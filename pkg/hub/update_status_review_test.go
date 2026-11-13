@@ -38,17 +38,22 @@ import (
 )
 
 // sudoRunner is a maintenance.CommandRunner for Detect and the sudo-install
-// installer. `sudo -n -l <argv>` succeeds only for argv in allowed; Start
-// runs startCmd (a real shell command, so its exit result is a real
-// *exec.ExitError) in place of the requested command. Nothing runs sudo.
+// installer. `sudo -n -l <argv>` succeeds only for argv in allowed; Run with
+// `sudo -n systemctl ...` executes runCmd when set, and Start runs startCmd
+// (real shell commands, so exit results are genuine *exec.ExitErrors). Nothing
+// runs sudo.
 type sudoRunner struct {
 	allowed  map[string]bool
+	runCmd   string
 	startCmd string
 }
 
-func (r *sudoRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
+func (r *sudoRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
 	if name == "sudo" && len(args) > 2 && args[0] == "-n" && args[1] == "-l" && r.allowed[strings.Join(args[2:], " ")] {
 		return nil, nil
+	}
+	if name == "sudo" && len(args) >= 2 && args[0] == "-n" && args[1] == "systemctl" && r.runCmd != "" {
+		return exec.CommandContext(ctx, "sh", "-c", r.runCmd).CombinedOutput()
 	}
 	return []byte("sudo: a password is required"), errors.New("exit status 1")
 }
@@ -323,6 +328,244 @@ func TestHandleAdminRestart_SignalKilledPlainRestart(t *testing.T) {
 	srv.config.MaintenanceConfig.Installer = inst
 	if rr := postRestart(t, srv); rr.Code != http.StatusOK {
 		t.Fatalf("response = %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestHandleAdminRestart_SignalKilledNoBlockRestart(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the sudo-install installer is Linux only")
+	}
+	repo := t.TempDir()
+	inst := detectForTest(t, repo, &sudoRunner{allowed: map[string]bool{
+		"install -m 755 " + filepath.Join(repo, maintenance.SudoStagingName) + " /usr/local/bin/scion": true,
+		"systemctl restart --no-block scion-hub":                                                       true,
+		"systemctl restart scion-hub":                                                                  true,
+	}, runCmd: "kill -TERM $$"})
+	if inst.Name() != maintenance.StrategySudoInstall {
+		t.Fatalf("precondition: detected %q (%s)", inst.Name(), inst.Status().Reason)
+	}
+	srv, _ := newTestServerWithStore(t)
+	srv.config.MaintenanceConfig.Installer = inst
+	if rr := postRestart(t, srv); rr.Code != http.StatusOK {
+		t.Fatalf("response = %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+// installerGitRebuildExecutor imitates rebuild-server's last steps on a real
+// Installer: the before-restart hook with UpdateModeGit, then Installer.Restart,
+// annotating a restart failure via the same no-backup wording when Restart fails.
+type installerGitRebuildExecutor struct {
+	inst       maintenance.Installer
+	commit     string
+	target     string
+	restartErr chan error
+}
+
+func (e *installerGitRebuildExecutor) Run(ctx context.Context, w io.Writer, p map[string]string) error {
+	return e.RunWithBeforeRestart(ctx, w, p, nil)
+}
+
+func (e *installerGitRebuildExecutor) RunWithBeforeRestart(ctx context.Context, _ io.Writer, _ map[string]string, before maintenance.BeforeRestartFunc) error {
+	if err := before(ctx, maintenance.PendingRestart{
+		From:     "nightly-20261023",
+		To:       e.target,
+		Strategy: e.inst.Name(),
+		Mode:     maintenance.UpdateModeGit,
+		Commit:   e.commit,
+	}); err != nil {
+		return err
+	}
+	err := e.inst.Restart(ctx)
+	e.restartErr <- err
+	if err != nil {
+		return fmt.Errorf("restarting the hub failed: %w; %s cannot be rolled back by the %s installer", err, e.target, e.inst.Name())
+	}
+	return nil
+}
+
+// ptone/scion#7185: on starter hubs (both --no-block and plain restart rules
+// present), systemd stops the service's cgroup as soon as `systemctl restart
+// --no-block` queues the job, sending SIGTERM to the sudo/systemctl child
+// before it exits 0. The old instance must record "restarting" and leave
+// system.pending_update intact so the new instance confirms the outcome on
+// boot (verified when the running build matches, failed when it does not).
+func TestRebuildServer_NoBlockSignalExitConfirmedByNewInstance(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the sudo-install installer is Linux only")
+	}
+	const (
+		rebuildCommit  = "0123456789abcdef0123456789abcdef01234567"
+		rebuildRelease = "git-0123456789ab"
+	)
+
+	newNoBlockInstaller := func(t *testing.T, runCmd string) maintenance.Installer {
+		t.Helper()
+		repo := t.TempDir()
+		inst := detectForTest(t, repo, &sudoRunner{allowed: map[string]bool{
+			"install -m 755 " + filepath.Join(repo, maintenance.SudoStagingName) + " /usr/local/bin/scion": true,
+			"systemctl restart --no-block scion-hub":                                                       true,
+			"systemctl restart scion-hub":                                                                  true,
+		}, runCmd: runCmd})
+		if inst.Name() != maintenance.StrategySudoInstall {
+			t.Fatalf("precondition: detected %q (%s), want sudo-install", inst.Name(), inst.Status().Reason)
+		}
+		return inst
+	}
+
+	newRebuildRun := func(t *testing.T, s store.Store) *store.MaintenanceOperationRun {
+		t.Helper()
+		run := &store.MaintenanceOperationRun{
+			ID: api.NewUUID(), OperationKey: "rebuild-server",
+			Status: store.MaintenanceStatusRunning, StartedAt: time.Now(), StartedBy: "admin@example.com",
+		}
+		if err := s.CreateMaintenanceRun(context.Background(), run); err != nil {
+			t.Fatal(err)
+		}
+		return run
+	}
+
+	t.Run("SIGTERM leaves run restarting and new instance confirms verified build", func(t *testing.T) {
+		ctx := context.Background()
+		srv1, s := newTestServerWithStore(t)
+		putReleaseSelection(t, s, ReleaseSelection{Mode: UpdateModeRelease, Channel: "nightly", Pin: "latest", Version: "nightly-20261023"})
+
+		run := newRebuildRun(t, s)
+		ex := &installerGitRebuildExecutor{
+			inst: newNoBlockInstaller(t, "kill -TERM $$"), commit: rebuildCommit, target: rebuildRelease,
+			restartErr: make(chan error, 1),
+		}
+		srv1.launchMaintenanceRun(run, ex, map[string]string{})
+
+		select {
+		case err := <-ex.restartErr:
+			if err != nil {
+				t.Fatalf("Restart returned %v, want nil for SIGTERM during --no-block restart", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("installer restart did not return")
+		}
+
+		got := waitForRestartRecorded(t, s, run.ID)
+		time.Sleep(200 * time.Millisecond)
+		got, _ = s.GetMaintenanceRun(ctx, run.ID)
+		if got.Status != store.MaintenanceStatusRestarting {
+			t.Fatalf("old instance left status = %q (result %s), want restarting", got.Status, got.Result)
+		}
+		if strings.Contains(got.Result, `"error"`) || strings.Contains(got.Result, "cannot be rolled back") {
+			t.Fatalf("old instance result contains false error: %s", got.Result)
+		}
+		if _, err := s.GetHubSetting(ctx, HubSettingSectionPendingUpdate); err != nil {
+			t.Fatalf("pending_update cleared by old instance: %v", err)
+		}
+
+		// Boot the new instance running the rebuilt commit (Version="" as stamped by GitBuildLDFlags).
+		prevVer, prevCommit := version.Version, version.Commit
+		version.Version = ""
+		version.Commit = rebuildCommit
+		t.Cleanup(func() {
+			version.Version = prevVer
+			version.Commit = prevCommit
+		})
+		testServerWithStore(t, s)
+
+		got, _ = s.GetMaintenanceRun(ctx, run.ID)
+		if got.Status != store.MaintenanceStatusCompleted {
+			t.Fatalf("after new instance boot: run status = %q (result %s), want completed", got.Status, got.Result)
+		}
+		if !strings.Contains(got.Log, "update verified") {
+			t.Fatalf("run log missing verification confirmation:\n%s", got.Log)
+		}
+		if last := getLastUpdate(t, s); last == nil || last.Status != LastUpdateVerified || last.To != rebuildRelease || last.Mode != UpdateModeGit {
+			t.Fatalf("last_update = %+v, want verified git build %s", last, rebuildRelease)
+		}
+		if sel := getReleaseSelection(t, s); sel == nil || sel.Mode != UpdateModeGit || sel.Version != rebuildRelease || sel.RunID != run.ID {
+			t.Fatalf("release_selection = %+v, want git mode on %s", sel, rebuildRelease)
+		}
+		requireNoPendingUpdate(t, s)
+	})
+
+	t.Run("SIGTERM followed by new instance booting old build records mismatch failure", func(t *testing.T) {
+		ctx := context.Background()
+		srv1, s := newTestServerWithStore(t)
+		prevSel := ReleaseSelection{Mode: UpdateModeRelease, Channel: "nightly", Pin: "latest", Version: "nightly-20261023"}
+		putReleaseSelection(t, s, prevSel)
+
+		run := newRebuildRun(t, s)
+		ex := &installerGitRebuildExecutor{
+			inst: newNoBlockInstaller(t, "kill -TERM $$"), commit: rebuildCommit, target: rebuildRelease,
+			restartErr: make(chan error, 1),
+		}
+		srv1.launchMaintenanceRun(run, ex, map[string]string{})
+
+		select {
+		case err := <-ex.restartErr:
+			if err != nil {
+				t.Fatalf("Restart returned %v, want nil for SIGTERM", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("installer restart did not return")
+		}
+		waitForRestartRecorded(t, s, run.ID)
+		time.Sleep(200 * time.Millisecond)
+
+		// Boot the new instance still running the old release rather than rebuildRelease.
+		prevVer, prevCommit := version.Version, version.Commit
+		version.Version = "nightly-20261023"
+		version.Commit = ""
+		t.Cleanup(func() {
+			version.Version = prevVer
+			version.Commit = prevCommit
+		})
+		testServerWithStore(t, s)
+
+		got, _ := s.GetMaintenanceRun(ctx, run.ID)
+		wantMismatch := fmt.Sprintf("the hub restarted on %q, not the installed %q", "nightly-20261023", rebuildRelease)
+		var res map[string]any
+		_ = json.Unmarshal([]byte(got.Result), &res)
+		if got.Status != store.MaintenanceStatusFailed || res["error"] != wantMismatch {
+			t.Fatalf("after mismatched boot: run = %+v (res=%v), want mismatch failure %q", got, res, wantMismatch)
+		}
+		if last := getLastUpdate(t, s); last == nil || last.Status != LastUpdateFailed || last.Mode != UpdateModeGit {
+			t.Fatalf("last_update = %+v, want failed git update", last)
+		}
+		if sel := getReleaseSelection(t, s); sel == nil || *sel != prevSel {
+			t.Fatalf("release_selection = %+v, want preserved %+v", sel, prevSel)
+		}
+		requireNoPendingUpdate(t, s)
+	})
+
+	for _, tt := range []struct {
+		name   string
+		runCmd string
+	}{
+		{"exit status 1 fails run and clears pending_update", "exit 1"},
+		{"SIGKILL fails run and clears pending_update", "kill -KILL $$"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			srv1, s := newTestServerWithStore(t)
+			run := newRebuildRun(t, s)
+			ex := &installerGitRebuildExecutor{
+				inst: newNoBlockInstaller(t, tt.runCmd), commit: rebuildCommit, target: rebuildRelease,
+				restartErr: make(chan error, 1),
+			}
+			srv1.launchMaintenanceRun(run, ex, map[string]string{})
+
+			select {
+			case err := <-ex.restartErr:
+				if err == nil {
+					t.Fatalf("Restart = nil for %q, want error", tt.runCmd)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("installer restart did not return")
+			}
+			got := waitForRunStatus(t, s, run.ID, func(r *store.MaintenanceOperationRun) bool {
+				return r.Status == store.MaintenanceStatusFailed
+			})
+			if !strings.Contains(got.Result, "cannot be rolled back") {
+				t.Fatalf("genuine restart failure should keep no-rollback note, got %s", got.Result)
+			}
+			requireNoPendingUpdate(t, s)
+		})
 	}
 }
 

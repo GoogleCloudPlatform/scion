@@ -24,6 +24,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // SudoStagingName is the file, in the maintenance repo, where sudo-install
@@ -173,15 +175,29 @@ func (s *sudoInstaller) Activate(ctx context.Context, staged string) error {
 }
 
 // Restart implements Installer. With the --no-block rule systemctl returns
-// once the restart job is queued. With only the plain rule the command
-// blocks while systemd stops this process, so it is started and watched for
+// once the restart job is queued, or is killed by SIGTERM when systemd begins
+// stopping the unit's control group before the child exits (see
+// IsStopSignalExit). With only the plain rule the command blocks while
+// systemd stops this process, so it is started and watched for
 // plainRestartGrace: only a normal non-zero exit in that window (nothing was
 // restarted) fails Restart.
 func (s *sudoInstaller) Restart(ctx context.Context) error {
 	if s.useNoBlock() {
 		args := append([]string{"-n"}, s.restartArgv(true)...)
 		if out, err := s.runner.Run(ctx, "sudo", args...); err != nil {
-			return fmt.Errorf("sudo %s: %v %s", strings.Join(s.restartArgv(true), " "), err, strings.TrimSpace(string(out)))
+			if ctx.Err() != nil {
+				return fmt.Errorf("sudo %s: %w", strings.Join(s.restartArgv(true), " "), ctx.Err())
+			}
+			if IsStopSignalExit(err) {
+				logging.Subsystem("hub.maintenance.installer").Info(
+					"Restart command terminated by stop signal; restart is under way",
+					"service", s.serviceName, "mode", "no-block")
+				return nil
+			}
+			if detail := strings.TrimSpace(string(out)); detail != "" {
+				return fmt.Errorf("sudo %s: %w (%s)", strings.Join(s.restartArgv(true), " "), err, detail)
+			}
+			return fmt.Errorf("sudo %s: %w", strings.Join(s.restartArgv(true), " "), err)
 		}
 		return nil
 	}

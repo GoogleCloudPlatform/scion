@@ -16,7 +16,9 @@
 package maintenance
 
 import (
+	"errors"
 	"os"
+	"os/exec"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -26,6 +28,30 @@ import (
 // gracefully and systemd (Restart=always) starts the binary current points to.
 func signalSelf() error {
 	return syscall.Kill(os.Getpid(), syscall.SIGTERM)
+}
+
+// IsStopSignalExit reports whether err is a child process exit caused by
+// SIGTERM. When systemd stops the hub's unit (KillMode=control-group), it
+// sends its stop signal to every process in the cgroup, including the
+// sudo/systemctl child that requested a --no-block restart.
+//
+// This intentionally matches only SIGTERM — systemd's default KillSignal=
+// used by the starter-hub unit (scripts/starter-hub/scion-hub.service.tmpl) —
+// so force-kills or crash signals (SIGKILL, SIGSEGV, SIGABRT) during a
+// synchronous --no-block command still surface as failures rather than false
+// restarts. A unit configured with a custom KillSignal= under --no-block is
+// not matched here (whereas the plain `systemctl restart` fallback treats any
+// signal termination within plainRestartGrace as a unit stop).
+func IsStopSignalExit(err error) bool {
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) {
+		return false
+	}
+	ws, ok := ee.Sys().(syscall.WaitStatus)
+	if !ok {
+		return false
+	}
+	return ws.Signaled() && ws.Signal() == syscall.SIGTERM
 }
 
 // fileOwnerUID returns the owning uid of fi, when the platform reports it.
