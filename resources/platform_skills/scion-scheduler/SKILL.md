@@ -85,8 +85,8 @@ owned by something that can reason about it.
 
 A user with list permission sees all of the project's schedules. An agent
 sees and manages only the schedules and events it created (whose recorded
-initiator is that agent): `list` omits the others, and `get`, `pause`,
-`cancel` and `delete` refuse them. An empty list therefore does not show that
+initiator is that agent): `list` omits the others, and `get`, `history`,
+`pause`, `resume`, `cancel` and `delete` refuse them. An empty list therefore does not show that
 a schedule is absent. To check another agent's schedule, ask that agent, or
 a user, to read it back.
 
@@ -108,8 +108,8 @@ a user, to read it back.
 
 - **Cron defaults to UTC.** For a local time, pass `--time-zone` rather than
   converting to UTC; a fixed UTC time shifts by an hour against local time
-  across DST changes. Zone prefixes in the expression (`CRON_TZ=`) are not
-  supported.
+  across DST changes. Zone prefixes in the expression (`CRON_TZ=`, `TZ=`) are
+  not supported.
 - **`cancel` vs `pause` vs `delete`:** `cancel` is for one-shot events only.
   `pause` and `delete` are for recurring schedules only. Using the wrong command
   on the wrong type will result in an error.
