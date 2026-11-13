@@ -94,7 +94,7 @@ a user, to read it back.
 
 | Action | Command |
 |---|---|
-| List all events and schedules | `scion schedule list` |
+| List your events and schedules (all, for a user) | `scion schedule list` |
 | List only recurring | `scion schedule list --show recurring` |
 | List only one-shot | `scion schedule list --show events` |
 | Inspect | `scion schedule get <id>` |
