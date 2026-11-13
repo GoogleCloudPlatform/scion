@@ -69,7 +69,7 @@ After making changes, verify:
 3. **Tests pass:** `npm run test`
 4. **Client builds:** `npm run build`
 
-The full Vitest suite takes about 10 to 18 minutes in an agent container, more than a 10-minute foreground tool limit. Run the touched test files first (`npx vitest run <files>`) and start the full suite in the background. Gitignored build output (`web/public/shoelace/`, `build/`) fails Go and web gates run afterwards; see "Gitignored build output" in `docs-repo/agents/sandbox-go-toolchain.md`.
+The full Vitest suite takes about 10 to 18 minutes in an agent container, more than a 10-minute foreground tool limit. Run the touched test files first (`npx vitest run <files>`) and start the full suite in the background. Gitignored build output (`web/public/shoelace/`, `build/`) makes Go and web gates run afterwards fail; see "Gitignored build output" in `docs-repo/agents/sandbox-go-toolchain.md`.
 
 ## Project Structure
 
@@ -293,7 +293,7 @@ These tips were collected during validation work and are useful for agents debug
 
 - **Agent status updates** use `POST /api/v1/agents/{id}/status`, not `PATCH`. The handler only accepts POST.
 - **Agent creation response** wraps the agent under an `"agent"` key: `{ "agent": { "id": "...", ... }, "warnings": [...] }`.
-- **SSE endpoint** (`/events?sub=...`) requires a session cookie, not a Bearer token. A Bearer request gets no session cookie. To get one with curl, open a dev sign-in link with a cookie jar: `POST /auth/dev-launch` with the dev token, then `curl -c jar.txt "http://localhost:8080<signInPath>"`, and pass the jar with `-b jar.txt`.
+- **SSE endpoint** (`/events?sub=...`) requires a session cookie, not a Bearer token. A Bearer request gets no session cookie. To get one with curl, request a dev sign-in link with `POST /auth/dev-launch` and the dev token, open the returned `signInPath` with a cookie jar (`curl -c jar.txt "http://localhost:8080<signInPath>"`), then pass the jar with `-b jar.txt`.
 
 ### SSE event format
 
