@@ -457,6 +457,127 @@ describe('history choice maps on the other load paths', () => {
     });
     const el = await messageEl(thread, 'p9');
     expect(cardOf(el)).not.toBeNull();
+    expect(bodyText(el)).not.toBeNull();
     expect(bodyText(el)).not.toContain('**D234.**');
+  });
+});
+
+describe('mobile touch on choice cards (ptone/scion#7839)', () => {
+  let origMatchMedia: typeof window.matchMedia;
+
+  beforeEach(() => {
+    origMatchMedia = window.matchMedia;
+    window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+      matches: query === '(hover: none)' || query.includes('max-width'),
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+  });
+
+  afterEach(() => {
+    window.matchMedia = origMatchMedia;
+  });
+
+  function hasOpenMenu(thread: ScionChatThread): boolean {
+    return (
+      thread.shadowRoot!.querySelector('scion-action-sheet[open]') !== null ||
+      thread.shadowRoot!.querySelector('.context-menu') !== null
+    );
+  }
+
+  it('does not open the message context menu on mobile tap on sl-button, opt description, icon, or card gap', async () => {
+    history = {
+      messages: [prompt('p-plain'), prompt('p-desc')],
+      messageDecisions: {
+        'p-plain': [decision({ messageId: 'p-plain', rowId: 'row-plain' })],
+        'p-desc': [
+          decision({
+            messageId: 'p-desc',
+            rowId: 'row-desc',
+            status: 'decided',
+            decision: {
+              choiceId: 'yes',
+              label: 'Yes',
+              answeredByUserId: 'u-me',
+              answeredByName: 'Me',
+              provenance: 'direct',
+              surface: 'web',
+              responseMessageId: 'resp-desc',
+              at: '2026-11-12T15:42:00Z',
+            },
+            choices: [
+              { id: 'yes', label: 'Yes', description: 'Deploy `v0.9` immediately.' },
+              { id: 'no', label: 'No', description: 'Hold until Monday.' },
+            ],
+          }),
+        ],
+      },
+      messageChoiceIntros: { 'p-plain': 'Plain', 'p-desc': 'With descriptions' },
+      messageChoiceAnswerModes: { 'p-plain': 'single', 'p-desc': 'single' },
+    };
+
+    const thread = await open();
+    apiFetch.mockImplementation(() =>
+      Promise.resolve(json({ decision: decided('Me'), responseMessageId: 'resp-new' }))
+    );
+
+    const plainEl = await messageEl(thread, 'p-plain');
+    const slBtn = cardOf(plainEl)!.shadowRoot.querySelector<HTMLElement>(
+      'sl-button[data-choice="yes"]'
+    )!;
+    slBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+    await thread.updateComplete;
+    expect(hasOpenMenu(thread)).toBe(false);
+
+    const descEl = await messageEl(thread, 'p-desc');
+    const descCard = cardOf(descEl)!;
+    const chosenOpt = descCard.shadowRoot.querySelector<HTMLElement>('button.opt.chosen')!;
+    const icon = chosenOpt.querySelector<HTMLElement>('sl-icon')!;
+    icon.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+    await thread.updateComplete;
+    expect(hasOpenMenu(thread)).toBe(false);
+
+    // Tapping the gap between stacked choice rows also stays out of the message menu.
+    const choicesWrap = descCard.shadowRoot.querySelector<HTMLElement>('.choices')!;
+    choicesWrap.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+    await thread.updateComplete;
+    expect(hasOpenMenu(thread)).toBe(false);
+
+    // Touch long-press contextmenu on a choice row with description must not open the message menu.
+    const descSpan = chosenOpt.querySelector<HTMLElement>('.desc')!;
+    const touchCtx =
+      typeof PointerEvent !== 'undefined'
+        ? new PointerEvent('contextmenu', {
+            bubbles: true,
+            composed: true,
+            cancelable: true,
+            pointerType: 'touch',
+            clientX: 40,
+            clientY: 40,
+          })
+        : new MouseEvent('contextmenu', {
+            bubbles: true,
+            composed: true,
+            cancelable: true,
+            clientX: 40,
+            clientY: 40,
+          });
+    descSpan.dispatchEvent(touchCtx);
+    await thread.updateComplete;
+    expect(hasOpenMenu(thread)).toBe(false);
+
+    // Tapping the message intro outside <scion-chat-choices> still opens the message menu.
+    const msgBody =
+      descEl.shadowRoot!.querySelector<HTMLElement>('.message-content, .msg-body') ?? descEl;
+    msgBody.dispatchEvent(
+      new MouseEvent('click', { bubbles: true, composed: true, clientX: 20, clientY: 20 })
+    );
+    await thread.updateComplete;
+    expect(hasOpenMenu(thread)).toBe(true);
   });
 });
