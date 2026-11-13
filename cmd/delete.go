@@ -49,8 +49,9 @@ With a Hub, --force removes the agent from the Hub even when its runtime
 broker cannot be reached or cannot resolve the agent. A forced delete is
 permanent: it skips soft-delete retention, so the agent cannot be
 restored. Runtime resources left on the broker (containers, worktrees)
-may then need separate cleanup on that broker. --force does not purge an
-agent that is already soft-deleted.
+may then need separate cleanup on that broker. --force does not override
+an inconsistent saved placement, and does not purge an agent that is
+already soft-deleted.
 
 --force cannot be combined with --stopped; name the agents to
 force-delete.

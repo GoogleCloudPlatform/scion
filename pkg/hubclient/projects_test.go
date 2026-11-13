@@ -165,3 +165,51 @@ func TestProjectsDelete_ForceQuery(t *testing.T) {
 		})
 	}
 }
+
+// TestProjectsDeleteWithResult_StorageKept covers ptone/scion#4474: both 204 No
+// Content and 200 OK with storageKept succeed cleanly through Delete and
+// DeleteWithResult.
+func TestProjectsDeleteWithResult_StorageKept(t *testing.T) {
+	t.Run("204 returns empty StorageKept", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		defer server.Close()
+
+		client, err := New(server.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := client.Projects().DeleteWithResult(context.Background(), "p1", nil)
+		if err != nil {
+			t.Fatalf("DeleteWithResult failed: %v", err)
+		}
+		if res == nil || len(res.StorageKept) != 0 {
+			t.Fatalf("got %+v, want empty StorageKept", res)
+		}
+	})
+
+	t.Run("200 decodes storageKept and Delete succeeds", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"storageKept":[{"code":"runtime-broker-project-directory","message":"cleanup on the Runtime Broker is deferred."}]}`))
+		}))
+		defer server.Close()
+
+		client, err := New(server.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := client.Projects().DeleteWithResult(context.Background(), "p1", nil)
+		if err != nil {
+			t.Fatalf("DeleteWithResult failed: %v", err)
+		}
+		if len(res.StorageKept) != 1 || res.StorageKept[0].Code != "runtime-broker-project-directory" {
+			t.Fatalf("got %+v", res)
+		}
+		if err := client.Projects().Delete(context.Background(), "p1", nil); err != nil {
+			t.Fatalf("Delete failed on 200 storageKept: %v", err)
+		}
+	})
+}

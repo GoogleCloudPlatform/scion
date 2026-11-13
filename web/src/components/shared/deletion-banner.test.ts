@@ -199,6 +199,24 @@ describe('scion-deletion-banner', () => {
     expect(text(el, '.detail')).toMatch(/Retry the delete, or force delete/);
   });
 
+  it('placement_conflict hides Force delete and explains placement checks (ptone/scion#4844)', async () => {
+    const el = await mount(
+      view({
+        code: 'placement_conflict',
+        error: 'saved placement is inconsistent',
+      })
+    );
+    expect(el.hasAttribute('hidden')).toBe(false);
+    expect(text(el, '.title')).toBe('Delete failed: saved placement is inconsistent');
+    expect(text(el, '.detail')).toMatch(/Force delete cannot override placement checks/);
+    expect(el.shadowRoot?.querySelector('.retry')).not.toBeNull();
+    expect(el.shadowRoot?.querySelector('.force')).toBeNull();
+
+    const compact = await mount(view({ code: 'placement_conflict' }), { compact: true });
+    expect(compact.shadowRoot?.querySelector('.retry')).not.toBeNull();
+    expect(compact.shadowRoot?.querySelector('.force')).toBeNull();
+  });
+
   it('role="alert" only when live', async () => {
     const quiet = await mount(view({ code: 'runtime_error' }));
     expect(quiet.shadowRoot?.querySelector('[role="alert"]')).toBeNull();

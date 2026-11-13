@@ -146,6 +146,21 @@ func TestComputeAgentDeletion(t *testing.T) {
 		}
 	})
 
+	t.Run("placement_conflict uses failedAt+15m", func(t *testing.T) {
+		failed := now.Add(-time.Minute)
+		a := &Agent{
+			DeletionState: DeletionStateFailed, DeletionCode: DeletionCodePlacementConflict,
+			DeletionError: "saved placement is inconsistent", DeletionFailedAt: tp(failed),
+		}
+		got := ComputeAgentDeletion(a, now)
+		if got == nil || got.State != DeletionStateFailed || got.Code != DeletionCodePlacementConflict || got.Error != "saved placement is inconsistent" {
+			t.Fatalf("got %+v", got)
+		}
+		if got.ExpiresAt == nil || !got.ExpiresAt.Equal(failed.Add(DeletionDisplayTTL)) {
+			t.Fatalf("expiresAt = %v, want failedAt+15m", got.ExpiresAt)
+		}
+	})
+
 	// Review N5: with neither failedAt nor leaseAt, startedAt is the base.
 	t.Run("failed with only startedAt uses startedAt+15m", func(t *testing.T) {
 		a := &Agent{DeletionState: DeletionStateFailed, DeletionCode: DeletionCodeRuntimeError, DeletionStartedAt: tp(started)}
@@ -311,5 +326,37 @@ func TestDeletionInfo_JSONKeys(t *testing.T) {
 	})
 	if len(full) != 9 || full["stage"] != "finalizing" {
 		t.Fatalf("keys = %v, want 9 keys with stage=finalizing", full)
+	}
+}
+
+func TestDeletionPriorState_JSONRoundTripAndLegacyFallback(t *testing.T) {
+	p := DeletionPriorState{
+		Phase:     "running",
+		Activity:  "working",
+		LaunchID:  "launch-1",
+		RunIntent: string(RunIntentRunning),
+	}
+	b, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := (&Agent{DeletionPrior: string(b)}).ParseDeletionPrior()
+	if got != p {
+		t.Fatalf("got %+v, want %+v", got, p)
+	}
+
+	// Empty RunIntent is omitted so unset priors keep their wire shape.
+	noIntent, err := json.Marshal(DeletionPriorState{Phase: "created"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(noIntent) != `{"phase":"created"}` {
+		t.Fatalf("got %s, want {\"phase\":\"created\"}", string(noIntent))
+	}
+
+	// Legacy payloads written before ptone/scion#4961 decode with empty RunIntent.
+	legacy := (&Agent{DeletionPrior: `{"phase":"running","activity":"working"}`}).ParseDeletionPrior()
+	if legacy.Phase != "running" || legacy.Activity != "working" || legacy.RunIntent != "" {
+		t.Fatalf("legacy = %+v", legacy)
 	}
 }

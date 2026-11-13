@@ -103,6 +103,7 @@ const FAILURE_TEXT: Record<string, string> = {
   runtime_error: 'runtime error',
   runtime_unavailable: 'runtime unavailable',
   conflict: 'conflict',
+  placement_conflict: 'inconsistent placement',
   in_doubt: 'outcome unknown',
   revoke_failed: 'could not revoke credentials',
   finalize_failed: 'could not finalize',
@@ -146,6 +147,16 @@ export const START_BLOCKED_BY_DELETE_MESSAGE =
   'Retry the delete, or use Force delete to finish removing it.';
 
 /**
+ * Whether Force delete may be offered on a failed deletion view
+ * (ptone/scion#4844). Placement refusals (`placement_conflict`) cannot be
+ * overridden with force, so offering Force delete is misleading.
+ */
+export function deletionAllowsForce(d: DeletionInfo | null | undefined): boolean {
+  if (!d || d.state !== 'failed') return false;
+  return d.code !== 'placement_conflict';
+}
+
+/**
  * The failure banner's text for a failed view: `title` is the badge label
  * (`Delete failed: <error>`, `Delete interrupted`, ...), `detail` explains
  * what happened and what Retry and Force do. For an `in_doubt` or
@@ -164,6 +175,10 @@ export function deletionBannerText(d: DeletionInfo): { title: string; detail: st
     detail =
       "The agent's container was already torn down, so starting this agent is blocked. " +
       'Retry the delete, or use Force delete to finish removing it.';
+  } else if (d.code === 'placement_conflict') {
+    detail =
+      "The agent's saved Runtime Broker placement is inconsistent, so automatic runtime teardown cannot be verified. " +
+      'Force delete cannot override placement checks.';
   } else if (d.code === 'abandoned') {
     detail =
       'The hub stopped working on this delete before it finished. Retry it, or force delete.';

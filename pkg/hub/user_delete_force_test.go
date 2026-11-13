@@ -888,7 +888,7 @@ func TestForceDeleteUser_PlacementRefusalRecordsCode(t *testing.T) {
 	got := mustGetAgent(t, f.s, a.ID)
 	assert.True(t, got.DeletedAt.IsZero(), "the agent is kept")
 	assert.Equal(t, store.DeletionStateFailed, got.DeletionState)
-	assert.Equal(t, store.DeletionCodeConflict, got.DeletionCode)
+	assert.Equal(t, store.DeletionCodePlacementConflict, got.DeletionCode)
 
 	// A later reconcile keeps the code, and the deletion names it.
 	f.srv.reconcileUserDeletion(ctx, v.DeletionID, false)

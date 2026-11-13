@@ -100,13 +100,13 @@ func TestAgentDelete_PlacementBackstopRefusesUnderForceAndBestEffort(t *testing.
 			require.Equal(t, http.StatusConflict, r.rec.Code, r.rec.Body.String())
 			code, details := errorBody(t, r.rec)
 			assert.Equal(t, ErrCodeRuntimeTargetPinStale, code, "the refusal's own code (ptone/scion#4958)")
-			assert.Equal(t, store.DeletionCodeConflict, details["deletionCode"])
+			assert.Equal(t, store.DeletionCodePlacementConflict, details["deletionCode"])
 			assert.Contains(t, r.rec.Body.String(), "saved placement is inconsistent")
 
 			got := mustGetAgent(t, f.store, f.agent.ID)
 			assert.True(t, got.DeletedAt.IsZero(), "the row is not finalized")
 			assert.Equal(t, store.DeletionStateFailed, got.DeletionState)
-			assert.Equal(t, store.DeletionCodeConflict, got.DeletionCode)
+			assert.Equal(t, store.DeletionCodePlacementConflict, got.DeletionCode)
 			assert.Equal(t, string(tc.phase), got.Phase, "the prior phase is restored")
 			assert.Equal(t, []string{"run-a"}, f.client.deleted(), "no previous-run delete after the refusal")
 		})
@@ -114,10 +114,11 @@ func TestAgentDelete_PlacementBackstopRefusesUnderForceAndBestEffort(t *testing.
 }
 
 // seedAbandonedDeletion puts agent id in deletion state st with an expired
-// lease and a running prior, as an engine that died would leave it.
+// lease and a running prior (including runIntent:running, ptone/scion#4961),
+// as an engine that died would leave it.
 func seedAbandonedDeletion(t *testing.T, s store.Store, id, st string) {
 	t.Helper()
-	seedAbandonedDeletionWithPrior(t, s, id, st, `{"phase":"running","activity":"working"}`)
+	seedAbandonedDeletionWithPrior(t, s, id, st, `{"phase":"running","activity":"working","runIntent":"running"}`)
 }
 
 // seedAbandonedDeletionWithPrior is seedAbandonedDeletion with the given
@@ -178,9 +179,9 @@ func TestAgentDelete_AbandonedDeletingRowRollsBack(t *testing.T) {
 	got := mustGetAgent(t, f.s, a.ID)
 	assert.True(t, got.DeletedAt.IsZero(), "the row is kept")
 	assert.Equal(t, store.DeletionStateFailed, got.DeletionState, "no longer stuck in deleting")
-	assert.Equal(t, store.DeletionCodeConflict, got.DeletionCode)
+	assert.Equal(t, store.DeletionCodePlacementConflict, got.DeletionCode)
 	assert.Equal(t, string(state.PhaseRunning), got.Phase, "the prior phase is restored, not stopping")
-	assert.Equal(t, store.RunIntentStopped, got.RunIntent, "the stop intent the abandoned engine recorded stays (the deletion prior keeps no intent)")
+	assert.Equal(t, store.RunIntentRunning, got.RunIntent, "the pre-delete running intent in DeletionPrior is restored (ptone/scion#4961)")
 }
 
 // The engine's check of the claimed snapshot is the only placement guard
@@ -202,7 +203,7 @@ func TestAgentDelete_SnapshotCheckGuardsDispatchShortcuts(t *testing.T) {
 		got := mustGetAgent(t, f.s, a.ID)
 		assert.True(t, got.DeletedAt.IsZero(), "the row is kept")
 		assert.Equal(t, store.DeletionStateFailed, got.DeletionState)
-		assert.Equal(t, store.DeletionCodeConflict, got.DeletionCode)
+		assert.Equal(t, store.DeletionCodePlacementConflict, got.DeletionCode)
 		assert.False(t, f.client.deleteCalled, "nothing is sent")
 		assert.Equal(t, int64(1), brokerReservationCount(t, f.s, f.legacy.ID), "the reservation is kept")
 	})
@@ -222,7 +223,7 @@ func TestAgentDelete_SnapshotCheckGuardsDispatchShortcuts(t *testing.T) {
 		got := mustGetAgent(t, f.s, a.ID)
 		assert.True(t, got.DeletedAt.IsZero(), "the row is kept")
 		assert.Equal(t, store.DeletionStateFailed, got.DeletionState)
-		assert.Equal(t, store.DeletionCodeConflict, got.DeletionCode)
+		assert.Equal(t, store.DeletionCodePlacementConflict, got.DeletionCode)
 		assert.False(t, f.client.deleteCalled, "nothing is sent")
 		assert.Equal(t, int64(1), brokerReservationCount(t, f.s, f.flat.ID), "the reservation is kept")
 	})
@@ -237,14 +238,15 @@ func TestAgentDelete_SnapshotCheckGuardsDispatchShortcuts(t *testing.T) {
 func TestAgentDelete_PinnedPlacementReadFailureNeverFinalizes(t *testing.T) {
 	boom := errors.New("injected broker read failure")
 	for _, tc := range []struct {
-		name      string
-		phase     string
-		prior     string
-		query     string
-		wantPhase string // the prior phase the rollback restores
+		name       string
+		phase      string
+		prior      string
+		query      string
+		wantPhase  string          // the prior phase the rollback restores
+		wantIntent store.RunIntent // the run intent after rollback
 	}{
-		{"force", string(state.PhaseStopping), `{"phase":"running","activity":"working"}`, "?force=true", string(state.PhaseRunning)},
-		{"best-effort", string(state.PhaseCreated), `{"phase":"created"}`, "", string(state.PhaseCreated)},
+		{"force", string(state.PhaseStopping), `{"phase":"running","activity":"working","runIntent":"running"}`, "?force=true", string(state.PhaseRunning), store.RunIntentRunning},
+		{"best-effort", string(state.PhaseCreated), `{"phase":"created"}`, "", string(state.PhaseCreated), store.RunIntentStopped},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -283,7 +285,7 @@ func TestAgentDelete_PinnedPlacementReadFailureNeverFinalizes(t *testing.T) {
 			assert.Equal(t, store.DeletionStateFailed, got.DeletionState, "rolled back, not left deleting or abandoned")
 			assert.Equal(t, store.DeletionCodeRuntimeError, got.DeletionCode)
 			assert.Equal(t, tc.wantPhase, got.Phase, "the prior phase is restored")
-			assert.Equal(t, store.RunIntentStopped, got.RunIntent, "the stop intent the abandoned engine recorded stays")
+			assert.Equal(t, tc.wantIntent, got.RunIntent, "the pre-delete run intent is restored when present in DeletionPrior")
 			assert.Equal(t, int64(1), brokerReservationCount(t, f.s, f.legacy.ID), "the reservation is kept")
 		})
 	}

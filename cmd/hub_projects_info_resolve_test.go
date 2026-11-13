@@ -39,6 +39,9 @@ type fakeProjectsHub struct {
 	// agentsRemain makes a DELETE without force=true answer 409 conflict
 	// listing an agent, as the hub does while agents remain.
 	agentsRemain bool
+	// storageKept makes a DELETE answer 200 OK with storageKept instead of
+	// 204 No Content (ptone/scion#4474).
+	storageKept []hubclient.StorageKeptItem
 
 	mu       sync.Mutex
 	requests []string
@@ -87,6 +90,11 @@ func (f *fakeProjectsHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					f.mu.Lock()
 					f.deletes = append(f.deletes, id)
 					f.mu.Unlock()
+					if len(f.storageKept) > 0 {
+						w.WriteHeader(http.StatusOK)
+						_ = json.NewEncoder(w).Encode(hubclient.DeleteProjectResult{StorageKept: f.storageKept})
+						return
+					}
 					w.WriteHeader(http.StatusNoContent)
 					return
 				}

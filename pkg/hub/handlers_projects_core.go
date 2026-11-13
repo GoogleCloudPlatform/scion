@@ -3950,13 +3950,15 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 	deletedProject := result.Project
 	// Release the held values of the project's deleted pending secrets.
 	s.dropPendingValues(ctx, result.PendingSecretValueRefs)
-	s.executePostDeletionEffects(ctx, id, deletedProject, effectInputs)
+	kept := s.executePostDeletionEffects(ctx, id, deletedProject, effectInputs)
 
 	// The Hub is the only remover of the project's tree on shared project
-	// storage: when it cannot see that storage the tree is kept, and the
-	// delete says so (200 with fixed, path-free items) instead of an
-	// unqualified 204.
-	if kept := s.projectDeleteStorageKept(ctx, id); len(kept) > 0 {
+	// storage: when it cannot see that storage the tree is kept, and when a
+	// Runtime Broker declines directory cleanup with 409 its local project
+	// directory is kept too (ptone/scion#4474). Report kept storage (200 with
+	// fixed, path-free items) instead of an unqualified 204.
+	kept = append(kept, s.projectDeleteStorageKept(ctx, id)...)
+	if len(kept) > 0 {
 		writeJSON(w, http.StatusOK, projectDeleteResult{StorageKept: kept})
 		return
 	}
@@ -4020,8 +4022,9 @@ func (s *Server) preEnumerateDeletionEffects(ctx context.Context, projectID stri
 
 // executePostDeletionEffects runs all external effects after the deletion
 // service has committed. All effects are best-effort: fire_and_forget
-// delivery with log_and_continue on failure.
-func (s *Server) executePostDeletionEffects(ctx context.Context, projectID string, project *store.Project, inputs deletionEffectInputs) {
+// delivery with log_and_continue on failure. It returns any fixed storageKept
+// items reported synchronously by provider Runtime Brokers (ptone/scion#4474).
+func (s *Server) executePostDeletionEffects(ctx context.Context, projectID string, project *store.Project, inputs deletionEffectInputs) []storageKeptItem {
 	// Effect 0: GCP SA warnings (log-only, post-auth to avoid leaking
 	// target-specific info for denied requests).
 	s.warnManagedGCPServiceAccounts(ctx, projectID)
@@ -4042,7 +4045,13 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 	// directories and project-configs entries and to release the project's
 	// per-dir shared-dir claims. Each provider is filtered by
 	// brokerUsesSlugProjectDir.
-	s.cleanupBrokerProjectDirectoriesFromInputs(ctx, project, inputs.providers)
+	var kept []storageKeptItem
+	if s.cleanupBrokerProjectDirectoriesFromInputs(ctx, project, inputs.providers) {
+		kept = append(kept, storageKeptItem{
+			Code:    projectDeleteBrokerDirKeptCode,
+			Message: projectDeleteBrokerDirKeptMessage,
+		})
+	}
 
 	// Effect 5: Filesystem cleanup (hub-managed projects). On the local
 	// workspace backend the hub-managed workspace is ~/.scion/projects/<slug>
@@ -4108,6 +4117,7 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 
 	// Effect 8: Publish project-deleted event.
 	s.events.PublishProjectDeleted(ctx, projectID)
+	return kept
 }
 
 // removeHubManagedProjectDir removes the hub-managed workspace directory of a
@@ -4295,10 +4305,11 @@ func (s *Server) deleteStorageFiles(ctx context.Context, projectID string, templ
 }
 
 // cleanupBrokerProjectDirectoriesFromInputs notifies provider brokers to
-// remove local project directories using pre-enumerated provider data.
-func (s *Server) cleanupBrokerProjectDirectoriesFromInputs(ctx context.Context, project *store.Project, providers []store.ProjectProvider) {
+// remove local project directories using pre-enumerated provider data. It
+// reports whether one or more brokers answered 409 Conflict (kept directory).
+func (s *Server) cleanupBrokerProjectDirectoriesFromInputs(ctx context.Context, project *store.Project, providers []store.ProjectProvider) bool {
 	if project.Slug == "" || len(providers) == 0 {
-		return
+		return false
 	}
 
 	var client RuntimeBrokerClient
@@ -4308,9 +4319,10 @@ func (s *Server) cleanupBrokerProjectDirectoriesFromInputs(ctx context.Context, 
 		}
 	}
 	if client == nil {
-		return
+		return false
 	}
 
+	kept := false
 	for _, provider := range providers {
 		if s.isEmbeddedBroker(provider.BrokerID) {
 			continue
@@ -4331,6 +4343,7 @@ func (s *Server) cleanupBrokerProjectDirectoriesFromInputs(ctx context.Context, 
 				// Runtime Broker instance of its host does. That is the
 				// outcome, not a failure: the delete has committed and
 				// stands.
+				kept = true
 				s.projectsLogger().Info("project directory kept on broker",
 					"project_id", project.ID, "slug", project.Slug, "broker", provider.BrokerID)
 				s.auditStorage(ctx, s.projectsLogger(), project.ID, "", []projectfs.Deletion{{
@@ -4344,6 +4357,7 @@ func (s *Server) cleanupBrokerProjectDirectoriesFromInputs(ctx context.Context, 
 				"broker", provider.BrokerID, "endpoint", broker.Endpoint, "error", err)
 		}
 	}
+	return kept
 }
 
 // brokerProjectDirKeptReason is the audit reason of a broker project

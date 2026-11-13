@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -43,6 +44,10 @@ type ProjectService interface {
 	// Delete removes a project and its agent records. Without opts.Force
 	// the hub refuses (409) while the project has agents not yet deleted.
 	Delete(ctx context.Context, projectID string, opts *DeleteProjectOptions) error
+
+	// DeleteWithResult removes a project like Delete and returns any kept
+	// storage items when the Hub answers 200 OK instead of 204 No Content.
+	DeleteWithResult(ctx context.Context, projectID string, opts *DeleteProjectOptions) (*DeleteProjectResult, error)
 
 	// Leave removes the caller's own direct roles on the project
 	// (POST /api/v1/projects/{id}/leave). With dryRun the hub computes the
@@ -311,18 +316,44 @@ type DeleteProjectOptions struct {
 	Force bool
 }
 
+// StorageKeptItem describes a storage location kept when deleting a project
+// (for example shared project storage unreachable by the Hub, or a Runtime
+// Broker project directory kept with 409 because another instance or agent
+// still uses it).
+type StorageKeptItem struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+// DeleteProjectResult is the decoded outcome of DELETE /api/v1/projects/{id}.
+// StorageKept is empty when the Hub answered 204 No Content.
+type DeleteProjectResult struct {
+	StorageKept []StorageKeptItem `json:"storageKept,omitempty"`
+}
+
 // Delete removes a project and its agent records. Without opts.Force the
 // hub refuses while the project has agents that are not deleted yet.
 func (s *projectService) Delete(ctx context.Context, projectID string, opts *DeleteProjectOptions) error {
+	_, err := s.DeleteWithResult(ctx, projectID, opts)
+	return err
+}
+
+// DeleteWithResult removes a project and returns any kept-storage items
+// reported when the Hub responds 200 OK instead of 204 No Content.
+func (s *projectService) DeleteWithResult(ctx context.Context, projectID string, opts *DeleteProjectOptions) (*DeleteProjectResult, error) {
 	path := "/api/v1/projects/" + url.PathEscape(projectID)
 	if opts != nil && opts.Force {
 		path += "?force=true"
 	}
 	resp, err := s.c.delete(ctx, path, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return apiclient.CheckResponse(resp)
+	if resp.StatusCode == http.StatusNoContent {
+		_ = resp.Body.Close()
+		return &DeleteProjectResult{}, nil
+	}
+	return apiclient.DecodeRequired[DeleteProjectResult](resp)
 }
 
 // LeaveProjectResult is the response of POST /api/v1/projects/{id}/leave.

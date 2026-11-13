@@ -40,6 +40,10 @@ const (
 	// DeletionCodeRuntimeUnavailable: the broker does not have the agent's
 	// runtime available, so the delete did not run there; retryable.
 	DeletionCodeRuntimeUnavailable = "runtime_unavailable"
+	// DeletionCodePlacementConflict: the agent's saved Runtime Broker placement
+	// is inconsistent, so nothing was dispatched and force delete does not
+	// override it (ptone/scion#4844).
+	DeletionCodePlacementConflict = "placement_conflict"
 )
 
 // DeletionDisplayTTL is how long a failed delete stays visible in the view
@@ -57,7 +61,7 @@ const DeletionDisplayTTL = 15 * time.Minute
 // three are omitempty and absent from the generic view.
 type DeletionInfo struct {
 	State          string     `json:"state"`          // "deleting" (incl. finalizing) | "failed"
-	Code           string     `json:"code,omitempty"` // runtime_error | conflict | in_doubt | abandoned | revoke_failed | finalize_failed | runtime_unavailable
+	Code           string     `json:"code,omitempty"` // runtime_error | conflict | placement_conflict | in_doubt | abandoned | revoke_failed | finalize_failed | runtime_unavailable
 	Error          string     `json:"error,omitempty"`
 	Soft           bool       `json:"soft"`
 	Claim          int64      `json:"claim,omitempty"` // named to avoid confusion with Agent.Generation (reincarnation)
@@ -87,11 +91,13 @@ type DeletionInfo struct {
 const DeletionStageFinalizing = "finalizing"
 
 // DeletionPriorState is the JSON stored in Agent.DeletionPrior: the state a
-// failed delete restores (design §2.1 claim).
+// failed delete restores (design §2.1 claim; runIntent added in
+// ptone/scion#4961).
 type DeletionPriorState struct {
-	Phase    string `json:"phase,omitempty"`
-	Activity string `json:"activity,omitempty"`
-	LaunchID string `json:"launchId,omitempty"`
+	Phase     string `json:"phase,omitempty"`
+	Activity  string `json:"activity,omitempty"`
+	LaunchID  string `json:"launchId,omitempty"`
+	RunIntent string `json:"runIntent,omitempty"`
 }
 
 // DeletionRequestInfo is the JSON stored in Agent.DeletionRequest: the

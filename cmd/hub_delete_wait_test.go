@@ -39,11 +39,12 @@ type getReply struct {
 }
 
 const (
-	replyDeleting = `{"id":"uuid-1","name":"%s","phase":"stopping","deletion":{"state":"deleting","claim":1,"startedAt":"2026-10-03T10:00:00Z"}}`
-	replyLive     = `{"id":"uuid-1","name":"%s","phase":"running","deletion":null}`
-	replySoftGone = `{"id":"uuid-1","name":"%s","phase":"stopped","deletedAt":"2026-10-03T10:00:05Z","deletion":null}`
-	replyInDoubt  = `{"id":"uuid-1","name":"%s","phase":"running","deletion":{"state":"failed","code":"in_doubt","error":"broker teardown outstanding","claim":1,"startedAt":"2026-10-03T10:00:00Z"}}`
-	replyRuntime  = `{"id":"uuid-1","name":"%s","phase":"running","deletion":{"state":"failed","code":"runtime_error","error":"broker unreachable","claim":1,"startedAt":"2026-10-03T10:00:00Z"}}`
+	replyDeleting  = `{"id":"uuid-1","name":"%s","phase":"stopping","deletion":{"state":"deleting","claim":1,"startedAt":"2026-10-03T10:00:00Z"}}`
+	replyLive      = `{"id":"uuid-1","name":"%s","phase":"running","deletion":null}`
+	replySoftGone  = `{"id":"uuid-1","name":"%s","phase":"stopped","deletedAt":"2026-10-03T10:00:05Z","deletion":null}`
+	replyInDoubt   = `{"id":"uuid-1","name":"%s","phase":"running","deletion":{"state":"failed","code":"in_doubt","error":"broker teardown outstanding","claim":1,"startedAt":"2026-10-03T10:00:00Z"}}`
+	replyRuntime   = `{"id":"uuid-1","name":"%s","phase":"running","deletion":{"state":"failed","code":"runtime_error","error":"broker unreachable","claim":1,"startedAt":"2026-10-03T10:00:00Z"}}`
+	replyPlacement = `{"id":"uuid-1","name":"%s","phase":"running","deletion":{"state":"failed","code":"placement_conflict","error":"saved placement is inconsistent","claim":1,"startedAt":"2026-10-03T10:00:00Z"}}`
 )
 
 // asyncDeleteHub is a hub stub whose DELETE answers 202 and whose
@@ -245,6 +246,18 @@ func TestDeleteAgentsViaHub_202FailedKeepsWorktreeAndErrors(t *testing.T) {
 		assert.Contains(t, err.Error(), "(in_doubt)")
 		assert.Contains(t, err.Error(), "Starting the agent stays blocked until a retry succeeds or force is used")
 		assert.True(t, env.dirExists())
+	})
+	t.Run("placement_conflict does not suggest force", func(t *testing.T) {
+		env := setupAsyncDelete(t, "bad-agent", getReply{body: replyDeleting}, getReply{body: replyPlacement})
+		err := deleteAgentsViaHub(env.hubCtx, []string{"bad-agent"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "delete failed on the Hub (placement_conflict): saved placement is inconsistent")
+		assert.Contains(t, err.Error(), "local worktree kept")
+		assert.Contains(t, err.Error(), "Force delete cannot override an inconsistent saved placement")
+		assert.NotContains(t, err.Error(), "--force")
+		assert.NotContains(t, err.Error(), "or force it")
+		assert.True(t, env.dirExists())
+		assert.True(t, env.stillSynced(t))
 	})
 }
 

@@ -480,6 +480,7 @@ func TestWriteDeletionFailure_AdminVsNonAdmin(t *testing.T) {
 		wantAPI    string
 	}{
 		{store.DeletionCodeConflict, http.StatusConflict, ErrCodeConflict},
+		{store.DeletionCodePlacementConflict, http.StatusConflict, ErrCodeConflict},
 		{store.DeletionCodeRuntimeUnavailable, http.StatusServiceUnavailable, brokerCodeRuntimeUnavailable},
 		{store.DeletionCodeRuntimeError, http.StatusBadGateway, ErrCodeRuntimeError},
 		{store.DeletionCodeInDoubt, http.StatusBadGateway, ErrCodeRuntimeError},
