@@ -122,7 +122,7 @@ scion schedule create-recurring \
 - **Refusals**: a held agent is never woken (the fire is refused), and an agent that is migrating (`scion reincarnate`) fails as without `--wake`. A stopped, errored or halted agent is not resumed: the fire fails with `failed to wake agent <name>: ...`, the same reason `scion message --wake` gives. Any refusal of the start itself (a delete in progress, capacity, broker placement) fails the fire the same way, and nothing is delivered.
 - **Start already in progress**: if the agent is already starting, or another start of it (or a stop) is in progress, when the message fires, the fire does not start it again: it waits for that start to bring the agent up and then delivers. If the agent does not become ready, the fire fails with `target agent was already starting or stopping and did not become ready; message not delivered`.
 - **Status while running**: a wake fire shows status `firing` until its delivery outcome is written (`fired`, `expired` or `failed`). If the Hub stops before the outcome can be written, recovery marks the event `failed` with `hub stopped before the wake fire completed` (and counts the error on the parent recurring schedule).
-- Messages scheduled in a chat conversation never wake an agent.
+- [Scheduled chat messages](/scion/hosted/user/scheduled-send/) are separate from the project scheduler and have their own opt-in **Wake the agent if it is suspended** option for the primary recipient.
 
 ---
 

@@ -134,6 +134,7 @@ export interface ChatScheduleDetail {
   text: string;
   fireAt: string;
   replyToId?: string;
+  wake?: boolean;
   onSuccess: () => void;
   /** Restore composer state when scheduling fails. */
   onError?: (errorMsg: string) => void;
@@ -274,6 +275,13 @@ export class ScionChatComposer extends LitElement {
    */
   @property({ type: Boolean })
   scheduleSendEnabled = false;
+
+  /**
+   * Whether the Schedule send dialog offers the opt-in wake checkbox (topics
+   * and agent DMs, never user-to-user DMs).
+   */
+  @property({ type: Boolean })
+  wakeAvailable = false;
 
   /** Whether the Schedule send dialog is open. */
   @state() private showScheduleDialog = false;
@@ -1292,6 +1300,7 @@ export class ScionChatComposer extends LitElement {
               ${this.scheduleSendEnabled
                 ? html`<scion-chat-schedule-dialog
                     .open=${this.showScheduleDialog}
+                    .wakeAvailable=${this.wakeAvailable}
                     @schedule-confirm=${this.handleScheduleConfirm}
                     @schedule-cancel=${this.handleScheduleCancel}
                   ></scion-chat-schedule-dialog>`
@@ -2482,14 +2491,14 @@ export class ScionChatComposer extends LitElement {
 
   private readonly handleScheduleConfirm = (e: CustomEvent<ScheduleConfirmDetail>): void => {
     this.showScheduleDialog = false;
-    this.doSchedule(e.detail.fireAt);
+    this.doSchedule(e.detail.fireAt, e.detail.wake);
   };
 
   /**
    * Schedule the current text for `fireAt`: clears the composer like a send
    * and dispatches `chat-schedule`; the parent restores it via onError.
    */
-  private doSchedule(fireAt: string): void {
+  private doSchedule(fireAt: string, wake?: boolean): void {
     if (this.editMessage || this.pendingFiles.length > 0 || this.pendingArtifacts.length > 0)
       return;
     const trimmed = this.text.trim();
@@ -2509,6 +2518,9 @@ export class ScionChatComposer extends LitElement {
     };
     if (this.replyTo) {
       detail.replyToId = this.replyTo.messageId;
+    }
+    if (wake) {
+      detail.wake = true;
     }
 
     this.text = '';

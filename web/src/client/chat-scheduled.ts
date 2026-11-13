@@ -39,6 +39,16 @@ export function conversationSupportsScheduledSend(conversationKey: string): bool
   return conversationKey !== '';
 }
 
+/**
+ * Whether a conversation offers the opt-in wake toggle on scheduled sends:
+ * topics and agent direct messages, never user-to-user direct messages.
+ */
+export function conversationSupportsScheduledWake(conversationKey: string): boolean {
+  return (
+    conversationSupportsScheduledSend(conversationKey) && !conversationKey.startsWith('dm:user:')
+  );
+}
+
 export type ScheduledMessageStatus = 'pending' | 'sending' | 'sent' | 'cancelled' | 'failed';
 
 /** A scheduled message as the hub returns it. Times are UTC ISO instants. */
@@ -48,6 +58,7 @@ export interface ScheduledMessage {
   content: string;
   replyToId?: string;
   fireAt: string;
+  wake?: boolean;
   status: ScheduledMessageStatus;
   failureReason?: string;
   messageId?: string;
@@ -89,6 +100,10 @@ export function scheduledFailureText(reason: string | undefined): string {
       return 'Not sent: it was found more than an hour after its time.';
     case 'interrupted':
       return 'Delivery was interrupted. Check the thread before sending it again.';
+    case 'wake_refused':
+      return "The agent couldn't be woken (no permission, or it is on hold).";
+    case 'wake_failed':
+      return 'Waking the agent failed.';
     default:
       return 'Not sent: delivery failed.';
   }
@@ -96,12 +111,15 @@ export function scheduledFailureText(reason: string | undefined): string {
 
 /**
  * Whether a failed message can be sent now: only one that was missed
- * (found more than an hour after its time) or whose delivery was
- * interrupted.
+ * (found more than an hour after its time), whose delivery was interrupted,
+ * or whose agent wake failed operationally.
  */
 export function scheduledSendNowAllowed(m: ScheduledMessage): boolean {
   return (
-    m.status === 'failed' && (m.failureReason === 'missed' || m.failureReason === 'interrupted')
+    m.status === 'failed' &&
+    (m.failureReason === 'missed' ||
+      m.failureReason === 'interrupted' ||
+      m.failureReason === 'wake_failed')
   );
 }
 
@@ -125,6 +143,7 @@ export interface CreateScheduledMessageInput {
   /** UTC ISO instant. */
   fireAt: string;
   replyToId?: string;
+  wake?: boolean;
   idempotencyKey: string;
 }
 
@@ -133,12 +152,13 @@ export async function createScheduledMessage(
   conversationKey: string,
   input: CreateScheduledMessageInput
 ): Promise<ScheduledMessage> {
-  const body: Record<string, string> = {
+  const body: Record<string, string | boolean> = {
     content: input.content,
     fire_at: input.fireAt,
     idempotency_key: input.idempotencyKey,
   };
   if (input.replyToId) body.reply_to_id = input.replyToId;
+  if (input.wake) body.wake = true;
   const res = await apiFetch(scheduledPath(conversationKey), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

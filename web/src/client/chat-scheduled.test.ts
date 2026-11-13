@@ -33,6 +33,7 @@ import {
   applyScheduledUpdate,
   cancelScheduledMessage,
   conversationSupportsScheduledSend,
+  conversationSupportsScheduledWake,
   createScheduledMessage,
   dismissScheduledMessage,
   listScheduledMessages,
@@ -69,6 +70,15 @@ describe('conversationSupportsScheduledSend', () => {
     expect(conversationSupportsScheduledSend('dm:agent:a:user:u')).toBe(true);
     expect(conversationSupportsScheduledSend('dm:user:a:user:b')).toBe(true);
     expect(conversationSupportsScheduledSend('')).toBe(false);
+  });
+});
+
+describe('conversationSupportsScheduledWake', () => {
+  it('allows topics and agent DMs, but rejects user-to-user DMs and empty keys', () => {
+    expect(conversationSupportsScheduledWake('3f2b9c1e-0000-0000-0000-000000000000')).toBe(true);
+    expect(conversationSupportsScheduledWake('dm:agent:a:user:u')).toBe(true);
+    expect(conversationSupportsScheduledWake('dm:user:a:user:b')).toBe(false);
+    expect(conversationSupportsScheduledWake('')).toBe(false);
   });
 });
 
@@ -118,6 +128,28 @@ describe('API helpers', () => {
       fire_at: '2026-10-08T07:00:00.000Z',
       idempotency_key: 'k1',
       reply_to_id: 'm1',
+    });
+  });
+
+  it('includes wake: true when requested', async () => {
+    apiFetch.mockResolvedValue(
+      new Response(JSON.stringify({ ...sm('w1', '2026-10-08T07:00:00Z'), wake: true }), {
+        status: 201,
+      })
+    );
+    const created = await createScheduledMessage('t1', {
+      content: 'wake up',
+      fireAt: '2026-10-08T07:00:00.000Z',
+      idempotencyKey: 'k-wake',
+      wake: true,
+    });
+    expect(created.wake).toBe(true);
+    const [, init] = apiFetch.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({
+      content: 'wake up',
+      fire_at: '2026-10-08T07:00:00.000Z',
+      idempotency_key: 'k-wake',
+      wake: true,
     });
   });
 
@@ -176,14 +208,21 @@ describe('send now and dismiss', () => {
     await expect(dismissScheduledMessage('t1', 'a')).rejects.toThrow('Failed to dismiss');
   });
 
-  it('allows Send now for missed and interrupted only', () => {
+  it('allows Send now for missed, interrupted and wake_failed only', () => {
     const failed = (failureReason: string): ScheduledMessage => ({
       ...sm('a', '2026-10-08T08:00:00Z', 'failed'),
       failureReason,
     });
     expect(scheduledSendNowAllowed(failed('missed'))).toBe(true);
     expect(scheduledSendNowAllowed(failed('interrupted'))).toBe(true);
-    for (const r of ['no_access', 'conversation_gone', 'recipient_gone', 'delivery_error']) {
+    expect(scheduledSendNowAllowed(failed('wake_failed'))).toBe(true);
+    for (const r of [
+      'wake_refused',
+      'no_access',
+      'conversation_gone',
+      'recipient_gone',
+      'delivery_error',
+    ]) {
       expect(scheduledSendNowAllowed(failed(r))).toBe(false);
     }
     expect(scheduledSendNowAllowed({ ...failed('missed'), status: 'pending' })).toBe(false);
@@ -199,8 +238,14 @@ describe('scheduledFailureText', () => {
       'recipient_gone',
       'missed',
       'interrupted',
+      'wake_refused',
+      'wake_failed',
     ]) {
       expect(scheduledFailureText(r)).not.toBe(scheduledFailureText(undefined));
     }
+    expect(scheduledFailureText('wake_refused')).toBe(
+      "The agent couldn't be woken (no permission, or it is on hold)."
+    );
+    expect(scheduledFailureText('wake_failed')).toBe('Waking the agent failed.');
   });
 });

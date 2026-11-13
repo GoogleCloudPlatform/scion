@@ -138,6 +138,13 @@ export class ScionChatScheduledList extends LitElement {
     .banner .when {
       flex: 1;
     }
+    .wake-marker {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      white-space: nowrap;
+      color: var(--scion-text-muted, #64748b);
+    }
     .actions {
       display: flex;
       gap: 0.75rem;
@@ -361,6 +368,11 @@ export class ScionChatScheduledList extends LitElement {
       <span class="when"
         >Scheduled for ${formatInstantWithZone(m.fireAt)} (${formatRelative(m.fireAt)})</span
       >
+      ${m.wake
+        ? html`<span class="wake-marker" title="Will wake the agent if it is suspended"
+            ><sl-icon name="power"></sl-icon> will wake</span
+          >`
+        : nothing}
       <button
         class="cancel-btn"
         type="button"
