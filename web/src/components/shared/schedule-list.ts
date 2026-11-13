@@ -971,7 +971,10 @@ export class ScionScheduleList extends LitElement {
     const agent = this.getPayloadAgent(sched.payload);
     let payloadDetails: Record<string, unknown> = {};
     try {
-      payloadDetails = JSON.parse(sched.payload) as Record<string, unknown>;
+      const parsed: unknown = JSON.parse(sched.payload);
+      if (parsed && typeof parsed === 'object') {
+        payloadDetails = parsed as Record<string, unknown>;
+      }
     } catch {
       // ignore
     }
@@ -1007,6 +1010,16 @@ export class ScionScheduleList extends LitElement {
             ? html`<div class="detail-row">
                 <strong>Message:</strong> ${payloadDetails.message}
               </div>`
+            : nothing}
+          ${sched.eventType === 'message'
+            ? html`
+                <div class="detail-row">
+                  <strong>Wake:</strong> ${payloadDetails.wake === true ? 'Yes' : 'No'}
+                </div>
+                <div class="detail-row">
+                  <strong>Interrupt:</strong> ${payloadDetails.interrupt === true ? 'Yes' : 'No'}
+                </div>
+              `
             : nothing}
           ${sched.eventType === 'dispatch_agent' && payloadDetails.template
             ? html`<div class="detail-row">

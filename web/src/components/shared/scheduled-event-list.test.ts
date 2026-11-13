@@ -181,3 +181,138 @@ describe('scion-scheduled-event-list create dialog wake option (ptone/scion#7734
     expect((await createWith(false)).wake).toBe(false);
   });
 });
+
+describe('scion-scheduled-event-list detail dialog wake and interrupt (ptone/scion#7791)', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.unstubAllGlobals();
+  });
+
+  async function mountWith(events: Record<string, unknown>[]): Promise<AnyEl> {
+    const el = document.createElement('scion-scheduled-event-list') as AnyEl;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    el.loading = false;
+    el.events = events;
+    await el.updateComplete;
+    return el;
+  }
+
+  function detailRowText(dialog: Element | null, label: string): string | undefined {
+    if (!dialog) return undefined;
+    const row = Array.from(dialog.querySelectorAll('.detail-row')).find(
+      (r) => r.querySelector('strong')?.textContent?.trim() === label
+    );
+    return row?.textContent?.replace(label, '').trim();
+  }
+
+  it('opens event detail on row click showing Wake: Yes and Interrupt: Yes when true', async () => {
+    const el = await mountWith([
+      {
+        id: 'evt-wake',
+        projectId: 'p1',
+        eventType: 'message',
+        fireAt: '2026-10-01T15:00:00Z',
+        payload: '{"agentName":"worker","message":"recheck","wake":true,"interrupt":true}',
+        status: 'pending',
+        createdAt: '2026-10-01T11:00:00Z',
+        createdBy: 'alice@example.com',
+      },
+    ]);
+
+    const row = el.shadowRoot!.querySelector('tbody tr') as HTMLElement;
+    row.click();
+    await el.updateComplete;
+
+    const dialog = el.shadowRoot!.querySelector('sl-dialog[label="Scheduled Event"]');
+    expect(dialog).not.toBeNull();
+    expect(dialog?.hasAttribute('open')).toBe(true);
+    expect(detailRowText(dialog, 'Target Agent:')).toBe('worker');
+    expect(detailRowText(dialog, 'Message:')).toBe('recheck');
+    expect(detailRowText(dialog, 'Wake:')).toBe('Yes');
+    expect(detailRowText(dialog, 'Interrupt:')).toBe('Yes');
+  });
+
+  it('shows Wake: No and Interrupt: No when omitted from message payload', async () => {
+    const el = await mountWith([
+      {
+        id: 'evt-default',
+        projectId: 'p1',
+        eventType: 'message',
+        fireAt: '2026-10-01T15:00:00Z',
+        payload: '{"agentName":"worker","message":"plain"}',
+        status: 'pending',
+        createdAt: '2026-10-01T11:00:00Z',
+        createdBy: 'alice@example.com',
+      },
+    ]);
+
+    const row = el.shadowRoot!.querySelector('tbody tr') as HTMLElement;
+    row.click();
+    await el.updateComplete;
+
+    const dialog = el.shadowRoot!.querySelector('sl-dialog[label="Scheduled Event"]');
+    expect(dialog).not.toBeNull();
+    expect(detailRowText(dialog, 'Wake:')).toBe('No');
+    expect(detailRowText(dialog, 'Interrupt:')).toBe('No');
+  });
+
+  it('omits Wake and Interrupt rows for non-message events', async () => {
+    const el = await mountWith([
+      {
+        id: 'evt-dispatch',
+        projectId: 'p1',
+        eventType: 'dispatch_agent',
+        fireAt: '2026-10-01T15:00:00Z',
+        payload: '{"agentName":"worker","template":"default","task":"build"}',
+        status: 'pending',
+        createdAt: '2026-10-01T11:00:00Z',
+        createdBy: 'alice@example.com',
+      },
+    ]);
+
+    const row = el.shadowRoot!.querySelector('tbody tr') as HTMLElement;
+    row.click();
+    await el.updateComplete;
+
+    const dialog = el.shadowRoot!.querySelector('sl-dialog[label="Scheduled Event"]');
+    expect(dialog).not.toBeNull();
+    expect(detailRowText(dialog, 'Wake:')).toBeUndefined();
+    expect(detailRowText(dialog, 'Interrupt:')).toBeUndefined();
+  });
+
+  it('does not open detail dialog when clicking the row cancel action', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ events: [] }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        )
+      )
+    );
+    const el = await mountWith([
+      {
+        id: 'evt-cancel',
+        projectId: 'p1',
+        eventType: 'message',
+        fireAt: '2026-10-01T15:00:00Z',
+        payload: '{"agentName":"worker","message":"recheck","wake":true}',
+        status: 'pending',
+        createdAt: '2026-10-01T11:00:00Z',
+        createdBy: 'alice@example.com',
+      },
+    ]);
+
+    const cancelBtn = el.shadowRoot!.querySelector(
+      'tbody tr sl-icon-button[label="Cancel"]'
+    ) as HTMLElement;
+    expect(cancelBtn).not.toBeNull();
+    cancelBtn.click();
+    await el.updateComplete;
+
+    expect(el.shadowRoot!.querySelector('sl-dialog[label="Scheduled Event"]')).toBeNull();
+  });
+});
