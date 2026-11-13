@@ -49,9 +49,11 @@ agent-to-agent work.
 - A body mention can appear anywhere. For a direct agent message, the recipient
   is the `@<agent-name>` argument at the start of the command, not a bare name in
   the body.
+- Every `@<agent-name>` in the body notifies that agent, **in a direct message
+  too**. Mentions inside code spans, fenced blocks and `>` quote lines do not.
+  Name a bystander by slug **without `@`**; that does not notify it.
 - State whether a mention is an assignment, a question or FYI. If several agents
   must act, mention each and state its part.
-- Naming an agent by slug **without `@`** in a group message does not notify it.
 - There is no `--cc` flag; use body mentions.
 - Check the send result. Handle reported delivery failures before assuming the
   intended recipient was reached. Do not duplicate a conversation reply into DMs
