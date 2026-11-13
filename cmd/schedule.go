@@ -810,7 +810,7 @@ func init() {
 	scheduleCmd.AddCommand(scheduleHistoryCmd)
 
 	// List flags
-	scheduleListCmd.Flags().StringVar(&scheduleStatus, "status", "", "Filter by status (pending, fired, cancelled, expired, active, paused)")
+	scheduleListCmd.Flags().StringVar(&scheduleStatus, "status", "", "Filter by status (pending, firing, fired, cancelled, expired, failed, active, paused)")
 	scheduleListCmd.Flags().StringVar(&scheduleType, "type", "", "Filter by event type (e.g. message)")
 	scheduleListCmd.Flags().StringVar(&scheduleListType, "show", "", "Filter by resource type: events, recurring, or all (default: all)")
 

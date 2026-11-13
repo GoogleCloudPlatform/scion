@@ -684,7 +684,7 @@ func TestScheduledMessageWake_RecurringWakeFireEventNotReplayable(t *testing.T) 
 	}
 	evt, err := s.GetScheduledEvent(ctx, eventID)
 	require.NoError(t, err)
-	assert.Equal(t, store.ScheduledEventFired, evt.Status, "created fired, before the fire runs")
+	assert.Equal(t, store.ScheduledEventFiring, evt.Status, "created firing, before the fire runs")
 	if claimer, ok := s.(store.ScheduledEventClaimer); ok {
 		claimed, err := claimer.ClaimScheduledEvent(ctx, eventID, store.ScheduledEventExpired)
 		require.NoError(t, err)
@@ -841,7 +841,7 @@ func fireOneShotWake(t *testing.T, f *schedWake, evt store.ScheduledEvent) (*Sch
 	evt.FireAt = time.Now().Add(50 * time.Millisecond)
 	evt.Status = store.ScheduledEventPending
 	require.NoError(t, f.store.CreateScheduledEvent(context.Background(), &evt))
-	sch := NewScheduler(f.store, slog.Default())
+	sch := NewScheduler(f.srv.store, slog.Default())
 	entered := make(chan struct{})
 	finished := make(chan struct{})
 	sch.RegisterEventHandler("message", func(ctx context.Context, e store.ScheduledEvent) error {
@@ -1023,4 +1023,644 @@ func TestScheduledMessageWake_RefreshFailureAfterStartFailsFire(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to refresh agent "+f.target.Slug)
 	assert.Empty(t, f.disp.getStartCalls())
 	assert.Empty(t, f.disp.getMessageCalls(), "nothing is dispatched on a stale row")
+}
+
+// blockingCompleteStore intercepts CompleteFiringScheduledEvent (and counts
+// UpdateScheduledEventStatus calls) while armed, forwarding
+// ScheduledEventClaimer so one-shot Scheduler.fireEvent still takes the atomic
+// claim path.
+type blockingCompleteStore struct {
+	store.Store
+	fault         *storeFaultSwitch
+	disarmed      atomic.Bool
+	entered       chan struct{}
+	enteredOnce   sync.Once
+	release       chan struct{}
+	onComplete    func(ctx context.Context, call int32) error
+	completeCalls atomic.Int32
+	updateCalls   atomic.Int32
+}
+
+func (b *blockingCompleteStore) ClaimScheduledEvent(ctx context.Context, id string, claimedStatus string) (bool, error) {
+	if claimer, ok := b.Store.(store.ScheduledEventClaimer); ok {
+		return claimer.ClaimScheduledEvent(ctx, id, claimedStatus)
+	}
+	now := time.Now()
+	return true, b.Store.UpdateScheduledEventStatus(ctx, id, claimedStatus, &now, "")
+}
+
+func (b *blockingCompleteStore) UpdateScheduledEventStatus(ctx context.Context, id string, status string, firedAt *time.Time, errMsg string) error {
+	if b.fault.Active() && !b.disarmed.Load() {
+		b.updateCalls.Add(1)
+	}
+	return b.Store.UpdateScheduledEventStatus(ctx, id, status, firedAt, errMsg)
+}
+
+func (b *blockingCompleteStore) CompleteFiringScheduledEvent(
+	ctx context.Context,
+	id string,
+	status string,
+	firedAt time.Time,
+	errMsg string,
+	scheduleID string,
+	ranAt time.Time,
+) (bool, error) {
+	if !b.fault.Active() || b.disarmed.Load() {
+		return b.Store.CompleteFiringScheduledEvent(ctx, id, status, firedAt, errMsg, scheduleID, ranAt)
+	}
+	call := b.completeCalls.Add(1)
+	if b.entered != nil {
+		b.enteredOnce.Do(func() { close(b.entered) })
+	}
+	if b.onComplete != nil {
+		if err := b.onComplete(ctx, call); err != nil {
+			return false, err
+		}
+	}
+	if b.release != nil {
+		<-b.release
+	}
+	return b.Store.CompleteFiringScheduledEvent(ctx, id, status, firedAt, errMsg, scheduleID, ranAt)
+}
+
+// TestScheduledMessageWake_ShutdownRecordWaitBoundedByDeadline covers
+// ptone/scion#7791 (a) across recurring and one-shot wake fires: when a fire's
+// own Detached/WithoutCancel completion write is already in flight as teardown
+// enters recordAbandonedWakeFires, recordAbandonedWakeFires waits up to the
+// shared record deadline (so fast writes finish cleanly before store close
+// without being overwritten) and returns promptly once that deadline expires
+// instead of blocking on sync.Once.Do.
+func TestScheduledMessageWake_ShutdownRecordWaitBoundedByDeadline(t *testing.T) {
+	t.Run("recurring in-flight completion write does not block past ctx or record deadline", func(t *testing.T) {
+		prevStop, prevAbort, prevBudget := scheduledWakeFireStopGrace, scheduledWakeFireAbortGrace, scheduledWakeRecordBudget
+		scheduledWakeFireStopGrace = 20 * time.Millisecond
+		scheduledWakeFireAbortGrace = 20 * time.Millisecond
+		scheduledWakeRecordBudget = 150 * time.Millisecond
+		t.Cleanup(func() {
+			scheduledWakeFireStopGrace = prevStop
+			scheduledWakeFireAbortGrace = prevAbort
+			scheduledWakeRecordBudget = prevBudget
+		})
+
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		srv, s, projectID, wrapped, fault := setupScheduleTestWithStore(t, func(inner store.Store, f *storeFaultSwitch) *blockingCompleteStore {
+			return &blockingCompleteStore{Store: inner, fault: f, entered: entered, release: release}
+		})
+		ctx := context.Background()
+		sched := createDueWakeTestSchedule(t, srv, s, projectID, "slow-complete-rec", true, time.Now().UTC().Add(-time.Minute))
+		srv.scheduler.RegisterEventHandler("message", func(context.Context, store.ScheduledEvent) error {
+			return nil
+		})
+		fault.Arm()
+
+		srv.executeSchedule(ctx, sched, time.Now().UTC())
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("recurring wake fire did not reach CompleteFiringScheduledEvent")
+		}
+
+		// Caller's shutdown ctx has an 80ms deadline, tighter than scheduledWakeRecordBudget.
+		stopCtx, cancel := context.WithTimeout(ctx, 80*time.Millisecond)
+		defer cancel()
+		stopDone := make(chan struct{})
+		go func() {
+			srv.stopScheduledWakeFires(stopCtx)
+			close(stopDone)
+		}()
+		select {
+		case <-stopDone:
+		case <-time.After(600 * time.Millisecond):
+			close(release)
+			t.Fatal("stopScheduledWakeFires blocked on in-flight completion write past shutdown deadline")
+		}
+
+		// Release the hung DB write so the background goroutine exits cleanly.
+		close(release)
+		srv.scheduledWakeFires.wg.Wait()
+		assert.Equal(t, int32(1), wrapped.completeCalls.Load(), "only the fire's completion write ran")
+		events, err := s.ListScheduledEvents(ctx, store.ScheduledEventFilter{ProjectID: projectID, ScheduleID: sched.ID}, store.ListOptions{})
+		require.NoError(t, err)
+		require.Len(t, events.Items, 1)
+		assert.Equal(t, store.ScheduledEventFired, events.Items[0].Status)
+	})
+
+	t.Run("one-shot in-flight completion write does not block past record budget", func(t *testing.T) {
+		prevStop, prevAbort, prevBudget := scheduledWakeFireStopGrace, scheduledWakeFireAbortGrace, scheduledWakeRecordBudget
+		scheduledWakeFireStopGrace = 20 * time.Millisecond
+		scheduledWakeFireAbortGrace = 20 * time.Millisecond
+		scheduledWakeRecordBudget = 80 * time.Millisecond
+		t.Cleanup(func() {
+			scheduledWakeFireStopGrace = prevStop
+			scheduledWakeFireAbortGrace = prevAbort
+			scheduledWakeRecordBudget = prevBudget
+		})
+
+		f := newSchedWake(t, state.PhaseRunning)
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		wrapped, fault := installStoreFault(t, f.srv, func(inner store.Store, sw *storeFaultSwitch) *blockingCompleteStore {
+			return &blockingCompleteStore{Store: inner, fault: sw, entered: entered, release: release}
+		})
+		u := f.user(t, "sw-oneshot-bound", "agent.message", "agent.read")
+		evt := withSessionRevision(f.event(true), u.ID)
+		fault.Arm()
+
+		sch, _, _ := fireOneShotWake(t, f, evt)
+		defer sch.halt()
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("one-shot wake fire did not reach CompleteFiringScheduledEvent")
+		}
+
+		stopDone := make(chan struct{})
+		go func() {
+			f.srv.stopScheduledWakeFires(context.Background())
+			close(stopDone)
+		}()
+		select {
+		case <-stopDone:
+		case <-time.After(600 * time.Millisecond):
+			close(release)
+			t.Fatal("stopScheduledWakeFires blocked on one-shot completion write past record budget")
+		}
+
+		close(release)
+		f.srv.scheduledWakeFires.wg.Wait()
+		assert.Equal(t, int32(1), wrapped.completeCalls.Load())
+		got, err := f.store.GetScheduledEvent(context.Background(), evt.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.ScheduledEventFired, got.Status)
+	})
+
+	t.Run("in-flight completion finishing within record budget completes before return and keeps outcome", func(t *testing.T) {
+		prevStop, prevAbort, prevBudget := scheduledWakeFireStopGrace, scheduledWakeFireAbortGrace, scheduledWakeRecordBudget
+		scheduledWakeFireStopGrace = 20 * time.Millisecond
+		scheduledWakeFireAbortGrace = 20 * time.Millisecond
+		scheduledWakeRecordBudget = 2 * time.Second
+		t.Cleanup(func() {
+			scheduledWakeFireStopGrace = prevStop
+			scheduledWakeFireAbortGrace = prevAbort
+			scheduledWakeRecordBudget = prevBudget
+		})
+
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		srv, s, projectID, wrapped, fault := setupScheduleTestWithStore(t, func(inner store.Store, f *storeFaultSwitch) *blockingCompleteStore {
+			return &blockingCompleteStore{Store: inner, fault: f, entered: entered, release: release}
+		})
+		ctx := context.Background()
+		sched := createDueWakeTestSchedule(t, srv, s, projectID, "fast-complete-rec", true, time.Now().UTC().Add(-time.Minute))
+		srv.scheduler.RegisterEventHandler("message", func(context.Context, store.ScheduledEvent) error {
+			return nil
+		})
+		fault.Arm()
+
+		srv.executeSchedule(ctx, sched, time.Now().UTC())
+		<-entered
+
+		stopDone := make(chan struct{})
+		go func() {
+			srv.stopScheduledWakeFires(ctx)
+			close(stopDone)
+		}()
+		// Let stopGrace + abortGrace expire so recordAbandonedWakeFires enters recordOrWait.
+		time.Sleep(80 * time.Millisecond)
+		select {
+		case <-stopDone:
+			t.Fatal("stopScheduledWakeFires returned before fast in-flight write finished within record budget")
+		default:
+		}
+		close(release)
+		select {
+		case <-stopDone:
+		case <-time.After(2 * time.Second):
+			t.Fatal("stopScheduledWakeFires did not return once in-flight write finished")
+		}
+		srv.scheduledWakeFires.wg.Wait()
+		assert.Equal(t, int32(1), wrapped.completeCalls.Load())
+		events, err := s.ListScheduledEvents(ctx, store.ScheduledEventFilter{ProjectID: projectID, ScheduleID: sched.ID}, store.ListOptions{})
+		require.NoError(t, err)
+		require.Len(t, events.Items, 1)
+		assert.Equal(t, store.ScheduledEventFired, events.Items[0].Status, "real outcome preserved, not overwritten with shutdown failure")
+		assert.Empty(t, events.Items[0].Error)
+	})
+}
+
+// TestScheduledMessageWake_OneShotFinalOutcomeSynchronizedWithShutdown covers
+// ptone/scion#7791 (b): one-shot wake tracking spans Scheduler.fireEvent's
+// final status persistence (b1), and fireEvent shares the wakeFireRun claim
+// with recordAbandonedWakeFires so an abandoned one-shot fire is never
+// double-written or overwritten on a late return (b2).
+func TestScheduledMessageWake_OneShotFinalOutcomeSynchronizedWithShutdown(t *testing.T) {
+	t.Run("tracking stays active until fireEvent persists final status", func(t *testing.T) {
+		prevStop := scheduledWakeFireStopGrace
+		scheduledWakeFireStopGrace = 2 * time.Second
+		t.Cleanup(func() { scheduledWakeFireStopGrace = prevStop })
+
+		f := newSchedWake(t, state.PhaseRunning)
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		_, fault := installStoreFault(t, f.srv, func(inner store.Store, sw *storeFaultSwitch) *blockingCompleteStore {
+			return &blockingCompleteStore{Store: inner, fault: sw, entered: entered, release: release}
+		})
+		u := f.user(t, "sw-b1-span", "agent.message", "agent.read")
+		evt := withSessionRevision(f.event(true), u.ID)
+		fault.Arm()
+
+		sch, _, handlerFinished := fireOneShotWake(t, f, evt)
+		defer sch.halt()
+		<-handlerFinished
+		<-entered
+
+		// messageEventHandler has already returned, yet fireEvent is still inside
+		// CompleteFiringScheduledEvent: tracking must remain active so shutdown
+		// does not return and close the store under the write.
+		assert.Equal(t, 1, f.srv.scheduledWakeFires.runningCount(), "tracking remains active across fireEvent persistence")
+
+		stopDone := make(chan struct{})
+		go func() {
+			f.srv.stopScheduledWakeFires(context.Background())
+			close(stopDone)
+		}()
+		time.Sleep(50 * time.Millisecond)
+		select {
+		case <-stopDone:
+			t.Fatal("stopScheduledWakeFires returned while fireEvent final status write was still running")
+		default:
+		}
+
+		close(release)
+		select {
+		case <-stopDone:
+		case <-time.After(2 * time.Second):
+			t.Fatal("stopScheduledWakeFires did not finish after persistence completed")
+		}
+		assert.Zero(t, f.srv.scheduledWakeFires.runningCount())
+		got, err := f.store.GetScheduledEvent(context.Background(), evt.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.ScheduledEventFired, got.Status)
+		assert.Empty(t, got.Error)
+	})
+
+	t.Run("expired one-shot wake claims firing and finalizes as expired", func(t *testing.T) {
+		f := newSchedWake(t, state.PhaseRunning)
+		u := f.user(t, "sw-b1-expired", "agent.message", "agent.read")
+		evt := withSessionRevision(f.event(true), u.ID)
+		evt.ScheduleID = ""
+		evt.FireAt = time.Now().Add(-time.Minute)
+		evt.Status = store.ScheduledEventPending
+		require.NoError(t, f.store.CreateScheduledEvent(context.Background(), &evt))
+
+		inHandler := make(chan struct{})
+		release := make(chan struct{})
+		sch := NewScheduler(f.srv.store, slog.Default())
+		sch.RegisterEventHandler("message", func(ctx context.Context, e store.ScheduledEvent) error {
+			close(inHandler)
+			<-release
+			return f.srv.messageEventHandler()(ctx, e)
+		})
+
+		done := make(chan struct{})
+		go func() {
+			sch.fireEvent(context.Background(), evt, true)
+			close(done)
+		}()
+		<-inHandler
+
+		mid, err := f.store.GetScheduledEvent(context.Background(), evt.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.ScheduledEventFiring, mid.Status, "claimed as firing while running, not prematurely expired")
+
+		close(release)
+		<-done
+		got, err := f.store.GetScheduledEvent(context.Background(), evt.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.ScheduledEventExpired, got.Status, "wasExpired wake finalizes as expired on success")
+		assert.Empty(t, got.Error)
+	})
+
+	for _, tc := range []struct {
+		name       string
+		handlerErr error
+	}{
+		{name: "late handler returning nil does not overwrite abandoned status", handlerErr: nil},
+		{name: "late handler returning error does not double-write abandoned status", handlerErr: errors.New("late failure")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prevStop, prevAbort := scheduledWakeFireStopGrace, scheduledWakeFireAbortGrace
+			scheduledWakeFireStopGrace = 20 * time.Millisecond
+			scheduledWakeFireAbortGrace = 20 * time.Millisecond
+			t.Cleanup(func() {
+				scheduledWakeFireStopGrace = prevStop
+				scheduledWakeFireAbortGrace = prevAbort
+			})
+
+			f := newSchedWake(t, state.PhaseRunning)
+			wrapped, fault := installStoreFault(t, f.srv, func(inner store.Store, sw *storeFaultSwitch) *blockingCompleteStore {
+				return &blockingCompleteStore{Store: inner, fault: sw}
+			})
+			u := f.user(t, "sw-b2", "agent.message", "agent.read")
+			evt := withSessionRevision(f.event(true), u.ID)
+			evt.ScheduleID = ""
+			evt.FireAt = time.Now().Add(10 * time.Millisecond)
+			evt.Status = store.ScheduledEventPending
+			require.NoError(t, f.store.CreateScheduledEvent(context.Background(), &evt))
+			fault.Arm()
+
+			started := make(chan struct{})
+			release := make(chan struct{})
+			finished := make(chan struct{})
+			sch := NewScheduler(f.srv.store, slog.Default())
+			sch.RegisterEventHandler("message", func(ctx context.Context, e store.ScheduledEvent) error {
+				trackedCtx, endTracking, ok := f.srv.trackScheduledWake(ctx, e)
+				require.True(t, ok)
+				defer endTracking()
+				_ = trackedCtx
+				close(started)
+				<-release // ignores abort, simulating a detached step finishing after abandonment
+				return tc.handlerErr
+			})
+
+			go func() {
+				defer close(finished)
+				sch.fireEvent(context.Background(), evt, false)
+			}()
+			<-started
+
+			f.srv.stopScheduledWakeFires(context.Background())
+			assert.Equal(t, int32(1), wrapped.completeCalls.Load(), "recordAbandonedWakeFires wrote once")
+			assert.Zero(t, wrapped.updateCalls.Load())
+
+			close(release)
+			<-finished
+			f.srv.scheduledWakeFires.wg.Wait()
+
+			assert.Equal(t, int32(1), wrapped.completeCalls.Load(), "fireEvent did not issue a second write")
+			assert.Zero(t, wrapped.updateCalls.Load())
+			got, err := f.store.GetScheduledEvent(context.Background(), evt.ID)
+			require.NoError(t, err)
+			assert.Equal(t, store.ScheduledEventFailed, got.Status)
+			assert.Equal(t, errScheduledWakeShutdown.Error(), got.Error)
+		})
+	}
+}
+
+// TestScheduledMessageWake_ProvisionalFiringAndAbandonedRecovery covers
+// ptone/scion#7791 (c) for both recurring and one-shot wake fires: events
+// skipped or whose write failed when scheduledWakeRecordBudget expires stay in
+// observable status "firing" (never "fired" or "expired"), and startup /
+// periodic recovery finalizes them as failed and updates recurring schedule
+// counters without rewinding next_run_at.
+func TestScheduledMessageWake_ProvisionalFiringAndAbandonedRecovery(t *testing.T) {
+	t.Run("skipped and failed shutdown writes stay firing and are recovered at startup", func(t *testing.T) {
+		prevStop, prevAbort, prevBudget := scheduledWakeFireStopGrace, scheduledWakeFireAbortGrace, scheduledWakeRecordBudget
+		scheduledWakeFireStopGrace = 20 * time.Millisecond
+		scheduledWakeFireAbortGrace = 20 * time.Millisecond
+		scheduledWakeRecordBudget = 60 * time.Millisecond
+		t.Cleanup(func() {
+			scheduledWakeFireStopGrace = prevStop
+			scheduledWakeFireAbortGrace = prevAbort
+			scheduledWakeRecordBudget = prevBudget
+		})
+
+		srv, s, projectID, wrapped, fault := setupScheduleTestWithStore(t, func(inner store.Store, sw *storeFaultSwitch) *blockingCompleteStore {
+			return &blockingCompleteStore{
+				Store: inner,
+				fault: sw,
+				onComplete: func(ctx context.Context, _ int32) error {
+					// Spend the shutdown record budget and fail with its deadline error.
+					<-ctx.Done()
+					return ctx.Err()
+				},
+			}
+		})
+		ctx := context.Background()
+		sched := createDueWakeTestSchedule(t, srv, s, projectID, "budget-skip-rec", true, time.Now().UTC().Add(-time.Minute))
+
+		// Also create two one-shot wake events (one regular, one wasExpired=true)
+		// sharing the same server & store.
+		oneShotPayload := sched.Payload
+		mkOneShot := func() store.ScheduledEvent {
+			ev := store.ScheduledEvent{
+				ID:                   api.NewUUID(),
+				ProjectID:            projectID,
+				EventType:            "message",
+				FireAt:               time.Now().UTC().Add(-time.Second),
+				Payload:              oneShotPayload,
+				Status:               store.ScheduledEventPending,
+				CreatedBy:            sched.CreatedBy,
+				InitiatorAttribution: sched.InitiatorAttribution,
+				AuthorityCeiling:     sched.AuthorityCeiling,
+			}
+			require.NoError(t, s.CreateScheduledEvent(ctx, &ev))
+			return ev
+		}
+		oneShotRegular := mkOneShot()
+		oneShotExpired := mkOneShot()
+
+		recEntered := make(chan string, 1)
+		oneShotEntered := make(chan struct{}, 2)
+		releaseHandlers := make(chan struct{})
+		srv.scheduler.RegisterEventHandler("message", func(hctx context.Context, evt store.ScheduledEvent) error {
+			if evt.ScheduleID != "" {
+				recEntered <- evt.ID
+				<-releaseHandlers
+				return nil
+			}
+			_, endTracking, ok := srv.trackScheduledWake(hctx, evt)
+			require.True(t, ok)
+			defer endTracking()
+			oneShotEntered <- struct{}{}
+			<-releaseHandlers
+			return nil
+		})
+
+		srv.executeSchedule(ctx, sched, time.Now().UTC())
+		recEventID := <-recEntered
+
+		oneShotDone := make(chan struct{}, 2)
+		go func() {
+			defer func() { oneShotDone <- struct{}{} }()
+			srv.scheduler.fireEvent(ctx, oneShotRegular, false)
+		}()
+		go func() {
+			defer func() { oneShotDone <- struct{}{} }()
+			srv.scheduler.fireEvent(ctx, oneShotExpired, true)
+		}()
+		<-oneShotEntered
+		<-oneShotEntered
+
+		// Arm the slow/failing CompleteFiringScheduledEvent fault so the first
+		// abandoned write exhausts scheduledWakeRecordBudget and fails, and the
+		// remaining two runs are skipped after the budget expires.
+		fault.Arm()
+		srv.stopScheduledWakeFires(ctx)
+		wrapped.disarmed.Store(true)
+
+		for name, id := range map[string]string{
+			"recurring wake":        recEventID,
+			"one-shot regular wake": oneShotRegular.ID,
+			"one-shot expired wake": oneShotExpired.ID,
+		} {
+			got, err := s.GetScheduledEvent(ctx, id)
+			require.NoError(t, err)
+			assert.Equal(t, store.ScheduledEventFiring, got.Status, "%s must remain firing when shutdown write fails or is skipped", name)
+			assert.Empty(t, got.Error)
+		}
+
+		schedBefore, err := s.GetSchedule(ctx, sched.ID)
+		require.NoError(t, err)
+		assert.Equal(t, 0, schedBefore.RunCount, "unrecovered recurring fire has not incremented RunCount yet")
+		require.NotNil(t, schedBefore.NextRunAt)
+		reservedNext := *schedBefore.NextRunAt
+		assert.True(t, reservedNext.After(time.Now().UTC().Add(-10*time.Second)))
+
+		// Simulate next hub startup recovery (immediate=true on single-instance SQLite).
+		srv.recoverAbandonedWakeFires(ctx, time.Now().UTC(), true)
+
+		for name, id := range map[string]string{
+			"recurring wake":        recEventID,
+			"one-shot regular wake": oneShotRegular.ID,
+			"one-shot expired wake": oneShotExpired.ID,
+		} {
+			got, err := s.GetScheduledEvent(ctx, id)
+			require.NoError(t, err)
+			assert.Equal(t, store.ScheduledEventFailed, got.Status, "%s recovered to failed", name)
+			assert.Equal(t, errScheduledWakeAbandoned.Error(), got.Error)
+		}
+
+		schedAfter, err := s.GetSchedule(ctx, sched.ID)
+		require.NoError(t, err)
+		assert.Equal(t, 1, schedAfter.RunCount, "startup recovery records the recurring run")
+		assert.Equal(t, 1, schedAfter.ErrorCount)
+		assert.Equal(t, store.ScheduleRunError, schedAfter.LastRunStatus)
+		assert.Equal(t, errScheduledWakeAbandoned.Error(), schedAfter.LastRunError)
+		require.NotNil(t, schedAfter.NextRunAt)
+		assert.True(t, reservedNext.Equal(*schedAfter.NextRunAt), "recovery must not rewind next_run_at")
+
+		// Releasing the stuck goroutines cannot overwrite or double-count the recovered state.
+		close(releaseHandlers)
+		<-oneShotDone
+		<-oneShotDone
+		srv.scheduledWakeFires.wg.Wait()
+
+		schedFinal, err := s.GetSchedule(ctx, sched.ID)
+		require.NoError(t, err)
+		assert.Equal(t, 1, schedFinal.RunCount, "late handler completion does not double-increment RunCount")
+	})
+
+	t.Run("startScheduler on SQLite immediately recovers leftover firing events", func(t *testing.T) {
+		srv, s, projectID := setupScheduleTest(t)
+		ctx := context.Background()
+		sched := createDueWakeTestSchedule(t, srv, s, projectID, "startup-sqlite-rec", true, time.Now().UTC().Add(time.Hour))
+		now := time.Now().UTC()
+
+		recEvt := store.ScheduledEvent{
+			ID:         api.NewUUID(),
+			ProjectID:  projectID,
+			EventType:  "message",
+			FireAt:     now,
+			FiredAt:    &now,
+			Payload:    sched.Payload,
+			Status:     store.ScheduledEventFiring,
+			CreatedBy:  sched.CreatedBy,
+			ScheduleID: sched.ID,
+		}
+		require.NoError(t, s.CreateScheduledEvent(ctx, &recEvt))
+
+		oneShotEvt := store.ScheduledEvent{
+			ID:        api.NewUUID(),
+			ProjectID: projectID,
+			EventType: "message",
+			FireAt:    now,
+			FiredAt:   &now,
+			Payload:   sched.Payload,
+			Status:    store.ScheduledEventFiring,
+			CreatedBy: sched.CreatedBy,
+		}
+		require.NoError(t, s.CreateScheduledEvent(ctx, &oneShotEvt))
+
+		schedCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		srv.startScheduler(schedCtx)
+		defer srv.scheduler.Stop()
+
+		for _, id := range []string{recEvt.ID, oneShotEvt.ID} {
+			got, err := s.GetScheduledEvent(ctx, id)
+			require.NoError(t, err)
+			assert.Equal(t, store.ScheduledEventFailed, got.Status)
+			assert.Equal(t, errScheduledWakeAbandoned.Error(), got.Error)
+		}
+		gotSched, err := s.GetSchedule(ctx, sched.ID)
+		require.NoError(t, err)
+		assert.Equal(t, 1, gotSched.RunCount)
+		assert.Equal(t, 1, gotSched.ErrorCount)
+		assert.Equal(t, store.ScheduleRunError, gotSched.LastRunStatus)
+	})
+
+	t.Run("periodic evaluator sweep recovers stale firing events without clobbering active fires", func(t *testing.T) {
+		srv, s, projectID := setupScheduleTest(t)
+		ctx := context.Background()
+		now := time.Now().UTC()
+		sched := createDueWakeTestSchedule(t, srv, s, projectID, "periodic-sweep-rec", true, now.Add(time.Hour))
+
+		staleAt := now.Add(-scheduledWakeStuckAfter() - time.Minute)
+		staleRec := store.ScheduledEvent{
+			ID:         api.NewUUID(),
+			ProjectID:  projectID,
+			EventType:  "message",
+			FireAt:     staleAt,
+			FiredAt:    &staleAt,
+			Payload:    sched.Payload,
+			Status:     store.ScheduledEventFiring,
+			CreatedBy:  sched.CreatedBy,
+			ScheduleID: sched.ID,
+		}
+		require.NoError(t, s.CreateScheduledEvent(ctx, &staleRec))
+
+		staleOneShot := store.ScheduledEvent{
+			ID:        api.NewUUID(),
+			ProjectID: projectID,
+			EventType: "message",
+			FireAt:    staleAt,
+			FiredAt:   &staleAt,
+			Payload:   sched.Payload,
+			Status:    store.ScheduledEventFiring,
+			CreatedBy: sched.CreatedBy,
+		}
+		require.NoError(t, s.CreateScheduledEvent(ctx, &staleOneShot))
+
+		activeAt := now.Add(-5 * time.Second)
+		activeOneShot := store.ScheduledEvent{
+			ID:        api.NewUUID(),
+			ProjectID: projectID,
+			EventType: "message",
+			FireAt:    activeAt,
+			FiredAt:   &activeAt,
+			Payload:   sched.Payload,
+			Status:    store.ScheduledEventFiring,
+			CreatedBy: sched.CreatedBy,
+		}
+		require.NoError(t, s.CreateScheduledEvent(ctx, &activeOneShot))
+
+		srv.evaluateSchedulesHandler()(ctx)
+
+		for _, id := range []string{staleRec.ID, staleOneShot.ID} {
+			got, err := s.GetScheduledEvent(ctx, id)
+			require.NoError(t, err)
+			assert.Equal(t, store.ScheduledEventFailed, got.Status)
+			assert.Equal(t, errScheduledWakeAbandoned.Error(), got.Error)
+		}
+		activeGot, err := s.GetScheduledEvent(ctx, activeOneShot.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.ScheduledEventFiring, activeGot.Status, "active firing event inside budget is left untouched")
+
+		gotSched, err := s.GetSchedule(ctx, sched.ID)
+		require.NoError(t, err)
+		assert.Equal(t, 1, gotSched.RunCount)
+		assert.Equal(t, 1, gotSched.ErrorCount)
+	})
 }

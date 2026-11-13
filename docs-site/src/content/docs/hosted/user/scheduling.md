@@ -121,6 +121,7 @@ scion schedule create-recurring \
 - **Permission**: a fire that resumes the agent needs the permission to start it (`agent.lifecycle`), as `scion message --wake` does, checked under the schedule's recorded authority (see **Scheduled Message Authority** below). The permission ceiling recorded with that authority must also include it, so a schedule an agent created without the permission does not wake anyone after that agent is given broader rights. Without it, the fire is refused (`scheduled_message_denied: message delivery refused`), and nothing is started or delivered. An agent that is already running needs no extra permission.
 - **Refusals**: a held agent is never woken (the fire is refused), and an agent that is migrating (`scion reincarnate`) fails as without `--wake`. A stopped, errored or halted agent is not resumed: the fire fails with `failed to wake agent <name>: ...`, the same reason `scion message --wake` gives. Any refusal of the start itself (a delete in progress, capacity, broker placement) fails the fire the same way, and nothing is delivered.
 - **Start already in progress**: if the agent is already starting, or another start of it (or a stop) is in progress, when the message fires, the fire does not start it again: it waits for that start to bring the agent up and then delivers. If the agent does not become ready, the fire fails with `target agent was already starting or stopping and did not become ready; message not delivered`.
+- **Status while running**: a wake fire shows status `firing` until its delivery outcome is written (`fired`, `expired` or `failed`). If the Hub stops before the outcome can be written, recovery marks the event `failed` with `hub stopped before the wake fire completed` (and counts the error on the parent recurring schedule).
 - Messages scheduled in a chat conversation never wake an agent.
 
 ---
@@ -196,7 +197,7 @@ Use these commands to manage schedules and events in your project:
 * **Cleanup obligation**: Recurring schedules fire indefinitely until paused or deleted. Always delete them when the task or project they serve is completed.
 * **Check before creating**: Run `scion schedule list` to check for existing schedules before creating new ones. Duplicate schedules will deliver duplicate messages.
 * **Command mismatch**: `cancel` is strictly for one-shot events. `pause` and `delete` are strictly for recurring schedules. Using the wrong command on a schedule type will return an error.
-* **Event retention**: The Hub deletes every scheduled event that is no longer pending, including the fires listed by `scion schedule history`, 7 days after it completed (fired, expired or failed), or 7 days after it was created if it never fired (for example, a cancelled event), whatever its soft-delete retention. Fire and failure outcomes are also written to the Hub log.
+* **Event retention**: The Hub deletes every completed scheduled event (excluding `pending` and `firing` events), including the fires listed by `scion schedule history`, 7 days after it completed (fired, expired or failed), or 7 days after it was created if it never fired (for example, a cancelled event), whatever its soft-delete retention. Fire and failure outcomes are also written to the Hub log.
 
 ---
 

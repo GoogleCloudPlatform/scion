@@ -318,6 +318,24 @@ func TestScheduleStoreWritesUTC_NonUTCLocal(t *testing.T) {
 				return ev.ID
 			},
 		},
+		{
+			name:    "CompleteFiringScheduledEvent fired_at",
+			columns: []string{"fired_at"},
+			mutate: func(t *testing.T, s *ScheduleStore) string {
+				sc := createSchedule(t, s)
+				ev := createEvent(t, s)
+				ok, err := s.ClaimScheduledEvent(ctx, ev.ID, store.ScheduledEventFiring)
+				require.NoError(t, err)
+				require.True(t, ok)
+				now := time.Now()
+				ok, err = s.CompleteFiringScheduledEvent(ctx, ev.ID, store.ScheduledEventFired, now, "", sc.ID, now)
+				require.NoError(t, err)
+				require.True(t, ok)
+				assertUTCColumn(t, s, "schedules", "last_run_at", sc.ID)
+				assertUTCColumn(t, s, "schedules", "updated", sc.ID)
+				return ev.ID
+			},
+		},
 	}
 	for _, tc := range eventCases {
 		t.Run(tc.name, func(t *testing.T) {

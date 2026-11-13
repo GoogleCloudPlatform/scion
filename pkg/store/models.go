@@ -3750,7 +3750,7 @@ type ScheduledEvent struct {
 	EventType  string     `json:"eventType"` // "message", "status_update"
 	FireAt     time.Time  `json:"fireAt"`    // When to fire (UTC)
 	Payload    string     `json:"payload"`   // JSON blob (handler-specific)
-	Status     string     `json:"status"`    // pending, fired, cancelled, expired
+	Status     string     `json:"status"`    // pending, firing, fired, cancelled, expired, failed
 	CreatedAt  time.Time  `json:"createdAt"`
 	CreatedBy  string     `json:"createdBy"`
 	FiredAt    *time.Time `json:"firedAt,omitempty"`
@@ -3776,6 +3776,7 @@ type ScheduledEvent struct {
 // ScheduledEventStatus constants
 const (
 	ScheduledEventPending   = "pending"
+	ScheduledEventFiring    = "firing" // Claimed/created for a wake fire whose outcome is not yet recorded
 	ScheduledEventFired     = "fired"
 	ScheduledEventCancelled = "cancelled"
 	ScheduledEventExpired   = "expired" // Loaded on startup past its fire time
