@@ -1402,6 +1402,9 @@ func TestBuildPodNFSHomeReset(t *testing.T) {
 }
 
 func TestHomeResetInitCommandFeatureGuard(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
 	for _, features := range []string{"home-v1\n", "home-v1\nhome-reset-v1\n", "home-reset-v10\n"} {
 		t.Run(strings.ReplaceAll(features, "\n", "-"), func(t *testing.T) {
 			bin := t.TempDir()
