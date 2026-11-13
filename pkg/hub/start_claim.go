@@ -88,7 +88,7 @@ func startOutcomeOf(err error) startOutcome {
 	case errors.Is(err, ErrLaunchInFlight), errors.As(err, &incomplete), errors.As(err, &stillMissing),
 		errors.Is(err, ErrLaunchInvalidPhase),
 		errors.Is(err, errStartRunNotBegun), errors.Is(err, errPendingConfigFold),
-		errors.As(err, &tokenErr), errors.Is(err, errBrokerLacksEmptyPerAgent),
+		errors.As(err, &tokenErr), isUnsupportedWorkspaceModeError(err),
 		isBrokerRuntimeUnavailable(err), isBrokerDraining(err), errors.Is(err, errStartClaimLost), errors.Is(err, store.ErrDeleteInProgress):
 		return startReleased
 	}
@@ -761,7 +761,7 @@ func startDidNotHappen(err error) bool {
 	var tokenErr *agentTokenIssueError
 	var incomplete *AgentCreateIncompleteError
 	return errors.As(err, &quotaErr) || errors.As(err, &stillMissing) || errors.As(err, &tokenErr) ||
-		errors.Is(err, errBrokerLacksEmptyPerAgent) || errors.As(err, &incomplete) ||
+		isUnsupportedWorkspaceModeError(err) || errors.As(err, &incomplete) ||
 		startRunNotBegunOutsideDelete(err) || pendingFoldRefusedOutsideDelete(err) ||
 		errors.Is(err, ErrLaunchInvalidPhase) || isConfirmedStartNotActedOnError(err)
 }

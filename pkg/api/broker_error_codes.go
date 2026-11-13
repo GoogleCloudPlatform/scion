@@ -116,6 +116,13 @@ const (
 	// BrokerErrDetailReason from its details to show the cause and the fix.
 	BrokerErrCodeLocalWorktreeRefused = "local_worktree_refused"
 
+	// BrokerErrCodeUnsupportedCapability marks a create, start or restart
+	// refused (412) because the resolved runtime does not support a required
+	// capability such as the project's workspace sharing mode (for example
+	// worktree-per-agent on Cloud Run). Nothing was provisioned or started;
+	// the hub relays the 412 refusal unchanged.
+	BrokerErrCodeUnsupportedCapability = "unsupported_capability"
+
 	// BrokerErrCodeRetainedFilesRefused marks a PurgeRetainedQueryParam
 	// delete that removed nothing because the files are not, or may not
 	// be, the retained files of a soft-deleted agent (409): a runtime entry

@@ -114,6 +114,12 @@ const (
 	// api.BrokerErrCodeLocalWorktreeRefused.
 	ErrCodeLocalWorktreeRefused = api.BrokerErrCodeLocalWorktreeRefused
 
+	// ErrCodeUnsupportedCapability marks a create, start or restart refused
+	// (412) because the resolved runtime does not support a required capability
+	// such as the project's workspace sharing mode; see
+	// api.BrokerErrCodeUnsupportedCapability.
+	ErrCodeUnsupportedCapability = api.BrokerErrCodeUnsupportedCapability
+
 	// ErrCodeStaleDispatch marks a delete refused because it arrived after
 	// the deadline the hub sent with it (notAfter, ptone/scion#2906): the
 	// hub's claim on the delete may have lapsed, so acting could remove an

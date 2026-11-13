@@ -846,6 +846,9 @@ func (d *HTTPAgentDispatcher) getProvisioningBrokerEndpoint(ctx context.Context,
 			if err := checkEmptyPerAgentBrokerCapability(project, broker); err != nil {
 				return "", err
 			}
+			if err := checkWorktreePerAgentCloudRun(project, broker, "", agent); err != nil {
+				return "", err
+			}
 		}
 	}
 	return broker.Endpoint, nil
