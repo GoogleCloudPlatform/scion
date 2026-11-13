@@ -151,6 +151,7 @@ export default defineConfig([
       'e2e/artifacts-agent-owned/*.ts',
       'e2e/artifacts-review/*.ts',
       'e2e/chat/*.ts',
+      'e2e/chat-choices/*.ts',
       'e2e/chat-file-preview/*.ts',
       'e2e/chat-mobile/*.ts',
       'e2e/chat-palette/*.ts',
