@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -235,4 +236,38 @@ func TestPluginHubCreds_KeepsExistingBrokerRow(t *testing.T) {
 	got, err := s.GetRuntimeBroker(ctx, brokerID)
 	require.NoError(t, err)
 	assert.Equal(t, "renamed-plugin-broker", got.Name, "an existing row is not replaced")
+}
+
+// Mid-session plugin credential reconstruction (ptone/scion#7625) returns the
+// same HMAC key idempotently across reads for a genuine plugin broker row,
+// while refusing a pre-registered non-plugin row at the deterministic UUIDv5.
+func TestPluginHubCreds_IdempotentForPluginRowAndRefusesNonPluginRow(t *testing.T) {
+	srv, _ := testServer(t)
+	ctx := context.Background()
+
+	first, err := srv.getPluginHubCredsChecked(ctx, "idempotent-plugin")
+	require.NoError(t, err)
+	second, err := srv.getPluginHubCredsChecked(ctx, "idempotent-plugin")
+	require.NoError(t, err)
+	require.NotEmpty(t, first["hmac_key"])
+	assert.Equal(t, first["hmac_key"], second["hmac_key"], "mid-session reads keep the active plugin HMAC key")
+
+	// Pre-register a remote non-plugin row at the deterministic UUIDv5 of another plugin.
+	detID := uuid.NewSHA1(pluginBrokerNS, []byte("plugin-broker-hijacked-plugin")).String()
+	reg, err := srv.GetBrokerAuthService().CreateBrokerRegistration(ctx, CreateBrokerRegistrationRequest{
+		BrokerID: detID,
+		Name:     "remote-occupant",
+	}, "dev")
+	require.NoError(t, err)
+	joined, err := srv.GetBrokerAuthService().CompleteBrokerJoin(ctx, BrokerJoinRequest{
+		BrokerID:  detID,
+		JoinToken: reg.JoinToken,
+	}, "http://localhost:8080")
+	require.NoError(t, err)
+	require.NotEmpty(t, joined.SecretKey)
+
+	creds, credsErr := srv.getPluginHubCredsChecked(ctx, "hijacked-plugin")
+	require.Error(t, credsErr)
+	assert.ErrorIs(t, credsErr, errPluginBrokerRow)
+	assert.Empty(t, creds["hmac_key"], "a non-plugin row's stored secret is never returned")
 }

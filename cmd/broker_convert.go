@@ -260,12 +260,16 @@ func runBrokerConvert(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
+	if g, gerr := config.GetGlobalDir(); gerr == nil {
+		plan.HostMode = planHostMode(g)
+	}
+
 	out := cmd.OutOrStdout()
 	if isJSONOutput() {
 		err = brokerconvert.WriteJSON(out, plan)
 	} else {
 		err = brokerconvert.WriteHuman(out, plan, brokerconvert.HumanOptions{ShowEnvValues: brokerConvertShowEnv})
-		if err == nil {
+		if err == nil && plan.HostMode != "" {
 			if g, gerr := config.GetGlobalDir(); gerr == nil {
 				_, err = fmt.Fprintln(out, planHostModeLine(g))
 			}

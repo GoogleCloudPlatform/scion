@@ -989,37 +989,10 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 					if !pluginMgr.IsSelfManaged(scionplugin.PluginTypeBroker, bt) &&
 						pluginMgr.GetDeploymentMode(scionplugin.PluginTypeBroker, bt) != scionplugin.DeploymentModeHA &&
 						hubSrv != nil && s != nil {
-						// Use the same deterministic UUIDv5 as the α migration so the
-						// broker entity created here matches the migrated ID.
-						pluginBrokerNS := uuid.MustParse("5c104390-a1d0-5e9a-9b1e-5c104390a1d0")
-						legacyID := "plugin-broker-" + bt
-						brokerID := uuid.NewSHA1(pluginBrokerNS, []byte(legacyID)).String()
-						if authSvc := hubSrv.GetBrokerAuthService(); authSvc != nil {
-							// Ensure the runtime broker entity exists (required by
-							// the broker_secrets foreign key constraint).
-							if _, err := s.GetRuntimeBroker(ctx, brokerID); err != nil {
-								pluginBroker := &store.RuntimeBroker{
-									ID:              brokerID,
-									Name:            "plugin-" + bt,
-									Slug:            api.Slugify("plugin-" + bt),
-									Version:         "0.1.0",
-									Status:          store.BrokerStatusOnline,
-									ConnectionState: "embedded",
-									Labels:          map[string]string{"scion.io/plugin": bt},
-									Created:         time.Now(),
-									Updated:         time.Now(),
-								}
-								if createErr := s.CreateRuntimeBrokerClearingCredentials(ctx, pluginBroker); createErr != nil {
-									log.Printf("Warning: failed to register broker entity for plugin %q: %v", bt, createErr)
-								}
-							}
-							// The hub provisions this record in-process: the test
-							// admin tier admits it by this id, never by a stored
-							// attribute.
-							hubSrv.RegisterInProcessPluginBroker(brokerID)
-							secretKey, secretErr := authSvc.GenerateAndStoreSecret(ctx, brokerID)
+						if hubSrv.GetBrokerAuthService() != nil {
+							brokerID, secretKey, secretErr := provisionInProcessPluginBrokerSecret(ctx, s, hubSrv, bt)
 							if secretErr != nil {
-								log.Printf("Warning: failed to generate secret for broker plugin %q: %v", bt, secretErr)
+								log.Printf("Warning: failed to provision secret for broker plugin %q: %v", bt, secretErr)
 							} else {
 								hubCreds := map[string]string{
 									"hub_url":     hubSrv.HubEndpointFor(hub.HubEndpointForPluginBrokers),
@@ -4529,9 +4502,13 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 			hubSrv.SetLocalImageChecker(rt)
 		}
 
-		// Generate or retrieve credentials for co-located mode (idempotent).
-		// Uses GenerateAndStoreSecret which returns the existing secret if one
-		// is already stored, so multiple Cloud Run instances share the same key.
+		// Generate or retrieve credentials for legacy single-broker co-located
+		// mode (idempotent — ptone/scion#7625, ptone/scion#7626).
+		// Intentionally retains GenerateAndStoreSecret rather than
+		// ReplaceBrokerSecret: legacy co-located deployments (including Cloud Run
+		// statelessEmbeddedBroker and multi-replica HA Hubs sharing one database)
+		// run multiple server instances under one shared brokerID and must sign
+		// with the same stored HMAC key until Phase 6 retires legacy hosting.
 		if authSvc := hubSrv.GetBrokerAuthService(); authSvc != nil {
 			secretKeyB64, secretErr := authSvc.GenerateAndStoreSecret(ctx, brokerID)
 			if secretErr != nil {
@@ -5347,4 +5324,79 @@ func warnColocatedBrokerEndpointTransport(endpoint string) {
 			"and delivers to this broker only over its control channel. Leave server.broker.host unset (or 0.0.0.0) to keep the HTTP fallback",
 			"endpoint", endpoint, "reason", err)
 	}
+}
+
+// pluginBrokerUUIDNamespace is the fixed UUIDv5 namespace shared with the α
+// migration and pkg/hub/handlers_integrations.go for deterministic plugin
+// broker IDs.
+var pluginBrokerUUIDNamespace = uuid.MustParse("5c104390-a1d0-5e9a-9b1e-5c104390a1d0")
+
+const pluginBrokerLabelKey = "scion.io/plugin"
+
+// provisionInProcessPluginBrokerSecret confirms or creates the Runtime Broker
+// row for a Hub-managed subprocess message-broker plugin (DeploymentModePlugin)
+// and retrieves or generates its shared HMAC secret via GenerateAndStoreSecret
+// (ptone/scion#7625).
+//
+// Why GenerateAndStoreSecret is intentionally retained here (matching the
+// other two audited GenerateAndStoreSecret callers — legacy co-located
+// startRuntimeBroker and mid-session/self-managed getPluginHubCredsChecked):
+//   - The caller gate (!IsSelfManaged && GetDeploymentMode != DeploymentModeHA)
+//     selects DeploymentModePlugin (the default subprocess mode), which runs on
+//     multi-replica Postgres Hubs as well as single-node SQLite Hubs. Each Hub
+//     replica spawns its own plugin subprocess sharing the same deterministic
+//     UUIDv5 brokerID, so calling ReplaceBrokerSecret on replica startup would
+//     revoke the HMAC key actively held by peer replicas' plugin children.
+//   - Pre-registered non-plugin row adoption at the deterministic UUIDv5 is
+//     prevented by verifying existing.Labels["scion.io/plugin"] == pluginName
+//     before RegisterInProcessPluginBroker or GenerateAndStoreSecret runs
+//     (remote POST /api/v1/brokers strips scion.io/plugin), and row creation
+//     clears any orphaned credentials via CreateRuntimeBrokerClearingCredentials.
+func provisionInProcessPluginBrokerSecret(ctx context.Context, s store.Store, hubSrv *hub.Server, pluginName string) (string, string, error) {
+	authSvc := hubSrv.GetBrokerAuthService()
+	if authSvc == nil {
+		return "", "", errors.New("broker authentication service is not available")
+	}
+	brokerID := uuid.NewSHA1(pluginBrokerUUIDNamespace, []byte("plugin-broker-"+pluginName)).String()
+	existing, err := s.GetRuntimeBroker(ctx, brokerID)
+	switch {
+	case err == nil:
+		if existing.Labels[pluginBrokerLabelKey] != pluginName {
+			return "", "", fmt.Errorf("runtime broker %s does not carry %s=%q", brokerID, pluginBrokerLabelKey, pluginName)
+		}
+	case errors.Is(err, store.ErrNotFound):
+		now := time.Now()
+		pluginBroker := &store.RuntimeBroker{
+			ID:              brokerID,
+			Name:            "plugin-" + pluginName,
+			Slug:            api.Slugify("plugin-" + pluginName),
+			Version:         "0.1.0",
+			Status:          store.BrokerStatusOnline,
+			ConnectionState: "embedded",
+			Labels:          map[string]string{pluginBrokerLabelKey: pluginName},
+			Created:         now,
+			Updated:         now,
+		}
+		if createErr := s.CreateRuntimeBrokerClearingCredentials(ctx, pluginBroker); createErr != nil {
+			if !errors.Is(createErr, store.ErrAlreadyExists) {
+				return "", "", fmt.Errorf("register broker entity: %w", createErr)
+			}
+			reread, rerr := s.GetRuntimeBroker(ctx, brokerID)
+			if rerr != nil || reread.Labels[pluginBrokerLabelKey] != pluginName {
+				return "", "", fmt.Errorf("runtime broker %s does not carry %s=%q", brokerID, pluginBrokerLabelKey, pluginName)
+			}
+		}
+	default:
+		return "", "", fmt.Errorf("look up broker entity: %w", err)
+	}
+
+	secretKey, err := authSvc.GenerateAndStoreSecret(ctx, brokerID)
+	if err != nil {
+		return "", "", err
+	}
+	// The hub provisions this record in-process: the test admin tier admits it
+	// by this id, never by a stored attribute, only after the plugin-labelled
+	// row and secret are confirmed.
+	hubSrv.RegisterInProcessPluginBroker(brokerID)
+	return brokerID, secretKey, nil
 }

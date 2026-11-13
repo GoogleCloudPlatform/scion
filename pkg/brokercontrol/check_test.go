@@ -140,6 +140,8 @@ func TestCheck_Cases(t *testing.T) {
 		{"file inside credentials dir", filepath.Join(g, "hub-credentials", "default.json"), RuleInside},
 		{"credentials dir", filepath.Join(g, "hub-credentials"), RuleEqual},
 		{"identity file", filepath.Join(g, "runtime-brokers", "k", "identity.json"), RuleInside},
+		{"colocated flat locks dir", filepath.Join(g, "colocated-flat-locks"), RuleEqual},
+		{"colocated flat owner stamp", filepath.Join(g, "colocated-flat-locks", "b1.owner"), RuleInside},
 		{"global dir", g, RuleAncestor},
 		{"home", f.home, RuleAncestor},
 		{"filesystem root", filepath.VolumeName(f.home) + string(filepath.Separator), RuleAncestor},
@@ -304,6 +306,8 @@ func TestCheckNamed_LeavesGlobalSubtreeToCaller(t *testing.T) {
 	// ...but still refuses named entries and the floor.
 	_, err := CheckNamed(filepath.Join(f.global, "settings.yaml"))
 	wantRefused(t, err, RuleEqual)
+	_, err = CheckNamed(filepath.Join(f.global, "colocated-flat-locks", "b1.lock"))
+	wantRefused(t, err, RuleInside)
 	_, err = CheckNamed(f.home)
 	wantRefused(t, err, RuleAncestor)
 }

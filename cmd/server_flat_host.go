@@ -18,9 +18,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"log/slog"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -40,7 +43,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/filelock"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -191,11 +196,135 @@ func probeKubernetesExecutionScope(ctx context.Context, rt *runtime.KubernetesRu
 	}, nil
 }
 
+// flatColocatedActiveWindow bounds how long a stored online Runtime Broker
+// heartbeat is treated as actively owned by another process during co-located
+// flat activation (3 × flatColocatedHeartbeatInterval, matching the Hub's
+// defaultAffinityFreshness).
+const flatColocatedActiveWindow = 90 * time.Second
+
+// reasonColocatedInstanceInUse is the stable refusal reason when a co-located
+// flat instance ID is already active in another server process (ptone/scion#7626).
+const reasonColocatedInstanceInUse = "instance_in_use"
+
+// colocatedLocksSubdir holds per-instance local process locks and prior-owner
+// stamps under globalDir so single-host concurrent starts are refused at once
+// while single-host crash restarts recover immediately without waiting out
+// flatColocatedActiveWindow.
+const colocatedLocksSubdir = "colocated-flat-locks"
+
+// colocatedFlatLocks holds per-instance advisory file locks for the lifetime
+// of a running co-located flat host and releases them on shutdown.
+type colocatedFlatLocks struct {
+	mu    sync.Mutex
+	locks []*filelock.Lock
+}
+
+func (l *colocatedFlatLocks) add(lk *filelock.Lock) {
+	if l == nil || lk == nil {
+		return
+	}
+	l.mu.Lock()
+	l.locks = append(l.locks, lk)
+	l.mu.Unlock()
+}
+
+func (l *colocatedFlatLocks) Start(context.Context) error { return nil }
+
+func (l *colocatedFlatLocks) Stop(context.Context) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	held := l.locks
+	l.locks = nil
+	l.mu.Unlock()
+	for _, lk := range held {
+		lk.Unlock()
+	}
+}
+
+// colocatedOwnerStamp records the Hub process instance ID and initial
+// registration heartbeat timestamp of the last local co-located process that
+// activated an instance under globalDir.
+type colocatedOwnerStamp struct {
+	hubID         string
+	heartbeatNano int64
+}
+
+func (o colocatedOwnerStamp) matchesRow(row *store.RuntimeBroker) bool {
+	if row == nil || o.hubID == "" {
+		return false
+	}
+	if row.ConnectedHubID != nil && *row.ConnectedHubID != "" {
+		return *row.ConnectedHubID == o.hubID
+	}
+	return o.heartbeatNano != 0 && row.LastHeartbeat.UTC().UnixNano() == o.heartbeatNano
+}
+
+func readColocatedOwnerStamp(tr *privatefs.Tree, brokerID string) colocatedOwnerStamp {
+	if tr == nil {
+		return colocatedOwnerStamp{}
+	}
+	data, err := tr.ReadPrivate(brokerID+".owner", 1024)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			slog.Warn("Failed to read co-located flat owner stamp", logging.AttrBrokerID, brokerID, "error", err)
+		}
+		return colocatedOwnerStamp{}
+	}
+	parts := strings.SplitN(strings.TrimSpace(string(data)), "\n", 2)
+	stamp := colocatedOwnerStamp{hubID: strings.TrimSpace(parts[0])}
+	if len(parts) == 2 {
+		if n, parseErr := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64); parseErr == nil {
+			stamp.heartbeatNano = n
+		}
+	}
+	return stamp
+}
+
+func writeColocatedOwnerStamp(tr *privatefs.Tree, brokerID, hubID string, hb time.Time) error {
+	if tr == nil || hubID == "" {
+		return nil
+	}
+	payload := []byte(fmt.Sprintf("%s\n%d\n", hubID, hb.UTC().UnixNano()))
+	f, _, err := tr.CreateTemp("", "owner-*", privatefs.Private)
+	if err != nil {
+		return err
+	}
+	renamed := false
+	defer func() {
+		if !renamed {
+			_ = tr.RemoveOpen(f)
+		}
+		_ = f.Close()
+	}()
+	if _, err := f.Write(payload); err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	if err := tr.RenameOpen(f, brokerID+".owner"); err != nil {
+		return err
+	}
+	renamed = true
+	return nil
+}
+
 // colocatedFlatActivator activates an instance through the Hub's embedded
 // flat registration (R1-R8, bound result required) and the in-memory
 // credentials of the co-located control channel.
+//
+// Co-located flat mode requires at most one live server process per flat
+// Runtime Broker instance ID: every activation calls ReplaceBrokerSecret, so
+// Activate checks both a local per-instance file lock and the Hub store's
+// online heartbeat state before registering or replacing the stored secret
+// (ptone/scion#7626).
 type colocatedFlatActivator struct {
-	hubSrv *hub.Server
+	hubSrv    *hub.Server
+	globalDir string
+	locks     *colocatedFlatLocks
+	now       func() time.Time
 	// reported holds the instance keys whose refusal the embedded
 	// registration already reported to the Hub.
 	reportedMu sync.Mutex
@@ -209,7 +338,77 @@ type colocatedFlatActivator struct {
 	hubEndpoint string
 }
 
-func (a *colocatedFlatActivator) Activate(ctx context.Context, c brokerhost.Candidate) (*brokerhost.Activation, error) {
+func (a *colocatedFlatActivator) currentTime() time.Time {
+	if a.now != nil {
+		return a.now()
+	}
+	return time.Now()
+}
+
+func (a *colocatedFlatActivator) Activate(ctx context.Context, c brokerhost.Candidate) (act *brokerhost.Activation, retErr error) {
+	brokerID := c.Identity.RuntimeBrokerID
+
+	var (
+		lockTree      *privatefs.Tree
+		heldLock      *filelock.Lock
+		priorOwner    colocatedOwnerStamp
+		localLockFree bool
+	)
+	if a.globalDir != "" {
+		var err error
+		lockTree, err = privatefs.OpenTree(filepath.Join(a.globalDir, colocatedLocksSubdir), privatefs.TreeOptions{CreateAnchor: true})
+		if err != nil {
+			return nil, brokerhost.WithReason("lock_failed",
+				fmt.Errorf("flat Runtime Broker instance %q: opening co-located lock directory: %w", c.Instance.Key, err))
+		}
+		defer func() { _ = lockTree.Close() }()
+
+		lockPath := filepath.Join(lockTree.Anchor(), brokerID+".lock")
+		heldLock, err = filelock.Acquire(lockPath, 0o600, 0)
+		if err != nil {
+			if errors.Is(err, filelock.ErrTimeout) {
+				return nil, brokerhost.WithReason(reasonColocatedInstanceInUse,
+					fmt.Errorf("flat Runtime Broker instance %q (%s) is already active in another local server process; co-located flat mode allows only one server process per instance ID",
+						c.Instance.Key, brokerID))
+			}
+			return nil, brokerhost.WithReason("lock_failed",
+				fmt.Errorf("flat Runtime Broker instance %q: acquiring co-located lock: %w", c.Instance.Key, err))
+		}
+		defer func() {
+			if heldLock != nil {
+				heldLock.Unlock()
+			}
+		}()
+		localLockFree = true
+		priorOwner = readColocatedOwnerStamp(lockTree, brokerID)
+	}
+
+	// Refuse before RegisterEmbeddedFlatRuntimeBroker or ReplaceBrokerSecret
+	// touches the row or rotates an active peer's HMAC secret when another
+	// live process holds this instance ID against a shared Hub database.
+	if s := a.hubSrv.GetStore(); s != nil {
+		existing, err := s.GetRuntimeBroker(ctx, brokerID)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return nil, brokerhost.WithReason("registration_failed",
+				fmt.Errorf("flat Runtime Broker instance %q: reading stored Runtime Broker: %w", c.Instance.Key, err))
+		}
+		if existing != nil && existing.Status == store.BrokerStatusOnline && !existing.LastHeartbeat.IsZero() {
+			age := a.currentTime().Sub(existing.LastHeartbeat)
+			if age < flatColocatedActiveWindow {
+				thisHubID := a.hubSrv.InstanceID()
+				sameHub := thisHubID != "" &&
+					((existing.ConnectedHubID != nil && *existing.ConnectedHubID == thisHubID) ||
+						priorOwner.hubID == thisHubID)
+				deadLocalPrior := localLockFree && priorOwner.matchesRow(existing)
+				if !sameHub && !deadLocalPrior {
+					return nil, brokerhost.WithReason(reasonColocatedInstanceInUse,
+						fmt.Errorf("flat Runtime Broker instance %q (%s) is already online on another active server process (last heartbeat %s ago); co-located flat mode requires a single server process per instance ID",
+							c.Instance.Key, brokerID, age.Truncate(time.Second)))
+				}
+			}
+		}
+	}
+
 	// RegisterEmbeddedFlatRuntimeBroker reports its own refusals per
 	// instance.
 	endpoint := strings.TrimSuffix(a.endpoint, "/") + brokerhost.InstancePrefix(c.Identity.RuntimeBrokerID)
@@ -251,6 +450,13 @@ func (a *colocatedFlatActivator) Activate(ctx context.Context, c brokerhost.Cand
 	if err != nil {
 		return nil, brokerhost.WithReason("credentials_failed",
 			fmt.Errorf("flat Runtime Broker instance %q: %w", c.Instance.Key, err))
+	}
+	if err := writeColocatedOwnerStamp(lockTree, row.ID, a.hubSrv.InstanceID(), row.LastHeartbeat); err != nil {
+		slog.Warn("Failed to record co-located flat owner stamp", "instance", c.Instance.Key, logging.AttrBrokerID, row.ID, "error", err)
+	}
+	if a.locks != nil && heldLock != nil {
+		a.locks.add(heldLock)
+		heldLock = nil
 	}
 	return &brokerhost.Activation{InMemoryCredentials: &brokercredentials.BrokerCredentials{
 		Name:         "local",
@@ -418,8 +624,23 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 	}
 
 	var activator brokerhost.Activator
+	var colocatedLocks *colocatedFlatLocks
+	releaseLocksOnReturn := true
+	defer func() {
+		if releaseLocksOnReturn {
+			colocatedLocks.Stop(context.Background())
+		}
+	}()
 	if mode == brokerhost.ModeColocated {
-		activator = &colocatedFlatActivator{hubSrv: p.hubSrv, endpoint: rhEndpoint, autoProvide: p.autoProvide, hubEndpoint: hubEndpointForRH}
+		colocatedLocks = &colocatedFlatLocks{}
+		activator = &colocatedFlatActivator{
+			hubSrv:      p.hubSrv,
+			globalDir:   p.globalDir,
+			locks:       colocatedLocks,
+			endpoint:    rhEndpoint,
+			autoProvide: p.autoProvide,
+			hubEndpoint: hubEndpointForRH,
+		}
 		keys := make([]string, 0, len(p.instances))
 		for _, inst := range p.instances {
 			keys = append(keys, inst.Key)
@@ -441,6 +662,9 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 		containerHub:            containerHub,
 	}
 	var hostServices []brokerhost.Service
+	if colocatedLocks != nil {
+		hostServices = append(hostServices, colocatedLocks)
+	}
 	if brokerNFS != nil && len(brokerNFS.Shares) > 0 {
 		shared.nfsMounter = runtimebroker.NewHostNFSMounter(nil, logging.Subsystem("broker.nfs-mount"))
 		hostServices = append(hostServices, shared.nfsMounter)
@@ -544,6 +768,7 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 
 	log.Printf("Starting Runtime Broker API server on %s:%d", cfg.RuntimeBroker.Host, cfg.RuntimeBroker.Port)
 	brokerListeners.add(host.Listening())
+	releaseLocksOnReturn = false
 	p.wg.Add(1)
 	go func() {
 		defer p.wg.Done()

@@ -109,6 +109,7 @@ var namedEntries = []namedEntry{
 	// Host identity and state.
 	{brokeridentity.RuntimeBrokersDirName, Dir, ClassHostState},
 	{"runtime-broker-state", Dir, ClassHostState},
+	{"colocated-flat-locks", Dir, ClassHostState},
 	{config.BrokerWorkspacesDir, Dir, ClassHostState},
 	{"hub-workspaces", Dir, ClassHostState},
 	{"workspace-config-records", Dir, ClassHostState},
