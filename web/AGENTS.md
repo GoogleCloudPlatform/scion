@@ -69,6 +69,8 @@ After making changes, verify:
 3. **Tests pass:** `npm run test`
 4. **Client builds:** `npm run build`
 
+The full Vitest suite takes about 10 to 18 minutes in an agent container, more than a 10-minute foreground tool limit. Run the touched test files first (`npx vitest run <files>`) and start the full suite in the background. Gitignored build output (`web/public/shoelace/`, `build/`) fails Go and web gates run afterwards; see "Gitignored build output" in `docs-repo/agents/sandbox-go-toolchain.md`.
+
 ## Project Structure
 
 ```
@@ -220,6 +222,8 @@ render() {
 }
 ```
 
+**ARIA state on an `sl-*` host is not exposed.** Shoelace forwards only some attributes (for `sl-button`, `role` and `aria-disabled`) to its inner control, so `aria-pressed`, `aria-expanded` or `aria-checked` on the host reaches no screen reader. For toggle state use a native element, as `chat-space-rail.ts` does. Assert accessibility state through the accessibility tree (Playwright `getByRole('button', { pressed: true })`), not through the host attribute: a test that checks the attribute passes while the control exposes nothing.
+
 ### Theme Variables
 
 Use CSS custom properties with the `--scion-` prefix for consistent theming:
@@ -264,7 +268,7 @@ PROJECT_ID=<uuid> TOKEN=<dev-token> node web/test-scripts/realtime-lifecycle-tes
 When working in a containerized or sandboxed agent environment (e.g., scion agents), keep these points in mind:
 
 - **Vite dev server is available.** You can run `npm run dev` to start the Vite dev server for client-side development and visual inspection. API calls and SSE will not work without the Go backend.
-- **Use `--dev-auth` for local testing.** When a Go server is available, `--dev-auth` bypasses OAuth and auto-creates a dev session, which is the simplest way to test the frontend end-to-end. See the README for details.
+- **Use `--dev-auth` for local testing.** When a Go server is available, `--dev-auth` bypasses OAuth and lets the dev-token holder sign in with a dev sign-in link (see [Browser authentication](#browser-authentication)), which is the simplest way to test the frontend end-to-end.
 - **Go server** the golang server can be started as a background process, but OAuth flows cannot be used in a container.
 
 ### Tool pitfalls in sandboxed environments
@@ -306,6 +310,7 @@ The client `SSEClient` listens for `event: update` and the `StateManager` parses
 
 - Use `waitUntil: 'domcontentloaded'` instead of `'networkidle'` — the SSE connection keeps the network perpetually active, so `networkidle` will time out.
 - Chromium needs `--no-sandbox --disable-setuid-sandbox` flags in containerized environments.
+- The `web/e2e/*` Playwright configs read `CHROMIUM_EXECUTABLE`. Agent containers have no Playwright browser bundle, so set `CHROMIUM_EXECUTABLE=/usr/bin/chromium`, or every test fails with "Executable doesn't exist".
 - Console logging via `page.on('console', ...)` is essential for debugging SSE connection state — the `[SSE] Connected` log confirms the EventSource opened.
 - To validate real-time updates: take a screenshot, make an API call, wait 2-3 seconds, take another screenshot. Compare visually.
 
@@ -347,7 +352,7 @@ When using the Chrome DevTools MCP tools (`take_screenshot`, `take_snapshot`, `c
 
 ### Browser authentication
 
-- **Navigate directly to `http://localhost:8080`** — dev-auth mode sets a session cookie automatically on the first page load, no manual cookie setup needed.
+- **Sign in with a dev sign-in link.** Dev auth no longer creates a session on the first page load; a request without a session goes to `/login`. Get a single-use link with `POST /auth/dev-launch` and the dev token (`Authorization: Bearer scion_dev_...`), then open the returned `signInPath` (see `pkg/hub/web_devsignin.go`, and `web/e2e/harness/auth.ts` for a scripted version). On a fresh server home, every page then redirects to `/onboarding` until onboarding is completed.
 - **For API calls via curl**, use the dev token as `Authorization: Bearer scion_dev_...` to get a `scion_sess` cookie, then pass it to subsequent requests.
 
 ### Taking screenshots and snapshots
