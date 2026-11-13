@@ -31,6 +31,7 @@
     "test:watch": "vitest",
     "test:terminal-smoke": "vitest run -c vitest.smoke.config.ts",
     "test:e2e": "playwright test",
+    "test:e2e:chat-choices": "playwright test -c e2e/chat-choices/playwright.config.ts",
     "test:e2e:chat-mobile": "playwright test -c e2e/chat-mobile/playwright.config.ts",
     "test:e2e:perf-budgets": "playwright test -c e2e-perf/budgets/playwright.config.ts"
   },

@@ -21,6 +21,8 @@ global-setup.ts          ← Playwright calls this before any spec
   ├─ hub.ts              ← Builds web + Go binary, starts hub on ephemeral port
   ├─ auth.ts             ← Creates authenticated sessions via test-login,
   │                         and redeems test identity web-login codes
+  ├─ agent.ts            ← Provisions containerless test agents and mints
+  │                         X-Scion-Agent-Token credentials (no Docker needed)
   └─ seed.ts             ← Seeds groups, users, role bindings via the real API
 smoke.spec.ts            ← Proves the loop: login → navigate → assert → axe
 global-teardown.ts       ← Kills the hub, cleans up temp files
@@ -326,6 +328,109 @@ Available helpers:
    helper, not the hub, rejects a non-empty value). Any other scope, e.g.
    `'project'`, requires an explicit `scopeId`.
 4. The user's next API call will reflect the new permissions.
+
+## Containerless agent-sender fixture (`agent.ts`)
+
+`agent.ts` provisions a real stored agent on a running `startHub(...)` test hub
+(`provisionOnly: true` against the co-located runtime broker) and mints a valid
+HS256 `X-Scion-Agent-Token` matching `pkg/hub/agenttoken.go` — **no Docker
+daemon or live agent container is required** (ptone/scion#7776).
+
+### Hub prerequisites
+
+Start the throwaway hub with `runtimeBroker: true`, `testIdentities: true`, and
+either `testLogin: true` (the default, which passes `--session-secret`) or
+`env: { SCION_SERVER_SESSION_SECRET: E2E_SESSION_SECRET }` so the hub derives a
+deterministic `agent_signing_key`:
+
+```typescript
+const hub = await startHub({
+  testLogin: true,
+  testIdentities: true,
+  runtimeBroker: true,
+  stateFile,
+  env: {
+    SCION_IMAGE_REGISTRY: 'registry.invalid/scion-e2e',
+  },
+  experiments: ['web.chat_choices'],
+});
+```
+
+**Legacy pre-table credential path:** `mintAgentToken` signs a stateless HS256
+JWT with a random `jti` (no `AgentCredential` DB row and no `run_id`). The hub
+accepts it via the legacy pre-table credential branch in
+`pkg/hub/agent_token_verify.go` (which logs one `WARN` per request) and requires
+`server.auth.agent_run_scope` to remain off. If that compatibility branch is
+closed or `agent_run_scope` is enabled, `createTestAgent` fails fast at
+`setStatus` with HTTP `401`.
+
+### Usage
+
+```typescript
+import { canonicalAgentUserDMKey, createTestAgent } from '../harness/agent.js';
+
+const agent = await createTestAgent(hub, {
+  projectId,
+  name: 'choices-asker',
+  messageMode: 'project',
+});
+
+// Authenticates on RouteAgentSelf (/api/v1/agents/{id}/*):
+const sendRes = await agent.sendChoicePrompt({
+  conversationRef: '#choices-room', // or recipient: 'user:alice@e2e.test' or conversationId
+  msg: 'Select rollout strategy:',
+  choices: [
+    {
+      id: 'D1',
+      question: 'Which rollout strategy should we use?',
+      choices: [
+        { id: 'canary', label: 'Canary 10%' },
+        { id: 'bluegreen', label: 'Blue/Green' },
+      ],
+      default: 'canary',
+    },
+  ],
+});
+
+// Also authenticates on RouteAgentToken (/api/v1/agent/*):
+const res = await agent.request('/api/v1/agent/gcp-token');
+
+// Inspect or wait for choice-response delivery behavior (assumes a
+// containerless/absent agent; default timeout 20s for ~5–6s broker buffer +
+// retries on hosts without Docker; promptMessageId matches the newest response
+// in ListMessages DESC order):
+//   - 'attempted_delivery' (attemptedAgentDelivery === true): hub dispatched to
+//     the broker (e.g. direct answer or override of an interpreted answer).
+//   - 'logged_without_delivery' (attemptedAgentDelivery === false): row is not
+//     (yet) marked `failed` (`dispatchState: "dispatched"`). In practice, once
+//     a later override settles, an earlier confirmation queued in a prior >2s
+//     broker debounce window has flushed too; if both answers fell in the same
+//     2s window, re-poll after override settles (or space >2s) because
+//     `reportMessageFailure` runs in separate goroutines.
+//   - 'agent_unreachable': asker was stopped/deleted before the answer.
+const delivery = await agent.waitForChoiceResponseDelivery(topicId, {
+  promptMessageId: sendRes.message_id,
+});
+```
+
+### Running the real-hub interactive choices suite
+
+```bash
+# Prebuild Go hub binary + web client assets, then run the Playwright suite:
+go build -buildvcs=false -o build/scion ./cmd/scion
+cd web
+npm run build
+CHROMIUM_EXECUTABLE=/usr/bin/chromium E2E_PREBUILT=1 npm run test:e2e:chat-choices
+```
+
+(Omit `CHROMIUM_EXECUTABLE` when using Playwright's downloaded Chromium bundle,
+and omit `E2E_PREBUILT=1` to let `global-setup.ts` run `make build` and
+`npm run build` automatically.)
+
+Note on project roles: built-in `project-admin` and `project-owner` carry the
+`agent.message` permission required to answer a `messageMode: 'project'`
+agent's choice prompts, whereas `project-member` does not (useful when testing
+blocked answerability).
 
 ## Navigation waits
 
