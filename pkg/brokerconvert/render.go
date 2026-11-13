@@ -187,6 +187,9 @@ func WriteHuman(w io.Writer, p *Plan, opts HumanOptions) error {
 	if s.DecisionRequired {
 		verdict = append(verdict, "operator decisions required")
 	}
+	for _, path := range operatorInputPaths(p.Findings) {
+		verdict = append(verdict, "operator input required: "+path)
+	}
 	switch p.Capacity.Status {
 	case CapacityNeedsHub:
 		verdict = append(verdict, "capacity not planned (needs the Hub)")
@@ -275,6 +278,20 @@ func writeProjects(b *strings.Builder, s *ProjectsSection) {
 			fmt.Fprintf(b, "       service account for profile: %s\n", refText(r))
 		}
 	}
+}
+
+// operatorInputPaths returns the paths of findings that require operator input
+// with no legacy settings source, in finding order.
+func operatorInputPaths(findings []Finding) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, f := range findings {
+		if f.Code == config.ConversionFlatTargetOperatorInputRequired && f.Path != "" && !seen[f.Path] {
+			seen[f.Path] = true
+			out = append(out, f.Path)
+		}
+	}
+	return out
 }
 
 // count formats n with noun, adding "s" unless n is 1.
