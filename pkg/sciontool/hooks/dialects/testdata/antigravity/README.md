@@ -3,7 +3,7 @@
 `hook-payloads-1.2.12.jsonl` is a real, captured sequence of stdin payloads
 the antigravity (`agy`) CLI sends to `sciontool hook --dialect=antigravity`,
 captured from `agy` version `1.2.12` (the version
-`harnesses/antigravity/Dockerfile` pins via `ARG AGY_VERSION`). It was
+`harnesses/antigravity/Dockerfile` pinned at capture time). It was
 driven against a local, credential-free mock implementing the Gemini
 Developer API's `generateContent`/`streamGenerateContent` shape via `agy`'s
 own documented `GOOGLE_GEMINI_BASE_URL` override — no real Google account,
