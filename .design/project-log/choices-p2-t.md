@@ -17,8 +17,10 @@ real-hub E2E coverage in PR 2B (`ptone/scion#7798`) and Phase 3
     containers.
   - Derives `agent_signing_key` from `E2E_SESSION_SECRET` matching
     `deriveSharedSigningKey(secret, "agent_signing_key")` in `pkg/hub/server.go`
-    and signs an HS256 `X-Scion-Agent-Token` JWT matching
-    `AgentTokenService.SignAgentToken` in `pkg/hub/agenttoken.go`.
+    and signs a stateless HS256 `X-Scion-Agent-Token` JWT matching
+    `AgentTokenService.SignAgentToken` in `pkg/hub/agenttoken.go` (accepted via
+    the legacy pre-table credential branch in `pkg/hub/agent_token_verify.go`
+    while `server.auth.agent_run_scope` remains off).
   - Transitions the agent to `phase: "running", activity: "idle"` via
     `POST /api/v1/agents/{id}/status`, validating the minted credential up
     front and ensuring chat v2 treats the agent as reachable.
@@ -50,17 +52,22 @@ real-hub E2E coverage in PR 2B (`ptone/scion#7798`) and Phase 3
      SSE when User A answers (`Answered by Alice Choices`, read-only disabled
      buttons, compact `<scion-chat-choice-response>` line, zero page reload).
   4. Multi-decision set card (`answerMode: "set"`) tracks per-row selections
-     (`2 remaining` -> `1 remaining` -> `0 remaining`), submits atomically via
-     `Submit answers`, flips all rows to `decided` (`Submitted by you`),
-     renders expandable `details[data-kind="set"]`, and settles as
+     (`2 remaining` -> `1 remaining` -> `0 remaining`), submits both answers
+     together via `Submit answers`, flips all rows to `decided` (`Submitted by
+     you`), renders expandable `details[data-kind="set"]`, and settles as
      `attempted_delivery`.
   5. Replacement (`choicesUpdate: true`) flips an open v1 card live over SSE to
      `replaced` (`Replaced by v2`, `Jump to v2`) and renders the pending v2
      card live.
+- Wired `chat-choices` into `.github/workflows/web-e2e.yml` alongside
+  `test-identity-session` and `page-policy` (including narrow path triggers on
+  `pkg/hub/choices_*.go`, `pkg/hub/agenttoken.go`, and
+  `pkg/hub/agent_token_verify.go`).
 - Added `web/e2e/harness-selftest/agent-fixture.pw.ts` so `npm run
-  test:e2e-support` exercises JWT signing, `provisionOnly` setup, outbound
-  addressing normalization, and confirm-vs-override delivery classification in
-  the fast CI web job without Go or a browser.
+  test:e2e-support` exercises deterministic golden HS256 JWT signing vectors,
+  `provisionOnly` setup, outbound addressing normalization, and
+  confirm-vs-override delivery classification in the fast CI web job without Go
+  or a browser.
 - Documented `web/e2e/harness/agent.ts` and `npm run test:e2e:chat-choices` in
   `web/e2e/harness/README.md`.
 
@@ -84,7 +91,8 @@ real-hub E2E coverage in PR 2B (`ptone/scion#7798`) and Phase 3
   agent.`).
 - Chat SSE streams subscribe to `user.<userId>.chat.>` and
   `project.<projectId>.chat.>` (not `user.<userId>.>`).
-- On cloud-hosted sandboxes without Docker, pass
-  `SCION_HOST_NETWORK_BLOCK_POLICY: 'allow'` in `startHub({ env })` alongside
-  `SCION_IMAGE_REGISTRY` so the co-located runtime broker never refuses startup
-  on detected cloud metadata hosts.
+- `provisionOnly: true` never enters `AgentManager.Start`, so
+  `SCION_HOST_NETWORK_BLOCK_POLICY` is unnecessary and omitted; only
+  `SCION_IMAGE_REGISTRY: 'registry.invalid/scion-e2e'` is set in `startHub({ env })`
+  so the co-located runtime broker registers cleanly with defense-in-depth
+  against accidental image pulls.

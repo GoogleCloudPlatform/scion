@@ -35,7 +35,6 @@ async function globalSetup(): Promise<void> {
     stateFile: createStateFile(),
     env: {
       SCION_IMAGE_REGISTRY: 'registry.invalid/scion-e2e',
-      SCION_HOST_NETWORK_BLOCK_POLICY: 'allow',
     },
     experiments: ['web.chat_choices'],
   });

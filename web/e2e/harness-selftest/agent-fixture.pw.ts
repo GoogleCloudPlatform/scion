@@ -33,6 +33,31 @@ import { E2E_SESSION_SECRET } from '../harness/hub.js';
 const AGENT_ID = '5f1c2d3e-6b1a-4c55-9f3e-0d6e7a1b2c3d';
 const PROJECT_ID = '11111111-2222-4333-8444-555555555555';
 
+// Independent golden SHA-256 digest of "scion-hub-signing-key:agent_signing_key:e2e-test-secret"
+// (matching `deriveSharedSigningKey(secret, "agent_signing_key")` in `pkg/hub/server.go`).
+const GOLDEN_E2E_AGENT_SIGNING_KEY_HEX =
+  '028d177d8052bc12ca25fd7b2806535e9c337c8649878fbf992883474b6f7e76';
+
+test('deriveAgentSigningKey and mintAgentToken match deterministic golden HS256 vector', () => {
+  expect(deriveAgentSigningKey(E2E_SESSION_SECRET).toString('hex')).toBe(
+    GOLDEN_E2E_AGENT_SIGNING_KEY_HEX
+  );
+
+  const goldenToken = mintAgentToken({
+    agentId: AGENT_ID,
+    projectId: PROJECT_ID,
+    scopes: ['project:read', 'agent:status:update'],
+    nowSeconds: 1_700_000_000,
+    ttlSeconds: 3600,
+    jti: '00000000-0000-4000-8000-000000000001',
+  });
+  const expectedGoldenJwt =
+    'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.' +
+    'eyJpc3MiOiJzY2lvbi1odWIiLCJzdWIiOiI1ZjFjMmQzZS02YjFhLTRjNTUtOWYzZS0wZDZlN2ExYjJjM2QiLCJhdWQiOlsic2Npb24taHViLWFwaSJdLCJpYXQiOjE3MDAwMDAwMDAsIm5iZiI6MTcwMDAwMDAwMCwiZXhwIjoxNzAwMDAzNjAwLCJqdGkiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDEiLCJwcm9qZWN0X2lkIjoiMTExMTExMTEtMjIyMi00MzMzLTg0NDQtNTU1NTU1NTU1NTU1Iiwic2NvcGVzIjpbInByb2plY3Q6cmVhZCIsImFnZW50OnN0YXR1czp1cGRhdGUiXSwic2NvcGVfc2NoZW1hIjoxfQ.' +
+    'wEx_bOfR2_sMpiFnSoNWxZr1Ap_nWa0-tjME-2YlLdI';
+  expect(goldenToken).toBe(expectedGoldenJwt);
+});
+
 test('mintAgentToken signs HS256 claims matching pkg/hub/agenttoken.go', () => {
   const token = mintAgentToken({
     agentId: AGENT_ID,
@@ -65,8 +90,9 @@ test('mintAgentToken signs HS256 claims matching pkg/hub/agenttoken.go', () => {
   expect(payload.scopes).toContain('project:agent:notify');
   expect(payload.scopes).toContain('agent:status:update');
 
+  // Verify against the hard-coded golden key (without calling deriveAgentSigningKey).
   const expectedSig = crypto
-    .createHmac('sha256', deriveAgentSigningKey(E2E_SESSION_SECRET))
+    .createHmac('sha256', Buffer.from(GOLDEN_E2E_AGENT_SIGNING_KEY_HEX, 'hex'))
     .update(`${parts[0]}.${parts[1]}`)
     .digest('base64url');
   expect(parts[2]).toBe(expectedSig);
@@ -226,7 +252,8 @@ test('createTestAgent provisions with provisionOnly, authenticates, and inspects
       choices: [{ question: 'Proceed?', choices: ['Yes', 'No'] }],
     });
 
-    // Polling until the override settles also proves the earlier confirm stayed logged_without_delivery.
+    // In practice on a containerless agent, polling until the override settles
+    // lets callers re-inspect and verify the earlier confirm stayed logged_without_delivery.
     const settled = await agent.waitForChoiceResponseDelivery('topic-1', {
       promptMessageId: 'msg-prompt-1',
     });
@@ -237,6 +264,29 @@ test('createTestAgent provisions with provisionOnly, authenticates, and inspects
     const confirmRow = all.find((r) => r.messageId === 'resp-confirm');
     expect(confirmRow?.deliveryClassification).toBe('logged_without_delivery');
     expect(confirmRow?.attemptedAgentDelivery).toBe(false);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test('createTestAgent throws explicit missing-id error on empty 2xx response body', async () => {
+  const server = http.createServer((_req, res) => {
+    res.writeHead(201, { 'Content-Type': 'application/json' });
+    res.end('');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const addr = server.address();
+  if (!addr || typeof addr !== 'object') {
+    server.close();
+    throw new Error('Could not bind local server');
+  }
+  try {
+    await expect(
+      createTestAgent(
+        { baseURL: `http://127.0.0.1:${addr.port}`, devToken: 'scion_dev_fake' },
+        { projectId: PROJECT_ID }
+      )
+    ).rejects.toThrow(/response missing agent id\/slug/);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }

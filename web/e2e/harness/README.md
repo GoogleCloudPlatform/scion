@@ -351,11 +351,18 @@ const hub = await startHub({
   stateFile,
   env: {
     SCION_IMAGE_REGISTRY: 'registry.invalid/scion-e2e',
-    SCION_HOST_NETWORK_BLOCK_POLICY: 'allow',
   },
   experiments: ['web.chat_choices'],
 });
 ```
+
+**Legacy pre-table credential path:** `mintAgentToken` signs a stateless HS256
+JWT with a random `jti` (no `AgentCredential` DB row and no `run_id`). The hub
+accepts it via the legacy pre-table credential branch in
+`pkg/hub/agent_token_verify.go` (which logs one `WARN` per request) and requires
+`server.auth.agent_run_scope` to remain off. If that compatibility branch is
+closed or `agent_run_scope` is enabled, `createTestAgent` fails fast at
+`setStatus` with HTTP `401`.
 
 ### Usage
 
@@ -388,11 +395,18 @@ const sendRes = await agent.sendChoicePrompt({
 // Also authenticates on RouteAgentToken (/api/v1/agent/*):
 const res = await agent.request('/api/v1/agent/gcp-token');
 
-// Inspect or wait for choice-response delivery behavior:
+// Inspect or wait for choice-response delivery behavior (assumes a
+// containerless/absent agent; default timeout 20s for ~5–6s broker buffer +
+// retries on hosts without Docker; promptMessageId matches the newest response
+// in ListMessages DESC order):
 //   - 'attempted_delivery' (attemptedAgentDelivery === true): hub dispatched to
 //     the broker (e.g. direct answer or override of an interpreted answer).
-//   - 'logged_without_delivery' (attemptedAgentDelivery === false): hub stored
-//     the choice-response without broker delivery (e.g. matching confirm).
+//   - 'logged_without_delivery' (attemptedAgentDelivery === false): row is not
+//     (yet) marked `failed` (`dispatchState: "dispatched"`). In practice, once
+//     a later override settles, an earlier confirmation queued in a prior >2s
+//     broker debounce window has flushed too; if both answers fell in the same
+//     2s window, re-poll after override settles (or space >2s) because
+//     `reportMessageFailure` runs in separate goroutines.
 //   - 'agent_unreachable': asker was stopped/deleted before the answer.
 const delivery = await agent.waitForChoiceResponseDelivery(topicId, {
   promptMessageId: sendRes.message_id,

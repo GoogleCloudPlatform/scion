@@ -31,6 +31,13 @@
  * and either `testLogin: true` (the default, which passes `--session-secret`)
  * or `env: { SCION_SERVER_SESSION_SECRET: E2E_SESSION_SECRET }` so the hub's
  * `agent_signing_key` is deterministically derived.
+ *
+ * Legacy pre-table credential path: `mintAgentToken` mints a stateless JWT with
+ * a random `jti` (no `AgentCredential` DB row and no `run_id`). The hub accepts
+ * it via the legacy pre-table credential branch in `pkg/hub/agent_token_verify.go`
+ * (which logs one `WARN` per request) and requires `server.auth.agent_run_scope`
+ * to remain off. If that compatibility branch is closed or `agent_run_scope` is
+ * enabled, `createTestAgent` fails fast at `setStatus` with HTTP 401.
  */
 
 import * as crypto from 'node:crypto';
@@ -41,7 +48,7 @@ const AGENT_TOKEN_ISSUER = 'scion-hub';
 const AGENT_TOKEN_AUDIENCE = 'scion-hub-api';
 const CURRENT_AGENT_SCOPE_SCHEMA = 1;
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
-const DEFAULT_DELIVERY_SETTLE_TIMEOUT_MS = 10_000;
+const DEFAULT_DELIVERY_SETTLE_TIMEOUT_MS = 20_000;
 
 export type TestAgentRole = 'readonly' | 'baseline' | 'full';
 export type TestAgentMessageMode = 'none' | 'lineage' | 'branch' | 'project' | 'hub';
@@ -209,13 +216,17 @@ export interface AgentRequestResult<T = unknown> {
 }
 
 /**
- * How the hub handled agent delivery for a stored `choice-response` message:
+ * How the hub handled agent delivery for a stored `choice-response` message
+ * (assumes a containerless/absent agent; against a live running container,
+ * delivered responses also stay `dispatchState: "dispatched"`):
  *   - `'attempted_delivery'`: the hub called `deliverChoiceResponse` /
  *     `deliverChoiceSetResponse` to the containerless runtime broker, which
  *     rejected/failed container delivery because no container is running.
- *   - `'logged_without_delivery'`: the hub persisted the `choice-response`
- *     message with `dispatchState: "dispatched"` and skipped broker delivery
- *     (for example `outcome == "confirm"` on a matching interpreted answer).
+ *   - `'logged_without_delivery'`: the stored `choice-response` row is not (yet)
+ *     marked `failed` (`dispatchState: "dispatched"`). Once broker flush has
+ *     settled for a containerless agent, this indicates the hub skipped broker
+ *     delivery (for example `outcome == "confirm"` on a matching interpreted
+ *     answer).
  *   - `'agent_unreachable'`: the hub skipped broker delivery up front because
  *     the asking agent was stopped, suspended, errored, or deleted
  *     (`dispatchFailureReason` starts with `"Agent unreachable"`).
@@ -286,15 +297,24 @@ export interface AgentSender {
    * Polls `inspectChoiceResponses` until the selected `choice-response` row
    * settles into a non-buffered delivery outcome (`'attempted_delivery'` or
    * `'agent_unreachable'`). Pass either a `responseMessageId` string or
-   * `{ responseMessageId?, promptMessageId? }`.
+   * `{ responseMessageId?, promptMessageId? }`. When matching by
+   * `promptMessageId`, selects the newest matching `choice-response` row
+   * (`ListMessages` orders `DESC`).
    *
-   * On hosts without a running Docker daemon, the co-located runtime broker
-   * flushes its 2s message buffer and reports the containerless delivery
-   * failure back to the hub within ~3s; on hosts with Docker, the broker
-   * returns 404 immediately. Once a later response to the same agent settles
-   * here, any earlier response to that agent is guaranteed to have flushed as
-   * well, allowing sleep-free assertions that an earlier confirmation stayed
-   * `'logged_without_delivery'`.
+   * Assumes a containerless/absent agent (`'logged_without_delivery'` means
+   * "not (yet) marked `failed`"). On hosts without a running Docker daemon,
+   * the co-located runtime broker flushes its 2s message buffer and retries
+   * (~3 attempts), reporting the containerless delivery failure back to the
+   * hub within ~5–6s (default timeout 20s for slow CI runner headroom); on
+   * hosts with Docker, the broker returns 404 immediately.
+   *
+   * In practice, once a later response to the same agent settles here, an
+   * earlier response queued in a prior >2s broker debounce window will also
+   * have flushed. Responses queued within the same 2s debounce window flush
+   * together while `reportMessageFailure` runs in separate goroutines, so
+   * tests asserting an earlier confirmation stayed `'logged_without_delivery'`
+   * should re-poll after the override settles or space the two answers >2s
+   * apart.
    */
   waitForChoiceResponseDelivery(
     conversationKey: string,
@@ -344,14 +364,25 @@ export interface MintAgentTokenOptions {
   ancestry?: readonly string[];
   signingSecret?: string;
   ttlSeconds?: number;
+  /** Optional deterministic issued-at Unix timestamp in seconds (for self-tests). */
+  nowSeconds?: number;
+  /** Optional deterministic JWT ID override (for self-tests; defaults to `crypto.randomUUID()`). */
+  jti?: string;
 }
 
 /**
- * Signs an HS256 agent JWT matching `AgentTokenService.SignAgentToken` in
- * `pkg/hub/agenttoken.go`.
+ * Signs a stateless HS256 agent JWT matching `AgentTokenService.SignAgentToken`
+ * in `pkg/hub/agenttoken.go`.
+ *
+ * Because no `AgentCredential` DB row is inserted and `run_id` is omitted, the
+ * hub admits this token through the legacy pre-table credential branch in
+ * `pkg/hub/agent_token_verify.go` (which logs a `WARN` per request) as long as
+ * `server.auth.agent_run_scope` remains off. If that compatibility branch is
+ * closed or `agent_run_scope` is enabled, `createTestAgent` fails fast at
+ * `setStatus` with HTTP 401.
  */
 export function mintAgentToken(options: MintAgentTokenOptions): string {
-  const nowSec = Math.floor(Date.now() / 1000);
+  const nowSec = options.nowSeconds ?? Math.floor(Date.now() / 1000);
   const ttl = options.ttlSeconds ?? 3600;
   const role = options.role ?? 'baseline';
   const scopes = options.scopes ? [...options.scopes] : [...ROLE_SCOPES[role]];
@@ -364,7 +395,7 @@ export function mintAgentToken(options: MintAgentTokenOptions): string {
     iat: nowSec,
     nbf: nowSec,
     exp: nowSec + ttl,
-    jti: crypto.randomUUID(),
+    jti: options.jti ?? crypto.randomUUID(),
     project_id: options.projectId,
     scopes,
     scope_schema: CURRENT_AGENT_SCOPE_SCHEMA,
@@ -494,8 +525,9 @@ export async function createTestAgent(
     slug?: string;
     name?: string;
     projectId?: string;
-  }>(createText);
-  const agentRecord = parsed.agent ?? parsed;
+  } | null>(createText);
+  const agentRecord =
+    typeof parsed === 'object' && parsed !== null ? (parsed.agent ?? parsed) : null;
   if (!agentRecord?.id || !agentRecord?.slug) {
     throw new Error(
       `createTestAgent: response missing agent id/slug (${createRes.status}): ${createText}`
@@ -559,7 +591,7 @@ export async function createTestAgent(
     if (!res.ok) {
       const hint =
         res.status === 401
-          ? ' (ensure startHub ran with testLogin: true or SCION_SERVER_SESSION_SECRET matching signingSecret)'
+          ? ' (ensure startHub ran with testLogin: true or SCION_SERVER_SESSION_SECRET matching signingSecret, server.auth.agent_run_scope remains off, and the legacy pre-table credential branch in pkg/hub/agent_token_verify.go is active)'
           : '';
       throw new Error(`agent.setStatus(${id}) answered ${res.status}${hint}: ${res.text}`);
     }

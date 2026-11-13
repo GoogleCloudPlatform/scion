@@ -14,22 +14,24 @@
 
 # Web Playwright e2e suites (ptone/scion#2580). Advisory: not a required
 # check. PRs and main pushes run only when web/ (or this file) changes,
-# or one of the few Go paths the page-policy and port-proxy suites
-# exercise (listed under on:, below); the nightly run covers everything
-# else, such as browser drift.
+# or one of the few Go paths the page-policy, chat-choices and port-proxy
+# suites exercise (listed under on:, below); the nightly run covers
+# everything else, such as browser drift.
 #
 # One matrix job per suite config under web/e2e/*/playwright.config.ts,
 # all in full Chromium. Every suite except test-identity-session,
-# page-policy and port-proxy (below) serves the web sources itself (Vite
-# dev server or an esbuild bundle) with a mocked hub. Only
+# page-policy, chat-choices and port-proxy (below) serves the web sources
+# itself (Vite dev server or an esbuild bundle) with a mocked hub. Only
 # terminal-workspace also needs a production build: some of its tests
 # check the Shoelace icon files in web/dist, so that job runs npm run build
 # first.
 #
-# test-identity-session and page-policy run against the real Go hub binary
-# (a throwaway hub started by their global setup; test-identity-session's
-# is a member-level test hub, ptone/scion#4240; page-policy checks the page
-# script policy the hub sends, ptone/scion#5912). They and port-proxy are
+# test-identity-session, page-policy and chat-choices run against the real Go
+# hub binary (a throwaway hub started by their global setup;
+# test-identity-session's is a member-level test hub, ptone/scion#4240;
+# page-policy checks the page script policy the hub sends, ptone/scion#5912;
+# chat-choices checks interactive chat choices end to end with a
+# containerless test agent, ptone/scion#7776). They and port-proxy are
 # the only jobs that set up Go (go.mod version, with setup-go's built-in
 # cache; ci.yml uses per-job caches instead, see
 # .github/actions/setup-go-cache) and build the binary (make build) and
@@ -67,13 +69,14 @@
 # 50-60 runner-minutes across the 14 mocked-hub jobs; retries of failing
 # tests add to that. The terminal-workspace job also runs a Vite production
 # build first, which adds about 1 minute (that job takes about 4 minutes in
-# total). The three real-hub jobs, test-identity-session, page-policy and
-# port-proxy, each add setup-go, a Go build (make build; a few minutes on a
-# cold Go cache, less with the setup-go cache) and a Vite production build
-# before a short suite; port-proxy also builds the helper and runs a second
-# suite (the page view journeys, ptone/scion#5569) on a second hub, which
-# adds a few minutes; its job timeout is 35 minutes, the others' 20.
-# iap-driver is the 18th job.
+# total). The four real-hub jobs, test-identity-session, page-policy,
+# chat-choices and port-proxy, each add setup-go, a Go build (make build; a
+# few minutes on a cold Go cache, less with the setup-go cache) and a Vite
+# production build before a short suite; port-proxy also builds the helper
+# and runs a second suite (the page view journeys, ptone/scion#5569) on a
+# second hub, which adds a few minutes; its job timeout is 35 minutes, the
+# others' 20.
+# iap-driver is the 19th job.
 # Wall clock is bounded by the slowest job, about 8-10 minutes.
 
 name: Web E2E (advisory)
@@ -102,6 +105,10 @@ on:
       - 'pkg/portforward/**'
       - 'pkg/sciontool/portforward/**'
       - 'pkg/sciontool/conduit/**'
+      # chat-choices suite (ptone/scion#7776): see the header.
+      - 'pkg/hub/choices_*.go'
+      - 'pkg/hub/agenttoken.go'
+      - 'pkg/hub/agent_token_verify.go'
   push:
     branches: [ main ]
     paths:
@@ -126,6 +133,10 @@ on:
       - 'pkg/portforward/**'
       - 'pkg/sciontool/portforward/**'
       - 'pkg/sciontool/conduit/**'
+      # chat-choices suite (ptone/scion#7776): see the header.
+      - 'pkg/hub/choices_*.go'
+      - 'pkg/hub/agenttoken.go'
+      - 'pkg/hub/agent_token_verify.go'
   # The odd minute avoids the top-of-hour spike in scheduled GitHub jobs.
   schedule:
     - cron: '41 5 * * *'
@@ -169,6 +180,7 @@ jobs:
           - broker-area
           - test-identity-session
           - page-policy
+          - chat-choices
           - port-proxy
           - iap-driver
     steps:
@@ -188,17 +200,17 @@ jobs:
         working-directory: ./web
         run: npm ci
 
-      # test-identity-session, page-policy and port-proxy: the suites start
-      # the real hub binary.
+      # test-identity-session, page-policy, chat-choices and port-proxy: the
+      # suites start the real hub binary.
       - name: Setup Go (real hub suites)
-        if: matrix.suite == 'test-identity-session' || matrix.suite == 'page-policy' || matrix.suite == 'port-proxy'
+        if: matrix.suite == 'test-identity-session' || matrix.suite == 'page-policy' || matrix.suite == 'chat-choices' || matrix.suite == 'port-proxy'
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
           cache: true
 
-      - name: Build hub binary and web assets (test-identity-session, page-policy)
-        if: matrix.suite == 'test-identity-session' || matrix.suite == 'page-policy'
+      - name: Build hub binary and web assets (test-identity-session, page-policy, chat-choices)
+        if: matrix.suite == 'test-identity-session' || matrix.suite == 'page-policy' || matrix.suite == 'chat-choices'
         run: |
           make build
           npm --prefix web run build
@@ -266,8 +278,9 @@ jobs:
         working-directory: ./web
         env:
           SUITE: ${{ matrix.suite }}
-          # Read only by test-identity-session, page-policy and port-proxy:
-          # the binaries and web assets were built in the steps above.
+          # Read only by test-identity-session, page-policy, chat-choices and
+          # port-proxy: the binaries and web assets were built in the steps
+          # above.
           E2E_PREBUILT: '1'
         run: |
           CHROMIUM_EXECUTABLE="$(node -p "require('playwright-core').chromium.executablePath()")"

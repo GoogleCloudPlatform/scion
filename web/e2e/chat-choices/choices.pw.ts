@@ -103,9 +103,7 @@ async function openUserContext(
     storageState: session.storageStatePath,
   });
   await context.addInitScript((seed: string) => {
-    let navSeq = 0;
-    navSeq += 1;
-    window.__e2eBootId = `${seed}:${navSeq}:${performance.timeOrigin}`;
+    window.__e2eBootId = `${seed}:${performance.timeOrigin}`;
     const tracked: EventSource[] = [];
     window.__e2eEventSources = tracked;
     const NativeEventSource = window.EventSource;
@@ -417,7 +415,7 @@ test.describe('Interactive chat choices on real hub (web.chat_choices)', () => {
     }
   });
 
-  test('multi-decision set card selects rows and submits atomically via Submit answers', async ({
+  test('multi-decision set card selects rows and submits both answers together via Submit answers', async ({
     browser,
   }) => {
     const topicName = 'choices-set';
