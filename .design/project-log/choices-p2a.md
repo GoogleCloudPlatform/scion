@@ -42,7 +42,7 @@ Implemented the complete Phase 2A vertical slice across store, Hub agent routes,
 | `pkg/hub/choices_agent_test.go` | Hub integration tests covering authz, isolation, pagination, validation rules, concurrency/rollback, mixed user sets, and surface mapping |
 | `pkg/hub/choices_view.go` | Optional envelope `PromptMessageID` and per-item `ChoiceResponseSetAnswer.PromptMessageID` |
 | `pkg/hub/choices_batch.go` | Populate per-item `PromptMessageID` on user set responses |
-| `pkg/hub/server.go`, `route_metadata.go`, `route_authz_manifest.go`, `route_classification_test.go`, `pkg/hub/authzop/catalog.go`, `pkg/util/logging/request_path_sites_test.go` | Route registration and guardrail classifications |
+| `pkg/hub/server.go`, `route_metadata.go`, `route_authz_manifest.go`, `route_classification_test.go`, `web_api_compress_catalog_test.go`, `pkg/hub/authzop/catalog.go`, `pkg/util/logging/request_path_sites_test.go` | Route registration and guardrail classifications |
 | `pkg/hubclient/client.go`, `decisions.go`, `decisions_test.go`, `pkg/templatecache/hydrator_test.go` | Typed `DecisionsService` client methods and unit tests |
 | `cmd/decisions.go`, `decisions_list.go`, `decisions_show.go`, `decisions_record.go`, `decisions_test.go`, `cli_mode.go`, `platform_gate.go` | `scion decisions` CLI commands, agent-mode/Windows gates, and tests |
 
