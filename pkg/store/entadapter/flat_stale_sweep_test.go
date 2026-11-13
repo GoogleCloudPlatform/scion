@@ -18,13 +18,16 @@ package entadapter
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
+	entgo "entgo.io/ent"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -92,4 +95,106 @@ func TestFlatRow_StaleSweepMarksOfflineKeepsTarget(t *testing.T) {
 	assert.Equal(t, "session-fresh", *still.ConnectedSessionID)
 	require.NotNil(t, still.RuntimeTarget)
 	assert.Equal(t, freshTarget.ID, still.RuntimeTarget.ID)
+}
+
+func TestMarkBrokerOffline_TransitionsBrokerAndContributors(t *testing.T) {
+	ctx := context.Background()
+	fs := newFlatStores(t)
+
+	target := dockerTarget()
+	b := flatBroker("flat-mark-offline", store.BrokerStatusOnline, target)
+	b.ConnectionState = "connected"
+	fs.createBroker(t, b)
+	require.NoError(t, fs.brokers.ClaimRuntimeBrokerConnection(ctx, b.ID, "hub-a", "sess-1"))
+	require.NoError(t, fs.brokers.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: fs.projectID, BrokerID: b.ID, BrokerName: b.Name, Status: store.BrokerStatusOnline,
+	}))
+
+	require.NoError(t, fs.brokers.MarkBrokerOffline(ctx, b.ID))
+
+	got, err := fs.brokers.GetRuntimeBroker(ctx, b.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.BrokerStatusOffline, got.Status)
+	assert.Equal(t, "disconnected", got.ConnectionState)
+	assert.Nil(t, got.ConnectedHubID)
+	assert.Nil(t, got.ConnectedSessionID)
+	assert.Nil(t, got.ConnectedAt)
+
+	prov, err := fs.brokers.GetProjectProvider(ctx, fs.projectID, b.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.BrokerStatusOffline, prov.Status)
+}
+
+func TestMarkBrokerOffline_RepairsStaleOnlineContributorWhenAlreadyOffline(t *testing.T) {
+	ctx := context.Background()
+	fs := newFlatStores(t)
+
+	target := dockerTarget()
+	b := flatBroker("flat-already-offline-stale-prov", store.BrokerStatusOffline, target)
+	b.ConnectionState = "disconnected"
+	fs.createBroker(t, b)
+	// Broker row is already offline + disconnected + unclaimed, while its
+	// ProjectContributor row remained online.
+	require.NoError(t, fs.brokers.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: fs.projectID, BrokerID: b.ID, BrokerName: b.Name, Status: store.BrokerStatusOnline,
+	}))
+
+	require.NoError(t, fs.brokers.MarkBrokerOffline(ctx, b.ID))
+
+	prov, err := fs.brokers.GetProjectProvider(ctx, fs.projectID, b.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.BrokerStatusOffline, prov.Status, "idempotent fast-path must still repair non-offline contributor rows")
+}
+
+func TestMarkBrokerOffline_PropagatesErrorsAndRollsBackAtomically(t *testing.T) {
+	ctx := context.Background()
+	fs := newFlatStores(t)
+
+	target := dockerTarget()
+	b := flatBroker("flat-mark-offline-err", store.BrokerStatusOnline, target)
+	b.ConnectionState = "connected"
+	fs.createBroker(t, b)
+	require.NoError(t, fs.brokers.ClaimRuntimeBrokerConnection(ctx, b.ID, "hub-a", "sess-err"))
+	require.NoError(t, fs.brokers.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: fs.projectID, BrokerID: b.ID, BrokerName: b.Name, Status: store.BrokerStatusOnline,
+	}))
+
+	// 1. Canceled context returns a non-nil error rather than silently succeeding.
+	canceledCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	require.Error(t, fs.brokers.MarkBrokerOffline(canceledCtx, b.ID))
+
+	// 2. Failure during ProjectContributor update returns a non-nil error AND rolls
+	// back the RuntimeBroker update so the two tables cannot diverge.
+	failContributorUpdate := true
+	injectedErr := errors.New("injected contributor update failure")
+	fs.client.ProjectContributor.Use(func(next ent.Mutator) ent.Mutator {
+		return ent.MutateFunc(func(mctx context.Context, m ent.Mutation) (ent.Value, error) {
+			if failContributorUpdate && m.Op().Is(entgo.OpUpdate|entgo.OpUpdateOne) {
+				return nil, injectedErr
+			}
+			return next.Mutate(mctx, m)
+		})
+	})
+
+	err := fs.brokers.MarkBrokerOffline(ctx, b.ID)
+	require.Error(t, err, "contributor update error must not be swallowed")
+
+	got, err := fs.brokers.GetRuntimeBroker(ctx, b.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.BrokerStatusOnline, got.Status, "transaction rollback must preserve online status on contributor failure")
+	assert.Equal(t, "connected", got.ConnectionState, "transaction rollback must preserve connected state on contributor failure")
+	require.NotNil(t, got.ConnectedHubID)
+
+	// Once the fault clears, a retry transitions both rows cleanly to offline.
+	failContributorUpdate = false
+	require.NoError(t, fs.brokers.MarkBrokerOffline(ctx, b.ID))
+
+	gotAfter, err := fs.brokers.GetRuntimeBroker(ctx, b.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.BrokerStatusOffline, gotAfter.Status)
+	assert.Equal(t, "disconnected", gotAfter.ConnectionState)
+	provAfter, err := fs.brokers.GetProjectProvider(ctx, fs.projectID, b.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.BrokerStatusOffline, provAfter.Status)
 }
