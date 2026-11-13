@@ -5564,6 +5564,13 @@ describe('scion-page-admin-server-config', () => {
             broker_name: 'broker-a',
             broker_nickname: 'nick',
             auto_provide: true,
+            instances: [
+              {
+                key: 'local-docker',
+                name: 'Local Docker',
+                runtime_target: { type: 'docker' },
+              },
+            ],
           },
           database: { driver: 'postgres', url: '********' },
           auth: {
@@ -5793,6 +5800,14 @@ describe('scion-page-admin-server-config', () => {
       'server.broker.auto_provide': {
         clear: (el) => (el.brokerAutoProvide = false),
         expected: false,
+      },
+      'server.broker.instances': {
+        clear: (el) => {
+          el.brokerInstances = [];
+          el.brokerInstanceRowIds = [];
+          el.brokerInstancesTouched = true;
+        },
+        expected: null,
       },
       'server.database.driver': { clear: (el) => (el.dbDriver = ''), expected: '' },
       'server.database.url': { clear: (el) => (el.dbUrl = ''), expected: '' },

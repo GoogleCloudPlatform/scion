@@ -72,6 +72,8 @@ import {
 } from '../../shared/resource-quantity.js';
 import {
   validateK8sRuntimeFields,
+  validateK8sRuntimeFieldsAt,
+  type K8sRuntimeFields,
   type PlacementIssue,
   type Toleration,
 } from '../../shared/k8s-placement.js';
@@ -212,6 +214,22 @@ interface V1ServerHubObservabilityConfig {
   tracing_enabled?: boolean | null;
 }
 
+interface V1RuntimeTargetConfig extends K8sRuntimeFields {
+  type?: string;
+  display_name?: string;
+  context?: string;
+  namespace?: string;
+  [key: string]: unknown;
+}
+
+interface V1RuntimeBrokerInstanceConfig {
+  key?: string;
+  name?: string;
+  runtime_target?: V1RuntimeTargetConfig;
+  agent_defaults?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
 interface V1BrokerConfig {
   enabled?: boolean;
   port?: number;
@@ -226,6 +244,7 @@ interface V1BrokerConfig {
   broker_token?: string;
   auto_provide?: boolean;
   cors?: V1CORSConfig;
+  instances?: V1RuntimeBrokerInstanceConfig[];
 }
 
 interface V1DatabaseConfig {
@@ -1040,6 +1059,47 @@ export function stripRemovedStorageOverrides<T extends object>(
   return entries;
 }
 
+const RUNTIME_BROKER_INSTANCE_KEY_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
+
+const INSTANCE_KUBERNETES_ONLY_TARGET_KEYS = [
+  'context',
+  'namespace',
+  'kubeconfig',
+  'kubernetes_block_service_account',
+  'shared_dir_storage_class',
+  'shared_dir_size',
+  'priority_class_name',
+  'runtime_class_name',
+  'kubernetes_service_account_mappings',
+  'gke',
+  'safe_to_evict',
+  'node_selector',
+  'tolerations',
+] as const;
+
+const INSTANCE_CLOUDRUN_ONLY_TARGET_KEYS = [
+  'project_id',
+  'region',
+  'service_account',
+  'network',
+  'subnetwork',
+  'credentials_file',
+] as const;
+
+function stripInstanceRemovedStorageOverrides(
+  instances: V1RuntimeBrokerInstanceConfig[]
+): V1RuntimeBrokerInstanceConfig[] {
+  for (const inst of instances) {
+    const rt = inst?.runtime_target;
+    if (rt && typeof rt === 'object') {
+      for (const key of REMOVED_STORAGE_OVERRIDE_KEYS) {
+        delete rt[key];
+      }
+    }
+  }
+  return instances;
+}
+
 @customElement('scion-page-admin-server-config')
 export class ScionPageAdminServerConfig extends LitElement {
   /** Re-renders absolute times when the display timezone changes. */
@@ -1174,6 +1234,12 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private brokerName = '';
   @state() private brokerNickname = '';
   @state() private brokerAutoProvide = true; // absent means on
+  @state() private brokerInstances: V1RuntimeBrokerInstanceConfig[] = [];
+  private loadedBrokerInstances: V1RuntimeBrokerInstanceConfig[] = [];
+  @state() private brokerInstancesTouched = false;
+  private brokerInstanceRowIds: number[] = [];
+  private nextBrokerInstanceRowId = 1;
+  private brokerInstanceNodeSelectorRows = new Map<number, Array<[string, string]>>();
 
   // Database
   @state() private dbDriver = '';
@@ -2276,6 +2342,18 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.brokerNickname = brokerBlock.broker_nickname || '';
     // Absent means on (the server auto-provides when the key is unset).
     this.brokerAutoProvide = brokerBlock.auto_provide ?? true;
+    const rawInstances = Array.isArray(brokerBlock.instances)
+      ? stripInstanceRemovedStorageOverrides(
+          JSON.parse(JSON.stringify(brokerBlock.instances)) as V1RuntimeBrokerInstanceConfig[]
+        )
+      : [];
+    this.brokerInstances = rawInstances;
+    this.loadedBrokerInstances = JSON.parse(
+      JSON.stringify(rawInstances)
+    ) as V1RuntimeBrokerInstanceConfig[];
+    this.brokerInstancesTouched = false;
+    this.brokerInstanceNodeSelectorRows.clear();
+    this.brokerInstanceRowIds = rawInstances.map(() => this.nextBrokerInstanceRowId++);
 
     // Database
     const dbBlock = srv.database ?? {};
@@ -3174,6 +3252,8 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.broker.broker_name')) broker.broker_name = this.brokerName || '';
     if (ok('server.broker.broker_nickname')) broker.broker_nickname = this.brokerNickname || '';
     if (ok('server.broker.auto_provide')) broker.auto_provide = this.brokerAutoProvide;
+    const layer0BrokerInstances = this.brokerInstancesForPayload(ok);
+    if (layer0BrokerInstances !== undefined) broker.instances = layer0BrokerInstances;
     if (Object.keys(broker).length > 0) server.broker = broker;
 
     const database: Record<string, unknown> = {};
@@ -3358,6 +3438,8 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.broker.broker_name')) broker.broker_name = this.brokerName || '';
     if (ok('server.broker.broker_nickname')) broker.broker_nickname = this.brokerNickname || '';
     if (ok('server.broker.auto_provide')) broker.auto_provide = this.brokerAutoProvide;
+    const fileBrokerInstances = this.brokerInstancesForPayload(ok);
+    if (fileBrokerInstances !== undefined) broker.instances = fileBrokerInstances;
     server.broker = broker;
 
     // Database
@@ -4366,6 +4448,12 @@ export class ScionPageAdminServerConfig extends LitElement {
                   (${this.placementIssues.errors.map((e) => e.path).join(', ')}).
                 </div>`
               : nothing}
+            ${this.hasBrokerInstanceErrors
+              ? html`<div class="error broker-instances-blocked" style="margin-bottom:0.75rem;">
+                  Cannot save: fix the Runtime Broker instance values marked as invalid
+                  (${this.brokerInstanceIssues.errors.map((e) => e.path).join(', ')}).
+                </div>`
+              : nothing}
             ${this.hasResourceQuantityErrors
               ? html`<div class="error resource-quantity-blocked" style="margin-bottom:0.75rem;">
                   Cannot save: fix the resource values marked as invalid
@@ -4378,7 +4466,8 @@ export class ScionPageAdminServerConfig extends LitElement {
                 ?loading=${this.saving}
                 ?disabled=${this.hasHarnessConfigErrors ||
                 this.hasResourceQuantityErrors ||
-                this.hasPlacementErrors}
+                this.hasPlacementErrors ||
+                this.hasBrokerInstanceErrors}
                 @click=${() => {
                   void this.handleSave();
                 }}
@@ -6945,7 +7034,636 @@ export class ScionPageAdminServerConfig extends LitElement {
           </div>
         </div>
       </div>
+      ${this.renderBrokerInstancesSection()}
     `;
+  }
+
+  private brokerInstancesForPayload(
+    ok: (key: string) => boolean
+  ): V1RuntimeBrokerInstanceConfig[] | null | undefined {
+    if (!ok('server.broker.instances') || !this.brokerInstancesTouched) {
+      return undefined;
+    }
+    if (this.brokerInstances.length === 0) {
+      return this.loadedBrokerInstances.length > 0 ? null : undefined;
+    }
+    if (JSON.stringify(this.brokerInstances) === JSON.stringify(this.loadedBrokerInstances)) {
+      return undefined;
+    }
+    return this.brokerInstances;
+  }
+
+  private brokerInstanceMapRows(rowId: number, rt: V1RuntimeTargetConfig): Array<[string, string]> {
+    let rows = this.brokerInstanceNodeSelectorRows.get(rowId);
+    if (!rows) {
+      rows = Object.entries(rt.node_selector ?? {});
+      this.brokerInstanceNodeSelectorRows.set(rowId, rows);
+    }
+    return rows;
+  }
+
+  private setBrokerInstanceMapRows(
+    idx: number,
+    rowId: number,
+    rows: Array<[string, string]>
+  ): void {
+    this.brokerInstanceNodeSelectorRows.set(rowId, rows);
+    const map: Record<string, string> = {};
+    for (const [k, v] of rows) if (k !== '') map[k] = v;
+    this.updateBrokerInstanceTargetValue(
+      idx,
+      'node_selector',
+      Object.keys(map).length > 0 ? map : undefined
+    );
+  }
+
+  private updateBrokerInstanceTopField(idx: number, field: 'key' | 'name', value: string): void {
+    const next = this.brokerInstances.map((inst, i) =>
+      i === idx ? { ...inst, [field]: value } : inst
+    );
+    this.brokerInstances = next;
+    this.brokerInstancesTouched = true;
+  }
+
+  private updateBrokerInstanceTargetValue(idx: number, field: string, value: unknown): void {
+    const next = this.brokerInstances.map((inst, i) => {
+      if (i !== idx) return inst;
+      const rt: V1RuntimeTargetConfig = { ...(inst.runtime_target ?? { type: 'docker' }) };
+      if (value === undefined || value === '') {
+        delete rt[field];
+      } else {
+        rt[field] = value;
+      }
+      return { ...inst, runtime_target: rt };
+    });
+    this.brokerInstances = next;
+    this.brokerInstancesTouched = true;
+  }
+
+  private async changeBrokerInstanceType(
+    idx: number,
+    rowId: number,
+    select: HTMLSelectElement
+  ): Promise<void> {
+    const nextType = select.value;
+    const inst = this.brokerInstances[idx];
+    if (!inst) return;
+    const prevType = inst.runtime_target?.type || '';
+    if (prevType === nextType) return;
+
+    const rt = inst.runtime_target ?? {};
+    const keysToDrop: string[] = [];
+    if (nextType === 'docker') {
+      keysToDrop.push(
+        ...INSTANCE_KUBERNETES_ONLY_TARGET_KEYS,
+        ...INSTANCE_CLOUDRUN_ONLY_TARGET_KEYS
+      );
+    } else if (isKubernetesRuntimeType(nextType)) {
+      keysToDrop.push(...INSTANCE_CLOUDRUN_ONLY_TARGET_KEYS);
+    } else if (nextType === 'cloudrun') {
+      keysToDrop.push(...INSTANCE_KUBERNETES_ONLY_TARGET_KEYS);
+    }
+
+    const cleared = keysToDrop.filter((k) => {
+      const v = rt[k];
+      if (v === undefined || v === null || v === '') return false;
+      if (v === false && k !== 'safe_to_evict') return false;
+      if (typeof v === 'object' && Object.keys(v).length === 0) return false;
+      return true;
+    });
+
+    if (cleared.length > 0) {
+      const label = inst.key || inst.name || `#${idx + 1}`;
+      const confirmed = await showConfirm(
+        `Changing instance "${label}" to ${nextType} clears these runtime_target fields:\n${cleared.join(', ')}\n\nThey are removed when you save.`,
+        { title: 'Change runtime target type?', confirmText: 'Change type' }
+      );
+      if (!confirmed) {
+        select.value = prevType;
+        return;
+      }
+    }
+
+    const updatedRt: V1RuntimeTargetConfig = { ...(inst.runtime_target ?? {}), type: nextType };
+    for (const k of keysToDrop) {
+      delete updatedRt[k];
+    }
+    if (nextType !== 'kubernetes') {
+      this.brokerInstanceNodeSelectorRows.delete(rowId);
+    }
+
+    const next = this.brokerInstances.map((item, i) =>
+      i === idx ? { ...item, runtime_target: updatedRt } : item
+    );
+    this.brokerInstances = next;
+    this.brokerInstancesTouched = true;
+  }
+
+  private addBrokerInstance(): void {
+    const newInst: V1RuntimeBrokerInstanceConfig = {
+      key: '',
+      name: '',
+      runtime_target: { type: 'docker' },
+    };
+    this.brokerInstances = [...this.brokerInstances, newInst];
+    this.brokerInstanceRowIds = [...this.brokerInstanceRowIds, this.nextBrokerInstanceRowId++];
+    this.brokerInstancesTouched = true;
+  }
+
+  private removeBrokerInstance(idx: number): void {
+    const rowId = this.brokerInstanceRowIds[idx];
+    if (rowId !== undefined) {
+      this.brokerInstanceNodeSelectorRows.delete(rowId);
+    }
+    this.brokerInstances = this.brokerInstances.filter((_, i) => i !== idx);
+    this.brokerInstanceRowIds = this.brokerInstanceRowIds.filter((_, i) => i !== idx);
+    this.brokerInstancesTouched = true;
+  }
+
+  private get brokerInstanceIssues(): { errors: PlacementIssue[]; warnings: PlacementIssue[] } {
+    const errors: PlacementIssue[] = [];
+    const warnings: PlacementIssue[] = [];
+    if (this.readOnlyReason('server.broker.instances') !== null || !this.brokerInstancesTouched) {
+      return { errors, warnings };
+    }
+    const seenKeys = new Set<string>();
+    this.brokerInstances.forEach((inst, i) => {
+      const p = `server.broker.instances[${i}]`;
+      const key = inst.key ?? '';
+      if (!key || !RUNTIME_BROKER_INSTANCE_KEY_RE.test(key)) {
+        errors.push({
+          path: `${p}.key`,
+          message:
+            'instance key is required (lowercase letters, digits, hyphens; must start and end with alphanumeric, max 63 chars)',
+        });
+      } else if (seenKeys.has(key)) {
+        errors.push({
+          path: `${p}.key`,
+          message: `duplicate instance key "${key}"`,
+        });
+      } else {
+        seenKeys.add(key);
+      }
+
+      if (!inst.name || !inst.name.trim()) {
+        errors.push({
+          path: `${p}.name`,
+          message: 'name is required',
+        });
+      }
+
+      const rt = inst.runtime_target;
+      const rtType = rt?.type ?? '';
+      if (!rtType) {
+        errors.push({
+          path: `${p}.runtime_target.type`,
+          message: 'runtime_target.type is required',
+        });
+        return;
+      }
+
+      if (isKubernetesRuntimeType(rtType) && rt) {
+        const loadedRt = this.loadedBrokerInstances.find((x) => x.key === key)?.runtime_target;
+        const rtPrefix = `${p}.runtime_target`;
+        for (const issue of validateK8sRuntimeFieldsAt(rtPrefix, rt)) {
+          const field = issue.path.slice(`${rtPrefix}.`.length) as keyof K8sRuntimeFields;
+          const same =
+            loadedRt !== undefined && JSON.stringify(loadedRt[field]) === JSON.stringify(rt[field]);
+          (same ? warnings : errors).push(issue);
+        }
+
+        const rowId = this.brokerInstanceRowIds[i];
+        const rows =
+          rowId !== undefined ? this.brokerInstanceNodeSelectorRows.get(rowId) : undefined;
+        if (rows) {
+          const keys = rows.map(([k]) => k);
+          if (keys.some((k, rIdx) => k === '' && rows[rIdx][1] !== '')) {
+            errors.push({
+              path: `${rtPrefix}.node_selector`,
+              message: 'a row has a value but no key',
+            });
+          }
+          if (new Set(keys.filter((k) => k !== '')).size !== keys.filter((k) => k !== '').length) {
+            errors.push({
+              path: `${rtPrefix}.node_selector`,
+              message: 'the same key appears twice',
+            });
+          }
+        }
+      }
+    });
+    return { errors, warnings };
+  }
+
+  private get hasBrokerInstanceErrors(): boolean {
+    return this.brokerInstanceIssues.errors.length > 0;
+  }
+
+  private renderBrokerInstanceIssues(path: string): typeof nothing | TemplateResult {
+    const { errors, warnings } = this.brokerInstanceIssues;
+    const e = errors.filter((i) => i.path === path);
+    const w = warnings.filter((i) => i.path === path);
+    if (e.length === 0 && w.length === 0) return nothing;
+    return html`${e.map(
+      (i) => html`<span class="field-error" data-broker-instance-error=${path}>${i.message}</span>`
+    )}${w.map(
+      (i) =>
+        html`<span class="hint field-warning" data-broker-instance-warning=${path}
+          >${i.message} (stored value; the hub saves it with a warning)</span
+        >`
+    )}`;
+  }
+
+  private instanceK8sPlacementHasValues(rt: V1RuntimeTargetConfig): boolean {
+    return (
+      Object.keys(rt.node_selector ?? {}).length > 0 ||
+      (rt.tolerations ?? []).length > 0 ||
+      !!rt.runtime_class_name
+    );
+  }
+
+  private renderBrokerInstancesSection() {
+    const readOnlyReason = this.readOnlyReason('server.broker.instances');
+    const readOnly = readOnlyReason !== null;
+    return html`
+      <div class="section" data-broker-instances-section>
+        <h3 class="section-title">Runtime Broker Instances</h3>
+        <p class="hint" style="margin-top:-0.5rem;margin-bottom:0.75rem;">
+          Flat Runtime Broker instances configured under <code>server.broker.instances</code>. Each
+          instance registers one Runtime Broker for a single runtime target. Requires restart.
+        </p>
+        ${readOnlyReason ? html`${this.renderReadOnlyBadge(readOnlyReason)}` : nothing}
+        ${this.renderEnvBadgeUnder('server.broker.instances')}
+        ${this.renderFieldErrors('server.broker.instances')}
+        ${this.brokerInstances.length === 0
+          ? html`<p class="hint">No flat Runtime Broker instances configured.</p>`
+          : this.brokerInstances.map((inst, idx) =>
+              this.renderBrokerInstanceCard(inst, idx, readOnly)
+            )}
+        ${!readOnly
+          ? html`
+              <div class="add-entry-row">
+                <sl-button
+                  size="small"
+                  variant="default"
+                  data-add-broker-instance
+                  @click=${() => this.addBrokerInstance()}
+                >
+                  <sl-icon slot="prefix" name="plus-circle"></sl-icon>
+                  Add Instance
+                </sl-button>
+              </div>
+            `
+          : nothing}
+      </div>
+    `;
+  }
+
+  private renderBrokerInstanceCard(
+    inst: V1RuntimeBrokerInstanceConfig,
+    idx: number,
+    readOnly: boolean
+  ) {
+    const rowId = this.brokerInstanceRowIds[idx] ?? idx;
+    const rt = inst.runtime_target ?? { type: 'docker' };
+    const rtType = rt.type || 'docker';
+    const isK8s = isKubernetesRuntimeType(rtType);
+    const p = `server.broker.instances[${idx}]`;
+    const title = inst.name || inst.key || `Instance #${idx + 1}`;
+    return html`
+      <sl-card class="runtime-card" data-broker-instance-card=${inst.key || String(idx)}>
+        <div slot="header" style="display:flex;align-items:center;justify-content:space-between;">
+          <div style="display:flex;align-items:center;gap:0.5rem;">
+            <strong>${title}</strong>
+            ${inst.key && inst.name ? html`<code>${inst.key}</code>` : nothing}
+          </div>
+          ${!readOnly
+            ? html`<sl-button
+                size="small"
+                variant="danger"
+                data-remove-broker-instance
+                @click=${() => this.removeBrokerInstance(idx)}
+              >
+                <sl-icon slot="prefix" name="trash"></sl-icon>
+                Remove
+              </sl-button>`
+            : nothing}
+        </div>
+        <div class="form-grid">
+          <div class="form-field">
+            <label>Instance Key</label>
+            <sl-input
+              data-instance-field="key"
+              value=${inst.key || ''}
+              placeholder="e.g. local-docker, cluster-a-agents"
+              ?disabled=${readOnly}
+              @sl-input=${(e: Event) => {
+                this.updateBrokerInstanceTopField(idx, 'key', (e.target as HTMLInputElement).value);
+              }}
+            ></sl-input>
+            <span class="hint"
+              >Immutable local instance key (lowercase letters, digits, hyphens).</span
+            >
+            ${this.renderBrokerInstanceIssues(`${p}.key`)} ${this.renderFieldErrors(`${p}.key`)}
+          </div>
+          <div class="form-field">
+            <label>Broker Name</label>
+            <sl-input
+              data-instance-field="name"
+              value=${inst.name || ''}
+              placeholder="e.g. Workstation Docker"
+              ?disabled=${readOnly}
+              @sl-input=${(e: Event) => {
+                this.updateBrokerInstanceTopField(
+                  idx,
+                  'name',
+                  (e.target as HTMLInputElement).value
+                );
+              }}
+            ></sl-input>
+            <span class="hint">Runtime Broker name registered with the Hub.</span>
+            ${this.renderBrokerInstanceIssues(`${p}.name`)} ${this.renderFieldErrors(`${p}.name`)}
+          </div>
+          <div class="form-field">
+            <label>Runtime Target Type</label>
+            <sl-select
+              data-instance-field="type"
+              value=${rtType}
+              ?disabled=${readOnly}
+              @sl-change=${(e: Event) => {
+                void this.changeBrokerInstanceType(idx, rowId, e.target as HTMLSelectElement);
+              }}
+            >
+              <sl-option value="docker">docker</sl-option>
+              <sl-option value="kubernetes">kubernetes</sl-option>
+              ${rtType !== 'docker' && rtType !== 'kubernetes'
+                ? html`<sl-option value=${rtType}>${rtType}</sl-option>`
+                : nothing}
+            </sl-select>
+            ${this.renderBrokerInstanceIssues(`${p}.runtime_target.type`)}
+            ${this.renderFieldErrors(`${p}.runtime_target.type`)}
+          </div>
+          <div class="form-field">
+            <label>Display Name</label>
+            <sl-input
+              data-instance-field="display_name"
+              value=${rt.display_name || ''}
+              placeholder="e.g. Cluster A"
+              ?disabled=${readOnly}
+              @sl-input=${(e: Event) => {
+                this.updateBrokerInstanceTargetValue(
+                  idx,
+                  'display_name',
+                  (e.target as HTMLInputElement).value
+                );
+              }}
+            ></sl-input>
+            <span class="hint">Optional target label shown in picker and broker views.</span>
+          </div>
+          ${isK8s
+            ? html`
+                <div class="form-field">
+                  <label>Context</label>
+                  <sl-input
+                    data-instance-field="context"
+                    value=${rt.context || ''}
+                    placeholder="e.g. gke_project_region_cluster"
+                    ?disabled=${readOnly}
+                    @sl-input=${(e: Event) => {
+                      this.updateBrokerInstanceTargetValue(
+                        idx,
+                        'context',
+                        (e.target as HTMLInputElement).value
+                      );
+                    }}
+                  ></sl-input>
+                  <span class="hint"
+                    >Kubernetes context from kubeconfig (leave empty for current/in-cluster).</span
+                  >
+                </div>
+                <div class="form-field">
+                  <label>Namespace</label>
+                  <sl-input
+                    data-instance-field="namespace"
+                    value=${rt.namespace || ''}
+                    placeholder="e.g. agents"
+                    ?disabled=${readOnly}
+                    @sl-input=${(e: Event) => {
+                      this.updateBrokerInstanceTargetValue(
+                        idx,
+                        'namespace',
+                        (e.target as HTMLInputElement).value
+                      );
+                    }}
+                  ></sl-input>
+                  <span class="hint">Kubernetes namespace for agent pods.</span>
+                </div>
+              `
+            : nothing}
+        </div>
+        ${isK8s ? this.renderBrokerInstanceK8sPlacement(idx, rowId, rt, readOnly) : nothing}
+      </sl-card>
+    `;
+  }
+
+  private renderBrokerInstanceK8sPlacement(
+    idx: number,
+    rowId: number,
+    rt: V1RuntimeTargetConfig,
+    readOnly: boolean
+  ): TemplateResult {
+    const p = `server.broker.instances[${idx}].runtime_target`;
+    const tolerations = rt.tolerations ?? [];
+    const currentTolerations = (): Toleration[] =>
+      (this.brokerInstances[idx]?.runtime_target?.tolerations ?? []).map((x) => ({ ...x }));
+    const setTolerations = (next: Toleration[]) =>
+      this.updateBrokerInstanceTargetValue(idx, 'tolerations', next.length > 0 ? next : undefined);
+    const rows = this.brokerInstanceMapRows(rowId, rt);
+
+    return html`<details class="k8s-placement" ?open=${this.instanceK8sPlacementHasValues(rt)}>
+      <summary>Kubernetes placement</summary>
+      <p class="hint" style="margin:0 0 0.75rem 0;">
+        Kubernetes only. Applies to every agent started on this Runtime Broker instance on its next
+        start.
+      </p>
+      <div class="form-grid">
+        <div class="form-field full-width">
+          <label>Node selector</label>
+          <span class="hint">Node labels agent pods must match (label key to value).</span>
+          <div class="k8s-rows" data-k8s-field="node_selector">
+            ${rows.map(
+              ([k, v], i) =>
+                html`<div class="k8s-row">
+                  <sl-input
+                    class="k8s-key"
+                    size="small"
+                    value=${k}
+                    placeholder="e.g. scion.dev/pool"
+                    ?disabled=${readOnly}
+                    @sl-input=${(e: Event) => {
+                      const next = this.brokerInstanceMapRows(rowId, rt).map(
+                        (r) => [...r] as [string, string]
+                      );
+                      next[i][0] = (e.target as HTMLInputElement).value;
+                      this.setBrokerInstanceMapRows(idx, rowId, next);
+                    }}
+                  ></sl-input>
+                  <sl-input
+                    class="k8s-value"
+                    size="small"
+                    value=${v}
+                    placeholder="e.g. agents"
+                    ?disabled=${readOnly}
+                    @sl-input=${(e: Event) => {
+                      const next = this.brokerInstanceMapRows(rowId, rt).map(
+                        (r) => [...r] as [string, string]
+                      );
+                      next[i][1] = (e.target as HTMLInputElement).value;
+                      this.setBrokerInstanceMapRows(idx, rowId, next);
+                    }}
+                  ></sl-input>
+                  ${!readOnly
+                    ? html`<sl-icon-button
+                        class="k8s-remove"
+                        name="x-lg"
+                        label="Remove"
+                        @click=${() =>
+                          this.setBrokerInstanceMapRows(
+                            idx,
+                            rowId,
+                            this.brokerInstanceMapRows(rowId, rt).filter((_, j) => j !== i)
+                          )}
+                      ></sl-icon-button>`
+                    : nothing}
+                </div>`
+            )}
+            ${!readOnly
+              ? html`<sl-button
+                  class="k8s-add"
+                  size="small"
+                  @click=${() =>
+                    this.setBrokerInstanceMapRows(idx, rowId, [
+                      ...this.brokerInstanceMapRows(rowId, rt),
+                      ['', ''],
+                    ])}
+                  >Add</sl-button
+                >`
+              : nothing}
+          </div>
+          ${this.renderBrokerInstanceIssues(`${p}.node_selector`)}
+          ${this.renderFieldErrors(`${p}.node_selector`)}
+        </div>
+        <div class="form-field full-width">
+          <label>Tolerations</label>
+          <span class="hint">Taints agent pods tolerate. Exists matches any value.</span>
+          <div class="k8s-rows" data-k8s-field="tolerations">
+            ${tolerations.map(
+              (t, i) =>
+                html`<div class="k8s-row">
+                  <sl-input
+                    class="tol-key"
+                    size="small"
+                    value=${t.key ?? ''}
+                    placeholder="key"
+                    ?disabled=${readOnly}
+                    @sl-input=${(e: Event) => {
+                      const next = currentTolerations();
+                      const v = (e.target as HTMLInputElement).value;
+                      if (v) next[i].key = v;
+                      else delete next[i].key;
+                      setTolerations(next);
+                    }}
+                  ></sl-input>
+                  <sl-select
+                    class="tol-operator"
+                    size="small"
+                    value=${t.operator || 'Equal'}
+                    ?disabled=${readOnly}
+                    @sl-change=${(e: Event) => {
+                      const next = currentTolerations();
+                      next[i].operator = (e.target as HTMLSelectElement).value;
+                      if (next[i].operator === 'Exists') delete next[i].value;
+                      setTolerations(next);
+                    }}
+                  >
+                    <sl-option value="Equal">Equal</sl-option>
+                    <sl-option value="Exists">Exists</sl-option>
+                  </sl-select>
+                  <sl-input
+                    class="tol-value"
+                    size="small"
+                    value=${t.value ?? ''}
+                    placeholder="value"
+                    ?disabled=${readOnly || t.operator === 'Exists'}
+                    @sl-input=${(e: Event) => {
+                      const next = currentTolerations();
+                      const v = (e.target as HTMLInputElement).value;
+                      if (v) next[i].value = v;
+                      else delete next[i].value;
+                      setTolerations(next);
+                    }}
+                  ></sl-input>
+                  <sl-select
+                    class="tol-effect"
+                    size="small"
+                    value=${t.effect || 'any'}
+                    ?disabled=${readOnly}
+                    @sl-change=${(e: Event) => {
+                      const next = currentTolerations();
+                      const v = (e.target as HTMLSelectElement).value;
+                      if (v && v !== 'any') next[i].effect = v;
+                      else delete next[i].effect;
+                      setTolerations(next);
+                    }}
+                  >
+                    <sl-option value="any">any effect</sl-option>
+                    <sl-option value="NoSchedule">NoSchedule</sl-option>
+                    <sl-option value="PreferNoSchedule">PreferNoSchedule</sl-option>
+                    <sl-option value="NoExecute">NoExecute</sl-option>
+                  </sl-select>
+                  ${!readOnly
+                    ? html`<sl-icon-button
+                        class="k8s-remove"
+                        name="x-lg"
+                        label="Remove"
+                        @click=${() =>
+                          setTolerations(currentTolerations().filter((_, j) => j !== i))}
+                      ></sl-icon-button>`
+                    : nothing}
+                </div>`
+            )}
+            ${!readOnly
+              ? html`<sl-button
+                  class="k8s-add"
+                  size="small"
+                  @click=${() => setTolerations([...currentTolerations(), { operator: 'Equal' }])}
+                  >Add</sl-button
+                >`
+              : nothing}
+          </div>
+          ${this.renderBrokerInstanceIssues(`${p}.tolerations`)}
+          ${this.renderFieldErrors(`${p}.tolerations`)}
+        </div>
+        <div class="form-field">
+          <label>Runtime class</label>
+          <sl-input
+            class="k8s-runtime_class_name"
+            value=${rt.runtime_class_name ?? ''}
+            placeholder="e.g. gvisor"
+            ?disabled=${readOnly}
+            @sl-input=${(e: Event) =>
+              this.updateBrokerInstanceTargetValue(
+                idx,
+                'runtime_class_name',
+                (e.target as HTMLInputElement).value
+              )}
+          ></sl-input>
+          <span class="hint">Set sandbox RuntimeClasses such as gVisor here, not on agents.</span>
+          ${this.renderBrokerInstanceIssues(`${p}.runtime_class_name`)}
+          ${this.renderFieldErrors(`${p}.runtime_class_name`)}
+        </div>
+      </div>
+    </details>`;
   }
 
   private renderDataTab() {
