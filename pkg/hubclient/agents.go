@@ -234,23 +234,27 @@ type StopAllResponse struct {
 
 // CreateAgentRequest is the request body for creating an agent.
 type CreateAgentRequest struct {
-	Name            string            `json:"name"`
-	ProjectID       string            `json:"projectId"`
-	Template        string            `json:"template,omitempty"`
-	HarnessConfig   string            `json:"harnessConfig,omitempty"` // Explicit harness config name (used during sync when template may not be on Hub)
-	HarnessAuth     string            `json:"harnessAuth,omitempty"`   // Late-binding override for auth_selected_type
-	RuntimeBrokerID string            `json:"runtimeBrokerId,omitempty"`
-	Profile         string            `json:"profile,omitempty"`
-	Task            string            `json:"task,omitempty"`
-	Branch          string            `json:"branch,omitempty"`
-	Workspace       string            `json:"workspace,omitempty"`
-	Labels          map[string]string `json:"labels,omitempty"`
-	Annotations     map[string]string `json:"annotations,omitempty"`
-	Config          *api.ScionConfig  `json:"config,omitempty"`
-	Resume          bool              `json:"resume,omitempty"`
-	ForceResume     bool              `json:"forceResume,omitempty"`
-	Attach          bool              `json:"attach,omitempty"`        // If true, signals interactive attach mode to the broker/harness
-	ProvisionOnly   bool              `json:"provisionOnly,omitempty"` // If true, provision only (write task to prompt.md) without starting
+	Name            string `json:"name"`
+	ProjectID       string `json:"projectId"`
+	Template        string `json:"template,omitempty"`
+	HarnessConfig   string `json:"harnessConfig,omitempty"` // Explicit harness config name (used during sync when template may not be on Hub)
+	HarnessAuth     string `json:"harnessAuth,omitempty"`   // Late-binding override for auth_selected_type
+	RuntimeBrokerID string `json:"runtimeBrokerId,omitempty"`
+	Profile         string `json:"profile,omitempty"`
+	// ManagedAgent selects hub-direct managed-agent execution (e.g. managed:google),
+	// bypassing Runtime Brokers entirely. Mutually exclusive with RuntimeBrokerID,
+	// ExpectedRuntimeTargetID, and Runtime Broker Profile selection.
+	ManagedAgent  bool              `json:"managedAgent,omitempty"`
+	Task          string            `json:"task,omitempty"`
+	Branch        string            `json:"branch,omitempty"`
+	Workspace     string            `json:"workspace,omitempty"`
+	Labels        map[string]string `json:"labels,omitempty"`
+	Annotations   map[string]string `json:"annotations,omitempty"`
+	Config        *api.ScionConfig  `json:"config,omitempty"`
+	Resume        bool              `json:"resume,omitempty"`
+	ForceResume   bool              `json:"forceResume,omitempty"`
+	Attach        bool              `json:"attach,omitempty"`        // If true, signals interactive attach mode to the broker/harness
+	ProvisionOnly bool              `json:"provisionOnly,omitempty"` // If true, provision only (write task to prompt.md) without starting
 	// WorkspaceFiles is populated for non-git workspace bootstrap.
 	WorkspaceFiles []transfer.FileInfo `json:"workspaceFiles,omitempty"`
 

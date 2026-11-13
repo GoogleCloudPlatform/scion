@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -61,13 +62,54 @@ func assertAsyncDeleteLanded(t *testing.T, s store.Store, agentID string) {
 // create (a dispatcher, backend or storage hook) and returns once it has
 // reached mode; finish lets a claimed DELETE complete and checks it did.
 type raceDelete struct {
-	t       *testing.T
-	srv     *Server
-	disp    *engineStubDispatcher
-	mode    deleteMode
-	release chan struct{}
-	ch      <-chan deleteResult
-	agentID string
+	t          *testing.T
+	srv        *Server
+	disp       *engineStubDispatcher
+	pauseStore *blockingFinalizingTransitionStore
+	mode       deleteMode
+	release    chan struct{}
+	ch         <-chan deleteResult
+	agentID    string
+}
+
+// blockingFinalizingTransitionStore pauses the delete engine's deleting ->
+// finalizing transition (UpdateAgentDeletion with State == finalizing) once for
+// targetID while its storeFaultSwitch is armed. For hub-direct managed agents
+// (RuntimeBrokerID == ""), which skip DispatchAgentDelete, this holds the row
+// in DeletionStateDeleting with a live lease until finish() closes release,
+// without reassigning srv.store after server construction.
+type blockingFinalizingTransitionStore struct {
+	store.Store
+	fault   *storeFaultSwitch
+	mu      sync.Mutex
+	target  string
+	entered chan struct{}
+	release <-chan struct{}
+	blocked atomic.Bool
+}
+
+func (s *blockingFinalizingTransitionStore) armFor(agentID string, entered chan struct{}, release <-chan struct{}) {
+	s.mu.Lock()
+	s.target = agentID
+	s.entered = entered
+	s.release = release
+	s.mu.Unlock()
+	s.fault.Arm()
+}
+
+func (s *blockingFinalizingTransitionStore) UpdateAgentDeletion(ctx context.Context, id string, pred store.DeletionPredicate, set store.DeletionFields) (int, error) {
+	if s.fault.Active() && set.State != nil && *set.State == store.DeletionStateFinalizing {
+		s.mu.Lock()
+		match := id == s.target
+		entered := s.entered
+		release := s.release
+		s.mu.Unlock()
+		if match && s.blocked.CompareAndSwap(false, true) {
+			close(entered)
+			<-release
+		}
+	}
+	return s.Store.UpdateAgentDeletion(ctx, id, pred, set)
 }
 
 func (d *raceDelete) start(agentID string) {
@@ -76,9 +118,15 @@ func (d *raceDelete) start(agentID string) {
 	switch d.mode {
 	case deleteClaimed:
 		entered := make(chan struct{})
-		d.disp.setFn(blockingDelete(entered, d.release, nil))
-		d.ch = deleteAsync(t, d.srv, "/api/v1/agents/"+agentID, nil)
-		waitClosed(t, entered, 5*time.Second, "broker delete dispatch")
+		if mustGetAgent(t, d.srv.store, agentID).RuntimeBrokerID == "" {
+			d.pauseStore.armFor(agentID, entered, d.release)
+			d.ch = deleteAsync(t, d.srv, "/api/v1/agents/"+agentID, nil)
+			waitClosed(t, entered, 5*time.Second, "hub-direct delete finalizing transition")
+		} else {
+			d.disp.setFn(blockingDelete(entered, d.release, nil))
+			d.ch = deleteAsync(t, d.srv, "/api/v1/agents/"+agentID, nil)
+			waitClosed(t, entered, 5*time.Second, "broker delete dispatch")
+		}
 		assert.Equal(t, store.DeletionStateDeleting, mustGetAgent(t, d.srv.store, agentID).DeletionState)
 	case deleteDone:
 		rec := doRequest(t, d.srv, http.MethodDelete, "/api/v1/agents/"+agentID, nil)
@@ -187,11 +235,22 @@ func TestCreateAgentPublish_SyncDispatchRacesDelete(t *testing.T) {
 		for i, tc := range createDeleteRaceCases {
 			t.Run(site.name+"/"+tc.name, func(t *testing.T) {
 				disp := &createRaceDispatcher{}
-				srv, s, project := setupCreateAgentServer(t, disp)
+				srv, s, pauseStore, _ := testServerWithStoreFault(t, func(inner store.Store, fault *storeFaultSwitch) *blockingFinalizingTransitionStore {
+					return &blockingFinalizingTransitionStore{Store: inner, fault: fault}
+				})
+				project := setupCreateAgentProject(t, s)
+				srv.SetDispatcher(disp)
 				srv.config.SoftDeleteRetention = tc.retention
 				pub := recordCreatedEvents(t, srv)
 
-				race := &raceDelete{t: t, srv: srv, disp: &disp.engineStubDispatcher, mode: tc.mode, release: make(chan struct{})}
+				race := &raceDelete{
+					t:          t,
+					srv:        srv,
+					disp:       &disp.engineStubDispatcher,
+					pauseStore: pauseStore,
+					mode:       tc.mode,
+					release:    make(chan struct{}),
+				}
 				body := site.arm(t, srv, s, project, disp, "race-"+string(rune('a'+si))+string(rune('a'+i)), race.start)
 
 				rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)

@@ -268,8 +268,10 @@ func TestManagedCreate_Unrecorded_DeleteHoldsRow_Answers409(t *testing.T) {
 			require.NoError(t, err, "the delete's row is kept")
 			assert.Equal(t, store.DeletionStateDeleting, row.DeletionState)
 			assert.Empty(t, agentAudits(t, s, mutationTypeAgentCreateDispatchFailed, agentID), "no compensation was written")
-			assert.EqualValues(t, 1, brokerReservationCount(t, s, project.DefaultRuntimeBrokerID),
-				"the quotas are left to the delete")
+			assert.EqualValues(t, 0, brokerReservationCount(t, s, project.DefaultRuntimeBrokerID),
+				"hub-direct managed agents hold no per-broker reservation")
+			assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerProject, agentID),
+				"the project quota is left to the delete")
 		})
 	}
 }
@@ -397,7 +399,8 @@ func TestManagedCreate_CreateFails_DeleteHoldsRow(t *testing.T) {
 				require.NoError(t, err, "the delete's row is kept")
 				assert.Equal(t, tc.state, row.DeletionState)
 				assert.Empty(t, agentAudits(t, s, mutationTypeAgentCreateDispatchFailed, agentID), "no compensation was written")
-				assert.EqualValues(t, 1, brokerReservationCount(t, s, project.DefaultRuntimeBrokerID), "the quotas are left to the delete")
+				assert.EqualValues(t, 0, brokerReservationCount(t, s, project.DefaultRuntimeBrokerID), "hub-direct managed agents hold no per-broker reservation")
+				assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerProject, agentID), "the project quota is left to the delete")
 				return
 			}
 			require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
@@ -449,7 +452,8 @@ func TestManagedCreate_Unrecorded_RowContended_LeavesRow(t *testing.T) {
 	assert.NotEqual(t, string(state.PhaseError), row.Phase, "no phase-error write")
 	assert.NotEqual(t, createRowRemoveFailedMessage, row.Message)
 	assert.Empty(t, agentAudits(t, s, mutationTypeAgentCreateDispatchFailed, agentID), "no compensation was written")
-	assert.EqualValues(t, 1, brokerReservationCount(t, s, project.DefaultRuntimeBrokerID), "no quota release")
+	assert.EqualValues(t, 0, brokerReservationCount(t, s, project.DefaultRuntimeBrokerID), "hub-direct managed agents hold no per-broker reservation")
+	assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerProject, agentID), "no project quota release")
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 	assert.Equal(t, 1+createCleanupDeleteAttempts, fs.finalizeCalls,
@@ -480,7 +484,8 @@ func TestManagedCreate_Unrecorded_CompensationFails_ThenContended_LeavesRow(t *t
 	require.NoError(t, err, "the row is kept")
 	assert.NotEqual(t, string(state.PhaseError), row.Phase, "no phase-error write")
 	assert.NotEqual(t, createRowRemoveFailedMessage, row.Message)
-	assert.EqualValues(t, 1, brokerReservationCount(t, s, project.DefaultRuntimeBrokerID), "no quota release")
+	assert.EqualValues(t, 0, brokerReservationCount(t, s, project.DefaultRuntimeBrokerID), "hub-direct managed agents hold no per-broker reservation")
+	assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerProject, agentID), "no project quota release")
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 	assert.Equal(t, 1+createCleanupDeleteAttempts, fs.finalizeCalls,
@@ -516,7 +521,8 @@ func TestManagedCreate_Unrecorded_CompensationFails_ThenHeld_Answers409(t *testi
 	row, err := s.GetAgent(context.Background(), agentID)
 	require.NoError(t, err, "the delete's row is kept")
 	assert.Equal(t, store.DeletionStateDeleting, row.DeletionState)
-	assert.EqualValues(t, 1, brokerReservationCount(t, s, project.DefaultRuntimeBrokerID), "the quotas are left to the delete")
+	assert.EqualValues(t, 0, brokerReservationCount(t, s, project.DefaultRuntimeBrokerID), "hub-direct managed agents hold no per-broker reservation")
+	assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerProject, agentID), "the project quota is left to the delete")
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 	assert.Equal(t, 2, fs.finalizeCalls, "the failed compensation, then one refused fallback delete")

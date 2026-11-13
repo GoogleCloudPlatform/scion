@@ -246,7 +246,8 @@ func TestCreateAgent_CanceledRequest_ManagedFailureCleanupStillRuns(t *testing.T
 
 	require.NotEmpty(t, backend.agentID, "backend must have observed the create-time agent row")
 	require.False(t, backend.ctxNotCanceled, "the backend must see the request ctx canceled")
-	assertReservationsHeldBeforeCleanup(t, backend.heldBeforeCleanup)
+	assert.False(t, backend.heldBeforeCleanup.broker, "hub-direct managed agents bypass Runtime Brokers and hold no per-broker reservation")
+	require.True(t, backend.heldBeforeCleanup.project, "precondition: the per-project reservation must be held before cleanup")
 
 	_, err := s.GetAgent(context.Background(), backend.agentID)
 	assert.ErrorIs(t, err, store.ErrNotFound, "cleanup must delete the agent row despite the canceled request")

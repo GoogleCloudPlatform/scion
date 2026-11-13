@@ -385,6 +385,21 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 // fallback (withNoAuthFallbackForbidden).
 var errNoAuthFallbackRefused = errors.New("the agent has no credentials for its harness, and the no-auth fallback is not allowed for this create")
 
+type managedAgentCreateKey struct{}
+
+// withManagedAgentCreate marks ctx as a hub-direct managed-agent create so
+// config derivation (deriveAgentConfig, profileDefaultSAUnlessPinned) never
+// stamps a Runtime Broker default profile onto the agent before agent.Runtime
+// is recorded by managedAgentCreate.
+func withManagedAgentCreate(ctx context.Context) context.Context {
+	return context.WithValue(ctx, managedAgentCreateKey{}, true)
+}
+
+func managedAgentCreateFrom(ctx context.Context) bool {
+	v, _ := ctx.Value(managedAgentCreateKey{}).(bool)
+	return v
+}
+
 type noAuthFallbackGuardKey struct{}
 
 // noAuthFallbackGuard records whether a create carrying it was refused.
@@ -521,10 +536,14 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 	// is not a harness-config name, so a project default the rung above
 	// dropped stays dropped.
 	// A pinned (flat) agent takes no default Runtime Broker Profile: the
-	// project active profile is dropped with a dispatch warning.
+	// project active profile is dropped with a dispatch warning. A hub-direct
+	// managed agent has no Runtime Broker at all and silently ignores any
+	// project active profile without emitting a flat-broker warning.
 	priorProfile := agent.AppliedConfig.Profile
 	applyProjectDefaults(agent.AppliedConfig, project)
-	if agent.IsPinned() && agent.AppliedConfig.Profile != priorProfile {
+	if managedAgentCreateFrom(ctx) || isManagedAgentRuntime(agent.Runtime) {
+		agent.AppliedConfig.Profile = priorProfile
+	} else if agent.IsPinned() && agent.AppliedConfig.Profile != priorProfile {
 		dropped := agent.AppliedConfig.Profile
 		agent.AppliedConfig.Profile = priorProfile
 		addDispatchWarnings(ctx, flatDefaultProfileDroppedWarning(dropped, agent.PinnedRuntimeBrokerID))
@@ -1435,6 +1454,14 @@ func (s *Server) handleExistingAgent(
 		}
 		ref.write(w)
 		return existingAgentErrored
+	}
+
+	// Managed and container execution modes never cross-adopt or cross-start a
+	// pre-existing agent row with the same slug: a managed create colliding
+	// with a container row, or a container create colliding with a managed row,
+	// returns 409 Conflict before any broker/pin mutation runs.
+	if req.ManagedAgent != isManagedAgentRuntime(existingAgent.Runtime) {
+		return existingAgentConflict
 	}
 
 	// Flat Runtime Broker checks for the branch this request takes, before

@@ -4,7 +4,7 @@
 
 **Problem statement.** Scion currently runs AI coding agents exclusively in containers (Docker, Podman, Kubernetes, Apple Container, Cloud Run). Each container bundles a Runtime (container lifecycle) and a Harness (LLM CLI like Claude Code or Gemini CLI). A growing class of cloud services offer fully-managed agent execution where the model, tools, sandbox, and orchestration loop are handled server-side. Scion needs to support these managed backends so that `scion start`, `scion message`, `scion stop`, and other commands work seamlessly whether the agent runs in a local container or a remote cloud service.
 
-**Design decision.** Option B: introduce `ManagedAgent` as a peer concept to the existing Runtime+Harness stack, not as a replacement. The Hub agent handlers are the live branching point: managed profiles dispatch directly to a `ManagedAgentBackend`, while container agents continue through the Runtime Broker. Container code is untouched.
+**Design decision.** Option B: introduce `ManagedAgent` as a peer concept to the existing Runtime+Harness stack, not as a replacement. The Hub agent handlers are the live branching point: requests selecting `managedAgent: true` (or the bounded legacy `profile: "managed-agents"` adapter during the flat Runtime Broker transition; see `.design/flat-runtime-brokers/p4-3-profile-disposition.md`) dispatch directly to a `ManagedAgentBackend`, while container agents continue through the Runtime Broker. Container code is untouched.
 
 **First backend.** Google Managed Agents API (Gemini API) at `generativelanguage.googleapis.com`. The Antigravity agent is the base agent.
 
@@ -30,13 +30,13 @@ Template (scion-agent.yaml)
 The live dispatch chain for managed agents:
 
 ```
-Agent create request (profile: managed-agents)
-  -> Hub agent handlers
+Agent create request (managedAgent: true; legacy adapter: profile: managed-agents)
+  -> Hub agent handlers (normalizeManagedAgentCreateRequest)
      -> ManagedAgentBackend (interface)
         -> GoogleManagedAgentBackend (first impl)
 ```
 
-The Hub detects the managed profile before broker dispatch and handles that lifecycle directly. Container agents continue through the existing `Manager` and Runtime Broker path.
+The Hub normalizes managed-agent selection at request entry (`normalizeManagedAgentCreateRequest` in `pkg/hub/handlers_managed_agents.go`), skips Runtime Broker resolution and flat-broker placement entirely, and handles the lifecycle directly. Container agents continue through the existing `Manager` and Runtime Broker path.
 
 ### 2.2 Package layout
 
@@ -201,11 +201,7 @@ type UsageInfo struct {
 
 ### 2.4 How execution branches
 
-The Hub branches before broker dispatch. `handlers_agents_core.go` recognizes the
-`managed-agents` profile and calls `managedAgentCreate`; the implementation in
-`handlers_managed_agents.go` lazily constructs the configured backend and handles
-managed lifecycle operations directly. All other profiles continue through the
-ordinary Runtime Broker path.
+The Hub branches before Runtime Broker resolution and dispatch. At the top of `createAgentInProject`, `normalizeManagedAgentCreateRequest` normalizes the legacy `profile: "managed-agents"` wire sentinel into `req.ManagedAgent = true` (`req.Profile = ""`) and rejects contradictory broker/profile targeting (`profile`, `runtimeBrokerId`, `expectedRuntimeTargetId`). `handlers_agents_core.go` then skips Runtime Broker lookup, `flatCreatePlacement`, per-broker quota reservation, and project profile defaults when `req.ManagedAgent` is set, calling `managedAgentCreate` directly; `handlers_managed_agents.go` lazily constructs the configured backend and handles managed lifecycle operations. All non-managed requests continue through the ordinary Runtime Broker path.
 
 ---
 
@@ -213,9 +209,9 @@ ordinary Runtime Broker path.
 
 ### 3.1 Templates do NOT declare execution mode
 
-**Key decision (Q7):** Templates define *what* an agent does, not *where/how* it runs. There is no `service:` field in the template YAML. The managed-vs-container decision is a **broker profile** selected at agent creation time (analogous to choosing Cloud Run vs GKE).
+**Key decision (Q7, updated in P4.3 ptone/scion#3284):** Templates define *what* an agent does, not *where/how* it runs. There is no `service:` field in the template YAML. The managed-vs-container decision is an explicit **create-time execution selection** (`managedAgent: true` on `CreateAgentRequest`), independent of Runtime Broker profiles.
 
-Templates remain unchanged from the existing schema. The same template can run on a container runtime or a managed agent service depending on the broker profile selected at `scion start` time.
+Templates remain unchanged from the existing schema. The same template can run on a container Runtime Broker or a managed agent service depending on whether `managedAgent: true` is selected at agent creation time.
 
 ### 3.2 Managed agent configuration lives in Scion settings
 
@@ -237,15 +233,15 @@ managed_agents:
           - domain: api.github.com
 ```
 
-### 3.3 Broker profile selection
+### 3.3 Managed-agent create selection
 
-The execution mode is selected as a broker profile during agent creation. The profile determines whether the agent runs in a container or on a managed service:
+Execution mode is chosen explicitly during agent creation rather than baked into templates or coupled to Runtime Broker profiles (ptone/scion#3284):
 
-- `cloud-run` — container on Cloud Run
-- `gke` — container on GKE
-- `managed-agents` — Google Managed Agents API (Gemini)
+- **Primary contract:** `managedAgent: true` on `CreateAgentRequest` (`pkg/hub/handlers_agents_core.go`, `pkg/hubclient/agents.go`) routes directly to the Hub's configured `ManagedAgentBackend` (Google Managed Agents API).
+- **Bounded legacy adapter:** `profile: "managed-agents"` (used by legacy callers including CLI `--profile managed-agents` during migration) is normalized at the Hub `CreateAgentRequest` entry boundary into `managedAgent: true` (`profile: ""`) during the flat Runtime Broker transition and is scheduled for removal in P6 (ptone/scion#3292).
+- **Containerized agents:** Omitting `managedAgent` dispatches to a Runtime Broker (selected by project default or `--broker`).
 
-The template is the same regardless of profile.
+The template is the same regardless of execution target.
 
 ### 3.4 Example template YAML
 
@@ -266,13 +262,13 @@ max_duration: 30m
 
 ### 4.1 Start flow for managed agents
 
-When an agent create request selects the `managed-agents` profile:
+When an agent create request selects `managedAgent: true` (directly or via the legacy `profile: "managed-agents"` entry normalization):
 
-1. The Hub performs the normal request validation, authorization, and Agent record creation.
-2. `handlers_agents_core.go` selects `managedAgentCreate` before broker dispatch.
-3. `getManagedBackend` loads `managed_agents.google` from global settings and lazily constructs the backend.
-4. The Hub sets the runtime to `managed:<provider>` and records the provider in Agent annotations.
-5. If the request includes a task, the Hub creates the first interaction and records its interaction and environment IDs in the same Agent annotations.
+1. `normalizeManagedAgentCreateRequest` normalizes legacy `profile: "managed-agents"` into `managedAgent: true` (`profile: ""`) and rejects contradictory broker/profile fields (`400 validation_error`).
+2. The Hub performs normal authorization, project-level quota reservation (`max_agents_per_project`), and brokerless Agent record creation (`RuntimeBrokerID == ""`).
+3. `handlers_agents_core.go` selects `managedAgentCreate` without consulting or pinning any Runtime Broker.
+4. `getManagedBackend` loads `managed_agents.google` from global settings and lazily constructs the backend.
+5. The Hub sets `Agent.Runtime` to `managed:<provider>` and records the provider in Agent annotations; if the request includes a task, it creates the first interaction and records the interaction and environment IDs in Agent annotations.
 6. The Hub persists the Agent record. No local agent directory or Runtime Broker is involved.
 
 ### 4.2 Message delivery flow
@@ -392,16 +388,16 @@ Managed agent API calls go directly from the Hub to the cloud API, bypassing bro
 ### 6.2 Hub dispatch
 
 Flow:
-1. Hub receives `POST /agents` from CLI/API with broker profile = `managed-agents`
-2. Hub handles directly via its managed agent client interface (no broker delegation)
+1. Hub receives `POST /api/v1/agents` (or `POST /api/v1/projects/{projectId}/agents`) with `managedAgent: true` (or legacy `profile: "managed-agents"`, normalized at request entry to `managedAgent: true` and `profile: ""`)
+2. Hub handles directly via its managed agent client interface (no Runtime Broker lookup, placement, or delegation)
 3. Hub calls cloud API (CreateAgent, CreateInteraction, etc.)
 4. Hub tracks agent state and reports status to CLI
 
 Reference: the `cloudrun-ha` branch on origin implements a similar hub-direct client interface pattern. Look for reusable patterns to factor out (e.g., client interface abstraction, error handling, retry logic).
 
-### 6.3 Broker profile selection
+### 6.3 Explicit managed-agent selection
 
-Managed agents are selected as a broker profile during agent creation — analogous to choosing Cloud Run or GKE (decision Q7). The profile is a runtime/deployment decision, not a template-level declaration.
+Managed agents are selected explicitly via `managedAgent: true` on `CreateAgentRequest` during agent creation rather than via Runtime Broker profiles (ptone/scion#3284; see `.design/flat-runtime-brokers/p4-3-profile-disposition.md`). Execution target remains a create-time deployment decision, never a template-level declaration.
 
 ---
 
@@ -470,7 +466,7 @@ Logging goes through GCP Cloud Logging with its own configurable retention polic
 
 ### Q5: Broker routing — DECIDED: Hub-direct
 
-Managed agent API calls go directly from the Hub to the cloud API, bypassing brokers entirely. Managed agents are a stateless API with no container lifecycle to manage — the broker layer would be a pass-through adding latency with no value. Managed agents are selected as a **broker profile** (like choosing Cloud Run or GKE) during agent creation. Reference: `cloudrun-ha` branch on origin has a similar hub-direct client interface pattern — look for reusable patterns to factor out.
+Managed agent API calls go directly from the Hub to the cloud API, bypassing brokers entirely. Managed agents are a stateless API with no container lifecycle to manage — the broker layer would be a pass-through adding latency with no value. Managed agents are selected via `managedAgent: true` on `CreateAgentRequest` during agent creation (updated in P4.3 ptone/scion#3284 from the legacy `profile: "managed-agents"` sentinel, which remains a bounded entry-boundary adapter until P6 ptone/scion#3292). Reference: `cloudrun-ha` branch on origin has a similar hub-direct client interface pattern — look for reusable patterns to factor out.
 
 ### Q6: `scion look` output format — DECIDED: Structured with timestamps
 
@@ -485,7 +481,7 @@ Structured, readable format with timestamps on each step. Primary consumer is ag
 
 ### Q7: Template execution model — DECIDED: Templates are execution-agnostic
 
-Templates do NOT declare whether the agent runs on a managed service or in a container. The `service:` field is removed from the template schema entirely. Templates define *what* the agent does (instructions, task, tools); the infrastructure layer decides *where/how* it runs. Managed-vs-container is a **broker profile** — analogous to choosing Cloud Run, GKE, or managed agents as the execution target. Hard error if any implementation leaks execution-mode concerns into the template.
+Templates do NOT declare whether the agent runs on a managed service or in a container. The `service:` field is removed from the template schema entirely. Templates define *what* the agent does (instructions, task, tools); the create request decides *where/how* it runs (`managedAgent: true` vs Runtime Broker placement; updated in P4.3 ptone/scion#3284). Hard error if any implementation leaks execution-mode concerns into the template.
 
 ### Q8: API client — DECIDED: Custom HTTP client
 
