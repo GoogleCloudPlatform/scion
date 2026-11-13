@@ -1209,15 +1209,6 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Refuse worktree-per-agent on Cloud Run ahead of every project-path,
-	// ownership, template-hydration or env-gather side effect (ptone/scion#7865).
-	if sce := s.createCloudRunWorktreePerAgentRefusal(req); sce != nil {
-		span.SetStatus(codes.Error, startContextSpanText(sce))
-		status := s.writeStartContextError(w, sce, "create agent", "agent_id", req.ID, "profile", createRequestProfile(req))
-		markAttemptFailed(status, sce.Error())
-		return
-	}
-
 	// On a shared storage backend a hub-managed project runs from the
 	// Layout's project root (sharedHubProjectPath). Its configuration is
 	// hub-seeded and never written here: the record of its .scion entry is
@@ -1365,6 +1356,17 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			writeError(w, sce.Status, ErrCodeConflict, sce.Message, nil)
 			return
 		}
+	}
+
+	// Refuse worktree-per-agent on Cloud Run after the workspace .scion record
+	// and project-identity checks above (preserving the ptone/scion#1799
+	// ordering invariant) and before env-gather or template/harness-config
+	// hydration (ptone/scion#7865).
+	if sce := s.createCloudRunWorktreePerAgentRefusal(req); sce != nil {
+		span.SetStatus(codes.Error, startContextSpanText(sce))
+		status := s.writeStartContextError(w, sce, "create agent", "agent_id", req.ID, "profile", createRequestProfile(req))
+		markAttemptFailed(status, sce.Error())
+		return
 	}
 
 	// Env-gather: if GatherEnv is true, evaluate env completeness before building full context.

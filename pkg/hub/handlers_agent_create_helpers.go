@@ -1593,7 +1593,7 @@ func (s *Server) handleExistingAgent(
 				// Response written.
 			case writeSecretResolutionError(w, err):
 				// 503: the agent's secrets or stored env settings could not be read; nothing was sent.
-			case writeEmptyPerAgentCapabilityError(w, err):
+			case writeWorkspaceModeCapabilityError(w, err):
 				// 412 already written (design #2703 D3).
 			case relayDispatchRefusal(w, err):
 				// Required-skill resolution failure relayed with the broker's status.
@@ -1753,7 +1753,7 @@ func (s *Server) handleExistingAgent(
 					// Response written.
 				case writeSecretResolutionError(w, err):
 					// 503: the agent's secrets or stored env settings could not be read; nothing was sent.
-				case writeEmptyPerAgentCapabilityError(w, err):
+				case writeWorkspaceModeCapabilityError(w, err):
 					// 412 already written (design #2703 D3).
 				case relayDispatchRefusal(w, err):
 					// Required-skill resolution failure relayed with the broker's status.
@@ -2007,7 +2007,7 @@ func (s *Server) handleExistingAgent(
 				// Response written.
 			case writeSecretResolutionError(w, err):
 				// 503: the agent's secrets or stored env settings could not be read; nothing was sent.
-			case writeEmptyPerAgentCapabilityError(w, err):
+			case writeWorkspaceModeCapabilityError(w, err):
 				// 412 already written (design #2703 D3).
 			case relayDispatchRefusal(w, err):
 				// Required-skill resolution failure relayed with the broker's status.

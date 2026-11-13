@@ -406,16 +406,6 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
-	// Refuse worktree-per-agent on Cloud Run before checkWorkspaceConfigRecord
-	// or recordHubProjectFilesChecked writes any .scion marker or
-	// project-configs directory on the broker host (ptone/scion#7865). The
-	// post-marker resolution below repeats the check against
-	// dispatchRuntimeType in case marker alignment changes settings lookup.
-	if sce := s.preMarkerCloudRunWorktreePerAgentRefusal(in); sce != nil {
-		span.SetStatus(codes.Error, startContextSpanText(sce))
-		return nil, sce
-	}
-
 	// A hub-managed workspace's .scion entry must be in the state the
 	// broker recorded for it before anything is read through it (see
 	// checkWorkspaceConfigRecord); recordHubProjectFiles records the state
@@ -1718,61 +1708,13 @@ func (s *Server) flatCloudRunWorktreePerAgentRefusal(in startContextInputs) *sta
 	return cloudRunWorktreePerAgentRefusalError(in.Name)
 }
 
-func (s *Server) preMarkerCloudRunWorktreePerAgentRefusal(in startContextInputs) *startContextError {
-	if !effectiveWorktreePerAgentDispatch(in.WorkspaceMode, in.ResolvedEnv, in.Config) {
-		return nil
-	}
-	if in.PinnedRuntime.rt != nil && isCloudRunRuntimeName(in.PinnedRuntime.rt.Name()) {
-		return cloudRunWorktreePerAgentRefusalError(in.Name)
-	}
-	prof := ""
-	if in.Config != nil {
-		prof = in.Config.Profile
-	}
-	if prof == "" && in.Operation != opCreate && !s.isFlat() {
-		if p, _, err := classificationProfile(in); err == nil {
-			prof = p
-		}
-	}
-	rtName, perr := s.resolveRuntimeNameForOpts(api.StartOptions{
-		Name:        in.Name,
-		ProjectPath: in.ProjectPath,
-		Profile:     prof,
-	})
-	if perr == nil && isCloudRunRuntimeName(rtName) {
-		return cloudRunWorktreePerAgentRefusalError(in.Name)
-	}
-	return nil
-}
-
-func (s *Server) candidateCreateProjectPath(req CreateAgentRequest) string {
-	if req.ProjectPath != "" {
-		return req.ProjectPath
-	}
-	if req.ProjectSlug == "" {
-		return ""
-	}
-	if s.config.StorageLayout.Backend.Shared() && req.ProjectID != "" {
-		if root, err := s.config.StorageLayout.ProjectRoot(req.ProjectID); err == nil {
-			return root.HostPath
-		}
-	}
-	if gd, err := config.GetGlobalDir(); err == nil {
-		return filepath.Join(gd, "projects", req.ProjectSlug)
-	}
-	return ""
-}
-
 func (s *Server) createCloudRunWorktreePerAgentRefusal(req CreateAgentRequest) *startContextError {
 	if !effectiveWorktreePerAgentDispatch(req.WorkspaceMode, req.ResolvedEnv, req.Config) {
 		return nil
 	}
-	if s.flatCloudRunTarget() {
-		return cloudRunWorktreePerAgentRefusalError(req.Name)
-	}
 	rtName, perr := s.resolveRuntimeNameForOpts(api.StartOptions{
 		Name:        req.Name,
-		ProjectPath: s.candidateCreateProjectPath(req),
+		ProjectPath: req.ProjectPath,
 		Profile:     createRequestProfile(req),
 	})
 	if perr == nil && isCloudRunRuntimeName(rtName) {
@@ -2436,12 +2378,6 @@ func resolveWorktreeProvision(in worktreeProvisionInput) worktreeProvisionResult
 		return worktreeProvisionResult{
 			Reason: "worktree-per-agent on Kubernetes requires the NFS backend; " +
 				"node-local host-side provisioning is not supported (pods cannot bind-mount host worktrees)",
-		}
-	}
-	if isCloudRunRuntimeName(in.RuntimeName) {
-		return worktreeProvisionResult{
-			Reason: "worktree-per-agent is not supported on Cloud Run; " +
-				"Cloud Run mounts workspaces from NFS and cannot bind-mount host worktrees",
 		}
 	}
 

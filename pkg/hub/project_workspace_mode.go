@@ -258,11 +258,11 @@ func checkEmptyPerAgentBrokerCapability(project *store.Project, broker *store.Ru
 	return &brokerLacksEmptyPerAgentError{broker: name}
 }
 
-// writeEmptyPerAgentCapabilityError writes the 412 response for err if it is
+// writeWorkspaceModeCapabilityError writes the 412 response for err if it is
 // an unsupported workspace-mode capability error (empty-per-agent on a broker
 // without emptyPerAgentWorkspace, or worktree-per-agent on Cloud Run) and
 // reports whether it did.
-func writeEmptyPerAgentCapabilityError(w http.ResponseWriter, err error) bool {
+func writeWorkspaceModeCapabilityError(w http.ResponseWriter, err error) bool {
 	if !isUnsupportedWorkspaceModeError(err) {
 		return false
 	}
@@ -383,20 +383,20 @@ func (s *Server) requireWorkspaceModeBrokerCapability(ctx context.Context, w htt
 		writeErrorFromErr(w, err, "")
 		return false
 	}
-	if err := checkEmptyPerAgentBrokerCapability(project, broker); writeEmptyPerAgentCapabilityError(w, err) {
+	if err := checkEmptyPerAgentBrokerCapability(project, broker); writeWorkspaceModeCapabilityError(w, err) {
 		return false
 	}
-	if err := checkWorktreePerAgentCloudRun(project, broker, profileName, agent); writeEmptyPerAgentCapabilityError(w, err) {
+	if err := checkWorktreePerAgentCloudRun(project, broker, profileName, agent); writeWorkspaceModeCapabilityError(w, err) {
 		return false
 	}
 	return true
 }
 
-// requireEmptyPerAgentBrokerCapabilityForAgent checks workspace-mode broker
+// requireWorkspaceModeBrokerCapabilityForAgent checks workspace-mode broker
 // compatibility for an existing agent: it loads the agent's project and checks
 // its assigned broker and profile. A project lookup error fails closed; a
 // missing project has nothing to gate.
-func (s *Server) requireEmptyPerAgentBrokerCapabilityForAgent(ctx context.Context, w http.ResponseWriter, agent *store.Agent) bool {
+func (s *Server) requireWorkspaceModeBrokerCapabilityForAgent(ctx context.Context, w http.ResponseWriter, agent *store.Agent) bool {
 	if agent.ProjectID == "" {
 		return true
 	}
