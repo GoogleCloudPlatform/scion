@@ -19,6 +19,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -413,6 +414,87 @@ func TestRunInit_StagedSecretsWriteFailure_HardErrorsAndNeverRunsChild(t *testin
 	}
 	if info.Phase != string(state.PhaseError) {
 		t.Errorf("agent-info.json phase = %q, want %q", info.Phase, state.PhaseError)
+	}
+}
+
+// TestRunInit_UnwritableFileSecretTarget_ReportsHubErrorWithStagedToken proves
+// that when SCION_STAGED_SECRETS carries both a staged HubToken (as on Cloud
+// Run) and a FileSecret targeting an unwritable path, RunInit stages the hub
+// credential before reporting the failure so the Hub receives PhaseError with
+// a clear, secret-free diagnostic naming the secret and target path.
+func TestRunInit_UnwritableFileSecretTarget_ReportsHubErrorWithStagedToken(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses 0500 directory permissions")
+	}
+	tmpHome := t.TempDir()
+	setupRunInitAsRootlessScion(t, tmpHome)
+	t.Cleanup(hub.SetTokenHome(tmpHome))
+
+	roDir := filepath.Join(tmpHome, "ro-mount")
+	if err := os.MkdirAll(roDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(roDir, 0o700) })
+
+	const (
+		secretCanary = "fake-secret-value-7866-do-not-leak"
+		tokenCanary  = "fake-hub-token-7866-for-failure-report"
+	)
+	target := filepath.Join(roDir, "sub", "my-key.pem")
+
+	var (
+		mu            sync.Mutex
+		gotAgentToken string
+		gotBody       string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var buf bytes.Buffer
+		_, _ = buf.ReadFrom(r.Body)
+		mu.Lock()
+		gotAgentToken = r.Header.Get("X-Scion-Agent-Token")
+		gotBody = buf.String()
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	t.Setenv(hub.EnvHubEndpoint, srv.URL)
+	t.Setenv(hub.EnvAgentID, "agent-7866")
+
+	staged := stagedsecrets.Staged{
+		FileSecrets: []stagedsecrets.FileSecret{
+			{
+				Name:   "MY_KEY",
+				Target: target,
+				Value:  base64.StdEncoding.EncodeToString([]byte(secretCanary)),
+			},
+		},
+		HubToken: tokenCanary,
+	}
+	data, err := json.Marshal(staged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(stagedsecrets.EnvVar, base64.StdEncoding.EncodeToString(data))
+
+	got := RunInit([]string{"definitely-not-a-real-binary-xyz"}, InitRunOptions{DisableTermSignalForwarding: true})
+	if got == 0 {
+		t.Fatal("RunInit() = 0, want non-zero when file secret target is unwritable")
+	}
+
+	mu.Lock()
+	agentToken := gotAgentToken
+	body := gotBody
+	mu.Unlock()
+
+	if agentToken != tokenCanary {
+		t.Fatalf("Hub status report X-Scion-Agent-Token = %q, want staged HubToken (reportInitFailure ran without staging HubToken)", agentToken)
+	}
+	if !strings.Contains(body, string(state.PhaseError)) || !strings.Contains(body, "MY_KEY") || !strings.Contains(body, target) {
+		t.Errorf("Hub status report body = %q, want phase=%s naming MY_KEY and %s", body, state.PhaseError, target)
+	}
+	if strings.Contains(body, secretCanary) || strings.Contains(body, tokenCanary) {
+		t.Errorf("Hub status report leaked credential material: %q", body)
 	}
 }
 

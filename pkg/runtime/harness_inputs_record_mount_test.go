@@ -293,7 +293,6 @@ func testRecordOutsideCloudRunPaths(t *testing.T) {
 	for what, p := range map[string]string{
 		"workspace": paths.workspaceHostPath,
 		"home":      paths.homeHostPath,
-		"secrets":   paths.secretsHostPath,
 	} {
 		if hasScionElement(p) {
 			t.Errorf("cloud run %s host path %s is inside a .scion directory, where agent records live", what, p)

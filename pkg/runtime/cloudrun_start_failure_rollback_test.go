@@ -57,8 +57,8 @@ func rollbackTestRun(t *testing.T, fake *fakeInstancesClient, clonePerAgent bool
 
 // A start whose instance create the server refuses (here the missing actAs
 // permission of ptone/scion#7100) removes the agent directories it
-// provisioned on the share: home, secrets, the clone-per-agent workspace
-// and agents/<slug>. The project's shared workspace is kept.
+// provisioned on the share: home, the clone-per-agent workspace and
+// agents/<slug>. The project's shared workspace is kept.
 func TestCloudRunRun_RejectedCreateRemovesProvisionedAgentDirs(t *testing.T) {
 	for name, clone := range map[string]bool{"clone-per-agent": true, "shared-plain": false} {
 		t.Run(name, func(t *testing.T) {
@@ -105,7 +105,7 @@ func TestCloudRunRun_CreateInDoubtKeepsAgentDirs(t *testing.T) {
 
 	_, err := rt.Run(context.Background(), cfg)
 	require.Error(t, err)
-	for _, leaf := range []string{"home-" + crTestAgentID, "secrets-" + crTestAgentID, "workspace"} {
+	for _, leaf := range []string{"home-" + crTestAgentID, "workspace"} {
 		assert.DirExists(t, filepath.Join(agentDir, leaf))
 	}
 }
@@ -126,7 +126,7 @@ func TestCloudRunRun_SuccessfulCreateKeepsAgentDirs(t *testing.T) {
 
 	_, err := rt.Run(context.Background(), cfg)
 	require.NoError(t, err)
-	for _, leaf := range []string{"home-" + crTestAgentID, "secrets-" + crTestAgentID, "workspace"} {
+	for _, leaf := range []string{"home-" + crTestAgentID, "workspace"} {
 		assert.DirExists(t, filepath.Join(agentDir, leaf))
 	}
 }
@@ -143,18 +143,18 @@ func TestCloudRunRun_CreateGateAbortRemovesProvisionedAgentDirs(t *testing.T) {
 	assert.NoDirExists(t, agentDir)
 }
 
-// A provision that fails part-way (here the secrets path is taken by a
-// file) removes what it created (the home) and keeps what it did not:
-// the existing agent directory and the file.
+// A provision that fails part-way (here the home path is taken by a file,
+// after the clone-per-agent workspace was created) removes what it created
+// (the workspace) and keeps what it did not: the existing agent directory
+// and the file.
 func TestCloudRunProvisionNFS_PartialFailureRollsBack(t *testing.T) {
 	rt, cfg, agentDir := rollbackTestRun(t, &fakeInstancesClient{getErr: notFoundErr()}, true)
 	require.NoError(t, os.MkdirAll(agentDir, 0o770))
-	blocker := filepath.Join(agentDir, "secrets-"+crTestAgentID)
+	blocker := filepath.Join(agentDir, "home-"+crTestAgentID)
 	require.NoError(t, os.WriteFile(blocker, []byte("x"), 0o644))
 
 	_, err := rt.provisionCloudRunNFS(context.Background(), cfg, crTestAgentID, os.Getuid(), os.Getgid())
 	require.Error(t, err)
-	assert.NoDirExists(t, filepath.Join(agentDir, "home-"+crTestAgentID), "the home this provision created goes")
 	assert.NoDirExists(t, filepath.Join(agentDir, "workspace"), "the workspace this provision created goes")
 	assert.FileExists(t, blocker)
 	assert.DirExists(t, agentDir, "the agent directory existed before")
@@ -181,7 +181,7 @@ func failMkdirAfterCreate(t *testing.T, prefix string) {
 // directory included.
 func TestCloudRunProvisionNFS_MkdirFailingAfterCreateRollsBack(t *testing.T) {
 	for name, prefix := range map[string]string{
-		"secrets (after home)":              "secrets-",
+		"home (after workspace)":            "home-",
 		"workspace (creates agents/<slug>)": "workspace",
 	} {
 		t.Run(name, func(t *testing.T) {

@@ -400,8 +400,7 @@ func TestGetRuntime_CloudRun_DirectProfileName(t *testing.T) {
 }
 
 // crTestSlug and crTestAgentID are an agent slug and hub agent ID: the
-// Cloud Run home and secrets are agents/<slug>/{home-,secrets-}<agentID>
-// (ptone/scion#5825).
+// Cloud Run home is agents/<slug>/home-<agentID> (ptone/scion#5825).
 const (
 	crTestSlug    = "dev"
 	crTestAgentID = "6f1c2b3a-4d5e-4f60-8a9b-0c1d2e3f4a5b"
@@ -420,9 +419,6 @@ func TestCloudRunNFSExportPaths(t *testing.T) {
 	}
 	if paths.homeExportPath != "/scion-workspaces/projects/proj-123/agents/dev/home-"+crTestAgentID {
 		t.Errorf("homeExportPath = %q", paths.homeExportPath)
-	}
-	if paths.secretsExportPath != "/scion-workspaces/projects/proj-123/agents/dev/secrets-"+crTestAgentID {
-		t.Errorf("secretsExportPath = %q", paths.secretsExportPath)
 	}
 }
 
@@ -484,9 +480,6 @@ func TestCloudRunNFSHostPaths(t *testing.T) {
 	}
 	if paths.homeHostPath != filepath.Join(wantHostBase, "projects", "proj-123", "agents", "dev", "home-"+crTestAgentID) {
 		t.Errorf("homeHostPath = %q", paths.homeHostPath)
-	}
-	if paths.secretsHostPath != filepath.Join(wantHostBase, "projects", "proj-123", "agents", "dev", "secrets-"+crTestAgentID) {
-		t.Errorf("secretsHostPath = %q", paths.secretsHostPath)
 	}
 }
 
@@ -550,8 +543,8 @@ func TestCloudRunNFSPathsHonourSubPathRoot(t *testing.T) {
 			if want := root + "/proj-123/workspace"; host.serverRelativePath != want {
 				t.Errorf("serverRelativePath = %q, want %q", host.serverRelativePath, want)
 			}
-			if want := filepath.Join(hostBase, filepath.FromSlash(root), "proj-123", "agents", "dev", "secrets-"+crTestAgentID); host.secretsHostPath != want {
-				t.Errorf("secretsHostPath = %q, want %q", host.secretsHostPath, want)
+			if want := filepath.Join(hostBase, filepath.FromSlash(root), "proj-123", "agents", "dev", "home-"+crTestAgentID); host.homeHostPath != want {
+				t.Errorf("homeHostPath = %q, want %q", host.homeHostPath, want)
 			}
 
 			// A host path laid out under the default root no longer matches.
@@ -916,7 +909,6 @@ func TestBuildCloudRunInstanceMountsResolvedNFSServer(t *testing.T) {
 		server:              "10.0.0.2",
 		workspaceExportPath: "/scion/projects/p/workspace",
 		homeExportPath:      "/scion/projects/p/agents/a/home",
-		secretsExportPath:   "/scion/projects/p/agents/a/secrets",
 	})
 	var n int
 	for _, v := range inst.Volumes {
@@ -927,7 +919,7 @@ func TestBuildCloudRunInstanceMountsResolvedNFSServer(t *testing.T) {
 			}
 		}
 	}
-	if n != 3 {
-		t.Fatalf("got %d NFS volumes, want 3", n)
+	if n != 2 {
+		t.Fatalf("got %d NFS volumes, want 2 (workspace and home)", n)
 	}
 }

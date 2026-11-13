@@ -179,11 +179,10 @@ func mustWriteFile(t *testing.T, path, contents string) {
 	}
 }
 
-// TestLogChownEntryError_ReadOnlyFSIsDebug: an EROFS failure (the Cloud Run
-// runtime mounts the agent secrets read-only inside the home directory) is
-// logged at debug, not as an error, whether bare or wrapped; any other
-// failure is still an error and a hard-link skip is still a warning
-// (ptone/scion#7104).
+// TestLogChownEntryError_ReadOnlyFSIsDebug: an EROFS failure (for example on a
+// read-only volume mounted inside the home directory) is logged at debug, not
+// as an error, whether bare or wrapped; any other failure is still an error
+// and a hard-link skip is still a warning (ptone/scion#7104).
 func TestLogChownEntryError_ReadOnlyFSIsDebug(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "agent.log")
 	log.SetLogPath(logPath)

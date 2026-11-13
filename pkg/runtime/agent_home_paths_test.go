@@ -53,9 +53,6 @@ func TestAgentHomeSameOnKubernetesAndCloudRun(t *testing.T) {
 			if host.homeHostPath != filepath.Join(hostBase, k8sHome) {
 				t.Fatalf("cloud run host home %q, want %q", host.homeHostPath, filepath.Join(hostBase, k8sHome))
 			}
-			if want := path.Join(export, root, projectID, "agents", slug, "secrets-"+agentID); cr.secretsExportPath != want {
-				t.Fatalf("secrets = %q, want %q", cr.secretsExportPath, want)
-			}
 		})
 	}
 }

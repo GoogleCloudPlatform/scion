@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
@@ -674,4 +675,116 @@ func TestWriteAs_RejectsDotAndDotDotTarget(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestWrite_ScionSecretsSubdirAndUnwritableTargetDiagnostic covers file
+// secrets targeting ~/.scion/secrets/<file> (including nested paths) and
+// verifies that when a target directory or parent mount is unwritable (such
+// as a read-only mount or 0500 directory), Write fails with a secret-free
+// error naming both the secret and the target path.
+func TestWrite_ScionSecretsSubdirAndUnwritableTargetDiagnostic(t *testing.T) {
+	const canary = "fake-secret-canary-7866-never-log"
+
+	t.Run("writable ~/.scion/secrets targets succeed", func(t *testing.T) {
+		homeDir := t.TempDir()
+		direct := filepath.Join(homeDir, ".scion", "secrets", "api-key")
+		nested := filepath.Join(homeDir, ".scion", "secrets", "nested", "sa.json")
+		staged := &Staged{
+			FileSecrets: []FileSecret{
+				{Name: "API_KEY", Target: direct, Value: base64.StdEncoding.EncodeToString([]byte("v1"))},
+				{Name: "SA_JSON", Target: nested, Value: base64.StdEncoding.EncodeToString([]byte("v2"))},
+			},
+			VariableSecrets: map[string]string{"REGION": "us-central1"},
+		}
+		if err := Write(homeDir, staged); err != nil {
+			t.Fatalf("Write() = %v, want nil", err)
+		}
+		for p, want := range map[string]string{direct: "v1", nested: "v2"} {
+			got, err := os.ReadFile(p)
+			if err != nil {
+				t.Fatalf("read %s: %v", p, err)
+			}
+			if string(got) != want {
+				t.Errorf("%s = %q, want %q", p, got, want)
+			}
+			fi, err := os.Lstat(p)
+			if err != nil {
+				t.Fatalf("lstat %s: %v", p, err)
+			}
+			if !fi.Mode().IsRegular() || fi.Mode().Perm() != 0o600 {
+				t.Errorf("%s mode = %v, want regular 0600", p, fi.Mode())
+			}
+		}
+	})
+
+	t.Run("unwritable targets report secret name and target path without secret value", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root bypasses 0500 directory permissions")
+		}
+		restore := dirfd.SetTrustedAncestorOwnerUIDForTest(os.Getuid())
+		defer restore()
+
+		homeDir := t.TempDir()
+		roHomeSub := filepath.Join(homeDir, ".scion", "secrets")
+		if err := os.MkdirAll(roHomeSub, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(roHomeSub, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(roHomeSub, 0o700) })
+
+		outsideBase := t.TempDir()
+		if err := os.Chmod(outsideBase, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		roOutside := filepath.Join(outsideBase, "ro")
+		if err := os.Mkdir(roOutside, 0o555); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(roOutside, 0o755) })
+
+		cases := []struct {
+			name   string
+			secret string
+			target string
+		}{
+			{
+				name:   "direct leaf in unwritable ~/.scion/secrets",
+				secret: "DIRECT_KEY",
+				target: filepath.Join(roHomeSub, "key.pem"),
+			},
+			{
+				name:   "nested subdir under unwritable ~/.scion/secrets",
+				secret: "NESTED_KEY",
+				target: filepath.Join(roHomeSub, "sub", "key.pem"),
+			},
+			{
+				name:   "nested subdir under unwritable outside-home mount",
+				secret: "OUTSIDE_KEY",
+				target: filepath.Join(roOutside, "sub", "cert.pem"),
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				enc := base64.StdEncoding.EncodeToString([]byte(canary))
+				err := writeAs(homeDir, &Staged{
+					FileSecrets: []FileSecret{{Name: tc.secret, Target: tc.target, Value: enc}},
+				}, os.Getuid(), os.Getgid())
+				if err == nil {
+					t.Fatalf("writeAs(%s) = nil, want error on unwritable target", tc.target)
+				}
+				msg := err.Error()
+				if !filepath.IsAbs(tc.target) {
+					t.Fatalf("target %q must be absolute", tc.target)
+				}
+				if !strings.Contains(msg, tc.secret) || !strings.Contains(msg, tc.target) {
+					t.Errorf("error %q must name both secret %q and target %q", msg, tc.secret, tc.target)
+				}
+				if strings.Contains(msg, canary) || strings.Contains(msg, enc) {
+					t.Errorf("error leaked secret material: %q", msg)
+				}
+			})
+		}
+	})
 }
