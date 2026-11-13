@@ -21,11 +21,13 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -496,9 +498,7 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 		if errors.Is(err, errNoAuthFallbackRefused) {
-			writeError(w, http.StatusUnprocessableEntity, ErrCodeHarnessCredentialsMissing,
-				fmt.Sprintf("harness config %q has no credentials available for this agent; set them as hub secrets, "+
-					"or pass --harness-auth (--harness-auth none runs the harness without credentials)", req.HarnessConfig), nil)
+			writeReincarnateHarnessCredentialsMissing(w, targetHC, req.HarnessAuth)
 			return
 		}
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
@@ -506,12 +506,32 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	imageRegistry := resolveRegistry(fresh.Profile)
+	runAs := *agent
+	runAs.AppliedConfig = fresh
+	if targetHC != nil && !fresh.NoAuth && fresh.HarnessAuth != harness.AuthTypeNone {
+		var authMeta *config.HarnessAuthMetadata
+		if targetHC.Config != nil {
+			authMeta = targetHC.Config.AuthMeta
+		}
+		// Broker-env-only credentials are invisible to this hub-side probe
+		// and can cause a false 422. Hosted deployments use hub secrets.
+		// The broker's reprovision gather remains the backstop and runs
+		// before resetting the home if its credential verdict differs.
+		hasCredentials, err := s.hasRequiredAuthCredentials(ctx, &runAs, targetHC.Harness, authMeta)
+		if err != nil {
+			s.agentLifecycleLog.Error("Failed to check target harness credentials", "agent_id", agent.ID, "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to check target harness credentials", nil)
+			return
+		}
+		if !hasCredentials {
+			writeReincarnateHarnessCredentialsMissing(w, targetHC, fresh.HarnessAuth)
+			return
+		}
+	}
 	// Fail fast, as start and restart do, when the GCP identity the fresh
 	// config will run with is no longer allowed for this agent. Checked
 	// before the claim and the worker's stop, so a refused request leaves
 	// the agent as it was, and a dry run reports the same refusal.
-	runAs := *agent
-	runAs.AppliedConfig = fresh
 	if s.gcpIdentityStartRefusal(ctx, w, &runAs, "reincarnate") {
 		return
 	}
@@ -1428,4 +1448,35 @@ func (s *Server) reincarnateWorkspaceGate(ctx context.Context, agent *store.Agen
 		cloneMode:               hasGitClone || emptyPerAgentMove,
 		sameBrokerEmptyPerAgent: sameBrokerEmptyPerAgent,
 	}
+}
+
+// writeReincarnateHarnessCredentialsMissing reports config-declared names only.
+// With automatic auth selection, any declared type could satisfy the probe, so
+// list all types' requirements in a stable order for dry-run/real parity.
+func writeReincarnateHarnessCredentialsMissing(w http.ResponseWriter, hc *store.HarnessConfig, authType string) {
+	var names []string
+	if hc.Config != nil && hc.Config.AuthMeta != nil {
+		meta := hc.Config.AuthMeta
+		for kind, requirements := range meta.Types {
+			if authType != "" && kind != authType {
+				continue
+			}
+			for _, group := range harness.RequiredAuthEnvKeysFromConfig(meta, kind) {
+				names = append(names, group...)
+			}
+			for _, file := range requirements.RequiredFiles {
+				names = append(names, file.Name)
+				names = append(names, file.AlternativeEnvKeys...)
+			}
+		}
+	}
+	slices.Sort(names)
+	names = slices.Compact(names)
+	requirements := ""
+	if len(names) > 0 {
+		requirements = " (credential requirements: " + strings.Join(names, ", ") + ")"
+	}
+	writeError(w, http.StatusUnprocessableEntity, ErrCodeHarnessCredentialsMissing,
+		fmt.Sprintf("harness config %q has no credentials available for this agent%s; set them as hub secrets, "+
+			"or pass --harness-auth (--harness-auth none runs the harness without credentials)", hc.Name, requirements), nil)
 }
