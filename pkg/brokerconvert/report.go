@@ -88,7 +88,7 @@ var refusalTexts = map[string]string{
 	RefusePlanNotClean:       "the plan has blocking findings or needs an operator decision; review 'convert --plan' and resolve them first",
 	RefuseHubSections:        "the plan needs this host's Runtime Broker row and the Hub sections; check the Hub login and the registration",
 	RefuseMultipleInstances:  "this release applies a plan with exactly one instance; a plan with more instances is not applied yet",
-	RefuseCapacitySplit:      "the plan splits the legacy agent limit across several instances; this release applies one instance only",
+	RefuseCapacitySplit:      "the plan's per-instance agent limits do not match the planned instances or exceed the legacy Runtime Broker's limit",
 	RefuseCapacityDecision:   "the legacy Runtime Broker has no agent limit of its own (it inherits the Hub's), so the instance's limit needs an operator decision; set the legacy Runtime Broker's maxAgents first",
 	RefuseCapacityPermission: "writing the instance's agent limit needs quota.update on the Hub; ask a Hub admin to run the apply, or to grant it",
 	RefuseCapacityDrift:      "the instance's agent limit on the Hub is not the one apply carries over from the legacy Runtime Broker; it was changed since; set it back, or roll back",
