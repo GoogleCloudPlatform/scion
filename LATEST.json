@@ -11,9 +11,9 @@
       "url": "https://github.com/GoogleCloudPlatform/scion/releases/tag/v0.4.0-preview.1"
     },
     "nightly": {
-      "version": "nightly-20261112",
-      "date": "2026-11-12T03:17:23Z",
-      "url": "https://github.com/GoogleCloudPlatform/scion/releases/tag/nightly-20261112"
+      "version": "nightly-20261113",
+      "date": "2026-11-13T03:16:59Z",
+      "url": "https://github.com/GoogleCloudPlatform/scion/releases/tag/nightly-20261113"
     }
   }
 }
