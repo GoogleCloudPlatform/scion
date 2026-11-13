@@ -425,6 +425,15 @@ func TestValidateRemoteURI(t *testing.T) {
 	}
 }
 
+func BenchmarkValidateRemoteURI_Rclone(b *testing.B) {
+	uri := ":gcs:bucket/path/to/template"
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = ValidateRemoteURI(uri)
+	}
+}
+
 func TestSanitizePath(t *testing.T) {
 	tests := []struct {
 		name     string
