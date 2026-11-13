@@ -1630,17 +1630,25 @@ var errPluginBrokerRow = errors.New("plugin broker row")
 
 // ensurePluginBroker creates the runtime broker row for the named broker
 // plugin when it does not exist, with the same fields server startup
-// (cmd/server_foreground.go) uses. A plugin activated or reconfigured
-// without a restart, or whose row was deleted, then has the live row its
-// HMAC secret authenticates against. It reports a failed look-up (other
-// than not found) or create (other than already exists), wrapping
-// errPluginBrokerRow.
+// (cmd/server_foreground.go) uses, and verifies that an existing row at the
+// deterministic UUIDv5 actually belongs to this plugin
+// (Labels[pluginBrokerLabel] == name) so a pre-registered non-plugin row can
+// never be adopted (ptone/scion#7625).
+// A plugin activated or reconfigured without a restart, or whose row was
+// deleted, then has the live row its HMAC secret authenticates against. It
+// reports a failed look-up (other than not found), label mismatch, or create
+// (other than already exists with matching label), wrapping errPluginBrokerRow.
 func (s *Server) ensurePluginBroker(ctx context.Context, name, brokerID string) error {
 	if s.store == nil {
 		return nil
 	}
-	_, err := s.store.GetRuntimeBroker(ctx, brokerID)
+	existing, err := s.store.GetRuntimeBroker(ctx, brokerID)
 	if err == nil {
+		if existing.Labels[pluginBrokerLabel] != name {
+			slog.WarnContext(ctx, "Refusing non-plugin broker row at deterministic plugin broker ID",
+				"plugin", name, "brokerId", brokerID)
+			return fmt.Errorf("%w label mismatch", errPluginBrokerRow)
+		}
 		return nil
 	}
 	if !errors.Is(err, store.ErrNotFound) {
@@ -1659,9 +1667,17 @@ func (s *Server) ensurePluginBroker(ctx context.Context, name, brokerID string) 
 		Created:         now,
 		Updated:         now,
 	}
-	if err := s.store.CreateRuntimeBrokerClearingCredentials(ctx, b); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
-		slog.WarnContext(ctx, "Failed to create plugin broker row", "plugin", name, "brokerId", brokerID)
-		return fmt.Errorf("%w create failed", errPluginBrokerRow)
+	if err := s.store.CreateRuntimeBrokerClearingCredentials(ctx, b); err != nil {
+		if !errors.Is(err, store.ErrAlreadyExists) {
+			slog.WarnContext(ctx, "Failed to create plugin broker row", "plugin", name, "brokerId", brokerID)
+			return fmt.Errorf("%w create failed", errPluginBrokerRow)
+		}
+		reread, rerr := s.store.GetRuntimeBroker(ctx, brokerID)
+		if rerr != nil || reread.Labels[pluginBrokerLabel] != name {
+			slog.WarnContext(ctx, "Refusing concurrent non-plugin broker row at deterministic plugin broker ID",
+				"plugin", name, "brokerId", brokerID)
+			return fmt.Errorf("%w label mismatch", errPluginBrokerRow)
+		}
 	}
 	return nil
 }
@@ -1693,10 +1709,20 @@ func (s *Server) getPluginHubCredsChecked(ctx context.Context, name string) (map
 	brokerID := uuid.NewSHA1(pluginBrokerNS, []byte(legacyID)).String()
 	creds["broker_id"] = brokerID
 
-	// hmac_key: from BrokerAuthService (idempotent — returns existing key).
-	// A broker secret authenticates only a live broker row, so the plugin's
-	// row is ensured first, as startup does; without a confirmed row no
-	// secret is generated or rotated.
+	// hmac_key: from BrokerAuthService (idempotent — returns existing key;
+	// audited in ptone/scion#7625). Intentionally retains GenerateAndStoreSecret:
+	//   1. getPluginHubCredsChecked is called mid-session during live
+	//      reconfiguration, restart, activation, and supervisor reconnects
+	//      (including self-managed standalone bridges dialed across Hub
+	//      replicas that share one hmac_key), before ReplaceBrokerConfig or
+	//      RestartBrokerPlugin pushes the merged config; rotating here would
+	//      desynchronize replicas or brick a running plugin if the RPC push
+	//      subsequently failed.
+	//   2. Pre-registered non-plugin rows and orphaned secrets are prevented
+	//      because both server startup (provisionInProcessPluginBrokerSecret)
+	//      and ensurePluginBroker verify Labels[pluginBrokerLabel] == name, and
+	//      row creation clears orphaned credentials via
+	//      CreateRuntimeBrokerClearingCredentials.
 	if authSvc := s.GetBrokerAuthService(); authSvc != nil {
 		if err := s.ensurePluginBroker(ctx, name, brokerID); err != nil {
 			credsErr = fmt.Errorf("hmac key: %w", err)

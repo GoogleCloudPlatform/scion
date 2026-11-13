@@ -919,11 +919,23 @@ func applyBrokerJoinRequest(broker *store.RuntimeBroker, req BrokerJoinRequest, 
 }
 
 // GenerateAndStoreSecret returns the broker's stored HMAC secret, or
-// generates and stores one when there is none. Its callers are in-process
-// (the co-located and plugin brokers), which share one key across
-// restarts and instances; the co-located flat Runtime Broker activation
-// uses ReplaceBrokerSecret instead, and a response to a remote caller uses
-// MintSecretIfAbsent, which never returns a stored secret.
+// generates and stores one when there is none. Co-located flat Runtime
+// Broker instances (cmd/server_flat_host.go, guarded single-process per
+// instance ID) use ReplaceBrokerSecret instead, and responses to remote
+// callers use MintSecretIfAbsent, which never returns a stored secret.
+// All three remaining callers of GenerateAndStoreSecret (audited in
+// ptone/scion#7625) intentionally retain reuse-if-present semantics for
+// multi-replica or mid-session shared-DB compatibility:
+//   - startRuntimeBroker (cmd/server_foreground.go) — legacy single-broker
+//     co-located mode shared across replicated Hub instances until Phase 6;
+//   - provisionInProcessPluginBrokerSecret (cmd/server_foreground.go) —
+//     Hub-spawned subprocess plugins sharing a deterministic UUIDv5 across
+//     Hub replicas (enforcing scion.io/plugin label ownership);
+//   - getPluginHubCredsChecked / ensurePluginBroker
+//     (pkg/hub/handlers_integrations.go) — mid-session plugin reloads and
+//     self-managed standalone bridges across replicas (enforcing
+//     pluginBrokerLabel ownership).
+//
 // Returns the base64-encoded secret key.
 func (s *BrokerAuthService) GenerateAndStoreSecret(ctx context.Context, brokerID string) (string, error) {
 	if brokerID == "" {
