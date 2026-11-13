@@ -15,6 +15,7 @@
 package homeprep
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -60,7 +61,7 @@ func TestDecide(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := Decide(tt.read, testAgentID, tt.uid, tt.names)
+			got, err := Decide(tt.read, testAgentID, tt.uid, tt.names, "")
 			if tt.wantClass != "" {
 				var ce *ClassError
 				require.ErrorAs(t, err, &ce)
@@ -115,4 +116,48 @@ func TestValidAgentID(t *testing.T) {
 	for _, bad := range []string{"", "agent", "0B9F6A52-3C1E-4F43-9D8E-2A6F1C7B5E10", "0b9f6a523c1e4f439d8e2a6f1c7b5e10", "0b9f6a52-3c1e-4f43-9d8e-2a6f1c7b5e1/", "../f6a52-3c1e-4f43-9d8e-2a6f1c7b5e10"} {
 		assert.False(t, ValidAgentID(bad), bad)
 	}
+}
+
+func TestDecideReset(t *testing.T) {
+	for _, state := range []string{StateSeeded, StateSeeding} {
+		for _, uid := range []int{1000, 2000} {
+			s := &Sentinel{Version: 1, AgentID: testAgentID, State: state, UID: 1000, ResetID: "old"}
+			got, err := Decide(SentinelRead{Sentinel: s}, testAgentID, uid, nil, "new")
+			require.NoError(t, err)
+			assert.Equal(t, Decision{Mode: ModeSeed, CleanAll: true}, got)
+			s.AgentID = "other"
+			_, err = Decide(SentinelRead{Sentinel: s}, testAgentID, uid, nil, "new")
+			require.ErrorContains(t, err, "belongs to agent")
+		}
+	}
+	s := &Sentinel{Version: 1, AgentID: testAgentID, State: StateSeeded, UID: 1000, ResetID: "new"}
+	got, err := Decide(SentinelRead{Sentinel: s}, testAgentID, 1000, nil, "new")
+	require.NoError(t, err)
+	assert.Equal(t, ModeSeedOver, got.Mode)
+	_, err = Decide(SentinelRead{Sentinel: s}, testAgentID, 2000, nil, "new")
+	require.ErrorContains(t, err, "uid 1000")
+	got, err = Decide(SentinelRead{NotExist: true}, testAgentID, 2000, nil, "new")
+	require.NoError(t, err)
+	assert.Equal(t, Decision{Mode: ModeSeed}, got)
+	_, err = Decide(SentinelRead{NotExist: true}, testAgentID, 2000, []string{"old-home"}, "new")
+	require.ErrorContains(t, err, "content but no sentinel")
+}
+
+func TestSentinelResetCompatible(t *testing.T) {
+	data, err := json.Marshal(Sentinel{Version: 1, State: StateSeeded, ResetID: "reset-1"})
+	require.NoError(t, err)
+	// Version-1 readers ignore the additional field.
+	var old struct {
+		Version int    `json:"version"`
+		State   string `json:"state"`
+	}
+	require.NoError(t, json.Unmarshal(data, &old))
+	assert.Equal(t, 1, old.Version)
+	assert.Equal(t, StateSeeded, old.State)
+	s, err := parseSentinel(data)
+	require.NoError(t, err)
+	assert.Equal(t, "reset-1", s.ResetID)
+	data, err = json.Marshal(Sentinel{Version: 1})
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "reset_id")
 }

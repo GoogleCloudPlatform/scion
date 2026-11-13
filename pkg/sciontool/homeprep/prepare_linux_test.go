@@ -763,3 +763,70 @@ func TestPrepare_SkeletonSourceIsTheHome(t *testing.T) {
 		assert.Contains(t, err.Error(), "is the agent home itself")
 	}
 }
+
+func TestPrepareReset(t *testing.T) {
+	bothResolvers(t, func(t *testing.T) {
+		e := newPrepEnv(t)
+		_, err := Prepare(e.opts("old"))
+		require.NoError(t, err)
+		require.NoError(t, MarkSeeded(e.home, testAgentID, "old"))
+		e.write(".old-harness/cache", "old")
+		e.write(".scion-home-old", "reserved old")
+		outside := filepath.Join(e.base, "outside")
+		require.NoError(t, os.WriteFile(outside, []byte("keep"), 0o644))
+		require.NoError(t, os.Symlink(outside, filepath.Join(e.home, "outside-link")))
+		require.NoError(t, os.WriteFile(filepath.Join(e.skeleton, ".new-harness"), []byte("new"), 0o644))
+		// The new image may use another uid: reset still seeds if removal is possible.
+		s := e.sentinel()
+		s.UID = os.Getuid() + 1
+		data, err := json.Marshal(s)
+		require.NoError(t, err)
+		e.write(SentinelName, string(data))
+		opts := e.opts("new")
+		opts.ResetID = "reset-1"
+		mode, err := Prepare(opts)
+		require.NoError(t, err)
+		assert.Equal(t, ModeSeed, mode)
+		assert.NoFileExists(t, filepath.Join(e.home, ".old-harness/cache"))
+		assert.NoFileExists(t, filepath.Join(e.home, ".scion-home-old"))
+		assert.NoFileExists(t, filepath.Join(e.home, "outside-link"))
+		assert.FileExists(t, outside)
+		assert.FileExists(t, filepath.Join(e.home, ".new-harness"))
+		assert.Equal(t, "reset-1", e.sentinel().ResetID)
+		assert.Equal(t, os.Getuid(), e.sentinel().UID)
+		require.NoError(t, MarkSeeded(e.home, testAgentID, "new"))
+		e.write("user-file", "keep on restart")
+		opts.StartID = "restart"
+		mode, err = Prepare(opts)
+		require.NoError(t, err)
+		assert.Equal(t, ModeSeedOver, mode)
+		assert.FileExists(t, filepath.Join(e.home, "user-file"))
+	})
+}
+
+func TestPrepareResetRemovalDenied(t *testing.T) {
+	bothResolvers(t, func(t *testing.T) {
+		e := newPrepEnv(t)
+		_, err := Prepare(e.opts("old"))
+		require.NoError(t, err)
+		require.NoError(t, MarkSeeded(e.home, testAgentID, "old"))
+		e.write("old-harness", "must clear")
+		removeEntryTestHook = func(string) error { return unix.EACCES }
+		t.Cleanup(func() { removeEntryTestHook = nil })
+		opts := e.opts("new")
+		opts.ResetID = "reset-1"
+		mode, err := Prepare(opts)
+		require.Error(t, err)
+		assert.Empty(t, mode)
+		var ce *ClassError
+		require.ErrorAs(t, err, &ce)
+		assert.Equal(t, ErrClassSeed, ce.Class)
+		assert.Empty(t, e.sentinel().ResetID)
+		assert.Equal(t, "old", e.sentinel().StartID)
+		removeEntryTestHook = nil
+		mode, err = Prepare(opts)
+		require.NoError(t, err)
+		assert.Equal(t, ModeSeed, mode)
+		assert.NoFileExists(t, filepath.Join(e.home, "old-harness"))
+	})
+}

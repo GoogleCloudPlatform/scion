@@ -306,6 +306,7 @@ func (r *KubernetesRuntime) verifyK8sHomeLinks(ctx context.Context, namespace, p
 // "home leaf", "home prepare" and "home mark-seeded" contract. The init
 // containers check the image's sciontool for it before using it.
 const homeFeatureToken = "home-v1"
+const homeResetFeatureToken = "home-reset-v1"
 
 const (
 	// k8sHomeVolume is the home's PVC volume when its claim differs from
@@ -408,6 +409,18 @@ exit 3`, shellQuote(homeFeatureToken), strings.Join(quoted, " "), homeFeatureTok
 	return []string{"sh", "-c", script}
 }
 
+func homeResetInitCommand(args ...string) []string {
+	quoted := make([]string, len(args))
+	for i, a := range args {
+		quoted[i] = shellQuote(a)
+	}
+	message := "home_prepare_failed: the agent image's sciontool cannot reset an NFS home (missing feature " + homeResetFeatureToken + "); use an image built from a scion release with " + homeResetFeatureToken + " support"
+	script := fmt.Sprintf(`if sciontool version --features 2>/dev/null | grep -qx %s; then exec %s; fi
+echo %s >&2
+exit 3`, shellQuote(homeResetFeatureToken), strings.Join(quoted, " "), shellQuote(message))
+	return []string{"sh", "-c", script}
+}
+
 // nfsHomePodParts is what buildPod adds to an NFS-home pod.
 type nfsHomePodParts struct {
 	// volume is set when the home needs its own PVC volume.
@@ -506,10 +519,16 @@ func (r *KubernetesRuntime) nfsHomePodSpec(config RunConfig, containerHome strin
 	}
 	skeletonMax := hs.SkeletonMaxBytes
 	_, memMount := nfsHomeVolume()
+	prepareArgs := []string{"sciontool", "home", "prepare", "--home", k8sHomePrepareMount, "--mem-dir", k8sMemDir}
+	prepareCommand := homeInitCommand(prepareArgs...)
+	if config.HomeResetID != "" {
+		prepareArgs = append(prepareArgs, "--reset-id", config.HomeResetID)
+		prepareCommand = homeResetInitCommand(prepareArgs...)
+	}
 	parts.initContainers = append(parts.initContainers, corev1.Container{
 		Name:    k8sHomePrepareContainer,
 		Image:   config.Image,
-		Command: homeInitCommand("sciontool", "home", "prepare", "--home", k8sHomePrepareMount, "--mem-dir", k8sMemDir),
+		Command: prepareCommand,
 		Env: []corev1.EnvVar{
 			{Name: homeAgentIDEnvVar, Value: hs.AgentID},
 			{Name: homeStartIDEnvVar, Value: startID},

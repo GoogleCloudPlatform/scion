@@ -151,5 +151,5 @@ const ReprovisionResetHomeCapabilityPrefix = "reprovisionResetHome:"
 // and any runtime home leaf (ptone/scion#7757). Runtimes that keep a
 // copy of the home elsewhere (an NFS leaf) are added once they clear it.
 func ReprovisionResetHomeRuntimes() []string {
-	return []string{"docker", "podman", "container", "cloudrun", "cloudrun-instances"}
+	return []string{"docker", "podman", "container", "cloudrun", "cloudrun-instances", "kubernetes"}
 }

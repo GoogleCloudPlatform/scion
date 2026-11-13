@@ -49,7 +49,7 @@ var versionFeatures bool
 // contract per token. A broker that relies on a contract checks for its
 // token in the image's sciontool before using it.
 func Features() []string {
-	return []string{homeprep.FeatureToken}
+	return []string{homeprep.FeatureToken, homeprep.ResetFeatureToken}
 }
 
 func init() {

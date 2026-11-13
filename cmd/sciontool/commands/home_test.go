@@ -36,8 +36,8 @@ func TestVersionFeatures(t *testing.T) {
 	rootCmd.SetArgs([]string{"version", "--features"})
 	t.Cleanup(func() { versionFeatures = false })
 	require.NoError(t, rootCmd.Execute())
-	assert.Equal(t, "home-v1\n", buf.String())
-	assert.Equal(t, []string{homeprep.FeatureToken}, Features())
+	assert.Equal(t, "home-v1\nhome-reset-v1\n", buf.String())
+	assert.Equal(t, []string{homeprep.FeatureToken, homeprep.ResetFeatureToken}, Features())
 }
 
 func runHome(t *testing.T, args ...string) (string, error) {
@@ -93,4 +93,18 @@ func TestHomeCommands(t *testing.T) {
 	_, err = runHome(t, "leaf", "--agent-dir", agentDir)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), homeprep.ErrClassLeafFailed)
+}
+
+func TestHomePrepareResetFlag(t *testing.T) {
+	home, mem := t.TempDir(), t.TempDir()
+	t.Setenv(envHomeAgentID, "0b9f6a52-3c1e-4f43-9d8e-2a6f1c7b5e10")
+	t.Setenv(envHomeStartID, "start-1")
+	t.Setenv(envHomeLinks, "")
+	t.Setenv(envHomeSkeletonSrc, "")
+	t.Cleanup(func() { homeResetID = "" })
+	out, err := runHome(t, "prepare", "--home", home, "--mem-dir", mem, "--reset-id", "reset-1")
+	require.NoError(t, err, out)
+	data, err := os.ReadFile(filepath.Join(home, homeprep.SentinelName))
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"reset_id": "reset-1"`)
 }

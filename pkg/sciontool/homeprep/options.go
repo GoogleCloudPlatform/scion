@@ -24,6 +24,8 @@ type PrepareOptions struct {
 	MemDir string
 	// AgentID is the hub agent ID the home belongs to.
 	AgentID string
+	// ResetID identifies the latest home reset; repeated starts keep this value.
+	ResetID string
 	// StartID identifies this start; LaunchID the hub launch, if any.
 	StartID  string
 	LaunchID string
