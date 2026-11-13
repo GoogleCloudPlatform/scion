@@ -438,3 +438,367 @@ func TestConvertHost_OwnInstanceCredentialsAndLoginDoNotRefuse(t *testing.T) {
 	assert.Equal(t, brokerconvert.HostModeColocated, mode)
 	assert.Equal(t, brokerconvert.HostModeDetected, source)
 }
+
+// setConvertProcessEndpointFlags puts the process-global 'server start' flags
+// in the state they have inside 'scion runtime-broker convert' (unset, with
+// webPort's flag default), and restores them when the test ends.
+func setConvertProcessEndpointFlags(t *testing.T) {
+	t.Helper()
+	savedHub, savedBroker, savedWeb, savedHosted := enableHub, enableRuntimeBroker, enableWeb, hostedMode
+	savedWebPort, savedHubPort, savedBase, savedDebug := webPort, hubPort, webBaseURL, enableDebug
+	t.Cleanup(func() {
+		enableHub, enableRuntimeBroker, enableWeb, hostedMode = savedHub, savedBroker, savedWeb, savedHosted
+		webPort, hubPort, webBaseURL, enableDebug = savedWebPort, savedHubPort, savedBase, savedDebug
+	})
+	enableHub, enableRuntimeBroker, enableWeb, hostedMode = false, false, false, false
+	webPort, hubPort, webBaseURL, enableDebug = 8080, 9810, "", false
+}
+
+// serverResolveForSavedLaunch runs the server's own resolveHubEndpointWithSource
+// with the global flags and port override reconciled as 'scion server start'
+// reconciles them for a co-located launch (ptone/scion#7714).
+func serverResolveForSavedLaunch(t *testing.T, configPath string, settings *config.Settings, hubOn, webOn, hosted bool, hubPortOverride, webPortVal int, baseURL string) (string, hubEndpointSource) {
+	t.Helper()
+	savedHub, savedBroker, savedWeb, savedHosted := enableHub, enableRuntimeBroker, enableWeb, hostedMode
+	savedWebPort, savedBase, savedDebug := webPort, webBaseURL, enableDebug
+	defer func() {
+		enableHub, enableRuntimeBroker, enableWeb, hostedMode = savedHub, savedBroker, savedWeb, savedHosted
+		webPort, webBaseURL, enableDebug = savedWebPort, savedBase, savedDebug
+	}()
+	cfg, err := config.LoadGlobalConfig(configPath)
+	require.NoError(t, err)
+	if hubPortOverride != 0 {
+		cfg.Hub.Port = hubPortOverride
+	}
+	enableHub, enableRuntimeBroker, enableWeb, hostedMode = hubOn, true, webOn, hosted
+	webPort, webBaseURL, enableDebug = webPortVal, baseURL, false
+	return resolveHubEndpointWithSource(cfg, settings)
+}
+
+// Agreement with the server's Hub endpoint resolver (ptone/scion#7714): when a
+// co-located host is detected from a saved server launch, colocatedPrecheckHost
+// (with 'server start' flags unset, as inside 'runtime-broker convert')
+// resolves the exact URL and source that the co-located server derives for the
+// same saved launch across --base-url, SCION_SERVER_HUB_ENDPOINT,
+// SCION_SERVER_BASE_URL, server.hub.public_url, settings hub.endpoint, hosted
+// IAP audience derivation and the localhost fallback (web port or Hub port).
+func TestColocatedPrecheckHost_AgreesWithServerResolver(t *testing.T) {
+	const (
+		flagURL     = "https://flag.example.com"
+		envHubURL   = "https://env-hub.example.com"
+		envBaseURL  = "https://env-base.example.com"
+		fileURL     = "https://file.example.com"
+		settingsURL = "https://settings.example.com"
+		iapAudience = "/projects/12345/locations/us-central1/services/scion-hub"
+		iapURL      = "https://scion-hub-12345.us-central1.run.app"
+	)
+	cases := []struct {
+		name           string
+		settingsYAML   string
+		extraCfgYAML   string // written to a separate --config file when non-empty
+		envHub         string
+		envBase        string
+		envLegacyHub   string
+		args           []string
+		serverHubOn    bool
+		serverWebOn    bool
+		serverHosted   bool
+		serverHubPort  int
+		serverWebPort  int
+		serverBaseFlag string
+		wantURL        string
+		wantSrc        hubEndpointSource
+		// checkConvertHost runs convertHost(globalDir) too when the named
+		// settings endpoint does not intentionally omit a local match.
+		skipConvertHost bool
+	}{
+		{
+			name:            "--base-url outranks env and file",
+			settingsYAML:    "server:\n  hub:\n    public_url: " + fileURL + "\nhub:\n  endpoint: " + fileURL + "\n",
+			envHub:          envHubURL,
+			envBase:         envBaseURL,
+			args:            []string{"server", "start", "--foreground", "--base-url=" + flagURL + "/"},
+			serverHubOn:     true,
+			serverWebOn:     true,
+			serverWebPort:   8080,
+			serverBaseFlag:  flagURL + "/",
+			wantURL:         flagURL,
+			wantSrc:         hubEndpointSourceBaseURLFlag,
+			skipConvertHost: true, // envHubURL overrides ev.Configured while hub.endpoint names fileURL
+		},
+		{
+			name:           "--base-url alone on workstation launch",
+			args:           []string{"server", "start", "--foreground", "--base-url=" + flagURL},
+			serverHubOn:    true,
+			serverWebOn:    true,
+			serverWebPort:  8080,
+			serverBaseFlag: flagURL,
+			wantURL:        flagURL,
+			wantSrc:        hubEndpointSourceBaseURLFlag,
+		},
+		{
+			name:          "SCION_SERVER_HUB_ENDPOINT outranks SCION_SERVER_BASE_URL and file",
+			settingsYAML:  "server:\n  hub:\n    public_url: " + fileURL + "\n",
+			envHub:        envHubURL,
+			envBase:       envBaseURL,
+			args:          []string{"server", "start", "--foreground"},
+			serverHubOn:   true,
+			serverWebOn:   true,
+			serverWebPort: 8080,
+			wantURL:       envHubURL,
+			wantSrc:       hubEndpointSourceConfig,
+		},
+		{
+			name:          "SCION_SERVER_BASE_URL outranks file",
+			settingsYAML:  "server:\n  hub:\n    public_url: " + fileURL + "\n",
+			envBase:       envBaseURL + "/",
+			args:          []string{"server", "start", "--foreground"},
+			serverHubOn:   true,
+			serverWebOn:   true,
+			serverWebPort: 8080,
+			wantURL:       envBaseURL,
+			wantSrc:       hubEndpointSourceBaseURLEnv,
+		},
+		{
+			name:          "configured server.hub.public_url outranks settings hub.endpoint",
+			settingsYAML:  "server:\n  hub:\n    public_url: " + fileURL + "\nhub:\n  endpoint: " + fileURL + "\n",
+			args:          []string{"server", "start", "--foreground"},
+			serverHubOn:   true,
+			serverWebOn:   true,
+			serverWebPort: 8080,
+			wantURL:       fileURL,
+			wantSrc:       hubEndpointSourceConfig,
+		},
+		{
+			name:            "settings hub.endpoint outranks IAP and localhost",
+			settingsYAML:    "server:\n  mode: hosted\n  broker:\n    enabled: true\n  auth:\n    proxy:\n      iap:\n        audience: " + iapAudience + "\nhub:\n  endpoint: " + settingsURL + "\n",
+			args:            []string{"server", "start", "--foreground", "--enable-hub"},
+			serverHubOn:     true,
+			serverWebOn:     false,
+			serverHosted:    true,
+			serverWebPort:   8080,
+			wantURL:         settingsURL,
+			wantSrc:         hubEndpointSourceSettings,
+			skipConvertHost: true, // settingsURL is remote without server.hub.public_url
+		},
+		{
+			name:          "SCION_HUB_ENDPOINT matching saved listener resolves as settings",
+			envLegacyHub:  "http://127.0.0.1:8443",
+			args:          []string{"server", "start", "--foreground", "--web-port=8443"},
+			serverHubOn:   true,
+			serverWebOn:   true,
+			serverWebPort: 8443,
+			wantURL:       "http://127.0.0.1:8443",
+			wantSrc:       hubEndpointSourceSettings,
+		},
+		{
+			name:          "hosted --hosted flag derives IAP Cloud Run URL",
+			settingsYAML:  "server:\n  auth:\n    proxy:\n      iap:\n        audience: " + iapAudience + "\n",
+			args:          []string{"server", "start", "--foreground", "--hosted", "--enable-hub", "--enable-runtime-broker"},
+			serverHubOn:   true,
+			serverWebOn:   false,
+			serverHosted:  true,
+			serverWebPort: 8080,
+			wantURL:       iapURL,
+			wantSrc:       hubEndpointSourceIAPAudience,
+		},
+		{
+			name:          "hosted server.mode in settings derives IAP Cloud Run URL",
+			settingsYAML:  "server:\n  mode: hosted\n  broker:\n    enabled: true\n  auth:\n    proxy:\n      iap:\n        audience: " + iapAudience + "\n",
+			args:          []string{"server", "start", "--foreground", "--enable-hub"},
+			serverHubOn:   true,
+			serverWebOn:   false,
+			serverHosted:  true,
+			serverWebPort: 8080,
+			wantURL:       iapURL,
+			wantSrc:       hubEndpointSourceIAPAudience,
+		},
+		{
+			name:          "workstation default localhost fallback uses web port 8080",
+			args:          []string{"server", "start", "--foreground"},
+			serverHubOn:   true,
+			serverWebOn:   true,
+			serverWebPort: 8080,
+			wantURL:       "http://localhost:8080",
+			wantSrc:       hubEndpointSourceLocalhost,
+		},
+		{
+			name:          "workstation --web-port localhost fallback",
+			args:          []string{"server", "start", "--foreground", "--web-port=8443"},
+			serverHubOn:   true,
+			serverWebOn:   true,
+			serverWebPort: 8443,
+			wantURL:       "http://localhost:8443",
+			wantSrc:       hubEndpointSourceLocalhost,
+		},
+		{
+			name:          "workstation --enable-web=false uses Hub port and --port override",
+			args:          []string{"server", "start", "--foreground", "--enable-web=false", "--port=9123"},
+			serverHubOn:   true,
+			serverWebOn:   false,
+			serverHubPort: 9123,
+			serverWebPort: 8080,
+			wantURL:       "http://localhost:9123",
+			wantSrc:       hubEndpointSourceLocalhost,
+		},
+		{
+			name:          "hosted without web uses Hub port localhost fallback",
+			args:          []string{"server", "start", "--foreground", "--hosted", "--enable-hub", "--enable-runtime-broker"},
+			serverHubOn:   true,
+			serverWebOn:   false,
+			serverHosted:  true,
+			serverWebPort: 8080,
+			wantURL:       "http://localhost:9810",
+			wantSrc:       hubEndpointSourceLocalhost,
+		},
+		{
+			name:          "saved --config loads server config from that path",
+			extraCfgYAML:  "hub:\n  endpoint: " + fileURL + "\n",
+			args:          []string{"server", "start", "--foreground"},
+			serverHubOn:   true,
+			serverWebOn:   true,
+			serverWebPort: 8080,
+			wantURL:       fileURL,
+			wantSrc:       hubEndpointSourceConfig,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			globalDir := isolateServerHubEndpointEnv(t)
+			t.Chdir(t.TempDir())
+			oldMode, oldDetect := brokerConvertHostMode, convertDetectHost
+			t.Cleanup(func() { brokerConvertHostMode, convertDetectHost = oldMode, oldDetect })
+			brokerConvertHostMode = ""
+			convertDetectHost = detectColocatedHost
+
+			body := "schema_version: \"1\"\n" + tc.settingsYAML
+			require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(body), 0o600))
+
+			args := append([]string(nil), tc.args...)
+			var cfgPath string
+			if tc.extraCfgYAML != "" {
+				cfgPath = filepath.Join(t.TempDir(), "custom-server.yaml")
+				require.NoError(t, os.WriteFile(cfgPath, []byte(tc.extraCfgYAML), 0o600))
+				args = append(args, "--config="+cfgPath)
+			}
+			require.NoError(t, daemon.SaveArgs(serverDaemonComponent, globalDir, args))
+
+			if tc.envHub != "" {
+				t.Setenv("SCION_SERVER_HUB_ENDPOINT", tc.envHub)
+			}
+			if tc.envBase != "" {
+				t.Setenv("SCION_SERVER_BASE_URL", tc.envBase)
+			}
+			if tc.envLegacyHub != "" {
+				t.Setenv("SCION_HUB_ENDPOINT", tc.envLegacyHub)
+			}
+
+			settings, err := config.LoadSettings(globalDir)
+			require.NoError(t, err)
+
+			wantServerURL, wantServerSrc := serverResolveForSavedLaunch(t, cfgPath, settings,
+				tc.serverHubOn, tc.serverWebOn, tc.serverHosted, tc.serverHubPort, tc.serverWebPort, tc.serverBaseFlag)
+			require.Equal(t, tc.wantURL, wantServerURL, "test setup: server URL")
+			require.Equal(t, tc.wantSrc, wantServerSrc, "test setup: server source")
+
+			// Inside 'scion runtime-broker convert', the 'server start' flags are unset.
+			setConvertProcessEndpointFlags(t)
+
+			detectedHost, err := detectColocatedHost(globalDir)
+			require.NoError(t, err)
+			require.True(t, detectedHost.Colocated)
+			hc := colocatedPrecheckHost(detectedHost, settings)
+			assert.Equal(t, wantServerURL, hc.hubEndpoint, "convert endpoint must match server resolver")
+			assert.Equal(t, wantServerSrc, hc.hubEndpointSrc, "convert endpoint source must match server resolver")
+
+			if !tc.skipConvertHost {
+				convHost, mode, src, err := convertHost(globalDir)
+				require.NoError(t, err)
+				assert.Equal(t, brokerconvert.HostModeColocated, mode)
+				assert.Equal(t, brokerconvert.HostModeDetected, src)
+				convHC := colocatedPrecheckHost(convHost, settings)
+				assert.Equal(t, wantServerURL, convHC.hubEndpoint)
+				assert.Equal(t, wantServerSrc, convHC.hubEndpointSrc)
+			}
+		})
+	}
+}
+
+// Asserted co-located mode with no saved launch (ptone/scion#7714): convert
+// uses ONLY the configured server.hub.endpoint, ignoring SCION_SERVER_BASE_URL,
+// settings hub.endpoint, IAP derivation and the localhost fallback, and
+// refuses a Cloud Run precheck with a "set server.hub.endpoint" message when
+// server.hub.endpoint is missing (while non-Cloud Run targets remain allowed).
+func TestColocatedPrecheckHost_AssertedUsesOnlyConfiguredEndpoint(t *testing.T) {
+	const nfsStorageYAML = "  project_storage:\n    backend: nfs\n    homes: nfs\n    nfs:\n      mount_root: /mnt/nfs\n      shares:\n        - id: ws1\n          server: 10.0.0.2\n          export: /x\n"
+
+	crTargetInst := config.V1RuntimeBrokerInstanceConfig{
+		Key:           "cr-1",
+		RuntimeTarget: &config.V1RuntimeTargetConfig{Type: config.RuntimeTargetTypeCloudRun},
+	}
+	dockerTargetInst := config.V1RuntimeBrokerInstanceConfig{
+		Key:           "docker-1",
+		RuntimeTarget: &config.V1RuntimeTargetConfig{Type: config.RuntimeTargetTypeDocker},
+	}
+
+	t.Run("configured server.hub.endpoint is used and ignores SCION_SERVER_BASE_URL", func(t *testing.T) {
+		globalDir := isolateServerHubEndpointEnv(t)
+		t.Chdir(t.TempDir())
+		oldMode, oldDetect := brokerConvertHostMode, convertDetectHost
+		t.Cleanup(func() { brokerConvertHostMode, convertDetectHost = oldMode, oldDetect })
+		convertDetectHost = detectColocatedHost
+		brokerConvertHostMode = brokerconvert.HostModeColocated
+
+		settingsBody := "schema_version: \"1\"\nserver:\n  hub:\n    public_url: https://configured.example.com\n" + nfsStorageYAML
+		require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(settingsBody), 0o600))
+		t.Setenv("SCION_SERVER_BASE_URL", "https://ignored-base.example.com")
+		setConvertProcessEndpointFlags(t)
+
+		host, mode, source, err := convertHost(globalDir)
+		require.NoError(t, err)
+		require.Equal(t, brokerconvert.HostModeColocated, mode)
+		require.Equal(t, brokerconvert.HostModeAsserted, source)
+
+		settings, err := config.LoadSettings(globalDir)
+		require.NoError(t, err)
+		hc := colocatedPrecheckHost(host, settings)
+		assert.Equal(t, "https://configured.example.com", hc.hubEndpoint)
+		assert.Equal(t, hubEndpointSourceConfig, hc.hubEndpointSrc)
+	})
+
+	t.Run("missing server.hub.endpoint refuses cloudrun with set server.hub.endpoint even if env or settings or IAP exist", func(t *testing.T) {
+		globalDir := isolateServerHubEndpointEnv(t)
+		t.Chdir(t.TempDir())
+		oldMode, oldDetect := brokerConvertHostMode, convertDetectHost
+		t.Cleanup(func() { brokerConvertHostMode, convertDetectHost = oldMode, oldDetect })
+		convertDetectHost = detectColocatedHost
+		brokerConvertHostMode = brokerconvert.HostModeColocated
+
+		settingsBody := "schema_version: \"1\"\nserver:\n  mode: hosted\n  auth:\n    proxy:\n      iap:\n        audience: /projects/12345/locations/us-central1/services/scion-hub\n" + nfsStorageYAML
+		require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(settingsBody), 0o600))
+		t.Setenv("SCION_SERVER_BASE_URL", "https://ignored-base.example.com")
+		setConvertProcessEndpointFlags(t)
+
+		host, mode, source, err := convertHost(globalDir)
+		require.NoError(t, err)
+		require.Equal(t, brokerconvert.HostModeColocated, mode)
+		require.Equal(t, brokerconvert.HostModeAsserted, source)
+
+		// Even if settings carries hub.endpoint, asserted mode without a saved
+		// launch must NOT fall back to settings.GetHubEndpoint().
+		settings := &config.Settings{Hub: &config.HubClientConfig{Endpoint: "https://ignored-settings.example.com"}}
+		hc := colocatedPrecheckHost(host, settings)
+		assert.Empty(t, hc.hubEndpoint)
+		assert.Equal(t, hubEndpointSourceNone, hc.hubEndpointSrc)
+
+		_, err = flatInstancePrecheck(context.Background(), crTargetInst, hc)
+		require.Error(t, err)
+		assert.Equal(t, reasonCloudRunHubEndpoint, brokerhost.ReasonCode(err))
+		assert.Contains(t, err.Error(), "set server.hub.endpoint")
+
+		// A Docker instance on the same asserted co-located host is unaffected.
+		_, err = flatInstancePrecheck(context.Background(), dockerTargetInst, hc)
+		assert.NoError(t, err)
+	})
+}
