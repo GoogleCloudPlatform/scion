@@ -102,6 +102,11 @@ import {
   renderEnvValuesList as envValuesListView,
   renderKeysEnvBadge,
 } from '../shared/env-badge-views.js';
+import {
+  FEATURE_FLAGS_CHANGED_EVENT,
+  FLAT_BROKERS_FLAG,
+  isFeatureEnabled,
+} from '../../utils/feature-flags.js';
 
 /** GET /api/v1/admin/server-config returns this in place of each secret. */
 const MASKED_VALUE = '********';
@@ -2146,8 +2151,13 @@ export class ScionPageAdminServerConfig extends LitElement {
     }
   `;
 
+  private readonly onFlagsChanged = (): void => {
+    this.requestUpdate();
+  };
+
   override connectedCallback(): void {
     super.connectedCallback();
+    window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.onFlagsChanged);
     void this.loadConfig();
     void this.loadHarnessConfigs();
     void this.loadRuntimeBrokers();
@@ -2155,6 +2165,11 @@ export class ScionPageAdminServerConfig extends LitElement {
     void this.loadGitHubAppInstallations();
     void this.loadMessagingSettings();
     void this.loadUpdateStatus();
+  }
+
+  override disconnectedCallback(): void {
+    window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.onFlagsChanged);
+    super.disconnectedCallback();
   }
 
   private async loadConfig(): Promise<void> {
@@ -7283,6 +7298,13 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   private renderBrokerInstancesSection() {
+    if (
+      !isFeatureEnabled(FLAT_BROKERS_FLAG) &&
+      this.brokerInstances.length === 0 &&
+      this.loadedBrokerInstances.length === 0
+    ) {
+      return nothing;
+    }
     const readOnlyReason = this.readOnlyReason('server.broker.instances');
     const readOnly = readOnlyReason !== null;
     return html`

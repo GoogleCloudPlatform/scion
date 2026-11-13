@@ -126,6 +126,13 @@ function makeFullConfig(overrides: Record<string, unknown>): Record<string, unkn
         broker_name: 'broker-a',
         broker_nickname: 'nick',
         auto_provide: true,
+        instances: [
+          {
+            key: 'local-docker',
+            name: 'Local Docker',
+            runtime_target: { type: 'docker' },
+          },
+        ],
       },
       database: { driver: 'postgres', url: '********' },
       auth: {

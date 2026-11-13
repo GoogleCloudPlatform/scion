@@ -17,6 +17,11 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import type { ScionPageAdminServerConfig } from './admin-server-config.js';
 import {
+  FLAT_BROKERS_FLAG,
+  resetServerFlagStateForTests,
+  setFeatureFlag,
+} from '../../utils/feature-flags.js';
+import {
   registrySchemaResponse,
   unknownPayloadKeys,
   valueAtPath,
@@ -251,7 +256,51 @@ describe('scion-page-admin-server-config — server.broker.instances (ptone/scio
   afterEach(() => {
     element?.remove();
     element = null;
+    delete window.__SCION_FEATURES__;
+    resetServerFlagStateForTests();
     vi.restoreAllMocks();
+  });
+
+  function makeConfigWithoutInstances(
+    overrides: Record<string, unknown> = {}
+  ): Record<string, unknown> {
+    const cfg = makeConfig(overrides);
+    delete (cfg.server.broker as Record<string, unknown>).instances;
+    return cfg;
+  }
+
+  it('hides server.broker.instances when FLAT_BROKERS_FLAG is off and no instances are stored', async () => {
+    setFeatureFlag(FLAT_BROKERS_FLAG, false);
+    element = await mountConfig(
+      makeConfigWithoutInstances({ settings_tier: 'db', layer0_editable: true })
+    );
+
+    expect(element.shadowRoot?.querySelector('[data-broker-instances-section]')).toBeNull();
+  });
+
+  it('renders server.broker.instances when FLAT_BROKERS_FLAG is off if stored instances exist', async () => {
+    setFeatureFlag(FLAT_BROKERS_FLAG, false);
+    element = await mountConfig(makeConfig({ settings_tier: 'db', layer0_editable: true }));
+
+    const section = element.shadowRoot?.querySelector('[data-broker-instances-section]');
+    expect(section).not.toBeNull();
+    expect(section?.querySelectorAll('[data-broker-instance-card]').length).toBe(2);
+  });
+
+  it('renders server.broker.instances when FLAT_BROKERS_FLAG is on even with no stored instances', async () => {
+    setFeatureFlag(FLAT_BROKERS_FLAG, true);
+    element = await mountConfig(
+      makeConfigWithoutInstances({ settings_tier: 'db', layer0_editable: true })
+    );
+
+    const section = element.shadowRoot?.querySelector('[data-broker-instances-section]');
+    expect(section).not.toBeNull();
+    expect(section?.textContent).toContain('No flat Runtime Broker instances configured.');
+    const addBtn = section?.querySelector('[data-add-broker-instance]') as HTMLElement | null;
+    expect(addBtn).not.toBeNull();
+    addBtn!.click();
+    await element.updateComplete;
+    expect(element.shadowRoot?.querySelectorAll('[data-broker-instance-card]').length).toBe(1);
   });
 
   it('renders server.broker.instances read-only in hosted DB mode and never sends it on save', async () => {
