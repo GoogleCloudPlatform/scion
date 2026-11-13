@@ -6155,6 +6155,23 @@ func (s *Server) messageEventHandler() EventHandler {
 				return errScheduledWakeShutdown
 			}
 			if isBrokerAgentNotFound(err) {
+				logArgs := []any{
+					"eventID", evt.ID,
+					"scheduleID", evt.ScheduleID,
+					"agent_id", agent.ID,
+					"agentName", agent.Name,
+					"wake", payload.Wake,
+					"error", err,
+				}
+				var se *brokerStatusError
+				if errors.As(err, &se) {
+					logArgs = append(logArgs,
+						"broker_status", se.StatusCode,
+						"broker_body_len", len(se.Body),
+						"broker_body", brokerBodyForLog(se.Body),
+					)
+				}
+				slog.Warn("Scheduler: broker reported agent not found on message dispatch", logArgs...)
 				if !payload.Wake {
 					if fresh, gerr := s.store.GetAgent(retryCtx, agent.ID); gerr == nil && fresh != nil {
 						if phaseErr := validateAgentDeliverable(fresh); phaseErr != nil {

@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -238,6 +239,32 @@ func TestScheduledMessage_WithoutWake_RecordsInEventAndScheduleHistory(t *testin
 	})
 }
 
+type schedPhaseLogBuf struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *schedPhaseLogBuf) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *schedPhaseLogBuf) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func captureSchedPhaseSlog(t *testing.T) *schedPhaseLogBuf {
+	t.Helper()
+	b := &schedPhaseLogBuf{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(b, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return b
+}
+
 type raceBroker404Dispatcher struct {
 	wakeTrackingDispatcher
 	onMessage func(ctx context.Context, agent *store.Agent) error
@@ -283,12 +310,38 @@ func TestScheduledMessage_PostDispatchBroker404Race(t *testing.T) {
 			},
 		}
 		f.srv.SetDispatcher(disp)
+		logBuf := captureSchedPhaseSlog(t)
 
 		err := f.fire(withSessionRevision(f.event(false), u.ID))
 		require.Error(t, err)
 		assert.Equal(t, fmt.Sprintf("agent %q has no running container; message was not delivered", f.target.Slug), err.Error())
 		assert.NotContains(t, err.Error(), "agent_not_found")
 		assert.NotContains(t, err.Error(), "404")
+
+		logged := logBuf.String()
+		assert.Contains(t, logged, "Scheduler: broker reported agent not found on message dispatch")
+		assert.Contains(t, logged, "broker_status=404")
+		assert.Contains(t, logged, "Agent not found")
+	})
+
+	t.Run("wake fire broker 404 after resume returns translated error", func(t *testing.T) {
+		f := newSchedWake(t, state.PhaseSuspended)
+		u := f.user(t, "sw-race-wakeresume", lifecyclePerms...)
+		f.disp.msgReturnErr = brokerNotFound
+		f.reportReadyOnStart(t)
+		logBuf := captureSchedPhaseSlog(t)
+
+		err := f.fire(withSessionRevision(f.event(true), u.ID))
+		require.Error(t, err)
+		require.Len(t, f.disp.getStartCalls(), 1, "wake resumed the suspended target")
+		assert.Equal(t, fmt.Sprintf("agent %q has no running container; message was not delivered", f.target.Slug), err.Error())
+		assert.NotContains(t, err.Error(), "agent_not_found")
+		assert.NotContains(t, err.Error(), "404")
+
+		logged := logBuf.String()
+		assert.Contains(t, logged, "Scheduler: broker reported agent not found on message dispatch")
+		assert.Contains(t, logged, "broker_status=404")
+		assert.Contains(t, logged, "Agent not found")
 	})
 }
 
