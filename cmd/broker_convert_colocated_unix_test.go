@@ -64,6 +64,80 @@ func TestFlatRegistrationActivation_CloudRunByHostMode(t *testing.T) {
 	assert.Equal(t, brokerhost.ModeColocated, colocatedPrecheckHost(colocatedHost{Colocated: true}, nil).mode)
 }
 
+// End-to-end Cloud Run registration precheck on a co-located convert host
+// (ptone/scion#7714): saved launches pass or refuse according to what the
+// server derives from the launch, and an asserted host without a saved launch
+// passes with server.hub.endpoint set and refuses naming "set server.hub.endpoint"
+// when it is missing.
+func TestFlatRegistrationActivation_ColocatedConvertHubEndpoint(t *testing.T) {
+	const nfsStorageYAML = "  project_storage:\n    backend: nfs\n    homes: nfs\n    nfs:\n      mount_root: /mnt/nfs\n      shares:\n        - id: ws1\n          server: 10.0.0.2\n          export: /x\n"
+
+	setupHost := func(t *testing.T, serverYAML string, savedArgs []string, hostModeFlag string) (flatPrecheckHost, config.V1RuntimeBrokerInstanceConfig) {
+		t.Helper()
+		globalDir := isolateServerHubEndpointEnv(t)
+		t.Chdir(t.TempDir())
+		oldMode, oldDetect := brokerConvertHostMode, convertDetectHost
+		t.Cleanup(func() { brokerConvertHostMode, convertDetectHost = oldMode, oldDetect })
+		convertDetectHost = detectColocatedHost
+		brokerConvertHostMode = hostModeFlag
+
+		body := "schema_version: \"1\"\nserver:\n" + nfsStorageYAML + serverYAML
+		require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(body), 0o600))
+		if savedArgs != nil {
+			require.NoError(t, daemon.SaveArgs(serverDaemonComponent, globalDir, savedArgs))
+		}
+		setConvertProcessEndpointFlags(t)
+
+		host, _, _, err := convertHost(globalDir)
+		require.NoError(t, err)
+		settings, err := config.LoadSettings(globalDir)
+		require.NoError(t, err)
+		hc := colocatedPrecheckHost(host, settings)
+
+		seedHC := crHostFacts()
+		inst := crInst("cr-a", "us-central1", crGoodCredentials(t, &seedHC, t.TempDir()))
+		return hc, inst
+	}
+
+	t.Run("saved launch with https --base-url passes without server.hub.endpoint", func(t *testing.T) {
+		hc, inst := setupHost(t, "", []string{"server", "start", "--foreground", "--base-url=https://hub.example.com"}, "")
+		_, err := flatRegistrationActivation(context.Background(), inst, hc)
+		require.NoError(t, err)
+	})
+
+	t.Run("saved launch with loopback --base-url overriding https env refuses", func(t *testing.T) {
+		hc, inst := setupHost(t, "  hub:\n    public_url: https://hub.example.com\n",
+			[]string{"server", "start", "--foreground", "--base-url=http://localhost:8080"}, "")
+		_, err := flatRegistrationActivation(context.Background(), inst, hc)
+		require.Error(t, err)
+		assert.Equal(t, reasonCloudRunHubEndpoint, brokerhost.ReasonCode(err))
+	})
+
+	t.Run("saved hosted launch with IAP-derived endpoint refuses", func(t *testing.T) {
+		hc, inst := setupHost(t,
+			"  auth:\n    proxy:\n      iap:\n        audience: /projects/12345/locations/us-central1/services/scion-hub\n",
+			[]string{"server", "start", "--foreground", "--hosted", "--enable-hub", "--enable-runtime-broker"}, "")
+		_, err := flatRegistrationActivation(context.Background(), inst, hc)
+		require.Error(t, err)
+		assert.Equal(t, reasonCloudRunHubEndpoint, brokerhost.ReasonCode(err))
+		assert.Contains(t, err.Error(), "IAP audience")
+	})
+
+	t.Run("asserted mode with server.hub.endpoint set passes", func(t *testing.T) {
+		hc, inst := setupHost(t, "  hub:\n    public_url: https://hub.example.com\n", nil, brokerconvert.HostModeColocated)
+		_, err := flatRegistrationActivation(context.Background(), inst, hc)
+		require.NoError(t, err)
+	})
+
+	t.Run("asserted mode without server.hub.endpoint refuses naming set server.hub.endpoint", func(t *testing.T) {
+		hc, inst := setupHost(t, "", nil, brokerconvert.HostModeColocated)
+		_, err := flatRegistrationActivation(context.Background(), inst, hc)
+		require.Error(t, err)
+		assert.Equal(t, reasonCloudRunHubEndpoint, brokerhost.ReasonCode(err))
+		assert.Contains(t, err.Error(), "set server.hub.endpoint")
+	})
+}
+
 // closedAddr returns a loopback address with nothing listening on it.
 func closedAddr(t *testing.T) string {
 	t.Helper()

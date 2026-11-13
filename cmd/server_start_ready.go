@@ -126,13 +126,43 @@ func serverReadyTargetsFromArgs(args []string, cfg *config.GlobalConfig, fallbac
 }
 
 // serverListeners is what a 'server start --foreground' argv resolves to:
-// which components run and the host and port each listens on. The web
-// listener uses HubHost.
+// which components run, whether hosted mode is in effect, the host and port
+// each listens on, and --base-url when set. The web listener uses HubHost.
 type serverListeners struct {
 	Hub, Broker, Web    bool
+	Hosted              bool
 	HubHost, BrokerHost string
 	HubPort, BrokerPort int
 	WebPort             int
+	BaseURL             string
+}
+
+// endpointMode returns the serverEndpointMode resolved for this launch's argv.
+func (l serverListeners) endpointMode() serverEndpointMode {
+	return serverEndpointMode{
+		hubEnabled:    l.Hub,
+		brokerEnabled: l.Broker,
+		webEnabled:    l.Web,
+		hosted:        l.Hosted,
+		webPort:       l.WebPort,
+		baseURLFlag:   l.BaseURL,
+	}
+}
+
+// resolveHubEndpoint resolves the Hub endpoint and source that a server
+// started with this launch's argv derives from cfg and settings
+// (resolveHubEndpointFrom, with any --port override applied to cfg.Hub.Port
+// as loadAndReconcileConfig applies it).
+func (l serverListeners) resolveHubEndpoint(cfg *config.GlobalConfig, settings *config.Settings) (string, hubEndpointSource) {
+	c := *cfg
+	if l.HubPort != 0 {
+		c.Hub.Port = l.HubPort
+	}
+	var legacyEndpoint string
+	if settings != nil {
+		legacyEndpoint = settings.GetHubEndpoint()
+	}
+	return resolveHubEndpointFrom(&c, l.endpointMode(), legacyEndpoint, nil)
 }
 
 // serverListenersFromArgs resolves the components, hosts and ports of the
@@ -141,8 +171,9 @@ func serverListenersFromArgs(args []string, cfg *config.GlobalConfig, fallbackMo
 	fs := pflag.NewFlagSet("server-start-ready", pflag.ContinueOnError)
 	fs.ParseErrorsAllowlist.UnknownFlags = true
 	fs.SetOutput(io.Discard)
-	hosted := fs.Bool("hosted", false, "")
-	production := fs.Bool("production", false, "")
+	var hostedVal bool
+	fs.BoolVar(&hostedVal, "hosted", false, "")
+	fs.BoolVar(&hostedVal, "production", false, "")
 	hub := fs.Bool("enable-hub", false, "")
 	broker := fs.Bool("enable-runtime-broker", false, "")
 	web := fs.Bool("enable-web", false, "")
@@ -150,6 +181,7 @@ func serverListenersFromArgs(args []string, cfg *config.GlobalConfig, fallbackMo
 	hubPortFlag := fs.Int("port", 0, "")
 	brokerPortFlag := fs.Int("runtime-broker-port", 0, "")
 	webPortFlag := fs.Int("web-port", 8080, "")
+	baseURLFlag := fs.String("base-url", "", "")
 	// Parse errors (e.g. a malformed saved value) leave the defaults; the
 	// child reports such errors itself.
 	_ = fs.Parse(args)
@@ -161,7 +193,7 @@ func serverListenersFromArgs(args []string, cfg *config.GlobalConfig, fallbackMo
 		def := config.DefaultGlobalConfig()
 		cfg = &def
 	}
-	isHosted := *hosted || *production
+	isHosted := hostedVal
 	if !fs.Changed("hosted") && !fs.Changed("production") {
 		isHosted = serverMode == "hosted" || serverMode == "production"
 	}
@@ -211,9 +243,11 @@ func serverListenersFromArgs(args []string, cfg *config.GlobalConfig, fallbackMo
 
 	return serverListeners{
 		Hub: *hub, Broker: *broker, Web: *web,
+		Hosted:  isHosted,
 		HubHost: hubHostVal, BrokerHost: brokerHostVal,
 		HubPort: hubPortVal, BrokerPort: brokerPortVal,
 		WebPort: *webPortFlag,
+		BaseURL: *baseURLFlag,
 	}
 }
 

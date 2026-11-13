@@ -103,10 +103,12 @@ type flatPrecheckHost struct {
 	// (brokerStorageLayout) and the error that left it unusable.
 	layout     projectfs.Layout
 	storageErr error
-	// hubEndpoint and hubEndpointSrc are resolveHubEndpointWithSource's
-	// result: the input of the agent-facing hub URL.
+	// hubEndpoint, hubEndpointSrc and hubEndpointErr are the host's
+	// resolved Hub endpoint, its source, and any error that left it
+	// unresolved: the input of the agent-facing hub URL.
 	hubEndpoint    string
 	hubEndpointSrc hubEndpointSource
+	hubEndpointErr error
 	// getenv reads one variable by its exact name (nil: os.Getenv).
 	getenv func(string) string
 }
@@ -161,6 +163,10 @@ func flatInstancePrecheck(_ context.Context, inst config.V1RuntimeBrokerInstance
 	}
 	// P5: the same function that produces the value applied to the
 	// instance (flatCloudRunContainerHub).
+	if hc.hubEndpointErr != nil {
+		return nil, brokerhost.WithReason(reasonCloudRunHubEndpoint,
+			fmt.Errorf("no https, non-loopback hub endpoint for Cloud Run agents: %w", hc.hubEndpointErr))
+	}
 	if _, err := flatCloudRunAgentHubEndpoint(hc.hubEndpoint, hc.hubEndpointSrc); err != nil {
 		return nil, brokerhost.WithReason(reasonCloudRunHubEndpoint,
 			fmt.Errorf("no https, non-loopback hub endpoint for Cloud Run agents: %w", err))
