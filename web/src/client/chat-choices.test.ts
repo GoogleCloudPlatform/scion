@@ -208,6 +208,18 @@ describe('actionableReason (golden parity with pkg/store/testdata/decision_actio
     });
     expect(actionableReason(ownInterp, undefined)).toBe('not_recorded_answerer');
   });
+
+  it('fails closed (not_recorded_answerer) when both userId and answeredByUserId are empty', () => {
+    const deletedOwnerInterp = decided({
+      decision: {
+        ...decided().decision!,
+        provenance: 'agent_interpreted',
+        answeredByUserId: '',
+      },
+    });
+    expect(actionableReason(deletedOwnerInterp, '')).toBe('not_recorded_answerer');
+    expect(actionableReason(deletedOwnerInterp, undefined)).toBe('not_recorded_answerer');
+  });
 });
 
 describe('patchDecisions', () => {

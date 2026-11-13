@@ -88,9 +88,10 @@ function statusRank(view: DecisionView): number {
 
 /**
  * The view to hold for a decision row once `incoming` arrives: the incoming
- * one, unless it is behind the held one in pending < decided < replaced
- * (an out-of-order event, a page fetched before the change, or the
- * viewer's own POST answering just before a replacement arrived).
+ * one, unless it is behind the held one in the 4-tier `statusRank` ordering
+ * (`pending (0) < decided-interpreted (1) < decided-direct (2) < replaced (3)`)
+ * — an out-of-order event, a page fetched before the change, or the viewer's
+ * own POST answering just before a replacement arrived.
  */
 export function newerDecisionView(held: DecisionView, incoming: DecisionView): DecisionView {
   if (statusRank(incoming) < statusRank(held)) return held;

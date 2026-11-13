@@ -616,4 +616,131 @@ describe('Phase 2: single card interpreted, confirm, and change (Mocks P2-1, P2-
       /^Interpreted by release-bot from Bob's reply · \d\d:\d\d · View reply$/
     );
   });
+
+  it('clicking the already-chosen interpreted choice is a no-op when confirmbar is closed and cancels confirmbar when open', async () => {
+    const el = await mount([interpretedSingle({ id: 'u-me', name: 'Me' })]);
+    await settle(el);
+
+    // Closed `.confirmbar`: clicking the filled robot-marked choice must NOT send confirm.
+    button(el, 'yes').click();
+    await settle(el);
+    expect(apiFetch).not.toHaveBeenCalled();
+    expect(root(el).querySelector('.confirmbar')).toBeNull();
+    expect(root(el).querySelector('.confirm-row')).not.toBeNull();
+
+    // Open `.confirmbar` by selecting 'no', verify polite status announcement, then click 'yes' to cancel.
+    button(el, 'no').click();
+    await settle(el);
+    const bar = root(el).querySelector('.confirmbar');
+    expect(bar).not.toBeNull();
+    const statusSpan = bar?.querySelector('span[role="status"]');
+    expect(statusSpan?.getAttribute('aria-live')).toBe('polite');
+
+    button(el, 'yes').click();
+    await settle(el);
+    expect(apiFetch).not.toHaveBeenCalled();
+    expect(root(el).querySelector('.confirmbar')).toBeNull();
+    expect(root(el).querySelector('.confirm-row')).not.toBeNull();
+  });
+
+  it('Hub-shaped 403 not_recorded_answerer (with details.decision) toasts warning and refreshes card to read-only without blocking', async () => {
+    const bobInterp = interpretedSingle({ id: 'u-bob', name: 'Bob' });
+    apiFetch.mockResolvedValueOnce(
+      res(403, {
+        error: {
+          code: 'not_recorded_answerer',
+          message: 'only the recorded answerer may confirm or change an interpreted answer',
+          details: { decision: bobInterp },
+        },
+      })
+    );
+
+    const el = await mount([interpretedSingle({ id: 'u-me', name: 'Me' })]);
+    root(el).querySelector<HTMLElement>('[data-action="confirm"]')!.click();
+    await settle(el);
+
+    expect(showToast).toHaveBeenCalledWith(
+      'only the recorded answerer may confirm or change an interpreted answer',
+      'warning'
+    );
+    expect(root(el).querySelector('sl-tooltip')?.getAttribute('content')).toBe(
+      'Only Bob can confirm or change this answer'
+    );
+    for (const id of ['yes', 'no', 'wait']) {
+      expect(button(el, id).hasAttribute('disabled')).toBe(true);
+    }
+    expect(root(el).querySelector('.confirm-row')).toBeNull();
+    expect(root(el).querySelector('[data-reason]')).toBeNull();
+    expect(root(el).querySelector('[data-note]')).toBeNull();
+  });
+
+  it('stacked (described-choice) interpreted single cards disable non-owner buttons natively and open confirmbar with aria-pressed for owner', async () => {
+    const stackedChoices = [
+      { id: 'yes', label: 'Yes', description: 'Deploy right away.' },
+      { id: 'no', label: 'No', description: 'Hold until Monday.' },
+    ];
+
+    const elBob = await mount([
+      interpretedSingle({ id: 'u-bob', name: 'Bob' }, { choices: stackedChoices }),
+    ]);
+    await settle(elBob);
+    for (const id of ['yes', 'no']) {
+      const opt = button(elBob, id);
+      expect(opt.tagName.toLowerCase()).toBe('button');
+      expect(opt.hasAttribute('disabled')).toBe(true);
+      expect(opt.getAttribute('title')).toBe('Only Bob can confirm or change this answer');
+    }
+    button(elBob, 'no').click();
+    await settle(elBob);
+    expect(apiFetch).not.toHaveBeenCalled();
+    expect(root(elBob).querySelector('.confirmbar')).toBeNull();
+
+    const elMe = await mount([
+      interpretedSingle({ id: 'u-me', name: 'Me' }, { choices: stackedChoices }),
+    ]);
+    await settle(elMe);
+    expect(button(elMe, 'yes').hasAttribute('disabled')).toBe(false);
+    button(elMe, 'yes').click();
+    await settle(elMe);
+    expect(apiFetch).not.toHaveBeenCalled();
+
+    button(elMe, 'no').click();
+    await settle(elMe);
+    expect(root(elMe).querySelector('.confirmbar')).not.toBeNull();
+    expect(button(elMe, 'no').getAttribute('aria-pressed')).toBe('true');
+
+    button(elMe, 'yes').click();
+    await settle(elMe);
+    expect(root(elMe).querySelector('.confirmbar')).toBeNull();
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('closes an open confirmbar when SSE updates the row to direct-confirmed', async () => {
+    const el = await mount([interpretedSingle({ id: 'u-me', name: 'Me' })]);
+    button(el, 'no').click();
+    await settle(el);
+    expect(root(el).querySelector('.confirmbar')).not.toBeNull();
+
+    el.decisions = [
+      view({
+        status: 'decided',
+        decision: {
+          choiceId: 'yes',
+          label: 'Yes',
+          answeredByUserId: 'u-me',
+          answeredByName: 'Me',
+          provenance: 'direct',
+          outcome: 'confirm',
+          surface: 'web',
+          responseMessageId: 'resp-sse',
+          at: '2026-11-12T15:55:00Z',
+        },
+      }),
+    ];
+    await settle(el);
+
+    expect(root(el).querySelector('.confirmbar')).toBeNull();
+    expect(root(el).querySelector('.confirm-row')).toBeNull();
+    expect(root(el).querySelector('.card-head .badge.conf')?.textContent?.trim()).toBe('confirmed');
+  });
 });

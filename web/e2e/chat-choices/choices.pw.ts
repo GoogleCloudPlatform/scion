@@ -908,6 +908,23 @@ test.describe('Interactive chat choices on real hub (web.chat_choices)', () => {
         { timeout: 15_000 }
       );
 
+      // User B (`not_recorded_answerer`) cannot confirm or override User A's interpreted answer.
+      const confRowId = promptConf.decisions?.[0]?.row_id;
+      expect(confRowId).toBeTruthy();
+      const bobAttempt = await hubApi<{ error?: { code?: string } }>(
+        hub,
+        userB.accessToken,
+        'POST',
+        `/api/v1/decisions/${encodeURIComponent(confRowId!)}/answer`,
+        { choice_id: 'no', idempotency_key: crypto.randomUUID() }
+      );
+      expect(bobAttempt.status).toBe(403);
+      expect(bobAttempt.body.error?.code).toBe('not_recorded_answerer');
+      await expect(cardConfA.locator('.card-head .badge.interp')).toContainText('interpreted');
+      await expect(
+        cardConfA.locator('.confirm-row sl-button[data-action="confirm"]')
+      ).toBeVisible();
+
       // 1. User A confirms S-CONF (response 1: logged without waking the agent).
       await cardConfA.locator('.confirm-row sl-button[data-action="confirm"]').click();
       await expect(cardConfA.locator('.card-head .badge.conf')).toContainText('confirmed', {
@@ -926,8 +943,9 @@ test.describe('Interactive chat choices on real hub (web.chat_choices)', () => {
         'not sent to the agent'
       );
 
-      // Space >2s past the co-located broker's 2s per-agent debounce window
-      // before triggering the override on the same agent.
+      // Clear the co-located runtime broker's 2s per-agent delivery debounce window
+      // so `waitForChoiceResponseDelivery` deterministically attributes the broker
+      // delivery attempt to response 2 (override) without coalescing.
       await new Promise((resolve) => setTimeout(resolve, 2_500));
 
       // 2. User A overrides S-OVER via the inline change bar (response 2: delivered to agent).
@@ -979,7 +997,7 @@ test.describe('Interactive chat choices on real hub (web.chat_choices)', () => {
       expect(confirmInspected!.attemptedAgentDelivery).toBe(false);
 
       // 3. Reload parity: reload User B's page so history comes from GET /messages
-      // and verify AnswerView.previousChoiceLabel still renders on the card.
+      // and verify both card `AnswerView.previousChoiceLabel` and response lines survive reload.
       await sessionB.page.reload({ waitUntil: 'domcontentloaded' });
       const reloadedOverCard = sessionB.page.locator(
         `scion-chat-message[id="msg-${promptOver.message_id}"] scion-chat-choices`
@@ -990,6 +1008,26 @@ test.describe('Interactive chat choices on real hub (web.chat_choices)', () => {
       await expect(reloadedOverCard.locator('.row-foot')).toContainText(
         'changed from the interpreted answer 5 minutes'
       );
+
+      const reloadedConfirmResp = sessionB.page.locator(
+        'scion-chat-choice-response [data-kind="single"][data-outcome="confirm"]'
+      );
+      await expect(reloadedConfirmResp).toContainText('Alice Choices confirmed Yes for', {
+        timeout: 15_000,
+      });
+      await expect(reloadedConfirmResp).toContainText('S-CONF');
+      await expect(reloadedConfirmResp.locator('[data-state="not-sent"]')).toHaveText(
+        'not sent to the agent'
+      );
+
+      const reloadedOverrideResp = sessionB.page.locator(
+        'scion-chat-choice-response [data-kind="single"][data-outcome="override"]'
+      );
+      await expect(reloadedOverrideResp).toContainText(
+        'Alice Choices changed S-OVER to 30 minutes',
+        { timeout: 15_000 }
+      );
+      await expect(reloadedOverrideResp).toContainText('(was interpreted as 5 minutes)');
     } finally {
       await Promise.all([sessionA.context.close(), sessionB.context.close()]);
     }

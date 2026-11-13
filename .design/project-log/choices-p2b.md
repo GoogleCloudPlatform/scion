@@ -53,3 +53,11 @@ Implemented the complete Phase 2B web confirm/change experience, Hub reload/SSE 
 - `cd web && CHROMIUM_EXECUTABLE=/usr/bin/chromium ./node_modules/.bin/playwright test -c e2e/chat-mobile/playwright.config.ts e2e/chat-mobile/choices.pw.ts` (72 passed)
 - `cd web && CHROMIUM_EXECUTABLE=/usr/bin/chromium E2E_PREBUILT=1 npm run test:e2e:chat-choices` (2 consecutive runs, 0 flakes)
 - `env -u SCION_MODEL make ci`
+
+## Pass-1 Review Fixes (ptone/scion#7798 / fork PR ptone/scion#7814)
+
+- **Q1 / R-s3:** Removed unreachable decision-less `403 not_recorded_answerer` and `409` branches in `choose()` and `submitSet()`, documented why `if (res.decision)` handles Hub-shaped `403 not_recorded_answerer` (`writeNotRecordedAnswerer` always populates `details.decision`), and added Vitest coverage verifying warning toast + read-only refresh without setting blocked `[data-reason]` / `[data-note]`.
+- **R1:** Made clicking the already-chosen interpreted button (`c.id === d.decision.choiceId`) on an owned single card a no-op when `.confirmbar` is closed and cancel `.confirmbar` when open (leaving confirm strictly to `[data-action="confirm"]`), with Vitest coverage for both states.
+- **R2:** Updated `excludedSummary` / `renderSetCounterContent` so the `"M of M ready"` set counter omits only `not_recorded_answerer` rows while still appending `replaced` and other-user direct `decided` counts, pinned by Vitest.
+- **Q2 & Q5:** Expanded `web/e2e/chat-choices/choices.pw.ts` to assert `403 not_recorded_answerer` on non-owner `POST /api/v1/decisions/{rowId}/answer`, assert both confirmed (`not sent to the agent`) and overridden (`(was interpreted as 5 minutes)`) `<scion-chat-choice-response>` lines after reload, and clarify the 2.5s broker debounce wait comment.
+- **A1, Q3, Q4, R-s4, R-s5:** Added Vitest coverage for empty `userId` + empty `answeredByUserId` fail-closed parity, stacked (`description`) interpreted single and set cards, SSE closing an open `.confirmbar`, consolidated `title` and `nativeDisabled` into `singleChoiceAppearance` / `setChoiceAppearance`, updated `newerDecisionView` doc comment for 4-tier `statusRank`, and added `role="status" aria-live="polite"` on `.confirmbar` text.

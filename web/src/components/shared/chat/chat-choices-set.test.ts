@@ -719,4 +719,42 @@ describe('Phase 2: set card interpreted pre-selection, chips, and multi-user exc
     expect(choice(elRace, 'r1', 'no').getAttribute('aria-pressed')).toBe('true');
     expect(counter(elRace)).toBe('2 of 2 ready · 1 confirm · 1 change');
   });
+
+  it('keeps replaced and other-user direct decided counts in the "M of M ready" counter while omitting not_recorded_answerer rows', async () => {
+    const d1 = interpretedRow(row('r1', 'D234'), 'yes', ME);
+    const d2 = decidedBy(row('r2', 'D-direct'), 'no', BOB, 'b-bob');
+    const d3 = interpretedRow(row('r3', 'D-carol'), 'yes', { id: 'u-carol', name: 'Carol' });
+    const d4 = replaced(row('r4', 'D-repl'));
+    const el = await mount([d1, d2, d3, d4]);
+
+    expect(counter(el)).toBe('1 of 1 ready · 1 confirm · 1 answered by Bob · 1 replaced');
+  });
+
+  it('stacked (described-choice) interpreted set rows disable non-owner buttons natively and toggle aria-pressed for owner', async () => {
+    const stackedChoices = [
+      { id: 'yes', label: 'Yes', description: 'Deploy right away.' },
+      { id: 'no', label: 'No', description: 'Hold until Monday.' },
+    ];
+    const d1 = interpretedRow(row('r1', 'D-me', { choices: stackedChoices }), 'yes', ME);
+    const d2 = interpretedRow(row('r2', 'D-bob', { choices: stackedChoices }), 'yes', BOB);
+    const el = await mount([d1, d2]);
+
+    for (const id of ['yes', 'no']) {
+      const opt = choice(el, 'r2', id);
+      expect(opt.classList.contains('opt')).toBe(true);
+      expect(opt.hasAttribute('disabled')).toBe(true);
+      expect(opt.getAttribute('title')).toBe('Only Bob can confirm or change this answer');
+    }
+    await click(el, choice(el, 'r2', 'no'));
+    expect(choice(el, 'r2', 'no').hasAttribute('aria-pressed')).toBe(false);
+    expect(text(rowEl(el, 'r2').querySelector('.chip.interp'))).toBe("Bob's answer");
+
+    expect(choice(el, 'r1', 'yes').hasAttribute('disabled')).toBe(false);
+    expect(choice(el, 'r1', 'yes').getAttribute('aria-pressed')).toBe('true');
+    await click(el, choice(el, 'r1', 'no'));
+    expect(choice(el, 'r1', 'no').getAttribute('aria-pressed')).toBe('true');
+    expect(choice(el, 'r1', 'yes').getAttribute('aria-pressed')).toBe('false');
+    expect(text(rowEl(el, 'r1').querySelector('.chip.change'))).toBe('will change');
+    expect(counter(el)).toBe('1 of 1 ready · 1 change');
+  });
 });
