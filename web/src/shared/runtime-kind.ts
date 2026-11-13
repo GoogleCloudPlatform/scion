@@ -49,6 +49,7 @@ export interface RuntimeKindProfile {
 /** A runtime broker, or just enough of one to classify its runtime kind. */
 export interface RuntimeKindBroker {
   profiles?: RuntimeKindProfile[];
+  runtimeTarget?: { type?: string } | null;
 }
 
 /** Whether a profile's `type` names the Kubernetes runtime, under any accepted spelling. */
@@ -57,11 +58,16 @@ export function isKubernetesRuntimeType(type: string | undefined): boolean {
 }
 
 /**
- * Whether every profile registered on broker is Kubernetes. A broker with no
+ * Whether a broker serves Kubernetes exclusively: either it is a flat Runtime
+ * Broker whose single `runtimeTarget.type` is Kubernetes, or it is a legacy
+ * broker where every registered profile is Kubernetes. A legacy broker with no
  * registered profiles is not considered Kubernetes-only — there is nothing to
  * confirm the type from, and this must not guess.
  */
 export function isBrokerKubernetesOnly(broker: RuntimeKindBroker | undefined): boolean {
+  if (broker?.runtimeTarget) {
+    return isKubernetesRuntimeType(broker.runtimeTarget.type);
+  }
   const profiles = broker?.profiles ?? [];
   if (profiles.length === 0) return false;
   return profiles.every((p) => isKubernetesRuntimeType(p.type));
@@ -71,17 +77,22 @@ export function isBrokerKubernetesOnly(broker: RuntimeKindBroker | undefined): b
  * Whether a specific broker/profile selection (as a create or configure
  * request would carry it) is reliably known to resolve to Kubernetes.
  *
- * With a profile name chosen, only that profile's type decides the answer.
- * With no profile chosen, this is true only when every *available* profile
- * on the broker is Kubernetes — a broker with no available profiles, or a
- * mix of runtime types and no profile picked yet, is not reliably known and
- * reads as false (not a guess).
+ * A flat Runtime Broker (`broker.runtimeTarget` present) serves a single
+ * runtime target with `profiles: []`, so `broker.runtimeTarget.type` decides
+ * directly. On a legacy broker, a chosen profile's type decides; with no
+ * profile chosen, this is true only when every *available* profile on the
+ * broker is Kubernetes — a broker with no available profiles, or a mix of
+ * runtime types and no profile picked yet, is not reliably known and reads as
+ * false (not a guess).
  */
 export function isTargetKubernetesOnly(
   broker: RuntimeKindBroker | undefined,
   profileName: string
 ): boolean {
   if (!broker) return false;
+  if (broker.runtimeTarget) {
+    return isKubernetesRuntimeType(broker.runtimeTarget.type);
+  }
   if (profileName) {
     const selected = broker.profiles?.find((p) => p.name === profileName);
     return isKubernetesRuntimeType(selected?.type);

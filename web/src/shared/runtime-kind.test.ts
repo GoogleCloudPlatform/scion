@@ -66,6 +66,27 @@ describe('isBrokerKubernetesOnly', () => {
     expect(isBrokerKubernetesOnly({})).toBe(false);
     expect(isBrokerKubernetesOnly(undefined)).toBe(false);
   });
+
+  it('classifies a flat Runtime Broker by runtimeTarget.type even with empty profiles', () => {
+    expect(
+      isBrokerKubernetesOnly({
+        profiles: [],
+        runtimeTarget: { type: 'kubernetes' },
+      })
+    ).toBe(true);
+    expect(
+      isBrokerKubernetesOnly({
+        profiles: [],
+        runtimeTarget: { type: 'k8s' },
+      })
+    ).toBe(true);
+    expect(
+      isBrokerKubernetesOnly({
+        profiles: [],
+        runtimeTarget: { type: 'docker' },
+      })
+    ).toBe(false);
+  });
 });
 
 describe('isTargetKubernetesOnly', () => {
@@ -107,6 +128,27 @@ describe('isTargetKubernetesOnly', () => {
       isTargetKubernetesOnly(
         {
           profiles: [{ name: 'default', type: 'kubernetes', available: false }],
+        },
+        ''
+      )
+    ).toBe(false);
+  });
+
+  it('classifies a flat Runtime Broker by runtimeTarget.type regardless of profiles', () => {
+    expect(
+      isTargetKubernetesOnly(
+        {
+          profiles: [],
+          runtimeTarget: { type: 'kubernetes' },
+        },
+        ''
+      )
+    ).toBe(true);
+    expect(
+      isTargetKubernetesOnly(
+        {
+          profiles: [],
+          runtimeTarget: { type: 'docker' },
         },
         ''
       )
