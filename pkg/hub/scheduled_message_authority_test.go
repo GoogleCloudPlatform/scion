@@ -59,7 +59,7 @@ func newSchedMsg(t *testing.T, name string) *schedMsg {
 	grantFixtureRole(t, f.bypassAgentsFixture, f.creator.ID, store.ProjectRoleAdmin)
 	target := &store.Agent{
 		ID: api.NewUUID(), Name: name + "-target", Slug: name + "-target",
-		ProjectID: f.proj.ID, MessageMode: store.MessageModeProject,
+		ProjectID: f.proj.ID, Phase: "running", MessageMode: store.MessageModeProject,
 	}
 	require.NoError(t, f.store.CreateAgent(context.Background(), target))
 	spy := &containmentDispatchSpy{}

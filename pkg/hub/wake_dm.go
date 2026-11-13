@@ -496,6 +496,19 @@ func validateGroupMemberDeliverable(agent *store.Agent) *AgentDMError {
 	return err
 }
 
+func agentTargetLabel(agent *store.Agent) string {
+	if agent == nil {
+		return ""
+	}
+	if agent.Slug != "" {
+		return agent.Slug
+	}
+	if agent.Name != "" {
+		return agent.Name
+	}
+	return agent.ID
+}
+
 // validateAgentDeliverable checks that the target agent is in a state that
 // can accept message delivery when wake was NOT requested. Returns nil when
 // the agent is running, or a typed error describing why delivery is not
@@ -503,37 +516,38 @@ func validateGroupMemberDeliverable(agent *store.Agent) *AgentDMError {
 func validateAgentDeliverable(agent *store.Agent) *AgentDMError {
 	rest := store.EffectiveRestingPhase(agent)
 	phase := state.Phase(rest)
+	label := agentTargetLabel(agent)
 	switch phase {
 	case state.PhaseRunning:
 		return nil
 	case state.PhaseSuspended:
 		return &AgentDMError{
 			Code:       ErrCodeAgentNotRunning,
-			Message:    fmt.Sprintf("agent %q is suspended; use --wake to resume and deliver", agent.Slug),
+			Message:    fmt.Sprintf("agent %q is suspended; use --wake to resume and deliver", label),
 			HTTPStatus: http.StatusConflict,
 		}
 	case state.PhaseStopped:
 		return &AgentDMError{
 			Code:       ErrCodeAgentNotRunning,
-			Message:    fmt.Sprintf("agent %q is stopped; use 'scion resume' to restart it with its previous state", agent.Slug),
+			Message:    fmt.Sprintf("agent %q is stopped; use 'scion resume' to restart it with its previous state", label),
 			HTTPStatus: http.StatusConflict,
 		}
 	case state.PhaseError:
 		return &AgentDMError{
 			Code:       ErrCodeAgentNotRunning,
-			Message:    fmt.Sprintf("agent %q is in error state; use 'scion resume' to restart", agent.Slug),
+			Message:    fmt.Sprintf("agent %q is in error state; use 'scion resume' to restart", label),
 			HTTPStatus: http.StatusConflict,
 		}
 	case state.PhaseHalted:
 		return &AgentDMError{
 			Code:       ErrCodeAgentNotRunning,
-			Message:    fmt.Sprintf("agent %q is halted; use 'scion start' to restart it", agent.Slug),
+			Message:    fmt.Sprintf("agent %q is halted; use 'scion start' to restart it", label),
 			HTTPStatus: http.StatusConflict,
 		}
 	default:
 		return &AgentDMError{
 			Code:       ErrCodeAgentNotRunning,
-			Message:    fmt.Sprintf("agent %q is not yet running (phase: %s); wait for it to reach running state", agent.Slug, rest),
+			Message:    fmt.Sprintf("agent %q is not yet running (phase: %s); wait for it to reach running state", label, rest),
 			HTTPStatus: http.StatusConflict,
 		}
 	}

@@ -6100,6 +6100,15 @@ func (s *Server) messageEventHandler() EventHandler {
 				}
 				return err
 			}
+		} else if phaseErr := validateAgentDeliverable(agent); phaseErr != nil {
+			slog.Warn("Scheduler: scheduled message target is not running",
+				"eventID", evt.ID,
+				"scheduleID", evt.ScheduleID,
+				"agent_id", agent.ID,
+				"agentName", agent.Name,
+				"phase", store.EffectiveRestingPhase(agent),
+				"error", phaseErr.Message)
+			return errors.New(phaseErr.Message)
 		}
 
 		dispatcher := s.GetDispatcher()
@@ -6144,6 +6153,16 @@ func (s *Server) messageEventHandler() EventHandler {
 		if err := dispatchWithBrokerRetry(retryCtx, s.recordLog(), dispatcher, agent, payload.Message, payload.Interrupt, structuredMsg); err != nil {
 			if payload.Wake && scheduledFireAborted(ctx) {
 				return errScheduledWakeShutdown
+			}
+			if isBrokerAgentNotFound(err) {
+				if !payload.Wake {
+					if fresh, gerr := s.store.GetAgent(retryCtx, agent.ID); gerr == nil && fresh != nil {
+						if phaseErr := validateAgentDeliverable(fresh); phaseErr != nil {
+							return errors.New(phaseErr.Message)
+						}
+					}
+				}
+				return fmt.Errorf("agent %q has no running container; message was not delivered", agentTargetLabel(agent))
 			}
 			return fmt.Errorf("failed to dispatch message to agent %s: %w", agent.Name, err)
 		}
