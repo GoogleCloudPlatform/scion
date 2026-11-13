@@ -78,12 +78,8 @@ export function userMentionSlug(member: { name?: string; email?: string }): stri
 }
 
 /** Canonical composer mention slug for an agent (`slug || name`). */
-export function agentMentionSlug(agent: {
-  slug?: string;
-  name?: string;
-  displayName?: string;
-}): string {
-  return (agent.slug || agent.displayName || agent.name || '').trim();
+export function agentMentionSlug(agent: { slug?: string; name?: string }): string {
+  return (agent.slug || agent.name || '').trim();
 }
 
 /** Characters that cannot immediately precede a standalone `@mention`. */
@@ -337,8 +333,8 @@ export function resolveReplyAllTargets(
   const agentsByKey = new Map<string, IndexedAgent>();
   for (const a of roster.agentMembers ?? []) {
     const slug = (a.slug || '').trim();
-    const name = (a.displayName || a.name || '').trim();
-    const insertSlug = agentMentionSlug(a);
+    const name = (a.name || a.displayName || '').trim();
+    const insertSlug = slug || toMentionSlug(name);
     const id = (a.id || slug).trim();
     if (!id || !insertSlug) continue;
     agentsByKey.set(id, { kind: 'agent', id, slug, name, insertSlug });
@@ -347,13 +343,14 @@ export function resolveReplyAllTargets(
     if (m.kind !== 'agent') continue;
     const slug = (m.slug || '').trim();
     const name = (m.name || '').trim();
-    const insertSlug = agentMentionSlug(m);
+    const insertSlug = slug || toMentionSlug(name);
     const id = (m.id || slug || name).trim();
     if (!id || !insertSlug) continue;
     const existing = agentsByKey.get(id);
     if (existing) {
       if (!existing.name && name) existing.name = name;
       if (!existing.slug && slug) existing.slug = slug;
+      existing.insertSlug = existing.slug || toMentionSlug(existing.name);
     } else {
       agentsByKey.set(id, { kind: 'agent', id, slug, name, insertSlug });
     }

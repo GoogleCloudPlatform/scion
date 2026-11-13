@@ -2630,6 +2630,7 @@ export class ScionChatComposer extends LitElement {
       !this.text.startsWith(leadIn) &&
       this.text.trimStart().startsWith('@')
     ) {
+      // Prepend `leadIn` even when every slug is already present so a leading `@mention` does not override the reply-target agent on the hub.
       this.text = `${leadIn}${this.text}`;
       this.mentionRanges = this.mentionRanges.map((r) => ({
         ...r,

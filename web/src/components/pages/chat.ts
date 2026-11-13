@@ -4750,13 +4750,16 @@ export class ScionPageChat extends LitElement {
 
   /**
    * Clicking an @mention in a message opens the DM with that entity. The slug
-   * is what the composer inserted: an agent slug, or a display name lowercased
-   * with spaces turned into dashes (see mention-autocomplete).
+   * is what the composer inserted: an agent slug, a display name lowercased
+   * with spaces turned into dashes, or a user's email address (see
+   * mention-autocomplete).
    */
   private handleMentionClick(e: CustomEvent): void {
     const slug = (e.detail as { slug?: string } | null)?.slug;
     if (!slug) return;
 
+    const lower = slug.trim().toLowerCase();
+    if (!lower) return;
     const wanted = normalizeMentionSlug(slug);
 
     const agent = this.v2AgentMembers.find(
@@ -4772,10 +4775,11 @@ export class ScionPageChat extends LitElement {
     const human = this.v2HumanMembers.find(
       (h) =>
         normalizeMentionSlug(h.displayName) === wanted ||
-        normalizeMentionSlug(h.email?.split('@')[0] || '') === wanted
+        normalizeMentionSlug(h.email?.split('@')[0] || '') === wanted ||
+        (h.email || '').trim().toLowerCase() === lower
     );
     if (human) {
-      this.openDM(human.id, 'user', human.displayName);
+      this.openDM(human.id, 'user', human.displayName || human.email || human.id);
     }
     // Unknown mention (e.g. a stale name): leave the view as it is.
   }

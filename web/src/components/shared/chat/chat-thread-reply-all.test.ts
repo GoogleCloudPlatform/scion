@@ -20,6 +20,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import '@shoelace-style/shoelace/dist/components/textarea/textarea.js';
+import { deepActiveElement } from '../deep-active-element.js';
 
 class FakeStateManager extends EventTarget {
   currentScope: { type: string; userId: string } | null = null;
@@ -124,6 +125,8 @@ async function settle(): Promise<void> {
 
 async function mountThread(opts: {
   messages: Message[];
+  starredMessages?: Message[];
+  messageFilter?: '' | 'starred';
   canPost?: boolean;
   isDM?: boolean;
   conversationKey?: string;
@@ -133,14 +136,16 @@ async function mountThread(opts: {
       return Promise.resolve(jsonResponse({ message: { id: 'sent-1' } }, 201));
     }
     if (url.includes('/messages?')) {
+      const list =
+        url.includes('starred=true') && opts.starredMessages ? opts.starredMessages : opts.messages;
       return Promise.resolve(
         jsonResponse({
-          messages: opts.messages,
+          messages: list,
           ...(typeof opts.canPost === 'boolean' ? { canPost: opts.canPost } : {}),
         })
       );
     }
-    return Promise.resolve(jsonResponse({}));
+    return Promise.resolve(jsonResponse({ starredMessageIds: [] }));
   });
 
   const el = document.createElement('scion-chat-thread') as ScionChatThread;
@@ -148,6 +153,9 @@ async function mountThread(opts: {
   el.projectId = 'p1';
   el.currentUserId = 'u-me';
   el.isDM = opts.isDM ?? false;
+  if (opts.messageFilter !== undefined) {
+    el.messageFilter = opts.messageFilter;
+  }
   el.members = MEMBERS;
   el.agentMembers = AGENT_MEMBERS;
   document.body.appendChild(el);
@@ -162,11 +170,13 @@ async function mountThread(opts: {
 
 describe('scion-chat-thread Reply all', () => {
   beforeEach(() => {
+    localStorage.clear();
     apiFetch.mockReset();
     showToastMock.mockReset();
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     document.body.innerHTML = '';
   });
 
@@ -315,5 +325,143 @@ describe('scion-chat-thread Reply all', () => {
     await sl.updateComplete;
     const ta = sl.shadowRoot.querySelector('textarea') as HTMLTextAreaElement;
     expect(ta.value).toBe('@agent-b @carol ');
+  });
+
+  it('mobile action sheet shows identical items to desktop popup and leaves focus in textarea', async () => {
+    const msg = makeMsg({ id: 'm-mobile', msg: '@agent-b @alice-smith look' });
+
+    // Capture desktop popup items first.
+    const desktopEl = await mountThread({ messages: [msg] });
+    const desktopInternals = desktopEl as unknown as ThreadInternals;
+    desktopInternals.handleMessageContextMenu(
+      new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 80, clientY: 80 }),
+      msg
+    );
+    await desktopEl.updateComplete;
+    const popupLabels = [
+      ...(desktopEl.shadowRoot?.querySelectorAll<HTMLElement>('.context-menu .context-menu-item') ??
+        []),
+    ].map((item) => item.textContent?.trim() ?? '');
+    const desktopActionIds = desktopInternals.messageMenuActions(msg).map((a) => a.id);
+    document.body.innerHTML = '';
+
+    // Mount on mobile viewport (`max-width: 768px` -> `<scion-action-sheet>`).
+    vi.spyOn(window, 'matchMedia').mockImplementation(
+      (query: string) =>
+        ({
+          matches: query.includes('max-width'),
+          media: query,
+          addEventListener: (): void => {},
+          removeEventListener: (): void => {},
+          addListener: (): void => {},
+          removeListener: (): void => {},
+        }) as unknown as MediaQueryList
+    );
+
+    const mobileEl = await mountThread({ messages: [msg] });
+    const mobileInternals = mobileEl as unknown as ThreadInternals;
+    mobileInternals.handleMessageContextMenu(
+      new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 40, clientY: 40 }),
+      msg
+    );
+    await mobileEl.updateComplete;
+
+    const actionSheet = mobileEl.shadowRoot?.querySelector('scion-action-sheet') as HTMLElement & {
+      open: boolean;
+      items: Array<{ id: string; label: string; icon?: string }>;
+      updateComplete: Promise<unknown>;
+      shadowRoot: ShadowRoot;
+    };
+    expect(actionSheet).toBeTruthy();
+    await actionSheet.updateComplete;
+    expect(actionSheet.open).toBe(true);
+    expect(actionSheet.items.map((i) => i.id)).toEqual(desktopActionIds);
+    expect(actionSheet.items.map((i) => i.label)).toEqual(popupLabels);
+
+    const replyAllBtn = actionSheet.shadowRoot.querySelector<HTMLButtonElement>(
+      '.item[data-id="reply-all"]'
+    );
+    expect(replyAllBtn).toBeTruthy();
+    replyAllBtn!.click();
+
+    await mobileEl.updateComplete;
+    await actionSheet.updateComplete;
+    await settle();
+    await new Promise<void>((r) => requestAnimationFrame(() => r()));
+    await settle();
+
+    expect(actionSheet.open).toBe(false);
+    expect(mobileInternals.composerReplyTo?.messageId).toBe('m-mobile');
+
+    const composer = mobileEl.shadowRoot?.querySelector('scion-chat-composer') as ScionChatComposer;
+    await composer.updateComplete;
+    const sl = composer.shadowRoot?.querySelector('sl-textarea') as {
+      updateComplete: Promise<unknown>;
+      shadowRoot: ShadowRoot;
+    };
+    await sl.updateComplete;
+    const ta = sl.shadowRoot.querySelector('textarea') as HTMLTextAreaElement;
+    expect(ta.value).toBe('cc @agent-b @alice-smith ');
+    expect(deepActiveElement()).toBe(ta);
+  });
+
+  it('starred-filter view offers Reply all after Reply and exits filter before seeding mentions', async () => {
+    const starredMentionMsg = makeMsg({
+      id: '00000000-0000-4000-8000-000000000001',
+      msg: '@agent-b @alice-smith starred check',
+    });
+    const starredPlainMsg = makeMsg({
+      id: '00000000-0000-4000-8000-000000000002',
+      msg: 'plain starred message',
+    });
+    const unstarredMsg = makeMsg({
+      id: '00000000-0000-4000-8000-000000000003',
+      msg: 'ordinary follow-up',
+      createdAt: '2026-11-13T12:05:00Z',
+    });
+
+    const el = await mountThread({
+      messages: [unstarredMsg, starredPlainMsg, starredMentionMsg],
+      starredMessages: [starredPlainMsg, starredMentionMsg],
+      messageFilter: 'starred',
+    });
+    const internals = el as unknown as ThreadInternals;
+
+    // Plain starred message has no Reply all; mention starred message has Reply all right after Reply.
+    const plainIds = internals.messageMenuActions(starredPlainMsg).map((a) => a.id);
+    expect(plainIds).toContain('reply');
+    expect(plainIds).not.toContain('reply-all');
+
+    const mentionActions = internals.messageMenuActions(starredMentionMsg);
+    const mentionIds = mentionActions.map((a) => a.id);
+    expect(mentionIds.slice(0, 3)).toEqual(['jump', 'reply', 'reply-all']);
+
+    const filterChanges: Array<{ filter: string; messageId?: string }> = [];
+    el.addEventListener('chat-message-filter-change', (e) => {
+      filterChanges.push((e as CustomEvent<{ filter: string; messageId?: string }>).detail);
+    });
+
+    const replyAllAction = mentionActions.find((a) => a.id === 'reply-all');
+    expect(replyAllAction).toBeTruthy();
+    replyAllAction!.run();
+
+    expect(filterChanges).toEqual([{ filter: '', messageId: starredMentionMsg.id }]);
+    expect(internals.composerReplyTo).toBeNull();
+
+    // Parent page clears the filter -> thread loads full conversation and lands Reply all.
+    el.messageFilter = '';
+    await vi.waitFor(() => expect(internals.composerReplyTo?.messageId).toBe(starredMentionMsg.id));
+    await settle();
+
+    const composer = el.shadowRoot?.querySelector('scion-chat-composer') as ScionChatComposer;
+    expect(composer).toBeTruthy();
+    await composer.updateComplete;
+    const sl = composer.shadowRoot?.querySelector('sl-textarea') as {
+      updateComplete: Promise<unknown>;
+      shadowRoot: ShadowRoot;
+    };
+    await sl.updateComplete;
+    const ta = sl.shadowRoot.querySelector('textarea') as HTMLTextAreaElement;
+    expect(ta.value).toBe('cc @agent-b @alice-smith ');
   });
 });

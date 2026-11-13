@@ -16,6 +16,7 @@
 
 import { describe, it, expect } from 'vitest';
 import {
+  agentMentionSlug,
   extractProseMentionTokens,
   resolveReplyAllTargets,
   toMentionSlug,
@@ -230,5 +231,30 @@ describe('resolveReplyAllTargets', () => {
       { kind: 'agent', id: 'a-peer', insertSlug: 'agent-b' },
       { kind: 'user', id: 'u-carol', insertSlug: 'carol' },
     ]);
+  });
+
+  it('normalizes empty-slug agent fallback to a single mention token while keeping agentMentionSlug slug || name', () => {
+    expect(agentMentionSlug({ slug: 'agent-b', name: 'Agent B' })).toBe('agent-b');
+    expect(agentMentionSlug({ slug: '', name: 'Bot Name' })).toBe('Bot Name');
+
+    const emptySlugRoster: MentionRoster = {
+      agentMembers: [{ id: 'a-noslug', slug: '', displayName: 'Bot Name' }],
+      members: [
+        { id: 'u-me', name: 'Me User', email: 'me@example.com', kind: 'user' },
+        { id: 'a-noslug', name: 'Bot Name', email: '', slug: '', kind: 'agent' },
+      ],
+    };
+
+    const targets = resolveReplyAllTargets(
+      {
+        sender: 'agent:agent-a',
+        senderId: 'a-sender',
+        msg: 'Check with @bot-name please',
+      },
+      emptySlugRoster,
+      'u-me'
+    );
+
+    expect(targets).toEqual([{ kind: 'agent', id: 'a-noslug', insertSlug: 'bot-name' }]);
   });
 });

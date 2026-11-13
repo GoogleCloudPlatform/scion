@@ -251,8 +251,8 @@ interface FilterExitTarget {
   conversationKey: string;
   messageId: string;
   highlight: boolean;
-  /** Seed the composer with a reply to, or an edit of, the message. */
-  action?: 'reply' | 'edit';
+  /** Seed the composer with a reply to, reply-all to, or an edit of, the message. */
+  action?: 'reply' | 'reply-all' | 'edit';
   /** Move focus to the message when it lands (a jump). */
   focus?: boolean;
 }
@@ -5717,6 +5717,10 @@ export class ScionChatThread extends LitElement {
       this.seedReply(msg);
       return;
     }
+    if (exit.action === 'reply-all') {
+      if (this.isDM || this.canPost) this.seedReplyAll(msg);
+      return;
+    }
     const isOwn = msg.senderId === (this._currentUserId || this.currentUserId);
     if (isOwn && !this.hasAgentReplyAfter(msg)) this.seedEdit(msg);
   }
@@ -5865,6 +5869,17 @@ export class ScionChatThread extends LitElement {
         },
       },
     ];
+    if ((this.isDM || this.canPost) && this.replyAllTargets(msg).length > 0) {
+      actions.push({
+        id: 'reply-all',
+        label: 'Reply all',
+        icon: 'reply-all',
+        run: (): void => {
+          this.closeContextMenu();
+          this.exitFilter({ messageId: msg.id, highlight: true, action: 'reply-all' }, true);
+        },
+      });
+    }
     if (isOwnMessage) {
       actions.push({
         id: 'edit',
