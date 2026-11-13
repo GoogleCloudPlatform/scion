@@ -45,6 +45,22 @@ describe('runtime target rows', () => {
       { label: 'ID', value: 'rt-2' },
       { label: 'Type', value: 'docker' },
     ]);
+    expect(
+      runtimeTargetRows(
+        { id: 'rt-3', type: 'cloudrun', displayName: 'Cloud Run' },
+        {
+          schemaVersion: 1,
+          key: 'cr-1',
+          name: 'cr-1',
+          target: { type: 'cloudrun', displayName: 'Cloud Run', region: 'us-central1' },
+        }
+      )
+    ).toEqual([
+      { label: 'ID', value: 'rt-3' },
+      { label: 'Type', value: 'cloudrun' },
+      { label: 'Display name', value: 'Cloud Run' },
+      { label: 'Region', value: 'us-central1' },
+    ]);
   });
 
   it('renders every published field, env by key only', () => {
@@ -93,7 +109,7 @@ describe('runtime target rows', () => {
     const text = JSON.stringify(rows);
     expect(text).not.toContain('NEVER');
     // The withheld values really are in the payload.
-    expect(JSON.stringify(presentationWithNeverFields()).match(/NEVER-/g)).toHaveLength(15);
+    expect(JSON.stringify(presentationWithNeverFields()).match(/NEVER-/g)).toHaveLength(20);
     expect(asMap(rows)).toEqual(asMap(presentationRows(fullPresentation())));
   });
 });

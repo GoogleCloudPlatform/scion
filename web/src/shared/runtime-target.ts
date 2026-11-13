@@ -88,7 +88,7 @@ function resourcesLabel(r: PresentedResourceSpec | undefined): string {
   return parts.join('; ');
 }
 
-/** The stored target's rows: ID, type, display name, and the reported namespace. */
+/** The stored target's rows: ID, type, display name, and the reported namespace or region. */
 export function runtimeTargetRows(
   target: RuntimeTargetDescriptor,
   presentation?: RuntimeTargetPresentation
@@ -98,6 +98,7 @@ export function runtimeTargetRows(
   push(rows, 'Type', target.type);
   push(rows, 'Display name', target.displayName);
   push(rows, 'Namespace', presentation?.target?.namespace);
+  push(rows, 'Region', presentation?.target?.region);
   return rows;
 }
 
@@ -172,16 +173,27 @@ export function isFlatBroker(broker: ClassifiableBroker): boolean {
 
 /**
  * The one-line runtime target label of a flat broker, for example
- * "kubernetes · Cluster A · ns agents"; the namespace appears only when the
- * instance reported one. Empty for a legacy broker.
+ * "kubernetes · Cluster A · ns agents" or "Cloud Run · us-central1"; the
+ * namespace or Cloud Run region appears only when the instance reported one.
+ * Empty for a legacy broker.
  */
 export function runtimeTargetLabel(broker: ClassifiableBroker): string {
   const target = broker.runtimeTarget;
   if (!target) return '';
-  const parts = [target.type];
-  if (target.displayName) parts.push(target.displayName);
+  const typeLabel = target.type === 'cloudrun' ? 'Cloud Run' : target.type;
+  const parts = [typeLabel];
+  if (
+    target.displayName &&
+    target.displayName !== typeLabel &&
+    !(target.type === 'cloudrun' && target.displayName === 'cloudrun')
+  ) {
+    parts.push(target.displayName);
+  }
   const ns = broker.runtimeTargetPresentation?.target?.namespace;
   if (ns) parts.push(`ns ${ns}`);
+  const region =
+    target.type === 'cloudrun' ? broker.runtimeTargetPresentation?.target?.region : undefined;
+  if (region) parts.push(region);
   return parts.join(' · ');
 }
 

@@ -118,6 +118,10 @@ const FINDING_TEXTS: Record<string, string> = {
     'This settings key is not recognized, or an operator choice cannot be applied. Review it on the host.',
   field_not_valid_for_target_type:
     'This setting does not apply to the runtime type and is not carried over.',
+  flat_target_field_required:
+    'A required flat-target setting is missing or invalid in the legacy configuration, so these profiles cannot move until it is set.',
+  flat_target_operator_input_required:
+    'This required flat-target setting has no legacy source (such as credentials_file on Cloud Run); supply it in settings.yaml before activating the instance.',
   [PLAN_TRUNCATED_CODE]:
     'The Runtime Broker shortened this plan to fit the reporting limits, so it may be incomplete.',
 };
@@ -183,7 +187,7 @@ export function profileMapRows(plan: ConversionPlanPresentation): ProfileMapRow[
 
 /**
  * The published rows of a proposed instance: the target's type, display
- * name and namespace, the reported defaults and, for Kubernetes, the
+ * name, namespace and region, the reported defaults and, for Kubernetes, the
  * placement. Every row names a published field explicitly (shared/runtime-
  * target.ts); the object is never walked, so a key outside the published
  * set is never shown.
@@ -195,6 +199,7 @@ export function instanceRows(p: RuntimeTargetPresentation): DisplayRow[] {
     if (t.type) rows.push({ label: 'Type', value: t.type });
     if (t.displayName) rows.push({ label: 'Display name', value: t.displayName });
     if (t.namespace) rows.push({ label: 'Namespace', value: t.namespace });
+    if (t.region) rows.push({ label: 'Region', value: t.region });
   }
   rows.push(...presentationRows(p));
   if (t) rows.push(...placementRows({ id: '', type: t.type }, p));
