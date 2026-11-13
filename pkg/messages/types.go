@@ -195,6 +195,13 @@ type StructuredMessage struct {
 	PersistMessageID string    `json:"-"`
 	PersistCreatedAt time.Time `json:"-"`
 
+	// MentionedUserIDs, when set, are the resolved human project member IDs
+	// @mentioned in a thread message that the sending handler already computed
+	// so the persisting subscriber can record mention rows before publishing
+	// SSE without re-querying project members. Hub-internal like
+	// PersistMessageID: never rendered, never accepted from request JSON.
+	MentionedUserIDs []string `json:"-"`
+
 	// AttachmentDeliveries are the attachments stored as artifacts, bound to
 	// a stored message, that the hub delivers into the recipient agent's
 	// home with this dispatch (ptone/scion#4596). Set by the hub's send path

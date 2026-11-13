@@ -79,6 +79,11 @@ type MessageBrokerProxy struct {
 	// references of a user message deliverToUser stored (ptone/scion#3222).
 	recordArtifactRefs func(ctx context.Context, messageID string, refs []artifacts.MessageRef) []artifacts.MessageRef
 
+	// recordHumanMentions, when non-nil, records per-recipient mention rows
+	// for human project members @mentioned in a thread message deliverToUser
+	// stored, before its SSE event is published.
+	recordHumanMentions func(ctx context.Context, conversationKey, messageID string, userIDs []string)
+
 	mu                  sync.Mutex
 	subscriptions       map[string][]eventbus.Subscription // projectID -> active subscriptions
 	pluginSubscriptions map[string]eventbus.Subscription   // pattern -> plugin-initiated subscription
@@ -764,6 +769,18 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 	if msg.ArtifactRefsAdmitted && p.recordArtifactRefs != nil {
 		if refs, _ := artifacts.ParseMessageRefs(msg.Metadata[artifacts.MessageMetadataKey]); len(refs) > 0 {
 			artifactRefs = p.recordArtifactRefs(ctx, storeMsg.ID, refs)
+		}
+	}
+
+	if len(msg.MentionedUserIDs) > 0 {
+		if p.recordHumanMentions != nil {
+			p.recordHumanMentions(ctx, storeMsg.ThreadID, storeMsg.ID, msg.MentionedUserIDs)
+		} else if p.webChatStore != nil && storeMsg.ThreadID != "" &&
+			!strings.HasPrefix(storeMsg.ThreadID, "dm:") && !strings.HasPrefix(storeMsg.ThreadID, "agent:") {
+			if err := p.webChatStore.RecordMentions(ctx, storeMsg.ThreadID, storeMsg.ID, msg.MentionedUserIDs); err != nil {
+				p.log.Warn("chat: failed to record mentions",
+					"conversation_key", storeMsg.ThreadID, "message_id", storeMsg.ID, "error", err)
+			}
 		}
 	}
 

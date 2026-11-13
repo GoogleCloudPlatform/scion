@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -524,6 +525,191 @@ func TestAgentThreadMessage_DirectPathRecordsHumanMentions(t *testing.T) {
 	keys, err := wcs.UnreadMentionKeys(ctx, alice.ID, []string{topicID})
 	if err != nil || !keys[topicID] {
 		t.Errorf("alice unread mention = %v %v; want true", keys, err)
+	}
+}
+
+// Wrapped mentions like (@user) and **@user** record mention dots on human
+// sends (both human-to-human and agent-routed) and agent sends, while code
+// spans and quoted lines do not, and wrapped (@agent) tokens do not alter
+// agent @mention routing or fan-out.
+func TestMentionDot_WrappedInPunctuationAndMarkdown(t *testing.T) {
+	srv, s, wcs, proj, db := setupMentionDotTest(t)
+	d := &brokerMockDispatcher{}
+	srv.SetDispatcher(d)
+	ctx := context.Background()
+	alice := addHumanMember(t, s, proj.ID, "alice.smith@test.com", "Alice Smith")
+	bob := addHumanMember(t, s, proj.ID, "bob.jones@test.com", "Bob Jones")
+	carol := addHumanMember(t, s, proj.ID, "carol@test.com", "Carol")
+	a := &store.Agent{ID: tid("md-wrap-agent"), ProjectID: proj.ID, Name: "Poster", Slug: "md-wrap-poster",
+		Phase: "running", OwnerID: DevUserID, CreatedBy: DevUserID}
+	if err := s.CreateAgent(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	bystander := &store.Agent{ID: tid("md-wrap-bystander"), ProjectID: proj.ID, Name: "Bystander", Slug: "md-wrap-bystander",
+		Phase: "running", OwnerID: DevUserID, CreatedBy: DevUserID}
+	if err := s.CreateAgent(ctx, bystander); err != nil {
+		t.Fatal(err)
+	}
+
+	humanTopic := tid("md-wrap-human")
+	if err := wcs.CreateTopic(ctx, WebChatTopic{ID: humanTopic, ProjectID: proj.ID, Name: "wrap-human",
+		CreatedBy: "dev", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	setTopicConversationID(t, db, s, humanTopic, proj.ID)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+humanTopic+"/messages",
+		map[string]string{"content": "heads up (@alice-smith) and **@bob-jones**! (`@carol`) (**@md-wrap-bystander**)"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("human send: %d %s", rec.Code, rec.Body.String())
+	}
+	if len(d.getMessages()) != 0 {
+		t.Fatalf("wrapped agent mention should not route to agent, got %d dispatches", len(d.getMessages()))
+	}
+	for _, tc := range []struct {
+		user *store.User
+		want bool
+	}{{alice, true}, {bob, true}, {carol, false}} {
+		keys, err := wcs.UnreadMentionKeys(ctx, tc.user.ID, []string{humanTopic})
+		if err != nil || keys[humanTopic] != tc.want {
+			t.Errorf("human send: user %s unread mention = %v %v; want %v", tc.user.Email, keys, err, tc.want)
+		}
+	}
+
+	routedTopic := tid("md-wrap-routed")
+	if err := wcs.CreateTopic(ctx, WebChatTopic{ID: routedTopic, ProjectID: proj.ID, Name: "wrap-routed",
+		CreatedBy: "dev", CreatedAt: time.Now().UTC(), DefaultAgent: a.Slug}); err != nil {
+		t.Fatal(err)
+	}
+	setTopicConversationID(t, db, s, routedTopic, proj.ID)
+
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+routedTopic+"/messages",
+		map[string]string{"content": "please review, cc (@alice-smith) and **@bob-jones**, fyi (**@md-wrap-bystander**) and `(@carol)`"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("routed send: %d %s", rec.Code, rec.Body.String())
+	}
+	dispatched := d.getMessages()
+	if len(dispatched) != 1 || dispatched[0].agentSlug != a.Slug {
+		t.Fatalf("routed send dispatches = %+v; want only primary %s (no wrapped fan-out to %s)", dispatched, a.Slug, bystander.Slug)
+	}
+	for _, tc := range []struct {
+		user *store.User
+		want bool
+	}{{alice, true}, {bob, true}, {carol, false}} {
+		keys, err := wcs.UnreadMentionKeys(ctx, tc.user.ID, []string{routedTopic})
+		if err != nil || keys[routedTopic] != tc.want {
+			t.Errorf("routed send: user %s unread mention = %v %v; want %v", tc.user.Email, keys, err, tc.want)
+		}
+	}
+
+	agentTopic := tid("md-wrap-agent-topic")
+	if err := wcs.CreateTopic(ctx, WebChatTopic{ID: agentTopic, ProjectID: proj.ID, Name: "wrap-agent",
+		CreatedBy: "dev", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	convID := def162GroupConv(t, s, proj.ID, agentTopic)
+
+	body := "done (@alice-smith) and **@bob.jones@test.com**; see `(@carol)`\n> **@carol** earlier"
+	rr := postOutboundConvRef(t, srv, proj.ID, a.ID, body, "conv:"+convID)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("agent outbound: %d %s", rr.Code, rr.Body.String())
+	}
+	for _, tc := range []struct {
+		user *store.User
+		want bool
+	}{{alice, true}, {bob, true}, {carol, false}} {
+		keys, err := wcs.UnreadMentionKeys(ctx, tc.user.ID, []string{agentTopic})
+		if err != nil || keys[agentTopic] != tc.want {
+			t.Errorf("agent send: user %s unread mention = %v %v; want %v", tc.user.Email, keys, err, tc.want)
+		}
+	}
+}
+
+type mentionCheckEvents struct {
+	EventPublisher
+	onPublish func(ctx context.Context, msg *store.Message)
+}
+
+func (e mentionCheckEvents) PublishUserMessage(ctx context.Context, msg *store.Message, a []AttachmentRef, r []artifacts.MessageRef, opts ...ChatEventOption) {
+	if e.onPublish != nil {
+		e.onPublish(ctx, msg)
+	}
+	e.EventPublisher.PublishUserMessage(ctx, msg, a, r, opts...)
+}
+
+// An agent's ordinary thread message on the live broker path (StartMessageBroker)
+// records human @mentions (both bare and wrapped) before publishing SSE.
+func TestAgentThreadMessage_BrokerPathRecordsHumanMentions(t *testing.T) {
+	srv, s, wcs, proj, _ := setupMentionDotTest(t)
+	ctx := context.Background()
+	alice := addHumanMember(t, s, proj.ID, "alice.smith@test.com", "Alice Smith")
+	bob := addHumanMember(t, s, proj.ID, "bob.jones@test.com", "Bob Jones")
+	carol := addHumanMember(t, s, proj.ID, "carol@test.com", "Carol")
+	topicID := tid("md-broker-thread")
+
+	events := NewChannelEventPublisher()
+	t.Cleanup(events.Close)
+	var publishedWithMentions atomic.Bool
+	srv.SetEventPublisher(mentionCheckEvents{
+		EventPublisher: events,
+		onPublish: func(pubCtx context.Context, msg *store.Message) {
+			if msg.ThreadID != topicID {
+				return
+			}
+			keys, err := wcs.UnreadMentionKeys(pubCtx, alice.ID, []string{topicID})
+			if err == nil && keys[topicID] {
+				publishedWithMentions.Store(true)
+			}
+		},
+	})
+	srv.StartMessageBroker(newSyncTestBus())
+	t.Cleanup(func() {
+		if bp := srv.GetMessageBrokerProxy(); bp != nil {
+			bp.Stop()
+		}
+	})
+
+	a := &store.Agent{ID: tid("md-broker-agent"), ProjectID: proj.ID, Name: "Poster", Slug: "md-broker-poster",
+		Phase: "running"}
+	if err := s.CreateAgent(ctx, a); err != nil {
+		t.Fatal(err)
+	}
+	if err := wcs.CreateTopic(ctx, WebChatTopic{ID: topicID, ProjectID: proj.ID, Name: "broker-thread",
+		CreatedBy: "dev", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	convID := def162GroupConv(t, s, proj.ID, topicID)
+
+	rr := postOutboundConvRef(t, srv, proj.ID, a.ID,
+		"@alice-smith and (**@bob.jones@test.com**) please check; ignore `(@carol)`", "conv:"+convID)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("outbound: %d %s", rr.Code, rr.Body.String())
+	}
+	if !publishedWithMentions.Load() {
+		t.Fatal("mention rows were not yet recorded when PublishUserMessage fired")
+	}
+	for _, tc := range []struct {
+		user *store.User
+		want bool
+	}{{alice, true}, {bob, true}, {carol, false}} {
+		keys, err := wcs.UnreadMentionKeys(ctx, tc.user.ID, []string{topicID})
+		if err != nil || keys[topicID] != tc.want {
+			t.Fatalf("broker path: user %s unread mention = %v %v; want %v", tc.user.Email, keys, err, tc.want)
+		}
+	}
+	// Verify the thread list endpoint surfaces hasUnreadMention=true for Alice and Bob.
+	for _, u := range []*store.User{alice, bob} {
+		rec := doRequestAsUser(t, srv, u, http.MethodGet, "/api/v1/chat/spaces/"+proj.ID+"/threads", nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s list: %d %s", u.Email, rec.Code, rec.Body.String())
+		}
+		var resp chatTopicListResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+		if len(resp.Threads) != 1 || !resp.Threads[0].HasUnread || !resp.Threads[0].HasUnreadMention {
+			t.Fatalf("%s threads = %+v; want unread mention", u.Email, resp.Threads)
+		}
 	}
 }
 

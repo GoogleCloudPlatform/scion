@@ -318,6 +318,30 @@ func TestDeduplicateAgentsByID(t *testing.T) {
 	assert.Equal(t, "beta", result[1].Slug)
 }
 
+func TestResolveRoutingAgents_WrappedMentionsKeepAgentRoutingUnchanged(t *testing.T) {
+	alpha := makeAgent("id-alpha", "alpha")
+	foo := makeAgent("id-foo", "foo")
+	lister := &mockAgentLister{agents: []store.Agent{alpha, foo}}
+
+	t.Run("wrapped agent mentions do not route when no default", func(t *testing.T) {
+		plan, err := resolveRoutingAgents(context.Background(), lister, "proj-1",
+			`(@foo) **@foo** "@foo" FYI:@foo`, nil)
+		require.NoError(t, err)
+		assert.Empty(t, plan.Agents)
+		assert.Empty(t, plan.MentionNames)
+		assert.Empty(t, plan.HumanMentionNames, "agent slugs are still excluded from human mention candidates")
+	})
+
+	t.Run("wrapped agent mentions do not fan out alongside default, wrapped human names still collected", func(t *testing.T) {
+		plan, err := resolveRoutingAgents(context.Background(), lister, "proj-1",
+			"check (@alice-smith), **@bob-jones**, and (**@foo**); ignore `(@carol)`", agentPtr(alpha))
+		require.NoError(t, err)
+		assert.Equal(t, []string{"alpha"}, slugs(plan.Agents))
+		assert.Empty(t, plan.MentionNames)
+		assert.Equal(t, []string{"alice-smith", "bob-jones"}, plan.HumanMentionNames)
+	})
+}
+
 func joinStrings(ss []string) string {
 	result := ""
 	for i, s := range ss {

@@ -1455,7 +1455,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// message, matched against the member list resolved above.
 	var mentionedHumans []string
 	if req.ThreadID != "" && !strings.HasPrefix(req.ThreadID, "dm:") && !strings.HasPrefix(req.ThreadID, "agent:") {
-		if names := messages.ExtractMentions(req.Msg); len(names) > 0 {
+		if names := messages.ExtractProseWrappedMentions(req.Msg); len(names) > 0 {
 			mentionedHumans = mentionedHumanIDs(humanMembers, names, "")
 		}
 	}
@@ -1570,6 +1570,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			// the published Timestamp.
 			structuredMsg.PersistMessageID = storeMsg.ID
 			structuredMsg.PersistCreatedAt = storeMsg.CreatedAt
+			structuredMsg.MentionedUserIDs = mentionedHumans
 			err := bp.PublishUserMessage(ctx, agent.ProjectID, result.RecipientID, structuredMsg)
 			if errors.Is(err, eventbus.ErrReservedChannel) {
 				// Nothing was published or stored: the request named a

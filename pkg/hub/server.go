@@ -5410,6 +5410,7 @@ func (s *Server) StartMessageBroker(b eventbus.EventBus) {
 		return &decision
 	}
 	proxy.recordArtifactRefs = s.recordMessageArtifacts
+	proxy.recordHumanMentions = s.recordHumanMentions
 	s.messageBrokerProxy = proxy
 	proxy.Start()
 
