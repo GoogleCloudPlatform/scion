@@ -42,14 +42,14 @@ const sharedDirsNotSharedMessage = "Warning: shared directories are not shared o
 
 // sharedDirsNotSharedWarning returns sharedDirsNotSharedMessage for a start
 // with shared dirs on a shared backend whose runtime type cannot mount the
-// shared tree (it is neither a local-container nor a Kubernetes runtime),
-// and "" otherwise. The legacy split is refused by resolveSharedDirs
-// instead.
+// shared tree (it is neither a local-container, Kubernetes, nor Cloud Run
+// Instances runtime), and "" otherwise. The legacy split is refused by
+// resolveSharedDirs instead.
 func sharedDirsNotSharedWarning(sdLayout projectfs.Layout, split bool, runtimeName string, dirs []api.SharedDir) string {
 	if len(dirs) == 0 || split || !sdLayout.Backend.Shared() {
 		return ""
 	}
-	if isLocalContainerRuntime(runtimeName) || isKubernetesRuntime(runtimeName) {
+	if isLocalContainerRuntime(runtimeName) || isKubernetesRuntime(runtimeName) || isCloudRunRuntime(runtimeName) {
 		return ""
 	}
 	return sharedDirsNotSharedMessage
@@ -68,15 +68,16 @@ func sharedDirsNotSharedWarning(sdLayout projectfs.Layout, split bool, runtimeNa
 // local layout: shared dirs are ensured and mounted under the broker-local
 // layout, and errors are logged and swallowed rather than failing agent
 // start. Runtimes that neither bind-mount host paths nor consume
-// RunConfig.SharedDirStorage (Cloud Run) also keep that behaviour, unless
-// the shared dirs are on the split legacy export, which they cannot mount.
+// RunConfig.SharedDirStorage (e.g. cloudrun-sandbox) also keep that
+// behaviour, unless the shared dirs are on the split legacy export, which
+// they cannot mount.
 //
 // On a shared backend, resolution fails closed (design G5): a missing or
 // invalid hub project ID, an invalid shared-dir name, or a missing host
-// base on a local-container runtime return an error instead of silently
-// falling back to local disk. The returned SharedDirRealization is
-// non-nil exactly on a shared backend; the Kubernetes runtime's buildPod
-// mounts every dir from it by subPath.
+// base on a runtime that requires a broker mount return an error instead of
+// silently falling back to local disk. The returned SharedDirRealization is
+// non-nil exactly on a shared backend; Kubernetes' buildPod and Cloud Run
+// Instances' buildCloudRunInstance mount every dir from it.
 //
 // Keep the shared-backend chain in lockstep with
 // runtime.ResolveSharedDirHostPath, which chat plugins use to find the same
@@ -106,7 +107,6 @@ func resolveSharedDirs(
 		return nil, nil, nil
 	}
 
-	mountsShare := isLocalContainerRuntime(runtimeName) || isKubernetesRuntime(runtimeName)
 	if usesLocalSharedDirLayout(sdLayout, split, runtimeName) {
 		// The local layout. Errors here are logged and swallowed, not
 		// propagated — this preserves exact pre-existing behaviour (design
@@ -135,12 +135,17 @@ func resolveSharedDirs(
 		return nil, nil, fmt.Errorf(
 			"shared dirs are on the %s backend (server.project_storage) but no hub project ID is available; shared dirs cannot be resolved", backend)
 	}
-	if !mountsShare {
+	mountsSplitShare := isLocalContainerRuntime(runtimeName) || isKubernetesRuntime(runtimeName)
+	if split && !mountsSplitShare {
 		// e.g. cloudrun/cloudrun-sandbox with the split legacy export:
-		// neither bind-mounts a host path nor consumes
-		// RunConfig.SharedDirStorage, so silently succeeding would produce
-		// volumes nobody reads (design G5).
+		// Cloud Run Instances mount shared dirs only from the workspace's
+		// unified NFS share, and cloudrun-sandbox neither bind-mounts a host
+		// path nor consumes RunConfig.SharedDirStorage, so silently
+		// succeeding would produce volumes nobody reads (design G5).
 		return nil, nil, fmt.Errorf("shared dirs on the server.shared_dir_storage nfs export are not supported on runtime %q", runtimeName)
+	}
+	if isCloudRunRuntime(runtimeName) && backend != projectfs.BackendNFS {
+		return nil, nil, fmt.Errorf("shared dirs on the %s backend are not supported on runtime %q: the Cloud Run runtime mounts shared dirs only from an nfs share", backend, runtimeName)
 	}
 
 	// Shared-dir names and the project ID are both path segments in the
@@ -276,9 +281,10 @@ func resolveSharedDirs(
 		SupplementalGroups: sharedDirLeafGroups(leafGIDs, sdLayout.GID),
 	}
 	if sdLayout.Backend == projectfs.BackendNFS && !split {
-		// The Layout's own nfs share: a pod mounts it inline when it has
-		// no claim. The transitional split never gets these, so without
-		// its claim the pod fails closed as before.
+		// The Layout's own nfs share: a Kubernetes pod mounts it inline when
+		// it has no claim, and Cloud Run Instances always mount shared dirs
+		// inline from Server/Export/SubPathRoot. The transitional split never
+		// gets these, so without its claim the pod and Cloud Run fail closed.
 		realization.Server, realization.Export, realization.SubPathRoot = sdLayout.Share.Server, sdLayout.Share.Export, sdLayout.SubPathRoot
 	}
 	return volumes, realization, nil
@@ -451,10 +457,10 @@ func writeAgentRecordFile(agentDir, name string, v any) error {
 // usesLocalSharedDirLayout reports whether resolveSharedDirs takes its local
 // layout branch for this start: the shared-dir Layout is not on a shared
 // backend, or the runtime neither bind-mounts host paths nor consumes
-// RunConfig.SharedDirStorage (Cloud Run) and the shared dirs are not on the
-// split legacy export.
+// RunConfig.SharedDirStorage (cloudrun-sandbox) and the shared dirs are not on
+// the split legacy export.
 func usesLocalSharedDirLayout(sdLayout projectfs.Layout, split bool, runtimeName string) bool {
-	mountsShare := isLocalContainerRuntime(runtimeName) || isKubernetesRuntime(runtimeName)
+	mountsShare := isLocalContainerRuntime(runtimeName) || isKubernetesRuntime(runtimeName) || isCloudRunRuntime(runtimeName)
 	return !sdLayout.Backend.Shared() || (!mountsShare && !split)
 }
 

@@ -210,8 +210,9 @@ func TestResolveSharedDirs_NFS_UnsupportedRuntime_FailsClosed(t *testing.T) {
 }
 
 // On a shared backend that is not the split legacy export, a runtime that
-// places shared dirs itself (Cloud Run) keeps the local layout, as it did
-// before the Layout (workspace_storage nfs never moved its shared dirs).
+// still places shared dirs itself (cloudrun-sandbox) keeps the local layout,
+// as it did before the Layout (workspace_storage nfs never moved its shared
+// dirs).
 func TestResolveSharedDirs_SharedBackend_OtherRuntimeKeepsLocalLayout(t *testing.T) {
 	projectDir := newTestProjectDir(t)
 	hostBase := t.TempDir()
@@ -219,13 +220,119 @@ func TestResolveSharedDirs_SharedBackend_OtherRuntimeKeepsLocalLayout(t *testing
 	sdCfg.NFS.Shares[0].ID = filepath.Base(hostBase)
 	dirs := []api.SharedDir{{Name: "scratchpad"}}
 
-	volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), false, projectDir, "", "cloudrun", dirs, "/workspace")
+	volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), false, projectDir, "", "cloudrun-sandbox", dirs, "/workspace")
 	require.NoError(t, err)
 	assert.Nil(t, realization)
 	want, err := config.SharedDirsToVolumeMounts(projectDir, dirs, "/workspace")
 	require.NoError(t, err)
 	assert.Equal(t, want, volumes)
 	assertDirEmpty(t, hostBase)
+}
+
+// TestResolveSharedDirs_CloudRun_NFS_ResolvesAndCreatesLeaves pins that the
+// Cloud Run Instances runtime ("cloudrun") resolves shared dirs on a unified
+// NFS project-storage layout, creating each leaf on the broker-mounted share
+// with 02755 intermediates and 02775 leaf permissions and returning the inline
+// share details on SharedDirRealization (ptone/scion#5926).
+func TestResolveSharedDirs_CloudRun_NFS_ResolvesAndCreatesLeaves(t *testing.T) {
+	withZeroUmask(t)
+
+	mountRoot := newResolvedTempDir(t)
+	shareID := "scion-shared"
+	hostBase := filepath.Join(mountRoot, shareID)
+	require.NoError(t, os.MkdirAll(hostBase, 0o775))
+
+	sdCfg := nfsSharedDirStorageCfg(mountRoot)
+	sdCfg.NFS.Shares[0].ID = shareID
+	dirs := []api.SharedDir{
+		{Name: "scratchpad"},
+		{Name: "notes", ReadOnly: true, InWorkspace: true},
+	}
+
+	volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), false, "/unused", "pid-42", "cloudrun", dirs, "/repo-root/sub")
+	require.NoError(t, err)
+	require.Len(t, volumes, 2)
+	assert.Equal(t, filepath.Join(hostBase, "projects", "pid-42", "shared-dirs", "scratchpad"), volumes[0].Source)
+	assert.Equal(t, "/scion-volumes/scratchpad", volumes[0].Target)
+	assert.False(t, volumes[0].ReadOnly)
+	assert.Equal(t, filepath.Join(hostBase, "projects", "pid-42", "shared-dirs", "notes"), volumes[1].Source)
+	assert.Equal(t, "/repo-root/sub/.scion-volumes/notes", volumes[1].Target)
+	assert.True(t, volumes[1].ReadOnly)
+
+	for _, name := range []string{"scratchpad", "notes"} {
+		leaf := filepath.Join(hostBase, "projects", "pid-42", "shared-dirs", name)
+		info, statErr := os.Stat(leaf)
+		require.NoError(t, statErr)
+		assert.Equal(t, os.FileMode(0o775), info.Mode().Perm())
+		assert.NotZero(t, info.Mode()&os.ModeSetgid)
+	}
+
+	require.NotNil(t, realization)
+	assert.Equal(t, "nfs", realization.Backend)
+	assert.Equal(t, "10.128.15.241", realization.Server)
+	assert.Equal(t, "/srv/scion-shared", realization.Export)
+	assert.Equal(t, "projects", realization.SubPathRoot)
+	assert.Equal(t, "pid-42", realization.ProjectID)
+	assert.Equal(t, map[string]string{
+		"scratchpad": "projects/pid-42/shared-dirs/scratchpad",
+		"notes":      "projects/pid-42/shared-dirs/notes",
+	}, realization.SubPaths)
+}
+
+// TestResolveSharedDirs_CloudRun_FailsClosed verifies that "cloudrun" fails
+// closed on shared backends when the project ID is missing, when the NFS host
+// base is not mounted on the broker (even if pv_name is set for Kubernetes),
+// or when the shared backend is not NFS (gke-shared-volume, cloudrun-volume).
+func TestResolveSharedDirs_CloudRun_FailsClosed(t *testing.T) {
+	dirs := []api.SharedDir{{Name: "scratchpad"}}
+
+	t.Run("missing hub project ID", func(t *testing.T) {
+		hostBase := t.TempDir()
+		sdCfg := nfsSharedDirStorageCfg(filepath.Dir(hostBase))
+		sdCfg.NFS.Shares[0].ID = filepath.Base(hostBase)
+
+		volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), false, "/unused", "", "cloudrun", dirs, "/workspace")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "hub project ID")
+		assert.Nil(t, volumes)
+		assert.Nil(t, realization)
+	})
+
+	t.Run("missing host base even with pv_name set", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		missingBase := filepath.Join(tmpDir, "does-not-exist")
+		sdCfg := nfsSharedDirStorageCfg(tmpDir)
+		sdCfg.NFS.Shares[0].ID = "does-not-exist"
+		sdCfg.NFS.Shares[0].PVName = "scion-shared"
+
+		volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), false, "/unused", "pid-1", "cloudrun", dirs, "/workspace")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), missingBase)
+		assert.Contains(t, err.Error(), "require this broker to have the share mounted")
+		assert.Nil(t, volumes)
+		assert.Nil(t, realization)
+		_, statErr := os.Stat(missingBase)
+		assert.True(t, os.IsNotExist(statErr))
+	})
+
+	for _, backend := range []projectfs.Backend{projectfs.BackendGKESharedVolume, projectfs.BackendCloudRunVolume} {
+		t.Run("non-nfs shared backend "+string(backend), func(t *testing.T) {
+			hostBase := newResolvedTempDir(t)
+			layout := projectfs.Layout{
+				Backend:     backend,
+				HostBase:    hostBase,
+				SubPathRoot: "projects",
+				Share:       projectfs.Share{ID: "vol", PVName: "claim"},
+			}
+			volumes, realization, err := resolveSharedDirs(layout, false, "/unused", "pid-1", "cloudrun", dirs, "/workspace")
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), string(backend))
+			assert.Contains(t, err.Error(), "cloudrun")
+			assert.Nil(t, volumes)
+			assert.Nil(t, realization)
+			assertDirEmpty(t, hostBase)
+		})
+	}
 }
 
 // TestResolveSharedDirs_NFS_TraversalProjectID_GuardBeforeMkdir is item
@@ -646,7 +753,7 @@ func TestResolveSharedDirs_NFS_PoC_TraversalNamesAndProjectID(t *testing.T) {
 
 	for _, poc := range pocs {
 		t.Run(poc.name, func(t *testing.T) {
-			for _, runtimeName := range []string{"docker", "kubernetes"} {
+			for _, runtimeName := range []string{"docker", "kubernetes", "cloudrun"} {
 				t.Run(runtimeName, func(t *testing.T) {
 					mountRoot := newResolvedTempDir(t)
 					shareID := "scion-shared"
@@ -1204,7 +1311,7 @@ func assertDirEmpty(t *testing.T, dir string) {
 // default) must still accept a non-default value rather than false-positive
 // reject every agent start for an otherwise valid config.
 func TestResolveSharedDirs_NFS_CustomSubPathRoot_StillWorks(t *testing.T) {
-	for _, runtimeName := range []string{"docker", "kubernetes"} {
+	for _, runtimeName := range []string{"docker", "kubernetes", "cloudrun"} {
 		t.Run(runtimeName, func(t *testing.T) {
 			mountRoot := newResolvedTempDir(t)
 			shareID := "scion-shared"

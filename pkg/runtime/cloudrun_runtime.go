@@ -51,6 +51,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/cloudrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/startuplistener"
+	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/googleapis/gax-go/v2"
@@ -495,6 +496,9 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	if err := rejectNonNFSOnCloudRun(cfg); err != nil {
 		return "", err
 	}
+	if _, _, err := r.cloudRunSharedDirVolumes(cfg); err != nil {
+		return "", err
+	}
 	if err := r.checkOwnerLabel(cfg); err != nil {
 		return "", err
 	}
@@ -622,7 +626,11 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 
 	// The instance this start computes. It is built before the read, so an
 	// existing instance is reused only when it matches (ptone/scion#7297).
-	inst := r.buildCloudRunInstance(cfg, uid, gid, nfsPaths)
+	inst, err := r.buildCloudRunInstanceChecked(cfg, uid, gid, nfsPaths)
+	if err != nil {
+		nfsPaths.rollbackCreated(err)
+		return "", err
+	}
 	inst.Containers[0].Resources = resources
 	// The init firewall on a native "assign" instance, checked on the
 	// final instance env (every source, harness env included) before any
@@ -1021,6 +1029,11 @@ func (r *CloudRunRuntime) deleteOwnAfterFailedWait(ctx context.Context, c cloudr
 // and the harness env never sets a name cloudRunHarnessEnvDenied reports,
 // so the SCION_METADATA_* settings in cfg.Env are always the hub's.
 func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfsPaths *cloudRunNFSProvisionPaths) *runpb.Instance {
+	inst, _ := r.buildCloudRunInstanceChecked(cfg, uid, gid, nfsPaths)
+	return inst
+}
+
+func (r *CloudRunRuntime) buildCloudRunInstanceChecked(cfg RunConfig, uid, gid int, nfsPaths *cloudRunNFSProvisionPaths) (*runpb.Instance, error) {
 	var envVars []*runpb.EnvVar
 	for _, e := range cfg.Env {
 		parts := strings.SplitN(e, "=", 2)
@@ -1169,6 +1182,13 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 			Name:      cloudRunMemVolume,
 			MountPath: k8sMemDir,
 		})
+
+		sdVols, sdMounts, err := r.cloudRunSharedDirVolumes(cfg)
+		if err != nil {
+			return nil, err
+		}
+		volumes = append(volumes, sdVols...)
+		volumeMounts = append(volumeMounts, sdMounts...)
 	}
 
 	labels := CloudRunStoredLabels(cfg.Labels)
@@ -1261,7 +1281,125 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 	if cfg.CloudRunIdentity != nil {
 		inst.ServiceAccount = cfg.CloudRunIdentity.ServiceAccount
 	}
-	return inst
+	return inst, nil
+}
+
+// cloudRunSharedDirVolumes validates and realizes cfg.SharedDirs as Cloud Run
+// inline NFS volumes and container mounts from the same NFS share that backs
+// the instance's workspace and home (ptone/scion#5926). Each leaf is realized
+// through projectfs.Layout (ProjectLeaf + Realize) and checked against
+// validateUnixPathBelowRoot and checkNFSMountScope so no volume ever mounts the
+// export root, the project root, the project .scion config directory, or
+// another project's tree. Fails closed whenever a shared dir cannot be served
+// from that unified NFS share.
+func (r *CloudRunRuntime) cloudRunSharedDirVolumes(cfg RunConfig) ([]*runpb.Volume, []*runpb.VolumeMount, error) {
+	if len(cfg.SharedDirs) == 0 {
+		return nil, nil, nil
+	}
+	if err := api.ValidateSharedDirs(cfg.SharedDirs); err != nil {
+		return nil, nil, fmt.Errorf("cloudrun: shared_dirs: %w", err)
+	}
+	sds := cfg.SharedDirStorage
+	if sds == nil {
+		return nil, nil, fmt.Errorf("cloudrun: project shared directories require NFS project storage (server.project_storage with backend \"nfs\")")
+	}
+	if sds.Backend != string(projectfs.BackendNFS) {
+		return nil, nil, fmt.Errorf("cloudrun: project shared directories on backend %q are not supported on the Cloud Run runtime, which mounts shared directories only from an NFS share", sds.Backend)
+	}
+	var runtimeServer, runtimeExport string
+	if r.config != nil {
+		runtimeServer, runtimeExport = r.config.NFSServer, r.config.NFSExport
+	}
+	server, export, err := resolveCloudRunNFSTarget(runtimeServer, runtimeExport, cfg.NFSShareServer, cfg.NFSShareExport)
+	if err != nil {
+		return nil, nil, err
+	}
+	exportRoot := path.Clean(export)
+	if !path.IsAbs(exportRoot) {
+		return nil, nil, fmt.Errorf("cloudrun: nfs_export must be an absolute server path, got %q", export)
+	}
+	if sds.Server == "" || sds.Export == "" || sds.SubPathRoot == "" {
+		return nil, nil, fmt.Errorf("cloudrun: project shared directories must reside on the instance's workspace NFS share (server.project_storage with backend \"nfs\"); split or incomplete shared-dir storage is not supported")
+	}
+	if sds.Server != server || path.Clean(sds.Export) != exportRoot {
+		return nil, nil, fmt.Errorf("cloudrun: shared-dir storage NFS target %s:%s does not match the instance's workspace NFS share %s:%s",
+			sds.Server, path.Clean(sds.Export), server, exportRoot)
+	}
+	wsRoot, err := config.ResolveSubPathRoot(cfg.NFSSubPathRoot)
+	if err != nil {
+		return nil, nil, fmt.Errorf("cloudrun: invalid NFS %w", err)
+	}
+	sdRoot, err := config.ResolveSubPathRoot(sds.SubPathRoot)
+	if err != nil {
+		return nil, nil, fmt.Errorf("cloudrun: invalid shared-dir NFS %w", err)
+	}
+	wsRootSlash := filepath.ToSlash(wsRoot)
+	sdRootSlash := filepath.ToSlash(sdRoot)
+	if sdRootSlash != wsRootSlash {
+		return nil, nil, fmt.Errorf("cloudrun: shared-dir storage subpath_root %q does not match workspace subpath_root %q", sds.SubPathRoot, cfg.NFSSubPathRoot)
+	}
+	if err := validateCloudRunNFSElement("project_id", cfg.ProjectID); err != nil {
+		return nil, nil, err
+	}
+	if !shareddirs.ValidProjectID(cfg.ProjectID) {
+		return nil, nil, fmt.Errorf("cloudrun: shared dirs: invalid hub project ID %q", cfg.ProjectID)
+	}
+	if sds.ProjectID == "" || sds.ProjectID != cfg.ProjectID {
+		return nil, nil, fmt.Errorf("cloudrun: shared-dir storage project ID %q does not match run project ID %q", sds.ProjectID, cfg.ProjectID)
+	}
+
+	// Cloud Run Instances have no Kubernetes PVCs: omit PVName even on a
+	// hybrid share that carries one for GKE, so Layout.Realize always emits
+	// each directory's inline NFS server path.
+	layout := nfsShareLayout(projectfs.BackendNFS, sdRootSlash, NFSPodShare{
+		Server: server,
+		Export: exportRoot,
+	})
+
+	vols := make([]*runpb.Volume, 0, len(cfg.SharedDirs))
+	mounts := make([]*runpb.VolumeMount, 0, len(cfg.SharedDirs))
+	for i, sd := range cfg.SharedDirs {
+		_, subPath, err := sharedDirClaimSubPath(sds, sd.Name)
+		if err != nil {
+			return nil, nil, fmt.Errorf("cloudrun: %w", err)
+		}
+		subPathSlash := filepath.ToSlash(subPath)
+		wantSubPath := path.Join(sdRootSlash, cfg.ProjectID, "shared-dirs", sd.Name)
+		if subPathSlash != wantSubPath {
+			return nil, nil, fmt.Errorf("cloudrun: shared dir %q: resolved subPath %q does not match %q", sd.Name, subPath, wantSubPath)
+		}
+		target := projectfs.SharedDirTarget(sd.Name, sd.InWorkspace, cfg.ContainerWorkspace)
+		realized, err := realizeNFSLeaf(layout, cfg.ProjectID, subPathSlash, target, sd.ReadOnly)
+		if err != nil {
+			return nil, nil, fmt.Errorf("cloudrun: shared dir %q: %w", sd.Name, err)
+		}
+		if realized.NFS == nil || realized.NFS.Server == "" || realized.NFS.Path == "" || realized.SubPath != "" {
+			return nil, nil, fmt.Errorf("cloudrun: shared dir %q: inline NFS realization missing server or path", sd.Name)
+		}
+		if err := validateUnixPathBelowRoot(realized.NFS.Path, exportRoot); err != nil {
+			return nil, nil, fmt.Errorf("cloudrun: invalid NFS shared dir %q path: %w", sd.Name, err)
+		}
+		if err := checkNFSMountScope(subPathSlash, sdRootSlash, cfg.ProjectID); err != nil {
+			return nil, nil, fmt.Errorf("cloudrun: NFS shared dir %q volume: %w", sd.Name, err)
+		}
+
+		volName := fmt.Sprintf("shared-dir-%d", i)
+		vols = append(vols, &runpb.Volume{
+			Name: volName,
+			VolumeType: &runpb.Volume_Nfs{
+				Nfs: &runpb.NFSVolumeSource{
+					Server:   realized.NFS.Server,
+					Path:     realized.NFS.Path,
+					ReadOnly: realized.ReadOnly,
+				},
+			},
+		})
+		mounts = append(mounts, &runpb.VolumeMount{
+			Name:      volName,
+			MountPath: realized.Target,
+		})
+	}
+	return vols, mounts, nil
 }
 
 // cloudRunIdentityLabel is the instance label holding cloudRunIdentityHash

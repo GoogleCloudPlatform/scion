@@ -27,10 +27,11 @@ import (
 )
 
 // TestSharedDirsNotSharedWarning: a runtime that cannot mount the shared
-// tree (Cloud Run) keeps node-local shared dirs on a shared backend, and
-// the start carries a user-visible warning (ptone/scion#5926); runtimes
-// that mount the tree, the local backend, the legacy split (refused
-// instead) and a project without shared dirs get none.
+// tree (cloudrun-sandbox) keeps node-local shared dirs on a shared backend,
+// and the start carries a user-visible warning (ptone/scion#5926); runtimes
+// that mount the tree (local-container, kubernetes, cloudrun), the local
+// backend, the legacy split (refused instead) and a project without shared
+// dirs get none.
 func TestSharedDirsNotSharedWarning(t *testing.T) {
 	nfs := projectfs.Layout{Backend: projectfs.BackendNFS}
 	local := projectfs.Layout{Backend: projectfs.BackendLocal}
@@ -43,7 +44,8 @@ func TestSharedDirsNotSharedWarning(t *testing.T) {
 		dirs    []api.SharedDir
 		want    bool
 	}{
-		{"cloudrun on nfs", nfs, false, "cloudrun", dirs, true},
+		{"cloudrun on nfs", nfs, false, "cloudrun", dirs, false},
+		{"cloudrun sandbox on nfs", nfs, false, "cloudrun-sandbox", dirs, true},
 		{"cloudrun sandbox on gke volume", projectfs.Layout{Backend: projectfs.BackendGKESharedVolume}, false, "cloudrun-sandbox", dirs, true},
 		{"docker on nfs", nfs, false, "docker", dirs, false},
 		{"kubernetes on nfs", nfs, false, "kubernetes", dirs, false},
