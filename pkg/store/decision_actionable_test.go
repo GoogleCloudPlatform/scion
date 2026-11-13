@@ -15,7 +15,9 @@
 package store
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -45,8 +47,13 @@ func TestDecisionActionableReason(t *testing.T) {
 		t.Fatalf("read golden actionable cases: %v", err)
 	}
 	var cases []actionableGoldenCase
-	if err := json.Unmarshal(raw, &cases); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&cases); err != nil {
 		t.Fatalf("unmarshal golden actionable cases: %v", err)
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		t.Fatalf("unexpected trailing data in golden actionable cases: %v", err)
 	}
 	if len(cases) == 0 {
 		t.Fatal("golden actionable cases table is empty")

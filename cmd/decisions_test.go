@@ -358,7 +358,9 @@ func TestDecisionsRecord_BothFormsAndErrorRendering(t *testing.T) {
 	mux.HandleFunc("/api/v1/agent/decisions/interpreted", func(w http.ResponseWriter, r *http.Request) {
 		switch mode {
 		case "exp_off":
-			http.NotFound(w, r)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"Not found"}}`))
 			return
 		case "conflict":
 			w.Header().Set("Content-Type", "application/json")

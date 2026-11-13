@@ -234,6 +234,12 @@ func TestAgentDecisions_ListAndShow(t *testing.T) {
 	otherShowRR := f.agentDecisionReq(t, otherAgent, http.MethodGet, "/api/v1/agent/decisions/D234", nil)
 	assert.Equal(t, http.StatusNotFound, otherShowRR.Code)
 	assert.Equal(t, ErrCodeDecisionNotFound, errorCode(t, otherShowRR))
+
+	// Invalid list query parameters -> 400.
+	for _, q := range []string{"state=bogus", "limit=0", "limit=201", "limit=x", "cursor=not-a-cursor"} {
+		rr := f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions?"+q, nil)
+		assert.Equal(t, http.StatusBadRequest, rr.Code, "%s: %s", q, rr.Body.String())
+	}
 }
 
 func TestAgentDecisions_InterpretedSingleAndMultiPromptPartialSet(t *testing.T) {
@@ -261,22 +267,41 @@ func TestAgentDecisions_InterpretedSingleAndMultiPromptPartialSet(t *testing.T) 
 	assert.Empty(t, outSolo.BatchID, "single pair omits batch_id")
 	assert.NotEmpty(t, outSolo.ResponseMessageID)
 	require.Len(t, outSolo.Decisions, 1)
+	require.NotNil(t, outSolo.Decisions[0].Decision)
 	assert.Equal(t, store.DecisionProvenanceAgentInterpreted, outSolo.Decisions[0].Decision.Provenance)
 	assert.True(t, outSolo.Decisions[0].Decision.MatchedDefault)
+	assert.Equal(t, f.bob.ID, outSolo.Decisions[0].Decision.AnsweredByUserID)
+	assert.Equal(t, f.bob.DisplayName, outSolo.Decisions[0].Decision.AnsweredByName)
+	assert.Equal(t, f.bob.Email, outSolo.Decisions[0].Decision.AnsweredByEmail)
+	assert.Equal(t, f.agent.ID, outSolo.Decisions[0].Decision.InterpretedByAgentID)
+	assert.Equal(t, replySolo.ID, outSolo.Decisions[0].Decision.SourceMessageID)
 	assert.Equal(t, beforeDeliveries, len(f.dispatcher.getMessages()), "interpreted answers are never delivered back to the agent")
+
+	soloRow, err := f.store.GetDecision(ctx, pSolo.Decisions[0].RowID)
+	require.NoError(t, err)
+	require.Len(t, soloRow.Answers, 1)
+	assert.Equal(t, f.bob.ID, soloRow.Answers[0].AnsweredByUserID)
+	assert.Equal(t, f.bob.DisplayName, soloRow.Answers[0].AnsweredByName)
+	assert.Equal(t, f.bob.Email, soloRow.Answers[0].AnsweredByEmail)
+	assert.Equal(t, f.agent.ID, soloRow.Answers[0].InterpretedByAgentID)
+	assert.Equal(t, replySolo.ID, soloRow.Answers[0].SourceMessageID)
 
 	soloMsg, err := f.store.GetMessage(ctx, outSolo.ResponseMessageID)
 	require.NoError(t, err)
 	assert.Equal(t, "agent:"+f.agent.Slug, soloMsg.Sender)
+	assert.Equal(t, store.MessageDispatchDispatched, soloMsg.DispatchState)
 	assert.Contains(t, soloMsg.Msg, "recorded")
 	assert.Contains(t, soloMsg.Msg, "answer yes to SOLO, interpreted from their reply")
 	assert.Len(t, collectEvents(updates), 1)
 	_ = collectEvents(chat)
 
-	// Multi-prompt + partial set:
+	// Multi-prompt + partial set + reverse request order:
 	// Prompt A has 3 decisions (D234, hub-keyed 1, ship-now); Prompt B has 1 decision (EXTRA).
-	// Record D234=1, 1=a, EXTRA=2 in ONE call, leaving ship-now pending!
+	// Pass EXTRA=2 (later prompt), 1=a (earlier prompt pos 1), D234=1 (earlier prompt pos 0)
+	// in reverse order, leaving ship-now pending. Live SSE, stored msg, HTTP response,
+	// history hydration, and idempotency replay must all use canonical [D234, 1, EXTRA] order.
 	pSet := f.sendSetToBob(t)
+	time.Sleep(2 * time.Millisecond)
 	pExtra := f.sendPromptToBob(t, `[{"id":"EXTRA","question":"Extra flag?","choices":["on","off"]}]`, false)
 	replyBatch := f.bobDMReply(t, pExtra.MessageID, "D234: 1, 1: a, EXTRA: 2")
 
@@ -285,9 +310,9 @@ func TestAgentDecisions_InterpretedSingleAndMultiPromptPartialSet(t *testing.T) 
 		SourceMessageID: replyBatch.ID,
 		IdempotencyKey:  "ik-multi",
 		Answers: []InterpretedAnswerInput{
-			{Key: "D234", ChoiceID: "1"},
-			{Key: pSet.Decisions[1].Key, ChoiceID: "a"},
 			{Key: "EXTRA", ChoiceID: "2"},
+			{Key: pSet.Decisions[1].Key, ChoiceID: "a"},
+			{Key: "D234", ChoiceID: "1"},
 		},
 	})
 	require.Equal(t, http.StatusOK, rrBatch.Code, rrBatch.Body.String())
@@ -295,7 +320,11 @@ func TestAgentDecisions_InterpretedSingleAndMultiPromptPartialSet(t *testing.T) 
 	require.NoError(t, json.Unmarshal(rrBatch.Body.Bytes(), &outBatch))
 	assert.NotEmpty(t, outBatch.BatchID)
 	require.Len(t, outBatch.Decisions, 3)
+	assert.Equal(t, []string{"D234", pSet.Decisions[1].Key, "EXTRA"}, []string{
+		outBatch.Decisions[0].Key, outBatch.Decisions[1].Key, outBatch.Decisions[2].Key,
+	})
 	assert.Equal(t, beforeDeliveries, len(f.dispatcher.getMessages()), "multi-pair interpreted answers are never delivered back to the agent")
+	assert.Len(t, collectEvents(updates), 3, "one choice.updated SSE event per recorded row")
 
 	// ship-now (3rd row of pSet) remains pending!
 	shipNow, err := f.store.GetDecision(ctx, pSet.Decisions[2].RowID)
@@ -304,10 +333,11 @@ func TestAgentDecisions_InterpretedSingleAndMultiPromptPartialSet(t *testing.T) 
 
 	batchMsg, err := f.store.GetMessage(ctx, outBatch.ResponseMessageID)
 	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchDispatched, batchMsg.DispatchState)
 	assert.Contains(t, batchMsg.Msg, "answers to 3 decisions: D234 yes · "+pSet.Decisions[1].Key+" Extend · EXTRA off, interpreted from their reply")
 
 	// Verify SSE ChoiceResponseSetView omits envelope PromptMessageID (multi-prompt)
-	// and populates per-answer PromptMessageID!
+	// and orders answers canonically with per-answer PromptMessageID!
 	var sseSet *ChoiceResponseSetView
 	for _, e := range collectEvents(chat) {
 		var evt UserMessageEvent
@@ -319,19 +349,45 @@ func TestAgentDecisions_InterpretedSingleAndMultiPromptPartialSet(t *testing.T) 
 	require.NotNil(t, sseSet)
 	assert.Empty(t, sseSet.PromptMessageID, "multi-prompt batch omits top-level promptMessageId")
 	require.Len(t, sseSet.Answers, 3)
+	assert.Equal(t, []string{"D234", pSet.Decisions[1].Key, "EXTRA"}, []string{
+		sseSet.Answers[0].Key, sseSet.Answers[1].Key, sseSet.Answers[2].Key,
+	})
 	assert.Equal(t, pSet.MessageID, sseSet.Answers[0].PromptMessageID)
 	assert.Equal(t, pSet.MessageID, sseSet.Answers[1].PromptMessageID)
 	assert.Equal(t, pExtra.MessageID, sseSet.Answers[2].PromptMessageID)
 
-	// Verify chat history hydration also omits envelope PromptMessageID and populates per-answer PromptMessageID.
+	// Verify chat history hydration also omits envelope PromptMessageID and matches canonical order.
 	histResp := &chatHistoryResponse{Messages: []store.Message{*batchMsg}}
 	f.srv.addChoiceHistoryViews(ctx, histResp)
 	histSet, ok := histResp.MessageChoiceResponseSets[outBatch.ResponseMessageID]
 	require.True(t, ok)
 	assert.Empty(t, histSet.PromptMessageID)
 	require.Len(t, histSet.Answers, 3)
+	assert.Equal(t, []string{"D234", pSet.Decisions[1].Key, "EXTRA"}, []string{
+		histSet.Answers[0].Key, histSet.Answers[1].Key, histSet.Answers[2].Key,
+	})
 	assert.Equal(t, pSet.MessageID, histSet.Answers[0].PromptMessageID)
 	assert.Equal(t, pExtra.MessageID, histSet.Answers[2].PromptMessageID)
+
+	// Verify idempotency replay returns 200 replayed:true in the same canonical order regardless of request pair order.
+	rrBatchReplay := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", RecordInterpretedRequest{
+		SourceMessageID: replyBatch.ID,
+		IdempotencyKey:  "ik-multi",
+		Answers: []InterpretedAnswerInput{
+			{Key: pSet.Decisions[1].Key, ChoiceID: "a"},
+			{Key: "EXTRA", ChoiceID: "2"},
+			{Key: "D234", ChoiceID: "1"},
+		},
+	})
+	require.Equal(t, http.StatusOK, rrBatchReplay.Code, rrBatchReplay.Body.String())
+	var outBatchReplay RecordInterpretedResponse
+	require.NoError(t, json.Unmarshal(rrBatchReplay.Body.Bytes(), &outBatchReplay))
+	assert.True(t, outBatchReplay.Replayed)
+	assert.Equal(t, outBatch.ResponseMessageID, outBatchReplay.ResponseMessageID)
+	require.Len(t, outBatchReplay.Decisions, 3)
+	assert.Equal(t, []string{"D234", pSet.Decisions[1].Key, "EXTRA"}, []string{
+		outBatchReplay.Decisions[0].Key, outBatchReplay.Decisions[1].Key, outBatchReplay.Decisions[2].Key,
+	})
 }
 
 func TestAgentDecisions_InterpretedValidationAndConflicts(t *testing.T) {
@@ -385,6 +441,48 @@ func TestAgentDecisions_InterpretedValidationAndConflicts(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rrWrongConv.Code)
 	assert.Equal(t, ErrCodeSourceWrongConversation, errorCode(t, rrWrongConv))
 
+	// Batch spanning decisions from two different conversations -> 400 source_wrong_conversation.
+	rrSpanConv := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", RecordInterpretedRequest{
+		SourceMessageID: dmReply.ID,
+		Answers:         []InterpretedAnswerInput{{Key: "D234", ChoiceID: "1"}, {Key: "TOP1", ChoiceID: "1"}},
+	})
+	assert.Equal(t, http.StatusBadRequest, rrSpanConv.Code)
+	assert.Equal(t, ErrCodeSourceWrongConversation, errorCode(t, rrSpanConv))
+
+	// Soft-deleted (retracted) web-chat source message -> 400 source_wrong_conversation.
+	deletedReply := f.bobDMReply(t, dmPrompt.MessageID, "D234: 1 (retracted)")
+	f.srv.mu.RLock()
+	wcs := f.srv.webChatStore
+	f.srv.mu.RUnlock()
+	require.NotNil(t, wcs)
+	_, err := markChatMessageDeleted(ctx, wcs, deletedReply.ID, time.Now().UTC())
+	require.NoError(t, err)
+	rrDeletedSrc := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", RecordInterpretedRequest{
+		SourceMessageID: deletedReply.ID,
+		Answers:         []InterpretedAnswerInput{{Key: "D234", ChoiceID: "1"}},
+	})
+	assert.Equal(t, http.StatusBadRequest, rrDeletedSrc.Code, rrDeletedSrc.Body.String())
+	assert.Equal(t, ErrCodeSourceWrongConversation, errorCode(t, rrDeletedSrc))
+	d234AfterDel, err := f.store.GetDecision(ctx, dmPrompt.Decisions[0].RowID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DecisionStatusPending, d234AfterDel.Status)
+	assert.Empty(t, d234AfterDel.Answers)
+
+	// Cross-agent isolation on RecordInterpretedAnswers -> 404 decision_not_found.
+	otherAgent := &store.Agent{
+		ID: api.NewUUID(), Slug: "other-rec-bot", Name: "other-rec-bot",
+		ProjectID: f.project.ID, OwnerID: f.bob.ID, Phase: "running",
+		Created: time.Now(),
+	}
+	require.NoError(t, f.store.CreateAgent(ctx, otherAgent))
+	rrCrossAgent := f.agentDecisionReq(t, otherAgent, http.MethodPost, "/api/v1/agent/decisions/interpreted", RecordInterpretedRequest{
+		SourceMessageID: dmReply.ID,
+		IdempotencyKey:  "ik-cross-agent",
+		Answers:         []InterpretedAnswerInput{{Key: "D234", ChoiceID: "1"}},
+	})
+	assert.Equal(t, http.StatusNotFound, rrCrossAgent.Code, rrCrossAgent.Body.String())
+	assert.Equal(t, ErrCodeDecisionNotFound, errorCode(t, rrCrossAgent))
+
 	// 4. Source message authored by an agent (e.g. the prompt message itself) -> 400 source_not_user.
 	rrAgentSrc := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", RecordInterpretedRequest{
 		SourceMessageID: dmPrompt.MessageID,
@@ -393,7 +491,7 @@ func TestAgentDecisions_InterpretedValidationAndConflicts(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rrAgentSrc.Code)
 	assert.Equal(t, ErrCodeSourceNotUser, errorCode(t, rrAgentSrc))
 
-	// 5. Source message created before the prompt -> 400 source_before_prompt.
+	// 5. Source message created before a prompt -> 400 source_before_prompt (both 1st and 2nd prompt).
 	promptStored, err := f.store.GetMessage(ctx, dmPrompt.MessageID)
 	require.NoError(t, err)
 	earlyMsg := &store.Message{
@@ -412,6 +510,22 @@ func TestAgentDecisions_InterpretedValidationAndConflicts(t *testing.T) {
 	})
 	assert.Equal(t, http.StatusBadRequest, rrBefore.Code)
 	assert.Equal(t, ErrCodeSourceBeforePrompt, errorCode(t, rrBefore))
+
+	time.Sleep(3 * time.Millisecond)
+	laterPrompt := f.sendPromptToBob(t, `[{"id":"QB1","question":"Asked after dmReply?","choices":["yes","no"]}]`, false)
+	rrBeforeSecond := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", RecordInterpretedRequest{
+		SourceMessageID: dmReply.ID,
+		Answers:         []InterpretedAnswerInput{{Key: "D234", ChoiceID: "1"}, {Key: "QB1", ChoiceID: "2"}},
+	})
+	assert.Equal(t, http.StatusBadRequest, rrBeforeSecond.Code, rrBeforeSecond.Body.String())
+	assert.Equal(t, ErrCodeSourceBeforePrompt, errorCode(t, rrBeforeSecond))
+	assert.Contains(t, rrBeforeSecond.Body.String(), "QB1")
+	for _, rowID := range []string{dmPrompt.Decisions[0].RowID, laterPrompt.Decisions[0].RowID} {
+		d, gerr := f.store.GetDecision(ctx, rowID)
+		require.NoError(t, gerr)
+		assert.Equal(t, store.DecisionStatusPending, d.Status)
+		assert.Empty(t, d.Answers)
+	}
 
 	// 6. Source author not allowed:
 	// (a) Alice forged into Bob's DM thread -> 403 source_author_not_allowed.
@@ -467,15 +581,38 @@ func TestAgentDecisions_InterpretedValidationAndConflicts(t *testing.T) {
 		SourceMessageID: dmReply.ID,
 		Answers: []InterpretedAnswerInput{
 			{Key: "D234", ChoiceID: "2"},
-			{Key: dmPrompt.Decisions[1].Key, ChoiceID: "a"},
+			{Key: dmPrompt.Decisions[1].Key, ChoiceID: "zzz"},
 		},
 	})
 	assert.Equal(t, http.StatusConflict, rrDup.Code)
-	assert.Equal(t, ErrCodeDecisionAnswered, errorCode(t, rrDup))
+	dupCode, dupDetails := errorCodeAndDetails(t, rrDup)
+	assert.Equal(t, ErrCodeDecisionAnswered, dupCode)
 	assert.Contains(t, rrDup.Body.String(), "D234: already answered (interpreted by you from")
+	dupErrs, _ := dupDetails["errors"].([]interface{})
+	assert.Len(t, dupErrs, 2, "mixed failure reports both already_answered and invalid_choice")
+	assert.NotNil(t, dupDetails["decision"], "409 already_answered includes DecisionView")
 	secondRow, err := f.store.GetDecision(ctx, dmPrompt.Decisions[1].RowID)
 	require.NoError(t, err)
 	assert.Equal(t, store.DecisionStatusPending, secondRow.Status, "all-or-nothing: 2nd row must stay pending")
+
+	// 9. Concurrent replacement during record -> 409 replaced with decision and replacedBy details.
+	repV1 := f.sendPromptToBob(t, `[{"id":"REP1","question":"Replace v1?","choices":["yes","no"]}]`, false)
+	f.sendPromptToBob(t, `[{"id":"REP1","question":"Replace v2?","choices":["yes","no"]}]`, true)
+	repV1Row, err := f.store.GetDecision(ctx, repV1.Decisions[0].RowID)
+	require.NoError(t, err)
+	rrReplaced := httptest.NewRecorder()
+	f.srv.writeInterpretedRecordError(rrReplaced, ctx, &store.InterpretedAnswersError{
+		Failures: []store.InterpretedKeyFailure{{
+			Key:      "REP1",
+			Reason:   store.InterpretedReasonReplaced,
+			Decision: repV1Row,
+		}},
+	})
+	assert.Equal(t, http.StatusConflict, rrReplaced.Code, rrReplaced.Body.String())
+	repCode, repDetails := errorCodeAndDetails(t, rrReplaced)
+	assert.Equal(t, ErrCodeDecisionReplaced, repCode)
+	assert.NotNil(t, repDetails["decision"])
+	assert.NotNil(t, repDetails["replacedBy"])
 }
 
 func TestAgentDecisions_SurfaceMappingAndIdempotency(t *testing.T) {
@@ -496,11 +633,15 @@ func TestAgentDecisions_SurfaceMappingAndIdempotency(t *testing.T) {
 		assert.Equal(t, want, decisionSurfaceFromChannel(ch), "channel=%q", ch)
 	}
 
-	// HTTP test: gchat source message records google_chat surface, and idempotency replays / rejects mismatches.
+	// HTTP test: gchat source message records google_chat surface, publishes project topic SSE,
+	// and idempotency replays (including after --update repost) / rejects mismatches.
 	f := newChoicesFixture(t)
 	promptMsg, _ := f.topicPrompt(t, `[{"id":"GC1","question":"Approve from Google Chat?","choices":["yes","no"]},{"id":"GC2","question":"Second?","choices":["yes","no"]}]`, false)
 	gchatReply := f.storeUserReply(t, f.alice, f.topicID, promptMsg.ConversationID, "gchat", "GC1: yes")
 	otherReply := f.storeUserReply(t, f.alice, f.topicID, promptMsg.ConversationID, "slack", "GC2: no")
+
+	projUpdates, unsubProjUpdates := f.srv.events.Subscribe("project." + f.project.ID + ".chat.choice.updated")
+	defer unsubProjUpdates()
 
 	rr1 := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", RecordInterpretedRequest{
 		SourceMessageID: gchatReply.ID,
@@ -512,6 +653,7 @@ func TestAgentDecisions_SurfaceMappingAndIdempotency(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rr1.Body.Bytes(), &out1))
 	assert.False(t, out1.Replayed)
 	assert.Equal(t, store.DecisionSurfaceGoogleChat, out1.Decisions[0].Decision.Surface)
+	assert.Len(t, collectEvents(projUpdates), 1, "topic interpreted record publishes choice.updated on project subject")
 
 	// Exact retry -> 200 with replayed=true and same response_message_id.
 	rrReplay := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", RecordInterpretedRequest{
@@ -524,6 +666,22 @@ func TestAgentDecisions_SurfaceMappingAndIdempotency(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rrReplay.Body.Bytes(), &outReplay))
 	assert.True(t, outReplay.Replayed)
 	assert.Equal(t, out1.ResponseMessageID, outReplay.ResponseMessageID)
+
+	// Repost GC1 with --update (v2) -> idempotent retry of ik-gchat-1 still replays v1 cleanly!
+	_, _ = f.topicPrompt(t, `[{"id":"GC1","question":"Approve from Google Chat v2?","choices":["yes","no"]}]`, true)
+	rrReplayAfterUpdate := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", RecordInterpretedRequest{
+		SourceMessageID: gchatReply.ID,
+		IdempotencyKey:  "ik-gchat-1",
+		Answers:         []InterpretedAnswerInput{{Key: "GC1", ChoiceID: "1"}},
+	})
+	require.Equal(t, http.StatusOK, rrReplayAfterUpdate.Code, rrReplayAfterUpdate.Body.String())
+	var outAfterUpdate RecordInterpretedResponse
+	require.NoError(t, json.Unmarshal(rrReplayAfterUpdate.Body.Bytes(), &outAfterUpdate))
+	assert.True(t, outAfterUpdate.Replayed)
+	assert.Equal(t, out1.ResponseMessageID, outAfterUpdate.ResponseMessageID)
+	require.Len(t, outAfterUpdate.Decisions, 1)
+	assert.Equal(t, 1, outAfterUpdate.Decisions[0].Version)
+	assert.NotNil(t, outAfterUpdate.Decisions[0].ReplacedBy)
 
 	// Mismatched choice, key (existing or nonexistent), or source_message_id -> 422 idempotency_mismatch.
 	for name, bad := range map[string]RecordInterpretedRequest{

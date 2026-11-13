@@ -649,15 +649,26 @@ type DecisionStore interface {
 	// that key.
 	GetAgentDecisionVersions(ctx context.Context, agentID, key string) ([]*Decision, error)
 
+	// FindInterpretedReplay checks whether idempotencyKey has already been
+	// used by agentID for agent_interpreted answers, without locking or
+	// writing. Returns (replay, nil) with Replayed=true and answers ordered
+	// canonically by (prompt CreatedAt, MessageID, Position) when the key
+	// matches sourceMessageID and every pair in pairs; (nil,
+	// ErrIdempotencyMismatch) when the key was already used by agentID for a
+	// different source message or different answers; and (nil, nil) when
+	// idempotencyKey is empty or unused by agentID.
+	FindInterpretedReplay(ctx context.Context, agentID, idempotencyKey, sourceMessageID string, pairs []InterpretedAnswerPair) (*AnswerSetResult, error)
+
 	// RecordInterpretedAnswers atomically records 1..MaxDecisionsPerMessage
 	// agent_interpreted answers for one asking agent from one user reply
 	// message: it checks idempotency scoped to (agent, idempotency_key)
-	// first, locks target rows on Postgres in (key_norm, version) order,
-	// validates every target row is pending with no existing answer and a
-	// valid choice id (returning *InterpretedAnswersError with all per-key
-	// failures and storing nothing if any fails), inserts one
-	// choice-response message, inserts the DecisionAnswer rows (sharing a
-	// new BatchID when len >= 2, empty BatchID when len == 1), and marks
-	// every target row decided.
+	// first (and re-checks after row locks on contention), locks target rows
+	// on Postgres in (key_norm, version) order, validates every target row
+	// is pending with no existing answer and a valid choice id (returning
+	// *InterpretedAnswersError with all per-key failures and storing nothing
+	// if any fails), orders validated answers canonically by (prompt
+	// CreatedAt, MessageID, Position), inserts one choice-response message,
+	// inserts the DecisionAnswer rows (sharing a new BatchID when len >= 2,
+	// empty BatchID when len == 1), and marks every target row decided.
 	RecordInterpretedAnswers(ctx context.Context, in *RecordInterpretedInput) (*AnswerSetResult, error)
 }

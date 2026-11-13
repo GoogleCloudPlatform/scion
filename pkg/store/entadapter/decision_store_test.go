@@ -24,6 +24,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -1380,6 +1381,16 @@ func TestRecordInterpretedAnswers_SingleAndMultiPromptPartialSet(t *testing.T) {
 	assert.True(t, singleRes.Answers[0].MatchedDefault)
 	assert.Equal(t, srcMsgID, singleRes.Answers[0].SourceMessageID)
 	assert.Equal(t, f.agentID, singleRes.Answers[0].InterpretedByAgentID)
+	assert.Equal(t, "user-1", singleRes.Answers[0].AnsweredByUserID)
+	assert.Equal(t, "Pat", singleRes.Answers[0].AnsweredByName)
+	assert.Equal(t, "pat@example.com", singleRes.Answers[0].AnsweredByEmail)
+
+	soloStored, err := f.cs.GetDecision(ctx, p0.Decisions[0].RowID)
+	require.NoError(t, err)
+	require.Len(t, soloStored.Answers, 1)
+	assert.Equal(t, "user-1", soloStored.Answers[0].AnsweredByUserID)
+	assert.Equal(t, "Pat", soloStored.Answers[0].AnsweredByName)
+	assert.Equal(t, "pat@example.com", soloStored.Answers[0].AnsweredByEmail)
 
 	msg, err := f.cs.GetMessage(ctx, singleIn.ResponseMessage.ID)
 	require.NoError(t, err)
@@ -1387,23 +1398,31 @@ func TestRecordInterpretedAnswers_SingleAndMultiPromptPartialSet(t *testing.T) {
 	assert.Equal(t, "interpreted: SOLO=yes", msg.Msg)
 
 	// Multi-prompt + partial set: prompt A has (D234, D999), prompt B has (17).
-	// Record D234=2 and 17=1 in one batch; D999 stays pending!
+	// Pass pairs in REVERSE prompt order (hubKey first, d234 second): both
+	// stored Msg and returned Answers must be canonically ordered [D234, hubKey].
 	pA := f.create(t, false, yesNo("D234", "first?"), yesNo("D999", "leave pending?"))
+	time.Sleep(2 * time.Millisecond)
 	pB := f.create(t, false, yesNo("", "hub key?"))
 	hubKey := pB.Decisions[0].Key
 
 	batchIn := f.interpretedBatch(srcMsgID, "user-1", "idem-batch",
-		store.InterpretedAnswerPair{Key: "d234", ChoiceID: "2"},
 		store.InterpretedAnswerPair{Key: hubKey, ChoiceID: "1"},
+		store.InterpretedAnswerPair{Key: "d234", ChoiceID: "2"},
 	)
 	batchRes, err := f.cs.RecordInterpretedAnswers(ctx, batchIn)
 	require.NoError(t, err)
 	assert.NotEmpty(t, batchRes.BatchID, "2+ pairs share a batch_id")
 	require.Len(t, batchRes.Answers, 2)
+	assert.Equal(t, "D234", batchRes.Answers[0].Key, "earlier prompt comes first")
+	assert.Equal(t, hubKey, batchRes.Answers[1].Key, "later prompt comes second")
 	assert.Equal(t, batchRes.BatchID, batchRes.Answers[0].BatchID)
 	assert.Equal(t, batchRes.BatchID, batchRes.Answers[1].BatchID)
 	assert.False(t, batchRes.Answers[0].MatchedDefault)
 	assert.True(t, batchRes.Answers[1].MatchedDefault)
+
+	batchMsg, err := f.cs.GetMessage(ctx, batchIn.ResponseMessage.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "interpreted: D234=no, "+hubKey+"=yes", batchMsg.Msg)
 
 	// Verify D999 is still pending while D234 and hubKey are decided.
 	d999, err := f.cs.GetDecision(ctx, pA.Decisions[1].RowID)
@@ -1507,6 +1526,33 @@ func TestRecordInterpretedAnswers_Idempotency(t *testing.T) {
 	)
 	_, err = f.cs.RecordInterpretedAnswers(ctx, diffSrc)
 	assert.ErrorIs(t, err, store.ErrIdempotencyMismatch)
+
+	// Read-only FindInterpretedReplay: unused key -> (nil, nil); exact match
+	// (even with reversed pair order) -> Replayed=true in canonical [D1, D2]
+	// order; malformed source_message_id or mismatched choice -> ErrIdempotencyMismatch.
+	miss, err := f.cs.FindInterpretedReplay(ctx, f.agentID, "unused-key", srcMsgID, []store.InterpretedAnswerPair{
+		{Key: "D1", ChoiceID: "1"},
+	})
+	require.NoError(t, err)
+	assert.Nil(t, miss)
+
+	roReplay, err := f.cs.FindInterpretedReplay(ctx, f.agentID, "idem-1", srcMsgID, []store.InterpretedAnswerPair{
+		{Key: "D2", ChoiceID: "2"},
+		{Key: "D1", ChoiceID: "1"},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, roReplay)
+	assert.True(t, roReplay.Replayed)
+	assert.Equal(t, res1.BatchID, roReplay.BatchID)
+	require.Len(t, roReplay.Answers, 2)
+	assert.Equal(t, "D1", roReplay.Answers[0].Key)
+	assert.Equal(t, "D2", roReplay.Answers[1].Key)
+
+	_, err = f.cs.FindInterpretedReplay(ctx, f.agentID, "idem-1", "not-a-uuid", []store.InterpretedAnswerPair{
+		{Key: "D1", ChoiceID: "1"},
+		{Key: "D2", ChoiceID: "2"},
+	})
+	assert.ErrorIs(t, err, store.ErrIdempotencyMismatch)
 }
 
 func TestRecordInterpretedAnswers_ConcurrentRaceWithDirectAnswer(t *testing.T) {
@@ -1548,4 +1594,46 @@ func TestRecordInterpretedAnswers_ConcurrentRaceWithDirectAnswer(t *testing.T) {
 		assert.Equal(t, store.DecisionStatusDecided, d.Status)
 		assert.Len(t, d.Answers, 1)
 	}
+}
+
+func TestRecordInterpretedAnswers_KeyOnlyPairIsAgentScoped(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+	otherAgent := uuid.NewString()
+	otherIn := f.prompt("", false, yesNo("SHARED", "other agent asks"))
+	otherIn.AskerAgentID = otherAgent
+	otherIn.Message.SenderID = otherAgent
+	otherIn.Message.AgentID = otherAgent
+	otherRes, err := f.cs.CreateChoicePrompt(ctx, otherIn)
+	require.NoError(t, err)
+
+	_, err = f.cs.RecordInterpretedAnswers(ctx, f.interpretedBatch(uuid.NewString(), "user-1", "",
+		store.InterpretedAnswerPair{Key: "SHARED", ChoiceID: "1"},
+	))
+	var iaErr *store.InterpretedAnswersError
+	require.ErrorAs(t, err, &iaErr)
+	require.Len(t, iaErr.Failures, 1)
+	assert.Equal(t, store.InterpretedReasonNotFound, iaErr.Failures[0].Reason)
+
+	d, err := f.cs.GetDecision(ctx, otherRes.Decisions[0].RowID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DecisionStatusPending, d.Status)
+	assert.Empty(t, d.Answers)
+}
+
+func TestRecordInterpretedAnswers_ReplacedVersion(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+	v1 := f.create(t, false, yesNo("REP", "v1?")).Decisions[0].RowID
+	f.create(t, true, yesNo("REP", "v2?"))
+
+	_, err := f.cs.RecordInterpretedAnswers(ctx, f.interpretedBatch(uuid.NewString(), "user-1", "",
+		store.InterpretedAnswerPair{DecisionRowID: v1, Key: "REP", ChoiceID: "1"},
+	))
+	var iaErr *store.InterpretedAnswersError
+	require.ErrorAs(t, err, &iaErr)
+	require.Len(t, iaErr.Failures, 1)
+	assert.Equal(t, store.InterpretedReasonReplaced, iaErr.Failures[0].Reason)
+	require.NotNil(t, iaErr.Failures[0].Decision)
+	assert.NotEmpty(t, iaErr.Failures[0].Decision.ReplacedByID)
 }

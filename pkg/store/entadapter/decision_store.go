@@ -1334,6 +1334,28 @@ func (c *CompositeStore) GetAgentDecisionVersions(ctx context.Context, agentID, 
 	return out, nil
 }
 
+// FindInterpretedReplay implements store.DecisionStore.
+func (c *CompositeStore) FindInterpretedReplay(ctx context.Context, agentID, idempotencyKey, sourceMessageID string, pairs []store.InterpretedAnswerPair) (*store.AnswerSetResult, error) {
+	if idempotencyKey == "" {
+		return nil, nil
+	}
+	if len(idempotencyKey) > store.MaxDecisionIdempotencyKeyLen {
+		return nil, fmt.Errorf("%w: the idempotency key is at most %d bytes", store.ErrInvalidInput, store.MaxDecisionIdempotencyKeyLen)
+	}
+	agentUUID, err := parseGetID(agentID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	res, ok, err := replayableInterpretedAnswers(ctx, c.client, agentUUID, idempotencyKey, sourceMessageID, pairs)
+	if err != nil || !ok {
+		return nil, err
+	}
+	return res, nil
+}
+
 // RecordInterpretedAnswers implements store.DecisionStore.
 func (c *CompositeStore) RecordInterpretedAnswers(ctx context.Context, in *store.RecordInterpretedInput) (*store.AnswerSetResult, error) {
 	if err := validateRecordInterpretedInput(in); err != nil {
@@ -1417,6 +1439,16 @@ type validatedInterpretedItem struct {
 	choiceLabel string
 }
 
+func compareEntDecisionOrder(ri, rj *ent.Decision) bool {
+	if ri.MessageID != rj.MessageID {
+		if !ri.CreatedAt.Equal(rj.CreatedAt) {
+			return ri.CreatedAt.Before(rj.CreatedAt)
+		}
+		return ri.MessageID.String() < rj.MessageID.String()
+	}
+	return ri.Position < rj.Position
+}
+
 func (c *CompositeStore) recordInterpretedAnswersTx(ctx context.Context, in *store.RecordInterpretedInput) (*store.AnswerSetResult, error) {
 	client := c.client
 	agentUUID, _ := parseUUID(in.InterpretedByAgentID)
@@ -1426,7 +1458,7 @@ func (c *CompositeStore) recordInterpretedAnswersTx(ctx context.Context, in *sto
 	// before row-status checks so retries after confirm/override/repost still
 	// replay cleanly and reused keys with different inputs return 422.
 	if in.IdempotencyKey != "" {
-		if res, ok, err := replayableInterpretedAnswers(ctx, client, agentUUID, sourceUUID, in); err != nil || ok {
+		if res, ok, err := replayableInterpretedAnswers(ctx, client, agentUUID, in.IdempotencyKey, in.SourceMessageID, in.Answers); err != nil || ok {
 			return res, err
 		}
 	}
@@ -1489,7 +1521,6 @@ func (c *CompositeStore) recordInterpretedAnswersTx(ctx context.Context, in *sto
 	// 3. Validate all requested pairs before writing anything (all-or-nothing).
 	var failures []store.InterpretedKeyFailure
 	validated := make([]validatedInterpretedItem, 0, len(in.Answers))
-	formatted := make([]store.InterpretedFormattedItem, 0, len(in.Answers))
 	for _, a := range in.Answers {
 		var row *ent.Decision
 		if a.DecisionRowID != "" {
@@ -1553,14 +1584,33 @@ func (c *CompositeStore) recordInterpretedAnswersTx(ctx context.Context, in *sto
 			choiceID:    a.ChoiceID,
 			choiceLabel: label,
 		})
-		formatted = append(formatted, store.InterpretedFormattedItem{
-			Key:         row.Key,
-			ChoiceID:    a.ChoiceID,
-			ChoiceLabel: label,
-		})
 	}
 	if len(failures) > 0 {
+		// On Postgres READ COMMITTED, two concurrent identical retries can both
+		// miss the pre-lock check; once the winner commits and releases FOR
+		// UPDATE locks, re-check idempotency here so the retry gets 200 replayed
+		// (or 422 on mismatch) rather than 409 already_answered.
+		if in.IdempotencyKey != "" {
+			if res, ok, err := replayableInterpretedAnswers(ctx, client, agentUUID, in.IdempotencyKey, in.SourceMessageID, in.Answers); err != nil || ok {
+				return res, err
+			}
+		}
 		return nil, &store.InterpretedAnswersError{Failures: failures}
+	}
+
+	// Sort validated pairs into canonical prompt/position order so stored
+	// response text, live SSE ChoiceResponseSetView, history hydration, and
+	// idempotency replay all share one deterministic order.
+	sort.SliceStable(validated, func(i, j int) bool {
+		return compareEntDecisionOrder(validated[i].row, validated[j].row)
+	})
+	formatted := make([]store.InterpretedFormattedItem, len(validated))
+	for i, v := range validated {
+		formatted[i] = store.InterpretedFormattedItem{
+			Key:         v.row.Key,
+			ChoiceID:    v.choiceID,
+			ChoiceLabel: v.choiceLabel,
+		}
 	}
 
 	// 4. Insert the single choice-response message, the DecisionAnswer rows,
@@ -1630,15 +1680,16 @@ func (c *CompositeStore) recordInterpretedAnswersTx(ctx context.Context, in *sto
 	return res, nil
 }
 
-// replayableInterpretedAnswers returns the answers recorded under in's
-// idempotency key by agentUUID when every target pair and source_message_id
-// match. Returns ErrIdempotencyMismatch when the key was already used by the
-// agent for different answers or a different source message.
-func replayableInterpretedAnswers(ctx context.Context, client *ent.Client, agentUUID, sourceUUID uuid.UUID, in *store.RecordInterpretedInput) (*store.AnswerSetResult, bool, error) {
+// replayableInterpretedAnswers returns the answers recorded under
+// idempotencyKey by agentUUID when every target pair in pairs and
+// sourceMessageID match, ordered canonically by (prompt CreatedAt, MessageID,
+// Position). Returns ErrIdempotencyMismatch when the key was already used by
+// the agent for different answers or a different source message.
+func replayableInterpretedAnswers(ctx context.Context, client *ent.Client, agentUUID uuid.UUID, idempotencyKey, sourceMessageID string, pairs []store.InterpretedAnswerPair) (*store.AnswerSetResult, bool, error) {
 	found, err := client.DecisionAnswer.Query().
 		Where(
 			decisionanswer.InterpretedByAgentID(agentUUID),
-			decisionanswer.IdempotencyKey(in.IdempotencyKey),
+			decisionanswer.IdempotencyKey(idempotencyKey),
 		).
 		All(ctx)
 	if err != nil {
@@ -1648,7 +1699,11 @@ func replayableInterpretedAnswers(ctx context.Context, client *ent.Client, agent
 		return nil, false, nil
 	}
 	mismatch := fmt.Errorf("%w: the idempotency key was used for different interpreted answers", store.ErrIdempotencyMismatch)
-	if len(found) != len(in.Answers) {
+	sourceUUID, serr := parseUUID(sourceMessageID)
+	if serr != nil {
+		return nil, false, mismatch
+	}
+	if len(found) != len(pairs) {
 		return nil, false, mismatch
 	}
 
@@ -1663,7 +1718,8 @@ func replayableInterpretedAnswers(ctx context.Context, client *ent.Client, agent
 
 	byNorm := make(map[string]*ent.DecisionAnswer, len(found))
 	byRowID := make(map[string]*ent.DecisionAnswer, len(found))
-	for _, f := range found {
+	foundRowIDs := make([]uuid.UUID, len(found))
+	for i, f := range found {
 		if f.Provenance != decisionanswer.ProvenanceAgentInterpreted {
 			return nil, false, mismatch
 		}
@@ -1682,24 +1738,46 @@ func replayableInterpretedAnswers(ctx context.Context, client *ent.Client, agent
 		}
 		byNorm[messages.DecisionKeyNorm(f.Key)] = f
 		byRowID[f.DecisionRowID.String()] = f
+		foundRowIDs[i] = f.DecisionRowID
 	}
 
-	ordered := make([]*store.DecisionAnswer, len(in.Answers))
-	for i, a := range in.Answers {
+	matched := make(map[uuid.UUID]bool, len(found))
+	ordered := make([]*store.DecisionAnswer, len(pairs))
+	for i, a := range pairs {
 		var f *ent.DecisionAnswer
 		if a.Key != "" {
 			f = byNorm[messages.DecisionKeyNorm(a.Key)]
 		} else {
 			f = byRowID[a.DecisionRowID]
 		}
-		if f == nil || f.ChoiceID != a.ChoiceID {
+		if f == nil || matched[f.ID] || f.ChoiceID != a.ChoiceID {
 			return nil, false, mismatch
 		}
 		if a.DecisionRowID != "" && f.DecisionRowID.String() != a.DecisionRowID && a.Key == "" {
 			return nil, false, mismatch
 		}
+		matched[f.ID] = true
 		ordered[i] = answerToStore(f)
 	}
+
+	dRows, derr := client.Decision.Query().
+		Where(decision.IDIn(foundRowIDs...)).
+		All(ctx)
+	if derr != nil {
+		return nil, false, mapError(derr)
+	}
+	rowsByID := make(map[string]*ent.Decision, len(dRows))
+	for _, r := range dRows {
+		rowsByID[r.ID.String()] = r
+	}
+	sort.SliceStable(ordered, func(i, j int) bool {
+		ri, rj := rowsByID[ordered[i].DecisionRowID], rowsByID[ordered[j].DecisionRowID]
+		if ri != nil && rj != nil {
+			return compareEntDecisionOrder(ri, rj)
+		}
+		return ordered[i].ID < ordered[j].ID
+	})
+
 	return &store.AnswerSetResult{
 		BatchID:  batchStr,
 		Answers:  ordered,

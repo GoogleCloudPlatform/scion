@@ -23,8 +23,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -404,11 +402,32 @@ func (s *Server) handleAgentDecisionInterpreted(w http.ResponseWriter, r *http.R
 		seenNorms[norm] = true
 	}
 
-	// Step 2: resolve each key to the caller's active version (or, on an
-	// idempotency retry after --update, the version carrying that key).
+	// Check idempotency before resolving active versions or source state so
+	// retries (including after confirm/override or --update repost) return 200
+	// replayed and reused keys with altered payloads return 422 without opening
+	// a write transaction.
+	if req.IdempotencyKey != "" {
+		reqPairs := make([]store.InterpretedAnswerPair, len(req.Answers))
+		for i, a := range req.Answers {
+			reqPairs[i] = store.InterpretedAnswerPair{Key: a.Key, ChoiceID: a.ChoiceID}
+		}
+		replay, rerr := s.store.FindInterpretedReplay(ctx, agentID, req.IdempotencyKey, req.SourceMessageID, reqPairs)
+		switch {
+		case errors.Is(rerr, store.ErrIdempotencyMismatch):
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeIdempotencyMismatch, rerr.Error(), nil)
+			return
+		case rerr != nil:
+			writeErrorFromErr(w, rerr, "")
+			return
+		case replay != nil:
+			s.writeInterpretedReplay(w, ctx, replay)
+			return
+		}
+	}
+
+	// Step 2: resolve each key to the caller's active version.
 	resolved := make([]*store.Decision, 0, len(req.Answers))
 	var missingKeys []string
-	isReplayCandidate := false
 	for _, item := range req.Answers {
 		versions, err := s.store.GetAgentDecisionVersions(ctx, agentID, item.Key)
 		if err != nil {
@@ -420,22 +439,9 @@ func (s *Server) handleAgentDecisionInterpreted(w http.ResponseWriter, r *http.R
 			return
 		}
 		var target *store.Decision
-		if req.IdempotencyKey != "" {
-			for _, v := range versions {
-				for _, a := range v.Answers {
-					if a.InterpretedByAgentID == agentID && a.IdempotencyKey == req.IdempotencyKey {
-						target = v
-						isReplayCandidate = true
-						break
-					}
-				}
-			}
-		}
-		if target == nil {
-			for _, v := range versions {
-				if v.Status != store.DecisionStatusReplaced && v.ReplacedByID == "" {
-					target = v
-				}
+		for _, v := range versions {
+			if v.Status != store.DecisionStatusReplaced && v.ReplacedByID == "" {
+				target = v
 			}
 		}
 		if target == nil {
@@ -445,29 +451,16 @@ func (s *Server) handleAgentDecisionInterpreted(w http.ResponseWriter, r *http.R
 		resolved = append(resolved, target)
 	}
 	if len(missingKeys) > 0 {
-		// If an idempotency key was supplied, check whether it was already used
-		// on another decision of this agent (422 idempotency_mismatch takes
-		// precedence over 404 when reusing a key for a nonexistent target).
-		if req.IdempotencyKey != "" && isValidUUID(req.SourceMessageID) {
-			if s.checkIdempotencyMismatchOnly(w, ctx, agentID, req) {
-				return
-			}
-		}
 		writeError(w, http.StatusNotFound, ErrCodeDecisionNotFound,
 			fmt.Sprintf("decision %s was not found", strings.Join(missingKeys, ", ")),
 			map[string]interface{}{"keys": missingKeys})
 		return
 	}
 
-	// Step 3: source message validation (exists & same conversation ->
-	// 400 source_wrong_conversation; user sender -> 400 source_not_user;
-	// strictly after every involved prompt -> 400 source_before_prompt).
-	if req.IdempotencyKey != "" && isValidUUID(req.SourceMessageID) && !isReplayCandidate {
-		if s.checkIdempotencyMismatchOnly(w, ctx, agentID, req) {
-			return
-		}
-	}
-
+	// Step 3: source message validation (exists, not soft-deleted, & same
+	// conversation -> 400 source_wrong_conversation; user sender -> 400
+	// source_not_user; strictly after every involved prompt -> 400
+	// source_before_prompt).
 	sourceMsg, err := s.store.GetMessage(ctx, req.SourceMessageID)
 	switch {
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrInvalidInput), sourceMsg == nil && err == nil:
@@ -477,6 +470,21 @@ func (s *Server) handleAgentDecisionInterpreted(w http.ResponseWriter, r *http.R
 	case err != nil:
 		writeErrorFromErr(w, err, "")
 		return
+	}
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+	if wcs != nil {
+		ext, xerr := wcs.GetMessageExt(ctx, sourceMsg.ID)
+		if xerr != nil {
+			writeErrorFromErr(w, xerr, "")
+			return
+		}
+		if ext != nil && ext.DeletedAt != nil {
+			writeError(w, http.StatusBadRequest, ErrCodeSourceWrongConversation,
+				"source message was not found in the decision's conversation", nil)
+			return
+		}
 	}
 
 	promptIDs := make([]string, 0, len(resolved))
@@ -601,19 +609,15 @@ func (s *Server) handleAgentDecisionInterpreted(w http.ResponseWriter, r *http.R
 
 	pairs := make([]store.InterpretedAnswerPair, len(req.Answers))
 	for i, a := range req.Answers {
-		rowID := resolved[i].ID
-		if isReplayCandidate {
-			rowID = ""
-		}
 		pairs[i] = store.InterpretedAnswerPair{
-			DecisionRowID: rowID,
+			DecisionRowID: resolved[i].ID,
 			Key:           a.Key,
 			ChoiceID:      a.ChoiceID,
 		}
 	}
 
 	// Steps 5-8: atomic transaction (idempotency, row locks, pending + choice
-	// validation, insert response message + answers, mark decided).
+	// validation, canonical ordering, insert response message + answers, mark decided).
 	res, err := s.store.RecordInterpretedAnswers(ctx, &store.RecordInterpretedInput{
 		InterpretedByAgentID: agentID,
 		SourceMessageID:      req.SourceMessageID,
@@ -633,7 +637,13 @@ func (s *Server) handleAgentDecisionInterpreted(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	if res.Replayed {
+		s.writeInterpretedReplay(w, ctx, res)
+		return
+	}
+
 	updatedRows := make([]*store.Decision, len(res.Answers))
+	rowsByID := make(map[string]*store.Decision, len(res.Answers))
 	views := make([]DecisionView, len(res.Answers))
 	for i, a := range res.Answers {
 		cur, gerr := s.store.GetDecision(ctx, a.DecisionRowID)
@@ -642,17 +652,8 @@ func (s *Server) handleAgentDecisionInterpreted(w http.ResponseWriter, r *http.R
 			return
 		}
 		updatedRows[i] = cur
+		rowsByID[cur.ID] = cur
 		views[i] = s.decisionViewFor(ctx, cur)
-	}
-
-	if res.Replayed {
-		writeJSON(w, http.StatusOK, RecordInterpretedResponse{
-			ResponseMessageID: res.Answers[0].ResponseMessageID,
-			BatchID:           res.BatchID,
-			Decisions:         views,
-			Replayed:          true,
-		})
-		return
 	}
 
 	// Publish the single choice-response to web SSE + member fan-out, and
@@ -660,8 +661,8 @@ func (s *Server) handleAgentDecisionInterpreted(w http.ResponseWriter, r *http.R
 	if len(res.Answers) == 1 {
 		s.publishChoiceResponse(ctx, responseMsg, updatedRows[0], res.Answers[0])
 	} else {
-		setView := interpretedChoiceResponseSetView(res.BatchID, updatedRows, res.Answers)
-		s.publishChoiceResponseSet(ctx, responseMsg, setView)
+		setView := choiceResponseSetViewOf(res.Answers, rowsByID)
+		s.publishChoiceResponseSet(ctx, responseMsg, &setView)
 	}
 	for i, v := range views {
 		if prompt := promptsByID[updatedRows[i].MessageID]; prompt != nil {
@@ -676,43 +677,22 @@ func (s *Server) handleAgentDecisionInterpreted(w http.ResponseWriter, r *http.R
 	})
 }
 
-func isValidUUID(s string) bool {
-	_, err := uuid.Parse(s)
-	return err == nil
-}
-
-// checkIdempotencyMismatchOnly probes RecordInterpretedAnswers inside a
-// read/rollback path when req.IdempotencyKey is set so a key reused with a
-// different source_message_id or nonexistent decision key still answers 422
-// idempotency_mismatch instead of 400/404.
-func (s *Server) checkIdempotencyMismatchOnly(w http.ResponseWriter, ctx context.Context, agentID string, req RecordInterpretedRequest) bool {
-	probePairs := make([]store.InterpretedAnswerPair, len(req.Answers))
-	for i, a := range req.Answers {
-		probePairs[i] = store.InterpretedAnswerPair{Key: a.Key, ChoiceID: a.ChoiceID}
+func (s *Server) writeInterpretedReplay(w http.ResponseWriter, ctx context.Context, res *store.AnswerSetResult) {
+	views := make([]DecisionView, len(res.Answers))
+	for i, a := range res.Answers {
+		cur, err := s.store.GetDecision(ctx, a.DecisionRowID)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		views[i] = s.decisionViewFor(ctx, cur)
 	}
-	var probeErr error
-	sentinelRollback := errors.New("probe rollback")
-	_ = s.store.WithTx(ctx, func(tx store.Store) error {
-		_, probeErr = tx.RecordInterpretedAnswers(ctx, &store.RecordInterpretedInput{
-			InterpretedByAgentID: agentID,
-			SourceMessageID:      req.SourceMessageID,
-			AnsweredByUserID:     "probe-user",
-			Surface:              store.DecisionSurfaceNative,
-			Answers:              probePairs,
-			ResponseMessage: &store.Message{
-				ID:            api.NewUUID(),
-				ProjectID:     api.NewUUID(),
-				DispatchState: store.MessageDispatchDispatched,
-			},
-			IdempotencyKey: req.IdempotencyKey,
-		})
-		return sentinelRollback
+	writeJSON(w, http.StatusOK, RecordInterpretedResponse{
+		ResponseMessageID: res.Answers[0].ResponseMessageID,
+		BatchID:           res.BatchID,
+		Decisions:         views,
+		Replayed:          true,
 	})
-	if errors.Is(probeErr, store.ErrIdempotencyMismatch) {
-		writeError(w, http.StatusUnprocessableEntity, ErrCodeIdempotencyMismatch, probeErr.Error(), nil)
-		return true
-	}
-	return false
 }
 
 func (s *Server) loadSourceAuthorIdentity(w http.ResponseWriter, ctx context.Context, userID string) (UserIdentity, bool) {
@@ -756,45 +736,6 @@ func formatInterpretedResponseLine(agentSlug, authorName string, items []store.I
 	}
 	return fmt.Sprintf("%s recorded %s's answers to %d decisions: %s, interpreted from their reply",
 		agentSlug, authorName, len(items), strings.Join(parts, " · "))
-}
-
-func interpretedChoiceResponseSetView(batchID string, ds []*store.Decision, answers []*store.DecisionAnswer) *ChoiceResponseSetView {
-	commonPromptID := ""
-	multiPrompt := false
-	for _, d := range ds {
-		if d.MessageID == "" {
-			continue
-		}
-		switch {
-		case commonPromptID == "" && !multiPrompt:
-			commonPromptID = d.MessageID
-		case commonPromptID != d.MessageID:
-			commonPromptID = ""
-			multiPrompt = true
-		}
-	}
-	v := &ChoiceResponseSetView{
-		PromptMessageID: commonPromptID,
-		BatchID:         batchID,
-		Answers:         make([]ChoiceResponseSetAnswer, 0, len(answers)),
-	}
-	for i, a := range answers {
-		d := ds[i]
-		v.Answers = append(v.Answers, ChoiceResponseSetAnswer{
-			RowID:           d.ID,
-			Ref:             d.Ref(),
-			Key:             a.Key,
-			Version:         a.Version,
-			Question:        a.QuestionText,
-			ChoiceID:        a.ChoiceID,
-			Label:           a.ChoiceLabel,
-			Provenance:      a.Provenance,
-			Outcome:         a.Outcome,
-			MatchedDefault:  a.MatchedDefault,
-			PromptMessageID: d.MessageID,
-		})
-	}
-	return v
 }
 
 func (s *Server) writeInterpretedRecordError(w http.ResponseWriter, ctx context.Context, err error) {
