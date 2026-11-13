@@ -2942,16 +2942,34 @@ export class ScionChatMessage extends LitElement {
     );
   }
 
-  /** The response line in the answerer's lane, without a bubble. */
+  /**
+   * The response line in the answerer's lane (or the left lane for an
+   * agent-sent interpreted response), attributed by `answeredByUserId`
+   * rather than message sender (ptone/scion#7775).
+   */
   private renderChoiceResponse(): TemplateResult {
-    const own = !this.fromAgent;
-    return html`<div class="choice-response-row ${own ? 'own' : 'other'}">
+    const first = this.choiceResponse ?? this.choiceResponseSet?.answers?.[0];
+    const answeredByUserId = first?.answeredByUserId ?? '';
+    const answeredByName = first?.answeredByName ?? '';
+    const provenance = first?.provenance ?? '';
+    const own = Boolean(this.currentUserId && answeredByUserId === this.currentUserId);
+    const interpreted = provenance === 'agent_interpreted';
+    const lane = !interpreted && own ? 'own' : 'other';
+    const fallbackAnswerer = !interpreted && !this.senderIsAgent ? this.senderName : '';
+    const answererName = own ? 'you' : answeredByName || fallbackAnswerer || 'Someone';
+    const rawAgent =
+      interpreted || (this.fromAgent && !this.routedTo)
+        ? this.senderName || this.sender
+        : this.routedTo;
+    const agentName = rawAgent.replace(/^agent:/, '');
+    return html`<div class="choice-response-row ${lane}">
       <scion-chat-choice-response
-        lane=${own ? 'own' : 'other'}
+        lane=${lane}
         .response=${this.choiceResponse}
         .responseSet=${this.choiceResponseSet}
-        answererName=${own ? 'you' : this.senderName || this.sender}
-        agentName=${this.routedTo}
+        .isOwnAnswerer=${own}
+        answererName=${answererName}
+        agentName=${agentName}
         timestamp=${this.timestamp}
         dispatchState=${this.dispatchState}
       ></scion-chat-choice-response>

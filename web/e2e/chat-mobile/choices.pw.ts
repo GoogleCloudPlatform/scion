@@ -29,6 +29,7 @@ import {
   BOB_ID,
   SELF_ID,
   answer,
+  responsesPhase2Thread,
   responsesThread,
   replacedThread,
   routeChoiceThread,
@@ -573,6 +574,55 @@ for (const theme of ['light', 'dark'] as const) {
 
       await line('resp-own').locator('[data-action="jump"]').click();
       await expect(message(page, 'prompt-resp')).toHaveClass(/permalink-highlight/);
+    });
+
+    test('response lines P2-7: interpreted (own and Bob), confirmed, and overridden', async ({
+      page,
+    }, testInfo) => {
+      await openChoices(page, theme, responsesPhase2Thread());
+      const line = (id: string): Locator => message(page, id).locator('scion-chat-choice-response');
+
+      await expect(message(page, 'resp-interp-own').locator('.choice-response-row')).toHaveClass(
+        /other/
+      );
+      await expect(line('resp-interp-own').locator('[data-kind="single"]')).toContainText(
+        `${ASKER_NAME} recorded your answer Yes for D234 from your reply`
+      );
+      await line('resp-interp-own').locator('[data-action="view-reply"]').click();
+      await expect(message(page, 'reply-self')).toHaveClass(/permalink-highlight/);
+
+      const bobSet = line('resp-interp-bob-set').locator('details[data-kind="set"]');
+      await expect(
+        message(page, 'resp-interp-bob-set').locator('.choice-response-row')
+      ).toHaveClass(/other/);
+      await expect(bobSet.locator('summary')).toContainText(
+        `${ASKER_NAME} recorded Bob's answers to 2 decisions from their reply`
+      );
+      await bobSet.locator('summary').click();
+      await expect(bobSet.locator('[data-action="view-reply"]')).toHaveText('View reply');
+
+      await expect(message(page, 'resp-confirm').locator('.choice-response-row')).toHaveClass(
+        /own/
+      );
+      await expect(line('resp-confirm').locator('[data-kind="single"]')).toContainText(
+        'you confirmed Yes for D234'
+      );
+      await expect(line('resp-confirm').locator('[data-state="not-sent"]')).toHaveText(
+        'not sent to the agent'
+      );
+
+      await expect(message(page, 'resp-override').locator('.choice-response-row')).toHaveClass(
+        /own/
+      );
+      await expect(line('resp-override').locator('[data-kind="single"]')).toContainText(
+        'you changed D234 to No (was interpreted as Yes)'
+      );
+      await shot(page, testInfo, theme, '12b-responses-p2-7', [
+        'resp-interp-own',
+        'resp-interp-bob-set',
+        'resp-confirm',
+        'resp-override',
+      ]);
     });
   });
 }
