@@ -32,8 +32,16 @@ func signalSelf() error {
 
 // IsStopSignalExit reports whether err is a child process exit caused by
 // SIGTERM. When systemd stops the hub's unit (KillMode=control-group), it
-// sends SIGTERM to every process in the cgroup, including the sudo/systemctl
-// child that requested the restart.
+// sends its stop signal to every process in the cgroup, including the
+// sudo/systemctl child that requested a --no-block restart.
+//
+// This intentionally matches only SIGTERM — systemd's default KillSignal=
+// used by the starter-hub unit (scripts/starter-hub/scion-hub.service.tmpl) —
+// so force-kills or crash signals (SIGKILL, SIGSEGV, SIGABRT) during a
+// synchronous --no-block command still surface as failures rather than false
+// restarts. A unit configured with a custom KillSignal= under --no-block is
+// not matched here (whereas the plain `systemctl restart` fallback treats any
+// signal termination within plainRestartGrace as a unit stop).
 func IsStopSignalExit(err error) bool {
 	var ee *exec.ExitError
 	if !errors.As(err, &ee) {

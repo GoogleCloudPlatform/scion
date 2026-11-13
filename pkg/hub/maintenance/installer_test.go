@@ -206,12 +206,14 @@ func TestSudoInstaller_PreflightAndRestart(t *testing.T) {
 		}
 	})
 
-	t.Run("plain restart killed by SIGKILL fails Restart", func(t *testing.T) {
+	t.Run("plain restart killed by custom KillSignal is under way", func(t *testing.T) {
 		if runtime.GOOS == "windows" {
 			t.Skip("unix shell signals only")
 		}
-		if err := plainRestart(t, "kill -KILL $$"); err == nil {
-			t.Fatal("Restart = nil, want error for SIGKILL")
+		// Plain restart preserves signal-agnostic unit-stop semantics so units
+		// with a custom KillSignal= (e.g. SIGINT) still count as under way.
+		if err := plainRestart(t, "kill -INT $$; sleep 5"); err != nil {
+			t.Fatalf("Restart = %v, want nil for a signal-terminated plain restart child", err)
 		}
 	})
 
@@ -248,6 +250,12 @@ func TestSudoInstaller_PreflightAndRestart(t *testing.T) {
 	t.Run("no-block restart killed by SIGKILL fails Restart", func(t *testing.T) {
 		if err := noBlockRestart(t, ctx, "kill -KILL $$"); err == nil {
 			t.Fatal("Restart = nil, want error for SIGKILL")
+		}
+	})
+
+	t.Run("no-block restart killed by non-SIGTERM signal fails Restart", func(t *testing.T) {
+		if err := noBlockRestart(t, ctx, "kill -INT $$"); err == nil {
+			t.Fatal("Restart = nil, want error for non-SIGTERM signal")
 		}
 	})
 
