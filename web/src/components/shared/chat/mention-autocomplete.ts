@@ -38,6 +38,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import type { Agent } from '../../../shared/types.js';
+import { agentMentionSlug, toMentionSlug, userMentionSlug } from './prose-mentions.js';
 
 /** Maximum items shown in the dropdown. */
 const MAX_DROPDOWN_ITEMS = 8;
@@ -491,8 +492,8 @@ export class ScionMentionAutocomplete extends LitElement {
     const slugs = new Set<string>();
 
     for (const agent of this.agents || []) {
-      const rawSlug = agent.slug || agent.name || '';
-      slugs.add(rawSlug.toLowerCase().replace(/\s+/g, '-'));
+      const rawSlug = agentMentionSlug(agent);
+      slugs.add(toMentionSlug(rawSlug));
       allCandidates.push({
         slug: rawSlug,
         name: agent.name || '',
@@ -503,12 +504,12 @@ export class ScionMentionAutocomplete extends LitElement {
 
     for (const member of this.members || []) {
       // Avoid duplicate entries if a member is also an agent
-      const slug = member.name.toLowerCase().replace(/\s+/g, '-');
-      if (!slugs.has(slug)) {
+      const slug = userMentionSlug(member);
+      if (slug && !slugs.has(slug)) {
         slugs.add(slug);
         allCandidates.push({
           slug,
-          name: member.name,
+          name: member.name || member.email,
           kind: member.kind === 'agent' ? 'agent' : 'user',
           avatarUrl: member.avatarUrl,
         });

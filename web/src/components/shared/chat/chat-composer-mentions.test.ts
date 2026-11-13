@@ -373,3 +373,110 @@ describe('composer — atomic mention delete', () => {
     expect(detail.mentions).toEqual(['bob']);
   });
 });
+
+describe('composer — seedMentions (Reply all)', () => {
+  it('seeds @slug tokens without leadIn, routes mentions on send, and deletes atomically', async () => {
+    const h = await mount();
+    h.el.seedMentions(['bob', 'alice-smith']);
+    await h.el.updateComplete;
+    await h.sl.updateComplete;
+
+    expect(h.el.text).toBe('@bob @alice-smith ');
+    expect(h.ta.value).toBe('@bob @alice-smith ');
+    expect(h.el.runeCount).toBe('@bob @alice-smith '.length);
+    expect(h.auto.active).toBe(false);
+    expect(h.ta.selectionStart).toBe(h.ta.value.length);
+
+    // Backspace removes @alice-smith atomically, leaving @bob.
+    const ev = pressKey(h, 'Backspace', h.el.text.length);
+    expect(ev.defaultPrevented).toBe(true);
+    await h.el.updateComplete;
+    expect(h.el.text).toBe('@bob ');
+
+    await typeText(h, '@bob sounds good', '@bob sounds good'.length);
+    let detail: any;
+    h.el.addEventListener('chat-send', (e: any) => (detail = e.detail));
+    h.el.handleSend();
+
+    expect(detail.text).toBe('@bob sounds good');
+    expect(detail.mentions).toEqual(['bob']);
+  });
+
+  it('seeds with leadIn "cc " and excludes "cc " from atomic mention ranges', async () => {
+    const h = await mount();
+    h.el.seedMentions(['bob', 'alice'], { leadIn: 'cc ' });
+    await h.el.updateComplete;
+    await h.sl.updateComplete;
+
+    expect(h.el.text).toBe('cc @bob @alice ');
+    expect(h.ta.value).toBe('cc @bob @alice ');
+
+    // First Backspace removes "@alice " atomically.
+    const ev1 = pressKey(h, 'Backspace', h.el.text.length);
+    expect(ev1.defaultPrevented).toBe(true);
+    await h.el.updateComplete;
+    expect(h.el.text).toBe('cc @bob ');
+
+    // Second Backspace removes "@bob " atomically, leaving "cc ".
+    const ev2 = pressKey(h, 'Backspace', h.el.text.length);
+    expect(ev2.defaultPrevented).toBe(true);
+    await h.el.updateComplete;
+    expect(h.el.text).toBe('cc ');
+
+    // Third Backspace at end of "cc " is NOT an atomic mention delete.
+    const ev3 = pressKey(h, 'Backspace', h.el.text.length);
+    expect(ev3.defaultPrevented).toBe(false);
+  });
+
+  it('preserves existing draft text and shifts existing mention ranges', async () => {
+    const h = await mount();
+    await typeText(h, 'check with @al', 14);
+    await acceptCandidate(h, 0);
+    await typeText(h, 'check with @alice please', 24);
+
+    h.el.seedMentions(['bob'], { leadIn: 'cc ' });
+    await h.el.updateComplete;
+    await h.sl.updateComplete;
+
+    expect(h.el.text).toBe('cc @bob check with @alice please');
+    expect(h.ta.selectionStart).toBe(h.el.text.length);
+
+    // Existing "@alice " range was shifted by "cc @bob ".length (8): now at [19, 26).
+    const ev = pressKey(h, 'Backspace', 26);
+    expect(ev.defaultPrevented).toBe(true);
+    await h.el.updateComplete;
+    expect(h.el.text).toBe('cc @bob check with please');
+
+    let detail: any;
+    h.el.addEventListener('chat-send', (e: any) => (detail = e.detail));
+    h.el.handleSend();
+    expect(detail.mentions).toEqual(['bob']);
+  });
+
+  it('is idempotent on re-invocation and does not repeat an existing leadIn', async () => {
+    const h = await mount();
+    h.el.seedMentions(['bob', 'alice'], { leadIn: 'cc ' });
+    await h.el.updateComplete;
+    await h.sl.updateComplete;
+    expect(h.el.text).toBe('cc @bob @alice ');
+
+    // Re-invoking with the same targets adds no duplicates or extra "cc ".
+    h.el.seedMentions(['bob', 'alice'], { leadIn: 'cc ' });
+    await h.el.updateComplete;
+    await h.sl.updateComplete;
+    expect(h.el.text).toBe('cc @bob @alice ');
+
+    // Adding a third target while draft already starts with "cc " keeps a single "cc " at start.
+    h.el.seedMentions(['bob', 'carol'], { leadIn: 'cc ' });
+    await h.el.updateComplete;
+    await h.sl.updateComplete;
+    expect(h.el.text).toBe('cc @bob @alice @carol ');
+
+    // Prefix-similar slug (@bob-2 vs @bob) is still recognized as distinct.
+    const h2 = await mount();
+    await typeText(h2, '@bob-2 hi', 9);
+    h2.el.seedMentions(['bob']);
+    await h2.el.updateComplete;
+    expect(h2.el.text).toBe('@bob @bob-2 hi');
+  });
+});

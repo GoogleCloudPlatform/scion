@@ -180,6 +180,7 @@ const USED_ICONS = [
   'puzzle',
   'question-circle',
   'reply',
+  'reply-all',
   'robot',
   'pause-circle',
   'search',
