@@ -1134,3 +1134,46 @@ func TestReprovision_IgnoresProvisionedWorktreeSignalForCloneWorkspace(t *testin
 		t.Fatalf("readProvisionedWorktreeRepoRoot(agentDir) = %q, want \"\" (a ctx signal must not be trusted against a clone-per-agent workspace, even one naming a genuine worktree base elsewhere)", got)
 	}
 }
+
+// TestReprovision_AgentInfoKeepsKeysWrittenInContainer: Reprovision
+// regenerates agent-info.json, but keys sciontool wrote in the container
+// that api.AgentInfo has no field for (toolName, activitySource) survive,
+// while the known fields are re-rendered (ptone/scion#4680).
+func TestReprovision_AgentInfoKeepsKeysWrittenInContainer(t *testing.T) {
+	scionDir, _ := reprovisionSetup(t)
+	agentName := "info-agent"
+	gc := &api.GitCloneConfig{URL: "https://example.com/repo.git"}
+	ctx := api.ContextWithGitClone(context.Background(), gc)
+	if _, _, _, err := ProvisionAgent(ctx, agentName, "default", "", "", scionDir, "", "created", "", ""); err != nil {
+		t.Fatalf("initial ProvisionAgent: %v", err)
+	}
+	ws := filepath.Join(scionDir, "agents", agentName, "workspace")
+	_ = os.MkdirAll(filepath.Join(ws, ".git"), 0755)
+
+	infoPath := filepath.Join(config.GetAgentHomePath(scionDir, agentName), "agent-info.json")
+	written := `{"name":"info-agent","phase":"running","activity":"waiting_for_input","activitySource":"notification","toolName":"Bash"}`
+	if err := os.WriteFile(infoPath, []byte(written), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := NewManager(&runtime.MockRuntime{})
+	if _, err := mgr.Reprovision(context.Background(), api.StartOptions{
+		Name: agentName, Template: "default", ProjectPath: scionDir, BrokerMode: true, GitClone: gc,
+	}); err != nil {
+		t.Fatalf("Reprovision: %v", err)
+	}
+	data, err := os.ReadFile(infoPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("parse agent-info.json: %v\n%s", err, data)
+	}
+	if got["toolName"] != "Bash" || got["activitySource"] != "notification" {
+		t.Errorf("keys written by sciontool were dropped:\n%s", data)
+	}
+	if got["phase"] == "running" || got["activity"] != nil {
+		t.Errorf("known fields were not re-rendered:\n%s", data)
+	}
+}
