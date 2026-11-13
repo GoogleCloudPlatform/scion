@@ -23,6 +23,7 @@ import {
   isDeletionActive,
   readAcceptedDeletion,
   shouldApplyAcceptedDeletion,
+  deletionAllowsForce,
   deletionBlocksStart,
   deletionBannerText,
 } from './agent-deletion.js';
@@ -266,11 +267,43 @@ describe('deletionBlocksStart', () => {
   });
 
   it('is false for other failures, a live delete and no delete', () => {
-    for (const code of ['runtime_error', 'conflict', 'abandoned', 'runtime_unavailable']) {
+    for (const code of [
+      'runtime_error',
+      'conflict',
+      'placement_conflict',
+      'abandoned',
+      'runtime_unavailable',
+    ]) {
       expect(deletionBlocksStart(failed({ code }))).toBe(false);
     }
     expect(deletionBlocksStart(deleting())).toBe(false);
     expect(deletionBlocksStart(null)).toBe(false);
+  });
+});
+
+describe('deletionAllowsForce', () => {
+  const failed = (o: Partial<DeletionInfo>): DeletionInfo =>
+    deleting({ state: 'failed', leaseExpiresAt: undefined, ...o });
+
+  it('is false for placement_conflict, live deleting and null', () => {
+    expect(deletionAllowsForce(failed({ code: 'placement_conflict' }))).toBe(false);
+    expect(deletionAllowsForce(deleting())).toBe(false);
+    expect(deletionAllowsForce(null)).toBe(false);
+  });
+
+  it('is true for forceable failure codes and generic failed views', () => {
+    for (const code of [
+      'runtime_error',
+      'conflict',
+      'in_doubt',
+      'abandoned',
+      'revoke_failed',
+      'finalize_failed',
+      'runtime_unavailable',
+    ]) {
+      expect(deletionAllowsForce(failed({ code }))).toBe(true);
+    }
+    expect(deletionAllowsForce(failed({ code: undefined }))).toBe(true);
   });
 });
 
@@ -289,6 +322,25 @@ describe('deletionBannerText', () => {
     const t = deletionBannerText(failed({ code: 'abandoned' }));
     expect(t.title).toBe('Delete interrupted');
     expect(t.detail).not.toMatch(/blocked/);
+  });
+
+  it('placement_conflict: explains inconsistent placement and does not suggest Force delete (ptone/scion#4844)', () => {
+    const fallback = deletionBannerText(failed({ code: 'placement_conflict' }));
+    expect(fallback.title).toBe('Delete failed: inconsistent placement');
+    expect(fallback.detail).toMatch(/saved Runtime Broker placement is inconsistent/);
+    expect(fallback.detail).toMatch(/Force delete cannot override placement checks/);
+    expect(fallback.detail).not.toMatch(/or force delete/i);
+    expect(fallback.detail).not.toMatch(/use Force delete/i);
+
+    const withError = deletionBannerText(
+      failed({
+        code: 'placement_conflict',
+        error:
+          'agent a-1 is pinned to Runtime Broker "b-1" but its saved placement is inconsistent',
+      })
+    );
+    expect(withError.title).toContain('saved placement is inconsistent');
+    expect(withError.detail).toMatch(/Force delete cannot override placement checks/);
   });
 
   it('in_doubt, revoke_failed, finalize_failed and a finalizing interruption say start is blocked and Force is the way out', () => {

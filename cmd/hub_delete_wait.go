@@ -144,6 +144,10 @@ func hubDeleteFailure(agentName string, o hubDeleteOutcome, what string) error {
 		if msg != "" {
 			msg = ": " + msg
 		}
+		if code == "placement_conflict" {
+			return fmt.Errorf("delete failed on the Hub (%s)%s; %s. Force delete cannot override an inconsistent saved placement",
+				code, msg, what)
+		}
 		blocked := ""
 		switch code {
 		case "in_doubt", "revoke_failed", "finalize_failed":

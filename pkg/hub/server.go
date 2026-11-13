@@ -6545,9 +6545,12 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 				"existingPhase", existingAgent.Phase)
 			if existingAgent.Phase == string(state.PhaseError) {
 				// Only deleting the errored row unblocks the name
-				// (ptone/scion#3701): say so, and tell the owner.
-				s.notifyScheduleBlocked(ctx, evt, existingAgent)
-				return scheduleBlockedError(existingAgent)
+				// (ptone/scion#3701): say so, and tell the owner. When a
+				// placement refusal keeps the row or refuses its delete,
+				// ordinary and force delete cannot remove it (ptone/scion#4844).
+				placementRefused := s.isScheduleBlockedPlacementRefusal(ctx, existingAgent)
+				s.notifyScheduleBlocked(ctx, evt, existingAgent, placementRefused)
+				return scheduleBlockedError(existingAgent, placementRefused)
 			}
 			return fmt.Errorf("agent %q already exists in project", slug)
 		}

@@ -646,3 +646,57 @@ func TestDeleteCmd_ForceViaHubDoesNotWarnLocalMode(t *testing.T) {
 	require.Contains(t, queries, "hub-agent")
 	assert.Equal(t, "true", queries["hub-agent"].Get("force"))
 }
+
+// Synchronous 409 placement refusals on `scion delete` preserve local files
+// and never suggest retrying with `--force` (ptone/scion#4844).
+func TestDeleteAgentsViaHub_SynchronousPlacementRefusalDoesNotSuggestForce(t *testing.T) {
+	for _, apiCode := range []string{
+		"runtime_target_pin_stale",
+		"runtime_target_mismatch",
+		"runtime_broker_missing",
+	} {
+		t.Run(apiCode, func(t *testing.T) {
+			orig := saveDeleteTestState()
+			defer orig.restore()
+
+			tmpHome := t.TempDir()
+			_ = os.Setenv("HOME", tmpHome)
+			preserveBranch = true
+
+			projectDir := filepath.Join(tmpHome, "project", ".scion")
+			require.NoError(t, os.MkdirAll(projectDir, 0755))
+			projectPath = projectDir
+			agentDir := createAgentDir(t, projectDir, "pinned-agent")
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Path == "/healthz" {
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+					return
+				}
+				w.WriteHeader(http.StatusConflict)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": map[string]interface{}{
+						"code":    apiCode,
+						"message": "agent a-1 is pinned to Runtime Broker \"b-1\" (target \"t-1\") but its saved placement is inconsistent; Scion will not operate on it through another Runtime Broker.",
+						"details": map[string]interface{}{
+							"agentId":      "a-1",
+							"deletionCode": "placement_conflict",
+						},
+					},
+				})
+			}))
+			defer server.Close()
+
+			hubCtx := newDeleteForceHubContext(t, server.URL, "project-placement")
+			hubCtx.ProjectPath = projectDir
+			err := deleteAgentsViaHub(hubCtx, []string{"pinned-agent"})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "saved placement is inconsistent")
+			assert.NotContains(t, err.Error(), "--force")
+			assert.NotContains(t, err.Error(), "force delete")
+			_, statErr := os.Stat(agentDir)
+			assert.NoError(t, statErr, "local agent directory must stay intact on placement refusal")
+		})
+	}
+}

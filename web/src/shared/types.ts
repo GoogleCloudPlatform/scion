@@ -1086,6 +1086,7 @@ export type DeletionState = 'deleting' | 'failed';
 export type DeletionCode =
   | 'runtime_error'
   | 'conflict'
+  | 'placement_conflict'
   | 'in_doubt'
   | 'abandoned'
   | 'revoke_failed'

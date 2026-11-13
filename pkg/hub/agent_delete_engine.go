@@ -1158,7 +1158,7 @@ func retriedRunMismatchMessage(first, second *DeleteRunMismatchError) string {
 //     the row (see finish).
 //   - a stale dispatch: abandon, as for the first dispatch.
 //   - a placement refusal: rollbackPlacement, as for the first dispatch.
-//     The stored code stays conflict, and the answer carries the
+//     The stored code is placement_conflict, and the answer carries the
 //     refusal's own code and details.
 //   - another run mismatch, whichever run it names: conflict. There is
 //     no second retry, so a run that keeps changing cannot loop the
@@ -1377,16 +1377,16 @@ func (e *deletionEngine) rollback(code, msg string) deletionOutcome {
 // rollbackPlacement fails the delete for a placement refusal (the claimed
 // snapshot's check, the dispatcher's backstop on the first dispatch, or its
 // backstop on the delete of the run the broker reported holding,
-// retryReportedRunDelete): nothing was deleted, so it rolls back as a
-// conflict and restores the prior phase. The stored deletion code stays
-// conflict; the outcome carries the refusal, so the answer names the
-// specific placement code, as the claim's pre-check does
+// retryReportedRunDelete): nothing was deleted, so it rolls back with
+// placement_conflict (force does not override it, ptone/scion#4844) and
+// restores the prior phase. The outcome carries the refusal, so the answer
+// names the specific placement code, as the claim's pre-check does
 // (writeDeletionFailureWithRefusal). The refusal is remembered for this
 // claim before the rollback publishes, so a joiner on this hub process
 // woken by that event already finds it (deletionPlacementRefusals).
 func (e *deletionEngine) rollbackPlacement(refusal *RuntimeTargetRefusal) deletionOutcome {
 	deletionPlacementRefusals.Store(e.agentID(), deletionPlacementRefusalEntry{claim: e.plan.claim, refusal: refusal})
-	out := e.rollback(store.DeletionCodeConflict, refusal.Message)
+	out := e.rollback(store.DeletionCodePlacementConflict, refusal.Message)
 	if out.kind == deletionOutcomeFailed {
 		out.refusal = refusal
 	}
@@ -1655,7 +1655,7 @@ func writeDeletionFailure(w http.ResponseWriter, agentID, code, message, retryAf
 // deletionCode for platform admins only. Any other failure is
 // writeDeletionFailure's answer.
 func writeDeletionFailureWithRefusal(w http.ResponseWriter, agentID, code, message, retryAfter string, refusal *RuntimeTargetRefusal, isAdmin bool) {
-	if refusal != nil && code == store.DeletionCodeConflict {
+	if refusal != nil && (code == store.DeletionCodePlacementConflict || code == store.DeletionCodeConflict) {
 		slog.Warn("agent delete failed", "agent_id", agentID, "deletion_code", code,
 			"placement_code", refusal.Code, "message", refusal.Message)
 		details := map[string]interface{}{}
@@ -1682,7 +1682,7 @@ func writeDeletionFailureWithRefusal(w http.ResponseWriter, agentID, code, messa
 	} else {
 		message = genericDeleteFailedMessage
 	}
-	if code == store.DeletionCodeConflict {
+	if code == store.DeletionCodeConflict || code == store.DeletionCodePlacementConflict {
 		writeError(w, http.StatusConflict, ErrCodeConflict, message, details)
 		return
 	}

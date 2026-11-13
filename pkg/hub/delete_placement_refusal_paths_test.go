@@ -38,7 +38,7 @@ import (
 
 // requirePlacementAnswer asserts a placement-refusal delete answer for a:
 // 409 with code, the guidance message, and the pin details with agentId.
-// deletionCode is present (conflict) only when admin. It returns the
+// deletionCode is present (placement_conflict) only when admin. It returns the
 // details.
 func requirePlacementAnswer(t *testing.T, rec *httptest.ResponseRecorder, a *store.Agent, code string, admin bool) map[string]interface{} {
 	t.Helper()
@@ -51,7 +51,7 @@ func requirePlacementAnswer(t *testing.T, rec *httptest.ResponseRecorder, a *sto
 	assert.Equal(t, a.PinnedRuntimeTargetID, details["pinnedRuntimeTargetId"])
 	assert.Equal(t, a.RuntimeBrokerID, details["runtimeBrokerId"])
 	if admin {
-		assert.Equal(t, store.DeletionCodeConflict, details["deletionCode"])
+		assert.Equal(t, store.DeletionCodePlacementConflict, details["deletionCode"])
 	} else {
 		assert.NotContains(t, details, "deletionCode")
 	}
@@ -60,7 +60,7 @@ func requirePlacementAnswer(t *testing.T, rec *httptest.ResponseRecorder, a *sto
 
 // The dispatcher backstop's refusal after the claim answers with the
 // refusal's code, not the plain conflict, under plain, force and
-// best-effort deletes; the stored deletion code stays conflict.
+// best-effort deletes; the stored deletion code is placement_conflict.
 func TestAgentDelete_BackstopRefusalAnswersSpecificCode(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -81,7 +81,7 @@ func TestAgentDelete_BackstopRefusalAnswersSpecificCode(t *testing.T) {
 
 			got := mustGetAgent(t, f.store, f.agent.ID)
 			assert.Equal(t, store.DeletionStateFailed, got.DeletionState)
-			assert.Equal(t, store.DeletionCodeConflict, got.DeletionCode, "the stored deletion code is unchanged")
+			assert.Equal(t, store.DeletionCodePlacementConflict, got.DeletionCode, "stored deletion code is placement_conflict")
 			assert.Equal(t, string(tc.phase), got.Phase, "the prior phase is restored")
 		})
 	}
@@ -112,7 +112,7 @@ func TestAgentDelete_SnapshotCheckAnswersSpecificCode(t *testing.T) {
 	rec := doRequest(t, f.srv, http.MethodDelete, "/api/v1/agents/"+a.ID, nil)
 	requirePlacementAnswer(t, rec, a, ErrCodeRuntimeTargetPinStale, true)
 	assert.False(t, f.client.deleteCalled, "nothing is dispatched")
-	assert.Equal(t, store.DeletionCodeConflict, mustGetAgent(t, f.s, a.ID).DeletionCode)
+	assert.Equal(t, store.DeletionCodePlacementConflict, mustGetAgent(t, f.s, a.ID).DeletionCode)
 }
 
 // A request that joins the failed delete on this hub process answers with
@@ -313,6 +313,6 @@ func TestForceDelete_RunMismatchRetryPlacementRefusalAnswersSpecificCode(t *test
 	assert.Equal(t, []string{"run-a", "run-b"}, f.client.deleted(), "the retry is sent once, then refused")
 	got := mustGetAgent(t, f.store, f.agent.ID)
 	assert.Equal(t, store.DeletionStateFailed, got.DeletionState)
-	assert.Equal(t, store.DeletionCodeConflict, got.DeletionCode)
+	assert.Equal(t, store.DeletionCodePlacementConflict, got.DeletionCode)
 	assert.Equal(t, string(state.PhaseRunning), got.Phase, "the prior phase is restored")
 }

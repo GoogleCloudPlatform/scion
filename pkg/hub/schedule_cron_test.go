@@ -705,3 +705,56 @@ func TestExecuteSchedule_ErroredRowBlocksEveryFire(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "error", row.Phase)
 }
+
+// When the existing errored row is kept because of an inconsistent saved
+// placement (create-failure cleanup refused for placement, or a failed delete
+// with placement_conflict), neither the schedule error nor the owner
+// notification tells the user to delete the agent (ptone/scion#4844).
+func TestExecuteSchedule_PlacementRefusedRowDoesNotAdviseDelete(t *testing.T) {
+	f := newSchedFire(t, "sched-blocked-placement")
+	ctx := context.Background()
+	pub := NewChannelEventPublisher()
+	t.Cleanup(pub.Close)
+	f.srv.SetEventPublisher(pub)
+	f.srv.scheduler = NewScheduler(f.store, slog.Default())
+	f.srv.scheduler.RegisterEventHandler("dispatch_agent", f.srv.dispatchAgentEventHandler())
+
+	errored := &store.Agent{
+		ID: api.NewUUID(), Slug: "sched-placement-r", Name: "sched-placement-r", ProjectID: f.proj.ID,
+		RuntimeBrokerID: "broker-a", PinnedRuntimeBrokerID: "broker-a", PinnedRuntimeTargetID: "target-a", PinnedRuntimeTargetType: "docker",
+	}
+	require.NoError(t, f.store.CreateAgent(ctx, errored))
+	errored.RuntimeBrokerID = "broker-b"
+	require.NoError(t, f.store.UpdateAgent(ctx, errored))
+	refused := createCleanupRefusedPrefix + stalePinRefusal(errored, "it is assigned to Runtime Broker broker-b").Message
+	require.NoError(t, f.store.UpdateAgentStatus(ctx, errored.ID, store.AgentStatusUpdate{Phase: "error", Message: refused}))
+
+	revision := withSessionRevision(store.ScheduledEvent{}, f.creator.ID)
+	sched := &store.Schedule{
+		ID: api.NewUUID(), ProjectID: f.proj.ID, Name: "blocked-placement", CronExpr: "0 * * * *",
+		EventType: "dispatch_agent", Payload: `{"agentName":"sched-placement-r"}`,
+		Status: store.ScheduleStatusActive, CreatedBy: f.creator.ID,
+		InitiatorAttribution: revision.InitiatorAttribution,
+		AuthorityCeiling:     revision.AuthorityCeiling,
+	}
+	require.NoError(t, f.store.CreateSchedule(ctx, sched))
+
+	sc, err := f.store.GetSchedule(ctx, sched.ID)
+	require.NoError(t, err)
+	f.srv.executeSchedule(ctx, *sc, time.Now())
+
+	got, err := f.store.GetSchedule(ctx, sched.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, got.ErrorCount)
+	assert.Contains(t, got.LastRunError, `agent "sched-placement-r" already exists in project in phase error`)
+	assert.Contains(t, got.LastRunError, "ordinary and force delete cannot remove this agent")
+	assert.NotContains(t, got.LastRunError, "delete the agent to resume this schedule")
+
+	notifs, err := f.store.GetNotifications(ctx, store.SubscriberTypeUser, f.creator.ID, false)
+	require.NoError(t, err)
+	require.Len(t, notifs, 1)
+	assert.Equal(t, NotificationScheduleBlocked, notifs[0].Status)
+	assert.Contains(t, notifs[0].Message, "inconsistent saved placement")
+	assert.Contains(t, notifs[0].Message, inconsistentPlacementDocsURL)
+	assert.NotContains(t, notifs[0].Message, "Delete the agent to resume this schedule")
+}

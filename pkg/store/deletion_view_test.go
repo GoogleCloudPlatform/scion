@@ -146,6 +146,21 @@ func TestComputeAgentDeletion(t *testing.T) {
 		}
 	})
 
+	t.Run("placement_conflict uses failedAt+15m", func(t *testing.T) {
+		failed := now.Add(-time.Minute)
+		a := &Agent{
+			DeletionState: DeletionStateFailed, DeletionCode: DeletionCodePlacementConflict,
+			DeletionError: "saved placement is inconsistent", DeletionFailedAt: tp(failed),
+		}
+		got := ComputeAgentDeletion(a, now)
+		if got == nil || got.State != DeletionStateFailed || got.Code != DeletionCodePlacementConflict || got.Error != "saved placement is inconsistent" {
+			t.Fatalf("got %+v", got)
+		}
+		if got.ExpiresAt == nil || !got.ExpiresAt.Equal(failed.Add(DeletionDisplayTTL)) {
+			t.Fatalf("expiresAt = %v, want failedAt+15m", got.ExpiresAt)
+		}
+	})
+
 	// Review N5: with neither failedAt nor leaseAt, startedAt is the base.
 	t.Run("failed with only startedAt uses startedAt+15m", func(t *testing.T) {
 		a := &Agent{DeletionState: DeletionStateFailed, DeletionCode: DeletionCodeRuntimeError, DeletionStartedAt: tp(started)}

@@ -33,6 +33,7 @@ import { customElement, property } from 'lit/decorators.js';
 import type { DeletionInfo } from '../../shared/types.js';
 import {
   DELETION_START_BLOCKED_HINT,
+  deletionAllowsForce,
   deletionBannerText,
   deletionBlocksStart,
 } from '../../shared/agent-deletion.js';
@@ -187,6 +188,7 @@ export class ScionDeletionBanner extends LitElement {
 
   private renderActions(): TemplateResult | typeof nothing {
     if (!this.canDelete) return nothing;
+    const allowForce = deletionAllowsForce(this.deletion);
     return html`
       <div class="actions">
         <sl-button
@@ -200,18 +202,22 @@ export class ScionDeletionBanner extends LitElement {
           <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
           Retry
         </sl-button>
-        <sl-button
-          class="force"
-          size="small"
-          aria-label=${this.agentName ? `Force delete ${this.agentName}` : 'Force delete'}
-          variant="danger"
-          outline
-          ?disabled=${this.busy}
-          @click=${(e: Event): void => this.emit('deletion-force', e)}
-        >
-          <sl-icon slot="prefix" name="trash"></sl-icon>
-          Force delete
-        </sl-button>
+        ${allowForce
+          ? html`
+              <sl-button
+                class="force"
+                size="small"
+                aria-label=${this.agentName ? `Force delete ${this.agentName}` : 'Force delete'}
+                variant="danger"
+                outline
+                ?disabled=${this.busy}
+                @click=${(e: Event): void => this.emit('deletion-force', e)}
+              >
+                <sl-icon slot="prefix" name="trash"></sl-icon>
+                Force delete
+              </sl-button>
+            `
+          : nothing}
       </div>
     `;
   }
