@@ -49,8 +49,25 @@ core-base -> scion-base -> scion-antigravity
 ```
 
 The keyring packages (`gnome-keyring`, `libsecret`, `dbus-x11`) are
-provided by `core-base`. The antigravity Dockerfile adds the Antigravity
-CLI binary on top of `scion-base`.
+provided by `core-base`. The antigravity `Dockerfile` installs the Antigravity
+CLI binary (`/usr/local/bin/agy`) on top of `scion-base` via the upstream
+installer script (`https://antigravity.google/cli/install.sh --dir /usr/local/bin`),
+and the `scion` omni image chains directly from this `Dockerfile` so both
+standalone and omni images share the same install step.
+
+- **Version recording & reproducibility:** Following the image-build reproducibility
+  model in [`image-build/README.md`](../../image-build/README.md) ("Same recipe, not
+  same bits"), the `Dockerfile` tracks the latest upstream `agy` release at build
+  time rather than maintaining a manual `AGY_VERSION` pin. Both `install.sh` and the
+  post-install `/usr/local/bin/agy --version` check print the exact installed version
+  into the Docker / Cloud Build log, and published images are pinned by registry
+  digest (`build-manifest.json`).
+- **Installer failure behavior:** `curl -fsSL -o /tmp/agy-install.sh` writes the
+  installer to disk before invoking `bash` (avoiding silent exit-0 when `curl` fails
+  in Docker's non-`pipefail` `/bin/sh`), `install.sh` runs with `set -euo pipefail`
+  and verifies the downloaded archive's SHA-512 checksum against the upstream HTTPS
+  manifest (`linux_amd64` / `linux_arm64`), and `/usr/local/bin/agy --version` fails
+  the build if the binary is missing or cannot execute.
 
 ```sh
 # Local Docker build
