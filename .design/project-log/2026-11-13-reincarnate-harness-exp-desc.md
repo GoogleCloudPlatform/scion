@@ -13,7 +13,7 @@ Phase 1 (GoogleCloudPlatform/scion#4784) introduced `hub.reincarnate_harness_swi
    - New: `Supported on the runtimes the agent's Runtime Broker advertises for home reset.`
 2. `cmd/reincarnate.go` (`reincarnateCmd.Long`):
    - Old: `and is supported on the docker, podman and container runtimes.`
-   - New: `and is supported on the runtimes the agent's runtime broker advertises for home reset.`
+   - New: `and is supported on the runtimes the agent's Runtime Broker advertises for home reset.`
 
 Referring to the runtimes advertised by the agent's Runtime Broker matches neighbouring entries in `pkg/experiments/registry.go` and `cmd/reincarnate.go`, accurately reflects mixed-version broker fleets as well as unsupported runtimes, and avoids going stale if future runtimes gain home-reset support.
 
