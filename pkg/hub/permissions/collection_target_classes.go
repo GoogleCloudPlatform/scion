@@ -107,10 +107,12 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	"artifact.update": {}, "artifact.delete": {}, "artifact.manage": {}, "artifact.steward": {},
 
 	// skill.* — create/create_global/list/register are CapabilityScope;
-	// read/update/delete are CapabilityResource (always an existing skill).
+	// read/update/delete and update_global/delete_global always target an
+	// existing skill record.
 	"skill.create":        {TargetClassKindProjectScoped},
 	"skill.create_global": {TargetClassKindHubResource},
 	"skill.read":          {}, "skill.update": {}, "skill.delete": {},
+	"skill.update_global": {}, "skill.delete_global": {},
 	"skill.list":     {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
 	"skill.register": {TargetClassKindHubResource},
 

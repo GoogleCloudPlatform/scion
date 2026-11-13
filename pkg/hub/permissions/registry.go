@@ -93,6 +93,8 @@ const (
 	ActionSetMessageMode = "set_message_mode"
 	ActionLifecycle      = "lifecycle"
 	ActionCreateGlobal   = "create_global"
+	ActionUpdateGlobal   = "update_global"
+	ActionDeleteGlobal   = "delete_global"
 	ActionAutoProvide    = "auto_provide"
 	// ActionDeliver and ActionUse distinguish launch-time material delivery
 	// from an agent's own runtime retrieval or token-mint request over the
@@ -262,7 +264,9 @@ var Registry = []Permission{
 	{ID: "skill.create_global", Resource: ResourceSkill, Action: ActionCreateGlobal, CapabilityKind: CapabilityScope, UATScope: "skill:create_global", ExcludeFromManageAlias: true, Description: "Create skills in the global (hub) catalog", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
 	{ID: "skill.read", Resource: ResourceSkill, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "skill:read", AgentScopes: []string{"project:read"}, Description: "Read skills", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
 	{ID: "skill.update", Resource: ResourceSkill, Action: ActionUpdate, CapabilityKind: CapabilityResource, UATScope: "skill:update", Description: "Update skills", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
+	{ID: "skill.update_global", Resource: ResourceSkill, Action: ActionUpdateGlobal, CapabilityKind: CapabilityNone, UATScope: "skill:update_global", ExcludeFromManageAlias: true, Description: "Update skills in the global (hub) catalog", Enforcement: []string{"pkg/hub/skill_handlers.go", "pkg/hub/skill_file_handlers.go"}},
 	{ID: "skill.delete", Resource: ResourceSkill, Action: ActionDelete, CapabilityKind: CapabilityResource, UATScope: "skill:delete", Description: "Delete skills", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
+	{ID: "skill.delete_global", Resource: ResourceSkill, Action: ActionDeleteGlobal, CapabilityKind: CapabilityNone, UATScope: "skill:delete_global", ExcludeFromManageAlias: true, Description: "Delete skills from the global (hub) catalog", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
 	{ID: "skill.list", Resource: ResourceSkill, Action: ActionList, CapabilityKind: CapabilityScope, UATScope: "skill:list", AgentScopes: []string{"project:read"}, Description: "List skills", Enforcement: []string{"pkg/hub/skill_handlers.go"}},
 
 	{ID: "template.create", Resource: ResourceTemplate, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "template:create", AgentScopes: []string{"project:template:write"}, Description: "Create templates", Enforcement: []string{"pkg/hub/template_handlers.go"}},

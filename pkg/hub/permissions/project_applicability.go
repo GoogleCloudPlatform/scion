@@ -63,9 +63,11 @@ var ProjectTargetApplicability = map[string]bool{
 	"project.chat_post": true,
 
 	// skill.* — create/read/update/delete/list can target a project-scoped
-	// skill; create_global and register are explicitly hub-catalog actions.
+	// skill; *_global and register are explicitly hub-catalog actions.
 	"skill.create": true, "skill.create_global": false, "skill.read": true,
-	"skill.update": true, "skill.delete": true, "skill.list": true, "skill.register": false,
+	"skill.update": true, "skill.update_global": false,
+	"skill.delete": true, "skill.delete_global": false,
+	"skill.list": true, "skill.register": false,
 
 	// template.*, harness_config.* — no *_global counterpart registered
 	// today; project/user-scoped, reviewed true (ScopeKind still governs
@@ -239,7 +241,8 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 
 	"skill.create": {BoundaryKindProject, BoundaryKindHub}, "skill.read": {BoundaryKindProject, BoundaryKindHub},
 	"skill.update": {BoundaryKindProject, BoundaryKindHub}, "skill.delete": {BoundaryKindProject, BoundaryKindHub},
-	"skill.list": {BoundaryKindProject, BoundaryKindHub}, "skill.register": {BoundaryKindHub}, "skill.create_global": {BoundaryKindHub},
+	"skill.list": {BoundaryKindProject, BoundaryKindHub}, "skill.register": {BoundaryKindHub},
+	"skill.create_global": {BoundaryKindHub}, "skill.update_global": {BoundaryKindHub}, "skill.delete_global": {BoundaryKindHub},
 	"artifact.read": {BoundaryKindProject, BoundaryKindHub}, "artifact.create": {BoundaryKindProject, BoundaryKindHub},
 	"artifact.update": {BoundaryKindProject, BoundaryKindHub}, "artifact.delete": {BoundaryKindProject, BoundaryKindHub},
 	"artifact.manage": {BoundaryKindProject, BoundaryKindHub}, "artifact.steward": {BoundaryKindProject, BoundaryKindHub},
@@ -424,12 +427,15 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 
 	// skill.* — read/list support both project and global catalog classes;
 	// create/update/delete are project-scoped only; register is a hub-level
-	// registry action and create_global a hub-level catalog action.
+	// registry action and *_global are hub-level catalog actions.
 	"skill.create": {TargetClassKindProjectScoped},
 	"skill.read":   {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
 	"skill.update": {TargetClassKindProjectScoped}, "skill.delete": {TargetClassKindProjectScoped},
-	"skill.list":     {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
-	"skill.register": {TargetClassKindHubResource}, "skill.create_global": {TargetClassKindHubResource},
+	"skill.list":          {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
+	"skill.register":      {TargetClassKindHubResource},
+	"skill.create_global": {TargetClassKindHubResource},
+	"skill.update_global": {TargetClassKindGlobalCatalog},
+	"skill.delete_global": {TargetClassKindGlobalCatalog},
 
 	// template.*, harness_config.* — unlike skill, a single create
 	// permission covers every scope (templateScopeResource/

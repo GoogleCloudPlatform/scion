@@ -19,6 +19,8 @@ package hub
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -595,4 +597,198 @@ func TestHarnessImageStatusToken_RequiresRead(t *testing.T) {
 	rec := f.call(t, f.hubToken(t, "harness_config:read"), http.MethodGet, path, nil)
 	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	gcAdmitted(t, rec)
+}
+
+// TestGlobalSkillWrite_RequiresTwinSelectorAndHubBoundary pins that updating
+// or deleting a global-scope skill requires skill:update_global or
+// skill:delete_global on a hub boundary:
+//   - a hub token carrying plain skill:update / skill:delete (or skill:manage)
+//     is refused (403) across every update entry point and delete;
+//   - skill:update_global and skill:delete_global cannot be minted on a
+//     project boundary, nor on a hub boundary by an ungranted hub member;
+//   - a hub token carrying the twins (minted for the super-admin) succeeds
+//     on patch, deprecate and delete.
+//
+// The global-catalog-author token journey and project-skill refusal are
+// covered by TestCatalogAuthorHubToken_SkillPublishJourney.
+func TestGlobalSkillWrite_RequiresTwinSelectorAndHubBoundary(t *testing.T) {
+	f := newGCFixture(t, true)
+	ctx := context.Background()
+	now := time.Now()
+
+	skillPath := "gc/skills/gc-write-global"
+	globalSkill := &store.Skill{
+		ID: tid("gc-write-global"), Name: "gc-write-global", Slug: "gc-write-global",
+		Scope: store.SkillScopeGlobal, Status: "active", StoragePath: skillPath, Created: now, Updated: now,
+	}
+	require.NoError(t, f.store.CreateSkill(ctx, globalSkill))
+	pubVer := &store.SkillVersion{
+		ID: tid("gc-write-v1"), SkillID: globalSkill.ID, Version: "1.0.0",
+		Status: store.SkillVersionStatusPublished, Files: []store.TemplateFile{{Path: "SKILL.md", Size: 3, Hash: "sha256:00"}}, Created: now,
+	}
+	require.NoError(t, f.store.CreateSkillVersion(ctx, pubVer))
+
+	// Mint constraints: project boundary refused even for super-admin; hub
+	// boundary refused for a member without global-catalog-author.
+	for _, sel := range []string{"skill:update_global", "skill:delete_global"} {
+		f.cannotMint(t, projectBoundary(f.projectA), sel)
+		_, _, err := f.srv.uatService.CreateTokenWithParams(rs4MintContext(f.member.ID), CreateTokenParams{
+			UserID: f.member.ID, Name: "gc-member-refused-" + sel, Boundary: hubBoundary(), Scopes: []string{sel},
+		})
+		assert.Error(t, err, "member without global-catalog-author must not mint %s", sel)
+	}
+
+	// Plain skill:update / skill:delete / skill:manage hub token is refused on
+	// every global skill write route.
+	plainHub := f.hubToken(t, "skill:manage")
+	byID := "/api/v1/skills/" + globalSkill.ID
+	for _, tc := range []struct {
+		name   string
+		method string
+		path   string
+		body   interface{}
+	}{
+		{"patch", http.MethodPatch, byID, UpdateSkillRequest{Description: "plain-refused"}},
+		{"versions", http.MethodPost, byID + "/versions", PublishVersionRequest{Version: "2.0.0"}},
+		{"deprecate", http.MethodPost, byID + "/versions/" + pubVer.ID + "/deprecate", DeprecateVersionRequest{Message: "old"}},
+		{"upload", http.MethodPost, byID + "/upload", map[string]interface{}{"version": "2.0.0", "files": []FileUploadRequest{{Path: "SKILL.md", Size: 5}}}},
+		{"finalize", http.MethodPost, byID + "/finalize", FinalizeSkillVersionRequest{Version: "2.0.0"}},
+		{"file-put", http.MethodPut, byID + "/files/SKILL.md?version=2.0.0", nil},
+		{"delete", http.MethodDelete, byID, nil},
+	} {
+		t.Run("plain-refused/"+tc.name, func(t *testing.T) {
+			rec := f.call(t, plainHub, tc.method, tc.path, tc.body)
+			assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		})
+	}
+
+	// Hub token with skill:update_global + skill:delete_global succeeds.
+	twinHub := f.hubToken(t, "skill:update_global", "skill:delete_global")
+	rec := f.call(t, twinHub, http.MethodPatch, byID, UpdateSkillRequest{Description: "twin-allowed"})
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec = f.call(t, twinHub, http.MethodPost, byID+"/versions/"+pubVer.ID+"/deprecate", DeprecateVersionRequest{Message: "superseded"})
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec = f.call(t, twinHub, http.MethodDelete, byID, nil)
+	assert.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+}
+
+// TestCatalogAuthorHubToken_SkillPublishJourney pins the documented CI recipe
+// (design §3.6, §8): a non-admin user bound only to hub-member +
+// global-catalog-author mints a hub UAT with
+// skill:list,skill:read,skill:create_global,skill:update_global,skill:delete_global
+// and completes the end-to-end global skill publish lifecycle
+// (list -> create -> publish-version -> upload -> file-put -> finalize ->
+// deprecate -> patch -> delete), while remaining forbidden on project and
+// other-user skills.
+func TestCatalogAuthorHubToken_SkillPublishJourney(t *testing.T) {
+	f := newGCFixture(t, true)
+	ctx := context.Background()
+
+	// Create a dedicated CI user holding ONLY hub-member + global-catalog-author.
+	ciUserID := tid("gc-ci-skill-author")
+	createTestUserWithRole(t, f.store, ciUserID, ciUserID+"@test.com", "member", store.SystemRoleGlobalCatalogAuthor)
+	ensureHubMembership(ctx, f.store, ciUserID)
+
+	ciKey := mintHubConfigToken(t, f.srv, ciUserID, hubBoundary(),
+		"skill:list", "skill:read", "skill:create_global", "skill:update_global", "skill:delete_global")
+
+	// 1. List skills.
+	rec := callWithKey(t, f.srv, ciKey, http.MethodGet, "/api/v1/skills", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// 2. Create global skill.
+	rec = callWithKey(t, f.srv, ciKey, http.MethodPost, "/api/v1/skills", CreateSkillRequest{
+		Name:        "ci-published-global-skill",
+		Description: "initial description",
+		Scope:       store.SkillScopeGlobal,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var createResp CreateSkillResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &createResp))
+	require.NotNil(t, createResp.Skill)
+	created := createResp.Skill
+	require.NotEmpty(t, created.ID)
+	byID := "/api/v1/skills/" + created.ID
+
+	// 3. Publish draft version 1.0.0.
+	skillMD := []byte("---\nname: ci-published-global-skill\ndescription: CI test skill\n---\n# CI Skill\n")
+	sum := sha256.Sum256(skillMD)
+	fileHash := "sha256:" + hex.EncodeToString(sum[:])
+
+	rec = callWithKey(t, f.srv, ciKey, http.MethodPost, byID+"/versions", PublishVersionRequest{
+		Version: "1.0.0",
+		Files:   []FileUploadRequest{{Path: "SKILL.md", Size: int64(len(skillMD))}},
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var pubResp PublishVersionResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &pubResp))
+	require.NotNil(t, pubResp.Version)
+
+	// 4. Request upload URLs via /upload.
+	rec = callWithKey(t, f.srv, ciKey, http.MethodPost, byID+"/upload", map[string]interface{}{
+		"version": "1.0.0",
+		"files":   []FileUploadRequest{{Path: "SKILL.md", Size: int64(len(skillMD))}},
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// 5. Upload SKILL.md bytes via PUT /api/v1/skills/{id}/files/SKILL.md?version=1.0.0.
+	putReq := httptest.NewRequest(http.MethodPut, byID+"/files/SKILL.md?version=1.0.0", bytes.NewReader(skillMD))
+	putReq.Header.Set("Authorization", "Bearer "+ciKey)
+	putReq.Header.Set("Content-Type", "application/octet-stream")
+	putRec := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(putRec, putReq)
+	require.Equal(t, http.StatusOK, putRec.Code, putRec.Body.String())
+
+	// 6. Finalize version 1.0.0 -> status becomes published.
+	rec = callWithKey(t, f.srv, ciKey, http.MethodPost, byID+"/finalize", FinalizeSkillVersionRequest{
+		Version: "1.0.0",
+		Manifest: &SkillManifest{
+			Files: []store.TemplateFile{{Path: "SKILL.md", Size: int64(len(skillMD)), Hash: fileHash, Mode: "0644"}},
+		},
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var finalizedVer store.SkillVersion
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &finalizedVer))
+	assert.Equal(t, store.SkillVersionStatusPublished, finalizedVer.Status)
+
+	// 7. Deprecate version 1.0.0.
+	rec = callWithKey(t, f.srv, ciKey, http.MethodPost, byID+"/versions/"+pubResp.Version.ID+"/deprecate", DeprecateVersionRequest{
+		Message: "deprecated in CI journey test",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// 8. Patch global skill metadata.
+	rec = callWithKey(t, f.srv, ciKey, http.MethodPatch, byID, UpdateSkillRequest{
+		Description: "updated description from CI",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// 9. Negative isolation checks with the same CI token: cannot create, patch,
+	// or delete a project skill or another user's user-scoped skill.
+	now := time.Now()
+	projSkill := &store.Skill{
+		ID: tid("gc-ci-proj-skill"), Name: "gc-ci-proj", Slug: "gc-ci-proj",
+		Scope: store.SkillScopeProject, ScopeID: f.projectA, OwnerID: f.admin.ID, Status: "active", Created: now, Updated: now,
+	}
+	require.NoError(t, f.store.CreateSkill(ctx, projSkill))
+	otherUserSkill := &store.Skill{
+		ID: tid("gc-ci-user-skill"), Name: "gc-ci-user", Slug: "gc-ci-user",
+		Scope: store.SkillScopeUser, ScopeID: f.member.ID, OwnerID: f.member.ID, Status: "active", Created: now, Updated: now,
+	}
+	require.NoError(t, f.store.CreateSkill(ctx, otherUserSkill))
+
+	rec = callWithKey(t, f.srv, ciKey, http.MethodPost, "/api/v1/skills", CreateSkillRequest{
+		Name: "ci-proj-denied", Scope: store.SkillScopeProject, ScopeID: f.projectA,
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	for _, targetID := range []string{projSkill.ID, otherUserSkill.ID} {
+		rec = callWithKey(t, f.srv, ciKey, http.MethodPatch, "/api/v1/skills/"+targetID, UpdateSkillRequest{Description: "denied"})
+		assert.Equal(t, http.StatusForbidden, rec.Code, "patch %s: %s", targetID, rec.Body.String())
+		rec = callWithKey(t, f.srv, ciKey, http.MethodDelete, "/api/v1/skills/"+targetID, nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "delete %s: %s", targetID, rec.Body.String())
+	}
+
+	// 10. Delete the global skill.
+	rec = callWithKey(t, f.srv, ciKey, http.MethodDelete, byID, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
 }

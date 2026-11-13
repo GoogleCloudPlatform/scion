@@ -67,6 +67,8 @@ type idFixtures struct {
 	member                  string
 	skill                   string
 	skillDel                string
+	projectSkill            string
+	projectSkillDel         string
 	skillRegistry           string
 	template                string
 	templateDel             string
@@ -145,10 +147,12 @@ type idFixtures struct {
 	// (skillVersion, 1.0.0) holding one stored file, SKILL.md;
 	// templateFiles and harnessConfigFiles are global records holding one
 	// stored file each, README.md (seedLiveInventoryCatalogFiles).
-	skillFiles         string
-	skillVersion       string
-	templateFiles      string
-	harnessConfigFiles string
+	skillFiles          string
+	skillVersion        string
+	projectSkillFiles   string
+	projectSkillVersion string
+	templateFiles       string
+	harnessConfigFiles  string
 	// delegation holds an agent delegation grant bound to agent, a
 	// disposable twin grant for the revoke entry, and an active delegated
 	// credential of the first grant (seedLiveInventoryDelegation).
@@ -335,6 +339,8 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 		member:               tid("li-member"),
 		skill:                tid("li-skill"),
 		skillDel:             tid("li-skill-del"),
+		projectSkill:         tid("li-project-skill"),
+		projectSkillDel:      tid("li-project-skill-del"),
 		skillRegistry:        tid("li-skill-registry"),
 		template:             tid("li-template"),
 		templateDel:          tid("li-template-del"),
@@ -436,6 +442,8 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 
 	require.NoError(t, s.CreateSkill(ctx, &store.Skill{ID: f.skill, Name: "li-skill", Slug: "li-skill", Scope: store.SkillScopeGlobal, Status: "active", Created: now, Updated: now}))
 	require.NoError(t, s.CreateSkill(ctx, &store.Skill{ID: f.skillDel, Name: "li-skill-del", Slug: "li-skill-del", Scope: store.SkillScopeGlobal, Status: "active", Created: now, Updated: now}))
+	require.NoError(t, s.CreateSkill(ctx, &store.Skill{ID: f.projectSkill, Name: "li-project-skill-rec", Slug: "li-project-skill-rec", Scope: store.SkillScopeProject, ScopeID: f.project, Status: "active", Created: now, Updated: now}))
+	require.NoError(t, s.CreateSkill(ctx, &store.Skill{ID: f.projectSkillDel, Name: "li-project-skill-del", Slug: "li-project-skill-del", Scope: store.SkillScopeProject, ScopeID: f.project, Status: "active", Created: now, Updated: now}))
 	// CreateSkillRegistry (skill_registry_store.go) ignores a caller-supplied
 	// ID and mints its own, writing it back into the passed struct.
 	skillRegistry := &store.SkillRegistry{Name: "li-skill-registry", Endpoint: "https://example.invalid/registry", Type: store.SkillRegistryTypeHub, TrustLevel: store.SkillRegistryTrustTrusted, Status: store.SkillRegistryStatusActive, Created: now, Updated: now}
@@ -805,6 +813,15 @@ func seedLiveInventoryCatalogFiles(t *testing.T, ctx context.Context, s store.St
 		Status: store.SkillVersionStatusPublished, Files: file("SKILL.md"), Created: now}))
 	put(skillPath + "/1.0.0/SKILL.md")
 
+	f.projectSkillFiles = tid("li-project-skill-files")
+	projectSkillPath := "li-catalog/skills/li-project-skill-files"
+	require.NoError(t, s.CreateSkill(ctx, &store.Skill{ID: f.projectSkillFiles, Name: "li-project-skill-files", Slug: "li-project-skill-files", Scope: store.SkillScopeProject, ScopeID: f.project,
+		Status: "active", StoragePath: projectSkillPath, Created: now, Updated: now}))
+	f.projectSkillVersion = tid("li-project-skill-version")
+	require.NoError(t, s.CreateSkillVersion(ctx, &store.SkillVersion{ID: f.projectSkillVersion, SkillID: f.projectSkillFiles, Version: "1.0.0",
+		Status: store.SkillVersionStatusPublished, Files: file("SKILL.md"), Created: now}))
+	put(projectSkillPath + "/1.0.0/SKILL.md")
+
 	f.templateFiles = tid("li-template-files")
 	templatePath := "li-catalog/templates/li-template-files"
 	require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: f.templateFiles, Name: "li-template-files", Slug: "li-template-files", Harness: "claude",
@@ -883,7 +900,14 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 		{"group.delete", "/api/v1/groups/{id}"}:                                         {"id": f.groupDel},
 		{"user.admin.delete", "/api/v1/users/{id}"}:                                     {"id": f.userDel},
 		{"testidentity.delete", "/api/v1/test-identities/{id}"}:                         {"id": f.testIdentityDel},
-		{"skill.delete", "/api/v1/skills/{id}"}:                                         {"id": f.skillDel},
+		{"skill.update", "/api/v1/skills/{id}"}:                                         {"id": f.projectSkill},
+		{"skill.update", "/api/v1/skills/{id}/versions"}:                                {"id": f.projectSkillFiles},
+		{"skill.update", "/api/v1/skills/{id}/versions/{vid}/deprecate"}:                {"id": f.projectSkillFiles, "vid": f.projectSkillVersion},
+		{"skill.update", "/api/v1/skills/{id}/upload"}:                                  {"id": f.projectSkillFiles},
+		{"skill.update", "/api/v1/skills/{id}/finalize"}:                                {"id": f.projectSkillFiles},
+		{"skill.update", "/api/v1/skills/{id}/files/{path}"}:                            {"id": f.projectSkillFiles, "path": "SKILL.md"},
+		{"skill.delete", "/api/v1/skills/{id}"}:                                         {"id": f.projectSkillDel},
+		{"skill.global.delete", "/api/v1/skills/{id}"}:                                  {"id": f.skillDel},
 		{"skill.register", "/api/v1/skill-registries/{id}"}:                             {"id": f.skillRegistryDel},
 		{"template.delete", "/api/v1/templates/{id}"}:                                   {"id": f.templateDel},
 		{"harnessconfig.delete", "/api/v1/harness-configs/{id}"}:                        {"id": f.harnessConfigDel},

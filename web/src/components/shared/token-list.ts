@@ -919,6 +919,13 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     isAlias: false,
   },
   {
+    value: 'skill:delete_global',
+    label: 'skill:delete_global',
+    description: 'Delete skills from the global (hub) catalog',
+    resource: 'skill',
+    isAlias: false,
+  },
+  {
     value: 'skill:list',
     label: 'skill:list',
     description: 'List skills',
@@ -958,6 +965,13 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     value: 'skill:update',
     label: 'skill:update',
     description: 'Update skills',
+    resource: 'skill',
+    isAlias: false,
+  },
+  {
+    value: 'skill:update_global',
+    label: 'skill:update_global',
+    description: 'Update skills in the global (hub) catalog',
     resource: 'skill',
     isAlias: false,
   },

@@ -1059,7 +1059,7 @@ var relationshipCharacterizedAllowlist = map[relationshipAllowKey][]string{
 		"gcp_service_account.assign",
 	},
 	{"owner", "user", "skill"}: {
-		"skill.create", "skill.create_global", "skill.read", "skill.update", "skill.delete",
+		"skill.create", "skill.read", "skill.update", "skill.delete",
 		"skill.list", "skill.register",
 	},
 

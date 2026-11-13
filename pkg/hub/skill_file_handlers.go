@@ -31,6 +31,7 @@ import (
 
 	"github.com/Masterminds/semver/v3"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -274,7 +275,7 @@ func (s *Server) handleSkillFileWrite(w http.ResponseWriter, r *http.Request, sk
 	if !requireSkillProfileWriter(w, r, skill) {
 		return
 	}
-	decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), ActionUpdate)
+	decision := s.authzService.CheckAccess(ctx, identity, skillResource(skill), catalogWriteAction(permissions.ResourceSkill, skill.Scope, ActionUpdate))
 	if !decision.Allowed {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to upload files for this skill", nil)
 		return

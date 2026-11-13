@@ -92,7 +92,7 @@ var catalogResourceOperations = []OperationSpec{
 	{
 		ID:          "skill.update",
 		Domain:      "skill",
-		Description: "Update a skill: its metadata, version publishing and deprecation, file uploads and finalize. A user-scope skill refuses a federated caller (requireProfileWriter)",
+		Description: "Update a project- or user-scope skill: its metadata, version publishing and deprecation, file uploads and finalize (global catalog skills use skill.global.update). A user-scope skill refuses a federated caller (requireProfileWriter)",
 		EntryPoints: []EntryPoint{
 			// handleSkillByID (skill_handlers.go) dispatches on r.Method:
 			// PATCH, not PUT.
@@ -120,7 +120,7 @@ var catalogResourceOperations = []OperationSpec{
 	{
 		ID:          "skill.delete",
 		Domain:      "skill",
-		Description: "Delete a skill definition. A user-scope skill refuses a federated caller (requireProfileWriter)",
+		Description: "Delete a project- or user-scope skill definition (global catalog skills use skill.global.delete). A user-scope skill refuses a federated caller (requireProfileWriter)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/{id}", Method: "DELETE"},
 		},
@@ -456,6 +456,59 @@ var catalogResourceOperations = []OperationSpec{
 			{Package: "pkg/hub", Function: "TestGlobalSkillCreate_RequiresCreateGlobalSelectorAndHubBoundary"},
 		},
 		Bearer: AdmitOn(BearerTargetHubCollection, BearerBoundaryHub),
+	},
+	{
+		ID:          "skill.global.update",
+		Domain:      "skill",
+		Description: "Update a global-catalog skill (scope=global): its metadata, version publishing and deprecation, file uploads and finalize. Selected by the stored skill record's scope via catalogWriteAction, requiring skill.update_global (skill:update_global on a hub boundary)",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/{id}", Method: "PATCH", Variant: "scope=global"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/{id}/versions", Method: "POST", Variant: "scope=global", Response: ResponseCredential},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/{id}/versions/{vid}/deprecate", Method: "POST", Variant: "scope=global"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/{id}/upload", Method: "POST", Variant: "scope=global", Response: ResponseCredential},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/{id}/finalize", Method: "POST", Variant: "scope=global"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/{id}/files/{path}", Method: "PUT", Variant: "scope=global"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "skill-from-url",
+		BasePermission:   "skill.update_global",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestGlobalSkillWrite_RequiresTwinSelectorAndHubBoundary"},
+		},
+		Bearer: AdmitOn(BearerTargetCatalogRecord, BearerBoundaryHub),
+	},
+	{
+		ID:          "skill.global.delete",
+		Domain:      "skill",
+		Description: "Delete a global-catalog skill definition (scope=global). Selected by the stored skill record's scope via catalogWriteAction, requiring skill.delete_global (skill:delete_global on a hub boundary)",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/skills/{id}", Method: "DELETE", Variant: "scope=global"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "skill-from-url",
+		BasePermission:   "skill.delete_global",
+		Effects:          []SecurityEffect{EffectDeleteResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		AuditObligation: &AuditObligation{
+			EventType:     "skill.delete",
+			ContextFields: []string{"actor_id", "project_id"},
+			BeforeFields:  []string{"skill_id", "skill_name"},
+			Atomic:        true,
+		},
+		DenialCodes: []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestGlobalSkillWrite_RequiresTwinSelectorAndHubBoundary"},
+		},
+		Bearer: AdmitOn(BearerTargetCatalogRecord, BearerBoundaryHub),
 	},
 	{
 		ID:          "skill.discover.project",

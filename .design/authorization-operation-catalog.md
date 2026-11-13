@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 386
+**Operations:** 388
 
 ## Table of Contents
 
@@ -304,8 +304,8 @@
 - [skill.list](#skilllist) — List skills; each row is filtered by skill read. A user access token needs skill:list on either boundary; its page, total and cursor count only the rows it may read. An agent delegated credential lists project-scoped skills only: its scope is the authorizing user's skill list scope within the grant boundary, and each item is also decided for skill.read
 - [skill.read](#skillread) — Read a skill, its versions, its download URLs, its resolved version and its files. A record the caller may not read answers as not found
 - [skill.create](#skillcreate) — Create a skill in a project named by the request body. A user access token needs skill:create on a boundary that contains the project
-- [skill.update](#skillupdate) — Update a skill: its metadata, version publishing and deprecation, file uploads and finalize. A user-scope skill refuses a federated caller (requireProfileWriter)
-- [skill.delete](#skilldelete) — Delete a skill definition. A user-scope skill refuses a federated caller (requireProfileWriter)
+- [skill.update](#skillupdate) — Update a project- or user-scope skill: its metadata, version publishing and deprecation, file uploads and finalize (global catalog skills use skill.global.update). A user-scope skill refuses a federated caller (requireProfileWriter)
+- [skill.delete](#skilldelete) — Delete a project- or user-scope skill definition (global catalog skills use skill.global.delete). A user-scope skill refuses a federated caller (requireProfileWriter)
 - [skill.register](#skillregister) — Manage skill registries and their pinned hashes. The route guard checks skill.register on the hub-scoped registry target, so a user access token needs skill:register on a hub boundary
 - [template.list](#templatelist) — List templates; each row is filtered by template read. The unfiltered list is used only with hub-level evidence for template.list: a user access token needs template:list on a hub boundary and hub-wide list authority for it. Every other token, project tokens included, gets the per-row template read scan. An agent delegated credential lists project-scoped templates only: its scope is the authorizing user's template list scope within the grant boundary, and each item is also decided for template.read
 - [template.read](#templateread) — Read a template, its download URLs, its storage validation and its files. A record the caller may not read answers as not found
@@ -318,6 +318,8 @@
 - [harnessconfig.update](#harnessconfigupdate) — Update a harness configuration: its definition and metadata, file uploads, finalize, the image check and file writes. On a user-scope harness config the existing route gate (authorizeHarnessConfigRoute) already refuses a federated caller, with requireProfileWriter behind it
 - [harnessconfig.delete](#harnessconfigdelete) — Delete a global or project harness configuration. The route gate needs harness_config read and the delete needs harness_config delete on the owning scope. A user-scope config is harnessconfig.user.delete
 - [skill.global.create](#skillglobalcreate) — Create a skill in the global catalog (global or core scope). The check is skill.create_global on a collection-level request at the hub scope, so a user access token needs skill:create_global on a hub boundary
+- [skill.global.update](#skillglobalupdate) — Update a global-catalog skill (scope=global): its metadata, version publishing and deprecation, file uploads and finalize. Selected by the stored skill record's scope via catalogWriteAction, requiring skill.update_global (skill:update_global on a hub boundary)
+- [skill.global.delete](#skillglobaldelete) — Delete a global-catalog skill definition (scope=global). Selected by the stored skill record's scope via catalogWriteAction, requiring skill.delete_global (skill:delete_global on a hub boundary)
 - [skill.discover.project](#skilldiscoverproject) — Discover the skills in a remote GitHub directory for a project named by the request body, spending that project's GitHub credentials. A user access token needs skill:create on a boundary that contains the project
 - [skill.discover.global](#skilldiscoverglobal) — Discover the skills in a public remote GitHub directory with no project named. A user access token needs skill:create_global on a hub boundary
 - [skill.resolve.local](#skillresolvelocal) — Resolve skill:// references against the hub catalog. Each candidate is checked for skill read; a candidate the caller may not read answers as not found
@@ -11463,7 +11465,7 @@
 
 **Domain:** skill
 
-**Description:** Update a skill: its metadata, version publishing and deprecation, file uploads and finalize. A user-scope skill refuses a federated caller (requireProfileWriter)
+**Description:** Update a project- or user-scope skill: its metadata, version publishing and deprecation, file uploads and finalize (global catalog skills use skill.global.update). A user-scope skill refuses a federated caller (requireProfileWriter)
 
 ### Entry Points
 
@@ -11501,7 +11503,7 @@
 
 **Domain:** skill
 
-**Description:** Delete a skill definition. A user-scope skill refuses a federated caller (requireProfileWriter)
+**Description:** Delete a project- or user-scope skill definition (global catalog skills use skill.global.delete). A user-scope skill refuses a federated caller (requireProfileWriter)
 
 ### Entry Points
 
@@ -11982,6 +11984,84 @@
 ### Tests
 
 - `pkg/hub:TestGlobalSkillCreate_RequiresCreateGlobalSelectorAndHubBoundary`
+
+---
+
+## skill.global.update
+
+**Domain:** skill
+
+**Description:** Update a global-catalog skill (scope=global): its metadata, version publishing and deprecation, file uploads and finalize. Selected by the stored skill record's scope via catalogWriteAction, requiring skill.update_global (skill:update_global on a hub boundary)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PATCH | `/api/v1/skills/{id}` |
+| http_route | POST | `/api/v1/skills/{id}/versions` |
+| http_route | POST | `/api/v1/skills/{id}/versions/{vid}/deprecate` |
+| http_route | POST | `/api/v1/skills/{id}/upload` |
+| http_route | POST | `/api/v1/skills/{id}/finalize` |
+| http_route | PUT | `/api/v1/skills/{id}/files/{path}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `skill.update_global`
+
+**Resource Resolver:** skill-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestGlobalSkillWrite_RequiresTwinSelectorAndHubBoundary`
+
+---
+
+## skill.global.delete
+
+**Domain:** skill
+
+**Description:** Delete a global-catalog skill definition (scope=global). Selected by the stored skill record's scope via catalogWriteAction, requiring skill.delete_global (skill:delete_global on a hub boundary)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/skills/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `skill.delete_global`
+
+**Resource Resolver:** skill-from-url
+
+**Effects:** `delete-resource`
+
+### Audit
+
+- **Event Type:** `skill.delete`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** skill_id, skill_name
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestGlobalSkillWrite_RequiresTwinSelectorAndHubBoundary`
 
 ---
 
