@@ -21,7 +21,8 @@
  * Used by the project detail page (compact mode) and potentially standalone.
  */
 
-import { LitElement, html, nothing } from 'lit';
+import { LitElement, html, css, nothing } from 'lit';
+import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
@@ -88,7 +89,28 @@ export class ScionScheduledEventList extends LitElement {
   // Cancel state
   @state() private cancellingId: string | null = null;
 
-  static override styles = [resourceStyles];
+  // Detail dialog
+  @state() private detailEvent: ScheduledEvent | null = null;
+  @state() private detailOpen = false;
+
+  static override styles = [
+    resourceStyles,
+    css`
+      .detail-row {
+        padding: 0.375rem 0;
+        font-size: 0.875rem;
+        color: var(--scion-text, #1e293b);
+        line-height: 1.5;
+      }
+      .detail-row strong {
+        display: inline-block;
+        min-width: 100px;
+        color: var(--scion-text-muted, #64748b);
+        font-weight: 600;
+        font-size: 0.8125rem;
+      }
+    `,
+  ];
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -202,12 +224,26 @@ export class ScionScheduledEventList extends LitElement {
       }
 
       await this.loadEvents();
+      if (this.detailEvent?.id === eventId) {
+        this.detailEvent = this.events.find((e) => e.id === eventId) ?? null;
+        if (!this.detailEvent) this.detailOpen = false;
+      }
     } catch (err) {
       console.error('Failed to cancel event:', err);
       this.error = err instanceof Error ? err.message : 'Failed to cancel event';
     } finally {
       this.cancellingId = null;
     }
+  }
+
+  private showDetail(evt: ScheduledEvent): void {
+    this.detailEvent = evt;
+    this.detailOpen = true;
+  }
+
+  private closeDetail(): void {
+    this.detailOpen = false;
+    this.detailEvent = null;
   }
 
   /** Relative fire time; an overdue pending instant reads "now", as before. */
@@ -269,7 +305,7 @@ export class ScionScheduledEventList extends LitElement {
                   </div>
                 `
               : this.renderTable()}
-        ${this.renderDialog()}
+        ${this.renderDialog()} ${this.renderDetailDialog()}
       </div>
     `;
   }
@@ -315,7 +351,7 @@ export class ScionScheduledEventList extends LitElement {
             </div>
           `
         : this.renderTable()}
-      ${this.renderDialog()}
+      ${this.renderDialog()} ${this.renderDetailDialog()}
     `;
   }
 
@@ -351,7 +387,7 @@ export class ScionScheduledEventList extends LitElement {
     const isCancelling = this.cancellingId === evt.id;
 
     return html`
-      <tr>
+      <tr @click=${(): void => this.showDetail(evt)} style="cursor: pointer;">
         <td><span class="type-badge environment">${evt.eventType}</span></td>
         <td><span class="badge ${this.statusBadgeClass(evt.status)}">${evt.status}</span></td>
         <td>
@@ -363,7 +399,7 @@ export class ScionScheduledEventList extends LitElement {
         <td class="hide-mobile">
           <span class="meta-text">${formatRelative(evt.createdAt)}</span>
         </td>
-        <td class="actions-cell">
+        <td class="actions-cell" @click=${(e: Event): void => e.stopPropagation()}>
           ${isPending
             ? html`
                 <sl-icon-button
@@ -495,6 +531,93 @@ export class ScionScheduledEventList extends LitElement {
           @click=${this.handleCreate}
           >Create</sl-button
         >
+      </sl-dialog>
+    `;
+  }
+
+  private renderDetailDialog(): TemplateResult | typeof nothing {
+    const evt = this.detailEvent;
+    if (!evt) return nothing;
+
+    const agent = this.getPayloadAgent(evt.payload);
+    let payloadDetails: Record<string, unknown> = {};
+    try {
+      const parsed: unknown = JSON.parse(evt.payload);
+      if (parsed && typeof parsed === 'object') {
+        payloadDetails = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // ignore
+    }
+
+    const isPending = evt.status === 'pending';
+
+    return html`
+      <sl-dialog
+        label="Scheduled Event"
+        ?open=${this.detailOpen}
+        @sl-request-close=${this.closeDetail}
+      >
+        <div class="dialog-form">
+          <div class="detail-row">
+            <strong>ID:</strong>
+            <span style="font-family: var(--scion-font-mono, monospace); font-size: 0.8125rem;"
+              >${evt.id}</span
+            >
+          </div>
+          <div class="detail-row">
+            <strong>Status:</strong>
+            <span class="badge ${this.statusBadgeClass(evt.status)}">${evt.status}</span>
+          </div>
+          <div class="detail-row"><strong>Event Type:</strong> ${evt.eventType}</div>
+          <div class="detail-row">
+            <strong>Fire At:</strong> ${isPending ? `${this.formatFutureTime(evt.fireAt)} · ` : ''}
+            <span class="fire-at-absolute">${formatInstantWithZone(evt.fireAt)}</span>
+          </div>
+          ${evt.firedAt
+            ? html`<div class="detail-row">
+                <strong>Fired At:</strong> ${formatRelative(evt.firedAt)} ·
+                <span class="fired-at-absolute">${formatInstantWithZone(evt.firedAt)}</span>
+              </div>`
+            : nothing}
+          <div class="detail-row"><strong>Target Agent:</strong> ${agent}</div>
+          ${evt.eventType === 'message' && payloadDetails.message
+            ? html`<div class="detail-row">
+                <strong>Message:</strong> ${payloadDetails.message}
+              </div>`
+            : nothing}
+          ${evt.eventType === 'message'
+            ? html`
+                <div class="detail-row">
+                  <strong>Wake:</strong> ${payloadDetails.wake === true ? 'Yes' : 'No'}
+                </div>
+                <div class="detail-row">
+                  <strong>Interrupt:</strong> ${payloadDetails.interrupt === true ? 'Yes' : 'No'}
+                </div>
+              `
+            : nothing}
+          ${evt.eventType === 'dispatch_agent' && payloadDetails.template
+            ? html`<div class="detail-row">
+                <strong>Template:</strong> ${payloadDetails.template}
+              </div>`
+            : nothing}
+          ${evt.eventType === 'dispatch_agent' && payloadDetails.task
+            ? html`<div class="detail-row"><strong>Task:</strong> ${payloadDetails.task}</div>`
+            : nothing}
+          ${evt.error
+            ? html`<div class="detail-row">
+                <strong>Error:</strong>
+                <span style="color: var(--sl-color-danger-600, #dc2626);">${evt.error}</span>
+              </div>`
+            : nothing}
+          <div class="detail-row">
+            <strong>Created:</strong> ${formatRelative(evt.createdAt)}${evt.createdBy
+              ? ` by ${evt.createdBy}`
+              : ''}
+          </div>
+        </div>
+
+        <sl-button slot="footer" variant="default" @click=${this.closeDetail}>Close</sl-button>
       </sl-dialog>
     `;
   }

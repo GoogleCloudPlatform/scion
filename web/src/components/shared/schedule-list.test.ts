@@ -924,3 +924,74 @@ describe('scion-schedule-list create with a time zone', () => {
     expect(mod.scheduleZoneLabel('Asia/Tokyo')).toBe('Asia/Tokyo');
   });
 });
+
+describe('scion-schedule-list detail dialog wake and interrupt (ptone/scion#7791)', () => {
+  beforeAll(async () => {
+    mod = await import('./schedule-list.js');
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  function detailRowText(dialog: Element | null, label: string): string | undefined {
+    if (!dialog) return undefined;
+    const row = Array.from(dialog.querySelectorAll('.detail-row')).find(
+      (r) => r.querySelector('strong')?.textContent?.trim() === label
+    );
+    return row?.textContent?.replace(label, '').trim();
+  }
+
+  it('shows Wake: Yes and Interrupt: Yes when both are true in payload', async () => {
+    const el = await mount([
+      schedule({
+        id: 's-wake',
+        name: 'wake-check',
+        eventType: 'message',
+        payload: '{"agentName":"watcher","message":"check builds","wake":true,"interrupt":true}',
+      }),
+    ]);
+    rowFor(el, 'wake-check').click();
+    await settle(el as unknown as { updateComplete: Promise<unknown> });
+    const dialog = (el.shadowRoot as ShadowRoot).querySelector('sl-dialog[label^="Schedule:"]');
+    expect(dialog).not.toBeNull();
+    expect(detailRowText(dialog, 'Wake:')).toBe('Yes');
+    expect(detailRowText(dialog, 'Interrupt:')).toBe('Yes');
+  });
+
+  it('shows Wake: No and Interrupt: No when omitted from message payload', async () => {
+    const el = await mount([
+      schedule({
+        id: 's-default',
+        name: 'default-msg',
+        eventType: 'message',
+        payload: '{"agentName":"watcher","message":"plain check"}',
+      }),
+    ]);
+    rowFor(el, 'default-msg').click();
+    await settle(el as unknown as { updateComplete: Promise<unknown> });
+    const dialog = (el.shadowRoot as ShadowRoot).querySelector('sl-dialog[label^="Schedule:"]');
+    expect(dialog).not.toBeNull();
+    expect(detailRowText(dialog, 'Wake:')).toBe('No');
+    expect(detailRowText(dialog, 'Interrupt:')).toBe('No');
+  });
+
+  it('omits Wake and Interrupt rows for dispatch_agent schedules', async () => {
+    const el = await mount([
+      schedule({
+        id: 's-dispatch',
+        name: 'spawn-worker',
+        eventType: 'dispatch_agent',
+        payload: '{"agentName":"worker","template":"default","task":"build"}',
+      }),
+    ]);
+    rowFor(el, 'spawn-worker').click();
+    await settle(el as unknown as { updateComplete: Promise<unknown> });
+    const dialog = (el.shadowRoot as ShadowRoot).querySelector('sl-dialog[label^="Schedule:"]');
+    expect(dialog).not.toBeNull();
+    expect(detailRowText(dialog, 'Wake:')).toBeUndefined();
+    expect(detailRowText(dialog, 'Interrupt:')).toBeUndefined();
+  });
+});

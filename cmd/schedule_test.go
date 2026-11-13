@@ -254,3 +254,102 @@ func TestScheduleCreateRequests_Wake(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(body), "wake")
 }
+
+// TestPrintEventDetail_WakeAndInterrupt: scion schedule get prints Wake and
+// Interrupt lines for message events (including false when omitted from payload)
+// and omits them for non-message event types (ptone/scion#7791 d).
+func TestPrintEventDetail_WakeAndInterrupt(t *testing.T) {
+	t.Run("message event with wake and interrupt true", func(t *testing.T) {
+		evt := &hubclient.ScheduledEvent{
+			ID:        "evt-1",
+			EventType: "message",
+			Status:    "pending",
+			ProjectID: "proj-1",
+			Payload:   `{"agentName":"worker","message":"recheck","wake":true,"interrupt":true}`,
+		}
+		out := captureStdout(t, func() { printEventDetail(evt) })
+		assert.Contains(t, out, "  Agent:      worker\n")
+		assert.Contains(t, out, "  Message:    \"recheck\"\n")
+		assert.Contains(t, out, "  Wake:       true\n")
+		assert.Contains(t, out, "  Interrupt:  true\n")
+	})
+
+	t.Run("message event defaults omitted flags to false", func(t *testing.T) {
+		evt := &hubclient.ScheduledEvent{
+			ID:        "evt-2",
+			EventType: "message",
+			Status:    "pending",
+			ProjectID: "proj-1",
+			Payload:   `{"agentName":"worker","message":"recheck"}`,
+		}
+		out := captureStdout(t, func() { printEventDetail(evt) })
+		assert.Contains(t, out, "  Wake:       false\n")
+		assert.Contains(t, out, "  Interrupt:  false\n")
+	})
+
+	t.Run("dispatch_agent event omits wake and interrupt", func(t *testing.T) {
+		evt := &hubclient.ScheduledEvent{
+			ID:        "evt-3",
+			EventType: "dispatch_agent",
+			Status:    "pending",
+			ProjectID: "proj-1",
+			Payload:   `{"agentName":"worker","template":"default","task":"build"}`,
+		}
+		out := captureStdout(t, func() { printEventDetail(evt) })
+		assert.NotContains(t, out, "Wake:")
+		assert.NotContains(t, out, "Interrupt:")
+	})
+}
+
+// TestPrintScheduleDetail_WakeAndInterrupt: scion schedule get prints Wake and
+// Interrupt lines for recurring message schedules and omits them for
+// dispatch_agent schedules (ptone/scion#7791 d).
+func TestPrintScheduleDetail_WakeAndInterrupt(t *testing.T) {
+	t.Run("message schedule with wake true and interrupt false", func(t *testing.T) {
+		sched := &hubclient.Schedule{
+			ID:        "sched-1",
+			Name:      "morning-check",
+			CronExpr:  "0 8 * * *",
+			EventType: "message",
+			Status:    "active",
+			ProjectID: "proj-1",
+			Payload:   `{"agentName":"watcher","message":"check builds","wake":true}`,
+		}
+		out := captureStdout(t, func() { printScheduleDetail(sched) })
+		assert.Contains(t, out, "  Agent:      watcher\n")
+		assert.Contains(t, out, "  Message:    \"check builds\"\n")
+		assert.Contains(t, out, "  Wake:       true\n")
+		assert.Contains(t, out, "  Interrupt:  false\n")
+	})
+
+	t.Run("message schedule with interrupt true and wake omitted", func(t *testing.T) {
+		sched := &hubclient.Schedule{
+			ID:        "sched-2",
+			Name:      "urgent-ping",
+			CronExpr:  "*/15 * * * *",
+			EventType: "message",
+			Status:    "active",
+			ProjectID: "proj-1",
+			Payload:   `{"agentName":"watcher","message":"urgent","interrupt":true}`,
+		}
+		out := captureStdout(t, func() { printScheduleDetail(sched) })
+		assert.Contains(t, out, "  Wake:       false\n")
+		assert.Contains(t, out, "  Interrupt:  true\n")
+	})
+
+	t.Run("dispatch_agent schedule omits wake and interrupt", func(t *testing.T) {
+		sched := &hubclient.Schedule{
+			ID:        "sched-3",
+			Name:      "nightly-worker",
+			CronExpr:  "0 2 * * *",
+			EventType: "dispatch_agent",
+			Status:    "active",
+			ProjectID: "proj-1",
+			Payload:   `{"agentName":"worker","template":"default","task":"nightly"}`,
+		}
+		out := captureStdout(t, func() { printScheduleDetail(sched) })
+		assert.Contains(t, out, "  Template:   default\n")
+		assert.NotContains(t, out, "Wake:")
+		assert.NotContains(t, out, "Interrupt:")
+	})
+}
