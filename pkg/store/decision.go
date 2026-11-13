@@ -106,10 +106,64 @@ var (
 	// actionable set (design choices v5, 4.2 step 5). It matches
 	// *AnswerSetChangedError, which names a reason per row.
 	ErrAnswerSetChanged = errors.New("answer set changed")
-	// ErrIdempotencyMismatch: a set submit reused an idempotency key the
-	// user already used on the prompt for a different set of answers.
+	// ErrIdempotencyMismatch: a set submit or interpreted-answer call reused
+	// an idempotency key for a different set of answers.
 	ErrIdempotencyMismatch = errors.New("idempotency mismatch")
+	// ErrInterpretedAnswersFailed: one or more pairs of RecordInterpretedAnswers
+	// failed row-state or choice validation; nothing was stored. Matches
+	// *InterpretedAnswersError.
+	ErrInterpretedAnswersFailed = errors.New("interpreted answers failed")
 )
+
+// DecisionListState filters ListAgentDecisions by row status.
+type DecisionListState string
+
+const (
+	DecisionListStatePending DecisionListState = "pending"
+	DecisionListStateDecided DecisionListState = "decided"
+	DecisionListStateAll     DecisionListState = "all"
+
+	DefaultDecisionListLimit = 50
+	MaxDecisionListLimit     = 200
+)
+
+// Per-key failure reasons in InterpretedAnswersError.
+const (
+	InterpretedReasonAlreadyAnswered = "already_answered"
+	InterpretedReasonReplaced        = "replaced"
+	InterpretedReasonInvalidChoice   = "invalid_choice"
+	InterpretedReasonNotFound        = "decision_not_found"
+)
+
+// InterpretedKeyFailure describes why one pair in RecordInterpretedAnswers
+// could not be recorded.
+type InterpretedKeyFailure struct {
+	Key      string
+	Reason   string    // InterpretedReason*
+	ChoiceID string    // populated for InterpretedReasonInvalidChoice
+	Decision *Decision // current row with Answers loaded, when present
+}
+
+// InterpretedAnswersError lists every pair that failed in an all-or-nothing
+// RecordInterpretedAnswers call. Nothing was stored.
+type InterpretedAnswersError struct {
+	Failures []InterpretedKeyFailure
+}
+
+func (e *InterpretedAnswersError) Error() string {
+	parts := make([]string, len(e.Failures))
+	for i, f := range e.Failures {
+		switch f.Reason {
+		case InterpretedReasonInvalidChoice:
+			parts[i] = fmt.Sprintf("%s: invalid choice %q", f.Key, f.ChoiceID)
+		default:
+			parts[i] = fmt.Sprintf("%s: %s", f.Key, f.Reason)
+		}
+	}
+	return strings.Join(parts, "; ")
+}
+
+func (e *InterpretedAnswersError) Unwrap() error { return ErrInterpretedAnswersFailed }
 
 // Reasons a row of a set submit is not answerable, or is missing from it
 // (AnswerSetChangedError.Reasons).
@@ -453,12 +507,59 @@ type RecordAnswerSetInput struct {
 	IdempotencyKey string
 }
 
-// AnswerSetResult is a recorded set submit: its batch id and its answers in
-// position order.
+// AnswerSetResult is a recorded set submit or interpreted-answer call: its
+// batch id (empty for a single-pair interpreted call) and its answers in
+// request/position order.
 type AnswerSetResult struct {
 	BatchID  string
 	Answers  []*DecisionAnswer
 	Replayed bool
+}
+
+// InterpretedAnswerPair is one decision answer in RecordInterpretedInput.
+type InterpretedAnswerPair struct {
+	// DecisionRowID, when set, names the resolved version row to answer;
+	// when empty, Key is resolved to the asking agent's active version.
+	DecisionRowID string
+	Key           string
+	ChoiceID      string
+}
+
+// InterpretedFormattedItem carries the canonical key and choice label of one
+// validated pair so RecordInterpretedInput.FormatMessage can render the
+// single choice-response message text inside the transaction.
+type InterpretedFormattedItem struct {
+	Key         string
+	ChoiceID    string
+	ChoiceLabel string
+}
+
+// RecordInterpretedInput records 1 to MaxDecisionsPerMessage agent-interpreted
+// answers from one user free-text reply (design choices v5, 7; plan phase 2,
+// 5.1).
+type RecordInterpretedInput struct {
+	InterpretedByAgentID string // required (the asking agent UUID)
+	SourceMessageID      string // required (UUID of the user's reply)
+
+	AnsweredByUserID string // required
+	AnsweredByName   string
+	AnsweredByEmail  string
+	Surface          string // DecisionSurface*; required
+
+	Answers []InterpretedAnswerPair
+
+	// ResponseMessage is the one choice-response message stored in the same
+	// transaction (ID and ProjectID required; Type is set to
+	// messages.TypeChoiceResponse). When FormatMessage is non-nil and Msg is
+	// empty, Msg is populated from the validated pairs before insertion.
+	ResponseMessage *Message
+	FormatMessage   func(items []InterpretedFormattedItem) string
+
+	// IdempotencyKey, when set, is scoped to (InterpretedByAgentID,
+	// IdempotencyKey): a retry with the same source message and key=choice
+	// pairs returns the recorded answers with Replayed true; reusing the key
+	// for different inputs returns ErrIdempotencyMismatch.
+	IdempotencyKey string
 }
 
 // DecisionStore persists choice prompt decisions and their answers.
@@ -533,4 +634,41 @@ type DecisionStore interface {
 	// with each of the given choice-response messages, keyed by message
 	// ID, for history pages. IDs with no answer (or not UUIDs) are absent.
 	GetDecisionAnswersByResponseMessageIDs(ctx context.Context, messageIDs []string) (map[string][]*DecisionAnswer, error)
+
+	// ListAgentDecisions lists decision rows belonging to agentID
+	// (asker_agent_id = agentID) filtered by state (pending by default;
+	// decided; or all), newest first by (created_at DESC, id DESC) with
+	// opaque cursor pagination (default limit 50, max 200). Answers are
+	// loaded on every returned row.
+	ListAgentDecisions(ctx context.Context, agentID string, state DecisionListState, cursor string, limit int) (items []*Decision, nextCursor string, err error)
+
+	// GetAgentDecisionVersions returns all versions of key belonging to
+	// agentID (asker_agent_id = agentID, key_norm = DecisionKeyNorm(key)),
+	// oldest first (version ASC), with EVERY DecisionAnswer row loaded on
+	// each version. Returns ErrNotFound when the agent has no decision with
+	// that key.
+	GetAgentDecisionVersions(ctx context.Context, agentID, key string) ([]*Decision, error)
+
+	// FindInterpretedReplay checks whether idempotencyKey has already been
+	// used by agentID for agent_interpreted answers, without locking or
+	// writing. Returns (replay, nil) with Replayed=true and answers ordered
+	// canonically by (prompt CreatedAt, MessageID, Position) when the key
+	// matches sourceMessageID and every pair in pairs; (nil,
+	// ErrIdempotencyMismatch) when the key was already used by agentID for a
+	// different source message or different answers; and (nil, nil) when
+	// idempotencyKey is empty or unused by agentID.
+	FindInterpretedReplay(ctx context.Context, agentID, idempotencyKey, sourceMessageID string, pairs []InterpretedAnswerPair) (*AnswerSetResult, error)
+
+	// RecordInterpretedAnswers atomically records 1..MaxDecisionsPerMessage
+	// agent_interpreted answers for one asking agent from one user reply
+	// message: it checks idempotency scoped to (agent, idempotency_key)
+	// first (and re-checks after row locks on contention), locks target rows
+	// on Postgres in (key_norm, version) order, validates every target row
+	// is pending with no existing answer and a valid choice id (returning
+	// *InterpretedAnswersError with all per-key failures and storing nothing
+	// if any fails), orders validated answers canonically by (prompt
+	// CreatedAt, MessageID, Position), inserts one choice-response message,
+	// inserts the DecisionAnswer rows (sharing a new BatchID when len >= 2,
+	// empty BatchID when len == 1), and marks every target row decided.
+	RecordInterpretedAnswers(ctx context.Context, in *RecordInterpretedInput) (*AnswerSetResult, error)
 }

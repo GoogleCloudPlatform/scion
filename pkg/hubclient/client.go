@@ -152,6 +152,9 @@ type Client interface {
 	// interface (.design/agent-delegation.md §18.6).
 	AgentDelegations() AgentDelegationService
 
+	// Decisions returns the agent self-service decision operations interface.
+	Decisions() DecisionService
+
 	// Health checks API availability.
 	Health(ctx context.Context) (*HealthResponse, error)
 
@@ -193,6 +196,7 @@ type client struct {
 	testIdentities        *testIdentityService
 	testIdentityDelegs    *testIdentityDelegationService
 	agentDelegations      *agentDelegationService
+	decisions             *decisionService
 
 	// pluginName, when set (WithPluginName), is sent as
 	// X-Scion-Plugin-Name on the broker attachment requests.
@@ -257,6 +261,7 @@ func New(baseURL string, opts ...Option) (Client, error) {
 	c.testIdentities = &testIdentityService{c: c}
 	c.testIdentityDelegs = &testIdentityDelegationService{c: c}
 	c.agentDelegations = &agentDelegationService{c: c}
+	c.decisions = &decisionService{c: c}
 
 	return c, nil
 }
@@ -418,6 +423,11 @@ func (c *client) TestIdentityDelegations() TestIdentityDelegationService {
 // AgentDelegations returns the agent delegation grant operations interface.
 func (c *client) AgentDelegations() AgentDelegationService {
 	return c.agentDelegations
+}
+
+// Decisions returns the agent self-service decision operations interface.
+func (c *client) Decisions() DecisionService {
+	return c.decisions
 }
 
 // get performs an HTTP GET request.

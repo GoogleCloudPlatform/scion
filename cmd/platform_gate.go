@@ -74,6 +74,13 @@ var windowsAllowed = map[string]bool{
 	"conversation.group.add":    true,
 	"conversation.group.remove": true,
 
+	// Choice decisions (ptone/scion#7797, decision Q1): pure Hub API calls,
+	// no local writes.
+	"decisions":        true,
+	"decisions.list":   true,
+	"decisions.show":   true,
+	"decisions.record": true,
+
 	// 'scion use' and its alias 'scion project use' run on Windows. Their
 	// local writes all go through the private-file primitives:
 	// ~/.scion/context.yaml with its directory and lock (Tree.MkdirAll

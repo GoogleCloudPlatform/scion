@@ -1,0 +1,206 @@
+[
+  {
+    "name": "pending (signed-in user)",
+    "userId": "u1",
+    "status": "pending",
+    "answers": [],
+    "decision": null,
+    "want": ""
+  },
+  {
+    "name": "pending (empty user id)",
+    "userId": "",
+    "status": "pending",
+    "answers": [],
+    "decision": null,
+    "want": ""
+  },
+  {
+    "name": "replaced (no answer)",
+    "userId": "u1",
+    "status": "replaced",
+    "answers": [],
+    "decision": null,
+    "want": "replaced"
+  },
+  {
+    "name": "replaced (even with own interpreted answer)",
+    "userId": "u1",
+    "status": "replaced",
+    "answers": [
+      {
+        "provenance": "agent_interpreted",
+        "outcome": "answer",
+        "answeredByUserId": "u1"
+      }
+    ],
+    "decision": {
+      "provenance": "agent_interpreted",
+      "outcome": "answer",
+      "answeredByUserId": "u1"
+    },
+    "want": "replaced"
+  },
+  {
+    "name": "decided with direct answer",
+    "userId": "u1",
+    "status": "decided",
+    "answers": [
+      {
+        "provenance": "direct",
+        "outcome": "answer",
+        "answeredByUserId": "u1"
+      }
+    ],
+    "decision": {
+      "provenance": "direct",
+      "outcome": "answer",
+      "answeredByUserId": "u1"
+    },
+    "want": "decided"
+  },
+  {
+    "name": "decided with another user's direct answer",
+    "userId": "u1",
+    "status": "decided",
+    "answers": [
+      {
+        "provenance": "direct",
+        "outcome": "answer",
+        "answeredByUserId": "u2"
+      }
+    ],
+    "decision": {
+      "provenance": "direct",
+      "outcome": "answer",
+      "answeredByUserId": "u2"
+    },
+    "want": "decided"
+  },
+  {
+    "name": "decided with own interpreted answer",
+    "userId": "u1",
+    "status": "decided",
+    "answers": [
+      {
+        "provenance": "agent_interpreted",
+        "outcome": "answer",
+        "answeredByUserId": "u1"
+      }
+    ],
+    "decision": {
+      "provenance": "agent_interpreted",
+      "outcome": "answer",
+      "answeredByUserId": "u1"
+    },
+    "want": ""
+  },
+  {
+    "name": "decided with another user's interpreted answer",
+    "userId": "u1",
+    "status": "decided",
+    "answers": [
+      {
+        "provenance": "agent_interpreted",
+        "outcome": "answer",
+        "answeredByUserId": "u2"
+      }
+    ],
+    "decision": {
+      "provenance": "agent_interpreted",
+      "outcome": "answer",
+      "answeredByUserId": "u2"
+    },
+    "want": "not_recorded_answerer"
+  },
+  {
+    "name": "decided with interpreted answer, recorded answerer deleted",
+    "userId": "u1",
+    "status": "decided",
+    "answers": [
+      {
+        "provenance": "agent_interpreted",
+        "outcome": "answer",
+        "answeredByUserId": ""
+      }
+    ],
+    "decision": {
+      "provenance": "agent_interpreted",
+      "outcome": "answer",
+      "answeredByUserId": ""
+    },
+    "want": "not_recorded_answerer"
+  },
+  {
+    "name": "decided with interpreted answer, empty caller user id",
+    "userId": "",
+    "status": "decided",
+    "answers": [
+      {
+        "provenance": "agent_interpreted",
+        "outcome": "answer",
+        "answeredByUserId": "u1"
+      }
+    ],
+    "decision": {
+      "provenance": "agent_interpreted",
+      "outcome": "answer",
+      "answeredByUserId": "u1"
+    },
+    "want": "not_recorded_answerer"
+  },
+  {
+    "name": "decided with own interpreted answer then direct confirm",
+    "userId": "u1",
+    "status": "decided",
+    "answers": [
+      {
+        "provenance": "agent_interpreted",
+        "outcome": "answer",
+        "answeredByUserId": "u1"
+      },
+      {
+        "provenance": "direct",
+        "outcome": "confirm",
+        "answeredByUserId": "u1"
+      }
+    ],
+    "decision": {
+      "provenance": "direct",
+      "outcome": "confirm",
+      "answeredByUserId": "u1"
+    },
+    "want": "decided"
+  },
+  {
+    "name": "decided with own interpreted answer then direct override",
+    "userId": "u1",
+    "status": "decided",
+    "answers": [
+      {
+        "provenance": "agent_interpreted",
+        "outcome": "answer",
+        "answeredByUserId": "u1"
+      },
+      {
+        "provenance": "direct",
+        "outcome": "override",
+        "answeredByUserId": "u1"
+      }
+    ],
+    "decision": {
+      "provenance": "direct",
+      "outcome": "override",
+      "answeredByUserId": "u1"
+    },
+    "want": "decided"
+  },
+  {
+    "name": "decided with no answer",
+    "userId": "u1",
+    "status": "decided",
+    "answers": [],
+    "decision": null,
+    "want": "not_actionable"
+  }
+]
