@@ -2504,7 +2504,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// Reject messages to non-running agents when --wake is not set.
 	// For agent-to-agent DMs, phase validation is handled by ExecuteAgentDM.
 	if !req.Wake && !senderIsAgent && !delegatedSender && !deferDelivery {
-		switch state.Phase(agent.Phase) {
+		rest := store.EffectiveRestingPhase(agent)
+		switch state.Phase(rest) {
 		case state.PhaseRunning:
 			// OK — proceed to deliver
 		case state.PhaseSuspended:
@@ -2525,7 +2526,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			return
 		default:
 			writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
-				fmt.Sprintf("Agent %q is not yet running (phase: %s). Wait for it to reach running state.", agent.Slug, agent.Phase), nil)
+				fmt.Sprintf("Agent %q is not yet running (phase: %s). Wait for it to reach running state.", agent.Slug, rest), nil)
 			return
 		}
 	}

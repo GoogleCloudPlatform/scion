@@ -129,14 +129,15 @@ func TestScheduledMessageWake_ResumesAndDelivers(t *testing.T) {
 func TestScheduledMessageWake_WithoutWakeUnchanged(t *testing.T) {
 	f := newSchedWake(t, state.PhaseSuspended)
 	u := f.user(t, "sw-nowake", lifecyclePerms...)
-	// Without wake a suspended target is not resumed. The dispatch is
-	// attempted as before and its outcome is the dispatcher's.
-	f.disp.msgReturnErr = assert.AnError
-
+	// Without wake a suspended target is rejected before broker dispatch with a
+	// clear suspended message suggesting --wake.
 	err := f.fire(withSessionRevision(f.event(false), u.ID))
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to dispatch message")
+	assert.Contains(t, err.Error(), "is suspended")
+	assert.Contains(t, err.Error(), "--wake")
+	assert.NotContains(t, err.Error(), "agent_not_found")
 	assert.Empty(t, f.disp.getStartCalls(), "no resume without wake")
+	assert.Empty(t, f.disp.getMessageCalls(), "no broker dispatch to suspended target without wake")
 	assert.Equal(t, string(state.PhaseSuspended), f.phase(t))
 }
 

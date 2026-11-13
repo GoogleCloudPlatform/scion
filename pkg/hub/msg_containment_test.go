@@ -400,7 +400,7 @@ func TestC1_ScheduledMessageHappyPath(t *testing.T) {
 	}
 	ms.agents["target"] = &store.Agent{
 		ID: "target", Name: "target", Slug: "target",
-		ProjectID: projectID, MessageMode: store.MessageModeProject,
+		ProjectID: projectID, Phase: "running", MessageMode: store.MessageModeProject,
 	}
 
 	// Set up role binding so the creator has agent.message permission.
@@ -701,7 +701,7 @@ func TestC1_FireEvent_SuccessRecordsFiredNoError(t *testing.T) {
 	}
 	ms.agents["target"] = &store.Agent{
 		ID: "target", Name: "target", Slug: "target",
-		ProjectID: projectID, MessageMode: store.MessageModeProject,
+		ProjectID: projectID, Phase: "running", MessageMode: store.MessageModeProject,
 	}
 	ms.roleDefinitions["member-role"] = &store.RoleDefinition{
 		ID:          "member-role",
@@ -841,7 +841,7 @@ func TestC1_FireEvent_StatusWriteFailureIsNotRetried(t *testing.T) {
 	}
 	ms.agents["target"] = &store.Agent{
 		ID: "target", Name: "target", Slug: "target",
-		ProjectID: projectID, MessageMode: store.MessageModeProject,
+		ProjectID: projectID, Phase: "running", MessageMode: store.MessageModeProject,
 	}
 	ms.roleDefinitions["member-role"] = &store.RoleDefinition{
 		ID:          "member-role",
