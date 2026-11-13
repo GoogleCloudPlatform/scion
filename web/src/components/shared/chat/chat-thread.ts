@@ -121,6 +121,7 @@ import './chat-message.js';
 import type { ReplyPreviewInfo } from './chat-message.js';
 import './chat-system-line.js';
 import './chat-composer.js';
+import { resolveReplyAllTargets, type Participant } from './prose-mentions.js';
 import './chat-interagent-marker.js';
 import {
   formatChatDate,
@@ -250,8 +251,8 @@ interface FilterExitTarget {
   conversationKey: string;
   messageId: string;
   highlight: boolean;
-  /** Seed the composer with a reply to, or an edit of, the message. */
-  action?: 'reply' | 'edit';
+  /** Seed the composer with a reply to, reply-all to, or an edit of, the message. */
+  action?: 'reply' | 'reply-all' | 'edit';
   /** Move focus to the message when it lands (a jump). */
   focus?: boolean;
 }
@@ -738,6 +739,7 @@ export class ScionChatThread extends LitElement {
     email: string;
     avatarUrl?: string;
     kind: 'user' | 'agent';
+    slug?: string;
   }> = [];
 
   /**
@@ -5439,6 +5441,14 @@ export class ScionChatThread extends LitElement {
     const actions: MenuAction[] = [
       { id: 'reply', label: 'Reply', icon: 'reply', run: () => this.handleContextMenuReply() },
     ];
+    if ((this.isDM || this.canPost) && this.replyAllTargets(msg).length > 0) {
+      actions.push({
+        id: 'reply-all',
+        label: 'Reply all',
+        icon: 'reply-all',
+        run: () => this.handleContextMenuReplyAll(msg),
+      });
+    }
     if (canEditDelete) {
       actions.push(
         { id: 'edit', label: 'Edit', icon: 'pencil', run: () => this.handleContextMenuEdit() },
@@ -5707,6 +5717,10 @@ export class ScionChatThread extends LitElement {
       this.seedReply(msg);
       return;
     }
+    if (exit.action === 'reply-all') {
+      if (this.isDM || this.canPost) this.seedReplyAll(msg);
+      return;
+    }
     const isOwn = msg.senderId === (this._currentUserId || this.currentUserId);
     if (isOwn && !this.hasAgentReplyAfter(msg)) this.seedEdit(msg);
   }
@@ -5855,6 +5869,17 @@ export class ScionChatThread extends LitElement {
         },
       },
     ];
+    if ((this.isDM || this.canPost) && this.replyAllTargets(msg).length > 0) {
+      actions.push({
+        id: 'reply-all',
+        label: 'Reply all',
+        icon: 'reply-all',
+        run: (): void => {
+          this.closeContextMenu();
+          this.exitFilter({ messageId: msg.id, highlight: true, action: 'reply-all' }, true);
+        },
+      });
+    }
     if (isOwnMessage) {
       actions.push({
         id: 'edit',
@@ -6388,6 +6413,23 @@ export class ScionChatThread extends LitElement {
     this.seedReply(msg);
   }
 
+  /** Context menu: Reply all to the right-clicked message. */
+  private handleContextMenuReplyAll(target?: Message): void {
+    const msg = target ?? this.contextMenuMessage;
+    this.closeContextMenu();
+    if (!msg) return;
+    this.seedReplyAll(msg);
+  }
+
+  /** Other participants @-mentioned in `msg` prose (excluding self and sender). */
+  private replyAllTargets(msg: Message): Participant[] {
+    return resolveReplyAllTargets(
+      msg,
+      { members: this.members, agentMembers: this.agentMembers },
+      this.selfUserId()
+    );
+  }
+
   /** Context menu: Edit the right-clicked message. */
   private handleContextMenuEdit(): void {
     const msg = this.contextMenuMessage;
@@ -6404,6 +6446,24 @@ export class ScionChatThread extends LitElement {
       senderName: this.getSenderDisplayName(msg) || msg.sender,
       content: replyToContent(msg.msg),
     };
+  }
+
+  /**
+   * Start a reply to `msg` and pre-fill `@`-mentions for the other mentioned
+   * participants. When `msg`'s sender is an agent, prefix with `'cc '` so the
+   * hub keeps the reply-target agent instead of applying leading-mention override.
+   */
+  private seedReplyAll(msg: Message): void {
+    const slugs = this.replyAllTargets(msg).map((p) => p.insertSlug);
+    const leadIn = this.isSenderAgent(msg) ? 'cc ' : '';
+    this.seedReply(msg);
+    if (slugs.length === 0) return;
+    void this.updateComplete.then(() => {
+      const composer = this.shadowRoot?.querySelector(
+        'scion-chat-composer'
+      ) as ScionChatComposer | null;
+      composer?.seedMentions(slugs, { leadIn });
+    });
   }
 
   /** Start an edit of `msg` in the composer. */

@@ -55,6 +55,7 @@ import { isFeatureEnabled } from '../../../utils/feature-flags.js';
 import type { ArtifactPickerSelectDetail, PendingArtifact } from './artifact-picker.js';
 import './artifact-picker.js';
 import { findDefaultAgent } from './default-agent.js';
+import { hasStandaloneMentionToken } from './prose-mentions.js';
 
 /** The touch presentation of the send button's right-click menu. */
 const SEND_SHEET_INTERRUPT: ActionSheetItem = {
@@ -2541,6 +2542,121 @@ export class ScionChatComposer extends LitElement {
     this.runeCount = countRunes(this.text);
     this.saveDraft();
     return true;
+  }
+
+  /**
+   * Pre-fill resolved `@slug ` tokens at the start of the draft (e.g. from
+   * "Reply all"), registering each in `mentionRanges` + `acceptedMentions`
+   * while preserving existing draft text and any already-present mentions.
+   *
+   * When `opts.leadIn` is supplied (e.g. `'cc '` for agent-authored replies so
+   * the message does not start with a leading `@mention`), the prefix starts
+   * with `leadIn` without including `leadIn` in `mentionRanges`. If the draft
+   * already begins with `leadIn`, it is not repeated.
+   */
+  seedMentions(slugs: readonly string[], opts: { leadIn?: string } = {}): void {
+    const leadIn = opts.leadIn ?? '';
+    const uniqueSlugs: string[] = [];
+    const seenLower = new Set<string>();
+    for (const raw of slugs) {
+      const slug = raw.trim();
+      if (!slug) continue;
+      const lower = slug.toLowerCase();
+      if (seenLower.has(lower)) continue;
+      seenLower.add(lower);
+      uniqueSlugs.push(slug);
+    }
+    if (uniqueSlugs.length === 0) {
+      this.focusTextareaCaretEnd();
+      return;
+    }
+
+    const missingSlugs: string[] = [];
+    for (const slug of uniqueSlugs) {
+      this.acceptedMentions.add(slug);
+      if (!hasStandaloneMentionToken(this.text, slug)) {
+        missingSlugs.push(slug);
+      }
+    }
+
+    if (missingSlugs.length > 0) {
+      const mentionText = missingSlugs.map((s) => `@${s} `).join('');
+      const hasLeadIn = leadIn !== '' && this.text.startsWith(leadIn);
+
+      if (hasLeadIn) {
+        let insertAt = leadIn.length;
+        for (;;) {
+          const nextRange = this.mentionRanges.find((r) => r.start === insertAt);
+          if (!nextRange) break;
+          insertAt = nextRange.end;
+        }
+        this.text = this.text.slice(0, insertAt) + mentionText + this.text.slice(insertAt);
+
+        const shifted = this.mentionRanges.map((r) =>
+          r.start >= insertAt
+            ? { ...r, start: r.start + mentionText.length, end: r.end + mentionText.length }
+            : r
+        );
+        const insertedRanges: MentionRange[] = [];
+        let offset = insertAt;
+        for (const slug of missingSlugs) {
+          const tokenLen = slug.length + 2; // `@${slug} `
+          insertedRanges.push({ start: offset, end: offset + tokenLen, slug });
+          offset += tokenLen;
+        }
+        this.mentionRanges = [...shifted, ...insertedRanges];
+      } else {
+        const prefix = `${leadIn}${mentionText}`;
+        this.text = `${prefix}${this.text}`;
+        const shifted = this.mentionRanges.map((r) => ({
+          ...r,
+          start: r.start + prefix.length,
+          end: r.end + prefix.length,
+        }));
+        const insertedRanges: MentionRange[] = [];
+        let offset = leadIn.length;
+        for (const slug of missingSlugs) {
+          const tokenLen = slug.length + 2; // `@${slug} `
+          insertedRanges.push({ start: offset, end: offset + tokenLen, slug });
+          offset += tokenLen;
+        }
+        this.mentionRanges = [...insertedRanges, ...shifted];
+      }
+
+      this.runeCount = countRunes(this.text);
+      this.saveDraft();
+    } else if (
+      leadIn !== '' &&
+      !this.text.startsWith(leadIn) &&
+      this.text.trimStart().startsWith('@')
+    ) {
+      // Prepend `leadIn` even when every slug is already present so a leading `@mention` does not override the reply-target agent on the hub.
+      this.text = `${leadIn}${this.text}`;
+      this.mentionRanges = this.mentionRanges.map((r) => ({
+        ...r,
+        start: r.start + leadIn.length,
+        end: r.end + leadIn.length,
+      }));
+      this.runeCount = countRunes(this.text);
+      this.saveDraft();
+    }
+
+    void this.updateComplete.then(async () => {
+      const slTextarea = this.shadowRoot?.querySelector('sl-textarea') as {
+        updateComplete?: Promise<unknown>;
+      } | null;
+      if (slTextarea?.updateComplete) {
+        await slTextarea.updateComplete;
+      }
+      const ta = this.getTextareaElement();
+      if (ta) {
+        const end = ta.value.length;
+        ta.setSelectionRange(end, end);
+      }
+      this.notifyMentionAutocompleteOfTextChange();
+      this.notifySlashAutocompleteOfTextChange();
+    });
+    this.focusTextareaCaretEnd();
   }
 
   /**
