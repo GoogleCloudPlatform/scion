@@ -216,3 +216,41 @@ func TestScheduleZoneLabels(t *testing.T) {
 	out = captureStdout(t, func() { printScheduleDetail(&sched) })
 	assert.Contains(t, out, "  Zone:       UTC\n")
 }
+
+// TestScheduleCreateRequests_Wake: --wake on create and create-recurring
+// sets wake on the request (ptone/scion#7734); unset, the field is omitted.
+func TestScheduleCreateRequests_Wake(t *testing.T) {
+	origType, origAgent, origMessage, origIn := scheduleType, scheduleAgent, scheduleMessage, scheduleIn
+	origName, origCron, origWake := scheduleName, scheduleCron, scheduleWake
+	defer func() {
+		scheduleType, scheduleAgent, scheduleMessage, scheduleIn = origType, origAgent, origMessage, origIn
+		scheduleName, scheduleCron, scheduleWake = origName, origCron, origWake
+	}()
+	scheduleType, scheduleAgent, scheduleMessage, scheduleIn = "message", "lead", "recheck", "5m"
+	scheduleName, scheduleCron = "poke", "*/5 * * * *"
+
+	for _, cmdName := range []string{"create", "create-recurring"} {
+		c := scheduleCreateCmd
+		if cmdName == "create-recurring" {
+			c = scheduleCreateRecurringCmd
+		}
+		flag := c.Flags().Lookup("wake")
+		require.NotNil(t, flag, "%s has --wake", cmdName)
+		assert.Equal(t, "false", flag.DefValue)
+	}
+
+	scheduleWake = true
+	assert.True(t, buildCreateEventRequest().Wake)
+	assert.True(t, buildCreateRecurringRequest().Wake)
+	body, err := json.Marshal(buildCreateEventRequest())
+	require.NoError(t, err)
+	assert.Contains(t, string(body), `"wake":true`)
+
+	scheduleWake = false
+	body, err = json.Marshal(buildCreateEventRequest())
+	require.NoError(t, err)
+	assert.NotContains(t, string(body), "wake")
+	body, err = json.Marshal(buildCreateRecurringRequest())
+	require.NoError(t, err)
+	assert.NotContains(t, string(body), "wake")
+}

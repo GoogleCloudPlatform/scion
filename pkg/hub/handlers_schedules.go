@@ -44,6 +44,8 @@ type CreateScheduleRequest struct {
 	AgentName string `json:"agentName,omitempty"`
 	Message   string `json:"message,omitempty"`
 	Interrupt bool   `json:"interrupt,omitempty"`
+	// Wake resumes a suspended target before delivery (ptone/scion#7734).
+	Wake bool `json:"wake,omitempty"`
 
 	// Convenience fields for "dispatch_agent" events — used to auto-construct Payload
 	Template string `json:"template,omitempty"`
@@ -225,6 +227,10 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 		ValidationError(w, fmt.Sprintf("unsupported event type: %s (supported: message, dispatch_agent)", req.EventType), nil)
 		return
 	}
+	if req.Wake && req.EventType != "message" {
+		ValidationError(w, "wake applies to message events only", nil)
+		return
+	}
 	// Recurring schedules accept (ptone/scion#2200)
 	// the same advanced Payload JSON as one-shot scheduled events and must
 	// be tombstoned the same way (see createScheduledEvent), for both
@@ -298,6 +304,7 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 			AgentName: req.AgentName,
 			Message:   req.Message,
 			Interrupt: req.Interrupt,
+			Wake:      req.Wake,
 		}
 		payloadBytes, marshalErr := json.Marshal(p)
 		if marshalErr != nil {

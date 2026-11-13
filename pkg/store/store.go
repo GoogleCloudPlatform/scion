@@ -3256,6 +3256,22 @@ type ScheduleStore interface {
 	// Sets last_run_at, next_run_at, run counters, and error status.
 	UpdateScheduleAfterRun(ctx context.Context, id string, ranAt time.Time, nextRunAt time.Time, errMsg string) error
 
+	// AdvanceScheduleNextRun sets only next_run_at, so a run that takes
+	// longer than an evaluator tick is not selected again as due while it
+	// runs. RecordScheduleRun records the run when it completes, without
+	// changing next_run_at.
+	// Returns ErrNotFound if the schedule doesn't exist.
+	AdvanceScheduleNextRun(ctx context.Context, id string, nextRunAt time.Time) error
+
+	// RecordScheduleRun records the outcome of a run whose next_run_at was
+	// already advanced (AdvanceScheduleNextRun): it never changes
+	// next_run_at. The run and error counters always count the run; the
+	// last-run fields (last_run_at, status, error) are written only when
+	// ranAt is later than the stored last_run_at, so a run that finishes
+	// after a newer one does not overwrite the newer outcome.
+	// Returns ErrNotFound if the schedule doesn't exist.
+	RecordScheduleRun(ctx context.Context, id string, ranAt time.Time, errMsg string) error
+
 	// DeleteSchedule removes a schedule by ID.
 	// Returns ErrNotFound if the schedule doesn't exist.
 	DeleteSchedule(ctx context.Context, id string) error

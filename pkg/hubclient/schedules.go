@@ -70,6 +70,7 @@ type CreateScheduleRequest struct {
 	AgentName string `json:"agentName,omitempty"`
 	Message   string `json:"message,omitempty"`
 	Interrupt bool   `json:"interrupt,omitempty"`
+	Wake      bool   `json:"wake,omitempty"`
 	Template  string `json:"template,omitempty"`
 	Task      string `json:"task,omitempty"`
 	Branch    string `json:"branch,omitempty"`

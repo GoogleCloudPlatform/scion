@@ -37,6 +37,7 @@ var (
 	scheduleAgent     string
 	scheduleMessage   string
 	scheduleInterrupt bool
+	scheduleWake      bool
 	scheduleName      string
 	scheduleCron      string
 	scheduleTimeZone  string
@@ -538,19 +539,7 @@ func runScheduleCreate(cmd *cobra.Command, args []string) error {
 	}
 	defer cancel()
 
-	req := &hubclient.CreateScheduledEventRequest{
-		EventType: scheduleType,
-		AgentName: scheduleAgent,
-		Message:   scheduleMessage,
-		Interrupt: scheduleInterrupt,
-	}
-
-	if scheduleIn != "" {
-		req.FireIn = scheduleIn
-	} else {
-		req.FireAt = scheduleAt
-	}
-
+	req := buildCreateEventRequest()
 	evt, err := hubCtx.Client.ScheduledEvents(projectID).Create(ctx, req)
 	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to create scheduled event: %w", err))
@@ -615,6 +604,23 @@ func runScheduleCreateRecurring(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// buildCreateEventRequest builds the create request from the create flags.
+func buildCreateEventRequest() *hubclient.CreateScheduledEventRequest {
+	req := &hubclient.CreateScheduledEventRequest{
+		EventType: scheduleType,
+		AgentName: scheduleAgent,
+		Message:   scheduleMessage,
+		Interrupt: scheduleInterrupt,
+		Wake:      scheduleWake,
+	}
+	if scheduleIn != "" {
+		req.FireIn = scheduleIn
+	} else {
+		req.FireAt = scheduleAt
+	}
+	return req
+}
+
 // buildCreateRecurringRequest builds the create request from the
 // create-recurring flags.
 func buildCreateRecurringRequest() *hubclient.CreateScheduleRequest {
@@ -626,6 +632,7 @@ func buildCreateRecurringRequest() *hubclient.CreateScheduleRequest {
 		AgentName: scheduleAgent,
 		Message:   scheduleMessage,
 		Interrupt: scheduleInterrupt,
+		Wake:      scheduleWake,
 	}
 }
 
@@ -817,6 +824,7 @@ func init() {
 	scheduleCreateCmd.Flags().StringVar(&scheduleAgent, "agent", "", "Target agent name")
 	scheduleCreateCmd.Flags().StringVar(&scheduleMessage, "message", "", "Message body")
 	scheduleCreateCmd.Flags().BoolVar(&scheduleInterrupt, "interrupt", false, "Interrupt the agent")
+	scheduleCreateCmd.Flags().BoolVar(&scheduleWake, "wake", false, "Message events only: resume the target agent if it is suspended when the message fires (requires permission to start it)")
 
 	// Create recurring flags
 	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleName, "name", "", "Schedule name (required)")
@@ -826,6 +834,7 @@ func init() {
 	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleAgent, "agent", "", "Target agent name")
 	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleMessage, "message", "", "Message body")
 	scheduleCreateRecurringCmd.Flags().BoolVar(&scheduleInterrupt, "interrupt", false, "Interrupt the agent")
+	scheduleCreateRecurringCmd.Flags().BoolVar(&scheduleWake, "wake", false, "Message events only: resume the target agent if it is suspended when the message fires (requires permission to start it)")
 }
 
 // scheduleWhen renders a scheduled time relative to now. A pending time that

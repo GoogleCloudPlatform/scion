@@ -125,3 +125,59 @@ describe('scion-scheduled-event-list fire time in the display zone', () => {
     expect(cells).toEqual(['in 3 days', 'now']);
   });
 });
+
+describe('scion-scheduled-event-list create dialog wake option (ptone/scion#7734)', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.unstubAllGlobals();
+  });
+
+  async function createWith(wake: boolean): Promise<Record<string, unknown>> {
+    const posts: Record<string, unknown>[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((_url: string, init?: RequestInit): Promise<Response> => {
+        if (init?.method === 'POST') {
+          posts.push(JSON.parse(init.body as string) as Record<string, unknown>);
+          return Promise.resolve(
+            new Response('{}', { status: 201, headers: { 'Content-Type': 'application/json' } })
+          );
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({ events: [] }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      })
+    );
+    const el = document.createElement('scion-scheduled-event-list') as AnyEl;
+    el.projectId = 'p1';
+    el.compact = true;
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    el.openCreateDialog();
+    await el.updateComplete;
+    const box = Array.from(el.shadowRoot!.querySelectorAll('label.checkbox-label')).find((l) =>
+      (l as HTMLElement).textContent?.includes('Wake agent')
+    ) as HTMLElement | undefined;
+    expect(box, 'the dialog offers a Wake agent option').toBeDefined();
+    expect((box!.querySelector('input') as HTMLInputElement).checked).toBe(false);
+
+    el.dialogAgent = 'worker';
+    el.dialogMessage = 'recheck';
+    el.dialogWake = wake;
+    await el.handleCreate(new Event('submit'));
+    expect(posts).toHaveLength(1);
+    return posts[0];
+  }
+
+  it('sends wake: true when the option is checked', async () => {
+    expect((await createWith(true)).wake).toBe(true);
+  });
+
+  it('sends wake: false by default', async () => {
+    expect((await createWith(false)).wake).toBe(false);
+  });
+});

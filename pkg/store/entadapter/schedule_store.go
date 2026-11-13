@@ -701,6 +701,49 @@ func (s *ScheduleStore) UpdateScheduleAfterRun(ctx context.Context, id string, r
 	return nil
 }
 
+// AdvanceScheduleNextRun sets only next_run_at on a schedule.
+func (s *ScheduleStore) AdvanceScheduleNextRun(ctx context.Context, id string, nextRunAt time.Time) error {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	if err := s.client.Schedule.UpdateOneID(uid).SetNextRunAt(nextRunAt).Exec(ctx); err != nil {
+		return mapError(err)
+	}
+	return nil
+}
+
+// RecordScheduleRun records a run's outcome without changing next_run_at.
+// The counters always count the run; the last-run fields are written only
+// for a run later than the stored last run. The two writes are separate: a
+// reader can see the counters before the last-run fields, never a rewound
+// outcome.
+func (s *ScheduleStore) RecordScheduleRun(ctx context.Context, id string, ranAt time.Time, errMsg string) error {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	counters := s.client.Schedule.UpdateOneID(uid).AddRunCount(1)
+	if errMsg != "" {
+		counters.AddErrorCount(1)
+	}
+	if err := counters.Exec(ctx); err != nil {
+		return mapError(err)
+	}
+	last := s.client.Schedule.Update().
+		Where(schedule.ID(uid), schedule.Or(schedule.LastRunAtIsNil(), schedule.LastRunAtLT(ranAt))).
+		SetLastRunAt(ranAt)
+	if errMsg != "" {
+		last.SetLastRunStatus(store.ScheduleRunError).SetLastRunError(errMsg)
+	} else {
+		last.SetLastRunStatus(store.ScheduleRunSuccess).ClearLastRunError()
+	}
+	if _, err := last.Save(ctx); err != nil {
+		return mapError(err)
+	}
+	return nil
+}
+
 // DeleteSchedule removes a schedule by ID (hard delete).
 func (s *ScheduleStore) DeleteSchedule(ctx context.Context, id string) error {
 	uid, err := parseUUID(id)

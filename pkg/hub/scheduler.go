@@ -384,7 +384,9 @@ func (s *Scheduler) Start(ctx context.Context) {
 // and waits for the root ticker goroutine to exit. In-flight recurring
 // handler goroutines (spawned per tick by runRecurringHandlers) are not
 // tracked; they will be cancelled via the parent context when the server
-// shuts down. The launch reaper's dedicated goroutine is different: it runs
+// shuts down. Recurring wake fires (ptone/scion#7734) are the exception: they
+// run off the evaluator on detached contexts, and the hub's teardown joins
+// them (Server.scheduledWakeFires). The launch reaper's dedicated goroutine is different: it runs
 // synchronously (no per-tick goroutine), is tracked by the same s.wg, and so
 // Stop also waits for it to exit — including finishing any tick already in
 // flight, bounded by the store's 10s tick timeout plus its up-to-2s
@@ -639,9 +641,16 @@ func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, was
 		status = store.ScheduledEventFailed
 	}
 
+	// Record the outcome on a bounded context of its own: the event was
+	// claimed (fired) before the handler ran, and a shutdown that cancelled
+	// ctx meanwhile (halt) must not leave it fired with the failure
+	// unrecorded, for example a scheduled wake that never delivered
+	// (ptone/scion#7734).
 	now := time.Now()
 	if s.store != nil {
-		_ = s.store.UpdateScheduledEventStatus(ctx, evt.ID, status, &now, errMsg)
+		recordCtx, cancelRecord := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancelRecord()
+		_ = s.store.UpdateScheduledEventStatus(recordCtx, evt.ID, status, &now, errMsg)
 	}
 }
 

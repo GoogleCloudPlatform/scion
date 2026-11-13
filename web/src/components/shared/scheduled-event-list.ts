@@ -81,6 +81,7 @@ export class ScionScheduledEventList extends LitElement {
   @state() private dialogDuration = '30m';
   @state() private dialogDatetime = '';
   @state() private dialogInterrupt = false;
+  @state() private dialogWake = false;
   @state() private dialogLoading = false;
   @state() private dialogError: string | null = null;
 
@@ -127,6 +128,7 @@ export class ScionScheduledEventList extends LitElement {
     this.dialogDuration = '30m';
     this.dialogDatetime = '';
     this.dialogInterrupt = false;
+    this.dialogWake = false;
     this.dialogError = null;
     this.dialogOpen = true;
   }
@@ -147,6 +149,7 @@ export class ScionScheduledEventList extends LitElement {
         agentName: this.dialogAgent,
         message: this.dialogMessage,
         interrupt: this.dialogInterrupt,
+        wake: this.dialogWake,
       };
 
       if (this.dialogTimingMode === 'in') {
@@ -464,6 +467,21 @@ export class ScionScheduledEventList extends LitElement {
               <span>Interrupt agent</span>
               <span class="checkbox-description"
                 >Interrupt the agent's current task before delivering the message.</span
+              >
+            </span>
+          </label>
+
+          <label class="checkbox-label">
+            <input
+              type="checkbox"
+              .checked=${this.dialogWake}
+              @change=${(e: Event) => (this.dialogWake = (e.target as HTMLInputElement).checked)}
+            />
+            <span class="checkbox-text">
+              <span>Wake agent</span>
+              <span class="checkbox-description"
+                >Resume the agent if it is suspended when the message fires. Requires permission to
+                start the agent.</span
               >
             </span>
           </label>
