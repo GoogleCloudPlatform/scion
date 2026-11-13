@@ -1218,6 +1218,7 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 		Metadata:    body.Metadata,
 		Interrupt:   body.Interrupt,
 		Wake:        body.Wake,
+		DetachWake:  true,
 		OfferWake:   body.OfferWake,
 	}
 
@@ -1621,6 +1622,12 @@ type chatSendOptions struct {
 	// with 403 when the caller lacks the lifecycle permission the start
 	// route requires, and a failed wake persists nothing.
 	Wake bool
+	// DetachWake detaches a wake send from caller cancellation with
+	// context.WithoutCancel, bounded by chatWakeSendBudget, so a dropped
+	// HTTP client does not abort an in-progress wake. Server-driven callers
+	// (scheduled sends) leave it false so their own deadline and shutdown
+	// abort stay attached.
+	DetachWake bool
 	// OfferWake makes a suspended primary that the caller may wake answer
 	// 409 agent_not_running with details canWake=true, persisting nothing,
 	// instead of a failed "Agent unreachable (suspended)" row. The client
@@ -1703,6 +1710,16 @@ func (s *Server) suspendedPrimaryWakeable(ctx context.Context, user UserIdentity
 		return false
 	}
 	return s.agentLifecycleAllowed(ctx, user, agent)
+}
+
+// isWakeRefusal reports whether a wakeAgentForDM error is a policy or standing
+// refusal (no permission, or a held agent / held ancestor / standing refusal
+// from startGate) rather than an operational wake failure.
+func isWakeRefusal(wakeErr *AgentDMError) bool {
+	if wakeErr == nil {
+		return false
+	}
+	return wakeErr.HTTPStatus == http.StatusForbidden || wakeErr.StandingRefused
 }
 
 // sendAgentRouted sends a message through the existing agent dispatch path.
@@ -1870,12 +1887,14 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		primaryAgent.DeletedAt.IsZero() && (opts.Wake || opts.OfferWake) {
 		switch {
 		case opts.Wake && !s.agentLifecycleAllowed(ctx, user, primaryAgent):
-			return nil, newChatSendError(http.StatusForbidden, ErrCodeForbidden,
+			serr := newChatSendError(http.StatusForbidden, ErrCodeForbidden,
 				"You do not have permission to wake this agent", map[string]interface{}{
 					"agentId":   primaryAgent.ID,
 					"agentSlug": primaryAgent.Slug,
 					"phase":     primaryAgent.Phase,
 				})
+			serr.wakeFailure = wakeFailureRefused
+			return nil, serr
 		case opts.Wake:
 			wakePrimary = true
 		case s.suspendedPrimaryWakeable(ctx, user, primaryAgent):
@@ -1977,26 +1996,43 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		if opts.BeforeWake != nil {
 			opts.BeforeWake(len(agents))
 		}
-		// Detach from client cancellation: a dropped connection must not
-		// abort a wake in progress, nor the persist and dispatch after it.
-		// The send then runs to its end with its idempotency key in flight
-		// (a retry is told send_in_progress), so the client's retry finds
-		// the finished outcome. The detached context carries one overall
-		// deadline (chatWakeSendBudget), so a stalled store or event call
-		// ends the send instead of keeping the key in flight forever.
-		// Within it the wake (chatWakeResumeBudget) and each dispatch
-		// (30s) have their own bounds; markFailed uses its finalization
-		// timeout and still runs after the deadline.
-		var cancelSend context.CancelFunc
-		ctx, cancelSend = context.WithTimeout(context.WithoutCancel(ctx), chatWakeSendBudget(len(agents)))
-		defer cancelSend()
+		// For HTTP requests (opts.DetachWake), detach from client
+		// cancellation: a dropped connection must not abort a wake in
+		// progress, nor the persist and dispatch after it. The send then
+		// runs to its end with its idempotency key in flight (a retry is
+		// told send_in_progress), so the client's retry finds the finished
+		// outcome. The detached context carries one overall deadline
+		// (chatWakeSendBudget), so a stalled store or event call ends the
+		// send instead of keeping the key in flight forever. Server-driven
+		// callers (scheduled sends) keep their own context so shutdown
+		// aborts and their delivery budget remain attached.
+		if opts.DetachWake {
+			var cancelSend context.CancelFunc
+			ctx, cancelSend = context.WithTimeout(context.WithoutCancel(ctx), chatWakeSendBudget(len(agents)))
+			defer cancelSend()
+		}
 		wakeCtx, cancelWake := context.WithTimeout(ctx, chatWakeResumeBudget)
 		// wakeAgentForDM reports managed runtimes, a missing broker, the
 		// start gate and readiness failures as typed errors.
-		_, wakeErr := s.wakeAgentForDM(wakeCtx, primaryAgent)
+		wakeRes, wakeErr := s.wakeAgentForDM(wakeCtx, primaryAgent)
 		cancelWake()
 		if wakeErr != nil {
-			return nil, chatSendFromAgentDMError(wakeErr)
+			serr := chatSendFromAgentDMError(wakeErr)
+			if isWakeRefusal(wakeErr) {
+				serr.wakeFailure = wakeFailureRefused
+			} else {
+				serr.wakeFailure = wakeFailureFailed
+			}
+			return nil, serr
+		}
+		if wakeRes != nil && wakeRes.Outcome == WakeDeferred {
+			return nil, &chatSendError{
+				Status:      http.StatusServiceUnavailable,
+				Code:        ErrCodeUnavailable,
+				Message:     fmt.Sprintf("Failed to wake agent: %s; retry shortly", deferredReason(primaryAgent)),
+				RetryAfter:  5 * time.Second,
+				wakeFailure: wakeFailureFailed,
+			}
 		}
 		// wakeAgentForDM moved the agent to running in place: the row is
 		// no longer born failed.

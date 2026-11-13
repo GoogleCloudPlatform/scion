@@ -40,10 +40,11 @@ type chatSendInput struct {
 	ReplyToID   string
 	// Metadata is client-supplied metadata; only allowlisted keys reach
 	// the agent (see allowedClientMetadataKeys).
-	Metadata  map[string]string
-	Interrupt bool
-	Wake      bool
-	OfferWake bool
+	Metadata   map[string]string
+	Interrupt  bool
+	Wake       bool
+	DetachWake bool
+	OfferWake  bool
 	// OnPersisted, when set, is called for an agent-routed send right
 	// after the row is stored and before dispatch. See
 	// chatSendOptions.OnPersisted.
@@ -68,7 +69,17 @@ type chatSendError struct {
 	// the response; callers without a request (scheduled sends) use it to
 	// tell a refusal from a missing or unreadable row.
 	accessRefused bool
+	// wakeFailure marks an error from wake admission or wakeAgentForDM in
+	// sendAgentRouted: wakeFailureRefused for a permission or standing/hold
+	// refusal, wakeFailureFailed for any other wake failure (including
+	// WakeDeferred). Never written to the HTTP response.
+	wakeFailure string
 }
+
+const (
+	wakeFailureRefused = "refused"
+	wakeFailureFailed  = "failed"
+)
 
 func (e *chatSendError) Error() string {
 	return fmt.Sprintf("chat send: %d %s: %s", e.Status, e.Code, e.Message)
@@ -927,7 +938,7 @@ func (s *Server) sendChatMessage(ctx context.Context, user UserIdentity, key str
 		// DM registration happens inside sendAgentRouted, before its
 		// watermark update — see the comment there.
 		return s.sendAgentRouted(ctx, key, projectID, user, content, senderLabel, plan.Agents, plan.MentionNames, plan.MentionResults, attachmentRefs, now, in.ReplyToID, in.Metadata,
-			chatSendOptions{Interrupt: in.Interrupt, Wake: in.Wake, OfferWake: in.OfferWake,
+			chatSendOptions{Interrupt: in.Interrupt, Wake: in.Wake, DetachWake: in.DetachWake, OfferWake: in.OfferWake,
 				OnPersisted: in.OnPersisted, BeforeWake: in.BeforeWake,
 				HumanMentionNames: humanMentionNames, HumanMentionsResolved: true})
 	}

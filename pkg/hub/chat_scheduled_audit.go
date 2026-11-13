@@ -54,6 +54,7 @@ type ChatScheduledMessageEvent struct {
 	ConversationKey    string
 	// ProjectID is the project stored with the row (empty for user DMs).
 	ProjectID     string
+	Wake          bool
 	Status        string
 	FailureReason string
 	MessageID     string
@@ -82,6 +83,9 @@ func chatScheduledAuditAttrs(e *ChatScheduledMessageEvent) []slog.Attr {
 	}
 	if e.ProjectID != "" {
 		attrs = append(attrs, slog.String("project_id", e.ProjectID))
+	}
+	if e.Action == ScheduledAuditCreate || e.Status == ScheduledMessageSent || e.Status == ScheduledMessageFailed {
+		attrs = append(attrs, slog.Bool("wake", e.Wake))
 	}
 	if e.FailureReason != "" {
 		attrs = append(attrs, slog.String("failure_reason", e.FailureReason))
@@ -122,6 +126,7 @@ func newChatScheduledMessageEvent(ctx context.Context, action string, m *Schedul
 		ScheduledMessageID: m.ID,
 		ConversationKey:    m.ConversationKey,
 		ProjectID:          m.ProjectID,
+		Wake:               m.Wake,
 		Status:             m.Status,
 		FailureReason:      m.FailureReason,
 		MessageID:          m.MessageID,

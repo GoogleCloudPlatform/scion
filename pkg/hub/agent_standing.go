@@ -566,10 +566,11 @@ const agentSuspendedConflictMessage = "This agent is suspended. A hub admin can 
 // or not in good standing.
 func agentSuspendedRefusal(agentID string) *startRefusal {
 	return &startRefusal{
-		HTTPStatus: http.StatusConflict,
-		Code:       ErrCodeConflict,
-		Message:    agentSuspendedConflictMessage,
-		Details:    map[string]interface{}{"agentId": agentID},
+		HTTPStatus:      http.StatusConflict,
+		Code:            ErrCodeConflict,
+		Message:         agentSuspendedConflictMessage,
+		Details:         map[string]interface{}{"agentId": agentID},
+		StandingRefused: true,
 	}
 }
 
