@@ -249,8 +249,7 @@ func (a *AuthzService) ComputeScopeCapabilities(ctx context.Context, identity Id
 		return a.computeCapabilitiesWithContext(ctx, identity, resource, actions)
 	}
 
-	// ComputeScopeCapabilities checks scope-level actions (ParentType/ParentID,
-	// empty ScopeKind), so restore plain action here rather than catalogWriteAction.
+	// Scope capabilities carry no ScopeKind, so the plain action is evaluated.
 	var allowed []string
 	for _, action := range actions {
 		decision := a.CheckAccess(ctx, identity, resource, action)

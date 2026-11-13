@@ -459,6 +459,7 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 	// using the explain-specific helper (not resolveResourcePermission, which
 	// is reserved for production enforcement).
 	permissionID := req.Permission
+	explainAction := Action(req.Action)
 	if permissionID != "" {
 		// Explicit permission: validate against the canonical registry.
 		if !isKnownPermission(permissionID) {
@@ -468,7 +469,13 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		// No explicit permission: canonicalize from resource.type + action.
-		permissionID = canonicalizeExplainPermission(req.Resource.Type, req.Action)
+		// Enforcement checks the stored record's scope twin (for example
+		// skill.update_global on a global skill), so explain must too:
+		// resolve the action kind-aware from the loaded record before
+		// canonicalizing, or it would report plain skill.update as allowed
+		// where the real write is refused.
+		explainAction = catalogWriteAction(resource.Type, resource.ScopeKind, explainAction)
+		permissionID = canonicalizeExplainPermission(req.Resource.Type, string(explainAction))
 	}
 
 	// Build the authz request with Explain enabled.
@@ -476,7 +483,7 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 		Principal:  principalContextForIdentity(explainIdentity),
 		Credential: credentialContextForIdentity(explainIdentity),
 		Resource:   resource,
-		Action:     Action(req.Action),
+		Action:     explainAction,
 		Permission: permissionID,
 		Explain:    true,
 	}

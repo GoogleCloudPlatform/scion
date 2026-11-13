@@ -606,8 +606,11 @@ func TestHarnessImageStatusToken_RequiresRead(t *testing.T) {
 //     is refused (403) across every update entry point and delete;
 //   - skill:update_global and skill:delete_global cannot be minted on a
 //     project boundary, nor on a hub boundary by an ungranted hub member;
-//   - a hub token carrying the twins succeeds for both super-admin and a
-//     global-catalog-author, while refusing writes on project skills.
+//   - a hub token carrying the twins (minted for the super-admin) succeeds
+//     on patch, deprecate and delete.
+//
+// The global-catalog-author token journey and project-skill refusal are
+// covered by TestCatalogAuthorHubToken_SkillPublishJourney.
 func TestGlobalSkillWrite_RequiresTwinSelectorAndHubBoundary(t *testing.T) {
 	f := newGCFixture(t, true)
 	ctx := context.Background()

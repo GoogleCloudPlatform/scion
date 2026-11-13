@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"sort"
 	"testing"
 	"time"
@@ -968,4 +969,83 @@ func TestGlobalSkillCapabilities_CatalogAuthorVsMember(t *testing.T) {
 	rec = callWithKey(t, srv, charlieToken, http.MethodGet, "/api/v1/skills/"+globalSkill.ID, nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.ElementsMatch(t, []string{"read", "update"}, getCaps(rec.Body))
+}
+
+// TestExplainAPI_GlobalSkillWriteUsesTwin pins that explain without an
+// explicit permission resolves update/delete on a global skill to the
+// *_global twin, matching enforcement: a custom system role holding only
+// plain skill.update is denied, a global-catalog-author is allowed.
+func TestExplainAPI_GlobalSkillWriteUsesTwin(t *testing.T) {
+	srv, s, alice, bob, project := setupSkillAuthzTest(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	globalSkill := &store.Skill{
+		ID: tid("explain-global-skill"), Name: "explain-global", Slug: "explain-global",
+		Scope: store.SkillScopeGlobal, Status: "active", Created: now, Updated: now,
+	}
+	require.NoError(t, s.CreateSkill(ctx, globalSkill))
+	projectSkill := &store.Skill{
+		ID: tid("explain-project-skill"), Name: "explain-project", Slug: "explain-project",
+		Scope: store.SkillScopeProject, ScopeID: project.ID, Status: "active", Created: now, Updated: now,
+	}
+	require.NoError(t, s.CreateSkill(ctx, projectSkill))
+
+	charlie := createNamedTestUser(t, s, "explain-plain-skill-user", store.UserRoleMember)
+	ensureHubMembership(ctx, s, charlie.ID)
+	customRole := &store.RoleDefinition{
+		ID:          tid("explain-plain-skill-rw"),
+		Name:        "explain-plain-skill-rw",
+		ScopeType:   store.RoleScopeSystem,
+		Permissions: []string{"skill.update", "skill.delete"},
+	}
+	_, err := s.CreateRoleDefinition(ctx, customRole)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: customRole.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      charlie.ID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        alice.ID,
+	})
+	require.NoError(t, err)
+
+	ensureHubMembership(ctx, s, bob.ID)
+	bindGlobalCatalogAuthor(t, s, bob.ID)
+
+	explain := func(t *testing.T, u *store.User, skillID, action string) explainResponse {
+		t.Helper()
+		body, err := json.Marshal(map[string]interface{}{
+			"resource": map[string]interface{}{"type": "skill", "id": skillID},
+			"action":   action,
+		})
+		require.NoError(t, err)
+		identity := NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, "api")
+		req := newRequestWithIdentity(t, http.MethodPost, "/api/v1/authz/explain", body, identity)
+		rec := httptest.NewRecorder()
+		srv.handleAuthzExplain(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp explainResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		return resp
+	}
+
+	for _, action := range []string{"update", "delete"} {
+		t.Run(action, func(t *testing.T) {
+			denied := explain(t, charlie, globalSkill.ID, action)
+			assert.False(t, denied.Allowed, "plain skill.%s must not allow a global skill write", action)
+			require.NotNil(t, denied.Provenance)
+			assert.Equal(t, "skill."+action+"_global", denied.Provenance.Permission)
+
+			allowed := explain(t, bob, globalSkill.ID, action)
+			assert.True(t, allowed.Allowed, "global-catalog-author must be allowed to %s a global skill", action)
+			require.NotNil(t, allowed.Provenance)
+			assert.Equal(t, "skill."+action+"_global", allowed.Provenance.Permission)
+
+			// Project skills keep the plain permission.
+			plain := explain(t, charlie, projectSkill.ID, action)
+			require.NotNil(t, plain.Provenance)
+			assert.Equal(t, "skill."+action, plain.Provenance.Permission)
+		})
+	}
 }
