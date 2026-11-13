@@ -128,6 +128,57 @@ const (
 	MaxDecisionListLimit     = 200
 )
 
+// ProjectDecisionProvenance* values filter ListProjectDecisionAnswers by
+// answer provenance + outcome (Plan Phase 3, §5.1).
+const (
+	ProjectDecisionProvenanceDirect      = "direct"
+	ProjectDecisionProvenanceInterpreted = "interpreted"
+	ProjectDecisionProvenanceConfirmed   = "confirmed"
+	ProjectDecisionProvenanceOverridden  = "overridden"
+)
+
+// ProjectDecisionActor identifies an agent or user referenced by a project's
+// decisions or answers, carrying a stored display-name snapshot so deleted
+// actors remain readable.
+type ProjectDecisionActor struct {
+	ID   string
+	Name string
+}
+
+// ProjectDecisionPrompt groups every decision row (in position order, with
+// Answers loaded) of one choice-prompt message that has at least one open
+// (pending or unconfirmed agent_interpreted) row in the project.
+type ProjectDecisionPrompt struct {
+	MessageID              string
+	ChatKey                string
+	AskerAgentID           string
+	AskerAgentName         string
+	CreatedAt              time.Time
+	PromptExistsInMessages bool
+	Decisions              []*Decision
+}
+
+// ProjectDecisionAnswerFilter filters ListProjectDecisionAnswers (tab=made).
+type ProjectDecisionAnswerFilter struct {
+	AgentID    string     // asker_agent_id UUID
+	UserID     string     // answered_by_user_id
+	Provenance string     // ProjectDecisionProvenance* or "" for all
+	From       *time.Time // inclusive lower bound on decision_answers.created_at
+	To         *time.Time // inclusive upper bound on decision_answers.created_at
+}
+
+// ProjectDecisionAnswerEntry is one append-only decision_answers log entry
+// enriched with its associated decision row, sibling agent_interpreted choice
+// label (when Outcome == DecisionOutcomeOverride), and message-availability
+// flags against the messages table.
+type ProjectDecisionAnswerEntry struct {
+	Answer                 *DecisionAnswer
+	Decision               *Decision
+	PreviousChoiceLabel    string
+	PromptExistsInMessages bool
+	SourceExistsInMessages bool
+}
+
 // Per-key failure reasons in InterpretedAnswersError.
 const (
 	InterpretedReasonAlreadyAnswered = "already_answered"
@@ -674,4 +725,31 @@ type DecisionStore interface {
 	// inserts the DecisionAnswer rows (sharing a new BatchID when len >= 2,
 	// empty BatchID when len == 1), and marks every target row decided.
 	RecordInterpretedAnswers(ctx context.Context, in *RecordInterpretedInput) (*AnswerSetResult, error)
+
+	// ListProjectDecisionAgents returns the distinct asking agents recorded on
+	// decisions in projectID (including hard-deleted agents whose rows in the
+	// agents table are gone), with their newest stored asker_agent_name.
+	ListProjectDecisionAgents(ctx context.Context, projectID string) ([]ProjectDecisionActor, error)
+
+	// ListProjectOpenPrompts returns every choice prompt in projectID whose
+	// chat_key is in chatKeys and that still has at least one non-settled
+	// decision row (status == pending, or status == decided with no direct
+	// answer). Every returned prompt carries all sibling Decision rows of its
+	// message_id in position order with Answers loaded, plus
+	// PromptExistsInMessages, ordered newest first by (CreatedAt DESC,
+	// MessageID DESC). Empty chatKeys returns (nil, nil) without querying.
+	ListProjectOpenPrompts(ctx context.Context, projectID string, chatKeys []string) ([]*ProjectDecisionPrompt, error)
+
+	// ListProjectDecisionAnswers lists append-only decision_answers entries
+	// belonging to decisions in projectID with chat_key in chatKeys, filtered
+	// by filter and ordered newest first by (created_at DESC, id DESC) with
+	// keyset cursor pagination. limit must be in [0, MaxDecisionListLimit];
+	// limit == 0 validates inputs and returns (nil, "", nil). Empty chatKeys
+	// validates inputs and returns (nil, "", nil).
+	ListProjectDecisionAnswers(ctx context.Context, projectID string, chatKeys []string, filter ProjectDecisionAnswerFilter, cursor string, limit int) (entries []*ProjectDecisionAnswerEntry, nextCursor string, err error)
+
+	// ListProjectDecisionFacets returns distinct asking agents and distinct
+	// answering users scoped strictly to decisions/answers in projectID whose
+	// chat_key is in chatKeys, sorted by display name then ID.
+	ListProjectDecisionFacets(ctx context.Context, projectID string, chatKeys []string) (agents []ProjectDecisionActor, answerers []ProjectDecisionActor, err error)
 }
