@@ -1243,6 +1243,7 @@ export class ScionPageAdminServerConfig extends LitElement {
   private loadedBrokerInstances: V1RuntimeBrokerInstanceConfig[] = [];
   @state() private brokerInstancesTouched = false;
   private brokerInstanceRowIds: number[] = [];
+  private loadedBrokerInstanceRowIds = new Set<number>();
   private nextBrokerInstanceRowId = 1;
   private brokerInstanceNodeSelectorRows = new Map<number, Array<[string, string]>>();
 
@@ -2369,6 +2370,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.brokerInstancesTouched = false;
     this.brokerInstanceNodeSelectorRows.clear();
     this.brokerInstanceRowIds = rawInstances.map(() => this.nextBrokerInstanceRowId++);
+    this.loadedBrokerInstanceRowIds = new Set(this.brokerInstanceRowIds);
 
     // Database
     const dbBlock = srv.database ?? {};
@@ -7092,7 +7094,15 @@ export class ScionPageAdminServerConfig extends LitElement {
     );
   }
 
+  private isLoadedBrokerInstanceRow(idx: number): boolean {
+    const rowId = this.brokerInstanceRowIds[idx];
+    return rowId !== undefined && this.loadedBrokerInstanceRowIds.has(rowId);
+  }
+
   private updateBrokerInstanceTopField(idx: number, field: 'key' | 'name', value: string): void {
+    if (field === 'key' && this.isLoadedBrokerInstanceRow(idx)) {
+      return;
+    }
     const next = this.brokerInstances.map((inst, i) =>
       i === idx ? { ...inst, [field]: value } : inst
     );
@@ -7124,6 +7134,10 @@ export class ScionPageAdminServerConfig extends LitElement {
     const inst = this.brokerInstances[idx];
     if (!inst) return;
     const prevType = inst.runtime_target?.type || '';
+    if (this.loadedBrokerInstanceRowIds.has(rowId)) {
+      select.value = prevType;
+      return;
+    }
     if (prevType === nextType) return;
 
     const rt = inst.runtime_target ?? {};
@@ -7189,6 +7203,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     const rowId = this.brokerInstanceRowIds[idx];
     if (rowId !== undefined) {
       this.brokerInstanceNodeSelectorRows.delete(rowId);
+      this.loadedBrokerInstanceRowIds.delete(rowId);
     }
     this.brokerInstances = this.brokerInstances.filter((_, i) => i !== idx);
     this.brokerInstanceRowIds = this.brokerInstanceRowIds.filter((_, i) => i !== idx);
@@ -7347,6 +7362,8 @@ export class ScionPageAdminServerConfig extends LitElement {
     readOnly: boolean
   ) {
     const rowId = this.brokerInstanceRowIds[idx] ?? idx;
+    const isSavedInstance = this.loadedBrokerInstanceRowIds.has(rowId);
+    const identityLocked = readOnly || isSavedInstance;
     const rt = inst.runtime_target ?? { type: 'docker' };
     const rtType = rt.type || 'docker';
     const isK8s = isKubernetesRuntimeType(rtType);
@@ -7378,14 +7395,16 @@ export class ScionPageAdminServerConfig extends LitElement {
               data-instance-field="key"
               value=${inst.key || ''}
               placeholder="e.g. local-docker, cluster-a-agents"
-              ?disabled=${readOnly}
+              ?disabled=${identityLocked}
               @sl-input=${(e: Event) => {
                 this.updateBrokerInstanceTopField(idx, 'key', (e.target as HTMLInputElement).value);
               }}
             ></sl-input>
-            <span class="hint"
-              >Immutable local instance key (lowercase letters, digits, hyphens).</span
-            >
+            <span class="hint">
+              ${isSavedInstance
+                ? 'Fixed once saved (remove and add a new instance to replace).'
+                : 'Immutable local instance key (lowercase letters, digits, hyphens).'}
+            </span>
             ${this.renderBrokerInstanceIssues(`${p}.key`)} ${this.renderFieldErrors(`${p}.key`)}
           </div>
           <div class="form-field">
@@ -7411,7 +7430,7 @@ export class ScionPageAdminServerConfig extends LitElement {
             <sl-select
               data-instance-field="type"
               value=${rtType}
-              ?disabled=${readOnly}
+              ?disabled=${identityLocked}
               @sl-change=${(e: Event) => {
                 void this.changeBrokerInstanceType(idx, rowId, e.target as HTMLSelectElement);
               }}
@@ -7422,6 +7441,11 @@ export class ScionPageAdminServerConfig extends LitElement {
                 ? html`<sl-option value=${rtType}>${rtType}</sl-option>`
                 : nothing}
             </sl-select>
+            <span class="hint">
+              ${isSavedInstance
+                ? 'Fixed once saved (changing target type requires a new instance key).'
+                : 'Runtime target substrate for this instance.'}
+            </span>
             ${this.renderBrokerInstanceIssues(`${p}.runtime_target.type`)}
             ${this.renderFieldErrors(`${p}.runtime_target.type`)}
           </div>

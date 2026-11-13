@@ -453,16 +453,52 @@ describe('scion-page-admin-server-config — server.broker.instances (ptone/scio
     expect(rt.home_storage_backend).toBeUndefined();
   });
 
-  it('strips Kubernetes-only runtime_target fields when switching an instance to docker', async () => {
+  it('locks key and runtime_target.type on saved instances while keeping them editable on newly added instances', async () => {
     const puts: Record<string, unknown>[] = [];
     element = await mountConfig(makeConfig({ settings_tier: 'file' }), puts);
 
-    const cards = Array.from(
+    const savedCards = Array.from(
       element.shadowRoot?.querySelectorAll('[data-broker-instance-card]') ?? []
     );
-    const k8sCard = cards[1]!;
-    const typeSelect = k8sCard.querySelector('[data-instance-field="type"]') as HTMLElement;
-    changeEvent(typeSelect, 'docker');
+    expect(savedCards.length).toBe(2);
+
+    for (const card of savedCards) {
+      const keyInput = card.querySelector('[data-instance-field="key"]')!;
+      const typeSelect = card.querySelector('[data-instance-field="type"]')!;
+      const nameInput = card.querySelector('[data-instance-field="name"]')!;
+      expect(keyInput.hasAttribute('disabled')).toBe(true);
+      expect(typeSelect.hasAttribute('disabled')).toBe(true);
+      expect(nameInput.hasAttribute('disabled')).toBe(false);
+    }
+
+    // Programmatic events on locked fields must also be ignored as no-ops:
+    inputEvent(savedCards[0]!.querySelector('[data-instance-field="key"]')!, 'hijacked-key');
+    changeEvent(savedCards[1]!.querySelector('[data-instance-field="type"]')!, 'docker');
+    await element.updateComplete;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await element.updateComplete;
+
+    // Newly added instance has editable key and runtime_target.type:
+    const section = element.shadowRoot?.querySelector('[data-broker-instances-section]');
+    expect(section).toBeTruthy();
+    const addBtn = section!.querySelector('[data-add-broker-instance]') as HTMLElement;
+    addBtn.click();
+    await element.updateComplete;
+
+    const allCards = Array.from(
+      element.shadowRoot?.querySelectorAll('[data-broker-instance-card]') ?? []
+    );
+    expect(allCards.length).toBe(3);
+
+    const newCard = allCards[2]!;
+    const newKeyInput = newCard.querySelector('[data-instance-field="key"]')!;
+    const newTypeSelect = newCard.querySelector('[data-instance-field="type"]')!;
+    expect(newKeyInput.hasAttribute('disabled')).toBe(false);
+    expect(newTypeSelect.hasAttribute('disabled')).toBe(false);
+
+    inputEvent(newKeyInput, 'cluster-b-agents');
+    inputEvent(newCard.querySelector('[data-instance-field="name"]')!, 'Cluster B Agents');
+    changeEvent(newTypeSelect, 'kubernetes');
     await element.updateComplete;
     await new Promise((resolve) => setTimeout(resolve, 30));
     await element.updateComplete;
@@ -473,10 +509,65 @@ describe('scion-page-admin-server-config — server.broker.instances (ptone/scio
     const sent = valueAtPath(puts[0], ['server', 'broker', 'instances']).value as Array<
       Record<string, unknown>
     >;
-    const converted = sent[1]!;
+    expect(sent.length).toBe(3);
+    // Saved instances kept their original key and runtime_target.type untouched:
+    expect(sent[0]!.key).toBe('local-docker');
+    expect((sent[1]!.runtime_target as Record<string, unknown>).type).toBe('kubernetes');
+    // Newly added instance saved with custom key and kubernetes type:
+    expect(sent[2]!).toEqual({
+      key: 'cluster-b-agents',
+      name: 'Cluster B Agents',
+      runtime_target: { type: 'kubernetes' },
+    });
+  });
+
+  it('strips Kubernetes-only runtime_target fields when switching a newly added instance to docker', async () => {
+    const puts: Record<string, unknown>[] = [];
+    element = await mountConfig(makeConfig({ settings_tier: 'file' }), puts);
+
+    const section = element.shadowRoot?.querySelector('[data-broker-instances-section]');
+    expect(section).toBeTruthy();
+    const addBtn = section!.querySelector('[data-add-broker-instance]') as HTMLElement;
+    addBtn.click();
+    await element.updateComplete;
+
+    let cards = Array.from(
+      element.shadowRoot?.querySelectorAll('[data-broker-instance-card]') ?? []
+    );
+    let addedCard = cards[2]!;
+    inputEvent(addedCard.querySelector('[data-instance-field="key"]')!, 'converted-docker');
+    inputEvent(addedCard.querySelector('[data-instance-field="name"]')!, 'Converted Docker');
+    inputEvent(addedCard.querySelector('[data-instance-field="display_name"]')!, 'Converted');
+
+    const typeSelect = addedCard.querySelector('[data-instance-field="type"]') as HTMLElement;
+    changeEvent(typeSelect, 'kubernetes');
+    await element.updateComplete;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await element.updateComplete;
+
+    cards = Array.from(element.shadowRoot?.querySelectorAll('[data-broker-instance-card]') ?? []);
+    addedCard = cards[2]!;
+    inputEvent(addedCard.querySelector('[data-instance-field="context"]')!, 'gke_ctx');
+    inputEvent(addedCard.querySelector('[data-instance-field="namespace"]')!, 'agents');
+    inputEvent(addedCard.querySelector('.k8s-runtime_class_name')!, 'gvisor');
+    await element.updateComplete;
+
+    // Now switch the unsaved instance back to docker: K8s-only fields are stripped
+    changeEvent(addedCard.querySelector('[data-instance-field="type"]')!, 'docker');
+    await element.updateComplete;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await element.updateComplete;
+
+    await clickSave(element);
+    expect(puts.length).toBe(1);
+
+    const sent = valueAtPath(puts[0], ['server', 'broker', 'instances']).value as Array<
+      Record<string, unknown>
+    >;
+    const converted = sent[2]!;
     expect(converted.runtime_target).toEqual({
       type: 'docker',
-      display_name: 'Cluster A',
+      display_name: 'Converted',
     });
   });
 
@@ -525,24 +616,31 @@ describe('scion-page-admin-server-config — server.broker.instances (ptone/scio
   it('blocks Save on invalid instance key, duplicate key, empty name, or invalid Kubernetes placement', async () => {
     element = await mountConfig(makeConfig({ settings_tier: 'file' }));
 
+    const section = element.shadowRoot?.querySelector('[data-broker-instances-section]');
+    expect(section).toBeTruthy();
+    (section!.querySelector('[data-add-broker-instance]') as HTMLElement).click();
+    await element.updateComplete;
+
     const cards = Array.from(
       element.shadowRoot?.querySelectorAll('[data-broker-instance-card]') ?? []
     );
     const k8sCard = cards[1]!;
+    const newCard = cards[2]!;
+    inputEvent(newCard.querySelector('[data-instance-field="name"]')!, 'New Instance');
 
-    // Invalid key
-    const keyInput = k8sCard.querySelector('[data-instance-field="key"]')!;
+    // Invalid key on newly added instance
+    const keyInput = newCard.querySelector('[data-instance-field="key"]')!;
     inputEvent(keyInput, 'Bad_Key');
     await element.updateComplete;
     expect(saveButton(element).hasAttribute('disabled')).toBe(true);
 
-    // Duplicate key
+    // Duplicate key colliding with a loaded instance
     inputEvent(keyInput, 'local-docker');
     await element.updateComplete;
     expect(saveButton(element).hasAttribute('disabled')).toBe(true);
 
-    // Valid key, empty name
-    inputEvent(keyInput, 'cluster-a-agents');
+    // Valid key on new instance, empty name on loaded instance
+    inputEvent(keyInput, 'new-docker');
     const nameInput = k8sCard.querySelector('[data-instance-field="name"]')!;
     inputEvent(nameInput, '');
     await element.updateComplete;
