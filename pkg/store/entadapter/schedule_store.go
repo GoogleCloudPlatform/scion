@@ -16,6 +16,7 @@ package entadapter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -35,6 +36,7 @@ import (
 // SQLite backend where schedules and scheduled events share one store.
 type ScheduleStore struct {
 	client *ent.Client
+	inTx   bool
 }
 
 // NewScheduleStore creates a new Ent-backed ScheduleStore.
@@ -723,14 +725,18 @@ func (s *ScheduleStore) RecordScheduleRun(ctx context.Context, id string, ranAt 
 	if err != nil {
 		return err
 	}
-	counters := s.client.Schedule.UpdateOneID(uid).AddRunCount(1)
+	return recordScheduleRunOnClient(ctx, s.client, uid, ranAt, errMsg)
+}
+
+func recordScheduleRunOnClient(ctx context.Context, client *ent.Client, uid uuid.UUID, ranAt time.Time, errMsg string) error {
+	counters := client.Schedule.UpdateOneID(uid).AddRunCount(1)
 	if errMsg != "" {
 		counters.AddErrorCount(1)
 	}
 	if err := counters.Exec(ctx); err != nil {
 		return mapError(err)
 	}
-	last := s.client.Schedule.Update().
+	last := client.Schedule.Update().
 		Where(schedule.ID(uid), schedule.Or(schedule.LastRunAtIsNil(), schedule.LastRunAtLT(ranAt))).
 		SetLastRunAt(ranAt)
 	if errMsg != "" {
@@ -1006,6 +1012,95 @@ func (s *ScheduleStore) UpdateScheduledEventStatus(ctx context.Context, id strin
 	return err
 }
 
+// CompleteFiringScheduledEvent atomically transitions an event in status
+// "firing" to status, setting fired_at and errMsg, and when scheduleID is
+// non-empty also records the run on that schedule inside the same transaction.
+// A deleted schedule is ignored so an orphaned firing event can still be
+// finalized.
+func (s *ScheduleStore) CompleteFiringScheduledEvent(
+	ctx context.Context,
+	id string,
+	status string,
+	firedAt time.Time,
+	errMsg string,
+	scheduleID string,
+	ranAt time.Time,
+) (bool, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return false, err
+	}
+	var schedUID uuid.UUID
+	if scheduleID != "" {
+		schedUID, err = parseUUID(scheduleID)
+		if err != nil {
+			return false, err
+		}
+	}
+	var updated bool
+	err = runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
+		upd := c.ScheduledEvent.Update().
+			Where(
+				scheduledevent.IDEQ(uid),
+				scheduledevent.StatusEQ(store.ScheduledEventFiring),
+			).
+			SetStatus(status).
+			SetFiredAt(firedAt)
+		if errMsg != "" {
+			upd.SetError(errMsg)
+		} else {
+			upd.ClearError()
+		}
+		n, err := upd.Save(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		if n == 0 {
+			return nil
+		}
+		updated = true
+		if scheduleID != "" {
+			if err := recordScheduleRunOnClient(ctx, c, schedUID, ranAt, errMsg); err != nil && !errors.Is(err, store.ErrNotFound) {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return updated, nil
+}
+
+// ListFiringScheduledEvents returns up to limit events in status "firing"
+// whose fired_at (or fire_at when fired_at is nil) is at or before cutoff,
+// ordered oldest-first.
+func (s *ScheduleStore) ListFiringScheduledEvents(ctx context.Context, cutoff time.Time, limit int) ([]store.ScheduledEvent, error) {
+	limit = clampLimit(limit)
+	entities, err := s.client.ScheduledEvent.Query().
+		Where(
+			scheduledevent.StatusEQ(store.ScheduledEventFiring),
+			scheduledevent.Or(
+				scheduledevent.FiredAtLTE(cutoff),
+				scheduledevent.And(
+					scheduledevent.FiredAtIsNil(),
+					scheduledevent.FireAtLTE(cutoff),
+				),
+			),
+		).
+		Order(scheduledevent.ByFiredAt(), scheduledevent.ByCreated()).
+		Limit(limit).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]store.ScheduledEvent, 0, len(entities))
+	for _, e := range entities {
+		out = append(out, *entScheduledEventToStore(e))
+	}
+	return out, nil
+}
+
 // ClaimScheduledEvent atomically transitions a scheduled event from "pending" to
 // claimedStatus, returning whether this caller won the claim. It is the
 // multi-replica dedup primitive (store.ScheduledEventClaimer): several hub
@@ -1140,15 +1235,15 @@ func (s *ScheduleStore) ListScheduledEvents(ctx context.Context, filter store.Sc
 	return result, nil
 }
 
-// PurgeOldScheduledEvents removes non-pending events that completed before
-// cutoff. Completion is fired_at (set for fired, expired and failed events);
-// an event with no fired_at (a cancelled one) falls back to created. So an
-// event scheduled far ahead keeps its outcome for the full period after it
-// fires (ptone/scion#4517).
+// PurgeOldScheduledEvents removes completed events (excluding pending and
+// firing) that finished before cutoff. Completion is fired_at (set for fired,
+// expired and failed events); an event with no fired_at (a cancelled one)
+// falls back to created. So an event scheduled far ahead keeps its outcome for
+// the full period after it fires (ptone/scion#4517).
 func (s *ScheduleStore) PurgeOldScheduledEvents(ctx context.Context, cutoff time.Time) (int, error) {
 	n, err := s.client.ScheduledEvent.Delete().
 		Where(
-			scheduledevent.StatusNEQ(store.ScheduledEventPending),
+			scheduledevent.StatusNotIn(store.ScheduledEventPending, store.ScheduledEventFiring),
 			scheduledevent.Or(
 				scheduledevent.FiredAtLT(cutoff),
 				scheduledevent.And(

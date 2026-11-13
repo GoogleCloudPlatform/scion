@@ -185,6 +185,61 @@ func (m *mockScheduledEventStore) UpdateScheduledEventStatus(_ context.Context, 
 	return nil
 }
 
+func (m *mockScheduledEventStore) CompleteFiringScheduledEvent(_ context.Context, id string, status string, firedAt time.Time, errMsg string, scheduleID string, ranAt time.Time) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	evt, ok := m.events[id]
+	if !ok || evt.Status != store.ScheduledEventFiring {
+		return false, nil
+	}
+	evt.Status = status
+	cpFired := firedAt
+	evt.FiredAt = &cpFired
+	evt.Error = errMsg
+	if scheduleID != "" {
+		if sc, ok := m.schedules[scheduleID]; ok {
+			sc.RunCount++
+			if errMsg != "" {
+				sc.ErrorCount++
+			}
+			if sc.LastRunAt == nil || sc.LastRunAt.Before(ranAt) {
+				cpRan := ranAt
+				sc.LastRunAt = &cpRan
+				if errMsg != "" {
+					sc.LastRunStatus = store.ScheduleRunError
+					sc.LastRunError = errMsg
+				} else {
+					sc.LastRunStatus = store.ScheduleRunSuccess
+					sc.LastRunError = ""
+				}
+			}
+		}
+	}
+	return true, nil
+}
+
+func (m *mockScheduledEventStore) ListFiringScheduledEvents(_ context.Context, cutoff time.Time, limit int) ([]store.ScheduledEvent, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []store.ScheduledEvent
+	for _, evt := range m.events {
+		if evt.Status != store.ScheduledEventFiring {
+			continue
+		}
+		ts := evt.FireAt
+		if evt.FiredAt != nil {
+			ts = *evt.FiredAt
+		}
+		if !ts.After(cutoff) {
+			out = append(out, *evt)
+		}
+	}
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
 func (m *mockScheduledEventStore) CancelScheduledEvent(_ context.Context, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

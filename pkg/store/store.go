@@ -3177,6 +3177,20 @@ type ScheduledEventStore interface {
 	// UpdateScheduledEventStatus updates the status and optional error for an event.
 	UpdateScheduledEventStatus(ctx context.Context, id string, status string, firedAt *time.Time, errMsg string) error
 
+	// CompleteFiringScheduledEvent atomically transitions an event in status
+	// "firing" to status (for example "fired", "expired", or "failed"), setting
+	// fired_at and errMsg, and when scheduleID is non-empty also records the
+	// run on that schedule (as RecordScheduleRun does, ignoring a deleted
+	// schedule) in the same transaction. Returns true when the event was still
+	// in status "firing" and updated, or false (with nil error) when the event
+	// did not exist or was no longer in status "firing".
+	CompleteFiringScheduledEvent(ctx context.Context, id string, status string, firedAt time.Time, errMsg string, scheduleID string, ranAt time.Time) (bool, error)
+
+	// ListFiringScheduledEvents returns up to limit events in status "firing"
+	// whose fired_at (or fire_at when fired_at is nil) is at or before cutoff,
+	// ordered oldest-first.
+	ListFiringScheduledEvents(ctx context.Context, cutoff time.Time, limit int) ([]ScheduledEvent, error)
+
 	// CancelScheduledEvent marks an event as cancelled.
 	// Returns ErrNotFound if the event doesn't exist or is not pending.
 	CancelScheduledEvent(ctx context.Context, id string) error
@@ -3192,8 +3206,8 @@ type ScheduledEventStore interface {
 	// ListScheduledEvents returns events matching the filter criteria.
 	ListScheduledEvents(ctx context.Context, filter ScheduledEventFilter, opts ListOptions) (*ListResult[ScheduledEvent], error)
 
-	// PurgeOldScheduledEvents removes non-pending events that completed
-	// before cutoff: fired_at before cutoff, or, for an event with no
+	// PurgeOldScheduledEvents removes completed events (excluding pending and
+	// firing) before cutoff: fired_at before cutoff, or, for an event with no
 	// fired_at (a cancelled one), created before cutoff.
 	PurgeOldScheduledEvents(ctx context.Context, cutoff time.Time) (int, error)
 }

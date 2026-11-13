@@ -218,6 +218,8 @@ func TestPurgeOldScheduledEvents_CompletionTime(t *testing.T) {
 	kept["created before, expired after"] = withStatus(old, store.ScheduledEventExpired, &recent)
 	kept["cancelled, created after"] = cancelled(recent)
 	kept["pending, created before"] = newEvent(old).ID
+	kept["firing, fired_at before cutoff"] = withStatus(old, store.ScheduledEventFiring, &old)
+	kept["firing, no fired_at, created before"] = withStatus(old, store.ScheduledEventFiring, nil)
 
 	n, err := s.PurgeOldScheduledEvents(ctx, cutoff)
 	require.NoError(t, err)
@@ -260,4 +262,138 @@ func TestListPendingScheduledEventsClaimPath(t *testing.T) {
 	require.Len(t, pending, 2)
 	assert.Equal(t, early.ID, pending[0].ID, "ordered by fire_at ascending")
 	assert.Equal(t, late.ID, pending[1].ID)
+}
+
+func TestCompleteFiringScheduledEvent(t *testing.T) {
+	s := newTestScheduleStore(t)
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// One-shot firing event: first completion succeeds, second is fenced out.
+	oneShot := newTestScheduledEvent(projectID)
+	require.NoError(t, s.CreateScheduledEvent(ctx, oneShot))
+	claimed, err := s.ClaimScheduledEvent(ctx, oneShot.ID, store.ScheduledEventFiring)
+	require.NoError(t, err)
+	require.True(t, claimed)
+
+	completedAt := now.Add(5 * time.Second)
+	ok, err := s.CompleteFiringScheduledEvent(ctx, oneShot.ID, store.ScheduledEventFired, completedAt, "", "", time.Time{})
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	got, err := s.GetScheduledEvent(ctx, oneShot.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ScheduledEventFired, got.Status)
+	require.NotNil(t, got.FiredAt)
+	assert.True(t, completedAt.Equal(*got.FiredAt))
+	assert.Empty(t, got.Error)
+
+	// Second call cannot overwrite the completed event.
+	ok, err = s.CompleteFiringScheduledEvent(ctx, oneShot.ID, store.ScheduledEventFailed, completedAt.Add(time.Second), "late failure", "", time.Time{})
+	require.NoError(t, err)
+	assert.False(t, ok)
+	got, err = s.GetScheduledEvent(ctx, oneShot.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ScheduledEventFired, got.Status)
+	assert.Empty(t, got.Error)
+
+	// Recurring firing event: atomically updates event status and schedule counters,
+	// without rewinding next_run_at, and fences out duplicate completion.
+	sched := newTestSchedule(projectID, "wake-rec")
+	nextRun := now.Add(time.Hour)
+	sched.NextRunAt = &nextRun
+	require.NoError(t, s.CreateSchedule(ctx, sched))
+
+	recEvt := newTestScheduledEvent(projectID)
+	recEvt.Status = store.ScheduledEventFiring
+	recEvt.FiredAt = &now
+	recEvt.ScheduleID = sched.ID
+	require.NoError(t, s.CreateScheduledEvent(ctx, recEvt))
+
+	failedAt := now.Add(10 * time.Second)
+	ok, err = s.CompleteFiringScheduledEvent(ctx, recEvt.ID, store.ScheduledEventFailed, failedAt, "hub stopped", sched.ID, now)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	gotRec, err := s.GetScheduledEvent(ctx, recEvt.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ScheduledEventFailed, gotRec.Status)
+	assert.Equal(t, "hub stopped", gotRec.Error)
+
+	gotSched, err := s.GetSchedule(ctx, sched.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, gotSched.RunCount)
+	assert.Equal(t, 1, gotSched.ErrorCount)
+	assert.Equal(t, store.ScheduleRunError, gotSched.LastRunStatus)
+	assert.Equal(t, "hub stopped", gotSched.LastRunError)
+	require.NotNil(t, gotSched.NextRunAt)
+	assert.True(t, nextRun.Equal(*gotSched.NextRunAt))
+
+	// Duplicate call neither changes the event nor increments RunCount a second time.
+	ok, err = s.CompleteFiringScheduledEvent(ctx, recEvt.ID, store.ScheduledEventFired, failedAt.Add(time.Second), "", sched.ID, now)
+	require.NoError(t, err)
+	assert.False(t, ok)
+	gotSched, err = s.GetSchedule(ctx, sched.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, gotSched.RunCount)
+	assert.Equal(t, 1, gotSched.ErrorCount)
+
+	// Deleted schedule does not prevent finalizing an orphaned firing event.
+	orphanEvt := newTestScheduledEvent(projectID)
+	orphanEvt.Status = store.ScheduledEventFiring
+	orphanEvt.FiredAt = &now
+	orphanEvt.ScheduleID = uuid.NewString()
+	require.NoError(t, s.CreateScheduledEvent(ctx, orphanEvt))
+
+	ok, err = s.CompleteFiringScheduledEvent(ctx, orphanEvt.ID, store.ScheduledEventFailed, failedAt, "orphaned", orphanEvt.ScheduleID, now)
+	require.NoError(t, err)
+	require.True(t, ok)
+	gotOrphan, err := s.GetScheduledEvent(ctx, orphanEvt.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ScheduledEventFailed, gotOrphan.Status)
+}
+
+func TestListFiringScheduledEvents(t *testing.T) {
+	s := newTestScheduleStore(t)
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	oldestAt := now.Add(-10 * time.Minute)
+	oldest := newTestScheduledEvent(projectID)
+	oldest.Status = store.ScheduledEventFiring
+	oldest.FiredAt = &oldestAt
+	require.NoError(t, s.CreateScheduledEvent(ctx, oldest))
+
+	midAt := now.Add(-5 * time.Minute)
+	mid := newTestScheduledEvent(projectID)
+	mid.Status = store.ScheduledEventFiring
+	mid.FiredAt = &midAt
+	require.NoError(t, s.CreateScheduledEvent(ctx, mid))
+
+	recentAt := now.Add(-10 * time.Second)
+	recent := newTestScheduledEvent(projectID)
+	recent.Status = store.ScheduledEventFiring
+	recent.FiredAt = &recentAt
+	require.NoError(t, s.CreateScheduledEvent(ctx, recent))
+
+	// Non-firing events are never returned.
+	fired := newTestScheduledEvent(projectID)
+	fired.Status = store.ScheduledEventFired
+	fired.FiredAt = &oldestAt
+	require.NoError(t, s.CreateScheduledEvent(ctx, fired))
+
+	cutoff := now.Add(-time.Minute)
+	stale, err := s.ListFiringScheduledEvents(ctx, cutoff, 10)
+	require.NoError(t, err)
+	require.Len(t, stale, 2)
+	assert.Equal(t, oldest.ID, stale[0].ID)
+	assert.Equal(t, mid.ID, stale[1].ID)
+
+	// Limit is respected.
+	paged, err := s.ListFiringScheduledEvents(ctx, cutoff, 1)
+	require.NoError(t, err)
+	require.Len(t, paged, 1)
+	assert.Equal(t, oldest.ID, paged[0].ID)
 }

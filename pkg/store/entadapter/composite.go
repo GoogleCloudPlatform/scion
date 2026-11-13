@@ -267,6 +267,7 @@ func newTxCompositeStore(tx *ent.Tx) *CompositeStore {
 	txStore.AgentHoldStore.inTx = true
 	txStore.ConversationStore.inTx = true
 	txStore.ThreadGroupStore.inTx = true
+	txStore.ScheduleStore.inTx = true
 	txStore.SecretStore.inTx = true
 	txStore.PendingSecretStore.inTx = true
 	txStore.PendingSecretStore.txFencedWrite = &txStore.SecretStore.txFencedWrite
