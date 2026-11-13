@@ -1149,9 +1149,9 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 			MountPath: "/home/" + r.ExecUser(),
 		})
 
-		// File and variable secrets travel in SCION_STAGED_SECRETS and are
-		// written by sciontool init into their target paths (including paths
-		// below ~/.scion/secrets), so nothing is mounted over ~/.scion/secrets.
+		// File secrets travel in SCION_STAGED_SECRETS and are written to their
+		// targets by sciontool init (including paths below ~/.scion/secrets),
+		// so nothing is mounted over ~/.scion/secrets.
 		// The harness secrets and outputs never live on the share: both
 		// directories are on an in-memory volume, as in Kubernetes NFS-home
 		// pods (k8sMemDir). sciontool init writes the staged harness

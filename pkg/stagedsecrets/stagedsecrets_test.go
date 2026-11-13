@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
@@ -777,44 +778,13 @@ func TestWrite_ScionSecretsSubdirAndUnwritableTargetDiagnostic(t *testing.T) {
 				if !filepath.IsAbs(tc.target) {
 					t.Fatalf("target %q must be absolute", tc.target)
 				}
-				if !containsAll(msg, tc.secret, tc.target) {
+				if !strings.Contains(msg, tc.secret) || !strings.Contains(msg, tc.target) {
 					t.Errorf("error %q must name both secret %q and target %q", msg, tc.secret, tc.target)
 				}
-				if containsAny(msg, canary, enc) {
+				if strings.Contains(msg, canary) || strings.Contains(msg, enc) {
 					t.Errorf("error leaked secret material: %q", msg)
 				}
 			})
 		}
 	})
-}
-
-func containsAll(s string, subs ...string) bool {
-	for _, sub := range subs {
-		if !containsSubstr(s, sub) {
-			return false
-		}
-	}
-	return true
-}
-
-func containsAny(s string, subs ...string) bool {
-	for _, sub := range subs {
-		if containsSubstr(s, sub) {
-			return true
-		}
-	}
-	return false
-}
-
-func containsSubstr(s, sub string) bool {
-	return len(sub) == 0 || (len(s) >= len(sub) && indexString(s, sub) >= 0)
-}
-
-func indexString(s, sub string) int {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
 }
