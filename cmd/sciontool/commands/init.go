@@ -573,6 +573,18 @@ func RunInit(args []string, opts InitRunOptions) int {
 			return 1
 		}
 		if err := stagedsecrets.Write(agentHome, staged); err != nil {
+			// On runtimes whose hub credential travels in the staged blob
+			// (Cloud Run), stage it best-effort before reporting the failure so
+			// reportInitFailure can reach the Hub instead of exiting with an
+			// unconfigured client. Running stageHubToken only on failure here
+			// keeps normal staging below so a FileSecret can never overwrite
+			// the hub credential file.
+			if staged.HubToken != "" {
+				if _, tokErr := stageHubToken(staged.HubToken, targetUID, targetGID); tokErr != nil {
+					log.Warn("Could not stage hub credential before reporting secret-staging failure: %v", tokErr)
+				}
+				staged.HubToken = ""
+			}
 			log.Error("Failed to write staged secrets: %v", err)
 			reportInitFailure(agentHome, fmt.Errorf("failed to write staged secrets: %w", err))
 			return 1

@@ -20,7 +20,7 @@ package runtime
 // on the export, beside the project configuration directory (.scion) the
 // hub writes. Agent containers must get only their own directories from
 // it: the agent workspace (the project workspace for shared-plain), the
-// agent home, the declared shared dirs and, read-only, the agent secrets.
+// agent home, and the declared shared dirs.
 // For each runtime and each workspace mode it places on the share, these
 // tests build the agent's mounts on an NFS Layout (subpath root
 // "projects") in the shape pkg/agent produces and assert that the share
@@ -596,11 +596,11 @@ func cloudRunShareMounts(t *testing.T, inst *runpb.Instance) []shareMount {
 	return out
 }
 
-// Cloud Run mounts the agent's workspace, its home and, read-only, its
-// secrets, with the paths provisionCloudRunNFS gives Run: the project
-// workspace for shared-plain and worktree-per-agent, the agent's own
-// agents/<slug>/workspace for clone-per-agent. It has no shared dirs on
-// the share, and Run refuses empty-per-agent before any path is built.
+// Cloud Run mounts the agent's workspace and its home with the paths
+// provisionCloudRunNFS gives Run: the project workspace for shared-plain and
+// worktree-per-agent, the agent's own agents/<slug>/workspace for
+// clone-per-agent. It has no shared dirs on the share, and Run refuses
+// empty-per-agent before any path is built.
 func TestCloudRunInstance_NFSMountScope(t *testing.T) {
 	orig := cloudRunRequireNFSFilesystem
 	cloudRunRequireNFSFilesystem = func(string) error { return nil }
@@ -639,7 +639,6 @@ func TestCloudRunInstance_NFSMountScope(t *testing.T) {
 			assertMountScope(t, cloudRunShareMounts(t, r.buildCloudRunInstance(cfg, 1000, 1000, paths)), []shareMount{
 				{rel: tc.workspace, target: "/workspace"},
 				{rel: scopeRel("agents", scopeAgent, "home-"+scopeAgentID), target: home},
-				{rel: scopeRel("agents", scopeAgent, "secrets-"+scopeAgentID), target: home + "/.scion/secrets", readOnly: true},
 			})
 		})
 	}

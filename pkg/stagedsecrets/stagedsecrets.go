@@ -196,7 +196,7 @@ func writeAs(homeDir string, staged *Staged, uid, gid int) error {
 		dir := filepath.Dir(target)
 		dirFd, underHome, derr := dirfd.EnsureDirNoFollowUnderRoot(homeDir, dir, 0755, uid, gid)
 		if derr != nil {
-			return fmt.Errorf("failed to create directory for secret %s: %w", fs.Name, derr)
+			return fmt.Errorf("failed to create directory for secret %s (%s): %w", fs.Name, target, derr)
 		}
 		fileUID, fileGID := uid, gid
 		if !underHome {
@@ -220,7 +220,7 @@ func writeAs(homeDir string, staged *Staged, uid, gid int) error {
 			var ferr error
 			dirFd, ferr = dirfd.EnsureDirTrustedAncestorFollow(dir)
 			if ferr != nil {
-				return fmt.Errorf("failed to create directory for secret %s: %w", fs.Name, ferr)
+				return fmt.Errorf("failed to create directory for secret %s (%s): %w", fs.Name, target, ferr)
 			}
 			fileUID, fileGID = 0, 0
 		}

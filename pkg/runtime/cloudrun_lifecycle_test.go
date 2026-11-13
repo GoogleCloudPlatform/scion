@@ -302,7 +302,6 @@ func stubCloudRunNFSProvision(context.Context, RunConfig, string, int, int) (*cl
 		server:              "10.0.0.2",
 		workspaceExportPath: "/ws/projects/proj/workspace",
 		homeExportPath:      "/ws/projects/proj/agents/agent-1/home",
-		secretsExportPath:   "/ws/projects/proj/agents/agent-1/staged",
 	}, nil
 }
 

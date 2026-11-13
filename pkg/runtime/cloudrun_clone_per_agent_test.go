@@ -113,17 +113,15 @@ func TestCloudRunProvisionNFS_ClonePerAgentOwnWorkspace(t *testing.T) {
 		if entries, err := os.ReadDir(wantHost); err != nil || len(entries) != 0 {
 			t.Errorf("agent workspace %s: %d entries, err %v; want an empty directory", wantHost, len(entries), err)
 		}
-		for _, dir := range []string{paths.homeHostPath, paths.secretsHostPath} {
-			if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
-				t.Errorf("agent directory %s not created: %v", dir, err)
-			}
+		if fi, err := os.Stat(paths.homeHostPath); err != nil || !fi.IsDir() {
+			t.Errorf("agent directory %s not created: %v", paths.homeHostPath, err)
 		}
 		if entries, _ := os.ReadDir(workspace); len(entries) != 0 {
 			t.Errorf("shared workspace %s has %d entries, want none (no shared clone)", workspace, len(entries))
 		}
 
 		// The instance mounts the agent's own workspace at /workspace and
-		// keeps home and secrets on the share.
+		// keeps home on the share.
 		rt, err := NewCloudRunRuntime(&config.CloudRunConfig{ProjectID: "p", Location: "us-central1"})
 		if err != nil {
 			t.Fatal(err)
@@ -131,10 +129,12 @@ func TestCloudRunProvisionNFS_ClonePerAgentOwnWorkspace(t *testing.T) {
 		inst := rt.buildCloudRunInstance(RunConfig{Image: "img", Labels: map[string]string{"agent_id": "a"}}, 1000, 1000, paths)
 		got := map[string]string{}
 		for _, v := range inst.Volumes {
-			got[v.Name] = v.GetNfs().GetPath()
+			if nfs := v.GetNfs(); nfs != nil {
+				got[v.Name] = nfs.GetPath()
+			}
 		}
-		if got["workspace"] != wantExport || got["home"] != paths.homeExportPath || got["secrets"] != paths.secretsExportPath {
-			t.Errorf("instance NFS volumes = %v, want workspace %s with home and secrets unchanged", got, wantExport)
+		if len(got) != 2 || got["workspace"] != wantExport || got["home"] != paths.homeExportPath {
+			t.Errorf("instance NFS volumes = %v, want workspace %s and home %s only", got, wantExport, paths.homeExportPath)
 		}
 
 		// A restart provisions again and keeps the agent's work.
