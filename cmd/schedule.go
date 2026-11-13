@@ -408,18 +408,7 @@ func printEventDetail(evt *hubclient.ScheduledEvent) {
 		fmt.Printf("  Schedule:   %s\n", evt.ScheduleID)
 	}
 
-	// Parse and display payload details
-	if evt.Payload != "" {
-		var payload map[string]interface{}
-		if json.Unmarshal([]byte(evt.Payload), &payload) == nil {
-			if agentName, ok := payload["agentName"].(string); ok && agentName != "" {
-				fmt.Printf("  Agent:      %s\n", agentName)
-			}
-			if message, ok := payload["message"].(string); ok && message != "" {
-				fmt.Printf("  Message:    %q\n", message)
-			}
-		}
-	}
+	printSchedulePayloadDetail(evt.EventType, evt.Payload)
 }
 
 func printScheduleDetail(sched *hubclient.Schedule) {
@@ -456,26 +445,34 @@ func printScheduleDetail(sched *hubclient.Schedule) {
 		fmt.Printf("  Last Error: %s\n", sched.LastRunError)
 	}
 
-	// Parse and display payload details
-	if sched.Payload != "" {
-		var payload map[string]interface{}
-		if json.Unmarshal([]byte(sched.Payload), &payload) == nil {
-			if agentName, ok := payload["agentName"].(string); ok && agentName != "" {
-				fmt.Printf("  Agent:      %s\n", agentName)
-			}
-			if message, ok := payload["message"].(string); ok && message != "" {
-				fmt.Printf("  Message:    %q\n", message)
-			}
-			if template, ok := payload["template"].(string); ok && template != "" {
-				fmt.Printf("  Template:   %s\n", template)
-			}
-			if task, ok := payload["task"].(string); ok && task != "" {
-				fmt.Printf("  Task:       %q\n", task)
-			}
-			if branch, ok := payload["branch"].(string); ok && branch != "" {
-				fmt.Printf("  Branch:     %s\n", branch)
-			}
-		}
+	printSchedulePayloadDetail(sched.EventType, sched.Payload)
+}
+
+func printSchedulePayloadDetail(eventType, rawPayload string) {
+	var payload map[string]interface{}
+	if rawPayload != "" {
+		_ = json.Unmarshal([]byte(rawPayload), &payload)
+	}
+	if agentName, ok := payload["agentName"].(string); ok && agentName != "" {
+		fmt.Printf("  Agent:      %s\n", agentName)
+	}
+	if message, ok := payload["message"].(string); ok && message != "" {
+		fmt.Printf("  Message:    %q\n", message)
+	}
+	if eventType == "message" {
+		wake, _ := payload["wake"].(bool)
+		interrupt, _ := payload["interrupt"].(bool)
+		fmt.Printf("  Wake:       %t\n", wake)
+		fmt.Printf("  Interrupt:  %t\n", interrupt)
+	}
+	if template, ok := payload["template"].(string); ok && template != "" {
+		fmt.Printf("  Template:   %s\n", template)
+	}
+	if task, ok := payload["task"].(string); ok && task != "" {
+		fmt.Printf("  Task:       %q\n", task)
+	}
+	if branch, ok := payload["branch"].(string); ok && branch != "" {
+		fmt.Printf("  Branch:     %s\n", branch)
 	}
 }
 
