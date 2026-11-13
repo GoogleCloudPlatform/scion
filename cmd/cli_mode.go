@@ -198,6 +198,13 @@ var agentAllowed = map[string]bool{
 	"secret":      true,
 	"secret.get":  true,
 	"secret.list": true,
+
+	// Choice decision self-service as the calling agent (ptone/scion#7797,
+	// decision Q1). Hub routes enforce AgentIdentity and web.chat_choices.
+	"decisions":        true,
+	"decisions.list":   true,
+	"decisions.show":   true,
+	"decisions.record": true,
 }
 
 // resolveMode determines the active CLI mode from environment and settings.
