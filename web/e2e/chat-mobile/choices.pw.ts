@@ -25,6 +25,7 @@
 import { test, expect, type Locator, type Page, type TestInfo } from '@playwright/test';
 import { openChatRail, openGeneralThread } from './fixture.js';
 import {
+  ASKER_ID,
   ASKER_NAME,
   BOB_ID,
   SELF_ID,
@@ -33,6 +34,7 @@ import {
   responsesThread,
   replacedThread,
   routeChoiceThread,
+  row,
   setDecisions,
   setThread,
   shipDecision,
@@ -426,22 +428,37 @@ for (const theme of ['light', 'dark'] as const) {
       await expect(message(page, 'prompt-v2')).toBeInViewport();
     });
 
-    test('interpreted answer is read-only', async ({ page }, testInfo) => {
+    test('single P2-2: another user interpreted answer is read-only with tooltip and View reply', async ({
+      page,
+    }, testInfo) => {
       const d = shipDecision('prompt-int', {
         status: 'decided',
         decision: answer('no', 'No', BOB_ID, 'Bob', 2, {
           provenance: 'agent_interpreted',
+          interpretedByAgentId: ASKER_ID,
           sourceMessageId: 'bob-reply',
         }),
       });
-      await openChoices(page, theme, singleThread(d));
+      const thread = singleThread(d);
+      thread.messages.push(row('bob-reply', 1, 'instruction', 'No, hold v0.9.', 'bob'));
+      await openChoices(page, theme, thread);
       await markdownReady(page, 'prompt-int');
       const c = card(page, 'prompt-int');
+      await expect(c.locator('.card-head .badge.interp')).toContainText('interpreted');
+      await expect(c.locator('.card-head .badge.interp sl-icon[name="robot"]')).toHaveCount(1);
       await expect(c.locator('.row-foot.interpreted')).toContainText(
         `Interpreted by ${ASKER_NAME} from Bob's reply`
       );
       await expect(c.locator('.row-foot.interpreted sl-icon[name="robot"]')).toHaveCount(1);
-      await expect(c.locator('sl-button[data-choice="no"]')).toHaveAttribute('variant', 'primary');
+      await expect(c.locator('.confirm-row')).toHaveCount(0);
+      await expect(c.locator('sl-tooltip')).toHaveAttribute(
+        'content',
+        'Only Bob can confirm or change this answer'
+      );
+      const chosen = c.locator('sl-button[data-choice="no"]');
+      await expect(chosen).toHaveAttribute('variant', 'primary');
+      await expect(chosen).toHaveAttribute('aria-disabled', 'true');
+      await expect(chosen.locator('sl-icon[name="robot"]')).toHaveCount(1);
       await expect(c.locator('sl-button[data-choice="yes"]')).toHaveAttribute(
         'aria-disabled',
         'true'
@@ -450,7 +467,369 @@ for (const theme of ['light', 'dark'] as const) {
         'aria-disabled',
         'true'
       );
-      await shot(page, testInfo, theme, '09b-interpreted', ['prompt-int']);
+      await shot(page, testInfo, theme, '09b-p2-2-single-interpreted-other', ['prompt-int']);
+      await c.locator('[data-action="view-reply"]').click();
+      await expect(message(page, 'bob-reply')).toHaveClass(/permalink-highlight/);
+    });
+
+    test('single P2-1, P2-6, P2-3: own interpreted, inline change bar, confirm and override', async ({
+      page,
+    }, testInfo) => {
+      const ownInterp = shipDecision('prompt-p21', {
+        status: 'decided',
+        decision: answer('yes', 'Yes', SELF_ID, 'Fixture User', 3, {
+          provenance: 'agent_interpreted',
+          interpretedByAgentId: ASKER_ID,
+          sourceMessageId: 'reply-self',
+        }),
+      });
+      const secondInterp = decision({
+        messageId: 'prompt-p26',
+        rowId: 'prompt-p26-rc',
+        key: 'D235',
+        question: 'Cut the RC from `main`?',
+        defaultChoiceId: 'yes',
+        choices: [
+          { id: 'yes', label: 'Yes' },
+          { id: 'no', label: 'No' },
+        ],
+        status: 'decided',
+        decision: answer('yes', 'Yes', SELF_ID, 'Fixture User', 3, {
+          provenance: 'agent_interpreted',
+          interpretedByAgentId: ASKER_ID,
+          sourceMessageId: 'reply-self',
+        }),
+      });
+      const thread: ChoiceThread = {
+        messages: [
+          row(
+            'prompt-p21',
+            0,
+            'choice-prompt',
+            'The release branch is green. One call before I tag it.\n\n(fallback)',
+            'asker'
+          ),
+          row('reply-self', 2, 'instruction', 'Yes on both.', 'self'),
+          row('prompt-p26', 3, 'choice-prompt', 'RC branch check.\n\n(fallback)', 'asker'),
+        ],
+        messageDecisions: {
+          'prompt-p21': [ownInterp],
+          'prompt-p26': [secondInterp],
+        },
+        messageChoiceIntros: {
+          'prompt-p21': 'The release branch is green. One call before I tag it.',
+          'prompt-p26': 'RC branch check.',
+        },
+        messageChoiceAnswerModes: {
+          'prompt-p21': 'single',
+          'prompt-p26': 'single',
+        },
+      };
+
+      await openChoices(page, theme, thread);
+      await markdownReady(page, 'prompt-p21');
+      await markdownReady(page, 'prompt-p26');
+
+      const posted: Array<{ url: string; body: Record<string, unknown> }> = [];
+      await page.route('**/api/v1/decisions/*/answer', async (route) => {
+        const url = route.request().url();
+        const body = route.request().postDataJSON() as Record<string, unknown>;
+        posted.push({ url, body });
+        if (url.includes('prompt-p21-d234')) {
+          await route.fulfill({
+            json: {
+              decision: {
+                ...ownInterp,
+                status: 'decided',
+                decision: answer('yes', 'Yes', SELF_ID, 'Fixture User', 11, {
+                  provenance: 'direct',
+                  outcome: 'confirm',
+                  interpretedByAgentId: ASKER_ID,
+                  sourceMessageId: 'reply-self',
+                }),
+              },
+              responseMessageId: 'resp-p21-confirm',
+            },
+          });
+          return;
+        }
+        await route.fulfill({
+          json: {
+            decision: {
+              ...secondInterp,
+              status: 'decided',
+              decision: answer('no', 'No', SELF_ID, 'Fixture User', 11, {
+                provenance: 'direct',
+                outcome: 'override',
+                interpretedByAgentId: ASKER_ID,
+                previousChoiceLabel: 'Yes',
+              }),
+            },
+            responseMessageId: 'resp-p26-override',
+          },
+        });
+      });
+
+      const c1 = card(page, 'prompt-p21');
+      await expect(c1.locator('.card-head .badge.interp')).toContainText('interpreted');
+      await expect(c1.locator('.card-head .badge.interp sl-icon[name="robot"]')).toHaveCount(1);
+      const yes1 = c1.locator('sl-button[data-choice="yes"]');
+      await expect(yes1).toHaveAttribute('variant', 'primary');
+      await expect(yes1).not.toHaveAttribute('aria-disabled', 'true');
+      await expect(yes1.locator('sl-icon[name="robot"]')).toHaveCount(1);
+      await expect(yes1.locator('[part="base"]')).toHaveCSS('color', 'rgb(255, 255, 255)');
+      await expect(c1.locator('sl-button[data-choice="no"]')).not.toHaveAttribute(
+        'aria-disabled',
+        'true'
+      );
+      await expect(c1.locator('.row-foot.interpreted')).toContainText(
+        `Interpreted by ${ASKER_NAME} from your reply`
+      );
+      await expect(c1.locator('.row-foot.interpreted time')).toHaveText('15:44');
+      await expect(c1.locator('.confirm-row sl-button[data-action="confirm"]')).toContainText(
+        'Confirm “Yes”'
+      );
+      await expect(c1.locator('.confirm-row')).toContainText('or pick another answer to change it');
+      await expect(c1.locator('.hint')).toHaveCount(0);
+      await shot(page, testInfo, theme, 'p2-1-single-interpreted-own', ['prompt-p21']);
+
+      // View reply scrolls and highlights the source message.
+      await c1.locator('[data-action="view-reply"]').click();
+      await expect(message(page, 'reply-self')).toHaveClass(/permalink-highlight/);
+
+      // Enter on the focused card group itself is a no-op on an interpreted card.
+      await c1.locator('.card').focus();
+      await page.keyboard.press('Enter');
+      expect(posted).toHaveLength(0);
+      await expect(c1.locator('.confirm-row')).toBeVisible();
+
+      // Clicking another choice opens the inline change bar (Mock P2-6).
+      await c1.locator('sl-button[data-choice="no"]').click();
+      expect(posted).toHaveLength(0);
+      const bar = c1.locator('.confirmbar');
+      await expect(bar).toContainText(
+        `Change your answer from Yes to No? ${ASKER_NAME} will be told.`
+      );
+      const no1 = c1.locator('sl-button[data-choice="no"]');
+      await expect(no1).toHaveAttribute('variant', 'primary');
+      await expect(no1).toHaveAttribute('aria-pressed', 'true');
+      await expect(no1.locator('sl-icon[name="check-lg"]')).toHaveCount(1);
+      await expect(no1.locator('[part="base"]')).toHaveCSS('color', 'rgb(255, 255, 255)');
+      await expect(yes1).toHaveAttribute('outline', '');
+      await expect(yes1.locator('sl-icon[name="robot"]')).toHaveCount(1);
+      await shot(page, testInfo, theme, 'p2-6-single-change-bar', ['prompt-p21']);
+
+      // Cancel restores P2-1 without posting.
+      await bar.locator('sl-button[data-action="cancel-change"]').click();
+      await expect(bar).toHaveCount(0);
+      await expect(c1.locator('.confirm-row')).toBeVisible();
+      expect(posted).toHaveLength(0);
+
+      // Confirm on c1 settles to Mock P2-3 confirmed.
+      await c1.locator('sl-button[data-action="confirm"]').click();
+      await expect(c1.locator('.card-head .badge.conf')).toContainText('confirmed');
+      await expect(c1.locator('.row-foot')).toContainText('Answered by you (confirmed)');
+      await expect(c1.locator('.row-foot time')).toHaveText('15:52');
+      await expect(c1.locator('.row-foot')).toContainText(
+        `first interpreted by ${ASKER_NAME} from your reply`
+      );
+      await expect(yes1.locator('sl-icon[name="check-circle-fill"]')).toHaveCount(1);
+      await expect(no1).toHaveAttribute('aria-disabled', 'true');
+      expect(posted[0]?.body).toMatchObject({ choice_id: 'yes' });
+
+      // Override on c2 settles to Mock P2-3 changed.
+      const c2 = card(page, 'prompt-p26');
+      await c2.locator('sl-button[data-choice="no"]').click();
+      await c2.locator('.confirmbar sl-button[data-action="confirm-change"]').click();
+      await expect(c2.locator('.card-head .badge.over')).toContainText('changed');
+      await expect(c2.locator('.row-foot')).toContainText('Answered by you');
+      await expect(c2.locator('.row-foot')).toContainText(
+        'changed from the interpreted answer Yes'
+      );
+      await expect(
+        c2.locator('sl-button[data-choice="no"] sl-icon[name="check-circle-fill"]')
+      ).toHaveCount(1);
+      await expect(c2.locator('sl-button[data-choice="yes"]')).toHaveAttribute(
+        'aria-disabled',
+        'true'
+      );
+      expect(posted[1]?.body).toMatchObject({ choice_id: 'no' });
+      await shot(page, testInfo, theme, 'p2-3-single-confirmed-changed', [
+        'prompt-p21',
+        'prompt-p26',
+      ]);
+    });
+
+    test('set P2-4: pending row + own interpreted row pre-selects interpreted over default and shows will confirm', async ({
+      page,
+    }, testInfo) => {
+      const decisions = [
+        decision({
+          messageId: 'prompt-p24',
+          rowId: 'prompt-p24-d234',
+          key: 'D234',
+          question: 'Ship `v0.9` today?',
+          // Deliberately set defaultChoiceId to 'no' so pre-selection proves
+          // the interpreted choice ('yes') beats defaultChoiceId.
+          defaultChoiceId: 'no',
+          choices: [
+            { id: 'yes', label: 'Yes' },
+            { id: 'no', label: 'No' },
+          ],
+          status: 'decided',
+          decision: answer('yes', 'Yes', SELF_ID, 'Fixture User', 3, {
+            provenance: 'agent_interpreted',
+            interpretedByAgentId: ASKER_ID,
+            sourceMessageId: 'reply-p24',
+          }),
+        }),
+        decision({
+          messageId: 'prompt-p24',
+          rowId: 'prompt-p24-17',
+          key: '17',
+          question: 'Which approach?',
+          defaultChoiceId: 'a',
+          choices: [
+            { id: 'a', label: 'a · Extend input-needed' },
+            { id: 'b', label: 'b · New waiting state' },
+          ],
+        }),
+      ];
+      const thread = setThread('prompt-p24', decisions, 'Two calls before the release.');
+      thread.messages.push(row('reply-p24', 2, 'instruction', 'Ship v0.9 today.', 'self'));
+      await openChoices(page, theme, thread);
+      await markdownReady(page, 'prompt-p24');
+
+      const c = card(page, 'prompt-p24');
+      const d234 = c.getByRole('group', { name: 'Ship v0.9 today?' });
+      const yesBtn = d234.getByRole('button', { name: /^Yes/, pressed: true });
+      await expect(yesBtn).toBeVisible();
+      await expect(yesBtn).toHaveCSS('color', 'rgb(255, 255, 255)');
+      await expect(yesBtn.locator('sl-icon[name="robot"]')).toHaveCount(1);
+      await expect(d234.getByRole('button', { name: /^No/, pressed: false })).toBeVisible();
+      await expect(d234.locator('.chip.confirm')).toHaveText('will confirm');
+      await expect(d234.locator('.row-foot.interpreted')).toContainText(
+        `Interpreted by ${ASKER_NAME} from your reply`
+      );
+
+      const q17 = c.getByRole('group', { name: 'Which approach?' });
+      const aBtn = q17.getByRole('button', { name: /^a · Extend input-needed/, pressed: true });
+      await expect(aBtn).toBeVisible();
+      await expect(aBtn).toHaveCSS('color', 'rgb(255, 255, 255)');
+
+      await expect(c.locator('.counter')).toHaveText('2 of 2 ready · 1 confirm');
+      const submit = c.locator('sl-button.submit');
+      await expect(submit).not.toHaveAttribute('disabled', '');
+      await expect(submit.locator('[part="base"]')).toHaveCSS('color', 'rgb(255, 255, 255)');
+      await shot(page, testInfo, theme, 'p2-4-set-mixed-confirm', ['prompt-p24']);
+    });
+
+    test('set P2-5: changed own interpreted row + another user read-only interpreted row excluded from submit', async ({
+      page,
+    }, testInfo) => {
+      const decisions = setDecisions('prompt-p25', {
+        overrides: {
+          D234: {
+            status: 'decided',
+            decision: answer('yes', 'Yes', SELF_ID, 'Fixture User', 3, {
+              provenance: 'agent_interpreted',
+              interpretedByAgentId: ASKER_ID,
+              sourceMessageId: 'reply-p25',
+            }),
+          },
+          'ship-now': {
+            status: 'decided',
+            decision: answer('yes', 'Yes', BOB_ID, 'Bob', 5, {
+              provenance: 'agent_interpreted',
+              interpretedByAgentId: ASKER_ID,
+            }),
+          },
+        },
+      });
+      const thread = setThread('prompt-p25', decisions);
+      thread.messages.push(row('reply-p25', 2, 'instruction', 'Ship v0.9.', 'self'));
+      await openChoices(page, theme, thread);
+      await markdownReady(page, 'prompt-p25');
+
+      const c = card(page, 'prompt-p25');
+      await expect(c.locator('.counter')).toHaveText('1 remaining · 1 answered by Bob');
+
+      const d234 = c.getByRole('group', { name: 'Ship v0.9 today?' });
+      await d234.locator('[data-choice="no"]').click();
+      await c.locator('.row[data-row="prompt-p25-17"] [data-choice="a"]').click();
+
+      await expect(d234.locator('.chip.change')).toHaveText('will change');
+      const noBtn = d234.getByRole('button', { name: /^No/, pressed: true });
+      await expect(noBtn).toBeVisible();
+      await expect(noBtn).toHaveCSS('color', 'rgb(255, 255, 255)');
+      await expect(noBtn.locator('sl-icon[name="check-lg"]')).toHaveCount(1);
+      const prevBtn = d234.getByRole('button', { name: /^Yes/, pressed: false });
+      await expect(prevBtn).toHaveAttribute('data-look', 'subtle');
+      await expect(prevBtn.locator('sl-icon[name="robot"]')).toHaveCount(1);
+      await expect(d234.locator('.row-foot.interpreted')).toContainText(
+        `Interpreted as Yes by ${ASKER_NAME} from your reply`
+      );
+
+      const bobRow = c.locator('.row[data-row="prompt-p25-ship-now"]');
+      await expect(bobRow).toHaveClass(/readonly/);
+      await expect(bobRow.locator('.chip.interp')).toHaveText("Bob's answer");
+      await expect(bobRow.locator('[data-choice="yes"]')).toBeDisabled();
+      await expect(bobRow.locator('[data-choice="no"]')).toBeDisabled();
+      await expect(bobRow.locator('[aria-pressed]')).toHaveCount(0);
+      await expect(bobRow.locator('sl-tooltip')).toHaveAttribute(
+        'content',
+        'Only Bob can confirm or change this answer'
+      );
+      await expect(bobRow.locator('.row-foot.interpreted')).toContainText(
+        `Interpreted by ${ASKER_NAME} from Bob's reply`
+      );
+
+      await expect(c.locator('.counter')).toHaveText('2 of 2 ready · 1 change');
+      await shot(page, testInfo, theme, 'p2-5-set-change-and-other', ['prompt-p25']);
+
+      let submitted: { answers?: Array<{ decision_row_id: string; choice_id: string }> } | null =
+        null;
+      await page.route('**/api/v1/choice-prompts/*/answers', async (route) => {
+        submitted = route.request().postDataJSON() as typeof submitted;
+        await route.fulfill({
+          json: {
+            responseMessageId: 'resp-p25',
+            batchId: 'batch-p25',
+            decisions: [
+              {
+                ...decisions[0],
+                status: 'decided',
+                decision: answer('no', 'No', SELF_ID, 'Fixture User', 8, {
+                  provenance: 'direct',
+                  outcome: 'override',
+                  previousChoiceLabel: 'Yes',
+                  batchId: 'batch-p25',
+                }),
+              },
+              {
+                ...decisions[1],
+                status: 'decided',
+                decision: answer('a', 'a · Extend input-needed', SELF_ID, 'Fixture User', 8, {
+                  provenance: 'direct',
+                  outcome: 'answer',
+                  batchId: 'batch-p25',
+                }),
+              },
+              decisions[2],
+            ],
+          },
+        });
+      });
+
+      await c.locator('sl-button.submit').click();
+      await expect(c.locator('sl-button.submit')).toHaveCount(0);
+      expect(submitted!.answers).toEqual([
+        { decision_row_id: 'prompt-p25-d234', choice_id: 'no' },
+        { decision_row_id: 'prompt-p25-17', choice_id: 'a' },
+      ]);
+      await expect(d234.locator('.row-foot')).toContainText(
+        'changed from the interpreted answer Yes'
+      );
     });
 
     test('blocked: the asker refuses the viewer, reason shown before clicking', async ({
