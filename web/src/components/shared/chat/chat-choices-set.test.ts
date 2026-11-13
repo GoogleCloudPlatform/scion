@@ -759,7 +759,10 @@ describe('Phase 2: set card interpreted pre-selection, chips, and multi-user exc
   });
 
   it('forwards surface="decisions_page" on set submit', async () => {
-    const [d1, d2] = [row('r1', 'D234', { defaultChoiceId: 'yes' }), row('r2', '17', { defaultChoiceId: 'no' })];
+    const [d1, d2] = [
+      row('r1', 'D234', { defaultChoiceId: 'yes' }),
+      row('r2', '17', { defaultChoiceId: 'no' }),
+    ];
     const el = await mount([d1, d2]);
     el.surface = 'decisions_page';
     await el.updateComplete;

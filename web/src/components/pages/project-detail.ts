@@ -503,7 +503,10 @@ export class ScionPageProjectDetail extends LitElement {
 
   private boundOnChoiceUpdated = (e: Event): void => {
     if (!this.decisionsEnabled || !this.projectId) return;
-    const raw = (e as CustomEvent).detail as { data?: { projectId?: string }; projectId?: string } | null;
+    const raw = (e as CustomEvent).detail as {
+      data?: { projectId?: string };
+      projectId?: string;
+    } | null;
     const data = raw?.data ?? raw;
     if (data?.projectId && data.projectId !== this.projectId) return;
     this.scheduleDecisionsCountRefresh();

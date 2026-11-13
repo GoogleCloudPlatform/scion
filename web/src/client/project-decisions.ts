@@ -190,7 +190,11 @@ function projectDecisionsUrl(projectId: string, options: ProjectDecisionsQueryOp
 /** Fetches `GET /api/v1/projects/{id}/decisions?tab=pending`. */
 export async function fetchProjectPendingDecisions(
   projectId: string,
-  options: { cursor?: string | undefined; limit?: number | undefined; signal?: AbortSignal | undefined } = {}
+  options: {
+    cursor?: string | undefined;
+    limit?: number | undefined;
+    signal?: AbortSignal | undefined;
+  } = {}
 ): Promise<ProjectPendingDecisionsResponse> {
   const url = projectDecisionsUrl(projectId, {
     tab: 'pending',
@@ -218,7 +222,11 @@ export async function fetchProjectPendingDecisions(
 export async function fetchProjectMadeDecisions(
   projectId: string,
   filter: MadeDecisionsFilter = {},
-  options: { cursor?: string | undefined; limit?: number | undefined; signal?: AbortSignal | undefined } = {}
+  options: {
+    cursor?: string | undefined;
+    limit?: number | undefined;
+    signal?: AbortSignal | undefined;
+  } = {}
 ): Promise<ProjectMadeDecisionsResponse> {
   const url = projectDecisionsUrl(projectId, {
     tab: 'made',

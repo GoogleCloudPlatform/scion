@@ -48,11 +48,13 @@ class FakeEventSource extends EventTarget {
   }
 }
 
-function jsonResponse(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'Content-Type': 'application/json' },
-  });
+function jsonResponse(body: unknown, status = 200): Promise<Response> {
+  return Promise.resolve(
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    })
+  );
 }
 
 await import('./project-detail.js');
@@ -82,8 +84,9 @@ describe('<scion-page-project-detail> Decisions button & badge (Mock P3-1)', () 
 
     vi.stubGlobal(
       'fetch',
-      vi.fn(async (input: RequestInfo | URL): Promise<Response> => {
-        const raw = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      vi.fn((input: RequestInfo | URL): Promise<Response> => {
+        const raw =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
         const url = new URL(raw, 'http://localhost');
         if (url.pathname === '/api/v1/projects/p-1') {
           return jsonResponse({
@@ -114,7 +117,10 @@ describe('<scion-page-project-detail> Decisions button & badge (Mock P3-1)', () 
             answerers: [],
           });
         }
-        if (url.pathname.endsWith('/metrics-summary') || url.pathname.endsWith('/session-metrics')) {
+        if (
+          url.pathname.endsWith('/metrics-summary') ||
+          url.pathname.endsWith('/session-metrics')
+        ) {
           return jsonResponse({ available: false });
         }
         return jsonResponse({}, 404);
