@@ -3,9 +3,10 @@
 **Date:** 2026-11-12
 **Branch:** scion/reincarnate-harness-p2
 **Issues:** ptone/scion#7759 (phase), ptone/scion#7757 (tracking)
-**Stack:** ptone/scion PR 7770, P1 head 534e6e301a4b438598be647823555636d2eae72e.
-Rebased from d01b08b without conflicts; the P1 update only fixes a dead initial
-assignment in `reincarnate_patch.go`.
+**Base:** upstream main ceded71, including P1 merged in
+GoogleCloudPlatform/scion#4784 (74a52f1). Rebased onto upstream main on
+2026-11-13 without conflicts, dropping all P1 commits from this phase's range.
+Only P2 commits remain in `git log upstream-main..HEAD`.
 
 ## Behavior
 
@@ -31,7 +32,7 @@ use hub secrets. The broker's reprovision gather remains the backstop if the hub
 accepts credentials the broker cannot obtain, and runs before the home reset.
 The experiment and runtime capability list remain those supplied by P1.
 
-## Verification
+## Verification before P1 upstream merge
 
 - RED: stable `make test-hub-shard SHARD=2` failed only the new credential
   preflight test, all four env/file × automatic/explicit cases (200 instead of
@@ -64,3 +65,27 @@ The experiment and runtime capability list remain those supplied by P1.
 targets compile the entire hub test package, which this repository forbids.
 Hub lint uses `--tests=false` per the repository's split-lint convention; shard
 vet covers tests. No whole hub test package was compiled.
+
+## Verification after P1 upstream merge (2026-11-13)
+
+Rebased onto upstream main `ceded71b43b1373a2833f03d455a67bb34e34e50` after
+P1 landed in GoogleCloudPlatform/scion#4784 (`74a52f1`). No conflicts or manual
+resolutions. All P1 commits were dropped; the range above upstream main contains
+only this phase's implementation and project-log commits.
+
+- `hack/hubshard/hubshard.sh -overlay /tmp/p2-landed-overlay`, then
+  `GOGC=25 go test -p 1 -overlay /tmp/p2-landed-overlay/overlay.json -tags
+  hubshard,hubshard_2 -run '^TestReincarnateHarness_' -count=1 ./pkg/hub`:
+  passed (`ok .../pkg/hub 1.998s`). This reruns all 12 focused harness-switch
+  tests from shard 2, including the credential preflight and P1 regressions.
+- `GOGC=40 golangci-lint run --new-from-rev=upstream-main --concurrency=1
+  --tests=false ./pkg/hub/...`: passed, exact output `0 issues.`.
+- `GOMAXPROCS=2 GOOS=windows GOARCH=amd64 go build -p 1 -buildvcs=false
+  -o /dev/null ./cmd/scion`: passed.
+- `bash hack/winsec-guard.sh`: passed (`winsec-guard: ok (3130 files)`).
+- `make fmt-check check-custom build`: passed; all custom checks passed and
+  the Linux binary built. Scoped checks continue to replace the forbidden
+  unsharded hub compilation in `make ci`.
+
+Fork CI is monitored on the pushed PR head; its final status is recorded in the
+handoff evidence rather than generating a new commit just to record CI status.
