@@ -458,11 +458,7 @@ func choiceResponseSetView(promptID, batchID string, ds []*store.Decision, answe
 		if !ok {
 			continue
 		}
-		item := choiceResponseSetAnswerOf(a, d)
-		if item.PromptMessageID == "" {
-			item.PromptMessageID = promptID
-		}
-		v.Answers = append(v.Answers, item)
+		v.Answers = append(v.Answers, choiceResponseSetAnswerOf(a, d))
 	}
 	return v
 }

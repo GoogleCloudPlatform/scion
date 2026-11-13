@@ -1111,4 +1111,34 @@ func TestChoiceResponseView_AttributionAndOutcomes(t *testing.T) {
 	assert.Equal(t, srcID, interp.SourceMessageID)
 	assert.Equal(t, interpPrompt.ID, interp.PromptMessageID)
 	assert.Empty(t, interp.PreviousChoiceLabel)
+
+	// Empty or whitespace-only AnsweredByName falls back to AnsweredByEmail.
+	for _, blank := range []string{"", "   \t "} {
+		emailAns := &store.DecisionAnswer{
+			DecisionRowID: "row-email", AskerAgentID: f.agent.ID, Key: "D-email", Version: 1,
+			QuestionText: "Email fallback?", ChoiceID: "1", ChoiceLabel: "yes",
+			Provenance: store.DecisionProvenanceDirect, Outcome: store.DecisionOutcomeAnswer,
+			AnsweredByUserID: "u-no-name", AnsweredByName: blank, AnsweredByEmail: "noname@example.test",
+		}
+		assert.Equal(t, "noname@example.test", choiceResponseViewOf(emailAns, nil).AnsweredByName)
+		assert.Equal(t, "noname@example.test", choiceResponseSetAnswerOf(emailAns, nil).AnsweredByName)
+	}
+
+	// Deleted answerer (AnsweredByUserID empty, snapshot AnsweredByName retained)
+	// omits answeredByUserId on the wire while keeping answeredByName.
+	deletedAns := &store.DecisionAnswer{
+		DecisionRowID: "row-del", AskerAgentID: f.agent.ID, Key: "D-del", Version: 1,
+		QuestionText: "Deleted user?", ChoiceID: "1", ChoiceLabel: "yes",
+		Provenance: store.DecisionProvenanceDirect, Outcome: store.DecisionOutcomeAnswer,
+		AnsweredByUserID: "", AnsweredByName: "Old User", AnsweredByEmail: "old@example.test",
+	}
+	singleJSON, err := json.Marshal(choiceResponseViewOf(deletedAns, nil))
+	require.NoError(t, err)
+	assert.NotContains(t, string(singleJSON), `"answeredByUserId"`)
+	assert.Contains(t, string(singleJSON), `"answeredByName":"Old User"`)
+
+	setItemJSON, err := json.Marshal(choiceResponseSetAnswerOf(deletedAns, nil))
+	require.NoError(t, err)
+	assert.NotContains(t, string(setItemJSON), `"answeredByUserId"`)
+	assert.Contains(t, string(setItemJSON), `"answeredByName":"Old User"`)
 }

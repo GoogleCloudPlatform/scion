@@ -341,7 +341,8 @@ export class ScionChatChoiceResponse extends LitElement {
     const whose = this.own ? 'your' : `${this.who}'s`;
     const pronoun = this.own ? 'your' : 'their';
     const sourceMsgId = interpreted ? answers[0]?.sourceMessageId : undefined;
-    const promptMsgId = rs.promptMessageId || answers[0]?.promptMessageId;
+    const promptMsgId = rs.promptMessageId || undefined;
+    const multiPrompt = !promptMsgId;
     return html`<details
       data-kind="set"
       ?open=${this.open}
@@ -378,7 +379,23 @@ export class ScionChatChoiceResponse extends LitElement {
           (a) =>
             html`<li data-row=${a.rowId}>
               <span class="key">${a.key}</span>
-              <span class="lbl">${a.label}${this.renderSetItemNote(a)}</span>
+              <span class="lbl"
+                >${a.label}${this.renderSetItemNote(a)}${multiPrompt &&
+                a.promptMessageId &&
+                a.promptMessageId !== answers[0]?.promptMessageId
+                  ? html` <span class="muted">(other question)</span>`
+                  : nothing}${multiPrompt && a.promptMessageId
+                  ? html`<span class="sep" aria-hidden="true"> · </span
+                      ><button
+                        type="button"
+                        class="link"
+                        data-action="jump"
+                        @click=${(): void => this.jumpTo(a.promptMessageId)}
+                      >
+                        Jump
+                      </button>`
+                  : nothing}</span
+              >
             </li>`
         )}
         ${sourceMsgId || promptMsgId

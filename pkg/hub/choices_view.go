@@ -18,6 +18,7 @@ import (
 	"context"
 	"log/slog"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
@@ -331,9 +332,6 @@ func (s *Server) choiceResponseViews(ctx context.Context, msgs []*store.Message)
 		if withAnswers, err := s.store.GetDecisionsByMessageIDs(ctx, overrideMsgIDs); err != nil {
 			slog.WarnContext(ctx, "choices: override decisions unreadable for history", "error", err)
 		} else {
-			if prompts == nil {
-				prompts = map[string]*store.Decision{}
-			}
 			for _, ds := range withAnswers {
 				for _, d := range ds {
 					prompts[d.ID] = d
@@ -369,8 +367,8 @@ func answererDisplayName(a *store.DecisionAnswer) string {
 	if a == nil {
 		return ""
 	}
-	if a.AnsweredByName != "" {
-		return a.AnsweredByName
+	if name := strings.TrimSpace(a.AnsweredByName); name != "" {
+		return name
 	}
 	return a.AnsweredByEmail
 }

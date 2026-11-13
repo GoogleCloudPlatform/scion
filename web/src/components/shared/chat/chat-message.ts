@@ -2957,11 +2957,7 @@ export class ScionChatMessage extends LitElement {
     const lane = !interpreted && own ? 'own' : 'other';
     const fallbackAnswerer = !interpreted && !this.senderIsAgent ? this.senderName : '';
     const answererName = own ? 'you' : answeredByName || fallbackAnswerer || 'Someone';
-    const rawAgent =
-      interpreted || (this.fromAgent && !this.routedTo)
-        ? this.senderName || this.sender
-        : this.routedTo;
-    const agentName = rawAgent.replace(/^agent:/, '');
+    const agentName = interpreted ? (this.senderName || this.sender).replace(/^agent:/, '') : '';
     return html`<div class="choice-response-row ${lane}">
       <scion-chat-choice-response
         lane=${lane}

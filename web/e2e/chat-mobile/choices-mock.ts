@@ -348,22 +348,33 @@ export function responsesThread(): ChoiceThread {
 
 /** Mock P2-7: interpreted (own & Bob's set), confirmed, and overridden response lines. */
 export function responsesPhase2Thread(): ChoiceThread {
+  const otherPrompt = shipDecision('prompt-other', {
+    key: 'D9',
+    ref: 'D9',
+    question: 'When?',
+    status: 'decided',
+    decision: answer('2', '2 · Later', BOB_ID, 'Bob', 5),
+  });
   const prompt = shipDecision('prompt-p27', {
     status: 'decided',
     decision: answer('no', 'No', SELF_ID, 'Fixture User', 11),
   });
   return {
     messages: [
-      row('prompt-p27', 0, 'choice-prompt', 'One call before I tag it.\n\n(fallback)', 'asker'),
+      row('prompt-other', 0, 'choice-prompt', 'Schedule check.\n\n(fallback)', 'asker'),
+      row('prompt-p27', 1, 'choice-prompt', 'One call before I tag it.\n\n(fallback)', 'asker'),
       row('reply-self', 2, 'instruction', 'Yes, ship D234 today.', 'self'),
       row('resp-interp-own', 3, 'choice-response', 'recorded answer', 'asker'),
       row('resp-interp-bob-set', 5, 'choice-response', 'recorded Bob answers', 'asker'),
       row('resp-confirm', 11, 'choice-response', 'confirmed Yes', 'self'),
       row('resp-override', 12, 'choice-response', 'changed D234 to No', 'self'),
     ],
-    messageDecisions: { 'prompt-p27': [prompt] },
-    messageChoiceIntros: { 'prompt-p27': 'One call before I tag it.' },
-    messageChoiceAnswerModes: { 'prompt-p27': 'single' },
+    messageDecisions: { 'prompt-other': [otherPrompt], 'prompt-p27': [prompt] },
+    messageChoiceIntros: {
+      'prompt-other': 'Schedule check.',
+      'prompt-p27': 'One call before I tag it.',
+    },
+    messageChoiceAnswerModes: { 'prompt-other': 'single', 'prompt-p27': 'single' },
     messageChoiceResponses: {
       'resp-interp-own': {
         rowId: 'interp-own-row',
@@ -413,7 +424,6 @@ export function responsesPhase2Thread(): ChoiceThread {
     },
     messageChoiceResponseSets: {
       'resp-interp-bob-set': {
-        promptMessageId: 'prompt-p27',
         batchId: 'batch-interp-bob',
         answers: [
           {
@@ -447,7 +457,7 @@ export function responsesPhase2Thread(): ChoiceThread {
             answeredByUserId: BOB_ID,
             answeredByName: 'Bob',
             interpretedByAgentId: ASKER_ID,
-            promptMessageId: 'prompt-p27',
+            promptMessageId: 'prompt-other',
             sourceMessageId: 'reply-self',
           },
         ],

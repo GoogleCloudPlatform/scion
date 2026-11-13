@@ -241,7 +241,7 @@ describe('set', () => {
     expect(rows).toEqual(['D234 Yes (recommended)', '17 a · Extend input-needed', 'ship-now Yes']);
   });
 
-  it('renders interpreted set for your vs another user reply, with View reply and per-item prompt fallback', async () => {
+  it('renders multi-prompt interpreted set with View reply, (other question), and per-item Jump', async () => {
     const bobSet = await mount({
       responseSet: {
         batchId: 'b-bob',
@@ -272,10 +272,21 @@ describe('set', () => {
     expect(text(summary)).toMatch(
       /^release-bot recorded Bob's answers to 2 decisions from their reply · \d\d:\d\d · Show answers ▸$/
     );
+    const rows = [...root(bobSet).querySelectorAll('li[data-row]')].map((li) => text(li));
+    expect(rows).toEqual(['ship-now Yes · Jump', 'D9 Later (other question) · Jump']);
+    const footer = root(bobSet).querySelector('ul.answers > li:not([data-row])')!;
+    expect(text(footer)).toBe('View reply');
+    expect(footer.querySelector('[data-action="jump"]')).toBeNull();
+
     const got = jumps(bobSet);
     root(bobSet).querySelector<HTMLButtonElement>('[data-action="view-reply"]')!.click();
-    root(bobSet).querySelector<HTMLButtonElement>('[data-action="jump"]')!.click();
-    expect(got).toEqual(['src-bob', 'prompt-a']);
+    const itemJumps = root(bobSet).querySelectorAll<HTMLButtonElement>(
+      'li[data-row] [data-action="jump"]'
+    );
+    expect(itemJumps.length).toBe(2);
+    itemJumps[0].click();
+    itemJumps[1].click();
+    expect(got).toEqual(['src-bob', 'prompt-a', 'prompt-b']);
 
     const ownSingleSet = await mount({
       responseSet: set({
@@ -285,6 +296,7 @@ describe('set', () => {
             key: 'D234',
             label: 'Yes',
             provenance: 'agent_interpreted',
+            promptMessageId: 'p2',
           }),
         ],
       }),
@@ -295,6 +307,8 @@ describe('set', () => {
     expect(text(root(ownSingleSet).querySelector('summary'))).toMatch(
       /^release-bot recorded your answer from your reply · \d\d:\d\d · Show answers ▸$/
     );
+    expect(root(ownSingleSet).querySelector('li[data-row] [data-action="jump"]')).toBeNull();
+    expect(text(root(ownSingleSet).querySelector('[data-action="jump"]'))).toBe('Jump to question');
   });
 
   it('renders confirmed and overridden items in sets, and marks all-confirm sets not sent', async () => {
@@ -414,6 +428,29 @@ describe('scion-chat-message attribution by answeredByUserId', () => {
     const line = msg.shadowRoot!.querySelector('scion-chat-choice-response')!;
     expect(text(line.shadowRoot!.querySelector('.line'))).toContain('Alice chose Yes for D234');
     expect(text(line.shadowRoot!.querySelector('.line'))).not.toContain('you chose');
+  });
+
+  it('attributes deleted answerer (answeredByUserId omitted or empty) to answeredByName in other lane for both empty and non-empty currentUserId', async () => {
+    for (const currentUserId of ['', 'u-alice']) {
+      for (const response of [
+        single({ answeredByName: 'Old User' }),
+        single({ answeredByUserId: '', answeredByName: 'Old User' }),
+      ]) {
+        const msg = await mountMsg({
+          currentUserId,
+          fromAgent: false,
+          senderName: 'Alice',
+          choiceResponse: response,
+        });
+        expect(msg.shadowRoot!.querySelector('.choice-response-row.other')).not.toBeNull();
+        expect(msg.shadowRoot!.querySelector('.choice-response-row.own')).toBeNull();
+        const line = msg.shadowRoot!.querySelector('scion-chat-choice-response')!;
+        expect(text(line.shadowRoot!.querySelector('.line'))).toContain(
+          'Old User chose Yes for D234'
+        );
+        expect(text(line.shadowRoot!.querySelector('.line'))).not.toContain('you chose');
+      }
+    }
   });
 
   it('places agent-sent interpreted single and set responses in the left lane with agentName and viewer-aware wording', async () => {

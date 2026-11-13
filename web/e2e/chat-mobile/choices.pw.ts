@@ -600,6 +600,15 @@ for (const theme of ['light', 'dark'] as const) {
       );
       await bobSet.locator('summary').click();
       await expect(bobSet.locator('[data-action="view-reply"]')).toHaveText('View reply');
+      await expect(
+        bobSet.locator('ul.answers > li:not([data-row]) [data-action="jump"]')
+      ).toHaveCount(0);
+      const bobItems = bobSet.locator('ul.answers li[data-row]');
+      await expect(bobItems).toHaveCount(2);
+      await expect(bobItems.nth(0)).not.toContainText('(other question)');
+      await expect(bobItems.nth(1)).toContainText('2 · Later (other question)');
+      const itemJumps = bobSet.locator('ul.answers li[data-row] [data-action="jump"]');
+      await expect(itemJumps).toHaveCount(2);
 
       await expect(message(page, 'resp-confirm').locator('.choice-response-row')).toHaveClass(
         /own/
@@ -623,6 +632,11 @@ for (const theme of ['light', 'dark'] as const) {
         'resp-confirm',
         'resp-override',
       ]);
+
+      await itemJumps.nth(0).click();
+      await expect(message(page, 'prompt-p27')).toHaveClass(/permalink-highlight/);
+      await itemJumps.nth(1).click();
+      await expect(message(page, 'prompt-other')).toHaveClass(/permalink-highlight/);
     });
   });
 }
