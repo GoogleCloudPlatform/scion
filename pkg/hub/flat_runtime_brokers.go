@@ -887,12 +887,12 @@ func checkAgentPinnedPlacement(ctx context.Context, st store.Store, agent *store
 }
 
 // profileDefaultSAUnlessPinned is projectProfileDefaultSA for the create
-// paths: a pinned agent never gets a profile written onto it (the flat
-// contract), so the per-profile default lookup is skipped for it. It reads
-// the in-memory pin set before this point (applyPinnedPlacement), with no
-// broker read, so it cannot fail open.
+// paths: a pinned agent or a hub-direct managed agent never gets a Runtime
+// Broker profile written onto it, so the per-profile default lookup is skipped.
+// It reads the in-memory pin set before this point (applyPinnedPlacement) and
+// the managed-create context marker, with no broker read, so it cannot fail open.
 func (s *Server) profileDefaultSAUnlessPinned(ctx context.Context, agent *store.Agent, runtimeBrokerID string, project *store.Project) (profile, saID string) {
-	if agent.IsPinned() {
+	if agent.IsPinned() || managedAgentCreateFrom(ctx) || isManagedAgentRuntime(agent.Runtime) {
 		return "", ""
 	}
 	requestProfile := ""

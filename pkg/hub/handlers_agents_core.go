@@ -229,20 +229,29 @@ type ListAgentsStats struct {
 }
 
 type CreateAgentRequest struct {
-	Name            string            `json:"name"`
-	ProjectID       string            `json:"projectId"`
-	RuntimeBrokerID string            `json:"runtimeBrokerId,omitempty"` // Optional: uses project's default if not specified
-	Template        string            `json:"template"`
-	HarnessConfig   string            `json:"harnessConfig,omitempty"` // Explicit harness config name (used during sync when template may not be on Hub)
-	HarnessAuth     string            `json:"harnessAuth,omitempty"`   // Late-binding override for auth_selected_type
-	Profile         string            `json:"profile,omitempty"`       // Settings profile for the runtime broker to use
-	Task            string            `json:"task,omitempty"`
-	Branch          string            `json:"branch,omitempty"`
-	Workspace       string            `json:"workspace,omitempty"`
-	Labels          map[string]string `json:"labels,omitempty"`
-	Config          *api.ScionConfig  `json:"config,omitempty"`
-	Attach          bool              `json:"attach,omitempty"`        // If true, signals interactive attach mode to the broker/harness
-	ProvisionOnly   bool              `json:"provisionOnly,omitempty"` // If true, provision only (write task to prompt.md) without starting
+	Name            string `json:"name"`
+	ProjectID       string `json:"projectId"`
+	RuntimeBrokerID string `json:"runtimeBrokerId,omitempty"` // Optional: uses project's default if not specified
+	Template        string `json:"template"`
+	HarnessConfig   string `json:"harnessConfig,omitempty"` // Explicit harness config name (used during sync when template may not be on Hub)
+	HarnessAuth     string `json:"harnessAuth,omitempty"`   // Late-binding override for auth_selected_type
+	// Profile selects a legacy Runtime Broker settings profile. Passing
+	// ManagedAgentsProfile ("managed-agents") is accepted only as a bounded
+	// legacy migration adapter at the create entry boundary (normalized to
+	// ManagedAgent=true and Profile=""), scheduled for removal in P6
+	// (ptone/scion#3292).
+	Profile string `json:"profile,omitempty"`
+	// ManagedAgent selects hub-direct managed-agent execution (e.g. managed:google),
+	// bypassing Runtime Brokers entirely. Mutually exclusive with RuntimeBrokerID,
+	// ExpectedRuntimeTargetID, and Runtime Broker Profile selection.
+	ManagedAgent  bool              `json:"managedAgent,omitempty"`
+	Task          string            `json:"task,omitempty"`
+	Branch        string            `json:"branch,omitempty"`
+	Workspace     string            `json:"workspace,omitempty"`
+	Labels        map[string]string `json:"labels,omitempty"`
+	Config        *api.ScionConfig  `json:"config,omitempty"`
+	Attach        bool              `json:"attach,omitempty"`        // If true, signals interactive attach mode to the broker/harness
+	ProvisionOnly bool              `json:"provisionOnly,omitempty"` // If true, provision only (write task to prompt.md) without starting
 	// WorkspaceFiles is populated for non-git workspace bootstrap.
 	// When present, the Hub generates signed upload URLs instead of dispatching immediately.
 	WorkspaceFiles []transfer.FileInfo `json:"workspaceFiles,omitempty"`
@@ -1614,6 +1623,17 @@ func (s *Server) createAgentInProject(
 		return
 	}
 
+	// Normalize bounded legacy Profile == ManagedAgentsProfile ("managed-agents")
+	// into req.ManagedAgent = true (clearing req.Profile) and reject contradictory
+	// managed-agent + Runtime Broker placement combinations before any broker
+	// resolution, flat placement check, or store write. Both create routes reach it here.
+	if !normalizeManagedAgentCreateRequest(w, &req) {
+		return
+	}
+	if req.ManagedAgent {
+		ctx = withManagedAgentCreate(ctx)
+	}
+
 	// The request's template, before any persistence or the existing-agent
 	// handling below: a template name or ID, never a host directory or a
 	// remote source (templateRefAllowed). Defaults are checked where they
@@ -1788,26 +1808,30 @@ func (s *Server) createAgentInProject(
 		req.NoAuth = true
 	}
 
-	// Resolve the runtime broker
-	runtimeBrokerID, err := s.resolveRuntimeBroker(ctx, w, req.RuntimeBrokerID, project)
-	if err != nil {
-		// Error response already written by resolveRuntimeBroker
-		return
-	}
-
-	// Enforce broker-level dispatch authorization: an auto-provide broker, a
-	// broker associated with this project with its owner's consent, or
-	// broker.dispatch on the broker (canUseBrokerForProject).
-	if runtimeBrokerID != "" {
-		if !s.checkBrokerDispatchAccess(ctx, w, runtimeBrokerID, project) {
+	// Resolve the runtime broker unless this is a hub-direct managed agent,
+	// which executes directly via the Hub's managed backend without a Runtime Broker.
+	var runtimeBrokerID string
+	if !req.ManagedAgent {
+		runtimeBrokerID, err = s.resolveRuntimeBroker(ctx, w, req.RuntimeBrokerID, project)
+		if err != nil {
+			// Error response already written by resolveRuntimeBroker
 			return
 		}
-	}
 
-	// Empty-per-agent projects only dispatch to brokers that advertise the
-	// capability (design #2703 D3): 412 before anything is persisted.
-	if !s.requireEmptyPerAgentBrokerCapability(ctx, w, project, runtimeBrokerID) {
-		return
+		// Enforce broker-level dispatch authorization: an auto-provide broker, a
+		// broker associated with this project with its owner's consent, or
+		// broker.dispatch on the broker (canUseBrokerForProject).
+		if runtimeBrokerID != "" {
+			if !s.checkBrokerDispatchAccess(ctx, w, runtimeBrokerID, project) {
+				return
+			}
+		}
+
+		// Empty-per-agent projects only dispatch to brokers that advertise the
+		// capability (design #2703 D3): 412 before anything is persisted.
+		if !s.requireEmptyPerAgentBrokerCapability(ctx, w, project, runtimeBrokerID) {
+			return
+		}
 	}
 
 	// Validate GCP passthrough mode. Two independent checks:
@@ -1915,7 +1939,7 @@ func (s *Server) createAgentInProject(
 		}
 	}
 	var placement store.PinnedPlacement
-	if existingAgent == nil {
+	if !req.ManagedAgent && existingAgent == nil {
 		if placement, err = s.flatCreatePlacement(ctx, resolvedBroker, req.Profile, req.ExpectedRuntimeTargetID); err != nil {
 			writeRuntimeTargetRefusal(w, err)
 			return
@@ -1931,9 +1955,11 @@ func (s *Server) createAgentInProject(
 	case existingAgentDeleted:
 		// Fall through to create a new agent below. handleExistingAgent ran
 		// the same new-create checks before the delete.
-		if placement, err = s.flatCreatePlacement(ctx, resolvedBroker, req.Profile, req.ExpectedRuntimeTargetID); err != nil {
-			writeRuntimeTargetRefusal(w, err)
-			return
+		if !req.ManagedAgent {
+			if placement, err = s.flatCreatePlacement(ctx, resolvedBroker, req.Profile, req.ExpectedRuntimeTargetID); err != nil {
+				writeRuntimeTargetRefusal(w, err)
+				return
+			}
 		}
 	case existingAgentNone:
 		// No existing agent — fall through to create.
@@ -2633,8 +2659,9 @@ func (s *Server) createAgentInProject(
 	//
 	// Exception: if the target broker has a LocalPath for this project, the broker
 	// can access the workspace directly from the filesystem — skip the upload
-	// and fall through to the normal dispatch path.
-	if len(req.WorkspaceFiles) > 0 && req.Task != "" {
+	// and fall through to the normal dispatch path. Hub-direct managed agents
+	// also skip workspace bootstrap because no Runtime Broker consumes the upload.
+	if !req.ManagedAgent && len(req.WorkspaceFiles) > 0 && req.Task != "" {
 		// Check if the target broker has local filesystem access to this project
 		hasLocalPath := false
 		if runtimeBrokerID != "" {
@@ -2708,7 +2735,7 @@ func (s *Server) createAgentInProject(
 	// A remote broker can reach it only through the same shared storage.
 	// A remote broker without it is refused with 409 before dispatch;
 	// clone-per-agent and empty-per-agent are unaffected.
-	if mountsHubProjectWorkspace(project) && runtimeBrokerID != "" && !s.isEmbeddedBroker(runtimeBrokerID) {
+	if !req.ManagedAgent && mountsHubProjectWorkspace(project) && runtimeBrokerID != "" && !s.isEmbeddedBroker(runtimeBrokerID) {
 		if msg, refused := s.remoteBrokerWorkspaceRefusal(ctx, project, runtimeBrokerID); refused {
 			s.agentLifecycleLog.Warn("Remote runtime broker cannot reach the project workspace; failing agent create",
 				"agent_id", agent.ID, "project_id", project.ID, "broker_id", runtimeBrokerID)
@@ -2723,7 +2750,7 @@ func (s *Server) createAgentInProject(
 	}
 
 	// Managed agent path: bypass broker dispatch entirely and handle directly.
-	if req.Profile == ManagedAgentsProfile {
+	if req.ManagedAgent {
 		logAttrs := []any{"agent_id", agent.ID, "agent", agent.Name, "elapsed", time.Since(hubCreateStart).String()}
 		if parentRole != "" {
 			logAttrs = append(logAttrs, "parent_agent_role", string(parentRole))

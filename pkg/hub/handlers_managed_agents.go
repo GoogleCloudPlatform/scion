@@ -32,6 +32,12 @@ import (
 )
 
 const (
+	// ManagedAgentsProfile is the bounded legacy CreateAgentRequest.Profile
+	// wire sentinel for managed-agent creation. At the Hub create entry boundary
+	// (normalizeManagedAgentCreateRequest), it is normalized to
+	// CreateAgentRequest.ManagedAgent = true and cleared from Profile so no
+	// downstream hosted create path, flat Runtime Broker check, or profile
+	// resolver inspects it. Scheduled for removal in P6 (ptone/scion#3292).
 	ManagedAgentsProfile = "managed-agents"
 	ManagedRuntimePrefix = "managed:"
 
@@ -39,6 +45,43 @@ const (
 	annotationInteractionID = "scion.dev/interaction-id"
 	annotationEnvironmentID = "scion.dev/environment-id"
 )
+
+// normalizeManagedAgentCreateRequest validates and normalizes managed-agent
+// selection on an incoming CreateAgentRequest at the Hub create entry boundary,
+// before Runtime Broker resolution, flat Runtime Broker placement checks, or
+// profile resolution run.
+//
+// Legacy callers that pass req.Profile == ManagedAgentsProfile ("managed-agents")
+// are normalized here to req.ManagedAgent = true with req.Profile cleared to "",
+// so no downstream create path, flat Runtime Broker check, or profile resolver
+// inspects ManagedAgentsProfile. Contradictory combinations with Runtime Broker
+// placement fields (profile, runtimeBrokerId, expectedRuntimeTargetId) are
+// rejected with a 400 validation_error before any side effects.
+func normalizeManagedAgentCreateRequest(w http.ResponseWriter, req *CreateAgentRequest) bool {
+	if req == nil {
+		return true
+	}
+	if req.Profile == ManagedAgentsProfile {
+		req.ManagedAgent = true
+		req.Profile = ""
+	}
+	if !req.ManagedAgent {
+		return true
+	}
+	if req.Profile != "" {
+		ValidationError(w, fmt.Sprintf("managedAgent cannot be combined with runtime broker profile %q", req.Profile), map[string]interface{}{"field": "profile"})
+		return false
+	}
+	if req.RuntimeBrokerID != "" {
+		ValidationError(w, "managedAgent cannot be combined with runtimeBrokerId: managed agents run directly on the Hub without a Runtime Broker", map[string]interface{}{"field": "runtimeBrokerId"})
+		return false
+	}
+	if req.ExpectedRuntimeTargetID != "" {
+		ValidationError(w, "managedAgent cannot be combined with expectedRuntimeTargetId: managed agents run directly on the Hub without a Runtime Broker", map[string]interface{}{"field": "expectedRuntimeTargetId"})
+		return false
+	}
+	return true
+}
 
 var (
 	managedBackendMu   sync.Mutex
@@ -89,7 +132,7 @@ func isManagedAgentRuntime(runtime string) bool {
 	return strings.HasPrefix(runtime, ManagedRuntimePrefix)
 }
 
-// managedAgentCreate handles agent creation for the managed-agents profile.
+// managedAgentCreate handles hub-direct managed agent creation (CreateAgentRequest.ManagedAgent).
 // It creates the cloud agent via the backend and stores the cloud agent ID
 // in the agent's annotations.
 func (s *Server) managedAgentCreate(ctx context.Context, agent *store.Agent, task string) error {
