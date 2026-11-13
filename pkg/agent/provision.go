@@ -2973,18 +2973,25 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 
 	// Write agent-info.json to home for container access
 	if finalScionCfg.Info != nil {
-		infoData, err := json.MarshalIndent(finalScionCfg.Info, "", "  ")
-		if err == nil {
-			// Temp file and rename, so a reader never sees a truncated
-			// file (#4681). No container runs during provisioning; the
-			// lock keeps the write ordered with any other host writer.
-			infoPath := filepath.Join(agentHome, "agent-info.json")
-			if err := agentinfolock.Update(infoPath, agentinfolock.Options{}, func() error {
-				return writeAgentInfoFile(infoPath, infoData, 0o644)
-			}); err != nil {
-				slog.Warn("Provision: failed to write agent-info.json",
-					"agent", agentName, "error", err)
+		// Temp file and rename, so a reader never sees a truncated
+		// file (#4681). No container runs during provisioning; the
+		// lock keeps the write ordered with any other host writer.
+		// A reprovision rewrites a file sciontool has written to, so keys
+		// api.AgentInfo has no field for (toolName, activitySource, ...)
+		// are carried over from the current file (ptone/scion#4680).
+		infoPath := filepath.Join(agentHome, "agent-info.json")
+		if err := agentinfolock.Update(infoPath, agentinfolock.Options{}, func() error {
+			// A missing, unreadable or corrupt current file has nothing to
+			// keep: the write then equals a plain marshal.
+			orig, _ := readHomeAgentInfo(agentHome)
+			infoData, err := marshalAgentInfoKeepUnknown(orig, finalScionCfg.Info)
+			if err != nil {
+				return err
 			}
+			return writeAgentInfoFile(infoPath, infoData, 0o644)
+		}); err != nil {
+			slog.Warn("Provision: failed to write agent-info.json",
+				"agent", agentName, "error", err)
 		}
 	}
 
