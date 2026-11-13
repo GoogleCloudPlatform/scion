@@ -785,3 +785,379 @@ func TestProjectDecisions_MadeLogFiltersPaginationAndDeletedPrincipals(t *testin
 	require.Len(t, combined.Entries, 1)
 	assert.Equal(t, "D9", combined.Entries[0].Decision.Key)
 }
+
+func TestProjectDecisions_LimitZeroSkipsFacetsAndPreservesCounts(t *testing.T) {
+	f := newChoicesFixture(t)
+	setProjectDecisionsExperiments(t, f.srv, true, true)
+	basePath := "/api/v1/projects/" + f.project.ID + "/decisions"
+
+	_, openRes := f.topicPrompt(t, `[{"id":"lz-open","question":"Open?","choices":["yes","no"]}]`, false)
+	require.Len(t, openRes.Decisions, 1)
+	_, madeRes := f.topicPrompt(t, `[{"id":"lz-made","question":"Answered?","choices":["yes","no"]}]`, false)
+	require.Equal(t, http.StatusOK, f.answer(t, f.bob, madeRes.Decisions[0].RowID, map[string]interface{}{
+		"choice_id": "1",
+		"surface":   "decisions_page",
+	}).Code)
+
+	// Non-zero limit returns facets; limit=0 skips facet queries and returns empty arrays with accurate counts.
+	withLimit := decodePendingDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, basePath+"?tab=pending&limit=10", nil))
+	assert.Equal(t, ProjectDecisionCounts{WaitingOnYou: 1, WaitingOnOthers: 0}, withLimit.Counts)
+	assert.Len(t, withLimit.Prompts, 1)
+	assert.Len(t, withLimit.Agents, 1)
+	assert.Len(t, withLimit.Answerers, 1)
+
+	pendingZero := decodePendingDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, basePath+"?tab=pending&limit=0", nil))
+	assert.Equal(t, ProjectDecisionCounts{WaitingOnYou: 1, WaitingOnOthers: 0}, pendingZero.Counts)
+	assert.Empty(t, pendingZero.Prompts)
+	assert.Empty(t, pendingZero.Agents, "limit=0 skips facet query")
+	assert.Empty(t, pendingZero.Answerers, "limit=0 skips facet query")
+	assert.Empty(t, pendingZero.NextCursor)
+
+	madeZero := decodeMadeDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, basePath+"?tab=made&limit=0", nil))
+	assert.Equal(t, ProjectDecisionCounts{WaitingOnYou: 1, WaitingOnOthers: 0}, madeZero.Counts)
+	assert.Empty(t, madeZero.Entries)
+	assert.Empty(t, madeZero.Agents, "limit=0 skips facet query")
+	assert.Empty(t, madeZero.Answerers, "limit=0 skips facet query")
+	assert.Empty(t, madeZero.NextCursor)
+}
+
+func TestProjectDecisions_DeletedTopicPreservesAuditLog(t *testing.T) {
+	f := newChoicesFixture(t)
+	setProjectDecisionsExperiments(t, f.srv, true, true)
+	ctx := context.Background()
+	basePath := "/api/v1/projects/" + f.project.ID + "/decisions"
+
+	f.srv.mu.RLock()
+	wcs := f.srv.webChatStore
+	f.srv.mu.RUnlock()
+	require.NotNil(t, wcs)
+
+	// Create a second non-general topic (#incidents) so DeleteTopic is allowed.
+	incTopicID := api.NewUUID()
+	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+		ID:           incTopicID,
+		ProjectID:    f.project.ID,
+		Name:         "incidents",
+		IsGeneral:    false,
+		CreatedBy:    f.alice.ID,
+		CreatedAt:    time.Now().UTC(),
+		DefaultAgent: f.agent.Slug,
+	}))
+	setTopicConversationID(t, f.db, f.store, incTopicID, f.project.ID)
+	incConv, err := f.store.GetConversationByExternalRef(ctx, "native", "thread:"+f.project.ID+":"+incTopicID)
+	require.NoError(t, err)
+	incConvID := incConv.ID
+
+	seedInIncidents := func(raw string) *store.ChoicePromptResult {
+		decs, err := messages.NormalizeDecisions("choices", decisionInputs(t, raw))
+		require.NoError(t, err)
+		msg := &store.Message{
+			ID: api.NewUUID(), ProjectID: f.project.ID, Sender: "agent:" + f.agent.Slug, SenderID: f.agent.ID,
+			Recipient: "chat", ThreadID: incTopicID, ConversationID: incConvID, Channel: "web", CreatedAt: time.Now().UTC(),
+		}
+		res, err := f.store.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+			Message: msg, Intro: "Incidents", AskerAgentID: f.agent.ID, AskerAgentName: f.agent.Name, Decisions: decs,
+		})
+		require.NoError(t, err)
+		return res
+	}
+
+	inc1 := seedInIncidents(`[{"id":"inc-answered","question":"Mitigate?","choices":["rollback","patch"]}]`)
+	inc2 := seedInIncidents(`[{"id":"inc-open","question":"Postmortem owner?","choices":["alice","bob"]}]`)
+
+	require.Equal(t, http.StatusOK, f.answer(t, f.bob, inc1.Decisions[0].RowID, map[string]interface{}{
+		"choice_id": "1",
+		"surface":   "decisions_page",
+	}).Code)
+
+	// Soft-delete #incidents.
+	require.NoError(t, wcs.DeleteTopic(ctx, incTopicID))
+	goneTopic, err := wcs.GetTopic(ctx, incTopicID)
+	require.NoError(t, err)
+	require.Nil(t, goneTopic, "GetTopic hides soft-deleted topic")
+	inclTopic, err := wcs.GetTopicIncludingDeleted(ctx, incTopicID)
+	require.NoError(t, err)
+	require.NotNil(t, inclTopic)
+	require.NotNil(t, inclTopic.DeletedAt)
+
+	// 1. tab=made preserves the answered entry with conversationAvailable=false and label "#incidents".
+	made := decodeMadeDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, basePath+"?tab=made", nil))
+	require.Len(t, made.Entries, 1)
+	assert.Equal(t, "inc-answered", made.Entries[0].Decision.Key)
+	assert.Equal(t, "#incidents", made.Entries[0].ConversationLabel)
+	assert.False(t, made.Entries[0].ConversationAvailable, "soft-deleted topic marks conversationAvailable=false")
+
+	// 2. tab=pending classifies the remaining open prompt under waitingOnOthers (read_only, canAnswer=false, conversationAvailable=false).
+	pending := decodePendingDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, basePath+"?tab=pending", nil))
+	assert.Equal(t, ProjectDecisionCounts{WaitingOnYou: 0, WaitingOnOthers: 1}, pending.Counts)
+	require.Len(t, pending.Prompts, 1)
+	assert.Equal(t, "inc-open", pending.Prompts[0].Decisions[0].Key)
+	assert.Equal(t, "#incidents", pending.Prompts[0].ConversationLabel)
+	assert.False(t, pending.Prompts[0].ConversationAvailable)
+	assert.False(t, pending.Prompts[0].WaitingOnYou)
+	assert.False(t, pending.Prompts[0].CanAnswer)
+	assert.Equal(t, WaitingReasonReadOnly, pending.Prompts[0].WaitingReasons[inc2.Decisions[0].RowID])
+
+	// 3. GET /api/v1/decisions/{rowId} succeeds for project reader (200) and refuses outsider (404).
+	assert.Equal(t, http.StatusOK, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/decisions/"+inc2.Decisions[0].RowID, nil).Code)
+	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.outsider, http.MethodGet, "/api/v1/decisions/"+inc2.Decisions[0].RowID, nil).Code)
+
+	// 4. POST /api/v1/decisions/{rowId}/answer is refused (404) because the topic is soft-deleted.
+	assert.Equal(t, http.StatusNotFound, f.answer(t, f.bob, inc2.Decisions[0].RowID, map[string]interface{}{
+		"choice_id": "1",
+		"surface":   "decisions_page",
+	}).Code)
+}
+
+func TestProjectDecisions_LiveDMAgentAuthzAndSoftDeletedAsker(t *testing.T) {
+	f := newChoicesFixture(t)
+	setProjectDecisionsExperiments(t, f.srv, true, true)
+	ctx := context.Background()
+	basePath := "/api/v1/projects/" + f.project.ID + "/decisions"
+
+	// Part A: Live DM agent authorization for active member with MessageModeNone vs revoked project member.
+	dave := &store.User{
+		ID: tid("choices-dave"), Email: "dave-choices@example.com", DisplayName: "Dave Member",
+		Role: store.UserRoleMember, Status: "active", Created: time.Now().UTC(),
+	}
+	require.NoError(t, f.store.CreateUser(ctx, dave))
+	ensureHubMembership(ctx, f.store, dave.ID)
+	addProjectMemberWithRole(t, f.store, f.project, dave.ID, store.GroupMemberRoleMember)
+
+	dmDaveKey, err := messages.DMConversationKey("agent", f.agent.ID, "user", dave.ID)
+	require.NoError(t, err)
+
+	seedDaveDM := func(raw string) *store.ChoicePromptResult {
+		decs, err := messages.NormalizeDecisions("choices", decisionInputs(t, raw))
+		require.NoError(t, err)
+		msg := &store.Message{
+			ID: api.NewUUID(), ProjectID: f.project.ID, Sender: "agent:" + f.agent.Slug, SenderID: f.agent.ID,
+			Recipient: "user:" + dave.ID, ThreadID: dmDaveKey, Channel: "web", CreatedAt: time.Now().UTC(),
+		}
+		res, err := f.store.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+			Message: msg, Intro: "DM to Dave", AskerAgentID: f.agent.ID, AskerAgentName: f.agent.Name, Decisions: decs,
+		})
+		require.NoError(t, err)
+		return res
+	}
+
+	dmOpen := seedDaveDM(`[{"id":"dm-dave-open","question":"Open DM?","choices":["yes","no"]}]`)
+	dmInterp1 := seedDaveDM(`[{"id":"dm-dave-interp-1","question":"Interp DM 1?","choices":["yes","no"]}]`)
+	dmInterp2 := seedDaveDM(`[{"id":"dm-dave-interp-2","question":"Interp DM 2?","choices":["yes","no"]}]`)
+
+	for _, res := range []*store.ChoicePromptResult{dmInterp1, dmInterp2} {
+		srcID := api.NewUUID()
+		require.NoError(t, f.store.CreateMessage(ctx, &store.Message{
+			ID: srcID, ProjectID: f.project.ID, Sender: "user:" + dave.ID, SenderID: dave.ID,
+			Recipient: "agent:" + f.agent.Slug, ThreadID: dmDaveKey, Type: messages.TypeChat, Channel: "web", Msg: "yes", CreatedAt: time.Now().UTC(),
+		}))
+		_, err := f.store.RecordInterpretedAnswers(ctx, &store.RecordInterpretedInput{
+			InterpretedByAgentID: f.agent.ID, SourceMessageID: srcID,
+			AnsweredByUserID: dave.ID, AnsweredByName: dave.DisplayName, AnsweredByEmail: dave.Email,
+			Surface: store.DecisionSurfaceNative,
+			Answers: []store.InterpretedAnswerPair{{DecisionRowID: res.Decisions[0].RowID, ChoiceID: "1"}},
+			ResponseMessage: &store.Message{
+				ID: api.NewUUID(), ProjectID: f.project.ID, Sender: "agent:" + f.agent.Slug, SenderID: f.agent.ID,
+				Recipient: "user:" + dave.ID, ThreadID: dmDaveKey, Channel: "web", CreatedAt: time.Now().UTC(),
+			},
+			FormatMessage: func(_ []store.InterpretedFormattedItem) string { return "interpreted yes" },
+		})
+		require.NoError(t, err)
+	}
+
+	// Switch live f.agent (owned by Bob, not Dave) to MessageModeNone:
+	// Dave (still a project member with ActionRead on f.agent) gets 200 on GET,
+	// 200 on confirm of his own interpreted answer, and 403 MESSAGE_DENIED on fresh answer!
+	f.agent.MessageMode = store.MessageModeNone
+	require.NoError(t, f.store.UpdateAgent(ctx, f.agent))
+
+	assert.Equal(t, http.StatusOK, doRequestAsUser(t, f.srv, dave, http.MethodGet, "/api/v1/decisions/"+dmOpen.Decisions[0].RowID, nil).Code)
+	freshDenied := f.answer(t, dave, dmOpen.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"})
+	assert.Equal(t, http.StatusForbidden, freshDenied.Code)
+	assert.Equal(t, ErrCodeMessageDenied, errorCode(t, freshDenied))
+	assert.Equal(t, http.StatusOK, f.answer(t, dave, dmInterp1.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"}).Code,
+		"current project member can confirm own interpreted DM answer even when live agent has MessageModeNone")
+
+	// Restore MessageModeProject on f.agent, then revoke Dave's project membership completely.
+	f.agent.MessageMode = store.MessageModeProject
+	require.NoError(t, f.store.UpdateAgent(ctx, f.agent))
+
+	membersGroup, err := f.store.GetGroupBySlug(ctx, "project:"+f.project.Slug+":members")
+	require.NoError(t, err)
+	require.NoError(t, f.store.RemoveGroupMember(ctx, membersGroup.ID, store.GroupMemberTypeUser, dave.ID))
+	_, err = f.store.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, dave.ID)
+	require.NoError(t, err)
+
+	// Revoked user no longer holds ActionRead on the live agent -> GET, fresh answer, AND confirm all return 404!
+	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, dave, http.MethodGet, "/api/v1/decisions/"+dmOpen.Decisions[0].RowID, nil).Code)
+	assert.Equal(t, http.StatusNotFound, f.answer(t, dave, dmOpen.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"}).Code)
+	assert.Equal(t, http.StatusNotFound, f.answer(t, dave, dmInterp2.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"}).Code)
+
+	// Part B: Soft-deleted restrictive asker parity in choiceAsker & classifyProjectOpenPrompts.
+	softBot := &store.Agent{
+		ID: api.NewUUID(), Slug: "soft-deleted-bot", Name: "Soft Deleted Bot",
+		ProjectID: f.project.ID, OwnerID: f.alice.ID, CreatedBy: f.alice.ID, Ancestry: []string{f.alice.ID},
+		Phase: string(state.PhaseRunning), MessageMode: store.MessageModeNone,
+	}
+	require.NoError(t, f.store.CreateAgent(ctx, softBot))
+
+	conv, err := f.store.GetConversationByExternalRef(ctx, "native", "thread:"+f.project.ID+":"+f.topicID)
+	require.NoError(t, err)
+	decsSoft, err := messages.NormalizeDecisions("choices", decisionInputs(t, `[{"id":"soft-asker-1","question":"Proceed after soft-delete?","choices":["yes","no"]}]`))
+	require.NoError(t, err)
+	softRes, err := f.store.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+		Message: &store.Message{
+			ID: api.NewUUID(), ProjectID: f.project.ID, Sender: "agent:" + softBot.Slug, SenderID: softBot.ID,
+			Recipient: "chat", ThreadID: f.topicID, ConversationID: conv.ID, Channel: "web", CreatedAt: time.Now().UTC(),
+		},
+		Intro: "Soft bot", AskerAgentID: softBot.ID, AskerAgentName: softBot.Name, Decisions: decsSoft,
+	})
+	require.NoError(t, err)
+	softRowID := softRes.Decisions[0].RowID
+
+	// While live with MessageModeNone, Bob (not owner) is blocked with message_denied (403).
+	assert.Equal(t, http.StatusForbidden, f.answer(t, f.bob, softRowID, map[string]interface{}{"choice_id": "1"}).Code)
+
+	// Soft-delete softBot (row remains in agents table with DeletedAt != zero).
+	now := time.Now().UTC()
+	n, err := f.store.UpdateAgentDeletion(ctx, softBot.ID, store.DeletionPredicate{}, store.DeletionFields{DeletedAt: &now})
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+	gotSoft, err := f.store.GetAgent(ctx, softBot.ID)
+	require.NoError(t, err)
+	require.False(t, gotSoft.DeletedAt.IsZero())
+
+	// Now Bob sees soft-asker-1 as WaitingOnYou (canAnswer=true) AND POST /answer succeeds 200 with failed/gone dispatch!
+	bobPending := decodePendingDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, basePath+"?tab=pending", nil))
+	require.Len(t, bobPending.Prompts, 1)
+	assert.Equal(t, softRowID, bobPending.Prompts[0].Decisions[0].RowID)
+	assert.True(t, bobPending.Prompts[0].WaitingOnYou)
+	assert.True(t, bobPending.Prompts[0].CanAnswer)
+
+	ansSoftRR := f.answer(t, f.bob, softRowID, map[string]interface{}{"choice_id": "1", "surface": "decisions_page"})
+	require.Equal(t, http.StatusOK, ansSoftRR.Code, "body: %s", ansSoftRR.Body.String())
+	var ansSoft DecisionAnswerResponse
+	require.NoError(t, json.Unmarshal(ansSoftRR.Body.Bytes(), &ansSoft))
+	respMsg, err := f.store.GetMessage(ctx, ansSoft.ResponseMessageID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchFailed, respMsg.DispatchState, "soft-deleted asker records undeliverable response message")
+}
+
+func TestProjectDecisions_NullChatKeyFallbackToPromptThread(t *testing.T) {
+	f := newChoicesFixture(t)
+	setProjectDecisionsExperiments(t, f.srv, true, true)
+	ctx := context.Background()
+
+	_, topicRes := f.topicPrompt(t, `[{"id":"null-topic-1","question":"Fallback topic?","choices":["yes","no"]}]`, false)
+	dmSingle := f.sendPromptToBob(t, `[{"id":"null-dm-1","question":"Fallback DM single?","choices":["yes","no"]}]`, false)
+	dmSet := f.sendSetToBob(t)
+
+	// Simulate pre-backfill rows: clear chat_key on all created decisions while prompt messages remain in messages!
+	provider, ok := f.store.(testRetentionProvider)
+	require.True(t, ok)
+	_, err := provider.DB().ExecContext(ctx, `UPDATE decisions SET chat_key = NULL`)
+	require.NoError(t, err)
+
+	// 1. GET /api/v1/decisions/{rowId}: Bob allowed on topic + own DM; outsider and non-participant Alice get 404.
+	assert.Equal(t, http.StatusOK, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/decisions/"+topicRes.Decisions[0].RowID, nil).Code)
+	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.outsider, http.MethodGet, "/api/v1/decisions/"+topicRes.Decisions[0].RowID, nil).Code)
+	assert.Equal(t, http.StatusOK, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/decisions/"+dmSingle.Decisions[0].RowID, nil).Code)
+	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.alice, http.MethodGet, "/api/v1/decisions/"+dmSingle.Decisions[0].RowID, nil).Code)
+
+	// 2. POST /api/v1/decisions/{rowId}/answer succeeds on both topic and DM fallback!
+	assert.Equal(t, http.StatusOK, f.answer(t, f.bob, topicRes.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"}).Code)
+	assert.Equal(t, http.StatusOK, f.answer(t, f.bob, dmSingle.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"}).Code)
+
+	// 3. POST /api/v1/choice-prompts/{messageId}/answers refuses non-participant Alice (404) and succeeds for Bob (200)!
+	setBody := map[string]interface{}{
+		"surface": "decisions_page",
+		"answers": []map[string]interface{}{
+			{"decision_row_id": dmSet.Decisions[0].RowID, "choice_id": "1"},
+			{"decision_row_id": dmSet.Decisions[1].RowID, "choice_id": "a"},
+			{"decision_row_id": dmSet.Decisions[2].RowID, "choice_id": "2"},
+		},
+	}
+	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.alice, http.MethodPost, "/api/v1/choice-prompts/"+dmSet.MessageID+"/answers", setBody).Code)
+	assert.Equal(t, http.StatusOK, doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/choice-prompts/"+dmSet.MessageID+"/answers", setBody).Code)
+}
+
+func TestProjectDecisions_EqualTimestampCursorTieBreak(t *testing.T) {
+	f := newChoicesFixture(t)
+	setProjectDecisionsExperiments(t, f.srv, true, true)
+	ctx := context.Background()
+	basePath := "/api/v1/projects/" + f.project.ID + "/decisions"
+
+	provider, ok := f.store.(testRetentionProvider)
+	require.True(t, ok)
+
+	// Seed 4 open prompts and 4 answered prompts.
+	var openMsgIDs []string
+	for i := 0; i < 4; i++ {
+		msg, _ := f.topicPrompt(t, `[{"id":"tie-open-`+uuid.NewString()[:8]+`","question":"Open tie?","choices":["yes","no"]}]`, false)
+		openMsgIDs = append(openMsgIDs, msg.ID)
+	}
+	var madeAnswerIDs []string
+	for i := 0; i < 4; i++ {
+		_, res := f.topicPrompt(t, `[{"id":"tie-made-`+uuid.NewString()[:8]+`","question":"Made tie?","choices":["yes","no"]}]`, false)
+		rr := f.answer(t, f.bob, res.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"})
+		require.Equal(t, http.StatusOK, rr.Code)
+		cur, err := f.store.GetDecision(ctx, res.Decisions[0].RowID)
+		require.NoError(t, err)
+		require.Len(t, cur.Answers, 1)
+		madeAnswerIDs = append(madeAnswerIDs, cur.Answers[0].ID)
+	}
+
+	// Force identical timestamps across all 4 open prompts and across all 4 decision_answers!
+	samePendingTS := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
+	sameMadeTS := time.Date(2026, 11, 13, 13, 0, 0, 0, time.UTC)
+	_, err := provider.DB().ExecContext(ctx, `UPDATE decisions SET created_at = ?`, samePendingTS)
+	require.NoError(t, err)
+	_, err = provider.DB().ExecContext(ctx, `UPDATE decision_answers SET created_at = ?`, sameMadeTS)
+	require.NoError(t, err)
+
+	// 1. Paginate tab=pending at limit=1 across all 4 open prompts -> strictly descending promptMessageId, zero duplicates/skips.
+	var gotPendingMsgIDs []string
+	cur := ""
+	for page := 0; page < 6; page++ {
+		u := basePath + "?tab=pending&limit=1"
+		if cur != "" {
+			u += "&cursor=" + cur
+		}
+		got := decodePendingDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, u, nil))
+		for _, p := range got.Prompts {
+			gotPendingMsgIDs = append(gotPendingMsgIDs, p.PromptMessageID)
+		}
+		if got.NextCursor == "" {
+			break
+		}
+		cur = got.NextCursor
+	}
+	require.Len(t, gotPendingMsgIDs, 4)
+	for i := 1; i < len(gotPendingMsgIDs); i++ {
+		assert.Greater(t, gotPendingMsgIDs[i-1], gotPendingMsgIDs[i], "tab=pending equal created_at tie-breaks by promptMessageId DESC")
+	}
+	assert.ElementsMatch(t, openMsgIDs, gotPendingMsgIDs)
+
+	// 2. Paginate tab=made at limit=1 across all 4 decision_answers -> strictly descending answerId, zero duplicates/skips.
+	var gotMadeAnsIDs []string
+	cur = ""
+	for page := 0; page < 6; page++ {
+		u := basePath + "?tab=made&limit=1"
+		if cur != "" {
+			u += "&cursor=" + cur
+		}
+		got := decodeMadeDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, u, nil))
+		for _, e := range got.Entries {
+			gotMadeAnsIDs = append(gotMadeAnsIDs, e.AnswerID)
+		}
+		if got.NextCursor == "" {
+			break
+		}
+		cur = got.NextCursor
+	}
+	require.Len(t, gotMadeAnsIDs, 4)
+	for i := 1; i < len(gotMadeAnsIDs); i++ {
+		assert.Greater(t, gotMadeAnsIDs[i-1], gotMadeAnsIDs[i], "tab=made equal created_at tie-breaks by answerId DESC")
+	}
+	assert.ElementsMatch(t, madeAnswerIDs, gotMadeAnsIDs)
+}

@@ -529,9 +529,50 @@ SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
 	return &t, nil
 }
 
+// GetTopicIncludingDeleted returns a topic by ID regardless of deletion state.
+// Returns nil if not found.
+func (s *pgWebChatStore) GetTopicIncludingDeleted(ctx context.Context, topicID string) (*WebChatTopic, error) {
+	const query = `
+SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
+       COALESCE(conversation_id, ''),
+       created_by, created_at, COALESCE(last_message_id, ''),
+       last_activity_at, deleted_at
+  FROM webchat_topic
+ WHERE id = $1
+`
+	var t WebChatTopic
+	var activityAt *time.Time
+	var deletedAt *time.Time
+	err := s.db.QueryRowContext(ctx, query, topicID).Scan(
+		&t.ID, &t.ProjectID, &t.Name, &t.IsGeneral, &t.DefaultAgent,
+		&t.ConversationID,
+		&t.CreatedBy, &t.CreatedAt, &t.LastMessageID, &activityAt, &deletedAt)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("webchat store: get topic including deleted: %w", err)
+	}
+	if activityAt != nil {
+		t.LastActivityAt = *activityAt
+	}
+	t.DeletedAt = deletedAt
+	return &t, nil
+}
+
 // ListTopics returns non-deleted topics for a project, ordered by last_activity_at DESC.
 func (s *pgWebChatStore) ListTopics(ctx context.Context, projectID string) ([]WebChatTopic, error) {
-	const query = `
+	return s.listTopics(ctx, projectID, false)
+}
+
+// ListTopicsIncludingDeleted returns all topics (including soft-deleted ones)
+// for a project, ordered by last_activity_at DESC.
+func (s *pgWebChatStore) ListTopicsIncludingDeleted(ctx context.Context, projectID string) ([]WebChatTopic, error) {
+	return s.listTopics(ctx, projectID, true)
+}
+
+func (s *pgWebChatStore) listTopics(ctx context.Context, projectID string, includeDeleted bool) ([]WebChatTopic, error) {
+	query := `
 SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
        COALESCE(conversation_id, ''),
        created_by, created_at, COALESCE(last_message_id, ''),
@@ -540,6 +581,17 @@ SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
  WHERE project_id = $1 AND deleted_at IS NULL
  ORDER BY last_activity_at DESC
 `
+	if includeDeleted {
+		query = `
+SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
+       COALESCE(conversation_id, ''),
+       created_by, created_at, COALESCE(last_message_id, ''),
+       last_activity_at, deleted_at
+  FROM webchat_topic
+ WHERE project_id = $1
+ ORDER BY last_activity_at DESC
+`
+	}
 	rows, err := s.db.QueryContext(ctx, query, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("webchat store: list topics: %w", err)

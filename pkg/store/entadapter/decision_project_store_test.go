@@ -367,4 +367,35 @@ func TestProjectDecisionStore_AnswersPaginationFiltersAndFacets(t *testing.T) {
 		Provenance: "bogus",
 	}, "", 0)
 	require.ErrorIs(t, err, store.ErrInvalidInput)
+
+	// 6. Equal-timestamp cursor tie-break: set all 4 answers to identical created_at
+	// and paginate with limit=1 across [topicRelease, dmAlice] -> strictly descending IDs,
+	// zero duplicates or skips.
+	sameTS := time.Date(2026, 11, 13, 18, 0, 0, 0, time.UTC)
+	allAnsIDs := []string{interpRes.Answers[0].ID, overrideAns.ID, directAns.ID, dmAns.ID}
+	for _, id := range allAnsIDs {
+		_, err := cs.DB().ExecContext(ctx,
+			rebindForDialect(cs.Dialect(), "UPDATE decision_answers SET created_at = ? WHERE id = ?"),
+			sameTS, id)
+		require.NoError(t, err)
+	}
+
+	var tieGotIDs []string
+	tieCur := ""
+	for page := 0; page < 6; page++ {
+		items, next, err := cs.ListProjectDecisionAnswers(ctx, projectID, []string{topicRelease, dmAlice}, store.ProjectDecisionAnswerFilter{}, tieCur, 1)
+		require.NoError(t, err)
+		for _, it := range items {
+			tieGotIDs = append(tieGotIDs, it.Answer.ID)
+		}
+		if next == "" {
+			break
+		}
+		tieCur = next
+	}
+	require.Len(t, tieGotIDs, 4)
+	for i := 1; i < len(tieGotIDs); i++ {
+		assert.Greater(t, tieGotIDs[i-1], tieGotIDs[i], "equal created_at must tie-break by id DESC")
+	}
+	assert.ElementsMatch(t, allAnsIDs, tieGotIDs)
 }

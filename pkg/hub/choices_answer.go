@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -141,12 +142,13 @@ func decisionCaller(w http.ResponseWriter, r *http.Request) UserIdentity {
 }
 
 // choiceAsker reads the asking agent of a choice answer, before anything
-// is recorded; both answer endpoints use it. A stopped or deleted asker
-// (store.ErrNotFound) is the gone case (design choices v4: the answers are
-// still recorded, and dispatch follows the undeliverable semantics): the
-// response row is stored failed and nothing is delivered. Any other lookup
-// error, or no agent without an error, writes an error response and
-// returns ok false, so the messaging check never runs on a missing agent.
+// is recorded; both answer endpoints use it. A hard-deleted (store.ErrNotFound)
+// or soft-deleted (!a.DeletedAt.IsZero()) asker is the gone case (design
+// choices v4: the answers are still recorded, and dispatch follows the
+// undeliverable semantics): the response row is stored failed and nothing is
+// delivered. Any other lookup error, or no agent without an error, writes an
+// error response and returns ok false, so the messaging check never runs on a
+// missing agent.
 func (s *Server) choiceAsker(w http.ResponseWriter, ctx context.Context, agentID string) (asker *store.Agent, gone bool, ok bool) {
 	a, err := s.store.GetAgent(ctx, agentID)
 	switch {
@@ -158,18 +160,21 @@ func (s *Server) choiceAsker(w http.ResponseWriter, ctx context.Context, agentID
 	case a == nil:
 		InternalError(w)
 		return nil, false, false
+	case !a.DeletedAt.IsZero():
+		return nil, true, true
 	}
 	return a, false, true
 }
 
 // authorizeDecisionChatKey authorizes user on the prompt's conversation key
 // (stored chat_key, or fallback messages.thread_id): authorizeChatSend to
-// answer a topic, authorizeChatSendRead to read one, and canonical DM
-// participant verification for a DM key. An agent peer in a DM key need not
-// still exist or currently accept messages here: deleted askers remain
-// readable and follow undeliverable answer semantics (choiceAsker), and live
-// asker message-mode checks run in the answer handlers after state resolution
-// (confirm needs no delivery).
+// answer a topic, authorizeChatSendRead (with soft-deleted topic read fallback
+// for project readers) to read one, and canonical DM participant + live peer
+// read verification for a DM key. A deleted (hard or soft) agent peer in a DM
+// key remains readable and answerable by the DM participant under gone-asker
+// undeliverable semantics (choiceAsker); for a live agent peer, the caller
+// must hold ActionRead on the agent (live message-mode checks run in the
+// answer handlers after state resolution because confirm needs no delivery).
 func (s *Server) authorizeDecisionChatKey(ctx context.Context, user UserIdentity, key string, answering bool) *chatSendError {
 	if user == nil {
 		return chatSendForbidden()
@@ -191,12 +196,23 @@ func (s *Server) authorizeDecisionChatKey(ctx context.Context, user UserIdentity
 		if canonical, cerr := messages.DMConversationKey(kindA, idA, kindB, idB); cerr != nil || canonical != key {
 			return chatSendBadRequest("invalid DM key format")
 		}
-		peerKind := kindA
+		peerKind, peerID := kindA, idA
 		if kindA == "user" && idA == user.ID() {
-			peerKind = kindB
+			peerKind, peerID = kindB, idB
 		}
 		switch peerKind {
 		case "agent":
+			ag, err := s.store.GetAgent(ctx, peerID)
+			if errors.Is(err, store.ErrNotFound) || (err == nil && ag != nil && !ag.DeletedAt.IsZero()) {
+				return nil
+			}
+			if err != nil || ag == nil {
+				slog.Warn("choices: DM peer agent lookup failed", "error", err)
+				return newChatSendError(http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Chat not available", nil)
+			}
+			if s.authzService == nil || !s.authzService.CheckAccess(ctx, user, agentResource(ag), ActionRead).Allowed {
+				return dmPeerRefused(ctx, user, key, "sender may not read the DM peer agent")
+			}
 			return nil
 		case "user":
 			return s.authorizeDMPeer(ctx, user, key)
@@ -209,6 +225,34 @@ func (s *Server) authorizeDecisionChatKey(ctx context.Context, user UserIdentity
 		return serr
 	}
 	_, serr := s.authorizeChatSendRead(ctx, user, key)
+	if serr == nil {
+		return nil
+	}
+	if serr.Status == http.StatusNotFound && validChatTopicKey(key) {
+		topic, terr := wcs.GetTopicIncludingDeleted(ctx, key)
+		if terr != nil {
+			logChatStoreFault(ctx, slog.Default(), "decision read: topic lookup failed", key, terr)
+			return newChatSendError(http.StatusInternalServerError, ErrCodeInternalError, "Internal server error", nil)
+		}
+		if topic != nil && topic.DeletedAt != nil {
+			project, perr := s.store.GetProject(ctx, topic.ProjectID)
+			if perr != nil {
+				if errors.Is(perr, store.ErrNotFound) {
+					return serr
+				}
+				logChatStoreFault(ctx, slog.Default(), "decision read: topic project lookup failed", key, perr)
+				return newChatSendError(http.StatusInternalServerError, ErrCodeInternalError, "Internal server error", nil)
+			}
+			access, aerr := s.chatThreadAccess(ctx, user, chatThreadRef{Key: key, Project: project})
+			if aerr != nil {
+				return newChatSendError(http.StatusInternalServerError, ErrCodeInternalError, "Internal server error", nil)
+			}
+			if access.Can(ChatActionRead) {
+				return nil
+			}
+			return chatSendRefusedAsNotFound("Thread")
+		}
+	}
 	return serr
 }
 

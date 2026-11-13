@@ -388,86 +388,60 @@ func (s *Server) resolveProjectReadableScope(
 		agentNames:            make(map[string]string),
 	}
 	seenKeys := make(map[string]bool)
-	postUser := chatPostIdentity(user)
-	userCanPostInProject := s.authzService != nil &&
-		s.authzService.CheckAccess(ctx, postUser, projectResource(project), ActionChatPost).Allowed
+	projectChatAccess := s.chatUserAccess(ctx, user, project,
+		[]string{ChatActionRead}, chatThreadWriteActions, nil, false, false)
 
-	// 1. Readable topics in the project.
-	if wcs != nil {
-		topics, err := wcs.ListTopics(ctx, project.ID)
+	// 1. Readable topics in the project (including soft-deleted topics so
+	// audit history is never erased; soft-deleted topics report
+	// conversationAvailable=false and userCanPost=false).
+	if wcs != nil && projectChatAccess.Can(ChatActionRead) {
+		topics, err := wcs.ListTopicsIncludingDeleted(ctx, project.ID)
 		if err != nil {
 			return nil, fmt.Errorf("list topics: %w", err)
 		}
+		canPostInActiveTopic := projectChatAccess.Can(ChatActionPost)
 		for _, t := range topics {
-			access, err := s.chatThreadAccess(ctx, user, chatThreadRef{Key: t.ID, Project: project})
-			if err != nil {
-				return nil, fmt.Errorf("topic access: %w", err)
-			}
-			if !access.Can(ChatActionRead) {
-				continue
-			}
 			if !seenKeys[t.ID] {
 				seenKeys[t.ID] = true
 				scope.chatKeys = append(scope.chatKeys, t.ID)
 			}
 			scope.conversationLabel[t.ID] = "#" + strings.TrimPrefix(t.Name, "#")
-			scope.conversationAvailable[t.ID] = true
-			scope.userCanPost[t.ID] = userCanPostInProject
+			if t.DeletedAt == nil {
+				scope.conversationAvailable[t.ID] = true
+				scope.userCanPost[t.ID] = canPostInActiveTopic
+			} else {
+				scope.conversationAvailable[t.ID] = false
+				scope.userCanPost[t.ID] = false
+			}
 		}
 	}
 
-	// 2. Collect all agent UUIDs associated with the project: live + soft-deleted
-	// agents from AgentStore, unioned with distinct asker_agent_id values from
-	// decisions in this project so hard-deleted agents' DMs remain visible.
-	candidateAgentIDs := make([]string, 0)
-	seenAgentIDs := make(map[string]bool)
-
-	cursor := ""
-	for page := 0; page < 20; page++ {
-		res, err := s.store.ListAgents(ctx, store.AgentFilter{
-			ProjectID:      project.ID,
-			IncludeDeleted: true,
-		}, store.ListOptions{
-			Limit:          500,
-			Cursor:         cursor,
-			SkipTotalCount: true,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("list project agents: %w", err)
-		}
-		for i := range res.Items {
-			ag := res.Items[i]
-			name := agentDisplayName(&ag)
-			if name != "" {
-				scope.agentNames[ag.ID] = name
-			}
-			if ag.DeletedAt.IsZero() {
-				agCopy := ag
-				scope.liveAgents[ag.ID] = &agCopy
-			}
-			if !seenAgentIDs[ag.ID] {
-				seenAgentIDs[ag.ID] = true
-				candidateAgentIDs = append(candidateAgentIDs, ag.ID)
-			}
-		}
-		if res.NextCursor == "" {
-			break
-		}
-		cursor = res.NextCursor
-	}
-
+	// 2. Collect distinct asking agent UUIDs that actually appear on decisions
+	// in this project (SQL GROUP BY asker_agent_id). An agent with zero
+	// decisions in this project can have no DM decision rows, so candidate DM
+	// keys are derived solely from this distinct set.
 	decAgents, err := s.store.ListProjectDecisionAgents(ctx, project.ID)
 	if err != nil {
 		return nil, fmt.Errorf("list project decision agents: %w", err)
 	}
+	candidateAgentIDs := make([]string, 0, len(decAgents))
 	for _, da := range decAgents {
-		if scope.agentNames[da.ID] == "" && da.Name != "" {
+		if da.Name != "" {
 			scope.agentNames[da.ID] = da.Name
 		}
-		if !seenAgentIDs[da.ID] {
-			seenAgentIDs[da.ID] = true
-			candidateAgentIDs = append(candidateAgentIDs, da.ID)
+		ag, gerr := s.store.GetAgent(ctx, da.ID)
+		if gerr != nil && !errors.Is(gerr, store.ErrNotFound) {
+			return nil, fmt.Errorf("get decision agent %s: %w", da.ID, gerr)
 		}
+		if ag != nil {
+			if name := agentDisplayName(ag); name != "" {
+				scope.agentNames[da.ID] = name
+			}
+			if ag.DeletedAt.IsZero() {
+				scope.liveAgents[da.ID] = ag
+			}
+		}
+		candidateAgentIDs = append(candidateAgentIDs, da.ID)
 	}
 
 	// Build viewer's canonical DM keys dm:agent:<agentUUID>:user:<viewerID>.
@@ -552,30 +526,34 @@ func (s *Server) listProjectDecisions(w http.ResponseWriter, r *http.Request, pr
 		return
 	}
 
-	// Load facets (agents + answerers) scoped strictly to readable chat keys.
-	facetAgents, facetAnswerers, err := s.store.ListProjectDecisionFacets(ctx, project.ID, scope.chatKeys)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
-	agentsFacet := make([]ProjectDecisionActorView, 0, len(facetAgents))
-	for _, a := range facetAgents {
-		name := scope.agentNames[a.ID]
-		if name == "" {
-			name = a.Name
+	agentsFacet := []ProjectDecisionActorView{}
+	answerersFacet := []ProjectDecisionActorView{}
+	if pq.limit > 0 {
+		// Load facets (agents + answerers) scoped strictly to readable chat keys.
+		facetAgents, facetAnswerers, err := s.store.ListProjectDecisionFacets(ctx, project.ID, scope.chatKeys)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
 		}
-		agentsFacet = append(agentsFacet, ProjectDecisionActorView{ID: a.ID, Name: name})
-	}
-	sort.Slice(agentsFacet, func(i, j int) bool {
-		ni, nj := strings.ToLower(agentsFacet[i].Name), strings.ToLower(agentsFacet[j].Name)
-		if ni != nj {
-			return ni < nj
+		agentsFacet = make([]ProjectDecisionActorView, 0, len(facetAgents))
+		for _, a := range facetAgents {
+			name := scope.agentNames[a.ID]
+			if name == "" {
+				name = a.Name
+			}
+			agentsFacet = append(agentsFacet, ProjectDecisionActorView{ID: a.ID, Name: name})
 		}
-		return agentsFacet[i].ID < agentsFacet[j].ID
-	})
-	answerersFacet := make([]ProjectDecisionActorView, 0, len(facetAnswerers))
-	for _, a := range facetAnswerers {
-		answerersFacet = append(answerersFacet, ProjectDecisionActorView{ID: a.ID, Name: a.Name})
+		sort.Slice(agentsFacet, func(i, j int) bool {
+			ni, nj := strings.ToLower(agentsFacet[i].Name), strings.ToLower(agentsFacet[j].Name)
+			if ni != nj {
+				return ni < nj
+			}
+			return agentsFacet[i].ID < agentsFacet[j].ID
+		})
+		answerersFacet = make([]ProjectDecisionActorView, 0, len(facetAnswerers))
+		for _, a := range facetAnswerers {
+			answerersFacet = append(answerersFacet, ProjectDecisionActorView{ID: a.ID, Name: a.Name})
+		}
 	}
 
 	// Compute live counts and classified prompt cards across open prompts.

@@ -113,9 +113,17 @@ func TestBackfillDecisionChatKeys_PopulatesPresentAndSkipsPurged(t *testing.T) {
 	_, err := cs.DB().ExecContext(ctx, rebindForDialect(cs.Dialect(), "DELETE FROM messages WHERE id = ?"), purgedMsgID)
 	require.NoError(t, err)
 
-	// 3. Legacy row whose prompt message has an empty thread_id.
-	_, emptyThreadRowID := seedDecisionPromptForBackfillTest(t, cs, projectID, agentID, "", "D3")
+	// 3. Legacy row whose prompt message has a NULL thread_id.
+	_, nullThreadRowID := seedDecisionPromptForBackfillTest(t, cs, projectID, agentID, "", "D3")
+	clearDecisionChatKey(t, cs, nullThreadRowID)
+
+	// 4. Legacy row whose prompt message has a literal empty-string thread_id ('').
+	emptyThreadMsgID, emptyThreadRowID := seedDecisionPromptForBackfillTest(t, cs, projectID, agentID, "topic-to-blank", "D4")
 	clearDecisionChatKey(t, cs, emptyThreadRowID)
+	_, err = cs.DB().ExecContext(ctx,
+		rebindForDialect(cs.Dialect(), "UPDATE messages SET thread_id = '' WHERE id = ?"),
+		emptyThreadMsgID)
+	require.NoError(t, err)
 
 	// Clear marker if newTestCompositeStore ran Migrate at init.
 	_, _ = cs.DB().ExecContext(ctx,
@@ -133,6 +141,7 @@ func TestBackfillDecisionChatKeys_PopulatesPresentAndSkipsPurged(t *testing.T) {
 	assert.Empty(t, gotPurged.ChatKey)
 	assert.False(t, rawDecisionChatKey(t, cs, purgedRowID).Valid)
 
+	assert.False(t, rawDecisionChatKey(t, cs, nullThreadRowID).Valid)
 	assert.False(t, rawDecisionChatKey(t, cs, emptyThreadRowID).Valid)
 }
 

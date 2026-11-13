@@ -30,6 +30,19 @@ import (
 	"github.com/google/uuid"
 )
 
+const maxProjectDecisionFacetItems = 500
+
+type groupedDecisionAgent struct {
+	AskerAgentID uuid.UUID `json:"asker_agent_id"`
+	Name         string    `json:"name"`
+}
+
+type groupedDecisionAnswerer struct {
+	AnsweredByUserID string `json:"answered_by_user_id"`
+	Name             string `json:"name"`
+	Email            string `json:"email"`
+}
+
 // ListProjectDecisionAgents implements store.DecisionStore.
 func (c *CompositeStore) ListProjectDecisionAgents(ctx context.Context, projectID string) ([]store.ProjectDecisionActor, error) {
 	projectUUID, err := parseGetID(projectID)
@@ -37,26 +50,22 @@ func (c *CompositeStore) ListProjectDecisionAgents(ctx context.Context, projectI
 		return nil, err
 	}
 
-	rows, err := c.client.Decision.Query().
+	var rows []groupedDecisionAgent
+	err = c.client.Decision.Query().
 		Where(decision.ProjectID(projectUUID)).
-		Order(ent.Desc(decision.FieldCreatedAt), ent.Desc(decision.FieldID)).
-		Select(decision.FieldAskerAgentID, decision.FieldAskerAgentName).
-		All(ctx)
+		Order(ent.Asc(decision.FieldAskerAgentID)).
+		GroupBy(decision.FieldAskerAgentID).
+		Aggregate(ent.As(ent.Max(decision.FieldAskerAgentName), "name")).
+		Scan(ctx, &rows)
 	if err != nil {
 		return nil, mapError(err)
 	}
 
-	seen := make(map[string]bool, len(rows))
-	var out []store.ProjectDecisionActor
+	out := make([]store.ProjectDecisionActor, 0, len(rows))
 	for _, r := range rows {
-		id := r.AskerAgentID.String()
-		if seen[id] {
-			continue
-		}
-		seen[id] = true
 		out = append(out, store.ProjectDecisionActor{
-			ID:   id,
-			Name: r.AskerAgentName,
+			ID:   r.AskerAgentID.String(),
+			Name: r.Name,
 		})
 	}
 	sortProjectDecisionActors(out)
@@ -333,55 +342,52 @@ func (c *CompositeStore) ListProjectDecisionFacets(
 		return nil, nil, nil
 	}
 
-	decRows, err := c.client.Decision.Query().
+	var decRows []groupedDecisionAgent
+	err = c.client.Decision.Query().
 		Where(decision.ProjectID(projectUUID), decision.ChatKeyIn(keys...)).
-		Order(ent.Desc(decision.FieldCreatedAt), ent.Desc(decision.FieldID)).
-		Select(decision.FieldAskerAgentID, decision.FieldAskerAgentName).
-		All(ctx)
+		Order(ent.Asc(decision.FieldAskerAgentID)).
+		Limit(maxProjectDecisionFacetItems).
+		GroupBy(decision.FieldAskerAgentID).
+		Aggregate(ent.As(ent.Max(decision.FieldAskerAgentName), "name")).
+		Scan(ctx, &decRows)
 	if err != nil {
 		return nil, nil, mapError(err)
 	}
-	seenAgents := make(map[string]bool, len(decRows))
-	var agents []store.ProjectDecisionActor
+	agents := make([]store.ProjectDecisionActor, 0, len(decRows))
 	for _, r := range decRows {
-		id := r.AskerAgentID.String()
-		if seenAgents[id] {
-			continue
-		}
-		seenAgents[id] = true
-		agents = append(agents, store.ProjectDecisionActor{ID: id, Name: r.AskerAgentName})
+		agents = append(agents, store.ProjectDecisionActor{ID: r.AskerAgentID.String(), Name: r.Name})
 	}
 	sortProjectDecisionActors(agents)
 
-	ansRows, err := c.client.DecisionAnswer.Query().
+	var ansRows []groupedDecisionAnswerer
+	err = c.client.DecisionAnswer.Query().
 		Where(
 			decisionanswer.ProjectID(projectUUID),
 			decisionanswer.AnsweredByUserIDNotNil(),
 			decisionanswer.AnsweredByUserIDNEQ(""),
 			decisionAnswerInChatKeys(projectUUID, keys),
 		).
-		Order(ent.Desc(decisionanswer.FieldCreatedAt), ent.Desc(decisionanswer.FieldID)).
-		Select(decisionanswer.FieldAnsweredByUserID, decisionanswer.FieldAnsweredByName, decisionanswer.FieldAnsweredByEmail).
-		All(ctx)
+		Order(ent.Asc(decisionanswer.FieldAnsweredByUserID)).
+		Limit(maxProjectDecisionFacetItems).
+		GroupBy(decisionanswer.FieldAnsweredByUserID).
+		Aggregate(
+			ent.As(ent.Max(decisionanswer.FieldAnsweredByName), "name"),
+			ent.As(ent.Max(decisionanswer.FieldAnsweredByEmail), "email"),
+		).
+		Scan(ctx, &ansRows)
 	if err != nil {
 		return nil, nil, mapError(err)
 	}
-	seenUsers := make(map[string]bool, len(ansRows))
-	var answerers []store.ProjectDecisionActor
+	answerers := make([]store.ProjectDecisionActor, 0, len(ansRows))
 	for _, r := range ansRows {
-		if r.AnsweredByUserID == nil || *r.AnsweredByUserID == "" {
+		if r.AnsweredByUserID == "" {
 			continue
 		}
-		uid := *r.AnsweredByUserID
-		if seenUsers[uid] {
-			continue
-		}
-		seenUsers[uid] = true
-		name := r.AnsweredByName
+		name := r.Name
 		if name == "" {
-			name = r.AnsweredByEmail
+			name = r.Email
 		}
-		answerers = append(answerers, store.ProjectDecisionActor{ID: uid, Name: name})
+		answerers = append(answerers, store.ProjectDecisionActor{ID: r.AnsweredByUserID, Name: name})
 	}
 	sortProjectDecisionActors(answerers)
 
