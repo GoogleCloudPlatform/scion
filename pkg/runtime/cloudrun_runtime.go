@@ -579,8 +579,11 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	// outputs directory settings and the volumes, so the setting reads the
 	// same as in the instance built below.
 	if cloudRunNativeAssign(cfg) {
-		env := r.buildCloudRunInstance(cfg, uid, gid, nil).Containers[0].GetEnv()
-		if err := checkCloudRunInitFirewall(cfg, env); err != nil {
+		envInst, err := r.buildCloudRunInstance(cfg, uid, gid, nil)
+		if err != nil {
+			return "", err
+		}
+		if err := checkCloudRunInitFirewall(cfg, envInst.Containers[0].GetEnv()); err != nil {
 			return "", err
 		}
 	}
@@ -626,9 +629,11 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 
 	// The instance this start computes. It is built before the read, so an
 	// existing instance is reused only when it matches (ptone/scion#7297).
-	inst, err := r.buildCloudRunInstanceChecked(cfg, uid, gid, nfsPaths)
+	inst, err := r.buildCloudRunInstance(cfg, uid, gid, nfsPaths)
 	if err != nil {
-		nfsPaths.rollbackCreated(err)
+		if nfsPaths != nil {
+			nfsPaths.rollbackCreated(err)
+		}
 		return "", err
 	}
 	inst.Containers[0].Resources = resources
@@ -1028,12 +1033,7 @@ func (r *CloudRunRuntime) deleteOwnAfterFailedWait(ctx context.Context, c cloudr
 // secret.IsReservedEnvTarget) never reaches the instance from any source,
 // and the harness env never sets a name cloudRunHarnessEnvDenied reports,
 // so the SCION_METADATA_* settings in cfg.Env are always the hub's.
-func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfsPaths *cloudRunNFSProvisionPaths) *runpb.Instance {
-	inst, _ := r.buildCloudRunInstanceChecked(cfg, uid, gid, nfsPaths)
-	return inst
-}
-
-func (r *CloudRunRuntime) buildCloudRunInstanceChecked(cfg RunConfig, uid, gid int, nfsPaths *cloudRunNFSProvisionPaths) (*runpb.Instance, error) {
+func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfsPaths *cloudRunNFSProvisionPaths) (*runpb.Instance, error) {
 	var envVars []*runpb.EnvVar
 	for _, e := range cfg.Env {
 		parts := strings.SplitN(e, "=", 2)

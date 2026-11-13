@@ -36,10 +36,13 @@ func TestBuildCloudRunInstance_StartupProbeOnStartupListener(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	inst := rt.buildCloudRunInstance(RunConfig{
+	inst, err := rt.buildCloudRunInstance(RunConfig{
 		Image:  "test-image:latest",
 		Labels: map[string]string{"agent_id": "agent-1"},
 	}, 1000, 1000, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(inst.GetContainers()) != 1 {
 		t.Fatalf("got %d containers, want 1", len(inst.GetContainers()))
 	}

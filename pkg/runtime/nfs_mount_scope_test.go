@@ -637,7 +637,11 @@ func TestCloudRunInstance_NFSMountScope(t *testing.T) {
 			if err != nil {
 				t.Fatalf("provisionCloudRunNFS: %v", err)
 			}
-			assertMountScope(t, cloudRunShareMounts(t, r.buildCloudRunInstance(cfg, 1000, 1000, paths)), []shareMount{
+			baseInst, err := r.buildCloudRunInstance(cfg, 1000, 1000, paths)
+			if err != nil {
+				t.Fatalf("buildCloudRunInstance: %v", err)
+			}
+			assertMountScope(t, cloudRunShareMounts(t, baseInst), []shareMount{
 				{rel: tc.workspace, target: "/workspace"},
 				{rel: scopeRel("agents", scopeAgent, "home-"+scopeAgentID), target: home},
 			})
@@ -660,7 +664,11 @@ func TestCloudRunInstance_NFSMountScope(t *testing.T) {
 					"notes":      scopeRel("shared-dirs", "notes"),
 				},
 			}
-			assertMountScope(t, cloudRunShareMounts(t, r.buildCloudRunInstance(withShared, 1000, 1000, paths)), []shareMount{
+			sharedInst, err := r.buildCloudRunInstance(withShared, 1000, 1000, paths)
+			if err != nil {
+				t.Fatalf("buildCloudRunInstance(withShared): %v", err)
+			}
+			assertMountScope(t, cloudRunShareMounts(t, sharedInst), []shareMount{
 				{rel: tc.workspace, target: "/workspace"},
 				{rel: scopeRel("agents", scopeAgent, "home-"+scopeAgentID), target: home},
 				{rel: scopeRel("shared-dirs", "scratchpad"), target: "/scion-volumes/scratchpad"},

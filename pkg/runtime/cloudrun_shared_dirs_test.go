@@ -112,11 +112,13 @@ func TestBuildCloudRunInstance_SharedDirs_MountsNFSLeaves(t *testing.T) {
 			cfg.ContainerWorkspace = tc.containerWorkspace
 
 			// Early env-only call (nfsPaths == nil) emits no volumes/mounts.
-			envOnly := rt.buildCloudRunInstance(cfg, 1000, 1000, nil)
+			envOnly, err := rt.buildCloudRunInstance(cfg, 1000, 1000, nil)
+			require.NoError(t, err)
 			assert.Empty(t, envOnly.GetVolumes())
 			assert.Empty(t, envOnly.GetContainers()[0].GetVolumeMounts())
 
-			inst := rt.buildCloudRunInstance(cfg, 1000, 1000, testCloudRunSharedDirNFSPaths())
+			inst, err := rt.buildCloudRunInstance(cfg, 1000, 1000, testCloudRunSharedDirNFSPaths())
+			require.NoError(t, err)
 			vols := inst.GetVolumes()
 			mounts := inst.GetContainers()[0].GetVolumeMounts()
 			require.Len(t, vols, 5, "workspace, home, scion-mem + 2 shared dirs")
@@ -152,6 +154,27 @@ func TestBuildCloudRunInstance_SharedDirs_MountsNFSLeaves(t *testing.T) {
 			assert.Empty(t, mountByName["shared-dir-1"].GetSubPath())
 		})
 	}
+}
+
+// TestBuildCloudRunInstance_SharedDirs_PropagatesError verifies that
+// buildCloudRunInstance propagates shared-dir validation errors rather than
+// swallowing them and returning a nil *runpb.Instance without an error.
+func TestBuildCloudRunInstance_SharedDirs_PropagatesError(t *testing.T) {
+	rt, err := NewCloudRunRuntime(&config.CloudRunConfig{
+		ProjectID: "test-project",
+		Location:  "us-central1",
+		NFSServer: "10.128.15.241",
+		NFSExport: "/srv/scion-shared",
+	})
+	require.NoError(t, err)
+
+	badCfg := testCloudRunSharedDirRunConfig()
+	badCfg.SharedDirStorage = nil
+
+	inst, err := rt.buildCloudRunInstance(badCfg, 1000, 1000, testCloudRunSharedDirNFSPaths())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "require NFS project storage")
+	assert.Nil(t, inst)
 }
 
 // TestCloudRunSharedDirs_ParityWithBindAndKubernetes verifies that for one

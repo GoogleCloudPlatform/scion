@@ -128,7 +128,10 @@ func TestBuildCloudRunInstance_CloudRunIdentity(t *testing.T) {
 			if tc.callerLabel != "" {
 				cfg.Labels[tc.callerLabel] = "caller-value"
 			}
-			inst := rt.buildCloudRunInstance(cfg, 1000, 1000, nil)
+			inst, err := rt.buildCloudRunInstance(cfg, 1000, 1000, nil)
+			if err != nil {
+				t.Fatalf("buildCloudRunInstance: %v", err)
+			}
 			if inst.GetServiceAccount() != tc.wantSA {
 				t.Errorf("ServiceAccount = %q, want %q", inst.GetServiceAccount(), tc.wantSA)
 			}
@@ -162,7 +165,10 @@ func TestBuildCloudRunInstance_GateOffUnchanged(t *testing.T) {
 	base.HomeDir = "/home/scion"
 	base.CommandArgs = []string{"sleep", "60"}
 
-	off := rt.buildCloudRunInstance(base, 1000, 1000, paths)
+	off, err := rt.buildCloudRunInstance(base, 1000, 1000, paths)
+	if err != nil {
+		t.Fatalf("buildCloudRunInstance(off): %v", err)
+	}
 	if off.GetServiceAccount() != nativeIDInstanceSA {
 		t.Errorf("gate off: ServiceAccount = %q, want the configured account", off.GetServiceAccount())
 	}
@@ -185,7 +191,10 @@ func TestBuildCloudRunInstance_GateOffUnchanged(t *testing.T) {
 		on.Labels[k] = v
 	}
 	on.CloudRunIdentity = &api.CloudRunIdentity{ServiceAccount: nativeIDAssignedSA, Mode: "assign"}
-	withID := rt.buildCloudRunInstance(on, 1000, 1000, paths)
+	withID, err := rt.buildCloudRunInstance(on, 1000, 1000, paths)
+	if err != nil {
+		t.Fatalf("buildCloudRunInstance(on): %v", err)
+	}
 	// Undo exactly the two documented differences; the rest must match.
 	withID.ServiceAccount = nativeIDInstanceSA
 	delete(withID.Labels, cloudRunIdentityLabel)

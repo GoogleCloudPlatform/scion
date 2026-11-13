@@ -637,7 +637,10 @@ func TestBuildCloudRunInstance_HarnessCommand(t *testing.T) {
 			},
 			Task: "do something",
 		}
-		inst := rt.buildCloudRunInstance(cfg, 1000, 1000, nil)
+		inst, err := rt.buildCloudRunInstance(cfg, 1000, 1000, nil)
+		if err != nil {
+			t.Fatalf("buildCloudRunInstance: %v", err)
+		}
 
 		if len(inst.Containers) != 1 {
 			t.Fatalf("expected 1 container, got %d", len(inst.Containers))
@@ -682,7 +685,10 @@ func TestBuildCloudRunInstance_HarnessCommand(t *testing.T) {
 			Labels:      map[string]string{"agent_id": "agent-2"},
 			CommandArgs: []string{"custom-binary", "--flag"},
 		}
-		inst := rt.buildCloudRunInstance(cfg, 1000, 1000, nil)
+		inst, err := rt.buildCloudRunInstance(cfg, 1000, 1000, nil)
+		if err != nil {
+			t.Fatalf("buildCloudRunInstance: %v", err)
+		}
 
 		c := inst.Containers[0]
 		if len(c.Command) != 0 {
@@ -698,7 +704,10 @@ func TestBuildCloudRunInstance_HarnessCommand(t *testing.T) {
 			Image:  "test-image:latest",
 			Labels: map[string]string{"agent_id": "agent-3"},
 		}
-		inst := rt.buildCloudRunInstance(cfg, 1000, 1000, nil)
+		inst, err := rt.buildCloudRunInstance(cfg, 1000, 1000, nil)
+		if err != nil {
+			t.Fatalf("buildCloudRunInstance: %v", err)
+		}
 
 		c := inst.Containers[0]
 		if len(c.Command) != 0 {
@@ -902,7 +911,7 @@ func TestBuildCloudRunInstanceMountsResolvedNFSServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	inst := rt.buildCloudRunInstance(RunConfig{
+	inst, err := rt.buildCloudRunInstance(RunConfig{
 		Image:  "test-image:latest",
 		Labels: map[string]string{"agent_id": "agent-1"},
 	}, 1000, 1000, &cloudRunNFSProvisionPaths{
@@ -910,6 +919,9 @@ func TestBuildCloudRunInstanceMountsResolvedNFSServer(t *testing.T) {
 		workspaceExportPath: "/scion/projects/p/workspace",
 		homeExportPath:      "/scion/projects/p/agents/a/home",
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	var n int
 	for _, v := range inst.Volumes {
 		if nfs := v.GetNfs(); nfs != nil {

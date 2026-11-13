@@ -126,7 +126,10 @@ func TestCloudRunProvisionNFS_ClonePerAgentOwnWorkspace(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		inst := rt.buildCloudRunInstance(RunConfig{Image: "img", Labels: map[string]string{"agent_id": "a"}}, 1000, 1000, paths)
+		inst, err := rt.buildCloudRunInstance(RunConfig{Image: "img", Labels: map[string]string{"agent_id": "a"}}, 1000, 1000, paths)
+		if err != nil {
+			t.Fatal(err)
+		}
 		got := map[string]string{}
 		for _, v := range inst.Volumes {
 			if nfs := v.GetNfs(); nfs != nil {

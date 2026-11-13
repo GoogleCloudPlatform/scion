@@ -79,7 +79,8 @@ func TestBuildPod_TokenRemoteRelayed(t *testing.T) {
 func TestCloudRun_TokenRemoteRelayed(t *testing.T) {
 	rt, err := NewCloudRunRuntime(&config.CloudRunConfig{ProjectID: "test-project", Location: "us-central1"})
 	require.NoError(t, err)
-	inst := rt.buildCloudRunInstance(RunConfig{Image: "test-image", Env: []string{tokenRemoteEnvEntry}}, 1000, 1000, nil)
+	inst, err := rt.buildCloudRunInstance(RunConfig{Image: "test-image", Env: []string{tokenRemoteEnvEntry}}, 1000, 1000, nil)
+	require.NoError(t, err)
 	require.Len(t, inst.Containers, 1)
 	found := false
 	for _, ev := range inst.Containers[0].Env {
