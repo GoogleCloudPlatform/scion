@@ -2226,8 +2226,8 @@ func runHubBrokers(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	fmt.Printf("%-36s  %-20s  %-10s  %-12s  %s\n", "ID", "NAME", "STATUS", "AUTO-PROVIDE", "LAST SEEN")
-	fmt.Printf("%-36s  %-20s  %-10s  %-12s  %s\n", "------------------------------------", "--------------------", "----------", "------------", "---------------")
+	fmt.Printf("%-36s  %-20s  %-34s  %-10s  %-12s  %s\n", "ID", "NAME", "TARGET", "STATUS", "AUTO-PROVIDE", "LAST SEEN")
+	fmt.Printf("%-36s  %-20s  %-34s  %-10s  %-12s  %s\n", "------------------------------------", "--------------------", "----------------------------------", "----------", "------------", "---------------")
 	for _, h := range resp.Brokers {
 		lastSeen := "-"
 		if !h.LastHeartbeat.IsZero() {
@@ -2237,7 +2237,8 @@ func runHubBrokers(cmd *cobra.Command, args []string) error {
 		if h.AutoProvide {
 			autoProvide = "yes"
 		}
-		fmt.Printf("%-36s  %-20s  %-10s  %-12s  %s\n", h.ID, truncate(h.Name, 20), h.Status, autoProvide, lastSeen)
+		target := truncateRunes(formatBrokerTargetCell(h), 34, true)
+		fmt.Printf("%-36s  %-20s  %-34s  %-10s  %-12s  %s\n", h.ID, truncate(h.Name, 20), target, h.Status, autoProvide, lastSeen)
 	}
 
 	return nil

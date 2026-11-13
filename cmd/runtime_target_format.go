@@ -23,7 +23,33 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
+
+// formatBrokerTargetCell renders the TARGET column of `scion hub brokers`:
+// for a flat Runtime Broker, its runtime target type, optional display name
+// and optional reported namespace ("kubernetes / Cluster A / ns agents");
+// for a legacy Runtime Broker, "legacy" with its profile count when non-zero.
+func formatBrokerTargetCell(b hubclient.RuntimeBroker) string {
+	if b.RuntimeTarget != nil {
+		parts := []string{b.RuntimeTarget.Type}
+		if b.RuntimeTarget.DisplayName != "" {
+			parts = append(parts, b.RuntimeTarget.DisplayName)
+		}
+		if b.RuntimeTargetPresentation != nil && b.RuntimeTargetPresentation.Target != nil && b.RuntimeTargetPresentation.Target.Namespace != "" {
+			parts = append(parts, "ns "+b.RuntimeTargetPresentation.Target.Namespace)
+		}
+		return strings.Join(parts, " / ")
+	}
+	switch n := len(b.Profiles); n {
+	case 0:
+		return "legacy"
+	case 1:
+		return "legacy (1 profile)"
+	default:
+		return fmt.Sprintf("legacy (%d profiles)", n)
+	}
+}
 
 // presentationCaption heads the reported defaults of a flat Runtime Broker:
 // they are what the instance reported, defaults for new agents only, and

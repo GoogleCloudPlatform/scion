@@ -631,6 +631,13 @@ func wrapHubError(err error) error {
 	if msg, ok := renderBrokerFailure(err); ok {
 		return &hubError{msg: msg, err: err}
 	}
+	var apiErr *apiclient.APIError
+	if errors.As(err, &apiErr) && apiErr.Code == api.ErrCodeRuntimeProfileUnsupported {
+		return &hubError{
+			msg: err.Error() + "; select the target Runtime Broker directly with --broker instead (--profile applies only to legacy profile-based Runtime Brokers)",
+			err: err,
+		}
+	}
 	if config.IsHubManagedAgent() || !shouldSuggestHubCheck(err) {
 		return &hubError{msg: err.Error(), err: err}
 	}

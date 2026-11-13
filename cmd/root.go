@@ -500,7 +500,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVarP(&projectPath, "project", "g", "", "Project identifier: path, slug (with Hub), or git URL (with Hub)")
 
 	rootCmd.PersistentFlags().BoolVar(&globalMode, "global", false, "Use the global project (equivalent to --project global)")
-	rootCmd.PersistentFlags().StringVarP(&profile, "profile", "p", "", "Configuration profile to use")
+	rootCmd.PersistentFlags().StringVarP(&profile, "profile", "p", "", "Configuration profile to use (for legacy profile-based Runtime Brokers; select flat Runtime Brokers with --broker)")
 	rootCmd.PersistentFlags().StringVar(&outputFormat, "format", "", "Output format (e.g., json)")
 
 	// Hub integration flags
