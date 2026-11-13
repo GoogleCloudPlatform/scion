@@ -19,6 +19,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -441,12 +442,18 @@ func TestRunInit_UnwritableFileSecretTarget_ReportsHubErrorWithStagedToken(t *te
 	)
 	target := filepath.Join(roDir, "sub", "my-key.pem")
 
-	var gotAgentToken, gotBody string
+	var (
+		mu            sync.Mutex
+		gotAgentToken string
+		gotBody       string
+	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAgentToken = r.Header.Get("X-Scion-Agent-Token")
 		var buf bytes.Buffer
 		_, _ = buf.ReadFrom(r.Body)
+		mu.Lock()
+		gotAgentToken = r.Header.Get("X-Scion-Agent-Token")
 		gotBody = buf.String()
+		mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(srv.Close)
@@ -475,14 +482,19 @@ func TestRunInit_UnwritableFileSecretTarget_ReportsHubErrorWithStagedToken(t *te
 		t.Fatal("RunInit() = 0, want non-zero when file secret target is unwritable")
 	}
 
-	if gotAgentToken != tokenCanary {
-		t.Fatalf("Hub status report X-Scion-Agent-Token = %q, want staged HubToken (reportInitFailure ran without staging HubToken)", gotAgentToken)
+	mu.Lock()
+	agentToken := gotAgentToken
+	body := gotBody
+	mu.Unlock()
+
+	if agentToken != tokenCanary {
+		t.Fatalf("Hub status report X-Scion-Agent-Token = %q, want staged HubToken (reportInitFailure ran without staging HubToken)", agentToken)
 	}
-	if !strings.Contains(gotBody, string(state.PhaseError)) || !strings.Contains(gotBody, "MY_KEY") || !strings.Contains(gotBody, target) {
-		t.Errorf("Hub status report body = %q, want phase=%s naming MY_KEY and %s", gotBody, state.PhaseError, target)
+	if !strings.Contains(body, string(state.PhaseError)) || !strings.Contains(body, "MY_KEY") || !strings.Contains(body, target) {
+		t.Errorf("Hub status report body = %q, want phase=%s naming MY_KEY and %s", body, state.PhaseError, target)
 	}
-	if strings.Contains(gotBody, secretCanary) || strings.Contains(gotBody, tokenCanary) {
-		t.Errorf("Hub status report leaked credential material: %q", gotBody)
+	if strings.Contains(body, secretCanary) || strings.Contains(body, tokenCanary) {
+		t.Errorf("Hub status report leaked credential material: %q", body)
 	}
 }
 
