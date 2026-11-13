@@ -3,7 +3,7 @@
 **Date:** 2026-11-13
 **Branch:** `scion/choices-p2b`
 **Issues:** `ptone/scion#7798` (sub-issue of `ptone/scion#7752`; epic `ptone/scion#7514`; depends on `ptone/scion#7775`, `ptone/scion#7776`, `ptone/scion#7797`)
-**Stacked Prerequisite Base (`PREREQ_SHA`):** `3af4cd3bb5148889417897781652de03771c2394` (cherry-picked `scion/choices-p2-0` @ `d7c1ed0ac`, `scion/choices-p2-t` @ `56059c482`, and `scion/choices-p2a` @ `c8fb4c44d` onto `upstream-main` @ `a682c6dcc`)
+**Upstream Base (`upstream-main`):** `e4f59a5f2f1abcbffb63ddf8c5f294575626c9fd` (`GoogleCloudPlatform/scion:main`, including merged `GoogleCloudPlatform/scion#4797`, `GoogleCloudPlatform/scion#4799`, and `GoogleCloudPlatform/scion#4802`)
 
 ## Problem
 
@@ -15,7 +15,7 @@ Implemented the complete Phase 2B web confirm/change experience, Hub reload/SSE 
 
 1. **Hub Reload Parity & Live SSE Set Attribution (`pkg/hub/`)**:
    - Added `PreviousChoiceLabel string` (`json:"previousChoiceLabel,omitempty"`) to `AnswerView` in `pkg/hub/choices_view.go` and populated `v.Decision.PreviousChoiceLabel = previousChoiceLabel(eff, d)` inside `decisionView`, ensuring overridden prompt cards retain `changed from the interpreted answer <Label>` across chat history reloads and `GET /api/v1/decisions/{rowId}`.
-   - Updated `interpretedChoiceResponseSetView` in `pkg/hub/choices_agent.go` to construct per-row items via `choiceResponseSetAnswerOf(a, ds[i])`, preserving `answeredByUserId`, `answeredByName`, `interpretedByAgentId`, and `sourceMessageId` on live SSE `choice-response` set events.
+   - Added live SSE set attribution assertions in `pkg/hub/choices_agent_test.go` verifying `answeredByUserId`, `answeredByName`, `interpretedByAgentId`, and `sourceMessageId` on multi-prompt interpreted `choice-response` set events.
 
 2. **Shared `actionableReason` Golden Table & `statusRank` SSE Guard (`web/src/shared/`, `web/src/client/`)**:
    - Added `previousChoiceLabel?: string` and `DecisionAnswerView` alias in `web/src/shared/types.ts`.
@@ -35,7 +35,6 @@ Implemented the complete Phase 2B web confirm/change experience, Hub reload/SSE 
 | File | Change |
 |------|--------|
 | `pkg/hub/choices_view.go` | Added `PreviousChoiceLabel` to `AnswerView` and populated it in `decisionView` |
-| `pkg/hub/choices_agent.go` | Used `choiceResponseSetAnswerOf` in `interpretedChoiceResponseSetView` for live SSE attribution |
 | `pkg/hub/choices_test.go`, `choices_batch_test.go`, `choices_agent_test.go` | Added tests for `AnswerView.PreviousChoiceLabel` reload parity and live SSE set attribution |
 | `web/src/shared/types.ts` | Added `previousChoiceLabel?: string` on `AnswerView` and `DecisionAnswerView` export |
 | `web/src/client/chat-choices.ts` | Added `actionableReason` and 4-level `statusRank` (`pending < decided-interpreted < decided-direct < replaced`) |
