@@ -74,12 +74,43 @@ async function hubApi<T = unknown>(
 }
 
 async function createProjectTopic(hub: HubState, projectId: string, name: string): Promise<string> {
-  const res = await hubApi<{ id: string }>(
+  const deadline = Date.now() + 5_000;
+  let res = await hubApi<{ id: string }>(
     hub,
     hub.devToken,
     'POST',
     `/api/v1/chat/spaces/${encodeURIComponent(projectId)}/threads`,
     { name }
+  );
+  // On fast CI cold boots, /healthz can return 200 ~100ms before the chat
+  // subsystem finishes initializing (503 SERVICE_UNAVAILABLE).
+  while (res.status === 503 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    res = await hubApi<{ id: string }>(
+      hub,
+      hub.devToken,
+      'POST',
+      `/api/v1/chat/spaces/${encodeURIComponent(projectId)}/threads`,
+      { name }
+    );
+  }
+  expect(res.status, JSON.stringify(res.body)).toBeLessThan(300);
+  expect(res.body.id).toMatch(/^[0-9a-f-]{36}$/);
+  return res.body.id;
+}
+
+async function sendUserTopicMessage(
+  hub: HubState,
+  accessToken: string,
+  topicId: string,
+  content: string
+): Promise<string> {
+  const res = await hubApi<{ id: string }>(
+    hub,
+    accessToken,
+    'POST',
+    `/api/v1/chat/conversations/${encodeURIComponent(topicId)}/messages`,
+    { content }
   );
   expect(res.status, JSON.stringify(res.body)).toBeLessThan(300);
   expect(res.body.id).toMatch(/^[0-9a-f-]{36}$/);
@@ -591,6 +622,376 @@ test.describe('Interactive chat choices on real hub (web.chat_choices)', () => {
       await assertNoPageReload(page, bootId);
     } finally {
       await context.close();
+    }
+  });
+
+  test('Phase 2 set card: interpreted answers flip User A to will confirm and User B to read-only live over SSE, then Submit answers converges', async ({
+    browser,
+  }) => {
+    const topicName = 'choices-p2-set';
+    const topicId = await createProjectTopic(hub, projectId, topicName);
+    const routePath = `/chat/space/${projectId}/thread/${topicId}`;
+    const projectSubject = `project.${projectId}.chat.>`;
+
+    const setAgent = await createTestAgent(hub, {
+      projectId,
+      name: 'choices-set-p2',
+      messageMode: 'project',
+    });
+
+    const sessionA = await openUserContext(browser, hub, userA);
+    const sessionB = await openUserContext(browser, hub, userB);
+    try {
+      const [bootIdA, bootIdB] = await Promise.all([
+        openChatAndAwaitSSE(sessionA.page, routePath, projectSubject),
+        openChatAndAwaitSSE(sessionB.page, routePath, projectSubject),
+      ]);
+
+      const sendRes = await setAgent.sendChoicePrompt({
+        conversationRef: `#${topicName}`,
+        msg: 'Release checklist decisions:',
+        choices: [
+          {
+            id: 'D234',
+            question: 'Ship v0.9 today?',
+            choices: [
+              { id: 'yes', label: 'Yes' },
+              { id: 'no', label: 'No' },
+            ],
+            // Default is 'no' so interpreted 'yes' proves interpreted beats default.
+            default: 'no',
+          },
+          {
+            id: 'D17',
+            question: 'Which approach?',
+            choices: [
+              { id: 'a', label: 'Extend input-needed' },
+              { id: 'b', label: 'New waiting state' },
+            ],
+          },
+          {
+            id: 'ship-now',
+            question: 'Deploy after tagging?',
+            choices: [
+              { id: 'yes', label: 'Yes' },
+              { id: 'no', label: 'No' },
+            ],
+          },
+        ],
+      });
+      expect(sendRes.decisions).toHaveLength(3);
+      const d234RowId = sendRes.decisions![0].row_id;
+      const q17RowId = sendRes.decisions![1].row_id;
+      const shipRowId = sendRes.decisions![2].row_id;
+
+      const cardA = sessionA.page.locator(
+        `scion-chat-message[id="msg-${sendRes.message_id}"] scion-chat-choices .card.set`
+      );
+      const cardB = sessionB.page.locator(
+        `scion-chat-message[id="msg-${sendRes.message_id}"] scion-chat-choices .card.set`
+      );
+      await expect(cardA).toBeVisible({ timeout: 15_000 });
+      await expect(cardB).toBeVisible({ timeout: 15_000 });
+
+      // User A posts a free-text reply; agent records interpreted answers for D234 and 17.
+      const sourceMessageId = await sendUserTopicMessage(
+        hub,
+        userA.accessToken,
+        topicId,
+        'D234: yes, 17: a'
+      );
+
+      const interpRes = await setAgent.request<{
+        response_message_id: string;
+        batch_id: string;
+      }>('/api/v1/agent/decisions/interpreted', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          source_message_id: sourceMessageId,
+          answers: [
+            { key: 'D234', choice_id: 'yes' },
+            { key: 'D17', choice_id: 'a' },
+          ],
+        }),
+      });
+      expect(interpRes.status, interpRes.text).toBe(200);
+
+      // User B sees Alice's interpreted rows flip to read-only live over SSE,
+      // while ship-now stays pending for Bob.
+      const rowB234 = cardB.locator(`[data-row="${d234RowId}"]`);
+      const rowB17 = cardB.locator(`[data-row="${q17RowId}"]`);
+      const rowBShip = cardB.locator(`[data-row="${shipRowId}"]`);
+      await expect(rowB234).toHaveClass(/readonly/, { timeout: 15_000 });
+      await expect(rowB17).toHaveClass(/readonly/, { timeout: 15_000 });
+      await expect(rowB234.locator('.chip.interp')).toHaveText("Alice Choices's answer");
+      await expect(rowB234.locator('sl-tooltip')).toHaveAttribute(
+        'content',
+        'Only Alice Choices can confirm or change this answer'
+      );
+      await expect(rowB234.locator('button[data-choice="yes"]')).toBeDisabled();
+      await expect(rowB234.locator('.row-foot.interpreted')).toContainText(
+        "Interpreted by choices-set-p2 from Alice Choices's reply"
+      );
+      await expect(rowBShip).toHaveAttribute('data-status', 'pending');
+      await expect(cardB.locator('.card-foot .counter')).toHaveText(
+        '1 remaining · 2 answered by Alice Choices'
+      );
+
+      // Live SSE interpreted set response line attributes Alice Choices (not agent sender).
+      const interpSetLineB = sessionB.page
+        .locator(
+          `scion-chat-message[id="msg-${interpRes.body.response_message_id}"] scion-chat-choice-response details[data-kind="set"] summary`
+        )
+        .first();
+      await expect(interpSetLineB).toContainText(
+        "choices-set-p2 recorded Alice Choices's answers to 2 decisions from their reply",
+        { timeout: 15_000 }
+      );
+
+      // User A sees D234 and 17 flip live over SSE to interactive pre-selected 'will confirm'.
+      const rowA234 = cardA.locator(`[data-row="${d234RowId}"]`);
+      const rowA17 = cardA.locator(`[data-row="${q17RowId}"]`);
+      const rowAShip = cardA.locator(`[data-row="${shipRowId}"]`);
+      await expect(rowA234.locator('.chip.confirm')).toHaveText('will confirm', {
+        timeout: 15_000,
+      });
+      await expect(rowA234.locator('button[data-choice="yes"]')).toHaveAttribute(
+        'aria-pressed',
+        'true'
+      );
+      await expect(rowA17.locator('.chip.confirm')).toHaveText('will confirm');
+      await expect(rowA17.locator('button[data-choice="a"]')).toHaveAttribute(
+        'aria-pressed',
+        'true'
+      );
+      await expect(cardA.locator('.card-foot .counter')).toHaveText('1 remaining');
+
+      // User A changes 17 to 'b' (will change) and picks 'yes' on pending ship-now.
+      await rowA17.locator('button[data-choice="b"]').click();
+      await rowAShip.locator('button[data-choice="yes"]').click();
+      await expect(rowA17.locator('.chip.change')).toHaveText('will change');
+      await expect(cardA.locator('.card-foot .counter')).toHaveText(
+        '3 of 3 ready · 1 confirm · 1 change'
+      );
+
+      await cardA.locator('sl-button.submit').click();
+
+      // Both User A and User B converge live over SSE to direct decided states.
+      await expect(rowA234.locator('.row-foot')).toContainText('Answered by you (confirmed)', {
+        timeout: 15_000,
+      });
+      await expect(rowA17.locator('.row-foot')).toContainText(
+        'changed from the interpreted answer Extend input-needed'
+      );
+      await expect(rowAShip.locator('.row-foot')).toContainText('Answered by you');
+      await expect(cardA.locator('.card-foot .counter')).toContainText('Submitted by you');
+
+      await expect(rowB234.locator('.row-foot')).toContainText(
+        'Answered by Alice Choices (confirmed)',
+        { timeout: 15_000 }
+      );
+      await expect(rowB17.locator('.row-foot')).toContainText(
+        'changed from the interpreted answer Extend input-needed'
+      );
+      await expect(rowBShip.locator('.row-foot')).toContainText('Answered by Alice Choices');
+
+      await assertNoPageReload(sessionA.page, bootIdA);
+      await assertNoPageReload(sessionB.page, bootIdB);
+
+      const delivery = await setAgent.waitForChoiceResponseDelivery(
+        topicId,
+        { promptMessageId: sendRes.message_id },
+        { authToken: userA.accessToken }
+      );
+      expect(delivery.deliveryClassification).toBe('attempted_delivery');
+      expect(delivery.attemptedAgentDelivery).toBe(true);
+    } finally {
+      await Promise.all([sessionA.context.close(), sessionB.context.close()]);
+    }
+  });
+
+  test('Phase 2 single cards: confirm stays logged_without_delivery while override attempts delivery and preserves previousChoiceLabel on reload', async ({
+    browser,
+  }) => {
+    const topicName = 'choices-p2-single';
+    const topicId = await createProjectTopic(hub, projectId, topicName);
+    const routePath = `/chat/space/${projectId}/thread/${topicId}`;
+    const projectSubject = `project.${projectId}.chat.>`;
+
+    const singleAgent = await createTestAgent(hub, {
+      projectId,
+      name: 'choices-single-p2',
+      messageMode: 'project',
+    });
+
+    const sessionA = await openUserContext(browser, hub, userA);
+    const sessionB = await openUserContext(browser, hub, userB);
+    try {
+      const [bootIdA, bootIdB] = await Promise.all([
+        openChatAndAwaitSSE(sessionA.page, routePath, projectSubject),
+        openChatAndAwaitSSE(sessionB.page, routePath, projectSubject),
+      ]);
+
+      const promptConf = await singleAgent.sendChoicePrompt({
+        conversationRef: `#${topicName}`,
+        msg: 'Staging rollout confirmation:',
+        choices: [
+          {
+            id: 'S-CONF',
+            question: 'Confirm staging deploy?',
+            choices: [
+              { id: 'yes', label: 'Yes' },
+              { id: 'no', label: 'No' },
+            ],
+          },
+        ],
+      });
+      const promptOver = await singleAgent.sendChoicePrompt({
+        conversationRef: `#${topicName}`,
+        msg: 'Canary duration check:',
+        choices: [
+          {
+            id: 'S-OVER',
+            question: 'Keep canary window at 5m?',
+            choices: [
+              { id: '5m', label: '5 minutes' },
+              { id: '30m', label: '30 minutes' },
+            ],
+          },
+        ],
+      });
+
+      const cardConfA = sessionA.page.locator(
+        `scion-chat-message[id="msg-${promptConf.message_id}"] scion-chat-choices`
+      );
+      const cardOverA = sessionA.page.locator(
+        `scion-chat-message[id="msg-${promptOver.message_id}"] scion-chat-choices`
+      );
+      const cardConfB = sessionB.page.locator(
+        `scion-chat-message[id="msg-${promptConf.message_id}"] scion-chat-choices`
+      );
+      const cardOverB = sessionB.page.locator(
+        `scion-chat-message[id="msg-${promptOver.message_id}"] scion-chat-choices`
+      );
+      await expect(cardConfA).toBeVisible({ timeout: 15_000 });
+      await expect(cardOverA).toBeVisible({ timeout: 15_000 });
+
+      const sourceMessageId = await sendUserTopicMessage(
+        hub,
+        userA.accessToken,
+        topicId,
+        'Yes on staging, 5m on canary.'
+      );
+      const interpRes = await singleAgent.request('/api/v1/agent/decisions/interpreted', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          source_message_id: sourceMessageId,
+          answers: [
+            { key: 'S-CONF', choice_id: 'yes' },
+            { key: 'S-OVER', choice_id: '5m' },
+          ],
+        }),
+      });
+      expect(interpRes.status, interpRes.text).toBe(200);
+
+      await expect(cardConfA.locator('.card-head .badge.interp')).toContainText('interpreted', {
+        timeout: 15_000,
+      });
+      await expect(cardOverA.locator('.card-head .badge.interp')).toContainText('interpreted', {
+        timeout: 15_000,
+      });
+      await expect(cardConfB.locator('sl-tooltip')).toHaveAttribute(
+        'content',
+        'Only Alice Choices can confirm or change this answer',
+        { timeout: 15_000 }
+      );
+
+      // 1. User A confirms S-CONF (response 1: logged without waking the agent).
+      await cardConfA.locator('.confirm-row sl-button[data-action="confirm"]').click();
+      await expect(cardConfA.locator('.card-head .badge.conf')).toContainText('confirmed', {
+        timeout: 15_000,
+      });
+      await expect(cardConfA.locator('.row-foot')).toContainText('Answered by you (confirmed)');
+      await expect(cardConfB.locator('.card-head .badge.conf')).toContainText('confirmed', {
+        timeout: 15_000,
+      });
+
+      const confRespLine = sessionA.page
+        .locator('scion-chat-choice-response [data-kind="single"]')
+        .last();
+      await expect(confRespLine).toContainText('you confirmed Yes for', { timeout: 15_000 });
+      await expect(confRespLine.locator('[data-state="not-sent"]')).toHaveText(
+        'not sent to the agent'
+      );
+
+      // Space >2s past the co-located broker's 2s per-agent debounce window
+      // before triggering the override on the same agent.
+      await new Promise((resolve) => setTimeout(resolve, 2_500));
+
+      // 2. User A overrides S-OVER via the inline change bar (response 2: delivered to agent).
+      await cardOverA.locator('sl-button[data-choice="30m"]').click();
+      await expect(cardOverA.locator('.confirmbar')).toContainText(
+        'Change your answer from 5 minutes to 30 minutes? choices-single-p2 will be told.'
+      );
+      await cardOverA.locator('.confirmbar sl-button[data-action="confirm-change"]').click();
+
+      await expect(cardOverA.locator('.card-head .badge.over')).toContainText('changed', {
+        timeout: 15_000,
+      });
+      await expect(cardOverA.locator('.row-foot')).toContainText(
+        'changed from the interpreted answer 5 minutes'
+      );
+      await expect(cardOverB.locator('.card-head .badge.over')).toContainText('changed', {
+        timeout: 15_000,
+      });
+      await expect(cardOverB.locator('.row-foot')).toContainText(
+        'changed from the interpreted answer 5 minutes'
+      );
+
+      await assertNoPageReload(sessionA.page, bootIdA);
+      await assertNoPageReload(sessionB.page, bootIdB);
+
+      // Wait for response 2 (override) to attempt broker delivery, then verify
+      // response 1 (confirm) remained logged_without_delivery after 500ms settle.
+      const overDelivery = await singleAgent.waitForChoiceResponseDelivery(
+        topicId,
+        { promptMessageId: promptOver.message_id },
+        { authToken: userA.accessToken }
+      );
+      expect(overDelivery.deliveryClassification).toBe('attempted_delivery');
+      expect(overDelivery.attemptedAgentDelivery).toBe(true);
+      expect(overDelivery.response?.outcome).toBe('override');
+
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      const inspected = await singleAgent.inspectChoiceResponses(topicId, {
+        authToken: userA.accessToken,
+      });
+      const confirmInspected = inspected.find(
+        (r) =>
+          r.response?.promptMessageId === promptConf.message_id &&
+          r.response?.provenance === 'direct'
+      );
+      expect(confirmInspected).toBeTruthy();
+      expect(confirmInspected!.response?.outcome).toBe('confirm');
+      expect(confirmInspected!.deliveryClassification).toBe('logged_without_delivery');
+      expect(confirmInspected!.attemptedAgentDelivery).toBe(false);
+
+      // 3. Reload parity: reload User B's page so history comes from GET /messages
+      // and verify AnswerView.previousChoiceLabel still renders on the card.
+      await sessionB.page.reload({ waitUntil: 'domcontentloaded' });
+      const reloadedOverCard = sessionB.page.locator(
+        `scion-chat-message[id="msg-${promptOver.message_id}"] scion-chat-choices`
+      );
+      await expect(reloadedOverCard.locator('.card-head .badge.over')).toContainText('changed', {
+        timeout: 20_000,
+      });
+      await expect(reloadedOverCard.locator('.row-foot')).toContainText(
+        'changed from the interpreted answer 5 minutes'
+      );
+    } finally {
+      await Promise.all([sessionA.context.close(), sessionB.context.close()]);
     }
   });
 });
