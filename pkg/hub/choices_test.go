@@ -1058,6 +1058,24 @@ func TestChoiceResponseView_AttributionAndOutcomes(t *testing.T) {
 	var overrideAns DecisionAnswerResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &overrideAns))
 
+	// AnswerView on prompt DecisionView also populates PreviousChoiceLabel on
+	// immediate answer, GET /api/v1/decisions/{rowId}, and chat history reload.
+	require.NotNil(t, directAns.Decision.Decision)
+	assert.Empty(t, directAns.Decision.Decision.PreviousChoiceLabel)
+	require.NotNil(t, confirmAns.Decision.Decision)
+	assert.Empty(t, confirmAns.Decision.Decision.PreviousChoiceLabel)
+	require.NotNil(t, overrideAns.Decision.Decision)
+	assert.Equal(t, "yes", overrideAns.Decision.Decision.PreviousChoiceLabel)
+
+	getRec := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/decisions/"+overrideRes.Decisions[0].RowID, nil)
+	require.Equal(t, http.StatusOK, getRec.Code, "body: %s", getRec.Body.String())
+	var getOut struct {
+		Decision DecisionView `json:"decision"`
+	}
+	require.NoError(t, json.Unmarshal(getRec.Body.Bytes(), &getOut))
+	require.NotNil(t, getOut.Decision.Decision)
+	assert.Equal(t, "yes", getOut.Decision.Decision.PreviousChoiceLabel)
+
 	liveByID := map[string]ChoiceResponseView{}
 	for _, e := range collectEvents(chat) {
 		var evt UserMessageEvent
@@ -1111,6 +1129,17 @@ func TestChoiceResponseView_AttributionAndOutcomes(t *testing.T) {
 	assert.Equal(t, srcID, interp.SourceMessageID)
 	assert.Equal(t, interpPrompt.ID, interp.PromptMessageID)
 	assert.Empty(t, interp.PreviousChoiceLabel)
+
+	// History prompt cards (messageDecisions) preserve PreviousChoiceLabel on
+	// overridden decisions across reload.
+	require.NotNil(t, h.MessageDecisions[directPrompt.ID][0].Decision)
+	assert.Empty(t, h.MessageDecisions[directPrompt.ID][0].Decision.PreviousChoiceLabel)
+	require.NotNil(t, h.MessageDecisions[interpPrompt.ID][0].Decision)
+	assert.Empty(t, h.MessageDecisions[interpPrompt.ID][0].Decision.PreviousChoiceLabel)
+	require.NotNil(t, h.MessageDecisions[confirmPrompt.ID][0].Decision)
+	assert.Empty(t, h.MessageDecisions[confirmPrompt.ID][0].Decision.PreviousChoiceLabel)
+	require.NotNil(t, h.MessageDecisions[overridePrompt.ID][0].Decision)
+	assert.Equal(t, "yes", h.MessageDecisions[overridePrompt.ID][0].Decision.PreviousChoiceLabel)
 
 	// Empty or whitespace-only AnsweredByName falls back to AnsweredByEmail.
 	for _, blank := range []string{"", "   \t "} {
