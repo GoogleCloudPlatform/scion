@@ -16,6 +16,8 @@ package entadapter
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -27,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decision"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionanswer"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionkeycounter"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -1188,4 +1191,518 @@ func answerToStore(r *ent.DecisionAnswer) *store.DecisionAnswer {
 	}
 	a.MatchedDefault = r.MatchedDefault
 	return a
+}
+
+type decisionListCursor struct {
+	CreatedAt time.Time `json:"c"`
+	ID        uuid.UUID `json:"id"`
+}
+
+func encodeDecisionListCursor(createdAt time.Time, id uuid.UUID) (string, error) {
+	raw, err := json.Marshal(decisionListCursor{CreatedAt: createdAt.UTC(), ID: id})
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+func decodeDecisionListCursor(s string) (decisionListCursor, error) {
+	var cur decisionListCursor
+	raw, err := base64.RawURLEncoding.DecodeString(s)
+	if err != nil {
+		return cur, fmt.Errorf("%w: invalid cursor", store.ErrInvalidInput)
+	}
+	if err := json.Unmarshal(raw, &cur); err != nil || cur.ID == uuid.Nil || cur.CreatedAt.IsZero() {
+		return cur, fmt.Errorf("%w: invalid cursor", store.ErrInvalidInput)
+	}
+	return cur, nil
+}
+
+// ListAgentDecisions implements store.DecisionStore.
+func (c *CompositeStore) ListAgentDecisions(ctx context.Context, agentID string, state store.DecisionListState, cursor string, limit int) ([]*store.Decision, string, error) {
+	agentUUID, err := parseGetID(agentID)
+	if err != nil {
+		return nil, "", err
+	}
+	if state == "" {
+		state = store.DecisionListStatePending
+	}
+	if limit == 0 {
+		limit = store.DefaultDecisionListLimit
+	}
+	if limit < 0 || limit > store.MaxDecisionListLimit {
+		return nil, "", fmt.Errorf("%w: limit must be between 1 and %d", store.ErrInvalidInput, store.MaxDecisionListLimit)
+	}
+
+	q := c.client.Decision.Query().Where(decision.AskerAgentID(agentUUID))
+	switch state {
+	case store.DecisionListStatePending:
+		q = q.Where(decision.StatusEQ(decision.StatusPending))
+	case store.DecisionListStateDecided:
+		q = q.Where(decision.StatusEQ(decision.StatusDecided))
+	case store.DecisionListStateAll:
+		// All statuses (pending, decided, replaced).
+	default:
+		return nil, "", fmt.Errorf("%w: invalid decision state %q", store.ErrInvalidInput, state)
+	}
+
+	if cursor != "" {
+		cur, err := decodeDecisionListCursor(cursor)
+		if err != nil {
+			return nil, "", err
+		}
+		q = q.Where(decision.Or(
+			decision.CreatedAtLT(cur.CreatedAt),
+			decision.And(
+				decision.CreatedAtEQ(cur.CreatedAt),
+				decision.IDLT(cur.ID),
+			),
+		))
+	}
+
+	rows, err := q.Order(ent.Desc(decision.FieldCreatedAt), ent.Desc(decision.FieldID)).
+		Limit(limit + 1).
+		All(ctx)
+	if err != nil {
+		return nil, "", mapError(err)
+	}
+
+	var nextCursor string
+	if len(rows) > limit {
+		rows = rows[:limit]
+		last := rows[len(rows)-1]
+		nextCursor, err = encodeDecisionListCursor(last.CreatedAt, last.ID)
+		if err != nil {
+			return nil, "", fmt.Errorf("encode cursor: %w", err)
+		}
+	}
+
+	rowIDs := make([]uuid.UUID, len(rows))
+	for i, r := range rows {
+		rowIDs[i] = r.ID
+	}
+	answers, err := loadAnswers(ctx, c.client, rowIDs)
+	if err != nil {
+		return nil, "", err
+	}
+
+	items := make([]*store.Decision, len(rows))
+	for i, r := range rows {
+		d := decisionToStore(r)
+		d.Answers = answersToStore(answers[r.ID])
+		items[i] = d
+	}
+	return items, nextCursor, nil
+}
+
+// GetAgentDecisionVersions implements store.DecisionStore.
+func (c *CompositeStore) GetAgentDecisionVersions(ctx context.Context, agentID, key string) ([]*store.Decision, error) {
+	agentUUID, err := parseGetID(agentID)
+	if err != nil {
+		return nil, err
+	}
+	if key == "" {
+		return nil, fmt.Errorf("%w: decision key is empty", store.ErrNotFound)
+	}
+	norm := messages.DecisionKeyNorm(key)
+	rows, err := c.client.Decision.Query().
+		Where(decision.AskerAgentID(agentUUID), decision.KeyNormEQ(norm)).
+		Order(ent.Asc(decision.FieldVersion)).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	if len(rows) == 0 {
+		return nil, fmt.Errorf("%w: decision %q not found", store.ErrNotFound, key)
+	}
+
+	rowIDs := make([]uuid.UUID, len(rows))
+	for i, r := range rows {
+		rowIDs[i] = r.ID
+	}
+	answers, err := loadAnswers(ctx, c.client, rowIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]*store.Decision, len(rows))
+	for i, r := range rows {
+		d := decisionToStore(r)
+		d.Answers = answersToStore(answers[r.ID])
+		out[i] = d
+	}
+	return out, nil
+}
+
+// RecordInterpretedAnswers implements store.DecisionStore.
+func (c *CompositeStore) RecordInterpretedAnswers(ctx context.Context, in *store.RecordInterpretedInput) (*store.AnswerSetResult, error) {
+	if err := validateRecordInterpretedInput(in); err != nil {
+		return nil, err
+	}
+	if c.inTx {
+		return c.recordInterpretedAnswersTx(ctx, in)
+	}
+	origMsg := in.ResponseMessage.Msg
+	var res *store.AnswerSetResult
+	for attempt := 0; ; attempt++ {
+		in.ResponseMessage.Msg = origMsg
+		err := c.WithTx(ctx, func(tx store.Store) error {
+			var err error
+			res, err = tx.(*CompositeStore).recordInterpretedAnswersTx(ctx, in)
+			return err
+		})
+		if err == nil {
+			return res, nil
+		}
+		if attempt < maxDecisionRaceRetries && (errors.Is(err, errDecisionRace) || errors.Is(err, store.ErrTransient)) {
+			continue
+		}
+		if errors.Is(err, errDecisionRace) {
+			return nil, store.ErrTransient
+		}
+		return nil, err
+	}
+}
+
+func validateRecordInterpretedInput(in *store.RecordInterpretedInput) error {
+	if in == nil || in.ResponseMessage == nil || in.ResponseMessage.ID == "" || in.ResponseMessage.ProjectID == "" {
+		return fmt.Errorf("%w: interpreted answers need a response message with an ID and a project", store.ErrInvalidInput)
+	}
+	for _, id := range []string{in.InterpretedByAgentID, in.SourceMessageID, in.ResponseMessage.ID, in.ResponseMessage.ProjectID} {
+		if _, err := parseUUID(id); err != nil {
+			return err
+		}
+	}
+	if in.AnsweredByUserID == "" {
+		return fmt.Errorf("%w: interpreted answers need the answering user", store.ErrInvalidInput)
+	}
+	if err := decisionanswer.SurfaceValidator(decisionanswer.Surface(in.Surface)); err != nil {
+		return fmt.Errorf("%w: %v", store.ErrInvalidInput, err)
+	}
+	if len(in.Answers) == 0 || len(in.Answers) > messages.MaxDecisionsPerMessage {
+		return fmt.Errorf("%w: interpreted answers require 1 to %d pairs", store.ErrInvalidInput, messages.MaxDecisionsPerMessage)
+	}
+	if len(in.IdempotencyKey) > store.MaxDecisionIdempotencyKeyLen {
+		return fmt.Errorf("%w: the idempotency key is at most %d bytes", store.ErrInvalidInput, store.MaxDecisionIdempotencyKeyLen)
+	}
+	seenKeys := make(map[string]bool, len(in.Answers))
+	seenRows := make(map[string]bool, len(in.Answers))
+	for _, a := range in.Answers {
+		if a.ChoiceID == "" || (a.Key == "" && a.DecisionRowID == "") {
+			return fmt.Errorf("%w: every pair needs a decision key or row id and a choice id", store.ErrInvalidInput)
+		}
+		if a.DecisionRowID != "" {
+			if _, err := parseUUID(a.DecisionRowID); err != nil {
+				return err
+			}
+			if seenRows[a.DecisionRowID] {
+				return fmt.Errorf("%w: duplicate decision row %s", store.ErrInvalidInput, a.DecisionRowID)
+			}
+			seenRows[a.DecisionRowID] = true
+		}
+		if a.Key != "" {
+			norm := messages.DecisionKeyNorm(a.Key)
+			if seenKeys[norm] {
+				return fmt.Errorf("%w: duplicate decision key %q", store.ErrInvalidInput, a.Key)
+			}
+			seenKeys[norm] = true
+		}
+	}
+	return nil
+}
+
+type validatedInterpretedItem struct {
+	row         *ent.Decision
+	choiceID    string
+	choiceLabel string
+}
+
+func (c *CompositeStore) recordInterpretedAnswersTx(ctx context.Context, in *store.RecordInterpretedInput) (*store.AnswerSetResult, error) {
+	client := c.client
+	agentUUID, _ := parseUUID(in.InterpretedByAgentID)
+	sourceUUID, _ := parseUUID(in.SourceMessageID)
+
+	// 1. Check idempotency scoped to (InterpretedByAgentID, IdempotencyKey)
+	// before row-status checks so retries after confirm/override/repost still
+	// replay cleanly and reused keys with different inputs return 422.
+	if in.IdempotencyKey != "" {
+		if res, ok, err := replayableInterpretedAnswers(ctx, client, agentUUID, sourceUUID, in); err != nil || ok {
+			return res, err
+		}
+	}
+
+	// 2. Load and lock all target decision rows on Postgres in (key_norm,
+	// version) order — the exact lock order of CreateChoicePrompt and
+	// RecordAnswerSet — so concurrent reposts, user answers, and interpreted
+	// records serialize without deadlocking.
+	var explicitUIDs []uuid.UUID
+	var norms []string
+	for _, a := range in.Answers {
+		if a.DecisionRowID != "" {
+			uid, _ := parseUUID(a.DecisionRowID)
+			explicitUIDs = append(explicitUIDs, uid)
+		}
+		if a.Key != "" {
+			norms = append(norms, messages.DecisionKeyNorm(a.Key))
+		}
+	}
+	var matchPreds []predicate.Decision
+	if len(explicitUIDs) > 0 {
+		matchPreds = append(matchPreds, decision.IDIn(explicitUIDs...))
+	}
+	if len(norms) > 0 {
+		matchPreds = append(matchPreds, decision.KeyNormIn(norms...))
+	}
+	q := client.Decision.Query().
+		Where(decision.AskerAgentID(agentUUID), decision.Or(matchPreds...)).
+		Order(ent.Asc(decision.FieldKeyNorm), ent.Asc(decision.FieldVersion))
+	if c.isPostgres() {
+		q = q.ForUpdate()
+	}
+	rows, err := q.All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+
+	byID := make(map[string]*ent.Decision, len(rows))
+	latestByNorm := make(map[string]*ent.Decision, len(rows))
+	activeByNorm := make(map[string]*ent.Decision, len(rows))
+	rowIDs := make([]uuid.UUID, len(rows))
+	for i, r := range rows {
+		byID[r.ID.String()] = r
+		rowIDs[i] = r.ID
+		if prev := latestByNorm[r.KeyNorm]; prev == nil || r.Version > prev.Version {
+			latestByNorm[r.KeyNorm] = r
+			if r.Status != decision.StatusReplaced {
+				activeByNorm[r.KeyNorm] = r
+			} else {
+				delete(activeByNorm, r.KeyNorm)
+			}
+		}
+	}
+
+	existing, err := loadAnswers(ctx, client, rowIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	// 3. Validate all requested pairs before writing anything (all-or-nothing).
+	var failures []store.InterpretedKeyFailure
+	validated := make([]validatedInterpretedItem, 0, len(in.Answers))
+	formatted := make([]store.InterpretedFormattedItem, 0, len(in.Answers))
+	for _, a := range in.Answers {
+		var row *ent.Decision
+		if a.DecisionRowID != "" {
+			row = byID[a.DecisionRowID]
+		} else {
+			norm := messages.DecisionKeyNorm(a.Key)
+			row = activeByNorm[norm]
+			if row == nil {
+				row = latestByNorm[norm]
+			}
+		}
+		dispKey := a.Key
+		if row != nil {
+			dispKey = row.Key
+		} else if dispKey == "" {
+			dispKey = a.DecisionRowID
+		}
+		if row == nil {
+			failures = append(failures, store.InterpretedKeyFailure{
+				Key:    dispKey,
+				Reason: store.InterpretedReasonNotFound,
+			})
+			continue
+		}
+		dStore := decisionToStore(row)
+		dStore.Answers = answersToStore(existing[row.ID])
+		if row.Status == decision.StatusReplaced {
+			failures = append(failures, store.InterpretedKeyFailure{
+				Key:      dispKey,
+				Reason:   store.InterpretedReasonReplaced,
+				Decision: dStore,
+			})
+			continue
+		}
+		if len(existing[row.ID]) > 0 || row.Status != decision.StatusPending {
+			failures = append(failures, store.InterpretedKeyFailure{
+				Key:      dispKey,
+				Reason:   store.InterpretedReasonAlreadyAnswered,
+				Decision: dStore,
+			})
+			continue
+		}
+		label := ""
+		for _, ch := range row.Choices {
+			if ch.ID == a.ChoiceID {
+				label = ch.Label
+				break
+			}
+		}
+		if label == "" {
+			failures = append(failures, store.InterpretedKeyFailure{
+				Key:      dispKey,
+				Reason:   store.InterpretedReasonInvalidChoice,
+				ChoiceID: a.ChoiceID,
+				Decision: dStore,
+			})
+			continue
+		}
+		validated = append(validated, validatedInterpretedItem{
+			row:         row,
+			choiceID:    a.ChoiceID,
+			choiceLabel: label,
+		})
+		formatted = append(formatted, store.InterpretedFormattedItem{
+			Key:         row.Key,
+			ChoiceID:    a.ChoiceID,
+			ChoiceLabel: label,
+		})
+	}
+	if len(failures) > 0 {
+		return nil, &store.InterpretedAnswersError{Failures: failures}
+	}
+
+	// 4. Insert the single choice-response message, the DecisionAnswer rows,
+	// and mark each Decision row decided.
+	if in.FormatMessage != nil && in.ResponseMessage.Msg == "" {
+		in.ResponseMessage.Msg = in.FormatMessage(formatted)
+	}
+	in.ResponseMessage.Type = messages.TypeChoiceResponse
+	if err := c.CreateMessage(ctx, in.ResponseMessage); err != nil {
+		return nil, err
+	}
+	responseUUID, _ := parseUUID(in.ResponseMessage.ID)
+
+	var batchUUID *uuid.UUID
+	batchStr := ""
+	if len(validated) >= 2 {
+		b := uuid.New()
+		batchUUID = &b
+		batchStr = b.String()
+	}
+
+	now := time.Now().UTC()
+	res := &store.AnswerSetResult{
+		BatchID: batchStr,
+		Answers: make([]*store.DecisionAnswer, 0, len(validated)),
+	}
+	for _, v := range validated {
+		saved, err := client.DecisionAnswer.Create().
+			SetDecisionRowID(v.row.ID).
+			SetProjectID(v.row.ProjectID).
+			SetAskerAgentID(v.row.AskerAgentID).
+			SetKey(v.row.Key).
+			SetVersion(v.row.Version).
+			SetQuestionText(v.row.Question).
+			SetChoiceID(v.choiceID).
+			SetChoiceLabel(v.choiceLabel).
+			SetNillableAnsweredByUserID(nullableString(in.AnsweredByUserID)).
+			SetAnsweredByName(in.AnsweredByName).
+			SetAnsweredByEmail(in.AnsweredByEmail).
+			SetProvenance(decisionanswer.ProvenanceAgentInterpreted).
+			SetOutcome(decisionanswer.OutcomeAnswer).
+			SetInterpretedByAgentID(agentUUID).
+			SetSourceMessageID(sourceUUID).
+			SetSurface(decisionanswer.Surface(in.Surface)).
+			SetResponseMessageID(responseUUID).
+			SetNillableIdempotencyKey(nullableString(in.IdempotencyKey)).
+			SetNillableBatchID(batchUUID).
+			SetMatchedDefault(v.row.DefaultChoiceID != nil && *v.row.DefaultChoiceID == v.choiceID).
+			SetCreatedAt(now).
+			Save(ctx)
+		if err != nil {
+			return nil, markDecisionRace(err)
+		}
+		n, err := client.Decision.Update().
+			Where(decision.ID(v.row.ID), decision.StatusEQ(decision.StatusPending)).
+			SetStatus(decision.StatusDecided).
+			SetDecidedAt(now).
+			Save(ctx)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		if n != 1 {
+			return nil, fmt.Errorf("%w: version %d of %s changed concurrently", errDecisionRace, v.row.Version, v.row.Key)
+		}
+		res.Answers = append(res.Answers, answerToStore(saved))
+	}
+	return res, nil
+}
+
+// replayableInterpretedAnswers returns the answers recorded under in's
+// idempotency key by agentUUID when every target pair and source_message_id
+// match. Returns ErrIdempotencyMismatch when the key was already used by the
+// agent for different answers or a different source message.
+func replayableInterpretedAnswers(ctx context.Context, client *ent.Client, agentUUID, sourceUUID uuid.UUID, in *store.RecordInterpretedInput) (*store.AnswerSetResult, bool, error) {
+	found, err := client.DecisionAnswer.Query().
+		Where(
+			decisionanswer.InterpretedByAgentID(agentUUID),
+			decisionanswer.IdempotencyKey(in.IdempotencyKey),
+		).
+		All(ctx)
+	if err != nil {
+		return nil, false, mapError(err)
+	}
+	if len(found) == 0 {
+		return nil, false, nil
+	}
+	mismatch := fmt.Errorf("%w: the idempotency key was used for different interpreted answers", store.ErrIdempotencyMismatch)
+	if len(found) != len(in.Answers) {
+		return nil, false, mismatch
+	}
+
+	respID := found[0].ResponseMessageID
+	var batchStr string
+	if found[0].BatchID != nil {
+		batchStr = found[0].BatchID.String()
+	}
+	if (len(found) >= 2) != (batchStr != "") {
+		return nil, false, mismatch
+	}
+
+	byNorm := make(map[string]*ent.DecisionAnswer, len(found))
+	byRowID := make(map[string]*ent.DecisionAnswer, len(found))
+	for _, f := range found {
+		if f.Provenance != decisionanswer.ProvenanceAgentInterpreted {
+			return nil, false, mismatch
+		}
+		if f.SourceMessageID == nil || *f.SourceMessageID != sourceUUID {
+			return nil, false, mismatch
+		}
+		if f.ResponseMessageID != respID {
+			return nil, false, mismatch
+		}
+		gotBatch := ""
+		if f.BatchID != nil {
+			gotBatch = f.BatchID.String()
+		}
+		if gotBatch != batchStr {
+			return nil, false, mismatch
+		}
+		byNorm[messages.DecisionKeyNorm(f.Key)] = f
+		byRowID[f.DecisionRowID.String()] = f
+	}
+
+	ordered := make([]*store.DecisionAnswer, len(in.Answers))
+	for i, a := range in.Answers {
+		var f *ent.DecisionAnswer
+		if a.Key != "" {
+			f = byNorm[messages.DecisionKeyNorm(a.Key)]
+		} else {
+			f = byRowID[a.DecisionRowID]
+		}
+		if f == nil || f.ChoiceID != a.ChoiceID {
+			return nil, false, mismatch
+		}
+		if a.DecisionRowID != "" && f.DecisionRowID.String() != a.DecisionRowID && a.Key == "" {
+			return nil, false, mismatch
+		}
+		ordered[i] = answerToStore(f)
+	}
+	return &store.AnswerSetResult{
+		BatchID:  batchStr,
+		Answers:  ordered,
+		Replayed: true,
+	}, true, nil
 }

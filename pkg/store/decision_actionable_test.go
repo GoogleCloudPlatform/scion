@@ -14,31 +14,70 @@
 
 package store
 
-import "testing"
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+type actionableGoldenAnswer struct {
+	Provenance       string `json:"provenance"`
+	Outcome          string `json:"outcome"`
+	AnsweredByUserID string `json:"answeredByUserId"`
+}
+
+type actionableGoldenCase struct {
+	Name     string                   `json:"name"`
+	UserID   string                   `json:"userId"`
+	Status   string                   `json:"status"`
+	Answers  []actionableGoldenAnswer `json:"answers"`
+	Decision *actionableGoldenAnswer  `json:"decision"`
+	Want     string                   `json:"want"`
+}
 
 // TestDecisionActionableReason covers every branch of the actionable-set
-// rule (design choices v5, 4.1).
+// rule (design choices v5, 4.1) from the shared golden table also consumed
+// by the web Vitest suite.
 func TestDecisionActionableReason(t *testing.T) {
-	direct := &DecisionAnswer{Provenance: DecisionProvenanceDirect, AnsweredByUserID: "u1"}
-	mine := &DecisionAnswer{Provenance: DecisionProvenanceAgentInterpreted, AnsweredByUserID: "u1"}
-	theirs := &DecisionAnswer{Provenance: DecisionProvenanceAgentInterpreted, AnsweredByUserID: "u2"}
-	gone := &DecisionAnswer{Provenance: DecisionProvenanceAgentInterpreted}
-	cases := map[string]struct {
-		d    *Decision
-		want string
-	}{
-		"pending":                      {&Decision{Status: DecisionStatusPending}, ""},
-		"replaced":                     {&Decision{Status: DecisionStatusReplaced}, AnswerSetReasonReplaced},
-		"direct answer":                {&Decision{Status: DecisionStatusDecided, Answers: []*DecisionAnswer{direct}}, AnswerSetReasonDecided},
-		"own interpreted answer":       {&Decision{Status: DecisionStatusDecided, Answers: []*DecisionAnswer{mine}}, ""},
-		"another user's interpreted":   {&Decision{Status: DecisionStatusDecided, Answers: []*DecisionAnswer{theirs}}, AnswerSetReasonNotRecordedAnswerer},
-		"interpreted, answerer gone":   {&Decision{Status: DecisionStatusDecided, Answers: []*DecisionAnswer{gone}}, AnswerSetReasonNotRecordedAnswerer},
-		"interpreted then direct":      {&Decision{Status: DecisionStatusDecided, Answers: []*DecisionAnswer{mine, direct}}, AnswerSetReasonDecided},
-		"decided with no answer (odd)": {&Decision{Status: DecisionStatusDecided}, AnswerSetReasonNotActionable},
+	raw, err := os.ReadFile(filepath.Join("testdata", "decision_actionable_cases.json"))
+	if err != nil {
+		t.Fatalf("read golden actionable cases: %v", err)
 	}
-	for name, tc := range cases {
-		if got := DecisionActionableReason(tc.d, "u1"); got != tc.want {
-			t.Errorf("%s: got %q, want %q", name, got, tc.want)
-		}
+	var cases []actionableGoldenCase
+	if err := json.Unmarshal(raw, &cases); err != nil {
+		t.Fatalf("unmarshal golden actionable cases: %v", err)
+	}
+	if len(cases) == 0 {
+		t.Fatal("golden actionable cases table is empty")
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.Name, func(t *testing.T) {
+			d := &Decision{Status: tc.Status}
+			for _, a := range tc.Answers {
+				d.Answers = append(d.Answers, &DecisionAnswer{
+					Provenance:       a.Provenance,
+					Outcome:          a.Outcome,
+					AnsweredByUserID: a.AnsweredByUserID,
+				})
+			}
+			eff := d.EffectiveAnswer()
+			switch {
+			case tc.Decision == nil && eff != nil:
+				t.Fatalf("EffectiveAnswer() = %+v, want nil", eff)
+			case tc.Decision != nil && eff == nil:
+				t.Fatalf("EffectiveAnswer() = nil, want %+v", *tc.Decision)
+			case tc.Decision != nil:
+				if eff.Provenance != tc.Decision.Provenance || eff.Outcome != tc.Decision.Outcome || eff.AnsweredByUserID != tc.Decision.AnsweredByUserID {
+					t.Fatalf("EffectiveAnswer() = (%q,%q,%q), want (%q,%q,%q)",
+						eff.Provenance, eff.Outcome, eff.AnsweredByUserID,
+						tc.Decision.Provenance, tc.Decision.Outcome, tc.Decision.AnsweredByUserID)
+				}
+			}
+			if got := DecisionActionableReason(d, tc.UserID); got != tc.Want {
+				t.Errorf("DecisionActionableReason(%s, %q) = %q, want %q", tc.Status, tc.UserID, got, tc.Want)
+			}
+		})
 	}
 }

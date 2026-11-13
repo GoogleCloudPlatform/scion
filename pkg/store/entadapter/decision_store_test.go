@@ -1218,3 +1218,334 @@ func TestRecordAnswer_MatchedDefault(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, b.MatchedDefault)
 }
+
+// ---- agent decision list, show, and interpreted answers (PR 2A) ----
+
+func (f *decisionFixture) interpretedBatch(sourceMsgID, userID, idem string, pairs ...store.InterpretedAnswerPair) *store.RecordInterpretedInput {
+	return &store.RecordInterpretedInput{
+		InterpretedByAgentID: f.agentID,
+		SourceMessageID:      sourceMsgID,
+		AnsweredByUserID:     userID,
+		AnsweredByName:       "Pat",
+		AnsweredByEmail:      "pat@example.com",
+		Surface:              store.DecisionSurfaceNative,
+		Answers:              pairs,
+		IdempotencyKey:       idem,
+		ResponseMessage: &store.Message{
+			ID:             uuid.NewString(),
+			ProjectID:      f.projectID,
+			ConversationID: f.conversationID,
+			Sender:         "agent:asker",
+			SenderID:       f.agentID,
+			Recipient:      "user:pat@example.com",
+			RecipientID:    userID,
+			AgentID:        f.agentID,
+			DispatchState:  store.MessageDispatchDispatched,
+		},
+		FormatMessage: func(items []store.InterpretedFormattedItem) string {
+			parts := make([]string, len(items))
+			for i, it := range items {
+				parts[i] = it.Key + "=" + it.ChoiceLabel
+			}
+			return "interpreted: " + strings.Join(parts, ", ")
+		},
+	}
+}
+
+func TestListAgentDecisions(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+
+	// Prompt 1: D1 (later replaced by v2) and D2 (later decided).
+	p1 := f.create(t, false, yesNo("D1", "q1"), yesNo("D2", "q2"))
+	_, _, err := f.cs.RecordAnswer(ctx, f.answer(p1.Decisions[1].RowID, "2", "user-1", ""))
+	require.NoError(t, err)
+
+	// Prompt 2: D1 v2 (pending) + D3, D4 (same prompt -> identical CreatedAt ties).
+	p2 := f.create(t, true, yesNo("D1", "q1 v2"), yesNo("D3", "q3"), yesNo("D4", "q4"))
+	require.Len(t, p2.Decisions, 3)
+
+	// Another agent's decision must never appear in f.agentID's list.
+	otherAgent := uuid.NewString()
+	otherIn := f.prompt("", false, yesNo("OTHER", "other?"))
+	otherIn.AskerAgentID = otherAgent
+	otherIn.Message.SenderID = otherAgent
+	otherIn.Message.AgentID = otherAgent
+	_, err = f.cs.CreateChoicePrompt(ctx, otherIn)
+	require.NoError(t, err)
+
+	// Default state ("") == pending: D1 v2, D3, D4 (3 rows).
+	pending, cur, err := f.cs.ListAgentDecisions(ctx, f.agentID, "", "", 0)
+	require.NoError(t, err)
+	assert.Empty(t, cur)
+	require.Len(t, pending, 3)
+	for _, d := range pending {
+		assert.Equal(t, store.DecisionStatusPending, d.Status)
+		assert.Equal(t, f.agentID, d.AskerAgentID)
+	}
+
+	// Decided: D2 with its answer loaded.
+	decided, cur, err := f.cs.ListAgentDecisions(ctx, f.agentID, store.DecisionListStateDecided, "", 50)
+	require.NoError(t, err)
+	assert.Empty(t, cur)
+	require.Len(t, decided, 1)
+	assert.Equal(t, "D2", decided[0].Key)
+	require.Len(t, decided[0].Answers, 1)
+	assert.Equal(t, "no", decided[0].Answers[0].ChoiceLabel)
+
+	// All with limit=2 paginates across all 5 versions (including replaced D1 v1)
+	// and handles identical CreatedAt ties without duplicates or drops.
+	var seenIDs []string
+	pageCursor := ""
+	for {
+		page, next, err := f.cs.ListAgentDecisions(ctx, f.agentID, store.DecisionListStateAll, pageCursor, 2)
+		require.NoError(t, err)
+		for _, d := range page {
+			seenIDs = append(seenIDs, d.ID)
+		}
+		if next == "" {
+			break
+		}
+		pageCursor = next
+	}
+	require.Len(t, seenIDs, 5)
+	uniq := map[string]bool{}
+	for _, id := range seenIDs {
+		uniq[id] = true
+	}
+	assert.Len(t, uniq, 5, "cursor pagination across timestamp ties must visit each row once")
+
+	// Validation errors: bad state, bad limit, bad cursor.
+	_, _, err = f.cs.ListAgentDecisions(ctx, f.agentID, "bogus", "", 10)
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+	_, _, err = f.cs.ListAgentDecisions(ctx, f.agentID, store.DecisionListStatePending, "", 201)
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+	_, _, err = f.cs.ListAgentDecisions(ctx, f.agentID, store.DecisionListStatePending, "not-a-cursor", 10)
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+}
+
+func TestGetAgentDecisionVersions(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+
+	// v1 gets an interpreted answer then a direct override -> 2 answer rows.
+	v1 := f.create(t, false, yesNo("D234", "ship v1?")).Decisions[0].RowID
+	_, _, err := f.cs.RecordAnswer(ctx, f.interpretedAnswer(v1, "1", "user-1"))
+	require.NoError(t, err)
+	overrideIn := f.answer(v1, "2", "user-1", "")
+	overrideIn.Outcome = store.DecisionOutcomeOverride
+	_, _, err = f.cs.RecordAnswer(ctx, overrideIn)
+	require.NoError(t, err)
+
+	// Repost with --update -> v2 pending.
+	f.create(t, true, yesNo("D234", "ship v2?"))
+
+	// Case-insensitive lookup returns [v1, v2] oldest-first with BOTH answers on v1.
+	versions, err := f.cs.GetAgentDecisionVersions(ctx, f.agentID, "d234")
+	require.NoError(t, err)
+	require.Len(t, versions, 2)
+	assert.Equal(t, 1, versions[0].Version)
+	assert.Equal(t, store.DecisionStatusReplaced, versions[0].Status)
+	require.Len(t, versions[0].Answers, 2)
+	assert.Equal(t, store.DecisionProvenanceAgentInterpreted, versions[0].Answers[0].Provenance)
+	assert.Equal(t, store.DecisionProvenanceDirect, versions[0].Answers[1].Provenance)
+	assert.Equal(t, store.DecisionOutcomeOverride, versions[0].Answers[1].Outcome)
+	assert.Equal(t, 2, versions[1].Version)
+	assert.Equal(t, store.DecisionStatusPending, versions[1].Status)
+
+	// Unknown key or another agent's lookup -> ErrNotFound.
+	_, err = f.cs.GetAgentDecisionVersions(ctx, f.agentID, "NOPE")
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	_, err = f.cs.GetAgentDecisionVersions(ctx, uuid.NewString(), "D234")
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
+func TestRecordInterpretedAnswers_SingleAndMultiPromptPartialSet(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+	srcMsgID := uuid.NewString()
+
+	// Single pair: BatchID is empty, MatchedDefault true when matching default.
+	p0 := f.create(t, false, yesNo("SOLO", "ship solo?"))
+	singleIn := f.interpretedBatch(srcMsgID, "user-1", "idem-solo",
+		store.InterpretedAnswerPair{DecisionRowID: p0.Decisions[0].RowID, Key: "SOLO", ChoiceID: "1"},
+	)
+	singleRes, err := f.cs.RecordInterpretedAnswers(ctx, singleIn)
+	require.NoError(t, err)
+	assert.Empty(t, singleRes.BatchID, "1 pair must have empty batch_id")
+	assert.False(t, singleRes.Replayed)
+	require.Len(t, singleRes.Answers, 1)
+	assert.Equal(t, store.DecisionProvenanceAgentInterpreted, singleRes.Answers[0].Provenance)
+	assert.Equal(t, store.DecisionOutcomeAnswer, singleRes.Answers[0].Outcome)
+	assert.True(t, singleRes.Answers[0].MatchedDefault)
+	assert.Equal(t, srcMsgID, singleRes.Answers[0].SourceMessageID)
+	assert.Equal(t, f.agentID, singleRes.Answers[0].InterpretedByAgentID)
+
+	msg, err := f.cs.GetMessage(ctx, singleIn.ResponseMessage.ID)
+	require.NoError(t, err)
+	assert.Equal(t, messages.TypeChoiceResponse, msg.Type)
+	assert.Equal(t, "interpreted: SOLO=yes", msg.Msg)
+
+	// Multi-prompt + partial set: prompt A has (D234, D999), prompt B has (17).
+	// Record D234=2 and 17=1 in one batch; D999 stays pending!
+	pA := f.create(t, false, yesNo("D234", "first?"), yesNo("D999", "leave pending?"))
+	pB := f.create(t, false, yesNo("", "hub key?"))
+	hubKey := pB.Decisions[0].Key
+
+	batchIn := f.interpretedBatch(srcMsgID, "user-1", "idem-batch",
+		store.InterpretedAnswerPair{Key: "d234", ChoiceID: "2"},
+		store.InterpretedAnswerPair{Key: hubKey, ChoiceID: "1"},
+	)
+	batchRes, err := f.cs.RecordInterpretedAnswers(ctx, batchIn)
+	require.NoError(t, err)
+	assert.NotEmpty(t, batchRes.BatchID, "2+ pairs share a batch_id")
+	require.Len(t, batchRes.Answers, 2)
+	assert.Equal(t, batchRes.BatchID, batchRes.Answers[0].BatchID)
+	assert.Equal(t, batchRes.BatchID, batchRes.Answers[1].BatchID)
+	assert.False(t, batchRes.Answers[0].MatchedDefault)
+	assert.True(t, batchRes.Answers[1].MatchedDefault)
+
+	// Verify D999 is still pending while D234 and hubKey are decided.
+	d999, err := f.cs.GetDecision(ctx, pA.Decisions[1].RowID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DecisionStatusPending, d999.Status)
+	assert.Empty(t, d999.Answers)
+}
+
+func TestRecordInterpretedAnswers_AllOrNothingRollback(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+	srcMsgID := uuid.NewString()
+
+	p := f.create(t, false, yesNo("K1", "pending?"), yesNo("K2", "already answered?"), yesNo("K3", "bad choice?"))
+	_, _, err := f.cs.RecordAnswer(ctx, f.answer(p.Decisions[1].RowID, "1", "user-1", ""))
+	require.NoError(t, err)
+
+	beforeMsgs, err := f.cs.client.Message.Query().Where(message.TypeEQ(messages.TypeChoiceResponse)).Count(ctx)
+	require.NoError(t, err)
+
+	// K1 is valid, K2 is already_answered, K3 has invalid_choice "99".
+	in := f.interpretedBatch(srcMsgID, "user-1", "",
+		store.InterpretedAnswerPair{Key: "K1", ChoiceID: "1"},
+		store.InterpretedAnswerPair{Key: "K2", ChoiceID: "1"},
+		store.InterpretedAnswerPair{Key: "K3", ChoiceID: "99"},
+	)
+	_, err = f.cs.RecordInterpretedAnswers(ctx, in)
+	var iaErr *store.InterpretedAnswersError
+	require.ErrorAs(t, err, &iaErr)
+	require.Len(t, iaErr.Failures, 2, "both failing keys reported together")
+	assert.Equal(t, "K2", iaErr.Failures[0].Key)
+	assert.Equal(t, store.InterpretedReasonAlreadyAnswered, iaErr.Failures[0].Reason)
+	require.NotNil(t, iaErr.Failures[0].Decision)
+	require.Len(t, iaErr.Failures[0].Decision.Answers, 1)
+	assert.Equal(t, "K3", iaErr.Failures[1].Key)
+	assert.Equal(t, store.InterpretedReasonInvalidChoice, iaErr.Failures[1].Reason)
+	assert.Equal(t, "99", iaErr.Failures[1].ChoiceID)
+
+	// K1 is still untouched, and 0 new choice-response messages were stored.
+	k1, err := f.cs.GetDecision(ctx, p.Decisions[0].RowID)
+	require.NoError(t, err)
+	assert.Equal(t, store.DecisionStatusPending, k1.Status)
+	assert.Empty(t, k1.Answers)
+
+	afterMsgs, err := f.cs.client.Message.Query().Where(message.TypeEQ(messages.TypeChoiceResponse)).Count(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, beforeMsgs, afterMsgs, "0 choice-response messages committed on rollback")
+}
+
+func TestRecordInterpretedAnswers_Idempotency(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+	srcMsgID := uuid.NewString()
+
+	p := f.create(t, false, yesNo("D1", "first?"), yesNo("D2", "second?"), yesNo("D3", "third?"))
+	first := f.interpretedBatch(srcMsgID, "user-1", "idem-1",
+		store.InterpretedAnswerPair{DecisionRowID: p.Decisions[0].RowID, Key: "D1", ChoiceID: "1"},
+		store.InterpretedAnswerPair{DecisionRowID: p.Decisions[1].RowID, Key: "D2", ChoiceID: "2"},
+	)
+	res1, err := f.cs.RecordInterpretedAnswers(ctx, first)
+	require.NoError(t, err)
+	assert.False(t, res1.Replayed)
+
+	// User confirms D1 and agent reposts D2 (--update v2), then agent retries idem-1:
+	// replay still returns 200 with original batch_id and response_message_id!
+	confirmIn := f.answer(p.Decisions[0].RowID, "1", "user-1", "")
+	confirmIn.Outcome = store.DecisionOutcomeConfirm
+	_, _, err = f.cs.RecordAnswer(ctx, confirmIn)
+	require.NoError(t, err)
+	f.create(t, true, yesNo("D2", "second v2?"))
+
+	retry := f.interpretedBatch(srcMsgID, "user-1", "idem-1",
+		store.InterpretedAnswerPair{Key: "D1", ChoiceID: "1"},
+		store.InterpretedAnswerPair{Key: "D2", ChoiceID: "2"},
+	)
+	res2, err := f.cs.RecordInterpretedAnswers(ctx, retry)
+	require.NoError(t, err)
+	assert.True(t, res2.Replayed)
+	assert.Equal(t, res1.BatchID, res2.BatchID)
+	assert.Equal(t, first.ResponseMessage.ID, res2.Answers[0].ResponseMessageID)
+
+	// Different choice -> ErrIdempotencyMismatch.
+	diffChoice := f.interpretedBatch(srcMsgID, "user-1", "idem-1",
+		store.InterpretedAnswerPair{Key: "D1", ChoiceID: "2"},
+		store.InterpretedAnswerPair{Key: "D2", ChoiceID: "2"},
+	)
+	_, err = f.cs.RecordInterpretedAnswers(ctx, diffChoice)
+	assert.ErrorIs(t, err, store.ErrIdempotencyMismatch)
+
+	// Different key -> ErrIdempotencyMismatch.
+	diffKey := f.interpretedBatch(srcMsgID, "user-1", "idem-1",
+		store.InterpretedAnswerPair{Key: "D3", ChoiceID: "1"},
+	)
+	_, err = f.cs.RecordInterpretedAnswers(ctx, diffKey)
+	assert.ErrorIs(t, err, store.ErrIdempotencyMismatch)
+
+	// Different source_message_id -> ErrIdempotencyMismatch.
+	diffSrc := f.interpretedBatch(uuid.NewString(), "user-1", "idem-1",
+		store.InterpretedAnswerPair{Key: "D1", ChoiceID: "1"},
+		store.InterpretedAnswerPair{Key: "D2", ChoiceID: "2"},
+	)
+	_, err = f.cs.RecordInterpretedAnswers(ctx, diffSrc)
+	assert.ErrorIs(t, err, store.ErrIdempotencyMismatch)
+}
+
+func TestRecordInterpretedAnswers_ConcurrentRaceWithDirectAnswer(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+
+	for round := 0; round < 10; round++ {
+		key := fmt.Sprintf("RACE-%d", round)
+		rowID := f.create(t, false, yesNo(key, "race?")).Decisions[0].RowID
+		srcMsgID := uuid.NewString()
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		var interpErr, directErr error
+
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, interpErr = f.cs.RecordInterpretedAnswers(ctx, f.interpretedBatch(srcMsgID, "user-1", "",
+				store.InterpretedAnswerPair{DecisionRowID: rowID, Key: key, ChoiceID: "1"},
+			))
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			_, _, directErr = f.cs.RecordAnswer(ctx, f.answer(rowID, "2", "user-1", ""))
+		}()
+		close(start)
+		wg.Wait()
+
+		// Exactly one of the two concurrent pending-row writes succeeds; the loser
+		// sees the winner's answer and fails cleanly with conflict/mismatch.
+		assert.NotEqual(t, interpErr == nil, directErr == nil,
+			"round %d: interpErr=%v directErr=%v", round, interpErr, directErr)
+
+		d, err := f.cs.GetDecision(ctx, rowID)
+		require.NoError(t, err)
+		assert.Equal(t, store.DecisionStatusDecided, d.Status)
+		assert.Len(t, d.Answers, 1)
+	}
+}
