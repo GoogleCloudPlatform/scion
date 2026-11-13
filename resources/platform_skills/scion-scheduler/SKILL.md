@@ -2,8 +2,9 @@
 name: scion-scheduler
 description: >-
   Schedule one-shot and recurring events for agents using the Scion CLI.
-  Covers when to use scheduled events vs inline message delays, recurring
-  cron schedules, lifecycle management, and the blocked-wait pairing rule.
+  Covers self-callbacks, recurring cron schedules and time zones, which
+  schedules an agent can see, lifecycle management, and the blocked-wait
+  pairing rule.
 ---
 
 # Scion Scheduler
@@ -15,25 +16,9 @@ schedules within its own project.
 
 For full command syntax: `scion schedule --help` and its subcommands.
 
-## Two ways to schedule — when to use which
-
-Scion has two scheduling mechanisms. They solve different problems:
-
-| | `scion message --in/--at` | `scion schedule create` / `create-recurring` |
-|---|---|---|
-| Nature | fire-and-forget delayed send | durable, project-scoped event |
-| Manageable | no handle once sent | list, inspect, cancel, pause, resume, delete, history |
-| Visibility | only sender knows it exists | any agent in the project can `scion schedule list` |
-| Recurrence | no | yes (`create-recurring --cron`) |
-
-**Use `scion message --in`** for a simple self-callback during your own wait —
-you need a poke, not a managed object.
-
-**Use `scion schedule create`** when any of these apply:
-- The event is recurring
-- Another agent may need to inspect, cancel, or take over the schedule
-- The wait outlives the current agent's session
-- You need execution history or failure tracking
+Use `scion schedule create` for every delayed message, including a simple
+self-callback. The `--in` and `--at` flags of `scion message` are deprecated;
+do not use them for callbacks.
 
 ## Waiting on external processes — the blocked-wait pairing rule
 
@@ -46,8 +31,10 @@ unrelated inbound message happens to arrive.
 
 **Correct pattern:** schedule a self-callback, then set blocked status.
 
-```
-scion message --in 5m agent:<self> "recheck CI status"
+```bash
+scion schedule create --non-interactive --type message \
+  --agent "$(scion whoami --non-interactive --format json | jq -r .name)" \
+  --message "Recheck CI status" --in 5m
 sciontool status blocked "Waiting for CI run to complete"
 ```
 
@@ -60,17 +47,6 @@ detector from flagging you during the wait. **Neither replaces the other.**
 `sciontool status blocked` alone **is** sufficient when waiting on another
 agent or a scheduled event already tracked by the orchestration system —
 those fire their own state-change notifications.
-
-## Self-scheduling
-
-To schedule a message to yourself, resolve your own agent name first:
-
-```bash
-scion schedule create --non-interactive --type message \
-  --agent "$(scion whoami --non-interactive --format json | jq -r .name)" \
-  --message "Check if deployment completed" \
-  --in 15m
-```
 
 ## Waking a suspended agent
 
@@ -92,8 +68,11 @@ Fire once, then done. Specify timing with `--in` (relative delay: `30m`,
 ### Recurring schedules
 
 Fire on a cron expression (5-field: minute hour day-of-month month
-day-of-week), evaluated in **UTC only**. Each recurring schedule has a name,
-can be paused and resumed, and maintains execution history.
+day-of-week). Pass `--time-zone <IANA name>` (for example
+`--time-zone America/Los_Angeles`) to evaluate it in that zone; a zoned
+schedule keeps its local time across daylight saving changes. Without
+`--time-zone` the expression is evaluated in UTC. Each recurring schedule
+has a name, can be paused and resumed, and maintains execution history.
 
 ## Message-to-orchestrator pattern
 
@@ -101,6 +80,15 @@ To create agents on a timer, message a long-lived orchestrator rather than
 dispatching agents directly from the schedule. The orchestrator receives the
 message and creates/manages task agents as needed — keeping agent lifecycle
 owned by something that can reason about it.
+
+## Which schedules you can see
+
+A user with list permission sees all of the project's schedules. An agent
+sees and manages only the schedules and events it created (whose recorded
+initiator is that agent): `list` omits the others, and `get`, `pause`,
+`cancel` and `delete` refuse them. An empty list therefore does not show that
+a schedule is absent. To check another agent's schedule, ask that agent, or
+a user, to read it back.
 
 ## Lifecycle management
 
@@ -118,14 +106,18 @@ owned by something that can reason about it.
 
 ## Gotchas
 
-- **Cron is UTC only.** An expression cannot carry a timezone, and there is
-  no timezone setting. Convert from local time before writing the expression.
-  A fixed UTC time shifts by an hour against local time across DST changes.
+- **Cron defaults to UTC.** For a local time, pass `--time-zone` rather than
+  converting to UTC; a fixed UTC time shifts by an hour against local time
+  across DST changes. Zone prefixes in the expression (`CRON_TZ=`) are not
+  supported.
 - **`cancel` vs `pause` vs `delete`:** `cancel` is for one-shot events only.
   `pause` and `delete` are for recurring schedules only. Using the wrong command
   on the wrong type will result in an error.
-- **Schedule names must be unique** within the project.
+- **Schedule names must be unique** within the project, including names of
+  schedules you cannot see. A name conflict can come from another agent's
+  schedule.
 - **Clean up recurring schedules** when the task they serve is complete —
   they fire indefinitely until paused or deleted.
-- **Check existing schedules** with `scion schedule list` before creating
-  new ones — duplicate schedules deliver duplicate messages.
+- **Check your existing schedules** with `scion schedule list` before
+  creating new ones — duplicate schedules deliver duplicate messages. The
+  list shows only your own (see above).
