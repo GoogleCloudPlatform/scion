@@ -1310,8 +1310,24 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// buildStartContext (which repeats this check) does (ptone/scion#1799).
 	if req.Config != nil && req.Config.SharedWorkspace {
 		// A marker naming an earlier ID of the same project (a re-link) is
-		// carried over to the current ID first (ptone/scion#4440).
-		lockErr, checkErr, err := s.relinkSharedProjectIdentityChecked(ctx, req.ProjectPath, req.ProjectSlug, req.ProjectID, req.Name, req.PreviousProjectIDs, s.unrecordedRelinkAllowed(ctx, r))
+		// carried over to the current ID first (ptone/scion#4440), retiring
+		// this flat instance's active ownership record under the earlier ID
+		// before buildStartContext records the new run (ptone/scion#4764).
+		createSlug := req.Slug
+		if createSlug == "" {
+			createSlug = api.Slugify(req.Name)
+		}
+		ownEnabled := s.ownership != nil && s.flatCloudRunGCPIdentityRefusal(startContextInputs{
+			Name:        req.Name,
+			Operation:   opCreate,
+			Config:      req.Config,
+			ResolvedEnv: req.ResolvedEnv,
+		}) == nil
+		lockErr, checkErr, err := s.relinkSharedProjectIdentityCheckedWithOwnership(ctx, req.ProjectPath, req.ProjectSlug, req.ProjectID, req.Name, req.PreviousProjectIDs, s.unrecordedRelinkAllowed(ctx, r), relinkOwnership{
+			agentID: req.ID,
+			slug:    createSlug,
+			enabled: ownEnabled,
+		})
 		if lockErr != nil {
 			s.writeRuntimeOpError(w, ctx, "create agent", lockErr, "agent_id", req.ID, "project_id", req.ProjectID)
 			return

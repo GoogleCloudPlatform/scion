@@ -174,7 +174,22 @@ func (e *projectRelinkError) Error() string {
 // only the marker is rewritten; a git project whose current directory
 // records no workspace_path is handled the same way (carried only when
 // unrecordedAllowed is set, refused otherwise).
+// relinkOwnership carries the flat-instance ownership context of a create,
+// start or restart into relinkSharedProjectIdentityWithOwnership. A zero
+// value disables per-agent ownership checks (legacy Runtime Brokers and
+// direct package-level re-link tests).
+type relinkOwnership struct {
+	agentID      string
+	slug         string
+	requireOwned bool
+	enabled      bool
+}
+
 func (s *Server) relinkSharedProjectIdentity(ctx context.Context, projectPath, projectSlug, hubProjectID, agentName string, previousIDs []string, unrecordedAllowed bool) error {
+	return s.relinkSharedProjectIdentityWithOwnership(ctx, projectPath, projectSlug, hubProjectID, agentName, previousIDs, unrecordedAllowed, relinkOwnership{})
+}
+
+func (s *Server) relinkSharedProjectIdentityWithOwnership(ctx context.Context, projectPath, projectSlug, hubProjectID, agentName string, previousIDs []string, unrecordedAllowed bool, own relinkOwnership) error {
 	if projectPath == "" || agentName == "" || !isCanonicalUUID(hubProjectID) {
 		return nil
 	}
@@ -251,7 +266,7 @@ func (s *Server) relinkSharedProjectIdentity(ctx context.Context, projectPath, p
 		return skip("a project config directory is not directly under the project-configs directory")
 	}
 	if _, err := os.Lstat(oldRoot); errors.Is(err, fs.ErrNotExist) {
-		return s.finishInterruptedRelink(log, ident, slug, hubProjectID, globalDir, newRoot, workspace, agentName, gitListed, unrecordedAllowed)
+		return s.finishInterruptedRelink(log, ident, slug, hubProjectID, globalDir, newRoot, workspace, agentName, gitListed, unrecordedAllowed, own)
 	}
 	if !projectConfigPathContained(globalDir, oldRoot) {
 		return skip("no project config directory for the earlier ID")
@@ -277,6 +292,9 @@ func (s *Server) relinkSharedProjectIdentity(ctx context.Context, projectPath, p
 		log.Warn("project re-link: an agent of the earlier project ID may be running; not moving", "old", oldRoot)
 		return &projectRelinkError{Path: oldRoot, Reason: "an agent of the earlier project ID may still be running (stop it and retry)"}
 	}
+	if !s.canRelinkOwnership(ident.ID, hubProjectID, own) {
+		return skip("this Runtime Broker instance cannot move ownership of the agent to the current project ID")
+	}
 
 	relinkBeforeMove()
 	commit, rollback, err := moveProjectConfigDir(oldRoot, newRoot)
@@ -290,18 +308,31 @@ func (s *Server) relinkSharedProjectIdentity(ctx context.Context, projectPath, p
 		}
 		return &projectRelinkError{Path: oldRoot, Reason: "the move did not complete"}
 	}
+	undoOwnership, err := s.migrateRelinkOwnership(ident.ID, hubProjectID, globalDir, newRoot, own)
+	if err != nil {
+		log.Warn("project re-link: moving the instance's ownership record failed; undoing the move", "old", oldRoot, "new", newRoot, "error", err)
+		if rbErr := rollback(); rbErr != nil {
+			if errors.Is(rbErr, errPartialCopyRemains) {
+				return &projectRelinkError{Path: newRoot, Reason: "the agent's ownership record could not be moved to the current project ID", PartialCopy: true}
+			}
+			return &projectRelinkError{Path: newRoot, Reason: "the agent's ownership record could not be moved to the current project ID", Moved: true}
+		}
+		return &projectRelinkError{Path: oldRoot, Reason: "the agent's ownership record could not be moved to the current project ID"}
+	}
 	if err := relinkWriteMarker(ident, slug, hubProjectID); errors.Is(err, errMarkerWrittenNotSynced) {
 		log.Warn("project re-link: the project-id marker was rewritten, but syncing it to disk failed; keeping the move", "path", ident.ScionPath, "error", err)
 	} else if err != nil {
 		log.Warn("project re-link: rewriting the project-id marker failed; undoing the move", "path", ident.ScionPath, "error", err)
 		if rbErr := rollback(); rbErr != nil {
 			if errors.Is(rbErr, errPartialCopyRemains) {
+				undoOwnership()
 				log.Error("project re-link: removing the copy failed; the earlier directory is intact and a partial copy remains", "old", oldRoot, "new", newRoot, "error", rbErr)
 				return &projectRelinkError{Path: newRoot, Reason: "the project-id marker could not be rewritten", PartialCopy: true}
 			}
 			log.Error("project re-link: undoing the move failed; the project config directory is at the new location", "old", oldRoot, "new", newRoot, "error", rbErr)
 			return &projectRelinkError{Path: ident.ScionPath, Reason: "the project-id marker could not be rewritten", Moved: true}
 		}
+		undoOwnership()
 		return &projectRelinkError{Path: ident.ScionPath, Reason: "the project-id marker could not be rewritten"}
 	}
 	if err := commit(); err != nil {
@@ -319,7 +350,7 @@ func (s *Server) relinkSharedProjectIdentity(ctx context.Context, projectPath, p
 // workspace_path is finished only when unrecordedAllowed is set; otherwise
 // it returns a projectRelinkError (Unrecorded) and changes nothing. In
 // every other case it changes nothing.
-func (s *Server) finishInterruptedRelink(log *slog.Logger, ident *config.WorkspaceIdentity, slug, hubProjectID, globalDir, newRoot, workspace, agentName string, gitListed, unrecordedAllowed bool) error {
+func (s *Server) finishInterruptedRelink(log *slog.Logger, ident *config.WorkspaceIdentity, slug, hubProjectID, globalDir, newRoot, workspace, agentName string, gitListed, unrecordedAllowed bool, own relinkOwnership) error {
 	newConfig := filepath.Join(newRoot, config.DotScion)
 	contained := projectConfigPathContained(globalDir, filepath.Join(newConfig, "agents", agentName))
 	recorded := workspacePathRecordedFor(newConfig, workspace)
@@ -332,6 +363,14 @@ func (s *Server) finishInterruptedRelink(log *slog.Logger, ident *config.Workspa
 		log.Info("project re-link: not carrying the agent over to the current project ID", "reason", "no project config directory for the earlier ID")
 		return nil
 	}
+	if !s.canRelinkOwnership(ident.ID, hubProjectID, own) {
+		log.Info("project re-link: not carrying the agent over to the current project ID", "reason", "this Runtime Broker instance cannot move ownership of the agent to the current project ID")
+		return nil
+	}
+	if _, err := s.migrateRelinkOwnership(ident.ID, hubProjectID, globalDir, newRoot, own); err != nil {
+		log.Warn("project re-link: moving the instance's ownership record after an earlier move failed", "new", newRoot, "error", err)
+		return &projectRelinkError{Path: newRoot, Reason: "the agent's ownership record could not be moved to the current project ID", Moved: true}
+	}
 	if err := relinkWriteMarker(ident, slug, hubProjectID); errors.Is(err, errMarkerWrittenNotSynced) {
 		log.Warn("project re-link: the project-id marker was rewritten, but syncing it to disk failed", "path", ident.ScionPath, "error", err)
 	} else if err != nil {
@@ -340,6 +379,131 @@ func (s *Server) finishInterruptedRelink(log *slog.Logger, ident *config.Workspa
 	}
 	log.Info("project re-link: the project config directory was already moved; rewrote the project-id marker", "new", newRoot, "path", ident.ScionPath)
 	return nil
+}
+
+// canRelinkOwnership checks, without side effects, whether this server may
+// carry a re-linked shared-workspace project over from oldProjectID to
+// hubProjectID under flat ownership rules (ptone/scion#4764,
+// ptone/scion#4765). On !create (own.requireOwned), this instance must
+// already hold an active, non-conflicting ownership record for (oldProjectID,
+// own.agentID) — or (hubProjectID, own.agentID) when recovering an
+// interrupted re-link — with matching slug, so an unowned or sibling-owned
+// agent is never adopted or moved on disk.
+func (s *Server) canRelinkOwnership(oldProjectID, hubProjectID string, own relinkOwnership) bool {
+	if s.ownership == nil || !own.enabled {
+		return true
+	}
+	if own.agentID == "" || own.slug == "" {
+		return false
+	}
+	if err := s.locks().reserveSlug(s, hubProjectID, own.slug, func() error {
+		holder, err := s.ownership.SlugHolder(hubProjectID, own.slug)
+		if err != nil {
+			return err
+		}
+		if holder != "" && holder != own.agentID {
+			return ErrOwnershipSlugHeld
+		}
+		return nil
+	}); err != nil {
+		return false
+	}
+	if !own.requireOwned {
+		return true
+	}
+	if s.hasActiveOwnedSlug(oldProjectID, own.agentID, own.slug) {
+		return true
+	}
+	return s.hasActiveOwnedSlug(hubProjectID, own.agentID, own.slug)
+}
+
+func (s *Server) hasActiveOwnedSlug(projectID, agentID, slug string) bool {
+	if s.ownership.conflicting[OwnershipSlugKey(projectID, slug)] {
+		return false
+	}
+	rec, ok, err := s.ownership.Get(projectID, agentID)
+	return err == nil && ok && rec.State == OwnershipStateActive && rec.AgentSlug == slug
+}
+
+// migrateRelinkOwnership moves this flat instance's active ownership records
+// carried with newRoot from oldProjectID to hubProjectID, returning an undo
+// closure for a rolled-back directory move. Legacy Runtime Brokers do nothing.
+func (s *Server) migrateRelinkOwnership(oldProjectID, hubProjectID, globalDir, newRoot string, own relinkOwnership) (func(), error) {
+	if s.ownership == nil || !own.enabled {
+		return func() {}, nil
+	}
+	var undos []func() error
+	undoAll := func() {
+		for i := len(undos) - 1; i >= 0; i-- {
+			_ = undos[i]()
+		}
+	}
+
+	oldAgentID := ""
+	if rec, ok, err := s.ownership.Get(oldProjectID, own.agentID); err != nil {
+		return func() {}, err
+	} else if ok && rec.State == OwnershipStateActive {
+		oldAgentID = own.agentID
+	} else if !own.requireOwned {
+		holder, err := s.ownership.SlugHolder(oldProjectID, own.slug)
+		if err != nil {
+			return func() {}, err
+		}
+		if holder != "" {
+			if hRec, hOK, hErr := s.ownership.Get(oldProjectID, holder); hErr != nil {
+				return func() {}, hErr
+			} else if hOK && hRec.State == OwnershipStateActive {
+				oldAgentID = holder
+			}
+		}
+	}
+
+	if oldAgentID != "" || own.requireOwned {
+		if oldAgentID == "" {
+			oldAgentID = own.agentID
+		}
+		var u func() error
+		err := s.locks().reserveSlug(s, hubProjectID, own.slug, func() error {
+			var moveErr error
+			u, _, moveErr = s.ownership.MoveProjectRecord(oldProjectID, oldAgentID, hubProjectID, own.agentID, own.slug)
+			return moveErr
+		})
+		if err != nil {
+			undoAll()
+			return func() {}, err
+		}
+		undos = append(undos, u)
+	}
+
+	recs, err := s.ownership.List()
+	if err != nil {
+		undoAll()
+		return func() {}, err
+	}
+	for _, r := range recs {
+		if r.ProjectID != oldProjectID || r.State != OwnershipStateActive {
+			continue
+		}
+		if s.ownership.agentConflict(r.ProjectID, r.AgentID) != nil || s.ownership.conflicting[OwnershipSlugKey(r.ProjectID, r.AgentSlug)] {
+			continue
+		}
+		if !projectConfigPathContained(globalDir, filepath.Join(newRoot, config.DotScion, "agents", r.AgentSlug)) {
+			continue
+		}
+		var u func() error
+		moveErr := s.locks().reserveSlug(s, hubProjectID, r.AgentSlug, func() error {
+			var err error
+			u, _, err = s.ownership.MoveProjectRecord(oldProjectID, r.AgentID, hubProjectID, r.AgentID, r.AgentSlug)
+			return err
+		})
+		if moveErr != nil {
+			s.agentLifecycleLog.Warn("project re-link: sibling ownership record in earlier project could not be moved",
+				"agent_id", r.AgentID, "slug", r.AgentSlug, "old_id", oldProjectID, "new_id", hubProjectID, "error", moveErr)
+			continue
+		}
+		undos = append(undos, u)
+	}
+	return undoAll, nil
 }
 
 // maxPreviousProjectIDs bounds the previousIDs list relinkSharedProjectIdentity
@@ -677,12 +841,16 @@ func directlyUnderProjectConfigs(dir string) bool {
 // When both checkErr and relinkErr are set, the callers return checkErr and
 // log relinkErr.
 func (s *Server) relinkSharedProjectIdentityChecked(ctx context.Context, projectPath, projectSlug, hubProjectID, agentName string, previousIDs []string, unrecordedAllowed bool) (lockErr, checkErr, relinkErr error) {
+	return s.relinkSharedProjectIdentityCheckedWithOwnership(ctx, projectPath, projectSlug, hubProjectID, agentName, previousIDs, unrecordedAllowed, relinkOwnership{})
+}
+
+func (s *Server) relinkSharedProjectIdentityCheckedWithOwnership(ctx context.Context, projectPath, projectSlug, hubProjectID, agentName string, previousIDs []string, unrecordedAllowed bool, own relinkOwnership) (lockErr, checkErr, relinkErr error) {
 	if projectPath == "" {
-		return nil, nil, s.relinkSharedProjectIdentity(ctx, projectPath, projectSlug, hubProjectID, agentName, previousIDs, unrecordedAllowed)
+		return nil, nil, s.relinkSharedProjectIdentityWithOwnership(ctx, projectPath, projectSlug, hubProjectID, agentName, previousIDs, unrecordedAllowed, own)
 	}
 	lockErr = s.withWorkspaceLock(ctx, func() {
 		checkErr = s.withCheckedWorkspaceConfig(projectPath, hubProjectID, projectSlug, func() {
-			relinkErr = s.relinkSharedProjectIdentity(ctx, projectPath, projectSlug, hubProjectID, agentName, previousIDs, unrecordedAllowed)
+			relinkErr = s.relinkSharedProjectIdentityWithOwnership(ctx, projectPath, projectSlug, hubProjectID, agentName, previousIDs, unrecordedAllowed, own)
 		})
 	}, projectPath)
 	return lockErr, checkErr, relinkErr

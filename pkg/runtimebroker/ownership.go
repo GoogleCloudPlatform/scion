@@ -101,6 +101,12 @@ type OwnershipRecord struct {
 	// files (the runtime delete and file removal succeeded); only then may
 	// the start-up reconciliation finish the record and release the slug.
 	FilesRemoved bool `json:"filesRemoved,omitempty"`
+	// PreviousProjectIDs are earlier project IDs from which this record was
+	// carried over by a shared-workspace project re-link (ptone/scion#4764),
+	// so start-up reconstruction still attributes stopped runtime objects
+	// labelled with an earlier project ID to this record and finishes any
+	// interrupted record move.
+	PreviousProjectIDs []string `json:"previousProjectIds,omitempty"`
 }
 
 // Run returns the run with this ID, or nil.
@@ -612,6 +618,9 @@ func (s *OwnershipStore) ReleaseSlug(projectID, agentID string) error {
 // could not repair (two live records claiming one slug, unreadable index or
 // records), which the caller treats as unresolved ownership.
 func (s *OwnershipStore) RepairSlugIndex() ([]string, error) {
+	if err := s.finishInterruptedProjectMoves(); err != nil {
+		return nil, err
+	}
 	recs, err := s.List()
 	if err != nil {
 		return nil, err
@@ -851,6 +860,367 @@ func (s *OwnershipStore) HasLiveAgents(projectID string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// HasActiveAgent reports whether this instance holds any active,
+// non-conflicting ownership record for agentID across any project. An
+// unreadable record is an error.
+func (s *OwnershipStore) HasActiveAgent(agentID string) (bool, error) {
+	if !validOwnershipElement(agentID) {
+		return false, nil
+	}
+	recs, err := s.List()
+	if err != nil {
+		return false, err
+	}
+	for _, r := range recs {
+		if r.AgentID != agentID || r.State != OwnershipStateActive {
+			continue
+		}
+		if s.agentConflict(r.ProjectID, r.AgentID) != nil || s.conflicting[OwnershipSlugKey(r.ProjectID, r.AgentSlug)] {
+			continue
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+// lockTwoKeys locks two (projectID, agentID) keys in canonical order and
+// returns a function that unlocks them.
+func (s *OwnershipStore) lockTwoKeys(p1, a1, p2, a2 string) func() {
+	k1 := p1 + "\x00" + a1
+	k2 := p2 + "\x00" + a2
+	if k1 == k2 {
+		l := s.keyLock(p1, a1)
+		l.Lock()
+		return l.Unlock
+	}
+	if k2 < k1 {
+		p1, a1, p2, a2 = p2, a2, p1, a1
+	}
+	l1 := s.keyLock(p1, a1)
+	l2 := s.keyLock(p2, a2)
+	l1.Lock()
+	l2.Lock()
+	return func() {
+		l2.Unlock()
+		l1.Unlock()
+	}
+}
+
+func cloneOwnedRuns(runs []OwnedRun) []OwnedRun {
+	if len(runs) == 0 {
+		return nil
+	}
+	out := make([]OwnedRun, len(runs))
+	for i, r := range runs {
+		out[i] = OwnedRun{RunID: r.RunID, State: r.State}
+		if len(r.Resources) > 0 {
+			out[i].Resources = append([]OwnedResource(nil), r.Resources...)
+		}
+	}
+	return out
+}
+
+func cloneOwnershipRecord(rec *OwnershipRecord) OwnershipRecord {
+	cp := *rec
+	cp.Runs = cloneOwnedRuns(rec.Runs)
+	if len(rec.PreviousProjectIDs) > 0 {
+		cp.PreviousProjectIDs = append([]string(nil), rec.PreviousProjectIDs...)
+	}
+	return cp
+}
+
+func appendUniqueProjectIDs(existing []string, extra ...string) []string {
+	var out []string
+	seen := make(map[string]bool, len(existing)+len(extra))
+	for _, id := range existing {
+		if id != "" && !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	for _, id := range extra {
+		if id != "" && !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// MoveProjectRecord moves an active ownership record of slug from
+// (oldProjectID, oldAgentID) to (newProjectID, newAgentID) during a
+// shared-workspace project re-link (ptone/scion#4764, ptone/scion#4765).
+//
+// The new record and slug index entry are synced to disk before the earlier
+// project's slug index entry and record are removed, so a crash never leaves
+// the agent without an active record. Repeating the call after the move has
+// already completed is a no-op (moved == false). When this call created the
+// new record, undo restores the earlier record and removes the uncommitted
+// new record if a subsequent step of the re-link rolls the directory move
+// back. The caller holds the host's slug reservation lock on (newProjectID,
+// slug) when sharing a host with sibling instances.
+func (s *OwnershipStore) MoveProjectRecord(oldProjectID, oldAgentID, newProjectID, newAgentID, slug string) (undo func() error, moved bool, err error) {
+	nopUndo := func() error { return nil }
+	if oldProjectID == newProjectID {
+		return nopUndo, false, fmt.Errorf("%w: earlier and current project IDs are identical (%q)", ErrOwnershipKeyInvalid, oldProjectID)
+	}
+	oldRecPath, err := s.recordPath(oldProjectID, oldAgentID)
+	if err != nil {
+		return nopUndo, false, err
+	}
+	newRecPath, err := s.recordPath(newProjectID, newAgentID)
+	if err != nil {
+		return nopUndo, false, err
+	}
+	oldSlugPath, err := s.slugPath(oldProjectID, slug)
+	if err != nil {
+		return nopUndo, false, err
+	}
+	newSlugPath, err := s.slugPath(newProjectID, slug)
+	if err != nil {
+		return nopUndo, false, err
+	}
+	if err := s.agentConflict(oldProjectID, oldAgentID); err != nil {
+		return nopUndo, false, err
+	}
+	if err := s.agentConflict(newProjectID, newAgentID); err != nil {
+		return nopUndo, false, err
+	}
+	if s.conflicting[OwnershipSlugKey(oldProjectID, slug)] {
+		return nopUndo, false, fmt.Errorf("%w: slug %q in project %q", ErrOwnershipConflict, slug, oldProjectID)
+	}
+
+	unlock := s.lockTwoKeys(oldProjectID, oldAgentID, newProjectID, newAgentID)
+	defer unlock()
+
+	oldRec, oldOK, err := s.read(oldProjectID, oldAgentID)
+	if err != nil {
+		return nopUndo, false, err
+	}
+	newRec, newOK, err := s.read(newProjectID, newAgentID)
+	if err != nil {
+		return nopUndo, false, err
+	}
+
+	s.slugMu.Lock()
+	defer s.slugMu.Unlock()
+
+	holder, err := s.SlugHolder(newProjectID, slug)
+	if err != nil {
+		return nopUndo, false, err
+	}
+	if holder != "" && holder != newAgentID {
+		if held, found, _ := s.readFile(newProjectID, holder); found && held.State != OwnershipStateActive {
+			return nopUndo, false, fmt.Errorf("%w: slug %q in project %q on Runtime Broker instance %s: the delete of agent %s has not yet confirmed that all its objects are gone",
+				ErrOwnershipSlugPending, slug, newProjectID, s.brokerID, holder)
+		}
+		return nopUndo, false, &slugHeldError{projectID: newProjectID, slug: slug, holder: holder}
+	}
+
+	removeOldUnlocked := func() error {
+		oldHolder, err := s.slugHolder(oldProjectID, slug)
+		if err != nil {
+			return err
+		}
+		if oldHolder == oldAgentID {
+			if err := os.Remove(oldSlugPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			syncDirBestEffort(filepath.Dir(oldSlugPath))
+		}
+		if err := os.Remove(oldRecPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		syncDirBestEffort(filepath.Dir(oldRecPath))
+		return nil
+	}
+
+	// Retry idempotency: the record is already active at newProjectID and
+	// absent (or already deleted) at oldProjectID.
+	if (!oldOK || oldRec.State == OwnershipStateDeleted) && newOK {
+		if newRec.State != OwnershipStateActive {
+			return nopUndo, false, fmt.Errorf("%w: agent %q is %s", ErrOwnershipStateOrder, newAgentID, newRec.State)
+		}
+		if newRec.AgentSlug != slug {
+			return nopUndo, false, fmt.Errorf("%w: agent %q is recorded with slug %q, not %q", ErrOwnershipKeyInvalid, newAgentID, newRec.AgentSlug, slug)
+		}
+		if holder == "" {
+			if err := writeOwnershipFile(newSlugPath, []byte(newAgentID+"\n")); err != nil {
+				return nopUndo, false, err
+			}
+		}
+		if oldHolder, _ := s.slugHolder(oldProjectID, slug); oldHolder == oldAgentID {
+			_ = os.Remove(oldSlugPath)
+			syncDirBestEffort(filepath.Dir(oldSlugPath))
+		}
+		return nopUndo, false, nil
+	}
+
+	if !oldOK {
+		return nopUndo, false, fmt.Errorf("%w: agent %q in project %q", ErrOwnershipNotRecorded, oldAgentID, oldProjectID)
+	}
+	if oldRec.State != OwnershipStateActive {
+		return nopUndo, false, fmt.Errorf("%w: agent %q is %s", ErrOwnershipStateOrder, oldAgentID, oldRec.State)
+	}
+	if oldRec.AgentSlug != slug {
+		return nopUndo, false, fmt.Errorf("%w: agent %q is recorded with slug %q, not %q", ErrOwnershipKeyInvalid, oldAgentID, oldRec.AgentSlug, slug)
+	}
+
+	if newOK {
+		// Finish an earlier move interrupted between writing newRec and
+		// removing oldRec.
+		if newRec.State != OwnershipStateActive {
+			return nopUndo, false, fmt.Errorf("%w: agent %q is %s", ErrOwnershipStateOrder, newAgentID, newRec.State)
+		}
+		if newRec.AgentSlug != slug {
+			return nopUndo, false, fmt.Errorf("%w: agent %q is recorded with slug %q, not %q", ErrOwnershipKeyInvalid, newAgentID, newRec.AgentSlug, slug)
+		}
+		for _, r := range cloneOwnedRuns(oldRec.Runs) {
+			if newRec.Run(r.RunID) == nil {
+				newRec.Runs = append(newRec.Runs, r)
+			}
+		}
+		newRec.PreviousProjectIDs = appendUniqueProjectIDs(newRec.PreviousProjectIDs, append(oldRec.PreviousProjectIDs, oldProjectID)...)
+		newRec.Revision++
+		newRec.UpdatedAt = s.now().UTC()
+		if err := writeOwnershipFile(newRecPath, mustJSON(newRec)); err != nil {
+			return nopUndo, false, err
+		}
+		if holder == "" {
+			if err := writeOwnershipFile(newSlugPath, []byte(newAgentID+"\n")); err != nil {
+				return nopUndo, false, err
+			}
+		}
+		if err := removeOldUnlocked(); err != nil {
+			return nopUndo, false, err
+		}
+		return nopUndo, true, nil
+	}
+
+	savedOld := cloneOwnershipRecord(oldRec)
+	movedRec := &OwnershipRecord{
+		SchemaVersion:      ownershipSchemaVersion,
+		Revision:           1,
+		RuntimeBrokerID:    s.brokerID,
+		ProjectID:          newProjectID,
+		AgentID:            newAgentID,
+		AgentSlug:          slug,
+		State:              OwnershipStateActive,
+		Runs:               cloneOwnedRuns(oldRec.Runs),
+		PreviousProjectIDs: appendUniqueProjectIDs(oldRec.PreviousProjectIDs, oldProjectID),
+		UpdatedAt:          s.now().UTC(),
+	}
+	if err := writeOwnershipFile(newRecPath, mustJSON(movedRec)); err != nil {
+		return nopUndo, false, err
+	}
+	if holder == "" {
+		if err := writeOwnershipFile(newSlugPath, []byte(newAgentID+"\n")); err != nil {
+			_ = os.Remove(newRecPath)
+			syncDirBestEffort(filepath.Dir(newRecPath))
+			return nopUndo, false, err
+		}
+	}
+	if err := removeOldUnlocked(); err != nil {
+		return nopUndo, false, err
+	}
+
+	undoFn := func() error {
+		unlockUndo := s.lockTwoKeys(oldProjectID, oldAgentID, newProjectID, newAgentID)
+		defer unlockUndo()
+		curNew, curOK, err := s.readFile(newProjectID, newAgentID)
+		if err != nil {
+			return err
+		}
+		if curOK && curNew.Revision != movedRec.Revision {
+			return nil
+		}
+		s.slugMu.Lock()
+		defer s.slugMu.Unlock()
+		restored := cloneOwnershipRecord(&savedOld)
+		restored.Revision++
+		restored.UpdatedAt = s.now().UTC()
+		if err := writeOwnershipFile(oldRecPath, mustJSON(&restored)); err != nil {
+			return err
+		}
+		if err := writeOwnershipFile(oldSlugPath, []byte(oldAgentID+"\n")); err != nil {
+			return err
+		}
+		if curHolder, _ := s.slugHolder(newProjectID, slug); curHolder == newAgentID {
+			if err := os.Remove(newSlugPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			syncDirBestEffort(filepath.Dir(newSlugPath))
+		}
+		if err := os.Remove(newRecPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		syncDirBestEffort(filepath.Dir(newRecPath))
+		return nil
+	}
+	return undoFn, true, nil
+}
+
+// finishInterruptedProjectMoves retires any active record in an earlier
+// project ID when a live record in the current project ID already lists that
+// earlier project ID in PreviousProjectIDs for the same slug (recovering a
+// crash between writing the new record and removing the earlier one).
+func (s *OwnershipStore) finishInterruptedProjectMoves() error {
+	recs, err := s.List()
+	if err != nil {
+		return err
+	}
+	for _, r := range recs {
+		if r.State == OwnershipStateDeleted || len(r.PreviousProjectIDs) == 0 {
+			continue
+		}
+		if s.agentConflict(r.ProjectID, r.AgentID) != nil || s.conflicting[OwnershipSlugKey(r.ProjectID, r.AgentSlug)] {
+			continue
+		}
+		for _, prevProj := range r.PreviousProjectIDs {
+			for _, old := range recs {
+				if old.ProjectID != prevProj || old.State != OwnershipStateActive || old.AgentSlug != r.AgentSlug {
+					continue
+				}
+				if s.agentConflict(old.ProjectID, old.AgentID) != nil || s.conflicting[OwnershipSlugKey(old.ProjectID, old.AgentSlug)] {
+					continue
+				}
+				if _, _, err := s.MoveProjectRecord(old.ProjectID, old.AgentID, r.ProjectID, r.AgentID, r.AgentSlug); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// findRelinkedRecord finds a non-deleted, non-conflicting record whose
+// PreviousProjectIDs includes oldProjectID, whose slug matches slug, and
+// whose runs include runID. It lets Reconstruct and ReconstructChild
+// attribute stopped pre-relink runtime objects still carrying oldProjectID to
+// the carried-over record under the current project ID.
+func (s *OwnershipStore) findRelinkedRecord(oldProjectID, slug, runID string) (*OwnershipRecord, error) {
+	recs, err := s.List()
+	if err != nil {
+		return nil, err
+	}
+	for i := range recs {
+		r := &recs[i]
+		if r.State == OwnershipStateDeleted || r.AgentSlug != slug || r.Run(runID) == nil {
+			continue
+		}
+		if s.agentConflict(r.ProjectID, r.AgentID) != nil || s.conflicting[OwnershipSlugKey(r.ProjectID, r.AgentSlug)] {
+			continue
+		}
+		for _, prev := range r.PreviousProjectIDs {
+			if prev == oldProjectID {
+				cp := cloneOwnershipRecord(r)
+				return &cp, nil
+			}
+		}
+	}
+	return nil, nil
 }
 
 // RecordsResource reports whether a live or deleting record of this
@@ -1243,6 +1613,15 @@ func (s *OwnershipStore) Reconstruct(o api.AgentInfo, rt scionrt.Runtime) error 
 	if err != nil {
 		return err
 	}
+	if !ok || (rec.State == OwnershipStateDeleted && rec.Run(runID) == nil) {
+		relinked, rErr := s.findRelinkedRecord(projectID, slug, runID)
+		if rErr != nil {
+			return rErr
+		}
+		if relinked != nil {
+			projectID, agentID, rec, ok = relinked.ProjectID, relinked.AgentID, relinked, true
+		}
+	}
 	if !ok && scionrt.RewritesLabels(rt) {
 		if err := s.runRecordedElsewhere(projectID, agentID, runID); err != nil {
 			return err
@@ -1471,6 +1850,15 @@ func (s *OwnershipStore) ReconstructChild(labels map[string]string, h api.Resour
 	rec, ok, err := s.Get(projectID, agentID)
 	if err != nil {
 		return err
+	}
+	if !ok || (rec.State == OwnershipStateDeleted && rec.Run(runID) == nil) {
+		relinked, rErr := s.findRelinkedRecord(projectID, slug, runID)
+		if rErr != nil {
+			return rErr
+		}
+		if relinked != nil {
+			projectID, agentID, rec, ok = relinked.ProjectID, relinked.AgentID, relinked, true
+		}
 	}
 	if ok {
 		if rec.AgentSlug != slug {
