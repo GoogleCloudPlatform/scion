@@ -289,41 +289,70 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 
 	// A flat instance records the run in its durable ownership record
 	// before any agent file or runtime object exists (ptone/scion#3274).
-	// The run gets an ID here when the request carried none, so the same ID
-	// labels every object the start creates.
-	var ownedProjectID, ownedAgentID string
+	// On a shared-workspace start, a project re-link first carries this
+	// instance's active ownership record from the earlier project ID to the
+	// current one before beginOwnedRunInfo checks it (ptone/scion#4764,
+	// ptone/scion#4765); an unowned !create is refused here before any
+	// workspace path or lock is touched.
+	sharedWorkspace := in.SharedWorkspace || (in.Config != nil && in.Config.SharedWorkspace)
+	var ownedProjectID, ownedAgentID, ownedSlug, candidateAgentID string
+	var recordOwnedRun func() *startContextError
 	if s.ownership != nil {
 		if in.RunID == "" {
 			in.RunID = uuid.NewString()
 		}
-		slug := in.Slug
-		if slug == "" {
-			slug = api.Slugify(in.Name)
+		ownedSlug = in.Slug
+		if ownedSlug == "" {
+			ownedSlug = api.Slugify(in.Name)
 		}
-		agentID := in.AgentID
-		if agentID == "" {
-			agentID = in.OwnershipAgentID
+		candidateAgentID = in.AgentID
+		if candidateAgentID == "" {
+			candidateAgentID = in.OwnershipAgentID
 		}
-		ab := in.OwnedAbandon
-		if in.Operation != opCreate {
-			ab = nil
+		recorded := false
+		recordOwnedRun = func() *startContextError {
+			if recorded {
+				return nil
+			}
+			ab := in.OwnedAbandon
+			if in.Operation != opCreate {
+				ab = nil
+			}
+			key := ownedRunKey{projectID: in.ProjectID, agentID: candidateAgentID, runID: in.RunID}
+			var hold *ownedHold
+			if ab != nil {
+				hold = s.holdOwnedRun(key)
+			}
+			began, err := s.beginOwnedRunInfo(in.ProjectID, candidateAgentID, ownedSlug, in.RunID, in.Operation == opCreate)
+			if err != nil {
+				hold.release()
+				span.SetStatus(codes.Error, err.Error())
+				return s.ownershipStartContextError(err, ownedSlug)
+			}
+			if ab != nil {
+				*ab = ownedCreateAbandon{armed: true, key: key, slug: ownedSlug, name: in.Name,
+					projectPath: in.ProjectPath, hubProjectID: in.ProjectID, began: began, hold: hold}
+			}
+			ownedProjectID, ownedAgentID = in.ProjectID, candidateAgentID
+			recorded = true
+			return nil
 		}
-		key := ownedRunKey{projectID: in.ProjectID, agentID: agentID, runID: in.RunID}
-		var hold *ownedHold
-		if ab != nil {
-			hold = s.holdOwnedRun(key)
+		switch {
+		case !sharedWorkspace:
+			if sce := recordOwnedRun(); sce != nil {
+				return nil, sce
+			}
+		case in.ProjectID == "" || candidateAgentID == "":
+			if sce := recordOwnedRun(); sce != nil {
+				return nil, sce
+			}
+		case in.Operation != opCreate:
+			if has, err := s.ownership.HasActiveAgent(candidateAgentID); err != nil || !has {
+				if sce := recordOwnedRun(); sce != nil {
+					return nil, sce
+				}
+			}
 		}
-		began, err := s.beginOwnedRunInfo(in.ProjectID, agentID, slug, in.RunID, in.Operation == opCreate)
-		if err != nil {
-			hold.release()
-			span.SetStatus(codes.Error, err.Error())
-			return nil, s.ownershipStartContextError(err, slug)
-		}
-		if ab != nil {
-			*ab = ownedCreateAbandon{armed: true, key: key, slug: slug, name: in.Name,
-				projectPath: in.ProjectPath, hubProjectID: in.ProjectID, began: began, hold: hold}
-		}
-		ownedProjectID, ownedAgentID = in.ProjectID, agentID
 	}
 
 	// --- Hub-managed project path resolution ---
@@ -391,10 +420,17 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// project settings, before the marker handling below and before the
 	// recorded profile is computed (ptone/scion#1799): see
 	// verifySharedProjectIdentity.
-	if in.SharedWorkspace || (in.Config != nil && in.Config.SharedWorkspace) {
+	if sharedWorkspace {
 		// A marker naming an earlier ID of the same project (a re-link) is
-		// carried over to the current ID first (ptone/scion#4440).
-		lockErr, checkErr, err := s.relinkSharedProjectIdentityChecked(ctx, in.ProjectPath, in.ProjectSlug, in.ProjectID, in.Name, in.PreviousProjectIDs, s.unrecordedRelinkAllowed(ctx, in.HTTPRequest))
+		// carried over to the current ID first (ptone/scion#4440), moving this
+		// flat instance's ownership record before beginOwnedRunInfo checks it
+		// (ptone/scion#4764, ptone/scion#4765).
+		lockErr, checkErr, err := s.relinkSharedProjectIdentityCheckedWithOwnership(ctx, in.ProjectPath, in.ProjectSlug, in.ProjectID, in.Name, in.PreviousProjectIDs, s.unrecordedRelinkAllowed(ctx, in.HTTPRequest), relinkOwnership{
+			agentID:      candidateAgentID,
+			slug:         ownedSlug,
+			requireOwned: in.Operation != opCreate,
+			enabled:      s.ownership != nil,
+		})
 		if lockErr != nil {
 			return nil, fmt.Errorf("project workspace lock: %w", lockErr)
 		}
@@ -408,6 +444,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		if err != nil {
 			span.SetStatus(codes.Error, "shared-workspace project re-link failed")
 			return nil, projectRelinkStartContextError(err)
+		}
+		if recordOwnedRun != nil {
+			if sce := recordOwnedRun(); sce != nil {
+				return nil, sce
+			}
 		}
 		if err := verifySharedProjectIdentity(in.ProjectPath, in.ProjectID); err != nil {
 			span.SetStatus(codes.Error, "shared-workspace project identity check failed")
