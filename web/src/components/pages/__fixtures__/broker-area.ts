@@ -127,6 +127,7 @@ export function adminStatus(canReadHealth: boolean) {
 /** One broker of healthSummary(). */
 export interface HealthSummaryItem {
   id: string;
+  status?: string;
   checks?: Record<string, string>;
   layout_mismatch?: string[];
   /**
@@ -144,7 +145,7 @@ export function healthSummary(items: HealthSummaryItem[], truncated = false) {
         id: i.id,
         name: i.id,
         version: '1',
-        status: 'online',
+        status: i.status ?? 'online',
         last_heartbeat: '2026-10-20T00:00:00Z',
         runtime: null,
         workspace_storage: i.no_workspace_storage

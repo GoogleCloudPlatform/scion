@@ -45,6 +45,7 @@ func TestFlatRow_StaleSweepMarksOfflineKeepsTarget(t *testing.T) {
 
 	staleTarget := dockerTarget()
 	stale := flatBroker("flat-stale-sweep", store.BrokerStatusOnline, staleTarget)
+	stale.ConnectionState = "connected"
 	stale.Labels = embeddedLabels()
 	fs.createBroker(t, stale)
 	require.NoError(t, fs.brokers.ClaimRuntimeBrokerConnection(ctx, stale.ID, "hub-a", "session-stale"))
@@ -68,6 +69,7 @@ func TestFlatRow_StaleSweepMarksOfflineKeepsTarget(t *testing.T) {
 	got, err := fs.brokers.GetRuntimeBroker(ctx, stale.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.BrokerStatusOffline, got.Status, "a stale flat row is marked offline")
+	assert.Equal(t, "disconnected", got.ConnectionState, "a stale flat row's connectionState is marked disconnected")
 	assert.Nil(t, got.ConnectedHubID, "connection columns cleared")
 	assert.Nil(t, got.ConnectedSessionID, "connection columns cleared")
 	assert.Nil(t, got.ConnectedAt, "connection columns cleared")

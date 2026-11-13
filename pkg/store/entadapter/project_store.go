@@ -1573,13 +1573,19 @@ func (s *ProjectStore) UpdateRuntimeBrokerHeartbeat(ctx context.Context, id stri
 		if err != nil {
 			return mapError(err)
 		}
-		affected, err := s.client.RuntimeBroker.Update().
+		upd := s.client.RuntimeBroker.Update().
 			Where(runtimebroker.IDEQ(uid), runtimebroker.LockVersionEQ(cur.LockVersion)).
 			SetStatus(status).
 			SetLastHeartbeat(now).
 			SetUpdated(now).
-			AddLockVersion(1).
-			Save(ctx)
+			AddLockVersion(1)
+		switch status {
+		case store.BrokerStatusOnline:
+			upd.SetConnectionState("connected")
+		case store.BrokerStatusOffline:
+			upd.SetConnectionState("disconnected")
+		}
+		affected, err := upd.Save(ctx)
 		if err != nil {
 			return mapError(err)
 		}
@@ -1614,6 +1620,7 @@ func (s *ProjectStore) ClaimRuntimeBrokerConnection(ctx context.Context, brokerI
 			SetConnectedSessionID(sessionID).
 			SetConnectedAt(now).
 			SetStatus(store.BrokerStatusOnline).
+			SetConnectionState("connected").
 			SetLastHeartbeat(now).
 			SetUpdated(now).
 			AddLockVersion(1).
@@ -1700,6 +1707,7 @@ func (s *ProjectStore) ReleaseAndMarkBrokerOffline(ctx context.Context, brokerID
 			ClearConnectedSessionID().
 			ClearConnectedAt().
 			SetStatus(store.BrokerStatusOffline).
+			SetConnectionState("disconnected").
 			SetLastHeartbeat(now).
 			SetUpdated(now).
 			AddLockVersion(1).
@@ -1730,13 +1738,18 @@ func (s *ProjectStore) MarkBrokerOffline(ctx context.Context, brokerID string) e
 		if err != nil {
 			return mapError(err)
 		}
-		// Already offline — nothing to do.
-		if cur.Status == store.BrokerStatusOffline {
+		// Already offline and disconnected — nothing to do.
+		if cur.Status == store.BrokerStatusOffline && cur.ConnectionState == "disconnected" &&
+			cur.ConnectedHubID == nil && cur.ConnectedSessionID == nil && cur.ConnectedAt == nil {
 			return nil
 		}
 		affected, err := s.client.RuntimeBroker.Update().
 			Where(runtimebroker.IDEQ(uid), runtimebroker.LockVersionEQ(cur.LockVersion)).
 			SetStatus(store.BrokerStatusOffline).
+			SetConnectionState("disconnected").
+			ClearConnectedHubID().
+			ClearConnectedSessionID().
+			ClearConnectedAt().
 			SetUpdated(now).
 			AddLockVersion(1).
 			Save(ctx)
@@ -1744,6 +1757,11 @@ func (s *ProjectStore) MarkBrokerOffline(ctx context.Context, brokerID string) e
 			return mapError(err)
 		}
 		if affected == 1 {
+			_, _ = s.client.ProjectContributor.Update().
+				Where(projectcontributor.BrokerIDEQ(uid)).
+				SetStatus(store.BrokerStatusOffline).
+				SetLastSeen(now).
+				Save(ctx)
 			return nil
 		}
 	}
@@ -1791,6 +1809,7 @@ func (s *ProjectStore) MarkStaleBrokersOffline(ctx context.Context, threshold ti
 		affected, err := s.client.RuntimeBroker.Update().
 			Where(runtimebroker.IDEQ(b.ID), runtimebroker.LockVersionEQ(b.LockVersion)).
 			SetStatus(store.BrokerStatusOffline).
+			SetConnectionState("disconnected").
 			ClearConnectedHubID().
 			ClearConnectedSessionID().
 			ClearConnectedAt().

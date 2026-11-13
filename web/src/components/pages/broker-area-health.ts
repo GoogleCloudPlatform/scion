@@ -60,7 +60,11 @@ export class ScionBrokerAreaHealth extends LitElement {
       <div class="stats-row">
         <div class="stat">
           <span class="stat-label">Self-reported health</span>
-          <span class="stat-value-sm health-status">${row.health?.status || 'not reported'}</span>
+          <span class="stat-value-sm health-status"
+            >${row.status !== 'online' && row.health?.status
+              ? `last reported: ${row.health.status}`
+              : row.health?.status || 'not reported'}</span
+          >
         </div>
         <div class="stat">
           <span class="stat-label">Last heartbeat</span>

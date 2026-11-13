@@ -169,6 +169,31 @@ describe('scion-page-brokers-area', () => {
     expect(row(root, LEGACY.id)?.querySelector('.health-ok')).toBeNull();
   });
 
+  it('an offline broker whose last reported health was healthy never renders ok (ptone/scion#7820)', async () => {
+    vi.mocked(loadAdminStatus).mockResolvedValue(adminStatus(true));
+    fetchMock.mockImplementation((url: string) => {
+      if (url.startsWith('/api/v1/runtime-brokers')) {
+        return jsonResponse({
+          brokers: [
+            {
+              ...FLAT_K8S,
+              status: 'offline',
+              connectionState: 'disconnected',
+              hostedByThisServer: false,
+            },
+          ],
+        });
+      }
+      if (url.startsWith('/api/v1/admin/health/summary')) {
+        return jsonResponse(healthSummary([{ id: FLAT_K8S.id }]));
+      }
+      return jsonResponse({}, 404);
+    });
+    const root = await mount();
+    expect(row(root, FLAT_K8S.id)?.querySelector('.health-ok')).toBeNull();
+    expect(row(root, FLAT_K8S.id)?.textContent).not.toContain('ok');
+  });
+
   it('a 403 from the summary hides the Health column', async () => {
     vi.mocked(loadAdminStatus).mockResolvedValue(adminStatus(true));
     summaryStatus = 403;

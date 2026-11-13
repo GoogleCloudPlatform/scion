@@ -171,6 +171,17 @@ describe('scion-page-broker-area-detail', () => {
     expect(health.shadowRoot!.querySelector('.health-checks')?.textContent).toContain('runtime');
   });
 
+  it('Health tab: labels an offline broker health report as last reported (ptone/scion#7820)', async () => {
+    vi.mocked(loadAdminStatus).mockResolvedValue(adminStatus(true));
+    summaryItems = [{ id: FLAT_K8S.id, status: 'offline' }];
+    const el = await mount({ ...FLAT_K8S, status: 'offline', connectionState: 'disconnected' });
+    const health = el.shadowRoot!.querySelector('scion-broker-area-health') as Page;
+    await health.updateComplete;
+    expect(health.shadowRoot!.querySelector('.health-status')?.textContent?.trim()).toBe(
+      'last reported: healthy'
+    );
+  });
+
   it('Health tab: says "not in the summary" when the row is missing', async () => {
     vi.mocked(loadAdminStatus).mockResolvedValue(adminStatus(true));
     const el = await mount(FLAT_K8S);

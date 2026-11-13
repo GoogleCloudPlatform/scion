@@ -133,6 +133,23 @@ func InstanceDir(globalDir, key string) string {
 	return filepath.Join(globalDir, RuntimeBrokersDirName, key)
 }
 
+// ReadExisting reads the persisted identity of instance key from dir without
+// creating dir, taking a lock, or minting a new identity. It returns
+// os.ErrNotExist when identity.json does not exist.
+func ReadExisting(dir, key string) (*Identity, error) {
+	if !ValidInstanceKey(key) {
+		return nil, fmt.Errorf("invalid instance key %q", key)
+	}
+	id, err := readIdentity(filepath.Join(dir, IdentityFileName))
+	if err != nil {
+		return nil, err
+	}
+	if id.InstanceKey != key {
+		return nil, fmt.Errorf("%w: file has %q, directory is for %q", ErrIdentityKeyMismatch, id.InstanceKey, key)
+	}
+	return id, nil
+}
+
 // LoadOrCreate loads the identity of instance key from dir, or mints it on
 // first boot. First boot means dir holds nothing but the lock file and
 // leftover temp files. Any other missing, corrupt or mismatching state is an

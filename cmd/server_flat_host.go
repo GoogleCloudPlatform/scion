@@ -326,9 +326,12 @@ type colocatedFlatActivator struct {
 	locks     *colocatedFlatLocks
 	now       func() time.Time
 	// reported holds the instance keys whose refusal the embedded
-	// registration already reported to the Hub.
-	reportedMu sync.Mutex
-	reported   map[string]bool
+	// registration already reported to the Hub; knownIdentity records the
+	// resolved identity of instances that reached Activate so Refused can
+	// identify the stored row even when globalDir is unset in tests.
+	reportedMu    sync.Mutex
+	reported      map[string]bool
+	knownIdentity map[string]*brokeridentity.Identity
 	// endpoint is the shared listener's base URL. Every flat instance,
 	// including a single one, registers <endpoint>/instances/<id>, its
 	// instance-qualified route, so its advertised endpoint does not change
@@ -347,6 +350,12 @@ func (a *colocatedFlatActivator) currentTime() time.Time {
 
 func (a *colocatedFlatActivator) Activate(ctx context.Context, c brokerhost.Candidate) (act *brokerhost.Activation, retErr error) {
 	brokerID := c.Identity.RuntimeBrokerID
+	a.reportedMu.Lock()
+	if a.knownIdentity == nil {
+		a.knownIdentity = map[string]*brokeridentity.Identity{}
+	}
+	a.knownIdentity[c.Instance.Key] = c.Identity
+	a.reportedMu.Unlock()
 
 	var (
 		lockTree      *privatefs.Tree
@@ -471,11 +480,86 @@ func (a *colocatedFlatActivator) Refused(inst config.V1RuntimeBrokerInstanceConf
 	a.reportedMu.Lock()
 	already := a.reported[inst.Key]
 	delete(a.reported, inst.Key)
+	knownID := a.knownIdentity[inst.Key]
+	delete(a.knownIdentity, inst.Key)
 	a.reportedMu.Unlock()
-	if already {
-		return // the embedded registration reported this refusal itself
+	if !already {
+		a.hubSrv.EmbeddedFlatInstanceFailed(inst.Key, err)
 	}
-	a.hubSrv.EmbeddedFlatInstanceFailed(inst.Key, err)
+	a.markRefusedInstanceOffline(inst, knownID, err)
+}
+
+// markRefusedInstanceOffline marks a previously registered co-located flat
+// Runtime Broker row offline at startup when activation is refused on THIS
+// host, unless another live server process currently holds the local instance
+// lock or has a fresh foreign-Hub heartbeat (ptone/scion#7820, ptone/scion#7626).
+func (a *colocatedFlatActivator) markRefusedInstanceOffline(inst config.V1RuntimeBrokerInstanceConfig, knownID *brokeridentity.Identity, refusalErr error) {
+	if a.hubSrv == nil || brokerhost.ReasonCode(refusalErr) == reasonColocatedInstanceInUse {
+		return
+	}
+	id := knownID
+	if id == nil && a.globalDir != "" {
+		existingID, err := brokeridentity.ReadExisting(brokeridentity.InstanceDir(a.globalDir, inst.Key), inst.Key)
+		if err != nil {
+			return
+		}
+		id = existingID
+	}
+	if id == nil || id.RuntimeBrokerID == "" {
+		return
+	}
+	brokerID := id.RuntimeBrokerID
+
+	var (
+		priorOwner    colocatedOwnerStamp
+		localLockFree bool
+	)
+	if a.globalDir != "" {
+		lockTree, err := privatefs.OpenTree(filepath.Join(a.globalDir, colocatedLocksSubdir), privatefs.TreeOptions{CreateAnchor: true})
+		if err != nil {
+			return
+		}
+		defer func() { _ = lockTree.Close() }()
+
+		lockPath := filepath.Join(lockTree.Anchor(), brokerID+".lock")
+		heldLock, err := filelock.Acquire(lockPath, 0o600, 0)
+		if err != nil {
+			// Another local server process holds the lock (or lock failed):
+			// never touch the stored row.
+			return
+		}
+		defer heldLock.Unlock()
+		localLockFree = true
+		priorOwner = readColocatedOwnerStamp(lockTree, brokerID)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	s := a.hubSrv.GetStore()
+	if s == nil {
+		return
+	}
+	existing, err := s.GetRuntimeBroker(ctx, brokerID)
+	if err != nil || existing == nil {
+		return
+	}
+	if existing.Status == store.BrokerStatusOnline && !existing.LastHeartbeat.IsZero() {
+		age := a.currentTime().Sub(existing.LastHeartbeat)
+		if age < flatColocatedActiveWindow {
+			thisHubID := a.hubSrv.InstanceID()
+			sameHub := thisHubID != "" &&
+				((existing.ConnectedHubID != nil && *existing.ConnectedHubID == thisHubID) ||
+					priorOwner.hubID == thisHubID)
+			deadLocalPrior := localLockFree && priorOwner.matchesRow(existing)
+			if !sameHub && !deadLocalPrior {
+				return
+			}
+		}
+	}
+	if err := a.hubSrv.MarkEmbeddedFlatRuntimeBrokerOffline(ctx, brokerID); err != nil {
+		slog.Warn("Failed to mark refused co-located flat Runtime Broker offline", "instance", inst.Key, logging.AttrBrokerID, brokerID, "error", err)
+	}
 }
 
 // remoteFlatActivator activates an instance with its instance-scoped

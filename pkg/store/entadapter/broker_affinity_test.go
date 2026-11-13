@@ -36,8 +36,9 @@ func TestClaimRuntimeBrokerConnection_SetsAffinityAndOnline(t *testing.T) {
 	assert.Equal(t, "sess-1", *got.ConnectedSessionID)
 	require.NotNil(t, got.ConnectedAt)
 	assert.False(t, got.ConnectedAt.IsZero())
-	// Claim bumps status->online + refreshes heartbeat in the same write.
+	// Claim bumps status->online + connectionState->connected + refreshes heartbeat in the same write.
 	assert.Equal(t, store.BrokerStatusOnline, got.Status)
+	assert.Equal(t, "connected", got.ConnectionState)
 	assert.False(t, got.LastHeartbeat.IsZero())
 }
 
@@ -129,6 +130,7 @@ func TestReleaseAndMarkBrokerOffline_StampsOffline(t *testing.T) {
 	assert.Nil(t, got.ConnectedSessionID)
 	assert.Nil(t, got.ConnectedAt)
 	assert.Equal(t, store.BrokerStatusOffline, got.Status)
+	assert.Equal(t, "disconnected", got.ConnectionState)
 	assert.False(t, got.LastHeartbeat.IsZero())
 }
 
