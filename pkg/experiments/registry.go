@@ -458,6 +458,13 @@ const ProjectSelfLeave = "hub.project_self_leave"
 // step in the setup wizard.
 const WelcomeProject = "hub.welcome_project"
 
+// ProjectDecisions gates the project Decisions page (ptone/scion#7753):
+// GET /api/v1/projects/{id}/decisions (404 unless both web.project_decisions
+// and web.chat_choices are on) and the project-detail Decisions button and
+// /projects/:id/decisions page. Stored decisions and answers are kept while
+// it is off.
+const ProjectDecisions = "web.project_decisions"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
@@ -684,6 +691,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#7514",
 		Owner:       "native-chat",
 		ReviewBy:    "2027-02-05",
+	},
+	{
+		Name:        ProjectDecisions,
+		Title:       "Project decisions page",
+		Description: "Adds a Decisions page to each project showing open choices waiting on the viewer across readable conversations and the append-only log of decisions made, even after chat retention purges the originating messages. Requires web.chat_choices. Gates GET /api/v1/projects/{id}/decisions (LayerServer, answers 404 unless both web.project_decisions and web.chat_choices are on) and the project header entry and /projects/:id/decisions page (LayerWeb). Stored decisions and answers are kept while it is off.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb, LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#7753",
+		Owner:       "native-chat",
+		ReviewBy:    "2027-02-13",
 	},
 	{
 		Name:        ChatStarredMessages,

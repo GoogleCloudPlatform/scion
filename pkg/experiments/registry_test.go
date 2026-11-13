@@ -740,3 +740,24 @@ func TestReincarnateHarnessSwitchExperimentRegistered(t *testing.T) {
 		t.Fatalf("unexpected registration: %+v", e)
 	}
 }
+
+// TestProjectDecisions_RegisteredDefaultOff pins web.project_decisions
+// (ptone/scion#7753): gated on both server and web layers and ships off.
+func TestProjectDecisions_RegisteredDefaultOff(t *testing.T) {
+	e, ok := Default().Lookup(ProjectDecisions)
+	if !ok {
+		t.Fatalf("%s is not registered", ProjectDecisions)
+	}
+	if ProjectDecisions != "web.project_decisions" {
+		t.Fatalf("frozen name changed: %q", ProjectDecisions)
+	}
+	if e.Default {
+		t.Fatal("web.project_decisions must default to off")
+	}
+	if !e.HasLayer(LayerServer) || !e.HasLayer(LayerWeb) {
+		t.Fatalf("must have both LayerWeb and LayerServer, got %v", e.Layers)
+	}
+	if e.Issue != "ptone/scion#7753" || e.Stage != StageAlpha || e.Owner != "native-chat" {
+		t.Fatalf("unexpected registration: %+v", e)
+	}
+}

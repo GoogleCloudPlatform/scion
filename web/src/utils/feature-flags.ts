@@ -258,3 +258,11 @@ export const CHAT_RETENTION_FLAG = 'hub.chat_retention';
  * experiment on the welcome preview, install and skip routes. Default OFF.
  */
 export const WELCOME_PROJECT_FLAG = 'hub.welcome_project';
+
+/**
+ * Project decisions page (web.project_decisions, ptone/scion#7753): the
+ * Decisions button + badge in the project header and /projects/:id/decisions
+ * page. Presentation only: the hub checks both web.project_decisions and
+ * web.chat_choices on GET /api/v1/projects/{id}/decisions. Default OFF.
+ */
+export const PROJECT_DECISIONS_FLAG = 'web.project_decisions';
