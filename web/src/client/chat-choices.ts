@@ -47,13 +47,42 @@ export function isTerminalDecision(view: DecisionView): boolean {
 }
 
 /**
- * How far a decision has gone: pending < decided < replaced. The hub never
- * moves a row back, and replaced is final (a row answered just before an
- * `--update` is then replaced).
+ * Why `d` cannot be answered (or confirmed/changed) by `userId`, or `''` when
+ * it is actionable. Mirrors `store.DecisionActionableReason`
+ * (`pkg/store/decision.go`, pinned against `decision_actionable_cases.json`).
+ */
+export type ActionableReason =
+  | ''
+  | 'replaced'
+  | 'decided'
+  | 'not_recorded_answerer'
+  | 'not_actionable';
+
+export function actionableReason(d: DecisionView, userId: string | undefined): ActionableReason {
+  if (d.status === 'replaced' || d.replacedBy) return 'replaced';
+  if (d.status === 'decided' && d.decision) {
+    if (d.decision.provenance !== 'agent_interpreted') return 'decided';
+    if (!userId || !d.decision.answeredByUserId || d.decision.answeredByUserId !== userId) {
+      return 'not_recorded_answerer';
+    }
+    return '';
+  }
+  if (d.status === 'pending' && !d.decision) return '';
+  return 'not_actionable';
+}
+
+/**
+ * How far a decision has gone:
+ * pending (0) < decided-interpreted (1) < decided-direct (2) < replaced (3).
+ * The hub never moves a row back: a direct answer (including confirm/override)
+ * supersedes an interpreted answer even when their timestamps tie, and replaced
+ * is final.
  */
 function statusRank(view: DecisionView): number {
-  if (view.status === 'replaced') return 2;
-  if (view.status === 'decided') return 1;
+  if (view.status === 'replaced' || view.replacedBy) return 3;
+  if (view.status === 'decided') {
+    return view.decision?.provenance === 'agent_interpreted' ? 1 : 2;
+  }
   return 0;
 }
 

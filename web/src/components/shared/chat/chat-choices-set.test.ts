@@ -527,3 +527,196 @@ describe('set card, replaced rows', () => {
     expect(submit(el)).toBeNull();
   });
 });
+
+describe('Phase 2: set card interpreted pre-selection, chips, and multi-user exclusion (Mocks P2-4, P2-5)', () => {
+  function interpretedRow(
+    d: DecisionView,
+    choiceId: string,
+    by: { id: string; name: string },
+    sourceMessageId = 'msg-src-1'
+  ): DecisionView {
+    const opt = d.choices.find((c) => c.id === choiceId);
+    return {
+      ...d,
+      status: 'decided',
+      decision: {
+        choiceId,
+        label: opt?.label ?? choiceId,
+        answeredByUserId: by.id,
+        answeredByName: by.name,
+        provenance: 'agent_interpreted',
+        outcome: 'answer',
+        interpretedByAgentId: 'a1',
+        sourceMessageId,
+        surface: 'web',
+        responseMessageId: 'resp-interp',
+        at: AT,
+      },
+    };
+  }
+
+  it('P2-4: pre-selects viewer interpreted choice (beating defaultChoiceId), renders native aria-pressed button + will confirm chip, and counts 2 of 2 ready · 1 confirm', async () => {
+    // Row 1 recommends "no", but agent interpreted viewer's reply as "yes" -> "yes" wins!
+    const d1 = interpretedRow(row('r1', 'D234', { defaultChoiceId: 'no' }), 'yes', ME);
+    const d2 = row('r2', '17', {
+      defaultChoiceId: 'a',
+      choices: [
+        { id: 'a', label: 'a · Extend input-needed' },
+        { id: 'b', label: 'b · New waiting state' },
+      ],
+    });
+    const el = await mount([d1, d2]);
+
+    const r1 = rowEl(el, 'r1');
+    expect(text(r1.querySelector('.chip.confirm'))).toBe('will confirm');
+    const yesBtn = choice(el, 'r1', 'yes');
+    const noBtn = choice(el, 'r1', 'no');
+    expect(yesBtn.tagName).toBe('BUTTON');
+    expect(yesBtn.getAttribute('aria-pressed')).toBe('true');
+    expect(yesBtn.getAttribute('data-look')).toBe('filled');
+    expect(yesBtn.querySelector('sl-icon')?.getAttribute('name')).toBe('robot');
+    expect(noBtn.getAttribute('aria-pressed')).toBe('false');
+    expect(noBtn.getAttribute('data-look')).toBe('default');
+    expect(text(r1.querySelector('.row-foot'))).toMatch(
+      /^Interpreted by release-bot from your reply · \d\d:\d\d · View reply$/
+    );
+
+    expect(counter(el)).toBe('2 of 2 ready · 1 confirm');
+    expect(submit(el).hasAttribute('disabled')).toBe(false);
+
+    // Submit mixed set (1 confirm + 1 pending answer).
+    apiFetch.mockResolvedValueOnce(
+      res(200, {
+        responseMessageId: 'resp-set',
+        batchId: 'b-set',
+        decisions: [
+          {
+            ...d1,
+            decision: {
+              ...d1.decision!,
+              provenance: 'direct',
+              outcome: 'confirm',
+              batchId: 'b-set',
+            },
+          },
+          decidedBy(d2, 'a', ME, 'b-set'),
+        ],
+      })
+    );
+    await click(el, submit(el));
+    const body = JSON.parse(apiFetch.mock.calls[0]![1]!.body as string);
+    expect(body.answers).toEqual([
+      { decision_row_id: 'r1', choice_id: 'yes' },
+      { decision_row_id: 'r2', choice_id: 'a' },
+    ]);
+  });
+
+  it('P2-5: changing viewer interpreted row shows will change + subtle robot outline, while excluding another user interpreted row from counter and POST body', async () => {
+    const d1 = interpretedRow(row('r1', 'D234'), 'yes', ME);
+    const d2 = row('r2', '17', {
+      defaultChoiceId: 'a',
+      choices: [
+        { id: 'a', label: 'a · Extend input-needed' },
+        { id: 'b', label: 'b · New waiting state' },
+      ],
+    });
+    const d3 = interpretedRow(row('r3', 'ship-now'), 'yes', BOB);
+    const el = await mount([d1, d2, d3]);
+
+    // Bob's row is read-only, has tooltip & chip, and is excluded from counter.
+    const r3 = rowEl(el, 'r3');
+    expect(r3.classList.contains('readonly')).toBe(true);
+    expect(text(r3.querySelector('.chip.interp'))).toBe("Bob's answer");
+    expect(r3.querySelector('sl-tooltip')?.getAttribute('content')).toBe(
+      'Only Bob can confirm or change this answer'
+    );
+    expect(choice(el, 'r3', 'yes').hasAttribute('disabled')).toBe(true);
+    expect(choice(el, 'r3', 'yes').hasAttribute('aria-pressed')).toBe(false);
+    expect(choice(el, 'r3', 'no').hasAttribute('disabled')).toBe(true);
+    expect(counter(el)).toBe('2 of 2 ready · 1 confirm');
+
+    // Viewer changes D234 from Yes -> No.
+    await click(el, choice(el, 'r1', 'no'));
+    const r1 = rowEl(el, 'r1');
+    expect(text(r1.querySelector('.chip.change'))).toBe('will change');
+    expect(choice(el, 'r1', 'yes').getAttribute('data-look')).toBe('subtle');
+    expect(choice(el, 'r1', 'yes').getAttribute('aria-pressed')).toBe('false');
+    expect(choice(el, 'r1', 'yes').querySelector('sl-icon')?.getAttribute('name')).toBe('robot');
+    expect(choice(el, 'r1', 'no').getAttribute('data-look')).toBe('filled');
+    expect(choice(el, 'r1', 'no').getAttribute('aria-pressed')).toBe('true');
+    expect(choice(el, 'r1', 'no').querySelector('sl-icon')?.getAttribute('name')).toBe('check-lg');
+    expect(text(r1.querySelector('.row-foot'))).toBe(
+      'Interpreted as Yes by release-bot from your reply · View reply'
+    );
+    expect(counter(el)).toBe('2 of 2 ready · 1 change');
+
+    // Unrelated SSE update on r3 preserves viewer's manual pick on r1.
+    el.decisions = [d1, d2, decidedBy(d3, 'yes', BOB, 'b-bob')];
+    await settle(el);
+    expect(choice(el, 'r1', 'no').getAttribute('aria-pressed')).toBe('true');
+
+    // Submit sends ONLY r1 and r2 (excludes Bob's r3).
+    apiFetch.mockResolvedValueOnce(
+      res(200, {
+        responseMessageId: 'resp-mix',
+        batchId: 'b-mix',
+        decisions: [
+          {
+            ...d1,
+            decision: {
+              ...d1.decision!,
+              choiceId: 'no',
+              label: 'No',
+              previousChoiceLabel: 'Yes',
+              provenance: 'direct',
+              outcome: 'override',
+              batchId: 'b-mix',
+            },
+          },
+          decidedBy(d2, 'a', ME, 'b-mix'),
+          decidedBy(d3, 'yes', BOB, 'b-bob'),
+        ],
+      })
+    );
+    await click(el, submit(el));
+    const body = JSON.parse(apiFetch.mock.calls[0]![1]!.body as string);
+    expect(body.answers).toEqual([
+      { decision_row_id: 'r1', choice_id: 'no' },
+      { decision_row_id: 'r2', choice_id: 'a' },
+    ]);
+  });
+
+  it('supports all-confirm set submit and preserves picks on actionable interpreted rows across 409 answer_set_changed', async () => {
+    const d1 = interpretedRow(row('r1', 'D234'), 'yes', ME);
+    const d2 = interpretedRow(row('r2', '17'), 'no', ME);
+    const d3 = row('r3', 'ship-now', { defaultChoiceId: 'yes' });
+    const el = await mount([d1, d2]);
+    expect(counter(el)).toBe('2 of 2 ready · 2 confirms');
+
+    // Now test 409 answer_set_changed where r3 became Bob's interpreted row while viewer changed r1 -> no.
+    const elRace = await mount([d1, d2, d3]);
+    await click(elRace, choice(elRace, 'r1', 'no'));
+    expect(counter(elRace)).toBe('3 of 3 ready · 1 confirm · 1 change');
+
+    const freshR3 = interpretedRow(d3, 'yes', BOB);
+    apiFetch.mockResolvedValueOnce(
+      res(409, {
+        error: {
+          code: 'answer_set_changed',
+          message: 'the decisions to answer changed; refresh and submit again',
+          details: {
+            decisions: [d1, d2, freshR3],
+            reasons: { r3: 'not_recorded_answerer' },
+          },
+        },
+      })
+    );
+    await click(elRace, submit(elRace));
+
+    expect(text(root(elRace).querySelector('sl-alert.changed'))).toContain(
+      'ship-now was answered by Bob. Your other selections are kept — review and submit again.'
+    );
+    expect(choice(elRace, 'r1', 'no').getAttribute('aria-pressed')).toBe('true');
+    expect(counter(elRace)).toBe('2 of 2 ready · 1 confirm · 1 change');
+  });
+});

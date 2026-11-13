@@ -14,8 +14,10 @@
  * limitations under the License.
  */
 
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { DecisionView, Message } from '../shared/types.js';
+import type { AnswerView, DecisionView, Message } from '../shared/types.js';
 
 const apiFetch = vi.hoisted(() => vi.fn<(path: string, init?: RequestInit) => Promise<Response>>());
 vi.mock('./api.js', async (orig) => ({
@@ -24,6 +26,7 @@ vi.mock('./api.js', async (orig) => ({
 }));
 
 const {
+  actionableReason,
   answerDecision,
   answerDecisionSet,
   applyChoiceHistoryMaps,
@@ -105,6 +108,105 @@ describe('newerDecisionView', () => {
   it('takes a newer decided view over a decided one', () => {
     const later = decided({ decision: { ...decided().decision!, choiceId: 'n', label: 'No' } });
     expect(newerDecisionView(decided(), later)).toBe(later);
+  });
+
+  it('upgrades agent_interpreted to direct and refuses a late agent_interpreted downgrade (even with identical at)', () => {
+    const sameAt = '2026-11-12T10:00:00Z';
+    const interpreted = decided({
+      decision: {
+        choiceId: 'y',
+        label: 'Yes',
+        provenance: 'agent_interpreted',
+        outcome: 'answer',
+        answeredByUserId: 'u1',
+        surface: 'native',
+        responseMessageId: 'resp-interp',
+        at: sameAt,
+      },
+    });
+    const confirmed = decided({
+      decision: {
+        choiceId: 'y',
+        label: 'Yes',
+        provenance: 'direct',
+        outcome: 'confirm',
+        answeredByUserId: 'u1',
+        surface: 'web',
+        responseMessageId: 'resp-conf',
+        at: sameAt,
+      },
+    });
+    const overridden = decided({
+      decision: {
+        choiceId: 'n',
+        label: 'No',
+        provenance: 'direct',
+        outcome: 'override',
+        previousChoiceLabel: 'Yes',
+        answeredByUserId: 'u1',
+        surface: 'web',
+        responseMessageId: 'resp-over',
+        at: sameAt,
+      },
+    });
+    expect(newerDecisionView(interpreted, confirmed)).toBe(confirmed);
+    expect(newerDecisionView(interpreted, overridden)).toBe(overridden);
+    expect(newerDecisionView(confirmed, interpreted)).toBe(confirmed);
+    expect(newerDecisionView(overridden, interpreted)).toBe(overridden);
+    expect(patchDecisions([overridden], [interpreted])).toEqual([overridden]);
+  });
+});
+
+describe('actionableReason (golden parity with pkg/store/testdata/decision_actionable_cases.json)', () => {
+  interface GoldenCase {
+    name: string;
+    userId: string;
+    status: DecisionView['status'];
+    decision: {
+      provenance: string;
+      outcome: string;
+      answeredByUserId: string;
+    } | null;
+    want: string;
+  }
+
+  const casesPath = join(__dirname, '../../../pkg/store/testdata/decision_actionable_cases.json');
+  const cases = JSON.parse(readFileSync(casesPath, 'utf8')) as GoldenCase[];
+
+  for (const tc of cases) {
+    it(`matches Go store on: ${tc.name}`, () => {
+      const decision: AnswerView | undefined = tc.decision
+        ? {
+            choiceId: 'y',
+            label: 'Yes',
+            provenance: tc.decision.provenance,
+            outcome: tc.decision.outcome,
+            ...(tc.decision.answeredByUserId
+              ? { answeredByUserId: tc.decision.answeredByUserId }
+              : {}),
+            surface: 'web',
+            responseMessageId: 'resp',
+            at: '2026-11-12T10:00:00Z',
+          }
+        : undefined;
+      const d = view({
+        status: tc.status,
+        ...(decision ? { decision } : {}),
+      });
+      expect(actionableReason(d, tc.userId)).toBe(tc.want);
+    });
+  }
+
+  it('treats undefined userId identically to empty userId', () => {
+    expect(actionableReason(view(), undefined)).toBe('');
+    const ownInterp = decided({
+      decision: {
+        ...decided().decision!,
+        provenance: 'agent_interpreted',
+        answeredByUserId: 'u1',
+      },
+    });
+    expect(actionableReason(ownInterp, undefined)).toBe('not_recorded_answerer');
   });
 });
 

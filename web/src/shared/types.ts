@@ -1737,8 +1737,11 @@ export interface AnswerView {
   responseMessageId: string;
   batchId?: string;
   matchedDefault?: boolean;
+  previousChoiceLabel?: string;
   at: string;
 }
+
+export type DecisionAnswerView = AnswerView;
 
 /** One version of a decision as clients see it (DecisionView). */
 export interface DecisionView {

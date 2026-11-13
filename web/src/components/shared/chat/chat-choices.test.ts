@@ -23,6 +23,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { DecisionView } from '../../../shared/types.js';
 import type { ChoiceAnsweredDetail } from '../../../client/chat-choices.js';
+import { getMarkdownRenderer } from '../../../utils/markdown.js';
 
 const apiFetch = vi.hoisted(() => vi.fn<(path: string, init?: RequestInit) => Promise<Response>>());
 const showToast = vi.hoisted(() => vi.fn());
@@ -104,6 +105,7 @@ const foot = (el: ScionChatChoices): string =>
 const card = (el: ScionChatChoices): HTMLElement => root(el).querySelector<HTMLElement>('.card')!;
 
 async function settle(el: ScionChatChoices): Promise<void> {
+  await getMarkdownRenderer();
   for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
   await el.updateComplete;
 }
@@ -423,5 +425,195 @@ describe('own answer racing a replacement', () => {
 
     expect(foot(el)).toMatch(/^Replaced by v2/);
     expect(root(el).querySelector('.row')?.getAttribute('data-status')).toBe('replaced');
+  });
+});
+
+describe('Phase 2: single card interpreted, confirm, and change (Mocks P2-1, P2-2, P2-3, P2-6)', () => {
+  function interpretedSingle(
+    by: { id: string; name: string },
+    over: Partial<DecisionView> = {}
+  ): DecisionView {
+    return view({
+      status: 'decided',
+      defaultChoiceId: 'no',
+      decision: {
+        choiceId: 'yes',
+        label: 'Yes',
+        answeredByUserId: by.id,
+        answeredByName: by.name,
+        provenance: 'agent_interpreted',
+        outcome: 'answer',
+        interpretedByAgentId: 'a1',
+        sourceMessageId: 'msg-reply-1',
+        surface: 'web',
+        responseMessageId: 'resp-interp',
+        at: '2026-11-12T15:44:00Z',
+      },
+      ...over,
+    });
+  }
+
+  it('P2-1: recorded answerer sees interpreted badge, View reply, Confirm button, and Enter is a no-op', async () => {
+    const el = await mount([interpretedSingle({ id: 'u-me', name: 'Me' })]);
+    await settle(el);
+
+    expect(root(el).querySelector('.card-head .badge.interp')?.textContent?.trim()).toBe(
+      'interpreted'
+    );
+    const yes = button(el, 'yes');
+    expect(yes.getAttribute('variant')).toBe('primary');
+    expect(yes.hasAttribute('outline')).toBe(false);
+    expect(yes.hasAttribute('disabled')).toBe(false);
+    expect(yes.querySelector('sl-icon[slot="prefix"]')?.getAttribute('name')).toBe('robot');
+
+    // defaultChoiceId ("no") is NOT outlined on an interpreted card; all buttons stay enabled.
+    const no = button(el, 'no');
+    expect(no.getAttribute('variant')).toBe('default');
+    expect(no.hasAttribute('outline')).toBe(false);
+    expect(no.hasAttribute('disabled')).toBe(false);
+
+    expect(foot(el)).toMatch(
+      /^Interpreted by release-bot from your reply · \d\d:\d\d · View reply$/
+    );
+    const viewReply = root(el).querySelector<HTMLAnchorElement>('[data-action="view-reply"]')!;
+    const scrolled: string[] = [];
+    document.body.addEventListener('scroll-to-message', (e) =>
+      scrolled.push((e as CustomEvent<{ messageId: string }>).detail.messageId)
+    );
+    const clickEvt = new MouseEvent('click', { bubbles: true, cancelable: true, composed: true });
+    viewReply.dispatchEvent(clickEvt);
+    expect(clickEvt.defaultPrevented).toBe(true);
+    expect(scrolled).toEqual(['msg-reply-1']);
+
+    const confirmBtn = root(el).querySelector<HTMLElement>('.confirm-row [data-action="confirm"]')!;
+    expect(confirmBtn.textContent?.replace(/\s+/g, ' ').trim()).toBe('Confirm “Yes”');
+    expect(root(el).querySelector('.hint')).toBeNull();
+
+    // Enter on the focused card group is a no-op when status !== 'pending'.
+    card(el).dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await settle(el);
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('P2-1 -> P2-3: clicking Confirm posts choice_id and transitions to confirmed badge & footer', async () => {
+    const confirmedView: DecisionView = view({
+      status: 'decided',
+      decision: {
+        choiceId: 'yes',
+        label: 'Yes',
+        answeredByUserId: 'u-me',
+        answeredByName: 'Me',
+        provenance: 'direct',
+        outcome: 'confirm',
+        surface: 'web',
+        responseMessageId: 'resp-conf',
+        at: '2026-11-12T15:52:00Z',
+      },
+    });
+    apiFetch.mockResolvedValueOnce(
+      res(200, { decision: confirmedView, responseMessageId: 'resp-conf' })
+    );
+
+    const el = await mount([interpretedSingle({ id: 'u-me', name: 'Me' })]);
+    const confirmBtn = root(el).querySelector<HTMLElement>('[data-action="confirm"]')!;
+    confirmBtn.click();
+    await settle(el);
+
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(apiFetch.mock.calls[0]![1]!.body as string).choice_id).toBe('yes');
+    expect(root(el).querySelector('.card-head .badge.conf')?.textContent?.trim()).toBe('confirmed');
+    expect(root(el).querySelector('.confirm-row')).toBeNull();
+    expect(foot(el)).toMatch(
+      /^Answered by you \(confirmed\) · \d\d:\d\d · first interpreted by release-bot from your reply$/
+    );
+  });
+
+  it('P2-6 -> P2-3: picking a different choice opens inline change bar; Cancel restores; Change answer posts override (and survives reload)', async () => {
+    const overriddenView: DecisionView = view({
+      status: 'decided',
+      decision: {
+        choiceId: 'no',
+        label: 'No',
+        previousChoiceLabel: 'Yes',
+        answeredByUserId: 'u-me',
+        answeredByName: 'Me',
+        provenance: 'direct',
+        outcome: 'override',
+        surface: 'web',
+        responseMessageId: 'resp-over',
+        at: '2026-11-12T15:53:00Z',
+      },
+    });
+    apiFetch.mockResolvedValueOnce(
+      res(200, { decision: overriddenView, responseMessageId: 'resp-over' })
+    );
+
+    const el = await mount([interpretedSingle({ id: 'u-me', name: 'Me' })]);
+    button(el, 'no').click();
+    await settle(el);
+
+    // Did not POST yet; inline change bar is open.
+    expect(apiFetch).not.toHaveBeenCalled();
+    expect(root(el).querySelector('.confirm-row')).toBeNull();
+    const bar = root(el).querySelector('.confirmbar')!;
+    expect(bar.textContent?.replace(/\s+/g, ' ').trim()).toContain(
+      'Change your answer from Yes to No? release-bot will be told.'
+    );
+    expect(button(el, 'yes').hasAttribute('outline')).toBe(true);
+    expect(button(el, 'yes').querySelector('sl-icon')?.getAttribute('name')).toBe('robot');
+    expect(button(el, 'no').getAttribute('variant')).toBe('primary');
+    expect(button(el, 'no').getAttribute('aria-pressed')).toBe('true');
+    expect(button(el, 'no').querySelector('sl-icon')?.getAttribute('name')).toBe('check-lg');
+
+    // Cancel restores P2-1 without sending.
+    bar.querySelector<HTMLElement>('[data-action="cancel-change"]')!.click();
+    await settle(el);
+    expect(root(el).querySelector('.confirmbar')).toBeNull();
+    expect(root(el).querySelector('.confirm-row')).not.toBeNull();
+    expect(apiFetch).not.toHaveBeenCalled();
+
+    // Open again and click Change answer.
+    button(el, 'no').click();
+    await settle(el);
+    root(el).querySelector<HTMLElement>('[data-action="confirm-change"]')!.click();
+    await settle(el);
+
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(apiFetch.mock.calls[0]![1]!.body as string).choice_id).toBe('no');
+    expect(root(el).querySelector('.card-head .badge.over')?.textContent?.trim()).toBe('changed');
+    expect(foot(el)).toMatch(
+      /^Answered by you · \d\d:\d\d · changed from the interpreted answer Yes$/
+    );
+
+    // Reload parity: mounting fresh from history view with previousChoiceLabel renders identically;
+    // mounting without previousChoiceLabel omits the trailing label cleanly.
+    const reloaded = await mount([overriddenView]);
+    expect(foot(reloaded)).toMatch(
+      /^Answered by you · \d\d:\d\d · changed from the interpreted answer Yes$/
+    );
+    const { previousChoiceLabel: _drop, ...withoutPrev } = overriddenView.decision!;
+    const fallback = await mount([{ ...overriddenView, decision: withoutPrev }]);
+    expect(foot(fallback)).toMatch(
+      /^Answered by you · \d\d:\d\d · changed from the interpreted answer$/
+    );
+  });
+
+  it('P2-2: another viewer sees disabled choices with owner tooltip and no confirm controls', async () => {
+    const el = await mount([interpretedSingle({ id: 'u-bob', name: 'Bob' })]);
+    await settle(el);
+
+    expect(root(el).querySelector('.card-head .badge.interp')?.textContent?.trim()).toBe(
+      'interpreted'
+    );
+    for (const id of ['yes', 'no', 'wait']) {
+      expect(button(el, id).hasAttribute('disabled')).toBe(true);
+    }
+    const tip = root(el).querySelector('sl-tooltip');
+    expect(tip?.getAttribute('content')).toBe('Only Bob can confirm or change this answer');
+    expect(root(el).querySelector('.confirm-row')).toBeNull();
+    expect(root(el).querySelector('.confirmbar')).toBeNull();
+    expect(foot(el)).toMatch(
+      /^Interpreted by release-bot from Bob's reply · \d\d:\d\d · View reply$/
+    );
   });
 });
