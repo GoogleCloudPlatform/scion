@@ -8223,6 +8223,10 @@ func (s *Server) registerRoutes() {
 	// Agent self-service secret fetch (agent token auth)
 	s.mux.HandleFunc("POST /api/v1/agent/secrets", s.guarded("POST /api/v1/agent/secrets", s.handleAgentSecretFetch))
 
+	// Agent self-service decision list, show, and interpreted answers (agent token auth; 404 when web.chat_choices is off)
+	s.mux.HandleFunc("/api/v1/agent/decisions", s.guarded("/api/v1/agent/decisions", s.handleAgentDecisionRoutes))
+	s.mux.HandleFunc("/api/v1/agent/decisions/", s.guarded("/api/v1/agent/decisions/", s.handleAgentDecisionRoutes))
+
 	// Public settings endpoint (no auth required for telemetry default, etc.)
 	s.mux.HandleFunc("/api/v1/settings/public", s.guarded("/api/v1/settings/public", s.handlePublicSettings))
 

@@ -102,7 +102,8 @@ func choiceAnswerMode(n int) string {
 
 // ChoiceResponseSetView is what the choice-response row of a set submit
 // gains in history and SSE (design v5 5.1): every answer, in position
-// order.
+// order. PromptMessageID is omitted when an interpreted batch spans multiple
+// prompt messages; each answer carries its own PromptMessageID.
 type ChoiceResponseSetView struct {
 	PromptMessageID string                    `json:"promptMessageId,omitempty"`
 	BatchID         string                    `json:"batchId"`
@@ -443,16 +444,25 @@ func choiceResponseSetAnswerOf(a *store.DecisionAnswer, d *store.Decision) Choic
 }
 
 // choiceResponseSetViewOf builds a set response's view from its answers,
-// ordered by the position of their rows (read in prompts).
+// ordered by prompt creation time and position (read in prompts). When the
+// batch spans multiple prompt messages, PromptMessageID on the envelope is
+// left empty and each answer carries its own PromptMessageID.
 func choiceResponseSetViewOf(as []*store.DecisionAnswer, prompts map[string]*store.Decision) ChoiceResponseSetView {
 	sorted := append([]*store.DecisionAnswer(nil), as...)
 	sort.SliceStable(sorted, func(i, j int) bool {
-		pi, pj := 0, 0
-		if d := prompts[sorted[i].DecisionRowID]; d != nil {
-			pi = d.Position
+		di, dj := prompts[sorted[i].DecisionRowID], prompts[sorted[j].DecisionRowID]
+		if di != nil && dj != nil && di.MessageID != dj.MessageID {
+			if !di.CreatedAt.Equal(dj.CreatedAt) {
+				return di.CreatedAt.Before(dj.CreatedAt)
+			}
+			return di.MessageID < dj.MessageID
 		}
-		if d := prompts[sorted[j].DecisionRowID]; d != nil {
-			pj = d.Position
+		pi, pj := 0, 0
+		if di != nil {
+			pi = di.Position
+		}
+		if dj != nil {
+			pj = dj.Position
 		}
 		return pi < pj
 	})

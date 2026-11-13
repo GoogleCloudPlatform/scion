@@ -1488,6 +1488,14 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "POST /api/v1/agent/secrets", RouteID: "agent.secretFetch",
 		Classification: RouteAgentToken,
 	},
+	"/api/v1/agent/decisions": {
+		Pattern: "/api/v1/agent/decisions", RouteID: "agent.decisions",
+		Classification: RouteAgentToken,
+	},
+	"/api/v1/agent/decisions/": {
+		Pattern: "/api/v1/agent/decisions/", RouteID: "agent.decisionsByKey",
+		Classification: RouteAgentToken,
+	},
 
 	// -------------------------------------------------------------------------
 	// Workstation: System endpoints
