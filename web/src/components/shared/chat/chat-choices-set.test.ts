@@ -757,4 +757,27 @@ describe('Phase 2: set card interpreted pre-selection, chips, and multi-user exc
     expect(text(rowEl(el, 'r1').querySelector('.chip.change'))).toBe('will change');
     expect(counter(el)).toBe('1 of 1 ready · 1 change');
   });
+
+  it('forwards surface="decisions_page" on set submit', async () => {
+    const [d1, d2] = [row('r1', 'D234', { defaultChoiceId: 'yes' }), row('r2', '17', { defaultChoiceId: 'no' })];
+    const el = await mount([d1, d2]);
+    el.surface = 'decisions_page';
+    await el.updateComplete;
+    apiFetch.mockResolvedValueOnce(
+      res(200, {
+        responseMessageId: 'resp-set',
+        batchId: 'b-set',
+        decisions: [decidedBy(d1, 'yes', ME, 'b-set'), decidedBy(d2, 'no', ME, 'b-set')],
+      })
+    );
+    await click(el, submit(el));
+    const body = JSON.parse(apiFetch.mock.calls[0]![1]?.body as string);
+    expect(body).toMatchObject({
+      surface: 'decisions_page',
+      answers: [
+        { decision_row_id: 'r1', choice_id: 'yes' },
+        { decision_row_id: 'r2', choice_id: 'no' },
+      ],
+    });
+  });
 });

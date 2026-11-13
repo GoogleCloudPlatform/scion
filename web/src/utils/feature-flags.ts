@@ -260,9 +260,25 @@ export const CHAT_RETENTION_FLAG = 'hub.chat_retention';
 export const WELCOME_PROJECT_FLAG = 'hub.welcome_project';
 
 /**
+ * Interactive chat choices (web.chat_choices, ptone/scion#7514): choice cards
+ * in chat conversations and inline decision answering. Presentation only: the
+ * hub checks the experiment on decision and choice-prompt routes. Default OFF.
+ */
+export const CHAT_CHOICES_FLAG = 'web.chat_choices';
+
+/**
  * Project decisions page (web.project_decisions, ptone/scion#7753): the
  * Decisions button + badge in the project header and /projects/:id/decisions
  * page. Presentation only: the hub checks both web.project_decisions and
  * web.chat_choices on GET /api/v1/projects/{id}/decisions. Default OFF.
  */
 export const PROJECT_DECISIONS_FLAG = 'web.project_decisions';
+
+/**
+ * Whether the project Decisions page and header entry point are enabled in
+ * this browser session. Requires both `web.project_decisions` and
+ * `web.chat_choices` (Plan B7).
+ */
+export function projectDecisionsEnabled(): boolean {
+  return isFeatureEnabled(PROJECT_DECISIONS_FLAG) && isFeatureEnabled(CHAT_CHOICES_FLAG);
+}
