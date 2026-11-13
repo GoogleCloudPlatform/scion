@@ -158,3 +158,36 @@ func TestRuntimeTargetSectionsShowPlacement(t *testing.T) {
 	writeRuntimeTargetSections(&buf, b.RuntimeTarget, b.RuntimeTargetPresentation, nil)
 	assert.Contains(t, buf.String(), "Placement:                  not reported\n")
 }
+
+// A flat Cloud Run Runtime Broker prints Region in its Runtime target section
+// (and includes region in JSON) when reported by the instance.
+func TestHubBrokersInfo_CloudRunRegion(t *testing.T) {
+	created := time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC)
+	observed := time.Date(2026, 11, 13, 1, 0, 0, 0, time.UTC)
+	b := &hubclient.RuntimeBroker{
+		ID: "b-cr", Name: "flat-cr", Slug: "flat-cr", Version: "1.2.3",
+		Status: "online", ConnectionState: "connected", Created: created, Updated: created,
+		RuntimeTarget: &api.RuntimeTargetDescriptor{ID: "rt-cr-1", Type: "cloudrun", DisplayName: "Cloud Run"},
+		RuntimeTargetPresentation: &api.RuntimeTargetPresentation{
+			SchemaVersion: 1, Key: "cr-us-central1", Name: "cr-us-central1",
+			Target: &api.PresentedTarget{
+				Type:        "cloudrun",
+				DisplayName: "Cloud Run",
+				Region:      "us-central1",
+			},
+		},
+		RuntimeTargetPresentationObservedAt: &observed,
+	}
+
+	var buf bytes.Buffer
+	writeRuntimeTargetSections(&buf, b.RuntimeTarget, b.RuntimeTargetPresentation, b.RuntimeTargetPresentationObservedAt)
+	out := buf.String()
+	assert.Contains(t, out, "Type:                       cloudrun\n")
+	assert.Contains(t, out, "Display name:               Cloud Run\n")
+	assert.Contains(t, out, "Region:                     us-central1\n")
+	assert.NotContains(t, out, "Namespace:")
+
+	raw, err := json.Marshal(brokerInfoJSON(b))
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"region":"us-central1"`)
+}

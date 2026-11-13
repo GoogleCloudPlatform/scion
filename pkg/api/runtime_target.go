@@ -148,6 +148,7 @@ type PresentedTarget struct {
 	Type                     string            `json:"type"`
 	DisplayName              string            `json:"displayName,omitempty"`
 	Namespace                string            `json:"namespace,omitempty"`
+	Region                   string            `json:"region,omitempty"`
 	GKE                      bool              `json:"gke,omitempty"`
 	PriorityClassName        string            `json:"priorityClassName,omitempty"`
 	SharedDirStorageClass    string            `json:"sharedDirStorageClass,omitempty"`

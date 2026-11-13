@@ -110,6 +110,10 @@ var presentationNeverKeys = []string{
 	"kubernetes_service_account_mappings", "kubernetesServiceAccountMappings",
 	"kubernetes_block_service_account", "kubernetesBlockServiceAccount",
 	"home_storage_leaf", "homeStorageLeaf",
+	"project_id", "projectId",
+	"service_account", "serviceAccount",
+	"credentials_file", "credentialsFile",
+	"network", "subnetwork",
 	"source", "bucket", "prefix", "server", "mode", "volume_name", "volumeName",
 	"alternative_env_keys", "alternativeEnvKeys", "env",
 }
