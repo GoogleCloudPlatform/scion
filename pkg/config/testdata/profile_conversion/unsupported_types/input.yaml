@@ -4,10 +4,6 @@ runtimes:
     type: podman
   apple:
     type: container
-  run:
-    type: cloudrun
-  runi:
-    type: cloudrun-instances
   runs:
     type: cloudrun-sandbox
   sub:
@@ -15,21 +11,22 @@ runtimes:
   dock:
     type: docker
     substrate: {}
+  dock-sandbox:
+    type: docker
+    cloudrun_sandbox: {}
 profiles:
   p-podman:
     runtime: pod
   p-container:
     runtime: apple
-  p-cloudrun:
-    runtime: run
-  p-instances:
-    runtime: runi
   p-sandbox:
     runtime: runs
   p-substrate:
     runtime: sub
   p-docker-substrate:
     runtime: dock
+  p-docker-sandbox:
+    runtime: dock-sandbox
   p-implicit:
     runtime: podman
   p-none: {}

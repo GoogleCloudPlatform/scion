@@ -381,6 +381,9 @@ func (p *Plan) summarize() {
 		} else {
 			s.NoticeFindings++
 		}
+		if f.Code == config.ConversionFlatTargetOperatorInputRequired {
+			s.DecisionRequired = true
+		}
 	}
 	if p.Agents != nil {
 		s.Agents = len(p.Agents.Items)
@@ -411,14 +414,16 @@ func nonNil(s []string) []string {
 // findingTexts are the fixed texts of the converter's finding codes. They
 // quote no settings value; the finding's key path and profiles say where.
 var findingTexts = map[string]string{
-	config.ConversionUnsupportedFlatTargetType:  "this runtime type has no flat Runtime Broker target; keep these profiles on the legacy Runtime Broker",
-	config.ConversionFlatTargetScopeViolation:   "this setting reaches beyond one target scope, which a flat Runtime Broker instance cannot hold",
-	config.ConversionProfileConflict:            "these profiles share a target but differ in one or more settings, so they keep separate instances; compare the proposed instances, then give the profiles the same values or add a field choice to merge them",
-	config.ConversionProfileConflictResolved:    "an operator choice consolidated this field on one profile's value; the other profiles' values are not carried over",
-	config.ConversionLegacyFieldNoEffect:        "this legacy setting has no effect on a flat Runtime Broker instance",
-	config.ConversionLegacyFieldRemoved:         "this setting was removed and is not converted",
-	config.ConversionUnknownSettingsKey:         "this key, profile or operator choice is not recognised or cannot be applied, so it is not converted",
-	config.ConversionFieldNotValidForTargetType: "this field is not valid for the instance's target type and is not converted",
+	config.ConversionUnsupportedFlatTargetType:       "this runtime type has no flat Runtime Broker target; keep these profiles on the legacy Runtime Broker",
+	config.ConversionFlatTargetScopeViolation:        "this setting reaches beyond one target scope, which a flat Runtime Broker instance cannot hold",
+	config.ConversionProfileConflict:                 "these profiles share a target but differ in one or more settings, so they keep separate instances; compare the proposed instances, then give the profiles the same values or add a field choice to merge them",
+	config.ConversionProfileConflictResolved:         "an operator choice consolidated this field on one profile's value; the other profiles' values are not carried over",
+	config.ConversionLegacyFieldNoEffect:             "this legacy setting has no effect on a flat Runtime Broker instance",
+	config.ConversionLegacyFieldRemoved:              "this setting was removed and is not converted",
+	config.ConversionUnknownSettingsKey:              "this key, profile or operator choice is not recognised or cannot be applied, so it is not converted",
+	config.ConversionFieldNotValidForTargetType:      "this field is not valid for the instance's target type and is not converted",
+	config.ConversionFlatTargetFieldRequired:         "this setting is required for the flat Runtime Broker instance's target type and is missing or invalid in the legacy settings; set a valid value before converting these profiles",
+	config.ConversionFlatTargetOperatorInputRequired: "this field has no legacy settings source and is required on the flat Runtime Broker instance; set it in settings.yaml before starting the instance",
 }
 
 // FindingText is the fixed text for a finding code.

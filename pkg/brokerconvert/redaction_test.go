@@ -145,7 +145,7 @@ func TestFindingText_EveryCodeHasFixedText(t *testing.T) {
 	for code := range findingTexts {
 		assert.NotEmpty(t, FindingText(code))
 	}
-	assert.Len(t, findingTexts, 8, "one text per frozen converter code")
+	assert.Len(t, findingTexts, 10, "one text per frozen converter code")
 	assert.NotEmpty(t, FindingText("some_new_code"))
 }
 

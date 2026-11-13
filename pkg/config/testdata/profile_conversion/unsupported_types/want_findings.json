@@ -37,6 +37,17 @@
     {
       "code": "unsupported_flat_target_type",
       "severity": "blocking",
+      "path": "runtimes.dock-sandbox.cloudrun_sandbox",
+      "profiles": [
+        "p-docker-sandbox"
+      ],
+      "message_contains": [
+        "runtime entry dock-sandbox configures cloudrun_sandbox"
+      ]
+    },
+    {
+      "code": "unsupported_flat_target_type",
+      "severity": "blocking",
       "path": "runtimes.dock.substrate",
       "profiles": [
         "p-docker-substrate"
@@ -55,28 +66,6 @@
       "message_contains": [
         "runtime type podman has no flat Runtime Broker target",
         "legacy Runtime Broker"
-      ]
-    },
-    {
-      "code": "unsupported_flat_target_type",
-      "severity": "blocking",
-      "path": "runtimes.run.type",
-      "profiles": [
-        "p-cloudrun"
-      ],
-      "message_contains": [
-        "runtime type cloudrun has"
-      ]
-    },
-    {
-      "code": "unsupported_flat_target_type",
-      "severity": "blocking",
-      "path": "runtimes.runi.type",
-      "profiles": [
-        "p-instances"
-      ],
-      "message_contains": [
-        "runtime type cloudrun-instances has"
       ]
     },
     {

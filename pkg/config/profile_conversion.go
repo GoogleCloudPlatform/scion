@@ -29,16 +29,18 @@ import (
 )
 
 // The conversion finding codes (.design/flat-runtime-brokers/contract-appendix-p3.md
-// FC6). The set is frozen.
+// FC6 and .design/flat-runtime-brokers/p5-cloudrun-amendment.md CR11). The set is frozen.
 const (
-	ConversionUnsupportedFlatTargetType  = "unsupported_flat_target_type"
-	ConversionFlatTargetScopeViolation   = "flat_target_scope_violation"
-	ConversionProfileConflict            = "profile_conflict"
-	ConversionProfileConflictResolved    = "profile_conflict_resolved"
-	ConversionLegacyFieldNoEffect        = "legacy_field_no_effect"
-	ConversionLegacyFieldRemoved         = "legacy_field_removed"
-	ConversionUnknownSettingsKey         = "unknown_settings_key"
-	ConversionFieldNotValidForTargetType = "field_not_valid_for_target_type"
+	ConversionUnsupportedFlatTargetType       = "unsupported_flat_target_type"
+	ConversionFlatTargetScopeViolation        = "flat_target_scope_violation"
+	ConversionProfileConflict                 = "profile_conflict"
+	ConversionProfileConflictResolved         = "profile_conflict_resolved"
+	ConversionLegacyFieldNoEffect             = "legacy_field_no_effect"
+	ConversionLegacyFieldRemoved              = "legacy_field_removed"
+	ConversionUnknownSettingsKey              = "unknown_settings_key"
+	ConversionFieldNotValidForTargetType      = "field_not_valid_for_target_type"
+	ConversionFlatTargetFieldRequired         = "flat_target_field_required"
+	ConversionFlatTargetOperatorInputRequired = "flat_target_operator_input_required"
 )
 
 // Severities of a ConversionFinding. A profile named by a blocking finding
@@ -125,18 +127,24 @@ type ConversionFinding struct {
 }
 
 var (
-	knownProfileKeys      = knownYAMLKeys(V1ProfileConfig{})
-	knownRuntimeEntryKeys = knownYAMLKeys(V1RuntimeConfig{})
+	knownProfileKeys           = knownYAMLKeys(V1ProfileConfig{})
+	knownRuntimeEntryKeys      = knownYAMLKeys(V1RuntimeConfig{})
+	knownCloudRunKeys          = knownYAMLKeys(CloudRunConfig{})
+	knownCloudRunInstancesKeys = knownYAMLKeys(V1CloudRunInstancesConfig{})
 )
 
 // convProfile is one profile in scope, with its folded instance values.
 type convProfile struct {
-	name   string
-	typ    string // docker or kubernetes once the target is supported
-	scope  string
-	ctx    string
-	ns     string
-	fields map[string]convValue
+	name       string
+	rtKey      string
+	legacyType string
+	typ        string // docker, kubernetes or cloudrun once the target is supported
+	scope      string
+	ctx        string
+	ns         string
+	proj       string
+	region     string
+	fields     map[string]convValue
 }
 
 // convValue is one folded field value and the legacy key it came from.
@@ -154,6 +162,8 @@ type convGroup struct {
 	typ      string
 	ctx      string
 	ns       string
+	proj     string
+	region   string
 	profiles []*convProfile
 }
 
@@ -247,10 +257,21 @@ func ConvertProfilesToInstances(in ProfileConversionInput) ProfileConversionResu
 		parts = append(parts, sp.parts...)
 	}
 	uniqueGroupKeys(parts)
+	partByKey := make(map[string]*convGroup, len(parts))
+	for _, part := range parts {
+		partByKey[part.key] = part
+	}
 	for _, sp := range splits {
 		result.Instances = append(result.Instances, buildSplitInstances(st, sp, fieldChoices[sp.key])...)
 	}
 	sort.Slice(result.Instances, func(i, j int) bool { return result.Instances[i].Key < result.Instances[j].Key })
+	for i, inst := range result.Instances {
+		if inst.RuntimeTarget == nil || inst.RuntimeTarget.Type != RuntimeTargetTypeCloudRun {
+			continue
+		}
+		part := partByKey[inst.Key]
+		checkProposedCloudRunTarget(st, i, inst.Key, inst.RuntimeTarget, part)
+	}
 	reportUnusedFieldChoices(st, splits, fieldChoices)
 
 	blocked := map[string]bool{}
@@ -289,13 +310,16 @@ func ConvertProfilesToInstances(in ProfileConversionInput) ProfileConversionResu
 }
 
 // flatTargetType maps a legacy runtime type to its flat target type, or ""
-// when it has none. "k8s" and "remote" are the legacy names of kubernetes.
+// when it has none. "k8s" and "remote" are the legacy names of kubernetes;
+// "cloudrun-instances" maps to cloudrun.
 func flatTargetType(t string) string {
 	switch t {
 	case RuntimeTargetTypeDocker:
 		return RuntimeTargetTypeDocker
 	case RuntimeTargetTypeKubernetes, "k8s", "remote":
 		return RuntimeTargetTypeKubernetes
+	case RuntimeTargetTypeCloudRun, "cloudrun-instances":
+		return RuntimeTargetTypeCloudRun
 	}
 	return ""
 }
@@ -307,7 +331,7 @@ func foldProfile(st *convState, vs *VersionedSettings, configured func(string) b
 	pp := "profiles." + name + "."
 	if prof.Runtime == "" {
 		st.add(ConversionUnsupportedFlatTargetType, ConversionSeverityBlocking, pp+"runtime",
-			fmt.Sprintf("profile %s names no runtime entry, so its runtime type is detected on the host and has no fixed flat Runtime Broker target; set its runtime to a docker or kubernetes runtime entry, or keep profile %s on its legacy Runtime Broker", name, name), name)
+			fmt.Sprintf("profile %s names no runtime entry, so its runtime type is detected on the host and has no fixed flat Runtime Broker target; set its runtime to a docker, kubernetes or cloudrun runtime entry, or keep profile %s on its legacy Runtime Broker", name, name), name)
 		return nil
 	}
 	rtKey := prof.Runtime
@@ -331,8 +355,7 @@ func foldProfile(st *convState, vs *VersionedSettings, configured func(string) b
 	for _, b := range []struct {
 		key string
 		set bool
-	}{{"cloudrun", rt.CloudRun != nil}, {"cloudrun_instances", rt.CloudRunInstances != nil},
-		{"cloudrun_sandbox", rt.CloudRunSandbox != nil}, {"substrate", rt.Substrate != nil}} {
+	}{{"cloudrun_sandbox", rt.CloudRunSandbox != nil}, {"substrate", rt.Substrate != nil}} {
 		if b.set {
 			st.add(ConversionUnsupportedFlatTargetType, ConversionSeverityBlocking, rp+b.key,
 				fmt.Sprintf("runtime entry %s configures %s, which has no flat Runtime Broker target; keep the profiles that use it on their legacy Runtime Broker", rtKey, b.key), name)
@@ -391,11 +414,51 @@ func foldProfile(st *convState, vs *VersionedSettings, configured func(string) b
 		return nil
 	}
 
-	cp := &convProfile{name: name, typ: typ, fields: map[string]convValue{}}
-	if typ == RuntimeTargetTypeKubernetes {
+	cp := &convProfile{name: name, rtKey: rtKey, legacyType: legacyType, typ: typ, fields: map[string]convValue{}}
+	switch typ {
+	case RuntimeTargetTypeKubernetes:
 		cp.ctx, cp.ns = strings.TrimSpace(rt.Context), strings.TrimSpace(rt.Namespace)
 		cp.scope = "kubernetes\x00" + cp.ctx + "\x00" + cp.ns
-	} else {
+	case RuntimeTargetTypeCloudRun:
+		if legacyType == "cloudrun-instances" {
+			if rt.CloudRunInstances != nil {
+				cp.proj = strings.TrimSpace(rt.CloudRunInstances.ProjectID)
+				cp.region = strings.TrimSpace(rt.CloudRunInstances.Region)
+			}
+			if rt.CloudRun != nil {
+				st.add(ConversionFieldNotValidForTargetType, ConversionSeverityNotice, rp+"cloudrun",
+					fmt.Sprintf("%scloudrun is not valid for runtime type cloudrun-instances; a cloudrun-instances runtime ignores it today, so it is not converted", rp), name)
+			}
+		} else {
+			if rt.CloudRun != nil {
+				cp.proj = strings.TrimSpace(rt.CloudRun.ProjectID)
+				cp.region = strings.TrimSpace(rt.CloudRun.Location)
+				if rt.CloudRun.NFSServer != "" {
+					st.add(ConversionLegacyFieldNoEffect, ConversionSeverityNotice, rp+"cloudrun.nfs_server",
+						fmt.Sprintf("%scloudrun.nfs_server has no effect on a flat cloudrun Runtime Broker instance (Cloud Run agents mount server.project_storage.nfs); it is not converted", rp), name)
+				}
+				if rt.CloudRun.NFSExport != "" {
+					st.add(ConversionLegacyFieldNoEffect, ConversionSeverityNotice, rp+"cloudrun.nfs_export",
+						fmt.Sprintf("%scloudrun.nfs_export has no effect on a flat cloudrun Runtime Broker instance (Cloud Run agents mount server.project_storage.nfs); it is not converted", rp), name)
+				}
+				if len(rt.CloudRun.AssignableServiceAccounts) > 0 {
+					p := rp + "cloudrun.assignable_service_accounts"
+					st.add(ConversionFieldNotValidForTargetType, ConversionSeverityBlocking, p, cloudRunIdentityKeyRefusal(p), name)
+				}
+				if rt.CloudRun.BlockServiceAccount != "" {
+					p := rp + "cloudrun.block_service_account"
+					st.add(ConversionFieldNotValidForTargetType, ConversionSeverityBlocking, p, cloudRunIdentityKeyRefusal(p), name)
+				}
+			}
+			if rt.CloudRunInstances != nil {
+				st.add(ConversionFieldNotValidForTargetType, ConversionSeverityNotice, rp+"cloudrun_instances",
+					fmt.Sprintf("%scloudrun_instances is not valid for runtime type cloudrun; a cloudrun runtime ignores it today, so it is not converted", rp), name)
+			}
+		}
+		// Keep cloudrun-instances in its own scope so it never merges with a
+		// sibling cloudrun entry (even when both leave service_account empty).
+		cp.scope = legacyType + "\x00" + cp.proj + "\x00" + cp.region
+	default:
 		cp.scope = RuntimeTargetTypeDocker
 	}
 
@@ -458,16 +521,33 @@ func foldProfile(st *convState, vs *VersionedSettings, configured func(string) b
 	// (design OQ2-A): each one set is reported and none is converted.
 	reportRemovedStorageOverrides(st, name, rtKey, prof, rt)
 
-	// A docker target has no Kubernetes settings: a legacy docker runtime
-	// ignores them, so they are not converted, and each one set is
-	// reported.
-	if typ == RuntimeTargetTypeDocker {
+	// Cloud Run runtime_target fields (CR10): folded from runtimes.<rt>.cloudrun
+	// on a cloudrun entry.
+	if typ == RuntimeTargetTypeCloudRun && legacyType != "cloudrun-instances" && rt.CloudRun != nil {
+		if sa := strings.TrimSpace(rt.CloudRun.ServiceAccount); sa != "" {
+			set("service_account", sa, rp+"cloudrun.service_account")
+		}
+		if net := strings.TrimSpace(rt.CloudRun.Network); net != "" {
+			set("network", net, rp+"cloudrun.network")
+		}
+		if subnet := strings.TrimSpace(rt.CloudRun.Subnetwork); subnet != "" {
+			set("subnetwork", subnet, rp+"cloudrun.subnetwork")
+		}
+	}
+
+	// Non-Kubernetes targets have no Kubernetes settings, and non-Cloud-Run
+	// targets ignore cloudrun / cloudrun_instances blocks: each one set is
+	// reported and none is converted.
+	if typ != RuntimeTargetTypeKubernetes {
 		for field := range cp.fields {
 			if isKubernetesOnlyTargetField(field) {
 				delete(cp.fields, field)
 			}
 		}
-		reportDockerKubernetesFields(st, name, rtKey, prof, rt)
+		reportNotValidKubernetesFields(st, typ, name, rtKey, prof, rt)
+	}
+	if typ != RuntimeTargetTypeCloudRun {
+		reportNotValidCloudRunBlocks(st, typ, name, rtKey, rt)
 	}
 
 	// agent_defaults: copied from the profile (rule 2; these keys exist
@@ -517,12 +597,12 @@ func isKubernetesOnlyTargetField(field string) bool {
 	return strings.HasPrefix(field, "kubernetes_service_account_mappings.")
 }
 
-// reportDockerKubernetesFields reports every Kubernetes-only key that
-// profile name or its docker runtime entry sets.
-func reportDockerKubernetesFields(st *convState, name, rtKey string, prof V1ProfileConfig, rt V1RuntimeConfig) {
+// reportNotValidKubernetesFields reports every Kubernetes-only key that
+// profile name or its non-Kubernetes runtime entry sets.
+func reportNotValidKubernetesFields(st *convState, typ, name, rtKey string, prof V1ProfileConfig, rt V1RuntimeConfig) {
 	report := func(path string) {
 		st.add(ConversionFieldNotValidForTargetType, ConversionSeverityNotice, path,
-			fmt.Sprintf("%s is not valid for runtime target type docker; a docker runtime ignores it today, so it is not converted", path), name)
+			fmt.Sprintf("%s is not valid for runtime target type %s; a %s runtime ignores it today, so it is not converted", path, typ, typ), name)
 	}
 	pp, rp := "profiles."+name+".", "runtimes."+rtKey+"."
 	for _, f := range []struct {
@@ -555,6 +635,103 @@ func reportDockerKubernetesFields(st *convState, name, rtKey string, prof V1Prof
 	} {
 		if f.set {
 			report(rp + f.key)
+		}
+	}
+}
+
+// reportNotValidCloudRunBlocks reports cloudrun and cloudrun_instances blocks
+// set on a non-Cloud-Run runtime entry (CR10).
+func reportNotValidCloudRunBlocks(st *convState, typ, name, rtKey string, rt V1RuntimeConfig) {
+	rp := "runtimes." + rtKey + "."
+	for _, b := range []struct {
+		key string
+		set bool
+	}{{"cloudrun", rt.CloudRun != nil}, {"cloudrun_instances", rt.CloudRunInstances != nil}} {
+		if b.set {
+			path := rp + b.key
+			st.add(ConversionFieldNotValidForTargetType, ConversionSeverityNotice, path,
+				fmt.Sprintf("%s is not valid for runtime target type %s; a %s runtime ignores it today, so it is not converted", path, typ, typ), name)
+		}
+	}
+}
+
+func cloudRunIdentityKeyRefusal(path string) string {
+	return fmt.Sprintf("%s cannot be carried to a flat cloudrun instance yet (ptone/scion#7764); remove it from the legacy entry or wait for flat identity support", path)
+}
+
+// checkProposedCloudRunTarget checks the CR2-required fields on a proposed
+// Cloud Run instance: fields with legacy sources emit blocking
+// flat_target_field_required at each affected profile's legacy path when
+// missing or invalid, while required fields with no legacy source
+// (credentials_file on all Cloud Run entries, plus service_account and
+// network/subnetwork on cloudrun-instances) emit notice
+// flat_target_operator_input_required at the proposed instance path.
+func checkProposedCloudRunTarget(st *convState, index int, key string, t *V1RuntimeTargetConfig, part *convGroup) {
+	if part == nil {
+		return
+	}
+	targetPrefix := fmt.Sprintf("server.broker.instances[%d].runtime_target.", index)
+	credPath := targetPrefix + "credentials_file"
+	st.add(ConversionFlatTargetOperatorInputRequired, ConversionSeverityNotice, credPath,
+		fmt.Sprintf("%s (%s) has no legacy settings source and is required for runtime target type cloudrun; set it to an absolute local service-account or impersonated-service-account JSON file path before starting the instance", credPath, key),
+		groupProfileNames(part)...)
+
+	for _, p := range part.profiles {
+		rp := "runtimes." + p.rtKey + "."
+		projPath, regionPath := rp+"cloudrun.project_id", rp+"cloudrun.location"
+		if p.legacyType == "cloudrun-instances" {
+			projPath, regionPath = rp+"cloudrun_instances.project_id", rp+"cloudrun_instances.region"
+		}
+
+		switch {
+		case t.ProjectID == "":
+			st.add(ConversionFlatTargetFieldRequired, ConversionSeverityBlocking, projPath,
+				fmt.Sprintf("%s is required for runtime target type cloudrun", projPath), p.name)
+		case strings.Contains(t.ProjectID, ":"):
+			st.add(ConversionFlatTargetFieldRequired, ConversionSeverityBlocking, projPath,
+				fmt.Sprintf("%s cannot be used on a flat cloudrun instance: domain-scoped project IDs are not supported", projPath), p.name)
+		case !cloudRunProjectIDRe.MatchString(t.ProjectID):
+			st.add(ConversionFlatTargetFieldRequired, ConversionSeverityBlocking, projPath,
+				fmt.Sprintf("%s cannot be used on a flat cloudrun instance: project_id must be a GCP project ID (6 to 30 lower-case letters, digits or hyphens, starting with a letter)", projPath), p.name)
+		}
+
+		switch {
+		case t.Region == "":
+			st.add(ConversionFlatTargetFieldRequired, ConversionSeverityBlocking, regionPath,
+				fmt.Sprintf("%s is required for runtime target type cloudrun (e.g. us-central1)", regionPath), p.name)
+		case !cloudRunRegionRe.MatchString(t.Region):
+			st.add(ConversionFlatTargetFieldRequired, ConversionSeverityBlocking, regionPath,
+				fmt.Sprintf("%s cannot be used on a flat cloudrun instance: region must be a Cloud Run region (e.g. us-central1)", regionPath), p.name)
+		}
+
+		if p.legacyType == "cloudrun-instances" {
+			saTargetPath := targetPrefix + "service_account"
+			st.add(ConversionFlatTargetOperatorInputRequired, ConversionSeverityNotice, saTargetPath,
+				fmt.Sprintf("%s (%s) has no legacy settings source on runtime type cloudrun-instances and is required for runtime target type cloudrun; set it to a user-managed service account (name@project.iam.gserviceaccount.com) before starting the instance", saTargetPath, key),
+				p.name)
+			netTargetPath := targetPrefix + "network"
+			st.add(ConversionFlatTargetOperatorInputRequired, ConversionSeverityNotice, netTargetPath,
+				fmt.Sprintf("%s or subnetwork (%s) has no legacy settings source on runtime type cloudrun-instances and is required for runtime target type cloudrun; set network or subnetwork before starting the instance", netTargetPath, key),
+				p.name)
+			continue
+		}
+
+		saPath, netPath := rp+"cloudrun.service_account", rp+"cloudrun.network"
+		switch {
+		case t.ServiceAccount == "":
+			st.add(ConversionFlatTargetFieldRequired, ConversionSeverityBlocking, saPath,
+				fmt.Sprintf("%s is required for runtime target type cloudrun; the platform default compute identity is never implied", saPath), p.name)
+		case cloudRunDefaultServiceAccount(t.ServiceAccount, t.ProjectID):
+			st.add(ConversionFlatTargetFieldRequired, ConversionSeverityBlocking, saPath,
+				fmt.Sprintf("%s cannot be used on a flat cloudrun instance: the project default service accounts are not allowed", saPath), p.name)
+		case !cloudRunServiceAccountRe.MatchString(t.ServiceAccount) || cloudRunServiceAgentRe.MatchString(t.ServiceAccount):
+			st.add(ConversionFlatTargetFieldRequired, ConversionSeverityBlocking, saPath,
+				fmt.Sprintf("%s cannot be used on a flat cloudrun instance: service_account must be a user-managed service account (name@project.iam.gserviceaccount.com)", saPath), p.name)
+		}
+
+		if t.Network == "" && t.Subnetwork == "" {
+			st.add(ConversionFlatTargetFieldRequired, ConversionSeverityBlocking, netPath,
+				fmt.Sprintf("%s or subnetwork is required for runtime target type cloudrun: Cloud Run agents mount the NFS share over the VPC", netPath), p.name)
 		}
 	}
 }
@@ -603,10 +780,21 @@ func groupProfiles(profiles []*convProfile) []*convGroup {
 	for _, p := range profiles {
 		g, ok := byScope[p.scope]
 		if !ok {
-			g = &convGroup{seed: p.scope, scope: p.scope, typ: p.typ, ctx: p.ctx, ns: p.ns}
-			if p.typ == RuntimeTargetTypeKubernetes {
+			g = &convGroup{
+				seed:   p.scope,
+				scope:  p.scope,
+				typ:    p.typ,
+				ctx:    p.ctx,
+				ns:     p.ns,
+				proj:   p.proj,
+				region: p.region,
+			}
+			switch p.typ {
+			case RuntimeTargetTypeKubernetes:
 				g.key = conversionKey(p.scope, "k8s", p.ctx, p.ns)
-			} else {
+			case RuntimeTargetTypeCloudRun:
+				g.key = conversionKey(p.scope, RuntimeTargetTypeCloudRun, p.region)
+			default:
 				g.key = conversionKey(p.scope, RuntimeTargetTypeDocker)
 			}
 			byScope[p.scope] = g
@@ -754,6 +942,8 @@ func applySplitChoices(st *convState, groups []*convGroup, choices []ConversionC
 			typ:      g.typ,
 			ctx:      g.ctx,
 			ns:       g.ns,
+			proj:     g.proj,
+			region:   g.region,
 			profiles: moved,
 		})
 	}
@@ -976,6 +1166,8 @@ func splitGroup(g *convGroup, choices map[string]*fieldChoice) *convSplit {
 			typ:      g.typ,
 			ctx:      g.ctx,
 			ns:       g.ns,
+			proj:     g.proj,
+			region:   g.region,
 			profiles: members,
 		})
 	}
@@ -1049,7 +1241,13 @@ func buildSplitInstances(st *convState, sp *convSplit, choices map[string]*field
 
 	var out []V1RuntimeBrokerInstanceConfig
 	for _, part := range sp.parts {
-		target := &V1RuntimeTargetConfig{Type: part.typ, Context: part.ctx, Namespace: part.ns}
+		target := &V1RuntimeTargetConfig{
+			Type:      part.typ,
+			Context:   part.ctx,
+			Namespace: part.ns,
+			ProjectID: part.proj,
+			Region:    part.region,
+		}
 		defaults := &V1InstanceAgentDefaults{}
 		for _, field := range sp.fields {
 			switch {
@@ -1164,6 +1362,12 @@ func setInstanceField(t *V1RuntimeTargetConfig, d *V1InstanceAgentDefaults, fiel
 		t.Tolerations = append([]api.K8sToleration(nil), v.([]api.K8sToleration)...)
 	case "runtime_class_name":
 		t.RuntimeClassName = v.(string)
+	case "service_account":
+		t.ServiceAccount = v.(string)
+	case "network":
+		t.Network = v.(string)
+	case "subnetwork":
+		t.Subnetwork = v.(string)
 	case "default_harness_config":
 		d.DefaultHarnessConfig = v.(string)
 	case "image_registry":
@@ -1316,6 +1520,32 @@ func checkRawConversionKeys(st *convState, vs *VersionedSettings, raw []byte, na
 			case k == "env":
 				st.add(ConversionLegacyFieldRemoved, ConversionSeverityNotice, pp+".env",
 					fmt.Sprintf("%s.env was removed from the settings and has no effect; it is not converted (use harness_configs.<name>.env)", pp), name)
+			case k == "cloudrun":
+				crm, isCRMap := pm["cloudrun"].(map[string]interface{})
+				if !isCRMap || len(crm) == 0 {
+					unknown(pp+".cloudrun", name)
+					continue
+				}
+				for _, ck := range rawMapKeys(crm) {
+					switch ck {
+					case "assignable_service_accounts":
+						if list, ok := crm[ck].([]interface{}); ok && len(list) > 0 {
+							p := pp + ".cloudrun.assignable_service_accounts"
+							st.add(ConversionFieldNotValidForTargetType, ConversionSeverityBlocking, p, cloudRunIdentityKeyRefusal(p), name)
+						} else {
+							unknown(pp+".cloudrun."+ck, name)
+						}
+					case "block_service_account":
+						if s, ok := crm[ck].(string); ok && s != "" {
+							p := pp + ".cloudrun.block_service_account"
+							st.add(ConversionFieldNotValidForTargetType, ConversionSeverityBlocking, p, cloudRunIdentityKeyRefusal(p), name)
+						} else {
+							unknown(pp+".cloudrun."+ck, name)
+						}
+					default:
+						unknown(pp+".cloudrun."+ck, name)
+					}
+				}
 			case !knownProfileKeys[k]:
 				unknown(pp+"."+k, name)
 			}
@@ -1334,6 +1564,10 @@ func checkRawConversionKeys(st *convState, vs *VersionedSettings, raw []byte, na
 	}
 	for rtKey, users := range runtimeUsers {
 		checkMap("runtimes."+rtKey, rawRuntimes[rtKey], knownRuntimeEntryKeys, users)
+		if rm, ok := rawRuntimes[rtKey].(map[string]interface{}); ok {
+			checkMap("runtimes."+rtKey+".cloudrun", rm["cloudrun"], knownCloudRunKeys, users)
+			checkMap("runtimes."+rtKey+".cloudrun_instances", rm["cloudrun_instances"], knownCloudRunInstancesKeys, users)
+		}
 	}
 }
 
