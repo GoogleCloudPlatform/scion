@@ -3390,12 +3390,6 @@ func (d *HTTPAgentDispatcher) injectLifecycleGitHubToken(
 	return token
 }
 
-// startEnvResult bundles everything buildStartEnv assembles. DispatchAgentStart
-// consumes all of it (env, classifications and secrets for the broker call,
-// projectInfo for projectPath/projectSlug/sharedDirs/sharedWorkspace, and
-// workspace for StartExtras.Workspace); DispatchAgentRestart consumes only
-// env and classifications, since RestartAgent takes neither secrets nor a
-// project path, and restart never recreates the workspace.
 // setStartEnvToken adds the Hub auth token beginRun issued to a start's
 // env. It does nothing for an empty token.
 func setStartEnvToken(env map[string]string, classifications *map[string]api.EnvKind, token string) {
@@ -3408,6 +3402,10 @@ func setStartEnvToken(env map[string]string, classifications *map[string]api.Env
 	classifyEnv(classifications, "SCION_AUTH_TOKEN", api.EnvKindSecretBootstrap)
 }
 
+// startEnvResult bundles everything buildStartEnv assembles. DispatchAgentStart
+// and DispatchAgentRestart both consume all of it: env, classifications and
+// secrets for the broker call, projectInfo for projectPath/projectSlug/
+// sharedDirs/sharedWorkspace, and workspace for the workspace extras.
 type startEnvResult struct {
 	env             map[string]string
 	classifications map[string]api.EnvKind
