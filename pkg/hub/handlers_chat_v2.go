@@ -1933,6 +1933,11 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		storeMsg.DispatchFailureReason = &unreachableReason
 		dispatchFailureCode = dispatchFailureCodeAgentUnreachable
 	}
+	prePersistErr := func(serr *chatSendError) *chatSendError {
+		serr.notPersisted = wakePrimary
+		return serr
+	}
+
 	// B15 dual-write: resolve-or-create conversation for web chat user→agent messages.
 	// chatV2ConvResult is declared outside the block so Phase 9b(ii)
 	// rendering can read it after persistence.
@@ -1957,7 +1962,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 				if s.writeDenyEnabled() {
 					messaging.WriteDenialMetrics.Inc("chat_v2.agent_routed.thread")
 					s.messageLog.Error("conversation resolution failed", "error", convErr)
-					return nil, newChatSendError(http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
+					return nil, prePersistErr(newChatSendError(http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil))
 				}
 				s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
 			}
@@ -1968,7 +1973,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 				if s.writeDenyEnabled() {
 					messaging.WriteDenialMetrics.Inc("chat_v2.agent_routed.dm")
 					s.messageLog.Error("conversation resolution failed", "error", convErr)
-					return nil, newChatSendError(http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
+					return nil, prePersistErr(newChatSendError(http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil))
 				}
 				s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
 			}
@@ -1978,7 +1983,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 			if err := messaging.ValidateAttributed(storeMsg.ConversationID); err != nil {
 				if s.writeDenyEnabled() {
 					messaging.WriteDenialMetrics.Inc("chat_v2.agent_routed.validate")
-					return nil, newChatSendError(http.StatusConflict, ErrCodeConversationNotResolved, err.Error(), nil)
+					return nil, prePersistErr(newChatSendError(http.StatusConflict, ErrCodeConversationNotResolved, err.Error(), nil))
 				}
 				s.messageLog.Warn("ValidateAttributed failed (write-deny OFF, continuing)", "error", err)
 			}
@@ -2050,7 +2055,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	}
 	if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 		s.messageLog.Error("Failed to persist agent-routed message", "error", err)
-		return nil, newChatSendError(http.StatusInternalServerError, "INTERNAL", "failed to persist message", nil)
+		return nil, prePersistErr(newChatSendError(http.StatusInternalServerError, "INTERNAL", "failed to persist message", nil))
 	}
 	if opts.OnPersisted != nil {
 		opts.OnPersisted(storeMsg.ID)

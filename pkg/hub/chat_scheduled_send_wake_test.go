@@ -492,6 +492,90 @@ func TestScheduledSendWake_ShutdownDuringWake_ReleasedToPending(t *testing.T) {
 	assert.Equal(t, []string{"sending", "released"}, scheduledEventActions(t, collectEvents(events)))
 }
 
+type abortDuringResumeStore struct {
+	store.Store
+	aborted      atomic.Bool
+	createFailed atomic.Bool
+}
+
+func (w *abortDuringResumeStore) CreateMessage(ctx context.Context, msg *store.Message) error {
+	exec, _ := ExecutorContextFromContext(ctx)
+	if exec.Kind == scheduledSendClientType && w.aborted.Load() {
+		select {
+		case <-ctx.Done():
+		case <-time.After(5 * time.Second):
+			return errors.New("scheduled delivery context was not cancelled by sweeper abort")
+		}
+		err := w.Store.CreateMessage(ctx, msg)
+		if err != nil {
+			w.createFailed.Store(true)
+		}
+		return err
+	}
+	return w.Store.CreateMessage(ctx, msg)
+}
+
+type abortDuringResumeDispatcher struct {
+	*wakeTrackingDispatcher
+	srv       *Server
+	store     *abortDuringResumeStore
+	markReady func(agentID string)
+}
+
+func (d *abortDuringResumeDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, prompt string, cont bool) error {
+	d.store.aborted.Store(true)
+	d.srv.scheduledRuntime().abort()
+	d.markReady(agent.ID)
+	return d.wakeTrackingDispatcher.DispatchAgentStart(ctx, agent, prompt, cont)
+}
+
+// Shutdown abort during an in-flight resume: the detached resume completes and
+// moves the agent to running, CreateMessage fails on the cancelled delivery
+// context, and the row is released back to pending (not failed/delivery_error).
+func TestScheduledSendWake_ShutdownDuringResume_ReleasedToPending(t *testing.T) {
+	srv, s, alice, bob, project, wrapped, _ := setupDemoPolicyTestWithFault(t,
+		func(inner store.Store, _ *storeFaultSwitch) *abortDuringResumeStore {
+			return &abortDuringResumeStore{Store: inner}
+		})
+
+	f := newScheduledSendFixtureOn(t, srv, s, alice, bob, project)
+	wf := attachScheduledWakeBroker(t, f, string(state.PhaseSuspended))
+	wf.srv.SetDispatcher(&abortDuringResumeDispatcher{
+		wakeTrackingDispatcher: wf.disp,
+		srv:                    wf.srv,
+		store:                  wrapped,
+		markReady:              wf.markReadySoon,
+	})
+
+	sm := wf.scheduleWakeIn(t, wf.bob, wf.topicID, "wake succeeds after sweeper abort", true)
+	events, unsub := wf.srv.events.Subscribe("user." + wf.bob.ID + ".chat.scheduled")
+	defer unsub()
+	assert.Equal(t, 1, wf.srv.sweepScheduledMessages(context.Background(), time.Now().UTC()))
+
+	assert.True(t, wrapped.aborted.Load(), "sweeper aborted during resume dispatch")
+	assert.True(t, wrapped.createFailed.Load(), "CreateMessage failed on cancelled delivery context")
+	assert.Len(t, wf.disp.getStartCalls(), 1, "detached resume completed")
+	gotAgent, err := wf.store.GetAgent(context.Background(), wf.agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseRunning), gotAgent.Phase)
+
+	row := wf.row(t, wf.bob, sm.ID)
+	assert.Equal(t, ScheduledMessagePending, row.Status, "pre-persistence failure after cut-short wake must release to pending")
+	assert.Empty(t, row.FailureReason)
+	assert.Empty(t, wf.topicMessages(t))
+	assert.Equal(t, []string{"sending", "released"}, scheduledEventActions(t, collectEvents(events)))
+
+	// Next sweep (fresh runtime) delivers to the now-running agent without a second start.
+	wrapped.aborted.Store(false)
+	wf.srv.mu.Lock()
+	wf.srv.scheduledSend = nil
+	wf.srv.mu.Unlock()
+	assert.Equal(t, 1, wf.srv.sweepScheduledMessages(context.Background(), time.Now().UTC()))
+	assert.Equal(t, ScheduledMessageSent, wf.row(t, wf.bob, sm.ID).Status)
+	assert.Len(t, wf.disp.getStartCalls(), 1, "already-running agent needs no second resume")
+	require.Len(t, wf.topicMessages(t), 1)
+}
+
 // scheduledStuckAfter() exceeds chatWakeResumeBudget + claim + delivery + finalize.
 func TestScheduledSendWake_BudgetCoversWakeResume(t *testing.T) {
 	delivery := time.Duration(1+messages.MaxMentionRecipients)*chatWakeDeliveryBudget + 30*time.Second

@@ -185,16 +185,18 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 		// (SyncDispatchBound) and, when the caller has a deadline, by that
 		// deadline too (KeepCallerDeadline; the earlier wins). The caller's
 		// deadline also shortens the readiness wait below. This path is
-		// shared by the user and agent direct messages and the chat wake;
-		// only the chat wake carries a deadline today (its resume budget).
+		// shared by the user and agent direct messages and the live and
+		// scheduled chat wakes; only the chat wakes carry a deadline today
+		// (their resume budget).
 		//
 		// A wake request that already ended (cancelled, or its time budget
 		// ran out) during the admission checks or the start gate gets no
-		// resume. On the direct-message paths the message is persisted on
-		// the request after the wake, so nobody would receive it; the chat
-		// wake persists on a detached context but answers the sender with
-		// an error once its wake budget is spent. Either way the resume
-		// would serve nobody. Nothing is claimed, dispatched or written.
+		// resume. On the direct-message and scheduled-chat paths the
+		// message is persisted on the caller's context after the wake, so
+		// nobody would receive it; the live chat wake persists on a
+		// detached context (DetachWake) but answers the sender with an
+		// error once its wake budget is spent. Either way the resume would
+		// serve nobody. Nothing is claimed, dispatched or written.
 		if err := ctx.Err(); err != nil {
 			s.messageLog.Info("wake: skipped, the wake request ended or its time budget ran out before the resume",
 				"agent_id", agent.ID, "error", err)

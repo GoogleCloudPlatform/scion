@@ -1248,8 +1248,9 @@ func finalizeContext(ctx context.Context) (context.Context, context.CancelFunc) 
 }
 
 // fireScheduledMessage delivers a row this replica has claimed. Once
-// sendChatMessage has been called the row never returns to pending: it
-// ends sent or failed, so a message is sent at most once.
+// sendChatMessage has been called the row never returns to pending — except
+// when a cut-short wake send fails before persisting a message — so a
+// persisted message is sent at most once.
 //
 // The checks and the send run on a context detached from ctx's
 // cancellation (server shutdown) and bounded by scheduledDeliveryBudget;
@@ -1306,10 +1307,12 @@ func (s *Server) fireScheduledMessage(ctx context.Context, sms ScheduledMessageS
 		})
 	}()
 	if serr != nil {
-		// A wake error returns before any message is persisted. If the
+		// On a wake send, wake errors and pre-persistence errors (such as
+		// CreateMessage failing on a delivery context aborted while the
+		// detached resume completed) leave no stored message row. If the
 		// sweeper was cut short, hand the row back to pending so the next
 		// sweep retries it instead of recording a false failure.
-		if serr.wakeFailure != "" && cutShort() {
+		if (serr.wakeFailure != "" || serr.notPersisted) && cutShort() {
 			return s.releaseScheduledMessage(base, sms, m)
 		}
 		scheduledSendLog().Info("scheduled send: delivery refused", "id", m.ID, "status", serr.Status, "code", serr.Code)

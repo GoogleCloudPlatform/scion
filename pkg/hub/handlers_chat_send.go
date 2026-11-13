@@ -74,6 +74,11 @@ type chatSendError struct {
 	// refusal, wakeFailureFailed for any other wake failure (including
 	// WakeDeferred). Never written to the HTTP response.
 	wakeFailure string
+	// notPersisted marks an error on a wake send (wakePrimary) returned
+	// before the message row was persisted (e.g. CreateMessage failing on a
+	// delivery context aborted while the resume finished). Never written to
+	// the HTTP response.
+	notPersisted bool
 }
 
 const (
