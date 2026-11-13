@@ -364,6 +364,8 @@ type projectReadableScope struct {
 	conversationLabel     map[string]string
 	conversationAvailable map[string]bool
 	userCanPost           map[string]bool
+	agentsByID            map[string]*store.Agent
+	queriedAgentIDs       map[string]bool
 	liveAgents            map[string]*store.Agent
 	agentNames            map[string]string
 }
@@ -384,6 +386,8 @@ func (s *Server) resolveProjectReadableScope(
 		conversationLabel:     make(map[string]string),
 		conversationAvailable: make(map[string]bool),
 		userCanPost:           make(map[string]bool),
+		agentsByID:            make(map[string]*store.Agent),
+		queriedAgentIDs:       make(map[string]bool),
 		liveAgents:            make(map[string]*store.Agent),
 		agentNames:            make(map[string]string),
 	}
@@ -417,7 +421,8 @@ func (s *Server) resolveProjectReadableScope(
 	}
 
 	// 2. Collect distinct asking agent UUIDs that actually appear on decisions
-	// in this project (SQL GROUP BY asker_agent_id). An agent with zero
+	// in this project (SQL GROUP BY asker_agent_id) and batch-load their agent
+	// rows once via GetAgentsByIDsIncludingDeleted. An agent with zero
 	// decisions in this project can have no DM decision rows, so candidate DM
 	// keys are derived solely from this distinct set.
 	decAgents, err := s.store.ListProjectDecisionAgents(ctx, project.ID)
@@ -429,19 +434,27 @@ func (s *Server) resolveProjectReadableScope(
 		if da.Name != "" {
 			scope.agentNames[da.ID] = da.Name
 		}
-		ag, gerr := s.store.GetAgent(ctx, da.ID)
-		if gerr != nil && !errors.Is(gerr, store.ErrNotFound) {
-			return nil, fmt.Errorf("get decision agent %s: %w", da.ID, gerr)
+		scope.queriedAgentIDs[da.ID] = true
+		candidateAgentIDs = append(candidateAgentIDs, da.ID)
+	}
+	if len(candidateAgentIDs) > 0 {
+		agentsByID, berr := s.store.GetAgentsByIDsIncludingDeleted(ctx, candidateAgentIDs)
+		if berr != nil {
+			return nil, fmt.Errorf("batch get decision agents: %w", berr)
 		}
-		if ag != nil {
+		for _, id := range candidateAgentIDs {
+			ag := agentsByID[id]
+			if ag == nil {
+				continue
+			}
+			scope.agentsByID[id] = ag
 			if name := agentDisplayName(ag); name != "" {
-				scope.agentNames[da.ID] = name
+				scope.agentNames[id] = name
 			}
 			if ag.DeletedAt.IsZero() {
-				scope.liveAgents[da.ID] = ag
+				scope.liveAgents[id] = ag
 			}
 		}
-		candidateAgentIDs = append(candidateAgentIDs, da.ID)
 	}
 
 	// Build viewer's canonical DM keys dm:agent:<agentUUID>:user:<viewerID>.
@@ -654,38 +667,56 @@ func (s *Server) classifyProjectOpenPrompts(
 	viewerID := user.ID()
 	postUser := chatPostIdentity(user)
 
-	// Cache per-asker live lookup and authorizeAgentMessage(postUser, asker).
+	// Batch-prefetch any asking agent IDs that were inserted concurrently after
+	// resolveProjectReadableScope ran so checkAsker never issues per-row queries.
+	var missingAskerIDs []string
+	seenMissingAsker := make(map[string]bool)
+	for _, p := range openPrompts {
+		if p.AskerAgentID != "" && !scope.queriedAgentIDs[p.AskerAgentID] && !seenMissingAsker[p.AskerAgentID] {
+			seenMissingAsker[p.AskerAgentID] = true
+			missingAskerIDs = append(missingAskerIDs, p.AskerAgentID)
+		}
+	}
+	if len(missingAskerIDs) > 0 {
+		extraAgents, err := s.store.GetAgentsByIDsIncludingDeleted(ctx, missingAskerIDs)
+		if err != nil {
+			return ProjectDecisionCounts{}, nil, err
+		}
+		for _, id := range missingAskerIDs {
+			scope.queriedAgentIDs[id] = true
+			if ag := extraAgents[id]; ag != nil {
+				scope.agentsByID[id] = ag
+				if name := agentDisplayName(ag); name != "" {
+					scope.agentNames[id] = name
+				}
+				if ag.DeletedAt.IsZero() {
+					scope.liveAgents[id] = ag
+				}
+			}
+		}
+	}
+
+	// Cache per-asker authorizeAgentMessage(postUser, asker) using the
+	// batch-loaded scope.liveAgents map (absent or soft-deleted = gone).
 	type askerCheck struct {
 		gone    bool
 		allowed bool
 	}
 	askerCache := make(map[string]askerCheck)
-	checkAsker := func(agentID string) (askerCheck, error) {
+	checkAsker := func(agentID string) askerCheck {
 		if c, ok := askerCache[agentID]; ok {
-			return c, nil
+			return c
 		}
-		asker, ok := scope.liveAgents[agentID]
-		if !ok {
-			ag, err := s.store.GetAgent(ctx, agentID)
-			switch {
-			case errors.Is(err, store.ErrNotFound):
-				c := askerCheck{gone: true, allowed: true}
-				askerCache[agentID] = c
-				return c, nil
-			case err != nil:
-				return askerCheck{}, err
-			case ag == nil || !ag.DeletedAt.IsZero():
-				c := askerCheck{gone: true, allowed: true}
-				askerCache[agentID] = c
-				return c, nil
-			default:
-				asker = ag
-			}
+		asker := scope.liveAgents[agentID]
+		if asker == nil {
+			c := askerCheck{gone: true, allowed: true}
+			askerCache[agentID] = c
+			return c
 		}
 		allowed, _, _ := s.authorizeAgentMessage(ctx, postUser, asker, false)
 		c := askerCheck{gone: false, allowed: allowed}
 		askerCache[agentID] = c
-		return c, nil
+		return c
 	}
 
 	var counts ProjectDecisionCounts
@@ -693,10 +724,7 @@ func (s *Server) classifyProjectOpenPrompts(
 
 	for _, p := range openPrompts {
 		canPostConv := scope.userCanPost[p.ChatKey]
-		ac, err := checkAsker(p.AskerAgentID)
-		if err != nil {
-			return ProjectDecisionCounts{}, nil, err
-		}
+		ac := checkAsker(p.AskerAgentID)
 
 		promptWaitingOnYou := false
 		var rowWaitingReasons map[string]string
@@ -915,7 +943,33 @@ func (s *Server) buildProjectDecisionLogViews(
 		}
 	}
 
-	interpreterNameCache := make(map[string]string)
+	// Batch-load any interpreter agents that never asked a decision themselves
+	// (so they were not in ListProjectDecisionAgents) in one query across the page.
+	var missingInterpreterIDs []string
+	seenMissingInterp := make(map[string]bool)
+	for _, e := range entries {
+		if e != nil && e.Answer != nil && e.Answer.InterpretedByAgentID != "" {
+			id := e.Answer.InterpretedByAgentID
+			if !scope.queriedAgentIDs[id] && !seenMissingInterp[id] {
+				seenMissingInterp[id] = true
+				missingInterpreterIDs = append(missingInterpreterIDs, id)
+			}
+		}
+	}
+	if len(missingInterpreterIDs) > 0 {
+		if extraAgents, err := s.store.GetAgentsByIDsIncludingDeleted(ctx, missingInterpreterIDs); err == nil {
+			for _, id := range missingInterpreterIDs {
+				scope.queriedAgentIDs[id] = true
+				if ag := extraAgents[id]; ag != nil {
+					scope.agentsByID[id] = ag
+					if name := agentDisplayName(ag); name != "" {
+						scope.agentNames[id] = name
+					}
+				}
+			}
+		}
+	}
+
 	resolveAgentName := func(agentID, fallback string) string {
 		if agentID == "" {
 			return ""
@@ -923,17 +977,10 @@ func (s *Server) buildProjectDecisionLogViews(
 		if name := scope.agentNames[agentID]; name != "" {
 			return name
 		}
-		if name, ok := interpreterNameCache[agentID]; ok {
-			return name
-		}
-		if ag, err := s.store.GetAgent(ctx, agentID); err == nil && ag != nil {
-			name := agentDisplayName(ag)
-			interpreterNameCache[agentID] = name
-			if name != "" {
+		if ag := scope.agentsByID[agentID]; ag != nil {
+			if name := agentDisplayName(ag); name != "" {
 				return name
 			}
-		} else {
-			interpreterNameCache[agentID] = fallback
 		}
 		return fallback
 	}

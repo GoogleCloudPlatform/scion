@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1160,4 +1161,150 @@ func TestProjectDecisions_EqualTimestampCursorTieBreak(t *testing.T) {
 		assert.Greater(t, gotMadeAnsIDs[i-1], gotMadeAnsIDs[i], "tab=made equal created_at tie-breaks by answerId DESC")
 	}
 	assert.ElementsMatch(t, madeAnswerIDs, gotMadeAnsIDs)
+}
+
+type agentLookupCountingStore struct {
+	store.Store
+	getAgentCalls atomic.Int64
+	batchCalls    atomic.Int64
+}
+
+func (s *agentLookupCountingStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	s.getAgentCalls.Add(1)
+	return s.Store.GetAgent(ctx, id)
+}
+
+func (s *agentLookupCountingStore) GetAgentsByIDsIncludingDeleted(ctx context.Context, ids []string) (map[string]*store.Agent, error) {
+	s.batchCalls.Add(1)
+	return s.Store.GetAgentsByIDsIncludingDeleted(ctx, ids)
+}
+
+func TestProjectDecisions_BatchAgentLookupsNoNPlusOne(t *testing.T) {
+	srv, rawStore, alice, bob, project, counting, _ := setupDemoPolicyTestWithFault(t, func(inner store.Store, _ *storeFaultSwitch) *agentLookupCountingStore {
+		return &agentLookupCountingStore{Store: inner}
+	})
+	f := newChoicesFixtureOn(t, srv, rawStore, alice, bob, project)
+	setProjectDecisionsExperiments(t, f.srv, true, true)
+	ctx := context.Background()
+	basePath := "/api/v1/projects/" + f.project.ID + "/decisions"
+
+	conv, err := f.store.GetConversationByExternalRef(ctx, "native", "thread:"+f.project.ID+":"+f.topicID)
+	require.NoError(t, err)
+
+	// Create 3 additional agents:
+	// 1. softAsker: asks a pending prompt, then is soft-deleted (renamed to "Soft Asker Live Name" before soft-delete).
+	// 2. hardAsker: asks a pending DM prompt to Bob, then is hard-deleted (stored name "Hard Asker Stored").
+	// 3. interpOnlyBot: never asks any decision itself, but records an interpreted answer on f.agent's prompt!
+	softAsker := &store.Agent{
+		ID: api.NewUUID(), Slug: "batch-soft-asker", Name: "Soft Asker Live Name",
+		ProjectID: f.project.ID, OwnerID: f.alice.ID, CreatedBy: f.alice.ID, Ancestry: []string{f.alice.ID},
+		Phase: string(state.PhaseRunning), MessageMode: store.MessageModeNone,
+	}
+	hardAsker := &store.Agent{
+		ID: api.NewUUID(), Slug: "batch-hard-asker", Name: "Hard Asker Stored",
+		ProjectID: f.project.ID, OwnerID: f.bob.ID, CreatedBy: f.bob.ID, Ancestry: []string{f.bob.ID},
+		Phase: string(state.PhaseRunning), MessageMode: store.MessageModeProject,
+	}
+	interpOnlyBot := &store.Agent{
+		ID: api.NewUUID(), Slug: "batch-interp-only", Name: "Interpreter Only Bot",
+		ProjectID: f.project.ID, OwnerID: f.bob.ID, CreatedBy: f.bob.ID, Ancestry: []string{f.bob.ID},
+		Phase: string(state.PhaseRunning), MessageMode: store.MessageModeProject,
+	}
+	for _, a := range []*store.Agent{softAsker, hardAsker, interpOnlyBot} {
+		require.NoError(t, f.store.CreateAgent(ctx, a))
+	}
+
+	// Prompt 1 (by f.agent) + interpreted answer recorded by f.agent, then point
+	// interpreted_by_agent_id at interpOnlyBot (an agent that never asked any
+	// decision itself) to exercise the defensive missingInterpreterIDs batch path.
+	_, resLive := f.topicPrompt(t, `[{"id":"b-live","question":"Live asker?","choices":["yes","no"]}]`, false)
+	srcMsgID := api.NewUUID()
+	require.NoError(t, f.store.CreateMessage(ctx, &store.Message{
+		ID: srcMsgID, ProjectID: f.project.ID, Sender: "user:" + f.bob.ID, SenderID: f.bob.ID,
+		Recipient: "chat", ThreadID: f.topicID, ConversationID: conv.ID, Type: messages.TypeChat, Channel: "web", Msg: "yes", CreatedAt: time.Now().UTC(),
+	}))
+	interpRes, err := f.store.RecordInterpretedAnswers(ctx, &store.RecordInterpretedInput{
+		InterpretedByAgentID: f.agent.ID,
+		SourceMessageID:      srcMsgID,
+		AnsweredByUserID:     f.bob.ID,
+		AnsweredByName:       f.bob.DisplayName,
+		AnsweredByEmail:      f.bob.Email,
+		Surface:              store.DecisionSurfaceNative,
+		Answers:              []store.InterpretedAnswerPair{{DecisionRowID: resLive.Decisions[0].RowID, ChoiceID: "1"}},
+		ResponseMessage: &store.Message{
+			ID: api.NewUUID(), ProjectID: f.project.ID, Sender: "agent:" + f.agent.Slug, SenderID: f.agent.ID,
+			Recipient: "chat", ThreadID: f.topicID, ConversationID: conv.ID, Channel: "web", CreatedAt: time.Now().UTC(),
+		},
+		FormatMessage: func(_ []store.InterpretedFormattedItem) string { return "interpreted" },
+	})
+	require.NoError(t, err)
+	require.Len(t, interpRes.Answers, 1)
+	provider, ok := rawStore.(testRetentionProvider)
+	require.True(t, ok)
+	_, err = provider.DB().ExecContext(ctx, `UPDATE decision_answers SET interpreted_by_agent_id = ? WHERE id = ?`, interpOnlyBot.ID, interpRes.Answers[0].ID)
+	require.NoError(t, err)
+
+	// Prompt 2 (by softAsker, stored with empty asker_agent_name so batch lookup populates "Soft Asker Live Name"), then soft-deleted.
+	decsSoft, err := messages.NormalizeDecisions("choices", decisionInputs(t, `[{"id":"b-soft","question":"Soft asker?","choices":["yes","no"]}]`))
+	require.NoError(t, err)
+	_, err = f.store.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+		Message: &store.Message{
+			ID: api.NewUUID(), ProjectID: f.project.ID, Sender: "agent:" + softAsker.Slug, SenderID: softAsker.ID,
+			Recipient: "chat", ThreadID: f.topicID, ConversationID: conv.ID, Channel: "web", CreatedAt: time.Now().UTC(),
+		},
+		Intro: "Soft", AskerAgentID: softAsker.ID, AskerAgentName: "", Decisions: decsSoft,
+	})
+	require.NoError(t, err)
+	now := time.Now().UTC()
+	_, err = f.store.UpdateAgentDeletion(ctx, softAsker.ID, store.DeletionPredicate{}, store.DeletionFields{DeletedAt: &now})
+	require.NoError(t, err)
+
+	// Prompt 3 (DM to Bob by hardAsker), then hard-deleted.
+	dmHardKey, err := messages.DMConversationKey("agent", hardAsker.ID, "user", f.bob.ID)
+	require.NoError(t, err)
+	decsHard, err := messages.NormalizeDecisions("choices", decisionInputs(t, `[{"id":"b-hard","question":"Hard asker?","choices":["yes","no"]}]`))
+	require.NoError(t, err)
+	_, err = f.store.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+		Message: &store.Message{
+			ID: api.NewUUID(), ProjectID: f.project.ID, Sender: "agent:" + hardAsker.Slug, SenderID: hardAsker.ID,
+			Recipient: "user:" + f.bob.ID, ThreadID: dmHardKey, Channel: "web", CreatedAt: time.Now().UTC(),
+		},
+		Intro: "Hard", AskerAgentID: hardAsker.ID, AskerAgentName: hardAsker.Name, Decisions: decsHard,
+	})
+	require.NoError(t, err)
+	require.NoError(t, f.store.DeleteAgent(ctx, hardAsker.ID))
+
+	// 1. limit=0 badge probe: 0 GetAgent calls, 1 batch GetAgentsByIDsIncludingDeleted call across all 3 askers!
+	counting.getAgentCalls.Store(0)
+	counting.batchCalls.Store(0)
+	zeroResp := decodePendingDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, basePath+"?tab=pending&limit=0", nil))
+	assert.Equal(t, int64(0), counting.getAgentCalls.Load(), "limit=0 must issue zero per-agent GetAgent calls")
+	assert.Equal(t, int64(1), counting.batchCalls.Load(), "limit=0 batch-loads distinct asking agents once")
+	assert.Equal(t, ProjectDecisionCounts{WaitingOnYou: 3, WaitingOnOthers: 0}, zeroResp.Counts)
+
+	// 2. tab=pending: 0 GetAgent calls, 1 batch call, and live + soft-deleted + hard-deleted names/statuses all resolve!
+	counting.getAgentCalls.Store(0)
+	counting.batchCalls.Store(0)
+	pendingResp := decodePendingDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, basePath+"?tab=pending&limit=20", nil))
+	assert.Equal(t, int64(0), counting.getAgentCalls.Load(), "tab=pending must issue zero per-agent GetAgent calls")
+	assert.Equal(t, int64(1), counting.batchCalls.Load(), "tab=pending batch-loads all asking agents in one call")
+	require.Len(t, pendingResp.Prompts, 3)
+	byKey := make(map[string]ProjectDecisionPromptView)
+	for _, p := range pendingResp.Prompts {
+		byKey[p.Decisions[0].Key] = p
+	}
+	assert.Equal(t, "Soft Asker Live Name", byKey["b-soft"].AskerAgentName, "soft-deleted agent resolves name via GetAgentsByIDsIncludingDeleted")
+	assert.True(t, byKey["b-soft"].CanAnswer, "soft-deleted restrictive asker is treated as gone/answerable")
+	assert.Equal(t, "Hard Asker Stored", byKey["b-hard"].AskerAgentName, "hard-deleted agent falls back to stored asker_agent_name")
+	assert.False(t, byKey["b-hard"].ConversationAvailable, "hard-deleted DM agent marks conversationAvailable=false")
+
+	// 3. tab=made: 0 GetAgent calls, 2 batch calls (1 for asking agents + 1 for interpreter-only agent), resolving InterpretedByAgentName!
+	counting.getAgentCalls.Store(0)
+	counting.batchCalls.Store(0)
+	madeResp := decodeMadeDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, basePath+"?tab=made&limit=20", nil))
+	assert.Equal(t, int64(0), counting.getAgentCalls.Load(), "tab=made must issue zero per-agent GetAgent calls")
+	assert.Equal(t, int64(2), counting.batchCalls.Load(), "tab=made batch-loads asking agents + missing interpreter agents")
+	require.Len(t, madeResp.Entries, 1)
+	assert.Equal(t, interpOnlyBot.ID, madeResp.Entries[0].InterpretedByAgentID)
+	assert.Equal(t, "Interpreter Only Bot", madeResp.Entries[0].InterpretedByAgentName)
 }
