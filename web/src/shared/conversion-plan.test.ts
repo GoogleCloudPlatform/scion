@@ -108,8 +108,8 @@ describe('conversion plan helpers', () => {
   it('instanceRows: shows Region for a proposed Cloud Run instance', () => {
     const cr: RuntimeTargetPresentation = {
       schemaVersion: 1,
-      key: 'cloudrun-myproj-us-central1',
-      name: 'cloudrun-myproj-us-central1',
+      key: 'cloudrun-us-central1',
+      name: 'cloudrun-us-central1',
       target: { type: 'cloudrun', region: 'us-central1' },
     };
     expect(instanceRows(cr)).toEqual([

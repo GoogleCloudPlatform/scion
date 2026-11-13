@@ -429,12 +429,12 @@ describe('scion-broker-area-conversion-plan', () => {
         instances: [
           {
             schemaVersion: 1,
-            key: 'cloudrun-myproj-us-central1',
-            name: 'cloudrun-myproj-us-central1',
+            key: 'cloudrun-us-central1',
+            name: 'cloudrun-us-central1',
             target: { type: 'cloudrun', region: 'us-central1' },
           },
         ],
-        profileMap: { 'cr-ok': 'cloudrun-myproj-us-central1' },
+        profileMap: { 'cr-ok': 'cloudrun-us-central1' },
         findings: [
           {
             code: 'flat_target_operator_input_required',
@@ -464,7 +464,7 @@ describe('scion-broker-area-conversion-plan', () => {
       'missing or invalid'
     );
     const mapText = el.shadowRoot!.querySelector('.profile-map')?.textContent ?? '';
-    expect(mapText).toContain('cloudrun-myproj-us-central1');
+    expect(mapText).toContain('cloudrun-us-central1');
     expect(mapText).toContain('flat_target_field_required');
   });
 });

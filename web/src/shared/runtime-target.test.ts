@@ -18,6 +18,7 @@ import { describe, it, expect } from 'vitest';
 
 import {
   presentationRows,
+  runtimeTargetLabel,
   runtimeTargetRows,
   safeToEvictLabel,
   type DisplayRow,
@@ -61,6 +62,16 @@ describe('runtime target rows', () => {
       { label: 'Display name', value: 'Cloud Run' },
       { label: 'Region', value: 'us-central1' },
     ]);
+    // Broker registration defaults an unset display_name to target.type;
+    // runtimeTargetLabel omits displayName when it repeats the type label.
+    expect(
+      runtimeTargetLabel({ runtimeTarget: { id: 'rt-d', type: 'docker', displayName: 'docker' } })
+    ).toBe('docker');
+    expect(
+      runtimeTargetLabel({
+        runtimeTarget: { id: 'rt-k', type: 'kubernetes', displayName: 'kubernetes' },
+      })
+    ).toBe('kubernetes');
   });
 
   it('renders every published field, env by key only', () => {

@@ -182,10 +182,12 @@ export function runtimeTargetLabel(broker: ClassifiableBroker): string {
   if (!target) return '';
   const typeLabel = target.type === 'cloudrun' ? 'Cloud Run' : target.type;
   const parts = [typeLabel];
+  // Broker registration defaults an unset display_name to target.type; omit
+  // displayName when it merely repeats the raw type or formatted type label.
   if (
     target.displayName &&
-    target.displayName !== typeLabel &&
-    !(target.type === 'cloudrun' && target.displayName === 'cloudrun')
+    target.displayName !== target.type &&
+    target.displayName !== typeLabel
   ) {
     parts.push(target.displayName);
   }
