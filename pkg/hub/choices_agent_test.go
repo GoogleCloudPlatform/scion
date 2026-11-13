@@ -355,6 +355,12 @@ func TestAgentDecisions_InterpretedSingleAndMultiPromptPartialSet(t *testing.T) 
 	assert.Equal(t, pSet.MessageID, sseSet.Answers[0].PromptMessageID)
 	assert.Equal(t, pSet.MessageID, sseSet.Answers[1].PromptMessageID)
 	assert.Equal(t, pExtra.MessageID, sseSet.Answers[2].PromptMessageID)
+	for i, a := range sseSet.Answers {
+		assert.Equal(t, f.bob.ID, a.AnsweredByUserID, "sseSet[%d]", i)
+		assert.Equal(t, f.bob.DisplayName, a.AnsweredByName, "sseSet[%d]", i)
+		assert.Equal(t, f.agent.ID, a.InterpretedByAgentID, "sseSet[%d]", i)
+		assert.Equal(t, replyBatch.ID, a.SourceMessageID, "sseSet[%d]", i)
+	}
 
 	// Verify chat history hydration also omits envelope PromptMessageID and matches canonical order.
 	histResp := &chatHistoryResponse{Messages: []store.Message{*batchMsg}}

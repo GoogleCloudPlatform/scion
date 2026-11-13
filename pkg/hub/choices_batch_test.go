@@ -742,6 +742,21 @@ func TestChoiceResponseSetView_AttributionAndOutcomes(t *testing.T) {
 		assert.Empty(t, set.Answers[2].PreviousChoiceLabel, source)
 	}
 
+	// Set prompt DecisionViews carry PreviousChoiceLabel on both immediate
+	// submit and history reload.
+	for source, decs := range map[string][]DecisionView{
+		"submit":  out.Decisions,
+		"history": h.MessageDecisions[msg.ID],
+	} {
+		require.Len(t, decs, 3, source)
+		require.NotNil(t, decs[0].Decision, source)
+		assert.Empty(t, decs[0].Decision.PreviousChoiceLabel, source)
+		require.NotNil(t, decs[1].Decision, source)
+		assert.Equal(t, "Extend", decs[1].Decision.PreviousChoiceLabel, source)
+		require.NotNil(t, decs[2].Decision, source)
+		assert.Empty(t, decs[2].Decision.PreviousChoiceLabel, source)
+	}
+
 	// Multi-prompt interpreted batch omits top-level promptMessageId while
 	// keeping per-answer promptMessageId, interpretedByAgentId, and sourceMessageId.
 	prompts := map[string]*store.Decision{

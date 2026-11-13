@@ -69,9 +69,10 @@ type AnswerView struct {
 	ResponseMessageID    string `json:"responseMessageId"`
 	// BatchID is set on every answer of one set submit; MatchedDefault when
 	// the answer is the decision's recommended choice (design v5 5.2).
-	BatchID        string    `json:"batchId,omitempty"`
-	MatchedDefault bool      `json:"matchedDefault,omitempty"`
-	At             time.Time `json:"at"`
+	BatchID             string    `json:"batchId,omitempty"`
+	MatchedDefault      bool      `json:"matchedDefault,omitempty"`
+	PreviousChoiceLabel string    `json:"previousChoiceLabel,omitempty"`
+	At                  time.Time `json:"at"`
 }
 
 // ChoicePromptView is what a choice-prompt row gains in history and SSE: the
@@ -175,6 +176,7 @@ func answerView(a *store.DecisionAnswer) *AnswerView {
 // decisionView converts a stored decision. replacedBy, when the decision is
 // replaced, is the row that replaced it (nil when it could not be read).
 func decisionView(d *store.Decision, replacedBy *store.Decision) DecisionView {
+	eff := d.EffectiveAnswer()
 	v := DecisionView{
 		RowID:           d.ID,
 		MessageID:       d.MessageID,
@@ -187,7 +189,10 @@ func decisionView(d *store.Decision, replacedBy *store.Decision) DecisionView {
 		Question:        d.Question,
 		DefaultChoiceID: d.DefaultChoiceID,
 		Choices:         d.Choices,
-		Decision:        answerView(d.EffectiveAnswer()),
+		Decision:        answerView(eff),
+	}
+	if v.Decision != nil {
+		v.Decision.PreviousChoiceLabel = previousChoiceLabel(eff, d)
 	}
 	if v.Choices == nil {
 		v.Choices = []messages.Choice{}
