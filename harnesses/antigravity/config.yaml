@@ -39,10 +39,10 @@ env_template:
   SCION_AGENT_NAME: "{{ .AgentName }}"
 
 model_aliases:
-  small: "Gemini 3.1 Flash Lite"
-  medium: "Gemini 3.8 Flash (Medium)"
-  large: "Gemini 4 Carbon (Medium)"
-  extra-large: "Gemini 4 Carbon (High)"
+  small: "gemini-4-hydrogen-low"
+  medium: "gemini-4-hydrogen-medium"
+  large: "gemini-4-carbon-medium"
+  extra-large: "gemini-4-carbon-high"
 
 # SCION_THINKING_LEVEL (0-100) -> `agy --effort <value>` in agy-wrapper.sh.
 # Applied by scion_harness.resolve_thinking in provision.py. Each level maps
