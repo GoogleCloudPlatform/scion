@@ -124,17 +124,30 @@ func hostEvidence(globalDir string, host colocatedHost, source string, launched 
 	return ev
 }
 
-// planHostModeLine is the human --plan line: the detected host mode, or
-// that --host-mode is required.
-func planHostModeLine(globalDir string) string {
+// planHostMode returns the fixed host-mode token (`colocated`, `remote`, or
+// `unknown`) for `--plan` JSON and human output (ptone/scion#7627). Only
+// compile-time constants are returned, so no path, endpoint, or settings value
+// can ever leak through it.
+func planHostMode(globalDir string) string {
 	host, err := convertDetectHost(globalDir)
 	switch {
 	case err != nil:
-		return "Host mode: unknown: --host-mode required"
+		return brokerconvert.HostModeUnknown
 	case host.Colocated:
-		return "Host mode: colocated"
+		return brokerconvert.HostModeColocated
 	default:
-		return "Host mode: remote"
+		return brokerconvert.HostModeRemote
+	}
+}
+
+// planHostModeLine is the human --plan line: the detected host mode, or
+// that --host-mode is required.
+func planHostModeLine(globalDir string) string {
+	switch mode := planHostMode(globalDir); mode {
+	case brokerconvert.HostModeColocated, brokerconvert.HostModeRemote:
+		return "Host mode: " + mode
+	default:
+		return "Host mode: unknown: --host-mode required"
 	}
 }
 

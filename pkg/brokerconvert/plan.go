@@ -30,6 +30,17 @@ import (
 )
 
 // SchemaVersion is the version of the JSON plan document.
+//
+// Schema evolution decision (ptone/scion#7627): adding Plan.HostMode
+// (`hostMode,omitempty`) stays within SchemaVersion 1 rather than bumping to 2:
+//   - Every existing field name, type, nullability, and meaning is unchanged,
+//     and standard JSON consumers ignore unknown optional fields.
+//   - Matches the package's established schema-version-1 additive convention
+//     for Report.HostMode and Journal co-located fields (see
+//     journal_colocated_fields_test.go), avoiding gratuitous breakage of
+//     existing schemaVersion == 1 readers and golden fixtures.
+//   - Hub-published api.ConversionPlanPresentation (Presentation) remains
+//     unchanged and never carries host-local daemon launch state.
 const SchemaVersion = 1
 
 // TipNote heads every plan: the plan proposes, it never applies, and it
@@ -89,8 +100,13 @@ type Input struct {
 // Plan is the plan document. Its JSON field names are part of the CLI
 // contract (schemaVersion 1).
 type Plan struct {
-	SchemaVersion  int           `json:"schemaVersion"`
-	TipNote        string        `json:"tipNote"`
+	SchemaVersion int    `json:"schemaVersion"`
+	TipNote       string `json:"tipNote"`
+	// HostMode is the detected host mode for `scion runtime-broker convert --plan`
+	// (HostModeColocated, HostModeRemote, or HostModeUnknown when --host-mode
+	// will be required on --apply/--rollback; omitted when BuildLocal runs
+	// without host detection). Additive under schemaVersion 1 (ptone/scion#7627).
+	HostMode       string        `json:"hostMode,omitempty"`
 	LegacyBrokerID string        `json:"legacyBrokerId,omitempty"`
 	LegacyBroker   *LegacyBroker `json:"legacyBroker,omitempty"`
 	// Instances are the proposed instances in their publishable form

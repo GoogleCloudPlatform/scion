@@ -541,12 +541,16 @@ func (r *run) removeInstanceCredentials(ce *ColocatedEnv, key string) error {
 	return nil
 }
 
-// Host modes and their sources, as the journal records them.
+// Host modes and their sources, as the journal and plan record them.
 const (
 	HostModeColocated = "colocated"
 	HostModeRemote    = "remote"
-	HostModeDetected  = "detected"
-	HostModeAsserted  = "asserted"
+	// HostModeUnknown is Plan.HostMode when --plan cannot determine the host
+	// mode from a saved daemon launch (--host-mode is then required on
+	// --apply or --rollback).
+	HostModeUnknown  = "unknown"
+	HostModeDetected = "detected"
+	HostModeAsserted = "asserted"
 	// HostModeJournal is HostEvidence.Source when an earlier apply bound the
 	// mode.
 	HostModeJournal = "journal"
