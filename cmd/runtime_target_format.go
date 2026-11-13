@@ -78,6 +78,7 @@ func writeRuntimeTargetSections(w io.Writer, target *api.RuntimeTargetDescriptor
 	line("Display name", target.DisplayName)
 	if p != nil && p.Target != nil {
 		line("Namespace", p.Target.Namespace)
+		line("Region", p.Target.Region)
 	}
 
 	_, _ = fmt.Fprintln(w)

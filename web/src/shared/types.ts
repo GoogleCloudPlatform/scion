@@ -1330,6 +1330,7 @@ export interface PresentedTarget {
   type: string;
   displayName?: string;
   namespace?: string;
+  region?: string;
   gke?: boolean;
   priorityClassName?: string;
   sharedDirStorageClass?: string;

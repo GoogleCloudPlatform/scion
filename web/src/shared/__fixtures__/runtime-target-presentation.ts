@@ -77,6 +77,11 @@ export function presentationWithNeverFields(): RuntimeTargetPresentation {
     kubernetesServiceAccountMappings: { 'NEVER-gsa': 'NEVER-ksa' },
     kubernetesBlockServiceAccount: 'NEVER-block-sa',
     homeStorageLeaf: 'NEVER-leaf',
+    projectId: 'NEVER-project-id',
+    serviceAccount: 'NEVER-sa@example.iam.gserviceaccount.com',
+    network: 'NEVER-network',
+    subnetwork: 'NEVER-subnetwork',
+    credentialsFile: '/NEVER-credentials.json',
   });
   const d = p.agentDefaults;
   const vols = d.volumes as Record<string, unknown>[];

@@ -421,4 +421,50 @@ describe('scion-broker-area-conversion-plan', () => {
       )
     ).toHaveLength(0);
   });
+
+  it('shows Cloud Run proposed instance region and CR11 finding texts', async () => {
+    planBody = response({
+      plan: {
+        schemaVersion: 1,
+        instances: [
+          {
+            schemaVersion: 1,
+            key: 'cloudrun-us-central1',
+            name: 'cloudrun-us-central1',
+            target: { type: 'cloudrun', region: 'us-central1' },
+          },
+        ],
+        profileMap: { 'cr-ok': 'cloudrun-us-central1' },
+        findings: [
+          {
+            code: 'flat_target_operator_input_required',
+            severity: 'notice',
+            path: 'server.broker.instances[0].runtime_target.credentials_file',
+            profiles: ['cr-ok'],
+          },
+          {
+            code: 'flat_target_field_required',
+            severity: 'blocking',
+            path: 'runtimes.cr-missing.cloudrun.service_account',
+            profiles: ['cr-missing'],
+          },
+        ],
+      },
+    });
+    const el = await mount(LEGACY);
+    const instDl = el.shadowRoot!.querySelector('.plan-instance dl.runtime-target-rows')!;
+    expect(instDl.textContent).toContain('Region');
+    expect(instDl.textContent).toContain('us-central1');
+    const findingRows = Array.from(el.shadowRoot!.querySelectorAll('.findings tr.finding'));
+    expect(findingRows).toHaveLength(2);
+    expect(findingRows[0].querySelector('.finding-text')?.textContent).toContain(
+      'credentials_file'
+    );
+    expect(findingRows[1].querySelector('.finding-text')?.textContent).toContain(
+      'missing or invalid'
+    );
+    const mapText = el.shadowRoot!.querySelector('.profile-map')?.textContent ?? '';
+    expect(mapText).toContain('cloudrun-us-central1');
+    expect(mapText).toContain('flat_target_field_required');
+  });
 });

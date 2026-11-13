@@ -19,6 +19,7 @@ import { describe, it, expect } from 'vitest';
 import {
   capacityOutcomeLabel,
   findingText,
+  instanceRows,
   profileMapRows,
   profileRefLabel,
   splitGroups,
@@ -95,11 +96,27 @@ describe('conversion plan helpers', () => {
       'legacy_field_removed',
       'unknown_settings_key',
       'field_not_valid_for_target_type',
+      'flat_target_field_required',
+      'flat_target_operator_input_required',
       'plan_truncated',
     ]) {
       expect(findingText(code)).not.toContain('scion runtime-broker convert --plan');
     }
     expect(findingText('something_new')).toContain('scion runtime-broker convert --plan');
+  });
+
+  it('instanceRows: shows Region for a proposed Cloud Run instance', () => {
+    const cr: RuntimeTargetPresentation = {
+      schemaVersion: 1,
+      key: 'cloudrun-us-central1',
+      name: 'cloudrun-us-central1',
+      target: { type: 'cloudrun', region: 'us-central1' },
+    };
+    expect(instanceRows(cr)).toEqual([
+      { label: 'Type', value: 'cloudrun' },
+      { label: 'Region', value: 'us-central1' },
+      { label: 'Safe to evict', value: 'unset' },
+    ]);
   });
 
   it('labels', () => {

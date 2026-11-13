@@ -48,12 +48,10 @@ var fc4aRows = map[string]map[string]string{
 		"shared_dir_storage_backend": fc4AsIs, "shared_dir_storage_backends": fc4AsIs,
 		"home_storage_backend": fc4AsIs, "home_storage_leaf": fc4Never,
 		"node_selector": fc4AsIs, "tolerations": fc4AsIs, "runtime_class_name": fc4AsIs,
-		// Cloud Run (contract amendment P5-CR, CR8). project_id,
-		// service_account, network, subnetwork and credentials_file are
-		// never published. CR8 allows region as is; until the presentation
-		// carries a region field it is not published either, which this
-		// row records.
-		"project_id": fc4Never, "region": fc4Never, "service_account": fc4Never,
+		// Cloud Run (contract amendment P5-CR, CR8). region is published as
+		// is; project_id, service_account, network, subnetwork and
+		// credentials_file are never published.
+		"project_id": fc4Never, "region": fc4AsIs, "service_account": fc4Never,
 		"network": fc4Never, "subnetwork": fc4Never, "credentials_file": fc4Never,
 	},
 	"agent_defaults": {
@@ -277,5 +275,94 @@ func TestPresentInstance_SharesNothingWithSource(t *testing.T) {
 	}
 	if p := PresentInstance(V1RuntimeBrokerInstanceConfig{Key: "a", Name: "b"}); p.RuntimeTarget != nil || p.AgentDefaults != nil {
 		t.Fatalf("got %+v", p)
+	}
+}
+
+// TestPresentInstance_CloudRunRedaction verifies CR8: for a cloudrun target,
+// region is published as is (both in PresentInstance and on the wire via API),
+// while the five CR8 "never" fields (project_id, service_account,
+// credentials_file, network, subnetwork) are absent. For non-cloudrun targets,
+// region is never populated.
+func TestPresentInstance_CloudRunRedaction(t *testing.T) {
+	inst := V1RuntimeBrokerInstanceConfig{
+		Key:  "cr-us-central1",
+		Name: "cr us-central1",
+		RuntimeTarget: &V1RuntimeTargetConfig{
+			Type:            RuntimeTargetTypeCloudRun,
+			DisplayName:     "Cloud Run",
+			Region:          "us-central1",
+			ProjectID:       "NEVER-project-id",
+			ServiceAccount:  "NEVER-sa@example.iam.gserviceaccount.com",
+			Network:         "NEVER-network",
+			Subnetwork:      "NEVER-subnetwork",
+			CredentialsFile: "/NEVER-credentials.json",
+		},
+	}
+
+	got := PresentInstance(inst)
+	want := FlatInstancePresentation{
+		Key:  "cr-us-central1",
+		Name: "cr us-central1",
+		RuntimeTarget: &FlatRuntimeTargetPresentation{
+			Type:              RuntimeTargetTypeCloudRun,
+			DisplayName:       "Cloud Run",
+			Region:            "us-central1",
+			PlacementReported: false,
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		gj, _ := json.MarshalIndent(got, "", "  ")
+		t.Fatalf("cloudrun presentation:\n%s", gj)
+	}
+
+	wire := got.API()
+	if wire.Target == nil || wire.Target.Region != "us-central1" {
+		t.Fatalf("wire Target = %+v, want Region = us-central1", wire.Target)
+	}
+	for label, v := range map[string]any{"config": got, "wire": wire} {
+		raw, err := json.Marshal(v)
+		if err != nil {
+			t.Fatalf("%s marshal: %v", label, err)
+		}
+		if !strings.Contains(string(raw), `"region":"us-central1"`) {
+			t.Errorf("%s JSON missing region: %s", label, raw)
+		}
+		if strings.Contains(string(raw), "NEVER-") {
+			t.Errorf("%s JSON leaked a CR8 never-published value: %s", label, raw)
+		}
+		var decoded any
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			t.Fatalf("%s unmarshal: %v", label, err)
+		}
+		keys, secretKeys := map[string]bool{}, map[string]bool{}
+		collectKeys(decoded, "", keys, secretKeys)
+		for _, k := range []string{
+			"project_id", "projectId",
+			"service_account", "serviceAccount",
+			"credentials_file", "credentialsFile",
+			"network", "subnetwork",
+		} {
+			if keys[k] {
+				t.Errorf("%s JSON contains CR8 never-published key %q: %s", label, k, raw)
+			}
+		}
+	}
+
+	// Non-cloudrun targets never populate Region in PresentInstance or API().
+	for _, typ := range []string{RuntimeTargetTypeDocker, RuntimeTargetTypeKubernetes} {
+		nonCR := PresentInstance(V1RuntimeBrokerInstanceConfig{
+			Key: "k", Name: "k",
+			RuntimeTarget: &V1RuntimeTargetConfig{Type: typ, Region: "us-central1"},
+		})
+		if nonCR.RuntimeTarget.Region != "" {
+			t.Errorf("%s PresentInstance Region = %q, want empty", typ, nonCR.RuntimeTarget.Region)
+		}
+		manual := FlatInstancePresentation{
+			Key: "k", Name: "k",
+			RuntimeTarget: &FlatRuntimeTargetPresentation{Type: typ, Region: "us-central1"},
+		}.API()
+		if manual.Target.Region != "" {
+			t.Errorf("%s API() Region = %q, want empty", typ, manual.Target.Region)
+		}
 	}
 }

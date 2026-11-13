@@ -61,6 +61,38 @@ describe('isFlatBroker and runtimeTargetLabel', () => {
     expect(runtimeTargetLabel({ runtimeTarget: docker })).toBe('docker');
     expect(runtimeTargetLabel({})).toBe('');
   });
+
+  it('labels a Cloud Run flat target with Cloud Run and region when reported', () => {
+    const cr = { id: 'rt-cr', type: 'cloudrun' };
+    const crPres: RuntimeTargetPresentation = {
+      schemaVersion: 1,
+      key: 'cr-us-central1',
+      name: 'cr-us-central1',
+      target: { type: 'cloudrun', region: 'us-central1' },
+    };
+    expect(runtimeTargetLabel({ runtimeTarget: cr })).toBe('Cloud Run');
+    expect(runtimeTargetLabel({ runtimeTarget: cr, runtimeTargetPresentation: crPres })).toBe(
+      'Cloud Run · us-central1'
+    );
+    expect(
+      runtimeTargetLabel({
+        runtimeTarget: { ...cr, displayName: 'cloudrun' },
+        runtimeTargetPresentation: crPres,
+      })
+    ).toBe('Cloud Run · us-central1');
+    expect(
+      runtimeTargetLabel({
+        runtimeTarget: { ...cr, displayName: 'Cloud Run' },
+        runtimeTargetPresentation: crPres,
+      })
+    ).toBe('Cloud Run · us-central1');
+    expect(
+      runtimeTargetLabel({
+        runtimeTarget: { ...cr, displayName: 'Staging' },
+        runtimeTargetPresentation: crPres,
+      })
+    ).toBe('Cloud Run · Staging · us-central1');
+  });
 });
 
 describe('tolerationLabel', () => {

@@ -923,6 +923,7 @@ func TestFlatCloudRun_NoLocalDetailReachesHub(t *testing.T) {
 
 	pres, err := json.Marshal(config.PresentInstance(inst).API())
 	require.NoError(t, err)
+	assert.Contains(t, string(pres), `"region":"`+tg.Region+`"`, "CR8 publishes region in presentation")
 	for _, s := range append(secretish, tg.ProjectID, crNumber) {
 		assert.NotContains(t, string(pres), s, "presentation")
 		assert.NotContains(t, string(health), s, "health")
