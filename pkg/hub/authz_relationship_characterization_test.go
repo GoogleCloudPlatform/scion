@@ -107,9 +107,10 @@ func TestRelationshipCharacterization_Owner(t *testing.T) {
 		}
 	}
 
-	// Global-scoped templates: owner/user/template excludes all template.*_global
-	// twins, and templateResource omits OwnerID on global templates, so even a
-	// legacy global template row with OwnerID set grants no relationship authority.
+	// Global-scoped templates: templateResource copies OwnerID for every scope,
+	// and these assertions hold because no relationship row (including
+	// owner/user/template) carries any template.*_global twin. Even a legacy
+	// global template row with OwnerID set grants no relationship authority.
 	globalTemplate := templateResource(&store.Template{ID: tid("relchar-global-tmpl"), OwnerID: owner.ID(), CreatedBy: owner.ID(), Scope: store.TemplateScopeGlobal})
 	for _, p := range sameTypeRegistryPermissions("template") {
 		switch p.ID {

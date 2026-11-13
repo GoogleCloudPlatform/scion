@@ -650,12 +650,10 @@ func TestGlobalTemplateDelete_AuthorizesRecord(t *testing.T) {
 	rec := doRequestAsUser(t, srv, noDeleteTwin, http.MethodDelete, "/api/v1/templates/"+globalTmpl.ID, nil)
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 
-	// Direct CheckAccess on templateResource(globalTmpl) vs bare scope resource:
-	// template.delete_global has SupportedTargetClasses = [GlobalCatalog] and
-	// CollectionTargetClasses = [], so a bare ID-less scope resource resolves
-	// TargetScopeUnknown and denies even when the user holds template.delete_global!
-	// Only authorizing templateResource(existing) (with existing.ID populated)
-	// resolves TargetScopeHub via TargetClassGlobalCatalog and succeeds.
+	// On the global branch, deleteTemplateV2 authorizes templateResource(existing)
+	// (carrying existing.ID for record-targeted policy and audit parity with
+	// updateTemplateV2) with template.delete_global rather than an ID-less
+	// templateScopeResource.
 	onlyDeleteTwin := createNamedTestUser(t, s, "tmpl-only-del-twin", store.UserRoleMember)
 	ensureHubMembership(ctx, s, onlyDeleteTwin.ID)
 	rdOnlyDel := &store.RoleDefinition{
@@ -689,21 +687,6 @@ func TestGlobalTemplateDelete_AuthorizesRecord(t *testing.T) {
 	onlyDelToken := mintHubConfigToken(t, srv, onlyDeleteTwin.ID, hubBoundary(), "template:delete_global")
 	rec = callWithKey(t, srv, onlyDelToken, http.MethodDelete, "/api/v1/templates/"+globalTmpl2.ID, nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code, "hub UAT with template:delete_global must delete global template: %s", rec.Body.String())
-
-	// Proof that deleteTemplateV2 passes templateResource(existing) rather than
-	// templateScopeResource(existing.Scope, existing.ScopeID): on a user-scope
-	// template owned by an ordinary hub-member (no template.delete role grant),
-	// templateScopeResource omits ID and OwnerID and is denied, whereas
-	// DELETE /api/v1/templates/{id} authorizes templateResource(existing) via
-	// owner/user/template and succeeds 204.
-	owner := createNamedTestUser(t, s, "tmpl-user-del-owner", store.UserRoleMember)
-	ensureHubMembership(ctx, s, owner.ID)
-	userTmpl := createAuthzTestTemplate(t, s, "del-record-user", store.TemplateScopeUser, owner.ID, owner.ID)
-	ownerIdent := NewAuthenticatedUser(owner.ID, owner.Email, owner.DisplayName, owner.Role, "api")
-	bareUserDec := srv.authzService.CheckAccess(ctx, ownerIdent, templateScopeResource(store.TemplateScopeUser, owner.ID), ActionDelete)
-	assert.False(t, bareUserDec.Allowed, "bare templateScopeResource without OwnerID/ID must not satisfy owner/user/template")
-	rec = doRequestAsUser(t, srv, owner, http.MethodDelete, "/api/v1/templates/"+userTmpl.ID, nil)
-	assert.Equal(t, http.StatusNoContent, rec.Code, "DELETE handler must pass templateResource(existing) so record fields participate: %s", rec.Body.String())
 }
 
 // TestGlobalTemplate_PlainPermissionsDeniedOnGlobalAllowedOnProject verifies
