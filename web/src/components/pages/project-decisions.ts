@@ -34,6 +34,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import { repeat } from 'lit/directives/repeat.js';
 
 import type { DecisionView, PageData } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
@@ -61,7 +62,14 @@ import type {
 import { stateManager } from '../../client/state.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import { FEATURE_FLAGS_CHANGED_EVENT, projectDecisionsEnabled } from '../../utils/feature-flags.js';
-import { formatInstant, formatInstantWithZone, formatRelative } from '../../utils/time.js';
+import {
+  DISPLAY_TIMEZONE_CHANGED_EVENT,
+  effectiveTimeZone,
+  formatInstant,
+  formatInstantWithZone,
+  formatRelative,
+  parseWallClock,
+} from '../../utils/time.js';
 import '../shared/chat/chat-choices.js';
 import './not-found.js';
 
@@ -78,6 +86,42 @@ interface WaitingOnOthersItem {
 }
 
 const AVATAR_PALETTE = ['#7c3aed', '#059669', '#0284c7', '#d97706', '#e11d48', '#4f46e5'] as const;
+const DEFAULT_DECISIONS_PAGE_SIZE = 50;
+const MAX_DECISIONS_PAGE_SIZE = 200;
+
+type DecisionsLoadMode = 'reset' | 'append' | 'live';
+
+function nextCalendarDate(ymd: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd);
+  if (!match) return '';
+  const y = Number(match[1]);
+  const m = Number(match[2]);
+  const day = Number(match[3]);
+  const d = new Date(0);
+  d.setUTCFullYear(y, m - 1, day + 1);
+  d.setUTCHours(0, 0, 0, 0);
+  const ny = String(d.getUTCFullYear()).padStart(4, '0');
+  const nm = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const nd = String(d.getUTCDate()).padStart(2, '0');
+  return `${ny}-${nm}-${nd}`;
+}
+
+function dateBoundToIso(ymd: string, endOfDay: boolean): string {
+  if (!ymd) return '';
+  const zone = effectiveTimeZone();
+  if (!endOfDay) {
+    return parseWallClock(`${ymd}T00:00`, zone) || ymd;
+  }
+  const nextYmd = nextCalendarDate(ymd);
+  const nextStartIso = nextYmd ? parseWallClock(`${nextYmd}T00:00`, zone) : '';
+  if (nextStartIso) {
+    const ms = Date.parse(nextStartIso);
+    if (Number.isFinite(ms)) {
+      return new Date(ms - 1).toISOString();
+    }
+  }
+  return ymd;
+}
 
 function avatarColor(seed: string): string {
   let hash = 0;
@@ -159,7 +203,14 @@ export class ScionPageProjectDecisions extends LitElement {
   private madeGen = 0;
   private pendingAbort: AbortController | null = null;
   private madeAbort: AbortController | null = null;
+  private userAbort: AbortController | null = null;
   private liveRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingPagesLoaded = 0;
+  private pendingRefreshDeferred = false;
+  private madePagedBeyondFirst = false;
+  private madeRefreshDeferred = false;
+  private madeStale = false;
+  private routeDecodeError = false;
   private booted = false;
 
   static override styles = css`
@@ -446,6 +497,24 @@ export class ScionPageProjectDecisions extends LitElement {
       min-width: 9.5rem;
     }
 
+    .date-range-error {
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      padding: 0.55rem 0.75rem;
+      margin: 0 0 0.75rem;
+      font-size: 0.85rem;
+      color: var(--sl-color-danger-700, #b91c1c);
+      background: var(--sl-color-danger-50, #fef2f2);
+      border: 1px solid var(--sl-color-danger-200, #fecaca);
+      border-radius: var(--scion-radius, 0.5rem);
+    }
+
+    .date-range-error sl-icon {
+      color: var(--sl-color-danger-600, #dc2626);
+      flex-shrink: 0;
+    }
+
     table.log {
       width: 100%;
       border-collapse: collapse;
@@ -617,11 +686,22 @@ export class ScionPageProjectDecisions extends LitElement {
     this.scheduleLiveRefresh();
   };
 
+  private readonly boundOnTimezoneChanged = (): void => {
+    if (!this.enabled || !this.madeLoaded || (!this.filterFrom && !this.filterTo)) return;
+    if (this.hasDateRangeError) return;
+    if (this.activeTab === 'made') {
+      void this.loadMadePage({ mode: 'reset' });
+    } else {
+      this.madeStale = true;
+    }
+  };
+
   override connectedCallback(): void {
     super.connectedCallback();
     this.extractRouteState();
     this.enabled = projectDecisionsEnabled();
     window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFlagsChanged);
+    window.addEventListener(DISPLAY_TIMEZONE_CHANGED_EVENT, this.boundOnTimezoneChanged);
     stateManager.addEventListener('choice-updated', this.boundOnChoiceUpdated);
     stateManager.addEventListener('chat-message-received', this.boundOnChatMessageReceived);
     void this.bootIfEnabled();
@@ -630,6 +710,7 @@ export class ScionPageProjectDecisions extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFlagsChanged);
+    window.removeEventListener(DISPLAY_TIMEZONE_CHANGED_EVENT, this.boundOnTimezoneChanged);
     stateManager.removeEventListener('choice-updated', this.boundOnChoiceUpdated);
     stateManager.removeEventListener('chat-message-received', this.boundOnChatMessageReceived);
     this.teardownActiveLoads();
@@ -640,19 +721,31 @@ export class ScionPageProjectDecisions extends LitElement {
       clearTimeout(this.liveRefreshTimer);
       this.liveRefreshTimer = null;
     }
+    this.pendingRefreshDeferred = false;
+    this.madeRefreshDeferred = false;
     this.pendingAbort?.abort();
     this.pendingAbort = null;
     this.madeAbort?.abort();
     this.madeAbort = null;
+    this.userAbort?.abort();
+    this.userAbort = null;
   }
 
   private extractRouteState(): void {
+    this.routeDecodeError = false;
     const rawPath = this.pageData?.path || window.location.pathname + window.location.search;
     const [pathname = '', query = ''] = rawPath.split('?', 2);
     if (!this.projectId) {
       const match = pathname.match(/\/projects\/([^/]+)\/decisions/);
       if (match?.[1]) {
-        this.projectId = decodeURIComponent(match[1]);
+        try {
+          this.projectId = decodeURIComponent(match[1]);
+        } catch {
+          this.routeDecodeError = true;
+          this.error = 'Invalid project ID in URL';
+          this.initialLoading = false;
+          return;
+        }
       }
     }
     if (this.pageData?.user?.id) {
@@ -666,6 +759,11 @@ export class ScionPageProjectDecisions extends LitElement {
   private async bootIfEnabled(): Promise<void> {
     if (!this.enabled || this.booted) return;
     this.extractRouteState();
+    if (this.routeDecodeError) {
+      this.error = 'Invalid project ID in URL';
+      this.initialLoading = false;
+      return;
+    }
     if (!this.projectId) {
       this.error = 'No project ID found in URL';
       this.initialLoading = false;
@@ -682,11 +780,9 @@ export class ScionPageProjectDecisions extends LitElement {
 
     const userTask = this.currentUserId ? Promise.resolve() : this.loadCurrentUserBestEffort();
     const projectTask = this.loadProjectSummary();
-    const pendingTask = this.loadPendingPage({ reset: true, silent: false });
+    const pendingTask = this.loadPendingPage({ mode: 'reset' });
     const madeTask =
-      this.activeTab === 'made'
-        ? this.loadMadePage({ reset: true, silent: false })
-        : Promise.resolve();
+      this.activeTab === 'made' ? this.loadMadePage({ mode: 'reset' }) : Promise.resolve();
 
     await Promise.all([userTask, projectTask, pendingTask, madeTask]);
     if (this.isConnected) {
@@ -695,10 +791,14 @@ export class ScionPageProjectDecisions extends LitElement {
   }
 
   private async loadCurrentUserBestEffort(): Promise<void> {
+    this.userAbort?.abort();
+    const ac = new AbortController();
+    this.userAbort = ac;
     try {
-      const res = await apiFetch('/auth/me', { authErrors: 'caller' });
-      if (!res.ok || !this.isConnected) return;
+      const res = await apiFetch('/auth/me', { authErrors: 'caller', signal: ac.signal });
+      if (ac.signal.aborted || !res.ok || !this.isConnected) return;
       const body = (await res.json()) as { id?: string; user?: { id?: string } } | null;
+      if (ac.signal.aborted || !this.isConnected) return;
       const uid = body?.id || body?.user?.id || '';
       if (uid && !this.currentUserId) {
         this.currentUserId = uid;
@@ -709,6 +809,10 @@ export class ScionPageProjectDecisions extends LitElement {
       }
     } catch {
       // Best-effort fallback when pageData.user was not injected.
+    } finally {
+      if (this.userAbort === ac) {
+        this.userAbort = null;
+      }
     }
   }
 
@@ -739,42 +843,103 @@ export class ScionPageProjectDecisions extends LitElement {
     }
   }
 
-  private async loadPendingPage(opts: { reset: boolean; silent: boolean }): Promise<void> {
+  private promptHasWaitingOnOthers(p: ProjectDecisionPromptView): boolean {
+    return p.decisions.some(
+      (d) =>
+        Boolean(p.waitingReasons?.[d.rowId]) ||
+        (!p.waitingOnYou &&
+          d.status !== 'replaced' &&
+          !(d.status === 'decided' && d.decision?.provenance !== 'agent_interpreted'))
+    );
+  }
+
+  private async loadPendingPage(opts: { mode: DecisionsLoadMode }): Promise<void> {
     if (!this.enabled || !this.projectId) return;
+    if (opts.mode === 'live' && this.pendingLoadingMore) {
+      this.pendingRefreshDeferred = true;
+      return;
+    }
+    if (opts.mode !== 'live') {
+      this.pendingRefreshDeferred = false;
+    }
+
     const gen = ++this.pendingGen;
     this.pendingAbort?.abort();
     const ac = new AbortController();
     this.pendingAbort = ac;
 
-    const cursor = opts.reset ? undefined : this.pendingNextCursor;
-    if (!opts.reset) {
+    const cursor = opts.mode === 'append' ? this.pendingNextCursor : undefined;
+    const limit =
+      opts.mode === 'live'
+        ? Math.min(
+            MAX_DECISIONS_PAGE_SIZE,
+            Math.max(DEFAULT_DECISIONS_PAGE_SIZE, this.pendingPrompts.length)
+          )
+        : undefined;
+
+    if (opts.mode === 'append') {
       this.pendingLoadingMore = true;
     }
 
     try {
       const res = await fetchProjectPendingDecisions(this.projectId, {
         cursor,
+        limit,
         signal: ac.signal,
       });
       if (gen !== this.pendingGen || !this.isConnected) return;
       this.counts = res.counts;
-      this.pendingPrompts = opts.reset ? res.prompts : [...this.pendingPrompts, ...res.prompts];
-      this.pendingNextCursor = res.nextCursor ?? '';
+
+      if (opts.mode === 'reset') {
+        this.pendingPrompts = res.prompts;
+        this.pendingPagesLoaded = 1;
+        this.pendingNextCursor = res.nextCursor ?? '';
+      } else if (opts.mode === 'append') {
+        const existingIds = new Set(this.pendingPrompts.map((p) => p.promptMessageId));
+        const extra = res.prompts.filter((p) => !existingIds.has(p.promptMessageId));
+        this.pendingPrompts = [...this.pendingPrompts, ...extra];
+        this.pendingPagesLoaded = Math.max(2, this.pendingPagesLoaded + 1);
+        this.pendingNextCursor = res.nextCursor ?? '';
+      } else {
+        if (this.pendingPrompts.length > MAX_DECISIONS_PAGE_SIZE) {
+          const headIds = new Set(res.prompts.map((p) => p.promptMessageId));
+          const openTail = this.pendingPrompts
+            .slice(MAX_DECISIONS_PAGE_SIZE)
+            .filter(
+              (p) =>
+                !headIds.has(p.promptMessageId) &&
+                (p.waitingOnYou || this.promptHasWaitingOnOthers(p))
+            );
+          this.pendingPrompts = [...res.prompts, ...openTail];
+        } else {
+          this.pendingPrompts = res.prompts;
+          this.pendingNextCursor = res.nextCursor ?? '';
+        }
+      }
+
       this.mergeFacets(res.agents, res.answerers);
-      if (!opts.silent) {
+      if (opts.mode !== 'live') {
         this.error = null;
       }
     } catch (err) {
       if (ac.signal.aborted || gen !== this.pendingGen || !this.isConnected) return;
-      if (!opts.silent) {
+      if (opts.mode !== 'live') {
         this.error = err instanceof Error ? err.message : 'Failed to load decisions';
       }
     } finally {
       if (gen === this.pendingGen) {
         this.pendingLoadingMore = false;
         if (this.pendingAbort === ac) this.pendingAbort = null;
+        if (this.pendingRefreshDeferred && this.isConnected && this.enabled) {
+          this.pendingRefreshDeferred = false;
+          void this.loadPendingPage({ mode: 'live' });
+        }
       }
     }
+  }
+
+  private get hasDateRangeError(): boolean {
+    return Boolean(this.filterFrom && this.filterTo && this.filterFrom > this.filterTo);
   }
 
   private currentMadeFilter(): MadeDecisionsFilter {
@@ -782,8 +947,8 @@ export class ScionPageProjectDecisions extends LitElement {
       agent: this.filterAgent,
       user: this.filterUser,
       provenance: this.filterProvenance,
-      from: this.filterFrom,
-      to: this.filterTo,
+      from: dateBoundToIso(this.filterFrom, false),
+      to: dateBoundToIso(this.filterTo, true),
     };
   }
 
@@ -797,18 +962,29 @@ export class ScionPageProjectDecisions extends LitElement {
     return n;
   }
 
-  private async loadMadePage(opts: { reset: boolean; silent: boolean }): Promise<void> {
-    if (!this.enabled || !this.projectId) return;
+  private async loadMadePage(opts: { mode: DecisionsLoadMode }): Promise<void> {
+    if (!this.enabled || !this.projectId || this.hasDateRangeError) return;
+    if (opts.mode === 'live' && this.madeLoadingMore) {
+      this.madeRefreshDeferred = true;
+      return;
+    }
+    if (opts.mode !== 'live') {
+      this.madeRefreshDeferred = false;
+    }
+    this.madeStale = false;
+
     const gen = ++this.madeGen;
     this.madeAbort?.abort();
     const ac = new AbortController();
     this.madeAbort = ac;
 
-    const cursor = opts.reset ? undefined : this.madeNextCursor;
-    if (opts.reset && !opts.silent) {
+    const cursor = opts.mode === 'append' ? this.madeNextCursor : undefined;
+    const limit = opts.mode === 'live' ? DEFAULT_DECISIONS_PAGE_SIZE : undefined;
+
+    if (opts.mode === 'reset') {
       this.madeLoading = true;
       this.madeError = null;
-    } else if (!opts.reset) {
+    } else if (opts.mode === 'append') {
       this.madeLoadingMore = true;
       this.madeError = null;
     }
@@ -816,18 +992,38 @@ export class ScionPageProjectDecisions extends LitElement {
     try {
       const res = await fetchProjectMadeDecisions(this.projectId, this.currentMadeFilter(), {
         cursor,
+        limit,
         signal: ac.signal,
       });
       if (gen !== this.madeGen || !this.isConnected) return;
       this.counts = res.counts;
-      this.madeEntries = opts.reset ? res.entries : [...this.madeEntries, ...res.entries];
-      this.madeNextCursor = res.nextCursor ?? '';
       this.madeLoaded = true;
       this.mergeFacets(res.agents, res.answerers);
       this.madeError = null;
+
+      if (opts.mode === 'reset') {
+        this.madeEntries = res.entries;
+        this.madeNextCursor = res.nextCursor ?? '';
+        this.madePagedBeyondFirst = false;
+      } else if (opts.mode === 'append') {
+        const existingIds = new Set(this.madeEntries.map((e) => e.answerId));
+        const extra = res.entries.filter((e) => !existingIds.has(e.answerId));
+        this.madeEntries = [...this.madeEntries, ...extra];
+        this.madeNextCursor = res.nextCursor ?? '';
+        this.madePagedBeyondFirst = true;
+      } else {
+        const incomingById = new Map(res.entries.map((e) => [e.answerId, e]));
+        const existingIds = new Set(this.madeEntries.map((e) => e.answerId));
+        const prepended = res.entries.filter((e) => !existingIds.has(e.answerId));
+        const updatedExisting = this.madeEntries.map((e) => incomingById.get(e.answerId) ?? e);
+        this.madeEntries = [...prepended, ...updatedExisting];
+        if (!this.madePagedBeyondFirst && !this.madeNextCursor) {
+          this.madeNextCursor = res.nextCursor ?? '';
+        }
+      }
     } catch (err) {
       if (ac.signal.aborted || gen !== this.madeGen || !this.isConnected) return;
-      if (!opts.silent) {
+      if (opts.mode !== 'live') {
         this.madeError = err instanceof Error ? err.message : 'Failed to load decision log';
       }
     } finally {
@@ -835,6 +1031,15 @@ export class ScionPageProjectDecisions extends LitElement {
         this.madeLoading = false;
         this.madeLoadingMore = false;
         if (this.madeAbort === ac) this.madeAbort = null;
+        if (
+          this.madeRefreshDeferred &&
+          this.isConnected &&
+          this.enabled &&
+          !this.hasDateRangeError
+        ) {
+          this.madeRefreshDeferred = false;
+          void this.loadMadePage({ mode: 'live' });
+        }
       }
     }
   }
@@ -896,9 +1101,13 @@ export class ScionPageProjectDecisions extends LitElement {
     this.liveRefreshTimer = setTimeout(() => {
       this.liveRefreshTimer = null;
       if (!this.isConnected || !this.enabled || !this.projectId) return;
-      void this.loadPendingPage({ reset: true, silent: true });
-      if (this.madeLoaded || this.activeTab === 'made') {
-        void this.loadMadePage({ reset: true, silent: true });
+      void this.loadPendingPage({ mode: 'live' });
+      if (this.activeTab === 'made') {
+        if (!this.hasDateRangeError) {
+          void this.loadMadePage({ mode: this.madeLoaded ? 'live' : 'reset' });
+        }
+      } else if (this.madeLoaded) {
+        this.madeStale = true;
       }
     }, 60);
   }
@@ -923,8 +1132,13 @@ export class ScionPageProjectDecisions extends LitElement {
       group.show(next);
     }
 
-    if (next === 'made' && !this.madeLoaded && !this.madeLoading) {
-      void this.loadMadePage({ reset: true, silent: false });
+    if (next === 'made' && !this.madeLoading && !this.hasDateRangeError) {
+      if (!this.madeLoaded) {
+        void this.loadMadePage({ mode: 'reset' });
+      } else if (this.madeStale) {
+        this.madeStale = false;
+        void this.loadMadePage({ mode: 'live' });
+      }
     }
   }
 
@@ -970,7 +1184,17 @@ export class ScionPageProjectDecisions extends LitElement {
 
   private onFilterChanged(): void {
     this.madeNextCursor = '';
-    void this.loadMadePage({ reset: true, silent: false });
+    this.madePagedBeyondFirst = false;
+    this.madeRefreshDeferred = false;
+    if (this.hasDateRangeError) {
+      this.madeAbort?.abort();
+      this.madeAbort = null;
+      this.madeLoading = false;
+      this.madeLoadingMore = false;
+      this.madeError = null;
+      return;
+    }
+    void this.loadMadePage({ mode: 'reset' });
   }
 
   private clearFilters(): void {
@@ -1053,7 +1277,7 @@ export class ScionPageProjectDecisions extends LitElement {
           <sl-icon name="exclamation-triangle"></sl-icon>
           <h2>Failed to Load Decisions</h2>
           <div class="error-details">${this.error}</div>
-          <sl-button variant="primary" @click=${() => this.retryAll()}>
+          <sl-button variant="primary" data-retry-pending @click=${() => this.retryAll()}>
             <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
             Retry
           </sl-button>
@@ -1138,7 +1362,11 @@ export class ScionPageProjectDecisions extends LitElement {
               </p>
             </div>
           `
-        : waitingPrompts.map((p) => this.renderPromptCard(p))}
+        : repeat(
+            waitingPrompts,
+            (p) => p.promptMessageId,
+            (p) => this.renderPromptCard(p)
+          )}
       ${this.pendingNextCursor
         ? html`
             <div class="more">
@@ -1147,7 +1375,7 @@ export class ScionPageProjectDecisions extends LitElement {
                 data-load-more="pending"
                 ?loading=${this.pendingLoadingMore}
                 ?disabled=${this.pendingLoadingMore}
-                @click=${() => void this.loadPendingPage({ reset: false, silent: false })}
+                @click=${() => void this.loadPendingPage({ mode: 'append' })}
               >
                 Load more
               </sl-button>
@@ -1162,7 +1390,11 @@ export class ScionPageProjectDecisions extends LitElement {
               summary=${`Waiting on others (${othersCount})`}
             >
               <div class="mlist">
-                ${othersItems.map((item) => this.renderWaitingOnOthersItem(item))}
+                ${repeat(
+                  othersItems,
+                  (item) => item.decision.rowId,
+                  (item) => this.renderWaitingOnOthersItem(item)
+                )}
               </div>
             </sl-details>
           `
@@ -1192,6 +1424,7 @@ export class ScionPageProjectDecisions extends LitElement {
         <div class="pcard-head">
           <span
             class="avatar"
+            aria-hidden="true"
             style="background: ${avatarColor(p.askerAgentId || p.askerAgentName)}"
             >${avatarInitial(p.askerAgentName)}</span
           >
@@ -1250,7 +1483,7 @@ export class ScionPageProjectDecisions extends LitElement {
     } else if (reason === 'message_denied') {
       reasonBadge = html`<span class="badge">messaging restricted</span>`;
     } else {
-      reasonBadge = html`<span class="badge">${reason}</span>`;
+      reasonBadge = html`<span class="badge">not answerable by you</span>`;
     }
 
     return html`
@@ -1281,6 +1514,8 @@ export class ScionPageProjectDecisions extends LitElement {
           <sl-button
             size="small"
             data-mobile-filters-toggle
+            aria-expanded=${this.mobileFiltersOpen ? 'true' : 'false'}
+            aria-controls="made-filters-bar"
             @click=${() => {
               this.mobileFiltersOpen = !this.mobileFiltersOpen;
             }}
@@ -1298,7 +1533,7 @@ export class ScionPageProjectDecisions extends LitElement {
             : nothing}
         </div>
 
-        <div class="filter-controls ${this.mobileFiltersOpen ? 'open' : ''}">
+        <div id="made-filters-bar" class="filter-controls ${this.mobileFiltersOpen ? 'open' : ''}">
           <sl-select
             size="small"
             label="Agent"
@@ -1387,6 +1622,14 @@ export class ScionPageProjectDecisions extends LitElement {
         </div>
       </div>
 
+      ${this.hasDateRangeError
+        ? html`
+            <div class="date-range-error" role="alert" data-date-range-error>
+              <sl-icon name="exclamation-triangle" aria-hidden="true"></sl-icon>
+              <span>Start date must be on or before end date.</span>
+            </div>
+          `
+        : nothing}
       ${this.madeLoading
         ? html`
             <div class="loading-state">
@@ -1402,7 +1645,8 @@ export class ScionPageProjectDecisions extends LitElement {
                 <div class="error-details">${this.madeError}</div>
                 <sl-button
                   variant="primary"
-                  @click=${() => void this.loadMadePage({ reset: true, silent: false })}
+                  data-retry-made
+                  @click=${() => void this.loadMadePage({ mode: 'reset' })}
                 >
                   Retry
                 </sl-button>
@@ -1441,12 +1685,20 @@ export class ScionPageProjectDecisions extends LitElement {
                     </tr>
                   </thead>
                   <tbody>
-                    ${this.madeEntries.map((e) => this.renderMadeRow(e))}
+                    ${repeat(
+                      this.madeEntries,
+                      (e) => e.answerId,
+                      (e) => this.renderMadeRow(e)
+                    )}
                   </tbody>
                 </table>
 
                 <div class="mlist made-mobile-list" data-made-mobile-list>
-                  ${this.madeEntries.map((e) => this.renderMadeMobileItem(e))}
+                  ${repeat(
+                    this.madeEntries,
+                    (e) => e.answerId,
+                    (e) => this.renderMadeMobileItem(e)
+                  )}
                 </div>
 
                 ${this.madeNextCursor
@@ -1457,7 +1709,7 @@ export class ScionPageProjectDecisions extends LitElement {
                           data-load-more="made"
                           ?loading=${this.madeLoadingMore}
                           ?disabled=${this.madeLoadingMore}
-                          @click=${() => void this.loadMadePage({ reset: false, silent: false })}
+                          @click=${() => void this.loadMadePage({ mode: 'append' })}
                         >
                           Load more
                         </sl-button>

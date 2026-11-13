@@ -176,8 +176,9 @@ for tbl, col in [
 ]:
     try:
         cur.execute(f"DELETE FROM {tbl} WHERE {col} IN ({q})", ids)
-    except Exception:
-        pass
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc).lower():
+            raise
 cur.execute(f"DELETE FROM messages WHERE id IN ({q})", ids)
 con.commit()
 after = cur.execute(f"SELECT COUNT(*) FROM messages WHERE id IN ({q})", ids).fetchone()[0]
@@ -493,13 +494,23 @@ test.describe('Project Decisions page on real hub (web.project_decisions + web.c
       await expect(madeTableA).toContainText('Decisions page');
       await expect(madeTableA).toContainText('your DM');
 
-      // 6. User B's Made tab MUST still never see User A's DM decision!
+      // 6. User B's Made tab MUST still never see User A's DM decision or answerer facet!
       await pageB.goto(`/projects/${projectId}/decisions?tab=made`, {
         waitUntil: 'domcontentloaded',
       });
       await expect(decisionsB.locator('[data-empty="made"]')).toBeVisible({ timeout: 15_000 });
       await expect(decisionsB).not.toContainText('D-DM-SECRET');
       await expect(decisionsB).not.toContainText(dmSecretQuestion);
+      const userFilterOptionsB = await decisionsB
+        .locator('sl-select[data-filter="user"] sl-option')
+        .allTextContents();
+      expect(userFilterOptionsB.join(' ')).not.toContain('Alice');
+
+      // 7. Navigating User A back to /projects/:id shows the Decisions header badge decremented to 1.
+      await tab1.goto(`/projects/${projectId}`, { waitUntil: 'domcontentloaded' });
+      const headerBtnAAfter = tab1.locator('[data-decisions-button]');
+      await expect(headerBtnAAfter).toBeVisible({ timeout: 15_000 });
+      await expect(headerBtnAAfter.locator('.decisions-badge')).toHaveText('1');
     } finally {
       await ctxA.close();
       await ctxB.close();

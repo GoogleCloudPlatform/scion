@@ -23,6 +23,7 @@ import { stateManager } from '../../client/state.js';
 import { resetHubProjectCapabilitiesCache } from '../../client/hub-capabilities.js';
 import {
   CHAT_CHOICES_FLAG,
+  FEATURE_FLAGS_CHANGED_EVENT,
   PROJECT_DECISIONS_FLAG,
   resetServerFlagStateForTests,
   setFeatureFlag,
@@ -212,5 +213,74 @@ describe('<scion-page-project-detail> Decisions button & badge (Mock P3-1)', () 
     await settle(el, 150);
     expect(decisionsUrls).toHaveLength(3);
     expect(btn?.querySelector('sl-badge.decisions-badge')).toBeNull();
+  });
+
+  it('refreshes badge on chat-message-received for choice-prompt only, and ignores plain messages or other projects', async () => {
+    setFeatureFlag(PROJECT_DECISIONS_FLAG, true);
+    setFeatureFlag(CHAT_CHOICES_FLAG, true);
+    waitingOnYouCount = 1;
+
+    const el = await mount();
+    expect(decisionsUrls).toHaveLength(1);
+    expect(
+      el.shadowRoot
+        ?.querySelector('[data-decisions-button] sl-badge.decisions-badge')
+        ?.textContent?.trim()
+    ).toBe('1');
+
+    // Other project choice-prompt is ignored
+    stateManager.dispatchEvent(
+      new CustomEvent('chat-message-received', {
+        detail: { data: { projectId: 'other-proj', type: 'choice-prompt' } },
+      })
+    );
+    // Plain chat message in this project is ignored
+    stateManager.dispatchEvent(
+      new CustomEvent('chat-message-received', {
+        detail: { data: { projectId: 'p-1', type: 'message' } },
+      })
+    );
+    await settle(el, 150);
+    expect(decisionsUrls).toHaveLength(1);
+
+    // New choice-prompt in this project triggers debounced count refresh
+    waitingOnYouCount = 4;
+    stateManager.dispatchEvent(
+      new CustomEvent('chat-message-received', {
+        detail: { data: { projectId: 'p-1', type: 'choice-prompt' } },
+      })
+    );
+    await settle(el, 150);
+    expect(decisionsUrls).toHaveLength(2);
+    expect(
+      el.shadowRoot
+        ?.querySelector('[data-decisions-button] sl-badge.decisions-badge')
+        ?.textContent?.trim()
+    ).toBe('4');
+  });
+
+  it('dynamically mounts and tears down Decisions button on FEATURE_FLAGS_CHANGED_EVENT', async () => {
+    waitingOnYouCount = 2;
+    const el = await mount();
+    expect(el.shadowRoot?.querySelector('[data-decisions-button]')).toBeNull();
+    expect(decisionsUrls).toEqual([]);
+
+    // Enable both flags dynamically and verify button + badge appear
+    window.__SCION_FEATURES__ = {
+      [PROJECT_DECISIONS_FLAG]: true,
+      [CHAT_CHOICES_FLAG]: true,
+    };
+    window.dispatchEvent(new Event(FEATURE_FLAGS_CHANGED_EVENT));
+    await settle(el, 30);
+
+    const btn = el.shadowRoot?.querySelector('[data-decisions-button]');
+    expect(btn).not.toBeNull();
+    expect(decisionsUrls).toEqual(['/api/v1/projects/p-1/decisions?tab=pending&limit=0']);
+    expect(btn?.querySelector('sl-badge.decisions-badge')?.textContent?.trim()).toBe('2');
+
+    // Disable project_decisions dynamically -> button and badge disappear
+    setFeatureFlag(PROJECT_DECISIONS_FLAG, false);
+    await settle(el, 20);
+    expect(el.shadowRoot?.querySelector('[data-decisions-button]')).toBeNull();
   });
 });

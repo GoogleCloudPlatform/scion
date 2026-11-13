@@ -29,10 +29,12 @@ import type {
 import { stateManager } from '../../client/state.js';
 import {
   CHAT_CHOICES_FLAG,
+  FEATURE_FLAGS_CHANGED_EVENT,
   PROJECT_DECISIONS_FLAG,
   resetServerFlagStateForTests,
   setFeatureFlag,
 } from '../../utils/feature-flags.js';
+import { setPreferredTimeZone } from '../../utils/time.js';
 
 class FakeEventSource extends EventTarget {
   static readonly CONNECTING = 0;
@@ -154,6 +156,8 @@ async function settle(el: ScionPageProjectDecisions, ms = 15): Promise<void> {
 describe('<scion-page-project-decisions>', () => {
   let pendingResponses: ProjectPendingDecisionsResponse[];
   let madeResponses: ProjectMadeDecisionsResponse[];
+  let pendingHandler: ((url: URL, init?: RequestInit) => Promise<Response>) | null;
+  let madeHandler: ((url: URL, init?: RequestInit) => Promise<Response>) | null;
   let requests: { method: string; url: string; body?: unknown }[];
   let answerResponseFn: (url: URL, body: unknown) => Promise<Response>;
   let navEvents: string[];
@@ -169,9 +173,12 @@ describe('<scion-page-project-decisions>', () => {
   beforeEach(() => {
     delete window.__SCION_FEATURES__;
     resetServerFlagStateForTests();
+    setPreferredTimeZone('UTC');
     window.history.replaceState({}, '', '/projects/p-1/decisions');
     requests = [];
     navEvents = [];
+    pendingHandler = null;
+    madeHandler = null;
     document.addEventListener('nav-click', onNavClick);
 
     pendingResponses = [
@@ -235,9 +242,11 @@ describe('<scion-page-project-decisions>', () => {
         if (url.pathname === '/api/v1/projects/p-1/decisions') {
           const tab = url.searchParams.get('tab') ?? 'pending';
           if (tab === 'made') {
+            if (madeHandler) return madeHandler(url, init);
             const next = madeResponses.length > 1 ? madeResponses.shift()! : madeResponses[0]!;
             return jsonResponse(next);
           }
+          if (pendingHandler) return pendingHandler(url, init);
           const next =
             pendingResponses.length > 1 ? pendingResponses.shift()! : pendingResponses[0]!;
           return jsonResponse(next);
@@ -258,6 +267,7 @@ describe('<scion-page-project-decisions>', () => {
     document.body.innerHTML = '';
     delete window.__SCION_FEATURES__;
     resetServerFlagStateForTests();
+    setPreferredTimeZone('');
     vi.unstubAllGlobals();
     vi.stubGlobal('EventSource', FakeEventSource);
   });
@@ -761,5 +771,583 @@ describe('<scion-page-project-decisions>', () => {
     expect(root.querySelector('[data-prompt-card="m-dm-live"]')).toBeNull();
     expect(root.querySelector('[data-waiting-badge]')).toBeNull();
     expect(root.querySelector('[data-empty="pending"]')).not.toBeNull();
+  });
+
+  it('preserves Made Load more pages and cursor on live choice-updated, and never aborts an in-flight Load more', async () => {
+    enableBothFlags();
+    const rowP1 = makeLogEntry({ answerId: 'ans-p1', label: 'Page 1 original' });
+    const rowP2 = makeLogEntry({ answerId: 'ans-p2', label: 'Page 2 older' });
+    const rowNew = makeLogEntry({ answerId: 'ans-new', label: 'Prepended live answer' });
+    const rowP1Updated = makeLogEntry({ answerId: 'ans-p1', label: 'Page 1 updated' });
+
+    let loadMoreAborted = false;
+    let resolveLoadMore!: (res: Response) => void;
+    let madeCall = 0;
+
+    madeHandler = (url, init) => {
+      madeCall++;
+      const cursor = url.searchParams.get('cursor');
+      if (madeCall === 1) {
+        return jsonResponse({
+          counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+          entries: [rowP1],
+          agents: [{ id: 'a-rel', name: 'release-bot' }],
+          answerers: [{ id: 'u-me', name: 'Alice' }],
+          nextCursor: 'cur-page-2',
+        });
+      }
+      if (cursor === 'cur-page-2') {
+        init?.signal?.addEventListener('abort', () => {
+          loadMoreAborted = true;
+        });
+        return new Promise<Response>((resolve) => {
+          resolveLoadMore = resolve;
+        });
+      }
+      // Live refresh of page 1 (no cursor, limit=50)
+      return jsonResponse({
+        counts: { waitingOnYou: 0, waitingOnOthers: 0 },
+        entries: [rowNew, rowP1Updated],
+        agents: [{ id: 'a-rel', name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        nextCursor: 'cur-stale-page-2',
+      });
+    };
+
+    const el = await mount({ path: '/projects/p-1/decisions?tab=made' });
+    const root = el.shadowRoot!;
+    expect(root.querySelector('[data-answer-row="ans-p1"]')).not.toBeNull();
+
+    // Start Load more (stays in flight)
+    root.querySelector<HTMLElement>('[data-load-more="made"]')!.click();
+    await settle(el, 10);
+
+    // Fire choice-updated while Load more is in flight; wait past 60ms debounce
+    stateManager.dispatchEvent(
+      new CustomEvent('choice-updated', {
+        detail: { data: { projectId: 'p-1', messageId: 'm-1' } },
+      })
+    );
+    await settle(el, 85);
+
+    // In-flight Load more was NOT aborted, and live refresh deferred until Load more finishes
+    expect(loadMoreAborted).toBe(false);
+    expect(madeCall).toBe(2);
+
+    // Resolve Load more with page 2 + cur-page-3 -> deferred live refresh runs automatically
+    resolveLoadMore(
+      new Response(
+        JSON.stringify({
+          counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+          entries: [rowP2],
+          agents: [{ id: 'a-rel', name: 'release-bot' }],
+          answerers: [{ id: 'u-me', name: 'Alice' }],
+          nextCursor: 'cur-page-3',
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      )
+    );
+    await settle(el, 40);
+
+    expect(madeCall).toBe(3);
+    const liveMadeUrl = [...requests].reverse().find((r) => r.url.includes('tab=made'))!.url;
+    expect(liveMadeUrl).toBe('/api/v1/projects/p-1/decisions?tab=made&limit=50');
+
+    // New entry prepended, existing entry updated, page-2 entry and cur-page-3 preserved!
+    const renderedIds = Array.from(root.querySelectorAll('[data-answer-row]')).map((tr) =>
+      tr.getAttribute('data-answer-row')
+    );
+    expect(renderedIds).toEqual(['ans-new', 'ans-p1', 'ans-p2']);
+    expect(root.querySelector('[data-answer-row="ans-p1"]')?.textContent).toContain(
+      'Page 1 updated'
+    );
+    expect(root.querySelector('[data-load-more="made"]')).not.toBeNull();
+  });
+
+  it('does not fetch Made while Pending tab is active, then prepends when switching back to Made', async () => {
+    enableBothFlags();
+    const rowInitial = makeLogEntry({ answerId: 'ans-initial', label: 'Initial' });
+    const rowAfterSse = makeLogEntry({ answerId: 'ans-after-sse', label: 'Added while hidden' });
+
+    madeResponses = [
+      {
+        counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+        entries: [rowInitial],
+        agents: [],
+        answerers: [],
+      },
+      {
+        counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+        entries: [rowAfterSse, rowInitial],
+        agents: [],
+        answerers: [],
+      },
+    ];
+
+    const el = await mount({ path: '/projects/p-1/decisions?tab=made' });
+    const root = el.shadowRoot!;
+    expect(root.querySelector('[data-answer-row="ans-initial"]')).not.toBeNull();
+
+    const madeCountBefore = requests.filter((r) => r.url.includes('tab=made')).length;
+    expect(madeCountBefore).toBe(1);
+
+    // Switch to Pending tab
+    root.querySelector<HTMLElement>('sl-tab[panel="pending"]')!.click();
+    await settle(el, 20);
+
+    // Fire choice-updated while Made is hidden
+    stateManager.dispatchEvent(
+      new CustomEvent('choice-updated', {
+        detail: { data: { projectId: 'p-1', messageId: 'm-1' } },
+      })
+    );
+    await settle(el, 90);
+
+    // Zero Made fetches while hidden!
+    expect(requests.filter((r) => r.url.includes('tab=made')).length).toBe(madeCountBefore);
+
+    // Switch back to Made -> triggers live prepend refresh
+    root.querySelector<HTMLElement>('sl-tab[panel="made"]')!.click();
+    await settle(el, 35);
+
+    expect(requests.filter((r) => r.url.includes('tab=made')).length).toBe(madeCountBefore + 1);
+    const renderedIds = Array.from(root.querySelectorAll('[data-answer-row]')).map((tr) =>
+      tr.getAttribute('data-answer-row')
+    );
+    expect(renderedIds).toEqual(['ans-after-sse', 'ans-initial']);
+  });
+
+  it('preserves Pending prompts beyond page 1 (>50) across live choice-updated without aborting Load more', async () => {
+    enableBothFlags();
+    const page1Prompts = Array.from({ length: 50 }, (_, i) =>
+      makePrompt({
+        promptMessageId: `m-p1-${i}`,
+        decisions: [makeDecision({ rowId: `r-p1-${i}`, messageId: `m-p1-${i}` })],
+      })
+    );
+    const page2Prompts = Array.from({ length: 10 }, (_, i) =>
+      makePrompt({
+        promptMessageId: `m-p2-${i}`,
+        decisions: [makeDecision({ rowId: `r-p2-${i}`, messageId: `m-p2-${i}` })],
+      })
+    );
+
+    let loadMoreAborted = false;
+    let resolveLoadMore!: (res: Response) => void;
+    let pendingCall = 0;
+
+    pendingHandler = (url, init) => {
+      pendingCall++;
+      const cursor = url.searchParams.get('cursor');
+      if (pendingCall === 1) {
+        return jsonResponse({
+          counts: { waitingOnYou: 60, waitingOnOthers: 0 },
+          prompts: page1Prompts,
+          agents: [],
+          answerers: [],
+          nextCursor: 'cur-pending-2',
+        });
+      }
+      if (cursor === 'cur-pending-2') {
+        init?.signal?.addEventListener('abort', () => {
+          loadMoreAborted = true;
+        });
+        return new Promise<Response>((resolve) => {
+          resolveLoadMore = resolve;
+        });
+      }
+      // Deferred live refresh requests limit=60 and keeps all 60 prompts
+      return jsonResponse({
+        counts: { waitingOnYou: 60, waitingOnOthers: 0 },
+        prompts: [...page1Prompts, ...page2Prompts],
+        agents: [],
+        answerers: [],
+        nextCursor: 'cur-pending-3',
+      });
+    };
+
+    const el = await mount();
+    const root = el.shadowRoot!;
+    expect(root.querySelectorAll('.pcard')).toHaveLength(50);
+
+    // Click Load more on Pending (in flight)
+    root.querySelector<HTMLElement>('[data-load-more="pending"]')!.click();
+    await settle(el, 10);
+
+    // Fire choice-updated while Pending Load more is in flight
+    stateManager.dispatchEvent(
+      new CustomEvent('choice-updated', {
+        detail: { data: { projectId: 'p-1', messageId: 'm-other' } },
+      })
+    );
+    await settle(el, 85);
+
+    expect(loadMoreAborted).toBe(false);
+    expect(pendingCall).toBe(2);
+
+    resolveLoadMore(
+      new Response(
+        JSON.stringify({
+          counts: { waitingOnYou: 60, waitingOnOthers: 0 },
+          prompts: page2Prompts,
+          agents: [],
+          answerers: [],
+          nextCursor: 'cur-pending-3',
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      )
+    );
+    await settle(el, 45);
+
+    expect(pendingCall).toBe(3);
+    const livePendingUrl = [...requests].reverse().find((r) => r.url.includes('tab=pending'))!.url;
+    expect(livePendingUrl).toBe('/api/v1/projects/p-1/decisions?tab=pending&limit=60');
+    expect(root.querySelectorAll('.pcard')).toHaveLength(60);
+    expect(root.querySelector('[data-prompt-card="m-p2-9"]')).not.toBeNull();
+  });
+
+  it('converts Made From/To dates in effectiveTimeZone() and blocks From > To with inline validation', async () => {
+    enableBothFlags();
+    setPreferredTimeZone('America/Los_Angeles');
+
+    const el = await mount({ path: '/projects/p-1/decisions?tab=made' });
+    const root = el.shadowRoot!;
+
+    const fromInput = root.querySelector<HTMLElement & { value?: string }>('[data-filter="from"]')!;
+    const toInput = root.querySelector<HTMLElement & { value?: string }>('[data-filter="to"]')!;
+
+    fromInput.value = '2026-11-13';
+    fromInput.dispatchEvent(new CustomEvent('sl-change'));
+    await settle(el, 20);
+
+    toInput.value = '2026-11-13';
+    toInput.dispatchEvent(new CustomEvent('sl-change'));
+    await settle(el, 20);
+
+    const tzMadeUrl = [...requests].reverse().find((r) => r.url.includes('tab=made'))!.url;
+    expect(tzMadeUrl).toContain('from=2026-11-13T08%3A00%3A00.000Z');
+    expect(tzMadeUrl).toContain('to=2026-11-14T07%3A59%3A59.999Z');
+    expect(root.querySelector('[data-date-range-error]')).toBeNull();
+
+    // Invalid range: From (2026-11-15) > To (2026-11-13) -> inline error, zero new requests
+    const countBeforeInvalid = requests.filter((r) => r.url.includes('tab=made')).length;
+    fromInput.value = '2026-11-15';
+    fromInput.dispatchEvent(new CustomEvent('sl-change'));
+    await settle(el, 25);
+
+    expect(requests.filter((r) => r.url.includes('tab=made')).length).toBe(countBeforeInvalid);
+    const rangeErr = root.querySelector('[data-date-range-error]');
+    expect(rangeErr).not.toBeNull();
+    expect(rangeErr?.textContent).toContain('Start date must be on or before end date.');
+
+    // Clear filters recovers cleanly
+    root.querySelector<HTMLElement>('[data-clear-filters]')!.click();
+    await settle(el, 25);
+
+    expect(root.querySelector('[data-date-range-error]')).toBeNull();
+    const recoveredUrl = [...requests].reverse().find((r) => r.url.includes('tab=made'))!.url;
+    expect(recoveredUrl).toBe('/api/v1/projects/p-1/decisions?tab=made');
+  });
+
+  it('drives all 5 Made UI filter controls into a combined query and resets all 5 on Clear filters', async () => {
+    enableBothFlags();
+    setPreferredTimeZone('UTC');
+
+    const el = await mount({ path: '/projects/p-1/decisions?tab=made' });
+    const root = el.shadowRoot!;
+
+    const setControl = async (selector: string, val: string): Promise<void> => {
+      const ctrl = root.querySelector<HTMLElement & { value?: string }>(selector)!;
+      ctrl.value = val;
+      ctrl.dispatchEvent(new CustomEvent('sl-change'));
+      await settle(el, 15);
+    };
+
+    await setControl('[data-filter="agent"]', 'a-rel');
+    await setControl('[data-filter="user"]', 'u-bob');
+    await setControl('[data-filter="provenance"]', 'interpreted');
+    await setControl('[data-filter="from"]', '2026-11-01');
+    await setControl('[data-filter="to"]', '2026-11-13');
+
+    const combinedUrl = [...requests].reverse().find((r) => r.url.includes('tab=made'))!.url;
+    const parsed = new URL(combinedUrl, 'http://localhost');
+    expect(parsed.searchParams.get('tab')).toBe('made');
+    expect(parsed.searchParams.get('agent')).toBe('a-rel');
+    expect(parsed.searchParams.get('user')).toBe('u-bob');
+    expect(parsed.searchParams.get('provenance')).toBe('interpreted');
+    expect(parsed.searchParams.get('from')).toBe('2026-11-01T00:00:00.000Z');
+    expect(parsed.searchParams.get('to')).toBe('2026-11-13T23:59:59.999Z');
+
+    // Click Clear filters and verify all 5 params are cleared
+    root.querySelector<HTMLElement>('[data-clear-filters]')!.click();
+    await settle(el, 25);
+
+    const resetUrl = [...requests].reverse().find((r) => r.url.includes('tab=made'))!.url;
+    expect(resetUrl).toBe('/api/v1/projects/p-1/decisions?tab=made');
+    expect(root.querySelector('[data-clear-filters]')).toBeNull();
+  });
+
+  it('preserves the exact <scion-chat-choices> DOM element for surviving cards via keyed repeat()', async () => {
+    enableBothFlags();
+    const card1 = makePrompt({
+      promptMessageId: 'p-1',
+      decisions: [makeDecision({ rowId: 'r-card-1', messageId: 'p-1', question: 'First?' })],
+    });
+    const card2 = makePrompt({
+      promptMessageId: 'p-2',
+      decisions: [makeDecision({ rowId: 'r-card-2', messageId: 'p-2', question: 'Second?' })],
+    });
+
+    pendingResponses = [
+      {
+        counts: { waitingOnYou: 2, waitingOnOthers: 0 },
+        prompts: [card1, card2],
+        agents: [],
+        answerers: [],
+      },
+      {
+        counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+        prompts: [card2],
+        agents: [],
+        answerers: [],
+      },
+    ];
+
+    const el = await mount();
+    const root = el.shadowRoot!;
+
+    const p1ChoicesBefore = root.querySelector<ScionChatChoices>(
+      '[data-prompt-card="p-1"] scion-chat-choices'
+    )!;
+    const p2ChoicesBefore = root.querySelector<ScionChatChoices>(
+      '[data-prompt-card="p-2"] scion-chat-choices'
+    )!;
+    expect(p1ChoicesBefore).not.toBeNull();
+    expect(p2ChoicesBefore).not.toBeNull();
+    expect(p1ChoicesBefore).not.toBe(p2ChoicesBefore);
+
+    // Settle p-1 so it leaves Waiting on you
+    stateManager.dispatchEvent(
+      new CustomEvent('choice-updated', {
+        detail: {
+          data: {
+            projectId: 'p-1',
+            messageId: 'p-1',
+            decision: makeDecision({
+              rowId: 'r-card-1',
+              messageId: 'p-1',
+              status: 'decided',
+              decision: {
+                choiceId: 'yes',
+                label: 'Yes',
+                answeredByUserId: 'u-me',
+                answeredByName: 'Alice',
+                provenance: 'direct',
+                outcome: 'answer',
+                surface: 'native',
+                responseMessageId: 'resp-card-1',
+                at: '2026-11-13T16:10:00Z',
+              },
+            }),
+          },
+        },
+      })
+    );
+    await settle(el, 90);
+
+    expect(root.querySelector('[data-prompt-card="p-1"]')).toBeNull();
+    expect(p1ChoicesBefore.isConnected).toBe(false);
+    const p2ChoicesAfter = root.querySelector<ScionChatChoices>(
+      '[data-prompt-card="p-2"] scion-chat-choices'
+    )!;
+    expect(p2ChoicesAfter).toBe(p2ChoicesBefore);
+  });
+
+  it('refreshes on chat-message-received for choice-prompt only and dynamically toggles on FEATURE_FLAGS_CHANGED_EVENT', async () => {
+    // Start with flags OFF -> 404, zero requests
+    const el = await mount();
+    const root = el.shadowRoot!;
+    expect(root.querySelector('scion-page-404')).not.toBeNull();
+    expect(requests).toEqual([]);
+
+    // Dynamically enable both flags -> boots and loads Pending
+    pendingResponses = [
+      {
+        counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+        prompts: [makePrompt({ promptMessageId: 'm-init' })],
+        agents: [],
+        answerers: [],
+      },
+      {
+        counts: { waitingOnYou: 2, waitingOnOthers: 0 },
+        prompts: [
+          makePrompt({ promptMessageId: 'm-new' }),
+          makePrompt({ promptMessageId: 'm-init' }),
+        ],
+        agents: [],
+        answerers: [],
+      },
+    ];
+
+    window.__SCION_FEATURES__ = {
+      [PROJECT_DECISIONS_FLAG]: true,
+      [CHAT_CHOICES_FLAG]: true,
+    };
+    window.dispatchEvent(new Event(FEATURE_FLAGS_CHANGED_EVENT));
+    await settle(el, 35);
+
+    expect(root.querySelector('scion-page-404')).toBeNull();
+    expect(root.querySelector('[data-prompt-card="m-init"]')).not.toBeNull();
+
+    const pendingCountBefore = requests.filter((r) => r.url.includes('tab=pending')).length;
+
+    // Ignore other-project choice-prompt and same-project plain message
+    stateManager.dispatchEvent(
+      new CustomEvent('chat-message-received', {
+        detail: { data: { projectId: 'other-proj', type: 'choice-prompt' } },
+      })
+    );
+    stateManager.dispatchEvent(
+      new CustomEvent('chat-message-received', {
+        detail: { data: { projectId: 'p-1', type: 'message' } },
+      })
+    );
+    await settle(el, 90);
+    expect(requests.filter((r) => r.url.includes('tab=pending')).length).toBe(pendingCountBefore);
+
+    // Same-project choice-prompt triggers debounced refresh
+    stateManager.dispatchEvent(
+      new CustomEvent('chat-message-received', {
+        detail: { data: { projectId: 'p-1', type: 'choice-prompt' } },
+      })
+    );
+    await settle(el, 90);
+    expect(requests.filter((r) => r.url.includes('tab=pending')).length).toBe(
+      pendingCountBefore + 1
+    );
+    expect(root.querySelector('[data-prompt-card="m-new"]')).not.toBeNull();
+    expect(root.querySelector('[data-waiting-badge]')?.textContent?.trim()).toBe('2');
+
+    // Dynamically disable flag -> tears down and renders 404
+    setFeatureFlag(CHAT_CHOICES_FLAG, false);
+    await settle(el, 20);
+    expect(root.querySelector('scion-page-404')).not.toBeNull();
+  });
+
+  it('renders error states on initial 500 for Pending and Made tabs and recovers on Retry', async () => {
+    enableBothFlags();
+    let failPending = true;
+    pendingHandler = () => {
+      if (failPending) {
+        return jsonResponse({ error: { message: 'database unavailable' } }, 500);
+      }
+      return jsonResponse({
+        counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+        prompts: [makePrompt({ promptMessageId: 'm-recovered' })],
+        agents: [],
+        answerers: [],
+      });
+    };
+
+    let failMade = true;
+    madeHandler = () => {
+      if (failMade) {
+        return jsonResponse({ error: { message: 'audit log timeout' } }, 500);
+      }
+      return jsonResponse({
+        counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+        entries: [makeLogEntry({ answerId: 'ans-recovered' })],
+        agents: [],
+        answerers: [],
+      });
+    };
+
+    const el = await mount();
+    const root = el.shadowRoot!;
+    expect(root.querySelector('.error-state h2')?.textContent).toBe('Failed to Load Decisions');
+    expect(root.querySelector('.error-details')?.textContent).toContain('database unavailable');
+
+    // Click Retry on Pending error state
+    failPending = false;
+    root.querySelector<HTMLElement>('[data-retry-pending]')!.click();
+    await settle(el, 35);
+    expect(root.querySelector('[data-prompt-card="m-recovered"]')).not.toBeNull();
+
+    // Switch to Made -> initial 500 -> Retry -> recovers
+    root.querySelector<HTMLElement>('sl-tab[panel="made"]')!.click();
+    await settle(el, 30);
+    const madePanel = root.querySelector('sl-tab-panel[name="made"]')!;
+    expect(madePanel.querySelector('.error-state h2')?.textContent).toBe(
+      'Failed to Load Decision Log'
+    );
+    expect(madePanel.querySelector('.error-details')?.textContent).toContain('audit log timeout');
+
+    failMade = false;
+    madePanel.querySelector<HTMLElement>('[data-retry-made]')!.click();
+    await settle(el, 30);
+    expect(madePanel.querySelector('[data-answer-row="ans-recovered"]')).not.toBeNull();
+  });
+
+  it('renders message_denied and safe fallback Waiting on others badges, handles malformed URLs, and sets ARIA attributes', async () => {
+    enableBothFlags();
+    pendingResponses = [
+      {
+        counts: { waitingOnYou: 1, waitingOnOthers: 2 },
+        prompts: [
+          makePrompt({ promptMessageId: 'm-self' }),
+          makePrompt({
+            promptMessageId: 'm-denied',
+            waitingOnYou: false,
+            canAnswer: false,
+            waitingReasons: {
+              'r-msg-denied': 'message_denied',
+              'r-custom': 'unexpected_backend_code',
+            },
+            decisions: [
+              makeDecision({
+                rowId: 'r-msg-denied',
+                messageId: 'm-denied',
+                question: 'Restricted?',
+              }),
+              makeDecision({ rowId: 'r-custom', messageId: 'm-denied', question: 'Unknown?' }),
+            ],
+          }),
+        ],
+        agents: [],
+        answerers: [],
+      },
+    ];
+
+    const el = await mount({ path: '/projects/p-1/decisions?tab=made' });
+    const root = el.shadowRoot!;
+
+    // Avatar decorative initial is aria-hidden="true"
+    const avatar = root.querySelector('[data-prompt-card="m-self"] .avatar')!;
+    expect(avatar.getAttribute('aria-hidden')).toBe('true');
+
+    // Waiting on others badges: message_denied -> "messaging restricted", unknown -> fixed literal
+    expect(root.querySelector('[data-others-row="r-msg-denied"]')?.textContent).toContain(
+      'messaging restricted'
+    );
+    const customRowText = root.querySelector('[data-others-row="r-custom"]')?.textContent ?? '';
+    expect(customRowText).toContain('not answerable by you');
+    expect(customRowText).not.toContain('unexpected_backend_code');
+
+    // Mobile Filters button exposes aria-expanded and aria-controls="made-filters-bar"
+    const filtersToggle = root.querySelector<HTMLElement>('[data-mobile-filters-toggle]')!;
+    expect(filtersToggle.getAttribute('aria-controls')).toBe('made-filters-bar');
+    expect(filtersToggle.getAttribute('aria-expanded')).toBe('false');
+    expect(root.querySelector('#made-filters-bar')).not.toBeNull();
+    filtersToggle.click();
+    await settle(el, 10);
+    expect(filtersToggle.getAttribute('aria-expanded')).toBe('true');
+
+    el.remove();
+
+    // Malformed percent-encoded projectId in URL renders error state without throwing
+    const badEl = await mount({ path: '/projects/%E0%A4%A/decisions' });
+    expect(badEl.shadowRoot?.querySelector('.error-details')?.textContent).toBe(
+      'Invalid project ID in URL'
+    );
   });
 });

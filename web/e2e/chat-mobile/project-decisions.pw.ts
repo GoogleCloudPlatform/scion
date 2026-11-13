@@ -47,7 +47,7 @@ interface MockScenarioOptions {
 const isPhone = (page: Page): boolean => (page.viewportSize()?.width ?? 0) <= 640;
 
 async function shot(page: Page, testInfo: TestInfo, theme: Theme, name: string): Promise<void> {
-  await page.waitForTimeout(200);
+  await page.evaluate(() => document.fonts.ready);
   const project = testInfo.project.name === 'chromium-390' ? 'mobile390' : 'desktop';
   const file = testInfo.outputPath(`project-decisions-${project}-${theme}-${name}.png`);
   await page.screenshot({ path: file, fullPage: false });
