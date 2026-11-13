@@ -110,6 +110,106 @@ func ExtractProseMentions(text string) []string {
 	return ExtractMentions(stripNonProseSpans(text))
 }
 
+// ExtractWrappedMentions scans message text for @name and @email mention
+// tokens, including mentions wrapped in common punctuation or markdown (such
+// as (@user), **@user**, *@user*, _@user_, ~~@user~~, "@user", [@user], or
+// FYI:@user), returning deduplicated names without the leading @.
+//
+// An @ preceded by a letter, digit, hyphen, @, backtick, or intraword
+// underscore (such as inside user@example.com, `@user`, or foo_@bar) is not
+// treated as a mention trigger. Agent @mention routing continues to use
+// ExtractMentions / ExtractProseMentions unchanged.
+func ExtractWrappedMentions(text string) []string {
+	runes := []rune(text)
+	var mentions []string
+	seen := make(map[string]bool)
+	for i := 0; i < len(runes); {
+		if runes[i] != '@' {
+			i++
+			continue
+		}
+		leadingUnderscores, ok := wrappedMentionStart(runes, i)
+		if !ok {
+			i++
+			continue
+		}
+		end := scanWrappedMentionEnd(runes, i+1)
+		name := string(runes[i+1 : end])
+		for k := 0; k < leadingUnderscores && strings.HasSuffix(name, "_"); k++ {
+			name = strings.TrimSuffix(name, "_")
+		}
+		name = trimMentionPunct(name)
+		if name != "" {
+			lower := strings.ToLower(name)
+			if !seen[lower] {
+				seen[lower] = true
+				mentions = append(mentions, name)
+			}
+		}
+		if end > i+1 {
+			i = end
+		} else {
+			i++
+		}
+	}
+	return mentions
+}
+
+// ExtractProseWrappedMentions is ExtractWrappedMentions over prose only:
+// fenced code blocks, inline backtick code spans, and '>' blockquote lines
+// are skipped via stripNonProseSpans.
+func ExtractProseWrappedMentions(text string) []string {
+	return ExtractWrappedMentions(stripNonProseSpans(text))
+}
+
+func isWrappedWordRune(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-'
+}
+
+func wrappedMentionStart(runes []rune, atIdx int) (leadingUnderscores int, ok bool) {
+	if atIdx == 0 {
+		return 0, true
+	}
+	prev := runes[atIdx-1]
+	if prev == '_' {
+		j := atIdx - 1
+		for j >= 0 && runes[j] == '_' {
+			j--
+		}
+		if j >= 0 && (isWrappedWordRune(runes[j]) || runes[j] == '@' || runes[j] == '`') {
+			return 0, false
+		}
+		return atIdx - 1 - j, true
+	}
+	if isWrappedWordRune(prev) || prev == '@' || prev == '`' {
+		return 0, false
+	}
+	return 0, true
+}
+
+func scanWrappedMentionEnd(runes []rune, start int) int {
+	sawAt := false
+	i := start
+	for i < len(runes) {
+		r := runes[i]
+		if isWrappedWordRune(r) {
+			i++
+			continue
+		}
+		if (r == '.' || r == '+') && i > start && i+1 < len(runes) && isWrappedWordRune(runes[i+1]) {
+			i++
+			continue
+		}
+		if r == '@' && !sawAt && i > start && i+1 < len(runes) && isWrappedWordRune(runes[i+1]) {
+			sawAt = true
+			i++
+			continue
+		}
+		break
+	}
+	return i
+}
+
 // stripNonProseSpans blanks fenced code blocks, inline code spans, and
 // blockquote lines with spaces, preserving every other character (including
 // newlines) so that ExtractMentions' word-boundary scanning is unaffected

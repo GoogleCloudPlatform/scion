@@ -15,6 +15,7 @@
 package messages
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -682,5 +683,31 @@ func TestSenderPrefix(t *testing.T) {
 				t.Errorf("SenderPrefix(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestMentionedUserIDs_JSONIgnored(t *testing.T) {
+	orig := &StructuredMessage{
+		Version:          Version,
+		Timestamp:        "2026-09-19T00:00:00Z",
+		Sender:           "agent:dev",
+		Recipient:        "thread:t1",
+		Msg:              "hello",
+		Type:             TypeInstruction,
+		MentionedUserIDs: []string{"user-1"},
+	}
+	raw, err := json.Marshal(orig)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(raw), "user-1") {
+		t.Fatalf("MentionedUserIDs leaked into JSON: %s", raw)
+	}
+	var decoded StructuredMessage
+	if err := json.Unmarshal([]byte(`{"version":1,"sender":"agent:dev","recipient":"thread:t1","msg":"hello","type":"instruction","MentionedUserIDs":["u1"],"mentionedUserIds":["u2"],"mentioned_user_ids":["u3"]}`), &decoded); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if len(decoded.MentionedUserIDs) != 0 {
+		t.Fatalf("decoded MentionedUserIDs = %v; want empty", decoded.MentionedUserIDs)
 	}
 }

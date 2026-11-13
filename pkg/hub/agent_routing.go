@@ -34,6 +34,11 @@ type RoutingPlan struct {
 	// UnresolvedMentions collects mention slugs that did not resolve to any
 	// agent in the project. Callers may surface these as diagnostics.
 	UnresolvedMentions []string
+
+	// HumanMentionNames collects prose @mention names (including mentions
+	// wrapped in punctuation or markdown) that do not match any project agent
+	// slug, for recording human mention dots without altering agent routing.
+	HumanMentionNames []string
 }
 
 // agentLister is the interface needed to list agents for routing resolution.
@@ -154,6 +159,11 @@ func resolveRoutingAgents(
 		a := &projectAgents[i]
 		agentInfos = append(agentInfos, messages.AgentInfo{Slug: a.Slug, Name: a.Name})
 		agentBySlug[strings.ToLower(a.Slug)] = a
+	}
+	for _, name := range messages.ExtractProseWrappedMentions(content) {
+		if _, isAgent := agentBySlug[strings.ToLower(name)]; !isAgent {
+			plan.HumanMentionNames = append(plan.HumanMentionNames, name)
+		}
 	}
 
 	// Step 3: Resolve mentions against known agents.

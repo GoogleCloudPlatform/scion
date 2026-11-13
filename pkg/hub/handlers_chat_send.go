@@ -897,17 +897,22 @@ func (s *Server) sendChatMessage(ctx context.Context, user UserIdentity, key str
 	// unreachable, so that case must keep the pre-existing human-to-human
 	// fallthrough instead of mislabelling the send "Agent unreachable".
 	var planErr error
+	var humanMentionNames []string
 	if projectID != "" {
 		plan, planErr = resolveRoutingAgents(ctx, s.store, projectID, content, defaultAgent)
 		if planErr != nil {
 			routingLookupFailed = true
 			slog.Error("agent routing resolution failed", "error", planErr)
+			humanMentionNames = messages.ExtractProseWrappedMentions(content)
 			// Fall through: plan.Agents will be empty, triggering human-to-human.
+		} else {
+			humanMentionNames = plan.HumanMentionNames
 		}
 	} else if defaultAgent != nil {
 		// No project context but DM default resolved: single-recipient plan.
 		plan.Agents = []*store.Agent{defaultAgent}
 		plan.MentionNames = messages.ExtractMentions(content)
+		humanMentionNames = messages.ExtractProseWrappedMentions(content)
 	}
 
 	now := time.Now().UTC()
@@ -923,7 +928,8 @@ func (s *Server) sendChatMessage(ctx context.Context, user UserIdentity, key str
 		// watermark update — see the comment there.
 		return s.sendAgentRouted(ctx, key, projectID, user, content, senderLabel, plan.Agents, plan.MentionNames, plan.MentionResults, attachmentRefs, now, in.ReplyToID, in.Metadata,
 			chatSendOptions{Interrupt: in.Interrupt, Wake: in.Wake, OfferWake: in.OfferWake,
-				OnPersisted: in.OnPersisted, BeforeWake: in.BeforeWake})
+				OnPersisted: in.OnPersisted, BeforeWake: in.BeforeWake,
+				HumanMentionNames: humanMentionNames, HumanMentionsResolved: true})
 	}
 
 	// --- Unresolvable topic default agent (nc-delivery-unreachable) ---
@@ -936,7 +942,7 @@ func (s *Server) sendChatMessage(ctx context.Context, user UserIdentity, key str
 	// plan reflects a routing-plan failure, not the deleted default, so keep
 	// the pre-existing human-to-human error handling below instead.
 	if unresolvedDefaultAgent != nil && planErr == nil {
-		return s.sendHumanToHuman(ctx, key, projectID, user, content, senderLabel, isDM, false, plan.MentionNames, attachmentRefs, now, in.ReplyToID,
+		return s.sendHumanToHuman(ctx, key, projectID, user, content, senderLabel, isDM, false, humanMentionNames, attachmentRefs, now, in.ReplyToID,
 			&unreachableAgentOverride{
 				AgentSlug: unresolvedDefaultAgent.Slug,
 				AgentID:   unresolvedDefaultAgent.ID,
@@ -950,8 +956,8 @@ func (s *Server) sendChatMessage(ctx context.Context, user UserIdentity, key str
 	// unless a lookup failed or it is addressed to a person.
 	members := s.projectMembersOnce(ctx, projectID)
 	noRecipient := !isDM && !routingLookupFailed &&
-		s.threadMessageUnaddressed(ctx, members, plan.MentionNames, in.ReplyToID, user.ID())
-	mentionNames := plan.MentionNames
+		s.threadMessageUnaddressed(ctx, members, humanMentionNames, in.ReplyToID, user.ID())
+	mentionNames := humanMentionNames
 	if noRecipient {
 		// When an agent has posted in the thread, address the reply to the
 		// most recent other human poster (or the thread creator) with a

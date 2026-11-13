@@ -1638,6 +1638,11 @@ type chatSendOptions struct {
 	// number of agent recipients. The HTTP handler uses it to extend the
 	// connection's write deadline past the server-wide WriteTimeout.
 	BeforeWake func(recipients int)
+	// HumanMentionNames, when HumanMentionsResolved is true, supplies the
+	// prose @mention names (including wrapped mentions) not matching any
+	// project agent for recording human mention dots.
+	HumanMentionNames     []string
+	HumanMentionsResolved bool
 }
 
 const (
@@ -2086,7 +2091,11 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	// translation, so this adds no lookup. Only names that matched no agent
 	// are candidates (agent slugs take precedence).
 	var mentionedHumans []string
-	if humanNames := unresolvedMentionNames(mentionResults); len(humanNames) > 0 {
+	humanNames := opts.HumanMentionNames
+	if !opts.HumanMentionsResolved {
+		humanNames = unresolvedMentionNames(mentionResults)
+	}
+	if len(humanNames) > 0 {
 		mentionedHumans = mentionedHumanIDs(humanMembers, humanNames, user.ID())
 		s.recordHumanMentions(ctx, key, storeMsg.ID, mentionedHumans)
 	}
