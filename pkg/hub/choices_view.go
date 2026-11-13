@@ -103,37 +103,48 @@ func choiceAnswerMode(n int) string {
 // gains in history and SSE (design v5 5.1): every answer, in position
 // order.
 type ChoiceResponseSetView struct {
-	PromptMessageID string                    `json:"promptMessageId"`
+	PromptMessageID string                    `json:"promptMessageId,omitempty"`
 	BatchID         string                    `json:"batchId"`
 	Answers         []ChoiceResponseSetAnswer `json:"answers"`
 }
 
 // ChoiceResponseSetAnswer is one answer of a ChoiceResponseSetView.
 type ChoiceResponseSetAnswer struct {
-	RowID          string `json:"rowId"`
-	Ref            string `json:"ref"`
-	Key            string `json:"key"`
-	Version        int    `json:"version"`
-	Question       string `json:"question"`
-	ChoiceID       string `json:"choiceId"`
-	Label          string `json:"label"`
-	Provenance     string `json:"provenance"`
-	Outcome        string `json:"outcome"`
-	MatchedDefault bool   `json:"matchedDefault"`
+	RowID                string `json:"rowId"`
+	Ref                  string `json:"ref"`
+	Key                  string `json:"key"`
+	Version              int    `json:"version"`
+	Question             string `json:"question"`
+	ChoiceID             string `json:"choiceId"`
+	Label                string `json:"label"`
+	Provenance           string `json:"provenance"`
+	Outcome              string `json:"outcome"`
+	MatchedDefault       bool   `json:"matchedDefault"`
+	AnsweredByUserID     string `json:"answeredByUserId,omitempty"`
+	AnsweredByName       string `json:"answeredByName,omitempty"`
+	InterpretedByAgentID string `json:"interpretedByAgentId,omitempty"`
+	SourceMessageID      string `json:"sourceMessageId,omitempty"`
+	PromptMessageID      string `json:"promptMessageId,omitempty"`
+	PreviousChoiceLabel  string `json:"previousChoiceLabel,omitempty"`
 }
 
 // ChoiceResponseView is what a choice-response row gains in history and SSE.
 type ChoiceResponseView struct {
-	RowID           string `json:"rowId"`
-	Ref             string `json:"ref"`
-	Key             string `json:"key"`
-	Version         int    `json:"version"`
-	Question        string `json:"question"`
-	ChoiceID        string `json:"choiceId"`
-	Label           string `json:"label"`
-	Provenance      string `json:"provenance"`
-	PromptMessageID string `json:"promptMessageId"`
-	SourceMessageID string `json:"sourceMessageId,omitempty"`
+	RowID                string `json:"rowId"`
+	Ref                  string `json:"ref"`
+	Key                  string `json:"key"`
+	Version              int    `json:"version"`
+	Question             string `json:"question"`
+	ChoiceID             string `json:"choiceId"`
+	Label                string `json:"label"`
+	Provenance           string `json:"provenance"`
+	Outcome              string `json:"outcome,omitempty"`
+	AnsweredByUserID     string `json:"answeredByUserId,omitempty"`
+	AnsweredByName       string `json:"answeredByName,omitempty"`
+	InterpretedByAgentID string `json:"interpretedByAgentId,omitempty"`
+	PromptMessageID      string `json:"promptMessageId"`
+	SourceMessageID      string `json:"sourceMessageId,omitempty"`
+	PreviousChoiceLabel  string `json:"previousChoiceLabel,omitempty"`
 }
 
 // answerView converts a stored answer.
@@ -300,6 +311,36 @@ func (s *Server) choiceResponseViews(ctx context.Context, msgs []*store.Message)
 		}
 	}
 	prompts := s.decisionRows(ctx, rowIDs)
+	// When any response row overrides an interpreted answer, load its
+	// prompt's decisions with answers so PreviousChoiceLabel is populated
+	// on history reload just as on live SSE.
+	var overrideMsgIDs []string
+	seenMsgID := map[string]bool{}
+	for _, as := range byResponse {
+		for _, a := range as {
+			if a.Outcome != store.DecisionOutcomeOverride {
+				continue
+			}
+			if d := prompts[a.DecisionRowID]; d != nil && d.MessageID != "" && !seenMsgID[d.MessageID] {
+				seenMsgID[d.MessageID] = true
+				overrideMsgIDs = append(overrideMsgIDs, d.MessageID)
+			}
+		}
+	}
+	if len(overrideMsgIDs) > 0 {
+		if withAnswers, err := s.store.GetDecisionsByMessageIDs(ctx, overrideMsgIDs); err != nil {
+			slog.WarnContext(ctx, "choices: override decisions unreadable for history", "error", err)
+		} else {
+			if prompts == nil {
+				prompts = map[string]*store.Decision{}
+			}
+			for _, ds := range withAnswers {
+				for _, d := range ds {
+					prompts[d.ID] = d
+				}
+			}
+		}
+	}
 	out := map[string]ChoiceResponseView{}
 	var sets map[string]ChoiceResponseSetView
 	for id, as := range byResponse {
@@ -314,26 +355,93 @@ func (s *Server) choiceResponseViews(ctx context.Context, msgs []*store.Message)
 			continue
 		}
 		a := as[0]
-		v := ChoiceResponseView{
-			RowID:           a.DecisionRowID,
-			Ref:             a.AskerAgentID + "/" + a.Key,
-			Key:             a.Key,
-			Version:         a.Version,
-			Question:        a.QuestionText,
-			ChoiceID:        a.ChoiceID,
-			Label:           a.ChoiceLabel,
-			Provenance:      a.Provenance,
-			SourceMessageID: a.SourceMessageID,
-		}
-		if d := prompts[a.DecisionRowID]; d != nil {
-			v.PromptMessageID = d.MessageID
-		}
-		out[id] = v
+		out[id] = choiceResponseViewOf(a, prompts[a.DecisionRowID])
 	}
 	if len(out) == 0 {
 		out = nil
 	}
 	return out, sets
+}
+
+// answererDisplayName returns the stored display name of an answerer, falling
+// back to their email snapshot when no display name was recorded.
+func answererDisplayName(a *store.DecisionAnswer) string {
+	if a == nil {
+		return ""
+	}
+	if a.AnsweredByName != "" {
+		return a.AnsweredByName
+	}
+	return a.AnsweredByEmail
+}
+
+// previousChoiceLabel returns the label of d's interpreted answer when a
+// overrides it, or "".
+func previousChoiceLabel(a *store.DecisionAnswer, d *store.Decision) string {
+	if a == nil || a.Outcome != store.DecisionOutcomeOverride || d == nil {
+		return ""
+	}
+	for _, prev := range d.Answers {
+		if prev.Provenance == store.DecisionProvenanceAgentInterpreted {
+			return prev.ChoiceLabel
+		}
+	}
+	return ""
+}
+
+// choiceResponseViewOf builds the ChoiceResponseView of one answer and its
+// decision row (d may be nil if unreadable).
+func choiceResponseViewOf(a *store.DecisionAnswer, d *store.Decision) ChoiceResponseView {
+	v := ChoiceResponseView{
+		RowID:                a.DecisionRowID,
+		Ref:                  a.AskerAgentID + "/" + a.Key,
+		Key:                  a.Key,
+		Version:              a.Version,
+		Question:             a.QuestionText,
+		ChoiceID:             a.ChoiceID,
+		Label:                a.ChoiceLabel,
+		Provenance:           a.Provenance,
+		Outcome:              a.Outcome,
+		AnsweredByUserID:     a.AnsweredByUserID,
+		AnsweredByName:       answererDisplayName(a),
+		InterpretedByAgentID: a.InterpretedByAgentID,
+		SourceMessageID:      a.SourceMessageID,
+		PreviousChoiceLabel:  previousChoiceLabel(a, d),
+	}
+	if d != nil {
+		v.RowID = d.ID
+		v.Ref = d.Ref()
+		v.PromptMessageID = d.MessageID
+	}
+	return v
+}
+
+// choiceResponseSetAnswerOf builds one item of a ChoiceResponseSetView from a
+// stored answer and its decision row (d may be nil if unreadable).
+func choiceResponseSetAnswerOf(a *store.DecisionAnswer, d *store.Decision) ChoiceResponseSetAnswer {
+	item := ChoiceResponseSetAnswer{
+		RowID:                a.DecisionRowID,
+		Ref:                  a.AskerAgentID + "/" + a.Key,
+		Key:                  a.Key,
+		Version:              a.Version,
+		Question:             a.QuestionText,
+		ChoiceID:             a.ChoiceID,
+		Label:                a.ChoiceLabel,
+		Provenance:           a.Provenance,
+		Outcome:              a.Outcome,
+		MatchedDefault:       a.MatchedDefault,
+		AnsweredByUserID:     a.AnsweredByUserID,
+		AnsweredByName:       answererDisplayName(a),
+		InterpretedByAgentID: a.InterpretedByAgentID,
+		SourceMessageID:      a.SourceMessageID,
+		PreviousChoiceLabel:  previousChoiceLabel(a, d),
+	}
+	if d != nil {
+		item.RowID = d.ID
+		item.Ref = d.Ref()
+		item.PromptMessageID = d.MessageID
+	}
+	return item
 }
 
 // choiceResponseSetViewOf builds a set response's view from its answers,
@@ -351,24 +459,18 @@ func choiceResponseSetViewOf(as []*store.DecisionAnswer, prompts map[string]*sto
 		return pi < pj
 	})
 	v := ChoiceResponseSetView{BatchID: sorted[0].BatchID, Answers: make([]ChoiceResponseSetAnswer, 0, len(sorted))}
+	multiPrompt := false
 	for _, a := range sorted {
-		if v.PromptMessageID == "" {
-			if d := prompts[a.DecisionRowID]; d != nil {
-				v.PromptMessageID = d.MessageID
+		item := choiceResponseSetAnswerOf(a, prompts[a.DecisionRowID])
+		if item.PromptMessageID != "" {
+			if v.PromptMessageID == "" && !multiPrompt {
+				v.PromptMessageID = item.PromptMessageID
+			} else if v.PromptMessageID != item.PromptMessageID {
+				v.PromptMessageID = ""
+				multiPrompt = true
 			}
 		}
-		v.Answers = append(v.Answers, ChoiceResponseSetAnswer{
-			RowID:          a.DecisionRowID,
-			Ref:            a.AskerAgentID + "/" + a.Key,
-			Key:            a.Key,
-			Version:        a.Version,
-			Question:       a.QuestionText,
-			ChoiceID:       a.ChoiceID,
-			Label:          a.ChoiceLabel,
-			Provenance:     a.Provenance,
-			Outcome:        a.Outcome,
-			MatchedDefault: a.MatchedDefault,
-		})
+		v.Answers = append(v.Answers, item)
 	}
 	return v
 }
