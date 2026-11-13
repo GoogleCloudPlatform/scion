@@ -1155,7 +1155,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.decision.read",
 		Domain:      "chat",
-		Description: "Read one version of a choice prompt decision. Needs read access to the prompt's conversation (project:read for a thread; the caller in a user slot of a DM key). Agents, visitors and tokens get 403; a missing or unreadable decision is 404. 404 while web.chat_choices is off",
+		Description: "Read one version of a choice prompt decision. Needs read access to the prompt's conversation (stored chat_key, falling back to messages.thread_id: project:read for a thread; the caller in a user slot of a DM key), surviving chat retention purge of the prompt message. Agents, visitors and tokens get 403; a missing or unreadable decision is 404. 404 while web.chat_choices is off",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/decisions/{rowId}", Method: "GET"},
 		},
@@ -1175,7 +1175,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.decision.answer",
 		Domain:      "chat",
-		Description: "Answer a choice prompt decision by choice id (the label is copied from the stored row). Needs the right to send in the prompt's conversation (project:read and project.chat_post for a thread; for a DM, only the user in its key). Agents, visitors and tokens get 403, and so does a user other than the one an agent-interpreted answer records, or a user the asking agent takes no messages from (MESSAGE_DENIED, the chat send's check; a confirm is not delivered, so it is not checked). A replaced version or an answered one is 409, as is an idempotency key reused for another answer; the first answer wins. Records the answer and a choice-response message, delivers it to the asking agent and publishes choice.updated. 404 while web.chat_choices is off",
+		Description: "Answer a choice prompt decision by choice id (the label is copied from the stored row) with optional surface (native or decisions_page). Needs the right to send in the prompt's conversation (stored chat_key, falling back to messages.thread_id: project:read and project.chat_post for a thread; for a DM, only the user in its key), surviving chat retention purge of the prompt message. Agents, visitors and tokens get 403, and so does a user other than the one an agent-interpreted answer records, or a user the asking agent takes no messages from (MESSAGE_DENIED, the chat send's check; a confirm is not delivered, so it is not checked). A replaced version or an answered one is 409, as is an idempotency key reused for another answer; the first answer wins. Records the answer and a choice-response message, delivers it to the asking agent and publishes choice.updated. 404 while web.chat_choices is off",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/decisions/{rowId}/answer", Method: "POST"},
 		},
@@ -1212,7 +1212,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.choiceprompt.answer",
 		Domain:      "chat",
-		Description: "Answer every actionable decision of a choice prompt with two or more decisions as one set, by choice id (labels are copied from the stored rows). Needs the right to send in the prompt's conversation (project:read and project.chat_post for a thread; for a DM, only the user in its key). Agents and visitors get 403, tokens and other non-session credentials the session-only 403, and a user the asking agent takes no messages from 403 MESSAGE_DENIED (an all-confirm set is not delivered, so it is not checked). A missing or unreadable prompt is 404; a malformed set is 400; a set that does not equal the actionable set is 409 answer_set_changed with fresh views and a reason per row, and stores nothing; an idempotency key reused for other answers is 422. Records one answer per row with a shared batch id and one choice-response message in one transaction, delivers it to the asking agent and publishes choice.updated per row. 404 while web.chat_choices is off",
+		Description: "Answer every actionable decision of a choice prompt with two or more decisions as one set, by choice id (labels are copied from the stored rows) with optional surface (native or decisions_page). Needs the right to send in the prompt's conversation (stored chat_key, falling back to messages.thread_id: project:read and project.chat_post for a thread; for a DM, only the user in its key), surviving chat retention purge of the prompt message. Agents and visitors get 403, tokens and other non-session credentials the session-only 403, and a user the asking agent takes no messages from 403 MESSAGE_DENIED (an all-confirm set is not delivered, so it is not checked). A missing or unreadable prompt is 404; a malformed set is 400; a set that does not equal the actionable set is 409 answer_set_changed with fresh views and a reason per row, and stores nothing; an idempotency key reused for other answers is 422. Records one answer per row with a shared batch id and one choice-response message in one transaction, delivers it to the asking agent and publishes choice.updated per row. 404 while web.chat_choices is off",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/choice-prompts/{messageId}/answers", Method: "POST"},
 		},
@@ -1244,5 +1244,31 @@ var chatOperations = []OperationSpec{
 			{Package: "pkg/hub", Function: "TestChoiceSetAnswer_Authorization"},
 		},
 		Bearer: SessionOnly(ReasonInteractiveState),
+	},
+	{
+		ID:          "chat.projectdecisions.list",
+		Domain:      "chat",
+		Description: "List pending choice prompts or the append-only recorded answer log for a project, with live waitingOnYou and waitingOnOthers counts and filter facets. Needs project:read on the project, then scopes every prompt, log entry, count, and facet to conversations the caller can read (project topics plus the caller's own canonical DMs with project agents; a UAT token includes DMs only with inbox:read). Agents, visitors and non-session/non-UAT credentials get 403; unsupported methods get 405; 404 unless both web.project_decisions and web.chat_choices are on",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{id}/decisions", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "project-from-url",
+		BasePermission:   "project.read",
+		Effects:          []SecurityEffect{EffectListScoped},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden, DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestProjectDecisions_TokenAndCallerAuthz"},
+			{Package: "pkg/hub", Function: "TestProjectDecisions_DMPrivacyAcrossTabsCountsAndFacets"},
+		},
+		Bearer: BearerDisposition{
+			Kind:       BearerAdmit,
+			Target:     BearerTargetProjectPath,
+			Boundaries: []BearerBoundary{BearerBoundaryProject, BearerBoundaryHub},
+			Pin:        "TestProjectDecisions_TokenAndCallerAuthz",
+		},
 	},
 }

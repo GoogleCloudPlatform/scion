@@ -43,6 +43,7 @@ const (
 	projectSubRouteGitHub            projectSubRouteKind = "github"
 	projectSubRouteVisitors          projectSubRouteKind = "visitors"
 	projectSubRouteLeave             projectSubRouteKind = "leave"
+	projectSubRouteDecisions         projectSubRouteKind = "decisions"
 )
 
 // projectSubRouteTable lists every first path segment after
@@ -83,6 +84,7 @@ var projectSubRouteTable = map[string]projectSubRouteKind{
 	"git-identity":             projectSubRouteGitHub,
 	"visitors":                 projectSubRouteVisitors,
 	"leave":                    projectSubRouteLeave,
+	"decisions":                projectSubRouteDecisions,
 }
 
 // projectSubRouteListed reports whether subPath (the path after

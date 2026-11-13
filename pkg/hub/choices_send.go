@@ -211,12 +211,20 @@ func (s *Server) publishReplacedDecisions(ctx context.Context, res *store.Choice
 			s.messageLog.Warn("choices: replaced decision not found for choice.updated", "row_id", d.Replaced.RowID, "error", err)
 			continue
 		}
-		prompt, err := s.store.GetMessage(ctx, old.MessageID)
-		if err != nil {
-			s.messageLog.Warn("choices: replaced decision's prompt not found for choice.updated", "row_id", old.ID, "message_id", old.MessageID, "error", err)
+		chatKey := old.ChatKey
+		if chatKey == "" {
+			prompt, err := s.store.GetMessage(ctx, old.MessageID)
+			if err != nil {
+				s.messageLog.Warn("choices: replaced decision's prompt not found for choice.updated", "row_id", old.ID, "message_id", old.MessageID, "error", err)
+				continue
+			}
+			chatKey = prompt.ThreadID
+		}
+		if chatKey == "" {
+			s.messageLog.Warn("choices: replaced decision has no chat_key for choice.updated", "row_id", old.ID, "message_id", old.MessageID)
 			continue
 		}
-		s.publishChoiceUpdated(ctx, prompt, s.decisionViewFor(ctx, old))
+		s.publishChoiceUpdatedAt(ctx, old.ProjectID, old.MessageID, chatKey, s.decisionViewFor(ctx, old))
 	}
 }
 
