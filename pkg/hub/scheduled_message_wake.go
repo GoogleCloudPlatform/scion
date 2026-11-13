@@ -286,8 +286,8 @@ func (r *wakeFireRun) tryRecord(write func()) bool {
 // recordOrWait claims the run's outcome and executes write when unclaimed.
 // When the fire's own completion write is already in flight, it waits up to
 // ctx's deadline for that write to finish instead of blocking unboundedly,
-// returning wrote=false and whether the in-flight write completed in time.
-func (r *wakeFireRun) recordOrWait(ctx context.Context, write func()) (wrote bool, completed bool) {
+// returning whether the outcome write completed in time.
+func (r *wakeFireRun) recordOrWait(ctx context.Context, write func()) bool {
 	r.mu.Lock()
 	if !r.claimed {
 		r.claimed = true
@@ -296,15 +296,15 @@ func (r *wakeFireRun) recordOrWait(ctx context.Context, write func()) (wrote boo
 		r.mu.Unlock()
 		defer close(done)
 		write()
-		return true, true
+		return true
 	}
 	done := r.done
 	r.mu.Unlock()
 	select {
 	case <-done:
-		return false, true
+		return true
 	case <-ctx.Done():
-		return false, false
+		return false
 	}
 }
 
@@ -483,7 +483,7 @@ func (s *Server) recordAbandonedWakeFires(ctx context.Context) {
 				"event_id", r.eventID, "schedule_id", r.scheduleID)
 			continue
 		}
-		_, completed := r.recordOrWait(recordCtx, func() {
+		if !r.recordOrWait(recordCtx, func() {
 			msg := errScheduledWakeShutdown.Error()
 			if _, err := s.store.CompleteFiringScheduledEvent(
 				recordCtx, r.eventID, store.ScheduledEventFailed, time.Now(), msg, r.scheduleID, r.ranAt,
@@ -491,8 +491,7 @@ func (s *Server) recordAbandonedWakeFires(ctx context.Context) {
 				slog.Warn("Scheduled wake fire outcome write failed during shutdown",
 					"event_id", r.eventID, "schedule_id", r.scheduleID, "error", err)
 			}
-		})
-		if !completed {
+		}) {
 			slog.Warn("Scheduled wake fire outcome write still in flight when the shutdown record budget ran out",
 				"event_id", r.eventID, "schedule_id", r.scheduleID)
 		}
@@ -503,13 +502,23 @@ func (s *Server) recordAbandonedWakeFires(ctx context.Context) {
 // abandoned "firing" wake events.
 const scheduledWakeRecoveryBatchSize = 200
 
+// Timeouts shared between scheduled event execution, message dispatch, outcome
+// persistence, and scheduledWakeStuckAfter so the shared-store recovery cutoff
+// cannot drift below an active wake fire's budget.
+const (
+	scheduledEventHandlerTimeout    = 30 * time.Second
+	scheduledMessageDispatchTimeout = 30 * time.Second
+	scheduledEventRecordTimeout     = 10 * time.Second
+	scheduledWakeStuckSafetyMargin  = time.Minute
+)
+
 // scheduledWakeStuckAfter returns the maximum legitimate lifetime of an active
 // wake fire (pre-wake handler budget + wake budget + dispatch retry budget +
 // completion write budget + safety margin). On a shared multi-replica store,
 // only "firing" events older than this threshold are swept so another live
 // replica's active wake fire is never clobbered.
 func scheduledWakeStuckAfter() time.Duration {
-	return 30*time.Second + scheduledWakeBudget + 30*time.Second + 10*time.Second + time.Minute
+	return scheduledEventHandlerTimeout + scheduledWakeBudget + scheduledMessageDispatchTimeout + scheduledEventRecordTimeout + scheduledWakeStuckSafetyMargin
 }
 
 // recoverAbandonedWakeFiresOnStart runs startup recovery before the scheduler

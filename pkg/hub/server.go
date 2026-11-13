@@ -6138,7 +6138,7 @@ func (s *Server) messageEventHandler() EventHandler {
 			defer cancelDetached()
 			dispatchBase = detached
 		}
-		retryCtx, retryCancel := context.WithTimeout(dispatchBase, 30*time.Second)
+		retryCtx, retryCancel := context.WithTimeout(dispatchBase, scheduledMessageDispatchTimeout)
 		defer retryCancel()
 
 		if err := dispatchWithBrokerRetry(retryCtx, s.recordLog(), dispatcher, agent, payload.Message, payload.Interrupt, structuredMsg); err != nil {
@@ -7095,7 +7095,7 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 		s.runningWakeFires.remove(run)
 		msg := errScheduledWakeShuttingDown.Error()
 		log.Warn("schedule-evaluator: " + msg)
-		recordCtx, cancelRecord := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		recordCtx, cancelRecord := context.WithTimeout(context.WithoutCancel(ctx), scheduledEventRecordTimeout)
 		defer cancelRecord()
 		_, _ = s.store.CompleteFiringScheduledEvent(recordCtx, evt.ID, store.ScheduledEventFailed, time.Now(), msg, sched.ID, now)
 		return
@@ -7128,7 +7128,7 @@ func (s *Server) runScheduleFire(ctx context.Context, log *slog.Logger, sched st
 		// from the initiator attribution just copied onto evt above.
 		handlerCtx, cancel := context.WithTimeout(
 			ContextWithExecutor(ctx, ExecutorContext{Kind: "schedule_evaluator", ID: "schedule:" + sched.ID}),
-			30*time.Second)
+			scheduledEventHandlerTimeout)
 		// A wake fire runs on its own goroutine (executeSchedule), outside
 		// the scheduler's panic recovery: contain a handler panic here, as
 		// fireEvent does, and record it as the fire's failure.
@@ -7174,7 +7174,7 @@ func (s *Server) runScheduleFire(ctx context.Context, log *slog.Logger, sched st
 	// waking: record the outcome without touching next_run_at, so a late
 	// completion cannot rewind it.
 	run.tryRecord(func() {
-		recordCtx, cancelRecord := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		recordCtx, cancelRecord := context.WithTimeout(context.WithoutCancel(ctx), scheduledEventRecordTimeout)
 		defer cancelRecord()
 		_, _ = s.store.CompleteFiringScheduledEvent(recordCtx, evt.ID, status, firedAt, errMsg, sched.ID, now)
 	})

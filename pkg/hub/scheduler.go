@@ -593,7 +593,7 @@ func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, was
 		ctx, scope = withOneShotFireScope(ctx)
 		defer scope.finish()
 	}
-	handlerCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	handlerCtx, cancel := context.WithTimeout(ctx, scheduledEventHandlerTimeout)
 	defer cancel()
 
 	finalStatus := store.ScheduledEventFired
@@ -683,7 +683,7 @@ func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, was
 	}
 	persist := func() {
 		now := time.Now()
-		recordCtx, cancelRecord := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		recordCtx, cancelRecord := context.WithTimeout(context.WithoutCancel(ctx), scheduledEventRecordTimeout)
 		defer cancelRecord()
 		if wakeFire {
 			_, _ = s.store.CompleteFiringScheduledEvent(recordCtx, evt.ID, status, now, errMsg, "", time.Time{})
