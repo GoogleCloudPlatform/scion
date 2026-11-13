@@ -185,5 +185,8 @@ func TestPrintHomeResetWarning_Wraps(t *testing.T) {
 func TestReincarnateHelp_RecommendsDryRunForHarness(t *testing.T) {
 	assert.Contains(t, reincarnateCmd.Long, "--harness <harness-config>")
 	assert.Contains(t, reincarnateCmd.Long, "Run with\n--dry-run first")
+	long := strings.Join(strings.Fields(reincarnateCmd.Long), " ")
+	assert.NotContains(t, long, "docker, podman", "CLI help must not hard-code the Phase 1 local runtime list")
+	assert.Contains(t, long, "runtime broker advertises")
 	require.NotNil(t, reincarnateCmd.Flags().Lookup("harness"))
 }

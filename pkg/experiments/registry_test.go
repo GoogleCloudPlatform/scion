@@ -739,4 +739,10 @@ func TestReincarnateHarnessSwitchExperimentRegistered(t *testing.T) {
 	if e.Issue != "ptone/scion#7757" || e.Stage != StageAlpha {
 		t.Fatalf("unexpected registration: %+v", e)
 	}
+	if strings.Contains(e.Description, "docker, podman") {
+		t.Fatalf("Description still hard-codes the Phase 1 local runtime list: %q", e.Description)
+	}
+	if !strings.Contains(e.Description, "Runtime Broker advertises") {
+		t.Fatalf("Description should refer to the runtimes the Runtime Broker advertises: %q", e.Description)
+	}
 }

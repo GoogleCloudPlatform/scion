@@ -866,7 +866,7 @@ var compiled = []Experiment{
 	{
 		Name:        ReincarnateHarnessSwitch,
 		Title:       "Reincarnate harness switch",
-		Description: "Lets scion reincarnate --harness <harness-config> move an agent to another harness config in place, keeping its identity, workspace, branch, conversations and history. The agent's home directory is deleted and rebuilt for the new harness config: the harness session and transcripts, memory edits, tools and caches installed in the home, shell history and dotfile edits are lost, and there is no rollback; the handoff is the only continuity. The dry run and the real request both show this warning. Supported on the docker, podman and container runtimes. While it is off, a reincarnate request that names a harness config is refused with 400 experiment_disabled.",
+		Description: "Lets scion reincarnate --harness <harness-config> move an agent to another harness config in place, keeping its identity, workspace, branch, conversations and history. The agent's home directory is deleted and rebuilt for the new harness config: the harness session and transcripts, memory edits, tools and caches installed in the home, shell history and dotfile edits are lost, and there is no rollback; the handoff is the only continuity. The dry run and the real request both show this warning. Supported on the runtimes the agent's Runtime Broker advertises for home reset. While it is off, a reincarnate request that names a harness config is refused with 400 experiment_disabled.",
 		Default:     false,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,
