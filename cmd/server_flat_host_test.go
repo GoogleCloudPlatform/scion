@@ -301,7 +301,7 @@ func colocatedTestHost(t *testing.T, hubSrv *hub.Server, globalDir string, insts
 		ProbeScope: func(_ context.Context, inst config.V1RuntimeBrokerInstanceConfig, _ runtime.Runtime) (brokeridentity.ExecutionScope, error) {
 			return brokeridentity.ExecutionScope{Type: "docker", Docker: &brokeridentity.DockerScope{DaemonID: "daemon-" + inst.Key}}, nil
 		},
-		Activator: &colocatedFlatActivator{hubSrv: hubSrv, endpoint: "http://localhost:9800/"},
+		Activator: &colocatedFlatActivator{hubSrv: hubSrv, globalDir: globalDir, endpoint: "http://localhost:9800/"},
 		BuildServer: func(ic brokerhost.InstanceContext) (*runtimebroker.Server, error) {
 			cfg := runtimebroker.DefaultServerConfig()
 			cfg.BrokerID = ic.Identity.RuntimeBrokerID
@@ -912,4 +912,141 @@ func TestColocatedFlatActivation_NoAuthServiceRefused(t *testing.T) {
 	require.Len(t, st, 1)
 	assert.Equal(t, brokerhost.StateRefused, st[0].State)
 	assert.Equal(t, "credentials_unavailable", st[0].Reason)
+}
+
+func colocatedTestHostWithLocks(t *testing.T, hubSrv *hub.Server, globalDir string, locks *colocatedFlatLocks, now func() time.Time, insts ...config.V1RuntimeBrokerInstanceConfig) *brokerhost.Host {
+	t.Helper()
+	h, err := brokerhost.New(brokerhost.Config{
+		GlobalDir:  globalDir,
+		Instances:  insts,
+		Mode:       brokerhost.ModeColocated,
+		NewRuntime: newFlatInstanceRuntime,
+		ProbeScope: func(_ context.Context, inst config.V1RuntimeBrokerInstanceConfig, _ runtime.Runtime) (brokeridentity.ExecutionScope, error) {
+			return brokeridentity.ExecutionScope{Type: "docker", Docker: &brokeridentity.DockerScope{DaemonID: "daemon-" + inst.Key}}, nil
+		},
+		Activator: &colocatedFlatActivator{
+			hubSrv:    hubSrv,
+			globalDir: globalDir,
+			locks:     locks,
+			now:       now,
+			endpoint:  "http://localhost:9800/",
+		},
+		BuildServer: func(ic brokerhost.InstanceContext) (*runtimebroker.Server, error) {
+			cfg := runtimebroker.DefaultServerConfig()
+			cfg.BrokerID = ic.Identity.RuntimeBrokerID
+			cfg.StateDir = filepath.Join(globalDir, "state", ic.Identity.RuntimeBrokerID)
+			cfg.FlatInstance = &runtimebroker.FlatInstanceConfig{Identity: ic.Identity, Instance: ic.Instance, HubInProcess: true}
+			return runtimebroker.New(cfg, ic.Manager, ic.Runtime, config.RuntimeBuildRecord{}), nil
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, h.Prepare(context.Background()))
+	return h
+}
+
+// TestColocatedFlatActivation_RefusesSecondLiveProcessOnSharedDB: when one
+// co-located server process has an online flat instance with a fresh
+// heartbeat in a shared Hub store, a second server process with the same
+// instance identity is refused before touching the stored row or rotating
+// the first process's HMAC secret; once the heartbeat goes stale (or the
+// first process marks the row offline), activation succeeds cleanly
+// (ptone/scion#7626).
+func TestColocatedFlatActivation_RefusesSecondLiveProcessOnSharedDB(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	srv1 := flatAuthTestHub(t, s)
+	srv2 := flatAuthTestHub(t, s)
+	require.NotEqual(t, srv1.InstanceID(), srv2.InstanceID())
+	hubTS := httptest.NewServer(srv1.Handler())
+	t.Cleanup(hubTS.Close)
+
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+
+	id, firstSecret := colocatedCredentials(t, colocatedTestHost(t, srv1, dir1, colocatedTestInst))
+	require.Equal(t, http.StatusOK, hubSelfReadStatus(t, hubTS.URL, id, firstSecret))
+
+	// Copy the persisted instance identity onto the second host so both
+	// processes target the exact same flat Runtime Broker ID against s.
+	idBytes, err := os.ReadFile(filepath.Join(brokeridentity.InstanceDir(dir1, colocatedTestInst.Key), "identity.json"))
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(brokeridentity.InstanceDir(dir2, colocatedTestInst.Key), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(brokeridentity.InstanceDir(dir2, colocatedTestInst.Key), "identity.json"), idBytes, 0o600))
+
+	// Second process attempts activation while srv1's heartbeat is fresh: refused.
+	contending := colocatedTestHost(t, srv2, dir2, colocatedTestInst)
+	assert.Empty(t, contending.Active(), "second process must not activate an in-use flat instance")
+	st := contending.Status()
+	require.Len(t, st, 1)
+	assert.Equal(t, brokerhost.StateRefused, st[0].State)
+	assert.Equal(t, reasonColocatedInstanceInUse, st[0].Reason)
+	assertNoSecretIn(t, st[0].Error, firstSecret)
+	assert.Equal(t, http.StatusOK, hubSelfReadStatus(t, hubTS.URL, id, firstSecret), "srv1's live secret must remain valid")
+
+	// Once the stored heartbeat is older than flatColocatedActiveWindow, takeover succeeds.
+	beyondWindow := func() time.Time { return time.Now().Add(flatColocatedActiveWindow + time.Second) }
+	recovered := colocatedTestHostWithLocks(t, srv2, dir2, nil, beyondWindow, colocatedTestInst)
+	gotID, secondSecret := colocatedCredentials(t, recovered)
+	assert.Equal(t, id, gotID)
+	assert.False(t, firstSecret == secondSecret, "takeover after stale heartbeat rotates the secret")
+	assert.Equal(t, http.StatusUnauthorized, hubSelfReadStatus(t, hubTS.URL, id, firstSecret))
+	assert.Equal(t, http.StatusOK, hubSelfReadStatus(t, hubTS.URL, id, secondSecret))
+
+	// Graceful offline transition also permits immediate activation without waiting.
+	row, err := s.GetRuntimeBroker(ctx, id)
+	require.NoError(t, err)
+	row.Status = store.BrokerStatusOffline
+	require.NoError(t, s.UpdateRuntimeBroker(ctx, row))
+	afterStop := colocatedTestHost(t, srv1, dir1, colocatedTestInst)
+	_, thirdSecret := colocatedCredentials(t, afterStop)
+	assert.Equal(t, http.StatusOK, hubSelfReadStatus(t, hubTS.URL, id, thirdSecret))
+}
+
+// TestColocatedFlatActivation_LocalLockRefusesConcurrentAndAllowsCrashRestart:
+// a second process on the same globalDir is refused immediately while the
+// first process holds the local instance lock, and a crash restart on the
+// same globalDir (lock released by OS exit while DB still shows online +
+// ConnectedHubID of the dead Hub within the active window) recovers at once
+// without a 90s lockout (ptone/scion#7626).
+func TestColocatedFlatActivation_LocalLockRefusesConcurrentAndAllowsCrashRestart(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	srv1 := flatAuthTestHub(t, s)
+	hubTS := httptest.NewServer(srv1.Handler())
+	t.Cleanup(hubTS.Close)
+	globalDir := t.TempDir()
+
+	locks1 := &colocatedFlatLocks{}
+	t.Cleanup(func() { locks1.Stop(ctx) })
+	h1 := colocatedTestHostWithLocks(t, srv1, globalDir, locks1, nil, colocatedTestInst)
+	id, firstSecret := colocatedCredentials(t, h1)
+	require.NoError(t, s.ClaimRuntimeBrokerConnection(ctx, id, srv1.InstanceID(), "session-1"))
+	require.Equal(t, http.StatusOK, hubSelfReadStatus(t, hubTS.URL, id, firstSecret))
+
+	// Concurrent second server process on the same globalDir while locks1 is held: refused.
+	srv2 := flatAuthTestHub(t, s)
+	locks2 := &colocatedFlatLocks{}
+	t.Cleanup(func() { locks2.Stop(ctx) })
+	concurrent := colocatedTestHostWithLocks(t, srv2, globalDir, locks2, nil, colocatedTestInst)
+	assert.Empty(t, concurrent.Active())
+	require.Len(t, concurrent.Status(), 1)
+	assert.Equal(t, brokerhost.StateRefused, concurrent.Status()[0].State)
+	assert.Equal(t, reasonColocatedInstanceInUse, concurrent.Status()[0].Reason)
+	assert.Equal(t, http.StatusOK, hubSelfReadStatus(t, hubTS.URL, id, firstSecret), "live process secret untouched")
+
+	// Simulate SIGKILL of process 1: kernel releases file lock, while DB row
+	// still shows Status=online, fresh LastHeartbeat, and ConnectedHubID=srv1.
+	locks1.Stop(ctx)
+	row, err := s.GetRuntimeBroker(ctx, id)
+	require.NoError(t, err)
+	require.Equal(t, store.BrokerStatusOnline, row.Status)
+	require.NotNil(t, row.ConnectedHubID)
+	require.Equal(t, srv1.InstanceID(), *row.ConnectedHubID)
+
+	restarted := colocatedTestHostWithLocks(t, srv2, globalDir, locks2, nil, colocatedTestInst)
+	gotID, restartedSecret := colocatedCredentials(t, restarted)
+	assert.Equal(t, id, gotID)
+	assert.False(t, firstSecret == restartedSecret)
+	assert.Equal(t, http.StatusUnauthorized, hubSelfReadStatus(t, hubTS.URL, id, firstSecret))
+	assert.Equal(t, http.StatusOK, hubSelfReadStatus(t, hubTS.URL, id, restartedSecret))
 }

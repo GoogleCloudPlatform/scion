@@ -90,7 +90,7 @@ func isolateKubernetesEnv(t *testing.T) {
 // production runtime factory), with probe standing in for the Docker scope
 // probe. It returns the activated identity and stored row, or the refusal.
 func prepareFlatInstance(ctx context.Context, hubSrv *hub.Server, _ *runtime.DockerRuntime, inst config.V1RuntimeBrokerInstanceConfig, legacyIDs []string, globalDir string, opts hub.EmbeddedFlatRegistrationOptions, probe func(context.Context, string) (brokeridentity.ExecutionScope, error)) (*flatInstanceStartup, error) {
-	act := &recordingActivator{colocatedFlatActivator: &colocatedFlatActivator{hubSrv: hubSrv, endpoint: opts.Endpoint, autoProvide: opts.AutoProvide}}
+	act := &recordingActivator{colocatedFlatActivator: &colocatedFlatActivator{hubSrv: hubSrv, globalDir: globalDir, endpoint: opts.Endpoint, autoProvide: opts.AutoProvide}}
 	h, err := brokerhost.New(brokerhost.Config{
 		GlobalDir:  globalDir,
 		Instances:  []config.V1RuntimeBrokerInstanceConfig{inst},
