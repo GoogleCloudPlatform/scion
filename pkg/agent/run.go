@@ -2611,6 +2611,10 @@ authDone:
 		}
 	}
 
+	homeResetID, err := readHomeResetID(agentDir)
+	if err != nil {
+		return nil, err
+	}
 	runCfg := runtime.RunConfig{
 		Name:                   containerName(projectName, opts.Name),
 		PrivateGitConfigSource: privateGitConfigSource,
@@ -2797,6 +2801,7 @@ authDone:
 		SharedDirStorage:   sharedDirStorage,
 		HomeStorageBackend: homeStorageBackend,
 		HomeStorage:        homeStorage,
+		HomeResetID:        homeResetID,
 		BrokerMode:         opts.BrokerMode,
 		NoAuth:             noAuthActive,
 		NoAuthMessage: func() string {

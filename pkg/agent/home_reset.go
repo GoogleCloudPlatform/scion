@@ -16,12 +16,17 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 )
 
 // Home reset (a harness switch, ptone/scion#7757).
@@ -38,6 +43,9 @@ import (
 // reset of the agent's home. It persists: runtimes whose home is kept
 // elsewhere (an NFS leaf) compare their own copy against it.
 const homeResetRecordFile = "home-reset.json"
+
+// homeResetRecordMaxBytes bounds the small JSON record, including whitespace.
+const homeResetRecordMaxBytes = 1024
 
 // removingHomePrefix starts the name of a home moved aside by a reset. It
 // is in the home's parent, which is the agent directory for an in-project
@@ -120,4 +128,34 @@ func PurgeResetHomeResidueUnder(globalDir string, log *slog.Logger) {
 			}
 		}
 	}
+}
+
+// readHomeResetID returns the latest persistent reset ID. A damaged record
+// refuses the start so an NFS runtime cannot silently reuse the old home.
+func readHomeResetID(agentDir string) (string, error) {
+	tree, err := privatefs.OpenTree(agentDir, privatefs.TreeOptions{})
+	if err != nil {
+		return "", fmt.Errorf("open home reset record directory: %w", err)
+	}
+	defer func() { _ = tree.Close() }()
+	// Read one extra byte to reject oversized records even if their prefix is
+	// valid JSON. ReadPrivate rejects links, non-regular files and privacy errors.
+	data, err := tree.ReadPrivate(homeResetRecordFile, homeResetRecordMaxBytes+1)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read home reset record: %w", err)
+	}
+	if len(data) > homeResetRecordMaxBytes {
+		return "", fmt.Errorf("home reset record exceeds %d bytes", homeResetRecordMaxBytes)
+	}
+	var rec homeResetRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return "", fmt.Errorf("parse home reset record: %w", err)
+	}
+	if !api.ValidResetHomeID(rec.ResetID) {
+		return "", fmt.Errorf("invalid home reset ID in %s", homeResetRecordFile)
+	}
+	return rec.ResetID, nil
 }

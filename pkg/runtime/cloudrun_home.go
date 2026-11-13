@@ -27,6 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
 )
 
@@ -54,6 +55,10 @@ const (
 	cloudRunHomeMaxBytes   = 64 << 20
 	cloudRunHomeMaxDepth   = 32
 )
+
+// cloudRunHomeResetMarker is reserved runtime metadata, never copied from
+// the broker home or included in the harness-material removal list.
+const cloudRunHomeResetMarker = ".scion-home-reset-id"
 
 // cloudRunMemVolume is the in-memory instance volume, mounted at k8sMemDir,
 // that holds the harness secrets (k8sHarnessSecretsDir) and the harness
@@ -83,7 +88,7 @@ var cloudRunTempNameRE = regexp.MustCompile(`^\..+\.tmp-([0-9a-f]{16}|[0-9]+-[0-
 // cloudRunHomeCopyExcluded reports whether the home copy leaves out the
 // source entry rel (slash-separated, relative to the home).
 func cloudRunHomeCopyExcluded(rel string, excludes []string) bool {
-	return homeRelExcluded(rel, excludes) || cloudRunTempNameRE.MatchString(path.Base(rel))
+	return rel == cloudRunHomeResetMarker || homeRelExcluded(rel, excludes) || cloudRunTempNameRE.MatchString(path.Base(rel))
 }
 
 // CloudRunHomesWarning is the warning a broker logs at start, and scion
@@ -158,8 +163,10 @@ var cloudRunHomeRemovals = []string{harnessBundleSecretsRel, harnessBundleOutput
 // directories 0700 and every file written through a fresh O_EXCL|O_NOFOLLOW
 // temporary file, fchowned to uid:gid, mode capped (0755 for executables,
 // 0644 otherwise, no setuid, setgid or sticky), then renamed into place.
-// Files on the leaf that the copy does not write are kept. A link on the
-// leaf where a file or directory goes is replaced, never followed or
+// Files on the leaf that the copy does not write are kept unless a pending
+// home reset differs from the leaf marker: then the entire leaf is cleared
+// before seeding, and the marker is written only after provisioning succeeds.
+// A link on the leaf where a file or directory goes is replaced, never followed or
 // written through, and its target is never touched; replacements are
 // logged as a count. Any other entry of the wrong type refuses the start
 // and is logged by home-relative name. Links, special files and
@@ -188,6 +195,11 @@ func provisionCloudRunHome(cfg RunConfig, paths *cloudRunNFSProvisionPaths, uid,
 	}
 	defer func() { _ = leaf.Close() }()
 
+	reset, err := clearCloudRunHomeForReset(leaf, cfg.HomeResetID)
+	if err != nil {
+		return cloudRunHomeErr(agentID, "reset the home leaf", err)
+	}
+
 	excludes := cloudRunHomeExcludes(cfg)
 	res, err := leaf.SeedTree(src, agenthome.SeedOptions{
 		Exclude: func(rel string) bool { return cloudRunHomeCopyExcluded(rel, excludes) },
@@ -210,10 +222,53 @@ func provisionCloudRunHome(cfg RunConfig, paths *cloudRunNFSProvisionPaths, uid,
 			return cloudRunHomeErr(agentID, "remove harness material from the home leaf", err)
 		}
 	}
+	if reset {
+		if err := leaf.WriteFile(cloudRunHomeResetMarker, []byte(cfg.HomeResetID), 0o644); err != nil {
+			return cloudRunHomeErr(agentID, "record the home leaf reset", err)
+		}
+	}
 	runtimeLog().Info("Cloud Run start: agent home provisioned onto the share",
 		"agent_id", agentID, "dirs", res.Dirs, "files", res.Files, "bytes", res.Bytes,
 		"skipped", len(res.Skipped), "replaced_links", len(res.Replaced))
 	return nil
+}
+
+// cloudRunResetLeaf keeps the no-follow filesystem boundary injectable for
+// interrupted-clear tests. The production leaf is an agenthome.Home.
+type cloudRunResetLeaf interface {
+	ReadFile(string, int64) ([]byte, error)
+	ReadDir(string) ([]fs.FileInfo, error)
+	RemoveAll(string) error
+}
+
+// clearCloudRunHomeForReset clears every top-level entry, including an old
+// marker, when a reset is pending. The caller commits the new marker LAST,
+// after seeding and removing harness material, so any failure retries the
+// entire reset on the next start. With no pending reset the leaf is untouched.
+func clearCloudRunHomeForReset(leaf cloudRunResetLeaf, resetID string) (bool, error) {
+	if resetID == "" {
+		return false, nil
+	}
+	marker, err := leaf.ReadFile(cloudRunHomeResetMarker, 64)
+	// An agent can edit or replace this reserved entry. Invalid marker
+	// content or type is a mismatch, never a reason to follow a link.
+	invalidMarker := errors.Is(err, syscall.ELOOP) || errors.Is(err, dirfd.ErrNotSingleLinkRegular) || errors.Is(err, dirfd.ErrTooLarge)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) && !invalidMarker {
+		return false, err
+	}
+	if err == nil && string(marker) == resetID {
+		return false, nil
+	}
+	entries, err := leaf.ReadDir(".")
+	if err != nil {
+		return false, err
+	}
+	for _, entry := range entries {
+		if err := leaf.RemoveAll(entry.Name()); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 // cloudRunHomeErr logs a home copy failure without host paths and returns

@@ -196,3 +196,19 @@ func TestStart_WithoutReprovision_StoredTaskBehaviourUnchanged(t *testing.T) {
 		t.Fatalf("prompt.md = %q, want the stored task kept", got)
 	}
 }
+
+func TestStartPassesPersistentHomeResetID(t *testing.T) {
+	_, start, prompt := reprovisionPromptFixture(t, "task")
+	agentDir := filepath.Dir(prompt)
+	if got := start("task", false).HomeResetID; got != "" {
+		t.Fatalf("initial reset ID = %q", got)
+	}
+	if err := writeHomeResetRecord(agentDir, "reset-1"); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if got := start("task", false).HomeResetID; got != "reset-1" {
+			t.Fatalf("reset ID = %q", got)
+		}
+	}
+}
