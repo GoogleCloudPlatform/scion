@@ -384,6 +384,7 @@ describe('scion-page-admin-server-config — server.broker.instances (ptone/scio
     inputEvent(displayNameInput, 'Cluster A Prod');
 
     const nsInput = k8sCard.querySelector('[data-instance-field="namespace"]') as HTMLElement;
+    expect(nsInput.hasAttribute('disabled')).toBe(true);
     inputEvent(nsInput, 'agents-prod');
 
     // Update runtime_class_name in placement section
@@ -431,7 +432,7 @@ describe('scion-page-admin-server-config — server.broker.instances (ptone/scio
     expect(rt.type).toBe('kubernetes');
     expect(rt.display_name).toBe('Cluster A Prod');
     expect(rt.context).toBe('gke_acme_us-central1_cluster-a');
-    expect(rt.namespace).toBe('agents-prod');
+    expect(rt.namespace).toBe('agents');
     expect(rt.runtime_class_name).toBe('kata');
     expect(rt.node_selector).toEqual({ 'scion.dev/pool': 'agents' });
     expect(rt.tolerations).toEqual([
@@ -518,6 +519,102 @@ describe('scion-page-admin-server-config — server.broker.instances (ptone/scio
       key: 'cluster-b-agents',
       name: 'Cluster B Agents',
       runtime_target: { type: 'kubernetes' },
+    });
+  });
+
+  it('locks Kubernetes namespace and warns on context changes on saved instances while keeping both editable on new instances', async () => {
+    const puts: Record<string, unknown>[] = [];
+    element = await mountConfig(makeConfig({ settings_tier: 'file' }), puts);
+
+    const savedCards = Array.from(
+      element.shadowRoot?.querySelectorAll('[data-broker-instance-card]') ?? []
+    );
+    expect(savedCards.length).toBe(2);
+
+    const savedK8sCard = savedCards[1]!;
+    const savedNsInput = savedK8sCard.querySelector(
+      '[data-instance-field="namespace"]'
+    ) as HTMLElement;
+    const savedCtxInput = savedK8sCard.querySelector(
+      '[data-instance-field="context"]'
+    ) as HTMLElement;
+    expect(savedNsInput.hasAttribute('disabled')).toBe(true);
+    expect(savedCtxInput.hasAttribute('disabled')).toBe(false);
+    expect(savedK8sCard.textContent).toContain(
+      'Fixed once saved (namespace is part of target identity'
+    );
+    expect(savedK8sCard.textContent).toContain('same cluster UID');
+    expect(
+      savedK8sCard.querySelector('[data-broker-instance-identity-warning="context"]')
+    ).toBeNull();
+
+    // Programmatic sl-input on locked namespace is ignored as a no-op:
+    inputEvent(savedNsInput, 'hijacked-namespace');
+    await element.updateComplete;
+
+    // Editing context on a saved row shows an explicit cluster-UID identity warning:
+    inputEvent(savedCtxInput, 'gke_acme_us-central1_cluster-a-renamed');
+    await element.updateComplete;
+    const ctxWarning = savedK8sCard.querySelector(
+      '[data-broker-instance-identity-warning="context"]'
+    );
+    expect(ctxWarning).toBeTruthy();
+    expect(ctxWarning?.textContent).toContain('target identity');
+    expect(ctxWarning?.textContent).toContain('new instance key');
+
+    // Reverting context clears the warning; re-applying keeps same-cluster context renames saveable:
+    inputEvent(savedCtxInput, 'gke_acme_us-central1_cluster-a');
+    await element.updateComplete;
+    expect(
+      savedK8sCard.querySelector('[data-broker-instance-identity-warning="context"]')
+    ).toBeNull();
+    inputEvent(savedCtxInput, 'gke_acme_us-central1_cluster-a-renamed');
+    await element.updateComplete;
+
+    // Newly added Kubernetes instance keeps both namespace and context editable with no saved warning:
+    const section = element.shadowRoot?.querySelector('[data-broker-instances-section]');
+    expect(section).toBeTruthy();
+    (section!.querySelector('[data-add-broker-instance]') as HTMLElement).click();
+    await element.updateComplete;
+
+    const allCards = Array.from(
+      element.shadowRoot?.querySelectorAll('[data-broker-instance-card]') ?? []
+    );
+    const newCard = allCards[2]!;
+    inputEvent(newCard.querySelector('[data-instance-field="key"]')!, 'cluster-b-agents');
+    inputEvent(newCard.querySelector('[data-instance-field="name"]')!, 'Cluster B Agents');
+    changeEvent(newCard.querySelector('[data-instance-field="type"]')!, 'kubernetes');
+    await element.updateComplete;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await element.updateComplete;
+
+    const newNsInput = newCard.querySelector('[data-instance-field="namespace"]')!;
+    const newCtxInput = newCard.querySelector('[data-instance-field="context"]')!;
+    expect(newNsInput.hasAttribute('disabled')).toBe(false);
+    expect(newCtxInput.hasAttribute('disabled')).toBe(false);
+
+    inputEvent(newNsInput, 'agents-b');
+    inputEvent(newCtxInput, 'gke_acme_us-central1_cluster-b');
+    await element.updateComplete;
+    expect(newCard.querySelector('[data-broker-instance-identity-warning="context"]')).toBeNull();
+
+    await clickSave(element);
+    expect(puts.length).toBe(1);
+    const sent = valueAtPath(puts[0], ['server', 'broker', 'instances']).value as Array<
+      Record<string, unknown>
+    >;
+    expect(sent.length).toBe(3);
+    const savedRt = sent[1]!.runtime_target as Record<string, unknown>;
+    expect(savedRt.namespace).toBe('agents');
+    expect(savedRt.context).toBe('gke_acme_us-central1_cluster-a-renamed');
+    expect(sent[2]!).toEqual({
+      key: 'cluster-b-agents',
+      name: 'Cluster B Agents',
+      runtime_target: {
+        type: 'kubernetes',
+        namespace: 'agents-b',
+        context: 'gke_acme_us-central1_cluster-b',
+      },
     });
   });
 
