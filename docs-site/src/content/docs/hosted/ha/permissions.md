@@ -206,8 +206,10 @@ Token requests are not logged on every request at the default log level. What th
 - **Token minted.** The Hub logs a `GCP token audit event` on the `hub.audit` subsystem at DEBUG level, with `event_type` (`gcp_access_token` or `gcp_identity_token`), `success: true`, `agent_id`, `project_id`, `sa_email` and `sa_id`. At the default `info` level this record is not written. To keep it, raise that subsystem to DEBUG, for example `SCION_LOG_LEVEL=info,hub.audit=debug` (see [Controlling the Log Level](/scion/hosted/single-node/observability/#controlling-the-log-level)).
 - **Token generation failed.** When the request passes every check but the call to GCP to generate the token fails, the Hub logs the same event at WARN level, with `success: false` and a `fail_reason`.
 - **`gcp_service_account.use` refused.** The Hub logs `GCP token mint refused: service account use not authorized` at INFO level, with the agent, the service account and the deny cause.
-- **`actAs` check.** In `enforce` mode, the `actAs` check writes its own record at INFO level when it allows and at WARN level when it denies or is indeterminate.
-- **Other refusals.** A request refused earlier (rate limit, agent not in good standing, no GCP identity assigned, missing token scope) gets an error response but no `GCP token audit event`.
+- **`actAs` check.** In `enforce` mode, the `actAs` check writes its own `SA assignment audit event` on every request that reaches it, before the token is generated: at INFO level when it allows and at WARN level when it denies or is indeterminate. The record names the recorded source as the caller, the service account and the surface `agent-gcp-token-mint`, but not the agent.
+- **Other refusals.** Other refused requests (for example a rate limit, an agent not in good standing, or a missing token scope) get an error response but no `GCP token audit event`.
+
+Only the `GCP token audit event` is logged on the `hub.audit` subsystem. The `gcp_service_account.use` refusal line and the `actAs` `SA assignment audit event` are not, so filtering on `hub.audit` misses refusals.
 
 The `gcp_service_account.use` decision is not written to the authorization decision log (experiment `hub.authorization_decision_audit_v2`), which records decisions on projects and agents only.
 
