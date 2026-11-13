@@ -2361,6 +2361,18 @@ export class ScionPageProjectSettings extends LitElement {
         );
       }
 
+      if (response.status === 200) {
+        const body = (await response.json().catch(() => null)) as {
+          storageKept?: Array<{ code?: string; message?: string }>;
+        } | null;
+        const keptMessages = (body?.storageKept ?? [])
+          .map((item) => item.message?.trim() ?? '')
+          .filter((msg) => msg.length > 0);
+        if (keptMessages.length > 0) {
+          showToast(`Project "${projectName}" deleted. ${keptMessages.join(' ')}`, 'warning');
+        }
+      }
+
       // Navigate back to projects list
       navigateTo('/projects');
     } catch (err) {
@@ -3904,6 +3916,7 @@ export class ScionPageProjectSettings extends LitElement {
         </div>
         <div class="delete-actions">
           <sl-button
+            data-delete-project
             variant="danger"
             size="small"
             ?loading=${this.deleteLoading}

@@ -19,10 +19,12 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -58,6 +60,19 @@ func requireSharedStorageKeptBody(t *testing.T, rec *httptest.ResponseRecorder) 
 	require.Len(t, got.StorageKept, 1, "body: %s", rec.Body.String())
 	assert.Equal(t, "shared-project-storage", got.StorageKept[0].Code)
 	assert.Equal(t, "The Hub cannot see the shared project storage, so the deleted project's shared tree was kept. Hub health reports the shared project storage as not ready on nfs while the Hub has projects, and as degraded on the other shared backends.", got.StorageKept[0].Message)
+}
+
+// requireBrokerDirKeptBody checks a 200 project delete body when one or more
+// Runtime Brokers declined directory cleanup with 409 Conflict
+// (ptone/scion#4474).
+func requireBrokerDirKeptBody(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var got projectDeleteResult
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got), "body: %s", rec.Body.String())
+	require.Len(t, got.StorageKept, 1, "body: %s", rec.Body.String())
+	assert.Equal(t, "runtime-broker-project-directory", got.StorageKept[0].Code)
+	assert.Equal(t, projectDeleteBrokerDirKeptMessage, got.StorageKept[0].Message)
 }
 
 // When the Hub cannot see the shared project storage (the share is not
@@ -131,4 +146,155 @@ func TestDeleteProject_SharedStorageProbeHangs_ReportsKept(t *testing.T) {
 	requireSharedStorageKeptBody(t, rec)
 	assert.Less(t, elapsed, 10*time.Second, "the delete must not wait for the hung probe")
 	e.srv.storageCleanupWG.Wait()
+}
+
+// ptone/scion#4474: when a Runtime Broker declines directory cleanup with 409
+// Conflict (another flat instance on the same host or a remaining agent still
+// uses the shared directory), DELETE /api/v1/projects/{id} commits the delete
+// and answers 200 OK with a path-free, ID-free storageKept item across both
+// Hub dispatch paths (direct HTTP and HybridBrokerClient control-channel /
+// Conduit tunnels).
+func TestDeleteProject_BrokerDeclinesDirectoryCleanup409_ReportsKept(t *testing.T) {
+	setupProjectWithBroker := func(t *testing.T, suffix, endpoint string) (*Server, store.Store, *store.Project, *store.RuntimeBroker) {
+		t.Helper()
+		srv, s := testServer(t)
+		ctx := context.Background()
+		project := &store.Project{
+			ID:   tid("project-broker-kept-" + suffix),
+			Slug: "broker-kept-" + suffix,
+			Name: "Broker Kept " + suffix,
+		}
+		require.NoError(t, s.CreateProject(ctx, project))
+		broker := &store.RuntimeBroker{
+			ID:       tid("broker-kept-" + suffix),
+			Slug:     "broker-kept-slug-" + suffix,
+			Name:     "Broker Kept " + suffix,
+			Status:   store.BrokerStatusOnline,
+			Endpoint: endpoint,
+		}
+		require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+		require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+			ProjectID:  project.ID,
+			BrokerID:   broker.ID,
+			BrokerName: broker.Name,
+			LinkedBy:   "test",
+		}))
+		return srv, s, project, broker
+	}
+
+	assertNoLeaks := func(t *testing.T, body string, leaks ...string) {
+		t.Helper()
+		for _, leak := range leaks {
+			if leak != "" {
+				assert.NotContains(t, body, leak, "response must not leak %q", leak)
+			}
+		}
+	}
+
+	t.Run("direct HTTP broker client", func(t *testing.T) {
+		var httpCalls atomic.Int32
+		brokerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			httpCalls.Add(1)
+			assert.Equal(t, http.MethodDelete, r.Method)
+			assert.Equal(t, "/api/v1/projects/broker-kept-http", r.URL.Path)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":{"code":"conflict","message":"another instance at /var/lib/scion/projects/broker-kept-http still uses this directory"}}`))
+		}))
+		t.Cleanup(brokerSrv.Close)
+
+		srv, s, project, broker := setupProjectWithBroker(t, "http", brokerSrv.URL)
+		srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, NewHTTPRuntimeBrokerClient(), false, slog.Default()))
+
+		rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID, nil)
+		requireBrokerDirKeptBody(t, rec)
+		assert.EqualValues(t, 1, httpCalls.Load())
+		assertNoLeaks(t, rec.Body.String(),
+			"/var/lib/scion", brokerSrv.URL, broker.ID, broker.Slug, project.ID, project.Slug, "projects/")
+
+		_, err := s.GetProject(context.Background(), project.ID)
+		assert.ErrorIs(t, err, store.ErrNotFound)
+	})
+
+	t.Run("HybridBrokerClient control-channel and Conduit tunnels", func(t *testing.T) {
+		runOverHubTunnels(t, func(t *testing.T, tr hubTunnelTransport) {
+			srv, s, project, broker := setupProjectWithBroker(t, "cc-"+tr.name, "http://unreachable-broker.invalid:9800")
+			tunnel := &mockControlChannelTunnel{
+				connected: true,
+				status:    http.StatusConflict,
+				body:      []byte(`{"error":{"code":"conflict","message":"kept at /srv/scion/projects/secret"}}`),
+			}
+			fallbackHTTP := &countingBrokerClient{}
+			hybrid := &HybridBrokerClient{
+				controlChannel: &ControlChannelBrokerClient{manager: tr.wrap(t, tunnel)},
+				httpClient:     fallbackHTTP,
+			}
+			srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, hybrid, false, slog.Default()))
+
+			rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID, nil)
+			requireBrokerDirKeptBody(t, rec)
+			assert.Zero(t, fallbackHTTP.count(), "cleanup must route over the control-channel tunnel, not HTTP")
+			require.NotNil(t, tunnel.lastRequest)
+			assert.Equal(t, http.MethodDelete, tunnel.lastRequest.Method)
+			assert.Equal(t, "/api/v1/projects/"+project.Slug+"?project_id="+project.ID, tunnel.lastRequest.Path)
+			assertNoLeaks(t, rec.Body.String(),
+				"/srv/scion", broker.Endpoint, broker.ID, broker.Slug, project.ID, project.Slug, "projects/")
+
+			_, err := s.GetProject(context.Background(), project.ID)
+			assert.ErrorIs(t, err, store.ErrNotFound)
+		})
+	})
+
+	t.Run("HybridBrokerClient routed Conduit RPC path", func(t *testing.T) {
+		runOverHubTunnels(t, func(t *testing.T, tr hubTunnelTransport) {
+			srv, s, project, broker := setupProjectWithBroker(t, "routed-"+tr.name, "http://unreachable-broker.invalid:9800")
+			routedTunnel := &mockControlChannelTunnel{
+				connected: true,
+				status:    http.StatusConflict,
+				body:      []byte(`{"error":{"code":"conflict","message":"kept by sibling flat instance"}}`),
+			}
+			disconnectedLocal := &mockControlChannelTunnel{connected: false}
+			fallbackHTTP := &countingBrokerClient{}
+			hybrid := &HybridBrokerClient{
+				routed:         &ControlChannelBrokerClient{manager: tr.wrap(t, routedTunnel)},
+				controlChannel: &ControlChannelBrokerClient{manager: tr.wrap(t, disconnectedLocal)},
+				httpClient:     fallbackHTTP,
+			}
+			srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, hybrid, false, slog.Default()))
+
+			rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID, nil)
+			requireBrokerDirKeptBody(t, rec)
+			assert.Zero(t, fallbackHTTP.count(), "cleanup must be handled by the routed Conduit client")
+			require.NotNil(t, routedTunnel.lastRequest)
+			assertNoLeaks(t, rec.Body.String(), broker.Endpoint, broker.ID, project.ID, project.Slug)
+		})
+	})
+
+	t.Run("multiple brokers returning 409 emit a single storageKept item", func(t *testing.T) {
+		srv, s, project, _ := setupProjectWithBroker(t, "multi", "http://broker1:9800")
+		ctx := context.Background()
+		broker2 := &store.RuntimeBroker{
+			ID:       tid("broker-kept-multi-2"),
+			Slug:     "broker-kept-slug-multi-2",
+			Name:     "Broker Kept Multi 2",
+			Status:   store.BrokerStatusOnline,
+			Endpoint: "http://broker2:9800",
+		}
+		require.NoError(t, s.CreateRuntimeBroker(ctx, broker2))
+		require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+			ProjectID:  project.ID,
+			BrokerID:   broker2.ID,
+			BrokerName: broker2.Name,
+			LinkedBy:   "test",
+		}))
+		mockClient := &mockRuntimeBrokerClient{cleanupErr: &brokerStatusError{
+			StatusCode: http.StatusConflict,
+			Body:       `{"error":{"code":"conflict","message":"kept"}}`,
+		}}
+		srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, mockClient, false, slog.Default()))
+
+		rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID, nil)
+		requireBrokerDirKeptBody(t, rec)
+		assert.Equal(t, 2, mockClient.cleanupCalls)
+	})
 }

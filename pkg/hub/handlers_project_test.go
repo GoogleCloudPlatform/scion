@@ -851,7 +851,7 @@ func TestDeleteProject_Forced_BrokerKeepsDirIsAuditedNotFailed(t *testing.T) {
 	srv.projectsLog = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID+"?force=true", nil)
-	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	requireBrokerDirKeptBody(t, rec)
 
 	_, err := s.GetProject(ctx, project.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound, "the forced delete stands")
