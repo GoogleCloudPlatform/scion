@@ -12321,6 +12321,7 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestGlobalTemplateWrite_RequiresTwinSelectorAndHubBoundary`
 
 ---
 
@@ -12359,6 +12360,7 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestGlobalTemplateWrite_RequiresTwinSelectorAndHubBoundary`
 
 ---
 
@@ -12398,6 +12400,7 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestGlobalTemplateWrite_RequiresTwinSelectorAndHubBoundary`
 
 ---
 

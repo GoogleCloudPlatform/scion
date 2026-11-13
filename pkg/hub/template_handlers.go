@@ -387,7 +387,7 @@ func (s *Server) canCreateTemplateInScope(ctx context.Context, scope, scopeID, p
 	switch scope {
 	case store.TemplateScopeUser:
 		userIdent := GetUserIdentityFromContext(ctx)
-		if userIdent == nil || userIdent.IsFederated() {
+		if userIdent == nil || isFederatedCaller(ctx) {
 			return false
 		}
 		if scopeID != "" && scopeID != userIdent.ID() {

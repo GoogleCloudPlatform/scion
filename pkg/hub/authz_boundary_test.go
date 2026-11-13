@@ -207,18 +207,17 @@ func TestResolveTargetScope_CollectionLevelEvidence(t *testing.T) {
 // builds the Resource through the actual production constructors
 // (templateScopeResource/templateUserScopeResource/harnessConfigScopeResource)
 // rather than hand literals, covering every scope those constructors
-// produce for template.create/harness_config.create: unlike skill, a single
-// permission ID covers project, global and user scope for these two
-// resource types (there is no separate *_create_global permission), so all
-// three must resolve correctly through collection evidence.
+// produce: global template create uses template.create_global, user and
+// project template create use template.create, and harness_config.create
+// covers global and project scope.
 func TestResolveTargetScope_TemplateAndHarnessConfigCreate_EveryScope_ViaRealConstructors(t *testing.T) {
 	user := NewAuthenticatedUser(tid("ttc-user"), "ttc@test.com", "u", store.UserRoleMember, "api")
 
 	got := ResolveTargetScope(templateScopeResource(store.TemplateScopeGlobal, ""), TargetScopeEvidence{
-		IsCollectionLevel: true, CollectionScope: TargetScopeHub, PermissionID: "template.create",
+		IsCollectionLevel: true, CollectionScope: TargetScopeHub, PermissionID: "template.create_global",
 	})
 	if got.Kind != TargetScopeHub {
-		t.Errorf("template.create via templateScopeResource(global): got %+v, want Hub", got)
+		t.Errorf("template.create_global via templateScopeResource(global): got %+v, want Hub", got)
 	}
 
 	got = ResolveTargetScope(templateUserScopeResource(user), TargetScopeEvidence{

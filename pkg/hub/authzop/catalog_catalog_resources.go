@@ -647,6 +647,7 @@ var catalogResourceOperations = []OperationSpec{
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestGlobalTemplateWrite_RequiresTwinSelectorAndHubBoundary"},
 		},
 		Bearer: AdmitOn(BearerTargetHubCollection, BearerBoundaryHub),
 	},
@@ -673,6 +674,7 @@ var catalogResourceOperations = []OperationSpec{
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestGlobalTemplateWrite_RequiresTwinSelectorAndHubBoundary"},
 		},
 		Bearer: AdmitOn(BearerTargetCatalogRecord, BearerBoundaryHub),
 	},
@@ -699,6 +701,7 @@ var catalogResourceOperations = []OperationSpec{
 		DenialCodes: []DenialCode{DenialForbidden},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestGlobalTemplateWrite_RequiresTwinSelectorAndHubBoundary"},
 		},
 		Bearer: AdmitOn(BearerTargetCatalogRecord, BearerBoundaryHub),
 	},

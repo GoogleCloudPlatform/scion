@@ -447,10 +447,11 @@ func TestUserScopeImport_RequiresCreateSelector(t *testing.T) {
 
 // TestUserScopeVariants_GlobalBranchNeedsItsOwnSelector pins that the
 // global branches of the routes whose user-scope branch admits tokens need
-// their own selector: a hub token of a super-admin holding skill:create is
-// refused a global skill create, which needs skill:create_global, and a
-// global import or discovery of one kind is refused with the other kind's
-// create selector.
+// their own selector: a hub token of a super-admin holding skill:create or
+// template:create is refused a global skill or template create, which needs
+// skill:create_global or template:create_global, and a global import or
+// discovery of one kind is refused with plain template:create or the other
+// kind's create selector.
 func TestUserScopeVariants_GlobalBranchNeedsItsOwnSelector(t *testing.T) {
 	srv, s := testServer(t)
 	srv.SetStorage(newMockStorage("us-storage"))
@@ -462,7 +463,15 @@ func TestUserScopeVariants_GlobalBranchNeedsItsOwnSelector(t *testing.T) {
 	rec := callWithKey(t, srv, skillToken, http.MethodPost, "/api/v1/skills", CreateSkillRequest{Name: "us-global-skill", Scope: store.SkillScopeGlobal})
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 
-	for _, k := range []struct{ kind, otherSelector string }{{"template", "harness_config:create"}, {"harness-config", "template:create"}} {
+	tmplToken := mintHubConfigToken(t, srv, adminID, hubBoundary(), "template:create")
+	rec = callWithKey(t, srv, tmplToken, http.MethodPost, "/api/v1/templates", CreateTemplateRequest{Name: "us-global-tmpl", Harness: "claude", Scope: store.TemplateScopeGlobal})
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+	for _, k := range []struct{ kind, otherSelector string }{
+		{"template", "template:create"},
+		{"template", "harness_config:create"},
+		{"harness-config", "template:create"},
+	} {
 		key := mintHubConfigToken(t, srv, adminID, hubBoundary(), k.otherSelector)
 		body := map[string]string{"kind": k.kind, "scope": "global", "sourceUrl": "https://example.invalid/us-global"}
 		for _, path := range []string{"/api/v1/resources/import", "/api/v1/resources/discover"} {

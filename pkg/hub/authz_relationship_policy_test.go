@@ -63,7 +63,7 @@ var relationshipOwnerExcluded = map[relationshipAllowKey][]string{
 		"project.clone", "project.list", "project.secret_read", "project.manage_visitors",
 		"project.chat_post",
 	},
-	{"owner", "user", "template"}:       {},
+	{"owner", "user", "template"}:       {"template.create_global", "template.update_global", "template.delete_global"},
 	{"owner", "user", "harness_config"}: {},
 	{"owner", "user", "group"}:          {},
 	// broker.auto_provide offers a broker to every project; it is held by
