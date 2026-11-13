@@ -36,7 +36,7 @@ async function globalSetup(): Promise<void> {
     env: {
       SCION_IMAGE_REGISTRY: 'registry.invalid/scion-e2e',
     },
-    experiments: ['web.chat_choices'],
+    experiments: ['web.chat_choices', 'web.project_decisions'],
   });
   console.info(`[setup] Chat-choices real hub ${String(state.hubId)} at ${state.baseURL}`);
 }
