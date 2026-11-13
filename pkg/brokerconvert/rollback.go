@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 
 	yamlv3 "gopkg.in/yaml.v3"
 
@@ -100,13 +101,28 @@ func (r *run) rollbackHub() ([]string, *Refusal) {
 		return nil, ref
 	}
 	// 1. No flat instance may have a non-terminal agent.
+	var blocking []AgentEntry
+	seenAgents := map[string]bool{}
 	for _, it := range j.Register {
 		if it.BrokerID == "" {
 			continue
 		}
 		if ref := r.drained(it.BrokerID, RefuseInstanceDrained); ref != nil {
-			return nil, ref
+			if ref.Code != RefuseInstanceDrained {
+				return nil, ref
+			}
+			for _, a := range ref.Agents {
+				if !seenAgents[a.ID] {
+					seenAgents[a.ID] = true
+					blocking = append(blocking, a)
+				}
+			}
 		}
+	}
+	if len(blocking) > 0 {
+		ref := refuse(RefuseInstanceDrained)
+		ref.Agents = blocking
+		return nil, ref
 	}
 
 	if j.Rollback == nil {
@@ -156,6 +172,7 @@ func (r *run) rollbackLocal() *Refusal {
 // named for it.
 func (r *run) fillRegisteredIDs() ([]string, *Refusal) {
 	var notes []string
+	var badKeys []string
 	changed := false
 	for i := range r.j.Register {
 		it := &r.j.Register[i]
@@ -164,9 +181,8 @@ func (r *run) fillRegisteredIDs() ([]string, *Refusal) {
 		}
 		id, ok, err := identityBrokerID(r.env.GlobalDir, it.Key)
 		if err != nil {
-			ref := refuse(RefuseIdentityUnreadable)
-			ref.Keys = []string{it.Key}
-			return nil, ref
+			badKeys = append(badKeys, it.Key)
+			continue
 		}
 		if !ok {
 			notes = append(notes, NoteNoIdentity+" "+it.Key)
@@ -174,6 +190,11 @@ func (r *run) fillRegisteredIDs() ([]string, *Refusal) {
 		}
 		it.BrokerID = id
 		changed = true
+	}
+	if len(badKeys) > 0 {
+		ref := refuse(RefuseIdentityUnreadable)
+		ref.Keys = badKeys
+		return nil, ref
 	}
 	if changed {
 		if ref := r.save(); ref != nil {
@@ -268,7 +289,20 @@ func (r *run) rollbackProjects() *Refusal {
 			}
 		}
 		if err == nil && proj != nil {
-			for _, id := range ap.Linked {
+			unlink := append([]string{}, ap.Linked...)
+			if ap.State != StepDone {
+				// An interrupted apply may have added provider links before
+				// saving Linked; RemoveProvider ignores 404 for unadded ones.
+				var extra []string
+				for id := range instances {
+					if !contains(unlink, id) {
+						extra = append(extra, id)
+					}
+				}
+				sort.Strings(extra)
+				unlink = append(unlink, extra...)
+			}
+			for _, id := range unlink {
 				if err := c.RemoveProvider(r.ctx, rp.ProjectID, id); err != nil && !isNotFound(err) {
 					return r.failRollbackProject(rp, refuseHub(RefuseHubRequest, err))
 				}

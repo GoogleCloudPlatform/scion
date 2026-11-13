@@ -106,8 +106,8 @@ func (r *run) save() *Refusal {
 	return nil
 }
 
-// Apply converts the drained legacy host to the plan's instance (design
-// sections 4.1 to 4.7, one instance, remote registration). It holds the
+// Apply converts the drained legacy host to the plan's instances (design
+// sections 4.1 to 4.7, remote registration). It holds the
 // host lock for its whole run. A refusal is returned in the report and as
 // the error; the journal stays resumable.
 func Apply(ctx context.Context, env *Env, in ApplyInput) (*Report, error) {
@@ -175,8 +175,8 @@ func startLocalApply(env *Env, in ApplyInput) (*applyState, *Report, error) {
 		return nil, rep, err
 	}
 	insts := p.SettingsInstances()
-	if len(insts) != 1 || len(p.Instances) != 1 {
-		rep, err := refused(ModeApply, nil, refuse(RefuseMultipleInstances))
+	if len(insts) == 0 || len(insts) != len(p.Instances) {
+		rep, err := refused(ModeApply, nil, refuse(RefusePlanNotClean))
 		return nil, rep, err
 	}
 	digest, err := PlanDigest(p, in.Choices)
@@ -213,10 +213,11 @@ func startLocalApply(env *Env, in ApplyInput) (*applyState, *Report, error) {
 
 // applyState is what the checks before any write establish for one apply.
 type applyState struct {
-	plan      *Plan
-	insts     []config.V1RuntimeBrokerInstanceConfig
-	maxAgents int64
-	digest    string
+	plan                 *Plan
+	insts                []config.V1RuntimeBrokerInstanceConfig
+	maxAgents            map[string]int64
+	legacyDefaultProfile string
+	digest               string
 	// j is the journal of the run being resumed, nil for a new run.
 	j        *Journal
 	resuming bool
@@ -226,12 +227,12 @@ type applyState struct {
 }
 
 // startApply runs the checks that need neither a Hub write nor a lock of
-// their own: P-1, the capacity target, the plan digest, the journal's
+// their own: P-1, the capacity targets, the plan digest, the journal's
 // resume rule (section 5.2) and P-2. A non-nil report ends the apply: a
 // refusal (also returned as the error) or the no-op of an applied plan.
 func startApply(env *Env, in ApplyInput) (*applyState, *Report, error) {
 	p := in.Plan
-	// P-1: a clean plan for exactly one instance, from the Hub too. A local
+	// P-1: a clean plan for at least one instance, from the Hub too. A local
 	// plan is taken only by the co-located stopped phase (startLocalApply).
 	if in.LocalPlan || p == nil || p.LegacyBrokerID == "" || p.Agents == nil || p.Projects == nil {
 		rep, err := refused(ModeApply, nil, refuse(RefuseHubSections))
@@ -242,14 +243,14 @@ func startApply(env *Env, in ApplyInput) (*applyState, *Report, error) {
 		return nil, rep, err
 	}
 	insts := p.SettingsInstances()
-	if len(insts) != 1 || len(p.Instances) != 1 {
-		rep, err := refused(ModeApply, nil, refuse(RefuseMultipleInstances))
+	if len(insts) == 0 || len(insts) != len(p.Instances) {
+		rep, err := refused(ModeApply, nil, refuse(RefusePlanNotClean))
 		return nil, rep, err
 	}
-	// The capacity carry-over (erratum E2 to sections 4.2 and 7): the new
-	// row takes the legacy row's own explicit override, L for one
-	// instance, 0 (unlimited) for no_limit; never unset.
-	maxAgents, ref := capacityTarget(p)
+	// The capacity carry-over (erratum E2 to sections 4.2 and 7): each new
+	// row takes its planned explicit override (its share of L for
+	// preserve_by_split, or 0 for no_limit); never unset.
+	maxAgents, ref := capacityTargets(p, insts)
 	if ref != nil {
 		rep, err := refused(ModeApply, nil, ref)
 		return nil, rep, err
@@ -302,12 +303,14 @@ func startApply(env *Env, in ApplyInput) (*applyState, *Report, error) {
 		rep.Notes = append(rep.Notes, NoteNoop)
 		return nil, rep, nil
 	}
-	return &applyState{plan: p, insts: insts, maxAgents: maxAgents, digest: digest, j: j, resuming: resuming,
+	return &applyState{plan: p, insts: insts, maxAgents: maxAgents, legacyDefaultProfile: in.LegacyDefaultProfile,
+		digest: digest, j: j, resuming: resuming,
 		hostMode: in.HostMode, hostModeSource: in.HostModeSource}, nil, nil
 }
 
-// applyPrechecks runs P-5 (the capacity permission), P-6 (names) and P-7
-// (no local path link), and returns the per-project facts for step 3.
+// applyPrechecks runs P-5 (the capacity permission), P-6 (names), P-7
+// (no local path link) and the project default resolution check, and
+// returns the per-project facts for step 3.
 func (r *run) applyPrechecks(st *applyState) ([]projectFacts, *Refusal) {
 	legacyID := st.plan.LegacyBrokerID
 	// P-5: the capacity write needs quota.update (hub-scoped), read from
@@ -320,7 +323,14 @@ func (r *run) applyPrechecks(st *applyState) ([]projectFacts, *Refusal) {
 		return nil, ref
 	}
 	// P-7 and the per-project facts for step 3.
-	return r.collectProjects(legacyID)
+	projects, ref := r.collectProjects(legacyID)
+	if ref != nil {
+		return nil, ref
+	}
+	if ref := r.checkProjectDefaults(st, projects); ref != nil {
+		return nil, ref
+	}
+	return projects, nil
 }
 
 // applyBegin creates the journal of a new run and keeps the evidence copy
@@ -334,9 +344,13 @@ func (r *run) applyBegin(st *applyState) *Refusal {
 		r.j = j
 		r.j.HostMode, r.j.HostModeSource = st.hostMode, st.hostModeSource
 		for _, inst := range st.insts {
-			target := st.maxAgents
+			target, ok := st.maxAgents[inst.Key]
+			if !ok {
+				return refuse(RefuseCapacityUnknown)
+			}
+			v := target
 			r.j.Register = append(r.j.Register, RegisterItem{Key: inst.Key, Name: inst.Name, ItemStatus: ItemStatus{State: StepPending},
-				MaxAgents: &target, Capacity: ItemStatus{State: StepPending}})
+				MaxAgents: &v, Capacity: ItemStatus{State: StepPending}})
 		}
 	}
 	// The evidence copy and the copy of the instances step 2 writes.
@@ -444,6 +458,12 @@ func (r *run) checkNames(insts []config.V1RuntimeBrokerInstanceConfig) *Refusal 
 		for _, it := range r.j.Register {
 			if it.BrokerID != "" {
 				own[it.BrokerID] = true
+				continue
+			}
+			if it.State != StepPending {
+				if id, ok, err := identityBrokerID(r.env.GlobalDir, it.Key); err == nil && ok {
+					own[id] = true
+				}
 			}
 		}
 	}
@@ -657,19 +677,92 @@ func instanceFor(p *Plan, profile string) string {
 	return ""
 }
 
+// resolveDefaultKey chooses the planned instance key that takes over a
+// project's legacy default Runtime Broker: the instance of the project's
+// active profile, else of the legacy default profile, else the sole planned
+// instance when there is only one.
+func resolveDefaultKey(p *Plan, insts []config.V1RuntimeBrokerInstanceConfig, activeProfile, legacyDefaultProfile string) string {
+	planned := make(map[string]bool, len(insts))
+	for _, inst := range insts {
+		planned[inst.Key] = true
+	}
+	if key := instanceFor(p, activeProfile); planned[key] {
+		return key
+	}
+	if key := instanceFor(p, legacyDefaultProfile); planned[key] {
+		return key
+	}
+	if len(insts) == 1 {
+		return insts[0].Key
+	}
+	return ""
+}
+
+// checkProjectDefaults verifies up front (before any Hub or local write)
+// that every project whose default Runtime Broker points at the legacy row
+// resolves to a planned instance.
+func (r *run) checkProjectDefaults(st *applyState, projects []projectFacts) *Refusal {
+	legacyID := st.plan.LegacyBrokerID
+	ownBrokers := map[string]bool{}
+	prior := map[string]ProjectItem{}
+	if r.j != nil {
+		for _, reg := range r.j.Register {
+			if reg.BrokerID != "" {
+				ownBrokers[reg.BrokerID] = true
+			}
+		}
+		for _, it := range r.j.Projects {
+			prior[it.ProjectID] = it
+		}
+	}
+	var ambiguous []string
+	for _, f := range projects {
+		if prev, ok := prior[f.id]; ok && prev.State == StepDone {
+			continue
+		}
+		needsDefault := f.defaultID == legacyID
+		if prev, ok := prior[f.id]; ok && prev.OldDefault == legacyID && ownBrokers[f.defaultID] {
+			needsDefault = true
+		}
+		if !needsDefault {
+			continue
+		}
+		if resolveDefaultKey(st.plan, st.insts, f.activeProfile, st.legacyDefaultProfile) == "" {
+			ambiguous = append(ambiguous, f.id)
+		}
+	}
+	if len(ambiguous) > 0 {
+		ref := refuse(RefuseDefaultUnknown)
+		ref.Projects = ambiguous
+		return ref
+	}
+	return nil
+}
+
 // repointProjects is step 3: each project gets a provider link to every
 // mapped instance, and a default that pointed at the legacy row is set
 // to the instance of the project's active profile (or of the legacy
 // default profile). The legacy link is kept.
 func (r *run) repointProjects(p *Plan, legacyDefaultProfile string, projects []projectFacts) *Refusal {
 	brokerByKey := map[string]string{}
+	ownBrokers := map[string]bool{}
 	for _, it := range r.j.Register {
 		brokerByKey[it.Key] = it.BrokerID
+		if it.BrokerID != "" {
+			ownBrokers[it.BrokerID] = true
+		}
 	}
 	var linkAll []string
 	seen := map[string]bool{}
 	for _, m := range p.ProfileMap {
-		if id := brokerByKey[m.Instance]; m.Instance != "" && id != "" && !seen[id] {
+		if m.Instance == "" {
+			continue
+		}
+		id := brokerByKey[m.Instance]
+		if id == "" {
+			return refuse(RefuseHubRequest)
+		}
+		if !seen[id] {
 			seen[id] = true
 			linkAll = append(linkAll, id)
 		}
@@ -695,13 +788,16 @@ func (r *run) repointProjects(p *Plan, legacyDefaultProfile string, projects []p
 		if it.State == StepDone {
 			continue
 		}
+		needsDefault := f.defaultID == r.j.LegacyBrokerID ||
+			(it.NewDefault != "" && f.defaultID == it.NewDefault) ||
+			(it.OldDefault == r.j.LegacyBrokerID && ownBrokers[f.defaultID])
 		newDefault := ""
-		if f.defaultID == r.j.LegacyBrokerID || (it.NewDefault != "" && f.defaultID == it.NewDefault) {
+		if needsDefault {
 			key := instanceFor(p, f.activeProfile)
-			if key == "" {
+			if brokerByKey[key] == "" {
 				key = instanceFor(p, legacyDefaultProfile)
 			}
-			if key == "" && len(r.j.Register) == 1 {
+			if brokerByKey[key] == "" && len(r.j.Register) == 1 {
 				key = r.j.Register[0].Key
 			}
 			if newDefault = brokerByKey[key]; newDefault == "" {
@@ -787,25 +883,52 @@ func contains(list []string, s string) bool {
 	return false
 }
 
-// capacityTarget is the agent limit the single instance takes over: the
-// legacy row's own explicit override (L, or 0 for unlimited).
-func capacityTarget(p *Plan) (int64, *Refusal) {
+// capacityTargets maps each planned instance key to the explicit agent limit
+// its Hub row takes over: 0 (unlimited) for no_limit, or its positive share
+// of the legacy row's explicit override for preserve_by_split.
+func capacityTargets(p *Plan, insts []config.V1RuntimeBrokerInstanceConfig) (map[string]int64, *Refusal) {
 	c := p.Capacity
 	if c.Status != CapacityPlanned {
-		return 0, refuse(RefuseCapacityUnknown)
+		return nil, refuse(RefuseCapacityUnknown)
+	}
+	planned := make(map[string]bool, len(insts))
+	for _, inst := range insts {
+		if inst.Key == "" || planned[inst.Key] {
+			return nil, refuse(RefusePlanNotClean)
+		}
+		planned[inst.Key] = true
 	}
 	switch c.Outcome {
 	case capacityplan.OutcomeNoLimit:
-		return 0, nil
-	case capacityplan.OutcomePreserveBySplit:
-		if len(c.Allocations) != 1 || c.MaxAgents == nil || c.Allocations[0].MaxAgents != *c.MaxAgents {
-			return 0, refuse(RefuseCapacitySplit)
+		targets := make(map[string]int64, len(insts))
+		for _, inst := range insts {
+			targets[inst.Key] = 0
 		}
-		return c.Allocations[0].MaxAgents, nil
+		return targets, nil
+	case capacityplan.OutcomePreserveBySplit:
+		if c.MaxAgents == nil || *c.MaxAgents <= 0 || len(c.Allocations) != len(insts) {
+			return nil, refuse(RefuseCapacitySplit)
+		}
+		targets := make(map[string]int64, len(insts))
+		var sum int64
+		for _, a := range c.Allocations {
+			if !planned[a.Instance] || a.MaxAgents <= 0 {
+				return nil, refuse(RefuseCapacitySplit)
+			}
+			if _, dup := targets[a.Instance]; dup {
+				return nil, refuse(RefuseCapacitySplit)
+			}
+			if a.MaxAgents > *c.MaxAgents-sum {
+				return nil, refuse(RefuseCapacitySplit)
+			}
+			sum += a.MaxAgents
+			targets[a.Instance] = a.MaxAgents
+		}
+		return targets, nil
 	case capacityplan.OutcomeOperatorDecisionRequired:
-		return 0, refuse(RefuseCapacityDecision)
+		return nil, refuse(RefuseCapacityDecision)
 	}
-	return 0, refuse(RefuseCapacityUnknown)
+	return nil, refuse(RefuseCapacityUnknown)
 }
 
 func (r *run) settingsAPI() (hubclient.RuntimeBrokerSettingsGetter, hubclient.RuntimeBrokerSettingsPutter, bool) {

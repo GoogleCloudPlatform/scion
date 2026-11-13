@@ -91,22 +91,21 @@ a settings value.
 
 Exactly one mode is required:
   --plan      print the plan (read-only; described above)
-  --apply     convert this drained legacy host to the plan's flat instance:
-              register it on the Hub, write server.broker.instances to
-              settings.yaml, and link the instance to every project this
-              Runtime Broker provides, re-pointing defaults. The server must
-              be stopped, and no non-terminal agent may be bound to this
+  --apply     convert this drained legacy host to the plan's flat instances:
+              register them on the Hub, write server.broker.instances to
+              settings.yaml, and link every mapped instance to every project
+              this Runtime Broker provides, re-pointing defaults. The server
+              must be stopped, and no non-terminal agent may be bound to this
               Runtime Broker. The switch takes effect at the next
               'scion server start'. Re-running resumes an interrupted apply
-              of the same plan; a changed plan is refused. This release
-              applies a plan with exactly one instance.
+              of the same plan; a changed plan is refused.
               On a co-located host (the server process runs the Hub and
               embeds the Runtime Broker) --apply runs in two steps: with the
-              server running it registers the instance and re-points
+              server running it registers the instances and re-points
               projects; once you stop the server, a second --apply writes
               the settings. Stopping a co-located server takes the whole
               Hub down, so plan a maintenance window. After the next start,
-              a third --apply removes the unused instance credentials file.
+              a third --apply removes the unused instance credentials files.
               With an external Hub database, the second step needs
               --single-hub-replica (exactly one Hub process serves it).
               The mode is read from the saved daemon launch: if neither the
@@ -115,8 +114,8 @@ Exactly one mode is required:
               (colocated_mode_unknown) until one of them is.
   --status    show the recorded run: step states and IDs only (read-only)
   --rollback  undo an apply: restore defaults, remove the instance links,
-              deregister the instance, remove server.broker.instances and
-              move the instance identity aside. The server must be stopped.
+              deregister the instances, remove server.broker.instances and
+              move the instance identities aside. The server must be stopped.
               On a co-located host it also runs in two steps: the Hub part
               with the server running, the local part after the stop. Its
               notes on a row named from an instance identity file appear
@@ -158,7 +157,7 @@ Examples:
 func init() {
 	brokerCmd.AddCommand(brokerConvertCmd)
 	brokerConvertCmd.Flags().BoolVar(&brokerConvertPlan, "plan", false, "Print the plan without changing anything")
-	brokerConvertCmd.Flags().BoolVar(&brokerConvertApply, "apply", false, "Convert this drained legacy host to the plan's flat instance (the server must be stopped)")
+	brokerConvertCmd.Flags().BoolVar(&brokerConvertApply, "apply", false, "Convert this drained legacy host to the plan's flat instances (the server must be stopped)")
 	brokerConvertCmd.Flags().BoolVar(&brokerConvertStatus, "status", false, "Show the recorded convert run (read-only)")
 	brokerConvertCmd.Flags().BoolVar(&brokerConvertRollback, "rollback", false, "Undo the recorded apply (the server must be stopped)")
 	brokerConvertCmd.Flags().StringSliceVar(&brokerConvertProfiles, "profiles", nil, "Limit the conversion to these profiles (default: all)")
