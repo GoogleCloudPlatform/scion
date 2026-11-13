@@ -74,7 +74,18 @@ export function isDNS1123Subdomain(s: string): boolean {
 
 /** The placement and identity problems of one runtime entry, at runtimes.<name>.<field>. */
 export function validateK8sRuntimeFields(name: string, rt: K8sRuntimeFields): PlacementIssue[] {
-  const p = `runtimes.${name}`;
+  return validateK8sRuntimeFieldsAt(`runtimes.${name}`, rt);
+}
+
+/**
+ * The placement and identity problems of a Kubernetes runtime or runtime_target
+ * block at `<pathPrefix>.<field>`.
+ */
+export function validateK8sRuntimeFieldsAt(
+  pathPrefix: string,
+  rt: K8sRuntimeFields
+): PlacementIssue[] {
+  const p = pathPrefix;
   const out: PlacementIssue[] = [];
   for (const [k, v] of Object.entries(rt.node_selector ?? {})) {
     if (!isQualifiedName(k)) {

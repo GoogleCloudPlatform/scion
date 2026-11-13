@@ -48,6 +48,7 @@ interface HarnessConfigEntry {
 
 import { isAgentLaunching, isIncompleteCreate, isSharedWorkspace } from '../../shared/types.js';
 import { isTargetKubernetesOnly } from '../../shared/runtime-kind.js';
+import { isFlatBroker, runtimeTargetLabel } from '../../shared/runtime-target.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import { AGENT_CREATE_TRIGGERS, defaultTriggersHint } from '../../shared/notification-triggers.js';
 import {
@@ -125,11 +126,24 @@ export class ScionPageAgentCreate extends LitElement {
   /** Cached project settings keyed by projectId */
   private projectSettingsCache: Map<string, ProjectCreateDefaults> = new Map();
 
-  /** Profiles available on the currently selected broker */
+  /** The currently selected Runtime Broker, if any. */
+  private get selectedBroker(): RuntimeBroker | undefined {
+    if (!this.brokerId) return undefined;
+    return this.brokers.find((b) => b.id === this.brokerId);
+  }
+
+  /** Effective runtime profile for the selected broker (flat brokers never take a profile). */
+  private get effectiveProfile(): string {
+    const broker = this.selectedBroker;
+    if (broker && isFlatBroker(broker)) return '';
+    return this.profile;
+  }
+
+  /** Profiles available on the currently selected legacy broker (empty for flat brokers). */
   private get selectedBrokerProfiles(): import('../../shared/types.js').BrokerProfile[] {
-    if (!this.brokerId) return [];
-    const broker = this.brokers.find((b) => b.id === this.brokerId);
-    return broker?.profiles?.filter((p) => p.available) ?? [];
+    const broker = this.selectedBroker;
+    if (!broker || isFlatBroker(broker)) return [];
+    return broker.profiles?.filter((p) => p.available) ?? [];
   }
 
   /**
@@ -141,9 +155,7 @@ export class ScionPageAgentCreate extends LitElement {
    * profiles mix runtime types, this is false.
    */
   private get targetRuntimeIsKubernetesOnly(): boolean {
-    if (!this.brokerId) return false;
-    const broker = this.brokers.find((b) => b.id === this.brokerId);
-    return isTargetKubernetesOnly(broker, this.profile);
+    return isTargetKubernetesOnly(this.selectedBroker, this.effectiveProfile);
   }
 
   /** The currently selected project */
@@ -407,7 +419,7 @@ export class ScionPageAgentCreate extends LitElement {
       changedProperties.has('profile') ||
       changedProperties.has('brokers')
     ) {
-      this.gcp.setTarget(this.targetRuntimeIsKubernetesOnly, this.profile);
+      this.gcp.setTarget(this.targetRuntimeIsKubernetesOnly, this.effectiveProfile);
       // The accounts' mapping state is for one target: ask again when it
       // changes (ptone/scion#4391). Not before the first load has started.
       void this.gcpAccounts.targetChanged();
@@ -639,6 +651,11 @@ export class ScionPageAgentCreate extends LitElement {
   }
 
   private autoSelectProfile(): void {
+    const broker = this.selectedBroker;
+    if (!broker || isFlatBroker(broker)) {
+      this.profile = '';
+      return;
+    }
     const profiles = this.selectedBrokerProfiles;
     if (profiles.length === 1) {
       this.profile = profiles[0].name;
@@ -707,7 +724,7 @@ export class ScionPageAgentCreate extends LitElement {
   private readonly gcpAccounts = new GCPServiceAccountsLoader({
     projectId: () => this.projectId,
     target: () =>
-      assignStatusTarget(this.targetRuntimeIsKubernetesOnly, this.brokerId, this.profile),
+      assignStatusTarget(this.targetRuntimeIsKubernetesOnly, this.brokerId, this.effectiveProfile),
     accounts: () => this.gcp.gcpServiceAccounts,
     setAccounts: (accounts) => this.gcp.setAccounts(accounts),
   });
@@ -812,8 +829,9 @@ export class ScionPageAgentCreate extends LitElement {
 
     // The submit-time guards read the live target, even if no update has
     // handed it to the identity state yet.
+    const profile = this.effectiveProfile;
     this.gcp.targetKubernetesOnly = this.targetRuntimeIsKubernetesOnly;
-    this.gcp.profile = this.profile;
+    this.gcp.profile = profile;
 
     // The form's validation includes the GCP identity rules. The form is
     // rendered once the page has loaded; the identity state is checked
@@ -844,7 +862,7 @@ export class ScionPageAgentCreate extends LitElement {
       // Only a picked harness config; unset, the hub applies its own order.
       if (this.resolvedHarness) body.harnessConfig = this.resolvedHarness;
       if (this.brokerId) body.runtimeBrokerId = this.brokerId;
-      if (this.profile) body.profile = this.profile;
+      if (profile) body.profile = profile;
       if (this.task.trim()) body.task = this.task.trim();
 
       // Additional Options: only what the user set. Everything else
@@ -1202,18 +1220,22 @@ export class ScionPageAgentCreate extends LitElement {
             this.autoSelectProfile();
           }}
         >
-          ${this.brokers.map(
-            (b) =>
-              html`<sl-option value=${b.id} ?disabled=${b.status === 'offline'}>
-                ${b.name} (${b.status})
-              </sl-option>`
-          )}
+          ${this.brokers.map((b) => {
+            const target = isFlatBroker(b) ? runtimeTargetLabel(b) : '';
+            const label = target
+              ? `${b.name} — ${target} (${b.status})`
+              : `${b.name} (${b.status})`;
+            return html`<sl-option value=${b.id} ?disabled=${b.status === 'offline'}>
+              ${label}
+            </sl-option>`;
+          })}
         </sl-select>
         <div class="hint">The compute node that will run this agent.</div>
       </div>
 
-      <!-- Runtime Profile (conditional: broker has profiles) -->
-      ${this.selectedBrokerProfiles.length > 0
+      <!-- Runtime Profile (conditional: legacy broker with profiles) -->
+      ${(!this.selectedBroker || !isFlatBroker(this.selectedBroker)) &&
+      this.selectedBrokerProfiles.length > 0
         ? html`
             <div class="form-field">
               <label for="profile">Runtime Profile</label>

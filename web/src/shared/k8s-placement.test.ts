@@ -20,6 +20,7 @@ import {
   isLabelValue,
   isQualifiedName,
   validateK8sRuntimeFields,
+  validateK8sRuntimeFieldsAt,
 } from './k8s-placement.js';
 
 // Mirrors the Go checks the hub runs on save (config.RuntimeSaveChecks).
@@ -82,5 +83,17 @@ describe('k8s placement validator', () => {
     expect(msgs({ key: 'k', operator: 'exists' })[0]).toContain('not supported');
     expect(msgs({ key: 'k', effect: 'Never' })[0]).toContain('effect');
     expect(msgs({ key: 'k', value: 'v' })).toEqual([]);
+  });
+  it('validates flat broker runtime_target paths with validateK8sRuntimeFieldsAt', () => {
+    const issues = validateK8sRuntimeFieldsAt('server.broker.instances[1].runtime_target', {
+      node_selector: { 'bad key!': 'v' },
+      tolerations: [{ operator: 'Equal' }],
+      runtime_class_name: 'Bad_Class',
+    });
+    expect(issues.map((i) => i.path)).toEqual([
+      'server.broker.instances[1].runtime_target.node_selector',
+      'server.broker.instances[1].runtime_target.tolerations',
+      'server.broker.instances[1].runtime_target.runtime_class_name',
+    ]);
   });
 });
