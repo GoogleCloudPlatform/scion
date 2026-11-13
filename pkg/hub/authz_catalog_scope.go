@@ -47,6 +47,17 @@ func catalogWriteAction(kind, scope string, a Action) Action {
 				return ActionCreateGlobal
 			}
 		}
+	case permissions.ResourceTemplate:
+		if scope == store.TemplateScopeGlobal {
+			switch a {
+			case ActionCreate:
+				return ActionCreateGlobal
+			case ActionUpdate:
+				return ActionUpdateGlobal
+			case ActionDelete:
+				return ActionDeleteGlobal
+			}
+		}
 	}
 	return a
 }

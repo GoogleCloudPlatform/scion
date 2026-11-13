@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -118,7 +119,10 @@ func (s *Server) handleTemplateReimport(w http.ResponseWriter, r *http.Request, 
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 			return
 		}
-		decision := s.authzService.CheckAccess(ctx, userIdent, templateScopeResource(store.TemplateScopeGlobal, ""), ActionCreate)
+		decision := s.authzService.CheckAccessWithEvidence(ctx, userIdent,
+			templateScopeResource(store.TemplateScopeGlobal, ""),
+			catalogWriteAction(permissions.ResourceTemplate, store.TemplateScopeGlobal, ActionCreate),
+			hubCollectionEvidence("template.create_global"))
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to reimport global resources", nil)
 			return

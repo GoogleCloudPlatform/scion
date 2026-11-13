@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -122,7 +123,7 @@ func (s *Server) handleTemplateFiles(w http.ResponseWriter, r *http.Request, tem
 		}
 	} else if !requireTemplateProfileWriter(w, r, template) {
 		return
-	} else if !s.authorize(w, r, templateResource(template), ActionUpdate) {
+	} else if !s.authorize(w, r, templateResource(template), catalogWriteAction(permissions.ResourceTemplate, template.Scope, ActionUpdate)) {
 		return
 	}
 

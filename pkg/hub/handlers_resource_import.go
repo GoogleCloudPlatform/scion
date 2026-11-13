@@ -23,6 +23,7 @@ import (
 	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -505,24 +506,29 @@ func (s *Server) projectImportDecision(ctx context.Context, user UserIdentity, p
 
 // globalImportDecision decides whether a user may discover or import
 // resources of authzResourceType ("template" or "harness_config") into the
-// global catalog. The check is the resource's create permission
-// (template.create or harness_config.create) on a collection-level request at
-// the hub scope, so a user access token needs that selector on a hub
-// boundary. The target is the global-scope collection resource built by
+// global catalog. The check is the resource's global create permission
+// (template.create_global or harness_config.create) on a collection-level
+// request at the hub scope, so a user access token needs that selector on a
+// hub boundary. The target is the global-scope collection resource built by
 // templateScopeResource / harnessConfigScopeResource, the same target the
 // direct global create routes check. Any other resource type is refused.
 func (s *Server) globalImportDecision(ctx context.Context, user UserIdentity, authzResourceType string) Decision {
 	var target Resource
+	var action Action
 	var permissionID string
 	switch authzResourceType {
 	case "template":
-		target, permissionID = templateScopeResource(store.TemplateScopeGlobal, ""), "template.create"
+		target = templateScopeResource(store.TemplateScopeGlobal, "")
+		action = catalogWriteAction(permissions.ResourceTemplate, store.TemplateScopeGlobal, ActionCreate)
+		permissionID = "template.create_global"
 	case "harness_config":
-		target, permissionID = harnessConfigScopeResource(store.HarnessConfigScopeGlobal, ""), "harness_config.create"
+		target = harnessConfigScopeResource(store.HarnessConfigScopeGlobal, "")
+		action = ActionCreate
+		permissionID = "harness_config.create"
 	default:
 		return Decision{Allowed: false, Reason: "unsupported import resource type"}
 	}
-	return s.authzService.CheckAccessWithEvidence(ctx, user, target, ActionCreate,
+	return s.authzService.CheckAccessWithEvidence(ctx, user, target, action,
 		hubCollectionEvidence(permissionID))
 }
 

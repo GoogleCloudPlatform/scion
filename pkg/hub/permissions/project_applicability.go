@@ -69,11 +69,15 @@ var ProjectTargetApplicability = map[string]bool{
 	"skill.delete": true, "skill.delete_global": false,
 	"skill.list": true, "skill.register": false,
 
-	// template.*, harness_config.* — no *_global counterpart registered
-	// today; project/user-scoped, reviewed true (ScopeKind still governs
+	// template.* — create/read/update/delete/list can target a project-scoped
+	// template; *_global are explicitly hub-catalog actions.
+	// harness_config.* — no *_global counterpart registered today;
+	// project/user-scoped, reviewed true (ScopeKind still governs
 	// ResolveTargetScope's actual per-instance classification).
-	"template.create": true, "template.read": true, "template.update": true,
-	"template.delete": true, "template.list": true,
+	"template.create": true, "template.create_global": false, "template.read": true,
+	"template.update": true, "template.update_global": false,
+	"template.delete": true, "template.delete_global": false,
+	"template.list":         true,
 	"harness_config.create": true, "harness_config.read": true, "harness_config.update": true,
 	"harness_config.delete": true, "harness_config.list": true,
 
@@ -248,7 +252,8 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	"artifact.manage": {BoundaryKindProject, BoundaryKindHub}, "artifact.steward": {BoundaryKindProject, BoundaryKindHub},
 	"template.create": {BoundaryKindProject, BoundaryKindHub}, "template.read": {BoundaryKindProject, BoundaryKindHub},
 	"template.update": {BoundaryKindProject, BoundaryKindHub}, "template.delete": {BoundaryKindProject, BoundaryKindHub},
-	"template.list":         {BoundaryKindProject, BoundaryKindHub},
+	"template.list":          {BoundaryKindProject, BoundaryKindHub},
+	"template.create_global": {BoundaryKindHub}, "template.update_global": {BoundaryKindHub}, "template.delete_global": {BoundaryKindHub},
 	"harness_config.create": {BoundaryKindProject, BoundaryKindHub}, "harness_config.read": {BoundaryKindProject, BoundaryKindHub},
 	"harness_config.update": {BoundaryKindProject, BoundaryKindHub}, "harness_config.delete": {BoundaryKindProject, BoundaryKindHub},
 	"harness_config.list": {BoundaryKindProject, BoundaryKindHub},
@@ -437,15 +442,19 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	"skill.update_global": {TargetClassKindGlobalCatalog},
 	"skill.delete_global": {TargetClassKindGlobalCatalog},
 
-	// template.*, harness_config.* — unlike skill, a single create
-	// permission covers every scope (templateScopeResource/
-	// templateUserScopeResource/harnessConfigScopeResource all route through
-	// template.create/harness_config.create regardless of scope), so create
-	// supports GlobalCatalog too, not just ProjectScoped.
+	// template.* — read/list support both project and global catalog classes;
+	// update/delete are project-scoped only; *_global are hub-level catalog
+	// actions. template.create keeps GlobalCatalog alongside ProjectScoped
+	// because templateUserScopeResource maps user-scope create to
+	// hasGlobalScope, whereas global-scope create uses template.create_global.
+	// harness_config.* still uses harness_config.create across every scope.
 	"template.create": {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
 	"template.read":   {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
 	"template.update": {TargetClassKindProjectScoped}, "template.delete": {TargetClassKindProjectScoped},
-	"template.list": {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
+	"template.list":          {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
+	"template.create_global": {TargetClassKindHubResource},
+	"template.update_global": {TargetClassKindGlobalCatalog},
+	"template.delete_global": {TargetClassKindGlobalCatalog},
 
 	"harness_config.create": {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
 	"harness_config.read":   {TargetClassKindProjectScoped, TargetClassKindGlobalCatalog},
