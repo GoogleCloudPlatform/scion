@@ -1168,6 +1168,11 @@ func (s *Server) handleAdminRestart(w http.ResponseWriter, r *http.Request) {
 	// killed.
 	cmd := exec.Command("sudo", "systemctl", "restart", "--no-block", serviceName)
 	if err := cmd.Run(); err != nil {
+		if maintenance.IsStopSignalExit(err) {
+			log.Info("Hub restart command terminated by stop signal; restart is under way", "service", serviceName, "user", user.Email())
+			writeRestartAccepted(w)
+			return
+		}
 		s.releaseHubRestart(stamp)
 		log.Error("Failed to initiate hub restart", "error", err, "user", user.Email())
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,

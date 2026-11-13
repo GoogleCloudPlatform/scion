@@ -16,14 +16,14 @@ package maintenance
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // SudoStagingName is the file, in the maintenance repo, where sudo-install
@@ -173,15 +173,29 @@ func (s *sudoInstaller) Activate(ctx context.Context, staged string) error {
 }
 
 // Restart implements Installer. With the --no-block rule systemctl returns
-// once the restart job is queued. With only the plain rule the command
-// blocks while systemd stops this process, so it is started and watched for
-// plainRestartGrace: only a normal non-zero exit in that window (nothing was
-// restarted) fails Restart.
+// once the restart job is queued, or is killed by SIGTERM when systemd begins
+// stopping the unit's control group before the child exits. With only the
+// plain rule the command blocks while systemd stops this process, so it is
+// started and watched for plainRestartGrace: clean exit, SIGTERM from the
+// unit stop, or still running after the grace window all mean the restart is
+// under way, while a non-zero exit or non-stop signal fails Restart.
 func (s *sudoInstaller) Restart(ctx context.Context) error {
 	if s.useNoBlock() {
 		args := append([]string{"-n"}, s.restartArgv(true)...)
 		if out, err := s.runner.Run(ctx, "sudo", args...); err != nil {
-			return fmt.Errorf("sudo %s: %v %s", strings.Join(s.restartArgv(true), " "), err, strings.TrimSpace(string(out)))
+			if ctx.Err() != nil {
+				return fmt.Errorf("sudo %s: %w", strings.Join(s.restartArgv(true), " "), ctx.Err())
+			}
+			if IsStopSignalExit(err) {
+				logging.Subsystem("hub.maintenance.installer").Info(
+					"Restart command terminated by stop signal; restart is under way",
+					"service", s.serviceName, "mode", "no-block")
+				return nil
+			}
+			if detail := strings.TrimSpace(string(out)); detail != "" {
+				return fmt.Errorf("sudo %s: %w (%s)", strings.Join(s.restartArgv(true), " "), err, detail)
+			}
+			return fmt.Errorf("sudo %s: %w", strings.Join(s.restartArgv(true), " "), err)
 		}
 		return nil
 	}
@@ -193,15 +207,20 @@ func (s *sudoInstaller) Restart(ctx context.Context) error {
 	// The plain restart blocks while systemd stops the unit. With the
 	// default KillMode=control-group systemd SIGTERMs every process in the
 	// hub's cgroup, this sudo/systemctl child included, so a child killed by
-	// a signal (or still running after the grace period) means the restart
-	// is under way. Only a normal exit with a non-zero status (no matching
-	// sudoers rule, systemctl refusing) means nothing was restarted.
+	// SIGTERM (or still running after the grace period) means the restart
+	// is under way. A normal non-zero exit (no matching sudoers rule,
+	// systemctl refusing) or a crash signal means nothing was restarted.
 	timer := time.NewTimer(s.restartGrace)
 	defer timer.Stop()
 	select {
 	case err := <-done:
-		var ee *exec.ExitError
-		if err != nil && errors.As(err, &ee) && ee.Exited() {
+		if err != nil {
+			if IsStopSignalExit(err) {
+				logging.Subsystem("hub.maintenance.installer").Info(
+					"Restart command terminated by stop signal; restart is under way",
+					"service", s.serviceName, "mode", "plain")
+				return nil
+			}
 			return fmt.Errorf("sudo %s: %w", strings.Join(s.restartArgv(false), " "), err)
 		}
 		return nil

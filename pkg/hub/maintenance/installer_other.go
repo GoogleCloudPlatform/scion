@@ -25,6 +25,9 @@ func signalSelf() error {
 	return fmt.Errorf("restarting the hub: %w on this platform", errors.ErrUnsupported)
 }
 
+// IsStopSignalExit reports whether err is a child process exit caused by SIGTERM.
+func IsStopSignalExit(error) bool { return false }
+
 func fileOwnerUID(os.FileInfo) (int, bool) { return 0, false }
 
 func isWritableDir(string) bool { return false }

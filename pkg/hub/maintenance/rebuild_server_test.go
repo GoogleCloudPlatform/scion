@@ -309,6 +309,58 @@ func TestRebuildServer_SudoInstallStarterHub(t *testing.T) {
 	}
 }
 
+func TestRebuildServer_SudoInstallNoBlockSignalAndFailure(t *testing.T) {
+	t.Run("SIGTERM during --no-block restart is restart requested, not failed", func(t *testing.T) {
+		f := newRebuildFixture(t, "")
+		r := &fakeRunner{allowed: map[string]bool{}}
+		for _, a := range []string{ruleInstall, ruleNoBlock, rulePlain} {
+			r.allowed[strings.ReplaceAll(a, "$REPO", f.repo)] = true
+		}
+		inst := newSudoInstaller(DetectOptions{
+			RepoPath: f.repo,
+			Runner:   shellRunRunner{fakeRunner: r, script: "kill -TERM $$"},
+		}.withDefaults())
+
+		var got *PendingRestart
+		var log bytes.Buffer
+		err := f.executor(inst).RunWithBeforeRestart(context.Background(), &log, nil,
+			func(_ context.Context, p PendingRestart) error { got = &p; return nil })
+		if err != nil {
+			t.Fatalf("RunWithBeforeRestart = %v, want nil when restart child receives SIGTERM\n%s", err, log.String())
+		}
+		if got == nil || got.To != testGitRelease || got.Mode != UpdateModeGit || got.Strategy != StrategySudoInstall {
+			t.Fatalf("hook got %+v", got)
+		}
+		if strings.Contains(log.String(), "cannot be rolled back") {
+			t.Fatalf("log unexpectedly mentions rollback inability:\n%s", log.String())
+		}
+	})
+
+	t.Run("non-zero exit during --no-block restart still fails with no-rollback detail", func(t *testing.T) {
+		f := newRebuildFixture(t, "")
+		r := &fakeRunner{allowed: map[string]bool{}}
+		for _, a := range []string{ruleInstall, ruleNoBlock, rulePlain} {
+			r.allowed[strings.ReplaceAll(a, "$REPO", f.repo)] = true
+		}
+		inst := newSudoInstaller(DetectOptions{
+			RepoPath: f.repo,
+			Runner:   shellRunRunner{fakeRunner: r, script: "echo 'Failed to restart unit' >&2; exit 1"},
+		}.withDefaults())
+
+		hooked := false
+		var log bytes.Buffer
+		err := f.executor(inst).RunWithBeforeRestart(context.Background(), &log, nil,
+			func(context.Context, PendingRestart) error { hooked = true; return nil })
+		if err == nil || !strings.Contains(err.Error(), "restarting the hub failed") ||
+			!strings.Contains(err.Error(), "cannot be rolled back by the sudo-install installer") {
+			t.Fatalf("RunWithBeforeRestart = %v, want restart failure with sudo-install no-rollback note", err)
+		}
+		if !hooked {
+			t.Fatal("before-restart hook did not run")
+		}
+	})
+}
+
 func TestSudoInstaller_PreflightSudoAbsent(t *testing.T) {
 	opts, _ := sudoOpts(t, ruleInstall, ruleNoBlock)
 	opts.Runner = missingSudoRunner{}
@@ -627,8 +679,11 @@ func TestRebuildServer_DetachedHeadWithoutBranchRefused(t *testing.T) {
 	inst := &fakeInstaller{}
 	e := NewRebuildServerExecutor(RebuildServerOptions{RepoPath: f.repo, Installer: inst})
 	err := e.Run(context.Background(), &bytes.Buffer{}, nil)
-	if err == nil || !strings.Contains(err.Error(), "the checkout is on a detached HEAD; set server.maintenance.repo_branch or pass the branch parameter") {
-		t.Fatalf("Run = %v, want the detached-HEAD refusal", err)
+	if err == nil || !strings.Contains(err.Error(), "the checkout is on a detached HEAD; set SCION_MAINTENANCE_REPO_BRANCH (or @branch on SCION_MAINTENANCE_REPO_PATH) or pass the branch parameter") {
+		t.Fatalf("Run = %v, want the detached-HEAD refusal naming SCION_MAINTENANCE_REPO_BRANCH", err)
+	}
+	if strings.Contains(err.Error(), "server.maintenance.repo_branch") {
+		t.Fatalf("Run error still names nonexistent settings key: %v", err)
 	}
 	if calls := f.callLog(t); strings.TrimSpace(calls) != "git rev-parse --abbrev-ref HEAD" {
 		t.Fatalf("commands run = %q, want only the branch lookup", calls)
@@ -654,8 +709,11 @@ func TestRebuildWeb_DetachedHeadWithoutBranchRefused(t *testing.T) {
 	f := newRebuildFixture(t, "")
 	detachedGitStub(t, f)
 	err := NewRebuildWebExecutor(RebuildWebOptions{RepoPath: f.repo}).Run(context.Background(), &bytes.Buffer{}, nil)
-	if err == nil || !strings.Contains(err.Error(), "rebuild-web: the checkout is on a detached HEAD; set server.maintenance.repo_branch or pass the branch parameter") {
-		t.Fatalf("Run = %v, want the detached-HEAD refusal", err)
+	if err == nil || !strings.Contains(err.Error(), "rebuild-web: the checkout is on a detached HEAD; set SCION_MAINTENANCE_REPO_BRANCH (or @branch on SCION_MAINTENANCE_REPO_PATH) or pass the branch parameter") {
+		t.Fatalf("Run = %v, want the detached-HEAD refusal naming SCION_MAINTENANCE_REPO_BRANCH", err)
+	}
+	if strings.Contains(err.Error(), "server.maintenance.repo_branch") {
+		t.Fatalf("Run error still names nonexistent settings key: %v", err)
 	}
 	if calls := f.callLog(t); strings.TrimSpace(calls) != "git rev-parse --abbrev-ref HEAD" {
 		t.Fatalf("commands run = %q, want only the branch lookup", calls)

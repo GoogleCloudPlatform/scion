@@ -198,8 +198,64 @@ func TestSudoInstaller_PreflightAndRestart(t *testing.T) {
 	})
 
 	t.Run("plain restart exiting cleanly", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("unix shell signals only")
+		}
 		if err := plainRestart(t, "exit 0"); err != nil {
 			t.Fatalf("Restart = %v", err)
+		}
+	})
+
+	t.Run("plain restart killed by SIGKILL fails Restart", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("unix shell signals only")
+		}
+		if err := plainRestart(t, "kill -KILL $$"); err == nil {
+			t.Fatal("Restart = nil, want error for SIGKILL")
+		}
+	})
+
+	noBlockRestart := func(t *testing.T, rctx context.Context, script string) error {
+		t.Helper()
+		if runtime.GOOS == "windows" {
+			t.Skip("unix shell signals only")
+		}
+		opts, r := sudoOpts(t, ruleInstall, ruleNoBlock, rulePlain)
+		inst := newSudoInstaller(opts)
+		if err := inst.Preflight(ctx); err != nil {
+			t.Fatal(err)
+		}
+		inst.runner = shellRunRunner{fakeRunner: r, script: script}
+		return inst.Restart(rctx)
+	}
+
+	t.Run("no-block restart killed by the unit stop is under way", func(t *testing.T) {
+		// Even with --no-block, systemd begins stopping the service's cgroup as
+		// soon as the D-Bus RestartUnit call is accepted, sending SIGTERM to the
+		// sudo/systemctl child before it exits 0 (ptone/scion#7185).
+		if err := noBlockRestart(t, ctx, "kill -TERM $$"); err != nil {
+			t.Fatalf("Restart = %v, want nil for a SIGTERM-terminated child", err)
+		}
+	})
+
+	t.Run("no-block restart exiting non-zero fails Restart", func(t *testing.T) {
+		err := noBlockRestart(t, ctx, "echo 'Unit scion-hub.service not found.' >&2; exit 5")
+		if err == nil || !strings.Contains(err.Error(), "Unit scion-hub.service not found.") {
+			t.Fatalf("Restart = %v, want systemctl stderr in error", err)
+		}
+	})
+
+	t.Run("no-block restart killed by SIGKILL fails Restart", func(t *testing.T) {
+		if err := noBlockRestart(t, ctx, "kill -KILL $$"); err == nil {
+			t.Fatal("Restart = nil, want error for SIGKILL")
+		}
+	})
+
+	t.Run("no-block restart hitting deadline fails Restart", func(t *testing.T) {
+		tctx, cancel := context.WithTimeout(ctx, 30*time.Millisecond)
+		defer cancel()
+		if err := noBlockRestart(t, tctx, "exec sleep 5"); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Restart = %v, want deadline exceeded", err)
 		}
 	})
 
@@ -388,4 +444,22 @@ type shellStartRunner struct {
 func (r shellStartRunner) Start(name string, args ...string) (<-chan error, error) {
 	_, _ = r.fakeRunner.Start(name, args...)
 	return ExecRunner{}.Start("sh", "-c", r.script)
+}
+
+// shellRunRunner is a fakeRunner whose `sudo -n systemctl ...` Run calls
+// execute `sh -c script` for real so the exit result is a genuine
+// *exec.ExitError, while `sudo -n -l` and `sudo -n install` stay faked.
+type shellRunRunner struct {
+	*fakeRunner
+	script string
+}
+
+func (r shellRunRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	if name == "sudo" && len(args) >= 2 && args[0] == "-n" && args[1] == "systemctl" {
+		r.mu.Lock()
+		r.runs = append(r.runs, strings.Join(append([]string{name}, args...), " "))
+		r.mu.Unlock()
+		return ExecRunner{}.Run(ctx, "sh", "-c", r.script)
+	}
+	return r.fakeRunner.Run(ctx, name, args...)
 }
