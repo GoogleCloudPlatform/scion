@@ -15,9 +15,11 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -75,8 +77,8 @@ func TestProfileConversion_CloudRunMapped(t *testing.T) {
 		t.Fatalf("instances = %+v, want 1", got.Instances)
 	}
 	inst := got.Instances[0]
-	if inst.Key != "cloudrun-my-project-us-central1" || inst.Name != "cloudrun-my-project-us-central1" {
-		t.Fatalf("instance key/name = %q/%q, want cloudrun-my-project-us-central1", inst.Key, inst.Name)
+	if inst.Key != "cloudrun-us-central1" || inst.Name != "cloudrun-us-central1" {
+		t.Fatalf("instance key/name = %q/%q, want cloudrun-us-central1", inst.Key, inst.Name)
 	}
 	wantTarget := &V1RuntimeTargetConfig{
 		Type:           RuntimeTargetTypeCloudRun,
@@ -94,7 +96,7 @@ func TestProfileConversion_CloudRunMapped(t *testing.T) {
 		inst.AgentDefaults.CloneDepth != "full" {
 		t.Fatalf("agent_defaults = %+v", inst.AgentDefaults)
 	}
-	if wantMap := map[string]string{"prod": "cloudrun-my-project-us-central1"}; !reflect.DeepEqual(got.ProfileMap, wantMap) {
+	if wantMap := map[string]string{"prod": "cloudrun-us-central1"}; !reflect.DeepEqual(got.ProfileMap, wantMap) {
 		t.Fatalf("profile map = %v, want %v (findings: %+v)", got.ProfileMap, wantMap, got.Findings)
 	}
 	if len(got.Findings) != 1 {
@@ -126,15 +128,15 @@ func TestProfileConversion_CloudRunLocationToRegion(t *testing.T) {
 	if len(got.Instances) != 1 {
 		t.Fatalf("instances = %+v, want both profiles grouped into 1 instance", got.Instances)
 	}
-	if got.Instances[0].Key != "cloudrun-my-project-europe-west1" {
-		t.Fatalf("key = %q, want cloudrun-my-project-europe-west1", got.Instances[0].Key)
+	if got.Instances[0].Key != "cloudrun-europe-west1" {
+		t.Fatalf("key = %q, want cloudrun-europe-west1", got.Instances[0].Key)
 	}
 	if got.Instances[0].RuntimeTarget.Region != "europe-west1" {
 		t.Fatalf("region = %q, want europe-west1", got.Instances[0].RuntimeTarget.Region)
 	}
 	wantMap := map[string]string{
-		"a": "cloudrun-my-project-europe-west1",
-		"b": "cloudrun-my-project-europe-west1",
+		"a": "cloudrun-europe-west1",
+		"b": "cloudrun-europe-west1",
 	}
 	if !reflect.DeepEqual(got.ProfileMap, wantMap) {
 		t.Fatalf("profile map = %v, want %v", got.ProfileMap, wantMap)
@@ -142,7 +144,7 @@ func TestProfileConversion_CloudRunLocationToRegion(t *testing.T) {
 }
 
 func TestProfileConversion_CloudRunInstancesFieldRequired(t *testing.T) {
-	t.Run("cloudrun-instances missing service_account and network", func(t *testing.T) {
+	t.Run("valid cloudrun-instances keeps ProfileMap and emits operator-input notices", func(t *testing.T) {
 		vs := &VersionedSettings{
 			Runtimes: map[string]V1RuntimeConfig{
 				"cri": {
@@ -151,6 +153,8 @@ func TestProfileConversion_CloudRunInstancesFieldRequired(t *testing.T) {
 						ProjectID: "my-project",
 						Region:    "us-west1",
 					},
+					// A stray cloudrun block on cloudrun-instances stays a non-folded notice.
+					CloudRun: validCloudRunConfig(),
 				},
 			},
 			Profiles: map[string]V1ProfileConfig{
@@ -159,23 +163,39 @@ func TestProfileConversion_CloudRunInstancesFieldRequired(t *testing.T) {
 		}
 		got := ConvertProfilesToInstances(ProfileConversionInput{Settings: vs})
 		if len(got.Instances) != 1 {
-			t.Fatalf("instances = %+v, want proposed instance even when fields are missing", got.Instances)
+			t.Fatalf("instances = %+v, want 1 proposed instance", got.Instances)
 		}
 		inst := got.Instances[0]
-		if inst.Key != "cloudrun-my-project-us-west1" || inst.RuntimeTarget.ProjectID != "my-project" || inst.RuntimeTarget.Region != "us-west1" {
+		if inst.Key != "cloudrun-us-west1" || inst.RuntimeTarget.ProjectID != "my-project" || inst.RuntimeTarget.Region != "us-west1" {
 			t.Fatalf("proposed instance = %+v", inst)
 		}
-		if len(got.ProfileMap) != 0 {
-			t.Fatalf("profile map = %v, want empty for blocked profile", got.ProfileMap)
+		if inst.RuntimeTarget.ServiceAccount != "" || inst.RuntimeTarget.Network != "" || inst.RuntimeTarget.Subnetwork != "" {
+			t.Fatalf("cloudrun-instances must not fold runtimes.cri.cloudrun fields: %+v", inst.RuntimeTarget)
+		}
+		if wantMap := map[string]string{"p": "cloudrun-us-west1"}; !reflect.DeepEqual(got.ProfileMap, wantMap) {
+			t.Fatalf("profile map = %v, want %v (findings: %+v)", got.ProfileMap, wantMap, got.Findings)
+		}
+		for _, f := range got.Findings {
+			if f.Severity == ConversionSeverityBlocking {
+				t.Fatalf("unexpected blocking finding on valid cloudrun-instances: %+v", f)
+			}
 		}
 		for _, path := range []string{
-			"runtimes.cri.cloudrun.service_account",
-			"runtimes.cri.cloudrun.network",
+			"server.broker.instances[0].runtime_target.credentials_file",
+			"server.broker.instances[0].runtime_target.service_account",
+			"server.broker.instances[0].runtime_target.network",
 		} {
-			f := findFinding(got.Findings, ConversionFlatTargetFieldRequired, path)
-			if f == nil || f.Severity != ConversionSeverityBlocking || !reflect.DeepEqual(f.Profiles, []string{"p"}) {
-				t.Fatalf("missing blocking flat_target_field_required at %s: %+v", path, got.Findings)
+			f := findFinding(got.Findings, ConversionFlatTargetOperatorInputRequired, path)
+			if f == nil || f.Severity != ConversionSeverityNotice || !reflect.DeepEqual(f.Profiles, []string{"p"}) {
+				t.Fatalf("missing notice flat_target_operator_input_required at %s: %+v", path, got.Findings)
 			}
+		}
+		netFinding := findFinding(got.Findings, ConversionFlatTargetOperatorInputRequired, "server.broker.instances[0].runtime_target.network")
+		if !strings.Contains(netFinding.Message, "network or subnetwork") {
+			t.Fatalf("network operator-input message = %q, want mention of network or subnetwork", netFinding.Message)
+		}
+		if f := findFinding(got.Findings, ConversionFieldNotValidForTargetType, "runtimes.cri.cloudrun"); f == nil || f.Severity != ConversionSeverityNotice {
+			t.Fatalf("want notice field_not_valid_for_target_type at runtimes.cri.cloudrun, got %+v", got.Findings)
 		}
 	})
 
@@ -187,18 +207,87 @@ func TestProfileConversion_CloudRunInstancesFieldRequired(t *testing.T) {
 			Profiles: map[string]V1ProfileConfig{"p": {Runtime: "cri"}},
 		}
 		got := ConvertProfilesToInstances(ProfileConversionInput{Settings: vs})
-		if len(got.Instances) != 1 || len(got.ProfileMap) != 0 {
+		if len(got.Instances) != 1 || got.Instances[0].Key != "cloudrun" || len(got.ProfileMap) != 0 {
 			t.Fatalf("instances = %+v, profile map = %v", got.Instances, got.ProfileMap)
 		}
 		for _, path := range []string{
 			"runtimes.cri.cloudrun_instances.project_id",
 			"runtimes.cri.cloudrun_instances.region",
-			"runtimes.cri.cloudrun.service_account",
-			"runtimes.cri.cloudrun.network",
 		} {
 			f := findFinding(got.Findings, ConversionFlatTargetFieldRequired, path)
 			if f == nil || f.Severity != ConversionSeverityBlocking {
 				t.Fatalf("missing blocking flat_target_field_required at %s: %+v", path, got.Findings)
+			}
+		}
+		for _, badPath := range []string{
+			"runtimes.cri.cloudrun.service_account",
+			"runtimes.cri.cloudrun.network",
+		} {
+			if f := findFinding(got.Findings, ConversionFlatTargetFieldRequired, badPath); f != nil {
+				t.Fatalf("cloudrun-instances must not emit flat_target_field_required at %s: %+v", badPath, f)
+			}
+		}
+	})
+
+	t.Run("cloudrun-instances never merges with sibling cloudrun in same project and region", func(t *testing.T) {
+		// Even when the cloudrun entry also has empty service_account and network,
+		// cloudrun-instances stays in its own proposed instance, keeps its ProfileMap
+		// entry, and never inherits a sibling's service_account or blocking finding.
+		vs := &VersionedSettings{
+			Runtimes: map[string]V1RuntimeConfig{
+				"cr-empty": {
+					Type: "cloudrun",
+					CloudRun: &CloudRunConfig{
+						ProjectID: "my-project",
+						Location:  "us-central1",
+					},
+				},
+				"cri": {
+					Type: "cloudrun-instances",
+					CloudRunInstances: &V1CloudRunInstancesConfig{
+						ProjectID: "my-project",
+						Region:    "us-central1",
+					},
+				},
+			},
+			Profiles: map[string]V1ProfileConfig{
+				"p-cr":  {Runtime: "cr-empty"},
+				"p-cri": {Runtime: "cri"},
+			},
+		}
+		got := ConvertProfilesToInstances(ProfileConversionInput{Settings: vs})
+		if len(got.Instances) != 2 {
+			t.Fatalf("instances = %+v, want 2 separate instances", got.Instances)
+		}
+		if _, blocked := got.ProfileMap["p-cr"]; blocked {
+			t.Fatalf("p-cr should have no ProfileMap entry: %v", got.ProfileMap)
+		}
+		criKey, ok := got.ProfileMap["p-cri"]
+		if !ok || criKey == "" {
+			t.Fatalf("p-cri should keep its ProfileMap entry, got %v (findings: %+v)", got.ProfileMap, got.Findings)
+		}
+
+		// Also verify with a valid sibling cloudrun entry that p-cri never adopts its service_account.
+		vsValid := &VersionedSettings{
+			Runtimes: map[string]V1RuntimeConfig{
+				"cr":  {Type: "cloudrun", CloudRun: validCloudRunConfig()},
+				"cri": vs.Runtimes["cri"],
+			},
+			Profiles: map[string]V1ProfileConfig{
+				"p-cr":  {Runtime: "cr"},
+				"p-cri": {Runtime: "cri"},
+			},
+		}
+		gotValid := ConvertProfilesToInstances(ProfileConversionInput{Settings: vsValid})
+		if len(gotValid.Instances) != 2 {
+			t.Fatalf("instances = %+v, want 2 separate instances", gotValid.Instances)
+		}
+		if gotValid.ProfileMap["p-cr"] == gotValid.ProfileMap["p-cri"] {
+			t.Fatalf("p-cr and p-cri merged onto same instance: %v", gotValid.ProfileMap)
+		}
+		for _, inst := range gotValid.Instances {
+			if inst.Key == gotValid.ProfileMap["p-cri"] && inst.RuntimeTarget.ServiceAccount != "" {
+				t.Fatalf("cloudrun-instances instance inherited sibling service_account: %+v", inst.RuntimeTarget)
 			}
 		}
 	})
@@ -255,7 +344,7 @@ func TestProfileConversion_CloudRunInstancesFieldRequired(t *testing.T) {
 			Profiles: map[string]V1ProfileConfig{"p": {Runtime: "cr"}},
 		}
 		got := ConvertProfilesToInstances(ProfileConversionInput{Settings: vs})
-		if got.ProfileMap["p"] != "cloudrun-my-project-us-central1" {
+		if got.ProfileMap["p"] != "cloudrun-us-central1" {
 			t.Fatalf("profile map = %v, findings = %+v", got.ProfileMap, got.Findings)
 		}
 	})
@@ -431,7 +520,7 @@ func TestProfileConversion_CloudRunBlockOnDockerNotice(t *testing.T) {
 	wantMap := map[string]string{
 		"p-dock": "docker",
 		"p-k8s":  "k8s-agents",
-		"p-cr":   "cloudrun-my-project-us-central1",
+		"p-cr":   "cloudrun-us-central1",
 	}
 	if !reflect.DeepEqual(got.ProfileMap, wantMap) {
 		t.Fatalf("profile map = %v, want %v (findings: %+v)", got.ProfileMap, wantMap, got.Findings)
@@ -480,7 +569,7 @@ func TestProfileConversion_CloudRunNFSFieldsNoEffect(t *testing.T) {
 	}
 
 	got := ConvertProfilesToInstances(ProfileConversionInput{Settings: vs})
-	if got.ProfileMap["p"] != "cloudrun-my-project-us-central1" {
+	if got.ProfileMap["p"] != "cloudrun-us-central1" {
 		t.Fatalf("profile map = %v, findings = %+v", got.ProfileMap, got.Findings)
 	}
 	for _, path := range []string{
@@ -535,8 +624,8 @@ func TestProfileConversion_CloudRunSplitBySA(t *testing.T) {
 				t.Fatalf("instances = %+v, want 2 split instances", got.Instances)
 			}
 			wantMap := map[string]string{
-				"alpha": "cloudrun-my-project-us-central1-alpha",
-				"beta":  "cloudrun-my-project-us-central1-beta",
+				"alpha": "cloudrun-us-central1-alpha",
+				"beta":  "cloudrun-us-central1-beta",
 			}
 			if !reflect.DeepEqual(got.ProfileMap, wantMap) {
 				t.Fatalf("profile map = %v, want %v", got.ProfileMap, wantMap)
@@ -550,12 +639,12 @@ func TestProfileConversion_CloudRunSplitBySA(t *testing.T) {
 			merged := ConvertProfilesToInstances(ProfileConversionInput{
 				Settings: vs,
 				Choices: []ConversionChoice{{
-					TargetGroup:   "cloudrun-my-project-us-central1",
+					TargetGroup:   "cloudrun-us-central1",
 					Field:         tc.wantField,
 					ChosenProfile: "alpha",
 				}},
 			})
-			if len(merged.Instances) != 1 || merged.Instances[0].Key != "cloudrun-my-project-us-central1" {
+			if len(merged.Instances) != 1 || merged.Instances[0].Key != "cloudrun-us-central1" {
 				t.Fatalf("merged instances = %+v", merged.Instances)
 			}
 			if f := findFinding(merged.Findings, ConversionProfileConflictResolved, "profiles.*."+tc.wantField); f == nil {
@@ -566,7 +655,7 @@ func TestProfileConversion_CloudRunSplitBySA(t *testing.T) {
 			tmplRefused := ConvertProfilesToInstances(ProfileConversionInput{
 				Settings: vs,
 				Choices: []ConversionChoice{{
-					TargetGroup:   "cloudrun-my-project-us-central1",
+					TargetGroup:   "cloudrun-us-central1",
 					Field:         tc.wantField,
 					ChosenProfile: ConversionChoiceTemplatePrefix + "default",
 				}},
@@ -604,12 +693,12 @@ func TestProfileConversion_CloudRunCredentialsFileNotice(t *testing.T) {
 		t.Fatalf("instances = %+v, want 3", got.Instances)
 	}
 	// Sorted by key:
-	// [0] cloudrun-my-project-us-east1
-	// [1] cloudrun-my-project-us-west1
+	// [0] cloudrun-us-east1
+	// [1] cloudrun-us-west1
 	// [2] docker
 	wantMap := map[string]string{
-		"p-east": "cloudrun-my-project-us-east1",
-		"p-west": "cloudrun-my-project-us-west1",
+		"p-east": "cloudrun-us-east1",
+		"p-west": "cloudrun-us-west1",
 		"p-dock": "docker",
 	}
 	if !reflect.DeepEqual(got.ProfileMap, wantMap) {
@@ -624,6 +713,64 @@ func TestProfileConversion_CloudRunCredentialsFileNotice(t *testing.T) {
 	}
 	if f := findFinding(got.Findings, ConversionFlatTargetOperatorInputRequired, "server.broker.instances[2].runtime_target.credentials_file"); f != nil {
 		t.Fatalf("docker instance must not get credentials_file notice: %+v", f)
+	}
+}
+
+func TestProfileConversion_CloudRunKeyOmitsProjectID(t *testing.T) {
+	cfgAlpha := &CloudRunConfig{
+		ProjectID:      "proj-alpha",
+		Location:       "us-central1",
+		ServiceAccount: "agent-sa@proj-alpha.iam.gserviceaccount.com",
+		Network:        "projects/proj-alpha/global/networks/agents-vpc",
+	}
+	cfgBeta := &CloudRunConfig{
+		ProjectID:      "proj-beta",
+		Location:       "us-central1",
+		ServiceAccount: "agent-sa@proj-beta.iam.gserviceaccount.com",
+		Network:        "projects/proj-beta/global/networks/agents-vpc",
+	}
+
+	vs := &VersionedSettings{
+		Runtimes: map[string]V1RuntimeConfig{
+			"cr-alpha": {Type: "cloudrun", CloudRun: cfgAlpha},
+			"cr-beta":  {Type: "cloudrun", CloudRun: cfgBeta},
+		},
+		Profiles: map[string]V1ProfileConfig{
+			"alpha": {Runtime: "cr-alpha"},
+			"beta":  {Runtime: "cr-beta"},
+		},
+	}
+
+	got := ConvertProfilesToInstances(ProfileConversionInput{Settings: vs})
+	if len(got.Instances) != 2 {
+		t.Fatalf("instances = %+v, want 2 instances for distinct projects in same region", got.Instances)
+	}
+	keyA, keyB := got.Instances[0].Key, got.Instances[1].Key
+	if keyA == keyB {
+		t.Fatalf("two projects in us-central1 got duplicate key %q", keyA)
+	}
+	suffixedRe := regexp.MustCompile(`^cloudrun-us-central1-[0-9a-f]{8}$`)
+	for _, inst := range got.Instances {
+		if !suffixedRe.MatchString(inst.Key) {
+			t.Fatalf("key %q does not match FC6 hashed cloudrun-us-central1-<8hex> pattern", inst.Key)
+		}
+		for _, proj := range []string{"proj-alpha", "proj-beta"} {
+			if strings.Contains(inst.Key, proj) || strings.Contains(inst.Name, proj) {
+				t.Fatalf("instance key/name %q/%q leaks project ID %q", inst.Key, inst.Name, proj)
+			}
+		}
+		presBytes, err := json.Marshal(PresentInstance(inst).API())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, proj := range []string{"proj-alpha", "proj-beta"} {
+			if strings.Contains(string(presBytes), proj) {
+				t.Fatalf("presented instance JSON %s leaks project ID %q", presBytes, proj)
+			}
+		}
+	}
+	if got.ProfileMap["alpha"] == "" || got.ProfileMap["beta"] == "" || got.ProfileMap["alpha"] == got.ProfileMap["beta"] {
+		t.Fatalf("profile map = %v, want distinct mapped keys", got.ProfileMap)
 	}
 }
 
@@ -667,9 +814,8 @@ func TestProfileConversion_CloudRunIdentityKeysBlocking(t *testing.T) {
 	})
 
 	// V1ProfileConfig has no CloudRun block; if a profile in raw settings sets
-	// cloudrun.assignable_service_accounts, cloudrun.block_service_account, or
-	// either identity key directly under profiles.<p>, conversion still blocks
-	// with the profile path named and omits the ProfileMap entry.
+	// cloudrun.assignable_service_accounts or cloudrun.block_service_account,
+	// conversion still blocks with the profile path named and omits the ProfileMap entry.
 	for name, tc := range map[string]struct {
 		yaml     string
 		wantCode string

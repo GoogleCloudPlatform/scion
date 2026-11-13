@@ -270,11 +270,7 @@ func ConvertProfilesToInstances(in ProfileConversionInput) ProfileConversionResu
 			continue
 		}
 		part := partByKey[inst.Key]
-		checkProposedCloudRunTarget(st, inst.RuntimeTarget, part)
-		credPath := fmt.Sprintf("server.broker.instances[%d].runtime_target.credentials_file", i)
-		st.add(ConversionFlatTargetOperatorInputRequired, ConversionSeverityNotice, credPath,
-			fmt.Sprintf("%s (%s) has no legacy settings source and is required for runtime target type cloudrun; set it to an absolute local service-account or impersonated-service-account JSON file path before starting the instance", credPath, inst.Key),
-			groupProfileNames(part)...)
+		checkProposedCloudRunTarget(st, i, inst.Key, inst.RuntimeTarget, part)
 	}
 	reportUnusedFieldChoices(st, splits, fieldChoices)
 
@@ -459,7 +455,9 @@ func foldProfile(st *convState, vs *VersionedSettings, configured func(string) b
 					fmt.Sprintf("%scloudrun_instances is not valid for runtime type cloudrun; a cloudrun runtime ignores it today, so it is not converted", rp), name)
 			}
 		}
-		cp.scope = "cloudrun\x00" + cp.proj + "\x00" + cp.region
+		// Keep cloudrun-instances in its own scope so it never merges with a
+		// sibling cloudrun entry (even when both leave service_account empty).
+		cp.scope = legacyType + "\x00" + cp.proj + "\x00" + cp.region
 	default:
 		cp.scope = RuntimeTargetTypeDocker
 	}
@@ -661,21 +659,29 @@ func cloudRunIdentityKeyRefusal(path string) string {
 	return fmt.Sprintf("%s cannot be carried to a flat cloudrun instance yet (ptone/scion#7764); remove it from the legacy entry or wait for flat identity support", path)
 }
 
-// checkProposedCloudRunTarget checks the CR2-required fields with legacy
-// sources on a proposed Cloud Run instance, emitting blocking
+// checkProposedCloudRunTarget checks the CR2-required fields on a proposed
+// Cloud Run instance: fields with legacy sources emit blocking
 // flat_target_field_required at each affected profile's legacy path when
-// missing or invalid.
-func checkProposedCloudRunTarget(st *convState, t *V1RuntimeTargetConfig, part *convGroup) {
+// missing or invalid, while required fields with no legacy source
+// (credentials_file on all Cloud Run entries, plus service_account and
+// network/subnetwork on cloudrun-instances) emit notice
+// flat_target_operator_input_required at the proposed instance path.
+func checkProposedCloudRunTarget(st *convState, index int, key string, t *V1RuntimeTargetConfig, part *convGroup) {
 	if part == nil {
 		return
 	}
+	targetPrefix := fmt.Sprintf("server.broker.instances[%d].runtime_target.", index)
+	credPath := targetPrefix + "credentials_file"
+	st.add(ConversionFlatTargetOperatorInputRequired, ConversionSeverityNotice, credPath,
+		fmt.Sprintf("%s (%s) has no legacy settings source and is required for runtime target type cloudrun; set it to an absolute local service-account or impersonated-service-account JSON file path before starting the instance", credPath, key),
+		groupProfileNames(part)...)
+
 	for _, p := range part.profiles {
 		rp := "runtimes." + p.rtKey + "."
 		projPath, regionPath := rp+"cloudrun.project_id", rp+"cloudrun.location"
 		if p.legacyType == "cloudrun-instances" {
 			projPath, regionPath = rp+"cloudrun_instances.project_id", rp+"cloudrun_instances.region"
 		}
-		saPath, netPath := rp+"cloudrun.service_account", rp+"cloudrun.network"
 
 		switch {
 		case t.ProjectID == "":
@@ -698,6 +704,19 @@ func checkProposedCloudRunTarget(st *convState, t *V1RuntimeTargetConfig, part *
 				fmt.Sprintf("%s cannot be used on a flat cloudrun instance: region must be a Cloud Run region (e.g. us-central1)", regionPath), p.name)
 		}
 
+		if p.legacyType == "cloudrun-instances" {
+			saTargetPath := targetPrefix + "service_account"
+			st.add(ConversionFlatTargetOperatorInputRequired, ConversionSeverityNotice, saTargetPath,
+				fmt.Sprintf("%s (%s) has no legacy settings source on runtime type cloudrun-instances and is required for runtime target type cloudrun; set it to a user-managed service account (name@project.iam.gserviceaccount.com) before starting the instance", saTargetPath, key),
+				p.name)
+			netTargetPath := targetPrefix + "network"
+			st.add(ConversionFlatTargetOperatorInputRequired, ConversionSeverityNotice, netTargetPath,
+				fmt.Sprintf("%s or subnetwork (%s) has no legacy settings source on runtime type cloudrun-instances and is required for runtime target type cloudrun; set network or subnetwork before starting the instance", netTargetPath, key),
+				p.name)
+			continue
+		}
+
+		saPath, netPath := rp+"cloudrun.service_account", rp+"cloudrun.network"
 		switch {
 		case t.ServiceAccount == "":
 			st.add(ConversionFlatTargetFieldRequired, ConversionSeverityBlocking, saPath,
@@ -774,7 +793,7 @@ func groupProfiles(profiles []*convProfile) []*convGroup {
 			case RuntimeTargetTypeKubernetes:
 				g.key = conversionKey(p.scope, "k8s", p.ctx, p.ns)
 			case RuntimeTargetTypeCloudRun:
-				g.key = conversionKey(p.scope, RuntimeTargetTypeCloudRun, p.proj, p.region)
+				g.key = conversionKey(p.scope, RuntimeTargetTypeCloudRun, p.region)
 			default:
 				g.key = conversionKey(p.scope, RuntimeTargetTypeDocker)
 			}
