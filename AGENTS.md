@@ -20,8 +20,8 @@ Alpha: changing or removing behavior needs no deprecation path.
 ## Sandbox
 
 - Build with `go build -buildvcs=false`; worktrees fail VCS stamping.
-- Never compile the whole `pkg/hub` test package (about 12 GiB). Use `make test-hub-shard SHARD=K`; `hack/hubshard/hubshard.sh -locate TestName` finds the shard.
-- Scope `golangci-lint` to touched packages: `GOGC=40 golangci-lint run --new-from-rev=main --concurrency=1 ./pkg/foo/...`.
+- Never compile the whole `pkg/hub` test package (about 12 GiB). `go test`, `go vet` and golangci-lint on `./pkg/hub` all do, and so do `make ci` and `make ci-full`. Use `make test-hub-shard SHARD=K`; `hack/hubshard/hubshard.sh -locate TestName` finds the shard.
+- Scope `golangci-lint` to touched packages: `GOGC=40 golangci-lint run --new-from-rev=main --concurrency=1 ./pkg/foo/...`; lint `./pkg/hub` itself in a separate `--tests=false` run (see `docs-repo/agents/sandbox-go-toolchain.md`).
 - Never open an editor: set the editor per command (`GIT_EDITOR=true git rebase --continue`, or `git -c core.editor=true <subcommand>`), `git merge main --no-edit`, `git commit -m`. Never write `core.editor`, `core.hooksPath` or any other key outside the repository git config allow-list (`pkg/util/git_config_policy.go`) into the repository config: brokers refuse to start or resume an agent whose checkout sets one. Pass such options per command (`git -c core.editor=true <subcommand>`).
 - Local `main` is the source of truth. Don't check it out; use `git diff main...HEAD`, `git show main:path`, `git rebase main`. Use remotes only when asked; report remote failures instead of working around them.
 - In worktree-per-agent mode you work under `/repo-root`, not `/workspace`. Scripts use `$PWD` or `git rev-parse --show-toplevel`.
@@ -42,7 +42,7 @@ Alpha: changing or removing behavior needs no deprecation path.
 ## Workflow
 
 1. Finish the task with tests.
-2. Before committing run `make ci`, or `make ci-full` for the full GitHub Actions mirror.
+2. Before committing run `make ci`, or `make ci-full` for the full GitHub Actions mirror. In an agent container, run the agent-safe split in `docs-repo/agents/sandbox-go-toolchain.md` instead and report which gates ran.
 3. Commit as you go. At the end, rebase on `main` (favor main), re-test after conflicts, notify the user.
 4. Raise adjacent cleanup you notice, with file/function, payoff and blast radius. Don't implement it unprompted.
 
