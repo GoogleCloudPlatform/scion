@@ -2553,6 +2553,11 @@ const (
 // it.
 const DeliveryOutcomeUnknownPartial = `{"outcome":"partial","stage":"unknown"}`
 
+// ErrDeliveryContended: BindMessageDelivery kept losing its conditional
+// update to concurrent writers although the rows read bindable. Nothing
+// was bound; the hub answers "not reached", so the broker may retry.
+var ErrDeliveryContended = errors.New("store: message delivery bind contended")
+
 // DeliveryBindResult is how BindMessageDelivery treated a /deliver call.
 type DeliveryBindResult int
 

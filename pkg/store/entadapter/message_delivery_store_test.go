@@ -18,6 +18,7 @@ package entadapter
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -228,4 +229,134 @@ func TestFailureVersusFinish(t *testing.T) {
 			assert.Equal(t, st, f.state(t, a))
 		}
 	})
+}
+
+// TestBindMessageDelivery_InterleavingMatrix (review P3-R1): a concurrent
+// operation runs right before the losing call's bind transaction, after
+// the caller decided to bind. The loser is classified from the rows'
+// current state: a same-id owner is in flight (never "bound", which the
+// broker would report as a failure), a finished same-id delivery replays,
+// another id conflicts, and rows the owner released bind again. The owner
+// can always finish or unbind afterwards.
+func TestBindMessageDelivery_InterleavingMatrix(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name   string
+		start  string
+		race   func(t *testing.T, f *deliveryFixture, id string)
+		want   store.DeliveryBindResult
+		outcom string
+	}{
+		{"owner bound same id", store.MessageDispatchPending, func(t *testing.T, f *deliveryFixture, id string) {
+			mustBind(t, f, "d1", id)
+		}, store.DeliveryInFlight, ""},
+		{"owner finished delivered", store.MessageDispatchDispatched, func(t *testing.T, f *deliveryFixture, id string) {
+			mustBind(t, f, "d1", id)
+			_, err := f.ds.FinishMessageDelivery(ctx, "d1", []string{id}, store.MessageDispatchDelivered, `{"outcome":"delivered"}`)
+			require.NoError(t, err)
+		}, store.DeliveryReplay, `{"outcome":"delivered"}`},
+		{"owner finished partial", store.MessageDispatchDispatched, func(t *testing.T, f *deliveryFixture, id string) {
+			mustBind(t, f, "d1", id)
+			_, err := f.ds.FinishMessageDelivery(ctx, "d1", []string{id}, store.MessageDispatchPartial, `{"outcome":"partial","stage":"submit"}`)
+			require.NoError(t, err)
+		}, store.DeliveryReplay, `{"outcome":"partial","stage":"submit"}`},
+		{"other-id owner", store.MessageDispatchPending, func(t *testing.T, f *deliveryFixture, id string) {
+			mustBind(t, f, "other", id)
+		}, store.DeliveryConflict, ""},
+		{"owner bound then unbound", store.MessageDispatchDispatched, func(t *testing.T, f *deliveryFixture, id string) {
+			mustBind(t, f, "d1", id)
+			require.NoError(t, f.ds.UnbindMessageDelivery(ctx, "d1", []string{id}))
+		}, store.DeliveryBound, ""},
+		{"failure won while owner delivering", store.MessageDispatchPending, func(t *testing.T, f *deliveryFixture, id string) {
+			mustBind(t, f, "d1", id)
+			won, err := f.ds.FailUndeliveredMessage(ctx, id, "x")
+			require.NoError(t, err)
+			require.True(t, won)
+		}, store.DeliveryReplay, store.DeliveryOutcomeUnknownPartial},
+		{"stale sweep", store.MessageDispatchDispatched, func(t *testing.T, f *deliveryFixture, id string) {
+			_, err := f.ds.BindMessageDelivery(ctx, f.agent, "d1", []string{id}, time.Now().Add(-time.Hour))
+			require.NoError(t, err)
+			_, err = f.ds.SweepStaleDeliveries(ctx, time.Now().Add(-time.Minute), store.DeliveryOutcomeUnknownPartial)
+			require.NoError(t, err)
+		}, store.DeliveryReplay, store.DeliveryOutcomeUnknownPartial},
+		{"failure won on undelivered row", store.MessageDispatchDispatched, func(t *testing.T, f *deliveryFixture, id string) {
+			won, err := f.ds.FailUndeliveredMessage(ctx, id, "x")
+			require.NoError(t, err)
+			require.True(t, won)
+		}, store.DeliveryConflict, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newDeliveryFixture(t)
+			id := f.msg(t, tc.start)
+			fired := false
+			bindBeforeTxHook = func() {
+				if fired {
+					return
+				}
+				fired = true
+				tc.race(t, f, id)
+			}
+			t.Cleanup(func() { bindBeforeTxHook = nil })
+			res, err := f.ds.BindMessageDelivery(ctx, f.agent, "d1", []string{id}, time.Now())
+			bindBeforeTxHook = nil
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, res.Result)
+			if tc.outcom != "" {
+				assert.JSONEq(t, tc.outcom, res.Outcome)
+			}
+		})
+	}
+}
+
+func mustBind(t *testing.T, f *deliveryFixture, deliveryID, id string) {
+	t.Helper()
+	hook := bindBeforeTxHook
+	bindBeforeTxHook = nil
+	defer func() { bindBeforeTxHook = hook }()
+	res, err := f.ds.BindMessageDelivery(context.Background(), f.agent, deliveryID, []string{id}, time.Now())
+	require.NoError(t, err)
+	require.Equal(t, store.DeliveryBound, res.Result)
+}
+
+// TestBindMessageDelivery_TwoReadersBarrier (review P3-R1, FV1-N1): two
+// same-id calls both pass the point of deciding to bind before either
+// transaction runs. Exactly one binds; the other is in flight (not bound),
+// so it reports no failure, and the owner can still unbind after a
+// proven not-reached answer and bind again on its retry.
+func TestBindMessageDelivery_TwoReadersBarrier(t *testing.T) {
+	ctx := context.Background()
+	f := newDeliveryFixture(t)
+	id := f.msg(t, store.MessageDispatchPending)
+	var arrived sync.WaitGroup
+	arrived.Add(2)
+	release := make(chan struct{})
+	var once sync.Once
+	bindBeforeTxHook = func() {
+		arrived.Done()
+		<-release
+	}
+	t.Cleanup(func() { bindBeforeTxHook = nil })
+	results := make(chan store.DeliveryBindResult, 2)
+	for range 2 {
+		go func() {
+			res, err := f.ds.BindMessageDelivery(ctx, f.agent, "d1", []string{id}, time.Now())
+			assert.NoError(t, err)
+			results <- res.Result
+		}()
+	}
+	arrived.Wait()
+	once.Do(func() { bindBeforeTxHook = nil; close(release) })
+	got := []store.DeliveryBindResult{<-results, <-results}
+	assert.ElementsMatch(t, []store.DeliveryBindResult{store.DeliveryBound, store.DeliveryInFlight}, got)
+	assert.Equal(t, store.MessageDispatchDelivering, f.state(t, id))
+
+	// The owner's proven not-reached answer: it unbinds, and its retry binds.
+	require.NoError(t, f.ds.UnbindMessageDelivery(ctx, "d1", []string{id}))
+	res, err := f.ds.BindMessageDelivery(ctx, f.agent, "d1", []string{id}, time.Now())
+	require.NoError(t, err)
+	assert.Equal(t, store.DeliveryBound, res.Result)
+	n, err := f.ds.FinishMessageDelivery(ctx, "d1", []string{id}, store.MessageDispatchDelivered, `{"outcome":"delivered"}`)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
 }

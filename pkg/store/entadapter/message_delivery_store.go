@@ -16,7 +16,10 @@ package entadapter
 
 import (
 	"context"
+	"slices"
 	"time"
+
+	"entgo.io/ent/dialect"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/message"
@@ -51,33 +54,70 @@ func parseDeliveryUUIDs(ids []string) ([]uuid.UUID, error) {
 	return out, nil
 }
 
+// bindBeforeTxHook, when set by a test, runs right before each bind
+// transaction starts: the last point a concurrent writer can act before
+// this call reads and decides.
+var bindBeforeTxHook func()
+
+// bindAttempts bounds BindMessageDelivery's transactions when its
+// conditional update loses to a concurrent writer (which the row lock
+// should prevent; kept as a safety net).
+const bindAttempts = 3
+
 // BindMessageDelivery implements store.BrokerDispatchStore.
+//
+// It locks, reads, decides and writes in one transaction (review P3-R1):
+// the rows are read inside the transaction (SELECT ... FOR UPDATE on
+// Postgres; SQLite runs every transaction on its single writer connection),
+// so the outcome is classified from their current state, never from a
+// snapshot taken before a concurrent same-id bind. Existence and recipient
+// are checked in that same read. A call that does not bind never forwards,
+// unbinds or finishes.
 func (s *BrokerDispatchStore) BindMessageDelivery(ctx context.Context, recipientID, deliveryID string, messageIDs []string, now time.Time) (store.DeliveryBind, error) {
 	uids, err := parseDeliveryUUIDs(messageIDs)
 	if err != nil || len(uids) == 0 {
 		return store.DeliveryBind{}, store.ErrNotFound
 	}
-	rows, err := s.client.Message.Query().
-		Where(message.IDIn(uids...)).
-		Select(message.FieldRecipientID, message.FieldDispatchState, message.FieldDeliveryID, message.FieldDeliveryOutcome).
-		All(ctx)
+	for attempt := 0; attempt < bindAttempts; attempt++ {
+		res, retry, err := s.bindOnce(ctx, recipientID, deliveryID, uids, now)
+		if err != nil || !retry {
+			return res, err
+		}
+	}
+	return store.DeliveryBind{}, store.ErrDeliveryContended
+}
+
+// bindOnce is one transaction of BindMessageDelivery. retry reports that
+// the conditional update lost to a concurrent writer after the read showed
+// the rows bindable.
+func (s *BrokerDispatchStore) bindOnce(ctx context.Context, recipientID, deliveryID string, uids []uuid.UUID, now time.Time) (store.DeliveryBind, bool, error) {
+	if bindBeforeTxHook != nil {
+		bindBeforeTxHook()
+	}
+	tx, err := s.client.Tx(ctx)
 	if err != nil {
-		return store.DeliveryBind{}, mapError(err)
+		return store.DeliveryBind{}, false, mapError(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	q := tx.Message.Query().Where(message.IDIn(uids...))
+	if s.client.Driver().Dialect() == dialect.Postgres {
+		q = q.ForUpdate()
+	}
+	rows, err := q.Select(message.FieldRecipientID, message.FieldDispatchState, message.FieldDeliveryID, message.FieldDeliveryOutcome).All(ctx)
+	if err != nil {
+		return store.DeliveryBind{}, false, mapError(err)
 	}
 	if len(rows) != len(uids) {
-		return store.DeliveryBind{}, store.ErrNotFound
+		return store.DeliveryBind{}, false, store.ErrNotFound
 	}
 	for _, r := range rows {
 		if r.RecipientID != recipientID {
-			return store.DeliveryBind{}, store.ErrNotFound
+			return store.DeliveryBind{}, false, store.ErrNotFound
 		}
 	}
-
-	tx, err := s.client.Tx(ctx)
-	if err != nil {
-		return store.DeliveryBind{}, mapError(err)
+	if !allBindable(rows) {
+		return classifyBoundRows(rows, deliveryID), false, nil
 	}
-	defer func() { _ = tx.Rollback() }()
 	n, err := tx.Message.Update().
 		Where(
 			message.IDIn(uids...),
@@ -90,19 +130,30 @@ func (s *BrokerDispatchStore) BindMessageDelivery(ctx context.Context, recipient
 		SetDeliveringAt(now).
 		Save(ctx)
 	if err != nil {
-		return store.DeliveryBind{}, mapError(err)
+		return store.DeliveryBind{}, false, mapError(err)
 	}
-	if n == len(uids) {
-		if err := tx.Commit(); err != nil {
-			return store.DeliveryBind{}, mapError(err)
-		}
-		return store.DeliveryBind{Result: store.DeliveryBound}, nil
+	if n != len(uids) {
+		return store.DeliveryBind{}, true, nil
 	}
-	_ = tx.Rollback()
-	return classifyBoundRows(rows, deliveryID), nil
+	if err := tx.Commit(); err != nil {
+		return store.DeliveryBind{}, false, mapError(err)
+	}
+	return store.DeliveryBind{Result: store.DeliveryBound}, false, nil
 }
 
-// classifyBoundRows decides a bind that did not move every row: all rows
+// allBindable reports whether every row may be bound: a bindable state and
+// no delivery id.
+func allBindable(rows []*ent.Message) bool {
+	for _, r := range rows {
+		if r.DeliveryID != nil || !slices.Contains(bindableDispatchStates, r.DispatchState) {
+			return false
+		}
+	}
+	return true
+}
+
+// classifyBoundRows decides, from the rows' current state, a bind that
+// cannot move every row: all rows
 // delivering under the same id is in flight (owned by another call), all final under the same id a
 // replay, anything else a conflict.
 func classifyBoundRows(rows []*ent.Message, deliveryID string) store.DeliveryBind {

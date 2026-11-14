@@ -676,3 +676,45 @@ func TestBrokerAgentDeliver_InFlightDuplicateLeavesOwnerResponsible(t *testing.T
 	assert.Equal(t, store.MessageDispatchDelivered, f.state(t, id))
 	assert.Equal(t, 4, tm.calls, "pasted exactly once")
 }
+
+// TestBrokerAgentDeliver_SimultaneousSameIDAdmission (review P3-R1): two
+// same-id /deliver calls start together on unbound rows (both before
+// either binds). Exactly one becomes the owner and reaches the agent; the
+// other is answered in_flight, never bound (which the broker would report
+// as a failure), and the row ends delivered after one paste. The store's
+// deterministic interleavings are in
+// TestBindMessageDelivery_InterleavingMatrix and _TwoReadersBarrier.
+func TestBrokerAgentDeliver_SimultaneousSameIDAdmission(t *testing.T) {
+	for i := range 5 {
+		t.Run(fmt.Sprintf("round%d", i), func(t *testing.T) {
+			f := newDeliverFixture(t)
+			c, tm := f.startDeliverAgent(t, 0, "")
+			id := f.msg(t, store.MessageDispatchPending)
+			start := make(chan struct{})
+			type answer struct {
+				code    int
+				outcome string
+			}
+			out := make(chan answer, 2)
+			for range 2 {
+				go func() {
+					<-start
+					code, resp := f.postDeliver(t, f.broker, f.launched.ID, deliverReq("d1", id))
+					out <- answer{code, resp.Outcome}
+				}()
+			}
+			close(start)
+			a, b := <-out, <-out
+			got := map[string]bool{a.outcome: true, b.outcome: true}
+			for _, ans := range []answer{a, b} {
+				assert.NotEqual(t, agentcontrol.OutcomeBound, ans.outcome, "a same-id loser must never be told bound")
+			}
+			// Either the loser ran while the owner was in flight, or after
+			// it finished (then it replays the stored outcome).
+			assert.True(t, got[agentcontrol.OutcomeDelivered], "one call delivered: %+v %+v", a, b)
+			assert.Equal(t, 1, c.count(), "one call reached the agent")
+			assert.Equal(t, 4, tm.calls, "pasted once")
+			assert.Equal(t, store.MessageDispatchDelivered, f.state(t, id))
+		})
+	}
+}

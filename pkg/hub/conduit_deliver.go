@@ -158,6 +158,11 @@ func (s *Server) handleBrokerAgentDeliver(w http.ResponseWriter, r *http.Request
 		log.Warn("message delivery refused: a message row is missing or addressed to another agent")
 		writeDeliverAnswer(w, http.StatusBadRequest, agentcontrol.DeliverResponse{Outcome: agentcontrol.OutcomeInvalid, Field: agentcontrol.FieldMessageIDs})
 		return
+	case errors.Is(err, store.ErrDeliveryContended):
+		// Nothing was bound and nothing sent: the broker may retry.
+		log.Warn("message delivery bind contended")
+		writeDeliverAnswer(w, http.StatusServiceUnavailable, agentcontrol.DeliverResponse{Outcome: deliverOutcomeNotReached})
+		return
 	case err != nil:
 		writeErrorFromErr(w, err, "")
 		return
