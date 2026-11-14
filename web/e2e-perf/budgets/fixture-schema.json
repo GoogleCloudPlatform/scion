@@ -52,6 +52,7 @@
         "experiments.web.chat_scheduled_send:boolean",
         "experiments.web.chat_starred_messages:boolean",
         "experiments.web.gcs_links:boolean",
+        "experiments.web.project_decisions:boolean",
         "experiments.web.sse_hidden_tab_close:boolean",
         "experiments:object"
       ]

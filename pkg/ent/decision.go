@@ -24,6 +24,8 @@ type Decision struct {
 	ProjectID uuid.UUID `json:"project_id,omitempty"`
 	// ConversationID holds the value of the "conversation_id" field.
 	ConversationID *uuid.UUID `json:"conversation_id,omitempty"`
+	// ChatKey holds the value of the "chat_key" field.
+	ChatKey *string `json:"chat_key,omitempty"`
 	// MessageID holds the value of the "message_id" field.
 	MessageID uuid.UUID `json:"message_id,omitempty"`
 	// Position holds the value of the "position" field.
@@ -72,7 +74,7 @@ func (*Decision) scanValues(columns []string) ([]any, error) {
 			values[i] = new([]byte)
 		case decision.FieldPosition, decision.FieldVersion, decision.FieldIntroLength:
 			values[i] = new(sql.NullInt64)
-		case decision.FieldAskerAgentName, decision.FieldKey, decision.FieldKeyNorm, decision.FieldKeySource, decision.FieldQuestion, decision.FieldDefaultChoiceID, decision.FieldStatus:
+		case decision.FieldChatKey, decision.FieldAskerAgentName, decision.FieldKey, decision.FieldKeyNorm, decision.FieldKeySource, decision.FieldQuestion, decision.FieldDefaultChoiceID, decision.FieldStatus:
 			values[i] = new(sql.NullString)
 		case decision.FieldCreatedAt, decision.FieldDecidedAt, decision.FieldReplacedAt:
 			values[i] = new(sql.NullTime)
@@ -111,6 +113,13 @@ func (_m *Decision) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.ConversationID = new(uuid.UUID)
 				*_m.ConversationID = *value.S.(*uuid.UUID)
+			}
+		case decision.FieldChatKey:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field chat_key", values[i])
+			} else if value.Valid {
+				_m.ChatKey = new(string)
+				*_m.ChatKey = value.String
 			}
 		case decision.FieldMessageID:
 			if value, ok := values[i].(*uuid.UUID); !ok {
@@ -262,6 +271,11 @@ func (_m *Decision) String() string {
 	if v := _m.ConversationID; v != nil {
 		builder.WriteString("conversation_id=")
 		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
+	if v := _m.ChatKey; v != nil {
+		builder.WriteString("chat_key=")
+		builder.WriteString(*v)
 	}
 	builder.WriteString(", ")
 	builder.WriteString("message_id=")

@@ -296,6 +296,7 @@ func (c *CompositeStore) createChoicePromptTx(ctx context.Context, in *store.Cho
 			SetID(rowIDs[i]).
 			SetProjectID(projectID).
 			SetNillableConversationID(conversationID).
+			SetNillableChatKey(nullableString(in.Message.ThreadID)).
 			SetMessageID(messageID).
 			SetPosition(i).
 			SetAskerAgentID(agentID).
@@ -817,6 +818,11 @@ func validateRecordAnswerSetInput(in *store.RecordAnswerSetInput) error {
 	if len(in.IdempotencyKey) > store.MaxDecisionIdempotencyKeyLen {
 		return fmt.Errorf("%w: the idempotency key is at most %d bytes", store.ErrInvalidInput, store.MaxDecisionIdempotencyKeyLen)
 	}
+	if in.Surface != "" {
+		if err := decisionanswer.SurfaceValidator(decisionanswer.Surface(in.Surface)); err != nil {
+			return fmt.Errorf("%w: %v", store.ErrInvalidInput, err)
+		}
+	}
 	seen := make(map[string]bool, len(in.Answers))
 	for _, a := range in.Answers {
 		if a.DecisionRowID == "" || a.ChoiceID == "" {
@@ -967,6 +973,10 @@ func (c *CompositeStore) recordAnswerSetTx(ctx context.Context, in *store.Record
 	responseID, _ := parseUUID(in.ResponseMessage.ID)
 	batchID := uuid.New()
 	now := time.Now().UTC()
+	surface := in.Surface
+	if surface == "" {
+		surface = store.DecisionSurfaceNative
+	}
 	res := &store.AnswerSetResult{BatchID: batchID.String()}
 	for _, r := range rows {
 		a, ok := requested[r.ID.String()]
@@ -987,7 +997,7 @@ func (c *CompositeStore) recordAnswerSetTx(ctx context.Context, in *store.Record
 			SetAnsweredByEmail(in.AnsweredByEmail).
 			SetProvenance(decisionanswer.ProvenanceDirect).
 			SetOutcome(decisionanswer.Outcome(outcomes[a.DecisionRowID])).
-			SetSurface(decisionanswer.SurfaceNative).
+			SetSurface(decisionanswer.Surface(surface)).
 			SetResponseMessageID(responseID).
 			SetNillableIdempotencyKey(nullableString(in.IdempotencyKey)).
 			SetBatchID(batchID).
@@ -1127,6 +1137,9 @@ func decisionToStore(r *ent.Decision) *store.Decision {
 	}
 	if r.ConversationID != nil {
 		d.ConversationID = r.ConversationID.String()
+	}
+	if r.ChatKey != nil {
+		d.ChatKey = *r.ChatKey
 	}
 	if r.DefaultChoiceID != nil {
 		d.DefaultChoiceID = *r.DefaultChoiceID

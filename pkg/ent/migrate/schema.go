@@ -1230,6 +1230,7 @@ var (
 		{Name: "id", Type: field.TypeUUID},
 		{Name: "project_id", Type: field.TypeUUID},
 		{Name: "conversation_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "chat_key", Type: field.TypeString, Nullable: true, Size: 256},
 		{Name: "message_id", Type: field.TypeUUID},
 		{Name: "position", Type: field.TypeInt},
 		{Name: "asker_agent_id", Type: field.TypeUUID},
@@ -1257,22 +1258,27 @@ var (
 			{
 				Name:    "decision_asker_agent_id_key_norm_version",
 				Unique:  true,
-				Columns: []*schema.Column{DecisionsColumns[5], DecisionsColumns[8], DecisionsColumns[10]},
+				Columns: []*schema.Column{DecisionsColumns[6], DecisionsColumns[9], DecisionsColumns[11]},
 			},
 			{
 				Name:    "decision_asker_agent_id_status",
 				Unique:  false,
-				Columns: []*schema.Column{DecisionsColumns[5], DecisionsColumns[15]},
+				Columns: []*schema.Column{DecisionsColumns[6], DecisionsColumns[16]},
 			},
 			{
 				Name:    "decision_project_id_status",
 				Unique:  false,
-				Columns: []*schema.Column{DecisionsColumns[1], DecisionsColumns[15]},
+				Columns: []*schema.Column{DecisionsColumns[1], DecisionsColumns[16]},
+			},
+			{
+				Name:    "decision_project_id_chat_key_status",
+				Unique:  false,
+				Columns: []*schema.Column{DecisionsColumns[1], DecisionsColumns[3], DecisionsColumns[16]},
 			},
 			{
 				Name:    "decision_message_id_position",
 				Unique:  false,
-				Columns: []*schema.Column{DecisionsColumns[3], DecisionsColumns[4]},
+				Columns: []*schema.Column{DecisionsColumns[4], DecisionsColumns[5]},
 			},
 			{
 				Name:    "decision_conversation_id",
@@ -1299,7 +1305,7 @@ var (
 		{Name: "outcome", Type: field.TypeEnum, Enums: []string{"answer", "confirm", "override"}, Default: "answer"},
 		{Name: "interpreted_by_agent_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "source_message_id", Type: field.TypeUUID, Nullable: true},
-		{Name: "surface", Type: field.TypeEnum, Enums: []string{"native", "slack", "google_chat", "discord", "telegram", "teams", "other"}},
+		{Name: "surface", Type: field.TypeEnum, Enums: []string{"native", "decisions_page", "slack", "google_chat", "discord", "telegram", "teams", "other"}},
 		{Name: "response_message_id", Type: field.TypeUUID},
 		{Name: "authorizing_user_id", Type: field.TypeString, Nullable: true},
 		{Name: "delegation_grant_id", Type: field.TypeString, Nullable: true},

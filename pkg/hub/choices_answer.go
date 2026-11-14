@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -52,6 +53,22 @@ const choiceResponseQuestionMax = 200
 type DecisionAnswerRequest struct {
 	ChoiceID       string `json:"choice_id"`
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	Surface        string `json:"surface,omitempty"`
+}
+
+// normalizeAnswerSurface validates the optional surface field on web answer
+// requests: empty or "native" records "native", and "decisions_page" records
+// "decisions_page". External channel surfaces ("slack", "google_chat", ...)
+// are set only by channel bridges or agent-interpreted recording.
+func normalizeAnswerSurface(raw string) (string, bool) {
+	switch strings.TrimSpace(raw) {
+	case "", store.DecisionSurfaceNative:
+		return store.DecisionSurfaceNative, true
+	case store.DecisionSurfaceDecisionsPage:
+		return store.DecisionSurfaceDecisionsPage, true
+	default:
+		return "", false
+	}
 }
 
 // DecisionAnswerResponse is the 200 answer of the answer endpoint.
@@ -125,12 +142,13 @@ func decisionCaller(w http.ResponseWriter, r *http.Request) UserIdentity {
 }
 
 // choiceAsker reads the asking agent of a choice answer, before anything
-// is recorded; both answer endpoints use it. A stopped or deleted asker
-// (store.ErrNotFound) is the gone case (design choices v4: the answers are
-// still recorded, and dispatch follows the undeliverable semantics): the
-// response row is stored failed and nothing is delivered. Any other lookup
-// error, or no agent without an error, writes an error response and
-// returns ok false, so the messaging check never runs on a missing agent.
+// is recorded; both answer endpoints use it. A hard-deleted (store.ErrNotFound)
+// or soft-deleted (!a.DeletedAt.IsZero()) asker is the gone case (design
+// choices v4: the answers are still recorded, and dispatch follows the
+// undeliverable semantics): the response row is stored failed and nothing is
+// delivered. Any other lookup error, or no agent without an error, writes an
+// error response and returns ok false, so the messaging check never runs on a
+// missing agent.
 func (s *Server) choiceAsker(w http.ResponseWriter, ctx context.Context, agentID string) (asker *store.Agent, gone bool, ok bool) {
 	a, err := s.store.GetAgent(ctx, agentID)
 	switch {
@@ -142,40 +160,141 @@ func (s *Server) choiceAsker(w http.ResponseWriter, ctx context.Context, agentID
 	case a == nil:
 		InternalError(w)
 		return nil, false, false
+	case !a.DeletedAt.IsZero():
+		return nil, true, true
 	}
 	return a, false, true
 }
 
-// loadAuthorizedDecision reads the decision and its prompt message and
-// authorizes the caller on the prompt's conversation: authorizeChatSend to
-// answer (for a DM prompt that admits only the user in the DM key, the
-// addressee), authorizeChatSendRead to read. A missing row, a missing
-// prompt message and a refused caller all answer 404, so a row id reveals
-// nothing.
-func (s *Server) loadAuthorizedDecision(w http.ResponseWriter, ctx context.Context, user UserIdentity, rowID string, answering bool) (*store.Decision, *store.Message, bool) {
+// authorizeDecisionChatKey authorizes user on the prompt's conversation key
+// (stored chat_key, or fallback messages.thread_id): authorizeChatSend to
+// answer a topic, authorizeChatSendRead (with soft-deleted topic read fallback
+// for project readers) to read one, and canonical DM participant + live peer
+// read verification for a DM key. A deleted (hard or soft) agent peer in a DM
+// key remains readable and answerable by the DM participant under gone-asker
+// undeliverable semantics (choiceAsker); for a live agent peer, the caller
+// must hold ActionRead on the agent (live message-mode checks run in the
+// answer handlers after state resolution because confirm needs no delivery).
+func (s *Server) authorizeDecisionChatKey(ctx context.Context, user UserIdentity, key string, answering bool) *chatSendError {
+	if user == nil {
+		return chatSendForbidden()
+	}
+	s.mu.RLock()
+	wcs := s.webChatStore
+	s.mu.RUnlock()
+	if wcs == nil {
+		return newChatSendError(http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Chat not available", nil)
+	}
+	if strings.HasPrefix(key, "dm:") {
+		if serr := authorizeDMKeyParticipant(ctx, user, key, chatSendPath(key)); serr != nil {
+			return serr
+		}
+		kindA, idA, kindB, idB, err := messages.ParseDMKey(key)
+		if err != nil {
+			return chatSendBadRequest("invalid DM key format")
+		}
+		if canonical, cerr := messages.DMConversationKey(kindA, idA, kindB, idB); cerr != nil || canonical != key {
+			return chatSendBadRequest("invalid DM key format")
+		}
+		peerKind, peerID := kindA, idA
+		if kindA == "user" && idA == user.ID() {
+			peerKind, peerID = kindB, idB
+		}
+		switch peerKind {
+		case "agent":
+			ag, err := s.store.GetAgent(ctx, peerID)
+			if errors.Is(err, store.ErrNotFound) || (err == nil && ag != nil && !ag.DeletedAt.IsZero()) {
+				return nil
+			}
+			if err != nil || ag == nil {
+				slog.Warn("choices: DM peer agent lookup failed", "error", err)
+				return newChatSendError(http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Chat not available", nil)
+			}
+			if s.authzService == nil || !s.authzService.CheckAccess(ctx, user, agentResource(ag), ActionRead).Allowed {
+				return dmPeerRefused(ctx, user, key, "sender may not read the DM peer agent")
+			}
+			return nil
+		case "user":
+			return s.authorizeDMPeer(ctx, user, key)
+		default:
+			return dmPeerRefused(ctx, user, key, "unknown DM peer kind")
+		}
+	}
+	if answering {
+		_, serr := s.authorizeChatSend(ctx, user, key)
+		return serr
+	}
+	_, serr := s.authorizeChatSendRead(ctx, user, key)
+	if serr == nil {
+		return nil
+	}
+	if serr.Status == http.StatusNotFound && validChatTopicKey(key) {
+		topic, terr := wcs.GetTopicIncludingDeleted(ctx, key)
+		if terr != nil {
+			logChatStoreFault(ctx, slog.Default(), "decision read: topic lookup failed", key, terr)
+			return newChatSendError(http.StatusInternalServerError, ErrCodeInternalError, "Internal server error", nil)
+		}
+		if topic != nil && topic.DeletedAt != nil {
+			project, perr := s.store.GetProject(ctx, topic.ProjectID)
+			if perr != nil {
+				if errors.Is(perr, store.ErrNotFound) {
+					return serr
+				}
+				logChatStoreFault(ctx, slog.Default(), "decision read: topic project lookup failed", key, perr)
+				return newChatSendError(http.StatusInternalServerError, ErrCodeInternalError, "Internal server error", nil)
+			}
+			access, aerr := s.chatThreadAccess(ctx, user, chatThreadRef{Key: key, Project: project})
+			if aerr != nil {
+				return newChatSendError(http.StatusInternalServerError, ErrCodeInternalError, "Internal server error", nil)
+			}
+			if access.Can(ChatActionRead) {
+				return nil
+			}
+			return chatSendRefusedAsNotFound("Thread")
+		}
+	}
+	return serr
+}
+
+// loadAuthorizedDecision reads the decision and authorizes the caller on the
+// prompt's conversation (using stored chat_key so authorization survives chat
+// retention purging the prompt message, falling back to messages.thread_id for
+// pre-backfill rows). A missing row, a purged row with no chat_key, and a
+// refused caller all answer 404, so a row id reveals nothing.
+func (s *Server) loadAuthorizedDecision(w http.ResponseWriter, ctx context.Context, user UserIdentity, rowID string, answering bool) (*store.Decision, string, bool) {
 	d, err := s.store.GetDecision(ctx, rowID)
 	if err != nil || d == nil {
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			writeErrorFromErr(w, err, "")
+			return nil, "", false
+		}
 		NotFound(w, "Decision")
-		return nil, nil, false
+		return nil, "", false
 	}
-	prompt, err := s.store.GetMessage(ctx, d.MessageID)
-	if err != nil || prompt == nil || prompt.ThreadID == "" {
+	var prompt *store.Message
+	if m, merr := s.store.GetMessage(ctx, d.MessageID); merr == nil {
+		prompt = m
+	} else if !errors.Is(merr, store.ErrNotFound) {
+		writeErrorFromErr(w, merr, "")
+		return nil, "", false
+	}
+	chatKey := d.ChatKey
+	if chatKey == "" && prompt != nil {
+		chatKey = prompt.ThreadID
+	}
+	if chatKey == "" {
 		NotFound(w, "Decision")
-		return nil, nil, false
+		return nil, "", false
 	}
-	authorize := s.authorizeChatSendRead
-	if answering {
-		authorize = s.authorizeChatSend
-	}
-	if _, serr := authorize(ctx, user, prompt.ThreadID); serr != nil {
+	if serr := s.authorizeDecisionChatKey(ctx, user, chatKey, answering); serr != nil {
 		if serr.Status == http.StatusNotFound || serr.accessRefused {
 			NotFound(w, "Decision")
-			return nil, nil, false
+			return nil, "", false
 		}
 		serr.write(w)
-		return nil, nil, false
+		return nil, "", false
 	}
-	return d, prompt, true
+	return d, chatKey, true
 }
 
 // handleDecisionGet serves GET /api/v1/decisions/{rowId}.
@@ -214,9 +333,15 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 			map[string]interface{}{"field": "idempotency_key"})
 		return
 	}
+	surface, ok := normalizeAnswerSurface(req.Surface)
+	if !ok {
+		ValidationError(w, fmt.Sprintf("surface %q is not supported; expected %q or %q", req.Surface, store.DecisionSurfaceNative, store.DecisionSurfaceDecisionsPage),
+			map[string]interface{}{"field": "surface"})
+		return
+	}
 
 	// Steps 1 and 2: the row, its conversation, the caller's send rights.
-	d, prompt, ok := s.loadAuthorizedDecision(w, ctx, user, rowID, true)
+	d, chatKey, ok := s.loadAuthorizedDecision(w, ctx, user, rowID, true)
 	if !ok {
 		return
 	}
@@ -226,7 +351,7 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 		writeErrorFromErr(w, err, "")
 		return
 	} else if ds := rows[d.MessageID]; len(ds) >= 2 {
-		s.writeBatchRequired(w, ctx, user, prompt, ds)
+		s.writeBatchRequired(w, ctx, user, d.MessageID, ds)
 		return
 	}
 	// Step 4: the choice is checked against the stored row; the label is
@@ -305,7 +430,7 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 			return
 		}
 	}
-	responseMsg := choiceResponseStoreMessage(user, d, prompt, choice, asker, askerGone)
+	responseMsg := choiceResponseStoreMessage(user, d, chatKey, choice, asker, askerGone)
 
 	// Step 5: record the answer and store the response, in one transaction.
 	answer, replayed, err := s.store.RecordAnswer(ctx, &store.RecordAnswerInput{
@@ -316,7 +441,7 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 		AnsweredByEmail:  user.Email(),
 		Provenance:       store.DecisionProvenanceDirect,
 		Outcome:          outcome,
-		Surface:          store.DecisionSurfaceNative,
+		Surface:          surface,
 		ResponseMessage:  responseMsg,
 		IdempotencyKey:   req.IdempotencyKey,
 	})
@@ -367,7 +492,7 @@ func (s *Server) handleDecisionAnswer(w http.ResponseWriter, r *http.Request, ro
 	if !askerGone && outcome != store.DecisionOutcomeConfirm {
 		s.deliverChoiceResponse(ctx, asker, responseMsg, answer, overridden)
 	}
-	s.publishChoiceUpdated(ctx, prompt, view)
+	s.publishChoiceUpdatedAt(ctx, d.ProjectID, d.MessageID, chatKey, view)
 	writeJSON(w, http.StatusOK, DecisionAnswerResponse{Decision: view, ResponseMessageID: answer.ResponseMessageID})
 }
 
@@ -415,7 +540,7 @@ func (s *Server) writeDecisionAnswered(w http.ResponseWriter, ctx context.Contex
 // prompt's conversation. A gone asker (askerGone; asker is then unused) or
 // one that cannot take a message gets the row born failed, as a chat send
 // to it would.
-func choiceResponseStoreMessage(user UserIdentity, d *store.Decision, prompt *store.Message, choice messages.Choice, asker *store.Agent, askerGone bool) *store.Message {
+func choiceResponseStoreMessage(user UserIdentity, d *store.Decision, chatKey string, choice messages.Choice, asker *store.Agent, askerGone bool) *store.Message {
 	m := &store.Message{
 		ID:             api.NewUUID(),
 		ProjectID:      d.ProjectID,
@@ -426,7 +551,7 @@ func choiceResponseStoreMessage(user UserIdentity, d *store.Decision, prompt *st
 		Type:           messages.TypeChoiceResponse,
 		AgentID:        d.AskerAgentID,
 		Channel:        "web",
-		ThreadID:       prompt.ThreadID,
+		ThreadID:       chatKey,
 		ConversationID: d.ConversationID,
 		DispatchState:  store.MessageDispatchDispatched,
 		CreatedAt:      time.Now().UTC(),
@@ -556,9 +681,19 @@ func (s *Server) deliverChoiceResponse(ctx context.Context, asker *store.Agent, 
 // user.<id>.chat.choice.updated for each user of a DM, so a DM's decisions reach
 // only its participants.
 func (s *Server) publishChoiceUpdated(ctx context.Context, prompt *store.Message, view DecisionView) {
-	evt := map[string]interface{}{"decision": view, "messageId": prompt.ID, "threadId": prompt.ThreadID}
-	if strings.HasPrefix(prompt.ThreadID, "dm:") {
-		parts := strings.Split(prompt.ThreadID, ":")
+	if prompt == nil {
+		return
+	}
+	s.publishChoiceUpdatedAt(ctx, prompt.ProjectID, prompt.ID, prompt.ThreadID, view)
+}
+
+// publishChoiceUpdatedAt publishes chat.choice.updated using the decision's
+// stored project_id, message_id, and chat_key so SSE updates continue to work
+// after chat retention purges the prompt message.
+func (s *Server) publishChoiceUpdatedAt(ctx context.Context, projectID, messageID, threadID string, view DecisionView) {
+	evt := map[string]interface{}{"decision": view, "messageId": messageID, "threadId": threadID}
+	if strings.HasPrefix(threadID, "dm:") {
+		parts := strings.Split(threadID, ":")
 		if len(parts) >= 5 {
 			for i, id := range []string{parts[2], parts[4]} {
 				kind := parts[1]
@@ -572,7 +707,7 @@ func (s *Server) publishChoiceUpdated(ctx context.Context, prompt *store.Message
 		}
 		return
 	}
-	if prompt.ProjectID != "" {
-		s.events.PublishRaw("project."+prompt.ProjectID+".chat.choice.updated", evt)
+	if projectID != "" {
+		s.events.PublishRaw("project."+projectID+".chat.choice.updated", evt)
 	}
 }

@@ -65,6 +65,11 @@ func ConversationID(v uuid.UUID) predicate.Decision {
 	return predicate.Decision(sql.FieldEQ(FieldConversationID, v))
 }
 
+// ChatKey applies equality check predicate on the "chat_key" field. It's identical to ChatKeyEQ.
+func ChatKey(v string) predicate.Decision {
+	return predicate.Decision(sql.FieldEQ(FieldChatKey, v))
+}
+
 // MessageID applies equality check predicate on the "message_id" field. It's identical to MessageIDEQ.
 func MessageID(v uuid.UUID) predicate.Decision {
 	return predicate.Decision(sql.FieldEQ(FieldMessageID, v))
@@ -223,6 +228,81 @@ func ConversationIDIsNil() predicate.Decision {
 // ConversationIDNotNil applies the NotNil predicate on the "conversation_id" field.
 func ConversationIDNotNil() predicate.Decision {
 	return predicate.Decision(sql.FieldNotNull(FieldConversationID))
+}
+
+// ChatKeyEQ applies the EQ predicate on the "chat_key" field.
+func ChatKeyEQ(v string) predicate.Decision {
+	return predicate.Decision(sql.FieldEQ(FieldChatKey, v))
+}
+
+// ChatKeyNEQ applies the NEQ predicate on the "chat_key" field.
+func ChatKeyNEQ(v string) predicate.Decision {
+	return predicate.Decision(sql.FieldNEQ(FieldChatKey, v))
+}
+
+// ChatKeyIn applies the In predicate on the "chat_key" field.
+func ChatKeyIn(vs ...string) predicate.Decision {
+	return predicate.Decision(sql.FieldIn(FieldChatKey, vs...))
+}
+
+// ChatKeyNotIn applies the NotIn predicate on the "chat_key" field.
+func ChatKeyNotIn(vs ...string) predicate.Decision {
+	return predicate.Decision(sql.FieldNotIn(FieldChatKey, vs...))
+}
+
+// ChatKeyGT applies the GT predicate on the "chat_key" field.
+func ChatKeyGT(v string) predicate.Decision {
+	return predicate.Decision(sql.FieldGT(FieldChatKey, v))
+}
+
+// ChatKeyGTE applies the GTE predicate on the "chat_key" field.
+func ChatKeyGTE(v string) predicate.Decision {
+	return predicate.Decision(sql.FieldGTE(FieldChatKey, v))
+}
+
+// ChatKeyLT applies the LT predicate on the "chat_key" field.
+func ChatKeyLT(v string) predicate.Decision {
+	return predicate.Decision(sql.FieldLT(FieldChatKey, v))
+}
+
+// ChatKeyLTE applies the LTE predicate on the "chat_key" field.
+func ChatKeyLTE(v string) predicate.Decision {
+	return predicate.Decision(sql.FieldLTE(FieldChatKey, v))
+}
+
+// ChatKeyContains applies the Contains predicate on the "chat_key" field.
+func ChatKeyContains(v string) predicate.Decision {
+	return predicate.Decision(sql.FieldContains(FieldChatKey, v))
+}
+
+// ChatKeyHasPrefix applies the HasPrefix predicate on the "chat_key" field.
+func ChatKeyHasPrefix(v string) predicate.Decision {
+	return predicate.Decision(sql.FieldHasPrefix(FieldChatKey, v))
+}
+
+// ChatKeyHasSuffix applies the HasSuffix predicate on the "chat_key" field.
+func ChatKeyHasSuffix(v string) predicate.Decision {
+	return predicate.Decision(sql.FieldHasSuffix(FieldChatKey, v))
+}
+
+// ChatKeyIsNil applies the IsNil predicate on the "chat_key" field.
+func ChatKeyIsNil() predicate.Decision {
+	return predicate.Decision(sql.FieldIsNull(FieldChatKey))
+}
+
+// ChatKeyNotNil applies the NotNil predicate on the "chat_key" field.
+func ChatKeyNotNil() predicate.Decision {
+	return predicate.Decision(sql.FieldNotNull(FieldChatKey))
+}
+
+// ChatKeyEqualFold applies the EqualFold predicate on the "chat_key" field.
+func ChatKeyEqualFold(v string) predicate.Decision {
+	return predicate.Decision(sql.FieldEqualFold(FieldChatKey, v))
+}
+
+// ChatKeyContainsFold applies the ContainsFold predicate on the "chat_key" field.
+func ChatKeyContainsFold(v string) predicate.Decision {
+	return predicate.Decision(sql.FieldContainsFold(FieldChatKey, v))
 }
 
 // MessageIDEQ applies the EQ predicate on the "message_id" field.

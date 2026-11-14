@@ -984,6 +984,9 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 	if err := c.MigrateGitHubTokenInjectionMode(ctx); err != nil {
 		return fmt.Errorf("github token injection mode migration: %w", err)
 	}
+	if err := c.BackfillDecisionChatKeys(ctx); err != nil {
+		return fmt.Errorf("decision chat_key backfill: %w", err)
+	}
 	return c.SeedMaintenanceOperations(ctx)
 }
 

@@ -188,6 +188,7 @@ export function buildFixture() {
           'web.chat_scheduled_send': false,
           'web.chat_starred_messages': true,
           'web.gcs_links': false,
+          'web.project_decisions': false,
           'web.sse_hidden_tab_close': false,
         },
       },

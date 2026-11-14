@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -47,6 +48,7 @@ const (
 // only; labels come from the stored rows.
 type ChoiceSetAnswerRequest struct {
 	IdempotencyKey string                `json:"idempotency_key,omitempty"`
+	Surface        string                `json:"surface,omitempty"`
 	Answers        []ChoiceSetAnswerItem `json:"answers"`
 }
 
@@ -85,35 +87,52 @@ func (s *Server) handleChoicePromptRoutes(w http.ResponseWriter, r *http.Request
 	})(w, r)
 }
 
-// loadAuthorizedChoicePrompt reads the prompt message and its decisions and
-// authorizes the caller to send in its conversation (design v5 4.2 steps 1
-// and 2). A missing message, one that is not a choice prompt, a prompt with
-// no decisions and a refused caller all answer 404.
-func (s *Server) loadAuthorizedChoicePrompt(w http.ResponseWriter, ctx context.Context, user UserIdentity, msgID string) (*store.Message, []*store.Decision, bool) {
-	m, err := s.store.GetMessage(ctx, msgID)
-	if err != nil || m == nil || m.Type != messages.TypeChoicePrompt || m.ThreadID == "" {
-		NotFound(w, "Choice prompt")
-		return nil, nil, false
+// loadAuthorizedChoicePrompt reads the prompt's decisions (and its message if
+// still present) and authorizes the caller to send in its conversation (using
+// stored chat_key so multi-decision set prompts remain answerable after chat
+// retention purges the prompt message, falling back to messages.thread_id for
+// pre-backfill rows). A message that is not a choice prompt, a prompt with no
+// decisions, a purged prompt with no chat_key, and a refused caller all answer
+// 404.
+func (s *Server) loadAuthorizedChoicePrompt(w http.ResponseWriter, ctx context.Context, user UserIdentity, msgID string) ([]*store.Decision, string, bool) {
+	var m *store.Message
+	if got, err := s.store.GetMessage(ctx, msgID); err == nil {
+		m = got
+	} else if !errors.Is(err, store.ErrNotFound) {
+		writeErrorFromErr(w, err, "")
+		return nil, "", false
 	}
-	if _, serr := s.authorizeChatSend(ctx, user, m.ThreadID); serr != nil {
-		if serr.Status == http.StatusNotFound || serr.accessRefused {
-			NotFound(w, "Choice prompt")
-			return nil, nil, false
-		}
-		serr.write(w)
-		return nil, nil, false
+	if m != nil && m.Type != messages.TypeChoicePrompt {
+		NotFound(w, "Choice prompt")
+		return nil, "", false
 	}
 	rows, err := s.store.GetDecisionsByMessageIDs(ctx, []string{msgID})
 	if err != nil {
 		writeErrorFromErr(w, err, "")
-		return nil, nil, false
+		return nil, "", false
 	}
 	ds := rows[msgID]
 	if len(ds) == 0 {
 		NotFound(w, "Choice prompt")
-		return nil, nil, false
+		return nil, "", false
 	}
-	return m, ds, true
+	chatKey := ds[0].ChatKey
+	if chatKey == "" && m != nil {
+		chatKey = m.ThreadID
+	}
+	if chatKey == "" {
+		NotFound(w, "Choice prompt")
+		return nil, "", false
+	}
+	if serr := s.authorizeDecisionChatKey(ctx, user, chatKey, true); serr != nil {
+		if serr.Status == http.StatusNotFound || serr.accessRefused {
+			NotFound(w, "Choice prompt")
+			return nil, "", false
+		}
+		serr.write(w)
+		return nil, "", false
+	}
+	return ds, chatKey, true
 }
 
 // answerSetReasons is the actionable-set check of design v5 4.2 step 5 on
@@ -149,21 +168,24 @@ func actionableViews(views []DecisionView, ds []*store.Decision, userID string) 
 	return out
 }
 
-// promptDecisionViews returns the views of every decision of the prompt m,
-// in position order, read now.
-func (s *Server) promptDecisionViews(ctx context.Context, m *store.Message) []DecisionView {
-	if v := s.choicePromptViewOf(ctx, m); v != nil {
-		return v.Decisions
+// promptDecisionViewsByID returns the views of every decision of msgID, in
+// position order, read now from decisions (working even when the prompt
+// message row was purged by chat retention).
+func (s *Server) promptDecisionViewsByID(ctx context.Context, msgID string) []DecisionView {
+	rows, err := s.store.GetDecisionsByMessageIDs(ctx, []string{msgID})
+	if err != nil {
+		slog.WarnContext(ctx, "choices: prompt decisions unreadable", "message_id", msgID, "error", err)
+		return []DecisionView{}
 	}
-	return []DecisionView{}
+	return s.decisionViewsFor(ctx, rows[msgID])
 }
 
 // writeAnswerSetChanged answers 409 answer_set_changed with every fresh
 // view of the prompt and the reason of every row that differs.
-func (s *Server) writeAnswerSetChanged(w http.ResponseWriter, ctx context.Context, m *store.Message, reasons map[string]string) {
+func (s *Server) writeAnswerSetChanged(w http.ResponseWriter, ctx context.Context, msgID string, reasons map[string]string) {
 	writeError(w, http.StatusConflict, ErrCodeAnswerSetChanged,
 		"the decisions to answer changed; refresh and submit again",
-		map[string]interface{}{"decisions": s.promptDecisionViews(ctx, m), "reasons": reasons})
+		map[string]interface{}{"decisions": s.promptDecisionViewsByID(ctx, msgID), "reasons": reasons})
 }
 
 // handleChoiceSetAnswer serves POST /api/v1/choice-prompts/{messageId}/answers
@@ -184,9 +206,15 @@ func (s *Server) handleChoiceSetAnswer(w http.ResponseWriter, r *http.Request, m
 			map[string]interface{}{"field": "idempotency_key"})
 		return
 	}
+	surface, ok := normalizeAnswerSurface(req.Surface)
+	if !ok {
+		ValidationError(w, fmt.Sprintf("surface %q is not supported; expected %q or %q", req.Surface, store.DecisionSurfaceNative, store.DecisionSurfaceDecisionsPage),
+			map[string]interface{}{"field": "surface"})
+		return
+	}
 
 	// Steps 1 and 2: the prompt, its conversation, the caller's send rights.
-	m, ds, ok := s.loadAuthorizedChoicePrompt(w, ctx, user, msgID)
+	ds, chatKey, ok := s.loadAuthorizedChoicePrompt(w, ctx, user, msgID)
 	if !ok {
 		return
 	}
@@ -245,7 +273,7 @@ func (s *Server) handleChoiceSetAnswer(w http.ResponseWriter, r *http.Request, m
 			}
 			writeJSON(w, http.StatusOK, ChoiceSetAnswerResponse{
 				ResponseMessageID: prior[0].ResponseMessageID, BatchID: prior[0].BatchID,
-				Decisions: s.promptDecisionViews(ctx, m), Replayed: true,
+				Decisions: s.promptDecisionViewsByID(ctx, msgID), Replayed: true,
 			})
 			return
 		}
@@ -254,7 +282,7 @@ func (s *Server) handleChoiceSetAnswer(w http.ResponseWriter, r *http.Request, m
 	// Step 5 on the rows read (the store checks again under the row
 	// locks): the request must equal the actionable set.
 	if reasons := answerSetReasons(ds, user.ID(), requested); len(reasons) > 0 {
-		s.writeAnswerSetChanged(w, ctx, m, reasons)
+		s.writeAnswerSetChanged(w, ctx, msgID, reasons)
 		return
 	}
 	// Outcomes: a row with the user's own interpreted answer is a confirm
@@ -298,14 +326,15 @@ func (s *Server) handleChoiceSetAnswer(w http.ResponseWriter, r *http.Request, m
 			return
 		}
 	}
-	responseMsg := choiceSetResponseStoreMessage(user, ds, m, requested, choices, asker, askerGone)
+	responseMsg := choiceSetResponseStoreMessage(user, ds, chatKey, requested, choices, asker, askerGone)
 
 	// Steps 5 to 7 in one transaction.
 	res, err := s.store.RecordAnswerSet(ctx, &store.RecordAnswerSetInput{
-		MessageID:        m.ID,
+		MessageID:        msgID,
 		AnsweredByUserID: user.ID(),
 		AnsweredByName:   user.DisplayName(),
 		AnsweredByEmail:  user.Email(),
+		Surface:          surface,
 		Answers:          items,
 		ResponseMessage:  responseMsg,
 		IdempotencyKey:   req.IdempotencyKey,
@@ -314,7 +343,7 @@ func (s *Server) handleChoiceSetAnswer(w http.ResponseWriter, r *http.Request, m
 	switch {
 	case err == nil:
 	case errors.As(err, &changed):
-		s.writeAnswerSetChanged(w, ctx, m, changed.Reasons)
+		s.writeAnswerSetChanged(w, ctx, msgID, changed.Reasons)
 		return
 	case errors.Is(err, store.ErrIdempotencyMismatch):
 		writeError(w, http.StatusUnprocessableEntity, ErrCodeIdempotencyMismatch,
@@ -331,7 +360,7 @@ func (s *Server) handleChoiceSetAnswer(w http.ResponseWriter, r *http.Request, m
 		return
 	}
 
-	views := s.promptDecisionViews(ctx, m)
+	views := s.promptDecisionViewsByID(ctx, msgID)
 	if res.Replayed {
 		writeJSON(w, http.StatusOK, ChoiceSetAnswerResponse{
 			ResponseMessageID: firstResponseID(res), BatchID: res.BatchID, Decisions: views, Replayed: true,
@@ -343,14 +372,14 @@ func (s *Server) handleChoiceSetAnswer(w http.ResponseWriter, r *http.Request, m
 	// to the asker (not for an all-confirm set: the agent already acted on
 	// those answers), then choice.updated once per answered row, in
 	// position order.
-	setView := choiceResponseSetView(m.ID, res.BatchID, ds, res.Answers)
+	setView := choiceResponseSetView(msgID, res.BatchID, ds, res.Answers)
 	s.publishChoiceResponseSet(ctx, responseMsg, setView)
 	if !askerGone && !allConfirm {
-		s.deliverChoiceSetResponse(ctx, asker, responseMsg, m.ID, res, overridden)
+		s.deliverChoiceSetResponse(ctx, asker, responseMsg, msgID, res, overridden)
 	}
 	for _, v := range views {
 		if requested[v.RowID] {
-			s.publishChoiceUpdated(ctx, m, v)
+			s.publishChoiceUpdatedAt(ctx, ds[0].ProjectID, msgID, chatKey, v)
 		}
 	}
 	writeJSON(w, http.StatusOK, ChoiceSetAnswerResponse{
@@ -403,7 +432,7 @@ func sameSetAnswers(prior []*store.DecisionAnswer, userID string, choices map[st
 // position order. A gone asker (askerGone; asker is then unused) or one
 // that cannot take a message gets the row born failed, as for a one-click
 // answer.
-func choiceSetResponseStoreMessage(user UserIdentity, ds []*store.Decision, prompt *store.Message, requested map[string]bool, choices map[string]messages.Choice, asker *store.Agent, askerGone bool) *store.Message {
+func choiceSetResponseStoreMessage(user UserIdentity, ds []*store.Decision, chatKey string, requested map[string]bool, choices map[string]messages.Choice, asker *store.Agent, askerGone bool) *store.Message {
 	var parts []string
 	for _, d := range ds {
 		if requested[d.ID] {
@@ -416,7 +445,7 @@ func choiceSetResponseStoreMessage(user UserIdentity, ds []*store.Decision, prom
 	}
 	m := &store.Message{
 		ID:             api.NewUUID(),
-		ProjectID:      prompt.ProjectID,
+		ProjectID:      ds[0].ProjectID,
 		Sender:         userSenderAddress(user),
 		SenderID:       user.ID(),
 		RecipientID:    ds[0].AskerAgentID,
@@ -424,8 +453,8 @@ func choiceSetResponseStoreMessage(user UserIdentity, ds []*store.Decision, prom
 		Type:           messages.TypeChoiceResponse,
 		AgentID:        ds[0].AskerAgentID,
 		Channel:        "web",
-		ThreadID:       prompt.ThreadID,
-		ConversationID: prompt.ConversationID,
+		ThreadID:       chatKey,
+		ConversationID: ds[0].ConversationID,
 		DispatchState:  store.MessageDispatchDispatched,
 		CreatedAt:      time.Now().UTC(),
 	}
@@ -568,11 +597,11 @@ func (s *Server) deliverChoiceSetResponse(ctx context.Context, asker *store.Agen
 // writeBatchRequired answers 409 batch_required for a per-decision answer to
 // a row of a set (design v5 4.3): the prompt id and the rows the caller may
 // answer in a set submit.
-func (s *Server) writeBatchRequired(w http.ResponseWriter, ctx context.Context, user UserIdentity, prompt *store.Message, ds []*store.Decision) {
+func (s *Server) writeBatchRequired(w http.ResponseWriter, ctx context.Context, user UserIdentity, msgID string, ds []*store.Decision) {
 	writeError(w, http.StatusConflict, ErrCodeBatchRequired,
-		fmt.Sprintf("this prompt has %d decisions; answer them together with POST %s%s/answers", len(ds), choicePromptsRoutePrefix, prompt.ID),
+		fmt.Sprintf("this prompt has %d decisions; answer them together with POST %s%s/answers", len(ds), choicePromptsRoutePrefix, msgID),
 		map[string]interface{}{
-			"promptMessageId": prompt.ID,
-			"actionable":      actionableViews(s.promptDecisionViews(ctx, prompt), ds, user.ID()),
+			"promptMessageId": msgID,
+			"actionable":      actionableViews(s.decisionViewsFor(ctx, ds), ds, user.ID()),
 		})
 }

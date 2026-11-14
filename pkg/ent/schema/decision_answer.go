@@ -100,7 +100,7 @@ func (DecisionAnswer) Fields() []ent.Field {
 			Immutable(),
 		// surface is where the user acted.
 		field.Enum("surface").
-			Values("native", "slack", "google_chat", "discord", "telegram", "teams", "other").
+			Values("native", "decisions_page", "slack", "google_chat", "discord", "telegram", "teams", "other").
 			Immutable(),
 		// response_message_id is the choice-response message.
 		field.UUID("response_message_id", uuid.UUID{}).

@@ -160,6 +160,9 @@ func (_u *DecisionUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if _u.mutation.ConversationIDCleared() {
 		_spec.ClearField(decision.FieldConversationID, field.TypeUUID)
 	}
+	if _u.mutation.ChatKeyCleared() {
+		_spec.ClearField(decision.FieldChatKey, field.TypeString)
+	}
 	if _u.mutation.DefaultChoiceIDCleared() {
 		_spec.ClearField(decision.FieldDefaultChoiceID, field.TypeString)
 	}
@@ -364,6 +367,9 @@ func (_u *DecisionUpdateOne) sqlSave(ctx context.Context) (_node *Decision, err 
 	}
 	if _u.mutation.ConversationIDCleared() {
 		_spec.ClearField(decision.FieldConversationID, field.TypeUUID)
+	}
+	if _u.mutation.ChatKeyCleared() {
+		_spec.ClearField(decision.FieldChatKey, field.TypeString)
 	}
 	if _u.mutation.DefaultChoiceIDCleared() {
 		_spec.ClearField(decision.FieldDefaultChoiceID, field.TypeString)

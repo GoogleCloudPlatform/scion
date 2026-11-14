@@ -19,6 +19,8 @@ const (
 	FieldProjectID = "project_id"
 	// FieldConversationID holds the string denoting the conversation_id field in the database.
 	FieldConversationID = "conversation_id"
+	// FieldChatKey holds the string denoting the chat_key field in the database.
+	FieldChatKey = "chat_key"
 	// FieldMessageID holds the string denoting the message_id field in the database.
 	FieldMessageID = "message_id"
 	// FieldPosition holds the string denoting the position field in the database.
@@ -62,6 +64,7 @@ var Columns = []string{
 	FieldID,
 	FieldProjectID,
 	FieldConversationID,
+	FieldChatKey,
 	FieldMessageID,
 	FieldPosition,
 	FieldAskerAgentID,
@@ -92,6 +95,8 @@ func ValidColumn(column string) bool {
 }
 
 var (
+	// ChatKeyValidator is a validator for the "chat_key" field. It is called by the builders before save.
+	ChatKeyValidator func(string) error
 	// PositionValidator is a validator for the "position" field. It is called by the builders before save.
 	PositionValidator func(int) error
 	// KeyValidator is a validator for the "key" field. It is called by the builders before save.
@@ -176,6 +181,11 @@ func ByProjectID(opts ...sql.OrderTermOption) OrderOption {
 // ByConversationID orders the results by the conversation_id field.
 func ByConversationID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldConversationID, opts...).ToFunc()
+}
+
+// ByChatKey orders the results by the chat_key field.
+func ByChatKey(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldChatKey, opts...).ToFunc()
 }
 
 // ByMessageID orders the results by the message_id field.

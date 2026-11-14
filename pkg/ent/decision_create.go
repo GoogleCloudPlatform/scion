@@ -45,6 +45,20 @@ func (_c *DecisionCreate) SetNillableConversationID(v *uuid.UUID) *DecisionCreat
 	return _c
 }
 
+// SetChatKey sets the "chat_key" field.
+func (_c *DecisionCreate) SetChatKey(v string) *DecisionCreate {
+	_c.mutation.SetChatKey(v)
+	return _c
+}
+
+// SetNillableChatKey sets the "chat_key" field if the given value is not nil.
+func (_c *DecisionCreate) SetNillableChatKey(v *string) *DecisionCreate {
+	if v != nil {
+		_c.SetChatKey(*v)
+	}
+	return _c
+}
+
 // SetMessageID sets the "message_id" field.
 func (_c *DecisionCreate) SetMessageID(v uuid.UUID) *DecisionCreate {
 	_c.mutation.SetMessageID(v)
@@ -275,6 +289,11 @@ func (_c *DecisionCreate) check() error {
 	if _, ok := _c.mutation.ProjectID(); !ok {
 		return &ValidationError{Name: "project_id", err: errors.New(`ent: missing required field "Decision.project_id"`)}
 	}
+	if v, ok := _c.mutation.ChatKey(); ok {
+		if err := decision.ChatKeyValidator(v); err != nil {
+			return &ValidationError{Name: "chat_key", err: fmt.Errorf(`ent: validator failed for field "Decision.chat_key": %w`, err)}
+		}
+	}
 	if _, ok := _c.mutation.MessageID(); !ok {
 		return &ValidationError{Name: "message_id", err: errors.New(`ent: missing required field "Decision.message_id"`)}
 	}
@@ -392,6 +411,10 @@ func (_c *DecisionCreate) createSpec() (*Decision, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.ConversationID(); ok {
 		_spec.SetField(decision.FieldConversationID, field.TypeUUID, value)
 		_node.ConversationID = &value
+	}
+	if value, ok := _c.mutation.ChatKey(); ok {
+		_spec.SetField(decision.FieldChatKey, field.TypeString, value)
+		_node.ChatKey = &value
 	}
 	if value, ok := _c.mutation.MessageID(); ok {
 		_spec.SetField(decision.FieldMessageID, field.TypeUUID, value)
@@ -601,6 +624,9 @@ func (u *DecisionUpsertOne) UpdateNewValues() *DecisionUpsertOne {
 		}
 		if _, exists := u.create.mutation.ConversationID(); exists {
 			s.SetIgnore(decision.FieldConversationID)
+		}
+		if _, exists := u.create.mutation.ChatKey(); exists {
+			s.SetIgnore(decision.FieldChatKey)
 		}
 		if _, exists := u.create.mutation.MessageID(); exists {
 			s.SetIgnore(decision.FieldMessageID)
@@ -937,6 +963,9 @@ func (u *DecisionUpsertBulk) UpdateNewValues() *DecisionUpsertBulk {
 			}
 			if _, exists := b.mutation.ConversationID(); exists {
 				s.SetIgnore(decision.FieldConversationID)
+			}
+			if _, exists := b.mutation.ChatKey(); exists {
+				s.SetIgnore(decision.FieldChatKey)
 			}
 			if _, exists := b.mutation.MessageID(); exists {
 				s.SetIgnore(decision.FieldMessageID)

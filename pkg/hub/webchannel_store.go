@@ -108,10 +108,18 @@ type WebChatStore interface {
 	// GetTopic returns a topic by ID. Returns nil if not found or soft-deleted.
 	GetTopic(ctx context.Context, topicID string) (*WebChatTopic, error)
 
+	// GetTopicIncludingDeleted returns a topic by ID regardless of deletion
+	// state. Returns nil if not found.
+	GetTopicIncludingDeleted(ctx context.Context, topicID string) (*WebChatTopic, error)
+
 	// ListTopics returns all non-deleted topics for a project, ordered by
 	// last_activity_at DESC. It creates nothing; EnsureGeneralTopic is what
 	// creates a project's #general topic.
 	ListTopics(ctx context.Context, projectID string) ([]WebChatTopic, error)
+
+	// ListTopicsIncludingDeleted returns all topics (including soft-deleted
+	// ones) for a project, ordered by last_activity_at DESC.
+	ListTopicsIncludingDeleted(ctx context.Context, projectID string) ([]WebChatTopic, error)
 
 	// ListTopicsByProjects returns the non-deleted topics of every project
 	// in projectIDs in one query: the union of ListTopics over those
@@ -983,9 +991,54 @@ SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
 	return &t, nil
 }
 
+// GetTopicIncludingDeleted returns a topic by ID regardless of deletion state.
+// Returns nil if not found.
+func (s *sqliteWebChatStore) GetTopicIncludingDeleted(ctx context.Context, topicID string) (*WebChatTopic, error) {
+	const query = `
+SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
+       COALESCE(conversation_id, ''),
+       created_by, created_at, COALESCE(last_message_id, ''),
+       COALESCE(last_activity_at, ''), deleted_at
+  FROM webchat_topic
+ WHERE id = ?
+`
+	var t WebChatTopic
+	var isGeneral int
+	var createdAtStr, activityStr string
+	var deletedAtStr *string
+	err := s.db.QueryRowContext(ctx, query, topicID).Scan(
+		&t.ID, &t.ProjectID, &t.Name, &isGeneral, &t.DefaultAgent,
+		&t.ConversationID,
+		&t.CreatedBy, &createdAtStr, &t.LastMessageID, &activityStr, &deletedAtStr)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("webchat store: get topic including deleted: %w", err)
+	}
+	t.IsGeneral = isGeneral != 0
+	t.CreatedAt = parseSQLiteTime(createdAtStr)
+	t.LastActivityAt = parseSQLiteTime(activityStr)
+	if deletedAtStr != nil && *deletedAtStr != "" {
+		parsed := parseSQLiteTime(*deletedAtStr)
+		t.DeletedAt = &parsed
+	}
+	return &t, nil
+}
+
 // ListTopics returns non-deleted topics for a project, ordered by last_activity_at DESC.
 func (s *sqliteWebChatStore) ListTopics(ctx context.Context, projectID string) ([]WebChatTopic, error) {
-	const query = `
+	return s.listTopics(ctx, projectID, false)
+}
+
+// ListTopicsIncludingDeleted returns all topics (including soft-deleted ones)
+// for a project, ordered by last_activity_at DESC.
+func (s *sqliteWebChatStore) ListTopicsIncludingDeleted(ctx context.Context, projectID string) ([]WebChatTopic, error) {
+	return s.listTopics(ctx, projectID, true)
+}
+
+func (s *sqliteWebChatStore) listTopics(ctx context.Context, projectID string, includeDeleted bool) ([]WebChatTopic, error) {
+	query := `
 SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
        COALESCE(conversation_id, ''),
        created_by, created_at, COALESCE(last_message_id, ''),
@@ -994,6 +1047,17 @@ SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
  WHERE project_id = ? AND deleted_at IS NULL
  ORDER BY last_activity_at DESC
 `
+	if includeDeleted {
+		query = `
+SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
+       COALESCE(conversation_id, ''),
+       created_by, created_at, COALESCE(last_message_id, ''),
+       COALESCE(last_activity_at, ''), deleted_at
+  FROM webchat_topic
+ WHERE project_id = ?
+ ORDER BY last_activity_at DESC
+`
+	}
 	rows, err := s.db.QueryContext(ctx, query, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("webchat store: list topics: %w", err)
@@ -1014,6 +1078,10 @@ SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
 		t.IsGeneral = isGeneral != 0
 		t.CreatedAt = parseSQLiteTime(createdAtStr)
 		t.LastActivityAt = parseSQLiteTime(activityStr)
+		if deletedAtStr != nil && *deletedAtStr != "" {
+			parsed := parseSQLiteTime(*deletedAtStr)
+			t.DeletedAt = &parsed
+		}
 		topics = append(topics, t)
 	}
 	if err := rows.Err(); err != nil {

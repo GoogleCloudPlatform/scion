@@ -2702,6 +2702,16 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Project decisions page & answer log (ptone/scion#7799).
+	if subPath == "decisions" {
+		s.handleProjectDecisions(w, r, projectID)
+		return
+	}
+	if strings.HasPrefix(subPath, "decisions/") {
+		NotFound(w, "Project decision route")
+		return
+	}
+
 	// RS1: Atomic ownership transfer endpoint.
 	if subPath == "transfer-ownership" {
 		s.handleTransferOwnership(w, r, projectID)
