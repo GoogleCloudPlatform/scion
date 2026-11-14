@@ -1231,27 +1231,34 @@ func (s *Server) failHomeResetForward(ctx context.Context, agentID, reincarnatio
 }
 
 // homeResetRecoveryHint is the recovery text of a home-resetting
-// reincarnation that failed after the reset. When the reprovision itself
-// failed (homeComposed false), the fresh home may be missing or half-built,
-// and a start does not compose it (provisioning on start runs only for a
-// missing agent directory), so the hint names a plain reincarnate, which
-// reprovisions the new config; after a successful reprovision a start is
-// enough.
+// reincarnation that failed after the reset. Every variant names a plain
+// `scion reincarnate`, the one command an agent in this state accepts that
+// also rebuilds it: the agent is left at phase error, where `scion start`
+// is refused as a duplicate (409) and `scion resume --force` restarts the
+// container without reprovisioning, with the harness resume flag on an
+// empty home and with no stop of a container an ambiguous start may have
+// left. The reincarnation stops the agent, reprovisions the new config
+// (composing a home the failed reprovision left missing or half-built:
+// homeComposed false) and starts it. It replays the image and model this
+// reincarnation recorded, so the hint names -i and --model for replacing a
+// bad one. Switching back with --harness drops them.
 func homeResetRecoveryHint(agentSlug string, plan *ReincarnationPlan, homeComposed bool) string {
 	oldHC, newHC := "", ""
 	if plan != nil && plan.Harness != nil {
 		oldHC, newHC = plan.Harness.Old, plan.Harness.New
 	}
-	retry := fmt.Sprintf("`scion start %s`", agentSlug)
+	hint := "the home was already reset"
 	if !homeComposed {
-		retry = fmt.Sprintf("`scion reincarnate %s`", agentSlug)
+		hint += " and may be incomplete"
 	}
-	hint := "the home was already reset; fix the cause and run " + retry
+	hint += "; to retry"
 	if newHC != "" {
-		hint += fmt.Sprintf(" (harness config %s)", newHC)
+		hint += fmt.Sprintf(" on harness config %s", newHC)
 	}
+	hint += fmt.Sprintf(", fix the cause and run `scion reincarnate %s`"+
+		" (it reuses the recorded image and model; add `-i <image>` or `--model <model>` to replace them)", agentSlug)
 	if oldHC != "" {
-		hint += fmt.Sprintf(" or `scion reincarnate %s --harness %s`", agentSlug, oldHC)
+		hint += fmt.Sprintf(", or switch back with `scion reincarnate %s --harness %s`", agentSlug, oldHC)
 	}
 	return hint
 }
