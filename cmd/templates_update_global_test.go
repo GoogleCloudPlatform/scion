@@ -45,6 +45,8 @@ type tuHub struct {
 	requests    []string
 	reimported  []string
 	projectHits []string
+	deleted     []string
+	downloaded  []string
 }
 
 const tuProjectID = "tu-project-id"
@@ -90,6 +92,16 @@ func newTUHub(t *testing.T) (*tuHub, *httptest.Server) {
 				out = append(out, tmpl)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"templates": out})
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/api/v1/templates/"):
+			h.mu.Lock()
+			h.deleted = append(h.deleted, strings.TrimPrefix(r.URL.Path, "/api/v1/templates/"))
+			h.mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/templates/") && strings.HasSuffix(r.URL.Path, "/download"):
+			h.mu.Lock()
+			h.downloaded = append(h.downloaded, strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1/templates/"), "/download"))
+			h.mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"files": []any{}})
 		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/v1/templates/") && strings.HasSuffix(r.URL.Path, "/reimport"):
 			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1/templates/"), "/reimport")
 			h.mu.Lock()
