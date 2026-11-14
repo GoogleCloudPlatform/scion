@@ -535,7 +535,7 @@ func TestMintCandidateScopesAndFilter(t *testing.T) {
 
 	a.AppliedConfig.AgentRole = string(AgentRoleReadOnly)
 	a.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{MetadataMode: store.GCPMetadataModeAssign, ServiceAccountID: "sa-1"}
-	assert.Equal(t, []AgentTokenScope{ScopeProjectRead, ScopeProjectArtifactRead, GCPTokenScopeForSA("sa-1")}, f.authz(f.store, false, false).mintCandidateScopes(a))
+	assert.Equal(t, []AgentTokenScope{ScopeProjectRead, ScopeAgentStatusUpdate, ScopeProjectArtifactRead, GCPTokenScopeForSA("sa-1")}, f.authz(f.store, false, false).mintCandidateScopes(a))
 
 	readCoverage := agentScopeCoverage([]AgentTokenScope{ScopeProjectRead})
 	f.edge(t, store.DelegationPrincipalUser, f.userID, a.ID, boundedCeiling(append(readCoverage, "agent.create")...), provSession)

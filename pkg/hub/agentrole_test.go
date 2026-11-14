@@ -169,11 +169,11 @@ func TestScopesForRole_RoleReadOnlyHasOnlyReadAndSelfStatus(t *testing.T) {
 
 // The status scope covers only self operations, so adding it to readonly
 // does not change which bounded ceilings readonly fits: a ceiling holding
-// just project.read still fits it (ptone/scion#7926).
+// just what project:read covers still fits it (ptone/scion#7926).
 func TestReadonlyRole_StatusScopeIsSelfOperationOnly(t *testing.T) {
 	for _, perm := range agentScopeCoverage([]AgentTokenScope{ScopeAgentStatusUpdate}) {
 		assert.True(t, selfOperationSet[perm], "%s must be a self operation", perm)
 	}
-	c := store.EffectCeiling{Kind: store.EffectCeilingBounded, Version: permissions.CeilingVersionV1, PermissionIDs: []string{"project.read"}}
+	c := store.EffectCeiling{Kind: store.EffectCeilingBounded, Version: permissions.CeilingVersionV1, PermissionIDs: agentScopeCoverage([]AgentTokenScope{ScopeProjectRead})}
 	assert.True(t, roleFitsCeiling(c, AgentRoleReadOnly))
 }
