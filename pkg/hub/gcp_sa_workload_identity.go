@@ -400,19 +400,20 @@ func sanitizeWorkloadIdentityDetail(msg string) string {
 	space := false
 	n := 0
 	for _, r := range msg {
-		if unicode.IsControl(r) || unicode.IsSpace(r) || !unicode.IsPrint(r) {
-			if !space && b.Len() > 0 {
-				b.WriteByte(' ')
-				space = true
-			}
+		blank := unicode.IsControl(r) || unicode.IsSpace(r) || !unicode.IsPrint(r)
+		if blank && (space || b.Len() == 0) {
 			continue
 		}
 		if n == maxWorkloadIdentityDetailLen {
 			b.WriteString("…")
 			break
 		}
-		b.WriteRune(r)
-		space = false
+		if blank {
+			b.WriteByte(' ')
+		} else {
+			b.WriteRune(r)
+		}
+		space = blank
 		n++
 	}
 	return strings.TrimSpace(b.String())
