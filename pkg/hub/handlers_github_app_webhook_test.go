@@ -580,12 +580,18 @@ func TestHandleGitHubWebhook_InstallationReposRemoved_CaseInsensitive(t *testing
 				t.Fatalf("expected 200, got %d", rec.Code)
 			}
 
-			updated, _ := s.GetGitHubInstallation(ctx, installationID)
+			updated, err := s.GetGitHubInstallation(ctx, installationID)
+			if err != nil {
+				t.Fatalf("failed to get installation: %v", err)
+			}
 			if len(updated.Repositories) != 1 || updated.Repositories[0] != "acme/api" {
 				t.Errorf("expected [acme/api], got %v", updated.Repositories)
 			}
 
-			updatedProject, _ := s.GetProject(ctx, tid("project-1"))
+			updatedProject, err := s.GetProject(ctx, tid("project-1"))
+			if err != nil {
+				t.Fatalf("failed to get project: %v", err)
+			}
 			if updatedProject.GitHubAppStatus == nil || updatedProject.GitHubAppStatus.State != store.GitHubAppStateError {
 				t.Fatalf("expected error state, got %v", updatedProject.GitHubAppStatus)
 			}
