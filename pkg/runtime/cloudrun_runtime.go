@@ -2304,12 +2304,12 @@ func rejectEmptyPerAgentOnCloudRun(cfg RunConfig) error {
 }
 
 // isWorktreePerAgentRun reports whether cfg starts a worktree-per-agent agent,
-// identified by SCION_WORKSPACE_MODE in its env.
+// identified by the effective (last) SCION_WORKSPACE_MODE entry in its env.
 func isWorktreePerAgentRun(cfg RunConfig) bool {
-	for _, kv := range cfg.Env {
-		k, v, ok := strings.Cut(kv, "=")
-		if ok && k == "SCION_WORKSPACE_MODE" && store.ResolveWorkspaceSharingMode(v) == store.SharingModeWorktreePerAgent {
-			return true
+	for i := len(cfg.Env) - 1; i >= 0; i-- {
+		k, v, ok := strings.Cut(cfg.Env[i], "=")
+		if ok && k == "SCION_WORKSPACE_MODE" {
+			return store.ResolveWorkspaceSharingMode(v) == store.SharingModeWorktreePerAgent
 		}
 	}
 	return false

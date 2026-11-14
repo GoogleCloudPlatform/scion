@@ -42,12 +42,24 @@ func TestCloudRunRuntime_RejectsWorktreePerAgent(t *testing.T) {
 	}
 
 	for _, env := range [][]string{
+		{"SCION_WORKSPACE_MODE=shared-plain", "SCION_WORKSPACE_MODE=worktree-per-agent"},
+		{"SCION_WORKSPACE_MODE=clone-per-agent", "SCION_WORKSPACE_MODE=worktree-per-agent"},
+	} {
+		if err := rejectWorktreePerAgentOnCloudRun(RunConfig{Env: env}); !errors.Is(err, errWorktreePerAgentCloudRun) {
+			t.Errorf("rejectWorktreePerAgentOnCloudRun(%v) = %v, want errWorktreePerAgentCloudRun", env, err)
+		}
+	}
+
+	for _, env := range [][]string{
 		nil,
 		{"SCION_WORKSPACE_MODE=clone-per-agent"},
 		{"SCION_WORKSPACE_MODE=per-agent"},
 		{"SCION_WORKSPACE_MODE=shared-plain"},
 		{"SCION_WORKSPACE_MODE=shared"},
 		{"OTHER=worktree-per-agent"},
+		{"SCION_WORKSPACE_MODE=worktree-per-agent", "SCION_WORKSPACE_MODE=shared-plain"},
+		{"SCION_WORKSPACE_MODE=worktree-per-agent", "SCION_WORKSPACE_MODE=clone-per-agent"},
+		{"SCION_WORKSPACE_MODE=worktree-per-agent", "SCION_WORKSPACE_MODE="},
 	} {
 		if err := rejectWorktreePerAgentOnCloudRun(RunConfig{Env: env}); err != nil {
 			t.Errorf("rejectWorktreePerAgentOnCloudRun(%v) = %v, want nil", env, err)

@@ -1679,18 +1679,17 @@ func effectiveWorktreePerAgentDispatch(workspaceMode string, resolvedEnv map[str
 	if workspaceMode != "" {
 		return store.ResolveWorkspaceSharingMode(workspaceMode) == store.SharingModeWorktreePerAgent
 	}
-	if v, ok := resolvedEnv["SCION_WORKSPACE_MODE"]; ok && v != "" {
-		return store.ResolveWorkspaceSharingMode(v) == store.SharingModeWorktreePerAgent
-	}
+	raw := resolvedEnv["SCION_WORKSPACE_MODE"]
 	if cfg != nil {
-		for _, kv := range cfg.Env {
-			k, v, ok := strings.Cut(kv, "=")
+		for i := len(cfg.Env) - 1; i >= 0; i-- {
+			k, v, ok := strings.Cut(cfg.Env[i], "=")
 			if ok && k == "SCION_WORKSPACE_MODE" {
-				return store.ResolveWorkspaceSharingMode(v) == store.SharingModeWorktreePerAgent
+				raw = v
+				break
 			}
 		}
 	}
-	return false
+	return raw != "" && store.ResolveWorkspaceSharingMode(raw) == store.SharingModeWorktreePerAgent
 }
 
 func cloudRunWorktreePerAgentRefusalError(agentName string) *startContextError {

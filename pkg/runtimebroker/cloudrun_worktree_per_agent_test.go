@@ -565,3 +565,115 @@ func TestWorktreePerAgent_WorkspaceConfigRecordCheckPrecedesCloudRunRefusal(t *t
 		}
 	})
 }
+
+func TestEffectiveWorktreePerAgentDispatch_LastDefinitionWins(t *testing.T) {
+	cases := []struct {
+		name          string
+		workspaceMode string
+		resolvedEnv   map[string]string
+		cfgEnv        []string
+		want          bool
+	}{
+		{
+			name:   "duplicate cfg.Env earlier shared-plain overridden by later worktree-per-agent refuses",
+			cfgEnv: []string{"SCION_WORKSPACE_MODE=shared-plain", "SCION_WORKSPACE_MODE=worktree-per-agent"},
+			want:   true,
+		},
+		{
+			name:   "duplicate cfg.Env earlier worktree-per-agent overridden by later shared-plain allows",
+			cfgEnv: []string{"SCION_WORKSPACE_MODE=worktree-per-agent", "SCION_WORKSPACE_MODE=shared-plain"},
+			want:   false,
+		},
+		{
+			name:   "duplicate cfg.Env earlier worktree-per-agent overridden by empty value defaults to shared-plain",
+			cfgEnv: []string{"SCION_WORKSPACE_MODE=worktree-per-agent", "SCION_WORKSPACE_MODE="},
+			want:   false,
+		},
+		{
+			name:        "cfg.Env overrides resolvedEnv from shared-plain to worktree-per-agent",
+			resolvedEnv: map[string]string{"SCION_WORKSPACE_MODE": string(store.SharingModeSharedPlain)},
+			cfgEnv:      []string{"SCION_WORKSPACE_MODE=worktree-per-agent"},
+			want:        true,
+		},
+		{
+			name:        "cfg.Env overrides resolvedEnv from worktree-per-agent to clone-per-agent",
+			resolvedEnv: map[string]string{"SCION_WORKSPACE_MODE": string(store.SharingModeWorktreePerAgent)},
+			cfgEnv:      []string{"SCION_WORKSPACE_MODE=clone-per-agent"},
+			want:        false,
+		},
+		{
+			name:          "explicit WorkspaceMode field takes precedence over cfg.Env and resolvedEnv",
+			workspaceMode: store.WorkspaceModeShared,
+			resolvedEnv:   map[string]string{"SCION_WORKSPACE_MODE": string(store.SharingModeWorktreePerAgent)},
+			cfgEnv:        []string{"SCION_WORKSPACE_MODE=worktree-per-agent"},
+			want:          false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var cfg *CreateAgentConfig
+			if tc.cfgEnv != nil {
+				cfg = &CreateAgentConfig{Env: tc.cfgEnv}
+			}
+			got := effectiveWorktreePerAgentDispatch(tc.workspaceMode, tc.resolvedEnv, cfg)
+			if got != tc.want {
+				t.Fatalf("effectiveWorktreePerAgentDispatch(%q, %v, %v) = %t, want %t",
+					tc.workspaceMode, tc.resolvedEnv, tc.cfgEnv, got, tc.want)
+			}
+		})
+	}
+
+	t.Run("broker handler honours last SCION_WORKSPACE_MODE in Config.Env", func(t *testing.T) {
+		e := newE10Server(t)
+
+		// Earlier shared-plain overridden by later worktree-per-agent -> 412 refusal.
+		bodyRefuse, err := json.Marshal(CreateAgentRequest{
+			ID:                      e10AgentID,
+			Name:                    e10Agent,
+			Slug:                    e10Agent,
+			ProjectID:               e10ProjectID,
+			ProjectSlug:             e10ProjectSlug,
+			ExpectedRuntimeTargetID: "flat-cr-target",
+			Config: &CreateAgentConfig{
+				Env: []string{"SCION_WORKSPACE_MODE=shared-plain", "SCION_WORKSPACE_MODE=worktree-per-agent"},
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		reqRefuse := httptest.NewRequest(http.MethodPost, "/api/v1/agents", bytes.NewReader(bodyRefuse))
+		reqRefuse.Header.Set("Content-Type", "application/json")
+		recRefuse := httptest.NewRecorder()
+		e.srv.createAgent(recRefuse, reqRefuse)
+		if recRefuse.Code != http.StatusPreconditionFailed {
+			t.Fatalf("createAgent(shared->worktree) status = %d, want 412: %s", recRefuse.Code, recRefuse.Body.String())
+		}
+
+		// Earlier worktree-per-agent overridden by later shared-plain -> not refused with 412.
+		srv := newTestServerForStartContextRuntime(t, ServerConfig{}, cloudRunRuntimeType)
+		projectDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(projectDir, ".scion"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+			Name:        "dup-allow",
+			Slug:        "dup-allow",
+			AgentID:     "id-dup-allow",
+			ProjectID:   "proj-dup-allow",
+			ProjectSlug: "proj-dup-allow",
+			ProjectPath: projectDir,
+			Operation:   opCreate,
+			Config: &CreateAgentConfig{
+				Template: "default",
+				Env:      []string{"SCION_WORKSPACE_MODE=worktree-per-agent", "SCION_WORKSPACE_MODE=shared-plain"},
+			},
+		})
+		if err != nil {
+			t.Fatalf("buildStartContext(worktree->shared) unexpected error: %v", err)
+		}
+		if got := sc.Opts.Env["SCION_WORKSPACE_MODE"]; got != string(store.SharingModeSharedPlain) {
+			t.Fatalf("sc.Opts.Env[SCION_WORKSPACE_MODE] = %q, want %q", got, store.SharingModeSharedPlain)
+		}
+	})
+}
