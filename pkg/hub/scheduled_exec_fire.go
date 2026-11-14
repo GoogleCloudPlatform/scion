@@ -146,14 +146,6 @@ func (t *scheduledExecRunTracker) ownedIDs() []string {
 	return out
 }
 
-// owns reports whether a fire or tracker of this replica owns eventID.
-func (t *scheduledExecRunTracker) owns(eventID string) bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	_, ok := t.owned[eventID]
-	return ok
-}
-
 // stopScheduledExecRuns is the background teardown's step for exec runs:
 // admission is already closed (haltDispatchProducers); fires still at
 // exec-start get scheduledExecStopGrace, then everything left, the trackers

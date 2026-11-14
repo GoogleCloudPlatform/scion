@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -269,18 +270,16 @@ func TestScheduledExecR3_SlowStatusOutcomeRecorded(t *testing.T) {
 	assert.Equal(t, store.ScheduledExecOutcomeNonzero, got.Outcome)
 }
 
-// finishFaultStore fails FinishScheduledExecRun while fail is set.
+// finishFaultStore fails FinishScheduledExecRun while its switch is armed
+// and fail is set.
 type finishFaultStore struct {
 	store.Store
-	mu   sync.Mutex
-	fail bool
+	fault *storeFaultSwitch
+	fail  atomic.Bool
 }
 
 func (s *finishFaultStore) FinishScheduledExecRun(ctx context.Context, fin store.ScheduledExecRunFinish) (bool, error) {
-	s.mu.Lock()
-	fail := s.fail
-	s.mu.Unlock()
-	if fail {
+	if s.fault.Active() && s.fail.Load() {
 		return false, context.DeadlineExceeded
 	}
 	return s.Store.FinishScheduledExecRun(ctx, fin)
@@ -290,9 +289,15 @@ func (s *finishFaultStore) FinishScheduledExecRun(ctx context.Context, fin store
 // keeps the run tracked; the tracker records it once the store recovers.
 // An already-finished run needs nothing more.
 func TestScheduledExecR3_FailedWriteKeepsTracking(t *testing.T) {
-	f := newExecRouteFixture(t)
-	faulty := &finishFaultStore{Store: f.srv.store, fail: true}
-	f.srv.store = faulty
+	var faulty *finishFaultStore
+	var fault *storeFaultSwitch
+	f := newExecRouteFixtureWith(t, func(srv *Server) {
+		faulty, fault = installStoreFault(t, srv, func(inner store.Store, sw *storeFaultSwitch) *finishFaultStore {
+			return &finishFaultStore{Store: inner, fault: sw}
+		})
+	})
+	faulty.fail.Store(true)
+	fault.Arm()
 	f.startAgent(t)
 	evt := f.event(t, 30, "sh", "-c", "exit 4")
 	f.fire(evt)
@@ -304,9 +309,7 @@ func TestScheduledExecR3_FailedWriteKeepsTracking(t *testing.T) {
 	assert.True(t, f.srv.execRuns.owns(evt.ID), "still tracked")
 	assert.Nil(t, f.getRun(t, evt.ID).FinishedAt)
 
-	faulty.mu.Lock()
-	faulty.fail = false
-	faulty.mu.Unlock()
+	faulty.fail.Store(false)
 	got := f.waitFinished(t, evt.ID)
 	assert.Equal(t, store.ScheduledExecOutcomeNonzero, got.Outcome)
 	f.waitUntracked(t, evt.ID)
@@ -322,8 +325,10 @@ func TestScheduledExecR4_ConcurrentLastSlot(t *testing.T) {
 	for i := 0; i < scheduledExecMaxPerTarget-1; i++ {
 		seedExecEvent(t, f, f.sibling.ID)
 	}
-	wrapped := &quotaBarrierStore{Store: f.srv.store, arrivals: make(chan struct{}, 2), release: make(chan struct{})}
-	f.srv.store = wrapped
+	wrapped, fault := installStoreFault(t, f.srv, func(inner store.Store, sw *storeFaultSwitch) *quotaBarrierStore {
+		return &quotaBarrierStore{Store: inner, fault: sw, arrivals: make(chan struct{}, 2), release: make(chan struct{})}
+	})
+	fault.Arm()
 	codes := make(chan int, 2)
 	for i := 0; i < 2; i++ {
 		go func() {
@@ -347,13 +352,14 @@ func TestScheduledExecR4_ConcurrentLastSlot(t *testing.T) {
 // quotaBarrierStore holds each early quota read until released.
 type quotaBarrierStore struct {
 	store.Store
+	fault    *storeFaultSwitch
 	arrivals chan struct{}
 	release  chan struct{}
 }
 
 func (s *quotaBarrierStore) ListScheduledEvents(ctx context.Context, f store.ScheduledEventFilter, o store.ListOptions) (*store.ListResult[store.ScheduledEvent], error) {
 	result, err := s.Store.ListScheduledEvents(ctx, f, o)
-	if f.EventType == scheduledEventTypeExec && f.Status == store.ScheduledEventPending {
+	if s.fault.Active() && f.EventType == scheduledEventTypeExec && f.Status == store.ScheduledEventPending {
 		s.arrivals <- struct{}{}
 		<-s.release
 	}

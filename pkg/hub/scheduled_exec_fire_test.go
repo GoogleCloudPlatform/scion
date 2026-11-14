@@ -54,9 +54,16 @@ type execRouteFixture struct {
 
 func newExecRouteFixture(t *testing.T) *execRouteFixture {
 	t.Helper()
+	return newExecRouteFixtureWith(t, nil)
+}
+
+// newExecRouteFixtureWith is newExecRouteFixture with srvMod applied to the
+// server before it serves (for example installStoreFault).
+func newExecRouteFixtureWith(t *testing.T, srvMod func(*Server)) *execRouteFixture {
+	t.Helper()
 	setExecTiming(t, &scheduledExecPollInitial, 20*time.Millisecond)
 	setExecTiming(t, &scheduledExecPollMax, 50*time.Millisecond)
-	f := newPTYConduitFixture(t)
+	f := newPTYConduitFixtureServer(t, srvMod)
 	enableExecSchedules(t, f.srv)
 	ctx := context.Background()
 	a, err := f.store.GetAgent(ctx, f.launched.ID)
@@ -176,6 +183,14 @@ func (f *execRouteFixture) waitAgentFinished(t *testing.T, id string) {
 }
 
 func intp(v int) *int { return &v }
+
+// owns reports whether a fire or tracker of this replica owns eventID.
+func (t *scheduledExecRunTracker) owns(eventID string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	_, ok := t.owned[eventID]
+	return ok
+}
 
 // TestScheduledExecFire_RealRoutes_Outcomes (AC5, D6): exit 0 fires; a
 // non-zero exit, a timeout and a start failure fail the event with their
