@@ -432,3 +432,88 @@ func writeStateSentinel(t *testing.T, ws string) {
 	require.NoError(t, os.MkdirAll(dir, 0o770))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, provision.ProvisionSentinelFile), []byte("x"), 0o644))
 }
+
+// A worktree-per-agent Kubernetes start with no NFS workspace storage gets
+// an in-container clone, possibly shallow, so it is labelled clone-per-agent
+// (ptone/scion#7906). With an NFS worktree the label stays
+// worktree-per-agent.
+func TestStartK8sWorktreeFallbackWorkspaceModeLabel(t *testing.T) {
+	t.Run("no workspace storage", func(t *testing.T) {
+		f := newSharedDirStorageRunFixture(t)
+		f.writeGlobalSettings(t, "")
+		var cfg runtime.RunConfig
+		mockRT := &runtime.MockRuntime{
+			NameFunc: func() string { return "kubernetes" },
+			RunFunc: func(ctx context.Context, rc runtime.RunConfig) (string, error) {
+				cfg = rc
+				return "mock-id", nil
+			},
+		}
+		depth := 1
+		info, err := NewManager(mockRT).Start(context.Background(), api.StartOptions{
+			Name:        "test-agent",
+			ProjectPath: f.projectScionDir,
+			NoAuth:      true,
+			Env: map[string]string{
+				"SCION_PROJECT_ID":     testNFSWorkspaceProjectID,
+				"SCION_WORKSPACE_MODE": "worktree-per-agent",
+				"SCION_GIT_DEPTH":      "1",
+			},
+			GitClone: &api.GitCloneConfig{URL: "https://example.com/repo.git", Depth: &depth},
+		})
+		require.NoError(t, err)
+		require.NotNil(t, cfg.GitClone, "the agent clones in its container")
+		assert.Empty(t, cfg.NFSWorktreeName)
+		assert.Equal(t, "clone-per-agent", workspaceModeOf(cfg))
+		// Only the label changes: the workspace stays node-local in the
+		// container, with no NFS mounts.
+		assert.Equal(t, api.WorkspacePlacementLocal, info.WorkspacePlacement)
+		assert.Empty(t, cfg.NFSSubPath)
+		assert.Empty(t, cfg.NFSAgentDirName)
+		assert.Equal(t, "/workspace", cfg.ContainerWorkspace)
+	})
+
+	t.Run("nfs worktree", func(t *testing.T) {
+		mountRoot := filepath.Join(t.TempDir(), "nfs")
+		require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share-1"), 0o755))
+		cfg, _, err := startNFSWorktreeAgent(t, "kubernetes", mountRoot, "worktree-per-agent")
+		require.NoError(t, err)
+		assert.Equal(t, "test-agent", cfg.NFSWorktreeName)
+		assert.Equal(t, "worktree-per-agent", workspaceModeOf(cfg))
+	})
+}
+
+func workspaceModeOf(cfg runtime.RunConfig) string {
+	v, _ := envValue(cfg.Env, "SCION_WORKSPACE_MODE")
+	return v
+}
+
+func TestK8sWorktreeCloneFallback(t *testing.T) {
+	git := &api.GitCloneConfig{URL: "https://example.com/repo.git"}
+	wt := map[string]string{"SCION_WORKSPACE_MODE": "worktree-per-agent"}
+	cases := []struct {
+		name          string
+		runtime       string
+		backend       string
+		emptyPerAgent bool
+		env           map[string]string
+		gitClone      *api.GitCloneConfig
+		want          bool
+	}{
+		{name: "kubernetes, no backend", runtime: "kubernetes", env: wt, gitClone: git, want: true},
+		{name: "kubernetes, nfs backend", runtime: "kubernetes", backend: "nfs", env: wt, gitClone: git},
+		{name: "docker", runtime: "docker", env: wt, gitClone: git},
+		{name: "cloudrun", runtime: "cloudrun", env: wt, gitClone: git},
+		{name: "empty-per-agent", runtime: "kubernetes", emptyPerAgent: true, env: wt, gitClone: git},
+		{name: "no git clone", runtime: "kubernetes", env: wt},
+		{name: "empty clone URL", runtime: "kubernetes", env: wt, gitClone: &api.GitCloneConfig{}},
+		{name: "clone-per-agent", runtime: "kubernetes", env: map[string]string{"SCION_WORKSPACE_MODE": "clone-per-agent"}, gitClone: git},
+		{name: "shared-plain", runtime: "kubernetes", env: map[string]string{"SCION_WORKSPACE_MODE": "shared-plain"}, gitClone: git},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := k8sWorktreeCloneFallback(tc.runtime, tc.backend, tc.emptyPerAgent, api.StartOptions{Env: tc.env, GitClone: tc.gitClone})
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}

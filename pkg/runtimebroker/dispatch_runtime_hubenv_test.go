@@ -336,3 +336,62 @@ func TestBuildStartContext_EmptyPerAgentFollowsNoDispatchRuntime(t *testing.T) {
 		})
 	}
 }
+
+// TestBuildStartContext_WorktreeFallbackWorkspaceModeLabel pins the
+// SCION_WORKSPACE_MODE an agent gets on each outcome of a worktree-per-agent
+// dispatch (ptone/scion#7906). A container-runtime agent that falls back to
+// the in-container clone is labelled clone-per-agent, which is what it
+// actually gets. A provisioned host worktree keeps worktree-per-agent, and so
+// does a kubernetes dispatch: the broker passes the label on, and pkg/agent
+// Start decides from it whether the agent gets an NFS worktree or is
+// relabelled clone-per-agent (TestStartK8sWorktreeFallbackWorkspaceModeLabel).
+func TestBuildStartContext_WorktreeFallbackWorkspaceModeLabel(t *testing.T) {
+	requireWorktreeGit(t)
+	clearSCIONEnv(t)
+	cases := []struct {
+		name string
+		tc   dispatchRuntimeCase
+		// agentID empty makes a create dispatch fall back (no identity
+		// to provision a worktree for).
+		agentID   string
+		wantClone bool
+		wantMode  store.WorkspaceSharingMode
+	}{
+		{name: "docker, host worktree provisioned", tc: dispatchRuntimeCases[0], agentID: "agent-a",
+			wantMode: store.SharingModeWorktreePerAgent},
+		{name: "docker, falls back to in-container clone", tc: dispatchRuntimeCases[0], agentID: "",
+			wantClone: true, wantMode: store.SharingModeClonePerAgent},
+		{name: "kubernetes, label passed on to pkg/agent", tc: dispatchRuntimeCases[2], agentID: "agent-a",
+			wantClone: true, wantMode: store.SharingModeWorktreePerAgent},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srv, dotScion := newDispatchRuntimeServer(t, c.tc, "")
+			bare := initBareRepoWithCommit(t)
+			depth := 1
+			sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+				Name:          "agent-a",
+				AgentID:       c.agentID,
+				ProjectID:     "p1",
+				ProjectSlug:   "proj",
+				ProjectPath:   dotScion,
+				WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+				Config: &CreateAgentConfig{
+					Profile:  c.tc.profile(),
+					GitClone: &api.GitCloneConfig{URL: bare, Branch: "main", Depth: &depth},
+				},
+				HTTPRequest: httptest.NewRequest("POST", "/api/v1/agents", nil),
+				Operation:   opCreate,
+			})
+			if err != nil {
+				t.Fatalf("buildStartContext: %v", err)
+			}
+			if got := sc.Opts.Env["SCION_GIT_CLONE_URL"] != ""; got != c.wantClone {
+				t.Fatalf("in-container clone = %v, want %v", got, c.wantClone)
+			}
+			if got := sc.Opts.Env["SCION_WORKSPACE_MODE"]; got != string(c.wantMode) {
+				t.Errorf("SCION_WORKSPACE_MODE = %q, want %q", got, c.wantMode)
+			}
+		})
+	}
+}

@@ -1343,6 +1343,19 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 			env["SCION_AGENT_BRANCH"] = in.Config.Branch
 			classifyBrokerEnv("SCION_AGENT_BRANCH", api.EnvKindPlain)
 		}
+		// A worktree-per-agent dispatch to a local container runtime that
+		// fell back here gets a clone-per-agent workspace (an in-container
+		// clone, possibly shallow), so it is labelled as one: guidance keyed
+		// on the mode would otherwise promise worktree semantics and full
+		// history (ptone/scion#7906). Kubernetes keeps the label here:
+		// pkg/agent Start selects an NFS worktree from it
+		// (nfsWorktreeSelection) and relabels the start clone-per-agent
+		// when there is none (k8sWorktreeCloneFallback). Cloud Run keeps
+		// it too (ptone/scion#7865).
+		if in.WorkspaceMode == store.WorkspaceModeWorktreePerAgent && localContainerRuntime(dispatchRuntimeType) {
+			env["SCION_WORKSPACE_MODE"] = string(store.SharingModeClonePerAgent)
+			classifyBrokerEnv("SCION_WORKSPACE_MODE", api.EnvKindPlain)
+		}
 		opts.Workspace = ""
 		// Keep opts.ProjectPath so that ProvisionAgent can resolve the correct
 		// agent directory (e.g. ~/.scion.projects/<slug>/) instead of falling

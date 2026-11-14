@@ -125,7 +125,7 @@ Agents can discover their workspace provisioning at startup through two environm
 
 ### `SCION_WORKSPACE_MODE`
 
-The canonical workspace sharing mode for the project. The Runtime Broker sets it on every agent it starts. When the project has no workspace mode, its value is `shared-plain`. That includes Hub git projects created without `--workspace-mode`, even though each of their agents gets its own clone; for those, `SCION_WORKSPACE_GIT=true` tells the agent the workspace is a git checkout.
+The canonical workspace sharing mode for the project. The Runtime Broker sets it on every agent it starts. When the project has no workspace mode, its value is `shared-plain`. That includes Hub git projects created without `--workspace-mode`, even though each of their agents gets its own clone; for those, `SCION_WORKSPACE_GIT=true` tells the agent the workspace is a git checkout. When a `worktree-per-agent` start gets a clone inside the container instead of a worktree (on Docker, Podman or Apple `container` when the worktree cannot be provisioned, and on Kubernetes without NFS workspace storage), the value is `clone-per-agent`, because that is the workspace the agent gets; that clone can be shallow (`SCION_GIT_DEPTH`).
 
 | Value | Description |
 |---|---|
