@@ -762,8 +762,12 @@ func TestExecInterleavingStress(t *testing.T) {
 						t.Errorf("identical request for %d answered mismatch", i)
 					}
 				case 2:
+					// Only a start known to precede the query may not
+					// disappear: snapshot admission before asking. A start
+					// concurrent with the query may legitimately be unknown.
+					wasAdmitted := admitted[i].Load()
 					code, _ := f.status(t, i)
-					if code == http.StatusNotFound && admitted[i].Load() {
+					if code == http.StatusNotFound && wasAdmitted {
 						t.Errorf("admitted run %d reported unknown", i)
 					}
 				}
@@ -928,5 +932,21 @@ func TestExecTombsUnit(t *testing.T) {
 	s.purge(now)
 	if s.len() != 0 {
 		t.Fatalf("len after TTL = %d", s.len())
+	}
+}
+
+// TestExecPreSpawnDeadlineGuard protects the spawn-time not_after check on
+// its own (review round 1, B-SEC-2): the start is valid at receipt with one
+// second left (not_after = receipt - 9s, +10s tolerance), and two seconds
+// of preparation pass the deadline while staying well inside the
+// receipt+10s bound. Only the pre-spawn deadline check refuses it.
+func TestExecPreSpawnDeadlineGuard(t *testing.T) {
+	f := newExecFixture(t)
+	req := f.startReq(123, "deadline-guard")
+	req.NotAfterUnixMS = f.clk.Now().Add(-9 * time.Second).UnixMilli()
+	f.route.beforeSpawn = func(string) { f.clk.Add(2 * time.Second) }
+	code, resp := f.start(t, req)
+	if code != http.StatusRequestTimeout || resp.Outcome != agentcontrol.ExecOutcomeExpiredBeforeStart || f.fx.total.Load() != 0 {
+		t.Fatalf("got %d %+v spawns=%d, want 408 expired_before_start and no spawn", code, resp, f.fx.total.Load())
 	}
 }
