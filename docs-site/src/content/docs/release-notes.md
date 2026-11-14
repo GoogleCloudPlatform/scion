@@ -10,6 +10,20 @@ Scion release notes are published for each preview and stable release. Earlier n
 - [v0.3.0-preview.7](/scion/release-notes/v0-3-0-preview-7/)
 - [v0.3.0-preview.6](/scion/release-notes/v0-3-0-preview-6/)
 
+## Switch an existing agent's harness-config
+
+With the server-layer `hub.reincarnate_harness_switch` experiment enabled (alpha,
+off by default), `scion reincarnate <agent> --harness <harness-config>` selects a
+harness-config while keeping the agent's identity, workspace, branch and Hub
+history. It deletes and rebuilds the agent home, including when the name is
+unchanged: the old harness session, transcripts, memory edits, installed tools
+and dotfile edits are lost. There is no rollback. Run `--dry-run` first to review
+the HOME RESET warning and provide a handoff for continuity. Supported runtimes
+are Docker, Podman, Apple Container, Cloud Run / Cloud Run Instances and
+Kubernetes; agents in worktree-per-agent projects remain unsupported. See
+[Switching harness-config](/scion/local/agent-lifecycle/#switching-harness-config)
+for requirements and recovery.
+
 ## Agents receive their owner's own material only along a recorded delegation chain
 
 Agents created from a user access token, and their descendants, now receive their owner's material only along a recorded delegation chain. At the agent's next create, start, resume or restart, the owner's user secrets and env vars that are not marked for progeny, the owner's user TZ and the `NoAuth` clone token are withheld from any agent whose chain is not recorded to its owner. The owner's user secrets marked for progeny are withheld from any agent whose chain is not recorded, and runtime reads and listings of them are refused (`chain_unrecorded`) for the same agents; a refused read answers as a missing key. An agent with no stored ancestry is no exception: it keeps the owner's shared secrets only when its chain is recorded to the owner. The required-key check before a start and the environment gather treat such a withheld secret as missing, so the gather prompts for it. An agent whose delegation is not recorded cannot clone at start until its owner reclaims it (or re-creates it). This includes agents whose authority another user re-recorded (for example by reincarnating them with `--role`), sub-agents whose ancestry does not start at the owner, and agents whose chain was never recorded. A lower-scope value with the same key still applies. Launch material is no longer inherited by older descendants of token-created agents whose delegation predates this release. There is no transition period.

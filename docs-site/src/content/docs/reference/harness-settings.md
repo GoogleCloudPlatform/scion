@@ -189,7 +189,7 @@ not edit the bundled scripts in place.
 ### Changing a harness config affects new agents only
 
 By design, an agent keeps the harness setup it was created with. Its home directory is composed
-once, when the agent is created (see [Seeding from Harness-Configs &
+when the agent is provisioned, including reincarnation (see [Seeding from Harness-Configs &
 Templates](#seeding-from-harness-configs--templates)). That directory holds the harness-config's
 `home/` dotfiles, such as Claude's `.claude/settings.json` with its hook registrations, and the
 agent's skills. The skills come from the template chain (including skill references it declares)
@@ -198,9 +198,9 @@ copy them again. For a harness that uses container-script provisioning, each sta
 provisioner bundle (for example `config.yaml`, `provision.py`, `scion_harness.py`,
 `dialect.yaml` and the capture-auth assets) and the hook wrapper script, and then runs
 `provision.py`. Changes to `home/` dotfiles, including hook registrations kept there, therefore
-reach new agents only. Harnesses whose provisioner writes its hook configuration at start (for
-example Copilot, Antigravity and Grok Build) pick up changes to the provisioner on the agent's
-next start.
+reach new agents and agents that are reincarnated. Harnesses whose provisioner writes its hook
+configuration at start (for example Copilot, Antigravity and Grok Build) pick up changes to the
+provisioner on the agent's next start.
 
 To give an existing agent the new setup:
 
@@ -217,6 +217,7 @@ To give an existing agent the new setup:
      It keeps the agent's identity and workspace and copies the harness-config's home files, the
      skills from the template chain (including skill references it declares) and the platform
      skills in again. It overlays files: files that the new version no longer has stay in place.
+   - To select another harness-config, use [`scion reincarnate <agent> --harness <harness-config>`](/scion/local/agent-lifecycle/#switching-harness-config) with the `hub.reincarnate_harness_switch` experiment enabled. Unlike a plain reincarnation's overlay, this deletes and rebuilds the home, even when the named harness-config is unchanged. Run `--dry-run` first to review the HOME RESET warning; there is no rollback.
    - **In a worktree-per-agent project** (where reincarnate is not available):
      save the agent's work, then delete the agent with `scion delete` and start it again.
 

@@ -161,9 +161,96 @@ Only one start of an agent runs at a time. If you start, resume, or restart an a
 
 To move an existing agent onto the current template, image, and harness config without losing its identity, use [`scion reincarnate`](/scion/reference/cli/#scion-reincarnate). It keeps the agent ID and slug, clears the previous run's `exitCode` and `exitReason` when the migration begins, starts a new generation with a freshly resolved config, and hands it the task you supply with `--handoff-file`. Use `--dry-run` to preview the changes first. Reincarnation requires a Hub, and works for agents in clone-per-agent, shared-workspace, and Hub-managed workspaces. An agent in an empty-per-agent project can be reincarnated on its current Runtime Broker when that Runtime Broker is up to date and uses a local-disk runtime (Docker, Podman, or Apple `container`) or shared (`nfs`) workspace storage. Agents in worktree-per-agent projects are not yet supported: the Hub rejects the request, and the Runtime Broker also refuses such a reprovision on its own.
 
-Reincarnating is also how an existing agent picks up changed harness dotfiles (including hook registrations kept in them, such as Claude's `.claude/settings.json`) and changed template skills, which are otherwise copied only when the agent is created. Harnesses whose provisioner writes its hook configuration at start, such as Copilot, Antigravity and Grok Build, pick up provisioner changes on the next start. See [Changing a harness config affects new agents only](/scion/reference/harness-settings/#changing-a-harness-config-affects-new-agents-only).
+Reincarnating is also how an existing agent picks up changed harness dotfiles (including hook registrations kept in them, such as Claude's `.claude/settings.json`) and changed template skills, which are otherwise copied only when the agent is created. Switching harness-config with `--harness` resets the home instead of overlaying it (see below). Harnesses whose provisioner writes its hook configuration at start, such as Copilot, Antigravity and Grok Build, pick up provisioner changes on the next start. See [Changing a harness config affects new agents only](/scion/reference/harness-settings/#changing-a-harness-config-affects-new-agents-only).
 
 In a hosted setup with several Runtime Brokers, `scion reincarnate <agent> --broker <name|id>` also moves the agent to another Runtime Broker, keeping its workspace, when both Runtime Brokers mount the same NFS export. An agent in an empty-per-agent project can move only when its workspace is on that export (Kubernetes with NFS workspace storage); `--dry-run --force` previews a forced move that would recreate a clone-per-agent or empty-per-agent workspace on the target instead. See [Moving an agent to another Runtime Broker](/scion/hosted/ha/multi-broker/#moving-an-agent-to-another-runtime-broker).
+
+##### Switching harness-config
+
+With the **server-layer, alpha, default-off** [`hub.reincarnate_harness_switch`
+experiment](/scion/reference/experiments/) enabled, use `--harness <harness-config>`
+to select a named harness-config from the project's catalog, falling back to the
+global catalog. This rebuilds the agent home, even when you name its current
+harness-config. It keeps the same agent identity and workspace.
+
+Write a handoff that captures the agent's active work, then **run `--dry-run`
+first** to review the plan and its **HOME RESET** warning:
+
+```bash
+scion reincarnate my-agent --harness codex --handoff-file handoff.md --dry-run
+scion reincarnate my-agent --harness codex --handoff-file handoff.md
+```
+
+The real request prints the same warning and proceeds without a confirmation
+prompt. **There is no rollback.**
+
+- **Lost:** the harness session and transcripts, harness memory edits,
+  skills/tools/caches the agent installed in `$HOME`, shell history and dotfile edits.
+- **Kept:** the workspace and branch, Hub conversations and history, and the
+  handoff, which is the only continuity into the new generation.
+
+Files the old harness left in the workspace are not removed. A template can also
+seed old-harness files back into the fresh home; the plan warns about recognizable
+files under another harness's config directory, but that check is best effort.
+
+**Settings on a switch.** The old explicit image, model and harness auth selection
+are cleared and resolved for the target harness-config. To pin them, pass `--image`,
+`--model` and `--harness-auth` in the same request. Model aliases use the target
+harness-config's aliases. Inline `config_dir`, `command_args`, `task_flag` and
+`user` settings are also dropped; there are no replacement CLI flags for these
+fields on reincarnate. Define the needed values in the target harness-config
+before switching. The selected harness-config and these drops persist into later
+plain reincarnations. The thinking level and other harness-neutral settings remain.
+An explicit create-time no-auth choice is kept, with a warning.
+
+**Refusals before the agent is stopped.** A dry run gets the same checks as a real
+request:
+
+| Condition | Response and next step |
+| :--- | :--- |
+| Experiment is off | `400 experiment_disabled`; enable `hub.reincarnate_harness_switch` on the Hub. |
+| Unknown harness-config | `404 harness_config_not_found`; check its name and scope. |
+| Auth method unsupported by the target | `400`; choose a method supported by the target harness-config. |
+| `--harness` combined with `--broker` | `400` from the Hub (also rejected by the CLI); switch and move in separate requests. |
+| Runtime lacks home-reset support, or the Runtime Broker does not advertise it | `412 unsupported_capability`; use a supported runtime and an up-to-date Runtime Broker. |
+| Target credentials missing | `422 harness_credentials_missing`; the response names the missing environment keys or auth files, never their values. Supply credentials as Hub secrets or choose `--harness-auth`. |
+
+A target with `no_auth.behavior: drop-to-shell` never silently switches to no-auth
+when credentials are missing. Pass `--harness-auth none` deliberately to request
+no credentials. Credentials present **only in the Runtime Broker's environment**
+are invisible to the Hub preflight and can cause a false `422`; use Hub secrets.
+The Runtime Broker also gathers required values before resetting the home.
+
+**Runtime support for `--harness`:**
+
+| Runtime | Home reset supported |
+| :--- | :--- |
+| `docker` | Yes |
+| `podman` | Yes |
+| `container` (Apple Container) | Yes |
+| `cloudrun` | Yes |
+| `cloudrun-instances` | Yes |
+| `kubernetes` | Yes, with NFS or local agent homes |
+| `cloudrun-sandbox` | No; refused |
+| `substrate` | No; refused |
+
+The existing workspace requirements still apply: **Agents in worktree-per-agent projects are
+refused**, and this table does not add support for ephemeral workspaces. Kubernetes
+NFS-home resets require an agent image whose `sciontool version --features` reports
+`home-reset-v1`. An older image refuses the start with `home_prepare_failed` and
+asks for an image with that feature; update the image before retrying.
+
+**Failure recovery.** Before the reset, a failure restores the previous generation's
+configuration and leaves the home intact. After the home has been reset (or its
+state is uncertain), the Hub keeps the new harness-config and marks the migration
+failed with the agent in `error`. Fix the reported cause and follow the Hub's hint:
+
+- If rebuilding the home failed, run `scion reincarnate <agent>` to reprovision the
+  new harness-config.
+- If rebuilding succeeded but starting failed, run `scion start <agent>`.
+- To select the old harness-config again, run
+  `scion reincarnate <agent> --harness <old-config>`. This performs another reset;
+  it does not recover the previous home's contents.
 
 ## Auto-Suspend of Stalled Agents
 

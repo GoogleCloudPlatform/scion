@@ -793,7 +793,9 @@ env keys), and starts it again with the **same** agent ID and slug. The new gene
 is a Hub-built preamble plus the handoff you provide. Requires a Hub connection.
 
 The Hub accepts the request with `202 Accepted` and completes the migration in the background. If
-the new generation cannot be provisioned, the Hub restores the previous generation's configuration.
+the new generation cannot be provisioned, the Hub restores the previous generation's configuration,
+unless a `--harness` home reset has happened or may have happened; see
+[Switching harness-config](/scion/local/agent-lifecycle/#switching-harness-config) for recovery.
 If you supplied a handoff, the restored configuration's task is that handoff, headed by a note that
 the migration failed and the agent remains at its current generation. The next fresh start delivers
 it, so the agent is not handed the previous generation's handoff. With no handoff, the previous
@@ -815,12 +817,12 @@ the agent's status message reads "migrating to generation N".
 
 An interrupted migration is not resumed. For example, if the Hub restarts in the middle of a
 migration, the Hub marks it failed and puts the agent in the `error` phase with the reason in its
-status message. Run `scion reincarnate` again with the same flags: the Hub does not keep a failed
-migration's patch flags. A migration that had not started yet fails within about 10 minutes with
+status message. For a migration without a home reset, run `scion reincarnate` again with the same
+flags: the Hub does not keep a failed migration's patch flags. A migration that had not started yet fails within about 10 minutes with
 "reincarnation failed: did not start, so no changes were applied except that any handoff is
 carried forward for recovery; run reincarnate again". None of its patch flags are applied. A
 migration that had started fails after 30 minutes without progress. The Hub restores the previous
-configuration unless the new generation had already been provisioned.
+configuration unless the new generation had already been provisioned or a home reset may have happened.
 Until the migration fails, a new request for the agent is refused with `409` (`already pending`; if a start or launch is in progress instead, the CLI reports `cannot reincarnate '<agent>' now: a start is in progress for this agent`).
 
 Reincarnation works for agents in clone-per-agent, shared-workspace (shared-plain), and
@@ -842,23 +844,24 @@ as stop, start, and restart); an agent can always reincarnate itself.
 - **Flags:**
     - `--handoff-file <path>`: File whose content becomes the new generation's first task. Required for self-migration.
     - `--handoff-template`: Print the handoff template and exit. Ignores other flags and arguments, and does not contact the Hub.
+    - `--harness <harness-config>`: Select a named harness-config (a single path component) and delete and rebuild the agent home, even if the name is unchanged. Requires the server-layer `hub.reincarnate_harness_switch` experiment (alpha, off by default). Run `--dry-run` first to review the HOME RESET warning; the real request proceeds without a confirmation prompt, and there is no rollback. Cannot combine with `--broker`. See [Switching harness-config](/scion/local/agent-lifecycle/#switching-harness-config) for losses, retained data, dropped settings, credentials, runtime support and recovery.
     - `--dry-run`: Print the resolved plan (old → new template, image, harness config, model, env key names, and branch; for legacy agents created before `createInputs` was recorded, any remaining inline env keys other than `SCION_AUTO_EXPOSE_PORTS` and adopted `TZ` are kept as explicit with a warning in the plan) without migrating anything.
     - `--broker <name|id>`: Move the agent to another Runtime Broker (see [Moving to another Runtime Broker](#moving-to-another-runtime-broker) below). By default both Runtime Brokers must mount the same NFS export, so the workspace moves without being copied (`transferMode: "export"`); add `--force` when the workspace is a clone-per-agent or empty-per-agent workspace that can be recreated on the target (`transferMode: "recreate"`). The CLI dry-runs the move first and stops if it is refused; add `--dry-run` to only check it.
     - `--force`: With `--broker <name|id>`, allow a forced move that recreates a clone-per-agent or empty-per-agent workspace on the target (`transferMode: "recreate"`) when the workspace cannot travel through a shared NFS export, waiving the export checks and printing what is kept, carried, recreated, and lost. Without `--dry-run`, the CLI runs the same checks as a dry run first and sends the move only if it is eligible; it does not print the verdict or consequences of an accepted move, so preview them first with `--dry-run --force`.
     - `--service-account <id|email|name>`: Patch the GCP service account of the new generation. Accepts the same forms and gets the same access checks as `scion create`.
     - `--role <role>`: Patch the agent role of the new generation: `none`, `readonly`, `baseline`, or `full`. Gets the same access checks as `scion create`; an agent reincarnating itself can lower its own role but not raise it.
     - `--model <model>`: Patch the model of the new generation. Model aliases are accepted, as with `scion start`.
-    - `--harness-auth <method>`: Patch the harness auth method of the new generation: `api-key`, `oauth-token`, `auth-file`, or `vertex-ai`.
+    - `--harness-auth <method>`: Patch the harness auth method of the new generation: `api-key`, `oauth-token`, `auth-file`, or `vertex-ai`, validated against the target harness-config. With `--harness`, also accepts `none` to deliberately run without credentials.
     - `--image <image>`, `-i`: Patch the container image of the new generation.
     - `--thinking-level <value>`: Patch the thinking level of the new generation. Accepts the same values as `scion start`: an integer from 0 to 100, or a case-insensitive shorthand: `low` (25), `medium` (50), `high` (75), `max` (100). The Hub receives the integer. Without the flag, the thinking level is not patched. An invalid value fails before contacting the Hub.
 
-**Patch flags.** `--service-account`, `--role`, `--model`, `--thinking-level`, `--harness-auth`, and
+**Patch flags.** `--harness`, `--service-account`, `--role`, `--model`, `--thinking-level`, `--harness-auth`, and
 `--image` change that setting on the new generation, and later reincarnations keep the new value.
 `--dry-run` shows the old and new value of each patched setting. For a user, patch flags need
 permission to update the agent (`agent.update`) as well as `agent.lifecycle`, so a user access token
 needs the `agent:update` scope for them; otherwise sign in with `scion hub auth login`. An agent caller, including an agent
 patching itself, needs the agent lifecycle permission. Before a real patched reincarnation the CLI dry-runs
-the same request, and stops if the Hub does not apply the patch (upgrade the Hub). Patch flags combine
+the same request, and stops if the Hub does not apply the patch (upgrade the Hub). Patch flags other than `--harness` combine
 with `--broker`: the move's checks judge the patched configuration, for example the patched service
 account. When a reincarnation that changed the service account fails and the agent returns to its
 previous configuration, the agent's previous service-account assignment returns with it, with the
