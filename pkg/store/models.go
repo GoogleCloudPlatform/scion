@@ -2547,15 +2547,22 @@ const (
 	MessageDispatchPartial = "partial"
 )
 
+// DeliveryOutcomeUnknownPartial is the delivery_outcome stored when a row
+// bound to a conduit delivery ends without a known answer: the stale sweep,
+// or a failure recorded while it was delivering. A same-id /deliver replays
+// it.
+const DeliveryOutcomeUnknownPartial = `{"outcome":"partial","stage":"unknown"}`
+
 // DeliveryBindResult is how BindMessageDelivery treated a /deliver call.
 type DeliveryBindResult int
 
 const (
 	// DeliveryBound: every row moved to delivering under the id.
 	DeliveryBound DeliveryBindResult = iota
-	// DeliveryForward: every row is already delivering under the same id
-	// (a same-id retry); the call may be forwarded to the agent.
-	DeliveryForward
+	// DeliveryInFlight: every row is already delivering under the same id:
+	// another call owns the delivery. The caller must not call the agent,
+	// unbind or finish the rows.
+	DeliveryInFlight
 	// DeliveryReplay: every row is final (delivered, partial or failed)
 	// under the same id; Outcome holds the stored answer and the agent is
 	// not called.

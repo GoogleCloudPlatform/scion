@@ -70,7 +70,7 @@ func TestBindMessageDelivery_Rules(t *testing.T) {
 
 		res, err = f.ds.BindMessageDelivery(ctx, f.agent, "d1", []string{a, b}, now)
 		require.NoError(t, err)
-		assert.Equal(t, store.DeliveryForward, res.Result, "same-id retry")
+		assert.Equal(t, store.DeliveryInFlight, res.Result, "same-id call while delivering: owned by the binder")
 
 		res, err = f.ds.BindMessageDelivery(ctx, f.agent, "d2", []string{a}, now)
 		require.NoError(t, err)
@@ -166,4 +166,66 @@ func TestSweepStaleDeliveries(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, n)
 	assert.Equal(t, store.MessageDispatchPartial, f.state(t, old))
+}
+
+// TestFailureVersusFinish (review R4): a failure write and a /deliver
+// finish race on a delivering row, and exactly one wins in either order.
+// A delivered row is never failed; a row failed while delivering keeps a
+// replayable outcome.
+func TestFailureVersusFinish(t *testing.T) {
+	ctx := context.Background()
+	t.Run("finish first", func(t *testing.T) {
+		f := newDeliveryFixture(t)
+		a := f.msg(t, store.MessageDispatchPending)
+		_, err := f.ds.BindMessageDelivery(ctx, f.agent, "d1", []string{a}, time.Now())
+		require.NoError(t, err)
+		n, err := f.ds.FinishMessageDelivery(ctx, "d1", []string{a}, store.MessageDispatchDelivered, `{"outcome":"delivered"}`)
+		require.NoError(t, err)
+		require.Equal(t, 1, n)
+		won, err := f.ds.FailUndeliveredMessage(ctx, a, "late report")
+		require.NoError(t, err)
+		assert.False(t, won, "a delivered row is never failed")
+		require.NoError(t, f.ds.MarkMessageFailed(ctx, a, "ExecuteAgentDM finalization"))
+		assert.Equal(t, store.MessageDispatchDelivered, f.state(t, a), "MarkMessageFailed keeps delivered too")
+	})
+	t.Run("failure first", func(t *testing.T) {
+		f := newDeliveryFixture(t)
+		a := f.msg(t, store.MessageDispatchDispatched)
+		_, err := f.ds.BindMessageDelivery(ctx, f.agent, "d1", []string{a}, time.Now())
+		require.NoError(t, err)
+		won, err := f.ds.FailUndeliveredMessage(ctx, a, "broker failure")
+		require.NoError(t, err)
+		assert.True(t, won)
+		assert.Equal(t, store.MessageDispatchFailed, f.state(t, a))
+		n, err := f.ds.FinishMessageDelivery(ctx, "d1", []string{a}, store.MessageDispatchDelivered, `{"outcome":"delivered"}`)
+		require.NoError(t, err)
+		assert.Zero(t, n, "the late finish loses")
+		res, err := f.ds.BindMessageDelivery(ctx, f.agent, "d1", []string{a}, time.Now())
+		require.NoError(t, err)
+		assert.Equal(t, store.DeliveryReplay, res.Result, "same id replays the stored outcome")
+		assert.JSONEq(t, store.DeliveryOutcomeUnknownPartial, res.Outcome)
+		won, err = f.ds.FailUndeliveredMessage(ctx, a, "again")
+		require.NoError(t, err)
+		assert.False(t, won, "a second report does not win again")
+	})
+	t.Run("MarkMessageFailed on delivering stores the outcome", func(t *testing.T) {
+		f := newDeliveryFixture(t)
+		a := f.msg(t, store.MessageDispatchPending)
+		_, err := f.ds.BindMessageDelivery(ctx, f.agent, "d1", []string{a}, time.Now())
+		require.NoError(t, err)
+		require.NoError(t, f.ds.MarkMessageFailed(ctx, a, "ExecuteAgentDM finalization"))
+		res, err := f.ds.BindMessageDelivery(ctx, f.agent, "d1", []string{a}, time.Now())
+		require.NoError(t, err)
+		assert.Equal(t, store.DeliveryReplay, res.Result)
+	})
+	t.Run("states FailUndeliveredMessage leaves alone", func(t *testing.T) {
+		for _, st := range []string{store.MessageDispatchDeferred, store.MessageDispatchNoRecipient, store.MessageDispatchFailed} {
+			f := newDeliveryFixture(t)
+			a := f.msg(t, st)
+			won, err := f.ds.FailUndeliveredMessage(ctx, a, "x")
+			require.NoError(t, err)
+			assert.False(t, won, st)
+			assert.Equal(t, st, f.state(t, a))
+		}
+	})
 }

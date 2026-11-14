@@ -113,6 +113,12 @@ func (d *deliverRoute) serve(w http.ResponseWriter, r *http.Request) {
 		err = req.Validate()
 	}
 	if err != nil {
+		var se *agentcontrol.SizeError
+		if errors.As(err, &se) {
+			log.Info("Control: deliver-message refused as too large (field %s)", se.Field)
+			writeDeliver(w, deliverResult{status: http.StatusRequestEntityTooLarge, resp: agentcontrol.DeliverResponse{Outcome: agentcontrol.OutcomeTooLarge, Field: se.Field}})
+			return
+		}
 		var fe *agentcontrol.FieldError
 		field := agentcontrol.FieldBody
 		if errors.As(err, &fe) {
@@ -251,6 +257,11 @@ func classify(err error, tr *trackingRunner) deliverResult {
 	switch {
 	case err == nil:
 		return deliverResult{status: http.StatusOK, resp: agentcontrol.DeliverResponse{Outcome: agentcontrol.OutcomeDelivered}, store: true}
+	case errors.Is(err, errExpired) && tr.visible:
+		// The interrupt keys were sent, then the hard stop passed before
+		// the paste: something visible happened, so the flush is partial
+		// (stored, never retried), not a 408 the hub would unbind on.
+		return partialResult(agentcontrol.StagePaste)
 	case errors.Is(err, errExpired):
 		return expired()
 	case errors.As(err, &partial):
@@ -314,7 +325,13 @@ func (t *trackingRunner) Run(ctx context.Context, argv []string, stdin io.Reader
 		verb = argv[1]
 	}
 	shows := verb == "send-keys" || verb == "paste-buffer"
-	if shows && !t.visible && !t.now().Before(t.stop) {
+	// No paste starts after the hard stop, even when interrupt keys were
+	// already sent (review S-A-01); no first visible step starts after it
+	// either. After an interrupt the flush is partial, never 408.
+	if (verb == "paste-buffer" || (shows && !t.visible)) && !t.now().Before(t.stop) {
+		if t.visible && t.failStage == "" {
+			t.failStage = agentcontrol.StagePaste
+		}
 		return "", errExpired
 	}
 	stage := ""

@@ -449,3 +449,180 @@ func TestBrokerAgentDeliver_LogsNoText(t *testing.T) {
 	assert.NotContains(t, buf.String(), "SENTINEL-HUB-TEXT")
 	assert.False(t, strings.Contains(buf.String(), `"Enter"`))
 }
+
+// TestBrokerAgentDeliver_ConcurrentSameIDHasOneOwner (review R1): while one
+// call owns a delivery, a same-id duplicate (a re-send, or a call on
+// another hub replica) gets 409 in_progress without reaching the agent, and
+// can never unbind the rows. After the owner pastes, a fresh id is refused
+// and the row is pasted exactly once.
+func TestBrokerAgentDeliver_ConcurrentSameIDHasOneOwner(t *testing.T) {
+	f := newDeliverFixture(t)
+	tm := &okTmux{}
+	entered, release := make(chan struct{}), make(chan struct{})
+	var mu sync.Mutex
+	calls := 0
+	f.startControlAgentWithDeliver(t, f.public.URL, true, &control.DeliverOptions{Runner: tm}, func(next conduit.RPCHandler) conduit.RPCHandler {
+		return conduit.RPCHandlerFunc(func(ctx context.Context, r *conduitv1.RpcRequest) *conduitv1.RpcResponse {
+			mu.Lock()
+			calls++
+			n := calls
+			mu.Unlock()
+			if n == 1 {
+				close(entered)
+				<-release
+			} else {
+				// Any later call would be a duplicate reaching the agent;
+				// answer the kind of refusal that used to unbind.
+				return &conduitv1.RpcResponse{Status: 503}
+			}
+			return next.HandleRPC(ctx, r)
+		})
+	})
+	id := f.msg(t, store.MessageDispatchPending)
+	done := make(chan int, 1)
+	go func() {
+		code, _ := f.postDeliver(t, f.broker, f.launched.ID, deliverReq("d1", id))
+		done <- code
+	}()
+	<-entered
+	code, resp := f.postDeliver(t, f.broker, f.launched.ID, deliverReq("d1", id))
+	assert.Equal(t, http.StatusConflict, code, "duplicate while in flight")
+	assert.Equal(t, agentcontrol.OutcomeInProgress, resp.Outcome, "an answer the broker never falls back on")
+	assert.Equal(t, store.MessageDispatchDelivering, f.state(t, id), "the duplicate did not unbind")
+	close(release)
+	require.Equal(t, http.StatusOK, <-done)
+	assert.Equal(t, store.MessageDispatchDelivered, f.state(t, id))
+
+	code, resp = f.postDeliver(t, f.broker, f.launched.ID, deliverReq("d2", id))
+	assert.Equal(t, http.StatusConflict, code, "a fresh id must not paste a delivered row")
+	assert.Equal(t, agentcontrol.OutcomeBound, resp.Outcome)
+	mu.Lock()
+	assert.Equal(t, 1, calls, "one call reached the agent")
+	mu.Unlock()
+	assert.Equal(t, 4, tm.calls, "exactly one four-step flush (has-session, load, paste, submit)")
+}
+
+// TestBrokerAgentDeliver_OwnerUnbindOnlyAfterDuplicateRefused (review R1,
+// every unbinding status): when the owner's own call proves nothing was
+// pasted, only the owner unbinds; a duplicate that arrived meanwhile was
+// refused in_progress, and the owner's same-id retry then binds again.
+func TestBrokerAgentDeliver_OwnerUnbindOnlyAfterDuplicateRefused(t *testing.T) {
+	for _, status := range []int{408, 409, 413, 422, 429, 501, 503} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			f := newDeliverFixture(t)
+			entered, release := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			body := `{"outcome":"busy"}`
+			f.startControlAgentWithDeliver(t, f.public.URL, true, &control.DeliverOptions{Runner: &okTmux{}}, func(conduit.RPCHandler) conduit.RPCHandler {
+				return conduit.RPCHandlerFunc(func(context.Context, *conduitv1.RpcRequest) *conduitv1.RpcResponse {
+					first := false
+					once.Do(func() { first = true })
+					if first {
+						close(entered)
+						<-release
+					}
+					return &conduitv1.RpcResponse{Status: int32(status), Body: []byte(body)}
+				})
+			})
+			id := f.msg(t, store.MessageDispatchDispatched)
+			done := make(chan int, 1)
+			go func() {
+				code, _ := f.postDeliver(t, f.broker, f.launched.ID, deliverReq("d1", id))
+				done <- code
+			}()
+			<-entered
+			code, resp := f.postDeliver(t, f.broker, f.launched.ID, deliverReq("d1", id))
+			assert.Equal(t, http.StatusConflict, code)
+			assert.Equal(t, agentcontrol.OutcomeInProgress, resp.Outcome)
+			assert.Equal(t, store.MessageDispatchDelivering, f.state(t, id))
+			close(release)
+			assert.Equal(t, status, <-done)
+			assert.Equal(t, store.MessageDispatchDispatched, f.state(t, id), "the owner unbinds")
+		})
+	}
+}
+
+// TestBrokerAgentDeliver_SizeLimitIs413 (review R3): text over the route
+// limit, raw or JSON-encoded, and more than 64 ids are 413 too_large (the
+// broker's exec fallback), never the permanent 400; nothing is bound.
+func TestBrokerAgentDeliver_SizeLimitIs413(t *testing.T) {
+	f := newDeliverFixture(t)
+	c, _ := f.startDeliverAgent(t, 0, "")
+	id := f.msg(t, store.MessageDispatchDispatched)
+	raw := deliverReq("d1", id)
+	big := strings.Repeat("x", agentcontrol.MaxDeliverText+1)
+	raw.Text = &big
+	encoded := deliverReq("d2", id)
+	angle := strings.Repeat("<", 200*1024)
+	encoded.Text = &angle
+	ids := make([]string, 65)
+	for i := range ids {
+		ids[i] = uuid.NewString()
+	}
+	many := deliverReq("d3", ids...)
+	for name, req := range map[string]agentcontrol.DeliverRequest{"raw text": raw, "encoded text": encoded, "65 ids": many} {
+		code, resp := f.postDeliver(t, f.broker, f.launched.ID, req)
+		assert.Equal(t, http.StatusRequestEntityTooLarge, code, name)
+		assert.Equal(t, agentcontrol.OutcomeTooLarge, resp.Outcome, name)
+	}
+	assert.Equal(t, store.MessageDispatchDispatched, f.state(t, id))
+	assert.Equal(t, 0, c.count())
+}
+
+// TestBrokerMessageFailures_NeverFailsDelivered (review R4): a failure
+// report for a row the delivery finished as delivered changes nothing and
+// sends no notice; one for a row still delivering wins, stores a
+// replayable outcome, and the delivery's late finish loses.
+func TestBrokerMessageFailures_NeverFailsDelivered(t *testing.T) {
+	f := newDeliverFixture(t)
+	ctx := context.Background()
+	delivered := f.msg(t, store.MessageDispatchPending)
+	_, err := f.store.BindMessageDelivery(ctx, f.launched.ID, "d1", []string{delivered}, time.Now())
+	require.NoError(t, err)
+	_, err = f.store.FinishMessageDelivery(ctx, "d1", []string{delivered}, store.MessageDispatchDelivered, `{"outcome":"delivered"}`)
+	require.NoError(t, err)
+	inflight := f.msg(t, store.MessageDispatchDispatched)
+	_, err = f.store.BindMessageDelivery(ctx, f.launched.ID, "d2", []string{inflight}, time.Now())
+	require.NoError(t, err)
+
+	rr, resp := postMessageFailures(t, f.srv, f.broker, f.broker,
+		messageDeliveryFailure{MessageID: delivered, Reason: "late"},
+		messageDeliveryFailure{MessageID: inflight, Reason: "broker gave up"})
+	require.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, 1, resp.Marked)
+	assert.Equal(t, 1, resp.Ignored)
+	assert.Equal(t, store.MessageDispatchDelivered, f.state(t, delivered))
+	assert.Equal(t, store.MessageDispatchFailed, f.state(t, inflight))
+
+	n, err := f.store.FinishMessageDelivery(ctx, "d2", []string{inflight}, store.MessageDispatchDelivered, `{"outcome":"delivered"}`)
+	require.NoError(t, err)
+	assert.Zero(t, n)
+	code, r := f.postDeliver(t, f.broker, f.launched.ID, deliverReq("d2", inflight))
+	assert.Equal(t, http.StatusOK, code)
+	assert.True(t, r.Replayed)
+	assert.Equal(t, agentcontrol.OutcomePartial, r.Outcome)
+}
+
+// TestExecuteAgentDMFinalization_KeepsDelivered (review R4): the agent-DM
+// failure finalization never turns a delivered row into failed, and a row
+// still delivering keeps a replayable outcome.
+func TestExecuteAgentDMFinalization_KeepsDelivered(t *testing.T) {
+	f := newDeliverFixture(t)
+	ctx := context.Background()
+	delivered := f.msg(t, store.MessageDispatchPending)
+	_, err := f.store.BindMessageDelivery(ctx, f.launched.ID, "d1", []string{delivered}, time.Now())
+	require.NoError(t, err)
+	_, err = f.store.FinishMessageDelivery(ctx, "d1", []string{delivered}, store.MessageDispatchDelivered, `{"outcome":"delivered"}`)
+	require.NoError(t, err)
+	require.NoError(t, f.srv.markFailed(ctx, delivered, "broker said failed"))
+	assert.Equal(t, store.MessageDispatchDelivered, f.state(t, delivered))
+
+	inflight := f.msg(t, store.MessageDispatchPending)
+	_, err = f.store.BindMessageDelivery(ctx, f.launched.ID, "d2", []string{inflight}, time.Now())
+	require.NoError(t, err)
+	require.NoError(t, f.srv.markFailed(ctx, inflight, "dispatch failed"))
+	assert.Equal(t, store.MessageDispatchFailed, f.state(t, inflight))
+	code, r := f.postDeliver(t, f.broker, f.launched.ID, deliverReq("d2", inflight))
+	assert.Equal(t, http.StatusOK, code)
+	assert.True(t, r.Replayed)
+}

@@ -260,6 +260,7 @@ func NewManager(rt runtime.Runtime) Manager {
 		return mgr.deliver(context.Background(), deliveryRequest{
 			agentID: f.agentID, projectID: f.projectID, message: f.text,
 			messageIDs: f.messageIDs, partialIDs: f.partialIDs, readyWanted: f.readyWanted,
+			hasAttachments: f.hasAttachments,
 		})
 	}
 	mgr.msgBuffer.waitReady = mgr.waitHarnessReady
@@ -642,7 +643,8 @@ func (m *AgentManager) Message(ctx context.Context, agentID, projectID string, m
 		// Work the message needs in the container (its attachments) runs
 		// right before the text, on this immediate path too.
 		message += m.runPreDelivery(ctx, agentID, projectID, PreDeliveryFromContext(ctx))
-		req := deliveryRequest{agentID: agentID, projectID: projectID, message: message, interrupt: true}
+		req := deliveryRequest{agentID: agentID, projectID: projectID, message: message, interrupt: true,
+			hasAttachments: PreDeliveryFromContext(ctx) != nil}
 		if id := deliveryMessageIDFromContext(ctx); id != "" {
 			req.messageIDs = []string{id}
 		}
@@ -1421,6 +1423,9 @@ type deliveryRequest struct {
 	// because the target delivers over conduit (sciontool waits instead,
 	// or the exec fallback waits here).
 	readyWanted bool
+	// hasAttachments: the delivery carries a message with attachments; it
+	// goes over exec (design v2.22 §1.6: attachments stay on exec).
+	hasAttachments bool
 }
 
 // deliver is deliverImmediate for a deliveryRequest: it chooses the
@@ -1525,6 +1530,8 @@ func (m *AgentManager) deliver(ctx context.Context, d deliveryRequest) error {
 	if m.usesConduitTransport(agent) {
 		if len(d.messageIDs) == 0 || d.partialIDs {
 			conduitReason = errors.New("delivery carries a message without a hub id")
+		} else if d.hasAttachments {
+			conduitReason = errors.New("delivery carries attachments")
 		} else if berr := tmuxdeliver.CheckBounds(conduitSettings(h, ds, m.readyTimings)); berr != nil {
 			conduitReason = berr
 		} else {
@@ -1533,11 +1540,17 @@ func (m *AgentManager) deliver(ctx context.Context, d deliveryRequest) error {
 				ready = conduitReadySpec(m.readyTimings)
 			}
 			creq := conduitDeliverRequest(nextDeliveryID(), d.messageIDs, req, ready)
-			outcome, cerr := m.deliverOverConduit(ctx, agent, creq)
-			if outcome == conduitDone {
-				return cerr
+			if ferr := creq.FitsRoute(); ferr != nil {
+				// Too large for the route (text, encoded size, or more
+				// than 64 coalesced messages): exec carries it (review R3).
+				conduitReason = fmt.Errorf("delivery outside conduit route limits: %w", ferr)
+			} else {
+				outcome, cerr := m.deliverOverConduit(ctx, agent, creq)
+				if outcome == conduitDone {
+					return cerr
+				}
+				conduitReason = cerr
 			}
-			conduitReason = cerr
 		}
 		slog.Info("message delivery uses exec", "agent_id", agent.ID, "reason", conduitReason)
 		if d.readyWanted {

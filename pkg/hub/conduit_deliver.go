@@ -55,7 +55,7 @@ const (
 var hubDeliverTimeout = agentcontrol.HubDeliverTimeout
 
 // staleDeliveryOutcome is stored on rows the stale sweep moves to partial.
-const staleDeliveryOutcome = `{"outcome":"partial","stage":"unknown"}`
+const staleDeliveryOutcome = store.DeliveryOutcomeUnknownPartial
 
 // conduitDeliverEnabled reports whether /deliver serves: hub.conduit_deliver
 // on and conduit routable (it requires hub.conduit; gap G6).
@@ -74,6 +74,13 @@ func writeDeliverAnswer(w http.ResponseWriter, status int, resp agentcontrol.Del
 // the body) is assigned to that broker; then the atomic row bind (§2.6),
 // which checks every message row exists and names this agent. Only then is
 // the agent called, with broker_id and not_after_unix_ms set by the hub.
+//
+// The call that binds the rows is the delivery's only owner, across hub
+// replicas: the bind is a compare-and-set on delivery_id IS NULL, a
+// same-id call that finds the rows delivering gets 409 in_progress without
+// calling the agent, and only the owner unbinds or finishes the rows. A
+// same-id retry after the owner unbound them (nothing pasted) binds again
+// and becomes the new owner.
 func (s *Server) handleBrokerAgentDeliver(w http.ResponseWriter, r *http.Request, brokerID, agentID string) {
 	ctx := r.Context()
 	if !s.conduitDeliverEnabled() {
@@ -90,14 +97,24 @@ func (s *Server) handleBrokerAgentDeliver(w http.ResponseWriter, r *http.Request
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxDeliverRequestBody))
 	if err != nil {
-		writeDeliverAnswer(w, http.StatusRequestEntityTooLarge, agentcontrol.DeliverResponse{Outcome: agentcontrol.OutcomeInvalid, Field: agentcontrol.FieldBody})
+		writeDeliverAnswer(w, http.StatusRequestEntityTooLarge, agentcontrol.DeliverResponse{Outcome: agentcontrol.OutcomeTooLarge, Field: agentcontrol.FieldBody})
 		return
 	}
 	req, err := agentcontrol.DecodeDeliverRequest(body)
 	if err == nil {
 		err = req.ValidateFromBroker()
 	}
+	if err == nil && len(body) > agentcontrol.MaxDeliverRequestBytes {
+		err = &agentcontrol.SizeError{Field: agentcontrol.FieldText}
+	}
 	if err != nil {
+		// Over a size limit is 413: nothing was done and the broker may
+		// use exec. A malformed request is a permanent 400 (review R3).
+		var se *agentcontrol.SizeError
+		if errors.As(err, &se) {
+			writeDeliverAnswer(w, http.StatusRequestEntityTooLarge, agentcontrol.DeliverResponse{Outcome: agentcontrol.OutcomeTooLarge, Field: se.Field})
+			return
+		}
 		field := agentcontrol.FieldBody
 		var fe *agentcontrol.FieldError
 		if errors.As(err, &fe) {
@@ -149,6 +166,15 @@ func (s *Server) handleBrokerAgentDeliver(w http.ResponseWriter, r *http.Request
 	case store.DeliveryConflict:
 		log.Warn("message delivery refused: rows bound to another delivery or past delivering")
 		writeDeliverAnswer(w, http.StatusConflict, agentcontrol.DeliverResponse{Outcome: agentcontrol.OutcomeBound})
+		return
+	case store.DeliveryInFlight:
+		// Another call holds this delivery (a duplicate, or a call on
+		// another hub replica). Only the call that bound the rows may call
+		// the agent, unbind or finish them; a duplicate must never get an
+		// answer that lets the broker retry or fall back to exec, since
+		// the owner may be pasting right now (review R1).
+		log.Warn("message delivery refused: the same delivery is already in flight")
+		writeDeliverAnswer(w, http.StatusConflict, agentcontrol.DeliverResponse{Outcome: agentcontrol.OutcomeInProgress})
 		return
 	case store.DeliveryReplay:
 		resp, derr := agentcontrol.DecodeDeliverResponse([]byte(bind.Outcome))

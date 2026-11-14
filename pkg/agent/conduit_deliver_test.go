@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -414,4 +415,117 @@ func TestConduitDelivery_LogsNoText(t *testing.T) {
 			t.Fatalf("log contains %q: %q", bad, out)
 		}
 	}
+}
+
+// TestConduitDelivery_OversizeUsesExec (review R3): a flush too large for
+// the route (raw text over 512 KiB, text whose JSON encoding exceeds the
+// request limit, or more than 64 coalesced messages) never goes to the hub;
+// it uses exec, and when exec fails the error names the limit and is final.
+func TestConduitDelivery_OversizeUsesExec(t *testing.T) {
+	ids := func(n int) []string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = fmt.Sprintf("m-%d", i)
+		}
+		return out
+	}
+	cases := map[string]struct {
+		text  string
+		ids   []string
+		field string
+	}{
+		"text 512 KiB + 1":       {strings.Repeat("x", agentcontrol.MaxDeliverText+1), []string{"m"}, "text"},
+		"encoded text too large": {strings.Repeat("<", 200*1024), []string{"m"}, "text"},
+		"65 messages":            {"hello", ids(65), "message_ids"},
+	}
+	for name, tc := range cases {
+		for _, execOK := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s exec=%t", name, execOK), func(t *testing.T) {
+				var execs []string
+				m := newConduitTestManager(t, true, shippedSpec, &execs)
+				if !execOK {
+					m.Runtime.(*runtime.MockRuntime).ExecWithStdinFunc = func(context.Context, string, []string, io.Reader) (string, error) {
+						return "", errors.New("no exec connector")
+					}
+				}
+				d := &fakeDeliverer{answers: []fakeAnswer{answer(200, agentcontrol.OutcomeDelivered)}}
+				m.SetConduitDeliverer(d)
+				err := m.deliver(context.Background(), deliveryRequest{agentID: "test-agent", message: tc.text, messageIDs: tc.ids})
+				if d.calls() != 0 {
+					t.Fatalf("hub called %d times for an oversize flush", d.calls())
+				}
+				if execOK {
+					if err != nil || len(execs) == 0 || !strings.Contains(execs[0], "load-buffer") {
+						t.Fatalf("err %v execs %v; want delivered over exec", err, execs)
+					}
+					return
+				}
+				var final *finalDeliveryError
+				if !errors.As(err, &final) || !strings.Contains(err.Error(), "route limits") || !strings.Contains(err.Error(), tc.field) {
+					t.Fatalf("err = %v; want a final error naming %s", err, tc.field)
+				}
+			})
+		}
+	}
+	// Control: just inside the raw limit, with plain text, uses conduit.
+	var execs []string
+	m := newConduitTestManager(t, true, shippedSpec, &execs)
+	d := &fakeDeliverer{answers: []fakeAnswer{answer(200, agentcontrol.OutcomeDelivered)}}
+	m.SetConduitDeliverer(d)
+	if err := m.deliver(context.Background(), deliveryRequest{agentID: "test-agent", message: strings.Repeat("x", agentcontrol.MaxDeliverText-1024), messageIDs: ids(64)}); err != nil || d.calls() != 1 {
+		t.Fatalf("control: err %v calls %d", err, d.calls())
+	}
+}
+
+// nopPreDelivery stands in for a message's attachment work.
+type nopPreDelivery struct{}
+
+func (nopPreDelivery) BeforeText(context.Context, runtime.Runtime, string) string { return "" }
+func (nopPreDelivery) Discard()                                                   {}
+
+// TestConduitDelivery_AttachmentsUseExec (review FYI, design v2.22 §1.6): a
+// buffered flush or an interrupt carrying attachments uses exec, never the
+// hub.
+func TestConduitDelivery_AttachmentsUseExec(t *testing.T) {
+	t.Run("interrupt", func(t *testing.T) {
+		var execs []string
+		m := newConduitTestManager(t, true, shippedSpec, &execs)
+		d := &fakeDeliverer{answers: []fakeAnswer{answer(200, agentcontrol.OutcomeDelivered)}}
+		m.SetConduitDeliverer(d)
+		ctx := WithPreDelivery(WithDeliveryMessageID(context.Background(), "m-1"), nopPreDelivery{})
+		if err := m.Message(ctx, "test-agent", "", "with file", true); err != nil {
+			t.Fatal(err)
+		}
+		if d.calls() != 0 || len(execs) == 0 {
+			t.Fatalf("hub calls %d, execs %v; want exec only", d.calls(), execs)
+		}
+	})
+	t.Run("buffered", func(t *testing.T) {
+		var execs []string
+		m := newConduitTestManager(t, true, shippedSpec, &execs)
+		d := &fakeDeliverer{answers: []fakeAnswer{answer(200, agentcontrol.OutcomeDelivered)}}
+		m.SetConduitDeliverer(d)
+		done := make(chan struct{})
+		m.msgBuffer = NewMessageBuffer(10*time.Millisecond, func(string, string, string, bool) error { return nil })
+		m.msgBuffer.preDeliver = func(context.Context, string, string, PreDelivery) string { return "" }
+		m.msgBuffer.deliverFlush = func(f bufferedFlush) error {
+			defer close(done)
+			if !f.hasAttachments {
+				t.Error("flush lost the attachment flag")
+			}
+			return m.deliver(context.Background(), deliveryRequest{agentID: f.agentID, message: f.text,
+				messageIDs: f.messageIDs, hasAttachments: f.hasAttachments})
+		}
+		defer m.msgBuffer.Close()
+		m.msgBuffer.sendWithID("test-agent", "", "plain", "m-1", nil, nil)
+		m.msgBuffer.sendWithID("test-agent", "", "with file", "m-2", nil, nopPreDelivery{})
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("no flush")
+		}
+		if d.calls() != 0 || len(execs) == 0 {
+			t.Fatalf("hub calls %d, execs %v; want exec only", d.calls(), execs)
+		}
+	})
 }

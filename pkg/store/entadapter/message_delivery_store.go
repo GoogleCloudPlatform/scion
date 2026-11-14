@@ -103,7 +103,7 @@ func (s *BrokerDispatchStore) BindMessageDelivery(ctx context.Context, recipient
 }
 
 // classifyBoundRows decides a bind that did not move every row: all rows
-// delivering under the same id is a forward, all final under the same id a
+// delivering under the same id is in flight (owned by another call), all final under the same id a
 // replay, anything else a conflict.
 func classifyBoundRows(rows []*ent.Message, deliveryID string) store.DeliveryBind {
 	delivering, final := 0, 0
@@ -124,7 +124,7 @@ func classifyBoundRows(rows []*ent.Message, deliveryID string) store.DeliveryBin
 	}
 	switch {
 	case delivering == len(rows):
-		return store.DeliveryBind{Result: store.DeliveryForward}
+		return store.DeliveryBind{Result: store.DeliveryInFlight}
 	case final == len(rows) && outcome != "":
 		return store.DeliveryBind{Result: store.DeliveryReplay, Outcome: outcome}
 	}

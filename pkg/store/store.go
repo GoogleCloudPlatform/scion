@@ -1996,14 +1996,22 @@ type BrokerDispatchStore interface {
 	// MarkMessageDispatched CAS-flips a message pending->dispatched (dedupes drains).
 	MarkMessageDispatched(ctx context.Context, id string) (dispatched bool, err error)
 
-	// MarkMessageFailed sets a message's dispatch_state to "failed" with a reason.
+	// MarkMessageFailed sets a message's dispatch_state to "failed" with a
+	// reason. A failed or delivered row is left alone; a delivering row
+	// also gets the stored outcome DeliveryOutcomeUnknownPartial.
 	MarkMessageFailed(ctx context.Context, id string, reason string) error
+
+	// FailUndeliveredMessage is MarkMessageFailed for a broker's async
+	// failure report: only a pending, dispatched, delivering or partial row
+	// is failed, in one conditional write. It reports whether this call
+	// made the transition; a failure notice is sent only then.
+	FailUndeliveredMessage(ctx context.Context, id string, reason string) (bool, error)
 
 	// BindMessageDelivery binds the rows messageIDs, all addressed to agent
 	// recipientID, to one deliver-message flush deliveryID in one
 	// transaction (design v2.22 §2.6): every row in a bindable state moves
 	// to delivering with delivery_id and delivering_at = now, or nothing
-	// changes. A same-id retry is DeliveryForward, a same-id call on final
+	// changes. A same-id call while the rows are delivering is DeliveryInFlight (another call owns the delivery), a same-id call on final
 	// rows DeliveryReplay; anything else is DeliveryConflict. A missing row,
 	// or one addressed to another agent, is store.ErrNotFound.
 	BindMessageDelivery(ctx context.Context, recipientID, deliveryID string, messageIDs []string, now time.Time) (DeliveryBind, error)

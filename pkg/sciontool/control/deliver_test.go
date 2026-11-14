@@ -44,6 +44,7 @@ type fakeTmux struct {
 	block    chan struct{} // when set, load-buffer waits on it
 	entered  chan struct{} // closed on the first load-buffer
 	once     sync.Once
+	onVerb   func(verb string) // called before each command, outside mu
 }
 
 func (f *fakeTmux) Run(ctx context.Context, argv []string, stdin io.Reader) (string, error) {
@@ -66,8 +67,11 @@ func (f *fakeTmux) Run(ctx context.Context, argv []string, stdin io.Reader) (str
 	if nth, ok := f.failNth[verb]; ok && nth != n {
 		err = nil
 	}
-	block, entered := f.block, f.entered
+	block, entered, onVerb := f.block, f.entered, f.onVerb
 	f.mu.Unlock()
+	if onVerb != nil {
+		onVerb(verb)
+	}
 	if verb == "load-buffer" && entered != nil {
 		f.once.Do(func() { close(entered) })
 	}
@@ -215,21 +219,17 @@ func TestDeliverSchemaRejects(t *testing.T) {
 		mod   func(r *agentcontrol.DeliverRequest)
 		field string
 	}{
-		"v2":                   {func(r *agentcontrol.DeliverRequest) { r.V = 2 }, agentcontrol.FieldV},
-		"delivery id shape":    {func(r *agentcontrol.DeliverRequest) { r.DeliveryID = "a b" }, agentcontrol.FieldDeliveryID},
-		"delivery id long":     {func(r *agentcontrol.DeliverRequest) { r.DeliveryID = strings.Repeat("a", 65) }, agentcontrol.FieldDeliveryID},
-		"no broker id":         {func(r *agentcontrol.DeliverRequest) { r.BrokerID = "" }, agentcontrol.FieldBrokerID},
-		"no message ids":       {func(r *agentcontrol.DeliverRequest) { r.MessageIDs = nil }, agentcontrol.FieldMessageIDs},
-		"65 message ids":       {func(r *agentcontrol.DeliverRequest) { r.MessageIDs = manyIDs(65) }, agentcontrol.FieldMessageIDs},
-		"bad message id":       {func(r *agentcontrol.DeliverRequest) { r.MessageIDs = []string{"../x"} }, agentcontrol.FieldMessageIDs},
-		"duplicate message id": {func(r *agentcontrol.DeliverRequest) { r.MessageIDs = []string{"a", "a"} }, agentcontrol.FieldMessageIDs},
-		"unknown op":           {func(r *agentcontrol.DeliverRequest) { r.Op = "exec" }, agentcontrol.FieldOp},
-		"raw op":               {func(r *agentcontrol.DeliverRequest) { r.Op = "raw" }, agentcontrol.FieldOp},
-		"paste without text":   {func(r *agentcontrol.DeliverRequest) { r.Text = nil }, agentcontrol.FieldText},
-		"paste empty text":     {func(r *agentcontrol.DeliverRequest) { r.Text = strp("") }, agentcontrol.FieldText},
-		"text too large": {func(r *agentcontrol.DeliverRequest) {
-			r.Text = strp(strings.Repeat("x", agentcontrol.MaxDeliverText+1))
-		}, agentcontrol.FieldText},
+		"v2":                     {func(r *agentcontrol.DeliverRequest) { r.V = 2 }, agentcontrol.FieldV},
+		"delivery id shape":      {func(r *agentcontrol.DeliverRequest) { r.DeliveryID = "a b" }, agentcontrol.FieldDeliveryID},
+		"delivery id long":       {func(r *agentcontrol.DeliverRequest) { r.DeliveryID = strings.Repeat("a", 65) }, agentcontrol.FieldDeliveryID},
+		"no broker id":           {func(r *agentcontrol.DeliverRequest) { r.BrokerID = "" }, agentcontrol.FieldBrokerID},
+		"no message ids":         {func(r *agentcontrol.DeliverRequest) { r.MessageIDs = nil }, agentcontrol.FieldMessageIDs},
+		"bad message id":         {func(r *agentcontrol.DeliverRequest) { r.MessageIDs = []string{"../x"} }, agentcontrol.FieldMessageIDs},
+		"duplicate message id":   {func(r *agentcontrol.DeliverRequest) { r.MessageIDs = []string{"a", "a"} }, agentcontrol.FieldMessageIDs},
+		"unknown op":             {func(r *agentcontrol.DeliverRequest) { r.Op = "exec" }, agentcontrol.FieldOp},
+		"raw op":                 {func(r *agentcontrol.DeliverRequest) { r.Op = "raw" }, agentcontrol.FieldOp},
+		"paste without text":     {func(r *agentcontrol.DeliverRequest) { r.Text = nil }, agentcontrol.FieldText},
+		"paste empty text":       {func(r *agentcontrol.DeliverRequest) { r.Text = strp("") }, agentcontrol.FieldText},
 		"submit_only with text":  {func(r *agentcontrol.DeliverRequest) { r.Op = agentcontrol.OpSubmitOnly; r.ExtraSubmits = nil }, agentcontrol.FieldText},
 		"interrupt without keys": {func(r *agentcontrol.DeliverRequest) { r.Op = agentcontrol.OpInterruptPaste }, agentcontrol.FieldInterruptKeys},
 		"stray interrupt keys":   {func(r *agentcontrol.DeliverRequest) { r.InterruptKeys = []string{"C-c"} }, agentcontrol.FieldInterruptKeys},
@@ -685,5 +685,72 @@ func TestDeliverLogLineContentFree(t *testing.T) {
 		if strings.Contains(line, bad) {
 			t.Fatalf("log line %q contains %q", line, bad)
 		}
+	}
+}
+
+// TestDeliverHardStopAfterInterrupt (review S-A-01): the hard stop is
+// checked before every paste, also after interrupt keys were sent. A stop
+// that passes after the interrupt (during the interrupt itself or the
+// buffer load) means no paste and a stored partial, never a 408 the hub
+// would unbind on; the replay is partial too.
+func TestDeliverHardStopAfterInterrupt(t *testing.T) {
+	for _, slowVerb := range []string{"send-keys", "load-buffer"} {
+		t.Run("slow "+slowVerb, func(t *testing.T) {
+			clk := &fakeClock{t: time.Unix(1_000_000, 0)}
+			f := &fakeTmux{}
+			f.onVerb = func(verb string) {
+				if verb == slowVerb {
+					clk.Advance(93 * time.Second)
+				}
+			}
+			h := newDeliverHandler(f, clk)
+			r := baseReq(clk.Now())
+			r.Op = agentcontrol.OpInterruptPaste
+			r.InterruptKeys = []string{"C-c"}
+			code, resp := post(t, h, r)
+			if code != http.StatusOK || resp.Outcome != agentcontrol.OutcomePartial || resp.Stage != agentcontrol.StagePaste {
+				t.Fatalf("= %d %+v, want 200 partial paste", code, resp)
+			}
+			if slices.Contains(f.verbs(), "paste-buffer") {
+				t.Fatalf("pasted after the hard stop: %v", f.verbs())
+			}
+			n := len(f.verbs())
+			if code, resp := post(t, h, r); code != http.StatusOK || !resp.Replayed || resp.Outcome != agentcontrol.OutcomePartial {
+				t.Fatalf("replay = %d %+v", code, resp)
+			}
+			if len(f.verbs()) != n {
+				t.Fatal("replay ran tmux")
+			}
+		})
+	}
+	// Control: expiry before anything visible stays 408 (TestDeliverReadinessPastHardStop).
+}
+
+// TestDeliverSizeLimits (review R3): over a size limit is 413 too_large,
+// which the hub and broker treat as "use exec", not the permanent 400 of a
+// malformed request; nothing runs.
+func TestDeliverSizeLimits(t *testing.T) {
+	now := time.Now()
+	for name, tc := range map[string]struct {
+		mod   func(r *agentcontrol.DeliverRequest)
+		field string
+	}{
+		"text over 512 KiB": {func(r *agentcontrol.DeliverRequest) {
+			r.Text = strp(strings.Repeat("x", agentcontrol.MaxDeliverText+1))
+		}, agentcontrol.FieldText},
+		"65 message ids": {func(r *agentcontrol.DeliverRequest) { r.MessageIDs = manyIDs(65) }, agentcontrol.FieldMessageIDs},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := &fakeTmux{}
+			r := baseReq(now)
+			tc.mod(&r)
+			code, resp := post(t, newDeliverHandler(f, nil), r)
+			if code != http.StatusRequestEntityTooLarge || resp.Outcome != agentcontrol.OutcomeTooLarge || resp.Field != tc.field {
+				t.Fatalf("= %d %+v, want 413 too_large %s", code, resp, tc.field)
+			}
+			if len(f.verbs()) != 0 {
+				t.Fatalf("ran %v", f.verbs())
+			}
+		})
 	}
 }

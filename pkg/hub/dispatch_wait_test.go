@@ -63,6 +63,9 @@ func (f *fakeDispatchStore) MarkMessageDispatched(_ context.Context, _ string) (
 func (f *fakeDispatchStore) MarkMessageFailed(_ context.Context, _, _ string) error {
 	return nil
 }
+func (f *fakeDispatchStore) FailUndeliveredMessage(_ context.Context, _, _ string) (bool, error) {
+	return false, nil
+}
 func (f *fakeDispatchStore) BindMessageDelivery(_ context.Context, _, _ string, _ []string, _ time.Time) (store.DeliveryBind, error) {
 	return store.DeliveryBind{}, nil
 }

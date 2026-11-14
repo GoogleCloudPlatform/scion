@@ -172,6 +172,10 @@ type bufferedFlush struct {
 	partialIDs bool
 	// readyWanted: this is a timer-driven flush with a readiness wait.
 	readyWanted bool
+	// hasAttachments: a coalesced message carried attachments (a
+	// PreDelivery). Such a flush is delivered over exec (design v2.22
+	// §1.6).
+	hasAttachments bool
 }
 
 // finalDeliveryError marks a deliverFunc failure that already made its own
@@ -397,6 +401,11 @@ func (mb *MessageBuffer) flush(agentID, key string, waitForReady bool) {
 
 	f := bufferedFlush{agentID: agentID, projectID: projectID, text: combined,
 		readyWanted: waitForReady && mb.waitReady != nil}
+	for _, pd := range pres {
+		if pd != nil {
+			f.hasAttachments = true
+		}
+	}
 	for _, id := range ids {
 		if id == "" {
 			f.partialIDs = true

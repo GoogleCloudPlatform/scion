@@ -41,6 +41,11 @@ const (
 	MaxDeliverText = 512 * 1024
 	// MaxDeliverMessageIDs bounds message_ids.
 	MaxDeliverMessageIDs = 64
+	// MaxDeliverRequestBytes bounds the JSON-encoded request as the broker
+	// sends it: below the session's 768 KiB MaxRPCBody with room for the
+	// fields the hub adds. JSON escaping can make text that fits
+	// MaxDeliverText exceed it (for example '<' encodes as 6 bytes).
+	MaxDeliverRequestBytes = 760 * 1024
 	// MaxDeliverDeadline is the largest deadline_ms: sciontool never starts
 	// the first visible step later than this after receipt.
 	MaxDeliverDeadline = 92 * time.Second
@@ -134,6 +139,36 @@ func (e *FieldError) Error() string {
 	return "deliver-message: invalid field " + e.Field
 }
 
+// SizeError reports a request that is well formed but larger than the
+// route carries: text over MaxDeliverText or MaxDeliverRequestBytes once
+// encoded, or more than MaxDeliverMessageIDs ids. Unlike a FieldError it is
+// not permanent: the delivery can go over exec instead (design v2.22 §1.6;
+// review R3). The hub and the agent answer it with 413.
+type SizeError struct {
+	Field string
+}
+
+func (e *SizeError) Error() string {
+	return "deliver-message: too large for the route: " + e.Field
+}
+
+// FitsRoute reports, as a *SizeError, whether r is within the route's size
+// limits, including its encoded size. The broker checks it before choosing
+// conduit transport.
+func (r *DeliverRequest) FitsRoute() error {
+	if len(r.MessageIDs) > MaxDeliverMessageIDs {
+		return &SizeError{Field: FieldMessageIDs}
+	}
+	if r.Text != nil && len(*r.Text) > MaxDeliverText {
+		return &SizeError{Field: FieldText}
+	}
+	b, err := json.Marshal(r)
+	if err != nil || len(b) > MaxDeliverRequestBytes {
+		return &SizeError{Field: FieldText}
+	}
+	return nil
+}
+
 // idPattern is the shape of delivery, broker and message ids.
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9-]{1,64}$`)
 
@@ -159,7 +194,8 @@ func DecodeDeliverRequest(body []byte) (*DeliverRequest, error) {
 
 // Validate checks r against the fixed schema and the route bounds (design
 // v2.22 §1.2, §1.7, §5.3) and returns a *FieldError naming the first field
-// that fails, in a fixed order. No value is ever clamped. NotAfterUnixMS
+// that fails, in a fixed order, or a *SizeError for a size limit. No value
+// is ever clamped. NotAfterUnixMS
 // and BrokerID must be set; the hub sets both before forwarding.
 func (r *DeliverRequest) Validate() error {
 	if err := r.validateCommon(); err != nil {
@@ -188,8 +224,11 @@ func (r *DeliverRequest) validateCommon() error {
 	if !ValidID(r.DeliveryID) {
 		return &FieldError{Field: FieldDeliveryID}
 	}
-	if len(r.MessageIDs) == 0 || len(r.MessageIDs) > MaxDeliverMessageIDs {
+	if len(r.MessageIDs) == 0 {
 		return &FieldError{Field: FieldMessageIDs}
+	}
+	if len(r.MessageIDs) > MaxDeliverMessageIDs {
+		return &SizeError{Field: FieldMessageIDs}
 	}
 	seen := make(map[string]struct{}, len(r.MessageIDs))
 	for _, id := range r.MessageIDs {
@@ -208,8 +247,11 @@ func (r *DeliverRequest) validateCommon() error {
 	pastes := op == tmuxdeliver.OpPaste || op == tmuxdeliver.OpInterruptPaste
 	interrupts := op == tmuxdeliver.OpInterruptPaste || op == tmuxdeliver.OpInterruptSubmit
 	if pastes {
-		if r.Text == nil || *r.Text == "" || len(*r.Text) > MaxDeliverText {
+		if r.Text == nil || *r.Text == "" {
 			return &FieldError{Field: FieldText}
+		}
+		if len(*r.Text) > MaxDeliverText {
+			return &SizeError{Field: FieldText}
 		}
 	} else if r.Text != nil {
 		return &FieldError{Field: FieldText}
@@ -271,6 +313,9 @@ const (
 	OutcomeBusy               = "busy"
 	OutcomeExpiredBeforePaste = "expired_before_paste"
 	OutcomeInvalid            = "invalid"
+	// OutcomeTooLarge is a 413: the request is over a size limit; nothing
+	// was done, and the delivery may use exec.
+	OutcomeTooLarge = "too_large"
 	// OutcomeNotDelivered is a 422: nothing visible was done (the tmux
 	// target is missing, or staging the text failed).
 	OutcomeNotDelivered = "not_delivered"
