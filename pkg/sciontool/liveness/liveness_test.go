@@ -296,3 +296,63 @@ func TestLiveWorkJSON(t *testing.T) {
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"kind":"process","suppressStall":true,"detail":"go (pid 1, 1.0s cpu)"}`, string(b))
 }
+
+// codexTree is the Codex harness's tree: its npm launcher (node
+// bin/codex.js) keeps running and spawns the native TUI as a child, which
+// redraws while it shows its "Working" status.
+func codexTree(tick uint64) []fakeProc {
+	codexWrapper := "sh\x00-c\x00codex --sandbox danger-full-access; echo $? > " + state.HarnessExitCodeFile
+	return []fakeProc{
+		{pid: 1, ppid: 0, comm: "sciontool", uid: 0, ticks: 1, start: 1},
+		{pid: 40, ppid: 1, comm: "tmux: server", uid: agentUID, ticks: 100 + tick, start: 14},
+		{pid: 41, ppid: 40, comm: "sh", uid: agentUID, ticks: 1, start: 15, cmdline: codexWrapper},
+		{pid: 42, ppid: 41, comm: "node", uid: agentUID, ticks: 50 + tick/10, start: 16},      // launcher
+		{pid: 43, ppid: 42, comm: "codex", uid: agentUID, ticks: 1000 + tick*5, start: 17},    // native TUI
+		{pid: 50, ppid: 40, comm: "zsh", uid: agentUID, ticks: 3, start: 20, cmdline: "-zsh"}, // shell window
+	}
+}
+
+func TestSample_LauncherHarnessRootDepth(t *testing.T) {
+	newTree := func(depth int) *fakeProcTree {
+		s := NewSampler(Config{AgentUID: agentUID, IsManagedPID: func(int) bool { return false }, HarnessRootDepth: depth})
+		return &fakeProcTree{t: t, sampler: s}
+	}
+
+	t.Run("depth 1 counts the spinning TUI under a launcher", func(t *testing.T) {
+		f := newTree(1)
+		require.Nil(t, f.sample(codexTree(0)...))
+		lw := f.sample(codexTree(100)...)
+		require.NotNil(t, lw)
+		assert.Equal(t, "codex (pid 43, 5.0s cpu)", lw.Detail)
+	})
+
+	t.Run("depth 2 excludes the launcher and the TUI", func(t *testing.T) {
+		f := newTree(2)
+		require.Nil(t, f.sample(codexTree(0)...))
+		assert.Nil(t, f.sample(codexTree(100)...), "a hung Codex agent's spinner is not work")
+		assert.Nil(t, f.sample(codexTree(200)...))
+	})
+
+	t.Run("depth 2 still counts a tool child of the TUI", func(t *testing.T) {
+		f := newTree(2)
+		shell := fakeProc{pid: 60, ppid: 43, comm: "bash", uid: agentUID, ticks: 1, start: 30}
+		tool := fakeProc{pid: 61, ppid: 60, comm: "cargo", uid: agentUID, ticks: 0, start: 31}
+		require.Nil(t, f.sample(append(codexTree(0), shell, tool)...))
+		tool.ticks += 200
+		lw := f.sample(append(codexTree(100), shell, tool)...)
+		require.NotNil(t, lw)
+		assert.Equal(t, "cargo (pid 61, 2.0s cpu)", lw.Detail)
+
+		// A busy direct child of the TUI (one level below the depth) counts.
+		direct := fakeProc{pid: 62, ppid: 43, comm: "rg", uid: agentUID, ticks: 100, start: 99}
+		lw = f.sample(append(codexTree(200), shell, direct)...)
+		require.NotNil(t, lw)
+		assert.Equal(t, "rg (pid 62, 1.0s cpu)", lw.Detail)
+	})
+}
+
+func TestNewSampler_HarnessRootDepthBounds(t *testing.T) {
+	for in, want := range map[int]int{-3: 1, 0: 1, 1: 1, 2: 2, MaxHarnessRootDepth: MaxHarnessRootDepth, 99: MaxHarnessRootDepth} {
+		assert.Equal(t, want, NewSampler(Config{HarnessRootDepth: in}).rootDepth, "HarnessRootDepth %d", in)
+	}
+}

@@ -19,9 +19,26 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 )
 
 func TestLivenessAgentUID(t *testing.T) {
 	assert.Equal(t, 1000, livenessAgentUID(1000), "privilege drop: the target UID")
 	assert.Equal(t, os.Getuid(), livenessAgentUID(0), "no drop: the harness inherits init's UID")
+}
+
+func TestLivenessHarnessRootDepth(t *testing.T) {
+	env := func(v string) func(string) string {
+		return func(k string) string {
+			if k == state.LivenessHarnessRootDepthEnv {
+				return v
+			}
+			return ""
+		}
+	}
+	assert.Equal(t, 1, livenessHarnessRootDepth(env("")), "unset")
+	assert.Equal(t, 2, livenessHarnessRootDepth(env("2")))
+	assert.Equal(t, 2, livenessHarnessRootDepth(env(" 2 ")))
+	assert.Equal(t, 1, livenessHarnessRootDepth(env("two")), "unparsable")
 }

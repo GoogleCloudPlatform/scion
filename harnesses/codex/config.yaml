@@ -41,6 +41,14 @@ delivery:
   extra_submits: 2
   extra_submit_delay: 300ms
 instructions_file: .codex/AGENTS.md
+env:
+  # The npm launcher (node bin/codex.js) spawns the native TUI as a child,
+  # so the TUI is two levels below the agent window's wrapper. The liveness
+  # sampler excludes both from live work (ptone/scion#7855); otherwise a
+  # hung agent's redrawing "Working" status would keep it from stalling.
+  # An env entry rather than a config.yaml key so older binaries still
+  # accept this file (ptone/scion#5196).
+  SCION_LIVENESS_HARNESS_ROOT_DEPTH: "2"
 system_prompt_mode: prepend_to_instructions
 # Default model for agents started without an explicit --model. Resolved
 # through model_aliases below broker-side only (pkg/agent/provision.go,

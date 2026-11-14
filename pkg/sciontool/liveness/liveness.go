@@ -73,7 +73,17 @@ type Config struct {
 	// started itself; its whole subtree is excluded. Defaults to
 	// procreap.IsManagedPID.
 	IsManagedPID func(pid int) bool
+	// HarnessRootDepth is how many process levels below the agent window's
+	// wrapper are the harness itself and never count as work: 1 (the
+	// default, also used for any value below 1) when the harness command
+	// is the TUI, 2 when it is a launcher that spawns the TUI as a child
+	// (Codex). Capped at MaxHarnessRootDepth.
+	HarnessRootDepth int
 }
+
+// MaxHarnessRootDepth caps Config.HarnessRootDepth: a deeper launcher
+// chain would start excluding the tools the harness runs.
+const MaxHarnessRootDepth = 4
 
 // Sampler finds live work by comparing CPU times between successive walks
 // of /proc. It is not safe for concurrent use; the heartbeat loop calls it
@@ -81,6 +91,7 @@ type Config struct {
 type Sampler struct {
 	agentUID  int
 	isManaged func(pid int) bool
+	rootDepth int
 	procRoot  string
 	// prev holds each process's CPU time at the previous sample; nil until
 	// the first sample, which only records the baseline.
@@ -111,7 +122,8 @@ func NewSampler(cfg Config) *Sampler {
 	if isManaged == nil {
 		isManaged = procreap.IsManagedPID
 	}
-	return &Sampler{agentUID: cfg.AgentUID, isManaged: isManaged, procRoot: "/proc"}
+	depth := min(max(cfg.HarnessRootDepth, 1), MaxHarnessRootDepth)
+	return &Sampler{agentUID: cfg.AgentUID, isManaged: isManaged, rootDepth: depth, procRoot: "/proc"}
 }
 
 // sample walks the /proc tree at s.procRoot once and returns the live work
@@ -190,7 +202,18 @@ func (s *Sampler) baseline(procs map[int]*proc) map[int]bool {
 	// window, tmux's default shell may run the wrapper `sh -c '<harness>;
 	// echo $? > <exit-code file>'` as a child rather than exec it, so every
 	// process in the chain whose command line names the exit-code file is
-	// a wrapper, and a wrapper's other children are the harness root.
+	// a wrapper, and a wrapper's other children are the harness root. A
+	// harness launched through a launcher (Config.HarnessRootDepth > 1)
+	// also has the launcher's descendants down to that depth excluded.
+	var excludeHarness func(pid, depth int)
+	excludeHarness = func(pid, depth int) {
+		excluded[pid] = true
+		if depth > 1 {
+			for _, c := range children[pid] {
+				excludeHarness(c, depth-1)
+			}
+		}
+	}
 	var excludeWrapper func(pid int)
 	excludeWrapper = func(pid int) {
 		excluded[pid] = true
@@ -198,7 +221,7 @@ func (s *Sampler) baseline(procs map[int]*proc) map[int]bool {
 			if hasHarnessMarker(s.procRoot, c) {
 				excludeWrapper(c)
 			} else {
-				excluded[c] = true
+				excludeHarness(c, s.rootDepth)
 			}
 		}
 	}

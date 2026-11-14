@@ -1440,7 +1440,10 @@ func RunInit(args []string, opts InitRunOptions) int {
 				// Live work (ptone/scion#7855): the Hub keeps an agent
 				// whose container is doing CPU work from being marked
 				// stalled or auto-suspended.
-				LiveWork: liveness.NewSampler(liveness.Config{AgentUID: livenessAgentUID(targetUID)}).Sample,
+				LiveWork: liveness.NewSampler(liveness.Config{
+					AgentUID:         livenessAgentUID(targetUID),
+					HarnessRootDepth: livenessHarnessRootDepth(os.Getenv),
+				}).Sample,
 			})
 			log.Info("Started Hub heartbeat loop (interval: %s)", hub.DefaultHeartbeatInterval)
 
@@ -2032,6 +2035,23 @@ func livenessAgentUID(targetUID int) int {
 		return targetUID
 	}
 	return os.Getuid()
+}
+
+// livenessHarnessRootDepth reads the harness config's
+// state.LivenessHarnessRootDepthEnv for the liveness sampler: unset means
+// 1, and an unparsable value is logged and treated as 1 (the sampler also
+// clamps the range).
+func livenessHarnessRootDepth(getenv func(string) string) int {
+	raw := getenv(state.LivenessHarnessRootDepthEnv)
+	if raw == "" {
+		return 1
+	}
+	depth, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		log.Warn("Liveness: ignoring %s=%q (not an integer); using 1", state.LivenessHarnessRootDepthEnv, raw)
+		return 1
+	}
+	return depth
 }
 
 // harnessExitCodePath is the harness exit-code file readHarnessExitCode
