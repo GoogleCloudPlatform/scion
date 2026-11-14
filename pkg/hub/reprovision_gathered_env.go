@@ -16,14 +16,11 @@ package hub
 
 import (
 	"context"
-	"maps"
-
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
-// reprovisionGatheredEnv carries the as_needed env a home-reset reprovision's
-// env-gather resolved into the start that follows it, in memory only
-// (ptone/scion#7757).
+// reprovisionGatheredEnv carries into the start that follows a home-reset
+// reprovision the names of the as_needed env keys that reprovision's
+// env-gather resolved (ptone/scion#7757). It holds names only, never values.
 //
 // A start does not resolve as_needed env (selectDeliveryEnv skips it); only a
 // create, provision or reprovision gather does. A hub-dispatched agent still
@@ -33,18 +30,24 @@ import (
 // not match, so the new harness's first start would have none of the values
 // the reprovision gather just resolved for it.
 //
-// The values are never logged or persisted: the start passes them to the
-// broker as secret-fetchable env, and the broker's own record of that start
-// keeps them for later restarts, as after a create.
+// With a holder, the start admits the as_needed env vars and environment
+// secrets stored under those names, through the same per-item delivery
+// authorization as all other launch material (selectDeliveryEnvWith,
+// selectDeliverySecretsWith), and fills only keys nothing else set. The
+// broker's record of that start keeps the values for later restarts, as
+// after a create.
 type reprovisionGatheredEnv struct {
-	env map[string]string
+	// keys maps each stored key name the start may admit to the key the
+	// broker asked for: a canonical key maps to itself, an alternative name
+	// to its canonical key (as resolveAsNeededForKeys stores values).
+	keys map[string]string
 }
 
 type reprovisionGatheredEnvKey struct{}
 
 // withReprovisionGatheredEnv returns ctx with an empty holder. The reincarnate
 // worker installs it for a home-reset reprovision and passes the same ctx to
-// the start, so that start receives what the reprovision gather resolved.
+// that reprovision and its start.
 func withReprovisionGatheredEnv(ctx context.Context) context.Context {
 	return context.WithValue(ctx, reprovisionGatheredEnvKey{}, &reprovisionGatheredEnv{})
 }
@@ -54,29 +57,34 @@ func reprovisionGatheredEnvFrom(ctx context.Context) *reprovisionGatheredEnv {
 	return h
 }
 
-// recordReprovisionGatheredEnv stores env in ctx's holder, if it has one.
-func recordReprovisionGatheredEnv(ctx context.Context, env map[string]string) {
-	if h := reprovisionGatheredEnvFrom(ctx); h != nil && len(env) > 0 {
-		h.env = maps.Clone(env)
+// recordReprovisionGatheredEnv records in ctx's holder, if it has one, the
+// names of resolved (the as_needed env a gather resolved, keyed by canonical
+// key), each with the alternative names the broker accepts for it. Values are
+// not kept.
+func recordReprovisionGatheredEnv(ctx context.Context, resolved map[string]string, alternatives map[string][]string) {
+	h := reprovisionGatheredEnvFrom(ctx)
+	if h == nil || len(resolved) == 0 {
+		return
+	}
+	h.keys = make(map[string]string, len(resolved))
+	for canonical := range resolved {
+		h.keys[canonical] = canonical
+	}
+	for canonical := range resolved {
+		for _, alt := range alternatives[canonical] {
+			if _, taken := h.keys[alt]; !taken {
+				h.keys[alt] = canonical
+			}
+		}
 	}
 }
 
-// mergeReprovisionGatheredEnv fills keys of resolvedEnv that are absent or
-// empty from ctx's holder, classified secret-fetchable like any as_needed
-// value. It never replaces a value the start resolved itself.
-func mergeReprovisionGatheredEnv(ctx context.Context, resolvedEnv map[string]string, classifications *map[string]api.EnvKind) {
-	h := reprovisionGatheredEnvFrom(ctx)
+// canonicalKey returns the key the broker asked for when name is one of the
+// recorded names. A nil holder admits nothing.
+func (h *reprovisionGatheredEnv) canonicalKey(name string) (canonical string, ok bool) {
 	if h == nil {
-		return
+		return "", false
 	}
-	for k, v := range h.env {
-		if v == "" {
-			continue
-		}
-		if existing, ok := resolvedEnv[k]; ok && existing != "" {
-			continue
-		}
-		resolvedEnv[k] = v
-		classifyEnv(classifications, k, api.EnvKindSecretFetchable)
-	}
+	canonical, ok = h.keys[name]
+	return canonical, ok
 }

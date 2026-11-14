@@ -18,48 +18,77 @@ package hub
 
 import (
 	"context"
-	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// vertexGatherBroker is a broker whose reprovision gather asks for the
-// Vertex AI discovery keys on the first pass and accepts the replay, like a
-// broker reprovisioning an agent onto a vertex-ai harness-config whose keys
-// are stored as as_needed hub env vars.
-func vertexGatherBroker() *mockRuntimeBrokerClient {
-	return &mockRuntimeBrokerClient{
-		createWithGatherFunc: func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
-			if req.ResolvedEnv["GOOGLE_CLOUD_PROJECT"] == "" {
-				return nil, &RemoteEnvRequirementsResponse{
-					AgentID: req.ID,
-					Needs:   []string{"GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_REGION"},
-				}, nil
-			}
-			return &RemoteAgentResponse{
-				Agent:         &RemoteAgentInfo{ID: req.ID, Slug: req.Slug, Name: req.Name},
-				Created:       true,
-				Reprovisioned: true,
-				HomeReset:     req.ResetHome,
-			}, nil, nil
-		},
+// vertexGatherFunc answers a reprovision gather like a broker
+// reprovisioning an agent onto a vertex-ai harness-config: the first pass
+// needs the project and the region (accepting GOOGLE_CLOUD_LOCATION for the
+// region, as claude's vertex-ai key group does), and the replay is accepted
+// with the reprovision and home-reset echoes.
+func vertexGatherFunc() func(context.Context, string, string, *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+	return func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+		if req.ResolvedEnv["GOOGLE_CLOUD_PROJECT"] == "" {
+			return nil, &RemoteEnvRequirementsResponse{
+				AgentID:      req.ID,
+				Needs:        []string{"GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_REGION"},
+				Alternatives: map[string][]string{"GOOGLE_CLOUD_REGION": {"CLOUD_ML_REGION", "GOOGLE_CLOUD_LOCATION"}},
+			}, nil
+		}
+		return &RemoteAgentResponse{
+			Agent:         &RemoteAgentInfo{ID: req.ID, Slug: req.Slug, Name: req.Name},
+			Created:       true,
+			Reprovisioned: true,
+			HomeReset:     req.ResetHome,
+		}, nil, nil
 	}
 }
 
-func vertexAsNeededAgent(t *testing.T, ctx context.Context, memStore store.Store) *store.Agent {
+// asNeededEnv stores an as_needed env var row for the fixture agent.
+func (m *ldFixture) asNeededEnv(t *testing.T, key, value, scope string) {
 	t.Helper()
-	agent := setupProvisionEnvTest(t, ctx, memStore, []store.EnvVar{
-		{Key: "GOOGLE_CLOUD_PROJECT", Value: "vertex-project-value"},
-		{Key: "GOOGLE_CLOUD_REGION", Value: "vertex-region-value"},
+	v := store.EnvVar{
+		ID: api.NewUUID(), Key: key, Value: value, Scope: scope, ScopeID: m.scopeID(scope),
+		InjectionMode: store.InjectionModeAsNeeded, CreatedBy: m.projectOwnerID,
+	}
+	require.NoError(t, m.store.CreateEnvVar(context.Background(), &v))
+}
+
+// asNeededSecret stores an as_needed environment secret for the fixture agent.
+func (m *ldFixture) asNeededSecret(t *testing.T, name, value, scope string) {
+	t.Helper()
+	_, _, err := m.backend.Set(context.Background(), &secret.SetSecretInput{
+		Name: name, Value: value, SecretType: store.SecretTypeEnvironment, Target: name,
+		Scope: scope, ScopeID: m.scopeID(scope), InjectionMode: store.InjectionModeAsNeeded,
+		CreatedBy: m.projectOwnerID,
 	})
-	agent.AppliedConfig.HarnessConfig = "claude"
-	return agent
+	require.NoError(t, err)
+}
+
+// switchStart runs a reprovision and its start the way the reincarnate
+// worker does, with a reprovisionGatheredEnv holder when homeReset is set.
+func switchStart(t *testing.T, m *ldFixture, homeReset bool) {
+	t.Helper()
+	m.agent.AppliedConfig.HarnessConfig = "claude"
+	m.client.createWithGatherFunc = vertexGatherFunc()
+	ctx := context.Background()
+	opts := ReprovisionOptions{}
+	if homeReset {
+		ctx = withReprovisionGatheredEnv(ctx)
+		opts = ReprovisionOptions{ResetHome: true, ResetID: "reset-1"}
+	}
+	require.NoError(t, m.d.DispatchAgentReprovision(ctx, m.agent, opts))
+	require.NoError(t, m.d.DispatchAgentStart(ctx, m.agent, "task", false))
+	require.True(t, m.client.startCalled)
 }
 
 // TestReincarnateHomeResetStartCarriesReprovisionGatheredEnv is the
@@ -68,71 +97,124 @@ func vertexAsNeededAgent(t *testing.T, ctx context.Context, memStore store.Store
 // reprovision gather resolved for the new harness. A start resolves no
 // as_needed env itself, and the broker's recorded secrets belong to the old
 // harness-config, so without this the new harness starts without its Vertex
-// AI project and region and its provisioner fails in the pre-start hook.
+// AI project and region and its provisioner fails in the pre-start hook. The
+// region is stored under GOOGLE_CLOUD_LOCATION, as on the hub where the
+// defect was found, and reaches the start under the canonical key the broker
+// asked for.
 func TestReincarnateHomeResetStartCarriesReprovisionGatheredEnv(t *testing.T) {
-	ctx := context.Background()
-	memStore := createTestStore(t)
-	agent := vertexAsNeededAgent(t, ctx, memStore)
-	mockClient := vertexGatherBroker()
-	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	m := newLDFixture(t, "switch-gathered", ldOptions{})
+	m.asNeededEnv(t, "GOOGLE_CLOUD_PROJECT", "vertex-project-value", store.ScopeProject)
+	m.asNeededEnv(t, "GOOGLE_CLOUD_LOCATION", "vertex-location-value", store.ScopeProject)
 
-	wctx := withReprovisionGatheredEnv(ctx)
-	require.NoError(t, dispatcher.DispatchAgentReprovision(wctx, agent, ReprovisionOptions{ResetHome: true, ResetID: "reset-1"}))
-	require.NoError(t, dispatcher.DispatchAgentStart(wctx, agent, "task", false))
+	switchStart(t, m, true)
 
-	require.True(t, mockClient.startCalled)
-	assert.Equal(t, "vertex-project-value", mockClient.lastResolvedEnv["GOOGLE_CLOUD_PROJECT"])
-	assert.Equal(t, "vertex-region-value", mockClient.lastResolvedEnv["GOOGLE_CLOUD_REGION"])
+	env := m.client.lastResolvedEnv
+	assert.Equal(t, "vertex-project-value", env["GOOGLE_CLOUD_PROJECT"])
+	assert.Equal(t, "vertex-location-value", env["GOOGLE_CLOUD_REGION"], "the alternative name fills the canonical key")
 	for _, k := range []string{"GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_REGION"} {
-		kind, ok := api.ClassifyEnvKey(mockClient.lastStartExtras.EnvClassifications, k)
+		kind, ok := api.ClassifyEnvKey(m.client.lastStartExtras.EnvClassifications, k)
 		require.True(t, ok, "%s must carry a classification", k)
 		assert.Equal(t, api.EnvKindSecretFetchable, kind, "%s is as_needed storage env", k)
 	}
 	// Nothing is persisted to the applied config.
-	assert.NotContains(t, agent.AppliedConfig.Env, "GOOGLE_CLOUD_PROJECT")
-	assert.NotContains(t, agent.AppliedConfig.Env, "GOOGLE_CLOUD_REGION")
+	assert.NotContains(t, m.agent.AppliedConfig.Env, "GOOGLE_CLOUD_PROJECT")
+	assert.NotContains(t, m.agent.AppliedConfig.Env, "GOOGLE_CLOUD_REGION")
 }
 
 // TestPlainReprovisionStartUnchanged pins that a reincarnation without a
 // home reset (no holder in ctx) starts exactly as before: the start carries
 // no as_needed env, whatever the reprovision gather resolved.
 func TestPlainReprovisionStartUnchanged(t *testing.T) {
-	ctx := context.Background()
-	memStore := createTestStore(t)
-	agent := vertexAsNeededAgent(t, ctx, memStore)
-	mockClient := vertexGatherBroker()
-	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	m := newLDFixture(t, "plain-gathered", ldOptions{})
+	m.asNeededEnv(t, "GOOGLE_CLOUD_PROJECT", "vertex-project-value", store.ScopeProject)
+	m.asNeededSecret(t, "GOOGLE_CLOUD_REGION", "vertex-region-value", store.ScopeProject)
 
-	require.NoError(t, dispatcher.DispatchAgentReprovision(ctx, agent, ReprovisionOptions{}))
-	require.NoError(t, dispatcher.DispatchAgentStart(ctx, agent, "task", false))
+	switchStart(t, m, false)
 
-	require.True(t, mockClient.startCalled)
-	assert.NotContains(t, mockClient.lastResolvedEnv, "GOOGLE_CLOUD_PROJECT")
-	assert.NotContains(t, mockClient.lastResolvedEnv, "GOOGLE_CLOUD_REGION")
+	assert.NotContains(t, m.client.lastResolvedEnv, "GOOGLE_CLOUD_PROJECT")
+	assert.NotContains(t, m.client.lastResolvedEnv, "GOOGLE_CLOUD_REGION")
 }
 
-// TestMergeReprovisionGatheredEnvFillOnly pins that the carried env never
-// replaces a value the start resolved itself, and fills an empty one.
-func TestMergeReprovisionGatheredEnvFillOnly(t *testing.T) {
+// ldHiddenKeyStore answers not-found for the record of one secret or env
+// var key, so the delivery association refuses that item only.
+type ldHiddenKeyStore struct {
+	store.Store
+	hidden string
+}
+
+func (s *ldHiddenKeyStore) GetSecret(ctx context.Context, key, scope, scopeID string) (*store.Secret, error) {
+	if key == s.hidden {
+		return nil, store.ErrNotFound
+	}
+	return s.Store.GetSecret(ctx, key, scope, scopeID)
+}
+
+func (s *ldHiddenKeyStore) GetEnvVar(ctx context.Context, key, scope, scopeID string) (*store.EnvVar, error) {
+	if key == s.hidden {
+		return nil, store.ErrNotFound
+	}
+	return s.Store.GetEnvVar(ctx, key, scope, scopeID)
+}
+
+// TestReincarnateHomeResetStartAuthorizesGatheredEnv pins that the carried
+// names are admitted only through the start's delivery authorization: an
+// as_needed project secret the delivery decision refuses is not delivered
+// to the switch's start, though the reprovision gather resolved it, while an
+// admitted one is. The same holds for an as_needed env var.
+func TestReincarnateHomeResetStartAuthorizesGatheredEnv(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		store func(m *ldFixture)
+	}{
+		{name: "secret", store: func(m *ldFixture) {
+			m.asNeededSecret(t, "GOOGLE_CLOUD_PROJECT", "vertex-project-value", store.ScopeProject)
+			m.asNeededSecret(t, "GOOGLE_CLOUD_REGION", "vertex-region-value", store.ScopeProject)
+		}},
+		{name: "env var", store: func(m *ldFixture) {
+			m.asNeededEnv(t, "GOOGLE_CLOUD_PROJECT", "vertex-project-value", store.ScopeProject)
+			m.asNeededEnv(t, "GOOGLE_CLOUD_REGION", "vertex-region-value", store.ScopeProject)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newLDFixture(t, "switch-denied-"+strings.ReplaceAll(tc.name, " ", "-"), ldOptions{})
+			tc.store(m)
+			// The delivery decision refuses the region item only.
+			hdWithStore(t, m.authz, &ldHiddenKeyStore{Store: m.store, hidden: "GOOGLE_CLOUD_REGION"})
+
+			switchStart(t, m, true)
+
+			assert.Equal(t, "vertex-project-value", m.client.lastResolvedEnv["GOOGLE_CLOUD_PROJECT"], "the admitted item is delivered")
+			assert.NotContains(t, m.client.lastResolvedEnv, "GOOGLE_CLOUD_REGION", "the refused item is not delivered")
+			for _, s := range m.client.lastStartResolvedSecrets {
+				assert.NotEqual(t, "GOOGLE_CLOUD_REGION", s.Target, "the refused item is not delivered as a secret either")
+			}
+		})
+	}
+}
+
+// TestReprovisionGatheredEnvNames pins the holder: it keeps names only,
+// maps alternatives to their canonical key, never lets an alternative
+// replace a canonical name, and a nil holder admits nothing.
+func TestReprovisionGatheredEnvNames(t *testing.T) {
 	ctx := withReprovisionGatheredEnv(context.Background())
-	recordReprovisionGatheredEnv(ctx, map[string]string{"KEPT": "gathered", "FILLED": "gathered", "NEW": "gathered", "BLANK": ""})
+	recordReprovisionGatheredEnv(ctx,
+		map[string]string{"GOOGLE_CLOUD_PROJECT": "v1", "GOOGLE_CLOUD_REGION": "v2"},
+		map[string][]string{
+			"GOOGLE_CLOUD_REGION":    {"GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_PROJECT"},
+			"NOT_RESOLVED_CANONICAL": {"SOME_ALT"},
+		})
+	h := reprovisionGatheredEnvFrom(ctx)
+	require.NotNil(t, h)
+	assert.Equal(t, map[string]string{
+		"GOOGLE_CLOUD_PROJECT":  "GOOGLE_CLOUD_PROJECT",
+		"GOOGLE_CLOUD_REGION":   "GOOGLE_CLOUD_REGION",
+		"GOOGLE_CLOUD_LOCATION": "GOOGLE_CLOUD_REGION",
+	}, h.keys)
 
-	env := map[string]string{"KEPT": "start", "FILLED": ""}
-	var cls map[string]api.EnvKind
-	classifyEnv(&cls, "KEPT", api.EnvKindPlain)
-	mergeReprovisionGatheredEnv(ctx, env, &cls)
-
-	assert.Equal(t, map[string]string{"KEPT": "start", "FILLED": "gathered", "NEW": "gathered"}, env)
-	assert.Equal(t, api.EnvKindPlain, cls["KEPT"])
-	assert.Equal(t, api.EnvKindSecretFetchable, cls["FILLED"])
-	assert.Equal(t, api.EnvKindSecretFetchable, cls["NEW"])
-
-	// Without a holder nothing is recorded or merged.
 	plain := context.Background()
-	recordReprovisionGatheredEnv(plain, map[string]string{"NEW": "gathered"})
-	env2 := map[string]string{}
-	mergeReprovisionGatheredEnv(plain, env2, &cls)
-	assert.Empty(t, env2)
+	recordReprovisionGatheredEnv(plain, map[string]string{"K": "v"}, nil)
+	_, ok := reprovisionGatheredEnvFrom(plain).canonicalKey("K")
+	assert.False(t, ok)
 }
 
 // TestReincarnateWorker_GatheredEnvHolderOnlyForHomeReset pins the worker
