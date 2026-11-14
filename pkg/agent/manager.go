@@ -1578,7 +1578,7 @@ func (m *AgentManager) deliverResolved(ctx context.Context, agent *api.AgentInfo
 			conduitReason = cerr
 			return false, nil
 		}
-		if len(d.parts) > 1 && !(d.hasAttachments && m.execAvailable()) && !m.fitsOneConduitDelivery(h, d, req) {
+		if len(d.parts) > 1 && (!d.hasAttachments || !m.execAvailable()) && !m.fitsOneConduitDelivery(h, d, req) {
 			// Too large for one conduit delivery: split along the
 			// messages into ordered sub-flushes (ptone Q3, amends §1.6).
 			return m.deliverSplit(ctx, agent, h, ds, d)
