@@ -17,10 +17,12 @@ package commands
 import (
 	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/liveness"
 )
 
 func TestLivenessAgentUID(t *testing.T) {
@@ -41,4 +43,20 @@ func TestLivenessHarnessRootDepth(t *testing.T) {
 	assert.Equal(t, 2, livenessHarnessRootDepth(env("2")))
 	assert.Equal(t, 2, livenessHarnessRootDepth(env(" 2 ")))
 	assert.Equal(t, 1, livenessHarnessRootDepth(env("two")), "unparsable")
+}
+
+// The live-work callback reads the activity and its time afresh on every
+// heartbeat, so the tool-call tier follows the agent's current tool call.
+func TestLivenessProvider_ReadsActivityEachHeartbeat(t *testing.T) {
+	calls := 0
+	activity := func() (state.Activity, time.Time) {
+		calls++
+		return state.ActivityExecuting, time.Now()
+	}
+	// No process on this host runs as this UID, so nothing is work.
+	s := liveness.NewSampler(liveness.Config{AgentUID: 1 << 30, IsManagedPID: func(int) bool { return false }})
+	provide := livenessProvider(s, activity)
+	assert.Nil(t, provide())
+	assert.Nil(t, provide())
+	assert.Equal(t, 2, calls)
 }

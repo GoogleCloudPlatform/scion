@@ -1438,12 +1438,12 @@ func RunInit(args []string, opts InitRunOptions) int {
 					log.Debug("Heartbeat sent successfully")
 				},
 				// Live work (ptone/scion#7855): the Hub keeps an agent
-				// whose container is doing CPU work from being marked
-				// stalled or auto-suspended.
-				LiveWork: liveness.NewSampler(liveness.Config{
+				// with a tool call in flight, or whose container is doing
+				// CPU work, from being marked stalled or auto-suspended.
+				LiveWork: livenessProvider(liveness.NewSampler(liveness.Config{
 					AgentUID:         livenessAgentUID(targetUID),
 					HarnessRootDepth: livenessHarnessRootDepth(os.Getenv),
-				}).Sample,
+				}), statusHandler.CurrentActivitySince),
 			})
 			log.Info("Started Hub heartbeat loop (interval: %s)", hub.DefaultHeartbeatInterval)
 
@@ -2025,6 +2025,16 @@ var (
 	runReportStoppingToHub = reportStoppingToHub
 	runServicesShutdown    = func(ctx context.Context, m *services.Manager) error { return m.Shutdown(ctx) }
 )
+
+// livenessProvider returns the heartbeat's live-work callback: it samples
+// with the activity agent-info.json records and when that activity began,
+// which the tool-call tier needs. The sampler only reads agent-info.json.
+func livenessProvider(s *liveness.Sampler, activity func() (state.Activity, time.Time)) func() *liveness.LiveWork {
+	return func() *liveness.LiveWork {
+		act, since := activity()
+		return s.Sample(time.Now(), act, since)
+	}
+}
 
 // livenessAgentUID is the UID the agent's processes run as, for the
 // liveness sampler: targetUID when init drops privileges to it, otherwise

@@ -16,8 +16,16 @@
 
 package liveness
 
-// Sample walks /proc once and returns the live work it shows since the
-// previous call, or nil. The first call only records the baseline.
-func (s *Sampler) Sample() *LiveWork {
-	return s.sample()
+import (
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+)
+
+// Sample walks /proc once and returns the live work it shows, or nil. act
+// and actSince are the agent's current activity and when it began, from
+// agent-info.json (actSince zero when unknown, which turns the tool-call
+// tier off). The first call reports no CPU work: it records the baseline.
+func (s *Sampler) Sample(now time.Time, act state.Activity, actSince time.Time) *LiveWork {
+	return s.sample(now, act, actSince)
 }

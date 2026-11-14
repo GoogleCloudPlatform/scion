@@ -13,8 +13,9 @@
 // limitations under the License.
 
 // Package liveness detects live work in an agent container
-// (ptone/scion#7855): a process doing CPU work that the agent is waiting on,
-// such as a build, a test run or a background job, which emits no activity
+// (ptone/scion#7855): a tool call whose process is still running (Tier 1),
+// or a process doing CPU work that the agent is waiting on, such as a
+// build, a test run or a background job (Tier 2). Neither emits activity
 // events. sciontool init samples it on every Hub heartbeat, and the Hub
 // keeps an agent with live work from being marked stalled or auto-suspended.
 //
@@ -23,11 +24,14 @@
 package liveness
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
@@ -36,9 +40,35 @@ import (
 // Kind says what kind of live work was seen.
 type Kind string
 
-// KindProcess is a process outside the baseline set whose CPU time advanced
-// by at least MinCPUTicks since the previous sample.
-const KindProcess Kind = "process"
+const (
+	// KindToolCall (Tier 1) is a tool call in flight: the activity is
+	// executing and a descendant of the harness started at or after the
+	// activity began. It needs no CPU.
+	KindToolCall Kind = "tool"
+	// KindProcess (Tier 2) is a process outside the baseline set whose CPU
+	// time advanced by at least MinCPUTicks since the previous sample.
+	KindProcess Kind = "process"
+)
+
+// ToolCallStallCap is how long after a tool call began its live process
+// keeps suppressing STALLED. Past it the sampler still reports the process,
+// with SuppressStall false: the agent can be marked stalled, so a
+// supervisor takes a look, but is still never auto-suspended.
+const ToolCallStallCap = 60 * time.Minute
+
+// ToolCallNoProgress is how long the tool call's process tree may go
+// without progress before it stops suppressing STALLED, ahead of
+// ToolCallStallCap. Progress is a change of its fingerprint: the set of
+// processes, their total CPU time, or their total I/O (rchar+wchar, which
+// counts every read and write syscall, sockets and pipes included). A tool
+// blocked on a prompt, a dead socket or a sleep makes none.
+const ToolCallNoProgress = 10 * time.Minute
+
+// toolStartSlack is how long before the activity's timestamp a process may
+// have started and still count as the tool call's: the hook that records
+// the activity runs as the harness spawns the tool, and /proc/stat's boot
+// time has one-second resolution.
+const toolStartSlack = 2 * time.Second
 
 // LiveWork is the live work one sample found. Its JSON shape is the
 // heartbeat's "liveWork" field (store.LiveWork on the Hub).
@@ -96,6 +126,24 @@ type Sampler struct {
 	// prev holds each process's CPU time at the previous sample; nil until
 	// the first sample, which only records the baseline.
 	prev map[int]procSample
+	// tool tracks the progress of the tool call Tier 1 last saw.
+	tool toolProgress
+}
+
+// toolProgress is the last fingerprint of a tool call's process tree and
+// when it last changed.
+type toolProgress struct {
+	since     time.Time // the activity timestamp that identifies the call
+	print     toolPrint
+	changedAt time.Time
+}
+
+// toolPrint is the progress fingerprint of a tool call's process tree.
+type toolPrint struct {
+	pids  string // sorted pid:starttime list
+	ticks uint64 // total utime+stime
+	io    uint64 // total rchar+wchar; 0 when ioOK is false
+	ioOK  bool   // every process's /proc/<pid>/io was readable
 }
 
 // procSample is what the next sample compares against. starttime tells a
@@ -127,14 +175,46 @@ func NewSampler(cfg Config) *Sampler {
 }
 
 // sample walks the /proc tree at s.procRoot once and returns the live work
-// it shows, or nil. Every call records the CPU times the next call compares
-// against; the first call only records them and returns nil, so CPU a
-// process used before sampling started (an MCP server's start-up, say) is
-// never counted.
-func (s *Sampler) sample() *LiveWork {
+// it shows, or nil. act and actSince are the agent's current activity and
+// when it began (zero when unknown, which turns Tier 1 off).
+//
+// Tier 1 suppressing STALLED wins. Otherwise CPU work (Tier 2, never
+// capped) does, so a CPU-busy build past the tool-call cap still keeps the
+// agent from stalling. Otherwise a capped or non-progressing tool call is
+// reported with SuppressStall false, which still guards auto-suspend.
+//
+// Every call records the CPU times the next call compares against; the
+// first call only records them and reports no Tier 2 work, so CPU a process
+// used before sampling started (an MCP server's start-up, say) is never
+// counted.
+func (s *Sampler) sample(now time.Time, act state.Activity, actSince time.Time) *LiveWork {
 	procs := readProcs(s.procRoot)
-	excluded := s.baseline(procs)
+	excluded, harness := s.baseline(procs)
+	tool := s.toolCall(procs, excluded, harness, now, act, actSince)
+	if tool != nil && tool.SuppressStall {
+		s.recordCPU(procs)
+		return tool
+	}
+	if work := s.cpuWork(procs, excluded); work != nil {
+		return work
+	}
+	return tool
+}
 
+// recordCPU records every process's CPU time for the next sample's Tier 2
+// comparison without evaluating it.
+func (s *Sampler) recordCPU(procs map[int]*proc) {
+	next := make(map[int]procSample, len(procs))
+	for pid, p := range procs {
+		next[pid] = procSample{start: p.start, ticks: p.ticks}
+	}
+	s.prev = next
+}
+
+// cpuWork is Tier 2: the busiest non-excluded process whose CPU time
+// advanced by at least MinCPUTicks since the previous sample, or nil. It
+// records the CPU times the next call compares against.
+func (s *Sampler) cpuWork(procs map[int]*proc, excluded map[int]bool) *LiveWork {
 	next := make(map[int]procSample, len(procs))
 	var best *proc
 	var bestDelta uint64
@@ -172,19 +252,130 @@ func (s *Sampler) sample() *LiveWork {
 	}
 }
 
+// toolCall is Tier 1: when act is executing, the processes descended from
+// the harness that started at or after actSince (less toolStartSlack) are
+// the tool call's. It reports them, and whether they still suppress STALLED
+// (ToolCallStallCap, ToolCallNoProgress), or returns nil when there are
+// none. It also tracks the tree's progress fingerprint across samples.
+func (s *Sampler) toolCall(procs map[int]*proc, excluded, harness map[int]bool, now time.Time, act state.Activity, actSince time.Time) *LiveWork {
+	if act != state.ActivityExecuting || actSince.IsZero() || len(harness) == 0 {
+		s.tool = toolProgress{}
+		return nil
+	}
+	boot := readBootTime(s.procRoot)
+	if boot.IsZero() {
+		s.tool = toolProgress{}
+		return nil
+	}
+	minStart := uint64(0)
+	if d := actSince.Add(-toolStartSlack).Sub(boot); d > 0 {
+		minStart = uint64(d / (time.Second / clockTicksPerSecond))
+	}
+
+	var tree []*proc
+	for pid, p := range procs {
+		if excluded[pid] || p.start < minStart || !descendsFrom(procs, pid, harness) {
+			continue
+		}
+		tree = append(tree, p)
+	}
+	if len(tree) == 0 {
+		s.tool = toolProgress{}
+		return nil
+	}
+	// The oldest process is the one the harness spawned for the call.
+	slices.SortFunc(tree, func(a, b *proc) int {
+		if a.start != b.start {
+			return compareUint(a.start, b.start)
+		}
+		return a.pid - b.pid
+	})
+
+	fp := s.toolPrint(tree)
+	if !s.tool.since.Equal(actSince) || s.tool.print != fp {
+		s.tool = toolProgress{since: actSince, print: fp, changedAt: now}
+	}
+	running := now.Sub(actSince)
+	stalled := now.Sub(s.tool.changedAt)
+	work := &LiveWork{Kind: KindToolCall, SuppressStall: true}
+	note := ""
+	switch {
+	case running >= ToolCallStallCap:
+		work.SuppressStall = false
+		note = ", past the cap"
+	case stalled >= ToolCallNoProgress:
+		work.SuppressStall = false
+		note = fmt.Sprintf(", no progress for %s", stalled.Truncate(time.Second))
+	}
+	work.Detail = fmt.Sprintf("%s (pid %d, tool call running %s%s)", tree[0].comm, tree[0].pid,
+		running.Truncate(time.Second), note)
+	return work
+}
+
+// toolPrint computes the progress fingerprint of a tool call's processes.
+// When any /proc/<pid>/io is unreadable (a hardened runtime, or a process
+// that just exited), I/O is left out and the PID set and CPU time remain.
+func (s *Sampler) toolPrint(tree []*proc) toolPrint {
+	var b strings.Builder
+	fp := toolPrint{ioOK: true}
+	for _, p := range tree {
+		fmt.Fprintf(&b, "%d:%d,", p.pid, p.start)
+		fp.ticks += p.ticks
+		if fp.ioOK {
+			n, ok := readIOChars(s.procRoot, p.pid)
+			fp.io += n
+			fp.ioOK = ok
+		}
+	}
+	fp.pids = b.String()
+	if !fp.ioOK {
+		fp.io = 0
+	}
+	return fp
+}
+
+// descendsFrom reports whether an ancestor of pid is in set.
+func descendsFrom(procs map[int]*proc, pid int, set map[int]bool) bool {
+	// The depth bound guards against a parent cycle in a torn read.
+	for depth := 0; depth < 64; depth++ {
+		p, ok := procs[pid]
+		if !ok || p.ppid <= 0 {
+			return false
+		}
+		if set[p.ppid] {
+			return true
+		}
+		pid = p.ppid
+	}
+	return false
+}
+
+func compareUint(a, b uint64) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	}
+	return 0
+}
+
 // baseline returns the PIDs that never count as work by themselves: PID 1,
 // sciontool-managed subtrees, processes of other UIDs, zombies, tmux, tmux
 // pane root processes, the harness wrapper and the harness root process,
 // and sciontool invocations. Descendants of these (other than managed
 // subtrees) are not excluded: a tool the harness runs counts, and so does a
-// command typed in the shell window or a job reparented to PID 1.
-func (s *Sampler) baseline(procs map[int]*proc) map[int]bool {
+// command typed in the shell window or a job reparented to PID 1. harness
+// holds the harness root and its launcher levels (Config.HarnessRootDepth),
+// whose descendants Tier 1 looks at.
+func (s *Sampler) baseline(procs map[int]*proc) (excluded, harness map[int]bool) {
 	children := make(map[int][]int, len(procs))
 	for pid, p := range procs {
 		children[p.ppid] = append(children[p.ppid], pid)
 	}
 
-	excluded := make(map[int]bool)
+	excluded = make(map[int]bool)
+	harness = make(map[int]bool)
 	for pid, p := range procs {
 		switch {
 		case pid == 1,
@@ -208,6 +399,7 @@ func (s *Sampler) baseline(procs map[int]*proc) map[int]bool {
 	var excludeHarness func(pid, depth int)
 	excludeHarness = func(pid, depth int) {
 		excluded[pid] = true
+		harness[pid] = true
 		if depth > 1 {
 			for _, c := range children[pid] {
 				excludeHarness(c, depth-1)
@@ -235,7 +427,7 @@ func (s *Sampler) baseline(procs map[int]*proc) map[int]bool {
 			excludeWrapper(pid)
 		}
 	}
-	return excluded
+	return excluded, harness
 }
 
 // inManagedSubtree reports whether pid or any of its ancestors below PID 1
@@ -266,6 +458,54 @@ func isTmux(comm string) bool {
 func hasHarnessMarker(procRoot string, pid int) bool {
 	b, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "cmdline"))
 	return err == nil && strings.Contains(string(b), state.HarnessExitCodeFile)
+}
+
+// readBootTime returns the boot time from root/stat's btime line, or zero.
+// /proc/<pid>/stat start times count clock ticks from it.
+func readBootTime(root string) time.Time {
+	f, err := os.Open(filepath.Join(root, "stat"))
+	if err != nil {
+		return time.Time{}
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		rest, ok := strings.CutPrefix(sc.Text(), "btime ")
+		if !ok {
+			continue
+		}
+		sec, err := strconv.ParseInt(strings.TrimSpace(rest), 10, 64)
+		if err != nil || sec <= 0 {
+			return time.Time{}
+		}
+		return time.Unix(sec, 0)
+	}
+	return time.Time{}
+}
+
+// readIOChars returns rchar+wchar from root/<pid>/io, and false when the
+// file is unreadable or has neither field. Reading another user's io file
+// needs ptrace access, which sciontool init (root) has.
+func readIOChars(root string, pid int) (uint64, bool) {
+	b, err := os.ReadFile(filepath.Join(root, strconv.Itoa(pid), "io"))
+	if err != nil {
+		return 0, false
+	}
+	var total uint64
+	found := false
+	for _, line := range strings.Split(string(b), "\n") {
+		key, val, ok := strings.Cut(line, ":")
+		if !ok || (key != "rchar" && key != "wchar") {
+			continue
+		}
+		n, err := strconv.ParseUint(strings.TrimSpace(val), 10, 64)
+		if err != nil {
+			return 0, false
+		}
+		total += n
+		found = true
+	}
+	return total, found
 }
 
 // readProcs reads every /proc/<pid> entry under root. A process that exits

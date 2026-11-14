@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -39,12 +40,21 @@ type fakeProc struct {
 	ticks     uint64
 	start     uint64
 	cmdline   string
+	// io is the /proc/<pid>/io content; "" writes no io file (unreadable).
+	io string
 }
 
 // fakeProcTree writes fixture /proc trees and samples them.
 type fakeProcTree struct {
 	t       *testing.T
 	sampler *Sampler
+	// The sample's clock and activity, and the fixture boot time
+	// (/proc/stat btime; zero writes no stat file). All zero by default,
+	// which leaves Tier 1 off.
+	now   time.Time
+	act   state.Activity
+	since time.Time
+	boot  time.Time
 }
 
 func newFakeProcTree(t *testing.T, managed ...int) *fakeProcTree {
@@ -80,9 +90,16 @@ func (f *fakeProcTree) sample(procs ...fakeProc) *LiveWork {
 			cmdline = p.comm
 		}
 		require.NoError(f.t, os.WriteFile(filepath.Join(dir, "cmdline"), []byte(cmdline+"\x00"), 0o644))
+		if p.io != "" {
+			require.NoError(f.t, os.WriteFile(filepath.Join(dir, "io"), []byte(p.io), 0o644))
+		}
+	}
+	if !f.boot.IsZero() {
+		stat := fmt.Sprintf("cpu  1 2 3 4\nbtime %d\nprocesses 99\n", f.boot.Unix())
+		require.NoError(f.t, os.WriteFile(filepath.Join(root, "stat"), []byte(stat), 0o644))
 	}
 	f.sampler.procRoot = root
-	return f.sampler.sample()
+	return f.sampler.sample(f.now, f.act, f.since)
 }
 
 // wrapperCmdline is the agent window's pane command as /proc shows it.
@@ -257,8 +274,8 @@ func TestSample_RootlessAgentUID0(t *testing.T) {
 func TestSample_MissingProcRoot(t *testing.T) {
 	s := NewSampler(Config{AgentUID: agentUID})
 	s.procRoot = filepath.Join(t.TempDir(), "missing")
-	assert.Nil(t, s.sample())
-	assert.Nil(t, s.sample())
+	assert.Nil(t, s.sample(time.Now(), "", time.Time{}))
+	assert.Nil(t, s.sample(time.Now(), "", time.Time{}))
 }
 
 func TestParseStat(t *testing.T) {

@@ -33,7 +33,7 @@ func TestSample_RealProcBusyChild(t *testing.T) {
 		t.Skip("sh not available")
 	}
 	s := NewSampler(Config{AgentUID: os.Getuid(), IsManagedPID: func(int) bool { return false }})
-	_ = s.Sample() // baseline
+	_ = s.Sample(time.Now(), "", time.Time{}) // baseline
 
 	// A fork-free shell busy loop (builtin arithmetic only), so the CPU is
 	// spent in the sampled process itself rather than in short-lived
@@ -58,8 +58,22 @@ func TestSample_RealProcBusyChild(t *testing.T) {
 		require.True(t, time.Now().Before(deadline), "the busy child got %d ticks in 2 minutes", p.ticks)
 		time.Sleep(200 * time.Millisecond)
 	}
-	lw := s.Sample()
+	lw := s.Sample(time.Now(), "", time.Time{})
 	require.NotNil(t, lw, "a CPU-busy child must be seen as live work")
 	assert.Equal(t, KindProcess, lw.Kind)
 	assert.True(t, lw.SuppressStall)
+}
+
+// The real /proc formats Tier 1 reads: the boot time and this process's
+// I/O counters.
+func TestRealProcBootTimeAndIO(t *testing.T) {
+	boot := readBootTime("/proc")
+	require.False(t, boot.IsZero(), "/proc/stat has no btime")
+	assert.True(t, boot.Before(time.Now()))
+
+	n, ok := readIOChars("/proc", os.Getpid())
+	if !ok {
+		t.Skip("/proc/self/io unreadable here (hardened runtime)")
+	}
+	assert.Positive(t, n, "a running test has read something")
 }

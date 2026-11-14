@@ -16,10 +16,16 @@
 
 package liveness
 
+import (
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+)
+
 // Sample always returns nil: there is no /proc to sample. sciontool init
 // runs only in Linux containers; this keeps the package building elsewhere.
 // No live work means the Hub's stall detection behaves as it did before
 // live-work detection existed.
-func (s *Sampler) Sample() *LiveWork {
+func (s *Sampler) Sample(now time.Time, act state.Activity, actSince time.Time) *LiveWork {
 	return nil
 }
