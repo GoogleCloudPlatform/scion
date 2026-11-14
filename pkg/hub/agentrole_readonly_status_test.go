@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -37,9 +38,14 @@ func doReadonlyAgentRequest(t *testing.T, srv *Server, agentID, projectID, metho
 	token, err := srv.GetAgentTokenService().GenerateAgentToken(agentID, projectID, ScopesForRole(AgentRoleReadOnly), nil)
 	require.NoError(t, err)
 
-	bodyBytes, err := json.Marshal(body)
-	require.NoError(t, err)
-	req := httptest.NewRequest(method, path, bytes.NewReader(bodyBytes))
+	// A nil body sends no body at all, not the JSON literal null.
+	var reqBody io.Reader
+	if body != nil {
+		bodyBytes, err := json.Marshal(body)
+		require.NoError(t, err)
+		reqBody = bytes.NewReader(bodyBytes)
+	}
+	req := httptest.NewRequest(method, path, reqBody)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Scion-Agent-Token", token)
 
