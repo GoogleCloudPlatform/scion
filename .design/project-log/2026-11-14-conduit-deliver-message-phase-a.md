@@ -96,3 +96,8 @@ ptone's decisions: Q1 = (a), fix as planned. Q2/G1 = (a), keep the bind from pen
 - golangci-lint `--new-from-rev=6f83e7b` on the touched packages (including `pkg/runtime`), plus `--tests=false ./pkg/hub`: 0 issues. The first run's QF1001 was fixed in 7677d39, and the pkg/agent delivery tests were rerun on the final tree.
 - Store bind tests with `-race`: passed.
 - Windows cross-build of `cmd/scion` and `hack/winsec-guard.sh`: passed.
+
+## Review round 4 (final; ptone Q4=(b): targeted fix check, no fifth blind review)
+
+- **P4-R1, a flush replay reported the first row's outcome for every row.** A row failed by a broker report while the owner finished the others as delivered could replay as delivered, depending on row order. `classifyBoundRows` now aggregates: it reports the common outcome only when every row stored the same one, and partial/unknown otherwise or when a row has no outcome. Sibling found while fixing it: a same-id call that sees some rows still delivering and another already failed under the same id was a conflict (`bound`). The broker reports `bound` as a failure, which would fail the owner's rows. It is now in flight. Test: `TestBindMessageDelivery_ReplayAggregatesRows` (both row orders, homogeneous controls, an `aggregateOutcome` table). It fails against the previous function via a Go overlay (Conflict instead of InFlight; delivered instead of partial/unknown).
+- Checks before the rebase: `pkg/store/entadapter` full suite, the hub delivery tests in shard 3, and scoped lint: passed. The full gates follow the rebase.
