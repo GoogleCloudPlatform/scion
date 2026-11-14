@@ -60,6 +60,51 @@ func TestAgentStatus_HeartbeatWithLiveWorkPublishesNothing(t *testing.T) {
 	assert.True(t, got.HasRecentLiveWork(time.Now()))
 }
 
+// A stalled agent whose container then reports stall-suppressing live work
+// returns to its previous activity with exactly one status event
+// (ptone/scion#7855, acceptance criteria 6 and 7). Non-suppressing live
+// work (a capped or stuck tool call) leaves it stalled and publishes
+// nothing, and later heartbeats publish nothing either.
+func TestAgentStatus_LiveWorkUnstallsWithOneEvent(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	project := &store.Project{ID: tid("project-unstall"), Name: "Unstall", Slug: "unstall"}
+	require.NoError(t, s.CreateProject(ctx, project))
+	agent := &store.Agent{
+		ID: tid("agent-unstall"), Slug: "agent-unstall", Name: "agent-unstall", ProjectID: project.ID,
+		Phase: string(state.PhaseRunning), Activity: string(state.ActivityStalled),
+		StalledFromActivity: string(state.ActivityExecuting),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+	probe := newStatusEventProbe(t, srv, agent.ID)
+
+	postAgentStatus(t, srv, agent.ID, store.AgentStatusUpdate{
+		Heartbeat: true,
+		LiveWork:  &store.LiveWork{Kind: "tool", Detail: "gh (pid 81, tool call running 1h0m30s, past the cap)"},
+	})
+	assert.Equal(t, 0, probe.drain(), "non-suppressing live work does not un-stall")
+	got, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.ActivityStalled), got.Activity)
+
+	postAgentStatus(t, srv, agent.ID, store.AgentStatusUpdate{
+		Heartbeat: true,
+		LiveWork:  &store.LiveWork{Kind: "tool", SuppressStall: true, Detail: "gh (pid 81, tool call running 30s)"},
+	})
+	assert.Equal(t, 1, probe.drain(), "the un-stall publishes one status event")
+	got, err = s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.ActivityExecuting), got.Activity)
+	assert.Empty(t, got.StalledFromActivity)
+
+	postAgentStatus(t, srv, agent.ID, store.AgentStatusUpdate{
+		Heartbeat: true,
+		LiveWork:  &store.LiveWork{Kind: "tool", SuppressStall: true},
+	})
+	postAgentStatus(t, srv, agent.ID, store.AgentStatusUpdate{Heartbeat: true})
+	assert.Equal(t, 0, probe.drain(), "later heartbeats publish nothing")
+}
+
 // Auto-suspend skips a stalled agent whose container reported live work
 // within store.LiveWorkFreshness, and still suspends one whose live work is
 // older than that (ptone/scion#7855, invariant 2).

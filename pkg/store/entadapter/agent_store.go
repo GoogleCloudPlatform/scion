@@ -1720,6 +1720,10 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 
 	now := time.Now()
 
+	// statusOwned is false once a guard below has taken the agent's status
+	// fields away from this report; live work then must not un-stall it.
+	statusOwned := true
+
 	// Guard 0c, enforced inside the transaction (design ptone/scion#2483
 	// §2.1 Guards): while a delete holds a live lease, or once the row is
 	// soft-deleted, a status report must not move phase, activity or the
@@ -1734,6 +1738,7 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		deleteHolds = store.DeletionHoldsRow(current.DeletionState, current.DeletionLeaseAt, now)
 	}
 	if current.DeletedAt != nil || deleteHolds {
+		statusOwned = false
 		su.Phase = ""
 		su.Activity = ""
 		su.ExitCode = nil
@@ -1750,6 +1755,7 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	// ExitReason/Message, so the report must not move them. The other
 	// fields (ContainerStatus, heartbeat, ...) still apply, as in the hub.
 	if su.GuardReincarnation && store.ReincarnationInFlight(current.ReincarnationState) {
+		statusOwned = false
 		su.Phase = ""
 		su.Activity = ""
 		su.ExitCode = nil
@@ -1788,6 +1794,7 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 			store.StartClaimKind(current.StartClaimKind), current.RunID, current.RunIDUpdatedAt, current.StartClaimAt)
 		if (preMint && store.RestartPreMintReport(su, current.RunID)) || store.RunlessAgentTokenReport(su, current.RunIDUpdatedAt) {
 			store.DropReportedStatus(&su)
+			statusOwned = false
 		}
 	}
 
@@ -1859,6 +1866,21 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 			upd.SetToolName("")
 		}
 	}
+	// Un-stall on live work (ptone/scion#7855): a stalled running agent
+	// whose container reports stall-suppressing live work is demonstrably
+	// active, so its activity before the stall comes back and the activity
+	// timestamp is refreshed. This only restores stalled_from_activity; it
+	// never writes any other activity (no idle or blocked; ptone/scion#7826).
+	unstalled := false
+	if su.LiveWork != nil && su.LiveWork.SuppressStall && statusOwned && !activityProvided && !halting &&
+		current.Activity == string(state.ActivityStalled) && current.Phase == string(state.PhaseRunning) &&
+		(su.Phase == "" || su.Phase == string(state.PhaseRunning)) {
+		upd.SetActivity(current.StalledFromActivity)
+		upd.SetStalledFromActivity("")
+		upd.SetLastActivityEvent(now)
+		unstalled = true
+	}
+
 	// A halt clears the activity outright, a terminal one included: the
 	// exit reason says how the run ended.
 	if halting {
@@ -1998,7 +2020,7 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		return err
 	}
 	if su.Result != nil {
-		*su.Result = store.AgentStatusResult{Halted: halting, HaltedFrom: haltedFrom}
+		*su.Result = store.AgentStatusResult{Halted: halting, HaltedFrom: haltedFrom, Unstalled: unstalled}
 	}
 	return nil
 }

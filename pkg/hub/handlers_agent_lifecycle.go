@@ -229,6 +229,8 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 	// A reincarnation that starts after the read above must still win: the
 	// store re-checks Guard 0b on the row it locks (ptone/scion#2887).
 	status.GuardReincarnation = true
+	var result store.AgentStatusResult
+	status.Result = &result
 	if err := s.store.UpdateAgentStatus(ctx, id, status); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -240,8 +242,10 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 	// A heartbeat-only report writes only last_seen, which no status event
 	// carries, so it publishes nothing and skips the re-read
 	// (ptone/scion#5233). Freshness reaches clients with the next real
-	// change, a resync, or the agent list's own refresh.
-	if statusUpdateIsHeartbeatOnly(status) {
+	// change, a resync, or the agent list's own refresh. A heartbeat whose
+	// live work un-stalled the agent changed its activity, so it publishes
+	// (ptone/scion#7855).
+	if statusUpdateIsHeartbeatOnly(status) && !result.Unstalled {
 		writeJSON(w, http.StatusOK, statusUpdateResult{Applied: true})
 		return
 	}
