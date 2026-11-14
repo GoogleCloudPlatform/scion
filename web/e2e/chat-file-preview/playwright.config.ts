@@ -14,6 +14,8 @@
 
 import { defineConfig } from '@playwright/test';
 
+import { chromiumLaunchOptions } from '../../playwright-chromium.js';
+
 const CI = !!process.env.CI;
 
 // Isolated fixture for the extracted <scion-chat-file-preview>.
@@ -51,12 +53,7 @@ export default defineConfig({
     // the grant pins it to granted so the result does not depend on the
     // environment.
     permissions: ['clipboard-read', 'clipboard-write'],
-    launchOptions: {
-      ...(process.env.CHROMIUM_EXECUTABLE
-        ? { executablePath: process.env.CHROMIUM_EXECUTABLE }
-        : {}),
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    },
+    launchOptions: chromiumLaunchOptions(),
   },
   webServer: {
     command: 'node e2e/chat-file-preview/serve.mjs',

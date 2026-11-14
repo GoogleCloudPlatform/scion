@@ -14,6 +14,8 @@
 
 import { defineConfig } from '@playwright/test';
 
+import { chromiumLaunchOptions } from '../../playwright-chromium.js';
+
 const CI = !!process.env.CI;
 
 // Real-hub E2E suite for interactive chat choices (ptone/scion#7776).
@@ -41,11 +43,6 @@ export default defineConfig({
   use: {
     trace: CI ? 'on-first-retry' : 'off',
     viewport: { width: 1280, height: 800 },
-    launchOptions: {
-      ...(process.env.CHROMIUM_EXECUTABLE
-        ? { executablePath: process.env.CHROMIUM_EXECUTABLE }
-        : {}),
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    },
+    launchOptions: chromiumLaunchOptions(),
   },
 });

@@ -17,6 +17,8 @@
 import { defineConfig, devices } from '@playwright/test';
 import type { Project } from '@playwright/test';
 
+import { chromiumLaunchOptions } from '../../playwright-chromium.js';
+
 const CI = !!process.env.CI;
 
 // No failure page snapshot (error-context.md) either: it records page
@@ -41,12 +43,7 @@ const ENGINES: Project[] = [
     name: 'chromium',
     use: {
       ...devices['Desktop Chrome'],
-      launchOptions: {
-        ...(process.env.CHROMIUM_EXECUTABLE
-          ? { executablePath: process.env.CHROMIUM_EXECUTABLE }
-          : {}),
-        args: ['--no-sandbox', '--disable-setuid-sandbox'],
-      },
+      launchOptions: chromiumLaunchOptions(),
     },
   },
   {

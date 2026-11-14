@@ -16,6 +16,8 @@
 
 import { defineConfig } from '@playwright/test';
 
+import { chromiumLaunchOptions } from '../../playwright-chromium.js';
+
 const CI = !!process.env.CI;
 
 // IAP browser journey (ptone/scion#4240, X5). Operator-run only against a
@@ -37,11 +39,6 @@ export default defineConfig({
     screenshot: 'off',
     video: 'off',
     viewport: { width: 1280, height: 800 },
-    launchOptions: {
-      ...(process.env.CHROMIUM_EXECUTABLE
-        ? { executablePath: process.env.CHROMIUM_EXECUTABLE }
-        : {}),
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    },
+    launchOptions: chromiumLaunchOptions(),
   },
 });

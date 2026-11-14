@@ -1,5 +1,7 @@
 import { defineConfig } from '@playwright/test';
 
+import { chromiumLaunchOptions } from '../../playwright-chromium.js';
+
 const CI = !!process.env.CI;
 const WEB_DIR = new URL('../../', import.meta.url).pathname;
 const BASE_PATH_PORT = 4533;
@@ -56,12 +58,7 @@ export default defineConfig({
     trace: CI ? 'on-first-retry' : 'off',
     baseURL: 'http://127.0.0.1:4532',
     viewport: { width: 1100, height: 700 },
-    launchOptions: {
-      ...(process.env.CHROMIUM_EXECUTABLE
-        ? { executablePath: process.env.CHROMIUM_EXECUTABLE }
-        : {}),
-      args: ['--no-sandbox'],
-    },
+    launchOptions: chromiumLaunchOptions(),
   },
   webServer: [
     {

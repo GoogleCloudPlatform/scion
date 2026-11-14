@@ -1,9 +1,9 @@
 {
   "extends": "../../tsconfig.json",
   "compilerOptions": {
-    "rootDir": "..",
+    "rootDir": "../..",
     "noEmit": true
   },
-  "include": ["./*.ts", "../harness/*.ts", "../../src/vite-env.d.ts"],
+  "include": ["./*.ts", "../harness/*.ts", "../../playwright-chromium.ts", "../../src/vite-env.d.ts"],
   "exclude": []
 }

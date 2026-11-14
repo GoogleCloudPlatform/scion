@@ -9,11 +9,14 @@ Production code is unchanged. See [design](../../../.design/hosted/terminal-work
 From `web/`, after `npm ci`:
 
 ```sh
-TERMINAL_OWNER_CHROMIUM=/usr/bin/chromium npm run test:e2e -- --config e2e/terminal-owner/playwright.config.ts
+npm run test:e2e -- --config e2e/terminal-owner/playwright.config.ts
 npm run typecheck -- --project e2e/terminal-owner/tsconfig.json
 ```
 
-Omit `TERMINAL_OWNER_CHROMIUM` to use Playwright's installed Chromium. The local
+Set `CHROMIUM_EXECUTABLE=/usr/bin/chromium` (or `TERMINAL_OWNER_CHROMIUM`, kept as an
+alias) to override the Chromium binary; agent containers set
+`PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium` automatically, and omitting all
+three uses Playwright's installed Chromium. The local
 config starts a loopback-only fixture server on port 4517. The fixture `*.pw.ts` files
 deliberately do not match the root `*.spec.ts` suite, which starts a real Hub. CI must invoke
 this config explicitly. No common harness changes or new packages are needed.

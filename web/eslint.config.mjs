@@ -137,8 +137,17 @@ export default defineConfig([
     rules: sharedRules,
   },
 
-  // Checks the Playwright configs, so it needs their TS project.
-  project(['src/utils/playwright-forbid-only.test.ts'], './tsconfig.e2e-configs.json'),
+  // Checks the Playwright configs and shared Chromium launch helper, so they
+  // need their TS project.
+  project(
+    [
+      'playwright-chromium.ts',
+      'playwright.config.ts',
+      'src/utils/playwright-chromium.test.ts',
+      'src/utils/playwright-forbid-only.test.ts',
+    ],
+    './tsconfig.e2e-configs.json'
+  ),
   // Playwright suites. The suites that load src share one lint-only TS
   // project (e2e/tsconfig.eslint.json) so ESLint builds one program for
   // them, not one per suite. Each suite's tsconfig.json still owns its
