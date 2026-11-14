@@ -123,9 +123,12 @@ server:
     #                                   # writable through the admin API). The hub_url that
     #                                   # broker plugins call the hub API on, e.g.
     #                                   # http://127.0.0.1:8080 when public_url is behind an
-    #                                   # auth proxy. Plugins still get public_url (as
-    #                                   # public_url) for user-facing links. When unset,
-    #                                   # hub_url is public_url. Same form as agent_endpoint.
+    #                                   # auth proxy. When unset, hub_url is public_url.
+    #                                   # Same form as agent_endpoint. WARNING: plugins also
+    #                                   # get public_url, but none reads it yet: Slack, Teams,
+    #                                   # Telegram and Discord build registration links from
+    #                                   # hub_url, so those links will use this address
+    #                                   # (Discord's register_url overrides it).
 
     # Layer 0 — CORS (restart required, middleware-init bound)
     # cors:
