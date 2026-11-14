@@ -674,6 +674,11 @@ func (s *runtimeBrokerService) ReportMessageFailures(ctx context.Context, broker
 // RuntimeBrokerService doc comment.
 func (s *runtimeBrokerService) DeliverMessage(ctx context.Context, brokerID, agentID string, req *agentcontrol.DeliverRequest) (int, agentcontrol.DeliverResponse, error) {
 	path := "/api/v1/runtime-brokers/" + url.PathEscape(brokerID) + "/agents/" + url.PathEscape(agentID) + "/deliver"
+	// The hub may hold the call for its whole 110 s budget (a readiness
+	// wait of up to 90 s, then the paste), longer than the client's
+	// default timeout: this request gets the broker's 115 s instead. The
+	// caller's ctx still applies when it is shorter (review R2).
+	ctx = apiclient.WithRequestTimeout(ctx, agentcontrol.BrokerDeliverTimeout)
 	resp, err := s.c.postNoRetry(ctx, path, req, nil)
 	if err != nil {
 		return 0, agentcontrol.DeliverResponse{}, err
