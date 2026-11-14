@@ -734,7 +734,7 @@ func (s *Server) stopHeldAgent(ctx context.Context, agentID string, attempt int)
 	}
 
 	newPhase := string(state.PhaseSuspended)
-	if ok, _ := s.harnessSupportsResume(agent); !ok {
+	if ok, _, _ := s.harnessSupportsResume(ctx, agent); !ok {
 		newPhase = string(state.PhaseStopped)
 	}
 	recorded, err := s.recordStopStatus(ctx, agent.ID, stopRunID, "hold", store.AgentStatusUpdate{
