@@ -153,12 +153,16 @@ func allBindable(rows []*ent.Message) bool {
 }
 
 // classifyBoundRows decides, from the rows' current state, a bind that
-// cannot move every row: all rows
-// delivering under the same id is in flight (owned by another call), all final under the same id a
-// replay, anything else a conflict.
+// cannot move every row. All rows must carry this delivery id; otherwise it
+// is a conflict. Then:
+//   - any row still delivering: the owner is still running (in flight),
+//     even if another row was already failed under it;
+//   - every row final: a replay of the aggregated outcome
+//     (aggregateOutcome);
+//   - anything else: a conflict.
 func classifyBoundRows(rows []*ent.Message, deliveryID string) store.DeliveryBind {
-	delivering, final := 0, 0
-	outcome := ""
+	delivering := 0
+	outcomes := make([]*string, 0, len(rows))
 	for _, r := range rows {
 		if r.DeliveryID == nil || *r.DeliveryID != deliveryID {
 			return store.DeliveryBind{Result: store.DeliveryConflict}
@@ -167,19 +171,34 @@ func classifyBoundRows(rows []*ent.Message, deliveryID string) store.DeliveryBin
 		case r.DispatchState == store.MessageDispatchDelivering:
 			delivering++
 		case finalDeliveryStates[r.DispatchState]:
-			final++
-			if r.DeliveryOutcome != nil && outcome == "" {
-				outcome = *r.DeliveryOutcome
-			}
+			outcomes = append(outcomes, r.DeliveryOutcome)
+		default:
+			return store.DeliveryBind{Result: store.DeliveryConflict}
 		}
 	}
-	switch {
-	case delivering == len(rows):
+	if delivering > 0 {
 		return store.DeliveryBind{Result: store.DeliveryInFlight}
-	case final == len(rows) && outcome != "":
-		return store.DeliveryBind{Result: store.DeliveryReplay, Outcome: outcome}
 	}
-	return store.DeliveryBind{Result: store.DeliveryConflict}
+	return store.DeliveryBind{Result: store.DeliveryReplay, Outcome: aggregateOutcome(outcomes)}
+}
+
+// aggregateOutcome is the outcome a replay of a whole flush reports from
+// its rows' stored outcomes, conservatively (review P4-R1): one row's
+// outcome is never reported for the others. When every row stored the same
+// outcome, that is it (all delivered is delivered; a homogeneous partial
+// keeps its stage). If any row has none, or the rows differ (for example
+// one row failed while the rest were delivered), it is partial/unknown.
+func aggregateOutcome(outcomes []*string) string {
+	if len(outcomes) == 0 || outcomes[0] == nil {
+		return store.DeliveryOutcomeUnknownPartial
+	}
+	first := *outcomes[0]
+	for _, o := range outcomes[1:] {
+		if o == nil || *o != first {
+			return store.DeliveryOutcomeUnknownPartial
+		}
+	}
+	return first
 }
 
 // UnbindMessageDelivery implements store.BrokerDispatchStore.

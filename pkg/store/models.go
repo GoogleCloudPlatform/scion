@@ -2564,7 +2564,8 @@ type DeliveryBindResult int
 const (
 	// DeliveryBound: every row moved to delivering under the id.
 	DeliveryBound DeliveryBindResult = iota
-	// DeliveryInFlight: every row is already delivering under the same id:
+	// DeliveryInFlight: every row carries the same id and at least one is
+	// still delivering (another may already have failed under it):
 	// another call owns the delivery. The caller must not call the agent,
 	// unbind or finish the rows.
 	DeliveryInFlight
@@ -2580,7 +2581,9 @@ const (
 // DeliveryBind is BindMessageDelivery's result.
 type DeliveryBind struct {
 	Result DeliveryBindResult
-	// Outcome is the stored delivery_outcome JSON, for DeliveryReplay.
+	// Outcome is the replayed outcome JSON, for DeliveryReplay: the rows'
+	// common stored delivery_outcome, or partial/unknown when they differ
+	// or one has none (never one row's outcome for the others).
 	Outcome string
 }
 

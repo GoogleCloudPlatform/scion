@@ -18,6 +18,7 @@ package entadapter
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -359,4 +360,78 @@ func TestBindMessageDelivery_TwoReadersBarrier(t *testing.T) {
 	n, err := f.ds.FinishMessageDelivery(ctx, "d1", []string{id}, store.MessageDispatchDelivered, `{"outcome":"delivered"}`)
 	require.NoError(t, err)
 	assert.Equal(t, 1, n)
+}
+
+// TestBindMessageDelivery_ReplayAggregatesRows (review P4-R1): a same-id
+// replay of a whole flush reports the rows' outcome conservatively, never
+// one row's outcome for the others. A per-row failure that races the
+// owner's batch finish (in either row order) replays partial/unknown;
+// homogeneous delivered and homogeneous partial replay as stored; and while
+// any row is still delivering, the call is in flight, not a conflict.
+func TestBindMessageDelivery_ReplayAggregatesRows(t *testing.T) {
+	ctx := context.Background()
+	bindBoth := func(t *testing.T, f *deliveryFixture) (string, string) {
+		a, b := f.msg(t, store.MessageDispatchDispatched), f.msg(t, store.MessageDispatchDispatched)
+		res, err := f.ds.BindMessageDelivery(ctx, f.agent, "d1", []string{a, b}, time.Now())
+		require.NoError(t, err)
+		require.Equal(t, store.DeliveryBound, res.Result)
+		return a, b
+	}
+	replay := func(t *testing.T, f *deliveryFixture, ids ...string) store.DeliveryBind {
+		res, err := f.ds.BindMessageDelivery(ctx, f.agent, "d1", ids, time.Now())
+		require.NoError(t, err)
+		return res
+	}
+	for _, failFirst := range []bool{true, false} {
+		t.Run(fmt.Sprintf("per-row failure, fail first row=%t", failFirst), func(t *testing.T) {
+			f := newDeliveryFixture(t)
+			a, b := bindBoth(t, f)
+			failed := b
+			if failFirst {
+				failed = a
+			}
+			won, err := f.ds.FailUndeliveredMessage(ctx, failed, "broker report")
+			require.NoError(t, err)
+			require.True(t, won)
+
+			// While the owner still runs, a same-id call is in flight.
+			res := replay(t, f, a, b)
+			assert.Equal(t, store.DeliveryInFlight, res.Result, "owner still delivering the other row")
+
+			n, err := f.ds.FinishMessageDelivery(ctx, "d1", []string{a, b}, store.MessageDispatchDelivered, `{"outcome":"delivered"}`)
+			require.NoError(t, err)
+			require.Equal(t, 1, n)
+			for _, order := range [][]string{{a, b}, {b, a}} {
+				res = replay(t, f, order...)
+				assert.Equal(t, store.DeliveryReplay, res.Result)
+				assert.JSONEq(t, store.DeliveryOutcomeUnknownPartial, res.Outcome, "a failed row must not replay as delivered")
+			}
+		})
+	}
+	t.Run("homogeneous delivered", func(t *testing.T) {
+		f := newDeliveryFixture(t)
+		a, b := bindBoth(t, f)
+		_, err := f.ds.FinishMessageDelivery(ctx, "d1", []string{a, b}, store.MessageDispatchDelivered, `{"outcome":"delivered"}`)
+		require.NoError(t, err)
+		res := replay(t, f, b, a)
+		assert.Equal(t, store.DeliveryReplay, res.Result)
+		assert.JSONEq(t, `{"outcome":"delivered"}`, res.Outcome)
+	})
+	t.Run("homogeneous partial keeps its stage", func(t *testing.T) {
+		f := newDeliveryFixture(t)
+		a, b := bindBoth(t, f)
+		_, err := f.ds.FinishMessageDelivery(ctx, "d1", []string{a, b}, store.MessageDispatchPartial, `{"outcome":"partial","stage":"submit"}`)
+		require.NoError(t, err)
+		res := replay(t, f, a, b)
+		assert.Equal(t, store.DeliveryReplay, res.Result)
+		assert.JSONEq(t, `{"outcome":"partial","stage":"submit"}`, res.Outcome)
+	})
+	t.Run("aggregateOutcome", func(t *testing.T) {
+		d, p := `{"outcome":"delivered"}`, `{"outcome":"partial","stage":"paste"}`
+		assert.Equal(t, d, aggregateOutcome([]*string{&d, &d}))
+		assert.Equal(t, store.DeliveryOutcomeUnknownPartial, aggregateOutcome([]*string{&d, &p}))
+		assert.Equal(t, store.DeliveryOutcomeUnknownPartial, aggregateOutcome([]*string{&d, nil}))
+		assert.Equal(t, store.DeliveryOutcomeUnknownPartial, aggregateOutcome([]*string{nil, &d}))
+		assert.Equal(t, store.DeliveryOutcomeUnknownPartial, aggregateOutcome(nil))
+	})
 }
