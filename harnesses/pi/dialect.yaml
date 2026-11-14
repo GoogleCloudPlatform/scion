@@ -30,8 +30,9 @@
 #
 # task_completed is not a dialect event: the bridge runs
 # `sciontool status task_completed` when pi reports agent_settled for a run
-# that neither aborted nor ended in a provider error. ask_user and blocked
-# are signalled by the agent through `sciontool status` per its instructions.
+# that neither aborted nor ended in a provider error. ask_user, blocked and
+# idle are signalled by the agent through `sciontool status` per its
+# instructions.
 dialect: pi
 
 event_name_field: hook_event_name

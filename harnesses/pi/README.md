@@ -108,12 +108,13 @@ What the policy does and does not cover (pi v1.3.0,
 | `input` (human/RPC) | `prompt-submit` |
 | `tool_execution_start` / `_end` | `tool-start` / `tool-end` |
 | `agent_end` | `agent-end` (carries a provider error) |
-| `agent_settled`, not aborted, no error, and the agent has not run `sciontool status` `ask_user`/`blocked`/`limits_exceeded`/`task_completed` itself since the last human/RPC input | `sciontool status task_completed -- <summary>` |
+| `agent_settled`, not aborted, no error, and the agent has not run `sciontool status` `ask_user`/`blocked`/`idle`/`limits_exceeded`/`task_completed` itself since the last human/RPC input | `sciontool status task_completed -- <summary>` |
 
-`ask_user` and `blocked` are not pi events. Instruct the agent to run
-`sciontool status ask_user "<question>"` or `sciontool status blocked "<reason>"`
-through its bash tool; the bridge sees that command on `tool_execution_start`
-and skips the automatic `task_completed` until the next human/RPC input.
+`ask_user`, `blocked` and `idle` are not pi events. Instruct the agent to run
+`sciontool status ask_user "<question>"`, `sciontool status blocked "<reason>"`
+or `sciontool status idle "<reason>"` through its bash tool; the bridge sees
+that command on `tool_execution_start` and skips the automatic
+`task_completed` until the next human/RPC input.
 The same applies when the agent runs `sciontool status task_completed "<summary>"`
 itself: the bridge skips its own call, so the agent's summary is kept.
 The call must be in command position: at the start of the command or of a
@@ -190,7 +191,7 @@ SCIONTOOL_BIN=/path/to/sciontool node --test scion-bridge.test.mjs
   current status (it releases only a notification-set wait). `new`,
   `resume` and `fork` are new sessions: no readiness effect under
   `ready: delay`, but a completed or waiting status (including an agent-set
-  `ask_user`/`blocked`) is replaced by working until the next run settles.
+  `ask_user`/`blocked`/`idle`) is replaced by working until the next run settles.
 - **Synchronous bridge calls:** the bridge runs `sciontool` with
   `execFileSync`, so pi's event loop (and its TUI) waits for each call: up to
   5 s per hook event (session start, human/RPC input, each tool start and
