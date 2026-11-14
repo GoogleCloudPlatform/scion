@@ -1785,6 +1785,11 @@ type V1ServerHubConfig struct {
 	// config.ValidateAgentEndpoint for the exact rules and the normalized
 	// form this field should hold.
 	AgentEndpoint string `json:"agent_endpoint,omitempty" yaml:"agent_endpoint,omitempty" koanf:"agent_endpoint"`
+	// InternalURL optionally sets the Hub URL hub-managed broker plugins
+	// call the Hub API on (their hub_url); see HubServerConfig.InternalURL.
+	// public_url stays the public URL of record. File/env only: the
+	// server-config API refuses it in every mode (HubInternalURLKey).
+	InternalURL string `json:"internal_url,omitempty" yaml:"internal_url,omitempty" koanf:"internal_url"`
 	// MonitoringDashboardURL is an optional absolute http(s) URL of an
 	// external monitoring dashboard; the Health page links to it when set.
 	// See ValidateMonitoringDashboardURL.
@@ -4491,6 +4496,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.AgentEndpoint != "" {
 			gc.Hub.AgentEndpoint = v1.Hub.AgentEndpoint
 		}
+		if v1.Hub.InternalURL != "" {
+			gc.Hub.InternalURL = v1.Hub.InternalURL
+		}
 		if v1.Hub.MonitoringDashboardURL != "" {
 			gc.Hub.MonitoringDashboardURL = v1.Hub.MonitoringDashboardURL
 		}
@@ -4992,6 +5000,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		PublicURL:              gc.Hub.Endpoint,
 		ContentURL:             gc.Hub.ContentURL,
 		AgentEndpoint:          gc.Hub.AgentEndpoint,
+		InternalURL:            gc.Hub.InternalURL,
 		MonitoringDashboardURL: gc.Hub.MonitoringDashboardURL,
 		HubClass:               gc.Hub.HubClass,
 		GCPProjectID:           gc.Hub.GCPProjectID,

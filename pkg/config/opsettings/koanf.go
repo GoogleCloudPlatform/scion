@@ -68,6 +68,9 @@ var layer0Prefixes = []string{
 	"server.env",
 	"server.hub.hub_id",
 	"server.hub.gcp_project_id",
+	// Plugin hub_url (ptone/scion#555): read once at startup and handed to
+	// broker plugins; the server-config API refuses it in every mode.
+	"server.hub.internal_url",
 	// Hub class (test admin tier gate input). Layer-0 so no DB section can
 	// hold it; the server-config API additionally refuses it in every mode,
 	// including workstation hubs where other Layer-0 keys are writable.

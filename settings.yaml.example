@@ -119,6 +119,13 @@ server:
     #                                   # networks. Security: an http:// value sends agent
     #                                   # bearer tokens and fetched secrets unencrypted; use
     #                                   # https:// unless the network is trusted and isolated.
+    # internal_url: ""                 # Layer 0 (file/env only, restart required; never
+    #                                   # writable through the admin API). The hub_url that
+    #                                   # broker plugins call the hub API on, e.g.
+    #                                   # http://127.0.0.1:8080 when public_url is behind an
+    #                                   # auth proxy. Plugins still get public_url (as
+    #                                   # public_url) for user-facing links. When unset,
+    #                                   # hub_url is public_url. Same form as agent_endpoint.
 
     # Layer 0 — CORS (restart required, middleware-init bound)
     # cors:

@@ -162,6 +162,7 @@
     "server.env",
     "server.hub.hub_id",
     "server.hub.gcp_project_id",
+    "server.hub.internal_url",
     "server.hub.class",
     "server.hub.test_identities",
     "server.log_level",

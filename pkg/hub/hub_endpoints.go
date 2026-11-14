@@ -52,8 +52,9 @@ const (
 	// HubEndpointForChatBridge is the hub URL written into chat-bridge
 	// configuration.
 	HubEndpointForChatBridge HubEndpointUse = "chat_bridge"
-	// HubEndpointForPluginBrokers is the hub URL handed to in-process
-	// broker plugins together with their credentials.
+	// HubEndpointForPluginBrokers is the public hub URL handed to broker
+	// plugins together with their credentials: their public_url, and their
+	// hub_url unless server.hub.internal_url is set (Server.PluginHubURLs).
 	HubEndpointForPluginBrokers HubEndpointUse = "plugin_brokers"
 	// HubEndpointForProjectSettings is the hub.endpoint written into the
 	// settings of hub-managed project workspaces.
@@ -220,6 +221,21 @@ func (s *Server) HubEndpoints() HubEndpoints {
 // hubEndpointUses).
 func (s *Server) HubEndpointFor(use HubEndpointUse) string {
 	return s.HubEndpoints().For(use)
+}
+
+// PluginHubURLs returns the two hub URLs handed to broker plugins
+// (ptone/scion#555): hubURL, the plugin's hub_url for Hub API calls, and
+// publicURL, its public_url for user-facing links (registration links,
+// settings panels, OAuth callbacks). publicURL is always the public
+// endpoint (HubEndpointForPluginBrokers, from server.hub.public_url).
+// hubURL is server.hub.internal_url when set, else that same public
+// endpoint.
+func (s *Server) PluginHubURLs() (hubURL, publicURL string) {
+	publicURL = s.HubEndpointFor(HubEndpointForPluginBrokers)
+	if s.config.InternalURL != "" {
+		return s.config.InternalURL, publicURL
+	}
+	return publicURL, publicURL
 }
 
 // StoredPublicURL returns the server.hub.public_url saved in the settings

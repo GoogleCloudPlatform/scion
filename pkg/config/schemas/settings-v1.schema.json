@@ -1436,6 +1436,12 @@
           "x-env-var": "SCION_SERVER_HUB_AGENTENDPOINT",
           "x-since": "1"
         },
+        "internal_url": {
+          "type": "string",
+          "format": "uri",
+          "description": "Optional Hub URL that hub-managed broker plugins call the Hub API on (the hub_url they receive), for deployments where public_url goes through an auth proxy or reverse proxy the plugins cannot pass (for example http://127.0.0.1:8080). It is not a public endpoint: plugins build user-facing links from public_url, which they receive as public_url, and no other use reads this key. When unset, plugins receive public_url as hub_url too. Must be scheme://host[:port] only, by the rules of agent_endpoint; the Hub fails to start otherwise. Read once at startup. Settable only in the settings file or environment: the server-config API refuses this key in every mode. Security: with an http:// value off loopback, plugin API traffic travels unencrypted.",
+          "x-env-var": "SCION_SERVER_HUB_INTERNALURL"
+        },
         "class": {
           "type": "string",
           "description": "Deploy-time class of this hub. The only recognised value is \"test\"; unset means the hub is not a test hub. Read once at startup by the --test-mode gate: every level other than off requires \"test\". Settable only in the settings file or environment: the server-config API refuses this key in every mode.",
