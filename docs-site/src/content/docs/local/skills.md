@@ -130,6 +130,7 @@ Most segments are optional. Common forms:
 | `skill://scion/project/<projectId>/deploy-checklist` | Project-scoped skill (scope + scope ID). |
 | `skill://scion/user/<userId>/scratch@1.4.0` | User-scoped skill, exact version. |
 | `skill://project/deploy-checklist` | Scope-alias form (registry defaults to `scion`). |
+| `skill://global/deploy-checklist` | Scope-alias form for a global skill; the same as `skill://scion/global/deploy-checklist`. Prefer the full form. |
 | `skill://registry.example.com/global/tool@^2.0` | External registry (federation). |
 | `gh://<owner>/<repo>/<path>[@<ref>][?token=<SECRET>]` | Skill sourced from a GitHub repository. Supports private repos and per-URI credentials. |
 | `gcp-skill://<alias>/<skillId>@<version>` | Skill sourced from GCP Vertex AI. |
@@ -173,6 +174,10 @@ To make adding skills as seamless as possible, Scion automatically validates and
 
 :::note
 The old `scion://` scheme is no longer supported and is rejected during validation with a clear error pointing to `skill://`.
+:::
+
+:::note[The `core` scope is retired]
+Skills used to have a fourth scope, `core`. It is retired: a reference with a `core` scope segment, such as `skill://core/<name>`, `skill://scion/core/<name>` or `skill://<registry>/core/<name>`, is rejected with an error that names the `global` replacement (for example `skill://scion/global/<name>`). The `skill://global/` and `skill://core/` prefixes always mean the local Hub's scope, even if a federated registry named `global` or `core` is configured. Existing `core` skills became `global` skills when the Hub was upgraded; see the [release notes](/scion/release-notes/#global-catalog-writes-need-the-global-permissions-and-the-core-skill-scope-is-retired).
 :::
 
 ### Scopes and resolution order
@@ -239,11 +244,11 @@ scion skills publish ./deploy-checklist --version 1.1.0 --skill-id <skill-id>
 | Flag | Default | Description |
 | :--- | :--- | :--- |
 | `--version` | *(required)* | SemVer version to publish (e.g. `1.0.0`). |
-| `--scope` | `global` | Scope for a **newly created** skill: `global`, `project`, or `user`. With `project`, the skill is attached to the current Hub-linked project. The command fails if no project can be determined (run `scion hub link` first). |
-| `--skill-id` | *(auto)* | Publish a new version for an existing skill ID. If omitted, Scion matches by directory name and creates the skill when no match exists. |
+| `--scope` | `global` | Scope of the skill: `global`, `project`, or `user`. When `--skill-id` is not given, Scion looks for an existing skill of that name **in this scope only** and creates one there if there is none, so a same-named skill in another scope is never published to. With `project`, the skill is attached to the current Hub-linked project. The command fails if no project can be determined (run `scion hub link` first). |
+| `--skill-id` | *(auto)* | Publish a new version for an existing skill ID. If omitted, Scion matches by directory name within `--scope` and creates the skill when no match exists. |
 
 :::note[Global scope permissions]
-Publishing a skill to the `global` scope requires either the `hub-admin` role or the `global-catalog-author` role. The `global-catalog-author` role grants only the `skill.create_global` permission, allowing non-admin users to author global catalog skills without full Hub administrator authority. See [Permissions & Policy](/scion/hosted/ha/permissions/#roles) for role details.
+Creating a skill in the `global` scope needs the `skill.create_global` permission; publishing a new version of a global skill, changing it or deprecating a version needs `skill.update_global`, and deleting it needs `skill.delete_global`. The `global-catalog-author` role grants all three (and the matching template permissions) without Hub administrator authority, and `hub-admin` holds them as well. Owning a global skill grants nothing: the user who created it needs the role to keep changing it. For a CI token that publishes global skills, see [Hub-boundary tokens for global catalog authoring](/scion/hosted/user/personal-access-tokens/#hub-boundary-tokens-for-global-catalog-authoring); for the role and permission details, see [Global catalog authoring](/scion/hosted/ha/permissions/#global-catalog-authoring).
 :::
 
 **Per-version limits:** at most **50 files**, **10 MB** per file, and **50 MB** total. `.git/`, `.DS_Store`, `__pycache__`, and files matching `.gitignore` patterns are excluded automatically.
@@ -332,6 +337,10 @@ Hub (System + User-Defined) → User → Project → Template
 ```
 
 1. **Hub Scope** (broadest): Configured by the Hub administrator for the entire platform. This includes pre-seeded **System** (built-in) skills under the `scion-platform://` URI scheme (such as status signaling and messaging operations) as well as admin-defined global skills.
+
+   :::caution
+   A **global** skill on the Hub's injected list reaches every agent, and every holder of `skill.update_global` (every `global-catalog-author` and hub admin) can change its content, for example by publishing a new version. Add a global skill here only if you trust every holder of that permission with that reach, or pin it to an exact version or content hash. See [Global catalog authoring](/scion/hosted/ha/permissions/#global-catalog-authoring).
+   :::
 2. **User Scope**: Configured by you. These skills are automatically injected into every agent you provision, regardless of the project.
 3. **Project Scope**: Configured for a specific project. These skills are automatically injected into all agents running within that project.
 4. **Template Scope** (highest): Defined directly inside the agent's template. A template-level skill reference always overrides any injected skill of the same name.

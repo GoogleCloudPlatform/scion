@@ -149,9 +149,10 @@ those routes answer `403 credential_not_admitted`.
   its ID, because a slug in the path answers `403 credential_not_admitted`. The agent's own access
   adds nothing.
 - **Project items only on the skill and template lists:** only project-scoped skills and templates
-  are listed. Hub catalog (global and core) and user-scoped skills and templates are never listed
-  to a delegated credential. `scope=global`, `scope=core` and `scope=user` list nothing, and so
-  does a `projectId` or `scopeId` outside the scope.
+  are listed. Global (hub catalog) and user-scoped skills and templates are never listed
+  to a delegated credential. `scope=global` and `scope=user` list nothing, and so
+  does a `projectId` or `scopeId` outside the scope. The retired `scope=core` answers `400` on the
+  skill list, for a delegated credential as for every other caller.
 - **A refused list is empty, not an error:** when the list itself is refused (the grant lacks the
   list permission, the issuer has no list access, any revocation-chain check fails, or the Hub
   hits an error deciding the scope), the answer is `200` with an empty list and `totalCount: 0`.

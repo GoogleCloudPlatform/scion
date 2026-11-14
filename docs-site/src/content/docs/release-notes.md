@@ -10,6 +10,29 @@ Scion release notes are published for each preview and stable release. Earlier n
 - [v0.3.0-preview.7](/scion/release-notes/v0-3-0-preview-7/)
 - [v0.3.0-preview.6](/scion/release-notes/v0-3-0-preview-6/)
 
+## Global catalog writes need the global permissions and the `core` skill scope is retired
+
+Writes on global (hub catalog) skills and templates are now decided only by new global permissions: `skill.create_global` (existing), `skill.update_global` and `skill.delete_global` for skills, and `template.create_global`, `template.update_global` and `template.delete_global` for templates, with token scopes of the same names (`skill:update_global` and so on) on hub tokens only. The plain `skill.update`, `skill.delete` and `template.*` permissions no longer authorize any write on a global record, and owning a global record grants nothing. The `global-catalog-author` role (revision 3) now holds exactly these six permissions, so a non-admin user bound to it can create, publish, update and delete global skills and templates, including from CI with a hub token, without any authority over project- or user-scoped records. There is no transition period.
+
+- **Re-mint tokens that write the global catalog.** Existing user access tokens whose scopes are plain `skill:update`, `skill:delete` or `template:*`, including hub admins' tokens, no longer write global records (`403`). Mint a new hub token with the `*_global` scopes; see [Hub-boundary tokens for global catalog authoring](/scion/hosted/user/personal-access-tokens/#hub-boundary-tokens-for-global-catalog-authoring) for the CI recipe. These scopes are not part of `skill:manage` or `template:manage`.
+- **Owners of global skills lose edit and delete unless they hold the role.** The user who created a global skill can no longer update, publish to, deprecate or delete it, or see its draft versions, without `global-catalog-author` or `hub-admin`. Global templates record their creator for audit only; the creator gets no rights from it.
+- **`hub-admin` (revision 12)** gains `skill.update_global`, `skill.delete_global` (revision 11) and global template create, update and delete (revision 12). It does not gain the plain `template.*` permissions, so it still cannot write templates in projects it is not a member of. `super-admin` is at revision 12.
+- **Custom roles** that hold plain `template.*`, `skill.update` or `skill.delete` keep their reach over project and user records but lose writes on global records. Add the matching `*_global` permissions to such roles if their holders should keep writing the global catalog.
+- **Import and refresh overwrite with `template.create_global`.** Importing into the global catalog, or refreshing a global template from its source, needs only `template.create_global`, also when the template already exists, so that permission can replace an existing global template's files.
+- **Global skills on the hub-wide injected list.** Every holder of `skill.update_global` can change the content of a global skill on the Hub's injected list, which reaches every agent. Review that list; see [Global catalog authoring](/scion/hosted/ha/permissions/#global-catalog-authoring).
+- `scion skills publish --scope <scope>` now reuses only an existing skill in that scope, so a global publish never adds a version to a same-named project or user skill. `scion templates update --scope global` (or `--global`) works with `--hub <url>` and a token, without `SCION_HUB_ENDPOINT` or a linked project. The web settings page's global **Templates** controls follow the user's permissions.
+
+**The `core` skill scope is retired.** Skills now have three scopes: `user`, `project` and `global`.
+
+- On upgrade, the Hub turns every `core` skill into a `global` skill. If a global skill with the same slug already exists, the former `core` skill is renamed `<slug>-core` (then `<slug>-core-2`, and so on) and the Hub logs a warning with the old and new names. The skills' files are not moved.
+- Stored injection references to `core` skills (the Hub's injected list and project and user injected skills) are rewritten to `skill://scion/global/<slug>`, using the new slug for a renamed skill.
+- A skill URI with a `core` scope (`skill://core/<name>`, `skill://scion/core/<name>`) is rejected with an error naming the `global` replacement, and `scope=core` on `GET` and `POST /api/v1/skills` answers `400`, for delegated credentials too. The CLI's `--scope core` is refused.
+- Template files that hard-code `skill://core/...` are not rewritten and now fail skill resolution with that error. Existing agents whose stored configuration holds a `core` skill URI fail the same way when they are next provisioned. Update such references to `skill://scion/global/<name>`, the recommended form.
+- A `core` reference that pointed at no skill before the upgrade may now resolve to a global skill of the same name.
+- `skill://global/...` and `skill://core/...` now always mean the local Hub's `global` scope (or are rejected), even where a federated skill registry named `global` or `core` is configured.
+
+There is no schema change and no downgrade floor bump. See [Global catalog authoring](/scion/hosted/ha/permissions/#global-catalog-authoring) and [Skills: scopes and resolution order](/scion/local/skills/#scopes-and-resolution-order).
+
 ## Switch an existing agent's harness-config
 
 With the server-layer `hub.reincarnate_harness_switch` experiment enabled (alpha,
