@@ -278,15 +278,17 @@ func (s *Server) handleInstallationRepositoriesWebhook(w http.ResponseWriter, r 
 		s.matchProjectsToInstallation(ctx, existing)
 
 	case "removed":
-		// Remove repos from the installation's repo list
+		// Remove repos from the installation's repo list. GitHub owner and
+		// repo names are case-insensitive, so the set is keyed by the
+		// lowercased owner/repo.
 		removedSet := make(map[string]bool)
 		for _, repo := range event.RepositoriesRemoved {
-			removedSet[repo.FullName] = true
+			removedSet[strings.ToLower(repo.FullName)] = true
 		}
 
 		filtered := existing.Repositories[:0]
 		for _, r := range existing.Repositories {
-			if !removedSet[r] {
+			if !removedSet[strings.ToLower(r)] {
 				filtered = append(filtered, r)
 			}
 		}
@@ -588,7 +590,8 @@ func (s *Server) updateProjectsForInstallation(ctx context.Context, installation
 }
 
 // checkProjectsForRemovedRepos checks if any projects using the given installation
-// have lost access to their repository.
+// have lost access to their repository. removedRepos is keyed by lowercased
+// owner/repo.
 func (s *Server) checkProjectsForRemovedRepos(ctx context.Context, installationID int64, removedRepos map[string]bool) {
 	projects, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 10000})
 	if err != nil {
@@ -607,7 +610,7 @@ func (s *Server) checkProjectsForRemovedRepos(ctx context.Context, installationI
 		}
 
 		ownerRepo := s.githubOwnerRepo(project.GitRemote)
-		if ownerRepo == "" || !removedRepos[ownerRepo] {
+		if ownerRepo == "" || !removedRepos[strings.ToLower(ownerRepo)] {
 			continue
 		}
 
