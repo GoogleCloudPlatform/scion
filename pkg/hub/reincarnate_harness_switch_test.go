@@ -430,13 +430,10 @@ func TestReincarnateHarness_FailureHandling(t *testing.T) {
 			if tc.wantForward {
 				assert.Equal(t, "codex-hc", final.AppliedConfig.HarnessConfig, "fail forward keeps the new harness config")
 				assert.Contains(t, r.Error, "the home was already reset")
-				// N1: after the reprovision itself failed, the home may be
-				// missing or half-built, which a start does not compose.
-				retry := fmt.Sprintf("`scion reincarnate %s`", f.agent.Slug)
-				if name == "start fails after the reset" {
-					retry = fmt.Sprintf("`scion start %s`", f.agent.Slug)
-				}
-				assert.Contains(t, r.Error, "run "+retry)
+				// Every stage names a plain reincarnate; a start of an
+				// error-phase agent is refused (ptone/scion#7757 D2).
+				assert.Contains(t, r.Error, fmt.Sprintf("run `scion reincarnate %s`", f.agent.Slug))
+				assert.NotContains(t, r.Error, "scion start")
 				assert.Contains(t, r.Error, fmt.Sprintf("scion reincarnate %s --harness claude-hc", f.agent.Slug))
 				assert.Contains(t, final.Message, "the home was already reset")
 			} else {
@@ -596,6 +593,94 @@ func TestReincarnateHarness_AmbiguousStartNamesRecovery(t *testing.T) {
 	assert.Contains(t, r.Error, fmt.Sprintf("scion reincarnate %s --harness claude-hc", f.agent.Slug))
 	calls, _ := f.disp.reprovisionSnapshot()
 	assert.Equal(t, 1, calls, "no re-render after an ambiguous start")
+}
+
+// The fail-forward hint names commands the failed agent accepts
+// (ptone/scion#7757 D2): for each stage, the hinted retry, a plain
+// reincarnate or one with -i replacing a bad recorded image, is accepted
+// (202, not 409) and completes on the new harness config, while the
+// `scion start` the hint used to name takes the duplicate-name branch.
+func TestReincarnateHarness_RecoveryHintCommandAccepted(t *testing.T) {
+	cases := map[string]struct {
+		fail          func(d *reincarnateTestDispatcher)
+		homeComposed  bool
+		retry         ReincarnateAgentRequest
+		wantImageEdit string
+	}{
+		"start fails after the reset, plain retry": {
+			fail:         func(d *reincarnateTestDispatcher) { d.startErr = definitiveStartErr() },
+			homeComposed: true,
+			retry:        ReincarnateAgentRequest{},
+		},
+		"start fails after the reset, retry replacing the image": {
+			fail:          func(d *reincarnateTestDispatcher) { d.startErr = definitiveStartErr() },
+			homeComposed:  true,
+			retry:         ReincarnateAgentRequest{Image: "codex-img:good"},
+			wantImageEdit: "codex-img:good",
+		},
+		"ambiguous start after the reset": {
+			fail:         func(d *reincarnateTestDispatcher) { d.startErr = errors.New("connection reset by peer") },
+			homeComposed: true,
+			retry:        ReincarnateAgentRequest{},
+		},
+		"reprovision fails after the reset": {
+			fail:  func(d *reincarnateTestDispatcher) { d.reprovisionErr = provisionSent(errors.New("timeout")) },
+			retry: ReincarnateAgentRequest{},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			f := newHarnessSwitchFixture(t, nil, nil)
+			f.disp.mu.Lock()
+			tc.fail(f.disp)
+			f.disp.mu.Unlock()
+			rec := reincarnateAsDev(t, f.srv, f.agent.ID, ReincarnateAgentRequest{HarnessConfig: "codex-hc", Image: "codex-img:bad"})
+			require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+			failed := waitForReincarnationSettled(t, f.s, f.agent.ID)
+			require.Equal(t, store.AgentReincarnationStateFailed, failed.State)
+
+			slug := f.agent.Slug
+			assert.Contains(t, failed.Error, fmt.Sprintf("to retry on harness config codex-hc, fix the cause and run `scion reincarnate %s`", slug))
+			assert.Contains(t, failed.Error, "add `-i <image>` or `--model <model>` to replace them")
+			assert.Contains(t, failed.Error, fmt.Sprintf("or switch back with `scion reincarnate %s --harness claude-hc`", slug))
+			assert.NotContains(t, failed.Error, "scion start")
+			assert.Equal(t, !tc.homeComposed, strings.Contains(failed.Error, "the home was already reset and may be incomplete"), failed.Error)
+
+			agent, err := f.s.GetAgent(ctx, f.agent.ID)
+			require.NoError(t, err)
+			require.Equal(t, "error", agent.Phase)
+			require.Equal(t, store.ReincarnationStateFailed, agent.ReincarnationState)
+			require.Equal(t, "codex-img:bad", agent.AppliedConfig.Image, "the image edit is recorded and replayed")
+			// The command the hint used to name: a create of the existing
+			// name without resume is a duplicate-name conflict.
+			assert.Equal(t, existingBranchNone, classifyExistingAgent(agent, CreateAgentRequest{Name: slug}))
+
+			// The cause is fixed; run the hinted command.
+			f.disp.mu.Lock()
+			f.disp.startErr, f.disp.reprovisionErr = nil, nil
+			f.disp.mu.Unlock()
+			rec = reincarnateAsDev(t, f.srv, f.agent.ID, tc.retry)
+			require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+			var done *store.AgentReincarnation
+			require.Eventually(t, func() bool {
+				done = waitForReincarnationSettled(t, f.s, f.agent.ID)
+				return done.ID != failed.ID
+			}, 5*time.Second, 5*time.Millisecond)
+			require.Equal(t, store.AgentReincarnationStateCompleted, done.State, done.Error)
+
+			final, err := f.s.GetAgent(ctx, f.agent.ID)
+			require.NoError(t, err)
+			assert.NotEqual(t, "error", final.Phase)
+			assert.Equal(t, store.ReincarnationStateNone, final.ReincarnationState)
+			assert.Equal(t, "codex-hc", final.AppliedConfig.HarnessConfig)
+			wantImage := "codex-img:bad"
+			if tc.wantImageEdit != "" {
+				wantImage = tc.wantImageEdit
+			}
+			assert.Equal(t, wantImage, final.AppliedConfig.Image)
+		})
+	}
 }
 
 // N2: harness-specific inline settings from a create-time config are
