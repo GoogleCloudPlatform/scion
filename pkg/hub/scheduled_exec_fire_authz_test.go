@@ -62,11 +62,12 @@ func (f *schedFire) setRunning(t *testing.T, agent *store.Agent) {
 	*agent = *a
 }
 
-// execEvent returns a one-shot exec event on target with no revision.
+// execEvent returns a one-shot exec event on target with no revision,
+// stored as claimed (fired), as a fire sees it.
 func (f *schedExec) execEvent(target *store.Agent, argv ...string) store.ScheduledEvent {
 	p := scheduledExecPayload{AgentID: target.ID, AgentName: target.Slug, Command: argv}
 	raw, _ := p.encode()
-	return store.ScheduledEvent{
+	evt := store.ScheduledEvent{
 		ID:        api.NewUUID(),
 		ProjectID: f.proj.ID,
 		EventType: scheduledEventTypeExec,
@@ -75,6 +76,8 @@ func (f *schedExec) execEvent(target *store.Agent, argv ...string) store.Schedul
 		CreatedBy: f.creator.ID,
 		FireAt:    time.Now(),
 	}
+	_ = f.store.CreateScheduledEvent(context.Background(), &evt)
+	return evt
 }
 
 // authorize runs the fire-time decision for evt.
