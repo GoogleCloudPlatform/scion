@@ -24,7 +24,10 @@
 
 ## activity_since: how it is maintained
 
-The column is store-managed and never written from a caller's struct:
+The column is store-managed, never written from a caller's struct, and not in
+the API response (`store.Agent.ActivitySince` is `json:"-"`; adding it changed
+the perf-budget response sizes and the web fixture schema, and nothing outside
+the hub needs it yet):
 
 - `stampActivitySince` (pkg/store/entadapter/agent_activity_since.go) runs in
   every writer that knows the stored values: `UpdateAgentStatus`,
