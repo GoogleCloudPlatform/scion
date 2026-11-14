@@ -19,9 +19,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"slices"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
 // Typed client of the exec control routes (exec-schedules design
@@ -31,28 +37,25 @@ import (
 // never a user-facing endpoint, and there is no API through which a caller
 // reaches exec-start. TestExecControlCallers guards that.
 //
-// Both calls go through callAgentControlJSON: the agent's own conduit
-// session for its current incarnation, only when the session advertises
-// the route, with agentcontrol.HubExecCallTimeout. The hub never resends
+// Both calls go through callAgentControlPinned: the agent's own conduit
+// session of the run's launch only, only when the session advertises the
+// route, with agentcontrol.HubExecCallTimeout. The hub never resends
 // exec-start: one attempt per run; on an ambiguous error the caller only
 // polls exec-status.
 
-// ErrAgentExecLaunchChanged: the agent's current launch is not the one the
-// run was admitted under (D9-S3). Before the call nothing was sent; after
-// it, the answer came from (or raced) another incarnation and is
-// discarded. Either way the run is abandoned, never re-queried on the
+// ErrAgentExecLaunchChanged: the agent's current launch, or the only
+// session the router can resolve, is not of the launch the run was admitted
+// under (D9-S3). Nothing was sent; the run is abandoned, never queried on a
 // replacement incarnation.
 var ErrAgentExecLaunchChanged = errors.New("agent exec: the agent's launch changed")
 
-// AgentExecLaunchChangedError wraps ErrAgentExecLaunchChanged. Sent reports
-// whether the request was sent before the change was seen.
+// AgentExecLaunchChangedError wraps ErrAgentExecLaunchChanged.
 type AgentExecLaunchChangedError struct {
 	AgentID string
-	Sent    bool
 }
 
 func (e *AgentExecLaunchChangedError) Error() string {
-	return fmt.Sprintf("%v: agent %s (sent=%t)", ErrAgentExecLaunchChanged, e.AgentID, e.Sent)
+	return fmt.Sprintf("%v: agent %s (nothing sent)", ErrAgentExecLaunchChanged, e.AgentID)
 }
 
 func (e *AgentExecLaunchChangedError) Unwrap() error { return ErrAgentExecLaunchChanged }
@@ -69,8 +72,8 @@ func (e *AgentExecLaunchChangedError) Unwrap() error { return ErrAgentExecLaunch
 //   - router.ErrNoSession (possibly wrapped) or ErrAgentControlNotAdvertised
 //     (wrapped): nothing was sent (the run is skipped, "agent executor
 //     unavailable");
-//   - *AgentExecLaunchChangedError: the launch differs (Sent says whether
-//     anything was sent);
+//   - *AgentExecLaunchChangedError: the agent's launch, or the resolvable
+//     session's, is not launchID; nothing was sent;
 //   - agentcontrol.ErrExecSchema (wrapped): the agent answered something
 //     outside the schema; never success;
 //   - otherwise the store, router or session error. A timeout or drop after
@@ -112,11 +115,12 @@ func (s *Server) AgentExecRunStatus(ctx context.Context, agentID, launchID, runI
 	return agentcontrol.ParseExecStatusAnswer(status, resp)
 }
 
-// callAgentExec calls an exec route on the agent's launch launchID. The
-// router binds the call to the incarnation it reads from the agent row
-// (agentIncarnationFacts), so the launch is checked before the call (a
-// mismatch sends nothing) and again after it (a change in between discards
-// the answer).
+// callAgentExec calls an exec route on the agent's launch launchID only
+// (D9-S3). It reads the agent row once, refuses a row whose launch is not
+// launchID (nothing sent), and routes with that validated snapshot's
+// incarnation facts (callAgentControlPinned), so the call can reach only a
+// session of launch launchID, locally or through another relay, never a
+// replacement incarnation.
 func (s *Server) callAgentExec(ctx context.Context, agentID, launchID, route string, body []byte) (int, []byte, error) {
 	if launchID == "" {
 		return 0, nil, &AgentExecLaunchChangedError{AgentID: agentID}
@@ -128,16 +132,60 @@ func (s *Server) callAgentExec(ctx context.Context, agentID, launchID, route str
 	if agent.RunID != launchID {
 		return 0, nil, &AgentExecLaunchChangedError{AgentID: agentID}
 	}
-	status, resp, err := s.callAgentControlJSON(ctx, agentID, route, body, agentcontrol.HubExecCallTimeout)
+	return s.callAgentControlPinned(ctx, agent, route, body, agentcontrol.HubExecCallTimeout)
+}
+
+// callAgentControlPinned is callAgentControlJSON for an agent snapshot the
+// caller has already validated: the router is asked for the snapshot's
+// incarnation (agentIncarnationFacts of agent, not a fresh read of the
+// row), and the resolved session must have been admitted with the
+// snapshot's launch id. A session admitted through the interim generation
+// fallback, or of any other launch, is refused before anything is sent
+// (*AgentExecLaunchChangedError). A session's incarnation is fixed at
+// admission and a relayed call is delivered to the resolved session id, so
+// this holds locally and across nodes. The route must be advertised, as
+// for callAgentControlJSON; errors are the same otherwise.
+func (s *Server) callAgentControlPinned(ctx context.Context, agent *store.Agent, route string, body []byte, timeout time.Duration) (int, []byte, error) {
+	if !s.conduitRoutable() {
+		return 0, nil, router.ErrNoSession
+	}
+	rtr := s.conduitRouter()
+	if rtr == nil {
+		return 0, nil, router.ErrNoSession
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	req := router.Request{
+		Op:    router.OpStatefulRPC,
+		Kind:  registry.PrincipalAgent,
+		ID:    agent.ID,
+		Want:  registry.Want{ProjectID: agent.ProjectID},
+		Agent: agentIncarnationFacts(agent),
+	}
+	rpc := &conduitv1.RpcRequest{
+		Method:  http.MethodPost,
+		Path:    agentControlPrefix + route,
+		Body:    body,
+		Headers: map[string]string{"Content-Type": "application/json"},
+	}
+	var status int
+	var respBody []byte
+	err := rtr.Do(ctx, req, func(ctx context.Context, res router.Resolved) error {
+		if res.Record.EndpointIncarnation != agent.RunID || res.Want.Incarnation != agent.RunID {
+			return &AgentExecLaunchChangedError{AgentID: agent.ID}
+		}
+		if !slices.Contains(res.Session.Info().Capabilities.GetRpc(), route) {
+			return fmt.Errorf("%w: agent %s, route %s", ErrAgentControlNotAdvertised, agent.ID, route)
+		}
+		resp, err := res.Session.Call(ctx, rpc)
+		if err != nil {
+			return err
+		}
+		status, respBody = int(resp.GetStatus()), resp.GetBody()
+		return nil
+	})
 	if err != nil {
 		return 0, nil, err
 	}
-	agent, err = s.store.GetAgent(ctx, agentID)
-	if err != nil {
-		return 0, nil, err
-	}
-	if agent.RunID != launchID {
-		return 0, nil, &AgentExecLaunchChangedError{AgentID: agentID, Sent: true}
-	}
-	return status, resp, nil
+	return status, respBody, nil
 }

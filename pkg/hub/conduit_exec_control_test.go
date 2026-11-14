@@ -19,11 +19,13 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -37,6 +39,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/control"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -247,42 +250,107 @@ func TestAgentExecClient_InvalidRequestNotSent(t *testing.T) {
 }
 
 // TestAgentExecClient_LaunchPinned (D9-S3): a call for a run admitted under
-// another launch sends nothing; a launch change during the call discards
-// the answer.
+// another launch (or with no launch) sends nothing.
 func TestAgentExecClient_LaunchPinned(t *testing.T) {
 	f := newPTYConduitFixture(t)
 	ctx := context.Background()
-	var changeDuring sync.Once
-	var armed bool
-	var mu sync.Mutex
-	c := &execCapture{answer: func(*conduitv1.RpcRequest) *conduitv1.RpcResponse {
-		mu.Lock()
-		a := armed
-		mu.Unlock()
-		if a {
-			changeDuring.Do(func() {
-				_, err := f.store.SetAgentRunID(ctx, f.launched.ID, "relaunched", nil)
-				assert.NoError(t, err)
-			})
-		}
-		return nil
-	}}
-	ca := f.startControlAgentWithOptions(t, f.public.URL, true, execControlOptions(t), c.wrap)
-
-	var le *AgentExecLaunchChangedError
+	ca := f.startControlAgentWithOptions(t, f.public.URL, true, execControlOptions(t), (&execCapture{}).wrap)
 	_, err := f.srv.StartAgentExecRun(ctx, f.launched.ID, "other-launch", execStartReq("true"))
+	var le *AgentExecLaunchChangedError
 	require.ErrorAs(t, err, &le)
-	assert.False(t, le.Sent)
+	_, err = f.srv.AgentExecRunStatus(ctx, f.launched.ID, "other-launch", execTestRunID)
+	require.ErrorIs(t, err, ErrAgentExecLaunchChanged)
 	_, err = f.srv.AgentExecRunStatus(ctx, f.launched.ID, "", execTestRunID)
 	require.ErrorIs(t, err, ErrAgentExecLaunchChanged)
 	assert.Zero(t, ca.rpcs.Load(), "nothing sent for another launch")
+}
 
-	mu.Lock()
-	armed = true
-	mu.Unlock()
+// execSnapshotKey marks the calls whose first agent read returns a stale
+// snapshot.
+type execSnapshotKey struct{}
+
+// staleSnapshotStore answers the first GetAgent of a marked call with the
+// row as it was under oldLaunch; every later read sees the current row.
+type staleSnapshotStore struct {
+	store.Store
+	oldLaunch string
+	mu        sync.Mutex
+	reads     int
+}
+
+func (s *staleSnapshotStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	a, err := s.Store.GetAgent(ctx, id)
+	if err != nil || ctx.Value(execSnapshotKey{}) == nil {
+		return a, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reads++
+	if s.reads == 1 {
+		stale := *a
+		stale.RunID = s.oldLaunch
+		return &stale, nil
+	}
+	return a, nil
+}
+
+// TestAgentExecClient_StaleSnapshotNeverReachesReplacement is the review
+// round 1 regression (B1 / B-SEC-1): the run was admitted under launch
+// old-launch; by the time the call routes, the row and the connected
+// session belong to a replacement launch. Neither exec-start nor
+// exec-status may reach the replacement session, locally or across nodes:
+// nothing is sent and the command never runs.
+func TestAgentExecClient_StaleSnapshotNeverReachesReplacement(t *testing.T) {
+	for _, crossNode := range []bool{false, true} {
+		name := map[bool]string{false: "local", true: "cross-node"}[crossNode]
+		t.Run(name, func(t *testing.T) {
+			var wrapped *staleSnapshotStore
+			f := newPTYConduitFixtureServer(t, func(s *Server) {
+				wrapped = &staleSnapshotStore{Store: s.store, oldLaunch: "old-launch"}
+				s.store = wrapped
+			})
+			hubURL := f.public.URL
+			if crossNode {
+				hubURL = f.startPeerRelay(t, "hub-b")
+			}
+			c := &execCapture{}
+			opts := execControlOptions(t)
+			ca := f.startControlAgentWithOptions(t, hubURL, true, opts, c.wrap)
+			marker := filepath.Join(opts.Exec.Workdir, "wrong-incarnation-started")
+
+			ctx := context.WithValue(context.Background(), execSnapshotKey{}, true)
+			_, err := f.srv.StartAgentExecRun(ctx, f.launched.ID, "old-launch", execStartReq("sh", "-c", "touch "+marker))
+			require.Error(t, err)
+			assert.True(t, errors.Is(err, ErrAgentExecLaunchChanged) || errors.Is(err, router.ErrNoSession), "err = %v", err)
+
+			wrapped.mu.Lock()
+			wrapped.reads = 0
+			wrapped.mu.Unlock()
+			_, err = f.srv.AgentExecRunStatus(ctx, f.launched.ID, "old-launch", execTestRunID)
+			require.Error(t, err)
+			assert.True(t, errors.Is(err, ErrAgentExecLaunchChanged) || errors.Is(err, router.ErrNoSession), "err = %v", err)
+
+			time.Sleep(300 * time.Millisecond)
+			_, statErr := os.Stat(marker)
+			assert.True(t, os.IsNotExist(statErr), "the command ran on the replacement incarnation")
+			assert.Zero(t, ca.rpcs.Load(), "an exec route reached the replacement incarnation")
+		})
+	}
+}
+
+// TestAgentExecClient_GenerationFallbackSessionRefused: a session admitted
+// through the interim generation fallback (no presented launch id) matches
+// the router's second incarnation choice, but is not provably of the run's
+// launch: it is refused before anything is sent.
+func TestAgentExecClient_GenerationFallbackSessionRefused(t *testing.T) {
+	f := newPTYConduitFixture(t)
+	ca := f.startControlAgentAs(t, f.public.URL, "", true, execControlOptions(t), (&execCapture{}).wrap)
+	ctx := context.Background()
+	_, err := f.srv.StartAgentExecRun(ctx, f.launched.ID, f.launched.RunID, execStartReq("true"))
+	require.ErrorIs(t, err, ErrAgentExecLaunchChanged)
 	_, err = f.srv.AgentExecRunStatus(ctx, f.launched.ID, f.launched.RunID, execTestRunID)
-	require.ErrorAs(t, err, &le)
-	assert.True(t, le.Sent)
+	require.ErrorIs(t, err, ErrAgentExecLaunchChanged)
+	assert.Zero(t, ca.rpcs.Load(), "nothing sent to a generation-fallback session")
 }
 
 // TestAgentExecClient_CallTimeout: the 30s per-route timeout bounds a call
