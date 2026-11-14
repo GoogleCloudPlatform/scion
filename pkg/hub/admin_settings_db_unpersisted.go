@@ -87,6 +87,8 @@ var dbFileOnlyRequestPaths = [][]string{
 	{"server", "keyring_file_allow_world_readable"},
 	// Likewise server.trusted_proxies (never API-writable).
 	{"server", "trusted_proxies"},
+	// Likewise server.hub.internal_url (never API-writable; ptone/scion#555).
+	{"server", "hub", "internal_url"},
 	{"server", "auth", "username"},
 	{"server", "auth", "display_name"},
 	{"server", "auth", "email"},
