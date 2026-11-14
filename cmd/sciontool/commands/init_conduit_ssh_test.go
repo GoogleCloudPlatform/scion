@@ -83,7 +83,7 @@ func TestConduitSSHOnlyWithConduit(t *testing.T) {
 		if ssh != nil {
 			t.Fatal("SSH server prepared with conduit off")
 		}
-		runPortForwarding(t, newPortForwarding(client, false, conduit.PTYUser{}, ssh, getenv))
+		runPortForwarding(t, newPortForwarding(client, false, conduit.PTYUser{}, ssh, nil, getenv))
 		waitSignal(t, h.tunnel, "the legacy tunnel")
 		if got := n.Load(); got != 0 {
 			t.Fatalf("SSH server built %d times with conduit off", got)
@@ -127,7 +127,7 @@ func TestConduitSSHOnlyWithConduit(t *testing.T) {
 			if posts := h.statusPosts(); len(posts) != 0 {
 				t.Fatalf("%d status POSTs with ssh disabled, want none", len(posts))
 			}
-			runPortForwarding(t, newPortForwarding(client, false, conduit.PTYUser{}, nil, getenv))
+			runPortForwarding(t, newPortForwarding(client, false, conduit.PTYUser{}, nil, nil, getenv))
 			select {
 			case hello := <-h.hellos:
 				if kinds := hello.GetCapabilities().GetStreamKinds(); slices.Contains(kinds, grant.StreamKindSSH) || !slices.Contains(kinds, grant.StreamKindTCP) {
@@ -170,7 +170,7 @@ func TestConduitSSHOnlyWithConduit(t *testing.T) {
 		if len(posts[0]) != 1 || posts[0]["sshHostKey"] != want {
 			t.Fatalf("status POST %v, want only sshHostKey=%q", posts[0], want)
 		}
-		runPortForwarding(t, newPortForwarding(client, false, conduit.PTYUser{}, ssh, getenv))
+		runPortForwarding(t, newPortForwarding(client, false, conduit.PTYUser{}, ssh, nil, getenv))
 		select {
 		case hello := <-h.hellos:
 			if kinds := hello.GetCapabilities().GetStreamKinds(); !slices.Contains(kinds, grant.StreamKindSSH) {
