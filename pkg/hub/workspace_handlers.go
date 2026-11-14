@@ -563,7 +563,7 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 			if writeSecretResolutionError(w, err) {
 				return
 			}
-			if writeEmptyPerAgentCapabilityError(w, err) {
+			if writeWorkspaceModeCapabilityError(w, err) {
 				return
 			}
 			if relayDispatchRefusal(w, err) {

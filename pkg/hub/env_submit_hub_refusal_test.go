@@ -66,7 +66,7 @@ func TestSubmitAgentEnv_RelaysHubRefusal(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// What the hub's own classifier writes for this error.
 			want := httptest.NewRecorder()
-			require.True(t, writeAgentTokenIssueError(want, tc.err) || writeEmptyPerAgentCapabilityError(want, tc.err))
+			require.True(t, writeAgentTokenIssueError(want, tc.err) || writeWorkspaceModeCapabilityError(want, tc.err))
 			require.Equal(t, tc.status, want.Code)
 
 			rec, got := submitEnvWithFinalizeErrAgent(t, "env-hub-refusal", tc.err)

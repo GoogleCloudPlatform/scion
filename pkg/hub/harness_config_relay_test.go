@@ -74,6 +74,7 @@ var brokerRefusals = []struct {
 	// A broker 400 validation_error is relayed by the same helper
 	// (ptone/scion#2666).
 	{name: "400 validation", status: http.StatusBadRequest, code: "validation_error", message: brokerValidationMessage},
+	{name: "412 unsupported capability", status: http.StatusPreconditionFailed, code: "unsupported_capability", message: `agent "a1": "Worktree per agent" (worktree-per-agent) workspaces are not supported on the Cloud Run runtime`},
 	// A broker that does not see the project storage share
 	// (ptone/scion#5823): its path-free text and code reach the client.
 	{name: "503 project storage", status: http.StatusServiceUnavailable, code: "project_storage_unavailable", message: projectStorageMessage},

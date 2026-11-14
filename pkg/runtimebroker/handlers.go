@@ -1358,6 +1358,17 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Refuse worktree-per-agent on Cloud Run after the workspace .scion record
+	// and project-identity checks above (preserving the ptone/scion#1799
+	// ordering invariant) and before env-gather or template/harness-config
+	// hydration (ptone/scion#7865).
+	if sce := s.createCloudRunWorktreePerAgentRefusal(req); sce != nil {
+		span.SetStatus(codes.Error, startContextSpanText(sce))
+		status := s.writeStartContextError(w, sce, "create agent", "agent_id", req.ID, "profile", createRequestProfile(req))
+		markAttemptFailed(status, sce.Error())
+		return
+	}
+
 	// Env-gather: if GatherEnv is true, evaluate env completeness before building full context.
 	// This needs the resolved project path and merged env to determine which keys are missing.
 	// Hub-hydrated template and harness-config, filled by the env-gather

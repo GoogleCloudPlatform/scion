@@ -282,6 +282,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	if sce := s.flatCloudRunGCPIdentityRefusal(in); sce != nil {
 		return nil, sce
 	}
+	// A flat cloudrun instance likewise refuses worktree-per-agent ahead of
+	// every ownership, project-file or worktree side effect (ptone/scion#7865).
+	if sce := s.flatCloudRunWorktreePerAgentRefusal(in); sce != nil {
+		return nil, sce
+	}
 
 	ctx, span := tracer.Start(ctx, "broker.agent.provision")
 	defer span.End()
@@ -582,6 +587,9 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		res = res.forCreate(in.Name)
 	} else {
 		res = res.forExistingAgent(in.Name)
+	}
+	if isCloudRunRuntimeName(dispatchRuntimeType) && effectiveWorktreePerAgentDispatch(in.WorkspaceMode, in.ResolvedEnv, in.Config) {
+		return nil, cloudRunWorktreePerAgentRefusalError(in.Name)
 	}
 	isKubernetes := isKubernetesRuntimeName(dispatchRuntimeType)
 
@@ -1652,6 +1660,66 @@ func (e *startContextError) Error() string {
 // the two functions keep classifying identically if that ever changes.
 func isKubernetesRuntimeName(name string) bool {
 	return name == "kubernetes" || name == "k8s" || name == "remote"
+}
+
+// isCloudRunRuntimeName reports whether name identifies the Cloud Run
+// Instances runtime: "cloudrun" (CloudRunRuntime.Name()) or the
+// "cloudrun-instances" settings.yaml runtime-type spelling that
+// resolveRuntimeNameForOpts can return raw. "cloudrun-sandbox" is a separate
+// local gVisor runtime and is not included.
+func isCloudRunRuntimeName(name string) bool {
+	return name == cloudRunRuntimeType || name == cloudRunInstancesRuntimeType
+}
+
+const cloudRunWorktreePerAgentRefusalText = `"Worktree per agent" (worktree-per-agent) workspaces are not supported on the Cloud Run runtime: ` +
+	`Cloud Run supports "Clone per agent" (clone-per-agent) and "Shared workspace" (shared-plain) modes; ` +
+	`recreate the project in one of those modes or pick a Docker, Podman or Apple broker`
+
+func effectiveWorktreePerAgentDispatch(workspaceMode string, resolvedEnv map[string]string, cfg *CreateAgentConfig) bool {
+	if workspaceMode != "" {
+		return store.ResolveWorkspaceSharingMode(workspaceMode) == store.SharingModeWorktreePerAgent
+	}
+	raw := resolvedEnv["SCION_WORKSPACE_MODE"]
+	if cfg != nil {
+		for i := len(cfg.Env) - 1; i >= 0; i-- {
+			k, v, ok := strings.Cut(cfg.Env[i], "=")
+			if ok && k == "SCION_WORKSPACE_MODE" {
+				raw = v
+				break
+			}
+		}
+	}
+	return raw != "" && store.ResolveWorkspaceSharingMode(raw) == store.SharingModeWorktreePerAgent
+}
+
+func cloudRunWorktreePerAgentRefusalError(agentName string) *startContextError {
+	return &startContextError{
+		Status:  http.StatusPreconditionFailed,
+		Code:    ErrCodeUnsupportedCapability,
+		Message: fmt.Sprintf("agent %q: %s", agentName, cloudRunWorktreePerAgentRefusalText),
+	}
+}
+
+func (s *Server) flatCloudRunWorktreePerAgentRefusal(in startContextInputs) *startContextError {
+	if !s.flatCloudRunTarget() || !effectiveWorktreePerAgentDispatch(in.WorkspaceMode, in.ResolvedEnv, in.Config) {
+		return nil
+	}
+	return cloudRunWorktreePerAgentRefusalError(in.Name)
+}
+
+func (s *Server) createCloudRunWorktreePerAgentRefusal(req CreateAgentRequest) *startContextError {
+	if !effectiveWorktreePerAgentDispatch(req.WorkspaceMode, req.ResolvedEnv, req.Config) {
+		return nil
+	}
+	rtName, perr := s.resolveRuntimeNameForOpts(api.StartOptions{
+		Name:        req.Name,
+		ProjectPath: req.ProjectPath,
+		Profile:     createRequestProfile(req),
+	})
+	if perr == nil && isCloudRunRuntimeName(rtName) {
+		return cloudRunWorktreePerAgentRefusalError(req.Name)
+	}
+	return nil
 }
 
 // effectiveGCPMetadataMode resolves the GCP identity mode that applies for a

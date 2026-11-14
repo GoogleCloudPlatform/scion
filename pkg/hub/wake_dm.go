@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -390,11 +391,19 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 					HTTPStatus: http.StatusServiceUnavailable,
 				}
 			}
-			if errors.Is(err, errBrokerLacksEmptyPerAgent) {
-				// Fail closed like the other dispatch sites (design #2703 D3).
+			if isUnsupportedWorkspaceModeError(err) {
+				// Fail closed like the other dispatch sites (design #2703 D3, ptone/scion#7865).
 				return nil, &AgentDMError{
 					Code:       ErrCodeUnsupportedCapability,
 					Message:    "Failed to wake agent: " + err.Error(),
+					HTTPStatus: http.StatusPreconditionFailed,
+				}
+			}
+			var se *brokerStatusError
+			if errors.As(err, &se) && se.StatusCode == http.StatusPreconditionFailed && se.brokerErrorCode() == api.BrokerErrCodeUnsupportedCapability {
+				return nil, &AgentDMError{
+					Code:       ErrCodeUnsupportedCapability,
+					Message:    "Failed to wake agent: " + se.brokerErrorMessage(),
 					HTTPStatus: http.StatusPreconditionFailed,
 				}
 			}

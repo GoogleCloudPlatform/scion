@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -257,21 +258,124 @@ func checkEmptyPerAgentBrokerCapability(project *store.Project, broker *store.Ru
 	return &brokerLacksEmptyPerAgentError{broker: name}
 }
 
-// writeEmptyPerAgentCapabilityError writes the 412 response for err if it is
-// an errBrokerLacksEmptyPerAgent error and reports whether it did.
-func writeEmptyPerAgentCapabilityError(w http.ResponseWriter, err error) bool {
-	if !errors.Is(err, errBrokerLacksEmptyPerAgent) {
+// writeWorkspaceModeCapabilityError writes the 412 response for err if it is
+// an unsupported workspace-mode capability error (empty-per-agent on a broker
+// without emptyPerAgentWorkspace, or worktree-per-agent on Cloud Run) and
+// reports whether it did.
+func writeWorkspaceModeCapabilityError(w http.ResponseWriter, err error) bool {
+	if !isUnsupportedWorkspaceModeError(err) {
 		return false
 	}
 	writeError(w, http.StatusPreconditionFailed, ErrCodeUnsupportedCapability, err.Error(), nil)
 	return true
 }
 
-// requireEmptyPerAgentBrokerCapability is the handler-side gate: it loads
-// brokerID and writes a 412 when the project is empty-per-agent and the
-// broker lacks the capability. Returns false when a response was written.
-func (s *Server) requireEmptyPerAgentBrokerCapability(ctx context.Context, w http.ResponseWriter, project *store.Project, brokerID string) bool {
-	if project == nil || !project.IsEmptyPerAgent() || brokerID == "" {
+// isUnsupportedWorkspaceModeError reports whether err is a fail-closed hub
+// refusal for a workspace sharing mode the target broker or runtime does not
+// support.
+func isUnsupportedWorkspaceModeError(err error) bool {
+	return errors.Is(err, errBrokerLacksEmptyPerAgent) || errors.Is(err, errCloudRunLacksWorktreePerAgent)
+}
+
+// cloudRunLacksWorktreePerAgentDetail is the user-facing tail of the 412
+// returned when a worktree-per-agent project targets Cloud Run Instances
+// (ptone/scion#7865). The web and CLI display it verbatim, so it names the
+// mode, Cloud Run, the supported Cloud Run modes, and the broker remedies.
+const cloudRunLacksWorktreePerAgentDetail = `cannot run "Worktree per agent" (worktree-per-agent) workspaces on Cloud Run: ` +
+	`Cloud Run supports "Clone per agent" (clone-per-agent) and "Shared workspace" (shared-plain) modes; ` +
+	`recreate the project in one of those modes or pick a Docker, Podman or Apple broker`
+
+// errCloudRunLacksWorktreePerAgent is returned when a worktree-per-agent agent
+// would be dispatched to a Cloud Run Instances runtime. Handlers map it to 412.
+var errCloudRunLacksWorktreePerAgent = errors.New("runtime broker " + cloudRunLacksWorktreePerAgentDetail)
+
+type cloudRunLacksWorktreePerAgentError struct {
+	broker  string
+	profile string
+}
+
+func (e *cloudRunLacksWorktreePerAgentError) Error() string {
+	switch {
+	case e.broker != "" && e.profile != "":
+		return fmt.Sprintf("broker %s (profile %q) %s", e.broker, e.profile, cloudRunLacksWorktreePerAgentDetail)
+	case e.broker != "":
+		return fmt.Sprintf("broker %s %s", e.broker, cloudRunLacksWorktreePerAgentDetail)
+	default:
+		return errCloudRunLacksWorktreePerAgent.Error()
+	}
+}
+
+func (e *cloudRunLacksWorktreePerAgentError) Unwrap() error { return errCloudRunLacksWorktreePerAgent }
+
+// checkWorktreePerAgentCloudRun fails closed when project uses
+// worktree-per-agent and the target broker/profile resolves to Cloud Run
+// Instances ("cloudrun" or "cloudrun-instances"; not "cloudrun-sandbox").
+// When a multi-profile broker's profile cannot be resolved on the hub, this
+// returns nil and the runtime broker's own start-context gate refuses before
+// any worktree or project side effect.
+func checkWorktreePerAgentCloudRun(project *store.Project, broker *store.RuntimeBroker, profileName string, agent *store.Agent) error {
+	if project == nil || !project.IsWorktreePerAgent() {
+		return nil
+	}
+	if profileName == "" && agent != nil && agent.AppliedConfig != nil {
+		profileName = agent.AppliedConfig.Profile
+	}
+	if profileName == ManagedAgentsProfile {
+		return nil
+	}
+	brokerName := ""
+	if broker != nil {
+		brokerName = broker.Name
+		if brokerName == "" {
+			brokerName = broker.ID
+		}
+	}
+	if agent != nil {
+		if isCloudRunProfileType(strings.ToLower(strings.TrimSpace(agent.PinnedRuntimeTargetType))) ||
+			isCloudRunProfileType(strings.ToLower(strings.TrimSpace(agent.Runtime))) {
+			return &cloudRunLacksWorktreePerAgentError{broker: brokerName}
+		}
+	}
+	if broker == nil {
+		return nil
+	}
+	if broker.RuntimeTarget != nil && isCloudRunProfileType(strings.ToLower(strings.TrimSpace(broker.RuntimeTarget.Type))) {
+		return &cloudRunLacksWorktreePerAgentError{broker: brokerName}
+	}
+	effProfile := effectiveRuntimeProfileName(profileName, project)
+	resolvedProfile, rtType, ok := resolveAgentRuntimeProfileType(broker, effProfile)
+	if ok {
+		if isCloudRunProfileType(strings.ToLower(strings.TrimSpace(rtType))) {
+			prof := ""
+			if len(broker.Profiles) > 1 {
+				prof = resolvedProfile
+			}
+			return &cloudRunLacksWorktreePerAgentError{broker: brokerName, profile: prof}
+		}
+		return nil
+	}
+	if len(broker.Profiles) > 0 {
+		allCloudRun := true
+		for _, p := range broker.Profiles {
+			if !isCloudRunProfileType(strings.ToLower(strings.TrimSpace(p.Type))) {
+				allCloudRun = false
+				break
+			}
+		}
+		if allCloudRun {
+			return &cloudRunLacksWorktreePerAgentError{broker: brokerName}
+		}
+	}
+	return nil
+}
+
+// requireWorkspaceModeBrokerCapability is the handler-side gate: it loads
+// brokerID and writes a 412 when the project's workspace sharing mode is not
+// supported by the target broker/profile (empty-per-agent on a broker without
+// emptyPerAgentWorkspace, or worktree-per-agent on Cloud Run). Returns false
+// when a response was written.
+func (s *Server) requireWorkspaceModeBrokerCapability(ctx context.Context, w http.ResponseWriter, project *store.Project, brokerID, profileName string, agent *store.Agent) bool {
+	if project == nil || (!project.IsEmptyPerAgent() && !project.IsWorktreePerAgent()) || brokerID == "" {
 		return true
 	}
 	broker, err := s.store.GetRuntimeBroker(ctx, brokerID)
@@ -279,14 +383,20 @@ func (s *Server) requireEmptyPerAgentBrokerCapability(ctx context.Context, w htt
 		writeErrorFromErr(w, err, "")
 		return false
 	}
-	return !writeEmptyPerAgentCapabilityError(w, checkEmptyPerAgentBrokerCapability(project, broker))
+	if err := checkEmptyPerAgentBrokerCapability(project, broker); writeWorkspaceModeCapabilityError(w, err) {
+		return false
+	}
+	if err := checkWorktreePerAgentCloudRun(project, broker, profileName, agent); writeWorkspaceModeCapabilityError(w, err) {
+		return false
+	}
+	return true
 }
 
-// requireEmptyPerAgentBrokerCapabilityForAgent is
-// requireEmptyPerAgentBrokerCapability for an existing agent: it loads the
-// agent's project and checks its assigned broker. A project lookup error
-// fails closed; a missing project has nothing to gate.
-func (s *Server) requireEmptyPerAgentBrokerCapabilityForAgent(ctx context.Context, w http.ResponseWriter, agent *store.Agent) bool {
+// requireWorkspaceModeBrokerCapabilityForAgent checks workspace-mode broker
+// compatibility for an existing agent: it loads the agent's project and checks
+// its assigned broker and profile. A project lookup error fails closed; a
+// missing project has nothing to gate.
+func (s *Server) requireWorkspaceModeBrokerCapabilityForAgent(ctx context.Context, w http.ResponseWriter, agent *store.Agent) bool {
 	if agent.ProjectID == "" {
 		return true
 	}
@@ -298,7 +408,7 @@ func (s *Server) requireEmptyPerAgentBrokerCapabilityForAgent(ctx context.Contex
 		writeErrorFromErr(w, err, "")
 		return false
 	}
-	return s.requireEmptyPerAgentBrokerCapability(ctx, w, project, agent.RuntimeBrokerID)
+	return s.requireWorkspaceModeBrokerCapability(ctx, w, project, agent.RuntimeBrokerID, "", agent)
 }
 
 // workspaceOnRemoteBrokers reports whether project's workspace lives on

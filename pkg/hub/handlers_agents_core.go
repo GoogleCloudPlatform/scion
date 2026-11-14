@@ -1827,9 +1827,10 @@ func (s *Server) createAgentInProject(
 			}
 		}
 
-		// Empty-per-agent projects only dispatch to brokers that advertise the
-		// capability (design #2703 D3): 412 before anything is persisted.
-		if !s.requireEmptyPerAgentBrokerCapability(ctx, w, project, runtimeBrokerID) {
+		// Gate workspace sharing modes that the target broker/profile cannot run
+		// (empty-per-agent without emptyPerAgentWorkspace, or worktree-per-agent
+		// on Cloud Run): 412 before anything is persisted.
+		if !s.requireWorkspaceModeBrokerCapability(ctx, w, project, runtimeBrokerID, req.Profile, nil) {
 			return
 		}
 	}
@@ -3725,7 +3726,7 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 		if writeSecretResolutionError(w, err) {
 			return
 		}
-		if writeEmptyPerAgentCapabilityError(w, err) {
+		if writeWorkspaceModeCapabilityError(w, err) {
 			return
 		}
 		var stillMissing *ErrEnvStillMissing
@@ -6202,6 +6203,7 @@ func relayBrokerRefusal(w http.ResponseWriter, err error) bool {
 	code := se.brokerErrorCode()
 	switch {
 	case se.StatusCode == http.StatusBadRequest && code == ErrCodeValidationError:
+	case se.StatusCode == http.StatusPreconditionFailed && code == api.BrokerErrCodeUnsupportedCapability:
 	case se.StatusCode == http.StatusUnprocessableEntity && code == harnessConfigUnusableErrorCode:
 	case se.StatusCode == http.StatusUnprocessableEntity && code == storageMigrationRequiredErrorCode:
 	case se.StatusCode == http.StatusUnprocessableEntity && code == api.BrokerErrCodeGitConfigRefused:

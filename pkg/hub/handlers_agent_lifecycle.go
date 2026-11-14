@@ -1030,10 +1030,10 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// The response waits on both legs: extend this request's write
 			// deadline to cover them (ptone/scion#3890).
 			extendWriteDeadline(ctx, w, s.config.WriteTimeout, restartWriteBudget())
-			// Refuse before the stop leg: otherwise a broker without
-			// the empty-per-agent capability would have the agent
+			// Refuse before the stop leg: otherwise a broker that cannot run
+			// the project's workspace sharing mode would have the agent
 			// stopped and then the start refused (design #2703 D3).
-			if !s.requireEmptyPerAgentBrokerCapabilityForAgent(ctx, w, agent) {
+			if !s.requireWorkspaceModeBrokerCapabilityForAgent(ctx, w, agent) {
 				return
 			}
 			// Flat placement pre-check, before the broker cap check, the
@@ -1259,7 +1259,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		if writeSecretResolutionError(w, dispatchErr) {
 			return
 		}
-		if writeEmptyPerAgentCapabilityError(w, dispatchErr) {
+		if writeWorkspaceModeCapabilityError(w, dispatchErr) {
 			return
 		}
 		// A flat Runtime Broker refusal is a definite start failure that no

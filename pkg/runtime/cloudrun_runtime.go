@@ -486,8 +486,12 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 	// Checked before anything is resolved or provisioned: other than a
 	// clone-per-agent agent, which mounts its own workspace on the share,
 	// this runtime mounts the project's shared NFS workspace (see
-	// provisionCloudRunNFS), which would break empty-per-agent isolation.
+	// provisionCloudRunNFS), which would break empty-per-agent and
+	// worktree-per-agent isolation.
 	if err := rejectEmptyPerAgentOnCloudRun(cfg); err != nil {
+		return "", err
+	}
+	if err := rejectWorktreePerAgentOnCloudRun(cfg); err != nil {
 		return "", err
 	}
 	// Also checked up front: buildCloudRunInstance mounts the workspace,
@@ -2368,6 +2372,12 @@ func sanitizeGCPLabelValue(value string) string {
 var errEmptyPerAgentCloudRun = errors.New("cloudrun: \"Empty directory per agent\" (empty-per-agent) workspaces are not supported on the Cloud Run runtime, " +
 	"which mounts the project's shared workspace; use a Docker, Podman, Apple or Kubernetes broker for this project")
 
+// errWorktreePerAgentCloudRun is returned by CloudRunRuntime.Run for a
+// worktree-per-agent agent (ptone/scion#7865).
+var errWorktreePerAgentCloudRun = errors.New(`cloudrun: "Worktree per agent" (worktree-per-agent) workspaces are not supported on the Cloud Run runtime; ` +
+	`Cloud Run supports "Clone per agent" (clone-per-agent) and "Shared workspace" (shared-plain) modes, ` +
+	`or use a Docker, Podman or Apple broker for this project`)
+
 // errCloudRunNeedsNFSWorkspace is returned, wrapped with the backend name,
 // by CloudRunRuntime.Run for a workspace backend other than "nfs"
 // (ptone/scion#5264).
@@ -2427,6 +2437,27 @@ func isClonePerAgentRun(cfg RunConfig) bool {
 func rejectEmptyPerAgentOnCloudRun(cfg RunConfig) error {
 	if isEmptyPerAgentRun(cfg) {
 		return errEmptyPerAgentCloudRun
+	}
+	return nil
+}
+
+// isWorktreePerAgentRun reports whether cfg starts a worktree-per-agent agent,
+// identified by the effective (last) SCION_WORKSPACE_MODE entry in its env.
+func isWorktreePerAgentRun(cfg RunConfig) bool {
+	for i := len(cfg.Env) - 1; i >= 0; i-- {
+		k, v, ok := strings.Cut(cfg.Env[i], "=")
+		if ok && k == "SCION_WORKSPACE_MODE" {
+			return store.ResolveWorkspaceSharingMode(v) == store.SharingModeWorktreePerAgent
+		}
+	}
+	return false
+}
+
+// rejectWorktreePerAgentOnCloudRun fails when cfg starts a worktree-per-agent
+// agent.
+func rejectWorktreePerAgentOnCloudRun(cfg RunConfig) error {
+	if isWorktreePerAgentRun(cfg) {
+		return errWorktreePerAgentCloudRun
 	}
 	return nil
 }
