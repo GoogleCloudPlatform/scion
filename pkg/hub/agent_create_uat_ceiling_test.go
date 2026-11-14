@@ -101,10 +101,12 @@ func TestNoUsableRoleMessage(t *testing.T) {
 		"an empty bounded ceiling lacks every readonly selector")
 }
 
-// Every permission that the readonly role's required scopes cover has a
-// UAT selector, so the no-usable-role message can always name the full
-// set. A registry row that breaks this makes missingRoleSelectors fall
-// back to the generic reason; this test makes the gap visible first.
+// Every permission that the readonly role's required scopes cover, other
+// than a self operation, has a UAT selector, so the no-usable-role message
+// can always name the full set. A self operation never blocks a bounded
+// ceiling (missingRoleSelectors skips it), so it needs no selector. A
+// registry row that breaks this makes missingRoleSelectors fall back to the
+// generic reason; this test makes the gap visible first.
 func TestReadonlyRoleRequiredPermissionsHaveUATSelectors(t *testing.T) {
 	checked := 0
 	for _, scope := range ScopesForRole(AgentRoleReadOnly) {
@@ -114,6 +116,9 @@ func TestReadonlyRoleRequiredPermissionsHaveUATSelectors(t *testing.T) {
 		coverage := agentScopeCoverage([]AgentTokenScope{scope})
 		require.NotEmpty(t, coverage, "readonly scope %s covers no registry permission", scope)
 		for _, permID := range coverage {
+			if selfOperationSet[permID] {
+				continue
+			}
 			p, ok := registryPermission(permID)
 			require.True(t, ok, permID)
 			assert.NotEmpty(t, p.UATScope, "%s (covered by readonly scope %s) has no UAT selector", permID, scope)

@@ -212,7 +212,7 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.AgentRoleDefReadonly,
 			Description: "Read-only agent permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    1,
+			Revision:    2, // R2: agent.status_update, self-only (ptone/scion#7926)
 			Permissions: agentRolePermissionIDs(AgentRoleReadOnly),
 		},
 		{

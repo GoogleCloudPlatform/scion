@@ -17,6 +17,9 @@ package hub
 import (
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -28,10 +31,12 @@ func TestScopesForRole_None(t *testing.T) {
 
 func TestScopesForRole_ReadOnly(t *testing.T) {
 	scopes := ScopesForRole(AgentRoleReadOnly)
-	require.Len(t, scopes, 2)
+	require.Len(t, scopes, 3)
 	assert.Equal(t, ScopeProjectRead, scopes[0])
+	// Self-only: updateAgentStatus admits only the bearer's own ID.
+	assert.Equal(t, ScopeAgentStatusUpdate, scopes[1])
 	// Ceiling-optional: see ceilingOptionalRoleScopes.
-	assert.Equal(t, ScopeProjectArtifactRead, scopes[1])
+	assert.Equal(t, ScopeProjectArtifactRead, scopes[2])
 }
 
 func TestScopesForRole_Baseline(t *testing.T) {
@@ -149,13 +154,26 @@ func TestScopesForRole_RoleNoneMapToNoAuth(t *testing.T) {
 	assert.Nil(t, scopes)
 }
 
-func TestScopesForRole_RoleReadOnlyHasOnlyRead(t *testing.T) {
+func TestScopesForRole_RoleReadOnlyHasOnlyReadAndSelfStatus(t *testing.T) {
 	scopes := ScopesForRole(AgentRoleReadOnly)
-	require.Len(t, scopes, 2)
-	assert.Equal(t, ScopeProjectRead, scopes[0])
-	// Ceiling-optional: see ceilingOptionalRoleScopes.
-	assert.Equal(t, ScopeProjectArtifactRead, scopes[1])
+	assert.ElementsMatch(t, []AgentTokenScope{ScopeProjectRead, ScopeAgentStatusUpdate, ScopeProjectArtifactRead}, scopes)
 	// Must NOT have elevated scopes
-	assert.NotContains(t, scopes, ScopeAgentCreate)
-	assert.NotContains(t, scopes, ScopeAgentStatusUpdate)
+	for _, s := range []AgentTokenScope{
+		ScopeAgentCreate, ScopeAgentLifecycle, ScopeAgentNotify, ScopeAgentPortForward,
+		ScopeAgentTokenRefresh, ScopeAgentSAAssign, ScopeProjectSecretRead,
+		ScopeProjectTemplateWrite, ScopeAgentSetMessageMode, ScopeProjectArtifactWrite,
+	} {
+		assert.NotContains(t, scopes, s)
+	}
+}
+
+// The status scope covers only self operations, so adding it to readonly
+// does not change which bounded ceilings readonly fits: a ceiling holding
+// just project.read still fits it (ptone/scion#7926).
+func TestReadonlyRole_StatusScopeIsSelfOperationOnly(t *testing.T) {
+	for _, perm := range agentScopeCoverage([]AgentTokenScope{ScopeAgentStatusUpdate}) {
+		assert.True(t, selfOperationSet[perm], "%s must be a self operation", perm)
+	}
+	c := store.EffectCeiling{Kind: store.EffectCeilingBounded, Version: permissions.CeilingVersionV1, PermissionIDs: []string{"project.read"}}
+	assert.True(t, roleFitsCeiling(c, AgentRoleReadOnly))
 }
