@@ -1350,4 +1350,154 @@ describe('<scion-page-project-decisions>', () => {
       'Invalid project ID in URL'
     );
   });
+
+  it('defers Made live refresh while a filter reset is in flight so old-filter rows never leak into new-filter results', async () => {
+    enableBothFlags();
+    const rowOld = makeLogEntry({ answerId: 'ans-old', surface: 'other', label: 'Unfiltered row' });
+    const rowFiltered = makeLogEntry({ answerId: 'ans-filtered', label: 'Filtered agent row' });
+    const rowLiveNew = makeLogEntry({ answerId: 'ans-live-new', label: 'New matching row' });
+
+    let madeCall = 0;
+    let filterResetAborted = false;
+    let resolveFilterReset!: (res: Response) => void;
+
+    madeHandler = (url, init) => {
+      madeCall++;
+      const agent = url.searchParams.get('agent');
+      const limit = url.searchParams.get('limit');
+      if (madeCall === 1) {
+        return jsonResponse({
+          counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+          entries: [rowOld],
+          agents: [
+            { id: 'a-rel', name: 'release-bot' },
+            { id: 'a-x', name: 'agent-x' },
+          ],
+          answerers: [{ id: 'u-me', name: 'Alice' }],
+        });
+      }
+      if (agent === 'a-x' && !limit) {
+        init?.signal?.addEventListener('abort', () => {
+          filterResetAborted = true;
+        });
+        return new Promise<Response>((resolve) => {
+          resolveFilterReset = resolve;
+        });
+      }
+      // Deferred live refresh after filter reset settles (agent=a-x&limit=50)
+      return jsonResponse({
+        counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+        entries: [rowLiveNew, rowFiltered],
+        agents: [
+          { id: 'a-rel', name: 'release-bot' },
+          { id: 'a-x', name: 'agent-x' },
+        ],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+      });
+    };
+
+    const el = await mount({ path: '/projects/p-1/decisions?tab=made' });
+    const root = el.shadowRoot!;
+    expect(root.querySelector('[data-answer-row="ans-old"]')).not.toBeNull();
+    // P2-N3: surface="other" maps cleanly to capitalized "Other"
+    expect(
+      root.querySelector('[data-answer-row="ans-old"] [data-surface]')?.textContent?.trim()
+    ).toBe('Other');
+
+    // Change Agent filter to a-x -> holds reset fetch open while madeEntries still holds ans-old
+    const agentSelect = root.querySelector<HTMLElement & { value?: string }>(
+      '[data-filter="agent"]'
+    )!;
+    agentSelect.value = 'a-x';
+    agentSelect.dispatchEvent(new CustomEvent('sl-change'));
+    await settle(el, 10);
+
+    // Fire choice-updated while filter reset is in flight; wait past 60ms debounce
+    stateManager.dispatchEvent(
+      new CustomEvent('choice-updated', {
+        detail: { data: { projectId: 'p-1', messageId: 'm-1' } },
+      })
+    );
+    await settle(el, 85);
+
+    expect(filterResetAborted).toBe(false);
+    expect(madeCall).toBe(2);
+
+    // Resolve filter reset with ['ans-filtered'] -> deferred live refresh replays cleanly
+    resolveFilterReset(
+      new Response(
+        JSON.stringify({
+          counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+          entries: [rowFiltered],
+          agents: [
+            { id: 'a-rel', name: 'release-bot' },
+            { id: 'a-x', name: 'agent-x' },
+          ],
+          answerers: [{ id: 'u-me', name: 'Alice' }],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      )
+    );
+    await settle(el, 45);
+
+    expect(madeCall).toBe(3);
+    const renderedIds = Array.from(root.querySelectorAll('[data-answer-row]')).map((tr) =>
+      tr.getAttribute('data-answer-row')
+    );
+    expect(renderedIds).toEqual(['ans-live-new', 'ans-filtered']);
+    expect(renderedIds).not.toContain('ans-old');
+  });
+
+  it('defers Pending live refresh during initial boot reset so boot errors are never swallowed', async () => {
+    enableBothFlags();
+    let pendingCall = 0;
+    let bootResetAborted = false;
+    let resolveBootPending!: (res: Response) => void;
+
+    pendingHandler = (_url, init) => {
+      pendingCall++;
+      if (pendingCall === 1) {
+        init?.signal?.addEventListener('abort', () => {
+          bootResetAborted = true;
+        });
+        return new Promise<Response>((resolve) => {
+          resolveBootPending = resolve;
+        });
+      }
+      return jsonResponse({
+        counts: { waitingOnYou: 0, waitingOnOthers: 0 },
+        prompts: [],
+        agents: [],
+        answerers: [],
+      });
+    };
+
+    const el = await mount();
+    const root = el.shadowRoot!;
+
+    // Fire choice-updated while initial Pending reset is still in flight
+    stateManager.dispatchEvent(
+      new CustomEvent('choice-updated', {
+        detail: { data: { projectId: 'p-1', messageId: 'm-boot' } },
+      })
+    );
+    await settle(el, 85);
+
+    expect(bootResetAborted).toBe(false);
+    expect(pendingCall).toBe(1);
+
+    // Fail the initial Pending reset with 500 -> error state renders (and deferred live does not run)
+    resolveBootPending(
+      new Response(JSON.stringify({ error: { message: 'boot pending error' } }), {
+        status: 500,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+    await settle(el, 40);
+
+    expect(pendingCall).toBe(1);
+    expect(root.querySelector('.error-state h2')?.textContent).toBe('Failed to Load Decisions');
+    expect(root.querySelector('.error-details')?.textContent).toContain('boot pending error');
+    expect(root.querySelector('[data-empty="pending"]')).toBeNull();
+  });
 });

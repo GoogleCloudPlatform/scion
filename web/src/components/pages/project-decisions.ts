@@ -154,8 +154,11 @@ function surfaceDisplay(surface: string): { icon: string; label: string } {
       return { icon: 'telegram', label: 'Telegram' };
     case 'teams':
       return { icon: 'microsoft-teams', label: 'Teams' };
+    case 'other':
+    case '':
+      return { icon: '', label: 'Other' };
     default:
-      return { icon: '', label: surface || 'Other' };
+      return { icon: '', label: surface };
   }
 }
 
@@ -205,7 +208,7 @@ export class ScionPageProjectDecisions extends LitElement {
   private madeAbort: AbortController | null = null;
   private userAbort: AbortController | null = null;
   private liveRefreshTimer: ReturnType<typeof setTimeout> | null = null;
-  private pendingPagesLoaded = 0;
+  private pendingResetInFlight = false;
   private pendingRefreshDeferred = false;
   private madePagedBeyondFirst = false;
   private madeRefreshDeferred = false;
@@ -721,7 +724,11 @@ export class ScionPageProjectDecisions extends LitElement {
       clearTimeout(this.liveRefreshTimer);
       this.liveRefreshTimer = null;
     }
+    this.pendingResetInFlight = false;
+    this.pendingLoadingMore = false;
     this.pendingRefreshDeferred = false;
+    this.madeLoading = false;
+    this.madeLoadingMore = false;
     this.madeRefreshDeferred = false;
     this.pendingAbort?.abort();
     this.pendingAbort = null;
@@ -855,7 +862,7 @@ export class ScionPageProjectDecisions extends LitElement {
 
   private async loadPendingPage(opts: { mode: DecisionsLoadMode }): Promise<void> {
     if (!this.enabled || !this.projectId) return;
-    if (opts.mode === 'live' && this.pendingLoadingMore) {
+    if (opts.mode === 'live' && (this.pendingLoadingMore || this.pendingResetInFlight)) {
       this.pendingRefreshDeferred = true;
       return;
     }
@@ -877,7 +884,9 @@ export class ScionPageProjectDecisions extends LitElement {
           )
         : undefined;
 
-    if (opts.mode === 'append') {
+    if (opts.mode === 'reset') {
+      this.pendingResetInFlight = true;
+    } else if (opts.mode === 'append') {
       this.pendingLoadingMore = true;
     }
 
@@ -892,13 +901,11 @@ export class ScionPageProjectDecisions extends LitElement {
 
       if (opts.mode === 'reset') {
         this.pendingPrompts = res.prompts;
-        this.pendingPagesLoaded = 1;
         this.pendingNextCursor = res.nextCursor ?? '';
       } else if (opts.mode === 'append') {
         const existingIds = new Set(this.pendingPrompts.map((p) => p.promptMessageId));
         const extra = res.prompts.filter((p) => !existingIds.has(p.promptMessageId));
         this.pendingPrompts = [...this.pendingPrompts, ...extra];
-        this.pendingPagesLoaded = Math.max(2, this.pendingPagesLoaded + 1);
         this.pendingNextCursor = res.nextCursor ?? '';
       } else {
         if (this.pendingPrompts.length > MAX_DECISIONS_PAGE_SIZE) {
@@ -928,11 +935,14 @@ export class ScionPageProjectDecisions extends LitElement {
       }
     } finally {
       if (gen === this.pendingGen) {
+        this.pendingResetInFlight = false;
         this.pendingLoadingMore = false;
         if (this.pendingAbort === ac) this.pendingAbort = null;
-        if (this.pendingRefreshDeferred && this.isConnected && this.enabled) {
+        if (this.pendingRefreshDeferred) {
           this.pendingRefreshDeferred = false;
-          void this.loadPendingPage({ mode: 'live' });
+          if (this.isConnected && this.enabled && !this.error) {
+            void this.loadPendingPage({ mode: 'live' });
+          }
         }
       }
     }
@@ -964,7 +974,7 @@ export class ScionPageProjectDecisions extends LitElement {
 
   private async loadMadePage(opts: { mode: DecisionsLoadMode }): Promise<void> {
     if (!this.enabled || !this.projectId || this.hasDateRangeError) return;
-    if (opts.mode === 'live' && this.madeLoadingMore) {
+    if (opts.mode === 'live' && (this.madeLoadingMore || this.madeLoading)) {
       this.madeRefreshDeferred = true;
       return;
     }
@@ -1031,14 +1041,15 @@ export class ScionPageProjectDecisions extends LitElement {
         this.madeLoading = false;
         this.madeLoadingMore = false;
         if (this.madeAbort === ac) this.madeAbort = null;
-        if (
-          this.madeRefreshDeferred &&
-          this.isConnected &&
-          this.enabled &&
-          !this.hasDateRangeError
-        ) {
+        if (this.madeRefreshDeferred) {
           this.madeRefreshDeferred = false;
-          void this.loadMadePage({ mode: 'live' });
+          if (this.isConnected && this.enabled && !this.hasDateRangeError && !this.madeError) {
+            if (this.activeTab === 'made') {
+              void this.loadMadePage({ mode: 'live' });
+            } else if (this.madeLoaded) {
+              this.madeStale = true;
+            }
+          }
         }
       }
     }
@@ -1101,12 +1112,14 @@ export class ScionPageProjectDecisions extends LitElement {
     this.liveRefreshTimer = setTimeout(() => {
       this.liveRefreshTimer = null;
       if (!this.isConnected || !this.enabled || !this.projectId) return;
-      void this.loadPendingPage({ mode: 'live' });
+      if (!this.error) {
+        void this.loadPendingPage({ mode: 'live' });
+      }
       if (this.activeTab === 'made') {
-        if (!this.hasDateRangeError) {
-          void this.loadMadePage({ mode: this.madeLoaded ? 'live' : 'reset' });
+        if (!this.hasDateRangeError && (this.madeLoaded || this.madeLoading)) {
+          void this.loadMadePage({ mode: 'live' });
         }
-      } else if (this.madeLoaded) {
+      } else if (this.madeLoaded || this.madeLoading) {
         this.madeStale = true;
       }
     }, 60);
