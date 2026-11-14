@@ -55,7 +55,7 @@ var pluginBrokerNS = uuid.MustParse("5c104390-a1d0-5e9a-9b1e-5c104390a1d0")
 // the cached-config carry-over (the live hub values override them), and
 // filterSensitiveConfig omits them from integration settings responses.
 var hubKeys = map[string]bool{
-	"hub_url": true, "broker_id": true, "hmac_key": true,
+	"hub_url": true, "public_url": true, "broker_id": true, "hmac_key": true,
 	"plugin_name": true, "project_slug_map": true,
 	"transport_mode": true, "transport_audience": true,
 	"database_driver": true, "database_url": true,
@@ -64,6 +64,7 @@ var hubKeys = map[string]bool{
 var reconfigureRuntimeKeys = map[string]bool{
 	"config_file":      true,
 	"hub_url":          true,
+	"public_url":       true,
 	"hmac_key":         true,
 	"broker_id":        true,
 	"plugin_name":      true,
@@ -1699,9 +1700,14 @@ func (s *Server) getPluginHubCredsChecked(ctx context.Context, name string) (map
 	var credsErr error
 	creds := make(map[string]string)
 
-	// hub_url: from the server config (same value that startup resolves).
-	if hubURL := s.HubEndpointFor(HubEndpointForPluginBrokers); hubURL != "" {
+	// hub_url and public_url: from the server config (the same values that
+	// startup resolves; see PluginHubURLs).
+	hubURL, publicURL := s.PluginHubURLs()
+	if hubURL != "" {
 		creds["hub_url"] = hubURL
+	}
+	if publicURL != "" {
+		creds["public_url"] = publicURL
 	}
 
 	// broker_id: deterministic UUIDv5 — same namespace and seed as startup.

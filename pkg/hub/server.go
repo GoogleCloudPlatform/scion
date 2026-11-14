@@ -299,6 +299,11 @@ type ServerConfig struct {
 	// cloudrun_invoker audience default, broker join responses) is
 	// unaffected. Empty means agents receive HubEndpoint.
 	AgentEndpoint string
+	// InternalURL is server.hub.internal_url: when set, the hub_url handed
+	// to broker plugins for Hub API calls (see Server.PluginHubURLs). It is
+	// not a public endpoint and is not in hubEndpointUses. Empty means
+	// plugins receive the public endpoint as hub_url.
+	InternalURL string
 	// SlowRequestThreshold is the duration after which an HTTP request is
 	// logged as slow. Zero uses logging.DefaultSlowRequestThreshold.
 	SlowRequestThreshold time.Duration

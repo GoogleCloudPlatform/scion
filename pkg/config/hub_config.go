@@ -70,6 +70,16 @@ type HubServerConfig struct {
 	// should be stored back into this field.
 	AgentEndpoint string `json:"agentEndpoint,omitempty" yaml:"agentEndpoint,omitempty" koanf:"agentEndpoint"`
 
+	// InternalURL (server.hub.internal_url) optionally sets the Hub URL
+	// that hub-managed broker plugins call the Hub API on (their hub_url),
+	// for deployments where the public URL (Endpoint) goes through an auth
+	// or reverse proxy the plugins cannot pass. Plugins keep building
+	// user-facing links from the public URL, handed to them as public_url.
+	// It is not a public endpoint and no other use reads it. When unset,
+	// hub_url is the public URL. Operator-only (file or environment); see
+	// ValidateHubInternalURL for the accepted form (ptone/scion#555).
+	InternalURL string `json:"internalUrl,omitempty" yaml:"internalUrl,omitempty" koanf:"internalUrl"`
+
 	// CORS settings
 	CORSEnabled        bool     `json:"corsEnabled" yaml:"corsEnabled" koanf:"corsEnabled"`
 	CORSAllowedOrigins []string `json:"corsAllowedOrigins" yaml:"corsAllowedOrigins" koanf:"corsAllowedOrigins"`
@@ -652,47 +662,69 @@ func isValidAgentEndpointHostname(host string) bool {
 // "http://h?token=secret" carries the secret in RawQuery — so every message
 // states the rule without echoing anything.
 func ValidateAgentEndpoint(raw string) (string, error) {
+	return validateHubOriginURL(AgentEndpointKey, raw)
+}
+
+// AgentEndpointKey is the settings key of HubServerConfig.AgentEndpoint.
+const AgentEndpointKey = "server.hub.agent_endpoint"
+
+// HubInternalURLKey is the settings key of HubServerConfig.InternalURL. It
+// is set only in the settings file or the environment
+// (SCION_SERVER_HUB_INTERNALURL): the server-config API refuses it in every
+// mode, so a web session cannot redirect the HMAC-signed plugin API traffic
+// to another host.
+const HubInternalURLKey = "server.hub.internal_url"
+
+// ValidateHubInternalURL checks server.hub.internal_url by the rules of
+// ValidateAgentEndpoint and returns its normalized form ("" when unset).
+func ValidateHubInternalURL(raw string) (string, error) {
+	return validateHubOriginURL(HubInternalURLKey, raw)
+}
+
+// validateHubOriginURL implements ValidateAgentEndpoint for the settings
+// key named key, which prefixes every error message.
+func validateHubOriginURL(key, raw string) (string, error) {
 	if raw == "" {
 		return "", nil
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
-		return "", fmt.Errorf("server.hub.agent_endpoint: invalid URL")
+		return "", fmt.Errorf("%s: invalid URL", key)
 	}
 	if u.Opaque != "" {
-		return "", fmt.Errorf("server.hub.agent_endpoint: must be an absolute http(s) URL of the form scheme://host[:port]")
+		return "", fmt.Errorf("%s: must be an absolute http(s) URL of the form scheme://host[:port]", key)
 	}
 	if u.User != nil {
-		return "", fmt.Errorf("server.hub.agent_endpoint: must not contain user credentials")
+		return "", fmt.Errorf("%s: must not contain user credentials", key)
 	}
 	scheme := strings.ToLower(u.Scheme)
 	if scheme != "http" && scheme != "https" {
-		return "", fmt.Errorf("server.hub.agent_endpoint: must be an absolute http(s) URL")
+		return "", fmt.Errorf("%s: must be an absolute http(s) URL", key)
 	}
 	if u.RawQuery != "" {
-		return "", fmt.Errorf("server.hub.agent_endpoint: must not contain a query string")
+		return "", fmt.Errorf("%s: must not contain a query string", key)
 	}
 	if u.Fragment != "" {
-		return "", fmt.Errorf("server.hub.agent_endpoint: must not contain a fragment")
+		return "", fmt.Errorf("%s: must not contain a fragment", key)
 	}
 	if u.Path != "" && u.Path != "/" {
-		return "", fmt.Errorf("server.hub.agent_endpoint: must not contain a path")
+		return "", fmt.Errorf("%s: must not contain a path", key)
 	}
 	host := u.Hostname()
 	if host == "" {
-		return "", fmt.Errorf("server.hub.agent_endpoint: must include a host")
+		return "", fmt.Errorf("%s: must include a host", key)
 	}
 	if strings.Contains(host, "%") {
-		return "", fmt.Errorf("server.hub.agent_endpoint: host must not contain an IPv6 zone")
+		return "", fmt.Errorf("%s: host must not contain an IPv6 zone", key)
 	}
 	if net.ParseIP(host) == nil && !isValidAgentEndpointHostname(host) {
-		return "", fmt.Errorf("server.hub.agent_endpoint: host must be an IP address or a hostname of letters, digits, '_', '-', and '.'")
+		return "", fmt.Errorf("%s: host must be an IP address or a hostname of letters, digits, '_', '-', and '.'", key)
 	}
 	authority := host
 	if portStr := u.Port(); portStr != "" {
 		port, err := strconv.Atoi(portStr)
 		if err != nil || port < 1 || port > 65535 {
-			return "", fmt.Errorf("server.hub.agent_endpoint: port must be between 1 and 65535")
+			return "", fmt.Errorf("%s: port must be between 1 and 65535", key)
 		}
 		authority = net.JoinHostPort(host, strconv.Itoa(port))
 	} else if strings.Contains(host, ":") {

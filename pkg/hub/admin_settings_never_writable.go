@@ -37,12 +37,16 @@ import (
 // project, which selects the service-account minting project
 // (ptone/scion#4942), and the server keyring file path (ptone/scion#1530:
 // the keyring is a deploy-time secret input read once at startup) and its
-// operator-only world-readable override, and server.trusted_proxies (the
-// transport policy's trust set). A key matches itself and every key nested
+// operator-only world-readable override, server.trusted_proxies (the
+// transport policy's trust set), and server.hub.internal_url (where broker
+// plugins send their signed Hub API calls; ptone/scion#555). A key matches itself and every key nested
 // under it.
 var neverAPIWritableSettingsKeys = []string{
 	config.HubClassKey,
 	config.HubGCPProjectIDKey,
+	// The URL hub-managed broker plugins send HMAC-signed Hub API calls
+	// to (ptone/scion#555): a web session must not redirect it.
+	config.HubInternalURLKey,
 	config.TestIdentitiesKey,
 	config.ProxyDriverPrincipalsKey,
 	config.ProxyDriverTokenAudienceKey,

@@ -994,8 +994,10 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 							if secretErr != nil {
 								log.Printf("Warning: failed to provision secret for broker plugin %q: %v", bt, secretErr)
 							} else {
+								pluginHubURL, pluginPublicURL := hubSrv.PluginHubURLs()
 								hubCreds := map[string]string{
-									"hub_url":     hubSrv.HubEndpointFor(hub.HubEndpointForPluginBrokers),
+									"hub_url":     pluginHubURL,
+									"public_url":  pluginPublicURL,
 									"hmac_key":    secretKey,
 									"broker_id":   brokerID,
 									"plugin_name": bt,
@@ -1801,6 +1803,11 @@ func validateServerPreflight(cfg *config.GlobalConfig) error {
 		return err
 	}
 	cfg.Hub.AgentEndpoint = normalized
+	internalURL, err := config.ValidateHubInternalURL(cfg.Hub.InternalURL)
+	if err != nil {
+		return err
+	}
+	cfg.Hub.InternalURL = internalURL
 	if err := cfg.Hub.Conduit.Validate(); err != nil {
 		return err
 	}
@@ -2932,6 +2939,7 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		DefaultUserRole:              cfg.Auth.DefaultUserRole,
 		HubEndpoint:                  hubEndpoint,
 		AgentEndpoint:                cfg.Hub.AgentEndpoint,
+		InternalURL:                  cfg.Hub.InternalURL,
 		SlowRequestThreshold:         cfg.SlowRequestThreshold,
 		StalledThreshold:             cfg.Hub.StalledThreshold,
 		MissingAgentGrace:            cfg.Hub.MissingAgentGrace,
