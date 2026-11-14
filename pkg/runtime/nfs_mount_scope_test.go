@@ -599,8 +599,9 @@ func cloudRunShareMounts(t *testing.T, inst *runpb.Instance) []shareMount {
 // Cloud Run mounts the agent's workspace and its home with the paths
 // provisionCloudRunNFS gives Run: the project workspace for shared-plain and
 // worktree-per-agent, the agent's own agents/<slug>/workspace for
-// clone-per-agent. It has no shared dirs on the share, and Run refuses
-// empty-per-agent before any path is built.
+// clone-per-agent. When project shared dirs are configured, it also mounts
+// each shared-dir leaf on the share; Run refuses empty-per-agent before any
+// path is built.
 func TestCloudRunInstance_NFSMountScope(t *testing.T) {
 	orig := cloudRunRequireNFSFilesystem
 	cloudRunRequireNFSFilesystem = func(string) error { return nil }
@@ -636,9 +637,42 @@ func TestCloudRunInstance_NFSMountScope(t *testing.T) {
 			if err != nil {
 				t.Fatalf("provisionCloudRunNFS: %v", err)
 			}
-			assertMountScope(t, cloudRunShareMounts(t, r.buildCloudRunInstance(cfg, 1000, 1000, paths)), []shareMount{
+			baseInst, err := r.buildCloudRunInstance(cfg, 1000, 1000, paths)
+			if err != nil {
+				t.Fatalf("buildCloudRunInstance: %v", err)
+			}
+			assertMountScope(t, cloudRunShareMounts(t, baseInst), []shareMount{
 				{rel: tc.workspace, target: "/workspace"},
 				{rel: scopeRel("agents", scopeAgent, "home-"+scopeAgentID), target: home},
+			})
+
+			withShared := cfg
+			withShared.NFSShareServer = scopeServer
+			withShared.NFSShareExport = scopeExport
+			withShared.SharedDirs = []api.SharedDir{
+				{Name: "scratchpad"},
+				{Name: "notes", ReadOnly: true, InWorkspace: true},
+			}
+			withShared.SharedDirStorage = &SharedDirRealization{
+				Backend:     "nfs",
+				Server:      scopeServer,
+				Export:      scopeExport,
+				SubPathRoot: scopeRoot,
+				ProjectID:   scopeProjectID,
+				SubPaths: map[string]string{
+					"scratchpad": scopeRel("shared-dirs", "scratchpad"),
+					"notes":      scopeRel("shared-dirs", "notes"),
+				},
+			}
+			sharedInst, err := r.buildCloudRunInstance(withShared, 1000, 1000, paths)
+			if err != nil {
+				t.Fatalf("buildCloudRunInstance(withShared): %v", err)
+			}
+			assertMountScope(t, cloudRunShareMounts(t, sharedInst), []shareMount{
+				{rel: tc.workspace, target: "/workspace"},
+				{rel: scopeRel("agents", scopeAgent, "home-"+scopeAgentID), target: home},
+				{rel: scopeRel("shared-dirs", "scratchpad"), target: "/scion-volumes/scratchpad"},
+				{rel: scopeRel("shared-dirs", "notes"), target: "/workspace/.scion-volumes/notes", readOnly: true},
 			})
 		})
 	}

@@ -446,7 +446,10 @@ func TestCloudRunRun_HarnessEnvAgentHomeArg(t *testing.T) {
 	h.env = map[string]string{"EXAMPLE_SEEN": "set"}
 	cfg := crEnvCfg(h)
 	cfg.HomeDir = "/var/lib/scion-broker/agents/agent-1/home"
-	inst := rt.buildCloudRunInstance(cfg, 1000, 1000, nil)
+	inst, err := rt.buildCloudRunInstance(cfg, 1000, 1000, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if h.gotName != cfg.Name || h.gotHome != cfg.HomeDir || h.gotUser != cfg.UnixUsername {
 		t.Errorf("GetEnv(%q, %q, %q), want (%q, %q, %q)", h.gotName, h.gotHome, h.gotUser, cfg.Name, cfg.HomeDir, cfg.UnixUsername)
 	}
@@ -474,7 +477,10 @@ func TestCloudRunRun_HarnessEnvSpecStable(t *testing.T) {
 
 	t.Run("name order", func(t *testing.T) {
 		rt := newFakeCloudRunRuntime(t, &fakeInstancesClient{getErr: notFoundErr()})
-		inst := rt.buildCloudRunInstance(crEnvCfg(newCREnvHarness(harnessEnv, nil)), 1000, 1000, nil)
+		inst, err := rt.buildCloudRunInstance(crEnvCfg(newCREnvHarness(harnessEnv, nil)), 1000, 1000, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
 		var order []string
 		for _, ev := range inst.Containers[0].Env {
 			if _, ok := harnessEnv[ev.GetName()]; ok {

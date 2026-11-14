@@ -496,6 +496,10 @@ func TestCloudRunRun_ExistingInstanceSpecDiffRecreated(t *testing.T) {
 			mutate: func(inst *runpb.Instance) {
 				inst.Volumes[0].GetNfs().Path = "/ws/projects/other/workspace"
 			}},
+		{field: "volume_mounts", existingCfg: readyRunCfg(), runCfg: readyRunCfg(),
+			mutate: func(inst *runpb.Instance) {
+				inst.Containers[0].VolumeMounts[0].MountPath = "/repo-root/other"
+			}},
 	} {
 		t.Run(tc.field+"/"+tc.existingCfg.Labels[api.LabelRunID], func(t *testing.T) {
 			fake := &fakeInstancesClient{}

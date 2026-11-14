@@ -361,7 +361,7 @@ func waitCloudRunInstanceGone(ctx context.Context, c cloudrun.InstancesAPI, name
 //     whose value comes from a source rather than a literal;
 //   - the set of env var names, so an env var this start does not set
 //     (for example a removed secret) is never kept;
-//   - the volumes.
+//   - the volumes and container volume mounts.
 //
 // Only field names are returned, never values.
 func cloudRunSpecDiff(existing, want *runpb.Instance, secretEnv map[string]bool) []string {
@@ -384,6 +384,9 @@ func cloudRunSpecDiff(existing, want *runpb.Instance, secretEnv map[string]bool)
 	}
 	if !slices.EqualFunc(existing.GetVolumes(), want.GetVolumes(), func(a, b *runpb.Volume) bool { return proto.Equal(a, b) }) {
 		diff = append(diff, "volumes")
+	}
+	if !slices.EqualFunc(ec.GetVolumeMounts(), wc.GetVolumeMounts(), func(a, b *runpb.VolumeMount) bool { return proto.Equal(a, b) }) {
+		diff = append(diff, "volume_mounts")
 	}
 	return diff
 }

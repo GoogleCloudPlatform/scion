@@ -514,7 +514,10 @@ func TestBuildCloudRunInstance_FallbackDoesNotOverrideResolvedAuth(t *testing.T)
 		ResolvedAuth: &api.ResolvedAuth{EnvVars: map[string]string{"CLOUD_ML_REGION": authFixtureRegion, "EXAMPLE_STAGED_AUTH": "from-resolved-auth"}},
 		FallbackEnv:  map[string]string{"CLOUD_ML_REGION": "template", "EXAMPLE_STAGED_AUTH": "template", "NEW_KEY": "from-template"},
 	}
-	inst := rt.buildCloudRunInstance(cfg, 1000, 1000, nil)
+	inst, err := rt.buildCloudRunInstance(cfg, 1000, 1000, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	count := map[string]int{}
 	env := map[string]string{}
 	for _, ev := range inst.Containers[0].Env {

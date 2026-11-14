@@ -190,7 +190,10 @@ func TestBuildCloudRunInstance_FallbackEnvIsLast(t *testing.T) {
 		},
 		SuppressedFallbackKeys: []string{"SUPP_KEY"},
 	}
-	inst := rt.buildCloudRunInstance(cfg, 1000, 1000, nil)
+	inst, err := rt.buildCloudRunInstance(cfg, 1000, 1000, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	env := map[string]string{}
 	count := map[string]int{}
 	for _, ev := range inst.Containers[0].Env {
