@@ -60,6 +60,13 @@ func applyCloneDepth(gc *api.GitCloneConfig, env map[string]string, in cloneDept
 		return nil, fmt.Errorf("%s: %w", source, err)
 	}
 	if !ok {
+		if env != nil && env[gitDepthEnvKey] == "" {
+			d := 1
+			if gc.Depth != nil {
+				d = *gc.Depth
+			}
+			env[gitDepthEnvKey] = strconv.Itoa(d)
+		}
 		return gc, nil
 	}
 	out := *gc

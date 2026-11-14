@@ -507,6 +507,37 @@ func TestBuildStartContext_GitClone(t *testing.T) {
 	}
 }
 
+func TestBuildStartContext_GitCloneNilDepthDefaultsEnvToOne(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+
+	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name: "agent-nil-depth",
+		Config: &CreateAgentConfig{
+			GitClone: &api.GitCloneConfig{
+				URL:    "https://github.com/org/repo.git",
+				Branch: "main",
+				// Depth omitted (nil) — documented default is shallow depth 1.
+			},
+		},
+		EnvClassifications: map[string]api.EnvKind{},
+		HTTPRequest:        r,
+		Operation:          opCreate,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := sc.Opts.Env["SCION_GIT_DEPTH"]; got != "1" {
+		t.Errorf("expected SCION_GIT_DEPTH='1' when GitClone.Depth is nil, got %q", got)
+	}
+	if kind, ok := sc.EnvClassifications["SCION_GIT_DEPTH"]; !ok || kind != api.EnvKindPlain {
+		t.Errorf("SCION_GIT_DEPTH classification: got (%q, %v), want (%q, true)", kind, ok, api.EnvKindPlain)
+	}
+}
+
 func TestBuildStartContext_NilHTTPRequest(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()

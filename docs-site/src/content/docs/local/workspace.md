@@ -141,10 +141,11 @@ Each agent gets its own branch named `scion/<agent-name>`. This prevents conflic
 
 By default, git projects use a shallow clone with `depth=1` for fast startup. 
 
-- **Full Clones on Startup:** If an agent needs full git history for operations like `git log` or `git blame` from the very start, you can configure `depth: 0` (or set `SCION_GIT_DEPTH=0`). The `GitCloneConfig` API treats a depth of `0` as an explicit instruction to perform a complete, non-shallow clone.
-- **Unshallowing Later:** Alternatively, an agent with a shallow clone (`depth=1`) can unshallow itself later inside its session by running:
+- **Full or Deeper Clones on Startup:** If an agent needs git history for operations like `git diff main...HEAD`, `git merge-base`, `git log`, or `git blame` from the start, set `clone_depth: full` (or an integer `N`) on the agent's template or [profile](/scion/reference/orchestrator-settings/#profiles-profiles) (see [Agent Configuration](/scion/reference/agent-config/)). At the API/env level, `GitCloneConfig` (`depth: 0`) and `SCION_GIT_DEPTH=0` represent a full, non-shallow clone.
+- **Deepening Later:** Every `clone-per-agent` container receives `SCION_GIT_DEPTH` (`1` by default, `N` for depth `N`, or `0` for full) and is oriented at startup that `clone-per-agent` checkouts default to shallow depth 1. An agent with a shallow clone can deepen on demand inside its session:
   ```bash
-  git fetch --unshallow
+  git fetch --deepen=50 origin main   # reach a merge base incrementally
+  git fetch --unshallow               # fetch complete history
   ```
 
 #### Environment Variables
@@ -277,6 +278,7 @@ project, whichever broker an agent lands on.
   Using hub, cloning repo https://github.com/org/repo.git
   ```
 - **The agent works from the remote's state**, not from your checkout, and its branch reaches you only after it pushes. Merge agent work via git push and pull request.
+- **Clones are shallow (`depth=1`) by default.** The Runtime Broker sets `SCION_GIT_DEPTH` (`1` by default, `N`, or `0` for full) in the container. Agents whose work needs history from the start (such as reviewers or investigators) can either deepen on demand (`git fetch --deepen=<N>` or `git fetch --unshallow`) or use `clone_depth: full` (or `N`) on their template or [profile](/scion/reference/orchestrator-settings/#profiles-profiles).
 
 To give agents on a remote Hub git worktrees instead of separate clones, create the project with the
 `worktree-per-agent` [workspace sharing mode](/scion/local/workspaces-and-sharing/): the broker then

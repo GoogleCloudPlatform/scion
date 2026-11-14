@@ -1328,10 +1328,12 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 			env["SCION_GIT_BRANCH"] = gc.Branch
 			classifyBrokerEnv("SCION_GIT_BRANCH", api.EnvKindPlain)
 		}
+		depth := 1
 		if gc.Depth != nil {
-			env["SCION_GIT_DEPTH"] = strconv.Itoa(*gc.Depth)
-			classifyBrokerEnv("SCION_GIT_DEPTH", api.EnvKindPlain)
+			depth = *gc.Depth
 		}
+		env["SCION_GIT_DEPTH"] = strconv.Itoa(depth)
+		classifyBrokerEnv("SCION_GIT_DEPTH", api.EnvKindPlain)
 		// The project's recorded remote, as the hub sent it: sciontool init
 		// offers the git token to the clone only when the clone URL names it.
 		// Relayed unchanged; without it the clone gets no token.
