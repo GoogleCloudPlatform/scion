@@ -124,6 +124,10 @@ type BrokerCapabilities struct {
 	// NFS leaf). The hub refuses a home-resetting reincarnation (412) for any
 	// other runtime, before anything is stopped (ptone/scion#7757).
 	ReprovisionResetHomeRuntimes []string `json:"reprovisionResetHomeRuntimes,omitempty"`
+	// RestartingRuntimes lists the runtimes on which the platform may
+	// restart an agent container that exited, so the hub stops a run that
+	// reported limits_exceeded (ptone/scion#7928).
+	RestartingRuntimes []string `json:"restartingRuntimes,omitempty"`
 	// ChangedFields indicates this broker re-renders, at start, the files
 	// provisioning wrote for the provision-rendered keys the hub lists in
 	// the inline config's changed_fields (ptone/scion#3982).

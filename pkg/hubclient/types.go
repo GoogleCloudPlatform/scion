@@ -438,6 +438,10 @@ type BrokerCapabilities struct {
 	// store.BrokerCapabilities.ReprovisionResetHomeRuntimes is its
 	// counterpart).
 	ReprovisionResetHomeRuntimes []string `json:"reprovisionResetHomeRuntimes,omitempty"`
+	// RestartingRuntimes lists the runtimes on which the platform may
+	// restart an exited agent container (ptone/scion#7928;
+	// store.BrokerCapabilities.RestartingRuntimes is its counterpart).
+	RestartingRuntimes []string `json:"restartingRuntimes,omitempty"`
 	// ChangedFields indicates the broker re-renders, at start, the files
 	// provisioning wrote for the provision-rendered keys the hub lists in
 	// the inline config's changed_fields (ptone/scion#3982;

@@ -2559,9 +2559,9 @@ type Server struct {
 	// intentStops records when the hub last stopped an agent that ran with
 	// run intent stopped (agent ID -> time.Time), to rate-limit it.
 	intentStops sync.Map
-	// limitsStops records the run the hub last stopped because the agent
-	// reported limits_exceeded (agent ID -> run ID), so each run is
-	// stopped once (limits_exceeded_stop.go). limitsStopsInFlight counts
+	// limitsStops holds the runs whose limits_exceeded stop is in flight
+	// (agent ID -> run ID), so each is dispatched once
+	// (limits_exceeded_stop.go). limitsStopsInFlight counts
 	// those stops as a test handle only; shutdown does not wait for it.
 	limitsStops         sync.Map
 	limitsStopsInFlight sync.WaitGroup

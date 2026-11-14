@@ -177,6 +177,7 @@ func storeBrokerCapabilities(c *hubclient.BrokerCapabilities) *store.BrokerCapab
 		AgentMoveRecreate:            c.AgentMoveRecreate,
 		ReprovisionEmptyPerAgent:     c.ReprovisionEmptyPerAgent,
 		ReprovisionResetHomeRuntimes: append([]string(nil), c.ReprovisionResetHomeRuntimes...),
+		RestartingRuntimes:           append([]string(nil), c.RestartingRuntimes...),
 		ChangedFields:                c.ChangedFields,
 		ClearedFields:                c.ClearedFields,
 		UnlimitedCountLimits:         c.UnlimitedCountLimits,

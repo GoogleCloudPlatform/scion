@@ -1464,6 +1464,11 @@ type BrokerCapabilities struct {
 	// other runtime, before anything is stopped (ptone/scion#7757). An old
 	// broker reports none, so it is refused everywhere.
 	ReprovisionResetHomeRuntimes []string `json:"reprovisionResetHomeRuntimes,omitempty"`
+	// RestartingRuntimes lists the runtimes on which the platform may
+	// restart an agent container that exited. On those the hub stops a run
+	// that reported limits_exceeded (ptone/scion#7928). An old broker
+	// reports none, so it gets no such stop.
+	RestartingRuntimes []string `json:"restartingRuntimes,omitempty"`
 	// ChangedFields indicates the broker re-renders, at start, the files
 	// provisioning wrote for the provision-rendered keys the hub lists in
 	// the inline config's changed_fields (ptone/scion#3982). Only for such
