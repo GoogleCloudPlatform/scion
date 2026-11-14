@@ -967,29 +967,6 @@ type brokerHeartbeatRequest struct {
 	WorkloadIdentityTargets *[]store.WorkloadIdentityTarget `json:"workloadIdentityTargets,omitempty"`
 }
 
-// normalizeWorkloadIdentityTargets returns the targets to store from a
-// heartbeat's reported list: trimmed, with empty-pool entries dropped, and,
-// for a flat row (which has no profiles), with each profile cleared. It
-// reports whether any profile was dropped. The result is never nil.
-func normalizeWorkloadIdentityTargets(reported []store.WorkloadIdentityTarget, flat bool) ([]store.WorkloadIdentityTarget, bool) {
-	out := make([]store.WorkloadIdentityTarget, 0, len(reported))
-	dropped := false
-	for _, t := range reported {
-		t.Profile = strings.TrimSpace(t.Profile)
-		t.Pool = strings.TrimSpace(t.Pool)
-		t.Namespace = strings.TrimSpace(t.Namespace)
-		if t.Pool == "" {
-			continue
-		}
-		if flat && t.Profile != "" {
-			t.Profile = ""
-			dropped = true
-		}
-		out = append(out, t)
-	}
-	return out, dropped
-}
-
 // brokerStartInFlight mirrors hubclient.StartInFlight.
 type brokerStartInFlight struct {
 	ProjectID string `json:"projectId"`
@@ -1432,11 +1409,16 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			// profile.
 			var wiTargets []store.WorkloadIdentityTarget
 			if heartbeat.WorkloadIdentityTargets != nil {
-				var dropped bool
+				var dropped workloadIdentityTargetDrops
 				wiTargets, dropped = normalizeWorkloadIdentityTargets(*heartbeat.WorkloadIdentityTargets, broker.IsFlat())
-				if dropped {
+				if dropped.profiles > 0 {
 					s.agentLifecycleLog.Warn("heartbeat: ignoring the profile of Workload Identity targets reported for a flat Runtime Broker",
 						"broker_id", id)
+				}
+				if dropped.invalid > 0 || dropped.overCap > 0 {
+					// Counts only: the rejected values are not logged.
+					s.agentLifecycleLog.Warn("heartbeat: ignoring malformed or excess Workload Identity targets reported by a Runtime Broker",
+						"broker_id", id, "invalid", dropped.invalid, "over_cap", dropped.overCap, "max", maxWorkloadIdentityTargets)
 				}
 			}
 			// A broker older than templateTiers ignores the telemetry tiers

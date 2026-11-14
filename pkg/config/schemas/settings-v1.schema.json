@@ -697,7 +697,7 @@
           "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
           "maxLength": 253,
           "description": "Kubernetes only. The Kubernetes ServiceAccount (KSA) a pod runs as when its GCP identity mode resolves to 'block'. It must be a dedicated KSA the operator provisions with no Workload Identity annotation and no IAM grants, so it is zero-privilege; Scion does not create or check it. Empty or unset means a block pod runs as the namespace's default ServiceAccount. Block pods also get automountServiceAccountToken false and a node selector for Workload Identity nodes. A profile value wins over this one. Read only from the broker's own operator-controlled settings."
-},
+        },
         "workload_identity_pool": {
           "type": "string",
           "pattern": "^$|^[a-z][a-z0-9-]{4,28}[a-z0-9]\\.svc\\.id\\.goog$",

@@ -22,10 +22,13 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"unicode"
 
 	"google.golang.org/api/googleapi"
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -56,6 +59,79 @@ const roleWorkloadIdentityUser = "roles/iam.workloadIdentityUser"
 // skipped, at mint.
 const GCPTokenEventWIBinding GCPTokenEventType = "gcp_sa.wi_binding"
 
+// maxWorkloadIdentityTargets caps the Workload Identity targets stored for
+// one broker. A legacy broker reports one per Kubernetes profile and a flat
+// instance at most one, so the cap only bounds a broken or hostile report.
+const maxWorkloadIdentityTargets = 64
+
+// maxWorkloadIdentityProfileLen bounds a reported profile name, which is
+// shown in the mint response and the CLI.
+const maxWorkloadIdentityProfileLen = 253
+
+// workloadIdentityTargetDrops counts what normalizeWorkloadIdentityTargets
+// left out or changed.
+type workloadIdentityTargetDrops struct {
+	// profiles: profiles cleared on a flat row.
+	profiles int
+	// invalid: entries dropped for a malformed pool, namespace or profile.
+	invalid int
+	// overCap: valid entries dropped past maxWorkloadIdentityTargets.
+	overCap int
+}
+
+// normalizeWorkloadIdentityTargets returns the targets to store from a
+// heartbeat's reported list. The hub does not trust what a broker sends:
+// the pool and namespace end up in an IAM member and in the gcloud command
+// a person is told to run, so an entry is kept only when its pool passes
+// config.ValidateWorkloadIdentityPool, its namespace is a DNS-1123 label,
+// and its profile has no control characters and a bounded length. Values
+// are trimmed, at most maxWorkloadIdentityTargets entries are kept, and on
+// a flat row (which has no profiles) each profile is cleared. The result is
+// never nil.
+func normalizeWorkloadIdentityTargets(reported []store.WorkloadIdentityTarget, flat bool) ([]store.WorkloadIdentityTarget, workloadIdentityTargetDrops) {
+	out := make([]store.WorkloadIdentityTarget, 0, min(len(reported), maxWorkloadIdentityTargets))
+	var drops workloadIdentityTargetDrops
+	for _, t := range reported {
+		t.Profile = strings.TrimSpace(t.Profile)
+		t.Pool = strings.TrimSpace(t.Pool)
+		t.Namespace = strings.TrimSpace(t.Namespace)
+		if t.Pool == "" {
+			continue
+		}
+		if config.ValidateWorkloadIdentityPool(t.Pool) != nil ||
+			len(validation.IsDNS1123Label(t.Namespace)) > 0 ||
+			!validWorkloadIdentityProfile(t.Profile) {
+			drops.invalid++
+			continue
+		}
+		if flat && t.Profile != "" {
+			t.Profile = ""
+			drops.profiles++
+		}
+		if len(out) == maxWorkloadIdentityTargets {
+			drops.overCap++
+			continue
+		}
+		out = append(out, t)
+	}
+	return out, drops
+}
+
+// validWorkloadIdentityProfile reports whether a reported profile name may
+// be stored: at most maxWorkloadIdentityProfileLen bytes of printable,
+// non-space characters (empty is allowed).
+func validWorkloadIdentityProfile(p string) bool {
+	if len(p) > maxWorkloadIdentityProfileLen {
+		return false
+	}
+	for _, r := range p {
+		if r <= ' ' || r == 0x7f || !unicode.IsPrint(r) {
+			return false
+		}
+	}
+	return true
+}
+
 // workloadIdentityMintTarget is one (pool, namespace) a mint binds, with the
 // runtime targets that report it.
 type workloadIdentityMintTarget struct {
@@ -68,10 +144,25 @@ type workloadIdentityMintTarget struct {
 // report no Workload Identity pool.
 type workloadIdentityMissing struct {
 	profiles []string
-	// tooOld is true when the broker does not report Workload Identity
-	// targets at all (no wi_targets_v1 capability).
-	tooOld bool
+	// why says why no pool is reported.
+	why workloadIdentityMissingReason
 }
+
+// workloadIdentityMissingReason is why a broker's Kubernetes targets report
+// no Workload Identity pool.
+type workloadIdentityMissingReason int
+
+const (
+	// wiMissingNotConfigured: the broker reports targets
+	// (wi_targets_v1), and these have no workload_identity_pool.
+	wiMissingNotConfigured workloadIdentityMissingReason = iota
+	// wiMissingTooOld: a legacy broker without wi_targets_v1, too old to
+	// report a pool.
+	wiMissingTooOld
+	// wiMissingFlat: a flat Runtime Broker instance, which does not report
+	// a pool yet (ptone/scion#3329 phase 5 P3b), whatever its version.
+	wiMissingFlat
+)
 
 // workloadIdentityMintPlan is what a mint binds: the (pool, namespace)
 // targets, sorted, and the brokers whose Kubernetes targets report no pool.
@@ -140,10 +231,14 @@ func workloadIdentityMintPlanFor(brokers []*store.RuntimeBroker) workloadIdentit
 		}
 		if len(missing) > 0 {
 			sort.Strings(missing)
-			plan.missing = append(plan.missing, workloadIdentityMissing{
-				profiles: missing,
-				tooOld:   b.Capabilities == nil || !b.Capabilities.WITargetsV1,
-			})
+			why := wiMissingNotConfigured
+			switch {
+			case flat:
+				why = wiMissingFlat
+			case b.Capabilities == nil || !b.Capabilities.WITargetsV1:
+				why = wiMissingTooOld
+			}
+			plan.missing = append(plan.missing, workloadIdentityMissing{profiles: missing, why: why})
 		}
 	}
 	for i := range plan.targets {
@@ -170,8 +265,17 @@ func workloadIdentityMember(pool, namespace, ksa string) string {
 // workloadIdentityManualStep is the gcloud command that grants member the
 // Workload Identity role on saEmail by hand.
 func workloadIdentityManualStep(saEmail, member string) string {
-	return fmt.Sprintf("gcloud iam service-accounts add-iam-policy-binding %s --role %s --member %q",
-		saEmail, roleWorkloadIdentityUser, member)
+	return fmt.Sprintf("gcloud iam service-accounts add-iam-policy-binding %s --role %s --member %s",
+		shellSingleQuote(saEmail), roleWorkloadIdentityUser, shellSingleQuote(member))
+}
+
+// shellSingleQuote quotes s for a POSIX shell: inside single quotes nothing
+// is expanded, and an embedded single quote is closed, escaped and reopened.
+// The member and email are validated before they get here, so this is
+// defence in depth: no reported value can turn the manual step into
+// another command.
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // gcpAccountID returns the account ID of a service account email: the part
@@ -226,8 +330,11 @@ func (s *Server) grantWorkloadIdentityBestEffort(ctx context.Context, saEmail st
 	placeholder := workloadIdentityMember("<CLUSTER_PROJECT>.svc.id.goog", "<NAMESPACE>", ksa)
 	for _, m := range plan.missing {
 		detail := "no workload_identity_pool is configured for these Kubernetes runtime targets on the Runtime Broker"
-		if m.tooOld {
+		switch m.why {
+		case wiMissingTooOld:
 			detail = "the Runtime Broker does not report a Workload Identity pool (upgrade it and set workload_identity_pool)"
+		case wiMissingFlat:
+			detail = "flat Runtime Broker instances do not report a Workload Identity pool yet; make the grant by hand"
 		}
 		out = append(out, api.WorkloadIdentityBinding{
 			KSA: ksa, Profiles: m.profiles,
@@ -274,9 +381,41 @@ func setWorkloadIdentityFailure(b *api.WorkloadIdentityBinding, saEmail string, 
 		b.Detail = fmt.Sprintf("IAM does not know the Workload Identity pool %s; check workload_identity_pool and that Workload Identity is enabled on the cluster", b.Pool)
 	default:
 		b.State = api.WorkloadIdentityBindingFailed
-		b.Detail = "the IAM policy update failed: " + err.Error()
+		b.Detail = "the IAM policy update failed: " + sanitizeWorkloadIdentityDetail(err.Error())
 	}
 	b.ManualStep = workloadIdentityManualStep(saEmail, b.Member)
+}
+
+// maxWorkloadIdentityDetailLen bounds the IAM error text echoed in a
+// failed entry's detail.
+const maxWorkloadIdentityDetailLen = 300
+
+// sanitizeWorkloadIdentityDetail makes IAM error text safe to show on one
+// line: control characters (newlines included) become spaces, runs of
+// spaces collapse, and the text is cut at maxWorkloadIdentityDetailLen
+// runes. It can then never add a line of its own (such as a fake manual
+// step) to the CLI output.
+func sanitizeWorkloadIdentityDetail(msg string) string {
+	var b strings.Builder
+	space := false
+	n := 0
+	for _, r := range msg {
+		if unicode.IsControl(r) || unicode.IsSpace(r) || !unicode.IsPrint(r) {
+			if !space && b.Len() > 0 {
+				b.WriteByte(' ')
+				space = true
+			}
+			continue
+		}
+		if n == maxWorkloadIdentityDetailLen {
+			b.WriteString("…")
+			break
+		}
+		b.WriteRune(r)
+		space = false
+		n++
+	}
+	return strings.TrimSpace(b.String())
 }
 
 // workloadIdentityErrorReason maps an IAM error to a binding reason.
@@ -319,7 +458,13 @@ func (s *Server) projectWorkloadIdentityBindings(ctx context.Context, projectID,
 	if !s.experimentEnabled(experiments.K8sWorkloadIdentitySetup) {
 		return nil
 	}
-	brokers, _ := s.projectProviderBrokers(ctx, projectID)
+	brokers, complete := s.projectProviderBrokers(ctx, projectID)
+	if !complete {
+		// The plan may miss a broker, or (when the provider list could not
+		// be read) be empty, which would read as "no Kubernetes target".
+		slog.Warn("GCP SA mint: the project's provider brokers could not all be read; Workload Identity bindings may miss some runtime targets",
+			"project_id", projectID, "sa_email", saEmail, "brokers_read", len(brokers))
+	}
 	plan := workloadIdentityMintPlanFor(brokers)
 	if plan.empty() {
 		return nil
