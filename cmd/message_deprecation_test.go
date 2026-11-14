@@ -156,9 +156,22 @@ func newDeprecationTestServer(t *testing.T, projectID string) (*httptest.Server,
 			})
 
 		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/scheduled-events"):
+			var req hubclient.CreateScheduledEventRequest
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if req.AgentID == "" && req.AgentName == "" {
+				w.WriteHeader(http.StatusBadRequest)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": map[string]interface{}{
+						"code":    "validation_error",
+						"message": "agentId or agentName is required for message events",
+					},
+				})
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				"id":      "evt-123",
-				"fire_at": "2030-01-01T00:00:00Z",
+				"id":     "evt-123",
+				"fireAt": "2030-01-01T00:00:00Z",
 			})
 
 		case r.Method == http.MethodPost:
