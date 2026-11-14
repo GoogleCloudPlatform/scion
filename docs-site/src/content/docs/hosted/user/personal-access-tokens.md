@@ -175,7 +175,7 @@ scion hub token create --boundary hub \
 
 | Scope | Boundary | Used for |
 |-------|----------|----------|
-| `skill:list`, `skill:read` | Project or hub | Find the skill to publish to and read it. |
+| `skill:list`, `skill:read` | Project or hub | Find the skill to publish to and read it. With `--scope`, `skills publish` stops with an error if this lookup fails, rather than creating a skill. |
 | `skill:create_global` | Hub only | Create a global skill on its first publish. |
 | `skill:update_global` | Hub only | Publish a new version of a global skill (create, upload and finalize the version), update its metadata, deprecate a version. |
 | `skill:delete_global` | Hub only | Delete (archive) a global skill. |

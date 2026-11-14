@@ -1241,7 +1241,7 @@ Manages skills in the Hub skill bank — reusable, versioned instruction snippet
 - `show <name-or-id>`: Show a skill's details and versions.
 - `create <name>`: Scaffold a new local skill directory with a starter `SKILL.md` (local-only; does not publish).
 - `publish <path>`: Publish a local skill directory to the Hub. Limits: 50 files, 10 MB/file, 50 MB total.
-    - Flags: `--version <semver>` (required), `--scope <global|project|user>` (when set and `--skill-id` is not, only a same-named skill in that scope is reused: the current project's for `project`, your own for `user`; otherwise one is created there. Without `--scope`, any same-named skill is reused and a new skill is created in `global`. `--scope global` links and looks up no project), `--skill-id <id>`. Global skills need the `global-catalog-author` or `hub-admin` role (see [Global catalog authoring](/scion/hosted/ha/permissions/#global-catalog-authoring)).
+    - Flags: `--version <semver>` (required), `--scope <global|project|user>` (when set and `--skill-id` is not, only a same-named skill in that scope is reused: the current project's for `project`, your own for `user`; otherwise one is created there, and a failed lookup stops the command with an error. Without `--scope`, any same-named skill is reused and a new skill is created in `global`. `--scope global` links and looks up no project), `--skill-id <id>`. Global skills need the `global-catalog-author` or `hub-admin` role (see [Global catalog authoring](/scion/hosted/ha/permissions/#global-catalog-authoring)).
 - `versions <name-or-id>`: List all versions of a skill.
 - `resolve <uri>`: Resolve a skill URI to a concrete version, content hash, and file manifest.
 - `deprecate <name-or-id>`: Mark a published version as deprecated.
