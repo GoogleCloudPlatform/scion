@@ -26,6 +26,7 @@ Rewrote the agent-facing status guidance around one rule:
 | `pkg/config/embeds/templates/default/agents.md` | Same rule in the template's style |
 | `resources/platform_skills/scion-scheduler/SKILL.md` | idle for "no further work" and for a far-off schedule; idle-suspended agents wake on any schedule without `--wake` |
 | `resources/platform_skills/scion-messaging/SKILL.md` | idle after sending or answering with no further work |
+| `harnesses/authoring-guide.md` | `idle` in the agent-side status list; bridges must not overwrite an agent-reported status |
 
 ## Notes
 
@@ -34,5 +35,5 @@ Rewrote the agent-facing status guidance around one rule:
 - Left for phase 4 (docs): `docs-site/.../local/agent-lifecycle.md`, `hosted/user/scheduling.md`
   and `hosted/user/messaging.md` still describe blocked mainly as a way to avoid the stall detector.
 - Not changed: the pi harness bridge (`harnesses/pi/`) matches `sciontool status ask_user|blocked`
-  in shell text to suppress its automatic task_completed. It may need `idle` added, which is a code change
-  that belongs with phase 1's status handling.
+  in shell text to suppress its automatic task_completed. It needs `idle` added. That is a code change,
+  so phase 1 (ptone/scion#7984) takes it.

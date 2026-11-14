@@ -808,10 +808,11 @@ would sum them in Go instead.)
 Your `capabilities.limits` claims must match this wiring: `max_turns` needs
 `prompt-submit`, `max_model_calls` needs model start/end events.
 
-Agent-side status signaling (`sciontool status task_completed|blocked|ask_user`)
+Agent-side status signaling (`sciontool status task_completed|blocked|idle|ask_user`)
 is usually driven by agent instructions/templates; a hook or bridge script may
 emit `task_completed` directly only from a run-settled callback (`pi`), never
-from a per-turn boundary.
+from a per-turn boundary, and never over a status the agent reported itself
+in that run (`ask_user`, `blocked`, `idle`, `limits_exceeded`).
 
 ## Dockerfile and image pipeline
 
