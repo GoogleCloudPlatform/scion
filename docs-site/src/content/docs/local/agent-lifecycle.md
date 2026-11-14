@@ -389,6 +389,15 @@ same check that marks it stalled, unless the agent's harness does not support
 session resume. Agents already `stalled` when you turn auto-suspend on are not
 suspended unless they become active and stall again.
 
+A long build, a test run or a background job emits no activity events, so the
+Hub also looks for **live work**. On each 30-second heartbeat, `sciontool init`
+checks the container for a process doing CPU work (at least 1% of one core). The
+tmux server, the pane shells, the harness's own process, sciontool and its
+services don't count. An agent whose container reported live work within the
+stall threshold is not marked `stalled`. Auto-suspend also skips an agent whose
+container reported live work in the last 90 seconds. An idle agent, including
+one with idle MCP or language servers, still stalls at the threshold.
+
 Auto-suspend uses the same machinery as a manual `scion suspend`, so the agent's
 phase becomes `suspended`, its harness session is preserved, and its Hub
 credentials and active delegation grants are revoked. The agent

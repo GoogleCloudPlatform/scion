@@ -41,6 +41,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/liveness"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/metadata"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
@@ -1436,6 +1437,10 @@ func RunInit(args []string, opts InitRunOptions) int {
 				OnSuccess: func() {
 					log.Debug("Heartbeat sent successfully")
 				},
+				// Live work (ptone/scion#7855): the Hub keeps an agent
+				// whose container is doing CPU work from being marked
+				// stalled or auto-suspended.
+				LiveWork: liveness.NewSampler(liveness.Config{AgentUID: livenessAgentUID(targetUID)}).Sample,
 			})
 			log.Info("Started Hub heartbeat loop (interval: %s)", hub.DefaultHeartbeatInterval)
 
@@ -2017,6 +2022,17 @@ var (
 	runReportStoppingToHub = reportStoppingToHub
 	runServicesShutdown    = func(ctx context.Context, m *services.Manager) error { return m.Shutdown(ctx) }
 )
+
+// livenessAgentUID is the UID the agent's processes run as, for the
+// liveness sampler: targetUID when init drops privileges to it, otherwise
+// init's own UID, which the harness then inherits (rootless or no host
+// user; see setupHostUser).
+func livenessAgentUID(targetUID int) int {
+	if targetUID > 0 {
+		return targetUID
+	}
+	return os.Getuid()
+}
 
 // harnessExitCodePath is the harness exit-code file readHarnessExitCode
 // reads. It is a variable only so a RunInit test can point it at a temp
