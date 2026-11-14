@@ -30,6 +30,7 @@ import (
 func TestDispatchAgentEventHandler_UserAuthoredChildRoleSurvivesMigration(t *testing.T) {
 	t.Parallel()
 	srv, s, user, project := setupAgentRoleTest(t)
+	linkScheduledDispatchBroker(t, s, project.ID)
 	ctx := context.Background()
 
 	err := srv.dispatchAgentEventHandler()(ctx, withSessionRevision(store.ScheduledEvent{

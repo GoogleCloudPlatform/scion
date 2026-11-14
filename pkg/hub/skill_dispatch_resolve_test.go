@@ -361,6 +361,7 @@ func (d *preResolvingDispatcher) DispatchAgentCreate(ctx context.Context, agent 
 func TestSchedulerDispatch_PreResolvesTemplatePrivateSkill(t *testing.T) {
 	const skillURI = "skill://scion/global/sched-private@latest"
 	srv, s, alice, _, project := setupSkillAuthzTest(t)
+	linkScheduledDispatchBroker(t, s, project.ID)
 	ctx := context.Background()
 	stor := newContentMockStorage("test-bucket")
 	srv.SetStorage(stor)

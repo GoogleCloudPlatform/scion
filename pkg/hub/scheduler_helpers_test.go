@@ -329,8 +329,33 @@ func (m *mockScheduledEventStore) GetProject(_ context.Context, id string) (*sto
 	return nil, store.ErrNotFound
 }
 
-func (m *mockScheduledEventStore) GetProjectProviders(_ context.Context, _ string) ([]store.ProjectProvider, error) {
-	return nil, nil
+// mockSchedulerBrokerID is the single runtime broker every project in the
+// mock store is served by. A scheduled fire selects its broker the way
+// interactive create does (ptone/scion#7868), so a project needs a usable
+// provider: an online auto-provide broker is usable by any authenticated
+// fire identity.
+const mockSchedulerBrokerID = "mock-scheduler-broker"
+
+func (m *mockScheduledEventStore) GetProjectProviders(_ context.Context, projectID string) ([]store.ProjectProvider, error) {
+	return []store.ProjectProvider{{
+		ProjectID:  projectID,
+		BrokerID:   mockSchedulerBrokerID,
+		BrokerName: mockSchedulerBrokerID,
+		Status:     store.BrokerStatusOnline,
+	}}, nil
+}
+
+func (m *mockScheduledEventStore) GetRuntimeBroker(_ context.Context, id string) (*store.RuntimeBroker, error) {
+	if id != mockSchedulerBrokerID {
+		return nil, store.ErrNotFound
+	}
+	return &store.RuntimeBroker{
+		ID:          mockSchedulerBrokerID,
+		Name:        mockSchedulerBrokerID,
+		Slug:        mockSchedulerBrokerID,
+		Status:      store.BrokerStatusOnline,
+		AutoProvide: true,
+	}, nil
 }
 
 func (m *mockScheduledEventStore) CreateAgent(_ context.Context, agent *store.Agent) error {

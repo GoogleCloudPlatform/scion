@@ -327,6 +327,7 @@ func TestAdoptedAgentRuntimeSecretFetch(t *testing.T) {
 // (TestPlanExcludesRoleNoneScheduledRows).
 func TestScheduledDispatchChildEdgeHasRoleNone(t *testing.T) {
 	srv, s, user, project := setupAgentRoleTest(t)
+	linkScheduledDispatchBroker(t, s, project.ID)
 	ctx := context.Background()
 	evt := withSessionRevision(store.ScheduledEvent{
 		ID:         tid("scheduled-dispatch-edge-role"),
