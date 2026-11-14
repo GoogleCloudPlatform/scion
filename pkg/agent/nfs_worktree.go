@@ -413,3 +413,13 @@ func (m *AgentManager) removeNFSWorktree(ctx context.Context, projectPath, proje
 	slog.Info("workspace_storage nfs: removed the agent's worktree", "path", worktree)
 	return worktree, true, nil
 }
+
+// k8sWorktreeCloneFallback reports whether a start on runtimeName gets an
+// in-container clone although it carries worktree-per-agent: a Kubernetes
+// git start (opts.GitClone set) with no workspace backend applied
+// (backendName empty), so no NFS worktree is selected.
+func k8sWorktreeCloneFallback(runtimeName, backendName string, emptyPerAgent bool, opts api.StartOptions) bool {
+	return isKubernetesRuntime(runtimeName) && backendName == "" && !emptyPerAgent &&
+		opts.GitClone != nil && opts.GitClone.URL != "" &&
+		store.ResolveWorkspaceSharingMode(opts.Env["SCION_WORKSPACE_MODE"]) == store.SharingModeWorktreePerAgent
+}

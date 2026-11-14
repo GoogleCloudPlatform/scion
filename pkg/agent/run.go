@@ -2397,6 +2397,20 @@ authDone:
 		}
 	}
 
+	// A worktree-per-agent Kubernetes start that got no NFS workspace
+	// backend clones the project inside its container (possibly shallow):
+	// label it clone-per-agent, the workspace it actually gets, so guidance
+	// keyed on the mode does not promise worktree semantics and full history
+	// (ptone/scion#7906). The broker keeps worktree-per-agent on Kubernetes
+	// for nfsWorktreeSelection above. Every placement decision is already
+	// made here, and without a backend workspacePlacementFor reports local
+	// whatever the mode. An NFS start that selected no worktree (an agent
+	// name that is not a slug, or no mountable pod share) keeps its label.
+	if k8sWorktreeCloneFallback(m.Runtime.Name(), workspaceBackendName, emptyPerAgent, opts) {
+		opts.Env["SCION_WORKSPACE_MODE"] = string(store.SharingModeClonePerAgent)
+		agentEnv = withEnvValue(agentEnv, "SCION_WORKSPACE_MODE", string(store.SharingModeClonePerAgent))
+	}
+
 	// The workspace backend above (NFS/cloudrun/gke) can replace
 	// effectiveWorkspace with a backend-managed path — real for
 	// worktree-per-agent when server.workspace_storage.backend is

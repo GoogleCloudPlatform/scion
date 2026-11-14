@@ -342,8 +342,9 @@ func TestBuildStartContext_EmptyPerAgentFollowsNoDispatchRuntime(t *testing.T) {
 // dispatch (ptone/scion#7906). A container-runtime agent that falls back to
 // the in-container clone is labelled clone-per-agent, which is what it
 // actually gets. A provisioned host worktree keeps worktree-per-agent, and so
-// does a kubernetes agent: its runtime still provisions the worktree on the
-// NFS export from that label (pkg/agent nfsWorktreeSelection).
+// does a kubernetes dispatch: the broker passes the label on, and pkg/agent
+// Start decides from it whether the agent gets an NFS worktree or is
+// relabelled clone-per-agent (TestStartK8sWorktreeFallbackWorkspaceModeLabel).
 func TestBuildStartContext_WorktreeFallbackWorkspaceModeLabel(t *testing.T) {
 	requireWorktreeGit(t)
 	clearSCIONEnv(t)
@@ -360,7 +361,7 @@ func TestBuildStartContext_WorktreeFallbackWorkspaceModeLabel(t *testing.T) {
 			wantMode: store.SharingModeWorktreePerAgent},
 		{name: "docker, falls back to in-container clone", tc: dispatchRuntimeCases[0], agentID: "",
 			wantClone: true, wantMode: store.SharingModeClonePerAgent},
-		{name: "kubernetes, worktree left to the runtime", tc: dispatchRuntimeCases[2], agentID: "agent-a",
+		{name: "kubernetes, label passed on to pkg/agent", tc: dispatchRuntimeCases[2], agentID: "agent-a",
 			wantClone: true, wantMode: store.SharingModeWorktreePerAgent},
 	}
 	for _, c := range cases {
