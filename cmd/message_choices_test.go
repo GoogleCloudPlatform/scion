@@ -92,30 +92,31 @@ func choicesSentBody() map[string]interface{} {
 
 func TestValidateChoiceFlags(t *testing.T) {
 	cases := []struct {
-		name    string
-		setup   func()
-		agent   bool
-		group   bool
-		noAgent bool
-		human   bool
-		wantErr string
+		name      string
+		setup     func()
+		agent     bool
+		group     bool
+		noAgent   bool
+		human     bool
+		wantErr   string
+		wantUsage bool
 	}{
 		{name: "no choices", setup: func() {}},
 		{name: "choices to a user", setup: func() { msgChoices = "[]" }},
-		{name: "both choice flags", setup: func() { msgChoices = "[]"; msgChoicesFile = "q.json" }, wantErr: "mutually exclusive"},
-		{name: "update without choices", setup: func() { msgChoicesUpdate = true }, wantErr: "--update is valid only"},
-		{name: "two readers of stdin", setup: func() { msgChoicesFile = "-"; msgBodyFile = "-" }, wantErr: "both read stdin"},
-		{name: "agent recipient", setup: func() { msgChoices = "[]" }, agent: true, wantErr: "not to an agent"},
-		{name: "group recipient", setup: func() { msgChoices = "[]" }, group: true, wantErr: "not to an agent or a group"},
-		{name: "scheduled", setup: func() { msgChoices = "[]"; msgIn = "5m" }, wantErr: "--in or --at"},
-		{name: "attachments", setup: func() { msgChoices = "[]"; msgAttach = []string{"f"} }, wantErr: "--attach"},
-		{name: "artifact", setup: func() { msgChoices = "[]"; msgArtifacts = []string{"scion://artifact/a"} }, wantErr: "--artifact"},
-		{name: "wake", setup: func() { msgChoices = "[]"; msgWake = true }, wantErr: "--wake"},
-		{name: "cc", setup: func() { msgChoices = "[]"; msgCC = []string{"agent:x"} }, wantErr: "--cc"},
-		{name: "channel", setup: func() { msgChoices = "[]"; msgChannel = "web" }, wantErr: "--channel"},
-		{name: "thread id", setup: func() { msgChoices = "[]"; msgThreadID = "t1" }, wantErr: "--thread-id"},
-		{name: "not an agent", setup: func() { msgChoices = "[]" }, noAgent: true, wantErr: "only by an agent"},
-		{name: "agent name in human mode", setup: func() { msgChoices = "[]" }, human: true, wantErr: "only by an agent"},
+		{name: "both choice flags", setup: func() { msgChoices = "[]"; msgChoicesFile = "q.json" }, wantErr: "mutually exclusive", wantUsage: true},
+		{name: "update without choices", setup: func() { msgChoicesUpdate = true }, wantErr: "--update is valid only", wantUsage: true},
+		{name: "two readers of stdin", setup: func() { msgChoicesFile = "-"; msgBodyFile = "-" }, wantErr: "both read stdin", wantUsage: true},
+		{name: "agent recipient", setup: func() { msgChoices = "[]" }, agent: true, wantErr: "not to an agent", wantUsage: false},
+		{name: "group recipient", setup: func() { msgChoices = "[]" }, group: true, wantErr: "not to an agent or a group", wantUsage: false},
+		{name: "scheduled", setup: func() { msgChoices = "[]"; msgIn = "5m" }, wantErr: "--in or --at", wantUsage: true},
+		{name: "attachments", setup: func() { msgChoices = "[]"; msgAttach = []string{"f"} }, wantErr: "--attach", wantUsage: true},
+		{name: "artifact", setup: func() { msgChoices = "[]"; msgArtifacts = []string{"scion://artifact/a"} }, wantErr: "--artifact", wantUsage: true},
+		{name: "wake", setup: func() { msgChoices = "[]"; msgWake = true }, wantErr: "--wake", wantUsage: true},
+		{name: "cc", setup: func() { msgChoices = "[]"; msgCC = []string{"agent:x"} }, wantErr: "--cc", wantUsage: true},
+		{name: "channel", setup: func() { msgChoices = "[]"; msgChannel = "web" }, wantErr: "--channel", wantUsage: true},
+		{name: "thread id", setup: func() { msgChoices = "[]"; msgThreadID = "t1" }, wantErr: "--thread-id", wantUsage: true},
+		{name: "not an agent", setup: func() { msgChoices = "[]" }, noAgent: true, wantErr: "only by an agent", wantUsage: false},
+		{name: "agent name in human mode", setup: func() { msgChoices = "[]" }, human: true, wantErr: "only by an agent", wantUsage: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -137,6 +138,7 @@ func TestValidateChoiceFlags(t *testing.T) {
 			}
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.wantErr)
+			assert.Equal(t, tc.wantUsage, isUsageError(err), "usage error mismatch for %q", err)
 		})
 	}
 }
@@ -148,11 +150,13 @@ func TestLoadChoicesPayload(t *testing.T) {
 	_, err := loadChoicesPayload()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "JSON array")
+	assert.False(t, isUsageError(err))
 
 	msgChoices = "[]"
 	_, err = loadChoicesPayload()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "at least one decision")
+	assert.False(t, isUsageError(err))
 
 	// Only the JSON shape is checked: an invalid decision is the hub's to
 	// refuse.
@@ -201,11 +205,11 @@ func TestChoicesSummary(t *testing.T) {
 
 func TestChoiceDecisionLine(t *testing.T) {
 	assert.Equal(t, "D234 v1 (new)", choiceDecisionLine(hubclient.ChoiceDecisionResult{Key: "D234", Version: 1}))
-	assert.Equal(t, "D1 v2 (replaced v1, pending)", choiceDecisionLine(hubclient.ChoiceDecisionResult{
+	assert.Equal(t, "D1 v2 (new, replaces v1 which was pending)", choiceDecisionLine(hubclient.ChoiceDecisionResult{
 		Key: "D1", Version: 2, Replaced: &hubclient.ChoiceReplacedDecision{Version: 1, Status: "pending"}}))
-	assert.Equal(t, "D1 v3 (replaced v2, decided: yes)", choiceDecisionLine(hubclient.ChoiceDecisionResult{
+	assert.Equal(t, "D1 v3 (new, replaces v2 which was decided: yes)", choiceDecisionLine(hubclient.ChoiceDecisionResult{
 		Key: "D1", Version: 3, Replaced: &hubclient.ChoiceReplacedDecision{Version: 2, Status: "decided", Answer: "yes"}}))
-	assert.Equal(t, "D1 v3 (replaced v2, decided by Pat: yes)", choiceDecisionLine(hubclient.ChoiceDecisionResult{
+	assert.Equal(t, "D1 v3 (new, replaces v2 which was decided by Pat: yes)", choiceDecisionLine(hubclient.ChoiceDecisionResult{
 		Key: "D1", Version: 3, Replaced: &hubclient.ChoiceReplacedDecision{Version: 2, Status: "decided", Answer: "yes", AnsweredBy: "Pat"}}))
 }
 
@@ -230,7 +234,7 @@ func TestSendOutboundChoices_UserRecipient(t *testing.T) {
 
 	assert.Contains(t, out, "Message sent to user:alice@example.com via Hub (message msg-choices-1).")
 	assert.Contains(t, out, "D234 v1 (new)\n")
-	assert.Equal(t, "D1 v2 (replaced v1, pending)", lastLine(out))
+	assert.Equal(t, "D1 v2 (new, replaces v1 which was pending)", lastLine(out))
 	assert.Equal(t, []string{"Decision needed: Ship the feature now? (+1 more)"}, *asked)
 }
 
@@ -272,7 +276,7 @@ func TestSendOutboundChoices_NonSentStatusPrintsDecisions(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, out, "saved to history")
 	assert.Contains(t, out, "D234 v1 (new)\n")
-	assert.Contains(t, out, "D1 v2 (replaced v1, pending)\n")
+	assert.Contains(t, out, "D1 v2 (new, replaces v1 which was pending)\n")
 }
 
 // A refused send (400 experiment_disabled) fails and leaves the agent's
@@ -313,4 +317,12 @@ func TestMessageCommand_ChoicesArgs(t *testing.T) {
 	err := messageCmd.RunE(messageCmd, []string{"agent:builder"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not to an agent")
+	assert.False(t, isUsageError(err))
+}
+
+func TestMessageCommand_UpdateHelpDocumentsFullSet(t *testing.T) {
+	flag := messageCmd.Flags().Lookup("update")
+	require.NotNil(t, flag)
+	assert.Contains(t, flag.Usage, "still-pending keys")
+	assert.Contains(t, messageCmd.Long, "still-pending keys")
 }

@@ -24,6 +24,7 @@
 
 import { test, expect, type Locator, type Page, type TestInfo } from '@playwright/test';
 import { openChatRail, openGeneralThread } from './fixture.js';
+import { touchHold } from './helpers.js';
 import {
   ASKER_ID,
   ASKER_NAME,
@@ -1016,6 +1017,120 @@ for (const theme of ['light', 'dark'] as const) {
       await expect(message(page, 'prompt-p27')).toHaveClass(/permalink-highlight/);
       await itemJumps.nth(1).click();
       await expect(message(page, 'prompt-other')).toHaveClass(/permalink-highlight/);
+    });
+
+    test('mobile tap and re-tap on description and plain choices do not open context menu or blank chosen row (ptone/scion#7839, ptone/scion#7840)', async ({
+      page,
+    }) => {
+      const descDecision = decision({
+        messageId: 'prompt-desc',
+        rowId: 'prompt-desc-d1',
+        key: 'DF-B',
+        question: 'Pick a **rollout** strategy:',
+        defaultChoiceId: 'canary',
+        choices: [
+          {
+            id: 'canary',
+            label: 'Canary first',
+            description: 'Roll out to `10%` of brokers for 24h before full release.',
+          },
+          {
+            id: 'all',
+            label: 'All at once',
+            description: 'Deploy to every broker in one wave.',
+          },
+        ],
+      });
+      const plainDecision = shipDecision('prompt-plain');
+      const thread: ChoiceThread = {
+        messages: [
+          row('prompt-desc', 0, 'choice-prompt', 'Strategy check.\n\n(fallback)', 'asker'),
+          row('prompt-plain', 1, 'choice-prompt', 'Release check.\n\n(fallback)', 'asker'),
+        ],
+        messageDecisions: {
+          'prompt-desc': [descDecision],
+          'prompt-plain': [plainDecision],
+        },
+        messageChoiceIntros: {
+          'prompt-desc': 'Strategy check.',
+          'prompt-plain': 'Release check.',
+        },
+        messageChoiceAnswerModes: {
+          'prompt-desc': 'single',
+          'prompt-plain': 'single',
+        },
+      };
+      await openChoices(page, theme, thread);
+      await expect(card(page, 'prompt-desc').locator('.desc code').first()).toBeVisible();
+
+      await page.route('**/api/v1/decisions/*/answer', async (route) => {
+        const url = route.request().url();
+        if (url.includes('prompt-desc-d1')) {
+          await route.fulfill({
+            json: {
+              decision: {
+                ...descDecision,
+                status: 'decided',
+                decision: answer('canary', 'Canary first', SELF_ID, 'Fixture User', 2),
+              },
+              responseMessageId: 'resp-desc-1',
+            },
+          });
+          return;
+        }
+        await route.fulfill({
+          json: {
+            decision: {
+              ...plainDecision,
+              status: 'decided',
+              decision: answer('yes', 'Yes', SELF_ID, 'Fixture User', 2),
+            },
+            responseMessageId: 'resp-plain-1',
+          },
+        });
+      });
+
+      const descCard = card(page, 'prompt-desc');
+      const canaryOpt = descCard.locator('button.opt[data-choice="canary"]');
+      const openSheet = page.locator('scion-action-sheet[open]');
+
+      if (isPhone(page)) {
+        // ptone/scion#7839: holding on a description option while reading must not open the mobile context sheet.
+        const box = await canaryOpt.boundingBox();
+        expect(box).not.toBeNull();
+        await touchHold(page, box!.x + box!.width / 2, box!.y + box!.height / 2);
+        await expect(openSheet).toHaveCount(0);
+
+        // Tapping the description text selects the option without opening the mobile context sheet.
+        await canaryOpt.locator('.desc').tap();
+        await expect(openSheet).toHaveCount(0);
+        await expect(canaryOpt).toHaveClass(/chosen/);
+
+        // Plain sl-button tap also selects without opening the mobile context sheet.
+        const yesBtn = card(page, 'prompt-plain').locator('sl-button[data-choice="yes"]');
+        await yesBtn.tap();
+        await expect(openSheet).toHaveCount(0);
+        await expect(card(page, 'prompt-plain').locator('.row-foot')).toContainText(
+          'Answered by you'
+        );
+
+        // ptone/scion#7840: re-tapping the already-chosen option (and its icon) neither opens the sheet nor blanks text-on-background.
+        await canaryOpt.tap();
+        await canaryOpt.locator('sl-icon').tap();
+        await expect(openSheet).toHaveCount(0);
+      } else {
+        await canaryOpt.locator('.desc').click();
+        await expect(canaryOpt).toHaveClass(/chosen/);
+      }
+
+      // Hovering / sticky-hovering the decided .opt.chosen row keeps white text on primary fill (never white-on-white).
+      await canaryOpt.hover();
+      await expect(canaryOpt.locator('.lbl')).toHaveCSS('color', 'rgb(255, 255, 255)');
+      await expect(canaryOpt.locator('.desc')).toHaveCSS('color', 'rgb(255, 255, 255)');
+      const bg = await canaryOpt.evaluate((el) => getComputedStyle(el).backgroundColor);
+      expect(bg).not.toBe('rgb(248, 250, 252)');
+      expect(bg).not.toBe('rgb(255, 255, 255)');
+      expect(bg).not.toBe('rgba(0, 0, 0, 0)');
     });
   });
 }

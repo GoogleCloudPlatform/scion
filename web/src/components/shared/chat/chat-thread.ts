@@ -6377,16 +6377,21 @@ export class ScionChatThread extends LitElement {
     // actions dots) — only intervene on devices that cannot hover.
     if (!window.matchMedia('(hover: none)').matches) return;
 
-    // <scion-chat-message> renders into its own shadow root, so `e.target`
-    // here is retargeted to the message host itself regardless of what was
-    // actually clicked inside it. `composedPath()[0]` is the real innermost
-    // element, which is what "was a link/button tapped?" needs to inspect.
-    const target = e.composedPath()[0] as HTMLElement;
+    // Walk the composed path up to the message host so controls inside nested
+    // shadow roots (<scion-chat-choices>, <sl-button>, <sl-icon>) are
+    // recognized instead of stopping at an inner shadow boundary.
     // `summary` toggles a <details> (a set's choice-response answers).
-    if (
-      target.closest?.('a, button, summary, sl-icon-button, .entity-link, .mention, .reply-preview')
-    )
-      return;
+    for (const node of e.composedPath()) {
+      if (node === e.currentTarget) break;
+      if (
+        node instanceof Element &&
+        node.matches(
+          'a, button, summary, sl-button, sl-icon-button, scion-chat-choices, .entity-link, .mention, .reply-preview'
+        )
+      ) {
+        return;
+      }
+    }
 
     this.handleMessageContextMenu(e, msg);
   }

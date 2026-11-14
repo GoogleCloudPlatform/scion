@@ -248,6 +248,17 @@ export class ScionChatChoices extends LitElement {
       flex-wrap: nowrap;
     }
 
+    .card sl-button {
+      -webkit-touch-callout: none;
+      -webkit-user-select: none;
+      user-select: none;
+      touch-action: manipulation;
+    }
+
+    .card sl-button[data-readonly]::part(base) {
+      cursor: default;
+    }
+
     /*
      * Shoelace draws a default button's label in neutral-700, which the dark
      * theme maps to a slate barely lighter than the button itself, so an
@@ -282,14 +293,20 @@ export class ScionChatChoices extends LitElement {
       );
       white-space: nowrap;
       vertical-align: middle;
+      -webkit-touch-callout: none;
       user-select: none;
       -webkit-user-select: none;
+      touch-action: manipulation;
       cursor: pointer;
       transition:
         var(--sl-transition-x-fast, 100ms) background-color,
         var(--sl-transition-x-fast, 100ms) color,
         var(--sl-transition-x-fast, 100ms) border,
         var(--sl-transition-x-fast, 100ms) box-shadow;
+    }
+
+    .sb[data-readonly] {
+      cursor: default;
     }
 
     .sb:focus {
@@ -336,13 +353,15 @@ export class ScionChatChoices extends LitElement {
       color: var(--scion-text, #1e293b);
     }
 
-    .sb-default:hover:not(:disabled) {
-      background-color: var(--sl-color-primary-50);
-      border-color: var(--sl-color-primary-300);
-      color: var(--sl-color-primary-700);
+    @media (hover: hover) {
+      .sb-default:hover:not(:disabled):not([data-readonly]) {
+        background-color: var(--sl-color-primary-50);
+        border-color: var(--sl-color-primary-300);
+        color: var(--sl-color-primary-700);
+      }
     }
 
-    .sb-default:active:not(:disabled) {
+    .sb-default:active:not(:disabled):not([data-readonly]) {
       background-color: var(--sl-color-primary-100);
       border-color: var(--sl-color-primary-400);
       color: var(--sl-color-primary-700);
@@ -354,12 +373,14 @@ export class ScionChatChoices extends LitElement {
       color: #fff;
     }
 
-    .sb-filled:hover:not(:disabled) {
-      background-color: var(--sl-color-primary-500);
-      border-color: var(--sl-color-primary-500);
+    @media (hover: hover) {
+      .sb-filled:hover:not(:disabled):not([data-readonly]) {
+        background-color: var(--sl-color-primary-500);
+        border-color: var(--sl-color-primary-500);
+      }
     }
 
-    .sb-filled:active:not(:disabled) {
+    .sb-filled:active:not(:disabled):not([data-readonly]) {
       background-color: var(--sl-color-primary-600);
       border-color: var(--sl-color-primary-600);
     }
@@ -370,15 +391,17 @@ export class ScionChatChoices extends LitElement {
       color: var(--sl-color-primary-600, #2563eb);
     }
 
-    .sb-outline:hover:not(:disabled) {
-      background-color: var(--sl-color-primary-600);
-      color: var(--sl-color-neutral-0);
+    @media (hover: hover) {
+      .sb-outline:hover:not(:disabled):not([data-readonly]) {
+        background-color: var(--sl-color-primary-600);
+        color: #fff;
+      }
     }
 
-    .sb-outline:active:not(:disabled) {
+    .sb-outline:active:not(:disabled):not([data-readonly]) {
       border-color: var(--sl-color-primary-700);
       background-color: var(--sl-color-primary-700);
-      color: var(--sl-color-neutral-0);
+      color: #fff;
     }
 
     .sb-subtle {
@@ -387,13 +410,15 @@ export class ScionChatChoices extends LitElement {
       color: var(--scion-text, #1e293b);
     }
 
-    .sb-subtle:hover:not(:disabled) {
-      background-color: var(--sl-color-primary-50);
-      border-color: var(--sl-color-primary-300);
-      color: var(--sl-color-primary-700);
+    @media (hover: hover) {
+      .sb-subtle:hover:not(:disabled):not([data-readonly]) {
+        background-color: var(--sl-color-primary-50);
+        border-color: var(--sl-color-primary-300);
+        color: var(--sl-color-primary-700);
+      }
     }
 
-    .sb-subtle:active:not(:disabled) {
+    .sb-subtle:active:not(:disabled):not([data-readonly]) {
       background-color: var(--sl-color-primary-100);
       border-color: var(--sl-color-primary-400);
       color: var(--sl-color-primary-700);
@@ -420,12 +445,22 @@ export class ScionChatChoices extends LitElement {
       padding: 0.45rem 0.6rem;
       font: inherit;
       color: var(--scion-text, #1e293b);
+      -webkit-touch-callout: none;
+      -webkit-user-select: none;
+      user-select: none;
+      touch-action: manipulation;
       cursor: pointer;
     }
 
-    .opt:hover:not([aria-disabled='true']) {
-      border-color: var(--scion-border-hover, #cbd5e1);
-      background: var(--scion-bg, #f8fafc);
+    .opt[data-readonly] {
+      cursor: default;
+    }
+
+    @media (hover: hover) {
+      .opt:hover:not([aria-disabled='true']):not(:disabled):not(.chosen) {
+        border-color: var(--scion-border-hover, #cbd5e1);
+        background: var(--scion-bg, #f8fafc);
+      }
     }
 
     .opt:focus-visible {
@@ -464,15 +499,15 @@ export class ScionChatChoices extends LitElement {
     }
 
     .opt.chosen {
-      border-color: var(--scion-primary, #3b82f6);
-      background: var(--scion-primary, #3b82f6);
-      color: var(--scion-primary-text, #fff);
+      border-color: var(--sl-color-primary-600, #2563eb);
+      background: var(--sl-color-primary-600, #2563eb);
+      color: #fff;
       opacity: 1;
     }
 
     .opt.chosen .lbl,
     .opt.chosen .desc {
-      color: var(--scion-primary-text, #fff);
+      color: #fff;
     }
 
     .row-foot {
@@ -624,7 +659,7 @@ export class ScionChatChoices extends LitElement {
     }
 
     .opt.chosen .mark {
-      color: var(--scion-primary-text, #fff);
+      color: #fff;
     }
 
     .badge {
@@ -1026,6 +1061,7 @@ export class ScionChatChoices extends LitElement {
         aria-disabled=${blocked ? 'true' : nothing}
         aria-describedby=${pendingWithDefault ? this.hintId : blocked ? this.reasonId : nothing}
         @keydown=${(e: KeyboardEvent) => this.onCardKeydown(e, d)}
+        @contextmenu=${this.onCardContextMenu}
       >
         <div class="card-head">
           <sl-icon name="signpost-split"></sl-icon>
@@ -1181,6 +1217,31 @@ export class ScionChatChoices extends LitElement {
     };
   }
 
+  /**
+   * Suppress touch long-press `contextmenu` on choice controls so reading a
+   * multi-line option with a resting finger neither triggers native selection
+   * nor bubbles to `scion-chat-message`'s context sheet. Desktop right-clicks,
+   * keyboard ContextMenu, and external links still pass through.
+   */
+  private onCardContextMenu = (e: MouseEvent): void => {
+    const fromKeyboard =
+      (e.clientX === 0 && e.clientY === 0) ||
+      (typeof PointerEvent !== 'undefined' && e instanceof PointerEvent && e.pointerType === '');
+    if (fromKeyboard) return;
+    const isTouch =
+      (typeof PointerEvent !== 'undefined' &&
+        e instanceof PointerEvent &&
+        e.pointerType !== 'mouse') ||
+      (typeof window.matchMedia === 'function' && window.matchMedia('(hover: none)').matches);
+    if (!isTouch) return;
+    for (const node of e.composedPath()) {
+      if (node === e.currentTarget) break;
+      if (node instanceof HTMLAnchorElement && /^(https?:|mailto:)/i.test(node.href)) return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
   private renderButton(d: DecisionView, c: ChoiceOption): TemplateResult {
     const s = this.singleChoiceAppearance(d, c);
     const btn = html`<sl-button
@@ -1190,6 +1251,7 @@ export class ScionChatChoices extends LitElement {
       ?outline=${s.outlined}
       ?loading=${s.loading}
       ?disabled=${s.disabled}
+      ?data-readonly=${!s.clickable && !s.disabled && !s.loading}
       aria-disabled=${s.disabled ? 'true' : nothing}
       aria-pressed=${s.pressed ? 'true' : nothing}
       title=${s.title}
@@ -1214,6 +1276,7 @@ export class ScionChatChoices extends LitElement {
       class=${cls}
       data-choice=${c.id}
       ?disabled=${s.nativeDisabled}
+      ?data-readonly=${!s.clickable && !s.disabled && !s.loading}
       aria-disabled=${s.disabled || s.loading ? 'true' : 'false'}
       aria-pressed=${s.pressed ? 'true' : nothing}
       aria-busy=${s.loading ? 'true' : nothing}
@@ -1617,6 +1680,7 @@ export class ScionChatChoices extends LitElement {
         aria-label=${label}
         aria-disabled=${blocked ? 'true' : nothing}
         aria-describedby=${blocked ? this.reasonId : nothing}
+        @contextmenu=${this.onCardContextMenu}
       >
         <div class="card-head">
           <sl-icon name="list-check"></sl-icon>
@@ -1813,6 +1877,7 @@ export class ScionChatChoices extends LitElement {
       data-choice=${c.id}
       data-look=${s.look}
       ?disabled=${s.disabled}
+      ?data-readonly=${!s.actionable && !s.disabled}
       aria-disabled=${s.disabled ? 'true' : nothing}
       aria-pressed=${s.actionable ? String(s.selected) : nothing}
       title=${s.title}
@@ -1839,6 +1904,7 @@ export class ScionChatChoices extends LitElement {
       class=${cls}
       data-choice=${c.id}
       ?disabled=${s.nativeDisabled}
+      ?data-readonly=${!s.actionable && !s.disabled}
       aria-pressed=${s.actionable ? String(s.selected) : nothing}
       aria-disabled=${s.disabled ? 'true' : 'false'}
       title=${s.title}
