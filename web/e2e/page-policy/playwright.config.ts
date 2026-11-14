@@ -14,6 +14,8 @@
 
 import { defineConfig } from '@playwright/test';
 
+import { chromiumLaunchOptions } from '../../playwright-chromium.js';
+
 const CI = !!process.env.CI;
 
 // Page script policy smoke (ptone/scion#5912). Runs against the real Go hub
@@ -43,11 +45,6 @@ export default defineConfig({
   use: {
     trace: CI ? 'on-first-retry' : 'off',
     viewport: { width: 1280, height: 800 },
-    launchOptions: {
-      ...(process.env.CHROMIUM_EXECUTABLE
-        ? { executablePath: process.env.CHROMIUM_EXECUTABLE }
-        : {}),
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    },
+    launchOptions: chromiumLaunchOptions(),
   },
 });

@@ -16,6 +16,8 @@ import { fileURLToPath } from 'node:url';
 
 import { defineConfig, devices, type PlaywrightTestConfig } from '@playwright/test';
 
+import { chromiumLaunchOptions } from '../../playwright-chromium.js';
+
 /**
  * Mobile-emulation guard suite for the chat layout.
  *
@@ -29,10 +31,7 @@ import { defineConfig, devices, type PlaywrightTestConfig } from '@playwright/te
 
 const CI = !!process.env.CI;
 
-const CHROMIUM_LAUNCH_OPTIONS = {
-  ...(process.env.CHROMIUM_EXECUTABLE ? { executablePath: process.env.CHROMIUM_EXECUTABLE } : {}),
-  args: ['--no-sandbox', '--disable-setuid-sandbox'],
-};
+const CHROMIUM_LAUNCH_OPTIONS = chromiumLaunchOptions();
 
 type ProjectConfig = NonNullable<PlaywrightTestConfig['projects']>[number];
 

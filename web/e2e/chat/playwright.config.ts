@@ -16,6 +16,8 @@ import { fileURLToPath } from 'node:url';
 
 import { defineConfig } from '@playwright/test';
 
+import { chromiumLaunchOptions } from '../../playwright-chromium.js';
+
 const CI = !!process.env.CI;
 
 // Deliberately separate from the Hub E2E harness: no project agents or
@@ -46,12 +48,7 @@ export default defineConfig({
     trace: CI ? 'on-first-retry' : 'off',
     baseURL: 'http://127.0.0.1:4535',
     viewport: { width: 1100, height: 700 },
-    launchOptions: {
-      ...(process.env.CHROMIUM_EXECUTABLE
-        ? { executablePath: process.env.CHROMIUM_EXECUTABLE }
-        : {}),
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    },
+    launchOptions: chromiumLaunchOptions(),
   },
   webServer: {
     command: 'npm run dev -- --host 127.0.0.1 --port 4535',

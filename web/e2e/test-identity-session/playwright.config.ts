@@ -14,6 +14,8 @@
 
 import { defineConfig } from '@playwright/test';
 
+import { chromiumLaunchOptions } from '../../playwright-chromium.js';
+
 const CI = !!process.env.CI;
 
 // Test identity browser session smoke (ptone/scion#4240, WS3). Unlike the
@@ -53,11 +55,6 @@ export default defineConfig({
     // Later requests send the session cookie, which the trace records.
     trace: CI ? 'on-first-retry' : 'off',
     viewport: { width: 1280, height: 800 },
-    launchOptions: {
-      ...(process.env.CHROMIUM_EXECUTABLE
-        ? { executablePath: process.env.CHROMIUM_EXECUTABLE }
-        : {}),
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    },
+    launchOptions: chromiumLaunchOptions(),
   },
 });

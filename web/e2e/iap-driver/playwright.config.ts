@@ -16,6 +16,8 @@
 
 import { defineConfig } from '@playwright/test';
 
+import { chromiumLaunchOptions } from '../../playwright-chromium.js';
+
 const CI = !!process.env.CI;
 
 // The IAP driver hook of the e2e harness (ptone/scion#4240, phase WS2):
@@ -43,11 +45,6 @@ export default defineConfig({
   use: {
     // Traces would record the synthetic header values; none are needed.
     trace: 'off',
-    launchOptions: {
-      ...(process.env.CHROMIUM_EXECUTABLE
-        ? { executablePath: process.env.CHROMIUM_EXECUTABLE }
-        : {}),
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    },
+    launchOptions: chromiumLaunchOptions(),
   },
 });

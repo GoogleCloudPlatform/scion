@@ -27,6 +27,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { chromium } from '@playwright/test';
+import { chromiumLaunchOptions } from '../../playwright-chromium.js';
 import { devSignInURL } from './auth.js';
 import { startHub } from './hub.js';
 import { seedSmokeData } from './seed.js';
@@ -67,7 +68,7 @@ async function globalSetup(): Promise<void> {
   fs.mkdirSync(storageDir, { recursive: true });
   const adminStorageState = path.join(storageDir, 'admin.json');
 
-  const browser = await chromium.launch();
+  const browser = await chromium.launch(chromiumLaunchOptions());
   const context = await browser.newContext();
   const page = await context.newPage();
 

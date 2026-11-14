@@ -14,6 +14,8 @@
 
 import { defineConfig, devices } from '@playwright/test';
 
+import { chromiumLaunchOptions } from '../../playwright-chromium.js';
+
 const CI = !!process.env.CI;
 
 // Isolated fixture for the native chat quick command palette. Mounts the
@@ -46,12 +48,7 @@ export default defineConfig({
     trace: CI ? 'on-first-retry' : 'off',
     baseURL: 'http://127.0.0.1:4534',
     viewport: { width: 1200, height: 800 },
-    launchOptions: {
-      ...(process.env.CHROMIUM_EXECUTABLE
-        ? { executablePath: process.env.CHROMIUM_EXECUTABLE }
-        : {}),
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    },
+    launchOptions: chromiumLaunchOptions(),
   },
   // WebKit, the engine iOS Safari uses, may not be installed in every
   // sandbox, so its project runs only when explicitly requested, and only

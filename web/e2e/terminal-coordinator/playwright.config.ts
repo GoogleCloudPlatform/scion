@@ -1,5 +1,7 @@
 import { defineConfig } from '@playwright/test';
 
+import { chromiumLaunchOptions } from '../../playwright-chromium.js';
+
 const CI = !!process.env.CI;
 
 export default defineConfig({
@@ -26,11 +28,7 @@ export default defineConfig({
     // A trace of the retried attempt in CI.
     trace: CI ? 'on-first-retry' : 'off',
     baseURL: 'http://127.0.0.1:4519',
-    launchOptions: {
-      ...(process.env.CHROMIUM_EXECUTABLE
-        ? { executablePath: process.env.CHROMIUM_EXECUTABLE }
-        : {}),
-    },
+    launchOptions: chromiumLaunchOptions(),
   },
   webServer: {
     command: 'node e2e/terminal-coordinator/server.mjs',

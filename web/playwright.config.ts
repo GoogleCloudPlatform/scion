@@ -14,6 +14,8 @@
 
 import { defineConfig, devices } from '@playwright/test';
 
+import { chromiumExecutablePath, chromiumLaunchOptions } from './playwright-chromium.js';
+
 /**
  * Playwright E2E configuration for the Scion web frontend.
  *
@@ -57,9 +59,12 @@ export default defineConfig({
     /* Trace on first retry for debugging flakes */
     trace: 'on-first-retry',
 
-    /* Screenshots and video only on failure */
+    /* Screenshots only on failure; video requires Playwright's bundled ffmpeg,
+     * which is absent in containers/CI runs using a system Chromium binary. */
     screenshot: 'only-on-failure',
-    video: 'retain-on-failure',
+    video: chromiumExecutablePath() ? 'off' : 'retain-on-failure',
+
+    launchOptions: chromiumLaunchOptions(),
   },
 
   projects: [

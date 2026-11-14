@@ -8,5 +8,5 @@
     "noEmit": true,
     "lib": ["ES2022", "DOM"]
   },
-  "include": ["*.ts"]
+  "include": ["*.ts", "../../playwright-chromium.ts"]
 }

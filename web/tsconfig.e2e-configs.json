@@ -12,8 +12,11 @@
   // that check them, and the CI web_checks path-filter guard. Run by the
   // typecheck script.
   "include": [
+    "playwright-chromium.ts",
     "playwright.config.ts",
     "e2e/**/playwright*.config.ts",
+    "e2e-perf/budgets/playwright.config.ts",
+    "src/utils/playwright-chromium.test.ts",
     "src/utils/playwright-forbid-only.test.ts",
     "vitest-workers.ts",
     "src/utils/vitest-workers.test.ts",

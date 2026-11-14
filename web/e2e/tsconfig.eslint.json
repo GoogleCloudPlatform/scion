@@ -42,6 +42,7 @@
     "./roles/*.ts",
     "./terminal-coordinator/*.ts",
     "./tokens/*.ts",
+    "../playwright-chromium.ts",
     "../src/**/*.ts"
   ],
   "exclude": ["../src/**/*.test.ts"]

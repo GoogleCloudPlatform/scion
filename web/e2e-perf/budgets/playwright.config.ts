@@ -16,6 +16,8 @@ import { fileURLToPath } from 'node:url';
 
 import { defineConfig } from '@playwright/test';
 
+import { chromiumLaunchOptions } from '../../playwright-chromium.js';
+
 /**
  * Browser counter budgets for the project agent views (grid, list, graph).
  *
@@ -49,12 +51,7 @@ export default defineConfig({
     baseURL: `http://127.0.0.1:${PORT}`,
     browserName: 'chromium',
     viewport: { width: 1440, height: 1000 },
-    launchOptions: {
-      ...(process.env.CHROMIUM_EXECUTABLE
-        ? { executablePath: process.env.CHROMIUM_EXECUTABLE }
-        : {}),
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    },
+    launchOptions: chromiumLaunchOptions(),
   },
   webServer: {
     command: `npm run dev -- --host 127.0.0.1 --port ${PORT} --strictPort`,

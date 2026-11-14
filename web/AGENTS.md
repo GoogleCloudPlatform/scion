@@ -310,7 +310,7 @@ The client `SSEClient` listens for `event: update` and the `StateManager` parses
 
 - Use `waitUntil: 'domcontentloaded'` instead of `'networkidle'` — the SSE connection keeps the network perpetually active, so `networkidle` will time out.
 - Chromium needs `--no-sandbox --disable-setuid-sandbox` flags in containerized environments.
-- Agent containers have no Playwright browser bundle. Most `web/e2e/*/playwright.config.ts` suites read `CHROMIUM_EXECUTABLE`, so set `CHROMIUM_EXECUTABLE=/usr/bin/chromium`, or every test fails with "Executable doesn't exist". `terminal-owner` reads `TERMINAL_OWNER_CHROMIUM` instead. The root `web/playwright.config.ts` (`npm run test:e2e`) reads neither variable and cannot launch in an agent container.
+- Agent containers have no Playwright browser bundle, and set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium` automatically. Every Playwright config in `web/` (including `web/playwright.config.ts` / `e2e/harness/global-setup.ts`, `web/e2e/*/playwright*.config.ts`, and `web/e2e-perf/budgets/playwright.config.ts`) resolves Chromium via `web/playwright-chromium.ts` (`CHROMIUM_EXECUTABLE` -> `TERMINAL_OWNER_CHROMIUM` -> `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`), falling back to Playwright's installed browser bundle when none is set.
 - Console logging via `page.on('console', ...)` is essential for debugging SSE connection state — the `[SSE] Connected` log confirms the EventSource opened.
 - To validate real-time updates: take a screenshot, make an API call, wait 2-3 seconds, take another screenshot. Compare visually.
 

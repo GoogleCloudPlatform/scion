@@ -14,6 +14,7 @@
 
 import { defineConfig } from '@playwright/test';
 
+import { chromiumLaunchOptions } from '../../playwright-chromium.js';
 import { parseTimeoutMs } from './journey-lib.js';
 
 const CI = !!process.env.CI;
@@ -61,11 +62,6 @@ export default defineConfig({
     viewport: { width: 1280, height: 800 },
     navigationTimeout: 30_000,
     actionTimeout: 15_000,
-    launchOptions: {
-      ...(process.env.CHROMIUM_EXECUTABLE
-        ? { executablePath: process.env.CHROMIUM_EXECUTABLE }
-        : {}),
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    },
+    launchOptions: chromiumLaunchOptions(),
   },
 });
