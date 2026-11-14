@@ -563,13 +563,13 @@ func printWorkloadIdentityBindings(w io.Writer, bindings []api.WorkloadIdentityB
 	if len(bindings) == 0 {
 		return
 	}
-	fmt.Fprintln(w, "  Workload Identity bindings:")
+	_, _ = fmt.Fprintln(w, "  Workload Identity bindings:")
 	anyBound := false
 	for _, b := range bindings {
 		where := strings.Join(b.Profiles, ", ")
 		if b.State == api.WorkloadIdentityBindingBound {
 			anyBound = true
-			fmt.Fprintf(w, "    bound    %s (%s)\n", b.Member, where)
+			_, _ = fmt.Fprintf(w, "    bound    %s (%s)\n", b.Member, where)
 			continue
 		}
 		target := b.Member
@@ -578,17 +578,17 @@ func printWorkloadIdentityBindings(w io.Writer, bindings []api.WorkloadIdentityB
 		} else if where != "" {
 			target += " (" + where + ")"
 		}
-		fmt.Fprintf(w, "    %-8s %s: %s", b.State, target, b.Reason)
+		_, _ = fmt.Fprintf(w, "    %-8s %s: %s", b.State, target, b.Reason)
 		if b.Detail != "" {
-			fmt.Fprintf(w, " - %s", b.Detail)
+			_, _ = fmt.Fprintf(w, " - %s", b.Detail)
 		}
-		fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w)
 		if b.ManualStep != "" {
-			fmt.Fprintf(w, "             to grant it by hand: %s\n", b.ManualStep)
+			_, _ = fmt.Fprintf(w, "             to grant it by hand: %s\n", b.ManualStep)
 		}
 	}
 	if anyBound {
-		fmt.Fprintln(w, "  A new Workload Identity binding can take a few minutes to take effect.")
+		_, _ = fmt.Fprintln(w, "  A new Workload Identity binding can take a few minutes to take effect.")
 	}
 }
 
