@@ -41,13 +41,20 @@ difference.
 
 ## Fix
 
-`pkg/hub/reprovision_gathered_env.go`: for a home-reset reincarnation the worker puts a holder in
-the ctx it passes to both `DispatchAgentReprovision` and `DispatchAgentStart`. After a confirmed
-reprovision, `dispatchProvision` stores the `as_needed` env its gather resolved there (the
-broker's own verdict of what the target needs). `buildStartEnv` merges it fill-only, classified
-secret-fetchable. Nothing is logged or persisted; the broker's record of that start keeps the
-values for later restarts, as after a create. A plain reincarnation gets no holder and is
-unchanged. No wire or capability change.
+`pkg/hub/reprovision_gathered_env.go`: for a home-reset reincarnation the worker passes a ctx with
+a holder (`startCtx`) to `DispatchAgentReprovision` and `DispatchAgentStart` only. After a
+confirmed reprovision, `dispatchProvision` records in it the names of the `as_needed` keys its
+gather resolved (the broker's own verdict of what the target needs), each alternative name mapped
+to its canonical key. Values are never kept. `buildStartEnv` then admits the `as_needed` env vars
+and environment secrets stored under those names through the same `deliverySelector` as all other
+launch material (`selectDeliveryEnvWith`, `selectDeliverySecretsWith` in
+`pkg/hub/material_delivery.go`), so an item the delivery decision refuses is withheld. They fill
+only keys nothing else set, under the canonical key, classified secret-fetchable. Nothing is logged
+or persisted; the broker's record of that start keeps the values for later restarts, as after a
+create. A plain reincarnation gets no holder and is unchanged. No wire or capability change.
+
+A first version carried the gathered values themselves; review pass 1 (R1) found that this
+bypassed the start's per-item delivery authorization, so the holder now carries names only.
 
 ## Adjacent, not fixed
 
