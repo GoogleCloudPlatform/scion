@@ -875,6 +875,11 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// too, unless this reincarnation resets it (a harness switch,
 	// ptone/scion#7757): then the broker moves it aside and composes a
 	// fresh one, under the reincarnation ID.
+	if homeReset {
+		// The start below gets the as_needed env this reprovision's
+		// gather resolves for the new harness (reprovisionGatheredEnv).
+		ctx = withReprovisionGatheredEnv(ctx)
+	}
 	if move != nil {
 		// Provisioned on the target above.
 	} else if err := dispatcher.DispatchAgentReprovision(ctx, agent, ReprovisionOptions{ResetHome: homeReset, ResetID: reincarnationID}); err != nil {

@@ -539,6 +539,12 @@ type reincarnateTestDispatcher struct {
 	lastStartTask    string
 	lastStartResume  *bool
 
+	// reprovisionGatheredEnvHolders and startGatheredEnvHolders record,
+	// per call, the reprovisionGatheredEnv holder in the dispatch ctx (nil
+	// when none).
+	reprovisionGatheredEnvHolders []*reprovisionGatheredEnv
+	startGatheredEnvHolders       []*reprovisionGatheredEnv
+
 	stopErr        error
 	reprovisionErr error
 	startErr       error
@@ -5229,9 +5235,10 @@ func (d *reincarnateTestDispatcher) DispatchAgentCreate(context.Context, *store.
 func (d *reincarnateTestDispatcher) DispatchAgentProvision(context.Context, *store.Agent) error {
 	return nil
 }
-func (d *reincarnateTestDispatcher) DispatchAgentReprovision(_ context.Context, agent *store.Agent, opts ReprovisionOptions) error {
+func (d *reincarnateTestDispatcher) DispatchAgentReprovision(ctx context.Context, agent *store.Agent, opts ReprovisionOptions) error {
 	d.mu.Lock()
 	d.reprovisionCalls++
+	d.reprovisionGatheredEnvHolders = append(d.reprovisionGatheredEnvHolders, reprovisionGatheredEnvFrom(ctx))
 	d.reprovisionOpts = append(d.reprovisionOpts, opts)
 	if agent.AppliedConfig != nil {
 		d.reprovisionConfigs = append(d.reprovisionConfigs, *agent.AppliedConfig)
@@ -5334,6 +5341,7 @@ func (d *reincarnateTestDispatcher) DispatchAgentStart(ctx context.Context, agen
 	}
 	d.startBrokers = append(d.startBrokers, agent.RuntimeBrokerID)
 	d.startCalls++
+	d.startGatheredEnvHolders = append(d.startGatheredEnvHolders, reprovisionGatheredEnvFrom(ctx))
 	d.lastStartTask = task
 	d.lastStartResume = &resume
 	err := d.startErr

@@ -2270,6 +2270,7 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 
 	finalResp := resp
 	finalNeeds := envReqs
+	var gatheredAsNeeded map[string]string
 
 	// Second pass: if the broker reported needed keys, check whether any can
 	// be satisfied by as_needed env vars or secrets — mirroring the pattern in
@@ -2294,6 +2295,7 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 			for k, v := range asNeededEnv {
 				req.ResolvedEnv[k] = v
 			}
+			gatheredAsNeeded = asNeededEnv
 			d.restrictCreateRequestTokenRemote(req)
 			if tzNeeded {
 				tz, tzErr := d.resolveAgentTZ(ctx, agent, true)
@@ -2367,6 +2369,9 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 			return fmt.Errorf("%s: broker did not confirm the home reset (it may not support resetting an agent home; its reported capabilities may be stale): %w", callerName, errReprovisionHomeIntact)
 		}
 		d.log.InfoContext(ctx, callerName+": reprovision confirmed", "agent_id", agent.ID, "home_reset", finalResp.HomeReset)
+		// The start that follows needs what this gather resolved
+		// (reprovisionGatheredEnv); only a ctx with a holder keeps it.
+		recordReprovisionGatheredEnv(ctx, gatheredAsNeeded)
 	}
 
 	// Merge resolved storage env vars back into AppliedConfig so they are
@@ -3554,6 +3559,9 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 			}
 		}
 	}
+	// After a home-reset reprovision, the as_needed env its gather
+	// resolved (reprovisionGatheredEnv), fill-only.
+	mergeReprovisionGatheredEnv(ctx, resolvedEnv, &envClassifications)
 
 	// TZ comes only from the agent TZ resolver, read live on every start
 	// and restart so a storage or hub-default edit reaches unpinned agents.
