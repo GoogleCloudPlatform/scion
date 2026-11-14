@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"time"
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentinfolock"
@@ -72,6 +73,7 @@ func (h *StatusHandler) update(mutate func(info map[string]interface{}) bool) er
 			return nil
 		}
 		dropStaleHarnessErrorReason(info, prevActivity, prevMessage)
+		stampActivitySince(info, prevActivity, time.Now())
 		return h.writeAgentInfoLocked(info)
 	})
 }
@@ -97,6 +99,33 @@ func dropStaleHarnessErrorReason(info map[string]interface{}, prevActivity, prev
 	}
 	if detailMessage(info) == prevMessage {
 		applyMessage(info, "")
+	}
+}
+
+// activitySinceKey is the agent-info.json field that records when the
+// current activity began (RFC 3339, UTC). The liveness sampler reads it
+// (ptone/scion#7855): a process the harness started after a tool call
+// began is that tool call's process, and the tool-call stall suppression
+// is capped by the time since then.
+const activitySinceKey = "activitySince"
+
+// stampActivitySince sets activitySinceKey to now when the write changed the
+// activity from before, or set an activity on a record that has no stamp
+// yet; it removes the stamp when the write removed the activity. A write
+// that keeps the activity (a second tool-start while executing, a message
+// or phase-only write) keeps the stamp. Every write goes through update, so
+// this is the one place the stamp is kept.
+func stampActivitySince(info map[string]interface{}, before string, now time.Time) {
+	after, _ := info["activity"].(string)
+	switch {
+	case after == "":
+		delete(info, activitySinceKey)
+	case after != before:
+		info[activitySinceKey] = now.UTC().Format(time.RFC3339Nano)
+	default:
+		if _, ok := info[activitySinceKey].(string); !ok {
+			info[activitySinceKey] = now.UTC().Format(time.RFC3339Nano)
+		}
 	}
 }
 
@@ -797,6 +826,24 @@ func (h *StatusHandler) CurrentActivity() state.Activity {
 	defer h.mu.Unlock()
 	current, _ := h.readAgentInfoMap()["activity"].(string)
 	return state.Activity(current)
+}
+
+// CurrentActivitySince returns the activity recorded in agent-info.json and
+// when it began (activitySinceKey). The time is zero when the file is
+// missing or unreadable, or when the record has no valid stamp (a record
+// written by an older sciontool).
+func (h *StatusHandler) CurrentActivitySince() (state.Activity, time.Time) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	info := h.readAgentInfoMap()
+	current, _ := info["activity"].(string)
+	var since time.Time
+	if raw, ok := info[activitySinceKey].(string); ok {
+		if t, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+			since = t
+		}
+	}
+	return state.Activity(current), since
 }
 
 // SetMessage writes a message to the agent-info.json detail section.
