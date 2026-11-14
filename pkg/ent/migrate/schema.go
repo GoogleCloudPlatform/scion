@@ -3007,6 +3007,7 @@ var (
 		{Name: "default_profile", Type: field.TypeString, Nullable: true},
 		{Name: "workspace_storage", Type: field.TypeString, Nullable: true},
 		{Name: "health", Type: field.TypeString, Nullable: true},
+		{Name: "workload_identity_targets", Type: field.TypeString, Nullable: true},
 		{Name: "labels", Type: field.TypeJSON, Nullable: true},
 		{Name: "annotations", Type: field.TypeJSON, Nullable: true},
 		{Name: "endpoint", Type: field.TypeString, Nullable: true},
@@ -3055,7 +3056,7 @@ var (
 			{
 				Name:    "runtimebroker_runtime_target_id",
 				Unique:  true,
-				Columns: []*schema.Column{RuntimeBrokersColumns[30]},
+				Columns: []*schema.Column{RuntimeBrokersColumns[31]},
 			},
 		},
 	}

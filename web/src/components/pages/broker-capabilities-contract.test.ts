@@ -58,6 +58,7 @@ const UNDECLARED_ALLOWED: readonly string[] = [
   'startsInFlight',
   'templateTiers',
   'unlimitedCountLimits',
+  'wiTargetsV1',
 ];
 
 const serverFields: readonly string[] = fixture.fields;

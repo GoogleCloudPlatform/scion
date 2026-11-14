@@ -93,6 +93,12 @@ func (RuntimeBroker) Fields() []ent.Field {
 		// reported (an older broker). It never affects status.
 		field.String("health").
 			Optional(),
+		// workload_identity_targets is the broker's JSON-encoded
+		// []store.WorkloadIdentityTarget from the heartbeat
+		// (ptone/scion#3329 phase 5). Empty means never reported; "[]"
+		// means the broker reports none. Kept on flat rows.
+		field.String("workload_identity_targets").
+			Optional(),
 		field.JSON("labels", map[string]string{}).
 			Optional(),
 		field.JSON("annotations", map[string]string{}).

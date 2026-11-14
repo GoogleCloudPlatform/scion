@@ -49,6 +49,8 @@ type RuntimeBroker struct {
 	WorkspaceStorage string `json:"workspace_storage,omitempty"`
 	// Health holds the value of the "health" field.
 	Health string `json:"health,omitempty"`
+	// WorkloadIdentityTargets holds the value of the "workload_identity_targets" field.
+	WorkloadIdentityTargets string `json:"workload_identity_targets,omitempty"`
 	// Labels holds the value of the "labels" field.
 	Labels map[string]string `json:"labels,omitempty"`
 	// Annotations holds the value of the "annotations" field.
@@ -119,7 +121,7 @@ func (*RuntimeBroker) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullBool)
 		case runtimebroker.FieldLockVersion, runtimebroker.FieldPresentationEpoch, runtimebroker.FieldPresentationSeq:
 			values[i] = new(sql.NullInt64)
-		case runtimebroker.FieldName, runtimebroker.FieldSlug, runtimebroker.FieldMode, runtimebroker.FieldVersion, runtimebroker.FieldStatus, runtimebroker.FieldConnectionState, runtimebroker.FieldCapabilities, runtimebroker.FieldSupportedHarnesses, runtimebroker.FieldResources, runtimebroker.FieldRuntimes, runtimebroker.FieldDefaultProfile, runtimebroker.FieldWorkspaceStorage, runtimebroker.FieldHealth, runtimebroker.FieldEndpoint, runtimebroker.FieldCreatedBy, runtimebroker.FieldGcpHostServiceAccountEmail, runtimebroker.FieldGcpHostProjectID, runtimebroker.FieldGcpHostSource, runtimebroker.FieldHostIdentityObservedEmail, runtimebroker.FieldHostIdentityObservation, runtimebroker.FieldConnectedHubID, runtimebroker.FieldConnectedSessionID, runtimebroker.FieldRuntimeTargetID, runtimebroker.FieldRuntimeTargetType, runtimebroker.FieldRuntimeTargetDisplayName, runtimebroker.FieldRuntimeTargetPresentation, runtimebroker.FieldRuntimeTargetPresentationHash, runtimebroker.FieldConversionPlanPresentation, runtimebroker.FieldConversionPlanPresentationHash:
+		case runtimebroker.FieldName, runtimebroker.FieldSlug, runtimebroker.FieldMode, runtimebroker.FieldVersion, runtimebroker.FieldStatus, runtimebroker.FieldConnectionState, runtimebroker.FieldCapabilities, runtimebroker.FieldSupportedHarnesses, runtimebroker.FieldResources, runtimebroker.FieldRuntimes, runtimebroker.FieldDefaultProfile, runtimebroker.FieldWorkspaceStorage, runtimebroker.FieldHealth, runtimebroker.FieldWorkloadIdentityTargets, runtimebroker.FieldEndpoint, runtimebroker.FieldCreatedBy, runtimebroker.FieldGcpHostServiceAccountEmail, runtimebroker.FieldGcpHostProjectID, runtimebroker.FieldGcpHostSource, runtimebroker.FieldHostIdentityObservedEmail, runtimebroker.FieldHostIdentityObservation, runtimebroker.FieldConnectedHubID, runtimebroker.FieldConnectedSessionID, runtimebroker.FieldRuntimeTargetID, runtimebroker.FieldRuntimeTargetType, runtimebroker.FieldRuntimeTargetDisplayName, runtimebroker.FieldRuntimeTargetPresentation, runtimebroker.FieldRuntimeTargetPresentationHash, runtimebroker.FieldConversionPlanPresentation, runtimebroker.FieldConversionPlanPresentationHash:
 			values[i] = new(sql.NullString)
 		case runtimebroker.FieldLastHeartbeat, runtimebroker.FieldHostIdentityObservedAt, runtimebroker.FieldConnectedAt, runtimebroker.FieldPresentationFencedAt, runtimebroker.FieldPresentationObservedAt, runtimebroker.FieldConversionPlanObservedAt, runtimebroker.FieldCreated, runtimebroker.FieldUpdated:
 			values[i] = new(sql.NullTime)
@@ -236,6 +238,12 @@ func (_m *RuntimeBroker) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field health", values[i])
 			} else if value.Valid {
 				_m.Health = value.String
+			}
+		case runtimebroker.FieldWorkloadIdentityTargets:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field workload_identity_targets", values[i])
+			} else if value.Valid {
+				_m.WorkloadIdentityTargets = value.String
 			}
 		case runtimebroker.FieldLabels:
 			if value, ok := values[i].(*[]byte); !ok {
@@ -505,6 +513,9 @@ func (_m *RuntimeBroker) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("health=")
 	builder.WriteString(_m.Health)
+	builder.WriteString(", ")
+	builder.WriteString("workload_identity_targets=")
+	builder.WriteString(_m.WorkloadIdentityTargets)
 	builder.WriteString(", ")
 	builder.WriteString("labels=")
 	builder.WriteString(fmt.Sprintf("%v", _m.Labels))

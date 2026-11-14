@@ -86243,6 +86243,7 @@ type RuntimeBrokerMutation struct {
 	default_profile                   *string
 	workspace_storage                 *string
 	health                            *string
+	workload_identity_targets         *string
 	labels                            *map[string]string
 	annotations                       *map[string]string
 	endpoint                          *string
@@ -87058,6 +87059,55 @@ func (m *RuntimeBrokerMutation) HealthCleared() bool {
 func (m *RuntimeBrokerMutation) ResetHealth() {
 	m.health = nil
 	delete(m.clearedFields, runtimebroker.FieldHealth)
+}
+
+// SetWorkloadIdentityTargets sets the "workload_identity_targets" field.
+func (m *RuntimeBrokerMutation) SetWorkloadIdentityTargets(s string) {
+	m.workload_identity_targets = &s
+}
+
+// WorkloadIdentityTargets returns the value of the "workload_identity_targets" field in the mutation.
+func (m *RuntimeBrokerMutation) WorkloadIdentityTargets() (r string, exists bool) {
+	v := m.workload_identity_targets
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldWorkloadIdentityTargets returns the old "workload_identity_targets" field's value of the RuntimeBroker entity.
+// If the RuntimeBroker object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeBrokerMutation) OldWorkloadIdentityTargets(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldWorkloadIdentityTargets is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldWorkloadIdentityTargets requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldWorkloadIdentityTargets: %w", err)
+	}
+	return oldValue.WorkloadIdentityTargets, nil
+}
+
+// ClearWorkloadIdentityTargets clears the value of the "workload_identity_targets" field.
+func (m *RuntimeBrokerMutation) ClearWorkloadIdentityTargets() {
+	m.workload_identity_targets = nil
+	m.clearedFields[runtimebroker.FieldWorkloadIdentityTargets] = struct{}{}
+}
+
+// WorkloadIdentityTargetsCleared returns if the "workload_identity_targets" field was cleared in this mutation.
+func (m *RuntimeBrokerMutation) WorkloadIdentityTargetsCleared() bool {
+	_, ok := m.clearedFields[runtimebroker.FieldWorkloadIdentityTargets]
+	return ok
+}
+
+// ResetWorkloadIdentityTargets resets all changes to the "workload_identity_targets" field.
+func (m *RuntimeBrokerMutation) ResetWorkloadIdentityTargets() {
+	m.workload_identity_targets = nil
+	delete(m.clearedFields, runtimebroker.FieldWorkloadIdentityTargets)
 }
 
 // SetLabels sets the "labels" field.
@@ -88469,7 +88519,7 @@ func (m *RuntimeBrokerMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *RuntimeBrokerMutation) Fields() []string {
-	fields := make([]string, 0, 43)
+	fields := make([]string, 0, 44)
 	if m.name != nil {
 		fields = append(fields, runtimebroker.FieldName)
 	}
@@ -88514,6 +88564,9 @@ func (m *RuntimeBrokerMutation) Fields() []string {
 	}
 	if m.health != nil {
 		fields = append(fields, runtimebroker.FieldHealth)
+	}
+	if m.workload_identity_targets != nil {
+		fields = append(fields, runtimebroker.FieldWorkloadIdentityTargets)
 	}
 	if m.labels != nil {
 		fields = append(fields, runtimebroker.FieldLabels)
@@ -88637,6 +88690,8 @@ func (m *RuntimeBrokerMutation) Field(name string) (ent.Value, bool) {
 		return m.WorkspaceStorage()
 	case runtimebroker.FieldHealth:
 		return m.Health()
+	case runtimebroker.FieldWorkloadIdentityTargets:
+		return m.WorkloadIdentityTargets()
 	case runtimebroker.FieldLabels:
 		return m.Labels()
 	case runtimebroker.FieldAnnotations:
@@ -88732,6 +88787,8 @@ func (m *RuntimeBrokerMutation) OldField(ctx context.Context, name string) (ent.
 		return m.OldWorkspaceStorage(ctx)
 	case runtimebroker.FieldHealth:
 		return m.OldHealth(ctx)
+	case runtimebroker.FieldWorkloadIdentityTargets:
+		return m.OldWorkloadIdentityTargets(ctx)
 	case runtimebroker.FieldLabels:
 		return m.OldLabels(ctx)
 	case runtimebroker.FieldAnnotations:
@@ -88901,6 +88958,13 @@ func (m *RuntimeBrokerMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetHealth(v)
+		return nil
+	case runtimebroker.FieldWorkloadIdentityTargets:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetWorkloadIdentityTargets(v)
 		return nil
 	case runtimebroker.FieldLabels:
 		v, ok := value.(map[string]string)
@@ -89194,6 +89258,9 @@ func (m *RuntimeBrokerMutation) ClearedFields() []string {
 	if m.FieldCleared(runtimebroker.FieldHealth) {
 		fields = append(fields, runtimebroker.FieldHealth)
 	}
+	if m.FieldCleared(runtimebroker.FieldWorkloadIdentityTargets) {
+		fields = append(fields, runtimebroker.FieldWorkloadIdentityTargets)
+	}
 	if m.FieldCleared(runtimebroker.FieldLabels) {
 		fields = append(fields, runtimebroker.FieldLabels)
 	}
@@ -89309,6 +89376,9 @@ func (m *RuntimeBrokerMutation) ClearField(name string) error {
 		return nil
 	case runtimebroker.FieldHealth:
 		m.ClearHealth()
+		return nil
+	case runtimebroker.FieldWorkloadIdentityTargets:
+		m.ClearWorkloadIdentityTargets()
 		return nil
 	case runtimebroker.FieldLabels:
 		m.ClearLabels()
@@ -89437,6 +89507,9 @@ func (m *RuntimeBrokerMutation) ResetField(name string) error {
 		return nil
 	case runtimebroker.FieldHealth:
 		m.ResetHealth()
+		return nil
+	case runtimebroker.FieldWorkloadIdentityTargets:
+		m.ResetWorkloadIdentityTargets()
 		return nil
 	case runtimebroker.FieldLabels:
 		m.ResetLabels()

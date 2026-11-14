@@ -219,6 +219,14 @@ func (s *Server) resolveKubernetesAssignIdentity(ctx context.Context, in startCo
 			"kubernetes_service_account_mappings is set in a project's own settings.yaml; it is never consulted there, only the broker's global settings are used for this mapping",
 			"agent", in.Name, "profile", sel.ProfileName, "runtime_entry", sel.RuntimeEntryName)
 	}
+	// The Workload Identity pool the broker reports to the hub
+	// (heartbeatWorkloadIdentityTargets) is likewise read only from the
+	// broker's settings.
+	if config.ProjectSettingsHasWorkloadIdentityPool(in.ProjectPath, sel.RuntimeEntryName) {
+		s.agentLifecycleLog.Warn(
+			"workload_identity_pool is set in a project's own settings.yaml; it is never consulted there, only the broker's global settings are used for the Workload Identity pool",
+			"agent", in.Name, "profile", sel.ProfileName, "runtime_entry", sel.RuntimeEntryName)
+	}
 
 	// Global file plus the DB-backed overlay only: no project layer and no
 	// SCION_ environment provider.

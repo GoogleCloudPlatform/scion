@@ -818,6 +818,7 @@ func entBrokerToStore(b *ent.RuntimeBroker) *store.RuntimeBroker {
 	sb.DefaultProfile = b.DefaultProfile
 	unmarshalRawJSON(b.WorkspaceStorage, &sb.WorkspaceStorage)
 	unmarshalRawJSON(b.Health, &sb.Health)
+	unmarshalRawJSON(b.WorkloadIdentityTargets, &sb.WorkloadIdentityTargets)
 	sb.Labels = b.Labels
 	if sb.Labels == nil {
 		sb.Labels = make(map[string]string)
@@ -914,6 +915,7 @@ func createRuntimeBroker(ctx context.Context, client *ent.Client, uid uuid.UUID,
 		SetDefaultProfile(defaultProfile).
 		SetWorkspaceStorage(marshalRawJSON(b.WorkspaceStorage)).
 		SetHealth(marshalRawJSON(b.Health)).
+		SetWorkloadIdentityTargets(marshalRawJSON(b.WorkloadIdentityTargets)).
 		SetLabels(b.Labels).
 		SetAnnotations(b.Annotations)
 	// The six presentation columns are never written at creation; only
@@ -1047,6 +1049,7 @@ func (s *ProjectStore) UpdateRuntimeBroker(ctx context.Context, b *store.Runtime
 			SetDefaultProfile(defaultProfile).
 			SetWorkspaceStorage(marshalRawJSON(b.WorkspaceStorage)).
 			SetHealth(marshalRawJSON(b.Health)).
+			SetWorkloadIdentityTargets(marshalRawJSON(b.WorkloadIdentityTargets)).
 			SetLabels(b.Labels).
 			SetAnnotations(b.Annotations).
 			SetEndpoint(b.Endpoint).
@@ -1115,6 +1118,7 @@ func (s *ProjectStore) RefreshRuntimeBrokerState(ctx context.Context, id string,
 			SetWorkspaceStorage(marshalRawJSON(b.WorkspaceStorage)).
 			SetDefaultProfile(defaultProfile).
 			SetHealth(marshalRawJSON(b.Health)).
+			SetWorkloadIdentityTargets(marshalRawJSON(b.WorkloadIdentityTargets)).
 			SetRuntimes(marshalRawJSON(profiles)).
 			SetVersion(b.Version).
 			SetUpdated(time.Now()).

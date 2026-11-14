@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -42,7 +43,16 @@ type GCPServiceAccountAdmin interface {
 
 	// SetIAMPolicy grants a role to a member on a service account.
 	// Used to grant roles/iam.serviceAccountTokenCreator to the Hub SA on minted SAs.
+	// IAMAdminClient implements it as AddRoleMembers with one member.
 	SetIAMPolicy(ctx context.Context, saEmail string, member string, role string) error
+
+	// AddRoleMembers grants role to every member on a service account in
+	// one get-modify-set of the account's IAM policy. The write carries the
+	// etag of the policy read, so a concurrent change fails it with a
+	// conflict (HTTP 409) rather than being overwritten. Members already
+	// granted the role are left as they are. Used for the Workload Identity
+	// bindings of a minted account (ptone/scion#3329 phase 5).
+	AddRoleMembers(ctx context.Context, saEmail, role string, members []string) error
 }
 
 // IAMAdminClient implements GCPServiceAccountAdmin using the GCP IAM Admin API.
@@ -87,36 +97,20 @@ func (c *IAMAdminClient) DeleteServiceAccount(ctx context.Context, saEmail strin
 }
 
 func (c *IAMAdminClient) SetIAMPolicy(ctx context.Context, saEmail string, member string, role string) error {
+	return c.AddRoleMembers(ctx, saEmail, role, []string{member})
+}
+
+func (c *IAMAdminClient) AddRoleMembers(ctx context.Context, saEmail, role string, members []string) error {
 	resource := "projects/-/serviceAccounts/" + saEmail
 
-	// Get current policy
+	// Get current policy (with its etag, which the write below sends back).
 	policy, err := c.service.Projects.ServiceAccounts.GetIamPolicy(resource).Context(ctx).Do()
 	if err != nil {
 		return fmt.Errorf("getting IAM policy for %s: %w", saEmail, err)
 	}
 
-	// Add the binding
-	found := false
-	for _, binding := range policy.Bindings {
-		if binding.Role == role {
-			for _, m := range binding.Members {
-				if m == member {
-					found = true
-					break
-				}
-			}
-			if !found {
-				binding.Members = append(binding.Members, member)
-				found = true
-			}
-			break
-		}
-	}
-	if !found {
-		policy.Bindings = append(policy.Bindings, &iam.Binding{
-			Role:    role,
-			Members: []string{member},
-		})
+	if !addPolicyRoleMembers(policy, role, members) {
+		return nil
 	}
 
 	// Set the updated policy
@@ -128,6 +122,33 @@ func (c *IAMAdminClient) SetIAMPolicy(ctx context.Context, saEmail string, membe
 	}
 
 	return nil
+}
+
+// addPolicyRoleMembers adds each of members to the unconditional binding of
+// role in policy, creating the binding when there is none, and reports
+// whether the policy changed. A conditional binding of the same role is
+// never extended.
+func addPolicyRoleMembers(policy *iam.Policy, role string, members []string) bool {
+	var binding *iam.Binding
+	for _, b := range policy.Bindings {
+		if b.Role == role && b.Condition == nil {
+			binding = b
+			break
+		}
+	}
+	changed := false
+	for _, member := range members {
+		if binding == nil {
+			binding = &iam.Binding{Role: role}
+			policy.Bindings = append(policy.Bindings, binding)
+		}
+		if slices.Contains(binding.Members, member) {
+			continue
+		}
+		binding.Members = append(binding.Members, member)
+		changed = true
+	}
+	return changed
 }
 
 // retryIAMGrant retries an IAM operation with exponential backoff to handle
@@ -170,6 +191,11 @@ func isEventualConsistencyError(err error) bool {
 		return false
 	}
 	errStr := err.Error()
+	// A Workload Identity pool that does not exist is a permanent error
+	// with the same status and wording; retrying it only adds delay.
+	if isWorkloadIdentityPoolNotFoundError(err) {
+		return false
+	}
 	return strings.Contains(errStr, "does not exist") &&
 		strings.Contains(errStr, "400")
 }

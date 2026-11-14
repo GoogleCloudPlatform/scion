@@ -768,6 +768,7 @@ func (s *Server) newHeartbeatService(client hubclient.RuntimeBrokerService, brok
 	hb.health = s.heartbeatHealthReport
 	hb.profileAttach = s.heartbeatProfileAttach
 	hb.profileSAMappings = s.heartbeatProfileSAMappings
+	hb.workloadIdentityTargets = s.heartbeatWorkloadIdentityTargets
 	hb.startsInFlight = s.startsInFlightSnapshot
 	hb.defaultProfile = s.defaultProfile
 	hb.flat = s.isFlat()

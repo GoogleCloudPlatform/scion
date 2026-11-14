@@ -21,6 +21,7 @@
     "sync",
     "templateTiers",
     "unlimitedCountLimits",
-    "webPty"
+    "webPty",
+    "wiTargetsV1"
   ]
 }

@@ -958,6 +958,36 @@ type brokerHeartbeatRequest struct {
 	// itself (ApplyConversionPlan). Omitted by an older broker or a flat
 	// one, in which case the stored value is left unchanged.
 	ConversionPlanPresentation json.RawMessage `json:"conversionPlanPresentation,omitempty"`
+	// WorkloadIdentityTargets refreshes the broker's stored Workload
+	// Identity targets (see hubclient.BrokerHeartbeat.WorkloadIdentityTargets;
+	// ptone/scion#3329 phase 5). Nil (omitted, or null) keeps the stored
+	// list; a non-nil list, empty included, replaces it when it differs.
+	// Accepted from legacy and flat brokers; a flat row's targets have their
+	// profile dropped (normalizeWorkloadIdentityTargets).
+	WorkloadIdentityTargets *[]store.WorkloadIdentityTarget `json:"workloadIdentityTargets,omitempty"`
+}
+
+// normalizeWorkloadIdentityTargets returns the targets to store from a
+// heartbeat's reported list: trimmed, with empty-pool entries dropped, and,
+// for a flat row (which has no profiles), with each profile cleared. It
+// reports whether any profile was dropped. The result is never nil.
+func normalizeWorkloadIdentityTargets(reported []store.WorkloadIdentityTarget, flat bool) ([]store.WorkloadIdentityTarget, bool) {
+	out := make([]store.WorkloadIdentityTarget, 0, len(reported))
+	dropped := false
+	for _, t := range reported {
+		t.Profile = strings.TrimSpace(t.Profile)
+		t.Pool = strings.TrimSpace(t.Pool)
+		t.Namespace = strings.TrimSpace(t.Namespace)
+		if t.Pool == "" {
+			continue
+		}
+		if flat && t.Profile != "" {
+			t.Profile = ""
+			dropped = true
+		}
+		out = append(out, t)
+	}
+	return out, dropped
 }
 
 // brokerStartInFlight mirrors hubclient.StartInFlight.
@@ -1382,7 +1412,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	if brokerSelf {
 		heartbeatVersion = brokerVersionToken(heartbeat.Version)
 	}
-	if heartbeatVersion != "" || heartbeat.Capabilities != nil || heartbeat.WorkspaceStorage != nil || heartbeat.DefaultProfile != nil || heartbeat.Health != nil || len(heartbeat.ProfileAttach) > 0 || len(heartbeat.ProfileSAMappings) > 0 || len(heartbeat.ProfileSAMappingsHashes) > 0 {
+	if heartbeatVersion != "" || heartbeat.Capabilities != nil || heartbeat.WorkspaceStorage != nil || heartbeat.DefaultProfile != nil || heartbeat.Health != nil || len(heartbeat.ProfileAttach) > 0 || len(heartbeat.ProfileSAMappings) > 0 || len(heartbeat.ProfileSAMappingsHashes) > 0 || heartbeat.WorkloadIdentityTargets != nil {
 		if broker, err := loadHeartbeatBroker(); err != nil {
 			s.agentLifecycleLog.Warn("heartbeat: failed to load broker to refresh broker state",
 				"broker_id", id, "error", err)
@@ -1397,6 +1427,17 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				heartbeat.ProfileAttach = nil
 				heartbeat.ProfileSAMappings = nil
 				heartbeat.ProfileSAMappingsHashes = nil
+			}
+			// Workload Identity targets are kept on a flat row, without a
+			// profile.
+			var wiTargets []store.WorkloadIdentityTarget
+			if heartbeat.WorkloadIdentityTargets != nil {
+				var dropped bool
+				wiTargets, dropped = normalizeWorkloadIdentityTargets(*heartbeat.WorkloadIdentityTargets, broker.IsFlat())
+				if dropped {
+					s.agentLifecycleLog.Warn("heartbeat: ignoring the profile of Workload Identity targets reported for a flat Runtime Broker",
+						"broker_id", id)
+				}
 			}
 			// A broker older than templateTiers ignores the telemetry tiers
 			// dispatch sends; warn once (ptone/scion#4224).
@@ -1437,6 +1478,10 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 					changed = true
 				}
 				if applyProfileAttach(b.Profiles, heartbeat.ProfileAttach) {
+					changed = true
+				}
+				if wiTargets != nil && !reflect.DeepEqual(b.WorkloadIdentityTargets, wiTargets) {
+					b.WorkloadIdentityTargets = wiTargets
 					changed = true
 				}
 				saChanged, requested := applyProfileSAMappings(b.Profiles, heartbeat.ProfileSAMappings, heartbeat.ProfileSAMappingsHashes, time.Now())
