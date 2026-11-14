@@ -180,6 +180,7 @@ func findDenyListProblems(lines []string, denyPatterns []string, source string) 
 func TestDocSyntax(t *testing.T) {
 	docFiles := []string{
 		"../resources/platform_skills/scion-messaging/SKILL.md",
+		"../resources/platform_skills/scion-messaging/references/choices.md",
 		"../docs-site/src/content/docs/hosted/user/messaging.md",
 		"../docs-site/src/content/docs/reference/cli.md",
 		"../docs-site/src/content/docs/glossary.md",
@@ -343,4 +344,91 @@ func TestAcceptsPositionalArgs(t *testing.T) {
 			assert.Equal(t, tt.want, acceptsPositionalArgs(tt.cmd))
 		})
 	}
+}
+
+// fencedScionLinesWithPlaceholders returns every `scion ...` line from
+// fenced code blocks, placeholder lines included (extractScionLines skips
+// those).
+func fencedScionLinesWithPlaceholders(t *testing.T, path string) []string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	require.NoError(t, err, "reading %s", path)
+	var lines []string
+	inFence := false
+	for _, raw := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(raw), "```") {
+			inFence = !inFence
+			continue
+		}
+		if s := strings.TrimSpace(raw); inFence && strings.HasPrefix(s, "scion ") {
+			lines = append(lines, s)
+		}
+	}
+	return lines
+}
+
+// placeholderFlagProblems checks the --flag names of fenced scion lines that
+// use placeholders: the command is resolved from the tokens before the first
+// flag, and every flag must exist on it.
+func placeholderFlagProblems(lines []string, source string) []string {
+	var problems []string
+	for _, line := range lines {
+		tokens := strings.Fields(line)[1:]
+		var path []string
+		for _, tok := range tokens {
+			if strings.HasPrefix(tok, "-") {
+				break
+			}
+			path = append(path, tok)
+		}
+		cmd, _, err := rootCmd.Find(path)
+		if err != nil {
+			problems = append(problems, fmt.Sprintf("command not found: %s (from %s)", line, source))
+			continue
+		}
+		for _, tok := range tokens {
+			if !strings.HasPrefix(tok, "--") {
+				continue
+			}
+			name, _, _ := strings.Cut(strings.TrimPrefix(tok, "--"), "=")
+			if name == "" {
+				continue
+			}
+			if cmd.Flags().Lookup(name) == nil && cmd.InheritedFlags().Lookup(name) == nil {
+				problems = append(problems, fmt.Sprintf("unknown flag --%s for %q: %s (from %s)", name, cmd.CommandPath(), line, source))
+			}
+		}
+	}
+	return problems
+}
+
+// TestDocSyntax_PlatformSkillChoices checks every fenced scion line of the
+// scion-messaging skill and its Choices reference (ptone/scion#7830),
+// placeholder lines included, against the cobra tree, and that no example
+// passes decisions as inline JSON: the reference teaches --choices-file.
+func TestDocSyntax_PlatformSkillChoices(t *testing.T) {
+	files := []string{
+		"../resources/platform_skills/scion-messaging/SKILL.md",
+		"../resources/platform_skills/scion-messaging/references/choices.md",
+	}
+	total := 0
+	for _, rel := range files {
+		lines := fencedScionLinesWithPlaceholders(t, rel)
+		total += len(lines)
+		for _, p := range placeholderFlagProblems(lines, rel) {
+			t.Error(p)
+		}
+		for _, line := range lines {
+			if strings.Contains(line, "--choices ") || strings.Contains(line, "--choices=") {
+				t.Errorf("fenced example passes inline --choices JSON; use --choices-file <file>: %s (from %s)", line, rel)
+			}
+		}
+	}
+	require.GreaterOrEqual(t, total, 10, "expected the scion-messaging skill files to hold at least 10 fenced scion lines; got %d", total)
+
+	t.Run("catches_unknown_flag_on_placeholder_line", func(t *testing.T) {
+		problems := placeholderFlagProblems([]string{"scion decisions record <key> <choice-id> --form <message-id>"}, "test")
+		assert.NotEmpty(t, problems)
+		assert.Empty(t, placeholderFlagProblems([]string{"scion decisions record <key> <choice-id> --from <message-id>"}, "test"))
+	})
 }

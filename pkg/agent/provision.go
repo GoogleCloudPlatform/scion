@@ -2665,6 +2665,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		HubEnabled:         hubEnabled,
 		ForceOverwrite:     api.IsReprovisionFromContext(ctx),
 		TemplateSkillNames: templateSkillNames,
+		ExperimentOn:       experimentOn(ctx, settings),
 	}
 	if skillsDir != "" {
 		if err := injectPlatformSkills(resources.PlatformSkillsFS(), agentHome, skillsDir, injCtx); err != nil {
@@ -3103,6 +3104,9 @@ type skillFrontmatter struct {
 	Name        string `yaml:"name"`
 	Description string `yaml:"description"`
 	InjectWhen  string `yaml:"inject_when"`
+	// Experiment names the experiment this file requires (skill_gate.go):
+	// on SKILL.md it gates the whole skill, on any other *.md the file.
+	Experiment string `yaml:"experiment"`
 }
 
 // parseSkillFrontmatter extracts YAML frontmatter from a SKILL.md file.
@@ -3141,6 +3145,10 @@ type workspaceSkillsInjectionContext struct {
 	// ForceOverwrite can still respect "template skills take precedence"
 	// rather than clobbering a template's intentional override.
 	TemplateSkillNames map[string]bool
+	// ExperimentOn reports whether an experiment is on for this agent
+	// (experimentOn). It drives the experiment gates of platform skills
+	// (skill_gate.go); nil means every gate is off.
+	ExperimentOn func(id string) bool
 }
 
 // platformSkillsHubEnabled reports whether hub_enabled platform skills are
@@ -3220,6 +3228,11 @@ func composeInstructions(preamble, templateContent []byte) []byte {
 // current template chain provides a skill with the same directory name
 // (injCtx.TemplateSkillNames), the platform skill is skipped.
 //
+// Experiment gates (skill_gate.go) are applied from injCtx.ExperimentOn: a
+// skill whose SKILL.md names an experiment that is off is skipped (and, on
+// ForceOverwrite, a platform-owned copy is removed), and the installed tree
+// is the gated view, so gated-off files and blocks never reach the agent.
+//
 // Otherwise, a platform skill whose directory already exists on disk is
 // normally left alone (idempotent restart/resume). injCtx.ForceOverwrite
 // (reincarnation reprovisioning) refreshes it instead, so a newer broker
@@ -3242,6 +3255,9 @@ func injectPlatformSkills(
 	}
 	defer func() { _ = home.Close() }()
 
+	gate := skillExperimentGate(injCtx.ExperimentOn)
+	view := gatedView(skillsFS, gate)
+
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -3257,6 +3273,20 @@ func injectPlatformSkills(
 		fm := parseSkillFrontmatter(skillMDData)
 		if !shouldInjectSkill(fm, injCtx) {
 			util.Debugf("provision: skipping platform skill %q (inject_when=%q not satisfied)", skillName, fm.InjectWhen)
+			continue
+		}
+
+		if fm.Experiment != "" && !gate(fm.Experiment) {
+			util.Debugf("provision: skipping platform skill %q (experiment %q is off)", skillName, fm.Experiment)
+			// Reincarnation reprovisions from the current state: a copy
+			// installed while the experiment was on is removed, unless the
+			// template chain owns that name. A Skill Bank skill of the same
+			// name is installed again by the next step.
+			if injCtx.ForceOverwrite && !injCtx.TemplateSkillNames[skillName] {
+				if err := home.RemoveAll(skillRel(skillsDir, skillName)); err != nil {
+					return fmt.Errorf("failed to remove gated-off platform skill %s: %w", skillName, homeSkillError(skillName, err))
+				}
+			}
 			continue
 		}
 
@@ -3287,7 +3317,7 @@ func injectPlatformSkills(
 		// keeps no stale file from an earlier generation. rel is
 		// platform-owned at this point: the TemplateSkillNames check above
 		// already exempted anything template-owned.
-		if err := home.InstallTreeFS(skillsFS, skillName, rel, skillTreeLimits); err != nil {
+		if err := home.InstallTreeFS(view, skillName, rel, skillTreeLimits); err != nil {
 			return fmt.Errorf("failed to copy platform skill %s: %w", skillName, homeSkillError(skillName, err))
 		}
 		util.Debugf("provision: injected platform skill %q into %s", skillName, rel)
