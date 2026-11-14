@@ -1389,6 +1389,15 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	if brokerSelf {
 		heartbeatVersion = brokerVersionToken(heartbeat.Version)
 	}
+	// Workload Identity targets decide which IAM member a mint binds, so
+	// they come only from the broker's own credentials (design §3.8: only
+	// operator-local settings choose the pool and namespace). A user
+	// heartbeat, even with broker.update, never sets them.
+	if !brokerSelf && heartbeat.WorkloadIdentityTargets != nil {
+		s.agentLifecycleLog.Warn("heartbeat: ignoring workloadIdentityTargets sent with a request identity other than the broker itself",
+			"broker_id", id)
+		heartbeat.WorkloadIdentityTargets = nil
+	}
 	if heartbeatVersion != "" || heartbeat.Capabilities != nil || heartbeat.WorkspaceStorage != nil || heartbeat.DefaultProfile != nil || heartbeat.Health != nil || len(heartbeat.ProfileAttach) > 0 || len(heartbeat.ProfileSAMappings) > 0 || len(heartbeat.ProfileSAMappingsHashes) > 0 || heartbeat.WorkloadIdentityTargets != nil {
 		if broker, err := loadHeartbeatBroker(); err != nil {
 			s.agentLifecycleLog.Warn("heartbeat: failed to load broker to refresh broker state",

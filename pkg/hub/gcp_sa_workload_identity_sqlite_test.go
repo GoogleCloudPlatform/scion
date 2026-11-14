@@ -17,10 +17,12 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -192,7 +194,7 @@ func TestBrokerHeartbeat_WorkloadIdentityTargetsPersisted(t *testing.T) {
 	assert.Nil(t, load(b.ID).WorkloadIdentityTargets, "never reported")
 
 	targets := []store.WorkloadIdentityTarget{{Profile: "gke", Pool: "cluster-project.svc.id.goog", Namespace: "agents"}}
-	postHeartbeat(t, srv, b.ID, brokerHeartbeatRequest{
+	wiHeartbeatAsBroker(t, srv, b.ID, brokerHeartbeatRequest{
 		Status:                  "online",
 		Capabilities:            &store.BrokerCapabilities{WITargetsV1: true},
 		WorkloadIdentityTargets: &targets,
@@ -202,11 +204,11 @@ func TestBrokerHeartbeat_WorkloadIdentityTargetsPersisted(t *testing.T) {
 	require.NotNil(t, got.Capabilities)
 	assert.True(t, got.Capabilities.WITargetsV1)
 
-	postHeartbeat(t, srv, b.ID, brokerHeartbeatRequest{Status: "online"})
+	wiHeartbeatAsBroker(t, srv, b.ID, brokerHeartbeatRequest{Status: "online"})
 	assert.Equal(t, targets, load(b.ID).WorkloadIdentityTargets, "an omitted field keeps the stored list")
 
 	none := []store.WorkloadIdentityTarget{}
-	postHeartbeat(t, srv, b.ID, brokerHeartbeatRequest{Status: "online", WorkloadIdentityTargets: &none})
+	wiHeartbeatAsBroker(t, srv, b.ID, brokerHeartbeatRequest{Status: "online", WorkloadIdentityTargets: &none})
 	got = load(b.ID)
 	require.NotNil(t, got.WorkloadIdentityTargets, "an empty report is stored as empty, not as never reported")
 	assert.Empty(t, got.WorkloadIdentityTargets)
@@ -217,15 +219,38 @@ func TestBrokerHeartbeat_WorkloadIdentityTargetsPersisted(t *testing.T) {
 		{Profile: "gke", Pool: "cluster-project.svc.id.goog", Namespace: "a$(id)"},
 		{Profile: "gke", Pool: "cluster-project.svc.id.goog", Namespace: "agents"},
 	}
-	postHeartbeat(t, srv, b.ID, brokerHeartbeatRequest{Status: "online", WorkloadIdentityTargets: &mixed})
+	wiHeartbeatAsBroker(t, srv, b.ID, brokerHeartbeatRequest{Status: "online", WorkloadIdentityTargets: &mixed})
 	assert.Equal(t, []store.WorkloadIdentityTarget{{Profile: "gke", Pool: "cluster-project.svc.id.goog", Namespace: "agents"}},
 		load(b.ID).WorkloadIdentityTargets, "malformed pool and namespace are dropped at ingest")
 
 	// A null field (unreadable settings) keeps the stored list too.
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/runtime-brokers/"+b.ID+"/heartbeat",
-		json.RawMessage(`{"status":"online","workloadIdentityTargets":null}`))
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	wiHeartbeatAsBroker(t, srv, b.ID, json.RawMessage(`{"status":"online","workloadIdentityTargets":null}`))
 	assert.NotNil(t, load(b.ID).WorkloadIdentityTargets)
+}
+
+// Workload Identity targets come only from the broker's own credentials: a
+// user heartbeat (the dev user holds broker.update here and is admitted)
+// leaves the stored targets unchanged, so a hub user cannot choose the pool
+// or namespace a mint binds.
+func TestBrokerHeartbeat_WorkloadIdentityTargetsIgnoredFromUser(t *testing.T) {
+	srv, s, projectID := newMappingProject(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
+	b := addProviderBroker(t, s, projectID, "b", k8sProfile("gke", false))
+	targets := []store.WorkloadIdentityTarget{{Profile: "gke", Pool: "cluster-project.svc.id.goog", Namespace: "agents"}}
+	wiHeartbeatAsBroker(t, srv, b.ID, brokerHeartbeatRequest{Status: "online", WorkloadIdentityTargets: &targets})
+
+	hostile := []store.WorkloadIdentityTarget{{Profile: "gke", Pool: "attacker-proj.svc.id.goog", Namespace: "x"}}
+	postHeartbeat(t, srv, b.ID, brokerHeartbeatRequest{Status: "online", WorkloadIdentityTargets: &hostile})
+	assert.Equal(t, targets, wiLoadBroker(t, s, b.ID).WorkloadIdentityTargets, "a user heartbeat does not change the stored targets")
+
+	none := []store.WorkloadIdentityTarget{}
+	postHeartbeat(t, srv, b.ID, brokerHeartbeatRequest{Status: "online", WorkloadIdentityTargets: &none})
+	assert.Equal(t, targets, wiLoadBroker(t, s, b.ID).WorkloadIdentityTargets, "nor clear them")
+
+	// A row that never received targets stays never-reported.
+	c := addProviderBroker(t, s, projectID, "c", k8sProfile("gke", false))
+	postHeartbeat(t, srv, c.ID, brokerHeartbeatRequest{Status: "online", WorkloadIdentityTargets: &hostile})
+	assert.Nil(t, wiLoadBroker(t, s, c.ID).WorkloadIdentityTargets)
 }
 
 func TestBrokerHeartbeat_WorkloadIdentityTargetsFlatRowDropsProfile(t *testing.T) {
@@ -242,7 +267,7 @@ func TestBrokerHeartbeat_WorkloadIdentityTargetsFlatRowDropsProfile(t *testing.T
 	require.True(t, wiLoadBroker(t, s, b.ID).IsFlat())
 
 	targets := []store.WorkloadIdentityTarget{{Profile: "ignored", Pool: "cluster-project.svc.id.goog", Namespace: "agents"}}
-	postHeartbeat(t, srv, b.ID, brokerHeartbeatRequest{Status: "online", WorkloadIdentityTargets: &targets})
+	wiHeartbeatAsBroker(t, srv, b.ID, brokerHeartbeatRequest{Status: "online", WorkloadIdentityTargets: &targets})
 	got := wiLoadBroker(t, s, b.ID)
 	assert.Equal(t, []store.WorkloadIdentityTarget{{Pool: "cluster-project.svc.id.goog", Namespace: "agents"}},
 		got.WorkloadIdentityTargets, "kept on a flat row, profile dropped")
@@ -252,6 +277,21 @@ func TestBrokerHeartbeat_WorkloadIdentityTargetsFlatRowDropsProfile(t *testing.T
 	plan := workloadIdentityMintPlanFor([]*store.RuntimeBroker{got})
 	require.Len(t, plan.targets, 1)
 	assert.Equal(t, []string{"flat-wi"}, plan.targets[0].profiles)
+}
+
+// wiHeartbeatAsBroker posts a heartbeat whose request identity is the
+// broker itself.
+func wiHeartbeatAsBroker(t *testing.T, srv *Server, brokerID string, body interface{}) {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/runtime-brokers/"+brokerID+"/heartbeat", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	ident := NewBrokerIdentity(brokerID)
+	req = req.WithContext(contextWithIdentity(contextWithBrokerIdentity(req.Context(), ident), ident))
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
 
 func wiLoadBroker(t *testing.T, s store.Store, id string) *store.RuntimeBroker {
