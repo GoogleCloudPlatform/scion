@@ -36,6 +36,7 @@ import { apiFetch, apiFetchAllPages, extractApiError } from '../../client/api.js
 import { showToast } from '../../utils/toast.js';
 import { navigateTo } from '../../client/navigation.js';
 import { isTemplateSourceRefreshable } from '../../shared/source-url.js';
+import { can, type Capabilities } from '../../shared/types.js';
 
 export type ResourceKind = 'template' | 'harness-config';
 
@@ -74,6 +75,7 @@ interface ResourceItem {
   harness?: string;
   imageStatus?: string;
   sourceUrl?: string;
+  _capabilities?: Capabilities;
 }
 
 @customElement('scion-resource-list')
@@ -105,6 +107,22 @@ export class ScionResourceList extends LitElement {
   /** Whether to show the Delete action on each row. */
   @property({ type: Boolean })
   canDelete = false;
+
+  /**
+   * When true, the Delete action is also gated per row on the record's own
+   * `_capabilities` from the list response: a row offers Delete only when
+   * canDelete is set and the hub reports `delete` for that record.
+   */
+  @property({ type: Boolean })
+  recordCapabilities = false;
+
+  /**
+   * When true, "Refresh All from Source" is not offered, e.g. because the
+   * caller may not reimport these resources (a global template reimport
+   * needs template.create_global).
+   */
+  @property({ type: Boolean })
+  hideRefresh = false;
 
   /** When true, show a "Clone from Global" button above the list. */
   @property({ type: Boolean })
@@ -612,7 +630,7 @@ export class ScionResourceList extends LitElement {
   }
 
   private async _handleRefreshAll(): Promise<void> {
-    if (this._refreshAllRunning) return;
+    if (this._refreshAllRunning || this.hideRefresh) return;
     const refreshable = this.items.filter((item) => this.isRefreshable(item));
     if (refreshable.length === 0) return;
 
@@ -691,9 +709,7 @@ export class ScionResourceList extends LitElement {
       return html`<div class="error">${this.error}</div>`;
     }
 
-    const hasActions = this.canClone || this.canDelete || this.canRename;
-
-    const showRefreshAll = this.items.some((item) => this.isRefreshable(item));
+    const showRefreshAll = !this.hideRefresh && this.items.some((item) => this.isRefreshable(item));
 
     const hasListHeader =
       (this.cloneFromGlobal && this.canClone) || showRefreshAll || this.canCreate;
@@ -746,9 +762,7 @@ export class ScionResourceList extends LitElement {
       ${this.items.length === 0
         ? this.renderEmpty()
         : html`
-            <div class="resource-list">
-              ${this.items.map((item) => this.renderItem(item, hasActions))}
-            </div>
+            <div class="resource-list">${this.items.map((item) => this.renderItem(item))}</div>
           `}
       ${this.renderDeleteDialog()} ${this.renderCloneDialog()} ${this.renderGlobalPickerDialog()}
       ${this.renderCreateDialog()} ${this.renderRenameDialog()}
@@ -786,8 +800,15 @@ export class ScionResourceList extends LitElement {
     }
   }
 
-  private renderItem(item: ResourceItem, hasActions: boolean) {
-    if (!hasActions) {
+  /** Whether the Delete action is offered for item. */
+  private canDeleteItem(item: ResourceItem): boolean {
+    if (!this.canDelete) return false;
+    return !this.recordCapabilities || can(item._capabilities, 'delete');
+  }
+
+  private renderItem(item: ResourceItem) {
+    const canDelete = this.canDeleteItem(item);
+    if (!(this.canClone || this.canRename || canDelete)) {
       return html`
         <a
           href="${this.detailBasePath}/${this.detailSegment}/${item.id}"
@@ -871,10 +892,10 @@ export class ScionResourceList extends LitElement {
                     </sl-menu-item>
                   `
                 : nothing}
-              ${(this.canClone || this.canRename) && this.canDelete
+              ${(this.canClone || this.canRename) && canDelete
                 ? html`<sl-divider></sl-divider>`
                 : nothing}
-              ${this.canDelete
+              ${canDelete
                 ? html`
                     <sl-menu-item
                       class="menu-item-danger"

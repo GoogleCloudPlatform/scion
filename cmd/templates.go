@@ -481,11 +481,14 @@ func runTemplateDelete(cmd *cobra.Command, args []string) error {
 	}
 
 	// A hub error is returned (no silent fallback to the filesystem);
-	// --local is the explicit filesystem-only view.
+	// --local is the explicit filesystem-only view. With --global no
+	// project is read, so the project is not linked or looked up
+	// (requireHubForUpload): a hub token without project:read can delete
+	// global templates (ptone/scion#1713).
 	var hubCtx *HubContext
 	if !localOnly {
 		var err error
-		hubCtx, err = requireHub(projectPath)
+		hubCtx, err = requireHubForUpload(projectPath)
 		if err != nil {
 			return err
 		}
@@ -588,11 +591,14 @@ func runTemplateClone(cmd *cobra.Command, args []string) error {
 	}
 
 	// A hub error is returned (no silent fallback to the filesystem);
-	// --local is the explicit filesystem-only view.
+	// --local is the explicit filesystem-only view. With --global (a
+	// global destination) the project is not linked or looked up
+	// (requireHubForUpload): a hub token without project:read can clone a
+	// global template (ptone/scion#1713).
 	var hubCtx *HubContext
 	if !localOnly {
 		var err error
-		hubCtx, err = requireHub(projectPath)
+		hubCtx, err = requireHubForUpload(projectPath)
 		if err != nil {
 			return err
 		}

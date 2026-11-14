@@ -170,8 +170,12 @@ func findHubTemplates(ctx context.Context, name string, hubCtx *HubContext, opts
 	listCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	// Get project ID for project-scoped lookups
-	projectID, _ := GetProjectID(hubCtx)
+	// Get project ID for project-scoped lookups. A global-only search
+	// reads no project, so it does not look one up (ptone/scion#1713).
+	var projectID string
+	if !opts.GlobalOnly {
+		projectID, _ = GetProjectID(hubCtx)
+	}
 
 	// Search project scope unless GlobalOnly is set
 	if !opts.GlobalOnly && projectID != "" {
