@@ -33,10 +33,18 @@ async function flush(el: ScionResourceList): Promise<void> {
   }
 }
 
+const GH_SOURCE = 'https://github.com/acme/repo/tree/main/.scion/templates/a';
+
+function refreshAllButton(el: ScionResourceList): Element | undefined {
+  return Array.from(el.shadowRoot?.querySelectorAll('sl-button') ?? []).find((b) =>
+    (b.textContent ?? '').includes('Refresh All from Source')
+  );
+}
+
 const ITEMS = [
   { id: 'a', name: 'a', _capabilities: { actions: ['read', 'update', 'delete'] } },
   { id: 'b', name: 'b', _capabilities: { actions: ['read'] } },
-  { id: 'c', name: 'c' },
+  { id: 'c', name: 'c', sourceUrl: GH_SOURCE },
 ];
 
 async function createList(props: Partial<ScionResourceList>): Promise<ScionResourceList> {
@@ -99,5 +107,13 @@ describe('resource list: per-record capabilities', () => {
   it('ignores record capabilities unless recordCapabilities is set', async () => {
     element = await createList({ canDelete: true });
     expect(rowActions(element)).toEqual({ a: ['Delete'], b: ['Delete'], c: ['Delete'] });
+  });
+
+  it('offers Refresh All from Source unless hideRefresh is set', async () => {
+    element = await createList({});
+    expect(refreshAllButton(element)).toBeDefined();
+    element.remove();
+    element = await createList({ hideRefresh: true });
+    expect(refreshAllButton(element)).toBeUndefined();
   });
 });

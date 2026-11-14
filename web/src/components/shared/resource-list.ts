@@ -116,6 +116,14 @@ export class ScionResourceList extends LitElement {
   @property({ type: Boolean })
   recordCapabilities = false;
 
+  /**
+   * When true, "Refresh All from Source" is not offered, e.g. because the
+   * caller may not reimport these resources (a global template reimport
+   * needs template.create_global).
+   */
+  @property({ type: Boolean })
+  hideRefresh = false;
+
   /** When true, show a "Clone from Global" button above the list. */
   @property({ type: Boolean })
   cloneFromGlobal = false;
@@ -622,7 +630,7 @@ export class ScionResourceList extends LitElement {
   }
 
   private async _handleRefreshAll(): Promise<void> {
-    if (this._refreshAllRunning) return;
+    if (this._refreshAllRunning || this.hideRefresh) return;
     const refreshable = this.items.filter((item) => this.isRefreshable(item));
     if (refreshable.length === 0) return;
 
@@ -701,7 +709,7 @@ export class ScionResourceList extends LitElement {
       return html`<div class="error">${this.error}</div>`;
     }
 
-    const showRefreshAll = this.items.some((item) => this.isRefreshable(item));
+    const showRefreshAll = !this.hideRefresh && this.items.some((item) => this.isRefreshable(item));
 
     const hasListHeader =
       (this.cloneFromGlobal && this.canClone) || showRefreshAll || this.canCreate;

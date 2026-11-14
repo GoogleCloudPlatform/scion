@@ -42,7 +42,14 @@ type spHub struct {
 	projectHits []string
 	finalized   []string
 	created     []map[string]any
+	// ownUserSkill makes the caller (tuCallerID) own a user skill "lint".
+	// Another user's user skill "lint" always exists, and a scope=user list
+	// returns it unless scopeId narrows the list to the caller, as the hub
+	// does for an unrestricted (hub-admin) caller.
+	ownUserSkill bool
 }
+
+const tuCallerID = "user-caller"
 
 func (h *spHub) snapshot() (requests, projectHits, finalized []string, created []map[string]any) {
 	h.mu.Lock()
@@ -71,10 +78,21 @@ func newSPHub(t *testing.T) (*spHub, *httptest.Server) {
 		case strings.HasPrefix(path, "/api/v1/projects"):
 			w.WriteHeader(http.StatusNotFound)
 			_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": "not_found", "message": "project not found"}})
+		case r.Method == http.MethodGet && path == "/api/v1/auth/me":
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": tuCallerID, "email": "caller@example.com"})
 		case r.Method == http.MethodGet && path == "/api/v1/skills":
 			out := []map[string]string{}
-			if s := r.URL.Query().Get("scope"); s == "" || s == "global" {
+			q := r.URL.Query()
+			if s := q.Get("scope"); s == "" || s == "global" {
 				out = append(out, map[string]string{"id": "skill-global", "name": "lint", "scope": "global", "status": "active"})
+			}
+			if s := q.Get("scope"); s == "" || s == "user" {
+				if id := q.Get("scopeId"); id == "" || id == "user-other" {
+					out = append(out, map[string]string{"id": "skill-other-user", "name": "lint", "scope": "user", "scopeId": "user-other", "status": "active"})
+				}
+				if id := q.Get("scopeId"); h.ownUserSkill && (id == "" || id == tuCallerID) {
+					out = append(out, map[string]string{"id": "skill-own-user", "name": "lint", "scope": "user", "scopeId": tuCallerID, "status": "active"})
+				}
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"skills": out})
 		case r.Method == http.MethodPost && path == "/api/v1/skills":
@@ -190,4 +208,37 @@ func TestSkillsPublish_ProjectScopeStillReadsProject(t *testing.T) {
 		assert.Equal(t, tuProjectID, created[0]["scopeId"])
 		assert.Equal(t, []string{"skill-new"}, finalized)
 	})
+}
+
+// TestSkillsPublish_UserScopeNarrowsToCaller: a --scope user publish by a
+// caller who can list every user's skills never reuses another user's
+// same-named skill: the lookup sends the caller's ID (from
+// /api/v1/auth/me) as scopeId.
+func TestSkillsPublish_UserScopeNarrowsToCaller(t *testing.T) {
+	for _, own := range []bool{false, true} {
+		name := "no own skill creates one"
+		if own {
+			name = "own skill is reused"
+		}
+		t.Run(name, func(t *testing.T) {
+			hub, srv := newSPHub(t)
+			hub.ownUserSkill = own
+			cwd := tuSetup(t)
+			writeTUProjectSettings(t, cwd, tuProjectID)
+			err := runSkillsPublishRoot(t, "--hub", srv.URL, "--yes", "--non-interactive",
+				"skills", "publish", writeSkillDir(t), "--version", "1.0.0", "--scope", "user")
+			requests, _, finalized, created := hub.snapshot()
+			require.NoError(t, err, "requests: %v", requests)
+			assert.Contains(t, requests, "GET /api/v1/skills?name=lint&scope=user&scopeId="+tuCallerID)
+			assert.NotContains(t, finalized, "skill-other-user", "another user's skill must not receive the version")
+			if own {
+				assert.Equal(t, []string{"skill-own-user"}, finalized)
+				assert.Empty(t, created)
+			} else {
+				require.Len(t, created, 1)
+				assert.Equal(t, "user", created[0]["scope"])
+				assert.Equal(t, []string{"skill-new"}, finalized)
+			}
+		})
+	}
 }

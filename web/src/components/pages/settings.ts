@@ -78,8 +78,9 @@ export class ScionPageSettings extends LitElement {
   /**
    * Whether the caller may create global templates, from the `create`
    * capability the hub reports on the scope=global templates list. Gates
-   * import and clone on the global Templates tab (both create a global
-   * template). Fails closed until the list answers.
+   * import, clone and "Refresh All from Source" on the global Templates tab
+   * (all three are authorized as template.create_global). Fails closed until
+   * the list answers.
    */
   @state()
   private canCreateGlobalTemplates = false;
@@ -383,6 +384,7 @@ export class ScionPageSettings extends LitElement {
                   scope="global"
                   detailBasePath="/settings"
                   ?canClone=${this.canCreateGlobalTemplates}
+                  ?hideRefresh=${!this.canCreateGlobalTemplates}
                   canDelete
                   recordCapabilities
                   @resource-changed=${() => this.refreshList('templates-list')}

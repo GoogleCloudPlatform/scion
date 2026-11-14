@@ -17,8 +17,9 @@
 /**
  * The global Templates tab on the Hub Resources page gates its import and
  * clone controls on the `create` capability the hub reports on the
- * scope=global templates list, and its delete control on each record's own
- * capabilities (ptone/scion#1713).
+ * scope=global templates list, as it does "Refresh All from Source" (a
+ * global reimport is authorized as template.create_global), and its delete
+ * control on each record's own capabilities (ptone/scion#1713).
  */
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
@@ -113,6 +114,7 @@ describe('settings global Templates tab capability gating', () => {
     expect(templatesImport(el).canImport).toBe(true);
     const list = templatesList(el);
     expect(list.canClone).toBe(true);
+    expect(list.hideRefresh).toBe(false);
     expect(list.canDelete).toBe(true);
     expect(list.recordCapabilities).toBe(true);
     const capCall = fetchMock.mock.calls
@@ -127,6 +129,7 @@ describe('settings global Templates tab capability gating', () => {
     expect(templatesImport(el).canImport).toBe(false);
     const list = templatesList(el);
     expect(list.canClone).toBe(false);
+    expect(list.hideRefresh).toBe(true);
     // Delete stays gated per record.
     expect(list.recordCapabilities).toBe(true);
   });
@@ -136,5 +139,6 @@ describe('settings global Templates tab capability gating', () => {
     element = el;
     expect(templatesImport(el).canImport).toBe(false);
     expect(templatesList(el).canClone).toBe(false);
+    expect(templatesList(el).hideRefresh).toBe(true);
   });
 });

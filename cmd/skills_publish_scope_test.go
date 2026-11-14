@@ -157,3 +157,29 @@ func TestSkillsPublish_ProjectLookupFiltersByScopeAndProject(t *testing.T) {
 		assert.Nil(t, got)
 	})
 }
+
+// TestSkillsPublish_UserLookupFiltersByCaller: a --scope user lookup is
+// narrowed to the caller's user ID and never returns another user's
+// same-named skill, even from a hub that ignores the filter.
+func TestSkillsPublish_UserLookupFiltersByCaller(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("sends the caller as scopeId", func(t *testing.T) {
+		svc, queries := publishLookupHub(t, sameNamedSkills, false)
+		got, err := findPublishTargetSkill(ctx, svc, "lint", "user", "user-1")
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.Equal(t, "user-skill", got.ID)
+		qs := queries()
+		require.Len(t, qs, 1)
+		assert.Equal(t, "user", qs[0].Get("scope"))
+		assert.Equal(t, "user-1", qs[0].Get("scopeId"))
+	})
+
+	t.Run("another user's skill is not reused even if the hub does not filter", func(t *testing.T) {
+		svc, _ := publishLookupHub(t, sameNamedSkills, true)
+		got, err := findPublishTargetSkill(ctx, svc, "lint", "user", "user-2")
+		require.NoError(t, err)
+		assert.Nil(t, got)
+	})
+}

@@ -248,14 +248,16 @@ description: <describe your skill>
 
 // findPublishTargetSkill returns the existing skill that `scion skills
 // publish` adds a version to, or nil when none exists. With a scope it asks
-// the hub for that scope only (and that project, for project scope), and
-// also checks each returned record, so a publish never lands on a same-named
-// skill in another scope (Q6.3, ptone/scion#1713). An empty scope keeps the
-// name-only lookup.
-func findPublishTargetSkill(ctx context.Context, skillSvc hubclient.SkillService, name, scope, projectID string) (*hubclient.Skill, error) {
+// the hub for that scope only, narrowed to scopeID for project scope (the
+// project ID) and user scope (the caller's user ID), and also checks each
+// returned record, so a publish never lands on a same-named skill in
+// another scope, project or user's scope (Q6.3, ptone/scion#1713). An empty
+// scope keeps the name-only lookup.
+func findPublishTargetSkill(ctx context.Context, skillSvc hubclient.SkillService, name, scope, scopeID string) (*hubclient.Skill, error) {
 	opts := &hubclient.ListSkillsOptions{Name: name, Scope: scope}
-	if scope == "project" {
-		opts.ScopeID = projectID
+	narrowed := scope == "project" || scope == "user"
+	if narrowed {
+		opts.ScopeID = scopeID
 	}
 	listResp, err := skillSvc.List(ctx, opts)
 	if err != nil {
@@ -266,7 +268,7 @@ func findPublishTargetSkill(ctx context.Context, skillSvc hubclient.SkillService
 		if scope != "" && sk.Scope != scope {
 			continue
 		}
-		if scope == "project" && sk.ScopeID != projectID {
+		if narrowed && sk.ScopeID != scopeID {
 			continue
 		}
 		return sk, nil
@@ -350,7 +352,23 @@ func runSkillsPublish(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		existing, err := findPublishTargetSkill(ctx, skillSvc, name, scope, projectID)
+		// A user-scope skill lives in the caller's own user scope (the hub
+		// sets its scope ID to the caller), so the lookup is narrowed to the
+		// caller: an unrestricted caller, who can list every user's skills,
+		// never reuses another user's same-named skill.
+		lookupScopeID := projectID
+		if scope == "user" {
+			me, err := hubCtx.Client.Auth().Me(ctx)
+			if err != nil {
+				return fmt.Errorf("cannot publish user-scoped skill %q: failed to identify the caller: %w", name, err)
+			}
+			if me.ID == "" {
+				return fmt.Errorf("cannot publish user-scoped skill %q: the Hub did not return the caller's user ID", name)
+			}
+			lookupScopeID = me.ID
+		}
+
+		existing, err := findPublishTargetSkill(ctx, skillSvc, name, scope, lookupScopeID)
 		if err == nil && existing != nil {
 			skillID = existing.ID
 		} else {
@@ -798,7 +816,7 @@ func init() {
 
 	// Flags for publish command
 	skillsPublishCmd.Flags().String("version", "", "Semver version to publish (required)")
-	skillsPublishCmd.Flags().String("scope", "", "Scope to publish into (global, project, user). When set, only a same-named skill in that scope (and this project, for project) gets the version; when unset, any same-named skill does. A new skill is created in this scope, default global")
+	skillsPublishCmd.Flags().String("scope", "", "Scope to publish into (global, project, user). When set, only a same-named skill in that scope (this project for project, your own for user) gets the version; when unset, any same-named skill does. A new skill is created in this scope, default global")
 	skillsPublishCmd.Flags().String("skill-id", "", "Existing skill ID to publish a version for")
 
 	// Also add a 'skill' alias (singular) for convenience
