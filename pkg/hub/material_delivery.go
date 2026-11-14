@@ -258,6 +258,24 @@ func envVarDeliveryKind(v store.EnvVar) MaterialKind {
 // like a store read error. The owner's user-scope rows not shared with
 // progeny are held to the owner material chain rule, as there.
 func (d *HTTPAgentDispatcher) selectDeliveryEnv(ctx context.Context, sel *deliverySelector, agent *store.Agent) (map[string]string, map[string]bool, error) {
+	return d.selectDeliveryEnvWith(ctx, sel, agent, nil)
+}
+
+// gatheredEnvPick is the as_needed env row selectDeliveryEnvWith keeps for
+// one canonical key: the highest scope wins, and within a scope a row stored
+// under the canonical name wins over one stored under an alternative name.
+type gatheredEnvPick struct {
+	value     string
+	scopeIdx  int
+	canonical bool
+}
+
+// selectDeliveryEnvWith is selectDeliveryEnv that also admits the as_needed
+// rows stored under a name gathered records (reprovisionGatheredEnv). Such a
+// row is authorized exactly like an always row, is returned under its
+// canonical key, is never plain, and fills only a key no other row (progeny
+// included) set. A nil gathered admits no as_needed row.
+func (d *HTTPAgentDispatcher) selectDeliveryEnvWith(ctx context.Context, sel *deliverySelector, agent *store.Agent, gathered *reprovisionGatheredEnv) (map[string]string, map[string]bool, error) {
 	result := make(map[string]string)
 	plain := make(map[string]bool)
 	if agent == nil {
@@ -274,14 +292,20 @@ func (d *HTTPAgentDispatcher) selectDeliveryEnv(ctx context.Context, sel *delive
 	defer gcancel()
 	gate := d.newOwnerMaterialGate(agent)
 	defer gate.flush(ctx, ownerMaterialSiteLaunchEnv)
-	for _, filter := range d.envScopesForDispatch(ctx, agent) {
+	picks := make(map[string]gatheredEnvPick)
+	for scopeIdx, filter := range d.envScopesForDispatch(ctx, agent) {
 		vars, err := d.store.ListEnvVars(ctx, filter)
 		if err != nil {
 			return nil, nil, fmt.Errorf("list %s env vars: %w", filter.Scope, err)
 		}
 		for _, v := range vars {
+			asNeededKey := ""
 			if v.InjectionMode == store.InjectionModeAsNeeded {
-				continue
+				canonical, ok := gathered.canonicalKey(v.Key)
+				if !ok || secret.IsReservedEnvTarget(canonical) || canonical == agentTZEnvKey {
+					continue
+				}
+				asNeededKey = canonical
 			}
 			if secret.IsReservedEnvTarget(v.Key) {
 				continue
@@ -305,6 +329,13 @@ func (d *HTTPAgentDispatcher) selectDeliveryEnv(ctx context.Context, sel *delive
 					continue
 				}
 			}
+			if asNeededKey != "" {
+				isCanonical := v.Key == asNeededKey
+				if p, ok := picks[asNeededKey]; !ok || scopeIdx > p.scopeIdx || (scopeIdx == p.scopeIdx && isCanonical && !p.canonical) {
+					picks[asNeededKey] = gatheredEnvPick{value: v.Value, scopeIdx: scopeIdx, canonical: isCanonical}
+				}
+				continue
+			}
 			result[v.Key] = v.Value
 			plain[v.Key] = !v.Secret
 		}
@@ -326,6 +357,15 @@ func (d *HTTPAgentDispatcher) selectDeliveryEnv(ctx context.Context, sel *delive
 			result[v.Key] = v.Value
 			plain[v.Key] = !v.Secret
 		}
+	}
+
+	// The admitted as_needed rows fill only keys nothing above set.
+	for key, p := range picks {
+		if _, exists := result[key]; exists {
+			continue
+		}
+		result[key] = p.value
+		plain[key] = false
 	}
 	return result, plain, nil
 }
@@ -374,8 +414,21 @@ type secretDeliveryCandidate struct {
 // A list error, a credential that cannot be minted or a fetch failure other
 // than the ones skipped above is an error; skipped is then nil.
 func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *deliverySelector, agent *store.Agent) ([]ResolvedSecret, []skippedSecret, error) {
+	result, _, skipped, err := d.selectDeliverySecretsWith(ctx, sel, agent, nil)
+	return result, skipped, err
+}
+
+// selectDeliverySecretsWith is selectDeliverySecrets that also returns, in
+// asNeededEnv, the as_needed environment secrets whose target is a name
+// gathered records (reprovisionGatheredEnv), keyed by canonical key. They go
+// through the same listing, authorization, fetch and precedence as every
+// other secret; selectDeliverySecrets drops them at the end. As the gather's
+// second pass does, they are env values, not entries of the returned list.
+// A secret stored under the canonical name wins over one stored under an
+// alternative name. A nil gathered returns no asNeededEnv.
+func (d *HTTPAgentDispatcher) selectDeliverySecretsWith(ctx context.Context, sel *deliverySelector, agent *store.Agent, gathered *reprovisionGatheredEnv) ([]ResolvedSecret, map[string]string, []skippedSecret, error) {
 	if d.secretBackend == nil || agent == nil {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 
 	type scopeEntry struct{ scope, scopeID string }
@@ -411,7 +464,7 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 	for _, sc := range scopes {
 		metas, err := d.secretBackend.List(ctx, secret.Filter{Scope: sc.scope, ScopeID: sc.scopeID})
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		for _, m := range metas {
 			if m.SecretType == store.SecretTypeInternal {
@@ -429,7 +482,7 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 			if sc.scope != store.ScopeUser {
 				allowed, err := sel.authorize(ctx, MaterialKindSecret, materialRecordSecret, m.ID, m.Name, sc.scope, sc.scopeID)
 				if err != nil {
-					return nil, nil, err
+					return nil, nil, nil, err
 				}
 				if !allowed {
 					continue
@@ -449,7 +502,7 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 	if startOpts != nil && startOpts.AuthzCheck != nil {
 		progeny, err := d.store.ListProgenySecrets(ctx, agent.Ancestry)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		check := startOpts.AuthzCheck
 		for i := range progeny {
@@ -469,7 +522,7 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 		d.log.WarnContext(ctx, "launch material withheld: items not authorized for delivery", "agent_id", agent.ID, "purpose", string(sel.purpose), "count", sel.denied)
 	}
 	if len(kept) == 0 {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 
 	// The test-admin scope restriction is decided before the fetch, so no
@@ -494,7 +547,7 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 		var err error
 		values, err = d.secretBackend.FetchValues(ctx, metas)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 	}
 
@@ -523,7 +576,7 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 					decryptFailures = append(decryptFailures, rde.Failures...)
 					continue
 				}
-				return nil, nil, fmt.Errorf("fetching secret %s (%s scope): %w", c.meta.Name, c.meta.Scope, r.Err)
+				return nil, nil, nil, fmt.Errorf("fetching secret %s (%s scope): %w", c.meta.Name, c.meta.Scope, r.Err)
 			}
 			sv.Value = r.Value
 			// The backend's external reference for the value it read, in
@@ -540,7 +593,7 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 		merged[c.meta.Name] = sv
 	}
 	if len(decryptFailures) > 0 {
-		return nil, nil, &secret.ResolveDecryptError{Failures: decryptFailures}
+		return nil, nil, nil, &secret.ResolveDecryptError{Failures: decryptFailures}
 	}
 	names := make([]string, 0, len(merged))
 	for n := range merged {
@@ -555,6 +608,8 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 	resolved = d.applyTestAdminSecretScopes(ctx, agent, resolved, restricted, allowedScopes, testAdminRoot)
 
 	result := make([]ResolvedSecret, 0, len(resolved))
+	var asNeededEnv map[string]string
+	asNeededCanonical := make(map[string]bool)
 	for _, sv := range resolved {
 		// applyTestAdminSecretScopes has dropped every withheld item; this
 		// keeps an unfetched one from ever being delivered.
@@ -565,6 +620,20 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 			continue
 		}
 		if sv.InjectionMode == store.InjectionModeAsNeeded && (sv.SecretType == store.SecretTypeEnvironment || sv.SecretType == "") {
+			// Left for the gather's second pass, unless gathered names it.
+			canonical, ok := gathered.canonicalKey(sv.Target)
+			if !ok || secret.IsReservedEnvTarget(canonical) || canonical == agentTZEnvKey {
+				continue
+			}
+			isCanonical := sv.Target == canonical
+			if _, set := asNeededEnv[canonical]; set && (asNeededCanonical[canonical] || !isCanonical) {
+				continue
+			}
+			if asNeededEnv == nil {
+				asNeededEnv = make(map[string]string)
+			}
+			asNeededEnv[canonical] = sv.Value
+			asNeededCanonical[canonical] = isCanonical
 			continue
 		}
 		result = append(result, ResolvedSecret{
@@ -576,7 +645,7 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 			Ref:    sv.SecretRef,
 		})
 	}
-	return result, skipped, nil
+	return result, asNeededEnv, skipped, nil
 }
 
 // deliverySkipClass is the skip class of a fetch result r (ok is false when

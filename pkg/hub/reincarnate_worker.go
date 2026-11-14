@@ -875,9 +875,16 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// too, unless this reincarnation resets it (a harness switch,
 	// ptone/scion#7757): then the broker moves it aside and composes a
 	// fresh one, under the reincarnation ID.
+	// startCtx is used for the reprovision and its start only. On a home
+	// reset it carries the as_needed names this reprovision's gather
+	// resolves for the new harness to that start (reprovisionGatheredEnv).
+	startCtx := ctx
+	if homeReset {
+		startCtx = withReprovisionGatheredEnv(ctx)
+	}
 	if move != nil {
 		// Provisioned on the target above.
-	} else if err := dispatcher.DispatchAgentReprovision(ctx, agent, ReprovisionOptions{ResetHome: homeReset, ResetID: reincarnationID}); err != nil {
+	} else if err := dispatcher.DispatchAgentReprovision(startCtx, agent, ReprovisionOptions{ResetHome: homeReset, ResetID: reincarnationID}); err != nil {
 		if homeReset && !reprovisionLeftHomeIntact(err) {
 			// D-b (fail forward): the home may already be gone, so a
 			// re-render of `previous` cannot restore it. The row keeps the
@@ -965,7 +972,7 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		return
 	}
 	beforeStart := agentStartEchoFields(agent)
-	if err := dispatcher.DispatchAgentStart(ctx, agent, preamble, false); err != nil {
+	if err := dispatcher.DispatchAgentStart(startCtx, agent, preamble, false); err != nil {
 		errMsg := "start failed: " + dispatchFailureText(err)
 		// A move follows the same rule: on an ambiguous outcome the agent
 		// stays assigned to the target at gen N+1, with its reservation

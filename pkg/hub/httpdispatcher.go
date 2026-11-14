@@ -2270,6 +2270,10 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 
 	finalResp := resp
 	finalNeeds := envReqs
+	// The names the second pass resolved, for the start that follows a
+	// home-reset reprovision (reprovisionGatheredEnv). Values stay here.
+	var gatheredAsNeeded map[string]string
+	var gatheredAlternatives map[string][]string
 
 	// Second pass: if the broker reported needed keys, check whether any can
 	// be satisfied by as_needed env vars or secrets — mirroring the pattern in
@@ -2294,6 +2298,8 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 			for k, v := range asNeededEnv {
 				req.ResolvedEnv[k] = v
 			}
+			gatheredAsNeeded = asNeededEnv
+			gatheredAlternatives = envReqs.Alternatives
 			d.restrictCreateRequestTokenRemote(req)
 			if tzNeeded {
 				tz, tzErr := d.resolveAgentTZ(ctx, agent, true)
@@ -2367,6 +2373,9 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 			return fmt.Errorf("%s: broker did not confirm the home reset (it may not support resetting an agent home; its reported capabilities may be stale): %w", callerName, errReprovisionHomeIntact)
 		}
 		d.log.InfoContext(ctx, callerName+": reprovision confirmed", "agent_id", agent.ID, "home_reset", finalResp.HomeReset)
+		// The start that follows needs the names this gather resolved
+		// (reprovisionGatheredEnv); only a ctx with a holder keeps them.
+		recordReprovisionGatheredEnv(ctx, gatheredAsNeeded, gatheredAlternatives)
 	}
 
 	// Merge resolved storage env vars back into AppliedConfig so they are
@@ -3512,7 +3521,11 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	// A read error (not an absence) fails the start/restart here, like a
 	// secret resolution error below: before any token is minted and before
 	// anything reaches the broker. Only the fixed message leaves the hub.
-	envFromStorage, envFromStoragePlain, err := d.selectDeliveryEnv(ctx, sel, agent)
+	// After a home-reset reprovision, the as_needed names its gather
+	// resolved are admitted too, through the same selector
+	// (reprovisionGatheredEnv).
+	gathered := reprovisionGatheredEnvFrom(ctx)
+	envFromStorage, envFromStoragePlain, err := d.selectDeliveryEnvWith(ctx, sel, agent, gathered)
 	if err != nil {
 		d.log.WarnContext(ctx, caller+": failed to read stored env settings; agent not "+startedVerb,
 			"agent_id", agent.ID, "error", err)
@@ -3539,7 +3552,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	// lookup and before any agent or transport token is minted below, so
 	// nothing reaches the broker and there is nothing to revoke. Absence is
 	// not an error: an agent with no secrets resolves to an empty list.
-	resolvedSecrets, skippedSecrets, err := d.selectDeliverySecrets(ctx, sel, agent)
+	resolvedSecrets, asNeededSecretEnv, skippedSecrets, err := d.selectDeliverySecretsWith(ctx, sel, agent, gathered)
 	if err != nil {
 		d.log.WarnContext(ctx, caller+": failed to resolve secrets; agent not "+startedVerb,
 			"agent_id", agent.ID, "error", err)
@@ -3552,6 +3565,13 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 				resolvedEnv[s.Target] = s.Value
 				classifyEnv(&envClassifications, s.Target, api.EnvKindSecretFetchable)
 			}
+		}
+	}
+	// The admitted as_needed environment secrets fill only keys still unset.
+	for k, v := range asNeededSecretEnv {
+		if existing, exists := resolvedEnv[k]; !exists || existing == "" {
+			resolvedEnv[k] = v
+			classifyEnv(&envClassifications, k, api.EnvKindSecretFetchable)
 		}
 	}
 
