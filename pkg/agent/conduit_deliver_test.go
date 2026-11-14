@@ -348,7 +348,7 @@ func TestConduitDelivery_BufferedFlush(t *testing.T) {
 	d := &fakeDeliverer{answers: []fakeAnswer{answer(200, agentcontrol.OutcomeDelivered)}}
 	m.SetConduitDeliverer(d)
 	done := make(chan struct{})
-	m.msgBuffer = NewMessageBuffer(10*time.Millisecond, func(string, string, string, bool) error {
+	m.msgBuffer = NewMessageBuffer(time.Hour, func(string, string, string, bool) error {
 		t.Error("deliverFunc used instead of deliverFlush")
 		return nil
 	})
@@ -362,6 +362,7 @@ func TestConduitDelivery_BufferedFlush(t *testing.T) {
 	if err := m.Message(WithDeliveryMessageID(context.Background(), "m-1"), "test-agent", "", "hello", false); err != nil {
 		t.Fatal(err)
 	}
+	flushNow(m)
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
@@ -510,7 +511,7 @@ func TestConduitDelivery_AttachmentsUseExec(t *testing.T) {
 		d := &fakeDeliverer{answers: []fakeAnswer{answer(200, agentcontrol.OutcomeDelivered)}}
 		m.SetConduitDeliverer(d)
 		done := make(chan struct{})
-		m.msgBuffer = NewMessageBuffer(10*time.Millisecond, func(string, string, string, bool) error { return nil })
+		m.msgBuffer = NewMessageBuffer(time.Hour, func(string, string, string, bool) error { return nil })
 		m.msgBuffer.preDeliver = func(context.Context, string, string, PreDelivery) string { return "" }
 		m.msgBuffer.deliverFlush = func(f bufferedFlush) error {
 			defer close(done)
@@ -523,6 +524,7 @@ func TestConduitDelivery_AttachmentsUseExec(t *testing.T) {
 		defer m.msgBuffer.Close()
 		m.msgBuffer.sendWithID("test-agent", "", "plain", "m-1", nil, nil)
 		m.msgBuffer.sendWithID("test-agent", "", "with file", "m-2", nil, nopPreDelivery{})
+		flushNow(m)
 		select {
 		case <-done:
 		case <-time.After(10 * time.Second):
@@ -657,19 +659,19 @@ func TestConduitDelivery_InFlightDuplicateNeverFails(t *testing.T) {
 		m.SetConduitDeliverer(d)
 		done := make(chan struct{})
 		var failed atomic.Bool
-		m.msgBuffer = NewMessageBuffer(10*time.Millisecond, func(string, string, string, bool) error { return nil })
+		m.msgBuffer = NewMessageBuffer(time.Hour, func(string, string, string, bool) error { return nil })
 		m.msgBuffer.deliverFlush = func(f bufferedFlush) error {
 			defer close(done)
 			return m.deliver(context.Background(), deliveryRequest{agentID: f.agentID, message: f.text, messageIDs: f.messageIDs})
 		}
 		defer m.msgBuffer.Close()
 		m.msgBuffer.sendWithID("test-agent", "", "hello", "m-1", func(error) { failed.Store(true) }, nil)
+		flushNow(m)
 		select {
 		case <-done:
 		case <-time.After(10 * time.Second):
 			t.Fatal("no flush")
 		}
-		time.Sleep(50 * time.Millisecond)
 		if failed.Load() {
 			t.Fatal("failure handler called: /message-failures would fail the owner's rows")
 		}
@@ -716,7 +718,7 @@ func TestConduitDelivery_AttachmentsWithoutExec(t *testing.T) {
 		d := &fakeDeliverer{answers: []fakeAnswer{answer(200, agentcontrol.OutcomeDelivered)}}
 		m.SetConduitDeliverer(d)
 		done := make(chan error, 1)
-		m.msgBuffer = NewMessageBuffer(10*time.Millisecond, func(string, string, string, bool) error { return nil })
+		m.msgBuffer = NewMessageBuffer(time.Hour, func(string, string, string, bool) error { return nil })
 		m.msgBuffer.preDeliver = func(ctx context.Context, _, _ string, pd PreDelivery) string { return pd.BeforeText(ctx, nil, "") }
 		m.msgBuffer.deliverFlush = func(f bufferedFlush) error {
 			err := m.deliver(context.Background(), deliveryRequest{agentID: f.agentID, message: f.text,
@@ -726,6 +728,7 @@ func TestConduitDelivery_AttachmentsWithoutExec(t *testing.T) {
 		}
 		defer m.msgBuffer.Close()
 		m.msgBuffer.sendWithID("test-agent", "", "see file", "m-1", nil, warnPreDelivery{})
+		flushNow(m)
 		select {
 		case err := <-done:
 			if err != nil {
@@ -989,7 +992,7 @@ func TestConduitDelivery_SplitStopsAtFirstUndelivered(t *testing.T) {
 			var mu sync.Mutex
 			var failed []int
 			done := make(chan struct{})
-			m.msgBuffer = NewMessageBuffer(10*time.Millisecond, func(string, string, string, bool) error { return nil })
+			m.msgBuffer = NewMessageBuffer(time.Hour, func(string, string, string, bool) error { return nil })
 			m.msgBuffer.deliverFlush = func(f bufferedFlush) error {
 				defer close(done)
 				return m.deliver(context.Background(), deliveryRequest{agentID: f.agentID, message: f.text,
@@ -1001,12 +1004,12 @@ func TestConduitDelivery_SplitStopsAtFirstUndelivered(t *testing.T) {
 				m.msgBuffer.sendWithID("test-agent", "", fmt.Sprintf("%d", i)+strings.Repeat("z", 300*1024), fmt.Sprintf("m-%d", i),
 					func(error) { mu.Lock(); failed = append(failed, i); mu.Unlock() }, nil)
 			}
+			flushNow(m)
 			select {
 			case <-done:
 			case <-time.After(10 * time.Second):
 				t.Fatal("no flush")
 			}
-			time.Sleep(50 * time.Millisecond)
 			if d.calls() != 2 {
 				t.Fatalf("%d sub-flushes sent; want 2 (stop after the second)", d.calls())
 			}
@@ -1074,4 +1077,12 @@ func TestSplitParts(t *testing.T) {
 	if got := splitParts(parts, never); len(got) != 5 {
 		t.Fatalf("one message per group expected, got %v", got)
 	}
+}
+
+// flushNow runs m's buffered flush for test-agent at once, synchronously,
+// as the debounce timer would: tests use a buffer whose timer never fires
+// (an hour), so every message is queued before this one flush and nothing
+// depends on timing.
+func flushNow(m *AgentManager) {
+	m.msgBuffer.flush("test-agent", bufferKey("test-agent", ""), true)
 }
