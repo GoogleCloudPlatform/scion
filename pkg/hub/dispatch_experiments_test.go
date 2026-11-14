@@ -124,6 +124,27 @@ func TestChatChoicesExperiment_OnWire(t *testing.T) {
 	}
 }
 
+// hub.artifacts is in HubAgentDefaults.Experiments only while it is on, so
+// the broker can apply the scion-artifacts skill gate (ptone/scion#7897).
+func TestArtifactsExperiment_OnWire(t *testing.T) {
+	on := dispatchExperimentsServer(t, `{"overrides":{"hub.artifacts":true}}`)
+	if got := on.dispatchExperiments(); !slices.Equal(got, []string{experiments.Artifacts}) {
+		t.Errorf("on: dispatch experiments = %v, want [%s]", got, experiments.Artifacts)
+	}
+	d := on.CreateAuthenticatedDispatcher()
+	req, err := d.buildCreateRequest(context.Background(), hubDefaultsDispatchAgent(), "test")
+	if err != nil {
+		t.Fatalf("buildCreateRequest: %v", err)
+	}
+	if req.Config == nil || req.Config.HubAgentDefaults == nil || !slices.Contains(req.Config.HubAgentDefaults.Experiments, experiments.Artifacts) {
+		t.Errorf("on: create dispatch does not carry %s: %+v", experiments.Artifacts, req.Config)
+	}
+	off := dispatchExperimentsServer(t, `{"overrides":{"hub.k8s_nfs_home":true}}`)
+	if got := off.dispatchExperiments(); slices.Contains(got, experiments.Artifacts) {
+		t.Errorf("off: dispatch experiments = %v include %s", got, experiments.Artifacts)
+	}
+}
+
 func dispatchExperimentsServer(t *testing.T, raw string) *Server {
 	t.Helper()
 	fakeStore := newFakeHubSettingStore()
