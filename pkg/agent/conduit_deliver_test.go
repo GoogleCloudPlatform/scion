@@ -15,9 +15,11 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -387,5 +389,29 @@ func TestDeliverImmediate_SanitisesOnExecPath(t *testing.T) {
 	}
 	if stdin != "a[201~bc" {
 		t.Fatalf("stdin = %q, want the sanitised text", stdin)
+	}
+}
+
+// TestConduitDelivery_LogsNoText: the broker's conduit delivery lines carry
+// ids, counts and outcomes, never the text or key names.
+func TestConduitDelivery_LogsNoText(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	var execs []string
+	m := newConduitTestManager(t, true, shippedSpec, &execs)
+	m.SetConduitDeliverer(&fakeDeliverer{answers: []fakeAnswer{{status: 404}}})
+	if err := m.deliver(context.Background(), deliveryRequest{agentID: "test-agent", message: "SENTINEL-BROKER-TEXT", messageIDs: []string{"m"}}); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "message delivery over conduit") {
+		t.Fatalf("no conduit delivery line: %q", out)
+	}
+	for _, bad := range []string{"SENTINEL-BROKER-TEXT", "Enter"} {
+		if strings.Contains(out, bad) {
+			t.Fatalf("log contains %q: %q", bad, out)
+		}
 	}
 }
