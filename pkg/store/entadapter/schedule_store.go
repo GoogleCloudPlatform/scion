@@ -1215,17 +1215,36 @@ func (s *ScheduleStore) ListScheduledEvents(ctx context.Context, filter store.Sc
 		return nil, err
 	}
 
+	// Keyset pagination on (created DESC, id DESC), as ListSchedules: the
+	// cursor is the opaque token encodeCursor makes from the previous page's
+	// last row, and the predicate matches the order, so a full traversal
+	// visits every matching row whatever the relation between UUID and
+	// creation order (ptone/scion#7883 P2-R2). An id-only cursor (the
+	// earlier format, or any non-token value) is refused as invalid.
+	var (
+		cursorCreated time.Time
+		cursorID      uuid.UUID
+	)
 	if opts.Cursor != "" {
-		cursorUID, err := parseCursorUUID(opts.Cursor)
+		var err error
+		cursorCreated, cursorID, err = decodeCursor(opts.Cursor)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("invalid cursor: %w", err)
 		}
-		query.Where(scheduledevent.IDLT(cursorUID))
+		cursorCreated = cursorCreated.UTC()
+		query.Where(scheduledevent.Or(
+			scheduledevent.CreatedLT(cursorCreated),
+			scheduledevent.And(
+				scheduledevent.CreatedEQ(cursorCreated),
+				scheduledevent.IDLT(cursorID),
+			),
+		))
 	}
 
 	limit := clampLimit(opts.Limit)
 	entities, err := query.
 		Order(scheduledevent.ByCreated(entsql.OrderDesc())).
+		Order(scheduledevent.ByID(entsql.OrderDesc())).
 		Limit(limit + 1).
 		All(ctx)
 	if err != nil {
@@ -1240,11 +1259,25 @@ func (s *ScheduleStore) ListScheduledEvents(ctx context.Context, filter store.Sc
 	result := &store.ListResult[store.ScheduledEvent]{TotalCount: totalCount}
 	if len(events) > limit {
 		result.Items = events[:limit]
-		result.NextCursor = events[limit-1].ID
+		last := events[limit-1]
+		// No-progress guard, as ListSchedules.
+		if opts.Cursor == "" || eventCursorAdvances(last, cursorCreated, cursorID) {
+			result.NextCursor = encodeCursor(last.CreatedAt.UTC(), last.ID)
+		}
 	} else {
 		result.Items = events
 	}
 	return result, nil
+}
+
+// eventCursorAdvances reports whether row is strictly after the cursor
+// (created, id) in (created DESC, id DESC) order.
+func eventCursorAdvances(row store.ScheduledEvent, created time.Time, id uuid.UUID) bool {
+	rc := row.CreatedAt.UTC()
+	if !rc.Equal(created) {
+		return rc.Before(created)
+	}
+	return row.ID < id.String()
 }
 
 // PurgeOldScheduledEvents removes completed events (excluding pending and
