@@ -69,25 +69,33 @@ func TestDispatchExperimentNames_CoverPlatformSkillGates(t *testing.T) {
 			t.Errorf("platform skill file(s) %v gate on experiment %q, which is not in dispatchExperimentNames (pkg/hub/experiments.go); add it so the broker sees its state", files, id)
 		}
 	}
-	if _, ok := refs[experiments.ChatChoices]; !ok {
-		t.Errorf("no platform skill gates on %s; the scion-messaging Choices content is expected to", experiments.ChatChoices)
+	for id, owner := range map[string]string{
+		experiments.ChatChoices: "the scion-messaging Choices content",
+		experiments.Artifacts:   "the scion-artifacts skill",
+	} {
+		if _, ok := refs[id]; !ok {
+			t.Errorf("no platform skill gates on %s; %s is expected to", id, owner)
+		}
 	}
 }
 
-// web.chat_choices is dispatched (for the scion-messaging skill gates) and
-// is off by default, so a fresh hub still dispatches no experiments.
-func TestChatChoicesExperiment_Dispatched(t *testing.T) {
-	exp, ok := experiments.Default().Lookup(experiments.ChatChoices)
-	if !ok {
-		t.Fatalf("%s is not registered", experiments.ChatChoices)
-	}
-	if exp.Default {
-		t.Errorf("%s must stay off by default, or a fresh hub dispatches experiments", experiments.ChatChoices)
-	}
-	if !exp.HasLayer(experiments.LayerServer) {
-		t.Errorf("%s must be a server-layer experiment to be dispatched", experiments.ChatChoices)
-	}
-	if !slices.Contains(dispatchExperimentNames, experiments.ChatChoices) {
-		t.Errorf("%s must be sent with dispatches", experiments.ChatChoices)
+// web.chat_choices and hub.artifacts are dispatched (for the scion-messaging
+// and scion-artifacts skill gates) and are off by default, so a fresh hub
+// still dispatches no experiments.
+func TestSkillGateExperiments_Dispatched(t *testing.T) {
+	for _, id := range []string{experiments.ChatChoices, experiments.Artifacts} {
+		exp, ok := experiments.Default().Lookup(id)
+		if !ok {
+			t.Fatalf("%s is not registered", id)
+		}
+		if exp.Default {
+			t.Errorf("%s must stay off by default, or a fresh hub dispatches experiments", id)
+		}
+		if !exp.HasLayer(experiments.LayerServer) {
+			t.Errorf("%s must be a server-layer experiment to be dispatched", id)
+		}
+		if !slices.Contains(dispatchExperimentNames, id) {
+			t.Errorf("%s must be sent with dispatches", id)
+		}
 	}
 }

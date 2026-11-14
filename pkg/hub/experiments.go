@@ -150,6 +150,7 @@ var dispatchExperimentNames = []string{
 	experiments.AgentPlugins,
 	experiments.CloudRunNativeIdentity,
 	experiments.ChatChoices,
+	experiments.Artifacts,
 }
 
 // dispatchExperiments returns the dispatch experiments that are enabled
