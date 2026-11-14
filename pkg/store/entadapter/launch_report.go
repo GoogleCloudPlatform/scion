@@ -459,6 +459,9 @@ func (s *AgentStore) applyLaunchReportPreRunning(ctx context.Context, ltx *launc
 		if ownerToSet != "" {
 			upd.SetLaunchOwner(ownerToSet)
 		}
+		// Pre-running to running: activity_since starts now if the row
+		// carries an activity (stampActivitySince).
+		stampActivitySince(upd.Mutation(), current.Phase, current.Activity, now)
 		updated, err := withLaunchEndSettlement(upd, current, store.LaunchEndReasonSucceeded, now).Save(ctx)
 		if err != nil {
 			return store.LaunchReportAnswer{}, nil, mapError(err)

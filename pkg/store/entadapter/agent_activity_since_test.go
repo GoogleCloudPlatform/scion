@@ -218,3 +218,53 @@ func TestAgentStore_ActivitySince_PhaseOnlyWriterClears(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, activitySinceOf(t, s, a.ID))
 }
+
+// A failed delete's rollback (UpdateAgentDeletion restoring running and the
+// prior activity) sets activity_since again after the claim's stopping
+// cleared it.
+func TestAgentStore_ActivitySince_DeletionRollback(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	a := makeAgent(projectID, "since-del-rollback")
+	require.NoError(t, s.CreateAgent(ctx, a))
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Activity: "idle"}))
+
+	stopping, running, idle := "stopping", "running", "idle"
+	n, err := s.UpdateAgentDeletion(ctx, a.ID, store.DeletionPredicate{}, store.DeletionFields{Phase: &stopping})
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+	assert.Nil(t, activitySinceOf(t, s, a.ID), "the claim's stopping clears activity_since")
+
+	beforeRollback := time.Now()
+	n, err = s.UpdateAgentDeletion(ctx, a.ID, store.DeletionPredicate{}, store.DeletionFields{Phase: &running, Activity: &idle})
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+	requireStampedAfter(t, activitySinceOf(t, s, a.ID), beforeRollback, "rollback to running/idle")
+}
+
+// A succeeded launch report moves a pre-running row to running; the row's
+// activity starts its activity_since there.
+func TestAgentStore_ActivitySince_LaunchSucceeded(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	a := makeAgent(projectID, "since-launch")
+	a.Phase = "created"
+	require.NoError(t, s.CreateAgent(ctx, a))
+	require.Nil(t, activitySinceOf(t, s, a.ID), "a pre-running row has no activity_since")
+	launchID, err := s.BeginLaunch(ctx, a.ID, store.LaunchKindCreate, 5*time.Minute)
+	require.NoError(t, err)
+
+	beforeReport := time.Now()
+	answer, _, err := s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, store.LaunchReport{
+		LaunchID: launchID, InstanceID: "i1", State: store.LaunchReportStateSucceeded,
+	})
+	require.NoError(t, err)
+	require.Equal(t, store.LaunchReportResultApplied, answer.Result)
+
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	require.Equal(t, "running", got.Phase)
+	requireStampedAfter(t, got.ActivitySince, beforeReport, "launch succeeded")
+}

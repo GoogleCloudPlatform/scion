@@ -33,9 +33,12 @@ import (
 //     it is left alone, so a re-report or hook traffic on a sticky
 //     activity never moves it.
 //
-// Every store writer that knows the stored values calls it. Writers that
-// only move phase rely on entc.ClearLaunchResumePhaseHook, which clears
-// activity_since on any write of a phase other than running.
+// Every store writer that sets activity, or sets phase to running, calls it
+// with the stored values, including the delete engine's rollback
+// (updateAgentDeletionOnce) and a launch's succeeded report. Writers that
+// only move phase away from running (launch reaper, container missing)
+// rely on entc.ClearLaunchResumePhaseHook, which clears activity_since on
+// any write of a phase other than running.
 func stampActivitySince(m *ent.AgentMutation, prevPhase, prevActivity string, now time.Time) {
 	phase, ok := m.Phase()
 	if !ok {

@@ -31,8 +31,9 @@ the hub needs it yet):
 
 - `stampActivitySince` (pkg/store/entadapter/agent_activity_since.go) runs in
   every writer that knows the stored values: `UpdateAgentStatus`,
-  `MarkStalledAgents`, `MarkStaleAgentsOffline`, `CreateAgent`, and
-  `UpdateAgent`. It sets the column when the activity value changes or the row
+  `MarkStalledAgents`, `MarkStaleAgentsOffline`, `CreateAgent`, `UpdateAgent`,
+  the delete engine's deletion-field writes (a failed delete's rollback
+  restores running and the prior activity), and a launch's succeeded report. It sets the column when the activity value changes or the row
   enters running, leaves it alone for an unchanged value, and clears it when the
   phase is not running or the activity is empty.
 - `UpdateAgent` is a version CAS with no read of the old activity, so the
@@ -41,8 +42,8 @@ the hub needs it yet):
   `state_version`) can leave the column one change behind; the whole-row write
   overwrites that report's activity anyway.
 - `entc.ClearLaunchResumePhaseHook` also clears the column on any write of a
-  phase other than running, which covers the writers that only move phase
-  (launch reaper, container missing, delete engine).
+  phase other than running, which covers the writers that only move phase away
+  from running (launch reaper, container missing).
 
 ## Not in this phase
 
