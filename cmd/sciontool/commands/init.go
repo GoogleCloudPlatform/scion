@@ -1405,6 +1405,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 				ptyUser := conduitPTYUser(targetUID, targetGID, rootless, opts.RequirePrivilegeDrop)
 				go newPortForwarding(hubClient, opts.DisableConduit, ptyUser, conduitSSH,
 					conduitDeliverOptions(os.Getenv, exec.LookPath, childArgs, ptyUser),
+					conduitExecOptions(os.Getenv, ptyUser, harnessShellEnv(config)),
 					os.Getenv).run(ctx)
 
 				// Auto-expose: detect and register listening ports

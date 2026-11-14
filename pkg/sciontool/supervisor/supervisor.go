@@ -426,6 +426,15 @@ func SSHSessionEnv(cfg Config, base []string) ([]string, error) {
 	return childEnv(cfg, base, false, false)
 }
 
+// HarnessShellEnv is the environment of a scheduled exec run (the exec
+// control routes): exactly the harness child's (ChildEnv, secret overrides
+// included), so a scheduled command sees what a command typed in the
+// harness's tmux session sees. It runs for every run, so it writes none
+// of ChildEnv's debug lines.
+func HarnessShellEnv(cfg Config, base []string) ([]string, error) {
+	return childEnv(cfg, base, true, false)
+}
+
 // childEnv is ChildEnv, applying the secret overrides only when
 // applySecrets is set and writing its debug lines only when logSteps is
 // set.

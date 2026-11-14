@@ -154,3 +154,48 @@ func envKeys(env []string) []string {
 	}
 	return keys
 }
+
+// TestHarnessShellEnvIsTheHarnessEnv: a scheduled exec run gets exactly the
+// harness child's environment (secret overrides and resolved auth
+// included), not the SSH session's, and building it writes no debug
+// lines.
+func TestHarnessShellEnvIsTheHarnessEnv(t *testing.T) {
+	log.SetLogPath(filepath.Join(t.TempDir(), "agent.log"))
+	log.Init()
+	log.SetDebug(true)
+	t.Cleanup(func() {
+		log.SetLogPath("")
+		log.Init()
+	})
+	base := []string{"PATH=/usr/bin", "SCION_EXTRA_PATH=/opt/x", "API_KEY="}
+	cfg := Config{
+		UID: 1000, GID: 1000, Username: "scion",
+		EnvOverlay:      map[string]string{"NEW": "n"},
+		SecretOverrides: map[string]string{"API_KEY": "fetched", "ADDED_SECRET": "a"},
+		AuthEnv:         map[string]string{"AUTH_ONLY": "x"},
+	}
+	harness, err := ChildEnv(cfg, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var shell []string
+	out := captureStderr(t, func() {
+		shell, err = HarnessShellEnv(cfg, base)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(shell, harness) {
+		t.Fatalf("HarnessShellEnv keys %v, want the harness keys %v", envKeys(shell), envKeys(harness))
+	}
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("HarnessShellEnv wrote debug output: %q", out)
+	}
+	ssh, err := SSHSessionEnv(cfg, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Equal(shell, ssh) {
+		t.Fatal("HarnessShellEnv must not be the SSH session env (it lacks the secret overrides)")
+	}
+}

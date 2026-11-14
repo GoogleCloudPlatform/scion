@@ -117,7 +117,7 @@ func TestPortForwardingConduitDeliver(t *testing.T) {
 	}
 	rr := &recordingRunner{}
 	ctx, cancel := context.WithCancel(context.Background())
-	p := newPortForwarding(client, false, conduit.PTYUser{}, nil, &control.DeliverOptions{Runner: tmuxdeliver.Runner(rr)}, func(k string) string { return env[k] })
+	p := newPortForwarding(client, false, conduit.PTYUser{}, nil, &control.DeliverOptions{Runner: tmuxdeliver.Runner(rr)}, nil, func(k string) string { return env[k] })
 	done := make(chan struct{})
 	go func() { p.run(ctx); close(done) }()
 	t.Cleanup(func() {

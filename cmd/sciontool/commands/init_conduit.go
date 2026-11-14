@@ -84,8 +84,9 @@ func (p portForwarding) run(ctx context.Context) {
 // the agent environment (os.Getenv outside tests). ptyUser is the agent
 // user that PTY streams' tmux clients run as; ssh is the conduit SSH
 // server (prepareConduitSSH), nil when there is none. deliver, when not nil,
-// registers the deliver-message control route (conduitDeliverOptions).
-func newPortForwarding(c *hub.Client, disableConduit bool, ptyUser conduit.PTYUser, ssh *sshd.Config, deliver *control.DeliverOptions, getenv func(string) string) portForwarding {
+// registers the deliver-message control route (conduitDeliverOptions);
+// execOpts, when not nil, registers the exec routes (conduitExecOptions).
+func newPortForwarding(c *hub.Client, disableConduit bool, ptyUser conduit.PTYUser, ssh *sshd.Config, deliver *control.DeliverOptions, execOpts *control.ExecOptions, getenv func(string) string) portForwarding {
 	return portForwarding{
 		getenv:         getenv,
 		disableConduit: disableConduit,
@@ -93,7 +94,7 @@ func newPortForwarding(c *hub.Client, disableConduit bool, ptyUser conduit.PTYUs
 			// The control handler is the session's only RPC target: a
 			// hub-originated RpcRequest reaches /v1/control/* and nothing
 			// else in sciontool.
-			ctl := control.New(control.Options{KickTokenRefresh: c.KickTokenRefresh, Deliver: deliver})
+			ctl := control.New(control.Options{KickTokenRefresh: c.KickTokenRefresh, Deliver: deliver, Exec: execOpts})
 			a, err := conduit.New(conduit.Options{
 				HubURL:                c.HubURL(),
 				AgentID:               c.AgentID(),
@@ -171,6 +172,33 @@ func conduitDeliverOptions(getenv func(string) string, lookPath func(string) (st
 		return nil
 	}
 	return &control.DeliverOptions{Runner: control.NewLocalRunner(u.UID, u.GID, u.Username, u.RequirePrivilegeDrop)}
+}
+
+// conduitExecOptions returns the exec route options (exec-start and
+// exec-status), or nil when the routes must not be registered: the agent
+// was launched without hub.exec_schedules (or the platform cannot run
+// them; control.ExecEnabled). Runs execute as the PTY user, with its
+// privilege-drop rule, in env: the harness's tmux session environment
+// (harnessShellEnv).
+func conduitExecOptions(getenv func(string) string, u conduit.PTYUser, env func() ([]string, error)) *control.ExecOptions {
+	if !control.ExecEnabled(getenv) {
+		return nil
+	}
+	return &control.ExecOptions{
+		UID:                  u.UID,
+		GID:                  u.GID,
+		Username:             u.Username,
+		RequirePrivilegeDrop: u.RequirePrivilegeDrop,
+		Env:                  env,
+		LaunchID:             getenv(conduit.EnvLaunchID),
+	}
+}
+
+// harnessShellEnv returns the environment of scheduled exec runs, built
+// for each run from the harness's configuration: the same environment the
+// harness child (and so its tmux session) gets, secret overrides included.
+func harnessShellEnv(cfg supervisor.Config) func() ([]string, error) {
+	return func() ([]string, error) { return supervisor.HarnessShellEnv(cfg, os.Environ()) }
 }
 
 // childRunsScionTmux reports whether the child command starts tmux session
