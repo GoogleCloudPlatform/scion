@@ -191,7 +191,11 @@ func HasEphemeralPersistenceSupport(rt Runtime) bool {
 // this backs it up for a dispatch that bypasses it.
 func CheckPersistenceSupported(rt Runtime, p api.Persistence) error {
 	if p.IsEphemeral() && !HasEphemeralPersistenceSupport(rt) {
-		return fmt.Errorf("ephemeral persistence is not supported by the %s runtime", rt.Name())
+		name := "selected"
+		if rt != nil {
+			name = rt.Name()
+		}
+		return fmt.Errorf("ephemeral persistence is not supported by the %s runtime", name)
 	}
 	return nil
 }

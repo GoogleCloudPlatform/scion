@@ -75,3 +75,18 @@ func TestStaticCapabilities_EphemeralPersistence(t *testing.T) {
 		}
 	}
 }
+
+// TestPersistenceRuntimeRefusal: the resolved runtime decides, with a 422
+// persistence_unsupported; persistent passes on any runtime.
+func TestPersistenceRuntimeRefusal(t *testing.T) {
+	sce := persistenceRuntimeRefusal("a", api.PersistenceEphemeral, &scionrt.DockerRuntime{})
+	if sce == nil || sce.Status != http.StatusUnprocessableEntity || sce.Code != "persistence_unsupported" {
+		t.Fatalf("docker ephemeral = %+v, want 422 persistence_unsupported", sce)
+	}
+	if sce := persistenceRuntimeRefusal("a", api.PersistenceEphemeral, nil); sce == nil {
+		t.Fatal("nil runtime ephemeral: want a refusal")
+	}
+	if sce := persistenceRuntimeRefusal("a", "", &scionrt.DockerRuntime{}); sce != nil {
+		t.Fatalf("persistent: %+v", sce)
+	}
+}

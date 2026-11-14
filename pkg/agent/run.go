@@ -97,6 +97,11 @@ func sortedEnvVarKeys(envVars map[string]string) []string {
 }
 
 func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
+	// Refused before anything is provisioned or recorded (the broker
+	// refuses it earlier still, in buildStartContext).
+	if err := runtime.CheckPersistenceSupported(m.Runtime, opts.Persistence); err != nil {
+		return nil, err
+	}
 	ctx = m.withWorkspaceLock(ctx)
 	startEntry := time.Now()
 	// callerHubEndpoint is opts.Env's SCION_HUB_ENDPOINT exactly as the
@@ -2925,9 +2930,6 @@ authDone:
 		}
 		warnings = append(warnings, claimWarnings...)
 	}
-	if err := runtime.CheckPersistenceSupported(m.Runtime, runCfg.Persistence); err != nil {
-		return nil, err
-	}
 	id, err := m.Runtime.Run(ctx, runCfg)
 	if err != nil {
 		// agent-info.json was set to the pre-run phase above, before the
@@ -3070,6 +3072,13 @@ authDone:
 	}, nil
 }
 
+// harnessResume reports whether the harness is launched with its resume
+// flag: on a resume, except for an ephemeral agent, whose session is never
+// kept and so always starts fresh (ptone/scion#7780).
+func harnessResume(opts api.StartOptions) bool {
+	return opts.Resume && !opts.Persistence.IsEphemeral()
+}
+
 // workspacePlacementInput is what a start resolved about its workspace.
 type workspacePlacementInput struct {
 	// Backend is the workspace backend that served the workspace ("" for
@@ -3117,13 +3126,6 @@ var exportMountingRuntimes = map[string]bool{
 // gets an EmptyDir), and a clone-per-agent workspace is on the export only
 // in its own agent directory, which also needs the share. Other runtimes count only when
 // listed in exportMountingRuntimes.
-// harnessResume reports whether the harness is launched with its resume
-// flag: on a resume, except for an ephemeral agent, whose session is never
-// kept and so always starts fresh (ptone/scion#7780).
-func harnessResume(opts api.StartOptions) bool {
-	return opts.Resume && !opts.Persistence.IsEphemeral()
-}
-
 func workspacePlacementFor(in workspacePlacementInput) string {
 	if in.Ephemeral || in.Backend != "nfs" {
 		return api.WorkspacePlacementLocal

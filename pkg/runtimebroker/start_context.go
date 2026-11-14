@@ -600,6 +600,12 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	if isCloudRunRuntimeName(dispatchRuntimeType) && effectiveWorktreePerAgentDispatch(in.WorkspaceMode, in.ResolvedEnv, in.Config) {
 		return nil, cloudRunWorktreePerAgentRefusalError(in.Name)
 	}
+	// Ephemeral persistence on the runtime this dispatch resolved (the
+	// profile's, not only the broker default the capability describes),
+	// refused before any agent file is provisioned.
+	if sce := persistenceRuntimeRefusal(in.Name, in.Persistence, res.Runtime); sce != nil {
+		return nil, sce
+	}
 	isKubernetes := isKubernetesRuntimeName(dispatchRuntimeType)
 
 	// Default when no GCP identity config is provided at all: "block" on

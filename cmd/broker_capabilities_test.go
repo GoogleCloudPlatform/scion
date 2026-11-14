@@ -44,10 +44,19 @@ var heartbeatOnlyCapabilities = map[string]bool{}
 // in flight) are registered false and become true at the first heartbeat.
 // Heartbeat-only capabilities are absent from the static set, the
 // registration names and the stored capabilities.
+// ephemeralCapableRuntime is a runtime that implements
+// runtime.EphemeralPersistenceRuntime.
+type ephemeralCapableRuntime struct{ *runtime.DockerRuntime }
+
+func (ephemeralCapableRuntime) SupportsEphemeralPersistence() bool { return true }
+
 func TestCapabilities_RegistrationMatchesHeartbeat(t *testing.T) {
 	for name, rt := range map[string]runtime.Runtime{
 		"docker": runtime.NewDockerRuntime(),
 		"nil":    nil,
+		// A runtime with ephemeral persistence, so the field is checked
+		// with a true value (ptone/scion#7780).
+		"ephemeral-capable": ephemeralCapableRuntime{runtime.NewDockerRuntime()},
 	} {
 		t.Run(name, func(t *testing.T) {
 			// The node image registry is registered as the heartbeat
@@ -91,6 +100,7 @@ func TestCapabilities_RegistrationMatchesHeartbeat(t *testing.T) {
 				tag := strings.Split(f.Tag.Get("json"), ",")[0]
 				assert.Equal(t, hv.Field(i).Bool(), slices.Contains(names, tag), "registration names and heartbeat disagree on %s", tag)
 			}
+			assert.Equal(t, name == "ephemeral-capable", registered.EphemeralPersistence, "ephemeralPersistence registered")
 			assert.Equal(t, reflect.TypeOf(hubclient.BrokerCapabilities{}).NumField()-len(heartbeatOnlyCapabilities), rv.NumField(), "every capability but the heartbeat-only ones has a stored counterpart")
 		})
 	}
