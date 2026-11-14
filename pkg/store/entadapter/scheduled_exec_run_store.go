@@ -17,11 +17,13 @@ package entadapter
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -368,4 +370,88 @@ func (s *ScheduleStore) CreateScheduledEventChecked(ctx context.Context, event *
 		tx := &ScheduleStore{client: c, inTx: true}
 		return tx.CreateScheduledEvent(ctx, event)
 	})
+}
+
+// unadmittedPredicates select events of eventType claimed (fired or
+// expired) before firedBefore that have no exec run.
+func unadmittedPredicates(eventType string, firedBefore time.Time) []predicate.ScheduledEvent {
+	return []predicate.ScheduledEvent{
+		scheduledevent.EventTypeEQ(eventType),
+		scheduledevent.StatusIn(store.ScheduledEventFired, store.ScheduledEventExpired),
+		scheduledevent.FiredAtLT(firedBefore.UTC()),
+		scheduledevent.Not(scheduledevent.HasExecRun()),
+	}
+}
+
+// ListUnadmittedScheduledEvents returns up to limit events of eventType
+// claimed (fired or expired) before firedBefore that have no exec run,
+// oldest claim first.
+func (s *ScheduleStore) ListUnadmittedScheduledEvents(ctx context.Context, eventType string, firedBefore time.Time, limit int) ([]store.ScheduledEvent, error) {
+	rows, err := s.client.ScheduledEvent.Query().
+		Where(unadmittedPredicates(eventType, firedBefore)...).
+		Order(scheduledevent.ByFiredAt(), scheduledevent.ByID()).
+		Limit(clampLimit(limit)).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]store.ScheduledEvent, 0, len(rows))
+	for _, e := range rows {
+		out = append(out, *entScheduledEventToStore(e))
+	}
+	return out, nil
+}
+
+// FailUnadmittedScheduledEvent records event id failed with errMsg while it
+// still matches unadmittedPredicates (same event type, claimed before
+// firedBefore, no exec run), and, for a recurring event, records the failed
+// run on its schedule in the same transaction. It reports whether the event
+// changed.
+func (s *ScheduleStore) FailUnadmittedScheduledEvent(ctx context.Context, id, eventType string, firedBefore time.Time, errMsg string) (bool, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return false, err
+	}
+	var changed bool
+	err = runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
+		evt, err := c.ScheduledEvent.Query().
+			Where(append([]predicate.ScheduledEvent{scheduledevent.IDEQ(uid)}, unadmittedPredicates(eventType, firedBefore)...)...).
+			Only(ctx)
+		if ent.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return mapError(err)
+		}
+		n, err := c.ScheduledEvent.Update().
+			Where(append([]predicate.ScheduledEvent{scheduledevent.IDEQ(uid)}, unadmittedPredicates(eventType, firedBefore)...)...).
+			SetStatus(store.ScheduledEventFailed).
+			SetError(errMsg).
+			Save(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		if n == 0 {
+			return nil
+		}
+		changed = true
+		if evt.ScheduleID != "" {
+			schedUID, err := parseUUID(evt.ScheduleID)
+			if err != nil {
+				return nil
+			}
+			ranAt := evt.FireAt
+			if evt.FiredAt != nil {
+				ranAt = *evt.FiredAt
+			}
+			if err := recordScheduleRunOnClient(ctx, c, schedUID, ranAt, errMsg); err != nil && !errors.Is(err, store.ErrNotFound) {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return changed, nil
 }

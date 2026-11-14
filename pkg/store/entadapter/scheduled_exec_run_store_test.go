@@ -371,3 +371,112 @@ func TestPurgeOldScheduledEvents_RemovesExecRuns(t *testing.T) {
 	_, err = s.GetScheduledExecRun(ctx, recent.ID)
 	assert.NoError(t, err)
 }
+
+// TestListScheduledEvents_KeysetTraversal (P2-R2): a full traversal visits
+// every matching event when UUID order opposes creation order and the
+// target is older than the first page (the reviewer's fixture), with the
+// 200-row page cap honoured.
+func TestListScheduledEvents_KeysetTraversal(t *testing.T) {
+	s := newTestScheduleStore(t)
+	ctx := context.Background()
+	project := uuid.NewString()
+	targetID := "ffffffff-ffff-4fff-8fff-ffffffffffff"
+	old := time.Now().Add(-time.Hour)
+	require.NoError(t, s.CreateScheduledEvent(ctx, &store.ScheduledEvent{
+		ID: targetID, ProjectID: project, EventType: "exec", FireAt: time.Now().Add(time.Hour),
+		Payload: `{"agentId":"target","command":["true"]}`, Status: store.ScheduledEventPending, CreatedAt: old,
+	}))
+	const n = 1000
+	for i := 0; i < n; i++ {
+		low := uuid.New()
+		low[0] = 1
+		require.NoError(t, s.CreateScheduledEvent(ctx, &store.ScheduledEvent{
+			ID: low.String(), ProjectID: project, EventType: "message", FireAt: time.Now().Add(time.Hour),
+			Payload: `{"agentId":"other","message":"x"}`, Status: store.ScheduledEventPending,
+			CreatedAt: old.Add(time.Minute + time.Duration(i)*time.Millisecond),
+		}))
+	}
+	cursor := ""
+	seen := map[string]bool{}
+	pages := 0
+	for {
+		result, err := s.ListScheduledEvents(ctx, store.ScheduledEventFilter{ProjectID: project, Status: store.ScheduledEventPending},
+			store.ListOptions{Limit: 1000, Cursor: cursor, SkipTotalCount: true})
+		require.NoError(t, err)
+		require.LessOrEqual(t, len(result.Items), 200, "page cap")
+		for _, e := range result.Items {
+			assert.False(t, seen[e.ID], "no event twice")
+			seen[e.ID] = true
+		}
+		pages++
+		require.Less(t, pages, 20)
+		if result.NextCursor == "" {
+			break
+		}
+		cursor = result.NextCursor
+	}
+	assert.Len(t, seen, n+1)
+	assert.True(t, seen[targetID], "the older target is visited")
+
+	// The earlier id-only cursor format is refused, never misread.
+	_, err := s.ListScheduledEvents(ctx, store.ScheduledEventFilter{ProjectID: project}, store.ListOptions{Cursor: targetID})
+	assert.ErrorIs(t, err, store.ErrInvalidCursor)
+}
+
+// TestUnadmittedScheduledEvents (P2-R1): claimed (fired or expired) exec
+// events older than the cutoff with no run are listed and failed; events
+// with a run, recent claims, pending and other types are not; a recurring
+// event's schedule records the failed run.
+func TestUnadmittedScheduledEvents(t *testing.T) {
+	s := newTestScheduleStore(t)
+	ctx := context.Background()
+	project := uuid.NewString()
+	longAgo := time.Now().Add(-time.Hour)
+	fired := newExecEvent(t, s, project, store.ScheduledEventFired, longAgo)
+	expired := newExecEvent(t, s, project, store.ScheduledEventExpired, longAgo)
+	withRun := newExecEvent(t, s, project, store.ScheduledEventFired, longAgo)
+	require.NoError(t, s.CreateScheduledExecRun(ctx, newExecRun(withRun)))
+	recent := newExecEvent(t, s, project, store.ScheduledEventFired, time.Now())
+	pending := newExecEvent(t, s, project, store.ScheduledEventPending, longAgo)
+	msg := &store.ScheduledEvent{ID: uuid.NewString(), ProjectID: project, EventType: "message", FireAt: longAgo,
+		Payload: `{"agentId":"x","message":"m"}`, Status: store.ScheduledEventPending}
+	require.NoError(t, s.CreateScheduledEvent(ctx, msg))
+	require.NoError(t, s.UpdateScheduledEventStatus(ctx, msg.ID, store.ScheduledEventFired, &longAgo, ""))
+
+	sched := newTestSchedule(project, "unadmitted")
+	require.NoError(t, s.CreateSchedule(ctx, sched))
+	recurring := &store.ScheduledEvent{ID: uuid.NewString(), ProjectID: project, EventType: "exec", FireAt: longAgo,
+		Payload: `{"agentId":"x","command":["true"]}`, Status: store.ScheduledEventPending, ScheduleID: sched.ID}
+	require.NoError(t, s.CreateScheduledEvent(ctx, recurring))
+	require.NoError(t, s.UpdateScheduledEventStatus(ctx, recurring.ID, store.ScheduledEventFired, &longAgo, ""))
+
+	cutoff := time.Now().Add(-time.Minute)
+	got, err := s.ListUnadmittedScheduledEvents(ctx, "exec", cutoff, 100)
+	require.NoError(t, err)
+	var ids []string
+	for _, e := range got {
+		ids = append(ids, e.ID)
+	}
+	assert.ElementsMatch(t, []string{fired.ID, expired.ID, recurring.ID}, ids)
+
+	for _, e := range got {
+		changed, err := s.FailUnadmittedScheduledEvent(ctx, e.ID, "exec", cutoff, "hub restarted before dispatch")
+		require.NoError(t, err)
+		assert.True(t, changed)
+		again, err := s.FailUnadmittedScheduledEvent(ctx, e.ID, "exec", cutoff, "x")
+		require.NoError(t, err)
+		assert.False(t, again, "once")
+		evt, err := s.GetScheduledEvent(ctx, e.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.ScheduledEventFailed, evt.Status)
+		assert.Equal(t, "hub restarted before dispatch", evt.Error)
+	}
+	for _, e := range []*store.ScheduledEvent{withRun, recent, pending} {
+		changed, err := s.FailUnadmittedScheduledEvent(ctx, e.ID, "exec", cutoff, "x")
+		require.NoError(t, err)
+		assert.False(t, changed, e.ID)
+	}
+	sc, err := s.GetSchedule(ctx, sched.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, sc.ErrorCount, "the recurring event's schedule records the failed run")
+}

@@ -3323,6 +3323,18 @@ type ScheduledExecRunStore interface {
 	// through every unfinished run.
 	ClaimScheduledExecRunsForPoll(ctx context.Context, now time.Time, limit int, excludeEventIDs []string) ([]ScheduledExecRun, error)
 
+	// ListUnadmittedScheduledEvents returns up to limit events of eventType
+	// claimed (status fired or expired) before firedBefore that have no exec
+	// run: a hub stopped between the claim and the run insert
+	// (ptone/scion#7883 P2-R1).
+	ListUnadmittedScheduledEvents(ctx context.Context, eventType string, firedBefore time.Time, limit int) ([]ScheduledEvent, error)
+
+	// FailUnadmittedScheduledEvent records event id failed with errMsg only
+	// while it still is such an event (and, for a recurring event, records
+	// the failed run on its schedule in the same transaction). It reports
+	// whether the event changed.
+	FailUnadmittedScheduledEvent(ctx context.Context, id, eventType string, firedBefore time.Time, errMsg string) (bool, error)
+
 	// CreateScheduledEventChecked inserts event only after check accepts the
 	// pending events of the same project and event type (at most limit),
 	// read in the same transaction under a per-project lock that serializes

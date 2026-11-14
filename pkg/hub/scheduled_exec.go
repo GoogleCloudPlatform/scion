@@ -217,6 +217,7 @@ const (
 	execReasonAgentStopped     = "agent stopped during run"
 	execReasonOutcomeUnknown   = "run outcome unknown"
 	execReasonShuttingDown     = "hub shutting down"
+	execReasonNotDispatched    = "hub restarted before dispatch"
 	execReasonRecurring        = "recurring exec schedules are not supported"
 )
 

@@ -67,6 +67,15 @@ var (
 	scheduledExecStopGrace = 2 * time.Second
 )
 
+// scheduledExecAdmitWindow bounds how long after its claim an exec event
+// can still get its run row: the claim sets fired_at, and the run is
+// inserted under the fire handler's deadline (scheduledEventHandlerTimeout),
+// so a claimed event with no run past this window was cut off by a hub
+// stop between the claim and the insert, and nothing was ever sent for it
+// (exec-start follows the insert). A minute of margin covers replica clock
+// differences. A variable only as a test seam.
+var scheduledExecAdmitWindow = scheduledEventHandlerTimeout + scheduledEventRecordTimeout + time.Minute
+
 // scheduledExecSeamMu guards the exec timing and bound variables above,
 // which tests change while trackers of earlier fires may still run.
 // Production code reads them through execSeamDuration and execSeamInt.
@@ -591,6 +600,7 @@ func (s *Server) scheduledExecRunSweepHandler() func(ctx context.Context) {
 func (s *Server) sweepScheduledExecRuns(ctx context.Context) {
 	batch, inFlight := execSeamInt(&scheduledExecSweepBatch), execSeamInt(&scheduledExecSweepInFlight)
 	budget := batch * execSeamInt(&scheduledExecSweepMaxPages)
+	s.recoverUnadmittedExecEvents(ctx, batch, budget)
 	for expired := 0; expired < budget && ctx.Err() == nil; {
 		runs, err := s.store.ListExpiredScheduledExecRuns(ctx, time.Now(), batch)
 		if err != nil {
@@ -631,6 +641,52 @@ func (s *Server) sweepScheduledExecRuns(ctx context.Context) {
 		wg.Wait()
 		polled += len(runs)
 		if len(runs) < inFlight {
+			return
+		}
+	}
+}
+
+// recoverUnadmittedExecEvents records failed (execReasonNotDispatched) the
+// exec events claimed fired or expired more than scheduledExecAdmitWindow
+// ago that never got a run row: a hub that stopped between the claim and
+// the run insert left them, and neither restart replay (they are no longer
+// pending) nor the run sweep (they have no run) would otherwise finish them
+// (ptone/scion#7883 P2-R1, AC10). Nothing was sent for such an event, and
+// recovery never sends exec-start. The write is conditional on the event
+// still having no run, in one transaction; for a recurring event (Phase 2)
+// it also records the schedule's failed run.
+func (s *Server) recoverUnadmittedExecEvents(ctx context.Context, batch, budget int) {
+	for done := 0; done < budget && ctx.Err() == nil; {
+		cutoff := time.Now().Add(-execSeamDuration(&scheduledExecAdmitWindow))
+		events, err := s.store.ListUnadmittedScheduledEvents(ctx, scheduledEventTypeExec, cutoff, batch)
+		if err != nil {
+			slog.Warn("Scheduler: exec run sweep: unadmitted list failed", "error", err)
+			return
+		}
+		progressed := false
+		for _, evt := range events {
+			recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledEventRecordTimeout)
+			changed, err := s.store.FailUnadmittedScheduledEvent(recordCtx, evt.ID, scheduledEventTypeExec, cutoff, execReasonNotDispatched)
+			cancel()
+			if err != nil {
+				slog.Warn("Scheduler: exec run sweep: unadmitted event not recorded", "eventID", evt.ID, "error", err)
+				continue
+			}
+			if !changed {
+				continue
+			}
+			progressed = true
+			p, _ := decodeScheduledExecPayload(evt.Payload)
+			a := newScheduledExecFireAudit(ContextWithExecutor(ctx, ExecutorContext{Kind: "scheduler", ID: "scheduled_event:" + evt.ID}),
+				ScheduledExecAuditOutcome, evt, p)
+			a.Outcome = store.ScheduledExecOutcomeError
+			a.Reason = execReasonNotDispatched
+			s.auditScheduledExec(ctx, a)
+			slog.Warn("Scheduler: exec event claimed but never dispatched; recorded failed",
+				"eventID", evt.ID, "projectID", evt.ProjectID)
+		}
+		done += len(events)
+		if len(events) < batch || !progressed {
 			return
 		}
 	}
