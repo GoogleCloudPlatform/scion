@@ -65,8 +65,13 @@ type UpdateScheduleRequest struct {
 	Status    string  `json:"status,omitempty"`
 }
 
+// ScheduleListScopeCaller indicates that a list response is filtered to rows
+// held by the calling principal (an agent caller).
+const ScheduleListScopeCaller = "caller"
+
 // ListSchedulesResponse is the API response for listing schedules.
 type ListSchedulesResponse struct {
+	Scope      string           `json:"scope,omitempty"`
 	Schedules  []store.Schedule `json:"schedules"`
 	NextCursor string           `json:"nextCursor,omitempty"`
 	TotalCount int              `json:"totalCount,omitempty"`
@@ -361,6 +366,10 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 	}
 
 	if err := s.store.CreateSchedule(r.Context(), &schedule); err != nil {
+		if errors.Is(err, store.ErrAlreadyExists) {
+			writeScheduleNameConflict(w, r, req.Name)
+			return
+		}
 		writeErrorFromErr(w, err, "")
 		return
 	}
@@ -375,14 +384,63 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 	writeJSON(w, http.StatusCreated, created)
 }
 
+// writeScheduleNameConflict writes the 409 Conflict response when creating or
+// renaming a recurring schedule collides with an existing (project_id, name).
+// The message interpolates only the caller's requested name and never loads or
+// discloses any field of the conflicting row (ID, holder, cron, status, or
+// payload).
+func writeScheduleNameConflict(w http.ResponseWriter, r *http.Request, name string) {
+	if isAgentCaller(r.Context()) {
+		Conflict(w, fmt.Sprintf(
+			"Schedule %q already exists in this project; if it does not appear in 'scion schedule list', it is held by another principal and not visible to this agent",
+			name))
+		return
+	}
+	Conflict(w, fmt.Sprintf("Schedule %q already exists in this project", name))
+}
+
+// writeScheduleNotFound writes the per-ID 404 response for schedules. Both
+// missing IDs (including non-UUID names) and cross-project IDs go through this
+// helper so the two cases return the exact same body.
+func writeScheduleNotFound(w http.ResponseWriter, r *http.Request) {
+	if isAgentCaller(r.Context()) {
+		writeError(w, http.StatusNotFound, ErrCodeNotFound,
+			"Schedule not found (per-ID schedule endpoints take a schedule ID, not a name; schedules held by another agent or user are hidden from agent lists and return 403 by ID)", nil)
+		return
+	}
+	NotFound(w, "Schedule")
+}
+
+func (s *Server) loadScheduleForProject(w http.ResponseWriter, r *http.Request, projectID, scheduleID string) (*store.Schedule, bool) {
+	schedule, err := s.store.GetSchedule(r.Context(), scheduleID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeScheduleNotFound(w, r)
+			return nil, false
+		}
+		writeErrorFromErr(w, err, "")
+		return nil, false
+	}
+	if schedule.ProjectID != projectID {
+		writeScheduleNotFound(w, r)
+		return nil, false
+	}
+	return schedule, true
+}
+
 // listSchedules handles GET /api/v1/projects/{projectId}/schedules
 func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request, projectID string) {
 	query := r.URL.Query()
+	scope := scheduleListScope(r.Context())
 
 	// An agent caller lists only the schedules it holds.
 	agentID, ok := agentListFilter(r.Context())
 	if !ok {
-		writeJSON(w, http.StatusOK, ListSchedulesResponse{Schedules: []store.Schedule{}, ServerTime: time.Now().UTC()})
+		writeJSON(w, http.StatusOK, ListSchedulesResponse{
+			Scope:      scope,
+			Schedules:  []store.Schedule{},
+			ServerTime: time.Now().UTC(),
+		})
 		return
 	}
 	filter := store.ScheduleFilter{
@@ -400,6 +458,7 @@ func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request, projectID
 
 	schedules, totalCount := visibleScheduledRows(r.Context(), s, projectID, result.Items, result.TotalCount, scheduleRow)
 	writeJSON(w, http.StatusOK, ListSchedulesResponse{
+		Scope:      scope,
 		Schedules:  schedules,
 		NextCursor: result.NextCursor,
 		TotalCount: totalCount,
@@ -409,14 +468,8 @@ func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request, projectID
 
 // getSchedule handles GET /api/v1/projects/{projectId}/schedules/{id}
 func (s *Server) getSchedule(w http.ResponseWriter, r *http.Request, projectID, scheduleID string) {
-	schedule, err := s.store.GetSchedule(r.Context(), scheduleID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
-
-	if schedule.ProjectID != projectID {
-		NotFound(w, "Schedule")
+	schedule, ok := s.loadScheduleForProject(w, r, projectID, scheduleID)
+	if !ok {
 		return
 	}
 	if !s.authorizeScheduledEventRow(w, r, projectID, ActionRead, scheduleRow(schedule)) {
@@ -428,13 +481,8 @@ func (s *Server) getSchedule(w http.ResponseWriter, r *http.Request, projectID, 
 
 // updateSchedule handles PATCH /api/v1/projects/{projectId}/schedules/{id}
 func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectID, scheduleID string) {
-	schedule, err := s.store.GetSchedule(r.Context(), scheduleID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
-	if schedule.ProjectID != projectID {
-		NotFound(w, "Schedule")
+	schedule, ok := s.loadScheduleForProject(w, r, projectID, scheduleID)
+	if !ok {
 		return
 	}
 	if !s.authorizeScheduledEventRow(w, r, projectID, ActionUpdate, scheduleEditRow(schedule)) {
@@ -648,6 +696,10 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 				"schedule was concurrently modified; refresh and retry", nil)
 			return
 		}
+		if errors.Is(err, store.ErrAlreadyExists) {
+			writeScheduleNameConflict(w, r, schedule.Name)
+			return
+		}
 		writeErrorFromErr(w, err, "")
 		return
 	}
@@ -657,13 +709,8 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 
 // deleteSchedule handles DELETE /api/v1/projects/{projectId}/schedules/{id}
 func (s *Server) deleteSchedule(w http.ResponseWriter, r *http.Request, projectID, scheduleID string) {
-	schedule, err := s.store.GetSchedule(r.Context(), scheduleID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
-	if schedule.ProjectID != projectID {
-		NotFound(w, "Schedule")
+	schedule, ok := s.loadScheduleForProject(w, r, projectID, scheduleID)
+	if !ok {
 		return
 	}
 	if !s.authorizeScheduledEventRow(w, r, projectID, ActionDelete, scheduleRow(schedule)) {
@@ -689,13 +736,8 @@ func (s *Server) deleteSchedule(w http.ResponseWriter, r *http.Request, projectI
 
 // pauseSchedule handles POST /api/v1/projects/{projectId}/schedules/{id}/pause
 func (s *Server) pauseSchedule(w http.ResponseWriter, r *http.Request, projectID, scheduleID string) {
-	schedule, err := s.store.GetSchedule(r.Context(), scheduleID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
-	if schedule.ProjectID != projectID {
-		NotFound(w, "Schedule")
+	schedule, ok := s.loadScheduleForProject(w, r, projectID, scheduleID)
+	if !ok {
 		return
 	}
 	if !s.authorizeScheduledEventRow(w, r, projectID, ActionUpdate, scheduleRow(schedule)) {
@@ -726,13 +768,8 @@ func (s *Server) pauseSchedule(w http.ResponseWriter, r *http.Request, projectID
 
 // resumeSchedule handles POST /api/v1/projects/{projectId}/schedules/{id}/resume
 func (s *Server) resumeSchedule(w http.ResponseWriter, r *http.Request, projectID, scheduleID string) {
-	schedule, err := s.store.GetSchedule(r.Context(), scheduleID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
-	if schedule.ProjectID != projectID {
-		NotFound(w, "Schedule")
+	schedule, ok := s.loadScheduleForProject(w, r, projectID, scheduleID)
+	if !ok {
 		return
 	}
 	if !s.authorizeScheduledEventRow(w, r, projectID, ActionUpdate, scheduleRow(schedule)) {
@@ -812,13 +849,8 @@ func (s *Server) resumeSchedule(w http.ResponseWriter, r *http.Request, projectI
 
 // getScheduleHistory handles GET /api/v1/projects/{projectId}/schedules/{id}/history
 func (s *Server) getScheduleHistory(w http.ResponseWriter, r *http.Request, projectID, scheduleID string) {
-	schedule, err := s.store.GetSchedule(r.Context(), scheduleID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
-	if schedule.ProjectID != projectID {
-		NotFound(w, "Schedule")
+	schedule, ok := s.loadScheduleForProject(w, r, projectID, scheduleID)
+	if !ok {
 		return
 	}
 	if !s.authorizeScheduledEventRow(w, r, projectID, ActionRead, scheduleRow(schedule)) {

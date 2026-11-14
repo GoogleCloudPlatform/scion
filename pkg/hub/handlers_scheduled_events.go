@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -62,6 +63,7 @@ type ScheduledEventResponse struct {
 
 // ListScheduledEventsResponse is the API response for listing scheduled events.
 type ListScheduledEventsResponse struct {
+	Scope      string                 `json:"scope,omitempty"`
 	Events     []store.ScheduledEvent `json:"events"`
 	NextCursor string                 `json:"nextCursor,omitempty"`
 	TotalCount int                    `json:"totalCount,omitempty"`
@@ -98,6 +100,8 @@ func (s *Server) authorizeScheduledEventRow(w http.ResponseWriter, r *http.Reque
 	logAuthzDenial(r, identity, scheduledEventResource(projectID), action, d.reason)
 	if d.byPolicy {
 		writeForbidden(w, "You don't have permission to access scheduled events in this project")
+	} else if d.notHeldByAgent {
+		writeForbidden(w, "Schedule or scheduled event is not visible to this agent (agent callers can only access schedules and events they hold)")
 	} else {
 		writeForbidden(w, "")
 	}
@@ -110,8 +114,11 @@ type scheduledEventAccess struct {
 	// reason is logged for a denial.
 	reason string
 	// byPolicy is true when the authorization service denied the request,
-	// the one denial authorizeScheduledEventRow explains to the caller.
+	// the one user denial authorizeScheduledEventRow explains to the caller.
 	byPolicy bool
+	// notHeldByAgent is true when an agent caller addressed a row in its
+	// project whose authority is held by another principal (or legacy unknown).
+	notHeldByAgent bool
 }
 
 // scheduledEventRow is the row a scheduled-event decision is about: a
@@ -180,7 +187,10 @@ func (s *Server) scheduledEventAccessDecision(ctx context.Context, projectID str
 			return scheduledEventAccess{reason: "agent callers do not edit schedule definitions"}
 		}
 		if !s.agentHoldsScheduledRow(identity, row.attribution) {
-			return scheduledEventAccess{reason: "agent does not hold authority for this scheduled row"}
+			return scheduledEventAccess{
+				reason:         "agent does not hold authority for this scheduled row",
+				notHeldByAgent: true,
+			}
 		}
 		return scheduledEventAccess{allowed: true}
 
@@ -487,11 +497,16 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 // listScheduledEvents handles GET /api/v1/projects/{projectId}/scheduled-events
 func (s *Server) listScheduledEvents(w http.ResponseWriter, r *http.Request, projectID string) {
 	query := r.URL.Query()
+	scope := scheduleListScope(r.Context())
 
 	// An agent caller lists only the events it holds.
 	agentID, ok := agentListFilter(r.Context())
 	if !ok {
-		writeJSON(w, http.StatusOK, ListScheduledEventsResponse{Events: []store.ScheduledEvent{}, ServerTime: time.Now().UTC()})
+		writeJSON(w, http.StatusOK, ListScheduledEventsResponse{
+			Scope:      scope,
+			Events:     []store.ScheduledEvent{},
+			ServerTime: time.Now().UTC(),
+		})
 		return
 	}
 	filter := store.ScheduledEventFilter{
@@ -509,11 +524,21 @@ func (s *Server) listScheduledEvents(w http.ResponseWriter, r *http.Request, pro
 
 	events, totalCount := visibleScheduledRows(r.Context(), s, projectID, result.Items, result.TotalCount, scheduledEventRowOf)
 	writeJSON(w, http.StatusOK, ListScheduledEventsResponse{
+		Scope:      scope,
 		Events:     events,
 		NextCursor: result.NextCursor,
 		TotalCount: totalCount,
 		ServerTime: time.Now().UTC(),
 	})
+}
+
+// scheduleListScope returns ScheduleListScopeCaller when the caller's list is
+// narrowed to rows held by the calling agent, and "" otherwise.
+func scheduleListScope(ctx context.Context) string {
+	if isAgentCaller(ctx) {
+		return ScheduleListScopeCaller
+	}
+	return ""
 }
 
 // visibleScheduledRows keeps the rows of one list page that the caller may
@@ -550,17 +575,39 @@ func agentListFilter(ctx context.Context) (agentID string, ok bool) {
 	return agentID, agentID != ""
 }
 
-// getScheduledEvent handles GET /api/v1/projects/{projectId}/scheduled-events/{id}
-func (s *Server) getScheduledEvent(w http.ResponseWriter, r *http.Request, projectID, eventID string) {
-	evt, err := s.store.GetScheduledEvent(r.Context(), eventID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
+// writeScheduledEventNotFound writes the per-ID 404 response for scheduled
+// events. Both missing IDs (including non-UUID names) and cross-project IDs
+// go through this helper so the two cases return the exact same body.
+func writeScheduledEventNotFound(w http.ResponseWriter, r *http.Request) {
+	if isAgentCaller(r.Context()) {
+		writeError(w, http.StatusNotFound, ErrCodeNotFound,
+			"Scheduled event not found (per-ID scheduled-event endpoints take an event ID; events held by another agent or user are hidden from agent lists and return 403 by ID)", nil)
 		return
 	}
+	NotFound(w, "Scheduled event")
+}
 
-	// Verify the event belongs to the requested project
+func (s *Server) loadScheduledEventForProject(w http.ResponseWriter, r *http.Request, projectID, eventID string) (*store.ScheduledEvent, bool) {
+	evt, err := s.store.GetScheduledEvent(r.Context(), eventID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeScheduledEventNotFound(w, r)
+			return nil, false
+		}
+		writeErrorFromErr(w, err, "")
+		return nil, false
+	}
 	if evt.ProjectID != projectID {
-		NotFound(w, "Scheduled event")
+		writeScheduledEventNotFound(w, r)
+		return nil, false
+	}
+	return evt, true
+}
+
+// getScheduledEvent handles GET /api/v1/projects/{projectId}/scheduled-events/{id}
+func (s *Server) getScheduledEvent(w http.ResponseWriter, r *http.Request, projectID, eventID string) {
+	evt, ok := s.loadScheduledEventForProject(w, r, projectID, eventID)
+	if !ok {
 		return
 	}
 	if !s.authorizeScheduledEventRow(w, r, projectID, ActionRead, scheduledEventRowOf(evt)) {
@@ -572,14 +619,8 @@ func (s *Server) getScheduledEvent(w http.ResponseWriter, r *http.Request, proje
 
 // cancelScheduledEvent handles DELETE /api/v1/projects/{projectId}/scheduled-events/{id}
 func (s *Server) cancelScheduledEvent(w http.ResponseWriter, r *http.Request, projectID, eventID string) {
-	// Verify event exists and belongs to the project
-	evt, err := s.store.GetScheduledEvent(r.Context(), eventID)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
-	if evt.ProjectID != projectID {
-		NotFound(w, "Scheduled event")
+	evt, ok := s.loadScheduledEventForProject(w, r, projectID, eventID)
+	if !ok {
 		return
 	}
 	if !s.authorizeScheduledEventRow(w, r, projectID, ActionDelete, scheduledEventRowOf(evt)) {

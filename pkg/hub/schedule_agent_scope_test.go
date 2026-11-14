@@ -37,8 +37,16 @@ import (
 // current initiator principal is the calling agent. User callers and
 // create are covered for comparison.
 
-// agentScopeForbiddenBody is the body of a row-level denial.
+// agentScopeForbiddenBody is the body of a generic row-level denial (such as
+// agent PATCH of a schedule definition, which is refused regardless of holder).
 const agentScopeForbiddenBody = `{"error":{"code":"forbidden","message":"Insufficient permissions"}}`
+
+// agentScopeNotVisibleMessage is the content-free 403 message returned when an
+// agent caller addresses a schedule or scheduled event in its project that is
+// held by another principal.
+const agentScopeNotVisibleMessage = "Schedule or scheduled event is not visible to this agent (agent callers can only access schedules and events they hold)"
+
+const agentScopeNotVisibleBody = `{"error":{"code":"forbidden","message":"` + agentScopeNotVisibleMessage + `"}}`
 
 // agentScopeHolder names whose authority a fixture row is held under.
 type agentScopeHolder string
@@ -197,7 +205,9 @@ func TestAgentScheduleScope_PerIDActions(t *testing.T) {
 					return
 				}
 				require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-				assert.JSONEq(t, agentScopeForbiddenBody, rec.Body.String())
+				assert.JSONEq(t, agentScopeNotVisibleBody, rec.Body.String())
+				assert.NotContains(t, rec.Body.String(), sc.Name)
+				assert.NotContains(t, rec.Body.String(), "agent-scope-worker")
 				after, err := s.GetSchedule(context.Background(), sc.ID)
 				require.NoError(t, err, "a denied action leaves the row in place")
 				assert.Equal(t, before.Status, after.Status)
@@ -231,7 +241,8 @@ func TestAgentScheduledEventScope_PerIDActions(t *testing.T) {
 					return
 				}
 				require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-				assert.JSONEq(t, agentScopeForbiddenBody, rec.Body.String())
+				assert.JSONEq(t, agentScopeNotVisibleBody, rec.Body.String())
+				assert.NotContains(t, rec.Body.String(), "agent-scope-worker")
 				after, err := s.GetScheduledEvent(context.Background(), evt.ID)
 				require.NoError(t, err)
 				assert.Equal(t, store.ScheduledEventPending, after.Status, "a denied cancel leaves the event pending")
@@ -240,8 +251,8 @@ func TestAgentScheduledEventScope_PerIDActions(t *testing.T) {
 	}
 }
 
-// An agent's schedule list holds only the rows it holds, counted; a
-// user's list is every row with its count.
+// An agent's schedule list holds only the rows it holds, counted, and marks
+// scope="caller"; a user's list is every row with its count and omits scope.
 func TestAgentScheduleScope_List(t *testing.T) {
 	srv, s, projectID := setupScheduleTest(t)
 	ids := map[agentScopeHolder]string{}
@@ -252,21 +263,32 @@ func TestAgentScheduleScope_List(t *testing.T) {
 	rec := doAuthoredScheduleRequest(t, srv, agentScopeCaller(projectID), projectID, "", http.MethodGet, nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var resp ListSchedulesResponse
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, ScheduleListScopeCaller, resp.Scope)
 	require.Len(t, resp.Schedules, 1)
 	assert.Equal(t, ids[holderCallerAgent], resp.Schedules[0].ID)
 	assert.Equal(t, 1, resp.TotalCount)
 
+	// Per-schedule history is scoped to one schedule (not caller-filtered), so scope is omitted.
+	histRec := doAuthoredScheduleRequest(t, srv, agentScopeCaller(projectID), projectID, ids[holderCallerAgent]+"/history", http.MethodGet, nil)
+	require.Equal(t, http.StatusOK, histRec.Code, histRec.Body.String())
+	var histResp ListScheduledEventsResponse
+	require.NoError(t, json.Unmarshal(histRec.Body.Bytes(), &histResp))
+	assert.Empty(t, histResp.Scope)
+	assert.NotContains(t, histRec.Body.String(), `"scope"`)
+
 	rec = doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projectID+"/schedules", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), `"scope"`)
 	resp = ListSchedulesResponse{}
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Empty(t, resp.Scope)
 	assert.Len(t, resp.Schedules, len(agentScopeHolders))
 	assert.Equal(t, len(agentScopeHolders), resp.TotalCount)
 }
 
-// An agent's scheduled-event list holds only the events it holds; a
-// user's list is every event.
+// An agent's scheduled-event list holds only the events it holds and marks
+// scope="caller"; a user's list is every event and omits scope.
 func TestAgentScheduledEventScope_List(t *testing.T) {
 	srv, s, projectID := setupScheduledEventTest(t)
 	ids := map[agentScopeHolder]string{}
@@ -278,14 +300,17 @@ func TestAgentScheduledEventScope_List(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var resp ListScheduledEventsResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, ScheduleListScopeCaller, resp.Scope)
 	require.Len(t, resp.Events, 1)
 	assert.Equal(t, ids[holderCallerAgent], resp.Events[0].ID)
 	assert.Equal(t, 1, resp.TotalCount)
 
 	rec = doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projectID+"/scheduled-events", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), `"scope"`)
 	resp = ListScheduledEventsResponse{}
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Empty(t, resp.Scope)
 	assert.Len(t, resp.Events, len(agentScopeHolders))
 }
 
@@ -627,6 +652,7 @@ func TestAgentScheduleScope_EmptyAgentIDListsNothing(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var list ListSchedulesResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&list))
+	assert.Equal(t, ScheduleListScopeCaller, list.Scope)
 	assert.Empty(t, list.Schedules)
 	assert.Empty(t, list.NextCursor)
 	assert.Zero(t, list.TotalCount)
@@ -635,6 +661,7 @@ func TestAgentScheduleScope_EmptyAgentIDListsNothing(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var events ListScheduledEventsResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&events))
+	assert.Equal(t, ScheduleListScopeCaller, events.Scope)
 	assert.Empty(t, events.Events)
 	assert.Empty(t, events.NextCursor)
 	assert.Zero(t, events.TotalCount)
@@ -850,4 +877,146 @@ func TestAgentScheduleScope_HealthPausedScanSkipsUnheldRows(t *testing.T) {
 	assert.Equal(t, 1, sec.PausedTotal)
 	assert.False(t, sec.PausedScanLimited)
 	assert.False(t, sec.PausedUnavailable)
+}
+
+// Creating a recurring schedule whose name is already taken in the project
+// returns a 409 carrying an actionable caller-scope hint for agent callers
+// without leaking any field of the conflicting row (ID, holder, cron, status,
+// target, or payload). User create and rename conflicts name the schedule
+// without claiming agent scoping.
+func TestAgentScheduleScope_CreateAndRenameNameConflictHintNoLeak(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	caller := agentScopeCaller(projectID)
+
+	for _, h := range agentScopeHolders {
+		t.Run("agent-create/"+string(h), func(t *testing.T) {
+			name := "conflict-" + string(h)
+			next := time.Now().UTC().Add(time.Hour)
+			existing := &store.Schedule{
+				ID:                   api.NewUUID(),
+				ProjectID:            projectID,
+				Name:                 name,
+				CronExpr:             "13 4 * * *",
+				EventType:            "dispatch_agent",
+				Payload:              `{"agentName":"secret-target-sentinel","template":"secret-tmpl","task":"secret-task-sentinel"}`,
+				Status:               store.ScheduleStatusPaused,
+				StatusReason:         store.ScheduleStatusReasonCreatorDeleted,
+				NextRunAt:            &next,
+				CreatedBy:            "secret-creator-sentinel",
+				InitiatorAttribution: h.attribution(),
+			}
+			require.NoError(t, s.CreateSchedule(context.Background(), existing))
+
+			rec := doAuthoredScheduleRequest(t, srv, caller, projectID, "", http.MethodPost, CreateScheduleRequest{
+				Name:      name,
+				CronExpr:  "0 * * * *",
+				EventType: "dispatch_agent",
+				AgentName: "caller-worker",
+			})
+			require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+			var errResp ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+			assert.Equal(t, ErrCodeConflict, errResp.Error.Code)
+			assert.Contains(t, errResp.Error.Message, name)
+			assert.Contains(t, errResp.Error.Message, "scion schedule list")
+			assert.Contains(t, errResp.Error.Message, "not visible to this agent")
+
+			// Content-free boundary: nothing from the existing row may appear.
+			body := rec.Body.String()
+			for _, forbidden := range []string{
+				existing.ID,
+				existing.CronExpr,
+				"secret-target-sentinel",
+				"secret-tmpl",
+				"secret-task-sentinel",
+				"secret-creator-sentinel",
+				store.ScheduleStatusReasonCreatorDeleted,
+				tid("agent-scope-other-agent"),
+				tid("agent-scope-user"),
+			} {
+				assert.NotContains(t, body, forbidden)
+			}
+		})
+	}
+
+	t.Run("user-create-and-rename", func(t *testing.T) {
+		first := storeAgentScopeSchedule(t, s, projectID, "user-taken-name", holderOtherAgent, store.ScheduleStatusActive)
+		second := storeAgentScopeSchedule(t, s, projectID, "user-second-name", holderUser, store.ScheduleStatusActive)
+
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules", CreateScheduleRequest{
+			Name:      first.Name,
+			CronExpr:  "0 * * * *",
+			EventType: "dispatch_agent",
+			AgentName: "w",
+		})
+		require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		var createErr ErrorResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &createErr))
+		assert.Equal(t, ErrCodeConflict, createErr.Error.Code)
+		assert.Contains(t, createErr.Error.Message, `"user-taken-name" already exists in this project`)
+		assert.NotContains(t, createErr.Error.Message, "not visible to this agent")
+
+		patchRec := doRequest(t, srv, http.MethodPatch, "/api/v1/projects/"+projectID+"/schedules/"+second.ID,
+			UpdateScheduleRequest{Name: first.Name})
+		require.Equal(t, http.StatusConflict, patchRec.Code, patchRec.Body.String())
+		var patchErr ErrorResponse
+		require.NoError(t, json.Unmarshal(patchRec.Body.Bytes(), &patchErr))
+		assert.Equal(t, ErrCodeConflict, patchErr.Error.Code)
+		assert.Contains(t, patchErr.Error.Message, `"user-taken-name" already exists in this project`)
+		assert.NotContains(t, patchErr.Error.Message, "not visible to this agent")
+	})
+}
+
+// Per-ID 404 responses on schedules and scheduled events carry a content-free
+// hint for agent callers (covering schedule names passed in place of UUIDs and
+// caller-scoped visibility), and return the exact same 404 body for a missing
+// ID and for a row belonging to another project (no cross-project oracle).
+func TestAgentScheduleScope_NotFoundHintAndCrossProjectParity(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	ctx := context.Background()
+	caller := agentScopeCaller(projectID)
+
+	otherProject := &store.Project{ID: tid("agent-scope-404-other"), Name: "Other 404", Slug: "agent-scope-404-other"}
+	require.NoError(t, s.CreateProject(ctx, otherProject))
+	otherSched := storeAgentScopeSchedule(t, s, otherProject.ID, "secret-other-proj-sched", holderOtherAgent, store.ScheduleStatusActive)
+	otherEvt := storeAgentScopeEvent(t, s, otherProject.ID, holderOtherAgent)
+	missingUUID := api.NewUUID()
+
+	for _, action := range agentScopeScheduleActions {
+		t.Run("schedule/"+action.name, func(t *testing.T) {
+			missingRec := doAuthoredScheduleRequest(t, srv, caller, projectID, missingUUID+action.suffix, action.method, nil)
+			require.Equal(t, http.StatusNotFound, missingRec.Code, missingRec.Body.String())
+			assert.Contains(t, missingRec.Body.String(), "schedule ID, not a name")
+			assert.Contains(t, missingRec.Body.String(), "hidden from agent lists")
+
+			nameRec := doAuthoredScheduleRequest(t, srv, caller, projectID, "some-hidden-schedule-name"+action.suffix, action.method, nil)
+			require.Equal(t, http.StatusNotFound, nameRec.Code, nameRec.Body.String())
+			assert.JSONEq(t, missingRec.Body.String(), nameRec.Body.String())
+
+			otherProjRec := doAuthoredScheduleRequest(t, srv, caller, projectID, otherSched.ID+action.suffix, action.method, nil)
+			require.Equal(t, http.StatusNotFound, otherProjRec.Code, otherProjRec.Body.String())
+			assert.JSONEq(t, missingRec.Body.String(), otherProjRec.Body.String(), "cross-project UUID must match missing UUID")
+			assert.NotContains(t, otherProjRec.Body.String(), otherSched.Name)
+		})
+	}
+
+	// User cross-project 404 parity on schedules
+	userMissing := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projectID+"/schedules/"+missingUUID, nil)
+	userOther := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+projectID+"/schedules/"+otherSched.ID, nil)
+	require.Equal(t, http.StatusNotFound, userMissing.Code)
+	assert.JSONEq(t, userMissing.Body.String(), userOther.Body.String())
+	assert.NotContains(t, userMissing.Body.String(), "hidden from agent lists")
+
+	for _, method := range []string{http.MethodGet, http.MethodDelete} {
+		t.Run("scheduled-event/"+method, func(t *testing.T) {
+			missingRec := doAgentScopeEventRequest(t, srv, caller, projectID, missingUUID, method)
+			require.Equal(t, http.StatusNotFound, missingRec.Code, missingRec.Body.String())
+			assert.Contains(t, missingRec.Body.String(), "event ID")
+			assert.Contains(t, missingRec.Body.String(), "hidden from agent lists")
+
+			otherProjRec := doAgentScopeEventRequest(t, srv, caller, projectID, otherEvt.ID, method)
+			require.Equal(t, http.StatusNotFound, otherProjRec.Code, otherProjRec.Body.String())
+			assert.JSONEq(t, missingRec.Body.String(), otherProjRec.Body.String(), "cross-project event UUID must match missing UUID")
+		})
+	}
 }

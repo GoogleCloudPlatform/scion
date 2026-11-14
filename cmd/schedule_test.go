@@ -15,12 +15,16 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -352,4 +356,286 @@ func TestPrintScheduleDetail_WakeAndInterrupt(t *testing.T) {
 		assert.NotContains(t, out, "Wake:")
 		assert.NotContains(t, out, "Interrupt:")
 	})
+}
+
+func newScheduleTestHubContext(t *testing.T, handler http.HandlerFunc, cred hubsync.CredentialKind) *HubContext {
+	t.Helper()
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+	return &HubContext{
+		Client:         client,
+		Endpoint:       srv.URL,
+		ProjectID:      "proj-1",
+		CredentialKind: cred,
+	}
+}
+
+func TestScheduleList_CallerScopeNotice(t *testing.T) {
+	origFormat, origListType, origStatus, origType := outputFormat, scheduleListType, scheduleStatus, scheduleType
+	t.Cleanup(func() {
+		outputFormat, scheduleListType, scheduleStatus, scheduleType = origFormat, origListType, origStatus, origType
+	})
+	scheduleListType, scheduleStatus, scheduleType = "", "", ""
+
+	sampleSched := hubclient.Schedule{
+		ID:        "8b4f6ec0-7d2a-45be-9199-265afce2148c",
+		Name:      "my-retro",
+		CronExpr:  "0 7 * * *",
+		EventType: "message",
+		Status:    "active",
+	}
+
+	t.Run("agent caller non-empty text and json", func(t *testing.T) {
+		hubCtx := newScheduleTestHubContext(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/api/v1/projects/proj-1/scheduled-events":
+				_ = json.NewEncoder(w).Encode(hubclient.ListScheduledEventsResponse{
+					Scope:      hubclient.ScheduleListScopeCaller,
+					Events:     []hubclient.ScheduledEvent{},
+					ServerTime: time.Now().UTC(),
+				})
+			case "/api/v1/projects/proj-1/schedules":
+				_ = json.NewEncoder(w).Encode(hubclient.ListSchedulesResponse{
+					Scope:      hubclient.ScheduleListScopeCaller,
+					Schedules:  []hubclient.Schedule{sampleSched},
+					TotalCount: 1,
+					ServerTime: time.Now().UTC(),
+				})
+			default:
+				http.NotFound(w, r)
+			}
+		}, hubsync.CredentialKindHubToken) // bearer token works via server Scope="caller" too
+
+		outputFormat = ""
+		out := captureStdout(t, func() {
+			require.NoError(t, scheduleListViaHub(context.Background(), hubCtx, "proj-1"))
+		})
+		assert.Contains(t, out, "held by this agent")
+		assert.Contains(t, out, "other project schedules are hidden")
+		assert.Contains(t, out, "RECURRING SCHEDULES")
+		assert.Contains(t, out, "my-retro")
+
+		outputFormat = "json"
+		jsonOut := captureStdout(t, func() {
+			require.NoError(t, scheduleListViaHub(context.Background(), hubCtx, "proj-1"))
+		})
+		var parsed map[string]any
+		require.NoError(t, json.Unmarshal([]byte(jsonOut), &parsed))
+		assert.Equal(t, hubclient.ScheduleListScopeCaller, parsed["scope"])
+	})
+
+	t.Run("agent caller empty list fallback via CredentialKindAgentToken", func(t *testing.T) {
+		hubCtx := newScheduleTestHubContext(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/api/v1/projects/proj-1/scheduled-events":
+				_ = json.NewEncoder(w).Encode(hubclient.ListScheduledEventsResponse{
+					Events:     []hubclient.ScheduledEvent{},
+					ServerTime: time.Now().UTC(),
+				})
+			case "/api/v1/projects/proj-1/schedules":
+				_ = json.NewEncoder(w).Encode(hubclient.ListSchedulesResponse{
+					Schedules:  []hubclient.Schedule{},
+					ServerTime: time.Now().UTC(),
+				})
+			default:
+				http.NotFound(w, r)
+			}
+		}, hubsync.CredentialKindAgentToken)
+
+		outputFormat = ""
+		out := captureStdout(t, func() {
+			require.NoError(t, scheduleListViaHub(context.Background(), hubCtx, "proj-1"))
+		})
+		assert.Contains(t, out, "No scheduled events or recurring schedules held by this agent")
+		assert.Contains(t, out, "other project schedules are hidden")
+	})
+
+	t.Run("user caller has no agent scope notice", func(t *testing.T) {
+		var scheds []hubclient.Schedule
+		hubCtx := newScheduleTestHubContext(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/api/v1/projects/proj-1/scheduled-events":
+				_ = json.NewEncoder(w).Encode(hubclient.ListScheduledEventsResponse{
+					Events:     []hubclient.ScheduledEvent{},
+					ServerTime: time.Now().UTC(),
+				})
+			case "/api/v1/projects/proj-1/schedules":
+				_ = json.NewEncoder(w).Encode(hubclient.ListSchedulesResponse{
+					Schedules:  scheds,
+					ServerTime: time.Now().UTC(),
+				})
+			default:
+				http.NotFound(w, r)
+			}
+		}, hubsync.CredentialKindOAuth)
+
+		outputFormat = ""
+		emptyOut := captureStdout(t, func() {
+			require.NoError(t, scheduleListViaHub(context.Background(), hubCtx, "proj-1"))
+		})
+		assert.Equal(t, "No scheduled events or recurring schedules found.\n", emptyOut)
+
+		scheds = []hubclient.Schedule{sampleSched}
+		nonEmptyOut := captureStdout(t, func() {
+			require.NoError(t, scheduleListViaHub(context.Background(), hubCtx, "proj-1"))
+		})
+		assert.NotContains(t, nonEmptyOut, "held by this agent")
+		assert.Contains(t, nonEmptyOut, "RECURRING SCHEDULES")
+
+		outputFormat = "json"
+		jsonOut := captureStdout(t, func() {
+			require.NoError(t, scheduleListViaHub(context.Background(), hubCtx, "proj-1"))
+		})
+		assert.NotContains(t, jsonOut, `"scope"`)
+	})
+}
+
+func TestScheduleGet_FullUUIDSurfaces403InsteadOf404(t *testing.T) {
+	origFormat := outputFormat
+	outputFormat = ""
+	t.Cleanup(func() { outputFormat = origFormat })
+
+	const fullUUID = "8b4f6ec0-7d2a-45be-9199-265afce2148c"
+	const forbiddenMsg = "Schedule or scheduled event is not visible to this agent (agent callers can only access schedules and events they hold)"
+
+	t.Run("event 404 + schedule 403 surfaces schedule 403", func(t *testing.T) {
+		hubCtx := newScheduleTestHubContext(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/api/v1/projects/proj-1/scheduled-events/" + fullUUID:
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"Scheduled event not found"}}`))
+			case "/api/v1/projects/proj-1/schedules/" + fullUUID:
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"error":{"code":"forbidden","message":"` + forbiddenMsg + `"}}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}, hubsync.CredentialKindAgentToken)
+
+		err := scheduleGetViaHub(context.Background(), hubCtx, "proj-1", fullUUID)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not visible to this agent")
+		assert.NotContains(t, err.Error(), "not found")
+	})
+
+	t.Run("event 403 + schedule 404 surfaces event 403", func(t *testing.T) {
+		hubCtx := newScheduleTestHubContext(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			switch r.URL.Path {
+			case "/api/v1/projects/proj-1/scheduled-events/" + fullUUID:
+				w.WriteHeader(http.StatusForbidden)
+				_, _ = w.Write([]byte(`{"error":{"code":"forbidden","message":"` + forbiddenMsg + `"}}`))
+			case "/api/v1/projects/proj-1/schedules/" + fullUUID:
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"Schedule not found"}}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}, hubsync.CredentialKindAgentToken)
+
+		err := scheduleGetViaHub(context.Background(), hubCtx, "proj-1", fullUUID)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not visible to this agent")
+		assert.NotContains(t, err.Error(), "not found")
+	})
+
+	t.Run("both 404 from older hub adds agent caller-scope hint", func(t *testing.T) {
+		hubCtx := newScheduleTestHubContext(t, func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"Resource not found"}}`))
+		}, hubsync.CredentialKindAgentToken)
+
+		err := scheduleGetViaHub(context.Background(), hubCtx, "proj-1", fullUUID)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "hidden from agent lists")
+	})
+}
+
+func TestResolveScheduleID_CallerScopeHintAndNonUUID36Chars(t *testing.T) {
+	// 36-char schedule name that is NOT a valid UUID.
+	const nonUUID36 = "process-improvement-lead-retro-night"
+	require.Len(t, nonUUID36, 36)
+
+	var listHits int
+	agentHubCtx := newScheduleTestHubContext(t, func(w http.ResponseWriter, r *http.Request) {
+		listHits++
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/projects/proj-1/scheduled-events":
+			_ = json.NewEncoder(w).Encode(hubclient.ListScheduledEventsResponse{
+				Scope:      hubclient.ScheduleListScopeCaller,
+				Events:     []hubclient.ScheduledEvent{},
+				ServerTime: time.Now().UTC(),
+			})
+		case "/api/v1/projects/proj-1/schedules":
+			_ = json.NewEncoder(w).Encode(hubclient.ListSchedulesResponse{
+				Scope:      hubclient.ScheduleListScopeCaller,
+				Schedules:  []hubclient.Schedule{},
+				ServerTime: time.Now().UTC(),
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}, hubsync.CredentialKindAgentToken)
+
+	_, _, err := resolveScheduleID(context.Background(), agentHubCtx, "proj-1", nonUUID36, "")
+	require.Error(t, err)
+	assert.Greater(t, listHits, 0, "36-char non-UUID must go through prefix lookup rather than bypassing as UUID")
+	assert.Contains(t, err.Error(), "held by this agent")
+	assert.Contains(t, err.Error(), "not visible")
+	assert.Contains(t, err.Error(), "ID or ID prefix")
+
+	for _, targetType := range []string{"schedule", "event"} {
+		_, _, err := resolveScheduleID(context.Background(), agentHubCtx, "proj-1", "8b4f6ec0", targetType)
+		require.Error(t, err, targetType)
+		assert.Contains(t, err.Error(), "held by this agent")
+	}
+
+	userHubCtx := newScheduleTestHubContext(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"events": []any{}, "schedules": []any{}, "serverTime": time.Now().UTC()})
+	}, hubsync.CredentialKindOAuth)
+
+	_, _, err = resolveScheduleID(context.Background(), userHubCtx, "proj-1", "8b4f6ec0", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `no schedule or event found with ID prefix "8b4f6ec0"`)
+	assert.NotContains(t, err.Error(), "held by this agent")
+}
+
+func TestWrapScheduleHubError(t *testing.T) {
+	agentCtx := &HubContext{CredentialKind: hubsync.CredentialKindAgentToken}
+	userCtx := &HubContext{CredentialKind: hubsync.CredentialKindOAuth}
+
+	// Older Hub generic 409 gets hint for agent, not for user, and newer Hub hint is not duplicated.
+	conflictOld := newScheduleTestHubContext(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":{"code":"conflict","message":"Resource already exists"}}`))
+	}, hubsync.CredentialKindAgentToken)
+	_, rawConflict := conflictOld.Client.Schedules("proj-1").Create(context.Background(), &hubclient.CreateScheduleRequest{Name: "x"})
+	require.Error(t, rawConflict)
+
+	wrappedAgent := wrapScheduleHubError(agentCtx, rawConflict)
+	assert.Contains(t, wrappedAgent.Error(), "scion schedule list")
+	assert.Contains(t, wrappedAgent.Error(), "not visible to this agent")
+
+	wrappedUser := wrapScheduleHubError(userCtx, rawConflict)
+	assert.NotContains(t, wrappedUser.Error(), "not visible to this agent")
+
+	// Specific scope/policy 403 (not bare "Insufficient permissions") is preserved without mislabeling.
+	scope403 := newScheduleTestHubContext(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":{"code":"forbidden","message":"missing required scope agent:create"}}`))
+	}, hubsync.CredentialKindAgentToken)
+	_, rawScope403 := scope403.Client.Schedules("proj-1").Resume(context.Background(), "8b4f6ec0-7d2a-45be-9199-265afce2148c")
+	require.Error(t, rawScope403)
+	assert.NotContains(t, wrapScheduleHubError(agentCtx, rawScope403).Error(), "agent callers can only access")
 }
