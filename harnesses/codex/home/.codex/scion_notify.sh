@@ -59,24 +59,6 @@ if [ -z "$event" ]; then
   event="$(json_get hook_event_name)"
 fi
 
-if [ "$event" = "agent-turn-complete" ]; then
-  autoc="${SCION_CODEX_NOTIFY_AUTO_COMPLETE-true}"
-  if [ "$autoc" = "false" ] || [ "$autoc" = "0" ] || [ "$autoc" = "no" ]; then
-    exit 0
-  fi
-
-  title="$(json_get title)"
-  if [ -z "$title" ]; then
-    title="$(json_get last-assistant-message)"
-  fi
-  if [ -z "$title" ]; then
-    title="Codex turn completed"
-  fi
-
-  sciontool status task_completed "$title" >/dev/null 2>&1 || true
-  exit 0
-fi
-
 case "$event" in
   UserPromptSubmit|PreToolUse|PostToolUse|Stop|SubagentStop|SessionStart|SessionEnd)
     printf '%s' "$payload" | sciontool hook --dialect=codex >/dev/null 2>&1 || true

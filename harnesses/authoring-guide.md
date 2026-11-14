@@ -761,10 +761,10 @@ Three wiring patterns, by how configurable your tool is:
 1. **Static config in `home/`** — claude and gemini-cli ship hook wiring in
    their seeded settings files, piping every lifecycle event to
    `sciontool hook --dialect=...` ([claude/home/.claude/settings.json](claude/home/.claude/settings.json)).
-2. **Notify/wrapper script in `home/`** — codex routes both its legacy
-   `notify` callback and its hooks through
-   [`scion_notify.sh`](codex/home/.codex/scion_notify.sh), which also turns
-   turn-completion into `sciontool status task_completed`.
+2. **Wrapper script in `home/`** — codex routes its registered hooks through
+   [`scion_notify.sh`](codex/home/.codex/scion_notify.sh), which filters the
+   event name and forwards known lifecycle payloads to
+   `sciontool hook --dialect=codex`.
 3. **Generated at provision time** — when hook config must contain runtime
    values or live in the workspace, write it from provision.py (antigravity
    generates `/workspace/.agents/hooks.json` wiring events through `jq` into
@@ -809,8 +809,9 @@ Your `capabilities.limits` claims must match this wiring: `max_turns` needs
 `prompt-submit`, `max_model_calls` needs model start/end events.
 
 Agent-side status signaling (`sciontool status task_completed|blocked|ask_user`)
-is usually driven by agent instructions/templates, but a hook script may emit
-it directly where the tool has a reliable completion callback (codex).
+is usually driven by agent instructions/templates; a hook or bridge script may
+emit `task_completed` directly only from a run-settled callback (`pi`), never
+from a per-turn boundary.
 
 ## Dockerfile and image pipeline
 

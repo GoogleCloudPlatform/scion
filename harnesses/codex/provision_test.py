@@ -19,6 +19,7 @@ import json
 import os
 import importlib.util
 import re
+import subprocess
 import tempfile
 import tomllib
 import unittest
@@ -1580,6 +1581,76 @@ class CodexShippedHookConfigTest(unittest.TestCase):
                 with open(config_path, "rb") as f:
                     data = tomllib.load(f)
         self.assertEqual(data["hooks"], self._load_config()["hooks"])
+
+    def test_no_legacy_notify_or_auto_complete_wired(self) -> None:
+        # ptone/scion#7856: config.toml must not wire legacy `notify` alongside
+        # hooks.Stop, and config.yaml must not export SCION_CODEX_NOTIFY_AUTO_COMPLETE.
+        self.assertNotIn("notify", self._load_config())
+        bundle_cfg_path = os.path.join(self.HARNESS_DIR, "config.yaml")
+        with open(bundle_cfg_path, encoding="utf-8") as f:
+            bundle_cfg_text = f.read()
+        self.assertNotIn("SCION_CODEX_NOTIFY_AUTO_COMPLETE", bundle_cfg_text)
+
+    def test_scion_notify_ignores_turn_complete_and_forwards_stop_once(self) -> None:
+        # Even if an un-upgraded config.toml still calls scion_notify.sh via
+        # `notify`, agent-turn-complete must neither emit task_completed nor
+        # forward to `sciontool hook` (which would double-count max_turns).
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = os.path.join(tmp, "bin")
+            os.makedirs(bin_dir)
+            calls_log = os.path.join(tmp, "calls.jsonl")
+            shim_path = os.path.join(bin_dir, "sciontool")
+            with open(shim_path, "w", encoding="utf-8") as f:
+                f.write(
+                    "#!/usr/bin/env python3\n"
+                    "import json, os, sys\n"
+                    "with open(os.environ['CALLS_LOG'], 'a', encoding='utf-8') as out:\n"
+                    "    out.write(json.dumps({'argv': sys.argv[1:], 'stdin': sys.stdin.read()}) + '\\n')\n"
+                )
+            os.chmod(shim_path, 0o755)
+            env = dict(os.environ)
+            env["PATH"] = bin_dir + os.pathsep + env.get("PATH", "")
+            env["CALLS_LOG"] = calls_log
+
+            turn_complete = json.dumps(
+                {
+                    "type": "agent-turn-complete",
+                    "title": "Turn 1",
+                    "last-assistant-message": "Still investigating",
+                }
+            )
+            subprocess.run(
+                ["sh", self.NOTIFY_PATH, turn_complete],
+                input="",
+                text=True,
+                env=env,
+                check=True,
+            )
+            subprocess.run(
+                ["sh", self.NOTIFY_PATH],
+                input=turn_complete,
+                text=True,
+                env=env,
+                check=True,
+            )
+            self.assertFalse(
+                os.path.exists(calls_log),
+                "scion_notify.sh must ignore agent-turn-complete so it neither marks COMPLETED nor double-counts max_turns",
+            )
+
+            stop_payload = json.dumps({"hook_event_name": "Stop", "session_id": "s-1"})
+            subprocess.run(
+                ["sh", self.NOTIFY_PATH],
+                input=stop_payload,
+                text=True,
+                env=env,
+                check=True,
+            )
+            with open(calls_log, encoding="utf-8") as f:
+                calls = [json.loads(line) for line in f if line.strip()]
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0]["argv"], ["hook", "--dialect=codex"])
+            self.assertEqual(json.loads(calls[0]["stdin"]), {"hook_event_name": "Stop", "session_id": "s-1"})
 
 
 class _FakeCodexCLI:
