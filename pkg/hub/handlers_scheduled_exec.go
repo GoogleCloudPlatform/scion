@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -118,7 +119,19 @@ func (s *Server) createScheduledExecEvent(w http.ResponseWriter, r *http.Request
 		InitiatorAttribution: newInitiatorAttribution(r.Context()),
 		AuthorityCeiling:     ceiling,
 	}
-	if err := s.scheduler.ScheduleEvent(r.Context(), evt); err != nil {
+	// The quota is checked again atomically with the insert, under the
+	// per-project lock (R4): concurrent authors on any replica cannot
+	// exceed it.
+	targetID := p.AgentID
+	if err := s.scheduler.ScheduleEventVia(r.Context(), evt, func(ctx context.Context, e *store.ScheduledEvent) error {
+		return s.store.CreateScheduledEventChecked(ctx, e, scheduledExecMaxPerProject+1, func(pending []store.ScheduledEvent) error {
+			return scheduledExecQuotaCheck(pending, targetID)
+		})
+	}); err != nil {
+		if errors.Is(err, errScheduledExecQuota) {
+			writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded, err.Error(), nil)
+			return
+		}
 		writeErrorFromErr(w, err, "")
 		return
 	}

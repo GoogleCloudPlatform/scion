@@ -152,10 +152,12 @@ func (s *Server) authorizeScheduledExecAuthoring(w http.ResponseWriter, r *http.
 // errScheduledExecQuota is the error of an authoring over the exec limits.
 var errScheduledExecQuota = errors.New("exec schedule quota exceeded")
 
-// checkScheduledExecQuota counts the active exec work of projectID (pending
-// one-shot exec events; recurring exec schedules join in Phase 2,
-// ptone/scion#7884) and refuses another when the project, or targetID,
-// is at its limit.
+// checkScheduledExecQuota is the early quota check at authoring: it counts
+// the active exec work of projectID (pending one-shot exec events;
+// recurring exec schedules join in Phase 2, ptone/scion#7884) and refuses
+// another when the project, or targetID, is at its limit. The binding check
+// is repeated atomically with the insert (createScheduledExecEvent,
+// CreateScheduledEventChecked), so concurrent authors cannot exceed it.
 func (s *Server) checkScheduledExecQuota(ctx context.Context, projectID, targetID string) error {
 	result, err := s.store.ListScheduledEvents(ctx, store.ScheduledEventFilter{
 		ProjectID: projectID,
@@ -165,11 +167,17 @@ func (s *Server) checkScheduledExecQuota(ctx context.Context, projectID, targetI
 	if err != nil {
 		return err
 	}
-	if len(result.Items) >= scheduledExecMaxPerProject {
+	return scheduledExecQuotaCheck(result.Items, targetID)
+}
+
+// scheduledExecQuotaCheck refuses another exec event on targetID given the
+// project's pending exec events.
+func scheduledExecQuotaCheck(pending []store.ScheduledEvent, targetID string) error {
+	if len(pending) >= scheduledExecMaxPerProject {
 		return fmt.Errorf("%w: at most %d active exec schedules per project", errScheduledExecQuota, scheduledExecMaxPerProject)
 	}
 	perTarget := 0
-	for _, evt := range result.Items {
+	for _, evt := range pending {
 		p, err := decodeScheduledExecPayload(evt.Payload)
 		if err != nil || p.AgentID == targetID {
 			// A stored row that no longer decodes counts against the
