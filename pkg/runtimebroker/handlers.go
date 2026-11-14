@@ -4261,6 +4261,26 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		}
 	}
 
+	// The runtime this start runs in may not be the one the agent's
+	// container runs in (its profile's runtime or namespace was changed,
+	// ptone/scion#4722). When it holds no container for the agent, stop one
+	// left in another registered runtime first, as restart does, or refuse
+	// the start, so the agent never runs in two runtimes at once. Last of
+	// the checks, so a start refused above stops nothing; before any write.
+	// A flat instance has one runtime target.
+	if !s.isFlat() && mgr != nil {
+		own := &agentOwnRuntime{mgr: mgr, rt: res.Runtime, record: res.Record, profile: runtimeOpts.Profile}
+		var refusal *previousRuntimeRefusal
+		if err := s.stopInPreviousRuntime(ctx, own, id, projectID); errors.As(err, &refusal) {
+			if s.refuseCancelledStart(w, span, ss, id, projectID, trackedRunID) {
+				return
+			}
+			span.SetStatus(codes.Error, refusal.msg)
+			writeError(w, http.StatusConflict, ErrCodeConflict, refusal.msg, nil)
+			return
+		}
+	}
+
 	// Apply updated InlineConfig to scion-agent.json before starting.
 	if startReq.InlineConfig != nil && opts.ProjectPath != "" {
 		s.applyInlineConfigUpdate(ctx, id, opts.ProjectPath, startReq.InlineConfig, startReq.SharedWorkspace)
@@ -5290,41 +5310,11 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		// now, which can differ from the one it is running in (the
 		// profile's runtime or namespace was changed). If the agent's own
 		// runtime holds no container for it, search the other registered
-		// runtimes the way delete does (collectAgentCandidates, with its
-		// project and legacy-path checks), so the stop below reaches a
+		// runtimes (previousRuntimeMatch), so the stop below reaches a
 		// container left in a previous runtime instead of leaving it running
-		// beside the new one. Each runtime is listed separately: one that
-		// cannot be listed is logged and skipped, and the others are still
-		// searched. More than one container found is ambiguous and fails
-		// the restart rather than stopping a guess.
-		cands, _ := s.collectAgentCandidates(ctx, s.otherManagers(ctx, own), id, projectID,
+		// beside the new one.
+		match, matchErr = s.previousRuntimeMatch(ctx, own, id, projectID, match, matchErr,
 			"Restart: runtime list failed while searching the other runtimes; skipped")
-		var containers []agentCandidate
-		for _, c := range cands {
-			if c.entry.ContainerID != "" {
-				containers = append(containers, c)
-			}
-		}
-		switch len(containers) {
-		case 0:
-			// No container anywhere. An entry for the agent's files found
-			// elsewhere still names the agent's project, which the start
-			// below reads its saved profile from; nothing is stopped for it.
-			if !match.matched && len(cands) == 1 {
-				c := cands[0]
-				// Paired through runtimeOfManager, so no record: the
-				// zero value.
-				match = agentMatch{manager: c.mgr, runtime: s.runtimeOfManager(c.mgr), entry: c.entry, matched: true}
-				matchErr = &agentNotFoundError{slug: strings.ToLower(id)}
-			}
-		case 1:
-			c := containers[0]
-			if m, err := s.otherRuntimeMatch(strings.ToLower(id), c); err == nil {
-				match, matchErr = m, nil
-			}
-		default:
-			match, matchErr = agentMatch{}, fmt.Errorf("agent '%s' is ambiguous: %d containers match in other runtimes", id, len(containers))
-		}
 	}
 	if match.matched {
 		if match.entry.Name != "" {
