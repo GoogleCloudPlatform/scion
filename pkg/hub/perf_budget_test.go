@@ -165,9 +165,10 @@ var perfBudgets = []perfBudget{
 		// added (default-claude, ptone/scion#4933 U4). 14871: measured with
 		// main 8c666466 (14817) plus the "unlimitedUnsupported":true flags on
 		// config.max_turns and config.max_model_calls (+54 bytes measured,
-		// ptone/scion#5605).
+		// ptone/scion#5605). 15068: measured with the TX config.persistence
+		// editability row (ptone/scion#7953).
 		// Store calls: the invited-user account-status check reads the user record per decision; this route has no request-local authz memo (ptone/scion#3684).
-		baseline: perfBudgetCounts{authzStoreCalls: 20, decisions: 10, dbReads: 0, bytes: 14871},
+		baseline: perfBudgetCounts{authzStoreCalls: 20, decisions: 10, dbReads: 0, bytes: 15068},
 	},
 	{
 		// Store calls: per-request sender standing (upstream #3101).
@@ -185,9 +186,10 @@ var perfBudgets = []perfBudget{
 		// added (default-claude, ptone/scion#4933 U4). 14871: measured with
 		// main 8c666466 (14817) plus the "unlimitedUnsupported":true flags on
 		// config.max_turns and config.max_model_calls (+54 bytes measured,
-		// ptone/scion#5605).
+		// ptone/scion#5605). 15068: measured with the TX config.persistence
+		// editability row (ptone/scion#7953).
 		// Store calls: the invited-user account-status check reads the user record per decision; this route has no request-local authz memo (ptone/scion#3684).
-		baseline: perfBudgetCounts{authzStoreCalls: 19, decisions: 10, dbReads: 0, bytes: 14871},
+		baseline: perfBudgetCounts{authzStoreCalls: 19, decisions: 10, dbReads: 0, bytes: 15068},
 	},
 }
 
