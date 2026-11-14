@@ -516,6 +516,9 @@ func (s *Server) registerEmbeddedFlat(ctx context.Context, id *brokeridentity.Id
 			b.Endpoint = o.Endpoint
 			b.AutoProvide = o.AutoProvide
 			b.LastHeartbeat = time.Now()
+			if b.Health != nil && b.Health.Checks["activation"] == api.BrokerHealthUnavailable {
+				b.Health = nil
+			}
 			// The embedded broker runs in the hub binary, so its version is
 			// the hub's build token, written on every registration.
 			b.Version = hubBuildToken()
@@ -543,6 +546,15 @@ func (s *Server) registerEmbeddedFlat(ctx context.Context, id *brokeridentity.Id
 		s.recordHostObservation(ctx, row.ID, *o.HostIdentity)
 		if stored, err := s.store.GetRuntimeBroker(ctx, row.ID); err == nil {
 			row = stored
+		}
+	}
+	if existing != nil {
+		if providers, err := s.store.GetBrokerProjects(ctx, row.ID); err == nil {
+			for _, provider := range providers {
+				if provider.Status != store.BrokerStatusOnline {
+					_ = s.store.UpdateProviderStatus(ctx, provider.ProjectID, row.ID, store.BrokerStatusOnline)
+				}
+			}
 		}
 	}
 	return row, nil
@@ -1053,4 +1065,52 @@ func (s *Server) settleRuntimeTargetRefusal(ctx context.Context, agent *store.Ag
 		return
 	}
 	agent.Message = msg
+}
+
+// MarkEmbeddedFlatRuntimeBrokerOffline marks a previously registered co-located
+// flat Runtime Broker row offline, disconnected, and unhealthy when this host
+// owns the instance and refused activation on startup (ptone/scion#7820).
+// Non-existent, legacy, or non-embedded rows are ignored.
+func (s *Server) MarkEmbeddedFlatRuntimeBrokerOffline(ctx context.Context, brokerID string) error {
+	if s.store == nil || brokerID == "" {
+		return nil
+	}
+	existing, err := s.store.GetRuntimeBroker(ctx, brokerID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	if !existing.IsFlat() || existing.Labels[brokerownership.LabelBrokerRole] != brokerownership.BrokerRoleEmbedded {
+		return nil
+	}
+	existing.Status = store.BrokerStatusOffline
+	existing.ConnectionState = "disconnected"
+	existing.ConnectedHubID = nil
+	existing.ConnectedSessionID = nil
+	existing.ConnectedAt = nil
+	existing.Health = &api.BrokerHealthReport{
+		Status: api.BrokerHealthUnhealthy,
+		Checks: map[string]string{"activation": api.BrokerHealthUnavailable},
+	}
+	if err := s.store.UpdateRuntimeBroker(ctx, existing); err != nil {
+		return err
+	}
+	providers, err := s.store.GetBrokerProjects(ctx, brokerID)
+	if err != nil {
+		slog.Warn("Failed to query broker projects on flat instance refusal", "brokerID", brokerID, "error", err)
+		return nil
+	}
+	projectIDs := make([]string, 0, len(providers))
+	for _, provider := range providers {
+		projectIDs = append(projectIDs, provider.ProjectID)
+		if uerr := s.store.UpdateProviderStatus(ctx, provider.ProjectID, brokerID, store.BrokerStatusOffline); uerr != nil {
+			slog.Warn("Failed to mark project provider offline on flat instance refusal", "brokerID", brokerID, "project_id", provider.ProjectID, "error", uerr)
+		}
+	}
+	if s.events != nil {
+		s.events.PublishBrokerDisconnected(ctx, brokerID, projectIDs)
+	}
+	return nil
 }

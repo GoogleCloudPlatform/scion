@@ -19,7 +19,9 @@ package hub
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -336,5 +338,81 @@ func TestBrokerHeartbeatTimeoutHandler_RefreshErrorDoesNotBlockSweep(t *testing.
 	}
 	if !strings.Contains(logs.String(), "failed to refresh stateless co-located broker heartbeat") {
 		t.Errorf("refresh failure not logged; logs:\n%s", logs.String())
+	}
+}
+
+// Reaping a stale broker leaves status, connectionState and health consistent
+// on both GET /api/v1/runtime-brokers/{id} and GET /api/v1/runtime-brokers
+// (ptone/scion#7820): an offline broker never reports connectionState
+// "connected" or health.status "healthy".
+func TestBrokerHeartbeatTimeoutHandler_ReapedBrokerConsistentOnAPI(t *testing.T) {
+	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
+	ctx := context.Background()
+
+	stale := &store.RuntimeBroker{
+		ID:              api.NewUUID(),
+		Name:            "stale-flat-k8s",
+		Slug:            "stale-flat-k8s",
+		Status:          store.BrokerStatusOnline,
+		ConnectionState: "connected",
+		LastHeartbeat:   time.Now().Add(-10 * time.Minute),
+		RuntimeTarget:   &api.RuntimeTargetDescriptor{ID: api.NewUUID(), Type: "kubernetes", DisplayName: "k8s"},
+		Health:          &api.BrokerHealthReport{Status: api.BrokerHealthHealthy, Checks: map[string]string{"runtime": api.BrokerHealthAvailable}},
+	}
+	if err := s.CreateRuntimeBroker(ctx, stale); err != nil {
+		t.Fatalf("failed to create stale broker: %v", err)
+	}
+
+	srv.brokerHeartbeatTimeoutHandler()(ctx)
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/runtime-brokers/"+stale.ID, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/runtime-brokers/%s = %d: %s", stale.ID, rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Status          string                  `json:"status"`
+		ConnectionState string                  `json:"connectionState"`
+		Health          *api.BrokerHealthReport `json:"health"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode broker response: %v", err)
+	}
+	if got.Status != store.BrokerStatusOffline {
+		t.Errorf("status = %q, want %q", got.Status, store.BrokerStatusOffline)
+	}
+	if got.ConnectionState != "disconnected" {
+		t.Errorf("connectionState = %q, want %q", got.ConnectionState, "disconnected")
+	}
+	if got.Health == nil || got.Health.Status == api.BrokerHealthHealthy {
+		t.Errorf("health = %+v, want non-healthy report when offline", got.Health)
+	}
+
+	listRec := doRequest(t, srv, http.MethodGet, "/api/v1/runtime-brokers", nil)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("GET /api/v1/runtime-brokers = %d: %s", listRec.Code, listRec.Body.String())
+	}
+	var list struct {
+		Brokers []struct {
+			ID              string                  `json:"id"`
+			Status          string                  `json:"status"`
+			ConnectionState string                  `json:"connectionState"`
+			Health          *api.BrokerHealthReport `json:"health"`
+		} `json:"brokers"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode broker list: %v", err)
+	}
+	found := false
+	for _, b := range list.Brokers {
+		if b.ID == stale.ID {
+			found = true
+			if b.Status != store.BrokerStatusOffline || b.ConnectionState != "disconnected" || b.Health == nil || b.Health.Status == api.BrokerHealthHealthy {
+				t.Errorf("list item = %+v, want offline + disconnected + non-healthy", b)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("stale broker %s missing from list", stale.ID)
 	}
 }

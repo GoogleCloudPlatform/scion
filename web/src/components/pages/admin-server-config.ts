@@ -7111,6 +7111,9 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   private updateBrokerInstanceTargetValue(idx: number, field: string, value: unknown): void {
+    if (field === 'namespace' && this.isLoadedBrokerInstanceRow(idx)) {
+      return;
+    }
     const next = this.brokerInstances.map((inst, i) => {
       if (i !== idx) return inst;
       const rt: V1RuntimeTargetConfig = { ...(inst.runtime_target ?? { type: 'docker' }) };
@@ -7364,6 +7367,9 @@ export class ScionPageAdminServerConfig extends LitElement {
     const rowId = this.brokerInstanceRowIds[idx] ?? idx;
     const isSavedInstance = this.loadedBrokerInstanceRowIds.has(rowId);
     const identityLocked = readOnly || isSavedInstance;
+    const loadedRt = isSavedInstance
+      ? this.loadedBrokerInstances.find((x) => x.key === inst.key)?.runtime_target
+      : undefined;
     const rt = inst.runtime_target ?? { type: 'docker' };
     const rtType = rt.type || 'docker';
     const isK8s = isKubernetesRuntimeType(rtType);
@@ -7483,9 +7489,20 @@ export class ScionPageAdminServerConfig extends LitElement {
                       );
                     }}
                   ></sl-input>
-                  <span class="hint"
-                    >Kubernetes context from kubeconfig (leave empty for current/in-cluster).</span
-                  >
+                  <span class="hint">
+                    ${isSavedInstance
+                      ? 'Kubernetes context from kubeconfig (must resolve to the same cluster UID; add a new instance key to target another cluster).'
+                      : 'Kubernetes context from kubeconfig (leave empty for current/in-cluster).'}
+                  </span>
+                  ${isSavedInstance && (rt.context || '') !== (loadedRt?.context || '')
+                    ? html`<span
+                        class="hint field-warning"
+                        data-broker-instance-identity-warning="context"
+                        >Pointing context at a different cluster changes target identity and causes
+                        startup refusal; add a new instance key unless this context resolves to the
+                        same cluster UID.</span
+                      >`
+                    : nothing}
                 </div>
                 <div class="form-field">
                   <label>Namespace</label>
@@ -7493,7 +7510,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                     data-instance-field="namespace"
                     value=${rt.namespace || ''}
                     placeholder="e.g. agents"
-                    ?disabled=${readOnly}
+                    ?disabled=${identityLocked}
                     @sl-input=${(e: Event) => {
                       this.updateBrokerInstanceTargetValue(
                         idx,
@@ -7502,7 +7519,11 @@ export class ScionPageAdminServerConfig extends LitElement {
                       );
                     }}
                   ></sl-input>
-                  <span class="hint">Kubernetes namespace for agent pods.</span>
+                  <span class="hint">
+                    ${isSavedInstance
+                      ? 'Fixed once saved (namespace is part of target identity; add a new instance key to target another namespace).'
+                      : 'Kubernetes namespace for agent pods.'}
+                  </span>
                 </div>
               `
             : nothing}

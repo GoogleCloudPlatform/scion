@@ -303,7 +303,16 @@ export class ScionPageBrokersArea extends LitElement {
   private renderHealth(broker: RuntimeBroker): TemplateResult {
     const h = this.health?.get(broker.id);
     if (!h) return html`<span class="meta-text">–</span>`;
-    if (!healthProblem(h)) return html`<span class="health-ok">ok</span>`;
+    if (!healthProblem(h)) {
+      if (broker.status !== 'online') {
+        return html`<span
+          class="meta-text"
+          title="Broker is ${broker.status}; last reported: ${h.status || 'healthy'}"
+          >–</span
+        >`;
+      }
+      return html`<span class="health-ok">ok</span>`;
+    }
     const failing = failingChecks(h);
     const text = failing.length > 0 ? String(failing.length) : h.status || 'problem';
     return html`<span class="health-warn" title=${failing.join(', ') || (h.status ?? '')}

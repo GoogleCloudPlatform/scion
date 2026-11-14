@@ -1573,13 +1573,19 @@ func (s *ProjectStore) UpdateRuntimeBrokerHeartbeat(ctx context.Context, id stri
 		if err != nil {
 			return mapError(err)
 		}
-		affected, err := s.client.RuntimeBroker.Update().
+		upd := s.client.RuntimeBroker.Update().
 			Where(runtimebroker.IDEQ(uid), runtimebroker.LockVersionEQ(cur.LockVersion)).
 			SetStatus(status).
 			SetLastHeartbeat(now).
 			SetUpdated(now).
-			AddLockVersion(1).
-			Save(ctx)
+			AddLockVersion(1)
+		switch status {
+		case store.BrokerStatusOnline:
+			upd.SetConnectionState("connected")
+		case store.BrokerStatusOffline:
+			upd.SetConnectionState("disconnected")
+		}
+		affected, err := upd.Save(ctx)
 		if err != nil {
 			return mapError(err)
 		}
@@ -1614,6 +1620,7 @@ func (s *ProjectStore) ClaimRuntimeBrokerConnection(ctx context.Context, brokerI
 			SetConnectedSessionID(sessionID).
 			SetConnectedAt(now).
 			SetStatus(store.BrokerStatusOnline).
+			SetConnectionState("connected").
 			SetLastHeartbeat(now).
 			SetUpdated(now).
 			AddLockVersion(1).
@@ -1700,6 +1707,7 @@ func (s *ProjectStore) ReleaseAndMarkBrokerOffline(ctx context.Context, brokerID
 			ClearConnectedSessionID().
 			ClearConnectedAt().
 			SetStatus(store.BrokerStatusOffline).
+			SetConnectionState("disconnected").
 			SetLastHeartbeat(now).
 			SetUpdated(now).
 			AddLockVersion(1).
@@ -1714,9 +1722,10 @@ func (s *ProjectStore) ReleaseAndMarkBrokerOffline(ctx context.Context, brokerID
 	return false, store.ErrVersionConflict
 }
 
-// MarkBrokerOffline sets a broker's status to offline. Used during startup
-// repair to ensure stale broker records that were never properly shut down are
-// explicitly marked offline. Uses the version-CAS loop for safe concurrency.
+// MarkBrokerOffline sets a broker's status to offline and marks its project
+// contributor records offline atomically. Used during startup repair to ensure
+// stale broker records that were never properly shut down are explicitly marked
+// offline. Uses the version-CAS loop for safe concurrency.
 // Returns ErrNotFound if the broker doesn't exist.
 func (s *ProjectStore) MarkBrokerOffline(ctx context.Context, brokerID string) error {
 	uid, err := parseUUID(brokerID)
@@ -1726,28 +1735,73 @@ func (s *ProjectStore) MarkBrokerOffline(ctx context.Context, brokerID string) e
 
 	now := time.Now()
 	for attempt := 0; attempt < maxCASRetries; attempt++ {
-		cur, err := s.client.RuntimeBroker.Get(ctx, uid)
+		done, err := s.markBrokerOfflineAttempt(ctx, uid, now)
 		if err != nil {
-			return mapError(err)
+			return err
 		}
-		// Already offline — nothing to do.
-		if cur.Status == store.BrokerStatusOffline {
-			return nil
-		}
-		affected, err := s.client.RuntimeBroker.Update().
-			Where(runtimebroker.IDEQ(uid), runtimebroker.LockVersionEQ(cur.LockVersion)).
-			SetStatus(store.BrokerStatusOffline).
-			SetUpdated(now).
-			AddLockVersion(1).
-			Save(ctx)
-		if err != nil {
-			return mapError(err)
-		}
-		if affected == 1 {
+		if done {
 			return nil
 		}
 	}
 	return store.ErrVersionConflict
+}
+
+func (s *ProjectStore) markBrokerOfflineAttempt(ctx context.Context, uid uuid.UUID, now time.Time) (bool, error) {
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		if !errors.Is(err, ent.ErrTxStarted) {
+			return false, mapError(err)
+		}
+		// Already inside store.WithTx: run on the caller's transaction.
+		return markBrokerOfflineOnClient(ctx, s.client, uid, now)
+	}
+	defer func() { _ = tx.Rollback() }()
+	done, err := markBrokerOfflineOnClient(ctx, tx.Client(), uid, now)
+	if err != nil || !done {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, mapError(err)
+	}
+	return true, nil
+}
+
+func markBrokerOfflineOnClient(ctx context.Context, client *ent.Client, uid uuid.UUID, now time.Time) (bool, error) {
+	cur, err := client.RuntimeBroker.Get(ctx, uid)
+	if err != nil {
+		return false, mapError(err)
+	}
+	alreadyOffline := cur.Status == store.BrokerStatusOffline && cur.ConnectionState == "disconnected" &&
+		cur.ConnectedHubID == nil && cur.ConnectedSessionID == nil && cur.ConnectedAt == nil
+	if !alreadyOffline {
+		affected, err := client.RuntimeBroker.Update().
+			Where(runtimebroker.IDEQ(uid), runtimebroker.LockVersionEQ(cur.LockVersion)).
+			SetStatus(store.BrokerStatusOffline).
+			SetConnectionState("disconnected").
+			ClearConnectedHubID().
+			ClearConnectedSessionID().
+			ClearConnectedAt().
+			SetUpdated(now).
+			AddLockVersion(1).
+			Save(ctx)
+		if err != nil {
+			return false, mapError(err)
+		}
+		if affected != 1 {
+			return false, nil
+		}
+	}
+	if _, err := client.ProjectContributor.Update().
+		Where(
+			projectcontributor.BrokerIDEQ(uid),
+			projectcontributor.StatusNEQ(store.BrokerStatusOffline),
+		).
+		SetStatus(store.BrokerStatusOffline).
+		SetLastSeen(now).
+		Save(ctx); err != nil {
+		return false, mapError(err)
+	}
+	return true, nil
 }
 
 // ReapStaleBrokerAffinity clears affinity (connected_hub_id/connected_session_id/
@@ -1791,6 +1845,7 @@ func (s *ProjectStore) MarkStaleBrokersOffline(ctx context.Context, threshold ti
 		affected, err := s.client.RuntimeBroker.Update().
 			Where(runtimebroker.IDEQ(b.ID), runtimebroker.LockVersionEQ(b.LockVersion)).
 			SetStatus(store.BrokerStatusOffline).
+			SetConnectionState("disconnected").
 			ClearConnectedHubID().
 			ClearConnectedSessionID().
 			ClearConnectedAt().

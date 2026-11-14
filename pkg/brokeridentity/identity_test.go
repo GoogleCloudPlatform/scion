@@ -291,3 +291,30 @@ func TestIdentity_MissingErrorMessage(t *testing.T) {
 		t.Fatalf("frozen message not used: %v", err)
 	}
 }
+
+func TestReadExisting_ReadsPersistedWithoutMinting(t *testing.T) {
+	missingDir := filepath.Join(t.TempDir(), "never-created")
+	got, err := ReadExisting(missingDir, "local-docker")
+	if !errors.Is(err, os.ErrNotExist) || got != nil {
+		t.Fatalf("missing dir: got (%+v, %v), want (nil, os.ErrNotExist)", got, err)
+	}
+	if _, statErr := os.Stat(missingDir); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("ReadExisting must not create missing directory: %v", statErr)
+	}
+
+	dir := instanceDir(t)
+	created, err := LoadOrCreate(dir, "local-docker", TargetTypeDocker, dockerScope("D1", ""), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readBack, err := ReadExisting(dir, "local-docker")
+	if err != nil {
+		t.Fatalf("ReadExisting on persisted identity: %v", err)
+	}
+	if readBack.RuntimeBrokerID != created.RuntimeBrokerID || readBack.RuntimeTarget.ID != created.RuntimeTarget.ID {
+		t.Fatalf("ReadExisting mismatch: got %+v, want %+v", readBack, created)
+	}
+	if _, err := ReadExisting(dir, "wrong-key"); !errors.Is(err, ErrIdentityKeyMismatch) {
+		t.Fatalf("wrong key: got %v, want ErrIdentityKeyMismatch", err)
+	}
+}

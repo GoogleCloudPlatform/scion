@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"sort"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -186,6 +187,16 @@ func dropTopLevelMember(rawBody []byte, key string) []byte {
 // stored before the bound existed.
 func brokerForDisplay(b store.RuntimeBroker) store.RuntimeBroker {
 	b.Version = brokerVersionToken(b.Version)
+	if b.Status != store.BrokerStatusOnline {
+		if b.Status == store.BrokerStatusOffline {
+			b.ConnectionState = "disconnected"
+		}
+		if b.Health != nil && b.Health.Status == api.BrokerHealthHealthy {
+			h := *b.Health
+			h.Status = api.BrokerHealthUnhealthy
+			b.Health = &h
+		}
+	}
 	if b.Capabilities == nil || b.Capabilities.NodeImageRegistry == "" {
 		return b
 	}
