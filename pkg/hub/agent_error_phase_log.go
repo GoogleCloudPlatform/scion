@@ -87,6 +87,8 @@ func agentErrorStage(message string) (stage, hook, exitStatus string) {
 // re-read after a status write, is in phase error and before, the agent
 // read before it, was not. A write that confirms an error phase already
 // stored (every later heartbeat of the exited container) logs nothing.
+// Every free-text field the agent or its runtime supplies (message, hook,
+// container_status) is logged through logging.SanitizeText.
 //
 // Without it a pre-start hook or harness provisioner failure reached the
 // hub only as the agent's stored phase and message (ptone/scion#7927). The
@@ -113,7 +115,7 @@ func (s *Server) logAgentErrorPhaseEntry(before, after *store.Agent, source stri
 		"failure_stage", stage,
 	}
 	if hook != "" {
-		attrs = append(attrs, "hook", hook)
+		attrs = append(attrs, "hook", logging.SanitizeText(hook))
 	}
 	if exitStatus != "" {
 		attrs = append(attrs, "hook_exit_status", exitStatus)
@@ -125,7 +127,7 @@ func (s *Server) logAgentErrorPhaseEntry(before, after *store.Agent, source stri
 		attrs = append(attrs, "exit_reason", after.ExitReason)
 	}
 	if after.ContainerStatus != "" {
-		attrs = append(attrs, "container_status", after.ContainerStatus)
+		attrs = append(attrs, "container_status", logging.SanitizeText(after.ContainerStatus))
 	}
 	attrs = append(attrs, "message", logging.SanitizeText(after.Message))
 	s.agentLifecycleLog.Warn(logAgentEnteredErrorPhase, attrs...)

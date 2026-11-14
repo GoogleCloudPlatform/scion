@@ -127,3 +127,23 @@ func TestLogAgentErrorPhaseEntry_BoundsMessage(t *testing.T) {
 	assert.Less(t, len(msg), len(long))
 	assert.LessOrEqual(t, len(msg), 2*1024, "SanitizeText bounds the logged message")
 }
+
+// Every agent-supplied free-text field, not only the message, is logged
+// sanitized: an agent can set its own container status, and the hook name
+// is taken from the raw message.
+func TestLogAgentErrorPhaseEntry_SanitizesFreeTextFields(t *testing.T) {
+	var buf bytes.Buffer
+	s := &Server{agentLifecycleLog: slog.New(slog.NewJSONHandler(&buf, nil))}
+	const secret = "sk-ant-not-a-real-key-0123456789"
+	after := &store.Agent{
+		ID: "a1", Phase: "error",
+		Message:         "pre-start hook failed: script /hooks/pre-start.d/TOKEN=" + secret + ": execution failed: exit status 1",
+		ContainerStatus: "exited API_KEY=" + secret,
+	}
+	s.logAgentErrorPhaseEntry(&store.Agent{Phase: "running"}, after, errorPhaseSourceAgentStatus)
+	recs := errorPhaseLogRecords(t, &buf)
+	require.Len(t, recs, 1)
+	assert.Contains(t, recs[0]["hook"], "TOKEN=")
+	assert.Contains(t, recs[0]["container_status"], "API_KEY=")
+	assert.NotContains(t, buf.String(), secret)
+}
