@@ -17,6 +17,7 @@
 package liveness
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"testing"
@@ -34,17 +35,30 @@ func TestSample_RealProcBusyChild(t *testing.T) {
 	s := NewSampler(Config{AgentUID: os.Getuid(), IsManagedPID: func(int) bool { return false }})
 	_ = s.Sample() // baseline
 
-	// A shell busy loop for about a second: well over MinCPUTicks.
-	cmd := exec.Command("sh", "-c", `end=$(( $(date +%s) + 2 )); while [ $(date +%s) -lt $end ]; do :; done`)
+	// A fork-free shell busy loop (builtin arithmetic only), so the CPU is
+	// spent in the sampled process itself rather than in short-lived
+	// children that exit between samples.
+	cmd := exec.Command("sh", "-c", `i=0; while :; do i=$((i+1)); done`)
 	require.NoError(t, cmd.Start())
 	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
 
-	var lw *LiveWork
-	deadline := time.Now().Add(5 * time.Second)
-	for lw == nil && time.Now().Before(deadline) {
-		time.Sleep(500 * time.Millisecond)
-		lw = s.Sample()
+	// Wait for the child itself to accumulate well over MinCPUTicks
+	// rather than for a fixed wall-clock time: a container with a CPU
+	// quota under load may give it only a sliver of a core.
+	statPath := fmt.Sprintf("/proc/%d/stat", cmd.Process.Pid)
+	deadline := time.Now().Add(2 * time.Minute)
+	for {
+		b, err := os.ReadFile(statPath)
+		require.NoError(t, err)
+		p, ok := parseStat(string(b))
+		require.True(t, ok)
+		if p.ticks >= 2*MinCPUTicks {
+			break
+		}
+		require.True(t, time.Now().Before(deadline), "the busy child got %d ticks in 2 minutes", p.ticks)
+		time.Sleep(200 * time.Millisecond)
 	}
+	lw := s.Sample()
 	require.NotNil(t, lw, "a CPU-busy child must be seen as live work")
 	assert.Equal(t, KindProcess, lw.Kind)
 	assert.True(t, lw.SuppressStall)
