@@ -20,6 +20,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -133,10 +134,11 @@ func TestRuntimeOrphans_Classification(t *testing.T) {
 		entry("reused", uuid.NewString()),
 		entry("soft", soft.ID),
 		entry("elsewhere", elsewhere.ID),
-		entry("deleting", deleting.ID),      // delete in flight: excluded
-		entry("starting", uuid.NewString()), // queued start: excluded
-		entry("live", ""),                   // older broker, slug only: matched
-		entry("live", "live"),               // legacy name label, not an ID: matched
+		entry("deleting", deleting.ID),          // delete in flight: excluded
+		entry("starting", uuid.NewString()),     // queued start: excluded
+		entry("live", ""),                       // older broker, slug only: matched
+		entry("live", "live"),                   // legacy name label, not an ID: matched
+		entry("live", strings.ToUpper(live.ID)), // non-canonical form of its own ID: matched
 	}
 	unknown := brokerProjectHeartbeat{ProjectID: uuid.NewString(), Agents: []brokerAgentHeartbeat{entry("stray", "")}}
 	unlabeled := brokerProjectHeartbeat{ProjectID: "default", Agents: []brokerAgentHeartbeat{entry("bare", "")}}

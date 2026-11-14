@@ -76,14 +76,15 @@ type runtimeOrphanCandidate struct {
 	lookupErr error
 }
 
-// heartbeatAgentID returns a reported agent ID if it is a UUID, else "": a
-// legacy container's agent_id label holds its name, which must not read as
-// another agent's ID.
+// heartbeatAgentID returns a reported agent ID in canonical UUID form, or ""
+// when it is not a UUID: a legacy container's agent_id label holds its
+// name, which must not read as another agent's ID.
 func heartbeatAgentID(id string) string {
-	if _, err := uuid.Parse(id); err != nil {
+	u, err := uuid.Parse(id)
+	if err != nil {
 		return ""
 	}
-	return id
+	return u.String()
 }
 
 // recordRuntimeOrphans classifies the heartbeat's orphan candidates and

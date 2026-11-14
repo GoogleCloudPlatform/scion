@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -488,6 +489,7 @@ func TestHeartbeatService_ReportsAgentID(t *testing.T) {
 			{Name: "by-id", ProjectID: "project-1", Phase: "running", ID: id1, Labels: map[string]string{api.LabelAgentID: id2}},
 			{Name: "by-label", ProjectID: "project-1", Phase: "running", Labels: map[string]string{api.LabelAgentID: id2}},
 			{Name: "legacy", ProjectID: "project-1", Phase: "running", Labels: map[string]string{api.LabelAgentID: "legacy"}},
+			{Name: "upper", ProjectID: "project-1", Phase: "running", Labels: map[string]string{api.LabelAgentID: "{" + strings.ToUpper(id2) + "}"}},
 			{Name: "unknown", ProjectID: "project-1", Phase: "running"},
 		},
 	}
@@ -501,7 +503,7 @@ func TestHeartbeatService_ReportsAgentID(t *testing.T) {
 			got[a.Slug] = a.AgentID
 		}
 	}
-	want := map[string]string{"by-id": id1, "by-label": id2, "legacy": "", "unknown": ""}
+	want := map[string]string{"by-id": id1, "by-label": id2, "legacy": "", "upper": id2, "unknown": ""}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("agent IDs = %v, want %v", got, want)
 	}

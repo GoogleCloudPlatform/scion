@@ -896,17 +896,18 @@ func (s *HeartbeatService) gatherProjectAgents(ctx context.Context, startsBefore
 }
 
 // heartbeatAgentID returns the Hub agent ID of a listed entry: the ID the
-// runtime reports, else its agent_id label, else "". A value that is not a
+// runtime reports, else its agent_id label, else "", in canonical UUID form. A value that is not a
 // UUID (a legacy container labels its name) is not an ID and gives "".
 func heartbeatAgentID(ag api.AgentInfo) string {
 	id := ag.ID
 	if id == "" {
 		id = ag.Labels[api.LabelAgentID]
 	}
-	if _, err := uuid.Parse(id); err != nil {
+	u, err := uuid.Parse(id)
+	if err != nil {
 		return ""
 	}
-	return id
+	return u.String() // canonical form
 }
 
 // dropVanishedPodReportsForStarts removes the entries a Kubernetes runtime
