@@ -123,12 +123,27 @@ func commandRequiresProject(cmd *cobra.Command) bool {
 	if parentName == "project" {
 		return false
 	}
+	// 'templates update --scope global' refreshes global templates and reads
+	// no project, so it runs outside a project (ptone/scion#1713).
+	if isGlobalTemplatesUpdate(cmd) {
+		return false
+	}
 	// design Amendment A26.2 O1: same reasoning as checkAgentContainerContext
 	// — --handoff-template never touches the project or the Hub.
 	if isReincarnateHandoffTemplateInvocation(cmd) {
 		return false
 	}
 	return true
+}
+
+// isGlobalTemplatesUpdate reports whether cmd is 'templates update' with
+// --scope global.
+func isGlobalTemplatesUpdate(cmd *cobra.Command) bool {
+	if cmd.Name() != "update" || cmd.Parent() == nil || cmd.Parent().Name() != "templates" || !isTopLevel(cmd.Parent()) {
+		return false
+	}
+	scope, _ := cmd.Flags().GetString("scope")
+	return scope == "global"
 }
 
 // isTopLevel reports whether c is a direct child of the root command.
