@@ -48,6 +48,12 @@ type Message struct {
 	DispatchFailureReason *string `json:"dispatch_failure_reason,omitempty"`
 	// DispatchedAt holds the value of the "dispatched_at" field.
 	DispatchedAt *time.Time `json:"dispatched_at,omitempty"`
+	// DeliveryID holds the value of the "delivery_id" field.
+	DeliveryID *string `json:"delivery_id,omitempty"`
+	// DeliveringAt holds the value of the "delivering_at" field.
+	DeliveringAt *time.Time `json:"delivering_at,omitempty"`
+	// DeliveryOutcome holds the value of the "delivery_outcome" field.
+	DeliveryOutcome *string `json:"delivery_outcome,omitempty"`
 	// Channel holds the value of the "channel" field.
 	Channel string `json:"channel,omitempty"`
 	// ThreadID holds the value of the "thread_id" field.
@@ -76,9 +82,9 @@ func (*Message) scanValues(columns []string) ([]any, error) {
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
 		case message.FieldUrgent, message.FieldBroadcasted, message.FieldRead:
 			values[i] = new(sql.NullBool)
-		case message.FieldSender, message.FieldSenderID, message.FieldRecipient, message.FieldRecipientID, message.FieldMsg, message.FieldType, message.FieldAgentID, message.FieldGroupID, message.FieldDispatchState, message.FieldDispatchFailureReason, message.FieldChannel, message.FieldThreadID, message.FieldAuthorizingUserID, message.FieldDelegationGrantID:
+		case message.FieldSender, message.FieldSenderID, message.FieldRecipient, message.FieldRecipientID, message.FieldMsg, message.FieldType, message.FieldAgentID, message.FieldGroupID, message.FieldDispatchState, message.FieldDispatchFailureReason, message.FieldDeliveryID, message.FieldDeliveryOutcome, message.FieldChannel, message.FieldThreadID, message.FieldAuthorizingUserID, message.FieldDelegationGrantID:
 			values[i] = new(sql.NullString)
-		case message.FieldDispatchedAt, message.FieldCreated:
+		case message.FieldDispatchedAt, message.FieldDeliveringAt, message.FieldCreated:
 			values[i] = new(sql.NullTime)
 		case message.FieldID, message.FieldProjectID:
 			values[i] = new(uuid.UUID)
@@ -194,6 +200,27 @@ func (_m *Message) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.DispatchedAt = new(time.Time)
 				*_m.DispatchedAt = value.Time
+			}
+		case message.FieldDeliveryID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field delivery_id", values[i])
+			} else if value.Valid {
+				_m.DeliveryID = new(string)
+				*_m.DeliveryID = value.String
+			}
+		case message.FieldDeliveringAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field delivering_at", values[i])
+			} else if value.Valid {
+				_m.DeliveringAt = new(time.Time)
+				*_m.DeliveringAt = value.Time
+			}
+		case message.FieldDeliveryOutcome:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field delivery_outcome", values[i])
+			} else if value.Valid {
+				_m.DeliveryOutcome = new(string)
+				*_m.DeliveryOutcome = value.String
 			}
 		case message.FieldChannel:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -331,6 +358,21 @@ func (_m *Message) String() string {
 	if v := _m.DispatchedAt; v != nil {
 		builder.WriteString("dispatched_at=")
 		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	if v := _m.DeliveryID; v != nil {
+		builder.WriteString("delivery_id=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.DeliveringAt; v != nil {
+		builder.WriteString("delivering_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	if v := _m.DeliveryOutcome; v != nil {
+		builder.WriteString("delivery_outcome=")
+		builder.WriteString(*v)
 	}
 	builder.WriteString(", ")
 	builder.WriteString("channel=")

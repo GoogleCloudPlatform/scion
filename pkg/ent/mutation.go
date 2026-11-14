@@ -65699,6 +65699,9 @@ type MessageMutation struct {
 	dispatch_state          *string
 	dispatch_failure_reason *string
 	dispatched_at           *time.Time
+	delivery_id             *string
+	delivering_at           *time.Time
+	delivery_outcome        *string
 	channel                 *string
 	thread_id               *string
 	conversation_id         *uuid.UUID
@@ -66435,6 +66438,153 @@ func (m *MessageMutation) ResetDispatchedAt() {
 	delete(m.clearedFields, message.FieldDispatchedAt)
 }
 
+// SetDeliveryID sets the "delivery_id" field.
+func (m *MessageMutation) SetDeliveryID(s string) {
+	m.delivery_id = &s
+}
+
+// DeliveryID returns the value of the "delivery_id" field in the mutation.
+func (m *MessageMutation) DeliveryID() (r string, exists bool) {
+	v := m.delivery_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeliveryID returns the old "delivery_id" field's value of the Message entity.
+// If the Message object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessageMutation) OldDeliveryID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeliveryID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeliveryID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeliveryID: %w", err)
+	}
+	return oldValue.DeliveryID, nil
+}
+
+// ClearDeliveryID clears the value of the "delivery_id" field.
+func (m *MessageMutation) ClearDeliveryID() {
+	m.delivery_id = nil
+	m.clearedFields[message.FieldDeliveryID] = struct{}{}
+}
+
+// DeliveryIDCleared returns if the "delivery_id" field was cleared in this mutation.
+func (m *MessageMutation) DeliveryIDCleared() bool {
+	_, ok := m.clearedFields[message.FieldDeliveryID]
+	return ok
+}
+
+// ResetDeliveryID resets all changes to the "delivery_id" field.
+func (m *MessageMutation) ResetDeliveryID() {
+	m.delivery_id = nil
+	delete(m.clearedFields, message.FieldDeliveryID)
+}
+
+// SetDeliveringAt sets the "delivering_at" field.
+func (m *MessageMutation) SetDeliveringAt(t time.Time) {
+	m.delivering_at = &t
+}
+
+// DeliveringAt returns the value of the "delivering_at" field in the mutation.
+func (m *MessageMutation) DeliveringAt() (r time.Time, exists bool) {
+	v := m.delivering_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeliveringAt returns the old "delivering_at" field's value of the Message entity.
+// If the Message object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessageMutation) OldDeliveringAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeliveringAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeliveringAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeliveringAt: %w", err)
+	}
+	return oldValue.DeliveringAt, nil
+}
+
+// ClearDeliveringAt clears the value of the "delivering_at" field.
+func (m *MessageMutation) ClearDeliveringAt() {
+	m.delivering_at = nil
+	m.clearedFields[message.FieldDeliveringAt] = struct{}{}
+}
+
+// DeliveringAtCleared returns if the "delivering_at" field was cleared in this mutation.
+func (m *MessageMutation) DeliveringAtCleared() bool {
+	_, ok := m.clearedFields[message.FieldDeliveringAt]
+	return ok
+}
+
+// ResetDeliveringAt resets all changes to the "delivering_at" field.
+func (m *MessageMutation) ResetDeliveringAt() {
+	m.delivering_at = nil
+	delete(m.clearedFields, message.FieldDeliveringAt)
+}
+
+// SetDeliveryOutcome sets the "delivery_outcome" field.
+func (m *MessageMutation) SetDeliveryOutcome(s string) {
+	m.delivery_outcome = &s
+}
+
+// DeliveryOutcome returns the value of the "delivery_outcome" field in the mutation.
+func (m *MessageMutation) DeliveryOutcome() (r string, exists bool) {
+	v := m.delivery_outcome
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeliveryOutcome returns the old "delivery_outcome" field's value of the Message entity.
+// If the Message object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessageMutation) OldDeliveryOutcome(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeliveryOutcome is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeliveryOutcome requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeliveryOutcome: %w", err)
+	}
+	return oldValue.DeliveryOutcome, nil
+}
+
+// ClearDeliveryOutcome clears the value of the "delivery_outcome" field.
+func (m *MessageMutation) ClearDeliveryOutcome() {
+	m.delivery_outcome = nil
+	m.clearedFields[message.FieldDeliveryOutcome] = struct{}{}
+}
+
+// DeliveryOutcomeCleared returns if the "delivery_outcome" field was cleared in this mutation.
+func (m *MessageMutation) DeliveryOutcomeCleared() bool {
+	_, ok := m.clearedFields[message.FieldDeliveryOutcome]
+	return ok
+}
+
+// ResetDeliveryOutcome resets all changes to the "delivery_outcome" field.
+func (m *MessageMutation) ResetDeliveryOutcome() {
+	m.delivery_outcome = nil
+	delete(m.clearedFields, message.FieldDeliveryOutcome)
+}
+
 // SetChannel sets the "channel" field.
 func (m *MessageMutation) SetChannel(s string) {
 	m.channel = &s
@@ -66848,7 +66998,7 @@ func (m *MessageMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *MessageMutation) Fields() []string {
-	fields := make([]string, 0, 23)
+	fields := make([]string, 0, 26)
 	if m.project_id != nil {
 		fields = append(fields, message.FieldProjectID)
 	}
@@ -66893,6 +67043,15 @@ func (m *MessageMutation) Fields() []string {
 	}
 	if m.dispatched_at != nil {
 		fields = append(fields, message.FieldDispatchedAt)
+	}
+	if m.delivery_id != nil {
+		fields = append(fields, message.FieldDeliveryID)
+	}
+	if m.delivering_at != nil {
+		fields = append(fields, message.FieldDeliveringAt)
+	}
+	if m.delivery_outcome != nil {
+		fields = append(fields, message.FieldDeliveryOutcome)
 	}
 	if m.channel != nil {
 		fields = append(fields, message.FieldChannel)
@@ -66956,6 +67115,12 @@ func (m *MessageMutation) Field(name string) (ent.Value, bool) {
 		return m.DispatchFailureReason()
 	case message.FieldDispatchedAt:
 		return m.DispatchedAt()
+	case message.FieldDeliveryID:
+		return m.DeliveryID()
+	case message.FieldDeliveringAt:
+		return m.DeliveringAt()
+	case message.FieldDeliveryOutcome:
+		return m.DeliveryOutcome()
 	case message.FieldChannel:
 		return m.Channel()
 	case message.FieldThreadID:
@@ -67011,6 +67176,12 @@ func (m *MessageMutation) OldField(ctx context.Context, name string) (ent.Value,
 		return m.OldDispatchFailureReason(ctx)
 	case message.FieldDispatchedAt:
 		return m.OldDispatchedAt(ctx)
+	case message.FieldDeliveryID:
+		return m.OldDeliveryID(ctx)
+	case message.FieldDeliveringAt:
+		return m.OldDeliveringAt(ctx)
+	case message.FieldDeliveryOutcome:
+		return m.OldDeliveryOutcome(ctx)
 	case message.FieldChannel:
 		return m.OldChannel(ctx)
 	case message.FieldThreadID:
@@ -67141,6 +67312,27 @@ func (m *MessageMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetDispatchedAt(v)
 		return nil
+	case message.FieldDeliveryID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeliveryID(v)
+		return nil
+	case message.FieldDeliveringAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeliveringAt(v)
+		return nil
+	case message.FieldDeliveryOutcome:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeliveryOutcome(v)
+		return nil
 	case message.FieldChannel:
 		v, ok := value.(string)
 		if !ok {
@@ -67245,6 +67437,15 @@ func (m *MessageMutation) ClearedFields() []string {
 	if m.FieldCleared(message.FieldDispatchedAt) {
 		fields = append(fields, message.FieldDispatchedAt)
 	}
+	if m.FieldCleared(message.FieldDeliveryID) {
+		fields = append(fields, message.FieldDeliveryID)
+	}
+	if m.FieldCleared(message.FieldDeliveringAt) {
+		fields = append(fields, message.FieldDeliveringAt)
+	}
+	if m.FieldCleared(message.FieldDeliveryOutcome) {
+		fields = append(fields, message.FieldDeliveryOutcome)
+	}
 	if m.FieldCleared(message.FieldChannel) {
 		fields = append(fields, message.FieldChannel)
 	}
@@ -67297,6 +67498,15 @@ func (m *MessageMutation) ClearField(name string) error {
 		return nil
 	case message.FieldDispatchedAt:
 		m.ClearDispatchedAt()
+		return nil
+	case message.FieldDeliveryID:
+		m.ClearDeliveryID()
+		return nil
+	case message.FieldDeliveringAt:
+		m.ClearDeliveringAt()
+		return nil
+	case message.FieldDeliveryOutcome:
+		m.ClearDeliveryOutcome()
 		return nil
 	case message.FieldChannel:
 		m.ClearChannel()
@@ -67371,6 +67581,15 @@ func (m *MessageMutation) ResetField(name string) error {
 		return nil
 	case message.FieldDispatchedAt:
 		m.ResetDispatchedAt()
+		return nil
+	case message.FieldDeliveryID:
+		m.ResetDeliveryID()
+		return nil
+	case message.FieldDeliveringAt:
+		m.ResetDeliveringAt()
+		return nil
+	case message.FieldDeliveryOutcome:
+		m.ResetDeliveryOutcome()
 		return nil
 	case message.FieldChannel:
 		m.ResetChannel()

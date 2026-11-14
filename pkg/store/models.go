@@ -2534,7 +2534,43 @@ const (
 	// @mention). It is saved to the thread but no agent was given it, so it
 	// must not read as "dispatched". Terminal: nothing retries it.
 	MessageDispatchNoRecipient = "no_recipient"
+	// MessageDispatchDelivering marks a row bound to one deliver-message
+	// flush over the recipient's conduit session (delivery_id), between
+	// the hub's bind and the agent's answer (design
+	// .design/conduit/v2.22-deliver-message.md §2.6).
+	MessageDispatchDelivering = "delivering"
+	// MessageDispatchDelivered: the bound flush was pasted and submitted.
+	MessageDispatchDelivered = "delivered"
+	// MessageDispatchPartial: the bound flush may have been pasted (a
+	// partial answer, an ambiguous call, or a stale delivering row). It is
+	// never re-driven.
+	MessageDispatchPartial = "partial"
 )
+
+// DeliveryBindResult is how BindMessageDelivery treated a /deliver call.
+type DeliveryBindResult int
+
+const (
+	// DeliveryBound: every row moved to delivering under the id.
+	DeliveryBound DeliveryBindResult = iota
+	// DeliveryForward: every row is already delivering under the same id
+	// (a same-id retry); the call may be forwarded to the agent.
+	DeliveryForward
+	// DeliveryReplay: every row is final (delivered, partial or failed)
+	// under the same id; Outcome holds the stored answer and the agent is
+	// not called.
+	DeliveryReplay
+	// DeliveryConflict: some row is bound to another delivery, past
+	// delivering, or not in a bindable state; nothing changed.
+	DeliveryConflict
+)
+
+// DeliveryBind is BindMessageDelivery's result.
+type DeliveryBind struct {
+	Result DeliveryBindResult
+	// Outcome is the stored delivery_outcome JSON, for DeliveryReplay.
+	Outcome string
+}
 
 // MessageEnteredPendingLogMsg is the text of the one structured log line
 // written whenever a message row is persisted in dispatch_state "pending"
