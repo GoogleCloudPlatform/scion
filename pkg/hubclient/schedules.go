@@ -117,8 +117,13 @@ type ListSchedulesOptions struct {
 	Page   apiclient.PageOptions
 }
 
+// ScheduleListScopeCaller indicates that a schedule or scheduled-event list
+// response is filtered to rows held by the calling principal (e.g. an agent).
+const ScheduleListScopeCaller = "caller"
+
 // ListSchedulesResponse is the response from listing schedules.
 type ListSchedulesResponse struct {
+	Scope      string     `json:"scope,omitempty"`
 	Schedules  []Schedule `json:"schedules"`
 	NextCursor string     `json:"nextCursor,omitempty"`
 	TotalCount int        `json:"totalCount,omitempty"`

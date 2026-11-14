@@ -88,6 +88,7 @@ type ListScheduledEventsOptions struct {
 
 // ListScheduledEventsResponse is the response from listing scheduled events.
 type ListScheduledEventsResponse struct {
+	Scope      string           `json:"scope,omitempty"`
 	Events     []ScheduledEvent `json:"events"`
 	NextCursor string           `json:"nextCursor,omitempty"`
 	TotalCount int              `json:"totalCount,omitempty"`
