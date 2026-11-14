@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -300,12 +301,13 @@ func TestBrokerAgentDeliver_NothingPastedUnbinds(t *testing.T) {
 		{409, `{"outcome":"busy"}`},
 		{413, ``},
 		{422, `{"outcome":"not_delivered","stage":"target"}`},
+		{422, `{"outcome":"out_of_bounds","field":"ready.settle"}`},
 		{429, ``},
 		{501, ``},
 		{503, ``},
 	}
-	for _, tc := range cases {
-		t.Run(http.StatusText(tc.status), func(t *testing.T) {
+	for i, tc := range cases {
+		t.Run(fmt.Sprintf("%d_case%d", tc.status, i), func(t *testing.T) {
 			f := newDeliverFixture(t)
 			f.startDeliverAgent(t, tc.status, tc.body)
 			id := f.msg(t, store.MessageDispatchDispatched)
@@ -452,7 +454,7 @@ func TestBrokerAgentDeliver_LogsNoText(t *testing.T) {
 
 // TestBrokerAgentDeliver_ConcurrentSameIDHasOneOwner (review R1): while one
 // call owns a delivery, a same-id duplicate (a re-send, or a call on
-// another hub replica) gets 409 in_progress without reaching the agent, and
+// another hub replica) gets 409 in_flight without reaching the agent, and
 // can never unbind the rows. After the owner pastes, a fresh id is refused
 // and the row is pasted exactly once.
 func TestBrokerAgentDeliver_ConcurrentSameIDHasOneOwner(t *testing.T) {
@@ -487,7 +489,7 @@ func TestBrokerAgentDeliver_ConcurrentSameIDHasOneOwner(t *testing.T) {
 	<-entered
 	code, resp := f.postDeliver(t, f.broker, f.launched.ID, deliverReq("d1", id))
 	assert.Equal(t, http.StatusConflict, code, "duplicate while in flight")
-	assert.Equal(t, agentcontrol.OutcomeInProgress, resp.Outcome, "an answer the broker never falls back on")
+	assert.Equal(t, agentcontrol.OutcomeInFlight, resp.Outcome, "an answer the broker never falls back on")
 	assert.Equal(t, store.MessageDispatchDelivering, f.state(t, id), "the duplicate did not unbind")
 	close(release)
 	require.Equal(t, http.StatusOK, <-done)
@@ -505,7 +507,7 @@ func TestBrokerAgentDeliver_ConcurrentSameIDHasOneOwner(t *testing.T) {
 // TestBrokerAgentDeliver_OwnerUnbindOnlyAfterDuplicateRefused (review R1,
 // every unbinding status): when the owner's own call proves nothing was
 // pasted, only the owner unbinds; a duplicate that arrived meanwhile was
-// refused in_progress, and the owner's same-id retry then binds again.
+// refused in_flight, and the owner's same-id retry then binds again.
 func TestBrokerAgentDeliver_OwnerUnbindOnlyAfterDuplicateRefused(t *testing.T) {
 	for _, status := range []int{408, 409, 413, 422, 429, 501, 503} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
@@ -533,7 +535,7 @@ func TestBrokerAgentDeliver_OwnerUnbindOnlyAfterDuplicateRefused(t *testing.T) {
 			<-entered
 			code, resp := f.postDeliver(t, f.broker, f.launched.ID, deliverReq("d1", id))
 			assert.Equal(t, http.StatusConflict, code)
-			assert.Equal(t, agentcontrol.OutcomeInProgress, resp.Outcome)
+			assert.Equal(t, agentcontrol.OutcomeInFlight, resp.Outcome)
 			assert.Equal(t, store.MessageDispatchDelivering, f.state(t, id))
 			close(release)
 			assert.Equal(t, status, <-done)
@@ -625,4 +627,52 @@ func TestExecuteAgentDMFinalization_KeepsDelivered(t *testing.T) {
 	code, r := f.postDeliver(t, f.broker, f.launched.ID, deliverReq("d2", inflight))
 	assert.Equal(t, http.StatusOK, code)
 	assert.True(t, r.Replayed)
+}
+
+// TestBrokerAgentDeliver_InFlightDuplicateLeavesOwnerResponsible (review
+// FV1-N1): a duplicate gets 409 in_flight and has no effect on the rows
+// (the broker treats it as "owner responsible": no failure report, no exec
+// fallback). When the owner's own call then proves nothing was pasted, the
+// owner's same-id retry delivers once.
+func TestBrokerAgentDeliver_InFlightDuplicateLeavesOwnerResponsible(t *testing.T) {
+	f := newDeliverFixture(t)
+	tm := &okTmux{}
+	entered, release := make(chan struct{}), make(chan struct{})
+	var mu sync.Mutex
+	calls := 0
+	f.startControlAgentWithDeliver(t, f.public.URL, true, &control.DeliverOptions{Runner: tm}, func(next conduit.RPCHandler) conduit.RPCHandler {
+		return conduit.RPCHandlerFunc(func(ctx context.Context, r *conduitv1.RpcRequest) *conduitv1.RpcResponse {
+			mu.Lock()
+			calls++
+			n := calls
+			mu.Unlock()
+			if n == 1 {
+				close(entered)
+				<-release
+				return &conduitv1.RpcResponse{Status: 503} // proven not reached
+			}
+			return next.HandleRPC(ctx, r)
+		})
+	})
+	id := f.msg(t, store.MessageDispatchPending)
+	done := make(chan int, 1)
+	go func() {
+		code, _ := f.postDeliver(t, f.broker, f.launched.ID, deliverReq("d1", id))
+		done <- code
+	}()
+	<-entered
+	code, resp := f.postDeliver(t, f.broker, f.launched.ID, deliverReq("d1", id))
+	require.Equal(t, http.StatusConflict, code)
+	require.Equal(t, agentcontrol.OutcomeInFlight, resp.Outcome)
+	assert.Equal(t, store.MessageDispatchDelivering, f.state(t, id), "the duplicate left the owner's rows alone")
+	close(release)
+	require.Equal(t, http.StatusServiceUnavailable, <-done)
+	require.Equal(t, store.MessageDispatchDispatched, f.state(t, id), "the owner unbound after its proven not-reached answer")
+
+	code, resp = f.postDeliver(t, f.broker, f.launched.ID, deliverReq("d1", id))
+	require.Equal(t, http.StatusOK, code, "the owner's same-id retry")
+	assert.Equal(t, agentcontrol.OutcomeDelivered, resp.Outcome)
+	assert.False(t, resp.Replayed)
+	assert.Equal(t, store.MessageDispatchDelivered, f.state(t, id))
+	assert.Equal(t, 4, tm.calls, "pasted exactly once")
 }

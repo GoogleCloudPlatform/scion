@@ -319,6 +319,15 @@ const (
 	// OutcomeNotDelivered is a 422: nothing visible was done (the tmux
 	// target is missing, or staging the text failed).
 	OutcomeNotDelivered = "not_delivered"
+	// OutcomeOutOfBounds is a 422: the agent image's own readiness spec is
+	// outside the route bounds (Field names it). Nothing was done; the
+	// delivery should use exec, which applies the spec in full.
+	OutcomeOutOfBounds = "out_of_bounds"
+	// OutcomeInFlight is the hub's own 409: the same delivery is already
+	// in flight under another call, which owns it and reports its outcome.
+	// Never forwarded to the agent; the caller neither retries, falls back
+	// to exec, nor reports a failure.
+	OutcomeInFlight = "in_flight"
 	// OutcomeBound is the hub's own 409: a row is bound to another
 	// delivery, or past delivering. Never forwarded to the agent.
 	OutcomeBound = "bound"

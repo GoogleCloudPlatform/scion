@@ -1528,31 +1528,53 @@ func (m *AgentManager) deliver(ctx context.Context, d deliveryRequest) error {
 	// it, over exec.
 	var conduitReason error
 	if m.usesConduitTransport(agent) {
-		if len(d.messageIDs) == 0 || d.partialIDs {
-			conduitReason = errors.New("delivery carries a message without a hub id")
-		} else if d.hasAttachments {
-			conduitReason = errors.New("delivery carries attachments")
-		} else if berr := tmuxdeliver.CheckBounds(conduitSettings(h, ds, m.readyTimings)); berr != nil {
-			conduitReason = berr
-		} else {
+		// tryConduit runs the conduit attempt; done means the delivery
+		// ended there (err is its final result). Otherwise conduitReason
+		// says why it goes over exec.
+		tryConduit := func() (done bool, err error) {
+			if len(d.messageIDs) == 0 || d.partialIDs {
+				conduitReason = errors.New("delivery carries a message without a hub id")
+				return false, nil
+			}
+			if berr := tmuxdeliver.CheckBounds(conduitSettings(h, ds)); berr != nil {
+				// The harness's delivery or readiness settings are outside
+				// the route bounds: never clamped (review P2-R1).
+				conduitReason = berr
+				return false, nil
+			}
 			var ready *agentcontrol.ReadySpec
 			if d.readyWanted {
-				ready = conduitReadySpec(m.readyTimings)
+				ready = conduitReadySpec(h)
 			}
 			creq := conduitDeliverRequest(nextDeliveryID(), d.messageIDs, req, ready)
 			if ferr := creq.FitsRoute(); ferr != nil {
 				// Too large for the route (text, encoded size, or more
 				// than 64 coalesced messages): exec carries it (review R3).
 				conduitReason = fmt.Errorf("delivery outside conduit route limits: %w", ferr)
-			} else {
-				outcome, cerr := m.deliverOverConduit(ctx, agent, creq)
-				if outcome == conduitDone {
-					return cerr
-				}
-				conduitReason = cerr
+				return false, nil
 			}
+			outcome, cerr := m.deliverOverConduit(ctx, agent, creq)
+			if outcome == conduitDone {
+				return true, cerr
+			}
+			conduitReason = cerr
+			return false, nil
+		}
+		if d.hasAttachments && m.execReachable(ctx, agent.ContainerID) {
+			// Attachments stay on exec where the runtime has it (design
+			// v2.22 §1.6). Where it has none, the attachment work already
+			// put its "not delivered" lines into the text, and that text
+			// goes over conduit like any other (review FV1-N2).
+			conduitReason = errors.New("delivery carries attachments")
+		} else if done, cerr := tryConduit(); done {
+			return cerr
 		}
 		slog.Info("message delivery uses exec", "agent_id", agent.ID, "reason", conduitReason)
+		if !m.execReachable(ctx, agent.ContainerID) {
+			// No exec either: a named failure before anything was pasted,
+			// without first probing readiness over an exec that cannot run.
+			return &finalDeliveryError{Err: fmt.Errorf("failed to send message to agent '%s': runtime exec unavailable (conduit not used: %v)", agent.Name, conduitReason)}
+		}
 		if d.readyWanted {
 			m.waitHarnessReadyNow(ctx, agentID, projectID)
 		}

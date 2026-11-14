@@ -120,6 +120,13 @@ type Probe struct {
 	// Deadline is line 2's hook-mode deadline; zero when the probe has no
 	// line 2 or is not in hook mode, which keeps the caller's deadline.
 	Deadline time.Duration
+	// HasSpec reports that the init-run file has a line 2 (the image's own
+	// ready spec); SpecSettle and SpecTimeout are its settle (the post-marker
+	// settle in hook mode, the session age in settle mode) and its hook
+	// deadline (zero in settle mode).
+	HasSpec     bool
+	SpecSettle  time.Duration
+	SpecTimeout time.Duration
 }
 
 // ParseProbe interprets ProbeArgv's output.
@@ -149,6 +156,10 @@ func ParseProbe(out string, settleFallback, settle time.Duration) Probe {
 	if run, ok := state.ParseInitRunSpec(fields["initrun"] + "\n" + fields["initspec"]); ok {
 		res.Mode, res.Nonce = run.Mode, run.Nonce
 		if run.HasSpec {
+			res.HasSpec, res.SpecSettle = true, run.Spec.Settle
+			if run.Mode == state.ReadyModeHook {
+				res.SpecTimeout = run.Spec.Timeout
+			}
 			if run.Mode == state.ReadyModeHook {
 				settle = run.Spec.Settle
 				res.Deadline = run.Spec.Timeout
@@ -217,6 +228,11 @@ const (
 	// WaitTargetGone: a probe failed and the Gone hook reported the target
 	// gone.
 	WaitTargetGone
+	// WaitOutOfBounds: the image's own ready spec (init-run line 2) has a
+	// settle or timeout above WaitConfig.BoundSettle or BoundTimeout. The
+	// wait stopped at once, without waiting or settling; Reason names the
+	// field (FieldReadySettle or FieldReadyTimeout).
+	WaitOutOfBounds
 )
 
 // WaitResult is what Wait returns. The caller logs it; Wait logs nothing.
@@ -250,6 +266,13 @@ type WaitConfig struct {
 	// before its hard stop. Zero means no cap: the exec path is unchanged.
 	MaxDeadline time.Duration
 	MaxSettle   time.Duration
+	// BoundSettle and BoundTimeout, when not zero, refuse an image ready
+	// spec above them: Wait returns WaitOutOfBounds after the first probe
+	// that shows it, instead of capping the spec. The deliver-message route
+	// sets them to its bounds (MaxReadySettle, MaxReadyTimeout), so it never
+	// shortens a harness's readiness policy; the caller then uses exec.
+	BoundSettle  time.Duration
+	BoundTimeout time.Duration
 	// Gone, when set, is asked after a failed probe whether the target is
 	// gone; true ends the wait at once.
 	Gone func(ctx context.Context, probeErr error) bool
@@ -322,6 +345,14 @@ func Wait(ctx context.Context, cfg WaitConfig) WaitResult {
 	var memo memoEntry
 	for first := true; ; first = false {
 		res, perr := probe()
+		if res.HasSpec {
+			if cfg.BoundSettle > 0 && res.SpecSettle > cfg.BoundSettle {
+				return WaitResult{Outcome: WaitOutOfBounds, Mode: res.Mode, Reason: FieldReadySettle, Waited: now().Sub(start)}
+			}
+			if cfg.BoundTimeout > 0 && res.SpecTimeout > cfg.BoundTimeout {
+				return WaitResult{Outcome: WaitOutOfBounds, Mode: res.Mode, Reason: FieldReadyTimeout, Waited: now().Sub(start)}
+			}
+		}
 		if res.Deadline > 0 {
 			deadline = start.Add(capDeadline(res.Deadline))
 		}

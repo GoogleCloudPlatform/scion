@@ -754,3 +754,56 @@ func TestDeliverSizeLimits(t *testing.T) {
 		})
 	}
 }
+
+// TestDeliverRefusesOutOfBoundsLocalReadySpec (review P2-R1): the image's
+// own ready spec (init-run line 2), which the broker may not know, is
+// refused before any visible work when it is outside the route bounds:
+// 422 out_of_bounds naming the field, not stored, no load or paste, so the
+// broker uses exec. It is never shortened. An in-bounds spec is waited in
+// full (control).
+func TestDeliverRefusesOutOfBoundsLocalReadySpec(t *testing.T) {
+	probe := func(spec string) string {
+		return "session=100\nnow=200\ninitrun=nonce=abcd1234 mode=hook\ninitspec=" + spec + "\nready=nonce=abcd1234\nreadymtime=200\n"
+	}
+	for name, tc := range map[string]struct {
+		spec  string
+		field string
+	}{
+		"settle 11s":  {"strategy=hook settle_ms=11000 deadline_ms=90000", agentcontrol.FieldReadySettle},
+		"timeout 91s": {"strategy=hook settle_ms=1500 deadline_ms=91000", agentcontrol.FieldReadyTimeout},
+	} {
+		t.Run(name, func(t *testing.T) {
+			clk := &fakeClock{t: time.Unix(1_000_000, 0)}
+			f := &fakeTmux{probeOut: probe(tc.spec)}
+			h := newDeliverHandler(f, clk)
+			r := baseReq(clk.Now())
+			r.Ready = &agentcontrol.ReadySpec{Strategy: "hook", SettleMS: 1500, TimeoutMS: 90000}
+			code, resp := post(t, h, r)
+			if code != http.StatusUnprocessableEntity || resp.Outcome != agentcontrol.OutcomeOutOfBounds || resp.Field != tc.field {
+				t.Fatalf("= %d %+v, want 422 out_of_bounds %s", code, resp, tc.field)
+			}
+			for _, v := range f.verbs() {
+				if v == "load-buffer" || v == "paste-buffer" || v == "send-keys" {
+					t.Fatalf("ran %s for a refused spec", v)
+				}
+			}
+			if code, resp := post(t, h, r); code != http.StatusUnprocessableEntity || resp.Replayed {
+				t.Fatalf("second call = %d %+v; a refusal is not stored", code, resp)
+			}
+		})
+	}
+	t.Run("in bounds is waited in full", func(t *testing.T) {
+		clk := &fakeClock{t: time.Unix(1_000_000, 0)}
+		f := &fakeTmux{probeOut: probe("strategy=hook settle_ms=9000 deadline_ms=90000")}
+		r := baseReq(clk.Now())
+		r.Ready = &agentcontrol.ReadySpec{Strategy: "hook", SettleMS: 1500, TimeoutMS: 90000}
+		start := clk.Now()
+		code, resp := post(t, newDeliverHandler(f, clk), r)
+		if code != http.StatusOK || resp.Outcome != agentcontrol.OutcomeDelivered {
+			t.Fatalf("= %d %+v", code, resp)
+		}
+		if waited := clk.Now().Sub(start); waited < 9*time.Second {
+			t.Fatalf("settled %s, want the spec's full 9s", waited)
+		}
+	})
+}

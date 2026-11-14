@@ -208,9 +208,18 @@ func (d *deliverRoute) flush(ctx context.Context, req *agentcontrol.DeliverReque
 			Key:         "local",
 			MaxDeadline: maxWait,
 			MaxSettle:   tmuxdeliver.MaxReadySettle,
-			Now:         d.now,
-			Sleep:       d.sleep,
+			// The image's own ready spec is refused, not shortened, when
+			// it is outside the route bounds (review P2-R1): the broker
+			// then delivers over exec, which applies it in full. The hard
+			// stop cap (MaxDeadline) stays as a safety guard only.
+			BoundSettle:  tmuxdeliver.MaxReadySettle,
+			BoundTimeout: tmuxdeliver.MaxReadyTimeout,
+			Now:          d.now,
+			Sleep:        d.sleep,
 		})
+		if wr.Outcome == tmuxdeliver.WaitOutOfBounds {
+			return deliverResult{status: http.StatusUnprocessableEntity, resp: agentcontrol.DeliverResponse{Outcome: agentcontrol.OutcomeOutOfBounds, Field: wr.Reason}}
+		}
 		if wr.Outcome == tmuxdeliver.WaitCancelled {
 			// The hub cancelled the call (RpcCancel); nothing was shown.
 			return notDelivered(agentcontrol.StageTarget)

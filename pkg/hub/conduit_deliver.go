@@ -77,7 +77,7 @@ func writeDeliverAnswer(w http.ResponseWriter, status int, resp agentcontrol.Del
 //
 // The call that binds the rows is the delivery's only owner, across hub
 // replicas: the bind is a compare-and-set on delivery_id IS NULL, a
-// same-id call that finds the rows delivering gets 409 in_progress without
+// same-id call that finds the rows delivering gets 409 in_flight without
 // calling the agent, and only the owner unbinds or finishes the rows. A
 // same-id retry after the owner unbound them (nothing pasted) binds again
 // and becomes the new owner.
@@ -173,8 +173,11 @@ func (s *Server) handleBrokerAgentDeliver(w http.ResponseWriter, r *http.Request
 		// the agent, unbind or finish them; a duplicate must never get an
 		// answer that lets the broker retry or fall back to exec, since
 		// the owner may be pasting right now (review R1).
+		// The answer is in_flight, not the agent's in_progress: the
+		// broker neither falls back nor reports a failure for it, since
+		// the owner is still responsible for the rows (review FV1-N1).
 		log.Warn("message delivery refused: the same delivery is already in flight")
-		writeDeliverAnswer(w, http.StatusConflict, agentcontrol.DeliverResponse{Outcome: agentcontrol.OutcomeInProgress})
+		writeDeliverAnswer(w, http.StatusConflict, agentcontrol.DeliverResponse{Outcome: agentcontrol.OutcomeInFlight})
 		return
 	case store.DeliveryReplay:
 		resp, derr := agentcontrol.DecodeDeliverResponse([]byte(bind.Outcome))

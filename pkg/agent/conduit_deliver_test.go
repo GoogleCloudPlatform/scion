@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -208,7 +209,7 @@ func TestConduitDelivery_ExistingPathUnlessRouted(t *testing.T) {
 			if d != nil && d.calls() != 0 {
 				t.Fatalf("hub called %d times", d.calls())
 			}
-			if len(*execs) == 0 || !strings.Contains((*execs)[0], "load-buffer") {
+			if !execDelivered(*execs) {
 				t.Fatalf("exec path not used: %v", *execs)
 			}
 		})
@@ -369,7 +370,8 @@ func TestConduitDelivery_BufferedFlush(t *testing.T) {
 		t.Fatalf("exec used (readiness probe or delivery): %v", execs)
 	}
 	r := d.reqs[0]
-	if r.Ready == nil || r.Ready.Strategy != "hook" || r.Ready.TimeoutMS != 90000 || r.MessageIDs[0] != "m-1" {
+	want := effectiveReadySpec(&deliveryTestHarness{spec: shippedSpec})
+	if r.Ready == nil || r.Ready.Strategy != want.Strategy || r.Ready.SettleMS != int(want.Settle.Milliseconds()) || r.MessageIDs[0] != "m-1" {
 		t.Fatalf("request = %+v ready %+v", r, r.Ready)
 	}
 }
@@ -455,7 +457,7 @@ func TestConduitDelivery_OversizeUsesExec(t *testing.T) {
 					t.Fatalf("hub called %d times for an oversize flush", d.calls())
 				}
 				if execOK {
-					if err != nil || len(execs) == 0 || !strings.Contains(execs[0], "load-buffer") {
+					if err != nil || !execDelivered(execs) {
 						t.Fatalf("err %v execs %v; want delivered over exec", err, execs)
 					}
 					return
@@ -528,4 +530,272 @@ func TestConduitDelivery_AttachmentsUseExec(t *testing.T) {
 			t.Fatalf("hub calls %d, execs %v; want exec only", d.calls(), execs)
 		}
 	})
+}
+
+// execDelivered reports whether execs hold an exec delivery (a load-buffer
+// step), after any reachability probe.
+func execDelivered(execs []string) bool {
+	for _, e := range execs {
+		if strings.Contains(e, "load-buffer") {
+			return true
+		}
+	}
+	return false
+}
+
+// readyTestHarness is a delivery test harness with its own resolved ready
+// spec.
+type readyTestHarness struct {
+	deliveryTestHarness
+	ready api.ReadySpec
+}
+
+func (h *readyTestHarness) ReadySpec() api.ReadySpec { return h.ready }
+
+// TestConduitDelivery_EffectiveReadySpecBounds (review P2-R1): the
+// harness's resolved readiness spec, not the broker's default timings, is
+// checked against the route bounds before conduit is chosen. Out of bounds
+// uses exec (or fails, named, without exec); in bounds goes to the hub and
+// carries the spec unchanged.
+func TestConduitDelivery_EffectiveReadySpecBounds(t *testing.T) {
+	cases := map[string]struct {
+		spec  api.ReadySpec
+		field string
+	}{
+		"settle 11s":  {api.ReadySpec{Strategy: "hook", Settle: 11 * time.Second, Timeout: 90 * time.Second}, "ready.settle"},
+		"timeout 91s": {api.ReadySpec{Strategy: "hook", Settle: 1500 * time.Millisecond, Timeout: 91 * time.Second}, "ready.timeout"},
+		"delay 11s":   {api.ReadySpec{Strategy: "delay", Settle: 11 * time.Second}, "ready.settle"},
+	}
+	for name, tc := range cases {
+		for _, execOK := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s exec=%t", name, execOK), func(t *testing.T) {
+				var execs []string
+				m := newConduitTestManager(t, true, shippedSpec, &execs)
+				m.newHarness = func(string) api.Harness {
+					return &readyTestHarness{deliveryTestHarness: deliveryTestHarness{spec: shippedSpec}, ready: tc.spec}
+				}
+				if !execOK {
+					m.Runtime.(*runtime.MockRuntime).ExecFunc = func(context.Context, string, []string) (string, error) {
+						return "", errors.New("exec connector not configured")
+					}
+				}
+				d := &fakeDeliverer{answers: []fakeAnswer{answer(200, agentcontrol.OutcomeDelivered)}}
+				m.SetConduitDeliverer(d)
+				err := m.deliver(context.Background(), deliveryRequest{agentID: "test-agent", message: "x", messageIDs: []string{"m"}})
+				if d.calls() != 0 {
+					t.Fatalf("hub called for an out-of-bounds readiness spec")
+				}
+				if execOK {
+					if err != nil || !execDelivered(execs) {
+						t.Fatalf("err %v execs %v; want exec", err, execs)
+					}
+					return
+				}
+				var final *finalDeliveryError
+				if !errors.As(err, &final) || !strings.Contains(err.Error(), tc.field) || !strings.Contains(err.Error(), "exec unavailable") {
+					t.Fatalf("err = %v; want a final error naming %s", err, tc.field)
+				}
+			})
+		}
+	}
+	t.Run("in bounds", func(t *testing.T) {
+		var execs []string
+		m := newConduitTestManager(t, true, shippedSpec, &execs)
+		spec := api.ReadySpec{Strategy: "hook", Settle: 2 * time.Second, Timeout: 60 * time.Second}
+		m.newHarness = func(string) api.Harness {
+			return &readyTestHarness{deliveryTestHarness: deliveryTestHarness{spec: shippedSpec}, ready: spec}
+		}
+		d := &fakeDeliverer{answers: []fakeAnswer{answer(200, agentcontrol.OutcomeDelivered)}}
+		m.SetConduitDeliverer(d)
+		if err := m.deliver(context.Background(), deliveryRequest{agentID: "test-agent", message: "x", messageIDs: []string{"m"}, readyWanted: true}); err != nil {
+			t.Fatal(err)
+		}
+		if d.calls() != 1 || len(execs) != 0 {
+			t.Fatalf("calls %d execs %v", d.calls(), execs)
+		}
+		if r := d.reqs[0].Ready; r == nil || r.Strategy != "hook" || r.SettleMS != 2000 || r.TimeoutMS != 60000 {
+			t.Fatalf("ready block = %+v, want the harness spec unchanged", r)
+		}
+	})
+	t.Run("agent refuses its local spec", func(t *testing.T) {
+		var execs []string
+		m := newConduitTestManager(t, true, shippedSpec, &execs)
+		d := &fakeDeliverer{answers: []fakeAnswer{{status: 422, resp: agentcontrol.DeliverResponse{Outcome: agentcontrol.OutcomeOutOfBounds, Field: "ready.settle"}}}}
+		m.SetConduitDeliverer(d)
+		if err := m.deliver(context.Background(), deliveryRequest{agentID: "test-agent", message: "x", messageIDs: []string{"m"}}); err != nil {
+			t.Fatal(err)
+		}
+		if d.calls() != 1 || !execDelivered(execs) {
+			t.Fatalf("calls %d execs %v; want one refusal then exec at once", d.calls(), execs)
+		}
+	})
+}
+
+// TestConduitDelivery_InFlightDuplicateNeverFails (review FV1-N1): when the
+// hub answers that the same delivery is in flight under another call, this
+// call ends without an error: no exec fallback, no retry, and no failure
+// report that would fail the owner's rows (buffered callback or the
+// interrupt's synchronous answer to ExecuteAgentDM).
+func TestConduitDelivery_InFlightDuplicateNeverFails(t *testing.T) {
+	inFlight := fakeAnswer{status: 409, resp: agentcontrol.DeliverResponse{Outcome: agentcontrol.OutcomeInFlight}}
+	t.Run("interrupt", func(t *testing.T) {
+		var execs []string
+		m := newConduitTestManager(t, true, shippedSpec, &execs)
+		d := &fakeDeliverer{answers: []fakeAnswer{inFlight}}
+		m.SetConduitDeliverer(d)
+		if err := m.Message(WithDeliveryMessageID(context.Background(), "m-1"), "test-agent", "", "stop", true); err != nil {
+			t.Fatalf("interrupt answered %v; ExecuteAgentDM would fail the owner's row", err)
+		}
+		if d.calls() != 1 || len(execs) != 0 {
+			t.Fatalf("calls %d execs %v; want one call and no exec", d.calls(), execs)
+		}
+	})
+	t.Run("buffered", func(t *testing.T) {
+		var execs []string
+		m := newConduitTestManager(t, true, shippedSpec, &execs)
+		d := &fakeDeliverer{answers: []fakeAnswer{inFlight}}
+		m.SetConduitDeliverer(d)
+		done := make(chan struct{})
+		var failed atomic.Bool
+		m.msgBuffer = NewMessageBuffer(10*time.Millisecond, func(string, string, string, bool) error { return nil })
+		m.msgBuffer.deliverFlush = func(f bufferedFlush) error {
+			defer close(done)
+			return m.deliver(context.Background(), deliveryRequest{agentID: f.agentID, message: f.text, messageIDs: f.messageIDs})
+		}
+		defer m.msgBuffer.Close()
+		m.msgBuffer.sendWithID("test-agent", "", "hello", "m-1", func(error) { failed.Store(true) }, nil)
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("no flush")
+		}
+		time.Sleep(50 * time.Millisecond)
+		if failed.Load() {
+			t.Fatal("failure handler called: /message-failures would fail the owner's rows")
+		}
+		if d.calls() != 1 || len(execs) != 0 {
+			t.Fatalf("calls %d execs %v", d.calls(), execs)
+		}
+	})
+}
+
+// warnPreDelivery is attachment work that failed, as on a runtime without
+// exec: it appends the "not delivered" line to the text.
+type warnPreDelivery struct{}
+
+func (warnPreDelivery) BeforeText(context.Context, runtime.Runtime, string) string {
+	return "\n[attachment report.pdf not delivered]"
+}
+func (warnPreDelivery) Discard() {}
+
+// TestConduitDelivery_AttachmentsWithoutExec (review FV1-N2): where the
+// runtime has no exec, a message with attachments is still delivered: the
+// attachment work's "not delivered" lines are in the text, which goes over
+// conduit. Where exec exists, attachments stay on exec
+// (TestConduitDelivery_AttachmentsUseExec).
+func TestConduitDelivery_AttachmentsWithoutExec(t *testing.T) {
+	noExec := func(m *AgentManager) {
+		rt := m.Runtime.(*runtime.MockRuntime)
+		rt.ExecFunc = func(context.Context, string, []string) (string, error) {
+			return "", errors.New("exec connector not configured")
+		}
+		rt.ExecWithStdinFunc = func(context.Context, string, []string, io.Reader) (string, error) {
+			return "", errors.New("exec connector not configured")
+		}
+	}
+	t.Run("interrupt", func(t *testing.T) {
+		var execs []string
+		m := newConduitTestManager(t, true, shippedSpec, &execs)
+		noExec(m)
+		d := &fakeDeliverer{answers: []fakeAnswer{answer(200, agentcontrol.OutcomeDelivered)}}
+		m.SetConduitDeliverer(d)
+		ctx := WithPreDelivery(WithDeliveryMessageID(context.Background(), "m-1"), warnPreDelivery{})
+		if err := m.Message(ctx, "test-agent", "", "see file", true); err != nil {
+			t.Fatal(err)
+		}
+		if d.calls() != 1 || !strings.Contains(*d.reqs[0].Text, "see file") || !strings.Contains(*d.reqs[0].Text, "not delivered") {
+			t.Fatalf("calls %d; want the text with its warning over conduit", d.calls())
+		}
+	})
+	t.Run("buffered", func(t *testing.T) {
+		var execs []string
+		m := newConduitTestManager(t, true, shippedSpec, &execs)
+		noExec(m)
+		d := &fakeDeliverer{answers: []fakeAnswer{answer(200, agentcontrol.OutcomeDelivered)}}
+		m.SetConduitDeliverer(d)
+		done := make(chan error, 1)
+		m.msgBuffer = NewMessageBuffer(10*time.Millisecond, func(string, string, string, bool) error { return nil })
+		m.msgBuffer.preDeliver = func(ctx context.Context, _, _ string, pd PreDelivery) string { return pd.BeforeText(ctx, nil, "") }
+		m.msgBuffer.deliverFlush = func(f bufferedFlush) error {
+			err := m.deliver(context.Background(), deliveryRequest{agentID: f.agentID, message: f.text,
+				messageIDs: f.messageIDs, hasAttachments: f.hasAttachments})
+			done <- err
+			return err
+		}
+		defer m.msgBuffer.Close()
+		m.msgBuffer.sendWithID("test-agent", "", "see file", "m-1", nil, warnPreDelivery{})
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("no flush")
+		}
+		if d.calls() != 1 || !strings.Contains(*d.reqs[0].Text, "not delivered") {
+			t.Fatalf("calls %d; want the text with its warning over conduit", d.calls())
+		}
+	})
+}
+
+// TestConduitDelivery_InterruptWaitsBehindFlush (review P2-O1, design §2.3):
+// on conduit the injection lock is held across the hub call, which
+// includes the agent's readiness wait, so an interrupt that arrives
+// during a buffered flush waits for it and never overtakes it.
+func TestConduitDelivery_InterruptWaitsBehindFlush(t *testing.T) {
+	var execs []string
+	m := newConduitTestManager(t, true, shippedSpec, &execs)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var order []string
+	var mu sync.Mutex
+	d := &fakeDeliverer{answers: []fakeAnswer{answer(200, agentcontrol.OutcomeDelivered)}}
+	first := true
+	d.onCall = func() {
+		mu.Lock()
+		isFirst := first
+		first = false
+		mu.Unlock()
+		if isFirst {
+			close(entered)
+			<-release
+		}
+	}
+	m.SetConduitDeliverer(d)
+	flushDone := make(chan struct{})
+	go func() {
+		defer close(flushDone)
+		_ = m.deliver(context.Background(), deliveryRequest{agentID: "test-agent", message: "buffered", messageIDs: []string{"m-1"}, readyWanted: true})
+		mu.Lock()
+		order = append(order, "flush")
+		mu.Unlock()
+	}()
+	<-entered
+	intDone := make(chan struct{})
+	go func() {
+		defer close(intDone)
+		_ = m.Message(WithDeliveryMessageID(context.Background(), "m-2"), "test-agent", "", "stop", true)
+		mu.Lock()
+		order = append(order, "interrupt")
+		mu.Unlock()
+	}()
+	time.Sleep(100 * time.Millisecond)
+	if d.calls() != 1 {
+		t.Fatalf("the interrupt reached the hub (%d calls) while the flush held the lock", d.calls())
+	}
+	close(release)
+	<-flushDone
+	<-intDone
+	if d.calls() != 2 || order[0] != "flush" || d.reqs[1].Op != agentcontrol.OpInterruptPaste {
+		t.Fatalf("calls %d order %v", d.calls(), order)
+	}
 }

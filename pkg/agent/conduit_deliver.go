@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/tmuxdeliver"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -199,6 +200,17 @@ func classifyConduitAnswer(status int, resp agentcontrol.DeliverResponse, err er
 		return conduitDone, nil
 	case status == http.StatusOK && resp.Outcome == agentcontrol.OutcomePartial:
 		return conduitDone, &PartialDeliveryError{Err: fmt.Errorf("partial delivery over conduit (stage %s)", resp.Stage)}
+	case status == http.StatusConflict && resp.Outcome == agentcontrol.OutcomeInFlight:
+		// The hub refused a duplicate of a delivery another call owns. That
+		// owner pastes (or not) and reports the outcome; this call must not
+		// fall back to exec, retry, or report a failure of the owner's
+		// rows (review FV1-N1).
+		return conduitDone, nil
+	case status == http.StatusUnprocessableEntity && resp.Outcome == agentcontrol.OutcomeOutOfBounds:
+		// The agent image's own readiness spec is outside the route
+		// bounds; nothing was done. Exec applies the spec in full
+		// (review P2-R1).
+		return conduitUseExec, fmt.Errorf("agent readiness spec outside conduit route bounds: %s", resp.Field)
 	case status == http.StatusConflict && resp.Outcome == agentcontrol.OutcomeInProgress:
 		return conduitDone, &PartialDeliveryError{Err: errors.New("delivery over conduit still in progress on the agent")}
 	case status == http.StatusConflict && resp.Outcome == agentcontrol.OutcomeBusy:
@@ -266,31 +278,58 @@ func deliveryMessageIDFromContext(ctx context.Context) string {
 // the route bounds are checked against before a conduit delivery (design
 // v2.22 §1.7): no value is clamped; a setting outside the bounds sends the
 // delivery over exec.
-func conduitSettings(h api.Harness, ds api.DeliverySpec, timings harnessReadyTimings) tmuxdeliver.Settings {
+func conduitSettings(h api.Harness, ds api.DeliverySpec) tmuxdeliver.Settings {
 	interrupt := h.GetInterruptSequence()
 	if len(interrupt) == 0 {
 		interrupt = []string{h.GetInterruptKey()}
 	}
-	t := timings.withDefaults()
+	rs := effectiveReadySpec(h)
 	return tmuxdeliver.Settings{
 		SubmitKeys:       ds.SubmitKeys,
 		InterruptKeys:    interrupt,
 		ExtraSubmits:     ds.ExtraSubmits,
 		ExtraSubmitDelay: ds.ExtraSubmitDelay,
-		ReadyStrategy:    "hook",
-		ReadySettle:      t.Settle,
-		ReadyTimeout:     t.Deadline,
+		ReadyStrategy:    rs.Strategy,
+		ReadySettle:      rs.Settle,
+		ReadyTimeout:     rs.Timeout,
 	}
 }
 
-// conduitReadySpec is the readiness block of a conduit paste: the broker's
-// own wait timings, which sciontool uses when the image writes no ready
-// spec of its own (the image's spec replaces them, as on the exec path).
-func conduitReadySpec(timings harnessReadyTimings) *agentcontrol.ReadySpec {
-	t := timings.withDefaults()
-	return &agentcontrol.ReadySpec{
-		Strategy:  "hook",
-		SettleMS:  int(t.Settle.Milliseconds()),
-		TimeoutMS: int(t.Deadline.Milliseconds()),
+// effectiveReadySpec is the harness's resolved readiness spec, the one the
+// agent was launched with (it reaches the container as the init-run spec):
+// what the route bounds are checked against (review P2-R1). A harness
+// without one gets the hook defaults.
+func effectiveReadySpec(h api.Harness) api.ReadySpec {
+	rs := h.ReadySpec()
+	if rs.Strategy == "" {
+		rs = state.DefaultReadySpec(state.ReadyStrategyHook)
 	}
+	return rs
+}
+
+// conduitReadySpec is the readiness block of a conduit paste: the
+// harness's resolved spec, which sciontool uses when the image writes no
+// ready spec of its own. When the image does, sciontool checks that one
+// against the bounds too and refuses rather than shortens it.
+func conduitReadySpec(h api.Harness) *agentcontrol.ReadySpec {
+	rs := effectiveReadySpec(h)
+	return &agentcontrol.ReadySpec{
+		Strategy:  rs.Strategy,
+		SettleMS:  int(rs.Settle.Milliseconds()),
+		TimeoutMS: int(rs.Timeout.Milliseconds()),
+	}
+}
+
+// execReachableTimeout bounds the exec probe.
+const execReachableTimeout = 15 * time.Second
+
+// execReachable reports whether the runtime can exec in containerID now:
+// one cheap, fixed tmux command (the target check). It is used only where a
+// conduit-capable delivery would otherwise go over exec (attachments, a
+// fallback), so it never runs on the plain exec path.
+func (m *AgentManager) execReachable(ctx context.Context, containerID string) bool {
+	ctx, cancel := context.WithTimeout(ctx, execReachableTimeout)
+	defer cancel()
+	_, err := m.Runtime.Exec(ctx, containerID, []string{"tmux", "has-session", "-t", tmuxdeliver.Target})
+	return err == nil
 }
