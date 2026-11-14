@@ -289,6 +289,13 @@ const (
 	// unused gap of the range.
 	LockPendingSecretExpiry AdvisoryLockKey = 0x5C10001B
 
+	// LockScheduledExecRunSweep guards the scheduled exec run sweeper
+	// ("scheduled-exec-run-sweep", ptone/scion#7883), so one replica per tick
+	// polls the outcomes of unfinished exec runs no live tracker owns and
+	// records runs past their lease as abandoned. A value in an unused gap of
+	// the range.
+	LockScheduledExecRunSweep AdvisoryLockKey = 0x5C10001C
+
 	// LockPendingSecretOwnerWrite is the CLASS ID for the per-owner pending
 	// secret write lock: a transaction-scoped
 	// pg_advisory_xact_lock(classid, objid) with objid

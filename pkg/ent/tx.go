@@ -172,6 +172,8 @@ type Tx struct {
 	Schedule *ScheduleClient
 	// ScheduledEvent is the client for interacting with the ScheduledEvent builders.
 	ScheduledEvent *ScheduledEventClient
+	// ScheduledExecRun is the client for interacting with the ScheduledExecRun builders.
+	ScheduledExecRun *ScheduledExecRunClient
 	// Secret is the client for interacting with the Secret builders.
 	Secret *SecretClient
 	// Skill is the client for interacting with the Skill builders.
@@ -419,6 +421,7 @@ func (tx *Tx) init() {
 	tx.RuntimeOrphan = NewRuntimeOrphanClient(tx.config)
 	tx.Schedule = NewScheduleClient(tx.config)
 	tx.ScheduledEvent = NewScheduledEventClient(tx.config)
+	tx.ScheduledExecRun = NewScheduledExecRunClient(tx.config)
 	tx.Secret = NewSecretClient(tx.config)
 	tx.Skill = NewSkillClient(tx.config)
 	tx.SkillInjection = NewSkillInjectionClient(tx.config)

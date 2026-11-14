@@ -26,6 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schedule"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
@@ -1240,19 +1241,43 @@ func (s *ScheduleStore) ListScheduledEvents(ctx context.Context, filter store.Sc
 // expired and failed events); an event with no fired_at (a cancelled one)
 // falls back to created. So an event scheduled far ahead keeps its outcome for
 // the full period after it fires (ptone/scion#4517).
+//
+// The scheduled exec run of each purged event (ptone/scion#7883) is deleted
+// in the same transaction, before the events, by the same predicate; no
+// cascade is relied on.
 func (s *ScheduleStore) PurgeOldScheduledEvents(ctx context.Context, cutoff time.Time) (int, error) {
-	n, err := s.client.ScheduledEvent.Delete().
-		Where(
-			scheduledevent.StatusNotIn(store.ScheduledEventPending, store.ScheduledEventFiring),
-			scheduledevent.Or(
-				scheduledevent.FiredAtLT(cutoff),
-				scheduledevent.And(
-					scheduledevent.FiredAtIsNil(),
-					scheduledevent.CreatedLT(cutoff),
-				),
+	purgeable := []predicate.ScheduledEvent{
+		scheduledevent.StatusNotIn(store.ScheduledEventPending, store.ScheduledEventFiring),
+		scheduledevent.Or(
+			scheduledevent.FiredAtLT(cutoff),
+			scheduledevent.And(
+				scheduledevent.FiredAtIsNil(),
+				scheduledevent.CreatedLT(cutoff),
 			),
-		).
-		Exec(ctx)
+		),
+	}
+	var n int
+	err := runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
+		ids, err := c.ScheduledEvent.Query().Where(purgeable...).IDs(ctx)
+		if err != nil {
+			return err
+		}
+		for start := 0; start < len(ids); start += scheduledExecRunsByEventChunk {
+			end := min(start+scheduledExecRunsByEventChunk, len(ids))
+			chunk := ids[start:end]
+			if _, err := c.ScheduledExecRun.Delete().Where(scheduledexecrun.IDIn(chunk...)).Exec(ctx); err != nil {
+				return err
+			}
+			deleted, err := c.ScheduledEvent.Delete().
+				Where(append([]predicate.ScheduledEvent{scheduledevent.IDIn(chunk...)}, purgeable...)...).
+				Exec(ctx)
+			if err != nil {
+				return err
+			}
+			n += deleted
+		}
+		return nil
+	})
 	if err != nil {
 		return 0, err
 	}

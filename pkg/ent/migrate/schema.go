@@ -3154,6 +3154,60 @@ var (
 			},
 		},
 	}
+	// ScheduledExecRunsColumns holds the columns for the "scheduled_exec_runs" table.
+	ScheduledExecRunsColumns = []*schema.Column{
+		{Name: "event_id", Type: field.TypeUUID},
+		{Name: "schedule_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "project_id", Type: field.TypeUUID},
+		{Name: "target_agent_id", Type: field.TypeUUID},
+		{Name: "initiator_principal_kind", Type: field.TypeString, Default: ""},
+		{Name: "initiator_principal_id", Type: field.TypeString, Default: ""},
+		{Name: "initiator_credential_kind", Type: field.TypeString, Default: ""},
+		{Name: "initiator_credential_id", Type: field.TypeString, Default: ""},
+		{Name: "authorization_revision", Type: field.TypeInt, Default: 0},
+		{Name: "executor_kind", Type: field.TypeString, Default: ""},
+		{Name: "executor_id", Type: field.TypeString, Default: ""},
+		{Name: "command_sha256", Type: field.TypeString, Size: 64},
+		{Name: "argc", Type: field.TypeInt},
+		{Name: "timeout_seconds", Type: field.TypeInt},
+		{Name: "started_at", Type: field.TypeTime},
+		{Name: "lease_until", Type: field.TypeTime},
+		{Name: "finished_at", Type: field.TypeTime, Nullable: true},
+		{Name: "outcome", Type: field.TypeEnum, Enums: []string{"starting", "running", "ok", "nonzero", "timeout", "skipped", "error", "abandoned"}, Default: "starting"},
+		{Name: "exit_code", Type: field.TypeInt, Nullable: true},
+		{Name: "duration_ms", Type: field.TypeInt64, Nullable: true},
+		{Name: "output_bytes", Type: field.TypeInt64, Nullable: true},
+		{Name: "runtime", Type: field.TypeString, Default: ""},
+		{Name: "launch_id", Type: field.TypeString, Default: ""},
+	}
+	// ScheduledExecRunsTable holds the schema information for the "scheduled_exec_runs" table.
+	ScheduledExecRunsTable = &schema.Table{
+		Name:       "scheduled_exec_runs",
+		Columns:    ScheduledExecRunsColumns,
+		PrimaryKey: []*schema.Column{ScheduledExecRunsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "scheduledexecrun_schedule_id_finished_at",
+				Unique:  false,
+				Columns: []*schema.Column{ScheduledExecRunsColumns[1], ScheduledExecRunsColumns[16]},
+			},
+			{
+				Name:    "scheduledexecrun_target_agent_id_finished_at",
+				Unique:  false,
+				Columns: []*schema.Column{ScheduledExecRunsColumns[3], ScheduledExecRunsColumns[16]},
+			},
+			{
+				Name:    "scheduledexecrun_project_id",
+				Unique:  false,
+				Columns: []*schema.Column{ScheduledExecRunsColumns[2]},
+			},
+			{
+				Name:    "scheduledexecrun_finished_at",
+				Unique:  false,
+				Columns: []*schema.Column{ScheduledExecRunsColumns[16]},
+			},
+		},
+	}
 	// SecretsColumns holds the columns for the "secrets" table.
 	SecretsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -3880,6 +3934,7 @@ var (
 		RuntimeOrphansTable,
 		SchedulesTable,
 		ScheduledEventsTable,
+		ScheduledExecRunsTable,
 		SecretsTable,
 		SkillsTable,
 		SkillInjectionsTable,
@@ -4101,6 +4156,9 @@ func init() {
 	}
 	ScheduledEventsTable.Annotation = &entsql.Annotation{
 		Table: "scheduled_events",
+	}
+	ScheduledExecRunsTable.Annotation = &entsql.Annotation{
+		Table: "scheduled_exec_runs",
 	}
 	SecretsTable.Annotation = &entsql.Annotation{
 		Table: "secrets",

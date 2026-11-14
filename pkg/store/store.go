@@ -473,6 +473,9 @@ type Store interface {
 	// Schedule operations (Recurring Schedules)
 	ScheduleStore
 
+	// Scheduled exec run operations (ptone/scion#7883)
+	ScheduledExecRunStore
+
 	// GCP Service Account operations (GCP Identity for Agents)
 	GCPServiceAccountStore
 
@@ -3277,8 +3280,42 @@ type ScheduledEventStore interface {
 
 	// PurgeOldScheduledEvents removes completed events (excluding pending and
 	// firing) before cutoff: fired_at before cutoff, or, for an event with no
-	// fired_at (a cancelled one), created before cutoff.
+	// fired_at (a cancelled one), created before cutoff. The scheduled exec
+	// run of each removed event is removed in the same transaction, first.
 	PurgeOldScheduledEvents(ctx context.Context, cutoff time.Time) (int, error)
+}
+
+// ScheduledExecRunStore manages the run records of scheduled exec events
+// (ptone/scion#7883).
+type ScheduledExecRunStore interface {
+	// CreateScheduledExecRun inserts the run record of an admitted exec
+	// event, with Outcome starting (when empty) and FinishedAt nil unless
+	// set. Returns ErrAlreadyExists when the event already has a run.
+	CreateScheduledExecRun(ctx context.Context, run *ScheduledExecRun) error
+
+	// GetScheduledExecRun returns the run of an event, or ErrNotFound.
+	GetScheduledExecRun(ctx context.Context, eventID string) (*ScheduledExecRun, error)
+
+	// ListScheduledExecRunsByEvent returns the runs of the given events that
+	// exist, keyed by event ID.
+	ListScheduledExecRunsByEvent(ctx context.Context, eventIDs []string) (map[string]ScheduledExecRun, error)
+
+	// MarkScheduledExecRunRunning moves an unfinished run from starting to
+	// running. It reports whether the row changed; a finished run, or one
+	// already running, is left as is.
+	MarkScheduledExecRunRunning(ctx context.Context, eventID string) (bool, error)
+
+	// FinishScheduledExecRun records a run's final outcome with a
+	// compare-and-set on FinishedAt IS NULL: the first writer wins and
+	// later writers get false with no change. When it wins and
+	// fin.EventStatus is set, the event's status and error are written in the
+	// same transaction, while the event is still fired or expired.
+	FinishScheduledExecRun(ctx context.Context, fin ScheduledExecRunFinish) (bool, error)
+
+	// ListUnfinishedScheduledExecRuns returns up to limit unfinished runs
+	// (FinishedAt nil) whose event ID sorts after afterEventID ("" for the
+	// first page), ordered by event ID.
+	ListUnfinishedScheduledExecRuns(ctx context.Context, afterEventID string, limit int) ([]ScheduledExecRun, error)
 }
 
 // =============================================================================

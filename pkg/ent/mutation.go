@@ -93,6 +93,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimeorphan"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schedule"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schema"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skill"
@@ -206,6 +207,7 @@ const (
 	TypeRuntimeOrphan                 = "RuntimeOrphan"
 	TypeSchedule                      = "Schedule"
 	TypeScheduledEvent                = "ScheduledEvent"
+	TypeScheduledExecRun              = "ScheduledExecRun"
 	TypeSecret                        = "Secret"
 	TypeSkill                         = "Skill"
 	TypeSkillInjection                = "SkillInjection"
@@ -93896,6 +93898,1774 @@ func (m *ScheduledEventMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *ScheduledEventMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown ScheduledEvent edge %s", name)
+}
+
+// ScheduledExecRunMutation represents an operation that mutates the ScheduledExecRun nodes in the graph.
+type ScheduledExecRunMutation struct {
+	config
+	op                        Op
+	typ                       string
+	id                        *uuid.UUID
+	schedule_id               *uuid.UUID
+	project_id                *uuid.UUID
+	target_agent_id           *uuid.UUID
+	initiator_principal_kind  *string
+	initiator_principal_id    *string
+	initiator_credential_kind *string
+	initiator_credential_id   *string
+	authorization_revision    *int
+	addauthorization_revision *int
+	executor_kind             *string
+	executor_id               *string
+	command_sha256            *string
+	argc                      *int
+	addargc                   *int
+	timeout_seconds           *int
+	addtimeout_seconds        *int
+	started_at                *time.Time
+	lease_until               *time.Time
+	finished_at               *time.Time
+	outcome                   *scheduledexecrun.Outcome
+	exit_code                 *int
+	addexit_code              *int
+	duration_ms               *int64
+	addduration_ms            *int64
+	output_bytes              *int64
+	addoutput_bytes           *int64
+	runtime                   *string
+	launch_id                 *string
+	clearedFields             map[string]struct{}
+	done                      bool
+	oldValue                  func(context.Context) (*ScheduledExecRun, error)
+	predicates                []predicate.ScheduledExecRun
+}
+
+var _ ent.Mutation = (*ScheduledExecRunMutation)(nil)
+
+// scheduledexecrunOption allows management of the mutation configuration using functional options.
+type scheduledexecrunOption func(*ScheduledExecRunMutation)
+
+// newScheduledExecRunMutation creates new mutation for the ScheduledExecRun entity.
+func newScheduledExecRunMutation(c config, op Op, opts ...scheduledexecrunOption) *ScheduledExecRunMutation {
+	m := &ScheduledExecRunMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeScheduledExecRun,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withScheduledExecRunID sets the ID field of the mutation.
+func withScheduledExecRunID(id uuid.UUID) scheduledexecrunOption {
+	return func(m *ScheduledExecRunMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *ScheduledExecRun
+		)
+		m.oldValue = func(ctx context.Context) (*ScheduledExecRun, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().ScheduledExecRun.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withScheduledExecRun sets the old ScheduledExecRun of the mutation.
+func withScheduledExecRun(node *ScheduledExecRun) scheduledexecrunOption {
+	return func(m *ScheduledExecRunMutation) {
+		m.oldValue = func(context.Context) (*ScheduledExecRun, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m ScheduledExecRunMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m ScheduledExecRunMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of ScheduledExecRun entities.
+func (m *ScheduledExecRunMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *ScheduledExecRunMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *ScheduledExecRunMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().ScheduledExecRun.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetScheduleID sets the "schedule_id" field.
+func (m *ScheduledExecRunMutation) SetScheduleID(u uuid.UUID) {
+	m.schedule_id = &u
+}
+
+// ScheduleID returns the value of the "schedule_id" field in the mutation.
+func (m *ScheduledExecRunMutation) ScheduleID() (r uuid.UUID, exists bool) {
+	v := m.schedule_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldScheduleID returns the old "schedule_id" field's value of the ScheduledExecRun entity.
+// If the ScheduledExecRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledExecRunMutation) OldScheduleID(ctx context.Context) (v *uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldScheduleID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldScheduleID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldScheduleID: %w", err)
+	}
+	return oldValue.ScheduleID, nil
+}
+
+// ClearScheduleID clears the value of the "schedule_id" field.
+func (m *ScheduledExecRunMutation) ClearScheduleID() {
+	m.schedule_id = nil
+	m.clearedFields[scheduledexecrun.FieldScheduleID] = struct{}{}
+}
+
+// ScheduleIDCleared returns if the "schedule_id" field was cleared in this mutation.
+func (m *ScheduledExecRunMutation) ScheduleIDCleared() bool {
+	_, ok := m.clearedFields[scheduledexecrun.FieldScheduleID]
+	return ok
+}
+
+// ResetScheduleID resets all changes to the "schedule_id" field.
+func (m *ScheduledExecRunMutation) ResetScheduleID() {
+	m.schedule_id = nil
+	delete(m.clearedFields, scheduledexecrun.FieldScheduleID)
+}
+
+// SetProjectID sets the "project_id" field.
+func (m *ScheduledExecRunMutation) SetProjectID(u uuid.UUID) {
+	m.project_id = &u
+}
+
+// ProjectID returns the value of the "project_id" field in the mutation.
+func (m *ScheduledExecRunMutation) ProjectID() (r uuid.UUID, exists bool) {
+	v := m.project_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldProjectID returns the old "project_id" field's value of the ScheduledExecRun entity.
+// If the ScheduledExecRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledExecRunMutation) OldProjectID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldProjectID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldProjectID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldProjectID: %w", err)
+	}
+	return oldValue.ProjectID, nil
+}
+
+// ResetProjectID resets all changes to the "project_id" field.
+func (m *ScheduledExecRunMutation) ResetProjectID() {
+	m.project_id = nil
+}
+
+// SetTargetAgentID sets the "target_agent_id" field.
+func (m *ScheduledExecRunMutation) SetTargetAgentID(u uuid.UUID) {
+	m.target_agent_id = &u
+}
+
+// TargetAgentID returns the value of the "target_agent_id" field in the mutation.
+func (m *ScheduledExecRunMutation) TargetAgentID() (r uuid.UUID, exists bool) {
+	v := m.target_agent_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTargetAgentID returns the old "target_agent_id" field's value of the ScheduledExecRun entity.
+// If the ScheduledExecRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledExecRunMutation) OldTargetAgentID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTargetAgentID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTargetAgentID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTargetAgentID: %w", err)
+	}
+	return oldValue.TargetAgentID, nil
+}
+
+// ResetTargetAgentID resets all changes to the "target_agent_id" field.
+func (m *ScheduledExecRunMutation) ResetTargetAgentID() {
+	m.target_agent_id = nil
+}
+
+// SetInitiatorPrincipalKind sets the "initiator_principal_kind" field.
+func (m *ScheduledExecRunMutation) SetInitiatorPrincipalKind(s string) {
+	m.initiator_principal_kind = &s
+}
+
+// InitiatorPrincipalKind returns the value of the "initiator_principal_kind" field in the mutation.
+func (m *ScheduledExecRunMutation) InitiatorPrincipalKind() (r string, exists bool) {
+	v := m.initiator_principal_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInitiatorPrincipalKind returns the old "initiator_principal_kind" field's value of the ScheduledExecRun entity.
+// If the ScheduledExecRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledExecRunMutation) OldInitiatorPrincipalKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInitiatorPrincipalKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInitiatorPrincipalKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInitiatorPrincipalKind: %w", err)
+	}
+	return oldValue.InitiatorPrincipalKind, nil
+}
+
+// ResetInitiatorPrincipalKind resets all changes to the "initiator_principal_kind" field.
+func (m *ScheduledExecRunMutation) ResetInitiatorPrincipalKind() {
+	m.initiator_principal_kind = nil
+}
+
+// SetInitiatorPrincipalID sets the "initiator_principal_id" field.
+func (m *ScheduledExecRunMutation) SetInitiatorPrincipalID(s string) {
+	m.initiator_principal_id = &s
+}
+
+// InitiatorPrincipalID returns the value of the "initiator_principal_id" field in the mutation.
+func (m *ScheduledExecRunMutation) InitiatorPrincipalID() (r string, exists bool) {
+	v := m.initiator_principal_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInitiatorPrincipalID returns the old "initiator_principal_id" field's value of the ScheduledExecRun entity.
+// If the ScheduledExecRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledExecRunMutation) OldInitiatorPrincipalID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInitiatorPrincipalID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInitiatorPrincipalID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInitiatorPrincipalID: %w", err)
+	}
+	return oldValue.InitiatorPrincipalID, nil
+}
+
+// ResetInitiatorPrincipalID resets all changes to the "initiator_principal_id" field.
+func (m *ScheduledExecRunMutation) ResetInitiatorPrincipalID() {
+	m.initiator_principal_id = nil
+}
+
+// SetInitiatorCredentialKind sets the "initiator_credential_kind" field.
+func (m *ScheduledExecRunMutation) SetInitiatorCredentialKind(s string) {
+	m.initiator_credential_kind = &s
+}
+
+// InitiatorCredentialKind returns the value of the "initiator_credential_kind" field in the mutation.
+func (m *ScheduledExecRunMutation) InitiatorCredentialKind() (r string, exists bool) {
+	v := m.initiator_credential_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInitiatorCredentialKind returns the old "initiator_credential_kind" field's value of the ScheduledExecRun entity.
+// If the ScheduledExecRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledExecRunMutation) OldInitiatorCredentialKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInitiatorCredentialKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInitiatorCredentialKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInitiatorCredentialKind: %w", err)
+	}
+	return oldValue.InitiatorCredentialKind, nil
+}
+
+// ResetInitiatorCredentialKind resets all changes to the "initiator_credential_kind" field.
+func (m *ScheduledExecRunMutation) ResetInitiatorCredentialKind() {
+	m.initiator_credential_kind = nil
+}
+
+// SetInitiatorCredentialID sets the "initiator_credential_id" field.
+func (m *ScheduledExecRunMutation) SetInitiatorCredentialID(s string) {
+	m.initiator_credential_id = &s
+}
+
+// InitiatorCredentialID returns the value of the "initiator_credential_id" field in the mutation.
+func (m *ScheduledExecRunMutation) InitiatorCredentialID() (r string, exists bool) {
+	v := m.initiator_credential_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInitiatorCredentialID returns the old "initiator_credential_id" field's value of the ScheduledExecRun entity.
+// If the ScheduledExecRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledExecRunMutation) OldInitiatorCredentialID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInitiatorCredentialID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInitiatorCredentialID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInitiatorCredentialID: %w", err)
+	}
+	return oldValue.InitiatorCredentialID, nil
+}
+
+// ResetInitiatorCredentialID resets all changes to the "initiator_credential_id" field.
+func (m *ScheduledExecRunMutation) ResetInitiatorCredentialID() {
+	m.initiator_credential_id = nil
+}
+
+// SetAuthorizationRevision sets the "authorization_revision" field.
+func (m *ScheduledExecRunMutation) SetAuthorizationRevision(i int) {
+	m.authorization_revision = &i
+	m.addauthorization_revision = nil
+}
+
+// AuthorizationRevision returns the value of the "authorization_revision" field in the mutation.
+func (m *ScheduledExecRunMutation) AuthorizationRevision() (r int, exists bool) {
+	v := m.authorization_revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAuthorizationRevision returns the old "authorization_revision" field's value of the ScheduledExecRun entity.
+// If the ScheduledExecRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledExecRunMutation) OldAuthorizationRevision(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAuthorizationRevision is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAuthorizationRevision requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAuthorizationRevision: %w", err)
+	}
+	return oldValue.AuthorizationRevision, nil
+}
+
+// AddAuthorizationRevision adds i to the "authorization_revision" field.
+func (m *ScheduledExecRunMutation) AddAuthorizationRevision(i int) {
+	if m.addauthorization_revision != nil {
+		*m.addauthorization_revision += i
+	} else {
+		m.addauthorization_revision = &i
+	}
+}
+
+// AddedAuthorizationRevision returns the value that was added to the "authorization_revision" field in this mutation.
+func (m *ScheduledExecRunMutation) AddedAuthorizationRevision() (r int, exists bool) {
+	v := m.addauthorization_revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetAuthorizationRevision resets all changes to the "authorization_revision" field.
+func (m *ScheduledExecRunMutation) ResetAuthorizationRevision() {
+	m.authorization_revision = nil
+	m.addauthorization_revision = nil
+}
+
+// SetExecutorKind sets the "executor_kind" field.
+func (m *ScheduledExecRunMutation) SetExecutorKind(s string) {
+	m.executor_kind = &s
+}
+
+// ExecutorKind returns the value of the "executor_kind" field in the mutation.
+func (m *ScheduledExecRunMutation) ExecutorKind() (r string, exists bool) {
+	v := m.executor_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldExecutorKind returns the old "executor_kind" field's value of the ScheduledExecRun entity.
+// If the ScheduledExecRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledExecRunMutation) OldExecutorKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldExecutorKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldExecutorKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldExecutorKind: %w", err)
+	}
+	return oldValue.ExecutorKind, nil
+}
+
+// ResetExecutorKind resets all changes to the "executor_kind" field.
+func (m *ScheduledExecRunMutation) ResetExecutorKind() {
+	m.executor_kind = nil
+}
+
+// SetExecutorID sets the "executor_id" field.
+func (m *ScheduledExecRunMutation) SetExecutorID(s string) {
+	m.executor_id = &s
+}
+
+// ExecutorID returns the value of the "executor_id" field in the mutation.
+func (m *ScheduledExecRunMutation) ExecutorID() (r string, exists bool) {
+	v := m.executor_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldExecutorID returns the old "executor_id" field's value of the ScheduledExecRun entity.
+// If the ScheduledExecRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledExecRunMutation) OldExecutorID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldExecutorID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldExecutorID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldExecutorID: %w", err)
+	}
+	return oldValue.ExecutorID, nil
+}
+
+// ResetExecutorID resets all changes to the "executor_id" field.
+func (m *ScheduledExecRunMutation) ResetExecutorID() {
+	m.executor_id = nil
+}
+
+// SetCommandSha256 sets the "command_sha256" field.
+func (m *ScheduledExecRunMutation) SetCommandSha256(s string) {
+	m.command_sha256 = &s
+}
+
+// CommandSha256 returns the value of the "command_sha256" field in the mutation.
+func (m *ScheduledExecRunMutation) CommandSha256() (r string, exists bool) {
+	v := m.command_sha256
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCommandSha256 returns the old "command_sha256" field's value of the ScheduledExecRun entity.
+// If the ScheduledExecRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledExecRunMutation) OldCommandSha256(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCommandSha256 is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCommandSha256 requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCommandSha256: %w", err)
+	}
+	return oldValue.CommandSha256, nil
+}
+
+// ResetCommandSha256 resets all changes to the "command_sha256" field.
+func (m *ScheduledExecRunMutation) ResetCommandSha256() {
+	m.command_sha256 = nil
+}
+
+// SetArgc sets the "argc" field.
+func (m *ScheduledExecRunMutation) SetArgc(i int) {
+	m.argc = &i
+	m.addargc = nil
+}
+
+// Argc returns the value of the "argc" field in the mutation.
+func (m *ScheduledExecRunMutation) Argc() (r int, exists bool) {
+	v := m.argc
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldArgc returns the old "argc" field's value of the ScheduledExecRun entity.
+// If the ScheduledExecRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledExecRunMutation) OldArgc(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldArgc is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldArgc requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldArgc: %w", err)
+	}
+	return oldValue.Argc, nil
+}
+
+// AddArgc adds i to the "argc" field.
+func (m *ScheduledExecRunMutation) AddArgc(i int) {
+	if m.addargc != nil {
+		*m.addargc += i
+	} else {
+		m.addargc = &i
+	}
+}
+
+// AddedArgc returns the value that was added to the "argc" field in this mutation.
+func (m *ScheduledExecRunMutation) AddedArgc() (r int, exists bool) {
+	v := m.addargc
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetArgc resets all changes to the "argc" field.
+func (m *ScheduledExecRunMutation) ResetArgc() {
+	m.argc = nil
+	m.addargc = nil
+}
+
+// SetTimeoutSeconds sets the "timeout_seconds" field.
+func (m *ScheduledExecRunMutation) SetTimeoutSeconds(i int) {
+	m.timeout_seconds = &i
+	m.addtimeout_seconds = nil
+}
+
+// TimeoutSeconds returns the value of the "timeout_seconds" field in the mutation.
+func (m *ScheduledExecRunMutation) TimeoutSeconds() (r int, exists bool) {
+	v := m.timeout_seconds
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTimeoutSeconds returns the old "timeout_seconds" field's value of the ScheduledExecRun entity.
+// If the ScheduledExecRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledExecRunMutation) OldTimeoutSeconds(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTimeoutSeconds is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTimeoutSeconds requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTimeoutSeconds: %w", err)
+	}
+	return oldValue.TimeoutSeconds, nil
+}
+
+// AddTimeoutSeconds adds i to the "timeout_seconds" field.
+func (m *ScheduledExecRunMutation) AddTimeoutSeconds(i int) {
+	if m.addtimeout_seconds != nil {
+		*m.addtimeout_seconds += i
+	} else {
+		m.addtimeout_seconds = &i
+	}
+}
+
+// AddedTimeoutSeconds returns the value that was added to the "timeout_seconds" field in this mutation.
+func (m *ScheduledExecRunMutation) AddedTimeoutSeconds() (r int, exists bool) {
+	v := m.addtimeout_seconds
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetTimeoutSeconds resets all changes to the "timeout_seconds" field.
+func (m *ScheduledExecRunMutation) ResetTimeoutSeconds() {
+	m.timeout_seconds = nil
+	m.addtimeout_seconds = nil
+}
+
+// SetStartedAt sets the "started_at" field.
+func (m *ScheduledExecRunMutation) SetStartedAt(t time.Time) {
+	m.started_at = &t
+}
+
+// StartedAt returns the value of the "started_at" field in the mutation.
+func (m *ScheduledExecRunMutation) StartedAt() (r time.Time, exists bool) {
+	v := m.started_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStartedAt returns the old "started_at" field's value of the ScheduledExecRun entity.
+// If the ScheduledExecRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledExecRunMutation) OldStartedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStartedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStartedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStartedAt: %w", err)
+	}
+	return oldValue.StartedAt, nil
+}
+
+// ResetStartedAt resets all changes to the "started_at" field.
+func (m *ScheduledExecRunMutation) ResetStartedAt() {
+	m.started_at = nil
+}
+
+// SetLeaseUntil sets the "lease_until" field.
+func (m *ScheduledExecRunMutation) SetLeaseUntil(t time.Time) {
+	m.lease_until = &t
+}
+
+// LeaseUntil returns the value of the "lease_until" field in the mutation.
+func (m *ScheduledExecRunMutation) LeaseUntil() (r time.Time, exists bool) {
+	v := m.lease_until
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLeaseUntil returns the old "lease_until" field's value of the ScheduledExecRun entity.
+// If the ScheduledExecRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledExecRunMutation) OldLeaseUntil(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLeaseUntil is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLeaseUntil requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLeaseUntil: %w", err)
+	}
+	return oldValue.LeaseUntil, nil
+}
+
+// ResetLeaseUntil resets all changes to the "lease_until" field.
+func (m *ScheduledExecRunMutation) ResetLeaseUntil() {
+	m.lease_until = nil
+}
+
+// SetFinishedAt sets the "finished_at" field.
+func (m *ScheduledExecRunMutation) SetFinishedAt(t time.Time) {
+	m.finished_at = &t
+}
+
+// FinishedAt returns the value of the "finished_at" field in the mutation.
+func (m *ScheduledExecRunMutation) FinishedAt() (r time.Time, exists bool) {
+	v := m.finished_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFinishedAt returns the old "finished_at" field's value of the ScheduledExecRun entity.
+// If the ScheduledExecRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledExecRunMutation) OldFinishedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFinishedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFinishedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFinishedAt: %w", err)
+	}
+	return oldValue.FinishedAt, nil
+}
+
+// ClearFinishedAt clears the value of the "finished_at" field.
+func (m *ScheduledExecRunMutation) ClearFinishedAt() {
+	m.finished_at = nil
+	m.clearedFields[scheduledexecrun.FieldFinishedAt] = struct{}{}
+}
+
+// FinishedAtCleared returns if the "finished_at" field was cleared in this mutation.
+func (m *ScheduledExecRunMutation) FinishedAtCleared() bool {
+	_, ok := m.clearedFields[scheduledexecrun.FieldFinishedAt]
+	return ok
+}
+
+// ResetFinishedAt resets all changes to the "finished_at" field.
+func (m *ScheduledExecRunMutation) ResetFinishedAt() {
+	m.finished_at = nil
+	delete(m.clearedFields, scheduledexecrun.FieldFinishedAt)
+}
+
+// SetOutcome sets the "outcome" field.
+func (m *ScheduledExecRunMutation) SetOutcome(s scheduledexecrun.Outcome) {
+	m.outcome = &s
+}
+
+// Outcome returns the value of the "outcome" field in the mutation.
+func (m *ScheduledExecRunMutation) Outcome() (r scheduledexecrun.Outcome, exists bool) {
+	v := m.outcome
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOutcome returns the old "outcome" field's value of the ScheduledExecRun entity.
+// If the ScheduledExecRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledExecRunMutation) OldOutcome(ctx context.Context) (v scheduledexecrun.Outcome, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOutcome is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOutcome requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOutcome: %w", err)
+	}
+	return oldValue.Outcome, nil
+}
+
+// ResetOutcome resets all changes to the "outcome" field.
+func (m *ScheduledExecRunMutation) ResetOutcome() {
+	m.outcome = nil
+}
+
+// SetExitCode sets the "exit_code" field.
+func (m *ScheduledExecRunMutation) SetExitCode(i int) {
+	m.exit_code = &i
+	m.addexit_code = nil
+}
+
+// ExitCode returns the value of the "exit_code" field in the mutation.
+func (m *ScheduledExecRunMutation) ExitCode() (r int, exists bool) {
+	v := m.exit_code
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldExitCode returns the old "exit_code" field's value of the ScheduledExecRun entity.
+// If the ScheduledExecRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledExecRunMutation) OldExitCode(ctx context.Context) (v *int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldExitCode is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldExitCode requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldExitCode: %w", err)
+	}
+	return oldValue.ExitCode, nil
+}
+
+// AddExitCode adds i to the "exit_code" field.
+func (m *ScheduledExecRunMutation) AddExitCode(i int) {
+	if m.addexit_code != nil {
+		*m.addexit_code += i
+	} else {
+		m.addexit_code = &i
+	}
+}
+
+// AddedExitCode returns the value that was added to the "exit_code" field in this mutation.
+func (m *ScheduledExecRunMutation) AddedExitCode() (r int, exists bool) {
+	v := m.addexit_code
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearExitCode clears the value of the "exit_code" field.
+func (m *ScheduledExecRunMutation) ClearExitCode() {
+	m.exit_code = nil
+	m.addexit_code = nil
+	m.clearedFields[scheduledexecrun.FieldExitCode] = struct{}{}
+}
+
+// ExitCodeCleared returns if the "exit_code" field was cleared in this mutation.
+func (m *ScheduledExecRunMutation) ExitCodeCleared() bool {
+	_, ok := m.clearedFields[scheduledexecrun.FieldExitCode]
+	return ok
+}
+
+// ResetExitCode resets all changes to the "exit_code" field.
+func (m *ScheduledExecRunMutation) ResetExitCode() {
+	m.exit_code = nil
+	m.addexit_code = nil
+	delete(m.clearedFields, scheduledexecrun.FieldExitCode)
+}
+
+// SetDurationMs sets the "duration_ms" field.
+func (m *ScheduledExecRunMutation) SetDurationMs(i int64) {
+	m.duration_ms = &i
+	m.addduration_ms = nil
+}
+
+// DurationMs returns the value of the "duration_ms" field in the mutation.
+func (m *ScheduledExecRunMutation) DurationMs() (r int64, exists bool) {
+	v := m.duration_ms
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDurationMs returns the old "duration_ms" field's value of the ScheduledExecRun entity.
+// If the ScheduledExecRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledExecRunMutation) OldDurationMs(ctx context.Context) (v *int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDurationMs is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDurationMs requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDurationMs: %w", err)
+	}
+	return oldValue.DurationMs, nil
+}
+
+// AddDurationMs adds i to the "duration_ms" field.
+func (m *ScheduledExecRunMutation) AddDurationMs(i int64) {
+	if m.addduration_ms != nil {
+		*m.addduration_ms += i
+	} else {
+		m.addduration_ms = &i
+	}
+}
+
+// AddedDurationMs returns the value that was added to the "duration_ms" field in this mutation.
+func (m *ScheduledExecRunMutation) AddedDurationMs() (r int64, exists bool) {
+	v := m.addduration_ms
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearDurationMs clears the value of the "duration_ms" field.
+func (m *ScheduledExecRunMutation) ClearDurationMs() {
+	m.duration_ms = nil
+	m.addduration_ms = nil
+	m.clearedFields[scheduledexecrun.FieldDurationMs] = struct{}{}
+}
+
+// DurationMsCleared returns if the "duration_ms" field was cleared in this mutation.
+func (m *ScheduledExecRunMutation) DurationMsCleared() bool {
+	_, ok := m.clearedFields[scheduledexecrun.FieldDurationMs]
+	return ok
+}
+
+// ResetDurationMs resets all changes to the "duration_ms" field.
+func (m *ScheduledExecRunMutation) ResetDurationMs() {
+	m.duration_ms = nil
+	m.addduration_ms = nil
+	delete(m.clearedFields, scheduledexecrun.FieldDurationMs)
+}
+
+// SetOutputBytes sets the "output_bytes" field.
+func (m *ScheduledExecRunMutation) SetOutputBytes(i int64) {
+	m.output_bytes = &i
+	m.addoutput_bytes = nil
+}
+
+// OutputBytes returns the value of the "output_bytes" field in the mutation.
+func (m *ScheduledExecRunMutation) OutputBytes() (r int64, exists bool) {
+	v := m.output_bytes
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOutputBytes returns the old "output_bytes" field's value of the ScheduledExecRun entity.
+// If the ScheduledExecRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledExecRunMutation) OldOutputBytes(ctx context.Context) (v *int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOutputBytes is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOutputBytes requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOutputBytes: %w", err)
+	}
+	return oldValue.OutputBytes, nil
+}
+
+// AddOutputBytes adds i to the "output_bytes" field.
+func (m *ScheduledExecRunMutation) AddOutputBytes(i int64) {
+	if m.addoutput_bytes != nil {
+		*m.addoutput_bytes += i
+	} else {
+		m.addoutput_bytes = &i
+	}
+}
+
+// AddedOutputBytes returns the value that was added to the "output_bytes" field in this mutation.
+func (m *ScheduledExecRunMutation) AddedOutputBytes() (r int64, exists bool) {
+	v := m.addoutput_bytes
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearOutputBytes clears the value of the "output_bytes" field.
+func (m *ScheduledExecRunMutation) ClearOutputBytes() {
+	m.output_bytes = nil
+	m.addoutput_bytes = nil
+	m.clearedFields[scheduledexecrun.FieldOutputBytes] = struct{}{}
+}
+
+// OutputBytesCleared returns if the "output_bytes" field was cleared in this mutation.
+func (m *ScheduledExecRunMutation) OutputBytesCleared() bool {
+	_, ok := m.clearedFields[scheduledexecrun.FieldOutputBytes]
+	return ok
+}
+
+// ResetOutputBytes resets all changes to the "output_bytes" field.
+func (m *ScheduledExecRunMutation) ResetOutputBytes() {
+	m.output_bytes = nil
+	m.addoutput_bytes = nil
+	delete(m.clearedFields, scheduledexecrun.FieldOutputBytes)
+}
+
+// SetRuntime sets the "runtime" field.
+func (m *ScheduledExecRunMutation) SetRuntime(s string) {
+	m.runtime = &s
+}
+
+// Runtime returns the value of the "runtime" field in the mutation.
+func (m *ScheduledExecRunMutation) Runtime() (r string, exists bool) {
+	v := m.runtime
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRuntime returns the old "runtime" field's value of the ScheduledExecRun entity.
+// If the ScheduledExecRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledExecRunMutation) OldRuntime(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRuntime is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRuntime requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRuntime: %w", err)
+	}
+	return oldValue.Runtime, nil
+}
+
+// ResetRuntime resets all changes to the "runtime" field.
+func (m *ScheduledExecRunMutation) ResetRuntime() {
+	m.runtime = nil
+}
+
+// SetLaunchID sets the "launch_id" field.
+func (m *ScheduledExecRunMutation) SetLaunchID(s string) {
+	m.launch_id = &s
+}
+
+// LaunchID returns the value of the "launch_id" field in the mutation.
+func (m *ScheduledExecRunMutation) LaunchID() (r string, exists bool) {
+	v := m.launch_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLaunchID returns the old "launch_id" field's value of the ScheduledExecRun entity.
+// If the ScheduledExecRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledExecRunMutation) OldLaunchID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLaunchID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLaunchID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLaunchID: %w", err)
+	}
+	return oldValue.LaunchID, nil
+}
+
+// ResetLaunchID resets all changes to the "launch_id" field.
+func (m *ScheduledExecRunMutation) ResetLaunchID() {
+	m.launch_id = nil
+}
+
+// Where appends a list predicates to the ScheduledExecRunMutation builder.
+func (m *ScheduledExecRunMutation) Where(ps ...predicate.ScheduledExecRun) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the ScheduledExecRunMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *ScheduledExecRunMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.ScheduledExecRun, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *ScheduledExecRunMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *ScheduledExecRunMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (ScheduledExecRun).
+func (m *ScheduledExecRunMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *ScheduledExecRunMutation) Fields() []string {
+	fields := make([]string, 0, 22)
+	if m.schedule_id != nil {
+		fields = append(fields, scheduledexecrun.FieldScheduleID)
+	}
+	if m.project_id != nil {
+		fields = append(fields, scheduledexecrun.FieldProjectID)
+	}
+	if m.target_agent_id != nil {
+		fields = append(fields, scheduledexecrun.FieldTargetAgentID)
+	}
+	if m.initiator_principal_kind != nil {
+		fields = append(fields, scheduledexecrun.FieldInitiatorPrincipalKind)
+	}
+	if m.initiator_principal_id != nil {
+		fields = append(fields, scheduledexecrun.FieldInitiatorPrincipalID)
+	}
+	if m.initiator_credential_kind != nil {
+		fields = append(fields, scheduledexecrun.FieldInitiatorCredentialKind)
+	}
+	if m.initiator_credential_id != nil {
+		fields = append(fields, scheduledexecrun.FieldInitiatorCredentialID)
+	}
+	if m.authorization_revision != nil {
+		fields = append(fields, scheduledexecrun.FieldAuthorizationRevision)
+	}
+	if m.executor_kind != nil {
+		fields = append(fields, scheduledexecrun.FieldExecutorKind)
+	}
+	if m.executor_id != nil {
+		fields = append(fields, scheduledexecrun.FieldExecutorID)
+	}
+	if m.command_sha256 != nil {
+		fields = append(fields, scheduledexecrun.FieldCommandSha256)
+	}
+	if m.argc != nil {
+		fields = append(fields, scheduledexecrun.FieldArgc)
+	}
+	if m.timeout_seconds != nil {
+		fields = append(fields, scheduledexecrun.FieldTimeoutSeconds)
+	}
+	if m.started_at != nil {
+		fields = append(fields, scheduledexecrun.FieldStartedAt)
+	}
+	if m.lease_until != nil {
+		fields = append(fields, scheduledexecrun.FieldLeaseUntil)
+	}
+	if m.finished_at != nil {
+		fields = append(fields, scheduledexecrun.FieldFinishedAt)
+	}
+	if m.outcome != nil {
+		fields = append(fields, scheduledexecrun.FieldOutcome)
+	}
+	if m.exit_code != nil {
+		fields = append(fields, scheduledexecrun.FieldExitCode)
+	}
+	if m.duration_ms != nil {
+		fields = append(fields, scheduledexecrun.FieldDurationMs)
+	}
+	if m.output_bytes != nil {
+		fields = append(fields, scheduledexecrun.FieldOutputBytes)
+	}
+	if m.runtime != nil {
+		fields = append(fields, scheduledexecrun.FieldRuntime)
+	}
+	if m.launch_id != nil {
+		fields = append(fields, scheduledexecrun.FieldLaunchID)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *ScheduledExecRunMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case scheduledexecrun.FieldScheduleID:
+		return m.ScheduleID()
+	case scheduledexecrun.FieldProjectID:
+		return m.ProjectID()
+	case scheduledexecrun.FieldTargetAgentID:
+		return m.TargetAgentID()
+	case scheduledexecrun.FieldInitiatorPrincipalKind:
+		return m.InitiatorPrincipalKind()
+	case scheduledexecrun.FieldInitiatorPrincipalID:
+		return m.InitiatorPrincipalID()
+	case scheduledexecrun.FieldInitiatorCredentialKind:
+		return m.InitiatorCredentialKind()
+	case scheduledexecrun.FieldInitiatorCredentialID:
+		return m.InitiatorCredentialID()
+	case scheduledexecrun.FieldAuthorizationRevision:
+		return m.AuthorizationRevision()
+	case scheduledexecrun.FieldExecutorKind:
+		return m.ExecutorKind()
+	case scheduledexecrun.FieldExecutorID:
+		return m.ExecutorID()
+	case scheduledexecrun.FieldCommandSha256:
+		return m.CommandSha256()
+	case scheduledexecrun.FieldArgc:
+		return m.Argc()
+	case scheduledexecrun.FieldTimeoutSeconds:
+		return m.TimeoutSeconds()
+	case scheduledexecrun.FieldStartedAt:
+		return m.StartedAt()
+	case scheduledexecrun.FieldLeaseUntil:
+		return m.LeaseUntil()
+	case scheduledexecrun.FieldFinishedAt:
+		return m.FinishedAt()
+	case scheduledexecrun.FieldOutcome:
+		return m.Outcome()
+	case scheduledexecrun.FieldExitCode:
+		return m.ExitCode()
+	case scheduledexecrun.FieldDurationMs:
+		return m.DurationMs()
+	case scheduledexecrun.FieldOutputBytes:
+		return m.OutputBytes()
+	case scheduledexecrun.FieldRuntime:
+		return m.Runtime()
+	case scheduledexecrun.FieldLaunchID:
+		return m.LaunchID()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *ScheduledExecRunMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case scheduledexecrun.FieldScheduleID:
+		return m.OldScheduleID(ctx)
+	case scheduledexecrun.FieldProjectID:
+		return m.OldProjectID(ctx)
+	case scheduledexecrun.FieldTargetAgentID:
+		return m.OldTargetAgentID(ctx)
+	case scheduledexecrun.FieldInitiatorPrincipalKind:
+		return m.OldInitiatorPrincipalKind(ctx)
+	case scheduledexecrun.FieldInitiatorPrincipalID:
+		return m.OldInitiatorPrincipalID(ctx)
+	case scheduledexecrun.FieldInitiatorCredentialKind:
+		return m.OldInitiatorCredentialKind(ctx)
+	case scheduledexecrun.FieldInitiatorCredentialID:
+		return m.OldInitiatorCredentialID(ctx)
+	case scheduledexecrun.FieldAuthorizationRevision:
+		return m.OldAuthorizationRevision(ctx)
+	case scheduledexecrun.FieldExecutorKind:
+		return m.OldExecutorKind(ctx)
+	case scheduledexecrun.FieldExecutorID:
+		return m.OldExecutorID(ctx)
+	case scheduledexecrun.FieldCommandSha256:
+		return m.OldCommandSha256(ctx)
+	case scheduledexecrun.FieldArgc:
+		return m.OldArgc(ctx)
+	case scheduledexecrun.FieldTimeoutSeconds:
+		return m.OldTimeoutSeconds(ctx)
+	case scheduledexecrun.FieldStartedAt:
+		return m.OldStartedAt(ctx)
+	case scheduledexecrun.FieldLeaseUntil:
+		return m.OldLeaseUntil(ctx)
+	case scheduledexecrun.FieldFinishedAt:
+		return m.OldFinishedAt(ctx)
+	case scheduledexecrun.FieldOutcome:
+		return m.OldOutcome(ctx)
+	case scheduledexecrun.FieldExitCode:
+		return m.OldExitCode(ctx)
+	case scheduledexecrun.FieldDurationMs:
+		return m.OldDurationMs(ctx)
+	case scheduledexecrun.FieldOutputBytes:
+		return m.OldOutputBytes(ctx)
+	case scheduledexecrun.FieldRuntime:
+		return m.OldRuntime(ctx)
+	case scheduledexecrun.FieldLaunchID:
+		return m.OldLaunchID(ctx)
+	}
+	return nil, fmt.Errorf("unknown ScheduledExecRun field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *ScheduledExecRunMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case scheduledexecrun.FieldScheduleID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetScheduleID(v)
+		return nil
+	case scheduledexecrun.FieldProjectID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetProjectID(v)
+		return nil
+	case scheduledexecrun.FieldTargetAgentID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTargetAgentID(v)
+		return nil
+	case scheduledexecrun.FieldInitiatorPrincipalKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInitiatorPrincipalKind(v)
+		return nil
+	case scheduledexecrun.FieldInitiatorPrincipalID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInitiatorPrincipalID(v)
+		return nil
+	case scheduledexecrun.FieldInitiatorCredentialKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInitiatorCredentialKind(v)
+		return nil
+	case scheduledexecrun.FieldInitiatorCredentialID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInitiatorCredentialID(v)
+		return nil
+	case scheduledexecrun.FieldAuthorizationRevision:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAuthorizationRevision(v)
+		return nil
+	case scheduledexecrun.FieldExecutorKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetExecutorKind(v)
+		return nil
+	case scheduledexecrun.FieldExecutorID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetExecutorID(v)
+		return nil
+	case scheduledexecrun.FieldCommandSha256:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCommandSha256(v)
+		return nil
+	case scheduledexecrun.FieldArgc:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetArgc(v)
+		return nil
+	case scheduledexecrun.FieldTimeoutSeconds:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTimeoutSeconds(v)
+		return nil
+	case scheduledexecrun.FieldStartedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStartedAt(v)
+		return nil
+	case scheduledexecrun.FieldLeaseUntil:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLeaseUntil(v)
+		return nil
+	case scheduledexecrun.FieldFinishedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFinishedAt(v)
+		return nil
+	case scheduledexecrun.FieldOutcome:
+		v, ok := value.(scheduledexecrun.Outcome)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOutcome(v)
+		return nil
+	case scheduledexecrun.FieldExitCode:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetExitCode(v)
+		return nil
+	case scheduledexecrun.FieldDurationMs:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDurationMs(v)
+		return nil
+	case scheduledexecrun.FieldOutputBytes:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOutputBytes(v)
+		return nil
+	case scheduledexecrun.FieldRuntime:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRuntime(v)
+		return nil
+	case scheduledexecrun.FieldLaunchID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLaunchID(v)
+		return nil
+	}
+	return fmt.Errorf("unknown ScheduledExecRun field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *ScheduledExecRunMutation) AddedFields() []string {
+	var fields []string
+	if m.addauthorization_revision != nil {
+		fields = append(fields, scheduledexecrun.FieldAuthorizationRevision)
+	}
+	if m.addargc != nil {
+		fields = append(fields, scheduledexecrun.FieldArgc)
+	}
+	if m.addtimeout_seconds != nil {
+		fields = append(fields, scheduledexecrun.FieldTimeoutSeconds)
+	}
+	if m.addexit_code != nil {
+		fields = append(fields, scheduledexecrun.FieldExitCode)
+	}
+	if m.addduration_ms != nil {
+		fields = append(fields, scheduledexecrun.FieldDurationMs)
+	}
+	if m.addoutput_bytes != nil {
+		fields = append(fields, scheduledexecrun.FieldOutputBytes)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *ScheduledExecRunMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case scheduledexecrun.FieldAuthorizationRevision:
+		return m.AddedAuthorizationRevision()
+	case scheduledexecrun.FieldArgc:
+		return m.AddedArgc()
+	case scheduledexecrun.FieldTimeoutSeconds:
+		return m.AddedTimeoutSeconds()
+	case scheduledexecrun.FieldExitCode:
+		return m.AddedExitCode()
+	case scheduledexecrun.FieldDurationMs:
+		return m.AddedDurationMs()
+	case scheduledexecrun.FieldOutputBytes:
+		return m.AddedOutputBytes()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *ScheduledExecRunMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case scheduledexecrun.FieldAuthorizationRevision:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddAuthorizationRevision(v)
+		return nil
+	case scheduledexecrun.FieldArgc:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddArgc(v)
+		return nil
+	case scheduledexecrun.FieldTimeoutSeconds:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddTimeoutSeconds(v)
+		return nil
+	case scheduledexecrun.FieldExitCode:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddExitCode(v)
+		return nil
+	case scheduledexecrun.FieldDurationMs:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddDurationMs(v)
+		return nil
+	case scheduledexecrun.FieldOutputBytes:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddOutputBytes(v)
+		return nil
+	}
+	return fmt.Errorf("unknown ScheduledExecRun numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *ScheduledExecRunMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(scheduledexecrun.FieldScheduleID) {
+		fields = append(fields, scheduledexecrun.FieldScheduleID)
+	}
+	if m.FieldCleared(scheduledexecrun.FieldFinishedAt) {
+		fields = append(fields, scheduledexecrun.FieldFinishedAt)
+	}
+	if m.FieldCleared(scheduledexecrun.FieldExitCode) {
+		fields = append(fields, scheduledexecrun.FieldExitCode)
+	}
+	if m.FieldCleared(scheduledexecrun.FieldDurationMs) {
+		fields = append(fields, scheduledexecrun.FieldDurationMs)
+	}
+	if m.FieldCleared(scheduledexecrun.FieldOutputBytes) {
+		fields = append(fields, scheduledexecrun.FieldOutputBytes)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *ScheduledExecRunMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *ScheduledExecRunMutation) ClearField(name string) error {
+	switch name {
+	case scheduledexecrun.FieldScheduleID:
+		m.ClearScheduleID()
+		return nil
+	case scheduledexecrun.FieldFinishedAt:
+		m.ClearFinishedAt()
+		return nil
+	case scheduledexecrun.FieldExitCode:
+		m.ClearExitCode()
+		return nil
+	case scheduledexecrun.FieldDurationMs:
+		m.ClearDurationMs()
+		return nil
+	case scheduledexecrun.FieldOutputBytes:
+		m.ClearOutputBytes()
+		return nil
+	}
+	return fmt.Errorf("unknown ScheduledExecRun nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *ScheduledExecRunMutation) ResetField(name string) error {
+	switch name {
+	case scheduledexecrun.FieldScheduleID:
+		m.ResetScheduleID()
+		return nil
+	case scheduledexecrun.FieldProjectID:
+		m.ResetProjectID()
+		return nil
+	case scheduledexecrun.FieldTargetAgentID:
+		m.ResetTargetAgentID()
+		return nil
+	case scheduledexecrun.FieldInitiatorPrincipalKind:
+		m.ResetInitiatorPrincipalKind()
+		return nil
+	case scheduledexecrun.FieldInitiatorPrincipalID:
+		m.ResetInitiatorPrincipalID()
+		return nil
+	case scheduledexecrun.FieldInitiatorCredentialKind:
+		m.ResetInitiatorCredentialKind()
+		return nil
+	case scheduledexecrun.FieldInitiatorCredentialID:
+		m.ResetInitiatorCredentialID()
+		return nil
+	case scheduledexecrun.FieldAuthorizationRevision:
+		m.ResetAuthorizationRevision()
+		return nil
+	case scheduledexecrun.FieldExecutorKind:
+		m.ResetExecutorKind()
+		return nil
+	case scheduledexecrun.FieldExecutorID:
+		m.ResetExecutorID()
+		return nil
+	case scheduledexecrun.FieldCommandSha256:
+		m.ResetCommandSha256()
+		return nil
+	case scheduledexecrun.FieldArgc:
+		m.ResetArgc()
+		return nil
+	case scheduledexecrun.FieldTimeoutSeconds:
+		m.ResetTimeoutSeconds()
+		return nil
+	case scheduledexecrun.FieldStartedAt:
+		m.ResetStartedAt()
+		return nil
+	case scheduledexecrun.FieldLeaseUntil:
+		m.ResetLeaseUntil()
+		return nil
+	case scheduledexecrun.FieldFinishedAt:
+		m.ResetFinishedAt()
+		return nil
+	case scheduledexecrun.FieldOutcome:
+		m.ResetOutcome()
+		return nil
+	case scheduledexecrun.FieldExitCode:
+		m.ResetExitCode()
+		return nil
+	case scheduledexecrun.FieldDurationMs:
+		m.ResetDurationMs()
+		return nil
+	case scheduledexecrun.FieldOutputBytes:
+		m.ResetOutputBytes()
+		return nil
+	case scheduledexecrun.FieldRuntime:
+		m.ResetRuntime()
+		return nil
+	case scheduledexecrun.FieldLaunchID:
+		m.ResetLaunchID()
+		return nil
+	}
+	return fmt.Errorf("unknown ScheduledExecRun field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *ScheduledExecRunMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *ScheduledExecRunMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *ScheduledExecRunMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *ScheduledExecRunMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *ScheduledExecRunMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *ScheduledExecRunMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *ScheduledExecRunMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown ScheduledExecRun unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *ScheduledExecRunMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown ScheduledExecRun edge %s", name)
 }
 
 // SecretMutation represents an operation that mutates the Secret nodes in the graph.
