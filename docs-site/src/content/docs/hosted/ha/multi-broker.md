@@ -54,6 +54,8 @@ When starting an agent, the Hub resolves a broker through a priority cascade:
 | 4 | **Single-provider auto-select** | If exactly one broker provides the project and it is online, it is used automatically. |
 | 5 | **Error** | Multiple eligible brokers require explicit selection; no providers is an error. |
 
+A scheduled agent ([`dispatch_agent`](/scion/hosted/user/scheduling/)) has no `--broker` flag and goes through priorities 2 to 5 under the schedule's recorded authority, so it runs on the same broker as a manual create in that project.
+
 - **Target a specific broker** with the `--broker` flag:
   ```bash
   scion start --broker my-cloud-vm
