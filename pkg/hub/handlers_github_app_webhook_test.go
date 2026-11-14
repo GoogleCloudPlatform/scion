@@ -519,6 +519,83 @@ func TestHandleGitHubWebhook_InstallationReposRemoved(t *testing.T) {
 	}
 }
 
+// TestHandleGitHubWebhook_InstallationReposRemoved_CaseInsensitive covers
+// ptone/scion#7548: GitHub owner and repo names are case-insensitive, so a
+// removed repository must match the installation's repo list and the
+// project's git remote regardless of letter case.
+func TestHandleGitHubWebhook_InstallationReposRemoved_CaseInsensitive(t *testing.T) {
+	cases := []struct {
+		name        string
+		storedRepos []string
+		gitRemote   string
+		removed     string
+	}{
+		{"mixed-case remote, lowercase payload", []string{"acme/widgets", "acme/api"}, "https://github.com/Acme/Widgets.git", "acme/widgets"},
+		{"lowercase remote, mixed-case payload", []string{"Acme/Widgets", "acme/api"}, "https://github.com/acme/widgets.git", "Acme/Widgets"},
+		{"stored list differs from payload", []string{"ACME/WIDGETS", "acme/api"}, "git@github.com:aCmE/wIdGeTs.git", "Acme/Widgets"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s := webhookTestServer(t)
+			ctx := context.Background()
+
+			installationID := int64(12345)
+			if err := s.CreateGitHubInstallation(ctx, &store.GitHubInstallation{
+				InstallationID: installationID,
+				AccountLogin:   "acme",
+				AccountType:    "Organization",
+				AppID:          42,
+				Repositories:   tc.storedRepos,
+				Status:         store.GitHubInstallationStatusActive,
+			}); err != nil {
+				t.Fatalf("failed to create installation: %v", err)
+			}
+			if err := s.CreateProject(ctx, &store.Project{
+				ID:                   tid("project-1"),
+				Name:                 "Test Project",
+				Slug:                 "test-project",
+				GitRemote:            tc.gitRemote,
+				GitHubInstallationID: &installationID,
+				GitHubAppStatus:      &store.GitHubAppProjectStatus{State: store.GitHubAppStateOK, LastChecked: time.Now()},
+				Created:              time.Now(),
+				Updated:              time.Now(),
+			}); err != nil {
+				t.Fatalf("failed to create project: %v", err)
+			}
+
+			payload := mustJSON(t, map[string]interface{}{
+				"action":       "removed",
+				"installation": map[string]interface{}{"id": installationID},
+				"repositories_removed": []map[string]interface{}{
+					{"id": 1, "full_name": tc.removed, "name": "widgets"},
+				},
+				"repositories_added": []map[string]interface{}{},
+			})
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", bytes.NewReader(payload))
+			req.Header.Set("X-GitHub-Event", "installation_repositories")
+			req.Header.Set("X-Hub-Signature-256", signWebhookPayload(payload, "test-webhook-secret"))
+			rec := httptest.NewRecorder()
+			srv.handleGitHubWebhook(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d", rec.Code)
+			}
+
+			updated, _ := s.GetGitHubInstallation(ctx, installationID)
+			if len(updated.Repositories) != 1 || updated.Repositories[0] != "acme/api" {
+				t.Errorf("expected [acme/api], got %v", updated.Repositories)
+			}
+
+			updatedProject, _ := s.GetProject(ctx, tid("project-1"))
+			if updatedProject.GitHubAppStatus == nil || updatedProject.GitHubAppStatus.State != store.GitHubAppStateError {
+				t.Fatalf("expected error state, got %v", updatedProject.GitHubAppStatus)
+			}
+			if updatedProject.GitHubAppStatus.ErrorCode != githubapp.ErrCodeRepoNotAccessible {
+				t.Errorf("expected %s error code, got %s", githubapp.ErrCodeRepoNotAccessible, updatedProject.GitHubAppStatus.ErrorCode)
+			}
+		})
+	}
+}
+
 func TestHandleGitHubWebhook_IgnoredEvent(t *testing.T) {
 	srv, _ := webhookTestServer(t)
 
