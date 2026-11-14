@@ -442,6 +442,10 @@ type heartbeatReport struct {
 	startsErr    error
 	// Agents with a queued stop dispatch, read with the starts.
 	stops map[string]bool
+
+	// orphanCandidates are the entries the runtime orphan report
+	// classifies (runtime_orphans.go).
+	orphanCandidates []runtimeOrphanCandidate
 }
 
 func newHeartbeatReport() *heartbeatReport {

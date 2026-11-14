@@ -443,6 +443,15 @@ const ReincarnateHarnessSwitch = "hub.reincarnate_harness_switch"
 // an unset image_tag leaves every image reference unchanged.
 const ImageTagVersionDefault = "hub.image_tag_version_default"
 
+// RuntimeOrphanReconcile gates the runtime orphan report
+// (ptone/scion#7930): the hub classifies the broker heartbeat inventory
+// entries no hub agent owns, records them in runtime_orphans, logs each new
+// one, exports scion.hub.runtime_orphans and serves GET
+// /api/v1/admin/runtime-orphans. Report only: nothing is stopped or
+// deleted. While it is off the hub classifies and writes nothing, and the
+// route answers 404.
+const RuntimeOrphanReconcile = "hub.runtime_orphan_reconcile"
+
 // ProjectSelfLeave gates project self-leave (ptone/scion#7494): POST
 // /api/v1/projects/{id}/leave, with which a user removes their own direct
 // project bindings, and the canLeave and leaveBlockedReason capabilities.
@@ -913,6 +922,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#6625",
 		Owner:       "hub",
 		ReviewBy:    "2027-02-05",
+	},
+	{
+		Name:        RuntimeOrphanReconcile,
+		Title:       "Runtime orphan report",
+		Description: "Reports runtime objects (containers, pods, Cloud Run instances) that no Hub agent owns, from each Runtime Broker heartbeat's complete inventory: a warning log per new orphan, the scion.hub.runtime_orphans gauge and GET /api/v1/admin/runtime-orphans. Report only; nothing is stopped or deleted. While it is off, nothing is classified or recorded and the route answers 404.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#7930",
+		Owner:       "cloudrun-runtime",
+		ReviewBy:    "2027-03-31",
 	},
 }
 

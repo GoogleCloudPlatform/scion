@@ -453,6 +453,27 @@ var hubOperations = []OperationSpec{
 		Bearer: SessionOnly(ReasonGovernancePending),
 	},
 	{
+		ID:          "hub.runtimeorphans.read",
+		Domain:      "hub",
+		Description: "List the runtime objects no hub agent owns, as recorded from broker heartbeat inventories, filtered by broker, project and kind (an operator diagnostic under the permission of the health summary; session only until its token admission is governed)",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/runtime-orphans", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "hub-scoped",
+		BasePermission:   "hub.health.read",
+		Effects:          []SecurityEffect{EffectListScoped},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestAdminRuntimeOrphans"},
+		},
+		Bearer: SessionOnly(ReasonGovernancePending),
+	},
+	{
 		ID:          "hub.diagnostics.read",
 		Domain:      "hub",
 		Description: "Read diagnostic logs, the diagnostic log stream and messaging divergence data. The log stream re-checks a token credential on every heartbeat and ends once the token stops validating or loses hub.diagnostics.read",
