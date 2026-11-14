@@ -1232,7 +1232,7 @@ export class ScionChatChoices extends LitElement {
       (typeof PointerEvent !== 'undefined' &&
         e instanceof PointerEvent &&
         e.pointerType !== 'mouse') ||
-      window.matchMedia('(hover: none)').matches;
+      (typeof window.matchMedia === 'function' && window.matchMedia('(hover: none)').matches);
     if (!isTouch) return;
     for (const node of e.composedPath()) {
       if (node === e.currentTarget) break;
@@ -1251,7 +1251,7 @@ export class ScionChatChoices extends LitElement {
       ?outline=${s.outlined}
       ?loading=${s.loading}
       ?disabled=${s.disabled}
-      ?data-readonly=${!s.clickable && !s.disabled}
+      ?data-readonly=${!s.clickable && !s.disabled && !s.loading}
       aria-disabled=${s.disabled ? 'true' : nothing}
       aria-pressed=${s.pressed ? 'true' : nothing}
       title=${s.title}

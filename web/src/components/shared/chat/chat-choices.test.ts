@@ -743,4 +743,80 @@ describe('Phase 2: single card interpreted, confirm, and change (Mocks P2-1, P2-
     expect(root(el).querySelector('.confirm-row')).toBeNull();
     expect(root(el).querySelector('.card-head .badge.conf')?.textContent?.trim()).toBe('confirmed');
   });
+
+  it('omits data-readonly on sl-button while an interpreted confirmation is loading', async () => {
+    let resolvePost!: (r: Response) => void;
+    apiFetch.mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolvePost = resolve;
+        })
+    );
+
+    const el = await mount([interpretedSingle({ id: 'u-me', name: 'Me' })]);
+    await settle(el);
+
+    // Before clicking Confirm, the already-interpreted choice button is non-clickable -> data-readonly.
+    expect(button(el, 'yes').hasAttribute('data-readonly')).toBe(true);
+
+    const confirmBtn = root(el).querySelector<HTMLElement>('.confirm-row [data-action="confirm"]')!;
+    confirmBtn.click();
+    await el.updateComplete;
+
+    expect(button(el, 'yes').hasAttribute('loading')).toBe(true);
+    expect(button(el, 'yes').hasAttribute('data-readonly')).toBe(false);
+
+    resolvePost(
+      res(200, {
+        decision: {
+          ...interpretedSingle({ id: 'u-me', name: 'Me' }),
+          decision: {
+            choiceId: 'yes',
+            label: 'Yes',
+            answeredByUserId: 'u-me',
+            answeredByName: 'Me',
+            provenance: 'direct',
+            outcome: 'confirm',
+            surface: 'web',
+            responseMessageId: 'resp-ok',
+            at: '2026-11-12T15:56:00Z',
+          },
+        },
+        responseMessageId: 'resp-ok',
+      })
+    );
+    await settle(el);
+    expect(button(el, 'yes').hasAttribute('loading')).toBe(false);
+    expect(button(el, 'yes').hasAttribute('data-readonly')).toBe(true);
+  });
+
+  it('handles contextmenu safely when window.matchMedia is undefined', async () => {
+    const el = await mount([view()]);
+    await settle(el);
+    const origMatchMedia = window.matchMedia;
+    Object.defineProperty(window, 'matchMedia', {
+      value: undefined,
+      configurable: true,
+      writable: true,
+    });
+    try {
+      expect(() => {
+        button(el, 'yes').dispatchEvent(
+          new MouseEvent('contextmenu', {
+            bubbles: true,
+            composed: true,
+            cancelable: true,
+            clientX: 40,
+            clientY: 40,
+          })
+        );
+      }).not.toThrow();
+    } finally {
+      Object.defineProperty(window, 'matchMedia', {
+        value: origMatchMedia,
+        configurable: true,
+        writable: true,
+      });
+    }
+  });
 });

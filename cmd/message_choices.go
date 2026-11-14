@@ -17,6 +17,7 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -76,7 +77,7 @@ func validateChoiceFlags(agentTarget, group bool) error {
 		return newUsageError("--choices-file - and --body-file - both read stdin; use a file for one of them")
 	}
 	if agentTarget || group {
-		return fmt.Errorf("choices can be sent only to a user or a conversation (user:<email>, @<email>, conv:<id>, #<thread>), not to an agent or a group")
+		return errors.New("choices can be sent only to a user or a conversation (user:<email>, @<email>, conv:<id>, #<thread>), not to an agent or a group")
 	}
 	if msgIn != "" || msgAt != "" {
 		return newUsageError("--choices cannot be combined with --in or --at")
@@ -99,7 +100,7 @@ func validateChoiceFlags(agentTarget, group bool) error {
 		}
 	}
 	if !choicesSenderIsAgent() {
-		return fmt.Errorf("choices can be sent only by an agent; it works inside an agent container (agent mode, with SCION_AGENT_NAME set)")
+		return errors.New("choices can be sent only by an agent; it works inside an agent container (agent mode, with SCION_AGENT_NAME set)")
 	}
 	return nil
 }
@@ -141,7 +142,7 @@ func loadChoicesPayload() (json.RawMessage, error) {
 		return nil, fmt.Errorf("choices must be a JSON array of decisions: %v", err)
 	}
 	if len(probe) == 0 {
-		return nil, fmt.Errorf("choices must hold at least one decision")
+		return nil, errors.New("choices must hold at least one decision")
 	}
 	return json.RawMessage(raw), nil
 }
