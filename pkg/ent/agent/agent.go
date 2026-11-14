@@ -106,6 +106,10 @@ const (
 	FieldLastSeen = "last_seen"
 	// FieldLastActivityEvent holds the string denoting the last_activity_event field in the database.
 	FieldLastActivityEvent = "last_activity_event"
+	// FieldLastLiveProcessAt holds the string denoting the last_live_process_at field in the database.
+	FieldLastLiveProcessAt = "last_live_process_at"
+	// FieldLastLiveWorkAt holds the string denoting the last_live_work_at field in the database.
+	FieldLastLiveWorkAt = "last_live_work_at"
 	// FieldStartedAt holds the string denoting the started_at field in the database.
 	FieldStartedAt = "started_at"
 	// FieldDeletedAt holds the string denoting the deleted_at field in the database.
@@ -305,6 +309,8 @@ var Columns = []string{
 	FieldUpdated,
 	FieldLastSeen,
 	FieldLastActivityEvent,
+	FieldLastLiveProcessAt,
+	FieldLastLiveWorkAt,
 	FieldStartedAt,
 	FieldDeletedAt,
 	FieldStateVersion,
@@ -728,6 +734,16 @@ func ByLastSeen(opts ...sql.OrderTermOption) OrderOption {
 // ByLastActivityEvent orders the results by the last_activity_event field.
 func ByLastActivityEvent(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldLastActivityEvent, opts...).ToFunc()
+}
+
+// ByLastLiveProcessAt orders the results by the last_live_process_at field.
+func ByLastLiveProcessAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldLastLiveProcessAt, opts...).ToFunc()
+}
+
+// ByLastLiveWorkAt orders the results by the last_live_work_at field.
+func ByLastLiveWorkAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldLastLiveWorkAt, opts...).ToFunc()
 }
 
 // ByStartedAt orders the results by the started_at field.

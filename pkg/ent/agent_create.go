@@ -604,6 +604,34 @@ func (_c *AgentCreate) SetNillableLastActivityEvent(v *time.Time) *AgentCreate {
 	return _c
 }
 
+// SetLastLiveProcessAt sets the "last_live_process_at" field.
+func (_c *AgentCreate) SetLastLiveProcessAt(v time.Time) *AgentCreate {
+	_c.mutation.SetLastLiveProcessAt(v)
+	return _c
+}
+
+// SetNillableLastLiveProcessAt sets the "last_live_process_at" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableLastLiveProcessAt(v *time.Time) *AgentCreate {
+	if v != nil {
+		_c.SetLastLiveProcessAt(*v)
+	}
+	return _c
+}
+
+// SetLastLiveWorkAt sets the "last_live_work_at" field.
+func (_c *AgentCreate) SetLastLiveWorkAt(v time.Time) *AgentCreate {
+	_c.mutation.SetLastLiveWorkAt(v)
+	return _c
+}
+
+// SetNillableLastLiveWorkAt sets the "last_live_work_at" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableLastLiveWorkAt(v *time.Time) *AgentCreate {
+	if v != nil {
+		_c.SetLastLiveWorkAt(*v)
+	}
+	return _c
+}
+
 // SetStartedAt sets the "started_at" field.
 func (_c *AgentCreate) SetStartedAt(v time.Time) *AgentCreate {
 	_c.mutation.SetStartedAt(v)
@@ -1881,6 +1909,14 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 		_spec.SetField(agent.FieldLastActivityEvent, field.TypeTime, value)
 		_node.LastActivityEvent = &value
 	}
+	if value, ok := _c.mutation.LastLiveProcessAt(); ok {
+		_spec.SetField(agent.FieldLastLiveProcessAt, field.TypeTime, value)
+		_node.LastLiveProcessAt = &value
+	}
+	if value, ok := _c.mutation.LastLiveWorkAt(); ok {
+		_spec.SetField(agent.FieldLastLiveWorkAt, field.TypeTime, value)
+		_node.LastLiveWorkAt = &value
+	}
 	if value, ok := _c.mutation.StartedAt(); ok {
 		_spec.SetField(agent.FieldStartedAt, field.TypeTime, value)
 		_node.StartedAt = &value
@@ -2887,6 +2923,42 @@ func (u *AgentUpsert) UpdateLastActivityEvent() *AgentUpsert {
 // ClearLastActivityEvent clears the value of the "last_activity_event" field.
 func (u *AgentUpsert) ClearLastActivityEvent() *AgentUpsert {
 	u.SetNull(agent.FieldLastActivityEvent)
+	return u
+}
+
+// SetLastLiveProcessAt sets the "last_live_process_at" field.
+func (u *AgentUpsert) SetLastLiveProcessAt(v time.Time) *AgentUpsert {
+	u.Set(agent.FieldLastLiveProcessAt, v)
+	return u
+}
+
+// UpdateLastLiveProcessAt sets the "last_live_process_at" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateLastLiveProcessAt() *AgentUpsert {
+	u.SetExcluded(agent.FieldLastLiveProcessAt)
+	return u
+}
+
+// ClearLastLiveProcessAt clears the value of the "last_live_process_at" field.
+func (u *AgentUpsert) ClearLastLiveProcessAt() *AgentUpsert {
+	u.SetNull(agent.FieldLastLiveProcessAt)
+	return u
+}
+
+// SetLastLiveWorkAt sets the "last_live_work_at" field.
+func (u *AgentUpsert) SetLastLiveWorkAt(v time.Time) *AgentUpsert {
+	u.Set(agent.FieldLastLiveWorkAt, v)
+	return u
+}
+
+// UpdateLastLiveWorkAt sets the "last_live_work_at" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateLastLiveWorkAt() *AgentUpsert {
+	u.SetExcluded(agent.FieldLastLiveWorkAt)
+	return u
+}
+
+// ClearLastLiveWorkAt clears the value of the "last_live_work_at" field.
+func (u *AgentUpsert) ClearLastLiveWorkAt() *AgentUpsert {
+	u.SetNull(agent.FieldLastLiveWorkAt)
 	return u
 }
 
@@ -4640,6 +4712,48 @@ func (u *AgentUpsertOne) UpdateLastActivityEvent() *AgentUpsertOne {
 func (u *AgentUpsertOne) ClearLastActivityEvent() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearLastActivityEvent()
+	})
+}
+
+// SetLastLiveProcessAt sets the "last_live_process_at" field.
+func (u *AgentUpsertOne) SetLastLiveProcessAt(v time.Time) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLastLiveProcessAt(v)
+	})
+}
+
+// UpdateLastLiveProcessAt sets the "last_live_process_at" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateLastLiveProcessAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLastLiveProcessAt()
+	})
+}
+
+// ClearLastLiveProcessAt clears the value of the "last_live_process_at" field.
+func (u *AgentUpsertOne) ClearLastLiveProcessAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLastLiveProcessAt()
+	})
+}
+
+// SetLastLiveWorkAt sets the "last_live_work_at" field.
+func (u *AgentUpsertOne) SetLastLiveWorkAt(v time.Time) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLastLiveWorkAt(v)
+	})
+}
+
+// UpdateLastLiveWorkAt sets the "last_live_work_at" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateLastLiveWorkAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLastLiveWorkAt()
+	})
+}
+
+// ClearLastLiveWorkAt clears the value of the "last_live_work_at" field.
+func (u *AgentUpsertOne) ClearLastLiveWorkAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLastLiveWorkAt()
 	})
 }
 
@@ -6711,6 +6825,48 @@ func (u *AgentUpsertBulk) UpdateLastActivityEvent() *AgentUpsertBulk {
 func (u *AgentUpsertBulk) ClearLastActivityEvent() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearLastActivityEvent()
+	})
+}
+
+// SetLastLiveProcessAt sets the "last_live_process_at" field.
+func (u *AgentUpsertBulk) SetLastLiveProcessAt(v time.Time) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLastLiveProcessAt(v)
+	})
+}
+
+// UpdateLastLiveProcessAt sets the "last_live_process_at" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateLastLiveProcessAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLastLiveProcessAt()
+	})
+}
+
+// ClearLastLiveProcessAt clears the value of the "last_live_process_at" field.
+func (u *AgentUpsertBulk) ClearLastLiveProcessAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLastLiveProcessAt()
+	})
+}
+
+// SetLastLiveWorkAt sets the "last_live_work_at" field.
+func (u *AgentUpsertBulk) SetLastLiveWorkAt(v time.Time) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLastLiveWorkAt(v)
+	})
+}
+
+// UpdateLastLiveWorkAt sets the "last_live_work_at" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateLastLiveWorkAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLastLiveWorkAt()
+	})
+}
+
+// ClearLastLiveWorkAt clears the value of the "last_live_work_at" field.
+func (u *AgentUpsertBulk) ClearLastLiveWorkAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLastLiveWorkAt()
 	})
 }
 

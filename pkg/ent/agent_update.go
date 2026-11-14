@@ -765,6 +765,46 @@ func (_u *AgentUpdate) ClearLastActivityEvent() *AgentUpdate {
 	return _u
 }
 
+// SetLastLiveProcessAt sets the "last_live_process_at" field.
+func (_u *AgentUpdate) SetLastLiveProcessAt(v time.Time) *AgentUpdate {
+	_u.mutation.SetLastLiveProcessAt(v)
+	return _u
+}
+
+// SetNillableLastLiveProcessAt sets the "last_live_process_at" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableLastLiveProcessAt(v *time.Time) *AgentUpdate {
+	if v != nil {
+		_u.SetLastLiveProcessAt(*v)
+	}
+	return _u
+}
+
+// ClearLastLiveProcessAt clears the value of the "last_live_process_at" field.
+func (_u *AgentUpdate) ClearLastLiveProcessAt() *AgentUpdate {
+	_u.mutation.ClearLastLiveProcessAt()
+	return _u
+}
+
+// SetLastLiveWorkAt sets the "last_live_work_at" field.
+func (_u *AgentUpdate) SetLastLiveWorkAt(v time.Time) *AgentUpdate {
+	_u.mutation.SetLastLiveWorkAt(v)
+	return _u
+}
+
+// SetNillableLastLiveWorkAt sets the "last_live_work_at" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableLastLiveWorkAt(v *time.Time) *AgentUpdate {
+	if v != nil {
+		_u.SetLastLiveWorkAt(*v)
+	}
+	return _u
+}
+
+// ClearLastLiveWorkAt clears the value of the "last_live_work_at" field.
+func (_u *AgentUpdate) ClearLastLiveWorkAt() *AgentUpdate {
+	_u.mutation.ClearLastLiveWorkAt()
+	return _u
+}
+
 // SetStartedAt sets the "started_at" field.
 func (_u *AgentUpdate) SetStartedAt(v time.Time) *AgentUpdate {
 	_u.mutation.SetStartedAt(v)
@@ -2241,6 +2281,18 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if _u.mutation.LastActivityEventCleared() {
 		_spec.ClearField(agent.FieldLastActivityEvent, field.TypeTime)
 	}
+	if value, ok := _u.mutation.LastLiveProcessAt(); ok {
+		_spec.SetField(agent.FieldLastLiveProcessAt, field.TypeTime, value)
+	}
+	if _u.mutation.LastLiveProcessAtCleared() {
+		_spec.ClearField(agent.FieldLastLiveProcessAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.LastLiveWorkAt(); ok {
+		_spec.SetField(agent.FieldLastLiveWorkAt, field.TypeTime, value)
+	}
+	if _u.mutation.LastLiveWorkAtCleared() {
+		_spec.ClearField(agent.FieldLastLiveWorkAt, field.TypeTime)
+	}
 	if value, ok := _u.mutation.StartedAt(); ok {
 		_spec.SetField(agent.FieldStartedAt, field.TypeTime, value)
 	}
@@ -3501,6 +3553,46 @@ func (_u *AgentUpdateOne) SetNillableLastActivityEvent(v *time.Time) *AgentUpdat
 // ClearLastActivityEvent clears the value of the "last_activity_event" field.
 func (_u *AgentUpdateOne) ClearLastActivityEvent() *AgentUpdateOne {
 	_u.mutation.ClearLastActivityEvent()
+	return _u
+}
+
+// SetLastLiveProcessAt sets the "last_live_process_at" field.
+func (_u *AgentUpdateOne) SetLastLiveProcessAt(v time.Time) *AgentUpdateOne {
+	_u.mutation.SetLastLiveProcessAt(v)
+	return _u
+}
+
+// SetNillableLastLiveProcessAt sets the "last_live_process_at" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableLastLiveProcessAt(v *time.Time) *AgentUpdateOne {
+	if v != nil {
+		_u.SetLastLiveProcessAt(*v)
+	}
+	return _u
+}
+
+// ClearLastLiveProcessAt clears the value of the "last_live_process_at" field.
+func (_u *AgentUpdateOne) ClearLastLiveProcessAt() *AgentUpdateOne {
+	_u.mutation.ClearLastLiveProcessAt()
+	return _u
+}
+
+// SetLastLiveWorkAt sets the "last_live_work_at" field.
+func (_u *AgentUpdateOne) SetLastLiveWorkAt(v time.Time) *AgentUpdateOne {
+	_u.mutation.SetLastLiveWorkAt(v)
+	return _u
+}
+
+// SetNillableLastLiveWorkAt sets the "last_live_work_at" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableLastLiveWorkAt(v *time.Time) *AgentUpdateOne {
+	if v != nil {
+		_u.SetLastLiveWorkAt(*v)
+	}
+	return _u
+}
+
+// ClearLastLiveWorkAt clears the value of the "last_live_work_at" field.
+func (_u *AgentUpdateOne) ClearLastLiveWorkAt() *AgentUpdateOne {
+	_u.mutation.ClearLastLiveWorkAt()
 	return _u
 }
 
@@ -5009,6 +5101,18 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	}
 	if _u.mutation.LastActivityEventCleared() {
 		_spec.ClearField(agent.FieldLastActivityEvent, field.TypeTime)
+	}
+	if value, ok := _u.mutation.LastLiveProcessAt(); ok {
+		_spec.SetField(agent.FieldLastLiveProcessAt, field.TypeTime, value)
+	}
+	if _u.mutation.LastLiveProcessAtCleared() {
+		_spec.ClearField(agent.FieldLastLiveProcessAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.LastLiveWorkAt(); ok {
+		_spec.SetField(agent.FieldLastLiveWorkAt, field.TypeTime, value)
+	}
+	if _u.mutation.LastLiveWorkAtCleared() {
+		_spec.ClearField(agent.FieldLastLiveWorkAt, field.TypeTime)
 	}
 	if value, ok := _u.mutation.StartedAt(); ok {
 		_spec.SetField(agent.FieldStartedAt, field.TypeTime, value)

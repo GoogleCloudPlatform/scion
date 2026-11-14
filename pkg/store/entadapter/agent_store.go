@@ -216,6 +216,8 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 	if a.LastActivityEvent != nil {
 		sa.LastActivityEvent = *a.LastActivityEvent
 	}
+	sa.LastLiveProcessAt = copyTimePtr(a.LastLiveProcessAt)
+	sa.LastLiveWorkAt = copyTimePtr(a.LastLiveWorkAt)
 	if a.StartedAt != nil {
 		sa.StartedAt = *a.StartedAt
 	}
@@ -1974,6 +1976,15 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 			upd.SetStartedAt(t)
 		}
 	}
+	// Live work from the container's heartbeat (ptone/scion#7855): any
+	// live work guards auto-suspend; work that suppresses STALLED also
+	// keeps the stall sweep off the agent (MarkStalledAgents).
+	if su.LiveWork != nil {
+		upd.SetLastLiveProcessAt(now)
+		if su.LiveWork.SuppressStall {
+			upd.SetLastLiveWorkAt(now)
+		}
+	}
 
 	stampActivitySince(upd.Mutation(), current.Phase, current.Activity, now)
 
@@ -2916,7 +2927,10 @@ var stalledExcluded = []string{"completed", "limits_exceeded", "blocked", "idle"
 
 // MarkStalledAgents marks running agents whose last activity event predates
 // activityThreshold but whose heartbeat is still recent (>= heartbeatRecency)
-// as stalled, preserving the prior activity in stalled_from_activity.
+// as stalled, preserving the prior activity in stalled_from_activity. An
+// agent whose container reported stall-suppressing live work since
+// activityThreshold is left alone (ptone/scion#7855): a long tool call or a
+// background job doing CPU work is not a hang.
 func (s *AgentStore) MarkStalledAgents(ctx context.Context, activityThreshold, heartbeatRecency time.Time) ([]store.Agent, error) {
 	useLock := s.usesRowLocks()
 
@@ -2935,6 +2949,7 @@ func (s *AgentStore) MarkStalledAgents(ctx context.Context, activityThreshold, h
 		agent.LastSeenGTE(heartbeatRecency),
 		agent.PhaseEQ("running"),
 		agent.ActivityNotIn(stalledExcluded...),
+		agent.Or(agent.LastLiveWorkAtIsNil(), agent.LastLiveWorkAtLT(activityThreshold)),
 	)
 	if useLock {
 		q = q.ForUpdate()

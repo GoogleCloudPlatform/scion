@@ -1511,6 +1511,10 @@ type AgentStatusUpdate struct {
 	TaskSummary     string            `json:"taskSummary,omitempty"`
 	Heartbeat       bool              `json:"heartbeat,omitempty"`
 	Metadata        map[string]string `json:"metadata,omitempty"`
+	// LiveWork is the live work the container's heartbeat reports
+	// (ptone/scion#7855); nil when there is none. It sets
+	// last_live_process_at, and last_live_work_at when SuppressStall is set.
+	LiveWork *LiveWork `json:"liveWork,omitempty"`
 
 	// Limits tracking (reported by sciontool)
 	CurrentTurns      *int   `json:"currentTurns,omitempty"`

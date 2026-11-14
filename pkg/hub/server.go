@@ -5760,6 +5760,15 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 		return false
 	}
 
+	// Skip agents whose container reported live work recently
+	// (ptone/scion#7855): a running tool call or background job is never
+	// suspended, even when it no longer suppresses the stall marker.
+	if agent.HasRecentLiveWork(time.Now()) {
+		slog.Info("Scheduler: skipping auto-suspend; agent has live work",
+			"agent_id", agent.ID, "agent_name", agent.Name)
+		return false
+	}
+
 	// Skip agents whose harness does not support resume — suspending
 	// them would imply resumability that doesn't exist.
 	if ok, harnessType, reason := s.harnessSupportsResume(ctx, agent); !ok {

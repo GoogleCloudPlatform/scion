@@ -236,6 +236,18 @@ func (Agent) Fields() []ent.Field {
 		field.Time("last_activity_event").
 			Optional().
 			Nillable(),
+		// last_live_process_at is the last time the agent's container
+		// reported live work of any kind (ptone/scion#7855). The
+		// auto-suspend guard reads it (store.Agent.HasRecentLiveWork).
+		field.Time("last_live_process_at").
+			Optional().
+			Nillable(),
+		// last_live_work_at is the last time the container reported live
+		// work that suppresses STALLED (LiveWork.SuppressStall). The
+		// stall sweep (MarkStalledAgents) reads it.
+		field.Time("last_live_work_at").
+			Optional().
+			Nillable(),
 		field.Time("started_at").
 			Optional().
 			Nillable(),

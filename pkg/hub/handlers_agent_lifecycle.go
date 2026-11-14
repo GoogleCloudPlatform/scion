@@ -335,17 +335,20 @@ func statusUpdateIsEmpty(su store.AgentStatusUpdate) bool {
 		su.RuntimeState == "" && su.TaskSummary == "" && !su.Heartbeat &&
 		len(su.Metadata) == 0 && su.CurrentTurns == nil && su.CurrentModelCalls == nil &&
 		su.StartedAt == "" && !su.ClearExit && su.ClearMessageIf == "" &&
-		!su.ClearTerminalRemnants
+		!su.ClearTerminalRemnants && su.LiveWork == nil
 }
 
 // statusUpdateIsHeartbeatOnly reports whether su carries the heartbeat flag
 // and nothing else statusUpdateIsEmpty counts: the agent's periodic
-// heartbeat report. It publishes no status event (ptone/scion#5233).
+// heartbeat report. It publishes no status event (ptone/scion#5233). The
+// heartbeat's live work (ptone/scion#7855) keeps it heartbeat-only: it
+// writes only the live-work timestamps, which no status event carries.
 func statusUpdateIsHeartbeatOnly(su store.AgentStatusUpdate) bool {
 	if !su.Heartbeat {
 		return false
 	}
 	su.Heartbeat = false
+	su.LiveWork = nil
 	return statusUpdateIsEmpty(su)
 }
 

@@ -241,6 +241,11 @@ var reflectFillStoreAgentSkipFields = map[string]bool{
 	// round-trip here. Both are json:"-" and not authz inputs.
 	"EffectiveConfig": true,
 	"LaunchRunID":     true,
+	// last_live_process_at and last_live_work_at are written only by
+	// UpdateAgentStatus from a heartbeat's live work (ptone/scion#7855);
+	// CreateAgent and UpdateAgent never write them. Not authz inputs.
+	"LastLiveProcessAt": true,
+	"LastLiveWorkAt":    true,
 }
 
 func reflectFillStoreAgent(t *testing.T, projectID string) *store.Agent {

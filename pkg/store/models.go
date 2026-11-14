@@ -135,6 +135,14 @@ type Agent struct {
 	LastActivityEvent time.Time `json:"lastActivityEvent,omitempty"`
 	DeletedAt         time.Time `json:"deletedAt,omitempty"`
 
+	// Live work (ptone/scion#7855): written only by UpdateAgentStatus from
+	// the container's heartbeat (AgentStatusUpdate.LiveWork); nil until the
+	// first report. LastLiveProcessAt is any live work and guards
+	// auto-suspend (HasRecentLiveWork); LastLiveWorkAt is live work that
+	// suppresses STALLED and is read by the stall sweep.
+	LastLiveProcessAt *time.Time `json:"lastLiveProcessAt,omitempty"`
+	LastLiveWorkAt    *time.Time `json:"lastLiveWorkAt,omitempty"`
+
 	// Ownership
 	CreatedBy   string `json:"createdBy,omitempty"`
 	OwnerID     string `json:"ownerId,omitempty"`

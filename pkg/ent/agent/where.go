@@ -251,6 +251,16 @@ func LastActivityEvent(v time.Time) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldLastActivityEvent, v))
 }
 
+// LastLiveProcessAt applies equality check predicate on the "last_live_process_at" field. It's identical to LastLiveProcessAtEQ.
+func LastLiveProcessAt(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLastLiveProcessAt, v))
+}
+
+// LastLiveWorkAt applies equality check predicate on the "last_live_work_at" field. It's identical to LastLiveWorkAtEQ.
+func LastLiveWorkAt(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLastLiveWorkAt, v))
+}
+
 // StartedAt applies equality check predicate on the "started_at" field. It's identical to StartedAtEQ.
 func StartedAt(v time.Time) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldStartedAt, v))
@@ -2919,6 +2929,106 @@ func LastActivityEventIsNil() predicate.Agent {
 // LastActivityEventNotNil applies the NotNil predicate on the "last_activity_event" field.
 func LastActivityEventNotNil() predicate.Agent {
 	return predicate.Agent(sql.FieldNotNull(FieldLastActivityEvent))
+}
+
+// LastLiveProcessAtEQ applies the EQ predicate on the "last_live_process_at" field.
+func LastLiveProcessAtEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLastLiveProcessAt, v))
+}
+
+// LastLiveProcessAtNEQ applies the NEQ predicate on the "last_live_process_at" field.
+func LastLiveProcessAtNEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldLastLiveProcessAt, v))
+}
+
+// LastLiveProcessAtIn applies the In predicate on the "last_live_process_at" field.
+func LastLiveProcessAtIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldLastLiveProcessAt, vs...))
+}
+
+// LastLiveProcessAtNotIn applies the NotIn predicate on the "last_live_process_at" field.
+func LastLiveProcessAtNotIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldLastLiveProcessAt, vs...))
+}
+
+// LastLiveProcessAtGT applies the GT predicate on the "last_live_process_at" field.
+func LastLiveProcessAtGT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldLastLiveProcessAt, v))
+}
+
+// LastLiveProcessAtGTE applies the GTE predicate on the "last_live_process_at" field.
+func LastLiveProcessAtGTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldLastLiveProcessAt, v))
+}
+
+// LastLiveProcessAtLT applies the LT predicate on the "last_live_process_at" field.
+func LastLiveProcessAtLT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldLastLiveProcessAt, v))
+}
+
+// LastLiveProcessAtLTE applies the LTE predicate on the "last_live_process_at" field.
+func LastLiveProcessAtLTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldLastLiveProcessAt, v))
+}
+
+// LastLiveProcessAtIsNil applies the IsNil predicate on the "last_live_process_at" field.
+func LastLiveProcessAtIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldLastLiveProcessAt))
+}
+
+// LastLiveProcessAtNotNil applies the NotNil predicate on the "last_live_process_at" field.
+func LastLiveProcessAtNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldLastLiveProcessAt))
+}
+
+// LastLiveWorkAtEQ applies the EQ predicate on the "last_live_work_at" field.
+func LastLiveWorkAtEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLastLiveWorkAt, v))
+}
+
+// LastLiveWorkAtNEQ applies the NEQ predicate on the "last_live_work_at" field.
+func LastLiveWorkAtNEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldLastLiveWorkAt, v))
+}
+
+// LastLiveWorkAtIn applies the In predicate on the "last_live_work_at" field.
+func LastLiveWorkAtIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldLastLiveWorkAt, vs...))
+}
+
+// LastLiveWorkAtNotIn applies the NotIn predicate on the "last_live_work_at" field.
+func LastLiveWorkAtNotIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldLastLiveWorkAt, vs...))
+}
+
+// LastLiveWorkAtGT applies the GT predicate on the "last_live_work_at" field.
+func LastLiveWorkAtGT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldLastLiveWorkAt, v))
+}
+
+// LastLiveWorkAtGTE applies the GTE predicate on the "last_live_work_at" field.
+func LastLiveWorkAtGTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldLastLiveWorkAt, v))
+}
+
+// LastLiveWorkAtLT applies the LT predicate on the "last_live_work_at" field.
+func LastLiveWorkAtLT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldLastLiveWorkAt, v))
+}
+
+// LastLiveWorkAtLTE applies the LTE predicate on the "last_live_work_at" field.
+func LastLiveWorkAtLTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldLastLiveWorkAt, v))
+}
+
+// LastLiveWorkAtIsNil applies the IsNil predicate on the "last_live_work_at" field.
+func LastLiveWorkAtIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldLastLiveWorkAt))
+}
+
+// LastLiveWorkAtNotNil applies the NotNil predicate on the "last_live_work_at" field.
+func LastLiveWorkAtNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldLastLiveWorkAt))
 }
 
 // StartedAtEQ applies the EQ predicate on the "started_at" field.
