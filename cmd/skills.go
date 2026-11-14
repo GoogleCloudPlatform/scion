@@ -246,6 +246,34 @@ description: <describe your skill>
 	return nil
 }
 
+// findPublishTargetSkill returns the existing skill that `scion skills
+// publish` adds a version to, or nil when none exists. With a scope it asks
+// the hub for that scope only (and that project, for project scope), and
+// also checks each returned record, so a publish never lands on a same-named
+// skill in another scope (Q6.3, ptone/scion#1713). An empty scope keeps the
+// name-only lookup.
+func findPublishTargetSkill(ctx context.Context, skillSvc hubclient.SkillService, name, scope, projectID string) (*hubclient.Skill, error) {
+	opts := &hubclient.ListSkillsOptions{Name: name, Scope: scope}
+	if scope == "project" {
+		opts.ScopeID = projectID
+	}
+	listResp, err := skillSvc.List(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	for i := range listResp.Skills {
+		sk := &listResp.Skills[i]
+		if scope != "" && sk.Scope != scope {
+			continue
+		}
+		if scope == "project" && sk.ScopeID != projectID {
+			continue
+		}
+		return sk, nil
+	}
+	return nil, nil
+}
+
 var skillsPublishCmd = &cobra.Command{
 	Use:   "publish <path>",
 	Short: "Publish a skill directory to the Hub",
@@ -308,22 +336,23 @@ func runSkillsPublish(cmd *cobra.Command, args []string) error {
 		// Extract name from SKILL.md frontmatter or directory name
 		name := filepath.Base(filepath.Clean(skillDir))
 
-		listResp, err := skillSvc.List(ctx, &hubclient.ListSkillsOptions{Name: name})
-		if err == nil && len(listResp.Skills) > 0 {
-			skillID = listResp.Skills[0].ID
+		var projectID string
+		if scope == "project" {
+			projectID, err = GetProjectID(hubCtx)
+			if err != nil {
+				return err
+			}
+			if projectID == "" {
+				return fmt.Errorf("cannot publish project-scoped skill %q: could not determine the project ID (run 'scion hub link' to link this project with the Hub)", name)
+			}
+		}
+
+		existing, err := findPublishTargetSkill(ctx, skillSvc, name, scope, projectID)
+		if err == nil && existing != nil {
+			skillID = existing.ID
 		} else {
 			if scope == "" {
 				scope = "global"
-			}
-			var projectID string
-			if scope == "project" {
-				projectID, err = GetProjectID(hubCtx)
-				if err != nil {
-					return err
-				}
-				if projectID == "" {
-					return fmt.Errorf("cannot create project-scoped skill %q: could not determine the project ID (run 'scion hub link' to link this project with the Hub)", name)
-				}
 			}
 			createResp, err := skillSvc.Create(ctx, &hubclient.CreateSkillRequest{
 				Name:    name,
@@ -766,7 +795,7 @@ func init() {
 
 	// Flags for publish command
 	skillsPublishCmd.Flags().String("version", "", "Semver version to publish (required)")
-	skillsPublishCmd.Flags().String("scope", "", "Scope for new skills (global, project, user)")
+	skillsPublishCmd.Flags().String("scope", "", "Scope to publish into (global, project, user). When set, only a same-named skill in that scope (and this project, for project) gets the version; when unset, any same-named skill does. A new skill is created in this scope, default global")
 	skillsPublishCmd.Flags().String("skill-id", "", "Existing skill ID to publish a version for")
 
 	// Also add a 'skill' alias (singular) for convenience
