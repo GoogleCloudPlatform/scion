@@ -28,12 +28,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// A report that moves the agent's current run to limits_exceeded makes the
-// hub stop that run on its runtime, once per run (ptone/scion#7928).
-
 const limitsMsg = "max_duration of 2m exceeded"
 
-// limitsStops waits for the fixture's limits_exceeded stops and returns how
+// limitsStops (ptone/scion#7928) waits for the fixture's limits_exceeded stops and returns how
 // many stops the broker received.
 func (f haltFixture) limitsStops(t *testing.T) int {
 	t.Helper()
@@ -57,7 +54,7 @@ func TestLimitsExceededStop_SelfReportStopsOnce(t *testing.T) {
 	assert.Equal(t, string(state.PhaseStopped), got.Phase)
 	assert.Equal(t, string(state.ActivityLimitsExceeded), got.Activity, "the reported activity is kept")
 	assert.Equal(t, limitsMsg, got.Message, "the reported message is kept")
-	assert.Equal(t, store.RunIntentStopped, got.RunIntent)
+	assert.Equal(t, store.RunIntentRunning, got.RunIntent, "intent stays as after the container's own exit")
 
 	// Repeat reports of the run, from the agent and the broker, do not
 	// stop it again.
@@ -107,9 +104,7 @@ func TestLimitsExceededStop_FailedDispatchRetries(t *testing.T) {
 	d.mu.Unlock()
 	f.heartbeat(t, brokerAgentHeartbeat{Phase: "running", Activity: "limits_exceeded", RunID: "run-1"})
 	assert.Equal(t, 1, f.limitsStops(t))
-	got := f.get(t)
-	assert.Equal(t, string(state.PhaseRunning), got.Phase)
-	assert.Equal(t, store.RunIntentRunning, got.RunIntent, "the replaced running intent is put back")
+	assert.Equal(t, string(state.PhaseRunning), f.get(t).Phase)
 
 	// The run is forgotten: the next limits_exceeded report of it (from
 	// a restarted container) stops it.

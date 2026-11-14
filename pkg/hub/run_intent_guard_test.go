@@ -108,7 +108,6 @@ var lifecycleDispatchCallers = map[string]lifecycleDispatchRule{
 	"Server.stopHeldAgent":           {kind: intentRecorded},
 	"Server.handleStopAllAgents":     {kind: intentRecorded},
 	"Server.autoSuspendStalledAgent": {kind: intentRecorded},
-	"Server.stopCurrentRun":          {kind: intentRecorded},
 	// The scheduled create-and-start runs under a start claim.
 	"Server.dispatchAgentEventHandler": {kind: intentRecorded, recordedBy: "Server.withStartClaim",
 		link: linkCallsRecorder, hops: []string{"Server.createUnderClaim"}},
@@ -146,6 +145,10 @@ var lifecycleDispatchCallers = map[string]lifecycleDispatchRule{
 	// The start-claim reaper stops a container an unconfirmed start left
 	// running past its hold; the agent's intent is left as it is.
 	"Server.stopUnconfirmedStart": {kind: intentUnchanged},
+	// A system stop of a run that ended itself (limits_exceeded): intent
+	// stays as after a container's own exit, so a later platform
+	// disruption of the run can still halt it.
+	"Server.stopCurrentRun": {kind: intentUnchanged},
 	// The backstop stops an agent whose intent is already stopped.
 	"Server.stopForStoppedIntent": {kind: intentUnchanged},
 	// Removes a run that landed after its agent was deleted or a delete

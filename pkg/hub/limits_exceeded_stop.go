@@ -23,9 +23,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// limitsExceededStopAction names the stop in logs.
-const limitsExceededStopAction = "limits_exceeded stop"
-
 // limitsExceededStopDue reports whether a status write the hub accepted
 // moves the current run of before (the row as read ahead of the write) to
 // activity limits_exceeded, so the hub has to stop that run on its runtime
@@ -56,7 +53,7 @@ func (s *Server) stopRunOnLimitsExceeded(ctx context.Context, before *store.Agen
 	}
 	agentID, runID := before.ID, before.RunID
 	if prev, loaded := s.limitsStops.Swap(agentID, runID); loaded && prev == runID {
-		return
+		return // this run's stop was already dispatched
 	}
 	s.agentLifecycleLog.Info("Agent reported limits_exceeded; stopping its run", "agent_id", agentID, "run_id", runID)
 	s.limitsStopsInFlight.Add(1)
@@ -68,20 +65,22 @@ func (s *Server) stopRunOnLimitsExceeded(ctx context.Context, before *store.Agen
 				s.limitsStops.CompareAndDelete(agentID, runID)
 			}
 		}()
-		if !s.stopCurrentRun(context.WithoutCancel(ctx), agentID, runID, limitsExceededStopAction) {
+		if !s.stopCurrentRun(context.WithoutCancel(ctx), agentID, runID, "limits_exceeded stop") {
 			s.limitsStops.CompareAndDelete(agentID, runID)
 		}
 	}()
 }
 
 // stopCurrentRun is a system-initiated stop of run runID of agent agentID:
-// it records run intent stopped, dispatches the stop to the broker and
-// writes phase stopped (container status stopped) while the row still
-// holds runID. Activity, exit code, exit reason and message are left as
-// they are, so the row still says why the run ended. It reports whether
-// the stop was recorded, and does nothing when the row has moved to
-// another run, is suspended, has no broker, or is being deleted or
-// reincarnated. action names the stop in logs.
+// it dispatches the stop to the broker and, unless the row already says how
+// the run ended, writes phase stopped (container status stopped) while the
+// row still holds runID and the phase it was read with. The run intent is
+// left as it is, as when a container exits on its own, so a later platform
+// disruption of the run can still halt it. Activity, exit code, exit reason
+// and message are left as they are, so the row still says why the run
+// ended. It reports whether the stop was dispatched, and does nothing when
+// the row has moved to another run, is suspended, has no broker, or is
+// being deleted or reincarnated. action names the stop in logs.
 func (s *Server) stopCurrentRun(ctx context.Context, agentID, runID, action string) bool {
 	ctx, cancel := detachStopFromClient(ctx, stopWriteBudget())
 	defer cancel()
@@ -108,45 +107,40 @@ func (s *Server) stopCurrentRun(ctx context.Context, agentID, runID, action stri
 	// beginLifecycleOp.
 	endLifecycleOp := s.beginLifecycleOp(agent.ID)
 	defer endLifecycleOp()
-	supersedes := agent.StartClaimID
-	priorIntent, intentAt, err := s.swapRunIntent(ctx, agent, store.RunIntentStopped)
-	if err != nil {
-		s.agentLifecycleLog.Error("Agent "+action+": intent write failed", "agent_id", agentID, "error", err)
-		return false
-	}
 	if err := syncDispatch(ctx, func(dctx context.Context) error {
 		return dispatcher.DispatchAgentStop(dctx, agent)
 	}); err != nil {
 		s.logStopRunMismatch(agent, action, err)
 		s.agentLifecycleLog.Error("Agent "+action+": dispatch failed", "agent_id", agentID, "error", err)
-		// As for auto-suspend: put back a running intent this stop
-		// replaced, unless something newer replaced it.
-		if priorIntent == store.RunIntentRunning {
-			if _, rerr := s.store.RevertRunIntent(ctx, agent.ID, store.RunIntentStopped, intentAt, store.RunIntentRunning); rerr != nil {
-				s.agentLifecycleLog.Error("Agent "+action+": intent revert failed", "agent_id", agentID, "error", rerr)
-			}
-		}
 		return false
 	}
-	defer s.releaseSupersededClaim(ctx, agent.ID, supersedes, intentAt)
 
-	recorded, err := s.recordStopStatus(ctx, agent.ID, runID, action, store.AgentStatusUpdate{
+	// The agent's own stopped report, a crash or a platform halt may have
+	// recorded the end of the run meanwhile: that record is kept.
+	cur, err := s.store.GetAgent(ctx, agentID)
+	if err != nil || cur.RunID != runID || !state.Phase(cur.Phase).IsActivePhase() {
+		return true
+	}
+	err = s.store.UpdateAgentStatus(ctx, agentID, store.AgentStatusUpdate{
 		Phase:           string(state.PhaseStopped),
 		ContainerStatus: "stopped",
+		IfPhase:         cur.Phase,
+		IfRunID:         runID,
 	})
 	endLifecycleOp()
 	if err != nil {
-		s.agentLifecycleLog.Error("Agent "+action+": status write failed", "agent_id", agentID, "error", err)
-		return false
-	}
-	if !recorded {
-		return false
+		// ErrPhaseMismatch and ErrRunChanged (both ErrVersionConflict): another
+		// writer recorded the run's end, or a newer run, first.
+		if !errors.Is(err, store.ErrVersionConflict) {
+			s.agentLifecycleLog.Error("Agent "+action+": status write failed", "agent_id", agentID, "error", err)
+		}
+		return true
 	}
 	// A stopped agent has no running container: release its broker and
 	// project reservations, as for a user stop.
-	s.releaseBrokerQuota(ctx, agent)
-	s.releaseProjectQuota(ctx, agent)
-	if updated, err := s.store.GetAgent(ctx, agent.ID); err == nil && updated.DeletedAt.IsZero() {
+	s.releaseBrokerQuota(ctx, cur)
+	s.releaseProjectQuota(ctx, cur)
+	if updated, err := s.store.GetAgent(ctx, agentID); err == nil && updated.DeletedAt.IsZero() {
 		s.events.PublishAgentStatus(ctx, updated)
 	}
 	return true
