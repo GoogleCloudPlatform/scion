@@ -44,3 +44,22 @@ All gates were run in the agent container, with `SCION_*` stripped, on the branc
   - criterion 19 (A4), which is operational;
   - the §6.3 docker integration test (no docker daemon here);
   - full `make ci`, because it compiles the unsharded `pkg/hub` test package, which the repo rules forbid.
+
+## Review round 1 (head 360a9e4 → fixes)
+
+Code review (4 Required) and security review (1 Medium), with exec-schedules-em's dispositions:
+
+- **R1, same-id duplicate could unbind a live delivery and allow a second paste.** The binding call is now the delivery's only owner across hub replicas. A same-id call on `delivering` rows gets 409 `in_progress` and never reaches the agent; only the owner unbinds or finishes the rows. This amends frozen §2.6 ("forwarded"); the amendment is recorded in the design. Tests: `TestBrokerAgentDeliver_ConcurrentSameIDHasOneOwner` (the reviewer's repro made a regression) and `TestBrokerAgentDeliver_OwnerUnbindOnlyAfterDuplicateRefused` (owner statuses 408, 409 busy, 413, 422, 429, 501, 503).
+- **R2, the broker's hub client cut `/deliver` off at its 30 s default timeout.** The request now uses `apiclient.WithRequestTimeout(115 s)`, keeping no retry, no redirect and the caller's deadline. Tests with a real HTTP client: `TestDeliverMessage_OutlastsClientTimeout` (fails without the fix) and `TestDeliverMessage_NoRetryNoRedirect`. No other hubclient call was added in this PR.
+- **R3, an oversize flush got a permanent 400 instead of exec.** `agentcontrol.SizeError`/`FitsRoute` cover raw text, JSON-encoded size (760 KiB) and the 64-id limit. The hub and sciontool answer 413 `too_large`; a malformed request stays 400. The broker checks the limits before choosing conduit and falls back to exec, failing with the named limit when exec is unavailable. Tests: `TestConduitDelivery_OversizeUsesExec` (both limits, encoded size, exec available and unavailable), `TestBrokerAgentDeliver_SizeLimitIs413`, `TestDeliverSizeLimits`.
+- **R4, a failure report could overwrite `delivered`, and failure-first left no replayable outcome.** Store transitions are now conditional. `FailUndeliveredMessage` returns whether it won. `MarkMessageFailed` never fails `delivered`, and failing a `delivering` row stores partial/unknown in the same write. `/message-failures` notifies only when it won the transition. Tests: `TestFailureVersusFinish` (both orderings), `TestBrokerMessageFailures_NeverFailsDelivered`, `TestExecuteAgentDMFinalization_KeepsDelivered`.
+- **S-A-01, `interrupt_paste` skipped the hard stop after its first key.** The hard stop is now checked before every `paste-buffer`. An expiry after the interrupt keys is a stored partial; an expiry before anything visible stays 408. Test: `TestDeliverHardStopAfterInterrupt` (fake clock, slow interrupt and slow load).
+- **Attachments (FYI).** Attachment presence now travels with the flush, and a flush or interrupt with attachments uses exec. Test: `TestConduitDelivery_AttachmentsUseExec`.
+- Declined or deferred per the dispositions: the govulncheck baseline, and the operational items (criterion 19, live Cloud Run, Docker integration).
+
+### Round 1 verification (head 59220c6, base upstream `ad80ecf`)
+
+- `make fmt-check lint-ci check-custom test-fast-ci build`: passed.
+- `make test-hub-shard SHARD=K`, `make test-hub-shard SHARD=K NOSQLITE=1` and `make vet-hub-shard SHARD=K` for K = 1..6: all passed.
+- golangci-lint `--new-from-rev=upstream-main` on the touched packages, plus `--tests=false ./pkg/hub`: 0 issues each.
+- Windows cross-build of `cmd/scion` and `hack/winsec-guard.sh`: passed.
