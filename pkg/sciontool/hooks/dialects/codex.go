@@ -83,8 +83,8 @@ func (d *CodexDialect) Parse(data map[string]interface{}) (*hooks.Event, error) 
 // staged dialect file; TestCodexDialect_MatchesStagedDialect enforces this.
 func (d *CodexDialect) normalizeEventName(name string) string {
 	switch name {
-	case "agent-turn-complete":
-		return hooks.EventResponseComplete
+	case "agent-turn-complete", "Stop":
+		return hooks.EventAgentEnd
 	case "notification":
 		return hooks.EventNotification
 	case "session-start", "SessionStart":
@@ -101,8 +101,6 @@ func (d *CodexDialect) normalizeEventName(name string) string {
 		return hooks.EventModelStart
 	case "model-end", "AfterModel":
 		return hooks.EventModelEnd
-	case "Stop":
-		return hooks.EventAgentEnd
 	case "SubagentStop":
 		return hooks.EventSubagentEnd
 	default:

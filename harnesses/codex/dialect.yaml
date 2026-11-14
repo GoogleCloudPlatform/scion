@@ -12,9 +12,9 @@ event_name_fields:
   - event
 
 mappings:
-  # Legacy notify path.
+  # Legacy notify path (turn boundary, non-terminal).
   agent-turn-complete:
-    event: response-complete
+    event: agent-end
     fields:
       message: title
 

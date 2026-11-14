@@ -73,6 +73,16 @@ func TestCodexBuiltinDialect_StatusMatchesStagedDialect(t *testing.T) {
 			before: state.ActivityThinking,
 			want:   state.ActivityWorking,
 		},
+		{
+			name: "agent-turn-complete",
+			payload: map[string]interface{}{
+				"type":                   "agent-turn-complete",
+				"title":                  "Done",
+				"last-assistant-message": "Inspecting brief and diff",
+			},
+			before: state.ActivityThinking,
+			want:   state.ActivityWorking,
+		},
 	}
 
 	for _, tt := range tests {

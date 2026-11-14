@@ -15,8 +15,6 @@
 harness: codex
 image: scion-codex:latest
 user: scion
-env:
-  SCION_CODEX_NOTIFY_AUTO_COMPLETE: "true"
 # provisioner.type is container-script so the container-side provision.py
 # handles auth resolution, MCP server translation, and other harness-native
 # config writes. Existing installations that still have type: builtin can

@@ -44,8 +44,8 @@ codex/
 registers `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`,
 `PostToolUse`, `Stop` and `SubagentStop`. Each one runs `scion_notify.sh`,
 which forwards the payload to `sciontool hook --dialect=codex`, mapped by
-`dialect.yaml`. The legacy `notify` callback (`agent-turn-complete`) is wired
-too.
+`dialect.yaml`. Task completion is signaled explicitly by the agent via
+`sciontool status task_completed`.
 
 `SubagentStart`, `PermissionRequest`, `PreCompact`, `PostCompact` and
 `Interrupt` are left unregistered: codex supports them, but the dialect has no

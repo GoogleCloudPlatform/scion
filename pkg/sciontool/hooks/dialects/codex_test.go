@@ -20,7 +20,7 @@ func TestCodexDialectParse_TurnComplete(t *testing.T) {
 		"title": "Done",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, hooks.EventResponseComplete, event.Name)
+	assert.Equal(t, hooks.EventAgentEnd, event.Name)
 	assert.Equal(t, "Done", event.Data.Message)
 	assert.Equal(t, "codex", event.Dialect)
 }
