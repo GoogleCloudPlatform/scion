@@ -39,13 +39,11 @@ func (f haltFixture) restartingRuntime(t *testing.T, gated bool) (release func()
 	b.Capabilities = &store.BrokerCapabilities{RestartingRuntimes: []string{f.agent.Runtime}}
 	require.NoError(t, f.s.UpdateRuntimeBroker(context.Background(), b))
 	gate := make(chan struct{})
-	old := limitsExceededStopWait
-	limitsExceededStopWait = func() {
+	f.srv.limitsStopWait = func() {
 		if gated {
 			<-gate
 		}
 	}
-	t.Cleanup(func() { limitsExceededStopWait = old })
 	return func() { close(gate) }
 }
 
@@ -85,6 +83,7 @@ func TestLimitsExceededStop_SelfReportStopsOnceAfterShutdown(t *testing.T) {
 	assert.Equal(t, store.RunIntentRunning, got.RunIntent, "intent stays as after the container's own exit")
 	_, held := f.srv.limitsStops.Load(f.agent.ID)
 	assert.False(t, held, "the run is forgotten once its stop ends")
+	assert.False(t, f.srv.lifecycleOps.active(f.agent.ID), "the stop's lifecycle op has ended")
 }
 
 func TestLimitsExceededStop_HeartbeatStopsOnce(t *testing.T) {

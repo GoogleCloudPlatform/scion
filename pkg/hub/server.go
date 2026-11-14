@@ -2565,6 +2565,9 @@ type Server struct {
 	// those stops as a test handle only; shutdown does not wait for it.
 	limitsStops         sync.Map
 	limitsStopsInFlight sync.WaitGroup
+	// limitsStopWait, when set, replaces the limits_exceeded stop's grace
+	// wait (tests only).
+	limitsStopWait func()
 	// httpDrains marks brokers with a heartbeat-triggered drain of queued
 	// stops running on this node (http_broker_drain.go).
 	httpDrains sync.Map

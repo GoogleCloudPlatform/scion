@@ -34,10 +34,6 @@ import (
 // add up to under a minute; two minutes leaves the session-end hooks room.
 const limitsExceededStopGrace = 2 * time.Minute
 
-// limitsExceededStopWait waits out limitsExceededStopGrace. A variable for
-// tests.
-var limitsExceededStopWait = func() { time.Sleep(limitsExceededStopGrace) }
-
 // limitsExceededStopDue reports whether a status write the hub accepted
 // moves the current run of before (the row as read ahead of the write) to
 // activity limits_exceeded, so the hub arms a stop of the run. upd is the
@@ -98,7 +94,11 @@ func (s *Server) stopRunOnLimitsExceeded(ctx context.Context, before *store.Agen
 		}
 		s.agentLifecycleLog.Info("Agent reported limits_exceeded; stopping its run after the grace",
 			"agent_id", agentID, "run_id", runID, "grace", limitsExceededStopGrace)
-		limitsExceededStopWait()
+		if s.limitsStopWait != nil {
+			s.limitsStopWait()
+		} else {
+			time.Sleep(limitsExceededStopGrace)
+		}
 		s.stopCurrentRun(bctx, agentID, runID, "limits_exceeded stop")
 	}()
 }
@@ -156,6 +156,9 @@ func (s *Server) stopCurrentRun(ctx context.Context, agentID, runID, action stri
 		IfPhase:         cur.Phase,
 		IfRunID:         runID,
 	})
+	// The op covers the dispatch and the status write only, as for
+	// auto-suspend: it ends here, before the releases and the publish. The
+	// deferred call is then a no-op (the end function is idempotent).
 	endLifecycleOp()
 	if err != nil {
 		// ErrPhaseMismatch and ErrRunChanged (both ErrVersionConflict): another
