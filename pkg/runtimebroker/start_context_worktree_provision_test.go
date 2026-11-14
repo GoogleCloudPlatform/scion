@@ -391,6 +391,38 @@ func TestResolveWorktreeProvision_KubernetesAliases_Rejected(t *testing.T) {
 	}
 }
 
+// TestResolveWorktreeProvision_HostWorkspaceUnmountedRuntimes_Rejected:
+// substrate and cloudrun-sandbox skip host-side provisioning: neither runs
+// the agent in a host worktree, so the dispatch gets the in-container clone
+// (ptone/scion#7913).
+func TestResolveWorktreeProvision_HostWorkspaceUnmountedRuntimes_Rejected(t *testing.T) {
+	for _, name := range []string{"substrate", "cloudrun-sandbox"} {
+		t.Run(name, func(t *testing.T) {
+			result := resolveWorktreeProvision(worktreeProvisionInput{
+				WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+				GitClone:      &api.GitCloneConfig{URL: "https://github.com/org/repo.git", Branch: "main"},
+				ProjectPath:   t.TempDir(),
+				ProjectID:     "proj-1",
+				AgentID:       "agent-1",
+				AgentName:     "test-agent",
+				RuntimeName:   name,
+				eligibilityOverride: func() (bool, string) {
+					return true, ""
+				},
+			})
+			if result.ShouldProvision {
+				t.Fatalf("expected ShouldProvision=false for runtime %q", name)
+			}
+			if result.MissingIdentity {
+				t.Errorf("expected MissingIdentity=false for runtime %q", name)
+			}
+			if !strings.Contains(result.Reason, name) {
+				t.Errorf("expected reason to name %q, got %q", name, result.Reason)
+			}
+		})
+	}
+}
+
 func TestResolveWorktreeProvision_DockerRuntime_NotRejected(t *testing.T) {
 	eligible, _ := runtime.WorktreeModeEligible()
 	if !eligible {

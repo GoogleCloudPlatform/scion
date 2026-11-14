@@ -1362,8 +1362,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		// pkg/agent Start selects an NFS worktree from it
 		// (nfsWorktreeSelection) and relabels the start clone-per-agent
 		// when there is none (k8sWorktreeCloneFallback). Cloud Run keeps
-		// it too (ptone/scion#7865).
-		if in.WorkspaceMode == store.WorkspaceModeWorktreePerAgent && localContainerRuntime(dispatchRuntimeType) {
+		// it too (ptone/scion#7865). substrate and cloudrun-sandbox always
+		// get this clone (hostWorkspaceUnmountedRuntimeName), so they are
+		// labelled like a local container runtime (ptone/scion#7913).
+		if in.WorkspaceMode == store.WorkspaceModeWorktreePerAgent &&
+			(localContainerRuntime(dispatchRuntimeType) || hostWorkspaceUnmountedRuntimeName(dispatchRuntimeType)) {
 			env["SCION_WORKSPACE_MODE"] = string(store.SharingModeClonePerAgent)
 			classifyBrokerEnv("SCION_WORKSPACE_MODE", api.EnvKindPlain)
 		}
@@ -1676,6 +1679,16 @@ func (e *startContextError) Error() string {
 // the two functions keep classifying identically if that ever changes.
 func isKubernetesRuntimeName(name string) bool {
 	return name == "kubernetes" || name == "k8s" || name == "remote"
+}
+
+// hostWorkspaceUnmountedRuntimeName reports whether name identifies a
+// runtime that cannot run an agent in a host-side worktree: substrate never
+// mounts RunConfig.Workspace, and cloudrun-sandbox copies it into the
+// sandbox, where the worktree's .git file names the shared base on the
+// read-only rootfs. A worktree-per-agent dispatch there gets the in-container
+// clone, labelled clone-per-agent (ptone/scion#7913).
+func hostWorkspaceUnmountedRuntimeName(name string) bool {
+	return name == "substrate" || name == "cloudrun-sandbox"
 }
 
 // isCloudRunRuntimeName reports whether name identifies the Cloud Run
@@ -2317,7 +2330,8 @@ type worktreeProvisionInput struct {
 	// RuntimeName is the name of the container runtime ("kubernetes", "docker",
 	// etc.) this dispatch resolved to. Used to reject host-side worktree provisioning
 	// on Kubernetes where pods cannot bind-mount host worktrees — worktree-per-agent
-	// on K8s requires the NFS backend (init-container path).
+	// on K8s requires the NFS backend (init-container path) — and on substrate
+	// and cloudrun-sandbox, which never run the agent in a host worktree.
 	RuntimeName string
 
 	// eligibilityOverride, when non-nil, replaces the runtime.WorktreeModeEligible
@@ -2393,6 +2407,14 @@ func resolveWorktreeProvision(in worktreeProvisionInput) worktreeProvisionResult
 		return worktreeProvisionResult{
 			Reason: "worktree-per-agent on Kubernetes requires the NFS backend; " +
 				"node-local host-side provisioning is not supported (pods cannot bind-mount host worktrees)",
+		}
+	}
+	// substrate and cloudrun-sandbox cannot run the agent in a host
+	// worktree either; they always get the in-container clone.
+	if hostWorkspaceUnmountedRuntimeName(in.RuntimeName) {
+		return worktreeProvisionResult{
+			Reason: "worktree-per-agent on " + in.RuntimeName + " uses the in-container clone; " +
+				"the runtime does not mount a host-side worktree",
 		}
 	}
 
