@@ -34,11 +34,9 @@ for a one-off direct message; send it with `scion message @<agent-name>` instead
 Conversation subcommands accept three reference formats:
 
 - **`conv:<uuid>`**: Direct conversation ID (from `scion conversation list` or an
-  inbound message envelope). This is the reliable form and always works for any
-  conversation you can access.
-- **`@<agent-name>`**: Direct-message shorthand. Fails with `no conversation found`
-  when a DM has an empty `DisplayName`; look up the DM's ID with
-  `scion conversation list` and pass `conv:<uuid>` instead.
+  inbound message envelope's `conversation.id`). This is the most common form
+  and always resolves unambiguously for any conversation you can access.
+- **`@<agent-name>`**: The direct-message conversation with an agent.
 - **`#<thread-name>`**: A named thread conversation.
 
 Bare UUIDs are not accepted. Always include the `conv:` prefix when addressing
