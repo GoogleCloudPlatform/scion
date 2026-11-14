@@ -1950,7 +1950,7 @@ uses it with no stored login and no agent token file (either one takes precedenc
 `SCION_HUB_TOKEN`; check `hub.auth.source` in the output):
 
 ```bash
-scion hub token create --boundary hub --name health-check \
+scion --global hub token create --boundary hub --name health-check \
   --scopes hub_health:read,broker:read,agent:list --expires 30d
 SCION_HUB_TOKEN=scion_pat_... scion doctor --format json
 ```

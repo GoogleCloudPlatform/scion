@@ -222,7 +222,7 @@ To register a broker on a machine where you cannot sign in interactively (a buil
 1. **Mint a hub token.** You must be a hub member, which grants `broker.create`. Include `broker:read` as well, so that `register` can check its existing registration:
 
    ```bash
-   scion hub token create --boundary hub --name build-host-3 \
+   scion --global hub token create --boundary hub --name build-host-3 \
      --scopes broker:create,broker:read --expires 2h
    ```
 

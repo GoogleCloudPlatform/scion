@@ -164,10 +164,11 @@ administrator grants it; see
 and the token cover global records only: they give no authority over project- or user-scoped
 skills and templates.
 
-Mint the token from a sign-in session as that user:
+Mint the token from a sign-in session as that user. Outside a Scion project, `scion hub token`
+commands need the root `--global` flag (see [Hub-bound tokens](#hub-bound-tokens)):
 
 ```bash
-scion hub token create --boundary hub \
+scion --global hub token create --boundary hub \
   --name catalog-ci \
   --scopes skill:list,skill:read,skill:create_global,skill:update_global,skill:delete_global \
   --scopes template:list,template:read,template:create_global,template:update_global,template:delete_global
@@ -208,8 +209,8 @@ scion --global --non-interactive templates delete old-reviewer --hub
 # Copy a global template into the local global templates directory
 scion --global templates clone code-reviewer code-reviewer-v2 --hub
 
-# Refresh a global template from its recorded GitHub source
-scion templates update code-reviewer --scope global
+# Refresh a global template that was imported from GitHub, from its recorded source
+scion templates update github-reviewer --scope global
 ```
 
 - Without a terminal, a command that asks for confirmation (such as `templates delete`) answers
@@ -219,10 +220,15 @@ scion templates update code-reviewer --scope global
   global skill of that name; a project or user skill of the same name is not reused.
 - The commands above do not link, register or look up a project, so the job needs no linked
   checkout and no `project:read` or `project:list`. Outside a Scion project (for example in a
-  plain CI checkout), `skills publish` and the `templates` commands other than `update` need the
-  root `--global` flag, as above; inside a linked project, `skills publish --scope global` works
+  plain CI checkout), `hub token create`, `skills publish` and the `templates` commands other
+  than `update` need the root `--global` flag, as above; inside a linked project, `skills publish --scope global` works
   without it. `templates update` takes `--scope global` or `--global`; `--global` together with
   a different `--scope` is rejected.
+- `templates update` refreshes only templates that have a recorded GitHub source URL, such as
+  templates imported into the global catalog from a GitHub folder (the web UI's **Load
+  Templates**, or `POST /api/v1/resources/import`). A template created with `templates sync` has
+  no source URL, so `templates update` skips or refuses it; see
+  [Refreshing a Hub template from its source](/scion/local/templates/#refreshing-a-hub-template-from-its-source).
 - `scion --global templates clone <src> <dest>` copies a Hub template into your local global
   templates directory, which needs only `template:read`; sync the copy to publish it. Cloning a
   template into the global scope on the Hub itself (the web UI's clone, or
@@ -308,7 +314,7 @@ refused with `403` and `details.reason` `CREDENTIAL_MANAGEMENT`.
 ```bash
 scion hub auth login
 scion hub token scopes --project my-project
-scion hub token scopes --boundary hub
+scion --global hub token scopes --boundary hub
 ```
 
 `--project` alone means the project boundary. `--boundary hub` takes no `--project`; passing both
@@ -396,10 +402,13 @@ In the web UI, open **Access Tokens** in your profile, select **Create Token**, 
 project choice, clears the scopes you had selected, and lists the scopes with their hub-boundary
 eligibility.
 
-With the CLI, pass `--boundary hub` and no `--project`:
+With the CLI, pass `--boundary hub` and no `--project`. Outside a Scion project directory,
+`scion hub token` commands (including `create`, `list` and `scopes`) stop with "not in a scion
+project" unless you pass `--project` or the root `--global` flag; for a hub token, use
+`--global`:
 
 ```bash
-scion hub token create --boundary hub \
+scion --global hub token create --boundary hub \
   --name health-check \
   --scopes hub_health:read,broker:read,agent:list \
   --expires 30d
