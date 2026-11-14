@@ -47,9 +47,22 @@ type spHub struct {
 	// returns it unless scopeId narrows the list to the caller, as the hub
 	// does for an unrestricted (hub-admin) caller.
 	ownUserSkill bool
+	// meStatus and meBody, when set, replace the /api/v1/auth/me answer.
+	meStatus int
+	meBody   map[string]string
+	// listStatus, when set, makes GET /api/v1/skills fail with it.
+	listStatus int
+	versions   []string
 }
 
 const tuCallerID = "user-caller"
+
+// versionPosts returns the skill IDs that got a POST .../versions.
+func (h *spHub) versionPosts() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]string(nil), h.versions...)
+}
 
 func (h *spHub) snapshot() (requests, projectHits, finalized []string, created []map[string]any) {
 	h.mu.Lock()
@@ -79,7 +92,19 @@ func newSPHub(t *testing.T) (*spHub, *httptest.Server) {
 			w.WriteHeader(http.StatusNotFound)
 			_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": "not_found", "message": "project not found"}})
 		case r.Method == http.MethodGet && path == "/api/v1/auth/me":
-			_ = json.NewEncoder(w).Encode(map[string]string{"id": tuCallerID, "email": "caller@example.com"})
+			if h.meStatus != 0 {
+				w.WriteHeader(h.meStatus)
+				_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": "forbidden", "message": "forbidden"}})
+				return
+			}
+			body := map[string]string{"id": tuCallerID, "email": "caller@example.com"}
+			if h.meBody != nil {
+				body = h.meBody
+			}
+			_ = json.NewEncoder(w).Encode(body)
+		case r.Method == http.MethodGet && path == "/api/v1/skills" && h.listStatus != 0:
+			w.WriteHeader(h.listStatus)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"code": "internal", "message": "list failed"}})
 		case r.Method == http.MethodGet && path == "/api/v1/skills":
 			out := []map[string]string{}
 			q := r.URL.Query()
@@ -103,6 +128,9 @@ func newSPHub(t *testing.T) (*spHub, *httptest.Server) {
 			h.mu.Unlock()
 			_ = json.NewEncoder(w).Encode(map[string]any{"skill": map[string]any{"id": "skill-new", "name": body["name"], "scope": body["scope"]}})
 		case r.Method == http.MethodPost && strings.HasSuffix(path, "/versions"):
+			h.mu.Lock()
+			h.versions = append(h.versions, strings.TrimSuffix(strings.TrimPrefix(path, "/api/v1/skills/"), "/versions"))
+			h.mu.Unlock()
 			_ = json.NewEncoder(w).Encode(map[string]any{"version": map[string]string{"id": "v1", "version": "1.0.0", "status": "draft"}})
 		case r.Method == http.MethodPost && strings.HasSuffix(path, "/finalize"):
 			id := strings.TrimSuffix(strings.TrimPrefix(path, "/api/v1/skills/"), "/finalize")
@@ -241,4 +269,62 @@ func TestSkillsPublish_UserScopeNarrowsToCaller(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSkillsPublish_UserScopeFailsClosedWithoutCaller: when the hub does
+// not identify the caller, a --scope user publish stops before any lookup,
+// create or version.
+func TestSkillsPublish_UserScopeFailsClosedWithoutCaller(t *testing.T) {
+	for name, configure := range map[string]func(*spHub){
+		"auth me forbidden": func(h *spHub) { h.meStatus = http.StatusForbidden },
+		"auth me empty id":  func(h *spHub) { h.meBody = map[string]string{"id": ""} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			hub, srv := newSPHub(t)
+			configure(hub)
+			cwd := tuSetup(t)
+			writeTUProjectSettings(t, cwd, tuProjectID)
+			err := runSkillsPublishRoot(t, "--hub", srv.URL, "--yes", "--non-interactive",
+				"skills", "publish", writeSkillDir(t), "--version", "1.0.0", "--scope", "user")
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "cannot publish user-scoped skill")
+			_, _, finalized, created := hub.snapshot()
+			assert.Empty(t, created, "no skill may be created")
+			assert.Empty(t, hub.versionPosts(), "no version may be published")
+			assert.Empty(t, finalized)
+		})
+	}
+}
+
+// TestSkillsPublish_ScopedLookupFailureStops: with --scope a failed skill
+// lookup is returned instead of creating a possibly duplicate skill;
+// without --scope the lookup error still falls through to create.
+func TestSkillsPublish_ScopedLookupFailureStops(t *testing.T) {
+	t.Run("scoped lookup failure is returned", func(t *testing.T) {
+		hub, srv := newSPHub(t)
+		hub.listStatus = http.StatusInternalServerError
+		cwd := tuSetup(t)
+		writeTUProjectSettings(t, cwd, tuProjectID)
+		err := runSkillsPublishRoot(t, "--hub", srv.URL, "--yes", "--non-interactive",
+			"skills", "publish", writeSkillDir(t), "--version", "1.0.0", "--scope", "global")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to look up skill")
+		_, _, _, created := hub.snapshot()
+		assert.Empty(t, created)
+		assert.Empty(t, hub.versionPosts())
+	})
+
+	t.Run("unscoped lookup failure still creates", func(t *testing.T) {
+		hub, srv := newSPHub(t)
+		hub.listStatus = http.StatusInternalServerError
+		cwd := tuSetup(t)
+		writeTUProjectSettings(t, cwd, tuProjectID)
+		err := runSkillsPublishRoot(t, "--hub", srv.URL, "--yes", "--non-interactive",
+			"skills", "publish", writeSkillDir(t), "--version", "1.0.0")
+		requests, _, finalized, created := hub.snapshot()
+		require.NoError(t, err, "requests: %v", requests)
+		require.Len(t, created, 1)
+		assert.Equal(t, "global", created[0]["scope"])
+		assert.Equal(t, []string{"skill-new"}, finalized)
+	})
 }

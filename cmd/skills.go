@@ -369,6 +369,11 @@ func runSkillsPublish(cmd *cobra.Command, args []string) error {
 		}
 
 		existing, err := findPublishTargetSkill(ctx, skillSvc, name, scope, lookupScopeID)
+		if err != nil && scope != "" {
+			// With a target scope a failed lookup is not "no such skill":
+			// creating one could duplicate an existing skill in that scope.
+			return fmt.Errorf("failed to look up skill %q in %s scope: %w", name, scope, err)
+		}
 		if err == nil && existing != nil {
 			skillID = existing.ID
 		} else {

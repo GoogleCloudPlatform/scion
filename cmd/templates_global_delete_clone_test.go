@@ -145,3 +145,40 @@ func TestTemplatesDelete_ProjectScopeStillLinksProject(t *testing.T) {
 		assert.Contains(t, hub.deleted, "tmpl-project-1")
 	})
 }
+
+// TestTemplatesGlobal_InGitCheckoutSkipsProject runs --global delete and
+// clone from a git checkout with a remote, where a project lookup by git
+// remote is possible. A --global delete searches the global scope only and
+// makes no project request at all; clone, whose source search covers all
+// scopes, makes no project-by-ID request.
+func TestTemplatesGlobal_InGitCheckoutSkipsProject(t *testing.T) {
+	t.Run("delete", func(t *testing.T) {
+		hub, srv := newTUHub(t)
+		cwd := tuSetup(t)
+		pfGitInit(t, cwd, "https://github.com/acme/repo.git")
+		tuHubSettings(t, srv.URL)
+		err := runTemplatesRoot(t, "--yes", "--non-interactive", "--global", "templates", "delete", "base")
+		requests, _, projectHits := hub.snapshot()
+		require.NoError(t, err, "requests: %v", requests)
+		assert.Empty(t, projectHits, "a --global delete must not read any project")
+		hub.mu.Lock()
+		defer hub.mu.Unlock()
+		assert.Equal(t, []string{tuGlobalTemplateID}, hub.deleted)
+	})
+
+	t.Run("clone", func(t *testing.T) {
+		hub, srv := newTUHub(t)
+		cwd := tuSetup(t)
+		pfGitInit(t, cwd, "https://github.com/acme/repo.git")
+		tuHubSettings(t, srv.URL)
+		err := runTemplatesRoot(t, "--yes", "--non-interactive", "--global", "templates", "clone", "base", "base-copy")
+		requests, _, projectHits := hub.snapshot()
+		require.NoError(t, err, "requests: %v", requests)
+		for _, hit := range projectHits {
+			assert.NotRegexp(t, `^GET /api/v1/projects/[^?]`, hit, "a --global clone must not read a project by ID")
+		}
+		hub.mu.Lock()
+		defer hub.mu.Unlock()
+		assert.Equal(t, []string{tuGlobalTemplateID}, hub.downloaded)
+	})
+}
