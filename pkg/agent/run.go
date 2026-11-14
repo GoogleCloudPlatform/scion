@@ -102,6 +102,12 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	if err := runtime.CheckPersistenceSupported(m.Runtime, opts.Persistence); err != nil {
 		return nil, err
 	}
+	// An ephemeral agent's session is never kept, so every start is a fresh
+	// one: the prompt-file task is sent again and the harness starts
+	// without its resume flag (ptone/scion#7780).
+	if opts.Persistence.IsEphemeral() {
+		opts.Resume = false
+	}
 	ctx = m.withWorkspaceLock(ctx)
 	startEntry := time.Now()
 	// callerHubEndpoint is opts.Env's SCION_HUB_ENDPOINT exactly as the

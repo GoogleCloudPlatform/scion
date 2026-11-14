@@ -63,3 +63,45 @@ func TestStart_EphemeralRefusedBeforeSideEffects(t *testing.T) {
 		t.Errorf("agent directory after the refusal: %v, want none (no workspace, home or agent-info)", err)
 	}
 }
+
+// ephemeralMockRuntime is a mock runtime that supports ephemeral
+// persistence.
+type ephemeralMockRuntime struct{ *runtime.MockRuntime }
+
+func (ephemeralMockRuntime) SupportsEphemeralPersistence() bool { return true }
+
+// TestStart_EphemeralResumeStartsFresh: a resume of an ephemeral agent is a
+// fresh start: the harness runs without its resume flag and gets the
+// prompt-file task again.
+func TestStart_EphemeralResumeStartsFresh(t *testing.T) {
+	_, projectScionDir := newResumePhaseTestFixture(t, func(context.Context, map[string]string) ([]api.AgentInfo, error) {
+		return nil, nil
+	})
+	agentDir := filepath.Join(projectScionDir, "agents", "resume-test")
+	if err := os.WriteFile(filepath.Join(agentDir, "prompt.md"), []byte("the original task"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var got runtime.RunConfig
+	mgr := NewManager(ephemeralMockRuntime{&runtime.MockRuntime{
+		ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) { return nil, nil },
+		RunFunc: func(_ context.Context, cfg runtime.RunConfig) (string, error) {
+			got = cfg
+			return "mock-id", nil
+		},
+	}})
+	if _, err := mgr.Start(context.Background(), api.StartOptions{
+		Name: "resume-test", ProjectPath: projectScionDir, BrokerMode: true, NoAuth: true,
+		Resume: true, Persistence: api.PersistenceEphemeral,
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if got.Resume {
+		t.Error("RunConfig.Resume = true, want a fresh harness session")
+	}
+	if got.Task != "the original task" {
+		t.Errorf("RunConfig.Task = %q, want the prompt-file task again", got.Task)
+	}
+	if got.Persistence != api.PersistenceEphemeral {
+		t.Errorf("RunConfig.Persistence = %q, want ephemeral", got.Persistence)
+	}
+}

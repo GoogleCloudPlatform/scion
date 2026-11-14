@@ -17,10 +17,13 @@ package runtimebroker
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
@@ -88,5 +91,98 @@ func TestPersistenceRuntimeRefusal(t *testing.T) {
 	}
 	if sce := persistenceRuntimeRefusal("a", "", &scionrt.DockerRuntime{}); sce != nil {
 		t.Fatalf("persistent: %+v", sce)
+	}
+}
+
+// ephemeralBrokerRuntime is a mock runtime with ephemeral support.
+type ephemeralBrokerRuntime struct{ *scionrt.MockRuntime }
+
+func (ephemeralBrokerRuntime) SupportsEphemeralPersistence() bool { return true }
+
+// newEphemeralTestServer is newTestServerWithManager with a runtime that
+// supports ephemeral persistence when capable is set.
+func newEphemeralTestServer(t *testing.T, capable bool) (*Server, *mockManager) {
+	t.Helper()
+	if !capable {
+		srv := newTestServer(t)
+		return srv, srv.manager.(*mockManager)
+	}
+	setupTestScionEnv(t)
+	cfg := testServerConfig()
+	cfg.BrokerID = "test-broker-id"
+	cfg.BrokerName = "test-host"
+	cfg.ForceRuntime = "mock"
+	mgr := &mockManager{agents: []api.AgentInfo{{ID: "container-1", Name: "test-agent-1", Phase: "running", ContainerStatus: "Up 1 hour"}}}
+	srv := New(cfg, mgr, ephemeralBrokerRuntime{&scionrt.MockRuntime{NameFunc: func() string { return "mock" }}}, config.RuntimeBuildRecord{})
+	endAsyncLaunchesAtCleanup(t, srv)
+	return srv, mgr
+}
+
+// TestEphemeralPersistence_Handlers: create, start and restart take the
+// persistence from the request: with the experiment missing from the
+// forwarded hub defaults they answer 412 experiment_disabled, on a runtime
+// without ephemeral support 422 persistence_unsupported, both before Start;
+// on a supporting runtime Start receives it.
+func TestEphemeralPersistence_Handlers(t *testing.T) {
+	gate := `{"experiments": ["` + experiments.CloudRunEphemeralAgents + `"]}`
+	bodies := map[string]func(gateOn bool) string{
+		"/api/v1/agents": func(gateOn bool) string {
+			cfg := `"template": "claude"`
+			if gateOn {
+				cfg += `, "hubAgentDefaults": ` + gate
+			}
+			return `{"name": "eph-agent", "persistence": "ephemeral", "config": {` + cfg + `}}`
+		},
+		"/api/v1/agents/test-agent-1/start": func(gateOn bool) string {
+			if gateOn {
+				return `{"persistence": "ephemeral", "hubAgentDefaults": ` + gate + `}`
+			}
+			return `{"persistence": "ephemeral"}`
+		},
+		"/api/v1/agents/test-agent-1/restart": func(gateOn bool) string {
+			if gateOn {
+				return `{"persistence": "ephemeral", "hubAgentDefaults": ` + gate + `}`
+			}
+			return `{"persistence": "ephemeral"}`
+		},
+	}
+	post := func(srv *Server, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+		return w
+	}
+	for path, body := range bodies {
+		t.Run(path+"/gate off", func(t *testing.T) {
+			srv, mgr := newEphemeralTestServer(t, true)
+			w := post(srv, path, body(false))
+			if w.Code != http.StatusPreconditionFailed || !strings.Contains(w.Body.String(), "experiment_disabled") {
+				t.Fatalf("got %d %s, want 412 experiment_disabled", w.Code, w.Body.String())
+			}
+			if mgr.startCalls != 0 {
+				t.Errorf("Start called %d times", mgr.startCalls)
+			}
+		})
+		t.Run(path+"/runtime without support", func(t *testing.T) {
+			srv, mgr := newEphemeralTestServer(t, false)
+			w := post(srv, path, body(true))
+			if w.Code != http.StatusUnprocessableEntity || !strings.Contains(w.Body.String(), "persistence_unsupported") {
+				t.Fatalf("got %d %s, want 422 persistence_unsupported", w.Code, w.Body.String())
+			}
+			if mgr.startCalls != 0 {
+				t.Errorf("Start called %d times", mgr.startCalls)
+			}
+		})
+		t.Run(path+"/supported", func(t *testing.T) {
+			srv, mgr := newEphemeralTestServer(t, true)
+			w := post(srv, path, body(true))
+			if w.Code >= 300 {
+				t.Fatalf("got %d %s, want success", w.Code, w.Body.String())
+			}
+			if mgr.lastStartOpts.Persistence != api.PersistenceEphemeral {
+				t.Errorf("Start persistence = %q, want ephemeral", mgr.lastStartOpts.Persistence)
+			}
+		})
 	}
 }
