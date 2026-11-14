@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -36,6 +37,16 @@ import (
 const (
 	defaultProjectDecisionsLimit = 50
 	maxProjectDecisionsLimit     = 200
+
+	// Search (q) bounds, in runes after trimming (design D1).
+	minProjectDecisionsQueryRunes = 2
+	maxProjectDecisionsQueryRunes = 256
+	// maxProjectDecisionsConversationBytes bounds the conversation param,
+	// the decisions.chat_key column width.
+	maxProjectDecisionsConversationBytes = 256
+	// maxProjectDecisionFacetOptions caps the agents and conversations
+	// facets after sorting by label (design D5).
+	maxProjectDecisionFacetOptions = 500
 
 	ProjectDecisionsTabPending = "pending"
 	ProjectDecisionsTabMade    = "made"
@@ -54,28 +65,47 @@ type ProjectDecisionCounts struct {
 }
 
 // ProjectDecisionActorView is one filter-facet option (an asking agent or a
-// recorded answerer) scoped to conversations the caller can read.
+// recorded answerer) scoped to conversations the caller can read. Hint tells
+// apart agents whose names collide ("deleted · 3f9c"); clients show it muted.
 type ProjectDecisionActorView struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+	Hint string `json:"hint,omitempty"`
+}
+
+// ProjectDecisionConversationView is one conversations-facet option: a
+// readable conversation with at least one decision.
+type ProjectDecisionConversationView struct {
+	Key       string `json:"key"`
+	Label     string `json:"label"`
+	ProjectID string `json:"projectId"`
+}
+
+// ProjectDecisionProjectRef names the project a prompt or log entry belongs
+// to (design S2).
+type ProjectDecisionProjectRef struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Slug string `json:"slug"`
 }
 
 // ProjectDecisionPromptView is one prompt card on tab=pending.
 type ProjectDecisionPromptView struct {
-	PromptMessageID       string            `json:"promptMessageId"`
-	PromptAvailable       bool              `json:"promptAvailable"`
-	ChatKey               string            `json:"chatKey"`
-	ConversationLabel     string            `json:"conversationLabel"`
-	ConversationAvailable bool              `json:"conversationAvailable"`
-	AskerAgentID          string            `json:"askerAgentId"`
-	AskerAgentName        string            `json:"askerAgentName"`
-	CreatedAt             time.Time         `json:"createdAt"`
-	AnswerMode            string            `json:"answerMode"`
-	WaitingOnYou          bool              `json:"waitingOnYou"`
-	CanAnswer             bool              `json:"canAnswer"`
-	DisabledReason        string            `json:"disabledReason,omitempty"`
-	WaitingReasons        map[string]string `json:"waitingReasons,omitempty"`
-	Decisions             []DecisionView    `json:"decisions"`
+	Project               ProjectDecisionProjectRef `json:"project"`
+	PromptMessageID       string                    `json:"promptMessageId"`
+	PromptAvailable       bool                      `json:"promptAvailable"`
+	ChatKey               string                    `json:"chatKey"`
+	ConversationLabel     string                    `json:"conversationLabel"`
+	ConversationAvailable bool                      `json:"conversationAvailable"`
+	AskerAgentID          string                    `json:"askerAgentId"`
+	AskerAgentName        string                    `json:"askerAgentName"`
+	CreatedAt             time.Time                 `json:"createdAt"`
+	AnswerMode            string                    `json:"answerMode"`
+	WaitingOnYou          bool                      `json:"waitingOnYou"`
+	CanAnswer             bool                      `json:"canAnswer"`
+	DisabledReason        string                    `json:"disabledReason,omitempty"`
+	WaitingReasons        map[string]string         `json:"waitingReasons,omitempty"`
+	Decisions             []DecisionView            `json:"decisions"`
 }
 
 // ProjectDecisionSummaryView is the decision metadata embedded in one entry of
@@ -94,6 +124,7 @@ type ProjectDecisionSummaryView struct {
 
 // ProjectDecisionLogEntryView is one append-only answer log line on tab=made.
 type ProjectDecisionLogEntryView struct {
+	Project                ProjectDecisionProjectRef  `json:"project"`
 	AnswerID               string                     `json:"answerId"`
 	Decision               ProjectDecisionSummaryView `json:"decision"`
 	ChoiceID               string                     `json:"choiceId"`
@@ -118,21 +149,26 @@ type ProjectDecisionLogEntryView struct {
 }
 
 // ProjectPendingDecisionsResponse is the response of GET /api/v1/projects/{id}/decisions?tab=pending.
+// Counts are never filtered; FilteredCounts is present when q, conversation
+// or agent narrows the list (design D6).
 type ProjectPendingDecisionsResponse struct {
-	Counts     ProjectDecisionCounts       `json:"counts"`
-	Prompts    []ProjectDecisionPromptView `json:"prompts"`
-	Agents     []ProjectDecisionActorView  `json:"agents"`
-	Answerers  []ProjectDecisionActorView  `json:"answerers"`
-	NextCursor string                      `json:"nextCursor,omitempty"`
+	Counts         ProjectDecisionCounts             `json:"counts"`
+	FilteredCounts *ProjectDecisionCounts            `json:"filteredCounts,omitempty"`
+	Prompts        []ProjectDecisionPromptView       `json:"prompts"`
+	Agents         []ProjectDecisionActorView        `json:"agents"`
+	Answerers      []ProjectDecisionActorView        `json:"answerers"`
+	Conversations  []ProjectDecisionConversationView `json:"conversations"`
+	NextCursor     string                            `json:"nextCursor,omitempty"`
 }
 
 // ProjectMadeDecisionsResponse is the response of GET /api/v1/projects/{id}/decisions?tab=made.
 type ProjectMadeDecisionsResponse struct {
-	Counts     ProjectDecisionCounts         `json:"counts"`
-	Entries    []ProjectDecisionLogEntryView `json:"entries"`
-	Agents     []ProjectDecisionActorView    `json:"agents"`
-	Answerers  []ProjectDecisionActorView    `json:"answerers"`
-	NextCursor string                        `json:"nextCursor,omitempty"`
+	Counts        ProjectDecisionCounts             `json:"counts"`
+	Entries       []ProjectDecisionLogEntryView     `json:"entries"`
+	Agents        []ProjectDecisionActorView        `json:"agents"`
+	Answerers     []ProjectDecisionActorView        `json:"answerers"`
+	Conversations []ProjectDecisionConversationView `json:"conversations"`
+	NextCursor    string                            `json:"nextCursor,omitempty"`
 }
 
 // pendingPromptCursor is the keyset cursor for tab=pending: section 0 is
@@ -242,12 +278,23 @@ func projectDecisionsCaller(w http.ResponseWriter, r *http.Request, projectID st
 	return user, token, true
 }
 
+// projectDecisionsQuery is one validated decisions query. q, conversation
+// and agentID apply to both tabs; madeFilter holds the Made-only filters
+// (its AgentID mirrors agentID).
 type projectDecisionsQuery struct {
 	tab           string
 	limit         int
 	cursor        string
 	pendingCursor *pendingPromptCursor
+	q             string
+	conversation  string
+	agentID       string
 	madeFilter    store.ProjectDecisionAnswerFilter
+}
+
+// filtered reports whether a filter that applies to tab=pending is set.
+func (q projectDecisionsQuery) filtered() bool {
+	return q.q != "" || q.conversation != "" || q.agentID != ""
 }
 
 func parseProjectDecisionsQuery(w http.ResponseWriter, r *http.Request) (projectDecisionsQuery, bool) {
@@ -289,15 +336,30 @@ func parseProjectDecisionsQuery(w http.ResponseWriter, r *http.Request) (project
 		out.pendingCursor = &cur
 	}
 
-	if out.tab == ProjectDecisionsTabMade {
-		agentParam := strings.TrimSpace(q.Get("agent"))
-		if agentParam != "" {
-			if _, err := uuid.Parse(agentParam); err != nil {
-				ValidationError(w, "agent must be a valid UUID", map[string]interface{}{"field": "agent"})
-				return projectDecisionsQuery{}, false
-			}
-			out.madeFilter.AgentID = agentParam
+	if search := strings.TrimSpace(q.Get("q")); search != "" {
+		if n := utf8.RuneCountInString(search); n < minProjectDecisionsQueryRunes || n > maxProjectDecisionsQueryRunes {
+			ValidationError(w, fmt.Sprintf("q must be %d to %d characters", minProjectDecisionsQueryRunes, maxProjectDecisionsQueryRunes),
+				map[string]interface{}{"field": "q"})
+			return projectDecisionsQuery{}, false
 		}
+		out.q = search
+	}
+	out.conversation = strings.TrimSpace(q.Get("conversation"))
+	if len(out.conversation) > maxProjectDecisionsConversationBytes {
+		ValidationError(w, fmt.Sprintf("conversation must be at most %d bytes", maxProjectDecisionsConversationBytes),
+			map[string]interface{}{"field": "conversation"})
+		return projectDecisionsQuery{}, false
+	}
+	if agentParam := strings.TrimSpace(q.Get("agent")); agentParam != "" {
+		if _, err := uuid.Parse(agentParam); err != nil {
+			ValidationError(w, "agent must be a valid UUID", map[string]interface{}{"field": "agent"})
+			return projectDecisionsQuery{}, false
+		}
+		out.agentID = agentParam
+	}
+
+	if out.tab == ProjectDecisionsTabMade {
+		out.madeFilter.AgentID = out.agentID
 		out.madeFilter.UserID = strings.TrimSpace(q.Get("user"))
 
 		prov := strings.TrimSpace(q.Get("provenance"))
@@ -360,6 +422,7 @@ func parseDecisionDateBound(raw string, endOfDay bool) (time.Time, error) {
 }
 
 type projectReadableScope struct {
+	project               *store.Project
 	chatKeys              []string
 	conversationLabel     map[string]string
 	conversationAvailable map[string]bool
@@ -383,6 +446,7 @@ func (s *Server) resolveProjectReadableScope(
 	wcs WebChatStore,
 ) (*projectReadableScope, error) {
 	scope := &projectReadableScope{
+		project:               project,
 		conversationLabel:     make(map[string]string),
 		conversationAvailable: make(map[string]bool),
 		userCanPost:           make(map[string]bool),
@@ -516,110 +580,396 @@ func (s *Server) listProjectDecisions(w http.ResponseWriter, r *http.Request, pr
 	wcs := s.webChatStore
 	s.mu.RUnlock()
 
-	scope, err := s.resolveProjectReadableScope(ctx, project, user, token, wcs)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
+	// A search runs under the chat search time limit (design D9).
+	if pq.q != "" {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.chatSearchTimeout())
+		defer cancel()
 	}
 
-	if len(scope.chatKeys) == 0 {
-		if pq.tab == ProjectDecisionsTabPending {
-			writeJSON(w, http.StatusOK, ProjectPendingDecisionsResponse{
-				Prompts:   []ProjectDecisionPromptView{},
-				Agents:    []ProjectDecisionActorView{},
-				Answerers: []ProjectDecisionActorView{},
-			})
-		} else {
-			writeJSON(w, http.StatusOK, ProjectMadeDecisionsResponse{
-				Entries:   []ProjectDecisionLogEntryView{},
-				Agents:    []ProjectDecisionActorView{},
-				Answerers: []ProjectDecisionActorView{},
-			})
-		}
+	scope, err := s.resolveProjectReadableScope(ctx, project, user, token, wcs)
+	if err != nil {
+		writeDecisionsError(w, err)
 		return
 	}
+	resp, err := s.decisionsCore(ctx, user, token, wcs, []*projectReadableScope{scope}, pq)
+	if err != nil {
+		writeDecisionsError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// writeDecisionsError maps a decisions query failure: a search past its time
+// limit answers like chat search, an invalid filter or cursor is 400.
+func writeDecisionsError(w http.ResponseWriter, err error) {
+	switch {
+	case isChatSearchTimeout(err):
+		writeChatSearchTimeout(w)
+	case errors.Is(err, store.ErrInvalidInput):
+		ValidationError(w, "invalid query filter or cursor", map[string]interface{}{"field": "cursor"})
+	default:
+		writeErrorFromErr(w, err, "")
+	}
+}
+
+// decisionScopeSet is the union of one or more projects' readable scopes.
+// Chat keys are unique across the hub and an agent belongs to one project,
+// so the per-key and per-agent maps merge without qualification.
+type decisionScopeSet struct {
+	*projectReadableScope
+	projectIDs []string
+	projects   map[string]*store.Project
+	keyProject map[string]string // chat key -> project ID
+	readable   map[string]bool
+}
+
+func newDecisionScopeSet(scopes []*projectReadableScope) *decisionScopeSet {
+	set := &decisionScopeSet{
+		projects:   make(map[string]*store.Project, len(scopes)),
+		keyProject: make(map[string]string),
+		readable:   make(map[string]bool),
+	}
+	if len(scopes) == 1 {
+		set.projectReadableScope = scopes[0]
+	} else {
+		set.projectReadableScope = &projectReadableScope{
+			conversationLabel:     make(map[string]string),
+			conversationAvailable: make(map[string]bool),
+			userCanPost:           make(map[string]bool),
+			agentsByID:            make(map[string]*store.Agent),
+			queriedAgentIDs:       make(map[string]bool),
+			liveAgents:            make(map[string]*store.Agent),
+			agentNames:            make(map[string]string),
+		}
+	}
+	merged := set.projectReadableScope
+	for _, sc := range scopes {
+		if sc == nil || sc.project == nil {
+			continue
+		}
+		pid := sc.project.ID
+		if set.projects[pid] == nil {
+			set.projects[pid] = sc.project
+			set.projectIDs = append(set.projectIDs, pid)
+		}
+		for _, k := range sc.chatKeys {
+			if set.readable[k] {
+				continue
+			}
+			set.readable[k] = true
+			set.keyProject[k] = pid
+			if len(scopes) > 1 {
+				merged.chatKeys = append(merged.chatKeys, k)
+			}
+		}
+		if len(scopes) == 1 {
+			continue
+		}
+		for k, v := range sc.conversationLabel {
+			merged.conversationLabel[k] = v
+		}
+		for k, v := range sc.conversationAvailable {
+			merged.conversationAvailable[k] = v
+		}
+		for k, v := range sc.userCanPost {
+			merged.userCanPost[k] = v
+		}
+		for k, v := range sc.agentsByID {
+			merged.agentsByID[k] = v
+		}
+		for k, v := range sc.queriedAgentIDs {
+			merged.queriedAgentIDs[k] = v
+		}
+		for k, v := range sc.liveAgents {
+			merged.liveAgents[k] = v
+		}
+		for k, v := range sc.agentNames {
+			merged.agentNames[k] = v
+		}
+	}
+	return set
+}
+
+// projectRef returns the S2 project reference for projectID.
+func (set *decisionScopeSet) projectRef(projectID string) ProjectDecisionProjectRef {
+	if p := set.projects[projectID]; p != nil {
+		return ProjectDecisionProjectRef{ID: p.ID, Name: p.Name, Slug: p.Slug}
+	}
+	return ProjectDecisionProjectRef{ID: projectID}
+}
+
+// labelMatchKeys returns the keys among keys whose conversation label
+// contains the case-folded search qFold (design D2).
+func (set *decisionScopeSet) labelMatchKeys(keys []string, qFold string) []string {
+	var out []string
+	for _, k := range keys {
+		if strings.Contains(strings.ToLower(set.conversationLabel[k]), qFold) {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// decisionsCore runs the decisions query for viewer over scopes: facets,
+// unfiltered counts, then the pending page (filtered in memory) or the made
+// page (filtered in the store). The project endpoint passes one scope.
+func (s *Server) decisionsCore(
+	ctx context.Context,
+	user UserIdentity,
+	token *ScopedUserIdentity,
+	wcs WebChatStore,
+	scopes []*projectReadableScope,
+	pq projectDecisionsQuery,
+) (any, error) {
+	set := newDecisionScopeSet(scopes)
 
 	agentsFacet := []ProjectDecisionActorView{}
 	answerersFacet := []ProjectDecisionActorView{}
-	if pq.limit > 0 {
-		// Load facets (agents + answerers) scoped strictly to readable chat keys.
-		facetAgents, facetAnswerers, err := s.store.ListProjectDecisionFacets(ctx, project.ID, scope.chatKeys)
+	conversationsFacet := []ProjectDecisionConversationView{}
+	if len(set.chatKeys) > 0 && pq.limit > 0 {
+		facetAgents, facetAnswerers, convKeys, err := s.store.ListDecisionFacets(ctx, set.projectIDs, set.chatKeys)
 		if err != nil {
-			writeErrorFromErr(w, err, "")
-			return
+			return nil, err
 		}
-		agentsFacet = make([]ProjectDecisionActorView, 0, len(facetAgents))
-		for _, a := range facetAgents {
-			name := scope.agentNames[a.ID]
-			if name == "" {
-				name = a.Name
-			}
-			agentsFacet = append(agentsFacet, ProjectDecisionActorView{ID: a.ID, Name: name})
-		}
-		sort.Slice(agentsFacet, func(i, j int) bool {
-			ni, nj := strings.ToLower(agentsFacet[i].Name), strings.ToLower(agentsFacet[j].Name)
-			if ni != nj {
-				return ni < nj
-			}
-			return agentsFacet[i].ID < agentsFacet[j].ID
-		})
+		agentsFacet = decisionAgentFacetViews(set, facetAgents)
 		answerersFacet = make([]ProjectDecisionActorView, 0, len(facetAnswerers))
 		for _, a := range facetAnswerers {
 			answerersFacet = append(answerersFacet, ProjectDecisionActorView{ID: a.ID, Name: a.Name})
 		}
+		conversationsFacet = decisionConversationFacetViews(set, convKeys)
 	}
 
-	// Compute live counts and classified prompt cards across open prompts.
-	openPrompts, err := s.store.ListProjectOpenPrompts(ctx, project.ID, scope.chatKeys)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
+	// The keys the list is narrowed to. An unreadable conversation narrows
+	// to nothing, so it is not an existence oracle (design D4).
+	listKeys := set.chatKeys
+	if pq.conversation != "" {
+		listKeys = nil
+		if set.readable[pq.conversation] {
+			listKeys = []string{pq.conversation}
+		}
 	}
-	counts, classifiedPrompts, err := s.classifyProjectOpenPrompts(ctx, user, token, wcs, scope, openPrompts)
+
+	// Live counts and classified prompt cards across all open prompts.
+	var openPrompts []*store.ProjectDecisionPrompt
+	if len(set.chatKeys) > 0 {
+		var err error
+		openPrompts, err = s.store.ListOpenPrompts(ctx, set.projectIDs, set.chatKeys)
+		if err != nil {
+			return nil, err
+		}
+	}
+	counts, classified, err := s.classifyProjectOpenPrompts(ctx, user, token, wcs, set.projectReadableScope, openPrompts)
 	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
+		return nil, err
 	}
 
 	if pq.tab == ProjectDecisionsTabPending {
-		pagePrompts, nextCursor, err := paginateClassifiedPrompts(classifiedPrompts, pq.pendingCursor, pq.limit)
-		if err != nil {
-			writeErrorFromErr(w, err, "")
-			return
+		resp := ProjectPendingDecisionsResponse{
+			Counts:        counts,
+			Agents:        agentsFacet,
+			Answerers:     answerersFacet,
+			Conversations: conversationsFacet,
 		}
-		promptsView := s.buildProjectDecisionPromptViews(ctx, scope, pagePrompts)
-		writeJSON(w, http.StatusOK, ProjectPendingDecisionsResponse{
-			Counts:     counts,
-			Prompts:    promptsView,
-			Agents:     agentsFacet,
-			Answerers:  answerersFacet,
-			NextCursor: nextCursor,
-		})
-		return
+		if pq.filtered() {
+			classified = filterClassifiedPrompts(set, classified, listKeys, pq)
+			fc := sumClassifiedCounts(classified)
+			resp.FilteredCounts = &fc
+		}
+		pagePrompts, nextCursor, err := paginateClassifiedPrompts(classified, pq.pendingCursor, pq.limit)
+		if err != nil {
+			return nil, err
+		}
+		resp.Prompts = s.buildProjectDecisionPromptViews(ctx, set, pagePrompts)
+		resp.NextCursor = nextCursor
+		return resp, nil
 	}
 
 	// tab=made
-	rawEntries, nextCursor, err := s.store.ListProjectDecisionAnswers(ctx, project.ID, scope.chatKeys, pq.madeFilter, pq.cursor, pq.limit)
-	if err != nil {
-		if errors.Is(err, store.ErrInvalidInput) {
-			ValidationError(w, "invalid query filter or cursor", map[string]interface{}{"field": "cursor"})
-			return
-		}
-		writeErrorFromErr(w, err, "")
-		return
+	filter := pq.madeFilter
+	if pq.q != "" {
+		filter.Query = pq.q
+		filter.QueryChatKeys = set.labelMatchKeys(listKeys, strings.ToLower(pq.q))
 	}
-	entriesView := s.buildProjectDecisionLogViews(ctx, wcs, scope, rawEntries)
-	writeJSON(w, http.StatusOK, ProjectMadeDecisionsResponse{
-		Counts:     counts,
-		Entries:    entriesView,
-		Agents:     agentsFacet,
-		Answerers:  answerersFacet,
-		NextCursor: nextCursor,
+	rawEntries, nextCursor, err := s.store.ListDecisionAnswers(ctx, set.projectIDs, listKeys, filter, pq.cursor, pq.limit)
+	if err != nil {
+		return nil, err
+	}
+	return ProjectMadeDecisionsResponse{
+		Counts:        counts,
+		Entries:       s.buildProjectDecisionLogViews(ctx, wcs, set, rawEntries),
+		Agents:        agentsFacet,
+		Answerers:     answerersFacet,
+		Conversations: conversationsFacet,
+		NextCursor:    nextCursor,
+	}, nil
+}
+
+// decisionAgentFacetViews labels the asking agents (design D5): the live
+// agent's name, else the newest decision's name snapshot. Agents whose labels
+// collide get a hint: "deleted · <id>" for a deleted agent, the short id for
+// one of several live agents. Sorted by label, capped.
+func decisionAgentFacetViews(set *decisionScopeSet, agents []store.ProjectDecisionActor) []ProjectDecisionActorView {
+	type option struct {
+		view    ProjectDecisionActorView
+		deleted bool
+	}
+	opts := make([]option, 0, len(agents))
+	for _, a := range agents {
+		live := set.liveAgents[a.ID]
+		label := a.Name
+		if live != nil {
+			label = agentDisplayName(live)
+		}
+		if label == "" {
+			label = set.agentNames[a.ID]
+		}
+		if label == "" {
+			label = a.ID
+		}
+		opts = append(opts, option{view: ProjectDecisionActorView{ID: a.ID, Name: label}, deleted: live == nil})
+	}
+	groups := make(map[string][]int)
+	for i, o := range opts {
+		k := strings.ToLower(o.view.Name)
+		groups[k] = append(groups[k], i)
+	}
+	for _, idx := range groups {
+		if len(idx) < 2 {
+			continue
+		}
+		liveCount := 0
+		for _, i := range idx {
+			if !opts[i].deleted {
+				liveCount++
+			}
+		}
+		for _, i := range idx {
+			short := shortDecisionAgentID(opts[i].view.ID)
+			switch {
+			case opts[i].deleted:
+				opts[i].view.Hint = "deleted · " + short
+			case liveCount > 1:
+				opts[i].view.Hint = short
+			}
+		}
+	}
+	// By label; a live agent before a deleted namesake; then by ID.
+	sort.Slice(opts, func(i, j int) bool {
+		ni, nj := strings.ToLower(opts[i].view.Name), strings.ToLower(opts[j].view.Name)
+		if ni != nj {
+			return ni < nj
+		}
+		if opts[i].deleted != opts[j].deleted {
+			return !opts[i].deleted
+		}
+		return opts[i].view.ID < opts[j].view.ID
 	})
+	out := make([]ProjectDecisionActorView, 0, len(opts))
+	for _, o := range opts {
+		out = append(out, o.view)
+	}
+	if len(out) > maxProjectDecisionFacetOptions {
+		out = out[:maxProjectDecisionFacetOptions]
+	}
+	return out
+}
+
+// shortDecisionAgentID is the first four characters of an agent ID, the
+// disambiguating suffix of the agents facet.
+func shortDecisionAgentID(id string) string {
+	if len(id) > 4 {
+		return id[:4]
+	}
+	return id
+}
+
+// decisionConversationFacetViews builds the conversations facet from the
+// readable keys that have decisions, sorted by label, capped.
+func decisionConversationFacetViews(set *decisionScopeSet, keys []string) []ProjectDecisionConversationView {
+	out := make([]ProjectDecisionConversationView, 0, len(keys))
+	for _, k := range keys {
+		if !set.readable[k] {
+			continue
+		}
+		label := set.conversationLabel[k]
+		if label == "" {
+			label = k
+		}
+		out = append(out, ProjectDecisionConversationView{Key: k, Label: label, ProjectID: set.keyProject[k]})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		li, lj := strings.ToLower(out[i].Label), strings.ToLower(out[j].Label)
+		if li != lj {
+			return li < lj
+		}
+		return out[i].Key < out[j].Key
+	})
+	if len(out) > maxProjectDecisionFacetOptions {
+		out = out[:maxProjectDecisionFacetOptions]
+	}
+	return out
+}
+
+// filterClassifiedPrompts applies the pending filters in memory (design D6):
+// the prompt's conversation is in keys, its asker is pq.agentID, and q
+// matches the conversation label, the asker's name, or any row's question,
+// key or answer label.
+func filterClassifiedPrompts(set *decisionScopeSet, all []classifiedOpenPrompt, keys []string, pq projectDecisionsQuery) []classifiedOpenPrompt {
+	inKeys := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		inKeys[k] = true
+	}
+	qFold := strings.ToLower(pq.q)
+	out := make([]classifiedOpenPrompt, 0, len(all))
+	for _, c := range all {
+		p := c.raw
+		if !inKeys[p.ChatKey] {
+			continue
+		}
+		if pq.agentID != "" && p.AskerAgentID != pq.agentID {
+			continue
+		}
+		if qFold != "" && !pendingPromptMatches(set, p, qFold) {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+func pendingPromptMatches(set *decisionScopeSet, p *store.ProjectDecisionPrompt, qFold string) bool {
+	contains := func(s string) bool { return s != "" && strings.Contains(strings.ToLower(s), qFold) }
+	if contains(set.conversationLabel[p.ChatKey]) || contains(p.AskerAgentName) || contains(set.agentNames[p.AskerAgentID]) {
+		return true
+	}
+	for _, d := range p.Decisions {
+		if d == nil {
+			continue
+		}
+		if contains(d.Question) || contains(d.Key) || contains(d.AskerAgentName) {
+			return true
+		}
+		if a := d.EffectiveAnswer(); a != nil && contains(a.ChoiceLabel) {
+			return true
+		}
+	}
+	return false
+}
+
+func sumClassifiedCounts(all []classifiedOpenPrompt) ProjectDecisionCounts {
+	var c ProjectDecisionCounts
+	for _, p := range all {
+		c.WaitingOnYou += p.onYou
+		c.WaitingOnOthers += p.onOthers
+	}
+	return c
 }
 
 type classifiedOpenPrompt struct {
 	raw            *store.ProjectDecisionPrompt
+	onYou          int // rows waiting on the viewer
+	onOthers       int // rows waiting on others
 	section        int // 0 = waitingOnYou, 1 = waitingOnOthers only
 	waitingOnYou   bool
 	canAnswer      bool
@@ -727,6 +1077,7 @@ func (s *Server) classifyProjectOpenPrompts(
 		ac := checkAsker(p.AskerAgentID)
 
 		promptWaitingOnYou := false
+		onYou, onOthers := 0, 0
 		var rowWaitingReasons map[string]string
 		var firstBlockReason string
 
@@ -737,7 +1088,7 @@ func (s *Server) classifyProjectOpenPrompts(
 				// Already settled sibling row in a multi-question set prompt.
 				continue
 			case store.AnswerSetReasonNotRecordedAnswerer:
-				counts.WaitingOnOthers++
+				onOthers++
 				if rowWaitingReasons == nil {
 					rowWaitingReasons = make(map[string]string)
 				}
@@ -754,7 +1105,7 @@ func (s *Server) classifyProjectOpenPrompts(
 				needsAskerDelivery := !ac.gone && d.EffectiveAnswer() == nil
 				switch {
 				case !canPostConv:
-					counts.WaitingOnOthers++
+					onOthers++
 					if rowWaitingReasons == nil {
 						rowWaitingReasons = make(map[string]string)
 					}
@@ -763,7 +1114,7 @@ func (s *Server) classifyProjectOpenPrompts(
 						firstBlockReason = "Read-only in this conversation"
 					}
 				case needsAskerDelivery && !ac.allowed:
-					counts.WaitingOnOthers++
+					onOthers++
 					if rowWaitingReasons == nil {
 						rowWaitingReasons = make(map[string]string)
 					}
@@ -772,7 +1123,7 @@ func (s *Server) classifyProjectOpenPrompts(
 						firstBlockReason = "Asking agent is not accepting messages from you"
 					}
 				default:
-					counts.WaitingOnYou++
+					onYou++
 					promptWaitingOnYou = true
 				}
 			}
@@ -794,8 +1145,12 @@ func (s *Server) classifyProjectOpenPrompts(
 
 		promptAvail := p.PromptExistsInMessages && !isMessageSoftDeleted(extByMsgID[p.MessageID])
 
+		counts.WaitingOnYou += onYou
+		counts.WaitingOnOthers += onOthers
 		out = append(out, classifiedOpenPrompt{
 			raw:            p,
+			onYou:          onYou,
+			onOthers:       onOthers,
 			section:        section,
 			waitingOnYou:   promptWaitingOnYou,
 			canAnswer:      canAnswer,
@@ -863,7 +1218,7 @@ func paginateClassifiedPrompts(
 
 func (s *Server) buildProjectDecisionPromptViews(
 	ctx context.Context,
-	scope *projectReadableScope,
+	scope *decisionScopeSet,
 	page []classifiedOpenPrompt,
 ) []ProjectDecisionPromptView {
 	if len(page) == 0 {
@@ -891,6 +1246,7 @@ func (s *Server) buildProjectDecisionPromptViews(
 			askerName = scope.agentNames[p.AskerAgentID]
 		}
 		out = append(out, ProjectDecisionPromptView{
+			Project:               scope.projectRef(p.ProjectID),
 			PromptMessageID:       p.MessageID,
 			PromptAvailable:       item.promptAvail,
 			ChatKey:               p.ChatKey,
@@ -913,7 +1269,7 @@ func (s *Server) buildProjectDecisionPromptViews(
 func (s *Server) buildProjectDecisionLogViews(
 	ctx context.Context,
 	wcs WebChatStore,
-	scope *projectReadableScope,
+	scope *decisionScopeSet,
 	entries []*store.ProjectDecisionAnswerEntry,
 ) []ProjectDecisionLogEntryView {
 	if len(entries) == 0 {
@@ -1011,6 +1367,7 @@ func (s *Server) buildProjectDecisionLogViews(
 		}
 
 		out = append(out, ProjectDecisionLogEntryView{
+			Project:  scope.projectRef(d.ProjectID),
 			AnswerID: a.ID,
 			Decision: ProjectDecisionSummaryView{
 				RowID:           d.ID,

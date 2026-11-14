@@ -130,12 +130,12 @@ func TestProjectDecisionStore_OpenPromptsAndReadableChatKeys(t *testing.T) {
 	_, _ = seedDecisionPromptForBackfillTest(t, cs, otherProjectID, agent1, topicRelease, "OTHER-PROJ")
 
 	// Empty chatKeys returns nil without error.
-	emptyPrompts, err := cs.ListProjectOpenPrompts(ctx, projectID, nil)
+	emptyPrompts, err := cs.ListOpenPrompts(ctx, []string{projectID}, nil)
 	require.NoError(t, err)
 	assert.Empty(t, emptyPrompts)
 
 	// Bob's readable keys (topicRelease + dmBob) must NEVER return Alice's DM!
-	bobPrompts, err := cs.ListProjectOpenPrompts(ctx, projectID, []string{topicRelease, dmBob})
+	bobPrompts, err := cs.ListOpenPrompts(ctx, []string{projectID}, []string{topicRelease, dmBob})
 	require.NoError(t, err)
 	require.Len(t, bobPrompts, 2)
 	for _, p := range bobPrompts {
@@ -143,7 +143,7 @@ func TestProjectDecisionStore_OpenPromptsAndReadableChatKeys(t *testing.T) {
 	}
 
 	// Alice's readable keys (topicRelease + dmAlice) return both, with purged DM marked PromptExistsInMessages=false!
-	alicePrompts, err := cs.ListProjectOpenPrompts(ctx, projectID, []string{topicRelease, dmAlice})
+	alicePrompts, err := cs.ListOpenPrompts(ctx, []string{projectID}, []string{topicRelease, dmAlice})
 	require.NoError(t, err)
 	require.Len(t, alicePrompts, 2)
 	byMsg := map[string]*store.ProjectDecisionPrompt{}
@@ -295,17 +295,18 @@ func TestProjectDecisionStore_AnswersPaginationFiltersAndFacets(t *testing.T) {
 	}
 
 	// 1. Bob's facets over [topicRelease] must NOT include agentSecretDM!
-	bobAgents, bobAnswerers, err := cs.ListProjectDecisionFacets(ctx, projectID, []string{topicRelease})
+	bobAgents, bobAnswerers, bobConvKeys, err := cs.ListDecisionFacets(ctx, []string{projectID}, []string{topicRelease})
 	require.NoError(t, err)
 	require.Len(t, bobAgents, 1)
 	assert.Equal(t, agentRelease, bobAgents[0].ID)
 	assert.Len(t, bobAnswerers, 2) // Alice and Bob both answered in #release
+	assert.Equal(t, []string{topicRelease}, bobConvKeys)
 
 	// 2. Paginate Bob's Made log 1 entry at a time across all 3 entries.
 	var gotIDs []string
 	cur := ""
 	for page := 0; page < 5; page++ {
-		items, next, err := cs.ListProjectDecisionAnswers(ctx, projectID, []string{topicRelease}, store.ProjectDecisionAnswerFilter{}, cur, 1)
+		items, next, err := cs.ListDecisionAnswers(ctx, []string{projectID}, []string{topicRelease}, store.ProjectDecisionAnswerFilter{}, cur, 1)
 		require.NoError(t, err)
 		for _, it := range items {
 			gotIDs = append(gotIDs, it.Answer.ID)
@@ -318,7 +319,7 @@ func TestProjectDecisionStore_AnswersPaginationFiltersAndFacets(t *testing.T) {
 	assert.Equal(t, []string{directAns.ID, overrideAns.ID, interpRes.Answers[0].ID}, gotIDs)
 
 	// 3. Check PreviousChoiceLabel on override entry and SourceExistsInMessages before/after purge.
-	overriddenEntries, _, err := cs.ListProjectDecisionAnswers(ctx, projectID, []string{topicRelease}, store.ProjectDecisionAnswerFilter{
+	overriddenEntries, _, err := cs.ListDecisionAnswers(ctx, []string{projectID}, []string{topicRelease}, store.ProjectDecisionAnswerFilter{
 		Provenance: store.ProjectDecisionProvenanceOverridden,
 	}, "", 50)
 	require.NoError(t, err)
@@ -327,7 +328,7 @@ func TestProjectDecisionStore_AnswersPaginationFiltersAndFacets(t *testing.T) {
 	assert.Equal(t, "Yes", overriddenEntries[0].PreviousChoiceLabel)
 	assert.Equal(t, store.DecisionSurfaceDecisionsPage, overriddenEntries[0].Answer.Surface)
 
-	interpEntries, _, err := cs.ListProjectDecisionAnswers(ctx, projectID, []string{topicRelease}, store.ProjectDecisionAnswerFilter{
+	interpEntries, _, err := cs.ListDecisionAnswers(ctx, []string{projectID}, []string{topicRelease}, store.ProjectDecisionAnswerFilter{
 		Provenance: store.ProjectDecisionProvenanceInterpreted,
 	}, "", 50)
 	require.NoError(t, err)
@@ -337,7 +338,7 @@ func TestProjectDecisionStore_AnswersPaginationFiltersAndFacets(t *testing.T) {
 	// Purge source reply -> SourceExistsInMessages flips to false!
 	_, err = cs.DB().ExecContext(ctx, rebindForDialect(cs.Dialect(), "DELETE FROM messages WHERE id = ?"), sourceReplyID)
 	require.NoError(t, err)
-	interpAfterPurge, _, err := cs.ListProjectDecisionAnswers(ctx, projectID, []string{topicRelease}, store.ProjectDecisionAnswerFilter{
+	interpAfterPurge, _, err := cs.ListDecisionAnswers(ctx, []string{projectID}, []string{topicRelease}, store.ProjectDecisionAnswerFilter{
 		Provenance: store.ProjectDecisionProvenanceInterpreted,
 	}, "", 50)
 	require.NoError(t, err)
@@ -347,7 +348,7 @@ func TestProjectDecisionStore_AnswersPaginationFiltersAndFacets(t *testing.T) {
 	// 4. Combinable filters: user + date range + agent.
 	from := time.Date(2026, 11, 11, 0, 0, 0, 0, time.UTC)
 	to := time.Date(2026, 11, 12, 23, 59, 59, int(time.Second-time.Nanosecond), time.UTC)
-	filtered, _, err := cs.ListProjectDecisionAnswers(ctx, projectID, []string{topicRelease, dmAlice}, store.ProjectDecisionAnswerFilter{
+	filtered, _, err := cs.ListDecisionAnswers(ctx, []string{projectID}, []string{topicRelease, dmAlice}, store.ProjectDecisionAnswerFilter{
 		AgentID: agentRelease,
 		UserID:  bobID,
 		From:    &from,
@@ -358,12 +359,12 @@ func TestProjectDecisionStore_AnswersPaginationFiltersAndFacets(t *testing.T) {
 	assert.Equal(t, directAns.ID, filtered[0].Answer.ID)
 
 	// 5. limit=0 returns empty slice and no cursor while still validating bad inputs.
-	zeroItems, zeroNext, err := cs.ListProjectDecisionAnswers(ctx, projectID, []string{topicRelease}, store.ProjectDecisionAnswerFilter{}, "", 0)
+	zeroItems, zeroNext, err := cs.ListDecisionAnswers(ctx, []string{projectID}, []string{topicRelease}, store.ProjectDecisionAnswerFilter{}, "", 0)
 	require.NoError(t, err)
 	assert.Empty(t, zeroItems)
 	assert.Empty(t, zeroNext)
 
-	_, _, err = cs.ListProjectDecisionAnswers(ctx, projectID, []string{topicRelease}, store.ProjectDecisionAnswerFilter{
+	_, _, err = cs.ListDecisionAnswers(ctx, []string{projectID}, []string{topicRelease}, store.ProjectDecisionAnswerFilter{
 		Provenance: "bogus",
 	}, "", 0)
 	require.ErrorIs(t, err, store.ErrInvalidInput)
@@ -383,7 +384,7 @@ func TestProjectDecisionStore_AnswersPaginationFiltersAndFacets(t *testing.T) {
 	var tieGotIDs []string
 	tieCur := ""
 	for page := 0; page < 6; page++ {
-		items, next, err := cs.ListProjectDecisionAnswers(ctx, projectID, []string{topicRelease, dmAlice}, store.ProjectDecisionAnswerFilter{}, tieCur, 1)
+		items, next, err := cs.ListDecisionAnswers(ctx, []string{projectID}, []string{topicRelease, dmAlice}, store.ProjectDecisionAnswerFilter{}, tieCur, 1)
 		require.NoError(t, err)
 		for _, it := range items {
 			tieGotIDs = append(tieGotIDs, it.Answer.ID)
