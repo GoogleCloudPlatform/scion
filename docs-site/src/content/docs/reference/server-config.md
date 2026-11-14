@@ -1548,6 +1548,7 @@ No plugin reads `public_url` yet. The current Slack, Teams, Telegram (default V2
 
 **Security:** plugin API calls are HMAC-signed, but with an `http://` value off loopback they travel unencrypted.
 
+### Web Base URL
 
 The web server's base URL is the base of the OAuth redirect URI (`<base URL>/auth/callback/<provider>`), decides whether the session cookie is marked `Secure`, and is sent to the browser client. It is resolved once at startup, from operator inputs only:
 
