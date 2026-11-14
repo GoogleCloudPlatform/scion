@@ -210,6 +210,7 @@ var suffixCheckExclusions = map[liveInventoryKey]string{
 	// A template or harness config file path may be nested, so a trailing
 	// segment on a file write names a new file below {path}.
 	{OperationID: "template.update", Method: "PUT", Pattern: "/api/v1/templates/{id}/files/{path}"}:            "handleTemplateFiles takes everything after files/ as the file path, so the write creates the nested file",
+	{OperationID: "template.global.update", Method: "PUT", Pattern: "/api/v1/templates/{id}/files/{path}"}:     "same as template.update above on a global-scope template",
 	{OperationID: "harnessconfig.update", Method: "PUT", Pattern: "/api/v1/harness-configs/{id}/files/{path}"}: "handleHarnessConfigFiles takes everything after files/ as the file path, so the write creates the nested file",
 	// handleAdminAccessConstraintPreviews (handlers_access_constraints.go)
 	// splits the path after the prefix into at most two parts and reads the

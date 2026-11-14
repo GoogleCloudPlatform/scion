@@ -27,6 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
@@ -280,7 +281,8 @@ func (s *Server) listTemplatesV2(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx, query := r.Context(), r.URL.Query()
-	filter := store.TemplateFilter{Name: query.Get("name"), Scope: query.Get("scope"), ScopeID: query.Get("scopeId"), ProjectID: query.Get("projectId"), Harness: query.Get("harness"), Status: query.Get("status"), Search: query.Get("search")}
+	rawScopeID := query.Get("scopeId")
+	filter := store.TemplateFilter{Name: query.Get("name"), Scope: query.Get("scope"), ScopeID: rawScopeID, ProjectID: query.Get("projectId"), Harness: query.Get("harness"), Status: query.Get("status"), Search: query.Get("search")}
 	// Normalize a legacy scope name to its canonical form before it drives
 	// the scope switch below or the store filter (ptone/scion#1977).
 	filter.Scope = canonicalResourceScope(filter.Scope)
@@ -353,9 +355,90 @@ func (s *Server) listTemplatesV2(w http.ResponseWriter, r *http.Request) {
 	}
 	var scopeCap *Capabilities
 	if identity != nil {
-		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "", "", "template")
+		scopeCap = s.templateListCapabilities(ctx, filter.Scope, rawScopeID, filter.ProjectID)
 	}
 	writeJSON(w, http.StatusOK, ListTemplatesResponse{Templates: templates, NextCursor: nextCursor, TotalCount: totalCount, TotalCountApproximate: totalApprox, Capabilities: scopeCap})
+}
+
+// templateListCapabilities returns the list-level capabilities for a templates
+// list request. "create" is reported when the caller can create a template in
+// at least one scope the request covers: any scope when no scope filter is
+// given, otherwise only the filtered scope (and, for project and user scopes,
+// the filtered scopeId/projectId when one is set). Each scope is checked the
+// same way createTemplateV2 authorizes a create in it, including
+// template.create_global for global scope. Listing is not reported as a
+// capability: a 200 response already means the caller may list.
+func (s *Server) templateListCapabilities(ctx context.Context, scopeFilter, scopeIDFilter, projectIDFilter string) *Capabilities {
+	scopes := []string{scopeFilter}
+	if scopeFilter == "" {
+		scopes = []string{store.TemplateScopeUser, store.TemplateScopeProject, store.TemplateScopeGlobal}
+	}
+	for _, scope := range scopes {
+		if s.canCreateTemplateInScope(ctx, scope, scopeIDFilter, projectIDFilter) {
+			return &Capabilities{Actions: []string{string(ActionCreate)}}
+		}
+	}
+	return &Capabilities{Actions: []string{}}
+}
+
+// canCreateTemplateInScope reports whether the caller in ctx could create a
+// template in scope, following the authorization branches of createTemplateV2.
+func (s *Server) canCreateTemplateInScope(ctx context.Context, scope, scopeID, projectID string) bool {
+	switch scope {
+	case store.TemplateScopeUser:
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil || isFederatedCaller(ctx) {
+			return false
+		}
+		if scopeID != "" && scopeID != userIdent.ID() {
+			return false
+		}
+		return s.authzService.CheckAccess(ctx, userIdent, templateUserScopeResource(userIdent), ActionCreate).Allowed
+	case store.TemplateScopeGlobal:
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			return false
+		}
+		return s.authzService.CheckAccessWithEvidence(ctx, userIdent,
+			templateScopeResource(store.TemplateScopeGlobal, ""),
+			catalogWriteAction(permissions.ResourceTemplate, store.TemplateScopeGlobal, ActionCreate),
+			hubCollectionEvidence("template.create_global")).Allowed
+	case store.TemplateScopeProject:
+		targetProjectID := scopeID
+		if targetProjectID == "" {
+			targetProjectID = projectID
+		}
+		if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+			own := agentIdent.ProjectID()
+			if own == "" || (targetProjectID != "" && targetProjectID != own) {
+				return false
+			}
+			return s.authzService.CheckAccess(ctx, agentIdent, templateScopeResource(store.TemplateScopeProject, own), ActionCreate).Allowed
+		}
+		userIdent := GetUserIdentityFromContext(ctx)
+		if userIdent == nil {
+			return false
+		}
+		if targetProjectID != "" {
+			return s.authzService.CheckAccess(ctx, userIdent, templateScopeResource(store.TemplateScopeProject, targetProjectID), ActionCreate).Allowed
+		}
+		scopeRes, err := s.authzService.ResolveListScopes(ctx, userIdent, "template.create")
+		if err != nil {
+			return false
+		}
+		if scopeRes.Scopes.IsAll() {
+			return s.authzService.CheckAccessWithEvidence(ctx, userIdent,
+				templateScopeResource(store.TemplateScopeProject, ""),
+				ActionCreate,
+				projectCollectionEvidence("template.create", "_")).Allowed
+		}
+		for _, pid := range scopeRes.Scopes.ProjectIDs() {
+			if s.authzService.CheckAccess(ctx, userIdent, templateScopeResource(store.TemplateScopeProject, pid), ActionCreate).Allowed {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // createTemplateV2 creates a template with optional file upload URLs.
@@ -405,7 +488,8 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 	if createScope == "" {
 		createScope = store.TemplateScopeGlobal
 	}
-	if createScope == store.TemplateScopeUser {
+	switch createScope {
+	case store.TemplateScopeUser:
 		userIdent := GetUserIdentityFromContext(ctx)
 		if userIdent == nil {
 			Unauthorized(w)
@@ -418,8 +502,17 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 		if !s.authorize(w, r, templateUserScopeResource(userIdent), ActionCreate) {
 			return
 		}
-	} else if !s.authorize(w, r, templateScopeResource(createScope, scopeID), ActionCreate) {
-		return
+	case store.TemplateScopeGlobal:
+		if !s.authorizeWithEvidence(w, r,
+			templateScopeResource(store.TemplateScopeGlobal, ""),
+			catalogWriteAction(permissions.ResourceTemplate, store.TemplateScopeGlobal, ActionCreate),
+			hubCollectionEvidence("template.create_global")) {
+			return
+		}
+	default:
+		if !s.authorize(w, r, templateScopeResource(createScope, scopeID), ActionCreate) {
+			return
+		}
 	}
 
 	// Generate slug from request or name — always sanitize caller-supplied
@@ -464,8 +557,11 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 
 	// For user-scoped templates, always set the owner and scope ID from the
 	// authenticated user. ScopeID is forced unconditionally to prevent callers
-	// from injecting another user's ID.
-	if template.Scope == store.TemplateScopeUser {
+	// from injecting another user's ID. Global-scoped templates record
+	// CreatedBy for audit without stamping OwnerID, so the owner relationship
+	// confers no residual write authority on global catalog records.
+	switch template.Scope {
+	case store.TemplateScopeUser:
 		userIdent := GetUserIdentityFromContext(ctx)
 		if userIdent == nil {
 			Unauthorized(w)
@@ -474,6 +570,10 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 		template.OwnerID = userIdent.ID()
 		template.CreatedBy = userIdent.ID()
 		template.ScopeID = userIdent.ID()
+	case store.TemplateScopeGlobal:
+		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
+			template.CreatedBy = userIdent.ID()
+		}
 	}
 
 	// If no files provided, keep the template in 'pending' status so it
@@ -625,7 +725,7 @@ func (s *Server) updateTemplateV2(w http.ResponseWriter, r *http.Request, id str
 		return
 	}
 	// SECURITY-GATE: authorize update access to this specific template.
-	if !s.authorize(w, r, templateResource(existing), ActionUpdate) {
+	if !s.authorize(w, r, templateResource(existing), catalogWriteAction(permissions.ResourceTemplate, existing.Scope, ActionUpdate)) {
 		return
 	}
 
@@ -676,7 +776,7 @@ func (s *Server) patchTemplateV2(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 	// SECURITY-GATE: authorize update access to this specific template.
-	if !s.authorize(w, r, templateResource(existing), ActionUpdate) {
+	if !s.authorize(w, r, templateResource(existing), catalogWriteAction(permissions.ResourceTemplate, existing.Scope, ActionUpdate)) {
 		return
 	}
 
@@ -722,7 +822,8 @@ func (s *Server) deleteTemplateV2(w http.ResponseWriter, r *http.Request, id str
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 			return
 		}
-		decision := s.authzService.CheckAccess(ctx, userIdent, templateScopeResource(store.TemplateScopeGlobal, ""), ActionDelete)
+		decision := s.authzService.CheckAccess(ctx, userIdent, templateResource(existing),
+			catalogWriteAction(permissions.ResourceTemplate, existing.Scope, ActionDelete))
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to delete global resources", nil)
 			return
@@ -807,7 +908,7 @@ func (s *Server) handleTemplateUpload(w http.ResponseWriter, r *http.Request, id
 	}
 
 	// SECURITY-GATE: authorize update access to this template (upload mutates content).
-	if !s.authorize(w, r, templateResource(template), ActionUpdate) {
+	if !s.authorize(w, r, templateResource(template), catalogWriteAction(permissions.ResourceTemplate, template.Scope, ActionUpdate)) {
 		return
 	}
 
@@ -880,7 +981,7 @@ func (s *Server) handleTemplateFinalize(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// SECURITY-GATE: authorize update access to this template (finalize mutates state).
-	if !s.authorize(w, r, templateResource(template), ActionUpdate) {
+	if !s.authorize(w, r, templateResource(template), catalogWriteAction(permissions.ResourceTemplate, template.Scope, ActionUpdate)) {
 		return
 	}
 
@@ -1096,7 +1197,10 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 			return
 		}
-		decision := s.authzService.CheckAccess(ctx, userIdent, templateScopeResource(store.TemplateScopeGlobal, ""), ActionCreate)
+		decision := s.authzService.CheckAccessWithEvidence(ctx, userIdent,
+			templateScopeResource(store.TemplateScopeGlobal, ""),
+			catalogWriteAction(permissions.ResourceTemplate, store.TemplateScopeGlobal, ActionCreate),
+			hubCollectionEvidence("template.create_global"))
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create global resources", nil)
 			return
@@ -1163,10 +1267,17 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		Status:       store.TemplateStatusPending,
 	}
 
-	// For user-scoped clones, set the owner from the authenticated user
-	if clone.Scope == store.TemplateScopeUser {
+	// User-scoped clones set OwnerID and CreatedBy from the authenticated
+	// user; global-scoped clones record CreatedBy only, leaving OwnerID
+	// empty so the owner relationship confers no residual write authority.
+	switch clone.Scope {
+	case store.TemplateScopeUser:
 		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 			clone.OwnerID = userIdent.ID()
+			clone.CreatedBy = userIdent.ID()
+		}
+	case store.TemplateScopeGlobal:
+		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 			clone.CreatedBy = userIdent.ID()
 		}
 	}

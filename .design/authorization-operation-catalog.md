@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 389
+**Operations:** 394
 
 ## Table of Contents
 
@@ -310,9 +310,9 @@
 - [skill.register](#skillregister) — Manage skill registries and their pinned hashes. The route guard checks skill.register on the hub-scoped registry target, so a user access token needs skill:register on a hub boundary
 - [template.list](#templatelist) — List templates; each row is filtered by template read. The unfiltered list is used only with hub-level evidence for template.list: a user access token needs template:list on a hub boundary and hub-wide list authority for it. Every other token, project tokens included, gets the per-row template read scan. An agent delegated credential lists project-scoped templates only: its scope is the authorizing user's template list scope within the grant boundary, and each item is also decided for template.read
 - [template.read](#templateread) — Read a template, its download URLs, its storage validation and its files. A record the caller may not read answers as not found
-- [template.create](#templatecreate) — Create a template in the global, project or caller's own user scope the request body names. A user-scope create refuses a federated caller (requireProfileWriter)
-- [template.update](#templateupdate) — Update a template: its definition and metadata, file uploads, finalize and file writes. A user-scope template refuses a federated caller (requireProfileWriter)
-- [template.delete](#templatedelete) — Delete a global or project template. A user-scope template is template.user.delete
+- [template.create](#templatecreate) — Create a template in a project or the caller's own user scope the request body names (global catalog templates use template.global.create). A user-scope create refuses a federated caller (requireProfileWriter)
+- [template.update](#templateupdate) — Update a project- or user-scope template: its definition and metadata, file uploads, finalize and file writes (global catalog templates use template.global.update). A user-scope template refuses a federated caller (requireProfileWriter)
+- [template.delete](#templatedelete) — Delete a project template (global catalog templates use template.global.delete; a user-scope template is template.user.delete)
 - [harnessconfig.list](#harnessconfiglist) — List harness configurations; each row is filtered by harness config read. The unfiltered list is used only with hub-level evidence for harness_config.list: a user access token needs harness_config:list on a hub boundary and hub-wide list authority for it. Every other token, project tokens included, gets the per-row harness config read scan
 - [harnessconfig.read](#harnessconfigread) — Read a harness configuration, its download URLs, its storage validation, its image status and its files. A record the caller may not read answers as not found
 - [harnessconfig.create](#harnessconfigcreate) — Create a harness configuration in the global, project or caller's own user scope the request body names; a user-scope config's scope and owner are the caller. A user-scope harness config refuses a federated caller (requireProfileWriter)
@@ -327,9 +327,14 @@
 - [skill.resolve.github.project](#skillresolvegithubproject) — Resolve gh:// references with a project named by the request body, using that project's GitHub credentials. The caller needs skill read on the project, so a user access token needs skill:read on a boundary that contains the project; a refused reference answers forbidden
 - [skill.resolve.github.public](#skillresolvegithubpublic) — Resolve gh:// references from public repositories with no project named; the hub fetches them and writes its resolution cache. A user access token needs skill:read on the global catalog, on a hub boundary; a refused reference answers forbidden
 - [skill.file.signedread](#skillfilesignedread) — Read one skill version file through a signed URL issued by the skill download. The signature alone authorizes exactly the skill, version and file it was issued for; no principal is evaluated
-- [template.clone](#templateclone) — Clone a readable template into the global scope or a project the request body names. The source needs template read; the destination needs template create on its scope, so a user access token needs template:read and template:create on a boundary that contains both
-- [template.reimport](#templatereimport) — Reimport a global or project template from its source. The template needs template read and the reimport needs template create on the owning scope, as import does
-- [template.import.global](#templateimportglobal) — Import or discover templates for the global catalog. The check is template create on a collection-level request at the hub scope, so a user access token needs template:create on a hub boundary
+- [template.global.create](#templateglobalcreate) — Create a template in the global catalog (scope=global). The check is template.create_global on a collection-level request at the hub scope, so a user access token needs template:create_global on a hub boundary
+- [template.global.update](#templateglobalupdate) — Update a global-catalog template (scope=global): its definition and metadata, file uploads, finalize and file writes. Selected by the stored template record's scope via catalogWriteAction, requiring template.update_global (template:update_global on a hub boundary)
+- [template.global.delete](#templateglobaldelete) — Delete a global-catalog template (scope=global). Selected by the stored template record's scope via catalogWriteAction, requiring template.delete_global (template:delete_global on a hub boundary)
+- [template.clone](#templateclone) — Clone a readable template into a project the request body names (global destination is template.global.clone; user destination is template.user.clone). The source needs template read; the destination needs template create on its project, so a user access token needs template:read and template:create on a boundary that contains both
+- [template.global.clone](#templateglobalclone) — Clone a readable template into the global catalog (scope=global). The source needs template read; the destination checks template.create_global on a collection-level request at the hub scope, so a user access token needs template:read and template:create_global on a hub boundary
+- [template.reimport](#templatereimport) — Reimport a project template from its source (global templates use template.global.reimport; user templates use template.user.reimport). The template needs template read and the reimport needs template create on the owning project, as import does
+- [template.global.reimport](#templateglobalreimport) — Reimport a global-catalog template (scope=global) from its source. The template needs template read and the reimport checks template.create_global on a collection-level request at the hub scope, so a user access token needs template:read and template:create_global on a hub boundary
+- [template.import.global](#templateimportglobal) — Import or discover templates for the global catalog. The check is template.create_global on a collection-level request at the hub scope, so a user access token needs template:create_global on a hub boundary
 - [template.import.project](#templateimportproject) — Import or discover templates for a project named by the request body. The check is template create on a collection-level request inside that project
 - [harnessconfig.clone](#harnessconfigclone) — Clone a readable harness configuration into the global scope or a project the request body names. The route gate needs harness_config read on the source; the destination needs harness_config create on its scope
 - [harnessconfig.reimport](#harnessconfigreimport) — Reimport a global or project harness configuration from its source. The route gate needs harness_config read and the reimport needs harness_config create on the owning scope, as import does
@@ -11697,7 +11702,7 @@
 
 **Domain:** template
 
-**Description:** Create a template in the global, project or caller's own user scope the request body names. A user-scope create refuses a federated caller (requireProfileWriter)
+**Description:** Create a template in a project or the caller's own user scope the request body names (global catalog templates use template.global.create). A user-scope create refuses a federated caller (requireProfileWriter)
 
 ### Entry Points
 
@@ -11730,7 +11735,7 @@
 
 **Domain:** template
 
-**Description:** Update a template: its definition and metadata, file uploads, finalize and file writes. A user-scope template refuses a federated caller (requireProfileWriter)
+**Description:** Update a project- or user-scope template: its definition and metadata, file uploads, finalize and file writes (global catalog templates use template.global.update). A user-scope template refuses a federated caller (requireProfileWriter)
 
 ### Entry Points
 
@@ -11769,7 +11774,7 @@
 
 **Domain:** template
 
-**Description:** Delete a global or project template. A user-scope template is template.user.delete
+**Description:** Delete a project template (global catalog templates use template.global.delete; a user-scope template is template.user.delete)
 
 ### Entry Points
 
@@ -12287,11 +12292,123 @@
 
 ---
 
+## template.global.create
+
+**Domain:** template
+
+**Description:** Create a template in the global catalog (scope=global). The check is template.create_global on a collection-level request at the hub scope, so a user access token needs template:create_global on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/templates` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
+
+**Base Permission:** `template.create_global`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestGlobalTemplateWrite_RequiresTwinSelectorAndHubBoundary`
+
+---
+
+## template.global.update
+
+**Domain:** template
+
+**Description:** Update a global-catalog template (scope=global): its definition and metadata, file uploads, finalize and file writes. Selected by the stored template record's scope via catalogWriteAction, requiring template.update_global (template:update_global on a hub boundary)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/templates/{id}` |
+| http_route | PATCH | `/api/v1/templates/{id}` |
+| http_route | POST | `/api/v1/templates/{id}/upload` |
+| http_route | POST | `/api/v1/templates/{id}/finalize` |
+| http_route | POST | `/api/v1/templates/{id}/files` |
+| http_route | PUT | `/api/v1/templates/{id}/files/{path}` |
+| http_route | DELETE | `/api/v1/templates/{id}/files/{path}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `template.update_global`
+
+**Resource Resolver:** template-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestGlobalTemplateWrite_RequiresTwinSelectorAndHubBoundary`
+
+---
+
+## template.global.delete
+
+**Domain:** template
+
+**Description:** Delete a global-catalog template (scope=global). Selected by the stored template record's scope via catalogWriteAction, requiring template.delete_global (template:delete_global on a hub boundary)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/templates/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `template.delete_global`
+
+**Resource Resolver:** template-from-url
+
+**Effects:** `delete-resource`
+
+### Audit
+
+- **Event Type:** `template.delete`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** template_id, template_name
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestGlobalTemplateWrite_RequiresTwinSelectorAndHubBoundary`
+
+---
+
 ## template.clone
 
 **Domain:** template
 
-**Description:** Clone a readable template into the global scope or a project the request body names. The source needs template read; the destination needs template create on its scope, so a user access token needs template:read and template:create on a boundary that contains both
+**Description:** Clone a readable template into a project the request body names (global destination is template.global.clone; user destination is template.user.clone). The source needs template read; the destination needs template create on its project, so a user access token needs template:read and template:create on a boundary that contains both
 
 ### Entry Points
 
@@ -12319,11 +12436,43 @@
 
 ---
 
+## template.global.clone
+
+**Domain:** template
+
+**Description:** Clone a readable template into the global catalog (scope=global). The source needs template read; the destination checks template.create_global on a collection-level request at the hub scope, so a user access token needs template:read and template:create_global on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/templates/{id}/clone` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
+
+**Base Permission:** `template.create_global`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestCatalogCloneToken_RequiresReadAndCreate`
+
+---
+
 ## template.reimport
 
 **Domain:** template
 
-**Description:** Reimport a global or project template from its source. The template needs template read and the reimport needs template create on the owning scope, as import does
+**Description:** Reimport a project template from its source (global templates use template.global.reimport; user templates use template.user.reimport). The template needs template read and the reimport needs template create on the owning project, as import does
 
 ### Entry Points
 
@@ -12351,11 +12500,43 @@
 
 ---
 
+## template.global.reimport
+
+**Domain:** template
+
+**Description:** Reimport a global-catalog template (scope=global) from its source. The template needs template read and the reimport checks template.create_global on a collection-level request at the hub scope, so a user access token needs template:read and template:create_global on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/templates/{id}/reimport` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
+
+**Base Permission:** `template.create_global`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestCatalogReimportToken_RequiresReadAndCreate`
+
+---
+
 ## template.import.global
 
 **Domain:** template
 
-**Description:** Import or discover templates for the global catalog. The check is template create on a collection-level request at the hub scope, so a user access token needs template:create on a hub boundary
+**Description:** Import or discover templates for the global catalog. The check is template.create_global on a collection-level request at the hub scope, so a user access token needs template:create_global on a hub boundary
 
 ### Entry Points
 
@@ -12370,7 +12551,7 @@
 
 **Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
 
-**Base Permission:** `template.create`
+**Base Permission:** `template.create_global`
 
 **Resource Resolver:** hub-scoped
 

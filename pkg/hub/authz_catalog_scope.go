@@ -25,10 +25,10 @@ import (
 // stored scope, never parentlessness (user-scoped records are also parentless
 // and must not require *_global permissions).
 //
-// Phase 1 covers skill.*_global twins (create_global, update_global,
-// delete_global), while keeping the interim core-scope mapping (create ->
-// create_global, update/delete -> plain) until core retirement lands.
-// Template twins are added in Phase 2.
+// For skills and templates, global-scope create, update, and delete map to
+// their respective *_global twins (create_global, update_global,
+// delete_global). Skill core scope keeps its interim mapping (create ->
+// create_global, update/delete -> plain) until core scope is retired.
 func catalogWriteAction(kind, scope string, a Action) Action {
 	switch kind {
 	case permissions.ResourceSkill:
@@ -45,6 +45,17 @@ func catalogWriteAction(kind, scope string, a Action) Action {
 		case store.SkillScopeCore:
 			if a == ActionCreate {
 				return ActionCreateGlobal
+			}
+		}
+	case permissions.ResourceTemplate:
+		if scope == store.TemplateScopeGlobal {
+			switch a {
+			case ActionCreate:
+				return ActionCreateGlobal
+			case ActionUpdate:
+				return ActionUpdateGlobal
+			case ActionDelete:
+				return ActionDeleteGlobal
 			}
 		}
 	}

@@ -106,6 +106,19 @@ func TestRelationshipCharacterization_Owner(t *testing.T) {
 			assert.False(t, d.Allowed, "global skill owner without role %s: reason %q", p.ID, d.Reason)
 		}
 	}
+
+	// Global-scoped templates: templateResource copies OwnerID for every scope,
+	// and these assertions hold because no relationship row (including
+	// owner/user/template) carries any template.*_global twin. Even a legacy
+	// global template row with OwnerID set grants no relationship authority.
+	globalTemplate := templateResource(&store.Template{ID: tid("relchar-global-tmpl"), OwnerID: owner.ID(), CreatedBy: owner.ID(), Scope: store.TemplateScopeGlobal})
+	for _, p := range sameTypeRegistryPermissions("template") {
+		switch p.ID {
+		case "template.create_global", "template.update_global", "template.delete_global":
+			d := decideExplicit(t, authz, owner, globalTemplate, p)
+			assert.False(t, d.Allowed, "global template owner without role %s: reason %q", p.ID, d.Reason)
+		}
+	}
 }
 
 // TestRelationshipCharacterization_OwnerProjectGrantsNothing pins

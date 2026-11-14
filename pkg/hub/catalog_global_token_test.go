@@ -246,15 +246,24 @@ func TestSkillRegistryToken_RequiresRegisterSelector(t *testing.T) {
 func TestGlobalResourceImport_ResolvesHubThroughEvidence(t *testing.T) {
 	f := newGCFixture(t, true)
 	ctx := context.Background()
-	kinds := []struct{ kind, authzType, selector, otherSelector string }{
-		{"template", "template", "template:create", "harness_config:create"},
-		{"harness-config", "harness_config", "harness_config:create", "template:create"},
+	kinds := []struct {
+		kind, authzType, selector, otherSelector string
+		hubOnly                                  bool
+		plainSelector                            string
+	}{
+		{"template", "template", "template:create_global", "harness_config:create", true, "template:create"},
+		{"harness-config", "harness_config", "harness_config:create", "template:create", false, ""},
 	}
 	for _, k := range kinds {
 		body := map[string]string{"kind": k.kind, "scope": "global", "sourceUrl": "https://example.invalid/gc-global"}
 		refused := []string{
 			f.hubToken(t, k.otherSelector),
-			f.projectToken(t, f.projectA, k.selector),
+		}
+		if k.hubOnly {
+			f.cannotMint(t, projectBoundary(f.projectA), k.selector)
+			refused = append(refused, f.hubToken(t, k.plainSelector), f.projectToken(t, f.projectA, k.plainSelector))
+		} else {
+			refused = append(refused, f.projectToken(t, f.projectA, k.selector))
 		}
 		admitted := f.hubToken(t, k.selector)
 		for _, path := range []string{"/api/v1/resources/import", "/api/v1/resources/discover"} {
@@ -478,23 +487,33 @@ func TestCatalogCloneToken_RequiresReadAndCreate(t *testing.T) {
 	f := newGCFixture(t, false)
 	srcTmpl := gcGlobalTemplate(t, f.store, "gc-clone-src", "")
 	srcHC := gcHarnessConfig(t, f.store, store.HarnessConfigScopeGlobal, "", "gc-clone-src")
-	cases := []struct{ path, read, create string }{
-		{"/api/v1/templates/" + srcTmpl.ID + "/clone", "template:read", "template:create"},
-		{"/api/v1/harness-configs/" + srcHC.ID + "/clone", "harness_config:read", "harness_config:create"},
+	cases := []struct{ path, read, createGlobal, createProject string }{
+		{"/api/v1/templates/" + srcTmpl.ID + "/clone", "template:read", "template:create_global", "template:create"},
+		{"/api/v1/harness-configs/" + srcHC.ID + "/clone", "harness_config:read", "harness_config:create", "harness_config:create"},
 	}
 	for _, c := range cases {
 		for i, dest := range []CloneTemplateRequest{
 			{Name: "gc-clone-global", Scope: "global"},
 			{Name: "gc-clone-project", Scope: "project", ScopeID: f.projectA},
 		} {
+			createSel := c.createProject
+			if dest.Scope == "global" {
+				createSel = c.createGlobal
+			}
 			rec := f.call(t, f.hubToken(t, c.read), http.MethodPost, c.path, dest)
 			assert.Equal(t, http.StatusForbidden, rec.Code, "%s dest %s with %s only: %s", c.path, dest.Scope, c.read, rec.Body.String())
-			rec = f.call(t, f.hubToken(t, c.create), http.MethodPost, c.path, dest)
-			assert.Equal(t, http.StatusNotFound, rec.Code, "%s dest %s with %s only: %s", c.path, dest.Scope, c.create, rec.Body.String())
-			rec = f.call(t, f.projectToken(t, f.projectA, c.read, c.create), http.MethodPost, c.path, dest)
+			if createSel != c.createProject {
+				// Plain template:create on a hub token must NOT authorize cloning into global scope.
+				rec = f.call(t, f.hubToken(t, c.read, c.createProject), http.MethodPost, c.path, dest)
+				assert.Equal(t, http.StatusForbidden, rec.Code, "%s dest %s with plain %s: %s", c.path, dest.Scope, c.createProject, rec.Body.String())
+				f.cannotMint(t, projectBoundary(f.projectA), createSel)
+			}
+			rec = f.call(t, f.hubToken(t, createSel), http.MethodPost, c.path, dest)
+			assert.Equal(t, http.StatusNotFound, rec.Code, "%s dest %s with %s only: %s", c.path, dest.Scope, createSel, rec.Body.String())
+			rec = f.call(t, f.projectToken(t, f.projectA, c.read, c.createProject), http.MethodPost, c.path, dest)
 			usRefused(t, rec.Code, "%s dest %s with a project token: %s", c.path, dest.Scope, rec.Body.String())
 
-			rec = f.call(t, f.hubToken(t, c.read, c.create), http.MethodPost, c.path, dest)
+			rec = f.call(t, f.hubToken(t, c.read, createSel), http.MethodPost, c.path, dest)
 			assert.Equal(t, http.StatusCreated, rec.Code, "%s dest %s (%d): %s", c.path, dest.Scope, i, rec.Body.String())
 		}
 	}
@@ -507,7 +526,8 @@ var gcPastReimportCheck = []int{http.StatusBadRequest, http.StatusServiceUnavail
 
 // TestCatalogReimportToken_RequiresReadAndCreate pins that reimporting a
 // global or project template or harness config needs read on the record
-// and create on its owning scope: a token with only the read selector is
+// and create on its owning scope (template:create_global for global templates,
+// template:create for project templates): a token with only the read selector is
 // refused (403), one with only the create selector does not reach the
 // record (404), a token bound to another project is refused, and a token
 // with both passes the check (the server has no storage, so the reimport
@@ -522,21 +542,27 @@ func TestCatalogReimportToken_RequiresReadAndCreate(t *testing.T) {
 	body := map[string]string{"sourceUrl": source}
 
 	cases := []struct {
-		path, read, create string
-		project            bool
-		admitted           []int
+		path, read, create, projectCreate string
+		project                           bool
+		admitted                          []int
 	}{
-		{"/api/v1/templates/" + globalTmpl.ID + "/reimport", "template:read", "template:create", false, gcPastReimportCheck},
-		{"/api/v1/templates/" + projectTmpl.ID + "/reimport", "template:read", "template:create", true, gcPastReimportCheck},
-		{"/api/v1/harness-configs/" + globalHC.ID + "/reimport", "harness_config:read", "harness_config:create", false, []int{http.StatusServiceUnavailable}},
-		{"/api/v1/harness-configs/" + projectHC.ID + "/reimport", "harness_config:read", "harness_config:create", true, []int{http.StatusServiceUnavailable}},
+		{"/api/v1/templates/" + globalTmpl.ID + "/reimport", "template:read", "template:create_global", "template:create", false, gcPastReimportCheck},
+		{"/api/v1/templates/" + projectTmpl.ID + "/reimport", "template:read", "template:create", "template:create", true, gcPastReimportCheck},
+		{"/api/v1/harness-configs/" + globalHC.ID + "/reimport", "harness_config:read", "harness_config:create", "harness_config:create", false, []int{http.StatusServiceUnavailable}},
+		{"/api/v1/harness-configs/" + projectHC.ID + "/reimport", "harness_config:read", "harness_config:create", "harness_config:create", true, []int{http.StatusServiceUnavailable}},
 	}
 	for _, c := range cases {
 		rec := f.call(t, f.hubToken(t, c.read), http.MethodPost, c.path, body)
 		assert.Equal(t, http.StatusForbidden, rec.Code, "%s with %s only: %s", c.path, c.read, rec.Body.String())
+		if c.create != c.projectCreate {
+			// Plain template:create on a hub token must NOT authorize reimporting a global template.
+			rec = f.call(t, f.hubToken(t, c.read, c.projectCreate), http.MethodPost, c.path, body)
+			assert.Equal(t, http.StatusForbidden, rec.Code, "%s with plain %s: %s", c.path, c.projectCreate, rec.Body.String())
+			f.cannotMint(t, projectBoundary(f.projectB), c.create)
+		}
 		rec = f.call(t, f.hubToken(t, c.create), http.MethodPost, c.path, body)
 		assert.Equal(t, http.StatusNotFound, rec.Code, "%s with %s only: %s", c.path, c.create, rec.Body.String())
-		rec = f.call(t, f.projectToken(t, f.projectB, c.read, c.create), http.MethodPost, c.path, body)
+		rec = f.call(t, f.projectToken(t, f.projectB, c.read, c.projectCreate), http.MethodPost, c.path, body)
 		usRefused(t, rec.Code, "%s with a token bound to another project: %s", c.path, rec.Body.String())
 
 		rec = f.call(t, f.hubToken(t, c.read, c.create), http.MethodPost, c.path, body)
@@ -789,6 +815,197 @@ func TestCatalogAuthorHubToken_SkillPublishJourney(t *testing.T) {
 	}
 
 	// 10. Delete the global skill.
+	rec = callWithKey(t, f.srv, ciKey, http.MethodDelete, byID, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+}
+
+// TestGlobalTemplateWrite_RequiresTwinSelectorAndHubBoundary pins that
+// creating, updating, or deleting a global-scope template requires
+// template:create_global, template:update_global, or template:delete_global
+// on a hub boundary:
+//   - a hub token carrying plain template:create / template:update /
+//     template:delete (or template:manage) is refused (403) across create,
+//     every update entry point, and delete;
+//   - template:create_global, template:update_global, and template:delete_global
+//     cannot be minted on a project boundary, nor on a hub boundary by an
+//     ungranted hub member;
+//   - a hub token carrying the twins (minted for the super-admin) succeeds
+//     across create, put, patch, file write/delete, and delete.
+func TestGlobalTemplateWrite_RequiresTwinSelectorAndHubBoundary(t *testing.T) {
+	f := newGCFixture(t, true)
+	ctx := context.Background()
+	now := time.Now()
+
+	tmplPath := "gc/templates/gc-write-global-tmpl"
+	globalTmpl := &store.Template{
+		ID: tid("gc-write-global-tmpl"), Name: "gc-write-global-tmpl", Slug: "gc-write-global-tmpl",
+		Harness: "claude", Scope: store.TemplateScopeGlobal, Status: store.TemplateStatusActive,
+		StoragePath: tmplPath,
+		Files:       []store.TemplateFile{{Path: "README.md", Size: 3, Hash: "sha256:00"}},
+		Created:     now, Updated: now,
+	}
+	require.NoError(t, f.store.CreateTemplate(ctx, globalTmpl))
+
+	// Mint constraints: project boundary refused even for super-admin; hub
+	// boundary refused for a member without global-catalog-author.
+	for _, sel := range []string{"template:create_global", "template:update_global", "template:delete_global"} {
+		f.cannotMint(t, projectBoundary(f.projectA), sel)
+		_, _, err := f.srv.uatService.CreateTokenWithParams(rs4MintContext(f.member.ID), CreateTokenParams{
+			UserID: f.member.ID, Name: "gc-member-refused-" + sel, Boundary: hubBoundary(), Scopes: []string{sel},
+		})
+		assert.Error(t, err, "member without global-catalog-author must not mint %s", sel)
+	}
+
+	// Plain template:manage hub token is refused on every global template write route.
+	plainHub := f.hubToken(t, "template:manage")
+	byID := "/api/v1/templates/" + globalTmpl.ID
+	for _, tc := range []struct {
+		name   string
+		method string
+		path   string
+		body   interface{}
+	}{
+		{"create", http.MethodPost, "/api/v1/templates", CreateTemplateRequest{Name: "plain-refused-global", Harness: "claude", Scope: store.TemplateScopeGlobal}},
+		{"put", http.MethodPut, byID, store.Template{Name: "plain-refused", Status: store.TemplateStatusActive}},
+		{"patch", http.MethodPatch, byID, map[string]string{"description": "plain-refused"}},
+		{"upload", http.MethodPost, byID + "/upload", UploadRequest{Files: []FileUploadRequest{{Path: "README.md", Size: 5}}}},
+		{"finalize", http.MethodPost, byID + "/finalize", FinalizeRequest{Manifest: &TemplateManifest{Files: []store.TemplateFile{{Path: "README.md"}}}}},
+		{"files-post", http.MethodPost, byID + "/files", map[string]string{"content": "nope"}},
+		{"files-put", http.MethodPut, byID + "/files/README.md", TemplateFileWriteRequest{Content: "nope"}},
+		{"files-delete", http.MethodDelete, byID + "/files/README.md", nil},
+		{"delete", http.MethodDelete, byID, nil},
+	} {
+		t.Run("plain-refused/"+tc.name, func(t *testing.T) {
+			rec := f.call(t, plainHub, tc.method, tc.path, tc.body)
+			assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		})
+	}
+
+	// Hub token with template:create_global + template:update_global + template:delete_global succeeds.
+	twinHub := f.hubToken(t, "template:create_global", "template:update_global", "template:delete_global")
+	rec := f.call(t, twinHub, http.MethodPost, "/api/v1/templates", CreateTemplateRequest{
+		Name: "twin-created-global", Harness: "claude", Scope: store.TemplateScopeGlobal,
+	})
+	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	rec = f.call(t, twinHub, http.MethodPut, byID, store.Template{Name: "gc-write-global-tmpl", Description: "twin-put", Status: store.TemplateStatusActive})
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	rec = f.call(t, twinHub, http.MethodPatch, byID, map[string]string{"description": "twin-patched"})
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	rec = f.call(t, twinHub, http.MethodDelete, byID, nil)
+	assert.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+}
+
+// TestCatalogAuthorHubToken_TemplateSyncJourney pins the documented CI recipe
+// (design §3.6, §8): a non-admin user bound only to hub-member +
+// global-catalog-author mints a hub UAT with
+// template:list,template:read,template:create_global,template:update_global,template:delete_global
+// and completes the end-to-end global template sync lifecycle
+// (list -> create -> upload -> file-put -> finalize -> patch -> delete), while
+// remaining forbidden on project and other-user templates.
+func TestCatalogAuthorHubToken_TemplateSyncJourney(t *testing.T) {
+	f := newGCFixture(t, true)
+	ctx := context.Background()
+
+	// Create a dedicated CI user holding ONLY hub-member + global-catalog-author.
+	ciUserID := tid("gc-ci-tmpl-author")
+	createTestUserWithRole(t, f.store, ciUserID, ciUserID+"@test.com", "member", store.SystemRoleGlobalCatalogAuthor)
+	ensureHubMembership(ctx, f.store, ciUserID)
+
+	ciKey := mintHubConfigToken(t, f.srv, ciUserID, hubBoundary(),
+		"template:list", "template:read", "template:create_global", "template:update_global", "template:delete_global")
+
+	// 1. List global templates.
+	rec := callWithKey(t, f.srv, ciKey, http.MethodGet, "/api/v1/templates?scope=global", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// 2. Create global template.
+	rec = callWithKey(t, f.srv, ciKey, http.MethodPost, "/api/v1/templates", CreateTemplateRequest{
+		Name:        "ci-synced-global-template",
+		Harness:     "claude",
+		Description: "initial CI template",
+		Scope:       store.TemplateScopeGlobal,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var createResp CreateTemplateResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &createResp))
+	require.NotNil(t, createResp.Template)
+	created := createResp.Template
+	require.NotEmpty(t, created.ID)
+	assert.Equal(t, ciUserID, created.CreatedBy)
+	assert.Empty(t, created.OwnerID)
+	byID := "/api/v1/templates/" + created.ID
+
+	// 3. Request upload URLs via POST /upload.
+	agentCfgBytes := []byte("default_harness_config: claude\n")
+	readmeBytes := []byte("# CI Global Template\n")
+	rec = callWithKey(t, f.srv, ciKey, http.MethodPost, byID+"/upload", UploadRequest{
+		Files: []FileUploadRequest{
+			{Path: "scion-agent.yaml", Size: int64(len(agentCfgBytes))},
+			{Path: "README.md", Size: int64(len(readmeBytes))},
+		},
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// 4. Write template files via PUT /api/v1/templates/{id}/files/{path}.
+	rec = callWithKey(t, f.srv, ciKey, http.MethodPut, byID+"/files/scion-agent.yaml", TemplateFileWriteRequest{
+		Content: string(agentCfgBytes),
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec = callWithKey(t, f.srv, ciKey, http.MethodPut, byID+"/files/README.md", TemplateFileWriteRequest{
+		Content: string(readmeBytes),
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// 5. Stage objects and finalize via POST /finalize.
+	storedTmpl, err := f.store.GetTemplate(ctx, created.ID)
+	require.NoError(t, err)
+	stageFiles := map[string]string{
+		"scion-agent.yaml": string(agentCfgBytes),
+		"README.md":        string(readmeBytes),
+	}
+	stageObjects(t, f.srv, storedTmpl, stageFiles)
+	rec = callWithKey(t, f.srv, ciKey, http.MethodPost, byID+"/finalize", FinalizeRequest{
+		Manifest: &TemplateManifest{Version: "1.0", Files: commitManifest(stageFiles)},
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// 6. Patch global template metadata.
+	rec = callWithKey(t, f.srv, ciKey, http.MethodPatch, byID, map[string]string{
+		"description": "updated description from CI",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// 7. Negative isolation checks with the same CI token: cannot create, patch,
+	// or delete a project template or another user's user-scoped template.
+	now := time.Now()
+	projTmpl := &store.Template{
+		ID: tid("gc-ci-proj-tmpl"), Name: "gc-ci-proj-tmpl", Slug: "gc-ci-proj-tmpl",
+		Harness: "claude", Scope: store.TemplateScopeProject, ScopeID: f.projectA, ProjectID: f.projectA,
+		OwnerID: f.admin.ID, Status: store.TemplateStatusActive, Created: now, Updated: now,
+	}
+	require.NoError(t, f.store.CreateTemplate(ctx, projTmpl))
+	otherUserTmpl := &store.Template{
+		ID: tid("gc-ci-user-tmpl"), Name: "gc-ci-user-tmpl", Slug: "gc-ci-user-tmpl",
+		Harness: "claude", Scope: store.TemplateScopeUser, ScopeID: f.member.ID,
+		OwnerID: f.member.ID, Status: store.TemplateStatusActive, Created: now, Updated: now,
+	}
+	require.NoError(t, f.store.CreateTemplate(ctx, otherUserTmpl))
+
+	rec = callWithKey(t, f.srv, ciKey, http.MethodPost, "/api/v1/templates", CreateTemplateRequest{
+		Name: "ci-proj-denied", Harness: "claude", Scope: store.TemplateScopeProject, ScopeID: f.projectA,
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	for _, targetID := range []string{projTmpl.ID, otherUserTmpl.ID} {
+		rec = callWithKey(t, f.srv, ciKey, http.MethodPatch, "/api/v1/templates/"+targetID, map[string]string{"description": "denied"})
+		assert.Equal(t, http.StatusForbidden, rec.Code, "patch %s: %s", targetID, rec.Body.String())
+		rec = callWithKey(t, f.srv, ciKey, http.MethodDelete, "/api/v1/templates/"+targetID, nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "delete %s: %s", targetID, rec.Body.String())
+	}
+
+	// 8. Delete the global template.
 	rec = callWithKey(t, f.srv, ciKey, http.MethodDelete, byID, nil)
 	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
 }

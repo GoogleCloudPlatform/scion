@@ -174,6 +174,9 @@ func TestGlobalCatalogAuthor_ExactPermissionSet(t *testing.T) {
 		"skill.create_global",
 		"skill.delete_global",
 		"skill.update_global",
+		"template.create_global",
+		"template.delete_global",
+		"template.update_global",
 	}
 	sort.Strings(expected)
 
@@ -391,9 +394,16 @@ func TestCatalogWriteAction_MapsCorrectly(t *testing.T) {
 		{"skill/user/create unchanged", permissions.ResourceSkill, store.SkillScopeUser, ActionCreate, ActionCreate},
 		{"skill/user/update unchanged", permissions.ResourceSkill, store.SkillScopeUser, ActionUpdate, ActionUpdate},
 		{"skill/user/delete unchanged", permissions.ResourceSkill, store.SkillScopeUser, ActionDelete, ActionDelete},
-		{"template/global/create phase1 unchanged", permissions.ResourceTemplate, store.TemplateScopeGlobal, ActionCreate, ActionCreate},
-		{"template/global/update phase1 unchanged", permissions.ResourceTemplate, store.TemplateScopeGlobal, ActionUpdate, ActionUpdate},
-		{"template/global/delete phase1 unchanged", permissions.ResourceTemplate, store.TemplateScopeGlobal, ActionDelete, ActionDelete},
+		{"template/global/create", permissions.ResourceTemplate, store.TemplateScopeGlobal, ActionCreate, ActionCreateGlobal},
+		{"template/global/update", permissions.ResourceTemplate, store.TemplateScopeGlobal, ActionUpdate, ActionUpdateGlobal},
+		{"template/global/delete", permissions.ResourceTemplate, store.TemplateScopeGlobal, ActionDelete, ActionDeleteGlobal},
+		{"template/global/read unchanged", permissions.ResourceTemplate, store.TemplateScopeGlobal, ActionRead, ActionRead},
+		{"template/project/create unchanged", permissions.ResourceTemplate, store.TemplateScopeProject, ActionCreate, ActionCreate},
+		{"template/project/update unchanged", permissions.ResourceTemplate, store.TemplateScopeProject, ActionUpdate, ActionUpdate},
+		{"template/project/delete unchanged", permissions.ResourceTemplate, store.TemplateScopeProject, ActionDelete, ActionDelete},
+		{"template/user/create unchanged", permissions.ResourceTemplate, store.TemplateScopeUser, ActionCreate, ActionCreate},
+		{"template/user/update unchanged", permissions.ResourceTemplate, store.TemplateScopeUser, ActionUpdate, ActionUpdate},
+		{"template/user/delete unchanged", permissions.ResourceTemplate, store.TemplateScopeUser, ActionDelete, ActionDelete},
 	}
 
 	for _, tt := range tests {
@@ -792,7 +802,8 @@ func TestGlobalSkill_HubAdminAndSuperAdminHaveTwins(t *testing.T) {
 
 // TestSeedReconcile_GlobalCatalogAuthorR2AppliesOnUpgrade verifies that
 // reconciling from global-catalog-author revision 1 (create_global only) to
-// revision 2 adds skill.update_global and skill.delete_global.
+// the current revision adds skill.update_global, skill.delete_global, and the
+// template.*_global twins.
 func TestSeedReconcile_GlobalCatalogAuthorR2AppliesOnUpgrade(t *testing.T) {
 	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
@@ -820,8 +831,11 @@ func TestSeedReconcile_GlobalCatalogAuthorR2AppliesOnUpgrade(t *testing.T) {
 
 	after, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleGlobalCatalogAuthor, store.RoleScopeSystem)
 	require.NoError(t, err)
-	assert.ElementsMatch(t, []string{"skill.create_global", "skill.update_global", "skill.delete_global"}, after.Permissions)
-	assert.Equal(t, 2, getAppliedBuiltInRoleMarker(ctx, s, store.SystemRoleGlobalCatalogAuthor).Revision)
+	assert.ElementsMatch(t, []string{
+		"skill.create_global", "skill.update_global", "skill.delete_global",
+		"template.create_global", "template.update_global", "template.delete_global",
+	}, after.Permissions)
+	assert.Equal(t, 3, getAppliedBuiltInRoleMarker(ctx, s, store.SystemRoleGlobalCatalogAuthor).Revision)
 }
 
 // TestSkillGlobalTwins_PermissionRegistered pins skill.update_global and

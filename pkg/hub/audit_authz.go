@@ -420,14 +420,20 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 		resource.ParentType = "project"
 		resource.ParentID = req.Resource.ProjectID
 	}
-	// A skill's authorization depends on its own scope (ScopeKind and, for
-	// user-scoped skills, the owning user), which the request does not
-	// carry. Build it from the stored record the way the read handlers do,
-	// so explain matches real decisions. An unknown ID keeps the bare
-	// resource, which every skill check denies.
-	if resource.Type == "skill" && resource.ID != "" {
+	// A skill's or template's authorization depends on its own scope
+	// (ScopeKind and, for user-scoped records, the owning user), which the
+	// request does not carry. Build it from the stored record the way the
+	// read/write handlers do, so explain matches real decisions (including
+	// *_global twins via catalogWriteAction). An unknown ID keeps the bare
+	// resource, which every check denies.
+	switch {
+	case resource.Type == "skill" && resource.ID != "":
 		if sk, err := s.store.GetSkill(ctx, resource.ID); err == nil {
 			resource = skillResource(sk)
+		}
+	case resource.Type == "template" && resource.ID != "":
+		if tmpl, err := s.store.GetTemplate(ctx, resource.ID); err == nil {
+			resource = templateResource(tmpl)
 		}
 	}
 

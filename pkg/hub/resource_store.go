@@ -523,10 +523,17 @@ func (p *templatePersistence) Create(ctx context.Context, rec *ResourceRecord, _
 	rec.StorageURI = t.StorageURI
 	// For user-scoped templates imported via the resource pipeline, set
 	// OwnerID and CreatedBy from the scope ID (which IS the user ID for
-	// user scope). This mirrors handleCreateTemplate's behavior.
-	if rec.Scope == store.TemplateScopeUser && rec.ScopeID != "" {
+	// user scope). Global-scoped templates record CreatedBy from the caller
+	// for audit without stamping OwnerID, so the owner relationship never
+	// creates residual write authority on global catalog records.
+	switch {
+	case rec.Scope == store.TemplateScopeUser && rec.ScopeID != "":
 		t.OwnerID = rec.ScopeID
 		t.CreatedBy = rec.ScopeID
+	case rec.Scope == store.TemplateScopeGlobal:
+		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
+			t.CreatedBy = userIdent.ID()
+		}
 	}
 	// The pending row carries no files and no derived fields: the Update
 	// that follows the upload commits both through commitTemplateFiles.

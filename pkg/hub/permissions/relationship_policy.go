@@ -93,6 +93,9 @@ var RelationshipPolicies = []RelationshipPolicy{
 	// TestRelationshipCharacterization_OwnerProjectGrantsNothing pins this.
 	{
 		// owner/user/template (TestRelationshipCharacterization_Owner).
+		// template.create_global, template.update_global and template.delete_global
+		// are deliberately excluded: global templates record CreatedBy only, never
+		// OwnerID, and global catalog writes require explicit role authority.
 		Relationship:   "owner",
 		PrincipalKinds: []string{"user"},
 		ResourceType:   ResourceTemplate,

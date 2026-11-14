@@ -274,12 +274,20 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the source needs template:read before the destination's template:create is checked, and a token without the read selector is answered 404 on the source, so a POST refusal is not 403",
 		Pin:    "TestCatalogCloneToken_RequiresReadAndCreate",
 	},
+	{OperationID: "template.global.clone", Method: "POST", Pattern: "/api/v1/templates/{id}/clone"}: {
+		Reason: "the source needs template:read before the destination's template:create_global is checked, and a token without the read selector is answered 404 on the source, so a POST refusal is not 403",
+		Pin:    "TestCatalogCloneToken_RequiresReadAndCreate",
+	},
 	{OperationID: "harnessconfig.clone", Method: "POST", Pattern: "/api/v1/harness-configs/{id}/clone"}: {
 		Reason: "the route gate needs harness_config:read on the source before the destination's harness_config:create is checked, and a token without the read selector is answered 404, so a POST refusal is not 403",
 		Pin:    "TestCatalogCloneToken_RequiresReadAndCreate",
 	},
 	{OperationID: "template.reimport", Method: "POST", Pattern: "/api/v1/templates/{id}/reimport"}: {
 		Reason: "the record needs template:read before template:create on the owning scope is checked, and a token without the read selector is answered 404, so a POST refusal is not 403",
+		Pin:    "TestCatalogReimportToken_RequiresReadAndCreate",
+	},
+	{OperationID: "template.global.reimport", Method: "POST", Pattern: "/api/v1/templates/{id}/reimport"}: {
+		Reason: "the record needs template:read before template:create_global on the global scope is checked, and a token without the read selector is answered 404, so a POST refusal is not 403",
 		Pin:    "TestCatalogReimportToken_RequiresReadAndCreate",
 	},
 	{OperationID: "harnessconfig.reimport", Method: "POST", Pattern: "/api/v1/harness-configs/{id}/reimport"}: {
@@ -804,6 +812,8 @@ type bearerMatrixPositivePinnedResult struct {
 // fixed client error after its authorization check passes.
 var bearerMatrixPositivePinned = map[liveInventoryKey]bearerMatrixPositivePinnedResult{
 	{"template.update", http.MethodPut, "/api/v1/templates/{id}"}: {
+		http.StatusBadRequest, "validation_error", "the empty update body has an empty name, refused before the store write"},
+	{"template.global.update", http.MethodPut, "/api/v1/templates/{id}"}: {
 		http.StatusBadRequest, "validation_error", "the empty update body has an empty name, refused before the store write"},
 	{"harnessconfig.update", http.MethodPut, "/api/v1/harness-configs/{id}"}: {
 		http.StatusBadRequest, "validation_error", "the empty update body has an empty name, refused before the store write"},

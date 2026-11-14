@@ -72,6 +72,8 @@ type idFixtures struct {
 	skillRegistry           string
 	template                string
 	templateDel             string
+	projectTemplate         string
+	projectTemplateDel      string
 	harnessConfig           string
 	harnessConfigDel        string
 	schedule                string
@@ -147,12 +149,13 @@ type idFixtures struct {
 	// (skillVersion, 1.0.0) holding one stored file, SKILL.md;
 	// templateFiles and harnessConfigFiles are global records holding one
 	// stored file each, README.md (seedLiveInventoryCatalogFiles).
-	skillFiles          string
-	skillVersion        string
-	projectSkillFiles   string
-	projectSkillVersion string
-	templateFiles       string
-	harnessConfigFiles  string
+	skillFiles           string
+	skillVersion         string
+	projectSkillFiles    string
+	projectSkillVersion  string
+	templateFiles        string
+	projectTemplateFiles string
+	harnessConfigFiles   string
 	// delegation holds an agent delegation grant bound to agent, a
 	// disposable twin grant for the revoke entry, and an active delegated
 	// credential of the first grant (seedLiveInventoryDelegation).
@@ -344,6 +347,8 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 		skillRegistry:        tid("li-skill-registry"),
 		template:             tid("li-template"),
 		templateDel:          tid("li-template-del"),
+		projectTemplate:      tid("li-project-template"),
+		projectTemplateDel:   tid("li-project-template-del"),
 		harnessConfig:        tid("li-hc"),
 		harnessConfigDel:     tid("li-hc-del"),
 		schedule:             tid("li-schedule"),
@@ -455,6 +460,8 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 
 	require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: f.template, Name: "li-template", Slug: "li-template", Harness: "claude", Scope: store.TemplateScopeGlobal, Created: now, Updated: now}))
 	require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: f.templateDel, Name: "li-template-del", Slug: "li-template-del", Harness: "claude", Scope: store.TemplateScopeGlobal, Created: now, Updated: now}))
+	require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: f.projectTemplate, Name: "li-project-template-rec", Slug: "li-project-template-rec", Harness: "claude", Scope: store.TemplateScopeProject, ScopeID: f.project, ProjectID: f.project, Created: now, Updated: now}))
+	require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: f.projectTemplateDel, Name: "li-project-template-del", Slug: "li-project-template-del", Harness: "claude", Scope: store.TemplateScopeProject, ScopeID: f.project, ProjectID: f.project, Created: now, Updated: now}))
 
 	require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{ID: f.harnessConfig, Name: "li-hc", Slug: "li-hc", Harness: "claude", Scope: store.HarnessConfigScopeGlobal, Status: store.HarnessConfigStatusActive, Created: now, Updated: now}))
 	require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{ID: f.harnessConfigDel, Name: "li-hc-del", Slug: "li-hc-del", Harness: "claude", Scope: store.HarnessConfigScopeGlobal, Status: store.HarnessConfigStatusActive, Created: now, Updated: now}))
@@ -828,6 +835,12 @@ func seedLiveInventoryCatalogFiles(t *testing.T, ctx context.Context, s store.St
 		Scope: store.TemplateScopeGlobal, Status: store.TemplateStatusActive, StoragePath: templatePath, Files: file("README.md"), Created: now, Updated: now}))
 	put(templatePath + "/README.md")
 
+	f.projectTemplateFiles = tid("li-project-template-files")
+	projectTemplatePath := "li-catalog/templates/li-project-template-files"
+	require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: f.projectTemplateFiles, Name: "li-project-template-files", Slug: "li-project-template-files", Harness: "claude",
+		Scope: store.TemplateScopeProject, ScopeID: f.project, ProjectID: f.project, Status: store.TemplateStatusActive, StoragePath: projectTemplatePath, Files: file("README.md"), Created: now, Updated: now}))
+	put(projectTemplatePath + "/README.md")
+
 	f.harnessConfigFiles = tid("li-hc-files")
 	hcPath := "li-catalog/harness-configs/li-hc-files"
 	require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{ID: f.harnessConfigFiles, Name: "li-hc-files", Slug: "li-hc-files", Harness: "claude",
@@ -909,7 +922,14 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 		{"skill.delete", "/api/v1/skills/{id}"}:                                         {"id": f.projectSkillDel},
 		{"skill.global.delete", "/api/v1/skills/{id}"}:                                  {"id": f.skillDel},
 		{"skill.register", "/api/v1/skill-registries/{id}"}:                             {"id": f.skillRegistryDel},
-		{"template.delete", "/api/v1/templates/{id}"}:                                   {"id": f.templateDel},
+		{"template.update", "/api/v1/templates/{id}"}:                                   {"id": f.projectTemplate},
+		{"template.update", "/api/v1/templates/{id}/upload"}:                            {"id": f.projectTemplateFiles},
+		{"template.update", "/api/v1/templates/{id}/finalize"}:                          {"id": f.projectTemplateFiles},
+		{"template.update", "/api/v1/templates/{id}/files"}:                             {"id": f.projectTemplateFiles},
+		{"template.update", "/api/v1/templates/{id}/files/{path}"}:                      {"id": f.projectTemplateFiles, "path": "README.md"},
+		{"template.delete", "/api/v1/templates/{id}"}:                                   {"id": f.projectTemplateDel},
+		{"template.global.delete", "/api/v1/templates/{id}"}:                            {"id": f.templateDel},
+		{"template.reimport", "/api/v1/templates/{id}/reimport"}:                        {"id": f.projectTemplate},
 		{"harnessconfig.delete", "/api/v1/harness-configs/{id}"}:                        {"id": f.harnessConfigDel},
 		// User-scope branches address the caller's user-scope records; a
 		// clone copies the global fixture into the caller's user scope.
@@ -1400,7 +1420,10 @@ func bodyOverrides(f idFixtures) map[overrideKey]map[string]interface{} {
 		{"skill.global.create", "/api/v1/skills"}:                       {"name": "li-global-skill", "scope": "global"},
 		{"skill.discover.project", "/api/v1/skills/discover-directory"}: {"projectId": f.project, "sourceUrl": "https://example.invalid/li-skills"},
 		{"skill.discover.global", "/api/v1/skills/discover-directory"}:  {"sourceUrl": "https://example.invalid/li-skills"},
-		{"template.create", "/api/v1/templates"}:                        {"name": "li-created-template", "harness": "claude", "scope": "global"},
+		{"template.create", "/api/v1/templates"}:                        {"name": "li-project-template", "harness": "claude", "scope": "project", "scopeId": f.project},
+		{"template.global.create", "/api/v1/templates"}:                 {"name": "li-global-template", "harness": "claude", "scope": "global"},
+		{"template.clone", "/api/v1/templates/{id}/clone"}:              {"name": "li-project-template-clone", "scope": "project", "scopeId": f.project},
+		{"template.global.clone", "/api/v1/templates/{id}/clone"}:       {"name": "li-global-template-clone", "scope": "global"},
 		{"harnessconfig.create", "/api/v1/harness-configs"}:             {"name": "li-created-hc", "harness": "claude", "scope": "global"},
 		{"template.import.global", "/api/v1/resources/import"}:          {"kind": "template", "scope": "global", "sourceUrl": "https://example.invalid/li-global"},
 		{"template.import.global", "/api/v1/resources/discover"}:        {"kind": "template", "scope": "global", "sourceUrl": "https://example.invalid/li-global"},

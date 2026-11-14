@@ -465,14 +465,19 @@ func TestProjectRegisterToken_EmbeddedBrokerFormIsSessionOnly(t *testing.T) {
 }
 
 // TestBuiltInRoles_SuperAdminRevision pins the super-admin revision and its
-// latest changes: revision 11 adds skill.update_global and
+// latest changes: revision 12 adds template.create_global,
+// template.update_global, and template.delete_global (ptone/scion#1713),
+// revision 11 adds skill.update_global and
 // skill.delete_global (ptone/scion#1713), revision 10 adds
 // agent.delegation.revoke_all (ptone/scion#2132), revision 9
 // project.chat_post (ptone/scion#5518), revision 8 drops project.register, a
 // reserved row.
 func TestBuiltInRoles_SuperAdminRevision(t *testing.T) {
 	admin := builtInRoleByName(t, store.SystemRoleSuperAdmin)
-	assert.Equal(t, 11, admin.Revision)
+	assert.Equal(t, 12, admin.Revision)
+	assert.Contains(t, admin.Permissions, "template.create_global")
+	assert.Contains(t, admin.Permissions, "template.update_global")
+	assert.Contains(t, admin.Permissions, "template.delete_global")
 	assert.Contains(t, admin.Permissions, "skill.update_global")
 	assert.Contains(t, admin.Permissions, "skill.delete_global")
 	assert.Contains(t, admin.Permissions, "agent.delegation.revoke_all")
