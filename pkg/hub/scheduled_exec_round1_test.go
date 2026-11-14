@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -26,10 +27,10 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -366,22 +367,81 @@ func (s *quotaBarrierStore) ListScheduledEvents(ctx context.Context, f store.Sch
 	return result, err
 }
 
-// TestScheduledExecF1_TargetDeletionCancelsBeyondFirstPage: with more
-// pending events in the project than one list page, deleting the target
-// still cancels its exec event.
+// TestScheduledExecF1_TargetDeletionCancelsBeyondFirstPage (F1, P2-R2):
+// the target's exec event is older than the first page and its UUID sorts
+// after every newer event (UUID order opposed to creation order, the
+// reviewer's fixture); deleting the target still cancels it.
 func TestScheduledExecF1_TargetDeletionCancelsBeyondFirstPage(t *testing.T) {
 	f := execAuthoringFixture(t)
 	ctx := context.Background()
+	old := time.Now().Add(-time.Hour)
+	p := scheduledExecPayload{AgentID: f.sibling.ID, Command: []string{"true"}}
+	raw, err := p.encode()
+	require.NoError(t, err)
+	target := withSessionRevision(store.ScheduledEvent{
+		ID: "ffffffff-ffff-4fff-8fff-ffffffffffff", ProjectID: f.proj.ID, EventType: scheduledEventTypeExec,
+		FireAt: time.Now().Add(time.Hour), Payload: raw, Status: store.ScheduledEventPending, CreatedAt: old,
+	}, f.owner.ID)
+	require.NoError(t, f.store.CreateScheduledEvent(ctx, &target))
+	other, _ := json.Marshal(MessageEventPayload{AgentID: f.caller.ID, Message: "x"})
 	for i := 0; i < 1100; i++ {
-		raw, _ := json.Marshal(MessageEventPayload{AgentID: f.caller.ID, Message: "x"})
+		low := uuid.New()
+		low[0] = 1
 		require.NoError(t, f.store.CreateScheduledEvent(ctx, &store.ScheduledEvent{
-			ID: api.NewUUID(), ProjectID: f.proj.ID, EventType: "message", Payload: string(raw),
+			ID: low.String(), ProjectID: f.proj.ID, EventType: "message", Payload: string(other),
 			Status: store.ScheduledEventPending, FireAt: time.Now().Add(time.Hour),
+			CreatedAt: old.Add(time.Minute + time.Duration(i)*time.Millisecond),
 		}))
 	}
-	target := seedExecEvent(t, f, f.sibling.ID)
 	f.srv.cancelScheduledEventsForAgent(ctx, f.sibling)
 	got, err := f.store.GetScheduledEvent(ctx, target.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.ScheduledEventCancelled, got.Status)
+}
+
+// TestScheduledExecP2R1_ClaimBeforeRunCrash (P2-R1, AC10; the reviewer's
+// reproduction): a hub that stops after claiming an exec event (fired, or
+// expired on a restart replay) and before inserting its run leaves an event
+// no replay or run sweep finds. The sweeper records it failed once the
+// admission window has passed, never sends exec-start for it, and leaves a
+// claim still inside the window alone.
+func TestScheduledExecP2R1_ClaimBeforeRunCrash(t *testing.T) {
+	for _, claim := range []string{store.ScheduledEventFired, store.ScheduledEventExpired} {
+		t.Run(claim, func(t *testing.T) {
+			f := newExecRouteFixture(t)
+			f.startAgent(t)
+			ctx := context.Background()
+			evt := f.event(t, 1, "true")
+			claimed, err := f.store.(store.ScheduledEventClaimer).ClaimScheduledEvent(ctx, evt.ID, claim)
+			require.NoError(t, err)
+			require.True(t, claimed)
+			fresh := f.event(t, 1, "true")
+			claimed, err = f.store.(store.ScheduledEventClaimer).ClaimScheduledEvent(ctx, fresh.ID, claim)
+			require.NoError(t, err)
+			require.True(t, claimed)
+
+			// Restart: the claim is older than the admission window.
+			old := time.Now().Add(-2 * time.Hour)
+			require.NoError(t, f.store.UpdateScheduledEventStatus(ctx, evt.ID, claim, &old, ""))
+			restarted := NewScheduler(f.store, slog.Default())
+			restarted.RegisterEventHandler(scheduledEventTypeExec, f.srv.execEventHandler())
+			restarted.loadPersistedTimers(ctx)
+			f.srv.sweepScheduledExecRuns(ctx)
+
+			got := f.getEvent(t, evt.ID)
+			assert.Equal(t, store.ScheduledEventFailed, got.Status, "AC10: no claimed exec stays successful without an outcome")
+			assert.Equal(t, execReasonNotDispatched, got.Error)
+			_, runErr := f.store.GetScheduledExecRun(ctx, evt.ID)
+			assert.ErrorIs(t, runErr, store.ErrNotFound)
+			assert.Zero(t, f.capture.count(execRoutePath(agentcontrol.RouteExecStart)), "recovery never sends exec-start")
+
+			assert.Equal(t, claim, f.getEvent(t, fresh.ID).Status, "a claim inside the window may still be admitted")
+
+			// A fire whose window has passed cannot add a run afterwards
+			// either: the event is failed, and a late insert would only
+			// leave a run whose outcome cannot touch the event.
+			f.srv.sweepScheduledExecRuns(ctx)
+			assert.Equal(t, store.ScheduledEventFailed, f.getEvent(t, evt.ID).Status)
+		})
+	}
 }
