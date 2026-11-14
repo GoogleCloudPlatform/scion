@@ -318,6 +318,84 @@ func TestMandatoryBoilerplate_PointsToWebServingSkill(t *testing.T) {
 	}
 }
 
+// TestMandatoryBoilerplate_ClonePerAgentShallowCloneOrientation pins that the
+// embedded workspace orientation preamble keys its shallow-clone guidance on
+// SCION_GIT_DEPTH / is-shallow-repository (covering both clone-per-agent and
+// worktree-per-agent fallback clones), explains why history/range commands
+// fail on shallow clones, and shows how to deepen (ptone/scion#7860).
+func TestMandatoryBoilerplate_ClonePerAgentShallowCloneOrientation(t *testing.T) {
+	data, err := fs.ReadFile(MandatoryBoilerplateFS(), "00-workspace-orientation.md")
+	if err != nil {
+		t.Fatalf("reading embedded 00-workspace-orientation.md: %v", err)
+	}
+	content := strings.Join(strings.Fields(string(data)), " ")
+	for _, want := range []string{
+		"Whenever `SCION_GIT_DEPTH` is set",
+		"fell back to cloning",
+		"git rev-parse --is-shallow-repository",
+		"git merge-base",
+		"git fetch --deepen",
+		"git fetch --unshallow",
+		"git-operations",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("embedded 00-workspace-orientation.md does not contain %q", want)
+		}
+	}
+}
+
+// TestPlatformSkillsFS_GitOperationsCoversShallowClones pins that the embedded
+// git-operations platform skill (injected into every agent, including
+// clone-per-agent where git-sandbox is not injected) covers shallow clone
+// diagnostics and deepening (ptone/scion#7860).
+func TestPlatformSkillsFS_GitOperationsCoversShallowClones(t *testing.T) {
+	data, err := fs.ReadFile(PlatformSkillsFS(), "git-operations/SKILL.md")
+	if err != nil {
+		t.Fatalf("reading embedded git-operations/SKILL.md: %v", err)
+	}
+	raw := strings.ReplaceAll(string(data), "\r\n", "\n")
+	front, _, ok := strings.Cut(strings.TrimPrefix(raw, "---\n"), "\n---\n")
+	if !strings.HasPrefix(raw, "---\n") || !ok {
+		t.Fatalf("embedded git-operations/SKILL.md has no frontmatter block")
+	}
+	if strings.Contains(front, "inject_when") {
+		t.Errorf("git-operations must reach every agent (including clone-per-agent); frontmatter sets inject_when:\n%s", front)
+	}
+	if !strings.Contains(strings.ToLower(front), "shallow") {
+		t.Errorf("git-operations frontmatter description does not mention shallow clones:\n%s", front)
+	}
+
+	content := strings.Join(strings.Fields(raw), " ")
+	for _, want := range []string{
+		"SCION_GIT_DEPTH",
+		"git rev-parse --is-shallow-repository",
+		"no merge base",
+		"`git merge`/`git pull` fail with `refusing to merge unrelated histories`",
+		"git fetch --deepen",
+		"--filter=blob:none",
+		"git fetch --unshallow",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("embedded git-operations/SKILL.md does not contain %q", want)
+		}
+	}
+
+	sandboxData, err := fs.ReadFile(PlatformSkillsFS(), "git-sandbox/SKILL.md")
+	if err != nil {
+		t.Fatalf("reading embedded git-sandbox/SKILL.md: %v", err)
+	}
+	sandboxContent := strings.Join(strings.Fields(string(sandboxData)), " ")
+	for _, want := range []string{
+		"When `SCION_GIT_DEPTH` Is Unset",
+		"If `SCION_GIT_DEPTH` is set",
+		"`git-operations` skill",
+	} {
+		if !strings.Contains(sandboxContent, want) {
+			t.Errorf("embedded git-sandbox/SKILL.md does not contain %q", want)
+		}
+	}
+}
+
 func TestSourceURLFormat(t *testing.T) {
 	const harnessPrefix = "https://github.com/GoogleCloudPlatform/scion/harnesses/"
 	const builtinPrefix = "builtin://scion/"

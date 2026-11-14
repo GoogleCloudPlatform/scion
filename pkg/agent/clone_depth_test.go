@@ -115,6 +115,16 @@ func TestApplyCloneDepth_NoGitClone(t *testing.T) {
 	assert.NotContains(t, env, gitDepthEnvKey)
 }
 
+func TestApplyCloneDepth_NilDepthPopulatesDefaultEnv(t *testing.T) {
+	orig := &api.GitCloneConfig{URL: "https://example.com/repo.git", Branch: "main"}
+	env := map[string]string{}
+	got, err := applyCloneDepth(orig, env, cloneDepthInput{})
+	require.NoError(t, err)
+	assert.Same(t, orig, got)
+	assert.Nil(t, orig.Depth)
+	assert.Equal(t, "1", env[gitDepthEnvKey])
+}
+
 func TestApplyCloneDepth_InvalidNamesSource(t *testing.T) {
 	_, err := applyCloneDepth(requestGitClone(), map[string]string{}, cloneDepthInput{Profile: "0", ProfileSource: "profiles.gke.clone_depth"})
 	require.Error(t, err)
@@ -287,4 +297,54 @@ func TestStartCloneDepth_InvalidProfileFailsStart(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "profiles.bad.clone_depth")
+}
+
+// TestStartCloneDepth_EndToEndClonePerAgentOrientation verifies that a
+// clone-per-agent start on a non-git host project directory (even with nil
+// GitClone.Depth and no pre-populated SCION_GIT_DEPTH) exports
+// SCION_GIT_DEPTH=1 to the container and provisions both the mandatory
+// workspace orientation preamble and the git-operations skill with shallow
+// clone guidance in the agent's home directory (ptone/scion#7860).
+func TestStartCloneDepth_EndToEndClonePerAgentOrientation(t *testing.T) {
+	f := newSharedDirStorageRunFixture(t)
+	require.NoError(t, os.WriteFile(filepath.Join(f.globalScionDir, "harness-configs", "test-harness", "config.yaml"),
+		[]byte("harness: gemini\nuser: scion\nimage: test-image:latest\nskills_dir: .gemini/skills\ninstructions_file: .gemini/GEMINI.md\n"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(f.globalScionDir, "settings.yaml"),
+		[]byte(cloneDepthRunSettings), 0644))
+	var captured runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		NameFunc: func() string { return "kubernetes" },
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			captured = config
+			return "mock-id", nil
+		},
+	}
+	_, err := NewManager(mockRT).Start(context.Background(), api.StartOptions{
+		Name:        "rev-agent",
+		ProjectPath: f.projectScionDir,
+		NoAuth:      true,
+		GitClone:    &api.GitCloneConfig{URL: "https://example.com/repo.git", Branch: "main"},
+		Env: map[string]string{
+			"SCION_AGENT_ID":       "agent-rev",
+			"SCION_PROJECT_ID":     "pid-rev",
+			"SCION_WORKSPACE_MODE": "clone-per-agent",
+			"SCION_WORKSPACE_GIT":  "true",
+		},
+	})
+	require.NoError(t, err)
+
+	depthEnv, ok := runEnvValue(captured, gitDepthEnvKey)
+	require.True(t, ok, "SCION_GIT_DEPTH must be exported even when GitClone.Depth is nil")
+	assert.Equal(t, "1", depthEnv)
+
+	require.NotEmpty(t, captured.HomeDir)
+	instrBytes, err := os.ReadFile(filepath.Join(captured.HomeDir, ".gemini", "GEMINI.md"))
+	require.NoError(t, err, "provisioned instructions must exist in agent home")
+	assert.Contains(t, string(instrBytes), "SCION_GIT_DEPTH")
+	assert.Contains(t, string(instrBytes), "git rev-parse --is-shallow-repository")
+
+	skillBytes, err := os.ReadFile(filepath.Join(captured.HomeDir, ".gemini", "skills", "git-operations", "SKILL.md"))
+	require.NoError(t, err, "git-operations skill must be injected even when host projectDir is not a git repo")
+	assert.Contains(t, string(skillBytes), "SCION_GIT_DEPTH")
+	assert.Contains(t, string(skillBytes), "git fetch --deepen")
 }

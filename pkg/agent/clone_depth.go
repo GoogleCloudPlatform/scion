@@ -36,10 +36,11 @@ type cloneDepthInput struct {
 	ProfileSource string
 }
 
-// applyCloneDepth applies the effective clone_depth to a clone-per-agent
+// applyCloneDepth applies the effective clone_depth to a per-agent clone
 // start. The template value wins over the profile value; when neither is
-// set, gc and env are left as they are, so the depth sent with the request
-// (today a shallow depth-1 clone) still applies.
+// set, gc is returned as-is (preserving the depth sent with the request,
+// today a shallow depth-1 clone) and env[SCION_GIT_DEPTH], if empty, is
+// populated from gc.Depth (defaulting to "1" when gc.Depth is nil).
 //
 // When a value applies, it returns a copy of gc with Depth set ("full" is
 // 0, N is N) and sets env[SCION_GIT_DEPTH] to match, so both the
@@ -60,6 +61,13 @@ func applyCloneDepth(gc *api.GitCloneConfig, env map[string]string, in cloneDept
 		return nil, fmt.Errorf("%s: %w", source, err)
 	}
 	if !ok {
+		if env != nil && env[gitDepthEnvKey] == "" {
+			d := 1
+			if gc.Depth != nil {
+				d = *gc.Depth
+			}
+			env[gitDepthEnvKey] = strconv.Itoa(d)
+		}
 		return gc, nil
 	}
 	out := *gc
