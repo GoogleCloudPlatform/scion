@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -127,6 +128,12 @@ func lookViaHub(hubCtx *HubContext, agentName string, execCmd []string) error {
 	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to capture terminal output for agent '%s': %w", agentName, err))
 	}
+	if resp.ExitCode != 0 {
+		// The capture failed inside the agent (no tmux session, ssh exit 255,
+		// ...). The output is the error text, not pane content, so keep it
+		// off stdout.
+		return lookCaptureError(agentName, resp.ExitCode, resp.Output)
+	}
 
 	// The header goes to stderr, so stdout keeps only the captured terminal
 	// output that scripts parse. It is skipped silently once its timeout
@@ -140,6 +147,18 @@ func lookViaHub(hubCtx *HubContext, agentName string, execCmd []string) error {
 	}
 	printLookOutput(resp.Output)
 	return nil
+}
+
+// lookCaptureError reports a capture that exited non-zero, quoting the first
+// non-empty line of its output.
+func lookCaptureError(agentName string, exitCode int, output string) error {
+	msg := fmt.Sprintf("capturing terminal for agent '%s' failed (exit %d)", agentName, exitCode)
+	for _, line := range strings.Split(output, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			return fmt.Errorf("%s: %s", msg, line)
+		}
+	}
+	return errors.New(msg)
 }
 
 // lookIdentityTimeout bounds the identity header fetch. It runs alongside

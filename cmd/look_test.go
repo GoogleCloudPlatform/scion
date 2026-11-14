@@ -15,10 +15,14 @@
 package cmd
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestBuildLookCmd(t *testing.T) {
@@ -126,4 +130,64 @@ func TestPrintLookOutput_FallbackWhenNotTerminal(t *testing.T) {
 	assert.Equal(t, "some output\n", got)
 	assert.NotContains(t, got, "⌄")
 	assert.NotContains(t, got, "^")
+}
+
+// lookExecServer is a fake hub whose exec endpoint returns execBody and whose
+// agent lookup returns an agent with no identity header to show.
+func lookExecServer(t *testing.T, execBody string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/projects/p1/agents/worker/exec":
+			_, _ = w.Write([]byte(execBody))
+		case "/api/v1/projects/p1/agents/worker":
+			_, _ = w.Write([]byte(`{"id": "a1", "slug": "worker"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+func runLookViaHub(t *testing.T, execBody string) (stdout, stderr string, err error) {
+	t.Helper()
+	server := lookExecServer(t, execBody)
+	defer server.Close()
+	client, cerr := hubclient.New(server.URL)
+	require.NoError(t, cerr)
+	origNonInteractive := nonInteractive
+	nonInteractive = true
+	defer func() { nonInteractive = origNonInteractive }()
+	stdout, stderr = captureStdoutStderr(t, func() {
+		err = lookViaHub(&HubContext{Client: client, Endpoint: server.URL, ProjectID: "p1"}, "worker", []string{"tmux"})
+	})
+	return stdout, stderr, err
+}
+
+// A successful capture prints the pane text, and only the pane text, on
+// stdout.
+func TestLookViaHub_Success(t *testing.T) {
+	stdout, _, err := runLookViaHub(t, `{"output": "pane line 1\npane line 2\n", "exitCode": 0}`)
+	require.NoError(t, err)
+	assert.Equal(t, "pane line 1\npane line 2\n", stdout)
+}
+
+// A failed capture (the hub returns 200 with the error text as output and a
+// non-zero exit code) is an error: nothing reaches stdout, and the error
+// names the agent, the exit code and the first line of the output.
+func TestLookViaHub_NonZeroExitCode(t *testing.T) {
+	stdout, stderr, err := runLookViaHub(t, `{"output": "no server running on /tmp/tmux-1000/default\nsecond line\n", "exitCode": 1}`)
+	require.Error(t, err)
+	assert.Empty(t, stdout)
+	assert.NotContains(t, stderr, "second line")
+	assert.Equal(t, "capturing terminal for agent 'worker' failed (exit 1): no server running on /tmp/tmux-1000/default", err.Error())
+}
+
+// A transport failure such as ssh exiting 255 with no output still fails,
+// without a dangling colon.
+func TestLookViaHub_NonZeroExitCodeNoOutput(t *testing.T) {
+	stdout, _, err := runLookViaHub(t, `{"output": "", "exitCode": 255}`)
+	require.Error(t, err)
+	assert.Empty(t, stdout)
+	assert.Equal(t, "capturing terminal for agent 'worker' failed (exit 255)", err.Error())
 }
