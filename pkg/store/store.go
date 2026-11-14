@@ -1609,6 +1609,12 @@ type AgentStatusUpdate struct {
 	// Phase "halted" has its phase dropped, and the halt rule does not
 	// apply to it. Internal to the hub — json:"-".
 	Restore bool `json:"-"`
+	// SuspendReason, when non-empty and the update writes phase suspended,
+	// records why (state.SuspendReason). An empty value writes nothing, so
+	// a report that merely repeats the suspended phase keeps the stored
+	// reason. Leaving suspended clears it (entc.ClearSuspendReasonHook).
+	// Internal to the hub — json:"-".
+	SuspendReason string `json:"-"`
 	// Result, when non-nil, is filled by a successful UpdateAgentStatus
 	// with what the write did (see AgentStatusResult). The caller owns it;
 	// it is left as it was on error. Internal to the hub — json:"-".

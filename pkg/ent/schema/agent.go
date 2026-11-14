@@ -112,6 +112,14 @@ func (Agent) Fields() []ent.Field {
 			Optional(),
 		field.String("stalled_from_activity").
 			Optional(),
+		// suspend_reason records why the agent was suspended
+		// (state.SuspendReason: user, idle, stalled). NULL when not
+		// suspended, and on rows suspended before it existed.
+		// entc.ClearSuspendReasonHook clears it on any write of a phase
+		// other than suspended or starting.
+		field.String("suspend_reason").
+			Optional().
+			Nillable(),
 
 		// --- Limits tracking ---
 		field.Int("current_turns").

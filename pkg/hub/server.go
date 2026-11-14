@@ -5855,6 +5855,7 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 		Phase:           string(state.PhaseSuspended),
 		ContainerStatus: "stopped",
 		Activity:        "",
+		SuspendReason:   string(state.SuspendReasonStalled),
 	}
 	// Only while the row still holds the run the stop was dispatched
 	// for (ptone/scion#2550).
@@ -5896,6 +5897,7 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 	agent.Phase = string(state.PhaseSuspended)
 	agent.ContainerStatus = "stopped"
 	agent.Activity = ""
+	agent.SuspendReason = string(state.SuspendReasonStalled)
 	// A suspended agent has no running container: release its
 	// max_agents_per_broker reservation (ptone/scion#1963) and its
 	// max_agents_per_project one (ptone/scion#6033), mirroring

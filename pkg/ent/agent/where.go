@@ -146,6 +146,11 @@ func StalledFromActivity(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldStalledFromActivity, v))
 }
 
+// SuspendReason applies equality check predicate on the "suspend_reason" field. It's identical to SuspendReasonEQ.
+func SuspendReason(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldSuspendReason, v))
+}
+
 // CurrentTurns applies equality check predicate on the "current_turns" field. It's identical to CurrentTurnsEQ.
 func CurrentTurns(v int) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldCurrentTurns, v))
@@ -1654,6 +1659,81 @@ func StalledFromActivityEqualFold(v string) predicate.Agent {
 // StalledFromActivityContainsFold applies the ContainsFold predicate on the "stalled_from_activity" field.
 func StalledFromActivityContainsFold(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldContainsFold(FieldStalledFromActivity, v))
+}
+
+// SuspendReasonEQ applies the EQ predicate on the "suspend_reason" field.
+func SuspendReasonEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldSuspendReason, v))
+}
+
+// SuspendReasonNEQ applies the NEQ predicate on the "suspend_reason" field.
+func SuspendReasonNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldSuspendReason, v))
+}
+
+// SuspendReasonIn applies the In predicate on the "suspend_reason" field.
+func SuspendReasonIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldSuspendReason, vs...))
+}
+
+// SuspendReasonNotIn applies the NotIn predicate on the "suspend_reason" field.
+func SuspendReasonNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldSuspendReason, vs...))
+}
+
+// SuspendReasonGT applies the GT predicate on the "suspend_reason" field.
+func SuspendReasonGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldSuspendReason, v))
+}
+
+// SuspendReasonGTE applies the GTE predicate on the "suspend_reason" field.
+func SuspendReasonGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldSuspendReason, v))
+}
+
+// SuspendReasonLT applies the LT predicate on the "suspend_reason" field.
+func SuspendReasonLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldSuspendReason, v))
+}
+
+// SuspendReasonLTE applies the LTE predicate on the "suspend_reason" field.
+func SuspendReasonLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldSuspendReason, v))
+}
+
+// SuspendReasonContains applies the Contains predicate on the "suspend_reason" field.
+func SuspendReasonContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldSuspendReason, v))
+}
+
+// SuspendReasonHasPrefix applies the HasPrefix predicate on the "suspend_reason" field.
+func SuspendReasonHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldSuspendReason, v))
+}
+
+// SuspendReasonHasSuffix applies the HasSuffix predicate on the "suspend_reason" field.
+func SuspendReasonHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldSuspendReason, v))
+}
+
+// SuspendReasonIsNil applies the IsNil predicate on the "suspend_reason" field.
+func SuspendReasonIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldSuspendReason))
+}
+
+// SuspendReasonNotNil applies the NotNil predicate on the "suspend_reason" field.
+func SuspendReasonNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldSuspendReason))
+}
+
+// SuspendReasonEqualFold applies the EqualFold predicate on the "suspend_reason" field.
+func SuspendReasonEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldSuspendReason, v))
+}
+
+// SuspendReasonContainsFold applies the ContainsFold predicate on the "suspend_reason" field.
+func SuspendReasonContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldSuspendReason, v))
 }
 
 // CurrentTurnsEQ applies the EQ predicate on the "current_turns" field.

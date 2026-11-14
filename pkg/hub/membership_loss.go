@@ -737,6 +737,8 @@ func (s *Server) stopHeldAgent(ctx context.Context, agentID string, attempt int)
 	if ok, _, _ := s.harnessSupportsResume(ctx, agent); !ok {
 		newPhase = string(state.PhaseStopped)
 	}
+	// No SuspendReason: a hold suspension is neither the user's nor the idle
+	// policy's, and leaving it NULL means it never auto-wakes.
 	recorded, err := s.recordStopStatus(ctx, agent.ID, stopRunID, "hold", store.AgentStatusUpdate{
 		Phase:           newPhase,
 		ContainerStatus: "stopped",

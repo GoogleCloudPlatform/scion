@@ -298,6 +298,20 @@ func (_c *AgentCreate) SetNillableStalledFromActivity(v *string) *AgentCreate {
 	return _c
 }
 
+// SetSuspendReason sets the "suspend_reason" field.
+func (_c *AgentCreate) SetSuspendReason(v string) *AgentCreate {
+	_c.mutation.SetSuspendReason(v)
+	return _c
+}
+
+// SetNillableSuspendReason sets the "suspend_reason" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableSuspendReason(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetSuspendReason(*v)
+	}
+	return _c
+}
+
 // SetCurrentTurns sets the "current_turns" field.
 func (_c *AgentCreate) SetCurrentTurns(v int) *AgentCreate {
 	_c.mutation.SetCurrentTurns(v)
@@ -1817,6 +1831,10 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 		_spec.SetField(agent.FieldStalledFromActivity, field.TypeString, value)
 		_node.StalledFromActivity = value
 	}
+	if value, ok := _c.mutation.SuspendReason(); ok {
+		_spec.SetField(agent.FieldSuspendReason, field.TypeString, value)
+		_node.SuspendReason = &value
+	}
 	if value, ok := _c.mutation.CurrentTurns(); ok {
 		_spec.SetField(agent.FieldCurrentTurns, field.TypeInt, value)
 		_node.CurrentTurns = value
@@ -2563,6 +2581,24 @@ func (u *AgentUpsert) UpdateStalledFromActivity() *AgentUpsert {
 // ClearStalledFromActivity clears the value of the "stalled_from_activity" field.
 func (u *AgentUpsert) ClearStalledFromActivity() *AgentUpsert {
 	u.SetNull(agent.FieldStalledFromActivity)
+	return u
+}
+
+// SetSuspendReason sets the "suspend_reason" field.
+func (u *AgentUpsert) SetSuspendReason(v string) *AgentUpsert {
+	u.Set(agent.FieldSuspendReason, v)
+	return u
+}
+
+// UpdateSuspendReason sets the "suspend_reason" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateSuspendReason() *AgentUpsert {
+	u.SetExcluded(agent.FieldSuspendReason)
+	return u
+}
+
+// ClearSuspendReason clears the value of the "suspend_reason" field.
+func (u *AgentUpsert) ClearSuspendReason() *AgentUpsert {
+	u.SetNull(agent.FieldSuspendReason)
 	return u
 }
 
@@ -4292,6 +4328,27 @@ func (u *AgentUpsertOne) UpdateStalledFromActivity() *AgentUpsertOne {
 func (u *AgentUpsertOne) ClearStalledFromActivity() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearStalledFromActivity()
+	})
+}
+
+// SetSuspendReason sets the "suspend_reason" field.
+func (u *AgentUpsertOne) SetSuspendReason(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetSuspendReason(v)
+	})
+}
+
+// UpdateSuspendReason sets the "suspend_reason" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateSuspendReason() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateSuspendReason()
+	})
+}
+
+// ClearSuspendReason clears the value of the "suspend_reason" field.
+func (u *AgentUpsertOne) ClearSuspendReason() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearSuspendReason()
 	})
 }
 
@@ -6405,6 +6462,27 @@ func (u *AgentUpsertBulk) UpdateStalledFromActivity() *AgentUpsertBulk {
 func (u *AgentUpsertBulk) ClearStalledFromActivity() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearStalledFromActivity()
+	})
+}
+
+// SetSuspendReason sets the "suspend_reason" field.
+func (u *AgentUpsertBulk) SetSuspendReason(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetSuspendReason(v)
+	})
+}
+
+// UpdateSuspendReason sets the "suspend_reason" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateSuspendReason() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateSuspendReason()
+	})
+}
+
+// ClearSuspendReason clears the value of the "suspend_reason" field.
+func (u *AgentUpsertBulk) ClearSuspendReason() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearSuspendReason()
 	})
 }
 

@@ -60,6 +60,8 @@ const (
 	FieldRuntimeState = "runtime_state"
 	// FieldStalledFromActivity holds the string denoting the stalled_from_activity field in the database.
 	FieldStalledFromActivity = "stalled_from_activity"
+	// FieldSuspendReason holds the string denoting the suspend_reason field in the database.
+	FieldSuspendReason = "suspend_reason"
 	// FieldCurrentTurns holds the string denoting the current_turns field in the database.
 	FieldCurrentTurns = "current_turns"
 	// FieldCurrentModelCalls holds the string denoting the current_model_calls field in the database.
@@ -286,6 +288,7 @@ var Columns = []string{
 	FieldExitReason,
 	FieldRuntimeState,
 	FieldStalledFromActivity,
+	FieldSuspendReason,
 	FieldCurrentTurns,
 	FieldCurrentModelCalls,
 	FieldImage,
@@ -629,6 +632,11 @@ func ByRuntimeState(opts ...sql.OrderTermOption) OrderOption {
 // ByStalledFromActivity orders the results by the stalled_from_activity field.
 func ByStalledFromActivity(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldStalledFromActivity, opts...).ToFunc()
+}
+
+// BySuspendReason orders the results by the suspend_reason field.
+func BySuspendReason(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSuspendReason, opts...).ToFunc()
 }
 
 // ByCurrentTurns orders the results by the current_turns field.

@@ -172,6 +172,7 @@ var (
 		{Name: "exit_reason", Type: field.TypeString, Nullable: true},
 		{Name: "runtime_state", Type: field.TypeString, Nullable: true},
 		{Name: "stalled_from_activity", Type: field.TypeString, Nullable: true},
+		{Name: "suspend_reason", Type: field.TypeString, Nullable: true},
 		{Name: "current_turns", Type: field.TypeInt, Default: 0},
 		{Name: "current_model_calls", Type: field.TypeInt, Default: 0},
 		{Name: "image", Type: field.TypeString, Nullable: true},
@@ -258,7 +259,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "agents_projects_agents",
-				Columns:    []*schema.Column{AgentsColumns[98]},
+				Columns:    []*schema.Column{AgentsColumns[99]},
 				RefColumns: []*schema.Column{ProjectsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -277,22 +278,22 @@ var (
 			{
 				Name:    "agent_slug_project_id",
 				Unique:  true,
-				Columns: []*schema.Column{AgentsColumns[3], AgentsColumns[98]},
+				Columns: []*schema.Column{AgentsColumns[3], AgentsColumns[99]},
 			},
 			{
 				Name:    "agent_project_id_owner_id",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[98], AgentsColumns[8]},
+				Columns: []*schema.Column{AgentsColumns[99], AgentsColumns[8]},
 			},
 			{
 				Name:    "agent_project_id_created_by",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[98], AgentsColumns[7]},
+				Columns: []*schema.Column{AgentsColumns[99], AgentsColumns[7]},
 			},
 			{
 				Name:    "agent_launch_deadline",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[64]},
+				Columns: []*schema.Column{AgentsColumns[65]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "launch_state = 'active'",
 				},
@@ -300,17 +301,17 @@ var (
 			{
 				Name:    "agent_launch_id",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[54]},
+				Columns: []*schema.Column{AgentsColumns[55]},
 			},
 			{
 				Name:    "agent_runtime_broker_id_run_intent",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[27], AgentsColumns[83]},
+				Columns: []*schema.Column{AgentsColumns[28], AgentsColumns[84]},
 			},
 			{
 				Name:    "agent_start_claim_state_start_claim_lease_until",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[88], AgentsColumns[92]},
+				Columns: []*schema.Column{AgentsColumns[89], AgentsColumns[93]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "start_claim_id IS NOT NULL",
 				},
