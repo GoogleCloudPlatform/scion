@@ -176,7 +176,29 @@ type bufferedFlush struct {
 	// PreDelivery). Such a flush is delivered over exec (design v2.22
 	// §1.6).
 	hasAttachments bool
+	// parts are the coalesced messages, in order (text after its
+	// PreDelivery text, and hub id), aligned with the failure handlers. A
+	// flush too large for one conduit delivery is split along them.
+	parts []deliveryPart
 }
+
+// deliveryPart is one coalesced message of a flush.
+type deliveryPart struct {
+	text string
+	id   string
+}
+
+// splitDeliveryError is a split flush that stopped at a sub-flush: the
+// messages before failedFrom were delivered, the rest were not (or may
+// have been only partly). flush reports a failure for the messages from
+// failedFrom on only, and never retries it.
+type splitDeliveryError struct {
+	failedFrom int
+	err        error
+}
+
+func (e *splitDeliveryError) Error() string { return e.err.Error() }
+func (e *splitDeliveryError) Unwrap() error { return e.err }
 
 // finalDeliveryError marks a deliverFunc failure that already made its own
 // bounded attempts (or must not be retried for another reason, such as a
@@ -406,6 +428,13 @@ func (mb *MessageBuffer) flush(agentID, key string, waitForReady bool) {
 			f.hasAttachments = true
 		}
 	}
+	for i, text := range pending {
+		id := ""
+		if i < len(ids) {
+			id = ids[i]
+		}
+		f.parts = append(f.parts, deliveryPart{text: text, id: id})
+	}
 	for _, id := range ids {
 		if id == "" {
 			f.partialIDs = true
@@ -427,6 +456,16 @@ func (mb *MessageBuffer) flush(agentID, key string, waitForReady bool) {
 
 		var partial *PartialDeliveryError
 		var final *finalDeliveryError
+		var split *splitDeliveryError
+		if errors.As(err, &split) {
+			// Earlier sub-flushes were delivered: report only the rest.
+			if split.failedFrom < len(handlers) {
+				handlers = handlers[split.failedFrom:]
+			} else {
+				handlers = nil
+			}
+			break
+		}
 		if errors.As(err, &partial) || errors.As(err, &final) {
 			break
 		}

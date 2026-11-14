@@ -22,6 +22,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -419,10 +420,11 @@ func TestConduitDelivery_LogsNoText(t *testing.T) {
 	}
 }
 
-// TestConduitDelivery_OversizeUsesExec (review R3): a flush too large for
-// the route (raw text over 512 KiB, text whose JSON encoding exceeds the
-// request limit, or more than 64 coalesced messages) never goes to the hub;
-// it uses exec, and when exec fails the error names the limit and is final.
+// TestConduitDelivery_OversizeUsesExec (review R3): a delivery too large
+// for the route that cannot be split along messages (an interrupt or a
+// single message; a buffered flush of several messages is split instead,
+// TestConduitDelivery_SplitOversizeFlush) never goes to the hub; it uses
+// exec, and when exec fails the error names the limit and is final.
 func TestConduitDelivery_OversizeUsesExec(t *testing.T) {
 	ids := func(n int) []string {
 		out := make([]string, n)
@@ -881,5 +883,195 @@ func TestConduitDelivery_NoConnectorFailsFastNamed(t *testing.T) {
 	}
 	if time.Since(start) > 5*time.Second || len(execs) != 0 {
 		t.Fatalf("took %s, execs %v; want no exec and no readiness wait", time.Since(start), execs)
+	}
+}
+
+// parts builds n buffered-flush parts with the given text maker.
+func makeParts(n int, text func(i int) string) ([]deliveryPart, []string) {
+	parts := make([]deliveryPart, n)
+	ids := make([]string, n)
+	for i := range parts {
+		parts[i] = deliveryPart{text: text(i), id: fmt.Sprintf("m-%d", i)}
+		ids[i] = parts[i].id
+	}
+	return parts, ids
+}
+
+// TestConduitDelivery_SplitOversizeFlush (ptone Q3, amends design §1.6): a
+// buffered flush too large for one conduit request (raw text, encoded
+// size, or more than 64 messages) is split along its messages into ordered
+// sub-flushes over conduit, each with its own delivery id and message
+// rows, on every runtime (exec available or not); only the first waits
+// for readiness.
+func TestConduitDelivery_SplitOversizeFlush(t *testing.T) {
+	cases := map[string]struct {
+		n      int
+		text   func(i int) string
+		groups [][]string
+	}{
+		"raw text":        {3, func(i int) string { return fmt.Sprintf("%d", i) + strings.Repeat("x", 300*1024) }, [][]string{{"m-0"}, {"m-1"}, {"m-2"}}},
+		"encoded text":    {3, func(i int) string { return strings.Repeat("<", 100*1024) }, [][]string{{"m-0"}, {"m-1"}, {"m-2"}}},
+		"65 messages":     {65, func(i int) string { return fmt.Sprintf("msg %d", i) }, nil},
+		"two fit per one": {4, func(i int) string { return strings.Repeat("y", 200*1024) }, [][]string{{"m-0", "m-1"}, {"m-2", "m-3"}}},
+	}
+	for name, tc := range cases {
+		for _, execOK := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s exec=%t", name, execOK), func(t *testing.T) {
+				var execs []string
+				m := newConduitTestManager(t, true, shippedSpec, &execs)
+				if !execOK {
+					withoutExec(m)
+				}
+				d := &fakeDeliverer{answers: []fakeAnswer{answer(200, agentcontrol.OutcomeDelivered)}}
+				m.SetConduitDeliverer(d)
+				parts, ids := makeParts(tc.n, tc.text)
+				text, _ := joinParts(parts)
+				err := m.deliver(context.Background(), deliveryRequest{agentID: "test-agent", message: text, messageIDs: ids, parts: parts, readyWanted: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(execs) != 0 {
+					t.Fatalf("exec used: %v", execs)
+				}
+				var got [][]string
+				seen := map[string]bool{}
+				for i, r := range d.reqs {
+					got = append(got, r.MessageIDs)
+					if seen[r.DeliveryID] {
+						t.Fatalf("delivery id %s reused", r.DeliveryID)
+					}
+					seen[r.DeliveryID] = true
+					if err := r.FitsRoute(); err != nil {
+						t.Fatalf("sub-flush %d does not fit: %v", i, err)
+					}
+					if (r.Ready != nil) != (i == 0) {
+						t.Fatalf("sub-flush %d ready block %v; want only the first", i, r.Ready)
+					}
+				}
+				var flat []string
+				for _, g := range got {
+					flat = append(flat, g...)
+				}
+				if !slices.Equal(flat, ids) {
+					t.Fatalf("messages out of order or missing: %v", got)
+				}
+				if tc.groups != nil && !slices.EqualFunc(got, tc.groups, slices.Equal[[]string]) {
+					t.Fatalf("groups = %v, want %v", got, tc.groups)
+				}
+				if tc.n == 65 && (len(got) != 2 || len(got[0]) != 64) {
+					t.Fatalf("65 messages split as %d groups (first %d)", len(got), len(got[0]))
+				}
+			})
+		}
+	}
+}
+
+// TestConduitDelivery_SplitStopsAtFirstUndelivered: after a sub-flush that
+// is not delivered (partial, a final refusal, or in flight under another
+// call) no later sub-flush is sent; the buffer reports failures only for
+// the messages from that sub-flush on (not for the one in flight, whose
+// owner reports it), and does not retry.
+func TestConduitDelivery_SplitStopsAtFirstUndelivered(t *testing.T) {
+	cases := map[string]struct {
+		second     fakeAnswer
+		failedFrom int
+	}{
+		"partial":   {answer(200, agentcontrol.OutcomePartial), 1},
+		"bound":     {answer(409, agentcontrol.OutcomeBound), 1},
+		"in flight": {answer(409, agentcontrol.OutcomeInFlight), 2},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			var execs []string
+			m := newConduitTestManager(t, true, shippedSpec, &execs)
+			d := &fakeDeliverer{answers: []fakeAnswer{answer(200, agentcontrol.OutcomeDelivered), tc.second, answer(200, agentcontrol.OutcomeDelivered)}}
+			m.SetConduitDeliverer(d)
+			var mu sync.Mutex
+			var failed []int
+			done := make(chan struct{})
+			m.msgBuffer = NewMessageBuffer(10*time.Millisecond, func(string, string, string, bool) error { return nil })
+			m.msgBuffer.deliverFlush = func(f bufferedFlush) error {
+				defer close(done)
+				return m.deliver(context.Background(), deliveryRequest{agentID: f.agentID, message: f.text,
+					messageIDs: f.messageIDs, parts: f.parts})
+			}
+			defer m.msgBuffer.Close()
+			for i := range 3 {
+				i := i
+				m.msgBuffer.sendWithID("test-agent", "", fmt.Sprintf("%d", i)+strings.Repeat("z", 300*1024), fmt.Sprintf("m-%d", i),
+					func(error) { mu.Lock(); failed = append(failed, i); mu.Unlock() }, nil)
+			}
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("no flush")
+			}
+			time.Sleep(50 * time.Millisecond)
+			if d.calls() != 2 {
+				t.Fatalf("%d sub-flushes sent; want 2 (stop after the second)", d.calls())
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			var want []int
+			for i := tc.failedFrom; i < 3; i++ {
+				want = append(want, i)
+			}
+			slices.Sort(failed)
+			if !slices.Equal(failed, want) {
+				t.Fatalf("failure reported for %v, want %v", failed, want)
+			}
+		})
+	}
+}
+
+// TestConduitDelivery_SplitSingleOversizeMessage: a message too large for
+// one conduit request on its own is never split: it is its own sub-flush,
+// delivered over exec where the runtime has it (then the sequence goes on),
+// otherwise a named failure that stops the sequence.
+func TestConduitDelivery_SplitSingleOversizeMessage(t *testing.T) {
+	texts := []string{"small 0", strings.Repeat("h", agentcontrol.MaxDeliverText+1), "small 2"}
+	for _, execOK := range []bool{true, false} {
+		t.Run(fmt.Sprintf("exec=%t", execOK), func(t *testing.T) {
+			var execs []string
+			m := newConduitTestManager(t, true, shippedSpec, &execs)
+			if !execOK {
+				withoutExec(m)
+			}
+			d := &fakeDeliverer{answers: []fakeAnswer{answer(200, agentcontrol.OutcomeDelivered)}}
+			m.SetConduitDeliverer(d)
+			parts, ids := makeParts(3, func(i int) string { return texts[i] })
+			text, _ := joinParts(parts)
+			err := m.deliver(context.Background(), deliveryRequest{agentID: "test-agent", message: text, messageIDs: ids, parts: parts})
+			if execOK {
+				if err != nil || d.calls() != 2 || !execDelivered(execs) {
+					t.Fatalf("err %v calls %d execs %v; want conduit, exec, conduit", err, d.calls(), len(execs))
+				}
+				if d.reqs[0].MessageIDs[0] != "m-0" || d.reqs[1].MessageIDs[0] != "m-2" {
+					t.Fatalf("order: %v %v", d.reqs[0].MessageIDs, d.reqs[1].MessageIDs)
+				}
+				return
+			}
+			var split *splitDeliveryError
+			if !errors.As(err, &split) || split.failedFrom != 1 || !strings.Contains(err.Error(), "route limits") {
+				t.Fatalf("err = %v; want a named failure from message 1", err)
+			}
+			if d.calls() != 1 {
+				t.Fatalf("%d conduit calls; want only the first sub-flush", d.calls())
+			}
+		})
+	}
+}
+
+func TestSplitParts(t *testing.T) {
+	parts, _ := makeParts(5, func(i int) string { return strings.Repeat("a", 10) })
+	fitsTwo := func(text string, ids []string) bool { return len(ids) <= 2 }
+	got := splitParts(parts, fitsTwo)
+	want := [][2]int{{0, 2}, {2, 4}, {4, 5}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("groups = %v, want %v", got, want)
+	}
+	never := func(string, []string) bool { return false }
+	if got := splitParts(parts, never); len(got) != 5 {
+		t.Fatalf("one message per group expected, got %v", got)
 	}
 }

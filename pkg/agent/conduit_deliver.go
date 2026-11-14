@@ -205,8 +205,8 @@ func classifyConduitAnswer(status int, resp agentcontrol.DeliverResponse, err er
 		// The hub refused a duplicate of a delivery another call owns. That
 		// owner pastes (or not) and reports the outcome; this call must not
 		// fall back to exec, retry, or report a failure of the owner's
-		// rows (review FV1-N1).
-		return conduitDone, nil
+		// rows (review FV1-N1). deliver turns this into success.
+		return conduitDone, errDeliveryInFlight
 	case status == http.StatusUnprocessableEntity && resp.Outcome == agentcontrol.OutcomeOutOfBounds:
 		// The agent image's own readiness spec is outside the route
 		// bounds; nothing was done. Exec applies the spec in full
@@ -331,4 +331,104 @@ func (m *AgentManager) execAvailable() bool {
 		return c.ExecAvailable()
 	}
 	return true
+}
+
+// errDeliveryInFlight: the hub refused a duplicate of a delivery another
+// call owns (409 in_flight). deliver turns it into success; a split flush
+// stops at it.
+var errDeliveryInFlight = errors.New("delivery in flight under another call")
+
+// splitIDPlaceholder stands in for a delivery id when sizing a request: as
+// long as the longest id, so a request that fits with it fits with any.
+var splitIDPlaceholder = strings.Repeat("x", 64)
+
+// fitsOneConduitDelivery reports whether the whole delivery fits one
+// conduit request (text, encoded size, id count). Only a flush whose every
+// message has a hub id is split; others keep their path.
+func (m *AgentManager) fitsOneConduitDelivery(h api.Harness, d deliveryRequest, req tmuxdeliver.Request) bool {
+	if d.partialIDs || len(d.messageIDs) == 0 {
+		return true
+	}
+	return conduitDeliverRequest(splitIDPlaceholder, d.messageIDs, req, m.readyBlock(h, d.readyWanted)).FitsRoute() == nil
+}
+
+// readyBlock is the request's readiness block when the delivery wants one.
+func (m *AgentManager) readyBlock(h api.Harness, wanted bool) *agentcontrol.ReadySpec {
+	if !wanted {
+		return nil
+	}
+	return conduitReadySpec(h)
+}
+
+// splitParts groups parts, in order, into sub-flushes that each fit one
+// conduit request (ptone Q3, amends design v2.22 §1.6). A message is never
+// split: one too large on its own is a sub-flush by itself, which then
+// takes the usual oversize path (exec where the runtime has it, otherwise
+// a named failure). It returns each group's first part index.
+func splitParts(parts []deliveryPart, fits func(text string, ids []string) bool) [][2]int {
+	var groups [][2]int // [start, end)
+	start := 0
+	for i := range parts {
+		if i == start {
+			continue
+		}
+		text, ids := joinParts(parts[start : i+1])
+		if fits(text, ids) {
+			continue
+		}
+		groups = append(groups, [2]int{start, i})
+		start = i
+	}
+	if start < len(parts) {
+		groups = append(groups, [2]int{start, len(parts)})
+	}
+	return groups
+}
+
+// joinParts is the coalesced text and the ids of parts, joined as the
+// buffer joins a flush.
+func joinParts(parts []deliveryPart) (string, []string) {
+	texts := make([]string, len(parts))
+	ids := make([]string, len(parts))
+	for i, p := range parts {
+		texts[i], ids[i] = p.text, p.id
+	}
+	return strings.Join(texts, "\n\n"), ids
+}
+
+// deliverSplit delivers an oversize buffered flush as ordered sub-flushes,
+// each with its own delivery id and its own message rows, under the lock
+// the caller holds. It stops at the first sub-flush that is not delivered
+// (a failure, a partial, or one in flight under another call): no later
+// sub-flush is sent, and the error reports the messages from that
+// sub-flush on as failed (the in-flight one excluded; its owner reports
+// it). Each sub-flush keeps the usual at-most-once rules.
+func (m *AgentManager) deliverSplit(ctx context.Context, agent *api.AgentInfo, h api.Harness, ds api.DeliverySpec, d deliveryRequest) error {
+	base := tmuxdeliver.Request{Op: tmuxdeliver.OpPaste, SubmitKeys: ds.SubmitKeys,
+		ExtraSubmits: ds.ExtraSubmits, ExtraSubmitDelay: ds.ExtraSubmitDelay}
+	fits := func(text string, ids []string) bool {
+		r := base
+		r.Text = text
+		return conduitDeliverRequest(splitIDPlaceholder, ids, r, m.readyBlock(h, d.readyWanted)).FitsRoute() == nil
+	}
+	groups := splitParts(d.parts, fits)
+	slog.Info("message delivery split for conduit", "agent_id", agent.ID, "messages", len(d.parts), "sub_flushes", len(groups))
+	for i, g := range groups {
+		text, ids := joinParts(d.parts[g[0]:g[1]])
+		sub := d
+		sub.message, sub.messageIDs, sub.parts = text, ids, nil
+		sub.readyWanted = d.readyWanted && i == 0
+		err := m.deliverResolved(ctx, agent, h, ds, sub)
+		switch {
+		case err == nil:
+			continue
+		case errors.Is(err, errDeliveryInFlight):
+			return &splitDeliveryError{failedFrom: g[1], err: fmt.Errorf("split delivery stopped: sub-flush %d of %d in flight under another call", i+1, len(groups))}
+		case i == 0:
+			return err // nothing delivered yet: the flush's own error
+		default:
+			return &splitDeliveryError{failedFrom: g[0], err: fmt.Errorf("split delivery stopped at sub-flush %d of %d: %w", i+1, len(groups), err)}
+		}
+	}
+	return nil
 }

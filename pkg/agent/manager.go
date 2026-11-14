@@ -260,7 +260,7 @@ func NewManager(rt runtime.Runtime) Manager {
 		return mgr.deliver(context.Background(), deliveryRequest{
 			agentID: f.agentID, projectID: f.projectID, message: f.text,
 			messageIDs: f.messageIDs, partialIDs: f.partialIDs, readyWanted: f.readyWanted,
-			hasAttachments: f.hasAttachments,
+			hasAttachments: f.hasAttachments, parts: f.parts,
 		})
 	}
 	mgr.msgBuffer.waitReady = mgr.waitHarnessReady
@@ -1426,12 +1426,15 @@ type deliveryRequest struct {
 	// hasAttachments: the delivery carries a message with attachments; it
 	// goes over exec (design v2.22 §1.6: attachments stay on exec).
 	hasAttachments bool
+	// parts are a buffered flush's messages, in order; a flush too large
+	// for one conduit delivery is split along them (deliverSplit).
+	parts []deliveryPart
 }
 
 // deliver is deliverImmediate for a deliveryRequest: it chooses the
 // transport, conduit or runtime exec, for the resolved target.
 func (m *AgentManager) deliver(ctx context.Context, d deliveryRequest) error {
-	agentID, projectID, message, interrupt := d.agentID, d.projectID, d.message, d.interrupt
+	agentID, projectID := d.agentID, d.projectID
 	// 1. Find the agent, scoped to project to prevent cross-project delivery
 	agent, matches, err := m.findMessageTargetCounted(ctx, agentID, projectID)
 	if err != nil {
@@ -1488,6 +1491,21 @@ func (m *AgentManager) deliver(ctx context.Context, d deliveryRequest) error {
 		// message without ever submitting it.
 		ds.SubmitKeys = config.DefaultDeliverySpec().SubmitKeys
 	}
+	err = m.deliverResolved(ctx, agent, h, ds, d)
+	if errors.Is(err, errDeliveryInFlight) {
+		// The hub refused a duplicate of a delivery another call owns;
+		// that owner reports the outcome (review FV1-N1).
+		return nil
+	}
+	return err
+}
+
+// deliverResolved is deliver for a resolved, locked target: it builds the
+// steps and chooses the transport. A split conduit flush calls it once per
+// sub-flush, under the same lock.
+func (m *AgentManager) deliverResolved(ctx context.Context, agent *api.AgentInfo, h api.Harness, ds api.DeliverySpec, d deliveryRequest) error {
+	agentID, projectID, message, interrupt := d.agentID, d.projectID, d.message, d.interrupt
+	var err error
 
 	// 3. Deliver through the shared steps (pkg/agent/tmuxdeliver): the same
 	// builder, buffer handling and text sanitiser sciontool's
@@ -1559,6 +1577,11 @@ func (m *AgentManager) deliver(ctx context.Context, d deliveryRequest) error {
 			}
 			conduitReason = cerr
 			return false, nil
+		}
+		if len(d.parts) > 1 && !(d.hasAttachments && m.execAvailable()) && !m.fitsOneConduitDelivery(h, d, req) {
+			// Too large for one conduit delivery: split along the
+			// messages into ordered sub-flushes (ptone Q3, amends §1.6).
+			return m.deliverSplit(ctx, agent, h, ds, d)
 		}
 		if d.hasAttachments && m.execAvailable() {
 			// Attachments stay on exec where the runtime has it (design
