@@ -234,6 +234,9 @@ type RoleDefinition func(*sql.Selector)
 // RuntimeBroker is the predicate function for runtimebroker builders.
 type RuntimeBroker func(*sql.Selector)
 
+// RuntimeOrphan is the predicate function for runtimeorphan builders.
+type RuntimeOrphan func(*sql.Selector)
+
 // Schedule is the predicate function for schedule builders.
 type Schedule func(*sql.Selector)
 

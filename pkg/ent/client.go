@@ -92,6 +92,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/rolebinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/roledefinition"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimebroker"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimeorphan"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schedule"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/secret"
@@ -271,6 +272,8 @@ type Client struct {
 	RoleDefinition *RoleDefinitionClient
 	// RuntimeBroker is the client for interacting with the RuntimeBroker builders.
 	RuntimeBroker *RuntimeBrokerClient
+	// RuntimeOrphan is the client for interacting with the RuntimeOrphan builders.
+	RuntimeOrphan *RuntimeOrphanClient
 	// Schedule is the client for interacting with the Schedule builders.
 	Schedule *ScheduleClient
 	// ScheduledEvent is the client for interacting with the ScheduledEvent builders.
@@ -398,6 +401,7 @@ func (c *Client) init() {
 	c.RoleBinding = NewRoleBindingClient(c.config)
 	c.RoleDefinition = NewRoleDefinitionClient(c.config)
 	c.RuntimeBroker = NewRuntimeBrokerClient(c.config)
+	c.RuntimeOrphan = NewRuntimeOrphanClient(c.config)
 	c.Schedule = NewScheduleClient(c.config)
 	c.ScheduledEvent = NewScheduledEventClient(c.config)
 	c.Secret = NewSecretClient(c.config)
@@ -586,6 +590,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		RoleBinding:                   NewRoleBindingClient(cfg),
 		RoleDefinition:                NewRoleDefinitionClient(cfg),
 		RuntimeBroker:                 NewRuntimeBrokerClient(cfg),
+		RuntimeOrphan:                 NewRuntimeOrphanClient(cfg),
 		Schedule:                      NewScheduleClient(cfg),
 		ScheduledEvent:                NewScheduledEventClient(cfg),
 		Secret:                        NewSecretClient(cfg),
@@ -701,6 +706,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		RoleBinding:                   NewRoleBindingClient(cfg),
 		RoleDefinition:                NewRoleDefinitionClient(cfg),
 		RuntimeBroker:                 NewRuntimeBrokerClient(cfg),
+		RuntimeOrphan:                 NewRuntimeOrphanClient(cfg),
 		Schedule:                      NewScheduleClient(cfg),
 		ScheduledEvent:                NewScheduledEventClient(cfg),
 		Secret:                        NewSecretClient(cfg),
@@ -770,12 +776,13 @@ func (c *Client) Use(hooks ...Hook) {
 		c.NonceCache, c.Notification, c.NotificationSubscription, c.PendingSecret,
 		c.PolicyBinding, c.Project, c.ProjectContributor, c.ProjectPreStartHook,
 		c.ProjectSyncState, c.ProjectVisitorExclusion, c.ProjectVisitorRule,
-		c.RelayInstance, c.RoleBinding, c.RoleDefinition, c.RuntimeBroker, c.Schedule,
-		c.ScheduledEvent, c.Secret, c.Skill, c.SkillInjection, c.SkillRegistry,
-		c.SkillVersion, c.SubscriptionTemplate, c.Template, c.TestIdentityDelegation,
-		c.TestIdentityLoginCode, c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember,
-		c.UsageReservation, c.User, c.UserAccessToken, c.UserDeletion,
-		c.UserDeletionAgent, c.UserTerminalWorkspace,
+		c.RelayInstance, c.RoleBinding, c.RoleDefinition, c.RuntimeBroker,
+		c.RuntimeOrphan, c.Schedule, c.ScheduledEvent, c.Secret, c.Skill,
+		c.SkillInjection, c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate,
+		c.Template, c.TestIdentityDelegation, c.TestIdentityLoginCode,
+		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.UsageReservation,
+		c.User, c.UserAccessToken, c.UserDeletion, c.UserDeletionAgent,
+		c.UserTerminalWorkspace,
 	} {
 		n.Use(hooks...)
 	}
@@ -805,12 +812,13 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.NonceCache, c.Notification, c.NotificationSubscription, c.PendingSecret,
 		c.PolicyBinding, c.Project, c.ProjectContributor, c.ProjectPreStartHook,
 		c.ProjectSyncState, c.ProjectVisitorExclusion, c.ProjectVisitorRule,
-		c.RelayInstance, c.RoleBinding, c.RoleDefinition, c.RuntimeBroker, c.Schedule,
-		c.ScheduledEvent, c.Secret, c.Skill, c.SkillInjection, c.SkillRegistry,
-		c.SkillVersion, c.SubscriptionTemplate, c.Template, c.TestIdentityDelegation,
-		c.TestIdentityLoginCode, c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember,
-		c.UsageReservation, c.User, c.UserAccessToken, c.UserDeletion,
-		c.UserDeletionAgent, c.UserTerminalWorkspace,
+		c.RelayInstance, c.RoleBinding, c.RoleDefinition, c.RuntimeBroker,
+		c.RuntimeOrphan, c.Schedule, c.ScheduledEvent, c.Secret, c.Skill,
+		c.SkillInjection, c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate,
+		c.Template, c.TestIdentityDelegation, c.TestIdentityLoginCode,
+		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.UsageReservation,
+		c.User, c.UserAccessToken, c.UserDeletion, c.UserDeletionAgent,
+		c.UserTerminalWorkspace,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -971,6 +979,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.RoleDefinition.mutate(ctx, m)
 	case *RuntimeBrokerMutation:
 		return c.RuntimeBroker.mutate(ctx, m)
+	case *RuntimeOrphanMutation:
+		return c.RuntimeOrphan.mutate(ctx, m)
 	case *ScheduleMutation:
 		return c.Schedule.mutate(ctx, m)
 	case *ScheduledEventMutation:
@@ -11620,6 +11630,139 @@ func (c *RuntimeBrokerClient) mutate(ctx context.Context, m *RuntimeBrokerMutati
 	}
 }
 
+// RuntimeOrphanClient is a client for the RuntimeOrphan schema.
+type RuntimeOrphanClient struct {
+	config
+}
+
+// NewRuntimeOrphanClient returns a client for the RuntimeOrphan from the given config.
+func NewRuntimeOrphanClient(c config) *RuntimeOrphanClient {
+	return &RuntimeOrphanClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `runtimeorphan.Hooks(f(g(h())))`.
+func (c *RuntimeOrphanClient) Use(hooks ...Hook) {
+	c.hooks.RuntimeOrphan = append(c.hooks.RuntimeOrphan, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `runtimeorphan.Intercept(f(g(h())))`.
+func (c *RuntimeOrphanClient) Intercept(interceptors ...Interceptor) {
+	c.inters.RuntimeOrphan = append(c.inters.RuntimeOrphan, interceptors...)
+}
+
+// Create returns a builder for creating a RuntimeOrphan entity.
+func (c *RuntimeOrphanClient) Create() *RuntimeOrphanCreate {
+	mutation := newRuntimeOrphanMutation(c.config, OpCreate)
+	return &RuntimeOrphanCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of RuntimeOrphan entities.
+func (c *RuntimeOrphanClient) CreateBulk(builders ...*RuntimeOrphanCreate) *RuntimeOrphanCreateBulk {
+	return &RuntimeOrphanCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *RuntimeOrphanClient) MapCreateBulk(slice any, setFunc func(*RuntimeOrphanCreate, int)) *RuntimeOrphanCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &RuntimeOrphanCreateBulk{err: fmt.Errorf("calling to RuntimeOrphanClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*RuntimeOrphanCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &RuntimeOrphanCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for RuntimeOrphan.
+func (c *RuntimeOrphanClient) Update() *RuntimeOrphanUpdate {
+	mutation := newRuntimeOrphanMutation(c.config, OpUpdate)
+	return &RuntimeOrphanUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *RuntimeOrphanClient) UpdateOne(_m *RuntimeOrphan) *RuntimeOrphanUpdateOne {
+	mutation := newRuntimeOrphanMutation(c.config, OpUpdateOne, withRuntimeOrphan(_m))
+	return &RuntimeOrphanUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *RuntimeOrphanClient) UpdateOneID(id uuid.UUID) *RuntimeOrphanUpdateOne {
+	mutation := newRuntimeOrphanMutation(c.config, OpUpdateOne, withRuntimeOrphanID(id))
+	return &RuntimeOrphanUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for RuntimeOrphan.
+func (c *RuntimeOrphanClient) Delete() *RuntimeOrphanDelete {
+	mutation := newRuntimeOrphanMutation(c.config, OpDelete)
+	return &RuntimeOrphanDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *RuntimeOrphanClient) DeleteOne(_m *RuntimeOrphan) *RuntimeOrphanDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *RuntimeOrphanClient) DeleteOneID(id uuid.UUID) *RuntimeOrphanDeleteOne {
+	builder := c.Delete().Where(runtimeorphan.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &RuntimeOrphanDeleteOne{builder}
+}
+
+// Query returns a query builder for RuntimeOrphan.
+func (c *RuntimeOrphanClient) Query() *RuntimeOrphanQuery {
+	return &RuntimeOrphanQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeRuntimeOrphan},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a RuntimeOrphan entity by its id.
+func (c *RuntimeOrphanClient) Get(ctx context.Context, id uuid.UUID) (*RuntimeOrphan, error) {
+	return c.Query().Where(runtimeorphan.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *RuntimeOrphanClient) GetX(ctx context.Context, id uuid.UUID) *RuntimeOrphan {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *RuntimeOrphanClient) Hooks() []Hook {
+	return c.hooks.RuntimeOrphan
+}
+
+// Interceptors returns the client interceptors.
+func (c *RuntimeOrphanClient) Interceptors() []Interceptor {
+	return c.inters.RuntimeOrphan
+}
+
+func (c *RuntimeOrphanClient) mutate(ctx context.Context, m *RuntimeOrphanMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&RuntimeOrphanCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&RuntimeOrphanUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&RuntimeOrphanUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&RuntimeOrphanDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown RuntimeOrphan mutation op: %q", m.Op())
+	}
+}
+
 // ScheduleClient is a client for the Schedule schema.
 type ScheduleClient struct {
 	config
@@ -14477,11 +14620,12 @@ type (
 		MutationAudit, NonceCache, Notification, NotificationSubscription,
 		PendingSecret, PolicyBinding, Project, ProjectContributor, ProjectPreStartHook,
 		ProjectSyncState, ProjectVisitorExclusion, ProjectVisitorRule, RelayInstance,
-		RoleBinding, RoleDefinition, RuntimeBroker, Schedule, ScheduledEvent, Secret,
-		Skill, SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate,
-		Template, TestIdentityDelegation, TestIdentityLoginCode, TestInfraMarker,
-		ThreadGroup, ThreadGroupMember, UsageReservation, User, UserAccessToken,
-		UserDeletion, UserDeletionAgent, UserTerminalWorkspace []ent.Hook
+		RoleBinding, RoleDefinition, RuntimeBroker, RuntimeOrphan, Schedule,
+		ScheduledEvent, Secret, Skill, SkillInjection, SkillRegistry, SkillVersion,
+		SubscriptionTemplate, Template, TestIdentityDelegation, TestIdentityLoginCode,
+		TestInfraMarker, ThreadGroup, ThreadGroupMember, UsageReservation, User,
+		UserAccessToken, UserDeletion, UserDeletionAgent,
+		UserTerminalWorkspace []ent.Hook
 	}
 	inters struct {
 		AccessConstraint, AccessConstraintHistory, AccessPolicy, Agent, AgentCredential,
@@ -14502,10 +14646,11 @@ type (
 		MutationAudit, NonceCache, Notification, NotificationSubscription,
 		PendingSecret, PolicyBinding, Project, ProjectContributor, ProjectPreStartHook,
 		ProjectSyncState, ProjectVisitorExclusion, ProjectVisitorRule, RelayInstance,
-		RoleBinding, RoleDefinition, RuntimeBroker, Schedule, ScheduledEvent, Secret,
-		Skill, SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate,
-		Template, TestIdentityDelegation, TestIdentityLoginCode, TestInfraMarker,
-		ThreadGroup, ThreadGroupMember, UsageReservation, User, UserAccessToken,
-		UserDeletion, UserDeletionAgent, UserTerminalWorkspace []ent.Interceptor
+		RoleBinding, RoleDefinition, RuntimeBroker, RuntimeOrphan, Schedule,
+		ScheduledEvent, Secret, Skill, SkillInjection, SkillRegistry, SkillVersion,
+		SubscriptionTemplate, Template, TestIdentityDelegation, TestIdentityLoginCode,
+		TestInfraMarker, ThreadGroup, ThreadGroupMember, UsageReservation, User,
+		UserAccessToken, UserDeletion, UserDeletionAgent,
+		UserTerminalWorkspace []ent.Interceptor
 	}
 )

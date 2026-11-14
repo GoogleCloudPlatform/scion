@@ -88,6 +88,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/rolebinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/roledefinition"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimebroker"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimeorphan"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schedule"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/secret"
@@ -244,6 +245,7 @@ func checkColumn(t, c string) error {
 			rolebinding.Table:                   rolebinding.ValidColumn,
 			roledefinition.Table:                roledefinition.ValidColumn,
 			runtimebroker.Table:                 runtimebroker.ValidColumn,
+			runtimeorphan.Table:                 runtimeorphan.ValidColumn,
 			schedule.Table:                      schedule.ValidColumn,
 			scheduledevent.Table:                scheduledevent.ValidColumn,
 			secret.Table:                        secret.ValidColumn,
