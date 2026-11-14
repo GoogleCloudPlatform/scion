@@ -467,7 +467,7 @@ func readBootTime(root string) time.Time {
 	if err != nil {
 		return time.Time{}
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		rest, ok := strings.CutPrefix(sc.Text(), "btime ")
