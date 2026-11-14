@@ -14,7 +14,7 @@ Docs only (`docs-site/src/content/docs/`):
 - `local/templates.md`: "Global template authoring permissions", refresh permission, `--scope global --hub` example.
 - `hosted/single-node/skill-registry.md`: scope list, draft visibility for global skills, global catalog authoring paragraph.
 - `reference/cli.md`, `reference/api.md`, `reference/agent-delegation.md`: `core` removed; `templates update` added to the CLI reference.
-- `release-notes.md`: new top section, following the convention of recent feature PRs (for example GoogleCloudPlatform/scion#4713 and #4698 added their sections there). `changelog/` is a daily generated summary and `.design/backlog/RELEASENOTES.md` is rarely used.
+- `release-notes.md`: new top section, following the convention of recent feature PRs (for example GoogleCloudPlatform/scion#4713 and GoogleCloudPlatform/scion#4698 added their sections there). `changelog/` is a daily generated summary and `.design/backlog/RELEASENOTES.md` is rarely used.
 
 ## Findings (code differs from design or brief)
 
