@@ -33,7 +33,8 @@ type runtimeOrphanKey struct {
 // RecordRuntimeOrphans implements store.AgentStore.RecordRuntimeOrphans.
 // Each write is its own statement, and a failed write does not stop the
 // others (errors are joined). Duplicate identities in one batch are written
-// once. A create that loses a race with another replica handling a
+// once. A row another replica removed since the read is created again. A
+// create that loses a race with another replica handling a
 // heartbeat of the same broker hits the unique index and is skipped: that
 // replica's row stands and is not returned as created here.
 func (s *AgentStore) RecordRuntimeOrphans(ctx context.Context, brokerID string, completeTargets []string, orphans []store.RuntimeOrphan, now time.Time, removeAfter int) ([]store.RuntimeOrphan, error) {
@@ -69,18 +70,21 @@ func (s *AgentStore) RecordRuntimeOrphans(ctx context.Context, brokerID string, 
 			continue
 		}
 		batch[k] = true
-		if _, seen := existing[k]; seen {
+		if ext, seen := existing[k]; seen {
 			delete(existing, k)
-			err = s.client.RuntimeOrphan.Update().
-				Where(runtimeorphan.KindEQ(k.kind), runtimeorphan.BrokerIDEQ(brokerID), runtimeorphan.RuntimeTargetEQ(k.target),
-					runtimeorphan.ProjectIDEQ(k.project), runtimeorphan.SlugEQ(k.slug), runtimeorphan.AgentIDEQ(k.agentID)).
+			err = s.client.RuntimeOrphan.UpdateOneID(ext.ID).
 				SetRunID(o.RunID).SetReason(o.Reason).SetObservedPhase(o.ObservedPhase).
 				SetLastSeenAt(now).SetMissedInventories(0).
 				Exec(ctx)
-			if err != nil {
-				errs = append(errs, mapError(err))
+			if err == nil {
+				continue
 			}
-			continue
+			if !ent.IsNotFound(err) {
+				errs = append(errs, mapError(err))
+				continue
+			}
+			// Another replica removed the row since the read: create it
+			// again below (or skip it if that replica already did).
 		}
 		row, err := s.client.RuntimeOrphan.Create().
 			SetKind(k.kind).SetBrokerID(brokerID).SetRuntimeTarget(k.target).SetProjectID(k.project).

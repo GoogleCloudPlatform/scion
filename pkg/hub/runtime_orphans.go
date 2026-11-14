@@ -120,12 +120,25 @@ func (s *Server) recordRuntimeOrphans(ctx context.Context, brokerID string, hb *
 		known[id] = err == nil
 		return err == nil, nil
 	}
+	// The agents of candidates without a live slug match, by reported
+	// ID, read in one batch (soft-deleted rows included).
+	var ids []string
+	for _, c := range report.orphanCandidates {
+		if complete[c.hb.RuntimeTarget] && c.bySlug == nil && c.hb.AgentID != "" {
+			ids = append(ids, c.hb.AgentID)
+		}
+	}
+	byID, err := s.store.GetAgentsByIDsIncludingDeleted(ctx, ids)
+	if err != nil {
+		log.Warn("runtime orphans: failed to read reported agents", "error", err)
+		return
+	}
 	var orphans []store.RuntimeOrphan
 	for _, c := range report.orphanCandidates {
 		if !complete[c.hb.RuntimeTarget] {
 			continue
 		}
-		reason, err := s.classifyRuntimeOrphan(ctx, brokerID, c, pending, projectKnown)
+		reason, err := s.classifyRuntimeOrphan(brokerID, c, pending, projectKnown, byID)
 		if err != nil {
 			// Not classified this time; the row, if any, counts as missed,
 			// so three failures in a row remove it and reset first_seen_at
@@ -158,7 +171,8 @@ func (s *Server) recordRuntimeOrphans(ctx context.Context, brokerID string, hb *
 
 // classifyRuntimeOrphan returns the orphan reason of c, or "" when c is not
 // an orphan. An error means c could not be classified.
-func (s *Server) classifyRuntimeOrphan(ctx context.Context, brokerID string, c runtimeOrphanCandidate, pending map[string]bool, projectKnown func(string) (bool, error)) (string, error) {
+// byID holds the agents of the reported IDs; an ID it lacks has no agent.
+func (s *Server) classifyRuntimeOrphan(brokerID string, c runtimeOrphanCandidate, pending map[string]bool, projectKnown func(string) (bool, error), byID map[string]*store.Agent) (string, error) {
 	if c.projectID == "" || c.projectID == "default" || c.hb.Slug == "" {
 		return orphanUnlabeled, nil
 	}
@@ -189,12 +203,10 @@ func (s *Server) classifyRuntimeOrphan(ctx context.Context, brokerID string, c r
 	if c.hb.AgentID == "" {
 		return orphanNoAgent, nil
 	}
-	a, err := s.store.GetAgent(ctx, c.hb.AgentID)
+	a := byID[c.hb.AgentID]
 	switch {
-	case errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput):
+	case a == nil:
 		return orphanNoAgent, nil
-	case err != nil:
-		return "", err
 	case !a.DeletedAt.IsZero():
 		return orphanDeleted, nil
 	case busy(a):

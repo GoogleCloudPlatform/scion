@@ -21,6 +21,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/hook"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -97,4 +99,41 @@ func TestRuntimeOrphans(t *testing.T) {
 	record("b1", []string{"cr"}, t1)
 	assert.Empty(t, list(store.RuntimeOrphanFilter{BrokerID: "b1"}))
 	assert.Len(t, list(store.RuntimeOrphanFilter{BrokerID: "b2"}), 1, "other broker untouched")
+}
+
+// TestRuntimeOrphans_RowRemovedConcurrently: a row another replica removes
+// between the read and the update is created again, and the rest of the
+// batch is still written.
+func TestRuntimeOrphans_RowRemovedConcurrently(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newTestAgentStore(t)
+	o := func(slug string) store.RuntimeOrphan {
+		return store.RuntimeOrphan{Kind: store.RuntimeOrphanKindInstance, RuntimeTarget: "cr", ProjectID: "p1", Slug: slug, Reason: "no_agent"}
+	}
+	t0 := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+	_, err := s.RecordRuntimeOrphans(ctx, "b1", []string{"cr"}, []store.RuntimeOrphan{o("a"), o("b")}, t0, 3)
+	require.NoError(t, err)
+
+	// The first update deletes its row just before it runs.
+	removed := false
+	s.client.RuntimeOrphan.Use(func(next ent.Mutator) ent.Mutator {
+		return hook.RuntimeOrphanFunc(func(ctx context.Context, m *ent.RuntimeOrphanMutation) (ent.Value, error) {
+			if id, ok := m.ID(); ok && m.Op().Is(ent.OpUpdateOne) && !removed {
+				removed = true
+				require.NoError(t, s.client.RuntimeOrphan.DeleteOneID(id).Exec(ctx))
+			}
+			return next.Mutate(ctx, m)
+		})
+	})
+	t1 := t0.Add(time.Minute)
+	created, err := s.RecordRuntimeOrphans(ctx, "b1", []string{"cr"}, []store.RuntimeOrphan{o("a"), o("b")}, t1, 3)
+	require.NoError(t, err)
+	require.True(t, removed)
+	require.Len(t, created, 1, "the removed row is created again")
+	got, err := s.ListRuntimeOrphans(ctx, store.RuntimeOrphanFilter{})
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	for _, r := range got {
+		assert.Equal(t, t1, r.LastSeenAt.UTC(), r.Slug)
+	}
 }
