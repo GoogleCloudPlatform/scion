@@ -25,7 +25,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
-import type { PageData } from '../../shared/types.js';
+import { can, type Capabilities, type PageData } from '../../shared/types.js';
 import { apiFetch } from '../../client/api.js';
 import {
   type AdminStatus,
@@ -74,6 +74,15 @@ export class ScionPageSettings extends LitElement {
   /** Whether the admin-status fetch failed (network error or non-OK response). */
   @state()
   private fetchFailed = false;
+
+  /**
+   * Whether the caller may create global templates, from the `create`
+   * capability the hub reports on the scope=global templates list. Gates
+   * import and clone on the global Templates tab (both create a global
+   * template). Fails closed until the list answers.
+   */
+  @state()
+  private canCreateGlobalTemplates = false;
 
   /**
    * Compute the set of tabs visible to the current user.
@@ -203,6 +212,22 @@ export class ScionPageSettings extends LitElement {
     const visible = this.visibleTabs;
     if (visible.length > 0 && !visible.includes(this.activeTab)) {
       this.activeTab = visible[0];
+    }
+
+    if (this.isTabVisible('templates')) {
+      void this.fetchGlobalTemplateCapabilities();
+    }
+  }
+
+  /** Read the list-level capabilities of the global templates list. */
+  private async fetchGlobalTemplateCapabilities(): Promise<void> {
+    try {
+      const res = await apiFetch('/api/v1/templates?scope=global&limit=1');
+      if (!res.ok) return;
+      const data = (await res.json()) as { _capabilities?: Capabilities };
+      this.canCreateGlobalTemplates = can(data._capabilities, 'create');
+    } catch {
+      // Fail closed: leave import and clone hidden.
     }
   }
 
@@ -349,7 +374,7 @@ export class ScionPageSettings extends LitElement {
                 <scion-resource-import
                   kind="template"
                   scope="global"
-                  canImport
+                  ?canImport=${this.canCreateGlobalTemplates}
                   @resource-changed=${() => this.refreshList('templates-list')}
                 ></scion-resource-import>
                 <scion-resource-list
@@ -357,8 +382,9 @@ export class ScionPageSettings extends LitElement {
                   kind="template"
                   scope="global"
                   detailBasePath="/settings"
-                  canClone
+                  ?canClone=${this.canCreateGlobalTemplates}
                   canDelete
+                  recordCapabilities
                   @resource-changed=${() => this.refreshList('templates-list')}
                 ></scion-resource-list>
               </sl-tab-panel>`
