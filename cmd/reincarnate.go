@@ -196,7 +196,7 @@ is dropped unless you pass --image, --model or --harness-auth again
 changing anything. The real command shows the same warning but does not
 ask for confirmation. --harness needs the hub.reincarnate_harness_switch
 experiment, cannot be combined with --broker, and is supported on the
-docker, podman and container runtimes.`,
+runtimes the agent's Runtime Broker advertises for home reset.`,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if len(args) > 1 {
 			return fmt.Errorf("accepts at most 1 argument (agent name)")
