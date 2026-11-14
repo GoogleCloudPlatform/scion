@@ -559,3 +559,118 @@ func TestNoImageTZCheckDetectsViolations(t *testing.T) {
 		t.Errorf("TZ-prefixed names reported as TZ: %q", errs)
 	}
 }
+
+const antigravityInstallerURL = "https://antigravity.google/cli/install.sh"
+
+func hasShellPipe(s string) bool {
+	return strings.Contains(strings.ReplaceAll(s, "||", ""), "|")
+}
+
+// checkAntigravityDockerfileContract checks that harnesses/antigravity/Dockerfile
+// installs agy via the upstream installer script without a manual AGY_VERSION
+// pin, downloads the script to a file instead of piping curl into bash under
+// Docker's non-pipefail /bin/sh, installs into /usr/local/bin, and verifies the
+// binary with `agy --version`.
+func checkAntigravityDockerfileContract(t *testing.T, content string) []string {
+	t.Helper()
+	stages := parseDockerfileStages(t, content)
+	if len(stages) == 0 {
+		return []string{"no stages found"}
+	}
+	var errs []string
+
+	// Check global ARGs before FROM as well as stage-level ARG/ENV instructions.
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		fields := strings.Fields(trimmed)
+		kw := strings.ToUpper(fields[0])
+		if kw != "ARG" && kw != "ENV" {
+			continue
+		}
+		rest := strings.TrimSpace(strings.TrimPrefix(trimmed, fields[0]))
+		for _, k := range envOrArgKeys(rest) {
+			if strings.EqualFold(k, "AGY_VERSION") {
+				errs = append(errs, "harnesses/antigravity/Dockerfile must not set "+kw+" AGY_VERSION (version comes from upstream installer)")
+			}
+		}
+	}
+
+	var runs []string
+	for _, st := range stages {
+		for _, in := range st.instrs {
+			if in.cmd == "RUN" {
+				runs = append(runs, strings.Join(strings.Fields(in.args), " "))
+			}
+		}
+	}
+	allRuns := strings.Join(runs, "\n")
+
+	if strings.Contains(allRuns, "github.com/google-antigravity/antigravity-cli/releases") {
+		errs = append(errs, "harnesses/antigravity/Dockerfile must not download pinned GitHub release tarballs directly")
+	}
+	if !strings.Contains(allRuns, antigravityInstallerURL) {
+		errs = append(errs, "harnesses/antigravity/Dockerfile must fetch "+antigravityInstallerURL)
+	}
+
+	var hasBashDirInstall, hasVersionCheck bool
+	for _, run := range runs {
+		for _, andClause := range strings.Split(run, "&&") {
+			for _, clause := range strings.Split(andClause, ";") {
+				c := strings.TrimSpace(clause)
+				if (strings.Contains(c, "curl ") || strings.Contains(c, antigravityInstallerURL)) && hasShellPipe(c) {
+					errs = append(errs, "harnesses/antigravity/Dockerfile must download install.sh to a file rather than piping curl into bash/sh (Docker /bin/sh lacks pipefail)")
+				}
+				if !hasShellPipe(c) && strings.Contains(c, "bash ") &&
+					(strings.Contains(c, "--dir /usr/local/bin") || strings.Contains(c, "--dir=/usr/local/bin") || strings.Contains(c, "-d /usr/local/bin")) {
+					hasBashDirInstall = true
+				}
+				if c == "agy --version" || c == "/usr/local/bin/agy --version" {
+					hasVersionCheck = true
+				}
+			}
+		}
+	}
+	if !hasBashDirInstall {
+		errs = append(errs, "harnesses/antigravity/Dockerfile must invoke install.sh via bash with --dir /usr/local/bin")
+	}
+	if !hasVersionCheck {
+		errs = append(errs, "harnesses/antigravity/Dockerfile must run `agy --version` (without `|| true`) to log the installed version and fail on a broken install")
+	}
+	return errs
+}
+
+func TestAntigravityDockerfileUsesInstaller(t *testing.T) {
+	for _, e := range checkAntigravityDockerfileContract(t, readRepoFile(t, "harnesses/antigravity/Dockerfile")) {
+		t.Error(e)
+	}
+}
+
+func TestAntigravityDockerfileContractDetectsViolations(t *testing.T) {
+	good := "ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\nUSER root\n" +
+		"RUN rm -f /usr/local/bin/agy \\\n" +
+		"  && tmp_home=\"$(mktemp -d)\" \\\n" +
+		"  && curl -fsSL -o /tmp/agy-install.sh https://antigravity.google/cli/install.sh \\\n" +
+		"  && HOME=\"${tmp_home}\" bash /tmp/agy-install.sh --dir /usr/local/bin \\\n" +
+		"  && rm -rf /tmp/agy-install.sh \"${tmp_home}\" \\\n" +
+		"  && /usr/local/bin/agy --version\n"
+
+	if errs := checkAntigravityDockerfileContract(t, good); len(errs) != 0 {
+		t.Fatalf("valid Dockerfile reported violations: %q", errs)
+	}
+
+	mutations := []struct{ name, src, want string }{
+		{"stage ARG AGY_VERSION", good + "ARG AGY_VERSION=1.5.8\n", "must not set ARG AGY_VERSION"},
+		{"global ARG AGY_VERSION", "ARG AGY_VERSION=1.5.8\n" + good, "must not set ARG AGY_VERSION"},
+		{"ENV AGY_VERSION", good + "ENV AGY_VERSION=1.5.8\n", "must not set ENV AGY_VERSION"},
+		{"curl piped to bash", "ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\nRUN curl -fsSL https://antigravity.google/cli/install.sh | bash -s -- --dir /usr/local/bin && /usr/local/bin/agy --version\n", "rather than piping curl"},
+		{"missing --dir /usr/local/bin", mustReplace(t, good, " --dir /usr/local/bin", ""), "with --dir /usr/local/bin"},
+		{"missing agy --version", mustReplace(t, good, "  && /usr/local/bin/agy --version\n", "\n"), "must run `agy --version`"},
+		{"agy --version masked with || true", mustReplace(t, good, "/usr/local/bin/agy --version", "/usr/local/bin/agy --version || true"), "must run `agy --version`"},
+	}
+	for _, m := range mutations {
+		expectViolation(t, m.name, checkAntigravityDockerfileContract(t, m.src), m.want)
+	}
+}

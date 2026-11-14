@@ -16,24 +16,26 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
-ARG TARGETARCH
-
 USER root
 
 RUN mkdir -p /home/scion/.gemini/antigravity-cli \
   && mkdir -p /home/scion/.agents \
   && chown -R scion:scion /home/scion/.gemini /home/scion/.agents
 
-# Pin the CLI to a specific release version.
-ARG AGY_VERSION=1.5.8
-
-RUN ARCH=$(case "${TARGETARCH:-amd64}" in amd64) echo "x64";; arm64) echo "arm64";; *) echo "${TARGETARCH}";; esac) \
-  && curl -fsSL -o /tmp/cli.tar.gz \
-       "https://github.com/google-antigravity/antigravity-cli/releases/download/${AGY_VERSION}/agy_cli_linux_${ARCH}.tar.gz" \
-  && tar -xzf /tmp/cli.tar.gz -C /tmp antigravity \
-  && mv /tmp/antigravity /usr/local/bin/agy \
-  && chmod +x /usr/local/bin/agy \
-  && rm /tmp/cli.tar.gz
+# Install Antigravity CLI via its upstream installer into /usr/local/bin:
+# - Download to a file instead of piping curl to bash so a failed download
+#   aborts under Docker's non-pipefail /bin/sh rather than running nothing.
+# - Remove any pre-existing /usr/local/bin/agy first (install.sh exits 0
+#   without updating when the target binary already exists) and isolate HOME
+#   so staging files and shell-rc PATH edits do not touch /root.
+# - Run `agy --version` to record the installed version in the build log and
+#   fail the build if the binary is missing or broken.
+RUN rm -f /usr/local/bin/agy \
+  && tmp_home="$(mktemp -d)" \
+  && curl -fsSL -o /tmp/agy-install.sh https://antigravity.google/cli/install.sh \
+  && HOME="${tmp_home}" bash /tmp/agy-install.sh --dir /usr/local/bin \
+  && rm -rf /tmp/agy-install.sh "${tmp_home}" \
+  && /usr/local/bin/agy --version
 
 RUN printf 'if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then\n    eval $(dbus-launch --sh-syntax)\n    export DBUS_SESSION_BUS_ADDRESS\nfi\nif ! pgrep gnome-keyring-daemon >/dev/null; then\n    eval $(echo "test" | gnome-keyring-daemon --unlock 2>/dev/null)\n    gnome-keyring-daemon --start --components=secrets,pkcs11,ssh >/dev/null 2>&1\nfi\n' >> /etc/bash.bashrc
 
