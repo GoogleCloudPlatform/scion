@@ -146,13 +146,13 @@ Present (value `"true"`) when the workspace is a git repository. Absent when the
 
 ### `SCION_GIT_DEPTH`
 
-Present on `clone-per-agent` workspaces. Records the initial git clone depth configured for the workspace: `"1"` by default (shallow clone), `"N"` when `clone_depth: N` is set on the template or profile, or `"0"` when `clone_depth: full` is set. Because an agent can deepen an existing workspace in place (`git fetch --deepen=<N>` or `git fetch --unshallow`), check `git rev-parse --is-shallow-repository` for the live checkout state.
+Present when the workspace is cloned per agent in the container (`clone-per-agent`, or a `worktree-per-agent` start that fell back to a clone). Records the initial git clone depth configured for the workspace: `"1"` by default (shallow clone), `"N"` when `clone_depth: N` is set on the template or profile, or `"0"` when `clone_depth: full` is set. Because an agent can deepen an existing workspace in place (`git fetch --deepen=<N>` or `git fetch --unshallow`), check `git rev-parse --is-shallow-repository` for the live checkout state.
 
 ---
 
 ## Workspace Orientation & Invariants (Mandatory Boilerplate)
 
-All Scion agents should run a **workspace orientation check** immediately upon startup. By reading `SCION_WORKSPACE_MODE` and `SCION_WORKSPACE_GIT`, an agent can adapt its behavior to match its level of isolation.
+All Scion agents should run a **workspace orientation check** immediately upon startup. By reading `SCION_WORKSPACE_MODE`, `SCION_WORKSPACE_GIT`, and `SCION_GIT_DEPTH`, an agent can adapt its behavior to match its level of isolation.
 
 ### 1. Per-Mode Behavior Guidelines
 
@@ -167,7 +167,8 @@ Depending on the effective workspace sharing mode, agents must adhere to the fol
   * **Shared Git Repo**: The underlying git repository history, local branches, and refs are shared, and the `.git` root is mounted read-only (only `objects/`, `refs/`, `logs/`, `lfs/` and your worktree's state directory are writable). Treat local branch names as a shared namespace to avoid collisions, and note that commands that rewrite `packed-refs` or root files (such as deleting a branch or tag or running `git gc`) fail cleanly inside the container.
 * **When `SCION_WORKSPACE_MODE` is `clone-per-agent`**:
   * **Full Isolation**: Your clone is entirely your own. Nothing you do to the working tree, local refs, or local branches will affect any other agent's workspace.
-  * **Shallow by Default**: Check `SCION_GIT_DEPTH` (`1` by default, `0` for full clone) and `git rev-parse --is-shallow-repository` before running `git merge-base`, `...` diffs, two-dot ranges, `git log`/`blame`, or `git rebase`. Deepen first (`git fetch --deepen=<N>` or `git fetch --unshallow`) when history beyond the clone depth is needed.
+* **Whenever `SCION_GIT_DEPTH` is set (or `git rev-parse --is-shallow-repository` is `true`)**:
+  * **Shallow by Default**: Per-agent container clones (including `worktree-per-agent` starts that fell back to cloning) default to shallow depth 1 (`SCION_GIT_DEPTH=1`, `0` for full clone). Check `SCION_GIT_DEPTH` and `git rev-parse --is-shallow-repository` before running `git merge-base`, `...` diffs, two-dot ranges, `git log`/`blame`, or `git rebase`, and deepen first (`git fetch --deepen=<N>` or `git fetch --unshallow`) when history beyond the clone depth is needed.
 * **When `SCION_WORKSPACE_MODE` is `empty-per-agent`**:
   * **Private, Initially Empty**: `/workspace` is your own directory. It started empty and is not a git repository.
   * **Lifetime**: It is kept across suspend/resume where storage allows, and deleted with the agent. Put anything that other agents need, or that must outlive you, in a shared directory.

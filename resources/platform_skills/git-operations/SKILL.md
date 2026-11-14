@@ -13,14 +13,14 @@ General git safety rules for Scion agents. These apply regardless of
 workspace sharing mode — for local worktree sandbox rules, see the
 `git-sandbox` skill.
 
-## Shallow Clones (`clone-per-agent`)
+## Shallow Clones
 
-`clone-per-agent` workspaces default to a shallow clone of depth 1 (`SCION_GIT_DEPTH=1`; `N` means depth `N`, and `0` means a full clone). `SCION_GIT_DEPTH` reflects the initial clone setting; run `git rev-parse --is-shallow-repository` to check whether the live checkout is still shallow.
+In-container per-agent clones (`SCION_GIT_DEPTH` set — `clone-per-agent`, or a `worktree-per-agent` start that fell back to cloning) default to a shallow clone of depth 1 (`SCION_GIT_DEPTH=1`; `N` means depth `N`, and `0` means a full clone). `SCION_GIT_DEPTH` reflects the initial clone setting; run `git rev-parse --is-shallow-repository` to check whether the live checkout is still shallow.
 
 **Symptoms of a shallow clone:**
 - `git diff main...HEAD` and `git merge-base` fail with `no merge base` (or return empty output) when the branch point is older than the clone depth.
 - Two-dot ranges (`git log a..b`) walk to the shallow graft and list hundreds of unrelated commits.
-- `git log -S`, `git blame`, tag comparisons, and `git rebase` (`refusing to merge unrelated histories`) cannot see commits past the shallow boundary.
+- `git log -S`, `git blame`, and tag comparisons cannot see commits past the shallow boundary; `git merge`/`git pull` fail with `refusing to merge unrelated histories`, and `git rebase` replays the grafted root commit and conflicts.
 
 **How to handle history and range operations (when remote access permits):**
 - **Reach a merge base quickly:** `git fetch --deepen=50 origin main` (increase `<N>` until `git merge-base` succeeds).

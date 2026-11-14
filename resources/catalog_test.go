@@ -319,10 +319,10 @@ func TestMandatoryBoilerplate_PointsToWebServingSkill(t *testing.T) {
 }
 
 // TestMandatoryBoilerplate_ClonePerAgentShallowCloneOrientation pins that the
-// embedded workspace orientation preamble tells clone-per-agent agents that
-// clones default to shallow depth 1 (SCION_GIT_DEPTH), how to verify live
-// shallow state, why history/range commands fail on shallow clones, and how to
-// deepen (ptone/scion#7860).
+// embedded workspace orientation preamble keys its shallow-clone guidance on
+// SCION_GIT_DEPTH / is-shallow-repository (covering both clone-per-agent and
+// worktree-per-agent fallback clones), explains why history/range commands
+// fail on shallow clones, and shows how to deepen (ptone/scion#7860).
 func TestMandatoryBoilerplate_ClonePerAgentShallowCloneOrientation(t *testing.T) {
 	data, err := fs.ReadFile(MandatoryBoilerplateFS(), "00-workspace-orientation.md")
 	if err != nil {
@@ -330,7 +330,8 @@ func TestMandatoryBoilerplate_ClonePerAgentShallowCloneOrientation(t *testing.T)
 	}
 	content := strings.Join(strings.Fields(string(data)), " ")
 	for _, want := range []string{
-		"SCION_GIT_DEPTH",
+		"Whenever `SCION_GIT_DEPTH` is set",
+		"fell back to cloning",
 		"git rev-parse --is-shallow-repository",
 		"git merge-base",
 		"git fetch --deepen",
@@ -369,12 +370,28 @@ func TestPlatformSkillsFS_GitOperationsCoversShallowClones(t *testing.T) {
 		"SCION_GIT_DEPTH",
 		"git rev-parse --is-shallow-repository",
 		"no merge base",
+		"`git merge`/`git pull` fail with `refusing to merge unrelated histories`",
 		"git fetch --deepen",
 		"--filter=blob:none",
 		"git fetch --unshallow",
 	} {
 		if !strings.Contains(content, want) {
 			t.Errorf("embedded git-operations/SKILL.md does not contain %q", want)
+		}
+	}
+
+	sandboxData, err := fs.ReadFile(PlatformSkillsFS(), "git-sandbox/SKILL.md")
+	if err != nil {
+		t.Fatalf("reading embedded git-sandbox/SKILL.md: %v", err)
+	}
+	sandboxContent := strings.Join(strings.Fields(string(sandboxData)), " ")
+	for _, want := range []string{
+		"When `SCION_GIT_DEPTH` Is Unset",
+		"If `SCION_GIT_DEPTH` is set",
+		"`git-operations` skill",
+	} {
+		if !strings.Contains(sandboxContent, want) {
+			t.Errorf("embedded git-sandbox/SKILL.md does not contain %q", want)
 		}
 	}
 }

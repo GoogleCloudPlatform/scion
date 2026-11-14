@@ -1,12 +1,12 @@
 # Workspace Boundaries
 
 Container isolation does not imply filesystem isolation. At task start, check
-`pwd`, `SCION_WORKSPACE_MODE`, and `SCION_WORKSPACE_GIT` (plus `SCION_GIT_DEPTH`
-in `clone-per-agent`). The Git flag is `true` for Git workspaces and otherwise
-unset. The mode describes the primary workspace; named shared mounts have their
-own sharing boundary. If the mode is missing or the facts contradict each other,
-report the mismatch before destructive Git operations. Continue inspection
-without changing repository state.
+`pwd`, `SCION_WORKSPACE_MODE`, `SCION_WORKSPACE_GIT`, and `SCION_GIT_DEPTH`.
+The Git flag is `true` for Git workspaces and otherwise unset. The mode
+describes the primary workspace; named shared mounts have their own sharing
+boundary. If the mode is missing or the facts contradict each other, report the
+mismatch before destructive Git operations. Continue inspection without
+changing repository state.
 
 - **`shared-plain`:** Files are shared. In a Git checkout, HEAD and the staging
   index are shared too. Agree on file ownership before overlapping edits, and
@@ -17,15 +17,19 @@ without changing repository state.
   only refs you own. If attached to an existing shared worktree, apply the
   `shared-plain` rules to that checkout.
 - **`clone-per-agent`:** Files and local Git state are private. Remote branches
-  and named shared mounts may still be shared. Clones default to shallow depth 1
-  (`SCION_GIT_DEPTH`: `1` default, `N` for depth `N`, `0` for full; check live
-  state with `git rev-parse --is-shallow-repository`). When shallow,
-  `git merge-base`, `...` diffs, two-dot ranges, `git log`/`blame`, and `rebase`
-  lack history beyond that depth — deepen first (`git fetch --deepen=<N>` or
-  `git fetch --unshallow`, when remote policy permits; see `git-operations`).
+  and named shared mounts may still be shared.
 - **`empty-per-agent`:** Private, initially empty, and not Git. Kept across
   suspend/resume where storage allows; deleted with the agent. Use named shared
   mounts to share or keep files.
+
+Whenever `SCION_GIT_DEPTH` is set (or `git rev-parse --is-shallow-repository` is
+`true`), your workspace is a per-agent clone — including `worktree-per-agent`
+starts that fell back to cloning — and defaults to shallow depth 1
+(`SCION_GIT_DEPTH`: `1` default, `N` for depth `N`, `0` for full; check live
+state with `git rev-parse --is-shallow-repository`). When shallow,
+`git merge-base`, `...` diffs, two-dot ranges, `git log`/`blame`, and `rebase`
+lack history beyond that depth — deepen first (`git fetch --deepen=<N>` or
+`git fetch --unshallow`, when remote policy permits; see `git-operations`).
 
 Inspect other revisions with `git show` or `git diff`. Use task-owned temporary
 storage for extracted snapshots. Preserve others' changes. Missing host paths in

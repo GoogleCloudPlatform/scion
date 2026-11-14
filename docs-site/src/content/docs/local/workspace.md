@@ -142,7 +142,7 @@ Each agent gets its own branch named `scion/<agent-name>`. This prevents conflic
 By default, git projects use a shallow clone with `depth=1` for fast startup. 
 
 - **Full or Deeper Clones on Startup:** If an agent needs git history for operations like `git diff main...HEAD`, `git merge-base`, `git log`, or `git blame` from the start, set `clone_depth: full` (or an integer `N`) on the agent's template or [profile](/scion/reference/orchestrator-settings/#profiles-profiles) (see [Agent Configuration](/scion/reference/agent-config/)). At the API/env level, `GitCloneConfig` (`depth: 0`) and `SCION_GIT_DEPTH=0` represent a full, non-shallow clone.
-- **Deepening Later:** Every `clone-per-agent` container receives `SCION_GIT_DEPTH` (`1` by default, `N` for depth `N`, or `0` for full) and is oriented at startup that `clone-per-agent` checkouts default to shallow depth 1. An agent with a shallow clone can deepen on demand inside its session:
+- **Deepening Later:** Every per-agent clone container receives `SCION_GIT_DEPTH` (`1` by default, `N` for depth `N`, or `0` for full) and is oriented at startup that per-agent clones default to shallow depth 1. An agent with a shallow clone can deepen on demand inside its session:
   ```bash
   git fetch --deepen=50 origin main   # reach a merge base incrementally
   git fetch --unshallow               # fetch complete history
