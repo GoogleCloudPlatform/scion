@@ -202,7 +202,12 @@ do not exist: they fail with `unknown command "share" for "scion artifact"`
 - **`missing_scope` on publish:** your token lacks the artifact scopes.
   `scion whoami --full` lists them on its `Scopes:` line. Report it to the user
   who started you; a Hub admin must reissue your scopes.
-- **Every command answers `404`:** artifacts may be off on this Hub.
-  `scion whoami --full` lists the experiments that are on; without
-  `hub.artifacts`, attach files with `--attach` or point to a path under
-  `/scion-volumes/` instead.
+- **Every command answers `404`** (and `scion artifact list` is empty): run
+  `scion whoami --full`.
+  - If its `Scopes:` line lacks `project:artifact:read`, that is the cause: a
+    token without it gets `404` for every artifact. Usually the user or agent
+    that created you does not hold the artifact scopes, so they were left out
+    of your token. Report it as for `missing_scope`.
+  - If its `Experiments:` line lacks `hub.artifacts`, artifacts are off on this
+    Hub. Attach files with `--attach` or point to a path under `/scion-volumes/`
+    instead.

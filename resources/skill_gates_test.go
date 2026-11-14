@@ -357,6 +357,8 @@ func TestPlatformSkillsFS_ScionArtifacts(t *testing.T) {
 		"--artifact scion://artifact/<id>",
 		"`scion artifact share`, `scion artifact grants` and `scion artifact delete` do not exist",
 		`unknown command "share" for "scion artifact"`,
+		"If its `Scopes:` line lacks `project:artifact:read`, that is the cause",
+		"If its `Experiments:` line lacks `hub.artifacts`",
 	} {
 		if !strings.Contains(content, want) {
 			t.Errorf("embedded scion-artifacts/SKILL.md does not contain %q", want)
