@@ -141,6 +141,7 @@ func runDecisionsTestCmd(t *testing.T, args ...string) (string, error) {
 }
 
 func TestDecisionsList_TablePaginationAndJSON(t *testing.T) {
+	t.Setenv("SCION_CLI_MODE", "agent")
 	fixedNow := time.Date(2026, 11, 13, 5, 0, 0, 0, time.UTC)
 	restoreNow := clitime.SetNow(func() time.Time { return fixedNow })
 	defer restoreNow()
