@@ -21,6 +21,7 @@ import (
 const (
 	AskUser        = "ask_user"
 	Blocked        = "blocked"
+	Idle           = "idle"
 	TaskCompleted  = "task_completed"
 	LimitsExceeded = "limits_exceeded"
 )
@@ -46,6 +47,12 @@ var definitions = map[string]Definition{
 		DefaultMessage: "Agent is blocked",
 		eventPrefix:    "Agent blocked",
 		outputPrefix:   "Agent blocked",
+	},
+	Idle: {
+		Activity:       state.ActivityIdle,
+		DefaultMessage: "Agent is idle",
+		eventPrefix:    "Agent idle",
+		outputPrefix:   "Agent idle",
 	},
 	TaskCompleted: {
 		Activity:       state.ActivityCompleted,

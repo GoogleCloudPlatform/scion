@@ -189,6 +189,7 @@ func TestStatusWaitingClear_OtherStickyActivitiesKept(t *testing.T) {
 	for _, activity := range []state.Activity{
 		state.ActivityCompleted,
 		state.ActivityBlocked,
+		state.ActivityIdle,
 		state.ActivityLimitsExceeded,
 		state.ActivityCrashed,
 	} {

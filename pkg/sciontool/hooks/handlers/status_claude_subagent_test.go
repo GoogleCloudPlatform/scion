@@ -85,7 +85,7 @@ func TestClaudeSubagent_IsSubagentEvent(t *testing.T) {
 // and still holds unchanged: an agent-set waiting_for_input (sciontool status
 // ask_user), blocked, completed, limits_exceeded and crashed.
 func TestClaudeSubagent_HeldActivitiesKept(t *testing.T) {
-	for _, held := range []state.Activity{state.ActivityWaitingForInput, state.ActivityBlocked, state.ActivityCompleted, state.ActivityLimitsExceeded, state.ActivityCrashed} {
+	for _, held := range []state.Activity{state.ActivityWaitingForInput, state.ActivityBlocked, state.ActivityIdle, state.ActivityCompleted, state.ActivityLimitsExceeded, state.ActivityCrashed} {
 		for _, raw := range []string{"UserPromptSubmit", "PreToolUse"} {
 			t.Run(string(held)+"/"+raw, func(t *testing.T) {
 				statusPath := filepath.Join(t.TempDir(), "agent-info.json")
@@ -148,6 +148,7 @@ func TestClaudeSubagent_ParentEventsUnchanged(t *testing.T) {
 	}{
 		{"prompt clears ask_user", prompt, state.ActivityWaitingForInput, "thinking", ""},
 		{"prompt clears blocked", prompt, state.ActivityBlocked, "thinking", ""},
+		{"prompt clears idle", prompt, state.ActivityIdle, "thinking", ""},
 		{"prompt clears completed", prompt, state.ActivityCompleted, "thinking", ""},
 		{"prompt clears crashed", prompt, state.ActivityCrashed, "thinking", ""},
 		{"prompt with agent_id equal to session clears ask_user", func(t *testing.T) *hooks.Event {
@@ -301,6 +302,8 @@ func TestClaudeSubagent_HubFollowsLocal(t *testing.T) {
 		{"sub-agent tool-start with ask_user", state.ActivityWaitingForInput, false, sub, "PreToolUse", "", "waiting_for_input"},
 		{"sub-agent prompt with blocked", state.ActivityBlocked, false, sub, "UserPromptSubmit", "", "blocked"},
 		{"sub-agent tool-start with blocked", state.ActivityBlocked, false, sub, "PreToolUse", "", "blocked"},
+		{"sub-agent prompt with idle", state.ActivityIdle, false, sub, "UserPromptSubmit", "", "idle"},
+		{"sub-agent tool-start with idle", state.ActivityIdle, false, sub, "PreToolUse", "", "idle"},
 		{"sub-agent prompt with completed", state.ActivityCompleted, false, sub, "UserPromptSubmit", "", "completed"},
 		{"sub-agent tool-start with crashed", state.ActivityCrashed, false, sub, "PreToolUse", "", "crashed"},
 		{"sub-agent prompt with limits_exceeded", state.ActivityLimitsExceeded, false, sub, "UserPromptSubmit", "", "limits_exceeded"},
@@ -311,6 +314,7 @@ func TestClaudeSubagent_HubFollowsLocal(t *testing.T) {
 		{"sub-agent tool-start with no hold", state.ActivityWorking, false, sub, "PreToolUse", "executing", "executing"},
 		{"parent prompt with ask_user", state.ActivityWaitingForInput, false, parent, "UserPromptSubmit", "thinking", "thinking"},
 		{"parent prompt with blocked", state.ActivityBlocked, false, parent, "UserPromptSubmit", "thinking", "thinking"},
+		{"parent prompt with idle", state.ActivityIdle, false, parent, "UserPromptSubmit", "thinking", "thinking"},
 		{"parent tool-start with ask_user", state.ActivityWaitingForInput, false, parent, "PreToolUse", "executing", "executing"},
 		{"parent tool-start with notification wait", "", true, parent, "PreToolUse", "executing", "executing"},
 	} {
