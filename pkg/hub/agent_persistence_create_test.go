@@ -109,8 +109,13 @@ func TestDispatch_PersistenceFromStamp(t *testing.T) {
 	assert.Equal(t, api.PersistenceEphemeral, f.client.lastStartExtras.Persistence)
 	require.NoError(t, f.dispatcher.DispatchAgentRestart(context.Background(), f.agent))
 	assert.Equal(t, api.PersistenceEphemeral, f.client.lastRestartExtras.Persistence)
-	assert.Equal(t, "ephemeral", startExtrasWireKey(StartExtras{Persistence: api.PersistenceEphemeral}, "persistence"))
-	assert.Equal(t, "", startExtrasWireKey(StartExtras{}, "persistence"))
+	payload := map[string]interface{}{}
+	applyStartExtras(payload, StartExtras{Persistence: api.PersistenceEphemeral})
+	assert.Equal(t, api.PersistenceEphemeral, payload["persistence"], "wire key persistence")
+	payload = map[string]interface{}{}
+	applyStartExtras(payload, StartExtras{})
+	_, sent := payload["persistence"]
+	assert.False(t, sent, "a persistent agent sends no persistence key")
 
 	g := newEmptyPerAgentFixture(t, "persistence-none", true)
 	require.NoError(t, g.dispatcher.DispatchAgentStart(context.Background(), g.agent, "", false))
