@@ -476,6 +476,34 @@ func TestHeartbeatService_ReportsRunIDLabel(t *testing.T) {
 	}
 }
 
+// TestHeartbeatService_ReportsAgentID: each entry carries its Hub agent ID,
+// from AgentInfo.ID or else the agent_id label, and none when neither is
+// known (ptone/scion#7930).
+func TestHeartbeatService_ReportsAgentID(t *testing.T) {
+	client := &mockRuntimeBrokerService{}
+	manager := &heartbeatMockManager{
+		agents: []api.AgentInfo{
+			{Name: "by-id", ProjectID: "project-1", Phase: "running", ID: "id-1", Labels: map[string]string{api.LabelAgentID: "label-ignored"}},
+			{Name: "by-label", ProjectID: "project-1", Phase: "running", Labels: map[string]string{api.LabelAgentID: "id-2"}},
+			{Name: "unknown", ProjectID: "project-1", Phase: "running"},
+		},
+	}
+	svc := NewHeartbeatService(client, "test-host", time.Hour, manager, nil, slog.Default())
+	if err := svc.ForceHeartbeat(context.Background()); err != nil {
+		t.Fatalf("ForceHeartbeat failed: %v", err)
+	}
+	got := map[string]string{}
+	for _, p := range client.getHeartbeatCalls()[0].Heartbeat.Projects {
+		for _, a := range p.Agents {
+			got[a.Slug] = a.AgentID
+		}
+	}
+	want := map[string]string{"by-id": "id-1", "by-label": "id-2", "unknown": ""}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("agent IDs = %v, want %v", got, want)
+	}
+}
+
 func TestHeartbeatService_IncludesPhaseActivity(t *testing.T) {
 	client := &mockRuntimeBrokerService{}
 	manager := &heartbeatMockManager{

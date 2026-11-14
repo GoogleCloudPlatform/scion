@@ -1186,6 +1186,10 @@ type brokerAgentHeartbeat struct {
 	// store's run check (AgentStatusUpdate.ReportRunID).
 	RunID        string                    `json:"runId,omitempty"`
 	OtherEntries []brokerAgentRuntimeEntry `json:"otherEntries,omitempty"`
+	// AgentID mirrors hubclient.AgentHeartbeat.AgentID; empty from an
+	// older broker. Read only by the runtime orphan report
+	// (runtime_orphans.go).
+	AgentID string `json:"agentId,omitempty"`
 }
 
 // brokerAgentRuntimeEntry mirrors hubclient.AgentRuntimeEntry.

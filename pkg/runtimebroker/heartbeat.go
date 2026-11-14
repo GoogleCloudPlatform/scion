@@ -858,6 +858,7 @@ func (s *HeartbeatService) gatherProjectAgents(ctx context.Context, startsBefore
 			ExitReason:      ag.ExitReason,
 			RuntimeTarget:   agentTargets[heartbeatAgentKey(ag)],
 			RunID:           ag.RunID,
+			AgentID:         heartbeatAgentID(ag),
 			// The resolved agent config, for a create the Hub kept after
 			// an unknown dispatch outcome (ptone/scion#4987).
 			Template:            ag.Template,
@@ -891,6 +892,15 @@ func (s *HeartbeatService) gatherProjectAgents(ctx context.Context, startsBefore
 	}
 
 	return projects, inventory
+}
+
+// heartbeatAgentID returns the Hub agent ID of a listed entry: the ID the
+// runtime reports, else its agent_id label, else "".
+func heartbeatAgentID(ag api.AgentInfo) string {
+	if ag.ID != "" {
+		return ag.ID
+	}
+	return ag.Labels[api.LabelAgentID]
 }
 
 // dropVanishedPodReportsForStarts removes the entries a Kubernetes runtime
