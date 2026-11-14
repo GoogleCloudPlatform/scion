@@ -2293,28 +2293,66 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 		return "", store.ErrNotFound
 	}
 
-	// Case 2: Use project's default runtime broker (must be online and dispatchable)
+	// Cases 2-4: no explicit broker. selectProjectRuntimeBroker is shared
+	// with scheduled dispatch (ptone/scion#7868), so both paths pick the same
+	// broker.
+	brokerID, refusal := s.selectProjectRuntimeBroker(ctx, project, allProviders, availableBrokers)
+	if refusal != "" {
+		NoRuntimeBroker(w, refusal, usableBrokers())
+		return "", store.ErrNotFound
+	}
+	return brokerID, nil
+}
+
+// selectProjectRuntimeBroker picks the runtime broker for an agent created in
+// project when no broker was requested. It writes no HTTP response and is
+// used by both interactive create (resolveRuntimeBroker) and scheduled
+// dispatch (dispatchAgentEventHandler). Every broker it returns has passed
+// canUseBrokerForProject for the identity in ctx. Priority order:
+//  1. Project's default runtime broker - must be online and usable; when it
+//     is not, there is no fallback
+//  2. Hub-level default broker - used only if it is a provider of the
+//     project and is online and usable; otherwise fall through
+//  3. Single provider (any status) - used if its broker is present and usable
+//  4. Multiple providers - the single online, usable one; none or several is
+//     a refusal
+//
+// allProviders is every provider of the project; availableBrokers is the
+// subset returned by getAvailableBrokersForProject. On refusal it returns ""
+// and a non-empty message for the caller to report.
+func (s *Server) selectProjectRuntimeBroker(ctx context.Context, project *store.Project, allProviders []store.ProjectProvider, availableBrokers []store.RuntimeBroker) (brokerID, refusal string) {
+	// anyUsable reports whether an online provider passes
+	// canUseBrokerForProject. Computed only on refusal paths: it costs a
+	// dispatch check per online provider.
+	anyUsable := func() bool {
+		for i := range availableBrokers {
+			if s.canUseBrokerForProject(ctx, &availableBrokers[i], project) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Case 1: Use project's default runtime broker (must be online and dispatchable)
 	if project.DefaultRuntimeBrokerID != "" {
 		// Check if the default broker is still available
 		for _, h := range availableBrokers {
 			if h.ID == project.DefaultRuntimeBrokerID {
 				if s.canUseBrokerForProject(ctx, &h, project) {
-					return project.DefaultRuntimeBrokerID, nil
+					return project.DefaultRuntimeBrokerID, ""
 				}
 				// Default broker exists but user can't dispatch to it — fall through
 				break
 			}
 		}
 		// Default broker is not available or not dispatchable
-		if usable := usableBrokers(); len(usable) > 0 {
-			NoRuntimeBroker(w, "Default runtime broker is unavailable; specify an alternative", usable)
-		} else {
-			NoRuntimeBroker(w, "Default runtime broker is unavailable and no alternatives found", usable)
+		if anyUsable() {
+			return "", "Default runtime broker is unavailable; specify an alternative"
 		}
-		return "", store.ErrNotFound
+		return "", "Default runtime broker is unavailable and no alternatives found"
 	}
 
-	// Case 2.5: Hub-level default broker (from hub operational agent_defaults).
+	// Case 2: Hub-level default broker (from hub operational agent_defaults).
 	// Used when the project has no default broker set. The hub default must be a
 	// provider for this project and must be online and dispatchable.
 	if hubDefault := s.hubAgentDefaults().DefaultRuntimeBroker; hubDefault != "" {
@@ -2323,7 +2361,7 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 				if s.canUseBrokerForProject(ctx, &h, project) {
 					slog.Info("Using hub-level default runtime broker",
 						"broker", h.Name, "brokerID", h.ID, "project_id", project.ID)
-					return h.ID, nil
+					return h.ID, ""
 				}
 				break
 			}
@@ -2340,14 +2378,12 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 		broker, brokerErr := s.store.GetRuntimeBroker(ctx, allProviders[0].BrokerID)
 		present := brokerErr == nil && s.brokerPresence(ctx, broker).Connected
 		if present && s.canUseBrokerForProject(ctx, broker, project) {
-			return allProviders[0].BrokerID, nil
+			return allProviders[0].BrokerID, ""
 		}
 		if present {
-			NoRuntimeBroker(w, "No runtime brokers available for this project that you have permission to use", usableBrokers())
-		} else {
-			NoRuntimeBroker(w, "This project's only runtime broker is offline", usableBrokers())
+			return "", "No runtime brokers available for this project that you have permission to use"
 		}
-		return "", store.ErrNotFound
+		return "", "This project's only runtime broker is offline"
 	}
 
 	// Case 4: Multiple providers - filter to dispatchable brokers, then require selection
@@ -2362,19 +2398,16 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 	case 0:
 		if len(availableBrokers) > 0 {
 			// Online brokers exist, but none the caller may use.
-			NoRuntimeBroker(w, "No runtime brokers available for this project that you have permission to use", usableBrokers())
+			return "", "No runtime brokers available for this project that you have permission to use"
 		} else if len(allProviders) == 0 {
-			NoRuntimeBroker(w, "No runtime brokers available for this project; register a runtime broker first", usableBrokers())
-		} else {
-			NoRuntimeBroker(w, "None of this project's runtime brokers are online", usableBrokers())
+			return "", "No runtime brokers available for this project; register a runtime broker first"
 		}
-		return "", store.ErrNotFound
+		return "", "None of this project's runtime brokers are online"
 	case 1:
-		return dispatchable[0].ID, nil
+		return dispatchable[0].ID, ""
 	default:
 		// Multiple dispatchable brokers - require explicit selection
-		NoRuntimeBroker(w, "Multiple runtime brokers available for this project; specify runtimeBrokerId to select one", usableBrokers())
-		return "", store.ErrNotFound
+		return "", "Multiple runtime brokers available for this project; specify runtimeBrokerId to select one"
 	}
 }
 
