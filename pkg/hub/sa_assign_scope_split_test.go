@@ -210,6 +210,7 @@ func TestAgentScopeSplit_GoldenPermissionSets(t *testing.T) {
 			"project.read", "artifact.read", "skill.read", "skill.list",
 			"template.read", "template.list",
 			"harness_config.read", "harness_config.list",
+			"agent.status_update", // self-only (ptone/scion#7926)
 		},
 		AgentRoleBaseline: {
 			"project.read", "artifact.read", "skill.read", "skill.list",
@@ -254,9 +255,11 @@ func TestAgentScopeSplit_GoldenPermissionSets(t *testing.T) {
 			got := agentScopesToPermissionIDs(effectiveAgentScopes(legacyIdentity))
 			// Legacy tokens predate project:artifact:read and
 			// project:artifact:write, so they lack exactly the artifact
-			// permissions.
+			// permissions. A legacy readonly token also predates
+			// readonly's agent:status:update (ptone/scion#7926).
 			wantLegacy := slices.DeleteFunc(slices.Clone(want), func(p string) bool {
-				return p == "artifact.read" || p == "artifact.create"
+				return p == "artifact.read" || p == "artifact.create" ||
+					(role == AgentRoleReadOnly && p == "agent.status_update")
 			})
 			assert.ElementsMatch(t, wantLegacy, got,
 				"a legacy pre-split token for role %s must authorize what a current token does, except for scopes added after it was minted", role)

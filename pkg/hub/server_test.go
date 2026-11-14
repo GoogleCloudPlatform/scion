@@ -863,11 +863,14 @@ func TestServer_GenerateAgentToken_RoleReadOnly(t *testing.T) {
 	if !claims.HasScope(ScopeProjectRead) {
 		t.Error("expected ScopeProjectRead for readonly role")
 	}
-	if claims.HasScope(ScopeAgentStatusUpdate) {
-		t.Error("expected ScopeAgentStatusUpdate NOT to be present for readonly role")
+	// A readonly agent reports its own status (ptone/scion#7926).
+	if !claims.HasScope(ScopeAgentStatusUpdate) {
+		t.Error("expected ScopeAgentStatusUpdate for readonly role")
 	}
-	if claims.HasScope(ScopeAgentCreate) {
-		t.Error("expected ScopeAgentCreate NOT to be present for readonly role")
+	for _, scope := range []AgentTokenScope{ScopeAgentCreate, ScopeAgentTokenRefresh, ScopeAgentNotify, ScopeAgentPortForward, ScopeAgentLifecycle} {
+		if claims.HasScope(scope) {
+			t.Errorf("expected %s NOT to be present for readonly role", scope)
+		}
 	}
 }
 

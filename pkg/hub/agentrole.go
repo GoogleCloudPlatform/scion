@@ -46,7 +46,14 @@ func ScopesForRole(role AgentRole) []AgentTokenScope {
 	case AgentRoleNone:
 		return nil
 	case AgentRoleReadOnly:
-		return []AgentTokenScope{ScopeProjectRead, ScopeProjectArtifactRead}
+		return []AgentTokenScope{
+			ScopeProjectRead,
+			// Reporting its own status is a control-plane concern, not a
+			// write to project state: updateAgentStatus admits an agent
+			// token only for the bearer's own agent ID (ptone/scion#7926).
+			ScopeAgentStatusUpdate,
+			ScopeProjectArtifactRead,
+		}
 	case AgentRoleBaseline:
 		return []AgentTokenScope{
 			ScopeProjectRead,
