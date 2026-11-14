@@ -1634,14 +1634,13 @@ func printGroupSendSummary(s groupSendResult, interrupted bool) {
 
 // resolveScheduledMessageAgent validates that the parsed recipient is a
 // non-empty agent target supported by deprecated --in/--at scheduling, and
-// returns the normalized agent slug. Any unsupported recipient fails with a
-// usage error pointing to 'scion schedule create'.
+// returns the normalized agent slug.
 func resolveScheduledMessageAgent(agentName, userRecipient string, group []messages.GroupRecipient, convRef *messaging.Reference) (string, error) {
 	if userRecipient != "" || (convRef != nil && convRef.Kind == messaging.RefEmail) {
-		return "", newUsageError("--in/--at cannot be used with user recipients; scheduled messages target agents (use 'scion schedule create --agent <name>' instead)")
+		return "", newUsageError("--in/--at cannot be used with user recipients; scheduled messages can only target agents")
 	}
 	if len(group) > 0 {
-		return "", newUsageError("--in/--at cannot be used with group[] recipients; use 'scion schedule create --agent <name>' instead")
+		return "", newUsageError("--in/--at cannot be used with group[] recipients; scheduled messages can only target agents")
 	}
 	if convRef != nil {
 		switch convRef.Kind {

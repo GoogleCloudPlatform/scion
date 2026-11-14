@@ -236,47 +236,58 @@ func TestMessageScheduled_RunE_JSONOutput(t *testing.T) {
 
 // TestMessageScheduled_RunE_UnsupportedRecipientsFail verifies that non-agent
 // or empty-slug recipients combined with --in/--at fail before contacting the
-// Hub and include a clear pointer to 'scion schedule create'.
+// Hub. User and group[] recipients explain that scheduled messages can only
+// target agents without suggesting 'scion schedule create --agent' as an
+// equivalent, while conversation/thread and empty-slug recipients point to
+// 'scion schedule create'.
 func TestMessageScheduled_RunE_UnsupportedRecipientsFail(t *testing.T) {
 	tests := []struct {
-		name      string
-		recipient string
-		wantErr   string
+		name               string
+		recipient          string
+		wantErr            string
+		wantScheduleCreate bool
 	}{
 		{
-			name:      "@email user recipient",
-			recipient: "@alice@example.com",
-			wantErr:   "--in/--at cannot be used with user recipients",
+			name:               "@email user recipient",
+			recipient:          "@alice@example.com",
+			wantErr:            "--in/--at cannot be used with user recipients; scheduled messages can only target agents",
+			wantScheduleCreate: false,
 		},
 		{
-			name:      "user: recipient",
-			recipient: "user:alice",
-			wantErr:   "--in/--at cannot be used with user recipients",
+			name:               "user: recipient",
+			recipient:          "user:alice",
+			wantErr:            "--in/--at cannot be used with user recipients; scheduled messages can only target agents",
+			wantScheduleCreate: false,
 		},
 		{
-			name:      "conv: conversation reference",
-			recipient: "conv:7f3a91c2-1234-5678-9abc-def012345678",
-			wantErr:   "--in/--at cannot be used with conv:",
+			name:               "conv: conversation reference",
+			recipient:          "conv:7f3a91c2-1234-5678-9abc-def012345678",
+			wantErr:            "--in/--at cannot be used with conv:",
+			wantScheduleCreate: true,
 		},
 		{
-			name:      "#thread reference",
-			recipient: "#general",
-			wantErr:   "--in/--at cannot be used with #general",
+			name:               "#thread reference",
+			recipient:          "#general",
+			wantErr:            "--in/--at cannot be used with #general",
+			wantScheduleCreate: true,
 		},
 		{
-			name:      "group[] recipient",
-			recipient: "group[agent:a,agent:b]",
-			wantErr:   "--in/--at cannot be used with group[] recipients",
+			name:               "group[] recipient",
+			recipient:          "group[agent:a,agent:b]",
+			wantErr:            "--in/--at cannot be used with group[] recipients; scheduled messages can only target agents",
+			wantScheduleCreate: false,
 		},
 		{
-			name:      "empty agent: prefix",
-			recipient: "agent:",
-			wantErr:   "agent recipient is required for --in/--at",
+			name:               "empty agent: prefix",
+			recipient:          "agent:",
+			wantErr:            "agent recipient is required for --in/--at",
+			wantScheduleCreate: true,
 		},
 		{
-			name:      "@ punctuation-only agent slug",
-			recipient: "@---",
-			wantErr:   "agent recipient is required for --in/--at",
+			name:               "@ punctuation-only agent slug",
+			recipient:          "@---",
+			wantErr:            "agent recipient is required for --in/--at",
+			wantScheduleCreate: true,
 		},
 	}
 
@@ -295,7 +306,11 @@ func TestMessageScheduled_RunE_UnsupportedRecipientsFail(t *testing.T) {
 
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.wantErr)
-			assert.Contains(t, err.Error(), "scion schedule create")
+			if tc.wantScheduleCreate {
+				assert.Contains(t, err.Error(), "scion schedule create")
+			} else {
+				assert.NotContains(t, err.Error(), "scion schedule create")
+			}
 			assert.Empty(t, *recorded, "invalid recipient must fail before sending a Hub request")
 		})
 	}
