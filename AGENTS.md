@@ -16,6 +16,7 @@ Alpha: changing or removing behavior needs no deprecation path.
 | CLI command agent-mode availability | `.design/cli-modes.md` |
 | Experimental features | `docs-site/src/content/docs/reference/experiments.md` |
 | Workspace or worktree provisioning | `docs-site/src/content/docs/local/workspace.md` ("Linked git projects") |
+| Building on another unmerged branch (stacked PRs) | `docs-repo/agents/stacked-branches.md` |
 
 ## Sandbox
 
@@ -43,7 +44,7 @@ Alpha: changing or removing behavior needs no deprecation path.
 
 1. Finish the task with tests.
 2. Before committing run `make ci`, or `make ci-full` for the full GitHub Actions mirror. In an agent container, run the agent-safe split in `docs-repo/agents/sandbox-go-toolchain.md` instead and report which gates ran.
-3. Commit as you go. At the end, rebase on `main` (favor main), re-test after conflicts, notify the user.
+3. Commit as you go. At the end, rebase on `main` (favor main), re-test after conflicts, notify the user. Upstream squash-merges PRs, so move a stacked branch with `git rebase --onto` (`docs-repo/agents/stacked-branches.md`).
 4. Raise adjacent cleanup you notice, with file/function, payoff and blast radius. Don't implement it unprompted.
 
 ## Interim template overrides
