@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -550,8 +551,45 @@ func runSAMint(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("  Verified:  %v\n", sa.Verified)
 	fmt.Printf("  Managed:   %v\n", sa.Managed)
+	printWorkloadIdentityBindings(os.Stdout, sa.WorkloadIdentityBindings)
 
 	return nil
+}
+
+// printWorkloadIdentityBindings prints one line per Workload Identity
+// binding entry of a mint response, with the manual gcloud command for an
+// entry that is not bound. Nothing is printed when there are none.
+func printWorkloadIdentityBindings(w io.Writer, bindings []api.WorkloadIdentityBinding) {
+	if len(bindings) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "  Workload Identity bindings:")
+	anyBound := false
+	for _, b := range bindings {
+		where := strings.Join(b.Profiles, ", ")
+		if b.State == api.WorkloadIdentityBindingBound {
+			anyBound = true
+			fmt.Fprintf(w, "    bound    %s (%s)\n", b.Member, where)
+			continue
+		}
+		target := b.Member
+		if target == "" {
+			target = where
+		} else if where != "" {
+			target += " (" + where + ")"
+		}
+		fmt.Fprintf(w, "    %-8s %s: %s", b.State, target, b.Reason)
+		if b.Detail != "" {
+			fmt.Fprintf(w, " - %s", b.Detail)
+		}
+		fmt.Fprintln(w)
+		if b.ManualStep != "" {
+			fmt.Fprintf(w, "             to grant it by hand: %s\n", b.ManualStep)
+		}
+	}
+	if anyBound {
+		fmt.Fprintln(w, "  A new Workload Identity binding can take a few minutes to take effect.")
+	}
 }
 
 func runSAVerify(cmd *cobra.Command, args []string) error {

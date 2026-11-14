@@ -108,8 +108,8 @@ func TestWorkloadIdentityMintPlanFor(t *testing.T) {
 	assert.Equal(t, workloadIdentityMintTarget{pool: "p1.svc.id.goog", namespace: "dev", profiles: []string{"a/gke-dev"}}, plan.targets[1])
 	assert.Equal(t, []workloadIdentityMissing{
 		{profiles: []string{"a/gke-nopool"}},
-		{profiles: []string{"old/k8s"}, tooOld: true},
 		{profiles: []string{"flat-nopool"}},
+		{profiles: []string{"old/k8s"}, tooOld: true},
 	}, plan.missing)
 
 	assert.True(t, workloadIdentityMintPlanFor([]*store.RuntimeBroker{

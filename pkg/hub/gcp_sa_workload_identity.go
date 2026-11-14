@@ -149,6 +149,9 @@ func workloadIdentityMintPlanFor(brokers []*store.RuntimeBroker) workloadIdentit
 	for i := range plan.targets {
 		sort.Strings(plan.targets[i].profiles)
 	}
+	sort.Slice(plan.missing, func(i, j int) bool {
+		return plan.missing[i].profiles[0] < plan.missing[j].profiles[0]
+	})
 	sort.Slice(plan.targets, func(i, j int) bool {
 		if plan.targets[i].pool != plan.targets[j].pool {
 			return plan.targets[i].pool < plan.targets[j].pool

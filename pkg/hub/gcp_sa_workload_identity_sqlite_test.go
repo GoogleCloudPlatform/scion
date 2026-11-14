@@ -77,7 +77,7 @@ func mintForWI(t *testing.T, srv *Server, projectID string) (wiMintResponse, str
 	t.Helper()
 	rec := doRequest(t, srv, http.MethodPost,
 		fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/mint", projectID),
-		map[string]string{"accountId": "wi-test"})
+		map[string]string{"account_id": "wi-test"})
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	var resp wiMintResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
