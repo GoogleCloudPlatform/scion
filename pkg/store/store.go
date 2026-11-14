@@ -800,6 +800,25 @@ type AgentStore interface {
 	// the others are still recorded.
 	RecordBrokerReportedRuns(ctx context.Context, brokerID string, runs []BrokerReportedRun, seenAt, pruneBefore time.Time) error
 
+	// RecordRuntimeOrphans records the instance orphans one complete
+	// heartbeat inventory of brokerID reported (ptone/scion#7930). Each
+	// orphan whose RuntimeTarget is in completeTargets is upserted on its
+	// identity (kind, broker, target, project, slug, agent ID) with
+	// last_seen_at = now and missed_inventories 0; a new row also gets
+	// first_seen_at = now and is returned in created. Every other instance
+	// row of brokerID on a target in completeTargets has missed_inventories
+	// incremented and is deleted once it reaches removeAfter. Orphans on
+	// other targets are ignored, and rows on other targets are untouched.
+	RecordRuntimeOrphans(ctx context.Context, brokerID string, completeTargets []string, orphans []RuntimeOrphan, now time.Time, removeAfter int) (created []RuntimeOrphan, err error)
+
+	// ListRuntimeOrphans returns the runtime orphans filter selects,
+	// ordered by first_seen_at.
+	ListRuntimeOrphans(ctx context.Context, filter RuntimeOrphanFilter) ([]RuntimeOrphan, error)
+
+	// CountRuntimeOrphans returns the number of runtime orphans per
+	// broker, kind and reason.
+	CountRuntimeOrphans(ctx context.Context) ([]RuntimeOrphanCount, error)
+
 	// AgentRunReportedSince reports whether a broker other than the
 	// agent's assigned broker reported an entry of agentID carrying runID
 	// at or after since (RecordBrokerReportedRuns).
