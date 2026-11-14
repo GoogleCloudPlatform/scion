@@ -103,7 +103,8 @@ func TestScheduledDispatch_RuntimeBrokerSelectionMatchesInteractiveCreate(t *tes
 
 	type outcome struct {
 		brokerID string // expected selection, or "" for a refusal
-		refusal  string // expected refusal message
+		refusal  string // expected refusal message (interactive create's)
+		remedy   string // expected schedule remedy appended on refusal
 	}
 
 	cases := []struct {
@@ -131,7 +132,10 @@ func TestScheduledDispatch_RuntimeBrokerSelectionMatchesInteractiveCreate(t *tes
 			setup: func(t *testing.T, f *bypassAgentsFixture) outcome {
 				off := addSelectionBroker(t, f, "sel-offline", store.BrokerStatusOffline, true, "")
 				setSelectionProjectDefault(t, f, off.ID)
-				return outcome{refusal: "Default runtime broker is unavailable; specify an alternative"}
+				return outcome{
+					refusal: "Default runtime broker is unavailable; specify an alternative",
+					remedy:  scheduledBrokerRemedyDefault,
+				}
 			},
 		},
 		{
@@ -147,16 +151,26 @@ func TestScheduledDispatch_RuntimeBrokerSelectionMatchesInteractiveCreate(t *tes
 				require.NoError(t, f.store.CreateUser(context.Background(), other))
 				priv := addSelectionBroker(t, f, "sel-private", store.BrokerStatusOnline, false, other.ID)
 				setSelectionProjectDefault(t, f, priv.ID)
-				return outcome{refusal: "Default runtime broker is unavailable; specify an alternative"}
+				return outcome{
+					refusal: "Default runtime broker is unavailable; specify an alternative",
+					remedy:  scheduledBrokerRemedyDefault,
+				}
 			},
 		},
 		{
+			// The hub default is a provider other than providers[0], so a
+			// fire that took the first provider would pick another broker.
 			name: "no project default uses the hub default",
 			setup: func(t *testing.T, f *bypassAgentsFixture) outcome {
-				hubDef := addSelectionBroker(t, f, "sel-hub-default", store.BrokerStatusOnline, true, "")
+				addSelectionBroker(t, f, "sel-hub-default", store.BrokerStatusOnline, true, "")
 				setSelectionProjectDefault(t, f, "")
-				setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{DefaultRuntimeBroker: hubDef.Slug})
-				return outcome{brokerID: hubDef.ID}
+				providers, err := f.store.GetProjectProviders(context.Background(), f.proj.ID)
+				require.NoError(t, err)
+				require.Len(t, providers, 2)
+				hubDef := providers[len(providers)-1].BrokerID
+				require.NotEqual(t, providers[0].BrokerID, hubDef)
+				setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{DefaultRuntimeBroker: hubDef})
+				return outcome{brokerID: hubDef}
 			},
 		},
 		{
@@ -173,7 +187,23 @@ func TestScheduledDispatch_RuntimeBrokerSelectionMatchesInteractiveCreate(t *tes
 			setup: func(t *testing.T, f *bypassAgentsFixture) outcome {
 				addSelectionBroker(t, f, "sel-another", store.BrokerStatusOnline, true, "")
 				setSelectionProjectDefault(t, f, "")
-				return outcome{refusal: "Multiple runtime brokers available for this project; specify runtimeBrokerId to select one"}
+				return outcome{
+					refusal: "Multiple runtime brokers available for this project; specify runtimeBrokerId to select one",
+					remedy:  scheduledBrokerRemedyNoDefault,
+				}
+			},
+		},
+		{
+			// No provider at all: before ptone/scion#7868 the fire wrote an
+			// agent row with no broker, which failed later at dispatch.
+			name: "no providers refuses",
+			setup: func(t *testing.T, f *bypassAgentsFixture) outcome {
+				setSelectionProjectDefault(t, f, "")
+				require.NoError(t, f.store.RemoveProjectProvider(context.Background(), f.proj.ID, f.broker.ID))
+				return outcome{
+					refusal: "No runtime brokers available for this project; register a runtime broker first",
+					remedy:  scheduledBrokerRemedyNoProviders,
+				}
 			},
 		},
 	}
@@ -195,7 +225,8 @@ func TestScheduledDispatch_RuntimeBrokerSelectionMatchesInteractiveCreate(t *tes
 			agent, getErr := f.store.GetAgentBySlug(context.Background(), f.proj.ID, agentName)
 			if want.refusal != "" {
 				require.Error(t, err)
-				assert.Contains(t, err.Error(), want.refusal)
+				assert.Contains(t, err.Error(), want.refusal+"; "+want.remedy,
+					"a refused fire reports interactive create's reason and a remedy a schedule owner can act on")
 				assert.Equal(t, want.refusal, interactiveRefusal, "interactive create must refuse the same way")
 				assert.Empty(t, gotInteractive)
 				assert.ErrorIs(t, getErr, store.ErrNotFound, "a refused fire must not leave an agent row")
