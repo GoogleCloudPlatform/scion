@@ -198,6 +198,37 @@ describe('scion-chat-scheduled-list', () => {
     expect(items()[1]!.querySelector('.dismiss-btn')).not.toBeNull();
   });
 
+  it('shows the will-wake marker on pending wake rows and renders wake_failed vs wake_refused actions', async () => {
+    expect(items()[0]!.querySelector('.wake-marker')).toBeNull();
+    emit(sm('a', { status: 'pending', wake: true }), 'created');
+    await flush(el);
+    expect(items()[0]!.querySelector('.wake-marker')?.textContent).toContain('will wake');
+
+    emit(sm('a', { status: 'failed', wake: true, failureReason: 'wake_failed' }), 'failed');
+    emit(
+      sm('b', {
+        fireAt: '2099-10-09T07:00:00Z',
+        status: 'failed',
+        wake: true,
+        failureReason: 'wake_refused',
+      }),
+      'failed'
+    );
+    await flush(el);
+
+    expect(items()[0]!.querySelector('.banner.failed')!.textContent).toContain(
+      'Waking the agent failed.'
+    );
+    expect(items()[0]!.querySelector('.send-now-btn')).not.toBeNull();
+
+    expect(items()[1]!.querySelector('.banner.failed')!.textContent).toContain(
+      "The agent couldn't be woken (no permission, or it is on hold)."
+    );
+    expect(items()[1]!.querySelector('.send-now-btn')).toBeNull();
+    expect(items()[1]!.querySelector('.copy-btn')).not.toBeNull();
+    expect(items()[1]!.querySelector('.dismiss-btn')).not.toBeNull();
+  });
+
   it('Copy to composer offers the text without the empty-composer condition', async () => {
     const restores: { text: string; onlyIfEmpty: boolean }[] = [];
     el.addEventListener('chat-scheduled-restore', (e: CustomEvent) => restores.push(e.detail));

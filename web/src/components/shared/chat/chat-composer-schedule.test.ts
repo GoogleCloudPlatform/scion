@@ -42,7 +42,7 @@ function contextmenu(): MouseEvent {
 describe('composer — schedule send', () => {
   let el: any;
   let sends: string[];
-  let schedules: { text: string; fireAt: string; replyToId?: string }[];
+  let schedules: { text: string; fireAt: string; replyToId?: string; wake?: boolean }[];
 
   const sendBtn = (): HTMLElement => el.shadowRoot.querySelector('.send-btn');
   const menu = (): HTMLElement | null => el.shadowRoot.querySelector('.send-context-menu');
@@ -73,6 +73,7 @@ describe('composer — schedule send', () => {
         text: e.detail.text,
         fireAt: e.detail.fireAt,
         replyToId: e.detail.replyToId,
+        wake: e.detail.wake,
       })
     );
   });
@@ -105,10 +106,37 @@ describe('composer — schedule send', () => {
     );
     await el.updateComplete;
 
-    expect(schedules).toEqual([{ text: 'send this tomorrow', fireAt, replyToId: undefined }]);
+    expect(schedules).toEqual([
+      { text: 'send this tomorrow', fireAt, replyToId: undefined, wake: undefined },
+    ]);
     expect(sends).toEqual([]);
     expect(el.text).toBe('');
     expect(dialog().open).toBe(false);
+  });
+
+  it('passes wakeAvailable to the dialog and carries wake: true on confirm', async () => {
+    el.scheduleSendEnabled = true;
+    el.wakeAvailable = true;
+    await el.updateComplete;
+    expect(dialog().wakeAvailable).toBe(true);
+
+    await openMenu();
+    scheduleItem()!.click();
+    await el.updateComplete;
+
+    const fireAt = new Date(Date.now() + 3_600_000).toISOString();
+    dialog().dispatchEvent(
+      new CustomEvent('schedule-confirm', {
+        detail: { fireAt, wake: true },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await el.updateComplete;
+
+    expect(schedules).toEqual([
+      { text: 'send this tomorrow', fireAt, replyToId: undefined, wake: true },
+    ]);
   });
 
   it('carries the reply-to message and restores the draft on error', async () => {

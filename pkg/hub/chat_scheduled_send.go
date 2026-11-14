@@ -86,14 +86,14 @@ func scheduledMissed(m *ScheduledChatMessage, now time.Time) bool {
 	return now.Sub(m.FireAt) > scheduledLateCutoff
 }
 
-// scheduledDeliveryBudget bounds the fire-time checks and the send of one
-// claimed message. A send dispatches to the primary agent and each
-// @mentioned agent one after another, each bounded by chatWakeDeliveryBudget
-// (as on the live path, where the request context has no deadline), so the
-// budget covers that worst case plus a margin for the checks and
-// persistence: a scheduled send is never cut shorter than a live one. It
-// is a variable so tests can shorten it.
-var scheduledDeliveryBudget = time.Duration(1+messages.MaxMentionRecipients)*chatWakeDeliveryBudget + 30*time.Second
+// scheduledDeliveryBudget bounds the fire-time checks, an optional primary
+// agent wake (chatWakeResumeBudget), and the send of one claimed message. A
+// send dispatches to the primary agent and each @mentioned agent one after
+// another, each bounded by chatWakeDeliveryBudget (as on the live path, where
+// the request context has no deadline), so the budget covers that worst case
+// plus a margin for the checks and persistence: a scheduled send is never cut
+// shorter than a live one. It is a variable so tests can shorten it.
+var scheduledDeliveryBudget = chatWakeResumeBudget + time.Duration(1+messages.MaxMentionRecipients)*chatWakeDeliveryBudget + 30*time.Second
 
 // ErrCodeScheduledLimit is returned when a sender already has the maximum
 // number of pending scheduled messages.
@@ -116,6 +116,7 @@ type scheduledMessageResponse struct {
 	Content         string    `json:"content"`
 	ReplyToID       string    `json:"replyToId,omitempty"`
 	FireAt          time.Time `json:"fireAt"`
+	Wake            bool      `json:"wake"`
 	Status          string    `json:"status"`
 	FailureReason   string    `json:"failureReason,omitempty"`
 	MessageID       string    `json:"messageId,omitempty"`
@@ -130,6 +131,7 @@ func newScheduledMessageResponse(m *ScheduledChatMessage) scheduledMessageRespon
 		Content:         m.Content,
 		ReplyToID:       m.ReplyToID,
 		FireAt:          m.FireAt.UTC(),
+		Wake:            m.Wake,
 		Status:          m.Status,
 		FailureReason:   m.FailureReason,
 		MessageID:       m.MessageID,
@@ -304,6 +306,7 @@ func (s *Server) handleScheduledCreate(w http.ResponseWriter, r *http.Request, k
 		Content        string   `json:"content"`
 		ReplyToID      string   `json:"reply_to_id,omitempty"`
 		FireAt         string   `json:"fire_at"`
+		Wake           bool     `json:"wake,omitempty"`
 		IdempotencyKey string   `json:"idempotency_key,omitempty"`
 		Attachments    []string `json:"attachments,omitempty"`
 	}
@@ -313,6 +316,10 @@ func (s *Server) handleScheduledCreate(w http.ResponseWriter, r *http.Request, k
 	}
 	if len(body.Attachments) > 0 {
 		ValidationError(w, "attachments cannot be scheduled", nil)
+		return
+	}
+	if body.Wake && strings.HasPrefix(key, "dm:user:") {
+		ValidationError(w, "wake requires an agent conversation", nil)
 		return
 	}
 	if len(body.ReplyToID) > scheduledMaxReplyToIDLen {
@@ -388,6 +395,7 @@ func (s *Server) handleScheduledCreate(w http.ResponseWriter, r *http.Request, k
 		ReplyToID:       body.ReplyToID,
 		IdempotencyKey:  idemKey,
 		FireAt:          fireAt,
+		Wake:            body.Wake,
 		Status:          ScheduledMessagePending,
 		CreatedAt:       now,
 		UpdatedAt:       now,
@@ -573,7 +581,7 @@ func (s *Server) handleScheduledSendNow(w http.ResponseWriter, r *http.Request, 
 	}
 	if !scheduledSendNowAllowed(row) {
 		writeError(w, http.StatusConflict, ErrCodeConflict,
-			"only a missed or interrupted message can be sent now",
+			"only a missed, interrupted or wake-failed message can be sent now",
 			map[string]interface{}{"status": row.Status, "failureReason": row.FailureReason})
 		return
 	}
@@ -603,7 +611,7 @@ func (s *Server) handleScheduledSendNow(w http.ResponseWriter, r *http.Request, 
 	}
 	if !ok {
 		writeError(w, http.StatusConflict, ErrCodeConflict,
-			"only a missed or interrupted message can be sent now", nil)
+			"only a missed, interrupted or wake-failed message can be sent now", nil)
 		return
 	}
 	updated, err := sms.GetScheduledMessage(ctx, user.ID(), id)
@@ -618,10 +626,12 @@ func (s *Server) handleScheduledSendNow(w http.ResponseWriter, r *http.Request, 
 }
 
 // scheduledSendNowAllowed reports whether the sender may ask for m to be
-// sent now: only a message that failed as missed or interrupted.
+// sent now: only a message that failed as missed, interrupted or wake_failed.
 func scheduledSendNowAllowed(m *ScheduledChatMessage) bool {
 	return m.Status == ScheduledMessageFailed &&
-		(m.FailureReason == ScheduledFailureMissed || m.FailureReason == ScheduledFailureInterrupted)
+		(m.FailureReason == ScheduledFailureMissed ||
+			m.FailureReason == ScheduledFailureInterrupted ||
+			m.FailureReason == ScheduledFailureWakeFailed)
 }
 
 // handleScheduledDismiss implements POST …/{key}/scheduled/{id}/dismiss:
@@ -1208,6 +1218,12 @@ func (s *Server) checkScheduledDMFire(ctx context.Context, user UserIdentity, m 
 // sendChatMessage also answers 404 for a store error while reading the
 // conversation.
 func scheduledFailureFromSendError(serr *chatSendError) string {
+	switch serr.wakeFailure {
+	case wakeFailureRefused:
+		return ScheduledFailureWakeRefused
+	case wakeFailureFailed:
+		return ScheduledFailureWakeFailed
+	}
 	if serr.Status == http.StatusForbidden || serr.accessRefused {
 		return ScheduledFailureNoAccess
 	}
@@ -1232,8 +1248,9 @@ func finalizeContext(ctx context.Context) (context.Context, context.CancelFunc) 
 }
 
 // fireScheduledMessage delivers a row this replica has claimed. Once
-// sendChatMessage has been called the row never returns to pending: it
-// ends sent or failed, so a message is sent at most once.
+// sendChatMessage has been called the row never returns to pending — except
+// when a cut-short wake send fails before persisting a message — so a
+// persisted message is sent at most once.
 //
 // The checks and the send run on a context detached from ctx's
 // cancellation (server shutdown) and bounded by scheduledDeliveryBudget;
@@ -1262,23 +1279,7 @@ func (s *Server) fireScheduledMessage(ctx context.Context, sms ScheduledMessageS
 		check.transient = true
 	}
 	if check.transient {
-		fctx, fcancel := finalizeContext(base)
-		defer fcancel()
-		now := time.Now().UTC()
-		ok, err := sms.ReleaseScheduledMessage(fctx, m.ID, scheduledClaimOf(m), now)
-		if err != nil {
-			scheduledSendLog().Warn("scheduled send: release failed", "id", m.ID, "error", err)
-			return
-		}
-		if !ok {
-			scheduledSendLog().Warn("scheduled send: row changed before release; not released", "id", m.ID)
-			return
-		}
-		m.Status = ScheduledMessagePending
-		m.ClaimedAt = nil
-		m.UpdatedAt = now
-		s.publishScheduledMessage(base, "released", m)
-		return true
+		return s.releaseScheduledMessage(base, sms, m)
 	}
 	if check.reason != "" {
 		s.failScheduledMessage(base, sms, m, check.reason)
@@ -1297,14 +1298,23 @@ func (s *Server) fireScheduledMessage(ctx context.Context, sms ScheduledMessageS
 				resp, serr = nil, newChatSendError(http.StatusInternalServerError, "INTERNAL", "panic during delivery", nil)
 			}
 		}()
-		// Never an interrupt and never a wake: a scheduled message reaches
-		// agents as an ordinary queued message.
+		// Never an interrupt; Wake follows the row's opt-in (for the primary
+		// agent recipient only, without detaching from shutdown).
 		resp, serr = s.sendChatMessage(ctx, check.user, m.ConversationKey, chatSendInput{
 			Content:   m.Content,
 			ReplyToID: check.replyToID,
+			Wake:      m.Wake,
 		})
 	}()
 	if serr != nil {
+		// On a wake send, wake errors and pre-persistence errors (such as
+		// CreateMessage failing on a delivery context aborted while the
+		// detached resume completed) leave no stored message row. If the
+		// sweeper was cut short, hand the row back to pending so the next
+		// sweep retries it instead of recording a false failure.
+		if (serr.wakeFailure != "" || serr.notPersisted) && cutShort() {
+			return s.releaseScheduledMessage(base, sms, m)
+		}
 		scheduledSendLog().Info("scheduled send: delivery refused", "id", m.ID, "status", serr.Status, "code", serr.Code)
 		// A refusal observed after an abort is a delivery error: an aborted
 		// delivery says nothing about access.
@@ -1340,6 +1350,28 @@ func scheduledClaimOf(m *ScheduledChatMessage) time.Time {
 		return time.Time{}
 	}
 	return *m.ClaimedAt
+}
+
+// releaseScheduledMessage hands a claimed row back to pending before any
+// message has been persisted, on a fresh context derived from base.
+func (s *Server) releaseScheduledMessage(base context.Context, sms ScheduledMessageStore, m *ScheduledChatMessage) bool {
+	fctx, fcancel := finalizeContext(base)
+	defer fcancel()
+	now := time.Now().UTC()
+	ok, err := sms.ReleaseScheduledMessage(fctx, m.ID, scheduledClaimOf(m), now)
+	if err != nil {
+		scheduledSendLog().Warn("scheduled send: release failed", "id", m.ID, "error", err)
+		return false
+	}
+	if !ok {
+		scheduledSendLog().Warn("scheduled send: row changed before release; not released", "id", m.ID)
+		return false
+	}
+	m.Status = ScheduledMessagePending
+	m.ClaimedAt = nil
+	m.UpdatedAt = now
+	s.publishScheduledMessage(base, "released", m)
+	return true
 }
 
 // failScheduledMessage records a claimed row as failed, on a fresh context

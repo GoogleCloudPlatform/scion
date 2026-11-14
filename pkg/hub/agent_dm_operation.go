@@ -269,6 +269,10 @@ type AgentDMError struct {
 	// RetryAfter is set when the error is a rate-limit rejection.
 	// Adapters should set the Retry-After header to this duration.
 	RetryAfter time.Duration
+
+	// StandingRefused reports whether a startGate standing check (a held
+	// agent, held ancestor, or root user out of standing) refused a wake.
+	StandingRefused bool
 }
 
 func (e *AgentDMError) Error() string { return e.Message }

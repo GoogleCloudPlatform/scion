@@ -159,7 +159,37 @@ func testScheduledStorePhase2Transitions(t *testing.T, sms ScheduledMessageStore
 	failRow(t, sms, noAccess.ID, ScheduledFailureNoAccess, base)
 	ok, err = sms.SendNowScheduledMessage(ctx, "p2-a", noAccess.ID, base, base)
 	require.NoError(t, err)
-	assert.False(t, ok, "only missed and interrupted can be sent now")
+	assert.False(t, ok, "no_access cannot be sent now")
+
+	// Wake column round-trip and SendNow allowance on wake_failed vs wake_refused.
+	wakeFailedIn := newTestScheduledRow("p2-wake-failed", "p2-a", base.Add(-time.Minute))
+	wakeFailedIn.ConversationKey = "p2-conv"
+	wakeFailedIn.Wake = true
+	wakeFailed, _, err := sms.CreateScheduledMessage(ctx, wakeFailedIn)
+	require.NoError(t, err)
+	assert.True(t, wakeFailed.Wake, "wake=true round-trips through CreateScheduledMessage")
+	assert.True(t, get("p2-a", wakeFailed.ID).Wake, "wake=true round-trips through GetScheduledMessage")
+	assert.False(t, missed.Wake, "wake defaults to false")
+	failRow(t, sms, wakeFailed.ID, ScheduledFailureWakeFailed, base)
+	ok, err = sms.SendNowScheduledMessage(ctx, "p2-a", wakeFailed.ID, base, base)
+	require.NoError(t, err)
+	assert.True(t, ok, "wake_failed can be sent now")
+	gotWakeFailed := get("p2-a", wakeFailed.ID)
+	assert.Equal(t, ScheduledMessagePending, gotWakeFailed.Status)
+	assert.Empty(t, gotWakeFailed.FailureReason)
+	assert.True(t, gotWakeFailed.Wake, "send-now preserves stored wake=true")
+
+	wakeRefusedIn := newTestScheduledRow("p2-wake-refused", "p2-a", base.Add(-time.Minute))
+	wakeRefusedIn.ConversationKey = "p2-conv"
+	wakeRefusedIn.Wake = true
+	wakeRefused, _, err := sms.CreateScheduledMessage(ctx, wakeRefusedIn)
+	require.NoError(t, err)
+	failRow(t, sms, wakeRefused.ID, ScheduledFailureWakeRefused, base)
+	ok, err = sms.SendNowScheduledMessage(ctx, "p2-a", wakeRefused.ID, base, base)
+	require.NoError(t, err)
+	assert.False(t, ok, "wake_refused cannot be sent now")
+	_, err = sms.DismissScheduledMessage(ctx, "p2-a", wakeRefused.ID, base)
+	require.NoError(t, err)
 
 	// Dismiss: failed rows only, only the sender's; then no longer listed.
 	ok, err = sms.DismissScheduledMessage(ctx, "p2-b", noAccess.ID, base)

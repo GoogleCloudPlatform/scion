@@ -13,8 +13,8 @@ Scheduled send is behind the `web.chat_scheduled_send` [experiment](/scion/refer
 
 1. Type your message in a topic or a direct message (with an agent or another user).
 2. Right-click **Send** (on a touch screen, press and hold it) and choose **Schedule send…**.
-3. Pick a preset (**In 1 hour**, **Tomorrow 09:00**, **Monday 09:00**) or enter a date and time. Times are in your display time zone, shown under the field.
-4. Confirm. The composer clears and the message appears at the bottom of the thread, dimmed, with the time it will be sent.
+3. Pick a preset (**In 1 hour**, **Tomorrow 09:00**, **Monday 09:00**) or enter a date and time. Times are in your display time zone, shown under the field. In a topic or a direct message with an agent, you can also check **Wake the agent if it is suspended** (off by default).
+4. Confirm. The composer clears and the message appears at the bottom of the thread, dimmed, with the time it will be sent (and a **will wake** marker when wake is enabled).
 
 The time must be at least one minute and at most 90 days ahead. You can have up to 50 messages waiting to be sent at once, across all conversations. Attachments and artifact references cannot be scheduled, and a message you are editing cannot be scheduled.
 
@@ -24,7 +24,7 @@ Only you. Until it is sent, a scheduled message is not in the thread history, se
 
 ## Changing or cancelling
 
-Click **Cancel** on the message's banner. If the composer is empty, the text goes back into it, so to change a scheduled message you cancel it, edit the text, and schedule it again. Once the Hub has started sending a message it can no longer be cancelled.
+Click **Cancel** on the message's banner. If the composer is empty, the text goes back into it, so to change a scheduled message you cancel it, edit the text, and schedule it again (choosing the wake option again if needed). Once the Hub has started sending a message it can no longer be cancelled.
 
 ## When the message is sent
 
@@ -35,7 +35,7 @@ The Hub checks for due messages every 10 seconds, so a message is sent within ab
 - in a direct message: the other participant still exists and you may still message them (an agent still accepts messages from you; a user has not been suspended or removed);
 - each agent the message is routed to will accept a message from you.
 
-Routing is worked out at that moment too: the topic's current default agent (or, in a direct message, the agent you are talking to), the agents you @-mention, and the message you replied to (if it was deleted, the message is sent without the reply link). A scheduled message never interrupts an agent and never wakes a suspended one.
+Routing is worked out at that moment too: the topic's current default agent (or, in a direct message, the agent you are talking to), the agents you @-mention, and the message you replied to (if it was deleted, the message is sent without the reply link). A scheduled message never interrupts an agent. By default it does not wake a suspended agent either; when **Wake the agent if it is suspended** is checked and the primary agent recipient is suspended, the Hub checks that you have permission to start that agent and that it is in good standing, resumes it, and then delivers the message. Secondary @-mentioned agents and stopped, errored or halted agents are never woken.
 
 Each scheduled message is sent at most once.
 
@@ -51,11 +51,13 @@ If a check fails, the message is not sent and its banner turns red with the reas
 | Your account is not active | Your account was suspended. |
 | It was found more than an hour after its time | The Hub found the message more than 60 minutes after its time, for example after downtime or while the experiment was off. It is not sent that late without asking you. |
 | Delivery was interrupted | The Hub stopped while it was sending the message. It may or may not have reached the thread; check the thread before sending it again. The Hub never sends it again on its own. |
+| The agent couldn't be woken (no permission, or it is on hold) | Wake was requested for a suspended primary agent, but you do not have permission to start it, or the agent (or an ancestor) is on hold. Nothing was posted to the thread. |
+| Waking the agent failed | Wake was requested for a suspended primary agent, and starting it or waiting for readiness failed (for example the Runtime Broker was unavailable, capacity was full, or another start was already in progress). Nothing was posted to the thread. |
 | Delivery failed | Any other error. |
 
 A failed message offers:
 
-- **Send now**: only for a missed or interrupted message. The Hub runs the same checks as when you schedule a message, then sends it within about 10 seconds, after checking again as described above.
+- **Send now**: only for a missed or interrupted message, or one where waking the agent failed. The Hub runs the same checks as when you schedule a message, then sends it within about 10 seconds (retrying the wake if enabled), after checking again as described above.
 - **Copy to composer**: puts the text into the composer, after any draft, so you can send or schedule it again.
 - **Dismiss**: removes the message from the thread.
 

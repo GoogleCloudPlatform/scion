@@ -176,6 +176,7 @@ const USED_ICONS = [
   'plus-circle',
   'plug',
   'plus-lg',
+  'power',
   'printer',
   'puzzle',
   'question-circle',

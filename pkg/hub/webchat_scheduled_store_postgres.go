@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS webchat_scheduled_message (
     reply_to_id      TEXT,
     idempotency_key  TEXT NOT NULL,
     fire_at          TIMESTAMPTZ NOT NULL,
+    wake             BOOLEAN NOT NULL DEFAULT false,
     status           TEXT NOT NULL,
     failure_reason   TEXT,
     message_id       TEXT,
@@ -59,10 +60,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_webchat_scheduled_message_idempotency
     ON webchat_scheduled_message (sender_user_id, idempotency_key);
 `
 
-// initScheduledMessages creates webchat_scheduled_message (idempotent) and
-// records it in webchat_migrations. It runs on every replica's Init, not
-// under the migration advisory lock: the DDL is IF NOT EXISTS, so a replica
-// that skips the locked migrations still has the table.
+// initScheduledMessages creates webchat_scheduled_message (idempotent), adds
+// the wake column on existing databases, and records both in
+// webchat_migrations. It runs on every replica's Init, not under the
+// migration advisory lock: the DDL is IF NOT EXISTS, so a replica that skips
+// the locked migrations still has the table and column.
 func (s *pgWebChatStore) initScheduledMessages() error {
 	if _, err := s.db.Exec(pgScheduledMessageDDL); err != nil {
 		return fmt.Errorf("webchat store: create scheduled message table: %w", err)
@@ -70,19 +72,32 @@ func (s *pgWebChatStore) initScheduledMessages() error {
 	if err := s.markMigrationCompleted(scheduledMessageTableMigration); err != nil {
 		return fmt.Errorf("webchat store: record scheduled message migration: %w", err)
 	}
+	wakeDone, err := s.migrationCompleted(scheduledMessageWakeMigration)
+	if err != nil {
+		return fmt.Errorf("webchat store: scheduled message wake migration: %w", err)
+	}
+	if wakeDone {
+		return nil
+	}
+	if _, err := s.db.Exec(`ALTER TABLE webchat_scheduled_message ADD COLUMN IF NOT EXISTS wake BOOLEAN NOT NULL DEFAULT false`); err != nil {
+		return fmt.Errorf("webchat store: add scheduled message wake column: %w", err)
+	}
+	if err := s.markMigrationCompleted(scheduledMessageWakeMigration); err != nil {
+		return fmt.Errorf("webchat store: record scheduled message wake migration: %w", err)
+	}
 	return nil
 }
 
 const pgScheduledColumns = `id, sender_user_id, conversation_key, COALESCE(project_id, ''), content,
        COALESCE(reply_to_id, ''), idempotency_key, fire_at, status, COALESCE(failure_reason, ''),
-       COALESCE(message_id, ''), created_at, updated_at, claimed_at`
+       COALESCE(message_id, ''), created_at, updated_at, claimed_at, wake`
 
 func scanPGScheduled(row interface{ Scan(...any) error }) (*ScheduledChatMessage, error) {
 	var m ScheduledChatMessage
 	var claimedAt sql.NullTime
 	if err := row.Scan(&m.ID, &m.SenderUserID, &m.ConversationKey, &m.ProjectID, &m.Content,
 		&m.ReplyToID, &m.IdempotencyKey, &m.FireAt, &m.Status, &m.FailureReason,
-		&m.MessageID, &m.CreatedAt, &m.UpdatedAt, &claimedAt); err != nil {
+		&m.MessageID, &m.CreatedAt, &m.UpdatedAt, &claimedAt, &m.Wake); err != nil {
 		return nil, err
 	}
 	m.FireAt = m.FireAt.UTC()
@@ -115,12 +130,12 @@ func (s *pgWebChatStore) CreateScheduledMessage(ctx context.Context, m *Schedule
 	const query = `
 INSERT INTO webchat_scheduled_message
     (id, sender_user_id, conversation_key, project_id, content, reply_to_id, idempotency_key,
-     fire_at, status, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+     fire_at, wake, status, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 ON CONFLICT (sender_user_id, idempotency_key) DO NOTHING
 `
 	res, err := s.db.ExecContext(ctx, query, m.ID, m.SenderUserID, m.ConversationKey, nullableString(m.ProjectID),
-		m.Content, nullableString(m.ReplyToID), m.IdempotencyKey, scheduledFireTime(m.FireAt), m.Status,
+		m.Content, nullableString(m.ReplyToID), m.IdempotencyKey, scheduledFireTime(m.FireAt), m.Wake, m.Status,
 		m.CreatedAt.UTC(), m.UpdatedAt.UTC())
 	if err != nil {
 		return nil, false, fmt.Errorf("webchat store: create scheduled message: %w", err)
@@ -258,9 +273,9 @@ func (s *pgWebChatStore) SendNowScheduledMessage(ctx context.Context, senderUser
 	return execOneRow("send now scheduled message")(s.db.ExecContext(ctx,
 		`UPDATE webchat_scheduled_message
 		    SET status = $1, fire_at = $2, failure_reason = NULL, message_id = NULL, claimed_at = NULL, updated_at = $3
-		  WHERE id = $4 AND sender_user_id = $5 AND status = $6 AND failure_reason IN ($7, $8)`,
+		  WHERE id = $4 AND sender_user_id = $5 AND status = $6 AND failure_reason IN ($7, $8, $9)`,
 		ScheduledMessagePending, scheduledFireTime(fireAt), now.UTC(),
-		id, senderUserID, ScheduledMessageFailed, ScheduledFailureMissed, ScheduledFailureInterrupted))
+		id, senderUserID, ScheduledMessageFailed, ScheduledFailureMissed, ScheduledFailureInterrupted, ScheduledFailureWakeFailed))
 }
 
 func (s *pgWebChatStore) DismissScheduledMessage(ctx context.Context, senderUserID, id string, now time.Time) (bool, error) {

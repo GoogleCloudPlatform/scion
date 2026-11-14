@@ -31,7 +31,7 @@ import (
 // Scheduled message wake (ptone/scion#7734): a message event whose payload
 // sets wake resumes a suspended target before delivery, through the shared
 // direct-message wake path (wakeAgentForDM). Chat scheduled sends
-// (chat_scheduled_send.go) never wake.
+// (chat_scheduled_send.go) have their own opt-in wake on the chat send path.
 
 // scheduledWakePermission is the permission a scheduled wake exercises: the
 // lifecycle permission a direct-message wake needs (wakeResumeDenial).

@@ -33,6 +33,7 @@ import { resolveScheduleTime, scheduleInputBounds, schedulePresets } from './sch
 
 export interface ScheduleConfirmDetail {
   fireAt: string;
+  wake?: boolean;
 }
 
 @customElement('scion-chat-schedule-dialog')
@@ -40,7 +41,12 @@ export class ScionChatScheduleDialog extends LitElement {
   @property({ type: Boolean })
   open = false;
 
+  /** Whether the conversation supports waking a suspended agent recipient. */
+  @property({ type: Boolean })
+  wakeAvailable = false;
+
   @state() private value = '';
+  @state() private wake = false;
   @state() private error = '';
 
   readonly _zone = new DisplayZoneController(this);
@@ -51,6 +57,10 @@ export class ScionChatScheduleDialog extends LitElement {
       flex-wrap: wrap;
       gap: 0.5rem;
       margin-bottom: 1rem;
+    }
+    .wake-checkbox {
+      display: block;
+      margin-top: 0.75rem;
     }
     .error {
       color: var(--sl-color-danger-600, #dc2626);
@@ -64,6 +74,7 @@ export class ScionChatScheduleDialog extends LitElement {
       // Start from tomorrow 09:00, the most common choice.
       const presets = schedulePresets(new Date(), effectiveTimeZone());
       this.value = presets.find((p) => p.id === 'tomorrow-9')?.value ?? '';
+      this.wake = false;
       this.error = '';
     }
   }
@@ -103,6 +114,16 @@ export class ScionChatScheduleDialog extends LitElement {
             this.error = '';
           }}
         ></sl-input>
+        ${this.wakeAvailable
+          ? html`<sl-checkbox
+              class="wake-checkbox"
+              .checked=${this.wake}
+              @sl-change=${(e: Event) => {
+                this.wake = (e.target as HTMLInputElement).checked;
+              }}
+              >Wake the agent if it is suspended</sl-checkbox
+            >`
+          : nothing}
         ${this.error ? html`<div class="error" role="alert">${this.error}</div>` : nothing}
         <sl-button slot="footer" class="cancel-btn" @click=${this.handleCancel}>Cancel</sl-button>
         <sl-button slot="footer" class="confirm-btn" variant="primary" @click=${this.handleConfirm}>
@@ -120,7 +141,7 @@ export class ScionChatScheduleDialog extends LitElement {
     }
     this.dispatchEvent(
       new CustomEvent<ScheduleConfirmDetail>('schedule-confirm', {
-        detail: { fireAt: result.fireAt },
+        detail: { fireAt: result.fireAt, wake: this.wakeAvailable ? this.wake : false },
         bubbles: true,
         composed: true,
       })

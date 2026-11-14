@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -47,6 +48,8 @@ const (
 	ScheduledFailureMissed           = "missed"
 	ScheduledFailureInterrupted      = "interrupted"
 	ScheduledFailureDeliveryError    = "delivery_error"
+	ScheduledFailureWakeRefused      = "wake_refused"
+	ScheduledFailureWakeFailed       = "wake_failed"
 )
 
 // ScheduledChatMessage is one row of webchat_scheduled_message.
@@ -63,6 +66,7 @@ type ScheduledChatMessage struct {
 	ReplyToID      string
 	IdempotencyKey string
 	FireAt         time.Time
+	Wake           bool
 	Status         string
 	FailureReason  string
 	MessageID      string
@@ -128,8 +132,8 @@ type ScheduledMessageStore interface {
 	MarkScheduledMessageFailed(ctx context.Context, id, reason string, claimedAt, now time.Time) (bool, error)
 
 	// SendNowScheduledMessage moves the sender's row from failed with
-	// reason missed or interrupted back to pending, due at fireAt. It
-	// reports false when the row is not in that state (or not the
+	// reason missed, interrupted or wake_failed back to pending, due at
+	// fireAt. It reports false when the row is not in that state (or not the
 	// sender's). Only the sender's explicit request calls it; the hub never
 	// returns a row to pending on its own once delivery has started.
 	SendNowScheduledMessage(ctx context.Context, senderUserID, id string, fireAt, now time.Time) (bool, error)
@@ -171,6 +175,10 @@ func scheduledMessageStoreFrom(wcs WebChatStore) ScheduledMessageStore {
 // records the creation of webchat_scheduled_message.
 const scheduledMessageTableMigration = "scheduled_message_table"
 
+// scheduledMessageWakeMigration names the webchat_migrations row that
+// records adding the wake column to webchat_scheduled_message.
+const scheduledMessageWakeMigration = "scheduled_message_wake_column"
+
 // ---------------------------------------------------------------------------
 // SQLite implementation
 // ---------------------------------------------------------------------------
@@ -210,6 +218,7 @@ CREATE TABLE IF NOT EXISTS webchat_scheduled_message (
     reply_to_id      TEXT,
     idempotency_key  TEXT NOT NULL,
     fire_at          TEXT NOT NULL,
+    wake             BOOLEAN NOT NULL DEFAULT false,
     status           TEXT NOT NULL,
     failure_reason   TEXT,
     message_id       TEXT,
@@ -234,8 +243,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_webchat_scheduled_message_idempotency
     ON webchat_scheduled_message (sender_user_id, idempotency_key);
 `
 
-// initScheduledMessages creates webchat_scheduled_message (idempotent) and
-// records it in webchat_migrations.
+// initScheduledMessages creates webchat_scheduled_message (idempotent), adds
+// the wake column on existing databases, and records both in
+// webchat_migrations.
 func (s *sqliteWebChatStore) initScheduledMessages() error {
 	if _, err := s.db.Exec(sqliteScheduledMessageDDL); err != nil {
 		return fmt.Errorf("webchat store: create scheduled message table: %w", err)
@@ -244,19 +254,33 @@ func (s *sqliteWebChatStore) initScheduledMessages() error {
 	if err != nil {
 		return fmt.Errorf("webchat store: scheduled message migration: %w", err)
 	}
-	if done {
+	if !done {
+		if err := s.markMigrationCompleted(scheduledMessageTableMigration); err != nil {
+			return fmt.Errorf("webchat store: record scheduled message migration: %w", err)
+		}
+	}
+	wakeDone, err := s.migrationCompleted(scheduledMessageWakeMigration)
+	if err != nil {
+		return fmt.Errorf("webchat store: scheduled message wake migration: %w", err)
+	}
+	if wakeDone {
 		return nil
 	}
-	const query = `INSERT INTO webchat_migrations (name, completed_at) VALUES (?, ?) ON CONFLICT (name) DO NOTHING`
-	if _, err := s.db.Exec(query, scheduledMessageTableMigration, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
-		return fmt.Errorf("webchat store: record scheduled message migration: %w", err)
+	if _, err := s.db.Exec(`ALTER TABLE webchat_scheduled_message ADD COLUMN wake BOOLEAN NOT NULL DEFAULT false`); err != nil {
+		// Fresh databases already created the column in sqliteScheduledMessageDDL.
+		if !strings.Contains(err.Error(), "duplicate column") {
+			return fmt.Errorf("webchat store: add scheduled message wake column: %w", err)
+		}
+	}
+	if err := s.markMigrationCompleted(scheduledMessageWakeMigration); err != nil {
+		return fmt.Errorf("webchat store: record scheduled message wake migration: %w", err)
 	}
 	return nil
 }
 
 const sqliteScheduledColumns = `id, sender_user_id, conversation_key, COALESCE(project_id, ''), content,
        COALESCE(reply_to_id, ''), idempotency_key, fire_at, status, COALESCE(failure_reason, ''),
-       COALESCE(message_id, ''), created_at, updated_at, claimed_at`
+       COALESCE(message_id, ''), created_at, updated_at, claimed_at, wake`
 
 func scanSQLiteScheduled(row interface{ Scan(...any) error }) (*ScheduledChatMessage, error) {
 	var m ScheduledChatMessage
@@ -264,7 +288,7 @@ func scanSQLiteScheduled(row interface{ Scan(...any) error }) (*ScheduledChatMes
 	var claimedAt sql.NullString
 	if err := row.Scan(&m.ID, &m.SenderUserID, &m.ConversationKey, &m.ProjectID, &m.Content,
 		&m.ReplyToID, &m.IdempotencyKey, &fireAt, &m.Status, &m.FailureReason,
-		&m.MessageID, &createdAt, &updatedAt, &claimedAt); err != nil {
+		&m.MessageID, &createdAt, &updatedAt, &claimedAt, &m.Wake); err != nil {
 		return nil, err
 	}
 	m.FireAt = parseSQLiteTime(fireAt)
@@ -281,13 +305,13 @@ func (s *sqliteWebChatStore) CreateScheduledMessage(ctx context.Context, m *Sche
 	const query = `
 INSERT INTO webchat_scheduled_message
     (id, sender_user_id, conversation_key, project_id, content, reply_to_id, idempotency_key,
-     fire_at, status, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     fire_at, wake, status, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (sender_user_id, idempotency_key) DO NOTHING
 `
 	res, err := s.db.ExecContext(ctx, query, m.ID, m.SenderUserID, m.ConversationKey, nullableString(m.ProjectID),
-		m.Content, nullableString(m.ReplyToID), m.IdempotencyKey, sqliteScheduledTime(scheduledFireTime(m.FireAt)), m.Status,
-		sqliteScheduledTime(m.CreatedAt), sqliteScheduledTime(m.UpdatedAt))
+		m.Content, nullableString(m.ReplyToID), m.IdempotencyKey, sqliteScheduledTime(scheduledFireTime(m.FireAt)),
+		m.Wake, m.Status, sqliteScheduledTime(m.CreatedAt), sqliteScheduledTime(m.UpdatedAt))
 	if err != nil {
 		return nil, false, fmt.Errorf("webchat store: create scheduled message: %w", err)
 	}
@@ -444,9 +468,9 @@ func (s *sqliteWebChatStore) SendNowScheduledMessage(ctx context.Context, sender
 	return execOneRow("send now scheduled message")(s.db.ExecContext(ctx,
 		`UPDATE webchat_scheduled_message
 		    SET status = ?, fire_at = ?, failure_reason = NULL, message_id = NULL, claimed_at = NULL, updated_at = ?
-		  WHERE id = ? AND sender_user_id = ? AND status = ? AND failure_reason IN (?, ?)`,
+		  WHERE id = ? AND sender_user_id = ? AND status = ? AND failure_reason IN (?, ?, ?)`,
 		ScheduledMessagePending, sqliteScheduledTime(scheduledFireTime(fireAt)), sqliteScheduledTime(now),
-		id, senderUserID, ScheduledMessageFailed, ScheduledFailureMissed, ScheduledFailureInterrupted))
+		id, senderUserID, ScheduledMessageFailed, ScheduledFailureMissed, ScheduledFailureInterrupted, ScheduledFailureWakeFailed))
 }
 
 func (s *sqliteWebChatStore) DismissScheduledMessage(ctx context.Context, senderUserID, id string, now time.Time) (bool, error) {

@@ -118,6 +118,10 @@ type startRefusal struct {
 	// launch marks a step 2 or 3 refusal. DM wake reports those in its
 	// runtime-error shape.
 	launch bool
+	// StandingRefused marks the step 1c standing refusal (409 from
+	// agentSuspendedRefusal): the agent or an ancestor is held, or its root
+	// user is not in good standing.
+	StandingRefused bool
 }
 
 // refuses reports whether r refuses the start.
@@ -142,10 +146,11 @@ func (r *startRefusal) dmError() *AgentDMError {
 		}
 	}
 	return &AgentDMError{
-		Code:       r.Code,
-		Message:    r.Message,
-		HTTPStatus: r.HTTPStatus,
-		Details:    r.Details,
+		Code:            r.Code,
+		Message:         r.Message,
+		HTTPStatus:      r.HTTPStatus,
+		Details:         r.Details,
+		StandingRefused: r.StandingRefused,
 	}
 }
 

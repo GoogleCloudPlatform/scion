@@ -67,6 +67,7 @@ import {
 import type { ChatScheduleDetail, ChatSendDetail, ScionChatComposer } from './chat-composer.js';
 import {
   conversationSupportsScheduledSend,
+  conversationSupportsScheduledWake,
   createScheduledMessage,
   scheduledSendEnabled,
 } from '../../../client/chat-scheduled.js';
@@ -3525,7 +3526,7 @@ export class ScionChatThread extends LitElement {
   private readonly handleChatScheduleV2 = async (
     e: CustomEvent<ChatScheduleDetail>
   ): Promise<void> => {
-    const { text, fireAt, replyToId, onSuccess, onError } = e.detail;
+    const { text, fireAt, replyToId, wake, onSuccess, onError } = e.detail;
     const key = this.conversationKey;
     const savedReplyTo = this.composerReplyTo;
     this.composerReplyTo = null;
@@ -3535,6 +3536,7 @@ export class ScionChatThread extends LitElement {
         fireAt,
         idempotencyKey: crypto.randomUUID(),
         ...(replyToId ? { replyToId } : {}),
+        ...(wake ? { wake: true } : {}),
       });
       this.renderRoot
         .querySelector<ScionChatScheduledList>('scion-chat-scheduled-list')
@@ -7359,6 +7361,7 @@ export class ScionChatThread extends LitElement {
         .replyTo=${this.composerReplyTo}
         .editMessage=${this.composerEditMessage}
         ?scheduleSendEnabled=${this.scheduleSendAvailable}
+        ?wakeAvailable=${conversationSupportsScheduledWake(this.conversationKey)}
         ?disabled=${this.wakingConversationKey !== '' &&
         this.wakingConversationKey === this.conversationKey}
         @chat-cancel-reply=${this.handleComposerCancelReply}
