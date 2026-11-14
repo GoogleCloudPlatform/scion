@@ -6487,6 +6487,53 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 	return origin, nil
 }
 
+// resolveScheduledRuntimeBroker selects the runtime broker for a scheduled
+// dispatch_agent fire in project. It applies selectProjectRuntimeBroker, the
+// policy interactive create uses when no broker is requested, so a scheduled
+// agent lands where an interactive create in the same project would. ctx must
+// carry the identity the fire runs as.
+//
+// A refusal is returned as an error: the interactive message followed by
+// scheduledBrokerRemedy, since the interactive remedy (name a broker) is not
+// available to a schedule.
+func (s *Server) resolveScheduledRuntimeBroker(ctx context.Context, project *store.Project) (string, error) {
+	allProviders, err := s.store.GetProjectProviders(ctx, project.ID)
+	if err != nil {
+		return "", fmt.Errorf("failed to list runtime brokers for project %q: %w", project.ID, err)
+	}
+	availableBrokers, err := s.getAvailableBrokersForProject(ctx, project.ID)
+	if err != nil {
+		return "", fmt.Errorf("failed to list available runtime brokers for project %q: %w", project.ID, err)
+	}
+	brokerID, refusal := s.selectProjectRuntimeBroker(ctx, project, allProviders, availableBrokers)
+	if refusal != "" {
+		return "", fmt.Errorf("%s; %s", refusal, scheduledBrokerRemedy(project, len(allProviders)))
+	}
+	return brokerID, nil
+}
+
+// Remedies a schedule owner can act on when a scheduled fire selects no
+// runtime broker. A dispatch_agent payload has no broker field, so the
+// remedy is always a change to the project or its brokers.
+const (
+	scheduledBrokerRemedyNoProviders = "a schedule cannot choose a runtime broker: link a runtime broker to the project, then set it as the project's default runtime broker"
+	scheduledBrokerRemedyDefault     = "a schedule cannot choose a runtime broker: bring the project's default runtime broker online, give the schedule's creator use of it, or change the project's default runtime broker"
+	scheduledBrokerRemedyNoDefault   = "a schedule cannot choose a runtime broker: set the project's default runtime broker to an online broker the schedule's creator may use"
+)
+
+// scheduledBrokerRemedy returns the remedy for a refused scheduled broker
+// selection in project, which has providerCount providers.
+func scheduledBrokerRemedy(project *store.Project, providerCount int) string {
+	switch {
+	case providerCount == 0:
+		return scheduledBrokerRemedyNoProviders
+	case project.DefaultRuntimeBrokerID != "":
+		return scheduledBrokerRemedyDefault
+	default:
+		return scheduledBrokerRemedyNoDefault
+	}
+}
+
 // dispatchAgentEventHandler returns an EventHandler that creates and starts
 // an agent in the project via the AgentDispatcher.
 func (s *Server) dispatchAgentEventHandler() EventHandler {
@@ -6548,16 +6595,19 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			return fmt.Errorf("failed to resolve project %q: %w", evt.ProjectID, err)
 		}
 
-		// Resolve the runtime broker for this project
-		runtimeBrokerID := ""
-		providers, provErr := s.store.GetProjectProviders(ctx, evt.ProjectID)
-		if provErr == nil && len(providers) > 0 {
-			runtimeBrokerID = providers[0].BrokerID
+		// Resolve the runtime broker exactly as interactive create does with
+		// no explicit broker (ptone/scion#7868): project default, then hub
+		// default, then a single usable provider, each checked with
+		// canUseBrokerForProject under the revision principal.
+		runtimeBrokerID, err := s.resolveScheduledRuntimeBroker(
+			contextWithIdentity(ctx, creatorIdentity), project)
+		if err != nil {
+			return fmt.Errorf("scheduled dispatch of agent %q: %w", slug, err)
 		}
 
 		// Flat Runtime Broker new-create rules, as on the interactive path
 		// (flatCreatePlacement), before any default profile is consulted and
-		// before any write. A missing providers[0] row is treated as legacy.
+		// before any write. A missing broker row is treated as legacy.
 		// A scheduled request carries no explicit profile.
 		var scheduledBroker *store.RuntimeBroker
 		if runtimeBrokerID != "" {

@@ -19,10 +19,40 @@ package hub
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
+
+// linkScheduledDispatchBroker makes an online auto-provide broker the only
+// provider of projectID. A scheduled fire selects its broker the way
+// interactive create does (ptone/scion#7868), so a fixture project with no
+// provider refuses the fire.
+func linkScheduledDispatchBroker(t *testing.T, s store.Store, projectID string) *store.RuntimeBroker {
+	t.Helper()
+	ctx := context.Background()
+	id := uuid.New().String()
+	b := &store.RuntimeBroker{
+		ID:          id,
+		Name:        "sched-broker-" + id[:8],
+		Slug:        "sched-broker-" + id[:8],
+		Status:      store.BrokerStatusOnline,
+		AutoProvide: true,
+		Created:     time.Now(),
+		Updated:     time.Now(),
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, b))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  projectID,
+		BrokerID:   b.ID,
+		BrokerName: b.Name,
+		LocalPath:  fixtureProviderCheckout(t),
+		Status:     store.BrokerStatusOnline,
+	}))
+	return b
+}
 
 func fireScheduledDispatchAsOwner(t *testing.T, f *bypassAgentsFixture, agentName string) error {
 	t.Helper()
