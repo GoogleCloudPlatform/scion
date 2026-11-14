@@ -1240,6 +1240,7 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/runtime-brokers/{id}/message-failures":                    {"id": f.runtimeBroker},
 		"/api/v1/runtime-brokers/{id}/agents/{agentId}/launch":             {"id": f.runtimeBroker, "agentId": f.agent},
 		"/api/v1/runtime-brokers/{id}/agents/{agentId}/workspace-download": {"id": f.runtimeBroker, "agentId": f.agent},
+		"/api/v1/runtime-brokers/{id}/agents/{agentId}/deliver":            {"id": f.runtimeBroker, "agentId": f.agent},
 
 		// --- github app family ---
 		"/api/v1/github-app/installations/{id}": {"id": f.githubInstallationID},

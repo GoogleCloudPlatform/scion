@@ -312,6 +312,20 @@ func (s *Server) handleRuntimeBrokerRoutes(w http.ResponseWriter, r *http.Reques
 			s.handleAgentLaunchReport(w, r, brokerID, agentID)
 			return
 		}
+		// The broker's deliver-message relay (design v2.22 §2.1), POST
+		// .../agents/{agentId}/deliver, with the same segment rules.
+		if agentID, ok := strings.CutSuffix(agentPath, "/deliver"); ok {
+			if agentID == "" || strings.Contains(agentID, "/") {
+				NotFound(w, "Agent")
+				return
+			}
+			if r.Method != http.MethodPost {
+				MethodNotAllowed(w, http.MethodPost)
+				return
+			}
+			s.handleBrokerAgentDeliver(w, r, brokerID, agentID)
+			return
+		}
 		// The broker-self signed workspace download, POST
 		// .../agents/{agentId}/workspace-download, with the same segment
 		// rules as the launch report.
