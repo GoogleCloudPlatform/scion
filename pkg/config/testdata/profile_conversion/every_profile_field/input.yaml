@@ -11,6 +11,7 @@ runtimes:
     type: kubernetes
     namespace: agents
     shared_dir_size: 10Gi
+    workload_identity_pool: cluster-project.svc.id.goog
 profiles:
   full:
     runtime: cluster

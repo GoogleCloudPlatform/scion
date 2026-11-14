@@ -595,6 +595,33 @@ func ValidateKubernetesBlockServiceAccount(name string) error {
 	return nil
 }
 
+// WorkloadIdentityPoolSuffix ends every GKE Workload Identity pool name.
+const WorkloadIdentityPoolSuffix = ".svc.id.goog"
+
+// workloadIdentityPoolProject matches a GCP project ID: 6-30 characters,
+// lowercase letters, digits and hyphens, starting with a letter and not
+// ending with a hyphen. A domain-scoped project ("example.com:my-project")
+// has its own pool form and is not accepted.
+var workloadIdentityPoolProject = regexp.MustCompile(`^[a-z][a-z0-9-]{4,28}[a-z0-9]$`)
+
+// WorkloadIdentityPoolPattern is ValidateWorkloadIdentityPool as a JSON
+// schema pattern (the empty string allowed), shared by
+// settings-v1.schema.json and the admin settings registry.
+const WorkloadIdentityPoolPattern = `^$|^[a-z][a-z0-9-]{4,28}[a-z0-9]\.svc\.id\.goog$`
+
+// ValidateWorkloadIdentityPool checks that pool is a GKE Workload Identity
+// pool name, "<project-id>.svc.id.goog". An empty pool is valid (unset).
+func ValidateWorkloadIdentityPool(pool string) error {
+	if pool == "" {
+		return nil
+	}
+	project, ok := strings.CutSuffix(pool, WorkloadIdentityPoolSuffix)
+	if !ok || !workloadIdentityPoolProject.MatchString(project) {
+		return fmt.Errorf("workload_identity_pool: %q is not a Workload Identity pool; use <cluster-project-id>%s", pool, WorkloadIdentityPoolSuffix)
+	}
+	return nil
+}
+
 // ResolveKubernetesNamespace returns the namespace configured on the
 // runtimeEntryName entry of the runtimes: map, and whether one is set.
 // Profiles carry no namespace of their own: a profile that needs a
@@ -660,6 +687,31 @@ func ProjectSettingsHasKubernetesServiceAccountMappings(projectPath, runtimeEntr
 		}
 	}
 	return false
+}
+
+// ProjectSettingsHasWorkloadIdentityPool reports whether a project's OWN
+// settings.yaml sets workload_identity_pool on the named runtime entry.
+// Like ProjectSettingsHasKubernetesServiceAccountMappings it exists only so
+// a caller can warn that the setting has no effect there: the pool is read
+// only from the broker's global settings. Best-effort: an unreadable file
+// returns false.
+func ProjectSettingsHasWorkloadIdentityPool(projectPath, runtimeEntryName string) bool {
+	if runtimeEntryName == "" {
+		return false
+	}
+	raw, ok := readProjectOwnSettings(projectPath)
+	if !ok {
+		return false
+	}
+	var probe struct {
+		Runtimes map[string]struct {
+			WorkloadIdentityPool string `yaml:"workload_identity_pool" json:"workload_identity_pool"`
+		} `yaml:"runtimes" json:"runtimes"`
+	}
+	if err := unmarshalSettingsYAML(raw, &probe); err != nil {
+		return false
+	}
+	return probe.Runtimes[runtimeEntryName].WorkloadIdentityPool != ""
 }
 
 // readProjectOwnSettings returns the bytes of a project's OWN settings file,
@@ -2187,6 +2239,11 @@ type V1RuntimeTargetConfig struct {
 	// descriptor or the persisted target identity. Kubernetes only.
 	KubernetesBlockServiceAccount    string            `json:"kubernetes_block_service_account,omitempty" yaml:"kubernetes_block_service_account,omitempty" koanf:"kubernetes_block_service_account"`
 	KubernetesServiceAccountMappings map[string]string `json:"kubernetes_service_account_mappings,omitempty" yaml:"kubernetes_service_account_mappings,omitempty" koanf:"kubernetes_service_account_mappings"`
+	// WorkloadIdentityPool is the flat counterpart of the runtime entry
+	// setting of the same name (V1RuntimeConfig.WorkloadIdentityPool).
+	// Local operator policy: never part of the runtime target descriptor,
+	// the persisted target identity or the presentation. Kubernetes only.
+	WorkloadIdentityPool string `json:"workload_identity_pool,omitempty" yaml:"workload_identity_pool,omitempty" koanf:"workload_identity_pool"`
 	// SharedDirStorageClass and SharedDirSize are this Kubernetes
 	// instance's defaults for the ReadWriteMany PVCs backing project shared
 	// dirs: the flat counterparts of the runtime entry and profile settings
@@ -3228,6 +3285,17 @@ type V1RuntimeConfig struct {
 	// ServiceAccount. A profile's own value wins over this one; see
 	// VersionedSettings.ResolveKubernetesBlockServiceAccountForSelection.
 	KubernetesBlockServiceAccount string `json:"kubernetes_block_service_account,omitempty" yaml:"kubernetes_block_service_account,omitempty" koanf:"kubernetes_block_service_account"`
+	// WorkloadIdentityPool is the GKE Workload Identity pool of the cluster
+	// this Kubernetes entry targets, "<cluster-project>.svc.id.goog"
+	// (ptone/scion#3329 phase 5). The broker reports it, with the entry's
+	// namespace, for each profile on this entry (heartbeat
+	// workloadIdentityTargets), so the hub can grant
+	// roles/iam.workloadIdentityUser on a GCP service account it mints to
+	// the conventional Kubernetes ServiceAccount in that namespace. Read
+	// only from the broker's own global settings (with the hub settings
+	// overlay on a co-located server), never from a project's settings.
+	// See ValidateWorkloadIdentityPool.
+	WorkloadIdentityPool string `json:"workload_identity_pool,omitempty" yaml:"workload_identity_pool,omitempty" koanf:"workload_identity_pool"`
 }
 
 // V1RuntimeDefaultsConfig holds runtime-wide behaviour that is not specific to

@@ -120,7 +120,7 @@ var v1RuntimeIndicatorKeys = []string{
 	"shared_dir_storage_backend", "shared_dir_storage_backends", "home_storage_backend", "home_storage_leaf",
 	"priority_class_name", "runtime_class_name", "node_selector", "tolerations",
 	"cloudrun_instances", "cloudrun_sandbox", "substrate",
-	"kubernetes_service_account_mappings", "kubernetes_block_service_account",
+	"kubernetes_service_account_mappings", "kubernetes_block_service_account", "workload_identity_pool",
 }
 
 // hasV1RuntimeIndicators reports whether a parsed settings map contains v1-only

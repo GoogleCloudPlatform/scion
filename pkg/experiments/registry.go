@@ -135,6 +135,15 @@ const CloudRunNativeIdentity = "hub.cloudrun_native_identity"
 // start while it is off. Persistent agents are unchanged either way.
 const CloudRunEphemeralAgents = "hub.cloudrun_ephemeral_agents"
 
+// K8sWorkloadIdentitySetup gates the hub's Workload Identity setup for the
+// GCP service accounts it mints (ptone/scion#3329 phase 5): at mint, the hub
+// grants roles/iam.workloadIdentityUser on the new account to the
+// conventional Kubernetes ServiceAccount of every Kubernetes runtime target
+// that reports a Workload Identity pool. The hub checks it; Runtime Brokers
+// report their pools whether it is on or off. While it is off, minting is
+// exactly as before.
+const K8sWorkloadIdentitySetup = "hub.k8s_workload_identity_setup"
+
 // FlatRuntimeBrokers gates flat (single-target) Runtime Brokers: the hub
 // accepts single-target Runtime Broker registrations, pins new agents to
 // that target and refuses mismatched dispatches
@@ -646,6 +655,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#7780",
 		Owner:       "cloudrun-runtime",
 		ReviewBy:    "2027-02-12",
+	},
+	{
+		Name:        K8sWorkloadIdentitySetup,
+		Title:       "Workload Identity setup for minted service accounts",
+		Description: "When the hub mints a GCP service account, it also grants roles/iam.workloadIdentityUser on it to the Kubernetes ServiceAccount named after the account ID, in the namespace of every Kubernetes runtime target of the project's Runtime Brokers that sets workload_identity_pool. A failed grant never fails the mint: the response lists each target as bound or skipped, with the gcloud command for a skipped one.",
+		Default:     false,
+		Layers:      []Layer{LayerServer, LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#3329",
+		Owner:       "k8s-runtime",
+		ReviewBy:    "2027-02-14",
 	},
 	{
 		Name:        FlatRuntimeBrokers,
