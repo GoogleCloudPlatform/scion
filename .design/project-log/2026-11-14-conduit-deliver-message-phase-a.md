@@ -79,3 +79,20 @@ R1–R4 and S-A-01 were verified fixed. New findings and their fixes:
 - `make test-hub-shard SHARD=K`, `NOSQLITE=1` and `make vet-hub-shard SHARD=K` for K = 1..6: all passed. Non-test hub code changed, so all six shards were run.
 - golangci-lint `--new-from-rev=upstream-main` on the touched packages, plus `--tests=false ./pkg/hub`: 0 issues each.
 - Windows cross-build of `cmd/scion` and `hack/winsec-guard.sh`: passed.
+
+## Review round 3 (ptone decisions; pass 3 and FV2)
+
+ptone's decisions: Q1 = (a), fix as planned. Q2/G1 = (a), keep the bind from pending or dispatched; G1 is closed in the design. Q3 = (a), split oversize flushes.
+
+- **P3-R1 / FV1-N1 residual, simultaneous same-id admission.** `BindMessageDelivery` now locks, reads, decides and writes in one transaction (`SELECT ... FOR UPDATE` on Postgres; SQLite's single writer connection). A loser is classified from current state (`in_flight`), never as `bound` from a stale snapshot. Persistent contention gives `ErrDeliveryContended`, which the hub answers with 503 `not_reached`. Tests: `TestBindMessageDelivery_InterleavingMatrix` (owner bound, finished delivered, finished partial, other-id owner, owner unbound, failure won, stale sweep, failure on an unbound row), `TestBindMessageDelivery_TwoReadersBarrier` (also run with `-race`), and `TestBrokerAgentDeliver_SimultaneousSameIDAdmission`.
+- **FV2-N1 / FV2-C1, the tmux probe treated a starting session as no exec.** The probe is replaced by the static capability `runtime.ExecCapability` (Cloud Run: an exec connector is configured; other runtimes always have exec). No probe runs under the lock. Tests: `TestConduitDelivery_StartingTmuxIsNotNoExec`, `_TransientExecErrorIsOrdinary`, `_NoConnectorFailsFastNamed`, `_AttachmentsWithoutExec`, `_AttachmentsUseExec`.
+- **Oversize splitting (ptone Q3).** A buffered flush over a route limit becomes ordered conduit sub-flushes, each with its own delivery id and message rows, under one lock and on every runtime. A message is never split. The sequence stops at the first sub-flush not delivered, and failures are reported only for the messages from that sub-flush on, with no retry. Tests: `TestConduitDelivery_SplitOversizeFlush`, `_SplitStopsAtFirstUndelivered`, `_SplitSingleOversizeMessage`, `TestSplitParts`.
+- The branch was not rebased this round, so the stacked Phase B and Phase 1 branches keep a stable base. Upstream has moved past `6f83e7b` (now `aa90e5d`); a rebase is still to do.
+
+### Round 3 verification (base upstream `6f83e7b`)
+
+- `make fmt-check lint-ci check-custom test-fast-ci build`: passed.
+- `make test-hub-shard SHARD=K`, `NOSQLITE=1` and `make vet-hub-shard SHARD=K` for K = 1..6: all passed. Non-test hub code changed.
+- golangci-lint `--new-from-rev=6f83e7b` on the touched packages (including `pkg/runtime`), plus `--tests=false ./pkg/hub`: 0 issues. The first run's QF1001 was fixed in 7677d39, and the pkg/agent delivery tests were rerun on the final tree.
+- Store bind tests with `-race`: passed.
+- Windows cross-build of `cmd/scion` and `hack/winsec-guard.sh`: passed.
