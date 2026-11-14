@@ -52,7 +52,8 @@ func TestRuntimeOrphans(t *testing.T) {
 		return got
 	}
 
-	created := record("b1", []string{"cr"}, t0, o("cr", "gone", "no_agent"), o("other", "skipped", "no_agent"))
+	// A duplicate identity in one batch is written once.
+	created := record("b1", []string{"cr"}, t0, o("cr", "gone", "no_agent"), o("cr", "gone", "no_agent"), o("other", "skipped", "no_agent"))
 	require.Len(t, created, 1)
 	assert.Equal(t, "gone", created[0].Slug)
 	assert.Equal(t, "none", created[0].ActionState)

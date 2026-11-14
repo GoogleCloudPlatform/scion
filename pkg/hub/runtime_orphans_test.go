@@ -136,6 +136,7 @@ func TestRuntimeOrphans_Classification(t *testing.T) {
 		entry("deleting", deleting.ID),      // delete in flight: excluded
 		entry("starting", uuid.NewString()), // queued start: excluded
 		entry("live", ""),                   // older broker, slug only: matched
+		entry("live", "live"),               // legacy name label, not an ID: matched
 	}
 	unknown := brokerProjectHeartbeat{ProjectID: uuid.NewString(), Agents: []brokerAgentHeartbeat{entry("stray", "")}}
 	unlabeled := brokerProjectHeartbeat{ProjectID: "default", Agents: []brokerAgentHeartbeat{entry("bare", "")}}

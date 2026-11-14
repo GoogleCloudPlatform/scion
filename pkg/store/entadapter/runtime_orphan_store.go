@@ -16,6 +16,7 @@ package entadapter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -30,9 +31,11 @@ type runtimeOrphanKey struct {
 }
 
 // RecordRuntimeOrphans implements store.AgentStore.RecordRuntimeOrphans.
-// Each write is its own statement: the report tolerates a concurrent
-// heartbeat of the same broker on another replica (the upsert keeps one row
-// per identity), at worst logging a new orphan twice.
+// Each write is its own statement, and a failed write does not stop the
+// others (errors are joined). Duplicate identities in one batch are written
+// once. A create that loses a race with another replica handling a
+// heartbeat of the same broker hits the unique index and is skipped: that
+// replica's row stands and is not returned as created here.
 func (s *AgentStore) RecordRuntimeOrphans(ctx context.Context, brokerID string, completeTargets []string, orphans []store.RuntimeOrphan, now time.Time, removeAfter int) ([]store.RuntimeOrphan, error) {
 	if brokerID == "" || removeAfter < 1 {
 		return nil, fmt.Errorf("%w: broker ID and removeAfter are required", store.ErrInvalidInput)
@@ -58,11 +61,14 @@ func (s *AgentStore) RecordRuntimeOrphans(ctx context.Context, brokerID string, 
 	}
 
 	var created []store.RuntimeOrphan
+	var errs []error
+	batch := make(map[runtimeOrphanKey]bool, len(orphans))
 	for _, o := range orphans {
-		if !complete[o.RuntimeTarget] {
+		k := runtimeOrphanKey{store.RuntimeOrphanKindInstance, o.RuntimeTarget, o.ProjectID, o.Slug, o.AgentID}
+		if !complete[o.RuntimeTarget] || batch[k] {
 			continue
 		}
-		k := runtimeOrphanKey{store.RuntimeOrphanKindInstance, o.RuntimeTarget, o.ProjectID, o.Slug, o.AgentID}
+		batch[k] = true
 		if _, seen := existing[k]; seen {
 			delete(existing, k)
 			err = s.client.RuntimeOrphan.Update().
@@ -72,7 +78,7 @@ func (s *AgentStore) RecordRuntimeOrphans(ctx context.Context, brokerID string, 
 				SetLastSeenAt(now).SetMissedInventories(0).
 				Exec(ctx)
 			if err != nil {
-				return created, mapError(err)
+				errs = append(errs, mapError(err))
 			}
 			continue
 		}
@@ -82,7 +88,10 @@ func (s *AgentStore) RecordRuntimeOrphans(ctx context.Context, brokerID string, 
 			SetObservedPhase(o.ObservedPhase).SetFirstSeenAt(now).SetLastSeenAt(now).
 			Save(ctx)
 		if err != nil {
-			return created, mapError(err)
+			if !ent.IsConstraintError(err) {
+				errs = append(errs, mapError(err))
+			}
+			continue
 		}
 		created = append(created, entRuntimeOrphanToStore(row))
 	}
@@ -95,10 +104,10 @@ func (s *AgentStore) RecordRuntimeOrphans(ctx context.Context, brokerID string, 
 			err = s.client.RuntimeOrphan.UpdateOneID(r.ID).AddMissedInventories(1).Exec(ctx)
 		}
 		if err != nil && !ent.IsNotFound(err) {
-			return created, mapError(err)
+			errs = append(errs, mapError(err))
 		}
 	}
-	return created, nil
+	return created, errors.Join(errs...)
 }
 
 // ListRuntimeOrphans implements store.AgentStore.ListRuntimeOrphans.

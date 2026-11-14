@@ -35,6 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/google/uuid"
 )
 
 // heartbeatAgentKey returns a key that uniquely identifies an agent within the
@@ -895,12 +896,17 @@ func (s *HeartbeatService) gatherProjectAgents(ctx context.Context, startsBefore
 }
 
 // heartbeatAgentID returns the Hub agent ID of a listed entry: the ID the
-// runtime reports, else its agent_id label, else "".
+// runtime reports, else its agent_id label, else "". A value that is not a
+// UUID (a legacy container labels its name) is not an ID and gives "".
 func heartbeatAgentID(ag api.AgentInfo) string {
-	if ag.ID != "" {
-		return ag.ID
+	id := ag.ID
+	if id == "" {
+		id = ag.Labels[api.LabelAgentID]
 	}
-	return ag.Labels[api.LabelAgentID]
+	if _, err := uuid.Parse(id); err != nil {
+		return ""
+	}
+	return id
 }
 
 // dropVanishedPodReportsForStarts removes the entries a Kubernetes runtime

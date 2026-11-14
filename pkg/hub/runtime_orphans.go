@@ -46,6 +46,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 )
@@ -75,6 +76,16 @@ type runtimeOrphanCandidate struct {
 	lookupErr error
 }
 
+// heartbeatAgentID returns a reported agent ID if it is a UUID, else "": a
+// legacy container's agent_id label holds its name, which must not read as
+// another agent's ID.
+func heartbeatAgentID(id string) string {
+	if _, err := uuid.Parse(id); err != nil {
+		return ""
+	}
+	return id
+}
+
 // recordRuntimeOrphans classifies the heartbeat's orphan candidates and
 // records them, with the store's resolution rule for rows this inventory no
 // longer lists. It does nothing while the experiment is off or when the
@@ -95,14 +106,29 @@ func (s *Server) recordRuntimeOrphans(ctx context.Context, brokerID string, hb *
 		log.Warn("runtime orphans: failed to list pending dispatches", "error", err)
 		return
 	}
+	// projectKnown memoises project existence for this heartbeat.
+	known := map[string]bool{}
+	projectKnown := func(id string) (bool, error) {
+		if ok, seen := known[id]; seen {
+			return ok, nil
+		}
+		_, err := s.store.GetProject(ctx, id)
+		if err != nil && !errors.Is(err, store.ErrNotFound) && !errors.Is(err, store.ErrInvalidInput) {
+			return false, err
+		}
+		known[id] = err == nil
+		return err == nil, nil
+	}
 	var orphans []store.RuntimeOrphan
 	for _, c := range report.orphanCandidates {
 		if !complete[c.hb.RuntimeTarget] {
 			continue
 		}
-		reason, err := s.classifyRuntimeOrphan(ctx, brokerID, c, pending)
+		reason, err := s.classifyRuntimeOrphan(ctx, brokerID, c, pending, projectKnown)
 		if err != nil {
-			// Not classified this time; the row, if any, counts as missed.
+			// Not classified this time; the row, if any, counts as missed,
+			// so three failures in a row remove it and reset first_seen_at
+			// (the safe direction for a later grace clock).
 			log.Warn("runtime orphans: failed to classify entry", "project_id", c.projectID, "slug", c.hb.Slug, "error", err)
 			continue
 		}
@@ -131,18 +157,18 @@ func (s *Server) recordRuntimeOrphans(ctx context.Context, brokerID string, hb *
 
 // classifyRuntimeOrphan returns the orphan reason of c, or "" when c is not
 // an orphan. An error means c could not be classified.
-func (s *Server) classifyRuntimeOrphan(ctx context.Context, brokerID string, c runtimeOrphanCandidate, pending map[string]bool) (string, error) {
+func (s *Server) classifyRuntimeOrphan(ctx context.Context, brokerID string, c runtimeOrphanCandidate, pending map[string]bool, projectKnown func(string) (bool, error)) (string, error) {
 	if c.projectID == "" || c.projectID == "default" || c.hb.Slug == "" {
 		return orphanUnlabeled, nil
 	}
 	if c.lookupErr != nil && !errors.Is(c.lookupErr, store.ErrNotFound) && !errors.Is(c.lookupErr, store.ErrInvalidInput) {
 		return "", c.lookupErr
 	}
-	if _, err := s.store.GetProject(ctx, c.projectID); err != nil {
-		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) {
-			return orphanUnknownProject, nil
+	if ok, err := projectKnown(c.projectID); err != nil || !ok {
+		if err != nil {
+			return "", err
 		}
-		return "", err
+		return orphanUnknownProject, nil
 	}
 	// busy reports whether a's delete or start may still change what runs.
 	busy := func(a *store.Agent) bool {

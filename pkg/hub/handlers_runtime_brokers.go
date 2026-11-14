@@ -1489,6 +1489,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	runEntries := newHeartbeatRunEntries()
 	for _, project := range heartbeat.Projects {
 		for _, agentHB := range project.Agents {
+			agentHB.AgentID = heartbeatAgentID(agentHB.AgentID)
 			// Look up the agent by name (slug) within the project
 			agent, err := s.store.GetAgentBySlug(ctx, project.ProjectID, agentHB.Slug)
 			if err != nil {

@@ -478,13 +478,16 @@ func TestHeartbeatService_ReportsRunIDLabel(t *testing.T) {
 
 // TestHeartbeatService_ReportsAgentID: each entry carries its Hub agent ID,
 // from AgentInfo.ID or else the agent_id label, and none when neither is
-// known (ptone/scion#7930).
+// known or the value is not a UUID, such as a legacy container's name label
+// (ptone/scion#7930).
 func TestHeartbeatService_ReportsAgentID(t *testing.T) {
+	id1, id2 := "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"
 	client := &mockRuntimeBrokerService{}
 	manager := &heartbeatMockManager{
 		agents: []api.AgentInfo{
-			{Name: "by-id", ProjectID: "project-1", Phase: "running", ID: "id-1", Labels: map[string]string{api.LabelAgentID: "label-ignored"}},
-			{Name: "by-label", ProjectID: "project-1", Phase: "running", Labels: map[string]string{api.LabelAgentID: "id-2"}},
+			{Name: "by-id", ProjectID: "project-1", Phase: "running", ID: id1, Labels: map[string]string{api.LabelAgentID: id2}},
+			{Name: "by-label", ProjectID: "project-1", Phase: "running", Labels: map[string]string{api.LabelAgentID: id2}},
+			{Name: "legacy", ProjectID: "project-1", Phase: "running", Labels: map[string]string{api.LabelAgentID: "legacy"}},
 			{Name: "unknown", ProjectID: "project-1", Phase: "running"},
 		},
 	}
@@ -498,7 +501,7 @@ func TestHeartbeatService_ReportsAgentID(t *testing.T) {
 			got[a.Slug] = a.AgentID
 		}
 	}
-	want := map[string]string{"by-id": "id-1", "by-label": "id-2", "unknown": ""}
+	want := map[string]string{"by-id": id1, "by-label": id2, "legacy": "", "unknown": ""}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("agent IDs = %v, want %v", got, want)
 	}

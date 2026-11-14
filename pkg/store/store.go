@@ -809,6 +809,7 @@ type AgentStore interface {
 	// row of brokerID on a target in completeTargets has missed_inventories
 	// incremented and is deleted once it reaches removeAfter. Orphans on
 	// other targets are ignored, and rows on other targets are untouched.
+	// A failed write does not stop the others; the errors are joined.
 	RecordRuntimeOrphans(ctx context.Context, brokerID string, completeTargets []string, orphans []RuntimeOrphan, now time.Time, removeAfter int) (created []RuntimeOrphan, err error)
 
 	// ListRuntimeOrphans returns the runtime orphans filter selects,
