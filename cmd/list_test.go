@@ -52,6 +52,7 @@ func TestFormatLastActivity(t *testing.T) {
 		{"empty status with zero time", "", time.Time{}, "-"},
 		{"initializing shown as starting", "initializing", now.Add(-30 * time.Second), "starting, just now"},
 		{"initializing with zero time", "initializing", time.Time{}, "starting"},
+		{"idle with time", "idle", now.Add(-2 * time.Hour), "idle, 2h ago"},
 	}
 
 	for _, tt := range tests {
@@ -736,6 +737,41 @@ func TestFilterAgentsByActivity(t *testing.T) {
 	}
 	if strings.Contains(output, "no-activity") {
 		t.Errorf("output should NOT contain 'no-activity': %s", output)
+	}
+}
+
+// scion list shows an idle agent as idle and filters on --activity idle;
+// a legacy status string "idle" maps to running/idle.
+func TestDisplayAgents_Idle(t *testing.T) {
+	phase, activity := hubAgentPhaseActivity("", "", "idle")
+	if phase != "running" || activity != "idle" {
+		t.Errorf("hubAgentPhaseActivity(status idle) = %q/%q, want running/idle", phase, activity)
+	}
+
+	agents := []api.AgentInfo{
+		{Name: "idle-agent", Phase: "running", Activity: "idle", Template: "default", Runtime: "docker", Project: "p", LastActivityEvent: time.Now()},
+		{Name: "blocked-agent", Phase: "running", Activity: "blocked", Template: "default", Runtime: "docker", Project: "p"},
+	}
+	filterActivity = "idle"
+	defer func() { filterActivity = "" }()
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	err := displayAgents(agents, false)
+	_ = w.Close()
+	os.Stdout = old
+	if err != nil {
+		t.Fatalf("displayAgents returned error: %v", err)
+	}
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+	output := buf.String()
+	if !strings.Contains(output, "idle-agent") || !strings.Contains(output, "idle, just now") {
+		t.Errorf("output should list idle-agent as idle: %s", output)
+	}
+	if strings.Contains(output, "blocked-agent") {
+		t.Errorf("output should NOT contain 'blocked-agent': %s", output)
 	}
 }
 

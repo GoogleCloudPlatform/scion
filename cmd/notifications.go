@@ -49,7 +49,7 @@ var (
 )
 
 // Default trigger activities for subscriptions.
-var defaultTriggers = []string{"COMPLETED", "WAITING_FOR_INPUT", "LIMITS_EXCEEDED"}
+var defaultTriggers = []string{"COMPLETED", "IDLE", "WAITING_FOR_INPUT", "LIMITS_EXCEEDED"}
 
 // notificationsCmd is the top-level command group for notification management.
 var notificationsCmd = &cobra.Command{
@@ -167,7 +167,7 @@ func init() {
 	// Subscribe flags
 	notificationsSubscribeCmd.Flags().StringVar(&subscribeAgent, "agent", "", "Agent name or ID to subscribe to")
 	notificationsSubscribeCmd.Flags().StringVar(&subscribeProject, "project", "", "Project to subscribe in (inferred from context if omitted)")
-	notificationsSubscribeCmd.Flags().StringArrayVar(&subscribeTriggers, "triggers", nil, "Trigger activity (repeatable; also accepts a comma-separated list) (default: COMPLETED,WAITING_FOR_INPUT,LIMITS_EXCEEDED)")
+	notificationsSubscribeCmd.Flags().StringArrayVar(&subscribeTriggers, "triggers", nil, "Trigger activity (repeatable; also accepts a comma-separated list) (default: COMPLETED,IDLE,WAITING_FOR_INPUT,LIMITS_EXCEEDED)")
 
 	// Unsubscribe flags
 	notificationsUnsubscribeCmd.Flags().BoolVar(&unsubscribeAll, "all", false, "Remove all subscriptions in the project")

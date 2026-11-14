@@ -206,6 +206,8 @@ const (
 	FieldStartClaimLaunchID = "start_claim_launch_id"
 	// FieldSoftDeleteOpID holds the string denoting the soft_delete_op_id field in the database.
 	FieldSoftDeleteOpID = "soft_delete_op_id"
+	// FieldActivitySince holds the string denoting the activity_since field in the database.
+	FieldActivitySince = "activity_since"
 	// EdgeProject holds the string denoting the project edge name in mutations.
 	EdgeProject = "project"
 	// EdgeMemberships holds the string denoting the memberships edge name in mutations.
@@ -353,6 +355,7 @@ var Columns = []string{
 	FieldStartClaimHoldUntil,
 	FieldStartClaimLaunchID,
 	FieldSoftDeleteOpID,
+	FieldActivitySince,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -970,6 +973,11 @@ func ByStartClaimLaunchID(opts ...sql.OrderTermOption) OrderOption {
 // BySoftDeleteOpID orders the results by the soft_delete_op_id field.
 func BySoftDeleteOpID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldSoftDeleteOpID, opts...).ToFunc()
+}
+
+// ByActivitySince orders the results by the activity_since field.
+func ByActivitySince(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldActivitySince, opts...).ToFunc()
 }
 
 // ByProjectField orders the results by project field.

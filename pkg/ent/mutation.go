@@ -4677,6 +4677,7 @@ type AgentMutation struct {
 	start_claim_hold_until     *time.Time
 	start_claim_launch_id      *string
 	soft_delete_op_id          *string
+	activity_since             *time.Time
 	clearedFields              map[string]struct{}
 	project                    *uuid.UUID
 	clearedproject             bool
@@ -9411,6 +9412,55 @@ func (m *AgentMutation) ResetSoftDeleteOpID() {
 	delete(m.clearedFields, agent.FieldSoftDeleteOpID)
 }
 
+// SetActivitySince sets the "activity_since" field.
+func (m *AgentMutation) SetActivitySince(t time.Time) {
+	m.activity_since = &t
+}
+
+// ActivitySince returns the value of the "activity_since" field in the mutation.
+func (m *AgentMutation) ActivitySince() (r time.Time, exists bool) {
+	v := m.activity_since
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldActivitySince returns the old "activity_since" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldActivitySince(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldActivitySince is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldActivitySince requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldActivitySince: %w", err)
+	}
+	return oldValue.ActivitySince, nil
+}
+
+// ClearActivitySince clears the value of the "activity_since" field.
+func (m *AgentMutation) ClearActivitySince() {
+	m.activity_since = nil
+	m.clearedFields[agent.FieldActivitySince] = struct{}{}
+}
+
+// ActivitySinceCleared returns if the "activity_since" field was cleared in this mutation.
+func (m *AgentMutation) ActivitySinceCleared() bool {
+	_, ok := m.clearedFields[agent.FieldActivitySince]
+	return ok
+}
+
+// ResetActivitySince resets all changes to the "activity_since" field.
+func (m *AgentMutation) ResetActivitySince() {
+	m.activity_since = nil
+	delete(m.clearedFields, agent.FieldActivitySince)
+}
+
 // ClearProject clears the "project" edge to the Project entity.
 func (m *AgentMutation) ClearProject() {
 	m.clearedproject = true
@@ -9688,7 +9738,7 @@ func (m *AgentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentMutation) Fields() []string {
-	fields := make([]string, 0, 95)
+	fields := make([]string, 0, 96)
 	if m.fixture_root_id != nil {
 		fields = append(fields, agent.FieldFixtureRootID)
 	}
@@ -9974,6 +10024,9 @@ func (m *AgentMutation) Fields() []string {
 	if m.soft_delete_op_id != nil {
 		fields = append(fields, agent.FieldSoftDeleteOpID)
 	}
+	if m.activity_since != nil {
+		fields = append(fields, agent.FieldActivitySince)
+	}
 	return fields
 }
 
@@ -10172,6 +10225,8 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.StartClaimLaunchID()
 	case agent.FieldSoftDeleteOpID:
 		return m.SoftDeleteOpID()
+	case agent.FieldActivitySince:
+		return m.ActivitySince()
 	}
 	return nil, false
 }
@@ -10371,6 +10426,8 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldStartClaimLaunchID(ctx)
 	case agent.FieldSoftDeleteOpID:
 		return m.OldSoftDeleteOpID(ctx)
+	case agent.FieldActivitySince:
+		return m.OldActivitySince(ctx)
 	}
 	return nil, fmt.Errorf("unknown Agent field %s", name)
 }
@@ -11045,6 +11102,13 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetSoftDeleteOpID(v)
 		return nil
+	case agent.FieldActivitySince:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetActivitySince(v)
+		return nil
 	}
 	return fmt.Errorf("unknown Agent field %s", name)
 }
@@ -11393,6 +11457,9 @@ func (m *AgentMutation) ClearedFields() []string {
 	if m.FieldCleared(agent.FieldSoftDeleteOpID) {
 		fields = append(fields, agent.FieldSoftDeleteOpID)
 	}
+	if m.FieldCleared(agent.FieldActivitySince) {
+		fields = append(fields, agent.FieldActivitySince)
+	}
 	return fields
 }
 
@@ -11637,6 +11704,9 @@ func (m *AgentMutation) ClearField(name string) error {
 		return nil
 	case agent.FieldSoftDeleteOpID:
 		m.ClearSoftDeleteOpID()
+		return nil
+	case agent.FieldActivitySince:
+		m.ClearActivitySince()
 		return nil
 	}
 	return fmt.Errorf("unknown Agent nullable field %s", name)
@@ -11930,6 +12000,9 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldSoftDeleteOpID:
 		m.ResetSoftDeleteOpID()
+		return nil
+	case agent.FieldActivitySince:
+		m.ResetActivitySince()
 		return nil
 	}
 	return fmt.Errorf("unknown Agent field %s", name)

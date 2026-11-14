@@ -69,6 +69,11 @@ type Agent struct {
 	// Stalled detection
 	StalledFromActivity string `json:"stalledFromActivity,omitempty"` // Activity before stalled; empty when not stalled
 
+	// ActivitySince is when Activity last changed value; nil when phase is
+	// not running. The store manages it: UpdateAgent and CreateAgent ignore
+	// the caller's value.
+	ActivitySince *time.Time `json:"activitySince,omitempty"`
+
 	// Runtime configuration
 	Image           string        `json:"image,omitempty"`
 	Detached        bool          `json:"detached"`

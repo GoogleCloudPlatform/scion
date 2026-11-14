@@ -262,6 +262,12 @@ func UTCTimeHook(next ent.Mutator) ent.Mutator {
 // (entadapter.newTxClient), which every launch writer uses. A new
 // *ent.Client constructor that writes agents must register it too
 // (TestEntClientConstructorsRegisterResumeHook checks this).
+//
+// The same choke point also clears activity_since on an update that sets
+// a phase other than running and does not itself set or clear
+// activity_since: the column is NULL whenever the agent is not running,
+// whichever writer moves the phase (the store's activity writers maintain
+// it explicitly, see entadapter.stampActivitySince).
 func ClearLaunchResumePhaseHook(next ent.Mutator) ent.Mutator {
 	return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
 		am, ok := m.(*ent.AgentMutation)
@@ -271,6 +277,10 @@ func ClearLaunchResumePhaseHook(next ent.Mutator) ent.Mutator {
 		phase, set := am.Phase()
 		if !set {
 			return next.Mutate(ctx, m)
+		}
+		if _, explicit := am.ActivitySince(); !explicit && !am.ActivitySinceCleared() &&
+			state.Phase(phase) != state.PhaseRunning {
+			am.ClearActivitySince()
 		}
 		if _, explicit := am.LaunchResumePhase(); explicit {
 			return next.Mutate(ctx, m)

@@ -757,6 +757,12 @@ func formatNotificationMessage(agent *store.Agent, status string) string {
 			msg += ": " + agent.Message
 		}
 		return msg
+	case "IDLE":
+		msg := fmt.Sprintf("%s is IDLE", agent.Slug)
+		if agent.Message != "" {
+			msg += ": " + agent.Message
+		}
+		return msg
 	case "LIMITS_EXCEEDED":
 		msg := fmt.Sprintf("%s has reached a state of LIMITS_EXCEEDED", agent.Slug)
 		if agent.Message != "" {
