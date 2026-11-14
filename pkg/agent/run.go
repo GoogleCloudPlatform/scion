@@ -2845,6 +2845,11 @@ authDone:
 				"agent_id":             agentID,
 				api.LabelRunID:         runID,
 			}
+			// The agent's sciontool registers deliver-message: its
+			// deliveries may go over conduit (conduit_deliver.go).
+			if launchedWithConduitDeliver(agentEnv) {
+				l[LabelConduitDeliver] = "true"
+			}
 			for k, v := range projectkeys.ProjectNameLabels(projectName) {
 				l[k] = v
 			}

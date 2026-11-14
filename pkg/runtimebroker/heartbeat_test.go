@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -121,6 +122,10 @@ func (m *mockRuntimeBrokerService) ReportMessageFailures(ctx context.Context, br
 	defer m.mu.Unlock()
 	m.messageFailureReports = append(m.messageFailureReports, req)
 	return nil
+}
+
+func (m *mockRuntimeBrokerService) DeliverMessage(ctx context.Context, brokerID, agentID string, req *agentcontrol.DeliverRequest) (int, agentcontrol.DeliverResponse, error) {
+	return http.StatusNotFound, agentcontrol.DeliverResponse{}, nil
 }
 
 func (m *mockRuntimeBrokerService) WorkspaceDownload(ctx context.Context, brokerID, agentID string, req *api.WorkspaceDownloadRequest) (*api.WorkspaceDownloadResponse, error) {

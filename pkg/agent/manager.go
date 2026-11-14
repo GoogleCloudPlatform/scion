@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -33,6 +34,8 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/tmuxdeliver"
+	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -183,6 +186,11 @@ type AgentManager struct {
 	// newHarness constructs the harness deliverImmediate uses for its
 	// interrupt and delivery keys; nil uses harness.New. Tests set it.
 	newHarness func(name string) api.Harness
+
+	// conduit, when set, delivers messages over the agent's conduit session
+	// for agents that support it (SetConduitDeliverer, conduit_deliver.go).
+	conduitMu sync.Mutex
+	conduit   ConduitDeliverer
 }
 
 // defaultBufferDelay is the debounce window for message delivery.
@@ -238,27 +246,6 @@ func nextMsgBufferName() string {
 	return fmt.Sprintf("%s-%s-%d", msgBufferPrefix, msgBufferNonce(), msgBufferSeq.Add(1))
 }
 
-// loadBufferArgv builds the argv that loads message text into the named tmux
-// buffer bufName via stdin. Shared by deliverImmediate and the real-tmux
-// integration test so the test exercises the exact argv delivery uses.
-func loadBufferArgv(bufName string) []string {
-	return []string{"tmux", "load-buffer", "-b", bufName, "-"}
-}
-
-// pasteBufferArgv builds the argv that pastes the named tmux buffer bufName
-// into target with bracketed paste, deleting the buffer on success. Shared by
-// deliverImmediate and the real-tmux integration test so the test exercises
-// the exact argv delivery uses.
-func pasteBufferArgv(target, bufName string) []string {
-	return []string{"tmux", "paste-buffer", "-t", target, "-p", "-d", "-b", bufName}
-}
-
-// sendKeyArgv builds the argv that sends one tmux key to target.
-// deliverImmediate uses it for interrupt and submit keys.
-func sendKeyArgv(target, key string) []string {
-	return []string{"tmux", "send-keys", "-t", target, key}
-}
-
 func NewManager(rt runtime.Runtime) Manager {
 	mgr := &AgentManager{
 		Runtime: rt,
@@ -269,6 +256,12 @@ func NewManager(rt runtime.Runtime) Manager {
 	mgr.msgBuffer = NewMessageBuffer(defaultBufferDelay, func(agentID, projectID string, message string, interrupt bool) error {
 		return mgr.deliverImmediate(context.Background(), agentID, projectID, message, interrupt)
 	})
+	mgr.msgBuffer.deliverFlush = func(f bufferedFlush) error {
+		return mgr.deliver(context.Background(), deliveryRequest{
+			agentID: f.agentID, projectID: f.projectID, message: f.text,
+			messageIDs: f.messageIDs, partialIDs: f.partialIDs, readyWanted: f.readyWanted,
+		})
+	}
 	mgr.msgBuffer.waitReady = mgr.waitHarnessReady
 	mgr.msgBuffer.preDeliver = mgr.runPreDelivery
 	return mgr
@@ -649,7 +642,11 @@ func (m *AgentManager) Message(ctx context.Context, agentID, projectID string, m
 		// Work the message needs in the container (its attachments) runs
 		// right before the text, on this immediate path too.
 		message += m.runPreDelivery(ctx, agentID, projectID, PreDeliveryFromContext(ctx))
-		return m.deliverImmediate(ctx, agentID, projectID, message, interrupt)
+		req := deliveryRequest{agentID: agentID, projectID: projectID, message: message, interrupt: true}
+		if id := deliveryMessageIDFromContext(ctx); id != "" {
+			req.messageIDs = []string{id}
+		}
+		return m.deliver(ctx, req)
 	}
 
 	// Before buffering, make sure the target has a running container. A
@@ -670,7 +667,7 @@ func (m *AgentManager) Message(ctx context.Context, agentID, projectID string, m
 	// A failure handler on ctx (set by the runtime broker) is invoked if the
 	// buffered delivery later fails, so the hub can mark the message failed
 	// rather than leave it "dispatched" (#1820).
-	m.msgBuffer.SendWithHooks(agentID, projectID, message, DeliveryFailureHandlerFromContext(ctx), PreDeliveryFromContext(ctx))
+	m.msgBuffer.sendWithID(agentID, projectID, message, deliveryMessageIDFromContext(ctx), DeliveryFailureHandlerFromContext(ctx), PreDeliveryFromContext(ctx))
 	return nil
 }
 
@@ -1403,33 +1400,33 @@ func kubernetesUID(a api.AgentInfo) string {
 	return a.Kubernetes.UID
 }
 
-// deliveryStepKind identifies how deliverImmediate must run a deliveryStep,
-// replacing dispatch on a step's argv contents (e.g. cmd[1] == "load-buffer")
-// with an explicit tag set once when the step is built.
-type deliveryStepKind int
-
-const (
-	// stepSendKeys runs argv via Exec: an interrupt key, or one of the
-	// harness's submit keys (the closing submit or an extra submit).
-	stepSendKeys deliveryStepKind = iota
-	// stepLoadBuffer runs argv via ExecWithStdin, streaming the message body.
-	stepLoadBuffer
-	// stepPasteBuffer runs argv via Exec. Its success marks the message as
-	// delivered; its failure triggers best-effort buffer cleanup.
-	stepPasteBuffer
-)
-
-// deliveryStep is one command in a deliverImmediate call.
-type deliveryStep struct {
-	kind deliveryStepKind
-	argv []string
-}
-
 // deliverImmediate sends a message to an agent's tmux session right now,
 // bypassing the message buffer. This is the low-level delivery mechanism
 // used both for interrupt messages (called directly) and for buffered
 // messages (called by the MessageBuffer when the debounce timer fires).
 func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID string, message string, interrupt bool) error {
+	return m.deliver(ctx, deliveryRequest{agentID: agentID, projectID: projectID, message: message, interrupt: interrupt})
+}
+
+// deliveryRequest is one delivery: a buffered flush or an interrupt.
+type deliveryRequest struct {
+	agentID, projectID, message string
+	interrupt                   bool
+	// messageIDs are the hub message ids the delivery carries; a conduit
+	// delivery needs at least one. partialIDs: the text also holds a
+	// message without an id.
+	messageIDs []string
+	partialIDs bool
+	// readyWanted: a buffered flush whose readiness wait the buffer skipped
+	// because the target delivers over conduit (sciontool waits instead,
+	// or the exec fallback waits here).
+	readyWanted bool
+}
+
+// deliver is deliverImmediate for a deliveryRequest: it chooses the
+// transport, conduit or runtime exec, for the resolved target.
+func (m *AgentManager) deliver(ctx context.Context, d deliveryRequest) error {
+	agentID, projectID, message, interrupt := d.agentID, d.projectID, d.message, d.interrupt
 	// 1. Find the agent, scoped to project to prevent cross-project delivery
 	agent, matches, err := m.findMessageTargetCounted(ctx, agentID, projectID)
 	if err != nil {
@@ -1487,129 +1484,110 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 		ds.SubmitKeys = config.DefaultDeliverySpec().SubmitKeys
 	}
 
-	// 3. Prepare commands
-	var steps []deliveryStep
-
+	// 3. Deliver through the shared steps (pkg/agent/tmuxdeliver): the same
+	// builder, buffer handling and text sanitiser sciontool's
+	// deliver-message route uses, so both paths behave the same (design
+	// v2.22 §3.4, §5.3). Bracketed paste through a named per-delivery buffer
+	// loaded on stdin (ptone/scion#2256, #2265); the keys are the harness's
+	// own, without the route's allowlist.
+	req := tmuxdeliver.Request{SubmitKeys: ds.SubmitKeys}
 	if interrupt {
 		if seq := h.GetInterruptSequence(); len(seq) > 0 {
-			for _, key := range seq {
-				steps = append(steps, deliveryStep{kind: stepSendKeys, argv: sendKeyArgv(keysTarget, key)})
-			}
+			req.InterruptKeys = seq
 		} else {
-			key := h.GetInterruptKey()
-			steps = append(steps, deliveryStep{kind: stepSendKeys, argv: sendKeyArgv(keysTarget, key)})
+			req.InterruptKeys = []string{h.GetInterruptKey()}
 		}
 	}
-
-	// bufName names the tmux buffer used below, if this delivery pastes a
-	// message. It is computed once (nextMsgBufferName) and reused for both
-	// the load and paste steps, and for cleanup if the paste step fails.
-	var bufName string
-
-	// submitSteps sends each of the harness's submit keys once (by default
-	// a single Enter).
-	submitSteps := func() []deliveryStep {
-		out := make([]deliveryStep, 0, len(ds.SubmitKeys))
-		for _, key := range ds.SubmitKeys {
-			out = append(out, deliveryStep{kind: stepSendKeys, argv: sendKeyArgv(keysTarget, key)})
-		}
-		return out
+	switch {
+	case interrupt && message == "":
+		req.Op = tmuxdeliver.OpInterruptSubmit
+	case interrupt:
+		req.Op = tmuxdeliver.OpInterruptPaste
+	case message == "":
+		// Empty messages send one pass of the submit keys (by default a
+		// bare Enter) to trigger confirmations.
+		req.Op = tmuxdeliver.OpSubmitOnly
+	default:
+		req.Op = tmuxdeliver.OpPaste
 	}
-
-	if message == "" {
-		// Empty messages send one pass of the submit keys (by default a bare
-		// Enter) to trigger confirmations.
-		steps = append(steps, submitSteps()...)
-	} else {
-		// Use tmux paste buffer with bracketed paste (-p) instead of send-keys.
-		// send-keys simulates typing character-by-character, which allows TUI
-		// applications to intercept special characters as hotkeys (e.g., Gemini
-		// CLI treats '!' as a shell-mode toggle). Bracketed paste wraps the
-		// content in escape sequences (\e[200~...\e[201~) that signal the
-		// application to treat all characters as literal pasted text.
-		//
-		// The message is loaded into a named buffer via stdin rather than
-		// passed as a "tmux set-buffer" argv element: tmux's client-server
-		// protocol caps a single command's argv at 16 KB, and a coalesced
-		// batch of debounced messages can exceed that (ptone/scion#2256).
-		// Streaming it over stdin has no such limit.
-		//
-		// The buffer name is unique per delivery (ptone/scion#2265): two
-		// deliveries to the same agent are not otherwise serialised, and a
-		// shared fixed name lets one delivery's paste consume the buffer
-		// loaded for the other. "-d" removes the per-delivery buffer after a
-		// successful paste; on paste failure it is deleted explicitly below,
-		// since "-d" does not run when paste-buffer itself fails.
-		bufName = nextMsgBufferName()
-		steps = append(steps, deliveryStep{kind: stepLoadBuffer, argv: loadBufferArgv(bufName)})
-		steps = append(steps, deliveryStep{kind: stepPasteBuffer, argv: pasteBufferArgv(keysTarget, bufName)})
-		steps = append(steps, submitSteps()...)
-	}
-
-	// 4. Execute. Once "tmux paste-buffer" succeeds, the message content is
-	// already sitting in the agent's terminal input — a later failure (the
-	// closing submit keys, or one of the extra submits below) must not
-	// trigger a retry of the whole delivery, or the retried paste-buffer
-	// would duplicate the already-visible text (ptone/scion#1866). Errors
-	// from that point on are wrapped in PartialDeliveryError so the message
-	// buffer's bounded retry knows not to retry them.
-	delivered := false
-	for _, step := range steps {
-		var err error
-		if step.kind == stepLoadBuffer {
-			_, err = m.Runtime.ExecWithStdin(ctx, agent.ContainerID, step.argv, strings.NewReader(message))
-		} else {
-			_, err = m.Runtime.Exec(ctx, agent.ContainerID, step.argv)
-		}
-		if err != nil {
-			if step.kind == stepPasteBuffer {
-				// load-buffer succeeded (or this step wouldn't have run), but
-				// the paste itself failed, so paste-buffer's own "-d" never
-				// fired to clean up the per-delivery buffer named above.
-				// Named buffers aren't evicted by buffer-limit, so without
-				// this they would accumulate on the tmux server. Best-effort:
-				// the failure is already being reported below, so a further
-				// error here is ignored. Uses a ctx detached from the
-				// caller's (context.WithoutCancel, with its own short
-				// timeout) so the cleanup still runs when the caller's ctx
-				// is already cancelled — which may be why paste-buffer
-				// itself failed.
-				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-				_, _ = m.Runtime.Exec(cleanupCtx, agent.ContainerID, []string{"tmux", "delete-buffer", "-b", bufName})
-				cancel()
-			}
-			wrapped := fmt.Errorf("failed to send message to agent '%s': %w", agent.Name, err)
-			if delivered {
-				return &PartialDeliveryError{Err: wrapped}
-			}
-			return wrapped
-		}
-		if step.kind == stepPasteBuffer {
-			delivered = true
-		}
-	}
-
-	// After sending a message, send the submit keys ds.ExtraSubmits more
-	// times, waiting ds.ExtraSubmitDelay before each pass, to ensure the
-	// input is accepted by the agent (by default two extra Enters 300ms
-	// apart). This runs only once the message (if any) has already been
-	// pasted, so any failure here is necessarily partial delivery too.
 	if message != "" {
-		for range ds.ExtraSubmits {
-			select {
-			case <-ctx.Done():
-				return &PartialDeliveryError{Err: fmt.Errorf("context canceled before sending %s to agent '%s': %w", strings.Join(ds.SubmitKeys, " "), agent.Name, ctx.Err())}
-			case <-time.After(ds.ExtraSubmitDelay):
+		req.Text = message
+		req.BufferName = nextMsgBufferName()
+		req.ExtraSubmits = ds.ExtraSubmits
+		req.ExtraSubmitDelay = ds.ExtraSubmitDelay
+	}
+
+	// 4. Over conduit when the target supports it (design v2.22 §1.5): a
+	// delivery with hub message ids and settings within the route bounds.
+	// Otherwise, or when conduit proves nothing was pasted and asks for
+	// it, over exec.
+	var conduitReason error
+	if m.usesConduitTransport(agent) {
+		if len(d.messageIDs) == 0 || d.partialIDs {
+			conduitReason = errors.New("delivery carries a message without a hub id")
+		} else if berr := tmuxdeliver.CheckBounds(conduitSettings(h, ds, m.readyTimings)); berr != nil {
+			conduitReason = berr
+		} else {
+			var ready *agentcontrol.ReadySpec
+			if d.readyWanted {
+				ready = conduitReadySpec(m.readyTimings)
 			}
-			for _, key := range ds.SubmitKeys {
-				if _, err := m.Runtime.Exec(ctx, agent.ContainerID, sendKeyArgv(keysTarget, key)); err != nil {
-					return &PartialDeliveryError{Err: fmt.Errorf("failed to send %s to agent '%s': %w", key, agent.Name, err)}
-				}
+			creq := conduitDeliverRequest(nextDeliveryID(), d.messageIDs, req, ready)
+			outcome, cerr := m.deliverOverConduit(ctx, agent, creq)
+			if outcome == conduitDone {
+				return cerr
 			}
+			conduitReason = cerr
+		}
+		slog.Info("message delivery uses exec", "agent_id", agent.ID, "reason", conduitReason)
+		if d.readyWanted {
+			m.waitHarnessReadyNow(ctx, agentID, projectID)
 		}
 	}
 
-	return nil
+	// 5. Execute over exec. Once the paste succeeds the message is in the
+	// agent's input, so a later failure is a PartialDeliveryError, which
+	// the message buffer never retries (ptone/scion#1866).
+	err = tmuxdeliver.Deliver(ctx, m.execRunner(agent.ContainerID), req)
+	if err != nil && conduitReason != nil {
+		// The exec fallback failed too: report why conduit was not used,
+		// and do not let the buffer run both paths again.
+		return &finalDeliveryError{Err: fmt.Errorf("%w (conduit not used: %v)", execDeliveryError(ctx, agent.Name, ds.SubmitKeys, err), conduitReason)}
+	}
+	if err == nil {
+		return nil
+	}
+	return execDeliveryError(ctx, agent.Name, ds.SubmitKeys, err)
+}
+
+// execDeliveryError words a tmuxdeliver.Deliver failure on the exec path as
+// before the shared steps, and types it for the message buffer: anything
+// after the paste is a PartialDeliveryError.
+func execDeliveryError(ctx context.Context, agentName string, submitKeys []string, err error) error {
+	var partial *tmuxdeliver.PartialError
+	if !errors.As(err, &partial) {
+		return fmt.Errorf("failed to send message to agent '%s': %w", agentName, err)
+	}
+	keys := strings.Join(submitKeys, " ")
+	switch {
+	case partial.Stage == tmuxdeliver.StageExtraSubmit && ctx.Err() != nil && errors.Is(partial.Err, ctx.Err()):
+		return &PartialDeliveryError{Err: fmt.Errorf("context canceled before sending %s to agent '%s': %w", keys, agentName, partial.Err)}
+	case partial.Stage == tmuxdeliver.StageExtraSubmit:
+		return &PartialDeliveryError{Err: fmt.Errorf("failed to send %s to agent '%s': %w", keys, agentName, partial.Err)}
+	default:
+		return &PartialDeliveryError{Err: fmt.Errorf("failed to send message to agent '%s': %w", agentName, partial.Err)}
+	}
+}
+
+// execRunner runs tmuxdeliver steps in containerID through the runtime's
+// exec, streaming stdin with ExecWithStdin when a step has one.
+func (m *AgentManager) execRunner(containerID string) tmuxdeliver.Runner {
+	return tmuxdeliver.RunnerFunc(func(ctx context.Context, argv []string, stdin io.Reader) (string, error) {
+		if stdin != nil {
+			return m.Runtime.ExecWithStdin(ctx, containerID, argv, stdin)
+		}
+		return m.Runtime.Exec(ctx, containerID, argv)
+	})
 }
 
 // refuseAmbiguousOwnedTarget refuses a message target on an owned (flat
