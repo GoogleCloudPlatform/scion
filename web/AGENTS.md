@@ -67,9 +67,9 @@ After making changes, verify:
 1. **Type checking passes:** `npm run typecheck`
 2. **Linting passes:** `npm run lint`
 3. **Tests pass:** `npm run test`
-4. **Client builds:** `npm run build`
+4. **Client builds:** `npm run build` (run before `npm run check:orphans` or root `make web-budget`, both of which read `web/dist/client/.vite/manifest.json`)
 
-The full Vitest suite takes about 10 to 18 minutes in an agent container, more than a 10-minute foreground tool limit. Run the touched test files first (`npx vitest run <files>`) and start the full suite in the background. Gitignored build output (`web/public/shoelace/`, `build/`) makes Go and web gates run afterwards fail; see "Gitignored build output" in `docs-repo/agents/sandbox-go-toolchain.md`.
+The full Vitest suite takes about 10 to 18 minutes in an agent container, more than a 10-minute foreground tool limit. Run the touched test files first (`npx vitest run <files>`) and start the full suite in the background; in cgroup-capped containers on high-`nproc` hosts, cap workers (`npx vitest run --maxWorkers=2`) to avoid worker starvation. Repo-scanning tests in `web/src/utils/*.test.ts` also run on Windows CI, so normalize `node:path` `relative()` paths to `/` (`.split(sep).join('/')`). Gitignored build output (`web/public/shoelace/`, `build/`) makes Go and web gates run afterwards fail; see "Gitignored build output" in `docs-repo/agents/sandbox-go-toolchain.md`.
 
 ## Project Structure
 
@@ -313,6 +313,7 @@ The client `SSEClient` listens for `event: update` and the `StateManager` parses
 - Agent containers have no Playwright browser bundle, and set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium` automatically. Every Playwright config in `web/` (including `web/playwright.config.ts` / `e2e/harness/global-setup.ts`, `web/e2e/*/playwright*.config.ts`, and `web/e2e-perf/budgets/playwright.config.ts`) resolves Chromium via `web/playwright-chromium.ts` (`CHROMIUM_EXECUTABLE` -> `TERMINAL_OWNER_CHROMIUM` -> `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH`), falling back to Playwright's installed browser bundle when none is set.
 - Console logging via `page.on('console', ...)` is essential for debugging SSE connection state — the `[SSE] Connected` log confirms the EventSource opened.
 - To validate real-time updates: take a screenshot, make an API call, wait 2-3 seconds, take another screenshot. Compare visually.
+- Mocked Playwright suites (`web/e2e/chat-mobile/`) intercept `/auth/me` and skip server-side `pageData.user` hydration; cover boot-time user preferences or feature flags with a real-hub Playwright spec.
 
 ### Common failure modes
 
