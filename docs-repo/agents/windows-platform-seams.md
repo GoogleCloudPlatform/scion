@@ -43,7 +43,7 @@ The `windows-latest` job runs only `.github/windows-test-packages.txt`: one pack
 
 ```bash
 GOOS=windows GOARCH=amd64 go build -buildvcs=false -o /dev/null ./cmd/scion
-GOOS=windows GOARCH=amd64 go vet ./pkg/util/privatefs/... ./pkg/util/pathcanon/... ./pkg/util/filelock/... ./pkg/tunnelclient/... ./pkg/<yours>/...
+GOOS=windows GOARCH=amd64 go vet -buildvcs=false ./pkg/util/privatefs/... ./pkg/util/pathcanon/... ./pkg/util/filelock/... ./pkg/tunnelclient/... ./pkg/<yours>/...   # for cmd/, pass ./cmd ./cmd/scion (not ./cmd/...; ./cmd/sciontool is unix-only)
 bash hack/winsec-guard.sh
-GOOS=windows go test -c -o /dev/null ./pkg/<yours>   # compiles Windows-only tests
+GOOS=windows go test -buildvcs=false -c -o /dev/null ./pkg/<yours>   # compiles Windows-only tests
 ```
