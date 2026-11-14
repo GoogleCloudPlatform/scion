@@ -767,3 +767,29 @@ func TestProjectDecisions_RegisteredDefaultOff(t *testing.T) {
 		t.Fatalf("unexpected registration: %+v", e)
 	}
 }
+
+// TestExecSchedulesExperimentRegistered pins the hub.exec_schedules entry
+// (design D8): an alpha experiment, off by default, that names its
+// dependency on hub.conduit and says what it does before the hub-side
+// gating lands.
+func TestExecSchedulesExperimentRegistered(t *testing.T) {
+	e, ok := Default().Lookup(ExecSchedules)
+	if !ok {
+		t.Fatalf("%s is not registered", ExecSchedules)
+	}
+	if ExecSchedules != "hub.exec_schedules" {
+		t.Fatalf("frozen name changed: %q", ExecSchedules)
+	}
+	if e.Default {
+		t.Fatal("hub.exec_schedules must default to off")
+	}
+	if e.Stage != StageAlpha {
+		t.Fatalf("must be alpha, got %q", e.Stage)
+	}
+	if !e.HasLayer(LayerServer) {
+		t.Fatalf("must gate the server layer, got %v", e.Layers)
+	}
+	if !strings.Contains(e.Description, "Requires hub.conduit") {
+		t.Fatalf("description must name the hub.conduit dependency: %q", e.Description)
+	}
+}

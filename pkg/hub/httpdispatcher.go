@@ -449,8 +449,9 @@ const envHubExperiments = "SCION_HUB_EXPERIMENTS"
 // agentExperimentNames is the allow-list of dispatch experiments sent to
 // the agent in envHubExperiments. Any other entry of the dispatch set stays
 // between hub and broker. hub.conduit_deliver tells sciontool to register
-// the deliver-message control route (design v2.22 §1.5).
-var agentExperimentNames = []string{conduitExperiment, conduitDeliverExperiment}
+// the deliver-message control route (design v2.22 §1.5); hub.exec_schedules
+// tells it to register exec-start and exec-status.
+var agentExperimentNames = []string{conduitExperiment, conduitDeliverExperiment, execSchedulesExperiment}
 
 // applyAgentExperiments sets envHubExperiments to the allow-listed entries
 // of dispatched, or removes it when there are none. The hub owns the

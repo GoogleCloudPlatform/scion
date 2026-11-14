@@ -139,8 +139,8 @@ func (s *Server) requireExperiment(name string, next http.HandlerFunc) http.Hand
 
 // dispatchExperimentNames are the server-layer experiments whose state the
 // hub sends with each agent dispatch, because they change what the broker
-// does. hub.conduit and hub.conduit_deliver are added separately (see
-// dispatchExperiments).
+// does. hub.conduit, hub.conduit_deliver and hub.exec_schedules are added
+// separately (see dispatchExperiments).
 //
 // It also lists every experiment a platform skill gates on (experiment:
 // frontmatter or a scion:experiment block, ptone/scion#7830): the broker
@@ -178,6 +178,11 @@ func (s *Server) dispatchExperiments() []string {
 		// only for agents launched with it.
 		if s.experimentEnabledIn(snap, experiments.ConduitDeliver) {
 			out = append(out, experiments.ConduitDeliver)
+		}
+		// hub.exec_schedules needs hub.conduit too (design D8): the agent
+		// registers exec-start and exec-status from it at launch.
+		if s.experimentEnabledIn(snap, experiments.ExecSchedules) {
+			out = append(out, experiments.ExecSchedules)
 		}
 	}
 	return out
