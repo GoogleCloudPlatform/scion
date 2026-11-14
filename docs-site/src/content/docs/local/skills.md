@@ -339,7 +339,7 @@ Hub (System + User-Defined) → User → Project → Template
 1. **Hub Scope** (broadest): Configured by the Hub administrator for the entire platform. This includes pre-seeded **System** (built-in) skills under the `scion-platform://` URI scheme (such as status signaling and messaging operations) as well as admin-defined global skills.
 
    :::caution
-   A **global** skill on the Hub's injected list reaches every agent, and every holder of `skill.update_global` (every `global-catalog-author` and hub admin) can change its content, for example by publishing a new version. Add a global skill here only if you trust every holder of that permission with that reach, or pin it to an exact version or content hash. See [Global catalog authoring](/scion/hosted/ha/permissions/#global-catalog-authoring).
+   A **global** skill on the Hub's injected list reaches every agent, and every holder of `skill.update_global` (every `global-catalog-author` and hub admin) can change its content, for example by publishing a new version. Add a global skill here only if you trust every holder of that permission with that reach, or pin it to an exact version (`@1.2.0`) or content hash (`@sha256:<hash>`), whose content cannot change. See [Global catalog authoring](/scion/hosted/ha/permissions/#global-catalog-authoring).
    :::
 2. **User Scope**: Configured by you. These skills are automatically injected into every agent you provision, regardless of the project.
 3. **Project Scope**: Configured for a specific project. These skills are automatically injected into all agents running within that project.
