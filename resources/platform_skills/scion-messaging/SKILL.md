@@ -179,7 +179,8 @@ Report completion, a blocker, or a result that unblocks the next step.
 - When intentionally waiting for input or another agent, signal
   `sciontool status blocked "<reason>"`. Do not poll agents with sleep loops. For
   external work without completion notifications, follow `scion-scheduler` guidance
-  on scheduled callbacks.
+  on scheduled callbacks. When you have no further work after sending or answering
+  a message, signal `sciontool status idle "<reason>"`; any new message wakes you.
 
 ## Preserve Markdown when sending
 
