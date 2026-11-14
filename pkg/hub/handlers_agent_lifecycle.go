@@ -115,12 +115,16 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 	status.ReportSource = store.StatusReportSourceAgent
 	status.ReportRunID = presentedAgentTokenRunID(ctx)
 	_, status.ReportAgentToken = identity.(AgentIdentity)
+	// before is the row as read ahead of the write, for the
+	// limits_exceeded stop below; nil when the guards did not run.
+	var before *store.Agent
 	if statusUpdateTouchesGuardedFields(status) {
 		agent, err := s.store.GetAgent(ctx, id)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
+		before = agent
 
 		// Observability only: start-time attribution from agent.Created to the
 		// first "running"/"working" status report, logged at whichever of two
@@ -228,6 +232,9 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	// A report moving the current run to limits_exceeded ends that run on
+	// its runtime (ptone/scion#7928).
+	s.stopRunOnLimitsExceeded(ctx, before, status)
 
 	// A heartbeat-only report writes only last_seen, which no status event
 	// carries, so it publishes nothing and skips the re-read
