@@ -24,7 +24,6 @@ import (
 	"go/token"
 	"net/http"
 	"os"
-	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -410,7 +409,10 @@ func TestExecControlCallers(t *testing.T) {
 		"conduit_exec_control.go": true,
 	}
 	fset := token.NewFileSet()
-	files, err := filepath.Glob("*.go")
+	// pkgmove:scan-covers guardScanSubdirs
+	// The client and every possible caller live in pkg/hub and its
+	// guard-scanned subdirectories.
+	files, err := globGuardScanDirs(".", "*.go")
 	require.NoError(t, err)
 	for _, name := range files {
 		if strings.HasSuffix(name, "_test.go") {
