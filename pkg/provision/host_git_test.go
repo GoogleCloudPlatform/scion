@@ -21,11 +21,14 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -115,6 +118,7 @@ func fakeGit(t *testing.T) string {
 	// host-scoped credential helper; clear any inherited value first.
 	t.Setenv("SCION_SCOPED_GIT_CREDENTIAL", "")
 	t.Setenv("GIT_CONFIG_COUNT", "")
+	t.Setenv(EnvGitCheckoutWorkers, "")
 	return record
 }
 
@@ -160,7 +164,7 @@ func TestRunGitClone_ArgvEndsOptionsBeforeURL(t *testing.T) {
 			// Union: a non-hardened clone still carries the base host-side git pins.
 			want = append(want, util.HostGitArgs()...)
 		}
-		want = append(want, "clone", "--branch", "main", "--", cloneURL, dest)
+		want = append(want, "-c", "checkout.workers=16", "clone", "--branch", "main", "--", cloneURL, dest)
 		assert.Equal(t, want, argv, "hardened=%v", hardened)
 		if hardened {
 			assert.Equal(t, HostCloneProtocols, allow)
@@ -419,4 +423,107 @@ func TestRunGitClone_TokenNotUsedForNonHTTPS(t *testing.T) {
 	assert.Contains(t, got, "SCOPED="+testCloneToken+"\n", "fixture check: the matching https URL gets the token via the scoped helper env")
 	assert.Contains(t, got, "CFG=5\n", "the host-scoped credential helper is installed after the resets")
 	assert.Contains(t, got, "TOKEN=\n", "the token is delivered via the scoped helper, never GITHUB_TOKEN")
+}
+
+// recordingGit puts a git on PATH that appends its argv (NUL-separated, one
+// invocation per line) to a log and then runs the real git, and returns the
+// log path.
+func recordingGit(t *testing.T) string {
+	t.Helper()
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "argv.log")
+	script := "#!/bin/sh\n" +
+		"for a in \"$@\"; do printf '%s\\0' \"$a\"; done >> '" + logPath + "'\n" +
+		"printf '\\n' >> '" + logPath + "'\n" +
+		"exec '" + realGit + "' \"$@\"\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return logPath
+}
+
+// recordedCalls returns the recorded invocations that contain every word of
+// sub, in order and adjacent.
+func recordedCalls(t *testing.T, logPath string, sub ...string) [][]string {
+	t.Helper()
+	data, err := os.ReadFile(logPath)
+	require.NoError(t, err)
+	var out [][]string
+	for _, line := range strings.Split(string(data), "\n") {
+		if line == "" {
+			continue
+		}
+		argv := strings.Split(strings.TrimSuffix(line, "\x00"), "\x00")
+		for i := 0; i+len(sub) <= len(argv); i++ {
+			if slices.Equal(argv[i:i+len(sub)], sub) {
+				out = append(out, argv)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// assertCheckoutWorkers checks that argv carries "-c checkout.workers=<n>"
+// ahead of the subcommand word sub.
+func assertCheckoutWorkers(t *testing.T, argv []string, sub string, n int) {
+	t.Helper()
+	want := fmt.Sprintf("checkout.workers=%d", n)
+	cfg := slices.Index(argv, want)
+	cmd := slices.Index(argv, sub)
+	require.GreaterOrEqual(t, cfg, 1, "%q missing from %q", want, argv)
+	assert.Equal(t, "-c", argv[cfg-1], "checkout.workers must be passed with -c: %q", argv)
+	assert.Less(t, cfg, cmd, "checkout.workers must come before %q: %q", sub, argv)
+}
+
+// ProvisionShared's work-tree-writing git commands (the shared clone and
+// both forms of worktree add) run with parallel checkout workers, the
+// default 16 or SCION_GIT_CHECKOUT_WORKERS, passed on the command line: the
+// setting never lands in the repository config.
+func TestProvisionShared_ParallelCheckoutWorkers(t *testing.T) {
+	for _, tc := range []struct {
+		env  string
+		want int
+	}{
+		{env: "", want: DefaultGitCheckoutWorkers},
+		{env: "4", want: 4},
+		{env: "bogus", want: DefaultGitCheckoutWorkers},
+	} {
+		t.Run("env="+tc.env, func(t *testing.T) {
+			isolateGitConfig(t)
+			origin := initBareGitRepo(t)
+			workspace := filepath.Join(t.TempDir(), "workspace")
+			t.Setenv(EnvGitCheckoutWorkers, tc.env)
+			logPath := recordingGit(t)
+
+			require.NoError(t, ProvisionShared(mountedWorktreeInput(workspace, origin, "agent-1", "agent-one")))
+
+			clones := recordedCalls(t, logPath, "clone")
+			require.Len(t, clones, 1)
+			assertCheckoutWorkers(t, clones[0], "clone", tc.want)
+			adds := recordedCalls(t, logPath, "worktree", "add")
+			require.Len(t, adds, 1)
+			assert.Contains(t, adds[0], "-b")
+			assertCheckoutWorkers(t, adds[0], "worktree", tc.want)
+
+			// An existing branch that is not checked out: the -b form fails
+			// and the retry without -b also carries the setting.
+			runIn(t, workspace, "git", "branch", "reuse")
+			require.NoError(t, os.Truncate(logPath, 0))
+			require.NoError(t, ProvisionShared(mountedWorktreeInput(workspace, origin, "agent-2", "reuse")))
+			adds = recordedCalls(t, logPath, "worktree", "add")
+			require.Len(t, adds, 2)
+			assert.Contains(t, adds[0], "-b")
+			assert.NotContains(t, adds[1], "-b")
+			for _, argv := range adds {
+				assertCheckoutWorkers(t, argv, "worktree", tc.want)
+			}
+			assert.FileExists(t, filepath.Join(workspace, "worktrees", "agent-2", "README.md"))
+
+			repoConfig, err := os.ReadFile(filepath.Join(workspace, ".git", "config"))
+			require.NoError(t, err)
+			assert.NotContains(t, string(repoConfig), "workers", "checkout.workers must not be written to .git/config")
+		})
+	}
 }

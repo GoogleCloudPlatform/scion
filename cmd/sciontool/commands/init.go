@@ -3286,35 +3286,17 @@ func isUIDMapped(uid int) bool {
 var errGitCloneWorkspacePrivilegeDropRequired = errors.New(
 	"gitCloneWorkspace: privilege drop required but uid/gid were not both set; refusing to run git as root")
 
-const (
-	// defaultGitCheckoutWorkers is the number of parallel checkout workers
-	// passed via `git -c checkout.workers=<N>` when populating or switching
-	// branches in gitCloneWorkspace. On NFS-backed workspaces (e.g. Cloud Run
-	// with Filestore), single-threaded checkout is bottlenecked on per-file
-	// create/write/close RPC latency (~4.5x faster at 16 workers on ~13.5k
-	// files), while on local disk 16 workers is slightly faster or neutral.
-	//
-	// checkout.thresholdForParallelism is intentionally left at Git's built-in
-	// default (100 files) so small checkouts and few-file branch switches avoid
-	// worker-process spawn overhead while any nontrivial tree gets parallel I/O.
-	// Passing checkout.workers via `-c` rather than `git config` keeps
-	// .git/config clean under pkg/util/git_config_policy.go.
-	defaultGitCheckoutWorkers = 16
-	maxGitCheckoutWorkers     = 64
-	envGitCheckoutWorkers     = "SCION_GIT_CHECKOUT_WORKERS"
-)
-
+// resolveGitCheckoutWorkers returns the parallel checkout worker count
+// passed via `git -c checkout.workers=<N>` when gitCloneWorkspace populates
+// or switches branches (provision.DefaultGitCheckoutWorkers, overridden by
+// provision.EnvGitCheckoutWorkers). Passing it via `-c` rather than
+// `git config` keeps .git/config clean under pkg/util/git_config_policy.go.
 func resolveGitCheckoutWorkers() int {
-	raw := os.Getenv(envGitCheckoutWorkers)
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return defaultGitCheckoutWorkers
-	}
-	n, err := strconv.Atoi(trimmed)
-	if err != nil || n < 0 || n > maxGitCheckoutWorkers {
+	raw := os.Getenv(provision.EnvGitCheckoutWorkers)
+	n, ok := provision.ParseGitCheckoutWorkers(raw)
+	if !ok {
 		log.Warn("%s is not a valid integer in 0..%d (%q), defaulting to %d",
-			envGitCheckoutWorkers, maxGitCheckoutWorkers, raw, defaultGitCheckoutWorkers)
-		return defaultGitCheckoutWorkers
+			provision.EnvGitCheckoutWorkers, provision.MaxGitCheckoutWorkers, raw, n)
 	}
 	return n
 }
