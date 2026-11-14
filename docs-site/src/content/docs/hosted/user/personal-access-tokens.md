@@ -196,7 +196,7 @@ export SCION_HUB_ENDPOINT="https://scion.example.com"
 export SCION_HUB_TOKEN="scion_pat_..."
 
 # Publish a skill version to the global catalog (creates the skill on first publish)
-scion skills publish ./skills/deploy-checklist --version 1.2.0 --scope global
+scion --global skills publish ./skills/deploy-checklist --version 1.2.0 --scope global
 
 # Create or update a global template from a template directory (push is an alias)
 scion --global templates sync ./templates/code-reviewer
@@ -212,12 +212,17 @@ scion templates update code-reviewer --scope global
 - Without a terminal, a command that asks for confirmation (such as `templates delete`) answers
   No unless you pass `--yes` or `--non-interactive`. `--non-interactive` also makes ambiguous
   prompts fail instead of waiting, which suits CI.
-- `scion skills publish --scope global` publishes onto an existing skill only when it is a
+- `scion skills publish --scope global` adds the version to an existing skill only when it is a
   global skill of that name; a project or user skill of the same name is not reused.
-- `scion --global templates sync` and `push` do not link or register a project, so the job does
-  not need a linked checkout, `project:read` or `project:list`. Likewise,
-  `scion templates update --scope global` (or `--global`) works with `--hub <url>` and the
-  token, without `SCION_HUB_ENDPOINT` or a linked project.
+- `skills publish --scope global`, `templates sync` and `push` with `--global`, and
+  `templates update --scope global` do not link, register or look up a project, so the job needs
+  no linked checkout and no `project:read` or `project:list`. Outside a Scion project (for
+  example in a plain CI checkout), `skills publish` and the `templates` commands other than
+  `update` need the root `--global` flag, as above; inside a linked project,
+  `skills publish --scope global` works without it.
+- `scion templates update --scope global` (or `scion --global templates update`) works with
+  `--hub <url>` and the token, without `SCION_HUB_ENDPOINT` or a linked project, also outside a
+  project. `--global` together with a different `--scope` is rejected.
 - `scion --global templates clone <src> <dest>` copies a Hub template into your local global
   templates directory, which needs only `template:read`; sync the copy to publish it. Cloning a
   template into the global scope on the Hub itself (the web UI's clone, or

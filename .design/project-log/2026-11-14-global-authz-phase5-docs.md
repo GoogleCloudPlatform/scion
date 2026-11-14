@@ -35,3 +35,9 @@ Docs only (`docs-site/src/content/docs/`):
 - Stored `core` URIs on reprovision: start and restart send the stored config plus creator pre-resolution (`pkg/hub/httpdispatcher.go:4001`, `:4298`). `isHubRegistrySkillURI` drops the unparseable `core` URI from pre-resolution (`skill_dispatch_resolve.go:171-184`). The broker's `PreResolvedSkillResolver` forwards the rest (`pkg/agent/pre_resolved_skill_resolver.go:112`) to the routing resolver, which sends `skill://` to the Hub resolver (`pkg/agent/routing_skill_resolver.go:181`, `POST /api/v1/skills/resolve`). There, `ParseSkillURI` fails with `invalid_uri` and the retired-scope message (`pkg/hub/skill_handlers.go:1781-1785`). Provisioning fails for a required reference and skips an optional one with a warning (`pkg/agent/provision.go:5396-5403`). The release note was narrowed to this; reincarnation was not traced.
 
 Not verified in code: phase 4 behaviour (not on the base) and a CLI journey against a live Hub with a non-admin token.
+
+## Restack onto phase 4
+
+- Rebased onto phase 4 (ptone/scion#7925). Docs updated to phase 4's final CLI behaviour: scope-filtered `skills publish` lookup, `--scope global` publish and `templates update` read no project, root `--global` needed outside a project, `--global` conflicting with `--scope` rejected. Web gating: Import, Clone and Refresh All from Source on the settings global Templates tab need the global `create` capability, and Delete is per record; the detail page's Refresh from Source is not gated in the UI.
+- Release note: older Hubs read `skill://global/<name>` as a federated registry named `global` (main's `registryAliases` has only `project` and `user`), so the recommended form is `skill://scion/global/<name>`.
+- Found that `scion --global templates delete` and `clone` still go through `requireHub` (project lookup), which fails under a token in a fresh CI environment. Reported to the EM; phase 4 is fixing it. The recipe keeps the CLI forms.

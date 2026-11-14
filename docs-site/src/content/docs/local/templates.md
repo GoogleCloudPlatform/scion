@@ -279,7 +279,7 @@ Writing global templates needs the global template permissions, which only hub-l
 
 Importing into the global catalog, or refreshing a global template, needs only `template.create_global`, even when the template already exists, so it can replace the files of an existing global template.
 
-In the web UI, the global **Templates** controls on the settings page (import, clone and delete) follow your permissions, so you are offered only the actions you can perform. For CI, use a [hub token with the global scopes](/scion/hosted/user/personal-access-tokens/#hub-boundary-tokens-for-global-catalog-authoring). See [Global catalog authoring](/scion/hosted/ha/permissions/#global-catalog-authoring) for the full model.
+In the web UI, the global **Templates** tab on the settings page offers **Import**, **Clone** and **Refresh All from Source** only to users who can create global templates, and offers **Delete** on each template only where you may delete it. The **Refresh from Source** button on a template's detail page is shown regardless; the Hub still refuses the refresh without `template.create_global`. For CI, use a [hub token with the global scopes](/scion/hosted/user/personal-access-tokens/#hub-boundary-tokens-for-global-catalog-authoring). See [Global catalog authoring](/scion/hosted/ha/permissions/#global-catalog-authoring) for the full model.
 
 In the Web Dashboard's **New Agent** creation form, templates are automatically clustered and ordered by scope in the dropdown:
 ```text

@@ -130,7 +130,7 @@ Most segments are optional. Common forms:
 | `skill://scion/project/<projectId>/deploy-checklist` | Project-scoped skill (scope + scope ID). |
 | `skill://scion/user/<userId>/scratch@1.4.0` | User-scoped skill, exact version. |
 | `skill://project/deploy-checklist` | Scope-alias form (registry defaults to `scion`). |
-| `skill://global/deploy-checklist` | Scope-alias form for a global skill; the same as `skill://scion/global/deploy-checklist`. Prefer the full form. |
+| `skill://global/deploy-checklist` | Scope-alias form for a global skill; the same as `skill://scion/global/deploy-checklist`. Prefer the full form: older Hubs read `skill://global/...` as a federated registry named `global`. |
 | `skill://registry.example.com/global/tool@^2.0` | External registry (federation). |
 | `gh://<owner>/<repo>/<path>[@<ref>][?token=<SECRET>]` | Skill sourced from a GitHub repository. Supports private repos and per-URI credentials. |
 | `gcp-skill://<alias>/<skillId>@<version>` | Skill sourced from GCP Vertex AI. |
@@ -244,8 +244,8 @@ scion skills publish ./deploy-checklist --version 1.1.0 --skill-id <skill-id>
 | Flag | Default | Description |
 | :--- | :--- | :--- |
 | `--version` | *(required)* | SemVer version to publish (e.g. `1.0.0`). |
-| `--scope` | `global` | Scope of the skill: `global`, `project`, or `user`. When `--skill-id` is not given, Scion looks for an existing skill of that name **in this scope only** and creates one there if there is none, so a same-named skill in another scope is never published to. With `project`, the skill is attached to the current Hub-linked project. The command fails if no project can be determined (run `scion hub link` first). |
-| `--skill-id` | *(auto)* | Publish a new version for an existing skill ID. If omitted, Scion matches by directory name within `--scope` and creates the skill when no match exists. |
+| `--scope` | `global` (for a new skill) | Scope to publish into: `global`, `project`, or `user`. When `--scope` is set and `--skill-id` is not, Scion adds the version only to a skill of that name **in that scope**: the current project's skill for `project`, your own skill for `user`. It creates the skill there if there is none, so a same-named skill in another scope, project or user's scope is never published to. Without `--scope`, any skill of that name you can see gets the version, and a new skill is created in `global`. With `project`, the skill is attached to the current Hub-linked project; the command fails if no project can be determined (run `scion hub link` first). With `global`, no project is linked or looked up; outside a Scion project, add the root `--global` flag. |
+| `--skill-id` | *(auto)* | Publish a new version for an existing skill ID. If omitted, Scion matches by directory name as described for `--scope` and creates the skill when no match exists. |
 
 :::note[Global scope permissions]
 Creating a skill in the `global` scope needs the `skill.create_global` permission; publishing a new version of a global skill, changing it or deprecating a version needs `skill.update_global`, and deleting it needs `skill.delete_global`. The `global-catalog-author` role grants all three (and the matching template permissions) without Hub administrator authority, and `hub-admin` holds them as well. Owning a global skill grants nothing: the user who created it needs the role to keep changing it. For a CI token that publishes global skills, see [Hub-boundary tokens for global catalog authoring](/scion/hosted/user/personal-access-tokens/#hub-boundary-tokens-for-global-catalog-authoring); for the role and permission details, see [Global catalog authoring](/scion/hosted/ha/permissions/#global-catalog-authoring).
