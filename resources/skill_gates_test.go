@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"gopkg.in/yaml.v3"
 )
 
 // Experiment gates in platform skills (ptone/scion#7830): `experiment: <id>`
@@ -76,6 +77,19 @@ func parseSkillMarkdown(name, raw string) skillMarkdown {
 					bad(i+1, "empty experiment: in frontmatter")
 				}
 			}
+		}
+	}
+	if start > 0 {
+		// The runtime reads experiment: with a YAML parser
+		// (pkg/agent parseSkillFrontmatter), which ignores the whole
+		// frontmatter on a parse error: the gate would silently vanish.
+		var fm struct {
+			Experiment string `yaml:"experiment"`
+		}
+		if err := yaml.Unmarshal([]byte(strings.Join(lines[1:start-1], "\n")), &fm); err != nil {
+			bad(1, "frontmatter is not valid YAML (the runtime would ignore its experiment: gate): %v", err)
+		} else if fm.Experiment != sm.fileGate {
+			bad(1, "frontmatter experiment parses as %q in YAML but reads as %q line by line", fm.Experiment, sm.fileGate)
 		}
 	}
 	open, openAt := "", 0
@@ -169,6 +183,7 @@ func TestParseSkillMarkdown_RejectsMalformedGates(t *testing.T) {
 		"inline":      "text <!-- scion:experiment web.chat_choices --> more\n",
 		"frontmatter": "---\nname: x\n<!-- scion:experiment web.chat_choices -->\n---\n",
 		"empty id":    "---\nexperiment:\n---\nbody\n",
+		"bad yaml":    "---\nexperiment: web.chat_choices\ndescription: a: b\n---\nbody\n",
 	} {
 		if got := parseSkillMarkdown(name, raw); len(got.problems) == 0 {
 			t.Errorf("%s: no problem reported for %q", name, raw)

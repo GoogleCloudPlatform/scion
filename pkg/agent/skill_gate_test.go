@@ -438,3 +438,37 @@ func TestInjectPlatformSkills_EmbeddedUngatedSkillsByteIdentical(t *testing.T) {
 		})
 	}
 }
+
+// TestInjectPlatformSkills_EmbeddedScionMessagingChoices installs the shipped
+// scion-messaging skill with web.chat_choices off and on (ptone/scion#7830
+// acceptance criterion 1): off, no Choices reference and no marker text;
+// on, the reference and the pointer lines, with the markers stripped.
+func TestInjectPlatformSkills_EmbeddedScionMessagingChoices(t *testing.T) {
+	const skillsDir = ".agents/skills"
+	for _, on := range []bool{false, true} {
+		home := t.TempDir()
+		state := func(string) bool { return false }
+		if on {
+			state = onlyOn(gateTestOn)
+		}
+		if err := injectPlatformSkills(resources.PlatformSkillsFS(), home, skillsDir, workspaceSkillsInjectionContext{ExperimentOn: state}); err != nil {
+			t.Fatal(err)
+		}
+		dir := filepath.Join(home, filepath.FromSlash(skillsDir), "scion-messaging")
+		skill, err := os.ReadFile(filepath.Join(dir, "SKILL.md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(skill), "scion:experiment") || strings.Contains(string(skill), "scion:end-experiment") {
+			t.Errorf("on=%v: installed SKILL.md contains marker text", on)
+		}
+		_, refErr := os.Stat(filepath.Join(dir, "references", "choices.md"))
+		hasPointer := strings.Contains(string(skill), "--choices-file <file>")
+		if on && (refErr != nil || !hasPointer) {
+			t.Errorf("on: references/choices.md err=%v, pointer lines present=%v; want both", refErr, hasPointer)
+		}
+		if !on && (!os.IsNotExist(refErr) || hasPointer) {
+			t.Errorf("off: references/choices.md err=%v, pointer lines present=%v; want neither", refErr, hasPointer)
+		}
+	}
+}

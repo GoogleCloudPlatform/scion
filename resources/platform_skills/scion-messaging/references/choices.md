@@ -68,7 +68,7 @@ The JSON is an array of decisions:
 |---|---|
 | `id` | Optional decision key. Use a short key you will recognize, such as `deploy-target`: `[A-Za-z0-9_-]`, at most 32 characters, with at least one non-digit. Leave it out and the Hub assigns your next number (`1`, `2`, ...). Keys compare case-insensitively. |
 | `question` | Required. Markdown, at most 2000 characters. |
-| `choices` | Required, 2 to 10. Each is a string label, or an object with `label` (one line, at most 100 characters), optional `id` and optional `description` (one line, at most 300 characters). A choice without an `id` gets its position (`1`, `2`, ...). Labels must differ. |
+| `choices` | Required, 2 to 10. Each is a string label, or an object with `label` (one line, at most 100 characters), optional `id` (`[A-Za-z0-9_-]`, at most 32 characters) and optional `description` (one line, at most 300 characters). A choice without an `id` gets its position (`1`, `2`, ...). Choice ids and labels must each be unique within the decision, compared case-insensitively. |
 | `default` | Optional. Marks your recommended choice, by its `id` or `label`. |
 
 Other fields are refused. The whole set is at most 32 KiB of JSON.
@@ -81,8 +81,8 @@ result.
 After a successful send the CLI marks you as waiting for input, the same as
 `sciontool status ask_user`, with the first question as the summary.
 
-You cannot combine choices with `--attach`, `--artifact`, `--wake`, `--in` or
-`--at`.
+You cannot combine choices with `--attach`, `--artifact`, `--wake`, `--in`,
+`--at`, `--cc`, `--channel` or `--thread-id`.
 
 ## Revise a decision: `--update`
 
