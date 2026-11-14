@@ -131,9 +131,16 @@ var (
 // exercises in the event's project. resolveScheduledAuthority checks the
 // revision principal's current project admission for it. An event type with
 // no entry is denied.
+//
+// For exec (ptone/scion#7883) the project admission this checks is only a
+// project-boundary and liveness gate: ProjectAdmissionForClass admits on
+// project membership, not on a binding of agent.attach. The real decision
+// is authorizeScheduledExecFire's target-scoped agent.attach check, which
+// must never be skipped.
 var scheduledEventPermissions = map[string]string{
-	"dispatch_agent": "agent.create",
-	"message":        scheduledMessagePermission,
+	"dispatch_agent":       "agent.create",
+	"message":              scheduledMessagePermission,
+	scheduledEventTypeExec: scheduledExecPermission,
 }
 
 // ScheduledAuthority is the authority a fired scheduled event runs under:

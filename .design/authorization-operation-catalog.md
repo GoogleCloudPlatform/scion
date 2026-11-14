@@ -70,7 +70,7 @@
 - [schedule.event.update](#scheduleeventupdate) — Update or resume a recurring schedule of any event type. A user access token needs scheduled_event:update and passes the event type's target checks
 - [schedule.event.pause](#scheduleeventpause) — Pause a recurring schedule. Pausing only stops future runs, so a token with scheduled_event:update is admitted
 - [schedule.event.delete](#scheduleeventdelete) — Cancel a scheduled event or delete a recurring schedule
-- [schedule.event.fire](#scheduleeventfire) — Fire a scheduled message or dispatch_agent event, one-shot or materialized from a recurring schedule, under the authority its revision recorded
+- [schedule.event.fire](#scheduleeventfire) — Fire a scheduled message, dispatch_agent or exec event, one-shot or materialized from a recurring schedule, under the authority its revision recorded. An exec fire (ptone/scion#7883) re-checks agent.attach on the target under the revision's ceiling before its one exec-start; exec-start and exec-status are reached only from the scheduler's exec fire, run tracker and sweeper, never from a request
 - [artifact.read](#artifactread) — Read an artifact's metadata or file bytes, one by one or as a zip of a version (owner, home-project readers via the scope grant, or principal grants); unreadable artifacts answer 404
 - [artifact.list](#artifactlist) — List the artifacts the caller owns, holds a grant on, or that are shared to a project it is a member of (?mine=1); each row passes the artifact.read check, so an artifact the caller cannot read is omitted, never denied
 - [artifact.create](#artifactcreate) — Create an artifact homed in a project (the caller's own, or ?scope=): a single file published at once (?name=), or a manifest that starts a pending first version (JSON body), whose files are then uploaded and finalized through the artifact.version.upload and artifact.version.finalize routes
@@ -3068,7 +3068,7 @@
 
 **Domain:** schedule
 
-**Description:** Fire a scheduled message or dispatch_agent event, one-shot or materialized from a recurring schedule, under the authority its revision recorded
+**Description:** Fire a scheduled message, dispatch_agent or exec event, one-shot or materialized from a recurring schedule, under the authority its revision recorded. An exec fire (ptone/scion#7883) re-checks agent.attach on the target under the revision's ceiling before its one exec-start; exec-start and exec-status are reached only from the scheduler's exec fire, run tracker and sweeper, never from a request
 
 ### Entry Points
 
@@ -3078,6 +3078,9 @@
 | scheduler_job | — | `executeSchedule:message` |
 | scheduler_job | — | `fireEvent:dispatch_agent` |
 | scheduler_job | — | `fireEvent:message` |
+| scheduler_job | — | `fireEvent:exec` |
+| internal_dispatch | — | `StartAgentExecRun:exec-start` |
+| internal_dispatch | — | `AgentExecRunStatus:exec-status` |
 
 **Principals:** `system`
 
@@ -3095,10 +3098,12 @@
 
 - `pkg/hub:TestScheduledFire_UsesRecordedTokenCeiling`
 - `pkg/hub:TestScheduledFire_UsesRecordedTokenBoundary`
+- `pkg/hub:TestScheduledExecFire_AuthzMatrix`
+- `pkg/hub:TestScheduledExecFire_HubGate`
 
 ### Exemptions
 
-- **internal_only:** The scheduler fires the event with no request credential. resolveScheduledAuthority resolves the revision's recorded principal and credential, and the fire is bounded by the revision's recorded ceiling and boundary (scope: scheduler fire) — waives: `base_permission`
+- **internal_only:** The scheduler fires the event with no request credential. resolveScheduledAuthority resolves the revision's recorded principal and credential, and the fire is bounded by the revision's recorded ceiling and boundary. The exec control routes are internal-only call sites of the exec fire: exec-start follows the full fire-time authorization; exec-status only recovers the outcome of a run already admitted, on its recorded launch (scope: scheduler fire) — waives: `base_permission`
 
 ---
 

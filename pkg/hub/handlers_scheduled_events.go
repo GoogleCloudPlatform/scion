@@ -28,7 +28,7 @@ import (
 
 // CreateScheduledEventRequest is the API request for creating a scheduled event.
 type CreateScheduledEventRequest struct {
-	EventType string `json:"eventType"`         // Required: "message" or "dispatch_agent"
+	EventType string `json:"eventType"`         // Required: "message", "dispatch_agent" or "exec"
 	FireAt    string `json:"fireAt,omitempty"`  // ISO 8601 absolute time
 	FireIn    string `json:"fireIn,omitempty"`  // Duration string (e.g. "30m")
 	Payload   string `json:"payload,omitempty"` // Raw JSON payload (advanced)
@@ -54,20 +54,20 @@ type CreateScheduledEventRequest struct {
 	Template string `json:"template,omitempty"`
 	Task     string `json:"task,omitempty"`
 	Branch   string `json:"branch,omitempty"`
-}
 
-// ScheduledEventResponse is the API response for a single scheduled event.
-type ScheduledEventResponse struct {
-	store.ScheduledEvent
+	// Convenience fields for "exec" events (ptone/scion#7883), with
+	// AgentID/AgentName: the argv and its timeout (0: 60 seconds).
+	Command        []string `json:"command,omitempty"`
+	TimeoutSeconds int      `json:"timeoutSeconds,omitempty"`
 }
 
 // ListScheduledEventsResponse is the API response for listing scheduled events.
 type ListScheduledEventsResponse struct {
-	Scope      string                 `json:"scope,omitempty"`
-	Events     []store.ScheduledEvent `json:"events"`
-	NextCursor string                 `json:"nextCursor,omitempty"`
-	TotalCount int                    `json:"totalCount,omitempty"`
-	ServerTime time.Time              `json:"serverTime"`
+	Scope      string                   `json:"scope,omitempty"`
+	Events     []ScheduledEventResponse `json:"events"`
+	NextCursor string                   `json:"nextCursor,omitempty"`
+	TotalCount int                      `json:"totalCount,omitempty"`
+	ServerTime time.Time                `json:"serverTime"`
 }
 
 // authorizeScheduledEventAccess is the project-level gate the scheduled-event
@@ -319,6 +319,7 @@ func (s *Server) handleScheduledEvents(w http.ResponseWriter, r *http.Request, p
 // createScheduledEvent handles POST /api/v1/projects/{projectId}/scheduled-events
 func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, projectID string) {
 	var req CreateScheduledEventRequest
+	r.Body = http.MaxBytesReader(w, r.Body, scheduleRequestBodyLimit)
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
@@ -329,8 +330,16 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 		ValidationError(w, "eventType is required", nil)
 		return
 	}
-	if req.EventType != "message" && req.EventType != "dispatch_agent" {
-		ValidationError(w, fmt.Sprintf("unsupported event type: %s (supported: message, dispatch_agent)", req.EventType), nil)
+	if !s.scheduledEventTypeSupported(req.EventType) {
+		ValidationError(w, fmt.Sprintf("unsupported event type: %s (supported: %s)", req.EventType, s.supportedScheduledEventTypes()), nil)
+		return
+	}
+	if req.EventType == scheduledEventTypeExec {
+		s.createScheduledExecEvent(w, r, projectID, &req)
+		return
+	}
+	if len(req.Command) > 0 || req.TimeoutSeconds != 0 {
+		ValidationError(w, "command and timeoutSeconds apply to exec events only", nil)
 		return
 	}
 	if req.Wake && req.EventType != "message" {
@@ -365,39 +374,9 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 		}
 	}
 
-	// Validate fire time: exactly one of FireAt or FireIn must be provided
-	if req.FireAt == "" && req.FireIn == "" {
-		ValidationError(w, "either fireAt or fireIn is required", nil)
+	fireAt, ok := parseScheduledFireTime(w, &req)
+	if !ok {
 		return
-	}
-	if req.FireAt != "" && req.FireIn != "" {
-		ValidationError(w, "fireAt and fireIn are mutually exclusive", nil)
-		return
-	}
-
-	var fireAt time.Time
-	if req.FireAt != "" {
-		var err error
-		fireAt, err = time.Parse(time.RFC3339, req.FireAt)
-		if err != nil {
-			ValidationError(w, "fireAt must be a valid ISO 8601 / RFC 3339 timestamp", nil)
-			return
-		}
-		if fireAt.Before(time.Now()) {
-			ValidationError(w, "fireAt must be in the future", nil)
-			return
-		}
-	} else {
-		duration, err := time.ParseDuration(req.FireIn)
-		if err != nil {
-			ValidationError(w, "fireIn must be a valid Go duration string (e.g. 30m, 1h)", nil)
-			return
-		}
-		if duration <= 0 {
-			ValidationError(w, "fireIn must be a positive duration", nil)
-			return
-		}
-		fireAt = time.Now().Add(duration)
 	}
 
 	// Build payload
@@ -482,16 +461,56 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	s.writeCreatedScheduledEvent(w, r, evt)
+}
 
-	// Fetch the created event to get the full record (with CreatedAt etc.)
+// writeCreatedScheduledEvent writes the 201 of a created event, read back
+// for its full record (CreatedAt etc.), through the response serializer.
+func (s *Server) writeCreatedScheduledEvent(w http.ResponseWriter, r *http.Request, evt store.ScheduledEvent) {
+	rev := s.newExecRevealer(r.Context())
 	created, err := s.store.GetScheduledEvent(r.Context(), evt.ID)
 	if err != nil {
 		// Event was created successfully, but we can't fetch it back — return what we have
-		writeJSON(w, http.StatusCreated, evt)
+		writeJSON(w, http.StatusCreated, s.scheduledEventResponse(r.Context(), rev, evt))
 		return
 	}
+	writeJSON(w, http.StatusCreated, s.scheduledEventResponse(r.Context(), rev, *created))
+}
 
-	writeJSON(w, http.StatusCreated, created)
+// parseScheduledFireTime validates the request's fire time: exactly one of
+// FireAt (RFC 3339, in the future) or FireIn (a positive duration). On an
+// error it writes the 400 and returns ok=false.
+func parseScheduledFireTime(w http.ResponseWriter, req *CreateScheduledEventRequest) (time.Time, bool) {
+	if req.FireAt == "" && req.FireIn == "" {
+		ValidationError(w, "either fireAt or fireIn is required", nil)
+		return time.Time{}, false
+	}
+	if req.FireAt != "" && req.FireIn != "" {
+		ValidationError(w, "fireAt and fireIn are mutually exclusive", nil)
+		return time.Time{}, false
+	}
+	if req.FireAt != "" {
+		fireAt, err := time.Parse(time.RFC3339, req.FireAt)
+		if err != nil {
+			ValidationError(w, "fireAt must be a valid ISO 8601 / RFC 3339 timestamp", nil)
+			return time.Time{}, false
+		}
+		if fireAt.Before(time.Now()) {
+			ValidationError(w, "fireAt must be in the future", nil)
+			return time.Time{}, false
+		}
+		return fireAt, true
+	}
+	duration, err := time.ParseDuration(req.FireIn)
+	if err != nil {
+		ValidationError(w, "fireIn must be a valid Go duration string (e.g. 30m, 1h)", nil)
+		return time.Time{}, false
+	}
+	if duration <= 0 {
+		ValidationError(w, "fireIn must be a positive duration", nil)
+		return time.Time{}, false
+	}
+	return time.Now().Add(duration), true
 }
 
 // listScheduledEvents handles GET /api/v1/projects/{projectId}/scheduled-events
@@ -504,7 +523,7 @@ func (s *Server) listScheduledEvents(w http.ResponseWriter, r *http.Request, pro
 	if !ok {
 		writeJSON(w, http.StatusOK, ListScheduledEventsResponse{
 			Scope:      scope,
-			Events:     []store.ScheduledEvent{},
+			Events:     []ScheduledEventResponse{},
 			ServerTime: time.Now().UTC(),
 		})
 		return
@@ -525,7 +544,7 @@ func (s *Server) listScheduledEvents(w http.ResponseWriter, r *http.Request, pro
 	events, totalCount := visibleScheduledRows(r.Context(), s, projectID, result.Items, result.TotalCount, scheduledEventRowOf)
 	writeJSON(w, http.StatusOK, ListScheduledEventsResponse{
 		Scope:      scope,
-		Events:     events,
+		Events:     s.scheduledEventResponses(r.Context(), s.newExecRevealer(r.Context()), events),
 		NextCursor: result.NextCursor,
 		TotalCount: totalCount,
 		ServerTime: time.Now().UTC(),
@@ -614,7 +633,7 @@ func (s *Server) getScheduledEvent(w http.ResponseWriter, r *http.Request, proje
 		return
 	}
 
-	writeJSON(w, http.StatusOK, evt)
+	writeJSON(w, http.StatusOK, s.scheduledEventResponse(r.Context(), s.newExecRevealer(r.Context()), *evt))
 }
 
 // cancelScheduledEvent handles DELETE /api/v1/projects/{projectId}/scheduled-events/{id}
@@ -644,6 +663,9 @@ func (s *Server) cancelScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 	}
 	if s.scheduler != nil {
 		s.scheduler.StopEventTimer(eventID)
+	}
+	if evt.EventType == scheduledEventTypeExec {
+		s.auditScheduledExecCancel(r.Context(), *evt)
 	}
 
 	w.WriteHeader(http.StatusNoContent)

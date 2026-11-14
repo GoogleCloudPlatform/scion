@@ -998,12 +998,15 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "schedule.event.fire",
 		Domain:      "schedule",
-		Description: "Fire a scheduled message or dispatch_agent event, one-shot or materialized from a recurring schedule, under the authority its revision recorded",
+		Description: "Fire a scheduled message, dispatch_agent or exec event, one-shot or materialized from a recurring schedule, under the authority its revision recorded. An exec fire (ptone/scion#7883) re-checks agent.attach on the target under the revision's ceiling before its one exec-start; exec-start and exec-status are reached only from the scheduler's exec fire, run tracker and sweeper, never from a request",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointSchedulerJob, Pattern: "executeSchedule:dispatch_agent"},
 			{Kind: EntryPointSchedulerJob, Pattern: "executeSchedule:message"},
 			{Kind: EntryPointSchedulerJob, Pattern: "fireEvent:dispatch_agent"},
 			{Kind: EntryPointSchedulerJob, Pattern: "fireEvent:message"},
+			{Kind: EntryPointSchedulerJob, Pattern: "fireEvent:exec"},
+			{Kind: EntryPointInternalDispatch, Pattern: "StartAgentExecRun:exec-start"},
+			{Kind: EntryPointInternalDispatch, Pattern: "AgentExecRunStatus:exec-status"},
 		},
 		Principals:       []PrincipalKind{PrincipalSystem},
 		Credentials:      []CredentialKind{CredentialSystemInternal},
@@ -1015,11 +1018,14 @@ var projectOperations = []OperationSpec{
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestScheduledFire_UsesRecordedTokenCeiling"},
 			{Package: "pkg/hub", Function: "TestScheduledFire_UsesRecordedTokenBoundary"},
+			{Package: "pkg/hub", Function: "TestScheduledExecFire_AuthzMatrix"},
+			{Package: "pkg/hub", Function: "TestScheduledExecFire_HubGate"},
 		},
 		Exemptions: []Exemption{{
 			Kind: ExemptionInternalOnly,
 			Reason: "The scheduler fires the event with no request credential. resolveScheduledAuthority resolves the revision's recorded principal and credential, " +
-				"and the fire is bounded by the revision's recorded ceiling and boundary",
+				"and the fire is bounded by the revision's recorded ceiling and boundary. The exec control routes are internal-only call sites of the exec fire: " +
+				"exec-start follows the full fire-time authorization; exec-status only recovers the outcome of a run already admitted, on its recorded launch",
 			Scope:  "scheduler fire",
 			Waives: []WaivedObligation{WaiveBasePermission},
 		}},

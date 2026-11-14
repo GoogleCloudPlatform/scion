@@ -43,6 +43,12 @@ import (
 // exec-start: one attempt per run; on an ambiguous error the caller only
 // polls exec-status.
 
+// ErrExecSchedulesDisabled: exec-start was not sent because the hub gate
+// is closed (hub.exec_schedules or hub.conduit off, or conduit not served;
+// AC18). Only new starts are gated: exec-status recovery of admitted runs
+// is not.
+var ErrExecSchedulesDisabled = errors.New("agent exec: exec schedules are disabled on this hub")
+
 // ErrAgentExecLaunchChanged: the agent's current launch, or the only
 // session the router can resolve, is not of the launch the run was admitted
 // under (D9-S3). Nothing was sent; the run is abandoned, never queried on a
@@ -66,9 +72,13 @@ func (e *AgentExecLaunchChangedError) Unwrap() error { return ErrAgentExecLaunch
 // sending; an invalid req is an *agentcontrol.ExecFieldError and nothing is
 // sent.
 //
+// It is the hub gate of AC18: nothing is sent unless hub.exec_schedules and
+// hub.conduit are both on and conduit is served (ErrExecSchedulesDisabled).
+//
 // A nil error carries the agent's documented answer (ExecResult.Status
 // 202, 200 replayed, 409 overlap/busy/mismatch, 408 expired_before_start,
 // 400). Errors:
+//   - ErrExecSchedulesDisabled: the hub gate is closed; nothing was sent;
 //   - router.ErrNoSession (possibly wrapped) or ErrAgentControlNotAdvertised
 //     (wrapped): nothing was sent (the run is skipped, "agent executor
 //     unavailable");
@@ -79,6 +89,9 @@ func (e *AgentExecLaunchChangedError) Unwrap() error { return ErrAgentExecLaunch
 //   - otherwise the store, router or session error. A timeout or drop after
 //     send is ambiguous: the run may have started.
 func (s *Server) StartAgentExecRun(ctx context.Context, agentID, launchID string, req agentcontrol.ExecStartRequest) (agentcontrol.ExecResult, error) {
+	if !s.execSchedulesEnabled() || !s.conduitRoutable() {
+		return agentcontrol.ExecResult{}, ErrExecSchedulesDisabled
+	}
 	req.V = agentcontrol.ExecVersion
 	req.NotAfterUnixMS = time.Now().Add(agentcontrol.ExecNotAfter).UnixMilli()
 	if err := req.Validate(); err != nil {
@@ -98,7 +111,11 @@ func (s *Server) StartAgentExecRun(ctx context.Context, agentID, launchID string
 // AgentExecRunStatus reads exec-status for runID on the agent's launch
 // launchID. It is a read and safe to repeat. A nil error carries 200
 // running or finished, or 404 unknown (ExecResult.State). Errors are as for
-// StartAgentExecRun; a 400 is a schema error (the hub sent a bad request).
+// StartAgentExecRun, except that it is not gated on the hub's experiment
+// flags (AC18): turning hub.exec_schedules or hub.conduit off stops new
+// starts but never the outcome recovery of runs already admitted. It needs
+// only a conduit router. A 400 is a schema error (the hub sent a bad
+// request).
 func (s *Server) AgentExecRunStatus(ctx context.Context, agentID, launchID, runID string) (agentcontrol.ExecResult, error) {
 	req := agentcontrol.ExecStatusRequest{V: agentcontrol.ExecVersion, RunID: runID}
 	if err := req.Validate(); err != nil {
@@ -151,10 +168,12 @@ func (s *Server) callAgentExec(ctx context.Context, agentID, launchID, route str
 // admission and a relayed call is delivered to the resolved session id, so
 // this holds locally and across nodes. The route must be advertised, as
 // for callAgentControlJSON; errors are the same otherwise.
+//
+// Unlike callAgentControlJSON it does not check the hub's conduit
+// experiment flag, only that a router exists: the caller owns the gate
+// (StartAgentExecRun gates new starts; AgentExecRunStatus recovers admitted
+// runs whatever the flags, AC18).
 func (s *Server) callAgentControlPinned(ctx context.Context, agent *store.Agent, route string, body []byte, timeout time.Duration) (int, []byte, error) {
-	if !s.conduitRoutable() {
-		return 0, nil, router.ErrNoSession
-	}
 	rtr := s.conduitRouter()
 	if rtr == nil {
 		return 0, nil, router.ErrNoSession
