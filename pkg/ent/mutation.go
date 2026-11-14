@@ -92059,6 +92059,8 @@ type ScheduledEventMutation struct {
 	schedule_id                           *string
 	created                               *time.Time
 	clearedFields                         map[string]struct{}
+	exec_run                              *uuid.UUID
+	clearedexec_run                       bool
 	done                                  bool
 	oldValue                              func(context.Context) (*ScheduledEvent, error)
 	predicates                            []predicate.ScheduledEvent
@@ -93227,6 +93229,45 @@ func (m *ScheduledEventMutation) ResetCreated() {
 	m.created = nil
 }
 
+// SetExecRunID sets the "exec_run" edge to the ScheduledExecRun entity by id.
+func (m *ScheduledEventMutation) SetExecRunID(id uuid.UUID) {
+	m.exec_run = &id
+}
+
+// ClearExecRun clears the "exec_run" edge to the ScheduledExecRun entity.
+func (m *ScheduledEventMutation) ClearExecRun() {
+	m.clearedexec_run = true
+}
+
+// ExecRunCleared reports if the "exec_run" edge to the ScheduledExecRun entity was cleared.
+func (m *ScheduledEventMutation) ExecRunCleared() bool {
+	return m.clearedexec_run
+}
+
+// ExecRunID returns the "exec_run" edge ID in the mutation.
+func (m *ScheduledEventMutation) ExecRunID() (id uuid.UUID, exists bool) {
+	if m.exec_run != nil {
+		return *m.exec_run, true
+	}
+	return
+}
+
+// ExecRunIDs returns the "exec_run" edge IDs in the mutation.
+// Note that IDs always returns len(IDs) <= 1 for unique edges, and you should use
+// ExecRunID instead. It exists only for internal usage by the builders.
+func (m *ScheduledEventMutation) ExecRunIDs() (ids []uuid.UUID) {
+	if id := m.exec_run; id != nil {
+		ids = append(ids, *id)
+	}
+	return
+}
+
+// ResetExecRun resets all changes to the "exec_run" edge.
+func (m *ScheduledEventMutation) ResetExecRun() {
+	m.exec_run = nil
+	m.clearedexec_run = false
+}
+
 // Where appends a list predicates to the ScheduledEventMutation builder.
 func (m *ScheduledEventMutation) Where(ps ...predicate.ScheduledEvent) {
 	m.predicates = append(m.predicates, ps...)
@@ -93854,19 +93895,28 @@ func (m *ScheduledEventMutation) ResetField(name string) error {
 
 // AddedEdges returns all edge names that were set/added in this mutation.
 func (m *ScheduledEventMutation) AddedEdges() []string {
-	edges := make([]string, 0, 0)
+	edges := make([]string, 0, 1)
+	if m.exec_run != nil {
+		edges = append(edges, scheduledevent.EdgeExecRun)
+	}
 	return edges
 }
 
 // AddedIDs returns all IDs (to other nodes) that were added for the given edge
 // name in this mutation.
 func (m *ScheduledEventMutation) AddedIDs(name string) []ent.Value {
+	switch name {
+	case scheduledevent.EdgeExecRun:
+		if id := m.exec_run; id != nil {
+			return []ent.Value{*id}
+		}
+	}
 	return nil
 }
 
 // RemovedEdges returns all edge names that were removed in this mutation.
 func (m *ScheduledEventMutation) RemovedEdges() []string {
-	edges := make([]string, 0, 0)
+	edges := make([]string, 0, 1)
 	return edges
 }
 
@@ -93878,25 +93928,42 @@ func (m *ScheduledEventMutation) RemovedIDs(name string) []ent.Value {
 
 // ClearedEdges returns all edge names that were cleared in this mutation.
 func (m *ScheduledEventMutation) ClearedEdges() []string {
-	edges := make([]string, 0, 0)
+	edges := make([]string, 0, 1)
+	if m.clearedexec_run {
+		edges = append(edges, scheduledevent.EdgeExecRun)
+	}
 	return edges
 }
 
 // EdgeCleared returns a boolean which indicates if the edge with the given name
 // was cleared in this mutation.
 func (m *ScheduledEventMutation) EdgeCleared(name string) bool {
+	switch name {
+	case scheduledevent.EdgeExecRun:
+		return m.clearedexec_run
+	}
 	return false
 }
 
 // ClearEdge clears the value of the edge with the given name. It returns an error
 // if that edge is not defined in the schema.
 func (m *ScheduledEventMutation) ClearEdge(name string) error {
+	switch name {
+	case scheduledevent.EdgeExecRun:
+		m.ClearExecRun()
+		return nil
+	}
 	return fmt.Errorf("unknown ScheduledEvent unique edge %s", name)
 }
 
 // ResetEdge resets all changes to the edge with the given name in this mutation.
 // It returns an error if the edge is not defined in the schema.
 func (m *ScheduledEventMutation) ResetEdge(name string) error {
+	switch name {
+	case scheduledevent.EdgeExecRun:
+		m.ResetExecRun()
+		return nil
+	}
 	return fmt.Errorf("unknown ScheduledEvent edge %s", name)
 }
 
@@ -93934,7 +94001,10 @@ type ScheduledExecRunMutation struct {
 	addoutput_bytes           *int64
 	runtime                   *string
 	launch_id                 *string
+	last_polled_at            *time.Time
 	clearedFields             map[string]struct{}
+	event                     *uuid.UUID
+	clearedevent              bool
 	done                      bool
 	oldValue                  func(context.Context) (*ScheduledExecRun, error)
 	predicates                []predicate.ScheduledExecRun
@@ -94042,6 +94112,42 @@ func (m *ScheduledExecRunMutation) IDs(ctx context.Context) ([]uuid.UUID, error)
 	default:
 		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
 	}
+}
+
+// SetEventID sets the "event_id" field.
+func (m *ScheduledExecRunMutation) SetEventID(u uuid.UUID) {
+	m.event = &u
+}
+
+// EventID returns the value of the "event_id" field in the mutation.
+func (m *ScheduledExecRunMutation) EventID() (r uuid.UUID, exists bool) {
+	v := m.event
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldEventID returns the old "event_id" field's value of the ScheduledExecRun entity.
+// If the ScheduledExecRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledExecRunMutation) OldEventID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldEventID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldEventID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldEventID: %w", err)
+	}
+	return oldValue.EventID, nil
+}
+
+// ResetEventID resets all changes to the "event_id" field.
+func (m *ScheduledExecRunMutation) ResetEventID() {
+	m.event = nil
 }
 
 // SetScheduleID sets the "schedule_id" field.
@@ -95024,6 +95130,69 @@ func (m *ScheduledExecRunMutation) ResetLaunchID() {
 	m.launch_id = nil
 }
 
+// SetLastPolledAt sets the "last_polled_at" field.
+func (m *ScheduledExecRunMutation) SetLastPolledAt(t time.Time) {
+	m.last_polled_at = &t
+}
+
+// LastPolledAt returns the value of the "last_polled_at" field in the mutation.
+func (m *ScheduledExecRunMutation) LastPolledAt() (r time.Time, exists bool) {
+	v := m.last_polled_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLastPolledAt returns the old "last_polled_at" field's value of the ScheduledExecRun entity.
+// If the ScheduledExecRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledExecRunMutation) OldLastPolledAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLastPolledAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLastPolledAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLastPolledAt: %w", err)
+	}
+	return oldValue.LastPolledAt, nil
+}
+
+// ResetLastPolledAt resets all changes to the "last_polled_at" field.
+func (m *ScheduledExecRunMutation) ResetLastPolledAt() {
+	m.last_polled_at = nil
+}
+
+// ClearEvent clears the "event" edge to the ScheduledEvent entity.
+func (m *ScheduledExecRunMutation) ClearEvent() {
+	m.clearedevent = true
+	m.clearedFields[scheduledexecrun.FieldEventID] = struct{}{}
+}
+
+// EventCleared reports if the "event" edge to the ScheduledEvent entity was cleared.
+func (m *ScheduledExecRunMutation) EventCleared() bool {
+	return m.clearedevent
+}
+
+// EventIDs returns the "event" edge IDs in the mutation.
+// Note that IDs always returns len(IDs) <= 1 for unique edges, and you should use
+// EventID instead. It exists only for internal usage by the builders.
+func (m *ScheduledExecRunMutation) EventIDs() (ids []uuid.UUID) {
+	if id := m.event; id != nil {
+		ids = append(ids, *id)
+	}
+	return
+}
+
+// ResetEvent resets all changes to the "event" edge.
+func (m *ScheduledExecRunMutation) ResetEvent() {
+	m.event = nil
+	m.clearedevent = false
+}
+
 // Where appends a list predicates to the ScheduledExecRunMutation builder.
 func (m *ScheduledExecRunMutation) Where(ps ...predicate.ScheduledExecRun) {
 	m.predicates = append(m.predicates, ps...)
@@ -95058,7 +95227,10 @@ func (m *ScheduledExecRunMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *ScheduledExecRunMutation) Fields() []string {
-	fields := make([]string, 0, 22)
+	fields := make([]string, 0, 24)
+	if m.event != nil {
+		fields = append(fields, scheduledexecrun.FieldEventID)
+	}
 	if m.schedule_id != nil {
 		fields = append(fields, scheduledexecrun.FieldScheduleID)
 	}
@@ -95125,6 +95297,9 @@ func (m *ScheduledExecRunMutation) Fields() []string {
 	if m.launch_id != nil {
 		fields = append(fields, scheduledexecrun.FieldLaunchID)
 	}
+	if m.last_polled_at != nil {
+		fields = append(fields, scheduledexecrun.FieldLastPolledAt)
+	}
 	return fields
 }
 
@@ -95133,6 +95308,8 @@ func (m *ScheduledExecRunMutation) Fields() []string {
 // schema.
 func (m *ScheduledExecRunMutation) Field(name string) (ent.Value, bool) {
 	switch name {
+	case scheduledexecrun.FieldEventID:
+		return m.EventID()
 	case scheduledexecrun.FieldScheduleID:
 		return m.ScheduleID()
 	case scheduledexecrun.FieldProjectID:
@@ -95177,6 +95354,8 @@ func (m *ScheduledExecRunMutation) Field(name string) (ent.Value, bool) {
 		return m.Runtime()
 	case scheduledexecrun.FieldLaunchID:
 		return m.LaunchID()
+	case scheduledexecrun.FieldLastPolledAt:
+		return m.LastPolledAt()
 	}
 	return nil, false
 }
@@ -95186,6 +95365,8 @@ func (m *ScheduledExecRunMutation) Field(name string) (ent.Value, bool) {
 // database failed.
 func (m *ScheduledExecRunMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
 	switch name {
+	case scheduledexecrun.FieldEventID:
+		return m.OldEventID(ctx)
 	case scheduledexecrun.FieldScheduleID:
 		return m.OldScheduleID(ctx)
 	case scheduledexecrun.FieldProjectID:
@@ -95230,6 +95411,8 @@ func (m *ScheduledExecRunMutation) OldField(ctx context.Context, name string) (e
 		return m.OldRuntime(ctx)
 	case scheduledexecrun.FieldLaunchID:
 		return m.OldLaunchID(ctx)
+	case scheduledexecrun.FieldLastPolledAt:
+		return m.OldLastPolledAt(ctx)
 	}
 	return nil, fmt.Errorf("unknown ScheduledExecRun field %s", name)
 }
@@ -95239,6 +95422,13 @@ func (m *ScheduledExecRunMutation) OldField(ctx context.Context, name string) (e
 // type.
 func (m *ScheduledExecRunMutation) SetField(name string, value ent.Value) error {
 	switch name {
+	case scheduledexecrun.FieldEventID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetEventID(v)
+		return nil
 	case scheduledexecrun.FieldScheduleID:
 		v, ok := value.(uuid.UUID)
 		if !ok {
@@ -95392,6 +95582,13 @@ func (m *ScheduledExecRunMutation) SetField(name string, value ent.Value) error 
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetLaunchID(v)
+		return nil
+	case scheduledexecrun.FieldLastPolledAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLastPolledAt(v)
 		return nil
 	}
 	return fmt.Errorf("unknown ScheduledExecRun field %s", name)
@@ -95550,6 +95747,9 @@ func (m *ScheduledExecRunMutation) ClearField(name string) error {
 // It returns an error if the field is not defined in the schema.
 func (m *ScheduledExecRunMutation) ResetField(name string) error {
 	switch name {
+	case scheduledexecrun.FieldEventID:
+		m.ResetEventID()
+		return nil
 	case scheduledexecrun.FieldScheduleID:
 		m.ResetScheduleID()
 		return nil
@@ -95616,25 +95816,37 @@ func (m *ScheduledExecRunMutation) ResetField(name string) error {
 	case scheduledexecrun.FieldLaunchID:
 		m.ResetLaunchID()
 		return nil
+	case scheduledexecrun.FieldLastPolledAt:
+		m.ResetLastPolledAt()
+		return nil
 	}
 	return fmt.Errorf("unknown ScheduledExecRun field %s", name)
 }
 
 // AddedEdges returns all edge names that were set/added in this mutation.
 func (m *ScheduledExecRunMutation) AddedEdges() []string {
-	edges := make([]string, 0, 0)
+	edges := make([]string, 0, 1)
+	if m.event != nil {
+		edges = append(edges, scheduledexecrun.EdgeEvent)
+	}
 	return edges
 }
 
 // AddedIDs returns all IDs (to other nodes) that were added for the given edge
 // name in this mutation.
 func (m *ScheduledExecRunMutation) AddedIDs(name string) []ent.Value {
+	switch name {
+	case scheduledexecrun.EdgeEvent:
+		if id := m.event; id != nil {
+			return []ent.Value{*id}
+		}
+	}
 	return nil
 }
 
 // RemovedEdges returns all edge names that were removed in this mutation.
 func (m *ScheduledExecRunMutation) RemovedEdges() []string {
-	edges := make([]string, 0, 0)
+	edges := make([]string, 0, 1)
 	return edges
 }
 
@@ -95646,25 +95858,42 @@ func (m *ScheduledExecRunMutation) RemovedIDs(name string) []ent.Value {
 
 // ClearedEdges returns all edge names that were cleared in this mutation.
 func (m *ScheduledExecRunMutation) ClearedEdges() []string {
-	edges := make([]string, 0, 0)
+	edges := make([]string, 0, 1)
+	if m.clearedevent {
+		edges = append(edges, scheduledexecrun.EdgeEvent)
+	}
 	return edges
 }
 
 // EdgeCleared returns a boolean which indicates if the edge with the given name
 // was cleared in this mutation.
 func (m *ScheduledExecRunMutation) EdgeCleared(name string) bool {
+	switch name {
+	case scheduledexecrun.EdgeEvent:
+		return m.clearedevent
+	}
 	return false
 }
 
 // ClearEdge clears the value of the edge with the given name. It returns an error
 // if that edge is not defined in the schema.
 func (m *ScheduledExecRunMutation) ClearEdge(name string) error {
+	switch name {
+	case scheduledexecrun.EdgeEvent:
+		m.ClearEvent()
+		return nil
+	}
 	return fmt.Errorf("unknown ScheduledExecRun unique edge %s", name)
 }
 
 // ResetEdge resets all changes to the edge with the given name in this mutation.
 // It returns an error if the edge is not defined in the schema.
 func (m *ScheduledExecRunMutation) ResetEdge(name string) error {
+	switch name {
+	case scheduledexecrun.EdgeEvent:
+		m.ResetEvent()
+		return nil
+	}
 	return fmt.Errorf("unknown ScheduledExecRun edge %s", name)
 }
 

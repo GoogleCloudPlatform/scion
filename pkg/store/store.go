@@ -3312,10 +3312,23 @@ type ScheduledExecRunStore interface {
 	// same transaction, while the event is still fired or expired.
 	FinishScheduledExecRun(ctx context.Context, fin ScheduledExecRunFinish) (bool, error)
 
-	// ListUnfinishedScheduledExecRuns returns up to limit unfinished runs
-	// (FinishedAt nil) whose event ID sorts after afterEventID ("" for the
-	// first page), ordered by event ID.
-	ListUnfinishedScheduledExecRuns(ctx context.Context, afterEventID string, limit int) ([]ScheduledExecRun, error)
+	// ListExpiredScheduledExecRuns returns up to limit unfinished runs whose
+	// lease ended before now, oldest lease first.
+	ListExpiredScheduledExecRuns(ctx context.Context, now time.Time, limit int) ([]ScheduledExecRun, error)
+
+	// ClaimScheduledExecRunsForPoll returns up to limit unfinished runs
+	// whose lease has not ended, least recently polled first, skipping the
+	// runs of excludeEventIDs, and records now as their last poll in the same
+	// transaction, so successive bounded sweeps (on any replica) rotate
+	// through every unfinished run.
+	ClaimScheduledExecRunsForPoll(ctx context.Context, now time.Time, limit int, excludeEventIDs []string) ([]ScheduledExecRun, error)
+
+	// CreateScheduledEventChecked inserts event only after check accepts the
+	// pending events of the same project and event type (at most limit),
+	// read in the same transaction under a per-project lock that serializes
+	// concurrent authors across replicas. check's error is returned as is
+	// and nothing is inserted.
+	CreateScheduledEventChecked(ctx context.Context, event *ScheduledEvent, limit int, check func(pending []ScheduledEvent) error) error
 }
 
 // =============================================================================

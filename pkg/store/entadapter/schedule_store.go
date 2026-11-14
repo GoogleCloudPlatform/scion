@@ -769,16 +769,27 @@ func (s *ScheduleStore) DeleteSchedulesByProject(ctx context.Context, projectID 
 	if err != nil {
 		return 0, err
 	}
-	// First delete all scheduled events for this project's schedules.
-	if _, err := s.client.ScheduledEvent.Delete().
-		Where(scheduledevent.ProjectIDEQ(uid)).
-		Exec(ctx); err != nil {
-		return 0, err
-	}
-	// Then delete the schedules themselves.
-	n, err := s.client.Schedule.Delete().
-		Where(schedule.ProjectIDEQ(uid)).
-		Exec(ctx)
+	// One transaction: the project's scheduled exec runs
+	// (ptone/scion#7883), then its scheduled events (whose foreign key
+	// would cascade to any run inserted meanwhile), then the schedules.
+	var n int
+	err = runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
+		if _, err := c.ScheduledExecRun.Delete().
+			Where(scheduledexecrun.ProjectIDEQ(uid)).
+			Exec(ctx); err != nil {
+			return err
+		}
+		if _, err := c.ScheduledEvent.Delete().
+			Where(scheduledevent.ProjectIDEQ(uid)).
+			Exec(ctx); err != nil {
+			return err
+		}
+		deleted, err := c.Schedule.Delete().
+			Where(schedule.ProjectIDEQ(uid)).
+			Exec(ctx)
+		n = deleted
+		return err
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -1265,7 +1276,7 @@ func (s *ScheduleStore) PurgeOldScheduledEvents(ctx context.Context, cutoff time
 		for start := 0; start < len(ids); start += scheduledExecRunsByEventChunk {
 			end := min(start+scheduledExecRunsByEventChunk, len(ids))
 			chunk := ids[start:end]
-			if _, err := c.ScheduledExecRun.Delete().Where(scheduledexecrun.IDIn(chunk...)).Exec(ctx); err != nil {
+			if _, err := c.ScheduledExecRun.Delete().Where(scheduledexecrun.EventIDIn(chunk...)).Exec(ctx); err != nil {
 				return err
 			}
 			deleted, err := c.ScheduledEvent.Delete().

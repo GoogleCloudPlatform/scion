@@ -3156,7 +3156,7 @@ var (
 	}
 	// ScheduledExecRunsColumns holds the columns for the "scheduled_exec_runs" table.
 	ScheduledExecRunsColumns = []*schema.Column{
-		{Name: "event_id", Type: field.TypeUUID},
+		{Name: "id", Type: field.TypeUUID},
 		{Name: "schedule_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "project_id", Type: field.TypeUUID},
 		{Name: "target_agent_id", Type: field.TypeUUID},
@@ -3179,12 +3179,22 @@ var (
 		{Name: "output_bytes", Type: field.TypeInt64, Nullable: true},
 		{Name: "runtime", Type: field.TypeString, Default: ""},
 		{Name: "launch_id", Type: field.TypeString, Default: ""},
+		{Name: "last_polled_at", Type: field.TypeTime},
+		{Name: "event_id", Type: field.TypeUUID, Unique: true},
 	}
 	// ScheduledExecRunsTable holds the schema information for the "scheduled_exec_runs" table.
 	ScheduledExecRunsTable = &schema.Table{
 		Name:       "scheduled_exec_runs",
 		Columns:    ScheduledExecRunsColumns,
 		PrimaryKey: []*schema.Column{ScheduledExecRunsColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "scheduled_exec_runs_scheduled_events_exec_run",
+				Columns:    []*schema.Column{ScheduledExecRunsColumns[24]},
+				RefColumns: []*schema.Column{ScheduledEventsColumns[0]},
+				OnDelete:   schema.Cascade,
+			},
+		},
 		Indexes: []*schema.Index{
 			{
 				Name:    "scheduledexecrun_schedule_id_finished_at",
@@ -3202,9 +3212,14 @@ var (
 				Columns: []*schema.Column{ScheduledExecRunsColumns[2]},
 			},
 			{
-				Name:    "scheduledexecrun_finished_at",
+				Name:    "scheduledexecrun_finished_at_lease_until",
 				Unique:  false,
-				Columns: []*schema.Column{ScheduledExecRunsColumns[16]},
+				Columns: []*schema.Column{ScheduledExecRunsColumns[16], ScheduledExecRunsColumns[15]},
+			},
+			{
+				Name:    "scheduledexecrun_finished_at_last_polled_at",
+				Unique:  false,
+				Columns: []*schema.Column{ScheduledExecRunsColumns[16], ScheduledExecRunsColumns[23]},
 			},
 		},
 	}
@@ -4157,6 +4172,7 @@ func init() {
 	ScheduledEventsTable.Annotation = &entsql.Annotation{
 		Table: "scheduled_events",
 	}
+	ScheduledExecRunsTable.ForeignKeys[0].RefTable = ScheduledEventsTable
 	ScheduledExecRunsTable.Annotation = &entsql.Annotation{
 		Table: "scheduled_exec_runs",
 	}

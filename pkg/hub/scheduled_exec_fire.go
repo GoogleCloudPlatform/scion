@@ -118,6 +118,17 @@ func (t *scheduledExecRunTracker) release(eventID string) {
 	t.used--
 }
 
+// ownedIDs returns the event IDs a fire or tracker of this replica owns.
+func (t *scheduledExecRunTracker) ownedIDs() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]string, 0, len(t.owned))
+	for id := range t.owned {
+		out = append(out, id)
+	}
+	return out
+}
+
 // owns reports whether a fire or tracker of this replica owns eventID.
 func (t *scheduledExecRunTracker) owns(eventID string) bool {
 	t.mu.Lock()
@@ -258,6 +269,7 @@ func (s *Server) fireScheduledExec(ctx context.Context, evt store.ScheduledEvent
 		return errors.New(execReasonDispatchFailed)
 	}
 	s.auditScheduledExec(ctx, newScheduledExecFireAudit(ctx, ScheduledExecAuditAdmit, evt, p))
+	scheduledExecFireStage(scheduledExecStageAdmitted, evt.ID)
 
 	// One exec-start attempt. It runs past the fire handler's deadline on
 	// the call's own timeout, and is cancelled only when the shutdown gives
@@ -271,36 +283,53 @@ func (s *Server) fireScheduledExec(ctx context.Context, evt store.ScheduledEvent
 	})
 	stopStart()
 	cancelStart()
+	scheduledExecFireStage(scheduledExecStageStarted, evt.ID)
 
-	recordCtx, cancelRecord := context.WithTimeout(context.WithoutCancel(ctx), scheduledEventRecordTimeout)
-	defer cancelRecord()
-	finish := func(outcome string, res *agentcontrol.ExecResult) {
-		s.finishScheduledExecRun(recordCtx, run, outcome, res, "", "")
+	// From here on the run row exists, so another replica's sweeper may
+	// record the outcome at any moment. Every outcome is therefore recorded
+	// here through the run's compare-and-set, with the event in the same
+	// transaction (and the event only while it is still fired or expired),
+	// and fireEvent writes nothing after the handler (outcomeRecorded): a
+	// recorded outcome is never overwritten (R1, ptone/scion#7883).
+	terminal := func(outcome string, res *agentcontrol.ExecResult, eventStatus, reason string, result error) error {
+		recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledEventRecordTimeout)
+		defer cancel()
+		if _, err := s.finishScheduledExecRun(recordCtx, run, outcome, res, eventStatus, reason); err != nil {
+			// The run stays unfinished; the sweeper resolves it.
+			log.Warn("Scheduler: exec run outcome not recorded at fire; left to the sweeper", "error", err)
+		}
+		return outcomeRecorded(result)
+	}
+	skipRun := func(reason, detail string) error {
+		return terminal(store.ScheduledExecOutcomeSkipped, nil, store.ScheduledEventSkipped, reason, skip(reason, detail))
+	}
+	failRun := func(reason string) error {
+		return terminal(store.ScheduledExecOutcomeError, nil, store.ScheduledEventFailed, reason, errors.New(reason))
+	}
+	track := func() error {
+		handedOff = true
+		afterScheduledRecord(ctx, func() { s.trackScheduledExecRun(run) })
+		// The claim already recorded the event as fired (or expired).
+		return outcomeRecorded(nil)
 	}
 
 	if startErr != nil {
 		switch {
 		case errors.Is(startErr, ErrExecSchedulesDisabled):
-			finish(store.ScheduledExecOutcomeSkipped, nil)
-			return skip(execReasonDisabled, "experiment_off_at_start")
+			return skipRun(execReasonDisabled, "experiment_off_at_start")
 		case errors.Is(startErr, router.ErrNoSession), errors.Is(startErr, ErrAgentControlNotAdvertised),
 			errors.Is(startErr, ErrAgentExecLaunchChanged), errors.Is(startErr, store.ErrNotFound):
-			finish(store.ScheduledExecOutcomeSkipped, nil)
-			return skip(execReasonUnavailable, "executor_unavailable")
+			return skipRun(execReasonUnavailable, "executor_unavailable")
 		case isExecFieldError(startErr):
-			finish(store.ScheduledExecOutcomeError, nil)
-			return errScheduledExecPayloadInvalid
+			return failRun(errScheduledExecPayloadInvalid.Error())
 		case errors.Is(startErr, agentcontrol.ErrExecSchema):
 			log.Warn("Scheduler: exec-start answer outside the schema", "error", startErr)
-			finish(store.ScheduledExecOutcomeError, nil)
-			return errors.New(execReasonDispatchFailed)
+			return failRun(execReasonDispatchFailed)
 		default:
 			// Timeout or transport error after the send: the run may have
 			// started. Never resend; the tracker resolves it.
 			log.Warn("Scheduler: exec-start result unknown; tracking the run", "error", startErr)
-			handedOff = true
-			afterScheduledRecord(ctx, func() { s.trackScheduledExecRun(run) })
-			return nil
+			return track()
 		}
 	}
 
@@ -309,36 +338,51 @@ func (s *Server) fireScheduledExec(ctx context.Context, evt store.ScheduledEvent
 		if res.Finished() {
 			// start_failed at 202, or a replay of a finished run.
 			outcome, status, reason := scheduledExecFinalOutcome(res, timeout)
-			finish(outcome, &res)
+			var result error
 			if status == store.ScheduledEventFailed {
-				return errors.New(reason)
+				result = errors.New(reason)
 			}
-			return nil
+			return terminal(outcome, &res, status, reason, result)
 		}
-		if _, err := s.store.MarkScheduledExecRunRunning(recordCtx, evt.ID); err == nil {
+		recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledEventRecordTimeout)
+		if changed, err := s.store.MarkScheduledExecRunRunning(recordCtx, evt.ID); err == nil && changed {
 			run.Outcome = store.ScheduledExecOutcomeRunning
 		}
-		handedOff = true
-		afterScheduledRecord(ctx, func() { s.trackScheduledExecRun(run) })
-		return nil
+		cancel()
+		return track()
 	case http.StatusConflict:
 		switch res.Outcome {
 		case agentcontrol.ExecOutcomeOverlap:
-			finish(store.ScheduledExecOutcomeSkipped, nil)
-			return skip(execReasonOverlap, "agent_overlap")
+			return skipRun(execReasonOverlap, "agent_overlap")
 		case agentcontrol.ExecOutcomeBusy:
-			finish(store.ScheduledExecOutcomeSkipped, nil)
-			return skip(execReasonCapacity, "agent_busy")
+			return skipRun(execReasonCapacity, "agent_busy")
 		default: // mismatch
-			finish(store.ScheduledExecOutcomeError, nil)
-			return errors.New(execReasonDispatchFailed)
+			return failRun(execReasonDispatchFailed)
 		}
 	case http.StatusRequestTimeout:
-		finish(store.ScheduledExecOutcomeError, nil)
-		return errors.New(execReasonStartExpired)
+		return failRun(execReasonStartExpired)
 	default: // 400
-		finish(store.ScheduledExecOutcomeError, nil)
-		return errScheduledExecPayloadInvalid
+		return failRun(errScheduledExecPayloadInvalid.Error())
+	}
+}
+
+// Stages of an exec fire at which scheduledExecFireHook runs.
+const (
+	// scheduledExecStageAdmitted: the run row is written; exec-start is
+	// not sent yet.
+	scheduledExecStageAdmitted = "admitted"
+	// scheduledExecStageStarted: exec-start has answered (or failed);
+	// nothing is recorded yet.
+	scheduledExecStageStarted = "started"
+)
+
+// scheduledExecFireHook, when set, runs at each stage of an exec fire. It is
+// a test seam for interleaving tests only; production never sets it.
+var scheduledExecFireHook func(stage, eventID string)
+
+func scheduledExecFireStage(stage, eventID string) {
+	if hook := scheduledExecFireHook; hook != nil {
+		hook(stage, eventID)
 	}
 }
 
@@ -369,7 +413,12 @@ func scheduledExecFinalOutcome(res agentcontrol.ExecResult, timeoutSeconds int) 
 // and, when eventStatus is set, the event's status in the same write; the
 // winner emits the outcome audit record. res carries the numbers of a
 // finished run, nil otherwise.
-func (s *Server) finishScheduledExecRun(ctx context.Context, run store.ScheduledExecRun, outcome string, res *agentcontrol.ExecResult, eventStatus, eventError string) bool {
+//
+// It returns whether this call recorded the outcome; false with a nil error
+// means the run was already finished (another writer won) or is gone
+// (purged), and needs nothing more. A non-nil error means the write failed:
+// the run is still unfinished and must be retried.
+func (s *Server) finishScheduledExecRun(ctx context.Context, run store.ScheduledExecRun, outcome string, res *agentcontrol.ExecResult, eventStatus, eventError string) (bool, error) {
 	fin := store.ScheduledExecRunFinish{
 		EventID:     run.EventID,
 		FinishedAt:  time.Now(),
@@ -384,10 +433,10 @@ func (s *Server) finishScheduledExecRun(ctx context.Context, run store.Scheduled
 	won, err := s.store.FinishScheduledExecRun(ctx, fin)
 	if err != nil {
 		slog.Warn("Scheduler: exec run outcome not recorded", "eventID", run.EventID, "outcome", outcome, "error", err)
-		return false
+		return false, err
 	}
 	if !won {
-		return false
+		return false, nil
 	}
 	a := newScheduledExecRunAudit(run)
 	a.Outcome = outcome
@@ -396,7 +445,7 @@ func (s *Server) finishScheduledExecRun(ctx context.Context, run store.Scheduled
 	s.auditScheduledExec(ctx, a)
 	slog.Info("Scheduler: exec run finished", "eventID", run.EventID, "agent_id", run.TargetAgentID,
 		"outcome", outcome, "event_status", eventStatus)
-	return true
+	return true, nil
 }
 
 // trackScheduledExecRun starts the detached tracker of an admitted run. The
@@ -433,15 +482,24 @@ func (s *Server) pollScheduledExecRun(ctx context.Context, run store.ScheduledEx
 }
 
 // pollScheduledExecRunOnce polls run once and records its outcome when it is
-// known. It reports whether the run needs no further polling. unavailable
+// known. It reports whether the run needs no further polling: its outcome
+// is recorded, by this call or another writer, or it is gone. A failed
+// write reports false, so the run stays tracked and is retried. unavailable
 // carries, across a tracker's polls, whether the agent's session was last
 // unavailable (the lease-expiry text).
+//
+// Each write gets its own bounded context, created after the status call
+// returns (R3): a status answer that took most of the call budget can still
+// be recorded.
 func (s *Server) pollScheduledExecRunOnce(ctx context.Context, run *store.ScheduledExecRun, unavailable *bool) bool {
-	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledEventRecordTimeout)
-	defer cancel()
+	record := func(outcome string, res *agentcontrol.ExecResult, eventStatus, reason string) bool {
+		recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledEventRecordTimeout)
+		defer cancel()
+		_, err := s.finishScheduledExecRun(recordCtx, *run, outcome, res, eventStatus, reason)
+		return err == nil
+	}
 	failed := func(outcome, reason string) bool {
-		s.finishScheduledExecRun(recordCtx, *run, outcome, nil, store.ScheduledEventFailed, reason)
-		return true
+		return record(outcome, nil, store.ScheduledEventFailed, reason)
 	}
 	if time.Now().After(run.LeaseUntil) {
 		reason := execReasonOutcomeUnknown
@@ -477,13 +535,14 @@ func (s *Server) pollScheduledExecRunOnce(ctx context.Context, run *store.Schedu
 	switch res.State {
 	case agentcontrol.ExecStateFinished:
 		outcome, status, reason := scheduledExecFinalOutcome(res, run.TimeoutSeconds)
-		s.finishScheduledExecRun(recordCtx, *run, outcome, &res, status, reason)
-		return true
+		return record(outcome, &res, status, reason)
 	case agentcontrol.ExecStateRunning:
 		if run.Outcome == store.ScheduledExecOutcomeStarting {
+			recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledEventRecordTimeout)
 			if _, err := s.store.MarkScheduledExecRunRunning(recordCtx, run.EventID); err == nil {
 				run.Outcome = store.ScheduledExecOutcomeRunning
 			}
+			cancel()
 		}
 		return false
 	default: // unknown (404)
@@ -505,51 +564,63 @@ func (s *Server) scheduledExecRunSweepHandler() func(ctx context.Context) {
 	return s.sweepScheduledExecRuns
 }
 
-// sweepScheduledExecRuns polls, once each, the unfinished runs no tracker
-// of this replica owns, and records runs past their lease as abandoned
-// (design "Recovery bounds"): bounded pages, at most
-// scheduledExecSweepInFlight concurrent calls, round-robin across target
-// agents so unavailable agents cannot monopolize a sweep. It recovers the
-// real outcome of runs whose tracker a hub restart lost while their
-// tombstone and lease are live.
+// sweepScheduledExecRuns is one bounded sweep of unfinished exec runs
+// (design "Recovery bounds", R2):
+//
+//  1. Runs past their lease are recorded abandoned first, in pages, with no
+//     status call, so they never wait behind slow polls.
+//  2. Live runs no tracker of this replica owns are claimed in chunks of at
+//     most scheduledExecSweepInFlight, least recently polled first
+//     (ClaimScheduledExecRunsForPoll records the claim), and polled once each,
+//     concurrently and round-robin across target agents. The claim order
+//     is persisted, so successive sweeps (after a deadline exit, or on
+//     another replica) rotate through every unfinished run instead of
+//     restarting at the same prefix.
+//
+// It recovers the real outcome of runs whose tracker a hub restart lost
+// while their tombstone and lease are live.
 func (s *Server) sweepScheduledExecRuns(ctx context.Context) {
-	after := ""
-	for page := 0; page < scheduledExecSweepMaxPages && ctx.Err() == nil; page++ {
-		runs, err := s.store.ListUnfinishedScheduledExecRuns(ctx, after, scheduledExecSweepBatch)
+	budget := scheduledExecSweepBatch * scheduledExecSweepMaxPages
+	for expired := 0; expired < budget && ctx.Err() == nil; {
+		runs, err := s.store.ListExpiredScheduledExecRuns(ctx, time.Now(), scheduledExecSweepBatch)
 		if err != nil {
-			slog.Warn("Scheduler: exec run sweep: list failed", "error", err)
+			slog.Warn("Scheduler: exec run sweep: expired list failed", "error", err)
+			break
+		}
+		progressed := false
+		for i := range runs {
+			var unavailable bool
+			if s.pollScheduledExecRunOnce(ctx, &runs[i], &unavailable) {
+				progressed = true
+			}
+		}
+		expired += len(runs)
+		if len(runs) < scheduledExecSweepBatch || !progressed {
+			break
+		}
+	}
+
+	for polled := 0; polled < budget && ctx.Err() == nil; {
+		runs, err := s.store.ClaimScheduledExecRunsForPoll(ctx, time.Now(), scheduledExecSweepInFlight, s.execRuns.ownedIDs())
+		if err != nil {
+			slog.Warn("Scheduler: exec run sweep: claim failed", "error", err)
 			return
 		}
 		if len(runs) == 0 {
 			return
 		}
-		after = runs[len(runs)-1].EventID
-		candidates := make([]store.ScheduledExecRun, 0, len(runs))
-		for _, r := range runs {
-			if !s.execRuns.owns(r.EventID) {
-				candidates = append(candidates, r)
-			}
-		}
-		sem := make(chan struct{}, scheduledExecSweepInFlight)
 		var wg sync.WaitGroup
-		for _, r := range roundRobinByAgent(candidates) {
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-			}
-			if ctx.Err() != nil {
-				break
-			}
+		for _, r := range roundRobinByAgent(runs) {
 			wg.Add(1)
 			go func(r store.ScheduledExecRun) {
 				defer wg.Done()
-				defer func() { <-sem }()
 				var unavailable bool
 				s.pollScheduledExecRunOnce(ctx, &r, &unavailable)
 			}(r)
 		}
 		wg.Wait()
-		if len(runs) < scheduledExecSweepBatch {
+		polled += len(runs)
+		if len(runs) < scheduledExecSweepInFlight {
 			return
 		}
 	}

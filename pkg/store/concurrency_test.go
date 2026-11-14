@@ -219,6 +219,7 @@ func TestAdvisoryLockKeys_AllUnique(t *testing.T) {
 		{"LockPendingSecretExpiry", LockPendingSecretExpiry},
 		{"LockScheduledExecRunSweep", LockScheduledExecRunSweep},
 		{"LockPendingSecretOwnerWrite", LockPendingSecretOwnerWrite},
+		{"LockScheduledEventQuota", LockScheduledEventQuota},
 	}
 
 	// --- Check 1: value uniqueness ---

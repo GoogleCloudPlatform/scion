@@ -16,8 +16,11 @@ package entadapter
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
 	"time"
 
+	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecrun"
@@ -33,7 +36,7 @@ var _ store.ScheduledExecRunStore = (*ScheduleStore)(nil)
 
 func entScheduledExecRunToStore(e *ent.ScheduledExecRun) store.ScheduledExecRun {
 	run := store.ScheduledExecRun{
-		EventID:                 e.ID.String(),
+		EventID:                 e.EventID.String(),
 		ProjectID:               e.ProjectID.String(),
 		TargetAgentID:           e.TargetAgentID.String(),
 		InitiatorPrincipalKind:  e.InitiatorPrincipalKind,
@@ -55,6 +58,7 @@ func entScheduledExecRunToStore(e *ent.ScheduledExecRun) store.ScheduledExecRun 
 		OutputBytes:             e.OutputBytes,
 		Runtime:                 e.Runtime,
 		LaunchID:                e.LaunchID,
+		LastPolledAt:            e.LastPolledAt,
 	}
 	if e.ScheduleID != nil {
 		run.ScheduleID = e.ScheduleID.String()
@@ -96,7 +100,8 @@ func (s *ScheduleStore) CreateScheduledExecRun(ctx context.Context, run *store.S
 		run.StartedAt = time.Now()
 	}
 	create := s.client.ScheduledExecRun.Create().
-		SetID(eid).
+		SetEventID(eid).
+		SetLastPolledAt(run.StartedAt.UTC()).
 		SetProjectID(pid).
 		SetTargetAgentID(aid).
 		SetInitiatorPrincipalKind(run.InitiatorPrincipalKind).
@@ -139,7 +144,7 @@ func (s *ScheduleStore) GetScheduledExecRun(ctx context.Context, eventID string)
 	if err != nil {
 		return nil, err
 	}
-	e, err := s.client.ScheduledExecRun.Get(ctx, eid)
+	e, err := s.client.ScheduledExecRun.Query().Where(scheduledexecrun.EventIDEQ(eid)).Only(ctx)
 	if err != nil {
 		return nil, mapError(err)
 	}
@@ -163,7 +168,7 @@ func (s *ScheduleStore) ListScheduledExecRunsByEvent(ctx context.Context, eventI
 	for start := 0; start < len(ids); start += scheduledExecRunsByEventChunk {
 		end := min(start+scheduledExecRunsByEventChunk, len(ids))
 		rows, err := s.client.ScheduledExecRun.Query().
-			Where(scheduledexecrun.IDIn(ids[start:end]...)).
+			Where(scheduledexecrun.EventIDIn(ids[start:end]...)).
 			All(ctx)
 		if err != nil {
 			return nil, mapError(err)
@@ -184,7 +189,7 @@ func (s *ScheduleStore) MarkScheduledExecRunRunning(ctx context.Context, eventID
 	}
 	n, err := s.client.ScheduledExecRun.Update().
 		Where(
-			scheduledexecrun.IDEQ(eid),
+			scheduledexecrun.EventIDEQ(eid),
 			scheduledexecrun.FinishedAtIsNil(),
 			scheduledexecrun.OutcomeEQ(scheduledexecrun.OutcomeStarting),
 		).
@@ -213,7 +218,7 @@ func (s *ScheduleStore) FinishScheduledExecRun(ctx context.Context, fin store.Sc
 	var won bool
 	err = runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
 		n, err := c.ScheduledExecRun.Update().
-			Where(scheduledexecrun.IDEQ(eid), scheduledexecrun.FinishedAtIsNil()).
+			Where(scheduledexecrun.EventIDEQ(eid), scheduledexecrun.FinishedAtIsNil()).
 			SetFinishedAt(finishedAt.UTC()).
 			SetOutcome(scheduledexecrun.Outcome(fin.Outcome)).
 			SetNillableExitCode(fin.ExitCode).
@@ -252,25 +257,115 @@ func (s *ScheduleStore) FinishScheduledExecRun(ctx context.Context, fin store.Sc
 	return won, nil
 }
 
-// ListUnfinishedScheduledExecRuns pages through unfinished runs by event ID.
-func (s *ScheduleStore) ListUnfinishedScheduledExecRuns(ctx context.Context, afterEventID string, limit int) ([]store.ScheduledExecRun, error) {
-	limit = clampLimit(limit)
-	q := s.client.ScheduledExecRun.Query().
-		Where(scheduledexecrun.FinishedAtIsNil())
-	if afterEventID != "" {
-		after, err := parseUUID(afterEventID)
-		if err != nil {
-			return nil, err
-		}
-		q = q.Where(scheduledexecrun.IDGT(after))
-	}
-	rows, err := q.Order(scheduledexecrun.ByID()).Limit(limit).All(ctx)
+// ListExpiredScheduledExecRuns returns up to limit unfinished runs whose
+// lease ended before now, oldest lease first.
+func (s *ScheduleStore) ListExpiredScheduledExecRuns(ctx context.Context, now time.Time, limit int) ([]store.ScheduledExecRun, error) {
+	rows, err := s.client.ScheduledExecRun.Query().
+		Where(scheduledexecrun.FinishedAtIsNil(), scheduledexecrun.LeaseUntilLT(now.UTC())).
+		Order(scheduledexecrun.ByLeaseUntil(), scheduledexecrun.ByEventID()).
+		Limit(clampLimit(limit)).
+		All(ctx)
 	if err != nil {
 		return nil, mapError(err)
 	}
+	return entScheduledExecRunsToStore(rows), nil
+}
+
+// ClaimScheduledExecRunsForPoll returns up to limit unfinished runs whose
+// lease has not ended, least recently polled first, skipping excludeIDs
+// (event IDs), and sets their last_polled_at to now in the same
+// transaction (on Postgres the rows are selected FOR UPDATE SKIP LOCKED).
+func (s *ScheduleStore) ClaimScheduledExecRunsForPoll(ctx context.Context, now time.Time, limit int, excludeEventIDs []string) ([]store.ScheduledExecRun, error) {
+	var exclude []uuid.UUID
+	for _, id := range excludeEventIDs {
+		if uid, err := uuid.Parse(id); err == nil {
+			exclude = append(exclude, uid)
+		}
+	}
+	var out []store.ScheduledExecRun
+	err := runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
+		q := c.ScheduledExecRun.Query().
+			Where(scheduledexecrun.FinishedAtIsNil(), scheduledexecrun.LeaseUntilGTE(now.UTC()))
+		if len(exclude) > 0 {
+			q = q.Where(scheduledexecrun.EventIDNotIn(exclude...))
+		}
+		q = q.Order(scheduledexecrun.ByLastPolledAt(), scheduledexecrun.ByEventID()).Limit(clampLimit(limit))
+		if isPostgres(c) {
+			q = q.ForUpdate(entsql.WithLockAction(entsql.SkipLocked))
+		}
+		rows, err := q.All(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		if len(rows) == 0 {
+			return nil
+		}
+		ids := make([]uuid.UUID, 0, len(rows))
+		for _, r := range rows {
+			ids = append(ids, r.ID)
+		}
+		if _, err := c.ScheduledExecRun.Update().
+			Where(scheduledexecrun.IDIn(ids...)).
+			SetLastPolledAt(now.UTC()).
+			Save(ctx); err != nil {
+			return mapError(err)
+		}
+		out = entScheduledExecRunsToStore(rows)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func entScheduledExecRunsToStore(rows []*ent.ScheduledExecRun) []store.ScheduledExecRun {
 	out := make([]store.ScheduledExecRun, 0, len(rows))
 	for _, e := range rows {
 		out = append(out, entScheduledExecRunToStore(e))
 	}
-	return out, nil
+	return out
+}
+
+// CreateScheduledEventChecked inserts event after check accepts the
+// pending events of its project and event type (at most limit of them),
+// read in the same transaction. On Postgres the transaction first takes the
+// per-project scheduled-event quota lock (store.LockScheduledEventQuota,
+// pg_advisory_xact_lock), so concurrent authors, on any replica, are
+// checked and inserted one at a time; SQLite serializes writers already.
+func (s *ScheduleStore) CreateScheduledEventChecked(ctx context.Context, event *store.ScheduledEvent, limit int, check func(pending []store.ScheduledEvent) error) error {
+	pid, err := parseUUID(event.ProjectID)
+	if err != nil {
+		return err
+	}
+	return runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
+		if isPostgres(c) {
+			var res sql.Result
+			if err := c.Driver().Exec(ctx, "SELECT pg_advisory_xact_lock($1, $2)",
+				[]any{int32(store.LockScheduledEventQuota), store.StableProjectHash(event.ProjectID)}, &res); err != nil {
+				return fmt.Errorf("lock scheduled event quota: %w", err)
+			}
+		}
+		rows, err := c.ScheduledEvent.Query().
+			Where(
+				scheduledevent.ProjectIDEQ(pid),
+				scheduledevent.EventTypeEQ(event.EventType),
+				scheduledevent.StatusEQ(store.ScheduledEventPending),
+			).
+			Order(scheduledevent.ByCreated(), scheduledevent.ByID()).
+			Limit(limit).
+			All(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		pending := make([]store.ScheduledEvent, 0, len(rows))
+		for _, e := range rows {
+			pending = append(pending, *entScheduledEventToStore(e))
+		}
+		if err := check(pending); err != nil {
+			return err
+		}
+		tx := &ScheduleStore{client: c, inTx: true}
+		return tx.CreateScheduledEvent(ctx, event)
+	})
 }

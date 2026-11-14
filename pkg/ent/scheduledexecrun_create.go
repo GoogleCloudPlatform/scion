@@ -12,6 +12,7 @@ import (
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecrun"
 	"github.com/google/uuid"
 )
@@ -22,6 +23,12 @@ type ScheduledExecRunCreate struct {
 	mutation *ScheduledExecRunMutation
 	hooks    []Hook
 	conflict []sql.ConflictOption
+}
+
+// SetEventID sets the "event_id" field.
+func (_c *ScheduledExecRunCreate) SetEventID(v uuid.UUID) *ScheduledExecRunCreate {
+	_c.mutation.SetEventID(v)
+	return _c
 }
 
 // SetScheduleID sets the "schedule_id" field.
@@ -284,10 +291,29 @@ func (_c *ScheduledExecRunCreate) SetNillableLaunchID(v *string) *ScheduledExecR
 	return _c
 }
 
+// SetLastPolledAt sets the "last_polled_at" field.
+func (_c *ScheduledExecRunCreate) SetLastPolledAt(v time.Time) *ScheduledExecRunCreate {
+	_c.mutation.SetLastPolledAt(v)
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *ScheduledExecRunCreate) SetID(v uuid.UUID) *ScheduledExecRunCreate {
 	_c.mutation.SetID(v)
 	return _c
+}
+
+// SetNillableID sets the "id" field if the given value is not nil.
+func (_c *ScheduledExecRunCreate) SetNillableID(v *uuid.UUID) *ScheduledExecRunCreate {
+	if v != nil {
+		_c.SetID(*v)
+	}
+	return _c
+}
+
+// SetEvent sets the "event" edge to the ScheduledEvent entity.
+func (_c *ScheduledExecRunCreate) SetEvent(v *ScheduledEvent) *ScheduledExecRunCreate {
+	return _c.SetEventID(v.ID)
 }
 
 // Mutation returns the ScheduledExecRunMutation object of the builder.
@@ -369,10 +395,17 @@ func (_c *ScheduledExecRunCreate) defaults() {
 		v := scheduledexecrun.DefaultLaunchID
 		_c.mutation.SetLaunchID(v)
 	}
+	if _, ok := _c.mutation.ID(); !ok {
+		v := scheduledexecrun.DefaultID()
+		_c.mutation.SetID(v)
+	}
 }
 
 // check runs all checks and user-defined validators on the builder.
 func (_c *ScheduledExecRunCreate) check() error {
+	if _, ok := _c.mutation.EventID(); !ok {
+		return &ValidationError{Name: "event_id", err: errors.New(`ent: missing required field "ScheduledExecRun.event_id"`)}
+	}
 	if _, ok := _c.mutation.ProjectID(); !ok {
 		return &ValidationError{Name: "project_id", err: errors.New(`ent: missing required field "ScheduledExecRun.project_id"`)}
 	}
@@ -433,6 +466,12 @@ func (_c *ScheduledExecRunCreate) check() error {
 	}
 	if _, ok := _c.mutation.LaunchID(); !ok {
 		return &ValidationError{Name: "launch_id", err: errors.New(`ent: missing required field "ScheduledExecRun.launch_id"`)}
+	}
+	if _, ok := _c.mutation.LastPolledAt(); !ok {
+		return &ValidationError{Name: "last_polled_at", err: errors.New(`ent: missing required field "ScheduledExecRun.last_polled_at"`)}
+	}
+	if len(_c.mutation.EventIDs()) == 0 {
+		return &ValidationError{Name: "event", err: errors.New(`ent: missing required edge "ScheduledExecRun.event"`)}
 	}
 	return nil
 }
@@ -558,6 +597,27 @@ func (_c *ScheduledExecRunCreate) createSpec() (*ScheduledExecRun, *sqlgraph.Cre
 		_spec.SetField(scheduledexecrun.FieldLaunchID, field.TypeString, value)
 		_node.LaunchID = value
 	}
+	if value, ok := _c.mutation.LastPolledAt(); ok {
+		_spec.SetField(scheduledexecrun.FieldLastPolledAt, field.TypeTime, value)
+		_node.LastPolledAt = value
+	}
+	if nodes := _c.mutation.EventIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: true,
+			Table:   scheduledexecrun.EventTable,
+			Columns: []string{scheduledexecrun.EventColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(scheduledevent.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_node.EventID = nodes[0]
+		_spec.Edges = append(_spec.Edges, edge)
+	}
 	return _node, _spec
 }
 
@@ -565,7 +625,7 @@ func (_c *ScheduledExecRunCreate) createSpec() (*ScheduledExecRun, *sqlgraph.Cre
 // of the `INSERT` statement. For example:
 //
 //	client.ScheduledExecRun.Create().
-//		SetScheduleID(v).
+//		SetEventID(v).
 //		OnConflict(
 //			// Update the row with the new values
 //			// the was proposed for insertion.
@@ -574,7 +634,7 @@ func (_c *ScheduledExecRunCreate) createSpec() (*ScheduledExecRun, *sqlgraph.Cre
 //		// Override some of the fields with custom
 //		// update values.
 //		Update(func(u *ent.ScheduledExecRunUpsert) {
-//			SetScheduleID(v+v).
+//			SetEventID(v+v).
 //		}).
 //		Exec(ctx)
 func (_c *ScheduledExecRunCreate) OnConflict(opts ...sql.ConflictOption) *ScheduledExecRunUpsertOne {
@@ -712,6 +772,18 @@ func (u *ScheduledExecRunUpsert) ClearOutputBytes() *ScheduledExecRunUpsert {
 	return u
 }
 
+// SetLastPolledAt sets the "last_polled_at" field.
+func (u *ScheduledExecRunUpsert) SetLastPolledAt(v time.Time) *ScheduledExecRunUpsert {
+	u.Set(scheduledexecrun.FieldLastPolledAt, v)
+	return u
+}
+
+// UpdateLastPolledAt sets the "last_polled_at" field to the value that was provided on create.
+func (u *ScheduledExecRunUpsert) UpdateLastPolledAt() *ScheduledExecRunUpsert {
+	u.SetExcluded(scheduledexecrun.FieldLastPolledAt)
+	return u
+}
+
 // UpdateNewValues updates the mutable fields using the new values that were set on create except the ID field.
 // Using this option is equivalent to using:
 //
@@ -728,6 +800,9 @@ func (u *ScheduledExecRunUpsertOne) UpdateNewValues() *ScheduledExecRunUpsertOne
 	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
 		if _, exists := u.create.mutation.ID(); exists {
 			s.SetIgnore(scheduledexecrun.FieldID)
+		}
+		if _, exists := u.create.mutation.EventID(); exists {
+			s.SetIgnore(scheduledexecrun.FieldEventID)
 		}
 		if _, exists := u.create.mutation.ScheduleID(); exists {
 			s.SetIgnore(scheduledexecrun.FieldScheduleID)
@@ -930,6 +1005,20 @@ func (u *ScheduledExecRunUpsertOne) ClearOutputBytes() *ScheduledExecRunUpsertOn
 	})
 }
 
+// SetLastPolledAt sets the "last_polled_at" field.
+func (u *ScheduledExecRunUpsertOne) SetLastPolledAt(v time.Time) *ScheduledExecRunUpsertOne {
+	return u.Update(func(s *ScheduledExecRunUpsert) {
+		s.SetLastPolledAt(v)
+	})
+}
+
+// UpdateLastPolledAt sets the "last_polled_at" field to the value that was provided on create.
+func (u *ScheduledExecRunUpsertOne) UpdateLastPolledAt() *ScheduledExecRunUpsertOne {
+	return u.Update(func(s *ScheduledExecRunUpsert) {
+		s.UpdateLastPolledAt()
+	})
+}
+
 // Exec executes the query.
 func (u *ScheduledExecRunUpsertOne) Exec(ctx context.Context) error {
 	if len(u.create.conflict) == 0 {
@@ -1066,7 +1155,7 @@ func (_c *ScheduledExecRunCreateBulk) ExecX(ctx context.Context) {
 //		// Override some of the fields with custom
 //		// update values.
 //		Update(func(u *ent.ScheduledExecRunUpsert) {
-//			SetScheduleID(v+v).
+//			SetEventID(v+v).
 //		}).
 //		Exec(ctx)
 func (_c *ScheduledExecRunCreateBulk) OnConflict(opts ...sql.ConflictOption) *ScheduledExecRunUpsertBulk {
@@ -1112,6 +1201,9 @@ func (u *ScheduledExecRunUpsertBulk) UpdateNewValues() *ScheduledExecRunUpsertBu
 		for _, b := range u.create.builders {
 			if _, exists := b.mutation.ID(); exists {
 				s.SetIgnore(scheduledexecrun.FieldID)
+			}
+			if _, exists := b.mutation.EventID(); exists {
+				s.SetIgnore(scheduledexecrun.FieldEventID)
 			}
 			if _, exists := b.mutation.ScheduleID(); exists {
 				s.SetIgnore(scheduledexecrun.FieldScheduleID)
@@ -1312,6 +1404,20 @@ func (u *ScheduledExecRunUpsertBulk) UpdateOutputBytes() *ScheduledExecRunUpsert
 func (u *ScheduledExecRunUpsertBulk) ClearOutputBytes() *ScheduledExecRunUpsertBulk {
 	return u.Update(func(s *ScheduledExecRunUpsert) {
 		s.ClearOutputBytes()
+	})
+}
+
+// SetLastPolledAt sets the "last_polled_at" field.
+func (u *ScheduledExecRunUpsertBulk) SetLastPolledAt(v time.Time) *ScheduledExecRunUpsertBulk {
+	return u.Update(func(s *ScheduledExecRunUpsert) {
+		s.SetLastPolledAt(v)
+	})
+}
+
+// UpdateLastPolledAt sets the "last_polled_at" field to the value that was provided on create.
+func (u *ScheduledExecRunUpsertBulk) UpdateLastPolledAt() *ScheduledExecRunUpsertBulk {
+	return u.Update(func(s *ScheduledExecRunUpsert) {
+		s.UpdateLastPolledAt()
 	})
 }
 

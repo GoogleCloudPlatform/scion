@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"entgo.io/ent/dialect/sql"
+	"entgo.io/ent/dialect/sql/sqlgraph"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/google/uuid"
 )
@@ -53,6 +54,11 @@ func IDLT(id uuid.UUID) predicate.ScheduledExecRun {
 // IDLTE applies the LTE predicate on the ID field.
 func IDLTE(id uuid.UUID) predicate.ScheduledExecRun {
 	return predicate.ScheduledExecRun(sql.FieldLTE(FieldID, id))
+}
+
+// EventID applies equality check predicate on the "event_id" field. It's identical to EventIDEQ.
+func EventID(v uuid.UUID) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldEQ(FieldEventID, v))
 }
 
 // ScheduleID applies equality check predicate on the "schedule_id" field. It's identical to ScheduleIDEQ.
@@ -158,6 +164,31 @@ func Runtime(v string) predicate.ScheduledExecRun {
 // LaunchID applies equality check predicate on the "launch_id" field. It's identical to LaunchIDEQ.
 func LaunchID(v string) predicate.ScheduledExecRun {
 	return predicate.ScheduledExecRun(sql.FieldEQ(FieldLaunchID, v))
+}
+
+// LastPolledAt applies equality check predicate on the "last_polled_at" field. It's identical to LastPolledAtEQ.
+func LastPolledAt(v time.Time) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldEQ(FieldLastPolledAt, v))
+}
+
+// EventIDEQ applies the EQ predicate on the "event_id" field.
+func EventIDEQ(v uuid.UUID) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldEQ(FieldEventID, v))
+}
+
+// EventIDNEQ applies the NEQ predicate on the "event_id" field.
+func EventIDNEQ(v uuid.UUID) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldNEQ(FieldEventID, v))
+}
+
+// EventIDIn applies the In predicate on the "event_id" field.
+func EventIDIn(vs ...uuid.UUID) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldIn(FieldEventID, vs...))
+}
+
+// EventIDNotIn applies the NotIn predicate on the "event_id" field.
+func EventIDNotIn(vs ...uuid.UUID) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldNotIn(FieldEventID, vs...))
 }
 
 // ScheduleIDEQ applies the EQ predicate on the "schedule_id" field.
@@ -1293,6 +1324,69 @@ func LaunchIDEqualFold(v string) predicate.ScheduledExecRun {
 // LaunchIDContainsFold applies the ContainsFold predicate on the "launch_id" field.
 func LaunchIDContainsFold(v string) predicate.ScheduledExecRun {
 	return predicate.ScheduledExecRun(sql.FieldContainsFold(FieldLaunchID, v))
+}
+
+// LastPolledAtEQ applies the EQ predicate on the "last_polled_at" field.
+func LastPolledAtEQ(v time.Time) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldEQ(FieldLastPolledAt, v))
+}
+
+// LastPolledAtNEQ applies the NEQ predicate on the "last_polled_at" field.
+func LastPolledAtNEQ(v time.Time) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldNEQ(FieldLastPolledAt, v))
+}
+
+// LastPolledAtIn applies the In predicate on the "last_polled_at" field.
+func LastPolledAtIn(vs ...time.Time) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldIn(FieldLastPolledAt, vs...))
+}
+
+// LastPolledAtNotIn applies the NotIn predicate on the "last_polled_at" field.
+func LastPolledAtNotIn(vs ...time.Time) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldNotIn(FieldLastPolledAt, vs...))
+}
+
+// LastPolledAtGT applies the GT predicate on the "last_polled_at" field.
+func LastPolledAtGT(v time.Time) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldGT(FieldLastPolledAt, v))
+}
+
+// LastPolledAtGTE applies the GTE predicate on the "last_polled_at" field.
+func LastPolledAtGTE(v time.Time) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldGTE(FieldLastPolledAt, v))
+}
+
+// LastPolledAtLT applies the LT predicate on the "last_polled_at" field.
+func LastPolledAtLT(v time.Time) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldLT(FieldLastPolledAt, v))
+}
+
+// LastPolledAtLTE applies the LTE predicate on the "last_polled_at" field.
+func LastPolledAtLTE(v time.Time) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldLTE(FieldLastPolledAt, v))
+}
+
+// HasEvent applies the HasEdge predicate on the "event" edge.
+func HasEvent() predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(func(s *sql.Selector) {
+		step := sqlgraph.NewStep(
+			sqlgraph.From(Table, FieldID),
+			sqlgraph.Edge(sqlgraph.O2O, true, EventTable, EventColumn),
+		)
+		sqlgraph.HasNeighbors(s, step)
+	})
+}
+
+// HasEventWith applies the HasEdge predicate on the "event" edge with a given conditions (other predicates).
+func HasEventWith(preds ...predicate.ScheduledEvent) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(func(s *sql.Selector) {
+		step := newEventStep()
+		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
+			for _, p := range preds {
+				p(s)
+			}
+		})
+	})
 }
 
 // And groups predicates with the AND operator between them.

@@ -18,7 +18,7 @@ package entadapter
 
 import (
 	"context"
-	"sort"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -205,42 +205,148 @@ func TestScheduledExecRun_FinishNeverOverwritesEventOutcome(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrInvalidInput)
 }
 
-func TestScheduledExecRun_ListUnfinishedPages(t *testing.T) {
+func TestScheduledExecRun_ExpiredAndPollRotation(t *testing.T) {
 	s := newTestScheduleStore(t)
 	ctx := context.Background()
 	project := uuid.NewString()
-	var unfinished []string
-	for i := 0; i < 7; i++ {
-		evt := newExecEvent(t, s, project, store.ScheduledEventFired, time.Now())
-		require.NoError(t, s.CreateScheduledExecRun(ctx, newExecRun(evt)))
-		if i%3 == 0 {
-			_, err := s.FinishScheduledExecRun(ctx, store.ScheduledExecRunFinish{EventID: evt.ID, Outcome: store.ScheduledExecOutcomeOK})
-			require.NoError(t, err)
-			continue
+	now := time.Now()
+	var live []string
+	var expired string
+	for i := 0; i < 5; i++ {
+		evt := newExecEvent(t, s, project, store.ScheduledEventFired, now)
+		run := newExecRun(evt)
+		run.StartedAt = now.Add(time.Duration(i) * time.Second)
+		if i == 4 {
+			run.LeaseUntil = now.Add(-time.Minute)
+			expired = evt.ID
+		} else {
+			live = append(live, evt.ID)
 		}
-		unfinished = append(unfinished, evt.ID)
+		require.NoError(t, s.CreateScheduledExecRun(ctx, run))
 	}
-	sort.Strings(unfinished)
-	var got []string
-	after := ""
-	for {
-		page, err := s.ListUnfinishedScheduledExecRuns(ctx, after, 2)
-		require.NoError(t, err)
-		if len(page) == 0 {
-			break
-		}
-		require.LessOrEqual(t, len(page), 2)
-		for _, r := range page {
-			assert.Nil(t, r.FinishedAt)
-			got = append(got, r.EventID)
-		}
-		after = page[len(page)-1].EventID
-	}
-	assert.Equal(t, unfinished, got)
-
-	byEvent, err := s.ListScheduledExecRunsByEvent(ctx, append([]string{"not-a-uuid", uuid.NewString()}, unfinished...))
+	finishedEvt := newExecEvent(t, s, project, store.ScheduledEventFired, now)
+	require.NoError(t, s.CreateScheduledExecRun(ctx, newExecRun(finishedEvt)))
+	_, err := s.FinishScheduledExecRun(ctx, store.ScheduledExecRunFinish{EventID: finishedEvt.ID, Outcome: store.ScheduledExecOutcomeOK})
 	require.NoError(t, err)
-	assert.Len(t, byEvent, len(unfinished))
+
+	exp, err := s.ListExpiredScheduledExecRuns(ctx, now, 10)
+	require.NoError(t, err)
+	require.Len(t, exp, 1)
+	assert.Equal(t, expired, exp[0].EventID)
+
+	// Claims rotate through every live run, least recently polled first,
+	// across successive bounded claims, and skip excluded runs.
+	seen := map[string]int{}
+	for round := 0; round < 4; round++ {
+		claimed, err := s.ClaimScheduledExecRunsForPoll(ctx, now.Add(time.Duration(round+10)*time.Second), 2, []string{live[0]})
+		require.NoError(t, err)
+		require.Len(t, claimed, 2)
+		for _, r := range claimed {
+			assert.NotEqual(t, live[0], r.EventID, "excluded")
+			assert.NotEqual(t, expired, r.EventID, "expired runs are not polled")
+			assert.NotEqual(t, finishedEvt.ID, r.EventID, "finished runs are not polled")
+			seen[r.EventID]++
+		}
+	}
+	for _, id := range live[1:] {
+		assert.GreaterOrEqual(t, seen[id], 2, "every live run is polled in turn")
+	}
+
+	byEvent, err := s.ListScheduledExecRunsByEvent(ctx, append([]string{"not-a-uuid", uuid.NewString()}, live...))
+	require.NoError(t, err)
+	assert.Len(t, byEvent, len(live))
+}
+
+// TestScheduledExecRun_EventForeignKey: a run cannot be inserted for a
+// missing event, and deleting an event deletes its run.
+func TestScheduledExecRun_EventForeignKey(t *testing.T) {
+	s := newTestScheduleStore(t)
+	ctx := context.Background()
+	ghost := &store.ScheduledEvent{ID: uuid.NewString(), ProjectID: uuid.NewString()}
+	assert.Error(t, s.CreateScheduledExecRun(ctx, newExecRun(ghost)), "no run without its event")
+}
+
+// TestDeleteSchedulesByProject_RemovesExecRuns: project deletion removes
+// the project's runs, finished and unfinished, with its events, and keeps
+// other projects' runs.
+func TestDeleteSchedulesByProject_RemovesExecRuns(t *testing.T) {
+	s := newTestScheduleStore(t)
+	ctx := context.Background()
+	project, other := uuid.NewString(), uuid.NewString()
+	done := newExecEvent(t, s, project, store.ScheduledEventFired, time.Now())
+	live := newExecEvent(t, s, project, store.ScheduledEventFired, time.Now())
+	kept := newExecEvent(t, s, other, store.ScheduledEventFired, time.Now())
+	for _, e := range []*store.ScheduledEvent{done, live, kept} {
+		require.NoError(t, s.CreateScheduledExecRun(ctx, newExecRun(e)))
+	}
+	_, err := s.FinishScheduledExecRun(ctx, store.ScheduledExecRunFinish{EventID: done.ID, Outcome: store.ScheduledExecOutcomeNonzero})
+	require.NoError(t, err)
+
+	_, err = s.DeleteSchedulesByProject(ctx, project)
+	require.NoError(t, err)
+	for _, e := range []*store.ScheduledEvent{done, live} {
+		_, err := s.GetScheduledExecRun(ctx, e.ID)
+		assert.ErrorIs(t, err, store.ErrNotFound)
+	}
+	_, err = s.GetScheduledExecRun(ctx, kept.ID)
+	assert.NoError(t, err)
+	// A fire past authorization cannot insert a run for a deleted event.
+	assert.Error(t, s.CreateScheduledExecRun(ctx, newExecRun(live)))
+	n, err := s.PurgeOldScheduledEvents(ctx, time.Now().Add(365*24*time.Hour))
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+	_, err = s.GetScheduledExecRun(ctx, kept.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
+// TestCreateScheduledEventChecked_LastSlot: concurrent authors racing for
+// the last slot insert exactly one event; the check sees the rows the
+// winner inserted.
+func TestCreateScheduledEventChecked_LastSlot(t *testing.T) {
+	s := newTestScheduleStore(t)
+	ctx := context.Background()
+	project := uuid.NewString()
+	const limit = 3
+	for i := 0; i < limit-1; i++ {
+		newExecEvent(t, s, project, store.ScheduledEventPending, time.Now())
+	}
+	errFull := errors.New("full")
+	var wg sync.WaitGroup
+	var inserted, refused atomic.Int32
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			evt := &store.ScheduledEvent{
+				ID: uuid.NewString(), ProjectID: project, EventType: "exec", FireAt: time.Now().Add(time.Hour),
+				Payload: `{"agentId":"x","command":["true"]}`, Status: store.ScheduledEventPending,
+			}
+			for {
+				err := s.CreateScheduledEventChecked(ctx, evt, limit+1, func(pending []store.ScheduledEvent) error {
+					if len(pending) >= limit {
+						return errFull
+					}
+					return nil
+				})
+				switch {
+				case err == nil:
+					inserted.Add(1)
+					return
+				case errors.Is(err, errFull):
+					refused.Add(1)
+					return
+				}
+				// SQLite may refuse a concurrent writer as busy: retry.
+				time.Sleep(time.Millisecond)
+			}
+		}()
+	}
+	wg.Wait()
+	assert.Equal(t, int32(1), inserted.Load())
+	assert.Equal(t, int32(7), refused.Load())
+	res, err := s.ListScheduledEvents(ctx, store.ScheduledEventFilter{ProjectID: project, Status: store.ScheduledEventPending}, store.ListOptions{Limit: 100})
+	require.NoError(t, err)
+	assert.Len(t, res.Items, limit)
 }
 
 // TestPurgeOldScheduledEvents_RemovesExecRuns: a purged event's run goes

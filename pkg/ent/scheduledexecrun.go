@@ -9,6 +9,7 @@ import (
 
 	"entgo.io/ent"
 	"entgo.io/ent/dialect/sql"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecrun"
 	"github.com/google/uuid"
 )
@@ -18,6 +19,8 @@ type ScheduledExecRun struct {
 	config `json:"-"`
 	// ID of the ent.
 	ID uuid.UUID `json:"id,omitempty"`
+	// EventID holds the value of the "event_id" field.
+	EventID uuid.UUID `json:"event_id,omitempty"`
 	// ScheduleID holds the value of the "schedule_id" field.
 	ScheduleID *uuid.UUID `json:"schedule_id,omitempty"`
 	// ProjectID holds the value of the "project_id" field.
@@ -61,8 +64,33 @@ type ScheduledExecRun struct {
 	// Runtime holds the value of the "runtime" field.
 	Runtime string `json:"runtime,omitempty"`
 	// LaunchID holds the value of the "launch_id" field.
-	LaunchID     string `json:"launch_id,omitempty"`
+	LaunchID string `json:"launch_id,omitempty"`
+	// LastPolledAt holds the value of the "last_polled_at" field.
+	LastPolledAt time.Time `json:"last_polled_at,omitempty"`
+	// Edges holds the relations/edges for other nodes in the graph.
+	// The values are being populated by the ScheduledExecRunQuery when eager-loading is set.
+	Edges        ScheduledExecRunEdges `json:"edges"`
 	selectValues sql.SelectValues
+}
+
+// ScheduledExecRunEdges holds the relations/edges for other nodes in the graph.
+type ScheduledExecRunEdges struct {
+	// Event holds the value of the event edge.
+	Event *ScheduledEvent `json:"event,omitempty"`
+	// loadedTypes holds the information for reporting if a
+	// type was loaded (or requested) in eager-loading or not.
+	loadedTypes [1]bool
+}
+
+// EventOrErr returns the Event value or an error if the edge
+// was not loaded in eager-loading, or loaded but was not found.
+func (e ScheduledExecRunEdges) EventOrErr() (*ScheduledEvent, error) {
+	if e.Event != nil {
+		return e.Event, nil
+	} else if e.loadedTypes[0] {
+		return nil, &NotFoundError{label: scheduledevent.Label}
+	}
+	return nil, &NotLoadedError{edge: "event"}
 }
 
 // scanValues returns the types for scanning values from sql.Rows.
@@ -76,9 +104,9 @@ func (*ScheduledExecRun) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullInt64)
 		case scheduledexecrun.FieldInitiatorPrincipalKind, scheduledexecrun.FieldInitiatorPrincipalID, scheduledexecrun.FieldInitiatorCredentialKind, scheduledexecrun.FieldInitiatorCredentialID, scheduledexecrun.FieldExecutorKind, scheduledexecrun.FieldExecutorID, scheduledexecrun.FieldCommandSha256, scheduledexecrun.FieldOutcome, scheduledexecrun.FieldRuntime, scheduledexecrun.FieldLaunchID:
 			values[i] = new(sql.NullString)
-		case scheduledexecrun.FieldStartedAt, scheduledexecrun.FieldLeaseUntil, scheduledexecrun.FieldFinishedAt:
+		case scheduledexecrun.FieldStartedAt, scheduledexecrun.FieldLeaseUntil, scheduledexecrun.FieldFinishedAt, scheduledexecrun.FieldLastPolledAt:
 			values[i] = new(sql.NullTime)
-		case scheduledexecrun.FieldID, scheduledexecrun.FieldProjectID, scheduledexecrun.FieldTargetAgentID:
+		case scheduledexecrun.FieldID, scheduledexecrun.FieldEventID, scheduledexecrun.FieldProjectID, scheduledexecrun.FieldTargetAgentID:
 			values[i] = new(uuid.UUID)
 		default:
 			values[i] = new(sql.UnknownType)
@@ -100,6 +128,12 @@ func (_m *ScheduledExecRun) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field id", values[i])
 			} else if value != nil {
 				_m.ID = *value
+			}
+		case scheduledexecrun.FieldEventID:
+			if value, ok := values[i].(*uuid.UUID); !ok {
+				return fmt.Errorf("unexpected type %T for field event_id", values[i])
+			} else if value != nil {
+				_m.EventID = *value
 			}
 		case scheduledexecrun.FieldScheduleID:
 			if value, ok := values[i].(*sql.NullScanner); !ok {
@@ -238,6 +272,12 @@ func (_m *ScheduledExecRun) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.LaunchID = value.String
 			}
+		case scheduledexecrun.FieldLastPolledAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field last_polled_at", values[i])
+			} else if value.Valid {
+				_m.LastPolledAt = value.Time
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -249,6 +289,11 @@ func (_m *ScheduledExecRun) assignValues(columns []string, values []any) error {
 // This includes values selected through modifiers, order, etc.
 func (_m *ScheduledExecRun) Value(name string) (ent.Value, error) {
 	return _m.selectValues.Get(name)
+}
+
+// QueryEvent queries the "event" edge of the ScheduledExecRun entity.
+func (_m *ScheduledExecRun) QueryEvent() *ScheduledEventQuery {
+	return NewScheduledExecRunClient(_m.config).QueryEvent(_m)
 }
 
 // Update returns a builder for updating this ScheduledExecRun.
@@ -274,6 +319,9 @@ func (_m *ScheduledExecRun) String() string {
 	var builder strings.Builder
 	builder.WriteString("ScheduledExecRun(")
 	builder.WriteString(fmt.Sprintf("id=%v, ", _m.ID))
+	builder.WriteString("event_id=")
+	builder.WriteString(fmt.Sprintf("%v", _m.EventID))
+	builder.WriteString(", ")
 	if v := _m.ScheduleID; v != nil {
 		builder.WriteString("schedule_id=")
 		builder.WriteString(fmt.Sprintf("%v", *v))
@@ -349,6 +397,9 @@ func (_m *ScheduledExecRun) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("launch_id=")
 	builder.WriteString(_m.LaunchID)
+	builder.WriteString(", ")
+	builder.WriteString("last_polled_at=")
+	builder.WriteString(_m.LastPolledAt.Format(time.ANSIC))
 	builder.WriteByte(')')
 	return builder.String()
 }

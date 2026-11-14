@@ -20,6 +20,7 @@ import (
 	"entgo.io/ent"
 	"entgo.io/ent/dialect/entsql"
 	"entgo.io/ent/schema"
+	"entgo.io/ent/schema/edge"
 	"entgo.io/ent/schema/field"
 	"entgo.io/ent/schema/index"
 	"github.com/google/uuid"
@@ -29,10 +30,12 @@ import (
 // entity: one row per admitted run of a scheduled exec event
 // (ptone/scion#7883, exec-schedules design "Schema: scheduled_exec_runs").
 //
-// The primary key is the scheduled event's id (column event_id): one run per
-// event. There is deliberately no foreign key or ent edge to
-// scheduled_events: the soft-delete purge deletes a run in the same
-// transaction as its event, before the event, and never relies on a cascade.
+// event_id is the scheduled event's id: one run per event (unique), with a
+// foreign key to scheduled_events that cascades on delete. Every hard
+// delete of an event (the purge, project deletion) removes its run with it,
+// and a run can never be inserted for an event that is already gone. The
+// purge and project deletion also delete runs explicitly, first, in the
+// same transaction.
 //
 // The row is written before exec-start is sent and is the durable record of
 // the run (SEC-P6): the initiator, revision, executor and command digest
@@ -45,7 +48,10 @@ type ScheduledExecRun struct {
 func (ScheduledExecRun) Fields() []ent.Field {
 	return []ent.Field{
 		field.UUID("id", uuid.UUID{}).
-			StorageKey("event_id").
+			Default(uuid.New).
+			Immutable(),
+		field.UUID("event_id", uuid.UUID{}).
+			Unique().
 			Immutable(),
 		// schedule_id is the recurring schedule of the event, NULL for a
 		// one-shot event (the overlap scope).
@@ -117,6 +123,23 @@ func (ScheduledExecRun) Fields() []ent.Field {
 		field.String("launch_id").
 			Default("").
 			Immutable(),
+		// last_polled_at is when the sweeper last claimed the run for a
+		// status poll (started_at at insert). The sweeper polls the
+		// least recently polled runs first, so its progress persists
+		// across bounded sweeps, deadline exits and replicas.
+		field.Time("last_polled_at"),
+	}
+}
+
+// Edges of the ScheduledExecRun.
+func (ScheduledExecRun) Edges() []ent.Edge {
+	return []ent.Edge{
+		edge.From("event", ScheduledEvent.Type).
+			Ref("exec_run").
+			Field("event_id").
+			Unique().
+			Required().
+			Immutable(),
 	}
 }
 
@@ -126,7 +149,8 @@ func (ScheduledExecRun) Indexes() []ent.Index {
 		index.Fields("schedule_id", "finished_at"),
 		index.Fields("target_agent_id", "finished_at"),
 		index.Fields("project_id"),
-		index.Fields("finished_at"),
+		index.Fields("finished_at", "lease_until"),
+		index.Fields("finished_at", "last_polled_at"),
 	}
 }
 

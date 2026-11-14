@@ -143,6 +143,20 @@ func (_u *ScheduledExecRunUpdate) ClearOutputBytes() *ScheduledExecRunUpdate {
 	return _u
 }
 
+// SetLastPolledAt sets the "last_polled_at" field.
+func (_u *ScheduledExecRunUpdate) SetLastPolledAt(v time.Time) *ScheduledExecRunUpdate {
+	_u.mutation.SetLastPolledAt(v)
+	return _u
+}
+
+// SetNillableLastPolledAt sets the "last_polled_at" field if the given value is not nil.
+func (_u *ScheduledExecRunUpdate) SetNillableLastPolledAt(v *time.Time) *ScheduledExecRunUpdate {
+	if v != nil {
+		_u.SetLastPolledAt(*v)
+	}
+	return _u
+}
+
 // Mutation returns the ScheduledExecRunMutation object of the builder.
 func (_u *ScheduledExecRunUpdate) Mutation() *ScheduledExecRunMutation {
 	return _u.mutation
@@ -181,6 +195,9 @@ func (_u *ScheduledExecRunUpdate) check() error {
 		if err := scheduledexecrun.OutcomeValidator(v); err != nil {
 			return &ValidationError{Name: "outcome", err: fmt.Errorf(`ent: validator failed for field "ScheduledExecRun.outcome": %w`, err)}
 		}
+	}
+	if _u.mutation.EventCleared() && len(_u.mutation.EventIDs()) > 0 {
+		return errors.New(`ent: clearing a required unique edge "ScheduledExecRun.event"`)
 	}
 	return nil
 }
@@ -235,6 +252,9 @@ func (_u *ScheduledExecRunUpdate) sqlSave(ctx context.Context) (_node int, err e
 	}
 	if _u.mutation.OutputBytesCleared() {
 		_spec.ClearField(scheduledexecrun.FieldOutputBytes, field.TypeInt64)
+	}
+	if value, ok := _u.mutation.LastPolledAt(); ok {
+		_spec.SetField(scheduledexecrun.FieldLastPolledAt, field.TypeTime, value)
 	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
@@ -371,6 +391,20 @@ func (_u *ScheduledExecRunUpdateOne) ClearOutputBytes() *ScheduledExecRunUpdateO
 	return _u
 }
 
+// SetLastPolledAt sets the "last_polled_at" field.
+func (_u *ScheduledExecRunUpdateOne) SetLastPolledAt(v time.Time) *ScheduledExecRunUpdateOne {
+	_u.mutation.SetLastPolledAt(v)
+	return _u
+}
+
+// SetNillableLastPolledAt sets the "last_polled_at" field if the given value is not nil.
+func (_u *ScheduledExecRunUpdateOne) SetNillableLastPolledAt(v *time.Time) *ScheduledExecRunUpdateOne {
+	if v != nil {
+		_u.SetLastPolledAt(*v)
+	}
+	return _u
+}
+
 // Mutation returns the ScheduledExecRunMutation object of the builder.
 func (_u *ScheduledExecRunUpdateOne) Mutation() *ScheduledExecRunMutation {
 	return _u.mutation
@@ -422,6 +456,9 @@ func (_u *ScheduledExecRunUpdateOne) check() error {
 		if err := scheduledexecrun.OutcomeValidator(v); err != nil {
 			return &ValidationError{Name: "outcome", err: fmt.Errorf(`ent: validator failed for field "ScheduledExecRun.outcome": %w`, err)}
 		}
+	}
+	if _u.mutation.EventCleared() && len(_u.mutation.EventIDs()) > 0 {
+		return errors.New(`ent: clearing a required unique edge "ScheduledExecRun.event"`)
 	}
 	return nil
 }
@@ -493,6 +530,9 @@ func (_u *ScheduledExecRunUpdateOne) sqlSave(ctx context.Context) (_node *Schedu
 	}
 	if _u.mutation.OutputBytesCleared() {
 		_spec.ClearField(scheduledexecrun.FieldOutputBytes, field.TypeInt64)
+	}
+	if value, ok := _u.mutation.LastPolledAt(); ok {
+		_spec.SetField(scheduledexecrun.FieldLastPolledAt, field.TypeTime, value)
 	}
 	_node = &ScheduledExecRun{config: _u.config}
 	_spec.Assign = _node.assignValues

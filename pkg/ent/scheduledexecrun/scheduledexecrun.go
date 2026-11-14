@@ -7,13 +7,17 @@ import (
 	"time"
 
 	"entgo.io/ent/dialect/sql"
+	"entgo.io/ent/dialect/sql/sqlgraph"
+	"github.com/google/uuid"
 )
 
 const (
 	// Label holds the string label denoting the scheduledexecrun type in the database.
 	Label = "scheduled_exec_run"
 	// FieldID holds the string denoting the id field in the database.
-	FieldID = "event_id"
+	FieldID = "id"
+	// FieldEventID holds the string denoting the event_id field in the database.
+	FieldEventID = "event_id"
 	// FieldScheduleID holds the string denoting the schedule_id field in the database.
 	FieldScheduleID = "schedule_id"
 	// FieldProjectID holds the string denoting the project_id field in the database.
@@ -58,13 +62,25 @@ const (
 	FieldRuntime = "runtime"
 	// FieldLaunchID holds the string denoting the launch_id field in the database.
 	FieldLaunchID = "launch_id"
+	// FieldLastPolledAt holds the string denoting the last_polled_at field in the database.
+	FieldLastPolledAt = "last_polled_at"
+	// EdgeEvent holds the string denoting the event edge name in mutations.
+	EdgeEvent = "event"
 	// Table holds the table name of the scheduledexecrun in the database.
 	Table = "scheduled_exec_runs"
+	// EventTable is the table that holds the event relation/edge.
+	EventTable = "scheduled_exec_runs"
+	// EventInverseTable is the table name for the ScheduledEvent entity.
+	// It exists in this package in order to avoid circular dependency with the "scheduledevent" package.
+	EventInverseTable = "scheduled_events"
+	// EventColumn is the table column denoting the event relation/edge.
+	EventColumn = "event_id"
 )
 
 // Columns holds all SQL columns for scheduledexecrun fields.
 var Columns = []string{
 	FieldID,
+	FieldEventID,
 	FieldScheduleID,
 	FieldProjectID,
 	FieldTargetAgentID,
@@ -87,6 +103,7 @@ var Columns = []string{
 	FieldOutputBytes,
 	FieldRuntime,
 	FieldLaunchID,
+	FieldLastPolledAt,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -122,6 +139,8 @@ var (
 	DefaultRuntime string
 	// DefaultLaunchID holds the default value on creation for the "launch_id" field.
 	DefaultLaunchID string
+	// DefaultID holds the default value on creation for the "id" field.
+	DefaultID func() uuid.UUID
 )
 
 // Outcome defines the type for the "outcome" enum field.
@@ -162,6 +181,11 @@ type OrderOption func(*sql.Selector)
 // ByID orders the results by the id field.
 func ByID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldID, opts...).ToFunc()
+}
+
+// ByEventID orders the results by the event_id field.
+func ByEventID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldEventID, opts...).ToFunc()
 }
 
 // ByScheduleID orders the results by the schedule_id field.
@@ -272,4 +296,23 @@ func ByRuntime(opts ...sql.OrderTermOption) OrderOption {
 // ByLaunchID orders the results by the launch_id field.
 func ByLaunchID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldLaunchID, opts...).ToFunc()
+}
+
+// ByLastPolledAt orders the results by the last_polled_at field.
+func ByLastPolledAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldLastPolledAt, opts...).ToFunc()
+}
+
+// ByEventField orders the results by event field.
+func ByEventField(field string, opts ...sql.OrderTermOption) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborTerms(s, newEventStep(), sql.OrderByField(field, opts...))
+	}
+}
+func newEventStep() *sqlgraph.Step {
+	return sqlgraph.NewStep(
+		sqlgraph.From(Table, FieldID),
+		sqlgraph.To(EventInverseTable, FieldID),
+		sqlgraph.Edge(sqlgraph.O2O, true, EventTable, EventColumn),
+	)
 }

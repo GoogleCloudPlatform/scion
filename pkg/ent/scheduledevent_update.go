@@ -13,6 +13,7 @@ import (
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecrun"
 	"github.com/google/uuid"
 )
 
@@ -436,9 +437,34 @@ func (_u *ScheduledEventUpdate) ClearScheduleID() *ScheduledEventUpdate {
 	return _u
 }
 
+// SetExecRunID sets the "exec_run" edge to the ScheduledExecRun entity by ID.
+func (_u *ScheduledEventUpdate) SetExecRunID(id uuid.UUID) *ScheduledEventUpdate {
+	_u.mutation.SetExecRunID(id)
+	return _u
+}
+
+// SetNillableExecRunID sets the "exec_run" edge to the ScheduledExecRun entity by ID if the given value is not nil.
+func (_u *ScheduledEventUpdate) SetNillableExecRunID(id *uuid.UUID) *ScheduledEventUpdate {
+	if id != nil {
+		_u = _u.SetExecRunID(*id)
+	}
+	return _u
+}
+
+// SetExecRun sets the "exec_run" edge to the ScheduledExecRun entity.
+func (_u *ScheduledEventUpdate) SetExecRun(v *ScheduledExecRun) *ScheduledEventUpdate {
+	return _u.SetExecRunID(v.ID)
+}
+
 // Mutation returns the ScheduledEventMutation object of the builder.
 func (_u *ScheduledEventUpdate) Mutation() *ScheduledEventMutation {
 	return _u.mutation
+}
+
+// ClearExecRun clears the "exec_run" edge to the ScheduledExecRun entity.
+func (_u *ScheduledEventUpdate) ClearExecRun() *ScheduledEventUpdate {
+	_u.mutation.ClearExecRun()
+	return _u
 }
 
 // Save executes the query and returns the number of nodes affected by the update operation.
@@ -608,6 +634,35 @@ func (_u *ScheduledEventUpdate) sqlSave(ctx context.Context) (_node int, err err
 	}
 	if _u.mutation.ScheduleIDCleared() {
 		_spec.ClearField(scheduledevent.FieldScheduleID, field.TypeString)
+	}
+	if _u.mutation.ExecRunCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   scheduledevent.ExecRunTable,
+			Columns: []string{scheduledevent.ExecRunColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(scheduledexecrun.FieldID, field.TypeUUID),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.ExecRunIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   scheduledevent.ExecRunTable,
+			Columns: []string{scheduledevent.ExecRunColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(scheduledexecrun.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
 	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
@@ -1036,9 +1091,34 @@ func (_u *ScheduledEventUpdateOne) ClearScheduleID() *ScheduledEventUpdateOne {
 	return _u
 }
 
+// SetExecRunID sets the "exec_run" edge to the ScheduledExecRun entity by ID.
+func (_u *ScheduledEventUpdateOne) SetExecRunID(id uuid.UUID) *ScheduledEventUpdateOne {
+	_u.mutation.SetExecRunID(id)
+	return _u
+}
+
+// SetNillableExecRunID sets the "exec_run" edge to the ScheduledExecRun entity by ID if the given value is not nil.
+func (_u *ScheduledEventUpdateOne) SetNillableExecRunID(id *uuid.UUID) *ScheduledEventUpdateOne {
+	if id != nil {
+		_u = _u.SetExecRunID(*id)
+	}
+	return _u
+}
+
+// SetExecRun sets the "exec_run" edge to the ScheduledExecRun entity.
+func (_u *ScheduledEventUpdateOne) SetExecRun(v *ScheduledExecRun) *ScheduledEventUpdateOne {
+	return _u.SetExecRunID(v.ID)
+}
+
 // Mutation returns the ScheduledEventMutation object of the builder.
 func (_u *ScheduledEventUpdateOne) Mutation() *ScheduledEventMutation {
 	return _u.mutation
+}
+
+// ClearExecRun clears the "exec_run" edge to the ScheduledExecRun entity.
+func (_u *ScheduledEventUpdateOne) ClearExecRun() *ScheduledEventUpdateOne {
+	_u.mutation.ClearExecRun()
+	return _u
 }
 
 // Where appends a list predicates to the ScheduledEventUpdate builder.
@@ -1238,6 +1318,35 @@ func (_u *ScheduledEventUpdateOne) sqlSave(ctx context.Context) (_node *Schedule
 	}
 	if _u.mutation.ScheduleIDCleared() {
 		_spec.ClearField(scheduledevent.FieldScheduleID, field.TypeString)
+	}
+	if _u.mutation.ExecRunCleared() {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   scheduledevent.ExecRunTable,
+			Columns: []string{scheduledevent.ExecRunColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(scheduledexecrun.FieldID, field.TypeUUID),
+			},
+		}
+		_spec.Edges.Clear = append(_spec.Edges.Clear, edge)
+	}
+	if nodes := _u.mutation.ExecRunIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   scheduledevent.ExecRunTable,
+			Columns: []string{scheduledevent.ExecRunColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(scheduledexecrun.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges.Add = append(_spec.Edges.Add, edge)
 	}
 	_node = &ScheduledEvent{config: _u.config}
 	_spec.Assign = _node.assignValues

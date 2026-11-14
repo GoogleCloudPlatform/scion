@@ -3900,6 +3900,10 @@ type ScheduledExecRun struct {
 
 	Runtime  string
 	LaunchID string
+
+	// LastPolledAt is when the sweeper last claimed the run for a status
+	// poll (StartedAt at insert).
+	LastPolledAt time.Time
 }
 
 // Outcomes of a ScheduledExecRun. Starting and running are unfinished

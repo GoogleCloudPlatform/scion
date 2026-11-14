@@ -12155,6 +12155,22 @@ func (c *ScheduledEventClient) GetX(ctx context.Context, id uuid.UUID) *Schedule
 	return obj
 }
 
+// QueryExecRun queries the exec_run edge of a ScheduledEvent.
+func (c *ScheduledEventClient) QueryExecRun(_m *ScheduledEvent) *ScheduledExecRunQuery {
+	query := (&ScheduledExecRunClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(scheduledevent.Table, scheduledevent.FieldID, id),
+			sqlgraph.To(scheduledexecrun.Table, scheduledexecrun.FieldID),
+			sqlgraph.Edge(sqlgraph.O2O, false, scheduledevent.ExecRunTable, scheduledevent.ExecRunColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
 // Hooks returns the client hooks.
 func (c *ScheduledEventClient) Hooks() []Hook {
 	return c.hooks.ScheduledEvent
@@ -12286,6 +12302,22 @@ func (c *ScheduledExecRunClient) GetX(ctx context.Context, id uuid.UUID) *Schedu
 		panic(err)
 	}
 	return obj
+}
+
+// QueryEvent queries the event edge of a ScheduledExecRun.
+func (c *ScheduledExecRunClient) QueryEvent(_m *ScheduledExecRun) *ScheduledEventQuery {
+	query := (&ScheduledEventClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(scheduledexecrun.Table, scheduledexecrun.FieldID, id),
+			sqlgraph.To(scheduledevent.Table, scheduledevent.FieldID),
+			sqlgraph.Edge(sqlgraph.O2O, true, scheduledexecrun.EventTable, scheduledexecrun.EventColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
 }
 
 // Hooks returns the client hooks.
