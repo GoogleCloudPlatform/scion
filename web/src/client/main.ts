@@ -767,6 +767,12 @@ const ROUTES: RouteConfig[] = [
     load: () => import('../components/pages/project-schedules.js'),
   },
   {
+    // Project Decisions page (experiments web.project_decisions && web.chat_choices; renders 404 when off).
+    pattern: /^\/projects\/[^/]+\/decisions$/,
+    tag: 'scion-page-project-decisions',
+    load: () => import('../components/pages/project-decisions.js'),
+  },
+  {
     pattern: /^\/projects\/[^/]+\/metrics$/,
     tag: 'scion-page-project-metrics',
     load: () => import('../components/pages/metrics-dashboard.js'),

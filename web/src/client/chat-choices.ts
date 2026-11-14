@@ -22,7 +22,7 @@
  */
 
 import { apiFetch, apiErrorMessageFromBody } from './api.js';
-import { isFeatureEnabled } from '../utils/feature-flags.js';
+import { CHAT_CHOICES_FLAG, isFeatureEnabled } from '../utils/feature-flags.js';
 import { getDenialMessage } from '../shared/message-mode.js';
 import type {
   Agent,
@@ -34,7 +34,10 @@ import type {
 } from '../shared/types.js';
 
 /** The experiment gating choice cards (web and hub). */
-export const CHAT_CHOICES_EXPERIMENT = 'web.chat_choices';
+export const CHAT_CHOICES_EXPERIMENT = CHAT_CHOICES_FLAG;
+
+/** Web surface submitting a decision answer (`native` in chat, `decisions_page` on `/projects/:id/decisions`). */
+export type ChoiceAnswerSurface = 'native' | 'decisions_page';
 
 /** Whether choice cards are shown in this browser session. */
 export function chatChoicesEnabled(): boolean {
@@ -221,14 +224,19 @@ export type AnswerDecisionResult =
 export async function answerDecision(
   rowId: string,
   choiceId: string,
-  idempotencyKey: string
+  idempotencyKey: string,
+  surface?: ChoiceAnswerSurface
 ): Promise<AnswerDecisionResult> {
   let res: Response;
   try {
     res = await apiFetch(`/api/v1/decisions/${encodeURIComponent(rowId)}/answer`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ choice_id: choiceId, idempotency_key: idempotencyKey }),
+      body: JSON.stringify({
+        choice_id: choiceId,
+        idempotency_key: idempotencyKey,
+        ...(surface === 'decisions_page' ? { surface: 'decisions_page' } : {}),
+      }),
     });
   } catch {
     return { ok: false, status: 0, code: '', message: 'Network error: the answer was not sent.' };
@@ -298,7 +306,8 @@ export type AnswerDecisionSetResult =
 export async function answerDecisionSet(
   messageId: string,
   answers: readonly SetAnswer[],
-  idempotencyKey: string
+  idempotencyKey: string,
+  surface?: ChoiceAnswerSurface
 ): Promise<AnswerDecisionSetResult> {
   let res: Response;
   try {
@@ -308,6 +317,7 @@ export async function answerDecisionSet(
       body: JSON.stringify({
         idempotency_key: idempotencyKey,
         answers: answers.map((a) => ({ decision_row_id: a.rowId, choice_id: a.choiceId })),
+        ...(surface === 'decisions_page' ? { surface: 'decisions_page' } : {}),
       }),
     });
   } catch {

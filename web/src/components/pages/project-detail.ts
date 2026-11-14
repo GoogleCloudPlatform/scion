@@ -120,7 +120,13 @@ import {
 } from '../../client/project-leave.js';
 import '../shared/project-leave-dialog.js';
 import type { ProjectLeftDetail, ScionProjectLeaveDialog } from '../shared/project-leave-dialog.js';
-import { AGENT_BADGES_FLAG, isFeatureEnabled } from '../../utils/feature-flags.js';
+import {
+  AGENT_BADGES_FLAG,
+  FEATURE_FLAGS_CHANGED_EVENT,
+  isFeatureEnabled,
+  projectDecisionsEnabled,
+} from '../../utils/feature-flags.js';
+import { fetchProjectDecisionCounts } from '../../client/project-decisions.js';
 import { agentBadges } from '../shared/agent-badges.js';
 import { ARTIFACTS_FLAG } from '../../client/artifacts.js';
 import '../shared/artifact-list.js';
@@ -470,6 +476,54 @@ export class ScionPageProjectDetail extends LitElement {
 
   private boundOnAgentsResync = () => {
     this.agentWindow.markResync();
+  };
+
+  @state()
+  private decisionsEnabled = false;
+
+  @state()
+  private waitingOnYouDecisionsCount = 0;
+
+  private decisionsCountAbort: AbortController | null = null;
+  private decisionsCountTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private boundOnFeatureFlagsChanged = (): void => {
+    const next = projectDecisionsEnabled();
+    if (next === this.decisionsEnabled) return;
+    this.decisionsEnabled = next;
+    if (!next) {
+      this.cancelDecisionsCountLoad();
+      this.waitingOnYouDecisionsCount = 0;
+      return;
+    }
+    if (this.project && this.projectId) {
+      void this.loadDecisionsCount();
+    }
+  };
+
+  private boundOnChoiceUpdated = (e: Event): void => {
+    if (!this.decisionsEnabled || !this.projectId) return;
+    const raw = (e as CustomEvent).detail as {
+      data?: { projectId?: string };
+      projectId?: string;
+    } | null;
+    const data = raw?.data ?? raw;
+    if (data?.projectId && data.projectId !== this.projectId) return;
+    this.scheduleDecisionsCountRefresh();
+  };
+
+  private boundOnChatMessageReceived = (e: Event): void => {
+    if (!this.decisionsEnabled || !this.projectId) return;
+    const raw = (e as CustomEvent).detail as {
+      data?: { projectId?: string; type?: string; decisions?: unknown };
+      projectId?: string;
+      type?: string;
+      decisions?: unknown;
+    } | null;
+    const data = raw?.data ?? raw;
+    if (data?.projectId && data.projectId !== this.projectId) return;
+    if (data?.type !== 'choice-prompt' && !Array.isArray(data?.decisions)) return;
+    this.scheduleDecisionsCountRefresh();
   };
 
   /**
@@ -1190,6 +1244,11 @@ export class ScionPageProjectDetail extends LitElement {
       cursor: pointer;
     }
 
+    .decisions-btn sl-badge::part(base) {
+      font-size: 0.65rem;
+      margin-left: 0.35rem;
+    }
+
     @media (max-width: 768px) {
       .hide-mobile {
         display: none;
@@ -1273,6 +1332,8 @@ export class ScionPageProjectDetail extends LitElement {
       view: listViewOf(this.viewMode),
     });
 
+    this.decisionsEnabled = projectDecisionsEnabled();
+
     // Set SSE scope to this project (receives all agent events within
     // project) before the first load: a drain belongs to the scope
     // generation it started in, and is discarded if the scope changes
@@ -1285,19 +1346,26 @@ export class ScionPageProjectDetail extends LitElement {
     void this.loadHubProjectCapabilities();
 
     // Listen for real-time updates
+    window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
     stateManager.addEventListener('projects-updated', this.boundOnProjectsUpdated);
     stateManager.addEventListener('agents-changed', this.boundOnAgentsChanged);
     stateManager.addEventListener('agents-resync', this.boundOnAgentsResync);
+    stateManager.addEventListener('choice-updated', this.boundOnChoiceUpdated);
+    stateManager.addEventListener('chat-message-received', this.boundOnChatMessageReceived);
     this.agentWindow.addEventListener('change', this.boundOnWindowChange);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
+    window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
     stateManager.removeEventListener('projects-updated', this.boundOnProjectsUpdated);
     stateManager.removeEventListener('agents-changed', this.boundOnAgentsChanged);
     stateManager.removeEventListener('agents-resync', this.boundOnAgentsResync);
+    stateManager.removeEventListener('choice-updated', this.boundOnChoiceUpdated);
+    stateManager.removeEventListener('chat-message-received', this.boundOnChatMessageReceived);
     this.agentWindow.removeEventListener('change', this.boundOnWindowChange);
     this.cancelAgentsLoad();
+    this.cancelDecisionsCountLoad();
     this.filesSectionObserver?.disconnect();
     this.filesSectionObserver = null;
     this.observedFilesPlaceholder = null;
@@ -1625,6 +1693,9 @@ export class ScionPageProjectDetail extends LitElement {
     // Fetch metrics summary (non-blocking, gracefully degrades)
     void this.loadMetricsSummary();
     void this.loadSessionMetricsSummary();
+    if (this.decisionsEnabled) {
+      void this.loadDecisionsCount();
+    }
 
     // Auto-discover GitHub App installation if project has a GitHub remote but no installation
     if (
@@ -1655,6 +1726,46 @@ export class ScionPageProjectDetail extends LitElement {
       this.metricsSummary = data;
     } catch {
       this.metricsSummary = null;
+    }
+  }
+
+  private cancelDecisionsCountLoad(): void {
+    if (this.decisionsCountTimer !== null) {
+      clearTimeout(this.decisionsCountTimer);
+      this.decisionsCountTimer = null;
+    }
+    this.decisionsCountAbort?.abort();
+    this.decisionsCountAbort = null;
+  }
+
+  private scheduleDecisionsCountRefresh(): void {
+    if (this.decisionsCountTimer !== null) {
+      clearTimeout(this.decisionsCountTimer);
+    }
+    this.decisionsCountTimer = setTimeout(() => {
+      this.decisionsCountTimer = null;
+      if (this.isConnected && this.decisionsEnabled && this.projectId) {
+        void this.loadDecisionsCount();
+      }
+    }, 100);
+  }
+
+  private async loadDecisionsCount(): Promise<void> {
+    if (!this.decisionsEnabled || !this.projectId) return;
+    this.decisionsCountAbort?.abort();
+    const ac = new AbortController();
+    this.decisionsCountAbort = ac;
+    try {
+      const counts = await fetchProjectDecisionCounts(this.projectId, ac.signal);
+      if (ac.signal.aborted || !this.isConnected || !this.decisionsEnabled) return;
+      this.waitingOnYouDecisionsCount = counts.waitingOnYou;
+    } catch {
+      if (ac.signal.aborted) return;
+      // Non-blocking badge fetch: leave previous/0 count if unavailable.
+    } finally {
+      if (this.decisionsCountAbort === ac) {
+        this.decisionsCountAbort = null;
+      }
     }
   }
 
@@ -2788,6 +2899,25 @@ export class ScionPageProjectDetail extends LitElement {
                     Clone
                   </sl-button>
                 `
+            : nothing}
+          ${this.decisionsEnabled
+            ? html`
+                <a
+                  href="/projects/${encodeURIComponent(this.projectId)}/decisions"
+                  style="text-decoration: none;"
+                  data-decisions-link
+                >
+                  <sl-button size="small" class="decisions-btn" data-decisions-button>
+                    <sl-icon slot="prefix" name="signpost-split"></sl-icon>
+                    Decisions
+                    ${this.waitingOnYouDecisionsCount > 0
+                      ? html`<sl-badge variant="primary" pill class="decisions-badge"
+                          >${this.waitingOnYouDecisionsCount}</sl-badge
+                        >`
+                      : nothing}
+                  </sl-button>
+                </a>
+              `
             : nothing}
           <a href="/projects/${this.projectId}/metrics" style="text-decoration: none;">
             <sl-button size="small">

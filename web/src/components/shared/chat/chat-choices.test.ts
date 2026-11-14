@@ -743,4 +743,80 @@ describe('Phase 2: single card interpreted, confirm, and change (Mocks P2-1, P2-
     expect(root(el).querySelector('.confirm-row')).toBeNull();
     expect(root(el).querySelector('.card-head .badge.conf')?.textContent?.trim()).toBe('confirmed');
   });
+
+  it('forwards surface="decisions_page" on single answer, confirm, and override', async () => {
+    const elPending = await mount([view()]);
+    elPending.surface = 'decisions_page';
+    await settle(elPending);
+    apiFetch.mockResolvedValueOnce(
+      res(200, { decision: answered('yes', { id: 'u-me', name: 'Me' }), responseMessageId: 'r-p' })
+    );
+    button(elPending, 'yes').click();
+    await settle(elPending);
+    expect(JSON.parse(apiFetch.mock.calls[0]![1]?.body as string)).toMatchObject({
+      choice_id: 'yes',
+      surface: 'decisions_page',
+    });
+
+    const elConfirm = await mount([interpretedSingle({ id: 'u-me', name: 'Me' })]);
+    elConfirm.surface = 'decisions_page';
+    await settle(elConfirm);
+    apiFetch.mockResolvedValueOnce(
+      res(200, {
+        decision: view({
+          status: 'decided',
+          decision: {
+            choiceId: 'yes',
+            label: 'Yes',
+            answeredByUserId: 'u-me',
+            answeredByName: 'Me',
+            provenance: 'direct',
+            outcome: 'confirm',
+            surface: 'decisions_page',
+            responseMessageId: 'r-c',
+            at: '2026-11-12T15:56:00Z',
+          },
+        }),
+        responseMessageId: 'r-c',
+      })
+    );
+    root(elConfirm).querySelector<HTMLElement>('[data-action="confirm"]')!.click();
+    await settle(elConfirm);
+    expect(JSON.parse(apiFetch.mock.calls[1]![1]?.body as string)).toMatchObject({
+      choice_id: 'yes',
+      surface: 'decisions_page',
+    });
+
+    const elOverride = await mount([interpretedSingle({ id: 'u-me', name: 'Me' })]);
+    elOverride.surface = 'decisions_page';
+    await settle(elOverride);
+    button(elOverride, 'no').click();
+    await settle(elOverride);
+    apiFetch.mockResolvedValueOnce(
+      res(200, {
+        decision: view({
+          status: 'decided',
+          decision: {
+            choiceId: 'no',
+            label: 'No',
+            previousChoiceLabel: 'Yes',
+            answeredByUserId: 'u-me',
+            answeredByName: 'Me',
+            provenance: 'direct',
+            outcome: 'override',
+            surface: 'decisions_page',
+            responseMessageId: 'r-o',
+            at: '2026-11-12T15:57:00Z',
+          },
+        }),
+        responseMessageId: 'r-o',
+      })
+    );
+    root(elOverride).querySelector<HTMLElement>('[data-action="confirm-change"]')!.click();
+    await settle(elOverride);
+    expect(JSON.parse(apiFetch.mock.calls[2]![1]?.body as string)).toMatchObject({
+      choice_id: 'no',
+      surface: 'decisions_page',
+    });
+  });
 });

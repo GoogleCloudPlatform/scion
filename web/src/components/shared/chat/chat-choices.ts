@@ -59,6 +59,7 @@ import type {
   AskerAnswerability,
   ChoiceAnswerDeniedDetail,
   ChoiceAnsweredDetail,
+  ChoiceAnswerSurface,
   SetAnswer,
 } from '../../../client/chat-choices.js';
 import type { ChoiceAnswerMode, ChoiceOption, DecisionView } from '../../../shared/types.js';
@@ -88,6 +89,10 @@ export class ScionChatChoices extends LitElement {
   /** Whether the viewer can answer this prompt's asker (design §4.5). */
   @property({ attribute: false })
   answerability: AskerAnswerability = ANSWERABLE;
+
+  /** Surface recorded on answers submitted from this card (`native` or `decisions_page`). */
+  @property({ type: String })
+  surface: ChoiceAnswerSurface = 'native';
 
   /**
    * What this card's own 403 said, authoritative over `answerability`
@@ -928,7 +933,7 @@ export class ScionChatChoices extends LitElement {
     if (!this.actionable(d)) return;
     this.submitting = { rowId: d.rowId, choiceId };
     try {
-      const res = await answerDecision(d.rowId, choiceId, crypto.randomUUID());
+      const res = await answerDecision(d.rowId, choiceId, crypto.randomUUID(), this.surface);
       if (res.ok) {
         this.pendingChange = null;
         this.applyOwn(res.decision, res.responseMessageId);
@@ -1524,7 +1529,12 @@ export class ScionChatChoices extends LitElement {
     this.changedAlert = null;
     this.setSubmitting = true;
     try {
-      const res = await answerDecisionSet(this.messageId, answers, crypto.randomUUID());
+      const res = await answerDecisionSet(
+        this.messageId,
+        answers,
+        crypto.randomUUID(),
+        this.surface
+      );
       if (res.ok) {
         this.picked = new Map();
         this.applyOwnViews(res.decisions, res.responseMessageId);
