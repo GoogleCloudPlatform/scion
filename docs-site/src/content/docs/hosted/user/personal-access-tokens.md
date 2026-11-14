@@ -188,12 +188,12 @@ The `*_global` scopes are not part of `skill:manage` or `template:manage`: list 
 explicitly. Leave out the ones the job does not need, for example the `*:delete_global` scopes
 for a job that only publishes.
 
-Use it from the CI job with `SCION_HUB_TOKEN` and the Hub's address (`SCION_HUB_ENDPOINT`, or
-`--hub <url>`):
+Use it from the CI job with `SCION_HUB_TOKEN`, and make the Hub the current hub once with
+`scion hub add <name> <url> --use`, so every step below uses it:
 
 ```bash
-export SCION_HUB_ENDPOINT="https://scion.example.com"
 export SCION_HUB_TOKEN="scion_pat_..."
+scion hub add catalog https://scion.example.com --use
 
 # Publish a skill version to the global catalog (creates the skill on first publish)
 scion --global skills publish ./skills/deploy-checklist --version 1.2.0 --scope global
@@ -205,6 +205,9 @@ scion --global templates push ./templates/reviewer-v2 --name reviewer
 # Delete a global template on the Hub (--non-interactive confirms without a terminal)
 scion --global --non-interactive templates delete old-reviewer --hub
 
+# Copy a global template into the local global templates directory
+scion --global templates clone code-reviewer code-reviewer-v2 --hub
+
 # Refresh a global template from its recorded GitHub source
 scion templates update code-reviewer --scope global
 ```
@@ -214,15 +217,12 @@ scion templates update code-reviewer --scope global
   prompts fail instead of waiting, which suits CI.
 - `scion skills publish --scope global` adds the version to an existing skill only when it is a
   global skill of that name; a project or user skill of the same name is not reused.
-- `skills publish --scope global`, `templates sync` and `push` with `--global`, and
-  `templates update --scope global` do not link, register or look up a project, so the job needs
-  no linked checkout and no `project:read` or `project:list`. Outside a Scion project (for
-  example in a plain CI checkout), `skills publish` and the `templates` commands other than
-  `update` need the root `--global` flag, as above; inside a linked project,
-  `skills publish --scope global` works without it.
-- `scion templates update --scope global` (or `scion --global templates update`) works with
-  `--hub <url>` and the token, without `SCION_HUB_ENDPOINT` or a linked project, also outside a
-  project. `--global` together with a different `--scope` is rejected.
+- The commands above do not link, register or look up a project, so the job needs no linked
+  checkout and no `project:read` or `project:list`. Outside a Scion project (for example in a
+  plain CI checkout), `skills publish` and the `templates` commands other than `update` need the
+  root `--global` flag, as above; inside a linked project, `skills publish --scope global` works
+  without it. `templates update` takes `--scope global` or `--global`; `--global` together with
+  a different `--scope` is rejected.
 - `scion --global templates clone <src> <dest>` copies a Hub template into your local global
   templates directory, which needs only `template:read`; sync the copy to publish it. Cloning a
   template into the global scope on the Hub itself (the web UI's clone, or
@@ -235,6 +235,21 @@ scion templates update code-reviewer --scope global
 - A token minted before this release whose scopes are plain `skill:update`, `skill:delete` or
   `template:*` (including a hub admin's token) no longer writes global records. Mint a new token
   with the `*_global` scopes.
+
+**Limits of this recipe:**
+
+- **Selecting the Hub.** A command takes its Hub from the root `--hub <name-or-url>` flag, then
+  `SCION_HUB_ENDPOINT`, then the hub of a linked project, then the current hub (`scion use`), so inside a linked checkout the project's hub wins over the current hub.
+  `scion templates delete` and `scion templates clone` cannot take the root `--hub <url>`: they
+  define their own `--hub` switch ("only search the Hub"), which shadows it. Select the Hub
+  with the current hub (as above) or `SCION_HUB_ENDPOINT` so that every step, including these
+  two, reaches the same Hub.
+- **Commands that still look up a project.** Under a token with only these skill and template
+  scopes, from an environment with no linked project, the following commands look up a project
+  first, which this token cannot pass: `scion templates list`, `show`, `pull` and `status`, and `scion skills list`,
+  `show`, `versions`, `resolve`, `deprecate` and `delete`. A CI step that lists or cleans up
+  skills (`skills deprecate` or `skills delete`) therefore does not work with this token from a
+  fresh environment.
 
 ### Scopes are restrictions, not grants
 

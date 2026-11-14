@@ -1210,7 +1210,7 @@ Manages agent templates. `scion template` (singular) is an accepted alias. Scope
     - Flags: `--local` (search local only), `--hub` (search Hub only). Without `--local`, a Hub error is shown rather than falling back to the filesystem; the same holds for `clone` and `delete`.
 - `create <name>`: Create a new template (seeded from the `default` template).
 - `clone <src> <dest>`: Clone an existing template (local or Hub source) to a new local one.
-    - Flags: `--local`, `--hub` (restrict where the source is searched).
+    - Flags: `--local`, `--hub` (restrict where the source is searched). This `--hub` switch shadows the root `--hub <url>` flag, so select the Hub with `scion use` or `SCION_HUB_ENDPOINT`; the same holds for `delete`.
 - `delete <name>` (alias `rm`): Delete a template.
     - Flags: `--local`, `--hub`.
 - `import <source>`: Import agent definitions (Claude/Gemini sub-agents or Scion templates) into your templates directory.
