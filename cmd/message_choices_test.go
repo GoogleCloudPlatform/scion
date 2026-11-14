@@ -319,3 +319,10 @@ func TestMessageCommand_ChoicesArgs(t *testing.T) {
 	assert.Contains(t, err.Error(), "not to an agent")
 	assert.False(t, isUsageError(err))
 }
+
+func TestMessageCommand_UpdateHelpDocumentsFullSet(t *testing.T) {
+	flag := messageCmd.Flags().Lookup("update")
+	require.NotNil(t, flag)
+	assert.Contains(t, flag.Usage, "still-pending keys")
+	assert.Contains(t, messageCmd.Long, "still-pending keys")
+}

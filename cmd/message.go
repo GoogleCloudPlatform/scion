@@ -138,7 +138,10 @@ under "delivered".
 Choice prompts (--choices or --choices-file, from an agent to a user or a
 conversation) print one line per decision with its key and version. With
 --format json the output is the Hub's full send result: message_id and
-decisions, plus every other field of an ordinary send.
+decisions, plus every other field of an ordinary send. With --update, only
+keys included in the new payload are replaced; to revise an unanswered
+multi-decision set on a single card, resend all still-pending keys of that
+set together.
 
 Exit codes:
   0  Sent. For a group, every recipient was accepted or deferred.
@@ -2000,7 +2003,7 @@ func init() {
 	messageCmd.Flags().StringVar(&msgBodyFile, "body-file", "", "Read message body from a file instead of positional args ('-' reads stdin; trailing CR/LF characters are trimmed)")
 	messageCmd.Flags().StringVar(&msgChoices, "choices", "", "Send a choice prompt: a JSON array of decisions for a user or conversation to answer (agents only; needs the web.chat_choices experiment). The body becomes the optional intro")
 	messageCmd.Flags().StringVar(&msgChoicesFile, "choices-file", "", "Read the --choices JSON from a file ('-' reads stdin, which then excludes --body-file -)")
-	messageCmd.Flags().BoolVar(&msgChoicesUpdate, "update", false, "With choices: replace decisions whose ids already exist (a new version each); without it, reusing an id is refused")
+	messageCmd.Flags().BoolVar(&msgChoicesUpdate, "update", false, "With choices: replace decisions whose ids already exist (a new version each); without it, reusing an id is refused. To revise an unanswered set on one card, resend all still-pending keys of that set")
 
 	// Deprecated flags — still functional, emit warnings when used.
 	// These flags are hidden from help output to guide users toward
