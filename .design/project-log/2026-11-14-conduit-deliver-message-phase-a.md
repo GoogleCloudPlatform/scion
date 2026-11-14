@@ -63,3 +63,19 @@ Code review (4 Required) and security review (1 Medium), with exec-schedules-em'
 - `make test-hub-shard SHARD=K`, `make test-hub-shard SHARD=K NOSQLITE=1` and `make vet-hub-shard SHARD=K` for K = 1..6: all passed.
 - golangci-lint `--new-from-rev=upstream-main` on the touched packages, plus `--tests=false ./pkg/hub`: 0 issues each.
 - Windows cross-build of `cmd/scion` and `hack/winsec-guard.sh`: passed.
+
+## Review round 2 (head d3c86ad → fixes)
+
+R1–R4 and S-A-01 were verified fixed. New findings and their fixes:
+
+- **P2-R1, the harness's effective readiness was not checked, and a local spec was silently capped.** The broker now checks `h.ReadySpec()` (strategy, settle, timeout) against the route bounds and sends it as the ready block. Out of bounds goes to exec, or to a named pre-paste failure when exec is unavailable. `tmuxdeliver.Wait` gains `BoundSettle`/`BoundTimeout` (`WaitOutOfBounds`). sciontool refuses an image ready spec outside the bounds before any visible work, with 422 `out_of_bounds`, and the broker then uses exec at once. Tests: `TestConduitDelivery_EffectiveReadySpecBounds` and `TestDeliverRefusesOutOfBoundsLocalReadySpec`.
+- **FV1-N1, a duplicate's `in_progress` could fail the owner's rows.** The hub now answers a duplicate with 409 `in_flight`. The broker ends that call without an error, exec fallback, retry or failure report. Tests: `TestConduitDelivery_InFlightDuplicateNeverFails` and `TestBrokerAgentDeliver_InFlightDuplicateLeavesOwnerResponsible`.
+- **FV1-N2, attachments blocked all delivery without exec.** Attachments use exec only where a cheap exec probe succeeds. Otherwise the warning text goes over conduit. Any fallback to exec probes exec first and fails at once, named, when it is unavailable. Test: `TestConduitDelivery_AttachmentsWithoutExec`.
+- **P2-O1 (documentation).** §2.3 now says that on conduit an interrupt waits behind the flush it arrives during. Pinned by `TestConduitDelivery_InterruptWaitsBehindFlush`.
+
+### Round 2 verification (code head 22f7ac2, base upstream `ad80ecf`)
+
+- `make fmt-check lint-ci check-custom test-fast-ci build`: passed.
+- `make test-hub-shard SHARD=K`, `NOSQLITE=1` and `make vet-hub-shard SHARD=K` for K = 1..6: all passed. Non-test hub code changed, so all six shards were run.
+- golangci-lint `--new-from-rev=upstream-main` on the touched packages, plus `--tests=false ./pkg/hub`: 0 issues each.
+- Windows cross-build of `cmd/scion` and `hack/winsec-guard.sh`: passed.
