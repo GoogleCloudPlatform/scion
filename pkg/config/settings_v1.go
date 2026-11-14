@@ -3268,10 +3268,12 @@ type V1RuntimeConfig struct {
 	// to the Kubernetes ServiceAccount (KSA) name it is bound to via Workload
 	// Identity, when Type is "kubernetes". Used by GCP identity mode "assign"
 	// dispatches on Kubernetes (ptone/scion#2328) to set the pod's
-	// spec.serviceAccountName. Scion never creates, annotates, or binds these
+	// spec.serviceAccountName. Scion never creates or annotates these
 	// KSAs — the operator must pre-provision each one (KSA exists, is
 	// annotated with iam.gke.io/gcp-service-account, and holds
-	// roles/iam.workloadIdentityUser for the named GSA) out of band. A
+	// roles/iam.workloadIdentityUser for the named GSA) out of band; the hub
+	// grants that role itself only for a GSA it mints while
+	// hub.k8s_workload_identity_setup is on (WorkloadIdentityPool). A
 	// same-keyed entry in the active profile's own
 	// KubernetesServiceAccountMappings overrides this one; see
 	// VersionedSettings.ResolveKubernetesServiceAccountMapping.

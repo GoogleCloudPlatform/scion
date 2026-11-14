@@ -531,8 +531,13 @@ Pods dispatched to a different namespace (e.g. `default`) will fail with
 
 GCP identity mode **assign** on the Kubernetes runtime authenticates agent pods via
 Workload Identity, not via the sciontool metadata emulator used on Docker. Scion does
-not create, annotate, or bind Kubernetes ServiceAccounts (KSAs) for this — pre-provision
+not create or annotate Kubernetes ServiceAccounts (KSAs) for this — pre-provision
 each one yourself, then tell the broker about it in its own `settings.yaml`.
+
+For a GSA the Hub mints, the Hub can make the `roles/iam.workloadIdentityUser` grant
+below for you: set `workload_identity_pool` on the broker's runtime entry, turn on the
+`hub.k8s_workload_identity_setup` experiment, and name the KSA after the GSA's account ID.
+See [Workload Identity binding at mint](/scion/hosted/ha/kubernetes/#workload-identity-binding-at-mint).
 
 This section covers the cluster side: the Workload Identity binding and the broker
 mapping. Registering the GSA with the Hub and granting the Hub token-creator on it come
