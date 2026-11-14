@@ -46,6 +46,25 @@ Alpha: changing or removing behavior needs no deprecation path.
 3. Commit as you go. At the end, rebase on `main` (favor main), re-test after conflicts, notify the user.
 4. Raise adjacent cleanup you notice, with file/function, payoff and blast radius. Don't implement it unprompted.
 
+## Interim template overrides
+
+Mandatory while project-level template configuration overrides are in development: when launching a new agent (`scion start` or `scion create`) from one of the templates below, pass these explicit `--harness` and `--model` flags until the project-template override mechanism replaces this section.
+
+| Template (`-t` / `--type`) | Harness (`--harness`) | Model alias (`--model`) |
+|---|---|---|
+| `developer` | `antigravity` | `large` |
+| `investigator` | `antigravity` | `large` |
+| `coordinator` | `antigravity` | `medium` |
+| `researcher` | `antigravity` | `extra-large` |
+
+- Pass the named harness configuration to `--harness` (alias for `--harness-config`) and the size alias to `--model`; never pass a model name or alias to `--harness` or `--harness-config`.
+- Applies only when creating or starting new agents from these four templates. Leave other templates unchanged, and do not restart or recreate existing agents solely to apply these overrides.
+
+```bash
+scion start <agent-name> -t developer --harness antigravity --model large \
+  "Read your brief at /path/to/brief.md and follow it."
+```
+
 ## Never commit
 
 Check `.gitignore` before staging. Binaries or media that aren't shipped UI (screenshots go in PR comments); agent state files (`.coordinator-state.md`, etc.); one-off scripts, test artifacts, generated data; PR review notes (`pr-*-review*.md`); force-added `.scratch/`, `.tasks/` or `downloads/` content. A new kind of ephemeral file gets a `.gitignore` entry in the same PR.
