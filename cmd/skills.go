@@ -321,7 +321,10 @@ func runSkillsPublish(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("total size exceeds 50MB limit (%d bytes)", totalSize)
 	}
 
-	hubCtx, err := requireHub(projectPath)
+	// A global-scope publish reads no project, so it neither links nor
+	// looks up one: a hub token holding only skill selectors (no
+	// project:read) can publish global skills (ptone/scion#1713).
+	hubCtx, err := requireHubWith(projectPath, scope == "global")
 	if err != nil {
 		return fmt.Errorf("hub connection required: %w", err)
 	}
