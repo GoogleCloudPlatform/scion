@@ -809,9 +809,9 @@ Your `capabilities.limits` claims must match this wiring: `max_turns` needs
 `prompt-submit`, `max_model_calls` needs model start/end events.
 
 Agent-side status signaling (`sciontool status task_completed|blocked|ask_user`)
-is driven by agent instructions/templates rather than per-turn hooks, because a
-turn boundary is non-terminal while an agent continues multi-step or background
-work.
+is usually driven by agent instructions/templates; a hook or bridge script may
+emit `task_completed` directly only from a run-settled callback (`pi`), never
+from a per-turn boundary.
 
 ## Dockerfile and image pipeline
 
