@@ -137,7 +137,11 @@ var execAuditSymbolAllowlist = map[string]map[string]bool{
 	// (url.Parse) and compares normalized remotes (cloneTokenHost,
 	// util.NormalizeGitRemote); TokenRemoteCredentialScope (same file) only
 	// normalizes and checks a remote string: no exec.Cmd and no I/O.
-	"pkg/provision": {"GitTokenCredentialHelper": true, "CloneTokenAllowed": true, "TokenRemoteCredentialScope": true},
+	// EnvGitCheckoutWorkers and MaxGitCheckoutWorkers are constants, and
+	// ParseGitCheckoutWorkers (pkg/provision/checkout_workers.go) only parses
+	// a string with strconv.Atoi: no exec.Cmd and no I/O.
+	"pkg/provision": {"GitTokenCredentialHelper": true, "CloneTokenAllowed": true, "TokenRemoteCredentialScope": true,
+		"EnvGitCheckoutWorkers": true, "MaxGitCheckoutWorkers": true, "ParseGitCheckoutWorkers": true},
 }
 
 // execAuditTrustedDir is excluded from scanning outright rather than via
