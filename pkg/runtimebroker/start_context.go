@@ -1287,9 +1287,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// the clone URL; see tryProvisionWorktree. (A refused URL is normally
 	// refused before this, by the project clone URL check above.)
 	worktreeProvisioned := false
+	worktreeAttempted := false
 	var provisionedWorktreeRoot string
 	if !linkedCheckout && in.Config != nil && in.Config.GitClone != nil && in.WorkspaceMode == store.WorkspaceModeWorktreePerAgent {
 		var err error
+		worktreeAttempted = true
 		in.OwnedAbandon.markWriting()
 		worktreeProvisioned, provisionedWorktreeRoot, err = s.tryProvisionWorktree(ctx, in, &opts, env, dispatchRuntimeType)
 		if err != nil {
@@ -1342,6 +1344,17 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		if in.Config.Branch != "" {
 			env["SCION_AGENT_BRANCH"] = in.Config.Branch
 			classifyBrokerEnv("SCION_AGENT_BRANCH", api.EnvKindPlain)
+		}
+		// A worktree-per-agent dispatch to a local container runtime that
+		// fell back here gets a clone-per-agent workspace (an in-container
+		// clone, possibly shallow), so it is labelled as one: guidance keyed
+		// on the mode would otherwise promise worktree semantics and full
+		// history (ptone/scion#7906). Other runtimes keep the label: on
+		// Kubernetes the runtime still provisions the worktree on the NFS
+		// export from it (pkg/agent nfsWorktreeSelection).
+		if worktreeAttempted && localContainerRuntime(dispatchRuntimeType) {
+			env["SCION_WORKSPACE_MODE"] = string(store.SharingModeClonePerAgent)
+			classifyBrokerEnv("SCION_WORKSPACE_MODE", api.EnvKindPlain)
 		}
 		opts.Workspace = ""
 		// Keep opts.ProjectPath so that ProvisionAgent can resolve the correct
