@@ -289,21 +289,18 @@ Examples:
 			}
 		}
 
-		// Validate user-recipient restrictions
-		if userRecipient != "" {
-			if msgIn != "" || msgAt != "" {
-				return newUsageError("--in/--at cannot be used with user recipients")
+		// Validate recipient restrictions for scheduled messages (--in/--at)
+		var scheduledAgent string
+		if msgIn != "" || msgAt != "" {
+			scheduledAgent, err = resolveScheduledMessageAgent(agentName, userRecipient, groupRecipients, convRef)
+			if err != nil {
+				return err
 			}
 		}
 
 		// Validate group recipient restrictions
-		if len(groupRecipients) > 0 {
-			if msgIn != "" || msgAt != "" {
-				return newUsageError("--in/--at cannot be used with group[] recipients")
-			}
-			if msgNotify {
-				return newUsageError("--notify cannot be used with group[] recipients")
-			}
+		if len(groupRecipients) > 0 && msgNotify {
+			return newUsageError("--notify cannot be used with group[] recipients")
 		}
 
 		// Validate --wake restrictions
@@ -358,6 +355,9 @@ Examples:
 		if hasAgentTarget {
 			crossProjectTarget = detectCrossProjectTarget(cmd)
 			if crossProjectTarget != "" {
+				if msgIn != "" || msgAt != "" {
+					return newUsageError("--in/--at does not support cross-project targets; schedules are project-scoped (use 'scion schedule create' within your own project)")
+				}
 				senderProjectPath = "" // let hub context resolve from agent's own config
 			}
 		}
@@ -389,7 +389,7 @@ Examples:
 
 		// Handle scheduled messages
 		if msgIn != "" || msgAt != "" {
-			return scheduleMessageViaHub(hubCtx, agentName, message, msgInterrupt, msgPlain)
+			return scheduleMessageViaHub(hubCtx, scheduledAgent, message, msgInterrupt, msgPlain)
 		}
 
 		// Attachments: ask the hub where uploads go first (ptone/scion#4596).
@@ -1632,7 +1632,39 @@ func printGroupSendSummary(s groupSendResult, interrupted bool) {
 	}
 }
 
+// resolveScheduledMessageAgent validates that the parsed recipient is a
+// non-empty agent target supported by deprecated --in/--at scheduling, and
+// returns the normalized agent slug. Any unsupported recipient fails with a
+// usage error pointing to 'scion schedule create'.
+func resolveScheduledMessageAgent(agentName, userRecipient string, group []messages.GroupRecipient, convRef *messaging.Reference) (string, error) {
+	if userRecipient != "" || (convRef != nil && convRef.Kind == messaging.RefEmail) {
+		return "", newUsageError("--in/--at cannot be used with user recipients; scheduled messages target agents (use 'scion schedule create --agent <name>' instead)")
+	}
+	if len(group) > 0 {
+		return "", newUsageError("--in/--at cannot be used with group[] recipients; use 'scion schedule create --agent <name>' instead")
+	}
+	if convRef != nil {
+		switch convRef.Kind {
+		case messaging.RefAgent:
+			slug := api.Slugify(convRef.Value)
+			if slug == "" {
+				return "", newUsageError("agent recipient is required for --in/--at; use 'scion schedule create --agent <name>' instead")
+			}
+			return slug, nil
+		default:
+			return "", newUsageError("--in/--at cannot be used with %s; scheduled messages target agents (use 'scion schedule create --agent <name>' instead)", convRef.Raw)
+		}
+	}
+	if agentName == "" {
+		return "", newUsageError("agent recipient is required for --in/--at; use 'scion schedule create --agent <name>' instead")
+	}
+	return agentName, nil
+}
+
 func scheduleMessageViaHub(hubCtx *HubContext, agentName string, message string, interrupt bool, plain bool) error {
+	if agentName == "" {
+		return newUsageError("agent recipient is required for --in/--at; use 'scion schedule create --agent <name>' instead")
+	}
 	if !isJSONOutput() {
 		PrintUsingHub(hubCtx.Endpoint)
 	}
@@ -1661,12 +1693,17 @@ func scheduleMessageViaHub(hubCtx *HubContext, agentName string, message string,
 
 	evt, err := hubCtx.Client.ScheduledEvents(projectID).Create(ctx, req)
 	if err != nil {
-		return wrapHubError(fmt.Errorf("failed to schedule message: %w", err))
+		return wrapHubError(fmt.Errorf("failed to schedule message (use 'scion schedule create' instead): %w", err))
+	}
+	if evt == nil || evt.ID == "" {
+		return fmt.Errorf("failed to schedule message: Hub returned no scheduled event ID (use 'scion schedule create' instead)")
 	}
 
-	if !isJSONOutput() {
-		fmt.Printf("Message to agent '%s' scheduled for %s\n", agentName, clitime.Format(evt.FireAt, clitime.Full))
+	if isJSONOutput() {
+		return outputJSON(evt)
 	}
+
+	fmt.Printf("Message to agent '%s' scheduled for %s (event: %s)\n", agentName, clitime.Format(evt.FireAt, clitime.Full), evt.ID)
 
 	return nil
 }
