@@ -78,6 +78,11 @@ user-facing format. Agent-only messages do not require it.
   abbreviations or internal labels that the user needs to understand.
 - **Make decisions easy to read.** Put options in a list with their trade-offs and
   your recommendation. Put the actual question on its own line.
+<!-- scion:experiment web.chat_choices -->
+- **Ask with choices.** For a decision the user should answer by picking an option,
+  send it with `scion message --choices-file <file>` instead of prose, so the user
+  can answer with a click. See `references/choices.md`.
+<!-- scion:end-experiment -->
 - **Keep details useful.** Avoid dense UUIDs, code line numbers and internal status
   codes unless the user needs them to act. Prefer descriptive Markdown links to
   bare URLs; link supporting evidence instead of pasting a technical inventory.
@@ -259,6 +264,11 @@ on `ask_user` status notifications to deliver the request.
 - `--attach <file>` attaches a file; repeat it for multiple files.
 - `--wake` resumes a suspended target before delivery.
 - `--interrupt` interrupts the target harness before delivery; use with caution.
+<!-- scion:experiment web.chat_choices -->
+- `--choices-file <file>` sends a choice prompt (keyed decisions the user answers
+  with a click); `--update` revises one. `scion decisions` lists your decisions and
+  records answers given in words. See `references/choices.md`.
+<!-- scion:end-experiment -->
 - `scion schedule create` schedules messages; see `scion-scheduler`.
 - `scion notifications subscribe` subscribes to agent state changes.
 
