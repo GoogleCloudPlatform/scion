@@ -36,10 +36,7 @@ import (
 // operator cannot enable it for a hub that has it off. Outside broker mode
 // (solo/local CLI) the effective settings' local_experiments decide.
 func agentPluginsEnabled(ctx context.Context, settings *config.VersionedSettings) bool {
-	if api.IsBrokerModeFromContext(ctx) {
-		return api.HubAgentDefaultsFromContext(ctx).ExperimentEnabled(experiments.AgentPlugins)
-	}
-	return settings != nil && slices.Contains(settings.LocalExperiments, experiments.AgentPlugins)
+	return experimentOn(ctx, settings)(experiments.AgentPlugins)
 }
 
 // hasAgentPlugins reports whether any template in chain declares
