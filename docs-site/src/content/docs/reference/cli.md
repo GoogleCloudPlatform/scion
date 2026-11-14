@@ -1210,7 +1210,7 @@ Manages agent templates. `scion template` (singular) is an accepted alias. Scope
     - Flags: `--local` (search local only), `--hub` (search Hub only). Without `--local`, a Hub error is shown rather than falling back to the filesystem; the same holds for `clone` and `delete`.
 - `create <name>`: Create a new template (seeded from the `default` template).
 - `clone <src> <dest>`: Clone an existing template (local or Hub source) to a new local one.
-    - Flags: `--local`, `--hub` (restrict where the source is searched).
+    - Flags: `--local`, `--hub` (restrict where the source is searched). This `--hub` switch shadows the root `--hub <url>` flag, so select the Hub with `scion use` or `SCION_HUB_ENDPOINT`; the same holds for `delete`.
 - `delete <name>` (alias `rm`): Delete a template.
     - Flags: `--local`, `--hub`.
 - `import <source>`: Import agent definitions (Claude/Gemini sub-agents or Scion templates) into your templates directory.
@@ -1224,6 +1224,8 @@ Hub-only commands (require an enabled Hub):
 - `sync [template]` (alias `push`): Create or update a template in the Hub; only changed files are uploaded. Use `--all` to sync every local template, or `--name <name>` to sync under a different Hub name.
     - The template may also be a directory path: `.` or `..`, an absolute path, or one that contains a path separator (such as `./name` or `../name`). That directory is synced as is, and the Hub name defaults to its base name (`--name` overrides it). Such an argument is read relative to the current directory, not looked up in the templates directories. If the base name cannot be a template name (for example a content-hash cache directory), sync stops and asks for `--name`.
 - `pull <name>`: Download a template from the Hub to the local filesystem. Use `--to <path>` for a custom destination.
+- `update [name]`: Refresh a Hub template from its stored GitHub source URL.
+    - Flags: `--all` (every template with a GitHub source URL), `--scope <global|project|user>` (only templates in this scope; with `global`, or the root `--global` flag, it links and looks up no project, so it works with `--hub <url>` and a token outside a project; `--global` with a different `--scope` is rejected), `--url <url>` (override and store the source URL).
 - `status`: Show the sync status of templates relative to the Hub.
 
 See [Templates & Roles](/scion/local/templates/) for the full guide.
@@ -1235,11 +1237,11 @@ See [Templates & Roles](/scion/local/templates/) for the full guide.
 Manages skills in the Hub skill bank — reusable, versioned instruction snippets referenced by URI (`scion skill`, singular, is an alias). See [Skills — Authoring & Publishing](/scion/local/skills/) for the full guide. All subcommands except `create` require a Hub connection.
 
 - `list`: List available skills.
-    - Flags: `--scope <core|global|project|user>`, `--search <text>`, `--tags <a,b>` (repeatable or comma-separated, AND semantics).
+    - Flags: `--scope <global|project|user>`, `--search <text>`, `--tags <a,b>` (repeatable or comma-separated, AND semantics). The retired `core` scope is rejected.
 - `show <name-or-id>`: Show a skill's details and versions.
 - `create <name>`: Scaffold a new local skill directory with a starter `SKILL.md` (local-only; does not publish).
 - `publish <path>`: Publish a local skill directory to the Hub. Limits: 50 files, 10 MB/file, 50 MB total.
-    - Flags: `--version <semver>` (required), `--scope <core|global|project|user>` (default `global` for new skills), `--skill-id <id>`.
+    - Flags: `--version <semver>` (required), `--scope <global|project|user>` (when set and `--skill-id` is not, only a same-named skill in that scope is reused: the current project's for `project`, your own for `user`; otherwise one is created there, and a failed lookup stops the command with an error. Without `--scope`, any same-named skill is reused and a new skill is created in `global`. `--scope global` links and looks up no project), `--skill-id <id>`. Global skills need the `global-catalog-author` or `hub-admin` role (see [Global catalog authoring](/scion/hosted/ha/permissions/#global-catalog-authoring)).
 - `versions <name-or-id>`: List all versions of a skill.
 - `resolve <uri>`: Resolve a skill URI to a concrete version, content hash, and file manifest.
 - `deprecate <name-or-id>`: Mark a published version as deprecated.
@@ -1948,7 +1950,7 @@ uses it with no stored login and no agent token file (either one takes precedenc
 `SCION_HUB_TOKEN`; check `hub.auth.source` in the output):
 
 ```bash
-scion hub token create --boundary hub --name health-check \
+scion --global hub token create --boundary hub --name health-check \
   --scopes hub_health:read,broker:read,agent:list --expires 30d
 SCION_HUB_TOKEN=scion_pat_... scion doctor --format json
 ```

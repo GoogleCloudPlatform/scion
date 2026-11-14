@@ -155,6 +155,108 @@ user record, and your user must also hold the matching permission:
   status, delete your own account, or activate an invited user. The last super-admin,
   last-project-owner and blocker rules of a delete apply to tokens as to sign-in sessions.
 
+### Hub-boundary tokens for global catalog authoring
+
+A CI job can publish skills and templates to the global (hub) catalog with a hub token, without
+an administrator account. The token's user needs the `global-catalog-author` role (an
+administrator grants it; see
+[Global catalog authoring](/scion/hosted/ha/permissions/#global-catalog-authoring)). The role
+and the token cover global records only: they give no authority over project- or user-scoped
+skills and templates.
+
+Mint the token from a sign-in session as that user. Outside a Scion project, `scion hub token`
+commands need the root `--global` flag (see [Hub-bound tokens](#hub-bound-tokens)):
+
+```bash
+scion --global hub token create --boundary hub \
+  --name catalog-ci \
+  --scopes skill:list,skill:read,skill:create_global,skill:update_global,skill:delete_global \
+  --scopes template:list,template:read,template:create_global,template:update_global,template:delete_global
+```
+
+| Scope | Boundary | Used for |
+|-------|----------|----------|
+| `skill:list`, `skill:read` | Project or hub | Find the skill to publish to and read it. With `--scope`, `skills publish` stops with an error if this lookup fails, rather than creating a skill. |
+| `skill:create_global` | Hub only | Create a global skill on its first publish. |
+| `skill:update_global` | Hub only | Publish a new version of a global skill (create, upload and finalize the version), update its metadata, deprecate a version. |
+| `skill:delete_global` | Hub only | Delete (archive) a global skill. |
+| `template:list`, `template:read` | Project or hub | Find, compare and download templates. |
+| `template:create_global` | Hub only | Create a global template, import templates into the global catalog, refresh a global template from its source. |
+| `template:update_global` | Hub only | Upload changed files to an existing global template. |
+| `template:delete_global` | Hub only | Delete a global template. |
+
+The `*_global` scopes are not part of `skill:manage` or `template:manage`: list them
+explicitly. Leave out the ones the job does not need, for example the `*:delete_global` scopes
+for a job that only publishes.
+
+Use it from the CI job with `SCION_HUB_TOKEN`, and make the Hub the current hub once with
+`scion hub add <name> <url> --use`, so every step below uses it:
+
+```bash
+export SCION_HUB_TOKEN="scion_pat_..."
+scion hub add catalog https://scion.example.com --use
+
+# Publish a skill version to the global catalog (creates the skill on first publish)
+scion --global skills publish ./skills/deploy-checklist --version 1.2.0 --scope global
+
+# Create or update a global template from a template directory (push is an alias)
+scion --global templates sync ./templates/code-reviewer
+scion --global templates push ./templates/reviewer-v2 --name reviewer
+
+# Delete a global template on the Hub (--non-interactive confirms without a terminal)
+scion --global --non-interactive templates delete old-reviewer --hub
+
+# Copy a global template into the local global templates directory
+scion --global templates clone code-reviewer code-reviewer-v2 --hub
+
+# Refresh a global template that was imported from GitHub, from its recorded source
+scion templates update github-reviewer --scope global
+```
+
+- Without a terminal, a command that asks for confirmation (such as `templates delete`) answers
+  No unless you pass `--yes` or `--non-interactive`. `--non-interactive` also makes ambiguous
+  prompts fail instead of waiting, which suits CI.
+- `scion skills publish --scope global` adds the version to an existing skill only when it is a
+  global skill of that name; a project or user skill of the same name is not reused.
+- The commands above do not link, register or look up a project, so the job needs no linked
+  checkout and no `project:read` or `project:list`. Outside a Scion project (for example in a
+  plain CI checkout), `hub token create`, `skills publish` and the `templates` commands other
+  than `update` need the root `--global` flag, as above; inside a linked project, `skills publish --scope global` works
+  without it. `templates update` takes `--scope global` or `--global`; `--global` together with
+  a different `--scope` is rejected.
+- `templates update` refreshes only templates that have a recorded GitHub source URL, such as
+  templates imported into the global catalog from a GitHub folder (the web UI's **Load
+  Templates**, or `POST /api/v1/resources/import`). A template created with `templates sync` has
+  no source URL, so `templates update` skips or refuses it; see
+  [Refreshing a Hub template from its source](/scion/local/templates/#refreshing-a-hub-template-from-its-source).
+- `scion --global templates clone <src> <dest>` copies a Hub template into your local global
+  templates directory, which needs only `template:read`; sync the copy to publish it. Cloning a
+  template into the global scope on the Hub itself (the web UI's clone, or
+  `POST /api/v1/templates/{id}/clone`) needs `template:read` and `template:create_global`.
+- Importing templates into the global catalog, and refreshing (reimporting) a global template,
+  need only `template:create_global` (with `template:read` to refresh), also when the template
+  already exists: an import overwrites the files of an existing global template of the same
+  name. A token with `template:create_global` can therefore replace the content of existing
+  global templates through import or refresh, even without `template:update_global`.
+- A token minted before this release whose scopes are plain `skill:update`, `skill:delete` or
+  `template:*` (including a hub admin's token) no longer writes global records. Mint a new token
+  with the `*_global` scopes.
+
+**Limits of this recipe:**
+
+- **Selecting the Hub.** A command takes its Hub from the root `--hub <name-or-url>` flag, then
+  `SCION_HUB_ENDPOINT`, then the hub of a linked project, then the current hub (`scion use`), so inside a linked checkout the project's hub wins over the current hub.
+  `scion templates delete` and `scion templates clone` cannot take the root `--hub <url>`: they
+  define their own `--hub` switch ("only search the Hub"), which shadows it. Select the Hub
+  with the current hub (as above) or `SCION_HUB_ENDPOINT` so that every step, including these
+  two, reaches the same Hub.
+- **Commands that still look up a project.** Under a token with only these skill and template
+  scopes, from an environment with no linked project, the following commands look up a project
+  first, which this token cannot pass: `scion templates list`, `show`, `pull` and `status`, and `scion skills list`,
+  `show`, `versions`, `resolve`, `deprecate` and `delete`. A CI step that lists or cleans up
+  skills (`skills deprecate` or `skills delete`) therefore does not work with this token from a
+  fresh environment.
+
 ### Scopes are restrictions, not grants
 
 Selecting a scope only **limits** what a token may ever be used for — it never by itself grants
@@ -212,7 +314,7 @@ refused with `403` and `details.reason` `CREDENTIAL_MANAGEMENT`.
 ```bash
 scion hub auth login
 scion hub token scopes --project my-project
-scion hub token scopes --boundary hub
+scion --global hub token scopes --boundary hub
 ```
 
 `--project` alone means the project boundary. `--boundary hub` takes no `--project`; passing both
@@ -300,10 +402,13 @@ In the web UI, open **Access Tokens** in your profile, select **Create Token**, 
 project choice, clears the scopes you had selected, and lists the scopes with their hub-boundary
 eligibility.
 
-With the CLI, pass `--boundary hub` and no `--project`:
+With the CLI, pass `--boundary hub` and no `--project`. Outside a Scion project directory,
+`scion hub token` commands (including `create`, `list` and `scopes`) stop with "not in a scion
+project" unless you pass `--project` or the root `--global` flag; for a hub token, use
+`--global`:
 
 ```bash
-scion hub token create --boundary hub \
+scion --global hub token create --boundary hub \
   --name health-check \
   --scopes hub_health:read,broker:read,agent:list \
   --expires 30d
@@ -425,10 +530,15 @@ The same per-request checks apply, with these limits:
   token can list your injected skills. User- and Hub-scope environment variables and secrets
   (`scope=user` and `scope=hub` on `/api/v1/env` and `/api/v1/secrets`) never accept a token of
   any boundary or scope: they require an interactive login (`403`, `details.reason: "CREDENTIAL_MANAGEMENT"`).
-- **Global catalog and skill registries.** Creating a global skill needs `skill:create_global`,
-  and managing skill registries needs `skill:register`; both can be selected only on a hub
-  token. Importing or discovering templates or harness configurations for the global catalog
-  needs `template:create` or `harness_config:create` on a hub token. Discovering skills for a
+- **Global catalog and skill registries.** Global skills and templates need the `*_global`
+  scopes on a hub token: `skill:create_global`, `skill:update_global` and
+  `skill:delete_global` for skills, and `template:create_global`, `template:update_global` and
+  `template:delete_global` for templates. The plain `skill:update`, `skill:delete` and
+  `template:*` scopes do not authorize writes on global records. Managing skill registries needs
+  `skill:register`, also only on a hub token. Importing or discovering templates for the global
+  catalog, and refreshing a global template from its source, need `template:create_global`;
+  for harness configurations they need `harness_config:create`. See
+  [Hub-boundary tokens for global catalog authoring](#hub-boundary-tokens-for-global-catalog-authoring). Discovering skills for a
   project needs `skill:create` on a token whose boundary contains the project; discovering
   them with no project needs `skill:create_global` on a hub token. Resolving `gh://` skill
   references with no project needs `skill:read` on a hub token.

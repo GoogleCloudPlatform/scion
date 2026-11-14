@@ -9,10 +9,10 @@ The Hub is the authoritative **Skill Registry** for the Skill Bank: it stores pu
 
 The Hub persists two record types:
 
-- **Skill** — the logical skill: `name`, `slug`, `description`, `tags`, `scope` (`core`, `global`, `project`, `user`) and optional `scope_id`, ownership, and `status` (`active` or `archived`). Skills are unique per `(slug, scope, scope_id)`.
+- **Skill** — the logical skill: `name`, `slug`, `description`, `tags`, `scope` (`global`, `project`, `user`; the former `core` scope is retired) and optional `scope_id`, ownership, and `status` (`active` or `archived`). Skills are unique per `(slug, scope, scope_id)`.
 - **SkillVersion** — an immutable release of a skill: `version` (semver), `status` (`draft`, `published`, `deprecated`, `archived`), a `sha256:` `content_hash`, the file manifest, publisher, download count, and — for deprecated versions — a deprecation message and optional replacement URI.
 
-Resolving a version constraint or content hash considers only `published` and `deprecated` versions. Reading a file by version number, the versions list and a single version's details apply the same rule, except that the skill's owner, its creator and callers who can update the skill also see its `draft` and `archived` versions. A version outside that set is reported as not found, exactly like a version that does not exist. Signed file URLs that the Hub issues at dispatch serve the version they were issued for until they expire.
+Resolving a version constraint or content hash considers only `published` and `deprecated` versions. Reading a file by version number, the versions list and a single version's details apply the same rule, except that callers who can update the skill also see its `draft` and `archived` versions, and so do the skill's owner and creator unless it is a global skill (for a global skill, that takes `skill.update_global`). A version outside that set is reported as not found, exactly like a version that does not exist. Signed file URLs that the Hub issues at dispatch serve the version they were issued for until they expire.
 
 `scion skills delete` performs a **soft delete**: the skill's status becomes `archived` and its records are retained for audit and history.
 
@@ -161,9 +161,9 @@ Registry administration is capability-gated; it is available to users with the a
 
 ### Global catalog authoring
 
-Publishing skills to the `global` scope requires the `skill.create_global` permission. Hub administrators hold this permission by default. For non-admin users who need to author global skills, assign the system-scoped `global-catalog-author` role. This role grants only `skill.create_global`, decoupling global skill authoring from full Hub administration authority.
+Global skills have their own permissions: `skill.create_global` to create one, `skill.update_global` to publish new versions, change it or deprecate a version, and `skill.delete_global` to delete it. The plain `skill.update` and `skill.delete` permissions, and owning the skill, do not cover global skills. Hub administrators hold all three by default. For non-admin users who need to author global skills, assign the system-scoped `global-catalog-author` role, which grants these three and the matching global template permissions, and nothing on project- or user-scoped records.
 
-See [Permissions & Policy — Roles](/scion/hosted/ha/permissions/#roles) for the complete role listing.
+See [Global catalog authoring](/scion/hosted/ha/permissions/#global-catalog-authoring) for the full model, including the risk of putting a global skill on the Hub's injected list, and [Hub-boundary tokens for global catalog authoring](/scion/hosted/user/personal-access-tokens/#hub-boundary-tokens-for-global-catalog-authoring) for a CI token.
 
 ## See also
 
