@@ -4810,6 +4810,27 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 		// woke is left alone.
 		s.recancelLocalLaunch(key, hubAgentID, "", woken)
 		match, lookupErr = s.lookupAgentMatch(ctx, id, projectID)
+		if own := s.ownRuntimeFor(ctx); own != nil && errors.Is(lookupErr, ErrAgentNotFound) {
+			// The agent's own runtime holds no container for it, but one
+			// may be left in a runtime its profile selected before
+			// (ptone/scion#4722): search the other registered runtimes, as
+			// restart and a run-scoped stop do, and stop the one found.
+			// More than one is ambiguous and stops nothing.
+			m, err := s.previousRuntimeMatch(ctx, own, id, projectID, match, lookupErr,
+				"Agent stop: runtime list failed while searching the other runtimes; skipped")
+			var ambiguous *previousRuntimeAmbiguousError
+			switch {
+			case errors.As(err, &ambiguous):
+				span.SetStatus(codes.Error, err.Error())
+				s.agentLifecycleLog.Warn("Agent stop refused: more than one container of the agent found in other runtimes",
+					"agent_id", id, "project_id", projectID, "containers", ambiguous.containers)
+				writeError(w, http.StatusConflict, ErrCodeConflict, fmt.Sprintf(
+					"agent '%s' was not stopped: %d containers of it were found in other runtimes", id, ambiguous.containers), nil)
+				return
+			case err == nil && m.containerID != "":
+				match, lookupErr = m, nil
+			}
+		}
 	} else {
 		// A run-scoped stop resolves first, so a stop for a run that no
 		// longer holds the name returns 404 before any side effect: no

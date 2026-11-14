@@ -240,3 +240,54 @@ func TestPreviousRuntimeMatch_SameSlugOtherProjectNotMatched(t *testing.T) {
 		t.Fatalf("match = %+v, err = %v; want the own project's container", m, err)
 	}
 }
+
+// AC5: a stop naming no run, for an agent whose own runtime holds no
+// container, stops the container left in the previous runtime.
+func TestStopAgent_NoRunID_OwnRuntimeNoMatch_StopsInPreviousRuntime(t *testing.T) {
+	f := newPreviousRuntimeFixture(t)
+
+	w := f.do(http.MethodPost, "/api/v1/agents/test-agent-1/stop")
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("stop status = %d, body %s; want 202", w.Code, w.Body.String())
+	}
+	if f.mgr.StopCalls() != 1 || f.mgr.LastStopAgentID() != "old-container" {
+		t.Fatalf("stop on the previous runtime: calls=%d target=%q; want 1 old-container", f.mgr.StopCalls(), f.mgr.LastStopAgentID())
+	}
+}
+
+// A stop naming no run with containers of the agent in two other runtimes
+// is ambiguous: 409, and nothing is stopped.
+func TestStopAgent_NoRunID_PreviousRuntimeAmbiguous_Refused(t *testing.T) {
+	f := newPreviousRuntimeFixture(t)
+	second := &mockManager{agents: []api.AgentInfo{{
+		ID: "test-agent-1", Name: "test-agent-1", ContainerID: "second-container",
+		ProjectPath: f.mgr.agents[0].ProjectPath, Phase: "running",
+	}}}
+	f.addRuntime("aux-second", second)
+
+	w := f.do(http.MethodPost, "/api/v1/agents/test-agent-1/stop")
+	if w.Code != http.StatusConflict {
+		t.Fatalf("stop status = %d, body %s; want 409", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "test-agent-1") {
+		t.Errorf("409 body %s does not name the agent", w.Body.String())
+	}
+	if f.mgr.StopCalls() != 0 || second.StopCalls() != 0 {
+		t.Fatalf("stop calls = %d, %d; want none", f.mgr.StopCalls(), second.StopCalls())
+	}
+}
+
+// With no container in any runtime, a stop naming no run is still the
+// idempotent 202 it was, and stops nothing.
+func TestStopAgent_NoRunID_NoContainerAnywhere_Accepted(t *testing.T) {
+	f := newPreviousRuntimeFixture(t)
+	f.mgr.agents[0].ContainerID = ""
+
+	w := f.do(http.MethodPost, "/api/v1/agents/test-agent-1/stop")
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("stop status = %d, body %s; want 202", w.Code, w.Body.String())
+	}
+	if f.mgr.StopCalls() != 0 {
+		t.Fatalf("stop calls = %d, want 0", f.mgr.StopCalls())
+	}
+}
