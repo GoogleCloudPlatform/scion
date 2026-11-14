@@ -181,6 +181,7 @@ func TestDocSyntax(t *testing.T) {
 	docFiles := []string{
 		"../resources/platform_skills/scion-messaging/SKILL.md",
 		"../resources/platform_skills/scion-messaging/references/choices.md",
+		"../resources/platform_skills/scion-artifacts/SKILL.md",
 		"../docs-site/src/content/docs/hosted/user/messaging.md",
 		"../docs-site/src/content/docs/reference/cli.md",
 		"../docs-site/src/content/docs/glossary.md",
@@ -431,4 +432,66 @@ func TestDocSyntax_PlatformSkillChoices(t *testing.T) {
 		assert.NotEmpty(t, problems)
 		assert.Empty(t, placeholderFlagProblems([]string{"scion decisions record <key> <choice-id> --from <message-id>"}, "test"))
 	})
+}
+
+// TestDocSyntax_PlatformSkillArtifacts checks every fenced scion line of the
+// scion-artifacts skill (ptone/scion#7897), placeholder lines included,
+// against the cobra tree as agents see it in --help: the command exists and
+// is available in agent mode, and each flag exists and is not hidden.
+func TestDocSyntax_PlatformSkillArtifacts(t *testing.T) {
+	const rel = "../resources/platform_skills/scion-artifacts/SKILL.md"
+	lines := fencedScionLinesWithPlaceholders(t, rel)
+	for _, p := range placeholderFlagProblems(lines, rel) {
+		t.Error(p)
+	}
+	for _, p := range agentHelpProblems(lines, rel) {
+		t.Error(p)
+	}
+	require.GreaterOrEqual(t, len(lines), 15, "expected the scion-artifacts skill to hold at least 15 fenced scion lines; got %d", len(lines))
+
+	t.Run("catches_hidden_flag_and_human_only_command", func(t *testing.T) {
+		assert.NotEmpty(t, agentHelpProblems([]string{`scion message @a "hi" --artifact <ref> --in 5m`}, "test"))
+		assert.NotEmpty(t, agentHelpProblems([]string{"scion artifact share <ref>"}, "test"))
+		assert.Empty(t, agentHelpProblems([]string{"scion artifact publish plan.md --review <ref> --note x"}, "test"))
+	})
+}
+
+// agentHelpProblems reports fenced scion lines whose command is not
+// available in agent mode (agentAllowed) or that use a hidden flag, which
+// --help does not list.
+func agentHelpProblems(lines []string, source string) []string {
+	var problems []string
+	for _, line := range lines {
+		tokens := strings.Fields(line)[1:]
+		var path []string
+		for _, tok := range tokens {
+			if strings.HasPrefix(tok, "-") {
+				break
+			}
+			path = append(path, tok)
+		}
+		cmd, _, err := rootCmd.Find(path)
+		if err != nil {
+			problems = append(problems, fmt.Sprintf("command not found: %s (from %s)", line, source))
+			continue
+		}
+		key := strings.ReplaceAll(strings.TrimPrefix(cmd.CommandPath(), rootCmd.Name()+" "), " ", ".")
+		if !agentAllowed[key] {
+			problems = append(problems, fmt.Sprintf("%q is not available in agent mode: %s (from %s)", cmd.CommandPath(), line, source))
+		}
+		for _, tok := range tokens {
+			if !strings.HasPrefix(tok, "--") {
+				continue
+			}
+			name, _, _ := strings.Cut(strings.TrimPrefix(tok, "--"), "=")
+			f := cmd.Flags().Lookup(name)
+			if f == nil {
+				f = cmd.InheritedFlags().Lookup(name)
+			}
+			if f != nil && f.Hidden {
+				problems = append(problems, fmt.Sprintf("hidden flag --%s for %q: %s (from %s)", name, cmd.CommandPath(), line, source))
+			}
+		}
+	}
+	return problems
 }

@@ -281,6 +281,9 @@ when the limit is exceeded. Check the error rather than assuming delivery.
 For longer content, send a short summary with a link to a published artifact, or
 attach a file. Split into a few messages only when each part remains useful on its
 own. Agent-to-agent messages have no enforced cap, but still keep them focused.
+<!-- scion:experiment hub.artifacts -->
+To publish long content and send its reference with `--artifact`, see the `scion-artifacts` skill.
+<!-- scion:end-experiment -->
 
 ## Before sending
 

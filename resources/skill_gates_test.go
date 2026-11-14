@@ -289,3 +289,96 @@ func TestPlatformSkillsFS_ScionMessagingChoices(t *testing.T) {
 		}
 	}
 }
+
+// TestPlatformSkillsFS_ScionArtifacts pins the scion-artifacts platform skill
+// (ptone/scion#7897): the whole skill is gated on hub.artifacts through its
+// SKILL.md frontmatter, it covers the commands agents use and what they
+// cannot do, and scion-messaging points to it from one hub.artifacts block.
+func TestPlatformSkillsFS_ScionArtifacts(t *testing.T) {
+	read := func(name string) string {
+		t.Helper()
+		data, err := fs.ReadFile(PlatformSkillsFS(), name)
+		if err != nil {
+			t.Fatalf("reading embedded %s: %v", name, err)
+		}
+		return string(data)
+	}
+	raw := read("scion-artifacts/SKILL.md")
+	skill := parseSkillMarkdown("scion-artifacts/SKILL.md", raw)
+	if skill.fileGate != experiments.Artifacts {
+		t.Errorf("scion-artifacts/SKILL.md frontmatter gate = %q, want %q", skill.fileGate, experiments.Artifacts)
+	}
+	var fm struct {
+		Name        string `yaml:"name"`
+		Description string `yaml:"description"`
+		InjectWhen  string `yaml:"inject_when"`
+	}
+	front, _, _ := strings.Cut(strings.TrimPrefix(strings.ReplaceAll(raw, "\r\n", "\n"), "---\n"), "\n---\n")
+	if err := yaml.Unmarshal([]byte(front), &fm); err != nil {
+		t.Fatalf("scion-artifacts/SKILL.md frontmatter: %v", err)
+	}
+	if fm.Name != "scion-artifacts" || fm.Description == "" {
+		t.Errorf("frontmatter name = %q, description = %q; want name scion-artifacts and a description", fm.Name, fm.Description)
+	}
+	if fm.InjectWhen != "" {
+		t.Errorf("scion-artifacts is gated by its experiment only; frontmatter sets inject_when: %q", fm.InjectWhen)
+	}
+	entries, err := fs.ReadDir(PlatformSkillsFS(), "scion-artifacts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("scion-artifacts holds %d entries, want only SKILL.md (other files would need their own gate)", len(entries))
+	}
+
+	content := strings.Join(strings.Fields(raw), " ")
+	for _, want := range []string{
+		"scion artifact publish design.md --title",
+		"--key",
+		"--note",
+		"--version-of scion://artifact/<id>",
+		"--entry index.html",
+		"scion artifact publish plan.md --review scion://artifact/<id>",
+		"{~~old~>new~~}",
+		"{>>text<<}",
+		"`unmarked_changes`",
+		"`stale_review`",
+		"scion artifact get scion://artifact/<id>",
+		"--out",
+		"--clean",
+		"--accept",
+		"--kind publish",
+		"scion artifact versions scion://artifact/<id>",
+		"scion artifact comments scion://artifact/<id>",
+		"scion artifact list",
+		"scion artifact view scion://artifact/<id> --check",
+		"--show-link",
+		"scion message @reviewer",
+		"--artifact scion://artifact/<id>",
+		"`scion artifact share`, `scion artifact grants` and `scion artifact delete` do not exist",
+		`unknown command "share" for "scion artifact"`,
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("embedded scion-artifacts/SKILL.md does not contain %q", want)
+		}
+	}
+
+	msg := parseSkillMarkdown("scion-messaging/SKILL.md", read("scion-messaging/SKILL.md"))
+	blocks, pointer := 0, false
+	prev := ""
+	for _, l := range msg.lines {
+		if l.gate == experiments.Artifacts && prev != experiments.Artifacts {
+			blocks++
+		}
+		prev = l.gate
+		if strings.Contains(l.text, "scion-artifacts") {
+			pointer = true
+			if l.gate != experiments.Artifacts {
+				t.Errorf("scion-messaging/SKILL.md:%d names the scion-artifacts skill outside a %s gate: %q", l.n, experiments.Artifacts, l.text)
+			}
+		}
+	}
+	if blocks != 1 || !pointer {
+		t.Errorf("scion-messaging/SKILL.md has %d %s blocks (pointer found: %v), want 1 pointing to the scion-artifacts skill", blocks, experiments.Artifacts, pointer)
+	}
+}
