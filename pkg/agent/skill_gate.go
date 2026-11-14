@@ -98,17 +98,18 @@ func gateMarkdown(name string, data []byte, isOn func(string) bool) (out []byte,
 			line = rest[:i+1]
 		}
 		rest = rest[len(line):]
-		trimmed := strings.TrimSpace(string(line))
-		if m := experimentOpenRe.FindStringSubmatch(trimmed); m != nil {
+		trimmed := bytes.TrimSpace(line)
+		if m := experimentOpenRe.FindSubmatch(trimmed); m != nil {
 			changed = true
+			id := string(m[1])
 			if inBlock {
-				slog.Warn("platform skill has a nested experiment block; dropping the rest of the file", "file", name, "experiment", m[1])
+				slog.Warn("platform skill has a nested experiment block; dropping the rest of the file", "file", name, "experiment", id)
 				return buf.Bytes(), true
 			}
-			inBlock, blockOn = true, isOn(m[1])
+			inBlock, blockOn = true, isOn(id)
 			continue
 		}
-		if experimentEndRe.MatchString(trimmed) {
+		if experimentEndRe.Match(trimmed) {
 			changed = true
 			if !inBlock {
 				slog.Warn("platform skill has an end-experiment marker without an opener; removing it", "file", name)
