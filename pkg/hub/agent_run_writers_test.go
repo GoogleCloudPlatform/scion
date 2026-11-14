@@ -141,14 +141,16 @@ var entRunIDSetters = map[string]bool{
 // the store's run methods, the delete engine's soft finish
 // (applyAgentDeletionFields, which writes the run only for a
 // DeletionFields.SoftFinishRunID, which FinalizeAgentDeletion's soft mode
-// alone accepts, ptone/scion#5016), the agent credential insert and the
-// broker-reported run upsert (each its own run_id column).
+// alone accepts, ptone/scion#5016), the agent credential insert, the
+// broker-reported run upsert and the runtime orphan upsert (each its own
+// run_id column).
 var wantEntRunIDSetterCallers = []string{
 	"pkg/store/entadapter/agent_deletion_store.go applyAgentDeletionFields",
 	"pkg/store/entadapter/agent_store.go AgentStore.setAgentRunIDOnce",
 	"pkg/store/entadapter/agent_store.go AgentStore.swapAgentRunID",
 	"pkg/store/entadapter/broker_reported_run_store.go AgentStore.RecordBrokerReportedRuns",
 	"pkg/store/entadapter/credential_store.go createAgentCredential",
+	"pkg/store/entadapter/runtime_orphan_store.go AgentStore.RecordRuntimeOrphans",
 }
 
 // TestAgentRunIDStoreWritersAreAClosedSet: below the store interface, the
