@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/tmuxdeliver"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 // Message delivery over the agent's conduit session (design v2.22,
@@ -320,16 +321,14 @@ func conduitReadySpec(h api.Harness) *agentcontrol.ReadySpec {
 	}
 }
 
-// execReachableTimeout bounds the exec probe.
-const execReachableTimeout = 15 * time.Second
-
-// execReachable reports whether the runtime can exec in containerID now:
-// one cheap, fixed tmux command (the target check). It is used only where a
-// conduit-capable delivery would otherwise go over exec (attachments, a
-// fallback), so it never runs on the plain exec path.
-func (m *AgentManager) execReachable(ctx context.Context, containerID string) bool {
-	ctx, cancel := context.WithTimeout(ctx, execReachableTimeout)
-	defer cancel()
-	_, err := m.Runtime.Exec(ctx, containerID, []string{"tmux", "has-session", "-t", tmuxdeliver.Target})
-	return err == nil
+// execAvailable reports whether the runtime can exec at all, from its
+// static capability (runtime.ExecCapability), without running anything
+// (review FV2-N1). A missing or starting tmux session is not "no exec":
+// that is left to the readiness wait and the pre-paste retries, and a
+// transient exec error is an ordinary delivery error.
+func (m *AgentManager) execAvailable() bool {
+	if c, ok := m.Runtime.(runtime.ExecCapability); ok {
+		return c.ExecAvailable()
+	}
+	return true
 }

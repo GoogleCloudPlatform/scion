@@ -575,9 +575,7 @@ func TestConduitDelivery_EffectiveReadySpecBounds(t *testing.T) {
 					return &readyTestHarness{deliveryTestHarness: deliveryTestHarness{spec: shippedSpec}, ready: tc.spec}
 				}
 				if !execOK {
-					m.Runtime.(*runtime.MockRuntime).ExecFunc = func(context.Context, string, []string) (string, error) {
-						return "", errors.New("exec connector not configured")
-					}
+					withoutExec(m)
 				}
 				d := &fakeDeliverer{answers: []fakeAnswer{answer(200, agentcontrol.OutcomeDelivered)}}
 				m.SetConduitDeliverer(d)
@@ -694,15 +692,7 @@ func (warnPreDelivery) Discard() {}
 // conduit. Where exec exists, attachments stay on exec
 // (TestConduitDelivery_AttachmentsUseExec).
 func TestConduitDelivery_AttachmentsWithoutExec(t *testing.T) {
-	noExec := func(m *AgentManager) {
-		rt := m.Runtime.(*runtime.MockRuntime)
-		rt.ExecFunc = func(context.Context, string, []string) (string, error) {
-			return "", errors.New("exec connector not configured")
-		}
-		rt.ExecWithStdinFunc = func(context.Context, string, []string, io.Reader) (string, error) {
-			return "", errors.New("exec connector not configured")
-		}
-	}
+	noExec := withoutExec
 	t.Run("interrupt", func(t *testing.T) {
 		var execs []string
 		m := newConduitTestManager(t, true, shippedSpec, &execs)
@@ -797,5 +787,99 @@ func TestConduitDelivery_InterruptWaitsBehindFlush(t *testing.T) {
 	<-intDone
 	if d.calls() != 2 || order[0] != "flush" || d.reqs[1].Op != agentcontrol.OpInterruptPaste {
 		t.Fatalf("calls %d order %v", d.calls(), order)
+	}
+}
+
+// capRuntime is a mock runtime with a static exec capability.
+type capRuntime struct {
+	*runtime.MockRuntime
+	exec bool
+}
+
+func (c *capRuntime) ExecAvailable() bool { return c.exec }
+
+// withoutExec makes m's runtime one without exec, as Cloud Run without an
+// exec connector: it reports no exec capability, and exec calls fail.
+func withoutExec(m *AgentManager) {
+	mock := m.Runtime.(*runtime.MockRuntime)
+	mock.ExecFunc = func(context.Context, string, []string) (string, error) {
+		return "", errors.New("cloudrun: exec connector not configured")
+	}
+	mock.ExecWithStdinFunc = func(context.Context, string, []string, io.Reader) (string, error) {
+		return "", errors.New("cloudrun: exec connector not configured")
+	}
+	m.Runtime = &capRuntime{MockRuntime: mock, exec: false}
+}
+
+// TestConduitDelivery_StartingTmuxIsNotNoExec (review FV2-N1): when the
+// conduit attempt ends in exec fallback while the agent's tmux session is
+// still starting, the broker does not conclude "no exec": it runs the
+// readiness wait and delivers over exec once the session is up.
+func TestConduitDelivery_StartingTmuxIsNotNoExec(t *testing.T) {
+	var execs []string
+	m := newConduitTestManager(t, true, shippedSpec, &execs)
+	m.readyTimings = harnessReadyTimings{PollInterval: time.Millisecond, Deadline: 5 * time.Second, SettleFallback: time.Nanosecond}
+	mock := m.Runtime.(*runtime.MockRuntime)
+	var mu sync.Mutex
+	probes := 0
+	mock.ExecFunc = func(_ context.Context, _ string, cmd []string) (string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		execs = append(execs, strings.Join(cmd, " "))
+		if len(cmd) > 1 && cmd[1] == "has-session" {
+			// tmux ran and found no session yet: exec works.
+			return "", errors.New("exit status 1: no server running")
+		}
+		if cmd[0] == "sh" { // the readiness probe
+			probes++
+			if probes == 1 {
+				return "session=\nnow=200\n", nil // tmux not up yet
+			}
+			return "session=100\nnow=200\ninitrun=\ninitspec=\nready=\nreadymtime=\n", nil
+		}
+		return "", nil
+	}
+	m.SetConduitDeliverer(&fakeDeliverer{answers: []fakeAnswer{answer(503, "not_reached")}})
+	err := m.deliver(context.Background(), deliveryRequest{agentID: "test-agent", message: "x", messageIDs: []string{"m"}, readyWanted: true})
+	if err != nil {
+		t.Fatalf("err = %v; want delivered over exec after the readiness wait", err)
+	}
+	if probes < 2 || !execDelivered(execs) {
+		t.Fatalf("probes %d execs %v", probes, execs)
+	}
+}
+
+// TestConduitDelivery_TransientExecErrorIsOrdinary (review FV2-N1): with a
+// runtime that has exec, a transient exec error on the fallback is an
+// ordinary (retryable) delivery error, not "exec unavailable".
+func TestConduitDelivery_TransientExecErrorIsOrdinary(t *testing.T) {
+	var execs []string
+	m := newConduitTestManager(t, true, shippedSpec, &execs)
+	m.Runtime.(*runtime.MockRuntime).ExecWithStdinFunc = func(context.Context, string, []string, io.Reader) (string, error) {
+		return "", errors.New("transient: connection reset")
+	}
+	m.SetConduitDeliverer(&fakeDeliverer{answers: []fakeAnswer{{status: http.StatusNotFound}}})
+	err := m.deliver(context.Background(), deliveryRequest{agentID: "test-agent", message: "x", messageIDs: []string{"m"}})
+	if err == nil || strings.Contains(err.Error(), "exec unavailable") {
+		t.Fatalf("err = %v; want the exec error itself", err)
+	}
+}
+
+// TestConduitDelivery_NoConnectorFailsFastNamed (review FV2-N1): a runtime
+// without exec capability fails a fallback at once with a named reason,
+// running no exec command at all.
+func TestConduitDelivery_NoConnectorFailsFastNamed(t *testing.T) {
+	var execs []string
+	m := newConduitTestManager(t, true, shippedSpec, &execs)
+	withoutExec(m)
+	m.SetConduitDeliverer(&fakeDeliverer{answers: []fakeAnswer{{status: http.StatusNotFound}}})
+	start := time.Now()
+	err := m.deliver(context.Background(), deliveryRequest{agentID: "test-agent", message: "x", messageIDs: []string{"m"}, readyWanted: true})
+	var final *finalDeliveryError
+	if !errors.As(err, &final) || !strings.Contains(err.Error(), "exec unavailable") {
+		t.Fatalf("err = %v", err)
+	}
+	if time.Since(start) > 5*time.Second || len(execs) != 0 {
+		t.Fatalf("took %s, execs %v; want no exec and no readiness wait", time.Since(start), execs)
 	}
 }

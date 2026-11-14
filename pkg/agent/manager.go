@@ -1560,17 +1560,18 @@ func (m *AgentManager) deliver(ctx context.Context, d deliveryRequest) error {
 			conduitReason = cerr
 			return false, nil
 		}
-		if d.hasAttachments && m.execReachable(ctx, agent.ContainerID) {
+		if d.hasAttachments && m.execAvailable() {
 			// Attachments stay on exec where the runtime has it (design
 			// v2.22 §1.6). Where it has none, the attachment work already
 			// put its "not delivered" lines into the text, and that text
-			// goes over conduit like any other (review FV1-N2).
+			// goes over conduit like any other (review FV1-N2). The decision uses
+			// the runtime's static exec capability, not a probe (FV2-N1).
 			conduitReason = errors.New("delivery carries attachments")
 		} else if done, cerr := tryConduit(); done {
 			return cerr
 		}
 		slog.Info("message delivery uses exec", "agent_id", agent.ID, "reason", conduitReason)
-		if !m.execReachable(ctx, agent.ContainerID) {
+		if !m.execAvailable() {
 			// No exec either: a named failure before anything was pasted,
 			// without first probing readiness over an exec that cannot run.
 			return &finalDeliveryError{Err: fmt.Errorf("failed to send message to agent '%s': runtime exec unavailable (conduit not used: %v)", agent.Name, conduitReason)}

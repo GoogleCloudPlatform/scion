@@ -28,6 +28,16 @@ import (
 // never returns this.
 var ErrLogsNotSupported = errors.New("agent logs are not available on this runtime")
 
+// ExecCapability is implemented by a runtime whose exec depends on its
+// configuration. ExecAvailable reports, without running anything, whether
+// Exec and ExecWithStdin can reach an agent at all (for Cloud Run: an exec
+// connector is configured). It says nothing about a particular container
+// or its tmux session. A runtime that does not implement it always has
+// exec.
+type ExecCapability interface {
+	ExecAvailable() bool
+}
+
 // RecordlessActor identifies one actor a RecordlessActorProber found running
 // with no in-memory record of which request created it — for example, after
 // the runtime's own process restarted. UID should be a globally unique,
