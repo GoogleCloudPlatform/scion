@@ -54,7 +54,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
-	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/keymaterial"
@@ -5740,13 +5739,15 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 
 	// Skip agents whose harness does not support resume — suspending
 	// them would imply resumability that doesn't exist.
-	if agent.AppliedConfig != nil && agent.AppliedConfig.HarnessConfig != "" {
-		h := harness.New(agent.AppliedConfig.HarnessConfig)
-		if h.AdvancedCapabilities().Resume.Support == api.SupportNo {
-			slog.Debug("Scheduler: skipping auto-suspend for non-resumable harness",
-				"agent_id", agent.ID, "harness", agent.AppliedConfig.HarnessConfig)
-			return false
+	if ok, harnessType, reason := s.harnessSupportsResume(ctx, agent); !ok {
+		harnessConfig := ""
+		if agent.AppliedConfig != nil {
+			harnessConfig = agent.AppliedConfig.HarnessConfig
 		}
+		slog.Info("Scheduler: skipping auto-suspend; harness does not support resume",
+			"agent_id", agent.ID, "agent_name", agent.Name,
+			"harness_config", harnessConfig, "harness", harnessType, "reason", reason)
+		return false
 	}
 
 	// The container is stopped before phase=suspended is written; see
