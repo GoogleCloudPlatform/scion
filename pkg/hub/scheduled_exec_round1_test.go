@@ -195,9 +195,15 @@ func TestScheduledExecR2_SweepCursorProgress(t *testing.T) {
 // setExecTiming2 sets an int test seam for the test.
 func setExecTiming2(t *testing.T, v *int, n int) {
 	t.Helper()
+	scheduledExecSeamMu.Lock()
 	prev := *v
 	*v = n
-	t.Cleanup(func() { *v = prev })
+	scheduledExecSeamMu.Unlock()
+	t.Cleanup(func() {
+		scheduledExecSeamMu.Lock()
+		*v = prev
+		scheduledExecSeamMu.Unlock()
+	})
 }
 
 // TestScheduledExecR2_UnavailablePrefixRotates: with more live runs on an

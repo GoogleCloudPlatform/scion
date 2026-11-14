@@ -87,9 +87,15 @@ func newExecRouteFixture(t *testing.T) *execRouteFixture {
 // setExecTiming sets a duration test seam for the test.
 func setExecTiming(t *testing.T, v *time.Duration, d time.Duration) {
 	t.Helper()
+	scheduledExecSeamMu.Lock()
 	prev := *v
 	*v = d
-	t.Cleanup(func() { *v = prev })
+	scheduledExecSeamMu.Unlock()
+	t.Cleanup(func() {
+		scheduledExecSeamMu.Lock()
+		*v = prev
+		scheduledExecSeamMu.Unlock()
+	})
 }
 
 // startAgent runs the agent's session with the exec routes registered and

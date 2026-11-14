@@ -360,9 +360,15 @@ func TestScheduledExecFire_Preflight(t *testing.T) {
 
 	t.Run("capacity", func(t *testing.T) {
 		f := newSchedExec(t, "sexec-cap")
+		scheduledExecSeamMu.Lock()
 		prev := scheduledExecMaxTracked
 		scheduledExecMaxTracked = 0
-		t.Cleanup(func() { scheduledExecMaxTracked = prev })
+		scheduledExecSeamMu.Unlock()
+		t.Cleanup(func() {
+			scheduledExecSeamMu.Lock()
+			scheduledExecMaxTracked = prev
+			scheduledExecSeamMu.Unlock()
+		})
 		evt := withSessionRevision(f.execEvent(f.target, "true"), f.creator.ID)
 		reason, ok := asScheduledSkip(f.srv.fireScheduledExec(ctx, evt))
 		require.True(t, ok)

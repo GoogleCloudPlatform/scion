@@ -67,6 +67,23 @@ var (
 	scheduledExecStopGrace = 2 * time.Second
 )
 
+// scheduledExecSeamMu guards the exec timing and bound variables above,
+// which tests change while trackers of earlier fires may still run.
+// Production code reads them through execSeamDuration and execSeamInt.
+var scheduledExecSeamMu sync.RWMutex
+
+func execSeamDuration(v *time.Duration) time.Duration {
+	scheduledExecSeamMu.RLock()
+	defer scheduledExecSeamMu.RUnlock()
+	return *v
+}
+
+func execSeamInt(v *int) int {
+	scheduledExecSeamMu.RLock()
+	defer scheduledExecSeamMu.RUnlock()
+	return *v
+}
+
 // scheduledExecStartUnknownAfter is how long after a run's insert a 404
 // from exec-status is definitive for a run never seen running: the start
 // can no longer be admitted. The hub sets not_after_unix_ms to its send
@@ -93,7 +110,7 @@ type scheduledExecRunTracker struct {
 func (t *scheduledExecRunTracker) acquire(eventID string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.used >= scheduledExecMaxTracked {
+	if t.used >= execSeamInt(&scheduledExecMaxTracked) {
 		return false
 	}
 	if _, ok := t.owned[eventID]; ok {
@@ -144,7 +161,7 @@ func (t *scheduledExecRunTracker) owns(eventID string) bool {
 // row stays unfinished and its event fired, and the sweeper records the
 // real outcome after the restart (design D5, D9 review).
 func (s *Server) stopScheduledExecRuns(ctx context.Context) {
-	if n := s.execRuns.work.stop(ctx, scheduledExecStopGrace); n > 0 {
+	if n := s.execRuns.work.stop(ctx, execSeamDuration(&scheduledExecStopGrace)); n > 0 {
 		slog.Info("Scheduled exec runs still tracked at shutdown; the sweeper records their outcome after the restart",
 			"running", n)
 	}
@@ -257,7 +274,7 @@ func (s *Server) fireScheduledExec(ctx context.Context, evt store.ScheduledEvent
 		Argc:                    len(p.Command),
 		TimeoutSeconds:          timeout,
 		StartedAt:               now,
-		LeaseUntil:              now.Add(time.Duration(timeout)*time.Second + scheduledExecLeaseGrace),
+		LeaseUntil:              now.Add(time.Duration(timeout)*time.Second + execSeamDuration(&scheduledExecLeaseGrace)),
 		Outcome:                 store.ScheduledExecOutcomeStarting,
 		Runtime:                 target.Runtime,
 		LaunchID:                target.RunID,
@@ -464,7 +481,7 @@ func (s *Server) trackScheduledExecRun(run store.ScheduledExecRun) {
 // pollScheduledExecRun polls exec-status for run until it records an
 // outcome or ctx ends (shutdown: nothing is recorded).
 func (s *Server) pollScheduledExecRun(ctx context.Context, run store.ScheduledExecRun) {
-	interval := scheduledExecPollInitial
+	interval, longest := execSeamDuration(&scheduledExecPollInitial), execSeamDuration(&scheduledExecPollMax)
 	var unavailable bool
 	for {
 		timer := time.NewTimer(interval)
@@ -477,7 +494,7 @@ func (s *Server) pollScheduledExecRun(ctx context.Context, run store.ScheduledEx
 		if s.pollScheduledExecRunOnce(ctx, &run, &unavailable) {
 			return
 		}
-		interval = min(interval*2, scheduledExecPollMax)
+		interval = min(interval*2, longest)
 	}
 }
 
@@ -551,7 +568,7 @@ func (s *Server) pollScheduledExecRunOnce(ctx context.Context, run *store.Schedu
 			// 1), so the container, restarted.
 			return failed(store.ScheduledExecOutcomeAbandoned, execReasonAgentRestarted)
 		}
-		if time.Since(run.StartedAt) > scheduledExecStartUnknownAfter {
+		if time.Since(run.StartedAt) > execSeamDuration(&scheduledExecStartUnknownAfter) {
 			// The admission window has closed: the start never arrived.
 			return failed(store.ScheduledExecOutcomeError, execReasonDispatchFailed)
 		}
@@ -580,9 +597,10 @@ func (s *Server) scheduledExecRunSweepHandler() func(ctx context.Context) {
 // It recovers the real outcome of runs whose tracker a hub restart lost
 // while their tombstone and lease are live.
 func (s *Server) sweepScheduledExecRuns(ctx context.Context) {
-	budget := scheduledExecSweepBatch * scheduledExecSweepMaxPages
+	batch, inFlight := execSeamInt(&scheduledExecSweepBatch), execSeamInt(&scheduledExecSweepInFlight)
+	budget := batch * execSeamInt(&scheduledExecSweepMaxPages)
 	for expired := 0; expired < budget && ctx.Err() == nil; {
-		runs, err := s.store.ListExpiredScheduledExecRuns(ctx, time.Now(), scheduledExecSweepBatch)
+		runs, err := s.store.ListExpiredScheduledExecRuns(ctx, time.Now(), batch)
 		if err != nil {
 			slog.Warn("Scheduler: exec run sweep: expired list failed", "error", err)
 			break
@@ -595,13 +613,13 @@ func (s *Server) sweepScheduledExecRuns(ctx context.Context) {
 			}
 		}
 		expired += len(runs)
-		if len(runs) < scheduledExecSweepBatch || !progressed {
+		if len(runs) < batch || !progressed {
 			break
 		}
 	}
 
 	for polled := 0; polled < budget && ctx.Err() == nil; {
-		runs, err := s.store.ClaimScheduledExecRunsForPoll(ctx, time.Now(), scheduledExecSweepInFlight, s.execRuns.ownedIDs())
+		runs, err := s.store.ClaimScheduledExecRunsForPoll(ctx, time.Now(), inFlight, s.execRuns.ownedIDs())
 		if err != nil {
 			slog.Warn("Scheduler: exec run sweep: claim failed", "error", err)
 			return
@@ -620,7 +638,7 @@ func (s *Server) sweepScheduledExecRuns(ctx context.Context) {
 		}
 		wg.Wait()
 		polled += len(runs)
-		if len(runs) < scheduledExecSweepInFlight {
+		if len(runs) < inFlight {
 			return
 		}
 	}
