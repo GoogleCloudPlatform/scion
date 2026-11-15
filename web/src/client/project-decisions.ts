@@ -219,7 +219,7 @@ export function isDecisionsSearchTimeoutError(err: unknown): boolean {
  * indicating that the Hub supports P1+ search and conversation/pending filters.
  */
 export function hasDecisionsSearchCapability(
-  res: Pick<ProjectPendingDecisionsResponse, 'conversations'> | null | undefined
+  res: { conversations?: ProjectDecisionConversationView[] | undefined } | null | undefined
 ): boolean {
   return Array.isArray(res?.conversations);
 }
