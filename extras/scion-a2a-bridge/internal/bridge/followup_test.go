@@ -203,7 +203,10 @@ func (m *mockHubClient) TestIdentities() hubclient.TestIdentityService      { re
 func (m *mockHubClient) TestIdentityDelegations() hubclient.TestIdentityDelegationService {
 	return nil
 }
-func (m *mockHubClient) AgentDelegations() hubclient.AgentDelegationService { return nil }
+func (m *mockHubClient) AgentDelegations() hubclient.AgentDelegationService       { return nil }
+func (m *mockHubClient) Decisions() hubclient.DecisionService                     { return nil }
+func (m *mockHubClient) ProjectDecisions(string) hubclient.ProjectDecisionService { return nil }
+func (m *mockHubClient) MyDecisions() hubclient.MyDecisionService                 { return nil }
 func (m *mockHubClient) Health(ctx context.Context) (*hubclient.HealthResponse, error) {
 	return &hubclient.HealthResponse{}, nil
 }

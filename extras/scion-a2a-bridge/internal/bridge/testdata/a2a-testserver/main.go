@@ -304,7 +304,10 @@ func (m *mockProdHubClient) AdminSettings() hubclient.AdminSettingsService      
 func (m *mockProdHubClient) TestIdentityDelegations() hubclient.TestIdentityDelegationService {
 	return nil
 }
-func (m *mockProdHubClient) AgentDelegations() hubclient.AgentDelegationService { return nil }
+func (m *mockProdHubClient) AgentDelegations() hubclient.AgentDelegationService       { return nil }
+func (m *mockProdHubClient) Decisions() hubclient.DecisionService                     { return nil }
+func (m *mockProdHubClient) ProjectDecisions(string) hubclient.ProjectDecisionService { return nil }
+func (m *mockProdHubClient) MyDecisions() hubclient.MyDecisionService                 { return nil }
 func (m *mockProdHubClient) Health(ctx context.Context) (*hubclient.HealthResponse, error) {
 	return &hubclient.HealthResponse{}, nil
 }
