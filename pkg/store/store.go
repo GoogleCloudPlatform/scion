@@ -2132,16 +2132,18 @@ type MessageHoldStore interface {
 	PrepareOrHoldMessage(ctx context.Context, agentID, messageID string, maxHeld int) (PrepareOrHoldResult, error)
 
 	// HoldMessageAwaitingSession atomically evaluates the hold preconditions
-	// for a broker awaiting_session report and, when all hold, moves the row
-	// from dispatched to awaiting_session with hold_until = COALESCE(hold_until,
-	// now + HoldTTL) (database clock) and creates or updates the agent's hold
+	// for a broker awaiting_session report and, when all hold, consumes and
+	// clears the single-use no_session proof stamp, moves the row from
+	// dispatched to awaiting_session with hold_until = COALESCE(hold_until,
+	// now + HoldTTL) (database clock), and creates or updates the agent's hold
 	// marker in the same transaction.
 	HoldMessageAwaitingSession(ctx context.Context, p HoldMessageParams) (bool, error)
 
 	// ClaimHeldMessages atomically claims up to limit unexpired rows in
 	// awaiting_session for agentID, ordered by (created, id), transitioning
-	// each claimed row to dispatched (keeping hold_until, hold_launch_id, and
-	// the proof stamp) and syncing or deleting the agent's hold marker in the
+	// each claimed row to dispatched (keeping hold_until and hold_launch_id;
+	// the single-use proof stamp was already consumed on entry to
+	// awaiting_session) and syncing or deleting the agent's hold marker in the
 	// same transaction. When an active re-drive lease is held on agentID's
 	// marker, only the lease owner (passed via WithRedriveLeaseOwner) may
 	// claim rows.

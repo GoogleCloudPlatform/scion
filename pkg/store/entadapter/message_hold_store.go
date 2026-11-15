@@ -276,7 +276,9 @@ func (s *BrokerDispatchStore) syncHoldMarkerAfterDirectFail(ctx context.Context,
 	}
 	_ = s.withHoldTx(ctx, func(c *ent.Client, now time.Time) error {
 		if agentUID, pErr := parseUUID(row.RecipientID); pErr == nil {
-			_, _ = lockAgentForHold(ctx, c, agentUID)
+			if _, err := lockAgentForHold(ctx, c, agentUID); err != nil {
+				return err
+			}
 		}
 		return syncAgentDeliveryHold(ctx, c, row.RecipientID, time.Time{}, "", now)
 	})
@@ -553,10 +555,14 @@ func (s *BrokerDispatchStore) ClaimHeldMessages(ctx context.Context, agentID str
 	if len(candidates) == 0 {
 		hasMarker, mErr := s.HasAgentDeliveryHold(ctx, agentID)
 		if mErr == nil && hasMarker {
-			_ = s.withHoldTx(ctx, func(c *ent.Client, now time.Time) error {
-				_, _ = lockAgentForHold(ctx, c, agentUID)
+			if err := s.withHoldTx(ctx, func(c *ent.Client, now time.Time) error {
+				if _, err := lockAgentForHold(ctx, c, agentUID); err != nil {
+					return err
+				}
 				return syncAgentDeliveryHold(ctx, c, agentID, time.Time{}, "", now)
-			})
+			}); err != nil {
+				return nil, err
+			}
 		}
 		return nil, nil
 	}
@@ -827,7 +833,9 @@ func (s *BrokerDispatchStore) ExpireHeldMessagesForAgent(ctx context.Context, ag
 	var expired []store.Message
 	err := s.withHoldTx(ctx, func(c *ent.Client, now time.Time) error {
 		if agentUID, pErr := parseUUID(agentID); pErr == nil {
-			_, _ = lockAgentForHold(ctx, c, agentUID)
+			if _, err := lockAgentForHold(ctx, c, agentUID); err != nil {
+				return err
+			}
 		}
 		candidates, err := c.Message.Query().
 			Where(
