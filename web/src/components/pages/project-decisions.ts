@@ -49,15 +49,23 @@ import type { AskerAnswerability, ChoiceAnsweredDetail } from '../../client/chat
 import { navigateTo, replaceSearch } from '../../client/navigation.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import {
+  buildDecisionsUrlSearch,
   fetchProjectMadeDecisions,
   fetchProjectPendingDecisions,
+  hasDecisionsSearchCapability,
+  isDecisionsSearchTimeoutError,
+  normalizeDecisionsSearchQuery,
+  parseDecisionsUrlState,
 } from '../../client/project-decisions.js';
 import type {
   MadeDecisionsFilter,
+  MadeDecisionsProvenanceFilter,
   ProjectDecisionActorView,
+  ProjectDecisionConversationView,
   ProjectDecisionCounts,
   ProjectDecisionLogEntryView,
   ProjectDecisionPromptView,
+  SharedDecisionsFilter,
 } from '../../client/project-decisions.js';
 import { stateManager } from '../../client/state.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
@@ -71,6 +79,13 @@ import {
   parseWallClock,
 } from '../../utils/time.js';
 import '../shared/chat/chat-choices.js';
+import { deepActiveElement } from '../shared/deep-active-element.js';
+import type {
+  DecisionsFilterPatch,
+  DecisionsSearchInputDetail,
+  ScionDecisionsFilterPanel,
+} from '../shared/decisions-filter-panel.js';
+import '../shared/decisions-filter-panel.js';
 import './not-found.js';
 
 interface ProjectSummary {
@@ -88,8 +103,24 @@ interface WaitingOnOthersItem {
 const AVATAR_PALETTE = ['#7c3aed', '#059669', '#0284c7', '#d97706', '#e11d48', '#4f46e5'] as const;
 const DEFAULT_DECISIONS_PAGE_SIZE = 50;
 const MAX_DECISIONS_PAGE_SIZE = 200;
+const SEARCH_DEBOUNCE_MS = 300;
 
 type DecisionsLoadMode = 'reset' | 'append' | 'live';
+
+const EDITABLE_TAG_NAMES = new Set([
+  'input',
+  'textarea',
+  'select',
+  'sl-input',
+  'sl-textarea',
+  'sl-select',
+]);
+
+function isEditableTarget(el: EventTarget | null): boolean {
+  if (!(el instanceof HTMLElement)) return false;
+  if (el.isContentEditable) return true;
+  return EDITABLE_TAG_NAMES.has(el.tagName.toLowerCase());
+}
 
 function nextCalendarDate(ymd: string): string {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd);
@@ -181,26 +212,33 @@ export class ScionPageProjectDecisions extends LitElement {
   @state() private error: string | null = null;
 
   @state() private counts: ProjectDecisionCounts = { waitingOnYou: 0, waitingOnOthers: 0 };
+  @state() private filteredCounts: ProjectDecisionCounts | null = null;
+  @state() private supportsSearch = false;
   @state() private pendingPrompts: ProjectDecisionPromptView[] = [];
   @state() private pendingNextCursor = '';
   @state() private pendingLoadingMore = false;
+  @state() private pendingSearchTimeout = false;
 
   @state() private madeLoaded = false;
   @state() private madeLoading = false;
   @state() private madeLoadingMore = false;
   @state() private madeError: string | null = null;
+  @state() private madeSearchTimeout = false;
   @state() private madeEntries: ProjectDecisionLogEntryView[] = [];
   @state() private madeNextCursor = '';
 
   @state() private facetsAgents: ProjectDecisionActorView[] = [];
   @state() private facetsAnswerers: ProjectDecisionActorView[] = [];
+  @state() private facetsConversations: ProjectDecisionConversationView[] = [];
 
+  @state() private filterQ = '';
+  @state() private searchDraft = '';
+  @state() private filterConversation = '';
   @state() private filterAgent = '';
   @state() private filterUser = '';
-  @state() private filterProvenance = '';
+  @state() private filterProvenance: MadeDecisionsProvenanceFilter = '';
   @state() private filterFrom = '';
   @state() private filterTo = '';
-  @state() private mobileFiltersOpen = false;
 
   private pendingGen = 0;
   private madeGen = 0;
@@ -208,11 +246,15 @@ export class ScionPageProjectDecisions extends LitElement {
   private madeAbort: AbortController | null = null;
   private userAbort: AbortController | null = null;
   private liveRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  private searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingResetInFlight = false;
   private pendingRefreshDeferred = false;
+  private pendingNeedsReset = false;
   private madePagedBeyondFirst = false;
   private madeRefreshDeferred = false;
   private madeStale = false;
+  private madeNeedsReset = false;
+  private facetsHydrated = false;
   private routeDecodeError = false;
   private booted = false;
 
@@ -471,33 +513,13 @@ export class ScionPageProjectDecisions extends LitElement {
       margin-top: 0.25rem;
     }
 
-    /* ---- Made toolbar & table (Mocks P3-3, P3-5) ---- */
-    .toolbar {
-      margin: 0.25rem 0 0.75rem;
-    }
-
-    .mobile-filters-row {
-      display: none;
-      align-items: center;
-      gap: 0.5rem;
-      margin-bottom: 0.5rem;
-    }
-
-    .mobile-filters-row sl-badge::part(base) {
-      font-size: 0.65rem;
-      margin-left: 0.35rem;
-    }
-
-    .filter-controls {
-      display: flex;
-      gap: 0.5rem;
-      flex-wrap: wrap;
-      align-items: flex-end;
-    }
-
-    .filter-controls sl-select,
-    .filter-controls sl-input {
-      min-width: 9.5rem;
+    /* ---- Made validation, timeout alert & table (Mocks P3-3, F-1, F-5) ---- */
+    sl-alert[data-search-timeout] {
+      display: block;
+      margin: 0.75rem 0;
+      --sl-panel-background-color: var(--scion-surface, #ffffff);
+      --sl-panel-border-color: var(--scion-border, #e2e8f0);
+      --sl-color-neutral-700: var(--scion-text, #1e293b);
     }
 
     .date-range-error {
@@ -615,24 +637,6 @@ export class ScionPageProjectDecisions extends LitElement {
         font-size: 1.2rem;
       }
 
-      .mobile-filters-row {
-        display: flex;
-      }
-
-      .filter-controls {
-        display: none;
-      }
-
-      .filter-controls.open {
-        display: flex;
-      }
-
-      .filter-controls sl-select,
-      .filter-controls sl-input {
-        min-width: calc(50% - 0.25rem);
-        flex: 1 1 8.5rem;
-      }
-
       table.log {
         display: none;
       }
@@ -699,12 +703,28 @@ export class ScionPageProjectDecisions extends LitElement {
     }
   };
 
+  private readonly boundOnKeydown = (e: KeyboardEvent): void => {
+    if (e.key !== '/' || e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (!this.enabled || !this.supportsSearch || this.initialLoading || this.error !== null) return;
+    if (isEditableTarget(deepActiveElement())) return;
+    for (const target of e.composedPath()) {
+      if (isEditableTarget(target)) return;
+    }
+    const panel = this.shadowRoot?.querySelector<ScionDecisionsFilterPanel>(
+      'scion-decisions-filter-panel'
+    );
+    if (!panel) return;
+    e.preventDefault();
+    void panel.expandAndFocusSearch();
+  };
+
   override connectedCallback(): void {
     super.connectedCallback();
     this.extractRouteState();
     this.enabled = projectDecisionsEnabled();
     window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFlagsChanged);
     window.addEventListener(DISPLAY_TIMEZONE_CHANGED_EVENT, this.boundOnTimezoneChanged);
+    window.addEventListener('keydown', this.boundOnKeydown);
     stateManager.addEventListener('choice-updated', this.boundOnChoiceUpdated);
     stateManager.addEventListener('chat-message-received', this.boundOnChatMessageReceived);
     void this.bootIfEnabled();
@@ -714,6 +734,7 @@ export class ScionPageProjectDecisions extends LitElement {
     super.disconnectedCallback();
     window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFlagsChanged);
     window.removeEventListener(DISPLAY_TIMEZONE_CHANGED_EVENT, this.boundOnTimezoneChanged);
+    window.removeEventListener('keydown', this.boundOnKeydown);
     stateManager.removeEventListener('choice-updated', this.boundOnChoiceUpdated);
     stateManager.removeEventListener('chat-message-received', this.boundOnChatMessageReceived);
     this.teardownActiveLoads();
@@ -723,6 +744,10 @@ export class ScionPageProjectDecisions extends LitElement {
     if (this.liveRefreshTimer !== null) {
       clearTimeout(this.liveRefreshTimer);
       this.liveRefreshTimer = null;
+    }
+    if (this.searchDebounceTimer !== null) {
+      clearTimeout(this.searchDebounceTimer);
+      this.searchDebounceTimer = null;
     }
     this.pendingResetInFlight = false;
     this.pendingLoadingMore = false;
@@ -759,8 +784,33 @@ export class ScionPageProjectDecisions extends LitElement {
       this.currentUserId = this.pageData.user.id;
     }
     const search = query ? `?${query}` : window.location.search;
-    const params = new URLSearchParams(search);
-    this.activeTab = params.get('tab') === 'made' ? 'made' : 'pending';
+    const parsed = parseDecisionsUrlState(search);
+    this.activeTab = parsed.tab;
+    this.filterQ = parsed.q;
+    this.searchDraft = parsed.q;
+    this.filterConversation = parsed.conversation;
+    this.filterAgent = parsed.agent;
+    this.filterUser = parsed.user;
+    this.filterProvenance = parsed.provenance;
+    this.filterFrom = parsed.from;
+    this.filterTo = parsed.to;
+  }
+
+  private syncUrlState(): void {
+    const nextQs = buildDecisionsUrlSearch({
+      tab: this.activeTab,
+      q: this.filterQ,
+      conversation: this.filterConversation,
+      agent: this.filterAgent,
+      user: this.filterUser,
+      provenance: this.filterProvenance,
+      from: this.filterFrom,
+      to: this.filterTo,
+    });
+    const curQs = window.location.search.replace(/^\?/, '');
+    if (nextQs !== curQs) {
+      replaceSearch(nextQs);
+    }
   }
 
   private async bootIfEnabled(): Promise<void> {
@@ -776,6 +826,7 @@ export class ScionPageProjectDecisions extends LitElement {
       this.initialLoading = false;
       return;
     }
+    this.syncUrlState();
     this.booted = true;
     this.initialLoading = true;
     this.error = null;
@@ -841,13 +892,32 @@ export class ScionPageProjectDecisions extends LitElement {
 
   private mergeFacets(
     agents: ProjectDecisionActorView[],
-    answerers: ProjectDecisionActorView[]
+    answerers: ProjectDecisionActorView[],
+    conversations?: ProjectDecisionConversationView[]
   ): void {
+    this.facetsHydrated = true;
     if (agents.length > 0 || this.facetsAgents.length === 0) {
       this.facetsAgents = agents;
     }
     if (answerers.length > 0 || this.facetsAnswerers.length === 0) {
       this.facetsAnswerers = answerers;
+    }
+    if (hasDecisionsSearchCapability({ conversations }) && conversations) {
+      this.supportsSearch = true;
+      if (conversations.length > 0 || this.facetsConversations.length === 0) {
+        this.facetsConversations = conversations;
+      }
+    } else if (!this.supportsSearch) {
+      const stripPendingAgent = this.activeTab === 'pending' && Boolean(this.filterAgent);
+      if (this.filterQ || this.filterConversation || stripPendingAgent) {
+        this.filterQ = '';
+        this.searchDraft = '';
+        this.filterConversation = '';
+        if (stripPendingAgent) {
+          this.filterAgent = '';
+        }
+        this.syncUrlState();
+      }
     }
   }
 
@@ -861,6 +931,33 @@ export class ScionPageProjectDecisions extends LitElement {
     );
   }
 
+  private currentSharedFilter(): SharedDecisionsFilter {
+    return {
+      q: this.filterQ,
+      conversation: this.filterConversation,
+      agent: this.filterAgent,
+    };
+  }
+
+  private get isPendingFiltered(): boolean {
+    if (!this.supportsSearch) return false;
+    return Boolean(
+      normalizeDecisionsSearchQuery(this.filterQ) || this.filterConversation || this.filterAgent
+    );
+  }
+
+  private get isMadeFiltered(): boolean {
+    return Boolean(
+      (this.supportsSearch &&
+        (normalizeDecisionsSearchQuery(this.filterQ) || this.filterConversation)) ||
+      this.filterAgent ||
+      this.filterUser ||
+      this.filterProvenance ||
+      this.filterFrom ||
+      this.filterTo
+    );
+  }
+
   private async loadPendingPage(opts: { mode: DecisionsLoadMode }): Promise<void> {
     if (!this.enabled || !this.projectId) return;
     if (opts.mode === 'live' && (this.pendingLoadingMore || this.pendingResetInFlight)) {
@@ -870,6 +967,7 @@ export class ScionPageProjectDecisions extends LitElement {
     if (opts.mode !== 'live') {
       this.pendingRefreshDeferred = false;
     }
+    this.pendingNeedsReset = false;
 
     const gen = ++this.pendingGen;
     this.pendingAbort?.abort();
@@ -887,6 +985,7 @@ export class ScionPageProjectDecisions extends LitElement {
 
     if (opts.mode === 'reset') {
       this.pendingResetInFlight = true;
+      this.pendingSearchTimeout = false;
     } else if (opts.mode === 'append') {
       this.pendingLoadingMore = true;
     }
@@ -895,10 +994,13 @@ export class ScionPageProjectDecisions extends LitElement {
       const res = await fetchProjectPendingDecisions(this.projectId, {
         cursor,
         limit,
+        filter: this.currentSharedFilter(),
         signal: ac.signal,
       });
       if (gen !== this.pendingGen || !this.isConnected) return;
       this.counts = res.counts;
+      this.filteredCounts = res.filteredCounts ?? null;
+      this.pendingSearchTimeout = false;
 
       if (opts.mode === 'reset') {
         this.pendingPrompts = res.prompts;
@@ -925,14 +1027,24 @@ export class ScionPageProjectDecisions extends LitElement {
         }
       }
 
-      this.mergeFacets(res.agents, res.answerers);
+      this.mergeFacets(res.agents, res.answerers, res.conversations);
       if (opts.mode !== 'live') {
         this.error = null;
       }
     } catch (err) {
       if (ac.signal.aborted || gen !== this.pendingGen || !this.isConnected) return;
       if (opts.mode !== 'live') {
-        this.error = err instanceof Error ? err.message : 'Failed to load decisions';
+        if (isDecisionsSearchTimeoutError(err)) {
+          this.supportsSearch = true;
+          this.pendingSearchTimeout = true;
+          this.error = null;
+          if (opts.mode === 'reset' && this.activeTab === 'pending' && !this.facetsHydrated) {
+            await this.hydrateFacetsAfterTimeout('pending', ac.signal, gen);
+          }
+        } else {
+          this.pendingSearchTimeout = false;
+          this.error = err instanceof Error ? err.message : 'Failed to load decisions';
+        }
       }
     } finally {
       if (gen === this.pendingGen) {
@@ -941,11 +1053,54 @@ export class ScionPageProjectDecisions extends LitElement {
         if (this.pendingAbort === ac) this.pendingAbort = null;
         if (this.pendingRefreshDeferred) {
           this.pendingRefreshDeferred = false;
-          if (this.isConnected && this.enabled && !this.error) {
+          if (
+            this.isConnected &&
+            this.enabled &&
+            !this.error &&
+            !this.pendingSearchTimeout &&
+            !this.pendingNeedsReset
+          ) {
             void this.loadPendingPage({ mode: 'live' });
           }
         }
       }
+    }
+  }
+
+  private async hydrateFacetsAfterTimeout(
+    tab: 'pending' | 'made',
+    signal: AbortSignal,
+    expectedGen: number
+  ): Promise<void> {
+    if (this.facetsHydrated || !this.isConnected || !this.enabled || !this.projectId) return;
+    try {
+      if (tab === 'pending') {
+        const res = await fetchProjectPendingDecisions(this.projectId, {
+          limit: 1,
+          filter: {
+            conversation: this.filterConversation,
+            agent: this.filterAgent,
+          },
+          signal,
+        });
+        if (signal.aborted || expectedGen !== this.pendingGen || !this.isConnected) return;
+        this.counts = res.counts;
+        this.mergeFacets(res.agents, res.answerers, res.conversations);
+      } else {
+        const res = await fetchProjectMadeDecisions(
+          this.projectId,
+          { ...this.currentMadeFilter(), q: '' },
+          {
+            limit: 1,
+            signal,
+          }
+        );
+        if (signal.aborted || expectedGen !== this.madeGen || !this.isConnected) return;
+        this.counts = res.counts;
+        this.mergeFacets(res.agents, res.answerers, res.conversations);
+      }
+    } catch {
+      // Best-effort facet hydration: preserve the SEARCH_TIMEOUT warning alert on fallback failure.
     }
   }
 
@@ -955,22 +1110,14 @@ export class ScionPageProjectDecisions extends LitElement {
 
   private currentMadeFilter(): MadeDecisionsFilter {
     return {
+      q: this.filterQ,
+      conversation: this.filterConversation,
       agent: this.filterAgent,
       user: this.filterUser,
       provenance: this.filterProvenance,
       from: dateBoundToIso(this.filterFrom, false),
       to: dateBoundToIso(this.filterTo, true),
     };
-  }
-
-  private get activeFilterCount(): number {
-    let n = 0;
-    if (this.filterAgent) n++;
-    if (this.filterUser) n++;
-    if (this.filterProvenance) n++;
-    if (this.filterFrom) n++;
-    if (this.filterTo) n++;
-    return n;
   }
 
   private async loadMadePage(opts: { mode: DecisionsLoadMode }): Promise<void> {
@@ -983,6 +1130,7 @@ export class ScionPageProjectDecisions extends LitElement {
       this.madeRefreshDeferred = false;
     }
     this.madeStale = false;
+    this.madeNeedsReset = false;
 
     const gen = ++this.madeGen;
     this.madeAbort?.abort();
@@ -995,6 +1143,7 @@ export class ScionPageProjectDecisions extends LitElement {
     if (opts.mode === 'reset') {
       this.madeLoading = true;
       this.madeError = null;
+      this.madeSearchTimeout = false;
     } else if (opts.mode === 'append') {
       this.madeLoadingMore = true;
       this.madeError = null;
@@ -1009,8 +1158,9 @@ export class ScionPageProjectDecisions extends LitElement {
       if (gen !== this.madeGen || !this.isConnected) return;
       this.counts = res.counts;
       this.madeLoaded = true;
-      this.mergeFacets(res.agents, res.answerers);
+      this.mergeFacets(res.agents, res.answerers, res.conversations);
       this.madeError = null;
+      this.madeSearchTimeout = false;
 
       if (opts.mode === 'reset') {
         this.madeEntries = res.entries;
@@ -1035,7 +1185,17 @@ export class ScionPageProjectDecisions extends LitElement {
     } catch (err) {
       if (ac.signal.aborted || gen !== this.madeGen || !this.isConnected) return;
       if (opts.mode !== 'live') {
-        this.madeError = err instanceof Error ? err.message : 'Failed to load decision log';
+        if (isDecisionsSearchTimeoutError(err)) {
+          this.supportsSearch = true;
+          this.madeSearchTimeout = true;
+          this.madeError = null;
+          if (opts.mode === 'reset' && this.activeTab === 'made' && !this.facetsHydrated) {
+            await this.hydrateFacetsAfterTimeout('made', ac.signal, gen);
+          }
+        } else {
+          this.madeSearchTimeout = false;
+          this.madeError = err instanceof Error ? err.message : 'Failed to load decision log';
+        }
       }
     } finally {
       if (gen === this.madeGen) {
@@ -1044,7 +1204,14 @@ export class ScionPageProjectDecisions extends LitElement {
         if (this.madeAbort === ac) this.madeAbort = null;
         if (this.madeRefreshDeferred) {
           this.madeRefreshDeferred = false;
-          if (this.isConnected && this.enabled && !this.hasDateRangeError && !this.madeError) {
+          if (
+            this.isConnected &&
+            this.enabled &&
+            !this.hasDateRangeError &&
+            !this.madeError &&
+            !this.madeSearchTimeout &&
+            !this.madeNeedsReset
+          ) {
             if (this.activeTab === 'made') {
               void this.loadMadePage({ mode: 'live' });
             } else if (this.madeLoaded) {
@@ -1102,6 +1269,12 @@ export class ScionPageProjectDecisions extends LitElement {
           ...this.counts,
           waitingOnYou: Math.max(0, this.counts.waitingOnYou + deltaWaitingOnYou),
         };
+        if (this.filteredCounts !== null) {
+          this.filteredCounts = {
+            ...this.filteredCounts,
+            waitingOnYou: Math.max(0, this.filteredCounts.waitingOnYou + deltaWaitingOnYou),
+          };
+        }
       }
     }
   }
@@ -1113,11 +1286,23 @@ export class ScionPageProjectDecisions extends LitElement {
     this.liveRefreshTimer = setTimeout(() => {
       this.liveRefreshTimer = null;
       if (!this.isConnected || !this.enabled || !this.projectId) return;
-      if (!this.error) {
-        void this.loadPendingPage({ mode: 'live' });
+      if (!this.error && !this.pendingSearchTimeout) {
+        if (this.pendingNeedsReset) {
+          if (this.activeTab === 'pending') {
+            this.pendingNextCursor = '';
+            void this.loadPendingPage({ mode: 'reset' });
+          }
+        } else {
+          void this.loadPendingPage({ mode: 'live' });
+        }
       }
       if (this.activeTab === 'made') {
-        if (!this.hasDateRangeError && (this.madeLoaded || this.madeLoading)) {
+        if (
+          !this.hasDateRangeError &&
+          !this.madeSearchTimeout &&
+          !this.madeNeedsReset &&
+          (this.madeLoaded || this.madeLoading)
+        ) {
           void this.loadMadePage({ mode: 'live' });
         }
       } else if (this.madeLoaded || this.madeLoading) {
@@ -1126,18 +1311,82 @@ export class ScionPageProjectDecisions extends LitElement {
     }, 60);
   }
 
+  private flushDebouncedSearchIfPending(): boolean {
+    if (this.searchDebounceTimer === null) return false;
+    clearTimeout(this.searchDebounceTimer);
+    this.searchDebounceTimer = null;
+    const nextQ = normalizeDecisionsSearchQuery(this.searchDraft);
+    if (nextQ !== this.filterQ) {
+      this.filterQ = nextQ;
+      return true;
+    }
+    return false;
+  }
+
+  private invalidateInFlightMadeLoad(): void {
+    this.madeNeedsReset = true;
+    this.madeSearchTimeout = false;
+    this.madeRefreshDeferred = false;
+    if (this.madeAbort || this.madeLoading || this.madeLoadingMore) {
+      ++this.madeGen;
+      this.madeAbort?.abort();
+      this.madeAbort = null;
+      this.madeLoading = false;
+      this.madeLoadingMore = false;
+    }
+  }
+
+  private invalidateInFlightPendingLoad(): void {
+    this.pendingNeedsReset = true;
+    this.pendingSearchTimeout = false;
+    this.pendingRefreshDeferred = false;
+    if (this.pendingAbort || this.pendingResetInFlight || this.pendingLoadingMore) {
+      ++this.pendingGen;
+      this.pendingAbort?.abort();
+      this.pendingAbort = null;
+      this.pendingResetInFlight = false;
+      this.pendingLoadingMore = false;
+    }
+  }
+
   private switchTab(next: 'pending' | 'made'): void {
     if (next !== 'pending' && next !== 'made') return;
     if (this.activeTab === next) return;
-    this.activeTab = next;
 
-    const params = new URLSearchParams(window.location.search);
-    if (next === 'made') {
-      params.set('tab', 'made');
-    } else {
-      params.delete('tab');
+    const flushedSearch = this.flushDebouncedSearchIfPending();
+    if (flushedSearch) {
+      if (next === 'pending') {
+        this.invalidateInFlightMadeLoad();
+        this.pendingNeedsReset = true;
+      } else {
+        this.invalidateInFlightPendingLoad();
+        this.madeNeedsReset = true;
+      }
     }
-    replaceSearch(params);
+
+    if (next === 'pending') {
+      const stripOldHubAgent = !this.supportsSearch && Boolean(this.filterAgent);
+      const hadMadeOnlyFilters = Boolean(
+        stripOldHubAgent ||
+        this.filterUser ||
+        this.filterProvenance ||
+        this.filterFrom ||
+        this.filterTo
+      );
+      if (hadMadeOnlyFilters) {
+        if (stripOldHubAgent) {
+          this.filterAgent = '';
+        }
+        this.filterUser = '';
+        this.filterProvenance = '';
+        this.filterFrom = '';
+        this.filterTo = '';
+        this.invalidateInFlightMadeLoad();
+      }
+    }
+
+    this.activeTab = next;
+    this.syncUrlState();
 
     const group = this.shadowRoot?.querySelector('sl-tab-group') as
       | (HTMLElement & { show?: (panel: string) => void })
@@ -1146,12 +1395,26 @@ export class ScionPageProjectDecisions extends LitElement {
       group.show(next);
     }
 
-    if (next === 'made' && !this.madeLoading && !this.hasDateRangeError) {
-      if (!this.madeLoaded) {
+    if (next === 'pending') {
+      if (this.pendingNeedsReset) {
+        this.pendingNextCursor = '';
+        void this.loadPendingPage({ mode: 'reset' });
+      }
+      return;
+    }
+
+    if (!this.hasDateRangeError) {
+      if (this.madeNeedsReset) {
+        this.madeNextCursor = '';
+        this.madePagedBeyondFirst = false;
         void this.loadMadePage({ mode: 'reset' });
-      } else if (this.madeStale) {
-        this.madeStale = false;
-        void this.loadMadePage({ mode: 'live' });
+      } else if (!this.madeLoading) {
+        if (!this.madeLoaded) {
+          void this.loadMadePage({ mode: 'reset' });
+        } else if (this.madeStale) {
+          this.madeStale = false;
+          void this.loadMadePage({ mode: 'live' });
+        }
       }
     }
   }
@@ -1190,38 +1453,147 @@ export class ScionPageProjectDecisions extends LitElement {
     navigateTo(`${base}#msg-${encodeURIComponent(targetMsgId)}`);
   }
 
-  private selectValueOf(e: Event): string {
-    const target = e.currentTarget as (HTMLElement & { value?: string }) | null;
-    const raw = (target?.value ?? '').trim();
-    return raw === 'all' ? '' : raw;
+  private onSearchInput(detail: DecisionsSearchInputDetail): void {
+    this.searchDraft = detail.value;
+    if (this.searchDebounceTimer !== null) {
+      clearTimeout(this.searchDebounceTimer);
+      this.searchDebounceTimer = null;
+    }
+
+    const commitSearch = (): void => {
+      const nextQ = normalizeDecisionsSearchQuery(this.searchDraft);
+      if (nextQ === this.filterQ && !this.pendingSearchTimeout && !this.madeSearchTimeout) {
+        return;
+      }
+      this.filterQ = nextQ;
+      this.onFiltersUpdated({ sharedChanged: true });
+    };
+
+    if (detail.immediate) {
+      commitSearch();
+      return;
+    }
+    this.searchDebounceTimer = setTimeout(() => {
+      this.searchDebounceTimer = null;
+      commitSearch();
+    }, SEARCH_DEBOUNCE_MS);
   }
 
-  private onFilterChanged(): void {
+  private applyFilterPatch(patch: DecisionsFilterPatch): void {
+    let sharedChanged = false;
+    let madeOnlyChanged = false;
+
+    if (patch.q !== undefined) {
+      if (this.searchDebounceTimer !== null) {
+        clearTimeout(this.searchDebounceTimer);
+        this.searchDebounceTimer = null;
+      }
+      const nextQ = normalizeDecisionsSearchQuery(patch.q);
+      this.searchDraft = nextQ;
+      if (nextQ !== this.filterQ) {
+        this.filterQ = nextQ;
+        sharedChanged = true;
+      }
+    }
+    if (patch.conversation !== undefined && patch.conversation !== this.filterConversation) {
+      this.filterConversation = patch.conversation;
+      sharedChanged = true;
+    }
+    if (patch.agent !== undefined && patch.agent !== this.filterAgent) {
+      this.filterAgent = patch.agent;
+      sharedChanged = true;
+    }
+    if (patch.user !== undefined && patch.user !== this.filterUser) {
+      this.filterUser = patch.user;
+      madeOnlyChanged = true;
+    }
+    if (patch.provenance !== undefined && patch.provenance !== this.filterProvenance) {
+      this.filterProvenance = patch.provenance;
+      madeOnlyChanged = true;
+    }
+    if (patch.from !== undefined && patch.from !== this.filterFrom) {
+      this.filterFrom = patch.from;
+      madeOnlyChanged = true;
+    }
+    if (patch.to !== undefined && patch.to !== this.filterTo) {
+      this.filterTo = patch.to;
+      madeOnlyChanged = true;
+    }
+
+    if (sharedChanged || madeOnlyChanged) {
+      this.onFiltersUpdated({ sharedChanged });
+    }
+  }
+
+  private onFiltersUpdated(opts: { sharedChanged: boolean }): void {
+    this.syncUrlState();
+
+    if (this.activeTab === 'pending') {
+      if (opts.sharedChanged) {
+        this.pendingNextCursor = '';
+        if (
+          this.madeLoaded ||
+          this.madeSearchTimeout ||
+          this.madeLoading ||
+          this.madeLoadingMore ||
+          this.madeAbort !== null
+        ) {
+          this.invalidateInFlightMadeLoad();
+        }
+        void this.loadPendingPage({ mode: 'reset' });
+      }
+      return;
+    }
+
+    if (opts.sharedChanged) {
+      this.invalidateInFlightPendingLoad();
+    }
     this.madeNextCursor = '';
     this.madePagedBeyondFirst = false;
     this.madeRefreshDeferred = false;
     if (this.hasDateRangeError) {
+      ++this.madeGen;
       this.madeAbort?.abort();
       this.madeAbort = null;
       this.madeLoading = false;
       this.madeLoadingMore = false;
       this.madeError = null;
+      this.madeSearchTimeout = false;
       return;
     }
     void this.loadMadePage({ mode: 'reset' });
   }
 
   private clearFilters(): void {
+    if (this.searchDebounceTimer !== null) {
+      clearTimeout(this.searchDebounceTimer);
+      this.searchDebounceTimer = null;
+    }
+    const hadShared = Boolean(
+      this.filterQ || this.searchDraft || this.filterConversation || this.filterAgent
+    );
+    const hadMadeOnly = Boolean(
+      this.filterUser || this.filterProvenance || this.filterFrom || this.filterTo
+    );
+    this.filterQ = '';
+    this.searchDraft = '';
+    this.filterConversation = '';
     this.filterAgent = '';
     this.filterUser = '';
     this.filterProvenance = '';
     this.filterFrom = '';
     this.filterTo = '';
-    this.onFilterChanged();
+    if (!hadShared && !hadMadeOnly && !this.pendingSearchTimeout && !this.madeSearchTimeout) {
+      return;
+    }
+    this.onFiltersUpdated({
+      sharedChanged: hadShared || this.pendingSearchTimeout || this.madeSearchTimeout,
+    });
   }
 
   private retryAll(): void {
     this.booted = false;
+    this.facetsHydrated = false;
     void this.bootIfEnabled();
   }
 
@@ -1271,6 +1643,80 @@ export class ScionPageProjectDecisions extends LitElement {
     return items;
   }
 
+  private renderFilterPanel(): TemplateResult {
+    return html`
+      <scion-decisions-filter-panel
+        scope="project"
+        .supportsSearch=${this.supportsSearch}
+        .tab=${this.activeTab}
+        .q=${this.filterQ}
+        .searchText=${this.searchDraft}
+        .conversation=${this.filterConversation}
+        .agent=${this.filterAgent}
+        .user=${this.filterUser}
+        .provenance=${this.filterProvenance}
+        .from=${this.filterFrom}
+        .to=${this.filterTo}
+        .currentUserId=${this.currentUserId}
+        .conversations=${this.facetsConversations}
+        .agents=${this.facetsAgents}
+        .answerers=${this.facetsAnswerers}
+        @decisions-search-input=${(e: CustomEvent<DecisionsSearchInputDetail>): void =>
+          this.onSearchInput(e.detail)}
+        @decisions-filter-change=${(e: CustomEvent<DecisionsFilterPatch>): void =>
+          this.applyFilterPatch(e.detail)}
+        @decisions-filters-clear=${(): void => this.clearFilters()}
+      ></scion-decisions-filter-panel>
+    `;
+  }
+
+  private renderSearchTimeoutAlert(): TemplateResult {
+    return html`
+      <sl-alert variant="warning" open data-search-timeout>
+        <sl-icon slot="icon" name="hourglass-split"></sl-icon>
+        Search took too long; narrow it with a conversation, agent, or date filter.
+      </sl-alert>
+    `;
+  }
+
+  private renderNoMatchState(tab: 'pending' | 'made'): TemplateResult {
+    return html`
+      <div class="empty" data-no-match=${tab}>
+        <sl-icon name="search"></sl-icon>
+        <p><b>No decisions match these filters</b></p>
+        <p>
+          <sl-button
+            size="small"
+            variant="text"
+            data-clear-filters
+            @click=${(): void => this.clearFilters()}
+          >
+            Clear filters
+          </sl-button>
+        </p>
+      </div>
+    `;
+  }
+
+  private renderWaitingTabBadge(): TemplateResult | typeof nothing {
+    if (
+      this.activeTab === 'pending' &&
+      this.isPendingFiltered &&
+      this.filteredCounts !== null &&
+      (this.counts.waitingOnYou > 0 || this.filteredCounts.waitingOnYou > 0)
+    ) {
+      return html`<sl-badge variant="primary" pill data-waiting-badge
+        >${this.filteredCounts.waitingOnYou} of ${this.counts.waitingOnYou}</sl-badge
+      >`;
+    }
+    if (this.counts.waitingOnYou > 0) {
+      return html`<sl-badge variant="primary" pill data-waiting-badge
+        >${this.counts.waitingOnYou}</sl-badge
+      >`;
+    }
+    return nothing;
+  }
+
   override render(): TemplateResult {
     if (!this.enabled) {
       return html`<scion-page-404 .pageData=${this.pageData}></scion-page-404>`;
@@ -1291,7 +1737,7 @@ export class ScionPageProjectDecisions extends LitElement {
           <sl-icon name="exclamation-triangle"></sl-icon>
           <h2>Failed to Load Decisions</h2>
           <div class="error-details">${this.error}</div>
-          <sl-button variant="primary" data-retry-pending @click=${() => this.retryAll()}>
+          <sl-button variant="primary" data-retry-pending @click=${(): void => this.retryAll()}>
             <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
             Retry
           </sl-button>
@@ -1313,37 +1759,34 @@ export class ScionPageProjectDecisions extends LitElement {
       <div class="ph">
         <h1>Decisions</h1>
       </div>
-      <p class="sub">Choices agents asked in this project's conversations you can read.</p>
+      <p class="sub">Decisions agents asked in this project's conversations you can read.</p>
 
-      <sl-tab-group @sl-tab-show=${(e: Event) => this.onTabShow(e)}>
+      <sl-tab-group @sl-tab-show=${(e: Event): void => this.onTabShow(e)}>
         <sl-tab
           slot="nav"
           panel="pending"
           data-tab="pending"
           ?active=${this.activeTab === 'pending'}
-          @click=${() => this.switchTab('pending')}
+          @click=${(): void => this.switchTab('pending')}
         >
-          Waiting on you
-          ${this.counts.waitingOnYou > 0
-            ? html`<sl-badge variant="primary" pill data-waiting-badge
-                >${this.counts.waitingOnYou}</sl-badge
-              >`
-            : nothing}
+          Waiting on you ${this.renderWaitingTabBadge()}
         </sl-tab>
         <sl-tab
           slot="nav"
           panel="made"
           data-tab="made"
           ?active=${this.activeTab === 'made'}
-          @click=${() => this.switchTab('made')}
+          @click=${(): void => this.switchTab('made')}
         >
           Made
         </sl-tab>
 
         <sl-tab-panel name="pending" ?active=${this.activeTab === 'pending'}>
+          ${this.activeTab === 'pending' ? this.renderFilterPanel() : nothing}
           ${this.renderPendingPanel()}
         </sl-tab-panel>
         <sl-tab-panel name="made" ?active=${this.activeTab === 'made'}>
+          ${this.activeTab === 'made' ? this.renderFilterPanel() : nothing}
           ${this.renderMadePanel()}
         </sl-tab-panel>
       </sl-tab-group>
@@ -1353,29 +1796,45 @@ export class ScionPageProjectDecisions extends LitElement {
   private renderPendingPanel(): TemplateResult {
     const waitingPrompts = this.pendingPrompts.filter((p) => p.waitingOnYou);
     const othersItems = this.waitingOnOthersItems();
-    const othersCount = Math.max(this.counts.waitingOnOthers, othersItems.length);
+    const isFiltered = this.isPendingFiltered;
+    const othersSummary =
+      isFiltered && this.filteredCounts !== null
+        ? `Waiting on others (${this.filteredCounts.waitingOnOthers} of ${this.counts.waitingOnOthers})`
+        : `Waiting on others (${Math.max(this.counts.waitingOnOthers, othersItems.length)})`;
+    const showOthersSection =
+      othersItems.length > 0 ||
+      (isFiltered &&
+        this.filteredCounts !== null &&
+        waitingPrompts.length > 0 &&
+        this.counts.waitingOnOthers > 0);
+
+    if (this.pendingSearchTimeout) {
+      return this.renderSearchTimeoutAlert();
+    }
 
     return html`
       ${waitingPrompts.length === 0
-        ? html`
-            <div class="empty" data-empty="pending">
-              <sl-icon name="check2-circle"></sl-icon>
-              <p><b>Nothing is waiting on you</b></p>
-              <p>
-                When an agent asks you to choose, it shows up here.
-                <a
-                  class="linkish"
-                  href="?tab=made"
-                  data-see-made
-                  @click=${(e: Event) => {
-                    e.preventDefault();
-                    this.switchTab('made');
-                  }}
-                  >See decisions made</a
-                >
-              </p>
-            </div>
-          `
+        ? isFiltered
+          ? this.renderNoMatchState('pending')
+          : html`
+              <div class="empty" data-empty="pending">
+                <sl-icon name="check2-circle"></sl-icon>
+                <p><b>Nothing is waiting on you</b></p>
+                <p>
+                  When an agent asks you to choose, it shows up here.
+                  <a
+                    class="linkish"
+                    href="?tab=made"
+                    data-see-made
+                    @click=${(e: Event): void => {
+                      e.preventDefault();
+                      this.switchTab('made');
+                    }}
+                    >See decisions made</a
+                  >
+                </p>
+              </div>
+            `
         : repeat(
             waitingPrompts,
             (p) => p.promptMessageId,
@@ -1389,20 +1848,16 @@ export class ScionPageProjectDecisions extends LitElement {
                 data-load-more="pending"
                 ?loading=${this.pendingLoadingMore}
                 ?disabled=${this.pendingLoadingMore}
-                @click=${() => void this.loadPendingPage({ mode: 'append' })}
+                @click=${(): void => void this.loadPendingPage({ mode: 'append' })}
               >
                 Load more
               </sl-button>
             </div>
           `
         : nothing}
-      ${othersItems.length > 0
+      ${showOthersSection
         ? html`
-            <sl-details
-              class="others"
-              data-waiting-others
-              summary=${`Waiting on others (${othersCount})`}
-            >
+            <sl-details class="others" data-waiting-others summary=${othersSummary}>
               <div class="mlist">
                 ${repeat(
                   othersItems,
@@ -1429,11 +1884,12 @@ export class ScionPageProjectDecisions extends LitElement {
       <div
         class="pcard"
         data-prompt-card=${p.promptMessageId}
-        @choice-answered=${(e: CustomEvent<ChoiceAnsweredDetail>) =>
+        @choice-answered=${(e: CustomEvent<ChoiceAnsweredDetail>): void =>
           this.onPromptChoiceAnswered(p, e)}
-        @scroll-to-message=${(e: CustomEvent<{ messageId?: string }>) =>
+        @scroll-to-message=${(e: CustomEvent<{ messageId?: string }>): void =>
           this.onPromptMessageJump(p, e)}
-        @choice-jump=${(e: CustomEvent<{ messageId?: string }>) => this.onPromptMessageJump(p, e)}
+        @choice-jump=${(e: CustomEvent<{ messageId?: string }>): void =>
+          this.onPromptMessageJump(p, e)}
       >
         <div class="pcard-head">
           <span
@@ -1520,122 +1976,9 @@ export class ScionPageProjectDecisions extends LitElement {
   }
 
   private renderMadePanel(): TemplateResult {
-    const filterCount = this.activeFilterCount;
+    const isFiltered = this.isMadeFiltered;
 
     return html`
-      <div class="toolbar">
-        <div class="mobile-filters-row">
-          <sl-button
-            size="small"
-            data-mobile-filters-toggle
-            aria-expanded=${this.mobileFiltersOpen ? 'true' : 'false'}
-            aria-controls="made-filters-bar"
-            @click=${() => {
-              this.mobileFiltersOpen = !this.mobileFiltersOpen;
-            }}
-          >
-            <sl-icon slot="prefix" name="funnel"></sl-icon>
-            Filters
-            ${filterCount > 0
-              ? html`<sl-badge variant="primary" pill>${filterCount}</sl-badge>`
-              : nothing}
-          </sl-button>
-          ${filterCount > 0
-            ? html`<sl-button size="small" variant="text" @click=${() => this.clearFilters()}
-                >Clear</sl-button
-              >`
-            : nothing}
-        </div>
-
-        <div id="made-filters-bar" class="filter-controls ${this.mobileFiltersOpen ? 'open' : ''}">
-          <sl-select
-            size="small"
-            label="Agent"
-            data-filter="agent"
-            .value=${this.filterAgent || 'all'}
-            @sl-change=${(e: Event) => {
-              this.filterAgent = this.selectValueOf(e);
-              this.onFilterChanged();
-            }}
-          >
-            <sl-option value="all">All agents</sl-option>
-            ${this.facetsAgents.map((a) => html`<sl-option value=${a.id}>${a.name}</sl-option>`)}
-          </sl-select>
-
-          <sl-select
-            size="small"
-            label="Answered by"
-            data-filter="user"
-            .value=${this.filterUser || 'all'}
-            @sl-change=${(e: Event) => {
-              this.filterUser = this.selectValueOf(e);
-              this.onFilterChanged();
-            }}
-          >
-            <sl-option value="all">Anyone</sl-option>
-            ${this.currentUserId
-              ? html`<sl-option value=${this.currentUserId}>You</sl-option>`
-              : nothing}
-            ${this.facetsAnswerers
-              .filter((u) => u.id && u.id !== this.currentUserId)
-              .map((u) => html`<sl-option value=${u.id}>${u.name}</sl-option>`)}
-          </sl-select>
-
-          <sl-select
-            size="small"
-            label="Provenance"
-            data-filter="provenance"
-            .value=${this.filterProvenance || 'all'}
-            @sl-change=${(e: Event) => {
-              this.filterProvenance = this.selectValueOf(e);
-              this.onFilterChanged();
-            }}
-          >
-            <sl-option value="all">Any</sl-option>
-            <sl-option value="direct">Direct</sl-option>
-            <sl-option value="interpreted">Interpreted</sl-option>
-            <sl-option value="confirmed">Confirmed</sl-option>
-            <sl-option value="overridden">Changed</sl-option>
-          </sl-select>
-
-          <sl-input
-            size="small"
-            type="date"
-            label="From"
-            data-filter="from"
-            .value=${this.filterFrom}
-            @sl-change=${(e: Event) => {
-              this.filterFrom = (
-                (e.currentTarget as { value?: string } | null)?.value ?? ''
-              ).trim();
-              this.onFilterChanged();
-            }}
-          ></sl-input>
-
-          <sl-input
-            size="small"
-            type="date"
-            label="To"
-            data-filter="to"
-            .value=${this.filterTo}
-            @sl-change=${(e: Event) => {
-              this.filterTo = ((e.currentTarget as { value?: string } | null)?.value ?? '').trim();
-              this.onFilterChanged();
-            }}
-          ></sl-input>
-
-          ${filterCount > 0
-            ? html`<sl-button
-                size="small"
-                variant="text"
-                data-clear-filters
-                @click=${() => this.clearFilters()}
-                >Clear filters</sl-button
-              >`
-            : nothing}
-        </div>
-      </div>
-
       ${this.hasDateRangeError
         ? html`
             <div class="date-range-error" role="alert" data-date-range-error>
@@ -1651,86 +1994,88 @@ export class ScionPageProjectDecisions extends LitElement {
               <p>Loading decision log...</p>
             </div>
           `
-        : this.madeError
-          ? html`
-              <div class="error-state">
-                <sl-icon name="exclamation-triangle"></sl-icon>
-                <h2>Failed to Load Decision Log</h2>
-                <div class="error-details">${this.madeError}</div>
-                <sl-button
-                  variant="primary"
-                  data-retry-made
-                  @click=${() => void this.loadMadePage({ mode: 'reset' })}
-                >
-                  Retry
-                </sl-button>
-              </div>
-            `
-          : this.madeEntries.length === 0
+        : this.madeSearchTimeout
+          ? this.renderSearchTimeoutAlert()
+          : this.madeError
             ? html`
-                <div class="empty" data-empty="made">
-                  <sl-icon name="journal-text"></sl-icon>
-                  <p>
-                    <b
-                      >${filterCount > 0
-                        ? 'No decisions match the current filters'
-                        : 'No decisions recorded yet'}</b
-                    >
-                  </p>
-                  <p>
-                    ${filterCount > 0
-                      ? 'Try adjusting or clearing the filters above.'
-                      : "Answers to agents' choices in this project's conversations appear here."}
-                  </p>
+                <div class="error-state">
+                  <sl-icon name="exclamation-triangle"></sl-icon>
+                  <h2>Failed to Load Decision Log</h2>
+                  <div class="error-details">${this.madeError}</div>
+                  <sl-button
+                    variant="primary"
+                    data-retry-made
+                    @click=${(): void => void this.loadMadePage({ mode: 'reset' })}
+                  >
+                    Retry
+                  </sl-button>
                 </div>
               `
-            : html`
-                <table class="log" data-made-table>
-                  <thead>
-                    <tr>
-                      <th>When</th>
-                      <th>Decision</th>
-                      <th>Question</th>
-                      <th>Answer</th>
-                      <th>Answered by</th>
-                      <th>Provenance</th>
-                      <th>Surface</th>
-                      <th>Agent · where</th>
-                    </tr>
-                  </thead>
-                  <tbody>
+            : this.madeEntries.length === 0
+              ? isFiltered
+                ? this.renderNoMatchState('made')
+                : html`
+                    <div class="empty" data-empty="made">
+                      <sl-icon name="journal-text"></sl-icon>
+                      <p><b>No decisions recorded yet</b></p>
+                      <p>
+                        Answers to agents' decisions in this project's conversations appear here.
+                      </p>
+                    </div>
+                  `
+              : html`
+                  <table class="log" data-made-table>
+                    <thead>
+                      <tr>
+                        <th>When</th>
+                        <th>Decision</th>
+                        <th>Question</th>
+                        <th>Answer</th>
+                        <th>Answered by</th>
+                        <th>Provenance</th>
+                        <th>Surface</th>
+                        <th>Agent · where</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${repeat(
+                        this.madeEntries,
+                        (e) => e.answerId,
+                        (e) => this.renderMadeRow(e)
+                      )}
+                    </tbody>
+                  </table>
+
+                  <div class="mlist made-mobile-list" data-made-mobile-list>
                     ${repeat(
                       this.madeEntries,
                       (e) => e.answerId,
-                      (e) => this.renderMadeRow(e)
+                      (e) => this.renderMadeMobileItem(e)
                     )}
-                  </tbody>
-                </table>
+                  </div>
 
-                <div class="mlist made-mobile-list" data-made-mobile-list>
-                  ${repeat(
-                    this.madeEntries,
-                    (e) => e.answerId,
-                    (e) => this.renderMadeMobileItem(e)
-                  )}
-                </div>
-
-                ${this.madeNextCursor
-                  ? html`
-                      <div class="more">
-                        <sl-button
-                          size="small"
-                          data-load-more="made"
-                          ?loading=${this.madeLoadingMore}
-                          ?disabled=${this.madeLoadingMore}
-                          @click=${() => void this.loadMadePage({ mode: 'append' })}
-                        >
-                          Load more
-                        </sl-button>
-                      </div>
-                    `
-                  : nothing}
-              `}
+                  ${this.madeNextCursor
+                    ? html`
+                        <div class="more">
+                          <sl-button
+                            size="small"
+                            data-load-more="made"
+                            ?loading=${this.madeLoadingMore}
+                            ?disabled=${this.madeLoadingMore}
+                            @click=${(): void => void this.loadMadePage({ mode: 'append' })}
+                          >
+                            Load more
+                          </sl-button>
+                        </div>
+                      `
+                    : isFiltered
+                      ? html`<div class="more">
+                          <span class="muted" style="font-size: 0.8rem"
+                            >End of matching decisions</span
+                          >
+                        </div>`
+                      : nothing}
+                `}
     `;
   }
 

@@ -70,6 +70,8 @@ function jsonResponse(body: unknown, status = 200): Promise<Response> {
 await import('./project-decisions.js');
 type ScionPageProjectDecisions = import('./project-decisions.js').ScionPageProjectDecisions;
 type ScionChatChoices = import('../shared/chat/chat-choices.js').ScionChatChoices;
+type ScionDecisionsFilterPanel =
+  import('../shared/decisions-filter-panel.js').ScionDecisionsFilterPanel;
 
 function makeDecision(over: Partial<DecisionView> = {}): DecisionView {
   return {
@@ -146,6 +148,10 @@ function makeLogEntry(
 async function settle(el: ScionPageProjectDecisions, ms = 15): Promise<void> {
   await new Promise((r) => setTimeout(r, ms));
   await el.updateComplete;
+  const panel = el.shadowRoot?.querySelector<ScionDecisionsFilterPanel>(
+    'scion-decisions-filter-panel'
+  );
+  await panel?.updateComplete;
   for (const card of Array.from(
     el.shadowRoot?.querySelectorAll<ScionChatChoices>('scion-chat-choices') ?? []
   )) {
@@ -153,6 +159,15 @@ async function settle(el: ScionPageProjectDecisions, ms = 15): Promise<void> {
   }
   await new Promise((r) => setTimeout(r, 0));
   await el.updateComplete;
+  await panel?.updateComplete;
+}
+
+function panelRootOf(el: ScionPageProjectDecisions): ShadowRoot {
+  const panel = el.shadowRoot?.querySelector<ScionDecisionsFilterPanel>(
+    'scion-decisions-filter-panel'
+  );
+  if (!panel?.shadowRoot) throw new Error('expected <scion-decisions-filter-panel> shadowRoot');
+  return panel.shadowRoot;
 }
 
 describe('<scion-page-project-decisions>', () => {
@@ -175,6 +190,7 @@ describe('<scion-page-project-decisions>', () => {
 
   beforeEach(() => {
     delete window.__SCION_FEATURES__;
+    window.localStorage.removeItem('scion:decisions:filters-open');
     resetServerFlagStateForTests();
     setPreferredTimeZone('UTC');
     window.history.replaceState({}, '', '/projects/p-1/decisions');
@@ -191,6 +207,7 @@ describe('<scion-page-project-decisions>', () => {
         prompts: [makePrompt()],
         agents: [{ id: 'a-rel', name: 'release-bot' }],
         answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
       },
     ];
     madeResponses = [
@@ -202,6 +219,7 @@ describe('<scion-page-project-decisions>', () => {
           { id: 'u-me', name: 'Alice' },
           { id: 'u-bob', name: 'Bob' },
         ],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
       },
     ];
     answerResponseFn = (_url, body) => {
@@ -597,6 +615,7 @@ describe('<scion-page-project-decisions>', () => {
           { id: 'u-me', name: 'Alice' },
           { id: 'u-bob', name: 'Bob' },
         ],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
         nextCursor: 'cur-page-2',
       },
       {
@@ -607,12 +626,14 @@ describe('<scion-page-project-decisions>', () => {
           { id: 'u-me', name: 'Alice' },
           { id: 'u-bob', name: 'Bob' },
         ],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
       },
       {
         counts: { waitingOnYou: 1, waitingOnOthers: 0 },
         entries: [],
         agents: [{ id: 'a-rel', name: 'release-bot' }],
         answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
       },
     ];
 
@@ -662,14 +683,18 @@ describe('<scion-page-project-decisions>', () => {
     expect(root.querySelector('[data-load-more="made"]')).toBeNull();
 
     // Filter changes combine & reset cursor
-    const agentSelect = root.querySelector<HTMLElement & { value?: string }>(
-      '[data-filter="agent"]'
-    )!;
-    agentSelect.value = 'a-rel';
-    agentSelect.dispatchEvent(new CustomEvent('sl-change'));
+    const pRoot = panelRootOf(el);
+    const agentCombobox = pRoot.querySelector<HTMLElement>('[data-filter="agent"]')!;
+    agentCombobox.dispatchEvent(
+      new CustomEvent('facet-change', {
+        detail: { value: 'a-rel', label: 'release-bot' },
+        bubbles: true,
+        composed: true,
+      })
+    );
     await settle(el, 25);
 
-    const provSelect = root.querySelector<HTMLElement & { value?: string }>(
+    const provSelect = pRoot.querySelector<HTMLElement & { value?: string }>(
       '[data-filter="provenance"]'
     )!;
     provSelect.value = 'confirmed';
@@ -680,8 +705,8 @@ describe('<scion-page-project-decisions>', () => {
     expect(lastMadeUrl).toBe(
       '/api/v1/projects/p-1/decisions?tab=made&agent=a-rel&provenance=confirmed'
     );
-    expect(root.querySelector('[data-empty="made"]')?.textContent).toContain(
-      'No decisions match the current filters'
+    expect(root.querySelector('[data-no-match="made"]')?.textContent).toContain(
+      'No decisions match these filters'
     );
   });
 
@@ -941,7 +966,7 @@ describe('<scion-page-project-decisions>', () => {
     let resolveLoadMore!: (res: Response) => void;
     let pendingCall = 0;
 
-    pendingHandler = (url, init) => {
+    pendingHandler = (url, init): Promise<Response> => {
       pendingCall++;
       const cursor = url.searchParams.get('cursor');
       if (pendingCall === 1) {
@@ -1017,9 +1042,12 @@ describe('<scion-page-project-decisions>', () => {
 
     const el = await mount({ path: '/projects/p-1/decisions?tab=made' });
     const root = el.shadowRoot!;
+    const pRoot = panelRootOf(el);
 
-    const fromInput = root.querySelector<HTMLElement & { value?: string }>('[data-filter="from"]')!;
-    const toInput = root.querySelector<HTMLElement & { value?: string }>('[data-filter="to"]')!;
+    const fromInput = pRoot.querySelector<HTMLElement & { value?: string }>(
+      '[data-filter="from"]'
+    )!;
+    const toInput = pRoot.querySelector<HTMLElement & { value?: string }>('[data-filter="to"]')!;
 
     fromInput.value = '2026-11-13';
     fromInput.dispatchEvent(new CustomEvent('sl-change'));
@@ -1046,7 +1074,7 @@ describe('<scion-page-project-decisions>', () => {
     expect(rangeErr?.textContent).toContain('Start date must be on or before end date.');
 
     // Clear filters recovers cleanly
-    root.querySelector<HTMLElement>('[data-clear-filters]')!.click();
+    pRoot.querySelector<HTMLElement>('[data-clear-filters]')!.click();
     await settle(el, 25);
 
     expect(root.querySelector('[data-date-range-error]')).toBeNull();
@@ -1054,42 +1082,56 @@ describe('<scion-page-project-decisions>', () => {
     expect(recoveredUrl).toBe('/api/v1/projects/p-1/decisions?tab=made');
   });
 
-  it('drives all 5 Made UI filter controls into a combined query and resets all 5 on Clear filters', async () => {
+  it('drives all Made UI filter controls into a combined query and resets all on Clear filters', async () => {
     enableBothFlags();
     setPreferredTimeZone('UTC');
 
     const el = await mount({ path: '/projects/p-1/decisions?tab=made' });
-    const root = el.shadowRoot!;
+    const pRoot = panelRootOf(el);
 
-    const setControl = async (selector: string, val: string): Promise<void> => {
-      const ctrl = root.querySelector<HTMLElement & { value?: string }>(selector)!;
+    const setSelectOrDate = async (selector: string, val: string): Promise<void> => {
+      const ctrl = pRoot.querySelector<HTMLElement & { value?: string }>(selector)!;
       ctrl.value = val;
       ctrl.dispatchEvent(new CustomEvent('sl-change'));
       await settle(el, 15);
     };
 
-    await setControl('[data-filter="agent"]', 'a-rel');
-    await setControl('[data-filter="user"]', 'u-bob');
-    await setControl('[data-filter="provenance"]', 'interpreted');
-    await setControl('[data-filter="from"]', '2026-11-01');
-    await setControl('[data-filter="to"]', '2026-11-13');
+    const setCombobox = async (selector: string, val: string, label: string): Promise<void> => {
+      const ctrl = pRoot.querySelector<HTMLElement>(selector)!;
+      ctrl.dispatchEvent(
+        new CustomEvent('facet-change', {
+          detail: { value: val, label },
+          bubbles: true,
+          composed: true,
+        })
+      );
+      await settle(el, 15);
+    };
+
+    await setCombobox('[data-filter="conversation"]', 'topic-release', '#release');
+    await setCombobox('[data-filter="agent"]', 'a-rel', 'release-bot');
+    await setSelectOrDate('[data-filter="user"]', 'u-bob');
+    await setSelectOrDate('[data-filter="provenance"]', 'interpreted');
+    await setSelectOrDate('[data-filter="from"]', '2026-11-01');
+    await setSelectOrDate('[data-filter="to"]', '2026-11-13');
 
     const combinedUrl = [...requests].reverse().find((r) => r.url.includes('tab=made'))!.url;
     const parsed = new URL(combinedUrl, 'http://localhost');
     expect(parsed.searchParams.get('tab')).toBe('made');
+    expect(parsed.searchParams.get('conversation')).toBe('topic-release');
     expect(parsed.searchParams.get('agent')).toBe('a-rel');
     expect(parsed.searchParams.get('user')).toBe('u-bob');
     expect(parsed.searchParams.get('provenance')).toBe('interpreted');
     expect(parsed.searchParams.get('from')).toBe('2026-11-01T00:00:00.000Z');
     expect(parsed.searchParams.get('to')).toBe('2026-11-13T23:59:59.999Z');
 
-    // Click Clear filters and verify all 5 params are cleared
-    root.querySelector<HTMLElement>('[data-clear-filters]')!.click();
+    // Click Clear in panel summary and verify all params are cleared
+    pRoot.querySelector<HTMLElement>('[data-clear-filters]')!.click();
     await settle(el, 25);
 
     const resetUrl = [...requests].reverse().find((r) => r.url.includes('tab=made'))!.url;
     expect(resetUrl).toBe('/api/v1/projects/p-1/decisions?tab=made');
-    expect(root.querySelector('[data-clear-filters]')).toBeNull();
+    expect(pRoot.querySelector('[data-clear-filters]')).toBeNull();
   });
 
   it('preserves the exact <scion-chat-choices> DOM element for surviving cards via keyed repeat()', async () => {
@@ -1320,11 +1362,13 @@ describe('<scion-page-project-decisions>', () => {
         ],
         agents: [],
         answerers: [],
+        conversations: [],
       },
     ];
 
     const el = await mount({ path: '/projects/p-1/decisions?tab=made' });
     const root = el.shadowRoot!;
+    const panel = panelRootOf(el);
 
     // Avatar decorative initial is aria-hidden="true"
     const avatar = root.querySelector('[data-prompt-card="m-self"] .avatar')!;
@@ -1338,11 +1382,11 @@ describe('<scion-page-project-decisions>', () => {
     expect(customRowText).toContain('not answerable by you');
     expect(customRowText).not.toContain('unexpected_backend_code');
 
-    // Mobile Filters button exposes aria-expanded and aria-controls="made-filters-bar"
-    const filtersToggle = root.querySelector<HTMLElement>('[data-mobile-filters-toggle]')!;
-    expect(filtersToggle.getAttribute('aria-controls')).toBe('made-filters-bar');
+    // Collapsible filter panel toggle button exposes aria-expanded and aria-controls="decisions-filter-body"
+    const filtersToggle = panel.querySelector<HTMLElement>('[data-filter-panel-toggle]')!;
+    expect(filtersToggle.getAttribute('aria-controls')).toBe('decisions-filter-body');
     expect(filtersToggle.getAttribute('aria-expanded')).toBe('false');
-    expect(root.querySelector('#made-filters-bar')).not.toBeNull();
+    expect(panel.querySelector('#decisions-filter-body')).not.toBeNull();
     filtersToggle.click();
     await settle(el, 10);
     expect(filtersToggle.getAttribute('aria-expanded')).toBe('true');
@@ -1379,6 +1423,7 @@ describe('<scion-page-project-decisions>', () => {
             { id: 'a-x', name: 'agent-x' },
           ],
           answerers: [{ id: 'u-me', name: 'Alice' }],
+          conversations: [],
         });
       }
       if (agent === 'a-x' && !limit) {
@@ -1398,11 +1443,13 @@ describe('<scion-page-project-decisions>', () => {
           { id: 'a-x', name: 'agent-x' },
         ],
         answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [],
       });
     };
 
     const el = await mount({ path: '/projects/p-1/decisions?tab=made' });
     const root = el.shadowRoot!;
+    const panel = panelRootOf(el);
     expect(root.querySelector('[data-answer-row="ans-old"]')).not.toBeNull();
     // P2-N3: surface="other" maps cleanly to capitalized "Other"
     expect(
@@ -1410,11 +1457,14 @@ describe('<scion-page-project-decisions>', () => {
     ).toBe('Other');
 
     // Change Agent filter to a-x -> holds reset fetch open while madeEntries still holds ans-old
-    const agentSelect = root.querySelector<HTMLElement & { value?: string }>(
-      '[data-filter="agent"]'
-    )!;
-    agentSelect.value = 'a-x';
-    agentSelect.dispatchEvent(new CustomEvent('sl-change'));
+    const agentCombobox = panel.querySelector<HTMLElement>('[data-filter="agent"]')!;
+    agentCombobox.dispatchEvent(
+      new CustomEvent('facet-change', {
+        detail: { value: 'a-x' },
+        bubbles: true,
+        composed: true,
+      })
+    );
     await settle(el, 10);
 
     // Fire choice-updated while filter reset is in flight; wait past 60ms debounce
@@ -1439,6 +1489,7 @@ describe('<scion-page-project-decisions>', () => {
             { id: 'a-x', name: 'agent-x' },
           ],
           answerers: [{ id: 'u-me', name: 'Alice' }],
+          conversations: [],
         }),
         { status: 200, headers: { 'Content-Type': 'application/json' } }
       )
@@ -1563,5 +1614,955 @@ describe('<scion-page-project-decisions>', () => {
     } finally {
       replaceSpy.mockRestore();
     }
+  });
+
+  it('round-trips valid URL filters on load and silently drops invalid parameters via replaceState without pushState', async () => {
+    enableBothFlags();
+    const agentUuid = '3f9c0a11-2222-4333-8444-555555555555';
+    madeResponses = [
+      {
+        counts: { waitingOnYou: 2, waitingOnOthers: 1 },
+        entries: [makeLogEntry()],
+        agents: [{ id: agentUuid, name: 'release-bot', hint: 'deleted · 3f9c' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      },
+    ];
+
+    const pushSpy = vi.spyOn(window.history, 'pushState');
+    const replaceSpy = vi.spyOn(window.history, 'replaceState');
+    try {
+      // Valid Made URL state
+      const validEl = await mount({
+        path: `/projects/p-1/decisions?tab=made&q=backfill&conversation=topic-release&agent=${agentUuid}&user=u-me&provenance=direct&from=2026-11-01&to=2026-11-14`,
+      });
+      expect(pushSpy).not.toHaveBeenCalled();
+
+      const madeUrl = new URL(
+        requests.find((r) => r.url.includes('tab=made'))!.url,
+        'http://localhost'
+      );
+      expect(madeUrl.searchParams.get('q')).toBe('backfill');
+      expect(madeUrl.searchParams.get('conversation')).toBe('topic-release');
+      expect(madeUrl.searchParams.get('agent')).toBe(agentUuid);
+      expect(madeUrl.searchParams.get('user')).toBe('u-me');
+      expect(madeUrl.searchParams.get('provenance')).toBe('direct');
+      expect(madeUrl.searchParams.get('from')).toBe('2026-11-01T00:00:00.000Z');
+      expect(madeUrl.searchParams.get('to')).toBe('2026-11-14T23:59:59.999Z');
+
+      const panel = panelRootOf(validEl);
+      expect(panel.querySelector('[data-active-filter-count]')?.textContent?.trim()).toBe(
+        '7 active'
+      );
+      expect(panel.querySelector('[data-filter-tag="q"]')?.textContent?.trim()).toBe('"backfill"');
+      expect(panel.querySelector('[data-filter-tag="from"]')?.textContent?.trim()).toContain(
+        '2026-11-01'
+      );
+      validEl.remove();
+
+      // Invalid URL state: 1-char q, non-UUID agent, bogus provenance, inverted from > to, Made-only user on pending
+      requests = [];
+      replaceSpy.mockClear();
+      const invalidEl = await mount({
+        path: '/projects/p-1/decisions?tab=bogus&q=a&agent=not-a-uuid&user=u-me&provenance=bogus&from=2026-11-20&to=2026-11-10',
+      });
+      expect(pushSpy).not.toHaveBeenCalled();
+      expect(window.location.search).toBe('');
+      const pendingUrl = new URL(
+        requests.find((r) => r.url.includes('tab=pending'))!.url,
+        'http://localhost'
+      );
+      expect(pendingUrl.searchParams.get('q')).toBeNull();
+      expect(pendingUrl.searchParams.get('agent')).toBeNull();
+      expect(pendingUrl.searchParams.get('user')).toBeNull();
+      expect(pendingUrl.searchParams.get('provenance')).toBeNull();
+      expect(invalidEl.shadowRoot?.querySelector('.error-state')).toBeNull();
+    } finally {
+      pushSpy.mockRestore();
+      replaceSpy.mockRestore();
+    }
+  });
+
+  it('debounces search q by 300ms, ignores 1-char typing, and aborts superseded in-flight search requests', async () => {
+    enableBothFlags();
+    let callNum = 0;
+    let firstSearchAborted = false;
+    let resolveFirstSearch!: (res: Response) => void;
+
+    pendingHandler = (url, init): Promise<Response> => {
+      callNum++;
+      const q = url.searchParams.get('q');
+      if (callNum === 1) {
+        return jsonResponse({
+          counts: { waitingOnYou: 2, waitingOnOthers: 0 },
+          prompts: [makePrompt({ promptMessageId: 'm-boot' })],
+          agents: [{ id: 'a-rel', name: 'release-bot' }],
+          answerers: [],
+          conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+        });
+      }
+      if (q === 'ba') {
+        init?.signal?.addEventListener('abort', () => {
+          firstSearchAborted = true;
+        });
+        return new Promise<Response>((resolve) => {
+          resolveFirstSearch = resolve;
+        });
+      }
+      return jsonResponse({
+        counts: { waitingOnYou: 2, waitingOnOthers: 0 },
+        filteredCounts: { waitingOnYou: 1, waitingOnOthers: 0 },
+        prompts: [makePrompt({ promptMessageId: 'm-backfill' })],
+        agents: [{ id: 'a-rel', name: 'release-bot' }],
+        answerers: [],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      });
+    };
+
+    const el = await mount();
+    const root = el.shadowRoot!;
+    const panel = panelRootOf(el);
+    const searchInput = panel.querySelector<HTMLElement & { value: string }>('[data-filter="q"]')!;
+
+    // 1-char input does not trigger an invalid q=b request even after 300ms
+    searchInput.value = 'b';
+    searchInput.dispatchEvent(new CustomEvent('sl-input'));
+    await settle(el, 330);
+    expect(callNum).toBe(1);
+
+    // Type "ba" -> wait 320ms -> starts first search request (held in flight)
+    searchInput.value = 'ba';
+    searchInput.dispatchEvent(new CustomEvent('sl-input'));
+    await settle(el, 100);
+    expect(callNum).toBe(1); // Not yet fired before 300ms
+    await settle(el, 230);
+    expect(callNum).toBe(2);
+    expect(firstSearchAborted).toBe(false);
+
+    // Type "backfill" while "ba" is in flight -> after 300ms, aborts "ba" and fires "backfill"
+    searchInput.value = 'backfill';
+    searchInput.dispatchEvent(new CustomEvent('sl-input'));
+    await settle(el, 330);
+    expect(firstSearchAborted).toBe(true);
+    expect(callNum).toBe(3);
+    expect(window.location.search).toBe('?q=backfill');
+
+    // Late resolution of superseded "ba" response is ignored
+    resolveFirstSearch(
+      new Response(
+        JSON.stringify({
+          counts: { waitingOnYou: 2, waitingOnOthers: 0 },
+          prompts: [makePrompt({ promptMessageId: 'm-stale' })],
+          agents: [],
+          answerers: [],
+          conversations: [],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }
+      )
+    );
+    await settle(el, 25);
+
+    expect(root.querySelector('[data-prompt-card="m-backfill"]')).not.toBeNull();
+    expect(root.querySelector('[data-prompt-card="m-stale"]')).toBeNull();
+  });
+
+  it('preserves shared filters across Pending <-> Made tab switches, drops Made-only filters on Pending, and clears all on Clear', async () => {
+    enableBothFlags();
+    const agentUuid = '3f9c0a11-2222-4333-8444-555555555555';
+    pendingResponses = [
+      {
+        counts: { waitingOnYou: 3, waitingOnOthers: 2 },
+        filteredCounts: { waitingOnYou: 1, waitingOnOthers: 0 },
+        prompts: [makePrompt({ promptMessageId: 'm-filtered' })],
+        agents: [{ id: agentUuid, name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      },
+      {
+        counts: { waitingOnYou: 3, waitingOnOthers: 2 },
+        filteredCounts: { waitingOnYou: 1, waitingOnOthers: 0 },
+        prompts: [makePrompt({ promptMessageId: 'm-filtered' })],
+        agents: [{ id: agentUuid, name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      },
+      {
+        counts: { waitingOnYou: 3, waitingOnOthers: 2 },
+        prompts: [makePrompt({ promptMessageId: 'm-unfiltered' })],
+        agents: [{ id: agentUuid, name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      },
+    ];
+    madeResponses = [
+      {
+        counts: { waitingOnYou: 3, waitingOnOthers: 2 },
+        entries: [makeLogEntry()],
+        agents: [{ id: agentUuid, name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      },
+      {
+        counts: { waitingOnYou: 3, waitingOnOthers: 2 },
+        entries: [makeLogEntry()],
+        agents: [{ id: agentUuid, name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      },
+    ];
+
+    const el = await mount({
+      path: `/projects/p-1/decisions?q=backfill&conversation=topic-release&agent=${agentUuid}`,
+    });
+    const root = el.shadowRoot!;
+
+    // Filtered Waiting on you badge shows "1 of 3" and Waiting on others shows "(0 of 2)" (D6, F-2b)
+    expect(root.querySelector('sl-tab[panel="pending"] sl-badge')?.textContent?.trim()).toBe(
+      '1 of 3'
+    );
+    expect(root.querySelector('[data-waiting-others]')?.getAttribute('summary')).toBe(
+      'Waiting on others (0 of 2)'
+    );
+
+    // Switch to Made -> shared filters carry over into Made URL & API request
+    root.querySelector<HTMLElement>('sl-tab[panel="made"]')!.click();
+    await settle(el, 25);
+    expect(window.location.search).toBe(
+      `?tab=made&q=backfill&conversation=topic-release&agent=${agentUuid}`
+    );
+    const madeReq = new URL(
+      requests.find((r) => r.url.includes('tab=made'))!.url,
+      'http://localhost'
+    );
+    expect(madeReq.searchParams.get('q')).toBe('backfill');
+    expect(madeReq.searchParams.get('conversation')).toBe('topic-release');
+    expect(madeReq.searchParams.get('agent')).toBe(agentUuid);
+
+    // Apply a Made-only filter (provenance=direct)
+    const madePanel = panelRootOf(el);
+    const provSelect = madePanel.querySelector<HTMLElement & { value: string }>(
+      '[data-filter="provenance"]'
+    )!;
+    provSelect.value = 'direct';
+    provSelect.dispatchEvent(new CustomEvent('sl-change'));
+    await settle(el, 25);
+    expect(window.location.search).toContain('provenance=direct');
+
+    // Switch back to Pending -> shared filters remain, Made-only provenance is dropped from URL
+    root.querySelector<HTMLElement>('sl-tab[panel="pending"]')!.click();
+    await settle(el, 25);
+    expect(window.location.search).toBe(
+      `?q=backfill&conversation=topic-release&agent=${agentUuid}`
+    );
+
+    // Click summary Clear -> clears all active shared filters and restores unfiltered badge "3"
+    panelRootOf(el).querySelector<HTMLElement>('[data-clear-filters]')!.click();
+    await settle(el, 25);
+    expect(window.location.search).toBe('');
+    expect(root.querySelector('sl-tab[panel="pending"] sl-badge')?.textContent?.trim()).toBe('3');
+  });
+
+  it('renders filtered "n of m" counts, distinct F-5 no-match state, D9 SEARCH_TIMEOUT alert, capability check, "/" shortcut, and C4 Decisions copy', async () => {
+    enableBothFlags();
+    const agentUuid = '3f9c0a11-2222-4333-8444-555555555555';
+
+    // 1. Pre-P1 Hub without `conversations` facet keeps panel mounted with supportsSearch=false,
+    //    hiding search/Conversation/pending-Agent and stripping unsupported URL params on Pending
+    pendingResponses = [
+      {
+        counts: { waitingOnYou: 0, waitingOnOthers: 0 },
+        prompts: [],
+        agents: [{ id: agentUuid, name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+      },
+    ];
+    const oldHubEl = await mount({
+      path: `/projects/p-1/decisions?q=backfill&conversation=topic-release&agent=${agentUuid}`,
+    });
+    const oldPendingPanelEl = oldHubEl.shadowRoot?.querySelector<ScionDecisionsFilterPanel>(
+      'scion-decisions-filter-panel'
+    );
+    expect(oldPendingPanelEl).not.toBeNull();
+    expect(oldPendingPanelEl?.supportsSearch).toBe(false);
+    const oldPendingPanel = panelRootOf(oldHubEl);
+    expect(oldPendingPanel.querySelector('[data-filter="q"]')).toBeNull();
+    expect(oldPendingPanel.querySelector('[data-filter="conversation"]')).toBeNull();
+    expect(oldPendingPanel.querySelector('[data-filter="agent"]')).toBeNull();
+    expect(window.location.search).toBe('');
+    expect(oldHubEl.shadowRoot?.querySelector('[data-empty="pending"]')).not.toBeNull();
+    expect(oldHubEl.shadowRoot?.querySelector('[data-no-match="pending"]')).toBeNull();
+    // C4 naming: "Decisions" (never "Choices")
+    expect(oldHubEl.shadowRoot?.querySelector('.sub')?.textContent).toContain(
+      "Decisions agents asked in this project's conversations"
+    );
+    expect(oldHubEl.shadowRoot?.textContent?.toLowerCase()).not.toContain('choices');
+    oldHubEl.remove();
+
+    // 2. P1+ Hub with F-5 no-match state (`[data-no-match="pending"]`), "0 of 3" badge, and "Waiting on others (0 of 2)"
+    pendingHandler = (url): Promise<Response> => {
+      const q = url.searchParams.get('q');
+      if (q === 'timeout-query') {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              error: { code: 'SEARCH_TIMEOUT', message: 'search query timed out' },
+            }),
+            { status: 503, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      }
+      if (q === 'nomatch') {
+        return jsonResponse({
+          counts: { waitingOnYou: 3, waitingOnOthers: 2 },
+          filteredCounts: { waitingOnYou: 0, waitingOnOthers: 0 },
+          prompts: [],
+          agents: [{ id: agentUuid, name: 'release-bot' }],
+          answerers: [],
+          conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+        });
+      }
+      return jsonResponse({
+        counts: { waitingOnYou: 3, waitingOnOthers: 2 },
+        prompts: [
+          makePrompt({ promptMessageId: 'm-1' }),
+          makePrompt({
+            promptMessageId: 'm-others',
+            waitingOnYou: false,
+            canAnswer: false,
+            decisions: [makeDecision({ rowId: 'r-o1', messageId: 'm-others' })],
+          }),
+        ],
+        agents: [{ id: agentUuid, name: 'release-bot' }],
+        answerers: [],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      });
+    };
+
+    const el = await mount({ path: '/projects/p-1/decisions?q=nomatch' });
+    const root = el.shadowRoot!;
+    const panel = panelRootOf(el);
+
+    expect(root.querySelector('sl-tab[panel="pending"] sl-badge')?.textContent?.trim()).toBe(
+      '0 of 3'
+    );
+    expect(root.querySelector('[data-no-match="pending"]')?.textContent).toContain(
+      'No decisions match these filters'
+    );
+    expect(root.querySelector('[data-empty="pending"]')).toBeNull();
+
+    // Pressing "/" on the page expands the collapsed filter panel (and is ignored when focus is in an input)
+    expect(panel.querySelector('[data-filter-panel-toggle]')?.getAttribute('aria-expanded')).toBe(
+      'false'
+    );
+    const dummyInput = document.createElement('input');
+    document.body.appendChild(dummyInput);
+    dummyInput.focus();
+    dummyInput.dispatchEvent(new KeyboardEvent('keydown', { key: '/', bubbles: true }));
+    await settle(el, 10);
+    expect(panel.querySelector('[data-filter-panel-toggle]')?.getAttribute('aria-expanded')).toBe(
+      'false'
+    );
+    dummyInput.remove();
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: '/', bubbles: true }));
+    await settle(el, 15);
+    expect(panel.querySelector('[data-filter-panel-toggle]')?.getAttribute('aria-expanded')).toBe(
+      'true'
+    );
+
+    // 3. D9: HTTP 503 SEARCH_TIMEOUT renders warning alert while keeping filter panel mounted
+    const searchInput = panel.querySelector<HTMLElement & { value: string }>('[data-filter="q"]')!;
+    searchInput.value = 'timeout-query';
+    searchInput.dispatchEvent(new CustomEvent('sl-input'));
+    await settle(el, 330);
+
+    const timeoutAlert = root.querySelector('[data-search-timeout]');
+    expect(timeoutAlert).not.toBeNull();
+    expect(timeoutAlert?.textContent).toContain('Search took too long; narrow it');
+    expect(root.querySelector('scion-decisions-filter-panel')).not.toBeNull();
+    expect(root.querySelector('.error-state')).toBeNull();
+
+    // Recover by clicking Clear on the filter panel -> unfiltered prompts return and "Waiting on others (2)" renders
+    panel.querySelector<HTMLElement>('[data-clear-filters]')!.click();
+    await settle(el, 25);
+    expect(root.querySelector('[data-search-timeout]')).toBeNull();
+    expect(root.querySelector('[data-prompt-card="m-1"]')).not.toBeNull();
+    expect(root.querySelector('[data-waiting-others]')?.getAttribute('summary')).toBe(
+      'Waiting on others (2)'
+    );
+  });
+
+  it('keeps Made Phase 3 filters, tags, and Clear working against an older Hub without conversations facet', async () => {
+    enableBothFlags();
+    const agentUuid = '3f9c0a11-2222-4333-8444-555555555555';
+
+    pendingHandler = (): Promise<Response> =>
+      jsonResponse({
+        counts: { waitingOnYou: 0, waitingOnOthers: 0 },
+        prompts: [],
+        agents: [{ id: agentUuid, name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+      });
+    madeHandler = (url): Promise<Response> => {
+      const prov = url.searchParams.get('provenance');
+      return jsonResponse({
+        counts: { waitingOnYou: 0, waitingOnOthers: 0 },
+        entries: prov === 'direct' ? [makeLogEntry({ provenance: 'direct' })] : [makeLogEntry()],
+        agents: [{ id: agentUuid, name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+      });
+    };
+
+    const el = await mount({
+      path: `/projects/p-1/decisions?tab=made&q=backfill&conversation=topic-release&agent=${agentUuid}&user=u-me&provenance=direct&from=2026-11-01&to=2026-11-14`,
+    });
+    const panelEl = el.shadowRoot?.querySelector<ScionDecisionsFilterPanel>(
+      'scion-decisions-filter-panel'
+    );
+    expect(panelEl).not.toBeNull();
+    expect(panelEl?.supportsSearch).toBe(false);
+
+    // Unsupported `q` and `conversation` are stripped, while Phase 3 Made filters stay applied & visible
+    expect(window.location.search).toBe(
+      `?tab=made&agent=${agentUuid}&user=u-me&provenance=direct&from=2026-11-01&to=2026-11-14`
+    );
+
+    const panel = panelRootOf(el);
+    expect(panel.querySelector('[data-filter="q"]')).toBeNull();
+    expect(panel.querySelector('[data-filter="conversation"]')).toBeNull();
+    expect(panel.querySelector('[data-filter="agent"]')).not.toBeNull();
+    expect(panel.querySelector('[data-filter="user"]')).not.toBeNull();
+    expect(panel.querySelector('[data-filter="provenance"]')).not.toBeNull();
+    expect(panel.querySelector('[data-filter="from"]')).not.toBeNull();
+    expect(panel.querySelector('[data-filter="to"]')).not.toBeNull();
+
+    const tags = Array.from(panel.querySelectorAll<HTMLElement>('sl-tag[data-filter-tag]'));
+    expect(tags.map((t) => t.textContent?.trim())).toEqual([
+      'Agent: release-bot',
+      'Answered by: you',
+      'Provenance: direct',
+      'From: 2026-11-01',
+      'To: 2026-11-14',
+    ]);
+    expect(panel.querySelector('[data-active-filter-count]')?.textContent).toBe('5 active');
+
+    // Clear resets all Made filters and keeps ?tab=made clean
+    panel.querySelector<HTMLElement>('[data-clear-filters]')!.click();
+    await settle(el, 25);
+    expect(window.location.search).toBe('?tab=made');
+    expect(panel.querySelectorAll('sl-tag[data-filter-tag]')).toHaveLength(0);
+    expect(el.shadowRoot?.querySelector('[data-made-table]')).not.toBeNull();
+  });
+
+  it('renders filter panel, tags, Clear, and "/" shortcut on a first-load SEARCH_TIMEOUT on both Pending and Made tabs (D9, D10)', async () => {
+    enableBothFlags();
+    const timeoutResponse = (): Promise<Response> =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            error: { code: 'SEARCH_TIMEOUT', message: 'search query timed out' },
+          }),
+          { status: 503, headers: { 'Content-Type': 'application/json' } }
+        )
+      );
+
+    pendingHandler = (url): Promise<Response> => {
+      if (url.searchParams.get('q') === 'slowsearch') {
+        return timeoutResponse();
+      }
+      // Mirror Design 13.3: limit=0 returns conversations: [] so facet hydration must use limit=1
+      if (url.searchParams.get('limit') === '0') {
+        return jsonResponse({
+          counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+          prompts: [],
+          agents: [],
+          answerers: [],
+          conversations: [],
+        });
+      }
+      return jsonResponse({
+        counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+        prompts: [makePrompt({ promptMessageId: 'm-recovered' })],
+        agents: [{ id: 'a-rel', name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      });
+    };
+    madeHandler = (url): Promise<Response> => {
+      if (url.searchParams.get('q') === 'slowsearch') {
+        return timeoutResponse();
+      }
+      if (url.searchParams.get('limit') === '0') {
+        return jsonResponse({
+          counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+          entries: [],
+          agents: [],
+          answerers: [],
+          conversations: [],
+        });
+      }
+      return jsonResponse({
+        counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+        entries: [makeLogEntry({ answerId: 'ans-recovered' })],
+        agents: [{ id: 'a-rel', name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      });
+    };
+
+    // 1. First-load SEARCH_TIMEOUT on Waiting on you (`/projects/p-1/decisions?q=slowsearch&conversation=topic-release`)
+    const pendingEl = await mount({
+      path: '/projects/p-1/decisions?q=slowsearch&conversation=topic-release',
+    });
+    const pendingRoot = pendingEl.shadowRoot!;
+    const pendingPanelEl = pendingRoot.querySelector<ScionDecisionsFilterPanel>(
+      'scion-decisions-filter-panel'
+    );
+    expect(pendingRoot.querySelector('[data-search-timeout]')).not.toBeNull();
+    expect(pendingRoot.querySelector('.error-state')).toBeNull();
+    expect(pendingPanelEl).not.toBeNull();
+    expect(pendingPanelEl?.supportsSearch).toBe(true);
+
+    // Fallback facet request ran with limit=1 and without q, populating Conversation/Agent pickers
+    // and resolving the raw `topic-release` key tag to `#release` while keeping the timeout alert
+    expect(
+      requests.some(
+        (r) => r.url.includes('tab=pending') && r.url.includes('limit=1') && !r.url.includes('q=')
+      )
+    ).toBe(true);
+
+    const pendingPanel = panelRootOf(pendingEl);
+    expect(pendingPanel.querySelector('sl-tag[data-filter-tag="q"]')?.textContent?.trim()).toBe(
+      '"slowsearch"'
+    );
+    expect(
+      pendingPanel.querySelector('sl-tag[data-filter-tag="conversation"]')?.textContent?.trim()
+    ).toBe('Conversation: #release');
+    expect(
+      pendingPanel.querySelector<HTMLElement & { options?: unknown[] }>(
+        '[data-filter="conversation"]'
+      )?.options
+    ).toEqual([{ value: 'topic-release', label: '#release' }]);
+    expect(
+      pendingPanel.querySelector<HTMLElement & { options?: unknown[] }>('[data-filter="agent"]')
+        ?.options
+    ).toEqual([{ value: 'a-rel', label: 'release-bot' }]);
+    expect(pendingPanel.querySelector('[data-clear-filters]')).not.toBeNull();
+
+    // "/" shortcut expands panel and exposes search input even on first-load timeout
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: '/', bubbles: true }));
+    await settle(pendingEl, 15);
+    expect(
+      pendingPanel.querySelector('[data-filter-panel-toggle]')?.getAttribute('aria-expanded')
+    ).toBe('true');
+    expect(pendingPanel.querySelector('[data-filter="q"]')).not.toBeNull();
+
+    // Clear recovers from first-load timeout on Pending
+    pendingPanel.querySelector<HTMLElement>('[data-clear-filters]')!.click();
+    await settle(pendingEl, 25);
+    expect(window.location.search).toBe('');
+    expect(pendingRoot.querySelector('[data-search-timeout]')).toBeNull();
+    expect(pendingRoot.querySelector('[data-prompt-card="m-recovered"]')).not.toBeNull();
+    pendingEl.remove();
+    window.localStorage.removeItem('scion:decisions:filters-open');
+
+    // 2. First-load SEARCH_TIMEOUT on Made (`/projects/p-1/decisions?tab=made&q=slowsearch&conversation=topic-release`)
+    requests = [];
+    const madeEl = await mount({
+      path: '/projects/p-1/decisions?tab=made&q=slowsearch&conversation=topic-release',
+    });
+    const madeRoot = madeEl.shadowRoot!;
+    const madePanelEl = madeRoot.querySelector<ScionDecisionsFilterPanel>(
+      'scion-decisions-filter-panel'
+    );
+    expect(
+      madeRoot.querySelector('sl-tab-panel[name="made"] [data-search-timeout]')
+    ).not.toBeNull();
+    expect(madeRoot.querySelector('.error-state')).toBeNull();
+    expect(madePanelEl).not.toBeNull();
+    expect(madePanelEl?.supportsSearch).toBe(true);
+    expect(
+      requests.some(
+        (r) => r.url.includes('tab=made') && r.url.includes('limit=1') && !r.url.includes('q=')
+      )
+    ).toBe(true);
+
+    const madePanel = panelRootOf(madeEl);
+    expect(madePanel.querySelector('sl-tag[data-filter-tag="q"]')?.textContent?.trim()).toBe(
+      '"slowsearch"'
+    );
+    expect(
+      madePanel.querySelector('sl-tag[data-filter-tag="conversation"]')?.textContent?.trim()
+    ).toBe('Conversation: #release');
+    expect(
+      madePanel.querySelector<HTMLElement & { options?: unknown[] }>('[data-filter="conversation"]')
+        ?.options
+    ).toEqual([{ value: 'topic-release', label: '#release' }]);
+    expect(
+      madePanel.querySelector<HTMLElement & { options?: unknown[] }>('[data-filter="agent"]')
+        ?.options
+    ).toEqual([{ value: 'a-rel', label: 'release-bot' }]);
+    expect(madePanel.querySelector('[data-clear-filters]')).not.toBeNull();
+
+    // "/" shortcut works on Made first-load timeout too
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: '/', bubbles: true }));
+    await settle(madeEl, 15);
+    expect(
+      madePanel.querySelector('[data-filter-panel-toggle]')?.getAttribute('aria-expanded')
+    ).toBe('true');
+
+    // Clear recovers from first-load timeout on Made (and clears stale timeout on inactive Pending tab)
+    madePanel.querySelector<HTMLElement>('[data-clear-filters]')!.click();
+    await settle(madeEl, 25);
+    expect(window.location.search).toBe('?tab=made');
+    expect(madeRoot.querySelector('[data-search-timeout]')).toBeNull();
+    expect(madeRoot.querySelector('[data-made-table]')).not.toBeNull();
+
+    // Switching to Pending reloads Pending cleanly after the boot timeout
+    madeRoot.querySelector<HTMLElement>('sl-tab[panel="pending"]')!.click();
+    await settle(madeEl, 25);
+    expect(madeRoot.querySelector('[data-prompt-card="m-recovered"]')).not.toBeNull();
+  });
+
+  it('aborts superseded in-flight Made and Pending loads across tab round-trips and re-issues fresh requests (D10, AC 4)', async () => {
+    enableBothFlags();
+    const agentUuid = '3f9c0a11-2222-4333-8444-555555555555';
+
+    // 1. Reviewer pass-2 sequence (plus shared-filter variant):
+    //    Made request in flight -> switch to Pending -> change shared filter -> switch back to Made
+    let releaseStaleProvMade: (() => void) | null = null;
+    let staleProvAborted = false;
+    let releaseStaleAgentMade: (() => void) | null = null;
+    let staleAgentAborted = false;
+
+    pendingHandler = (url): Promise<Response> =>
+      jsonResponse({
+        counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+        filteredCounts: url.searchParams.get('q')
+          ? { waitingOnYou: 1, waitingOnOthers: 0 }
+          : undefined,
+        prompts: [makePrompt({ promptMessageId: 'm-pending' })],
+        agents: [{ id: agentUuid, name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      });
+
+    madeHandler = (url, init): Promise<Response> => {
+      const prov = url.searchParams.get('provenance');
+      const q = url.searchParams.get('q');
+      const agent = url.searchParams.get('agent');
+
+      if (prov === 'direct' && !q) {
+        init?.signal?.addEventListener('abort', () => {
+          staleProvAborted = true;
+        });
+        return new Promise<Response>((resolve) => {
+          releaseStaleProvMade = (): void => {
+            void jsonResponse({
+              counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+              entries: [
+                makeLogEntry({
+                  answerId: 'ans-stale-prov',
+                  decision: {
+                    ...makeLogEntry().decision,
+                    key: 'STALE_PROV',
+                    ref: 'STALE_PROV',
+                  },
+                }),
+              ],
+              agents: [{ id: agentUuid, name: 'release-bot' }],
+              answerers: [{ id: 'u-me', name: 'Alice' }],
+              conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+            }).then(resolve);
+          };
+        });
+      }
+
+      if (agent === agentUuid && !q) {
+        init?.signal?.addEventListener('abort', () => {
+          staleAgentAborted = true;
+        });
+        return new Promise<Response>((resolve) => {
+          releaseStaleAgentMade = (): void => {
+            void jsonResponse({
+              counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+              entries: [
+                makeLogEntry({
+                  answerId: 'ans-stale-agent',
+                  decision: {
+                    ...makeLogEntry().decision,
+                    key: 'STALE_AGENT',
+                    ref: 'STALE_AGENT',
+                  },
+                }),
+              ],
+              agents: [{ id: agentUuid, name: 'release-bot' }],
+              answerers: [{ id: 'u-me', name: 'Alice' }],
+              conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+            }).then(resolve);
+          };
+        });
+      }
+
+      const key = q === 'backfill' ? 'FRESH_BACKFILL' : 'INITIAL_MADE';
+      return jsonResponse({
+        counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+        entries: [
+          makeLogEntry({
+            answerId: `ans-${key.toLowerCase()}`,
+            decision: {
+              ...makeLogEntry().decision,
+              key,
+              ref: key,
+            },
+          }),
+        ],
+        agents: [{ id: agentUuid, name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      });
+    };
+
+    const el = await mount({ path: '/projects/p-1/decisions?tab=made' });
+    const root = el.shadowRoot!;
+
+    // 1a. Made-only filter (`provenance=direct`) in flight -> Pending -> `q=backfill` -> Made
+    el.shadowRoot!.querySelector('scion-decisions-filter-panel')!.dispatchEvent(
+      new CustomEvent('decisions-filter-change', {
+        detail: { provenance: 'direct' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await settle(el, 5);
+    expect(releaseStaleProvMade).not.toBeNull();
+
+    root.querySelector<HTMLElement>('sl-tab[panel="pending"]')!.click();
+    await settle(el, 10);
+    expect(staleProvAborted).toBe(true);
+
+    el.shadowRoot!.querySelector('scion-decisions-filter-panel')!.dispatchEvent(
+      new CustomEvent('decisions-filter-change', {
+        detail: { q: 'backfill' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await settle(el, 15);
+
+    root.querySelector<HTMLElement>('sl-tab[panel="made"]')!.click();
+    releaseStaleProvMade!();
+    await settle(el, 25);
+
+    expect(window.location.search).toBe('?tab=made&q=backfill');
+    expect(requests.some((r) => r.url.includes('tab=made') && r.url.includes('q=backfill'))).toBe(
+      true
+    );
+    expect(root.querySelector('[data-made-table]')?.textContent).toContain('FRESH_BACKFILL');
+    expect(root.querySelector('[data-made-table]')?.textContent).not.toContain('STALE_PROV');
+
+    // 1b. Shared filter (`agent`) in flight on Made -> Pending -> change `q=backfill` -> Made
+    el.shadowRoot!.querySelector('scion-decisions-filter-panel')!.dispatchEvent(
+      new CustomEvent('decisions-filters-clear', { bubbles: true, composed: true })
+    );
+    await settle(el, 20);
+
+    el.shadowRoot!.querySelector('scion-decisions-filter-panel')!.dispatchEvent(
+      new CustomEvent('decisions-filter-change', {
+        detail: { agent: agentUuid },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await settle(el, 5);
+    expect(releaseStaleAgentMade).not.toBeNull();
+    expect(staleAgentAborted).toBe(false);
+
+    // Switch to Pending (agent is shared so Made load stays in flight until shared filter changes on Pending)
+    root.querySelector<HTMLElement>('sl-tab[panel="pending"]')!.click();
+    await settle(el, 10);
+
+    el.shadowRoot!.querySelector('scion-decisions-filter-panel')!.dispatchEvent(
+      new CustomEvent('decisions-filter-change', {
+        detail: { q: 'backfill' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await settle(el, 10);
+    expect(staleAgentAborted).toBe(true);
+
+    root.querySelector<HTMLElement>('sl-tab[panel="made"]')!.click();
+    releaseStaleAgentMade!();
+    await settle(el, 25);
+
+    expect(window.location.search).toBe(`?tab=made&q=backfill&agent=${agentUuid}`);
+    expect(root.querySelector('[data-made-table]')?.textContent).toContain('FRESH_BACKFILL');
+    expect(root.querySelector('[data-made-table]')?.textContent).not.toContain('STALE_AGENT');
+    el.remove();
+
+    // 2. Mirror sequence: Pending request in flight -> switch to Made -> change shared filter -> switch back to Pending
+    let releaseStalePending: (() => void) | null = null;
+    let stalePendingAborted = false;
+
+    pendingHandler = (url, init): Promise<Response> => {
+      const q = url.searchParams.get('q');
+      if (q === 'slowfirst') {
+        init?.signal?.addEventListener('abort', () => {
+          stalePendingAborted = true;
+        });
+        return new Promise<Response>((resolve) => {
+          releaseStalePending = (): void => {
+            void jsonResponse({
+              counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+              filteredCounts: { waitingOnYou: 1, waitingOnOthers: 0 },
+              prompts: [makePrompt({ promptMessageId: 'm-stale-pending' })],
+              agents: [{ id: agentUuid, name: 'release-bot' }],
+              answerers: [{ id: 'u-me', name: 'Alice' }],
+              conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+            }).then(resolve);
+          };
+        });
+      }
+      const promptId = q === 'freshsecond' ? 'm-fresh-pending' : 'm-initial-pending';
+      return jsonResponse({
+        counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+        filteredCounts: q ? { waitingOnYou: 1, waitingOnOthers: 0 } : undefined,
+        prompts: [makePrompt({ promptMessageId: promptId })],
+        agents: [{ id: agentUuid, name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      });
+    };
+
+    window.history.replaceState({}, '', '/projects/p-1/decisions');
+    const el2 = await mount({ path: '/projects/p-1/decisions' });
+    const root2 = el2.shadowRoot!;
+
+    el2.shadowRoot!.querySelector('scion-decisions-filter-panel')!.dispatchEvent(
+      new CustomEvent('decisions-filter-change', {
+        detail: { q: 'slowfirst' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await settle(el2, 5);
+    expect(releaseStalePending).not.toBeNull();
+    expect(stalePendingAborted).toBe(false);
+
+    // Switch to Made while Pending `q=slowfirst` is still in flight
+    root2.querySelector<HTMLElement>('sl-tab[panel="made"]')!.click();
+    await settle(el2, 15);
+
+    // Change shared filter `q=freshsecond` on Made -> aborts in-flight Pending load
+    el2.shadowRoot!.querySelector('scion-decisions-filter-panel')!.dispatchEvent(
+      new CustomEvent('decisions-filter-change', {
+        detail: { q: 'freshsecond' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await settle(el2, 15);
+    expect(stalePendingAborted).toBe(true);
+
+    // Switch back to Pending -> issues fresh `q=freshsecond` Pending load; stale response is ignored
+    root2.querySelector<HTMLElement>('sl-tab[panel="pending"]')!.click();
+    releaseStalePending!();
+    await settle(el2, 25);
+
+    expect(window.location.search).toBe('?q=freshsecond');
+    expect(
+      requests.some((r) => r.url.includes('tab=pending') && r.url.includes('q=freshsecond'))
+    ).toBe(true);
+    expect(root2.querySelector('[data-prompt-card="m-fresh-pending"]')).not.toBeNull();
+    expect(root2.querySelector('[data-prompt-card="m-stale-pending"]')).toBeNull();
+  });
+
+  it('does not merge old-filter >200 Pending tail rows on live SSE refresh when pendingNeedsReset is set', async () => {
+    enableBothFlags();
+    const agentUuid = '3f9c0a11-2222-4333-8444-555555555555';
+    const page1Prompts = Array.from({ length: 200 }, (_, i) =>
+      makePrompt({
+        promptMessageId: `m-old-${i}`,
+        decisions: [makeDecision({ rowId: `r-old-${i}`, messageId: `m-old-${i}` })],
+      })
+    );
+    const page2Prompts = Array.from({ length: 5 }, (_, i) =>
+      makePrompt({
+        promptMessageId: `m-old-tail-${i}`,
+        decisions: [makeDecision({ rowId: `r-old-tail-${i}`, messageId: `m-old-tail-${i}` })],
+      })
+    );
+
+    pendingHandler = (url): Promise<Response> => {
+      if (url.searchParams.get('agent') === agentUuid) {
+        return jsonResponse({
+          counts: { waitingOnYou: 205, waitingOnOthers: 0 },
+          filteredCounts: { waitingOnYou: 1, waitingOnOthers: 0 },
+          prompts: [
+            makePrompt({
+              promptMessageId: 'm-agent-only',
+              askerAgentId: agentUuid,
+              decisions: [makeDecision({ rowId: 'r-agent-only', messageId: 'm-agent-only' })],
+            }),
+          ],
+          agents: [{ id: agentUuid, name: 'release-bot' }],
+          answerers: [{ id: 'u-me', name: 'Alice' }],
+          conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+        });
+      }
+      if (url.searchParams.get('cursor') === 'cur-p2') {
+        return jsonResponse({
+          counts: { waitingOnYou: 205, waitingOnOthers: 0 },
+          prompts: page2Prompts,
+          agents: [{ id: agentUuid, name: 'release-bot' }],
+          answerers: [{ id: 'u-me', name: 'Alice' }],
+          conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+        });
+      }
+      return jsonResponse({
+        counts: { waitingOnYou: 205, waitingOnOthers: 0 },
+        prompts: page1Prompts,
+        nextCursor: 'cur-p2',
+        agents: [{ id: agentUuid, name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      });
+    };
+
+    const el = await mount({ path: '/projects/p-1/decisions' });
+    const root = el.shadowRoot!;
+
+    // Load page 2 so >200 unfiltered prompts (including `m-old-tail-0`) are in memory
+    root.querySelector<HTMLElement>('[data-load-more="pending"]')!.click();
+    await settle(el, 25);
+    expect(root.querySelector('[data-prompt-card="m-old-tail-0"]')).not.toBeNull();
+
+    // Switch to Made and apply shared `agent` filter -> marks Pending as pendingNeedsReset
+    root.querySelector<HTMLElement>('sl-tab[panel="made"]')!.click();
+    await settle(el, 20);
+    el.shadowRoot!.querySelector('scion-decisions-filter-panel')!.dispatchEvent(
+      new CustomEvent('decisions-filter-change', {
+        detail: { agent: agentUuid },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await settle(el, 20);
+
+    // Fire an SSE choice-prompt while on Made -> scheduleLiveRefresh must NOT run a `live` merge on Pending
+    stateManager.dispatchEvent(
+      new CustomEvent('chat-message-received', {
+        detail: { data: { projectId: 'p-1', type: 'choice-prompt' } },
+      })
+    );
+    await settle(el, 90);
+
+    // Switch back to Pending -> full reset runs for `agent=${agentUuid}`; old >200 tail row never leaks
+    root.querySelector<HTMLElement>('sl-tab[panel="pending"]')!.click();
+    await settle(el, 25);
+
+    expect(root.querySelector('[data-prompt-card="m-agent-only"]')).not.toBeNull();
+    expect(root.querySelector('[data-prompt-card="m-old-tail-0"]')).toBeNull();
   });
 });

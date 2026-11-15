@@ -54,6 +54,8 @@
     "shared/code-editor-language.test.ts",
     "shared/code-editor-language-race.test.ts",
     "shared/resource-list-refresh.test.ts",
+    "shared/facet-combobox.test.ts",
+    "shared/decisions-filter-panel.test.ts",
     "pages/harness-config-detail-source.test.ts"
   ],
   "exclude": []
