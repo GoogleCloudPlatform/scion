@@ -140,11 +140,14 @@ type EvalOptions struct {
 	Revision int64
 	// ProjectID populates Evaluation.ProjectID.
 	ProjectID string
-	// MaxEvalTime optionally overrides or lowers MaxEvalTime for this evaluation
-	// (clamped to MaxAllowedEvalTime = 30s).
+	// MaxEvalTime optionally lowers MaxEvalTime for this evaluation (clamped to
+	// MaxAllowedEvalTime = 30s; effective ceiling is min(r.MaxEvalTime(),
+	// opts.MaxEvalTime), never raising above the Runtime's configured ceiling).
 	MaxEvalTime time.Duration
 	// Budget optionally caps the evaluation by a remaining aggregate consumer
-	// budget when positive (runtime-design §7.1).
+	// budget when positive (runtime-design §7.1). Budget <= 0 means no budget is
+	// set; callers tracking an aggregate budget must enforce exhaustion before
+	// calling Evaluate and must never call Evaluate with an exhausted budget.
 	Budget time.Duration
 }
 
@@ -158,14 +161,13 @@ type transportKey struct {
 // content-environment limits, producing typed Decisions and content-free
 // Evaluation provenance records (runtime-design §§6, 7.1, 7.7, 8.1).
 type Runtime struct {
-	registry               *provider.Registry
-	instances              InstanceSource
-	credentials            CredentialSource
-	maxEvalTime            time.Duration
-	hasExplicitMaxEvalTime bool
-	defaultInstance        string
-	logger                 *slog.Logger
-	egressOpts             []egress.Option
+	registry        *provider.Registry
+	instances       InstanceSource
+	credentials     CredentialSource
+	maxEvalTime     time.Duration
+	defaultInstance string
+	logger          *slog.Logger
+	egressOpts      []egress.Option
 
 	transportMu sync.Mutex
 	transports  map[transportKey]provider.Transport
@@ -182,21 +184,18 @@ func New(cfg Config, opts ...Option) *Runtime {
 		logger = slog.Default()
 	}
 	maxEval := DefaultMaxEvalTime
-	explicitMax := false
 	if cfg.MaxEvalTime > 0 {
-		explicitMax = true
 		maxEval = clampDuration(cfg.MaxEvalTime, MaxAllowedEvalTime)
 	}
 
 	r := &Runtime{
-		registry:               reg,
-		instances:              cfg.Instances,
-		credentials:            cfg.Credentials,
-		maxEvalTime:            maxEval,
-		hasExplicitMaxEvalTime: explicitMax,
-		defaultInstance:        cfg.DefaultInstance,
-		logger:                 logger,
-		transports:             make(map[transportKey]provider.Transport),
+		registry:        reg,
+		instances:       cfg.Instances,
+		credentials:     cfg.Credentials,
+		maxEvalTime:     maxEval,
+		defaultInstance: cfg.DefaultInstance,
+		logger:          logger,
+		transports:      make(map[transportKey]provider.Transport),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -460,7 +459,7 @@ func (r *Runtime) ListModels(ctx context.Context, inst Instance) ([]string, erro
 
 	models, err := lister.ListModels(callCtx, r.transportForInstance(inst), inst.View())
 	if err != nil {
-		reason, statusClass := classifyInvokeError(err, ctx.Err(), callCtx.Err(), context.Cause(callCtx))
+		reason, _ := classifyInvokeError(err, ctx.Err(), callCtx.Err(), context.Cause(callCtx))
 		httpStatus := 0
 		retryable := false
 		var retryAfter time.Duration
@@ -471,7 +470,6 @@ func (r *Runtime) ListModels(ctx context.Context, inst Instance) ([]string, erro
 			retryAfter = pe.RetryAfter
 			msg = pe.Message
 		}
-		_ = statusClass
 		return nil, provider.NewProviderError(reason, retryable, retryAfter, httpStatus, msg)
 	}
 	return models, nil
@@ -481,7 +479,7 @@ func (r *Runtime) effectiveOwnDuration(ruleTimeout time.Duration, opts EvalOptio
 	effMax := r.maxEvalTime
 	if opts.MaxEvalTime > 0 {
 		clamped := clampDuration(opts.MaxEvalTime, MaxAllowedEvalTime)
-		if !r.hasExplicitMaxEvalTime || clamped < effMax {
+		if clamped < effMax {
 			effMax = clamped
 		}
 	}

@@ -219,7 +219,6 @@ func NewClient(bearer BearerSource, opts ...Option) *http.Client {
 		Resolver:             cfg.resolver,
 		Dialer:               cfg.dialer,
 		TLSClientConfig:      tlsCfg,
-		RedirectError:        ErrRedirectBlocked,
 	})
 
 	rt := &egressRoundTripper{
