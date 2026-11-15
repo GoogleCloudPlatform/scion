@@ -2276,7 +2276,8 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 	finalResp := resp
 	finalNeeds := envReqs
 	// The names the second pass resolved, for the start that follows a
-	// home-reset reprovision (reprovisionGatheredEnv). Values stay here.
+	// reincarnation's reprovision or move provision (reprovisionGatheredEnv).
+	// Values stay here.
 	var gatheredAsNeeded map[string]string
 	var gatheredAlternatives map[string][]string
 
@@ -2378,10 +2379,13 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 			return fmt.Errorf("%s: broker did not confirm the home reset (it may not support resetting an agent home; its reported capabilities may be stale): %w", callerName, errReprovisionHomeIntact)
 		}
 		d.log.InfoContext(ctx, callerName+": reprovision confirmed", "agent_id", agent.ID, "home_reset", finalResp.HomeReset)
-		// The start that follows needs the names this gather resolved
-		// (reprovisionGatheredEnv); only a ctx with a holder keeps them.
-		recordReprovisionGatheredEnv(ctx, gatheredAsNeeded, gatheredAlternatives)
 	}
+	// Record gathered as_needed names for the reincarnation start that
+	// follows: both in-place reprovisions (reprovision=true) and cross-broker
+	// move provisions (DispatchAgentProvisionForMove, reprovision=false) carry
+	// a holder in ctx, while standalone DispatchAgentProvision has no holder
+	// and stays a no-op.
+	recordReprovisionGatheredEnv(ctx, gatheredAsNeeded, gatheredAlternatives)
 
 	// Merge resolved storage env vars back into AppliedConfig so they are
 	// visible in the advanced config form. Exclude internal SCION_* vars
@@ -3526,8 +3530,8 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	// A read error (not an absence) fails the start/restart here, like a
 	// secret resolution error below: before any token is minted and before
 	// anything reaches the broker. Only the fixed message leaves the hub.
-	// After a home-reset reprovision, the as_needed names its gather
-	// resolved are admitted too, through the same selector
+	// After a reincarnation's reprovision or move provision, the as_needed
+	// names its gather resolved are admitted too, through the same selector
 	// (reprovisionGatheredEnv).
 	gathered := reprovisionGatheredEnvFrom(ctx)
 	envFromStorage, envFromStoragePlain, err := d.selectDeliveryEnvWith(ctx, sel, agent, gathered)
