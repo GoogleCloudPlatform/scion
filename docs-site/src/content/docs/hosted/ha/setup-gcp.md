@@ -274,13 +274,18 @@ account's ambient credentials. This works because the Hub SA has `roles/containe
 
 ### 1f. Generate Session Secret
 
-The Hub uses a 32-byte hex session signing key:
+The Hub uses a 32-byte hex session and JWT signing key shared across replicas. Generate it directly into Secret Manager so the plaintext value is never printed to your terminal, written to disk, or stored in the Cloud Run service spec:
 
 ```bash
-export SCION_SERVER_SESSION_SECRET=$(openssl rand -hex 32)
-echo "Session secret: $SCION_SERVER_SESSION_SECRET"
-# Save this — you'll use it in the deploy command.
+openssl rand -hex 32 | tr -d '\n' | gcloud secrets create scion-hub-session-secret \
+  --data-file=- \
+  --replication-policy=automatic \
+  --project=$PROJECT_ID
 ```
+
+:::note[Existing deployments]
+If you already deployed `scion-hub` with `SCION_SERVER_SESSION_SECRET` (or `SESSION_SECRET`) set directly in `--set-env-vars`, seed `scion-hub-session-secret` with the current value from the running revision's environment instead of generating a new random key, then redeploy in [Section 3d](#3d-deploy-the-hub-to-cloud-run). Generating a new value rotates the session and legacy JWT signing key, signing every user out and invalidating existing Hub-signed tokens.
+:::
 
 ### Infrastructure Verification Checklist
 
@@ -303,6 +308,10 @@ gcloud container clusters describe scion-agents --region=$GKE_REGION \
 
 echo "Kubeconfig Secret:"
 gcloud secrets describe scion-gke-kubeconfig --project=$PROJECT_ID \
+  --format="value(name)" 2>/dev/null && echo "  OK" || echo "  MISSING"
+
+echo "Session Secret:"
+gcloud secrets describe scion-hub-session-secret --project=$PROJECT_ID \
   --format="value(name)" 2>/dev/null && echo "  OK" || echo "  MISSING"
 ```
 
@@ -998,7 +1007,7 @@ rm /tmp/settings-final.yaml
 
 ### 3d. Deploy the Hub to Cloud Run
 
-We can now deploy the Hub to Cloud Run cleanly. Notice that we mount both the kubeconfig and the `settings.yaml` files as secrets directly under `/etc/scion/` and `/home/scion/.scion/`, keeping the start command extremely simple and robust.
+We can now deploy the Hub to Cloud Run cleanly. Notice that we mount the kubeconfig and `settings.yaml` files as secrets under `/etc/scion/` and `/home/scion/.scion/` and inject `SCION_SERVER_SESSION_SECRET` from Secret Manager, keeping secrets out of the command line and revision environment literals (if migrating an existing service from a literal env var, seed `scion-hub-session-secret` with the current value first — see [Section 1f](#1f-generate-session-secret)).
 
 ```bash
 gcloud run deploy scion-hub \
@@ -1007,8 +1016,8 @@ gcloud run deploy scion-hub \
   --project=$PROJECT_ID \
   --service-account=scion-hub-runner@$PROJECT_ID.iam.gserviceaccount.com \
   --add-cloudsql-instances=$PROJECT_ID:$REGION:scion-hub-db \
-  --set-env-vars="SCION_DEPLOY=$(date +%s),KUBECONFIG=/etc/scion/kubeconfig.yaml,SCION_K8S_NAMESPACE=scion-agents,SCION_SERVER_SESSION_SECRET=$SCION_SERVER_SESSION_SECRET,SCION_CLOUDRUN_CPU_ALWAYS_ALLOCATED=true" \
-  --set-secrets="/etc/scion/kubeconfig.yaml=scion-gke-kubeconfig:latest,/home/scion/.scion/settings.yaml=scion-hub-settings:latest" \
+  --set-env-vars="SCION_DEPLOY=$(date +%s),KUBECONFIG=/etc/scion/kubeconfig.yaml,SCION_K8S_NAMESPACE=scion-agents,SCION_CLOUDRUN_CPU_ALWAYS_ALLOCATED=true" \
+  --set-secrets="/etc/scion/kubeconfig.yaml=scion-gke-kubeconfig:latest,/home/scion/.scion/settings.yaml=scion-hub-settings:latest,SCION_SERVER_SESSION_SECRET=scion-hub-session-secret:latest" \
   --min-instances=2 \
   --max-instances=3 \
   --cpu=1 \
