@@ -66,6 +66,7 @@ func TestIsBlockedSSRFTarget(t *testing.T) {
 		// Public IPs — MUST ALLOW
 		{"public IPv4", net.ParseIP("8.8.8.8"), false},
 		{"public IPv4 other", net.ParseIP("203.0.113.1"), false},
+		{"benchmarking IPv4 allowed when private networks permitted", net.ParseIP("198.18.0.1"), false},
 		{"public IPv6", net.ParseIP("2001:4860:4860::8888"), false},
 
 		// nil IP
@@ -125,11 +126,22 @@ func TestIsBlockedPrivateOrLocal(t *testing.T) {
 		{"site-local deprecated", net.ParseIP("fec0::1"), true},
 		{"nil IP", nil, true},
 
+		// Special-purpose non-global IPv4/IPv6 ranges (L2: IETF protocol, benchmarking, TEST-NETs, IPv6 doc)
+		{"IETF protocol assignments 192.0.0.0/24", net.ParseIP("192.0.0.1"), true},
+		{"benchmarking 198.18.0.0/15 low", net.ParseIP("198.18.0.1"), true},
+		{"benchmarking 198.18.0.0/15 high", net.ParseIP("198.19.255.254"), true},
+		{"benchmarking IPv4-mapped IPv6", net.IP{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 198, 18, 0, 1}, true},
+		{"TEST-NET-1 192.0.2.0/24", net.ParseIP("192.0.2.1"), true},
+		{"TEST-NET-2 198.51.100.0/24", net.ParseIP("198.51.100.1"), true},
+		{"TEST-NET-3 203.0.113.0/24", net.ParseIP("203.0.113.1"), true},
+		{"IPv6 documentation 2001:db8::/32", net.ParseIP("2001:db8::1"), true},
+
 		// Public IPs — MUST ALLOW
 		{"public IPv4 8.8.8.8", net.ParseIP("8.8.8.8"), false},
+		{"public IPv4 93.184.216.34", net.ParseIP("93.184.216.34"), false},
 		{"public IPv4 172.32.x", net.ParseIP("172.32.0.1"), false},
 		{"public IPv4 100.128.x", net.ParseIP("100.128.0.1"), false},
-		{"public IPv4 203.0.113.1", net.ParseIP("203.0.113.1"), false},
+		{"public IPv4 198.20.x", net.ParseIP("198.20.0.1"), false},
 		{"public IPv6", net.ParseIP("2001:4860:4860::8888"), false},
 	}
 
@@ -313,6 +325,12 @@ func TestSSRFDialer_DefaultConfigRefusesPrivateAndZonedIPs(t *testing.T) {
 			{IP: net.ParseIP("10.0.0.1")},
 			{IP: net.ParseIP("172.16.0.1")},
 			{IP: net.ParseIP("192.168.1.1")},
+			{IP: net.ParseIP("192.0.0.1")},
+			{IP: net.ParseIP("198.18.0.1")},
+			{IP: net.ParseIP("192.0.2.1")},
+			{IP: net.ParseIP("198.51.100.1")},
+			{IP: net.ParseIP("203.0.113.1")},
+			{IP: net.ParseIP("2001:db8::1")},
 			{IP: net.ParseIP("2001:4860:4860::8888"), Zone: "eth0"},
 		},
 	}
@@ -342,7 +360,7 @@ func TestNewClient_BlocksRedirects(t *testing.T) {
 	require.NoError(t, err)
 
 	client := NewClient(Config{
-		Resolver: &fakeResolver{ips: []net.IPAddr{{IP: net.ParseIP("203.0.113.1")}}},
+		Resolver: &fakeResolver{ips: []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}},
 		Dialer: &rewritingDialer{
 			target: ts.Listener.Addr().String(),
 			inner:  &net.Dialer{Timeout: 5 * time.Second},

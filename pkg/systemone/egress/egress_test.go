@@ -113,6 +113,12 @@ func TestEgress_RefusesPrivateLoopbackAndLinkLocalDestinations(t *testing.T) {
 		{"link-local cloud metadata", []net.IPAddr{{IP: net.ParseIP("169.254.169.254")}}},
 		{"link-local IPv6", []net.IPAddr{{IP: net.ParseIP("fe80::1")}}},
 		{"unspecified IPv4", []net.IPAddr{{IP: net.ParseIP("0.0.0.0")}}},
+		{"IETF protocol 192.0.0/24", []net.IPAddr{{IP: net.ParseIP("192.0.0.1")}}},
+		{"benchmarking 198.18/15", []net.IPAddr{{IP: net.ParseIP("198.18.0.1")}}},
+		{"TEST-NET-1 192.0.2/24", []net.IPAddr{{IP: net.ParseIP("192.0.2.1")}}},
+		{"TEST-NET-2 198.51.100/24", []net.IPAddr{{IP: net.ParseIP("198.51.100.1")}}},
+		{"TEST-NET-3 203.0.113/24", []net.IPAddr{{IP: net.ParseIP("203.0.113.1")}}},
+		{"IPv6 doc 2001:db8::/32", []net.IPAddr{{IP: net.ParseIP("2001:db8::1")}}},
 		{"IPv4-mapped metadata", []net.IPAddr{{IP: net.IP{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 169, 254, 169, 254}}}},
 		{"all blocked mixed", []net.IPAddr{
 			{IP: net.ParseIP("10.0.0.1")},
@@ -180,7 +186,7 @@ func TestEgress_RefusesNonHTTPS(t *testing.T) {
 	dialer := &recordingDialer{}
 	client := NewClient(
 		StaticBearer(secretKey),
-		WithDialerForTesting(&fakeResolver{ips: []net.IPAddr{{IP: net.ParseIP("203.0.113.10")}}}, dialer),
+		WithDialerForTesting(&fakeResolver{ips: []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}}, dialer),
 	)
 
 	for _, rawURL := range []string{
@@ -211,7 +217,7 @@ func TestEgress_RefusesURLUserinfo(t *testing.T) {
 	dialer := &recordingDialer{}
 	client := NewClient(
 		StaticBearer(secretKey),
-		WithDialerForTesting(&fakeResolver{ips: []net.IPAddr{{IP: net.ParseIP("203.0.113.10")}}}, dialer),
+		WithDialerForTesting(&fakeResolver{ips: []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}}, dialer),
 	)
 
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://user:pw@api.typesafe.ai/v1/systemone", strings.NewReader(`{}`))
@@ -264,7 +270,7 @@ func TestEgress_RefusesRedirects(t *testing.T) {
 			}
 			client := NewClient(
 				StaticBearer(secretKey),
-				WithDialerForTesting(&fakeResolver{ips: []net.IPAddr{{IP: net.ParseIP("203.0.113.25")}}}, dialer),
+				WithDialerForTesting(&fakeResolver{ips: []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}}, dialer),
 				WithTLSConfigForTesting(tlsClientConfigForServer(t, redirectSrv, "127.0.0.1")),
 			)
 
@@ -481,7 +487,7 @@ func TestEgress_AuthSourceErrorsAndInvalidTokensNeverLeakCredential(t *testing.T
 		}
 		client := NewClient(
 			StaticBearer(secretKey),
-			WithDialerForTesting(&fakeResolver{ips: []net.IPAddr{{IP: net.ParseIP("203.0.113.99")}}}, dialer),
+			WithDialerForTesting(&fakeResolver{ips: []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}}, dialer),
 		)
 		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://api.typesafe.ai/v1/models", nil)
 		require.NoError(t, err)
