@@ -253,7 +253,11 @@ func (nd *NotificationDispatcher) activityEnteredAfter(
 ) bool {
 	if !*loaded {
 		*loaded = true
-		if a, err := nd.store.GetAgent(ctx, agentID); err == nil {
+		a, err := nd.store.GetAgent(ctx, agentID)
+		if err != nil {
+			nd.log.Warn("Failed to get agent for per-period notification check",
+				"agent_id", agentID, "error", err)
+		} else {
 			*cached = a
 		}
 	}

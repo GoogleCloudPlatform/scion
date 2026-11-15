@@ -18,8 +18,10 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -618,4 +620,94 @@ func TestNotificationDispatcher_AutoSuspendStalledWithRetainedActivityFiresSuspe
 			assert.Equal(t, "SUSPENDED", notifs[0].Status)
 		})
 	}
+}
+
+type failingGetAgentNotificationStore struct {
+	store.Store
+	targetID string
+	fail     atomic.Bool
+}
+
+func (s *failingGetAgentNotificationStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if s.fail.Load() && id == s.targetID {
+		return nil, errors.New("simulated GetAgent failure")
+	}
+	return s.Store.GetAgent(ctx, id)
+}
+
+func TestNotificationDispatcher_PerPeriodGetAgentErrorFailsSafeAndWarnsOnce(t *testing.T) {
+	env := setupNotificationTest(t)
+	ctx := context.Background()
+	require.NoError(t, env.store.UpdateNotificationSubscriptionTriggers(ctx, env.sub.ID, []string{"IDLE"}))
+
+	// Add a second subscriber on the same agent so a single event exercises the
+	// per-event cached read across multiple subscriptions without log spam.
+	sub2Agent := &store.Agent{
+		ID:              api.NewUUID(),
+		Slug:            "subscriber-agent-2",
+		Name:            "Subscriber Agent 2",
+		ProjectID:       env.project.ID,
+		RuntimeBrokerID: env.watched.RuntimeBrokerID,
+		Phase:           string(state.PhaseRunning),
+	}
+	require.NoError(t, env.store.CreateAgent(ctx, sub2Agent))
+	sub2 := &store.NotificationSubscription{
+		ID:                api.NewUUID(),
+		Scope:             store.SubscriptionScopeAgent,
+		AgentID:           env.watched.ID,
+		ProjectID:         env.project.ID,
+		SubscriberType:    store.SubscriberTypeAgent,
+		SubscriberID:      sub2Agent.Slug,
+		TriggerActivities: []string{"IDLE"},
+		CreatedAt:         time.Now(),
+		CreatedBy:         "test",
+	}
+	require.NoError(t, env.store.CreateNotificationSubscription(ctx, sub2))
+
+	faultStore := &failingGetAgentNotificationStore{
+		Store:    env.store,
+		targetID: env.watched.ID,
+	}
+	var logBuf lockedLogBuffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	nd := NewNotificationDispatcher(faultStore, env.pub, func() AgentDispatcher { return env.dispatcher }, logger)
+	nd.Start()
+	defer nd.Stop()
+
+	// Period 1: initial IDLE notifies both subscribers.
+	reportAndPublishActivity(t, env, string(state.PhaseRunning), string(state.ActivityIdle))
+	require.Eventually(t, func() bool {
+		return len(watchedAgentCalls(env)) == 2
+	}, 2*time.Second, 20*time.Millisecond)
+
+	// Same-period heartbeat with GetAgent failing: fails safe (stays deduplicated,
+	// no duplicate notification) and logs a single Warn for the event.
+	faultStore.fail.Store(true)
+	env.pub.PublishAgentStatus(ctx, mustGetAgent(t, env.store, env.watched.ID))
+	flushNotificationDispatcher(t, env)
+	assert.Len(t, watchedAgentCalls(env), 2, "read failure must fail safe to dedupe rather than sending a duplicate")
+
+	recs := logBuf.records(t, "Failed to get agent for per-period notification check")
+	require.Len(t, recs, 1, "GetAgent failure must warn once per event across subscriptions")
+	assert.Equal(t, "WARN", recs[0]["level"])
+	assert.Equal(t, env.watched.ID, recs[0]["agent_id"])
+	assert.Equal(t, "simulated GetAgent failure", recs[0]["error"])
+
+	// Enter a new IDLE period while GetAgent is still failing: the event during
+	// the outage is skipped safely without overwriting lastNotif, so once the
+	// transient error clears, the next status event in that new period notifies.
+	time.Sleep(15 * time.Millisecond)
+	require.NoError(t, env.store.UpdateAgentStatus(ctx, env.watched.ID, store.AgentStatusUpdate{
+		Phase:    string(state.PhaseRunning),
+		Activity: string(state.ActivityWorking),
+	}))
+	reportAndPublishActivity(t, env, string(state.PhaseRunning), string(state.ActivityIdle))
+	flushNotificationDispatcher(t, env)
+	assert.Len(t, watchedAgentCalls(env), 2)
+
+	faultStore.fail.Store(false)
+	env.pub.PublishAgentStatus(ctx, mustGetAgent(t, env.store, env.watched.ID))
+	require.Eventually(t, func() bool {
+		return len(watchedAgentCalls(env)) == 4
+	}, 2*time.Second, 20*time.Millisecond)
 }
