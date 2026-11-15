@@ -139,6 +139,11 @@ func nextDeliveryID() string {
 	return fmt.Sprintf("%s-%d", msgBufferNonce(), msgBufferSeq.Add(1))
 }
 
+// ErrAwaitingSession reports that a conduit delivery failed after its bounded
+// retries because the hub answered 503 not_reached with reason=no_session on
+// the final attempt and runtime exec is unavailable (ptone/scion#7881).
+var ErrAwaitingSession = errors.New("agent conduit session not connected")
+
 // conduitOutcome is how a conduit attempt ended for the caller.
 type conduitOutcome int
 
@@ -230,6 +235,8 @@ func classifyConduitAnswer(status int, resp agentcontrol.DeliverResponse, err er
 		return conduitDone, &finalDeliveryError{Err: fmt.Errorf("delivery refused by the agent: invalid %s", resp.Field)}
 	case status == http.StatusNotFound, status == http.StatusRequestEntityTooLarge:
 		return conduitUseExec, fmt.Errorf("conduit delivery not available (status %d)", status)
+	case status == http.StatusServiceUnavailable && resp.Outcome == "not_reached" && resp.Reason == agentcontrol.ReasonNoSession:
+		return conduitNotReached, fmt.Errorf("conduit delivery not reached (status %d, reason %s): %w", status, resp.Reason, ErrAwaitingSession)
 	case status == http.StatusUnprocessableEntity, status == http.StatusTooManyRequests,
 		status == http.StatusNotImplemented, status == http.StatusServiceUnavailable:
 		return conduitNotReached, fmt.Errorf("conduit delivery not reached (status %d)", status)
@@ -430,10 +437,27 @@ func (m *AgentManager) deliverSplit(ctx context.Context, agent *api.AgentInfo, h
 			continue
 		case errors.Is(err, errDeliveryInFlight):
 			return &splitDeliveryError{failedFrom: g[1], err: fmt.Errorf("split delivery stopped: sub-flush %d of %d in flight under another call", i+1, len(groups))}
+		case i == 0 && len(groups) == 1:
+			return err // single sub-flush: the flush's own error
+		case i == 0 && errors.Is(err, ErrAwaitingSession):
+			return &splitDeliveryError{
+				failedFrom: 0,
+				err:        err,
+				tailFrom:   g[1],
+				tailErr:    fmt.Errorf("split delivery stopped before sub-flush 2 of %d: earlier sub-flush awaiting session", len(groups)),
+			}
 		case i == 0:
 			return err // nothing delivered yet: the flush's own error
 		default:
-			return &splitDeliveryError{failedFrom: g[0], err: fmt.Errorf("split delivery stopped at sub-flush %d of %d: %w", i+1, len(groups), err)}
+			se := &splitDeliveryError{
+				failedFrom: g[0],
+				err:        fmt.Errorf("split delivery stopped at sub-flush %d of %d: %w", i+1, len(groups), err),
+			}
+			if i+1 < len(groups) && errors.Is(err, ErrAwaitingSession) {
+				se.tailFrom = g[1]
+				se.tailErr = fmt.Errorf("split delivery stopped before sub-flush %d of %d: earlier sub-flush awaiting session", i+2, len(groups))
+			}
+			return se
 		}
 	}
 	return nil

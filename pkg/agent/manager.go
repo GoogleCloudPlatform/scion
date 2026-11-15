@@ -1597,6 +1597,11 @@ func (m *AgentManager) deliverResolved(ctx context.Context, agent *api.AgentInfo
 		if !m.execAvailable() {
 			// No exec either: a named failure before anything was pasted,
 			// without first probing readiness over an exec that cannot run.
+			// Wrap ErrAwaitingSession only when the final conduit attempt
+			// proved no_session (ptone/scion#7881).
+			if errors.Is(conduitReason, ErrAwaitingSession) {
+				return &finalDeliveryError{Err: fmt.Errorf("failed to send message to agent '%s': runtime exec unavailable (conduit not used: %w)", agent.Name, conduitReason)}
+			}
 			return &finalDeliveryError{Err: fmt.Errorf("failed to send message to agent '%s': runtime exec unavailable (conduit not used: %v)", agent.Name, conduitReason)}
 		}
 		if d.readyWanted {

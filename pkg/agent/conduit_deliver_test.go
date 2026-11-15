@@ -1125,3 +1125,179 @@ func (h *clearingHarness) ReadySpec() api.ReadySpec {
 	h.clear()
 	return h.deliveryTestHarness.ReadySpec()
 }
+
+func answerWithReason(status int, outcome, reason string) fakeAnswer {
+	return fakeAnswer{status: status, resp: agentcontrol.DeliverResponse{Outcome: outcome, Reason: reason}}
+}
+
+// TestConduitDelivery_ErrAwaitingSessionOnlyOnNoSessionWithoutExec (ptone/scion#7881):
+// ErrAwaitingSession is emitted iff runtime exec is unavailable and the final
+// bounded conduit attempt received HTTP 503 with outcome=not_reached and
+// reason=no_session. Every other failure or an exec-capable runtime leaves
+// ErrAwaitingSession unset.
+func TestConduitDelivery_ErrAwaitingSessionOnlyOnNoSessionWithoutExec(t *testing.T) {
+	noSess := answerWithReason(http.StatusServiceUnavailable, "not_reached", agentcontrol.ReasonNoSession)
+	notAdv := answerWithReason(http.StatusServiceUnavailable, "not_reached", agentcontrol.ReasonNotAdvertised)
+	netDrop := fakeAnswer{err: fmt.Errorf("%w: eof", ErrConduitNotSent)}
+
+	t.Run("no_exec_final_no_session_emits_awaiting_session", func(t *testing.T) {
+		var execs []string
+		m := newConduitTestManager(t, true, shippedSpec, &execs)
+		withoutExec(m)
+		d := &fakeDeliverer{answers: []fakeAnswer{noSess}}
+		m.SetConduitDeliverer(d)
+		err := m.deliver(context.Background(), deliveryRequest{agentID: "test-agent", message: "hello", messageIDs: []string{"m-1"}})
+		if !errors.Is(err, ErrAwaitingSession) {
+			t.Fatalf("err = %v; want ErrAwaitingSession", err)
+		}
+		var final *finalDeliveryError
+		if !errors.As(err, &final) {
+			t.Fatalf("err = %T; want *finalDeliveryError", err)
+		}
+		if d.calls() != conduitNotReachedAttempts {
+			t.Fatalf("calls = %d, want %d", d.calls(), conduitNotReachedAttempts)
+		}
+	})
+
+	t.Run("no_exec_not_sent_then_final_no_session_emits_awaiting_session", func(t *testing.T) {
+		var execs []string
+		m := newConduitTestManager(t, true, shippedSpec, &execs)
+		withoutExec(m)
+		d := &fakeDeliverer{answers: []fakeAnswer{netDrop, netDrop, noSess}}
+		m.SetConduitDeliverer(d)
+		err := m.deliver(context.Background(), deliveryRequest{agentID: "test-agent", message: "hello", messageIDs: []string{"m-1"}})
+		if !errors.Is(err, ErrAwaitingSession) {
+			t.Fatalf("err = %v; want ErrAwaitingSession", err)
+		}
+	})
+
+	t.Run("exec_capable_falls_back_to_exec_never_awaiting_session", func(t *testing.T) {
+		var execs []string
+		m := newConduitTestManager(t, true, shippedSpec, &execs)
+		d := &fakeDeliverer{answers: []fakeAnswer{noSess}}
+		m.SetConduitDeliverer(d)
+		err := m.deliver(context.Background(), deliveryRequest{agentID: "test-agent", message: "hello", messageIDs: []string{"m-1"}})
+		if err != nil {
+			t.Fatalf("unexpected err on exec-capable runtime: %v", err)
+		}
+		if !execDelivered(execs) {
+			t.Fatalf("expected exec fallback, got %v", execs)
+		}
+	})
+
+	negative := map[string][]fakeAnswer{
+		"not_advertised":                {notAdv},
+		"503_without_reason":            {answer(http.StatusServiceUnavailable, "not_reached")},
+		"429_rate_limited":              {answer(http.StatusTooManyRequests, "not_reached")},
+		"422_unprocessable":             {answer(http.StatusUnprocessableEntity, "not_reached")},
+		"501_not_implemented":           {answer(http.StatusNotImplemented, "not_reached")},
+		"409_busy":                      {answer(http.StatusConflict, agentcontrol.OutcomeBusy)},
+		"transport_not_sent":            {netDrop},
+		"no_session_then_not_adv_final": {noSess, noSess, notAdv},
+		"no_session_then_net_final":     {noSess, noSess, netDrop},
+	}
+	for name, script := range negative {
+		t.Run(name, func(t *testing.T) {
+			var execs []string
+			m := newConduitTestManager(t, true, shippedSpec, &execs)
+			withoutExec(m)
+			d := &fakeDeliverer{answers: script}
+			m.SetConduitDeliverer(d)
+			err := m.deliver(context.Background(), deliveryRequest{agentID: "test-agent", message: "hello", messageIDs: []string{"m-1"}})
+			if err == nil {
+				t.Fatal("expected error without exec")
+			}
+			if errors.Is(err, ErrAwaitingSession) {
+				t.Fatalf("case %s unexpectedly wrapped ErrAwaitingSession: %v", name, err)
+			}
+		})
+	}
+}
+
+// TestConduitDelivery_SplitAwaitingSessionDoesNotTagUnsentTail verifies that
+// when an oversize buffered flush is split into multiple sub-flushes and an
+// early sub-flush stops with ErrAwaitingSession, only the sub-flush whose
+// /deliver call actually received 503 no_session gets ErrAwaitingSession;
+// later sub-flushes that were never sent get a plain failure error.
+func TestConduitDelivery_SplitAwaitingSessionDoesNotTagUnsentTail(t *testing.T) {
+	noSess := answerWithReason(http.StatusServiceUnavailable, "not_reached", agentcontrol.ReasonNoSession)
+	okAns := answer(http.StatusOK, agentcontrol.OutcomeDelivered)
+
+	t.Run("first_subflush_no_session", func(t *testing.T) {
+		var execs []string
+		m := newConduitTestManager(t, true, shippedSpec, &execs)
+		withoutExec(m)
+		d := &fakeDeliverer{answers: []fakeAnswer{noSess}}
+		m.SetConduitDeliverer(d)
+
+		var mu sync.Mutex
+		gotErrs := map[int]error{}
+		done := make(chan struct{})
+		m.msgBuffer = NewMessageBuffer(time.Hour, func(string, string, string, bool) error { return nil })
+		m.msgBuffer.deliverFlush = func(f bufferedFlush) error {
+			defer close(done)
+			return m.deliver(context.Background(), deliveryRequest{agentID: f.agentID, message: f.text,
+				messageIDs: f.messageIDs, parts: f.parts})
+		}
+		defer m.msgBuffer.Close()
+		for i := range 3 {
+			i := i
+			m.msgBuffer.sendWithID("test-agent", "", fmt.Sprintf("%d", i)+strings.Repeat("z", 300*1024), fmt.Sprintf("m-%d", i),
+				func(err error) { mu.Lock(); gotErrs[i] = err; mu.Unlock() }, nil)
+		}
+		flushNow(m)
+		<-done
+
+		mu.Lock()
+		defer mu.Unlock()
+		if len(gotErrs) != 3 {
+			t.Fatalf("expected 3 callbacks, got %d", len(gotErrs))
+		}
+		if !errors.Is(gotErrs[0], ErrAwaitingSession) {
+			t.Fatalf("sub-flush 0 should wrap ErrAwaitingSession, got %v", gotErrs[0])
+		}
+		for _, tail := range []int{1, 2} {
+			if errors.Is(gotErrs[tail], ErrAwaitingSession) {
+				t.Fatalf("unsent sub-flush %d must not wrap ErrAwaitingSession: %v", tail, gotErrs[tail])
+			}
+		}
+	})
+
+	t.Run("second_subflush_no_session", func(t *testing.T) {
+		var execs []string
+		m := newConduitTestManager(t, true, shippedSpec, &execs)
+		withoutExec(m)
+		d := &fakeDeliverer{answers: []fakeAnswer{okAns, noSess, noSess, noSess, noSess}}
+		m.SetConduitDeliverer(d)
+
+		var mu sync.Mutex
+		gotErrs := map[int]error{}
+		done := make(chan struct{})
+		m.msgBuffer = NewMessageBuffer(time.Hour, func(string, string, string, bool) error { return nil })
+		m.msgBuffer.deliverFlush = func(f bufferedFlush) error {
+			defer close(done)
+			return m.deliver(context.Background(), deliveryRequest{agentID: f.agentID, message: f.text,
+				messageIDs: f.messageIDs, parts: f.parts})
+		}
+		defer m.msgBuffer.Close()
+		for i := range 3 {
+			i := i
+			m.msgBuffer.sendWithID("test-agent", "", fmt.Sprintf("%d", i)+strings.Repeat("z", 300*1024), fmt.Sprintf("m-%d", i),
+				func(err error) { mu.Lock(); gotErrs[i] = err; mu.Unlock() }, nil)
+		}
+		flushNow(m)
+		<-done
+
+		mu.Lock()
+		defer mu.Unlock()
+		if _, ok := gotErrs[0]; ok {
+			t.Fatalf("delivered sub-flush 0 must not fail: %v", gotErrs[0])
+		}
+		if !errors.Is(gotErrs[1], ErrAwaitingSession) {
+			t.Fatalf("sub-flush 1 should wrap ErrAwaitingSession, got %v", gotErrs[1])
+		}
+		if errors.Is(gotErrs[2], ErrAwaitingSession) {
+			t.Fatalf("unsent sub-flush 2 must not wrap ErrAwaitingSession: %v", gotErrs[2])
+		}
+	})
+}

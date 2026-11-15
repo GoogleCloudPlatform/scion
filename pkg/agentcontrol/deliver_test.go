@@ -73,6 +73,14 @@ func TestDecodeDeliverResponseNeverSuccessByDefault(t *testing.T) {
 	if err != nil || r.Outcome != OutcomePartial || r.Stage != StageSubmit {
 		t.Fatalf("= %+v %v", r, err)
 	}
+	ns, err := DecodeDeliverResponse([]byte(`{"outcome":"not_reached","reason":"no_session"}`))
+	if err != nil || ns.Outcome != "not_reached" || ns.Reason != ReasonNoSession {
+		t.Fatalf("no_session = %+v %v", ns, err)
+	}
+	na, err := DecodeDeliverResponse([]byte(`{"outcome":"not_reached","reason":"not_advertised"}`))
+	if err != nil || na.Outcome != "not_reached" || na.Reason != ReasonNotAdvertised {
+		t.Fatalf("not_advertised = %+v %v", na, err)
+	}
 }
 
 func TestTimingBudget(t *testing.T) {

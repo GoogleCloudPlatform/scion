@@ -205,11 +205,17 @@ const (
 	AgentLaunchReportReasonOtherOwner  = "other_owner"
 )
 
+// MessageFailureCodeAwaitingSession is the enum code a broker sends on a
+// MessageFailure when its final deliver-message attempt received a hub 503
+// with reason=no_session and exec is unavailable (ptone/scion#7881).
+const MessageFailureCodeAwaitingSession = "awaiting_session"
+
 // MessageFailure is one buffered delivery that failed on the broker.
 type MessageFailure struct {
 	MessageID string `json:"messageId"`
 	AgentID   string `json:"agentId,omitempty"`
 	ProjectID string `json:"projectId,omitempty"`
+	Code      string `json:"code,omitempty"`
 	Reason    string `json:"reason,omitempty"`
 }
 

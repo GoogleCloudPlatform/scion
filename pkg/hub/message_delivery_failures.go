@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -75,11 +76,26 @@ func dispatchMessageIDFromContext(ctx context.Context) string {
 // more to report can split it across requests.
 const maxMessageFailuresPerReport = 50
 
+const messageFailureCodeAwaitingSession = "awaiting_session"
+
+// Hold-until-session bounds (ptone/scion#7881; H2 confirmed). Variables so
+// tests can exercise bounds without waiting minutes.
+var (
+	messageHoldTTL            = 10 * time.Minute
+	messageHoldMaxProofAge    = 2 * time.Minute
+	maxHeldMessagesPerAgent   = 100
+	hubConduitDeliverRuntimes = map[string]bool{
+		"cloudrun":           true,
+		"cloudrun-instances": true,
+	}
+)
+
 // messageDeliveryFailure is one failed delivery reported by a broker.
 type messageDeliveryFailure struct {
 	MessageID string `json:"messageId"`
 	AgentID   string `json:"agentId,omitempty"`
 	ProjectID string `json:"projectId,omitempty"`
+	Code      string `json:"code,omitempty"`
 	Reason    string `json:"reason,omitempty"`
 }
 
@@ -137,6 +153,7 @@ const maxAttachmentOutcomesPerReport = 100
 // messageDeliveryFailuresResponse reports how many rows were updated.
 type messageDeliveryFailuresResponse struct {
 	Marked  int `json:"marked"`
+	Held    int `json:"held,omitempty"`
 	Ignored int `json:"ignored"`
 }
 
@@ -168,6 +185,12 @@ func (s *Server) handleBrokerMessageFailures(w http.ResponseWriter, r *http.Requ
 		BadRequest(w, "too many failures in one report")
 		return
 	}
+	for _, f := range req.Failures {
+		if f.Code != "" && f.Code != messageFailureCodeAwaitingSession {
+			BadRequest(w, "invalid failure code")
+			return
+		}
+	}
 	if len(req.AttachmentOutcomes) > maxAttachmentOutcomesPerReport {
 		BadRequest(w, "too many attachment outcomes in one report")
 		return
@@ -181,20 +204,59 @@ func (s *Server) handleBrokerMessageFailures(w http.ResponseWriter, r *http.Requ
 
 	resp := messageDeliveryFailuresResponse{}
 	for _, f := range req.Failures {
-		if s.applyBrokerMessageFailure(ctx, brokerID, f) {
+		switch s.applyBrokerMessageFailureOutcome(ctx, brokerID, f) {
+		case brokerFailureMarked:
 			resp.Marked++
-		} else {
+		case brokerFailureHeld:
+			resp.Held++
+		default:
 			resp.Ignored++
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
+type brokerFailureOutcome int
+
+const (
+	brokerFailureIgnored brokerFailureOutcome = iota
+	brokerFailureMarked
+	brokerFailureHeld
+)
+
+// agentUsesConduitDelivery reports whether target's runtime uses Conduit
+// deliver-message rather than exec. Checks recorded Runtime first, falling
+// back to PinnedRuntimeTargetType and broker runtime resolution while an
+// agent is still starting before its first heartbeat.
+func (s *Server) agentUsesConduitDelivery(ctx context.Context, agent *store.Agent) bool {
+	if agent == nil {
+		return false
+	}
+	rt := strings.ToLower(strings.TrimSpace(agent.Runtime))
+	if rt == "" {
+		rt = strings.ToLower(strings.TrimSpace(agent.PinnedRuntimeTargetType))
+	}
+	if rt == "" && agent.RuntimeBrokerID != "" && s.store != nil {
+		if b, err := s.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID); err == nil && b != nil {
+			if resolved := resolveAgentRuntime(agent, b); resolved != "" {
+				rt = strings.ToLower(strings.TrimSpace(resolved))
+			} else if b.RuntimeTarget.Type != "" {
+				rt = strings.ToLower(strings.TrimSpace(b.RuntimeTarget.Type))
+			}
+		}
+	}
+	return hubConduitDeliverRuntimes[rt]
+}
+
 // applyBrokerMessageFailure validates and applies one reported failure.
 // Returns true when the message row was moved to failed.
 func (s *Server) applyBrokerMessageFailure(ctx context.Context, brokerID string, f messageDeliveryFailure) bool {
+	return s.applyBrokerMessageFailureOutcome(ctx, brokerID, f) == brokerFailureMarked
+}
+
+func (s *Server) applyBrokerMessageFailureOutcome(ctx context.Context, brokerID string, f messageDeliveryFailure) brokerFailureOutcome {
 	if f.MessageID == "" {
-		return false
+		return brokerFailureIgnored
 	}
 	msg, err := s.store.GetMessage(ctx, f.MessageID)
 	if err != nil {
@@ -202,19 +264,57 @@ func (s *Server) applyBrokerMessageFailure(ctx context.Context, brokerID string,
 			slog.Warn("message-failures: message lookup failed",
 				"broker_id", brokerID, "message_id", f.MessageID, "error", err)
 		}
-		return false
+		return brokerFailureIgnored
 	}
 
 	// Ownership: the recipient agent must be assigned to the reporting broker.
 	recipientAgentID := msg.RecipientID
 	if recipientAgentID == "" || !strings.HasPrefix(msg.Recipient, "agent:") {
-		return false
+		return brokerFailureIgnored
 	}
 	agent, err := s.store.GetAgent(ctx, recipientAgentID)
 	if err != nil || agent == nil || agent.RuntimeBrokerID != brokerID {
 		slog.Warn("message-failures: broker reported failure for message it does not own",
 			"broker_id", brokerID, "message_id", f.MessageID)
-		return false
+		return brokerFailureIgnored
+	}
+
+	// Hold-until-session CAS (ptone/scion#7881): only when the broker sent
+	// code=awaiting_session, hold is enabled, the agent uses conduit delivery,
+	// and the store CAS verifies a fresh hub-stamped no_session proof on a
+	// dispatched row under the per-agent cap. Otherwise fall through and fail
+	// the row as today.
+	if f.Code == messageFailureCodeAwaitingSession &&
+		msg.DispatchState == store.MessageDispatchDispatched &&
+		s.conduitDeliverEnabled() &&
+		s.agentUsesConduitDelivery(ctx, agent) {
+		finCtx, finCancel := finalizationContext(ctx)
+		held, hErr := s.store.HoldMessageAwaitingSession(finCtx, store.HoldMessageParams{
+			MessageID:   msg.ID,
+			AgentID:     agent.ID,
+			MaxProofAge: messageHoldMaxProofAge,
+			HoldTTL:     messageHoldTTL,
+			MaxHeld:     maxHeldMessagesPerAgent,
+		})
+		finCancel()
+		if hErr != nil {
+			slog.Error("message-failures: hold awaiting_session CAS failed",
+				"broker_id", brokerID, "message_id", msg.ID, "agent_id", agent.ID, "error", hErr)
+		} else if held {
+			if s.messageLog != nil {
+				s.messageLog.Info("message held awaiting conduit session",
+					"message_id", msg.ID,
+					"agent_id", agent.ID,
+					"project_id", agent.ProjectID,
+					"broker_id", brokerID,
+				)
+			}
+			// If a conduit session advertising deliver-message connected in the
+			// window between /deliver's 503 and this hold CAS committing (M-09),
+			// trigger re-drive immediately rather than waiting for the 30s sweep.
+			s.maybeScheduleHeldMessageRedriveIfConnected(agent.ID)
+			return brokerFailureHeld
+		}
 	}
 
 	switch msg.DispatchState {
@@ -226,7 +326,7 @@ func (s *Server) applyBrokerMessageFailure(ctx context.Context, brokerID string,
 		// a same-id /deliver still replays without calling the agent. A
 		// delivered row is never failed.
 	default:
-		return false
+		return brokerFailureIgnored
 	}
 
 	reason := sanitizeFailureReason(f.Reason)
@@ -243,10 +343,10 @@ func (s *Server) applyBrokerMessageFailure(ctx context.Context, brokerID string,
 	if err != nil {
 		slog.Error("message-failures: failed to mark message failed",
 			"broker_id", brokerID, "message_id", msg.ID, "error", err)
-		return false
+		return brokerFailureIgnored
 	}
 	if !won {
-		return false
+		return brokerFailureIgnored
 	}
 	if s.messageLog != nil {
 		s.messageLog.Warn("message delivery failed after broker acceptance; marked failed",
@@ -289,7 +389,7 @@ func (s *Server) applyBrokerMessageFailure(ctx context.Context, brokerID string,
 		msg.DispatchFailureReason = &reason
 		s.events.PublishUserMessage(ctx, msg, nil, nil)
 	}
-	return true
+	return brokerFailureMarked
 }
 
 // maxFailureReasonBytes bounds the broker-supplied failure reason that is
