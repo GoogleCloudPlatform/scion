@@ -49,6 +49,8 @@ const (
 
 // systemOneInstanceSecretName returns the hub-scoped internal secret name for
 // the System One provider instance with the given immutable UUID.
+//
+//nolint:unused // Consumed by System One instance admin handlers in P1b slice 3.
 func systemOneInstanceSecretName(instanceID string) string {
 	return systemOneSecretPrefix + strings.TrimSpace(instanceID)
 }
@@ -93,6 +95,8 @@ func isValidSystemOneAPIKey(v string) bool {
 
 // setSystemOneInstanceSecret stores apiKey as a hub-scoped internal secret
 // under systemone.instance.<instanceID> via pkg/secret.
+//
+//nolint:unused // Consumed by System One instance admin handlers in P1b slice 3.
 func (s *Server) setSystemOneInstanceSecret(ctx context.Context, instanceID, apiKey, actorID string) (string, error) {
 	if s.secretBackend == nil {
 		return "", secret.ErrNoSecretBackend
@@ -116,6 +120,8 @@ func (s *Server) setSystemOneInstanceSecret(ctx context.Context, instanceID, api
 
 // deleteSystemOneInstanceSecret removes a hub-scoped internal System One
 // instance credential from pkg/secret. Missing secrets are treated as a no-op.
+//
+//nolint:unused // Consumed by System One instance admin handlers in P1b slice 3.
 func (s *Server) deleteSystemOneInstanceSecret(ctx context.Context, secretName string) error {
 	secretName = strings.TrimSpace(secretName)
 	if secretName == "" || s.secretBackend == nil {
@@ -151,7 +157,9 @@ func resolveSystemOneMaxEvalTime(cfg ServerConfig) time.Duration {
 	return config.SystemOneDefaultMaxEvalTime
 }
 
-func (s *Server) systemOneProviderRegistry() *systemoneprovider.Registry {
+// SystemOneProviderRegistry returns the Hub's System One provider adapter
+// registry, defaulting to provider.DefaultRegistry().
+func (s *Server) SystemOneProviderRegistry() *systemoneprovider.Registry {
 	s.mu.RLock()
 	reg := s.systemOneRegistry
 	s.mu.RUnlock()
@@ -192,7 +200,9 @@ func (s *Server) rebuildSystemOneRuntimeLocked() {
 	s.systemOneRuntime = rt
 }
 
-func (s *Server) getSystemOneRuntime() *systemoneruntime.Runtime {
+// SystemOneRuntime returns the Hub's shared System One evaluation runtime,
+// lazily initializing it if needed.
+func (s *Server) SystemOneRuntime() *systemoneruntime.Runtime {
 	s.mu.RLock()
 	rt := s.systemOneRuntime
 	s.mu.RUnlock()
@@ -205,15 +215,6 @@ func (s *Server) getSystemOneRuntime() *systemoneruntime.Runtime {
 		s.rebuildSystemOneRuntimeLocked()
 	}
 	return s.systemOneRuntime
-}
-
-// setSystemOneRuntimeOptions replaces optional runtime construction options and
-// rebuilds the Server's System One runtime. Used by package-internal tests.
-func (s *Server) setSystemOneRuntimeOptions(opts ...systemoneruntime.Option) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.systemOneRuntimeOpts = slices.Clone(opts)
-	s.rebuildSystemOneRuntimeLocked()
 }
 
 // storeSystemOneInstanceToRuntime converts a persisted store record into the

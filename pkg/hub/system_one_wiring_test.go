@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -31,6 +32,15 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/egress"
 	systemoneruntime "github.com/GoogleCloudPlatform/scion/pkg/systemone/runtime"
 )
+
+// setSystemOneRuntimeOptions replaces optional runtime construction options and
+// rebuilds the Server's System One runtime for package-internal tests.
+func (s *Server) setSystemOneRuntimeOptions(opts ...systemoneruntime.Option) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.systemOneRuntimeOpts = slices.Clone(opts)
+	s.rebuildSystemOneRuntimeLocked()
+}
 
 type stubSystemOneSecretBackend struct {
 	secret.SecretBackend

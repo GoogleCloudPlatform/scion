@@ -126,7 +126,7 @@ func TestSystemOneSecretLifecycleAndGenericIsolation(t *testing.T) {
 		Enabled:  true,
 		Revision: 1,
 	}
-	_, listErr := srv.getSystemOneRuntime().ListModels(ctx, inst)
+	_, listErr := srv.SystemOneRuntime().ListModels(ctx, inst)
 	require.Error(t, listErr)
 	pe, ok := systemoneprovider.AsProviderError(listErr)
 	require.True(t, ok, "expected ProviderError, got %T (%v)", listErr, listErr)
