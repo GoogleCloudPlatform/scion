@@ -57,6 +57,34 @@ func (_c *AgentDeliveryHoldCreate) SetNillableHeldCount(v *int) *AgentDeliveryHo
 	return _c
 }
 
+// SetClaimOwner sets the "claim_owner" field.
+func (_c *AgentDeliveryHoldCreate) SetClaimOwner(v string) *AgentDeliveryHoldCreate {
+	_c.mutation.SetClaimOwner(v)
+	return _c
+}
+
+// SetNillableClaimOwner sets the "claim_owner" field if the given value is not nil.
+func (_c *AgentDeliveryHoldCreate) SetNillableClaimOwner(v *string) *AgentDeliveryHoldCreate {
+	if v != nil {
+		_c.SetClaimOwner(*v)
+	}
+	return _c
+}
+
+// SetClaimUntil sets the "claim_until" field.
+func (_c *AgentDeliveryHoldCreate) SetClaimUntil(v time.Time) *AgentDeliveryHoldCreate {
+	_c.mutation.SetClaimUntil(v)
+	return _c
+}
+
+// SetNillableClaimUntil sets the "claim_until" field if the given value is not nil.
+func (_c *AgentDeliveryHoldCreate) SetNillableClaimUntil(v *time.Time) *AgentDeliveryHoldCreate {
+	if v != nil {
+		_c.SetClaimUntil(*v)
+	}
+	return _c
+}
+
 // SetCreated sets the "created" field.
 func (_c *AgentDeliveryHoldCreate) SetCreated(v time.Time) *AgentDeliveryHoldCreate {
 	_c.mutation.SetCreated(v)
@@ -120,6 +148,10 @@ func (_c *AgentDeliveryHoldCreate) defaults() {
 		v := agentdeliveryhold.DefaultHeldCount
 		_c.mutation.SetHeldCount(v)
 	}
+	if _, ok := _c.mutation.ClaimOwner(); !ok {
+		v := agentdeliveryhold.DefaultClaimOwner
+		_c.mutation.SetClaimOwner(v)
+	}
 	if _, ok := _c.mutation.Created(); !ok {
 		v := agentdeliveryhold.DefaultCreated()
 		_c.mutation.SetCreated(v)
@@ -138,6 +170,11 @@ func (_c *AgentDeliveryHoldCreate) check() error {
 	}
 	if _, ok := _c.mutation.HeldCount(); !ok {
 		return &ValidationError{Name: "held_count", err: errors.New(`ent: missing required field "AgentDeliveryHold.held_count"`)}
+	}
+	if v, ok := _c.mutation.ClaimOwner(); ok {
+		if err := agentdeliveryhold.ClaimOwnerValidator(v); err != nil {
+			return &ValidationError{Name: "claim_owner", err: fmt.Errorf(`ent: validator failed for field "AgentDeliveryHold.claim_owner": %w`, err)}
+		}
 	}
 	if _, ok := _c.mutation.Created(); !ok {
 		return &ValidationError{Name: "created", err: errors.New(`ent: missing required field "AgentDeliveryHold.created"`)}
@@ -194,6 +231,14 @@ func (_c *AgentDeliveryHoldCreate) createSpec() (*AgentDeliveryHold, *sqlgraph.C
 	if value, ok := _c.mutation.HeldCount(); ok {
 		_spec.SetField(agentdeliveryhold.FieldHeldCount, field.TypeInt, value)
 		_node.HeldCount = value
+	}
+	if value, ok := _c.mutation.ClaimOwner(); ok {
+		_spec.SetField(agentdeliveryhold.FieldClaimOwner, field.TypeString, value)
+		_node.ClaimOwner = value
+	}
+	if value, ok := _c.mutation.ClaimUntil(); ok {
+		_spec.SetField(agentdeliveryhold.FieldClaimUntil, field.TypeTime, value)
+		_node.ClaimUntil = &value
 	}
 	if value, ok := _c.mutation.Created(); ok {
 		_spec.SetField(agentdeliveryhold.FieldCreated, field.TypeTime, value)
@@ -296,6 +341,42 @@ func (u *AgentDeliveryHoldUpsert) UpdateHeldCount() *AgentDeliveryHoldUpsert {
 // AddHeldCount adds v to the "held_count" field.
 func (u *AgentDeliveryHoldUpsert) AddHeldCount(v int) *AgentDeliveryHoldUpsert {
 	u.Add(agentdeliveryhold.FieldHeldCount, v)
+	return u
+}
+
+// SetClaimOwner sets the "claim_owner" field.
+func (u *AgentDeliveryHoldUpsert) SetClaimOwner(v string) *AgentDeliveryHoldUpsert {
+	u.Set(agentdeliveryhold.FieldClaimOwner, v)
+	return u
+}
+
+// UpdateClaimOwner sets the "claim_owner" field to the value that was provided on create.
+func (u *AgentDeliveryHoldUpsert) UpdateClaimOwner() *AgentDeliveryHoldUpsert {
+	u.SetExcluded(agentdeliveryhold.FieldClaimOwner)
+	return u
+}
+
+// ClearClaimOwner clears the value of the "claim_owner" field.
+func (u *AgentDeliveryHoldUpsert) ClearClaimOwner() *AgentDeliveryHoldUpsert {
+	u.SetNull(agentdeliveryhold.FieldClaimOwner)
+	return u
+}
+
+// SetClaimUntil sets the "claim_until" field.
+func (u *AgentDeliveryHoldUpsert) SetClaimUntil(v time.Time) *AgentDeliveryHoldUpsert {
+	u.Set(agentdeliveryhold.FieldClaimUntil, v)
+	return u
+}
+
+// UpdateClaimUntil sets the "claim_until" field to the value that was provided on create.
+func (u *AgentDeliveryHoldUpsert) UpdateClaimUntil() *AgentDeliveryHoldUpsert {
+	u.SetExcluded(agentdeliveryhold.FieldClaimUntil)
+	return u
+}
+
+// ClearClaimUntil clears the value of the "claim_until" field.
+func (u *AgentDeliveryHoldUpsert) ClearClaimUntil() *AgentDeliveryHoldUpsert {
+	u.SetNull(agentdeliveryhold.FieldClaimUntil)
 	return u
 }
 
@@ -403,6 +484,48 @@ func (u *AgentDeliveryHoldUpsertOne) AddHeldCount(v int) *AgentDeliveryHoldUpser
 func (u *AgentDeliveryHoldUpsertOne) UpdateHeldCount() *AgentDeliveryHoldUpsertOne {
 	return u.Update(func(s *AgentDeliveryHoldUpsert) {
 		s.UpdateHeldCount()
+	})
+}
+
+// SetClaimOwner sets the "claim_owner" field.
+func (u *AgentDeliveryHoldUpsertOne) SetClaimOwner(v string) *AgentDeliveryHoldUpsertOne {
+	return u.Update(func(s *AgentDeliveryHoldUpsert) {
+		s.SetClaimOwner(v)
+	})
+}
+
+// UpdateClaimOwner sets the "claim_owner" field to the value that was provided on create.
+func (u *AgentDeliveryHoldUpsertOne) UpdateClaimOwner() *AgentDeliveryHoldUpsertOne {
+	return u.Update(func(s *AgentDeliveryHoldUpsert) {
+		s.UpdateClaimOwner()
+	})
+}
+
+// ClearClaimOwner clears the value of the "claim_owner" field.
+func (u *AgentDeliveryHoldUpsertOne) ClearClaimOwner() *AgentDeliveryHoldUpsertOne {
+	return u.Update(func(s *AgentDeliveryHoldUpsert) {
+		s.ClearClaimOwner()
+	})
+}
+
+// SetClaimUntil sets the "claim_until" field.
+func (u *AgentDeliveryHoldUpsertOne) SetClaimUntil(v time.Time) *AgentDeliveryHoldUpsertOne {
+	return u.Update(func(s *AgentDeliveryHoldUpsert) {
+		s.SetClaimUntil(v)
+	})
+}
+
+// UpdateClaimUntil sets the "claim_until" field to the value that was provided on create.
+func (u *AgentDeliveryHoldUpsertOne) UpdateClaimUntil() *AgentDeliveryHoldUpsertOne {
+	return u.Update(func(s *AgentDeliveryHoldUpsert) {
+		s.UpdateClaimUntil()
+	})
+}
+
+// ClearClaimUntil clears the value of the "claim_until" field.
+func (u *AgentDeliveryHoldUpsertOne) ClearClaimUntil() *AgentDeliveryHoldUpsertOne {
+	return u.Update(func(s *AgentDeliveryHoldUpsert) {
+		s.ClearClaimUntil()
 	})
 }
 
@@ -677,6 +800,48 @@ func (u *AgentDeliveryHoldUpsertBulk) AddHeldCount(v int) *AgentDeliveryHoldUpse
 func (u *AgentDeliveryHoldUpsertBulk) UpdateHeldCount() *AgentDeliveryHoldUpsertBulk {
 	return u.Update(func(s *AgentDeliveryHoldUpsert) {
 		s.UpdateHeldCount()
+	})
+}
+
+// SetClaimOwner sets the "claim_owner" field.
+func (u *AgentDeliveryHoldUpsertBulk) SetClaimOwner(v string) *AgentDeliveryHoldUpsertBulk {
+	return u.Update(func(s *AgentDeliveryHoldUpsert) {
+		s.SetClaimOwner(v)
+	})
+}
+
+// UpdateClaimOwner sets the "claim_owner" field to the value that was provided on create.
+func (u *AgentDeliveryHoldUpsertBulk) UpdateClaimOwner() *AgentDeliveryHoldUpsertBulk {
+	return u.Update(func(s *AgentDeliveryHoldUpsert) {
+		s.UpdateClaimOwner()
+	})
+}
+
+// ClearClaimOwner clears the value of the "claim_owner" field.
+func (u *AgentDeliveryHoldUpsertBulk) ClearClaimOwner() *AgentDeliveryHoldUpsertBulk {
+	return u.Update(func(s *AgentDeliveryHoldUpsert) {
+		s.ClearClaimOwner()
+	})
+}
+
+// SetClaimUntil sets the "claim_until" field.
+func (u *AgentDeliveryHoldUpsertBulk) SetClaimUntil(v time.Time) *AgentDeliveryHoldUpsertBulk {
+	return u.Update(func(s *AgentDeliveryHoldUpsert) {
+		s.SetClaimUntil(v)
+	})
+}
+
+// UpdateClaimUntil sets the "claim_until" field to the value that was provided on create.
+func (u *AgentDeliveryHoldUpsertBulk) UpdateClaimUntil() *AgentDeliveryHoldUpsertBulk {
+	return u.Update(func(s *AgentDeliveryHoldUpsert) {
+		s.UpdateClaimUntil()
+	})
+}
+
+// ClearClaimUntil clears the value of the "claim_until" field.
+func (u *AgentDeliveryHoldUpsertBulk) ClearClaimUntil() *AgentDeliveryHoldUpsertBulk {
+	return u.Update(func(s *AgentDeliveryHoldUpsert) {
+		s.ClearClaimUntil()
 	})
 }
 

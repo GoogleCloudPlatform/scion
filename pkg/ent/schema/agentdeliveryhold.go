@@ -51,6 +51,16 @@ func (AgentDeliveryHold) Fields() []ent.Field {
 			MaxLen(128),
 		field.Int("held_count").
 			Default(0),
+		// claim_owner and claim_until hold a short-lived cross-replica re-drive
+		// lease so only one hub pass claims and settles 64-row batches for an
+		// agent at a time (ptone/scion#7881, AC A2-3 / A2-3b).
+		field.String("claim_owner").
+			Optional().
+			Default("").
+			MaxLen(128),
+		field.Time("claim_until").
+			Optional().
+			Nillable(),
 		field.Time("created").
 			Default(time.Now).
 			Immutable(),

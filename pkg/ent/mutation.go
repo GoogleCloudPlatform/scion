@@ -16299,6 +16299,8 @@ type AgentDeliveryHoldMutation struct {
 	launch_id     *string
 	held_count    *int
 	addheld_count *int
+	claim_owner   *string
+	claim_until   *time.Time
 	created       *time.Time
 	clearedFields map[string]struct{}
 	done          bool
@@ -16551,6 +16553,104 @@ func (m *AgentDeliveryHoldMutation) ResetHeldCount() {
 	m.addheld_count = nil
 }
 
+// SetClaimOwner sets the "claim_owner" field.
+func (m *AgentDeliveryHoldMutation) SetClaimOwner(s string) {
+	m.claim_owner = &s
+}
+
+// ClaimOwner returns the value of the "claim_owner" field in the mutation.
+func (m *AgentDeliveryHoldMutation) ClaimOwner() (r string, exists bool) {
+	v := m.claim_owner
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldClaimOwner returns the old "claim_owner" field's value of the AgentDeliveryHold entity.
+// If the AgentDeliveryHold object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentDeliveryHoldMutation) OldClaimOwner(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldClaimOwner is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldClaimOwner requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldClaimOwner: %w", err)
+	}
+	return oldValue.ClaimOwner, nil
+}
+
+// ClearClaimOwner clears the value of the "claim_owner" field.
+func (m *AgentDeliveryHoldMutation) ClearClaimOwner() {
+	m.claim_owner = nil
+	m.clearedFields[agentdeliveryhold.FieldClaimOwner] = struct{}{}
+}
+
+// ClaimOwnerCleared returns if the "claim_owner" field was cleared in this mutation.
+func (m *AgentDeliveryHoldMutation) ClaimOwnerCleared() bool {
+	_, ok := m.clearedFields[agentdeliveryhold.FieldClaimOwner]
+	return ok
+}
+
+// ResetClaimOwner resets all changes to the "claim_owner" field.
+func (m *AgentDeliveryHoldMutation) ResetClaimOwner() {
+	m.claim_owner = nil
+	delete(m.clearedFields, agentdeliveryhold.FieldClaimOwner)
+}
+
+// SetClaimUntil sets the "claim_until" field.
+func (m *AgentDeliveryHoldMutation) SetClaimUntil(t time.Time) {
+	m.claim_until = &t
+}
+
+// ClaimUntil returns the value of the "claim_until" field in the mutation.
+func (m *AgentDeliveryHoldMutation) ClaimUntil() (r time.Time, exists bool) {
+	v := m.claim_until
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldClaimUntil returns the old "claim_until" field's value of the AgentDeliveryHold entity.
+// If the AgentDeliveryHold object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentDeliveryHoldMutation) OldClaimUntil(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldClaimUntil is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldClaimUntil requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldClaimUntil: %w", err)
+	}
+	return oldValue.ClaimUntil, nil
+}
+
+// ClearClaimUntil clears the value of the "claim_until" field.
+func (m *AgentDeliveryHoldMutation) ClearClaimUntil() {
+	m.claim_until = nil
+	m.clearedFields[agentdeliveryhold.FieldClaimUntil] = struct{}{}
+}
+
+// ClaimUntilCleared returns if the "claim_until" field was cleared in this mutation.
+func (m *AgentDeliveryHoldMutation) ClaimUntilCleared() bool {
+	_, ok := m.clearedFields[agentdeliveryhold.FieldClaimUntil]
+	return ok
+}
+
+// ResetClaimUntil resets all changes to the "claim_until" field.
+func (m *AgentDeliveryHoldMutation) ResetClaimUntil() {
+	m.claim_until = nil
+	delete(m.clearedFields, agentdeliveryhold.FieldClaimUntil)
+}
+
 // SetCreated sets the "created" field.
 func (m *AgentDeliveryHoldMutation) SetCreated(t time.Time) {
 	m.created = &t
@@ -16621,7 +16721,7 @@ func (m *AgentDeliveryHoldMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentDeliveryHoldMutation) Fields() []string {
-	fields := make([]string, 0, 4)
+	fields := make([]string, 0, 6)
 	if m.hold_until != nil {
 		fields = append(fields, agentdeliveryhold.FieldHoldUntil)
 	}
@@ -16630,6 +16730,12 @@ func (m *AgentDeliveryHoldMutation) Fields() []string {
 	}
 	if m.held_count != nil {
 		fields = append(fields, agentdeliveryhold.FieldHeldCount)
+	}
+	if m.claim_owner != nil {
+		fields = append(fields, agentdeliveryhold.FieldClaimOwner)
+	}
+	if m.claim_until != nil {
+		fields = append(fields, agentdeliveryhold.FieldClaimUntil)
 	}
 	if m.created != nil {
 		fields = append(fields, agentdeliveryhold.FieldCreated)
@@ -16648,6 +16754,10 @@ func (m *AgentDeliveryHoldMutation) Field(name string) (ent.Value, bool) {
 		return m.LaunchID()
 	case agentdeliveryhold.FieldHeldCount:
 		return m.HeldCount()
+	case agentdeliveryhold.FieldClaimOwner:
+		return m.ClaimOwner()
+	case agentdeliveryhold.FieldClaimUntil:
+		return m.ClaimUntil()
 	case agentdeliveryhold.FieldCreated:
 		return m.Created()
 	}
@@ -16665,6 +16775,10 @@ func (m *AgentDeliveryHoldMutation) OldField(ctx context.Context, name string) (
 		return m.OldLaunchID(ctx)
 	case agentdeliveryhold.FieldHeldCount:
 		return m.OldHeldCount(ctx)
+	case agentdeliveryhold.FieldClaimOwner:
+		return m.OldClaimOwner(ctx)
+	case agentdeliveryhold.FieldClaimUntil:
+		return m.OldClaimUntil(ctx)
 	case agentdeliveryhold.FieldCreated:
 		return m.OldCreated(ctx)
 	}
@@ -16696,6 +16810,20 @@ func (m *AgentDeliveryHoldMutation) SetField(name string, value ent.Value) error
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetHeldCount(v)
+		return nil
+	case agentdeliveryhold.FieldClaimOwner:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetClaimOwner(v)
+		return nil
+	case agentdeliveryhold.FieldClaimUntil:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetClaimUntil(v)
 		return nil
 	case agentdeliveryhold.FieldCreated:
 		v, ok := value.(time.Time)
@@ -16752,6 +16880,12 @@ func (m *AgentDeliveryHoldMutation) ClearedFields() []string {
 	if m.FieldCleared(agentdeliveryhold.FieldLaunchID) {
 		fields = append(fields, agentdeliveryhold.FieldLaunchID)
 	}
+	if m.FieldCleared(agentdeliveryhold.FieldClaimOwner) {
+		fields = append(fields, agentdeliveryhold.FieldClaimOwner)
+	}
+	if m.FieldCleared(agentdeliveryhold.FieldClaimUntil) {
+		fields = append(fields, agentdeliveryhold.FieldClaimUntil)
+	}
 	return fields
 }
 
@@ -16769,6 +16903,12 @@ func (m *AgentDeliveryHoldMutation) ClearField(name string) error {
 	case agentdeliveryhold.FieldLaunchID:
 		m.ClearLaunchID()
 		return nil
+	case agentdeliveryhold.FieldClaimOwner:
+		m.ClearClaimOwner()
+		return nil
+	case agentdeliveryhold.FieldClaimUntil:
+		m.ClearClaimUntil()
+		return nil
 	}
 	return fmt.Errorf("unknown AgentDeliveryHold nullable field %s", name)
 }
@@ -16785,6 +16925,12 @@ func (m *AgentDeliveryHoldMutation) ResetField(name string) error {
 		return nil
 	case agentdeliveryhold.FieldHeldCount:
 		m.ResetHeldCount()
+		return nil
+	case agentdeliveryhold.FieldClaimOwner:
+		m.ResetClaimOwner()
+		return nil
+	case agentdeliveryhold.FieldClaimUntil:
+		m.ResetClaimUntil()
 		return nil
 	case agentdeliveryhold.FieldCreated:
 		m.ResetCreated()
@@ -67582,6 +67728,7 @@ type MessageMutation struct {
 	recipient_project_id    *uuid.UUID
 	authorizing_user_id     *string
 	delegation_grant_id     *string
+	scheduled_event_id      *string
 	created                 *time.Time
 	clearedFields           map[string]struct{}
 	done                    bool
@@ -68997,6 +69144,55 @@ func (m *MessageMutation) ResetDelegationGrantID() {
 	delete(m.clearedFields, message.FieldDelegationGrantID)
 }
 
+// SetScheduledEventID sets the "scheduled_event_id" field.
+func (m *MessageMutation) SetScheduledEventID(s string) {
+	m.scheduled_event_id = &s
+}
+
+// ScheduledEventID returns the value of the "scheduled_event_id" field in the mutation.
+func (m *MessageMutation) ScheduledEventID() (r string, exists bool) {
+	v := m.scheduled_event_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldScheduledEventID returns the old "scheduled_event_id" field's value of the Message entity.
+// If the Message object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessageMutation) OldScheduledEventID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldScheduledEventID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldScheduledEventID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldScheduledEventID: %w", err)
+	}
+	return oldValue.ScheduledEventID, nil
+}
+
+// ClearScheduledEventID clears the value of the "scheduled_event_id" field.
+func (m *MessageMutation) ClearScheduledEventID() {
+	m.scheduled_event_id = nil
+	m.clearedFields[message.FieldScheduledEventID] = struct{}{}
+}
+
+// ScheduledEventIDCleared returns if the "scheduled_event_id" field was cleared in this mutation.
+func (m *MessageMutation) ScheduledEventIDCleared() bool {
+	_, ok := m.clearedFields[message.FieldScheduledEventID]
+	return ok
+}
+
+// ResetScheduledEventID resets all changes to the "scheduled_event_id" field.
+func (m *MessageMutation) ResetScheduledEventID() {
+	m.scheduled_event_id = nil
+	delete(m.clearedFields, message.FieldScheduledEventID)
+}
+
 // SetCreated sets the "created" field.
 func (m *MessageMutation) SetCreated(t time.Time) {
 	m.created = &t
@@ -69067,7 +69263,7 @@ func (m *MessageMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *MessageMutation) Fields() []string {
-	fields := make([]string, 0, 30)
+	fields := make([]string, 0, 31)
 	if m.project_id != nil {
 		fields = append(fields, message.FieldProjectID)
 	}
@@ -69155,6 +69351,9 @@ func (m *MessageMutation) Fields() []string {
 	if m.delegation_grant_id != nil {
 		fields = append(fields, message.FieldDelegationGrantID)
 	}
+	if m.scheduled_event_id != nil {
+		fields = append(fields, message.FieldScheduledEventID)
+	}
 	if m.created != nil {
 		fields = append(fields, message.FieldCreated)
 	}
@@ -69224,6 +69423,8 @@ func (m *MessageMutation) Field(name string) (ent.Value, bool) {
 		return m.AuthorizingUserID()
 	case message.FieldDelegationGrantID:
 		return m.DelegationGrantID()
+	case message.FieldScheduledEventID:
+		return m.ScheduledEventID()
 	case message.FieldCreated:
 		return m.Created()
 	}
@@ -69293,6 +69494,8 @@ func (m *MessageMutation) OldField(ctx context.Context, name string) (ent.Value,
 		return m.OldAuthorizingUserID(ctx)
 	case message.FieldDelegationGrantID:
 		return m.OldDelegationGrantID(ctx)
+	case message.FieldScheduledEventID:
+		return m.OldScheduledEventID(ctx)
 	case message.FieldCreated:
 		return m.OldCreated(ctx)
 	}
@@ -69507,6 +69710,13 @@ func (m *MessageMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetDelegationGrantID(v)
 		return nil
+	case message.FieldScheduledEventID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetScheduledEventID(v)
+		return nil
 	case message.FieldCreated:
 		v, ok := value.(time.Time)
 		if !ok {
@@ -69604,6 +69814,9 @@ func (m *MessageMutation) ClearedFields() []string {
 	if m.FieldCleared(message.FieldDelegationGrantID) {
 		fields = append(fields, message.FieldDelegationGrantID)
 	}
+	if m.FieldCleared(message.FieldScheduledEventID) {
+		fields = append(fields, message.FieldScheduledEventID)
+	}
 	return fields
 }
 
@@ -69677,6 +69890,9 @@ func (m *MessageMutation) ClearField(name string) error {
 		return nil
 	case message.FieldDelegationGrantID:
 		m.ClearDelegationGrantID()
+		return nil
+	case message.FieldScheduledEventID:
+		m.ClearScheduledEventID()
 		return nil
 	}
 	return fmt.Errorf("unknown Message nullable field %s", name)
@@ -69772,6 +69988,9 @@ func (m *MessageMutation) ResetField(name string) error {
 		return nil
 	case message.FieldDelegationGrantID:
 		m.ResetDelegationGrantID()
+		return nil
+	case message.FieldScheduledEventID:
+		m.ResetScheduledEventID()
 		return nil
 	case message.FieldCreated:
 		m.ResetCreated()

@@ -83,6 +83,46 @@ func (_u *AgentDeliveryHoldUpdate) AddHeldCount(v int) *AgentDeliveryHoldUpdate 
 	return _u
 }
 
+// SetClaimOwner sets the "claim_owner" field.
+func (_u *AgentDeliveryHoldUpdate) SetClaimOwner(v string) *AgentDeliveryHoldUpdate {
+	_u.mutation.SetClaimOwner(v)
+	return _u
+}
+
+// SetNillableClaimOwner sets the "claim_owner" field if the given value is not nil.
+func (_u *AgentDeliveryHoldUpdate) SetNillableClaimOwner(v *string) *AgentDeliveryHoldUpdate {
+	if v != nil {
+		_u.SetClaimOwner(*v)
+	}
+	return _u
+}
+
+// ClearClaimOwner clears the value of the "claim_owner" field.
+func (_u *AgentDeliveryHoldUpdate) ClearClaimOwner() *AgentDeliveryHoldUpdate {
+	_u.mutation.ClearClaimOwner()
+	return _u
+}
+
+// SetClaimUntil sets the "claim_until" field.
+func (_u *AgentDeliveryHoldUpdate) SetClaimUntil(v time.Time) *AgentDeliveryHoldUpdate {
+	_u.mutation.SetClaimUntil(v)
+	return _u
+}
+
+// SetNillableClaimUntil sets the "claim_until" field if the given value is not nil.
+func (_u *AgentDeliveryHoldUpdate) SetNillableClaimUntil(v *time.Time) *AgentDeliveryHoldUpdate {
+	if v != nil {
+		_u.SetClaimUntil(*v)
+	}
+	return _u
+}
+
+// ClearClaimUntil clears the value of the "claim_until" field.
+func (_u *AgentDeliveryHoldUpdate) ClearClaimUntil() *AgentDeliveryHoldUpdate {
+	_u.mutation.ClearClaimUntil()
+	return _u
+}
+
 // Mutation returns the AgentDeliveryHoldMutation object of the builder.
 func (_u *AgentDeliveryHoldUpdate) Mutation() *AgentDeliveryHoldMutation {
 	return _u.mutation
@@ -122,6 +162,11 @@ func (_u *AgentDeliveryHoldUpdate) check() error {
 			return &ValidationError{Name: "launch_id", err: fmt.Errorf(`ent: validator failed for field "AgentDeliveryHold.launch_id": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.ClaimOwner(); ok {
+		if err := agentdeliveryhold.ClaimOwnerValidator(v); err != nil {
+			return &ValidationError{Name: "claim_owner", err: fmt.Errorf(`ent: validator failed for field "AgentDeliveryHold.claim_owner": %w`, err)}
+		}
+	}
 	return nil
 }
 
@@ -151,6 +196,18 @@ func (_u *AgentDeliveryHoldUpdate) sqlSave(ctx context.Context) (_node int, err 
 	}
 	if value, ok := _u.mutation.AddedHeldCount(); ok {
 		_spec.AddField(agentdeliveryhold.FieldHeldCount, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.ClaimOwner(); ok {
+		_spec.SetField(agentdeliveryhold.FieldClaimOwner, field.TypeString, value)
+	}
+	if _u.mutation.ClaimOwnerCleared() {
+		_spec.ClearField(agentdeliveryhold.FieldClaimOwner, field.TypeString)
+	}
+	if value, ok := _u.mutation.ClaimUntil(); ok {
+		_spec.SetField(agentdeliveryhold.FieldClaimUntil, field.TypeTime, value)
+	}
+	if _u.mutation.ClaimUntilCleared() {
+		_spec.ClearField(agentdeliveryhold.FieldClaimUntil, field.TypeTime)
 	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
@@ -227,6 +284,46 @@ func (_u *AgentDeliveryHoldUpdateOne) AddHeldCount(v int) *AgentDeliveryHoldUpda
 	return _u
 }
 
+// SetClaimOwner sets the "claim_owner" field.
+func (_u *AgentDeliveryHoldUpdateOne) SetClaimOwner(v string) *AgentDeliveryHoldUpdateOne {
+	_u.mutation.SetClaimOwner(v)
+	return _u
+}
+
+// SetNillableClaimOwner sets the "claim_owner" field if the given value is not nil.
+func (_u *AgentDeliveryHoldUpdateOne) SetNillableClaimOwner(v *string) *AgentDeliveryHoldUpdateOne {
+	if v != nil {
+		_u.SetClaimOwner(*v)
+	}
+	return _u
+}
+
+// ClearClaimOwner clears the value of the "claim_owner" field.
+func (_u *AgentDeliveryHoldUpdateOne) ClearClaimOwner() *AgentDeliveryHoldUpdateOne {
+	_u.mutation.ClearClaimOwner()
+	return _u
+}
+
+// SetClaimUntil sets the "claim_until" field.
+func (_u *AgentDeliveryHoldUpdateOne) SetClaimUntil(v time.Time) *AgentDeliveryHoldUpdateOne {
+	_u.mutation.SetClaimUntil(v)
+	return _u
+}
+
+// SetNillableClaimUntil sets the "claim_until" field if the given value is not nil.
+func (_u *AgentDeliveryHoldUpdateOne) SetNillableClaimUntil(v *time.Time) *AgentDeliveryHoldUpdateOne {
+	if v != nil {
+		_u.SetClaimUntil(*v)
+	}
+	return _u
+}
+
+// ClearClaimUntil clears the value of the "claim_until" field.
+func (_u *AgentDeliveryHoldUpdateOne) ClearClaimUntil() *AgentDeliveryHoldUpdateOne {
+	_u.mutation.ClearClaimUntil()
+	return _u
+}
+
 // Mutation returns the AgentDeliveryHoldMutation object of the builder.
 func (_u *AgentDeliveryHoldUpdateOne) Mutation() *AgentDeliveryHoldMutation {
 	return _u.mutation
@@ -279,6 +376,11 @@ func (_u *AgentDeliveryHoldUpdateOne) check() error {
 			return &ValidationError{Name: "launch_id", err: fmt.Errorf(`ent: validator failed for field "AgentDeliveryHold.launch_id": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.ClaimOwner(); ok {
+		if err := agentdeliveryhold.ClaimOwnerValidator(v); err != nil {
+			return &ValidationError{Name: "claim_owner", err: fmt.Errorf(`ent: validator failed for field "AgentDeliveryHold.claim_owner": %w`, err)}
+		}
+	}
 	return nil
 }
 
@@ -325,6 +427,18 @@ func (_u *AgentDeliveryHoldUpdateOne) sqlSave(ctx context.Context) (_node *Agent
 	}
 	if value, ok := _u.mutation.AddedHeldCount(); ok {
 		_spec.AddField(agentdeliveryhold.FieldHeldCount, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.ClaimOwner(); ok {
+		_spec.SetField(agentdeliveryhold.FieldClaimOwner, field.TypeString, value)
+	}
+	if _u.mutation.ClaimOwnerCleared() {
+		_spec.ClearField(agentdeliveryhold.FieldClaimOwner, field.TypeString)
+	}
+	if value, ok := _u.mutation.ClaimUntil(); ok {
+		_spec.SetField(agentdeliveryhold.FieldClaimUntil, field.TypeTime, value)
+	}
+	if _u.mutation.ClaimUntilCleared() {
+		_spec.ClearField(agentdeliveryhold.FieldClaimUntil, field.TypeTime)
 	}
 	_node = &AgentDeliveryHold{config: _u.config}
 	_spec.Assign = _node.assignValues

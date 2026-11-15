@@ -76,6 +76,8 @@ type Message struct {
 	AuthorizingUserID *string `json:"authorizing_user_id,omitempty"`
 	// DelegationGrantID holds the value of the "delegation_grant_id" field.
 	DelegationGrantID *string `json:"delegation_grant_id,omitempty"`
+	// ScheduledEventID holds the value of the "scheduled_event_id" field.
+	ScheduledEventID *string `json:"scheduled_event_id,omitempty"`
 	// Created holds the value of the "created" field.
 	Created      time.Time `json:"created,omitempty"`
 	selectValues sql.SelectValues
@@ -90,7 +92,7 @@ func (*Message) scanValues(columns []string) ([]any, error) {
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
 		case message.FieldUrgent, message.FieldBroadcasted, message.FieldRead:
 			values[i] = new(sql.NullBool)
-		case message.FieldSender, message.FieldSenderID, message.FieldRecipient, message.FieldRecipientID, message.FieldMsg, message.FieldType, message.FieldAgentID, message.FieldGroupID, message.FieldDispatchState, message.FieldDispatchFailureReason, message.FieldDeliveryID, message.FieldDeliveryOutcome, message.FieldHoldLaunchID, message.FieldNotReached, message.FieldChannel, message.FieldThreadID, message.FieldAuthorizingUserID, message.FieldDelegationGrantID:
+		case message.FieldSender, message.FieldSenderID, message.FieldRecipient, message.FieldRecipientID, message.FieldMsg, message.FieldType, message.FieldAgentID, message.FieldGroupID, message.FieldDispatchState, message.FieldDispatchFailureReason, message.FieldDeliveryID, message.FieldDeliveryOutcome, message.FieldHoldLaunchID, message.FieldNotReached, message.FieldChannel, message.FieldThreadID, message.FieldAuthorizingUserID, message.FieldDelegationGrantID, message.FieldScheduledEventID:
 			values[i] = new(sql.NullString)
 		case message.FieldDispatchedAt, message.FieldDeliveringAt, message.FieldHoldUntil, message.FieldNotReachedAt, message.FieldCreated:
 			values[i] = new(sql.NullTime)
@@ -305,6 +307,13 @@ func (_m *Message) assignValues(columns []string, values []any) error {
 				_m.DelegationGrantID = new(string)
 				*_m.DelegationGrantID = value.String
 			}
+		case message.FieldScheduledEventID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field scheduled_event_id", values[i])
+			} else if value.Valid {
+				_m.ScheduledEventID = new(string)
+				*_m.ScheduledEventID = value.String
+			}
 		case message.FieldCreated:
 			if value, ok := values[i].(*sql.NullTime); !ok {
 				return fmt.Errorf("unexpected type %T for field created", values[i])
@@ -459,6 +468,11 @@ func (_m *Message) String() string {
 	builder.WriteString(", ")
 	if v := _m.DelegationGrantID; v != nil {
 		builder.WriteString("delegation_grant_id=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.ScheduledEventID; v != nil {
+		builder.WriteString("scheduled_event_id=")
 		builder.WriteString(*v)
 	}
 	builder.WriteString(", ")

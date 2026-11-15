@@ -112,6 +112,7 @@ func entMessageToStore(e *ent.Message) *store.Message {
 		HoldLaunchID:          derefString(e.HoldLaunchID),
 		NotReached:            derefString(e.NotReached),
 		NotReachedAt:          e.NotReachedAt,
+		ScheduledEventID:      derefString(e.ScheduledEventID),
 	}
 }
 
@@ -221,6 +222,9 @@ func (s *MessageStore) CreateMessage(ctx context.Context, msg *store.Message) er
 	}
 	if msg.NotReachedAt != nil {
 		create.SetNotReachedAt(*msg.NotReachedAt)
+	}
+	if msg.ScheduledEventID != "" {
+		create.SetScheduledEventID(msg.ScheduledEventID)
 	}
 	if !msg.CreatedAt.IsZero() {
 		create.SetCreated(msg.CreatedAt)

@@ -504,8 +504,14 @@ func init() {
 	agentdeliveryholdDescHeldCount := agentdeliveryholdFields[3].Descriptor()
 	// agentdeliveryhold.DefaultHeldCount holds the default value on creation for the held_count field.
 	agentdeliveryhold.DefaultHeldCount = agentdeliveryholdDescHeldCount.Default.(int)
+	// agentdeliveryholdDescClaimOwner is the schema descriptor for claim_owner field.
+	agentdeliveryholdDescClaimOwner := agentdeliveryholdFields[4].Descriptor()
+	// agentdeliveryhold.DefaultClaimOwner holds the default value on creation for the claim_owner field.
+	agentdeliveryhold.DefaultClaimOwner = agentdeliveryholdDescClaimOwner.Default.(string)
+	// agentdeliveryhold.ClaimOwnerValidator is a validator for the "claim_owner" field. It is called by the builders before save.
+	agentdeliveryhold.ClaimOwnerValidator = agentdeliveryholdDescClaimOwner.Validators[0].(func(string) error)
 	// agentdeliveryholdDescCreated is the schema descriptor for created field.
-	agentdeliveryholdDescCreated := agentdeliveryholdFields[4].Descriptor()
+	agentdeliveryholdDescCreated := agentdeliveryholdFields[6].Descriptor()
 	// agentdeliveryhold.DefaultCreated holds the default value on creation for the created field.
 	agentdeliveryhold.DefaultCreated = agentdeliveryholdDescCreated.Default.(func() time.Time)
 	// agentdeliveryholdDescID is the schema descriptor for id field.
@@ -2248,8 +2254,12 @@ func init() {
 	messageDescThreadID := messageFields[24].Descriptor()
 	// message.ThreadIDValidator is a validator for the "thread_id" field. It is called by the builders before save.
 	message.ThreadIDValidator = messageDescThreadID.Validators[0].(func(string) error)
+	// messageDescScheduledEventID is the schema descriptor for scheduled_event_id field.
+	messageDescScheduledEventID := messageFields[30].Descriptor()
+	// message.ScheduledEventIDValidator is a validator for the "scheduled_event_id" field. It is called by the builders before save.
+	message.ScheduledEventIDValidator = messageDescScheduledEventID.Validators[0].(func(string) error)
 	// messageDescCreated is the schema descriptor for created field.
-	messageDescCreated := messageFields[30].Descriptor()
+	messageDescCreated := messageFields[31].Descriptor()
 	// message.DefaultCreated holds the default value on creation for the created field.
 	message.DefaultCreated = messageDescCreated.Default.(func() time.Time)
 	// messageDescID is the schema descriptor for id field.

@@ -398,6 +398,20 @@ func (_c *MessageCreate) SetNillableDelegationGrantID(v *string) *MessageCreate 
 	return _c
 }
 
+// SetScheduledEventID sets the "scheduled_event_id" field.
+func (_c *MessageCreate) SetScheduledEventID(v string) *MessageCreate {
+	_c.mutation.SetScheduledEventID(v)
+	return _c
+}
+
+// SetNillableScheduledEventID sets the "scheduled_event_id" field if the given value is not nil.
+func (_c *MessageCreate) SetNillableScheduledEventID(v *string) *MessageCreate {
+	if v != nil {
+		_c.SetScheduledEventID(*v)
+	}
+	return _c
+}
+
 // SetCreated sets the "created" field.
 func (_c *MessageCreate) SetCreated(v time.Time) *MessageCreate {
 	_c.mutation.SetCreated(v)
@@ -560,6 +574,11 @@ func (_c *MessageCreate) check() error {
 			return &ValidationError{Name: "thread_id", err: fmt.Errorf(`ent: validator failed for field "Message.thread_id": %w`, err)}
 		}
 	}
+	if v, ok := _c.mutation.ScheduledEventID(); ok {
+		if err := message.ScheduledEventIDValidator(v); err != nil {
+			return &ValidationError{Name: "scheduled_event_id", err: fmt.Errorf(`ent: validator failed for field "Message.scheduled_event_id": %w`, err)}
+		}
+	}
 	if _, ok := _c.mutation.Created(); !ok {
 		return &ValidationError{Name: "created", err: errors.New(`ent: missing required field "Message.created"`)}
 	}
@@ -714,6 +733,10 @@ func (_c *MessageCreate) createSpec() (*Message, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.DelegationGrantID(); ok {
 		_spec.SetField(message.FieldDelegationGrantID, field.TypeString, value)
 		_node.DelegationGrantID = &value
+	}
+	if value, ok := _c.mutation.ScheduledEventID(); ok {
+		_spec.SetField(message.FieldScheduledEventID, field.TypeString, value)
+		_node.ScheduledEventID = &value
 	}
 	if value, ok := _c.mutation.Created(); ok {
 		_spec.SetField(message.FieldCreated, field.TypeTime, value)
@@ -1195,6 +1218,9 @@ func (u *MessageUpsertOne) UpdateNewValues() *MessageUpsertOne {
 		}
 		if _, exists := u.create.mutation.DelegationGrantID(); exists {
 			s.SetIgnore(message.FieldDelegationGrantID)
+		}
+		if _, exists := u.create.mutation.ScheduledEventID(); exists {
+			s.SetIgnore(message.FieldScheduledEventID)
 		}
 		if _, exists := u.create.mutation.Created(); exists {
 			s.SetIgnore(message.FieldCreated)
@@ -1886,6 +1912,9 @@ func (u *MessageUpsertBulk) UpdateNewValues() *MessageUpsertBulk {
 			}
 			if _, exists := b.mutation.DelegationGrantID(); exists {
 				s.SetIgnore(message.FieldDelegationGrantID)
+			}
+			if _, exists := b.mutation.ScheduledEventID(); exists {
+				s.SetIgnore(message.FieldScheduledEventID)
 			}
 			if _, exists := b.mutation.Created(); exists {
 				s.SetIgnore(message.FieldCreated)

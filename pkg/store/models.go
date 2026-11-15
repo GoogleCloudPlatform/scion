@@ -3684,10 +3684,11 @@ type Message struct {
 
 	// Hold-until-session re-drive fields (ptone/scion#7881). Internal store
 	// fields only — never serialized to API, history, or SSE responses.
-	HoldUntil    *time.Time `json:"-"`
-	HoldLaunchID string     `json:"-"`
-	NotReached   string     `json:"-"`
-	NotReachedAt *time.Time `json:"-"`
+	HoldUntil        *time.Time `json:"-"`
+	HoldLaunchID     string     `json:"-"`
+	NotReached       string     `json:"-"`
+	NotReachedAt     *time.Time `json:"-"`
+	ScheduledEventID string     `json:"-"`
 
 	// DeferredAttachments is never stored. For a deferred message, the
 	// conversation messages route lists its attachments stored as

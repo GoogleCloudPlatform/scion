@@ -200,6 +200,11 @@ func DelegationGrantID(v string) predicate.Message {
 	return predicate.Message(sql.FieldEQ(FieldDelegationGrantID, v))
 }
 
+// ScheduledEventID applies equality check predicate on the "scheduled_event_id" field. It's identical to ScheduledEventIDEQ.
+func ScheduledEventID(v string) predicate.Message {
+	return predicate.Message(sql.FieldEQ(FieldScheduledEventID, v))
+}
+
 // Created applies equality check predicate on the "created" field. It's identical to CreatedEQ.
 func Created(v time.Time) predicate.Message {
 	return predicate.Message(sql.FieldEQ(FieldCreated, v))
@@ -1923,6 +1928,81 @@ func DelegationGrantIDEqualFold(v string) predicate.Message {
 // DelegationGrantIDContainsFold applies the ContainsFold predicate on the "delegation_grant_id" field.
 func DelegationGrantIDContainsFold(v string) predicate.Message {
 	return predicate.Message(sql.FieldContainsFold(FieldDelegationGrantID, v))
+}
+
+// ScheduledEventIDEQ applies the EQ predicate on the "scheduled_event_id" field.
+func ScheduledEventIDEQ(v string) predicate.Message {
+	return predicate.Message(sql.FieldEQ(FieldScheduledEventID, v))
+}
+
+// ScheduledEventIDNEQ applies the NEQ predicate on the "scheduled_event_id" field.
+func ScheduledEventIDNEQ(v string) predicate.Message {
+	return predicate.Message(sql.FieldNEQ(FieldScheduledEventID, v))
+}
+
+// ScheduledEventIDIn applies the In predicate on the "scheduled_event_id" field.
+func ScheduledEventIDIn(vs ...string) predicate.Message {
+	return predicate.Message(sql.FieldIn(FieldScheduledEventID, vs...))
+}
+
+// ScheduledEventIDNotIn applies the NotIn predicate on the "scheduled_event_id" field.
+func ScheduledEventIDNotIn(vs ...string) predicate.Message {
+	return predicate.Message(sql.FieldNotIn(FieldScheduledEventID, vs...))
+}
+
+// ScheduledEventIDGT applies the GT predicate on the "scheduled_event_id" field.
+func ScheduledEventIDGT(v string) predicate.Message {
+	return predicate.Message(sql.FieldGT(FieldScheduledEventID, v))
+}
+
+// ScheduledEventIDGTE applies the GTE predicate on the "scheduled_event_id" field.
+func ScheduledEventIDGTE(v string) predicate.Message {
+	return predicate.Message(sql.FieldGTE(FieldScheduledEventID, v))
+}
+
+// ScheduledEventIDLT applies the LT predicate on the "scheduled_event_id" field.
+func ScheduledEventIDLT(v string) predicate.Message {
+	return predicate.Message(sql.FieldLT(FieldScheduledEventID, v))
+}
+
+// ScheduledEventIDLTE applies the LTE predicate on the "scheduled_event_id" field.
+func ScheduledEventIDLTE(v string) predicate.Message {
+	return predicate.Message(sql.FieldLTE(FieldScheduledEventID, v))
+}
+
+// ScheduledEventIDContains applies the Contains predicate on the "scheduled_event_id" field.
+func ScheduledEventIDContains(v string) predicate.Message {
+	return predicate.Message(sql.FieldContains(FieldScheduledEventID, v))
+}
+
+// ScheduledEventIDHasPrefix applies the HasPrefix predicate on the "scheduled_event_id" field.
+func ScheduledEventIDHasPrefix(v string) predicate.Message {
+	return predicate.Message(sql.FieldHasPrefix(FieldScheduledEventID, v))
+}
+
+// ScheduledEventIDHasSuffix applies the HasSuffix predicate on the "scheduled_event_id" field.
+func ScheduledEventIDHasSuffix(v string) predicate.Message {
+	return predicate.Message(sql.FieldHasSuffix(FieldScheduledEventID, v))
+}
+
+// ScheduledEventIDIsNil applies the IsNil predicate on the "scheduled_event_id" field.
+func ScheduledEventIDIsNil() predicate.Message {
+	return predicate.Message(sql.FieldIsNull(FieldScheduledEventID))
+}
+
+// ScheduledEventIDNotNil applies the NotNil predicate on the "scheduled_event_id" field.
+func ScheduledEventIDNotNil() predicate.Message {
+	return predicate.Message(sql.FieldNotNull(FieldScheduledEventID))
+}
+
+// ScheduledEventIDEqualFold applies the EqualFold predicate on the "scheduled_event_id" field.
+func ScheduledEventIDEqualFold(v string) predicate.Message {
+	return predicate.Message(sql.FieldEqualFold(FieldScheduledEventID, v))
+}
+
+// ScheduledEventIDContainsFold applies the ContainsFold predicate on the "scheduled_event_id" field.
+func ScheduledEventIDContainsFold(v string) predicate.Message {
+	return predicate.Message(sql.FieldContainsFold(FieldScheduledEventID, v))
 }
 
 // CreatedEQ applies the EQ predicate on the "created" field.

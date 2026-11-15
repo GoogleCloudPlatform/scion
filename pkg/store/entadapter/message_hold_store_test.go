@@ -677,3 +677,203 @@ func TestMessageHoldStore_ExpiryAndSweepsIgnoreAwaitingSession(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, hasMarker)
 }
+
+func TestMessageHoldStore_RedriveLeaseExclusivityAndExpiry(t *testing.T) {
+	ctx := context.Background()
+	f := newHoldStoreFixture(t)
+
+	// No marker -> AcquireAgentRedriveLease returns false.
+	ok, err := f.cs.AcquireAgentRedriveLease(ctx, f.agentID, "replica-a", time.Minute)
+	require.NoError(t, err)
+	assert.False(t, ok)
+
+	m1 := f.createDispatchedMsg(t, "lease-1", 0)
+	m2 := f.createDispatchedMsg(t, "lease-2", time.Millisecond)
+	_, err = f.cs.PrepareOrHoldMessage(ctx, f.agentID, m1.ID, 100)
+	require.NoError(t, err)
+	f.stampNoSession(t, m1.ID)
+	held, err := f.cs.HoldMessageAwaitingSession(ctx, store.HoldMessageParams{
+		MessageID: m1.ID, AgentID: f.agentID, MaxProofAge: 2 * time.Minute, HoldTTL: 10 * time.Minute, MaxHeld: 100,
+	})
+	require.NoError(t, err)
+	require.True(t, held)
+	res2, err := f.cs.PrepareOrHoldMessage(ctx, f.agentID, m2.ID, 100)
+	require.NoError(t, err)
+	require.True(t, res2.Held)
+
+	// Replica A acquires the lease; Replica B is refused at both Acquire and Claim.
+	ok, err = f.cs.AcquireAgentRedriveLease(ctx, f.agentID, "replica-a", time.Minute)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	okB, err := f.cs.AcquireAgentRedriveLease(ctx, f.agentID, "replica-b", time.Minute)
+	require.NoError(t, err)
+	assert.False(t, okB, "competing replica must not acquire unexpired lease")
+
+	stolen, err := f.cs.ClaimHeldMessages(store.WithRedriveLeaseOwner(ctx, "replica-b"), f.agentID, 64)
+	require.NoError(t, err)
+	assert.Empty(t, stolen, "non-owner must not claim rows while lease is active")
+
+	unleased, err := f.cs.ClaimHeldMessages(ctx, f.agentID, 64)
+	require.NoError(t, err)
+	assert.Empty(t, unleased, "unleased caller must not claim rows while lease is active")
+
+	// Replica A claims batch 1 (1 row), renews lease, then claims final row.
+	ctxA := store.WithRedriveLeaseOwner(ctx, "replica-a")
+	batch1, err := f.cs.ClaimHeldMessages(ctxA, f.agentID, 1)
+	require.NoError(t, err)
+	require.Len(t, batch1, 1)
+	assert.Equal(t, m1.ID, batch1[0].ID)
+
+	f.advance(30 * time.Second)
+	renewed, err := f.cs.RenewAgentRedriveLease(ctx, f.agentID, "replica-a", time.Minute)
+	require.NoError(t, err)
+	require.True(t, renewed)
+
+	// Past original 1m TTL (now T+70s), renewed lease keeps blocking Replica B.
+	f.advance(40 * time.Second)
+	okB, err = f.cs.AcquireAgentRedriveLease(ctx, f.agentID, "replica-b", time.Minute)
+	require.NoError(t, err)
+	assert.False(t, okB)
+
+	batch2, err := f.cs.ClaimHeldMessages(ctxA, f.agentID, 64)
+	require.NoError(t, err)
+	require.Len(t, batch2, 1)
+	assert.Equal(t, m2.ID, batch2[0].ID)
+
+	// Marker stays present while Replica A still holds the lease (so live sends
+	// arriving mid-drain queue behind batch 2 instead of overtaking it), and is
+	// deleted once ReleaseAgentRedriveLease runs with zero awaiting_session rows.
+	hasMarker, err := f.cs.HasAgentDeliveryHold(ctx, f.agentID)
+	require.NoError(t, err)
+	assert.True(t, hasMarker, "leased marker stays alive until drain releases lease")
+
+	require.NoError(t, f.cs.ReleaseAgentRedriveLease(ctx, f.agentID, "replica-a"))
+	hasMarker, err = f.cs.HasAgentDeliveryHold(ctx, f.agentID)
+	require.NoError(t, err)
+	assert.False(t, hasMarker, "releasing lease with 0 held rows must delete marker")
+
+	// Lease expiry takeover: if Replica A stalls past TTL, Replica B can take over.
+	m3 := f.createDispatchedMsg(t, "lease-3", 2*time.Millisecond)
+	_, err = f.cs.PrepareOrHoldMessage(ctx, f.agentID, m3.ID, 100)
+	require.NoError(t, err)
+	f.stampNoSession(t, m3.ID)
+	held, err = f.cs.HoldMessageAwaitingSession(ctx, store.HoldMessageParams{
+		MessageID: m3.ID, AgentID: f.agentID, MaxProofAge: 2 * time.Minute, HoldTTL: 10 * time.Minute, MaxHeld: 100,
+	})
+	require.NoError(t, err)
+	require.True(t, held)
+
+	ok, err = f.cs.AcquireAgentRedriveLease(ctx, f.agentID, "replica-a", 30*time.Second)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	f.advance(31 * time.Second)
+	okB, err = f.cs.AcquireAgentRedriveLease(ctx, f.agentID, "replica-b", time.Minute)
+	require.NoError(t, err)
+	require.True(t, okB, "expired lease must allow replica B takeover")
+
+	renewStaleA, err := f.cs.RenewAgentRedriveLease(ctx, f.agentID, "replica-a", time.Minute)
+	require.NoError(t, err)
+	assert.False(t, renewStaleA, "superseded owner must not renew lease")
+
+	staleClaimA, err := f.cs.ClaimHeldMessages(ctxA, f.agentID, 64)
+	require.NoError(t, err)
+	assert.Empty(t, staleClaimA, "superseded owner must not claim rows")
+
+	claimedB, err := f.cs.ClaimHeldMessages(store.WithRedriveLeaseOwner(ctx, "replica-b"), f.agentID, 64)
+	require.NoError(t, err)
+	require.Len(t, claimedB, 1)
+	assert.Equal(t, m3.ID, claimedB[0].ID)
+	require.NoError(t, f.cs.ReleaseAgentRedriveLease(ctx, f.agentID, "replica-b"))
+}
+
+func TestMessageHoldStore_ConcurrentCapNeverExceedsMaxHeld(t *testing.T) {
+	ctx := context.Background()
+	f := newHoldStoreFixture(t)
+	const maxHeld = 10
+	const totalSenders = 32
+
+	msgs := make([]*store.Message, totalSenders)
+	for i := 0; i < totalSenders; i++ {
+		msgs[i] = f.createDispatchedMsg(t, "cap-race", time.Duration(i)*time.Millisecond)
+		if i%2 == 0 {
+			_, err := f.cs.PrepareOrHoldMessage(ctx, f.agentID, msgs[i].ID, maxHeld)
+			require.NoError(t, err)
+			f.stampNoSession(t, msgs[i].ID)
+		}
+	}
+
+	// Seed the first held row so both PrepareOrHoldMessage and HoldMessageAwaitingSession
+	// race concurrently against maxHeld.
+	held0, err := f.cs.HoldMessageAwaitingSession(ctx, store.HoldMessageParams{
+		MessageID: msgs[0].ID, AgentID: f.agentID, MaxProofAge: 2 * time.Minute, HoldTTL: 10 * time.Minute, MaxHeld: maxHeld,
+	})
+	require.NoError(t, err)
+	require.True(t, held0)
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	var admitted atomic.Int32
+	admitted.Store(1)
+	for i := 1; i < totalSenders; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if i%2 == 0 {
+				ok, hErr := f.cs.HoldMessageAwaitingSession(ctx, store.HoldMessageParams{
+					MessageID: msgs[i].ID, AgentID: f.agentID, MaxProofAge: 2 * time.Minute, HoldTTL: 10 * time.Minute, MaxHeld: maxHeld,
+				})
+				assert.NoError(t, hErr)
+				if ok {
+					admitted.Add(1)
+				}
+			} else {
+				res, pErr := f.cs.PrepareOrHoldMessage(ctx, f.agentID, msgs[i].ID, maxHeld)
+				assert.NoError(t, pErr)
+				if res.Held {
+					admitted.Add(1)
+				}
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	assert.Equal(t, int32(maxHeld), admitted.Load(), "concurrent callers must admit exactly maxHeld rows")
+	claimed, err := f.cs.ClaimHeldMessages(ctx, f.agentID, 100)
+	require.NoError(t, err)
+	assert.Len(t, claimed, maxHeld)
+}
+
+func TestMessageHoldStore_ScheduledEventIDRoundTripAndJSONOmission(t *testing.T) {
+	ctx := context.Background()
+	f := newHoldStoreFixture(t)
+
+	evtID := uuid.NewString()
+	m := &store.Message{
+		ID:               uuid.NewString(),
+		ProjectID:        f.projectID,
+		Sender:           "scheduler",
+		SenderID:         "SCHEDULER",
+		Recipient:        "agent:target",
+		RecipientID:      f.agentID,
+		AgentID:          f.agentID,
+		Msg:              "scheduled body",
+		Type:             "system",
+		DispatchState:    store.MessageDispatchDispatched,
+		ScheduledEventID: evtID,
+		CreatedAt:        f.currentTime(),
+	}
+	require.NoError(t, f.cs.CreateMessage(ctx, m))
+
+	got, err := f.cs.GetMessage(ctx, m.ID)
+	require.NoError(t, err)
+	assert.Equal(t, evtID, got.ScheduledEventID)
+
+	raw, err := json.Marshal(got)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), evtID, "ScheduledEventID must be omitted from JSON")
+}

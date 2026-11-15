@@ -23,6 +23,10 @@ type AgentDeliveryHold struct {
 	LaunchID string `json:"launch_id,omitempty"`
 	// HeldCount holds the value of the "held_count" field.
 	HeldCount int `json:"held_count,omitempty"`
+	// ClaimOwner holds the value of the "claim_owner" field.
+	ClaimOwner string `json:"claim_owner,omitempty"`
+	// ClaimUntil holds the value of the "claim_until" field.
+	ClaimUntil *time.Time `json:"claim_until,omitempty"`
 	// Created holds the value of the "created" field.
 	Created      time.Time `json:"created,omitempty"`
 	selectValues sql.SelectValues
@@ -35,9 +39,9 @@ func (*AgentDeliveryHold) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case agentdeliveryhold.FieldHeldCount:
 			values[i] = new(sql.NullInt64)
-		case agentdeliveryhold.FieldID, agentdeliveryhold.FieldLaunchID:
+		case agentdeliveryhold.FieldID, agentdeliveryhold.FieldLaunchID, agentdeliveryhold.FieldClaimOwner:
 			values[i] = new(sql.NullString)
-		case agentdeliveryhold.FieldHoldUntil, agentdeliveryhold.FieldCreated:
+		case agentdeliveryhold.FieldHoldUntil, agentdeliveryhold.FieldClaimUntil, agentdeliveryhold.FieldCreated:
 			values[i] = new(sql.NullTime)
 		default:
 			values[i] = new(sql.UnknownType)
@@ -77,6 +81,19 @@ func (_m *AgentDeliveryHold) assignValues(columns []string, values []any) error 
 				return fmt.Errorf("unexpected type %T for field held_count", values[i])
 			} else if value.Valid {
 				_m.HeldCount = int(value.Int64)
+			}
+		case agentdeliveryhold.FieldClaimOwner:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field claim_owner", values[i])
+			} else if value.Valid {
+				_m.ClaimOwner = value.String
+			}
+		case agentdeliveryhold.FieldClaimUntil:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field claim_until", values[i])
+			} else if value.Valid {
+				_m.ClaimUntil = new(time.Time)
+				*_m.ClaimUntil = value.Time
 			}
 		case agentdeliveryhold.FieldCreated:
 			if value, ok := values[i].(*sql.NullTime); !ok {
@@ -128,6 +145,14 @@ func (_m *AgentDeliveryHold) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("held_count=")
 	builder.WriteString(fmt.Sprintf("%v", _m.HeldCount))
+	builder.WriteString(", ")
+	builder.WriteString("claim_owner=")
+	builder.WriteString(_m.ClaimOwner)
+	builder.WriteString(", ")
+	if v := _m.ClaimUntil; v != nil {
+		builder.WriteString("claim_until=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
 	builder.WriteString(", ")
 	builder.WriteString("created=")
 	builder.WriteString(_m.Created.Format(time.ANSIC))

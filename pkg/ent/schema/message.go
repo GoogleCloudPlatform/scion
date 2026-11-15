@@ -161,6 +161,17 @@ func (Message) Fields() []ent.Field {
 			Optional().
 			Nillable().
 			Immutable(),
+		// scheduled_event_id records the server-derived ScheduledEvent ID for
+		// a message persisted by the scheduler's messageEventHandler
+		// (ptone/scion#7881). Nullable: every client, agent, chat, choice or
+		// broker-inbound message leaves it NULL. Immutable and omitted from
+		// JSON so client-supplied fields (channel, thread_id) can never select
+		// scheduled-authority re-validation.
+		field.String("scheduled_event_id").
+			Optional().
+			Nillable().
+			Immutable().
+			MaxLen(64),
 		field.Time("created").
 			Default(time.Now).
 			Immutable(),

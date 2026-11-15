@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"entgo.io/ent/dialect"
@@ -185,10 +186,16 @@ func countHeldMessages(ctx context.Context, c *ent.Client, agentID string) (int,
 	return n, nil
 }
 
+func markerLeaseActive(m *ent.AgentDeliveryHold, now time.Time) bool {
+	return m != nil && m.ClaimOwner != "" && m.ClaimUntil != nil && m.ClaimUntil.After(now)
+}
+
 // syncAgentDeliveryHold reconciles agentID's marker row with the live count of
 // awaiting_session messages inside c's transaction: deletes the marker when
-// zero remain, updates held_count when the marker exists, or creates the
-// marker with fallbackHoldUntil (never extending an existing marker's bound).
+// zero remain (unless an unexpired re-drive lease is held on the marker, in
+// which case HeldCount is set to 0 until ReleaseAgentRedriveLease completes),
+// updates held_count when the marker exists, or creates the marker with
+// fallbackHoldUntil (never extending an existing marker's bound).
 func syncAgentDeliveryHold(ctx context.Context, c *ent.Client, agentID string, fallbackHoldUntil time.Time, launchID string, now time.Time) error {
 	count, err := countHeldMessages(ctx, c, agentID)
 	if err != nil {
@@ -200,6 +207,14 @@ func syncAgentDeliveryHold(ctx context.Context, c *ent.Client, agentID string, f
 	}
 	if count == 0 {
 		if marker != nil {
+			if markerLeaseActive(marker, now) {
+				if marker.HeldCount != 0 {
+					if err := c.AgentDeliveryHold.UpdateOneID(agentID).SetHeldCount(0).Exec(ctx); err != nil {
+						return mapError(err)
+					}
+				}
+				return nil
+			}
 			if err := c.AgentDeliveryHold.DeleteOneID(agentID).Exec(ctx); err != nil && !ent.IsNotFound(err) {
 				return mapError(err)
 			}
@@ -512,6 +527,7 @@ func (s *BrokerDispatchStore) ClaimHeldMessages(ctx context.Context, agentID str
 	if err != nil {
 		return nil, err
 	}
+	leaseOwner := store.RedriveLeaseOwnerFromContext(ctx)
 
 	preNow, err := s.holdNow(ctx, s.client.Driver())
 	if err != nil {
@@ -551,6 +567,17 @@ func (s *BrokerDispatchStore) ClaimHeldMessages(ctx context.Context, agentID str
 		if err != nil {
 			return err
 		}
+		marker, err := lockHoldMarker(ctx, c, agentID)
+		if err != nil {
+			return err
+		}
+		if leaseOwner != "" {
+			if !markerLeaseActive(marker, now) || marker.ClaimOwner != leaseOwner {
+				return nil
+			}
+		} else if markerLeaseActive(marker, now) {
+			return nil
+		}
 		claimed = make([]store.Message, 0, len(candidates))
 		for _, cand := range candidates {
 			n, err := c.Message.Update().
@@ -581,6 +608,112 @@ func (s *BrokerDispatchStore) ClaimHeldMessages(ctx context.Context, agentID str
 		return nil, err
 	}
 	return claimed, nil
+}
+
+// AcquireAgentRedriveLease implements store.MessageHoldStore.
+func (s *BrokerDispatchStore) AcquireAgentRedriveLease(ctx context.Context, agentID, ownerID string, ttl time.Duration) (bool, error) {
+	if agentID == "" || ownerID == "" || ttl <= 0 {
+		return false, nil
+	}
+	agentUID, err := parseUUID(agentID)
+	if err != nil {
+		return false, err
+	}
+	acquired := false
+	err = s.withHoldTx(ctx, func(c *ent.Client, now time.Time) error {
+		if _, err := lockAgentForHold(ctx, c, agentUID); err != nil {
+			return err
+		}
+		marker, err := lockHoldMarker(ctx, c, agentID)
+		if err != nil {
+			return err
+		}
+		if marker == nil {
+			return nil
+		}
+		if markerLeaseActive(marker, now) && marker.ClaimOwner != ownerID {
+			return nil
+		}
+		until := now.Add(ttl)
+		if err := c.AgentDeliveryHold.UpdateOneID(agentID).
+			SetClaimOwner(ownerID).
+			SetClaimUntil(until).
+			Exec(ctx); err != nil {
+			return mapError(err)
+		}
+		acquired = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return acquired, nil
+}
+
+// RenewAgentRedriveLease implements store.MessageHoldStore.
+func (s *BrokerDispatchStore) RenewAgentRedriveLease(ctx context.Context, agentID, ownerID string, ttl time.Duration) (bool, error) {
+	if agentID == "" || ownerID == "" || ttl <= 0 {
+		return false, nil
+	}
+	agentUID, err := parseUUID(agentID)
+	if err != nil {
+		return false, err
+	}
+	renewed := false
+	err = s.withHoldTx(ctx, func(c *ent.Client, now time.Time) error {
+		if _, err := lockAgentForHold(ctx, c, agentUID); err != nil {
+			return err
+		}
+		marker, err := lockHoldMarker(ctx, c, agentID)
+		if err != nil {
+			return err
+		}
+		if marker == nil || marker.ClaimOwner != ownerID {
+			return nil
+		}
+		until := now.Add(ttl)
+		if err := c.AgentDeliveryHold.UpdateOneID(agentID).
+			SetClaimUntil(until).
+			Exec(ctx); err != nil {
+			return mapError(err)
+		}
+		renewed = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return renewed, nil
+}
+
+// ReleaseAgentRedriveLease implements store.MessageHoldStore.
+func (s *BrokerDispatchStore) ReleaseAgentRedriveLease(ctx context.Context, agentID, ownerID string) error {
+	if agentID == "" || ownerID == "" {
+		return nil
+	}
+	agentUID, err := parseUUID(agentID)
+	if err != nil {
+		return err
+	}
+	return s.withHoldTx(ctx, func(c *ent.Client, now time.Time) error {
+		if _, err := lockAgentForHold(ctx, c, agentUID); err != nil {
+			return err
+		}
+		marker, err := lockHoldMarker(ctx, c, agentID)
+		if err != nil {
+			return err
+		}
+		if marker == nil || marker.ClaimOwner != ownerID {
+			return nil
+		}
+		if err := c.AgentDeliveryHold.UpdateOneID(agentID).
+			SetClaimOwner("").
+			ClearClaimUntil().
+			Exec(ctx); err != nil {
+			return mapError(err)
+		}
+		return syncAgentDeliveryHold(ctx, c, agentID, time.Time{}, "", now)
+	})
 }
 
 // ReholdClaimedMessage implements store.MessageHoldStore.
@@ -732,6 +865,9 @@ func (s *BrokerDispatchStore) ExpireHeldMessagesForAgent(ctx context.Context, ag
 			sm.NotReachedAt = nil
 			expired = append(expired, sm)
 		}
+		if marker, mErr := lockHoldMarker(ctx, c, agentID); mErr == nil && marker != nil && marker.ClaimOwner != "" {
+			_ = c.AgentDeliveryHold.UpdateOneID(agentID).SetClaimOwner("").ClearClaimUntil().Exec(ctx)
+		}
 		return syncAgentDeliveryHold(ctx, c, agentID, time.Time{}, "", now)
 	})
 	if err != nil {
@@ -762,6 +898,29 @@ func (s *BrokerDispatchStore) ExpireHeldMessagesPastDeadline(ctx context.Context
 		if len(candidates) == 0 {
 			return nil
 		}
+		// Lock candidate recipient agents in sorted UUID order BEFORE updating
+		// message rows so lock acquisition matches ClaimHeldMessages /
+		// HoldMessageAwaitingSession (agents -> messages -> agent_delivery_holds)
+		// and avoids Postgres deadlocks under contention.
+		candidateAgentSet := make(map[string]struct{})
+		for _, cand := range candidates {
+			if cand.RecipientID != "" {
+				candidateAgentSet[cand.RecipientID] = struct{}{}
+			}
+		}
+		candidateAgentIDs := make([]string, 0, len(candidateAgentSet))
+		for agentID := range candidateAgentSet {
+			candidateAgentIDs = append(candidateAgentIDs, agentID)
+		}
+		slices.Sort(candidateAgentIDs)
+		for _, agentID := range candidateAgentIDs {
+			if agentUID, pErr := parseUUID(agentID); pErr == nil {
+				if _, lErr := lockAgentForHold(ctx, c, agentUID); lErr != nil {
+					return lErr
+				}
+			}
+		}
+
 		affectedAgents := make(map[string]struct{})
 		expired = make([]store.Message, 0, len(candidates))
 		for _, cand := range candidates {
@@ -794,9 +953,9 @@ func (s *BrokerDispatchStore) ExpireHeldMessagesPastDeadline(ctx context.Context
 			sm.NotReachedAt = nil
 			expired = append(expired, sm)
 		}
-		for agentID := range affectedAgents {
-			if agentUID, pErr := parseUUID(agentID); pErr == nil {
-				_, _ = lockAgentForHold(ctx, c, agentUID)
+		for _, agentID := range candidateAgentIDs {
+			if _, ok := affectedAgents[agentID]; !ok {
+				continue
 			}
 			if err := syncAgentDeliveryHold(ctx, c, agentID, time.Time{}, "", now); err != nil {
 				return err

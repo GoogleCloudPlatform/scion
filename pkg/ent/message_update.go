@@ -699,6 +699,9 @@ func (_u *MessageUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if _u.mutation.DelegationGrantIDCleared() {
 		_spec.ClearField(message.FieldDelegationGrantID, field.TypeString)
 	}
+	if _u.mutation.ScheduledEventIDCleared() {
+		_spec.ClearField(message.FieldScheduledEventID, field.TypeString)
+	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
 			err = &NotFoundError{message.Label}
@@ -1418,6 +1421,9 @@ func (_u *MessageUpdateOne) sqlSave(ctx context.Context) (_node *Message, err er
 	}
 	if _u.mutation.DelegationGrantIDCleared() {
 		_spec.ClearField(message.FieldDelegationGrantID, field.TypeString)
+	}
+	if _u.mutation.ScheduledEventIDCleared() {
+		_spec.ClearField(message.FieldScheduledEventID, field.TypeString)
 	}
 	_node = &Message{config: _u.config}
 	_spec.Assign = _node.assignValues

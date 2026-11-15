@@ -19,6 +19,10 @@ const (
 	FieldLaunchID = "launch_id"
 	// FieldHeldCount holds the string denoting the held_count field in the database.
 	FieldHeldCount = "held_count"
+	// FieldClaimOwner holds the string denoting the claim_owner field in the database.
+	FieldClaimOwner = "claim_owner"
+	// FieldClaimUntil holds the string denoting the claim_until field in the database.
+	FieldClaimUntil = "claim_until"
 	// FieldCreated holds the string denoting the created field in the database.
 	FieldCreated = "created"
 	// Table holds the table name of the agentdeliveryhold in the database.
@@ -31,6 +35,8 @@ var Columns = []string{
 	FieldHoldUntil,
 	FieldLaunchID,
 	FieldHeldCount,
+	FieldClaimOwner,
+	FieldClaimUntil,
 	FieldCreated,
 }
 
@@ -51,6 +57,10 @@ var (
 	LaunchIDValidator func(string) error
 	// DefaultHeldCount holds the default value on creation for the "held_count" field.
 	DefaultHeldCount int
+	// DefaultClaimOwner holds the default value on creation for the "claim_owner" field.
+	DefaultClaimOwner string
+	// ClaimOwnerValidator is a validator for the "claim_owner" field. It is called by the builders before save.
+	ClaimOwnerValidator func(string) error
 	// DefaultCreated holds the default value on creation for the "created" field.
 	DefaultCreated func() time.Time
 	// IDValidator is a validator for the "id" field. It is called by the builders before save.
@@ -78,6 +88,16 @@ func ByLaunchID(opts ...sql.OrderTermOption) OrderOption {
 // ByHeldCount orders the results by the held_count field.
 func ByHeldCount(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldHeldCount, opts...).ToFunc()
+}
+
+// ByClaimOwner orders the results by the claim_owner field.
+func ByClaimOwner(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldClaimOwner, opts...).ToFunc()
+}
+
+// ByClaimUntil orders the results by the claim_until field.
+func ByClaimUntil(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldClaimUntil, opts...).ToFunc()
 }
 
 // ByCreated orders the results by the created field.

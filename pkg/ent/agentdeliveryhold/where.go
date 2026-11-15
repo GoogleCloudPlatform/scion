@@ -79,6 +79,16 @@ func HeldCount(v int) predicate.AgentDeliveryHold {
 	return predicate.AgentDeliveryHold(sql.FieldEQ(FieldHeldCount, v))
 }
 
+// ClaimOwner applies equality check predicate on the "claim_owner" field. It's identical to ClaimOwnerEQ.
+func ClaimOwner(v string) predicate.AgentDeliveryHold {
+	return predicate.AgentDeliveryHold(sql.FieldEQ(FieldClaimOwner, v))
+}
+
+// ClaimUntil applies equality check predicate on the "claim_until" field. It's identical to ClaimUntilEQ.
+func ClaimUntil(v time.Time) predicate.AgentDeliveryHold {
+	return predicate.AgentDeliveryHold(sql.FieldEQ(FieldClaimUntil, v))
+}
+
 // Created applies equality check predicate on the "created" field. It's identical to CreatedEQ.
 func Created(v time.Time) predicate.AgentDeliveryHold {
 	return predicate.AgentDeliveryHold(sql.FieldEQ(FieldCreated, v))
@@ -237,6 +247,131 @@ func HeldCountLT(v int) predicate.AgentDeliveryHold {
 // HeldCountLTE applies the LTE predicate on the "held_count" field.
 func HeldCountLTE(v int) predicate.AgentDeliveryHold {
 	return predicate.AgentDeliveryHold(sql.FieldLTE(FieldHeldCount, v))
+}
+
+// ClaimOwnerEQ applies the EQ predicate on the "claim_owner" field.
+func ClaimOwnerEQ(v string) predicate.AgentDeliveryHold {
+	return predicate.AgentDeliveryHold(sql.FieldEQ(FieldClaimOwner, v))
+}
+
+// ClaimOwnerNEQ applies the NEQ predicate on the "claim_owner" field.
+func ClaimOwnerNEQ(v string) predicate.AgentDeliveryHold {
+	return predicate.AgentDeliveryHold(sql.FieldNEQ(FieldClaimOwner, v))
+}
+
+// ClaimOwnerIn applies the In predicate on the "claim_owner" field.
+func ClaimOwnerIn(vs ...string) predicate.AgentDeliveryHold {
+	return predicate.AgentDeliveryHold(sql.FieldIn(FieldClaimOwner, vs...))
+}
+
+// ClaimOwnerNotIn applies the NotIn predicate on the "claim_owner" field.
+func ClaimOwnerNotIn(vs ...string) predicate.AgentDeliveryHold {
+	return predicate.AgentDeliveryHold(sql.FieldNotIn(FieldClaimOwner, vs...))
+}
+
+// ClaimOwnerGT applies the GT predicate on the "claim_owner" field.
+func ClaimOwnerGT(v string) predicate.AgentDeliveryHold {
+	return predicate.AgentDeliveryHold(sql.FieldGT(FieldClaimOwner, v))
+}
+
+// ClaimOwnerGTE applies the GTE predicate on the "claim_owner" field.
+func ClaimOwnerGTE(v string) predicate.AgentDeliveryHold {
+	return predicate.AgentDeliveryHold(sql.FieldGTE(FieldClaimOwner, v))
+}
+
+// ClaimOwnerLT applies the LT predicate on the "claim_owner" field.
+func ClaimOwnerLT(v string) predicate.AgentDeliveryHold {
+	return predicate.AgentDeliveryHold(sql.FieldLT(FieldClaimOwner, v))
+}
+
+// ClaimOwnerLTE applies the LTE predicate on the "claim_owner" field.
+func ClaimOwnerLTE(v string) predicate.AgentDeliveryHold {
+	return predicate.AgentDeliveryHold(sql.FieldLTE(FieldClaimOwner, v))
+}
+
+// ClaimOwnerContains applies the Contains predicate on the "claim_owner" field.
+func ClaimOwnerContains(v string) predicate.AgentDeliveryHold {
+	return predicate.AgentDeliveryHold(sql.FieldContains(FieldClaimOwner, v))
+}
+
+// ClaimOwnerHasPrefix applies the HasPrefix predicate on the "claim_owner" field.
+func ClaimOwnerHasPrefix(v string) predicate.AgentDeliveryHold {
+	return predicate.AgentDeliveryHold(sql.FieldHasPrefix(FieldClaimOwner, v))
+}
+
+// ClaimOwnerHasSuffix applies the HasSuffix predicate on the "claim_owner" field.
+func ClaimOwnerHasSuffix(v string) predicate.AgentDeliveryHold {
+	return predicate.AgentDeliveryHold(sql.FieldHasSuffix(FieldClaimOwner, v))
+}
+
+// ClaimOwnerIsNil applies the IsNil predicate on the "claim_owner" field.
+func ClaimOwnerIsNil() predicate.AgentDeliveryHold {
+	return predicate.AgentDeliveryHold(sql.FieldIsNull(FieldClaimOwner))
+}
+
+// ClaimOwnerNotNil applies the NotNil predicate on the "claim_owner" field.
+func ClaimOwnerNotNil() predicate.AgentDeliveryHold {
+	return predicate.AgentDeliveryHold(sql.FieldNotNull(FieldClaimOwner))
+}
+
+// ClaimOwnerEqualFold applies the EqualFold predicate on the "claim_owner" field.
+func ClaimOwnerEqualFold(v string) predicate.AgentDeliveryHold {
+	return predicate.AgentDeliveryHold(sql.FieldEqualFold(FieldClaimOwner, v))
+}
+
+// ClaimOwnerContainsFold applies the ContainsFold predicate on the "claim_owner" field.
+func ClaimOwnerContainsFold(v string) predicate.AgentDeliveryHold {
+	return predicate.AgentDeliveryHold(sql.FieldContainsFold(FieldClaimOwner, v))
+}
+
+// ClaimUntilEQ applies the EQ predicate on the "claim_until" field.
+func ClaimUntilEQ(v time.Time) predicate.AgentDeliveryHold {
+	return predicate.AgentDeliveryHold(sql.FieldEQ(FieldClaimUntil, v))
+}
+
+// ClaimUntilNEQ applies the NEQ predicate on the "claim_until" field.
+func ClaimUntilNEQ(v time.Time) predicate.AgentDeliveryHold {
+	return predicate.AgentDeliveryHold(sql.FieldNEQ(FieldClaimUntil, v))
+}
+
+// ClaimUntilIn applies the In predicate on the "claim_until" field.
+func ClaimUntilIn(vs ...time.Time) predicate.AgentDeliveryHold {
+	return predicate.AgentDeliveryHold(sql.FieldIn(FieldClaimUntil, vs...))
+}
+
+// ClaimUntilNotIn applies the NotIn predicate on the "claim_until" field.
+func ClaimUntilNotIn(vs ...time.Time) predicate.AgentDeliveryHold {
+	return predicate.AgentDeliveryHold(sql.FieldNotIn(FieldClaimUntil, vs...))
+}
+
+// ClaimUntilGT applies the GT predicate on the "claim_until" field.
+func ClaimUntilGT(v time.Time) predicate.AgentDeliveryHold {
+	return predicate.AgentDeliveryHold(sql.FieldGT(FieldClaimUntil, v))
+}
+
+// ClaimUntilGTE applies the GTE predicate on the "claim_until" field.
+func ClaimUntilGTE(v time.Time) predicate.AgentDeliveryHold {
+	return predicate.AgentDeliveryHold(sql.FieldGTE(FieldClaimUntil, v))
+}
+
+// ClaimUntilLT applies the LT predicate on the "claim_until" field.
+func ClaimUntilLT(v time.Time) predicate.AgentDeliveryHold {
+	return predicate.AgentDeliveryHold(sql.FieldLT(FieldClaimUntil, v))
+}
+
+// ClaimUntilLTE applies the LTE predicate on the "claim_until" field.
+func ClaimUntilLTE(v time.Time) predicate.AgentDeliveryHold {
+	return predicate.AgentDeliveryHold(sql.FieldLTE(FieldClaimUntil, v))
+}
+
+// ClaimUntilIsNil applies the IsNil predicate on the "claim_until" field.
+func ClaimUntilIsNil() predicate.AgentDeliveryHold {
+	return predicate.AgentDeliveryHold(sql.FieldIsNull(FieldClaimUntil))
+}
+
+// ClaimUntilNotNil applies the NotNil predicate on the "claim_until" field.
+func ClaimUntilNotNil() predicate.AgentDeliveryHold {
+	return predicate.AgentDeliveryHold(sql.FieldNotNull(FieldClaimUntil))
 }
 
 // CreatedEQ applies the EQ predicate on the "created" field.

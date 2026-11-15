@@ -72,6 +72,8 @@ const (
 	FieldAuthorizingUserID = "authorizing_user_id"
 	// FieldDelegationGrantID holds the string denoting the delegation_grant_id field in the database.
 	FieldDelegationGrantID = "delegation_grant_id"
+	// FieldScheduledEventID holds the string denoting the scheduled_event_id field in the database.
+	FieldScheduledEventID = "scheduled_event_id"
 	// FieldCreated holds the string denoting the created field in the database.
 	FieldCreated = "created"
 	// Table holds the table name of the message in the database.
@@ -110,6 +112,7 @@ var Columns = []string{
 	FieldRecipientProjectID,
 	FieldAuthorizingUserID,
 	FieldDelegationGrantID,
+	FieldScheduledEventID,
 	FieldCreated,
 }
 
@@ -150,6 +153,8 @@ var (
 	ChannelValidator func(string) error
 	// ThreadIDValidator is a validator for the "thread_id" field. It is called by the builders before save.
 	ThreadIDValidator func(string) error
+	// ScheduledEventIDValidator is a validator for the "scheduled_event_id" field. It is called by the builders before save.
+	ScheduledEventIDValidator func(string) error
 	// DefaultCreated holds the default value on creation for the "created" field.
 	DefaultCreated func() time.Time
 	// DefaultID holds the default value on creation for the "id" field.
@@ -307,6 +312,11 @@ func ByAuthorizingUserID(opts ...sql.OrderTermOption) OrderOption {
 // ByDelegationGrantID orders the results by the delegation_grant_id field.
 func ByDelegationGrantID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldDelegationGrantID, opts...).ToFunc()
+}
+
+// ByScheduledEventID orders the results by the scheduled_event_id field.
+func ByScheduledEventID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldScheduledEventID, opts...).ToFunc()
 }
 
 // ByCreated orders the results by the created field.
