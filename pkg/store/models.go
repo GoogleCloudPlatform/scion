@@ -4022,13 +4022,13 @@ type Schedule struct {
 	Name          string     `json:"name"`
 	CronExpr      string     `json:"cronExpr"`               // Standard 5-field cron expression, evaluated in TimeZone
 	TimeZone      string     `json:"timeZone,omitempty"`     // IANA time zone for CronExpr; empty means UTC
-	EventType     string     `json:"eventType"`              // "message" (future: "dispatch_agent")
+	EventType     string     `json:"eventType"`              // "message", "dispatch_agent", "exec"
 	Payload       string     `json:"payload"`                // JSON: handler-specific configuration
 	Status        string     `json:"status"`                 // active, paused, deleted
 	StatusReason  string     `json:"statusReason,omitempty"` // system pause reason (ScheduleStatusReason*); empty otherwise
 	NextRunAt     *time.Time `json:"nextRunAt,omitempty"`
 	LastRunAt     *time.Time `json:"lastRunAt,omitempty"`
-	LastRunStatus string     `json:"lastRunStatus,omitempty"` // success, error
+	LastRunStatus string     `json:"lastRunStatus,omitempty"` // success, error, skipped
 	LastRunError  string     `json:"lastRunError,omitempty"`
 	RunCount      int        `json:"runCount"`
 	ErrorCount    int        `json:"errorCount"`
@@ -4078,21 +4078,27 @@ const (
 	// expression carries a zone prefix (CRON_TZ= or TZ=), which is not
 	// supported. The expression must be edited to UTC before resuming.
 	ScheduleStatusReasonCronZoneUnsupported = "cron_zone_unsupported"
+	// ScheduleStatusReasonTargetDeleted: paused because the target agent of an
+	// exec schedule was deleted. Editing the schedule to name a live target and
+	// resuming re-records the authority and clears the reason.
+	ScheduleStatusReasonTargetDeleted = "target_deleted"
 )
 
 // ScheduleRunStatus constants
 const (
 	ScheduleRunSuccess = "success"
 	ScheduleRunError   = "error"
+	ScheduleRunSkipped = "skipped"
 )
 
 // ScheduleFilter for listing schedules.
 type ScheduleFilter struct {
 	ProjectID string
 	Status    string
+	EventType string
 	Name      string
 	// LastRunStatus, when set, keeps only schedules whose most recent run
-	// ended with this status (ScheduleRunSuccess or ScheduleRunError).
+	// ended with this status (ScheduleRunSuccess, ScheduleRunError, or ScheduleRunSkipped).
 	LastRunStatus string
 	// InitiatorAgentID, when set, keeps only rows whose current initiator
 	// principal is this agent with a recorded attribution (version 1 or

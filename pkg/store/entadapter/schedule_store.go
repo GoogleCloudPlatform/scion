@@ -347,6 +347,9 @@ func (s *ScheduleStore) ListSchedules(ctx context.Context, filter store.Schedule
 		// By default, exclude deleted schedules.
 		query.Where(schedule.StatusNEQ(store.ScheduleStatusDeleted))
 	}
+	if filter.EventType != "" {
+		query.Where(schedule.EventTypeEQ(filter.EventType))
+	}
 	if filter.Name != "" {
 		query.Where(schedule.NameEQ(filter.Name))
 	}
@@ -731,8 +734,16 @@ func (s *ScheduleStore) RecordScheduleRun(ctx context.Context, id string, ranAt 
 }
 
 func recordScheduleRunOnClient(ctx context.Context, client *ent.Client, uid uuid.UUID, ranAt time.Time, errMsg string) error {
-	counters := client.Schedule.UpdateOneID(uid).AddRunCount(1)
+	status := store.ScheduleRunSuccess
 	if errMsg != "" {
+		status = store.ScheduleRunError
+	}
+	return recordScheduleRunStatusOnClient(ctx, client, uid, ranAt, status, errMsg)
+}
+
+func recordScheduleRunStatusOnClient(ctx context.Context, client *ent.Client, uid uuid.UUID, ranAt time.Time, status string, errMsg string) error {
+	counters := client.Schedule.UpdateOneID(uid).AddRunCount(1)
+	if status == store.ScheduleRunError {
 		counters.AddErrorCount(1)
 	}
 	if err := counters.Exec(ctx); err != nil {
@@ -740,11 +751,12 @@ func recordScheduleRunOnClient(ctx context.Context, client *ent.Client, uid uuid
 	}
 	last := client.Schedule.Update().
 		Where(schedule.ID(uid), schedule.Or(schedule.LastRunAtIsNil(), schedule.LastRunAtLT(ranAt))).
-		SetLastRunAt(ranAt)
-	if errMsg != "" {
-		last.SetLastRunStatus(store.ScheduleRunError).SetLastRunError(errMsg)
+		SetLastRunAt(ranAt).
+		SetLastRunStatus(status)
+	if errMsg != "" && status != store.ScheduleRunSuccess {
+		last.SetLastRunError(errMsg)
 	} else {
-		last.SetLastRunStatus(store.ScheduleRunSuccess).ClearLastRunError()
+		last.ClearLastRunError()
 	}
 	if _, err := last.Save(ctx); err != nil {
 		return mapError(err)
@@ -1073,7 +1085,14 @@ func (s *ScheduleStore) CompleteFiringScheduledEvent(
 		}
 		updated = true
 		if scheduleID != "" {
-			if err := recordScheduleRunOnClient(ctx, c, schedUID, ranAt, errMsg); err != nil && !errors.Is(err, store.ErrNotFound) {
+			runStatus := store.ScheduleRunSuccess
+			switch {
+			case status == store.ScheduledEventSkipped:
+				runStatus = store.ScheduleRunSkipped
+			case status == store.ScheduledEventFailed || errMsg != "":
+				runStatus = store.ScheduleRunError
+			}
+			if err := recordScheduleRunStatusOnClient(ctx, c, schedUID, ranAt, runStatus, errMsg); err != nil && !errors.Is(err, store.ErrNotFound) {
 				return err
 			}
 		}

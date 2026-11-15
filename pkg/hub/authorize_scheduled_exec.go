@@ -134,7 +134,7 @@ func (s *Server) authorizeScheduledExecAuthoring(w http.ResponseWriter, r *http.
 		return nil, false
 	}
 
-	if err := s.checkScheduledExecQuota(ctx, projectID, target.ID); err != nil {
+	if err := s.checkScheduledExecQuota(ctx, projectID, target.ID, ""); err != nil {
 		if errors.Is(err, errScheduledExecQuota) {
 			writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded, err.Error(), nil)
 			return nil, false
@@ -153,13 +153,14 @@ func (s *Server) authorizeScheduledExecAuthoring(w http.ResponseWriter, r *http.
 var errScheduledExecQuota = errors.New("exec schedule quota exceeded")
 
 // checkScheduledExecQuota is the early quota check at authoring: it counts
-// the active exec work of projectID (pending one-shot exec events;
-// recurring exec schedules join in Phase 2, ptone/scion#7884) and refuses
-// another when the project, or targetID, is at its limit. The binding check
-// is repeated atomically with the insert (createScheduledExecEvent,
-// CreateScheduledEventChecked), so concurrent authors cannot exceed it.
-func (s *Server) checkScheduledExecQuota(ctx context.Context, projectID, targetID string) error {
-	result, err := s.store.ListScheduledEvents(ctx, store.ScheduledEventFilter{
+// the active exec work of projectID (pending one-shot exec events + active
+// recurring exec schedules, ptone/scion#7884) and refuses another when the
+// project, or targetID, is at its limit. excludeScheduleID omits the schedule
+// being updated or resumed so editing an already-active schedule does not
+// double-count itself. The binding check is repeated atomically with the
+// insert/update under LockScheduledEventQuota.
+func (s *Server) checkScheduledExecQuota(ctx context.Context, projectID, targetID, excludeScheduleID string) error {
+	events, err := s.store.ListScheduledEvents(ctx, store.ScheduledEventFilter{
 		ProjectID: projectID,
 		EventType: scheduledEventTypeExec,
 		Status:    store.ScheduledEventPending,
@@ -167,23 +168,45 @@ func (s *Server) checkScheduledExecQuota(ctx context.Context, projectID, targetI
 	if err != nil {
 		return err
 	}
-	return scheduledExecQuotaCheck(result.Items, targetID)
+	schedules, err := s.store.ListSchedules(ctx, store.ScheduleFilter{
+		ProjectID: projectID,
+		EventType: scheduledEventTypeExec,
+		Status:    store.ScheduleStatusActive,
+	}, store.ListOptions{Limit: scheduledExecMaxPerProject + 1})
+	if err != nil {
+		return err
+	}
+	return scheduledExecQuotaCheck(store.ScheduledExecQuotaSnapshot{
+		PendingEvents:   events.Items,
+		ActiveSchedules: schedules.Items,
+	}, targetID, excludeScheduleID)
 }
 
-// scheduledExecQuotaCheck refuses another exec event on targetID given the
-// project's pending exec events.
-func scheduledExecQuotaCheck(pending []store.ScheduledEvent, targetID string) error {
-	if len(pending) >= scheduledExecMaxPerProject {
-		return fmt.Errorf("%w: at most %d active exec schedules per project", errScheduledExecQuota, scheduledExecMaxPerProject)
-	}
+// scheduledExecQuotaCheck refuses another active exec item on targetID given
+// the project's pending exec events and active recurring exec schedules.
+func scheduledExecQuotaCheck(snap store.ScheduledExecQuotaSnapshot, targetID, excludeScheduleID string) error {
+	total := len(snap.PendingEvents)
 	perTarget := 0
-	for _, evt := range pending {
+	for _, evt := range snap.PendingEvents {
 		p, err := decodeScheduledExecPayload(evt.Payload)
 		if err != nil || p.AgentID == targetID {
 			// A stored row that no longer decodes counts against the
 			// target too: fail closed.
 			perTarget++
 		}
+	}
+	for _, sc := range snap.ActiveSchedules {
+		if excludeScheduleID != "" && sc.ID == excludeScheduleID {
+			continue
+		}
+		total++
+		p, err := decodeScheduledExecPayload(sc.Payload)
+		if err != nil || p.AgentID == targetID {
+			perTarget++
+		}
+	}
+	if total >= scheduledExecMaxPerProject {
+		return fmt.Errorf("%w: at most %d active exec schedules per project", errScheduledExecQuota, scheduledExecMaxPerProject)
 	}
 	if perTarget >= scheduledExecMaxPerTarget {
 		return fmt.Errorf("%w: at most %d active exec schedules per agent", errScheduledExecQuota, scheduledExecMaxPerTarget)

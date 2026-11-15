@@ -124,8 +124,8 @@ func (s *Server) createScheduledExecEvent(w http.ResponseWriter, r *http.Request
 	// exceed it.
 	targetID := p.AgentID
 	if err := s.scheduler.ScheduleEventVia(r.Context(), evt, func(ctx context.Context, e *store.ScheduledEvent) error {
-		return s.store.CreateScheduledEventChecked(ctx, e, scheduledExecMaxPerProject+1, func(pending []store.ScheduledEvent) error {
-			return scheduledExecQuotaCheck(pending, targetID)
+		return s.store.CreateScheduledEventChecked(ctx, e, scheduledExecMaxPerProject+1, func(snap store.ScheduledExecQuotaSnapshot) error {
+			return scheduledExecQuotaCheck(snap, targetID, "")
 		})
 	}); err != nil {
 		if errors.Is(err, errScheduledExecQuota) {

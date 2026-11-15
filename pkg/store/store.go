@@ -146,6 +146,11 @@ var (
 	// synchronous send on this error (design §3.4, NB-1); it means a
 	// concurrent write (e.g. a stop) landed first.
 	ErrInvalidPhase = errors.New("agent phase is not eligible for this launch")
+
+	// ErrScheduledExecOverlap is returned by CreateScheduledExecRun when a
+	// recurring schedule already has an unfinished exec run whose DB lease
+	// has not ended (ptone/scion#7884).
+	ErrScheduledExecOverlap = errors.New("scheduled exec run overlap")
 )
 
 // SystemReconcileCreatedBy is the CreatedBy sentinel that identifies the
@@ -3440,12 +3445,21 @@ type ScheduledEventStore interface {
 	PurgeOldScheduledEvents(ctx context.Context, cutoff time.Time) (int, error)
 }
 
+// ScheduledExecQuotaSnapshot holds the active exec items of a project read
+// inside a quota-locked transaction (ptone/scion#7883, ptone/scion#7884).
+type ScheduledExecQuotaSnapshot struct {
+	PendingEvents   []ScheduledEvent
+	ActiveSchedules []Schedule
+}
+
 // ScheduledExecRunStore manages the run records of scheduled exec events
-// (ptone/scion#7883).
+// (ptone/scion#7883, ptone/scion#7884).
 type ScheduledExecRunStore interface {
 	// CreateScheduledExecRun inserts the run record of an admitted exec
 	// event, with Outcome starting (when empty) and FinishedAt nil unless
-	// set. Returns ErrAlreadyExists when the event already has a run.
+	// set. Returns ErrAlreadyExists when the event already has a run, or
+	// ErrScheduledExecOverlap when ScheduleID is set and another unfinished
+	// run of that schedule still holds an unexpired DB lease.
 	CreateScheduledExecRun(ctx context.Context, run *ScheduledExecRun) error
 
 	// GetScheduledExecRun returns the run of an event, or ErrNotFound.
@@ -3464,7 +3478,9 @@ type ScheduledExecRunStore interface {
 	// compare-and-set on FinishedAt IS NULL: the first writer wins and
 	// later writers get false with no change. When it wins and
 	// fin.EventStatus is set, the event's status and error are written in the
-	// same transaction, while the event is still fired or expired.
+	// same transaction, while the event is still fired or expired; when the
+	// run belongs to a recurring schedule, the parent schedule's run counters
+	// and last-run fields are updated in the same transaction.
 	FinishScheduledExecRun(ctx context.Context, fin ScheduledExecRunFinish) (bool, error)
 
 	// ListExpiredScheduledExecRuns returns up to limit unfinished runs whose
@@ -3490,12 +3506,36 @@ type ScheduledExecRunStore interface {
 	// whether the event changed.
 	FailUnadmittedScheduledEvent(ctx context.Context, id, eventType string, firedBefore time.Time, errMsg string) (bool, error)
 
+	// CompleteUnadmittedExecEvent atomically transitions an exec event in
+	// status "fired" (or "expired") that has NO scheduled_exec_runs row to
+	// status (ScheduledEventSkipped or ScheduledEventFailed) with errMsg, and
+	// when scheduleID is non-empty records the corresponding run status on
+	// that schedule in the same transaction (ignoring a deleted schedule).
+	// Returns true when the event was still unadmitted and updated, or false
+	// (with nil error) when the event was already admitted, already completed,
+	// or missing.
+	CompleteUnadmittedExecEvent(ctx context.Context, id string, status string, errMsg string, scheduleID string, ranAt time.Time) (bool, error)
+
 	// CreateScheduledEventChecked inserts event only after check accepts the
-	// pending events of the same project and event type (at most limit),
-	// read in the same transaction under a per-project lock that serializes
-	// concurrent authors across replicas. check's error is returned as is
-	// and nothing is inserted.
-	CreateScheduledEventChecked(ctx context.Context, event *ScheduledEvent, limit int, check func(pending []ScheduledEvent) error) error
+	// active exec items (pending events + active recurring schedules) of the
+	// same project and event type (at most limit of each), read in the same
+	// transaction under a per-project lock that serializes concurrent authors
+	// across replicas. check's error is returned as is and nothing is inserted.
+	CreateScheduledEventChecked(ctx context.Context, event *ScheduledEvent, limit int, check func(snap ScheduledExecQuotaSnapshot) error) error
+
+	// CreateScheduleChecked inserts schedule only after check accepts the
+	// active exec items (pending events + active recurring schedules) of the
+	// same project and event type (at most limit of each), read in the same
+	// transaction under a per-project lock that serializes concurrent authors
+	// across replicas. check's error is returned as is and nothing is inserted.
+	CreateScheduleChecked(ctx context.Context, schedule *Schedule, limit int, check func(snap ScheduledExecQuotaSnapshot) error) error
+
+	// UpdateScheduleChecked updates schedule (as UpdateSchedule) only after
+	// check accepts the other active exec items (pending events + active
+	// recurring schedules excluding schedule.ID) of the same project and event
+	// type (at most limit of each), read in the same transaction under a
+	// per-project lock that serializes concurrent authors across replicas.
+	UpdateScheduleChecked(ctx context.Context, schedule *Schedule, fields ScheduleFieldMask, prevRevision int, prevRevisionKnown bool, attribution *InitiatorAttribution, limit int, check func(snap ScheduledExecQuotaSnapshot) error) error
 }
 
 // =============================================================================
