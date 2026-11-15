@@ -686,7 +686,7 @@ func TestAmplifyingCallsOn64KiBPayloadBounded(t *testing.T) {
 
 	// Build a ~62 KiB valid JSON payload (within the 64 KiB ingress bound).
 	s60k := strings.Repeat("a", 60*1024)
-	payload := `{"s":"` + s60k + `","q":"` + strings.Repeat(`\"`, 1024) + `"}`
+	payload := `{"s":"` + s60k + `","q":"` + strings.Repeat(`\"`, 1024) + `","p":"[a-z]{0,1000}x"}`
 	if len(payload) > triggerrule.MaxPayloadBytes {
 		t.Fatalf("test payload length %d exceeds MaxPayloadBytes %d", len(payload), triggerrule.MaxPayloadBytes)
 	}
@@ -699,6 +699,7 @@ func TestAmplifyingCallsOn64KiBPayloadBounded(t *testing.T) {
 	}
 
 	nestedListConcat := `[event.payload.s.split("")].map(l, (l + l).size() > 0)[0]`
+	literalOverworkRegex := strings.Repeat("a?", 80) + strings.Repeat("a", 80) + "x"
 
 	matchVectors := []struct {
 		name string
@@ -731,6 +732,14 @@ func TestAmplifyingCallsOn64KiBPayloadBounded(t *testing.T) {
 		{
 			name: "list_concat_amplification",
 			expr: nestedListConcat,
+		},
+		{
+			name: "matches_literal_overwork",
+			expr: `string(event.payload.s).matches("` + literalOverworkRegex + `")`,
+		},
+		{
+			name: "matches_dynamic_counted_repetition",
+			expr: `string(event.payload.s).matches(string(event.payload.p))`,
 		},
 		{
 			name: "short_circuit_or_cannot_bypass",
@@ -793,6 +802,152 @@ func TestAmplifyingCallsOn64KiBPayloadBounded(t *testing.T) {
 		allocDelta := mAfter.TotalAlloc - mBefore.TotalAlloc
 		if allocDelta > maxAllocDelta {
 			t.Errorf("TotalAlloc delta %d bytes exceeds 64 MiB bound", allocDelta)
+		}
+	})
+}
+
+func TestPathologicalRuleDoesNotBlockSubsequentTriggerOnSameEvent(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("pathological_single_call_rules_then_benign_rule_matches_under_1s", func(t *testing.T) {
+		rules, err := triggerrule.NewDefault()
+		if err != nil {
+			t.Fatalf("NewDefault: %v", err)
+		}
+
+		s60k := strings.Repeat("a", 60*1024)
+		payload := `{"s":"` + s60k + `","p":"[a-z]{0,1000}x","env":"prod"}`
+		ev := sampleFireEvent(payload)
+		baseAct, err := triggerrule.NewEventActivation(ev)
+		if err != nil {
+			t.Fatalf("NewEventActivation: %v", err)
+		}
+
+		literalOverwork := strings.Repeat("a?", 80) + strings.Repeat("a", 80) + "x"
+		badRules := []struct {
+			id   string
+			expr string
+		}{
+			{id: "trig-bad-dyn-re", expr: `string(event.payload.s).matches(string(event.payload.p))`},
+			{id: "trig-bad-lit-re", expr: `string(event.payload.s).matches("` + literalOverwork + `")`},
+			{id: "trig-bad-split-join", expr: `event.payload.s.split("").join(event.payload.s).size() > 0`},
+		}
+
+		budget := triggerrule.NewEventBudget()
+		start := time.Now()
+
+		for _, br := range badRules {
+			act := baseAct.WithTrigger(hubfire.FireTriggerRef{ID: br.id, Name: br.id})
+			scope := celengine.CacheScope{Consumer: triggerrule.ConsumerName, ID: br.id, Revision: 1}
+			matched, evalErr := rules.Match(ctx, scope, triggerrule.Rule{Expr: br.expr}, act, triggerrule.WithBudget(budget))
+			if matched {
+				t.Fatalf("%s unexpectedly matched", br.id)
+			}
+			reason, ok := triggerrule.SkipReason(evalErr)
+			if !ok || reason != triggerrule.SkipReasonEvalFailed {
+				t.Fatalf("%s SkipReason = (%q, %v), want (%q, true) (err=%v)", br.id, reason, ok, triggerrule.SkipReasonEvalFailed, evalErr)
+			}
+		}
+
+		benignRef := hubfire.FireTriggerRef{ID: "trig-benign", Name: "benign"}
+		benignAct := baseAct.WithTrigger(benignRef)
+		benignScope := celengine.CacheScope{Consumer: triggerrule.ConsumerName, ID: benignRef.ID, Revision: 1}
+		matched, err := rules.Match(ctx, benignScope, triggerrule.Rule{
+			Expr: `event.type == "webhook.deploy.finished" && event.payload.env == "prod"`,
+		}, benignAct, triggerrule.WithBudget(budget))
+		if err != nil || !matched {
+			t.Fatalf("benign trigger Match = (%v, %v), want (true, nil)", matched, err)
+		}
+		subj := rules.DeriveSubject(ctx, benignScope, triggerrule.Rule{
+			Expr: `"deploy:" + string(event.payload.env)`,
+		}, benignAct, ev.Subject, nil, triggerrule.WithBudget(budget))
+		elapsed := time.Since(start)
+
+		if subj != "deploy:prod" {
+			t.Fatalf("benign DeriveSubject = %q, want %q", subj, "deploy:prod")
+		}
+		if elapsed > triggerrule.EventRuleBudget {
+			t.Errorf("end-to-end event evaluation took %s, want <= %s", elapsed, triggerrule.EventRuleBudget)
+		}
+	})
+
+	t.Run("cumulative_timeout_rules_exhaust_1s_budget_and_record_budget_exhausted", func(t *testing.T) {
+		limits := triggerrule.Stage1Limits()
+		limits.CostLimit = celengine.MaxCostLimitCeiling
+		limits.EvalTimeout = 100 * time.Millisecond
+		limits.InterruptFrequency = 1
+
+		celEng, err := celengine.New(triggerrule.Env(), limits, celengine.DefaultCacheConfig())
+		if err != nil {
+			t.Fatalf("celengine.New: %v", err)
+		}
+		celDialect, err := ruleengine.NewCELDialect(celEng)
+		if err != nil {
+			t.Fatalf("NewCELDialect: %v", err)
+		}
+		re := ruleengine.NewEngine()
+		if err := re.Register(celDialect); err != nil {
+			t.Fatalf("Register: %v", err)
+		}
+		re.AllowConsumerDialects(triggerrule.ConsumerName, ruleengine.DialectCEL)
+		rules, err := triggerrule.New(re)
+		if err != nil {
+			t.Fatalf("triggerrule.New: %v", err)
+		}
+
+		var buf bytes.Buffer
+		buf.WriteString(`{"env":"prod","items":[`)
+		for i := 0; i < 160; i++ {
+			if i > 0 {
+				buf.WriteByte(',')
+			}
+			buf.WriteString(`"elem"`)
+		}
+		buf.WriteString(`]}`)
+
+		ev := sampleFireEvent(buf.String())
+		baseAct, err := triggerrule.NewEventActivation(ev)
+		if err != nil {
+			t.Fatalf("NewEventActivation: %v", err)
+		}
+
+		slowRule := triggerrule.Rule{
+			Expr: `event.payload.items.all(a, event.payload.items.all(b, event.payload.items.all(c, string(a).size() + string(b).size() + string(c).size() >= 0)))`,
+		}
+		budget := triggerrule.NewEventBudget()
+		start := time.Now()
+
+		for i := 0; i < 11; i++ {
+			id := "trig-slow-" + string(rune('a'+i))
+			act := baseAct.WithTrigger(hubfire.FireTriggerRef{ID: id, Name: id})
+			scope := celengine.CacheScope{Consumer: triggerrule.ConsumerName, ID: id, Revision: 1}
+			matched, evalErr := rules.Match(ctx, scope, slowRule, act, triggerrule.WithBudget(budget))
+			if matched {
+				t.Fatalf("%s unexpectedly matched", id)
+			}
+			reason, ok := triggerrule.SkipReason(evalErr)
+			if !ok || (reason != triggerrule.SkipReasonEvalFailed && reason != triggerrule.SkipReasonBudgetExhausted) {
+				t.Fatalf("%s SkipReason = (%q, %v), want eval failed or budget exhausted (err=%v)", id, reason, ok, evalErr)
+			}
+		}
+
+		benignRef := hubfire.FireTriggerRef{ID: "trig-after-exhausted", Name: "benign"}
+		benignAct := baseAct.WithTrigger(benignRef)
+		benignScope := celengine.CacheScope{Consumer: triggerrule.ConsumerName, ID: benignRef.ID, Revision: 1}
+		matched, evalErr := rules.Match(ctx, benignScope, triggerrule.Rule{
+			Expr: `event.payload.env == "prod"`,
+		}, benignAct, triggerrule.WithBudget(budget))
+		elapsed := time.Since(start)
+
+		if matched {
+			t.Fatalf("expected benign trigger after exhausted event budget to skip, got matched=true")
+		}
+		reason, ok := triggerrule.SkipReason(evalErr)
+		if !ok || reason != triggerrule.SkipReasonBudgetExhausted {
+			t.Fatalf("benign trigger SkipReason = (%q, %v), want (%q, true) (err=%v)", reason, ok, triggerrule.SkipReasonBudgetExhausted, evalErr)
+		}
+		if elapsed > 1400*time.Millisecond {
+			t.Errorf("cumulative 1s event budget run took %s, want <= 1.4s", elapsed)
 		}
 	})
 }

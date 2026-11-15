@@ -179,7 +179,8 @@ func (r *Rules) CompileMatch(ctx context.Context, rule Rule) error {
 }
 
 // CompileSubject validates rule for the trigger subject slot (<= 1024 bytes, string).
-// An empty Expr with a supported dialect is valid (uses event.subject).
+// An empty Expr with a supported dialect is valid (Subject returns ("", nil) and
+// DeriveSubject substitutes the fallback event.subject).
 func (r *Rules) CompileSubject(ctx context.Context, rule Rule) error {
 	if !r.engine.Supports(ConsumerName, rule.normalizedDialect()) {
 		return &ruleengine.UnsupportedDialectError{
@@ -408,7 +409,8 @@ func (r *Rules) Match(ctx context.Context, scope celengine.CacheScope, rule Rule
 }
 
 // Subject evaluates rule for the trigger subject slot using the engine's
-// program cache.
+// program cache. An empty rule.Expr returns ("", nil); callers that apply the
+// fallback event.subject and Stage 1 subject output bounds use DeriveSubject.
 func (r *Rules) Subject(ctx context.Context, scope celengine.CacheScope, rule Rule, act Activation, opts ...EvalOption) (string, error) {
 	if ctx != nil {
 		if err := ctx.Err(); err != nil {
