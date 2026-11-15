@@ -5792,13 +5792,13 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 			if projID == "" {
 				projID = req.ProjectID
 			}
-			if s.reportMessageFailureSync(connName, hubclient.MessageFailure{
+			if _, held := s.reportMessageFailureSync(connName, hubclient.MessageFailure{
 				MessageID: req.MessageID,
 				AgentID:   id,
 				ProjectID: projID,
 				Code:      hubclient.MessageFailureCodeAwaitingSession,
 				Reason:    "broker delivery failed: " + err.Error(),
-			}) {
+			}); held {
 				w.WriteHeader(http.StatusOK)
 				return
 			}

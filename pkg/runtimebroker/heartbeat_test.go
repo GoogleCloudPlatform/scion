@@ -44,6 +44,7 @@ type mockRuntimeBrokerService struct {
 	heartbeatResp *hubclient.BrokerHeartbeatResponse
 
 	messageFailureReports []*hubclient.MessageFailuresReport
+	messageFailureResp    *hubclient.MessageFailuresResponse
 
 	// launchReports records every ReportAgentLaunch call, in order.
 	launchReports []*mockLaunchReportCall
@@ -117,11 +118,15 @@ func (m *mockRuntimeBrokerService) Heartbeat(ctx context.Context, brokerID strin
 	return m.heartbeatResp, nil
 }
 
-func (m *mockRuntimeBrokerService) ReportMessageFailures(ctx context.Context, brokerID string, req *hubclient.MessageFailuresReport) error {
+func (m *mockRuntimeBrokerService) ReportMessageFailures(ctx context.Context, brokerID string, req *hubclient.MessageFailuresReport) (*hubclient.MessageFailuresResponse, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.messageFailureReports = append(m.messageFailureReports, req)
-	return nil
+	if m.messageFailureResp != nil {
+		cp := *m.messageFailureResp
+		return &cp, nil
+	}
+	return &hubclient.MessageFailuresResponse{Marked: len(req.Failures)}, nil
 }
 
 func (m *mockRuntimeBrokerService) DeliverMessage(ctx context.Context, brokerID, agentID string, req *agentcontrol.DeliverRequest) (int, agentcontrol.DeliverResponse, error) {

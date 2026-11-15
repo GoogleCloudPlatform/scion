@@ -236,7 +236,7 @@ func TestSendMessage_AwaitingSessionCodeReported(t *testing.T) {
 		}
 	})
 
-	t.Run("interrupt_awaiting_session_reports_sync_and_answers_200", func(t *testing.T) {
+	t.Run("interrupt_awaiting_session_reports_sync_and_answers_200_only_when_held", func(t *testing.T) {
 		srv := newTestServer(t)
 		base := srv.manager.(*mockManager)
 		wrapped := errors.Join(errors.New("conduit failed"), agent.ErrAwaitingSession)
@@ -245,7 +245,9 @@ func TestSendMessage_AwaitingSessionCodeReported(t *testing.T) {
 			err:         wrapped,
 		}
 		srv.manager = cm
-		hubA := &mockRuntimeBrokerService{}
+		hubA := &mockRuntimeBrokerService{
+			messageFailureResp: &hubclient.MessageFailuresResponse{Held: 1},
+		}
 		srv.hubMu.Lock()
 		srv.hubConnections["hub-a"] = &HubConnection{Name: "hub-a", BrokerID: "broker-on-a", HubClient: &stubBrokerHubClient{brokers: hubA}}
 		srv.hubMu.Unlock()
@@ -257,7 +259,7 @@ func TestSendMessage_AwaitingSessionCodeReported(t *testing.T) {
 			Interrupt: true,
 		})
 		if w.Code != http.StatusOK {
-			t.Fatalf("expected 200 when interrupt awaiting_session reported to hub, got %d: %s", w.Code, w.Body.String())
+			t.Fatalf("expected 200 when interrupt awaiting_session held by hub, got %d: %s", w.Code, w.Body.String())
 		}
 		reports := hubA.getMessageFailureReports()
 		if len(reports) != 1 || len(reports[0].Failures) != 1 {
@@ -266,6 +268,35 @@ func TestSendMessage_AwaitingSessionCodeReported(t *testing.T) {
 		f := reports[0].Failures[0]
 		if f.MessageID != "msg-int-1" || f.Code != hubclient.MessageFailureCodeAwaitingSession {
 			t.Fatalf("unexpected failure report: %+v", f)
+		}
+
+		// OPT-2: when the hub accepts the report with HTTP 200 but Held == 0
+		// (e.g. Ignored: 1 or Marked: 1 because experiment is off / cap reached),
+		// the broker must return the runtime delivery error instead of 200.
+		for _, tc := range []struct {
+			name string
+			resp hubclient.MessageFailuresResponse
+		}{
+			{name: "ignored", resp: hubclient.MessageFailuresResponse{Ignored: 1}},
+			{name: "marked_failed", resp: hubclient.MessageFailuresResponse{Marked: 1}},
+			{name: "empty_legacy", resp: hubclient.MessageFailuresResponse{}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				hubA.mu.Lock()
+				respCopy := tc.resp
+				hubA.messageFailureResp = &respCopy
+				hubA.mu.Unlock()
+
+				wNotHeld := postBrokerMessage(t, srv, "hub-a", MessageRequest{
+					Message:   "urgent-not-held",
+					MessageID: "msg-int-" + tc.name,
+					ProjectID: "proj-1",
+					Interrupt: true,
+				})
+				if wNotHeld.Code == http.StatusOK {
+					t.Fatalf("expected non-200 when hub report returned %+v, got 200", tc.resp)
+				}
+			})
 		}
 	})
 }

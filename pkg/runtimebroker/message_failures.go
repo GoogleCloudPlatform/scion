@@ -33,12 +33,13 @@ const messageFailureReportTimeout = 10 * time.Second
 // ignores message IDs it does not own, and checks that the recipient agent
 // is assigned to the reporting broker.
 func (s *Server) reportMessageFailure(connName string, failure hubclient.MessageFailure) {
-	_ = s.reportMessageFailureSync(connName, failure)
+	_, _ = s.reportMessageFailureSync(connName, failure)
 }
 
 // reportMessageFailureSync sends failure to the hub synchronously and reports
-// whether at least one hub connection accepted the report.
-func (s *Server) reportMessageFailureSync(connName string, failure hubclient.MessageFailure) bool {
+// whether at least one hub connection accepted the report and whether any
+// connection held the message in awaiting_session (held > 0).
+func (s *Server) reportMessageFailureSync(connName string, failure hubclient.MessageFailure) (reported bool, held bool) {
 	var targets []*HubConnection
 	s.hubMu.RLock()
 	if conn, ok := s.hubConnections[connName]; connName != "" && ok && conn.HubClient != nil {
@@ -55,14 +56,13 @@ func (s *Server) reportMessageFailureSync(connName string, failure hubclient.Mes
 	if len(targets) == 0 {
 		s.messageLogger().Warn("buffered message delivery failed; no hub connection to report it to",
 			"message_id", failure.MessageID, "agent_id", failure.AgentID, "reason", failure.Reason)
-		return false
+		return false, false
 	}
 
 	report := &hubclient.MessageFailuresReport{Failures: []hubclient.MessageFailure{failure}}
-	reported := false
 	for _, conn := range targets {
 		ctx, cancel := context.WithTimeout(context.Background(), messageFailureReportTimeout)
-		err := conn.HubClient.RuntimeBrokers().ReportMessageFailures(ctx, conn.BrokerID, report)
+		res, err := conn.HubClient.RuntimeBrokers().ReportMessageFailures(ctx, conn.BrokerID, report)
 		cancel()
 		if err != nil {
 			s.messageLogger().Warn("failed to report buffered message delivery failure to hub",
@@ -71,10 +71,13 @@ func (s *Server) reportMessageFailureSync(connName string, failure hubclient.Mes
 			continue
 		}
 		reported = true
+		if res != nil && res.Held > 0 {
+			held = true
+		}
 		s.messageLogger().Info("reported buffered message delivery failure to hub",
 			"connection", conn.Name, "message_id", failure.MessageID, "agent_id", failure.AgentID)
 	}
-	return reported
+	return reported, held
 }
 
 // messageLogger returns the dedicated message log when configured, falling
@@ -109,7 +112,7 @@ func (s *Server) reportAttachmentOutcomes(connName string, outcomes []hubclient.
 	report := &hubclient.MessageFailuresReport{Failures: []hubclient.MessageFailure{}, AttachmentOutcomes: outcomes}
 	for _, conn := range targets {
 		ctx, cancel := context.WithTimeout(context.Background(), messageFailureReportTimeout)
-		err := conn.HubClient.RuntimeBrokers().ReportMessageFailures(ctx, conn.BrokerID, report)
+		_, err := conn.HubClient.RuntimeBrokers().ReportMessageFailures(ctx, conn.BrokerID, report)
 		cancel()
 		if err != nil {
 			s.messageLogger().Warn("failed to report attachment delivery outcomes to hub",
