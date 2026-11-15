@@ -24,7 +24,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/go-jose/go-jose/v4/jwt"
 )
 
 // This file holds the authority of scheduled work. A schedule (or one-shot
@@ -143,135 +142,21 @@ var scheduledEventPermissions = map[string]string{
 	scheduledEventTypeExec: scheduledExecPermission,
 }
 
-// ScheduledAuthority is the authority a fired scheduled event runs under:
-// the principal and credential of its authorization revision, and the
-// revision's frozen ceiling.
-type ScheduledAuthority struct {
-	PrincipalKind  string // store.DelegationPrincipalUser or store.DelegationPrincipalAgent
-	PrincipalID    string
-	CredentialKind string // session | dev_local | uat | agent (legacy_unknown never reaches here)
-	CredentialID   string
-	Ceiling        store.EffectCeiling
-	ScheduleID     string
-	EventID        string
-	Revision       int
+// ScheduledAuthority aliases FireAuthority until all scheduled actions migrate
+// to FireAction.
+// Removed in PR 2 (ptone/scion#8029).
+type ScheduledAuthority = FireAuthority
 
-	// user is the principal's user row (user principals), loaded at fire
-	// time; agent is the principal's agent row (agent principals).
-	user  *store.User
-	agent *store.Agent
-}
-
-// resolveScheduledAuthority returns the authority a fired event runs under,
-// and an Identity that carries it, or an error that denies the fire. All
-// rules fail closed:
-//
-//  1. Legacy attribution (AttributionVersion 0 or credential kind
-//     legacy_unknown) → errScheduledAuthorityUnrecorded. There is no
-//     CreatedBy fallback and no inference from descriptive fields.
-//  2. A recorded revision whose ceiling is unrecorded, of an unknown kind, of
-//     a kind its credential cannot produce, or of a version Allows does not
-//     interpret → errScheduledAuthorityUnrecorded.
-//  3. A user principal must exist, be active and hold current admission to
-//     the event's project for the event type's permission. Then, by
-//     credential: session → a user identity; dev_local → local development
-//     authority enabled on this server and the principal is DevUserID (both
-//     checked before the user lookup), then a user identity for DevUserID;
-//     uat → the token exists, is unrevoked and unexpired and belongs to the
-//     principal, then a scoped identity carrying the token's live ceiling.
-//  4. An agent principal must exist, not be deleted and be in the event's
-//     project. Its identity carries the scopes its token would carry
-//     (ceilingFilteredAgentScopes over mintCandidateScopes) and its stored
-//     ancestry.
-//  5. Any lookup error denies.
-//
-// The returned identity is for Decide, CanDelegate and the template and
-// service-account gates only. It is never passed to sourceEffectCeiling:
-// fire-time writes take their ceiling and provenance from
-// scheduledEffectCeiling.
+// resolveScheduledAuthority forwards to resolveRecordedAuthority.
+// Removed in PR 2 (ptone/scion#8029).
 func (s *Server) resolveScheduledAuthority(ctx context.Context, evt store.ScheduledEvent) (ScheduledAuthority, Identity, error) {
-	initiator := s.scheduledInitiator(evt.InitiatorAttribution)
-	if initiator.LegacyUnknown {
-		return ScheduledAuthority{}, nil, errScheduledAuthorityUnrecorded
-	}
-	if s.authzService == nil {
-		return ScheduledAuthority{}, nil, fmt.Errorf("scheduled authority: no authorization service")
-	}
-	auth := ScheduledAuthority{
-		PrincipalKind:  initiator.PrincipalKind,
-		PrincipalID:    initiator.PrincipalID,
-		CredentialKind: initiator.CredentialKind,
-		CredentialID:   initiator.CredentialID,
-		Ceiling:        evt.AuthorityCeiling,
-		ScheduleID:     evt.ScheduleID,
-		EventID:        evt.ID,
-		Revision:       evt.AuthorizationRevision,
-	}
-	if auth.PrincipalID == "" {
-		return ScheduledAuthority{}, nil, fmt.Errorf("%w: revision has no principal", errScheduledAuthorityDenied)
-	}
-	// A dev_local revision is recorded with the local development user's
-	// identity kind ("dev"); its principal is that user. Any other principal
-	// kind on a dev_local revision is inconsistent and denies.
-	if auth.CredentialKind == store.InitiatorCredentialKindDevLocal {
-		if auth.PrincipalKind != string(PrincipalKindDev) {
-			return ScheduledAuthority{}, nil, fmt.Errorf("%w: dev_local revision with principal kind %q", errScheduledAuthorityDenied, auth.PrincipalKind)
-		}
-		auth.PrincipalKind = store.DelegationPrincipalUser
-	}
-	if err := revisionCeilingConsistent(auth.CredentialKind, auth.Ceiling); err != nil {
-		return ScheduledAuthority{}, nil, err
-	}
-	permissionID, ok := scheduledEventPermissions[evt.EventType]
-	if !ok {
-		return ScheduledAuthority{}, nil, fmt.Errorf("%w: event type %q has no scheduled authority rule", errScheduledAuthorityDenied, evt.EventType)
-	}
-
-	switch auth.PrincipalKind {
-	case store.DelegationPrincipalUser:
-		identity, err := s.resolveScheduledUser(ctx, &auth, evt.ProjectID, permissionID)
-		if err != nil {
-			return ScheduledAuthority{}, nil, err
-		}
-		return auth, identity, nil
-	case store.DelegationPrincipalAgent:
-		identity, err := s.resolveScheduledAgent(ctx, &auth, evt.ProjectID)
-		if err != nil {
-			return ScheduledAuthority{}, nil, err
-		}
-		return auth, identity, nil
-	default:
-		return ScheduledAuthority{}, nil, fmt.Errorf("%w: unsupported principal kind %q", errScheduledAuthorityDenied, auth.PrincipalKind)
-	}
+	return s.resolveRecordedAuthority(ctx, scheduledRecordedAuthority(evt), evt.ProjectID, scheduledEventPermissions[evt.EventType])
 }
 
-// revisionCeilingConsistent checks that a recorded revision's ceiling is
-// recorded and is the kind its credential produces: principal for session
-// and dev_local, bounded (with a version Allows interprets) for uat and
-// agent.
+// revisionCeilingConsistent forwards to fireRevisionCeilingConsistent.
+// Removed in PR 2 (ptone/scion#8029).
 func revisionCeilingConsistent(credentialKind string, c store.EffectCeiling) error {
-	switch c.Kind {
-	case store.EffectCeilingUnrecorded:
-		return errScheduledAuthorityUnrecorded
-	case store.EffectCeilingPrincipal, store.EffectCeilingBounded:
-	default:
-		return fmt.Errorf("%w: ceiling kind %q", errScheduledAuthorityUnrecorded, c.Kind)
-	}
-	want := store.EffectCeilingBounded
-	switch credentialKind {
-	case store.InitiatorCredentialKindSession, store.InitiatorCredentialKindDevLocal:
-		want = store.EffectCeilingPrincipal
-	case store.InitiatorCredentialKindUAT, store.InitiatorCredentialKindAgent:
-	default:
-		return fmt.Errorf("%w: unsupported credential kind %q", errScheduledAuthorityDenied, credentialKind)
-	}
-	if c.Kind != want {
-		return fmt.Errorf("%w: %s credential with a %s ceiling", errScheduledAuthorityUnrecorded, credentialKind, c.Kind)
-	}
-	if c.Kind == store.EffectCeilingBounded && !knownCeilingVersion(c.Version) {
-		return fmt.Errorf("%w: ceiling version not interpreted", errScheduledAuthorityUnrecorded)
-	}
-	return nil
+	return fireRevisionCeilingConsistent(credentialKind, c)
 }
 
 // scheduledUserAccount applies the account-status rule (checkUserAccount)
@@ -296,106 +181,16 @@ func scheduledUserAccount(ctx context.Context, users userRowReader, principalID 
 	}
 }
 
-// resolveScheduledUser applies rule 3 of resolveScheduledAuthority.
+// resolveScheduledUser forwards to resolveFireUser.
+// Removed in PR 2 (ptone/scion#8029).
 func (s *Server) resolveScheduledUser(ctx context.Context, auth *ScheduledAuthority, projectID, permissionID string) (Identity, error) {
-	if auth.CredentialKind == store.InitiatorCredentialKindDevLocal {
-		if !s.authzService.devLocalAuthorityEnabled() {
-			return nil, fmt.Errorf("%w: %s: %s", errScheduledAuthorityDenied, errSourceNotAllowed, reasonDevLocalDisabled)
-		}
-		if auth.PrincipalID != DevUserID {
-			return nil, fmt.Errorf("%w: %s: %s", errScheduledAuthorityDenied, errSourceNotAllowed, reasonPrincipalInactive)
-		}
-	}
-	if auth.CredentialKind == store.InitiatorCredentialKindAgent {
-		return nil, fmt.Errorf("%w: agent credential on a user principal", errScheduledAuthorityDenied)
-	}
-
-	user, err := scheduledUserAccount(ctx, s.store, auth.PrincipalID)
-	if err != nil {
-		return nil, err
-	}
-	auth.user = user
-	userIdentity := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "scheduler")
-
-	admission, err := s.authzService.ProjectAdmissionForClass(ctx, PrincipalContext{
-		Kind:     PrincipalKindUser,
-		ID:       user.ID,
-		Identity: userIdentity,
-	}, projectID, permissionID, executionProjectClass(permissionID), nil)
-	if err != nil {
-		if errors.Is(err, ErrProjectAccessDenied) {
-			return nil, fmt.Errorf("%w: principal %s lacks admission to the project", errScheduledAuthorityDenied, user.ID)
-		}
-		return nil, fmt.Errorf("scheduled authority: project admission: %w", err)
-	}
-	if !admission.Admitted {
-		return nil, fmt.Errorf("%w: principal %s lacks admission to the project", errScheduledAuthorityDenied, user.ID)
-	}
-
-	if auth.CredentialKind != store.InitiatorCredentialKindUAT {
-		return userIdentity, nil
-	}
-	if auth.CredentialID == "" {
-		return nil, fmt.Errorf("%w: access token not recorded", errScheduledAuthorityDenied)
-	}
-	tok, err := s.store.GetUserAccessToken(ctx, auth.CredentialID)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return nil, fmt.Errorf("%w: access token not found", errScheduledAuthorityDenied)
-		}
-		return nil, fmt.Errorf("scheduled authority: access token lookup: %w", err)
-	}
-	switch {
-	case tok == nil:
-		return nil, fmt.Errorf("%w: access token not found", errScheduledAuthorityDenied)
-	case tok.Revoked:
-		return nil, fmt.Errorf("%w: access token revoked", errScheduledAuthorityDenied)
-	case tok.ExpiresAt == nil || time.Now().After(*tok.ExpiresAt):
-		// The expiry comparison matches ValidateToken. A nil expiry is
-		// refused: CreateToken always sets one, so a row without it was not
-		// minted by the hub and is not treated as non-expiring here.
-		return nil, fmt.Errorf("%w: access token expired", errScheduledAuthorityDenied)
-	case tok.UserID != user.ID:
-		return nil, fmt.Errorf("%w: access token owner does not match the principal", errScheduledAuthorityDenied)
-	}
-	boundary := TokenBoundary{Kind: BoundaryKind(tok.BoundaryKind), ProjectID: tok.ProjectID}
-	return NewScopedUserIdentityWithBoundary(userIdentity, boundary, tok.Scopes, tok.ID, tok.NormalizedCeiling()), nil
+	return s.resolveFireUser(ctx, auth, projectID, permissionID)
 }
 
-// resolveScheduledAgent applies rule 4 of resolveScheduledAuthority.
+// resolveScheduledAgent forwards to resolveFireAgent.
+// Removed in PR 2 (ptone/scion#8029).
 func (s *Server) resolveScheduledAgent(ctx context.Context, auth *ScheduledAuthority, projectID string) (Identity, error) {
-	if auth.CredentialKind != store.InitiatorCredentialKindAgent {
-		return nil, fmt.Errorf("%w: %s credential on an agent principal", errScheduledAuthorityDenied, auth.CredentialKind)
-	}
-	agent, err := s.store.GetAgent(ctx, auth.PrincipalID)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return nil, fmt.Errorf("%w: principal agent not found", errScheduledAuthorityDenied)
-		}
-		return nil, fmt.Errorf("scheduled authority: agent lookup: %w", err)
-	}
-	if agent == nil || !agent.DeletedAt.IsZero() {
-		return nil, fmt.Errorf("%w: principal agent deleted", errScheduledAuthorityDenied)
-	}
-	if agent.ProjectID == "" || agent.ProjectID != projectID {
-		return nil, fmt.Errorf("%w: principal agent is not in the event's project", errScheduledAuthorityDenied)
-	}
-	scopes, err := s.authzService.ceilingFilteredAgentScopes(ctx, agent, s.authzService.mintCandidateScopes(agent))
-	if err != nil {
-		if cause, structural := ceilingDenyCauseForError(err); structural {
-			return nil, fmt.Errorf("%w: %s: %v", errScheduledAuthorityDenied, cause, err)
-		}
-		return nil, fmt.Errorf("scheduled authority: agent ceiling: %w", err)
-	}
-	auth.agent = agent
-	ancestry := make([]string, len(agent.Ancestry))
-	copy(ancestry, agent.Ancestry)
-	return &agentIdentityWrapper{&AgentTokenClaims{
-		Claims:    jwt.Claims{Subject: agent.ID},
-		ProjectID: agent.ProjectID,
-		Scopes:    scopes,
-		Ancestry:  ancestry,
-	}}, nil
+	return s.resolveFireAgent(ctx, auth, projectID)
 }
 
 // scheduledEffectCeiling returns the ceiling and provenance to freeze for a

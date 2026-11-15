@@ -591,58 +591,10 @@ func standingStartRefusal(agentID string, err error) *startRefusal {
 	}
 }
 
-// scheduledFireStanding refuses a scheduled event whose target agent is held
-// or whose authoring agent is not in good standing (ptone/scion#3433).
-// target is the message event's target agent, nil for an event with no
-// target (dispatch_agent). A user author is checked live by the event's own
-// authorization. A message event is refused with the one public scheduled
-// message refusal; the specific cause is logged.
+// scheduledFireStanding forwards to fireStanding.
+// Removed in PR 2 (ptone/scion#8029).
 func (s *Server) scheduledFireStanding(ctx context.Context, evt store.ScheduledEvent, target *store.Agent) error {
-	refuse := func(cause string, err error) error {
-		slog.Warn("Scheduler: scheduled event refused at fire time",
-			"eventID", evt.ID, "eventType", evt.EventType, "projectID", evt.ProjectID,
-			"creator", evt.CreatedBy, "cause", cause, "error", err)
-		if target != nil {
-			return errScheduledMessageRefused
-		}
-		return fmt.Errorf("scheduled dispatch refused: %s", cause)
-	}
-	if target != nil {
-		held, err := s.agentHeld(ctx, target.ID)
-		if err != nil {
-			return refuse("target hold lookup failed", err)
-		}
-		if held {
-			return refuse("target agent is suspended", nil)
-		}
-	}
-	// The authoring principal is the event's recorded revision principal;
-	// CreatedBy (history) is checked too, so an agent named by either must
-	// be in good standing.
-	var authors []string
-	if init := s.scheduledInitiator(evt.InitiatorAttribution); !init.LegacyUnknown &&
-		init.PrincipalKind == store.DelegationPrincipalAgent && init.PrincipalID != "" {
-		authors = append(authors, init.PrincipalID)
-	}
-	if evt.CreatedBy != "" {
-		authors = append(authors, evt.CreatedBy)
-	}
-	for _, id := range authors {
-		creator, err := s.store.GetAgent(ctx, id)
-		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				continue
-			}
-			return refuse("author lookup failed", err)
-		}
-		if creator == nil {
-			continue
-		}
-		if err := s.agentStanding(ctx, creator.ID); err != nil {
-			return refuse("authoring agent is not in good standing", err)
-		}
-	}
-	return nil
+	return s.fireStanding(ctx, scheduledStandingAuthority(evt), target)
 }
 
 // ErrAgentNotInStanding is returned by the dispatcher when the standing

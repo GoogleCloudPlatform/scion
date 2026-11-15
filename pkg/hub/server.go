@@ -2208,6 +2208,7 @@ type Server struct {
 	runtimeReloadFunc       func() bool        // Callback to reload the co-located broker runtime; returns true if swapped
 	workstation             bool               // True when running in workstation (non-production) mode
 	scheduler               *Scheduler         // Unified scheduler for recurring tasks
+	actions                 actionRegistry     // Fire-core action registry (firecore_action.go)
 	cleanupOnce             sync.Once          // Ensures CleanupResources runs only once
 	ctx                     context.Context    // Server-lifetime context; cancelled on Shutdown
 	ctxCancel               context.CancelFunc // Cancels ctx

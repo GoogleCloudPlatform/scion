@@ -435,33 +435,7 @@ var scheduledWakeFireAbortGrace = 2 * time.Second
 // survives the scheduler's halt); the shutdown records the failure for one
 // still running when it stops waiting.
 func (s *Server) trackScheduledWake(ctx context.Context, evt store.ScheduledEvent) (context.Context, func(), bool) {
-	if abort, _ := ctx.Value(scheduledFireAbortKey{}).(context.Context); abort != nil {
-		return ctx, func() {}, true
-	}
-	trackCtx, endWork, ok := s.scheduledWakeFires.begin()
-	if !ok {
-		return ctx, func() {}, false
-	}
-	run := &wakeFireRun{eventID: evt.ID, ranAt: time.Now()}
-	s.runningWakeFires.add(run)
-	fireCtx, cancelFire := context.WithCancel(ctx)
-	stop := context.AfterFunc(trackCtx, cancelFire)
-	releaseRun := func() {
-		s.runningWakeFires.remove(run)
-		endWork()
-	}
-	if scope := oneShotFireScopeFromContext(ctx); scope != nil {
-		scope.attach(run, trackCtx, releaseRun)
-		return withScheduledFireAbort(fireCtx, trackCtx), func() {
-			stop()
-			cancelFire()
-		}, true
-	}
-	return withScheduledFireAbort(fireCtx, trackCtx), func() {
-		stop()
-		cancelFire()
-		releaseRun()
-	}, true
+	return (&scheduledFireTracker{srv: s, fireID: evt.ID}).Admit(ctx)
 }
 
 // errScheduledWakeShuttingDown is recorded on a scheduled wake that did
