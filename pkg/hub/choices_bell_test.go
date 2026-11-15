@@ -312,8 +312,14 @@ func TestDecisionsBell_B2LifecycleAndG6Scenario(t *testing.T) {
 	_ = collectEvents(aliceSub)
 	_ = collectEvents(bobSub)
 
+	aliceCreatedBeforeKeep := aliceRow.CreatedAt
+	bobBeforeKeep, err := f.store.GetNotification(ctx, decisionsWaitingNotificationID(f.bob.ID))
+	require.NoError(t, err)
+	bobCreatedBeforeKeep := bobBeforeKeep.CreatedAt
+
 	// Step 4 (G6): Alice answers 1 decision (p1). N drops 3 -> 2:
 	// Alice stays acknowledged (hidden) with resource_id="2"; Bob stays unacknowledged and updates to 2.
+	// Both keep paths leave CreatedAt unchanged.
 	rr = f.answer(t, f.alice, p1.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"})
 	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
 	waitDecisionBellIdle(t, f.srv)
@@ -323,15 +329,18 @@ func TestDecisionsBell_B2LifecycleAndG6Scenario(t *testing.T) {
 	assert.True(t, aliceRow.Acknowledged, "0 < N <= P must preserve acknowledged=true")
 	assert.Equal(t, "2", aliceRow.ResourceID)
 	assert.Equal(t, "2 decisions are waiting on you in 1 project", aliceRow.Message)
+	assert.True(t, aliceRow.CreatedAt.Equal(aliceCreatedBeforeKeep), "keep path leaves CreatedAt unchanged")
 
 	bobRow, err := f.store.GetNotification(ctx, decisionsWaitingNotificationID(f.bob.ID))
 	require.NoError(t, err)
 	assert.False(t, bobRow.Acknowledged)
 	assert.Equal(t, "2", bobRow.ResourceID)
 	assert.Equal(t, "2 decisions are waiting on you in 1 project", bobRow.Message)
+	assert.True(t, bobRow.CreatedAt.Equal(bobCreatedBeforeKeep), "keep path leaves CreatedAt unchanged")
 
 	// Step 5 (G6): A new 1-row prompt arrives -> N becomes 3 > P (2):
-	// Alice's row resurfaces (acknowledged=false)!
+	// Alice's row resurfaces (acknowledged=false) and refreshes CreatedAt!
+	time.Sleep(2 * time.Millisecond)
 	p3 := sendTopicChoicePromptAsAgent(t, f.srv, f.store, f.agent, f.project.ID, f.topicID,
 		`[{"id":"d4","question":"Fourth call?","choices":["yes","no"]}]`, false)
 	waitDecisionBellIdle(t, f.srv)
@@ -341,6 +350,7 @@ func TestDecisionsBell_B2LifecycleAndG6Scenario(t *testing.T) {
 	assert.False(t, aliceRow.Acknowledged, "N > P must reset acknowledged=false so the bell resurfaces")
 	assert.Equal(t, "3", aliceRow.ResourceID)
 	assert.Equal(t, "3 decisions are waiting on you in 1 project", aliceRow.Message)
+	assert.True(t, aliceRow.CreatedAt.After(aliceCreatedBeforeKeep), "reset-to-unacknowledged refreshes CreatedAt")
 
 	// Step 6 (G6): Alice answers the 2-row set (p2) and the remaining 1-row prompt (p3) -> N == 0:
 	// Both Alice's and Bob's rows clear (acknowledged=true, resource_id="0") and publish acknowledged=true on SSE.
@@ -398,17 +408,24 @@ func (s *notificationWriteCountStore) UpdateNotificationState(ctx context.Contex
 	return s.Store.UpdateNotificationState(ctx, id, message, resourceID, acknowledged)
 }
 
+func (s *notificationWriteCountStore) UpdateNotificationStateIfAcknowledged(ctx context.Context, id, message, resourceID string, observedAcknowledged bool) error {
+	if s.fault == nil || s.fault.Active() {
+		s.updates.Add(1)
+	}
+	return s.Store.UpdateNotificationStateIfAcknowledged(ctx, id, message, resourceID, observedAcknowledged)
+}
+
 // TestDecisionsBell_DebounceCoalescesBurst verifies B5: a 10-row prompt and a
-// rapid 10-prompt burst within one debounce window coalesce into a single
-// notification write per user.
+// rapid 10-event burst in the debounce queue coalesce into a single
+// notification write per user regardless of host CPU scheduling.
 func TestDecisionsBell_DebounceCoalescesBurst(t *testing.T) {
-	srv, _, alice, bob, project, spy, fault := setupDemoPolicyTestWithFault(t, func(inner store.Store, f *storeFaultSwitch) *notificationWriteCountStore {
+	srv, baseStore, alice, bob, project, spy, fault := setupDemoPolicyTestWithFault(t, func(inner store.Store, f *storeFaultSwitch) *notificationWriteCountStore {
 		return &notificationWriteCountStore{Store: inner, fault: f}
 	})
 	f := newChoicesFixtureOn(t, srv, spy, alice, bob, project)
 	fault.Arm()
 	setProjectDecisionsExperiments(t, f.srv, true, true)
-	setFastDecisionBell(t, f.srv, 90*time.Millisecond)
+	setFastDecisionBell(t, f.srv, 30*time.Millisecond)
 
 	// 1. Single 10-row prompt in Bob's DM -> 1 write.
 	var ten []map[string]interface{}
@@ -430,15 +447,47 @@ func TestDecisionsBell_DebounceCoalescesBurst(t *testing.T) {
 	assert.Equal(t, "10", row.ResourceID)
 	assert.Equal(t, "10 decisions are waiting on you in 1 project", row.Message)
 
-	// 2. Rapid burst of 10 separate DM prompts inside one 90 ms window -> 1 additional write.
-	before := spy.creates.Load() + spy.updates.Load()
+	// 2. Burst of 10 separate DM decision events in the queue -> 1 additional write.
+	// Seed the 10 decisions directly and hold worker dequeue until all 10
+	// enqueueDecisionBellEvent calls have landed so CPU contention can never
+	// split the burst across two earliest-wins windows.
+	dmKey, err := messages.DMConversationKey("agent", f.agent.ID, "user", f.bob.ID)
+	require.NoError(t, err)
 	for i := 0; i < 10; i++ {
-		f.sendPromptToBob(t, `[{"question":"Rapid?","choices":["y","n"]}]`, false)
+		decs, nerr := messages.NormalizeDecisions("choices", decisionInputs(t, `[{"question":"Rapid?","choices":["y","n"]}]`))
+		require.NoError(t, nerr)
+		_, cerr := baseStore.CreateChoicePrompt(context.Background(), &store.ChoicePromptInput{
+			Message: &store.Message{
+				ID: api.NewUUID(), ProjectID: f.project.ID, Sender: "agent:" + f.agent.Slug, SenderID: f.agent.ID,
+				Recipient: "user:" + f.bob.ID, ThreadID: dmKey, Channel: "web", CreatedAt: time.Now().UTC(),
+			},
+			Intro: "Rapid burst", AskerAgentID: f.agent.ID, AskerAgentName: f.agent.Name, Decisions: decs,
+		})
+		require.NoError(t, cerr)
 	}
+
+	before := spy.creates.Load() + spy.updates.Load()
+	holdCh := make(chan struct{})
+	f.srv.decisionBell.mu.Lock()
+	f.srv.decisionBell.testHoldCh = holdCh
+	f.srv.decisionBell.mu.Unlock()
+
+	for i := 0; i < 10; i++ {
+		f.srv.enqueueDecisionBellEvent(f.project.ID, dmKey, "")
+	}
+
+	f.srv.decisionBell.mu.Lock()
+	queuedUsers := len(f.srv.decisionBell.userDue)
+	f.srv.decisionBell.testHoldCh = nil
+	close(holdCh)
+	f.srv.decisionBell.signalWakeLocked()
+	f.srv.decisionBell.mu.Unlock()
+
+	assert.Equal(t, 1, queuedUsers, "10 enqueues for the same user must coalesce into 1 pending queue entry")
 	waitDecisionBellIdle(t, f.srv)
 
 	after := spy.creates.Load() + spy.updates.Load()
-	assert.Equal(t, before+1, after, "10 rapid prompts within debounce window must coalesce into 1 write")
+	assert.Equal(t, before+1, after, "10 coalesced queue events must produce exactly 1 write")
 	row, err = f.store.GetNotification(context.Background(), decisionsWaitingNotificationID(f.bob.ID))
 	require.NoError(t, err)
 	assert.Equal(t, "20", row.ResourceID)
@@ -801,4 +850,138 @@ func TestDecisionsBell_InterpretedAndReplacedLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, aliceRow.Acknowledged, "replaced open decision resurfaces Alice's bell")
 	assert.Equal(t, "1", aliceRow.ResourceID)
+}
+
+type interleaveAckOnKeepWriteStore struct {
+	store.Store
+	fault         *storeFaultSwitch
+	interleaved   atomic.Bool
+	conflicts     atomic.Int64
+	onBeforeWrite func()
+}
+
+func (s *interleaveAckOnKeepWriteStore) UpdateNotificationStateIfAcknowledged(ctx context.Context, id, message, resourceID string, observedAcknowledged bool) error {
+	if (s.fault == nil || s.fault.Active()) && !observedAcknowledged && s.onBeforeWrite != nil && s.interleaved.CompareAndSwap(false, true) {
+		s.onBeforeWrite()
+	}
+	err := s.Store.UpdateNotificationStateIfAcknowledged(ctx, id, message, resourceID, observedAcknowledged)
+	if err != nil {
+		s.conflicts.Add(1)
+	}
+	return err
+}
+
+// TestDecisionsBell_ConcurrentMarkReadNotUndoneByDecrease verifies that when a
+// user clicks Mark read (POST /api/v1/notifications/{id}/ack) between the
+// recompute worker's GetNotification(acknowledged=false, P=3) and its keep-path
+// write (N=2), the conditional update detects the concurrent acknowledgement,
+// retries, preserves acknowledged=true with resource_id="2", and never
+// publishes an unacknowledged row on user.<id>.notification.
+func TestDecisionsBell_ConcurrentMarkReadNotUndoneByDecrease(t *testing.T) {
+	srv, _, alice, bob, project, hookStore, fault := setupDemoPolicyTestWithFault(t, func(inner store.Store, f *storeFaultSwitch) *interleaveAckOnKeepWriteStore {
+		return &interleaveAckOnKeepWriteStore{Store: inner, fault: f}
+	})
+	f := newChoicesFixtureOn(t, srv, hookStore, alice, bob, project)
+	setProjectDecisionsExperiments(t, f.srv, true, true)
+	setFastDecisionBell(t, f.srv, 15*time.Millisecond)
+	ctx := context.Background()
+
+	// Seed 3 waiting DM decisions for Bob (a 1-row prompt + a 2-row prompt) so
+	// Bob starts with P=3, acknowledged=false and can answer 1 decision (3 -> 2).
+	p1 := f.sendPromptToBob(t, `[{"id":"race-1","question":"Q1?","choices":["yes","no"]}]`, false)
+	f.sendPromptToBob(t, `[
+		{"id":"race-2","question":"Q2?","choices":["yes","no"]},
+		{"id":"race-3","question":"Q3?","choices":["yes","no"]}
+	]`, false)
+	waitDecisionBellIdle(t, f.srv)
+
+	notifID := decisionsWaitingNotificationID(f.bob.ID)
+	row, err := f.store.GetNotification(ctx, notifID)
+	require.NoError(t, err)
+	require.False(t, row.Acknowledged)
+	require.Equal(t, "3", row.ResourceID)
+
+	bobSub, unsubBob := f.srv.events.Subscribe("user." + f.bob.ID + ".notification")
+	defer unsubBob()
+
+	// Arm the hook so that right after GetNotification reads acknowledged=false
+	// on the 3 -> 2 decrease recompute, Bob's HTTP Mark read executes before
+	// UpdateNotificationStateIfAcknowledged runs.
+	hookStore.onBeforeWrite = func() {
+		ackRR := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/notifications/"+notifID+"/ack", nil)
+		require.Equal(t, http.StatusOK, ackRR.Code, "body: %s", ackRR.Body.String())
+	}
+	fault.Arm()
+
+	rr := f.answer(t, f.bob, p1.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"})
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+	waitDecisionBellIdle(t, f.srv)
+
+	assert.True(t, hookStore.interleaved.Load(), "interleaved Mark read hook must have fired")
+	assert.Equal(t, int64(1), hookStore.conflicts.Load(), "first keep-state write must conflict and retry")
+
+	row, err = f.store.GetNotification(ctx, notifID)
+	require.NoError(t, err)
+	assert.True(t, row.Acknowledged, "concurrent Mark read must NOT be undone by a decrease recompute")
+	assert.Equal(t, "2", row.ResourceID)
+	assert.Equal(t, "2 decisions are waiting on you in 1 project", row.Message)
+
+	evts := collectEvents(bobSub)
+	require.NotEmpty(t, evts, "retry must publish the updated acknowledged state")
+	for i, raw := range evts {
+		var evt UserNotificationEvent
+		require.NoError(t, json.Unmarshal(raw.Data, &evt), "event %d", i)
+		assert.True(t, evt.Acknowledged, "event %d must not publish an unacknowledged row after Mark read", i)
+	}
+}
+
+type panicTopicBindingsStore struct {
+	store.Store
+	fault     *storeFaultSwitch
+	panicked  atomic.Bool
+	projectID string
+}
+
+func (s *panicTopicBindingsStore) ListRoleBindingsForScope(ctx context.Context, scopeType, scopeID string) ([]*store.RoleBinding, error) {
+	if (s.fault == nil || s.fault.Active()) && scopeType == store.RoleScopeProject && scopeID == s.projectID && s.panicked.CompareAndSwap(false, true) {
+		panic("injected topic expansion panic")
+	}
+	return s.Store.ListRoleBindingsForScope(ctx, scopeType, scopeID)
+}
+
+// TestDecisionsBell_TopicWorkerPanicRecovery verifies that a panic inside
+// expandDecisionBellTopic is recovered, clears inFlightTopics, and leaves the
+// worker pool healthy for subsequent topic events.
+func TestDecisionsBell_TopicWorkerPanicRecovery(t *testing.T) {
+	srv, _, alice, bob, project, panicStore, fault := setupDemoPolicyTestWithFault(t, func(inner store.Store, f *storeFaultSwitch) *panicTopicBindingsStore {
+		return &panicTopicBindingsStore{Store: inner, fault: f}
+	})
+	panicStore.projectID = project.ID
+	f := newChoicesFixtureOn(t, srv, panicStore, alice, bob, project)
+	setProjectDecisionsExperiments(t, f.srv, true, true)
+	setFastDecisionBell(t, f.srv, 15*time.Millisecond)
+
+	f.agent.Ancestry = []string{f.bob.ID}
+	f.agent.MessageMode = store.MessageModeProject
+	require.NoError(t, f.store.UpdateAgent(context.Background(), f.agent))
+
+	fault.Arm()
+	sendTopicChoicePromptAsAgent(t, f.srv, f.store, f.agent, f.project.ID, f.topicID, oneDecision, false)
+	waitDecisionBellIdle(t, f.srv)
+
+	assert.True(t, panicStore.panicked.Load(), "injected panic must have fired")
+	f.srv.decisionBell.mu.Lock()
+	inFlightTopics := len(f.srv.decisionBell.inFlightTopics)
+	f.srv.decisionBell.mu.Unlock()
+	assert.Zero(t, inFlightTopics, "inFlightTopics must be cleared after topic worker panic")
+
+	// A subsequent topic event on the same topic still expands and delivers normally.
+	sendTopicChoicePromptAsAgent(t, f.srv, f.store, f.agent, f.project.ID, f.topicID,
+		`[{"id":"after-panic","question":"Recovered?","choices":["yes","no"]}]`, false)
+	waitDecisionBellIdle(t, f.srv)
+
+	aliceRow, err := f.store.GetNotification(context.Background(), decisionsWaitingNotificationID(f.alice.ID))
+	require.NoError(t, err)
+	assert.Equal(t, "2", aliceRow.ResourceID)
+	assert.False(t, aliceRow.Acknowledged)
 }

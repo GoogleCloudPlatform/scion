@@ -111,6 +111,7 @@ type decisionBellState struct {
 	wg              sync.WaitGroup
 	debounce        time.Duration
 	maxTopicMembers int
+	testHoldCh      <-chan struct{}
 
 	userDue        map[string]decisionBellUserEntry
 	topicDue       map[decisionBellTopicKey]time.Time
@@ -297,10 +298,8 @@ func (s *Server) enqueueDecisionBellTopic(projectID, chatKey string) {
 		st.mu.Unlock()
 		return
 	}
-	if existing, ok := st.topicDue[tk]; !ok || dueAt.Before(existing) {
-		if !ok {
-			st.topicDue[tk] = dueAt
-		}
+	if _, ok := st.topicDue[tk]; !ok {
+		st.topicDue[tk] = dueAt
 	}
 	st.signalWakeLocked()
 	st.mu.Unlock()
@@ -367,6 +366,13 @@ func (s *Server) nextDecisionBellWorkItem() (decisionBellWorkItem, time.Duration
 	if st.stopped {
 		return decisionBellWorkItem{}, -1, false
 	}
+	if st.testHoldCh != nil {
+		select {
+		case <-st.testHoldCh:
+		default:
+			return decisionBellWorkItem{}, -1, false
+		}
+	}
 
 	now := time.Now()
 	var earliest time.Time
@@ -413,11 +419,22 @@ func (s *Server) executeDecisionBellWorkItem(item decisionBellWorkItem) {
 	st := &s.decisionBell
 	if item.isTopic {
 		var members []string
-		if s.decisionsBellEnabled() {
-			ctx, cancel := context.WithTimeout(context.Background(), s.chatSearchTimeout())
-			members = s.expandDecisionBellTopic(ctx, item.topic.projectID, item.topic.chatKey)
-			cancel()
-		}
+		func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					slog.Error("decisions bell: topic worker panic",
+						"project_id", item.topic.projectID,
+						"chat_key", item.topic.chatKey,
+						"panic", fmt.Sprint(rec),
+					)
+				}
+			}()
+			if s.decisionsBellEnabled() {
+				ctx, cancel := context.WithTimeout(context.Background(), s.chatSearchTimeout())
+				defer cancel()
+				members = s.expandDecisionBellTopic(ctx, item.topic.projectID, item.topic.chatKey)
+			}
+		}()
 
 		now := time.Now()
 		st.mu.Lock()
@@ -491,7 +508,7 @@ func (s *Server) writeDecisionsWaitingNotification(ctx context.Context, userID s
 	}
 	id := decisionsWaitingNotificationID(userID)
 
-	for attempt := 0; attempt < 2; attempt++ {
+	for attempt := 0; attempt < 3; attempt++ {
 		existing, err := s.store.GetNotification(ctx, id)
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			return err
@@ -512,6 +529,9 @@ func (s *Server) writeDecisionsWaitingNotification(ctx context.Context, userID s
 				return nil
 			}
 			if err := s.store.UpdateNotificationState(ctx, id, decisionsWaitingClearedMessage, "0", true); err != nil {
+				if errors.Is(err, store.ErrNotFound) {
+					return nil
+				}
 				return err
 			}
 			s.publishDecisionsWaitingUserEvent(ctx, id)
@@ -539,7 +559,7 @@ func (s *Server) writeDecisionsWaitingNotification(ctx context.Context, userID s
 					CreatedAt:      time.Now().UTC(),
 				}
 				if err := s.store.CreateNotification(ctx, notif); err != nil {
-					if errors.Is(err, store.ErrAlreadyExists) && attempt == 0 {
+					if errors.Is(err, store.ErrAlreadyExists) && attempt < 2 {
 						continue
 					}
 					return err
@@ -548,6 +568,9 @@ func (s *Server) writeDecisionsWaitingNotification(ctx context.Context, userID s
 				return nil
 			}
 			if err := s.store.UpdateNotificationState(ctx, id, msg, resID, false); err != nil {
+				if errors.Is(err, store.ErrNotFound) && attempt < 2 {
+					continue
+				}
 				return err
 			}
 			s.publishDecisionsWaitingUserEvent(ctx, id)
@@ -555,10 +578,15 @@ func (s *Server) writeDecisionsWaitingNotification(ctx context.Context, userID s
 		}
 
 		// 0 < total <= prevCount: keep existing.Acknowledged (design B2).
+		// Conditional on existing.Acknowledged so a concurrent Mark read
+		// between GetNotification and this write is never undone.
 		if existing.ResourceID == resID && existing.Message == msg {
 			return nil
 		}
-		if err := s.store.UpdateNotificationState(ctx, id, msg, resID, existing.Acknowledged); err != nil {
+		if err := s.store.UpdateNotificationStateIfAcknowledged(ctx, id, msg, resID, existing.Acknowledged); err != nil {
+			if (errors.Is(err, store.ErrVersionConflict) || errors.Is(err, store.ErrNotFound)) && attempt < 2 {
+				continue
+			}
 			return err
 		}
 		s.publishDecisionsWaitingUserEvent(ctx, id)

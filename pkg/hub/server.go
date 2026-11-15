@@ -7926,10 +7926,11 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		if s.previewService != nil {
 			s.previewService.Close()
 		}
-		// Stop presence manager before closing event publisher
+		// Stop presence manager and decisions bell workers before closing event publisher
 		if presenceManager != nil {
 			presenceManager.Stop()
 		}
+		s.stopDecisionBell()
 		if events != nil {
 			events.Close()
 		}
@@ -7949,7 +7950,6 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		if s.cspReports != nil {
 			s.cspReports.Close()
 		}
-		s.stopDecisionBell()
 	})
 	return nil
 }
