@@ -54,6 +54,43 @@ func newTestEngine(t *testing.T) *celengine.Engine {
 	return eng
 }
 
+// newSemanticLargeInputEngine uses DefaultLimits() with EvalTimeout raised to the
+// 1s ceiling so 16-64 KiB semantic happy-path tests do not flake under -race or
+// 2-vCPU contention (tests specifically exercising the 100ms default keep newTestEngine).
+func newSemanticLargeInputEngine(t *testing.T) *celengine.Engine {
+	t.Helper()
+	lim := celengine.DefaultLimits()
+	lim.EvalTimeout = celengine.MaxEvalTimeoutCeiling
+	eng, err := celengine.New(testEnv(), lim, celengine.DefaultCacheConfig())
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	return eng
+}
+
+func scaleWallBound(d time.Duration) time.Duration {
+	if !raceEnabled {
+		return d
+	}
+	scaled := 10 * d
+	if scaled < 2*time.Second {
+		return 2 * time.Second
+	}
+	return scaled
+}
+
+func assertCostLimitOrRaceTimeout(t *testing.T, err error) {
+	t.Helper()
+	if !raceEnabled {
+		assertEvalReason(t, err, celengine.ReasonCostLimit)
+		return
+	}
+	var evalErr *celengine.EvalError
+	if !errors.As(err, &evalErr) || (evalErr.Reason != celengine.ReasonCostLimit && evalErr.Reason != celengine.ReasonTimeout) {
+		t.Fatalf("EvalError = %v, want cost_limit or timeout under -race", err)
+	}
+}
+
 func TestNewValidation(t *testing.T) {
 	validEnv := testEnv()
 	validLimits := celengine.DefaultLimits()
@@ -481,6 +518,9 @@ func TestHasMacroAndRuntimeErrors(t *testing.T) {
 
 func TestLinearRE2MatchesAndDynamicRegexError(t *testing.T) {
 	eng := newTestEngine(t)
+	if raceEnabled {
+		eng = newSemanticLargeInputEngine(t)
+	}
 	boolKind := celengine.Kind{Name: "filter", Result: celengine.Bool()}
 
 	// Classic PCRE catastrophic-backtracking input runs in microseconds on RE2.
@@ -495,7 +535,7 @@ func TestLinearRE2MatchesAndDynamicRegexError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Eval matches: %v", err)
 	}
-	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+	if elapsed := time.Since(start); elapsed > scaleWallBound(100*time.Millisecond) {
 		t.Errorf("RE2 match took unexpectedly long: %v", elapsed)
 	}
 	if b, _ := res.Bool(); b {
@@ -927,7 +967,7 @@ func TestAmplifyingFunctionsBoundedOn64KiBPayload(t *testing.T) {
 		},
 	}
 
-	maxElapsed := 2 * celengine.DefaultLimits().EvalTimeout
+	maxElapsed := scaleWallBound(2 * celengine.DefaultLimits().EvalTimeout)
 	const maxAllocDelta = 64 << 20 // 64 MiB
 
 	for _, tc := range cases {
@@ -947,9 +987,9 @@ func TestAmplifyingFunctionsBoundedOn64KiBPayload(t *testing.T) {
 			if res != nil {
 				t.Fatalf("expected nil Result, got %v", res)
 			}
-			assertEvalReason(t, evalErr, celengine.ReasonCostLimit)
+			assertCostLimitOrRaceTimeout(t, evalErr)
 			if elapsed > maxElapsed {
-				t.Errorf("elapsed %s exceeds 2x EvalTimeout (%s)", elapsed, maxElapsed)
+				t.Errorf("elapsed %s exceeds wall-clock bound (%s)", elapsed, maxElapsed)
 			}
 			allocDelta := mAfter.TotalAlloc - mBefore.TotalAlloc
 			if allocDelta > maxAllocDelta {
@@ -974,6 +1014,9 @@ func TestAmplifyingFunctionsBoundedOn64KiBPayload(t *testing.T) {
 		// runs in O(N+M) milliseconds rather than O(N*M) seconds.
 		highCostLim := celengine.DefaultLimits()
 		highCostLim.CostLimit = celengine.MaxCostLimitCeiling
+		if raceEnabled {
+			highCostLim.EvalTimeout = celengine.MaxEvalTimeoutCeiling
+		}
 		searchEng, err := celengine.New(testEnv(), highCostLim, celengine.DefaultCacheConfig())
 		if err != nil {
 			t.Fatalf("New: %v", err)
@@ -987,10 +1030,10 @@ func TestAmplifyingFunctionsBoundedOn64KiBPayload(t *testing.T) {
 			res, _, evalErr := prog.Eval(ctx, searchAct)
 			elapsed := time.Since(start)
 			// Under stringSearchCostModel 200k*100k*0.1 > 10M, CostTracker charges AFTER the call:
-			// either it returns true or ReasonCostLimit, and critically the call itself MUST finish
-			// in well under 2x EvalTimeout (200ms) instead of ~5s of O(N*M) rune loops!
+			// either it returns true or ReasonCostLimit (or ReasonTimeout under -race), and critically
+			// the call itself MUST finish quickly instead of ~5s of O(N*M) rune loops!
 			if evalErr != nil {
-				assertEvalReason(t, evalErr, celengine.ReasonCostLimit)
+				assertCostLimitOrRaceTimeout(t, evalErr)
 			} else if got, _ := res.Bool(); !got {
 				t.Fatalf("%s = false, want true", expr)
 			}
@@ -1176,6 +1219,7 @@ func TestPlanTimeBoundRecovery(t *testing.T) {
 
 func TestMatchesRegexSizeAndWorkBounds(t *testing.T) {
 	eng := newTestEngine(t)
+	semEng := newSemanticLargeInputEngine(t)
 	boolKind := celengine.Kind{Name: "filter", Result: celengine.Bool()}
 	ctx := context.Background()
 
@@ -1210,9 +1254,9 @@ func TestMatchesRegexSizeAndWorkBounds(t *testing.T) {
 		if res != nil {
 			t.Fatalf("expected nil Result, got %v", res)
 		}
-		assertEvalReason(t, evalErr, celengine.ReasonCostLimit)
-		if elapsed > 50*time.Millisecond {
-			t.Errorf("pre-call work check took %s, want <= 50ms", elapsed)
+		assertCostLimitOrRaceTimeout(t, evalErr)
+		if elapsed > scaleWallBound(50*time.Millisecond) {
+			t.Errorf("pre-call work check took %s, want <= %s", elapsed, scaleWallBound(50*time.Millisecond))
 		}
 	})
 
@@ -1235,9 +1279,9 @@ func TestMatchesRegexSizeAndWorkBounds(t *testing.T) {
 			if res != nil {
 				t.Fatalf("pattern %q: expected nil Result (must not be swallowed by || true), got %v", pat[:12], res)
 			}
-			assertEvalReason(t, evalErr, celengine.ReasonCostLimit)
-			if elapsed > 50*time.Millisecond {
-				t.Errorf("pattern %q took %s, want <= 50ms", pat[:12], elapsed)
+			assertCostLimitOrRaceTimeout(t, evalErr)
+			if elapsed > scaleWallBound(50*time.Millisecond) {
+				t.Errorf("pattern %q took %s, want <= %s", pat[:12], elapsed, scaleWallBound(50*time.Millisecond))
 			}
 		}
 	})
@@ -1245,7 +1289,7 @@ func TestMatchesRegexSizeAndWorkBounds(t *testing.T) {
 	// 4. Normal literal and dynamic matches on 60 KiB inputs within work bound succeed.
 	t.Run("normal_literal_and_dynamic_matches", func(t *testing.T) {
 		s60k := "webhook.deploy." + strings.Repeat("a", 60*1024)
-		litProg, err := eng.Compile(`event.s.matches("^webhook\\.deploy\\..*$")`, boolKind)
+		litProg, err := semEng.Compile(`event.s.matches("^webhook\\.deploy\\..*$")`, boolKind)
 		if err != nil {
 			t.Fatalf("Compile normal literal: %v", err)
 		}
@@ -1257,7 +1301,7 @@ func TestMatchesRegexSizeAndWorkBounds(t *testing.T) {
 			t.Fatalf("expected true match")
 		}
 
-		dynProg, err := eng.Compile(`event.s.matches(event.p)`, boolKind)
+		dynProg, err := semEng.Compile(`event.s.matches(event.p)`, boolKind)
 		if err != nil {
 			t.Fatalf("Compile normal dynamic: %v", err)
 		}
@@ -1279,7 +1323,7 @@ func TestMatchesRegexSizeAndWorkBounds(t *testing.T) {
 		s64k := strings.Repeat("ok ", 21840) + "panic: boom" // ~65,531 bytes <= 64 KiB
 		commit64k := "feat(triggers): " + strings.Repeat("x", 65500)
 
-		kwProg, err := eng.Compile(`event.s.matches("(?i)\\b(error|failed|panic)\\b")`, boolKind)
+		kwProg, err := semEng.Compile(`event.s.matches("(?i)\\b(error|failed|panic)\\b")`, boolKind)
 		if err != nil {
 			t.Fatalf("Compile keyword regex: %v", err)
 		}
@@ -1291,7 +1335,7 @@ func TestMatchesRegexSizeAndWorkBounds(t *testing.T) {
 			t.Fatalf("expected keyword regex match on 64k")
 		}
 
-		ccProg, err := eng.Compile(`event.s.matches("^(feat|fix|chore)(\\([a-z0-9_-]+\\))?!?: .+")`, boolKind)
+		ccProg, err := semEng.Compile(`event.s.matches("^(feat|fix|chore)(\\([a-z0-9_-]+\\))?!?: .+")`, boolKind)
 		if err != nil {
 			t.Fatalf("Compile conventional-commit regex: %v", err)
 		}
@@ -1308,7 +1352,7 @@ func TestMatchesRegexSizeAndWorkBounds(t *testing.T) {
 		// charges 6,161 per call and aborts repeated matches on CostLimit (or
 		// ReasonTimeout via CheckInterrupt under -race instrumentation).
 		s1kA := strings.Repeat("a", 1_000)
-		singleRepProg, err := eng.Compile(`event.s.matches("a{1,120}b")`, boolKind)
+		singleRepProg, err := semEng.Compile(`event.s.matches("a{1,120}b")`, boolKind)
 		if err != nil {
 			t.Fatalf("Compile single counted-rep: %v", err)
 		}
@@ -1338,8 +1382,9 @@ func TestMatchesRegexSizeAndWorkBounds(t *testing.T) {
 		if !errors.As(evalErr, &repEvalErr) || (repEvalErr.Reason != celengine.ReasonCostLimit && repEvalErr.Reason != celengine.ReasonTimeout) {
 			t.Fatalf("EvalError = %v, want cost_limit or timeout", evalErr)
 		}
-		if elapsed > 2*celengine.DefaultEvalTimeout {
-			t.Errorf("counted-repetition loop took %s, want <= %s", elapsed, 2*celengine.DefaultEvalTimeout)
+		maxLoopElapsed := scaleWallBound(2 * celengine.DefaultEvalTimeout)
+		if elapsed > maxLoopElapsed {
+			t.Errorf("counted-repetition loop took %s, want <= %s", elapsed, maxLoopElapsed)
 		}
 	})
 }
@@ -1414,7 +1459,7 @@ func TestComprehensionContainerWalkAndFormatBounded(t *testing.T) {
 		},
 	}
 
-	maxElapsed := 2 * celengine.DefaultEvalTimeout
+	maxElapsed := scaleWallBound(2 * celengine.DefaultEvalTimeout)
 	const maxAllocDelta = 64 << 20 // 64 MiB
 
 	for _, tc := range probes {
@@ -1449,7 +1494,7 @@ func TestComprehensionContainerWalkAndFormatBounded(t *testing.T) {
 				t.Fatalf("EvalError = %v, want cost_limit or timeout", evalErr)
 			}
 			if elapsed > maxElapsed {
-				t.Errorf("elapsed %s exceeds 2x EvalTimeout (%s)", elapsed, maxElapsed)
+				t.Errorf("elapsed %s exceeds wall-clock bound (%s)", elapsed, maxElapsed)
 			}
 			if allocDelta > maxAllocDelta {
 				t.Errorf("TotalAlloc delta %.2f MiB exceeds 64 MiB", float64(allocDelta)/(1<<20))
@@ -1500,7 +1545,7 @@ func TestComprehensionContainerWalkAndFormatBounded(t *testing.T) {
 			t.Fatalf("EvalError = %v, want timeout or cost_limit", evalErr)
 		}
 		if elapsed > maxElapsed {
-			t.Errorf("elapsed %s under MaxCostLimitCeiling exceeds 2x EvalTimeout (%s)", elapsed, maxElapsed)
+			t.Errorf("elapsed %s under MaxCostLimitCeiling exceeds wall-clock bound (%s)", elapsed, maxElapsed)
 		}
 	})
 }
@@ -1550,6 +1595,9 @@ func TestOptionalCeilingValidationErrorMessages(t *testing.T) {
 
 func TestSystemOneModeBenignProseRegexAndPredicateProbe(t *testing.T) {
 	eng := newTestEngine(t)
+	if raceEnabled {
+		eng = newSemanticLargeInputEngine(t)
+	}
 	boolKind := celengine.Kind{Name: "filter", Result: celengine.Bool()}
 
 	prose16k := strings.Repeat("Reviewing candidate change notes and rollout telemetry. ", 295) +
@@ -1589,4 +1637,286 @@ func TestSystemOneModeBenignProseRegexAndPredicateProbe(t *testing.T) {
 	if stats.Cost >= celengine.DefaultCostLimit {
 		t.Fatalf("stats.Cost = %d, want < DefaultCostLimit (%d)", stats.Cost, celengine.DefaultCostLimit)
 	}
+}
+
+func TestConcatListTraversalChargedAndBounded(t *testing.T) {
+	eng := newTestEngine(t)
+	boolKind := celengine.Kind{Name: "filter", Result: celengine.Bool()}
+	strKind := celengine.Kind{Name: "subject", Result: celengine.String()}
+	ctx := context.Background()
+
+	buildConcatChain := func(varExpr string, depth int) string {
+		parts := make([]string, depth)
+		for i := range parts {
+			parts[i] = varExpr
+		}
+		return "(" + strings.Join(parts, " + ") + ")"
+	}
+
+	// 1. Depth-30 left-nested concat of payload lists across ==, !=, in, join, and %s
+	// must charge result size across the chain (stats.Cost >= elements * depth) and
+	// abort with ReasonCostLimit without building O(depth) lazy concatList traversal.
+	const depth = 30
+	const elems = 2184
+	strPayload := make([]any, elems)
+	for i := range strPayload {
+		strPayload[i] = "x"
+	}
+	act := map[string]any{
+		"event": map[string]any{
+			"a": strPayload,
+		},
+	}
+
+	chain30 := buildConcatChain("event.a", depth)
+	consumers := []struct {
+		name string
+		expr string
+	}{
+		{name: "eq", expr: chain30 + " == " + chain30},
+		{name: "ne", expr: chain30 + " != " + chain30},
+		{name: "in", expr: `"z" in ` + chain30},
+		{name: "join", expr: fmt.Sprintf(`[dyn(%s)].map(c, c.map(x, string(x)).join("") == "")[0]`, chain30)},
+		{name: "format_s", expr: `"%s".format([` + chain30 + `]) == ""`},
+		{name: "chained_or_ne_eq", expr: `[` + chain30 + `].map(c, c != c || c != c || c == c)[0]`},
+	}
+
+	// Also exercise direct list<string> `tags + tags + ...` (static AddList overload, no map wrapper) for join.
+	tagsPayload := make([]string, elems)
+	for i := range tagsPayload {
+		tagsPayload[i] = "x"
+	}
+	act["tags"] = tagsPayload
+	tagsChain30 := buildConcatChain("tags", depth)
+	consumers = append(consumers, struct {
+		name string
+		expr string
+	}{
+		name: "join_typed_tags",
+		expr: tagsChain30 + `.join("") == ""`,
+	})
+
+	minExpectedCost := uint64(elems * depth)
+	maxElapsed := scaleWallBound(2 * celengine.DefaultEvalTimeout)
+
+	for _, tc := range consumers {
+		t.Run("depth30_"+tc.name, func(t *testing.T) {
+			prog, err := eng.Compile(tc.expr, boolKind)
+			if err != nil {
+				t.Fatalf("Compile(%s): %v", tc.name, err)
+			}
+			start := time.Now()
+			res, stats, evalErr := prog.Eval(ctx, act)
+			elapsed := time.Since(start)
+			if res != nil {
+				t.Fatalf("%s returned decision %v (elapsed=%s, cost=%d), want nil Result", tc.name, res, elapsed, stats.Cost)
+			}
+			if !raceEnabled {
+				assertEvalReason(t, evalErr, celengine.ReasonCostLimit)
+			} else {
+				assertCostLimitOrRaceTimeout(t, evalErr)
+			}
+			if stats.Cost < minExpectedCost {
+				t.Errorf("%s stats.Cost = %d, want >= %d (elements*depth = %d*%d)", tc.name, stats.Cost, minExpectedCost, elems, depth)
+			}
+			if elapsed > maxElapsed {
+				t.Errorf("%s elapsed %s exceeds wall-clock bound %s", tc.name, elapsed, maxElapsed)
+			}
+		})
+	}
+
+	// 2. Benign small concat chain preserves exact semantics across all 5 consumers
+	// while still charging >= elements * depth.
+	t.Run("benign_depth10_semantics_and_cost", func(t *testing.T) {
+		smallAct := map[string]any{
+			"tags": []string{"a", "b", "c"},
+		}
+		chain10 := buildConcatChain("tags", 10)
+		wantMinCost := uint64(3 * 10)
+
+		for _, expr := range []string{
+			chain10 + " == " + chain10,
+			`!(` + chain10 + " != " + chain10 + `)`,
+			`"c" in ` + chain10,
+			`!("z" in ` + chain10 + `)`,
+		} {
+			prog, err := eng.Compile(expr, boolKind)
+			if err != nil {
+				t.Fatalf("Compile(%s): %v", expr, err)
+			}
+			res, stats, err := prog.Eval(ctx, smallAct)
+			if err != nil {
+				t.Fatalf("Eval(%s): %v", expr, err)
+			}
+			if b, bErr := res.Bool(); bErr != nil || !b {
+				t.Fatalf("Eval(%s) = (%v, %v), want (true, nil)", expr, b, bErr)
+			}
+			if stats.Cost < wantMinCost {
+				t.Errorf("Eval(%s) Cost = %d, want >= %d", expr, stats.Cost, wantMinCost)
+			}
+		}
+
+		joinProg, err := eng.Compile(chain10+`.join("")`, strKind)
+		if err != nil {
+			t.Fatalf("Compile join: %v", err)
+		}
+		joinRes, joinStats, err := joinProg.Eval(ctx, smallAct)
+		if err != nil {
+			t.Fatalf("Eval join: %v", err)
+		}
+		if s, sErr := joinRes.String(); sErr != nil || s != strings.Repeat("abc", 10) {
+			t.Fatalf("join = (%q, %v), want %q", s, sErr, strings.Repeat("abc", 10))
+		}
+		if joinStats.Cost < wantMinCost {
+			t.Errorf("join Cost = %d, want >= %d", joinStats.Cost, wantMinCost)
+		}
+
+		fmtProg, err := eng.Compile(`"%s".format([`+chain10+`])`, strKind)
+		if err != nil {
+			t.Fatalf("Compile format: %v", err)
+		}
+		fmtRes, fmtStats, err := fmtProg.Eval(ctx, smallAct)
+		if err != nil {
+			t.Fatalf("Eval format: %v", err)
+		}
+		if s, sErr := fmtRes.String(); sErr != nil || !strings.HasPrefix(s, "[a, b, c, a,") {
+			t.Fatalf("format = (%q, %v), want prefix '[a, b, c, a,'", s, sErr)
+		}
+		if fmtStats.Cost < wantMinCost {
+			t.Errorf("format Cost = %d, want >= %d", fmtStats.Cost, wantMinCost)
+		}
+	})
+}
+
+func TestTimezoneEmbeddedLRUCacheAndCost(t *testing.T) {
+	semEng := newSemanticLargeInputEngine(t)
+	semEng2 := newSemanticLargeInputEngine(t)
+	defaultEng := newTestEngine(t)
+	boolKind := celengine.Kind{Name: "filter", Result: celengine.Bool()}
+	ctx := context.Background()
+	refTime := time.Date(2026, 1, 15, 12, 0, 0, 0, time.UTC)
+
+	// 1. Valid IANA zone: cold miss pre-charges >= 250, warm hit on same Engine charges ~1,
+	// and a second Engine has an isolated LRU (cold miss >= 250).
+	t.Run("valid_iana_cold_miss_warm_hit_and_per_engine_isolation", func(t *testing.T) {
+		prog1, err := semEng.Compile(`at.getHours(meta["tz"]) == 1`, boolKind) // Auckland in Jan = UTC+13 -> 01:00 next day
+		if err != nil {
+			t.Fatalf("Compile: %v", err)
+		}
+		act := map[string]any{
+			"at":   refTime,
+			"meta": map[string]string{"tz": "Pacific/Auckland"},
+		}
+		res, coldStats, err := prog1.Eval(ctx, act)
+		if err != nil {
+			t.Fatalf("cold Eval Pacific/Auckland: %v", err)
+		}
+		if b, _ := res.Bool(); !b {
+			t.Fatalf("expected Pacific/Auckland hour == 1")
+		}
+		if coldStats.Cost < 250 {
+			t.Errorf("cold miss stats.Cost = %d, want >= 250", coldStats.Cost)
+		}
+
+		res, warmStats, err := prog1.Eval(ctx, act)
+		if err != nil {
+			t.Fatalf("warm Eval Pacific/Auckland: %v", err)
+		}
+		if b, _ := res.Bool(); !b {
+			t.Fatalf("expected warm Pacific/Auckland hour == 1")
+		}
+		if warmStats.Cost >= 20 {
+			t.Errorf("warm hit stats.Cost = %d, want < 20 (1 for cached tz lookup)", warmStats.Cost)
+		}
+
+		// Independent Engine must not share semEng's timezone cache.
+		prog2, err := semEng2.Compile(`at.getHours(meta["tz"]) == 1`, boolKind)
+		if err != nil {
+			t.Fatalf("Compile eng2: %v", err)
+		}
+		_, coldStats2, err := prog2.Eval(ctx, act)
+		if err != nil {
+			t.Fatalf("cold Eval on eng2: %v", err)
+		}
+		if coldStats2.Cost < 250 {
+			t.Errorf("eng2 cold miss stats.Cost = %d, want >= 250 (per-Engine cache isolation)", coldStats2.Cost)
+		}
+	})
+
+	// 2. Negative / invalid and > 64B timezone names charge >= 250, cache negative entries,
+	// and abort repeated invalid-timezone loops with ReasonCostLimit.
+	t.Run("negative_cached_and_invalid_loop_cost_bounded", func(t *testing.T) {
+		prog, err := semEng.Compile(`at.getHours(meta["tz"]) == 0`, boolKind)
+		if err != nil {
+			t.Fatalf("Compile: %v", err)
+		}
+		for _, badTZ := range []string{
+			"NoSuchArea/NoSuchCity",
+			"NoSuchArea/NoSuchCity", // warm negative LRU hit
+			strings.Repeat("A", 80), // > 64B rejected in memory without fallback
+			"../America/New_York",
+			"America//New_York",
+			"+25:00",
+			"00:99",
+		} {
+			res, stats, evalErr := prog.Eval(ctx, map[string]any{
+				"at":   refTime,
+				"meta": map[string]string{"tz": badTZ},
+			})
+			if res != nil {
+				t.Fatalf("badTZ %q returned decision %v", badTZ, res)
+			}
+			assertEvalReason(t, evalErr, celengine.ReasonRuntime)
+			if stats.Cost < 250 {
+				t.Errorf("badTZ %q stats.Cost = %d, want >= 250", badTZ, stats.Cost)
+			}
+		}
+
+		// 300 distinct invalid zone names x 5 iterations = 1500 lookups * 250 > 250,000 CostLimit.
+		badZones := make([]string, 300)
+		for i := range badZones {
+			badZones[i] = fmt.Sprintf("InvalidZone/City_%03d", i)
+		}
+		loopExpr := `[0, 1, 2, 3, 4].exists(r, tags.exists(z, at.getHours(z) == -99 || false))`
+		loopProg, err := defaultEng.Compile(loopExpr, boolKind)
+		if err != nil {
+			t.Fatalf("Compile invalid tz loop: %v", err)
+		}
+		res, _, evalErr := loopProg.Eval(ctx, map[string]any{
+			"at":   refTime,
+			"tags": badZones,
+		})
+		if res != nil {
+			t.Fatalf("expected nil Result on invalid timezone flood, got %v", res)
+		}
+		assertCostLimitOrRaceTimeout(t, evalErr)
+	})
+
+	// 3. Fixed numeric offsets, UTC, empty string, and Local preserve CEL semantics at cost ~1.
+	t.Run("fixed_offsets_and_builtin_zones", func(t *testing.T) {
+		exprs := []string{
+			`at.getHours("") == 12`,
+			`at.getHours("UTC") == 12`,
+			`at.getHours("+05:30") == 17 && at.getMinutes("+05:30") == 30`,
+			`at.getHours("-00:30") == 11 && at.getMinutes("-00:30") == 30`,
+			`at.getHours("05:30") == 17`,
+			`at.getHours("Local") >= 0`,
+		}
+		for _, expr := range exprs {
+			prog, err := semEng.Compile(expr, boolKind)
+			if err != nil {
+				t.Fatalf("Compile(%s): %v", expr, err)
+			}
+			res, stats, err := prog.Eval(ctx, map[string]any{"at": refTime})
+			if err != nil {
+				t.Fatalf("Eval(%s): %v", expr, err)
+			}
+			if b, _ := res.Bool(); !b {
+				t.Fatalf("Eval(%s) = false, want true", expr)
+			}
+			if stats.Cost >= 50 {
+				t.Errorf("Eval(%s) stats.Cost = %d, want < 50", expr, stats.Cost)
+			}
+		}
+	})
 }

@@ -15,12 +15,15 @@
 package celengine
 
 import (
+	"container/list"
 	"fmt"
 	"math"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+	_ "time/tzdata"
 	"unicode"
 	"unicode/utf8"
 
@@ -40,9 +43,11 @@ const (
 	maxPinnedFormatPrec  = 100
 	rabinKarpPatMinBytes = 64
 	rabinKarpWorkCutoff  = 4 << 20 // 4 MiB-comparisons before switching to linear KMP
-	maxCachedTimezones   = 256
-	maxCachedTzNameBytes = 128
+	maxCachedTimezones   = 1024
+	maxCachedTzNameBytes = 64
 	tzLookupErrorCost    = 250
+	walkInterruptStride  = 1024
+	walkCostFlushStride  = 4096
 )
 
 func abortOutputLimit() {
@@ -80,7 +85,7 @@ func buildRawFormatProgram() (cel.Program, error) {
 // interpreter.CostLimitExceeded (-> EvalError{Reason: ReasonCostLimit}) before
 // allocating or executing the unbounded work, and cannot be swallowed by
 // non-strict ||.
-func outputBoundsDecorator(limits Limits, rawFormat cel.Program) interpreter.InterpretableDecoratorV2 {
+func outputBoundsDecorator(limits Limits, rawFormat cel.Program, tzCache *tzLRUCache) interpreter.InterpretableDecoratorV2 {
 	maxBytes := limits.MaxOutputBytes
 	maxElems := limits.MaxCollectionElements
 	maxRegexProgSize := limits.MaxRegexProgramSize
@@ -96,6 +101,9 @@ func outputBoundsDecorator(limits Limits, rawFormat cel.Program) interpreter.Int
 	}
 	if maxRegexWork <= 0 {
 		maxRegexWork = DefaultMaxRegexWork
+	}
+	if tzCache == nil {
+		tzCache = newTZLRUCache(maxCachedTimezones)
 	}
 
 	return func(node interpreter.InterpretableV2) (interpreter.InterpretableV2, error) {
@@ -117,7 +125,11 @@ func outputBoundsDecorator(limits Limits, rawFormat cel.Program) interpreter.Int
 			}
 		case "join":
 			if arity == 1 || arity == 2 {
-				impl = boundedJoin(maxBytes, maxElems)
+				return &boundedJoinCall{
+					InterpretableCall: call,
+					maxBytes:          maxBytes,
+					maxElems:          maxElems,
+				}, nil
 			}
 		case "split":
 			if arity == 2 || arity == 3 {
@@ -138,7 +150,11 @@ func outputBoundsDecorator(limits Limits, rawFormat cel.Program) interpreter.Int
 			}
 		case operators.Add:
 			if arity == 2 {
-				impl = boundedAdd(maxBytes, maxElems)
+				return &boundedAddCall{
+					InterpretableCall: call,
+					maxBytes:          maxBytes,
+					maxElems:          maxElems,
+				}, nil
 			}
 		case "indexOf":
 			if arity == 2 || arity == 3 {
@@ -231,7 +247,11 @@ func outputBoundsDecorator(limits Limits, rawFormat cel.Program) interpreter.Int
 			overloads.TimeGetSeconds,
 			overloads.TimeGetMilliseconds:
 			if arity == 2 {
-				impl = boundedTimezoneAccessor(call.Function(), call.OverloadID(), maxBytes)
+				return &boundedTimezoneCall{
+					InterpretableCall: call,
+					maxBytes:          maxBytes,
+					tzCache:           tzCache,
+				}, nil
 			}
 		case operators.Equals:
 			if arity == 2 {
@@ -447,63 +467,120 @@ func boundedReplace(maxBytes int) functions.FunctionOp {
 	}
 }
 
-func boundedJoin(maxBytes, maxElems int) functions.FunctionOp {
-	return func(args ...ref.Val) ref.Val {
-		list, ok := args[0].(traits.Lister)
-		if !ok {
-			return types.MaybeNoSuchOverloadErr(args[0])
-		}
-		sep := ""
-		if len(args) == 2 {
-			sepVal, ok := args[1].(types.String)
-			if !ok {
-				return types.MaybeNoSuchOverloadErr(args[1])
-			}
-			sep = string(sepVal)
-		}
+type boundedJoinCall struct {
+	interpreter.InterpretableCall
+	maxBytes int
+	maxElems int
+}
 
-		szVal, ok := list.Size().(types.Int)
-		if !ok {
-			return types.NewErr("join: invalid list size")
+func (c *boundedJoinCall) Eval(ctx interpreter.Activation) ref.Val {
+	return interpreter.EvalActivation(ctx, c.Exec)
+}
+
+func (c *boundedJoinCall) Exec(frame *interpreter.ExecutionFrame) ref.Val {
+	checkFrameInterrupt(frame)
+	args := c.Args()
+	lVal := args[0].Exec(frame)
+	if len(args) == 1 {
+		switch lVal.(type) {
+		case *types.Err:
+			return lVal
+		case *types.Unknown:
+			chargePrecomputedCost(frame, c.ID(), 1)
+			return lVal
 		}
-		sz := int64(szVal)
-		if sz < 0 || sz > int64(maxElems) {
+	} else {
+		switch l := lVal.(type) {
+		case *types.Err:
+			return lVal
+		case *types.Unknown:
+			rVal := args[1].Exec(frame)
+			if rUnk, ok := rVal.(*types.Unknown); ok {
+				merged := types.MergeUnknowns(l, rUnk)
+				chargePrecomputedCost(frame, c.ID(), 1)
+				return merged
+			}
+			chargePrecomputedCost(frame, c.ID(), 1)
+			return lVal
+		}
+	}
+
+	sep := ""
+	if len(args) == 2 {
+		rVal := args[1].Exec(frame)
+		switch rVal.(type) {
+		case *types.Err:
+			return rVal
+		case *types.Unknown:
+			chargePrecomputedCost(frame, c.ID(), 1)
+			return rVal
+		}
+		sepVal, ok := rVal.(types.String)
+		if !ok {
+			chargePrecomputedCost(frame, c.ID(), 1)
+			return types.LabelErrNode(c.ID(), types.MaybeNoSuchOverloadErr(rVal))
+		}
+		sep = string(sepVal)
+	}
+
+	list, ok := lVal.(traits.Lister)
+	if !ok {
+		chargePrecomputedCost(frame, c.ID(), 1)
+		return types.LabelErrNode(c.ID(), types.MaybeNoSuchOverloadErr(lVal))
+	}
+	szVal, ok := list.Size().(types.Int)
+	if !ok {
+		chargePrecomputedCost(frame, c.ID(), 1)
+		return types.LabelErrNode(c.ID(), types.NewErr("join: invalid list size"))
+	}
+	sz := int64(szVal)
+	if sz < 0 || sz > int64(c.maxElems) {
+		abortOutputLimit()
+	}
+	if sz == 0 {
+		chargePrecomputedCost(frame, c.ID(), 1)
+		return types.String("")
+	}
+
+	b := newWalkBudget(frame, c.ID(), int64(c.maxBytes), int64(c.maxElems))
+	b.chargeElems(sz)
+	if sz > 1 && len(sep) > 0 {
+		if len(sep) > c.maxBytes || (sz-1) > int64(c.maxBytes)/int64(len(sep)) {
 			abortOutputLimit()
 		}
-		if sz == 0 {
-			return types.String("")
-		}
-
-		var total int64
-		if sz > 1 && len(sep) > 0 {
-			if len(sep) > maxBytes || (sz-1) > int64(maxBytes)/int64(len(sep)) {
-				abortOutputLimit()
-			}
-			total = (sz - 1) * int64(len(sep))
-		}
-
-		for i := types.Int(0); i < szVal; i++ {
-			elem := list.Get(i)
-			str, ok := elem.(types.String)
-			if !ok {
-				return types.NewErr("join: invalid input type %s", elem.Type().TypeName())
-			}
-			total += int64(len(str))
-			if total > int64(maxBytes) {
-				abortOutputLimit()
-			}
-		}
-
-		var sb strings.Builder
-		sb.Grow(int(total))
-		for i := types.Int(0); i < szVal; i++ {
-			if i != 0 {
-				sb.WriteString(sep)
-			}
-			sb.WriteString(string(list.Get(i).(types.String)))
-		}
-		return types.String(sb.String())
+		b.chargeBytes((sz - 1) * int64(len(sep)))
 	}
+
+	for i := types.Int(0); i < szVal; i++ {
+		b.tickInterrupt()
+		elem := list.Get(i)
+		str, ok := elem.(types.String)
+		if !ok {
+			b.finishCharge(1)
+			return types.LabelErrNode(c.ID(), types.NewErr("join: invalid input type %s", elem.Type().TypeName()))
+		}
+		b.chargeBytes(int64(len(str)))
+	}
+
+	totalBytes := int(b.initBytes - b.remBytes)
+	b.finishCharge(1)
+	checkFrameInterrupt(frame)
+
+	var sb strings.Builder
+	sb.Grow(totalBytes)
+	steps := 0
+	for i := types.Int(0); i < szVal; i++ {
+		steps++
+		if steps >= walkInterruptStride {
+			steps = 0
+			checkFrameInterrupt(frame)
+		}
+		if i != 0 {
+			sb.WriteString(sep)
+		}
+		sb.WriteString(string(list.Get(i).(types.String)))
+	}
+	return types.String(sb.String())
 }
 
 func boundedSplit(maxBytes, maxElems int) functions.FunctionOp {
@@ -733,9 +810,8 @@ func (c *boundedFormatCall) Exec(frame *interpreter.ExecutionFrame) ref.Val {
 		abortOutputLimit()
 	}
 
-	estOutBytes, walkedElems := checkFormatOutputBound(fmtStr, argList, c.maxBytes, c.maxElems)
-	callCost := cost.SafeAdd(1, cost.SafeAdd(byteScanCost(len(fmtStr)), cost.SafeAdd(byteScanCost(estOutBytes), walkedElems)))
-	chargePrecomputedCost(frame, c.ID(), callCost)
+	checkFormatOutputBound(frame, c.ID(), fmtStr, argList, c.maxBytes, c.maxElems)
+	checkFrameInterrupt(frame)
 
 	out, _, err := c.rawFormat.Eval(map[string]any{
 		"_fmt":  fmtVal,
@@ -754,8 +830,64 @@ func (c *boundedFormatCall) Exec(frame *interpreter.ExecutionFrame) ref.Val {
 }
 
 type formatBudget struct {
-	remBytes int64
-	remElems int64
+	frame       *interpreter.ExecutionFrame
+	nodeID      int64
+	initBytes   int64
+	initElems   int64
+	remBytes    int64
+	remElems    int64
+	flushedCost uint64
+	steps       int
+}
+
+func newWalkBudget(frame *interpreter.ExecutionFrame, nodeID int64, maxBytes, maxElems int64) formatBudget {
+	return formatBudget{
+		frame:     frame,
+		nodeID:    nodeID,
+		initBytes: maxBytes,
+		initElems: maxElems,
+		remBytes:  maxBytes,
+		remElems:  maxElems,
+	}
+}
+
+func (b *formatBudget) tickInterrupt() {
+	b.steps++
+	if b.steps >= walkInterruptStride {
+		b.steps = 0
+		checkFrameInterrupt(b.frame)
+	}
+}
+
+func (b *formatBudget) currentWalkCost() uint64 {
+	usedElems := uint64(b.initElems - b.remElems)
+	usedBytes := int(b.initBytes - b.remBytes)
+	return cost.SafeAdd(usedElems, byteScanCost(usedBytes))
+}
+
+func (b *formatBudget) maybeFlush() {
+	if b.frame == nil {
+		return
+	}
+	cur := b.currentWalkCost()
+	if cur > b.flushedCost && cur-b.flushedCost >= walkCostFlushStride {
+		delta := cur - b.flushedCost
+		b.flushedCost = cur
+		chargePrecomputedCost(b.frame, b.nodeID, delta)
+	}
+}
+
+func (b *formatBudget) finishCharge(extraCost uint64) {
+	if b.frame == nil {
+		return
+	}
+	total := cost.SafeAdd(extraCost, b.currentWalkCost())
+	if total <= b.flushedCost {
+		return
+	}
+	delta := total - b.flushedCost
+	b.flushedCost = total
+	chargePrecomputedCost(b.frame, b.nodeID, delta)
 }
 
 func (b *formatBudget) chargeBytes(n int64) {
@@ -763,6 +895,7 @@ func (b *formatBudget) chargeBytes(n int64) {
 	if b.remBytes < 0 {
 		abortOutputLimit()
 	}
+	b.maybeFlush()
 }
 
 func (b *formatBudget) chargeElems(n int64) {
@@ -770,30 +903,29 @@ func (b *formatBudget) chargeElems(n int64) {
 	if b.remElems < 0 {
 		abortOutputLimit()
 	}
+	b.maybeFlush()
 }
 
-func checkFormatOutputBound(fmtStr string, argList traits.Lister, maxBytes, maxElems int) (estOutBytes int, walkedElems uint64) {
+func checkFormatOutputBound(frame *interpreter.ExecutionFrame, nodeID int64, fmtStr string, argList traits.Lister, maxBytes, maxElems int) {
+	baseExtra := cost.SafeAdd(1, byteScanCost(len(fmtStr)))
 	szVal, ok := argList.Size().(types.Int)
 	if !ok {
-		return 0, 0
+		chargePrecomputedCost(frame, nodeID, baseExtra)
+		return
 	}
 	argCount := int64(szVal)
 	if argCount < 0 {
 		abortOutputLimit()
 	}
 
-	initBytes := int64(maxBytes)
-	initElems := int64(maxElems)
-	b := formatBudget{
-		remBytes: initBytes,
-		remElems: initElems,
-	}
-	finish := func() (int, uint64) {
-		return int(initBytes - b.remBytes), uint64(initElems - b.remElems)
+	b := newWalkBudget(frame, nodeID, int64(maxBytes), int64(maxElems))
+	finish := func() {
+		b.finishCharge(baseExtra)
 	}
 
 	var argIdx int64
 	for i := 0; i < len(fmtStr); {
+		b.tickInterrupt()
 		if fmtStr[i] != '%' {
 			b.chargeBytes(1)
 			i++
@@ -806,7 +938,8 @@ func checkFormatOutputBound(fmtStr string, argList traits.Lister, maxBytes, maxE
 		}
 		if i+1 >= len(fmtStr) || argIdx >= argCount {
 			// Malformed format string or missing arg; let rawFormat produce the exact CEL error.
-			return finish()
+			finish()
+			return
 		}
 		j := i + 1
 		prec := 6
@@ -821,7 +954,8 @@ func checkFormatOutputBound(fmtStr string, argList traits.Lister, maxBytes, maxE
 				j++
 			}
 			if j >= len(fmtStr) || j == startDigits || precVal > maxPinnedFormatPrec {
-				return finish()
+				finish()
+				return
 			}
 			prec = precVal
 		}
@@ -854,10 +988,11 @@ func checkFormatOutputBound(fmtStr string, argList traits.Lister, maxBytes, maxE
 		case 'o':
 			b.chargeBytes(23)
 		default:
-			return finish()
+			finish()
+			return
 		}
 	}
-	return finish()
+	finish()
 }
 
 func upperBoundDecimalBytes(arg ref.Val) int64 {
@@ -878,6 +1013,7 @@ func measureFormatStringArg(b *formatBudget, arg ref.Val, depth int) {
 	if depth > MaxContainerDepth {
 		abortOutputLimit()
 	}
+	b.tickInterrupt()
 	switch v := arg.(type) {
 	case types.String:
 		b.chargeBytes(int64(len(v)))
@@ -929,37 +1065,109 @@ func measureFormatStringArg(b *formatBudget, arg ref.Val, depth int) {
 	}
 }
 
-func boundedAdd(maxBytes, maxElems int) functions.FunctionOp {
-	return func(args ...ref.Val) ref.Val {
-		lhs, rhs := args[0], args[1]
-		switch l := lhs.(type) {
-		case types.String:
-			if r, ok := rhs.(types.String); ok {
-				if len(l) > maxBytes || len(r) > maxBytes-len(l) {
-					abortOutputLimit()
-				}
-			}
-		case types.Bytes:
-			if r, ok := rhs.(types.Bytes); ok {
-				if len(l) > maxBytes || len(r) > maxBytes-len(l) {
-					abortOutputLimit()
-				}
-			}
-		case traits.Lister:
-			if r, ok := rhs.(traits.Lister); ok {
-				lSz, ok1 := l.Size().(types.Int)
-				rSz, ok2 := r.Size().(types.Int)
-				if !ok1 || !ok2 || lSz < 0 || rSz < 0 || int64(lSz) > int64(maxElems) || int64(rSz) > int64(maxElems)-int64(lSz) {
-					abortOutputLimit()
-				}
-			}
+type boundedAddCall struct {
+	interpreter.InterpretableCall
+	maxBytes int
+	maxElems int
+}
+
+func (c *boundedAddCall) Eval(ctx interpreter.Activation) ref.Val {
+	return interpreter.EvalActivation(ctx, c.Exec)
+}
+
+func (c *boundedAddCall) Exec(frame *interpreter.ExecutionFrame) ref.Val {
+	checkFrameInterrupt(frame)
+	args := c.Args()
+	lVal := args[0].Exec(frame)
+	switch l := lVal.(type) {
+	case *types.Err:
+		return lVal
+	case *types.Unknown:
+		rVal := args[1].Exec(frame)
+		if rUnk, ok := rVal.(*types.Unknown); ok {
+			merged := types.MergeUnknowns(l, rUnk)
+			chargePrecomputedCost(frame, c.ID(), 1)
+			return merged
 		}
-		adder, ok := lhs.(traits.Adder)
-		if !ok {
-			return types.MaybeNoSuchOverloadErr(lhs)
-		}
-		return adder.Add(rhs)
+		chargePrecomputedCost(frame, c.ID(), 1)
+		return lVal
 	}
+	rVal := args[1].Exec(frame)
+	switch rVal.(type) {
+	case *types.Err:
+		return rVal
+	case *types.Unknown:
+		chargePrecomputedCost(frame, c.ID(), 1)
+		return rVal
+	}
+
+	switch l := lVal.(type) {
+	case types.String:
+		if r, ok := rVal.(types.String); ok {
+			if len(l) > c.maxBytes || len(r) > c.maxBytes-len(l) {
+				abortOutputLimit()
+			}
+			chargePrecomputedCost(frame, c.ID(), atLeastOneCost(byteScanCost(len(l)+len(r))))
+			return l + r
+		}
+	case types.Bytes:
+		if r, ok := rVal.(types.Bytes); ok {
+			if len(l) > c.maxBytes || len(r) > c.maxBytes-len(l) {
+				abortOutputLimit()
+			}
+			chargePrecomputedCost(frame, c.ID(), atLeastOneCost(byteScanCost(len(l)+len(r))))
+			return l.Add(r)
+		}
+	case traits.Lister:
+		if r, ok := rVal.(traits.Lister); ok {
+			lSz, ok1 := l.Size().(types.Int)
+			rSz, ok2 := r.Size().(types.Int)
+			if !ok1 || !ok2 || lSz < 0 || rSz < 0 || int64(lSz) > int64(c.maxElems) || int64(rSz) > int64(c.maxElems)-int64(lSz) {
+				abortOutputLimit()
+			}
+			totalSz := int(lSz + rSz)
+			// Charge result size BEFORE materializing so chained list `+` pays
+			// O(depth * elements) and aborts at CostLimit before copying; flatten
+			// into a slice-backed list so downstream Get(i) is O(1) without boxing.
+			chargePrecomputedCost(frame, c.ID(), atLeastOneCost(uint64(totalSz)))
+			if totalSz == 0 {
+				return types.NewRefValList(types.DefaultTypeAdapter, nil)
+			}
+			elems := make([]ref.Val, totalSz)
+			steps := 0
+			outIdx := 0
+			for i := types.Int(0); i < lSz; i++ {
+				steps++
+				if steps >= walkInterruptStride {
+					steps = 0
+					checkFrameInterrupt(frame)
+				}
+				elems[outIdx] = l.Get(i)
+				outIdx++
+			}
+			for i := types.Int(0); i < rSz; i++ {
+				steps++
+				if steps >= walkInterruptStride {
+					steps = 0
+					checkFrameInterrupt(frame)
+				}
+				elems[outIdx] = r.Get(i)
+				outIdx++
+			}
+			return types.NewRefValList(types.DefaultTypeAdapter, elems)
+		}
+	}
+
+	var res ref.Val
+	if adder, ok := lVal.(traits.Adder); ok {
+		res = types.LabelErrNode(c.ID(), adder.Add(rVal))
+	} else if lVal.Type().HasTrait(traits.ReceiverType) {
+		res = types.LabelErrNode(c.ID(), lVal.(traits.Receiver).Receive(c.Function(), c.OverloadID(), []ref.Val{rVal}))
+	} else {
+		res = types.LabelErrNode(c.ID(), types.MaybeNoSuchOverloadErr(lVal))
+	}
+	chargePrecomputedCost(frame, c.ID(), 1)
+	return res
 }
 
 func boundedIndexOf(maxBytes int) functions.FunctionOp {
@@ -1326,6 +1534,7 @@ func checkContainerWalkBound(v ref.Val, b *formatBudget, depth int) {
 	if depth > MaxContainerDepth {
 		abortOutputLimit()
 	}
+	b.tickInterrupt()
 	switch c := v.(type) {
 	case types.String:
 		b.chargeBytes(int64(len(c)))
@@ -1395,33 +1604,26 @@ func (c *boundedEqNeCall) Exec(frame *interpreter.ExecutionFrame) ref.Val {
 		return rVal
 	}
 
-	callCost := uint64(1)
 	if isContainerVal(lVal) || isContainerVal(rVal) {
-		initBytes := int64(c.maxBytes) * 2
-		initElems := int64(c.maxElems) * 2
-		b := formatBudget{
-			remBytes: initBytes,
-			remElems: initElems,
-		}
+		b := newWalkBudget(frame, c.ID(), int64(c.maxBytes)*2, int64(c.maxElems)*2)
 		checkContainerWalkBound(lVal, &b, 0)
 		checkContainerWalkBound(rVal, &b, 0)
-		walkedElems := uint64(initElems - b.remElems)
-		walkedBytes := int(initBytes - b.remBytes)
-		callCost = cost.SafeAdd(1, cost.SafeAdd(walkedElems, byteScanCost(walkedBytes)))
-	} else if lStr, okL := lVal.(types.String); okL {
-		if rStr, okR := rVal.(types.String); okR {
-			callCost = atLeastOneCost(byteScanCost(min(len(lStr), len(rStr))))
+		b.finishCharge(1)
+	} else {
+		callCost := uint64(1)
+		if lStr, okL := lVal.(types.String); okL {
+			if rStr, okR := rVal.(types.String); okR {
+				callCost = atLeastOneCost(byteScanCost(min(len(lStr), len(rStr))))
+			}
+		} else if lBytes, okL := lVal.(types.Bytes); okL {
+			if rBytes, okR := rVal.(types.Bytes); okR {
+				callCost = atLeastOneCost(byteScanCost(min(len(lBytes), len(rBytes))))
+			}
 		}
-	} else if lBytes, okL := lVal.(types.Bytes); okL {
-		if rBytes, okR := rVal.(types.Bytes); okR {
-			callCost = atLeastOneCost(byteScanCost(min(len(lBytes), len(rBytes))))
-		}
+		chargePrecomputedCost(frame, c.ID(), callCost)
 	}
 
-	// Charge walked elements + bytes before types.Equal so crossing CostLimit
-	// aborts pre-comparison without walking the containers a second time.
-	chargePrecomputedCost(frame, c.ID(), callCost)
-
+	checkFrameInterrupt(frame)
 	eq := types.Equal(lVal, rVal)
 	if c.wantEq {
 		return eq
@@ -1470,24 +1672,20 @@ func (c *boundedInCall) Exec(frame *interpreter.ExecutionFrame) ref.Val {
 		return types.LabelErrNode(c.ID(), types.ValOrErr(rVal, "no such overload"))
 	}
 
-	callCost := uint64(1)
 	if _, isList := rVal.(traits.Lister); isList || isContainerVal(lVal) {
-		initBytes := int64(c.maxBytes) * 2
-		initElems := int64(c.maxElems) * 2
-		b := formatBudget{
-			remBytes: initBytes,
-			remElems: initElems,
-		}
+		b := newWalkBudget(frame, c.ID(), int64(c.maxBytes)*2, int64(c.maxElems)*2)
 		checkContainerWalkBound(lVal, &b, 0)
 		checkContainerWalkBound(rVal, &b, 0)
-		walkedElems := uint64(initElems - b.remElems)
-		walkedBytes := int(initBytes - b.remBytes)
-		callCost = cost.SafeAdd(1, cost.SafeAdd(walkedElems, byteScanCost(walkedBytes)))
-	} else if sKey, ok := lVal.(types.String); ok {
-		callCost = atLeastOneCost(byteScanCost(len(sKey)))
+		b.finishCharge(1)
+	} else {
+		callCost := uint64(1)
+		if sKey, ok := lVal.(types.String); ok {
+			callCost = atLeastOneCost(byteScanCost(len(sKey)))
+		}
+		chargePrecomputedCost(frame, c.ID(), callCost)
 	}
 
-	chargePrecomputedCost(frame, c.ID(), callCost)
+	checkFrameInterrupt(frame)
 	return types.LabelErrNode(c.ID(), rVal.(traits.Container).Contains(lVal))
 }
 
@@ -1673,31 +1871,121 @@ func boundedScalarStringInputConv(maxBytes int, targetType ref.Type) functions.F
 	}
 }
 
-var (
-	tzCacheMu sync.RWMutex
-	tzCache   = make(map[string]*time.Location, 16)
-)
+type tzCacheEntry struct {
+	key string
+	loc *time.Location
+	err error
+}
 
-func loadCachedLocation(tz string) (*time.Location, bool) {
-	if len(tz) > maxCachedTzNameBytes || strings.Contains(tz, ":") {
-		return nil, false
+type tzLRUCache struct {
+	mu       sync.Mutex
+	capacity int
+	order    *list.List
+	entries  map[string]*list.Element
+}
+
+func newTZLRUCache(capacity int) *tzLRUCache {
+	if capacity <= 0 {
+		capacity = maxCachedTimezones
 	}
-	tzCacheMu.RLock()
-	loc, ok := tzCache[tz]
-	tzCacheMu.RUnlock()
-	if ok {
-		return loc, true
+	return &tzLRUCache{
+		capacity: capacity,
+		order:    list.New(),
+		entries:  make(map[string]*list.Element, 64),
 	}
-	loaded, err := time.LoadLocation(tz)
+}
+
+func (c *tzLRUCache) get(key string) (tzCacheEntry, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	elem, ok := c.entries[key]
+	if !ok {
+		return tzCacheEntry{}, false
+	}
+	c.order.MoveToFront(elem)
+	return elem.Value.(tzCacheEntry), true
+}
+
+func (c *tzLRUCache) put(key string, loc *time.Location, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if elem, ok := c.entries[key]; ok {
+		elem.Value = tzCacheEntry{key: key, loc: loc, err: err}
+		c.order.MoveToFront(elem)
+		return
+	}
+	if c.order.Len() >= c.capacity {
+		oldest := c.order.Back()
+		if oldest != nil {
+			oldEntry := oldest.Value.(tzCacheEntry)
+			delete(c.entries, oldEntry.key)
+			c.order.Remove(oldest)
+		}
+	}
+	// Clone key so a substring of a large activation payload cannot pin the backing string.
+	ownedKey := strings.Clone(key)
+	elem := c.order.PushFront(tzCacheEntry{key: ownedKey, loc: loc, err: err})
+	c.entries[ownedKey] = elem
+}
+
+func isSyntacticallyValidTZName(tz string) bool {
+	if len(tz) == 0 || len(tz) > maxCachedTzNameBytes {
+		return false
+	}
+	if tz[0] == '/' || tz[len(tz)-1] == '/' {
+		return false
+	}
+	for i := 0; i < len(tz); i++ {
+		ch := tz[i]
+		if ch == '/' {
+			if tz[i-1] == '/' {
+				return false
+			}
+			continue
+		}
+		if (ch >= 'A' && ch <= 'Z') ||
+			(ch >= 'a' && ch <= 'z') ||
+			(ch >= '0' && ch <= '9') ||
+			ch == '_' || ch == '+' || ch == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func truncateTZForErr(tz string) string {
+	if len(tz) <= maxCachedTzNameBytes {
+		return tz
+	}
+	return tz[:maxCachedTzNameBytes]
+}
+
+func parseCELFixedOffset(val string, colonIdx int) (*time.Location, error) {
+	if len(val) > maxCachedTzNameBytes {
+		return nil, fmt.Errorf("invalid timezone offset: %s", truncateTZForErr(val))
+	}
+	hr, err := strconv.Atoi(val[:colonIdx])
 	if err != nil {
-		return nil, false
+		return nil, err
 	}
-	tzCacheMu.Lock()
-	if len(tzCache) < maxCachedTimezones {
-		tzCache[tz] = loaded
+	minPart, err := strconv.Atoi(val[colonIdx+1:])
+	if err != nil {
+		return nil, err
 	}
-	tzCacheMu.Unlock()
-	return loaded, true
+	if hr < -23 || hr > 23 {
+		return nil, fmt.Errorf("timezone offset hours out of range [-23, 23]: %s", val)
+	}
+	if minPart < 0 || minPart > 59 {
+		return nil, fmt.Errorf("timezone offset minutes out of range [0, 59]: %s", val)
+	}
+	var offsetMinutes int
+	if val[0] == '-' {
+		offsetMinutes = hr*60 - minPart
+	} else {
+		offsetMinutes = hr*60 + minPart
+	}
+	return time.FixedZone("", offsetMinutes*60), nil
 }
 
 func evalTimestampInLocation(fn string, t time.Time) (ref.Val, bool) {
@@ -1727,25 +2015,123 @@ func evalTimestampInLocation(fn string, t time.Time) (ref.Val, bool) {
 	}
 }
 
-func boundedTimezoneAccessor(fn, overload string, maxBytes int) functions.FunctionOp {
-	return func(args ...ref.Val) ref.Val {
-		if tz, ok := args[1].(types.String); ok {
-			if len(tz) > maxBytes {
-				abortOutputLimit()
-			}
-			if ts, isTS := args[0].(types.Timestamp); isTS {
-				if loc, cached := loadCachedLocation(string(tz)); cached {
-					if out, handled := evalTimestampInLocation(fn, ts.In(loc)); handled {
-						return out
-					}
-				}
-			}
+type boundedTimezoneCall struct {
+	interpreter.InterpretableCall
+	maxBytes int
+	tzCache  *tzLRUCache
+}
+
+func (c *boundedTimezoneCall) Eval(ctx interpreter.Activation) ref.Val {
+	return interpreter.EvalActivation(ctx, c.Exec)
+}
+
+func (c *boundedTimezoneCall) Exec(frame *interpreter.ExecutionFrame) ref.Val {
+	checkFrameInterrupt(frame)
+	args := c.Args()
+	lVal := args[0].Exec(frame)
+	switch l := lVal.(type) {
+	case *types.Err:
+		return lVal
+	case *types.Unknown:
+		rVal := args[1].Exec(frame)
+		if rUnk, ok := rVal.(*types.Unknown); ok {
+			merged := types.MergeUnknowns(l, rUnk)
+			chargePrecomputedCost(frame, c.ID(), 1)
+			return merged
 		}
-		if recv, ok := args[0].(traits.Receiver); ok {
-			return recv.Receive(fn, overload, args[1:])
-		}
-		return types.MaybeNoSuchOverloadErr(args[0])
+		chargePrecomputedCost(frame, c.ID(), 1)
+		return lVal
 	}
+	rVal := args[1].Exec(frame)
+	switch rVal.(type) {
+	case *types.Err:
+		return rVal
+	case *types.Unknown:
+		chargePrecomputedCost(frame, c.ID(), 1)
+		return rVal
+	}
+
+	ts, isTS := lVal.(types.Timestamp)
+	if !isTS {
+		var res ref.Val
+		if recv, ok := lVal.(traits.Receiver); ok {
+			res = types.LabelErrNode(c.ID(), recv.Receive(c.Function(), c.OverloadID(), []ref.Val{rVal}))
+		} else {
+			res = types.LabelErrNode(c.ID(), types.MaybeNoSuchOverloadErr(lVal))
+		}
+		chargePrecomputedCost(frame, c.ID(), 1)
+		return res
+	}
+
+	tzVal, ok := rVal.(types.String)
+	if !ok {
+		chargePrecomputedCost(frame, c.ID(), 1)
+		return types.LabelErrNode(c.ID(), types.MaybeNoSuchOverloadErr(rVal))
+	}
+
+	tz := string(tzVal)
+	if len(tz) > c.maxBytes {
+		abortOutputLimit()
+	}
+
+	fn := c.Function()
+	if colonIdx := strings.IndexByte(tz, ':'); colonIdx >= 0 {
+		loc, err := parseCELFixedOffset(tz, colonIdx)
+		if err != nil {
+			chargePrecomputedCost(frame, c.ID(), tzLookupErrorCost)
+			return types.LabelErrNode(c.ID(), types.WrapErr(err))
+		}
+		chargePrecomputedCost(frame, c.ID(), 1)
+		if out, handled := evalTimestampInLocation(fn, ts.In(loc)); handled {
+			return out
+		}
+		return types.LabelErrNode(c.ID(), types.MaybeNoSuchOverloadErr(lVal))
+	}
+
+	if tz == "" || tz == "UTC" {
+		chargePrecomputedCost(frame, c.ID(), 1)
+		if out, handled := evalTimestampInLocation(fn, ts.In(time.UTC)); handled {
+			return out
+		}
+		return types.LabelErrNode(c.ID(), types.MaybeNoSuchOverloadErr(lVal))
+	}
+	if tz == "Local" {
+		chargePrecomputedCost(frame, c.ID(), 1)
+		if out, handled := evalTimestampInLocation(fn, ts.In(time.Local)); handled {
+			return out
+		}
+		return types.LabelErrNode(c.ID(), types.MaybeNoSuchOverloadErr(lVal))
+	}
+
+	if !isSyntacticallyValidTZName(tz) {
+		chargePrecomputedCost(frame, c.ID(), tzLookupErrorCost)
+		return types.LabelErrNode(c.ID(), types.NewErr("unknown time zone %s", truncateTZForErr(tz)))
+	}
+
+	if entry, hit := c.tzCache.get(tz); hit {
+		if entry.err != nil {
+			chargePrecomputedCost(frame, c.ID(), tzLookupErrorCost)
+			return types.LabelErrNode(c.ID(), types.WrapErr(entry.err))
+		}
+		chargePrecomputedCost(frame, c.ID(), 1)
+		if out, handled := evalTimestampInLocation(fn, ts.In(entry.loc)); handled {
+			return out
+		}
+		return types.LabelErrNode(c.ID(), types.MaybeNoSuchOverloadErr(lVal))
+	}
+
+	// Uncached timezone lookup: pre-charge before consulting time.LoadLocation
+	// (backed by embedded time/tzdata) and cache both positive and negative outcomes.
+	chargePrecomputedCost(frame, c.ID(), tzLookupErrorCost)
+	loc, err := time.LoadLocation(tz)
+	c.tzCache.put(tz, loc, err)
+	if err != nil {
+		return types.LabelErrNode(c.ID(), types.WrapErr(err))
+	}
+	if out, handled := evalTimestampInLocation(fn, ts.In(loc)); handled {
+		return out
+	}
+	return types.LabelErrNode(c.ID(), types.MaybeNoSuchOverloadErr(lVal))
 }
 
 // boundedMatchesCall wraps CEL's matches(string, string) in an InterpretableV2
@@ -2139,6 +2525,21 @@ func trackStringInputConvCost(args []ref.Val, _ ref.Val) *uint64 {
 	return uint64Ptr(1)
 }
 
+func trackAddListCost(args []ref.Val, _ ref.Val) *uint64 {
+	if len(args) == 2 {
+		l, ok1 := args[0].(traits.Lister)
+		r, ok2 := args[1].(traits.Lister)
+		if ok1 && ok2 {
+			lSz, okL := l.Size().(types.Int)
+			rSz, okR := r.Size().(types.Int)
+			if okL && okR && lSz >= 0 && rSz >= 0 {
+				return uint64Ptr(atLeastOneCost(cost.SafeAdd(uint64(lSz), uint64(rSz))))
+			}
+		}
+	}
+	return uint64Ptr(1)
+}
+
 func trackTimezoneCost(_ []ref.Val, result ref.Val) *uint64 {
 	if types.IsError(result) {
 		return uint64Ptr(tzLookupErrorCost)
@@ -2173,6 +2574,8 @@ func (e runtimeCostEstimator) CallCost(fn, overloadID string, args []ref.Val, re
 				if r, ok := args[1].(types.Bytes); ok {
 					return uint64Ptr(atLeastOneCost(byteScanCost(len(l) + len(r))))
 				}
+			case traits.Lister:
+				return trackAddListCost(args, result)
 			}
 		}
 		return uint64Ptr(1)
@@ -2257,6 +2660,7 @@ func buildCostTracking(limits Limits) (cost.ActualCostEstimator, []cost.TrackerO
 			}
 			return uint64Ptr(1)
 		}),
+		cost.OverloadTracker(overloads.AddList, trackAddListCost),
 		cost.OverloadTracker(overloads.Equals, eqNeTracker),
 		cost.OverloadTracker(overloads.NotEquals, eqNeTracker),
 		cost.OverloadTracker(overloads.InList, inTracker),

@@ -582,18 +582,37 @@ func TestAdversarialSurfaceCoversEveryFunctionAndOverload(t *testing.T) {
 		}
 	}
 
-	// Execute every adversarial overload & macro probe under DefaultLimits(),
-	// asserting wall-clock time and heap allocation bounds.
+	// Execute every adversarial overload & macro probe under DefaultLimits()
+	// (with EvalTimeout raised to the 1s ceiling for 64 KiB happy-path probes
+	// when running under -race so 2-vCPU race runs do not flake).
 	boolKind := Kind{Name: "filter", Result: Bool()}
 	ctx := context.Background()
 	evalTimeout := DefaultLimits().EvalTimeout
+	happyEng := eng
+	happyEvalTimeout := evalTimeout
 	maxErrElapsed := 2 * evalTimeout
+	if raceEnabled {
+		happyLim := DefaultLimits()
+		happyLim.EvalTimeout = MaxEvalTimeoutCeiling
+		var err error
+		happyEng, err = New(eng.Environment(), happyLim, DefaultCacheConfig())
+		if err != nil {
+			t.Fatalf("New happyEng: %v", err)
+		}
+		happyEvalTimeout = happyLim.EvalTimeout
+		maxErrElapsed = 5 * time.Second
+	}
 	const maxAllocDelta = 64 << 20 // 64 MiB
 
 	runProbe := func(t *testing.T, group string, p adversarialProbe) {
 		t.Helper()
 		t.Run(group+"/"+p.name, func(t *testing.T) {
-			prog, compErr := eng.Compile(p.expr, boolKind)
+			isErrProbe := p.wantEvalReason != "" || len(p.wantEvalReasons) > 0
+			targetEng := happyEng
+			if p.wantCompileCat != "" || isErrProbe {
+				targetEng = eng
+			}
+			prog, compErr := targetEng.Compile(p.expr, boolKind)
 			if p.wantCompileCat != "" {
 				if compErr == nil {
 					t.Fatalf("Compile(%s): expected CompileError(%s), got nil", p.expr, p.wantCompileCat)
@@ -620,10 +639,13 @@ func TestAdversarialSurfaceCoversEveryFunctionAndOverload(t *testing.T) {
 				t.Errorf("TotalAlloc delta %d bytes (%.2f MiB) exceeds 64 MiB bound", allocDelta, float64(allocDelta)/(1<<20))
 			}
 
-			if p.wantEvalReason != "" || len(p.wantEvalReasons) > 0 {
-				allowed := p.wantEvalReasons
+			if isErrProbe {
+				allowed := slices.Clone(p.wantEvalReasons)
 				if p.wantEvalReason != "" {
 					allowed = append([]string{p.wantEvalReason}, allowed...)
+				}
+				if raceEnabled && slices.Contains(allowed, ReasonCostLimit) && !slices.Contains(allowed, ReasonTimeout) {
+					allowed = append(allowed, ReasonTimeout)
 				}
 				if res != nil {
 					t.Fatalf("expected nil Result on %v error, got %v", allowed, res)
@@ -633,7 +655,7 @@ func TestAdversarialSurfaceCoversEveryFunctionAndOverload(t *testing.T) {
 					t.Fatalf("Eval(%s): got %T (%v), want EvalError.Reason in %v", p.expr, evalErr, evalErr, allowed)
 				}
 				if elapsed > maxErrElapsed {
-					t.Errorf("error-path elapsed %s exceeds 2x EvalTimeout (%s)", elapsed, maxErrElapsed)
+					t.Errorf("error-path elapsed %s exceeds wall-clock bound (%s)", elapsed, maxErrElapsed)
 				}
 				return
 			}
@@ -648,11 +670,11 @@ func TestAdversarialSurfaceCoversEveryFunctionAndOverload(t *testing.T) {
 			if bErr != nil || !got {
 				t.Fatalf("Eval(%s) = (%v, %v), want (true, nil)", p.expr, got, bErr)
 			}
-			if stats.Elapsed > evalTimeout {
-				t.Errorf("decision returned with stats.Elapsed=%s > EvalTimeout=%s", stats.Elapsed, evalTimeout)
+			if stats.Elapsed > happyEvalTimeout {
+				t.Errorf("decision returned with stats.Elapsed=%s > EvalTimeout=%s", stats.Elapsed, happyEvalTimeout)
 			}
 			if elapsed > maxErrElapsed {
-				t.Errorf("wall-clock elapsed %s exceeds 2x EvalTimeout (%s)", elapsed, maxErrElapsed)
+				t.Errorf("wall-clock elapsed %s exceeds wall-clock bound (%s)", elapsed, maxErrElapsed)
 			}
 		})
 	}

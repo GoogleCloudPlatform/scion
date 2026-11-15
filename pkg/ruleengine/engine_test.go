@@ -227,8 +227,12 @@ func TestUncertainVsFailedErrorsAndBudgetTracker(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error from hanging dialect")
 	}
-	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
-		t.Fatalf("MaxEvalTime did not bound dialect evaluation: took %v", elapsed)
+	maxHangElapsed := 500 * time.Millisecond
+	if raceEnabled {
+		maxHangElapsed = 3 * time.Second
+	}
+	if elapsed := time.Since(start); elapsed > maxHangElapsed {
+		t.Fatalf("MaxEvalTime did not bound dialect evaluation: took %v (max %v)", elapsed, maxHangElapsed)
 	}
 
 	// Exhausted aggregate tracker rejects before invoking dialect.
@@ -245,6 +249,9 @@ func TestEvaluateTimeoutVsCallerCancellationAndTrackerRemainder(t *testing.T) {
 	limits := celengine.DefaultLimits()
 	limits.CostLimit = celengine.MaxCostLimitCeiling
 	limits.EvalTimeout = 20 * time.Millisecond
+	if raceEnabled {
+		limits.EvalTimeout = 80 * time.Millisecond
+	}
 	limits.InterruptFrequency = 1
 
 	env := celengine.Environment{

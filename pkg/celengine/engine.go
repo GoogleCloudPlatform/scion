@@ -45,6 +45,7 @@ type Engine struct {
 	limits    Limits
 	celEnv    *cel.Env
 	rawFormat cel.Program
+	tzCache   *tzLRUCache
 	functions []string
 	fnSetMap  map[string]struct{}
 	fnSetHash [32]byte
@@ -149,6 +150,7 @@ func New(env Environment, limits Limits, cache CacheConfig) (*Engine, error) {
 		limits:    limits,
 		celEnv:    celEnv,
 		rawFormat: rawFormat,
+		tzCache:   newTZLRUCache(maxCachedTimezones),
 		functions: fns,
 		fnSetMap:  fnSetMap,
 		fnSetHash: fnSetHash,
@@ -340,7 +342,7 @@ func (e *Engine) compileInternal(expr string, kind Kind, maxBytes int) (Program,
 		}
 	}
 
-	celProg, err := buildCELProgram(e.celEnv, checked, e.limits, e.rawFormat)
+	celProg, err := buildCELProgram(e.celEnv, checked, e.limits, e.rawFormat, e.tzCache)
 	if err != nil {
 		line, col := rootLocation(checked)
 		cat := CategoryType
@@ -359,6 +361,7 @@ func (e *Engine) compileInternal(expr string, kind Kind, maxBytes int) (Program,
 	return Program{
 		celEnv:    e.celEnv,
 		rawFormat: e.rawFormat,
+		tzCache:   e.tzCache,
 		checked:   checked,
 		celProg:   celProg,
 		kind:      kind,
@@ -366,7 +369,7 @@ func (e *Engine) compileInternal(expr string, kind Kind, maxBytes int) (Program,
 	}, nil
 }
 
-func buildCELProgram(celEnv *cel.Env, checked *cel.Ast, limits Limits, rawFormat cel.Program) (prog cel.Program, err error) {
+func buildCELProgram(celEnv *cel.Env, checked *cel.Ast, limits Limits, rawFormat cel.Program, tzCache *tzLRUCache) (prog cel.Program, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			if cancelled, ok := r.(interpreter.EvalCancelledError); ok && cancelled.Cause == interpreter.CostLimitExceeded {
@@ -381,7 +384,7 @@ func buildCELProgram(celEnv *cel.Env, checked *cel.Ast, limits Limits, rawFormat
 	costEst, costOpts := buildCostTracking(limits)
 	return celEnv.Program(
 		checked,
-		cel.CustomDecoratorV2(outputBoundsDecorator(limits, rawFormat)),
+		cel.CustomDecoratorV2(outputBoundsDecorator(limits, rawFormat, tzCache)),
 		cel.EvalOptions(cel.OptOptimize, cel.OptTrackCost),
 		cel.CostTracking(costEst),
 		cel.CostTrackerOptions(costOpts...),
@@ -514,6 +517,7 @@ func rootLocation(checked *cel.Ast) (int, int) {
 type Program struct {
 	celEnv    *cel.Env
 	rawFormat cel.Program
+	tzCache   *tzLRUCache
 	checked   *cel.Ast
 	celProg   cel.Program
 	kind      Kind
@@ -557,7 +561,7 @@ func (p Program) Eval(ctx context.Context, act map[string]any, limits ...Limits)
 		eff.MaxCollectionElements != p.limits.MaxCollectionElements ||
 		eff.MaxRegexProgramSize != p.limits.MaxRegexProgramSize ||
 		eff.MaxRegexWork != p.limits.MaxRegexWork {
-		lowered, err := buildCELProgram(p.celEnv, p.checked, eff, p.rawFormat)
+		lowered, err := buildCELProgram(p.celEnv, p.checked, eff, p.rawFormat, p.tzCache)
 		if err != nil {
 			if errors.Is(err, errPlanBoundExceeded) || strings.Contains(err.Error(), "regex program size ") {
 				return nil, EvalStats{}, &EvalError{Reason: ReasonCostLimit}

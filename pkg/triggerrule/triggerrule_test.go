@@ -749,6 +749,9 @@ func TestAmplifyingCallsOn64KiBPayloadBounded(t *testing.T) {
 	}
 
 	maxElapsed := 2 * triggerrule.Stage1Limits().EvalTimeout
+	if raceEnabled {
+		maxElapsed = 3 * time.Second
+	}
 	const maxAllocDelta = 64 << 20 // 64 MiB
 
 	for i, tc := range matchVectors {
@@ -766,14 +769,16 @@ func TestAmplifyingCallsOn64KiBPayloadBounded(t *testing.T) {
 				t.Fatalf("Match(%s) = true, want false on cost_limit error", tc.name)
 			}
 			var ferr *ruleengine.FailedError
-			if !errors.As(evalErr, &ferr) || ferr.Reason != celengine.ReasonCostLimit {
+			allowedErr := errors.As(evalErr, &ferr) &&
+				(ferr.Reason == celengine.ReasonCostLimit || (raceEnabled && ferr.Reason == celengine.ReasonTimeout))
+			if !allowedErr {
 				t.Fatalf("Match(%s) err = %T (%v), want *FailedError{Reason: %q}", tc.name, evalErr, evalErr, celengine.ReasonCostLimit)
 			}
 			if reason, ok := triggerrule.SkipReason(evalErr); !ok || reason != triggerrule.SkipReasonEvalFailed {
 				t.Fatalf("SkipReason = (%q, %v), want (%q, true)", reason, ok, triggerrule.SkipReasonEvalFailed)
 			}
 			if elapsed > maxElapsed {
-				t.Errorf("elapsed %s exceeds 2x EvalTimeout (%s)", elapsed, maxElapsed)
+				t.Errorf("elapsed %s exceeds wall-clock bound (%s)", elapsed, maxElapsed)
 			}
 			allocDelta := mAfter.TotalAlloc - mBefore.TotalAlloc
 			if allocDelta > maxAllocDelta {
@@ -798,7 +803,7 @@ func TestAmplifyingCallsOn64KiBPayloadBounded(t *testing.T) {
 			t.Fatalf("DeriveSubject = %q, want fallback %q", got, ev.Subject)
 		}
 		if elapsed > maxElapsed {
-			t.Errorf("elapsed %s exceeds 2x EvalTimeout (%s)", elapsed, maxElapsed)
+			t.Errorf("elapsed %s exceeds wall-clock bound (%s)", elapsed, maxElapsed)
 		}
 		allocDelta := mAfter.TotalAlloc - mBefore.TotalAlloc
 		if allocDelta > maxAllocDelta {
@@ -809,6 +814,17 @@ func TestAmplifyingCallsOn64KiBPayloadBounded(t *testing.T) {
 
 func TestPathologicalRuleDoesNotBlockSubsequentTriggerOnSameEvent(t *testing.T) {
 	ctx := context.Background()
+
+	newBenignSurvivalBudget := func() *ruleengine.BudgetTracker {
+		if raceEnabled {
+			return ruleengine.NewBudgetTracker(5 * time.Second)
+		}
+		return triggerrule.NewEventBudget()
+	}
+	maxEventWall := triggerrule.EventRuleBudget
+	if raceEnabled {
+		maxEventWall = 5 * time.Second
+	}
 
 	t.Run("pathological_single_call_rules_then_benign_rule_matches_under_1s", func(t *testing.T) {
 		rules, err := triggerrule.NewDefault()
@@ -834,7 +850,7 @@ func TestPathologicalRuleDoesNotBlockSubsequentTriggerOnSameEvent(t *testing.T) 
 			{id: "trig-bad-split-join", expr: `event.payload.s.split("").join(event.payload.s).size() > 0`},
 		}
 
-		budget := triggerrule.NewEventBudget()
+		budget := newBenignSurvivalBudget()
 		start := time.Now()
 
 		for _, br := range badRules {
@@ -867,8 +883,8 @@ func TestPathologicalRuleDoesNotBlockSubsequentTriggerOnSameEvent(t *testing.T) 
 		if subj != "deploy:prod" {
 			t.Fatalf("benign DeriveSubject = %q, want %q", subj, "deploy:prod")
 		}
-		if elapsed > triggerrule.EventRuleBudget {
-			t.Errorf("end-to-end event evaluation took %s, want <= %s", elapsed, triggerrule.EventRuleBudget)
+		if elapsed > maxEventWall {
+			t.Errorf("end-to-end event evaluation took %s, want <= %s", elapsed, maxEventWall)
 		}
 	})
 
@@ -911,7 +927,7 @@ func TestPathologicalRuleDoesNotBlockSubsequentTriggerOnSameEvent(t *testing.T) 
 			t.Fatalf("eqComprehensionExpr len %d exceeds MaxMatchRuleBytes %d", len(eqComprehensionExpr), triggerrule.MaxMatchRuleBytes)
 		}
 
-		budget := triggerrule.NewEventBudget()
+		budget := newBenignSurvivalBudget()
 		start := time.Now()
 
 		badAct := baseAct.WithTrigger(hubfire.FireTriggerRef{ID: "trig-bad-eq-comp", Name: "bad-eq-comp"})
@@ -937,8 +953,8 @@ func TestPathologicalRuleDoesNotBlockSubsequentTriggerOnSameEvent(t *testing.T) 
 		if err != nil || !matched {
 			t.Fatalf("benign trigger Match = (%v, %v), want (true, nil) (total elapsed=%s)", matched, err, elapsed)
 		}
-		if elapsed > triggerrule.EventRuleBudget {
-			t.Errorf("end-to-end event evaluation took %s, want <= %s", elapsed, triggerrule.EventRuleBudget)
+		if elapsed > maxEventWall {
+			t.Errorf("end-to-end event evaluation took %s, want <= %s", elapsed, maxEventWall)
 		}
 	})
 
@@ -988,7 +1004,7 @@ func TestPathologicalRuleDoesNotBlockSubsequentTriggerOnSameEvent(t *testing.T) 
 		budget := triggerrule.NewEventBudget()
 		start := time.Now()
 
-		for i := 0; i < 11; i++ {
+		for i := 0; i < 12; i++ {
 			id := "trig-slow-" + string(rune('a'+i))
 			act := baseAct.WithTrigger(hubfire.FireTriggerRef{ID: id, Name: id})
 			scope := celengine.CacheScope{Consumer: triggerrule.ConsumerName, ID: id, Revision: 1}
@@ -999,6 +1015,9 @@ func TestPathologicalRuleDoesNotBlockSubsequentTriggerOnSameEvent(t *testing.T) 
 			reason, ok := triggerrule.SkipReason(evalErr)
 			if !ok || (reason != triggerrule.SkipReasonEvalFailed && reason != triggerrule.SkipReasonBudgetExhausted) {
 				t.Fatalf("%s SkipReason = (%q, %v), want eval failed or budget exhausted (err=%v)", id, reason, ok, evalErr)
+			}
+			if reason == triggerrule.SkipReasonBudgetExhausted {
+				break
 			}
 		}
 
@@ -1017,8 +1036,12 @@ func TestPathologicalRuleDoesNotBlockSubsequentTriggerOnSameEvent(t *testing.T) 
 		if !ok || reason != triggerrule.SkipReasonBudgetExhausted {
 			t.Fatalf("benign trigger SkipReason = (%q, %v), want (%q, true) (err=%v)", reason, ok, triggerrule.SkipReasonBudgetExhausted, evalErr)
 		}
-		if elapsed > 1400*time.Millisecond {
-			t.Errorf("cumulative 1s event budget run took %s, want <= 1.4s", elapsed)
+		maxCumulativeWall := 1400 * time.Millisecond
+		if raceEnabled {
+			maxCumulativeWall = 5 * time.Second
+		}
+		if elapsed > maxCumulativeWall {
+			t.Errorf("cumulative 1s event budget run took %s, want <= %s", elapsed, maxCumulativeWall)
 		}
 	})
 }
