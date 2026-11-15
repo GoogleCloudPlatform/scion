@@ -128,6 +128,11 @@ func TestScheduledExecR1R2R3_InterleavingMatrix(t *testing.T) {
 					})
 					f.fire(evt)
 					assert.LessOrEqual(t, f.capture.count(execRoutePath(agentcontrol.RouteExecStart)), 1, "exec-start at most once")
+					if stage == scheduledExecStageAdmitted && (name == "other replica sweeps" || name == "purge") {
+						// Recovery or a purge finished the run before
+						// dispatch: nothing may start (P3-R1).
+						assert.Zero(t, f.capture.count(execRoutePath(agentcontrol.RouteExecStart)), "no start after the run is terminal")
+					}
 
 					gotEvt, evtErr := f.store.GetScheduledEvent(context.Background(), evt.ID)
 					if evtErr != nil {

@@ -547,14 +547,16 @@ func TestScheduledExecFire_UnknownStart(t *testing.T) {
 	run := store.ScheduledExecRun{
 		EventID: evt.ID, ProjectID: evt.ProjectID, TargetAgentID: f.launched.ID,
 		CommandSHA256: agentcontrol.ExecArgvDigest([]string{"true"}), Argc: 1, TimeoutSeconds: 30,
-		StartedAt: time.Now(), LeaseUntil: time.Now().Add(time.Hour), LaunchID: f.launched.RunID,
+		StartedAt: time.Now(), NotAfter: time.Now().Add(agentcontrol.ExecNotAfter),
+		LeaseUntil: time.Now().Add(time.Hour), LaunchID: f.launched.RunID,
 	}
 	require.NoError(t, f.store.CreateScheduledExecRun(context.Background(), &run))
 	var unavailable bool
-	assert.False(t, f.srv.pollScheduledExecRunOnce(context.Background(), &run, &unavailable), "inside the window: keep polling")
+	assert.False(t, f.srv.pollScheduledExecRunOnce(context.Background(), &run, &unavailable), "before not_after + tolerance: keep polling")
 	assert.Nil(t, f.getRun(t, evt.ID).FinishedAt)
 
-	setExecTiming(t, &scheduledExecStartUnknownAfter, 0)
+	// Past the frozen deadline plus tolerance a start can no longer begin.
+	run.NotAfter = time.Now().Add(-agentcontrol.ExecClockTolerance - 11*time.Second)
 	assert.True(t, f.srv.pollScheduledExecRunOnce(context.Background(), &run, &unavailable))
 	got := f.getRun(t, evt.ID)
 	assert.Equal(t, store.ScheduledExecOutcomeError, got.Outcome)
