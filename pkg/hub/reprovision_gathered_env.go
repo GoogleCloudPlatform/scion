@@ -18,17 +18,19 @@ import (
 	"context"
 )
 
-// reprovisionGatheredEnv carries into the start that follows a home-reset
-// reprovision the names of the as_needed env keys that reprovision's
-// env-gather resolved (ptone/scion#7757). It holds names only, never values.
+// reprovisionGatheredEnv carries into the start that follows a reincarnation's
+// reprovision or cross-broker move provision the names of the as_needed env
+// keys that its env-gather resolved (ptone/scion#7757, ptone/scion#7909). It
+// holds names only, never values.
 //
 // A start does not resolve as_needed env (selectDeliveryEnv skips it); only a
-// create, provision or reprovision gather does. A hub-dispatched agent still
+// create, provision or reprovision gather does. A hub-dispatched agent normally
 // restarts with such values (for example the Vertex AI project and location)
-// because the broker restores the auth secrets its creating start staged, but
-// only for the same harness-config. After a harness switch that record does
-// not match, so the new harness's first start would have none of the values
-// the reprovision gather just resolved for it.
+// because the broker restores the auth secrets a prior start staged for that
+// harness-config. On a reincarnation — whether a harness switch, an in-place
+// reprovision whose prior record was overwritten or uses rotated hub values, or
+// a cross-broker move whose target broker has no prior record — the start leg
+// needs the current as_needed values the gather just resolved.
 //
 // With a holder, the start admits the as_needed env vars and environment
 // secrets stored under those names, through the same per-item delivery
@@ -46,8 +48,8 @@ type reprovisionGatheredEnv struct {
 type reprovisionGatheredEnvKey struct{}
 
 // withReprovisionGatheredEnv returns ctx with an empty holder. The reincarnate
-// worker installs it for a home-reset reprovision and passes the same ctx to
-// that reprovision and its start.
+// worker installs it for every reincarnation and passes the same ctx to the
+// provision/reprovision leg and its start.
 func withReprovisionGatheredEnv(ctx context.Context) context.Context {
 	return context.WithValue(ctx, reprovisionGatheredEnvKey{}, &reprovisionGatheredEnv{})
 }

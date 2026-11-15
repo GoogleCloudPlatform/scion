@@ -539,11 +539,12 @@ type reincarnateTestDispatcher struct {
 	lastStartTask    string
 	lastStartResume  *bool
 
-	// reprovisionGatheredEnvHolders and startGatheredEnvHolders record,
-	// per call, the reprovisionGatheredEnv holder in the dispatch ctx (nil
-	// when none).
-	reprovisionGatheredEnvHolders []*reprovisionGatheredEnv
-	startGatheredEnvHolders       []*reprovisionGatheredEnv
+	// reprovisionGatheredEnvHolders, moveProvisionGatheredEnvHolders and
+	// startGatheredEnvHolders record, per call, the reprovisionGatheredEnv
+	// holder in the dispatch ctx (nil when none).
+	reprovisionGatheredEnvHolders   []*reprovisionGatheredEnv
+	moveProvisionGatheredEnvHolders []*reprovisionGatheredEnv
+	startGatheredEnvHolders         []*reprovisionGatheredEnv
 
 	stopErr        error
 	reprovisionErr error
@@ -5258,9 +5259,10 @@ func (d *reincarnateTestDispatcher) DispatchAgentReprovision(ctx context.Context
 	}
 	return err
 }
-func (d *reincarnateTestDispatcher) DispatchAgentProvisionForMove(_ context.Context, agent *store.Agent, expect, moveID string) error {
+func (d *reincarnateTestDispatcher) DispatchAgentProvisionForMove(ctx context.Context, agent *store.Agent, expect, moveID string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.moveProvisionGatheredEnvHolders = append(d.moveProvisionGatheredEnvHolders, reprovisionGatheredEnvFrom(ctx))
 	d.moveProvisionCalls = append(d.moveProvisionCalls, agent.RuntimeBrokerID+"|"+expect)
 	d.moveProvisionIDs = append(d.moveProvisionIDs, moveID)
 	if d.moveProvisionErr != nil && (!errors.Is(d.moveProvisionErr, errProvisionSent) || d.moveProvisionFailsBeforeF4) {

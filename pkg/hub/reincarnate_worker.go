@@ -842,6 +842,13 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		return
 	}
 
+	// startCtx is used for this reincarnation's provision/reprovision leg
+	// and its start leg only. For every reincarnation (in-place reprovision,
+	// with or without a home reset, and cross-broker moves), it carries the
+	// as_needed names the gather resolved to DispatchAgentStart
+	// (reprovisionGatheredEnv, ptone/scion#7757, ptone/scion#7909).
+	startCtx := withReprovisionGatheredEnv(ctx)
+
 	// A move links the target to the project if needed and provisions
 	// the agent fresh there. The target first confirms the agent's
 	// workspace on its own mount of the export (409 when it is missing),
@@ -856,7 +863,7 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		if move.recreates() {
 			moveMarkerID = reincarnationID
 		}
-		if err := md.DispatchAgentProvisionForMove(ctx, agent, move.expectedNFSWorkspace(), moveMarkerID); err != nil {
+		if err := md.DispatchAgentProvisionForMove(startCtx, agent, move.expectedNFSWorkspace(), moveMarkerID); err != nil {
 			// A forced move removes the target's files only when the
 			// provision may have created them: an error marked sent that
 			// is not the target's own refusal (moveTargetUntouched).
@@ -875,13 +882,6 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// too, unless this reincarnation resets it (a harness switch,
 	// ptone/scion#7757): then the broker moves it aside and composes a
 	// fresh one, under the reincarnation ID.
-	// startCtx is used for the reprovision and its start only. On a home
-	// reset it carries the as_needed names this reprovision's gather
-	// resolves for the new harness to that start (reprovisionGatheredEnv).
-	startCtx := ctx
-	if homeReset {
-		startCtx = withReprovisionGatheredEnv(ctx)
-	}
 	if move != nil {
 		// Provisioned on the target above.
 	} else if err := dispatcher.DispatchAgentReprovision(startCtx, agent, ReprovisionOptions{ResetHome: homeReset, ResetID: reincarnationID}); err != nil {
