@@ -341,6 +341,7 @@ func (h *TelemetryHandler) endSpan(event *hooks.Event, spanName, startEventType 
 func (h *TelemetryHandler) singleSpan(event *hooks.Event, spanName string) {
 	ctx := context.Background()
 	attrs := h.eventToAttributes(event)
+	attrs = append(attrs, eventTokenAttributes(event)...)
 
 	// For session-end events, record session metric counters
 	if event.Name == hooks.EventSessionEnd {
@@ -420,6 +421,12 @@ func (h *TelemetryHandler) emitLogRecord(ctx context.Context, event *hooks.Event
 	}
 	if event.Data.CachedTokens > 0 {
 		attrs = append(attrs, slog.Int64("gen_ai.usage.cached_tokens", event.Data.CachedTokens))
+	}
+	if event.Data.CacheWriteTokens > 0 {
+		attrs = append(attrs, slog.Int64("gen_ai.usage.cache_write_tokens", event.Data.CacheWriteTokens))
+	}
+	if event.Data.ReasoningTokens > 0 {
+		attrs = append(attrs, slog.Int64("gen_ai.usage.reasoning_tokens", event.Data.ReasoningTokens))
 	}
 
 	h.logger.LogAttrs(ctx, slog.LevelInfo, spanName, attrs...)
@@ -509,6 +516,14 @@ func (h *TelemetryHandler) eventToEndAttributes(event *hooks.Event, startTime ti
 	}
 
 	// Add token usage attributes
+	attrs = append(attrs, eventTokenAttributes(event)...)
+
+	return attrs
+}
+
+// eventTokenAttributes builds gen_ai.usage.* span attributes for positive token fields.
+func eventTokenAttributes(event *hooks.Event) []attribute.KeyValue {
+	var attrs []attribute.KeyValue
 	if event.Data.InputTokens > 0 {
 		attrs = append(attrs, attribute.Int64("gen_ai.usage.input_tokens", event.Data.InputTokens))
 	}
@@ -518,7 +533,12 @@ func (h *TelemetryHandler) eventToEndAttributes(event *hooks.Event, startTime ti
 	if event.Data.CachedTokens > 0 {
 		attrs = append(attrs, attribute.Int64("gen_ai.usage.cached_tokens", event.Data.CachedTokens))
 	}
-
+	if event.Data.CacheWriteTokens > 0 {
+		attrs = append(attrs, attribute.Int64("gen_ai.usage.cache_write_tokens", event.Data.CacheWriteTokens))
+	}
+	if event.Data.ReasoningTokens > 0 {
+		attrs = append(attrs, attribute.Int64("gen_ai.usage.reasoning_tokens", event.Data.ReasoningTokens))
+	}
 	return attrs
 }
 
