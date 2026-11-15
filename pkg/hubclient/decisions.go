@@ -112,6 +112,7 @@ type AgentDecisionListItem struct {
 type AgentDecisionListResponse struct {
 	Items      []AgentDecisionListItem `json:"items"`
 	NextCursor string                  `json:"nextCursor,omitempty"`
+	Query      string                  `json:"query,omitempty"`
 }
 
 // AgentDecisionVersionView is one version in AgentDecisionShowResponse.

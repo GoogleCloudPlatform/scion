@@ -968,8 +968,31 @@ func TestAgentDecisions_SearchValidationTimeoutAndExperimentGate(t *testing.T) {
 			var out AgentDecisionListResponse
 			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
 			assert.Len(t, out.Items, 1, "whitespace-only q returns unfiltered list")
+			var raw map[string]interface{}
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &raw))
+			_, hasQuery := raw["query"]
+			assert.False(t, hasQuery, "whitespace-only q omits query marker")
 		}
 	}
+
+	// Search capability marker: present as trimmed q when q is set, omitted when q is absent.
+	rrTrimmedMarker := f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions?q="+url.QueryEscape("  feature  "), nil)
+	require.Equal(t, http.StatusOK, rrTrimmedMarker.Code, rrTrimmedMarker.Body.String())
+	var rawWithQ map[string]interface{}
+	require.NoError(t, json.Unmarshal(rrTrimmedMarker.Body.Bytes(), &rawWithQ))
+	assert.Equal(t, "feature", rawWithQ["query"])
+
+	rrAbsentMarker := f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions", nil)
+	require.Equal(t, http.StatusOK, rrAbsentMarker.Code, rrAbsentMarker.Body.String())
+	var rawWithoutQ map[string]interface{}
+	require.NoError(t, json.Unmarshal(rrAbsentMarker.Body.Bytes(), &rawWithoutQ))
+	_, hasAbsentQuery := rawWithoutQ["query"]
+	assert.False(t, hasAbsentQuery, "absent q omits query marker")
+
+	// Invalid cursor with q still preserves store.ErrInvalidInput message text.
+	rrBadCursor := f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions?q=feature&cursor=not-a-cursor", nil)
+	assert.Equal(t, http.StatusBadRequest, rrBadCursor.Code, rrBadCursor.Body.String())
+	assert.Contains(t, rrBadCursor.Body.String(), "invalid cursor")
 
 	// Experiment gating (C3): web.chat_choices gates agent decisions?q= independently of web.project_decisions.
 	setProjectDecisionsExperiments(t, f.srv, true, false)

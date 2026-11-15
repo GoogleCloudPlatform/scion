@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -155,6 +156,9 @@ func runAgentDecisionsList(cmd *cobra.Command) error {
 		if err != nil {
 			return formatDecisionAPIError(err)
 		}
+		if search != "" && page.Query == "" {
+			return errors.New(errMsgDecisionSearchUnsupported)
+		}
 		items = append(items, page.Items...)
 		if page.NextCursor == "" {
 			break
@@ -165,10 +169,15 @@ func runAgentDecisionsList(cmd *cobra.Command) error {
 	if decisionsWantJSON(cmd) {
 		return writeJSONTo(cmd.OutOrStdout(), hubclient.AgentDecisionListResponse{
 			Items: items,
+			Query: search,
 		})
 	}
 
 	if len(items) == 0 {
+		if search != "" {
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "No %s decisions match %q.\n", state, safeText(search))
+			return nil
+		}
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "No %s decisions.\n", state)
 		return nil
 	}

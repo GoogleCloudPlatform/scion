@@ -478,8 +478,35 @@ func TestDecisionsListAgent_SearchValidationPaginationAndErrors(t *testing.T) {
 			_, _ = w.Write([]byte(`{"error":{"code":"SEARCH_TIMEOUT","message":"Search took too long. Try a longer phrase or search one space."}}`))
 			return
 		}
+		appliedQuery := strings.TrimSpace(r.URL.Query().Get("q"))
+		if serverMode == "old_hub" {
+			// Pre-P3 hub ignores q and omits the "query" marker.
+			next := "p2"
+			if r.URL.Query().Get("cursor") != "" {
+				next = ""
+			}
+			_ = json.NewEncoder(w).Encode(hubclient.AgentDecisionListResponse{
+				Items: []hubclient.AgentDecisionListItem{
+					{
+						RowID:          "row-unfiltered",
+						Key:            "unrelated-1",
+						Ref:            "ag/unrelated-1",
+						Version:        1,
+						Status:         "pending",
+						Question:       "Unrelated decision?",
+						ConversationID: "conv-1",
+						CreatedAt:      fixedNow.Add(-5 * time.Minute),
+					},
+				},
+				NextCursor: next,
+			})
+			return
+		}
 		if serverMode == "empty" {
-			_ = json.NewEncoder(w).Encode(hubclient.AgentDecisionListResponse{Items: []hubclient.AgentDecisionListItem{}})
+			_ = json.NewEncoder(w).Encode(hubclient.AgentDecisionListResponse{
+				Items: []hubclient.AgentDecisionListItem{},
+				Query: appliedQuery,
+			})
 			return
 		}
 		if r.URL.Query().Get("cursor") == "" {
@@ -497,6 +524,7 @@ func TestDecisionsListAgent_SearchValidationPaginationAndErrors(t *testing.T) {
 					},
 				},
 				NextCursor: "p2",
+				Query:      appliedQuery,
 			})
 			return
 		}
@@ -519,6 +547,7 @@ func TestDecisionsListAgent_SearchValidationPaginationAndErrors(t *testing.T) {
 					},
 				},
 			},
+			Query: appliedQuery,
 		})
 	})
 	withMockDecisionsServer(t, mux)
@@ -546,6 +575,32 @@ func TestDecisionsListAgent_SearchValidationPaginationAndErrors(t *testing.T) {
 	assert.Equal(t, outNoQ, outBlankQ, "whitespace -q matches omitted -q byte-for-byte")
 	assert.Equal(t, []string{"limit=200&state=pending", "limit=200&state=pending"}, seenRawQueries)
 
+	// Empty search results with -q name the query across pending, decided, and all.
+	outEmptyPendingQ, err := runDecisionsTestCmd(t, "decisions", "list", "-q", "  release  ")
+	require.NoError(t, err)
+	assert.Equal(t, "No pending decisions match \"release\".\n", outEmptyPendingQ)
+
+	outEmptyDecidedQ, err := runDecisionsTestCmd(t, "decisions", "list", "--decided", "-q", "release")
+	require.NoError(t, err)
+	assert.Equal(t, "No decided decisions match \"release\".\n", outEmptyDecidedQ)
+
+	outEmptyAllQ, err := runDecisionsTestCmd(t, "decisions", "list", "--all", "-q", "release")
+	require.NoError(t, err)
+	assert.Equal(t, "No all decisions match \"release\".\n", outEmptyAllQ)
+
+	// Pre-P3 hub that ignores q (omits "query" marker) fails instead of returning unfiltered rows.
+	seenRawQueries = nil
+	serverMode = "old_hub"
+	_, err = runDecisionsTestCmd(t, "decisions", "list", "-q", "canary")
+	require.Error(t, err)
+	assert.Equal(t, "this hub does not support decision search", err.Error())
+	assert.Len(t, seenRawQueries, 1, "old hub check stops on first page before following cursor")
+
+	// Omitting -q against a pre-P3 hub continues to work.
+	outOldNoQ, err := runDecisionsTestCmd(t, "decisions", "list")
+	require.NoError(t, err)
+	assert.Contains(t, outOldNoQ, "unrelated-1")
+
 	// Search with cursor pagination across state flags and --json.
 	seenRawQueries = nil
 	serverMode = "ok"
@@ -566,6 +621,7 @@ func TestDecisionsListAgent_SearchValidationPaginationAndErrors(t *testing.T) {
 	var parsed hubclient.AgentDecisionListResponse
 	require.NoError(t, json.Unmarshal([]byte(outJSON), &parsed))
 	assert.Len(t, parsed.Items, 2)
+	assert.Equal(t, strings.Repeat("é", 256), parsed.Query)
 
 	// 503 SEARCH_TIMEOUT surfaces the Hub's timeout message cleanly.
 	serverMode = "timeout"

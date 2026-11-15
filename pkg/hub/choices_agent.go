@@ -62,9 +62,12 @@ type AgentDecisionListItem struct {
 }
 
 // AgentDecisionListResponse is the 200 envelope of GET /api/v1/agent/decisions.
+// Query echoes the trimmed q filter when one was applied so the CLI can reject
+// older hubs that silently ignore unknown query parameters.
 type AgentDecisionListResponse struct {
 	Items      []AgentDecisionListItem `json:"items"`
 	NextCursor string                  `json:"nextCursor,omitempty"`
+	Query      string                  `json:"query,omitempty"`
 }
 
 // AgentDecisionVersionView is one version in GET /api/v1/agent/decisions/{key}.
@@ -215,24 +218,24 @@ func (s *Server) handleAgentDecisionList(w http.ResponseWriter, r *http.Request,
 	cursor := q.Get("cursor")
 	rows, nextCursor, err := s.store.ListAgentDecisions(searchCtx, agentIdent.ID(), state, search, cursor, limit)
 	if err != nil {
-		switch {
-		case r.Context().Err() != nil:
+		if r.Context().Err() != nil {
 			return
-		case search != "" && (errors.Is(searchCtx.Err(), context.DeadlineExceeded) || isChatSearchTimeout(err)):
-			writeChatSearchTimeout(w)
-		case errors.Is(err, store.ErrInvalidInput):
-			ValidationError(w, err.Error(), nil)
-		default:
-			writeErrorFromErr(w, err, "")
 		}
+		if errors.Is(err, store.ErrInvalidInput) {
+			ValidationError(w, err.Error(), nil)
+			return
+		}
+		if search != "" {
+			writeDecisionsError(w, r, searchCtx, err)
+			return
+		}
+		writeErrorFromErr(w, err, "")
 		return
 	}
 
 	convByPrompt := s.fallbackConversationsForDecisions(searchCtx, rows)
 	if search != "" && errors.Is(searchCtx.Err(), context.DeadlineExceeded) {
-		if r.Context().Err() == nil {
-			writeChatSearchTimeout(w)
-		}
+		writeDecisionsError(w, r, searchCtx, searchCtx.Err())
 		return
 	}
 	items := make([]AgentDecisionListItem, len(rows))
@@ -259,6 +262,7 @@ func (s *Server) handleAgentDecisionList(w http.ResponseWriter, r *http.Request,
 	writeJSON(w, http.StatusOK, AgentDecisionListResponse{
 		Items:      items,
 		NextCursor: nextCursor,
+		Query:      search,
 	})
 }
 

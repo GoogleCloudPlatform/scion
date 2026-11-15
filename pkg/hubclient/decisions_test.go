@@ -190,7 +190,9 @@ func TestDecisionService_ListQueryParam(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seenRawQueries = append(seenRawQueries, r.URL.RawQuery)
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(AgentDecisionListResponse{})
+		_ = json.NewEncoder(w).Encode(AgentDecisionListResponse{
+			Query: r.URL.Query().Get("q"),
+		})
 	}))
 	defer srv.Close()
 
@@ -200,11 +202,19 @@ func TestDecisionService_ListQueryParam(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	if _, err := c.Decisions().List(ctx, &ListAgentDecisionsOptions{State: "all", Query: "canary 50%"}); err != nil {
+	withQ, err := c.Decisions().List(ctx, &ListAgentDecisionsOptions{State: "all", Query: "canary 50%"})
+	if err != nil {
 		t.Fatalf("List with Query: %v", err)
 	}
-	if _, err := c.Decisions().List(ctx, &ListAgentDecisionsOptions{State: "pending"}); err != nil {
+	if withQ.Query != "canary 50%" {
+		t.Errorf("withQ.Query = %q, want %q", withQ.Query, "canary 50%")
+	}
+	withoutQ, err := c.Decisions().List(ctx, &ListAgentDecisionsOptions{State: "pending"})
+	if err != nil {
 		t.Fatalf("List without Query: %v", err)
+	}
+	if withoutQ.Query != "" {
+		t.Errorf("withoutQ.Query = %q, want empty", withoutQ.Query)
 	}
 
 	if len(seenRawQueries) != 2 {
