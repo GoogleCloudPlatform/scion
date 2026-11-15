@@ -2028,7 +2028,21 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		wakeCtx, cancelWake := context.WithTimeout(ctx, chatWakeResumeBudget)
 		// wakeAgentForDM reports managed runtimes, a missing broker, the
 		// start gate and readiness failures as typed errors.
-		wakeRes, wakeErr := s.wakeAgentForDM(wakeCtx, primaryAgent)
+		var wakeRes *WakeResult
+		var wakeErr *AgentDMError
+		if autoWakePrimary {
+			// A hub-suspended primary whose wake another start already
+			// holds is waited for and delivered to (wakeOrAwaitStart);
+			// a wait that ends without a ready agent answers as a
+			// deferred wake does below.
+			var awaitErr error
+			wakeErr, awaitErr = s.wakeOrAwaitStart(wakeCtx, primaryAgent)
+			if wakeErr == nil && awaitErr != nil {
+				wakeRes = &WakeResult{Outcome: WakeDeferred}
+			}
+		} else {
+			wakeRes, wakeErr = s.wakeAgentForDM(wakeCtx, primaryAgent)
+		}
 		cancelWake()
 		if wakeErr != nil {
 			serr := chatSendFromAgentDMError(wakeErr)

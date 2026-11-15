@@ -432,11 +432,19 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// permission check: the delivery authorization above suffices. A mention
 	// from the fan-out cannot wait for a resume inside its budget, so it is
 	// stored now and dispatched after a background wake (wakeQueued).
+	// A target whose hub wake is already in flight (autoWakeAwait) is
+	// waited for, then delivered to; a mention to it keeps today's
+	// buffered dispatch, which a starting agent receives once up.
 	autoWake := false
 	wakeQueued := false
 	if !deferred {
 		held, holdErr := s.agentHeld(ctx, input.TargetAgent.ID)
-		autoWake = !held && holdErr == nil && s.shouldAutoWake(input.TargetAgent)
+		mode := autoWakeNone
+		if !held && holdErr == nil {
+			mode = s.autoWakeModeOf(input.TargetAgent)
+		}
+		isFanoutMention := input.SkipPhaseGate && input.Type == messages.TypeMention
+		autoWake = mode == autoWakeResume || (mode == autoWakeAwait && !isFanoutMention)
 		switch {
 		case holdErr != nil:
 			return nil, heldLookupFaultDMError()
@@ -444,7 +452,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			deferred = true
 		case held:
 			return nil, heldTargetDMError(input.TargetAgent)
-		case autoWake && input.SkipPhaseGate && input.Type == messages.TypeMention:
+		case autoWake && isFanoutMention:
 			wakeQueued = true
 		case input.Wake || autoWake:
 			if !autoWake {
@@ -903,30 +911,34 @@ func (s *Server) agentDMAutoWakeItem(input *AgentDMInput, storeMsg *store.Messag
 			} else if dispatcher := s.GetDispatcher(); dispatcher != nil && woken.RuntimeBrokerID != "" {
 				err = dispatchWithBrokerRetry(withDispatchMessageID(dctx, msgID), nil, dispatcher, woken, dispatchMsg.Msg, input.Urgent || input.Interrupt, dispatchMsg)
 			}
+			// The settle writes run on a short detached context, so a wake
+			// cut short at shutdown still records its outcome.
+			fctx, fcancel := finalizationContext(ctx)
+			defer fcancel()
 			// As the synchronous fan-out settles it: an ambiguous dispatch
 			// counts as delivered, a definite failure as failed.
 			if err != nil && !isAmbiguousDispatchError(err) {
-				s.finishAttachmentAddressee(ctx, input.AttachmentAddressee, err)
+				s.finishAttachmentAddressee(fctx, input.AttachmentAddressee, err)
 			} else {
-				s.finishAttachmentAddressee(ctx, input.AttachmentAddressee, nil)
+				s.finishAttachmentAddressee(fctx, input.AttachmentAddressee, nil)
 			}
 			if err != nil {
 				LogDMDispatchOutcome(input.SenderAgent, woken, msgID, DispatchFailed, err)
 				if isAmbiguousDispatchError(err) {
 					return
 				}
-				if markErr := s.markFailed(ctx, msgID, err.Error()); markErr != nil {
+				if markErr := s.markFailed(fctx, msgID, err.Error()); markErr != nil {
 					s.messageLog.Error("agent DM: failed to mark message failed",
 						"message_id", msgID, "error", markErr)
 				}
 				return
 			}
-			if _, casErr := s.markDispatched(ctx, msgID); casErr != nil {
+			if _, casErr := s.markDispatched(fctx, msgID); casErr != nil {
 				s.messageLog.Error("agent DM: MarkMessageDispatched store error (message dispatched)",
 					"message_id", msgID, "error", casErr)
 			}
 			LogDMDispatchOutcome(input.SenderAgent, woken, msgID, DispatchSucceeded, nil)
-			s.publishAgentDMObserver(ctx, input, structuredMsg)
+			s.publishAgentDMObserver(fctx, input, structuredMsg)
 			s.logMessage("agent DM: message dispatched after auto-wake",
 				"sender_agent_id", input.SenderAgent.ID,
 				"target_agent_id", woken.ID,
@@ -934,10 +946,12 @@ func (s *Server) agentDMAutoWakeItem(input *AgentDMInput, storeMsg *store.Messag
 				logging.AttrLogKind, logging.LogKindEvent)
 		},
 		fail: func(ctx context.Context, dmErr *AgentDMError) {
+			fctx, fcancel := finalizationContext(ctx)
+			defer fcancel()
 			err := fmt.Errorf("auto-wake failed: %s", dmErr.Message)
-			s.finishAttachmentAddressee(ctx, input.AttachmentAddressee, err)
+			s.finishAttachmentAddressee(fctx, input.AttachmentAddressee, err)
 			LogDMDispatchOutcome(input.SenderAgent, input.TargetAgent, msgID, DispatchFailed, err)
-			if markErr := s.markFailed(ctx, msgID, err.Error()); markErr != nil {
+			if markErr := s.markFailed(fctx, msgID, err.Error()); markErr != nil {
 				s.messageLog.Error("agent DM: failed to mark message failed",
 					"message_id", msgID, "error", markErr)
 			}

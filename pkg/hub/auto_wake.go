@@ -44,19 +44,59 @@ import (
 // background goroutine resumes the agent once, through the same
 // wakeAgentForDM, and then runs every item queued for it.
 
+// autoWakeMode classifies a target for a sender that delivers right after
+// the wake and needs a running agent (the direct-message and scheduled
+// paths; autoWakeModeOf).
+type autoWakeMode int
+
+const (
+	// autoWakeNone: not an auto-wake target; today's behaviour applies.
+	autoWakeNone autoWakeMode = iota
+	// autoWakeResume: the hub suspended it (shouldAutoWake); resume it,
+	// then deliver.
+	autoWakeResume
+	// autoWakeAwait: a wake of an agent the hub suspended is already in
+	// flight (phase starting, reason idle or stalled kept through starting);
+	// wait for it, then deliver. Nothing is started, so the sender needs
+	// only its delivery authorization.
+	autoWakeAwait
+)
+
+// autoWakeModeOf classifies agent as read by a synchronous sender (see
+// autoWakeMode). It requires the lifecycle.idle_suspend experiment and a
+// suspend reason that auto-wakes; holds are checked by the callers. A
+// starting agent whose reason is user (a resume of a user-suspended agent)
+// or none is autoWakeNone. An error row never carries a reason (any phase
+// write other than suspended or starting clears it), so the effective
+// resting phase need not be consulted. Both non-none modes go through
+// wakeOrAwaitStart, which resumes a suspended target and waits on a
+// starting one.
+func (s *Server) autoWakeModeOf(agent *store.Agent) autoWakeMode {
+	if agent == nil || !state.SuspendReason(agent.SuspendReason).AutoWakes() {
+		return autoWakeNone
+	}
+	var mode autoWakeMode
+	switch state.Phase(agent.Phase) {
+	case state.PhaseSuspended:
+		mode = autoWakeResume
+	case state.PhaseStarting:
+		mode = autoWakeAwait
+	default:
+		return autoWakeNone
+	}
+	if !s.experimentEnabled(experiments.IdleSuspend) {
+		return autoWakeNone
+	}
+	return mode
+}
+
 // shouldAutoWake reports whether new work for agent resumes it without an
 // explicit wake: the lifecycle.idle_suspend experiment is on, the agent is
 // suspended, and the hub suspended it (state.SuspendReason.AutoWakes). A
 // row with no suspend reason (suspended by a user, by a hold, or before
 // reasons were recorded) never auto-wakes.
 func (s *Server) shouldAutoWake(agent *store.Agent) bool {
-	if agent == nil || state.Phase(agent.Phase) != state.PhaseSuspended {
-		return false
-	}
-	if !state.SuspendReason(agent.SuspendReason).AutoWakes() {
-		return false
-	}
-	return s.experimentEnabled(experiments.IdleSuspend)
+	return s.autoWakeModeOf(agent) == autoWakeResume
 }
 
 // agentHeldOrUnknown reports whether agentID is held, or its hold could not
@@ -230,26 +270,30 @@ func (s *Server) stopAutoWakes(ctx context.Context) {
 func (s *Server) chatSecondaryAutoWakeItem(messageID, addressee, content string, msg *messages.StructuredMessage) autoWakeItem {
 	return autoWakeItem{
 		deliver: func(ctx context.Context, woken *store.Agent) {
-			dispatcher := s.GetDispatcher()
-			if dispatcher == nil {
-				s.finishAttachmentAddressee(ctx, addressee, errors.New("dispatch not available"))
-				_ = s.markFailed(ctx, messageID, "dispatch not available")
-				return
+			var err error
+			if dispatcher := s.GetDispatcher(); dispatcher == nil {
+				err = errors.New("dispatch not available")
+			} else {
+				dctx, cancel := context.WithTimeout(withDispatchMessageID(ctx, messageID), chatWakeDeliveryBudget)
+				err = dispatchWithBrokerRetry(dctx, nil, dispatcher, woken, content, false, msg)
+				cancel()
 			}
-			dctx, cancel := context.WithTimeout(withDispatchMessageID(ctx, messageID), chatWakeDeliveryBudget)
-			defer cancel()
-			if err := dispatchWithBrokerRetry(dctx, nil, dispatcher, woken, content, false, msg); err != nil {
+			// The settle writes run on a short detached context, so a wake
+			// cut short at shutdown still records its outcome.
+			fctx, fcancel := finalizationContext(ctx)
+			defer fcancel()
+			s.finishAttachmentAddressee(fctx, addressee, err)
+			if err != nil {
 				s.messageLog.Error("Failed to dispatch mention after auto-wake", "slug", woken.Slug, "error", err)
-				s.finishAttachmentAddressee(ctx, addressee, err)
-				_ = s.markFailed(ctx, messageID, err.Error())
-				return
+				_ = s.markFailed(fctx, messageID, err.Error())
 			}
-			s.finishAttachmentAddressee(ctx, addressee, nil)
 		},
 		fail: func(ctx context.Context, dmErr *AgentDMError) {
+			fctx, fcancel := finalizationContext(ctx)
+			defer fcancel()
 			err := fmt.Errorf("auto-wake failed: %s", dmErr.Message)
-			s.finishAttachmentAddressee(ctx, addressee, err)
-			_ = s.markFailed(ctx, messageID, err.Error())
+			s.finishAttachmentAddressee(fctx, addressee, err)
+			_ = s.markFailed(fctx, messageID, err.Error())
 		},
 	}
 }

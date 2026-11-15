@@ -6127,7 +6127,9 @@ func (s *Server) messageEventHandler() EventHandler {
 		// woken without the payload's wake and without the wake
 		// permission: the send authorization above suffices. A held
 		// target was refused by the standing check.
-		autoWake := s.shouldAutoWake(agent)
+		// A target whose hub wake is already in flight (starting) is
+		// waited for the same way (autoWakeModeOf, wakeScheduledTarget).
+		autoWake := s.autoWakeModeOf(agent) != autoWakeNone
 		wake := payload.Wake || autoWake
 		if wake {
 			if autoWake {

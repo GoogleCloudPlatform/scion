@@ -2305,7 +2305,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// An agent the hub suspended (shouldAutoWake, ptone/scion#7826) is woken
 	// without --wake and without that permission: the delivery
 	// authorization suffices.
-	if req.Wake && !reincarnationInFlight(agent) && !s.shouldAutoWake(agent) {
+	if req.Wake && !reincarnationInFlight(agent) && s.autoWakeModeOf(agent) == autoWakeNone {
 		if denial := s.wakeResumeDenial(ctx, GetIdentityFromContext(ctx), agent); denial != nil {
 			WriteAgentDMError(w, denial)
 			return
@@ -2492,7 +2492,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 
 	// A user's message to an agent the hub suspended wakes it as --wake
 	// does (auto_wake.go); an agent sender's is woken by ExecuteAgentDM.
-	autoWakeUser := s.shouldAutoWake(agent)
+	// A target the hub suspended is resumed, and one whose hub wake is
+	// already in flight (starting) is waited for (autoWakeModeOf).
+	autoWakeUser := s.autoWakeModeOf(agent) != autoWakeNone
 	userWake := req.Wake || autoWakeUser
 	if autoWakeUser && !senderIsAgent && !delegatedSender && !deferDelivery {
 		// The hub's own wakes are routine and the sender cannot know about

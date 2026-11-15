@@ -57,8 +57,23 @@
 
 - Rows suspended before this change have no reason and never auto-wake.
   `DowngradeFloor` is unchanged (additive nullable column).
-- A failed resume that ends in `error` (not rolled back to suspended) clears the
-  reason, so that agent no longer auto-wakes.
+- A failed asynchronous resume ends in `error`, which clears the reason, so that
+  agent no longer auto-wakes. Only the synchronous starting to suspended rollback
+  keeps the reason. This is deliberate and pinned by
+  `TestAutoWake_ErrorAfterFailedResumeIsNotAutoWoken`.
+
+## Review rounds
+
+- Pass 1: a background wake refused a target already `starting`; a sync DM that got
+  `WakeDeferred` was stored deferred and never sent; a woken chat secondary was not
+  a group participant; and the attachment addressee was settled at queue time. All
+  four are fixed, using one helper, `wakeOrAwaitStart`, that waits on a start in
+  progress.
+- Pass 2: a DM whose fresh read saw `starting` during a hub wake got 409. The sync
+  paths now classify the target once (`autoWakeModeOf`: resume, await or none),
+  and an in-flight hub wake (`starting` with reason idle or stalled) is waited on.
+  The tests set the row state before the send, or act on a log signal, so they do
+  not depend on scheduling. The auto-wake tests pass at `-cpu=1,2,4 -count=10`.
 - Out of scope: routed inbound from chat plugins
   (`handlers_broker_inbound_routed.go`) and delegated sends still refuse a suspended
   target. They are candidate follow-ups.

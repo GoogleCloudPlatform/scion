@@ -330,16 +330,213 @@ func TestAutoWake_UserDM_ConcurrentAllDelivered(t *testing.T) {
 	assertEveryRowDispatched(t, s, target.ID, n)
 }
 
-// A DM to an idle-suspended agent that another start has already moved
-// to starting waits for that start, then delivers (no second resume).
-func TestAutoWake_AgentDM_TargetAlreadyStarting(t *testing.T) {
+// awSignalHandler is a slog.Handler that closes fired the first time a
+// record with message msg is logged, so a test can act at a known point of
+// the code under test instead of relying on goroutine timing.
+type awSignalHandler struct {
+	msg   string
+	once  sync.Once
+	fired chan struct{}
+}
+
+func newAWSignal(msg string) *awSignalHandler {
+	return &awSignalHandler{msg: msg, fired: make(chan struct{})}
+}
+
+func (h *awSignalHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *awSignalHandler) Handle(_ context.Context, r slog.Record) error {
+	if r.Message == h.msg {
+		h.once.Do(func() { close(h.fired) })
+	}
+	return nil
+}
+func (h *awSignalHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *awSignalHandler) WithGroup(string) slog.Handler      { return h }
+
+// awStartingFresh moves target to starting, as another wake of the agent
+// the hub suspended would (the reason is kept through starting), and
+// returns the row as a sender reading it now sees it.
+func awStartingFresh(t *testing.T, s store.Store, target *store.Agent) *store.Agent {
+	t.Helper()
+	require.NoError(t, s.UpdateAgentStatus(context.Background(), target.ID, store.AgentStatusUpdate{Phase: string(state.PhaseStarting)}))
+	fresh, err := s.GetAgent(context.Background(), target.ID)
+	require.NoError(t, err)
+	require.Equal(t, string(state.PhaseStarting), fresh.Phase)
+	return fresh
+}
+
+func TestAutoWakeModeOf(t *testing.T) {
+	srv, _ := testServer(t)
+	cases := []struct {
+		phase  state.Phase
+		reason state.SuspendReason
+		on     bool
+		want   autoWakeMode
+	}{
+		{state.PhaseSuspended, state.SuspendReasonIdle, true, autoWakeResume},
+		{state.PhaseSuspended, state.SuspendReasonStalled, true, autoWakeResume},
+		{state.PhaseStarting, state.SuspendReasonIdle, true, autoWakeAwait},
+		{state.PhaseStarting, state.SuspendReasonStalled, true, autoWakeAwait},
+		// A resume of a user-suspended agent, or of one with no reason,
+		// is none of the hub's business.
+		{state.PhaseStarting, state.SuspendReasonUser, true, autoWakeNone},
+		{state.PhaseStarting, "", true, autoWakeNone},
+		{state.PhaseSuspended, state.SuspendReasonUser, true, autoWakeNone},
+		{state.PhaseRunning, state.SuspendReasonIdle, true, autoWakeNone},
+		{state.PhaseError, state.SuspendReasonIdle, true, autoWakeNone},
+		{state.PhaseSuspended, state.SuspendReasonIdle, false, autoWakeNone},
+		{state.PhaseStarting, state.SuspendReasonIdle, false, autoWakeNone},
+	}
+	for _, tc := range cases {
+		setIdleSuspendExperiment(t, srv, tc.on)
+		a := &store.Agent{ID: "a", Phase: string(tc.phase), SuspendReason: string(tc.reason)}
+		assert.Equal(t, tc.want, srv.autoWakeModeOf(a), "phase=%s reason=%q experiment=%v", tc.phase, tc.reason, tc.on)
+	}
+	assert.Equal(t, autoWakeNone, srv.autoWakeModeOf(nil))
+}
+
+// A failed asynchronous resume ends in error (with resume memory
+// suspended); the error write clears the reason, so the agent is not
+// auto-woken again. This is the deliberate, conservative choice.
+func TestAutoWake_ErrorAfterFailedResumeIsNotAutoWoken(t *testing.T) {
+	srv, s, _, target, _ := autoWakeFixture(t, state.SuspendReasonIdle)
+	require.NoError(t, s.UpdateAgentStatus(context.Background(), target.ID, store.AgentStatusUpdate{Phase: string(state.PhaseStarting)}))
+	require.NoError(t, s.UpdateAgentStatus(context.Background(), target.ID, store.AgentStatusUpdate{Phase: string(state.PhaseError)}))
+	got, err := s.GetAgent(context.Background(), target.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got.SuspendReason, "the error write clears the reason")
+	assert.Equal(t, autoWakeNone, srv.autoWakeModeOf(got))
+}
+
+// A DM whose fresh read sees the target starting, because a hub wake of
+// it is in flight, waits for that start and is delivered: no second
+// resume, no 409. The row is starting before the send, so the outcome
+// does not depend on scheduling.
+func TestAutoWake_FreshStarting(t *testing.T) {
+	t.Run("agent DM", func(t *testing.T) {
+		srv, s, sender, target, disp := autoWakeFixture(t, state.SuspendReasonIdle)
+		fresh := awStartingFresh(t, s, target)
+		awReadyOnStart(t, s, target.ID)
+
+		res, dmErr := srv.ExecuteAgentDM(context.Background(), awAgentDMInput(sender, fresh, "during an auto-wake"))
+		require.Nil(t, dmErr)
+		assert.Equal(t, AgentDMAccepted, res.Outcome)
+		assert.Empty(t, disp.getStartCalls(), "nothing is started")
+		assert.Len(t, disp.getMessageCalls(), 1)
+		assertEveryRowDispatched(t, s, target.ID, 1)
+	})
+
+	t.Run("user DM", func(t *testing.T) {
+		srv, s, _, target, disp := autoWakeFixture(t, state.SuspendReasonIdle)
+		u := wakeLifecycleUser(t, s, "aw-fresh-user", target.ProjectID, "agent.message", "agent.read")
+		awStartingFresh(t, s, target)
+		awReadyOnStart(t, s, target.ID)
+
+		rec := requestAsIdentity(t, srv, authUser(u), http.MethodPost, "/api/v1/agents/"+target.ID+"/message",
+			map[string]interface{}{"message": "during an auto-wake"})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Empty(t, disp.getStartCalls(), "nothing is started")
+		assert.Len(t, disp.getMessageCalls(), 1)
+		assertEveryRowDispatched(t, s, target.ID, 1)
+	})
+
+	t.Run("scheduled message", func(t *testing.T) {
+		f := newSchedWake(t, state.PhaseRunning)
+		setIdleSuspendExperiment(t, f.srv, true)
+		awSuspendFor(t, f.store, f.target, state.SuspendReasonIdle)
+		u := f.user(t, "aw-fresh-sched", "agent.message", "agent.read")
+		awStartingFresh(t, f.store, f.target)
+		awReadyOnStart(t, f.store, f.target.ID)
+
+		require.NoError(t, f.fire(withSessionRevision(f.event(false), u.ID)))
+		assert.Empty(t, f.disp.getStartCalls(), "nothing is started")
+		assert.Len(t, f.disp.getMessageCalls(), 1)
+	})
+
+	t.Run("a user's resume in flight keeps today's 409", func(t *testing.T) {
+		srv, s, sender, target, disp := autoWakeFixture(t, state.SuspendReasonUser)
+		fresh := awStartingFresh(t, s, target)
+		_, dmErr := srv.ExecuteAgentDM(context.Background(), awAgentDMInput(sender, fresh, "x"))
+		require.NotNil(t, dmErr)
+		assert.Equal(t, ErrCodeAgentNotRunning, dmErr.Code)
+		assert.Empty(t, disp.getMessageCalls())
+	})
+
+	t.Run("experiment off keeps today's 409", func(t *testing.T) {
+		srv, s, _, target, disp := autoWakeFixture(t, state.SuspendReasonIdle)
+		setIdleSuspendExperiment(t, srv, false)
+		u := wakeLifecycleUser(t, s, "aw-fresh-off", target.ProjectID, "agent.message", "agent.read")
+		awStartingFresh(t, s, target)
+		rec := requestAsIdentity(t, srv, authUser(u), http.MethodPost, "/api/v1/agents/"+target.ID+"/message",
+			map[string]interface{}{"message": "x"})
+		require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		assert.Empty(t, disp.getMessageCalls())
+	})
+
+	t.Run("a held target is refused, never waited on", func(t *testing.T) {
+		srv, s, sender, target, disp := autoWakeFixture(t, state.SuspendReasonIdle)
+		fresh := awStartingFresh(t, s, target)
+		holdAgentFor(t, s, target.ID, target.ProjectID, target.Ancestry[0])
+		_, dmErr := srv.ExecuteAgentDM(context.Background(), awAgentDMInput(sender, fresh, "x"))
+		require.NotNil(t, dmErr)
+		assert.Empty(t, disp.getMessageCalls())
+	})
+}
+
+// A DM whose copy reads suspended while another start of the agent holds
+// its start claim gets WakeDeferred; it waits for that start and is
+// delivered, never kept deferred. The other start is driven from the
+// point the DM logs that it is waiting, not from timing.
+func TestAutoWake_WakeDeferred(t *testing.T) {
+	for _, path := range []string{"agent DM", "user DM"} {
+		t.Run(path, func(t *testing.T) {
+			srv, s, sender, target, disp := autoWakeFixture(t, state.SuspendReasonIdle)
+			signal := newAWSignal("wake: another start of the target is in progress; waiting for it")
+			srv.messageLog = slog.New(signal)
+			_, err := s.ClaimAgentStart(context.Background(), target.ID, "other-wake", store.StartClaimWake, "", time.Minute)
+			require.NoError(t, err)
+			awReadyOnStart(t, s, target.ID)
+			go func() {
+				select {
+				case <-signal.fired:
+				case <-time.After(20 * time.Second):
+					return
+				}
+				// The other start writes starting; awReadyOnStart then
+				// reports it running.
+				_ = s.UpdateAgentStatus(context.Background(), target.ID, store.AgentStatusUpdate{Phase: string(state.PhaseStarting)})
+			}()
+
+			if path == "agent DM" {
+				res, dmErr := srv.ExecuteAgentDM(context.Background(), awAgentDMInput(sender, target, "deferred wake"))
+				require.Nil(t, dmErr)
+				assert.Equal(t, AgentDMAccepted, res.Outcome)
+			} else {
+				u := wakeLifecycleUser(t, s, "aw-deferred-user", target.ProjectID, "agent.message", "agent.read")
+				rec := requestAsIdentity(t, srv, authUser(u), http.MethodPost, "/api/v1/agents/"+target.ID+"/message",
+					map[string]interface{}{"message": "deferred wake"})
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			}
+			select {
+			case <-signal.fired:
+			default:
+				t.Fatal("fixture check: the send did not take the WakeDeferred wait")
+			}
+			assert.Empty(t, disp.getStartCalls(), "the start in progress is reused")
+			assert.Len(t, disp.getMessageCalls(), 1)
+			assertEveryRowDispatched(t, s, target.ID, 1)
+		})
+	}
+}
+
+// A DM whose copy is stale (read suspended) while the row already reads
+// starting and another wake holds the claim is waited on and delivered.
+func TestAutoWake_AgentDM_StaleSuspendedCopy(t *testing.T) {
 	srv, s, sender, target, disp := autoWakeFixture(t, state.SuspendReasonIdle)
-	// The sender's copy was read while suspended; another wake has since
-	// written starting and holds the start claim.
 	stale := *target
 	_, err := s.ClaimAgentStart(context.Background(), target.ID, "other-wake", store.StartClaimWake, "", time.Minute)
 	require.NoError(t, err)
-	require.NoError(t, s.UpdateAgentStatus(context.Background(), target.ID, store.AgentStatusUpdate{Phase: string(state.PhaseStarting)}))
+	awStartingFresh(t, s, target)
 	awReadyOnStart(t, s, target.ID)
 
 	res, dmErr := srv.ExecuteAgentDM(context.Background(), awAgentDMInput(sender, &stale, "during a wake"))
