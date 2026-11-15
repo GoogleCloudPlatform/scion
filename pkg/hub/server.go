@@ -8369,6 +8369,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/gcp-quota", s.guarded("/api/v1/admin/gcp-quota", s.handleAdminGCPQuota))
 	s.mux.HandleFunc("/api/v1/admin/lifecycle-hooks", s.guarded("/api/v1/admin/lifecycle-hooks", s.handleAdminLifecycleHooks))
 	s.mux.HandleFunc("/api/v1/admin/lifecycle-hooks/", s.guarded("/api/v1/admin/lifecycle-hooks/", s.handleAdminLifecycleHookByID))
+	// System One provider instance administration (hub.system_one; 404 while off).
+	// Checked per request inside the handlers rather than with requireExperiment
+	// at registration so servers built over a synthetic test registry still boot.
+	s.mux.HandleFunc("/api/v1/admin/system-one/instances", s.guarded("/api/v1/admin/system-one/instances", s.handleAdminSystemOneInstances))
+	s.mux.HandleFunc("/api/v1/admin/system-one/instances/", s.guarded("/api/v1/admin/system-one/instances/", s.handleAdminSystemOneInstanceByName))
 	s.mux.HandleFunc("/api/v1/admin/validate-resources", s.guarded("/api/v1/admin/validate-resources", s.handleAdminValidateResources))
 	s.mux.HandleFunc("/api/v1/admin/integrations", s.guarded("/api/v1/admin/integrations", s.handleAdminIntegrations))
 	s.mux.HandleFunc("/api/v1/admin/integrations/teams/manifest", s.guarded("/api/v1/admin/integrations/teams/manifest", s.handleTeamsManifestDownload))

@@ -202,7 +202,13 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	// test_identity.issue_admin and issue_super_admin — admin-kind
 	// issuance and revoke-all target the same hub-level collection.
 	"test_identity.issue_admin": {TargetClassKindHubResource}, "test_identity.issue_super_admin": {TargetClassKindHubResource},
-	"hub.github_app.read": {TargetClassKindHubResource}, "hub.github_app.update": {TargetClassKindHubResource},
+	// system_one_instance.* — read/create authorize against the hub-scoped
+	// collection target; delete/execute target an existing named instance.
+	"system_one_instance.read":    {TargetClassKindHubResource},
+	"system_one_instance.create":  {TargetClassKindHubResource},
+	"system_one_instance.delete":  {},
+	"system_one_instance.execute": {},
+	"hub.github_app.read":         {TargetClassKindHubResource}, "hub.github_app.update": {TargetClassKindHubResource},
 	"hub.metrics.read": {TargetClassKindHubResource}, "hub.audit.read": {},
 	"hub.env_vars.read": {TargetClassKindHubResource},
 

@@ -257,6 +257,14 @@ var testAdminPermissionPolicy = map[string]testAdminPolicy{
 	"test_identity.issue_admin":       testAdminPolicyDeny,
 	"test_identity.issue_super_admin": testAdminPolicyDeny,
 
+	// System One provider instances (ptone/scion#8044): runtime-writable
+	// credential and outbound provider configuration surface — deny for
+	// admin test identities.
+	"system_one_instance.read":    testAdminPolicyDeny,
+	"system_one_instance.create":  testAdminPolicyDeny,
+	"system_one_instance.delete":  testAdminPolicyDeny,
+	"system_one_instance.execute": testAdminPolicyDeny,
+
 	// Quotas, roles, bindings, access constraints, schedules.
 	"quota.read":              testAdminPolicyAllow,
 	"quota.create":            testAdminPolicyAllow,

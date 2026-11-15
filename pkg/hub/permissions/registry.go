@@ -55,6 +55,9 @@ const (
 	// ResourceTestIdentity is the hub test identity collection
 	// (POST/GET /api/v1/test-identities).
 	ResourceTestIdentity = "test_identity"
+	// ResourceSystemOneInstance is the hub-scoped System One provider
+	// instance registry (/api/v1/admin/system-one/instances).
+	ResourceSystemOneInstance = "system_one_instance"
 
 	// ResourceInbox and ResourceUserSkillInjection are self-scoped resource
 	// types: their records belong to one user and carry no project or hub
@@ -371,6 +374,13 @@ var Registry = []Permission{
 	{ID: "test_identity.issue", Resource: ResourceTestIdentity, Action: ActionIssue, CapabilityKind: CapabilityScope, UATScope: "test_identity:issue", Description: "Issue short-lived synthetic member or viewer test identities (only when the hub runs with --test-mode=member or above)", Enforcement: []string{"pkg/hub/route_metadata.go:testIdentities.create", "pkg/hub/route_metadata.go:testIdentities.list", "pkg/hub/route_metadata.go:testIdentities.token", "pkg/hub/route_metadata.go:testIdentities.webLoginCode", "pkg/hub/route_metadata.go:testIdentities.delete", "pkg/hub/route_metadata.go:testIdentityDelegations.create", "pkg/hub/route_metadata.go:testIdentityDelegations.list", "pkg/hub/route_metadata.go:testIdentityDelegations.revoke", "pkg/hub/handlers_test_identities.go:testIdentityCaller", "pkg/hub/handlers_test_identity_delegations.go:testIdentityDelegationCaller"}},
 	{ID: "test_identity.issue_admin", Resource: ResourceTestIdentity, Action: ActionIssueAdmin, CapabilityKind: CapabilityScope, UATScope: "test_identity:issue_admin", Description: "Issue short-lived test identities holding an expiring hub-admin role (only on hubs started with --test-mode=admin or above); held only by super-admin", Enforcement: []string{"pkg/hub/route_metadata.go:testIdentities.admin.create", "pkg/hub/route_metadata.go:testIdentities.admin.revokeAll", "pkg/hub/handlers_test_admin_identities.go:testAdminIssuer"}},
 	{ID: "test_identity.issue_super_admin", Resource: ResourceTestIdentity, Action: ActionIssueSuperAdmin, CapabilityKind: CapabilityScope, UATScope: "test_identity:issue_super_admin", Description: "Issue short-lived test identities holding an expiring super-admin role (only on hubs started with --test-mode=super-admin); held only by super-admin", Enforcement: []string{"pkg/hub/handlers_test_admin_identities.go:testAdminIssuer"}},
+
+	// System One provider instances (ptone/scion#8044). Interactive session
+	// only (CREDENTIAL_MANAGEMENT): no UATScope is minted.
+	{ID: "system_one_instance.read", Resource: ResourceSystemOneInstance, Action: ActionRead, CapabilityKind: CapabilityScope, Description: "List and read System One provider instances", Enforcement: []string{"pkg/hub/route_metadata.go:admin.systemOne.instances", "pkg/hub/route_metadata.go:admin.systemOne.instances.byName"}},
+	{ID: "system_one_instance.create", Resource: ResourceSystemOneInstance, Action: ActionCreate, CapabilityKind: CapabilityScope, Description: "Create System One provider instances and bind hub-scoped internal API keys", Enforcement: []string{"pkg/hub/handlers_system_one_instances.go:handleAdminSystemOneInstances"}},
+	{ID: "system_one_instance.delete", Resource: ResourceSystemOneInstance, Action: ActionDelete, CapabilityKind: CapabilityResource, Description: "Delete System One provider instances and their stored credentials", Enforcement: []string{"pkg/hub/handlers_system_one_instances.go:handleAdminSystemOneInstanceByName"}},
+	{ID: "system_one_instance.execute", Resource: ResourceSystemOneInstance, Action: ActionExecute, CapabilityKind: CapabilityResource, Description: "Probe System One provider instances with inline specs or model queries", Enforcement: []string{"pkg/hub/handlers_system_one_instances.go:handleAdminSystemOneInstanceByName"}},
 
 	// Quota management (Phase 2B — Limits/Quotas)
 	{ID: "quota.read", Resource: ResourceQuota, Action: ActionRead, CapabilityKind: CapabilityScope, UATScope: "quota:read", Description: "Read limit definitions, entitlements, and usage", Enforcement: []string{"pkg/hub/handlers_quota.go", "pkg/hub/route_metadata.go:admin.limits", "pkg/hub/route_metadata.go:admin.limits.byId", "pkg/hub/route_metadata.go:admin.entitlements.byId", "pkg/hub/route_metadata.go:admin.usage", "pkg/hub/route_metadata.go:admin.usage.byLimit"}},
