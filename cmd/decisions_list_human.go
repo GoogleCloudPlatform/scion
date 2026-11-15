@@ -476,8 +476,22 @@ func runHumanAllProjectsDecisionsList(cmd *cobra.Command, base hubclient.ListPro
 			return errors.New(errMsgDecisionSearchUnsupported)
 		}
 		if projectFilter != "" {
-			if myOpts.ProjectID, err = resolveDecisionProject(projectFilter, facets.Projects); err != nil {
+			var inFacet bool
+			if myOpts.ProjectID, inFacet, err = resolveDecisionProject(ctx, client, projectFilter, facets.Projects); err != nil {
 				return err
+			}
+			// When --project resolved a hub project outside the top-200 facet
+			// and --conversation or --agent also needs facet resolution, re-fetch
+			// facets scoped to ProjectID so the hub swaps that project in.
+			if !inFacet && (conversation != "" || agent != "") {
+				facets, err = svc.List(ctx, &hubclient.ListMyDecisionsOptions{
+					Tab:       base.Tab,
+					Limit:     1,
+					ProjectID: myOpts.ProjectID,
+				})
+				if err != nil {
+					return formatProjectDecisionsError(err)
+				}
 			}
 		}
 		if conversation != "" {
@@ -520,14 +534,21 @@ func runHumanAllProjectsDecisionsList(cmd *cobra.Command, base hubclient.ListPro
 	return nil
 }
 
-// resolveDecisionProject maps --project (with --all-projects) to a project ID:
-// a facet ID as is, else the one facet whose name or slug matches
-// case-insensitively. An unmatched UUID is passed through so the hub answers
-// empty when the caller is not a member.
-func resolveDecisionProject(value string, projects []hubclient.ProjectDecisionProjectRef) (string, error) {
+// resolveDecisionProject maps --project (with --all-projects) to a project ID
+// and reports whether the match came from the top-200 facet: a facet ID as is,
+// else the one facet whose name or slug matches case-insensitively. When no
+// facet matches (for example a member project past the 200-project cap), an
+// unmatched UUID is passed through and a name or slug is looked up via the
+// hub's project list so "pass --project <name> to see others" works past 200.
+func resolveDecisionProject(
+	ctx context.Context,
+	client hubclient.Client,
+	value string,
+	projects []hubclient.ProjectDecisionProjectRef,
+) (string, bool, error) {
 	for _, p := range projects {
 		if p.ID == value {
-			return p.ID, nil
+			return p.ID, true, nil
 		}
 	}
 	norm := normDecisionName(value)
@@ -542,14 +563,22 @@ func resolveDecisionProject(value string, projects []hubclient.ProjectDecisionPr
 			matches = append(matches, p)
 		}
 	}
+	inFacet := len(matches) > 0
+	if !inFacet {
+		if _, err := uuid.Parse(value); err == nil {
+			return value, false, nil
+		}
+		hubMatches, err := lookupHubDecisionProjects(ctx, client, value)
+		if err != nil {
+			return "", false, err
+		}
+		matches = hubMatches
+	}
 	switch len(matches) {
 	case 1:
-		return matches[0].ID, nil
+		return matches[0].ID, inFacet, nil
 	case 0:
-		if _, err := uuid.Parse(value); err == nil {
-			return value, nil
-		}
-		return "", fmt.Errorf("no project with Decisions matches %q", safeText(value))
+		return "", false, fmt.Errorf("no project with Decisions matches %q", safeText(value))
 	}
 	lines := make([]string, 0, len(matches))
 	for _, m := range matches {
@@ -562,8 +591,47 @@ func resolveDecisionProject(value string, projects []hubclient.ProjectDecisionPr
 		}
 		lines = append(lines, fmt.Sprintf("  %s  %s", label, safeText(m.ID)))
 	}
-	return "", &decisionsAmbiguousError{msg: fmt.Sprintf("--project %q matches %d projects; pass an ID:\n%s",
+	return "", false, &decisionsAmbiguousError{msg: fmt.Sprintf("--project %q matches %d projects; pass an ID:\n%s",
 		safeText(value), len(matches), strings.Join(lines, "\n"))}
+}
+
+func lookupHubDecisionProjects(ctx context.Context, client hubclient.Client, value string) ([]hubclient.ProjectDecisionProjectRef, error) {
+	clean := strings.TrimPrefix(strings.TrimSpace(value), "#")
+	if clean == "" || client == nil {
+		return nil, nil
+	}
+	norm := normDecisionName(clean)
+	seen := make(map[string]bool)
+	var matches []hubclient.ProjectDecisionProjectRef
+	for _, opts := range []*hubclient.ListProjectsOptions{
+		{Slug: clean},
+		{Name: clean},
+	} {
+		resp, err := client.Projects().List(ctx, opts)
+		if err != nil {
+			var apiErr *apiclient.APIError
+			if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusForbidden || apiErr.StatusCode == http.StatusNotFound) {
+				// A scoped credential without project:list cannot browse /api/v1/projects;
+				// fall back to no match rather than failing on the secondary lookup.
+				continue
+			}
+			return nil, formatDecisionAPIError(err)
+		}
+		for _, p := range resp.Projects {
+			if seen[p.ID] {
+				continue
+			}
+			if (p.Name != "" && normDecisionName(p.Name) == norm) || (p.Slug != "" && normDecisionName(p.Slug) == norm) {
+				seen[p.ID] = true
+				matches = append(matches, hubclient.ProjectDecisionProjectRef{
+					ID:   p.ID,
+					Name: p.Name,
+					Slug: p.Slug,
+				})
+			}
+		}
+	}
+	return matches, nil
 }
 
 func decisionProjectDisplay(ref hubclient.ProjectDecisionProjectRef) string {

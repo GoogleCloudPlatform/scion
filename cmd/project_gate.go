@@ -15,6 +15,9 @@
 package cmd
 
 import (
+	"strconv"
+	"strings"
+
 	"github.com/spf13/cobra"
 )
 
@@ -144,11 +147,42 @@ func commandRequiresProject(cmd *cobra.Command) bool {
 // isAllProjectsDecisionsList reports whether cmd is 'decisions list' with
 // --all-projects set.
 func isAllProjectsDecisionsList(cmd *cobra.Command) bool {
-	if cmd == nil || cmd.Name() != "list" || cmd.Parent() == nil || cmd.Parent().Name() != "decisions" || !isTopLevel(cmd.Parent()) {
+	if !isDecisionsListCommand(cmd) {
 		return false
 	}
 	allProjects, _ := cmd.Flags().GetBool("all-projects")
 	return allProjects
+}
+
+// isAllProjectsDecisionsListArgs reports whether target is 'decisions list'
+// with --all-projects requested, before or after cobra parses flags (mirrors
+// hubProfileRequested for Execute's early autoHelp settings load).
+func isAllProjectsDecisionsListArgs(target *cobra.Command, args []string) bool {
+	if !isDecisionsListCommand(target) {
+		return false
+	}
+	if isAllProjectsDecisionsList(target) {
+		return true
+	}
+	requested := false
+	for _, a := range args {
+		if a == "--" {
+			break
+		}
+		switch {
+		case a == "--all-projects":
+			requested = true
+		case strings.HasPrefix(a, "--all-projects="):
+			if v, err := strconv.ParseBool(strings.TrimPrefix(a, "--all-projects=")); err == nil {
+				requested = v
+			}
+		}
+	}
+	return requested
+}
+
+func isDecisionsListCommand(cmd *cobra.Command) bool {
+	return cmd != nil && cmd.Name() == "list" && cmd.Parent() != nil && cmd.Parent().Name() == "decisions" && isTopLevel(cmd.Parent())
 }
 
 // isGlobalTemplatesUpdate reports whether cmd is 'templates update' with

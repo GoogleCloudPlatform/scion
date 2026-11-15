@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -93,16 +94,18 @@ const humanDecisionsMadeBody = `{
 // humanDecisionsHub is a mock hub for the human-mode list: it records every
 // project and profile decisions query and answers with the configured body.
 type humanDecisionsHub struct {
-	mu             sync.Mutex
-	queries        []url.Values
-	profileQueries []url.Values
-	pending        string
-	made           string
-	profilePending string
-	profileMade    string
-	status         int
-	errBody        string
-	me             string
+	mu                      sync.Mutex
+	queries                 []url.Values
+	profileQueries          []url.Values
+	pending                 string
+	made                    string
+	profilePending          string
+	profilePendingByProject map[string]string
+	profileMade             string
+	hubProjects             []hubclient.Project
+	status                  int
+	errBody                 string
+	me                      string
 }
 
 func newHumanDecisionsHub(t *testing.T) *humanDecisionsHub {
@@ -145,7 +148,29 @@ func newHumanDecisionsHub(t *testing.T) *humanDecisionsHub {
 			_, _ = w.Write([]byte(h.profileMade))
 			return
 		}
+		if pid := r.URL.Query().Get("project"); pid != "" && h.profilePendingByProject[pid] != "" {
+			_, _ = w.Write([]byte(h.profilePendingByProject[pid]))
+			return
+		}
 		_, _ = w.Write([]byte(h.profilePending))
+	})
+	mux.HandleFunc("/api/v1/projects", func(w http.ResponseWriter, r *http.Request) {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		wantSlug := strings.ToLower(r.URL.Query().Get("slug"))
+		wantName := strings.ToLower(r.URL.Query().Get("name"))
+		var matched []hubclient.Project
+		for _, p := range h.hubProjects {
+			if wantSlug != "" && strings.ToLower(p.Slug) != wantSlug {
+				continue
+			}
+			if wantName != "" && strings.ToLower(p.Name) != wantName {
+				continue
+			}
+			matched = append(matched, p)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"projects": matched})
 	})
 	mux.HandleFunc("/api/v1/auth/me", func(w http.ResponseWriter, _ *http.Request) {
 		h.mu.Lock()
@@ -556,6 +581,11 @@ func TestDecisionsListHuman_AllProjectsProjectGateAndValidation(t *testing.T) {
 	listCmd, _, err := root.Find([]string{"decisions", "list"})
 	require.NoError(t, err)
 	assert.True(t, commandRequiresProject(listCmd), "without --all-projects, decisions list requires a project")
+	assert.False(t, isAllProjectsDecisionsListArgs(listCmd, []string{"decisions", "list", "--project", "scion"}))
+	assert.True(t, isAllProjectsDecisionsListArgs(listCmd, []string{"decisions", "list", "--all-projects", "--project", "scion"}))
+	assert.True(t, isAllProjectsDecisionsListArgs(listCmd, []string{"decisions", "list", "--all-projects=true", "--project=scion"}))
+	assert.False(t, isAllProjectsDecisionsListArgs(listCmd, []string{"decisions", "list", "--all-projects=false", "--project=scion"}))
+	assert.False(t, isAllProjectsDecisionsListArgs(listCmd, []string{"decisions", "list", "--", "--all-projects"}))
 	require.NoError(t, listCmd.Flags().Set("all-projects", "true"))
 	assert.False(t, commandRequiresProject(listCmd), "with --all-projects, decisions list runs outside any local project")
 
@@ -607,6 +637,42 @@ func TestDecisionsListHuman_AllProjectsProjectResolutionAndAmbiguity(t *testing.
 	assert.Contains(t, err.Error(), "matches 2 projects")
 	assert.Contains(t, err.Error(), "p-1")
 	assert.Contains(t, err.Error(), "p-2")
+
+	// Beyond-200 cap: truncatedProjects=true and target project is absent from
+	// facets.Projects, resolved via /api/v1/projects (including --conversation).
+	h.profilePending = `{"counts":{"waitingOnYou":0,"waitingOnOthers":0},"prompts":[],"agents":[],"answerers":[],
+	  "conversations":[],"projects":[{"id":"proj-1","name":"Scion","slug":"scion"}],"truncatedProjects":true}`
+	h.hubProjects = []hubclient.Project{
+		{ID: "proj-205", Name: "Archive App", Slug: "archive-app"},
+		{ID: "proj-206", Name: "Legacy", Slug: "legacy-1"},
+		{ID: "proj-207", Name: "Legacy", Slug: "legacy-2"},
+	}
+	h.profilePendingByProject = map[string]string{
+		"proj-205": `{"counts":{"waitingOnYou":1,"waitingOnOthers":0},"prompts":[
+		  {"project":{"id":"proj-205","name":"Archive App","slug":"archive-app"},"promptMessageId":"m205","promptAvailable":true,
+		   "chatKey":"bbbb0000-0000-4000-8000-000000000205","conversationLabel":"#ops","conversationAvailable":true,
+		   "askerAgentId":"` + humanDecisionsBot + `","askerAgentName":"ops-bot","createdAt":"2026-11-13T04:48:00Z",
+		   "answerMode":"single","waitingOnYou":true,"canAnswer":true,
+		   "decisions":[{"rowId":"r205","messageId":"m205","key":"prune","ref":"ops-bot/prune","version":1,"status":"pending",
+		     "askerAgentId":"` + humanDecisionsBot + `","askerAgentName":"ops-bot","question":"Prune cold snapshots?","choices":[]}]}
+		],"agents":[{"id":"` + humanDecisionsBot + `","name":"ops-bot"}],"answerers":[],
+		"conversations":[{"key":"bbbb0000-0000-4000-8000-000000000205","label":"#ops","projectId":"proj-205"}],
+		"projects":[{"id":"proj-205","name":"Archive App","slug":"archive-app"}],"truncatedProjects":true}`,
+	}
+	out205, err := runDecisionsTestCmd(t, "decisions", "list", "--all-projects", "--project", "Archive App", "--conversation", "#ops")
+	require.NoError(t, err)
+	assert.Equal(t, "proj-205", h.lastProfile().Get("project"))
+	assert.Equal(t, "bbbb0000-0000-4000-8000-000000000205", h.lastProfile().Get("conversation"))
+	assert.Contains(t, out205, "archive-app")
+	assert.Contains(t, out205, "prune")
+
+	// Ambiguous match via /api/v1/projects also exits with status 2.
+	_, err = runDecisionsTestCmd(t, "decisions", "list", "--all-projects", "--project", "Legacy")
+	require.Error(t, err)
+	assert.Equal(t, 2, exitCodeFor(err))
+	assert.Contains(t, err.Error(), "matches 2 projects")
+	assert.Contains(t, err.Error(), "proj-206")
+	assert.Contains(t, err.Error(), "proj-207")
 
 	// Experiment off (404) on the profile endpoint prints the design 5.4 message.
 	h.status = http.StatusNotFound
