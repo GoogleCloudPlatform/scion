@@ -89,13 +89,13 @@ func (d txOnlyDriver) Tx(context.Context) (dialect.Tx, error) {
 // newTxClient builds the *ent.Client every launch writer uses: ent builders
 // issued through it run on tx's connection and participate in tx, including
 // through UpdateOneID/DeleteOneID's internal nested-Tx call (see txOnlyDriver).
-// It registers entc.ClearLaunchResumePhaseHook, so the launch writers' phase
-// writes follow the same resume-memory rule as every other agent write
-// (ptone/scion#4669).
+// It registers entc.ClearLaunchResumePhaseHook and entc.ClearSuspendReasonHook,
+// so the launch writers' phase writes follow the same resume-memory and
+// suspend-reason rules as every other agent write (ptone/scion#4669).
 func newTxClient(dialectName string, tx *sql.Tx) *ent.Client {
 	drv := entsql.NewDriver(dialectName, entsql.Conn{ExecQuerier: tx})
 	client := ent.NewClient(ent.Driver(txOnlyDriver{drv}))
-	client.Use(entc.ClearLaunchResumePhaseHook)
+	client.Use(entc.ClearLaunchResumePhaseHook, entc.ClearSuspendReasonHook)
 	return client
 }
 

@@ -693,6 +693,7 @@ func hubAgentToAgentInfo(a hubclient.Agent) api.AgentInfo {
 		ProvisionedOnly:   a.ProvisionedOnly,
 		ExitCode:          a.ExitCode,
 		ExitReason:        a.ExitReason,
+		SuspendReason:     a.SuspendReason,
 		Authority:         a.Authority,
 		Launch:            a.Launch,
 
@@ -753,6 +754,17 @@ func exitReasonPhaseLabel(phase, exitReason string) string {
 		return phase + " (" + state.ExitReason(exitReason).Label() + ")"
 	case phase == string(state.PhaseError) && exitReason != "":
 		return phase + " (" + state.ExitReason(exitReason).Label() + ")"
+	}
+	return phase
+}
+
+// suspendedPhaseLabel shows why a suspended agent was suspended next to its
+// phase, e.g. "suspended (idle)", when a known reason is recorded; any other
+// phase, or no or an unknown reason, is returned unchanged.
+func suspendedPhaseLabel(phase, reason string) string {
+	r := state.SuspendReason(reason)
+	if phase == string(state.PhaseSuspended) && r != "" && r.IsValid() {
+		return phase + " (" + reason + ")"
 	}
 	return phase
 }
@@ -916,6 +928,7 @@ func displayAgents(agents []api.AgentInfo, all bool) error {
 			phase = a.Activity
 		}
 		phase = exitReasonPhaseLabel(phase, a.ExitReason)
+		phase = suspendedPhaseLabel(phase, a.SuspendReason)
 		phase = provisionedPhaseLabel(phase, a.ProvisionedOnly)
 		phase = authorityPhaseLabel(phase, a.Authority)
 		containerStatus := a.ContainerStatus

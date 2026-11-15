@@ -42,6 +42,20 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	{file: "agent_dm_operation.go", function: "ExecuteAgentDM", symbol: "dispatchWithBrokerRetry",
 		class: "guarded", reason: "authorizeAgentMessage called inside ExecuteAgentDM before persistence/dispatch/observer (#1688)"},
 
+	// agent_dm_operation.go: agentDMAutoWakeItem — the dispatch of a mention
+	// queued behind a background auto-wake (ptone/scion#7826). It is built
+	// only inside ExecuteAgentDM, after authorizeAgentMessage admitted the
+	// send and the row was persisted.
+	{file: "agent_dm_operation.go", function: "agentDMAutoWakeItem", symbol: "dispatchWithBrokerRetry",
+		class: "guarded", reason: "built only inside ExecuteAgentDM after authorizeAgentMessage admitted the send (ptone/scion#7826)"},
+
+	// auto_wake.go: chatSecondaryAutoWakeItem — the dispatch of a web chat
+	// secondary's copy queued behind a background auto-wake. It is built
+	// only in sendAgentRouted's secondary loop, after that secondary's
+	// authorizeAgentMessage.
+	{file: "auto_wake.go", function: "chatSecondaryAutoWakeItem", symbol: "dispatchWithBrokerRetry",
+		class: "guarded", reason: "built only in sendAgentRouted after the secondary's authorizeAgentMessage (ptone/scion#7826)"},
+
 	// handlers_agent_messaging.go: handleGroupMessage — guarded at :1286.
 	{file: "handlers_agent_messaging.go", function: "handleGroupMessage", symbol: "dispatchWithBrokerRetry",
 		class: "guarded", reason: "authorizeAgentMessage at handlers_agent_messaging.go:1286"},

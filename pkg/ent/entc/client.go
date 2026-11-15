@@ -294,6 +294,39 @@ func ClearLaunchResumePhaseHook(next ent.Mutator) ent.Mutator {
 	})
 }
 
+// ClearSuspendReasonHook is an Ent mutation hook that ends an agent's
+// suspend_reason (state.SuspendReason) at one choke point: an Agent update
+// (UpdateOne or bulk Update) that sets phase to a value other than
+// suspended or starting, and does not itself set suspend_reason, clears
+// it. A resume, stop, delete or failed start therefore clears the reason
+// whichever writer makes it. starting (a resume dispatch) keeps it, so the
+// rollback of a failed resume, which restores suspended, keeps the reason
+// too. An explicit suspend_reason in the same mutation wins.
+//
+// Registered with ClearLaunchResumePhaseHook wherever that hook is (see
+// its comment), so the same constructors carry both.
+func ClearSuspendReasonHook(next ent.Mutator) ent.Mutator {
+	return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+		am, ok := m.(*ent.AgentMutation)
+		if !ok || (!am.Op().Is(ent.OpUpdate) && !am.Op().Is(ent.OpUpdateOne)) {
+			return next.Mutate(ctx, m)
+		}
+		phase, set := am.Phase()
+		if !set {
+			return next.Mutate(ctx, m)
+		}
+		if _, explicit := am.SuspendReason(); explicit || am.SuspendReasonCleared() {
+			return next.Mutate(ctx, m)
+		}
+		switch state.Phase(phase) {
+		case state.PhaseSuspended, state.PhaseStarting:
+		default:
+			am.ClearSuspendReason()
+		}
+		return next.Mutate(ctx, m)
+	})
+}
+
 // OpenSQLite creates an Ent client backed by SQLite.
 // The dsn should be a SQLite connection string (e.g. "file:ent?mode=memory&cache=shared").
 // Foreign keys and WAL journal mode are enabled automatically. Foreign keys
@@ -328,7 +361,7 @@ func OpenSQLite(dsn string, pool PoolConfig, opts ...ent.Option) (*ent.Client, e
 	pool.apply(db)
 	drv := entsql.OpenDB(dialect.SQLite, db)
 	client := ent.NewClient(append(opts, ent.Driver(diagDriver(drv, mon)))...)
-	client.Use(UTCTimeHook, ClearLaunchResumePhaseHook)
+	client.Use(UTCTimeHook, ClearLaunchResumePhaseHook, ClearSuspendReasonHook)
 	return client, nil
 }
 
@@ -433,7 +466,7 @@ func OpenSQLiteReadOnly(dsn string, opts ...ent.Option) (*ent.Client, error) {
 	}
 	drv := entsql.OpenDB(dialect.SQLite, db)
 	client := ent.NewClient(append(opts, ent.Driver(drv))...)
-	client.Use(UTCTimeHook, ClearLaunchResumePhaseHook)
+	client.Use(UTCTimeHook, ClearLaunchResumePhaseHook, ClearSuspendReasonHook)
 	return client, nil
 }
 
@@ -613,7 +646,7 @@ func openPostgres(dsn string, pool PoolConfig, readOnly bool, opts ...ent.Option
 	pool.apply(db)
 	drv := entsql.OpenDB(dialect.Postgres, db)
 	client := ent.NewClient(append(opts, ent.Driver(diagDriver(drv, mon)))...)
-	client.Use(UTCTimeHook, ClearLaunchResumePhaseHook)
+	client.Use(UTCTimeHook, ClearLaunchResumePhaseHook, ClearSuspendReasonHook)
 	return client, nil
 }
 

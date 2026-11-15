@@ -2196,6 +2196,11 @@ type Server struct {
 	// hands stalled agents to (auto_suspend_worker.go).
 	autoSuspend autoSuspendWorker
 
+	// autoWakeWork admits and joins background auto-wakes, and autoWakes
+	// holds the one in flight per agent (auto_wake.go, ptone/scion#7826).
+	autoWakeWork brokerWorkTracker
+	autoWakes    autoWakeRuns
+
 	// hubInstanceRegistryStop stops this process's hub-instance registry
 	// loop and records its clean stop; set by startHubInstanceRegistry,
 	// taken (and cleared) by stopHubInstanceRegistry. Guarded by mu.
@@ -5348,6 +5353,7 @@ func (s *Server) StartNotificationDispatcher() {
 	nd := NewNotificationDispatcher(s.store, s.events, s.GetDispatcher, logging.Subsystem("hub.notifications"))
 	nd.messageLog = s.dedicatedMessageLog
 	nd.channelRegistryFn = s.currentChannelRegistry
+	nd.autoWakeFn = s.autoWakeNotificationSubscriber
 	nd.writeDenyEnabled = func() bool {
 		ops := s.GetOperationalSettings()
 		return ops != nil && ops.ConversationEnvelopeSwitch()
@@ -5855,6 +5861,7 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 		Phase:           string(state.PhaseSuspended),
 		ContainerStatus: "stopped",
 		Activity:        "",
+		SuspendReason:   string(state.SuspendReasonStalled),
 	}
 	// Only while the row still holds the run the stop was dispatched
 	// for (ptone/scion#2550).
@@ -5896,6 +5903,7 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 	agent.Phase = string(state.PhaseSuspended)
 	agent.ContainerStatus = "stopped"
 	agent.Activity = ""
+	agent.SuspendReason = string(state.SuspendReasonStalled)
 	// A suspended agent has no running container: release its
 	// max_agents_per_broker reservation (ptone/scion#1963) and its
 	// max_agents_per_project one (ptone/scion#6033), mirroring
@@ -6114,8 +6122,20 @@ func (s *Server) messageEventHandler() EventHandler {
 		// The wake permission is decided under the event's authorization
 		// revision; a denial is a refusal like any other and starts
 		// nothing.
-		if payload.Wake {
-			if wakeErr := s.authorizeScheduledWake(ctx, auth, identity, agent); wakeErr != nil {
+		//
+		// A target the hub suspended (shouldAutoWake, ptone/scion#7826) is
+		// woken without the payload's wake and without the wake
+		// permission: the send authorization above suffices. A held
+		// target was refused by the standing check.
+		// A target whose hub wake is already in flight (starting) is
+		// waited for the same way (autoWakeModeOf, wakeScheduledTarget).
+		autoWake := s.autoWakeModeOf(agent) != autoWakeNone
+		wake := payload.Wake || autoWake
+		if wake {
+			if autoWake {
+				slog.Info("Scheduler: waking a hub-suspended target for a scheduled message",
+					"eventID", evt.ID, "agent_id", agent.ID, "suspend_reason", agent.SuspendReason)
+			} else if wakeErr := s.authorizeScheduledWake(ctx, auth, identity, agent); wakeErr != nil {
 				slog.Warn("Scheduler: scheduled message wake refused at fire time",
 					"eventID", evt.ID,
 					"agent_id", agent.ID,
@@ -6185,7 +6205,7 @@ func (s *Server) messageEventHandler() EventHandler {
 		// (wakeScheduledTarget runs on its own budget); its dispatch gets
 		// a fresh bound, keeping the handler's values.
 		dispatchBase := ctx
-		if payload.Wake {
+		if wake {
 			detached, cancelDetached := detachKeepFireAbort(ctx)
 			defer cancelDetached()
 			dispatchBase = detached
@@ -6194,7 +6214,7 @@ func (s *Server) messageEventHandler() EventHandler {
 		defer retryCancel()
 
 		if err := dispatchWithBrokerRetry(retryCtx, s.recordLog(), dispatcher, agent, payload.Message, payload.Interrupt, structuredMsg); err != nil {
-			if payload.Wake && scheduledFireAborted(ctx) {
+			if wake && scheduledFireAborted(ctx) {
 				return errScheduledWakeShutdown
 			}
 			if isBrokerAgentNotFound(err) {
@@ -6203,7 +6223,7 @@ func (s *Server) messageEventHandler() EventHandler {
 					"scheduleID", evt.ScheduleID,
 					"agent_id", agent.ID,
 					"agentName", agent.Name,
-					"wake", payload.Wake,
+					"wake", wake,
 					"error", err,
 				}
 				var se *brokerStatusError
@@ -6215,7 +6235,7 @@ func (s *Server) messageEventHandler() EventHandler {
 					)
 				}
 				slog.Warn("Scheduler: broker reported agent not found on message dispatch", logArgs...)
-				if !payload.Wake {
+				if !wake {
 					if fresh, gerr := s.store.GetAgent(retryCtx, agent.ID); gerr == nil && fresh != nil {
 						if phaseErr := validateAgentDeliverable(fresh); phaseErr != nil {
 							return errors.New(phaseErr.Message)
@@ -7836,6 +7856,10 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		// Likewise for an auto-suspend in flight; the cancelled ctx above
 		// already stops new ones from starting.
 		s.stopAutoSuspendWorker(ctx)
+
+		// Background auto-wakes (auto_wake.go) resume agents and deliver
+		// through the broker connections and the store: stop them first.
+		s.stopAutoWakes(ctx)
 
 		// Stop broker connection work (connect, disconnect, reconcile and
 		// notification drains) before the control channel closes: new

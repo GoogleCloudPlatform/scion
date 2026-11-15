@@ -1882,10 +1882,19 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	// validation, so a denied or invalid send can neither be offered a
 	// wake nor resume an agent. The wake itself runs later, right before
 	// persistence (see wakePrimary below).
+	//
+	// A primary the hub suspended (shouldAutoWake, ptone/scion#7826) is
+	// woken without a wake request and without the lifecycle permission:
+	// the send authorization suffices. A held primary is never woken; it
+	// keeps the unreachable handling above.
 	wakePrimary := false
+	autoWakePrimary := !primaryReincarnating && primaryAgent.DeletedAt.IsZero() &&
+		s.shouldAutoWake(primaryAgent) && !s.agentHeldOrUnknown(ctx, primaryAgent.ID)
 	if !primaryReincarnating && state.Phase(primaryAgent.Phase) == state.PhaseSuspended &&
-		primaryAgent.DeletedAt.IsZero() && (opts.Wake || opts.OfferWake) {
+		primaryAgent.DeletedAt.IsZero() && (opts.Wake || opts.OfferWake || autoWakePrimary) {
 		switch {
+		case autoWakePrimary:
+			wakePrimary = true
 		case opts.Wake && !s.agentLifecycleAllowed(ctx, user, primaryAgent):
 			serr := newChatSendError(http.StatusForbidden, ErrCodeForbidden,
 				"You do not have permission to wake this agent", map[string]interface{}{
@@ -2019,7 +2028,21 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		wakeCtx, cancelWake := context.WithTimeout(ctx, chatWakeResumeBudget)
 		// wakeAgentForDM reports managed runtimes, a missing broker, the
 		// start gate and readiness failures as typed errors.
-		wakeRes, wakeErr := s.wakeAgentForDM(wakeCtx, primaryAgent)
+		var wakeRes *WakeResult
+		var wakeErr *AgentDMError
+		if autoWakePrimary {
+			// A hub-suspended primary whose wake another start already
+			// holds is waited for and delivered to (wakeOrAwaitStart);
+			// a wait that ends without a ready agent answers as a
+			// deferred wake does below.
+			var awaitErr error
+			wakeErr, awaitErr = s.wakeOrAwaitStart(wakeCtx, primaryAgent)
+			if wakeErr == nil && awaitErr != nil {
+				wakeRes = &WakeResult{Outcome: WakeDeferred}
+			}
+		} else {
+			wakeRes, wakeErr = s.wakeAgentForDM(wakeCtx, primaryAgent)
+		}
 		cancelWake()
 		if wakeErr != nil {
 			serr := chatSendFromAgentDMError(wakeErr)
@@ -2443,6 +2466,21 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 						break
 					}
 				}
+				continue
+			}
+			// A secondary the hub suspended (shouldAutoWake,
+			// ptone/scion#7826) is woken in the background and gets its
+			// stored copy once ready; the send does not wait for it. A wake
+			// that fails marks the copy failed. A hub that is shutting down
+			// cannot start the wake, and the copy takes the dispatch below.
+			// It is registered as a group participant now, as the agent
+			// mention fan-out does for a queued wake, so a woken agent in
+			// lineage or branch mode can reply into the group. On purpose
+			// before delivery: a participant is a listing index, not an
+			// ACL, so one whose wake then fails stays listed harmlessly.
+			if mentionPersisted && dispatcher != nil && s.shouldAutoWake(mentionAgent) &&
+				s.queueAutoWake(mentionAgent, s.chatSecondaryAutoWakeItem(mentionStoreMsg.ID, mentionAddressee, agentContent, mentionMsg)) {
+				dispatchedAgents = append(dispatchedAgents, mentionAgent)
 				continue
 			}
 			if dispatcher != nil {

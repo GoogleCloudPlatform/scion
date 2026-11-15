@@ -503,6 +503,31 @@ func TestDisplayAgents_HubHaltedShowsReason(t *testing.T) {
 	assert.Contains(t, lines[1], "halted (preempted)")
 }
 
+func TestSuspendedPhaseLabel(t *testing.T) {
+	assert.Equal(t, "suspended (idle)", suspendedPhaseLabel("suspended", "idle"))
+	assert.Equal(t, "suspended (stalled)", suspendedPhaseLabel("suspended", "stalled"))
+	assert.Equal(t, "suspended (user)", suspendedPhaseLabel("suspended", "user"))
+	assert.Equal(t, "suspended", suspendedPhaseLabel("suspended", ""), "no reason recorded")
+	assert.Equal(t, "suspended", suspendedPhaseLabel("suspended", "evil\x1b[2J"), "only known reasons are shown")
+	assert.Equal(t, "running", suspendedPhaseLabel("running", "idle"), "only suspended shows its reason")
+}
+
+func TestDisplayAgents_HubSuspendedShowsReason(t *testing.T) {
+	prev := outputFormat
+	outputFormat = ""
+	t.Cleanup(func() { outputFormat = prev })
+
+	info := hubAgentToAgentInfo(hubclient.Agent{Slug: "idle-agent", Phase: "suspended", SuspendReason: "idle"})
+	assert.Equal(t, "idle", info.SuspendReason)
+
+	var err error
+	out := captureStdout(t, func() { err = displayAgents([]api.AgentInfo{info}, false) })
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	require.Len(t, lines, 2, out)
+	assert.Contains(t, lines[1], "suspended (idle)")
+}
+
 func TestHaltedPhaseDecisions(t *testing.T) {
 	assert.True(t, hubStartImpliesResume("halted"))
 	assert.True(t, hubCreateReusesExistingAgent("halted", true, false))

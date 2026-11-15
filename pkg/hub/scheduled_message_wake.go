@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sync"
 	"time"
 
@@ -113,35 +114,66 @@ func (s *Server) wakeScheduledTarget(ctx context.Context, evt store.ScheduledEve
 	wakeCtx, cancel := context.WithTimeout(detached, scheduledWakeBudget)
 	defer cancel()
 
-	// A target already starting is not resumed (the shared wake path
-	// refuses a starting agent): another start is bringing it up, so wait
-	// for that start like a deferred wake. Delivering once it is ready is
-	// a delivery to a running agent, which the message authorization
-	// already covers; nothing is started here.
 	if state.Phase(agent.Phase) == state.PhaseStarting {
 		slog.Info("Scheduler: scheduled message target is already starting; waiting for it to become ready",
 			"eventID", evt.ID, "agent_id", agent.ID)
-		return s.awaitStartInProgress(wakeCtx, evt, agent)
 	}
-
-	result, dmErr := s.wakeAgentForDM(wakeCtx, agent)
+	dmErr, awaitErr := s.wakeOrAwaitStart(wakeCtx, agent)
 	if dmErr != nil {
 		slog.Warn("Scheduler: scheduled message wake failed",
 			"eventID", evt.ID, "scheduleID", evt.ScheduleID, "agent_id", agent.ID,
 			"code", dmErr.Code, "error", dmErr.Message)
 		return fmt.Errorf("failed to wake agent %s: %s: %s", agent.Slug, dmErr.Code, dmErr.Message)
 	}
-	if result == nil || result.Outcome != WakeDeferred {
-		return nil
+	if awaitErr != nil {
+		slog.Warn("Scheduler: scheduled message target did not become ready after a start in progress",
+			"eventID", evt.ID, "agent_id", agent.ID, "error", awaitErr)
+		if errors.Is(awaitErr, errStartInProgressNotReady) {
+			return errScheduledWakeNotReady
+		}
+		return awaitErr
 	}
+	return nil
+}
 
-	// Another start (or a stop) holds the target's start claim. A
-	// scheduled message has no stored row to keep and no sender to retry,
-	// so wait for that start to bring the target up, then deliver; a target
-	// that does not become ready fails the fire.
-	slog.Info("Scheduler: scheduled message wake deferred; waiting for the start in progress",
-		"eventID", evt.ID, "agent_id", agent.ID, "holder", string(agent.StartClaimKind))
-	return s.awaitStartInProgress(wakeCtx, evt, agent)
+// errStartInProgressNotReady is awaitStartInProgress's answer when a start
+// of the target that someone else began did not bring it up in time.
+var errStartInProgressNotReady = errors.New("target agent was already starting and did not become ready")
+
+// wakeOrAwaitStart is wakeAgentForDM for a caller that must deliver after
+// the wake rather than keep its item deferred: a target another start is
+// already bringing up (phase starting, which wakeAgentForDM refuses, or a
+// held start claim, WakeDeferred) is waited for with awaitStartInProgress
+// instead. On success agent describes the ready run, as after
+// wakeAgentForDM. dmErr is wakeAgentForDM's refusal or failure; awaitErr is
+// awaitStartInProgress's (errStartInProgressNotReady, or a failed re-read).
+// Nothing is started by the wait; the caller's delivery authorization
+// covers delivering to the run another start brought up.
+func (s *Server) wakeOrAwaitStart(ctx context.Context, agent *store.Agent) (dmErr *AgentDMError, awaitErr error) {
+	if state.Phase(agent.Phase) == state.PhaseStarting {
+		return nil, s.awaitStartInProgress(ctx, agent)
+	}
+	result, dmErr := s.wakeAgentForDM(ctx, agent)
+	if dmErr != nil {
+		return dmErr, nil
+	}
+	if result == nil || result.Outcome != WakeDeferred {
+		return nil, nil
+	}
+	s.messageLog.Info("wake: another start of the target is in progress; waiting for it",
+		"agent_id", agent.ID, "holder", string(agent.StartClaimKind))
+	return nil, s.awaitStartInProgress(ctx, agent)
+}
+
+// startInProgressDMError is the direct-message answer to a wait on a start
+// already in progress that ended without a ready target (awaitErr from
+// wakeOrAwaitStart).
+func startInProgressDMError(agent *store.Agent, awaitErr error) *AgentDMError {
+	return &AgentDMError{
+		Code:       ErrCodeUnavailable,
+		Message:    fmt.Sprintf("agent %q was already starting and did not become ready: %v", agent.Slug, awaitErr),
+		HTTPStatus: http.StatusServiceUnavailable,
+	}
 }
 
 // awaitStartInProgress waits, within ctx and wakeReadyTimeout for each
@@ -149,28 +181,25 @@ func (s *Server) wakeScheduledTarget(ctx context.Context, evt store.ScheduledEve
 // first for that start to leave the suspended phase, then for readiness. On
 // success agent is refreshed to the row the start brought up, so the
 // dispatch goes to the new run. A target that does not become ready returns
-// errScheduledWakeNotReady.
-func (s *Server) awaitStartInProgress(ctx context.Context, evt store.ScheduledEvent, agent *store.Agent) error {
+// errStartInProgressNotReady; one that cannot be re-read afterwards returns
+// the read error, so nothing is dispatched on the row read before that
+// start (its broker or phase may be stale).
+func (s *Server) awaitStartInProgress(ctx context.Context, agent *store.Agent) error {
 	err := s.waitForStartToBegin(ctx, agent.ID, wakeReadyTimeout)
 	var activity state.Activity
 	if err == nil {
 		activity, err = s.waitForAgentReady(ctx, agent.ID, wakeReadyTimeout)
 	}
 	if err != nil {
-		slog.Warn("Scheduler: scheduled message target did not become ready after a start in progress",
-			"eventID", evt.ID, "agent_id", agent.ID, "error", err)
-		return errScheduledWakeNotReady
+		s.messageLog.Warn("wake: the start in progress did not bring the target up",
+			"agent_id", agent.ID, "error", err)
+		return errStartInProgressNotReady
 	}
-	// Deliver to the run the other start brought up: a target that cannot
-	// be re-read fails the fire rather than dispatching on the row read
-	// before that start (its broker or phase may be stale).
 	fresh, gerr := s.store.GetAgent(ctx, agent.ID)
 	if gerr == nil && fresh == nil {
 		gerr = store.ErrNotFound
 	}
 	if gerr != nil {
-		slog.Warn("Scheduler: scheduled message target could not be re-read after a start in progress",
-			"eventID", evt.ID, "agent_id", agent.ID, "error", gerr)
 		return fmt.Errorf("failed to refresh agent %s after the start in progress: %w", agent.Slug, gerr)
 	}
 	*agent = *fresh

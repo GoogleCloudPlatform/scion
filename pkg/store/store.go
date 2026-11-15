@@ -1609,6 +1609,12 @@ type AgentStatusUpdate struct {
 	// Phase "halted" has its phase dropped, and the halt rule does not
 	// apply to it. Internal to the hub — json:"-".
 	Restore bool `json:"-"`
+	// SuspendReason, when non-empty and the update writes phase suspended,
+	// records why (state.SuspendReason). An empty value writes nothing, so
+	// a report that merely repeats the suspended phase keeps the stored
+	// reason. Leaving suspended clears it (entc.ClearSuspendReasonHook).
+	// Internal to the hub — json:"-".
+	SuspendReason string `json:"-"`
 	// Result, when non-nil, is filled by a successful UpdateAgentStatus
 	// with what the write did (see AgentStatusResult). The caller owns it;
 	// it is left as it was on error. Internal to the hub — json:"-".
@@ -3180,6 +3186,14 @@ type NotificationStore interface {
 	// stays suspended or has no runtime broker does not stay pending
 	// forever. Returns how many rows it expired.
 	ExpireStaleAgentNotifications(ctx context.Context, cutoff time.Time) (int, error)
+
+	// ListParkedNotificationSubscribers returns the agents that have a
+	// parked notification (agent-targeted, dispatched=false) while they are
+	// suspended with a suspend_reason in reasons and have no active hold,
+	// at most 100, in no particular order, as read in one query. The hub's
+	// auto-wake (ptone/scion#7826) wakes them so the notifications can be
+	// delivered; the wake re-reads each agent before acting.
+	ListParkedNotificationSubscribers(ctx context.Context, reasons []string) ([]Agent, error)
 
 	// GetUndispatchedAgentNotifications returns agent-targeted notifications
 	// with dispatched=false.

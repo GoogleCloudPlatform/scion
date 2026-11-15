@@ -451,6 +451,14 @@ const ImageTagSetting = "hub.image_tag_setting"
 // reset request, so they need no flag.
 const ReincarnateHarnessSwitch = "hub.reincarnate_harness_switch"
 
+// IdleSuspend gates the hub's idle lifecycle policy (ptone/scion#7826):
+// auto-wake of an agent the hub suspended (suspend_reason idle or stalled)
+// when a message, mention, notification or scheduled message arrives for
+// it, and the idle auto-suspend sweep. It is checked in hub server code.
+// While it is off, suspend_reason is still recorded and shown, and nothing
+// is woken without an explicit wake.
+const IdleSuspend = "lifecycle.idle_suspend"
+
 // ImageTagVersionDefault gates the version default of image_tag
 // (ptone/scion#6625): while it is on and image_tag is unset, a release
 // build of the hub (vX.Y.Z, vX.Y.Z-preview.N or vX.Y.Z-rc.N) applies its
@@ -972,6 +980,17 @@ var compiled = []Experiment{
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#7930",
 		Owner:       "cloudrun-runtime",
+		ReviewBy:    "2027-03-31",
+	},
+	{
+		Name:        IdleSuspend,
+		Title:       "Idle suspend and auto-wake",
+		Description: "An agent the hub suspended (because it was idle or stalled) is resumed automatically when a direct message, mention, notification or scheduled message arrives for it, with no --wake needed; the sender only needs permission to message it. Agents a user suspended are never woken this way, and held agents never are. While it is off, nothing is woken without an explicit wake.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#7826",
+		Owner:       "lifecycle",
 		ReviewBy:    "2027-03-31",
 	},
 }

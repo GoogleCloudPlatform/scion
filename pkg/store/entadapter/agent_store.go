@@ -113,6 +113,7 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		ExitReason:          a.ExitReason,
 		RuntimeState:        a.RuntimeState,
 		StalledFromActivity: a.StalledFromActivity,
+		SuspendReason:       derefString(a.SuspendReason),
 		CurrentTurns:        a.CurrentTurns,
 		CurrentModelCalls:   a.CurrentModelCalls,
 		Image:               a.Image,
@@ -354,6 +355,7 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) (err error
 		SetContainerStatus(a.ContainerStatus).
 		SetRuntimeState(a.RuntimeState).
 		SetStalledFromActivity(a.StalledFromActivity).
+		SetNillableSuspendReason(nillableString(a.SuspendReason)).
 		SetCurrentTurns(a.CurrentTurns).
 		SetCurrentModelCalls(a.CurrentModelCalls).
 		SetImage(a.Image).
@@ -1836,6 +1838,9 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 
 	if su.Phase != "" {
 		upd.SetPhase(su.Phase)
+		if su.Phase == string(state.PhaseSuspended) && su.SuspendReason != "" {
+			upd.SetSuspendReason(su.SuspendReason)
+		}
 	}
 
 	activityProvided := su.Activity != ""

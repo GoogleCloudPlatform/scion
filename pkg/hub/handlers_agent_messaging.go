@@ -2301,7 +2301,11 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// request resumes nothing and stores nothing. A migrating recipient is
 	// never resumed (see the migration gate below), so the rule does not
 	// apply to it.
-	if req.Wake && !reincarnationInFlight(agent) {
+	//
+	// An agent the hub suspended (shouldAutoWake, ptone/scion#7826) is woken
+	// without --wake and without that permission: the delivery
+	// authorization suffices.
+	if req.Wake && !reincarnationInFlight(agent) && s.autoWakeModeOf(agent) == autoWakeNone {
 		if denial := s.wakeResumeDenial(ctx, GetIdentityFromContext(ctx), agent); denial != nil {
 			WriteAgentDMError(w, denial)
 			return
@@ -2486,7 +2490,28 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		}
 	}
 
-	if req.Wake && !senderIsAgent && !delegatedSender && !deferDelivery {
+	// A user's message to an agent the hub suspended wakes it as --wake
+	// does (auto_wake.go); an agent sender's is woken by ExecuteAgentDM.
+	// A target the hub suspended is resumed, and one whose hub wake is
+	// already in flight (starting) is waited for (autoWakeModeOf).
+	autoWakeUser := s.autoWakeModeOf(agent) != autoWakeNone
+	userWake := req.Wake || autoWakeUser
+	if autoWakeUser && !senderIsAgent && !delegatedSender && !deferDelivery {
+		// The hub's own wakes are routine and the sender cannot know about
+		// them: a start already in progress is waited for and delivered
+		// to, instead of keeping the message deferred (wakeOrAwaitStart).
+		// The wait fits in the same write budget as a resume.
+		s.extendWriteDeadlineForDMWake(ctx, w)
+		dmErr, awaitErr := s.wakeOrAwaitStart(ctx, agent)
+		if dmErr != nil {
+			WriteAgentDMError(w, dmErr)
+			return
+		}
+		if awaitErr != nil {
+			WriteAgentDMError(w, startInProgressDMError(agent, awaitErr))
+			return
+		}
+	} else if userWake && !senderIsAgent && !delegatedSender && !deferDelivery {
 		// The response waits on the resume and the readiness wait: extend
 		// this request's write deadline to cover them (ptone/scion#4178).
 		s.extendWriteDeadlineForDMWake(ctx, w)
@@ -2505,7 +2530,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 
 	// Reject messages to non-running agents when --wake is not set.
 	// For agent-to-agent DMs, phase validation is handled by ExecuteAgentDM.
-	if !req.Wake && !senderIsAgent && !delegatedSender && !deferDelivery {
+	if !userWake && !senderIsAgent && !delegatedSender && !deferDelivery {
 		rest := store.EffectiveRestingPhase(agent)
 		switch state.Phase(rest) {
 		case state.PhaseRunning:

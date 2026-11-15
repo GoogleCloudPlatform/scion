@@ -634,6 +634,7 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 		Phase:           newPhase,
 		ContainerStatus: "stopped",
 		Activity:        "",
+		SuspendReason:   string(state.SuspendReasonUser),
 	})
 	if err != nil {
 		// The container is stopped but the write failed. Revoke the
@@ -659,6 +660,7 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	agent.Phase = newPhase
 	agent.ContainerStatus = "stopped"
 	agent.Activity = ""
+	agent.SuspendReason = string(state.SuspendReasonUser)
 	// A suspended agent has no running container: release its
 	// max_agents_per_broker reservation so it stops consuming broker
 	// capacity until it is resumed (ptone/scion#1963), and its

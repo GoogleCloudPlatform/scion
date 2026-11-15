@@ -206,6 +206,10 @@ var reflectFillStoreAgentSkipFields = map[string]bool{
 	// it from the row's own phase and activity and ignores the caller's
 	// value, so a reflection-filled value cannot round-trip.
 	"ActivitySince": true,
+	// suspend_reason is written only by UpdateAgentStatus with the suspended
+	// phase (ptone/scion#7826); UpdateAgent never writes it, and any other
+	// phase write clears it, so it cannot round-trip here.
+	"SuspendReason": true,
 	// workspace_placement is written only through SetAgentWorkspacePlacement
 	// (ptone/scion#2727): CreateAgent and UpdateAgent never write it, so it
 	// cannot round-trip here. It is not an authz input.

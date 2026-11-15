@@ -75,6 +75,14 @@ type Agent struct {
 	// and not part of the API response.
 	ActivitySince *time.Time `json:"-"`
 
+	// SuspendReason is why the agent is suspended (state.SuspendReason:
+	// user, idle, stalled); empty when it is not suspended, or was
+	// suspended without a recorded reason. Written only by
+	// UpdateAgentStatus (AgentStatusUpdate.SuspendReason) with the
+	// suspended phase; UpdateAgent never writes it, and any write of a phase
+	// other than suspended or starting clears it.
+	SuspendReason string `json:"suspendReason,omitempty"`
+
 	// Runtime configuration
 	Image           string        `json:"image,omitempty"`
 	Detached        bool          `json:"detached"`

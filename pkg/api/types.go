@@ -736,6 +736,7 @@ type AgentInfo struct {
 	Activity        string       `json:"activity,omitempty"`        // Runtime activity (working, thinking, executing, waiting_for_input, completed)
 	ExitCode        *int         `json:"exitCode,omitempty"`        // Structured exit code from runtime (nil = unknown)
 	ExitReason      string       `json:"exitReason,omitempty"`      // Terminal reason (see state.ExitReason), e.g. "crashed", "preempted", "oom_killed"; "signaled" is agent-reported
+	SuspendReason   string       `json:"suspendReason,omitempty"`   // Why a suspended agent was suspended (see state.SuspendReason): user, idle or stalled
 	Detail          *AgentDetail `json:"detail,omitempty"`          // Freeform context about the current activity
 	// StalledFromActivity is the activity the agent had when the Hub marked
 	// it stalled; empty when it is not stalled (Hub agents only).

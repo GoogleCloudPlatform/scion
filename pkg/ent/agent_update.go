@@ -371,6 +371,26 @@ func (_u *AgentUpdate) ClearStalledFromActivity() *AgentUpdate {
 	return _u
 }
 
+// SetSuspendReason sets the "suspend_reason" field.
+func (_u *AgentUpdate) SetSuspendReason(v string) *AgentUpdate {
+	_u.mutation.SetSuspendReason(v)
+	return _u
+}
+
+// SetNillableSuspendReason sets the "suspend_reason" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableSuspendReason(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetSuspendReason(*v)
+	}
+	return _u
+}
+
+// ClearSuspendReason clears the value of the "suspend_reason" field.
+func (_u *AgentUpdate) ClearSuspendReason() *AgentUpdate {
+	_u.mutation.ClearSuspendReason()
+	return _u
+}
+
 // SetCurrentTurns sets the "current_turns" field.
 func (_u *AgentUpdate) SetCurrentTurns(v int) *AgentUpdate {
 	_u.mutation.ResetCurrentTurns()
@@ -2156,6 +2176,12 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if _u.mutation.StalledFromActivityCleared() {
 		_spec.ClearField(agent.FieldStalledFromActivity, field.TypeString)
 	}
+	if value, ok := _u.mutation.SuspendReason(); ok {
+		_spec.SetField(agent.FieldSuspendReason, field.TypeString, value)
+	}
+	if _u.mutation.SuspendReasonCleared() {
+		_spec.ClearField(agent.FieldSuspendReason, field.TypeString)
+	}
 	if value, ok := _u.mutation.CurrentTurns(); ok {
 		_spec.SetField(agent.FieldCurrentTurns, field.TypeInt, value)
 	}
@@ -3159,6 +3185,26 @@ func (_u *AgentUpdateOne) SetNillableStalledFromActivity(v *string) *AgentUpdate
 // ClearStalledFromActivity clears the value of the "stalled_from_activity" field.
 func (_u *AgentUpdateOne) ClearStalledFromActivity() *AgentUpdateOne {
 	_u.mutation.ClearStalledFromActivity()
+	return _u
+}
+
+// SetSuspendReason sets the "suspend_reason" field.
+func (_u *AgentUpdateOne) SetSuspendReason(v string) *AgentUpdateOne {
+	_u.mutation.SetSuspendReason(v)
+	return _u
+}
+
+// SetNillableSuspendReason sets the "suspend_reason" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableSuspendReason(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetSuspendReason(*v)
+	}
+	return _u
+}
+
+// ClearSuspendReason clears the value of the "suspend_reason" field.
+func (_u *AgentUpdateOne) ClearSuspendReason() *AgentUpdateOne {
+	_u.mutation.ClearSuspendReason()
 	return _u
 }
 
@@ -4976,6 +5022,12 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	}
 	if _u.mutation.StalledFromActivityCleared() {
 		_spec.ClearField(agent.FieldStalledFromActivity, field.TypeString)
+	}
+	if value, ok := _u.mutation.SuspendReason(); ok {
+		_spec.SetField(agent.FieldSuspendReason, field.TypeString, value)
+	}
+	if _u.mutation.SuspendReasonCleared() {
+		_spec.ClearField(agent.FieldSuspendReason, field.TypeString)
 	}
 	if value, ok := _u.mutation.CurrentTurns(); ok {
 		_spec.SetField(agent.FieldCurrentTurns, field.TypeInt, value)
