@@ -398,6 +398,7 @@ export class ScionDecisionsFilterPanel extends LitElement {
     return this.conversations.map((c) => ({
       value: c.key,
       label: c.label || c.key,
+      ...(c.hint ? { hint: c.hint } : {}),
     }));
   }
 

@@ -673,6 +673,11 @@ const ROUTES: RouteConfig[] = [
     load: () => import('../components/pages/gcp-service-account-detail.js'),
   },
   {
+    pattern: /^\/profile\/decisions$/,
+    tag: 'scion-page-profile-decisions',
+    load: () => import('../components/pages/profile-decisions.js'),
+  },
+  {
     pattern: /^\/profile\/env$/,
     tag: 'scion-page-profile-env-vars',
     load: () => import('../components/pages/profile-env-vars.js'),
@@ -855,6 +860,7 @@ const STANDALONE_ROUTES = new Set([
  * Routes that render inside the profile shell instead of the main app shell
  */
 const PROFILE_ROUTES = new Set([
+  'scion-page-profile-decisions',
   'scion-page-profile-env-vars',
   'scion-page-profile-secrets',
   'scion-page-profile-settings',
