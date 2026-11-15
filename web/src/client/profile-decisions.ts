@@ -174,10 +174,12 @@ function cleanFilterValue(raw: string | undefined | null): string {
   return trimmed;
 }
 
+const textEncoder = new TextEncoder();
+
 function cleanConversationValue(raw: string | undefined | null): string {
   const trimmed = cleanFilterValue(raw);
   if (!trimmed || CONTROL_CHAR_RE.test(trimmed)) return '';
-  if (new TextEncoder().encode(trimmed).length > MAX_DECISIONS_CONVERSATION_BYTES) {
+  if (textEncoder.encode(trimmed).length > MAX_DECISIONS_CONVERSATION_BYTES) {
     return '';
   }
   return trimmed;
@@ -186,7 +188,7 @@ function cleanConversationValue(raw: string | undefined | null): string {
 export function cleanProfileProjectValue(raw: string | undefined | null): string {
   const trimmed = cleanFilterValue(raw);
   if (!trimmed || CONTROL_CHAR_RE.test(trimmed)) return '';
-  if (new TextEncoder().encode(trimmed).length > MAX_PROFILE_DECISIONS_PROJECT_BYTES) {
+  if (textEncoder.encode(trimmed).length > MAX_PROFILE_DECISIONS_PROJECT_BYTES) {
     return '';
   }
   return trimmed;

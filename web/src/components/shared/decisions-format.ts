@@ -93,16 +93,17 @@ export function dateBoundToIso(ymd: string, endOfDay: boolean): string {
   return ymd;
 }
 
-export function avatarColor(seed: string): string {
+export function avatarColor(seed: string | undefined | null): string {
+  const s = seed ?? '';
   let hash = 0;
-  for (let i = 0; i < seed.length; i++) {
-    hash = (hash * 31 + seed.charCodeAt(i)) | 0;
+  for (let i = 0; i < s.length; i++) {
+    hash = (hash * 31 + s.charCodeAt(i)) | 0;
   }
   const idx = Math.abs(hash) % AVATAR_PALETTE.length;
   return AVATAR_PALETTE[idx] ?? AVATAR_PALETTE[0];
 }
 
-export function avatarInitial(name: string): string {
+export function avatarInitial(name: string | undefined | null): string {
   const ch = (name || '?').trim().charAt(0).toUpperCase();
   return ch || '?';
 }

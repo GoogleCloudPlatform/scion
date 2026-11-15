@@ -33,6 +33,7 @@ import {
   type ProfilePendingDecisionsResponse,
 } from '../../client/profile-decisions.js';
 import { stateManager } from '../../client/state.js';
+import { avatarColor, avatarInitial } from '../shared/decisions-format.js';
 import {
   CHAT_CHOICES_FLAG,
   PROJECT_DECISIONS_FLAG,
@@ -1170,5 +1171,40 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
     expect(requestedUrls.slice(beforeDmUpdateIdx)).toContain(
       '/api/v1/users/me/decisions?tab=pending&sort=project&limit=50'
     );
+  });
+
+  it('guards avatarColor and avatarInitial when askerAgentId and askerAgentName are omitted', async () => {
+    expect(avatarColor(undefined)).toBe(avatarColor(''));
+    expect(avatarColor(null)).toBe(avatarColor(''));
+    expect(avatarInitial(undefined)).toBe('?');
+    expect(avatarInitial(null)).toBe('?');
+    expect(avatarInitial('   ')).toBe('?');
+
+    setFeatureFlag(PROJECT_DECISIONS_FLAG, true);
+    setFeatureFlag(CHAT_CHOICES_FLAG, true);
+
+    const promptWithoutAsker = makePrompt({
+      project: PROJ_SCION,
+      promptMessageId: 'm-missing-asker',
+      decisions: [makeDecision({ rowId: 'r-missing-asker', messageId: 'm-missing-asker' })],
+    }) as unknown as Record<string, unknown>;
+    delete promptWithoutAsker.askerAgentId;
+    delete promptWithoutAsker.askerAgentName;
+
+    handleDecisionsFetch = (): Promise<Response> =>
+      jsonResponse({
+        counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+        prompts: [promptWithoutAsker],
+        agents: [],
+        answerers: [],
+        conversations: [],
+        projects: [PROJ_SCION],
+        truncatedProjects: false,
+      });
+
+    const el = await mount('/profile/decisions');
+    const card = el.shadowRoot?.querySelector<HTMLElement>('[data-prompt-card="m-missing-asker"]');
+    expect(card).not.toBeNull();
+    expect(card?.querySelector('.avatar')?.textContent?.trim()).toBe('?');
   });
 });
