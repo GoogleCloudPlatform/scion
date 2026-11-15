@@ -447,7 +447,7 @@ func TestEgress_AuthSourceErrorsAndInvalidTokensNeverLeakCredential(t *testing.T
 		assert.NotContains(t, err.Error(), "X-Injected")
 	})
 
-	t.Run("bearer_source_error_containing_secret_is_scrubbed", func(t *testing.T) {
+	t.Run("bearer_source_error_containing_secret_is_scrubbed_as_credential_unavailable", func(t *testing.T) {
 		client := NewClient(func(context.Context) (string, error) {
 			return "", fmt.Errorf("vault failed for key %s", secretKey)
 		})
@@ -455,8 +455,22 @@ func TestEgress_AuthSourceErrorsAndInvalidTokensNeverLeakCredential(t *testing.T
 		require.NoError(t, err)
 		_, err = client.Do(req)
 		require.Error(t, err)
-		assert.True(t, IsAuthError(err))
+		assert.True(t, IsCredentialUnavailable(err))
+		assert.ErrorIs(t, err, ErrCredentialUnavailable)
+		assert.False(t, IsAuthError(err))
 		assert.NotContains(t, err.Error(), secretKey, "bearer source error text must never propagate secret material")
+	})
+
+	t.Run("bearer_source_returning_err_auth_preserves_auth", func(t *testing.T) {
+		client := NewClient(func(context.Context) (string, error) {
+			return "", ErrAuth
+		})
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://api.typesafe.ai/v1/models", nil)
+		require.NoError(t, err)
+		_, err = client.Do(req)
+		require.Error(t, err)
+		assert.True(t, IsAuthError(err))
+		assert.False(t, IsCredentialUnavailable(err))
 	})
 
 	t.Run("transport_error_containing_secret_is_scrubbed", func(t *testing.T) {
@@ -475,6 +489,21 @@ func TestEgress_AuthSourceErrorsAndInvalidTokensNeverLeakCredential(t *testing.T
 		require.Error(t, err)
 		assert.NotContains(t, err.Error(), secretKey)
 	})
+}
+
+func TestEgress_ProdTransportSetsIdleConnTimeoutWithoutChangingSSRFDefault(t *testing.T) {
+	client := NewClient(StaticBearer("sk-test"))
+	rt, ok := client.Transport.(*egressRoundTripper)
+	require.True(t, ok)
+	prodTr, ok := rt.prodTransport.(*http.Transport)
+	require.True(t, ok)
+	assert.Equal(t, 90*time.Second, prodTr.IdleConnTimeout)
+	assert.Equal(t, DefaultIdleConnTimeout, prodTr.IdleConnTimeout)
+
+	// Verify ssrfclient default IdleConnTimeout remains untouched so lifecycle hooks
+	// preserve exact existing behavior.
+	ssrfTr := ssrfclient.NewTransport(ssrfclient.Config{})
+	assert.Zero(t, ssrfTr.IdleConnTimeout)
 }
 
 type dialerFunc func(ctx context.Context, network, addr string) (net.Conn, error)

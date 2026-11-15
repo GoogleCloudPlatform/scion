@@ -42,6 +42,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util/ssrfclient"
 )
@@ -50,6 +51,11 @@ import (
 // Any response whose Content-Length or streamed body exceeds MaxResponseBytes
 // fails with ErrResponseTooLarge, which callers classify as malformed_response.
 const MaxResponseBytes int64 = 1 << 20
+
+// DefaultIdleConnTimeout bounds how long idle HTTP keep-alive sockets remain
+// open in an egress transport pool (egress-side only; ssrfclient defaults
+// remain unchanged).
+const DefaultIdleConnTimeout = 90 * time.Second
 
 var (
 	// ErrResponseTooLarge indicates the provider response body exceeded
@@ -72,9 +78,14 @@ var (
 	// loopback, link-local, or reserved IP addresses.
 	ErrBlockedDestination = errors.New("systemone egress: destination address is blocked")
 
-	// ErrAuth indicates the bearer credential could not be resolved or was
-	// empty or malformed before sending the request.
+	// ErrAuth indicates the bearer credential was missing, empty, or malformed
+	// before sending the request.
 	ErrAuth = errors.New("systemone egress: bearer credential unavailable or invalid")
+
+	// ErrCredentialUnavailable indicates the BearerSource callback failed to
+	// resolve a credential (for example, due to a transient secret-store
+	// outage) before sending the request. Callers map this to FailUnavailable.
+	ErrCredentialUnavailable = errors.New("systemone egress: bearer credential source unavailable")
 )
 
 // IsResponseTooLarge reports whether err was caused by a response body
@@ -104,10 +115,16 @@ func IsBlockedDestination(err error) bool {
 	return errors.Is(err, ErrBlockedDestination) || errors.Is(err, ssrfclient.ErrBlockedAddress)
 }
 
-// IsAuthError reports whether err was caused by a missing, failing, or invalid
+// IsAuthError reports whether err was caused by a missing, empty, or invalid
 // bearer credential before sending the request.
 func IsAuthError(err error) bool {
 	return errors.Is(err, ErrAuth)
+}
+
+// IsCredentialUnavailable reports whether err was caused by a BearerSource
+// callback failure before sending the request.
+func IsCredentialUnavailable(err error) bool {
+	return errors.Is(err, ErrCredentialUnavailable)
 }
 
 // BearerSource supplies the raw bearer API key (without the "Bearer " prefix)
@@ -220,6 +237,7 @@ func NewClient(bearer BearerSource, opts ...Option) *http.Client {
 		Dialer:               cfg.dialer,
 		TLSClientConfig:      tlsCfg,
 	})
+	prodTransport.IdleConnTimeout = DefaultIdleConnTimeout
 
 	rt := &egressRoundTripper{
 		bearer:        bearer,
@@ -345,9 +363,13 @@ func (rt *egressRoundTripper) resolveToken(ctx context.Context) (string, error) 
 		if errors.Is(err, context.DeadlineExceeded) {
 			return "", context.DeadlineExceeded
 		}
+		if errors.Is(err, ErrAuth) {
+			return "", ErrAuth
+		}
 		// Never propagate raw error text from a credential callback in case it
-		// echoes secret material.
-		return "", ErrAuth
+		// echoes secret material; surface ErrCredentialUnavailable so callers
+		// distinguish transient store outages from missing/malformed tokens.
+		return "", ErrCredentialUnavailable
 	}
 	if strings.TrimSpace(token) == "" || hasInvalidHeaderByte(token) {
 		return "", ErrAuth
