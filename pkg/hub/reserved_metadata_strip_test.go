@@ -43,6 +43,8 @@ var stripExemptions = map[stripSiteKey]string{
 	{"server.go", "messageEventHandler"}:                              "scheduled message; messages.NewSystemMessage carries no client metadata",
 	{"reconcile.go", "deliverMessage"}:                                "dead code: assigned at server.go but never invoked in production (msg_containment_callsite_test.go)",
 	{"notification_sweep.go", "retryDispatch"}:                        "hub-built notification fan-out retry; no client metadata",
+	{"agent_dm_operation.go", "agentDMAutoWakeItem"}:                  "dispatches the message ExecuteAgentDM already stripped (step 7b) before queuing it behind the auto-wake",
+	{"auto_wake.go", "chatSecondaryAutoWakeItem"}:                     "dispatches the secondary copy sendAgentRouted already stripped (mentionMsg.Metadata) before queuing it behind the auto-wake",
 }
 
 // TestReservedKeyStripCoverage requires every dispatchWithBrokerRetry /
