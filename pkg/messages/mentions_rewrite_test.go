@@ -73,6 +73,24 @@ func TestRewriteAgentMentions(t *testing.T) {
 			wantMent: []string{"foo", "bar"},
 		},
 		{
+			name:     "possessive_ascii",
+			text:     "see @agent:hub-ops's proposal.",
+			wantBody: "see @hub-ops's proposal.",
+			wantMent: []string{"hub-ops"},
+		},
+		{
+			name:     "possessive_typographic_with_comma",
+			text:     "per @agent:hub-ops\u2019s, proceed",
+			wantBody: "per @hub-ops\u2019s, proceed",
+			wantMent: []string{"hub-ops"},
+		},
+		{
+			name:     "bare_prefix_possessive_unchanged",
+			text:     "a bare @agent:'s here",
+			wantBody: "a bare @agent:'s here",
+			wantMent: []string{"agent"},
+		},
+		{
 			name:     "email_like_address_unchanged",
 			text:     "mail ops@agent:foo or user@example.com",
 			wantBody: "mail ops@agent:foo or user@example.com",

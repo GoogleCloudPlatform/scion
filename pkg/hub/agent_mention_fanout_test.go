@@ -230,6 +230,20 @@ func TestMentionFanout_HumanExtractMentionsUnchanged(t *testing.T) {
 	require.Equal(t, []string{"amf-bystander"}, got, "ExtractMentions must remain fence-agnostic for human senders")
 }
 
+// Possessive @agent's and @agent’s mentions notify the intended agent rather
+// than failing resolution as a nonexistent "<slug>'s" token (ptone/scion#8112).
+func TestMentionFanout_PossessiveMentionDeliversToAgent(t *testing.T) {
+	srv, _, _, sender, target, bystander, _, dispatcher := mentionFanoutSetup(t)
+	body := "following @" + bystander.Slug + "'s proposal and @" + bystander.Slug + "\u2019s follow-up."
+	in := mentionFanoutBaseInput(sender, target, body)
+
+	results := srv.fanOutAgentMentions(context.Background(), in)
+	require.Len(t, results, 1)
+	require.Equal(t, bystander.Slug, results[0].Slug)
+	require.Equal(t, "delivered", results[0].Status)
+	require.Len(t, dispatchesTo(dispatcher, bystander.ID), 1)
+}
+
 // A mention to an agent the sender may not DM is unauthorized, creates no
 // row/conversation, and the primary is unaffected.
 func TestMentionFanout_Unauthorized(t *testing.T) {
