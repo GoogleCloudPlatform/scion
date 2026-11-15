@@ -254,10 +254,9 @@ func runProjectHealth(cmd *cobra.Command, args []string) error {
 			Name:      p.Name,
 			Slug:      p.Slug,
 			GitRemote: p.GitRemote,
+			Summary:   summarizeAgents(allAgents),
 			Agents:    allAgents,
 		}
-
-		report.Summary = summarizeAgents(allAgents)
 		reports = append(reports, report)
 	}
 
@@ -299,7 +298,12 @@ func summarizeAgents(agents []hubclient.Agent) ProjectHealthSummary {
 			sum.OtherPhase++
 		}
 
-		sum.addActivity(a.Activity)
+		// Suspended agents carry a retained pre-suspend activity (e.g. completed,
+		// idle, or harness_error); they are counted under Suspended, not as active
+		// activities.
+		if state.Phase(a.Phase) != state.PhaseSuspended {
+			sum.addActivity(a.Activity)
+		}
 	}
 	return sum
 }

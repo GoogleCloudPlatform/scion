@@ -196,3 +196,41 @@ func TestProjectHealthSummary_IdleCount(t *testing.T) {
 	assert.Contains(t, formatActivitySummary(s), "Idle=2")
 	assert.NotContains(t, formatActivitySummary(ProjectHealthSummary{Working: 1}), "Idle")
 }
+
+func TestSummarizeAgents_SuspendedExcludedFromActivityCounts(t *testing.T) {
+	agents := []hubclient.Agent{
+		{ID: "a1", Name: "run-work", Phase: "running", Activity: "working"},
+		{ID: "a2", Name: "run-idle", Phase: "running", Activity: "idle"},
+		{ID: "a3", Name: "susp-done", Phase: "suspended", Activity: "completed"},
+		{ID: "a4", Name: "susp-idle", Phase: "suspended", Activity: "idle"},
+		{ID: "a5", Name: "susp-blocked", Phase: "suspended", Activity: "blocked"},
+		{ID: "a6", Name: "stop-crash", Phase: "stopped", Activity: "crashed"},
+	}
+
+	s := summarizeAgents(agents)
+	assert.Equal(t, 6, s.Total)
+	assert.Equal(t, 2, s.Running)
+	assert.Equal(t, 3, s.Suspended)
+	assert.Equal(t, 1, s.Stopped)
+
+	assert.Equal(t, 1, s.Working)
+	assert.Equal(t, 1, s.Idle, "suspended+idle must not inflate live Idle count")
+	assert.Equal(t, 0, s.Completed, "suspended+completed must not inflate live Completed count")
+	assert.Equal(t, 0, s.Blocked, "suspended row with legacy blocked must not trigger blocked count")
+	assert.Equal(t, 1, s.Crashed)
+
+	var buf bytes.Buffer
+	printProjectHealthReports(&buf, []ProjectHealthReport{{
+		ID:      "p1",
+		Name:    "proj",
+		Slug:    "proj",
+		Summary: s,
+		Agents:  agents,
+	}})
+	out := buf.String()
+	assert.Contains(t, out, "Suspended=3")
+	assert.Contains(t, out, "Idle=1")
+	assert.Contains(t, out, "Completed=0")
+	assert.Contains(t, out, "Blocked=0")
+	assert.NotContains(t, out, "agent(s) are blocked")
+}

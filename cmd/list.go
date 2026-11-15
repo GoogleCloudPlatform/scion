@@ -818,8 +818,15 @@ func filterAgentsByFlags(agents []api.AgentInfo) []api.AgentInfo {
 		if filterPhase != "" && !strings.EqualFold(a.Phase, filterPhase) {
 			continue
 		}
-		if filterActivity != "" && !strings.EqualFold(a.Activity, filterActivity) {
-			continue
+		if filterActivity != "" {
+			if !strings.EqualFold(a.Activity, filterActivity) {
+				continue
+			}
+			// Without an explicit --phase, --activity selects active/terminal
+			// agents rather than suspended rows carrying a retained activity.
+			if filterPhase == "" && strings.EqualFold(a.Phase, string(state.PhaseSuspended)) {
+				continue
+			}
 		}
 		if filterTemplate != "" && !strings.EqualFold(a.Template, filterTemplate) {
 			continue
@@ -926,6 +933,8 @@ func displayAgents(agents []api.AgentInfo, all bool) error {
 		}
 		if phase == string(state.PhaseStopped) && state.Activity(a.Activity).IsTerminal() {
 			phase = a.Activity
+		} else if phase == string(state.PhaseSuspended) && state.Activity(a.Activity).IsRetainedOnSuspend() {
+			phase = phase + " · " + state.Activity(a.Activity).DisplayLabel()
 		}
 		phase = exitReasonPhaseLabel(phase, a.ExitReason)
 		phase = suspendedPhaseLabel(phase, a.SuspendReason)
@@ -943,7 +952,11 @@ func displayAgents(agents []api.AgentInfo, all bool) error {
 		if activityTime.IsZero() {
 			activityTime = a.LastSeen
 		}
-		lastActivity := formatAgentLastActivity(a, activityTime)
+		displayAgent := a
+		if a.Phase == string(state.PhaseSuspended) && !state.Activity(a.Activity).IsRetainedOnSuspend() {
+			displayAgent.Activity = ""
+		}
+		lastActivity := formatAgentLastActivity(displayAgent, activityTime)
 		// Use broker name if available, otherwise fall back to ID
 		broker := a.RuntimeBrokerName
 		if broker == "" {
@@ -1081,7 +1094,9 @@ func hubStatusToPhaseActivity(status string) (string, string) {
 	if a.IsTerminal() {
 		return string(state.PhaseStopped), status
 	}
-	// Check if the status is a known activity (only valid during running phase)
+	// Check if the status is a known activity. DisplayStatus() emits "suspended"
+	// for suspended agents even when they retain an activity, so a bare activity
+	// string on the legacy Status field always belongs to the running phase.
 	if a.IsValid() && a != "" {
 		return string(state.PhaseRunning), status
 	}
