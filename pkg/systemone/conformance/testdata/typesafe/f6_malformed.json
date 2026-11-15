@@ -383,6 +383,36 @@
         "retryable": false,
         "http_status": 200
       }
+    },
+    {
+      "name": "excessive_json_nesting_depth_over_32",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "billing",
+              "type": "binary",
+              "instructions": "Is this about billing?"
+            }
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Test.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"model\":\"jev-1.14.0\",\"answers\":{\"billing\":{\"type\":\"noul\",\"noul\":0.98}},\"usage\":{\"input_tokens\":20,\"output_tokens\":2},\"extra\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[1]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}"
+      },
+      "expect_error": {
+        "reason": "malformed_response",
+        "retryable": false,
+        "http_status": 200
+      }
     }
   ]
 }

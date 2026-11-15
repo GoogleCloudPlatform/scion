@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -740,4 +741,86 @@ func TestInvoke_OversizeBodyAndContextCancellation(t *testing.T) {
 	pe, ok = provider.AsProviderError(err)
 	require.True(t, ok)
 	assert.Equal(t, provider.FailCanceled, pe.Reason)
+}
+
+func TestDecodeResponse_JSONNestingDepthBound(t *testing.T) {
+	qs := []spec.Question{
+		{ID: "billing", Type: spec.PrimitiveBinary, Instructions: "Is this message about billing?"},
+	}
+
+	nestedArray := func(brackets int) string {
+		return strings.Repeat("[", brackets) + "1" + strings.Repeat("]", brackets)
+	}
+
+	// Root object is depth 1; 31 nested arrays under "extra" reaches total depth 32 (accepted).
+	bodyDepth32 := fmt.Sprintf(
+		`{"model":"jev-1.14.0","answers":{"billing":{"type":"noul","noul":0.98}},"usage":{"input_tokens":120,"output_tokens":12},"extra":%s}`,
+		nestedArray(31),
+	)
+	res, err := jevwire.DecodeResponse(jevwire.TypeSafeProfile(), qs, http.StatusOK, "req_d32", []byte(bodyDepth32))
+	require.NoError(t, err)
+	assert.Equal(t, "jev-1.14.0", res.ResolvedModel)
+
+	// Root object (depth 1) + 32 nested arrays reaches total depth 33 (> 32, rejected as malformed_response).
+	bodyDepth33 := fmt.Sprintf(
+		`{"model":"jev-1.14.0","answers":{"billing":{"type":"noul","noul":0.98}},"usage":{"input_tokens":120,"output_tokens":12},"extra":%s}`,
+		nestedArray(32),
+	)
+	_, err = jevwire.DecodeResponse(jevwire.TypeSafeProfile(), qs, http.StatusOK, "req_d33", []byte(bodyDepth33))
+	require.Error(t, err)
+	pe, ok := provider.AsProviderError(err)
+	require.True(t, ok)
+	assert.Equal(t, provider.FailMalformedResponse, pe.Reason)
+	assert.False(t, pe.Retryable)
+
+	// Same boundary on DecodeModelsResponse (GET /v1/models): depth 32 accepted, depth 33 rejected.
+	modelsDepth32 := fmt.Sprintf(
+		`{"models":[{"name":"jev-latest","description":"desc","release_date":"2026-09-15"}],"extra":%s}`,
+		nestedArray(31),
+	)
+	models, err := jevwire.DecodeModelsResponse(http.StatusOK, []byte(modelsDepth32))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"jev-latest"}, models)
+
+	modelsDepth33 := fmt.Sprintf(
+		`{"models":[{"name":"jev-latest","description":"desc","release_date":"2026-09-15"}],"extra":%s}`,
+		nestedArray(32),
+	)
+	_, err = jevwire.DecodeModelsResponse(http.StatusOK, []byte(modelsDepth33))
+	require.Error(t, err)
+	pe, ok = provider.AsProviderError(err)
+	require.True(t, ok)
+	assert.Equal(t, provider.FailMalformedResponse, pe.Reason)
+	assert.False(t, pe.Retryable)
+
+	// Regression for 1 MiB of '[' (previously grew goroutine stack to ~256 MB via unbounded recursion).
+	oneMiBBrackets := bytes.Repeat([]byte{'['}, int(egress.MaxResponseBytes))
+	oneMiBObjects := bytes.Repeat([]byte(`{"a":`), int(egress.MaxResponseBytes)/5)
+
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	for _, payload := range [][]byte{oneMiBBrackets, oneMiBObjects} {
+		_, decErr := jevwire.DecodeResponse(jevwire.TypeSafeProfile(), qs, http.StatusOK, "req_deep", payload)
+		require.Error(t, decErr)
+		decPE, isPE := provider.AsProviderError(decErr)
+		require.True(t, isPE)
+		assert.Equal(t, provider.FailMalformedResponse, decPE.Reason)
+		assert.False(t, decPE.Retryable)
+
+		_, modErr := jevwire.DecodeModelsResponse(http.StatusOK, payload)
+		require.Error(t, modErr)
+		modPE, isModPE := provider.AsProviderError(modErr)
+		require.True(t, isModPE)
+		assert.Equal(t, provider.FailMalformedResponse, modPE.Reason)
+		assert.False(t, modPE.Retryable)
+	}
+
+	runtime.ReadMemStats(&after)
+	var stackDelta uint64
+	if after.StackInuse > before.StackInuse {
+		stackDelta = after.StackInuse - before.StackInuse
+	}
+	assert.Less(t, stackDelta, uint64(4<<20), "1 MiB deeply nested JSON must not blow up goroutine stack")
 }

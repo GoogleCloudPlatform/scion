@@ -538,10 +538,12 @@ func marshalNoEscape(v any) ([]byte, error) {
 	return out, nil
 }
 
+const maxJSONNestingDepth = 32
+
 func checkNoDuplicateJSONKeys(raw []byte) error {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
-	if err := walkNoDuplicateKeys(dec); err != nil {
+	if err := walkNoDuplicateKeys(dec, 0); err != nil {
 		return err
 	}
 	if _, err := dec.Token(); err != io.EOF {
@@ -550,7 +552,7 @@ func checkNoDuplicateJSONKeys(raw []byte) error {
 	return nil
 }
 
-func walkNoDuplicateKeys(dec *json.Decoder) error {
+func walkNoDuplicateKeys(dec *json.Decoder, depth int) error {
 	tok, err := dec.Token()
 	if err != nil {
 		return err
@@ -561,6 +563,10 @@ func walkNoDuplicateKeys(dec *json.Decoder) error {
 	}
 	switch delim {
 	case '{':
+		nextDepth := depth + 1
+		if nextDepth > maxJSONNestingDepth {
+			return fmt.Errorf("JSON nesting depth exceeds maximum %d", maxJSONNestingDepth)
+		}
 		seen := make(map[string]struct{})
 		for dec.More() {
 			kTok, err := dec.Token()
@@ -572,10 +578,10 @@ func walkNoDuplicateKeys(dec *json.Decoder) error {
 				return fmt.Errorf("expected string key")
 			}
 			if _, dup := seen[key]; dup {
-				return fmt.Errorf("duplicate JSON key %q", key)
+				return fmt.Errorf("duplicate JSON key")
 			}
 			seen[key] = struct{}{}
-			if err := walkNoDuplicateKeys(dec); err != nil {
+			if err := walkNoDuplicateKeys(dec, nextDepth); err != nil {
 				return err
 			}
 		}
@@ -583,8 +589,12 @@ func walkNoDuplicateKeys(dec *json.Decoder) error {
 			return err
 		}
 	case '[':
+		nextDepth := depth + 1
+		if nextDepth > maxJSONNestingDepth {
+			return fmt.Errorf("JSON nesting depth exceeds maximum %d", maxJSONNestingDepth)
+		}
 		for dec.More() {
-			if err := walkNoDuplicateKeys(dec); err != nil {
+			if err := walkNoDuplicateKeys(dec, nextDepth); err != nil {
 				return err
 			}
 		}
