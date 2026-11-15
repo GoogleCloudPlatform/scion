@@ -41,6 +41,7 @@ type memQueueStore struct {
 	mu        sync.Mutex
 	nextSeq   int64
 	rows      map[int64]*store.DurableQueueRow
+	claims    int
 	renews    int
 	loseAt    int // when > 0, RenewDurableLease returns held=false starting on this renew call
 	trimLimit int // when > 0, caps trimmed rows per TrimDurableQueue pass and sets More
@@ -48,6 +49,12 @@ type memQueueStore struct {
 
 func newMemQueueStore() *memQueueStore {
 	return &memQueueStore{rows: make(map[int64]*store.DurableQueueRow)}
+}
+
+func (m *memQueueStore) claimCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.claims
 }
 
 func (m *memQueueStore) EnqueueDurableItem(_ context.Context, _ store.Tx, row store.DurableQueueRow) (int64, error) {
@@ -89,6 +96,7 @@ func (m *memQueueStore) EnqueueDurableItem(_ context.Context, _ store.Tx, row st
 func (m *memQueueStore) ClaimDurableItems(_ context.Context, kind, owner string, now, leaseUntil time.Time, limit int) ([]store.DurableQueueRow, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.claims++
 	var cands []*store.DurableQueueRow
 	for _, r := range m.rows {
 		if r.Kind != kind || r.NextAttemptAt.After(now) {
@@ -763,75 +771,305 @@ func TestHandlerPanicCountsTowardPoisonAndDrops(t *testing.T) {
 	assert.Equal(t, 3, calls)
 }
 
-func TestQueueWakeAndRunShutdownFinalPass(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	st := newMemQueueStore()
-	q := durablequeue.NewQueue(st)
+func TestQueueWakeAndRunShutdownInHandOnly(t *testing.T) {
+	t.Run("wake_and_no_claim_after_ctx_done", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
-	// Calling Wake with no drainers or repeatedly never blocks.
-	for i := 0; i < 50; i++ {
+		st := newMemQueueStore()
+		q := durablequeue.NewQueue(st)
+
+		// Calling Wake with no drainers or repeatedly never blocks.
+		for i := 0; i < 50; i++ {
+			q.Wake("test.echo")
+			q.Wake("other.kind")
+		}
+
+		handled := make(chan string, 10)
+		d, err := durablequeue.NewDrainer(durablequeue.DrainerConfig{
+			Store:        st,
+			Queue:        q,
+			Kind:         "test.echo",
+			PollInterval: time.Hour, // relies on Wake
+			Logger:       quietLogger(),
+			Handler: func(_ context.Context, item durablequeue.Item, _ durablequeue.Lease) durablequeue.Result {
+				handled <- item.DedupKey
+				return durablequeue.Result{Done: true}
+			},
+		})
+		require.NoError(t, err)
+
+		doneRun := make(chan struct{})
+		go func() {
+			defer close(doneRun)
+			d.Run(ctx)
+		}()
+
+		// Wait for the initial startup pass so Run is parked waiting on Wake/ctx.
+		require.Eventually(t, func() bool {
+			return st.claimCount() >= 1
+		}, 2*time.Second, 5*time.Millisecond)
+
+		// Enqueue and Wake("test.echo"): delivered without waiting for the 1h PollInterval.
+		_, err = q.Enqueue(context.Background(), nil, durablequeue.Item{
+			Kind:     "test.echo",
+			DedupKey: "woken-1",
+			Payload:  []byte(`{}`),
+		})
+		require.NoError(t, err)
+		q.Wake("other.kind") // unrelated kind does not wake test.echo
 		q.Wake("test.echo")
-		q.Wake("other.kind")
-	}
 
-	handled := make(chan string, 10)
-	d, err := durablequeue.NewDrainer(durablequeue.DrainerConfig{
-		Store:        st,
-		Queue:        q,
-		Kind:         "test.echo",
-		PollInterval: time.Hour, // relies on Wake and final shutdown pass
-		Logger:       quietLogger(),
-		Handler: func(_ context.Context, item durablequeue.Item, _ durablequeue.Lease) durablequeue.Result {
-			handled <- item.DedupKey
-			return durablequeue.Result{Done: true}
-		},
+		select {
+		case got := <-handled:
+			assert.Equal(t, "woken-1", got)
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for woken drainer")
+		}
+		require.Eventually(t, func() bool {
+			stats, serr := st.DurableQueueStats(context.Background(), "test.echo", "", time.Now().UTC())
+			return serr == nil && stats.Pending == 0
+		}, 2*time.Second, 5*time.Millisecond)
+
+		// Enqueue an unclaimed item WITHOUT waking, then cancel ctx: Run must
+		// NOT execute any new ClaimDurableItems call on shutdown.
+		claimsBeforeCancel := st.claimCount()
+		_, err = q.Enqueue(context.Background(), nil, durablequeue.Item{
+			Kind:     "test.echo",
+			DedupKey: "unclaimed-on-shutdown",
+			Payload:  []byte(`{}`),
+		})
+		require.NoError(t, err)
+
+		cancel()
+		select {
+		case <-doneRun:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for Run shutdown")
+		}
+
+		assert.Equal(t, claimsBeforeCancel, st.claimCount(), "Run must claim nothing new after ctx is done")
+		select {
+		case unexpected := <-handled:
+			t.Fatalf("unexpected post-shutdown handling of %q", unexpected)
+		default:
+		}
+		stats, err := st.DurableQueueStats(context.Background(), "test.echo", "", time.Now().UTC())
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), stats.Pending, "unclaimed item must remain queued for next start or another replica")
+		assert.Zero(t, stats.Leased)
+
+		// Starting Run with an already-cancelled ctx also claims nothing.
+		dCancelled, err := durablequeue.NewDrainer(durablequeue.DrainerConfig{
+			Store:  st,
+			Kind:   "test.echo",
+			Logger: quietLogger(),
+			Handler: func(_ context.Context, _ durablequeue.Item, _ durablequeue.Lease) durablequeue.Result {
+				t.Error("handler must not be invoked when Run starts with cancelled ctx")
+				return durablequeue.Result{Done: true}
+			},
+		})
+		require.NoError(t, err)
+		dCancelled.Run(ctx)
+		assert.Equal(t, claimsBeforeCancel, st.claimCount())
 	})
-	require.NoError(t, err)
 
-	doneRun := make(chan struct{})
-	go func() {
-		defer close(doneRun)
-		d.Run(ctx)
-	}()
+	t.Run("in_hand_finishes_within_budget_and_releases_unstarted_tail", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
-	// Enqueue and Wake("test.echo"): delivered without waiting for the 1h PollInterval.
-	_, err = q.Enqueue(context.Background(), nil, durablequeue.Item{
-		Kind:     "test.echo",
-		DedupKey: "woken-1",
-		Payload:  []byte(`{}`),
+		st := newMemQueueStore()
+		q := durablequeue.NewQueue(st)
+
+		for _, key := range []string{"in-hand-1", "in-hand-2"} {
+			_, err := q.Enqueue(context.Background(), nil, durablequeue.Item{
+				Kind:     "test.echo",
+				DedupKey: key,
+				Payload:  []byte(`{}`),
+			})
+			require.NoError(t, err)
+		}
+
+		started1 := make(chan struct{})
+		proceed1 := make(chan struct{})
+		var (
+			mu                  sync.Mutex
+			handledKeys         []string
+			handlerCtxCancelled bool
+		)
+
+		d, err := durablequeue.NewDrainer(durablequeue.DrainerConfig{
+			Store:          st,
+			Queue:          q,
+			Kind:           "test.echo",
+			BatchSize:      2,
+			PollInterval:   time.Hour,
+			LeaseDuration:  5 * time.Second,
+			HandlerTimeout: 4 * time.Second,
+			ShutdownBudget: 500 * time.Millisecond,
+			Logger:         quietLogger(),
+			Handler: func(hctx context.Context, item durablequeue.Item, _ durablequeue.Lease) durablequeue.Result {
+				if item.DedupKey == "in-hand-1" {
+					close(started1)
+					<-proceed1
+					mu.Lock()
+					handlerCtxCancelled = hctx.Err() != nil
+					handledKeys = append(handledKeys, item.DedupKey)
+					mu.Unlock()
+					return durablequeue.Result{Done: true}
+				}
+				mu.Lock()
+				handledKeys = append(handledKeys, item.DedupKey)
+				mu.Unlock()
+				return durablequeue.Result{Done: true}
+			},
+		})
+		require.NoError(t, err)
+
+		doneRun := make(chan struct{})
+		go func() {
+			defer close(doneRun)
+			d.Run(ctx)
+		}()
+
+		// Wait until the 2-item batch is claimed and in-hand-1 is mid-handler.
+		<-started1
+		assert.Equal(t, 1, st.claimCount())
+
+		// Enqueue a 3rd item and buffer a Wake before cancelling ctx: Run must
+		// still not claim a second batch once ctx is done.
+		_, err = q.Enqueue(context.Background(), nil, durablequeue.Item{
+			Kind:     "test.echo",
+			DedupKey: "queued-after-claim",
+			Payload:  []byte(`{}`),
+		})
+		require.NoError(t, err)
+		q.Wake("test.echo")
+
+		cancel()
+		// Give AfterFunc a moment to arm the ShutdownBudget timer while in-hand-1
+		// is still running; its hctx must stay live within the 500ms budget.
+		time.Sleep(25 * time.Millisecond)
+		close(proceed1)
+
+		select {
+		case <-doneRun:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for Run to finish in-hand work")
+		}
+
+		assert.Equal(t, 1, st.claimCount(), "no new claim may happen after ctx is cancelled")
+		mu.Lock()
+		assert.False(t, handlerCtxCancelled, "in-flight handler context must stay live within ShutdownBudget")
+		assert.Equal(t, []string{"in-hand-1"}, handledKeys, "unstarted batch tail must be released rather than started under a shutting-down drainer")
+		mu.Unlock()
+
+		stats, err := st.DurableQueueStats(context.Background(), "test.echo", "", time.Now().UTC())
+		require.NoError(t, err)
+		assert.Equal(t, int64(2), stats.Pending, "in-hand-2 and queued-after-claim must remain pending")
+		assert.Zero(t, stats.Leased, "in-hand-2 lease must be released before Run returns")
+
+		st.mu.Lock()
+		for _, r := range st.rows {
+			assert.Zero(t, r.Attempts, "released shutdown row %q must not burn an attempt", r.DedupKey)
+			assert.Empty(t, r.LeaseOwner)
+			assert.Nil(t, r.LeaseUntil)
+		}
+		st.mu.Unlock()
 	})
-	require.NoError(t, err)
-	q.Wake("other.kind") // unrelated kind does not wake test.echo
-	q.Wake("test.echo")
 
-	select {
-	case got := <-handled:
-		assert.Equal(t, "woken-1", got)
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for woken drainer")
-	}
+	t.Run("in_hand_exceeding_shutdown_budget_is_cancelled_and_released", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 
-	// Enqueue one more item WITHOUT calling Wake, then cancel ctx: Run's bounded
-	// final pass on shutdown must drain it before Run returns!
-	_, err = q.Enqueue(context.Background(), nil, durablequeue.Item{
-		Kind:     "test.echo",
-		DedupKey: "shutdown-final",
-		Payload:  []byte(`{}`),
+		st := newMemQueueStore()
+		q := durablequeue.NewQueue(st)
+		metrics := newRecordingMetrics()
+
+		for _, key := range []string{"slow-1", "slow-2"} {
+			_, err := q.Enqueue(context.Background(), nil, durablequeue.Item{
+				Kind:     "test.echo",
+				DedupKey: key,
+				Payload:  []byte(`{}`),
+			})
+			require.NoError(t, err)
+		}
+
+		startedSlow := make(chan struct{})
+		var (
+			handlerCalls atomic.Int32
+			sawCtxErr    atomic.Value
+		)
+
+		d, err := durablequeue.NewDrainer(durablequeue.DrainerConfig{
+			Store:          st,
+			Queue:          q,
+			Kind:           "test.echo",
+			BatchSize:      2,
+			PollInterval:   time.Hour,
+			LeaseDuration:  10 * time.Second,
+			HandlerTimeout: 5 * time.Second, // much longer than ShutdownBudget
+			ShutdownBudget: 60 * time.Millisecond,
+			Metrics:        metrics,
+			Logger:         quietLogger(),
+			Handler: func(hctx context.Context, item durablequeue.Item, _ durablequeue.Lease) durablequeue.Result {
+				if handlerCalls.Add(1) == 1 && item.DedupKey == "slow-1" {
+					close(startedSlow)
+				}
+				<-hctx.Done()
+				sawCtxErr.Store(hctx.Err())
+				return durablequeue.Result{Err: hctx.Err()}
+			},
+		})
+		require.NoError(t, err)
+
+		doneRun := make(chan struct{})
+		go func() {
+			defer close(doneRun)
+			d.Run(ctx)
+		}()
+
+		<-startedSlow
+		leasedDuring, err := st.DurableQueueStats(context.Background(), "test.echo", "", time.Now().UTC())
+		require.NoError(t, err)
+		assert.Equal(t, int64(2), leasedDuring.Leased)
+
+		tCancel := time.Now()
+		cancel()
+
+		select {
+		case <-doneRun:
+		case <-time.After(time.Second):
+			t.Fatal("Run did not exit within ShutdownBudget")
+		}
+		elapsed := time.Since(tCancel)
+		assert.GreaterOrEqual(t, elapsed, 45*time.Millisecond, "in-flight handler should receive ShutdownBudget grace")
+		assert.Less(t, elapsed, 750*time.Millisecond, "ShutdownBudget (not 5s HandlerTimeout) must bound shutdown")
+
+		assert.Equal(t, 1, st.claimCount())
+		assert.Equal(t, int32(1), handlerCalls.Load(), "second item in batch must be released without starting")
+		assert.ErrorIs(t, sawCtxErr.Load().(error), context.Canceled)
+
+		stats, err := st.DurableQueueStats(context.Background(), "test.echo", "", time.Now().UTC())
+		require.NoError(t, err)
+		assert.Equal(t, int64(2), stats.Pending)
+		assert.Zero(t, stats.Leased, "both cut-off and unstarted items must have their leases released")
+
+		st.mu.Lock()
+		for _, r := range st.rows {
+			assert.Zero(t, r.Attempts, "shutdown cut-off must release %q without counting an attempt", r.DedupKey)
+			assert.Zero(t, r.PermanentFailures)
+			assert.Empty(t, r.LeaseOwner)
+			assert.Nil(t, r.LeaseUntil)
+		}
+		st.mu.Unlock()
+
+		metrics.mu.Lock()
+		assert.Zero(t, metrics.done)
+		assert.Zero(t, metrics.retried)
+		assert.Zero(t, metrics.permanent)
+		metrics.mu.Unlock()
 	})
-	require.NoError(t, err)
-
-	cancel()
-	select {
-	case <-doneRun:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for Run shutdown")
-	}
-	select {
-	case got := <-handled:
-		assert.Equal(t, "shutdown-final", got)
-	default:
-		t.Fatal("expected bounded final shutdown pass to drain queued item")
-	}
 }
 
 func TestDrainerRunContinuesBoundedTrimAcrossPasses(t *testing.T) {

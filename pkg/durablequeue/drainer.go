@@ -122,7 +122,11 @@ type DrainerConfig struct {
 	// Optional operational overrides (match lifecycleevents.DrainerConfig).
 	Now                 func() time.Time
 	MaintenanceInterval time.Duration // default 1 min
-	ShutdownBudget      time.Duration // default 5 s
+	// ShutdownBudget bounds how long Run waits after ctx cancellation for an
+	// already-running Handler to finish and for remaining leases in the in-hand
+	// batch to be released; Run never claims or starts new items once ctx is
+	// done. Default 5 s.
+	ShutdownBudget time.Duration
 }
 
 // DrainResult summarizes one DrainOnce / poll pass.
@@ -233,8 +237,9 @@ func (d *Drainer) Blocked() bool {
 // Run polls every PollInterval and on Wake until ctx is cancelled, running
 // trim + gauge maintenance every MaintenanceInterval (or immediately on the
 // next pass when a bounded trim pass reports additional candidates remaining).
-// On ctx cancellation it executes one final pass bounded by ShutdownBudget
-// before returning.
+// On ctx cancellation Run claims nothing new: it only lets an already-running
+// handler finish within ShutdownBudget and releases any remaining leases in
+// the in-hand batch before returning.
 func (d *Drainer) Run(ctx context.Context) {
 	if d.unregister != nil {
 		defer d.unregister()
@@ -245,14 +250,16 @@ func (d *Drainer) Run(ctx context.Context) {
 	var nextMaintenance time.Time // maintain on the first pass
 	for {
 		if ctx.Err() != nil {
-			d.runShutdownDrain(ctx)
 			return
 		}
 		now := d.cfg.Now()
 		maintain := !now.Before(nextMaintenance)
-		_, trimMore, err := d.drainPass(ctx, maintain)
+		_, trimMore, err := d.drainPass(ctx, maintain, d.cfg.ShutdownBudget)
 		if err != nil && ctx.Err() == nil {
 			d.cfg.Logger.Warn("durable queue drain pass failed", "kind", d.cfg.Kind, "error", err)
+		}
+		if ctx.Err() != nil {
+			return
 		}
 		if maintain {
 			if trimMore && err == nil {
@@ -267,19 +274,10 @@ func (d *Drainer) Run(ctx context.Context) {
 		}
 		select {
 		case <-ctx.Done():
-			d.runShutdownDrain(ctx)
 			return
 		case <-ticker.C:
 		case <-d.wake:
 		}
-	}
-}
-
-func (d *Drainer) runShutdownDrain(ctx context.Context) {
-	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), d.cfg.ShutdownBudget)
-	defer cancel()
-	if _, err := d.DrainOnce(fctx); err != nil {
-		d.cfg.Logger.Info("durable queue final drain incomplete; items remain queued", "kind", d.cfg.Kind, "error", err)
 	}
 }
 
@@ -288,7 +286,7 @@ func (d *Drainer) runShutdownDrain(ctx context.Context) {
 // no-op. DrainOnce must not be called concurrently with Run on the same
 // Drainer.
 func (d *Drainer) DrainOnce(ctx context.Context) (DrainResult, error) {
-	res, _, err := d.drainPass(ctx, true)
+	res, _, err := d.drainPass(ctx, true, 0)
 	return res, err
 }
 
@@ -296,11 +294,15 @@ func (d *Drainer) nextClaimOwner() string {
 	return d.ownerPrefix + ":" + uuid.NewString()
 }
 
-func (d *Drainer) drainPass(ctx context.Context, maintain bool) (DrainResult, bool, error) {
+func (d *Drainer) drainPass(ctx context.Context, maintain bool, shutdownBudget time.Duration) (DrainResult, bool, error) {
 	var res DrainResult
 	if d.cfg.Enabled != nil && !d.cfg.Enabled() {
 		res.Remaining = -1
 		return res, false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		res.Remaining = -1
+		return res, false, err
 	}
 
 	var trimMore bool
@@ -312,10 +314,14 @@ func (d *Drainer) drainPass(ctx context.Context, maintain bool) (DrainResult, bo
 		}
 		res.Dropped += dropped
 		trimMore = more
+		if err := ctx.Err(); err != nil {
+			res.Remaining = -1
+			return res, trimMore, err
+		}
 	}
 
 	hitPoisonBound := false
-	if allowed, probe := d.claimAllowed(now); allowed {
+	if allowed, probe := d.claimAllowed(now); allowed && ctx.Err() == nil {
 		batch := d.cfg.BatchSize
 		if probe {
 			batch = 1
@@ -337,7 +343,7 @@ func (d *Drainer) drainPass(ctx context.Context, maintain bool) (DrainResult, bo
 				d.releaseRows(rows[i:], claimOwner)
 				break
 			}
-			out, poisoned := d.handleRow(ctx, row, claimOwner)
+			out, poisoned := d.handleRow(ctx, row, claimOwner, shutdownBudget)
 			if poisoned {
 				hitPoisonBound = true
 			}
@@ -359,10 +365,15 @@ func (d *Drainer) drainPass(ctx context.Context, maintain bool) (DrainResult, bo
 		}
 	}
 
+	if ctx.Err() != nil {
+		res.Remaining = -1
+		return res, trimMore, nil
+	}
+
 	// If an item reached MaxPermanent on this pass, trim poison immediately so
 	// OnDrop fires promptly and the item is never left pending until the next
 	// maintenance window.
-	if hitPoisonBound && ctx.Err() == nil {
+	if hitPoisonBound {
 		dropped, more, err := d.trimAndReport(ctx, d.cfg.Now().UTC())
 		if err != nil {
 			return res, trimMore, fmt.Errorf("poison trim: %w", err)
@@ -403,14 +414,56 @@ const (
 	rowOutcomeBlocked
 )
 
-func (d *Drainer) handleRow(ctx context.Context, row store.DurableQueueRow, claimOwner string) (outcome rowOutcome, hitPoisonBound bool) {
+// withShutdownBudget derives a context from ctx whose cancellation is delayed
+// by budget when ctx is cancelled, allowing an already-started handler to
+// finish cleanly within ShutdownBudget during Run shutdown.
+func withShutdownBudget(ctx context.Context, budget time.Duration) (context.Context, context.CancelFunc) {
+	if budget <= 0 {
+		return ctx, func() {}
+	}
+	bctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	var timerMu sync.Mutex
+	var timer *time.Timer
+	stopAfter := context.AfterFunc(ctx, func() {
+		timerMu.Lock()
+		defer timerMu.Unlock()
+		if bctx.Err() != nil {
+			return
+		}
+		timer = time.AfterFunc(budget, cancel)
+	})
+	stop := func() {
+		stopAfter()
+		timerMu.Lock()
+		if timer != nil {
+			timer.Stop()
+		}
+		timerMu.Unlock()
+		cancel()
+	}
+	return bctx, stop
+}
+
+func (d *Drainer) handleRow(ctx context.Context, row store.DurableQueueRow, claimOwner string, shutdownBudget time.Duration) (outcome rowOutcome, hitPoisonBound bool) {
+	if ctx.Err() != nil {
+		d.releaseRows([]store.DurableQueueRow{row}, claimOwner)
+		return rowOutcomeSkipped, false
+	}
 	lease := &itemLease{d: d, seq: row.Seq, owner: claimOwner}
 	held, err := lease.Renew(ctx)
 	if err != nil || !held {
+		if ctx.Err() != nil {
+			d.releaseRows([]store.DurableQueueRow{row}, claimOwner)
+		}
+		return rowOutcomeSkipped, false
+	}
+	if ctx.Err() != nil {
+		d.releaseRows([]store.DurableQueueRow{row}, claimOwner)
 		return rowOutcomeSkipped, false
 	}
 
-	hctx, hcancel := context.WithTimeout(ctx, d.cfg.HandlerTimeout)
+	bctx, stopBudget := withShutdownBudget(ctx, shutdownBudget)
+	hctx, hcancel := context.WithTimeout(bctx, d.cfg.HandlerTimeout)
 	rctx, stopRenew := context.WithCancel(hctx)
 	renewDone := make(chan struct{})
 	renewInterval := d.cfg.LeaseDuration / 3
@@ -440,13 +493,17 @@ func (d *Drainer) handleRow(ctx context.Context, row store.DurableQueueRow, clai
 	stopRenew()
 	<-renewDone
 	hcancel()
+	// Check bctx before stopBudget cancels it so we distinguish ShutdownBudget
+	// expiry from HandlerTimeout or lost-lease cancellation.
+	shutdownExpired := shutdownBudget > 0 && ctx.Err() != nil && bctx.Err() != nil
+	stopBudget()
 
 	// Use a short uncancelled context if the caller cancelled while the handler
 	// was finishing, so completion or lease release still reaches the store.
 	sctx := ctx
 	var scancel context.CancelFunc
 	if sctx.Err() != nil {
-		sctx, scancel = context.WithTimeout(context.Background(), time.Second)
+		sctx, scancel = context.WithTimeout(context.Background(), d.storeReleaseTimeout())
 		defer scancel()
 	}
 
@@ -481,6 +538,18 @@ func (d *Drainer) handleRow(ctx context.Context, row store.DurableQueueRow, clai
 			d.cfg.Logger.Warn("durable queue blocked-item release failed", "kind", d.cfg.Kind, "seq", row.Seq, "error", ferr)
 		}
 		return rowOutcomeBlocked, false
+	}
+
+	if shutdownExpired && !res.Permanent {
+		if _, ferr := d.cfg.Store.FailDurableItem(sctx, row.Seq, claimOwner, store.DurableQueueFailure{
+			CountAttempt:  false,
+			Permanent:     false,
+			NextAttemptAt: row.NextAttemptAt,
+			LastError:     row.LastError,
+		}); ferr != nil {
+			d.cfg.Logger.Warn("durable queue shutdown lease release failed", "kind", d.cfg.Kind, "seq", row.Seq, "error", ferr)
+		}
+		return rowOutcomeSkipped, false
 	}
 
 	now := d.cfg.Now().UTC()
@@ -536,9 +605,17 @@ func (d *Drainer) invokeHandler(ctx context.Context, item Item, lease Lease) (re
 	return d.cfg.Handler(ctx, item, lease)
 }
 
+func (d *Drainer) storeReleaseTimeout() time.Duration {
+	if d.cfg.ShutdownBudget > 0 && d.cfg.ShutdownBudget < time.Second {
+		return max(d.cfg.ShutdownBudget, 25*time.Millisecond)
+	}
+	return time.Second
+}
+
 func (d *Drainer) releaseRows(rows []store.DurableQueueRow, claimOwner string) {
+	timeout := d.storeReleaseTimeout()
 	for _, r := range rows {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		_, _ = d.cfg.Store.FailDurableItem(ctx, r.Seq, claimOwner, store.DurableQueueFailure{
 			CountAttempt:  false,
 			NextAttemptAt: r.NextAttemptAt,
