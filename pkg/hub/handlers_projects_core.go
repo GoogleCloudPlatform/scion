@@ -3632,7 +3632,9 @@ func (s *Server) getProject(w http.ResponseWriter, r *http.Request, id string) {
 	}
 
 	// Ensure associated groups exist (backfill for projects created before
-	// group support was added). These calls are idempotent.
+	// group support was added). These calls are idempotent, and must remain
+	// after the SECURITY-GATE CheckAccess check above so denied callers never
+	// trigger store writes (ptone/scion#1393).
 	s.createProjectGroup(ctx, project)
 	s.createProjectMembersGroup(ctx, project)
 
