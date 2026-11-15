@@ -39,6 +39,12 @@ import (
 // reference.
 const auditWriteTimeout = 1 * time.Second
 
+// auditCancelDrainGrace bounds how long CloseAuditWriter waits after cancelling
+// stuck mutation-audit write contexts for those goroutines to unwind before
+// returning, so cooperative writes exit before store.Close() runs without
+// letting a non-cooperative store hang shutdown.
+const auditCancelDrainGrace = 250 * time.Millisecond
+
 // emitDecisionAudit builds and emits a decision audit record from a Decide call.
 func (a *AuthzService) emitDecisionAudit(ctx context.Context, request AuthzRequest, decision Decision) {
 	// Sampling: always audit deny decisions; sample allow decisions, unless
@@ -198,11 +204,14 @@ func (t *mutationAuditTracker) goTracked(timeout time.Duration, fn func(ctx cont
 }
 
 // stop closes admission for new mutation audit writes and waits for in-flight
-// writes to finish, bounded by min(ctx deadline, grace). If the wait expires
+// writes to finish, bounded by min(ctx deadline, grace). If that wait expires
 // while writes are still running, stop cancels their contexts so blocked store
-// calls abort promptly and returns the number of writes that had not finished.
-// Safe to call more than once.
-func (t *mutationAuditTracker) stop(ctx context.Context, grace time.Duration) int {
+// calls abort promptly and waits up to cancelGrace for those goroutines to
+// unwind before returning, so cooperative writes finish exiting before the
+// store closes without letting a non-cooperative store hang shutdown. It
+// returns how many writes were cancelled at the bound and how many remained
+// running after cancelGrace. Safe to call more than once.
+func (t *mutationAuditTracker) stop(ctx context.Context, grace, cancelGrace time.Duration) (cancelled, remaining int) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -210,7 +219,7 @@ func (t *mutationAuditTracker) stop(ctx context.Context, grace time.Duration) in
 	t.closed = true
 	if len(t.cancels) == 0 {
 		t.mu.Unlock()
-		return 0
+		return 0, 0
 	}
 	if t.drained == nil {
 		t.drained = make(chan struct{})
@@ -222,18 +231,36 @@ func (t *mutationAuditTracker) stop(ctx context.Context, grace time.Duration) in
 	defer timer.Stop()
 	select {
 	case <-drained:
-		return 0
+		return 0, 0
 	case <-ctx.Done():
 	case <-timer.C:
 	}
 
 	t.mu.Lock()
-	remaining := len(t.cancels)
+	cancelled = len(t.cancels)
+	if cancelled == 0 {
+		t.mu.Unlock()
+		return 0, 0
+	}
 	for _, cancel := range t.cancels {
 		cancel()
 	}
 	t.mu.Unlock()
-	return remaining
+
+	if cancelGrace > 0 {
+		cancelTimer := time.NewTimer(cancelGrace)
+		defer cancelTimer.Stop()
+		select {
+		case <-drained:
+			return cancelled, 0
+		case <-cancelTimer.C:
+		}
+	}
+
+	t.mu.Lock()
+	remaining = len(t.cancels)
+	t.mu.Unlock()
+	return cancelled, remaining
 }
 
 // emitMutationAudit creates a mutation audit record from a handler context.
@@ -241,11 +268,14 @@ func (t *mutationAuditTracker) stop(ctx context.Context, grace time.Duration) in
 // asynchronously so handlers are not blocked. Errors are logged via the logger
 // captured at call time and do not fail the request (best-effort).
 //
-// CloseAuditWriter drains admitted writes up to min(ctx deadline,
-// auditWriteTimeout) before the store closes; any write still blocked at that
-// bound has its context cancelled (logging "failed to emit mutation audit
-// record"), and calls arriving after admission closes are dropped with a
-// warning rather than racing a closed store (ptone/scion#8111).
+// Shutdown pending-records contract (ptone/scion#8111): CloseAuditWriter joins
+// admitted writes up to min(ctx deadline, auditWriteTimeout) before the store
+// closes. Writes still blocked at that bound have their contexts cancelled and
+// are given up to auditCancelDrainGrace to exit before CloseAuditWriter
+// returns; calls arriving after admission closes are dropped with a warning.
+// Mutation audit emission is best-effort, so records cancelled at the shutdown
+// bound or arriving after admission closes can be lost at shutdown rather than
+// hanging shutdown or writing to a closed store.
 func (s *Server) emitMutationAudit(ctx context.Context, record *store.MutationAuditRecord) {
 	// E.2a: consolidated actor/credential-snapshot/correlation helper (plan
 	// §3.3), replacing this function's own copy of the extraction logic.

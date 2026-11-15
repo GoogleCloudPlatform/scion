@@ -7768,13 +7768,16 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 
 // CloseAuditWriter stops async mutation-audit admission, joins in-flight
 // emitMutationAudit store writes up to min(ctx deadline, auditWriteTimeout)
-// (cancelling any write still blocked at that bound), and closes the
+// (cancelling any write still blocked at that bound and waiting up to
+// auditCancelDrainGrace for cancelled goroutines to unwind), and closes the
 // asynchronous decision/broker audit writer: admission stops and queued
 // records are drained, bounded by min(ctx deadline, the writer's 5s drain
-// timeout). Records emitted afterwards are dropped (mutation audit) or counted
-// as closed (decision/broker audit). It is idempotent and nil-safe. It returns
-// asyncwrite.ErrWorkerStuck when a noncooperative log handler is still blocked
-// at the deadline.
+// timeout). Mutation audit emission is best-effort: writes cancelled at the
+// shutdown bound or calls arriving after admission closes are lost (with
+// warning logs) rather than hanging shutdown or racing store close; decision
+// and broker audit records emitted afterwards are counted as closed. It is
+// idempotent and nil-safe. It returns asyncwrite.ErrWorkerStuck when a
+// noncooperative log handler is still blocked at the deadline.
 //
 // Every after-drain path calls it, so it first writes the browser policy
 // report refusals counted while requests were draining (the report
@@ -7784,9 +7787,16 @@ func (s *Server) CloseAuditWriter(ctx context.Context) error {
 	if s.cspReports != nil {
 		s.cspReports.Close()
 	}
-	if n := s.mutationAuditWork.stop(ctx, auditWriteTimeout); n > 0 {
-		slog.Warn("Mutation audit writes still running after shutdown wait; cancelled them",
-			"running", n, "timeout", auditWriteTimeout)
+	if cancelled, remaining := s.mutationAuditWork.stop(ctx, auditWriteTimeout, auditCancelDrainGrace); remaining > 0 {
+		slog.Warn("Mutation audit writes still running after cancellation grace; proceeding with shutdown",
+			"cancelled", cancelled,
+			"running", remaining,
+			"timeout", auditWriteTimeout,
+			"cancel_grace", auditCancelDrainGrace)
+	} else if cancelled > 0 {
+		slog.Warn("Cancelled in-flight mutation audit writes at shutdown deadline",
+			"cancelled", cancelled,
+			"timeout", auditWriteTimeout)
 	}
 	if s.auditWriter == nil {
 		return nil
