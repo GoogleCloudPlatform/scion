@@ -76,7 +76,7 @@ jobs:
             # ensures skipped runs (e.g. Nightly with no new commits) never supersede
             # a pending deploy run in build-docs's concurrency group.
             MATCHING_JOBS=$(gh api "repos/${GH_REPO}/actions/runs/${WORKFLOW_RUN_ID}/jobs?per_page=100" --paginate --slurp \
-              --jq '[.[].jobs[] | select((.name | endswith("Build and Upload Docs Snapshot")) and .conclusion == "success")] | length')
+              | jq '[.[].jobs[] | select((.name | endswith("Build and Upload Docs Snapshot")) and .conclusion == "success")] | length')
             if [[ "${MATCHING_JOBS:-0}" -gt 0 && "$GH_REPO" == "GoogleCloudPlatform/scion" && "$GIT_REF" == "refs/heads/main" ]]; then
               echo "should_build=true" >> "$GITHUB_OUTPUT"
               echo "should_deploy=true" >> "$GITHUB_OUTPUT"

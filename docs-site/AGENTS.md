@@ -144,7 +144,7 @@ writes YAML by default. The JSON schema lives at
 - **Tests & Type Checks**: Run `npm test` and `npm run check` (`astro check`) before
   committing changes to `docs-site/` scripts, plugins, or Astro components. Unit tests in
   `test/` must be hermetic and must not depend on git refs or tags beyond `HEAD` (check
-  historical inputs in under `test/fixtures/`). When changing versioning or link-rewriting
+  historical inputs into `test/fixtures/`). When changing versioning or link-rewriting
   code, also verify a subpath snapshot build:
   `DOCS_BASE=/scion/v0.3.0 DOCS_CHANNEL=stable DOCS_VERSION=v0.3.0 npm run build && DOCS_BASE=/scion/v0.3.0 npm run verify-snapshot`.
 - **Link Check**: `starlight-links-validator` runs during `npm run build` (Node ≥ 22).
