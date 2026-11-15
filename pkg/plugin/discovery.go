@@ -25,13 +25,14 @@ import (
 
 // DiscoveredPlugin represents a plugin found during discovery.
 type DiscoveredPlugin struct {
-	Name        string
-	Type        string // "broker" (additional types may be added in future)
-	Path        string // absolute path to the binary (empty for self-managed plugins)
-	Config      map[string]string
-	FromConfig  bool   // true if found via settings, false if auto-discovered
-	SelfManaged bool   // true if the plugin manages its own process lifecycle
-	Address     string // RPC address for self-managed plugins
+	Name         string
+	Type         string // "broker" (additional types may be added in future)
+	Path         string // absolute path to the binary (empty for self-managed plugins)
+	ExplicitPath bool   // true when Path came from an explicit PluginEntry.Path setting
+	Config       map[string]string
+	FromConfig   bool   // true if found via settings, false if auto-discovered
+	SelfManaged  bool   // true if the plugin manages its own process lifecycle
+	Address      string // RPC address for self-managed plugins
 }
 
 // DiscoverPlugins finds all available plugins from settings configuration and
@@ -61,17 +62,18 @@ func DiscoverPlugins(cfg PluginsConfig, pluginsDir string, logger *slog.Logger) 
 			})
 			continue
 		}
-		path := resolvePluginPath(name, PluginTypeBroker, entry.Path, pluginsDir, logger)
+		path, explicit := resolvePluginPath(name, PluginTypeBroker, entry.Path, pluginsDir, logger)
 		if path == "" {
 			logger.Warn("Plugin binary not found", "type", PluginTypeBroker, "name", name)
 			continue
 		}
 		discovered = append(discovered, DiscoveredPlugin{
-			Name:       name,
-			Type:       PluginTypeBroker,
-			Path:       path,
-			Config:     entry.Config,
-			FromConfig: true,
+			Name:         name,
+			Type:         PluginTypeBroker,
+			Path:         path,
+			ExplicitPath: explicit,
+			Config:       entry.Config,
+			FromConfig:   true,
 		})
 	}
 
@@ -96,33 +98,35 @@ func DiscoverPlugins(cfg PluginsConfig, pluginsDir string, logger *slog.Logger) 
 	return discovered
 }
 
-// resolvePluginPath resolves the absolute path to a plugin binary.
-// It checks: explicit path → plugins dir → $PATH.
-func resolvePluginPath(name, pluginType, explicitPath, pluginsDir string, logger *slog.Logger) string {
+// resolvePluginPath resolves the absolute path to a plugin binary and reports
+// whether it came from explicitPath. It checks: explicit path → plugins dir → $PATH.
+func resolvePluginPath(name, pluginType, explicitPath, pluginsDir string, logger *slog.Logger) (string, bool) {
 	binaryName := PluginBinaryPrefix + name
 
 	// 1. Explicit path from settings
 	if explicitPath != "" {
 		expanded := expandPath(explicitPath)
 		if _, err := os.Stat(expanded); err == nil {
-			return expanded
+			return expanded, true
 		}
 		logger.Warn("Explicit plugin path not found", "path", explicitPath, "name", name)
 	}
 
 	// 2. Scan ~/.scion/plugins/<type>/ directory
-	typeDir := filepath.Join(pluginsDir, pluginType)
-	candidate := filepath.Join(typeDir, binaryName)
-	if _, err := os.Stat(candidate); err == nil {
-		return candidate
+	if pluginsDir != "" {
+		typeDir := filepath.Join(pluginsDir, pluginType)
+		candidate := filepath.Join(typeDir, binaryName)
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, false
+		}
 	}
 
 	// 3. Search $PATH
 	if path, err := exec.LookPath(binaryName); err == nil {
-		return path
+		return path, false
 	}
 
-	return ""
+	return "", false
 }
 
 // scanPluginDir scans a directory for plugin binaries matching the naming convention.

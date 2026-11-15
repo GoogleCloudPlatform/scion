@@ -97,7 +97,7 @@ type IntegrationManager interface {
 	Reconnect(pluginType, name string) error
 	BrokerHealthCheck(name string) (status, message string, details map[string]string, err error)
 	BrokerInfo(name string) (version, channelID string, capabilities []string, err error)
-	UpdatePlugin(name string, repoPath string) error
+	UpdatePlugin(name string, repoPath string) (plugin.UpdateResult, error)
 	InstallPlugin(name, repoPath, pluginsDir, configFile string) error
 	LoadOne(pluginType, name string, entry plugin.PluginEntry, pluginsDir string) error
 	GetBroker(name string) (eventbus.EventBus, error)
@@ -849,7 +849,17 @@ func (s *Server) handleUpdateIntegration(w http.ResponseWriter, r *http.Request,
 		// Non-fatal — continue with the update.
 	}
 
-	if err := mgr.UpdatePlugin(name, repoPath); err != nil {
+	updateRes, err := mgr.UpdatePlugin(name, repoPath)
+	if err != nil {
+		var permErr *plugin.PermissionError
+		if errors.As(err, &permErr) {
+			slog.Warn("Failed to update integration due to permissions", "plugin", name, "binary", permErr.BinaryPath, "error", err)
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeUnprocessable,
+				permErr.UserMessage(), map[string]interface{}{
+					"guidance": permErr.Guidance(repoPath),
+				})
+			return
+		}
 		slog.Error("Failed to update integration", "plugin", name, "error", err)
 		InternalError(w)
 		return
@@ -860,8 +870,22 @@ func (s *Server) handleUpdateIntegration(w http.ResponseWriter, r *http.Request,
 	}
 
 	resp := map[string]interface{}{"status": "ok"}
+	var warnings []string
+	if updateRes.Relocated {
+		slog.Warn("Integration binary relocated during update",
+			"plugin", name, "previous_binary", updateRes.PreviousPath, "binary", updateRes.BinaryPath)
+		resp["relocated_from"] = updateRes.PreviousPath
+		resp["binary_path"] = updateRes.BinaryPath
+		warnings = append(warnings, fmt.Sprintf(
+			"plugin %q binary in %s could not be overwritten; installed updated binary to %s (stale copy at %s was left untouched)",
+			name, filepath.Dir(updateRes.PreviousPath), updateRes.BinaryPath, updateRes.PreviousPath,
+		))
+	}
 	if err := s.refreshBrokerSpoke(mgr, name); err != nil { // also logged inside
-		resp["warnings"] = []string{fmt.Sprintf("plugin %q updated, but its message routing was not fully restored: %v", name, err)}
+		warnings = append(warnings, fmt.Sprintf("plugin %q updated, but its message routing was not fully restored: %v", name, err))
+	}
+	if len(warnings) > 0 {
+		resp["warnings"] = warnings
 	}
 
 	writeJSON(w, http.StatusOK, resp)
@@ -986,8 +1010,7 @@ func (s *Server) handleInstallIntegration(w http.ResponseWriter, r *http.Request
 		// Config file and settings.yaml were written above — no build needed.
 		slog.Info("Plugin binary found on PATH, skipping build", "plugin", name, "binary", binaryName)
 
-		binaryPath, _ := exec.LookPath(binaryName)
-		if err := mgr.LoadOne(plugin.PluginTypeBroker, name, plugin.PluginEntry{Path: binaryPath, ConfigFile: configFilePath}, pluginsDir); err != nil {
+		if err := mgr.LoadOne(plugin.PluginTypeBroker, name, plugin.PluginEntry{ConfigFile: configFilePath}, pluginsDir); err != nil {
 			// LoadOne failing due to missing required config (e.g. bot_token) is
 			// expected on first install — the plugin is installed but not yet
 			// configured. Log a warning and continue; the operator must configure

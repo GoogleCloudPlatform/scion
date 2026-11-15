@@ -16,6 +16,7 @@ package plugin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -24,6 +25,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
@@ -41,6 +43,7 @@ type Manager struct {
 	configs         map[string]DiscoveredPlugin // "type:name" -> original config (for reconnection)
 	configFiles     map[string]string           // "type:name" -> config file path (immutable after load)
 	pluginEntries   map[string]PluginEntry      // "type:name" -> original PluginEntry (for mode resolution)
+	pluginsDir      string                      // user plugins directory passed to LoadAll/LoadOne
 	mu              sync.RWMutex
 	logger          *slog.Logger
 	brokerCallbacks *HostCallbacksForwarder // lazily-wired host callbacks for broker plugins
@@ -123,6 +126,12 @@ func (f *HostCallbacksForwarder) CancelSubscription(pattern string) error {
 
 // LoadAll discovers and loads all plugins from the given configuration and plugins directory.
 func (m *Manager) LoadAll(cfg PluginsConfig, pluginsDir string) error {
+	if pluginsDir != "" {
+		m.mu.Lock()
+		m.pluginsDir = pluginsDir
+		m.mu.Unlock()
+	}
+
 	// Handle gRPC mode entries before standard discovery.
 	for name, entry := range cfg.Broker {
 		if entry.ResolvedDeploymentMode() == DeploymentModeHA {
@@ -169,6 +178,11 @@ func (m *Manager) LoadAll(cfg PluginsConfig, pluginsDir string) error {
 
 // LoadOne loads a single plugin by type and name from the given configuration.
 func (m *Manager) LoadOne(pluginType, name string, entry PluginEntry, pluginsDir string) error {
+	if pluginsDir != "" {
+		m.mu.Lock()
+		m.pluginsDir = pluginsDir
+		m.mu.Unlock()
+	}
 	if entry.ConfigFile != "" {
 		if entry.Config == nil {
 			entry.Config = make(map[string]string)
@@ -188,16 +202,17 @@ func (m *Manager) LoadOne(pluginType, name string, entry PluginEntry, pluginsDir
 			Address:     entry.Address,
 		})
 	}
-	path := resolvePluginPath(name, pluginType, entry.Path, pluginsDir, m.logger)
+	path, explicit := resolvePluginPath(name, pluginType, entry.Path, pluginsDir, m.logger)
 	if path == "" {
 		return fmt.Errorf("plugin binary not found: %s/%s", pluginType, name)
 	}
 	return m.loadPlugin(DiscoveredPlugin{
-		Name:       name,
-		Type:       pluginType,
-		Path:       path,
-		Config:     entry.Config,
-		FromConfig: true,
+		Name:         name,
+		Type:         pluginType,
+		Path:         path,
+		ExplicitPath: explicit,
+		Config:       entry.Config,
+		FromConfig:   true,
 	})
 }
 
@@ -888,9 +903,167 @@ func (m *Manager) BrokerInfo(name string) (version, channelID string, capabiliti
 	return info.Version, info.ChannelID, info.Capabilities, nil
 }
 
+// mkdirTemp creates a temporary directory; overridden in tests to simulate
+// read-only mounts (EROFS) without requiring mount privileges.
+var mkdirTemp = os.MkdirTemp
+
+func isUnwritable(err error) bool {
+	return errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.EROFS)
+}
+
+// UpdateResult describes the binary placement after Manager.UpdatePlugin succeeds.
+type UpdateResult struct {
+	BinaryPath   string
+	PreviousPath string
+	Relocated    bool
+}
+
+// PermissionError reports that the Hub process lacks filesystem permission to
+// stage or install a rebuilt plugin binary at BinaryPath.
+type PermissionError struct {
+	Plugin       string
+	BinaryPath   string
+	PluginsDir   string
+	ExplicitPath bool
+	Err          error
+}
+
+func (e *PermissionError) Error() string {
+	return fmt.Sprintf("permission denied installing plugin %q at %s: %v", e.Plugin, e.BinaryPath, e.Err)
+}
+
+func (e *PermissionError) Unwrap() error {
+	return e.Err
+}
+
+// UserMessage returns a concise, human-readable summary suitable for the Admin UI.
+func (e *PermissionError) UserMessage() string {
+	if e.ExplicitPath {
+		return fmt.Sprintf("Cannot update plugin %q: configured binary path %s is in a directory not writable by the Hub process", e.Plugin, e.BinaryPath)
+	}
+	return fmt.Sprintf("Cannot update plugin %q: plugins directory %s is not writable by the Hub process", e.Plugin, filepath.Dir(e.BinaryPath))
+}
+
+// Guidance returns actionable operator instructions (including exact commands)
+// for resolving the permission error without privilege escalation in the Hub.
+func (e *PermissionError) Guidance(repoPath string) string {
+	if e.ExplicitPath {
+		binaryName := PluginBinaryPrefix + e.Plugin
+		sourceDir := filepath.Join(repoPath, "extras", "scion-"+e.Plugin)
+		brokerDir := "~/.scion/plugins/broker"
+		if e.PluginsDir != "" {
+			brokerDir = filepath.Join(e.PluginsDir, PluginTypeBroker)
+		}
+		return fmt.Sprintf(
+			"Remove server.plugins.broker.%s.path from settings.yaml and restart the Hub server (`scion server restart` or your service manager) so Scion can manage updates in %s — then retry Update (or use Install if %s is not on the Hub's PATH). Alternatively, rebuild manually (`tmp=$(mktemp -d) && go -C %s build -o \"$tmp/%s\" ./cmd/%s && sudo install -m 0755 \"$tmp/%s\" %s && rm -rf \"$tmp\"`) and click Restart.",
+			e.Plugin, brokerDir, binaryName, sourceDir, binaryName, binaryName, binaryName, e.BinaryPath,
+		)
+	}
+	dir := filepath.Dir(e.BinaryPath)
+	return fmt.Sprintf(
+		"Ensure %s is owned and writable by the Hub service user (for example: `sudo install -d -m 0755 -o <hub-user> %s`), then retry Update.",
+		dir, dir,
+	)
+}
+
+func (m *Manager) effectivePluginsDir() (string, error) {
+	m.mu.RLock()
+	dir := m.pluginsDir
+	m.mu.RUnlock()
+	if dir != "" {
+		return dir, nil
+	}
+	return DefaultPluginsDir()
+}
+
+// preparePluginBuildTarget selects the destination binary path and creates a
+// staging directory on the same filesystem so os.Rename is atomic and any
+// directory-permission failure is caught before compiling or stopping the
+// running plugin. When the current binary lives in an unwritable directory
+// (such as /usr/local/bin owned by root or on a read-only mount) and no
+// explicit path was pinned in settings, it relocates the updated binary to
+// <pluginsDir>/broker/ (the same location InstallPlugin uses and
+// resolvePluginPath prefers over $PATH).
+func (m *Manager) preparePluginBuildTarget(name string, dp DiscoveredPlugin) (binaryPath, tmpDir string, relocated bool, err error) {
+	binaryPath = dp.Path
+	if binaryPath == "" {
+		pluginsDir, dirErr := m.effectivePluginsDir()
+		if dirErr != nil {
+			return "", "", false, dirErr
+		}
+		targetDir := filepath.Join(pluginsDir, PluginTypeBroker)
+		binaryPath = filepath.Join(targetDir, PluginBinaryPrefix+name)
+		if mkErr := os.MkdirAll(targetDir, 0o755); mkErr != nil {
+			if isUnwritable(mkErr) {
+				return "", "", false, &PermissionError{
+					Plugin:       name,
+					BinaryPath:   binaryPath,
+					PluginsDir:   pluginsDir,
+					ExplicitPath: false,
+					Err:          mkErr,
+				}
+			}
+			return "", "", false, fmt.Errorf("failed to create plugins directory %s: %w", targetDir, mkErr)
+		}
+	}
+
+	tmpDir, err = mkdirTemp(filepath.Dir(binaryPath), ".scion-plugin-build-*")
+	if err == nil {
+		return binaryPath, tmpDir, false, nil
+	}
+	if !isUnwritable(err) {
+		return "", "", false, fmt.Errorf("failed to prepare staging directory for plugin %q: %w", name, err)
+	}
+	if dp.ExplicitPath {
+		pluginsDir, _ := m.effectivePluginsDir()
+		return "", "", false, &PermissionError{
+			Plugin:       name,
+			BinaryPath:   binaryPath,
+			PluginsDir:   pluginsDir,
+			ExplicitPath: true,
+			Err:          err,
+		}
+	}
+
+	pluginsDir, dirErr := m.effectivePluginsDir()
+	if dirErr != nil {
+		return "", "", false, dirErr
+	}
+	fallbackDir := filepath.Join(pluginsDir, PluginTypeBroker)
+	fallbackPath := filepath.Join(fallbackDir, PluginBinaryPrefix+name)
+	if mkErr := os.MkdirAll(fallbackDir, 0o755); mkErr != nil {
+		if isUnwritable(mkErr) {
+			return "", "", false, &PermissionError{
+				Plugin:       name,
+				BinaryPath:   fallbackPath,
+				PluginsDir:   pluginsDir,
+				ExplicitPath: false,
+				Err:          mkErr,
+			}
+		}
+		return "", "", false, fmt.Errorf("failed to create plugins directory %s: %w", fallbackDir, mkErr)
+	}
+	tmpDir, err = mkdirTemp(fallbackDir, ".scion-plugin-build-*")
+	if err != nil {
+		if isUnwritable(err) {
+			return "", "", false, &PermissionError{
+				Plugin:       name,
+				BinaryPath:   fallbackPath,
+				PluginsDir:   pluginsDir,
+				ExplicitPath: false,
+				Err:          err,
+			}
+		}
+		return "", "", false, fmt.Errorf("failed to prepare staging directory in %s: %w", fallbackDir, err)
+	}
+	m.logger.Warn("Plugin directory is not writable; installing updated binary to user plugins directory (previous binary remains on disk)",
+		"name", name, "previous_binary", binaryPath, "binary", fallbackPath)
+	return fallbackPath, tmpDir, true, nil
+}
+
 // UpdatePlugin rebuilds a hub-managed (non-self-managed) plugin binary from
 // source and restarts it. Self-managed plugins cannot be updated this way.
-func (m *Manager) UpdatePlugin(name string, repoPath string) error {
+func (m *Manager) UpdatePlugin(name string, repoPath string) (UpdateResult, error) {
 	key := PluginTypeBroker + ":" + name
 	m.mu.RLock()
 	dp, ok := m.configs[key]
@@ -898,19 +1071,24 @@ func (m *Manager) UpdatePlugin(name string, repoPath string) error {
 	m.mu.RUnlock()
 
 	if !ok {
-		return fmt.Errorf("plugin %q is not loaded", name)
+		return UpdateResult{}, fmt.Errorf("plugin %q is not loaded", name)
 	}
 	if isSelf {
-		return fmt.Errorf("plugin %q is self-managed and cannot be updated this way", name)
+		return UpdateResult{}, fmt.Errorf("plugin %q is self-managed and cannot be updated this way", name)
 	}
 
 	sourceDir := filepath.Join(repoPath, "extras", "scion-"+name)
 	if _, err := os.Stat(sourceDir); err != nil {
-		return fmt.Errorf("plugin source directory not found: %s", sourceDir)
+		return UpdateResult{}, fmt.Errorf("plugin source directory not found: %s", sourceDir)
 	}
 
-	binaryPath := dp.Path
-	tmpBinaryPath := binaryPath + ".tmp"
+	previousPath := dp.Path
+	binaryPath, tmpDir, relocated, err := m.preparePluginBuildTarget(name, dp)
+	if err != nil {
+		return UpdateResult{}, err
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+	tmpBinaryPath := filepath.Join(tmpDir, PluginBinaryPrefix+name)
 
 	m.logger.Info("Building plugin from source",
 		"name", name, "source", sourceDir, "binary", binaryPath)
@@ -918,28 +1096,75 @@ func (m *Manager) UpdatePlugin(name string, repoPath string) error {
 	tidyCmd := exec.Command("go", "mod", "tidy")
 	tidyCmd.Dir = sourceDir
 	if output, err := tidyCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("go mod tidy failed for plugin %q: %w\n%s", name, err, string(output))
+		return UpdateResult{}, fmt.Errorf("go mod tidy failed for plugin %q: %w\n%s", name, err, string(output))
 	}
 
 	buildCmd := exec.Command("go", "build", "-o", tmpBinaryPath, "./cmd/scion-plugin-"+name)
 	buildCmd.Dir = sourceDir
 	if output, err := buildCmd.CombinedOutput(); err != nil {
-		_ = os.Remove(tmpBinaryPath)
-		return fmt.Errorf("go build failed for plugin %q: %w\n%s", name, err, string(output))
+		return UpdateResult{}, fmt.Errorf("go build failed for plugin %q: %w\n%s", name, err, string(output))
 	}
-	defer func() { _ = os.Remove(tmpBinaryPath) }()
 
 	lock := m.restartLock(key)
 	lock.Lock()
 	defer lock.Unlock()
 
-	m.replaceClient(key, nil, true)
-
-	if err := os.Rename(tmpBinaryPath, binaryPath); err != nil {
-		return fmt.Errorf("failed to move new binary into place for plugin %q: %w", name, err)
+	m.mu.RLock()
+	_, stillLoaded := m.configs[key]
+	stopping := m.stopping.Load()
+	m.mu.RUnlock()
+	if stopping {
+		return UpdateResult{}, fmt.Errorf("plugin manager is shutting down; aborting update for plugin %q", name)
+	}
+	if !stillLoaded {
+		return UpdateResult{}, fmt.Errorf("plugin %q was unloaded during update", name)
 	}
 
-	return m.loadPlugin(dp)
+	if err := os.Rename(tmpBinaryPath, binaryPath); err != nil {
+		if isUnwritable(err) {
+			pluginsDir, _ := m.effectivePluginsDir()
+			return UpdateResult{}, &PermissionError{
+				Plugin:       name,
+				BinaryPath:   binaryPath,
+				PluginsDir:   pluginsDir,
+				ExplicitPath: dp.ExplicitPath && !relocated,
+				Err:          err,
+			}
+		}
+		return UpdateResult{}, fmt.Errorf("failed to move new binary into place for plugin %q: %w", name, err)
+	}
+
+	m.mu.Lock()
+	latest, exists := m.configs[key]
+	if stoppingNow := m.stopping.Load(); stoppingNow || !exists {
+		m.mu.Unlock()
+		if relocated {
+			_ = os.Remove(binaryPath)
+		}
+		if stoppingNow {
+			return UpdateResult{}, fmt.Errorf("plugin manager is shutting down; aborting update for plugin %q", name)
+		}
+		return UpdateResult{}, fmt.Errorf("plugin %q was unloaded during update", name)
+	}
+	dp = latest
+	dp.Path = binaryPath
+	if relocated {
+		dp.ExplicitPath = false
+	}
+	m.configs[key] = dp
+	m.mu.Unlock()
+
+	m.replaceClient(key, nil, true)
+
+	if err := m.loadPlugin(dp); err != nil {
+		return UpdateResult{}, err
+	}
+	res := UpdateResult{BinaryPath: binaryPath}
+	if relocated {
+		res.Relocated = true
+		res.PreviousPath = previousPath
+	}
+	return res, nil
 }
 
 // InstallPlugin builds a plugin binary from source and loads it into the manager.
@@ -981,7 +1206,7 @@ func (m *Manager) InstallPlugin(name, repoPath, pluginsDir, configFile string) e
 		return fmt.Errorf("go build failed for plugin %q: %w\n%s", name, err, string(output))
 	}
 
-	return m.LoadOne(PluginTypeBroker, name, PluginEntry{Path: targetPath, ConfigFile: configFile}, pluginsDir)
+	return m.LoadOne(PluginTypeBroker, name, PluginEntry{ConfigFile: configFile}, pluginsDir)
 }
 
 // BeginShutdown records that the owner has started shutting down, before

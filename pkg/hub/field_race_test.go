@@ -349,7 +349,9 @@ func (*noopPluginManager) BrokerHealthCheck(_ string) (string, string, map[strin
 func (*noopPluginManager) BrokerInfo(_ string) (string, string, []string, error) {
 	return "", "", nil, nil
 }
-func (*noopPluginManager) UpdatePlugin(_, _ string) error                            { return nil }
+func (*noopPluginManager) UpdatePlugin(_, _ string) (plugin.UpdateResult, error) {
+	return plugin.UpdateResult{}, nil
+}
 func (*noopPluginManager) InstallPlugin(_, _, _, _ string) error                     { return nil }
 func (*noopPluginManager) LoadOne(_, _ string, _ plugin.PluginEntry, _ string) error { return nil }
 func (*noopPluginManager) GetBroker(_ string) (eventbus.EventBus, error)             { return nil, nil }

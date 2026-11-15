@@ -3177,6 +3177,7 @@ type mockIntegrationManager struct {
 	configureErr       error
 	replaceConfigErr   error
 	reconnectErr       error
+	updateResult       plugin.UpdateResult
 	updateErr          error
 	installErr         error
 	configureCalls     []string
@@ -5999,9 +6000,9 @@ func (m *mockIntegrationManager) BrokerInfo(name string) (string, string, []stri
 	return "v0.8.2", "telegram", []string{"send", "receive"}, nil
 }
 
-func (m *mockIntegrationManager) UpdatePlugin(name string, repoPath string) error {
+func (m *mockIntegrationManager) UpdatePlugin(name string, repoPath string) (plugin.UpdateResult, error) {
 	m.updateCalls = append(m.updateCalls, name)
-	return m.updateErr
+	return m.updateResult, m.updateErr
 }
 
 func (m *mockIntegrationManager) InstallPlugin(name, repoPath, pluginsDir, configFile string) error {

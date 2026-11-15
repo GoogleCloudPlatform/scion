@@ -1,0 +1,606 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build linux
+
+package plugin
+
+import (
+	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sync"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// writeFakePluginSource writes a minimal stdlib-only Go module under
+// <repoDir>/extras/scion-<name>/cmd/scion-plugin-<name> that execs the current
+// test binary in fake-broker helper mode. It has zero external dependencies so
+// go mod tidy and go build run offline.
+func writeFakePluginSource(t *testing.T, repoDir, name string) {
+	t.Helper()
+	exe, err := os.Executable()
+	require.NoError(t, err)
+
+	modDir := filepath.Join(repoDir, "extras", "scion-"+name)
+	cmdDir := filepath.Join(modDir, "cmd", "scion-plugin-"+name)
+	require.NoError(t, os.MkdirAll(cmdDir, 0o755))
+
+	goMod := fmt.Sprintf("module example.com/scion-%s\n\ngo 1.21\n", name)
+	require.NoError(t, os.WriteFile(filepath.Join(modDir, "go.mod"), []byte(goMod), 0o644))
+
+	mainGo := fmt.Sprintf(`package main
+
+import (
+	"os"
+	"syscall"
+)
+
+func main() {
+	env := append(os.Environ(), %q)
+	_ = syscall.Exec(%q, os.Args, env)
+}
+`, supervisorHelperEnv+"=1", exe)
+	require.NoError(t, os.WriteFile(filepath.Join(cmdDir, "main.go"), []byte(mainGo), 0o644))
+}
+
+// writeFakePluginWrapper writes a shell wrapper script at path that execs the
+// current test binary in fake-broker helper mode.
+func writeFakePluginWrapper(t *testing.T, path string) {
+	t.Helper()
+	exe, err := os.Executable()
+	require.NoError(t, err)
+	script := fmt.Sprintf("#!/bin/sh\nexport %s=1\nexec %q \"$@\"\n", supervisorHelperEnv, exe)
+	require.NoError(t, os.WriteFile(path, []byte(script), 0o755))
+}
+
+func TestUpdatePlugin_UnwritablePathDir_RelocatesToUserPluginsDir(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; chmod 0555 does not prevent writes")
+	}
+
+	// Simulate /usr/local/bin owned by root (read/exec only for hub user).
+	systemBinDir := filepath.Join(t.TempDir(), "usr-local-bin")
+	require.NoError(t, os.MkdirAll(systemBinDir, 0o755))
+	systemBinary := filepath.Join(systemBinDir, "scion-plugin-fake")
+	writeFakePluginWrapper(t, systemBinary)
+	require.NoError(t, os.Chmod(systemBinDir, 0o555))
+	t.Cleanup(func() { _ = os.Chmod(systemBinDir, 0o755) })
+
+	t.Setenv("PATH", systemBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	pluginsDir := filepath.Join(t.TempDir(), "plugins")
+	repoDir := t.TempDir()
+	writeFakePluginSource(t, repoDir, "fake")
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mgr := NewManager(logger)
+	t.Cleanup(mgr.Shutdown)
+
+	cfg := PluginsConfig{
+		Broker: map[string]PluginEntry{
+			"fake": {
+				Config: map[string]string{"token": "initial-token"},
+			},
+		},
+	}
+	require.NoError(t, mgr.LoadAll(cfg, pluginsDir))
+
+	before := fakeHealth(t, mgr, "fake")
+	require.Equal(t, "initial-token", before["token"])
+
+	// UpdatePlugin should succeed by installing into <pluginsDir>/broker/scion-plugin-fake
+	// rather than failing with permission denied on systemBinDir.
+	res, err := mgr.UpdatePlugin("fake", repoDir)
+	require.NoError(t, err)
+
+	expectedInstalledPath := filepath.Join(pluginsDir, PluginTypeBroker, "scion-plugin-fake")
+	assert.True(t, res.Relocated)
+	assert.Equal(t, systemBinary, res.PreviousPath)
+	assert.Equal(t, expectedInstalledPath, res.BinaryPath)
+	info, statErr := os.Stat(expectedInstalledPath)
+	require.NoError(t, statErr, "rebuilt binary must be installed into user plugins directory")
+	assert.NotZero(t, info.Mode()&0o111, "installed binary must be executable")
+
+	after := fakeHealth(t, mgr, "fake")
+	assert.NotEqual(t, before["pid"], after["pid"], "plugin process must restart on updated binary")
+	assert.Equal(t, "initial-token", after["token"])
+
+	// Simulate a subsequent Hub restart: LoadAll must prefer <pluginsDir>/broker
+	// over the stale binary on PATH.
+	mgr2 := NewManager(logger)
+	t.Cleanup(mgr2.Shutdown)
+	require.NoError(t, mgr2.LoadAll(cfg, pluginsDir))
+	mgr2.mu.RLock()
+	reloadedPath := mgr2.configs["broker:fake"].Path
+	mgr2.mu.RUnlock()
+	assert.Equal(t, expectedInstalledPath, reloadedPath)
+}
+
+func TestUpdatePlugin_ExplicitUnwritablePath_FailsClearlyWithoutStoppingPlugin(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; chmod 0555 does not prevent writes")
+	}
+
+	systemBinDir := filepath.Join(t.TempDir(), "usr-local-bin")
+	require.NoError(t, os.MkdirAll(systemBinDir, 0o755))
+	systemBinary := filepath.Join(systemBinDir, "scion-plugin-fake")
+	writeFakePluginWrapper(t, systemBinary)
+	require.NoError(t, os.Chmod(systemBinDir, 0o555))
+	t.Cleanup(func() { _ = os.Chmod(systemBinDir, 0o755) })
+
+	pluginsDir := filepath.Join(t.TempDir(), "plugins")
+	repoDir := t.TempDir()
+	writeFakePluginSource(t, repoDir, "fake")
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mgr := NewManager(logger)
+	t.Cleanup(mgr.Shutdown)
+
+	cfg := PluginsConfig{
+		Broker: map[string]PluginEntry{
+			"fake": {
+				Path:   systemBinary,
+				Config: map[string]string{"token": "initial-token"},
+			},
+		},
+	}
+	require.NoError(t, mgr.LoadAll(cfg, pluginsDir))
+	before := fakeHealth(t, mgr, "fake")
+
+	_, err := mgr.UpdatePlugin("fake", repoDir)
+	require.Error(t, err)
+
+	var permErr *PermissionError
+	require.ErrorAs(t, err, &permErr)
+	assert.ErrorIs(t, err, os.ErrPermission)
+	assert.True(t, permErr.ExplicitPath)
+	assert.Equal(t, systemBinary, permErr.BinaryPath)
+	assert.Equal(t, pluginsDir, permErr.PluginsDir)
+	assert.Contains(t, permErr.UserMessage(), systemBinary)
+	guidance := permErr.Guidance(repoDir)
+	assert.Contains(t, guidance, "server.plugins.broker.fake.path")
+	assert.Contains(t, guidance, "scion server restart")
+	assert.Contains(t, guidance, "Install")
+	assert.Contains(t, guidance, filepath.Join(pluginsDir, PluginTypeBroker))
+	assert.Contains(t, guidance, "mktemp -d")
+	assert.Contains(t, guidance, "sudo install -m 0755")
+	assert.NotContains(t, guidance, "/tmp/scion-plugin-")
+
+	// Must not write to <pluginsDir>/broker because explicit path in settings
+	// would shadow it on the next Hub restart.
+	_, statErr := os.Stat(filepath.Join(pluginsDir, PluginTypeBroker, "scion-plugin-fake"))
+	assert.True(t, os.IsNotExist(statErr))
+
+	// Running plugin must remain alive with the same PID.
+	after := fakeHealth(t, mgr, "fake")
+	assert.Equal(t, before["pid"], after["pid"])
+}
+
+func TestUpdatePlugin_UnwritableFallbackPluginsDir_FailsClearlyWithoutStoppingPlugin(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; chmod 0555 does not prevent writes")
+	}
+
+	systemBinDir := filepath.Join(t.TempDir(), "usr-local-bin")
+	require.NoError(t, os.MkdirAll(systemBinDir, 0o755))
+	systemBinary := filepath.Join(systemBinDir, "scion-plugin-fake")
+	writeFakePluginWrapper(t, systemBinary)
+	require.NoError(t, os.Chmod(systemBinDir, 0o555))
+	t.Cleanup(func() { _ = os.Chmod(systemBinDir, 0o755) })
+
+	t.Setenv("PATH", systemBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	pluginsDir := filepath.Join(t.TempDir(), "plugins")
+	require.NoError(t, os.MkdirAll(pluginsDir, 0o555))
+	t.Cleanup(func() { _ = os.Chmod(pluginsDir, 0o755) })
+
+	repoDir := t.TempDir()
+	writeFakePluginSource(t, repoDir, "fake")
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mgr := NewManager(logger)
+	t.Cleanup(mgr.Shutdown)
+
+	cfg := PluginsConfig{
+		Broker: map[string]PluginEntry{
+			"fake": {
+				Config: map[string]string{"token": "initial-token"},
+			},
+		},
+	}
+	require.NoError(t, mgr.LoadAll(cfg, pluginsDir))
+	before := fakeHealth(t, mgr, "fake")
+
+	_, err := mgr.UpdatePlugin("fake", repoDir)
+	require.Error(t, err)
+
+	var permErr *PermissionError
+	require.ErrorAs(t, err, &permErr)
+	assert.ErrorIs(t, err, os.ErrPermission)
+	assert.False(t, permErr.ExplicitPath)
+	assert.Contains(t, permErr.UserMessage(), filepath.Join(pluginsDir, PluginTypeBroker))
+	assert.Contains(t, permErr.Guidance(repoDir), "sudo install -d -m 0755")
+
+	after := fakeHealth(t, mgr, "fake")
+	assert.Equal(t, before["pid"], after["pid"])
+}
+
+func TestUpdatePlugin_WritablePath_UpdatesInPlace(t *testing.T) {
+	pluginsDir := filepath.Join(t.TempDir(), "plugins")
+	brokerDir := filepath.Join(pluginsDir, PluginTypeBroker)
+	require.NoError(t, os.MkdirAll(brokerDir, 0o755))
+	binaryPath := filepath.Join(brokerDir, "scion-plugin-fake")
+	writeFakePluginWrapper(t, binaryPath)
+
+	repoDir := t.TempDir()
+	writeFakePluginSource(t, repoDir, "fake")
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mgr := NewManager(logger)
+	t.Cleanup(mgr.Shutdown)
+
+	cfg := PluginsConfig{
+		Broker: map[string]PluginEntry{
+			"fake": {
+				Config: map[string]string{"token": "initial-token"},
+			},
+		},
+	}
+	require.NoError(t, mgr.LoadAll(cfg, pluginsDir))
+	before := fakeHealth(t, mgr, "fake")
+
+	res, err := mgr.UpdatePlugin("fake", repoDir)
+	require.NoError(t, err)
+	assert.False(t, res.Relocated)
+	assert.Empty(t, res.PreviousPath)
+	assert.Equal(t, binaryPath, res.BinaryPath)
+
+	after := fakeHealth(t, mgr, "fake")
+	assert.NotEqual(t, before["pid"], after["pid"])
+
+	entries, err := os.ReadDir(brokerDir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "scion-plugin-fake", entries[0].Name())
+}
+
+func TestUpdatePlugin_ReadOnlyMountEROFS_RelocatesAndPinnedFailsClearly(t *testing.T) {
+	systemBinDir := filepath.Join(t.TempDir(), "ro-usr-local-bin")
+	require.NoError(t, os.MkdirAll(systemBinDir, 0o755))
+	systemBinary := filepath.Join(systemBinDir, "scion-plugin-fake")
+	writeFakePluginWrapper(t, systemBinary)
+
+	origMkdirTemp := mkdirTemp
+	mkdirTemp = func(dir, pattern string) (string, error) {
+		if dir == systemBinDir {
+			return "", &os.PathError{Op: "mkdir", Path: dir, Err: syscall.EROFS}
+		}
+		return origMkdirTemp(dir, pattern)
+	}
+	t.Cleanup(func() { mkdirTemp = origMkdirTemp })
+
+	t.Setenv("PATH", systemBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	pluginsDir := filepath.Join(t.TempDir(), "plugins")
+	repoDir := t.TempDir()
+	writeFakePluginSource(t, repoDir, "fake")
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	t.Run("path_discovered_relocates", func(t *testing.T) {
+		mgr := NewManager(logger)
+		t.Cleanup(mgr.Shutdown)
+
+		cfg := PluginsConfig{
+			Broker: map[string]PluginEntry{
+				"fake": {Config: map[string]string{"token": "ro-token"}},
+			},
+		}
+		require.NoError(t, mgr.LoadAll(cfg, pluginsDir))
+		before := fakeHealth(t, mgr, "fake")
+
+		res, err := mgr.UpdatePlugin("fake", repoDir)
+		require.NoError(t, err)
+		assert.True(t, res.Relocated)
+		assert.Equal(t, systemBinary, res.PreviousPath)
+		assert.Equal(t, filepath.Join(pluginsDir, PluginTypeBroker, "scion-plugin-fake"), res.BinaryPath)
+
+		after := fakeHealth(t, mgr, "fake")
+		assert.NotEqual(t, before["pid"], after["pid"])
+	})
+
+	t.Run("explicit_path_returns_permission_error", func(t *testing.T) {
+		mgr := NewManager(logger)
+		t.Cleanup(mgr.Shutdown)
+
+		explicitPluginsDir := filepath.Join(t.TempDir(), "plugins-explicit")
+		cfg := PluginsConfig{
+			Broker: map[string]PluginEntry{
+				"fake": {Path: systemBinary, Config: map[string]string{"token": "ro-token"}},
+			},
+		}
+		require.NoError(t, mgr.LoadAll(cfg, explicitPluginsDir))
+		before := fakeHealth(t, mgr, "fake")
+
+		_, err := mgr.UpdatePlugin("fake", repoDir)
+		require.Error(t, err)
+
+		var permErr *PermissionError
+		require.ErrorAs(t, err, &permErr)
+		assert.ErrorIs(t, err, syscall.EROFS)
+		assert.True(t, permErr.ExplicitPath)
+
+		after := fakeHealth(t, mgr, "fake")
+		assert.Equal(t, before["pid"], after["pid"])
+	})
+}
+
+func TestUpdatePlugin_RenameFailure_LeavesRunningPluginAlive(t *testing.T) {
+	pluginsDir := filepath.Join(t.TempDir(), "plugins")
+	brokerDir := filepath.Join(pluginsDir, PluginTypeBroker)
+	require.NoError(t, os.MkdirAll(brokerDir, 0o755))
+	binaryPath := filepath.Join(brokerDir, "scion-plugin-fake")
+	writeFakePluginWrapper(t, binaryPath)
+
+	repoDir := t.TempDir()
+	writeFakePluginSource(t, repoDir, "fake")
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mgr := NewManager(logger)
+	t.Cleanup(mgr.Shutdown)
+
+	cfg := PluginsConfig{
+		Broker: map[string]PluginEntry{
+			"fake": {Config: map[string]string{"token": "keep-alive"}},
+		},
+	}
+	require.NoError(t, mgr.LoadAll(cfg, pluginsDir))
+	before := fakeHealth(t, mgr, "fake")
+
+	// Replace the binary path on disk with a non-empty directory while the
+	// already-spawned plugin process continues running, forcing os.Rename to
+	// fail after go build succeeds.
+	require.NoError(t, os.Remove(binaryPath))
+	require.NoError(t, os.MkdirAll(filepath.Join(binaryPath, "nonempty"), 0o755))
+
+	_, err := mgr.UpdatePlugin("fake", repoDir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to move new binary into place")
+
+	after := fakeHealth(t, mgr, "fake")
+	assert.Equal(t, before["pid"], after["pid"], "failed rename must not kill the running plugin process")
+}
+
+// installBlockingGoWrapper prepends a `go` wrapper script to PATH that pauses
+// `go build` on a named pipe until release() is called, while passing other
+// subcommands (such as `go mod tidy`) straight through to realGo.
+func installBlockingGoWrapper(t *testing.T, realGo string) (waitEntered func(), release func()) {
+	t.Helper()
+	syncDir := t.TempDir()
+	enteredFile := filepath.Join(syncDir, "entered")
+	releaseFIFO := filepath.Join(syncDir, "release.fifo")
+	require.NoError(t, syscall.Mkfifo(releaseFIFO, 0o600))
+
+	goWrapDir := filepath.Join(syncDir, "bin")
+	require.NoError(t, os.MkdirAll(goWrapDir, 0o755))
+	wrapper := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = \"build\" ]; then\n  : > %q\n  cat %q >/dev/null\nfi\nexec %q \"$@\"\n",
+		enteredFile, releaseFIFO, realGo)
+	require.NoError(t, os.WriteFile(filepath.Join(goWrapDir, "go"), []byte(wrapper), 0o755))
+
+	t.Setenv("PATH", goWrapDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	var once sync.Once
+	release = func() {
+		once.Do(func() {
+			f, err := os.OpenFile(releaseFIFO, os.O_WRONLY, 0)
+			require.NoError(t, err)
+			require.NoError(t, f.Close())
+		})
+	}
+	t.Cleanup(func() {
+		once.Do(func() {
+			if f, err := os.OpenFile(releaseFIFO, syscall.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+				_ = f.Close()
+			}
+		})
+	})
+	waitEntered = func() {
+		waitFor(t, 15*time.Second, "go build to start", func() bool {
+			_, err := os.Stat(enteredFile)
+			return err == nil
+		})
+	}
+	return waitEntered, release
+}
+
+func TestUpdatePlugin_ShutdownDuringBuild_AbortsCleanly(t *testing.T) {
+	realGo, err := exec.LookPath("go")
+	require.NoError(t, err)
+
+	repoDir := t.TempDir()
+	writeFakePluginSource(t, repoDir, "fake")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	t.Run("shutdown_during_build", func(t *testing.T) {
+		pidDir := t.TempDir()
+		t.Setenv(supervisorPidDirEnv, pidDir)
+
+		// Use an EROFS PATH directory so UpdatePlugin stages into <pluginsDir>/broker/
+		// (relocated=true), exercising staged-binary and relocated-target cleanup.
+		systemBinDir := filepath.Join(t.TempDir(), "ro-bin")
+		require.NoError(t, os.MkdirAll(systemBinDir, 0o755))
+		writeFakePluginWrapper(t, filepath.Join(systemBinDir, "scion-plugin-fake"))
+
+		origMkdirTemp := mkdirTemp
+		mkdirTemp = func(dir, pattern string) (string, error) {
+			if dir == systemBinDir {
+				return "", &os.PathError{Op: "mkdir", Path: dir, Err: syscall.EROFS}
+			}
+			return origMkdirTemp(dir, pattern)
+		}
+		t.Cleanup(func() { mkdirTemp = origMkdirTemp })
+
+		t.Setenv("PATH", systemBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+		waitBuildStarted, releaseBuild := installBlockingGoWrapper(t, realGo)
+
+		pluginsDir := filepath.Join(t.TempDir(), "plugins")
+		brokerDir := filepath.Join(pluginsDir, PluginTypeBroker)
+
+		mgr := NewManager(logger)
+		t.Cleanup(mgr.Shutdown)
+
+		cfg := PluginsConfig{
+			Broker: map[string]PluginEntry{
+				"fake": {Config: map[string]string{"token": "shutdown-race"}},
+			},
+		}
+		require.NoError(t, mgr.LoadAll(cfg, pluginsDir))
+		before := fakeHealth(t, mgr, "fake")
+
+		errCh := make(chan error, 1)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_, uErr := mgr.UpdatePlugin("fake", repoDir)
+			errCh <- uErr
+		}()
+		t.Cleanup(func() {
+			releaseBuild()
+			<-done
+		})
+
+		waitBuildStarted()
+
+		stagingDirs, globErr := filepath.Glob(filepath.Join(brokerDir, ".scion-plugin-build-*"))
+		require.NoError(t, globErr)
+		assert.Len(t, stagingDirs, 1, "staging dir should exist while go build is in flight")
+
+		mgr.Shutdown()
+		releaseBuild()
+
+		var updateErr error
+		select {
+		case updateErr = <-errCh:
+		case <-time.After(30 * time.Second):
+			t.Fatal("timed out waiting for UpdatePlugin to finish after release")
+		}
+
+		require.Error(t, updateErr)
+		assert.Contains(t, updateErr.Error(), "shutting down")
+
+		entries, readErr := os.ReadDir(brokerDir)
+		require.NoError(t, readErr)
+		assert.Empty(t, entries, "abort path must clean up staged binary and not leave relocated binary behind")
+
+		mgr.mu.RLock()
+		cfgCount := len(mgr.configs)
+		clientCount := len(mgr.clients)
+		mgr.mu.RUnlock()
+		assert.Zero(t, cfgCount, "UpdatePlugin must not repopulate m.configs after Shutdown")
+		assert.Zero(t, clientCount, "UpdatePlugin must not register a client after Shutdown")
+
+		pidEntries, pidErr := os.ReadDir(pidDir)
+		require.NoError(t, pidErr)
+		require.Len(t, pidEntries, 1, "UpdatePlugin must not spawn a new plugin subprocess after Shutdown")
+		assert.Equal(t, before["pid"], pidEntries[0].Name())
+	})
+
+	t.Run("unloaded_during_build", func(t *testing.T) {
+		pidDir := t.TempDir()
+		t.Setenv(supervisorPidDirEnv, pidDir)
+
+		waitBuildStarted, releaseBuild := installBlockingGoWrapper(t, realGo)
+
+		pluginsDir := filepath.Join(t.TempDir(), "plugins")
+		brokerDir := filepath.Join(pluginsDir, PluginTypeBroker)
+		require.NoError(t, os.MkdirAll(brokerDir, 0o755))
+		binaryPath := filepath.Join(brokerDir, "scion-plugin-fake")
+		writeFakePluginWrapper(t, binaryPath)
+		origBytes, err := os.ReadFile(binaryPath)
+		require.NoError(t, err)
+
+		mgr := NewManager(logger)
+		t.Cleanup(mgr.Shutdown)
+
+		cfg := PluginsConfig{
+			Broker: map[string]PluginEntry{
+				"fake": {Config: map[string]string{"token": "unload-race"}},
+			},
+		}
+		require.NoError(t, mgr.LoadAll(cfg, pluginsDir))
+		before := fakeHealth(t, mgr, "fake")
+
+		errCh := make(chan error, 1)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			_, uErr := mgr.UpdatePlugin("fake", repoDir)
+			errCh <- uErr
+		}()
+		t.Cleanup(func() {
+			releaseBuild()
+			<-done
+		})
+
+		waitBuildStarted()
+
+		key := PluginTypeBroker + ":fake"
+		mgr.mu.Lock()
+		delete(mgr.configs, key)
+		mgr.mu.Unlock()
+		mgr.replaceClient(key, nil, true)
+
+		releaseBuild()
+
+		var updateErr error
+		select {
+		case updateErr = <-errCh:
+		case <-time.After(30 * time.Second):
+			t.Fatal("timed out waiting for UpdatePlugin to finish after release")
+		}
+
+		require.Error(t, updateErr)
+		assert.Contains(t, updateErr.Error(), "was unloaded during update")
+
+		entries, readErr := os.ReadDir(brokerDir)
+		require.NoError(t, readErr)
+		require.Len(t, entries, 1, "staged build dir must be cleaned up")
+		assert.Equal(t, "scion-plugin-fake", entries[0].Name())
+
+		afterBytes, readBinErr := os.ReadFile(binaryPath)
+		require.NoError(t, readBinErr)
+		assert.Equal(t, origBytes, afterBytes, "existing binary on disk must not be overwritten when plugin was unloaded")
+
+		mgr.mu.RLock()
+		_, exists := mgr.configs[key]
+		_, hasClient := mgr.clients[key]
+		mgr.mu.RUnlock()
+		assert.False(t, exists, "UpdatePlugin must not resurrect m.configs[key]")
+		assert.False(t, hasClient, "UpdatePlugin must not spawn a client for an unloaded plugin")
+
+		pidEntries, pidErr := os.ReadDir(pidDir)
+		require.NoError(t, pidErr)
+		require.Len(t, pidEntries, 1, "UpdatePlugin must not spawn a second subprocess when unloaded")
+		assert.Equal(t, before["pid"], pidEntries[0].Name())
+	})
+}
