@@ -179,13 +179,10 @@ func TestUpdateAgentStatus_ResumeAndClearActivity(t *testing.T) {
 	a5.Phase = string(state.PhaseRunning)
 	a5.Activity = "completed"
 	require.NoError(t, s.CreateAgent(ctx, a5))
-	initial5, err := s.GetAgent(ctx, a5.ID)
-	require.NoError(t, err)
-	require.NotNil(t, initial5.ActivitySince)
-	time.Sleep(15 * time.Millisecond)
+	initial5 := backdateActivitySince(t, s, a5.ID)
 	require.NoError(t, s.UpdateAgentStatus(ctx, a5.ID, store.AgentStatusUpdate{Activity: "COMPLETED"}))
 	after5, err := s.GetAgent(ctx, a5.ID)
 	require.NoError(t, err)
 	require.NotNil(t, after5.ActivitySince)
-	assert.Equal(t, *initial5.ActivitySince, *after5.ActivitySince, "case-only re-report must keep ActivitySince stable")
+	assert.True(t, after5.ActivitySince.Equal(initial5), "case-only re-report must keep ActivitySince stable: %v != %v", *after5.ActivitySince, initial5)
 }

@@ -1911,16 +1911,16 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		upd.SetToolName("")
 	}
 
-	// A (re)start — a transition from a terminal or suspended phase to running
-	// — clears remnants from the prior stop/crash/suspend: the stale message,
-	// any retained/terminal activity, and any leftover stalled marker. This is
-	// gated on the CURRENT phase being terminal/suspended so routine
-	// running→running heartbeats (which carry their own sticky-stalled rules in
-	// the broker handler) are left untouched. An explicit message or activity
-	// in the same update wins.
+	// A (re)start — a transition from a terminal phase to running — clears
+	// remnants from the prior stop or crash: the stale message, any terminal
+	// activity, any leftover stalled marker, and any exit code/reason from the
+	// stopped container. This is gated on the CURRENT phase being terminal so
+	// routine running→running heartbeats (which carry their own sticky-stalled
+	// rules in the broker handler) are left untouched. An explicit message,
+	// activity, or exit code in the same update wins.
 	// ClearTerminalRemnants applies the same clear whatever the current phase
 	// (a lifecycle start's final write; see store.AgentStatusUpdate).
-	if su.ClearTerminalRemnants || (su.Phase == "running" && (store.IsTerminalPhase(current.Phase) || current.Phase == string(state.PhaseSuspended))) {
+	if su.ClearTerminalRemnants || (su.Phase == "running" && store.IsTerminalPhase(current.Phase)) {
 		if su.Message == "" {
 			upd.SetMessage("")
 		}
@@ -1933,6 +1933,15 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 			upd.ClearExitCode()
 		}
 		upd.SetExitReason("")
+	} else if su.Phase == string(state.PhaseRunning) && current.Phase == string(state.PhaseSuspended) {
+		// Resuming directly from suspended to running clears any retained
+		// pre-suspend activity without disturbing exit fields (pinned by
+		// TestUpdateAgentStatus_ExitFieldsKeptOutsidePreRunningToRunning).
+		if !activityProvided {
+			upd.SetActivity("")
+			upd.SetToolName("")
+		}
+		upd.SetStalledFromActivity("")
 	}
 
 	// ClearExit covers the case the phase-transition clear above does not:
