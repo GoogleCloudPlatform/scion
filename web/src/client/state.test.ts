@@ -242,6 +242,53 @@ describe('StateManager own chat subject', () => {
   });
 });
 
+describe('StateManager profile scope', () => {
+  const subjectsFor = (
+    sm: StateManager,
+    scope: Parameters<StateManager['setScope']>[0]
+  ): string[] =>
+    (sm as unknown as { subjectsForScope(s: unknown): string[] }).subjectsForScope(scope);
+
+  it('subscribes to project.>, notification.>, and user.<id>.chat.> for DM choice updates', () => {
+    const sm = new StateManager();
+    expect(subjectsFor(sm, { type: 'profile', userId: 'u-1' })).toEqual([
+      'project.>',
+      'notification.>',
+      'user.u-1.chat.>',
+      'user.u-1.notification',
+    ]);
+
+    sm.setCurrentUserId('u-1');
+    const deduped = subjectsFor(sm, { type: 'profile', userId: 'u-1' });
+    expect(deduped.filter((s) => s === 'user.u-1.chat.>')).toHaveLength(1);
+  });
+
+  it('adds user.<id>.chat.> when setCurrentUserId arrives after setScope({ type: "profile" }) and dedupes identical scopes', () => {
+    const sm = new StateManager();
+    const connect = vi.fn();
+    (sm as unknown as { sseClient: { connect: (s: string[]) => void } }).sseClient.connect =
+      connect;
+
+    sm.setScope({ type: 'profile' });
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(connect).toHaveBeenLastCalledWith(['project.>', 'notification.>']);
+
+    sm.setCurrentUserId('u-2');
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(connect).toHaveBeenLastCalledWith([
+      'project.>',
+      'notification.>',
+      'user.u-2.chat.>',
+      'user.u-2.notification',
+    ]);
+
+    sm.setScope({ type: 'profile', userId: 'u-2' });
+    const gen = sm.scopeGeneration;
+    sm.setScope({ type: 'profile', userId: 'u-2' });
+    expect(sm.scopeGeneration).toBe(gen);
+  });
+});
+
 describe('StateManager agent-feed scope', () => {
   const subjectsFor = (
     sm: StateManager,

@@ -56,7 +56,9 @@
     "shared/resource-list-refresh.test.ts",
     "shared/facet-combobox.test.ts",
     "shared/decisions-filter-panel.test.ts",
-    "pages/harness-config-detail-source.test.ts"
+    "pages/harness-config-detail-source.test.ts",
+    "profile/profile-nav.test.ts",
+    "pages/profile-decisions.test.ts"
   ],
   "exclude": []
 }

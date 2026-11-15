@@ -51,6 +51,7 @@ export interface ProjectDecisionActorView {
   id: string;
   name: string;
   hint?: string;
+  projectId?: string;
 }
 
 /** One conversation filter-facet option scoped to readable conversations with at least one decision (D5). */
@@ -58,6 +59,7 @@ export interface ProjectDecisionConversationView {
   key: string;
   label: string;
   projectId: string;
+  hint?: string;
 }
 
 /** Project summary carried on each decision prompt or log entry (S2). */

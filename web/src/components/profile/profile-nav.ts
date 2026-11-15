@@ -28,6 +28,16 @@ import {
   PENDING_SECRETS_CHANGED_EVENT,
   fetchPendingSecretCount,
 } from '../../client/pending-secrets.js';
+import {
+  PROFILE_DECISIONS_COUNT_CHANGED_EVENT,
+  fetchProfileDecisionProbe,
+  getCachedProfileDecisionProbe,
+  getLastKnownProfileDecisionAvailability,
+  isChoicePromptMessageEvent,
+  scheduleSharedProfileDecisionProbeRefresh,
+} from '../../client/profile-decisions.js';
+import { stateManager } from '../../client/state.js';
+import { FEATURE_FLAGS_CHANGED_EVENT, projectDecisionsEnabled } from '../../utils/feature-flags.js';
 
 import type { User, Project } from '../../shared/types.js';
 
@@ -113,10 +123,68 @@ export class ScionProfileNav extends LitElement {
   @state()
   private pendingSecretCount = 0;
 
+  /** Whether both `web.project_decisions` and `web.chat_choices` are enabled. */
+  @state()
+  private decisionsEnabled = false;
+
+  /**
+   * Visibility of the top-level Decisions nav entry (§7):
+   * - `'unknown'`: initial probe has not resolved yet -> hidden (prevents flash on older 404 hubs)
+   * - `'visible'`: Hub supports `/api/v1/users/me/decisions` (or probe failed transiently per §7)
+   * - `'hidden'`: Hub returned 404 on `/api/v1/users/me/decisions`
+   */
+  @state()
+  private decisionsNavVisibility: 'unknown' | 'visible' | 'hidden' = 'unknown';
+
+  /** Unfiltered `counts.waitingOnYou` across member projects (R1). */
+  @state()
+  private decisionsWaitingCount = 0;
+
   private boundOnPendingSecretsChanged = (e: Event): void => {
     const count = (e as CustomEvent<{ count?: number }>).detail?.count;
     if (typeof count === 'number') this.pendingSecretCount = count;
     else void this.loadPendingSecretCount();
+  };
+
+  private boundOnFeatureFlagsChanged = (): void => {
+    const next = projectDecisionsEnabled();
+    if (next === this.decisionsEnabled) return;
+    this.decisionsEnabled = next;
+    if (next) {
+      this.ensureProfileStateScope();
+      this.syncOrProbeDecisionsCount();
+    } else {
+      this.decisionsWaitingCount = 0;
+      this.decisionsNavVisibility = 'unknown';
+    }
+  };
+
+  private boundOnProfileDecisionsCountChanged = (e: Event): void => {
+    const detail = (e as CustomEvent<{ available?: boolean; waitingOnYou?: number }>).detail;
+    if (detail?.available === false) {
+      this.decisionsNavVisibility = 'hidden';
+      this.decisionsWaitingCount = 0;
+      return;
+    }
+    if (typeof detail?.waitingOnYou === 'number') {
+      this.decisionsWaitingCount = Math.max(0, detail.waitingOnYou);
+      this.decisionsNavVisibility = 'visible';
+    } else {
+      scheduleSharedProfileDecisionProbeRefresh();
+    }
+  };
+
+  private boundOnChoiceUpdated = (): void => {
+    if (!this.decisionsEnabled || this.decisionsNavVisibility === 'hidden') return;
+    if (this.isActive('/profile/decisions')) return;
+    scheduleSharedProfileDecisionProbeRefresh();
+  };
+
+  private boundOnChatMessageReceived = (e: Event): void => {
+    if (!this.decisionsEnabled || this.decisionsNavVisibility === 'hidden') return;
+    if (this.isActive('/profile/decisions')) return;
+    if (!isChoicePromptMessageEvent(e)) return;
+    scheduleSharedProfileDecisionProbeRefresh();
   };
 
   static override styles = css`
@@ -379,6 +447,26 @@ export class ScionProfileNav extends LitElement {
       display: none;
     }
 
+    .nav-section-decisions {
+      margin-bottom: 1rem;
+      padding-bottom: 0.75rem;
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .decisions-nav-badge {
+      margin-left: auto;
+    }
+
+    .nav-link.active .decisions-nav-badge::part(base) {
+      background: rgba(255, 255, 255, 0.22);
+      color: #ffffff;
+      border-color: rgba(255, 255, 255, 0.45);
+    }
+
+    :host([collapsed]) .decisions-nav-badge {
+      display: none;
+    }
+
     .nav-link-external {
       display: flex;
       align-items: center;
@@ -545,12 +633,113 @@ export class ScionProfileNav extends LitElement {
     super.connectedCallback();
     void this.checkGitHubApp();
     void this.loadPendingSecretCount();
+    this.decisionsEnabled = projectDecisionsEnabled();
+    if (this.decisionsEnabled) {
+      this.ensureProfileStateScope();
+      this.syncOrProbeDecisionsCount();
+    }
     window.addEventListener(PENDING_SECRETS_CHANGED_EVENT, this.boundOnPendingSecretsChanged);
+    window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
+    window.addEventListener(
+      PROFILE_DECISIONS_COUNT_CHANGED_EVENT,
+      this.boundOnProfileDecisionsCountChanged
+    );
+    stateManager.addEventListener('choice-updated', this.boundOnChoiceUpdated);
+    stateManager.addEventListener('chat-message-received', this.boundOnChatMessageReceived);
+  }
+
+  override updated(changedProperties: Map<string, unknown>): void {
+    if (changedProperties.has('user') && this.decisionsEnabled) {
+      this.ensureProfileStateScope();
+    }
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     window.removeEventListener(PENDING_SECRETS_CHANGED_EVENT, this.boundOnPendingSecretsChanged);
+    window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
+    window.removeEventListener(
+      PROFILE_DECISIONS_COUNT_CHANGED_EVENT,
+      this.boundOnProfileDecisionsCountChanged
+    );
+    stateManager.removeEventListener('choice-updated', this.boundOnChoiceUpdated);
+    stateManager.removeEventListener('chat-message-received', this.boundOnChatMessageReceived);
+  }
+
+  private ensureProfileStateScope(): void {
+    const uid = this.user?.id || stateManager.getCurrentUserId();
+    if (uid) {
+      stateManager.setCurrentUserId(uid);
+    }
+    if (typeof EventSource !== 'undefined') {
+      stateManager.setScope(uid ? { type: 'profile', userId: uid } : { type: 'profile' });
+    }
+  }
+
+  private syncOrProbeDecisionsCount(): void {
+    const cached = getCachedProfileDecisionProbe();
+    if (cached !== null) {
+      this.decisionsNavVisibility = cached.available ? 'visible' : 'hidden';
+      this.decisionsWaitingCount = cached.available ? cached.waitingOnYou : 0;
+      return;
+    }
+    const lastKnownAvailable = getLastKnownProfileDecisionAvailability();
+    if (lastKnownAvailable === true) {
+      this.decisionsNavVisibility = 'visible';
+      this.decisionsWaitingCount = 0;
+    } else if (lastKnownAvailable === false) {
+      this.decisionsNavVisibility = 'hidden';
+      this.decisionsWaitingCount = 0;
+    } else {
+      this.decisionsNavVisibility = 'unknown';
+      this.decisionsWaitingCount = 0;
+    }
+    if (this.isActive('/profile/decisions')) {
+      // Let <scion-page-profile-decisions> start its page fetch first in the same
+      // mount tick so the nav piggybacks on it instead of issuing a second ?limit=0 probe.
+      queueMicrotask(() => {
+        if (this.isConnected && this.decisionsEnabled) {
+          void this.loadProfileDecisionsCount();
+        }
+      });
+      return;
+    }
+    void this.loadProfileDecisionsCount();
+  }
+
+  private async loadProfileDecisionsCount(): Promise<void> {
+    if (!this.decisionsEnabled) return;
+    const probe = await fetchProfileDecisionProbe();
+    if (!this.isConnected || !this.decisionsEnabled) return;
+    if (probe === null) {
+      // §7: a transient non-404 probe error leaves the Decisions entry visible.
+      if (this.decisionsNavVisibility === 'unknown') {
+        this.decisionsNavVisibility = 'visible';
+      }
+      return;
+    }
+    if (!probe.available) {
+      this.decisionsNavVisibility = 'hidden';
+      this.decisionsWaitingCount = 0;
+      return;
+    }
+    this.decisionsNavVisibility = 'visible';
+    this.decisionsWaitingCount = probe.waitingOnYou;
+  }
+
+  private renderDecisionsBadge(): TemplateResult | typeof nothing {
+    if (this.decisionsWaitingCount <= 0) return nothing;
+    const n = this.decisionsWaitingCount;
+    const label = n === 1 ? '1 decision waiting on you' : `${n} decisions waiting on you`;
+    return html`<sl-badge
+      variant="primary"
+      pill
+      class="decisions-nav-badge"
+      data-decisions-nav-badge
+      title=${label}
+      aria-label=${label}
+      >${n}</sl-badge
+    >`;
   }
 
   private async loadPendingSecretCount(): Promise<void> {
@@ -612,7 +801,7 @@ export class ScionProfileNav extends LitElement {
     return false;
   }
 
-  override render() {
+  override render(): TemplateResult {
     return html`
       <div class="logo">
         <div class="logo-icon">🌱</div>
@@ -643,6 +832,25 @@ export class ScionProfileNav extends LitElement {
         : ''}
 
       <nav class="nav-container">
+        ${this.decisionsEnabled && this.decisionsNavVisibility === 'visible'
+          ? html`
+              <div class="nav-section nav-section-decisions">
+                <ul class="nav-list">
+                  <li class="nav-item">
+                    <a
+                      href="/profile/decisions"
+                      data-decisions-nav-link
+                      class="nav-link ${this.isActive('/profile/decisions') ? 'active' : ''}"
+                    >
+                      <sl-icon name="signpost-split"></sl-icon>
+                      <span class="nav-link-text">Decisions</span>
+                      ${this.renderDecisionsBadge()}
+                    </a>
+                  </li>
+                </ul>
+              </div>
+            `
+          : nothing}
         ${PROFILE_SECTIONS.map(
           (section) => html`
             <div class="nav-section">
@@ -727,7 +935,8 @@ export class ScionProfileNav extends LitElement {
   }
 
   private isActive(path: string): boolean {
-    return this.currentPath === path || this.currentPath.startsWith(path + '/');
+    const pathname = this.currentPath.split(/[?#]/, 1)[0] || '';
+    return pathname === path || pathname.startsWith(path + '/');
   }
 }
 

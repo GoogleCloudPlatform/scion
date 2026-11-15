@@ -380,3 +380,502 @@ describe('scion-profile-nav — pending secrets badge', () => {
     expect(secretsBadge(element)).toBeNull();
   });
 });
+
+describe('scion-profile-nav — Decisions entry & badge (ptone/scion#7996)', () => {
+  let element: HTMLElement | null = null;
+  let secondaryElement: HTMLElement | null = null;
+  let decisionsProbeCount = 0;
+
+  beforeAll(async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(jsonResponse({})))
+    );
+    await import('./profile-nav.js');
+  });
+
+  afterEach(async () => {
+    element?.remove();
+    element = null;
+    secondaryElement?.remove();
+    secondaryElement = null;
+    const { resetProfileDecisionProbeCacheForTests } =
+      await import('../../client/profile-decisions.js');
+    resetProfileDecisionProbeCacheForTests();
+    const flags = await import('../../utils/feature-flags.js');
+    delete window.__SCION_FEATURES__;
+    flags.resetServerFlagStateForTests();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  async function mountWithDecisions(options: {
+    flagsEnabled?: boolean;
+    probeStatus?: number;
+    waitingOnYou?: number;
+    currentPath?: string;
+  }): Promise<HTMLElement> {
+    decisionsProbeCount = 0;
+    const { resetProfileDecisionProbeCacheForTests } =
+      await import('../../client/profile-decisions.js');
+    resetProfileDecisionProbeCacheForTests();
+    const flags = await import('../../utils/feature-flags.js');
+    delete window.__SCION_FEATURES__;
+    flags.resetServerFlagStateForTests();
+    if (options.flagsEnabled ?? true) {
+      flags.setFeatureFlag(flags.PROJECT_DECISIONS_FLAG, true);
+      flags.setFeatureFlag(flags.CHAT_CHOICES_FLAG, true);
+    }
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const raw =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        if (raw.startsWith('/api/v1/users/me/decisions')) {
+          decisionsProbeCount++;
+          if (options.probeStatus === 404) {
+            return Promise.resolve(jsonResponse({ error: { code: 'not_found' } }, 404));
+          }
+          return Promise.resolve(
+            jsonResponse(
+              {
+                counts: {
+                  waitingOnYou: options.waitingOnYou ?? 0,
+                  waitingOnOthers: 2,
+                },
+              },
+              options.probeStatus ?? 200
+            )
+          );
+        }
+        return Promise.resolve(jsonResponse({ configured: false, pendingSecrets: [] }));
+      })
+    );
+
+    const el = document.createElement('scion-profile-nav') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+      user: User | null;
+      currentPath: string;
+    };
+    el.user = user('member');
+    el.currentPath = options.currentPath ?? '/profile/env';
+    document.body.appendChild(el);
+    for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0));
+    await el.updateComplete;
+    return el;
+  }
+
+  function decisionsLink(el: HTMLElement): HTMLAnchorElement | null {
+    return el.shadowRoot?.querySelector<HTMLAnchorElement>('a[href="/profile/decisions"]') ?? null;
+  }
+
+  function decisionsBadge(el: HTMLElement): HTMLElement | null {
+    return (
+      el.shadowRoot?.querySelector<HTMLElement>(
+        'a[href="/profile/decisions"] [data-decisions-nav-badge]'
+      ) ?? null
+    );
+  }
+
+  it('hides Decisions link and makes no probe request when flags are off', async () => {
+    element = await mountWithDecisions({ flagsEnabled: false, waitingOnYou: 4 });
+    expect(decisionsLink(element)).toBeNull();
+    expect(decisionsProbeCount).toBe(0);
+  });
+
+  it('renders Decisions at the top of profile nav with unfiltered waitingOnYou badge and active query matching', async () => {
+    element = await mountWithDecisions({
+      flagsEnabled: true,
+      waitingOnYou: 4,
+      currentPath: '/profile/decisions?tab=pending&sort=project',
+    });
+
+    const link = decisionsLink(element);
+    expect(link).not.toBeNull();
+    expect(link?.textContent).toContain('Decisions');
+    expect(link?.classList.contains('active')).toBe(true);
+
+    // Must appear before Configuration section
+    const navHtml = element.shadowRoot?.querySelector('nav.nav-container')?.innerHTML ?? '';
+    expect(navHtml.indexOf('/profile/decisions')).toBeGreaterThanOrEqual(0);
+    expect(navHtml.indexOf('/profile/decisions')).toBeLessThan(navHtml.indexOf('Configuration'));
+
+    const badgeEl = decisionsBadge(element);
+    expect(badgeEl?.textContent?.trim()).toBe('4');
+  });
+
+  it('hides the Decisions nav item when GET /api/v1/users/me/decisions?limit=0 returns 404 (§7)', async () => {
+    element = await mountWithDecisions({
+      flagsEnabled: true,
+      probeStatus: 404,
+    });
+    expect(decisionsProbeCount).toBe(1);
+    expect(decisionsLink(element)).toBeNull();
+  });
+
+  it('hides badge when waitingOnYou is 0 and updates live on count-changed event', async () => {
+    element = await mountWithDecisions({
+      flagsEnabled: true,
+      waitingOnYou: 0,
+    });
+    expect(decisionsLink(element)).not.toBeNull();
+    expect(decisionsBadge(element)).toBeNull();
+
+    const { dispatchProfileDecisionsCountChanged } =
+      await import('../../client/profile-decisions.js');
+    dispatchProfileDecisionsCountChanged(3);
+    await (element as HTMLElement & { updateComplete: Promise<boolean> }).updateComplete;
+    expect(decisionsBadge(element)?.textContent?.trim()).toBe('3');
+
+    dispatchProfileDecisionsCountChanged(0);
+    await (element as HTMLElement & { updateComplete: Promise<boolean> }).updateComplete;
+    expect(decisionsBadge(element)).toBeNull();
+  });
+
+  it('shares a single ?limit=0 probe across dual nav instances and route changes, refreshing on SSE events', async () => {
+    let liveWaiting = 4;
+    decisionsProbeCount = 0;
+    const { resetProfileDecisionProbeCacheForTests } =
+      await import('../../client/profile-decisions.js');
+    resetProfileDecisionProbeCacheForTests();
+    const flags = await import('../../utils/feature-flags.js');
+    delete window.__SCION_FEATURES__;
+    flags.resetServerFlagStateForTests();
+    flags.setFeatureFlag(flags.PROJECT_DECISIONS_FLAG, true);
+    flags.setFeatureFlag(flags.CHAT_CHOICES_FLAG, true);
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const raw =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        if (raw.startsWith('/api/v1/users/me/decisions')) {
+          decisionsProbeCount++;
+          return Promise.resolve(
+            jsonResponse({ counts: { waitingOnYou: liveWaiting, waitingOnOthers: 1 } }, 200)
+          );
+        }
+        return Promise.resolve(jsonResponse({ configured: false, pendingSecrets: [] }));
+      })
+    );
+
+    type NavEl = HTMLElement & {
+      updateComplete: Promise<boolean>;
+      user: User | null;
+      currentPath: string;
+    };
+    const desktopNav = document.createElement('scion-profile-nav') as NavEl;
+    desktopNav.user = user('member');
+    desktopNav.currentPath = '/profile/env';
+
+    const drawerNav = document.createElement('scion-profile-nav') as NavEl;
+    drawerNav.user = user('member');
+    drawerNav.currentPath = '/profile/env';
+
+    element = desktopNav;
+    secondaryElement = drawerNav;
+    document.body.appendChild(desktopNav);
+    document.body.appendChild(drawerNav);
+
+    for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0));
+    await desktopNav.updateComplete;
+    await drawerNav.updateComplete;
+
+    expect(decisionsProbeCount).toBe(1);
+    expect(decisionsBadge(desktopNav)?.textContent?.trim()).toBe('4');
+    expect(decisionsBadge(drawerNav)?.textContent?.trim()).toBe('4');
+
+    // Navigating across /profile/* routes does NOT refetch ?limit=0
+    desktopNav.currentPath = '/profile/secrets';
+    drawerNav.currentPath = '/profile/secrets';
+    await desktopNav.updateComplete;
+    await drawerNav.updateComplete;
+    expect(decisionsProbeCount).toBe(1);
+
+    // Remounting another <scion-profile-nav> reuses the cached probe without refetching
+    drawerNav.remove();
+    const remountedNav = document.createElement('scion-profile-nav') as NavEl;
+    remountedNav.user = user('member');
+    remountedNav.currentPath = '/profile/tokens';
+    secondaryElement = remountedNav;
+    document.body.appendChild(remountedNav);
+    await remountedNav.updateComplete;
+    expect(decisionsProbeCount).toBe(1);
+    expect(decisionsBadge(remountedNav)?.textContent?.trim()).toBe('4');
+
+    // Generic notification-created events do NOT re-probe ?limit=0
+    liveWaiting = 6;
+    const { stateManager } = await import('../../client/state.js');
+    stateManager.dispatchEvent(new CustomEvent('notification-created', { detail: {} }));
+    await new Promise((r) => setTimeout(r, 140));
+    expect(decisionsProbeCount).toBe(1);
+
+    // SSE choice-updated triggers ONE debounced shared refresh for both nav instances
+    stateManager.dispatchEvent(new CustomEvent('choice-updated', { detail: {} }));
+    await new Promise((r) => setTimeout(r, 140));
+    await desktopNav.updateComplete;
+    await remountedNav.updateComplete;
+
+    expect(decisionsProbeCount).toBe(2);
+    expect(decisionsBadge(desktopNav)?.textContent?.trim()).toBe('6');
+    expect(decisionsBadge(remountedNav)?.textContent?.trim()).toBe('6');
+
+    // Real Hub chat-message-received payload ({ data: { type: 'choice-prompt', decisions } }) triggers refresh;
+    // plain chat message does not
+    liveWaiting = 7;
+    stateManager.dispatchEvent(
+      new CustomEvent('chat-message-received', {
+        detail: { data: { id: 'm-plain', type: 'message' } },
+      })
+    );
+    await new Promise((r) => setTimeout(r, 140));
+    expect(decisionsProbeCount).toBe(2);
+
+    stateManager.dispatchEvent(
+      new CustomEvent('chat-message-received', {
+        detail: {
+          data: { id: 'm-choice', type: 'choice-prompt', decisions: [{ rowId: 'r-new' }] },
+        },
+      })
+    );
+    await new Promise((r) => setTimeout(r, 140));
+    await desktopNav.updateComplete;
+    await remountedNav.updateComplete;
+
+    expect(decisionsProbeCount).toBe(3);
+    expect(decisionsBadge(desktopNav)?.textContent?.trim()).toBe('7');
+    expect(decisionsBadge(remountedNav)?.textContent?.trim()).toBe('7');
+  });
+
+  it('re-probes on remount after off-nav choice-updated or TTL expiry while staying probe-free when fresh', async () => {
+    let now = 2_000_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    let liveWaiting = 3;
+    decisionsProbeCount = 0;
+
+    const { PROFILE_DECISION_PROBE_TTL_MS, resetProfileDecisionProbeCacheForTests } =
+      await import('../../client/profile-decisions.js');
+    resetProfileDecisionProbeCacheForTests();
+    const { stateManager } = await import('../../client/state.js');
+    const flags = await import('../../utils/feature-flags.js');
+    delete window.__SCION_FEATURES__;
+    flags.resetServerFlagStateForTests();
+    flags.setFeatureFlag(flags.PROJECT_DECISIONS_FLAG, true);
+    flags.setFeatureFlag(flags.CHAT_CHOICES_FLAG, true);
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const raw =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        if (raw.startsWith('/api/v1/users/me/decisions')) {
+          decisionsProbeCount++;
+          return Promise.resolve(
+            jsonResponse({ counts: { waitingOnYou: liveWaiting, waitingOnOthers: 0 } }, 200)
+          );
+        }
+        return Promise.resolve(jsonResponse({ configured: false, pendingSecrets: [] }));
+      })
+    );
+
+    type NavEl = HTMLElement & {
+      updateComplete: Promise<boolean>;
+      user: User | null;
+      currentPath: string;
+    };
+
+    try {
+      // 1. Mount on /profile/settings -> 1 probe, badge shows 3
+      const nav1 = document.createElement('scion-profile-nav') as NavEl;
+      nav1.user = user('member');
+      nav1.currentPath = '/profile/settings';
+      element = nav1;
+      document.body.appendChild(nav1);
+      for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0));
+      await nav1.updateComplete;
+      expect(decisionsProbeCount).toBe(1);
+      expect(decisionsBadge(nav1)?.textContent?.trim()).toBe('3');
+
+      // 2. Navigate away to /chat or /projects/<id>/decisions (nav unmounts) and answer all 3 choices
+      nav1.remove();
+      element = null;
+      liveWaiting = 0;
+      stateManager.dispatchEvent(new CustomEvent('choice-updated', { detail: {} }));
+      expect(decisionsProbeCount).toBe(1);
+
+      // 3. Return to /profile/settings -> remounted nav re-probes once and clears the stale badge
+      const nav2 = document.createElement('scion-profile-nav') as NavEl;
+      nav2.user = user('member');
+      nav2.currentPath = '/profile/settings';
+      element = nav2;
+      document.body.appendChild(nav2);
+      // Stale count 3 is NOT shown while the refresh is in flight
+      await nav2.updateComplete;
+      expect(decisionsBadge(nav2)).toBeNull();
+      for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0));
+      await nav2.updateComplete;
+      expect(decisionsProbeCount).toBe(2);
+      expect(decisionsLink(nav2)).not.toBeNull();
+      expect(decisionsBadge(nav2)).toBeNull();
+
+      // 4. Unmount and remount after PROFILE_DECISION_PROBE_TTL_MS -> re-probes once (and dedupes dual navs)
+      nav2.remove();
+      element = null;
+      liveWaiting = 2;
+      now += PROFILE_DECISION_PROBE_TTL_MS + 100;
+
+      const desktop = document.createElement('scion-profile-nav') as NavEl;
+      desktop.user = user('member');
+      desktop.currentPath = '/profile/settings';
+      const drawer = document.createElement('scion-profile-nav') as NavEl;
+      drawer.user = user('member');
+      drawer.currentPath = '/profile/settings';
+      element = desktop;
+      secondaryElement = drawer;
+      document.body.appendChild(desktop);
+      document.body.appendChild(drawer);
+      for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0));
+      await desktop.updateComplete;
+      await drawer.updateComplete;
+
+      expect(decisionsProbeCount).toBe(3);
+      expect(decisionsBadge(desktop)?.textContent?.trim()).toBe('2');
+      expect(decisionsBadge(drawer)?.textContent?.trim()).toBe('2');
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('hides Decisions before the first probe resolves (no flash on 404 hubs) while keeping entry visible on transient 500 (§7)', async () => {
+    const { resetProfileDecisionProbeCacheForTests } =
+      await import('../../client/profile-decisions.js');
+    resetProfileDecisionProbeCacheForTests();
+    const flags = await import('../../utils/feature-flags.js');
+    delete window.__SCION_FEATURES__;
+    flags.resetServerFlagStateForTests();
+    flags.setFeatureFlag(flags.PROJECT_DECISIONS_FLAG, true);
+    flags.setFeatureFlag(flags.CHAT_CHOICES_FLAG, true);
+
+    let resolveProbe!: (r: Response) => void;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const raw =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        if (raw.startsWith('/api/v1/users/me/decisions')) {
+          return new Promise<Response>((r) => {
+            resolveProbe = r;
+          });
+        }
+        return Promise.resolve(jsonResponse({ configured: false, pendingSecrets: [] }));
+      })
+    );
+
+    type NavEl = HTMLElement & {
+      updateComplete: Promise<boolean>;
+      user: User | null;
+      currentPath: string;
+    };
+    const nav404 = document.createElement('scion-profile-nav') as NavEl;
+    nav404.user = user('member');
+    nav404.currentPath = '/profile/settings';
+    element = nav404;
+    document.body.appendChild(nav404);
+    await nav404.updateComplete;
+
+    // While initial probe is unresolved: hidden (no flash!)
+    expect(decisionsLink(nav404)).toBeNull();
+    resolveProbe(jsonResponse({ error: { code: 'not_found' } }, 404));
+    for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0));
+    await nav404.updateComplete;
+    expect(decisionsLink(nav404)).toBeNull();
+
+    // Transient 500 on first probe: hidden while in flight, then visible without badge per §7
+    nav404.remove();
+    element = null;
+    resetProfileDecisionProbeCacheForTests();
+    const nav500 = await mountWithDecisions({
+      flagsEnabled: true,
+      probeStatus: 500,
+    });
+    element = nav500;
+    expect(decisionsLink(nav500)).not.toBeNull();
+    expect(decisionsBadge(nav500)).toBeNull();
+  });
+
+  it('opens the profile SSE scope with user.<id>.chat.> and refreshes badge on DM choice.updated events', async () => {
+    class FakeEventSource extends EventTarget {
+      static instances: FakeEventSource[] = [];
+      readyState = 0;
+      onopen: ((ev: Event) => void) | null = null;
+      onerror: ((ev: Event) => void) | null = null;
+      constructor(readonly url: string) {
+        super();
+        FakeEventSource.instances.push(this);
+      }
+      close(): void {
+        this.readyState = 2;
+      }
+    }
+    vi.stubGlobal('EventSource', FakeEventSource);
+
+    let liveWaiting = 2;
+    decisionsProbeCount = 0;
+    const { resetProfileDecisionProbeCacheForTests } =
+      await import('../../client/profile-decisions.js');
+    resetProfileDecisionProbeCacheForTests();
+    const { stateManager } = await import('../../client/state.js');
+    const flags = await import('../../utils/feature-flags.js');
+    delete window.__SCION_FEATURES__;
+    flags.resetServerFlagStateForTests();
+    flags.setFeatureFlag(flags.PROJECT_DECISIONS_FLAG, true);
+    flags.setFeatureFlag(flags.CHAT_CHOICES_FLAG, true);
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const raw =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        if (raw.startsWith('/api/v1/users/me/decisions')) {
+          decisionsProbeCount++;
+          return Promise.resolve(
+            jsonResponse({ counts: { waitingOnYou: liveWaiting, waitingOnOthers: 0 } }, 200)
+          );
+        }
+        return Promise.resolve(jsonResponse({ configured: false, pendingSecrets: [] }));
+      })
+    );
+
+    const nav = document.createElement('scion-profile-nav') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+      user: User | null;
+      currentPath: string;
+    };
+    nav.user = user('member');
+    nav.currentPath = '/profile/settings';
+    element = nav;
+    document.body.appendChild(nav);
+    for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0));
+    await nav.updateComplete;
+
+    const latestUrl = FakeEventSource.instances[FakeEventSource.instances.length - 1]?.url ?? '';
+    expect(decodeURIComponent(latestUrl)).toContain('sub=user.u-1.chat.>');
+    expect(decisionsBadge(nav)?.textContent?.trim()).toBe('2');
+
+    // Feed a DM user.u-1.chat.choice.updated event through stateManager
+    liveWaiting = 1;
+    (
+      stateManager as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }
+    ).handleUpdate({
+      subject: 'user.u-1.chat.choice.updated',
+      data: { messageId: 'm-dm', threadId: 'dm:agent:a:user:u-1', decision: { rowId: 'r-dm' } },
+    });
+    await new Promise((r) => setTimeout(r, 140));
+    await nav.updateComplete;
+
+    expect(decisionsProbeCount).toBe(2);
+    expect(decisionsBadge(nav)?.textContent?.trim()).toBe('1');
+    stateManager.disconnect();
+  });
+});
