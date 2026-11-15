@@ -1086,3 +1086,42 @@ func TestSplitParts(t *testing.T) {
 func flushNow(m *AgentManager) {
 	m.msgBuffer.flush("test-agent", bufferKey("test-agent", ""), true)
 }
+
+// TestConduitDelivery_DelivererClearedBeforeCall: SetConduitDeliverer(nil)
+// can land between the transport check and the conduit call (each takes
+// the lock on its own). The call then sends nothing and asks for exec, and
+// the delivery goes over exec instead of panicking.
+func TestConduitDelivery_DelivererClearedBeforeCall(t *testing.T) {
+	var execs []string
+	m := newConduitTestManager(t, true, shippedSpec, &execs)
+	outcome, err := m.deliverOverConduit(context.Background(), &api.AgentInfo{ID: "hub-agent-1"}, &agentcontrol.DeliverRequest{DeliveryID: "d1"})
+	if outcome != conduitUseExec || !errors.Is(err, ErrConduitUnavailable) {
+		t.Fatalf("= %v %v; want conduitUseExec with ErrConduitUnavailable", outcome, err)
+	}
+
+	// Through deliver: the deliverer is cleared after the transport check.
+	d := &fakeDeliverer{answers: []fakeAnswer{answer(200, agentcontrol.OutcomeDelivered)}}
+	m.SetConduitDeliverer(d)
+	m.newHarness = func(string) api.Harness {
+		return &clearingHarness{deliveryTestHarness: deliveryTestHarness{spec: shippedSpec}, clear: func() { m.SetConduitDeliverer(nil) }}
+	}
+	if err := m.deliver(context.Background(), deliveryRequest{agentID: "test-agent", message: "x", messageIDs: []string{"m"}}); err != nil {
+		t.Fatalf("deliver: %v", err)
+	}
+	if d.calls() != 0 || !execDelivered(execs) {
+		t.Fatalf("hub calls %d, execs %v; want exec", d.calls(), execs)
+	}
+}
+
+// clearingHarness clears the deliverer when its ready spec is read: in
+// deliver that happens after usesConduitTransport (in the route bounds
+// check) and before the conduit call.
+type clearingHarness struct {
+	deliveryTestHarness
+	clear func()
+}
+
+func (h *clearingHarness) ReadySpec() api.ReadySpec {
+	h.clear()
+	return h.deliveryTestHarness.ReadySpec()
+}

@@ -156,6 +156,12 @@ const (
 // finalDeliveryError for a failure that must not be retried.
 func (m *AgentManager) deliverOverConduit(ctx context.Context, target *api.AgentInfo, req *agentcontrol.DeliverRequest) (conduitOutcome, error) {
 	d := m.conduitDeliverer()
+	if d == nil {
+		// usesConduitTransport checked for a deliverer, but under its own
+		// lock: SetConduitDeliverer(nil) (conduit delivery turned off) can
+		// land in between. Nothing was sent; deliver over exec instead.
+		return conduitUseExec, fmt.Errorf("%w: no deliverer", ErrConduitUnavailable)
+	}
 	var lastErr error
 	for attempt := 1; attempt <= conduitNotReachedAttempts; attempt++ {
 		dctx, cancel := context.WithTimeout(ctx, agentcontrol.BrokerDeliverTimeout)
