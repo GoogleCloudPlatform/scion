@@ -270,11 +270,11 @@ type wireUsage struct {
 }
 
 type wireAnswer struct {
-	Type          string             `json:"type"`
-	Noul          *float64           `json:"noul"`
-	Choice        *string            `json:"choice"`
-	Confidence    *float64           `json:"confidence"`
-	Probabilities map[string]float64 `json:"probabilities"`
+	Type          string              `json:"type"`
+	Noul          *float64            `json:"noul"`
+	Choice        *string             `json:"choice"`
+	Confidence    *float64            `json:"confidence"`
+	Probabilities map[string]*float64 `json:"probabilities"`
 }
 
 // DecodeResponse validates and decodes a 2xx POST /v1/systemone response body
@@ -389,17 +389,21 @@ func decodeQuestionAnswer(profile Profile, q spec.Question, httpStatus int, rawA
 		for i, opt := range q.Options {
 			declaredIDs[i] = opt.ID
 		}
-		if err := provider.ValidateDistribution(wa.Probabilities, declaredIDs); err != nil {
-			return provider.Answer{}, withHTTPStatus(err, httpStatus)
-		}
 
 		distCopy := make(map[string]float64, len(wa.Probabilities))
 		var pMax float64
-		for k, p := range wa.Probabilities {
+		for k, pPtr := range wa.Probabilities {
+			if pPtr == nil {
+				return provider.Answer{}, provider.NewProviderError(provider.FailMalformedResponse, false, 0, httpStatus, "choice probability value must not be null")
+			}
+			p := *pPtr
 			distCopy[k] = p
 			if p > pMax {
 				pMax = p
 			}
+		}
+		if err := provider.ValidateDistribution(distCopy, declaredIDs); err != nil {
+			return provider.Answer{}, withHTTPStatus(err, httpStatus)
 		}
 
 		argmax, tied := provider.ArgmaxChoice(distCopy)

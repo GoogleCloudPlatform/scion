@@ -197,16 +197,16 @@ func resolveEndpointURL(configuredEndpoint, defaultEndpoint, routePath string) (
 		base = strings.TrimSpace(defaultEndpoint)
 	}
 	if base == "" {
-		return "", provider.NewProviderError(provider.FailInvalidRequest, false, 0, 0, "instance endpoint is empty")
+		return "", egress.ErrInvalidEndpoint
 	}
 
 	u, err := url.Parse(base)
 	if err != nil || u.Opaque != "" || u.User != nil || u.Host == "" || u.Hostname() == "" || u.RawQuery != "" || u.Fragment != "" {
-		return "", provider.NewProviderError(provider.FailInvalidRequest, false, 0, 0, "invalid instance endpoint URL")
+		return "", egress.ErrInvalidEndpoint
 	}
 	scheme := strings.ToLower(u.Scheme)
 	if scheme != "https" && scheme != "http" {
-		return "", provider.NewProviderError(provider.FailInvalidRequest, false, 0, 0, "unsupported instance endpoint scheme")
+		return "", egress.ErrSchemeNotAllowed
 	}
 
 	prefix := strings.TrimRight(u.Path, "/")

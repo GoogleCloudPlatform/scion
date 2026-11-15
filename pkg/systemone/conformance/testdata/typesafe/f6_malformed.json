@@ -413,6 +413,41 @@
         "retryable": false,
         "http_status": 200
       }
+    },
+    {
+      "name": "null_probability_value",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "tone",
+              "type": "choice",
+              "instructions": "What is the tone?",
+              "options": [
+                {"id": "angry", "description": "Upset"},
+                {"id": "calm", "description": "Neutral"},
+                {"id": "excited", "description": "Eager"}
+              ]
+            }
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Test.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"model\":\"jev-1.14.0\",\"answers\":{\"tone\":{\"type\":\"choice\",\"choice\":\"calm\",\"confidence\":0.9,\"probabilities\":{\"angry\":null,\"calm\":0.95,\"excited\":0.05}}},\"usage\":{\"input_tokens\":20,\"output_tokens\":2}}"
+      },
+      "expect_error": {
+        "reason": "malformed_response",
+        "retryable": false,
+        "http_status": 200
+      }
     }
   ]
 }

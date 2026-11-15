@@ -313,6 +313,13 @@ func TestInvoke_ErrorTableAndNoRetryAndNoBodyLeak(t *testing.T) {
 			wantRetryable: false,
 		},
 		{
+			name:          "403_forbidden_auth",
+			status:        http.StatusForbidden,
+			body:          `{"detail":"CANARY_403_FORBIDDEN_KEY"}`,
+			wantReason:    provider.FailAuth,
+			wantRetryable: false,
+		},
+		{
 			name:          "400_max_tokens_exceeded_string",
 			status:        http.StatusBadRequest,
 			body:          `{"detail":"max_tokens_exceeded: CANARY_400_PROMPT"}`,
@@ -691,6 +698,14 @@ func TestDecodeResponse_MalformedCasesNeverRenormalize(t *testing.T) {
 			name: "duplicate_json_probability_key",
 			body: `{"model":"jev-1.14.0","answers":{"tone":{"type":"choice","choice":"calm","confidence":0.7,"probabilities":{"angry":0.1,"angry":0.15,"calm":0.8,"excited":0.05}}},"usage":{"input_tokens":10,"output_tokens":2}}`,
 		},
+		{
+			name: "null_probability_value",
+			body: `{"model":"jev-1.14.0","answers":{"tone":{"type":"choice","choice":"calm","confidence":0.9,"probabilities":{"angry":null,"calm":0.95,"excited":0.05}}},"usage":{"input_tokens":10,"output_tokens":2}}`,
+		},
+		{
+			name: "non_number_string_probability_value",
+			body: `{"model":"jev-1.14.0","answers":{"tone":{"type":"choice","choice":"calm","confidence":0.7,"probabilities":{"angry":"0.15","calm":0.8,"excited":0.05}}},"usage":{"input_tokens":10,"output_tokens":2}}`,
+		},
 	}
 
 	for _, tc := range malformedPayloads {
@@ -835,6 +850,48 @@ func TestInvokeAndListModels_PassesEgressSentinelsThrough(t *testing.T) {
 		assert.True(t, egress.IsAuthError(err), "Invoke must pass egress auth sentinel through: %v", err)
 		_, isPE := provider.AsProviderError(err)
 		assert.False(t, isPE)
+	})
+
+	t.Run("non_http_scheme_returns_scheme_not_allowed", func(t *testing.T) {
+		tr := egress.NewClient(egress.StaticBearer("sk-ftp-scheme-canary"))
+		inst := provider.InstanceView{Name: "jev-prod", Model: "jev-1.14.0", Endpoint: "ftp://198.51.100.10"}
+
+		_, err := adapter.Invoke(context.Background(), tr, inst, req)
+		require.Error(t, err)
+		assert.True(t, egress.IsSchemeNotAllowed(err), "Invoke must return egress.ErrSchemeNotAllowed for ftp://: %v", err)
+		_, isPE := provider.AsProviderError(err)
+		assert.False(t, isPE)
+
+		_, err = adapter.ListModels(context.Background(), tr, inst)
+		require.Error(t, err)
+		assert.True(t, egress.IsSchemeNotAllowed(err), "ListModels must return egress.ErrSchemeNotAllowed for ftp://: %v", err)
+		_, isPE = provider.AsProviderError(err)
+		assert.False(t, isPE)
+	})
+
+	t.Run("userinfo_and_opaque_endpoints_return_invalid_endpoint", func(t *testing.T) {
+		tr := egress.NewClient(egress.StaticBearer("sk-bad-url-canary"))
+		for _, badEndpoint := range []string{
+			"https://user:CANARY_URL_USERINFO_SECRET@198.51.100.10",
+			"mailto:ops@example.com",
+			"https://198.51.100.10?unexpected=query",
+		} {
+			inst := provider.InstanceView{Name: "jev-prod", Model: "jev-1.14.0", Endpoint: badEndpoint}
+
+			_, err := adapter.Invoke(context.Background(), tr, inst, req)
+			require.Error(t, err, "endpoint %q", badEndpoint)
+			assert.True(t, egress.IsInvalidEndpoint(err), "Invoke must return egress.ErrInvalidEndpoint for %q: %v", badEndpoint, err)
+			assert.NotContains(t, err.Error(), "CANARY_URL_USERINFO_SECRET")
+			_, isPE := provider.AsProviderError(err)
+			assert.False(t, isPE)
+
+			_, err = adapter.ListModels(context.Background(), tr, inst)
+			require.Error(t, err, "endpoint %q", badEndpoint)
+			assert.True(t, egress.IsInvalidEndpoint(err), "ListModels must return egress.ErrInvalidEndpoint for %q: %v", badEndpoint, err)
+			assert.NotContains(t, err.Error(), "CANARY_URL_USERINFO_SECRET")
+			_, isPE = provider.AsProviderError(err)
+			assert.False(t, isPE)
+		}
 	})
 }
 

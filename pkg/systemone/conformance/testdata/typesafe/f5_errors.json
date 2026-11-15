@@ -48,6 +48,42 @@
       }
     },
     {
+      "name": "http_403_forbidden",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "billing",
+              "type": "binary",
+              "instructions": "Is this message about billing?"
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "Synthetic probe text.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 403,
+        "raw_body": "{\"detail\":\"F5_ERROR_BODY_CANARY_403_FORBIDDEN\"}"
+      },
+      "expect_error": {
+        "reason": "auth",
+        "retryable": false,
+        "http_status": 403,
+        "error_body_canary": "F5_ERROR_BODY_CANARY_403_FORBIDDEN"
+      }
+    },
+    {
       "name": "http_400_max_tokens_exceeded_string_detail",
       "model": "jev-1.14.0",
       "expected_path": "/v1/systemone",
