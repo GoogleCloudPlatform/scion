@@ -259,6 +259,15 @@ func (s *AgentStore) beginLaunch(ctx context.Context, agentID, kind string, time
 		SetLaunchPriorPhase(opts.PriorPhase).
 		SetLaunchRevokeOnFail(opts.RevokeOnFail).
 		SetLaunchRunID(boundLaunchRunID(current.RunID, opts.RunID))
+	if kind != store.LaunchKindCreate {
+		// A start or restart launch begins a new run: clear any retained or
+		// prior-run activity so neither a pre-harness heartbeat nor
+		// failedAfterRunningObservedApplies reads it as live activity.
+		upd.SetActivity("").
+			SetStalledFromActivity("").
+			SetToolName("").
+			ClearActivitySince()
+	}
 	if kind == store.LaunchKindRestart && current.Phase != string(state.PhaseStarting) {
 		// A restart's start leg moves the row to starting, as a phase
 		// change, so it bumps state_version (v11 §3.13).

@@ -1749,6 +1749,7 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		su.ClearExit = false
 		su.ClearMessageIf = ""
 		su.ClearTerminalRemnants = false
+		su.ClearActivity = false
 	}
 
 	// The reincarnation guard (the hub's Guard 0b), repeated on the locked
@@ -1859,6 +1860,17 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		upd.SetStalledFromActivity("")
 		upd.SetLastActivityEvent(now)
 		upd.SetToolName(su.ToolName)
+	} else if su.Phase == string(state.PhaseSuspended) {
+		// Transitioning to suspended: preserve retained activities (completed,
+		// idle; computed from stalled_from_activity when stalled) and clear any
+		// other activity, stall marker, and tool name.
+		retained := string(state.RetainedSuspendActivity(
+			state.Activity(current.Activity),
+			state.Activity(current.StalledFromActivity),
+		))
+		upd.SetActivity(retained)
+		upd.SetStalledFromActivity("")
+		upd.SetToolName("")
 	} else if store.IsTerminalPhase(su.Phase) {
 		// Transitioning to a terminal phase without an explicit activity: clear
 		// any leftover live activity (e.g. a lingering "stalled" set by the
@@ -1886,6 +1898,11 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		unstalled = true
 	}
 
+	if su.ClearActivity && !activityProvided {
+		upd.SetActivity("")
+		upd.SetStalledFromActivity("")
+		upd.SetToolName("")
+	}
 	// A halt clears the activity outright, a terminal one included: the
 	// exit reason says how the run ended.
 	if halting {
@@ -1894,17 +1911,22 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		upd.SetToolName("")
 	}
 
-	// A (re)start — a transition from a terminal phase (stopped/error) to running
-	// — clears terminal remnants from the prior stop/crash: the stale crash/stop
-	// message and any leftover stalled marker. This is gated on the CURRENT phase
-	// being terminal so routine running→running heartbeats (which carry their own
-	// sticky-stalled rules in the broker handler) are left untouched. An explicit
-	// message in the same update (su.Message != "") wins and is set below.
+	// A (re)start — a transition from a terminal or suspended phase to running
+	// — clears remnants from the prior stop/crash/suspend: the stale message,
+	// any retained/terminal activity, and any leftover stalled marker. This is
+	// gated on the CURRENT phase being terminal/suspended so routine
+	// running→running heartbeats (which carry their own sticky-stalled rules in
+	// the broker handler) are left untouched. An explicit message or activity
+	// in the same update wins.
 	// ClearTerminalRemnants applies the same clear whatever the current phase
 	// (a lifecycle start's final write; see store.AgentStatusUpdate).
-	if su.ClearTerminalRemnants || (su.Phase == "running" && store.IsTerminalPhase(current.Phase)) {
+	if su.ClearTerminalRemnants || (su.Phase == "running" && (store.IsTerminalPhase(current.Phase) || current.Phase == string(state.PhaseSuspended))) {
 		if su.Message == "" {
 			upd.SetMessage("")
+		}
+		if !activityProvided {
+			upd.SetActivity("")
+			upd.SetToolName("")
 		}
 		upd.SetStalledFromActivity("")
 		if su.ExitCode == nil {

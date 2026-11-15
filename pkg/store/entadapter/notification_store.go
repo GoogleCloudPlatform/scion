@@ -592,9 +592,19 @@ func (s *NotificationStore) MarkNotificationDispatched(ctx context.Context, id s
 // GetLastNotificationStatus returns the status of the most recent notification
 // for a given subscription. Returns ("", nil) if no notifications exist.
 func (s *NotificationStore) GetLastNotificationStatus(ctx context.Context, subscriptionID string) (string, error) {
+	n, err := s.GetLastNotification(ctx, subscriptionID)
+	if err != nil || n == nil {
+		return "", err
+	}
+	return n.Status, nil
+}
+
+// GetLastNotification returns the most recent notification for a given
+// subscription, or (nil, nil) if no notifications exist.
+func (s *NotificationStore) GetLastNotification(ctx context.Context, subscriptionID string) (*store.Notification, error) {
 	uid, err := parseUUID(subscriptionID)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	e, err := s.client.Notification.Query().
 		Where(notification.SubscriptionIDEQ(uid)).
@@ -602,11 +612,11 @@ func (s *NotificationStore) GetLastNotificationStatus(ctx context.Context, subsc
 		First(ctx)
 	if err != nil {
 		if ent.IsNotFound(err) {
-			return "", nil
+			return nil, nil
 		}
-		return "", err
+		return nil, err
 	}
-	return e.Status, nil
+	return entNotifToStore(e), nil
 }
 
 // notifsToStore converts a slice of Ent notifications to store models.

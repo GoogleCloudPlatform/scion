@@ -163,15 +163,26 @@ func TestNotificationStore_NotificationLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, unack)
 
-	// Last status by subscription.
+	// Last status and full notification by subscription.
 	status, err := s.GetLastNotificationStatus(ctx, subID)
 	require.NoError(t, err)
 	assert.Equal(t, "COMPLETED", status)
 
-	// No notifications for an unknown subscription -> ("", nil).
-	status, err = s.GetLastNotificationStatus(ctx, uuid.NewString())
+	lastNotif, err := s.GetLastNotification(ctx, subID)
+	require.NoError(t, err)
+	require.NotNil(t, lastNotif)
+	assert.Equal(t, notif.ID, lastNotif.ID)
+	assert.Equal(t, "COMPLETED", lastNotif.Status)
+	assert.False(t, lastNotif.CreatedAt.IsZero())
+
+	// No notifications for an unknown subscription -> ("", nil) / (nil, nil).
+	unknownSub := uuid.NewString()
+	status, err = s.GetLastNotificationStatus(ctx, unknownSub)
 	require.NoError(t, err)
 	assert.Equal(t, "", status)
+	lastNotif, err = s.GetLastNotification(ctx, unknownSub)
+	require.NoError(t, err)
+	assert.Nil(t, lastNotif)
 }
 
 func TestNotificationStore_AcknowledgeAll(t *testing.T) {

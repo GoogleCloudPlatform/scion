@@ -1542,15 +1542,20 @@ type AgentStatusUpdate struct {
 	ClearMessageIf string `json:"-"`
 	// ClearTerminalRemnants, when true, applies the clear a stopped/error ->
 	// running write gets whatever the stored phase is: the message (unless
-	// Message is set on this update), the stalled marker, and the exit code
+	// Message is set on this update), any prior activity and tool name (unless
+	// Activity is set on this update), the stalled marker, and the exit code
 	// and reason. A lifecycle start, restart or wake brings up a new
 	// generation of the agent, and its write after a successful dispatch
 	// uses this (the HTTP start/restart final write; the wake's
 	// post-dispatch starting write) because the row no longer reads
-	// stopped/error by then: beginStartDispatch writes starting first, and a
-	// heartbeat guarded during the dispatch may have stored the old
+	// stopped/error/suspended by then: beginStartDispatch writes starting first,
+	// and a heartbeat guarded during the dispatch may have stored the old
 	// container's exit message. Internal to the hub — json:"-".
 	ClearTerminalRemnants bool `json:"-"`
+	// ClearActivity, when true and Activity is empty, explicitly clears the
+	// stored activity, stalled marker, and tool name (where Activity:"" alone
+	// means "not provided"). Internal to the hub — json:"-".
+	ClearActivity bool `json:"-"`
 	// IfPhase, when non-empty, makes the update conditional: it applies only
 	// if the stored phase equals IfPhase, checked on the row read inside the
 	// update's transaction; otherwise UpdateAgentStatus returns
@@ -3126,6 +3131,10 @@ type NotificationStore interface {
 	// GetLastNotificationStatus returns the status of the most recent notification
 	// for a given subscription. Returns ("", nil) if no notifications exist.
 	GetLastNotificationStatus(ctx context.Context, subscriptionID string) (string, error)
+
+	// GetLastNotification returns the most recent notification for a given
+	// subscription, or (nil, nil) if no notifications exist.
+	GetLastNotification(ctx context.Context, subscriptionID string) (*Notification, error)
 
 	// ClaimNotificationForDispatch atomically transitions a notification from
 	// dispatched=false to dispatched=true, returning claimed=true if this caller
