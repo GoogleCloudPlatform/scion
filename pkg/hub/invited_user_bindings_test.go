@@ -654,3 +654,257 @@ func TestProvisionedUser_PreRecordedBindings_InertUntilSignIn(t *testing.T) {
 		assert.True(t, d.Allowed, "%s on %s allowed after first sign-in: %s", c.perm, c.res.ID, d.Reason)
 	}
 }
+
+// Built-in system hub roles and hub-members membership cannot be assigned to
+// an invited user before first sign-in, whether directly, via group nesting,
+// or through GovernanceService.ReplaceRoleBinding.
+func TestInvitedUser_BuiltInHubRolesAndHubMembersRefused(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	carol := newInvitedUser(t, s, "user-carol-hubguard", "carol-hubguard@test.com")
+	active := &store.User{
+		ID: tid("user-active-hubguard"), Email: "active-hubguard@test.com",
+		DisplayName: "Active", Role: store.UserRoleMember, Status: store.UserStatusActive, Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, active))
+
+	hubMembers, err := s.GetGroupBySlug(ctx, "hub-members")
+	require.NoError(t, err)
+
+	builtInHubRoles := []string{
+		store.SystemRoleHubAdmin,
+		store.SystemRoleHubMember,
+		store.SystemRoleHubViewer,
+		store.SystemRoleGlobalCatalogAuthor,
+	}
+
+	t.Run("direct role-bindings by ID and email", func(t *testing.T) {
+		for _, roleName := range builtInHubRoles {
+			rd, err := s.GetRoleDefinitionByName(ctx, roleName, store.RoleScopeSystem)
+			require.NoError(t, err)
+			for _, principal := range []string{carol.ID, carol.Email} {
+				rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
+					RoleDefinitionID: rd.ID,
+					PrincipalType:    store.RoleBindingPrincipalUser,
+					PrincipalID:      principal,
+					ScopeType:        store.RoleScopeSystem,
+				})
+				assert.Equal(t, http.StatusConflict, rec.Code, "%s (%s): %s", roleName, principal, rec.Body.String())
+				assert.Contains(t, rec.Body.String(), "hub roles are assigned when the user first signs in")
+			}
+		}
+		assert.Empty(t, allBindingsFor(t, s, carol.ID))
+	})
+
+	t.Run("hub-members group add by ID and slug", func(t *testing.T) {
+		for _, groupRef := range []string{hubMembers.ID, "hub-members"} {
+			for _, memberRef := range []string{carol.ID, carol.Email} {
+				rec := doRequest(t, srv, http.MethodPost, "/api/v1/groups/"+groupRef+"/members", AddGroupMemberRequest{
+					MemberType: store.GroupMemberTypeUser,
+					MemberID:   memberRef,
+					Role:       store.GroupMemberRoleMember,
+				})
+				assert.Equal(t, http.StatusConflict, rec.Code, "group=%s member=%s: %s", groupRef, memberRef, rec.Body.String())
+				assert.Contains(t, rec.Body.String(), "hub roles are assigned when the user first signs in")
+			}
+		}
+		_, err := s.GetGroupMembership(ctx, hubMembers.ID, store.GroupMemberTypeUser, carol.ID)
+		assert.ErrorIs(t, err, store.ErrNotFound)
+	})
+
+	t.Run("group-mediated hub role bindings and nested groups", func(t *testing.T) {
+		// Explicit group containing carol (via a nested child group) is
+		// allowed for non-hub-role grouping, but cannot receive a built-in
+		// hub role or be nested under hub-members.
+		parentGroup := &store.Group{ID: tid("grp-inv-parent"), Name: "Invited Parent", Slug: "invited-parent", GroupType: store.GroupTypeExplicit}
+		childGroup := &store.Group{ID: tid("grp-inv-child"), Name: "Invited Child", Slug: "invited-child", GroupType: store.GroupTypeExplicit}
+		require.NoError(t, s.CreateGroup(ctx, parentGroup))
+		require.NoError(t, s.CreateGroup(ctx, childGroup))
+
+		// Adding carol to an ordinary explicit group succeeds.
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/groups/"+childGroup.ID+"/members", AddGroupMemberRequest{
+			MemberType: store.GroupMemberTypeUser,
+			MemberID:   carol.ID,
+			Role:       store.GroupMemberRoleMember,
+		})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		rec = doRequest(t, srv, http.MethodPost, "/api/v1/groups/"+parentGroup.ID+"/members", AddGroupMemberRequest{
+			MemberType: store.GroupMemberTypeGroup,
+			MemberID:   childGroup.ID,
+			Role:       store.GroupMemberRoleMember,
+		})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+		// Binding a built-in system hub role to parentGroup (which transitively contains carol) is refused.
+		viewerRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubViewer, store.RoleScopeSystem)
+		require.NoError(t, err)
+		rec = doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
+			RoleDefinitionID: viewerRD.ID,
+			PrincipalType:    store.RoleBindingPrincipalGroup,
+			PrincipalID:      parentGroup.ID,
+			ScopeType:        store.RoleScopeSystem,
+		})
+		assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "hub roles are assigned when the user first signs in")
+
+		// Nesting parentGroup into hub-members is refused.
+		rec = doRequest(t, srv, http.MethodPost, "/api/v1/groups/hub-members/members", AddGroupMemberRequest{
+			MemberType: store.GroupMemberTypeGroup,
+			MemberID:   parentGroup.ID,
+			Role:       store.GroupMemberRoleMember,
+		})
+		assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "hub roles are assigned when the user first signs in")
+
+		// Adding carol to a group that already holds a built-in system hub role (or is under hub-members) is refused.
+		roleBearingGroup := &store.Group{ID: tid("grp-hub-viewer-holders"), Name: "Viewer Holders", Slug: "viewer-holders", GroupType: store.GroupTypeExplicit}
+		require.NoError(t, s.CreateGroup(ctx, roleBearingGroup))
+		rec = doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
+			RoleDefinitionID: viewerRD.ID,
+			PrincipalType:    store.RoleBindingPrincipalGroup,
+			PrincipalID:      roleBearingGroup.ID,
+			ScopeType:        store.RoleScopeSystem,
+		})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+		// Active user can still join roleBearingGroup.
+		rec = doRequest(t, srv, http.MethodPost, "/api/v1/groups/"+roleBearingGroup.ID+"/members", AddGroupMemberRequest{
+			MemberType: store.GroupMemberTypeUser,
+			MemberID:   active.ID,
+			Role:       store.GroupMemberRoleMember,
+		})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+		// Invited user cannot join roleBearingGroup directly or via group nesting.
+		rec = doRequest(t, srv, http.MethodPost, "/api/v1/groups/"+roleBearingGroup.ID+"/members", AddGroupMemberRequest{
+			MemberType: store.GroupMemberTypeUser,
+			MemberID:   carol.ID,
+			Role:       store.GroupMemberRoleMember,
+		})
+		assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "hub roles are assigned when the user first signs in")
+
+		rec = doRequest(t, srv, http.MethodPost, "/api/v1/groups/"+roleBearingGroup.ID+"/members", AddGroupMemberRequest{
+			MemberType: store.GroupMemberTypeGroup,
+			MemberID:   parentGroup.ID,
+			Role:       store.GroupMemberRoleMember,
+		})
+		assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "hub roles are assigned when the user first signs in")
+
+		// Group created under hub-members also refuses invited members.
+		subHubMembers := &store.Group{
+			ID: tid("grp-sub-hub-members"), Name: "Sub Hub Members", Slug: "sub-hub-members",
+			GroupType: store.GroupTypeExplicit, ParentID: hubMembers.ID,
+		}
+		require.NoError(t, s.CreateGroup(ctx, subHubMembers))
+		rec = doRequest(t, srv, http.MethodPost, "/api/v1/groups/"+subHubMembers.ID+"/members", AddGroupMemberRequest{
+			MemberType: store.GroupMemberTypeUser,
+			MemberID:   carol.ID,
+			Role:       store.GroupMemberRoleMember,
+		})
+		assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "hub roles are assigned when the user first signs in")
+	})
+
+	t.Run("ReplaceRoleBinding refuses built-in hub role for invited user", func(t *testing.T) {
+		customSys, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+			Name: "invited-replace-custom-sys", ScopeType: store.RoleScopeSystem, Permissions: []string{"project.read"},
+		})
+		require.NoError(t, err)
+		existing, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: customSys.ID,
+			PrincipalType:    store.RoleBindingPrincipalUser,
+			PrincipalID:      carol.ID,
+			ScopeType:        store.RoleScopeSystem,
+			CreatedBy:        "test",
+		})
+		require.NoError(t, err)
+
+		viewerRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubViewer, store.RoleScopeSystem)
+		require.NoError(t, err)
+
+		_, err = srv.governanceService.ReplaceRoleBinding(ctx, existing.ID, &store.RoleBinding{
+			RoleDefinitionID: viewerRD.ID,
+			PrincipalType:    store.RoleBindingPrincipalUser,
+			PrincipalID:      carol.ID,
+			ScopeType:        store.RoleScopeSystem,
+			CreatedBy:        "test",
+		}, "")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "hub roles are assigned when the user first signs in")
+
+		// Existing custom binding remains intact.
+		stillThere, err := s.GetRoleBinding(ctx, existing.ID)
+		require.NoError(t, err)
+		assert.Equal(t, customSys.ID, stillThere.RoleDefinitionID)
+	})
+}
+
+type failInvitedGuardLookupStore struct {
+	store.Store
+	fault        *storeFaultSwitch
+	targetUserID string
+	inTxOnly     bool
+	inTx         bool
+}
+
+func (f *failInvitedGuardLookupStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	if f.fault.Active() && id == f.targetUserID && (!f.inTxOnly || f.inTx) {
+		return nil, errors.New("injected user lookup fault")
+	}
+	return f.Store.GetUser(ctx, id)
+}
+
+func (f *failInvitedGuardLookupStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	if !f.fault.Active() {
+		return f.Store.WithTx(ctx, fn)
+	}
+	return f.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&failInvitedGuardLookupStore{
+			Store: tx, fault: f.fault, targetUserID: f.targetUserID, inTxOnly: f.inTxOnly, inTx: true,
+		})
+	})
+}
+
+func TestInvitedUser_HubRoleGuard_FailsClosedOnStoreFault(t *testing.T) {
+	srv, s, wrapper, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *failInvitedGuardLookupStore {
+		return &failInvitedGuardLookupStore{Store: inner, fault: f}
+	})
+	ctx := context.Background()
+
+	carol := newInvitedUser(t, s, "user-carol-guardfault", "carol-guardfault@test.com")
+	wrapper.targetUserID = carol.ID
+
+	viewerRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubViewer, store.RoleScopeSystem)
+	require.NoError(t, err)
+	hubMembers, err := s.GetGroupBySlug(ctx, "hub-members")
+	require.NoError(t, err)
+
+	// Fault only inside WithTx so createRoleBinding's pre-tx test-identity
+	// check passes and rejectInvitedHubRoleBinding's transactional GetUser
+	// fails closed.
+	wrapper.inTxOnly = true
+	fault.Arm()
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
+		RoleDefinitionID: viewerRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      carol.ID,
+		ScopeType:        store.RoleScopeSystem,
+	})
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+
+	// Group add: both pre-tx and in-tx guard lookups fail closed -> 500, no membership added.
+	wrapper.inTxOnly = false
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/groups/hub-members/members", AddGroupMemberRequest{
+		MemberType: store.GroupMemberTypeUser,
+		MemberID:   carol.Email,
+		Role:       store.GroupMemberRoleMember,
+	})
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+
+	assert.Empty(t, allBindingsFor(t, s, carol.ID))
+	_, err = s.GetGroupMembership(ctx, hubMembers.ID, store.GroupMemberTypeUser, carol.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}

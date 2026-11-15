@@ -141,6 +141,11 @@ func promoteUserToAdmin(ctx context.Context, s store.Store, email string, out io
 		return fmt.Errorf("user %q is a hub test identity; test identities cannot be promoted to admin", email)
 	}
 
+	// Invited users receive their hub role at first sign-in.
+	if user.Status == store.UserStatusInvited {
+		return fmt.Errorf("user %q has not signed in yet; hub roles are assigned when the user first signs in", email)
+	}
+
 	// Check if already admin
 	if user.Role == store.UserRoleAdmin {
 		_, _ = fmt.Fprintf(out, "User %q (%s) is already an admin. No action taken.\n", email, user.ID)
@@ -155,15 +160,26 @@ func promoteUserToAdmin(ctx context.Context, s store.Store, email string, out io
 
 	// Promote to admin: update role + create binding atomically
 	previousRole := user.Role
-	user.Role = store.UserRoleAdmin
 	err = s.WithTx(ctx, func(tx store.Store) error {
-		if err := tx.UpdateUser(ctx, user); err != nil {
+		txUser, err := tx.GetUser(ctx, user.ID)
+		if err != nil {
+			return fmt.Errorf("failed to re-read user: %w", err)
+		}
+		if !txUser.IsHumanKind() || store.IsReservedTestIdentityEmail(txUser.Email) {
+			return fmt.Errorf("user %q is a hub test identity; test identities cannot be promoted to admin", email)
+		}
+		if txUser.Status == store.UserStatusInvited {
+			return fmt.Errorf("user %q has not signed in yet; hub roles are assigned when the user first signs in", email)
+		}
+		previousRole = txUser.Role
+		txUser.Role = store.UserRoleAdmin
+		if err := tx.UpdateUser(ctx, txUser); err != nil {
 			return fmt.Errorf("failed to update user role: %w", err)
 		}
 		_, err = tx.CreateRoleBinding(ctx, &store.RoleBinding{
 			RoleDefinitionID: rd.ID,
 			PrincipalType:    store.RoleBindingPrincipalUser,
-			PrincipalID:      user.ID,
+			PrincipalID:      txUser.ID,
 			ScopeType:        store.RoleScopeSystem,
 			ScopeID:          "",
 			CreatedBy:        store.AdminAPICreatedBy,
