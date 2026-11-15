@@ -23,6 +23,8 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 )
@@ -896,18 +898,65 @@ func hasTopLevelSpecKey(raw []byte) (bool, error) {
 	return hasSpec, nil
 }
 
-// checkNoDuplicateJSONKeys walks the JSON token stream and rejects any object
-// containing duplicate keys at the same nesting level.
-func checkNoDuplicateJSONKeys(raw []byte) error {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	return walkTokensNoDup(dec, "")
+// maxJSONNestingDepth bounds container nesting in ParseSpec, ParseEnvelope, and
+// Compile so untrusted rule/probe bodies cannot cause deep recursion or large
+// allocations before schema validation runs (portable specs and envelopes are
+// at most ~6 containers deep).
+const maxJSONNestingDepth = 32
+
+type jsonPathStep struct {
+	key   string
+	index int // >= 0 for array element, -1 for object key
 }
 
-func walkTokensNoDup(dec *json.Decoder, path string) error {
+func formatJSONPath(steps []jsonPathStep) string {
+	if len(steps) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for i, step := range steps {
+		if step.index >= 0 {
+			b.WriteByte('[')
+			b.WriteString(strconv.Itoa(step.index))
+			b.WriteByte(']')
+			continue
+		}
+		if i > 0 {
+			b.WriteByte('.')
+		}
+		b.WriteString(step.key)
+	}
+	return b.String()
+}
+
+// checkNoDuplicateJSONKeys walks the JSON token stream with bounded nesting
+// depth (maxJSONNestingDepth) and rejects any object containing duplicate keys
+// at the same nesting level. Path strings are formatted lazily only on error.
+func checkNoDuplicateJSONKeys(raw []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	var pathBuf [maxJSONNestingDepth]jsonPathStep
+	if err := walkTokensNoDup(dec, 0, pathBuf[:0]); err != nil {
+		return err
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		msg := "unexpected trailing JSON content"
+		if err != nil {
+			msg = err.Error()
+		}
+		return &CompileError{
+			Path:     "",
+			Category: CategorySyntax,
+			Message:  msg,
+		}
+	}
+	return nil
+}
+
+func walkTokensNoDup(dec *json.Decoder, depth int, steps []jsonPathStep) error {
 	tok, err := dec.Token()
 	if err != nil {
 		return &CompileError{
-			Path:     path,
+			Path:     formatJSONPath(steps),
 			Category: CategorySyntax,
 			Message:  err.Error(),
 		}
@@ -916,48 +965,69 @@ func walkTokensNoDup(dec *json.Decoder, path string) error {
 	if !ok {
 		return nil
 	}
+	nextDepth := depth + 1
+	if nextDepth > maxJSONNestingDepth {
+		return &CompileError{
+			Path:     formatJSONPath(steps),
+			Category: CategorySyntax,
+			Message:  fmt.Sprintf("JSON nesting depth exceeds maximum (%d)", maxJSONNestingDepth),
+		}
+	}
 	switch delim {
 	case '{':
 		seen := make(map[string]struct{})
 		for dec.More() {
 			kTok, err := dec.Token()
 			if err != nil {
-				return &CompileError{Path: path, Category: CategorySyntax, Message: err.Error()}
+				return &CompileError{
+					Path:     formatJSONPath(steps),
+					Category: CategorySyntax,
+					Message:  err.Error(),
+				}
 			}
 			key, ok := kTok.(string)
 			if !ok {
-				return &CompileError{Path: path, Category: CategorySyntax, Message: "expected object key string"}
+				return &CompileError{
+					Path:     formatJSONPath(steps),
+					Category: CategorySyntax,
+					Message:  "expected object key string",
+				}
 			}
-			childPath := key
-			if path != "" {
-				childPath = path + "." + key
-			}
+			childSteps := append(steps, jsonPathStep{key: key, index: -1})
 			if _, dup := seen[key]; dup {
 				return &CompileError{
-					Path:     childPath,
+					Path:     formatJSONPath(childSteps),
 					Category: CategorySyntax,
 					Message:  fmt.Sprintf("duplicate JSON object key %q", key),
 				}
 			}
 			seen[key] = struct{}{}
-			if err := walkTokensNoDup(dec, childPath); err != nil {
+			if err := walkTokensNoDup(dec, nextDepth, childSteps); err != nil {
 				return err
 			}
 		}
 		if _, err := dec.Token(); err != nil { // closing '}'
-			return &CompileError{Path: path, Category: CategorySyntax, Message: err.Error()}
+			return &CompileError{
+				Path:     formatJSONPath(steps),
+				Category: CategorySyntax,
+				Message:  err.Error(),
+			}
 		}
 	case '[':
 		idx := 0
 		for dec.More() {
-			childPath := fmt.Sprintf("%s[%d]", path, idx)
-			if err := walkTokensNoDup(dec, childPath); err != nil {
+			childSteps := append(steps, jsonPathStep{index: idx})
+			if err := walkTokensNoDup(dec, nextDepth, childSteps); err != nil {
 				return err
 			}
 			idx++
 		}
 		if _, err := dec.Token(); err != nil { // closing ']'
-			return &CompileError{Path: path, Category: CategorySyntax, Message: err.Error()}
+			return &CompileError{
+				Path:     formatJSONPath(steps),
+				Category: CategorySyntax,
+				Message:  err.Error(),
+			}
 		}
 	}
 	return nil

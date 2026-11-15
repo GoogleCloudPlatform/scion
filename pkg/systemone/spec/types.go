@@ -141,6 +141,43 @@ type Spec struct {
 	UncertainIf []UncertainRule `json:"uncertain_if,omitempty"`
 }
 
+// UnmarshalJSON decodes a Spec with strict unknown-field rejection while
+// preserving the question index on structured-instructions CompileErrors.
+func (s *Spec) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Version     int               `json:"version"`
+		Form        string            `json:"form,omitempty"`
+		Binding     Binding           `json:"binding,omitempty"`
+		Questions   []json.RawMessage `json:"questions"`
+		Required    []string          `json:"required,omitempty"`
+		Output      *Output           `json:"output,omitempty"`
+		UncertainIf []UncertainRule   `json:"uncertain_if,omitempty"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&raw); err != nil {
+		return err
+	}
+	var questions []Question
+	if raw.Questions != nil {
+		questions = make([]Question, len(raw.Questions))
+		for i, qRaw := range raw.Questions {
+			instrPath := fmt.Sprintf("spec.questions[%d].instructions", i)
+			if err := questions[i].unmarshalAt(qRaw, instrPath); err != nil {
+				return err
+			}
+		}
+	}
+	s.Version = raw.Version
+	s.Form = raw.Form
+	s.Binding = raw.Binding
+	s.Questions = questions
+	s.Required = raw.Required
+	s.Output = raw.Output
+	s.UncertainIf = raw.UncertainIf
+	return nil
+}
+
 // QuestionByID looks up a question in s.Questions by ID.
 func (s *Spec) QuestionByID(id string) (*Question, bool) {
 	if s == nil {
@@ -201,6 +238,10 @@ type Question struct {
 // UnmarshalJSON decodes a Question while producing a structured syntax error if
 // instructions is supplied as structured JSON rather than a plain string.
 func (q *Question) UnmarshalJSON(data []byte) error {
+	return q.unmarshalAt(data, "spec.questions.instructions")
+}
+
+func (q *Question) unmarshalAt(data []byte, instrPath string) error {
 	var raw struct {
 		ID           string          `json:"id"`
 		Type         string          `json:"type"`
@@ -221,7 +262,7 @@ func (q *Question) UnmarshalJSON(data []byte) error {
 		trimmed := bytes.TrimSpace(raw.Instructions)
 		if len(trimmed) > 0 && trimmed[0] != '"' {
 			return &CompileError{
-				Path:     "spec.questions.instructions",
+				Path:     instrPath,
 				Category: CategorySyntax,
 				Message:  "portable instructions must be a plain text string, not structured JSON",
 			}

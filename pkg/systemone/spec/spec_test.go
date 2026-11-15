@@ -15,6 +15,7 @@
 package spec_test
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -553,17 +554,43 @@ func TestValidatePortable_GrammarAndCapabilityLimits(t *testing.T) {
 func TestParseSpec_RejectsStructuredInstructionsAndDuplicateKeys(t *testing.T) {
 	structured := []byte(`{
 		"version": 1,
-		"questions": [{
-			"id": "q1",
-			"type": "binary",
-			"instructions": {"task": "not allowed in portable"}
-		}]
+		"questions": [
+			{
+				"id": "q1",
+				"type": "binary",
+				"instructions": "plain string ok"
+			},
+			{
+				"id": "q2",
+				"type": "binary",
+				"instructions": {"task": "not allowed in portable"}
+			}
+		]
 	}`)
 	_, err := spec.ParseSpec(structured)
 	require.Error(t, err)
 	ce, ok := spec.AsCompileError(err)
 	require.True(t, ok)
 	assert.Equal(t, spec.CategorySyntax, ce.Category)
+	assert.Equal(t, "spec.questions[1].instructions", ce.Path)
+
+	envelopeStructured := []byte(`{
+		"dialect": "system_one",
+		"spec": {
+			"version": 1,
+			"questions": [{
+				"id": "q1",
+				"type": "binary",
+				"instructions": ["not", "plain", "string"]
+			}]
+		}
+	}`)
+	_, err = spec.Compile(envelopeStructured, spec.CompileOptions{Kind: spec.KindJudgments})
+	require.Error(t, err)
+	ce, ok = spec.AsCompileError(err)
+	require.True(t, ok)
+	assert.Equal(t, spec.CategorySyntax, ce.Category)
+	assert.Equal(t, "spec.questions[0].instructions", ce.Path)
 
 	dupKey := []byte(`{
 		"version": 1,
@@ -579,4 +606,97 @@ func TestParseSpec_RejectsStructuredInstructionsAndDuplicateKeys(t *testing.T) {
 	ce, ok = spec.AsCompileError(err)
 	require.True(t, ok)
 	assert.Equal(t, spec.CategorySyntax, ce.Category)
+	assert.Equal(t, "version", ce.Path)
+
+	nestedDupKey := []byte(`{
+		"version": 1,
+		"questions": [{
+			"id": "q1",
+			"id": "q1",
+			"type": "binary",
+			"instructions": "ok"
+		}]
+	}`)
+	_, err = spec.ParseSpec(nestedDupKey)
+	require.Error(t, err)
+	ce, ok = spec.AsCompileError(err)
+	require.True(t, ok)
+	assert.Equal(t, spec.CategorySyntax, ce.Category)
+	assert.Equal(t, "questions[0].id", ce.Path)
+}
+
+func TestCompile_RejectsDeepNestingWithBoundedMemory(t *testing.T) {
+	// Depth 32 passes the nesting-depth guard (and fails only on unknown field "a").
+	depth32 := []byte(strings.Repeat(`{"a":`, 32) + `1` + strings.Repeat(`}`, 32))
+	_, err := spec.ParseSpec(depth32)
+	require.Error(t, err)
+	ce, ok := spec.AsCompileError(err)
+	require.True(t, ok)
+	assert.Equal(t, spec.CategorySyntax, ce.Category)
+	assert.NotContains(t, ce.Message, "nesting depth")
+
+	// Depth 33 (> 32) is rejected immediately by the nesting-depth guard.
+	depth33 := []byte(strings.Repeat(`{"a":`, 33) + `1` + strings.Repeat(`}`, 33))
+	_, err = spec.ParseSpec(depth33)
+	require.Error(t, err)
+	ce, ok = spec.AsCompileError(err)
+	require.True(t, ok)
+	assert.Equal(t, spec.CategorySyntax, ce.Category)
+	assert.Contains(t, ce.Message, "nesting depth")
+
+	// Regression test for R1: depth >= 10,000 (20,000 nested brackets, ~40 KB)
+	// previously allocated ~620 MB via quadratic path strings. It must fail fast
+	// with CategorySyntax and negligible memory allocation across all entry points.
+	const deep = 20_000
+	deepArrays := []byte(`{"version":1,"questions":` + strings.Repeat("[", deep) + strings.Repeat("]", deep) + `}`)
+	deepObjects := []byte(strings.Repeat(`{"a":`, 12_000) + `1` + strings.Repeat(`}`, 12_000))
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	start := time.Now()
+
+	for _, entry := range []struct {
+		name string
+		call func([]byte) error
+	}{
+		{
+			name: "Compile_deep_arrays",
+			call: func(b []byte) error {
+				_, err := spec.Compile(b, spec.CompileOptions{Kind: spec.KindJudgments})
+				return err
+			},
+		},
+		{
+			name: "ParseSpec_deep_arrays",
+			call: func(b []byte) error {
+				_, err := spec.ParseSpec(b)
+				return err
+			},
+		},
+		{
+			name: "ParseEnvelope_deep_objects",
+			call: func(b []byte) error {
+				_, err := spec.ParseEnvelope(b)
+				return err
+			},
+		},
+	} {
+		payload := deepArrays
+		if strings.Contains(entry.name, "objects") {
+			payload = deepObjects
+		}
+		err := entry.call(payload)
+		require.Error(t, err, entry.name)
+		ce, ok := spec.AsCompileError(err)
+		require.True(t, ok, "%s: expected *CompileError, got %v", entry.name, err)
+		assert.Equal(t, spec.CategorySyntax, ce.Category, entry.name)
+		assert.Contains(t, ce.Message, "nesting depth", entry.name)
+	}
+
+	elapsed := time.Since(start)
+	runtime.ReadMemStats(&after)
+	totalAllocDelta := after.TotalAlloc - before.TotalAlloc
+
+	assert.Less(t, elapsed, 200*time.Millisecond, "deep nesting rejection should be sub-millisecond, took %v", elapsed)
+	assert.Less(t, totalAllocDelta, uint64(1<<20), "deep nesting rejection allocated %d bytes (expected < 1 MiB)", totalAllocDelta)
 }
