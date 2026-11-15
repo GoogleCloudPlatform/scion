@@ -79,6 +79,44 @@ func IsHubOnlyEnvKey(key string) bool {
 	return ok
 }
 
+// reservedLifecycleEnvKeys lists SCION_* environment keys owned by container
+// initialization and staged-harness plumbing; harness-config env /
+// env_template maps and persisted agent config env layers may not set them.
+var reservedLifecycleEnvKeys = map[string]struct{}{
+	"SCION_HOOKS_DIR":            {},
+	"SCION_HARNESS_BUNDLE":       {},
+	"SCION_HARNESS_SECRETS_DIR":  {},
+	"SCION_HARNESS_OUTPUTS_DIR":  {},
+	"SCION_PROVISION_STATE_DIR":  {},
+	"SCION_SECRETS":              {},
+	"SCION_SECRETS_FILE":         {},
+	"SCION_HUB_TOKEN_STAGED":     {},
+	"SCION_RESOLVED_AUTH_STAGED": {},
+}
+
+// IsReservedLifecycleEnvKey reports whether key is reserved for container
+// lifecycle and staged-harness initialization.
+func IsReservedLifecycleEnvKey(key string) bool {
+	_, ok := reservedLifecycleEnvKeys[key]
+	return ok
+}
+
+// FilterHarnessConfigEnv returns a copy of env with reserved lifecycle
+// initialization keys removed, without mutating env. Nil yields nil.
+func FilterHarnessConfigEnv(env map[string]string) map[string]string {
+	if env == nil {
+		return nil
+	}
+	out := make(map[string]string, len(env))
+	for k, v := range env {
+		if IsReservedLifecycleEnvKey(k) {
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
 // IsReservedTemplateEnvKey reports whether a template may not set env key
 // key: a key in the platform's SCION_* namespace.
 func IsReservedTemplateEnvKey(key string) bool {

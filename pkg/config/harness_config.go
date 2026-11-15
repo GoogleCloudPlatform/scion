@@ -310,6 +310,8 @@ func parseValidatedHarnessConfig(data []byte) (HarnessConfigEntry, error) {
 	if err := entry.Delivery.Validate(); err != nil {
 		return HarnessConfigEntry{}, fmt.Errorf("invalid config.yaml: %w", err)
 	}
+	entry.Env = FilterHarnessConfigEnv(entry.Env)
+	entry.EnvTemplate = FilterHarnessConfigEnv(entry.EnvTemplate)
 	return entry, nil
 }
 

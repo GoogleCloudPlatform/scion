@@ -462,10 +462,7 @@ func rerenderSkills(ctx context.Context, in rerenderInputs) error {
 // provisioning step), or removes it when the agent has no services,
 // confined to the agent home.
 func rerenderServices(agentHome string, services []api.ServiceSpec) error {
-	if len(services) > 0 {
-		return writeServicesFile(agentHome, services)
-	}
-	return removeHomeFile(agentHome, filepath.Join(".scion", servicesFileName))
+	return reconcileServicesFile(agentHome, services)
 }
 
 func inlineString(c *api.ScionConfig, get func(*api.ScionConfig) string) string {

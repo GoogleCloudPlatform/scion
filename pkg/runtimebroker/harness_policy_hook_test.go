@@ -416,3 +416,66 @@ func TestHarnessPolicyHook_CaptureAuthAssetStagingFollowsAllowSetting(t *testing
 		})
 	}
 }
+
+// Through Server.withHarnessConfigPolicy, a non-container-script harness-config
+// bundle containing home/.scion/hooks files preserves them when container-script
+// harnesses are allowed and suppresses them when disallowed, while keeping the
+// project pre-start hook (30-project-custom) intact in both modes.
+func TestHarnessPolicyHook_BundleHomeHookStagingFollowsAllowSetting(t *testing.T) {
+	const declYAML = "harness: generic\nimage: scion-base:test\nuser: scion\n"
+
+	for _, allow := range []bool{false, true} {
+		t.Run(fmt.Sprintf("allow=%v", allow), func(t *testing.T) {
+			srv, _, globalScion := dispatchTestEnv(t, allow)
+			writeHarnessConfig(t, globalScion, "decl-hooks", declYAML)
+			bundleHookSrc := filepath.Join(globalScion, "harness-configs", "decl-hooks", "home", ".scion", "hooks", "pre-start.d", "10-bundle")
+			if err := os.MkdirAll(filepath.Dir(bundleHookSrc), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(bundleHookSrc, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			runs := 0
+			srv.manager = agent.NewManager(&runtime.MockRuntime{
+				ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+					return []api.AgentInfo{}, nil
+				},
+				RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+					runs++
+					return "mock-id", nil
+				},
+			})
+
+			ctx := srv.withHarnessConfigPolicy(context.Background())
+			if _, err := srv.manager.Start(ctx, api.StartOptions{
+				Name:                      "decl-hook-agent",
+				ProjectPath:               globalScion,
+				HarnessConfig:             "decl-hooks",
+				NoAuth:                    true,
+				ProjectPreStartHookScript: "#!/bin/sh\nexit 0\n",
+			}); err != nil {
+				t.Fatalf("Start(allow=%v): %v", allow, err)
+			}
+			if runs != 1 {
+				t.Fatalf("runs = %d, want 1", runs)
+			}
+
+			home := config.GetAgentHomePath(globalScion, "decl-hook-agent")
+			bundleHookDst := filepath.Join(home, ".scion", "hooks", "pre-start.d", "10-bundle")
+			projectHookDst := filepath.Join(home, ".scion", "hooks", "pre-start.d", "30-project-custom")
+			if info, err := os.Stat(projectHookDst); err != nil || info.Mode()&0o111 == 0 {
+				t.Errorf("allow=%v: expected executable 30-project-custom, got info=%v err=%v", allow, info, err)
+			}
+			if allow {
+				if info, err := os.Stat(bundleHookDst); err != nil || info.Mode()&0o111 == 0 {
+					t.Errorf("allow=true: expected executable 10-bundle hook, got info=%v err=%v", info, err)
+				}
+			} else {
+				if _, err := os.Lstat(bundleHookDst); !os.IsNotExist(err) {
+					t.Errorf("allow=false: 10-bundle hook must not be present (stat err=%v)", err)
+				}
+			}
+		})
+	}
+}

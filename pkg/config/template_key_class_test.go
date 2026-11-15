@@ -195,3 +195,35 @@ func TestStripTemplateEnvironmentKeys_NilEnvStaysNil(t *testing.T) {
 		t.Errorf("Env = %v, want nil", got.Env)
 	}
 }
+
+func TestFilterHarnessConfigEnv(t *testing.T) {
+	if got := FilterHarnessConfigEnv(nil); got != nil {
+		t.Errorf("FilterHarnessConfigEnv(nil) = %v, want nil", got)
+	}
+	in := map[string]string{
+		"SCION_HOOKS_DIR":            "/custom/hooks",
+		"SCION_HARNESS_BUNDLE":       "/custom/bundle",
+		"SCION_HARNESS_SECRETS_DIR":  "/custom/secrets",
+		"SCION_HARNESS_OUTPUTS_DIR":  "/custom/outputs",
+		"SCION_PROVISION_STATE_DIR":  "/custom/prov",
+		"SCION_SECRETS":              "{}",
+		"SCION_SECRETS_FILE":         "/custom/sec.json",
+		"SCION_HUB_TOKEN_STAGED":     "1",
+		"SCION_RESOLVED_AUTH_STAGED": "nonce",
+		"SCION_AGENT_NAME":           "allowed",
+		"SCION_AUTO_EXPOSE_PORTS":    "true",
+		"CUSTOM_KEY":                 "value",
+	}
+	got := FilterHarnessConfigEnv(in)
+	want := map[string]string{
+		"SCION_AGENT_NAME":        "allowed",
+		"SCION_AUTO_EXPOSE_PORTS": "true",
+		"CUSTOM_KEY":              "value",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("FilterHarnessConfigEnv = %v, want %v", got, want)
+	}
+	if _, ok := in["SCION_HOOKS_DIR"]; !ok {
+		t.Error("input map was mutated")
+	}
+}

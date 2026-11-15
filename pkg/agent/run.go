@@ -1342,6 +1342,11 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			return writeAgentHome(ctx, fn)
 		})
 	}
+	if err := clearDisallowedBundleHooksOnStart(ctx, opts.Name, harnessConfigName, resolvedHCDir, envChain, agentDir, agentHome, func(fn func() error) error {
+		return writeAgentHome(ctx, fn)
+	}); err != nil {
+		return nil, err
+	}
 
 	// Reconcile the harness bundle for existing agents. Provision() is
 	// idempotent and stages any missing files. A container-script harness
@@ -4325,6 +4330,10 @@ func buildTrackedAgentEnv(
 			if expandedKey == "" {
 				continue
 			}
+			if config.IsReservedLifecycleEnvKey(expandedKey) {
+				warnings = append(warnings, fmt.Sprintf("Warning: ignoring %s: reserved for container lifecycle initialization", expandedKey))
+				continue
+			}
 			if skipBrokerLocalEnvKey(brokerMode, expandedKey) {
 				// Checked before the host passthrough below, so an empty
 				// marker never pulls in the broker host's value.
@@ -4576,6 +4585,9 @@ func resolveAuthEnvOverlayWithPolicy(opts *api.StartOptions, settings *config.Ve
 			// SCION_GIT_TOKEN_REMOTE, SCION_GIT_CLONE_URL).
 			nonHubOnly := make(map[string]string, len(hcEntry.Env))
 			for k, v := range hcEntry.Env {
+				if config.IsReservedLifecycleEnvKey(k) {
+					continue
+				}
 				if skipBrokerLocalEnvKey(opts.BrokerMode, k) {
 					dropped = append(dropped, droppedBrokerEnv{Key: k, Value: v, Layer: envLayerHarnessConfigEntry})
 					continue
