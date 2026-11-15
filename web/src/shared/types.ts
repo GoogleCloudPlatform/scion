@@ -1967,6 +1967,8 @@ export interface ProjectMemberGroup {
   principalType: string;
   principalId: string;
   principalDisplayName?: string;
+  /** User account status ('active', 'invited', 'suspended') for user principals. */
+  principalStatus?: string;
   /** The built-in membership role name, or '' when the principal holds none. */
   builtInRoleName: string;
   /** Built-in binding first, then custom bindings by role name. */

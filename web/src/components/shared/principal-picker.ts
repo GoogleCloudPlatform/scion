@@ -32,6 +32,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch } from '../../client/api.js';
 import { isProjectMembersGroup } from '../../shared/groups.js';
+import { invitedStatusTagStyles } from './styles.js';
 
 /** Group fields the picker reads from the group search API. */
 export interface PickerGroup {
@@ -57,7 +58,10 @@ export interface PrincipalChangeDetail {
   principalType: string;
   principalId: string;
   displayLabel: string;
+  principalStatus?: string;
 }
+
+const INVITED_PICKER_TOOLTIP = 'Has not signed in yet. Access starts at first sign-in.';
 
 /**
  * Page size for group search. It leaves headroom so that results
@@ -93,7 +97,12 @@ export class ScionPrincipalPicker extends LitElement {
 
   // User search autocomplete state
   @state() private searchQuery = '';
-  @state() private searchResults: Array<{ id: string; email: string; displayName: string }> = [];
+  @state() private searchResults: Array<{
+    id: string;
+    email: string;
+    displayName: string;
+    status?: string;
+  }> = [];
   @state() private searchLoading = false;
   @state() private searchOpen = false;
   private searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -110,66 +119,79 @@ export class ScionPrincipalPicker extends LitElement {
     if (this.groupBlurTimeoutId) clearTimeout(this.groupBlurTimeoutId);
   }
 
-  static override styles = css`
-    :host {
-      display: block;
-    }
+  static override styles = [
+    invitedStatusTagStyles,
+    css`
+      :host {
+        display: block;
+      }
 
-    .user-search-container {
-      position: relative;
-    }
+      .user-search-container {
+        position: relative;
+      }
 
-    .user-search-dropdown {
-      position: absolute;
-      top: 100%;
-      left: 0;
-      right: 0;
-      z-index: 1000;
-      background: var(--scion-surface, #ffffff);
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: var(--scion-radius, 0.5rem);
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
-      max-height: 200px;
-      overflow-y: auto;
-      margin-top: 0.25rem;
-    }
+      .user-search-dropdown {
+        position: absolute;
+        top: 100%;
+        left: 0;
+        right: 0;
+        z-index: 1000;
+        background: var(--scion-surface, #ffffff);
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: var(--scion-radius, 0.5rem);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+        max-height: 200px;
+        overflow-y: auto;
+        margin-top: 0.25rem;
+      }
 
-    .user-search-option {
-      display: flex;
-      flex-direction: column;
-      padding: 0.5rem 0.75rem;
-      cursor: pointer;
-      border-bottom: 1px solid var(--scion-border, #e2e8f0);
-    }
+      .user-search-option {
+        display: flex;
+        flex-direction: column;
+        padding: 0.5rem 0.75rem;
+        cursor: pointer;
+        border-bottom: 1px solid var(--scion-border, #e2e8f0);
+      }
 
-    .user-search-option:last-child {
-      border-bottom: none;
-    }
+      .user-search-option:last-child {
+        border-bottom: none;
+      }
 
-    .user-search-option:hover,
-    .user-search-option.focused {
-      background: var(--scion-bg-subtle, #f1f5f9);
-    }
+      .user-search-option:hover,
+      .user-search-option.focused {
+        background: var(--scion-bg-subtle, #f1f5f9);
+      }
 
-    .user-search-option .user-name {
-      font-weight: 500;
-      font-size: 0.875rem;
-      color: var(--scion-text, #1e293b);
-    }
+      .user-search-header {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
 
-    .user-search-option .user-email {
-      font-size: 0.75rem;
-      color: var(--scion-text-muted, #64748b);
-    }
+      .user-search-option .user-name {
+        font-weight: 500;
+        font-size: 0.875rem;
+        color: var(--scion-text, #1e293b);
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
 
-    .user-search-empty,
-    .user-search-loading {
-      padding: 0.75rem;
-      text-align: center;
-      font-size: 0.8125rem;
-      color: var(--scion-text-muted, #64748b);
-    }
-  `;
+      .user-search-option .user-email {
+        font-size: 0.75rem;
+        color: var(--scion-text-muted, #64748b);
+      }
+
+      .user-search-empty,
+      .user-search-loading {
+        padding: 0.75rem;
+        text-align: center;
+        font-size: 0.8125rem;
+        color: var(--scion-text-muted, #64748b);
+      }
+    `,
+  ];
 
   override updated(changed: Map<string, unknown>): void {
     // Reset search state when principal type changes.
@@ -246,7 +268,7 @@ export class ScionPrincipalPicker extends LitElement {
       if (requestId !== this.searchRequestId) return; // stale response, a newer request has superseded this one
       if (response.ok) {
         const data = (await response.json()) as {
-          users?: Array<{ id: string; email: string; displayName: string }>;
+          users?: Array<{ id: string; email: string; displayName: string; status?: string }>;
         };
         this.searchResults = data.users || [];
       }
@@ -261,14 +283,19 @@ export class ScionPrincipalPicker extends LitElement {
     }
   }
 
-  private selectUser(user: { id: string; email: string; displayName: string }): void {
+  private selectUser(user: {
+    id: string;
+    email: string;
+    displayName: string;
+    status?: string;
+  }): void {
     // Show display-friendly label in the input.
     this.searchQuery = user.displayName ? `${user.displayName} (${user.email})` : user.email;
     this.searchOpen = false;
     this.searchResults = [];
     this.selectedViaDropdown = true;
     // Emit the user's UUID as principalId (not email).
-    this.emitChange(user.id, user.displayName || user.email);
+    this.emitChange(user.id, user.displayName || user.email, user.status);
   }
 
   private handleAgentInput(e: Event): void {
@@ -276,13 +303,14 @@ export class ScionPrincipalPicker extends LitElement {
     this.emitChange(value.trim(), value.trim());
   }
 
-  private emitChange(principalId: string, displayLabel: string): void {
+  private emitChange(principalId: string, displayLabel: string, principalStatus?: string): void {
     this.dispatchEvent(
       new CustomEvent<PrincipalChangeDetail>('principal-change', {
         detail: {
           principalType: this.principalType,
           principalId,
           displayLabel,
+          ...(principalStatus !== undefined ? { principalStatus } : {}),
         },
         bubbles: true,
         composed: true,
@@ -351,7 +379,14 @@ export class ScionPrincipalPicker extends LitElement {
                               this.selectUser(user);
                             }}
                           >
-                            <span class="user-name">${user.displayName || user.email}</span>
+                            <div class="user-search-header">
+                              <span class="user-name">${user.displayName || user.email}</span>
+                              ${user.status === 'invited'
+                                ? html`<sl-tooltip content=${INVITED_PICKER_TOOLTIP}>
+                                    <span class="status-badge invited">Invited</span>
+                                  </sl-tooltip>`
+                                : nothing}
+                            </div>
                             ${user.displayName
                               ? html`<span class="user-email">${user.email}</span>`
                               : nothing}
