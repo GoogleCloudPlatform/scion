@@ -49,9 +49,14 @@ agent-to-agent work.
 - A body mention can appear anywhere. For a direct agent message, the recipient
   is the `@<agent-name>` argument at the start of the command, not a bare name in
   the body.
-- Every `@<agent-name>` in the body notifies that agent, **in a direct message
-  too**. Mentions inside code spans, fenced blocks and `>` quote lines do not.
-  Name a bystander by slug **without `@`**; that does not notify it.
+- Every `@<agent-name>` in the body proactively delivers the current message to
+  that agent, **in a direct message too**; mentions inside code spans, fenced
+  blocks and `>` quote lines do not. Only mention another agent when important
+  FYI awareness or direct participation in reaction to the current message is
+  needed. Reference bystanders or agents you will contact later by plain name
+  **without `@`** so they are not notified — for example, tell a user "I will
+  contact fooagent in 1 hour", not "I will contact @fooagent in 1 hour", because
+  future-contact statements alone have no FYI value.
 - State whether a mention is an assignment, a question or FYI. If several agents
   must act, mention each and state its part.
 - There is no `--cc` flag; use body mentions.
@@ -300,7 +305,8 @@ To publish long content and send its reference with `--artifact`, see the `scion
 ## Before sending
 
 - Is the destination appropriate for the audience and conversation?
-- Are required participants @-mentioned, with action or FYI clear?
+- Are required participants @-mentioned (with action or FYI clear), and bystanders
+  or future contacts named without `@`?
 - For users: is the message readable Markdown, with descriptive links, copyable
   commands and times in the timezone supplied in their messages?
 - For agents: are the necessary technical details and next action present?
