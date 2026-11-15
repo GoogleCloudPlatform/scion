@@ -509,6 +509,11 @@ func (s *NotificationStore) AcknowledgeNotification(ctx context.Context, id stri
 
 // UpdateNotificationContent implements store.NotificationStore.
 func (s *NotificationStore) UpdateNotificationContent(ctx context.Context, id, message, resourceID string) error {
+	return s.UpdateNotificationState(ctx, id, message, resourceID, false)
+}
+
+// UpdateNotificationState implements store.NotificationStore.
+func (s *NotificationStore) UpdateNotificationState(ctx context.Context, id, message, resourceID string, acknowledged bool) error {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return err
@@ -516,7 +521,7 @@ func (s *NotificationStore) UpdateNotificationContent(ctx context.Context, id, m
 	_, err = s.client.Notification.UpdateOneID(uid).
 		SetMessage(message).
 		SetResourceID(resourceID).
-		SetAcknowledged(false).
+		SetAcknowledged(acknowledged).
 		Save(ctx)
 	if err != nil {
 		return mapError(err)
@@ -786,6 +791,14 @@ func (s *NotificationStore) PurgeOrphanedNotifications(ctx context.Context) (int
 		ids, err := s.client.Notification.Query().
 			Where(
 				notification.AcknowledgedEQ(true),
+				// An acknowledged decisions_waiting row whose resource_id is
+				// non-zero holds the user's "Mark read" high-water count P so
+				// subsequent decreases (0 < N <= P) stay hidden (B2); only
+				// cleared rows (resource_id "" or "0") are eligible for GC.
+				notification.Or(
+					notification.KindNEQ(store.NotificationKindDecisionsWaiting),
+					notification.ResourceIDIn("", "0"),
+				),
 				func(sel *entsql.Selector) {
 					sel.Where(entsql.And(
 						noRowWithID(sel, agent.Table, agent.FieldID, notification.FieldAgentID),
