@@ -44,7 +44,7 @@ gemini-cli/
 
 ```sh
 # Local Docker build
-docker build --build-arg BASE_IMAGE=scion-base:latest -t scion-gemini:latest -f Dockerfile .
+docker build --build-arg BASE_IMAGE=scion-base:latest -t scion-gemini-cli:latest -f Dockerfile .
 
 # Cloud Build
 gcloud builds submit --config cloudbuild.yaml .
