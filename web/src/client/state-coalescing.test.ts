@@ -70,9 +70,13 @@ type FuzzEvent =
   | { kind: 'deleted'; id: string };
 
 const IDS = Array.from({ length: 24 }, (_, i) => `a${i}`);
-const PHASES = ['running', 'stopped', 'error', 'stopping'];
-const ACTIVITIES = ['working', '', 'thinking', 'waiting_for_input', 'completed'];
+const PHASES = ['running', 'suspended', 'stopped', 'error', 'stopping'];
+const ACTIVITIES = ['working', '', 'thinking', 'waiting_for_input', 'completed', 'idle'];
 const STICKY_ACTIVITIES = new Set(['waiting_for_input', 'completed', 'limits_exceeded']);
+
+function phaseAllowsStickyRef(phase: string | undefined): boolean {
+  return phase === undefined || phase === 'running';
+}
 
 function genEvents(count: number, seed: number): FuzzEvent[] {
   const rand = mulberry32(seed);
@@ -167,9 +171,14 @@ function promoteDetailFieldsRef(delta: Partial<Agent>): Partial<Agent> {
 function applyKnown(base: Agent, rawDelta: Partial<Agent>, id: string): Agent {
   let delta: Partial<Agent> = { ...rawDelta };
   const incomingActivity = delta.activity as string | undefined;
+  const effectiveNextPhase = Object.prototype.hasOwnProperty.call(delta, 'phase')
+    ? delta.phase
+    : base.phase;
   if (
     incomingActivity !== undefined &&
     (incomingActivity === 'working' || incomingActivity === '') &&
+    phaseAllowsStickyRef(base.phase) &&
+    phaseAllowsStickyRef(effectiveNextPhase) &&
     base.activity &&
     STICKY_ACTIVITIES.has(base.activity)
   ) {

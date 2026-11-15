@@ -23,9 +23,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import type { Project } from './types.js';
+import type { Agent, Project } from './types.js';
 import {
+  getAgentDisplayStatus,
   isEmptyPerAgentWorkspace,
+  isRetainedSuspendActivity,
   lifecycleActionRequestInit,
   projectWorkspaceModeIcon,
   RESUME_BEST_EFFORT_CONFIRM_MESSAGE,
@@ -120,5 +122,44 @@ describe('projectWorkspaceModeIcon', () => {
     expect(projectWorkspaceModeIcon(project({ labels: mode('per-agent') })).icon).not.toBe(
       projectWorkspaceModeIcon(project({})).icon
     );
+  });
+});
+
+describe('isRetainedSuspendActivity and getAgentDisplayStatus', () => {
+  it('recognises completed and idle as retained on suspend', () => {
+    expect(isRetainedSuspendActivity('completed')).toBe(true);
+    expect(isRetainedSuspendActivity('idle')).toBe(true);
+    expect(isRetainedSuspendActivity('working')).toBe(false);
+    expect(isRetainedSuspendActivity('blocked')).toBe(false);
+    expect(isRetainedSuspendActivity('waiting_for_input')).toBe(false);
+    expect(isRetainedSuspendActivity('')).toBe(false);
+    expect(isRetainedSuspendActivity(undefined)).toBe(false);
+  });
+
+  it('returns suspended as the display status even when activity is retained', () => {
+    expect(
+      getAgentDisplayStatus({
+        id: 'a1',
+        name: 'a1',
+        phase: 'suspended',
+        activity: 'completed',
+      } as Agent)
+    ).toBe('suspended');
+    expect(
+      getAgentDisplayStatus({
+        id: 'a2',
+        name: 'a2',
+        phase: 'suspended',
+        activity: 'idle' as Agent['activity'],
+      } as Agent)
+    ).toBe('suspended');
+    expect(
+      getAgentDisplayStatus({
+        id: 'a3',
+        name: 'a3',
+        phase: 'running',
+        activity: 'completed',
+      } as Agent)
+    ).toBe('completed');
   });
 });
