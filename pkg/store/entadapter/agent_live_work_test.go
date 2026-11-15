@@ -200,6 +200,10 @@ func TestAgentStore_UpdateAgentStatus_LiveWorkUnstalls(t *testing.T) {
 		assert.Empty(t, got.StalledFromActivity)
 		assert.True(t, got.LastActivityEvent.After(before), "the agent is demonstrably active")
 		require.NotNil(t, got.LastLiveWorkAt)
+		// The activity changed value, so activity_since (ptone/scion#7826)
+		// moves with it.
+		require.NotNil(t, got.ActivitySince)
+		assert.True(t, got.ActivitySince.After(before), "activity_since follows the restored activity")
 
 		// The next heartbeat finds nothing to restore.
 		res, got = report(a, store.AgentStatusUpdate{Heartbeat: true, LiveWork: suppress})
