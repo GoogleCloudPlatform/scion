@@ -371,7 +371,7 @@ func readBoundedJSONStrict(w http.ResponseWriter, r *http.Request, maxBytes int6
 		return false
 	}
 	limited := http.MaxBytesReader(w, r.Body, maxBytes)
-	defer limited.Close()
+	defer func() { _ = limited.Close() }()
 
 	dec := json.NewDecoder(limited)
 	dec.DisallowUnknownFields()
