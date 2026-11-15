@@ -482,7 +482,10 @@ func execLogLine(what, runID, scheduleID string, a execAnswer) string {
 	return line
 }
 
-// execWorkdir is preferred if it is a directory, else the user's home.
+// execWorkdir is preferred if it is a directory, else the run's home: the
+// HOME of the run's own environment (the harness shell's, which the run
+// keeps unchanged) when it is a directory, else the agent user's
+// /home/<username>, else /.
 func execWorkdir(preferred, username string, env []string) string {
 	if preferred == "" {
 		preferred = "/workspace"
@@ -490,12 +493,11 @@ func execWorkdir(preferred, username string, env []string) string {
 	if isDir(preferred) {
 		return preferred
 	}
-	home := envValue(env, "HOME")
-	if username != "" {
-		home = "/home/" + username
-	}
-	if home != "" && isDir(home) {
+	if home := envValue(env, "HOME"); home != "" && isDir(home) {
 		return home
+	}
+	if username != "" && isDir("/home/"+username) {
+		return "/home/" + username
 	}
 	return "/"
 }
