@@ -173,8 +173,9 @@ export class ScionChatChoices extends LitElement {
 
     .card-head {
       display: flex;
+      flex-wrap: wrap;
       align-items: center;
-      gap: 0.5rem;
+      gap: 0.375rem 0.5rem;
       padding: 0.5rem 0.75rem;
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
       background: var(--scion-bg, #f8fafc);
@@ -183,6 +184,7 @@ export class ScionChatChoices extends LitElement {
     }
 
     .card-head sl-icon {
+      flex-shrink: 0;
       font-size: 1rem;
       color: var(--scion-primary, #3b82f6);
     }
@@ -190,6 +192,7 @@ export class ScionChatChoices extends LitElement {
     .title {
       font-weight: 600;
       color: var(--scion-text, #1e293b);
+      white-space: nowrap;
     }
 
     .key {
@@ -547,6 +550,7 @@ export class ScionChatChoices extends LitElement {
 
     .version {
       color: var(--scion-text-muted, #64748b);
+      white-space: nowrap;
     }
 
     .row-top {
