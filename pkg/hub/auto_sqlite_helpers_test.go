@@ -95,7 +95,7 @@ func autoSuspendQueueState(s *Server) (pending []string, queued int) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	for i := range w.pending {
-		pending = append(pending, w.pending[i].ID)
+		pending = append(pending, w.pending[i].agent.ID)
 	}
 	return pending, len(w.queued)
 }

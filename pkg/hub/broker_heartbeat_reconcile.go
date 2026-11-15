@@ -399,10 +399,48 @@ func (t *lifecycleOpTracker) active(agentID string) bool {
 	return t.inFlight[agentID] > 0
 }
 
+// tryBegin marks agentID as having a lifecycle operation in flight when none is
+// already active, returning (end, true); if an operation is already active, it
+// leaves inFlight unchanged and returns (nil, false). Safe to call with an
+// empty ID (returns a no-op end and true).
+func (t *lifecycleOpTracker) tryBegin(agentID string) (func(), bool) {
+	if agentID == "" {
+		return func() {}, true
+	}
+	t.mu.Lock()
+	if t.inFlight[agentID] > 0 {
+		t.mu.Unlock()
+		return nil, false
+	}
+	if t.inFlight == nil {
+		t.inFlight = make(map[string]int)
+	}
+	t.inFlight[agentID] = 1
+	t.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			t.mu.Lock()
+			defer t.mu.Unlock()
+			if t.inFlight[agentID] <= 1 {
+				delete(t.inFlight, agentID)
+			} else {
+				t.inFlight[agentID]--
+			}
+		})
+	}, true
+}
+
 // beginLifecycleOp marks a lifecycle dispatch for agentID as in flight; call
 // the returned function when the dispatch and its status write are done.
 func (s *Server) beginLifecycleOp(agentID string) func() {
 	return s.lifecycleOps.begin(agentID)
+}
+
+// tryBeginLifecycleOp starts a lifecycle operation for agentID only when none
+// is already in flight on this server.
+func (s *Server) tryBeginLifecycleOp(agentID string) (func(), bool) {
+	return s.lifecycleOps.tryBegin(agentID)
 }
 
 // missingAgentGrace returns the configured grace period, applying the

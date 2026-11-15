@@ -786,6 +786,12 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
+	// An agent already suspended by the hub (suspend_reason idle or stalled)
+	// can be converted in place to a user suspension without any broker action.
+	if action == api.AgentActionSuspend && s.convertHubSuspendToUser(ctx, w, agent) {
+		return
+	}
+
 	// Flat placement pre-check for stop and suspend (requirePinnedPlacement),
 	// before the stop intent, the offline-stop queue (queueOfflineStop) and
 	// any dispatch: a refused stop writes nothing, so no stop_queued state

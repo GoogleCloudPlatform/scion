@@ -509,6 +509,18 @@ func validateGroupMemberDeliverable(agent *store.Agent) *AgentDMError {
 	return err
 }
 
+// groupMemberDeliverableError is validateGroupMemberDeliverable aware of
+// server-side auto-wake: when shouldAutoWake(agent) holds (lifecycle.idle_suspend
+// enabled and suspend_reason is idle or stalled), a direct message wakes the
+// agent automatically without --wake, so the hint omits "--wake".
+func (s *Server) groupMemberDeliverableError(agent *store.Agent) *AgentDMError {
+	err := validateGroupMemberDeliverable(agent)
+	if err != nil && s.shouldAutoWake(agent) {
+		err.Message = fmt.Sprintf("agent %q is suspended; group messages do not wake agents — message it directly to wake and deliver", agent.Slug)
+	}
+	return err
+}
+
 func agentTargetLabel(agent *store.Agent) string {
 	if agent == nil {
 		return ""

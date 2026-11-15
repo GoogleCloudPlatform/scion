@@ -3650,7 +3650,7 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 			var gateReason *string
 			if !recipDeferred {
 				var reason string
-				if gateErr := validateGroupMemberDeliverable(agent); gateErr != nil {
+				if gateErr := s.groupMemberDeliverableError(agent); gateErr != nil {
 					reason = gateErr.Message
 				} else if dispatcher == nil {
 					reason = "dispatcher not available"

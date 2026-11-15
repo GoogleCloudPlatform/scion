@@ -103,11 +103,11 @@ type lifecycleDispatchRule struct {
 // that calls a lifecycle dispatch method. A new call site has to be added
 // here, with how it records run intent.
 var lifecycleDispatchCallers = map[string]lifecycleDispatchRule{
-	"Server.handleAgentLifecycle":    {kind: intentRecorded},
-	"Server.suspendAgent":            {kind: intentRecorded},
-	"Server.stopHeldAgent":           {kind: intentRecorded},
-	"Server.handleStopAllAgents":     {kind: intentRecorded},
-	"Server.autoSuspendStalledAgent": {kind: intentRecorded},
+	"Server.handleAgentLifecycle": {kind: intentRecorded},
+	"Server.suspendAgent":         {kind: intentRecorded},
+	"Server.stopHeldAgent":        {kind: intentRecorded},
+	"Server.handleStopAllAgents":  {kind: intentRecorded},
+	"Server.autoSuspendAgent":     {kind: intentRecorded},
 	// The scheduled create-and-start runs under a start claim.
 	"Server.dispatchAgentEventHandler": {kind: intentRecorded, recordedBy: "Server.withStartClaim",
 		link: linkCallsRecorder, hops: []string{"Server.createUnderClaim"}},

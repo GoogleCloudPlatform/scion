@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -59,12 +60,19 @@ var autoSuspendStopGrace = 10 * time.Second
 // goroutine right after it has decided to exit and released the lock.
 var autoSuspendWorkerExitHook func()
 
+// autoSuspendItem pairs an agent snapshot with the suspend_reason the worker
+// should record if the agent is still eligible when processed.
+type autoSuspendItem struct {
+	agent  store.Agent
+	reason state.SuspendReason
+}
+
 // autoSuspendWorker is the state of the server's auto-suspend worker. The
 // zero value is ready to use.
 type autoSuspendWorker struct {
 	mu sync.Mutex
 	// pending are the agents waiting for the next batch, in hand-off order.
-	pending []store.Agent
+	pending []autoSuspendItem
 	// queued holds the IDs of the pending agents and of the agents in the
 	// batch being processed.
 	queued map[string]bool
@@ -89,11 +97,19 @@ func (s *Server) lifetimeCtx() context.Context {
 // auto-suspend worker, starting it if it is not running. It does not wait
 // for them to be suspended.
 func (s *Server) enqueueAutoSuspend(agents []store.Agent) {
+	s.enqueueAutoSuspendWithReason(agents, state.SuspendReasonStalled)
+}
+
+// enqueueAutoSuspendWithReason hands candidate agents to the auto-suspend
+// worker with the given suspend reason, starting the worker if it is not
+// already running. It does not wait for them to be suspended.
+func (s *Server) enqueueAutoSuspendWithReason(agents []store.Agent, reason state.SuspendReason) {
 	w := &s.autoSuspend
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.stopped {
-		slog.Info("Scheduler: auto-suspend worker stopped; stalled agents not handed off", "count", len(agents))
+		slog.Info("Scheduler: auto-suspend worker stopped; agents not handed off",
+			"count", len(agents), "reason", reason)
 		return
 	}
 	if w.queued == nil {
@@ -109,16 +125,17 @@ func (s *Server) enqueueAutoSuspend(agents []store.Agent) {
 			dropped++
 		default:
 			w.queued[id] = true
-			w.pending = append(w.pending, agents[i])
+			w.pending = append(w.pending, autoSuspendItem{agent: agents[i], reason: reason})
 			added++
 		}
 	}
 	if duplicates > 0 {
-		slog.Debug("Scheduler: stalled agents already queued for auto-suspend", "count", duplicates)
+		slog.Debug("Scheduler: agents already queued for auto-suspend",
+			"count", duplicates, "reason", reason)
 	}
 	if dropped > 0 {
-		slog.Warn("Scheduler: auto-suspend queue full; stalled agents left running",
-			"dropped", dropped, "limit", autoSuspendQueueLimit)
+		slog.Warn("Scheduler: auto-suspend queue full; agents left running",
+			"dropped", dropped, "limit", autoSuspendQueueLimit, "reason", reason)
 	}
 	if added > 0 && !w.running {
 		w.running = true
@@ -139,7 +156,7 @@ func (s *Server) runAutoSuspendWorker() {
 		w.pending = nil
 		if len(batch) == 0 || w.stopped || ctx.Err() != nil {
 			for i := range batch {
-				delete(w.queued, batch[i].ID)
+				delete(w.queued, batch[i].agent.ID)
 			}
 			w.running = false
 			w.mu.Unlock()
@@ -159,15 +176,13 @@ func (s *Server) runAutoSuspendWorker() {
 // recovered and logged, as the scheduler did when the batch
 // ran on its goroutine: the hub keeps running, the batch's agents are
 // still removed from the queued set, and the worker goes on with the next
-// batch or exits normally, so later hand-offs are still processed. The
-// agents of the batch after the one that panicked are not suspended; they
-// stay stalled.
-func (s *Server) runAutoSuspendBatch(ctx context.Context, batch []store.Agent) {
+// batch or exits normally, so later hand-offs are still processed.
+func (s *Server) runAutoSuspendBatch(ctx context.Context, batch []autoSuspendItem) {
 	w := &s.autoSuspend
 	defer func() {
 		w.mu.Lock()
 		for i := range batch {
-			delete(w.queued, batch[i].ID)
+			delete(w.queued, batch[i].agent.ID)
 		}
 		w.mu.Unlock()
 	}()
@@ -177,7 +192,7 @@ func (s *Server) runAutoSuspendBatch(ctx context.Context, batch []store.Agent) {
 				"panic", r, "batch_size", len(batch), "stack", string(debug.Stack()))
 		}
 	}()
-	s.autoSuspendStalledAgents(ctx, batch)
+	s.autoSuspendAgents(ctx, batch)
 }
 
 // haltAutoSuspendWorker drops later hand-offs and pending agents without

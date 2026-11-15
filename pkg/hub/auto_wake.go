@@ -358,3 +358,41 @@ func (s *Server) autoWakeParkedNotificationSubscribers(ctx context.Context) {
 // autoWakeSuspendReasons are the suspend reasons that auto-wake
 // (state.SuspendReason.AutoWakes), for store queries.
 var autoWakeSuspendReasons = []string{string(state.SuspendReasonIdle), string(state.SuspendReasonStalled)}
+
+// convertHubSuspendToUser handles a user SUSPEND action on an agent that the
+// hub already suspended (suspend_reason idle or stalled): it rewrites
+// suspend_reason to user in place, with no runtime broker action, so future
+// messages do not auto-wake the agent. It returns true when it handled the
+// request (writing the response to w), or false when the caller should proceed
+// with the normal running-only suspend path (for example when the agent is
+// already user-suspended, not suspended, or a concurrent wake changed its
+// phase before the CAS write).
+func (s *Server) convertHubSuspendToUser(ctx context.Context, w http.ResponseWriter, agent *store.Agent) bool {
+	if agent == nil || agent.Phase != string(state.PhaseSuspended) ||
+		!state.SuspendReason(agent.SuspendReason).AutoWakes() ||
+		reincarnationInFlight(agent) {
+		return false
+	}
+	err := s.store.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+		Phase:         string(state.PhaseSuspended),
+		SuspendReason: string(state.SuspendReasonUser),
+		IfPhase:       string(state.PhaseSuspended),
+	})
+	if errors.Is(err, store.ErrPhaseMismatch) {
+		if fresh, gerr := s.store.GetAgent(ctx, agent.ID); gerr == nil && fresh != nil {
+			*agent = *fresh
+		}
+		return false
+	}
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return true
+	}
+	agent.SuspendReason = string(state.SuspendReasonUser)
+	s.events.PublishAgentStatus(ctx, agent)
+	respAgent := *agent
+	respAgent.AppliedConfig, respAgent.PendingConfig = s.redactAgentConfigsForResponse(
+		agent.AppliedConfig, agent.PendingConfig, canViewAgentEnv(ctx, s, agent))
+	writeJSON(w, http.StatusOK, agentLifecycleResponse{Agent: &respAgent})
+	return true
+}

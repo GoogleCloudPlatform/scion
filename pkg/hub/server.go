@@ -2292,8 +2292,8 @@ type Server struct {
 	scheduledExecLimiterOnce      sync.Once
 	scheduledExecAuthoringLimiter *keysRateLimiter
 
-	// autoSuspend is the auto-suspend worker the stalled-detection tick
-	// hands stalled agents to (auto_suspend_worker.go).
+	// autoSuspend is the auto-suspend worker the stalled-detection and
+	// idle-suspend sweeps hand eligible agents to (auto_suspend_worker.go).
 	autoSuspend autoSuspendWorker
 
 	// autoWakeWork admits and joins background auto-wakes, and autoWakes
@@ -5851,62 +5851,109 @@ func (s *Server) agentStalledDetectionHandler() func(ctx context.Context) {
 	}
 }
 
-// stalledDetectionTimeout bounds the stalled-detection tick: marking the
-// stalled agents, publishing their status and handing them to the
-// auto-suspend worker. A variable so tests can shorten it.
+// agentIdleSuspendHandler returns the recurring sweep for idle auto-suspend
+// (ptone/scion#7826 phase 3). When both the lifecycle.idle_suspend experiment
+// and server.hub.auto_suspend_idle are enabled, running agents with a fresh
+// heartbeat whose suspend-eligible activity (idle, completed, harness_error)
+// has held since before now - idle_suspend_after are handed to the
+// auto-suspend worker with suspend_reason=idle.
+func (s *Server) agentIdleSuspendHandler() func(ctx context.Context) {
+	return func(ctx context.Context) {
+		if !s.experimentEnabled(experiments.IdleSuspend) {
+			return
+		}
+		enabled, after := s.idleSuspendSettings()
+		if !enabled {
+			return
+		}
+
+		tickCtx, cancel := context.WithTimeout(ctx, stalledDetectionTimeout)
+		defer cancel()
+
+		now := time.Now()
+		cutoff := now.Add(-after)
+		heartbeatRecency := now.Add(-2 * time.Minute)
+
+		candidates, err := s.store.ListIdleSuspendCandidates(tickCtx, cutoff, heartbeatRecency)
+		if err != nil {
+			slog.Error("Scheduler: idle auto-suspend check failed", "error", err)
+			return
+		}
+		if len(candidates) > 0 {
+			slog.Info("Scheduler: selected idle auto-suspend candidates",
+				"count", len(candidates), "idle_suspend_after", after)
+			s.enqueueAutoSuspendWithReason(candidates, state.SuspendReasonIdle)
+		}
+	}
+}
+
+// stalledDetectionTimeout bounds the stalled-detection and idle-suspend ticks.
+// A variable so tests can shorten it.
 var stalledDetectionTimeout = 15 * time.Second
 
 // autoSuspendStartWindow is how long after a batch of auto-suspends begins
 // a new agent's auto-suspend may still start: one agent's stop budget. Each
 // started agent then runs under its own stopWriteBudget, so a batch ends at
 // most autoSuspendStartWindow() + stopWriteBudget() after it began. Agents
-// not reached in the window are left stalled and running. A variable so
-// tests can change it.
+// not reached in the window are left running. A variable so tests can change it.
 var autoSuspendStartWindow = stopWriteBudget
 
-// autoSuspendStalledAgents suspends a batch of agents that were marked
-// stalled, one after another (autoSuspendStalledAgent). The auto-suspend
-// worker calls it with the server-lifetime ctx. Each agent's auto-suspend
-// is bounded on its own, so a slow agent does not cut the ones after it;
-// new agents are started only within autoSuspendStartWindow, and not once
-// ctx is done (server shutdown).
+// autoSuspendStalledAgents suspends a batch of agents that were marked stalled.
 func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Agent) {
+	items := make([]autoSuspendItem, len(agents))
+	for i := range agents {
+		items[i] = autoSuspendItem{agent: agents[i], reason: state.SuspendReasonStalled}
+	}
+	s.autoSuspendAgents(ctx, items)
+}
+
+// autoSuspendAgents suspends a batch of candidate agents one after another
+// (autoSuspendAgent). The auto-suspend worker calls it with the
+// server-lifetime ctx. Each agent's auto-suspend is bounded on its own, so a
+// slow agent does not cut the ones after it; new agents are started only
+// within autoSuspendStartWindow, and not once ctx is done (server shutdown).
+func (s *Server) autoSuspendAgents(ctx context.Context, items []autoSuspendItem) {
 	dispatcher := s.GetDispatcher()
 	suspended := 0
 	windowEnd := time.Now().Add(autoSuspendStartWindow())
 
-	for i := range agents {
+	for i := range items {
 		if ctx.Err() != nil || !time.Now().Before(windowEnd) {
-			slog.Warn("Scheduler: auto-suspend batch stopped; remaining stalled agents left running",
-				"remaining", len(agents)-i, "window", autoSuspendStartWindow(), "error", ctx.Err())
+			slog.Warn("Scheduler: auto-suspend batch stopped; remaining agents left running",
+				"remaining", len(items)-i, "window", autoSuspendStartWindow(), "error", ctx.Err())
 			break
 		}
-		if s.autoSuspendStalledAgent(ctx, dispatcher, &agents[i]) {
+		if s.autoSuspendAgent(ctx, dispatcher, &items[i].agent, items[i].reason) {
 			suspended++
 		}
 	}
 
 	if suspended > 0 {
-		slog.Info("Scheduler: auto-suspended stalled agents", "count", suspended)
+		slog.Info("Scheduler: auto-suspended agents", "count", suspended)
 	}
 }
 
-// autoSuspendStalledAgent suspends one agent that was marked stalled and
-// reports whether the suspension was recorded. It stops the container via
-// the dispatcher and transitions the phase to suspended, under its own
-// stopWriteBudget detached from ctx. snapshot is the agent as it was marked
-// stalled; the agent is read again first and skipped unless it is still
-// running and stalled, in the same run, so an agent that recovered while it
-// waited is left alone. Agents whose harness does not support resume are
-// skipped.
+// autoSuspendStalledAgent suspends one agent that was marked stalled.
 func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDispatcher, snapshot *store.Agent) bool {
+	return s.autoSuspendAgent(ctx, dispatcher, snapshot, state.SuspendReasonStalled)
+}
+
+// autoSuspendAgent suspends one candidate agent for reason (stalled or idle)
+// and reports whether the suspension was recorded. It stops the container via
+// the dispatcher and transitions the phase to suspended, under its own
+// stopWriteBudget detached from ctx. The agent is re-read first and skipped
+// unless all reason-specific and shared guards hold on the fresh row.
+func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatcher, snapshot *store.Agent, reason state.SuspendReason) bool {
+	if reason == "" {
+		reason = state.SuspendReasonStalled
+	}
 	// The agent's own bound, detached from the tick and from the agents
 	// before it (ptone/scion#4387): the stop budget, as for a single suspend.
 	ctx, cancel := detachStopFromClient(ctx, stopWriteBudget())
 	defer cancel()
 
 	agent, err := s.store.GetAgent(ctx, snapshot.ID)
-	if errors.Is(err, store.ErrNotFound) {
+	if errors.Is(err, store.ErrNotFound) || (err == nil && !agent.DeletedAt.IsZero()) {
 		// Deleted while it waited: nothing to suspend.
 		slog.Info("Scheduler: skipping auto-suspend; agent no longer exists",
 			"agent_id", snapshot.ID, "agent_name", snapshot.Name)
@@ -5917,26 +5964,54 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 			"agent_id", snapshot.ID, "agent_name", snapshot.Name, "error", err)
 		return false
 	}
-	if agent.Phase != string(state.PhaseRunning) || agent.Activity != string(state.ActivityStalled) || agent.RunID != snapshot.RunID {
-		slog.Info("Scheduler: skipping auto-suspend; agent no longer stalled in the same run",
-			"agent_id", agent.ID, "agent_name", agent.Name, "phase", agent.Phase, "activity", agent.Activity)
-		return false
-	}
 
-	// Skip agents that stalled while initializing: the harness never
-	// showed it was reading input, so a long start (or a lost readiness
-	// report) is not idleness and must not suspend the agent. The stall
-	// marker itself still applies, for visibility.
-	if agent.StalledFromActivity == string(state.ActivityInitializing) {
-		slog.Info("Scheduler: skipping auto-suspend; agent stalled while initializing",
-			"agent_id", agent.ID, "agent_name", agent.Name)
-		return false
+	now := time.Now()
+	switch reason {
+	case state.SuspendReasonIdle:
+		if !s.experimentEnabled(experiments.IdleSuspend) {
+			slog.Info("Scheduler: skipping idle auto-suspend; experiment disabled",
+				"agent_id", agent.ID, "agent_name", agent.Name)
+			return false
+		}
+		enabled, after := s.idleSuspendSettings()
+		if !enabled {
+			slog.Info("Scheduler: skipping idle auto-suspend; auto_suspend_idle disabled",
+				"agent_id", agent.ID, "agent_name", agent.Name)
+			return false
+		}
+		cutoff := now.Add(-after)
+		if agent.Phase != string(state.PhaseRunning) ||
+			agent.RunID != snapshot.RunID ||
+			agent.Activity != snapshot.Activity ||
+			!state.Activity(agent.Activity).IsSuspendEligible() ||
+			agent.ActivitySince == nil ||
+			!agent.ActivitySince.Before(cutoff) {
+			slog.Info("Scheduler: skipping idle auto-suspend; agent no longer eligible in the same run",
+				"agent_id", agent.ID, "agent_name", agent.Name,
+				"phase", agent.Phase, "activity", agent.Activity)
+			return false
+		}
+	default:
+		if agent.Phase != string(state.PhaseRunning) || agent.Activity != string(state.ActivityStalled) || agent.RunID != snapshot.RunID {
+			slog.Info("Scheduler: skipping auto-suspend; agent no longer stalled in the same run",
+				"agent_id", agent.ID, "agent_name", agent.Name, "phase", agent.Phase, "activity", agent.Activity)
+			return false
+		}
+		// Skip agents that stalled while initializing: the harness never
+		// showed it was reading input, so a long start (or a lost readiness
+		// report) is not idleness and must not suspend the agent. The stall
+		// marker itself still applies, for visibility.
+		if agent.StalledFromActivity == string(state.ActivityInitializing) {
+			slog.Info("Scheduler: skipping auto-suspend; agent stalled while initializing",
+				"agent_id", agent.ID, "agent_name", agent.Name)
+			return false
+		}
 	}
 
 	// Skip agents whose container reported live work recently
 	// (ptone/scion#7855): a running tool call or background job is never
 	// suspended, even when it no longer suppresses the stall marker.
-	if agent.HasRecentLiveWork(time.Now()) {
+	if agent.HasRecentLiveWork(now) {
 		slog.Info("Scheduler: skipping auto-suspend; agent has live work",
 			"agent_id", agent.ID, "agent_name", agent.Name)
 		return false
@@ -5944,20 +6019,31 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 
 	// Skip agents whose harness does not support resume — suspending
 	// them would imply resumability that doesn't exist.
-	if ok, harnessType, reason := s.harnessSupportsResume(ctx, agent); !ok {
+	if ok, harnessType, skipReason := s.harnessSupportsResume(ctx, agent); !ok {
 		harnessConfig := ""
 		if agent.AppliedConfig != nil {
 			harnessConfig = agent.AppliedConfig.HarnessConfig
 		}
 		slog.Info("Scheduler: skipping auto-suspend; harness does not support resume",
 			"agent_id", agent.ID, "agent_name", agent.Name,
-			"harness_config", harnessConfig, "harness", harnessType, "reason", reason)
+			"harness_config", harnessConfig, "harness", harnessType, "reason", skipReason)
 		return false
 	}
 
-	// The container is stopped before phase=suspended is written; see
-	// beginLifecycleOp.
-	endLifecycleOp := s.beginLifecycleOp(agent.ID)
+	// Skip agents with an active deletion, reincarnation or in-flight
+	// lifecycle operation; otherwise claim the lifecycle op across the stop
+	// dispatch and status write.
+	if deletionActive(agent) || reincarnationInFlight(agent) {
+		slog.Info("Scheduler: skipping auto-suspend; lifecycle operation active on agent",
+			"agent_id", agent.ID, "agent_name", agent.Name, "suspend_reason", reason)
+		return false
+	}
+	endLifecycleOp, ok := s.tryBeginLifecycleOp(agent.ID)
+	if !ok {
+		slog.Info("Scheduler: skipping auto-suspend; lifecycle operation already in flight",
+			"agent_id", agent.ID, "agent_name", agent.Name, "suspend_reason", reason)
+		return false
+	}
 	// The op ends when this function returns (including after a panic,
 	// which runAutoSuspendBatch recovers), or earlier, right after the
 	// status write below. endLifecycleOp is idempotent.
@@ -6019,7 +6105,7 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 		Phase:           string(state.PhaseSuspended),
 		ContainerStatus: "stopped",
 		Activity:        "",
-		SuspendReason:   string(state.SuspendReasonStalled),
+		SuspendReason:   string(reason),
 	}
 	// Only while the row still holds the run the stop was dispatched
 	// for (ptone/scion#2550).
@@ -6058,7 +6144,7 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 	// keeps the grants keyed to it (ptone/scion#6403).
 	s.revokeSuspendedRunDelegationGrantsBestEffort(ctx, agent.ID, stopRunID)
 
-	s.syncAgentAfterStopRecord(ctx, agent, string(state.PhaseSuspended), string(state.SuspendReasonStalled))
+	s.syncAgentAfterStopRecord(ctx, agent, string(state.PhaseSuspended), string(reason))
 	// A suspended agent has no running container: release its
 	// max_agents_per_broker reservation (ptone/scion#1963) and its
 	// max_agents_per_project one (ptone/scion#6033), mirroring
@@ -7338,6 +7424,7 @@ func (s *Server) registerSchedulerHandlers() {
 
 	s.scheduler.RegisterRecurringSingleton("agent-heartbeat-timeout", 5, store.LockAgentHeartbeatTimeout, s.agentHeartbeatTimeoutHandler())
 	s.scheduler.RegisterRecurringSingleton("agent-stalled-detection", 5, store.LockAgentStalledDetection, s.agentStalledDetectionHandler())
+	s.scheduler.RegisterRecurringSingleton("agent-idle-suspend", 5, store.LockAgentIdleSuspend, s.agentIdleSuspendHandler())
 	// Registered whatever the startup retention: soft_delete_retention is
 	// applied live, and the handler skips the agent purge while it is 0.
 	// The scheduled-event purge inside it always runs.
