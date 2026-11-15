@@ -8188,6 +8188,9 @@ func (s *Server) registerRoutes() {
 	// User-scoped terminal workspace persistence (/users/me/terminal-workspace)
 	s.mux.HandleFunc("/api/v1/users/me/terminal-workspace", s.guarded("/api/v1/users/me/terminal-workspace", s.handleUserMeTerminalWorkspace))
 
+	// Profile decisions roll-up across member projects (/users/me/decisions)
+	s.mux.HandleFunc("/api/v1/users/me/decisions", s.guarded("/api/v1/users/me/decisions", s.handleUserMeDecisions))
+
 	// User-scoped template endpoints (/users/me/templates)
 	s.mux.HandleFunc("/api/v1/users/me/templates", s.guarded("/api/v1/users/me/templates", s.handleUserMeTemplates))
 	s.mux.HandleFunc("/api/v1/users/me/templates/", s.guarded("/api/v1/users/me/templates/", func(w http.ResponseWriter, r *http.Request) {

@@ -161,6 +161,9 @@ var routeAuthzManifest = map[string]string{
 	// ── User-scoped terminal workspace ─────────────────────────────────
 	"/api/v1/users/me/terminal-workspace": "authenticated", // GET/PUT: caller's own list; session/dev credential only (requireSessionCredentialFor)
 
+	// ── Profile decisions roll-up ──────────────────────────────────────
+	"/api/v1/users/me/decisions": "authenticated", // GET: caller's decisions across member projects; session or scoped UAT (project:read + inbox:read for DMs)
+
 	// ── Hub-scoped injected skills ─────────────────────────────────────
 	"/api/v1/hub/settings/injected-skills": "authenticated", // GET: authenticated (any user), PUT: admin (role check in handler)
 

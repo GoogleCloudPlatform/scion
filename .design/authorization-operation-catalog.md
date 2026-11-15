@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 396
+**Operations:** 397
 
 ## Table of Contents
 
@@ -203,6 +203,7 @@
 - [chat.decision.answer](#chatdecisionanswer) — Answer a choice prompt decision by choice id (the label is copied from the stored row) with optional surface (native or decisions_page). Needs the right to send in the prompt's conversation (stored chat_key, falling back to messages.thread_id: project:read and project.chat_post for a thread; for a DM, only the user in its key), surviving chat retention purge of the prompt message. Agents, visitors and tokens get 403, and so does a user other than the one an agent-interpreted answer records, or a user the asking agent takes no messages from (MESSAGE_DENIED, the chat send's check; a confirm is not delivered, so it is not checked). A replaced version or an answered one is 409, as is an idempotency key reused for another answer; the first answer wins. Records the answer and a choice-response message, delivers it to the asking agent and publishes choice.updated. 404 while web.chat_choices is off
 - [chat.choiceprompt.answer](#chatchoicepromptanswer) — Answer every actionable decision of a choice prompt with two or more decisions as one set, by choice id (labels are copied from the stored rows) with optional surface (native or decisions_page). Needs the right to send in the prompt's conversation (stored chat_key, falling back to messages.thread_id: project:read and project.chat_post for a thread; for a DM, only the user in its key), surviving chat retention purge of the prompt message. Agents and visitors get 403, tokens and other non-session credentials the session-only 403, and a user the asking agent takes no messages from 403 MESSAGE_DENIED (an all-confirm set is not delivered, so it is not checked). A missing or unreadable prompt is 404; a malformed set is 400; a set that does not equal the actionable set is 409 answer_set_changed with fresh views and a reason per row, and stores nothing; an idempotency key reused for other answers is 422. Records one answer per row with a shared batch id and one choice-response message in one transaction, delivers it to the asking agent and publishes choice.updated per row. 404 while web.chat_choices is off
 - [chat.projectdecisions.list](#chatprojectdecisionslist) — List pending choice prompts or the append-only recorded answer log for a project, with live waitingOnYou and waitingOnOthers counts and filter facets. Needs project:read on the project, then scopes every prompt, log entry, count, and facet to conversations the caller can read (project topics plus the caller's own canonical DMs with project agents; a UAT token includes DMs only with inbox:read). Agents, visitors and non-session/non-UAT credentials get 403; unsupported methods get 405; 404 unless both web.project_decisions and web.chat_choices are on
+- [chat.userdecisions.list](#chatuserdecisionslist) — List pending choice prompts or recorded decision answers across every project the caller is a member of and can read, with live waitingOnYou and waitingOnOthers counts, sort=project|recent, optional project narrowing, and filter facets (capped at 200 readable member projects with truncatedProjects). Filters candidate member projects by project:read (a project-bounded UAT sees only its boundary project; a UAT without project:read gets 200 with empty results), then scopes every prompt, log entry, group, count, and facet to conversations the caller can read (project topics plus the caller's own canonical DMs with project agents; a UAT includes DMs only with inbox:read). Non-member projects and project-visitor bindings are excluded even for hub admins. Agents, visitors and non-session/non-UAT credentials get 403; unsupported methods get 405; 404 unless both web.project_decisions and web.chat_choices are on
 - [role.definition.create](#roledefinitioncreate) — Create a custom role definition (create, import, duplicate). A token needs role:create and role:read on a hub boundary and the holder's live role.create authority; the holder must hold every permission of the role within the token's selectors. A project-scoped definition can be bound in every project, so it is judged on the holder's system-scope authority; a system-scoped definition is refused to every token
 - [role.definition.update](#roledefinitionupdate) — Update a custom role definition. A token needs role:update and role:read on a hub boundary and the holder's live role.update authority; the holder must hold every permission of the updated role within the token's selectors, judged as for create
 - [role.definition.delete](#roledefinitiondelete) — Delete a custom role definition. A token needs role:delete and role:read on a hub boundary and the holder's live role.delete authority; system roles and roles that are still bound are kept
@@ -7706,6 +7707,39 @@
 
 - `pkg/hub:TestProjectDecisions_TokenAndCallerAuthz`
 - `pkg/hub:TestProjectDecisions_DMPrivacyAcrossTabsCountsAndFacets`
+
+---
+
+## chat.userdecisions.list
+
+**Domain:** chat
+
+**Description:** List pending choice prompts or recorded decision answers across every project the caller is a member of and can read, with live waitingOnYou and waitingOnOthers counts, sort=project|recent, optional project narrowing, and filter facets (capped at 200 readable member projects with truncatedProjects). Filters candidate member projects by project:read (a project-bounded UAT sees only its boundary project; a UAT without project:read gets 200 with empty results), then scopes every prompt, log entry, group, count, and facet to conversations the caller can read (project topics plus the caller's own canonical DMs with project agents; a UAT includes DMs only with inbox:read). Non-member projects and project-visitor bindings are excluded even for hub admins. Agents, visitors and non-session/non-UAT credentials get 403; unsupported methods get 405; 404 unless both web.project_decisions and web.chat_choices are on
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/users/me/decisions` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_collection`; boundaries `project`, `hub`; pinned by `TestUserMeDecisions_TokenAndCallerAuthz`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** project-collection
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestUserMeDecisions_TokenAndCallerAuthz`
+- `pkg/hub:TestUserMeDecisions_DMPrivacyAndMembershipScope`
 
 ---
 

@@ -1271,4 +1271,30 @@ var chatOperations = []OperationSpec{
 			Pin:        "TestProjectDecisions_TokenAndCallerAuthz",
 		},
 	},
+	{
+		ID:          "chat.userdecisions.list",
+		Domain:      "chat",
+		Description: "List pending choice prompts or recorded decision answers across every project the caller is a member of and can read, with live waitingOnYou and waitingOnOthers counts, sort=project|recent, optional project narrowing, and filter facets (capped at 200 readable member projects with truncatedProjects). Filters candidate member projects by project:read (a project-bounded UAT sees only its boundary project; a UAT without project:read gets 200 with empty results), then scopes every prompt, log entry, group, count, and facet to conversations the caller can read (project topics plus the caller's own canonical DMs with project agents; a UAT includes DMs only with inbox:read). Non-member projects and project-visitor bindings are excluded even for hub admins. Agents, visitors and non-session/non-UAT credentials get 403; unsupported methods get 405; 404 unless both web.project_decisions and web.chat_choices are on",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/decisions", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "project-collection",
+		BasePermission:   "project.read",
+		Effects:          []SecurityEffect{EffectListScoped},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden, DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestUserMeDecisions_TokenAndCallerAuthz"},
+			{Package: "pkg/hub", Function: "TestUserMeDecisions_DMPrivacyAndMembershipScope"},
+		},
+		Bearer: BearerDisposition{
+			Kind:       BearerAdmit,
+			Target:     BearerTargetProjectCollection,
+			Boundaries: []BearerBoundary{BearerBoundaryProject, BearerBoundaryHub},
+			Pin:        "TestUserMeDecisions_TokenAndCallerAuthz",
+		},
+	},
 }

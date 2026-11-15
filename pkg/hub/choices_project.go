@@ -173,8 +173,11 @@ type ProjectMadeDecisionsResponse struct {
 
 // pendingPromptCursor is the keyset cursor for tab=pending: section 0 is
 // "Waiting on you" prompts and section 1 is "Waiting on others"-only prompts.
+// GroupAt and ProjectID are populated on profile sort=project cursors.
 type pendingPromptCursor struct {
 	Section   int       `json:"s"`
+	GroupAt   time.Time `json:"g,omitempty"`
+	ProjectID string    `json:"p,omitempty"`
 	CreatedAt time.Time `json:"t"`
 	MessageID string    `json:"m"`
 }
@@ -200,7 +203,7 @@ func decodePendingPromptCursor(token string) (pendingPromptCursor, error) {
 	if err := json.Unmarshal(raw, &c); err != nil {
 		return pendingPromptCursor{}, err
 	}
-	if (c.Section != 0 && c.Section != 1) || c.MessageID == "" || c.CreatedAt.IsZero() {
+	if (c.Section != 0 && c.Section != 1) || c.MessageID == "" || c.CreatedAt.IsZero() || !c.GroupAt.IsZero() || c.ProjectID != "" {
 		return pendingPromptCursor{}, errors.New("malformed pending cursor")
 	}
 	c.CreatedAt = c.CreatedAt.UTC()
@@ -280,21 +283,27 @@ func projectDecisionsCaller(w http.ResponseWriter, r *http.Request, projectID st
 
 // projectDecisionsQuery is one validated decisions query. q, conversation
 // and agentID apply to both tabs; madeFilter holds the Made-only filters
-// (its AgentID mirrors agentID).
+// (its AgentID mirrors agentID). On the profile endpoint (profile == true),
+// sort and projectID also apply.
 type projectDecisionsQuery struct {
-	tab           string
-	limit         int
-	cursor        string
-	pendingCursor *pendingPromptCursor
-	q             string
-	conversation  string
-	agentID       string
-	madeFilter    store.ProjectDecisionAnswerFilter
+	profile           bool
+	viewerID          string
+	tab               string
+	sort              string
+	projectID         string
+	truncatedProjects bool
+	limit             int
+	cursor            string
+	pendingCursor     *pendingPromptCursor
+	q                 string
+	conversation      string
+	agentID           string
+	madeFilter        store.ProjectDecisionAnswerFilter
 }
 
 // filtered reports whether a filter that applies to tab=pending is set.
 func (q projectDecisionsQuery) filtered() bool {
-	return q.q != "" || q.conversation != "" || q.agentID != ""
+	return q.q != "" || q.conversation != "" || q.agentID != "" || q.projectID != ""
 }
 
 func parseProjectDecisionsQuery(w http.ResponseWriter, r *http.Request) (projectDecisionsQuery, bool) {
@@ -738,6 +747,7 @@ func (s *Server) decisionsCore(
 	agentsFacet := []ProjectDecisionActorView{}
 	answerersFacet := []ProjectDecisionActorView{}
 	conversationsFacet := []ProjectDecisionConversationView{}
+	projectsFacet := []ProjectDecisionProjectRef{}
 	if len(set.chatKeys) > 0 && pq.limit > 0 {
 		facetAgents, facetAnswerers, convKeys, err := s.store.ListDecisionFacets(ctx, set.projectIDs, set.chatKeys)
 		if err != nil {
@@ -749,15 +759,26 @@ func (s *Server) decisionsCore(
 			answerersFacet = append(answerersFacet, ProjectDecisionActorView{ID: a.ID, Name: a.Name})
 		}
 		conversationsFacet = decisionConversationFacetViews(set, convKeys)
+		if pq.profile {
+			projectsFacet = decisionProjectFacetViews(set, convKeys)
+		}
 	}
 
-	// The keys the list is narrowed to. An unreadable conversation narrows
-	// to nothing, so it is not an existence oracle (design D4).
+	// The keys and projects the list is narrowed to. An unreadable conversation
+	// or non-member project narrows to nothing, so neither is an existence
+	// oracle (design D4, R1).
 	listKeys := set.chatKeys
 	if pq.conversation != "" {
 		listKeys = nil
 		if set.readable[pq.conversation] {
 			listKeys = []string{pq.conversation}
+		}
+	}
+	targetProjectIDs := set.projectIDs
+	if pq.projectID != "" {
+		targetProjectIDs = nil
+		if set.projects[pq.projectID] != nil {
+			targetProjectIDs = []string{pq.projectID}
 		}
 	}
 
@@ -776,24 +797,28 @@ func (s *Server) decisionsCore(
 	}
 
 	if pq.tab == ProjectDecisionsTabPending {
-		resp := ProjectPendingDecisionsResponse{
-			Counts:        counts,
-			Agents:        agentsFacet,
-			Answerers:     answerersFacet,
-			Conversations: conversationsFacet,
-		}
+		var filteredCounts *ProjectDecisionCounts
 		if pq.filtered() {
 			classified = filterClassifiedPrompts(set, classified, listKeys, pq)
 			fc := sumClassifiedCounts(classified)
-			resp.FilteredCounts = &fc
+			filteredCounts = &fc
+		}
+		if pq.profile {
+			return s.finishProfilePendingDecisions(ctx, set, pq, counts, filteredCounts, classified, agentsFacet, answerersFacet, conversationsFacet, projectsFacet)
 		}
 		pagePrompts, nextCursor, err := paginateClassifiedPrompts(classified, pq.pendingCursor, pq.limit)
 		if err != nil {
 			return nil, err
 		}
-		resp.Prompts = s.buildProjectDecisionPromptViews(ctx, set, pagePrompts)
-		resp.NextCursor = nextCursor
-		return resp, nil
+		return ProjectPendingDecisionsResponse{
+			Counts:         counts,
+			FilteredCounts: filteredCounts,
+			Prompts:        s.buildProjectDecisionPromptViews(ctx, set, pagePrompts),
+			Agents:         agentsFacet,
+			Answerers:      answerersFacet,
+			Conversations:  conversationsFacet,
+			NextCursor:     nextCursor,
+		}, nil
 	}
 
 	// tab=made
@@ -802,7 +827,10 @@ func (s *Server) decisionsCore(
 		filter.Query = pq.q
 		filter.QueryChatKeys = set.labelMatchKeys(listKeys, strings.ToLower(pq.q))
 	}
-	rawEntries, nextCursor, err := s.store.ListDecisionAnswers(ctx, set.projectIDs, listKeys, filter, pq.cursor, pq.limit)
+	if pq.profile {
+		return s.finishProfileMadeDecisions(ctx, wcs, set, pq, targetProjectIDs, listKeys, filter, counts, agentsFacet, answerersFacet, conversationsFacet, projectsFacet)
+	}
+	rawEntries, nextCursor, err := s.store.ListDecisionAnswers(ctx, targetProjectIDs, listKeys, filter, pq.cursor, pq.limit)
 	if err != nil {
 		return nil, err
 	}
@@ -935,6 +963,9 @@ func filterClassifiedPrompts(set *decisionScopeSet, all []classifiedOpenPrompt, 
 	out := make([]classifiedOpenPrompt, 0, len(all))
 	for _, c := range all {
 		p := c.raw
+		if pq.projectID != "" && p.ProjectID != pq.projectID {
+			continue
+		}
 		if !inKeys[p.ChatKey] {
 			continue
 		}

@@ -267,6 +267,10 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the route answers 404 unless both web.project_decisions and web.chat_choices are on, and both are off in this fixture; the dedicated test enables both experiments and drives the route across session, project and hub UATs (with and without inbox:read and project:read), wrong-project UATs, agent tokens, federated users and visitors",
 		Pin:    "TestProjectDecisions_TokenAndCallerAuthz",
 	},
+	{OperationID: "chat.userdecisions.list", Method: "GET", Pattern: "/api/v1/users/me/decisions"}: {
+		Reason: "the route answers 404 unless both web.project_decisions and web.chat_choices are on, and when on it filters candidate member projects by project:read rather than refusing a UAT without project:read; the dedicated test enables both experiments and drives the route across session, project-bounded and hub-bounded UATs (with and without inbox:read and project:read), agent tokens, federated users and visitors",
+		Pin:    "TestUserMeDecisions_TokenAndCallerAuthz",
+	},
 	// Global catalog and project-scope branches whose refusal the generic
 	// probes cannot observe. Each is pinned by a test that drives real
 	// tokens through the branch.
