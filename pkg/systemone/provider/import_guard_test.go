@@ -20,6 +20,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -45,6 +46,8 @@ const (
 //     pkg/systemone/runtime.
 //  3. Only pkg/systemone/egress may construct an outbound http.Client in
 //     non-test Go files under pkg/systemone/...
+//  4. Exported *ForTesting seams from pkg/systemone/... may only be referenced
+//     from _test.go files and pkg/systemone/conformance.
 func TestImportGuards_SystemOneBoundaries(t *testing.T) {
 	root := findModuleRoot(t)
 	pkgs, err := discoverSubpackages(root, filepath.Join(root, "pkg", "systemone"))
@@ -103,6 +106,11 @@ func TestImportGuards_SystemOneBoundaries(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, httpViolations, "only pkg/systemone/egress may construct outbound http.Client:\n  %s",
 		strings.Join(httpViolations, "\n  "))
+
+	forTestingViolations, err := scanUnauthorizedForTestingReferences(root)
+	require.NoError(t, err)
+	require.Empty(t, forTestingViolations, "*ForTesting identifiers from pkg/systemone/... must only be referenced in _test.go files or pkg/systemone/conformance:\n  %s",
+		strings.Join(forTestingViolations, "\n  "))
 }
 
 func TestImportGuards_SelfTestDetectsViolations(t *testing.T) {
@@ -141,6 +149,33 @@ func TestImportGuards_SelfTestDetectsViolations(t *testing.T) {
 	vBad, err := scanUnauthorizedHTTPClientConstruction(filepath.Join(tmp, "pkg", "systemone"))
 	require.NoError(t, err)
 	assert.Len(t, vBad, 2)
+
+	// *ForTesting AST scanner allows declarations, _test.go files, and pkg/systemone/conformance,
+	// while flagging references from non-test files inside or outside pkg/systemone/...
+	tmpFT := t.TempDir()
+	writeFT := func(rel, src string) {
+		p := filepath.Join(tmpFT, filepath.FromSlash(rel))
+		require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
+		require.NoError(t, os.WriteFile(p, []byte(src), 0o644))
+	}
+	writeFT("pkg/systemone/egress/egress.go", "package egress\nfunc WithLoopbackServerForTesting() {}\n")
+	writeFT("pkg/systemone/runtime/runtime.go", "package runtime\nfunc WithEgressOptionsForTesting() {}\n")
+	writeFT("pkg/systemone/conformance/harness.go", "package conformance\nimport \""+egressPkg+"\"\nfunc Run() { egress.WithLoopbackServerForTesting() }\n")
+	writeFT("pkg/systemone/provider/jevwire/ok_test.go", "package jevwire_test\nimport \""+egressPkg+"\"\nfunc init() { egress.WithLoopbackServerForTesting() }\n")
+	writeFT("pkg/hub/probe_test.go", "package hub\nimport \""+systemOnePkg+"/runtime\"\nfunc init() { runtime.WithEgressOptionsForTesting() }\n")
+
+	ftClean, err := scanUnauthorizedForTestingReferences(tmpFT)
+	require.NoError(t, err)
+	assert.Empty(t, ftClean)
+
+	// Plant unauthorized references: aliased adapter reference, same-package production call, and outside package call.
+	writeFT("pkg/systemone/provider/jevwire/bad.go", "package jevwire\nimport eg \""+egressPkg+"\"\nvar _ = eg.WithLoopbackServerForTesting\n")
+	writeFT("pkg/systemone/egress/misuse.go", "package egress\nfunc Prod() { WithLoopbackServerForTesting() }\n")
+	writeFT("pkg/hub/bad_probe.go", "package hub\nimport \""+systemOnePkg+"/runtime\"\nfunc Bad() { runtime.WithEgressOptionsForTesting() }\n")
+
+	ftBad, err := scanUnauthorizedForTestingReferences(tmpFT)
+	require.NoError(t, err)
+	assert.Len(t, ftBad, 3, "expected all 3 planted *ForTesting violations, got: %v", ftBad)
 }
 
 func findModuleRoot(t *testing.T) string {
@@ -342,4 +377,300 @@ func scanUnauthorizedHTTPClientConstruction(systemOneDir string) ([]string, erro
 		return nil
 	})
 	return violations, err
+}
+
+func isSystemOneImportPath(impPath string) bool {
+	return impPath == systemOnePkg || strings.HasPrefix(impPath, systemOnePkg+"/")
+}
+
+func scanUnauthorizedForTestingReferences(moduleRoot string) ([]string, error) {
+	systemOneDir := filepath.Join(moduleRoot, "pkg", "systemone")
+	conformanceDir := filepath.Join(systemOneDir, "conformance")
+	fset := token.NewFileSet()
+
+	pkgNameCache := make(map[string]string)
+	resolveLocalPkgName := func(impPath string) string {
+		if cached, ok := pkgNameCache[impPath]; ok {
+			return cached
+		}
+		name := path.Base(impPath)
+		if strings.HasPrefix(impPath, scionModulePath+"/") {
+			rel := strings.TrimPrefix(impPath, scionModulePath+"/")
+			dir := filepath.Join(moduleRoot, filepath.FromSlash(rel))
+			if files, err := filepath.Glob(filepath.Join(dir, "*.go")); err == nil {
+				for _, gf := range files {
+					if strings.HasSuffix(gf, "_test.go") {
+						continue
+					}
+					if pf, err := parser.ParseFile(fset, gf, nil, parser.PackageClauseOnly); err == nil && pf.Name != nil {
+						name = pf.Name.Name
+						break
+					}
+				}
+			}
+		}
+		pkgNameCache[impPath] = name
+		return name
+	}
+
+	// Pre-scan pkg/systemone/... non-test declarations to capture any *ForTesting
+	// methods or struct fields so method/field selector calls outside pkg/systemone
+	// are also caught.
+	declaredMemberForTesting := make(map[string]bool)
+	if _, statErr := os.Stat(systemOneDir); statErr == nil {
+		_ = filepath.WalkDir(systemOneDir, func(p string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				n := d.Name()
+				if p != systemOneDir && (n == "testdata" || strings.HasPrefix(n, ".") || strings.HasPrefix(n, "_")) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+				return nil
+			}
+			f, err := parser.ParseFile(fset, p, nil, 0)
+			if err != nil {
+				return nil
+			}
+			for _, decl := range f.Decls {
+				if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv != nil && fn.Name != nil && strings.HasSuffix(fn.Name.Name, "ForTesting") {
+					declaredMemberForTesting[fn.Name.Name] = true
+				}
+			}
+			ast.Inspect(f, func(n ast.Node) bool {
+				switch node := n.(type) {
+				case *ast.StructType:
+					if node.Fields != nil {
+						for _, fld := range node.Fields.List {
+							for _, nm := range fld.Names {
+								if strings.HasSuffix(nm.Name, "ForTesting") {
+									declaredMemberForTesting[nm.Name] = true
+								}
+							}
+						}
+					}
+				case *ast.InterfaceType:
+					if node.Methods != nil {
+						for _, m := range node.Methods.List {
+							for _, nm := range m.Names {
+								if strings.HasSuffix(nm.Name, "ForTesting") {
+									declaredMemberForTesting[nm.Name] = true
+								}
+							}
+						}
+					}
+				}
+				return true
+			})
+			return nil
+		})
+	}
+
+	skipTopDirs := map[string]bool{
+		"build":        true,
+		"docs":         true,
+		"docs-repo":    true,
+		"docs-site":    true,
+		"node_modules": true,
+		"testdata":     true,
+		"vendor":       true,
+		"web":          true,
+	}
+
+	var violations []string
+	err := filepath.WalkDir(moduleRoot, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if p == moduleRoot {
+				return nil
+			}
+			if p == conformanceDir || strings.HasPrefix(p, conformanceDir+string(filepath.Separator)) {
+				return filepath.SkipDir
+			}
+			n := d.Name()
+			if strings.HasPrefix(n, ".") || strings.HasPrefix(n, "_") || skipTopDirs[n] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+			return nil
+		}
+
+		inSystemOne := p == systemOneDir || strings.HasPrefix(p, systemOneDir+string(filepath.Separator))
+		if !inSystemOne {
+			fImp, err := parser.ParseFile(fset, p, nil, parser.ImportsOnly)
+			if err != nil {
+				return err
+			}
+			importsSysOne := false
+			for _, imp := range fImp.Imports {
+				impPath, uErr := strconv.Unquote(imp.Path.Value)
+				if uErr == nil && isSystemOneImportPath(impPath) {
+					importsSysOne = true
+					break
+				}
+			}
+			if !importsSysOne {
+				return nil
+			}
+		}
+
+		f, err := parser.ParseFile(fset, p, nil, 0)
+		if err != nil {
+			return err
+		}
+
+		sysOneAliases := make(map[string]bool)
+		externalAliases := make(map[string]bool)
+		dotImportsSystemOne := false
+		for _, imp := range f.Imports {
+			impPath, uErr := strconv.Unquote(imp.Path.Value)
+			if uErr != nil {
+				continue
+			}
+			sysOne := isSystemOneImportPath(impPath)
+			if imp.Name != nil {
+				switch imp.Name.Name {
+				case "_":
+					continue
+				case ".":
+					if sysOne {
+						dotImportsSystemOne = true
+					}
+				default:
+					if sysOne {
+						sysOneAliases[imp.Name.Name] = true
+					} else {
+						externalAliases[imp.Name.Name] = true
+					}
+				}
+			} else {
+				alias := resolveLocalPkgName(impPath)
+				if sysOne {
+					sysOneAliases[alias] = true
+				} else {
+					externalAliases[alias] = true
+				}
+			}
+		}
+
+		declIdents := collectDeclarationIdents(f)
+
+		if inSystemOne {
+			ignoredSel := make(map[*ast.Ident]bool)
+			ast.Inspect(f, func(n ast.Node) bool {
+				if sel, ok := n.(*ast.SelectorExpr); ok {
+					if id, ok := sel.X.(*ast.Ident); ok && externalAliases[id.Name] {
+						ignoredSel[sel.Sel] = true
+					}
+				}
+				return true
+			})
+			ast.Inspect(f, func(n ast.Node) bool {
+				ident, ok := n.(*ast.Ident)
+				if !ok || !strings.HasSuffix(ident.Name, "ForTesting") {
+					return true
+				}
+				if declIdents[ident] || ignoredSel[ident] {
+					return true
+				}
+				pos := fset.Position(ident.Pos())
+				violations = append(violations, fmt.Sprintf("%s:%d: unauthorized reference to %s outside _test.go and pkg/systemone/conformance", pos.Filename, pos.Line, ident.Name))
+				return true
+			})
+			return nil
+		}
+
+		// File outside pkg/systemone/... that imports pkg/systemone/...
+		selIdents := make(map[*ast.Ident]bool)
+		ast.Inspect(f, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			selIdents[sel.Sel] = true
+			if !strings.HasSuffix(sel.Sel.Name, "ForTesting") {
+				return true
+			}
+			if id, ok := sel.X.(*ast.Ident); ok {
+				if sysOneAliases[id.Name] {
+					pos := fset.Position(sel.Sel.Pos())
+					violations = append(violations, fmt.Sprintf("%s:%d: unauthorized reference to %s.%s outside _test.go and pkg/systemone/conformance", pos.Filename, pos.Line, id.Name, sel.Sel.Name))
+					return true
+				}
+				if externalAliases[id.Name] {
+					return true
+				}
+			}
+			if declaredMemberForTesting[sel.Sel.Name] {
+				pos := fset.Position(sel.Sel.Pos())
+				violations = append(violations, fmt.Sprintf("%s:%d: unauthorized reference to %s outside _test.go and pkg/systemone/conformance", pos.Filename, pos.Line, sel.Sel.Name))
+			}
+			return true
+		})
+
+		if dotImportsSystemOne {
+			ast.Inspect(f, func(n ast.Node) bool {
+				ident, ok := n.(*ast.Ident)
+				if !ok || !strings.HasSuffix(ident.Name, "ForTesting") {
+					return true
+				}
+				if declIdents[ident] || selIdents[ident] {
+					return true
+				}
+				pos := fset.Position(ident.Pos())
+				violations = append(violations, fmt.Sprintf("%s:%d: unauthorized dot-imported reference to %s outside _test.go and pkg/systemone/conformance", pos.Filename, pos.Line, ident.Name))
+				return true
+			})
+		}
+
+		return nil
+	})
+	sort.Strings(violations)
+	return violations, err
+}
+
+func collectDeclarationIdents(f *ast.File) map[*ast.Ident]bool {
+	decls := make(map[*ast.Ident]bool)
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.FuncDecl:
+			if node.Name != nil {
+				decls[node.Name] = true
+			}
+		case *ast.TypeSpec:
+			if node.Name != nil {
+				decls[node.Name] = true
+			}
+		case *ast.ValueSpec:
+			for _, nm := range node.Names {
+				decls[nm] = true
+			}
+		case *ast.StructType:
+			if node.Fields != nil {
+				for _, fld := range node.Fields.List {
+					for _, nm := range fld.Names {
+						decls[nm] = true
+					}
+				}
+			}
+		case *ast.InterfaceType:
+			if node.Methods != nil {
+				for _, m := range node.Methods.List {
+					for _, nm := range m.Names {
+						decls[nm] = true
+					}
+				}
+			}
+		}
+		return true
+	})
+	return decls
 }
