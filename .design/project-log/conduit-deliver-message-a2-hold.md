@@ -102,3 +102,8 @@
 - Over `maxHeldMessagesPerAgent` (100), pre-dispatch sends proceed directly to
   normal broker dispatch without queuing behind held rows, and broker failure
   reports fall through to ordinary `failed` handling.
+- If a hub process dies abruptly (OOM or node loss) after `ClaimHeldMessages`
+  moved rows `awaiting_session → dispatched` and before handing them to the
+  runtime broker, those claimed rows stay `dispatched` (`delivery_id IS NULL`)
+  without re-drive or sender notice, matching existing persist-then-dispatch
+  writers; graceful shutdown cancels `abortCtx` and re-holds them (RV3-O4).
