@@ -100,6 +100,9 @@ const (
 	// conduitDeliverExperiment is experiments.ConduitDeliver: message
 	// delivery over the agent's conduit session (deliver-message).
 	conduitDeliverExperiment = experiments.ConduitDeliver
+	// execSchedulesExperiment is experiments.ExecSchedules: the agent
+	// registers the exec control routes (exec-start, exec-status).
+	execSchedulesExperiment = experiments.ExecSchedules
 
 	// conduitGrantKeySecretName is the ring's secret key (design
 	// "conduit.grant_key").

@@ -54,16 +54,22 @@ type Options struct {
 	// Deliver, when set, registers deliver-message (RouteDeliverMessage)
 	// and so advertises it. Set it only when DeliverEnabled holds.
 	Deliver *DeliverOptions
+	// Exec, when set, registers exec-start and exec-status
+	// (RouteExecStart, RouteExecStatus) and so advertises them. Set it
+	// only when ExecEnabled holds.
+	Exec *ExecOptions
 }
 
 // Handler serves the /v1/control/* routes.
 type Handler struct {
 	routes map[string]http.HandlerFunc
 	names  []string
+	exec   *execRoute // nil unless Options.Exec is set
 }
 
 // New returns a Handler serving the routes opts supports. It panics if
-// KickTokenRefresh is nil, or Deliver is set without a Runner.
+// KickTokenRefresh is nil, Deliver is set without a Runner, or Exec is set
+// without Env.
 func New(opts Options) *Handler {
 	if opts.KickTokenRefresh == nil {
 		panic("control: KickTokenRefresh is required")
@@ -76,6 +82,12 @@ func New(opts Options) *Handler {
 	})
 	if opts.Deliver != nil {
 		h.add(RouteDeliverMessage, newDeliverRoute(*opts.Deliver).serve)
+	}
+	if opts.Exec != nil {
+		e := newExecRoute(*opts.Exec)
+		h.exec = e
+		h.add(RouteExecStart, e.serveStart)
+		h.add(RouteExecStatus, e.serveStatus)
 	}
 	return h
 }

@@ -165,6 +165,17 @@ const FlatCloudRunTarget = "hub.flat_cloudrun_target"
 // before it was turned on keeps using exec until it restarts.
 const ConduitDeliver = "hub.conduit_deliver"
 
+// ExecSchedules gates exec-only schedules (ptone/scion#7818, design D8): a
+// scheduled command run in the target agent's container over its Conduit
+// session (the exec-start and exec-status control routes,
+// .design/conduit/exec-control-routes.md). It requires hub.conduit: the hub
+// sends it to agents at launch only while conduit is served, and an agent
+// launched with it registers the two routes. The hub-side gating of exec
+// schedules (authoring and fire time) lands with ptone/scion#7883; until
+// then turning it on only makes newly launched agents advertise the routes,
+// which nothing in the hub calls.
+const ExecSchedules = "hub.exec_schedules"
+
 // Artifacts gates the artifact service (pkg/artifacts): the hub's
 // /api/v1/artifacts routes answer 404 while it is off, and the web UI hides
 // every artifact surface.
@@ -695,6 +706,17 @@ var compiled = []Experiment{
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#7353",
 		Owner:       "conduit",
+		ReviewBy:    "2027-03-31",
+	},
+	{
+		Name:        ExecSchedules,
+		Title:       "Exec schedules",
+		Description: "Exec-only schedules: run a command in an agent's container on a schedule, over the agent's Conduit session, with no message and no LLM turn. Requires hub.conduit. Agents launched while it is on advertise the exec-start and exec-status control routes; agents started before it was turned on do not until they restart. Until scheduling exec commands lands (ptone/scion#7883), turning it on only makes newly launched agents advertise those routes; nothing in the hub calls them.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#7818",
+		Owner:       "@ptone",
 		ReviewBy:    "2027-03-31",
 	},
 	{

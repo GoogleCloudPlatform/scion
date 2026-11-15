@@ -202,9 +202,25 @@ func (f *ptyConduitFixture) startControlAgent(t *testing.T, hubURL string, adver
 // deliver-message route registered when deliver is not nil.
 func (f *ptyConduitFixture) startControlAgentWithDeliver(t *testing.T, hubURL string, advertise bool, deliver *control.DeliverOptions, wrap func(conduit.RPCHandler) conduit.RPCHandler) *controlAgent {
 	t.Helper()
+	return f.startControlAgentWithOptions(t, hubURL, advertise, control.Options{Deliver: deliver}, wrap)
+}
+
+// startControlAgentWithOptions is startControlAgent with the control
+// handler built from opts (KickTokenRefresh is the agent's kick counter).
+func (f *ptyConduitFixture) startControlAgentWithOptions(t *testing.T, hubURL string, advertise bool, opts control.Options, wrap func(conduit.RPCHandler) conduit.RPCHandler) *controlAgent {
+	t.Helper()
+	return f.startControlAgentAs(t, hubURL, f.launched.RunID, advertise, opts, wrap)
+}
+
+// startControlAgentAs is startControlAgentWithOptions with the session's
+// presented launch id set to launchID ("" admits it through the interim
+// generation fallback).
+func (f *ptyConduitFixture) startControlAgentAs(t *testing.T, hubURL, launchID string, advertise bool, opts control.Options, wrap func(conduit.RPCHandler) conduit.RPCHandler) *controlAgent {
+	t.Helper()
 	guardSciontoolLog()
 	ca := &controlAgent{paths: make(chan string, 16)}
-	ctl := control.New(control.Options{KickTokenRefresh: func() { ca.kicks.Add(1) }, Deliver: deliver})
+	opts.KickTokenRefresh = func() { ca.kicks.Add(1) }
+	ctl := control.New(opts)
 	h := control.RPCHandler(ctl)
 	if wrap != nil {
 		h = wrap(h)
@@ -227,7 +243,7 @@ func (f *ptyConduitFixture) startControlAgentWithDeliver(t *testing.T, hubURL st
 		HubURL:    hubURL,
 		AgentID:   f.launched.ID,
 		ProjectID: f.launched.ProjectID,
-		LaunchID:  f.launched.RunID,
+		LaunchID:  launchID,
 		Token:     func() string { return tok },
 		OnSession: func(w *conduitv1.Welcome) { admitted <- w },
 		Backoff:   &conduit.Backoff{Rand: func(int64) int64 { return 0 }},
