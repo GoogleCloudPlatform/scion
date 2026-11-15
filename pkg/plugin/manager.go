@@ -1109,6 +1109,17 @@ func (m *Manager) UpdatePlugin(name string, repoPath string) (UpdateResult, erro
 	lock.Lock()
 	defer lock.Unlock()
 
+	m.mu.RLock()
+	_, stillLoaded := m.configs[key]
+	stopping := m.stopping.Load()
+	m.mu.RUnlock()
+	if stopping {
+		return UpdateResult{}, fmt.Errorf("plugin manager is shutting down; aborting update for plugin %q", name)
+	}
+	if !stillLoaded {
+		return UpdateResult{}, fmt.Errorf("plugin %q was unloaded during update", name)
+	}
+
 	if err := os.Rename(tmpBinaryPath, binaryPath); err != nil {
 		if isUnwritable(err) {
 			pluginsDir, _ := m.effectivePluginsDir()
@@ -1124,9 +1135,18 @@ func (m *Manager) UpdatePlugin(name string, repoPath string) (UpdateResult, erro
 	}
 
 	m.mu.Lock()
-	if latest, exists := m.configs[key]; exists {
-		dp = latest
+	latest, exists := m.configs[key]
+	if stoppingNow := m.stopping.Load(); stoppingNow || !exists {
+		m.mu.Unlock()
+		if relocated {
+			_ = os.Remove(binaryPath)
+		}
+		if stoppingNow {
+			return UpdateResult{}, fmt.Errorf("plugin manager is shutting down; aborting update for plugin %q", name)
+		}
+		return UpdateResult{}, fmt.Errorf("plugin %q was unloaded during update", name)
 	}
+	dp = latest
 	dp.Path = binaryPath
 	if relocated {
 		dp.ExplicitPath = false
