@@ -19,6 +19,10 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import d2 from 'astro-d2';
 import starlightLinksValidator from 'starlight-links-validator';
+import { getBuildVersionConfig } from './src/lib/versioning.mjs';
+import { scionRewriteBaseIntegration } from './src/plugins/rewrite-scion-base.mjs';
+
+const buildVersion = getBuildVersionConfig();
 
 // The Hosted user journey is shared by both hosted tiers (Single-node and HA).
 // The pages live once under `hosted/user/`; both tiers reference the same slugs
@@ -46,47 +50,56 @@ const hostedUserGuide = {
 	],
 };
 
+const legacyRedirectTargets = {
+	'/advanced-local/local-governance': '/local/local-governance/',
+	'/advanced-local/agent-lifecycle': '/local/agent-lifecycle/',
+	'/advanced-local/workspace': '/local/workspace/',
+	'/advanced-local/templates': '/local/templates/',
+	'/advanced-local/agent-credentials': '/local/agent-credentials/',
+	'/advanced-local/custom-images': '/local/custom-images/',
+	'/advanced-local/tmux': '/local/tmux/',
+	'/advanced-local/completions': '/local/completions/',
+	'/advanced-local/workstation-server': '/workstation/workstation-server/',
+	'/workspaces-and-sharing': '/local/workspaces-and-sharing/',
+	'/hub-user/dashboard': '/workstation/dashboard/',
+	'/hub-user/git-projects': '/workstation/git-projects/',
+	'/hub-user/hosted-user': '/hosted/user/hosted-user/',
+	'/hub-user/personal-access-tokens': '/hosted/user/personal-access-tokens/',
+	'/hub-user/secrets': '/hosted/user/secrets/',
+	'/hub-user/messaging': '/hosted/user/messaging/',
+	'/hub-user/external-channels': '/hosted/user/external-channels/',
+	'/hub-user/runtime-broker': '/hosted/ha/runtime-broker/',
+	'/hub-user/multi-broker': '/hosted/ha/multi-broker/',
+	'/hub-admin/hub-server': '/hosted/single-node/hub-server/',
+	'/hub-admin/hub-setup-gce': '/hosted/single-node/hub-setup-gce/',
+	'/hub-admin/auth': '/hosted/single-node/auth/',
+	'/hub-admin/observability': '/hosted/single-node/observability/',
+	'/hub-admin/metrics': '/hosted/single-node/metrics/',
+	'/hub-admin/kubernetes': '/hosted/ha/kubernetes/',
+	'/hub-admin/auth-proxy-iap': '/hosted/ha/auth-proxy-iap/',
+	'/hub-admin/permissions': '/hosted/ha/permissions/',
+	'/hub-admin/lifecycle-hooks': '/hosted/ha/lifecycle-hooks/',
+	'/development/logging': '/contributing/logging/',
+};
+
 // https://astro.build/config
 export default defineConfig({
 	site: 'https://googlecloudplatform.github.io',
-	base: '/scion',
+	base: buildVersion.base,
 	// Preserve old URLs after the mode-axis restructure so inbound links do not 404.
-	redirects: {
-		'/advanced-local/local-governance': '/local/local-governance',
-		'/advanced-local/agent-lifecycle': '/local/agent-lifecycle',
-		'/advanced-local/workspace': '/local/workspace',
-		'/advanced-local/templates': '/local/templates',
-		'/advanced-local/agent-credentials': '/local/agent-credentials',
-		'/advanced-local/custom-images': '/local/custom-images',
-		'/advanced-local/tmux': '/local/tmux',
-		'/advanced-local/completions': '/local/completions',
-		'/advanced-local/workstation-server': '/workstation/workstation-server',
-		'/workspaces-and-sharing': '/local/workspaces-and-sharing',
-		'/hub-user/dashboard': '/workstation/dashboard',
-		'/hub-user/git-projects': '/workstation/git-projects',
-		'/hub-user/hosted-user': '/hosted/user/hosted-user',
-		'/hub-user/personal-access-tokens': '/hosted/user/personal-access-tokens',
-		'/hub-user/secrets': '/hosted/user/secrets',
-		'/hub-user/messaging': '/hosted/user/messaging',
-		'/hub-user/external-channels': '/hosted/user/external-channels',
-		'/hub-user/runtime-broker': '/hosted/ha/runtime-broker',
-		'/hub-user/multi-broker': '/hosted/ha/multi-broker',
-		'/hub-admin/hub-server': '/hosted/single-node/hub-server',
-		'/hub-admin/hub-setup-gce': '/hosted/single-node/hub-setup-gce',
-		'/hub-admin/auth': '/hosted/single-node/auth',
-		'/hub-admin/observability': '/hosted/single-node/observability',
-		'/hub-admin/metrics': '/hosted/single-node/metrics',
-		'/hub-admin/kubernetes': '/hosted/ha/kubernetes',
-		'/hub-admin/auth-proxy-iap': '/hosted/ha/auth-proxy-iap',
-		'/hub-admin/permissions': '/hosted/ha/permissions',
-		'/hub-admin/lifecycle-hooks': '/hosted/ha/lifecycle-hooks',
-		'/development/logging': '/contributing/logging',
-	},
+	redirects: Object.fromEntries(
+		Object.entries(legacyRedirectTargets).map(([from, to]) => [from, `${buildVersion.base}${to}`]),
+	),
 	integrations: [
+		scionRewriteBaseIntegration({ base: buildVersion.base }),
 		d2(),
 		starlight({
 			plugins: [starlightLinksValidator()],
 			title: 'Scion',
+			components: {
+				Banner: './src/components/Banner.astro',
+				ThemeSelect: './src/components/ThemeSelect.astro',
+			},
 			social: [
 				{ icon: 'github', label: 'GitHub', href: 'https://github.com/GoogleCloudPlatform/scion' },
 			],

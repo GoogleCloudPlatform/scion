@@ -1,0 +1,35 @@
+{
+  "defaultChannel": "main",
+  "channels": [
+    {
+      "id": "main",
+      "label": "main",
+      "latest": "main",
+      "versions": [
+        {
+          "version": "main",
+          "label": "HEAD (latest)",
+          "path": "/scion"
+        }
+      ]
+    },
+    {
+      "id": "stable",
+      "label": "Stable",
+      "latest": "",
+      "versions": []
+    },
+    {
+      "id": "preview",
+      "label": "Preview",
+      "latest": "",
+      "versions": []
+    },
+    {
+      "id": "nightly",
+      "label": "Nightly",
+      "latest": "",
+      "versions": []
+    }
+  ]
+}
