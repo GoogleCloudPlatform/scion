@@ -121,7 +121,7 @@ writes YAML by default. The JSON schema lives at
 2. **Source of Truth**:
    - `GLOSSARY.md` (root) for terminology and the mode spine.
    - `.design/` for architectural intent.
-   - `pkg/` for implementation details; verify CLI flags in `cmd/`.
+   - `pkg/` for implementation details; verify CLI flags in `cmd/` and HTTP status / wire error codes in `pkg/hub/` handlers. User-facing feature release notes go at the top of `src/content/docs/release-notes.md` (not generated `changelog/` pages).
 3. **Mode-Specific Placement**: Put a page in the mode it belongs to. When a topic
    spans modes, place it in the most logical one and cross-link — do not duplicate.
 4. **Tone**: *User docs* are practical and task-oriented; *admin docs* are technical
@@ -144,9 +144,11 @@ writes YAML by default. The JSON schema lives at
 
 **Note on D2**: `npm run build` and `npm run dev` render every `d2` block with the
 `astro-d2` integration, so the `d2` CLI must be installed to build the site locally (see
-`docs-site/README.md` for the install command; CI pins d2 v0.9.0 in
-`.github/workflows/docs.yml`). The rendered SVGs in `public/d2/` are gitignored and
-regenerated on every build. To check diagram syntax on its own, run `./check-d2.sh`. If
-`d2` is not available in your environment, check your D2 syntax against the
-[D2 documentation](https://d2lang.com/tour/intro) and say in your PR that the diagrams
-were not rendered locally.
+`docs-site/README.md` for workstation install; in agent containers, unpack the pinned
+checksummed release tarball into `/tmp` and add its `bin/` directory to `PATH` following
+the `Install D2` step in `.github/workflows/docs.yml`, since `d2lang.com/install.sh` uses
+`sudo` and hits unauthenticated GitHub API 403 rate limits). The rendered SVGs in
+`public/d2/` are gitignored and regenerated on every build. To check diagram syntax on its
+own, run `./check-d2.sh`. If network policy blocks fetching `d2`, check your D2 syntax
+against the [D2 documentation](https://d2lang.com/tour/intro) and say in your PR that
+`npm run build` (including `starlight-links-validator`) was not run locally.
