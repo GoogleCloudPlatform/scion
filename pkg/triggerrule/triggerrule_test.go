@@ -1144,6 +1144,35 @@ func TestSkipReasonPreservedWhenEngineWrapsDialectErrors(t *testing.T) {
 		t.Fatalf("caller cancel wrapping UncertainError: SkipReason = (%q, %v), want (\"\", false) (err=%v)",
 			reason, ok, evalErr)
 	}
+
+	// 4. Caller cancellation wrapping an inner ErrBudgetExhausted still returns ("", false):
+	// outermost caller cancellation must win over deeper sentinels in the Unwrap chain
+	// (regression guard against replacing `err == ErrBudgetExhausted` with `errors.Is`).
+	stub.evalFn = func(ctx context.Context) error {
+		<-ctx.Done()
+		return fmt.Errorf("dialect inner step: %w", errors.Join(ctx.Err(), ruleengine.ErrBudgetExhausted))
+	}
+	callerCtx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel2()
+	_, evalErr = rules.Match(callerCtx2, scope, rule, act)
+	if !errors.Is(evalErr, ruleengine.ErrBudgetExhausted) {
+		t.Fatalf("expected wrapped ErrBudgetExhausted in error chain, got %v", evalErr)
+	}
+	if reason, ok := triggerrule.SkipReason(evalErr); ok || reason != "" {
+		t.Fatalf("caller cancel wrapping ErrBudgetExhausted: SkipReason = (%q, %v), want (\"\", false) (err=%v)",
+			reason, ok, evalErr)
+	}
+
+	// 5. Dialect eval timeout wrapping an inner ErrBudgetExhausted still maps to
+	// SkipReasonEvalFailed (outermost FailedError{Reason: ReasonTimeout} wins).
+	_, evalErr = rules.Match(context.Background(), scope, rule, act)
+	if !errors.Is(evalErr, ruleengine.ErrBudgetExhausted) {
+		t.Fatalf("expected wrapped ErrBudgetExhausted in timeout error chain, got %v", evalErr)
+	}
+	if reason, ok := triggerrule.SkipReason(evalErr); !ok || reason != triggerrule.SkipReasonEvalFailed {
+		t.Fatalf("timeout wrapping ErrBudgetExhausted: SkipReason = (%q, %v), want (%q, true) (err=%v)",
+			reason, ok, triggerrule.SkipReasonEvalFailed, evalErr)
+	}
 }
 
 func TestPass6RegexOptionAPreScanAndOrdinaryRules(t *testing.T) {

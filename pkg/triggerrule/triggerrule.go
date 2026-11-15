@@ -544,6 +544,13 @@ func classifyRuleErrorTopDown(err error) (reason string, isSkip bool, matched bo
 	if err == nil {
 		return "", false, false
 	}
+	// Check direct sentinel equality on the current node only — do NOT use
+	// errors.Is(err, ruleengine.ErrBudgetExhausted) here. errors.Is walks the
+	// entire Unwrap tree at the root call, which would let a deeper
+	// ErrBudgetExhausted override an outer classification in the switch below
+	// (for example &ruleengine.FailedError{Reason: ReasonCanceled, Cause: ...}
+	// when caller cancellation wraps a dialect error). Wrapped sentinels are
+	// still reached in outermost-first order by the Unwrap recursion below.
 	if err == ruleengine.ErrBudgetExhausted {
 		return SkipReasonBudgetExhausted, true, true
 	}
