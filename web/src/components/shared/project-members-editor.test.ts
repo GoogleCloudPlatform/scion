@@ -65,6 +65,7 @@ import {
   isNonDirectSource,
   isCustomProjectRole,
   isEmptySelection,
+  isLastDirectOwner,
   isLastOwnerByTier,
   roleIdsUnclassifiable,
   selectionToRoleIds,
@@ -209,6 +210,7 @@ function group(
     principalType,
     principalId,
     principalDisplayName: displayName,
+    ...(principalType === 'user' ? { principalStatus: 'active' } : {}),
     builtInRoleName: builtIn?.name ?? '',
     bindings: roles.map((r) => binding(principalType, principalId, r, displayName)),
   };
@@ -255,7 +257,12 @@ interface EditorInternals {
   openAddDialog(): void;
   openEditDialog(g: ProjectMemberGroup, info?: string | null): void;
   onPrincipalTypeChange(t: string): void;
-  onPrincipalChange(d: { principalType: string; principalId: string; displayLabel: string }): void;
+  onPrincipalChange(d: {
+    principalType: string;
+    principalId: string;
+    displayLabel: string;
+    principalStatus?: string;
+  }): void;
   toggleCustomRole(id: string, checked: boolean): void;
   handleSave(): Promise<void>;
   handleRemoveRow(g: ProjectMemberGroup): Promise<void>;
@@ -2162,5 +2169,128 @@ describe('project-viewer role', () => {
       currentBuiltInId: NO_PROJECT_ROLE,
     });
     expect(state.disabled).toBe(false);
+  });
+});
+
+describe('invited principals', () => {
+  const INVITED_MEMBER: ProjectMemberGroup = {
+    ...group('user', 'u-invited-member', [R_MEMBER], 'inv-member@example.com'),
+    principalStatus: 'invited',
+  };
+  const INVITED_OWNER: ProjectMemberGroup = {
+    ...group('user', 'u-invited-owner', [R_OWNER], 'inv-owner@example.com'),
+    principalStatus: 'invited',
+  };
+  const SUSPENDED_OWNER: ProjectMemberGroup = {
+    ...group('user', 'u-suspended-owner', [R_OWNER], 'susp-owner@example.com'),
+    principalStatus: 'suspended',
+  };
+  const MISSING_OWNER: ProjectMemberGroup = (() => {
+    const g = group('user', 'u-missing-owner', [R_OWNER], 'u-missing-owner');
+    delete g.principalStatus;
+    return g;
+  })();
+
+  it('counts only usable (active, existing) owners while keeping a sole owner binding locked', async () => {
+    for (const nonUsable of [INVITED_OWNER, SUSPENDED_OWNER, MISSING_OWNER]) {
+      const pair = [ALICE, nonUsable];
+      expect(isLastDirectOwner(ALICE, pair)).toBe(true);
+      expect(isLastDirectOwner(nonUsable, pair)).toBe(false);
+      expect(isLastOwnerByTier('user', 'owner', pair)).toBe(true);
+      expect(canRemoveRow(ALICE, OWNER_CAPS, pair).disabled).toBe(true);
+      expect(canRemoveRow(nonUsable, OWNER_CAPS, pair).disabled).toBe(false);
+    }
+
+    // Sole invited owner (no usable owner, 1 owner binding total): stays locked
+    // on both row Remove and Edit dialog, matching the server's zero-owner floor.
+    const soleInvited = [INVITED_OWNER, DAVE];
+    expect(isLastDirectOwner(INVITED_OWNER, soleInvited)).toBe(true);
+    expect(canRemoveRow(INVITED_OWNER, OWNER_CAPS, soleInvited).disabled).toBe(true);
+
+    const el = await mountEditor(soleInvited, OWNER_CAPS);
+    const ownerRow = row(el, 'user:u-invited-owner');
+    expect(ownerRow.querySelector('sl-icon[name="shield-lock"]')).not.toBeNull();
+    el.openEditDialog(INVITED_OWNER);
+    await el.updateComplete;
+    expect(el.dlgIsLastOwner).toBe(true);
+    expect(radio(el, 'r-member').hasAttribute('disabled')).toBe(true);
+  });
+
+  it('renders Invited tags and distinct tooltips on member vs owner rows', async () => {
+    const el = await mountEditor([ALICE, INVITED_MEMBER, INVITED_OWNER], OWNER_CAPS);
+
+    const aliceRow = row(el, 'user:u-alice');
+    expect(aliceRow.querySelector('.status-badge.invited')).toBeNull();
+    expect(aliceRow.querySelector('sl-icon[name="shield-lock"]')).not.toBeNull();
+
+    const memberRow = row(el, 'user:u-invited-member');
+    const memberBadge = memberRow.querySelector('.status-badge.invited');
+    expect(memberBadge?.textContent?.trim()).toBe('Invited');
+    expect(memberBadge?.closest('sl-tooltip')?.getAttribute('content')).toBe(
+      'Has not signed in yet. Access starts at first sign-in.'
+    );
+
+    const ownerRow = row(el, 'user:u-invited-owner');
+    const ownerBadge = ownerRow.querySelector('.status-badge.invited');
+    expect(ownerBadge?.textContent?.trim()).toBe('Invited');
+    expect(ownerBadge?.closest('sl-tooltip')?.getAttribute('content')).toBe(
+      'Invited owner. Does not count as an owner until they sign in.'
+    );
+    expect(ownerRow.querySelector('sl-icon[name="shield-lock"]')).toBeNull();
+  });
+
+  it('shows invited notice and owner warning in Add and Edit dialogs', async () => {
+    const el = await mountEditor([ALICE, INVITED_OWNER], OWNER_CAPS);
+
+    // Add mode: select an invited user not yet on the project.
+    el.openAddDialog();
+    el.onPrincipalChange({
+      principalType: 'user',
+      principalId: 'u-new-invited',
+      displayLabel: 'new-invited@example.com',
+      principalStatus: 'invited',
+    });
+    await el.updateComplete;
+
+    let alert = q(el, 'sl-alert.invited-member-alert');
+    expect(alert).not.toBeNull();
+    expect(alert?.getAttribute('variant')).toBe('primary');
+    expect(alert?.hasAttribute('open')).toBe(true);
+    expect(alert?.textContent).toContain(
+      'This user has not signed in yet. The roles you assign here take effect at their first sign-in.'
+    );
+    expect(alert?.textContent).not.toContain(
+      'Invited owners do not count towards the last-owner rule until they sign in.'
+    );
+
+    // Selecting Owner built-in role adds the invited-owner warning.
+    el.dlgBuiltIn = 'r-owner';
+    await el.updateComplete;
+    alert = q(el, 'sl-alert.invited-member-alert');
+    expect(alert?.textContent).toContain(
+      'Invited owners do not count towards the last-owner rule until they sign in. Keep at least one signed-in owner.'
+    );
+
+    // Typing raw text clears principalStatus and hides the invited alert.
+    el.onPrincipalChange({
+      principalType: 'user',
+      principalId: 'someone@example.com',
+      displayLabel: '',
+    });
+    await el.updateComplete;
+    expect(q(el, 'sl-alert.invited-member-alert')).toBeNull();
+
+    // Edit mode on an existing invited owner shows both messages and allows demotion.
+    el.openEditDialog(INVITED_OWNER);
+    await el.updateComplete;
+    expect(el.dlgIsLastOwner).toBe(false);
+    expect(radio(el, 'r-member').hasAttribute('disabled')).toBe(false);
+    alert = q(el, 'sl-alert.invited-member-alert');
+    expect(alert?.textContent).toContain(
+      'This user has not signed in yet. The roles you assign here take effect at their first sign-in.'
+    );
+    expect(alert?.textContent).toContain(
+      'Invited owners do not count towards the last-owner rule until they sign in. Keep at least one signed-in owner.'
+    );
   });
 });

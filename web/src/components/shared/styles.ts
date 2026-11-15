@@ -36,3 +36,23 @@ export const srOnlyStyles = css`
     border: 0;
   }
 `;
+
+/**
+ * Pill badge marking a user principal whose status is 'invited' (not yet
+ * signed in). Matches the invited status badge palette in admin-users.
+ */
+export const invitedStatusTagStyles = css`
+  .status-badge.invited {
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    padding: 0.125rem 0.5rem;
+    border-radius: 9999px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    line-height: 1.25;
+    background: var(--sl-color-primary-100, #dbeafe);
+    color: var(--sl-color-primary-700, #1d4ed8);
+    border: 1px solid var(--sl-color-primary-200, #bfdbfe);
+  }
+`;

@@ -340,6 +340,11 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 	// The group, its parent membership, the creator's owner membership, and
 	// the audit record of each membership commit or roll back together.
 	if err := s.store.WithTx(ctx, func(tx store.Store) error {
+		if parentEdge != nil && createdBy != "" {
+			if err := rejectInvitedGroupHubRoleGrant(ctx, tx, parentEdge.GroupID, store.GroupMemberTypeUser, createdBy); err != nil {
+				return err
+			}
+		}
 		if err := tx.CreateGroup(ctx, group); err != nil {
 			return err
 		}
@@ -370,6 +375,10 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 	}); err != nil {
 		if parentEdge != nil {
 			s.releaseGroupMemberSlot(ctx, parentEdge.GroupID, parentEdge.MemberType, parentEdge.MemberID)
+		}
+		if errors.Is(err, errHubRoleOnInvitedUser) {
+			Conflict(w, errHubRoleOnInvitedUser.Error())
+			return
 		}
 		if errors.Is(err, store.ErrAlreadyExists) {
 			Conflict(w, "Group with this slug already exists")
@@ -908,6 +917,17 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 		member.AddedBy = identity.ID()
 	}
 
+	// Refuse adding an invited user (directly or via nested groups) to
+	// hub-members or any group carrying a built-in system hub role.
+	if err := rejectInvitedGroupHubRoleGrant(ctx, s.store, groupID, member.MemberType, member.MemberID); err != nil {
+		if errors.Is(err, errHubRoleOnInvitedUser) {
+			Conflict(w, errHubRoleOnInvitedUser.Error())
+			return
+		}
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
 	// Quota enforcement: check members-per-group limit before addition.
 	if !s.reserveGroupMemberSlot(w, ctx, member) {
 		return
@@ -915,6 +935,9 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 
 	// The membership and its audit record commit or roll back together.
 	if err := s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := rejectInvitedGroupHubRoleGrant(ctx, tx, groupID, member.MemberType, member.MemberID); err != nil {
+			return err
+		}
 		if err := tx.AddGroupMember(ctx, member); err != nil {
 			return err
 		}
@@ -924,6 +947,10 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 		return s.auditGroupMemberAddTx(ctx, tx, member, grant.canDelegateResult, grant.canDelegateReason)
 	}); err != nil {
 		s.releaseGroupMemberSlot(ctx, member.GroupID, member.MemberType, member.MemberID)
+		if errors.Is(err, errHubRoleOnInvitedUser) {
+			Conflict(w, errHubRoleOnInvitedUser.Error())
+			return
+		}
 		if errors.Is(err, store.ErrAlreadyExists) {
 			Conflict(w, "Member already exists in this group")
 			return

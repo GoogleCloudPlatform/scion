@@ -170,3 +170,98 @@ describe('helpText', () => {
     expect(await describedBy(el)).toBe('');
   });
 });
+
+describe('invited user status', () => {
+  const INVITED_USER = {
+    id: 'u-invited',
+    email: 'invited@example.com',
+    displayName: '',
+    status: 'invited',
+  };
+  const ACTIVE_USER = {
+    id: 'u-active',
+    email: 'active@example.com',
+    displayName: 'Active User',
+    status: 'active',
+  };
+
+  it('renders an Invited tag with tooltip only for invited users in search results', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ users: [INVITED_USER, ACTIVE_USER] }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        )
+      )
+    );
+
+    const el = new mod.ScionPrincipalPicker();
+    el.principalType = 'user';
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    await (el as unknown as { searchUsers(q: string): Promise<void> }).searchUsers('example');
+    await el.updateComplete;
+
+    const options = Array.from(el.shadowRoot!.querySelectorAll<HTMLElement>('.user-search-option'));
+    expect(options).toHaveLength(2);
+
+    const invitedBadge = options[0]!.querySelector('.status-badge.invited');
+    expect(invitedBadge).not.toBeNull();
+    expect(invitedBadge?.textContent?.trim()).toBe('Invited');
+    const invitedTooltip = invitedBadge?.closest('sl-tooltip');
+    expect(invitedTooltip?.getAttribute('content')).toBe(
+      'Has not signed in yet. Access starts at first sign-in.'
+    );
+
+    expect(options[1]!.querySelector('.status-badge.invited')).toBeNull();
+  });
+
+  it('emits principalStatus when selecting a user and clears it on typed input', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ users: [INVITED_USER] }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        )
+      )
+    );
+
+    const el = new mod.ScionPrincipalPicker();
+    el.principalType = 'user';
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    const events: Array<Record<string, unknown>> = [];
+    el.addEventListener('principal-change', (e: Event) => {
+      events.push((e as CustomEvent<Record<string, unknown>>).detail);
+    });
+
+    await (el as unknown as { searchUsers(q: string): Promise<void> }).searchUsers('inv');
+    await el.updateComplete;
+
+    const opt = el.shadowRoot!.querySelector<HTMLElement>('.user-search-option')!;
+    opt.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+    expect(events.at(-1)).toEqual({
+      principalType: 'user',
+      principalId: 'u-invited',
+      displayLabel: 'invited@example.com',
+      principalStatus: 'invited',
+    });
+
+    const slInput = el.shadowRoot!.querySelector('sl-input') as HTMLElement & { value: string };
+    slInput.value = 'x';
+    slInput.dispatchEvent(new CustomEvent('sl-input', { bubbles: true }));
+    expect(events.at(-1)).toEqual({
+      principalType: 'user',
+      principalId: 'x',
+      displayLabel: 'x',
+    });
+  });
+});

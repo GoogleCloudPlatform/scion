@@ -1541,6 +1541,9 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 	// The binding and its audit record commit or roll back together.
 	var created *store.RoleBinding
 	err := s.store.WithTx(r.Context(), func(tx store.Store) error {
+		if err := rejectInvitedHubRoleBinding(r.Context(), tx, rb); err != nil {
+			return err
+		}
 		c, err := tx.CreateRoleBinding(r.Context(), rb)
 		if err != nil {
 			return err
@@ -1556,6 +1559,10 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 		})
 	})
 	if err != nil {
+		if errors.Is(err, errHubRoleOnInvitedUser) {
+			Conflict(w, errHubRoleOnInvitedUser.Error())
+			return
+		}
 		if errors.Is(err, store.ErrAlreadyExists) {
 			Conflict(w, "this role binding already exists")
 			return
