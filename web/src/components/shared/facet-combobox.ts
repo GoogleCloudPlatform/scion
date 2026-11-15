@@ -572,7 +572,7 @@ export class ScionFacetCombobox extends LitElement {
             autocomplete="off"
             aria-autocomplete="list"
             aria-expanded=${this.open ? 'true' : 'false'}
-            aria-controls=${listboxId}
+            aria-controls=${this.open ? listboxId : nothing}
             aria-activedescendant=${activeOptionId || nothing}
             placeholder=${this.placeholder}
             .value=${this.inputDisplayValue}
@@ -590,6 +590,7 @@ export class ScionFacetCombobox extends LitElement {
                   class="icon-btn clear-btn"
                   tabindex="-1"
                   data-combobox-clear
+                  title="Clear ${this.label || 'filter'} (Esc)"
                   aria-label="Clear ${this.label || 'filter'}"
                   @mousedown=${(e: Event): void => e.preventDefault()}
                   @click=${(): void => this.clearSelection()}

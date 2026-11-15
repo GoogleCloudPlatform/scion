@@ -905,12 +905,15 @@ export class ScionPageProjectDecisions extends LitElement {
       if (conversations.length > 0 || this.facetsConversations.length === 0) {
         this.facetsConversations = conversations;
       }
-    } else {
-      this.supportsSearch = false;
-      if (this.filterQ || this.filterConversation) {
+    } else if (!this.supportsSearch) {
+      const stripPendingAgent = this.activeTab === 'pending' && Boolean(this.filterAgent);
+      if (this.filterQ || this.filterConversation || stripPendingAgent) {
         this.filterQ = '';
         this.searchDraft = '';
         this.filterConversation = '';
+        if (stripPendingAgent) {
+          this.filterAgent = '';
+        }
         this.syncUrlState();
       }
     }
@@ -935,6 +938,7 @@ export class ScionPageProjectDecisions extends LitElement {
   }
 
   private get isPendingFiltered(): boolean {
+    if (!this.supportsSearch) return false;
     return Boolean(
       normalizeDecisionsSearchQuery(this.filterQ) || this.filterConversation || this.filterAgent
     );
@@ -942,7 +946,9 @@ export class ScionPageProjectDecisions extends LitElement {
 
   private get isMadeFiltered(): boolean {
     return Boolean(
-      this.isPendingFiltered ||
+      (this.supportsSearch &&
+        (normalizeDecisionsSearchQuery(this.filterQ) || this.filterConversation)) ||
+      this.filterAgent ||
       this.filterUser ||
       this.filterProvenance ||
       this.filterFrom ||
@@ -1027,6 +1033,7 @@ export class ScionPageProjectDecisions extends LitElement {
       if (ac.signal.aborted || gen !== this.pendingGen || !this.isConnected) return;
       if (opts.mode !== 'live') {
         if (isDecisionsSearchTimeoutError(err)) {
+          this.supportsSearch = true;
           this.pendingSearchTimeout = true;
           this.error = null;
         } else {
@@ -1131,6 +1138,7 @@ export class ScionPageProjectDecisions extends LitElement {
       if (ac.signal.aborted || gen !== this.madeGen || !this.isConnected) return;
       if (opts.mode !== 'live') {
         if (isDecisionsSearchTimeoutError(err)) {
+          this.supportsSearch = true;
           this.madeSearchTimeout = true;
           this.madeError = null;
         } else {
@@ -1266,10 +1274,18 @@ export class ScionPageProjectDecisions extends LitElement {
     }
 
     if (next === 'pending') {
+      const stripOldHubAgent = !this.supportsSearch && Boolean(this.filterAgent);
       const hadMadeOnlyFilters = Boolean(
-        this.filterUser || this.filterProvenance || this.filterFrom || this.filterTo
+        stripOldHubAgent ||
+        this.filterUser ||
+        this.filterProvenance ||
+        this.filterFrom ||
+        this.filterTo
       );
       if (hadMadeOnlyFilters) {
+        if (stripOldHubAgent) {
+          this.filterAgent = '';
+        }
         this.filterUser = '';
         this.filterProvenance = '';
         this.filterFrom = '';
@@ -1417,7 +1433,10 @@ export class ScionPageProjectDecisions extends LitElement {
     if (this.activeTab === 'pending') {
       if (opts.sharedChanged) {
         this.pendingNextCursor = '';
-        if (this.madeLoaded) this.madeNeedsReset = true;
+        if (this.madeLoaded || this.madeSearchTimeout) {
+          this.madeNeedsReset = true;
+          this.madeSearchTimeout = false;
+        }
         void this.loadPendingPage({ mode: 'reset' });
       }
       return;
@@ -1425,6 +1444,7 @@ export class ScionPageProjectDecisions extends LitElement {
 
     if (opts.sharedChanged) {
       this.pendingNeedsReset = true;
+      this.pendingSearchTimeout = false;
     }
     this.madeNextCursor = '';
     this.madePagedBeyondFirst = false;
@@ -1463,7 +1483,9 @@ export class ScionPageProjectDecisions extends LitElement {
     if (!hadShared && !hadMadeOnly && !this.pendingSearchTimeout && !this.madeSearchTimeout) {
       return;
     }
-    this.onFiltersUpdated({ sharedChanged: hadShared || this.pendingSearchTimeout });
+    this.onFiltersUpdated({
+      sharedChanged: hadShared || this.pendingSearchTimeout || this.madeSearchTimeout,
+    });
   }
 
   private retryAll(): void {
@@ -1517,11 +1539,11 @@ export class ScionPageProjectDecisions extends LitElement {
     return items;
   }
 
-  private renderFilterPanel(): TemplateResult | typeof nothing {
-    if (!this.supportsSearch) return nothing;
+  private renderFilterPanel(): TemplateResult {
     return html`
       <scion-decisions-filter-panel
         scope="project"
+        .supportsSearch=${this.supportsSearch}
         .tab=${this.activeTab}
         .q=${this.filterQ}
         .searchText=${this.searchDraft}

@@ -151,5 +151,55 @@ describe('<scion-decisions-filter-panel> (D13)', () => {
     expect(el.isOpen).toBe(true);
     expect(focusSpy).toHaveBeenCalledTimes(1);
     expect(window.localStorage.getItem(DECISIONS_FILTERS_OPEN_STORAGE_KEY)).toBe('true');
+    expect(slInput.getAttribute('maxlength')).toBe('256');
+  });
+
+  it('hides search, Conversation, and pending Agent when supportsSearch is false while preserving Made filters', async () => {
+    const el = await mountPanel({
+      supportsSearch: false,
+      tab: 'pending',
+      q: 'backfill',
+      conversation: 't-91',
+      agent: 'a-rel',
+      user: 'u-me',
+      provenance: 'direct',
+      from: '2026-11-01',
+      to: '2026-11-14',
+      currentUserId: 'u-me',
+      agents: [{ id: 'a-rel', name: 'release-bot' }],
+      answerers: [{ id: 'u-me', name: 'Alice' }],
+    });
+    const root = el.shadowRoot!;
+
+    expect(root.querySelector('.lbl')?.textContent).toBe('Filters');
+    expect(root.querySelector('.kbd')).toBeNull();
+    expect(root.querySelectorAll('sl-tag[data-filter-tag]')).toHaveLength(0);
+    expect(root.querySelector('[data-filter="q"]')).toBeNull();
+    expect(root.querySelector('[data-filter="conversation"]')).toBeNull();
+    expect(root.querySelector('[data-filter="agent"]')).toBeNull();
+    expect(root.querySelector('[data-no-pending-filters]')).not.toBeNull();
+
+    // Switch to Made -> Phase 3 filters (Agent, Answered by, Provenance, From, To), tags, and Clear work
+    el.tab = 'made';
+    await el.updateComplete;
+
+    expect(root.querySelector('[data-filter="q"]')).toBeNull();
+    expect(root.querySelector('[data-filter="conversation"]')).toBeNull();
+    expect(root.querySelector('[data-filter="agent"]')).not.toBeNull();
+    expect(root.querySelector('[data-filter="user"]')).not.toBeNull();
+    expect(root.querySelector('[data-filter="provenance"]')).not.toBeNull();
+    expect(root.querySelector('[data-filter="from"]')).not.toBeNull();
+    expect(root.querySelector('[data-filter="to"]')).not.toBeNull();
+
+    const tags = Array.from(root.querySelectorAll<HTMLElement>('sl-tag[data-filter-tag]'));
+    expect(tags.map((t) => t.textContent?.trim())).toEqual([
+      'Agent: release-bot',
+      'Answered by: you',
+      'Provenance: direct',
+      'From: 2026-11-01',
+      'To: 2026-11-14',
+    ]);
+    expect(root.querySelector('[data-active-filter-count]')?.textContent).toBe('5 active');
+    expect(root.querySelector('[data-clear-filters]')).not.toBeNull();
   });
 });

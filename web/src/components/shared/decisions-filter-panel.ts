@@ -35,6 +35,7 @@ import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import {
+  MAX_DECISIONS_SEARCH_RUNES,
   normalizeDecisionsSearchQuery,
   type MadeDecisionsProvenanceFilter,
   type ProjectDecisionActorView,
@@ -119,6 +120,14 @@ function provenanceTagWord(value: string): string {
 export class ScionDecisionsFilterPanel extends LitElement {
   /** Surface hosting the panel (`'project'` in P2; `'profile'` reserved for P5). */
   @property({ type: String }) scope: DecisionsFilterScope = 'project';
+
+  /**
+   * Whether the connected Hub supports P1+ search and conversation/pending filters (Design 5.3).
+   * When `false` (older Hub without `conversations` facet), hides the search input and
+   * Conversation combobox (plus the Agent combobox on `tab="pending"`), while keeping Phase 3
+   * `Made` filters, tags, and `Clear` working.
+   */
+  @property({ type: Boolean, attribute: 'supports-search' }) supportsSearch = true;
 
   /** Active tab (`'pending'` shows shared controls; `'made'` adds answer log controls). */
   @property({ type: String }) tab: 'pending' | 'made' = 'pending';
@@ -256,6 +265,12 @@ export class ScionDecisionsFilterPanel extends LitElement {
       width: 100%;
     }
 
+    .empty-filters-note {
+      margin: 0;
+      font-size: 0.82rem;
+      color: var(--scion-text-muted, #64748b);
+    }
+
     sl-tag::part(base) {
       background: var(--scion-bg-subtle, #f1f5f9);
       border-color: var(--scion-border, #e2e8f0);
@@ -360,6 +375,7 @@ export class ScionDecisionsFilterPanel extends LitElement {
 
   /** Expands the panel (persisting the preference) and focuses the search input (`/` shortcut, D13). */
   async expandAndFocusSearch(): Promise<void> {
+    if (!this.supportsSearch) return;
     if (!this.open) {
       this.setOpen(true);
     }
@@ -396,18 +412,20 @@ export class ScionDecisionsFilterPanel extends LitElement {
   private get activeTags(): DecisionsFilterTag[] {
     const tags: DecisionsFilterTag[] = [...this.extraTags];
 
-    const normalizedQ = normalizeDecisionsSearchQuery(this.q);
-    if (normalizedQ) {
-      tags.push({ key: 'q', label: `"${normalizedQ}"` });
+    if (this.supportsSearch) {
+      const normalizedQ = normalizeDecisionsSearchQuery(this.q);
+      if (normalizedQ) {
+        tags.push({ key: 'q', label: `"${normalizedQ}"` });
+      }
+
+      if (this.conversation) {
+        const convLabel =
+          this.conversations.find((c) => c.key === this.conversation)?.label ?? this.conversation;
+        tags.push({ key: 'conversation', label: `Conversation: ${convLabel}` });
+      }
     }
 
-    if (this.conversation) {
-      const convLabel =
-        this.conversations.find((c) => c.key === this.conversation)?.label ?? this.conversation;
-      tags.push({ key: 'conversation', label: `Conversation: ${convLabel}` });
-    }
-
-    if (this.agent) {
+    if ((this.supportsSearch || this.tab === 'made') && this.agent) {
       const actor = this.agents.find((a) => a.id === this.agent);
       const duplicateName =
         actor !== undefined && this.agents.filter((a) => a.name === actor.name).length > 1;
@@ -557,7 +575,7 @@ export class ScionDecisionsFilterPanel extends LitElement {
               aria-hidden="true"
             ></sl-icon>
             <sl-icon name="funnel" aria-hidden="true"></sl-icon>
-            <span class="lbl">Search and filters</span>
+            <span class="lbl">${this.supportsSearch ? 'Search and filters' : 'Filters'}</span>
           </button>
 
           ${tags.map(
@@ -592,127 +610,145 @@ export class ScionDecisionsFilterPanel extends LitElement {
                     Clear
                   </sl-button>
                 `
-              : !this.open
+              : this.supportsSearch && !this.open
                 ? html`<span class="kbd" aria-hidden="true">/</span>`
                 : nothing}
           </span>
         </div>
 
         <div id="decisions-filter-body" class="body" ?hidden=${!this.open}>
-          <sl-input
-            class="search"
-            size="small"
-            type="search"
-            clearable
-            data-filter="q"
-            aria-label="Search decisions"
-            placeholder="Search questions, answers, keys, agents, conversations"
-            .value=${displayedSearch}
-            @sl-input=${(e: Event): void => this.handleSearchInput(e)}
-            @sl-clear=${(): void => this.handleSearchClear()}
-          >
-            <sl-icon slot="prefix" name="search"></sl-icon>
-          </sl-input>
+          ${this.supportsSearch
+            ? html`
+                <sl-input
+                  class="search"
+                  size="small"
+                  type="search"
+                  clearable
+                  maxlength=${MAX_DECISIONS_SEARCH_RUNES}
+                  data-filter="q"
+                  aria-label="Search decisions"
+                  placeholder="Search questions, answers, keys, agents, conversations"
+                  .value=${displayedSearch}
+                  @sl-input=${(e: Event): void => this.handleSearchInput(e)}
+                  @sl-clear=${(): void => this.handleSearchClear()}
+                >
+                  <sl-icon slot="prefix" name="search"></sl-icon>
+                </sl-input>
+              `
+            : nothing}
+          ${this.scope === 'project' && !this.supportsSearch && this.tab === 'pending'
+            ? html`
+                <p class="empty-filters-note" data-no-pending-filters>
+                  No filters are available on this tab for this Hub version.
+                </p>
+              `
+            : html`
+                <div class="row2">
+                  <slot name="leading-controls"></slot>
 
-          <div class="row2">
-            <slot name="leading-controls"></slot>
+                  ${this.supportsSearch
+                    ? html`
+                        <scion-facet-combobox
+                          data-filter="conversation"
+                          label="Conversation"
+                          placeholder="Any"
+                          footer-text="↑↓ Enter Esc"
+                          .options=${this.conversationOptions}
+                          .value=${this.conversation}
+                          @facet-change=${(e: CustomEvent<FacetChangeDetail>): void => {
+                            this.emitPatch({ conversation: e.detail.value });
+                          }}
+                        ></scion-facet-combobox>
+                      `
+                    : nothing}
+                  ${this.supportsSearch || this.tab === 'made'
+                    ? html`
+                        <scion-facet-combobox
+                          data-filter="agent"
+                          label="Agent"
+                          placeholder="Any"
+                          footer-text="Only agents that asked decisions here · ↑↓ Enter Esc"
+                          .options=${this.agentOptions}
+                          .value=${this.agent}
+                          @facet-change=${(e: CustomEvent<FacetChangeDetail>): void => {
+                            this.emitPatch({ agent: e.detail.value });
+                          }}
+                        ></scion-facet-combobox>
+                      `
+                    : nothing}
+                  ${this.tab === 'made'
+                    ? html`
+                        <sl-select
+                          size="small"
+                          label="Answered by"
+                          data-filter="user"
+                          .value=${this.user || 'all'}
+                          @sl-change=${(e: Event): void => {
+                            this.emitPatch({ user: this.selectValueOf(e) });
+                          }}
+                        >
+                          <sl-option value="all">Anyone</sl-option>
+                          ${this.currentUserId
+                            ? html`<sl-option value=${this.currentUserId}>You</sl-option>`
+                            : nothing}
+                          ${this.answerers
+                            .filter((u) => u.id && u.id !== this.currentUserId)
+                            .map((u) => html`<sl-option value=${u.id}>${u.name}</sl-option>`)}
+                        </sl-select>
 
-            <scion-facet-combobox
-              data-filter="conversation"
-              label="Conversation"
-              placeholder="Any"
-              footer-text="↑↓ Enter Esc"
-              .options=${this.conversationOptions}
-              .value=${this.conversation}
-              @facet-change=${(e: CustomEvent<FacetChangeDetail>): void => {
-                this.emitPatch({ conversation: e.detail.value });
-              }}
-            ></scion-facet-combobox>
+                        <sl-select
+                          size="small"
+                          label="Provenance"
+                          data-filter="provenance"
+                          .value=${this.provenance || 'all'}
+                          @sl-change=${(e: Event): void => {
+                            this.emitPatch({
+                              provenance: this.selectValueOf(e) as MadeDecisionsProvenanceFilter,
+                            });
+                          }}
+                        >
+                          <sl-option value="all">Any</sl-option>
+                          <sl-option value="direct">Direct</sl-option>
+                          <sl-option value="interpreted">Interpreted</sl-option>
+                          <sl-option value="confirmed">Confirmed</sl-option>
+                          <sl-option value="overridden">Changed</sl-option>
+                        </sl-select>
 
-            <scion-facet-combobox
-              data-filter="agent"
-              label="Agent"
-              placeholder="Any"
-              footer-text="Only agents that asked decisions here · ↑↓ Enter Esc"
-              .options=${this.agentOptions}
-              .value=${this.agent}
-              @facet-change=${(e: CustomEvent<FacetChangeDetail>): void => {
-                this.emitPatch({ agent: e.detail.value });
-              }}
-            ></scion-facet-combobox>
+                        <div class="date-pair">
+                          <sl-input
+                            size="small"
+                            type="date"
+                            label="From"
+                            data-filter="from"
+                            .value=${this.from}
+                            @sl-change=${(e: Event): void => {
+                              const val = (
+                                (e.currentTarget as { value?: string } | null)?.value ?? ''
+                              ).trim();
+                              this.emitPatch({ from: val });
+                            }}
+                          ></sl-input>
 
-            ${this.tab === 'made'
-              ? html`
-                  <sl-select
-                    size="small"
-                    label="Answered by"
-                    data-filter="user"
-                    .value=${this.user || 'all'}
-                    @sl-change=${(e: Event): void => {
-                      this.emitPatch({ user: this.selectValueOf(e) });
-                    }}
-                  >
-                    <sl-option value="all">Anyone</sl-option>
-                    ${this.currentUserId
-                      ? html`<sl-option value=${this.currentUserId}>You</sl-option>`
-                      : nothing}
-                    ${this.answerers
-                      .filter((u) => u.id && u.id !== this.currentUserId)
-                      .map((u) => html`<sl-option value=${u.id}>${u.name}</sl-option>`)}
-                  </sl-select>
+                          <sl-input
+                            size="small"
+                            type="date"
+                            label="To"
+                            data-filter="to"
+                            .value=${this.to}
+                            @sl-change=${(e: Event): void => {
+                              const val = (
+                                (e.currentTarget as { value?: string } | null)?.value ?? ''
+                              ).trim();
+                              this.emitPatch({ to: val });
+                            }}
+                          ></sl-input>
+                        </div>
+                      `
+                    : nothing}
 
-                  <sl-select
-                    size="small"
-                    label="Provenance"
-                    data-filter="provenance"
-                    .value=${this.provenance || 'all'}
-                    @sl-change=${(e: Event): void => {
-                      this.emitPatch({
-                        provenance: this.selectValueOf(e) as MadeDecisionsProvenanceFilter,
-                      });
-                    }}
-                  >
-                    <sl-option value="all">Any</sl-option>
-                    <sl-option value="direct">Direct</sl-option>
-                    <sl-option value="interpreted">Interpreted</sl-option>
-                    <sl-option value="confirmed">Confirmed</sl-option>
-                    <sl-option value="overridden">Changed</sl-option>
-                  </sl-select>
-
-                  <div class="date-pair">
-                    <sl-input
-                      size="small"
-                      type="date"
-                      label="From"
-                      data-filter="from"
-                      .value=${this.from}
-                      @sl-change=${(e: Event): void => {
-                        const val = (
-                          (e.currentTarget as { value?: string } | null)?.value ?? ''
-                        ).trim();
-                        this.emitPatch({ from: val });
-                      }}
-                    ></sl-input>
-
-                    <sl-input
-                      size="small"
-                      type="date"
-                      label="To"
-                      data-filter="to"
-                      .value=${this.to}
-                      @sl-change=${(e: Event): void => {
-                        const val = (
-                          (e.currentTarget as { value?: string } | null)?.value ?? ''
-                        ).trim();
-                        this.emitPatch({ to: val });
-                      }}
-                    ></sl-input>
-                  </div>
-                `
-              : nothing}
-
-            <slot name="trailing-controls"></slot>
-          </div>
+                  <slot name="trailing-controls"></slot>
+                </div>
+              `}
         </div>
       </div>
     `;

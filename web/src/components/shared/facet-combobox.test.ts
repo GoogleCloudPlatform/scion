@@ -96,6 +96,7 @@ describe('<scion-facet-combobox>', () => {
     const input = el.shadowRoot!.querySelector<HTMLInputElement>('input[role="combobox"]')!;
     expect(input).not.toBeNull();
     expect(input.getAttribute('aria-expanded')).toBe('false');
+    expect(input.hasAttribute('aria-controls')).toBe(false);
     expect(el.shadowRoot!.querySelector('[role="listbox"]')).toBeNull();
 
     // Open dropdown without typing
@@ -118,6 +119,7 @@ describe('<scion-facet-combobox>', () => {
     expect(el.value).toBe('a-rel-live');
     expect(input.value).toBe('release-bot');
     expect(input.getAttribute('aria-expanded')).toBe('false');
+    expect(input.hasAttribute('aria-controls')).toBe(false);
     expect(events).toEqual([{ value: 'a-rel-live', label: 'release-bot' }]);
   });
 

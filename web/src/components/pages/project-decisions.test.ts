@@ -1866,20 +1866,31 @@ describe('<scion-page-project-decisions>', () => {
     enableBothFlags();
     const agentUuid = '3f9c0a11-2222-4333-8444-555555555555';
 
-    // 1. Pre-P1 Hub without `conversations` facet hides `<scion-decisions-filter-panel>` and strips unsupported URL params
+    // 1. Pre-P1 Hub without `conversations` facet keeps panel mounted with supportsSearch=false,
+    //    hiding search/Conversation/pending-Agent and stripping unsupported URL params on Pending
     pendingResponses = [
       {
         counts: { waitingOnYou: 0, waitingOnOthers: 0 },
         prompts: [],
-        agents: [],
-        answerers: [],
+        agents: [{ id: agentUuid, name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
       },
     ];
     const oldHubEl = await mount({
-      path: '/projects/p-1/decisions?q=backfill&conversation=topic-release',
+      path: `/projects/p-1/decisions?q=backfill&conversation=topic-release&agent=${agentUuid}`,
     });
-    expect(oldHubEl.shadowRoot?.querySelector('scion-decisions-filter-panel')).toBeNull();
+    const oldPendingPanelEl = oldHubEl.shadowRoot?.querySelector<ScionDecisionsFilterPanel>(
+      'scion-decisions-filter-panel'
+    );
+    expect(oldPendingPanelEl).not.toBeNull();
+    expect(oldPendingPanelEl?.supportsSearch).toBe(false);
+    const oldPendingPanel = panelRootOf(oldHubEl);
+    expect(oldPendingPanel.querySelector('[data-filter="q"]')).toBeNull();
+    expect(oldPendingPanel.querySelector('[data-filter="conversation"]')).toBeNull();
+    expect(oldPendingPanel.querySelector('[data-filter="agent"]')).toBeNull();
     expect(window.location.search).toBe('');
+    expect(oldHubEl.shadowRoot?.querySelector('[data-empty="pending"]')).not.toBeNull();
+    expect(oldHubEl.shadowRoot?.querySelector('[data-no-match="pending"]')).toBeNull();
     // C4 naming: "Decisions" (never "Choices")
     expect(oldHubEl.shadowRoot?.querySelector('.sub')?.textContent).toContain(
       "Decisions agents asked in this project's conversations"
@@ -1979,5 +1990,177 @@ describe('<scion-page-project-decisions>', () => {
     expect(root.querySelector('[data-waiting-others]')?.getAttribute('summary')).toBe(
       'Waiting on others (2)'
     );
+  });
+
+  it('keeps Made Phase 3 filters, tags, and Clear working against an older Hub without conversations facet', async () => {
+    enableBothFlags();
+    const agentUuid = '3f9c0a11-2222-4333-8444-555555555555';
+
+    pendingHandler = (): Promise<Response> =>
+      jsonResponse({
+        counts: { waitingOnYou: 0, waitingOnOthers: 0 },
+        prompts: [],
+        agents: [{ id: agentUuid, name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+      });
+    madeHandler = (url): Promise<Response> => {
+      const prov = url.searchParams.get('provenance');
+      return jsonResponse({
+        counts: { waitingOnYou: 0, waitingOnOthers: 0 },
+        entries: prov === 'direct' ? [makeLogEntry({ provenance: 'direct' })] : [makeLogEntry()],
+        agents: [{ id: agentUuid, name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+      });
+    };
+
+    const el = await mount({
+      path: `/projects/p-1/decisions?tab=made&q=backfill&conversation=topic-release&agent=${agentUuid}&user=u-me&provenance=direct&from=2026-11-01&to=2026-11-14`,
+    });
+    const panelEl = el.shadowRoot?.querySelector<ScionDecisionsFilterPanel>(
+      'scion-decisions-filter-panel'
+    );
+    expect(panelEl).not.toBeNull();
+    expect(panelEl?.supportsSearch).toBe(false);
+
+    // Unsupported `q` and `conversation` are stripped, while Phase 3 Made filters stay applied & visible
+    expect(window.location.search).toBe(
+      `?tab=made&agent=${agentUuid}&user=u-me&provenance=direct&from=2026-11-01&to=2026-11-14`
+    );
+
+    const panel = panelRootOf(el);
+    expect(panel.querySelector('[data-filter="q"]')).toBeNull();
+    expect(panel.querySelector('[data-filter="conversation"]')).toBeNull();
+    expect(panel.querySelector('[data-filter="agent"]')).not.toBeNull();
+    expect(panel.querySelector('[data-filter="user"]')).not.toBeNull();
+    expect(panel.querySelector('[data-filter="provenance"]')).not.toBeNull();
+    expect(panel.querySelector('[data-filter="from"]')).not.toBeNull();
+    expect(panel.querySelector('[data-filter="to"]')).not.toBeNull();
+
+    const tags = Array.from(panel.querySelectorAll<HTMLElement>('sl-tag[data-filter-tag]'));
+    expect(tags.map((t) => t.textContent?.trim())).toEqual([
+      'Agent: release-bot',
+      'Answered by: you',
+      'Provenance: direct',
+      'From: 2026-11-01',
+      'To: 2026-11-14',
+    ]);
+    expect(panel.querySelector('[data-active-filter-count]')?.textContent).toBe('5 active');
+
+    // Clear resets all Made filters and keeps ?tab=made clean
+    panel.querySelector<HTMLElement>('[data-clear-filters]')!.click();
+    await settle(el, 25);
+    expect(window.location.search).toBe('?tab=made');
+    expect(panel.querySelectorAll('sl-tag[data-filter-tag]')).toHaveLength(0);
+    expect(el.shadowRoot?.querySelector('[data-made-table]')).not.toBeNull();
+  });
+
+  it('renders filter panel, tags, Clear, and "/" shortcut on a first-load SEARCH_TIMEOUT on both Pending and Made tabs (D9, D10)', async () => {
+    enableBothFlags();
+    const timeoutResponse = (): Promise<Response> =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            error: { code: 'SEARCH_TIMEOUT', message: 'search query timed out' },
+          }),
+          { status: 503, headers: { 'Content-Type': 'application/json' } }
+        )
+      );
+
+    pendingHandler = (url): Promise<Response> => {
+      if (url.searchParams.get('q') === 'slowsearch') {
+        return timeoutResponse();
+      }
+      return jsonResponse({
+        counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+        prompts: [makePrompt({ promptMessageId: 'm-recovered' })],
+        agents: [{ id: 'a-rel', name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      });
+    };
+    madeHandler = (url): Promise<Response> => {
+      if (url.searchParams.get('q') === 'slowsearch') {
+        return timeoutResponse();
+      }
+      return jsonResponse({
+        counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+        entries: [makeLogEntry({ answerId: 'ans-recovered' })],
+        agents: [{ id: 'a-rel', name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      });
+    };
+
+    // 1. First-load SEARCH_TIMEOUT on Waiting on you (`/projects/p-1/decisions?q=slowsearch`)
+    const pendingEl = await mount({ path: '/projects/p-1/decisions?q=slowsearch' });
+    const pendingRoot = pendingEl.shadowRoot!;
+    const pendingPanelEl = pendingRoot.querySelector<ScionDecisionsFilterPanel>(
+      'scion-decisions-filter-panel'
+    );
+    expect(pendingRoot.querySelector('[data-search-timeout]')).not.toBeNull();
+    expect(pendingRoot.querySelector('.error-state')).toBeNull();
+    expect(pendingPanelEl).not.toBeNull();
+    expect(pendingPanelEl?.supportsSearch).toBe(true);
+
+    const pendingPanel = panelRootOf(pendingEl);
+    expect(pendingPanel.querySelector('sl-tag[data-filter-tag="q"]')?.textContent?.trim()).toBe(
+      '"slowsearch"'
+    );
+    expect(pendingPanel.querySelector('[data-clear-filters]')).not.toBeNull();
+
+    // "/" shortcut expands panel and exposes search input even on first-load timeout
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: '/', bubbles: true }));
+    await settle(pendingEl, 15);
+    expect(
+      pendingPanel.querySelector('[data-filter-panel-toggle]')?.getAttribute('aria-expanded')
+    ).toBe('true');
+    expect(pendingPanel.querySelector('[data-filter="q"]')).not.toBeNull();
+
+    // Clear recovers from first-load timeout on Pending
+    pendingPanel.querySelector<HTMLElement>('[data-clear-filters]')!.click();
+    await settle(pendingEl, 25);
+    expect(window.location.search).toBe('');
+    expect(pendingRoot.querySelector('[data-search-timeout]')).toBeNull();
+    expect(pendingRoot.querySelector('[data-prompt-card="m-recovered"]')).not.toBeNull();
+    pendingEl.remove();
+    window.localStorage.removeItem('scion:decisions:filters-open');
+
+    // 2. First-load SEARCH_TIMEOUT on Made (`/projects/p-1/decisions?tab=made&q=slowsearch`)
+    const madeEl = await mount({ path: '/projects/p-1/decisions?tab=made&q=slowsearch' });
+    const madeRoot = madeEl.shadowRoot!;
+    const madePanelEl = madeRoot.querySelector<ScionDecisionsFilterPanel>(
+      'scion-decisions-filter-panel'
+    );
+    expect(
+      madeRoot.querySelector('sl-tab-panel[name="made"] [data-search-timeout]')
+    ).not.toBeNull();
+    expect(madeRoot.querySelector('.error-state')).toBeNull();
+    expect(madePanelEl).not.toBeNull();
+    expect(madePanelEl?.supportsSearch).toBe(true);
+
+    const madePanel = panelRootOf(madeEl);
+    expect(madePanel.querySelector('sl-tag[data-filter-tag="q"]')?.textContent?.trim()).toBe(
+      '"slowsearch"'
+    );
+    expect(madePanel.querySelector('[data-clear-filters]')).not.toBeNull();
+
+    // "/" shortcut works on Made first-load timeout too
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: '/', bubbles: true }));
+    await settle(madeEl, 15);
+    expect(
+      madePanel.querySelector('[data-filter-panel-toggle]')?.getAttribute('aria-expanded')
+    ).toBe('true');
+
+    // Clear recovers from first-load timeout on Made (and clears stale timeout on inactive Pending tab)
+    madePanel.querySelector<HTMLElement>('[data-clear-filters]')!.click();
+    await settle(madeEl, 25);
+    expect(window.location.search).toBe('?tab=made');
+    expect(madeRoot.querySelector('[data-search-timeout]')).toBeNull();
+    expect(madeRoot.querySelector('[data-made-table]')).not.toBeNull();
+
+    // Switching to Pending reloads Pending cleanly after the boot timeout
+    madeRoot.querySelector<HTMLElement>('sl-tab[panel="pending"]')!.click();
+    await settle(madeEl, 25);
+    expect(madeRoot.querySelector('[data-prompt-card="m-recovered"]')).not.toBeNull();
   });
 });
