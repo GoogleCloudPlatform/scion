@@ -150,12 +150,24 @@ func TestDeprecatedAllowListDelete_CascadesRoleBindings(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, allBindingsFor(t, s, carol.ID))
 
+	group := &store.Group{ID: tid("group-allowlist-del"), Name: "Allowlist Delete", Slug: "allowlist-delete", GroupType: store.GroupTypeExplicit}
+	require.NoError(t, s.CreateGroup(ctx, group))
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+		GroupID: group.ID, MemberID: carol.ID, MemberType: store.GroupMemberTypeUser, Role: store.GroupMemberRoleMember,
+	}))
+	groups, err := s.GetUserGroups(ctx, carol.ID)
+	require.NoError(t, err)
+	require.Len(t, groups, 1)
+
 	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/admin/allow-list/"+carol.Email, nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 	_, err = s.GetUser(ctx, carol.ID)
 	require.Error(t, err, "invited user should be deleted")
 	assert.Empty(t, allBindingsFor(t, s, carol.ID), "invited user's bindings must be removed")
+	groups, err = s.GetUserGroups(ctx, carol.ID)
+	require.NoError(t, err)
+	assert.Empty(t, groups, "invited user's group memberships must be removed")
 	requireSingleOwnerBinding(t, s, project.ID, alice.ID)
 }
 

@@ -908,3 +908,141 @@ func TestInvitedUser_HubRoleGuard_FailsClosedOnStoreFault(t *testing.T) {
 	_, err = s.GetGroupMembership(ctx, hubMembers.ID, store.GroupMemberTypeUser, carol.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
+
+type getUserCountStore struct {
+	store.Store
+	targetID string
+	count    atomic.Int64
+}
+
+func (c *getUserCountStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	if id == c.targetID {
+		c.count.Add(1)
+	}
+	return c.Store.GetUser(ctx, id)
+}
+
+// Grouped project member responses expose principalStatus for user principals
+// ("invited" before first sign-in, "active" after) using a single memoized
+// GetUser per user principal, and omit principalStatus for non-user principals.
+func TestProjectMembers_PrincipalStatus(t *testing.T) {
+	srv, s, alice, _, project := setupDemoPolicyTest(t)
+	counter, _ := installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *getUserCountStore {
+		return &getUserCountStore{Store: inner}
+	})
+	ctx := context.Background()
+
+	carol := newInvitedUser(t, s, "user-carol-status", "carol-status@test.com")
+	counter.targetID = carol.ID
+
+	grp := &store.Group{ID: tid("grp-status-check"), Name: "Status Group", Slug: "status-group", GroupType: store.GroupTypeExplicit}
+	require.NoError(t, s.CreateGroup(ctx, grp))
+	agent := &store.Agent{
+		ID: tid("agent-status-check"), Slug: "agent-status-check", Name: "agent-status-check",
+		ProjectID: project.ID, Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	customRD := createCustomRoleDef(t, s, "status-custom-role", []string{"project.update"})
+
+	// PUT on invited user returns principalStatus: "invited".
+	rec := doRequest(t, srv, http.MethodPut,
+		fmt.Sprintf("/api/v1/projects/%s/members/principals/user/%s", project.ID, carol.Email),
+		map[string]interface{}{"roleDefinitionIds": []string{memberRD.ID, customRD.ID}})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var putBody map[string]interface{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &putBody))
+	assert.Equal(t, store.UserStatusInvited, putBody["principalStatus"])
+
+	// Add group and agent members too.
+	for _, p := range []struct{ pType, pID string }{
+		{store.RoleBindingPrincipalGroup, grp.ID},
+		{store.RoleBindingPrincipalAgent, agent.ID},
+	} {
+		rec := doRequest(t, srv, http.MethodPut,
+			fmt.Sprintf("/api/v1/projects/%s/members/principals/%s/%s", project.ID, p.pType, p.pID),
+			map[string]interface{}{"roleDefinitionIds": []string{memberRD.ID}})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	}
+
+	counter.count.Store(0)
+	rec = doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s/members?groupBy=principal", project.ID), nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, int64(1), counter.count.Load(), "memoized user lookup runs once for carol across multiple bindings")
+
+	var listBody struct {
+		Items []map[string]interface{} `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &listBody))
+	byPrincipal := map[string]map[string]interface{}{}
+	for _, item := range listBody.Items {
+		byPrincipal[fmt.Sprintf("%s:%s", item["principalType"], item["principalId"])] = item
+	}
+
+	assert.Equal(t, store.UserStatusActive, byPrincipal["user:"+alice.ID]["principalStatus"])
+	assert.Equal(t, store.UserStatusInvited, byPrincipal["user:"+carol.ID]["principalStatus"])
+	_, grpHasStatus := byPrincipal["group:"+grp.ID]["principalStatus"]
+	assert.False(t, grpHasStatus, "group principal omits principalStatus")
+	_, agentHasStatus := byPrincipal["agent:"+agent.ID]["principalStatus"]
+	assert.False(t, agentHasStatus, "agent principal omits principalStatus")
+
+	// After carol signs in, grouped GET reports principalStatus: "active".
+	_, err = srv.provisionUser(ctx, &ExternalUserInfo{Email: carol.Email, DisplayName: "Carol"})
+	require.NoError(t, err)
+
+	rec = doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s/members?groupBy=principal", project.ID), nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &listBody))
+	for _, item := range listBody.Items {
+		if item["principalType"] == "user" && item["principalId"] == carol.ID {
+			assert.Equal(t, store.UserStatusActive, item["principalStatus"])
+		}
+	}
+}
+
+// An invited project owner does not count as a usable owner until first sign-in:
+// removing the sole active owner fails with 409 last_owner while removing the
+// invited owner succeeds, and once the invited owner signs in, removing the
+// original owner succeeds.
+func TestInvitedOwner_NotUsableUntilSignIn(t *testing.T) {
+	srv, s, alice, _, project := setupDemoPolicyTest(t)
+	ctx := context.Background()
+	carol := newInvitedUser(t, s, "user-carol-owner", "carol-owner@test.com")
+
+	ownerRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+	require.NoError(t, err)
+
+	// Assign carol as an invited owner.
+	rec := doRequest(t, srv, http.MethodPut,
+		fmt.Sprintf("/api/v1/projects/%s/members/principals/user/%s", project.ID, carol.Email),
+		map[string]interface{}{"roleDefinitionIds": []string{ownerRD.ID}})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	// Removing alice (the only active owner) fails with 409 last_owner.
+	rec = doRequest(t, srv, http.MethodDelete,
+		fmt.Sprintf("/api/v1/projects/%s/members/principals/user/%s", project.ID, alice.ID), nil)
+	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "last_owner")
+
+	// Removing carol (invited owner) succeeds.
+	rec = doRequest(t, srv, http.MethodDelete,
+		fmt.Sprintf("/api/v1/projects/%s/members/principals/user/%s", project.ID, carol.ID), nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+
+	// Re-add carol as owner, activate via first sign-in, then remove alice -> succeeds.
+	rec = doRequest(t, srv, http.MethodPut,
+		fmt.Sprintf("/api/v1/projects/%s/members/principals/user/%s", project.ID, carol.Email),
+		map[string]interface{}{"roleDefinitionIds": []string{ownerRD.ID}})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	signedIn, err := srv.provisionUser(ctx, &ExternalUserInfo{Email: carol.Email, DisplayName: "Carol Owner"})
+	require.NoError(t, err)
+	require.Equal(t, carol.ID, signedIn.ID)
+	require.Equal(t, store.UserStatusActive, signedIn.Status)
+
+	rec = doRequest(t, srv, http.MethodDelete,
+		fmt.Sprintf("/api/v1/projects/%s/members/principals/user/%s", project.ID, alice.ID), nil)
+	assert.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+}
