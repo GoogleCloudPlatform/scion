@@ -20,9 +20,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -984,4 +987,133 @@ func TestDecisionsBell_TopicWorkerPanicRecovery(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "2", aliceRow.ResourceID)
 	assert.False(t, aliceRow.Acknowledged)
+}
+
+type batchUserExpansionSpyStore struct {
+	store.Store
+	fault                   *storeFaultSwitch
+	mu                      sync.Mutex
+	getUserByID             map[string]int
+	checkUserAccountGetUser atomic.Int64
+	getUsersByIDs           atomic.Int64
+	failBatch               atomic.Bool
+}
+
+func (s *batchUserExpansionSpyStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	if s.fault == nil || s.fault.Active() {
+		var pcs [16]uintptr
+		n := runtime.Callers(2, pcs[:])
+		frames := runtime.CallersFrames(pcs[:n])
+		for {
+			fr, more := frames.Next()
+			if strings.HasSuffix(fr.Function, ".checkUserAccount") {
+				s.checkUserAccountGetUser.Add(1)
+				break
+			}
+			if !more {
+				break
+			}
+		}
+		s.mu.Lock()
+		if s.getUserByID == nil {
+			s.getUserByID = make(map[string]int)
+		}
+		s.getUserByID[id]++
+		s.mu.Unlock()
+	}
+	return s.Store.GetUser(ctx, id)
+}
+
+func (s *batchUserExpansionSpyStore) GetUsersByIDs(ctx context.Context, ids []string) (map[string]*store.User, error) {
+	if s.fault == nil || s.fault.Active() {
+		s.getUsersByIDs.Add(1)
+		if s.failBatch.Load() {
+			return nil, errors.New("injected batch user lookup failure")
+		}
+	}
+	return s.Store.GetUsersByIDs(ctx, ids)
+}
+
+// TestDecisionsBell_TopicExpansionBatchesUserAccountLookups verifies that
+// expandDecisionBellTopic batch-loads candidate user rows once via GetUsersByIDs
+// (0 per-member GetUser calls from checkUserAccount), still excludes suspended
+// and read-only members before membership evaluation, and fails closed when
+// GetUsersByIDs errors.
+func TestDecisionsBell_TopicExpansionBatchesUserAccountLookups(t *testing.T) {
+	srv, rawStore, alice, bob, project, spy, fault := setupDemoPolicyTestWithFault(t, func(inner store.Store, f *storeFaultSwitch) *batchUserExpansionSpyStore {
+		return &batchUserExpansionSpyStore{Store: inner, fault: f}
+	})
+	f := newChoicesFixtureOn(t, srv, spy, alice, bob, project)
+	setProjectDecisionsExperiments(t, f.srv, true, true)
+	ctx := context.Background()
+
+	isolatedProj := &store.Project{
+		ID:        api.NewUUID(),
+		Name:      "Isolated Bell Project",
+		Slug:      "isolated-bell-project",
+		CreatedBy: alice.ID,
+		Created:   time.Now(),
+		Updated:   time.Now(),
+	}
+	require.NoError(t, rawStore.CreateProject(ctx, isolatedProj))
+
+	f.srv.mu.RLock()
+	wcs := f.srv.webChatStore
+	f.srv.mu.RUnlock()
+	require.NotNil(t, wcs)
+	topicID := api.NewUUID()
+	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+		ID:        topicID,
+		ProjectID: isolatedProj.ID,
+		Name:      "general",
+		CreatedBy: alice.ID,
+		CreatedAt: time.Now().UTC(),
+	}))
+
+	memberRD, err := rawStore.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	viewerRD, err := rawStore.GetRoleDefinitionByName(ctx, store.ProjectRoleViewer, store.RoleScopeProject)
+	require.NoError(t, err)
+
+	addRole := func(u *store.User, rdID string) {
+		require.NoError(t, rawStore.CreateUser(ctx, u))
+		_, berr := rawStore.CreateRoleBinding(ctx, &store.RoleBinding{
+			ID:               api.NewUUID(),
+			PrincipalType:    store.RoleBindingPrincipalUser,
+			PrincipalID:      u.ID,
+			RoleDefinitionID: rdID,
+			ScopeType:        store.RoleScopeProject,
+			ScopeID:          isolatedProj.ID,
+			CreatedAt:        time.Now(),
+		})
+		require.NoError(t, berr)
+	}
+
+	m1 := &store.User{ID: api.NewUUID(), Email: "m1-batch@example.com", DisplayName: "M1", Role: store.UserRoleMember, Status: store.UserStatusActive, Created: time.Now()}
+	m2 := &store.User{ID: api.NewUUID(), Email: "m2-batch@example.com", DisplayName: "M2", Role: store.UserRoleMember, Status: store.UserStatusActive, Created: time.Now()}
+	suspended := &store.User{ID: api.NewUUID(), Email: "susp-batch@example.com", DisplayName: "Susp", Role: store.UserRoleMember, Status: store.UserStatusSuspended, Created: time.Now()}
+	readOnly := &store.User{ID: api.NewUUID(), Email: "ro-batch@example.com", DisplayName: "RO", Role: store.UserRoleMember, Status: store.UserStatusActive, Created: time.Now()}
+
+	addRole(m1, memberRD.ID)
+	addRole(m2, memberRD.ID)
+	addRole(suspended, memberRD.ID)
+	addRole(readOnly, viewerRD.ID)
+
+	fault.Arm()
+	got := f.srv.expandDecisionBellTopic(ctx, isolatedProj.ID, topicID)
+	assert.ElementsMatch(t, []string{m1.ID, m2.ID}, got, "only active posting members may be returned; suspended and viewer excluded")
+	assert.Equal(t, int64(1), spy.getUsersByIDs.Load(), "candidate users must be fetched in one GetUsersByIDs batch")
+	assert.Zero(t, spy.checkUserAccountGetUser.Load(), "checkUserAccount must read from the GetUsersByIDs map with zero GetUser calls")
+	spy.mu.Lock()
+	suspGetUsers := spy.getUserByID[suspended.ID]
+	spy.mu.Unlock()
+	assert.Zero(t, suspGetUsers, "suspended user must be rejected from batched user map before CheckEffectiveMembership")
+
+	// Injecting a GetUsersByIDs failure fails closed (returns nil).
+	spy.getUsersByIDs.Store(0)
+	spy.checkUserAccountGetUser.Store(0)
+	spy.failBatch.Store(true)
+	assert.Nil(t, f.srv.expandDecisionBellTopic(ctx, isolatedProj.ID, topicID))
+	assert.Equal(t, int64(1), spy.getUsersByIDs.Load())
+	assert.Zero(t, spy.checkUserAccountGetUser.Load())
 }

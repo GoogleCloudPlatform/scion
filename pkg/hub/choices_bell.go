@@ -580,6 +580,9 @@ func (s *Server) writeDecisionsWaitingNotification(ctx context.Context, userID s
 		// 0 < total <= prevCount: keep existing.Acknowledged (design B2).
 		// Conditional on existing.Acknowledged so a concurrent Mark read
 		// between GetNotification and this write is never undone.
+		if existing == nil {
+			return nil
+		}
 		if existing.ResourceID == resID && existing.Message == msg {
 			return nil
 		}
@@ -735,10 +738,17 @@ func (s *Server) expandDecisionBellTopic(ctx context.Context, projectID, chatKey
 		return nil
 	}
 
+	usersByID, err := s.store.GetUsersByIDs(ctx, candidateIDs)
+	if err != nil {
+		slog.Warn("decisions bell: batch user lookup failed", "project_id", projectID, "error", err)
+		return nil
+	}
+	userReader := decisionBellUserMapReader{users: usersByID}
+
 	ctx = withAuthzInputMemo(ctx)
 	posting := make([]string, 0, len(candidateIDs))
 	for _, uid := range candidateIDs {
-		u, uerr := checkUserAccount(ctx, s.store, PrincipalContext{Kind: PrincipalKindUser, ID: uid})
+		u, uerr := checkUserAccount(ctx, userReader, PrincipalContext{Kind: PrincipalKindUser, ID: uid})
 		if classifyUserAccount(u, uerr) != accountAllowed || u == nil {
 			continue
 		}
@@ -753,6 +763,17 @@ func (s *Server) expandDecisionBellTopic(ctx context.Context, projectID, chatKey
 		}
 	}
 	return posting
+}
+
+type decisionBellUserMapReader struct {
+	users map[string]*store.User
+}
+
+func (m decisionBellUserMapReader) GetUser(_ context.Context, id string) (*store.User, error) {
+	if u, ok := m.users[id]; ok && u != nil {
+		return u, nil
+	}
+	return nil, store.ErrNotFound
 }
 
 type decisionBellStatusRecorder struct {
