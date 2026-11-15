@@ -128,14 +128,23 @@ writes YAML by default. The JSON schema lives at
    and detail-oriented; *reference docs* are exhaustive and dry.
 5. **Diagrams**: Use **D2** in `d2` code blocks within Markdown files.
 6. **Cross-Linking**: Link from high-level guides to specific references to avoid
-   duplication. Internal links use the absolute form `/scion/<slug>/`.
+   duplication. Internal links use the absolute form `/scion/<slug>/`. During versioned
+   tag snapshot builds (`DOCS_BASE=/scion/<tag>`), `scionRewriteBaseIntegration`
+   (`src/plugins/rewrite-scion-base.mjs`) automatically rewrites internal `/scion/<slug>/`
+   links and assets to `/scion/<tag>/<slug>/` while leaving `/scion/versions.json` and
+   non-site paths (such as `/scion-volumes/...`) untouched.
 
 ## 6. Verification
 
 - **Sidebar**: Register new pages in `docs-site/astro.config.mjs` under the correct
   mode group.
 - **Redirects**: When moving or renaming a page, add a redirect in the
-  `redirects` map in `astro.config.mjs` so old URLs do not 404.
+  `legacyRedirectTargets` map in `docs-site/astro.config.mjs` so old URLs do not 404 on
+  either `main` or versioned snapshots.
+- **Tests & Type Checks**: Run `npm test` and `npm run check` (`astro check`) before
+  committing changes to `docs-site/` scripts, plugins, or Astro components. When
+  changing versioning or link-rewriting code, also verify a subpath snapshot build:
+  `DOCS_BASE=/scion/v0.3.0 DOCS_CHANNEL=stable DOCS_VERSION=v0.3.0 npm run build && DOCS_BASE=/scion/v0.3.0 npm run verify-snapshot`.
 - **Link Check**: `starlight-links-validator` runs during `npm run build` (Node ≥ 22).
   Fix every reported broken link.
 - **Formatting**: Standard Markdown. Starlight supports

@@ -552,6 +552,16 @@ jobs:
             echo "::warning::Failed to merge ${PR_URL} after retries. Manual merge required."
           fi
 
+  publish-docs-snapshot:
+    name: Publish Docs Snapshot
+    needs: release
+    if: github.repository == 'GoogleCloudPlatform/scion'
+    permissions:
+      contents: write
+    uses: ./.github/workflows/docs-snapshot.yml
+    with:
+      tag: ${{ needs.release.outputs.tag }}
+
   # Preview releases only: build the homebrew-scion images and update the
   # tap formula. The called jobs read HOMEBREW_SCION_TOKEN from the
   # "homebrew" environment, so no secret is passed here; they skip with a

@@ -1,0 +1,123 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Build immutable documentation snapshot tarballs (`scion-docs-<tag>.tar.gz` and
+# `.sha256`) and attach them to the matching GitHub Release(s).
+#
+# GitHub Pages deployment stays exclusively in `.github/workflows/docs.yml`
+# (`refs/heads/main`) because the `github-pages` environment restricts deployments
+# to `main`. Completing this workflow (directly via `workflow_dispatch` or nested
+# inside `build-release.yml`) triggers `docs.yml` via `workflow_run` to assemble
+# `main` + all retained release tarballs and deploy Pages.
+
+name: Build Docs Snapshot
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Release tag to snapshot, e.g. v0.3.0 or v0.4.0-preview.2'
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tags:
+        description: 'Space- or comma-separated release tag(s) to snapshot, e.g. "v0.3.0 v0.4.0-preview.2"'
+        required: true
+        type: string
+
+permissions: {}
+
+# Fork guard: forks mirror upstream tags and must never publish release assets.
+jobs:
+  build-and-upload:
+    name: Build and Upload Docs Snapshot
+    runs-on: ubuntu-latest
+    if: github.repository == 'GoogleCloudPlatform/scion'
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout main tooling and tags
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: main
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+          package-manager-cache: false # release artifacts never restore a cache (zizmor cache-poisoning)
+
+      - name: Install D2
+        env:
+          D2_VERSION: v0.9.0
+          D2_SHA256: 5669ddc46b99e942cc96078f4a4e36d5e62103348f4c05179ede27802fdd87a9
+        run: |
+          set -euo pipefail
+          tarball="d2-${D2_VERSION}-linux-amd64.tar.gz"
+          curl -fsSL --retry 3 -o "${RUNNER_TEMP}/${tarball}" \
+            "https://github.com/terrastruct/d2/releases/download/${D2_VERSION}/${tarball}"
+          echo "${D2_SHA256}  ${RUNNER_TEMP}/${tarball}" | sha256sum -c -
+          tar -xzf "${RUNNER_TEMP}/${tarball}" -C "${RUNNER_TEMP}"
+          echo "${RUNNER_TEMP}/d2-${D2_VERSION}/bin" >> "$GITHUB_PATH"
+
+      - name: Build and upload snapshot tarball(s)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          CALL_TAG: ${{ inputs.tag }}
+          DISPATCH_TAGS: ${{ inputs.tags }}
+          SERVER_URL: ${{ github.server_url }}
+        run: |
+          set -euo pipefail
+          RAW="${CALL_TAG:-${DISPATCH_TAGS:-}}"
+          # Normalize commas to spaces and split into an array.
+          NORMALIZED="${RAW//,/ }"
+          read -r -a TAG_LIST <<< "$NORMALIZED"
+          if [[ "${#TAG_LIST[@]}" -eq 0 ]]; then
+            echo "::error::No release tags provided."
+            exit 1
+          fi
+
+          OUT_DIR="${RUNNER_TEMP:?}/docs-snapshots"
+          mkdir -p "$OUT_DIR"
+
+          for raw_tag in "${TAG_LIST[@]}"; do
+            tag="${raw_tag#refs/tags/}"
+            if [[ ! "$tag" =~ ^[0-9A-Za-z][0-9A-Za-z._-]*$ ]]; then
+              printf '::error::Invalid tag name %q.\n' "$raw_tag"
+              exit 1
+            fi
+
+            if ! git rev-parse --verify --quiet "refs/tags/${tag}^{commit}" >/dev/null; then
+              git fetch --no-tags "${SERVER_URL}/${GH_REPO}.git" "refs/tags/${tag}:refs/tags/${tag}"
+            fi
+
+            # Require an existing non-draft GitHub Release for this tag before uploading.
+            IS_DRAFT=$(gh release view "$tag" --repo "$GH_REPO" --json isDraft --jq '.isDraft')
+            if [[ "$IS_DRAFT" != "false" ]]; then
+              printf '::error::GitHub Release for %s is a draft; refusing to upload snapshot assets.\n' "$tag"
+              exit 1
+            fi
+
+            ./scripts/docs/build-release-snapshot.sh --tag "$tag" --out-dir "$OUT_DIR"
+
+            tar_asset="${OUT_DIR}/scion-docs-${tag}.tar.gz"
+            sha_asset="${tar_asset}.sha256"
+            gh release upload "$tag" "$tar_asset" "$sha_asset" --repo "$GH_REPO" --clobber
+            echo "Uploaded docs snapshot for ${tag}" >> "$GITHUB_STEP_SUMMARY"
+          done

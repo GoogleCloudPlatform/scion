@@ -329,11 +329,73 @@ release-candidate, or nightly tag is pushed. It:
    since the previous release in the same channel (see [Release notes](#release-notes)).
 6. Force-updates the matching `stable`, `preview`, or `nightly` channel branch.
 7. Updates the corresponding channel in `LATEST.json` on `main`.
-8. For preview tags only, calls [`publish-homebrew.yml`](../.github/workflows/publish-homebrew.yml)
+8. Calls [`docs-snapshot.yml`](../.github/workflows/docs-snapshot.yml) to build and attach a
+   versioned documentation tarball (`scion-docs-<tag>.tar.gz` and `.sha256`) to the GitHub
+   release (see [Versioned documentation snapshots](#versioned-documentation-snapshots)).
+9. For preview tags only, calls [`publish-homebrew.yml`](../.github/workflows/publish-homebrew.yml)
    (see [Homebrew publishing](#homebrew-publishing)).
 
 Release-candidate tags route to the preview branch and preview manifest entry. They are not
 published to Homebrew.
+
+### Versioned documentation snapshots
+
+The documentation site (`https://googlecloudplatform.github.io/scion/`) serves `main` at the root
+`/scion/<slug>/` path alongside immutable tag snapshots under `/scion/<tag>/<slug>/`:
+
+| Path | Content |
+|------|---------|
+| `/scion/<slug>/` | Latest documentation from `main` (default channel) |
+| `/scion/<tag>/<slug>/` | Immutable snapshot built from `<tag>` (`DOCS_BASE=/scion/<tag>`) |
+| `/scion/main/`, `/scion/stable/`, `/scion/preview/`, `/scion/nightly/` | HTML redirects to the latest `/overview/` page in each channel |
+| `/scion/versions.json` | Channel and version manifest read by the header selectors and outdated-version banner |
+| `/scion/release-notes/**`, `/scion/landing/` | Global pages served from `main` so links in GitHub Release bodies never 404 |
+
+Publishing a versioned snapshot splits across two workflows because the `github-pages` environment
+accepts deployments only from `refs/heads/main`:
+
+1. **Snapshot build (`docs-snapshot.yml`):** Called by `build-release.yml` after creating the
+   GitHub release (or dispatched manually). [`build-release-snapshot.sh`](../scripts/docs/build-release-snapshot.sh)
+   extracts `docs-site/` from `refs/tags/<tag>`, builds the static site with
+   `DOCS_BASE=/scion/<tag> DOCS_CHANNEL=<channel> DOCS_VERSION=<tag>`, verifies with
+   `verify-snapshot-links.mjs` that no unprefixed `/scion/` internal links leaked into the HTML, and
+   uploads `scion-docs-<tag>.tar.gz` and `scion-docs-<tag>.tar.gz.sha256` to the tag's GitHub
+   release.
+2. **Pages assembly (`docs.yml`):** Triggered on pushes to `main` touching `docs-site/` or
+   `scripts/docs/`, on `workflow_dispatch`, and via `workflow_run` when `Build Multi-Arch Release`,
+   `Nightly Release`, `Weekly Preview Release`, or `Build Docs Snapshot` completes with a
+   succeeded `Build and Upload Docs Snapshot` job. [`assemble-pages.mjs`](../docs-site/scripts/assemble-pages.mjs)
+   builds `main`, downloads and verifies SHA-256 checksums and tar paths for all retained release
+   snapshots, writes `/scion/versions.json` and `/scion/{main,stable,preview,nightly}/index.html`,
+   and deploys the combined artifact from `main`.
+
+**Retention policy.** `assemble-pages.mjs` retains:
+
+- **Stable:** all non-draft `vX.Y.Z` releases that carry snapshot assets.
+- **Preview:** up to the 5 most recent `vX.Y.Z-preview.N` and `vX.Y.Z-rc.N` releases on unreleased
+  lines. Pre-releases are pruned automatically once their target `vX.Y.Z` is promoted to `stable`
+  (or superseded by a higher `.0` stable minor release), even if the older stable release predates
+  docs snapshots.
+- **Nightly:** `nightly-YYYYMMDD` releases from the last 14 days (matching nightly release cleanup).
+
+**Backfilling or rerunning snapshots.** To attach or refresh snapshots for historical or existing
+releases (such as `v0.3.0` and `v0.4.0-preview.2`), dispatch `docs-snapshot.yml` from `main` with
+one or more space- or comma-separated tags:
+
+```bash
+gh workflow run docs-snapshot.yml -R GoogleCloudPlatform/scion \
+  -f tags="v0.3.0 v0.4.0-preview.2"
+```
+
+For tags created before native docs versioning landed,
+[`prepare-legacy-snapshot.mjs`](../docs-site/scripts/prepare-legacy-snapshot.mjs) automatically
+overlays the current versioning UI and Sätteri link-rewriter shell onto the extracted tag while
+preserving that tag's own Markdown content, sidebar, and redirects. To test a snapshot build
+locally:
+
+```bash
+./scripts/docs/build-release-snapshot.sh --tag v0.3.0 --out-dir /tmp/scion-docs-out
+```
 
 ### Nightly scheduling workflow
 
