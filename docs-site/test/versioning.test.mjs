@@ -15,8 +15,12 @@
  */
 
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, it } from 'node:test';
 
+import { scanSnapshotDistForUnprefixedLinks } from '../scripts/verify-snapshot-links.mjs';
 import {
 	loadVersionsManifest,
 	navigateToVersionBase,
@@ -24,8 +28,10 @@ import {
 } from '../src/lib/manifest-client.mjs';
 import {
 	classifyTagChannel,
+	compareReleaseVersions,
 	ensureCurrentInManifest,
 	extractRelativeDocPath,
+	findNewerChannelRelease,
 	getBuildVersionConfig,
 	isSafeDocsBasePath,
 	joinVersionUrl,
@@ -110,6 +116,37 @@ describe('classifyTagChannel & getBuildVersionConfig', () => {
 				channel: 'stable',
 				version: 'v0.3.0',
 			},
+		);
+	});
+
+	it('rejects unclassifiable or contradictory snapshot build env configs', () => {
+		assert.throws(
+			() => getBuildVersionConfig({ DOCS_BASE: '/scion/foo' }),
+			/Unclassifiable snapshot version/,
+		);
+		assert.throws(
+			() => getBuildVersionConfig({ DOCS_BASE: '/scion/a/b' }),
+			/Unclassifiable snapshot version/,
+		);
+		assert.throws(
+			() =>
+				getBuildVersionConfig({
+					DOCS_BASE: '/scion/v0.3.0',
+					DOCS_VERSION: 'nightly-20261115',
+				}),
+			/Mismatched DOCS_BASE/,
+		);
+		assert.throws(
+			() =>
+				getBuildVersionConfig({
+					DOCS_BASE: '/scion/v0.3.0',
+					DOCS_CHANNEL: 'nightly',
+				}),
+			/conflicts with tag/,
+		);
+		assert.throws(
+			() => getBuildVersionConfig({ DOCS_BASE: '/scion', DOCS_VERSION: 'v0.3.0' }),
+			/Invalid build version config for root base/,
 		);
 	});
 });
@@ -343,6 +380,86 @@ describe('manifest-client browser helpers', () => {
 		} finally {
 			globalThis.fetch = origFetch;
 			globalThis.window = origWindow;
+		}
+	});
+});
+
+describe('compareReleaseVersions & findNewerChannelRelease', () => {
+	it('orders semver releases, RCs, previews, and nightly dates accurately', () => {
+		assert.ok((compareReleaseVersions('v0.4.0', 'v0.3.0') ?? 0) > 0);
+		assert.ok((compareReleaseVersions('v0.4.0', 'v0.4.0-rc.1') ?? 0) > 0);
+		assert.ok((compareReleaseVersions('v0.4.0-rc.0', 'v0.4.0-preview.9') ?? 0) > 0);
+		assert.ok((compareReleaseVersions('v0.4.0-preview.10', 'v0.4.0-preview.2') ?? 0) > 0);
+		assert.ok((compareReleaseVersions('nightly-20261115', 'nightly-20261114') ?? 0) > 0);
+		assert.equal(compareReleaseVersions('v0.3.0', 'v0.3.0'), 0);
+	});
+
+	it('flags outdated snapshots without ever offering a downgrade when versions.json lags', () => {
+		const staleManifest = normalizeManifest({
+			channels: [
+				{
+					id: 'stable',
+					latest: 'v0.3.0',
+					versions: [
+						{ version: 'v0.3.0', label: 'v0.3.0', path: '/scion/v0.3.0' },
+						{ version: 'v0.2.0', label: 'v0.2.0', path: '/scion/v0.2.0' },
+					],
+				},
+			],
+		});
+
+		// Viewing older v0.2.0 -> offers upgrade to v0.3.0.
+		const upgrade = findNewerChannelRelease(staleManifest, {
+			channel: 'stable',
+			version: 'v0.2.0',
+		});
+		assert.equal(upgrade?.latestEntry.version, 'v0.3.0');
+
+		// Viewing newer v0.4.0 before versions.json updates -> must NOT offer downgrade to v0.3.0!
+		const mergedForNewer = ensureCurrentInManifest(staleManifest, {
+			channel: 'stable',
+			version: 'v0.4.0',
+			base: '/scion/v0.4.0',
+		});
+		assert.equal(
+			 mergedForNewer.channels.find((c) => c.id === 'stable')?.latest,
+			'v0.4.0',
+		);
+		assert.equal(
+			findNewerChannelRelease(staleManifest, { channel: 'stable', version: 'v0.4.0' }),
+			null,
+		);
+		assert.equal(
+			findNewerChannelRelease(mergedForNewer, { channel: 'stable', version: 'v0.4.0' }),
+			null,
+		);
+	});
+});
+
+describe('scanSnapshotDistForUnprefixedLinks', () => {
+	it('ignores banner back-to-main links and versions.json while catching unprefixed body links', async () => {
+		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'scion-docs-scan-'));
+		try {
+			await fs.writeFile(
+				path.join(tmpDir, 'clean.html'),
+				[
+					'<scion-version-banner><a href="/scion/overview/">main</a></scion-version-banner>',
+					'<a href="/scion/v0.3.0/overview/">ok</a>',
+					'<a href="/scion-volumes/work">vol</a>',
+				].join('\n'),
+			);
+			const cleanRes = await scanSnapshotDistForUnprefixedLinks(tmpDir, '/scion/v0.3.0');
+			assert.equal(cleanRes.leaks.length, 0);
+
+			await fs.writeFile(
+				path.join(tmpDir, 'leak.html'),
+				'<main><a href="/scion/local/tmux/">missed</a></main>',
+			);
+			const leakRes = await scanSnapshotDistForUnprefixedLinks(tmpDir, '/scion/v0.3.0');
+			assert.equal(leakRes.leaks.length, 1);
+			assert.equal(leakRes.leaks[0].url, '/scion/local/tmux/');
+		} finally {
+			await fs.rm(tmpDir, { recursive: true, force: true });
 		}
 	});
 });

@@ -18,6 +18,7 @@
 
 export const ROOT_BASE = '/scion';
 export const MANIFEST_PATH = '/scion/versions.json';
+export const MAIN_VERSION_LABEL = 'HEAD (latest)';
 
 /**
  * Canonical ordered release channels for the documentation selector.
@@ -122,19 +123,125 @@ export function classifyTagChannel(refName) {
 
 /**
  * Read and validate build-time versioning configuration from environment variables.
+ * Rejects contradictory or unclassifiable snapshot configurations so misconfigured builds
+ * fail fast instead of publishing broken metadata.
  *
  * @param {Record<string, string | undefined>} [env]
  * @returns {{ base: string, channel: ChannelId, version: string }}
  */
 export function getBuildVersionConfig(env = process.env) {
 	const base = normalizeBase(env.DOCS_BASE);
-	const rawVersion = (env.DOCS_VERSION || '').trim() || (base === ROOT_BASE ? 'main' : base.slice(ROOT_BASE.length + 1));
-	const inferredChannel = classifyTagChannel(rawVersion) || 'main';
 	const rawChannel = (env.DOCS_CHANNEL || '').trim().toLowerCase();
-	const channel = /** @type {ChannelId} */ (
-		VALID_CHANNELS.has(/** @type {ChannelId} */ (rawChannel)) ? rawChannel : inferredChannel
-	);
-	return { base, channel, version: rawVersion };
+	if (rawChannel && !VALID_CHANNELS.has(/** @type {ChannelId} */ (rawChannel))) {
+		throw new Error(`Invalid DOCS_CHANNEL "${env.DOCS_CHANNEL}": must be one of main, stable, preview, nightly.`);
+	}
+
+	if (base === ROOT_BASE) {
+		const rawVersion = ((env.DOCS_VERSION || '').trim() || 'main').replace(/^refs\/tags\//, '');
+		if (rawVersion !== 'main' || (rawChannel && rawChannel !== 'main')) {
+			throw new Error(
+				`Invalid build version config for root base "${ROOT_BASE}": expected channel/version "main", got channel="${rawChannel || 'main'}", version="${rawVersion}".`,
+			);
+		}
+		return { base, channel: 'main', version: 'main' };
+	}
+
+	const derivedTag = base.slice(ROOT_BASE.length + 1);
+	const version = ((env.DOCS_VERSION || '').trim() || derivedTag).replace(/^refs\/tags\//, '');
+	if (base !== `${ROOT_BASE}/${version}`) {
+		throw new Error(
+			`Mismatched DOCS_BASE "${base}" and DOCS_VERSION "${version}": expected DOCS_BASE="${ROOT_BASE}/${version}".`,
+		);
+	}
+
+	const inferredChannel = classifyTagChannel(version);
+	if (!inferredChannel || inferredChannel === 'main') {
+		throw new Error(
+			`Unclassifiable snapshot version "${version}": must match vX.Y.Z, vX.Y.Z-(preview|rc).N, or nightly-YYYYMMDD.`,
+		);
+	}
+	if (rawChannel && rawChannel !== inferredChannel) {
+		throw new Error(
+			`DOCS_CHANNEL "${rawChannel}" conflicts with tag "${version}" (classified as "${inferredChannel}").`,
+		);
+	}
+
+	return { base, channel: inferredChannel, version };
+}
+
+/**
+ * Compare two release version identifiers within the same family (`vX.Y.Z[-(preview|rc).N]` or `nightly-YYYYMMDD`).
+ * Returns `> 0` when `a` is newer than `b`, `< 0` when `a` is older than `b`, `0` when equal,
+ * or `null` when the two identifiers are not comparable.
+ *
+ * @param {string} a
+ * @param {string} b
+ * @returns {number | null}
+ */
+export function compareReleaseVersions(a, b) {
+	if (a === b) return 0;
+
+	const nightlyA = /^nightly-([0-9]{8,})$/.exec(a);
+	const nightlyB = /^nightly-([0-9]{8,})$/.exec(b);
+	if (nightlyA && nightlyB) {
+		if (nightlyA[1].length !== nightlyB[1].length) {
+			return nightlyA[1].length - nightlyB[1].length;
+		}
+		return nightlyA[1].localeCompare(nightlyB[1]);
+	}
+
+	const semverRe =
+		/^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-(preview|rc)\.(0|[1-9][0-9]*))?$/;
+	const sa = semverRe.exec(a);
+	const sb = semverRe.exec(b);
+	if (!sa || !sb) return null;
+
+	for (let i = 1; i <= 3; i += 1) {
+		const diff = Number(sa[i]) - Number(sb[i]);
+		if (diff !== 0) return diff;
+	}
+
+	const stageRank = (/** @type {string | undefined} */ stage) => {
+		if (!stage) return 3; // stable > rc > preview
+		if (stage === 'rc') return 2;
+		return 1;
+	};
+	const rankDiff = stageRank(sa[4]) - stageRank(sb[4]);
+	if (rankDiff !== 0) return rankDiff;
+
+	if (sa[4] && sb[4]) {
+		return Number(sa[5]) - Number(sb[5]);
+	}
+	return 0;
+}
+
+/**
+ * Return the channel's newer `latest` entry only when `manifest` actually lists a release
+ * strictly newer than `current.version` (never offering a downgrade if `versions.json` is stale).
+ *
+ * @param {VersionsManifest} manifest
+ * @param {{ channel: ChannelId, version: string }} current
+ * @returns {{ channelLabel: string, latestEntry: VersionEntry } | null}
+ */
+export function findNewerChannelRelease(manifest, current) {
+	if (current.channel === 'main') return null;
+	const ch = manifest.channels.find((c) => c.id === current.channel);
+	if (!ch || !ch.latest || ch.latest === current.version) return null;
+
+	const latestIdx = ch.versions.findIndex((v) => v.version === ch.latest);
+	if (latestIdx === -1) return null;
+	const latestEntry = ch.versions[latestIdx];
+
+	const cmp = compareReleaseVersions(latestEntry.version, current.version);
+	if (cmp !== null) {
+		return cmp > 0 ? { channelLabel: ch.label, latestEntry } : null;
+	}
+
+	const currentIdx = ch.versions.findIndex((v) => v.version === current.version);
+	if (currentIdx !== -1 && currentIdx > latestIdx) {
+		return { channelLabel: ch.label, latestEntry };
+	}
+	return null;
 }
 
 /**
@@ -298,23 +405,25 @@ export function ensureCurrentInManifest(manifest, current) {
 			return {
 				...ch,
 				latest: 'main',
-				versions: [{ version: 'main', label: 'HEAD (latest)', path: ROOT_BASE }],
+				versions: [{ version: 'main', label: MAIN_VERSION_LABEL, path: ROOT_BASE }],
 			};
 		}
 		if (ch.id !== current.channel) return ch;
 		if (ch.versions.some((v) => v.version === current.version)) return ch;
 
+		const isCurrentNewer =
+			!ch.latest || (compareReleaseVersions(current.version, ch.latest) ?? -1) > 0;
 		const defaultLabel =
 			current.channel === 'main'
-				? 'HEAD (latest)'
-				: ch.versions.length === 0
+				? MAIN_VERSION_LABEL
+				: isCurrentNewer
 					? `${current.version} (latest)`
 					: current.version;
 		const added = { version: current.version, label: defaultLabel, path: safeBase };
-		const versions = [added, ...ch.versions];
+		const versions = isCurrentNewer ? [added, ...ch.versions] : [...ch.versions, added];
 		return {
 			...ch,
-			latest: ch.latest || current.version,
+			latest: isCurrentNewer ? current.version : ch.latest,
 			versions,
 		};
 	});

@@ -104,7 +104,6 @@ export function createSatteriMdastRewritePlugin(targetBase) {
 		name: 'scion-rewrite-base-mdast',
 		link(node, ctx) {
 			if (normalizedTarget === ROOT_BASE) return;
-			rewriteFrontmatterLinks(/** @type {any} */ (ctx.data?.astro)?.frontmatter, normalizedTarget);
 			const next = rewriteScionUrl(node.url, normalizedTarget);
 			if (next !== node.url) ctx.setProperty(node, 'url', next);
 		},
@@ -222,6 +221,10 @@ export function scionRewriteBaseIntegration(options = {}) {
 					processor.options.mdastPlugins.push(() => createSatteriMdastRewritePlugin(targetBase));
 					processor.options.hastPlugins.push(() => createSatteriHastRewritePlugin(targetBase));
 
+					// Starlight reads page-level frontmatter (`hero.actions[].link`, `prev.link`, `next.link`)
+					// from the `frontmatter` object passed into `renderer.render(content, renderOpts)` and
+					// returned in `metadata.frontmatter`. Rewriting once per document here covers pages
+					// even when their Markdown body contains zero links.
 					const origCreateRenderer = processor.createRenderer.bind(processor);
 					processor.createRenderer = async (/** @type {any} */ shared) => {
 						const renderer = await origCreateRenderer(shared);

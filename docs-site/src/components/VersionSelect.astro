@@ -19,11 +19,12 @@ import { Icon } from '@astrojs/starlight/components';
 import {
 	CHANNEL_DEFINITIONS,
 	getBuildVersionConfig,
+	MAIN_VERSION_LABEL,
 	MANIFEST_PATH,
 } from '../lib/versioning.mjs';
 
 const { base, channel, version } = getBuildVersionConfig();
-const initialVersionLabel = channel === 'main' ? 'HEAD (latest)' : version;
+const initialVersionLabel = channel === 'main' ? MAIN_VERSION_LABEL : version;
 ---
 
 <scion-version-select
@@ -82,7 +83,11 @@ const initialVersionLabel = channel === 'main' ? 'HEAD (latest)' : version;
 			const manifestUrl = this.dataset.manifestUrl || '/scion/versions.json';
 
 			this.channelSelect.addEventListener('change', () => {
-				if (!this.channelSelect || !this.manifest) return;
+				if (!this.channelSelect) return;
+				if (!this.manifest) {
+					this.channelSelect.value = current.channel;
+					return;
+				}
 				const chosenChannelId = this.channelSelect.value as ChannelId;
 				const channelEntry = this.manifest.channels.find((c) => c.id === chosenChannelId);
 				if (!channelEntry || channelEntry.versions.length === 0) {

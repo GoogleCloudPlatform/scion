@@ -52,7 +52,7 @@ const channelLabel = channelLabelMap[channel] || channel;
 				Viewing <strong>{channelLabel}</strong> documentation (<code>{version}</code>).
 			</span>{' '}
 			<span data-role="latest-channel-wrap" hidden>
-				<a data-role="latest-channel-link" href={mainPageHref}>
+				<a data-role="latest-channel-link" href={`${ROOT_BASE}/overview/`}>
 					Switch to latest {channelLabel}
 				</a>
 				{' · '}
@@ -67,7 +67,7 @@ const channelLabel = channelLabelMap[channel] || channel;
 
 <script>
 	import { loadVersionsManifest, navigateToVersionBase } from '../lib/manifest-client.mjs';
-	import type { ChannelId } from '../lib/versioning.mjs';
+	import { findNewerChannelRelease, type ChannelId } from '../lib/versioning.mjs';
 
 	class ScionVersionBanner extends HTMLElement {
 		connectedCallback() {
@@ -85,11 +85,9 @@ const channelLabel = channelLabelMap[channel] || channel;
 			}
 
 			void loadVersionsManifest({ channel, version, base }, manifestUrl).then((manifest) => {
-				const ch = manifest.channels.find((c) => c.id === channel);
-				if (!ch || !ch.latest || ch.latest === version) return;
-
-				const latestEntry = ch.versions.find((v) => v.version === ch.latest);
-				if (!latestEntry) return;
+				const newer = findNewerChannelRelease(manifest, { channel, version });
+				if (!newer) return;
+				const { channelLabel, latestEntry } = newer;
 
 				this.classList.add('scion-banner-outdated');
 				const bannerText = this.querySelector<HTMLElement>('[data-role="banner-text"]');
@@ -97,7 +95,7 @@ const channelLabel = channelLabelMap[channel] || channel;
 					bannerText.textContent = '';
 					bannerText.append('Viewing an older ');
 					const strong = document.createElement('strong');
-					strong.textContent = ch.label;
+					strong.textContent = channelLabel;
 					bannerText.append(strong, ' snapshot (');
 					const code = document.createElement('code');
 					code.textContent = version;
@@ -108,7 +106,7 @@ const channelLabel = channelLabelMap[channel] || channel;
 				const link = this.querySelector<HTMLAnchorElement>('a[data-role="latest-channel-link"]');
 				if (wrap && link) {
 					link.href = `${latestEntry.path}/overview/`;
-					link.textContent = `Switch to ${ch.label} ${latestEntry.version}`;
+					link.textContent = `Switch to ${channelLabel} ${latestEntry.version}`;
 					link.addEventListener('click', (e) => {
 						e.preventDefault();
 						void navigateToVersionBase(latestEntry.path, base);
