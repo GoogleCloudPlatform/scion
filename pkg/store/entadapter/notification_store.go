@@ -897,11 +897,11 @@ func writeHeldOverridesSuspended(b *entsql.Builder, extra func(*entsql.Builder))
 
 // ListParkedNotificationSubscribers implements
 // store.NotificationStore.ListParkedNotificationSubscribers.
-func (s *NotificationStore) ListParkedNotificationSubscribers(ctx context.Context, reasons []string) ([]string, error) {
+func (s *NotificationStore) ListParkedNotificationSubscribers(ctx context.Context, reasons []string) ([]store.Agent, error) {
 	if len(reasons) == 0 {
 		return nil, nil
 	}
-	ids, err := s.client.Agent.Query().
+	rows, err := s.client.Agent.Query().
 		Where(
 			agent.PhaseEQ(string(state.PhaseSuspended)),
 			agent.SuspendReasonIn(reasons...),
@@ -931,13 +931,13 @@ func (s *NotificationStore) ListParkedNotificationSubscribers(ctx context.Contex
 			},
 		).
 		Limit(undispatchedBatchLimit).
-		IDs(ctx)
+		All(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list parked notification subscribers: %w", err)
 	}
-	out := make([]string, len(ids))
-	for i, id := range ids {
-		out[i] = id.String()
+	out := make([]store.Agent, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, *entAgentToStore(r))
 	}
 	return out, nil
 }

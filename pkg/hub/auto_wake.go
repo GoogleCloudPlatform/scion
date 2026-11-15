@@ -340,17 +340,16 @@ func (s *Server) autoWakeParkedNotificationSubscribers(ctx context.Context) {
 	if !s.experimentEnabled(experiments.IdleSuspend) {
 		return
 	}
-	ids, err := s.store.ListParkedNotificationSubscribers(ctx, autoWakeSuspendReasons)
+	// One batch read selects the candidates; each queued wake re-reads its
+	// agent before acting (autoWakeAgent), so the decision to resume is
+	// still made on a fresh row.
+	subscribers, err := s.store.ListParkedNotificationSubscribers(ctx, autoWakeSuspendReasons)
 	if err != nil {
 		s.agentLifecycleLog.Error("notification-dispatch-sweep: parked subscriber query failed", "error", err)
 		return
 	}
-	for _, id := range ids {
-		subscriber, err := s.store.GetAgent(ctx, id)
-		if err != nil || subscriber == nil {
-			continue
-		}
-		s.autoWakeNotificationSubscriber(subscriber)
+	for i := range subscribers {
+		s.autoWakeNotificationSubscriber(&subscribers[i])
 	}
 }
 

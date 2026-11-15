@@ -392,8 +392,14 @@ func TestListParkedNotificationSubscribers(t *testing.T) {
 		Save(ctx)
 	require.NoError(t, err)
 
-	got, err := e.s.ListParkedNotificationSubscribers(ctx, reasons)
+	agents, err := e.s.ListParkedNotificationSubscribers(ctx, reasons)
 	require.NoError(t, err)
+	var got []string
+	for _, a := range agents {
+		got = append(got, a.ID)
+		assert.Equal(t, string(state.PhaseSuspended), a.Phase, "the full row is returned")
+		assert.NotEmpty(t, a.SuspendReason)
+	}
 	sort.Strings(got)
 	assert.Equal(t, sortedIDs(idle.String(), stalled.String()), got)
 
