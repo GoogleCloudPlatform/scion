@@ -346,6 +346,9 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 	b := snap.AutoSuspendStalled
 	resp.Server.Hub.AutoSuspendStalled = &b
 	resp.Server.Hub.StalledThreshold = snap.StalledThreshold
+	bIdle := snap.AutoSuspendIdle
+	resp.Server.Hub.AutoSuspendIdle = &bIdle
+	resp.Server.Hub.IdleSuspendAfter = snap.IdleSuspendAfter
 	resp.Server.Hub.SoftDeleteRetention = snap.SoftDeleteRetention
 	resp.Server.Hub.StartClaimLeaseTTL = snap.StartClaimLeaseTTL
 	resp.Server.Hub.StartMaxDuration = snap.StartMaxDuration
@@ -2524,6 +2527,12 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			if hub.StalledThreshold != "" {
 				keys = append(keys, "server.hub.stalled_threshold")
 			}
+			if hub.AutoSuspendIdle != nil {
+				keys = append(keys, "server.hub.auto_suspend_idle")
+			}
+			if hub.IdleSuspendAfter != "" {
+				keys = append(keys, "server.hub.idle_suspend_after")
+			}
 			if hub.SoftDeleteRetention != "" {
 				keys = append(keys, "server.hub.soft_delete_retention")
 			}
@@ -2909,6 +2918,10 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 			d.AutoSuspendStalled = req.Server.Hub.AutoSuspendStalled
 			if req.Server.Hub.StalledThreshold != "" {
 				d.StalledThreshold = req.Server.Hub.StalledThreshold
+			}
+			d.AutoSuspendIdle = req.Server.Hub.AutoSuspendIdle
+			if req.Server.Hub.IdleSuspendAfter != "" {
+				d.IdleSuspendAfter = req.Server.Hub.IdleSuspendAfter
 			}
 			if req.Server.Hub.SoftDeleteRetention != "" {
 				d.SoftDeleteRetention = req.Server.Hub.SoftDeleteRetention

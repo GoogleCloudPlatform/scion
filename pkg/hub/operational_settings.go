@@ -107,6 +107,8 @@ type Layer1Snapshot struct {
 	// Lifecycle
 	AutoSuspendStalled  bool
 	StalledThreshold    string // DB-backed snapshots only (see type comment)
+	AutoSuspendIdle     bool
+	IdleSuspendAfter    string // DB-backed snapshots only (see type comment)
 	SoftDeleteRetention string // DB-backed snapshots only (see type comment); "" = startup value
 	// SoftDeleteRetainFiles is nil when unset; ApplySnapshot then uses the
 	// startup value. DB-backed snapshots only (see type comment).
@@ -1296,6 +1298,8 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	// Lifecycle
 	snap.AutoSuspendStalled = k.Bool("server.hub.auto_suspend_stalled")
 	snap.StalledThreshold = k.String("server.hub.stalled_threshold")
+	snap.AutoSuspendIdle = k.Bool("server.hub.auto_suspend_idle")
+	snap.IdleSuspendAfter = k.String("server.hub.idle_suspend_after")
 	snap.SoftDeleteRetention = k.String("server.hub.soft_delete_retention")
 	if k.Exists("server.hub.soft_delete_retain_files") {
 		v := k.Bool("server.hub.soft_delete_retain_files")
@@ -1490,6 +1494,7 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 		DefaultUserRole:    gc.Auth.DefaultUserRole,
 		AuthorizedDomains:  gc.Auth.AuthorizedDomains,
 		AutoSuspendStalled: gc.Hub.AutoSuspendStalled,
+		AutoSuspendIdle:    gc.Hub.AutoSuspendIdle,
 		TelemetryEnabled:   gc.TelemetryEnabled,
 		AdminMode:          gc.AdminMode,
 		MaintenanceMessage: gc.MaintenanceMessage,
@@ -1810,6 +1815,31 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 			s.config.StalledThreshold = d
 		} else {
 			slog.Warn("invalid stalled_threshold duration, keeping current value", "value", snap.StalledThreshold, "error", err)
+		}
+	}
+
+	// Auto-suspend idle
+	oldAutoSuspendIdle := s.config.AutoSuspendIdle
+	s.config.AutoSuspendIdle = snap.AutoSuspendIdle
+	if oldAutoSuspendIdle != snap.AutoSuspendIdle {
+		applied = append(applied, "auto_suspend_idle")
+	}
+
+	// Idle suspend after
+	if snap.IdleSuspendAfter != "" {
+		if d, err := time.ParseDuration(snap.IdleSuspendAfter); err == nil {
+			if d < MinIdleSuspendAfter {
+				defaultAfter := DefaultServerConfig().IdleSuspendAfter
+				slog.Warn("idle_suspend_after below minimum 5m, using default",
+					"configured", snap.IdleSuspendAfter, "default", defaultAfter)
+				d = defaultAfter
+			}
+			if s.config.IdleSuspendAfter != d {
+				applied = append(applied, "idle_suspend_after")
+			}
+			s.config.IdleSuspendAfter = d
+		} else {
+			slog.Warn("invalid idle_suspend_after duration, keeping current value", "value", snap.IdleSuspendAfter, "error", err)
 		}
 	}
 

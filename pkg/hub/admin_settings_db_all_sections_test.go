@@ -53,6 +53,8 @@ var layer1RoundTripSamples = map[string]string{
 	// lifecycle
 	"server.hub.auto_suspend_stalled":          `true`,
 	"server.hub.stalled_threshold":             `"10m"`,
+	"server.hub.auto_suspend_idle":             `true`,
+	"server.hub.idle_suspend_after":            `"20m"`,
 	"server.hub.soft_delete_retention":         `"720h"`,
 	"server.hub.soft_delete_retain_files":      `true`,
 	"server.hub.start_claim_lease_ttl":         `"60s"`,

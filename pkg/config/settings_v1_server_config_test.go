@@ -667,6 +667,35 @@ func TestConvertV1ServerToGlobalConfig_StalledThresholdInvalidIgnored(t *testing
 	assert.Equal(t, time.Duration(0), gc.Hub.StalledThreshold)
 }
 
+func TestConvertV1ServerToGlobalConfig_IdleSuspendSettings(t *testing.T) {
+	enabled := true
+	v1 := &V1ServerConfig{
+		Hub: &V1ServerHubConfig{
+			AutoSuspendIdle:  &enabled,
+			IdleSuspendAfter: "20m",
+		},
+	}
+	gc := ConvertV1ServerToGlobalConfig(v1)
+	assert.True(t, gc.Hub.AutoSuspendIdle)
+	assert.Equal(t, 20*time.Minute, gc.Hub.IdleSuspendAfter)
+
+	back := ConvertGlobalToV1ServerConfig(gc)
+	require.NotNil(t, back.Hub)
+	require.NotNil(t, back.Hub.AutoSuspendIdle)
+	assert.True(t, *back.Hub.AutoSuspendIdle)
+	assert.Equal(t, "20m0s", back.Hub.IdleSuspendAfter)
+}
+
+func TestConvertV1ServerToGlobalConfig_IdleSuspendAfterInvalidIgnored(t *testing.T) {
+	v1 := &V1ServerConfig{
+		Hub: &V1ServerHubConfig{
+			IdleSuspendAfter: "not-a-duration",
+		},
+	}
+	gc := ConvertV1ServerToGlobalConfig(v1)
+	assert.Equal(t, time.Duration(0), gc.Hub.IdleSuspendAfter)
+}
+
 // --- Federation conversion tests ---
 
 func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {

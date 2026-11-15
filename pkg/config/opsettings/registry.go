@@ -152,9 +152,9 @@ func init() {
 		},
 		{
 			Name:       "lifecycle",
-			KoanfPaths: []string{"server.hub.auto_suspend_stalled", "server.hub.stalled_threshold", "server.hub.soft_delete_retention", "server.hub.soft_delete_retain_files", "server.hub.start_claim_lease_ttl", "server.hub.start_max_duration", "server.hub.start_unconfirmed_hold", "server.hub.start_create_unconfirmed_hold"},
+			KoanfPaths: []string{"server.hub.auto_suspend_stalled", "server.hub.stalled_threshold", "server.hub.auto_suspend_idle", "server.hub.idle_suspend_after", "server.hub.soft_delete_retention", "server.hub.soft_delete_retain_files", "server.hub.start_claim_lease_ttl", "server.hub.start_max_duration", "server.hub.start_unconfirmed_hold", "server.hub.start_create_unconfirmed_hold"},
 			New:        func() any { return &LifecycleSettings{} },
-			Durations:  []string{"server.hub.stalled_threshold", "server.hub.soft_delete_retention", "server.hub.start_claim_lease_ttl", "server.hub.start_max_duration", "server.hub.start_unconfirmed_hold", "server.hub.start_create_unconfirmed_hold"},
+			Durations:  []string{"server.hub.stalled_threshold", "server.hub.idle_suspend_after", "server.hub.soft_delete_retention", "server.hub.start_claim_lease_ttl", "server.hub.start_max_duration", "server.hub.start_unconfirmed_hold", "server.hub.start_create_unconfirmed_hold"},
 		},
 		{
 			// maintenance is durable via DB but has no settings.yaml representation.
@@ -525,6 +525,8 @@ func compileSchemas() {
 			"properties": map[string]interface{}{
 				"auto_suspend_stalled":          getSchemaProperty(root, "server", "hub", "auto_suspend_stalled"),
 				"stalled_threshold":             getSchemaProperty(root, "server", "hub", "stalled_threshold"),
+				"auto_suspend_idle":             getSchemaProperty(root, "server", "hub", "auto_suspend_idle"),
+				"idle_suspend_after":            getSchemaProperty(root, "server", "hub", "idle_suspend_after"),
 				"soft_delete_retention":         getSchemaProperty(root, "server", "hub", "soft_delete_retention"),
 				"soft_delete_retain_files":      getSchemaProperty(root, "server", "hub", "soft_delete_retain_files"),
 				"start_claim_lease_ttl":         getSchemaProperty(root, "server", "hub", "start_claim_lease_ttl"),

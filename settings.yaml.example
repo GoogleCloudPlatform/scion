@@ -138,6 +138,8 @@ server:
     # Layer 1 — Access (section: access)
     admin_emails: []                   # Super-admin email addresses
     # auto_suspend_stalled: true       # Layer 1 (section: lifecycle)
+    # auto_suspend_idle: false         # Layer 1 (section: lifecycle)
+    # idle_suspend_after: "15m"        # Layer 1 (section: lifecycle; minimum 5m)
     # soft_delete_retention: "72h"     # Layer 1 (section: lifecycle)
     # soft_delete_retain_files: false  # Layer 1 (section: lifecycle)
     # public_url: ""                   # Layer 1 (section: endpoints)

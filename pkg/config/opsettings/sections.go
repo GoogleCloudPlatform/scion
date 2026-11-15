@@ -38,6 +38,8 @@ type AccessSettings struct {
 type LifecycleSettings struct {
 	AutoSuspendStalled         *bool  `json:"auto_suspend_stalled,omitempty"`
 	StalledThreshold           string `json:"stalled_threshold,omitempty"`
+	AutoSuspendIdle            *bool  `json:"auto_suspend_idle,omitempty"`
+	IdleSuspendAfter           string `json:"idle_suspend_after,omitempty"`
 	SoftDeleteRetention        string `json:"soft_delete_retention,omitempty"`
 	SoftDeleteRetainFiles      *bool  `json:"soft_delete_retain_files,omitempty"`
 	StartClaimLeaseTTL         string `json:"start_claim_lease_ttl,omitempty"`

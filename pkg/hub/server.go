@@ -326,6 +326,14 @@ type ServerConfig struct {
 	// AutoSuspendStalled controls whether stalled agents are automatically
 	// suspended (container stopped, phase set to "suspended"). Default: false.
 	AutoSuspendStalled bool
+	// AutoSuspendIdle controls whether running agents holding a
+	// suspend-eligible activity (idle, completed, harness_error) are
+	// automatically suspended after IdleSuspendAfter. Default: false.
+	AutoSuspendIdle bool
+	// IdleSuspendAfter is how long an agent must hold a suspend-eligible
+	// activity before idle auto-suspend applies (default: 15 minutes,
+	// minimum: 5 minutes; lower values use the default).
+	IdleSuspendAfter time.Duration
 	// SoftDeleteRetention is how long soft-deleted agents are retained before purging.
 	// Zero means soft-delete is disabled (hard-delete immediately).
 	SoftDeleteRetention time.Duration
@@ -741,11 +749,34 @@ func DefaultServerConfig() ServerConfig {
 		},
 		CORSMaxAge:             3600,
 		StalledThreshold:       5 * time.Minute,
+		IdleSuspendAfter:       DefaultIdleSuspendAfter,
 		BrokerAuthConfig:       DefaultBrokerAuthConfig(),
 		LaunchTimeout:          5 * time.Minute,
 		LaunchKeepaliveSeconds: 15,
 		MissingAgentGrace:      DefaultMissingAgentGrace,
 	}
+}
+
+const (
+	// DefaultIdleSuspendAfter is the default grace period an agent must hold
+	// a suspend-eligible activity before idle auto-suspend applies.
+	DefaultIdleSuspendAfter = 15 * time.Minute
+	// MinIdleSuspendAfter is the minimum allowed idle_suspend_after duration.
+	// Lower values fall back to DefaultIdleSuspendAfter with a warning.
+	MinIdleSuspendAfter = 5 * time.Minute
+)
+
+// idleSuspendSettings returns the current AutoSuspendIdle flag and
+// IdleSuspendAfter duration under s.mu.RLock().
+func (s *Server) idleSuspendSettings() (bool, time.Duration) {
+	s.mu.RLock()
+	enabled := s.config.AutoSuspendIdle
+	after := s.config.IdleSuspendAfter
+	s.mu.RUnlock()
+	if after < MinIdleSuspendAfter {
+		after = DefaultIdleSuspendAfter
+	}
+	return enabled, after
 }
 
 // brokerQuotasEnforced reports whether the per-broker agent quota cap
@@ -3042,6 +3073,13 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 				"configured", cfg.StalledThreshold, "default", defaults.StalledThreshold)
 		}
 		cfg.StalledThreshold = defaults.StalledThreshold
+	}
+	if cfg.IdleSuspendAfter == 0 || cfg.IdleSuspendAfter < MinIdleSuspendAfter {
+		if cfg.IdleSuspendAfter != 0 {
+			slog.Warn("idle_suspend_after below minimum 5m, using default",
+				"configured", cfg.IdleSuspendAfter, "default", defaults.IdleSuspendAfter)
+		}
+		cfg.IdleSuspendAfter = defaults.IdleSuspendAfter
 	}
 	const minLaunchTimeout = 30 * time.Second
 	if cfg.LaunchTimeout < minLaunchTimeout {
