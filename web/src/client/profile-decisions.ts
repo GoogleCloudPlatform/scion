@@ -1,0 +1,471 @@
+/**
+ * Copyright 2026 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/**
+ * Profile Decisions API client & URL state helpers (ptone/scion#7996, Design §4.3 R1–R7, D10, §5.1, §7).
+ *
+ * Mirrors `pkg/hub/choices_profile.go` (`GET /api/v1/users/me/decisions`).
+ */
+
+import { apiFetch, parseApiError } from './api.js';
+import {
+  DecisionsApiError,
+  MAX_DECISIONS_CONVERSATION_BYTES,
+  isValidDecisionCalendarDate,
+  normalizeDecisionsSearchQuery,
+  parseDecisionsUrlState,
+  type DecisionsUrlState,
+  type MadeDecisionsFilter,
+  type MadeDecisionsProvenanceFilter,
+  type ProjectDecisionActorView,
+  type ProjectDecisionConversationView,
+  type ProjectDecisionCounts,
+  type ProjectDecisionLogEntryView,
+  type ProjectDecisionProjectRef,
+  type ProjectDecisionPromptView,
+  type SharedDecisionsFilter,
+} from './project-decisions.js';
+
+/** Maximum UTF-8 byte length accepted for `project` by `pkg/hub/choices_profile.go`. */
+export const MAX_PROFILE_DECISIONS_PROJECT_BYTES = 128;
+
+/** Window event dispatched whenever the caller's unfiltered `counts.waitingOnYou` changes. */
+export const PROFILE_DECISIONS_COUNT_CHANGED_EVENT = 'scion:profile-decisions-count-changed';
+
+/** Sort order for `/profile/decisions` (`project` groups by project, `recent` is chronological). */
+export type ProfileDecisionsSort = 'project' | 'recent';
+
+// Matches Go strings.TrimSpace (which trims U+0085 NEL) plus JS whitespace/U+FEFF BOM at string edges.
+const EDGE_SPACE_RE = /^[\s\u0085]+|[\s\u0085]+$/g;
+// eslint-disable-next-line no-control-regex -- reject C0/DEL/C1 control characters in URL parameters
+const CONTROL_CHAR_RE = /[\u0000-\u001f\u007f-\u009f]/;
+
+/** Actor facet option on profile responses, carrying an optional `projectId` when available. */
+export interface ProfileDecisionActorView extends ProjectDecisionActorView {
+  projectId?: string;
+}
+
+/** One project's overview group on `GET /api/v1/users/me/decisions?tab=made&sort=project` (R5). */
+export interface ProfileDecisionMadeGroupView {
+  project: ProjectDecisionProjectRef;
+  entries: ProjectDecisionLogEntryView[];
+  more: boolean;
+}
+
+/** Response of `GET /api/v1/users/me/decisions?tab=pending`. */
+export interface ProfilePendingDecisionsResponse {
+  counts: ProjectDecisionCounts;
+  filteredCounts?: ProjectDecisionCounts;
+  prompts: ProjectDecisionPromptView[];
+  agents: ProfileDecisionActorView[];
+  answerers: ProjectDecisionActorView[];
+  conversations?: ProjectDecisionConversationView[];
+  projects: ProjectDecisionProjectRef[];
+  truncatedProjects: boolean;
+  nextCursor?: string;
+}
+
+/** Response of `GET /api/v1/users/me/decisions?tab=made&sort=recent`. */
+export interface ProfileMadeRecentDecisionsResponse {
+  sort: 'recent';
+  counts: ProjectDecisionCounts;
+  entries: ProjectDecisionLogEntryView[];
+  agents: ProfileDecisionActorView[];
+  answerers: ProjectDecisionActorView[];
+  conversations?: ProjectDecisionConversationView[];
+  projects: ProjectDecisionProjectRef[];
+  truncatedProjects: boolean;
+  nextCursor?: string;
+}
+
+/** Response of `GET /api/v1/users/me/decisions?tab=made&sort=project` (overview, no cursor). */
+export interface ProfileMadeByProjectDecisionsResponse {
+  sort: 'project';
+  counts: ProjectDecisionCounts;
+  groups: ProfileDecisionMadeGroupView[];
+  agents: ProfileDecisionActorView[];
+  answerers: ProjectDecisionActorView[];
+  conversations?: ProjectDecisionConversationView[];
+  projects: ProjectDecisionProjectRef[];
+  truncatedProjects: boolean;
+}
+
+export type ProfileMadeDecisionsResponse =
+  | ProfileMadeRecentDecisionsResponse
+  | ProfileMadeByProjectDecisionsResponse;
+
+/** Shared filter criteria accepted on both profile tabs. */
+export interface ProfileSharedDecisionsFilter extends SharedDecisionsFilter {
+  project?: string;
+}
+
+/** Filter criteria accepted on `tab=made` on the profile page. */
+export interface ProfileMadeDecisionsFilter extends MadeDecisionsFilter {
+  project?: string;
+}
+
+export interface ProfileDecisionsQueryOptions {
+  tab?: 'pending' | 'made' | undefined;
+  sort?: ProfileDecisionsSort | undefined;
+  cursor?: string | undefined;
+  limit?: number | undefined;
+  filter?: ProfileMadeDecisionsFilter | undefined;
+}
+
+/** Validated URL filter/tab/sort state for `/profile/decisions` (D10, R6). */
+export interface ProfileDecisionsUrlState extends DecisionsUrlState {
+  sort: ProfileDecisionsSort;
+  project: string;
+}
+
+/** Probe result from `GET /api/v1/users/me/decisions?limit=0` for `<scion-profile-nav>` (§7). */
+export interface ProfileDecisionProbeResult {
+  available: boolean;
+  waitingOnYou: number;
+}
+
+/** Returns the natural default sort for a tab on `/profile/decisions` (R6). */
+export function defaultProfileDecisionsSort(tab: 'pending' | 'made'): ProfileDecisionsSort {
+  return tab === 'made' ? 'recent' : 'project';
+}
+
+function trimEdgeSpace(raw: string | undefined | null): string {
+  return (raw ?? '').replace(EDGE_SPACE_RE, '');
+}
+
+function cleanFilterValue(raw: string | undefined | null): string {
+  const trimmed = trimEdgeSpace(raw);
+  if (!trimmed || trimmed === 'all') return '';
+  return trimmed;
+}
+
+function cleanConversationValue(raw: string | undefined | null): string {
+  const trimmed = cleanFilterValue(raw);
+  if (!trimmed || CONTROL_CHAR_RE.test(trimmed)) return '';
+  if (new TextEncoder().encode(trimmed).length > MAX_DECISIONS_CONVERSATION_BYTES) {
+    return '';
+  }
+  return trimmed;
+}
+
+export function cleanProfileProjectValue(raw: string | undefined | null): string {
+  const trimmed = cleanFilterValue(raw);
+  if (!trimmed || CONTROL_CHAR_RE.test(trimmed)) return '';
+  if (new TextEncoder().encode(trimmed).length > MAX_PROFILE_DECISIONS_PROJECT_BYTES) {
+    return '';
+  }
+  return trimmed;
+}
+
+function cleanUserValue(raw: string | undefined | null): string {
+  const trimmed = cleanFilterValue(raw);
+  if (!trimmed || trimmed.length > 256 || CONTROL_CHAR_RE.test(trimmed)) return '';
+  return trimmed;
+}
+
+function cleanProvenanceValue(raw: string | undefined | null): MadeDecisionsProvenanceFilter {
+  const trimmed = cleanFilterValue(raw);
+  switch (trimmed) {
+    case 'direct':
+    case 'interpreted':
+    case 'confirmed':
+    case 'overridden':
+      return trimmed;
+    case 'agent_interpreted':
+      return 'interpreted';
+    default:
+      return '';
+  }
+}
+
+function cleanSortValue(
+  raw: string | undefined | null,
+  tab: 'pending' | 'made'
+): ProfileDecisionsSort {
+  const trimmed = trimEdgeSpace(raw);
+  if (trimmed === 'project' || trimmed === 'recent') {
+    return trimmed;
+  }
+  return defaultProfileDecisionsSort(tab);
+}
+
+/**
+ * Parses URL query parameters on load for `/profile/decisions`, silently
+ * dropping invalid values and filling per-tab default `sort` (D10, R6).
+ */
+export function parseProfileDecisionsUrlState(
+  search: string | URLSearchParams
+): ProfileDecisionsUrlState {
+  const params = typeof search === 'string' ? new URLSearchParams(search) : search;
+  const base = parseDecisionsUrlState(params);
+  const sort = cleanSortValue(params.get('sort'), base.tab);
+  const project = cleanProfileProjectValue(params.get('project'));
+
+  return {
+    ...base,
+    sort,
+    project,
+  };
+}
+
+/**
+ * Serializes current profile Decisions tab, sort, and filter state to a query
+ * string (without leading `?`) suitable for `replaceSearch()` (D10, R6).
+ * Both `tab` and `sort` (including defaults) are always included in the URL.
+ */
+export function buildProfileDecisionsUrlSearch(state: Partial<ProfileDecisionsUrlState>): string {
+  const params = new URLSearchParams();
+  const tab: 'pending' | 'made' = state.tab === 'made' ? 'made' : 'pending';
+  const sort = cleanSortValue(state.sort, tab);
+
+  params.set('tab', tab);
+  params.set('sort', sort);
+
+  const project = cleanProfileProjectValue(state.project);
+  if (project) params.set('project', project);
+
+  const q = normalizeDecisionsSearchQuery(state.q);
+  if (q) params.set('q', q);
+
+  const conversation = cleanConversationValue(state.conversation);
+  if (conversation) params.set('conversation', conversation);
+
+  const agent = cleanFilterValue(state.agent);
+  if (agent) params.set('agent', agent);
+
+  if (tab === 'made') {
+    const user = cleanUserValue(state.user);
+    if (user) params.set('user', user);
+
+    const provenance = cleanProvenanceValue(state.provenance);
+    if (provenance) params.set('provenance', provenance);
+
+    const from = cleanFilterValue(state.from);
+    if (from && isValidDecisionCalendarDate(from)) params.set('from', from);
+
+    const to = cleanFilterValue(state.to);
+    if (to && isValidDecisionCalendarDate(to)) params.set('to', to);
+  }
+
+  return params.toString();
+}
+
+/**
+ * Builds the query string (starting with `?`) for `GET /api/v1/users/me/decisions`.
+ * Omits `cursor` when `tab=made` and `sort=project` (overview mode forbids cursors, R5).
+ */
+export function buildProfileDecisionsQuery(options: ProfileDecisionsQueryOptions = {}): string {
+  const params = new URLSearchParams();
+  const tab = options.tab ?? 'pending';
+  const sort = cleanSortValue(options.sort, tab);
+  params.set('tab', tab);
+  params.set('sort', sort);
+
+  if (options.limit !== undefined) {
+    params.set('limit', String(options.limit));
+  }
+  const cursor = (options.cursor ?? '').trim();
+  if (cursor && !(tab === 'made' && sort === 'project')) {
+    params.set('cursor', cursor);
+  }
+
+  if (options.filter) {
+    const q = normalizeDecisionsSearchQuery(options.filter.q);
+    if (q) params.set('q', q);
+
+    const conversation = cleanConversationValue(options.filter.conversation);
+    if (conversation) params.set('conversation', conversation);
+
+    const agent = cleanFilterValue(options.filter.agent);
+    if (agent) params.set('agent', agent);
+
+    const project = cleanProfileProjectValue(options.filter.project);
+    if (project) params.set('project', project);
+
+    if (tab === 'made') {
+      const user = cleanFilterValue(options.filter.user);
+      if (user) params.set('user', user);
+
+      const provenance = cleanFilterValue(options.filter.provenance);
+      if (provenance) params.set('provenance', provenance);
+
+      const from = cleanFilterValue(options.filter.from);
+      if (from) params.set('from', from);
+
+      const to = cleanFilterValue(options.filter.to);
+      if (to) params.set('to', to);
+    }
+  }
+
+  return `?${params.toString()}`;
+}
+
+function profileDecisionsUrl(options: ProfileDecisionsQueryOptions): string {
+  return `/api/v1/users/me/decisions${buildProfileDecisionsQuery(options)}`;
+}
+
+async function throwDecisionsApiError(res: Response): Promise<never> {
+  const info = await parseApiError(res, `HTTP ${res.status}`);
+  throw new DecisionsApiError(info.message, res.status, info.code);
+}
+
+/** Fetches `GET /api/v1/users/me/decisions?tab=pending&sort=...`. */
+export async function fetchProfilePendingDecisions(
+  options: {
+    sort?: ProfileDecisionsSort | undefined;
+    cursor?: string | undefined;
+    limit?: number | undefined;
+    filter?: ProfileSharedDecisionsFilter | undefined;
+    signal?: AbortSignal | undefined;
+  } = {}
+): Promise<ProfilePendingDecisionsResponse> {
+  const url = profileDecisionsUrl({
+    tab: 'pending',
+    sort: options.sort ?? 'project',
+    cursor: options.cursor,
+    limit: options.limit,
+    filter: options.filter,
+  });
+  const res = await apiFetch(url, options.signal ? { signal: options.signal } : undefined);
+  if (!res.ok) {
+    return throwDecisionsApiError(res);
+  }
+  const data = (await res.json()) as Partial<ProfilePendingDecisionsResponse> | null;
+  return {
+    counts: {
+      waitingOnYou: data?.counts?.waitingOnYou ?? 0,
+      waitingOnOthers: data?.counts?.waitingOnOthers ?? 0,
+    },
+    ...(data?.filteredCounts
+      ? {
+          filteredCounts: {
+            waitingOnYou: data.filteredCounts.waitingOnYou ?? 0,
+            waitingOnOthers: data.filteredCounts.waitingOnOthers ?? 0,
+          },
+        }
+      : {}),
+    prompts: Array.isArray(data?.prompts) ? data.prompts : [],
+    agents: Array.isArray(data?.agents) ? data.agents : [],
+    answerers: Array.isArray(data?.answerers) ? data.answerers : [],
+    ...(Array.isArray(data?.conversations) ? { conversations: data.conversations } : {}),
+    projects: Array.isArray(data?.projects) ? data.projects : [],
+    truncatedProjects: Boolean(data?.truncatedProjects),
+    ...(data?.nextCursor ? { nextCursor: data.nextCursor } : {}),
+  };
+}
+
+/** Fetches `GET /api/v1/users/me/decisions?tab=made&sort=...` (`project` overview or `recent` paged). */
+export async function fetchProfileMadeDecisions(
+  filter: ProfileMadeDecisionsFilter = {},
+  options: {
+    sort?: ProfileDecisionsSort | undefined;
+    cursor?: string | undefined;
+    limit?: number | undefined;
+    signal?: AbortSignal | undefined;
+  } = {}
+): Promise<ProfileMadeDecisionsResponse> {
+  const sort: ProfileDecisionsSort = options.sort ?? 'recent';
+  const url = profileDecisionsUrl({
+    tab: 'made',
+    sort,
+    cursor: options.cursor,
+    limit: options.limit,
+    filter,
+  });
+  const res = await apiFetch(url, options.signal ? { signal: options.signal } : undefined);
+  if (!res.ok) {
+    return throwDecisionsApiError(res);
+  }
+  if (sort === 'project') {
+    const data = (await res.json()) as Partial<ProfileMadeByProjectDecisionsResponse> | null;
+    const rawGroups = Array.isArray(data?.groups) ? data.groups : [];
+    return {
+      sort: 'project',
+      counts: {
+        waitingOnYou: data?.counts?.waitingOnYou ?? 0,
+        waitingOnOthers: data?.counts?.waitingOnOthers ?? 0,
+      },
+      groups: rawGroups.map((g) => ({
+        project: g?.project ?? { id: '', name: '', slug: '' },
+        entries: Array.isArray(g?.entries) ? g.entries : [],
+        more: Boolean(g?.more),
+      })),
+      agents: Array.isArray(data?.agents) ? data.agents : [],
+      answerers: Array.isArray(data?.answerers) ? data.answerers : [],
+      ...(Array.isArray(data?.conversations) ? { conversations: data.conversations } : {}),
+      projects: Array.isArray(data?.projects) ? data.projects : [],
+      truncatedProjects: Boolean(data?.truncatedProjects),
+    };
+  }
+
+  const data = (await res.json()) as Partial<ProfileMadeRecentDecisionsResponse> | null;
+  return {
+    sort: 'recent',
+    counts: {
+      waitingOnYou: data?.counts?.waitingOnYou ?? 0,
+      waitingOnOthers: data?.counts?.waitingOnOthers ?? 0,
+    },
+    entries: Array.isArray(data?.entries) ? data.entries : [],
+    agents: Array.isArray(data?.agents) ? data.agents : [],
+    answerers: Array.isArray(data?.answerers) ? data.answerers : [],
+    ...(Array.isArray(data?.conversations) ? { conversations: data.conversations } : {}),
+    projects: Array.isArray(data?.projects) ? data.projects : [],
+    truncatedProjects: Boolean(data?.truncatedProjects),
+    ...(data?.nextCursor ? { nextCursor: data.nextCursor } : {}),
+  };
+}
+
+/**
+ * Probes `GET /api/v1/users/me/decisions?limit=0` for the `<scion-profile-nav>`
+ * entry and badge (Design §4.3 R1, §7):
+ * - HTTP 404 -> `{ available: false, waitingOnYou: 0 }` (hide nav item)
+ * - HTTP 2xx -> `{ available: true, waitingOnYou }`
+ * - Transient/auth failure -> `null` (leave nav state unchanged)
+ */
+export async function fetchProfileDecisionProbe(
+  signal?: AbortSignal
+): Promise<ProfileDecisionProbeResult | null> {
+  try {
+    const res = await apiFetch('/api/v1/users/me/decisions?limit=0', {
+      authErrors: 'caller',
+      ...(signal ? { signal } : {}),
+    });
+    if (res.status === 404) {
+      return { available: false, waitingOnYou: 0 };
+    }
+    if (!res.ok) {
+      return null;
+    }
+    const data = (await res.json()) as { counts?: { waitingOnYou?: number } } | null;
+    const waitingOnYou =
+      typeof data?.counts?.waitingOnYou === 'number' && data.counts.waitingOnYou > 0
+        ? data.counts.waitingOnYou
+        : 0;
+    return { available: true, waitingOnYou };
+  } catch {
+    return null;
+  }
+}
+
+/** Dispatches a window event so `<scion-profile-nav>` updates its Decisions badge immediately. */
+export function dispatchProfileDecisionsCountChanged(waitingOnYou: number): void {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(
+    new CustomEvent<{ waitingOnYou: number }>(PROFILE_DECISIONS_COUNT_CHANGED_EVENT, {
+      detail: { waitingOnYou: Math.max(0, Math.trunc(waitingOnYou)) },
+    })
+  );
+}

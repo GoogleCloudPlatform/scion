@@ -1,0 +1,311 @@
+/**
+ * Copyright 2026 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+const apiFetch = vi.hoisted(() =>
+  vi.fn<(path: string, init?: RequestInit & { authErrors?: string }) => Promise<Response>>()
+);
+vi.mock('./api.js', async (orig) => ({
+  ...(await orig<typeof import('./api.js')>()),
+  apiFetch,
+}));
+
+const {
+  PROFILE_DECISIONS_COUNT_CHANGED_EVENT,
+  buildProfileDecisionsQuery,
+  buildProfileDecisionsUrlSearch,
+  defaultProfileDecisionsSort,
+  dispatchProfileDecisionsCountChanged,
+  fetchProfileDecisionProbe,
+  fetchProfileMadeDecisions,
+  fetchProfilePendingDecisions,
+  parseProfileDecisionsUrlState,
+} = await import('./profile-decisions.js');
+
+function res(status: number, body: unknown): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    statusText: status === 404 ? 'Not Found' : 'OK',
+    json: () => Promise.resolve(body),
+    text: () => Promise.resolve(JSON.stringify(body)),
+  } as unknown as Response;
+}
+
+describe('profile-decisions URL state (D10, R6)', () => {
+  it('applies per-tab default sort: project on pending and recent on made', () => {
+    expect(defaultProfileDecisionsSort('pending')).toBe('project');
+    expect(defaultProfileDecisionsSort('made')).toBe('recent');
+
+    expect(parseProfileDecisionsUrlState('')).toEqual({
+      tab: 'pending',
+      sort: 'project',
+      project: '',
+      q: '',
+      conversation: '',
+      agent: '',
+      user: '',
+      provenance: '',
+      from: '',
+      to: '',
+    });
+
+    expect(parseProfileDecisionsUrlState('?tab=made')).toEqual({
+      tab: 'made',
+      sort: 'recent',
+      project: '',
+      q: '',
+      conversation: '',
+      agent: '',
+      user: '',
+      provenance: '',
+      from: '',
+      to: '',
+    });
+  });
+
+  it('round-trips tab, sort, project, shared filters, and made filters in the URL', () => {
+    const pendingSearch = buildProfileDecisionsUrlSearch({
+      tab: 'pending',
+      sort: 'recent',
+      project: 'proj-1',
+      q: 'backfill',
+      conversation: 'topic:release',
+      agent: '11111111-2222-3333-4444-555555555555',
+      user: 'ignored-on-pending',
+    });
+    expect(pendingSearch).toBe(
+      'tab=pending&sort=recent&project=proj-1&q=backfill&conversation=topic%3Arelease&agent=11111111-2222-3333-4444-555555555555'
+    );
+    expect(parseProfileDecisionsUrlState(pendingSearch)).toEqual({
+      tab: 'pending',
+      sort: 'recent',
+      project: 'proj-1',
+      q: 'backfill',
+      conversation: 'topic:release',
+      agent: '11111111-2222-3333-4444-555555555555',
+      user: '',
+      provenance: '',
+      from: '',
+      to: '',
+    });
+
+    const madeSearch = buildProfileDecisionsUrlSearch({
+      tab: 'made',
+      sort: 'project',
+      project: 'proj-2',
+      q: 'font',
+      conversation: 'topic:landing',
+      agent: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      user: 'u-1',
+      provenance: 'confirmed',
+      from: '2026-11-01',
+      to: '2026-11-14',
+    });
+    expect(parseProfileDecisionsUrlState(madeSearch)).toEqual({
+      tab: 'made',
+      sort: 'project',
+      project: 'proj-2',
+      q: 'font',
+      conversation: 'topic:landing',
+      agent: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      user: 'u-1',
+      provenance: 'confirmed',
+      from: '2026-11-01',
+      to: '2026-11-14',
+    });
+  });
+
+  it('always writes tab and sort in the URL including defaults (R6, R-1)', () => {
+    expect(buildProfileDecisionsUrlSearch({ tab: 'pending' })).toBe('tab=pending&sort=project');
+    expect(buildProfileDecisionsUrlSearch({ tab: 'made' })).toBe('tab=made&sort=recent');
+  });
+
+  it('silently drops invalid sort, overlong/control-char project, 1-rune q, non-UUID agent, and inverted dates', () => {
+    const overlongProject = 'p'.repeat(129);
+    const parsed = parseProfileDecisionsUrlState(
+      `?tab=made&sort=bogus&project=${overlongProject}&q=x&agent=not-uuid&from=2026-11-15&to=2026-11-01`
+    );
+    expect(parsed).toEqual({
+      tab: 'made',
+      sort: 'recent',
+      project: '',
+      q: '',
+      conversation: '',
+      agent: '',
+      user: '',
+      provenance: '',
+      from: '',
+      to: '',
+    });
+
+    const ctrlProject = parseProfileDecisionsUrlState('?tab=pending&sort=alpha&project=bad%00id');
+    expect(ctrlProject.sort).toBe('project');
+    expect(ctrlProject.project).toBe('');
+  });
+});
+
+describe('profile-decisions API client (R1, R3, R4, R5, §7)', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+  });
+
+  it('builds profile query strings and omits cursor on made+project overview', () => {
+    expect(buildProfileDecisionsQuery()).toBe('?tab=pending&sort=project');
+    expect(
+      buildProfileDecisionsQuery({
+        tab: 'pending',
+        sort: 'recent',
+        limit: 25,
+        cursor: 'cur-p',
+        filter: { project: 'proj-1', q: 'deploy' },
+      })
+    ).toBe('?tab=pending&sort=recent&limit=25&cursor=cur-p&q=deploy&project=proj-1');
+
+    expect(
+      buildProfileDecisionsQuery({
+        tab: 'made',
+        sort: 'project',
+        cursor: 'should-be-ignored',
+        filter: { project: 'proj-1', provenance: 'direct' },
+      })
+    ).toBe('?tab=made&sort=project&project=proj-1&provenance=direct');
+  });
+
+  it('fetches pending profile decisions including projects, truncatedProjects, and filteredCounts', async () => {
+    apiFetch.mockResolvedValueOnce(
+      res(200, {
+        counts: { waitingOnYou: 4, waitingOnOthers: 2 },
+        filteredCounts: { waitingOnYou: 3, waitingOnOthers: 1 },
+        prompts: [{ promptMessageId: 'm-1' }],
+        agents: [{ id: 'a-1', name: 'release-bot' }],
+        answerers: [],
+        conversations: [{ key: 'topic:rel', label: '#release', projectId: 'proj-1' }],
+        projects: [{ id: 'proj-1', name: 'scion', slug: 'scion' }],
+        truncatedProjects: true,
+        nextCursor: 'next-1',
+      })
+    );
+
+    const out = await fetchProfilePendingDecisions({
+      sort: 'project',
+      filter: { project: 'proj-1' },
+    });
+    expect(apiFetch).toHaveBeenCalledWith(
+      '/api/v1/users/me/decisions?tab=pending&sort=project&project=proj-1',
+      undefined
+    );
+    expect(out.counts).toEqual({ waitingOnYou: 4, waitingOnOthers: 2 });
+    expect(out.filteredCounts).toEqual({ waitingOnYou: 3, waitingOnOthers: 1 });
+    expect(out.projects).toEqual([{ id: 'proj-1', name: 'scion', slug: 'scion' }]);
+    expect(out.truncatedProjects).toBe(true);
+    expect(out.nextCursor).toBe('next-1');
+  });
+
+  it('fetches made decisions in both sort=project (groups) and sort=recent (entries + nextCursor)', async () => {
+    apiFetch.mockResolvedValueOnce(
+      res(200, {
+        counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+        groups: [
+          {
+            project: { id: 'proj-1', name: 'scion', slug: 'scion' },
+            entries: [{ answerId: 'ans-1' }],
+            more: true,
+          },
+        ],
+        agents: [],
+        answerers: [],
+        conversations: [],
+        projects: [{ id: 'proj-1', name: 'scion', slug: 'scion' }],
+        truncatedProjects: false,
+      })
+    );
+
+    const grouped = await fetchProfileMadeDecisions({}, { sort: 'project' });
+    expect(apiFetch).toHaveBeenCalledWith(
+      '/api/v1/users/me/decisions?tab=made&sort=project',
+      undefined
+    );
+    expect(grouped.sort).toBe('project');
+    if (grouped.sort === 'project') {
+      expect(grouped.groups).toHaveLength(1);
+      expect(grouped.groups[0]?.more).toBe(true);
+    }
+
+    apiFetch.mockResolvedValueOnce(
+      res(200, {
+        counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+        entries: [{ answerId: 'ans-1' }],
+        agents: [],
+        answerers: [],
+        conversations: [],
+        projects: [{ id: 'proj-1', name: 'scion', slug: 'scion' }],
+        truncatedProjects: false,
+        nextCursor: 'made-cur-2',
+      })
+    );
+
+    const recent = await fetchProfileMadeDecisions(
+      { project: 'proj-1' },
+      { sort: 'recent', cursor: 'made-cur-1' }
+    );
+    expect(apiFetch).toHaveBeenCalledWith(
+      '/api/v1/users/me/decisions?tab=made&sort=recent&cursor=made-cur-1&project=proj-1',
+      undefined
+    );
+    expect(recent.sort).toBe('recent');
+    if (recent.sort === 'recent') {
+      expect(recent.entries).toHaveLength(1);
+      expect(recent.nextCursor).toBe('made-cur-2');
+    }
+  });
+
+  it('probes GET /api/v1/users/me/decisions?limit=0 with authErrors=caller and distinguishes 200, 404, and transient errors', async () => {
+    apiFetch.mockResolvedValueOnce(res(200, { counts: { waitingOnYou: 4, waitingOnOthers: 5 } }));
+    await expect(fetchProfileDecisionProbe()).resolves.toEqual({
+      available: true,
+      waitingOnYou: 4,
+    });
+    expect(apiFetch).toHaveBeenLastCalledWith('/api/v1/users/me/decisions?limit=0', {
+      authErrors: 'caller',
+    });
+
+    apiFetch.mockResolvedValueOnce(res(404, { error: { code: 'not_found' } }));
+    await expect(fetchProfileDecisionProbe()).resolves.toEqual({
+      available: false,
+      waitingOnYou: 0,
+    });
+
+    apiFetch.mockResolvedValueOnce(res(503, { error: { code: 'unavailable' } }));
+    await expect(fetchProfileDecisionProbe()).resolves.toBeNull();
+  });
+
+  it('dispatches count-changed events for profile nav badge synchronization', () => {
+    const received: number[] = [];
+    const listener = (ev: Event): void => {
+      received.push((ev as CustomEvent<{ waitingOnYou: number }>).detail.waitingOnYou);
+    };
+    window.addEventListener(PROFILE_DECISIONS_COUNT_CHANGED_EVENT, listener);
+    try {
+      dispatchProfileDecisionsCountChanged(3);
+      dispatchProfileDecisionsCountChanged(-2);
+      expect(received).toEqual([3, 0]);
+    } finally {
+      window.removeEventListener(PROFILE_DECISIONS_COUNT_CHANGED_EVENT, listener);
+    }
+  });
+});
