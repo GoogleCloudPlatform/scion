@@ -604,10 +604,15 @@ describe('scion-profile-nav — Decisions entry & badge (ptone/scion#7996)', () 
     expect(decisionsProbeCount).toBe(1);
     expect(decisionsBadge(remountedNav)?.textContent?.trim()).toBe('4');
 
-    // SSE notification-created triggers ONE debounced shared refresh for both nav instances
+    // Generic notification-created events do NOT re-probe ?limit=0
     liveWaiting = 6;
     const { stateManager } = await import('../../client/state.js');
     stateManager.dispatchEvent(new CustomEvent('notification-created', { detail: {} }));
+    await new Promise((r) => setTimeout(r, 140));
+    expect(decisionsProbeCount).toBe(1);
+
+    // SSE choice-updated triggers ONE debounced shared refresh for both nav instances
+    stateManager.dispatchEvent(new CustomEvent('choice-updated', { detail: {} }));
     await new Promise((r) => setTimeout(r, 140));
     await desktopNav.updateComplete;
     await remountedNav.updateComplete;

@@ -37,6 +37,7 @@ const {
   getCachedProfileDecisionProbe,
   parseProfileDecisionsUrlState,
   resetProfileDecisionProbeCacheForTests,
+  scheduleSharedProfileDecisionProbeRefresh,
 } = await import('./profile-decisions.js');
 
 function res(status: number, body: unknown): Response {
@@ -350,6 +351,54 @@ describe('profile-decisions API client (R1, R3, R4, R5, §7)', () => {
         { available: true, waitingOnYou: 0 },
         { available: false, waitingOnYou: 0 },
       ]);
+    } finally {
+      window.removeEventListener(PROFILE_DECISIONS_COUNT_CHANGED_EVENT, listener);
+    }
+  });
+
+  it('prevents a slow forced ?limit=0 probe from overwriting a fresher page-derived count', async () => {
+    let resolveSlowProbe!: (r: Response) => void;
+    apiFetch
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveSlowProbe = resolve;
+          })
+      )
+      .mockResolvedValueOnce(
+        res(200, {
+          counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+          prompts: [],
+          agents: [],
+          answerers: [],
+          conversations: [],
+          projects: [],
+          truncatedProjects: false,
+        })
+      );
+
+    const received: Array<{ available: boolean; waitingOnYou: number }> = [];
+    const listener = (ev: Event): void => {
+      received.push((ev as CustomEvent<{ available: boolean; waitingOnYou: number }>).detail);
+    };
+    window.addEventListener(PROFILE_DECISIONS_COUNT_CHANGED_EVENT, listener);
+    try {
+      scheduleSharedProfileDecisionProbeRefresh();
+      await new Promise((r) => setTimeout(r, 120));
+      expect(apiFetch).toHaveBeenCalledTimes(1);
+
+      // User navigates to /profile/decisions while the forced probe is still in flight;
+      // the page fetch resolves fresher count = 1 and broadcasts it.
+      const pageRes = await fetchProfilePendingDecisions({ sort: 'project' });
+      dispatchProfileDecisionsCountChanged(pageRes.counts.waitingOnYou);
+      expect(getCachedProfileDecisionProbe()).toEqual({ available: true, waitingOnYou: 1 });
+
+      // Now the older ?limit=0 probe settles with stale count = 5 -> must NOT overwrite or broadcast!
+      resolveSlowProbe(res(200, { counts: { waitingOnYou: 5, waitingOnOthers: 0 } }));
+      await new Promise((r) => setTimeout(r, 20));
+
+      expect(getCachedProfileDecisionProbe()).toEqual({ available: true, waitingOnYou: 1 });
+      expect(received).toEqual([{ available: true, waitingOnYou: 1 }]);
     } finally {
       window.removeEventListener(PROFILE_DECISIONS_COUNT_CHANGED_EVENT, listener);
     }

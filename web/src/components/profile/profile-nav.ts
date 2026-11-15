@@ -172,12 +172,6 @@ export class ScionProfileNav extends LitElement {
     scheduleSharedProfileDecisionProbeRefresh();
   };
 
-  private boundOnNotificationCreated = (): void => {
-    if (!this.decisionsEnabled || this.decisionsProbeHidden) return;
-    if (this.isActive('/profile/decisions')) return;
-    scheduleSharedProfileDecisionProbeRefresh();
-  };
-
   private boundOnChatMessageReceived = (e: Event): void => {
     if (!this.decisionsEnabled || this.decisionsProbeHidden) return;
     if (this.isActive('/profile/decisions')) return;
@@ -643,7 +637,6 @@ export class ScionProfileNav extends LitElement {
       this.boundOnProfileDecisionsCountChanged
     );
     stateManager.addEventListener('choice-updated', this.boundOnChoiceUpdated);
-    stateManager.addEventListener('notification-created', this.boundOnNotificationCreated);
     stateManager.addEventListener('chat-message-received', this.boundOnChatMessageReceived);
   }
 
@@ -656,7 +649,6 @@ export class ScionProfileNav extends LitElement {
       this.boundOnProfileDecisionsCountChanged
     );
     stateManager.removeEventListener('choice-updated', this.boundOnChoiceUpdated);
-    stateManager.removeEventListener('notification-created', this.boundOnNotificationCreated);
     stateManager.removeEventListener('chat-message-received', this.boundOnChatMessageReceived);
   }
 

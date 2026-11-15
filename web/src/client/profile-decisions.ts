@@ -322,10 +322,16 @@ async function throwDecisionsApiError(res: Response): Promise<never> {
   throw new DecisionsApiError(info.message, res.status, info.code);
 }
 
-/** Module-level shared probe cache + in-flight deduplication so multiple `<scion-profile-nav>` instances and route changes reuse a single `?limit=0` probe. */
+/** Module-level shared probe cache + monotonic sequence number + in-flight deduplication so multiple `<scion-profile-nav>` instances and route changes reuse a single `?limit=0` probe without stale overwrites. */
 let cachedProfileDecisionProbe: ProfileDecisionProbeResult | null = null;
+let profileDecisionProbeWriteSeq = 0;
 let inFlightProfileDecisionProbe: Promise<ProfileDecisionProbeResult | null> | null = null;
 let sharedProbeRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+function commitProfileDecisionProbe(next: ProfileDecisionProbeResult): void {
+  ++profileDecisionProbeWriteSeq;
+  cachedProfileDecisionProbe = next;
+}
 
 function recordPageFetchForProbe<T extends { counts: ProjectDecisionCounts }>(
   work: () => Promise<T>
@@ -345,7 +351,7 @@ function recordPageFetchForProbe<T extends { counts: ProjectDecisionCounts }>(
         available: true,
         waitingOnYou: Math.max(0, Math.trunc(result.counts.waitingOnYou)),
       };
-      cachedProfileDecisionProbe = probeResult;
+      commitProfileDecisionProbe(probeResult);
       if (ownedProbePromise && inFlightProfileDecisionProbe === ownedProbePromise) {
         inFlightProfileDecisionProbe = null;
       }
@@ -358,7 +364,7 @@ function recordPageFetchForProbe<T extends { counts: ProjectDecisionCounts }>(
       }
       if (err instanceof DecisionsApiError && err.status === 404) {
         const notFoundProbe: ProfileDecisionProbeResult = { available: false, waitingOnYou: 0 };
-        cachedProfileDecisionProbe = notFoundProbe;
+        commitProfileDecisionProbe(notFoundProbe);
         resolvePageProbe?.(notFoundProbe);
       } else {
         resolvePageProbe?.(null);
@@ -486,6 +492,7 @@ export function getCachedProfileDecisionProbe(): ProfileDecisionProbeResult | nu
 /** Resets the module-level probe cache and any pending refresh timer (for unit tests). */
 export function resetProfileDecisionProbeCacheForTests(): void {
   cachedProfileDecisionProbe = null;
+  profileDecisionProbeWriteSeq = 0;
   inFlightProfileDecisionProbe = null;
   if (sharedProbeRefreshTimer !== null) {
     clearTimeout(sharedProbeRefreshTimer);
@@ -496,6 +503,42 @@ export function resetProfileDecisionProbeCacheForTests(): void {
 export interface FetchProfileDecisionProbeOptions {
   signal?: AbortSignal | undefined;
   forceRefresh?: boolean | undefined;
+}
+
+async function executeProfileDecisionProbe(
+  signal?: AbortSignal
+): Promise<{ result: ProfileDecisionProbeResult | null; superseded: boolean }> {
+  const startSeq = profileDecisionProbeWriteSeq;
+  try {
+    const res = await apiFetch('/api/v1/users/me/decisions?limit=0', {
+      authErrors: 'caller',
+      ...(signal ? { signal } : {}),
+    });
+    if (res.status === 404) {
+      if (profileDecisionProbeWriteSeq !== startSeq) {
+        return { result: cachedProfileDecisionProbe, superseded: true };
+      }
+      const notFound: ProfileDecisionProbeResult = { available: false, waitingOnYou: 0 };
+      commitProfileDecisionProbe(notFound);
+      return { result: notFound, superseded: false };
+    }
+    if (!res.ok) {
+      return { result: null, superseded: false };
+    }
+    const data = (await res.json()) as { counts?: { waitingOnYou?: number } } | null;
+    if (profileDecisionProbeWriteSeq !== startSeq) {
+      return { result: cachedProfileDecisionProbe, superseded: true };
+    }
+    const waitingOnYou =
+      typeof data?.counts?.waitingOnYou === 'number' && data.counts.waitingOnYou > 0
+        ? data.counts.waitingOnYou
+        : 0;
+    const resolved: ProfileDecisionProbeResult = { available: true, waitingOnYou };
+    commitProfileDecisionProbe(resolved);
+    return { result: resolved, superseded: false };
+  } catch {
+    return { result: null, superseded: false };
+  }
 }
 
 /**
@@ -521,49 +564,26 @@ export async function fetchProfileDecisionProbe(
     return inFlightProfileDecisionProbe;
   }
 
-  const runProbe = async (): Promise<ProfileDecisionProbeResult | null> => {
-    try {
-      const res = await apiFetch('/api/v1/users/me/decisions?limit=0', {
-        authErrors: 'caller',
-        ...(opts.signal ? { signal: opts.signal } : {}),
-      });
-      if (res.status === 404) {
-        const notFound: ProfileDecisionProbeResult = { available: false, waitingOnYou: 0 };
-        cachedProfileDecisionProbe = notFound;
-        return notFound;
-      }
-      if (!res.ok) {
-        return null;
-      }
-      const data = (await res.json()) as { counts?: { waitingOnYou?: number } } | null;
-      const waitingOnYou =
-        typeof data?.counts?.waitingOnYou === 'number' && data.counts.waitingOnYou > 0
-          ? data.counts.waitingOnYou
-          : 0;
-      const resolved: ProfileDecisionProbeResult = { available: true, waitingOnYou };
-      cachedProfileDecisionProbe = resolved;
-      return resolved;
-    } catch {
-      return null;
-    }
-  };
-
   if (opts.signal) {
-    return runProbe();
+    const out = await executeProfileDecisionProbe(opts.signal);
+    return out.result;
   }
 
-  const shared = runProbe().finally(() => {
-    if (inFlightProfileDecisionProbe === shared) {
-      inFlightProfileDecisionProbe = null;
-    }
-  });
+  const shared = executeProfileDecisionProbe()
+    .then((out) => out.result)
+    .finally(() => {
+      if (inFlightProfileDecisionProbe === shared) {
+        inFlightProfileDecisionProbe = null;
+      }
+    });
   inFlightProfileDecisionProbe = shared;
   return shared;
 }
 
 /**
  * Debounces a single shared `?limit=0` refresh across all mounted `<scion-profile-nav>`
- * instances when an SSE decision/notification event arrives outside `/profile/decisions`.
+ * instances when an SSE decision event arrives outside `/profile/decisions`.
+ * Ignores late probe responses that started before a fresher page-derived write.
  */
 export function scheduleSharedProfileDecisionProbeRefresh(): void {
   if (sharedProbeRefreshTimer !== null) {
@@ -571,13 +591,17 @@ export function scheduleSharedProfileDecisionProbeRefresh(): void {
   }
   sharedProbeRefreshTimer = setTimeout(() => {
     sharedProbeRefreshTimer = null;
-    void fetchProfileDecisionProbe({ forceRefresh: true }).then((probe) => {
-      if (!probe) return;
-      if (!probe.available) {
-        dispatchProfileDecisionsNotFound();
-        return;
-      }
-      dispatchProfileDecisionsCountChanged(probe.waitingOnYou);
+    void executeProfileDecisionProbe().then(({ result, superseded }) => {
+      if (!result || superseded) return;
+      if (typeof window === 'undefined') return;
+      window.dispatchEvent(
+        new CustomEvent<{ available: boolean; waitingOnYou: number }>(
+          PROFILE_DECISIONS_COUNT_CHANGED_EVENT,
+          {
+            detail: result,
+          }
+        )
+      );
     });
   }, 100);
 }
@@ -585,7 +609,7 @@ export function scheduleSharedProfileDecisionProbeRefresh(): void {
 /** Dispatches a window event so `<scion-profile-nav>` updates its Decisions badge immediately. */
 export function dispatchProfileDecisionsCountChanged(waitingOnYou: number): void {
   const normalized = Math.max(0, Math.trunc(waitingOnYou));
-  cachedProfileDecisionProbe = { available: true, waitingOnYou: normalized };
+  commitProfileDecisionProbe({ available: true, waitingOnYou: normalized });
   if (typeof window === 'undefined') return;
   window.dispatchEvent(
     new CustomEvent<{ available: boolean; waitingOnYou: number }>(
@@ -599,7 +623,7 @@ export function dispatchProfileDecisionsCountChanged(waitingOnYou: number): void
 
 /** Marks `/api/v1/users/me/decisions` as unsupported (404) and notifies `<scion-profile-nav>`. */
 export function dispatchProfileDecisionsNotFound(): void {
-  cachedProfileDecisionProbe = { available: false, waitingOnYou: 0 };
+  commitProfileDecisionProbe({ available: false, waitingOnYou: 0 });
   if (typeof window === 'undefined') return;
   window.dispatchEvent(
     new CustomEvent<{ available: boolean; waitingOnYou: number }>(
