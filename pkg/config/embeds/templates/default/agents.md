@@ -28,7 +28,7 @@ If the only thing you are waiting for is a scheduled message hours away, idle is
 
 ### Completing your task
 
-`task_completed` means the task you were created for is done. Agents with an ongoing role (lead, owner, coordinator) never complete; they go idle between pieces of work.
+`task_completed` means the task you were created for is done. Agents with an ongoing role (lead, owner, coordinator, reviewer pool) never complete; they go idle between pieces of work.
 
 Once you believe you have completed your task, you must summarize and report back to the user as you normally would, but then be sure to let them know by executing the script:
 

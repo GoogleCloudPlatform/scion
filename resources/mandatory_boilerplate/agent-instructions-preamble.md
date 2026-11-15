@@ -30,7 +30,7 @@ sciontool status blocked "<reason>"
 
 Example: `sciontool status blocked "Waiting for agent deploy-frontend to complete"`
 
-If you end your turn while your own background job or process runs (a build, a test run, `make ci`), always signal blocked *before* ending the turn: suspending you would kill the job. The status clears automatically when you resume work (e.g. when you receive a message or start a new task).
+If you end your turn while your own background job or process runs (a build, a test run), always signal blocked *before* ending the turn: suspending you would kill the job. The status clears automatically when you resume work (e.g. when you receive a message or start a new task).
 
 Do NOT use the sleep bash command, or enter into a polling loop to wait check on another agent. You may use your own strategies for waiting for things like long running bash commands, programs you run, build jobs etc that are running inside your system, but for interaction with other agents or users you should signal a "blocked" status
 

@@ -811,8 +811,9 @@ Your `capabilities.limits` claims must match this wiring: `max_turns` needs
 Agent-side status signaling (`sciontool status task_completed|blocked|idle|ask_user`)
 is usually driven by agent instructions/templates; a hook or bridge script may
 emit `task_completed` directly only from a run-settled callback (`pi`), never
-from a per-turn boundary, and never over a status the agent reported itself
-in that run (`ask_user`, `blocked`, `idle`, `limits_exceeded`).
+from a per-turn boundary, and never over a status set earlier in that run,
+whether the agent reported it (`ask_user`, `blocked`, `idle`) or limit
+enforcement set it (`limits_exceeded`).
 
 ## Dockerfile and image pipeline
 
