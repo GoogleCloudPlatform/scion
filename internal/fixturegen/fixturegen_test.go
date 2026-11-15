@@ -174,7 +174,7 @@ func TestFixtureLoadable(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, excluded)
 
-	dqStats, err := composite.DurableQueueStats(ctx, "fixture.echo", projectID)
+	dqStats, err := composite.DurableQueueStats(ctx, "fixture.echo", projectID, baseTime)
 	require.NoError(t, err, "durable_queue_items fixture row must be readable via DurableQueueStore")
 	assert.Equal(t, int64(1), dqStats.Pending)
 	require.NotNil(t, dqStats.Oldest)

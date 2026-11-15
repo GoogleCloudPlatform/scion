@@ -377,14 +377,15 @@ func (d *Drainer) drainPass(ctx context.Context, maintain bool) (DrainResult, bo
 		res.Remaining = -1
 		return res, trimMore, nil
 	}
-	stats, err := d.cfg.Store.DurableQueueStats(ctx, d.cfg.Kind, "")
+	sampleNow := d.cfg.Now().UTC()
+	stats, err := d.cfg.Store.DurableQueueStats(ctx, d.cfg.Kind, "", sampleNow)
 	if err != nil {
 		return res, trimMore, fmt.Errorf("stats: %w", err)
 	}
 	res.Remaining = stats.Pending
 	var oldestAge time.Duration
 	if stats.Oldest != nil {
-		if age := d.cfg.Now().UTC().Sub(*stats.Oldest); age > 0 {
+		if age := sampleNow.Sub(*stats.Oldest); age > 0 {
 			oldestAge = age
 		}
 	}

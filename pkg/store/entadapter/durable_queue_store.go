@@ -646,10 +646,11 @@ func trimOverflowByLargestProject(ctx context.Context, client *ent.Client, kind 
 }
 
 // DurableQueueStats implements store.DurableQueueStore.
-func (s *DurableQueueStore) DurableQueueStats(ctx context.Context, kind, projectID string) (store.DurableQueueStats, error) {
+func (s *DurableQueueStore) DurableQueueStats(ctx context.Context, kind, projectID string, now time.Time) (store.DurableQueueStats, error) {
 	if err := store.ValidateDurableQueueKind(kind); err != nil {
 		return store.DurableQueueStats{}, err
 	}
+	now = now.UTC()
 	preds := []predicate.DurableQueueItem{durablequeueitem.KindEQ(kind)}
 	if projectID != "" {
 		preds = append(preds, durablequeueitem.ProjectIDEQ(projectID))
@@ -667,7 +668,6 @@ func (s *DurableQueueStore) DurableQueueStats(ctx context.Context, kind, project
 		return st, nil
 	}
 
-	now := time.Now().UTC()
 	leasedPreds := append(slices.Clone(preds),
 		durablequeueitem.LeaseUntilNotNil(),
 		durablequeueitem.LeaseUntilGTE(now),

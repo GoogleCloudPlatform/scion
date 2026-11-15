@@ -155,6 +155,8 @@ type DurableQueueStore interface {
 	// additional candidates remain for the next maintenance pass.
 	TrimDurableQueue(ctx context.Context, kind string, now time.Time, maxAge time.Duration, maxRows, maxPermanent int) (DurableQueueTrim, error)
 	// DurableQueueStats samples pending count, oldest created_at, and active
-	// leased count for kind. When projectID is "", all projects are sampled.
-	DurableQueueStats(ctx context.Context, kind, projectID string) (DurableQueueStats, error)
+	// leased count (evaluated against the caller's now, consistent with
+	// ClaimDurableItems and TrimDurableQueue) for kind. When projectID is "",
+	// all projects are sampled.
+	DurableQueueStats(ctx context.Context, kind, projectID string, now time.Time) (DurableQueueStats, error)
 }

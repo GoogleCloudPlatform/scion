@@ -229,10 +229,10 @@ func (m *memQueueStore) TrimDurableQueue(_ context.Context, kind string, now tim
 	return trim, nil
 }
 
-func (m *memQueueStore) DurableQueueStats(_ context.Context, kind, projectID string) (store.DurableQueueStats, error) {
+func (m *memQueueStore) DurableQueueStats(_ context.Context, kind, projectID string, now time.Time) (store.DurableQueueStats, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	now := time.Now().UTC()
+	now = now.UTC()
 	var st store.DurableQueueStats
 	for _, r := range m.rows {
 		if r.Kind != kind || (projectID != "" && r.ProjectID != projectID) {
@@ -390,7 +390,7 @@ func TestEnabledGateSkipsClaimAndTrim(t *testing.T) {
 	assert.Equal(t, int64(-1), res.Remaining)
 	assert.Zero(t, handled)
 
-	stats, err := st.DurableQueueStats(ctx, "test.echo", "")
+	stats, err := st.DurableQueueStats(ctx, "test.echo", "", now)
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), stats.Pending, "queued item must wait untouched while Enabled is false")
 

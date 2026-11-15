@@ -73,7 +73,7 @@ func TestEchoConsumer_EnqueueInTxCommitRollbackAndDedup(t *testing.T) {
 	})
 	require.Error(t, err)
 
-	st, err := cs.DurableQueueStats(ctx, "test.echo", "")
+	st, err := cs.DurableQueueStats(ctx, "test.echo", "", t0)
 	require.NoError(t, err)
 	assert.Zero(t, st.Pending)
 
@@ -599,7 +599,7 @@ func TestEchoConsumer_TwoConcurrentDrainers(t *testing.T) {
 		if done < totalItems {
 			return false
 		}
-		st, serr := cs.DurableQueueStats(ctx, "test.echo", "")
+		st, serr := cs.DurableQueueStats(ctx, "test.echo", "", time.Now().UTC())
 		return serr == nil && st.Pending == 0
 	}, 10*time.Second, 20*time.Millisecond)
 

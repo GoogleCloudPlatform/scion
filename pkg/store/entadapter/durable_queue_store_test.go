@@ -119,7 +119,7 @@ func TestDurableQueueEnqueueAndTxAtomicity(t *testing.T) {
 
 	_, err = cs.GetProject(ctx, rollbackProjID)
 	require.ErrorIs(t, err, store.ErrNotFound)
-	st, err := cs.DurableQueueStats(ctx, "test.echo", "")
+	st, err := cs.DurableQueueStats(ctx, "test.echo", "", base)
 	require.NoError(t, err)
 	assert.Zero(t, st.Pending)
 
@@ -370,8 +370,7 @@ func TestDurableQueueClaimOrderingAndLeaseLifecycle(t *testing.T) {
 func TestDurableQueueTrimBoundsAndLargestProjectFirst(t *testing.T) {
 	ctx := context.Background()
 	cs := newTestCompositeStore(t)
-	// Anchor to wall clock (truncated to ms for Postgres timestamptz) because
-	// DurableQueueStats evaluates Leased against time.Now().
+	// Anchor to truncated wall clock (keeps Postgres timestamptz µs checks clean).
 	now := time.Now().UTC().Truncate(time.Millisecond)
 
 	enq := func(kind, proj, key string, createdAt time.Time, perm int, leased bool) int64 {
@@ -449,22 +448,22 @@ func TestDurableQueueTrimBoundsAndLargestProjectFirst(t *testing.T) {
 	}
 
 	// Verify surviving counts per project and on other.kind.
-	stFlood, err := cs.DurableQueueStats(ctx, "test.echo", "proj-flood")
+	stFlood, err := cs.DurableQueueStats(ctx, "test.echo", "proj-flood", now)
 	require.NoError(t, err)
 	assert.Equal(t, int64(3), stFlood.Pending)
 
-	stMid, err := cs.DurableQueueStats(ctx, "test.echo", "proj-mid")
+	stMid, err := cs.DurableQueueStats(ctx, "test.echo", "proj-mid", now)
 	require.NoError(t, err)
 	assert.Equal(t, int64(4), stMid.Pending)
 
-	stSmall, err := cs.DurableQueueStats(ctx, "test.echo", "proj-small")
+	stSmall, err := cs.DurableQueueStats(ctx, "test.echo", "proj-small", now)
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), stSmall.Pending)
 	assert.Equal(t, int64(2), stSmall.Leased)
 	_ = agedLeasedSeq
 	_ = poisonLeasedSeq
 
-	stOther, err := cs.DurableQueueStats(ctx, "other.kind", "")
+	stOther, err := cs.DurableQueueStats(ctx, "other.kind", "", now)
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), stOther.Pending)
 	_ = otherKindSeq
@@ -578,13 +577,13 @@ func TestDurableQueueStats(t *testing.T) {
 	ctx := context.Background()
 	cs := newTestCompositeStore(t)
 
-	empty, err := cs.DurableQueueStats(ctx, "test.echo", "")
+	now := time.Date(2026, 11, 15, 6, 0, 0, 0, time.UTC)
+	empty, err := cs.DurableQueueStats(ctx, "test.echo", "", now)
 	require.NoError(t, err)
 	assert.Zero(t, empty.Pending)
 	assert.Zero(t, empty.Leased)
 	assert.Nil(t, empty.Oldest)
 
-	now := time.Now().UTC().Truncate(time.Millisecond)
 	tOldest := now.Add(-10 * time.Minute)
 	tNewer := now.Add(-2 * time.Minute)
 	activeLease := now.Add(5 * time.Minute)
@@ -625,14 +624,20 @@ func TestDurableQueueStats(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	allStats, err := cs.DurableQueueStats(ctx, "test.echo", "")
+	allStats, err := cs.DurableQueueStats(ctx, "test.echo", "", now)
 	require.NoError(t, err)
 	assert.Equal(t, int64(3), allStats.Pending)
 	assert.Equal(t, int64(1), allStats.Leased)
 	require.NotNil(t, allStats.Oldest)
 	assert.True(t, allStats.Oldest.Equal(tOldest))
 
-	p2Stats, err := cs.DurableQueueStats(ctx, "test.echo", "p2")
+	// Advancing caller now past activeLease flips Leased to 0 deterministically.
+	afterExpiryStats, err := cs.DurableQueueStats(ctx, "test.echo", "", activeLease.Add(time.Millisecond))
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), afterExpiryStats.Pending)
+	assert.Zero(t, afterExpiryStats.Leased)
+
+	p2Stats, err := cs.DurableQueueStats(ctx, "test.echo", "p2", now)
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), p2Stats.Pending)
 	assert.Zero(t, p2Stats.Leased)
