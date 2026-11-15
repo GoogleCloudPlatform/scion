@@ -2052,6 +2052,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 					if agentStatusVisiblyChanged(agent, updated) {
 						s.events.PublishAgentStatus(ctx, updated)
 					}
+					s.logAgentErrorPhaseEntry(agent, updated, errorPhaseSourceHeartbeat)
 					if statusResult.Halted {
 						s.onAgentHalted(ctx, updated, statusResult.HaltedFrom)
 					}
