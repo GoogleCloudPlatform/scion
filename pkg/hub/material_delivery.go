@@ -249,7 +249,16 @@ func envVarDeliveryKind(v store.EnvVar) MaterialKind {
 	return MaterialKindEnvVar
 }
 
-// selectDeliveryEnv is resolveEnvFromStorage for the start and restart
+// gatheredEnvPick is the as_needed env row selectDeliveryEnvWith keeps for
+// one canonical key: the highest scope wins, and within a scope a row stored
+// under the canonical name wins over one stored under an alternative name.
+type gatheredEnvPick struct {
+	value     string
+	scopeIdx  int
+	canonical bool
+}
+
+// selectDeliveryEnvWith is resolveEnvFromStorage for the start and restart
 // paths, with every project-, hub- and broker-scope row authorized under
 // the delivery credential before it is used. The scopes, their order, the
 // as_needed and reserved-target skips, the progeny pass and the error
@@ -264,25 +273,12 @@ func envVarDeliveryKind(v store.EnvVar) MaterialKind {
 // agent without credentials a setting noAuthKeepsStoredEnv withholds is
 // skipped before it is authorized or decided. Such an agent with nil
 // credNames is an error: the selection never runs without the rule.
-func (d *HTTPAgentDispatcher) selectDeliveryEnv(ctx context.Context, sel *deliverySelector, agent *store.Agent, credNames credentialEnvNames) (map[string]string, map[string]bool, error) {
-	return d.selectDeliveryEnvWith(ctx, sel, agent, credNames, nil)
-}
-
-// gatheredEnvPick is the as_needed env row selectDeliveryEnvWith keeps for
-// one canonical key: the highest scope wins, and within a scope a row stored
-// under the canonical name wins over one stored under an alternative name.
-type gatheredEnvPick struct {
-	value     string
-	scopeIdx  int
-	canonical bool
-}
-
-// selectDeliveryEnvWith is selectDeliveryEnv that also admits, for an agent
-// with credentials, the as_needed rows stored under a name gathered records
-// (reprovisionGatheredEnv). Such a row is authorized exactly like an always
-// row, is returned under its canonical key, is never plain, and fills only a
-// key no other row (progeny included) set. A nil gathered admits no as_needed
-// row.
+//
+// For an agent with credentials, selectDeliveryEnvWith also admits the
+// as_needed rows stored under a name gathered records (reprovisionGatheredEnv).
+// Such a row is authorized exactly like an always row, is returned under its
+// canonical key, is never plain, and fills only a key no other row (progeny
+// included) set. A nil gathered admits no as_needed row.
 func (d *HTTPAgentDispatcher) selectDeliveryEnvWith(ctx context.Context, sel *deliverySelector, agent *store.Agent, credNames credentialEnvNames, gathered *reprovisionGatheredEnv) (map[string]string, map[string]bool, error) {
 	if launchesWithoutCredentials(agent) && credNames == nil {
 		return nil, nil, errors.New("material delivery: credential names not read for an agent without credentials")

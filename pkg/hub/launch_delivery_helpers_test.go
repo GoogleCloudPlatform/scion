@@ -122,3 +122,9 @@ func launchSecretBackend(t *testing.T, s store.Store, hubID string, secrets []se
 	}
 	return b
 }
+
+// selectDeliveryEnv runs selectDeliveryEnvWith without gathered reprovision
+// env, for launch material selection tests.
+func (d *HTTPAgentDispatcher) selectDeliveryEnv(ctx context.Context, sel *deliverySelector, agent *store.Agent, credNames credentialEnvNames) (map[string]string, map[string]bool, error) {
+	return d.selectDeliveryEnvWith(ctx, sel, agent, credNames, nil)
+}
