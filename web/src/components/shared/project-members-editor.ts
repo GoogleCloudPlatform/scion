@@ -397,13 +397,18 @@ const INVITED_DIALOG_NOTICE =
 const INVITED_DIALOG_OWNER_WARNING =
   'Invited owners do not count towards the last-owner rule until they sign in. Keep at least one signed-in owner.';
 
-function isDirectOwnerRow(group: ProjectMemberGroup): boolean {
+function hasDirectOwnerBinding(group: ProjectMemberGroup): boolean {
+  return group.bindings.some(
+    (b) => b.source === 'direct' && !isCustomBinding(b) && getRoleTier(b.roleName) === 'owner'
+  );
+}
+
+/** Matches server usable-owner check: existing user with status 'active'. */
+function isUsableOwnerRow(group: ProjectMemberGroup): boolean {
   return (
     group.principalType === 'user' &&
-    group.principalStatus !== 'invited' &&
-    group.bindings.some(
-      (b) => b.source === 'direct' && !isCustomBinding(b) && getRoleTier(b.roleName) === 'owner'
-    )
+    group.principalStatus === 'active' &&
+    hasDirectOwnerBinding(group)
   );
 }
 
@@ -411,8 +416,13 @@ export function isLastDirectOwner(
   group: ProjectMemberGroup,
   groups: readonly ProjectMemberGroup[]
 ): boolean {
-  if (!isDirectOwnerRow(group)) return false;
-  return groups.filter(isDirectOwnerRow).length <= 1;
+  if (!hasDirectOwnerBinding(group)) return false;
+  if (isUsableOwnerRow(group)) {
+    return groups.filter(isUsableOwnerRow).length <= 1;
+  }
+  // Unusable owner binding (invited, suspended, or missing user): stays locked
+  // only when it is the sole owner binding on the project.
+  return groups.filter(hasDirectOwnerBinding).length <= 1;
 }
 
 /**
@@ -433,14 +443,17 @@ export function tierFromRoleIds(
 }
 
 /** Last-owner status for a principal known only by its tier: a direct user
- *  owner is the last one when the loaded rows hold at most one direct owner. */
+ *  owner is the last one when the loaded rows hold at most one usable owner
+ *  (or at most one owner binding of any kind). */
 export function isLastOwnerByTier(
   principalType: string,
   tier: RoleTier,
   groups: readonly ProjectMemberGroup[]
 ): boolean {
   if (principalType !== 'user' || tier !== 'owner') return false;
-  return groups.filter(isDirectOwnerRow).length <= 1;
+  return (
+    groups.filter(isUsableOwnerRow).length <= 1 || groups.filter(hasDirectOwnerBinding).length <= 1
+  );
 }
 
 /**

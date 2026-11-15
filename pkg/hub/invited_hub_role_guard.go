@@ -22,8 +22,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-const hubMembersGroupSlug = "hub-members"
-
 // errHubRoleOnInvitedUser is returned when an API or service mutation attempts
 // to grant a built-in system hub role or hub-members group membership to an
 // invited user before first sign-in.
@@ -173,7 +171,7 @@ func groupClosureCarriesBuiltInHubRole(ctx context.Context, st store.Store, grou
 	if err != nil {
 		return false, fmt.Errorf("look up group %s for hub role guard: %w", groupID, err)
 	}
-	if g.Slug == hubMembersGroupSlug {
+	if g.Slug == hubMembersSlug {
 		return true, nil
 	}
 
@@ -182,9 +180,9 @@ func groupClosureCarriesBuiltInHubRole(ctx context.Context, st store.Store, grou
 		return false, fmt.Errorf("expand parent groups of %s for hub role guard: %w", groupID, err)
 	}
 
-	hubMembers, err := st.GetGroupBySlug(ctx, hubMembersGroupSlug)
+	hubMembers, err := st.GetGroupBySlug(ctx, hubMembersSlug)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		return false, fmt.Errorf("look up %s group for hub role guard: %w", hubMembersGroupSlug, err)
+		return false, fmt.Errorf("look up %s group for hub role guard: %w", hubMembersSlug, err)
 	}
 	if err == nil && hubMembers != nil {
 		if groupID == hubMembers.ID {

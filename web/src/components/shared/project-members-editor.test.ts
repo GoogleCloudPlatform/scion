@@ -210,6 +210,7 @@ function group(
     principalType,
     principalId,
     principalDisplayName: displayName,
+    ...(principalType === 'user' ? { principalStatus: 'active' } : {}),
     builtInRoleName: builtIn?.name ?? '',
     bindings: roles.map((r) => binding(principalType, principalId, r, displayName)),
   };
@@ -2180,14 +2181,39 @@ describe('invited principals', () => {
     ...group('user', 'u-invited-owner', [R_OWNER], 'inv-owner@example.com'),
     principalStatus: 'invited',
   };
+  const SUSPENDED_OWNER: ProjectMemberGroup = {
+    ...group('user', 'u-suspended-owner', [R_OWNER], 'susp-owner@example.com'),
+    principalStatus: 'suspended',
+  };
+  const MISSING_OWNER: ProjectMemberGroup = (() => {
+    const g = group('user', 'u-missing-owner', [R_OWNER], 'u-missing-owner');
+    delete g.principalStatus;
+    return g;
+  })();
 
-  it('excludes invited owners from last-owner protection', () => {
-    const groups = [ALICE, INVITED_OWNER];
-    expect(isLastDirectOwner(ALICE, groups)).toBe(true);
-    expect(isLastDirectOwner(INVITED_OWNER, groups)).toBe(false);
-    expect(isLastOwnerByTier('user', 'owner', groups)).toBe(true);
-    expect(canRemoveRow(ALICE, OWNER_CAPS, groups).disabled).toBe(true);
-    expect(canRemoveRow(INVITED_OWNER, OWNER_CAPS, groups).disabled).toBe(false);
+  it('counts only usable (active, existing) owners while keeping a sole owner binding locked', async () => {
+    for (const nonUsable of [INVITED_OWNER, SUSPENDED_OWNER, MISSING_OWNER]) {
+      const pair = [ALICE, nonUsable];
+      expect(isLastDirectOwner(ALICE, pair)).toBe(true);
+      expect(isLastDirectOwner(nonUsable, pair)).toBe(false);
+      expect(isLastOwnerByTier('user', 'owner', pair)).toBe(true);
+      expect(canRemoveRow(ALICE, OWNER_CAPS, pair).disabled).toBe(true);
+      expect(canRemoveRow(nonUsable, OWNER_CAPS, pair).disabled).toBe(false);
+    }
+
+    // Sole invited owner (no usable owner, 1 owner binding total): stays locked
+    // on both row Remove and Edit dialog, matching the server's zero-owner floor.
+    const soleInvited = [INVITED_OWNER, DAVE];
+    expect(isLastDirectOwner(INVITED_OWNER, soleInvited)).toBe(true);
+    expect(canRemoveRow(INVITED_OWNER, OWNER_CAPS, soleInvited).disabled).toBe(true);
+
+    const el = await mountEditor(soleInvited, OWNER_CAPS);
+    const ownerRow = row(el, 'user:u-invited-owner');
+    expect(ownerRow.querySelector('sl-icon[name="shield-lock"]')).not.toBeNull();
+    el.openEditDialog(INVITED_OWNER);
+    await el.updateComplete;
+    expect(el.dlgIsLastOwner).toBe(true);
+    expect(radio(el, 'r-member').hasAttribute('disabled')).toBe(true);
   });
 
   it('renders Invited tags and distinct tooltips on member vs owner rows', async () => {
