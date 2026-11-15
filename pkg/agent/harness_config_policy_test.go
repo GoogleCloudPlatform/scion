@@ -2099,3 +2099,354 @@ func TestAgentStateDirStrictness(t *testing.T) {
 		t.Errorf("local without a project ID: got %q (err=%v), want the in-project dir", dir, err)
 	}
 }
+
+const policyTestDeclCaptureAuth = policyTestDecl + `auth:
+  default_type: auth-file
+  types:
+    auth-file:
+      required_files:
+        - name: DECL_CRED
+          type: file
+          target_suffix: .decl/creds.json
+`
+
+func writeDeclCaptureAuthHC(t *testing.T, e *policyTestEnv, name string) string {
+	t.Helper()
+	e.projectHC(t, name, policyTestDeclCaptureAuth)
+	dir := filepath.Join(e.scion, "harness-configs", name)
+	if err := os.WriteFile(filepath.Join(dir, "capture_auth.py"), []byte("#!/usr/bin/env python3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func assertCaptureAuthNotStaged(t *testing.T, e *policyTestEnv, agentName string) {
+	t.Helper()
+	home := config.GetAgentHomePath(e.scion, agentName)
+	for _, rel := range []string{
+		filepath.Join(".scion", "harness", "capture_auth.py"),
+		filepath.Join(".scion", "harness", "inputs", "capture-auth-config.json"),
+	} {
+		if _, err := os.Lstat(filepath.Join(home, rel)); !os.IsNotExist(err) {
+			t.Errorf("%s was staged in agent home despite policy refusal (stat err=%v)", rel, err)
+		}
+	}
+}
+
+func assertCaptureAuthStaged(t *testing.T, e *policyTestEnv, agentName string) {
+	t.Helper()
+	home := config.GetAgentHomePath(e.scion, agentName)
+	script := filepath.Join(home, ".scion", "harness", "capture_auth.py")
+	info, err := os.Stat(script)
+	if err != nil {
+		t.Fatalf("capture_auth.py not staged: %v", err)
+	}
+	if info.Mode()&0o111 == 0 {
+		t.Errorf("capture_auth.py mode = %v, want executable", info.Mode())
+	}
+	cfgPath := filepath.Join(home, ".scion", "harness", "inputs", "capture-auth-config.json")
+	if _, err := os.Stat(cfgPath); err != nil {
+		t.Errorf("capture-auth-config.json not staged: %v", err)
+	}
+}
+
+// TestHarnessConfigPolicy_StageCaptureAuthCallSitesAreGated guards that
+// pkg/harness's StageCaptureAuthAssets is called outside pkg/harness only from
+// stageFallbackCaptureAuthAssets, where the context's harness-config policy
+// gates staging capture_auth.py (ptone/scion#622).
+func TestHarnessConfigPolicy_StageCaptureAuthCallSitesAreGated(t *testing.T) {
+	const gatedSite = "pkg/agent/harness_config_policy.go:stageFallbackCaptureAuthAssets"
+	root := mustAbs(t, filepath.Join("..", ".."))
+	sawGatedCall := false
+
+	for _, top := range []string{"pkg", "cmd"} {
+		err := filepath.WalkDir(filepath.Join(root, top), func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() {
+				if path == filepath.Join(root, "pkg", "harness") || d.Name() == "testdata" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			rel, _ := filepath.Rel(root, path)
+			relSlash := filepath.ToSlash(rel)
+			fset := token.NewFileSet()
+			file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+			if err != nil {
+				return err
+			}
+			local, dot := harnessImportName(file)
+			if local == "" && !dot {
+				return nil
+			}
+			isStageRef := func(n ast.Node) bool {
+				switch x := n.(type) {
+				case *ast.SelectorExpr:
+					if id, ok := x.X.(*ast.Ident); ok && local != "" && id.Name == local && x.Sel.Name == "StageCaptureAuthAssets" {
+						return true
+					}
+				case *ast.Ident:
+					if dot && x.Name == "StageCaptureAuthAssets" {
+						return true
+					}
+				}
+				return false
+			}
+			for _, decl := range file.Decls {
+				fn, isFn := decl.(*ast.FuncDecl)
+				if isFn && fn.Body == nil {
+					continue
+				}
+				callees := map[ast.Node]bool{}
+				ast.Inspect(decl, func(n ast.Node) bool {
+					if call, ok := n.(*ast.CallExpr); ok {
+						callees[call.Fun] = true
+					}
+					return true
+				})
+				ast.Inspect(decl, func(n ast.Node) bool {
+					if !isStageRef(n) {
+						return true
+					}
+					if !isFn {
+						t.Errorf("%s: package-level reference to harness.StageCaptureAuthAssets; call it only from %s", relSlash, gatedSite)
+						return true
+					}
+					site := relSlash + ":" + fn.Name.Name
+					if !callees[n] {
+						t.Errorf("%s: harness.StageCaptureAuthAssets used as a function value; call it directly from %s", site, gatedSite)
+						return true
+					}
+					if site != gatedSite {
+						t.Errorf("ungated harness.StageCaptureAuthAssets call at %s; route through %s", site, gatedSite)
+						return true
+					}
+					sawGatedCall = true
+					return true
+				})
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !sawGatedCall {
+		t.Errorf("expected %s to call harness.StageCaptureAuthAssets", gatedSite)
+	}
+}
+
+// ptone/scion#622: when the context's harness-config policy refuses
+// container-script harnesses, a declarative harness-config still launches,
+// neither capture_auth.py nor capture-auth-config.json is staged on
+// ProvisionAgent, Start, or relaunch after an allowed start, and suppression is
+// logged clearly for operators.
+func TestHarnessConfigPolicy_DisallowedSuppressesCaptureAuthStaging(t *testing.T) {
+	assertSuppressedLog := func(t *testing.T, logs, agentName, hcName string) {
+		t.Helper()
+		for _, want := range []string{
+			"capture-auth asset staging suppressed",
+			"agent=" + agentName,
+			"harness=generic",
+			"harness_config=" + hcName,
+			`reason="container-script harnesses disallowed"`,
+		} {
+			if !strings.Contains(logs, want) {
+				t.Errorf("expected suppression log containing %q, got:\n%s", want, logs)
+			}
+		}
+	}
+
+	t.Run("ProvisionAgent disallowed", func(t *testing.T) {
+		e := newPolicyTestEnv(t)
+		writeDeclCaptureAuthHC(t, e, "hc-decl-ca")
+		var logBuf bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+		t.Cleanup(func() { slog.SetDefault(prev) })
+
+		ctx := (&recordingPolicy{refuse: true}).ctx()
+		if _, _, _, err := ProvisionAgent(ctx, "prov-disallowed", "", "", "hc-decl-ca", e.scion, "", "", "", ""); err != nil {
+			t.Fatalf("ProvisionAgent with declarative harness under restrictive policy failed: %v", err)
+		}
+		assertCaptureAuthNotStaged(t, e, "prov-disallowed")
+		assertSuppressedLog(t, logBuf.String(), "prov-disallowed", "hc-decl-ca")
+	})
+
+	t.Run("Start disallowed", func(t *testing.T) {
+		e := newPolicyTestEnv(t)
+		writeDeclCaptureAuthHC(t, e, "hc-decl-ca")
+		var logBuf bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+		t.Cleanup(func() { slog.SetDefault(prev) })
+
+		runs := 0
+		ctx := (&recordingPolicy{refuse: true}).ctx()
+		if _, err := policyTestManager(&runs).Start(ctx, api.StartOptions{
+			Name: "start-disallowed", ProjectPath: e.scion, HarnessConfig: "hc-decl-ca", NoAuth: true,
+		}); err != nil {
+			t.Fatalf("Start with declarative harness under restrictive policy failed: %v", err)
+		}
+		if runs != 1 {
+			t.Errorf("expected container to run once, got %d", runs)
+		}
+		assertCaptureAuthNotStaged(t, e, "start-disallowed")
+		assertSuppressedLog(t, logBuf.String(), "start-disallowed", "hc-decl-ca")
+	})
+
+	t.Run("Relaunch disallowed clears previously staged capture-auth", func(t *testing.T) {
+		e := newPolicyTestEnv(t)
+		writeDeclCaptureAuthHC(t, e, "hc-decl-ca")
+		runs := 0
+		mgr := policyTestManager(&runs)
+		opts := api.StartOptions{Name: "relaunch-disallowed", ProjectPath: e.scion, HarnessConfig: "hc-decl-ca", NoAuth: true}
+		if _, err := mgr.Start(context.Background(), opts); err != nil {
+			t.Fatalf("first Start (allowed): %v", err)
+		}
+		assertCaptureAuthStaged(t, e, "relaunch-disallowed")
+
+		var logBuf bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+		t.Cleanup(func() { slog.SetDefault(prev) })
+
+		if _, err := mgr.Start((&recordingPolicy{refuse: true}).ctx(), opts); err != nil {
+			t.Fatalf("relaunch under restrictive policy: %v", err)
+		}
+		if runs != 2 {
+			t.Errorf("expected container to run twice, got %d", runs)
+		}
+		assertCaptureAuthNotStaged(t, e, "relaunch-disallowed")
+		assertSuppressedLog(t, logBuf.String(), "relaunch-disallowed", "hc-decl-ca")
+	})
+
+	t.Run("Stat error on capture_auth.py under restrictive policy fails closed on staging", func(t *testing.T) {
+		e := newPolicyTestEnv(t)
+		// Use policyTestDecl (no auth/required_files block) so hasCaptureAuthCredentials
+		// is false and ONLY the !errors.Is(statErr, os.ErrNotExist) clause triggers
+		// the policy probe.
+		e.projectHC(t, "hc-stat-err", policyTestDecl)
+		hcDir, err := config.LoadHarnessConfigDir(filepath.Join(e.scion, "harness-configs", "hc-stat-err"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hasCaptureAuthCredentials(hcDir.Config.Auth) {
+			t.Fatal("fixture: expected no capture-auth credentials so only the stat-error clause applies")
+		}
+		notADir := filepath.Join(t.TempDir(), "regular-file")
+		if err := os.WriteFile(notADir, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		hcDir.Path = filepath.Join(notADir, "hc") // Lstat("<regular-file>/hc/capture_auth.py") -> ENOTDIR
+		home := t.TempDir()
+		p := &recordingPolicy{refuse: true}
+		stageCalled := false
+
+		var logBuf bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+		t.Cleanup(func() { slog.SetDefault(prev) })
+
+		stageFallbackCaptureAuthAssets(
+			p.ctx(),
+			"stat-err-agent",
+			harness.New("generic"),
+			"hc-stat-err",
+			hcDir,
+			home,
+			func(fn func() error) error {
+				stageCalled = true
+				return fn()
+			},
+		)
+		if got := strings.Join(p.recorded(), ","); got != "hc-stat-err:scripted" {
+			t.Errorf("policy evaluations = %q, want %q", got, "hc-stat-err:scripted")
+		}
+		if stageCalled {
+			t.Error("StageCaptureAuthAssets must not be called when statting capture_auth.py fails under a restrictive policy")
+		}
+		if _, err := os.Lstat(filepath.Join(home, ".scion", "harness")); !os.IsNotExist(err) {
+			t.Errorf(".scion/harness was created despite uncertain capture_auth.py stat under restrictive policy (stat err=%v)", err)
+		}
+		assertSuppressedLog(t, logBuf.String(), "stat-err-agent", "hc-stat-err")
+	})
+
+	t.Run("Config-only without capture_auth.py disallowed", func(t *testing.T) {
+		e := newPolicyTestEnv(t)
+		e.projectHC(t, "hc-decl-cfgonly", policyTestDeclCaptureAuth)
+		runs := 0
+		if _, err := policyTestManager(&runs).Start((&recordingPolicy{refuse: true}).ctx(), api.StartOptions{
+			Name: "cfgonly-disallowed", ProjectPath: e.scion, HarnessConfig: "hc-decl-cfgonly", NoAuth: true,
+		}); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		if runs != 1 {
+			t.Errorf("expected container to run once, got %d", runs)
+		}
+		assertCaptureAuthNotStaged(t, e, "cfgonly-disallowed")
+	})
+}
+
+// ptone/scion#622: when no policy is attached (solo CLI or
+// AllowContainerScriptHarnesses=true) or the attached policy permits container
+// scripts, capture_auth.py and capture-auth-config.json are staged as before,
+// and staging I/O errors warn without failing the launch.
+func TestHarnessConfigPolicy_AllowedStagesCaptureAuthAsBefore(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ctx  func() context.Context
+	}{
+		{"no policy", context.Background},
+		{"permissive policy", func() context.Context { return (&recordingPolicy{refuse: false}).ctx() }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newPolicyTestEnv(t)
+			writeDeclCaptureAuthHC(t, e, "hc-decl-ca")
+			if _, _, _, err := ProvisionAgent(tc.ctx(), "prov-ok", "", "", "hc-decl-ca", e.scion, "", "", "", ""); err != nil {
+				t.Fatalf("ProvisionAgent: %v", err)
+			}
+			assertCaptureAuthStaged(t, e, "prov-ok")
+
+			runs := 0
+			if _, err := policyTestManager(&runs).Start(tc.ctx(), api.StartOptions{
+				Name: "start-ok", ProjectPath: e.scion, HarnessConfig: "hc-decl-ca", NoAuth: true,
+			}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			if runs != 1 {
+				t.Errorf("expected container to run once, got %d", runs)
+			}
+			assertCaptureAuthStaged(t, e, "start-ok")
+		})
+	}
+
+	t.Run("staging I/O error when allowed warns without failing launch", func(t *testing.T) {
+		e := newPolicyTestEnv(t)
+		hcDir := writeDeclCaptureAuthHC(t, e, "hc-decl-ioerr")
+		script := filepath.Join(hcDir, "capture_auth.py")
+		if err := os.Remove(script); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(script, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, _, err := ProvisionAgent(context.Background(), "prov-ioerr", "", "", "hc-decl-ioerr", e.scion, "", "", "", ""); err != nil {
+			t.Fatalf("ProvisionAgent must warn rather than fail on capture-auth I/O error: %v", err)
+		}
+		runs := 0
+		if _, err := policyTestManager(&runs).Start((&recordingPolicy{refuse: false}).ctx(), api.StartOptions{
+			Name: "start-ioerr", ProjectPath: e.scion, HarnessConfig: "hc-decl-ioerr", NoAuth: true,
+		}); err != nil {
+			t.Fatalf("Start must warn rather than fail on capture-auth I/O error: %v", err)
+		}
+		if runs != 1 {
+			t.Errorf("expected container to run once, got %d", runs)
+		}
+	})
+}

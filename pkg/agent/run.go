@@ -1230,14 +1230,11 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			cs.SetRecordedSecrets(restored)
 		}
 		// Restage the capture-auth assets a non-container-script harness
-		// keeps in the bundle, as ProvisionAgent stages them.
-		if _, isContainerScript := h.(*harness.ContainerScriptHarness); !isContainerScript && resolvedHCDir != nil && resolvedHCDir.Path != "" {
-			if err := writeAgentHome(ctx, func() error {
-				return harness.StageCaptureAuthAssets(agentHome, resolvedHCDir.Path, resolvedHCDir.Config.Auth)
-			}); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: capture-auth asset staging failed: %v\n", err)
-			}
-		}
+		// keeps in the bundle when permitted by the context's harness-config
+		// policy, as ProvisionAgent stages them.
+		stageFallbackCaptureAuthAssets(ctx, opts.Name, h, harnessConfigName, resolvedHCDir, agentHome, func(fn func() error) error {
+			return writeAgentHome(ctx, fn)
+		})
 	}
 
 	// Reconcile the harness bundle for existing agents. Provision() is

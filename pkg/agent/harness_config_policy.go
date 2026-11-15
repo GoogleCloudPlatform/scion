@@ -113,6 +113,90 @@ func resetStagedProvisioning(agentHome string) error {
 	return harness.ClearStagedProvisioning(agentHome)
 }
 
+// stageFallbackCaptureAuthAssets stages capture-auth assets (capture_auth.py +
+// capture-auth-config.json) for a non-container-script harness when permitted
+// by the context's harness-config policy (ptone/scion#622). Container-script
+// harnesses stage these inside (*ContainerScriptHarness).Provision.
+//
+// Because capture_auth.py is an executable script from the harness-config
+// bundle (staged 0755 at .scion/harness/capture_auth.py), staging capture-auth
+// assets on the non-container-script path is subject to the same context
+// policy gate that blocks container-script harnesses
+// (AllowContainerScriptHarnesses):
+//   - when no policy is attached (AllowContainerScriptHarnesses=true or solo
+//     CLI), staging runs as before;
+//   - when a policy is attached and capture-auth would stage any asset
+//     (capture_auth.py is present, statting it fails with a non-ENOENT error so
+//     an uncertain policy check fails closed, or auth metadata declares
+//     capture-auth required_files), the policy is probed with a
+//     container-script Provisioner on the entry; if the policy refuses,
+//     neither capture_auth.py nor capture-auth-config.json is staged, while
+//     the declarative harness launch itself proceeds;
+//   - in the allowed case, staging I/O errors warn on stderr without failing
+//     the launch.
+func stageFallbackCaptureAuthAssets(
+	ctx context.Context,
+	agentName string,
+	h api.Harness,
+	harnessConfigName string,
+	hcDir *config.HarnessConfigDir,
+	agentHome string,
+	writeHome func(func() error) error,
+) {
+	if _, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript || hcDir == nil || hcDir.Path == "" {
+		return
+	}
+	if policy := config.HarnessConfigPolicyFromContext(ctx); policy != nil {
+		_, statErr := os.Lstat(filepath.Join(hcDir.Path, "capture_auth.py"))
+		if statErr == nil || !errors.Is(statErr, os.ErrNotExist) || hasCaptureAuthCredentials(hcDir.Config.Auth) {
+			probe := hcDir.Config
+			probe.Provisioner = &config.HarnessProvisionerConfig{Type: "container-script"}
+			if err := policy(harnessConfigName, probe); err != nil {
+				if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+					fmt.Fprintf(os.Stderr, "Warning: capture-auth asset check failed; skipping staging under policy: %v\n", statErr)
+				}
+				harnessName := ""
+				if h != nil {
+					harnessName = h.Name()
+				}
+				slog.Info("capture-auth asset staging suppressed",
+					"agent", agentName,
+					"harness", harnessName,
+					"harness_config", harnessConfigName,
+					"reason", "container-script harnesses disallowed",
+				)
+				return
+			}
+		}
+	}
+	stage := func() error {
+		return harness.StageCaptureAuthAssets(agentHome, hcDir.Path, hcDir.Config.Auth)
+	}
+	var err error
+	if writeHome != nil {
+		err = writeHome(stage)
+	} else {
+		err = stage()
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: capture-auth asset staging failed: %v\n", err)
+	}
+}
+
+func hasCaptureAuthCredentials(authMeta *config.HarnessAuthMetadata) bool {
+	if authMeta == nil {
+		return false
+	}
+	for _, authType := range authMeta.Types {
+		for _, rf := range authType.RequiredFiles {
+			if rf.Name != "" && rf.TargetSuffix != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // controlPlaneInputsDirName is the directory, in the agent directory (outside
 // every container mount, unlike the agent home), holding the control plane's copy
 // of the per-agent inputs ProvisionAgent stages for a container-script
