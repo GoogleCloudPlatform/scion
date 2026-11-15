@@ -364,6 +364,8 @@ func TestStatusHandler_TurnEndErrorOutsideRunningIsIgnored(t *testing.T) {
 // harness-progress events that clear harness_error (model-start, an
 // error-free model-end, tool-start) keep it. A turn that ends on an error
 // after idle is newer than idle and replaces it, as it replaces blocked.
+// The watchdogs never replace idle: see the idle rows of
+// TestAPIErrorWatchdog_Guards and TestFirstTurnWatchdog's sticky table.
 func TestStatusHandler_IdleAndHarnessError(t *testing.T) {
 	const idle = `{"phase":"running","activity":"idle","detail":{"message":"no task assigned"}}`
 	for _, tt := range []struct {
@@ -394,15 +396,5 @@ func TestStatusHandler_IdleAndHarnessError(t *testing.T) {
 		info := readAgentInfoMap(t, h.StatusPath)
 		assert.Equal(t, "harness_error", info["activity"])
 		assert.Equal(t, "model API: APIError (status 400)", detailMessage(info))
-	})
-	t.Run("the watchdogs' conditional write never replaces idle", func(t *testing.T) {
-		h := newTempStatusHandler(t)
-		writeAgentInfoJSON(t, h, idle)
-		wrote, err := h.SetHarnessErrorIf("harness did not start the initial task", func(a state.Activity) bool {
-			return a != "" && !a.IsSticky()
-		})
-		require.NoError(t, err)
-		assert.False(t, wrote)
-		assert.Equal(t, "idle", readAgentInfoMap(t, h.StatusPath)["activity"])
 	})
 }

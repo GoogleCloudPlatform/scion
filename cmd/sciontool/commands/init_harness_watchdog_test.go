@@ -355,12 +355,14 @@ func TestAPIErrorWatchdog_QuietPeriodRestartsOnHookActivity(t *testing.T) {
 }
 
 func TestAPIErrorWatchdog_Guards(t *testing.T) {
-	for _, activity := range []string{"executing", "waiting_for_input", "blocked", "completed", "initializing"} {
+	for _, activity := range []string{"executing", "waiting_for_input", "blocked", "idle", "completed", "initializing"} {
 		t.Run("activity "+activity, func(t *testing.T) {
 			f := newWatchdogFixture(t, activity)
 			f.outcome(time.Second, false, 401, "bad key")
 			var reported time.Time
-			assert.False(t, f.check(time.Minute, &reported))
+			// Past both grace periods, so only the activity guard can
+			// hold the report back.
+			assert.False(t, f.check(3*time.Minute, &reported))
 			assert.Equal(t, activity, f.info()["activity"])
 		})
 	}
@@ -551,7 +553,7 @@ func TestFirstTurnWatchdog(t *testing.T) {
 		run(f)
 		assert.Equal(t, "harness_error", f.info()["activity"])
 	})
-	for _, activity := range []string{"waiting_for_input", "blocked", "completed", "harness_error"} {
+	for _, activity := range []string{"waiting_for_input", "blocked", "idle", "completed", "harness_error"} {
 		t.Run("keeps sticky "+activity, func(t *testing.T) {
 			f := newWatchdogFixture(t, activity)
 			run(f)

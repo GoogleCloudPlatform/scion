@@ -1990,7 +1990,7 @@ type MessageRequest struct {
 	Interrupt bool `json:"interrupt,omitempty"`
 
 	// Notify subscribes the sender to status notifications for this agent
-	// (COMPLETED, WAITING_FOR_INPUT, LIMITS_EXCEEDED, STALLED, ERROR,
+	// (COMPLETED, IDLE, WAITING_FOR_INPUT, LIMITS_EXCEEDED, STALLED, ERROR,
 	// HARNESS_ERROR, HALTED).
 	Notify bool `json:"notify,omitempty"`
 
