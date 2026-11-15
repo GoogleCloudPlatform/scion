@@ -768,4 +768,19 @@ type DecisionStore interface {
 	// the distinct chat keys that have at least one decision (a subset of
 	// chatKeys, in no particular order).
 	ListDecisionFacets(ctx context.Context, projectIDs, chatKeys []string) (agents, answerers []ProjectDecisionActor, convKeys []string, err error)
+
+	// ProjectsWithDecisions returns the distinct project IDs in projectIDs
+	// that have at least one row in decisions, ordered by each project's
+	// most recent decision (created_at DESC, project_id ASC). Empty
+	// projectIDs returns (nil, nil) without querying.
+	ProjectsWithDecisions(ctx context.Context, projectIDs []string) ([]string, error)
+
+	// ListDecisionAnswersPerProject lists up to perProject newest
+	// append-only decision_answers entries per project in projectIDs whose
+	// decision's chat_key is in chatKeys, filtered by filter and ordered
+	// within each project by (created_at DESC, id DESC). Projects with no
+	// matching answers are omitted from the returned map. perProject must
+	// be in [0, MaxDecisionListLimit]; 0 or empty projectIDs/chatKeys
+	// validates inputs and returns (nil, nil).
+	ListDecisionAnswersPerProject(ctx context.Context, projectIDs, chatKeys []string, filter ProjectDecisionAnswerFilter, perProject int) (map[string][]*ProjectDecisionAnswerEntry, error)
 }
