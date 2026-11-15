@@ -10,6 +10,7 @@ import (
 	"entgo.io/ent"
 	"entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecrun"
 	"github.com/google/uuid"
 )
 
@@ -63,8 +64,31 @@ type ScheduledEvent struct {
 	// ScheduleID holds the value of the "schedule_id" field.
 	ScheduleID string `json:"schedule_id,omitempty"`
 	// Created holds the value of the "created" field.
-	Created      time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created,omitempty"`
+	// Edges holds the relations/edges for other nodes in the graph.
+	// The values are being populated by the ScheduledEventQuery when eager-loading is set.
+	Edges        ScheduledEventEdges `json:"edges"`
 	selectValues sql.SelectValues
+}
+
+// ScheduledEventEdges holds the relations/edges for other nodes in the graph.
+type ScheduledEventEdges struct {
+	// ExecRun holds the value of the exec_run edge.
+	ExecRun *ScheduledExecRun `json:"exec_run,omitempty"`
+	// loadedTypes holds the information for reporting if a
+	// type was loaded (or requested) in eager-loading or not.
+	loadedTypes [1]bool
+}
+
+// ExecRunOrErr returns the ExecRun value or an error if the edge
+// was not loaded in eager-loading, or loaded but was not found.
+func (e ScheduledEventEdges) ExecRunOrErr() (*ScheduledExecRun, error) {
+	if e.ExecRun != nil {
+		return e.ExecRun, nil
+	} else if e.loadedTypes[0] {
+		return nil, &NotFoundError{label: scheduledexecrun.Label}
+	}
+	return nil, &NotLoadedError{edge: "exec_run"}
 }
 
 // scanValues returns the types for scanning values from sql.Rows.
@@ -260,6 +284,11 @@ func (_m *ScheduledEvent) assignValues(columns []string, values []any) error {
 // This includes values selected through modifiers, order, etc.
 func (_m *ScheduledEvent) Value(name string) (ent.Value, error) {
 	return _m.selectValues.Get(name)
+}
+
+// QueryExecRun queries the "exec_run" edge of the ScheduledEvent entity.
+func (_m *ScheduledEvent) QueryExecRun() *ScheduledExecRunQuery {
+	return NewScheduledEventClient(_m.config).QueryExecRun(_m)
 }
 
 // Update returns a builder for updating this ScheduledEvent.

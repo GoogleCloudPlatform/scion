@@ -170,10 +170,10 @@ const ConduitDeliver = "hub.conduit_deliver"
 // session (the exec-start and exec-status control routes,
 // .design/conduit/exec-control-routes.md). It requires hub.conduit: the hub
 // sends it to agents at launch only while conduit is served, and an agent
-// launched with it registers the two routes. The hub-side gating of exec
-// schedules (authoring and fire time) lands with ptone/scion#7883; until
-// then turning it on only makes newly launched agents advertise the routes,
-// which nothing in the hub calls.
+// launched with it registers the two routes. The hub checks both flags when
+// an exec event is created and again when it fires (a fire with either off
+// is skipped); turning either off stops new runs but not the outcome
+// recovery of runs already started (ptone/scion#7883).
 const ExecSchedules = "hub.exec_schedules"
 
 // Artifacts gates the artifact service (pkg/artifacts): the hub's
@@ -719,7 +719,7 @@ var compiled = []Experiment{
 	{
 		Name:        ExecSchedules,
 		Title:       "Exec schedules",
-		Description: "Exec-only schedules: run a command in an agent's container on a schedule, over the agent's Conduit session, with no message and no LLM turn. Requires hub.conduit. Agents launched while it is on advertise the exec-start and exec-status control routes; agents started before it was turned on do not until they restart. Until scheduling exec commands lands (ptone/scion#7883), turning it on only makes newly launched agents advertise those routes; nothing in the hub calls them.",
+		Description: "Exec-only schedules: run a command in an agent's container at a scheduled time, over the agent's Conduit session, with no message and no LLM turn. Requires hub.conduit. One-shot exec events only for now (API: eventType exec on scheduled-events); the creator needs attach permission on the target agent, at creation and at every fire. Command output is not stored, and the command is shown only to callers who may attach to the target. Agents launched while it is on advertise the exec-start and exec-status control routes; agents started before it was turned on do not until they restart, and their runs are skipped. While either flag is off, exec events are refused at creation and skipped when they fire.",
 		Default:     false,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,

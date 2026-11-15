@@ -92,6 +92,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimeorphan"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schedule"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skill"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillinjection"
@@ -250,6 +251,7 @@ func checkColumn(t, c string) error {
 			runtimeorphan.Table:                 runtimeorphan.ValidColumn,
 			schedule.Table:                      schedule.ValidColumn,
 			scheduledevent.Table:                scheduledevent.ValidColumn,
+			scheduledexecrun.Table:              scheduledexecrun.ValidColumn,
 			secret.Table:                        secret.ValidColumn,
 			skill.Table:                         skill.ValidColumn,
 			skillinjection.Table:                skillinjection.ValidColumn,

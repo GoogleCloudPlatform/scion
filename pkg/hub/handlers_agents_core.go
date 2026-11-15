@@ -5380,19 +5380,32 @@ func (s *Server) awaitAgentDeletion(w http.ResponseWriter, r *http.Request, plan
 
 // cancelScheduledEventsForAgent cancels all pending scheduled events that
 // target the given agent, preventing orphaned events from firing after deletion.
+//
+// It pages through every pending event of the project (following
+// NextCursor), so a target's events on later pages are cancelled too
+// (AC11, ptone/scion#7883).
 func (s *Server) cancelScheduledEventsForAgent(ctx context.Context, agent *store.Agent) {
-	result, err := s.store.ListScheduledEvents(ctx, store.ScheduledEventFilter{
-		ProjectID: agent.ProjectID,
-		Status:    store.ScheduledEventPending,
-	}, store.ListOptions{Limit: 1000})
-	if err != nil {
-		s.agentLifecycleLog.Warn("Failed to list scheduled events for cleanup",
-			"agent_id", agent.ID, "error", err)
-		return
+	var pending []store.ScheduledEvent
+	cursor := ""
+	for {
+		result, err := s.store.ListScheduledEvents(ctx, store.ScheduledEventFilter{
+			ProjectID: agent.ProjectID,
+			Status:    store.ScheduledEventPending,
+		}, store.ListOptions{Limit: 1000, Cursor: cursor, SkipTotalCount: true})
+		if err != nil {
+			s.agentLifecycleLog.Warn("Failed to list scheduled events for cleanup",
+				"agent_id", agent.ID, "error", err)
+			break
+		}
+		pending = append(pending, result.Items...)
+		if result.NextCursor == "" || result.NextCursor == cursor || len(result.Items) == 0 {
+			break
+		}
+		cursor = result.NextCursor
 	}
 
 	var cancelled int
-	for _, evt := range result.Items {
+	for _, evt := range pending {
 		if !eventTargetsAgent(evt, agent) {
 			continue
 		}

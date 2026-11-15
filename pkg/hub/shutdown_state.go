@@ -178,6 +178,7 @@ func (s *Server) haltDispatchProducers() {
 		scheduler.halt()
 	}
 	s.scheduledWakeFires.closeAdmission()
+	s.execRuns.work.closeAdmission()
 	s.haltScheduledSendSweeper()
 	s.haltAutoSuspendWorker()
 }

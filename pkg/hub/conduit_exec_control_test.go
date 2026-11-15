@@ -118,6 +118,7 @@ func TestAgentExecClient_RoundTrip(t *testing.T) {
 		name := map[bool]string{false: "local", true: "cross-node"}[crossNode]
 		t.Run(name, func(t *testing.T) {
 			f := newPTYConduitFixture(t)
+			enableExecSchedules(t, f.srv)
 			hubURL := f.public.URL
 			if crossNode {
 				hubURL = f.startPeerRelay(t, "hub-b")
@@ -168,6 +169,7 @@ func TestAgentExecClient_RoundTrip(t *testing.T) {
 // error and nothing is sent.
 func TestAgentExecClient_NotReached(t *testing.T) {
 	f := newPTYConduitFixture(t)
+	enableExecSchedules(t, f.srv)
 	ctx := context.Background()
 	_, err := f.srv.StartAgentExecRun(ctx, f.launched.ID, f.launched.RunID, execStartReq("true"))
 	require.ErrorIs(t, err, router.ErrNoSession)
@@ -188,6 +190,7 @@ func TestAgentExecClient_NotReached(t *testing.T) {
 // schema is an error wrapping ErrExecSchema, never a success.
 func TestAgentExecClient_SchemaMismatchIsError(t *testing.T) {
 	f := newPTYConduitFixture(t)
+	enableExecSchedules(t, f.srv)
 	var mu sync.Mutex
 	var status int32
 	var body string
@@ -233,6 +236,7 @@ func TestAgentExecClient_SchemaMismatchIsError(t *testing.T) {
 // is refused by the hub before anything is sent.
 func TestAgentExecClient_InvalidRequestNotSent(t *testing.T) {
 	f := newPTYConduitFixture(t)
+	enableExecSchedules(t, f.srv)
 	c := &execCapture{}
 	ca := f.startControlAgentWithOptions(t, f.public.URL, true, execControlOptions(t), c.wrap)
 	bad := execStartReq("a\x00b")
@@ -253,6 +257,7 @@ func TestAgentExecClient_InvalidRequestNotSent(t *testing.T) {
 // another launch (or with no launch) sends nothing.
 func TestAgentExecClient_LaunchPinned(t *testing.T) {
 	f := newPTYConduitFixture(t)
+	enableExecSchedules(t, f.srv)
 	ctx := context.Background()
 	ca := f.startControlAgentWithOptions(t, f.public.URL, true, execControlOptions(t), (&execCapture{}).wrap)
 	_, err := f.srv.StartAgentExecRun(ctx, f.launched.ID, "other-launch", execStartReq("true"))
@@ -309,6 +314,7 @@ func TestAgentExecClient_StaleSnapshotNeverReachesReplacement(t *testing.T) {
 				wrapped = &staleSnapshotStore{Store: s.store, oldLaunch: "old-launch"}
 				s.store = wrapped
 			})
+			enableExecSchedules(t, f.srv)
 			hubURL := f.public.URL
 			if crossNode {
 				hubURL = f.startPeerRelay(t, "hub-b")
@@ -344,6 +350,7 @@ func TestAgentExecClient_StaleSnapshotNeverReachesReplacement(t *testing.T) {
 // launch: it is refused before anything is sent.
 func TestAgentExecClient_GenerationFallbackSessionRefused(t *testing.T) {
 	f := newPTYConduitFixture(t)
+	enableExecSchedules(t, f.srv)
 	ca := f.startControlAgentAs(t, f.public.URL, "", true, execControlOptions(t), (&execCapture{}).wrap)
 	ctx := context.Background()
 	_, err := f.srv.StartAgentExecRun(ctx, f.launched.ID, f.launched.RunID, execStartReq("true"))
@@ -361,6 +368,7 @@ func TestAgentExecClient_CallTimeout(t *testing.T) {
 		t.Skip("waits for the 30s exec call timeout")
 	}
 	f := newPTYConduitFixture(t)
+	enableExecSchedules(t, f.srv)
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
 	c := &execCapture{answer: func(*conduitv1.RpcRequest) *conduitv1.RpcResponse {
@@ -469,12 +477,13 @@ func TestExecControlRoutes_NotReachableThroughDeliver(t *testing.T) {
 
 // TestExecControlCallers guards the amendment's first bound: in pkg/hub,
 // only conduit_exec_control.go names the exec routes, and the typed
-// client is called from no other non-test file until the scheduler's exec
-// handler, tracker and sweeper (ptone/scion#7883) are added to
-// allowedCallers. No user-facing endpoint may ever be added there.
+// client is called from no other non-test file than the scheduler's exec
+// fire, run tracker and sweeper (scheduled_exec_fire.go, ptone/scion#7883).
+// No user-facing endpoint may ever be added there.
 func TestExecControlCallers(t *testing.T) {
 	allowedCallers := map[string]bool{
 		"conduit_exec_control.go": true,
+		"scheduled_exec_fire.go":  true,
 	}
 	fset := token.NewFileSet()
 	// pkgmove:scan-covers guardScanSubdirs
@@ -511,3 +520,10 @@ func TestExecControlCallers(t *testing.T) {
 }
 
 func execRoutePath(route string) string { return agentControlPrefix + route }
+
+// enableExecSchedules turns on the hub gate of exec-start (hub.conduit and
+// hub.exec_schedules, AC18).
+func enableExecSchedules(t *testing.T, srv *Server) {
+	t.Helper()
+	setHubExperiments(t, srv, map[string]bool{conduitExperiment: true, experiments.ExecSchedules: true})
+}

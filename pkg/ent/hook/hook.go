@@ -969,6 +969,18 @@ func (f ScheduledEventFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Val
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.ScheduledEventMutation", m)
 }
 
+// The ScheduledExecRunFunc type is an adapter to allow the use of ordinary
+// function as ScheduledExecRun mutator.
+type ScheduledExecRunFunc func(context.Context, *ent.ScheduledExecRunMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f ScheduledExecRunFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.ScheduledExecRunMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.ScheduledExecRunMutation", m)
+}
+
 // The SecretFunc type is an adapter to allow the use of ordinary
 // function as Secret mutator.
 type SecretFunc func(context.Context, *ent.SecretMutation) (ent.Value, error)

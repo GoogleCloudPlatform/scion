@@ -259,14 +259,18 @@ func (f *ptyConduitFixture) startControlAgentAs(t *testing.T, hubURL, launchID s
 		defer close(exited)
 		_ = a.Run(ctx)
 	}()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case <-exited:
-		case <-time.After(10 * time.Second):
-			t.Error("conduit agent did not stop")
-		}
-	})
+	var stopOnce sync.Once
+	ca.stop = func() {
+		stopOnce.Do(func() {
+			cancel()
+			select {
+			case <-exited:
+			case <-time.After(10 * time.Second):
+				t.Error("conduit agent did not stop")
+			}
+		})
+	}
+	t.Cleanup(ca.stop)
 	select {
 	case <-admitted:
 	case <-time.After(10 * time.Second):

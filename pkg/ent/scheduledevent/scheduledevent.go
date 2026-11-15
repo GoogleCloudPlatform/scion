@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"entgo.io/ent/dialect/sql"
+	"entgo.io/ent/dialect/sql/sqlgraph"
 	"github.com/google/uuid"
 )
 
@@ -60,8 +61,17 @@ const (
 	FieldScheduleID = "schedule_id"
 	// FieldCreated holds the string denoting the created field in the database.
 	FieldCreated = "created"
+	// EdgeExecRun holds the string denoting the exec_run edge name in mutations.
+	EdgeExecRun = "exec_run"
 	// Table holds the table name of the scheduledevent in the database.
 	Table = "scheduled_events"
+	// ExecRunTable is the table that holds the exec_run relation/edge.
+	ExecRunTable = "scheduled_exec_runs"
+	// ExecRunInverseTable is the table name for the ScheduledExecRun entity.
+	// It exists in this package in order to avoid circular dependency with the "scheduledexecrun" package.
+	ExecRunInverseTable = "scheduled_exec_runs"
+	// ExecRunColumn is the table column denoting the exec_run relation/edge.
+	ExecRunColumn = "event_id"
 )
 
 // Columns holds all SQL columns for scheduledevent fields.
@@ -244,4 +254,18 @@ func ByScheduleID(opts ...sql.OrderTermOption) OrderOption {
 // ByCreated orders the results by the created field.
 func ByCreated(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldCreated, opts...).ToFunc()
+}
+
+// ByExecRunField orders the results by exec_run field.
+func ByExecRunField(field string, opts ...sql.OrderTermOption) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborTerms(s, newExecRunStep(), sql.OrderByField(field, opts...))
+	}
+}
+func newExecRunStep() *sqlgraph.Step {
+	return sqlgraph.NewStep(
+		sqlgraph.From(Table, FieldID),
+		sqlgraph.To(ExecRunInverseTable, FieldID),
+		sqlgraph.Edge(sqlgraph.O2O, false, ExecRunTable, ExecRunColumn),
+	)
 }

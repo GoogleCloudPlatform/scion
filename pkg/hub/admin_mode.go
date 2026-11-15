@@ -301,10 +301,12 @@ func (s *Server) handleAdminScheduler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Exec argv is never shown here (D3): the admin view reveals nothing.
+	rev := s.noExecRevealer(r.Context())
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"scheduler":          status,
-		"scheduledEvents":    events,
-		"recurringSchedules": schedules,
+		"scheduledEvents":    s.scheduledEventResponses(r.Context(), rev, events),
+		"recurringSchedules": scheduleResponses(rev, schedules),
 		"serverTime":         time.Now().UTC(),
 	})
 }

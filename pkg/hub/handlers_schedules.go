@@ -71,11 +71,11 @@ const ScheduleListScopeCaller = "caller"
 
 // ListSchedulesResponse is the API response for listing schedules.
 type ListSchedulesResponse struct {
-	Scope      string           `json:"scope,omitempty"`
-	Schedules  []store.Schedule `json:"schedules"`
-	NextCursor string           `json:"nextCursor,omitempty"`
-	TotalCount int              `json:"totalCount,omitempty"`
-	ServerTime time.Time        `json:"serverTime"`
+	Scope      string             `json:"scope,omitempty"`
+	Schedules  []ScheduleResponse `json:"schedules"`
+	NextCursor string             `json:"nextCursor,omitempty"`
+	TotalCount int                `json:"totalCount,omitempty"`
+	ServerTime time.Time          `json:"serverTime"`
 }
 
 // handleSchedules routes requests under /api/v1/projects/{projectId}/schedules[/{id}[/{action}]]
@@ -210,6 +210,7 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request, project
 // createSchedule handles POST /api/v1/projects/{projectId}/schedules
 func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectID string) {
 	var req CreateScheduleRequest
+	r.Body = http.MaxBytesReader(w, r.Body, scheduleRequestBodyLimit)
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
@@ -377,11 +378,11 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 	// Fetch the created schedule to get the full record
 	created, err := s.store.GetSchedule(r.Context(), schedule.ID)
 	if err != nil {
-		writeJSON(w, http.StatusCreated, schedule)
+		writeJSON(w, http.StatusCreated, scheduleResponse(s.newExecRevealer(r.Context()), schedule))
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, created)
+	writeJSON(w, http.StatusCreated, scheduleResponse(s.newExecRevealer(r.Context()), *created))
 }
 
 // writeScheduleNameConflict writes the 409 Conflict response when creating or
@@ -438,7 +439,7 @@ func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request, projectID
 	if !ok {
 		writeJSON(w, http.StatusOK, ListSchedulesResponse{
 			Scope:      scope,
-			Schedules:  []store.Schedule{},
+			Schedules:  []ScheduleResponse{},
 			ServerTime: time.Now().UTC(),
 		})
 		return
@@ -459,7 +460,7 @@ func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request, projectID
 	schedules, totalCount := visibleScheduledRows(r.Context(), s, projectID, result.Items, result.TotalCount, scheduleRow)
 	writeJSON(w, http.StatusOK, ListSchedulesResponse{
 		Scope:      scope,
-		Schedules:  schedules,
+		Schedules:  scheduleResponses(s.newExecRevealer(r.Context()), schedules),
 		NextCursor: result.NextCursor,
 		TotalCount: totalCount,
 		ServerTime: time.Now().UTC(),
@@ -476,7 +477,7 @@ func (s *Server) getSchedule(w http.ResponseWriter, r *http.Request, projectID, 
 		return
 	}
 
-	writeJSON(w, http.StatusOK, schedule)
+	writeJSON(w, http.StatusOK, scheduleResponse(s.newExecRevealer(r.Context()), *schedule))
 }
 
 // updateSchedule handles PATCH /api/v1/projects/{projectId}/schedules/{id}
@@ -495,6 +496,7 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 	originalPayload := schedule.Payload
 
 	var req UpdateScheduleRequest
+	r.Body = http.MaxBytesReader(w, r.Body, scheduleRequestBodyLimit)
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
@@ -704,7 +706,7 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 		return
 	}
 
-	writeJSON(w, http.StatusOK, schedule)
+	writeJSON(w, http.StatusOK, scheduleResponse(s.newExecRevealer(r.Context()), *schedule))
 }
 
 // deleteSchedule handles DELETE /api/v1/projects/{projectId}/schedules/{id}
@@ -763,7 +765,7 @@ func (s *Server) pauseSchedule(w http.ResponseWriter, r *http.Request, projectID
 	}
 
 	schedule.Status, schedule.StatusReason = store.ScheduleStatusPaused, store.ScheduleStatusReasonNone
-	writeJSON(w, http.StatusOK, schedule)
+	writeJSON(w, http.StatusOK, scheduleResponse(s.newExecRevealer(r.Context()), *schedule))
 }
 
 // resumeSchedule handles POST /api/v1/projects/{projectId}/schedules/{id}/resume
@@ -844,7 +846,7 @@ func (s *Server) resumeSchedule(w http.ResponseWriter, r *http.Request, projectI
 		return
 	}
 
-	writeJSON(w, http.StatusOK, schedule)
+	writeJSON(w, http.StatusOK, scheduleResponse(s.newExecRevealer(r.Context()), *schedule))
 }
 
 // getScheduleHistory handles GET /api/v1/projects/{projectId}/schedules/{id}/history
@@ -870,7 +872,7 @@ func (s *Server) getScheduleHistory(w http.ResponseWriter, r *http.Request, proj
 	}
 
 	writeJSON(w, http.StatusOK, ListScheduledEventsResponse{
-		Events:     result.Items,
+		Events:     s.scheduledEventResponses(r.Context(), s.newExecRevealer(r.Context()), result.Items),
 		NextCursor: result.NextCursor,
 		TotalCount: result.TotalCount,
 		ServerTime: time.Now().UTC(),

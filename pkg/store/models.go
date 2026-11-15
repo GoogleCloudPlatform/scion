@@ -3867,7 +3867,85 @@ const (
 	ScheduledEventCancelled = "cancelled"
 	ScheduledEventExpired   = "expired" // Loaded on startup past its fire time
 	ScheduledEventFailed    = "failed"
+	// ScheduledEventSkipped: the fire ran nothing because a precondition
+	// did not hold (target not running, no executor, experiment off,
+	// capacity, missed window). It is not an error (ptone/scion#7883, D4).
+	ScheduledEventSkipped = "skipped"
 )
+
+// ScheduledExecRun is the durable record of one admitted run of a scheduled
+// exec event (ptone/scion#7883): one row per event, written before
+// exec-start is sent. It never holds argv or command output. Every field but
+// the outcome group (FinishedAt, Outcome, ExitCode, DurationMS, OutputBytes)
+// is fixed at insert.
+type ScheduledExecRun struct {
+	EventID       string
+	ScheduleID    string // empty for a one-shot event
+	ProjectID     string
+	TargetAgentID string
+
+	InitiatorPrincipalKind  string
+	InitiatorPrincipalID    string
+	InitiatorCredentialKind string
+	InitiatorCredentialID   string
+	AuthorizationRevision   int
+
+	ExecutorKind string
+	ExecutorID   string
+
+	CommandSHA256  string
+	Argc           int
+	TimeoutSeconds int
+
+	StartedAt time.Time
+	// NotAfter is the start-admission deadline sent with exec-start,
+	// frozen at admission (zero: StartedAt).
+	NotAfter   time.Time
+	LeaseUntil time.Time
+	FinishedAt *time.Time
+
+	Outcome     string // ScheduledExecOutcome*
+	ExitCode    *int
+	DurationMS  *int64
+	OutputBytes *int64
+
+	Runtime  string
+	LaunchID string
+
+	// LastPolledAt is when the sweeper last claimed the run for a status
+	// poll (StartedAt at insert).
+	LastPolledAt time.Time
+}
+
+// Outcomes of a ScheduledExecRun. Starting and running are unfinished
+// (FinishedAt nil); the others are final.
+const (
+	ScheduledExecOutcomeStarting  = "starting"
+	ScheduledExecOutcomeRunning   = "running"
+	ScheduledExecOutcomeOK        = "ok"
+	ScheduledExecOutcomeNonzero   = "nonzero"
+	ScheduledExecOutcomeTimeout   = "timeout"
+	ScheduledExecOutcomeSkipped   = "skipped"
+	ScheduledExecOutcomeError     = "error"
+	ScheduledExecOutcomeAbandoned = "abandoned"
+)
+
+// ScheduledExecRunFinish is the final outcome FinishScheduledExecRun records
+// on a run, and the status it records on the run's event.
+type ScheduledExecRunFinish struct {
+	EventID     string
+	FinishedAt  time.Time
+	Outcome     string // a final ScheduledExecOutcome*
+	ExitCode    *int
+	DurationMS  *int64
+	OutputBytes *int64
+	// EventStatus, when not empty, is written to the run's event (with
+	// EventError) in the same transaction, but only while the event is still
+	// fired or expired: a run's outcome never overwrites a recorded event
+	// outcome.
+	EventStatus string
+	EventError  string
+}
 
 // ScheduledEventFilter for listing events.
 type ScheduledEventFilter struct {

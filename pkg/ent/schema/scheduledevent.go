@@ -20,6 +20,7 @@ import (
 	"entgo.io/ent"
 	"entgo.io/ent/dialect/entsql"
 	"entgo.io/ent/schema"
+	"entgo.io/ent/schema/edge"
 	"entgo.io/ent/schema/field"
 	"entgo.io/ent/schema/index"
 	"github.com/google/uuid"
@@ -77,6 +78,17 @@ func (ScheduledEvent) Fields() []ent.Field {
 		field.Time("created").
 			Default(time.Now).
 			Immutable(),
+	}
+}
+
+// Edges of the ScheduledEvent.
+func (ScheduledEvent) Edges() []ent.Edge {
+	return []ent.Edge{
+		// An exec event's run record (ptone/scion#7883); deleting the
+		// event deletes its run (ON DELETE CASCADE on the run's event_id).
+		edge.To("exec_run", ScheduledExecRun.Type).
+			Unique().
+			Annotations(entsql.OnDelete(entsql.Cascade)),
 	}
 }
 

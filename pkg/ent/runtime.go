@@ -85,6 +85,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimeorphan"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schedule"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schema"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skill"
@@ -2839,6 +2840,56 @@ func init() {
 	scheduledeventDescID := scheduledeventFields[0].Descriptor()
 	// scheduledevent.DefaultID holds the default value on creation for the id field.
 	scheduledevent.DefaultID = scheduledeventDescID.Default.(func() uuid.UUID)
+	scheduledexecrunFields := schema.ScheduledExecRun{}.Fields()
+	_ = scheduledexecrunFields
+	// scheduledexecrunDescInitiatorPrincipalKind is the schema descriptor for initiator_principal_kind field.
+	scheduledexecrunDescInitiatorPrincipalKind := scheduledexecrunFields[5].Descriptor()
+	// scheduledexecrun.DefaultInitiatorPrincipalKind holds the default value on creation for the initiator_principal_kind field.
+	scheduledexecrun.DefaultInitiatorPrincipalKind = scheduledexecrunDescInitiatorPrincipalKind.Default.(string)
+	// scheduledexecrunDescInitiatorPrincipalID is the schema descriptor for initiator_principal_id field.
+	scheduledexecrunDescInitiatorPrincipalID := scheduledexecrunFields[6].Descriptor()
+	// scheduledexecrun.DefaultInitiatorPrincipalID holds the default value on creation for the initiator_principal_id field.
+	scheduledexecrun.DefaultInitiatorPrincipalID = scheduledexecrunDescInitiatorPrincipalID.Default.(string)
+	// scheduledexecrunDescInitiatorCredentialKind is the schema descriptor for initiator_credential_kind field.
+	scheduledexecrunDescInitiatorCredentialKind := scheduledexecrunFields[7].Descriptor()
+	// scheduledexecrun.DefaultInitiatorCredentialKind holds the default value on creation for the initiator_credential_kind field.
+	scheduledexecrun.DefaultInitiatorCredentialKind = scheduledexecrunDescInitiatorCredentialKind.Default.(string)
+	// scheduledexecrunDescInitiatorCredentialID is the schema descriptor for initiator_credential_id field.
+	scheduledexecrunDescInitiatorCredentialID := scheduledexecrunFields[8].Descriptor()
+	// scheduledexecrun.DefaultInitiatorCredentialID holds the default value on creation for the initiator_credential_id field.
+	scheduledexecrun.DefaultInitiatorCredentialID = scheduledexecrunDescInitiatorCredentialID.Default.(string)
+	// scheduledexecrunDescAuthorizationRevision is the schema descriptor for authorization_revision field.
+	scheduledexecrunDescAuthorizationRevision := scheduledexecrunFields[9].Descriptor()
+	// scheduledexecrun.DefaultAuthorizationRevision holds the default value on creation for the authorization_revision field.
+	scheduledexecrun.DefaultAuthorizationRevision = scheduledexecrunDescAuthorizationRevision.Default.(int)
+	// scheduledexecrunDescExecutorKind is the schema descriptor for executor_kind field.
+	scheduledexecrunDescExecutorKind := scheduledexecrunFields[10].Descriptor()
+	// scheduledexecrun.DefaultExecutorKind holds the default value on creation for the executor_kind field.
+	scheduledexecrun.DefaultExecutorKind = scheduledexecrunDescExecutorKind.Default.(string)
+	// scheduledexecrunDescExecutorID is the schema descriptor for executor_id field.
+	scheduledexecrunDescExecutorID := scheduledexecrunFields[11].Descriptor()
+	// scheduledexecrun.DefaultExecutorID holds the default value on creation for the executor_id field.
+	scheduledexecrun.DefaultExecutorID = scheduledexecrunDescExecutorID.Default.(string)
+	// scheduledexecrunDescCommandSha256 is the schema descriptor for command_sha256 field.
+	scheduledexecrunDescCommandSha256 := scheduledexecrunFields[12].Descriptor()
+	// scheduledexecrun.CommandSha256Validator is a validator for the "command_sha256" field. It is called by the builders before save.
+	scheduledexecrun.CommandSha256Validator = scheduledexecrunDescCommandSha256.Validators[0].(func(string) error)
+	// scheduledexecrunDescStartedAt is the schema descriptor for started_at field.
+	scheduledexecrunDescStartedAt := scheduledexecrunFields[15].Descriptor()
+	// scheduledexecrun.DefaultStartedAt holds the default value on creation for the started_at field.
+	scheduledexecrun.DefaultStartedAt = scheduledexecrunDescStartedAt.Default.(func() time.Time)
+	// scheduledexecrunDescRuntime is the schema descriptor for runtime field.
+	scheduledexecrunDescRuntime := scheduledexecrunFields[23].Descriptor()
+	// scheduledexecrun.DefaultRuntime holds the default value on creation for the runtime field.
+	scheduledexecrun.DefaultRuntime = scheduledexecrunDescRuntime.Default.(string)
+	// scheduledexecrunDescLaunchID is the schema descriptor for launch_id field.
+	scheduledexecrunDescLaunchID := scheduledexecrunFields[24].Descriptor()
+	// scheduledexecrun.DefaultLaunchID holds the default value on creation for the launch_id field.
+	scheduledexecrun.DefaultLaunchID = scheduledexecrunDescLaunchID.Default.(string)
+	// scheduledexecrunDescID is the schema descriptor for id field.
+	scheduledexecrunDescID := scheduledexecrunFields[0].Descriptor()
+	// scheduledexecrun.DefaultID holds the default value on creation for the id field.
+	scheduledexecrun.DefaultID = scheduledexecrunDescID.Default.(func() uuid.UUID)
 	secretFields := schema.Secret{}.Fields()
 	_ = secretFields
 	// secretDescKey is the schema descriptor for key field.

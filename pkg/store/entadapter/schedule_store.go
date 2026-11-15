@@ -26,6 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schedule"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
@@ -768,16 +769,27 @@ func (s *ScheduleStore) DeleteSchedulesByProject(ctx context.Context, projectID 
 	if err != nil {
 		return 0, err
 	}
-	// First delete all scheduled events for this project's schedules.
-	if _, err := s.client.ScheduledEvent.Delete().
-		Where(scheduledevent.ProjectIDEQ(uid)).
-		Exec(ctx); err != nil {
-		return 0, err
-	}
-	// Then delete the schedules themselves.
-	n, err := s.client.Schedule.Delete().
-		Where(schedule.ProjectIDEQ(uid)).
-		Exec(ctx)
+	// One transaction: the project's scheduled exec runs
+	// (ptone/scion#7883), then its scheduled events (whose foreign key
+	// would cascade to any run inserted meanwhile), then the schedules.
+	var n int
+	err = runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
+		if _, err := c.ScheduledExecRun.Delete().
+			Where(scheduledexecrun.ProjectIDEQ(uid)).
+			Exec(ctx); err != nil {
+			return err
+		}
+		if _, err := c.ScheduledEvent.Delete().
+			Where(scheduledevent.ProjectIDEQ(uid)).
+			Exec(ctx); err != nil {
+			return err
+		}
+		deleted, err := c.Schedule.Delete().
+			Where(schedule.ProjectIDEQ(uid)).
+			Exec(ctx)
+		n = deleted
+		return err
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -1203,17 +1215,36 @@ func (s *ScheduleStore) ListScheduledEvents(ctx context.Context, filter store.Sc
 		return nil, err
 	}
 
+	// Keyset pagination on (created DESC, id DESC), as ListSchedules: the
+	// cursor is the opaque token encodeCursor makes from the previous page's
+	// last row, and the predicate matches the order, so a full traversal
+	// visits every matching row whatever the relation between UUID and
+	// creation order (ptone/scion#7883 P2-R2). An id-only cursor (the
+	// earlier format, or any non-token value) is refused as invalid.
+	var (
+		cursorCreated time.Time
+		cursorID      uuid.UUID
+	)
 	if opts.Cursor != "" {
-		cursorUID, err := parseCursorUUID(opts.Cursor)
+		var err error
+		cursorCreated, cursorID, err = decodeCursor(opts.Cursor)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("invalid cursor: %w", err)
 		}
-		query.Where(scheduledevent.IDLT(cursorUID))
+		cursorCreated = cursorCreated.UTC()
+		query.Where(scheduledevent.Or(
+			scheduledevent.CreatedLT(cursorCreated),
+			scheduledevent.And(
+				scheduledevent.CreatedEQ(cursorCreated),
+				scheduledevent.IDLT(cursorID),
+			),
+		))
 	}
 
 	limit := clampLimit(opts.Limit)
 	entities, err := query.
 		Order(scheduledevent.ByCreated(entsql.OrderDesc())).
+		Order(scheduledevent.ByID(entsql.OrderDesc())).
 		Limit(limit + 1).
 		All(ctx)
 	if err != nil {
@@ -1228,11 +1259,25 @@ func (s *ScheduleStore) ListScheduledEvents(ctx context.Context, filter store.Sc
 	result := &store.ListResult[store.ScheduledEvent]{TotalCount: totalCount}
 	if len(events) > limit {
 		result.Items = events[:limit]
-		result.NextCursor = events[limit-1].ID
+		last := events[limit-1]
+		// No-progress guard, as ListSchedules.
+		if opts.Cursor == "" || eventCursorAdvances(last, cursorCreated, cursorID) {
+			result.NextCursor = encodeCursor(last.CreatedAt.UTC(), last.ID)
+		}
 	} else {
 		result.Items = events
 	}
 	return result, nil
+}
+
+// eventCursorAdvances reports whether row is strictly after the cursor
+// (created, id) in (created DESC, id DESC) order.
+func eventCursorAdvances(row store.ScheduledEvent, created time.Time, id uuid.UUID) bool {
+	rc := row.CreatedAt.UTC()
+	if !rc.Equal(created) {
+		return rc.Before(created)
+	}
+	return row.ID < id.String()
 }
 
 // PurgeOldScheduledEvents removes completed events (excluding pending and
@@ -1240,19 +1285,43 @@ func (s *ScheduleStore) ListScheduledEvents(ctx context.Context, filter store.Sc
 // expired and failed events); an event with no fired_at (a cancelled one)
 // falls back to created. So an event scheduled far ahead keeps its outcome for
 // the full period after it fires (ptone/scion#4517).
+//
+// The scheduled exec run of each purged event (ptone/scion#7883) is deleted
+// in the same transaction, before the events, by the same predicate; no
+// cascade is relied on.
 func (s *ScheduleStore) PurgeOldScheduledEvents(ctx context.Context, cutoff time.Time) (int, error) {
-	n, err := s.client.ScheduledEvent.Delete().
-		Where(
-			scheduledevent.StatusNotIn(store.ScheduledEventPending, store.ScheduledEventFiring),
-			scheduledevent.Or(
-				scheduledevent.FiredAtLT(cutoff),
-				scheduledevent.And(
-					scheduledevent.FiredAtIsNil(),
-					scheduledevent.CreatedLT(cutoff),
-				),
+	purgeable := []predicate.ScheduledEvent{
+		scheduledevent.StatusNotIn(store.ScheduledEventPending, store.ScheduledEventFiring),
+		scheduledevent.Or(
+			scheduledevent.FiredAtLT(cutoff),
+			scheduledevent.And(
+				scheduledevent.FiredAtIsNil(),
+				scheduledevent.CreatedLT(cutoff),
 			),
-		).
-		Exec(ctx)
+		),
+	}
+	var n int
+	err := runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
+		ids, err := c.ScheduledEvent.Query().Where(purgeable...).IDs(ctx)
+		if err != nil {
+			return err
+		}
+		for start := 0; start < len(ids); start += scheduledExecRunsByEventChunk {
+			end := min(start+scheduledExecRunsByEventChunk, len(ids))
+			chunk := ids[start:end]
+			if _, err := c.ScheduledExecRun.Delete().Where(scheduledexecrun.EventIDIn(chunk...)).Exec(ctx); err != nil {
+				return err
+			}
+			deleted, err := c.ScheduledEvent.Delete().
+				Where(append([]predicate.ScheduledEvent{scheduledevent.IDIn(chunk...)}, purgeable...)...).
+				Exec(ctx)
+			if err != nil {
+				return err
+			}
+			n += deleted
+		}
+		return nil
+	})
 	if err != nil {
 		return 0, err
 	}

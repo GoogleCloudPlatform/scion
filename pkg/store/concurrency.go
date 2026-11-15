@@ -289,6 +289,13 @@ const (
 	// unused gap of the range.
 	LockPendingSecretExpiry AdvisoryLockKey = 0x5C10001B
 
+	// LockScheduledExecRunSweep guards the scheduled exec run sweeper
+	// ("scheduled-exec-run-sweep", ptone/scion#7883), so one replica per tick
+	// polls the outcomes of unfinished exec runs no live tracker owns and
+	// records runs past their lease as abandoned. A value in an unused gap of
+	// the range.
+	LockScheduledExecRunSweep AdvisoryLockKey = 0x5C10001C
+
 	// LockPendingSecretOwnerWrite is the CLASS ID for the per-owner pending
 	// secret write lock: a transaction-scoped
 	// pg_advisory_xact_lock(classid, objid) with objid
@@ -297,6 +304,14 @@ const (
 	// checked and applied atomically. Like LockQuotaEnforcement it is in the
 	// per-object range; it is not taken through AdvisoryLocker.
 	LockPendingSecretOwnerWrite AdvisoryLockKey = 0x5C101004
+
+	// LockScheduledEventQuota is the CLASS ID for the per-project scheduled
+	// event quota lock: a transaction-scoped pg_advisory_xact_lock(classid,
+	// objid) with objid StableProjectHash(project ID), taken by
+	// CreateScheduledEventChecked so the exec schedule quotas
+	// (ptone/scion#7883) are checked and applied atomically across
+	// replicas. In the per-object range; not taken through AdvisoryLocker.
+	LockScheduledEventQuota AdvisoryLockKey = 0x5C101005
 )
 
 // AdvisoryLocker is implemented by backends that can take a cluster-wide

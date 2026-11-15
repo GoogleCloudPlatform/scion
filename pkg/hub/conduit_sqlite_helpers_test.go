@@ -990,6 +990,9 @@ type controlAgent struct {
 	kicks atomic.Int32
 	// paths receives the path of every RpcRequest (buffered).
 	paths chan string
+	// stop ends the agent's session and waits for it to exit (the agent
+	// stopped). Safe to call more than once.
+	stop func()
 }
 
 // listenGapPublisher is an in-process publisher whose "LISTEN connection"

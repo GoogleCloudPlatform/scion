@@ -403,6 +403,30 @@ func Spec() []TableFixture {
 				"event_type": "dispatch_agent", "fire_at": baseTime.Add(time.Hour),
 				"payload": `{"task":"run"}`, "status": "pending", "created_at": baseTime,
 			},
+			{
+				"id": "5e000000-0000-0000-0000-000000000002", "project_id": projectID,
+				"event_type": "exec", "fire_at": baseTime.Add(-time.Hour), "fired_at": baseTime.Add(-time.Hour),
+				"payload": `{"agentId":"` + agentID + `","command":["true"]}`, "status": "fired", "created_at": baseTime,
+			},
+		}},
+		// One admitted, finished exec run of the fired exec event above
+		// (ptone/scion#7883); event_id references scheduled_events.
+		{Table: "scheduled_exec_runs", Rows: []row{
+			{
+				"id": "5f000000-0000-0000-0000-000000000001", "event_id": "5e000000-0000-0000-0000-000000000002",
+				"project_id": projectID, "target_agent_id": agentID,
+				"initiator_principal_kind": "user", "initiator_principal_id": userID,
+				"initiator_credential_kind": "session", "initiator_credential_id": "",
+				"authorization_revision": 1, "executor_kind": "scheduler",
+				"executor_id":    "scheduled_event:5e000000-0000-0000-0000-000000000002",
+				"command_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+				"argc":           1, "timeout_seconds": 60,
+				"started_at": baseTime.Add(-time.Hour), "not_after": baseTime.Add(-time.Hour + time.Minute),
+				"lease_until": baseTime.Add(-time.Hour + 3*time.Minute), "finished_at": baseTime.Add(-time.Hour + time.Second),
+				"last_polled_at": baseTime.Add(-time.Hour),
+				"outcome":        "ok", "exit_code": 0, "duration_ms": 1000, "output_bytes": 0,
+				"runtime": "docker", "launch_id": "",
+			},
 		}},
 		{Table: "lifecycle_hooks", Rows: []row{
 			{

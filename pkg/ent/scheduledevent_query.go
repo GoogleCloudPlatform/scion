@@ -4,6 +4,7 @@ package ent
 
 import (
 	"context"
+	"database/sql/driver"
 	"fmt"
 	"math"
 
@@ -14,17 +15,19 @@ import (
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecrun"
 	"github.com/google/uuid"
 )
 
 // ScheduledEventQuery is the builder for querying ScheduledEvent entities.
 type ScheduledEventQuery struct {
 	config
-	ctx        *QueryContext
-	order      []scheduledevent.OrderOption
-	inters     []Interceptor
-	predicates []predicate.ScheduledEvent
-	modifiers  []func(*sql.Selector)
+	ctx         *QueryContext
+	order       []scheduledevent.OrderOption
+	inters      []Interceptor
+	predicates  []predicate.ScheduledEvent
+	withExecRun *ScheduledExecRunQuery
+	modifiers   []func(*sql.Selector)
 	// intermediate query (i.e. traversal path).
 	sql  *sql.Selector
 	path func(context.Context) (*sql.Selector, error)
@@ -59,6 +62,28 @@ func (_q *ScheduledEventQuery) Unique(unique bool) *ScheduledEventQuery {
 func (_q *ScheduledEventQuery) Order(o ...scheduledevent.OrderOption) *ScheduledEventQuery {
 	_q.order = append(_q.order, o...)
 	return _q
+}
+
+// QueryExecRun chains the current query on the "exec_run" edge.
+func (_q *ScheduledEventQuery) QueryExecRun() *ScheduledExecRunQuery {
+	query := (&ScheduledExecRunClient{config: _q.config}).Query()
+	query.path = func(ctx context.Context) (fromU *sql.Selector, err error) {
+		if err := _q.prepareQuery(ctx); err != nil {
+			return nil, err
+		}
+		selector := _q.sqlQuery(ctx)
+		if err := selector.Err(); err != nil {
+			return nil, err
+		}
+		step := sqlgraph.NewStep(
+			sqlgraph.From(scheduledevent.Table, scheduledevent.FieldID, selector),
+			sqlgraph.To(scheduledexecrun.Table, scheduledexecrun.FieldID),
+			sqlgraph.Edge(sqlgraph.O2O, false, scheduledevent.ExecRunTable, scheduledevent.ExecRunColumn),
+		)
+		fromU = sqlgraph.SetNeighbors(_q.driver.Dialect(), step)
+		return fromU, nil
+	}
+	return query
 }
 
 // First returns the first ScheduledEvent entity from the query.
@@ -248,15 +273,27 @@ func (_q *ScheduledEventQuery) Clone() *ScheduledEventQuery {
 		return nil
 	}
 	return &ScheduledEventQuery{
-		config:     _q.config,
-		ctx:        _q.ctx.Clone(),
-		order:      append([]scheduledevent.OrderOption{}, _q.order...),
-		inters:     append([]Interceptor{}, _q.inters...),
-		predicates: append([]predicate.ScheduledEvent{}, _q.predicates...),
+		config:      _q.config,
+		ctx:         _q.ctx.Clone(),
+		order:       append([]scheduledevent.OrderOption{}, _q.order...),
+		inters:      append([]Interceptor{}, _q.inters...),
+		predicates:  append([]predicate.ScheduledEvent{}, _q.predicates...),
+		withExecRun: _q.withExecRun.Clone(),
 		// clone intermediate query.
 		sql:  _q.sql.Clone(),
 		path: _q.path,
 	}
+}
+
+// WithExecRun tells the query-builder to eager-load the nodes that are connected to
+// the "exec_run" edge. The optional arguments are used to configure the query builder of the edge.
+func (_q *ScheduledEventQuery) WithExecRun(opts ...func(*ScheduledExecRunQuery)) *ScheduledEventQuery {
+	query := (&ScheduledExecRunClient{config: _q.config}).Query()
+	for _, opt := range opts {
+		opt(query)
+	}
+	_q.withExecRun = query
+	return _q
 }
 
 // GroupBy is used to group vertices by one or more fields/columns.
@@ -335,8 +372,11 @@ func (_q *ScheduledEventQuery) prepareQuery(ctx context.Context) error {
 
 func (_q *ScheduledEventQuery) sqlAll(ctx context.Context, hooks ...queryHook) ([]*ScheduledEvent, error) {
 	var (
-		nodes = []*ScheduledEvent{}
-		_spec = _q.querySpec()
+		nodes       = []*ScheduledEvent{}
+		_spec       = _q.querySpec()
+		loadedTypes = [1]bool{
+			_q.withExecRun != nil,
+		}
 	)
 	_spec.ScanValues = func(columns []string) ([]any, error) {
 		return (*ScheduledEvent).scanValues(nil, columns)
@@ -344,6 +384,7 @@ func (_q *ScheduledEventQuery) sqlAll(ctx context.Context, hooks ...queryHook) (
 	_spec.Assign = func(columns []string, values []any) error {
 		node := &ScheduledEvent{config: _q.config}
 		nodes = append(nodes, node)
+		node.Edges.loadedTypes = loadedTypes
 		return node.assignValues(columns, values)
 	}
 	if len(_q.modifiers) > 0 {
@@ -358,7 +399,41 @@ func (_q *ScheduledEventQuery) sqlAll(ctx context.Context, hooks ...queryHook) (
 	if len(nodes) == 0 {
 		return nodes, nil
 	}
+	if query := _q.withExecRun; query != nil {
+		if err := _q.loadExecRun(ctx, query, nodes, nil,
+			func(n *ScheduledEvent, e *ScheduledExecRun) { n.Edges.ExecRun = e }); err != nil {
+			return nil, err
+		}
+	}
 	return nodes, nil
+}
+
+func (_q *ScheduledEventQuery) loadExecRun(ctx context.Context, query *ScheduledExecRunQuery, nodes []*ScheduledEvent, init func(*ScheduledEvent), assign func(*ScheduledEvent, *ScheduledExecRun)) error {
+	fks := make([]driver.Value, 0, len(nodes))
+	nodeids := make(map[uuid.UUID]*ScheduledEvent)
+	for i := range nodes {
+		fks = append(fks, nodes[i].ID)
+		nodeids[nodes[i].ID] = nodes[i]
+	}
+	if len(query.ctx.Fields) > 0 {
+		query.ctx.AppendFieldOnce(scheduledexecrun.FieldEventID)
+	}
+	query.Where(predicate.ScheduledExecRun(func(s *sql.Selector) {
+		s.Where(sql.InValues(s.C(scheduledevent.ExecRunColumn), fks...))
+	}))
+	neighbors, err := query.All(ctx)
+	if err != nil {
+		return err
+	}
+	for _, n := range neighbors {
+		fk := n.EventID
+		node, ok := nodeids[fk]
+		if !ok {
+			return fmt.Errorf(`unexpected referenced foreign-key "event_id" returned %v for node %v`, fk, n.ID)
+		}
+		assign(node, n)
+	}
+	return nil
 }
 
 func (_q *ScheduledEventQuery) sqlCount(ctx context.Context) (int, error) {

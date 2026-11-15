@@ -2192,6 +2192,18 @@ type Server struct {
 	// can record the outcome of one it gave up waiting for.
 	runningWakeFires wakeFireRuns
 
+	// execRuns tracks scheduled exec runs in flight on this replica
+	// (ptone/scion#7883): the inline fires up to exec-start and the
+	// detached trackers that poll exec-status. Admission closes when the
+	// hub stops its dispatch producers; the teardown cancels what is still
+	// running without recording an outcome, so the sweeper records the real
+	// one after a restart.
+	execRuns scheduledExecRunTracker
+	// scheduledExecLimiterOnce creates scheduledExecAuthoringLimiter, the
+	// per-principal exec authoring rate limiter.
+	scheduledExecLimiterOnce      sync.Once
+	scheduledExecAuthoringLimiter *keysRateLimiter
+
 	// autoSuspend is the auto-suspend worker the stalled-detection tick
 	// hands stalled agents to (auto_suspend_worker.go).
 	autoSuspend autoSuspendWorker
@@ -7370,6 +7382,8 @@ func (s *Server) registerSchedulerHandlers() {
 	s.scheduler.RegisterRecurringSingleton("soft-delete-purge", 60, store.LockSoftDeletePurge, s.purgeHandler())
 	s.scheduler.RegisterEventHandler("message", s.messageEventHandler())
 	s.scheduler.RegisterEventHandler("dispatch_agent", s.dispatchAgentEventHandler())
+	s.scheduler.RegisterEventHandler(scheduledEventTypeExec, s.execEventHandler())
+	s.scheduler.RegisterRecurringSingleton("scheduled-exec-run-sweep", 1, store.LockScheduledExecRunSweep, s.scheduledExecRunSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("schedule-evaluator", 1, store.LockScheduleEvaluator, s.evaluateSchedulesHandler())
 	s.scheduler.RegisterRecurringSingleton("broker-heartbeat-timeout", 5, store.LockBrokerHeartbeatTimeout, s.brokerHeartbeatTimeoutHandler())
 	s.scheduler.RegisterRecurringSingleton("broker-affinity-reap", 5, store.LockBrokerAffinityReap, s.brokerAffinityReapHandler())
@@ -7885,6 +7899,7 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 			scheduler.Stop()
 		}
 		s.stopScheduledWakeFires(ctx)
+		s.stopScheduledExecRuns(ctx)
 		if notificationDispatcher != nil {
 			notificationDispatcher.Stop()
 		}

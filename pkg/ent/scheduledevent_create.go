@@ -13,6 +13,7 @@ import (
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecrun"
 	"github.com/google/uuid"
 )
 
@@ -328,6 +329,25 @@ func (_c *ScheduledEventCreate) SetNillableID(v *uuid.UUID) *ScheduledEventCreat
 	return _c
 }
 
+// SetExecRunID sets the "exec_run" edge to the ScheduledExecRun entity by ID.
+func (_c *ScheduledEventCreate) SetExecRunID(id uuid.UUID) *ScheduledEventCreate {
+	_c.mutation.SetExecRunID(id)
+	return _c
+}
+
+// SetNillableExecRunID sets the "exec_run" edge to the ScheduledExecRun entity by ID if the given value is not nil.
+func (_c *ScheduledEventCreate) SetNillableExecRunID(id *uuid.UUID) *ScheduledEventCreate {
+	if id != nil {
+		_c = _c.SetExecRunID(*id)
+	}
+	return _c
+}
+
+// SetExecRun sets the "exec_run" edge to the ScheduledExecRun entity.
+func (_c *ScheduledEventCreate) SetExecRun(v *ScheduledExecRun) *ScheduledEventCreate {
+	return _c.SetExecRunID(v.ID)
+}
+
 // Mutation returns the ScheduledEventMutation object of the builder.
 func (_c *ScheduledEventCreate) Mutation() *ScheduledEventMutation {
 	return _c.mutation
@@ -562,6 +582,22 @@ func (_c *ScheduledEventCreate) createSpec() (*ScheduledEvent, *sqlgraph.CreateS
 	if value, ok := _c.mutation.Created(); ok {
 		_spec.SetField(scheduledevent.FieldCreated, field.TypeTime, value)
 		_node.Created = value
+	}
+	if nodes := _c.mutation.ExecRunIDs(); len(nodes) > 0 {
+		edge := &sqlgraph.EdgeSpec{
+			Rel:     sqlgraph.O2O,
+			Inverse: false,
+			Table:   scheduledevent.ExecRunTable,
+			Columns: []string{scheduledevent.ExecRunColumn},
+			Bidi:    false,
+			Target: &sqlgraph.EdgeTarget{
+				IDSpec: sqlgraph.NewFieldSpec(scheduledexecrun.FieldID, field.TypeUUID),
+			},
+		}
+		for _, k := range nodes {
+			edge.Target.Nodes = append(edge.Target.Nodes, k)
+		}
+		_spec.Edges = append(_spec.Edges, edge)
 	}
 	return _node, _spec
 }

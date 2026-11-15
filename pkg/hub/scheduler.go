@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand"
@@ -28,6 +29,96 @@ import (
 
 // EventHandler processes a one-shot scheduled event of a specific type.
 type EventHandler func(ctx context.Context, evt store.ScheduledEvent) error
+
+// scheduledSkip is the error an event handler returns when the fire ran
+// nothing because a precondition did not hold (target not running, no
+// executor, experiment off, capacity, missed window; ptone/scion#7883, D4).
+// fireEvent records the event as skipped with the reason as its error,
+// which is not a failure. It is generic: any event type may return it.
+type scheduledSkip struct {
+	reason string
+}
+
+func (e *scheduledSkip) Error() string { return e.reason }
+
+// skipScheduledFire returns a scheduledSkip with reason.
+func skipScheduledFire(reason string) error { return &scheduledSkip{reason: reason} }
+
+// asScheduledSkip returns the reason of a scheduledSkip in err's chain.
+func asScheduledSkip(err error) (string, bool) {
+	var skip *scheduledSkip
+	if errors.As(err, &skip) {
+		return skip.reason, true
+	}
+	return "", false
+}
+
+// scheduledOutcomeRecorded is the error an event handler returns when it
+// has already recorded the event's outcome itself, atomically with other
+// state (an exec run, ptone/scion#7883): fireEvent then writes nothing, so
+// its final write can never overwrite an outcome another replica recorded
+// meanwhile. err is the outcome for the log: nil for a fire, a
+// scheduledSkip, or the failure.
+type scheduledOutcomeRecorded struct {
+	err error
+}
+
+func (e *scheduledOutcomeRecorded) Error() string {
+	if e.err == nil {
+		return "outcome recorded by the handler"
+	}
+	return e.err.Error()
+}
+
+func (e *scheduledOutcomeRecorded) Unwrap() error { return e.err }
+
+// outcomeRecorded wraps err (nil for a fire) as already recorded.
+func outcomeRecorded(err error) error { return &scheduledOutcomeRecorded{err: err} }
+
+// asOutcomeRecorded reports whether err says the handler recorded the
+// outcome, and returns the recorded outcome.
+func asOutcomeRecorded(err error) (error, bool) {
+	var rec *scheduledOutcomeRecorded
+	if errors.As(err, &rec) {
+		return rec.err, true
+	}
+	return nil, false
+}
+
+// scheduledAfterRecordKey carries a fire's after-record hooks.
+type scheduledAfterRecordKey struct{}
+
+// scheduledAfterRecord collects the work a handler defers until fireEvent
+// has recorded the event's outcome, so that work never races that write.
+type scheduledAfterRecord struct {
+	mu    sync.Mutex
+	hooks []func()
+}
+
+// afterScheduledRecord runs fn once the fire's outcome is recorded: after
+// fireEvent's final write, or at once when ctx carries no fire scope (a
+// direct handler call).
+func afterScheduledRecord(ctx context.Context, fn func()) {
+	scope, _ := ctx.Value(scheduledAfterRecordKey{}).(*scheduledAfterRecord)
+	if scope == nil {
+		fn()
+		return
+	}
+	scope.mu.Lock()
+	scope.hooks = append(scope.hooks, fn)
+	scope.mu.Unlock()
+}
+
+// run runs the collected hooks, once.
+func (a *scheduledAfterRecord) run() {
+	a.mu.Lock()
+	hooks := a.hooks
+	a.hooks = nil
+	a.mu.Unlock()
+	for _, fn := range hooks {
+		fn()
+	}
+}
 
 // Scheduler manages recurring and one-shot timers within the Hub server.
 // A single root ticker fires at a configurable interval (default 1 minute) and
@@ -584,6 +675,11 @@ func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, was
 	// from the initiator recorded on evt. Covers one-shot fires and restart
 	// replay of overdue events alike, since both paths call fireEvent.
 	ctx = ContextWithExecutor(ctx, ExecutorContext{Kind: "scheduler", ID: "scheduled_event:" + evt.ID})
+	afterRecord := &scheduledAfterRecord{}
+	ctx = context.WithValue(ctx, scheduledAfterRecordKey{}, afterRecord)
+	// Hooks run after the final status write below, on every return path
+	// after the claim; a lost claim registers none.
+	defer afterRecord.run()
 	wakeFire := evt.EventType == "message" && scheduledPayloadWakes(evt.Payload)
 	var scope *oneShotFireScope
 	if wakeFire {
@@ -637,6 +733,8 @@ func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, was
 	}
 
 	var errMsg string
+	skipped := false
+	recorded := false
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -647,6 +745,20 @@ func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, was
 		}()
 
 		if err := s.executeEvent(handlerCtx, evt); err != nil {
+			if outcome, ok := asOutcomeRecorded(err); ok {
+				// The handler recorded the outcome itself.
+				recorded = true
+				s.log.Info("Scheduler: event outcome recorded by its handler",
+					"eventID", evt.ID, "type", evt.EventType, "outcome", outcome)
+				return
+			}
+			if reason, ok := asScheduledSkip(err); ok {
+				// Not a failure: the fire ran nothing (ptone/scion#7883).
+				skipped, errMsg = true, reason
+				s.log.Info("Scheduler: event skipped",
+					"eventID", evt.ID, "type", evt.EventType, "reason", reason)
+				return
+			}
 			errMsg = err.Error()
 			s.log.Warn("Scheduler: event handler failed",
 				"eventID", evt.ID, "type", evt.EventType, "error", err)
@@ -668,7 +780,10 @@ func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, was
 	// If the handler returned an error or panicked, record the event as
 	// failed rather than fired/expired.
 	status := finalStatus
-	if errMsg != "" {
+	switch {
+	case skipped:
+		status = store.ScheduledEventSkipped
+	case errMsg != "":
 		status = store.ScheduledEventFailed
 	}
 
@@ -678,7 +793,7 @@ func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, was
 	// (ptone/scion#7734). When tracked via wakeFireRun, share its single-claim
 	// coordination with recordAbandonedWakeFires so teardown and fireEvent
 	// never double-write or overwrite each other (ptone/scion#7791 b2).
-	if s.store == nil {
+	if s.store == nil || recorded {
 		return
 	}
 	persist := func() {
@@ -728,6 +843,26 @@ func (s *Scheduler) ScheduleEvent(ctx context.Context, evt store.ScheduledEvent)
 	}
 	s.scheduleTimer(timerCtx, evt)
 
+	s.log.Info("Scheduler: event scheduled",
+		"eventID", evt.ID, "type", evt.EventType, "fireAt", evt.FireAt)
+	return nil
+}
+
+// ScheduleEventVia is ScheduleEvent with the insert done by create (for
+// example a quota-checked insert); the timer is armed only after create
+// succeeds.
+func (s *Scheduler) ScheduleEventVia(ctx context.Context, evt store.ScheduledEvent, create func(ctx context.Context, evt *store.ScheduledEvent) error) error {
+	if s.store == nil {
+		return fmt.Errorf("scheduler has no store configured")
+	}
+	if err := create(ctx, &evt); err != nil {
+		return err
+	}
+	timerCtx := s.ctx
+	if timerCtx == nil {
+		timerCtx = context.Background()
+	}
+	s.scheduleTimer(timerCtx, evt)
 	s.log.Info("Scheduler: event scheduled",
 		"eventID", evt.ID, "type", evt.EventType, "fireAt", evt.FireAt)
 	return nil
