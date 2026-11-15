@@ -22,6 +22,7 @@ import (
 	"math/rand"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
@@ -37,6 +38,12 @@ import (
 // take before the goroutine abandons the attempt and releases its store
 // reference.
 const auditWriteTimeout = 1 * time.Second
+
+// auditCancelDrainGrace bounds how long CloseAuditWriter waits after cancelling
+// stuck mutation-audit write contexts for those goroutines to unwind before
+// returning, so cooperative writes exit before store.Close() runs without
+// letting a non-cooperative store hang shutdown.
+const auditCancelDrainGrace = 250 * time.Millisecond
 
 // emitDecisionAudit builds and emits a decision audit record from a Decide call.
 func (a *AuthzService) emitDecisionAudit(ctx context.Context, request AuthzRequest, decision Decision) {
@@ -148,9 +155,127 @@ func routeFromContext(ctx context.Context) string {
 // Mutation Audit Helper
 // =============================================================================
 
+// mutationAuditTracker admits, tracks, and joins asynchronous mutation audit
+// writes started by Server.emitMutationAudit (ptone/scion#8111).
+//
+// Its zero value is ready to use, and admission allocates no long-lived
+// channels so an emitMutationAudit call inside a testing/synctest bubble
+// leaves no bubbled channel behind once the write completes.
+type mutationAuditTracker struct {
+	mu      sync.Mutex
+	closed  bool
+	nextID  uint64
+	cancels map[uint64]context.CancelFunc
+	drained chan struct{}
+}
+
+// goTracked admits one async mutation audit write with the given per-write
+// timeout and runs fn on a tracked goroutine. Once stop has closed admission,
+// goTracked returns false without starting a goroutine.
+func (t *mutationAuditTracker) goTracked(timeout time.Duration, fn func(ctx context.Context)) bool {
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		return false
+	}
+	writeCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	if t.cancels == nil {
+		t.cancels = make(map[uint64]context.CancelFunc)
+	}
+	t.nextID++
+	id := t.nextID
+	t.cancels[id] = cancel
+	t.mu.Unlock()
+
+	go func() {
+		defer func() {
+			cancel()
+			t.mu.Lock()
+			delete(t.cancels, id)
+			if len(t.cancels) == 0 && t.drained != nil {
+				close(t.drained)
+				t.drained = nil
+			}
+			t.mu.Unlock()
+		}()
+		fn(writeCtx)
+	}()
+	return true
+}
+
+// stop closes admission for new mutation audit writes and waits for in-flight
+// writes to finish, bounded by min(ctx deadline, grace). If that wait expires
+// while writes are still running, stop cancels their contexts so blocked store
+// calls abort promptly and waits up to cancelGrace for those goroutines to
+// unwind before returning, so cooperative writes finish exiting before the
+// store closes without letting a non-cooperative store hang shutdown. It
+// returns how many writes were cancelled at the bound and how many remained
+// running after cancelGrace. Safe to call more than once.
+func (t *mutationAuditTracker) stop(ctx context.Context, grace, cancelGrace time.Duration) (cancelled, remaining int) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	t.mu.Lock()
+	t.closed = true
+	if len(t.cancels) == 0 {
+		t.mu.Unlock()
+		return 0, 0
+	}
+	if t.drained == nil {
+		t.drained = make(chan struct{})
+	}
+	drained := t.drained
+	t.mu.Unlock()
+
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case <-drained:
+		return 0, 0
+	case <-ctx.Done():
+	case <-timer.C:
+	}
+
+	t.mu.Lock()
+	cancelled = len(t.cancels)
+	if cancelled == 0 {
+		t.mu.Unlock()
+		return 0, 0
+	}
+	for _, cancel := range t.cancels {
+		cancel()
+	}
+	t.mu.Unlock()
+
+	if cancelGrace > 0 {
+		cancelTimer := time.NewTimer(cancelGrace)
+		defer cancelTimer.Stop()
+		select {
+		case <-drained:
+			return cancelled, 0
+		case <-cancelTimer.C:
+		}
+	}
+
+	t.mu.Lock()
+	remaining = len(t.cancels)
+	t.mu.Unlock()
+	return cancelled, remaining
+}
+
 // emitMutationAudit creates a mutation audit record from a handler context.
-// It extracts actor identity from the context and stores the record.
-// Errors are logged but do not fail the request (best-effort).
+// It extracts actor identity from the context and stores the record
+// asynchronously so handlers are not blocked. Errors are logged via the logger
+// captured at call time and do not fail the request (best-effort).
+//
+// Shutdown pending-records contract (ptone/scion#8111): CloseAuditWriter joins
+// admitted writes up to min(ctx deadline, auditWriteTimeout) before the store
+// closes. Writes still blocked at that bound have their contexts cancelled and
+// are given up to auditCancelDrainGrace to exit before CloseAuditWriter
+// returns; calls arriving after admission closes are dropped with a warning.
+// Mutation audit emission is best-effort, so records cancelled at the shutdown
+// bound or arriving after admission closes can be lost at shutdown rather than
+// hanging shutdown or writing to a closed store.
 func (s *Server) emitMutationAudit(ctx context.Context, record *store.MutationAuditRecord) {
 	// E.2a: consolidated actor/credential-snapshot/correlation helper (plan
 	// §3.3), replacing this function's own copy of the extraction logic.
@@ -161,22 +286,27 @@ func (s *Server) emitMutationAudit(ctx context.Context, record *store.MutationAu
 		record.Timestamp = time.Now()
 	}
 
-	// Fire-and-forget: do not block the handler.
-	// Uses a short timeout context to prevent goroutine/memory leaks on shutdown.
-	go func() {
+	logger := slog.Default()
+	if !s.mutationAuditWork.goTracked(auditWriteTimeout, func(writeCtx context.Context) {
 		defer func() {
 			if r := recover(); r != nil {
-				slog.Warn("recovered panic in mutation audit emit", "panic", r)
+				logger.Warn("recovered panic in mutation audit emit",
+					"mutation_type", record.MutationType,
+					"target_id", record.TargetID,
+					"panic", r)
 			}
 		}()
-		writeCtx, cancel := context.WithTimeout(context.Background(), auditWriteTimeout)
-		defer cancel()
 		if err := s.store.CreateMutationAudit(writeCtx, record); err != nil {
-			slog.Warn("failed to emit mutation audit record",
+			logger.Warn("failed to emit mutation audit record",
 				"mutation_type", record.MutationType,
+				"target_id", record.TargetID,
 				"error", err)
 		}
-	}()
+	}) {
+		logger.Warn("dropped mutation audit record after audit shutdown",
+			"mutation_type", record.MutationType,
+			"target_id", record.TargetID)
+	}
 }
 
 // =============================================================================
