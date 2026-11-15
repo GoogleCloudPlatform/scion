@@ -834,4 +834,130 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
     const badge = nav.shadowRoot?.querySelector('[data-decisions-nav-badge]');
     expect(badge?.textContent?.trim()).toBe('4');
   });
+
+  it('keeps pendingNeedsReset across an off-tab SSE refresh so Waiting on you reloads filtered prompts on tab switch', async () => {
+    setFeatureFlag(PROJECT_DECISIONS_FLAG, true);
+    setFeatureFlag(CHAT_CHOICES_FLAG, true);
+
+    const orig = handleDecisionsFetch;
+    const el = await mount('/profile/decisions?tab=made&sort=recent');
+
+    // Simulate a transient/timeout failure on any pending request carrying `project`
+    handleDecisionsFetch = (url: URL): Promise<Response> =>
+      (url.searchParams.get('tab') || 'pending') === 'pending' && url.searchParams.get('project')
+        ? jsonResponse({ error: { code: 'internal', message: 'boom' } }, 500)
+        : orig(url);
+
+    // Apply a shared Project filter while on Made -> sets pendingNeedsReset
+    const panel = el.shadowRoot?.querySelector<ScionDecisionsFilterPanel>(
+      'scion-decisions-filter-panel'
+    );
+    expect(panel).not.toBeNull();
+    panel?.dispatchEvent(
+      new CustomEvent('decisions-filter-change', {
+        detail: { project: 'proj-2' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await settle(el, 25);
+
+    // Fire an SSE choice-updated while still on Made -> must skip off-tab pending live load
+    const urlsBeforeSse = requestedUrls.length;
+    stateManager.dispatchEvent(new CustomEvent('choice-updated', { detail: {} }));
+    await settle(el, 120);
+    const sseUrls = requestedUrls.slice(urlsBeforeSse);
+    expect(sseUrls.some((u) => u.includes('tab=pending'))).toBe(false);
+
+    // Restore backend and switch back to Waiting on you -> must issue a reset load for project=proj-2
+    handleDecisionsFetch = orig;
+    const urlsBeforeSwitch = requestedUrls.length;
+    el.shadowRoot?.querySelector<HTMLElement>('sl-tab[data-tab="pending"]')?.click();
+    await settle(el, 40);
+
+    const switchUrls = requestedUrls.slice(urlsBeforeSwitch);
+    expect(switchUrls).toEqual([
+      '/api/v1/users/me/decisions?tab=pending&sort=project&project=proj-2',
+    ]);
+    expect(window.location.search).toBe('?tab=pending&sort=project&project=proj-2');
+    const cardIds = Array.from(
+      el.shadowRoot?.querySelectorAll<HTMLElement>('[data-prompt-card]') ?? []
+    ).map((c) => c.dataset.promptCard);
+    expect(cardIds).toEqual(['m-3']);
+  });
+
+  it('never sends a stale cursor across sort, tab, or filter changes', async () => {
+    setFeatureFlag(PROJECT_DECISIONS_FLAG, true);
+    setFeatureFlag(CHAT_CHOICES_FLAG, true);
+
+    const orig = handleDecisionsFetch;
+    handleDecisionsFetch = (url: URL): Promise<Response> => {
+      const tab = url.searchParams.get('tab') || 'pending';
+      if (tab === 'pending') {
+        const cur = url.searchParams.get('cursor');
+        return jsonResponse({
+          counts: { waitingOnYou: 2, waitingOnOthers: 0 },
+          prompts: [
+            makePrompt({
+              project: PROJ_SCION,
+              promptMessageId: cur ? 'm-page-2' : 'm-page-1',
+              decisions: [
+                makeDecision({
+                  rowId: cur ? 'r-p2' : 'r-p1',
+                  messageId: cur ? 'm-page-2' : 'm-page-1',
+                }),
+              ],
+            }),
+          ],
+          agents: [{ id: AGENT_NCX, name: 'nc-x', projectId: 'proj-1' }],
+          answerers: [{ id: 'u-me', name: 'Alice' }],
+          conversations: [{ key: 'topic:release', label: '#release', projectId: 'proj-1' }],
+          projects: [PROJ_SCION, PROJ_WEB],
+          truncatedProjects: false,
+          ...(cur ? {} : { nextCursor: 'pending-cur-2' }),
+        });
+      }
+      return orig(url);
+    };
+
+    const el = await mount('/profile/decisions?tab=pending&sort=project');
+    expect(el.shadowRoot?.querySelector('[data-load-more="pending"]')).not.toBeNull();
+
+    // Load page 2 on pending (uses cursor=pending-cur-2 once)
+    el.shadowRoot?.querySelector<HTMLElement>('[data-load-more="pending"]')?.click();
+    await settle(el, 25);
+    expect(requestedUrls.filter((u) => u.includes('cursor=pending-cur-2'))).toHaveLength(1);
+
+    const recordStart = requestedUrls.length;
+
+    // 1. Sort change on pending -> no cursor
+    el.shadowRoot?.querySelector<HTMLElement>('[data-sort-option="recent"]')?.click();
+    await settle(el, 25);
+
+    // 2. Filter change on pending -> no cursor
+    el.shadowRoot?.querySelector('scion-decisions-filter-panel')?.dispatchEvent(
+      new CustomEvent('decisions-filter-change', {
+        detail: { project: 'proj-1' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await settle(el, 25);
+
+    // 3. Switch to Made (default sort=recent returns nextCursor=made-cur-2) -> no cursor on initial reset
+    el.shadowRoot?.querySelector<HTMLElement>('sl-tab[data-tab="made"]')?.click();
+    await settle(el, 25);
+
+    // 4. Sort change on Made -> no cursor
+    el.shadowRoot?.querySelector<HTMLElement>('[data-sort-option="project"]')?.click();
+    await settle(el, 25);
+
+    // 5. Switch back to Pending -> no cursor
+    el.shadowRoot?.querySelector<HTMLElement>('sl-tab[data-tab="pending"]')?.click();
+    await settle(el, 25);
+
+    const subsequentUrls = requestedUrls.slice(recordStart);
+    expect(subsequentUrls.length).toBeGreaterThanOrEqual(4);
+    expect(subsequentUrls.some((u) => u.includes('cursor='))).toBe(false);
+  });
 });
