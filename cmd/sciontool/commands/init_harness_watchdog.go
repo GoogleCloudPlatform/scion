@@ -116,11 +116,9 @@ type harnessWatchdogConfig struct {
 	// (see apiOutcomeTracker.Candidate).
 	ConfiguredModel string
 	// LiveWork reports whether the agent has live work (a running tool
-	// process or background job). Nil means no live work.
-	//
-	// TODO(ptone/scion#7855): wire the live-work signal from
-	// pkg/sciontool/liveness here, in whichever of ptone/scion#7855 and
-	// ptone/scion#7858 lands second.
+	// process or background job). Nil means no live work. sciontool init
+	// wires it to the heartbeat's liveness samples (liveWorkRecorder.Live,
+	// ptone/scion#7855).
 	LiveWork func() bool
 	// LastTurnEventAt returns when the hook process last recorded a
 	// turn event (handlers.IsTurnEvent).
@@ -471,6 +469,9 @@ type harnessWatchdogDeps struct {
 	TurnEventsPath     string
 	PendingErrorPath   string
 	SetOutcomeObserver func(telemetry.APIOutcomeObserver)
+	// LiveWork reports whether the container has live work
+	// (liveWorkRecorder.Live). Nil means none.
+	LiveWork func() bool
 }
 
 // newHarnessWatchdogConfig builds the watchdogs' production configuration
@@ -492,6 +493,7 @@ func newHarnessWatchdogConfig(d harnessWatchdogDeps) harnessWatchdogConfig {
 		},
 		FirstTurn:       getenv(envInitialTask) == "1" && dialects.HasTurnHooks(getenv("SCION_HARNESS"), d.AgentHome),
 		ConfiguredModel: getenv("SCION_MODEL"),
+		LiveWork:        d.LiveWork,
 	}
 	if d.StatusHandler != nil {
 		statusPath := d.StatusHandler.StatusPath

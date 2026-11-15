@@ -1403,6 +1403,10 @@ func RunInit(args []string, opts InitRunOptions) int {
 		// The harness_error watchdogs (init_harness_watchdog.go) start
 		// once the harness is ready, in the watcher's goroutine, so the
 		// shutdown path below stops them with it.
+		// The heartbeat's live-work samples, shared with the API-error
+		// watchdog (ptone/scion#7855): live work means the turn is not
+		// over, so a swallowed API error is not yet a harness error.
+		liveWork := newLiveWorkRecorder()
 		watchdogCfg := newHarnessWatchdogConfig(harnessWatchdogDeps{
 			LaunchedAt:       harnessLaunchedAt,
 			AgentHome:        agentHome,
@@ -1414,6 +1418,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 			CapturePane:      captureHarnessPane,
 			TurnEventsPath:   turnEventsFilePath,
 			PendingErrorPath: pendingHarnessErrorFilePath,
+			LiveWork:         liveWork.Live,
 		})
 		var readyWatchCtx context.Context
 		readyWatchCtx, readyWatchCancel = context.WithCancel(context.Background())
@@ -1440,10 +1445,10 @@ func RunInit(args []string, opts InitRunOptions) int {
 				// Live work (ptone/scion#7855): the Hub keeps an agent
 				// with a tool call in flight, or whose container is doing
 				// CPU work, from being marked stalled or auto-suspended.
-				LiveWork: livenessProvider(liveness.NewSampler(liveness.Config{
+				LiveWork: liveWork.record(livenessProvider(liveness.NewSampler(liveness.Config{
 					AgentUID:         livenessAgentUID(targetUID),
 					HarnessRootDepth: livenessHarnessRootDepth(os.Getenv),
-				}), statusHandler.CurrentActivitySince),
+				}), statusHandler.CurrentActivitySince)),
 			})
 			log.Info("Started Hub heartbeat loop (interval: %s)", hub.DefaultHeartbeatInterval)
 
