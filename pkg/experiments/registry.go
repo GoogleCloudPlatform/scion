@@ -500,6 +500,15 @@ const WelcomeProject = "hub.welcome_project"
 // it is off.
 const ProjectDecisions = "web.project_decisions"
 
+// SystemOne gates Hub-side System One message rule evaluation and provider
+// instance management (ptone/scion#8044): /api/v1/system-one/instances,
+// /api/v1/system-one/adapters, and System One condition evaluation on message
+// delivery. While it is off, the System One routes answer 404, rules declaring
+// a systemOne condition are skipped as non-matching, and stored provider
+// instances are kept. The design names it "hub.system-one"; NamePattern allows
+// no hyphen.
+const SystemOne = "hub.system_one"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
@@ -992,6 +1001,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#7826",
 		Owner:       "lifecycle",
 		ReviewBy:    "2027-03-31",
+	},
+	{
+		Name:        SystemOne,
+		Title:       "System One message guardrails",
+		Description: "Enables Hub-scoped System One provider instances (/api/v1/system-one/instances and /api/v1/system-one/adapters) and semantic message rule evaluation on message delivery. While off, the System One routes answer 404, rules carrying a systemOne condition are skipped as non-matching, and stored provider instances are kept.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#8044",
+		Owner:       "system-one",
+		ReviewBy:    "2027-02-15",
 	},
 }
 

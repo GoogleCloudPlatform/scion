@@ -606,6 +606,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.ArtifactsOpenReviewCheck:     testAdminPolicyDeny,
 	experiments.ProjectSelfLeave:             testAdminPolicyDeny,
 	experiments.WelcomeProject:               testAdminPolicyDeny,
+	experiments.SystemOne:                    testAdminPolicyDeny,
 }
 
 // testAdminPolicyInputs are the vocabularies the classification must cover.
