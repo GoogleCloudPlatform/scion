@@ -824,3 +824,113 @@ func TestDecodeResponse_JSONNestingDepthBound(t *testing.T) {
 	}
 	assert.Less(t, stackDelta, uint64(4<<20), "1 MiB deeply nested JSON must not blow up goroutine stack")
 }
+
+func TestInvoke_ErrorPathsPreserveProviderRequestIDAndHTTPStatus(t *testing.T) {
+	baseReq := provider.ModelRequest{
+		Rule: spec.Spec{
+			Version: 1,
+			Questions: []spec.Question{
+				{ID: "billing", Type: spec.PrimitiveBinary, Instructions: "Is this message about billing?"},
+			},
+		},
+		Input: []provider.InputField{
+			{Name: spec.ProbeFieldText, Kind: provider.FieldKindText, Value: "synthetic text", Trust: provider.TrustUntrusted},
+		},
+	}
+
+	cases := []struct {
+		name          string
+		status        int
+		headers       map[string]string
+		body          string
+		wantReason    provider.FailReason
+		wantRetryable bool
+		wantRequestID string
+	}{
+		{
+			name:   "429_rate_limited_preserves_request_id",
+			status: http.StatusTooManyRequests,
+			headers: map[string]string{
+				"x-typesafe-request-id": "req_429_support_trace_01",
+				"Retry-After":           "3",
+			},
+			body:          `{"detail":"CANARY_429_RATE_LIMITED"}`,
+			wantReason:    provider.FailRateLimited,
+			wantRetryable: true,
+			wantRequestID: "req_429_support_trace_01",
+		},
+		{
+			name:   "503_unavailable_preserves_request_id",
+			status: http.StatusServiceUnavailable,
+			headers: map[string]string{
+				"x-typesafe-request-id": "req_503_support_trace_02",
+			},
+			body:          `{"detail":"CANARY_503_UPSTREAM"}`,
+			wantReason:    provider.FailUnavailable,
+			wantRetryable: true,
+			wantRequestID: "req_503_support_trace_02",
+		},
+		{
+			name:   "200_malformed_body_preserves_request_id",
+			status: http.StatusOK,
+			headers: map[string]string{
+				"x-typesafe-request-id": "req_200_malformed_trace_03",
+			},
+			body:          `{"model":"jev-1.14.0","answers":{},"usage":{"input_tokens":10,"output_tokens":1}}`,
+			wantReason:    provider.FailMalformedResponse,
+			wantRetryable: false,
+			wantRequestID: "req_200_malformed_trace_03",
+		},
+		{
+			name:   "429_sanitizes_non_ascii_in_request_id",
+			status: http.StatusTooManyRequests,
+			headers: map[string]string{
+				"x-typesafe-request-id": "req_non_ascii_\xc3\xa9",
+			},
+			body:          `{"detail":"CANARY_429_NON_ASCII"}`,
+			wantReason:    provider.FailRateLimited,
+			wantRetryable: true,
+			wantRequestID: "",
+		},
+		{
+			name:   "503_truncates_oversize_request_id_to_128_chars",
+			status: http.StatusServiceUnavailable,
+			headers: map[string]string{
+				"x-typesafe-request-id": strings.Repeat("r", 150),
+			},
+			body:          `{"detail":"CANARY_503_LONG_ID"}`,
+			wantReason:    provider.FailUnavailable,
+			wantRetryable: true,
+			wantRequestID: strings.Repeat("r", 128),
+		},
+	}
+
+	adapter := jevwire.NewTypeSafe()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				for k, v := range tc.headers {
+					w.Header().Set(k, v)
+				}
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+
+			transport := egress.NewClient(
+				egress.StaticBearer("sk-reqid-err-canary"),
+				egress.WithLoopbackServerForTesting(srv.URL, srv.Client()),
+			)
+			inst := provider.InstanceView{Name: "jev-prod", Model: "jev-1.14.0", Endpoint: srv.URL}
+
+			res, err := adapter.Invoke(context.Background(), transport, inst, baseReq)
+			require.Error(t, err)
+			pe, ok := provider.AsProviderError(err)
+			require.True(t, ok)
+			assert.Equal(t, tc.wantReason, pe.Reason)
+			assert.Equal(t, tc.wantRetryable, pe.Retryable)
+			assert.Equal(t, tc.status, res.HTTPStatus)
+			assert.Equal(t, tc.wantRequestID, res.ProviderRequestID)
+		})
+	}
+}

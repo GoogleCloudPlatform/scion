@@ -99,19 +99,30 @@ func (a *Adapter) Invoke(ctx context.Context, t provider.Transport, inst provide
 	httpReq.Header.Set("Accept", "application/json")
 
 	resp, body, err := executeOnce(ctx, t, httpReq)
+	var errMeta provider.ModelResult
+	var rawReqID string
+	if resp != nil {
+		if a.profile.RequestIDHeader != "" {
+			rawReqID = resp.Header.Get(a.profile.RequestIDHeader)
+		}
+		errMeta = provider.ModelResult{
+			ProviderRequestID: sanitizeRequestID(rawReqID),
+			HTTPStatus:        resp.StatusCode,
+		}
+	}
 	if err != nil {
-		return provider.ModelResult{}, err
+		return errMeta, err
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return provider.ModelResult{}, classifyHTTPError(resp.StatusCode, resp.Header, body, time.Now())
+		return errMeta, classifyHTTPError(resp.StatusCode, resp.Header, body, time.Now())
 	}
 
-	var reqID string
-	if a.profile.RequestIDHeader != "" {
-		reqID = resp.Header.Get(a.profile.RequestIDHeader)
+	res, err := DecodeResponse(a.profile, selectedQuestions, resp.StatusCode, rawReqID, body)
+	if err != nil {
+		return errMeta, err
 	}
-	return DecodeResponse(a.profile, selectedQuestions, resp.StatusCode, reqID, body)
+	return res, nil
 }
 
 // ListModels queries GET /v1/models over the egress-supplied Transport and
@@ -159,7 +170,7 @@ func executeOnce(ctx context.Context, t provider.Transport, httpReq *http.Reques
 	}()
 
 	if resp.ContentLength > egress.MaxResponseBytes {
-		return nil, nil, provider.NewProviderError(provider.FailMalformedResponse, false, 0, resp.StatusCode, "provider response body exceeded 1 MiB limit")
+		return resp, nil, provider.NewProviderError(provider.FailMalformedResponse, false, 0, resp.StatusCode, "provider response body exceeded 1 MiB limit")
 	}
 
 	var body []byte
@@ -169,10 +180,10 @@ func executeOnce(ctx context.Context, t provider.Transport, httpReq *http.Reques
 		if readErr != nil {
 			pe := classifyTransportError(ctx, readErr)
 			pe.HTTPStatus = resp.StatusCode
-			return nil, nil, pe
+			return resp, nil, pe
 		}
 		if int64(len(body)) > egress.MaxResponseBytes {
-			return nil, nil, provider.NewProviderError(provider.FailMalformedResponse, false, 0, resp.StatusCode, "provider response body exceeded 1 MiB limit")
+			return resp, nil, provider.NewProviderError(provider.FailMalformedResponse, false, 0, resp.StatusCode, "provider response body exceeded 1 MiB limit")
 		}
 	}
 	return resp, body, nil
