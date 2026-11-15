@@ -26,6 +26,7 @@ vi.mock('./api.js', async (orig) => ({
 
 const {
   PROFILE_DECISIONS_COUNT_CHANGED_EVENT,
+  PROFILE_DECISION_PROBE_TTL_MS,
   buildProfileDecisionsQuery,
   buildProfileDecisionsUrlSearch,
   defaultProfileDecisionsSort,
@@ -35,10 +36,13 @@ const {
   fetchProfileMadeDecisions,
   fetchProfilePendingDecisions,
   getCachedProfileDecisionProbe,
+  getLastKnownProfileDecisionAvailability,
+  isChoicePromptMessageEvent,
   parseProfileDecisionsUrlState,
   resetProfileDecisionProbeCacheForTests,
   scheduleSharedProfileDecisionProbeRefresh,
 } = await import('./profile-decisions.js');
+const { stateManager } = await import('./state.js');
 
 function res(status: number, body: unknown): Response {
   return {
@@ -401,6 +405,111 @@ describe('profile-decisions API client (R1, R3, R4, R5, §7)', () => {
       expect(received).toEqual([{ available: true, waitingOnYou: 1 }]);
     } finally {
       window.removeEventListener(PROFILE_DECISIONS_COUNT_CHANGED_EVENT, listener);
+    }
+  });
+
+  it('matches real Hub choice-prompt chat events and ignores plain messages or dead message.choices shapes', () => {
+    expect(
+      isChoicePromptMessageEvent(
+        new CustomEvent('chat-message-received', {
+          detail: { data: { id: 'm1', type: 'choice-prompt' } },
+        })
+      )
+    ).toBe(true);
+    expect(
+      isChoicePromptMessageEvent(
+        new CustomEvent('chat-message-received', {
+          detail: { data: { id: 'm2', decisions: [{ rowId: 'r1' }] } },
+        })
+      )
+    ).toBe(true);
+    expect(
+      isChoicePromptMessageEvent(
+        new CustomEvent('chat-message-received', {
+          detail: { data: { id: 'm3', type: 'message', content: 'hello' } },
+        })
+      )
+    ).toBe(false);
+    expect(
+      isChoicePromptMessageEvent(
+        new CustomEvent('chat-message-received', {
+          detail: { data: { message: { choices: [{ rowId: 'r1' }] } } },
+        })
+      )
+    ).toBe(false);
+  });
+
+  it('invalidates the probe cache on module-level SSE events (even with no nav mounted) and after PROFILE_DECISION_PROBE_TTL_MS', async () => {
+    let now = 1_000_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      expect(getLastKnownProfileDecisionAvailability()).toBeNull();
+      apiFetch.mockResolvedValueOnce(res(200, { counts: { waitingOnYou: 3, waitingOnOthers: 0 } }));
+      await expect(fetchProfileDecisionProbe()).resolves.toEqual({
+        available: true,
+        waitingOnYou: 3,
+      });
+      expect(getCachedProfileDecisionProbe()).toEqual({ available: true, waitingOnYou: 3 });
+      expect(getLastKnownProfileDecisionAvailability()).toBe(true);
+
+      // Unmounted choice-updated marks cache dirty without issuing a background fetch
+      stateManager.dispatchEvent(new CustomEvent('choice-updated', { detail: {} }));
+      expect(apiFetch).toHaveBeenCalledTimes(1);
+      expect(getCachedProfileDecisionProbe()).toBeNull();
+      expect(getLastKnownProfileDecisionAvailability()).toBe(true);
+
+      // Next fetchProfileDecisionProbe re-probes and clears dirty state
+      apiFetch.mockResolvedValueOnce(res(200, { counts: { waitingOnYou: 1, waitingOnOthers: 0 } }));
+      await expect(fetchProfileDecisionProbe()).resolves.toEqual({
+        available: true,
+        waitingOnYou: 1,
+      });
+      expect(apiFetch).toHaveBeenCalledTimes(2);
+      expect(getCachedProfileDecisionProbe()).toEqual({ available: true, waitingOnYou: 1 });
+
+      // Choice-prompt chat message also marks cache dirty; plain chat message does not
+      stateManager.dispatchEvent(
+        new CustomEvent('chat-message-received', {
+          detail: { data: { id: 'm-plain', type: 'message' } },
+        })
+      );
+      expect(getCachedProfileDecisionProbe()).toEqual({ available: true, waitingOnYou: 1 });
+
+      stateManager.dispatchEvent(
+        new CustomEvent('chat-message-received', {
+          detail: { data: { id: 'm-choice', type: 'choice-prompt', decisions: [{ rowId: 'r1' }] } },
+        })
+      );
+      expect(getCachedProfileDecisionProbe()).toBeNull();
+
+      apiFetch.mockResolvedValueOnce(res(200, { counts: { waitingOnYou: 2, waitingOnOthers: 0 } }));
+      await expect(fetchProfileDecisionProbe()).resolves.toEqual({
+        available: true,
+        waitingOnYou: 2,
+      });
+      expect(apiFetch).toHaveBeenCalledTimes(3);
+
+      // Within TTL: fresh, no extra probe
+      now += PROFILE_DECISION_PROBE_TTL_MS - 1;
+      expect(getCachedProfileDecisionProbe()).toEqual({ available: true, waitingOnYou: 2 });
+      await expect(fetchProfileDecisionProbe()).resolves.toEqual({
+        available: true,
+        waitingOnYou: 2,
+      });
+      expect(apiFetch).toHaveBeenCalledTimes(3);
+
+      // At/past TTL: stale, next call re-probes
+      now += 2;
+      expect(getCachedProfileDecisionProbe()).toBeNull();
+      expect(getLastKnownProfileDecisionAvailability()).toBe(true);
+      apiFetch.mockResolvedValueOnce(res(200, { counts: { waitingOnYou: 0, waitingOnOthers: 0 } }));
+      await expect(fetchProfileDecisionProbe()).resolves.toEqual({
+        available: true,
+        waitingOnYou: 0,
+      });
+      expect(apiFetch).toHaveBeenCalledTimes(4);
+    } finally {
+      nowSpy.mockRestore();
     }
   });
 });

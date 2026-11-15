@@ -575,7 +575,7 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
     expect(el.shadowRoot?.querySelector('[data-load-more="made"]')).not.toBeNull();
   });
 
-  it('shows the R3 banner when truncatedProjects is true', async () => {
+  it('shows the R3 banner when truncatedProjects is true and hides it while a project filter is active', async () => {
     setFeatureFlag(PROJECT_DECISIONS_FLAG, true);
     setFeatureFlag(CHAT_CHOICES_FLAG, true);
     handleDecisionsFetch = (): Promise<Response> =>
@@ -585,7 +585,7 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
         agents: [],
         answerers: [],
         conversations: [],
-        projects: [],
+        projects: [PROJ_SCION],
         truncatedProjects: true,
       });
 
@@ -595,6 +595,26 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
     expect(banner?.textContent).toContain(
       'Showing your 200 most recently active projects; pick a project to see others'
     );
+
+    // Selecting a project hides the truncated banner
+    el.shadowRoot?.querySelector('scion-decisions-filter-panel')?.dispatchEvent(
+      new CustomEvent('decisions-filter-change', {
+        detail: { project: 'proj-1' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await settle(el, 25);
+    expect(el.shadowRoot?.querySelector('[data-truncated-projects]')).toBeNull();
+
+    // Clearing filters restores the truncated banner
+    el.shadowRoot
+      ?.querySelector('scion-decisions-filter-panel')
+      ?.dispatchEvent(
+        new CustomEvent('decisions-filters-clear', { bubbles: true, composed: true })
+      );
+    await settle(el, 25);
+    expect(el.shadowRoot?.querySelector('[data-truncated-projects]')).not.toBeNull();
   });
 
   it('records surface=decisions_page on inline answer, updates nav badge event, and reloads By project from page 1 when paged (R7, Brief §Task)', async () => {
@@ -959,5 +979,159 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
     const subsequentUrls = requestedUrls.slice(recordStart);
     expect(subsequentUrls.length).toBeGreaterThanOrEqual(4);
     expect(subsequentUrls.some((u) => u.includes('cursor='))).toBe(false);
+  });
+
+  it('invalidates the opposite tab when setSort or drillDownMadeProject flushes a debounced search within 300ms', async () => {
+    setFeatureFlag(PROJECT_DECISIONS_FLAG, true);
+    setFeatureFlag(CHAT_CHOICES_FLAG, true);
+
+    const orig = handleDecisionsFetch;
+    handleDecisionsFetch = (url: URL): Promise<Response> => {
+      const tab = url.searchParams.get('tab') || 'pending';
+      const sort = url.searchParams.get('sort') || (tab === 'made' ? 'recent' : 'project');
+      const q = url.searchParams.get('q') || '';
+      const cur = url.searchParams.get('cursor') || '';
+
+      if (tab === 'made' && sort === 'recent' && q === 'foo') {
+        if (cur === 'made-cur-2') {
+          return jsonResponse(
+            { error: { code: 'invalid_argument', message: 'cursor mismatch' } },
+            400
+          );
+        }
+        return jsonResponse({
+          counts: { waitingOnYou: 4, waitingOnOthers: 1 },
+          entries: [
+            makeLogEntry({
+              answerId: cur ? 'ans-foo-2' : 'ans-foo-1',
+              project: PROJ_SCION,
+            }),
+          ],
+          agents: [{ id: AGENT_NCX, name: 'nc-x', projectId: 'proj-1' }],
+          answerers: [{ id: 'u-me', name: 'Alice' }],
+          conversations: [{ key: 'topic:release', label: '#release', projectId: 'proj-1' }],
+          projects: [PROJ_SCION, PROJ_WEB],
+          truncatedProjects: false,
+          ...(cur ? {} : { nextCursor: 'made-cur-foo-2' }),
+        });
+      }
+      return orig(url);
+    };
+
+    // 1. Reviewer reproducer: visit Made (caches entries + made-cur-2), return to Pending,
+    // type 'foo' (debounced), click Most recent BEFORE 300ms, then switch back to Made and click Load more.
+    const el = await mount('/profile/decisions?tab=pending&sort=project');
+    el.shadowRoot?.querySelector<HTMLElement>('sl-tab[data-tab="made"]')?.click();
+    await settle(el, 25);
+    expect(requestedUrls).toContain('/api/v1/users/me/decisions?tab=made&sort=recent');
+
+    el.shadowRoot?.querySelector<HTMLElement>('sl-tab[data-tab="pending"]')?.click();
+    await settle(el, 10);
+
+    const beforeFlushIdx = requestedUrls.length;
+    el.shadowRoot?.querySelector('scion-decisions-filter-panel')?.dispatchEvent(
+      new CustomEvent('decisions-search-input', {
+        detail: { value: 'foo', immediate: false },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    // Immediately (< 300ms) click Most recent on Pending
+    el.shadowRoot?.querySelector<HTMLElement>('[data-sort-option="recent"]')?.click();
+    await settle(el, 25);
+    expect(requestedUrls.slice(beforeFlushIdx)).toContain(
+      '/api/v1/users/me/decisions?tab=pending&sort=recent&q=foo'
+    );
+
+    // Switch back to Made -> MUST issue a reset fetch with q=foo (no cursor!) and NOT keep stale made-cur-2
+    const beforeMadeSwitchIdx = requestedUrls.length;
+    el.shadowRoot?.querySelector<HTMLElement>('sl-tab[data-tab="made"]')?.click();
+    await settle(el, 25);
+    expect(requestedUrls.slice(beforeMadeSwitchIdx)).toEqual([
+      '/api/v1/users/me/decisions?tab=made&sort=recent&q=foo',
+    ]);
+
+    // Load more on Made uses ONLY the fresh cursor (made-cur-foo-2), never made-cur-2
+    el.shadowRoot?.querySelector<HTMLElement>('[data-load-more="made"]')?.click();
+    await settle(el, 25);
+    expect(requestedUrls[requestedUrls.length - 1]).toBe(
+      '/api/v1/users/me/decisions?tab=made&sort=recent&cursor=made-cur-foo-2&q=foo'
+    );
+
+    // 2. drillDownMadeProject when project is ALREADY proj-1 and a debounced search is pending (< 300ms)
+    // must still invalidate Pending so switching back refetches with the flushed search!
+    el.shadowRoot?.querySelector('scion-decisions-filter-panel')?.dispatchEvent(
+      new CustomEvent('decisions-filter-change', {
+        detail: { project: 'proj-1' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await settle(el, 25);
+    el.shadowRoot?.querySelector<HTMLElement>('[data-sort-option="project"]')?.click();
+    await settle(el, 25);
+
+    el.shadowRoot?.querySelector('scion-decisions-filter-panel')?.dispatchEvent(
+      new CustomEvent('decisions-search-input', {
+        detail: { value: 'baz', immediate: false },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    // Click "See all in scion" before 300ms while filterProject is ALREADY 'proj-1'
+    el.shadowRoot?.querySelector<HTMLElement>('[data-see-all-project="proj-1"]')?.click();
+    await settle(el, 25);
+    expect(requestedUrls[requestedUrls.length - 1]).toBe(
+      '/api/v1/users/me/decisions?tab=made&sort=recent&q=baz&project=proj-1'
+    );
+
+    const beforePendingReturnIdx = requestedUrls.length;
+    el.shadowRoot?.querySelector<HTMLElement>('sl-tab[data-tab="pending"]')?.click();
+    await settle(el, 25);
+    expect(requestedUrls.slice(beforePendingReturnIdx)).toEqual([
+      '/api/v1/users/me/decisions?tab=pending&sort=recent&q=baz&project=proj-1',
+    ]);
+  });
+
+  it('subscribes to the profile SSE scope (including user.<id>.chat.>) so DM choice.updated events refresh Waiting on you', async () => {
+    setFeatureFlag(PROJECT_DECISIONS_FLAG, true);
+    setFeatureFlag(CHAT_CHOICES_FLAG, true);
+
+    const sseSources: FakeEventSource[] = [];
+    class RecordingEventSource extends FakeEventSource {
+      constructor(url: string) {
+        super(url);
+        sseSources.push(this);
+      }
+    }
+    stateManager.setScope({ type: 'dashboard' });
+    vi.stubGlobal('EventSource', RecordingEventSource);
+
+    const el = await mount('/profile/decisions');
+    const latestUrl = sseSources[sseSources.length - 1]?.url ?? '';
+    expect(decodeURIComponent(latestUrl)).toContain('sub=project.>');
+    expect(decodeURIComponent(latestUrl)).toContain('sub=user.u-me.chat.>');
+
+    const beforeDmUpdateIdx = requestedUrls.length;
+    (
+      stateManager as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }
+    ).handleUpdate({
+      subject: 'user.u-me.chat.choice.updated',
+      data: {
+        messageId: 'm-1',
+        threadId: 'dm:agent:release-bot:user:u-me',
+        decision: makeDecision({
+          rowId: 'r-1',
+          messageId: 'm-1',
+          status: 'answered',
+        }),
+      },
+    });
+
+    await new Promise((r) => setTimeout(r, 90));
+    await settle(el, 20);
+    expect(requestedUrls.slice(beforeDmUpdateIdx)).toContain(
+      '/api/v1/users/me/decisions?tab=pending&sort=project&limit=50'
+    );
   });
 });

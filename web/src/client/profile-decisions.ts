@@ -38,12 +38,34 @@ import {
   type ProjectDecisionPromptView,
   type SharedDecisionsFilter,
 } from './project-decisions.js';
+import { stateManager } from './state.js';
 
 /** Maximum UTF-8 byte length accepted for `project` by `pkg/hub/choices_profile.go`. */
 export const MAX_PROFILE_DECISIONS_PROJECT_BYTES = 128;
 
 /** Window event dispatched whenever the caller's unfiltered `counts.waitingOnYou` changes. */
 export const PROFILE_DECISIONS_COUNT_CHANGED_EVENT = 'scion:profile-decisions-count-changed';
+
+/** Maximum age before a cached `?limit=0` nav probe is revalidated on `<scion-profile-nav>` connect. */
+export const PROFILE_DECISION_PROBE_TTL_MS = 30_000;
+
+/**
+ * Returns true when a `stateManager` `'chat-message-received'` event carries a
+ * structured choice prompt (`UserMessageEvent` in `pkg/hub/events.go` emits
+ * `type: 'choice-prompt'` and top-level `decisions`).
+ */
+export function isChoicePromptMessageEvent(e: Event): boolean {
+  const raw = (e as CustomEvent).detail as {
+    data?: {
+      type?: unknown;
+      decisions?: unknown;
+    };
+    type?: unknown;
+    decisions?: unknown;
+  } | null;
+  const data = raw?.data ?? raw;
+  return data?.type === 'choice-prompt' || Array.isArray(data?.decisions);
+}
 
 /** Sort order for `/profile/decisions` (`project` groups by project, `recent` is chronological). */
 export type ProfileDecisionsSort = 'project' | 'recent';
@@ -322,23 +344,63 @@ async function throwDecisionsApiError(res: Response): Promise<never> {
   throw new DecisionsApiError(info.message, res.status, info.code);
 }
 
-/** Module-level shared probe cache + monotonic sequence number + in-flight deduplication so multiple `<scion-profile-nav>` instances and route changes reuse a single `?limit=0` probe without stale overwrites. */
+/**
+ * Module-level shared probe cache + monotonic sequence number + TTL + SSE dirty
+ * tracking + in-flight deduplication so multiple `<scion-profile-nav>` instances
+ * and route changes reuse a single `?limit=0` probe while invalidating on off-nav
+ * choice updates or after `PROFILE_DECISION_PROBE_TTL_MS`.
+ */
 let cachedProfileDecisionProbe: ProfileDecisionProbeResult | null = null;
+let cachedProfileDecisionProbeAt = 0;
+let cachedProfileDecisionProbeDirty = false;
+let probeInvalidationSeq = 0;
 let profileDecisionProbeWriteSeq = 0;
 let inFlightProfileDecisionProbe: Promise<ProfileDecisionProbeResult | null> | null = null;
 let sharedProbeRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+let probeInvalidationListenersInstalled = false;
 
-function commitProfileDecisionProbe(next: ProfileDecisionProbeResult): void {
+function ensureProbeInvalidationListeners(): void {
+  if (probeInvalidationListenersInstalled) return;
+  probeInvalidationListenersInstalled = true;
+  stateManager.addEventListener('choice-updated', () => {
+    ++probeInvalidationSeq;
+    cachedProfileDecisionProbeDirty = true;
+  });
+  stateManager.addEventListener('chat-message-received', (e: Event) => {
+    if (isChoicePromptMessageEvent(e)) {
+      ++probeInvalidationSeq;
+      cachedProfileDecisionProbeDirty = true;
+    }
+  });
+}
+
+ensureProbeInvalidationListeners();
+
+function isProfileDecisionProbeFresh(): boolean {
+  if (cachedProfileDecisionProbe === null) return false;
+  if (cachedProfileDecisionProbeDirty) return false;
+  return Date.now() - cachedProfileDecisionProbeAt < PROFILE_DECISION_PROBE_TTL_MS;
+}
+
+function commitProfileDecisionProbe(
+  next: ProfileDecisionProbeResult,
+  validForInvalidationSeq = probeInvalidationSeq
+): void {
   ++profileDecisionProbeWriteSeq;
   cachedProfileDecisionProbe = next;
+  cachedProfileDecisionProbeAt = Date.now();
+  if (probeInvalidationSeq === validForInvalidationSeq) {
+    cachedProfileDecisionProbeDirty = false;
+  }
 }
 
 function recordPageFetchForProbe<T extends { counts: ProjectDecisionCounts }>(
   work: () => Promise<T>
 ): Promise<T> {
+  const startInvalidationSeq = probeInvalidationSeq;
   let resolvePageProbe: ((res: ProfileDecisionProbeResult | null) => void) | null = null;
   let ownedProbePromise: Promise<ProfileDecisionProbeResult | null> | null = null;
-  if (cachedProfileDecisionProbe === null && inFlightProfileDecisionProbe === null) {
+  if (!isProfileDecisionProbeFresh() && inFlightProfileDecisionProbe === null) {
     ownedProbePromise = new Promise<ProfileDecisionProbeResult | null>((resolve) => {
       resolvePageProbe = resolve;
     });
@@ -351,7 +413,7 @@ function recordPageFetchForProbe<T extends { counts: ProjectDecisionCounts }>(
         available: true,
         waitingOnYou: Math.max(0, Math.trunc(result.counts.waitingOnYou)),
       };
-      commitProfileDecisionProbe(probeResult);
+      commitProfileDecisionProbe(probeResult, startInvalidationSeq);
       if (ownedProbePromise && inFlightProfileDecisionProbe === ownedProbePromise) {
         inFlightProfileDecisionProbe = null;
       }
@@ -364,7 +426,7 @@ function recordPageFetchForProbe<T extends { counts: ProjectDecisionCounts }>(
       }
       if (err instanceof DecisionsApiError && err.status === 404) {
         const notFoundProbe: ProfileDecisionProbeResult = { available: false, waitingOnYou: 0 };
-        commitProfileDecisionProbe(notFoundProbe);
+        commitProfileDecisionProbe(notFoundProbe, startInvalidationSeq);
         resolvePageProbe?.(notFoundProbe);
       } else {
         resolvePageProbe?.(null);
@@ -484,14 +546,30 @@ export async function fetchProfileMadeDecisions(
   });
 }
 
-/** Returns the cached `GET /api/v1/users/me/decisions?limit=0` probe result if already resolved. */
+/**
+ * Returns the cached `GET /api/v1/users/me/decisions?limit=0` probe result only
+ * when it is fresh (not marked dirty by SSE and within `PROFILE_DECISION_PROBE_TTL_MS`).
+ */
 export function getCachedProfileDecisionProbe(): ProfileDecisionProbeResult | null {
-  return cachedProfileDecisionProbe;
+  return isProfileDecisionProbeFresh() ? cachedProfileDecisionProbe : null;
+}
+
+/**
+ * Returns the last observed endpoint availability (`true` on 200, `false` on 404,
+ * `null` before the first probe resolves) regardless of badge-count freshness,
+ * so `<scion-profile-nav>` avoids flashing on older 404 hubs while keeping a
+ * known-available entry visible during a count refresh.
+ */
+export function getLastKnownProfileDecisionAvailability(): boolean | null {
+  return cachedProfileDecisionProbe ? cachedProfileDecisionProbe.available : null;
 }
 
 /** Resets the module-level probe cache and any pending refresh timer (for unit tests). */
 export function resetProfileDecisionProbeCacheForTests(): void {
   cachedProfileDecisionProbe = null;
+  cachedProfileDecisionProbeAt = 0;
+  cachedProfileDecisionProbeDirty = false;
+  probeInvalidationSeq = 0;
   profileDecisionProbeWriteSeq = 0;
   inFlightProfileDecisionProbe = null;
   if (sharedProbeRefreshTimer !== null) {
@@ -509,6 +587,7 @@ async function executeProfileDecisionProbe(
   signal?: AbortSignal
 ): Promise<{ result: ProfileDecisionProbeResult | null; superseded: boolean }> {
   const startSeq = profileDecisionProbeWriteSeq;
+  const startInvalidationSeq = probeInvalidationSeq;
   try {
     const res = await apiFetch('/api/v1/users/me/decisions?limit=0', {
       authErrors: 'caller',
@@ -519,7 +598,7 @@ async function executeProfileDecisionProbe(
         return { result: cachedProfileDecisionProbe, superseded: true };
       }
       const notFound: ProfileDecisionProbeResult = { available: false, waitingOnYou: 0 };
-      commitProfileDecisionProbe(notFound);
+      commitProfileDecisionProbe(notFound, startInvalidationSeq);
       return { result: notFound, superseded: false };
     }
     if (!res.ok) {
@@ -534,7 +613,7 @@ async function executeProfileDecisionProbe(
         ? data.counts.waitingOnYou
         : 0;
     const resolved: ProfileDecisionProbeResult = { available: true, waitingOnYou };
-    commitProfileDecisionProbe(resolved);
+    commitProfileDecisionProbe(resolved, startInvalidationSeq);
     return { result: resolved, superseded: false };
   } catch {
     return { result: null, superseded: false };
@@ -544,7 +623,8 @@ async function executeProfileDecisionProbe(
 /**
  * Probes `GET /api/v1/users/me/decisions?limit=0` for the `<scion-profile-nav>`
  * entry and badge (Design §4.3 R1, §7), deduplicating concurrent calls and
- * reusing the cached result across route transitions until invalidated:
+ * reusing a fresh cached result across route transitions until invalidated by
+ * SSE or `PROFILE_DECISION_PROBE_TTL_MS`:
  * - HTTP 404 -> `{ available: false, waitingOnYou: 0 }` (hide nav item)
  * - HTTP 2xx -> `{ available: true, waitingOnYou }`
  * - Transient/auth failure -> `null` (leave nav state unchanged)
@@ -557,7 +637,7 @@ export async function fetchProfileDecisionProbe(
       ? { signal: signalOrOptions }
       : (signalOrOptions ?? {});
 
-  if (!opts.forceRefresh && cachedProfileDecisionProbe !== null) {
+  if (!opts.forceRefresh && isProfileDecisionProbeFresh()) {
     return cachedProfileDecisionProbe;
   }
   if (!opts.forceRefresh && inFlightProfileDecisionProbe !== null) {

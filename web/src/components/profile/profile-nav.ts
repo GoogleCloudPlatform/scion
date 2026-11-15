@@ -32,6 +32,8 @@ import {
   PROFILE_DECISIONS_COUNT_CHANGED_EVENT,
   fetchProfileDecisionProbe,
   getCachedProfileDecisionProbe,
+  getLastKnownProfileDecisionAvailability,
+  isChoicePromptMessageEvent,
   scheduleSharedProfileDecisionProbeRefresh,
 } from '../../client/profile-decisions.js';
 import { stateManager } from '../../client/state.js';
@@ -125,9 +127,14 @@ export class ScionProfileNav extends LitElement {
   @state()
   private decisionsEnabled = false;
 
-  /** Set to true when `GET /api/v1/users/me/decisions?limit=0` returns 404 (§7). */
+  /**
+   * Visibility of the top-level Decisions nav entry (§7):
+   * - `'unknown'`: initial probe has not resolved yet -> hidden (prevents flash on older 404 hubs)
+   * - `'visible'`: Hub supports `/api/v1/users/me/decisions` (or probe failed transiently per §7)
+   * - `'hidden'`: Hub returned 404 on `/api/v1/users/me/decisions`
+   */
   @state()
-  private decisionsProbeHidden = false;
+  private decisionsNavVisibility: 'unknown' | 'visible' | 'hidden' = 'unknown';
 
   /** Unfiltered `counts.waitingOnYou` across member projects (R1). */
   @state()
@@ -144,39 +151,39 @@ export class ScionProfileNav extends LitElement {
     if (next === this.decisionsEnabled) return;
     this.decisionsEnabled = next;
     if (next) {
+      this.ensureProfileStateScope();
       this.syncOrProbeDecisionsCount();
     } else {
       this.decisionsWaitingCount = 0;
-      this.decisionsProbeHidden = false;
+      this.decisionsNavVisibility = 'unknown';
     }
   };
 
   private boundOnProfileDecisionsCountChanged = (e: Event): void => {
     const detail = (e as CustomEvent<{ available?: boolean; waitingOnYou?: number }>).detail;
     if (detail?.available === false) {
-      this.decisionsProbeHidden = true;
+      this.decisionsNavVisibility = 'hidden';
       this.decisionsWaitingCount = 0;
       return;
     }
     if (typeof detail?.waitingOnYou === 'number') {
       this.decisionsWaitingCount = Math.max(0, detail.waitingOnYou);
-      this.decisionsProbeHidden = false;
+      this.decisionsNavVisibility = 'visible';
     } else {
       scheduleSharedProfileDecisionProbeRefresh();
     }
   };
 
   private boundOnChoiceUpdated = (): void => {
-    if (!this.decisionsEnabled || this.decisionsProbeHidden) return;
+    if (!this.decisionsEnabled || this.decisionsNavVisibility === 'hidden') return;
     if (this.isActive('/profile/decisions')) return;
     scheduleSharedProfileDecisionProbeRefresh();
   };
 
   private boundOnChatMessageReceived = (e: Event): void => {
-    if (!this.decisionsEnabled || this.decisionsProbeHidden) return;
+    if (!this.decisionsEnabled || this.decisionsNavVisibility === 'hidden') return;
     if (this.isActive('/profile/decisions')) return;
-    const payload = (e as CustomEvent<{ data?: { message?: { choices?: unknown } } }>).detail?.data;
-    if (!payload?.message?.choices) return;
+    if (!isChoicePromptMessageEvent(e)) return;
     scheduleSharedProfileDecisionProbeRefresh();
   };
 
@@ -628,6 +635,7 @@ export class ScionProfileNav extends LitElement {
     void this.loadPendingSecretCount();
     this.decisionsEnabled = projectDecisionsEnabled();
     if (this.decisionsEnabled) {
+      this.ensureProfileStateScope();
       this.syncOrProbeDecisionsCount();
     }
     window.addEventListener(PENDING_SECRETS_CHANGED_EVENT, this.boundOnPendingSecretsChanged);
@@ -638,6 +646,12 @@ export class ScionProfileNav extends LitElement {
     );
     stateManager.addEventListener('choice-updated', this.boundOnChoiceUpdated);
     stateManager.addEventListener('chat-message-received', this.boundOnChatMessageReceived);
+  }
+
+  override updated(changedProperties: Map<string, unknown>): void {
+    if (changedProperties.has('user') && this.decisionsEnabled) {
+      this.ensureProfileStateScope();
+    }
   }
 
   override disconnectedCallback(): void {
@@ -652,12 +666,33 @@ export class ScionProfileNav extends LitElement {
     stateManager.removeEventListener('chat-message-received', this.boundOnChatMessageReceived);
   }
 
+  private ensureProfileStateScope(): void {
+    const uid = this.user?.id || stateManager.getCurrentUserId();
+    if (uid) {
+      stateManager.setCurrentUserId(uid);
+    }
+    if (typeof EventSource !== 'undefined') {
+      stateManager.setScope(uid ? { type: 'profile', userId: uid } : { type: 'profile' });
+    }
+  }
+
   private syncOrProbeDecisionsCount(): void {
     const cached = getCachedProfileDecisionProbe();
     if (cached !== null) {
-      this.decisionsProbeHidden = !cached.available;
+      this.decisionsNavVisibility = cached.available ? 'visible' : 'hidden';
       this.decisionsWaitingCount = cached.available ? cached.waitingOnYou : 0;
       return;
+    }
+    const lastKnownAvailable = getLastKnownProfileDecisionAvailability();
+    if (lastKnownAvailable === true) {
+      this.decisionsNavVisibility = 'visible';
+      this.decisionsWaitingCount = 0;
+    } else if (lastKnownAvailable === false) {
+      this.decisionsNavVisibility = 'hidden';
+      this.decisionsWaitingCount = 0;
+    } else {
+      this.decisionsNavVisibility = 'unknown';
+      this.decisionsWaitingCount = 0;
     }
     if (this.isActive('/profile/decisions')) {
       // Let <scion-page-profile-decisions> start its page fetch first in the same
@@ -675,13 +710,20 @@ export class ScionProfileNav extends LitElement {
   private async loadProfileDecisionsCount(): Promise<void> {
     if (!this.decisionsEnabled) return;
     const probe = await fetchProfileDecisionProbe();
-    if (!this.isConnected || !this.decisionsEnabled || probe === null) return;
+    if (!this.isConnected || !this.decisionsEnabled) return;
+    if (probe === null) {
+      // §7: a transient non-404 probe error leaves the Decisions entry visible.
+      if (this.decisionsNavVisibility === 'unknown') {
+        this.decisionsNavVisibility = 'visible';
+      }
+      return;
+    }
     if (!probe.available) {
-      this.decisionsProbeHidden = true;
+      this.decisionsNavVisibility = 'hidden';
       this.decisionsWaitingCount = 0;
       return;
     }
-    this.decisionsProbeHidden = false;
+    this.decisionsNavVisibility = 'visible';
     this.decisionsWaitingCount = probe.waitingOnYou;
   }
 
@@ -759,7 +801,7 @@ export class ScionProfileNav extends LitElement {
     return false;
   }
 
-  override render() {
+  override render(): TemplateResult {
     return html`
       <div class="logo">
         <div class="logo-icon">🌱</div>
@@ -790,7 +832,7 @@ export class ScionProfileNav extends LitElement {
         : ''}
 
       <nav class="nav-container">
-        ${this.decisionsEnabled && !this.decisionsProbeHidden
+        ${this.decisionsEnabled && this.decisionsNavVisibility === 'visible'
           ? html`
               <div class="nav-section nav-section-decisions">
                 <ul class="nav-list">

@@ -387,6 +387,7 @@ function applyCompactedDelta(base: Agent, acc: CompactedDelta, agentId: string):
 /** Subscription scope matches view context */
 export type ViewScope =
   | { type: 'dashboard' }
+  | { type: 'profile'; userId?: string }
   | { type: 'project'; projectId: string }
   | { type: 'agent-detail'; projectId: string; agentId: string }
   | { type: 'brokers-list' }
@@ -722,6 +723,15 @@ export class StateManager extends EventTarget {
         case 'dashboard':
           return ['project.>', 'notification.>'];
 
+        case 'profile': {
+          const profileSubs = ['project.>', 'notification.>'];
+          const profileUid = scope.userId || this.currentUserId;
+          if (profileUid) {
+            profileSubs.push(`user.${profileUid}.chat.>`);
+          }
+          return profileSubs;
+        }
+
         case 'project':
           return [`project.${scope.projectId}.>`, 'notification.>'];
 
@@ -760,7 +770,10 @@ export class StateManager extends EventTarget {
     // agents and schedules and so never go out on `notification.*`. The
     // chat subject's `chat.>` does not cover it: `notification` is not under
     // `chat`. It is added in every scope so the bell hears about them live.
-    const userId = this.currentUserId || (scope.type === 'chat' ? scope.userId : '');
+    const userId =
+      this.currentUserId ||
+      (scope.type === 'chat' ? scope.userId : '') ||
+      (scope.type === 'profile' ? scope.userId || '' : '');
     if (userId) {
       const own = `user.${userId}.chat.>`;
       if (!subs.includes(own)) subs.push(own);
@@ -773,6 +786,9 @@ export class StateManager extends EventTarget {
   private scopeEquals(a: ViewScope, b: ViewScope): boolean {
     if (a.type !== b.type) return false;
     if (a.type === 'dashboard' && b.type === 'dashboard') return true;
+    if (a.type === 'profile' && b.type === 'profile') {
+      return (a.userId || '') === (b.userId || '');
+    }
     if (a.type === 'agent-feed' && b.type === 'agent-feed') return true;
     if (a.type === 'brokers-list' && b.type === 'brokers-list') return true;
     if (a.type === 'broker-detail' && b.type === 'broker-detail') return a.brokerId === b.brokerId;

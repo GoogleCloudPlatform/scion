@@ -96,7 +96,8 @@ export class ScionPageProfileDecisions extends LitElement {
     getPageData: (): PageData | null => this.pageData,
     canOperate: (): boolean => true,
     configureStateScope: (): void => {
-      stateManager.setScope({ type: 'dashboard' });
+      const uid = this.pageData?.user?.id || stateManager.getCurrentUserId();
+      stateManager.setScope(uid ? { type: 'profile', userId: uid } : { type: 'profile' });
     },
     onBoot: (): Promise<void> => {
       dispatchPageTitle(this, 'Decisions', 'Profile');
@@ -350,7 +351,7 @@ export class ScionPageProfileDecisions extends LitElement {
   }
 
   private renderTruncatedBanner(): TemplateResult | typeof nothing {
-    if (!this.ctrl.truncatedProjects) return nothing;
+    if (!this.ctrl.truncatedProjects || this.ctrl.filterProject) return nothing;
     return html`
       <sl-alert variant="primary" open data-truncated-projects>
         <sl-icon slot="icon" name="info-circle"></sl-icon>

@@ -52,6 +52,7 @@ import {
   buildProfileDecisionsUrlSearch,
   cleanProfileProjectValue,
   defaultProfileDecisionsSort,
+  isChoicePromptMessageEvent,
   parseProfileDecisionsUrlState,
   type ProfileDecisionActorView,
   type ProfileDecisionMadeGroupView,
@@ -250,27 +251,13 @@ export class DecisionsPageController implements ReactiveController {
 
   private readonly boundOnChatMessageReceived = (e: Event): void => {
     if (!this.enabled || !this.canOperate()) return;
+    if (!isChoicePromptMessageEvent(e)) return;
     const raw = (e as CustomEvent).detail as {
-      data?: {
-        projectId?: string;
-        type?: string;
-        decisions?: unknown;
-        message?: { choices?: unknown };
-      };
+      data?: { projectId?: string };
       projectId?: string;
-      type?: string;
-      decisions?: unknown;
-      message?: { choices?: unknown };
     } | null;
     const data = raw?.data ?? raw;
     if (this.adapter.matchesProject && !this.adapter.matchesProject(data?.projectId)) return;
-    if (
-      data?.type !== 'choice-prompt' &&
-      !Array.isArray(data?.decisions) &&
-      !data?.message?.choices
-    ) {
-      return;
-    }
     this.scheduleLiveRefresh();
   };
 
@@ -1241,10 +1228,20 @@ export class DecisionsPageController implements ReactiveController {
     if (next !== 'project' && next !== 'recent') return;
     if (this.sort === next) return;
 
-    this.flushDebouncedSearchIfPending();
+    const flushedSearch = this.flushDebouncedSearchIfPending();
     this.sort = next;
     if (this.activeTab === 'pending') {
       this.pendingSortOverride = next !== defaultProfileDecisionsSort('pending') ? next : null;
+      if (
+        flushedSearch &&
+        (this.madeLoaded ||
+          this.madeSearchTimeout ||
+          this.madeLoading ||
+          this.madeLoadingMore ||
+          this.madeAbort !== null)
+      ) {
+        this.invalidateInFlightMadeLoad();
+      }
       this.syncUrlState();
       this.pendingNextCursor = '';
       this.pendingPagedBeyondFirst = false;
@@ -1252,13 +1249,26 @@ export class DecisionsPageController implements ReactiveController {
       void this.loadPendingPage({ mode: 'reset' });
     } else {
       this.madeSortOverride = next !== defaultProfileDecisionsSort('made') ? next : null;
-      this.syncUrlState();
+      if (flushedSearch) {
+        this.invalidateInFlightPendingLoad();
+      }
       this.madeNextCursor = '';
       this.madePagedBeyondFirst = false;
+      this.madeRefreshDeferred = false;
+      this.syncUrlState();
       this.notify();
-      if (!this.hasDateRangeError) {
-        void this.loadMadePage({ mode: 'reset' });
+      if (this.hasDateRangeError) {
+        ++this.madeGen;
+        this.madeAbort?.abort();
+        this.madeAbort = null;
+        this.madeLoading = false;
+        this.madeLoadingMore = false;
+        this.madeError = null;
+        this.madeSearchTimeout = false;
+        this.notify();
+        return;
       }
+      void this.loadMadePage({ mode: 'reset' });
     }
   }
 
@@ -1266,12 +1276,12 @@ export class DecisionsPageController implements ReactiveController {
     if (this.adapter.scope !== 'profile') return;
     const cleaned = cleanProfileProjectValue(projectId);
     if (!cleaned) return;
-    this.flushDebouncedSearchIfPending();
+    const flushedSearch = this.flushDebouncedSearchIfPending();
     const projectChanged = cleaned !== this.filterProject;
     this.filterProject = cleaned;
     this.sort = 'recent';
     this.madeSortOverride = null;
-    if (projectChanged) {
+    if (projectChanged || flushedSearch) {
       this.invalidateInFlightPendingLoad();
     }
     this.madeNextCursor = '';
@@ -1279,9 +1289,18 @@ export class DecisionsPageController implements ReactiveController {
     this.madeRefreshDeferred = false;
     this.syncUrlState();
     this.notify();
-    if (!this.hasDateRangeError) {
-      void this.loadMadePage({ mode: 'reset' });
+    if (this.hasDateRangeError) {
+      ++this.madeGen;
+      this.madeAbort?.abort();
+      this.madeAbort = null;
+      this.madeLoading = false;
+      this.madeLoadingMore = false;
+      this.madeError = null;
+      this.madeSearchTimeout = false;
+      this.notify();
+      return;
     }
+    void this.loadMadePage({ mode: 'reset' });
   }
 
   onTabShow(e: Event): void {
