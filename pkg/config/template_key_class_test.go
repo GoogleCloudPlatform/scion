@@ -15,7 +15,9 @@
 package config
 
 import (
+	"bytes"
 	"io/fs"
+	"log/slog"
 	"path"
 	"reflect"
 	"strings"
@@ -225,5 +227,40 @@ func TestFilterHarnessConfigEnv(t *testing.T) {
 	}
 	if _, ok := in["SCION_HOOKS_DIR"]; !ok {
 		t.Error("input map was mutated")
+	}
+}
+
+func TestFilterHarnessConfigEnv_LogsWarnForDroppedReservedKeys(t *testing.T) {
+	var logBuf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	const secretHookVal = "do-not-log-hooks-value"
+	const secretPayloadVal = "do-not-log-secrets-value"
+	FilterHarnessConfigEnv(map[string]string{
+		"SCION_HOOKS_DIR": secretHookVal,
+		"SCION_SECRETS":   secretPayloadVal,
+		"CUSTOM_KEY":      "kept",
+	})
+	logged := logBuf.String()
+	if !strings.Contains(logged, "level=WARN") {
+		t.Errorf("expected WARN log when reserved lifecycle keys are dropped, got %q", logged)
+	}
+	for _, key := range []string{"SCION_HOOKS_DIR", "SCION_SECRETS"} {
+		if !strings.Contains(logged, key) {
+			t.Errorf("expected dropped key %s in warn log, got %q", key, logged)
+		}
+	}
+	for _, secret := range []string{secretHookVal, secretPayloadVal} {
+		if strings.Contains(logged, secret) {
+			t.Errorf("warn log leaked dropped value %q: %s", secret, logged)
+		}
+	}
+
+	logBuf.Reset()
+	FilterHarnessConfigEnv(map[string]string{"CUSTOM_KEY": "kept"})
+	if logBuf.Len() != 0 {
+		t.Errorf("expected no warn log when no reserved keys are present, got %q", logBuf.String())
 	}
 }

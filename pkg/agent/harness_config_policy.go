@@ -607,7 +607,7 @@ func listHomeHooksEntries(homeDir string) (present bool, rels []string, err erro
 		return false, nil, err
 	}
 	if !scionInfo.IsDir() {
-		return false, nil, nil
+		return false, nil, fmt.Errorf("stat %s/.scion: not a directory", homeDir)
 	}
 
 	hooksOSRel := filepath.FromSlash(homeHooksRel)
@@ -704,11 +704,7 @@ func writeBundleHooksRecord(agentDir string, rels []string) error {
 	if rec.Paths == nil {
 		rec.Paths = []string{}
 	}
-	data, err := json.Marshal(rec)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(agentDir, bundleHooksRecordFileName), data, 0o644)
+	return writeAgentRecordFile(agentDir, bundleHooksRecordFileName, rec)
 }
 
 func readBundleHooksRecord(agentDir string) (rels []string, exists bool, err error) {
@@ -787,6 +783,7 @@ func clearDisallowedBundleHooksOnStart(
 	agentName, harnessConfigName string,
 	hcDir *config.HarnessConfigDir,
 	chain []*config.Template,
+	templatesUnresolvable bool,
 	agentDir, agentHome string,
 	writeHome func(func() error) error,
 ) error {
@@ -796,18 +793,45 @@ func clearDisallowedBundleHooksOnStart(
 	}
 
 	recorded, hasRecord, recErr := readBundleHooksRecord(agentDir)
-	var resolvedRels []string
+	var toRemove []string
 	var listErr error
-	if !hasRecord && hcDir != nil && hcDir.Path != "" {
+	switch {
+	case hasRecord:
+		toRemove = slices.Clone(recorded)
+	case hcDir != nil && hcDir.Path != "":
 		_, hcRels, err := listHomeHooksEntries(filepath.Join(hcDir.Path, "home"))
 		if err != nil {
 			listErr = err
 		} else if len(hcRels) > 0 {
-			resolvedRels, listErr = subtractTemplateHookPaths(hcRels, chain)
+			toRemove, listErr = subtractTemplateHookPaths(hcRels, chain)
 		}
+	default:
+		if !probeScriptedPolicyRefusal(policy, harnessConfigName, hcDir) {
+			return nil
+		}
+		if harnessConfigName != "" {
+			return fmt.Errorf("%w: %w", ErrHarnessConfigPolicy, &HarnessConfigNotEvaluatedError{
+				Name:  harnessConfigName,
+				Cause: errors.New("harness-config directory is not resolvable and no provision hooks record exists"),
+			})
+		}
+		if templatesUnresolvable {
+			return fmt.Errorf("%w: cannot verify agent hooks for %q: template is not resolvable and no provision hooks record exists", ErrHarnessConfigPolicy, agentName)
+		}
+		_, homeRels, err := listHomeHooksEntries(agentHome)
+		if err != nil {
+			return fmt.Errorf("inspect agent hooks: %w", err)
+		}
+		toRemove, err = subtractTemplateHookPaths(homeRels, chain)
+		if err != nil {
+			return fmt.Errorf("inspect template hooks: %w", err)
+		}
+		if len(toRemove) == 0 {
+			return nil
+		}
+		return stripAgentHomeHookPaths(agentName, harnessConfigName, agentHome, toRemove, writeHome)
 	}
 
-	toRemove := append(slices.Clone(recorded), resolvedRels...)
 	slices.Sort(toRemove)
 	toRemove = slices.Compact(toRemove)
 
@@ -823,7 +847,14 @@ func clearDisallowedBundleHooksOnStart(
 	if listErr != nil {
 		return fmt.Errorf("inspect harness-config hooks: %w", listErr)
 	}
+	return stripAgentHomeHookPaths(agentName, harnessConfigName, agentHome, toRemove, writeHome)
+}
 
+func stripAgentHomeHookPaths(
+	agentName, harnessConfigName, agentHome string,
+	toRemove []string,
+	writeHome func(func() error) error,
+) error {
 	strip := func() error {
 		home, err := agenthome.Open(agentHome)
 		if err != nil {

@@ -16,6 +16,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 
@@ -102,17 +103,24 @@ func IsReservedLifecycleEnvKey(key string) bool {
 }
 
 // FilterHarnessConfigEnv returns a copy of env with reserved lifecycle
-// initialization keys removed, without mutating env. Nil yields nil.
+// initialization keys removed, without mutating env. Nil yields nil. Dropped
+// keys are logged at warn level by name only.
 func FilterHarnessConfigEnv(env map[string]string) map[string]string {
 	if env == nil {
 		return nil
 	}
 	out := make(map[string]string, len(env))
+	var dropped []string
 	for k, v := range env {
 		if IsReservedLifecycleEnvKey(k) {
+			dropped = append(dropped, k)
 			continue
 		}
 		out[k] = v
+	}
+	sort.Strings(dropped)
+	for _, k := range dropped {
+		slog.Warn("ignoring reserved lifecycle environment variable in harness-config", "key", k)
 	}
 	return out
 }
