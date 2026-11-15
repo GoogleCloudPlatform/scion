@@ -909,6 +909,20 @@ func TestInvitedUser_HubRoleGuard_FailsClosedOnStoreFault(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
+type nilGetGroupStore struct {
+	store.Store
+}
+
+func (nilGetGroupStore) GetGroup(context.Context, string) (*store.Group, error) {
+	return nil, nil
+}
+
+func TestGroupClosureCarriesBuiltInHubRole_NilGroupFailsClosed(t *testing.T) {
+	carries, err := groupClosureCarriesBuiltInHubRole(context.Background(), nilGetGroupStore{}, "group-1")
+	require.Error(t, err)
+	assert.False(t, carries)
+}
+
 type getUserCountStore struct {
 	store.Store
 	targetID string

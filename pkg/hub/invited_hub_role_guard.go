@@ -171,6 +171,9 @@ func groupClosureCarriesBuiltInHubRole(ctx context.Context, st store.Store, grou
 	if err != nil {
 		return false, fmt.Errorf("look up group %s for hub role guard: %w", groupID, err)
 	}
+	if g == nil {
+		return false, fmt.Errorf("group %s not found", groupID)
+	}
 	if g.Slug == hubMembersSlug {
 		return true, nil
 	}

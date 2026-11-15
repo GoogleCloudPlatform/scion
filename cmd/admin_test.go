@@ -95,3 +95,47 @@ func TestPromoteUserToAdmin_RefusesInvitedUser(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, bindings)
 }
+
+type nilTxUserStore struct {
+	store.Store
+	inTx bool
+}
+
+func (s *nilTxUserStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	if s.inTx {
+		return nil, nil
+	}
+	return s.Store.GetUser(ctx, id)
+}
+
+func (s *nilTxUserStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return s.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&nilTxUserStore{Store: tx, inTx: true})
+	})
+}
+
+func TestPromoteUserToAdmin_NilTxUserFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	s := newRecoveryTestStore(t)
+
+	_, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:      store.SystemRoleSuperAdmin,
+		ScopeType: store.RoleScopeSystem,
+		System:    true,
+	})
+	require.NoError(t, err)
+
+	active := &store.User{
+		ID:      uuid.NewString(),
+		Email:   "active-nil-tx@example.com",
+		Role:    store.UserRoleMember,
+		Status:  store.UserStatusActive,
+		Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, active))
+
+	var out bytes.Buffer
+	err = promoteUserToAdmin(ctx, &nilTxUserStore{Store: s}, active.Email, &out)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+}

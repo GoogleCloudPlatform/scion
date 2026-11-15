@@ -165,6 +165,9 @@ func promoteUserToAdmin(ctx context.Context, s store.Store, email string, out io
 		if err != nil {
 			return fmt.Errorf("failed to re-read user: %w", err)
 		}
+		if txUser == nil {
+			return fmt.Errorf("user %q not found", email)
+		}
 		if !txUser.IsHumanKind() || store.IsReservedTestIdentityEmail(txUser.Email) {
 			return fmt.Errorf("user %q is a hub test identity; test identities cannot be promoted to admin", email)
 		}
