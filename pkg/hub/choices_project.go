@@ -581,30 +581,41 @@ func (s *Server) listProjectDecisions(w http.ResponseWriter, r *http.Request, pr
 	s.mu.RUnlock()
 
 	// A search runs under the chat search time limit (design D9).
+	searchCtx := ctx
 	if pq.q != "" {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, s.chatSearchTimeout())
+		searchCtx, cancel = context.WithTimeout(ctx, s.chatSearchTimeout())
 		defer cancel()
 	}
 
-	scope, err := s.resolveProjectReadableScope(ctx, project, user, token, wcs)
+	scope, err := s.resolveProjectReadableScope(searchCtx, project, user, token, wcs)
 	if err != nil {
-		writeDecisionsError(w, err)
+		writeDecisionsError(w, r, searchCtx, err)
 		return
 	}
-	resp, err := s.decisionsCore(ctx, user, token, wcs, []*projectReadableScope{scope}, pq)
+	resp, err := s.decisionsCore(searchCtx, user, token, wcs, []*projectReadableScope{scope}, pq)
+	if err == nil && errors.Is(searchCtx.Err(), context.DeadlineExceeded) {
+		// A step that tolerates a failed lookup may have run past the
+		// limit: no partial results, as in chat search.
+		err = searchCtx.Err()
+	}
 	if err != nil {
-		writeDecisionsError(w, err)
+		writeDecisionsError(w, r, searchCtx, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// writeDecisionsError maps a decisions query failure: a search past its time
-// limit answers like chat search, an invalid filter or cursor is 400.
-func writeDecisionsError(w http.ResponseWriter, err error) {
+// writeDecisionsError maps a decisions query failure the way chat search
+// does (handlers_chat_v2.go finishCtxErr): a client that went away gets no
+// body; a passed search deadline is 503 SEARCH_TIMEOUT whatever error the
+// interrupted query surfaced (a SQLite interrupt during rows.Next is not a
+// context error); an invalid filter or cursor is 400.
+func writeDecisionsError(w http.ResponseWriter, r *http.Request, searchCtx context.Context, err error) {
 	switch {
-	case isChatSearchTimeout(err):
+	case r.Context().Err() != nil:
+		return
+	case errors.Is(searchCtx.Err(), context.DeadlineExceeded), isChatSearchTimeout(err):
 		writeChatSearchTimeout(w)
 	case errors.Is(err, store.ErrInvalidInput):
 		ValidationError(w, "invalid query filter or cursor", map[string]interface{}{"field": "cursor"})

@@ -336,8 +336,11 @@ func writeWaitingDecisionsTable(out io.Writer, resp *hubclient.ProjectDecisionsR
 		}
 		_ = tw.Flush()
 	}
-	if resp.NextCursor != "" {
-		_, _ = fmt.Fprintf(out, "More Decisions are waiting; raise --limit (up to %d) to list them.\n", maxDecisionsListLimit)
+	// Pages list waiting-on-you prompts before waiting-on-others ones, so
+	// a next page holds more of yours only while rows shown fall short of
+	// the waiting-on-you count.
+	if resp.NextCursor != "" && len(rows) < counts.WaitingOnYou {
+		_, _ = fmt.Fprintf(out, "More Decisions are waiting on you; raise --limit (up to %d) to list them.\n", maxDecisionsListLimit)
 	}
 	if counts.WaitingOnOthers > 0 {
 		_, _ = fmt.Fprintf(out, "%d more waiting on others (use --json for details)\n", counts.WaitingOnOthers)

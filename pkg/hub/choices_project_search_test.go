@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"strings"
@@ -403,4 +404,32 @@ func TestDecisionAgentFacetViews_LabelsAndHints(t *testing.T) {
 		{ID: liveA.ID, Name: "release-bot", Hint: "aaaa"},
 		{ID: liveB.ID, Name: "Release-Bot", Hint: "bbbb"},
 	}, got)
+}
+
+// interruptingDecisionStore fails ListDecisionFacets the way an interrupted
+// SQLite query does: it waits for the search deadline, then returns an error
+// that does not wrap the context's.
+type interruptingDecisionStore struct {
+	store.Store
+}
+
+func (s *interruptingDecisionStore) ListDecisionFacets(ctx context.Context, projectIDs, chatKeys []string) ([]store.ProjectDecisionActor, []store.ProjectDecisionActor, []string, error) {
+	<-ctx.Done()
+	return nil, nil, nil, errors.New("interrupted (9)")
+}
+
+func TestProjectDecisions_SearchDeadlineWithNonContextErrorIsTimeout(t *testing.T) {
+	srv, rawStore, alice, bob, project, _, _ := setupDemoPolicyTestWithFault(t, func(inner store.Store, _ *storeFaultSwitch) *interruptingDecisionStore {
+		return &interruptingDecisionStore{Store: inner}
+	})
+	f := newChoicesFixtureOn(t, srv, rawStore, alice, bob, project)
+	setProjectDecisionsExperiments(t, f.srv, true, true)
+	f.topicPrompt(t, `[{"id":"ship-now","question":"Deploy?","choices":["yes","no"]}]`, false)
+	f.srv.config.ChatSearchTimeout = 50 * time.Millisecond
+
+	for _, tab := range []string{ProjectDecisionsTabPending, ProjectDecisionsTabMade} {
+		rr := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/projects/"+f.project.ID+"/decisions?tab="+tab+"&q=deploy", nil)
+		assert.Equal(t, http.StatusServiceUnavailable, rr.Code, "%s: %s", tab, rr.Body.String())
+		assert.Contains(t, rr.Body.String(), "SEARCH_TIMEOUT", tab)
+	}
 }

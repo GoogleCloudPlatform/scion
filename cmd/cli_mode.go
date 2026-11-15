@@ -263,6 +263,12 @@ func applyModeRestrictions(root *cobra.Command, mode CLIMode) {
 const cliModeFlagAnnotation = "scion_cli_mode"
 
 // markFlagsForMode marks cmd's local flags names as accepted only in mode.
+//
+// Hiding is automatic (applyModeRestrictions), but refusing is opt-in: a
+// command that marks flags must call checkFlagsForMode(cmd, resolveMode())
+// at the top of its RunE, before acting on any flag (as runDecisionsList
+// does). Without that call a marked flag set in the other mode is hidden
+// from help yet still accepted.
 func markFlagsForMode(cmd *cobra.Command, mode CLIMode, names ...string) {
 	for _, name := range names {
 		if err := cmd.Flags().SetAnnotation(name, cliModeFlagAnnotation, []string{string(mode)}); err != nil {

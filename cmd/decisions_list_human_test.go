@@ -371,3 +371,36 @@ func TestDecisionsListHuman_EmptyAndFilteredMessages(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "No Decisions made.\n", out)
 }
+
+func TestDecisionsListHuman_MoreHintOnlyForWaitingOnYou(t *testing.T) {
+	fixDecisionsClock(t)
+	h := newHumanDecisionsHub(t)
+	t.Setenv("SCION_CLI_MODE", "human")
+
+	// Every waiting-on-you row fits; the next page holds only prompts
+	// waiting on others: no --limit hint.
+	h.pending = `{"counts":{"waitingOnYou":1,"waitingOnOthers":3},"nextCursor":"c2",
+	  "prompts":[{"promptMessageId":"m1","chatKey":"t","conversationLabel":"#release","askerAgentName":"release-bot",
+	    "createdAt":"2026-11-13T04:48:00Z","waitingOnYou":true,
+	    "decisions":[{"rowId":"r1","key":"ship-now","version":1,"status":"pending","question":"Deploy?"}]}],
+	  "agents":[],"answerers":[],"conversations":[]}`
+	out, err := runDecisionsTestCmd(t, "decisions", "list", "--limit", "1")
+	require.NoError(t, err)
+	assert.Equal(t, ""+
+		"KEY       VER  QUESTION  AGENT        CONVERSATION  AGE\n"+
+		"ship-now  v1   Deploy?   release-bot  #release      12m ago\n"+
+		"3 more waiting on others (use --json for details)\n", out)
+
+	// More waiting-on-you rows than the page shows: the hint.
+	h.pending = `{"counts":{"waitingOnYou":2,"waitingOnOthers":0},"nextCursor":"c2",
+	  "prompts":[{"promptMessageId":"m1","chatKey":"t","conversationLabel":"#release","askerAgentName":"release-bot",
+	    "createdAt":"2026-11-13T04:48:00Z","waitingOnYou":true,
+	    "decisions":[{"rowId":"r1","key":"ship-now","version":1,"status":"pending","question":"Deploy?"}]}],
+	  "agents":[],"answerers":[],"conversations":[]}`
+	out, err = runDecisionsTestCmd(t, "decisions", "list", "--limit", "1")
+	require.NoError(t, err)
+	assert.Equal(t, ""+
+		"KEY       VER  QUESTION  AGENT        CONVERSATION  AGE\n"+
+		"ship-now  v1   Deploy?   release-bot  #release      12m ago\n"+
+		"More Decisions are waiting on you; raise --limit (up to 200) to list them.\n", out)
+}
