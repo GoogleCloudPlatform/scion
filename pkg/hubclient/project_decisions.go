@@ -65,11 +65,12 @@ type ProjectDecisionCounts struct {
 }
 
 // ProjectDecisionActor is an agents or answerers facet option. Hint tells
-// apart agents whose names collide.
+// apart agents whose names collide; ProjectID is populated for asking agents.
 type ProjectDecisionActor struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Hint string `json:"hint,omitempty"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Hint      string `json:"hint,omitempty"`
+	ProjectID string `json:"projectId,omitempty"`
 }
 
 // ProjectDecisionConversation is a conversations facet option.

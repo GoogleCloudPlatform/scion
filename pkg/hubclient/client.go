@@ -159,6 +159,10 @@ type Client interface {
 	// sees them (Waiting on you and Made).
 	ProjectDecisions(projectID string) ProjectDecisionService
 
+	// MyDecisions returns the calling user's Decisions roll-up across their
+	// member projects (GET /api/v1/users/me/decisions).
+	MyDecisions() MyDecisionService
+
 	// Health checks API availability.
 	Health(ctx context.Context) (*HealthResponse, error)
 
@@ -201,6 +205,7 @@ type client struct {
 	testIdentityDelegs    *testIdentityDelegationService
 	agentDelegations      *agentDelegationService
 	decisions             *decisionService
+	myDecisions           *myDecisionService
 
 	// pluginName, when set (WithPluginName), is sent as
 	// X-Scion-Plugin-Name on the broker attachment requests.
@@ -266,6 +271,7 @@ func New(baseURL string, opts ...Option) (Client, error) {
 	c.testIdentityDelegs = &testIdentityDelegationService{c: c}
 	c.agentDelegations = &agentDelegationService{c: c}
 	c.decisions = &decisionService{c: c}
+	c.myDecisions = &myDecisionService{c: c}
 
 	return c, nil
 }
@@ -432,6 +438,11 @@ func (c *client) AgentDelegations() AgentDelegationService {
 // Decisions returns the agent self-service decision operations interface.
 func (c *client) Decisions() DecisionService {
 	return c.decisions
+}
+
+// MyDecisions returns the calling user's cross-project Decisions roll-up service.
+func (c *client) MyDecisions() MyDecisionService {
+	return c.myDecisions
 }
 
 // get performs an HTTP GET request.

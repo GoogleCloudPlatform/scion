@@ -15,6 +15,9 @@
 package cmd
 
 import (
+	"strconv"
+	"strings"
+
 	"github.com/spf13/cobra"
 )
 
@@ -128,12 +131,58 @@ func commandRequiresProject(cmd *cobra.Command) bool {
 	if isGlobalTemplatesUpdate(cmd) {
 		return false
 	}
+	// 'decisions list --all-projects' queries GET /api/v1/users/me/decisions
+	// across the user's Hub projects and needs no local project (ptone/scion#7995).
+	if isAllProjectsDecisionsList(cmd) {
+		return false
+	}
 	// design Amendment A26.2 O1: same reasoning as checkAgentContainerContext
 	// — --handoff-template never touches the project or the Hub.
 	if isReincarnateHandoffTemplateInvocation(cmd) {
 		return false
 	}
 	return true
+}
+
+// isAllProjectsDecisionsList reports whether cmd is 'decisions list' with
+// --all-projects set.
+func isAllProjectsDecisionsList(cmd *cobra.Command) bool {
+	if !isDecisionsListCommand(cmd) {
+		return false
+	}
+	allProjects, _ := cmd.Flags().GetBool("all-projects")
+	return allProjects
+}
+
+// isAllProjectsDecisionsListArgs reports whether target is 'decisions list'
+// with --all-projects requested, before or after cobra parses flags (mirrors
+// hubProfileRequested for Execute's early autoHelp settings load).
+func isAllProjectsDecisionsListArgs(target *cobra.Command, args []string) bool {
+	if !isDecisionsListCommand(target) {
+		return false
+	}
+	if isAllProjectsDecisionsList(target) {
+		return true
+	}
+	requested := false
+	for _, a := range args {
+		if a == "--" {
+			break
+		}
+		switch {
+		case a == "--all-projects":
+			requested = true
+		case strings.HasPrefix(a, "--all-projects="):
+			if v, err := strconv.ParseBool(strings.TrimPrefix(a, "--all-projects=")); err == nil {
+				requested = v
+			}
+		}
+	}
+	return requested
+}
+
+func isDecisionsListCommand(cmd *cobra.Command) bool {
+	return cmd != nil && cmd.Name() == "list" && cmd.Parent() != nil && cmd.Parent().Name() == "decisions" && isTopLevel(cmd.Parent())
 }
 
 // isGlobalTemplatesUpdate reports whether cmd is 'templates update' with

@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decision"
@@ -40,6 +41,7 @@ type groupedDecisionAgent struct {
 
 type groupedDecisionAgentName struct {
 	AskerAgentID uuid.UUID `json:"asker_agent_id"`
+	ProjectID    uuid.UUID `json:"project_id"`
 	Name         string    `json:"asker_agent_name"`
 	Latest       string    `json:"latest"`
 }
@@ -48,6 +50,11 @@ type groupedDecisionAnswerer struct {
 	AnsweredByUserID string `json:"answered_by_user_id"`
 	Name             string `json:"name"`
 	Email            string `json:"email"`
+}
+
+type groupedDecisionProject struct {
+	ProjectID uuid.UUID `json:"project_id"`
+	Latest    string    `json:"latest"`
 }
 
 // ListProjectDecisionAgents implements store.DecisionStore.
@@ -95,7 +102,7 @@ func (c *CompositeStore) ListOpenPrompts(ctx context.Context, projectIDs, chatKe
 	openRows, err := c.client.Decision.Query().
 		Where(
 			decision.ProjectIDIn(projectUUIDs...),
-			decision.ChatKeyIn(keys...),
+			decisionChatKeyIn(len(projectUUIDs), keys),
 			decision.Or(
 				decision.StatusEQ(decision.StatusPending),
 				decision.And(
@@ -178,20 +185,9 @@ func (c *CompositeStore) ListDecisionAnswers(
 	if limit < 0 || limit > store.MaxDecisionListLimit {
 		return nil, "", fmt.Errorf("%w: limit must be between 0 and %d", store.ErrInvalidInput, store.MaxDecisionListLimit)
 	}
-
-	var agentUUID uuid.UUID
-	if filter.AgentID != "" {
-		agentUUID, err = parseUUID(filter.AgentID)
-		if err != nil {
-			return nil, "", err
-		}
-	}
-	provPred, err := answerProvenancePredicate(filter.Provenance)
+	agentUUID, provPred, err := validateDecisionAnswerFilter(filter)
 	if err != nil {
 		return nil, "", err
-	}
-	if filter.From != nil && filter.To != nil && filter.From.After(*filter.To) {
-		return nil, "", fmt.Errorf("%w: from must not be after to", store.ErrInvalidInput)
 	}
 	var cur decisionListCursor
 	if cursor != "" {
@@ -209,26 +205,9 @@ func (c *CompositeStore) ListDecisionAnswers(
 	q := c.client.DecisionAnswer.Query().
 		Where(
 			decisionanswer.ProjectIDIn(projectUUIDs...),
-			decisionAnswerInChatKeys(projectUUIDs, keys),
+			decisionAnswerInChatKeys(keys),
 		)
-	if filter.Query != "" {
-		q = q.Where(decisionAnswerMatchesQuery(filter.Query, cleanChatKeys(filter.QueryChatKeys)))
-	}
-	if filter.AgentID != "" {
-		q = q.Where(decisionanswer.AskerAgentID(agentUUID))
-	}
-	if filter.UserID != "" {
-		q = q.Where(decisionanswer.AnsweredByUserID(filter.UserID))
-	}
-	if provPred != nil {
-		q = q.Where(provPred)
-	}
-	if filter.From != nil {
-		q = q.Where(decisionanswer.CreatedAtGTE(filter.From.UTC()))
-	}
-	if filter.To != nil {
-		q = q.Where(decisionanswer.CreatedAtLTE(filter.To.UTC()))
-	}
+	q = applyDecisionAnswerFilter(q, filter, agentUUID, provPred)
 	if cursor != "" {
 		q = q.Where(decisionanswer.Or(
 			decisionanswer.CreatedAtLT(cur.CreatedAt),
@@ -259,6 +238,206 @@ func (c *CompositeStore) ListDecisionAnswers(
 		return nil, "", nil
 	}
 
+	entries, err := c.enrichDecisionAnswerRows(ctx, rows)
+	if err != nil {
+		return nil, "", err
+	}
+	return entries, nextCursor, nil
+}
+
+// ProjectsWithDecisions implements store.DecisionStore.
+func (c *CompositeStore) ProjectsWithDecisions(ctx context.Context, projectIDs []string) ([]string, error) {
+	if len(projectIDs) == 0 {
+		return nil, nil
+	}
+	projectUUIDs, err := parseProjectIDs(projectIDs)
+	if err != nil {
+		return nil, err
+	}
+	if len(projectUUIDs) == 0 {
+		return nil, nil
+	}
+
+	var rows []groupedDecisionProject
+	err = c.client.Decision.Query().
+		Where(decision.ProjectIDIn(projectUUIDs...)).
+		GroupBy(decision.FieldProjectID).
+		Aggregate(ent.As(ent.Max(decision.FieldCreatedAt), "latest")).
+		Scan(ctx, &rows)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+
+	type projectLatest struct {
+		id     string
+		latest time.Time
+	}
+	ordered := make([]projectLatest, len(rows))
+	for i, r := range rows {
+		ordered[i] = projectLatest{
+			id:     r.ProjectID.String(),
+			latest: parseAggregateTime(r.Latest),
+		}
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		if !ordered[i].latest.Equal(ordered[j].latest) {
+			return ordered[i].latest.After(ordered[j].latest)
+		}
+		return ordered[i].id < ordered[j].id
+	})
+
+	out := make([]string, len(ordered))
+	for i, p := range ordered {
+		out[i] = p.id
+	}
+	return out, nil
+}
+
+// ListDecisionAnswersPerProject implements store.DecisionStore using the
+// design R5 shape: one bounded LIMIT perProject query per target project
+// scoped to that project's own readable keys (served by
+// INDEX(project_id, created_at)), followed by a single batched enrichment
+// pass over the union of returned rows.
+func (c *CompositeStore) ListDecisionAnswersPerProject(
+	ctx context.Context,
+	projectIDs []string,
+	chatKeysByProject map[string][]string,
+	filter store.ProjectDecisionAnswerFilter,
+	perProject int,
+) (map[string][]*store.ProjectDecisionAnswerEntry, error) {
+	projectUUIDs, err := parseProjectIDs(projectIDs)
+	if err != nil {
+		return nil, err
+	}
+	if perProject < 0 || perProject > store.MaxDecisionListLimit {
+		return nil, fmt.Errorf("%w: perProject must be between 0 and %d", store.ErrInvalidInput, store.MaxDecisionListLimit)
+	}
+	agentUUID, provPred, err := validateDecisionAnswerFilter(filter)
+	if err != nil {
+		return nil, err
+	}
+	if perProject == 0 || len(projectUUIDs) == 0 || len(chatKeysByProject) == 0 {
+		return nil, nil
+	}
+
+	cleanedQueryKeys := cleanChatKeys(filter.QueryChatKeys)
+	allRows := make([]*ent.DecisionAnswer, 0, len(projectUUIDs)*perProject)
+	for _, pUUID := range projectUUIDs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		pid := pUUID.String()
+		projKeys := cleanChatKeys(chatKeysByProject[pid])
+		if len(projKeys) == 0 {
+			continue
+		}
+		projFilter := filter
+		if filter.Query != "" && len(cleanedQueryKeys) > 0 {
+			projKeySet := make(map[string]bool, len(projKeys))
+			for _, k := range projKeys {
+				projKeySet[k] = true
+			}
+			var qKeys []string
+			for _, qk := range cleanedQueryKeys {
+				if projKeySet[qk] {
+					qKeys = append(qKeys, qk)
+				}
+			}
+			projFilter.QueryChatKeys = qKeys
+		}
+
+		q := c.client.DecisionAnswer.Query().
+			Where(
+				decisionanswer.ProjectIDEQ(pUUID),
+				decisionAnswerInChatKeys(projKeys),
+			)
+		q = applyDecisionAnswerFilter(q, projFilter, agentUUID, provPred)
+		rows, err := q.Order(ent.Desc(decisionanswer.FieldCreatedAt), ent.Desc(decisionanswer.FieldID)).
+			Limit(perProject).
+			All(ctx)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		allRows = append(allRows, rows...)
+	}
+	if len(allRows) == 0 {
+		return nil, nil
+	}
+
+	entries, err := c.enrichDecisionAnswerRows(ctx, allRows)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string][]*store.ProjectDecisionAnswerEntry, len(projectUUIDs))
+	for _, entry := range entries {
+		pid := entry.Decision.ProjectID
+		out[pid] = append(out[pid], entry)
+	}
+	return out, nil
+}
+
+func validateDecisionAnswerFilter(filter store.ProjectDecisionAnswerFilter) (uuid.UUID, predicate.DecisionAnswer, error) {
+	var agentUUID uuid.UUID
+	var err error
+	if filter.AgentID != "" {
+		agentUUID, err = parseUUID(filter.AgentID)
+		if err != nil {
+			return uuid.Nil, nil, err
+		}
+	}
+	provPred, err := answerProvenancePredicate(filter.Provenance)
+	if err != nil {
+		return uuid.Nil, nil, err
+	}
+	if filter.From != nil && filter.To != nil && filter.From.After(*filter.To) {
+		return uuid.Nil, nil, fmt.Errorf("%w: from must not be after to", store.ErrInvalidInput)
+	}
+	return agentUUID, provPred, nil
+}
+
+func decisionAnswerFilterPredicates(
+	filter store.ProjectDecisionAnswerFilter,
+	agentUUID uuid.UUID,
+	provPred predicate.DecisionAnswer,
+) []predicate.DecisionAnswer {
+	var preds []predicate.DecisionAnswer
+	if filter.Query != "" {
+		preds = append(preds, decisionAnswerMatchesQuery(filter.Query, cleanChatKeys(filter.QueryChatKeys)))
+	}
+	if filter.AgentID != "" {
+		preds = append(preds, decisionanswer.AskerAgentID(agentUUID))
+	}
+	if filter.UserID != "" {
+		preds = append(preds, decisionanswer.AnsweredByUserID(filter.UserID))
+	}
+	if provPred != nil {
+		preds = append(preds, provPred)
+	}
+	if filter.From != nil {
+		preds = append(preds, decisionanswer.CreatedAtGTE(filter.From.UTC()))
+	}
+	if filter.To != nil {
+		preds = append(preds, decisionanswer.CreatedAtLTE(filter.To.UTC()))
+	}
+	return preds
+}
+
+func applyDecisionAnswerFilter(
+	q *ent.DecisionAnswerQuery,
+	filter store.ProjectDecisionAnswerFilter,
+	agentUUID uuid.UUID,
+	provPred predicate.DecisionAnswer,
+) *ent.DecisionAnswerQuery {
+	if preds := decisionAnswerFilterPredicates(filter, agentUUID, provPred); len(preds) > 0 {
+		q = q.Where(preds...)
+	}
+	return q
+}
+
+func (c *CompositeStore) enrichDecisionAnswerRows(ctx context.Context, rows []*ent.DecisionAnswer) ([]*store.ProjectDecisionAnswerEntry, error) {
 	decisionRowUUIDs := make([]uuid.UUID, 0, len(rows))
 	seenDec := make(map[uuid.UUID]bool, len(rows))
 	var overrideRowUUIDs []uuid.UUID
@@ -285,7 +464,7 @@ func (c *CompositeStore) ListDecisionAnswers(
 		Where(decision.IDIn(decisionRowUUIDs...)).
 		All(ctx)
 	if err != nil {
-		return nil, "", mapError(err)
+		return nil, mapError(err)
 	}
 	decByID := make(map[uuid.UUID]*store.Decision, len(decRows))
 	for _, dr := range decRows {
@@ -305,7 +484,7 @@ func (c *CompositeStore) ListDecisionAnswers(
 			).
 			All(ctx)
 		if err != nil {
-			return nil, "", mapError(err)
+			return nil, mapError(err)
 		}
 		for _, ir := range interpRows {
 			prevChoiceByRow[ir.DecisionRowID] = ir.ChoiceLabel
@@ -314,7 +493,7 @@ func (c *CompositeStore) ListDecisionAnswers(
 
 	existingMsgs, err := c.existingMessageIDSet(ctx, msgUUIDsToCheck)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 
 	entries := make([]*store.ProjectDecisionAnswerEntry, 0, len(rows))
@@ -335,7 +514,7 @@ func (c *CompositeStore) ListDecisionAnswers(
 		}
 		entries = append(entries, entry)
 	}
-	return entries, nextCursor, nil
+	return entries, nil
 }
 
 // ListDecisionFacets implements store.DecisionStore.
@@ -364,7 +543,7 @@ func (c *CompositeStore) ListDecisionFacets(
 			decisionanswer.ProjectIDIn(projectUUIDs...),
 			decisionanswer.AnsweredByUserIDNotNil(),
 			decisionanswer.AnsweredByUserIDNEQ(""),
-			decisionAnswerInChatKeys(projectUUIDs, keys),
+			decisionAnswerInChatKeys(keys),
 		).
 		Order(ent.Asc(decisionanswer.FieldAnsweredByUserID)).
 		Limit(maxProjectDecisionFacetItems).
@@ -393,7 +572,7 @@ func (c *CompositeStore) ListDecisionFacets(
 	// Distinct chat keys with at least one decision. The result is a subset
 	// of keys, so its size is bounded by the caller's readable set.
 	convKeys, err := c.client.Decision.Query().
-		Where(decision.ProjectIDIn(projectUUIDs...), decision.ChatKeyIn(keys...)).
+		Where(decision.ProjectIDIn(projectUUIDs...), decisionChatKeyIn(len(projectUUIDs), keys)).
 		Unique(true).
 		Select(decision.FieldChatKey).
 		Strings(ctx)
@@ -406,20 +585,21 @@ func (c *CompositeStore) ListDecisionFacets(
 
 // decisionAgentFacet returns the distinct asking agents of decisions in
 // (projectUUIDs, keys), each named by the asker_agent_name snapshot of its
-// newest decision.
+// newest decision and carrying its project_id.
 func (c *CompositeStore) decisionAgentFacet(ctx context.Context, projectUUIDs []uuid.UUID, keys []string) ([]store.ProjectDecisionActor, error) {
 	var rows []groupedDecisionAgentName
 	err := c.client.Decision.Query().
-		Where(decision.ProjectIDIn(projectUUIDs...), decision.ChatKeyIn(keys...)).
-		GroupBy(decision.FieldAskerAgentID, decision.FieldAskerAgentName).
+		Where(decision.ProjectIDIn(projectUUIDs...), decisionChatKeyIn(len(projectUUIDs), keys)).
+		GroupBy(decision.FieldAskerAgentID, decision.FieldProjectID, decision.FieldAskerAgentName).
 		Aggregate(ent.As(ent.Max(decision.FieldCreatedAt), "latest")).
 		Scan(ctx, &rows)
 	if err != nil {
 		return nil, mapError(err)
 	}
 	type newest struct {
-		name   string
-		latest time.Time
+		name      string
+		projectID string
+		latest    time.Time
 	}
 	byAgent := make(map[uuid.UUID]newest, len(rows))
 	for _, r := range rows {
@@ -428,12 +608,12 @@ func (c *CompositeStore) decisionAgentFacet(ctx context.Context, projectUUIDs []
 		// Ties on the timestamp keep the greater name, so the result is
 		// deterministic.
 		if !ok || latest.After(cur.latest) || (latest.Equal(cur.latest) && r.Name > cur.name) {
-			byAgent[r.AskerAgentID] = newest{name: r.Name, latest: latest}
+			byAgent[r.AskerAgentID] = newest{name: r.Name, projectID: r.ProjectID.String(), latest: latest}
 		}
 	}
 	out := make([]store.ProjectDecisionActor, 0, len(byAgent))
 	for id, n := range byAgent {
-		out = append(out, store.ProjectDecisionActor{ID: id.String(), Name: n.name})
+		out = append(out, store.ProjectDecisionActor{ID: id.String(), Name: n.name, ProjectID: n.projectID})
 	}
 	sortProjectDecisionActors(out)
 	return out, nil
@@ -453,14 +633,39 @@ func noDirectDecisionAnswer() predicate.Decision {
 	}
 }
 
-func decisionAnswerInChatKeys(projectUUIDs []uuid.UUID, keys []string) predicate.DecisionAnswer {
+// decisionChatKeyIn filters decisions to keys. On SQLite, when querying
+// multiple projects alongside decision.ProjectIDIn, prefixing +chat_key
+// prevents SQLite's planner from turning INDEX(project_id, chat_key, status)
+// into a Cartesian 200x1000=200,000 B-tree seek loop while still seeking
+// project_id via the index and testing chat_key in an ephemeral set.
+func decisionChatKeyIn(projectCount int, keys []string) predicate.Decision {
+	if projectCount <= 1 {
+		return decision.ChatKeyIn(keys...)
+	}
 	vals := make([]any, len(keys))
 	for i, k := range keys {
 		vals[i] = k
 	}
-	projectVals := make([]any, len(projectUUIDs))
-	for i, id := range projectUUIDs {
-		projectVals[i] = id
+	return func(s *entsql.Selector) {
+		if s.Dialect() != dialect.SQLite {
+			decision.ChatKeyIn(keys...)(s)
+			return
+		}
+		col := s.C(decision.FieldChatKey)
+		s.Where(entsql.P(func(b *entsql.Builder) {
+			b.WriteByte('+')
+			b.Ident(col)
+			b.WriteString(" IN (")
+			b.Args(vals...)
+			b.WriteByte(')')
+		}))
+	}
+}
+
+func decisionAnswerInChatKeys(keys []string) predicate.DecisionAnswer {
+	vals := make([]any, len(keys))
+	for i, k := range keys {
+		vals[i] = k
 	}
 	return func(s *entsql.Selector) {
 		t := entsql.Table(decision.Table)
@@ -469,7 +674,7 @@ func decisionAnswerInChatKeys(projectUUIDs []uuid.UUID, keys []string) predicate
 				From(t).
 				Where(entsql.And(
 					entsql.ColumnsEQ(t.C(decision.FieldID), s.C(decisionanswer.FieldDecisionRowID)),
-					entsql.In(t.C(decision.FieldProjectID), projectVals...),
+					entsql.ColumnsEQ(t.C(decision.FieldProjectID), s.C(decisionanswer.FieldProjectID)),
 					entsql.In(t.C(decision.FieldChatKey), vals...),
 				)),
 		))

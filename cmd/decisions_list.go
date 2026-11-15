@@ -37,12 +37,15 @@ func newDecisionsListCmd() *cobra.Command {
 		Short: "List Decisions waiting on you, or the Decisions made",
 		Long: `List Decisions.
 
-In human mode, lists the Decisions in the current project that are waiting on
-you (the default, --waiting) or the log of Decisions made (--made). Search
-with -q/--search (question, answer, key, agent or conversation name, at least
-2 characters) and narrow with --conversation and --agent, which take a name
-(case-insensitive, # optional) or a key or ID. On --made, also narrow with
---answered-by, --provenance, --since and --until (answer time).
+In human mode, lists the Decisions in the current project (or across all of
+your member projects with --all-projects) that are waiting on you (the default,
+--waiting) or the log of Decisions made (--made). Search with -q/--search
+(question, answer, key, agent or conversation name, at least 2 characters) and
+narrow with --conversation and --agent, which take a name (case-insensitive, #
+optional) or a key or ID. With --all-projects, --project narrows to one member
+project by name, slug or ID, and --sort selects project or recent order. On
+--made, also narrow with --answered-by, --provenance, --since and --until
+(answer time).
 
 In agent mode, lists the Decisions your agent has asked. By default only
 pending Decisions; pass --decided for answered active Decisions or --all to
@@ -52,6 +55,8 @@ include pending, decided and replaced versions. Search with -q/--search
 Examples:
   scion decisions list
   scion decisions list -q release
+  scion decisions list --all-projects
+  scion decisions list --all-projects --project scion --sort recent
   scion decisions list --made --conversation release --since 2026-11-01
   scion decisions list --made --answered-by me --json
   scion decisions list --decided          # agent mode
@@ -68,6 +73,8 @@ Examples:
 	// Human mode.
 	cmd.Flags().Bool("waiting", false, "List Decisions waiting on you (default)")
 	cmd.Flags().Bool("made", false, "List the Decisions made (the answer log)")
+	cmd.Flags().Bool("all-projects", false, "List Decisions across all of your member projects")
+	cmd.Flags().String("sort", "", "With --all-projects: sort order, project or recent")
 	cmd.Flags().String("conversation", "", "Only this conversation: a name such as #release or \"DM with nc-x\", or its key")
 	cmd.Flags().String("agent", "", "Only Decisions asked by this agent: a name or an agent ID")
 	cmd.Flags().String("answered-by", "", "With --made: only answers by this user: me or a user ID")
@@ -75,7 +82,7 @@ Examples:
 	cmd.Flags().String("since", "", "With --made: answered on or after this day (YYYY-MM-DD, UTC) or time (RFC3339)")
 	cmd.Flags().String("until", "", "With --made: answered on or before this day (YYYY-MM-DD, UTC) or time (RFC3339)")
 	cmd.Flags().Int("limit", defaultDecisionsListLimit, fmt.Sprintf("Maximum number of prompts or answers to list (1 to %d)", maxDecisionsListLimit))
-	markFlagsForMode(cmd, ModeHuman, "waiting", "made", "conversation", "agent",
+	markFlagsForMode(cmd, ModeHuman, "waiting", "made", "all-projects", "sort", "conversation", "agent",
 		"answered-by", "provenance", "since", "until", "limit")
 	// Shared across human and agent mode.
 	cmd.Flags().StringP("search", "q", "", "Search Decisions (2 to 256 characters; question, key and answer, plus agent and conversation names in human mode)")

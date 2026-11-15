@@ -207,7 +207,7 @@ return an error instead of blocking.`,
 
 		// Hub-only commands never read local project settings: for them
 		// --project names a hub project, not a directory.
-		hubOnly := hubOnlyCommands[topLevelName(cmd)]
+		hubOnly := hubOnlyCommands[topLevelName(cmd)] || isAllProjectsDecisionsList(cmd)
 
 		if !hubOnly {
 			// Load settings to get cli.autohelp
@@ -305,8 +305,9 @@ func Execute() {
 		}
 	}
 	// Hub-only commands skip it: their --project is not a directory. So do
-	// hub profile invocations, which never read local project settings.
-	if !hubOnlyCommands[topLevelName(target)] && !hubProfileRequested() {
+	// hub profile invocations and "decisions list --all-projects", which
+	// never read local project settings.
+	if !hubOnlyCommands[topLevelName(target)] && !hubProfileRequested() && !isAllProjectsDecisionsListArgs(target, cliArgs) {
 		settings, _ := config.LoadSettings(tempProjectPath)
 		if settings != nil && settings.CLI != nil && settings.CLI.AutoHelp != nil {
 			autoHelp = *settings.CLI.AutoHelp
