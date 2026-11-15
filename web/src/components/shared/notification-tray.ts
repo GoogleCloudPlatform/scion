@@ -277,11 +277,20 @@ export class ScionNotificationTray extends LitElement {
   private appliedSeq = 0;
 
   /**
-   * Rows an event added, with the fetchSeq when it was added. A list request
-   * sent at or before that number may have been answered before the row
-   * existed, so its response must not drop the row.
+   * Rows an event added or updated in place, with the fetchSeq when the event
+   * arrived. A list request sent at or before that number may have been
+   * answered before the row existed (or with an older in-place version of a
+   * deterministic row such as decisions_waiting), so its response must neither
+   * drop nor overwrite the row.
    */
   private upsertedAtSeq = new Map<string, number>();
+
+  /**
+   * Rows acknowledged since the latest list request started, with the fetchSeq
+   * at the time of acknowledgement. Prevents an already-in-flight list request
+   * from resurrecting a row that SSE or user ack dismissed while it ran.
+   */
+  private ackedAtSeq = new Map<string, number>();
 
   /**
    * Fetches for events that carry no usable notification: the first of a
@@ -401,6 +410,7 @@ export class ScionNotificationTray extends LitElement {
     this.seenIds = new Set();
     this.lastDecisionsCount = 0;
     this.upsertedAtSeq.clear();
+    this.ackedAtSeq.clear();
     this.initialFetchDone = false;
     // The next user's first fetch answers any event the previous user's
     // coalescer held, and their first event fetches at once.
@@ -507,6 +517,7 @@ export class ScionNotificationTray extends LitElement {
           this.lastDecisionsCount = 0;
         }
         this.upsertedAtSeq.delete(ack.id);
+        this.ackedAtSeq.set(ack.id, this.fetchSeq);
         this.seenIds.delete(ack.id);
         if (this.notifications.some((x) => x.id === ack.id)) {
           this.notifications = this.notifications.filter((x) => x.id !== ack.id);
@@ -539,6 +550,7 @@ export class ScionNotificationTray extends LitElement {
       this.dispatchBrowserNotification(n);
       this.seenIds.add(n.id);
     }
+    this.ackedAtSeq.delete(n.id);
     this.upsertedAtSeq.set(n.id, this.fetchSeq);
     // The list is newest first, with decisions_waiting pinned at index 0.
     const at = this.notifications.findIndex((x) => x.id === n.id);
@@ -569,11 +581,34 @@ export class ScionNotificationTray extends LitElement {
         (n) => !RETIRED_CHAT_STATUSES.has(n.status) && (decisionsOn || !isDecisionsWaiting(n))
       );
 
+      // Rows added, updated in place (such as decisions_waiting), or
+      // acknowledged after this request was sent are newer than its answer:
+      // keep the live event version and ignore any stale copy in incoming.
+      const newerInPlaceIds = new Set<string>();
+      for (const [id, at] of this.upsertedAtSeq) {
+        if (at >= seq) {
+          newerInPlaceIds.add(id);
+        } else {
+          this.upsertedAtSeq.delete(id);
+        }
+      }
+      const newerAckedIds = new Set<string>();
+      for (const [id, at] of this.ackedAtSeq) {
+        if (at >= seq) {
+          newerAckedIds.add(id);
+        } else {
+          this.ackedAtSeq.delete(id);
+        }
+      }
+      const freshIncoming = incoming.filter(
+        (n) => !newerInPlaceIds.has(n.id) && !newerAckedIds.has(n.id)
+      );
+
       // Detect new notifications (IDs not previously seen, or decisions_waiting
       // appearing / increasing) and dispatch browser push — but only after the
       // first fetch so we don't blast existing unacknowledged rows on page load.
       if (this.initialFetchDone) {
-        for (const n of incoming) {
+        for (const n of freshIncoming) {
           if (isDecisionsWaiting(n)) {
             const nextCount = parseDecisionsCount(n);
             const currentlyShown = this.notifications.some((x) => x.id === n.id);
@@ -586,19 +621,14 @@ export class ScionNotificationTray extends LitElement {
         }
       }
 
-      // Rows an event added after this request was sent are newer than its
-      // answer: keep them (they are already seen). Older ones are answered.
-      const incomingIds = new Set(incoming.map((n) => n.id));
+      const freshIncomingIds = new Set(freshIncoming.map((n) => n.id));
       const kept = this.notifications.filter(
         (n) =>
-          !incomingIds.has(n.id) &&
-          (this.upsertedAtSeq.get(n.id) ?? -1) >= seq &&
+          !freshIncomingIds.has(n.id) &&
+          newerInPlaceIds.has(n.id) &&
           (decisionsOn || !isDecisionsWaiting(n))
       );
-      for (const [id, at] of this.upsertedAtSeq) {
-        if (at < seq) this.upsertedAtSeq.delete(id);
-      }
-      const next = pinDecisionsWaitingFirst([...kept, ...incoming]);
+      const next = pinDecisionsWaitingFirst([...kept, ...freshIncoming]);
       const decisionsRow = next.find((n) => isDecisionsWaiting(n));
       this.lastDecisionsCount = decisionsRow ? parseDecisionsCount(decisionsRow) : 0;
 
@@ -659,6 +689,7 @@ export class ScionNotificationTray extends LitElement {
       if (!this.isForCurrentUser(requestUserId)) return;
       this.notifications = this.notifications.filter((n) => n.id !== id);
       this.upsertedAtSeq.delete(id);
+      this.ackedAtSeq.set(id, this.fetchSeq);
     } catch {
       // Ignore
     }
@@ -669,6 +700,9 @@ export class ScionNotificationTray extends LitElement {
     try {
       await apiFetch('/api/v1/notifications/ack-all', { method: 'POST' });
       if (!this.isForCurrentUser(requestUserId)) return;
+      for (const n of this.notifications) {
+        this.ackedAtSeq.set(n.id, this.fetchSeq);
+      }
       this.notifications = [];
       this.upsertedAtSeq.clear();
     } catch {

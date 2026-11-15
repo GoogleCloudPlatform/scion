@@ -403,4 +403,66 @@ describe('notification tray: decisions_waiting', () => {
       '/api/v1/users/me/decisions?tab=pending&limit=0',
     ]);
   });
+
+  it('preserves newer SSE in-place updates and acknowledgements when an older fetchNotifications resolves late', async () => {
+    enableDecisionsFlags(true, true);
+    let resolveInFlight!: (res: Response) => void;
+    let callCount = 0;
+    mockedFetch.mockImplementation((input) => {
+      const url = String(input);
+      if (url.startsWith('/api/v1/notifications?acknowledged=false')) {
+        callCount += 1;
+        if (callCount === 1) {
+          return Promise.resolve(jsonResponse([decisionsRow(2, 1)]));
+        }
+        return new Promise<Response>((resolve) => {
+          resolveInFlight = resolve;
+        });
+      }
+      return Promise.resolve(jsonResponse({}));
+    });
+
+    const tray = new ScionNotificationTray();
+    tray.user = alice;
+    document.body.appendChild(tray);
+    await flush();
+    await tray.updateComplete;
+    expect((tray as any).notifications[0].message).toBe(
+      '2 decisions are waiting on you in 1 project'
+    );
+
+    // 1. Opening the tray starts fetch #2 (which reads stale count=2 on the server)
+    //    while reconcile pushes count=3 over SSE before fetch #2 resolves.
+    tray.shadowRoot?.querySelector<HTMLButtonElement>('.bell-btn')?.click();
+    emitUserNotification({ ...decisionsRow(3, 1), acknowledged: false });
+    await tray.updateComplete;
+    expect((tray as any).notifications[0].message).toBe(
+      '3 decisions are waiting on you in 1 project'
+    );
+
+    resolveInFlight(jsonResponse([decisionsRow(2, 1)]));
+    await flush();
+    await tray.updateComplete;
+    expect((tray as any).notifications[0].message).toBe(
+      '3 decisions are waiting on you in 1 project'
+    );
+
+    // 2. Start fetch #3 while unacknowledged, then SSE acknowledges the row
+    //    before fetch #3 resolves -> stale fetch #3 must not resurrect it.
+    void (tray as any).fetchNotifications();
+    emitUserNotification({
+      ...decisionsRow(0, 0, {
+        message: 'No decisions are waiting on you',
+        resourceId: '0',
+      }),
+      acknowledged: true,
+    });
+    await tray.updateComplete;
+    expect((tray as any).notifications).toEqual([]);
+
+    resolveInFlight(jsonResponse([decisionsRow(3, 1)]));
+    await flush();
+    await tray.updateComplete;
+    expect((tray as any).notifications).toEqual([]);
+  });
 });
