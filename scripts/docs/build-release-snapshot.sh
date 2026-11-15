@@ -29,7 +29,7 @@ set -euo pipefail
 
 STABLE_RE='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
 PREVIEW_RE='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-(preview|rc)\.(0|[1-9][0-9]*)$'
-NIGHTLY_RE='^nightly-[0-9]{8}([.-][0-9A-Za-z._-]+)?$'
+NIGHTLY_RE='^nightly-[0-9]{8,}$'
 
 usage() {
   echo "Usage: $0 --tag <TAG> --out-dir <DIR> [--main-docs <DIR>] [--source-docs <DIR>]" >&2

@@ -75,7 +75,7 @@ jobs:
           tar -xzf "${RUNNER_TEMP}/${tarball}" -C "${RUNNER_TEMP}"
           echo "${RUNNER_TEMP}/d2-${D2_VERSION}/bin" >> "$GITHUB_PATH"
 
-      - name: Build and upload snapshot tarball(s)
+      - name: Validate release tags and draft state
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
@@ -85,7 +85,6 @@ jobs:
         run: |
           set -euo pipefail
           RAW="${CALL_TAG:-${DISPATCH_TAGS:-}}"
-          # Normalize commas to spaces and split into an array.
           NORMALIZED="${RAW//,/ }"
           read -r -a TAG_LIST <<< "$NORMALIZED"
           if [[ "${#TAG_LIST[@]}" -eq 0 ]]; then
@@ -93,8 +92,8 @@ jobs:
             exit 1
           fi
 
-          OUT_DIR="${RUNNER_TEMP:?}/docs-snapshots"
-          mkdir -p "$OUT_DIR"
+          TAGS_FILE="${RUNNER_TEMP:?}/validated-tags.txt"
+          : > "$TAGS_FILE"
 
           for raw_tag in "${TAG_LIST[@]}"; do
             tag="${raw_tag#refs/tags/}"
@@ -107,17 +106,38 @@ jobs:
               git fetch --no-tags "${SERVER_URL}/${GH_REPO}.git" "refs/tags/${tag}:refs/tags/${tag}"
             fi
 
-            # Require an existing non-draft GitHub Release for this tag before uploading.
+            # Require an existing non-draft GitHub Release for this tag before building/uploading.
             IS_DRAFT=$(gh release view "$tag" --repo "$GH_REPO" --json isDraft --jq '.isDraft')
             if [[ "$IS_DRAFT" != "false" ]]; then
               printf '::error::GitHub Release for %s is a draft; refusing to upload snapshot assets.\n' "$tag"
               exit 1
             fi
 
-            ./scripts/docs/build-release-snapshot.sh --tag "$tag" --out-dir "$OUT_DIR"
+            printf '%s\n' "$tag" >> "$TAGS_FILE"
+          done
 
+      # Kept separate from GH_TOKEN so npm ci / astro build never run with a write token in env.
+      - name: Build snapshot tarball(s)
+        run: |
+          set -euo pipefail
+          OUT_DIR="${RUNNER_TEMP:?}/docs-snapshots"
+          mkdir -p "$OUT_DIR"
+          while IFS= read -r tag; do
+            [[ -n "$tag" ]] || continue
+            ./scripts/docs/build-release-snapshot.sh --tag "$tag" --out-dir "$OUT_DIR"
+          done < "${RUNNER_TEMP:?}/validated-tags.txt"
+
+      - name: Upload snapshot tarball(s) to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          OUT_DIR="${RUNNER_TEMP:?}/docs-snapshots"
+          while IFS= read -r tag; do
+            [[ -n "$tag" ]] || continue
             tar_asset="${OUT_DIR}/scion-docs-${tag}.tar.gz"
             sha_asset="${tar_asset}.sha256"
             gh release upload "$tag" "$tar_asset" "$sha_asset" --repo "$GH_REPO" --clobber
             echo "Uploaded docs snapshot for ${tag}" >> "$GITHUB_STEP_SUMMARY"
-          done
+          done < "${RUNNER_TEMP:?}/validated-tags.txt"

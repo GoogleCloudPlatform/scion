@@ -42,24 +42,16 @@ on:
 permissions:
   contents: read
 
-# Per-ref group: each PR gets its own group, so PR builds no longer queue
-# behind (and cancel) one another. A newer push to the same PR supersedes its
-# older run. Pushes to main and release-snapshot assembly runs are not cancelled mid-run.
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 # Fork CI gate (hack/check-fork-ci-gate.sh, cr-ci/workflows/README.md): on push
 # and schedule every job runs only in GoogleCloudPlatform/scion; forks stage PRs.
 jobs:
-  build-docs:
+  check-trigger:
     if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (github.event_name != 'workflow_run' || (github.repository == 'GoogleCloudPlatform/scion' && github.event.workflow_run.repository.full_name == 'GoogleCloudPlatform/scion')) }}
     runs-on: ubuntu-latest
     permissions:
-      contents: read
       actions: read
-      pages: read # configure-pages reads the Pages site config
     outputs:
+      should_build: ${{ steps.mode.outputs.should_build }}
       should_deploy: ${{ steps.mode.outputs.should_deploy }}
     steps:
       - name: Determine build and deploy mode
@@ -80,10 +72,11 @@ jobs:
 
           if [[ "$EVENT_NAME" == "workflow_run" ]]; then
             # Deploy only when a "Build and Upload Docs Snapshot" job in the upstream
-            # workflow run succeeded. Skips nightly/weekly runs that created no tag,
-            # while still deploying when unrelated jobs (e.g. Homebrew) fail.
-            MATCHING_JOBS=$(gh api "repos/${GH_REPO}/actions/runs/${WORKFLOW_RUN_ID}/jobs?per_page=100" --paginate \
-              --jq '[.jobs[] | select((.name | endswith("Build and Upload Docs Snapshot")) and .conclusion == "success")] | length')
+            # workflow run succeeded. Running this check in an un-grouped gate job
+            # ensures skipped runs (e.g. Nightly with no new commits) never supersede
+            # a pending deploy run in build-docs's concurrency group.
+            MATCHING_JOBS=$(gh api "repos/${GH_REPO}/actions/runs/${WORKFLOW_RUN_ID}/jobs?per_page=100" --paginate --slurp \
+              --jq '[.[].jobs[] | select((.name | endswith("Build and Upload Docs Snapshot")) and .conclusion == "success")] | length')
             if [[ "${MATCHING_JOBS:-0}" -gt 0 && "$GH_REPO" == "GoogleCloudPlatform/scion" && "$GIT_REF" == "refs/heads/main" ]]; then
               echo "should_build=true" >> "$GITHUB_OUTPUT"
               echo "should_deploy=true" >> "$GITHUB_OUTPUT"
@@ -102,13 +95,24 @@ jobs:
             echo "should_deploy=false" >> "$GITHUB_OUTPUT"
           fi
 
+  build-docs:
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (needs.check-trigger.outputs.should_build == 'true') }}
+    needs: check-trigger
+    runs-on: ubuntu-latest
+    # Per-ref group on active builds only: PR pushes cancel older runs on the same PR,
+    # while main pushes and snapshot-assembly runs never cancel mid-run.
+    concurrency:
+      group: ${{ github.workflow }}-build-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    permissions:
+      contents: read
+      pages: read # configure-pages reads the Pages site config
+    steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        if: steps.mode.outputs.should_build == 'true'
         with:
           persist-credentials: false
 
       - name: Set up Node.js
-        if: steps.mode.outputs.should_build == 'true'
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '22'
@@ -116,13 +120,12 @@ jobs:
           cache-dependency-path: docs-site/package-lock.json
 
       - name: Setup Pages
-        if: steps.mode.outputs.should_deploy == 'true'
+        if: needs.check-trigger.outputs.should_deploy == 'true'
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
 
       # Pinned release tarball with a checksum. d2lang.com/install.sh calls the
       # GitHub API without auth and hits the shared-runner rate limit (403).
       - name: Install D2
-        if: steps.mode.outputs.should_build == 'true'
         env:
           D2_VERSION: v0.9.0
           D2_SHA256: 5669ddc46b99e942cc96078f4a4e36d5e62103348f4c05179ede27802fdd87a9
@@ -135,11 +138,9 @@ jobs:
           echo "${RUNNER_TEMP}/d2-${D2_VERSION}/bin" >> "$GITHUB_PATH"
 
       - name: Install dependencies
-        if: steps.mode.outputs.should_build == 'true'
         run: cd docs-site && npm ci
 
       - name: Run unit tests, type checks, and D2 syntax check
-        if: steps.mode.outputs.should_build == 'true'
         run: |
           cd docs-site
           npm test
@@ -147,11 +148,10 @@ jobs:
           npm run check-d2
 
       - name: Build main documentation
-        if: steps.mode.outputs.should_build == 'true'
         run: cd docs-site && npm run build
 
       - name: Assemble versioned Pages site
-        if: steps.mode.outputs.should_deploy == 'true'
+        if: needs.check-trigger.outputs.should_deploy == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
@@ -163,14 +163,14 @@ jobs:
             --repo "$GH_REPO"
 
       - name: Upload Pages artifact
-        if: steps.mode.outputs.should_deploy == 'true'
+        if: needs.check-trigger.outputs.should_deploy == 'true'
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: docs-site/assembled-pages
 
   deploy-docs:
-    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (needs.build-docs.outputs.should_deploy == 'true') }}
-    needs: build-docs
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (needs.check-trigger.outputs.should_deploy == 'true') }}
+    needs: [check-trigger, build-docs]
     runs-on: ubuntu-latest
     # Serialize Pages deployments; never cancel one that is in progress.
     concurrency:

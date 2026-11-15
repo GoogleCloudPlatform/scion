@@ -239,6 +239,29 @@ describe('verifyTarListingSafe and extractVerifiedSnapshotTarball', () => {
 				/SHA-256 mismatch/,
 			);
 
+			// Real archive containing a symlink must be rejected before extraction.
+			const symlinkStage = path.join(tmpDir, 'symlink-stage');
+			await fs.mkdir(symlinkStage, { recursive: true });
+			await fs.symlink('/etc/passwd', path.join(symlinkStage, 'escape-link'));
+			const symlinkTar = path.join(assetsDir, 'symlink.tar.gz');
+			const symlinkSha = path.join(assetsDir, 'symlink.tar.gz.sha256');
+			execFileSync('tar', ['-czf', symlinkTar, '-C', symlinkStage, '.']);
+			const symlinkHex = crypto
+				.createHash('sha256')
+				.update(await fs.readFile(symlinkTar))
+				.digest('hex');
+			await fs.writeFile(symlinkSha, `${symlinkHex}  symlink.tar.gz\n`, 'utf8');
+			await assert.rejects(
+				() =>
+					extractVerifiedSnapshotTarball({
+						tarPath: symlinkTar,
+						shaPath: symlinkSha,
+						pagesRoot: path.join(tmpDir, 'symlink-out'),
+						tag: 'v0.3.0',
+					}),
+				/Unsafe tar entry type/,
+			);
+
 			const outDir = path.join(tmpDir, 'assembled');
 			const map = { 'v0.3.0': v030, 'v0.4.0-preview.2': v040p2 };
 			const { manifest, retainedCount } = await assemblePagesSite({
@@ -295,12 +318,13 @@ describe('verifyTarListingSafe and extractVerifiedSnapshotTarball', () => {
 });
 
 describe('patchLegacyAstroConfig and prepareLegacySnapshotDir', () => {
-	it('patches historical v0.3.0 and v0.4.0-preview.2 astro.config.mjs cleanly and idempotently', () => {
-		const repoRoot = path.resolve(import.meta.dirname, '../..');
+	it('patches historical v0.3.0 and v0.4.0-preview.2 astro.config.mjs fixtures cleanly and idempotently', async () => {
+		const fixturesDir = path.resolve(import.meta.dirname, 'fixtures');
 		for (const tag of ['v0.3.0', 'v0.4.0-preview.2']) {
-			const raw = execFileSync('git', ['-C', repoRoot, 'show', `${tag}:docs-site/astro.config.mjs`], {
-				encoding: 'utf8',
-			});
+			const raw = await fs.readFile(
+				path.join(fixturesDir, `astro.config.${tag}.fixture.txt`),
+				'utf8',
+			);
 			const patched = patchLegacyAstroConfig(raw);
 			assert.match(patched, /base: buildVersion\.base,/);
 			assert.match(patched, /scionRewriteBaseIntegration\(\{ base: buildVersion\.base \}\),/);

@@ -374,13 +374,14 @@ accepts deployments only from `refs/heads/main`:
 - **Stable:** all non-draft `vX.Y.Z` releases that carry snapshot assets.
 - **Preview:** up to the 5 most recent `vX.Y.Z-preview.N` and `vX.Y.Z-rc.N` releases on unreleased
   lines. Pre-releases are pruned automatically once their target `vX.Y.Z` is promoted to `stable`
-  (or superseded by a higher `.0` stable minor release), even if the older stable release predates
-  docs snapshots.
+  (or when a `.0` preview line is superseded by a stable release on the same or higher minor line),
+  even if the older stable release predates docs snapshots.
 - **Nightly:** `nightly-YYYYMMDD` releases from the last 14 days (matching nightly release cleanup).
 
-**Backfilling or rerunning snapshots.** To attach or refresh snapshots for historical or existing
-releases (such as `v0.3.0` and `v0.4.0-preview.2`), dispatch `docs-snapshot.yml` from `main` with
-one or more space- or comma-separated tags:
+**Backfilling or rerunning snapshots.** `assemble-pages.mjs` fails closed if a retained release's
+tarball and `.sha256` checksum do not match. To attach snapshots to historical releases (such as
+`v0.3.0` and `v0.4.0-preview.2`) or repair an interrupted asset upload, dispatch
+`docs-snapshot.yml` from `main` with one or more space- or comma-separated tags:
 
 ```bash
 gh workflow run docs-snapshot.yml -R GoogleCloudPlatform/scion \
