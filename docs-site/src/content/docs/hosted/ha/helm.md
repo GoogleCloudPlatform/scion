@@ -430,7 +430,10 @@ Secret's CONTENT does not: after replacing the CA bundle inside an existing
 Secret, run `kubectl rollout restart deployment/<fullname>`. (`<fullname>` is the
 chart's full name: `<release>-scion-hub` by default, `<release>-<nameOverride>`
 when `nameOverride` is set, just `<release>` when the release name already
-contains that name, and `fullnameOverride` when that is set.)
+contains that name and does not end in `-<name>`, and `fullnameOverride` when
+that is set. When a long `nameOverride` pushes `<release>-<nameOverride>` past
+63 characters, the chart truncates the prefix and appends a 10-character hex
+SHA-256 digest of `<release>/<nameOverride>`.)
 
 To rotate the CA without breaking the hop between nodes, keep both CAs trusted
 while the leaf certificates move:
@@ -527,6 +530,46 @@ Rotating the session secret signs every user out. Other changes to
 `settings.yaml` alter the `checksum/settings` pod annotation and restart the pods
 on their own.
 
+### Upgrading an existing `*-scion-hub` release
+
+Earlier chart versions skipped the `-scion-hub` suffix whenever the release name
+contained `scion-hub`, so a release named `<prefix>-scion-hub` (for example,
+`prod-scion-hub`) rendered the exact same object names as a sibling release
+named `<prefix>` (`prod`) in the same namespace.
+
+- Releases named `scion-hub` (as in the commands above), `scion-hub-*`, or names
+  that do not contain `scion-hub` (such as `prod` or `myhub`) keep their
+  existing object names unchanged.
+- Releases whose name ends in `-scion-hub` (or `-<nameOverride>`) now append the
+  chart name (for example, `prod-scion-hub` renders `prod-scion-hub-scion-hub`).
+
+If you are upgrading an existing `*-scion-hub` release from chart `<= 0.1.0` and
+**no** sibling `<prefix>` release shares the namespace, pass `fullnameOverride`
+set to the previous full name so all chart-owned objects keep their current
+names without replacement or temporary Deployment pod-selector overlap:
+
+```yaml
+fullnameOverride: prod-scion-hub
+```
+
+If you instead let the release move to the new `<release>-scion-hub` object
+names:
+
+- **Workload Identity:** when `serviceAccount.create` is `true` and
+  `serviceAccount.name` is not set explicitly, the Kubernetes `ServiceAccount`
+  moves from `<release>` to `<release>-scion-hub`. Re-bind
+  `roles/iam.workloadIdentityUser` on the Google service account to
+  `serviceAccount:<project-id>.svc.id.goog[<namespace>/<release>-scion-hub]` so
+  Cloud SQL IAM authentication, Cloud Storage, and Secret Manager continue to
+  authenticate.
+- **Service and relay TLS:** update any Ingress or Gateway backend that points
+  at `Service/<release>`, and re-issue any relay TLS certificate whose SAN used
+  the default `<release>-relay.<namespace>.svc` (or set
+  `conduit.internalTls.serverName` explicitly).
+- **Rendered manifests (`helm template | kubectl apply` or Argo CD without
+  prune):** remove the previous `<release>*` objects only after confirming no
+  sibling `<prefix>` release in the namespace owns them.
+
 ---
 
 ## 8. Render-time checks
@@ -561,13 +604,14 @@ that case the chart does not check the file's contents.
 
 ### Cluster-scoped RBAC objects under the previous name
 
-Earlier versions of the chart cut these names at 63 characters and added no
-digest. A release whose name was cut that way gets a new `ClusterRole` and
-`ClusterRoleBinding` name when it moves to the current chart. This happens only
-when `rbac.create` and `runtime.listAllNamespaces` are both `true`, and
-`<fullname>-<namespace>-agents` is longer than 63 characters. The default values
-leave `runtime.listAllNamespaces` off, so a default install renders no
-cluster-scoped objects and nothing is renamed.
+Earlier versions of the chart cut cluster-scoped RBAC names at 63 characters
+with no digest, and collapsed releases ending in `-scion-hub` onto `<prefix>`. A
+release whose full name moved or whose `<fullname>-<namespace>-agents` name
+exceeded 63 characters gets a new `ClusterRole` and `ClusterRoleBinding` name
+when it moves to the current chart. This applies only when `rbac.create` and
+`runtime.listAllNamespaces` are both `true`. The default values leave
+`runtime.listAllNamespaces` off, so a default install renders no cluster-scoped
+objects.
 
 After `helm install` or `helm upgrade`, the chart's NOTES print the current name
 and the previous one. On the rendered-manifest path, take the previous name from
@@ -641,7 +685,9 @@ On this path, remove the previous binding by hand:
    If the binding is not found, there is nothing to remove. The output shows
    only the last install that applied it, not every install that uses it.
 3. Once every release that shared the name runs a chart that includes the
-   naming fix, delete the binding:
+   naming fix — and you have confirmed that no remaining release's current
+   render still uses `<previous-name>` (such as an untruncated sibling
+   namespace or a sibling `<prefix>` release) — delete the binding:
 
    ```bash
    kubectl delete clusterrolebinding <previous-name>

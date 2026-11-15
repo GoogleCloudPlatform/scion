@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=286   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 18 (workspaceStorage.nfs: thirteen refusals, two acceptances, three rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check) + 11 (conduit.internalTls: eight refusals, two acceptances, one rendered-shape check) + 3 (relay hop: cert-without-key refusals on non-loopback and loopback listeners, no relay-level trusted_proxies) + 3 (internal_listen loopback needs host:port and a valid 127.x: no-port IP, no-port localhost, out-of-range octet) + 5 (internal_listen: leading and trailing whitespace, port 65536, port 0, no port with TLS files) + 4 (TLS settings as written: server name with a slash, server name with trailing whitespace, blank cert path, padded key path) + 9 (minimum hub image for the relay wiring: older and minimum semver, newer semver, older and minimum nightly, no gate with the relay off, the unverified annotation, no annotation on a checked tag, the NOTES warning present and absent) + 8 (older tag with build metadata, minimum with build metadata, pre-release of the minimum, malformed version, config.extra listener on an older tag and on a digest, the digest annotation, padded CA path; the gate block now runs 16 rows) + 4 (overflowing version number, newer pre-release, newer tag with build metadata, config.extra loopback listener on an older tag; the gate block now runs 20 rows) + 1 (localhost:port without TLS is not loopback, as the hub reads it) + 1 (the default-tag refusal names image.tag and image.digest; the gate block now runs 21 rows) + 6 (the semver refusal names no placeholder floor, so the gate block now runs 22 rows; whitespace-only listen: spaces and tab, with TLS files and without; SCION_SERVER_HUB_CONDUIT_INTERNAL* refused in hub.extraEnv) + 2 (the malformed-version remedy by mode; the config.extra path names removing that listener; the gate block now runs 24 rows) + 1 (the NOTES warning on the config.extra path names removing that listener; the gate block now runs 25 rows) + 1 (the same NOTES check for an image.digest; the gate block now runs 26 rows) + 4 (conduit.internalTls auto: one refusal, three acceptances) + 8 (the relay version floor set to v0.3.0-preview.5: v0.3.0-preview.4, v0.2.99 and nightly-20261028 refused, v0.3.0-preview.5, v0.3.0, v0.3.1-preview.1 and nightly-20261029 accepted, the default-tag refusal offers the release floor; the empty-floor case moves to a chart copy; the pre-release-of-the-minimum row is dropped, the preview.4 row covering it; the gate block now runs 34 rows) + 3 (v0.3.0-preview.10 accepted, numeric pre-release precedence at the floor's core version; the empty-floor chart copy also refuses the default tag and a malformed version tag; the gate block now runs 37 rows).
+EXPECTED_TOTAL=298   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 18 (workspaceStorage.nfs: thirteen refusals, two acceptances, three rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check) + 11 (conduit.internalTls: eight refusals, two acceptances, one rendered-shape check) + 3 (relay hop: cert-without-key refusals on non-loopback and loopback listeners, no relay-level trusted_proxies) + 3 (internal_listen loopback needs host:port and a valid 127.x: no-port IP, no-port localhost, out-of-range octet) + 5 (internal_listen: leading and trailing whitespace, port 65536, port 0, no port with TLS files) + 4 (TLS settings as written: server name with a slash, server name with trailing whitespace, blank cert path, padded key path) + 9 (minimum hub image for the relay wiring: older and minimum semver, newer semver, older and minimum nightly, no gate with the relay off, the unverified annotation, no annotation on a checked tag, the NOTES warning present and absent) + 8 (older tag with build metadata, minimum with build metadata, pre-release of the minimum, malformed version, config.extra listener on an older tag and on a digest, the digest annotation, padded CA path; the gate block now runs 16 rows) + 4 (overflowing version number, newer pre-release, newer tag with build metadata, config.extra loopback listener on an older tag; the gate block now runs 20 rows) + 1 (localhost:port without TLS is not loopback, as the hub reads it) + 1 (the default-tag refusal names image.tag and image.digest; the gate block now runs 21 rows) + 6 (the semver refusal names no placeholder floor, so the gate block now runs 22 rows; whitespace-only listen: spaces and tab, with TLS files and without; SCION_SERVER_HUB_CONDUIT_INTERNAL* refused in hub.extraEnv) + 2 (the malformed-version remedy by mode; the config.extra path names removing that listener; the gate block now runs 24 rows) + 1 (the NOTES warning on the config.extra path names removing that listener; the gate block now runs 25 rows) + 1 (the same NOTES check for an image.digest; the gate block now runs 26 rows) + 4 (conduit.internalTls auto: one refusal, three acceptances) + 8 (the relay version floor set to v0.3.0-preview.5: v0.3.0-preview.4, v0.2.99 and nightly-20261028 refused, v0.3.0-preview.5, v0.3.0, v0.3.1-preview.1 and nightly-20261029 accepted, the default-tag refusal offers the release floor; the empty-floor case moves to a chart copy; the pre-release-of-the-minimum row is dropped, the preview.4 row covering it; the gate block now runs 34 rows) + 3 (v0.3.0-preview.10 accepted, numeric pre-release precedence at the floor's core version; the empty-floor chart copy also refuses the default tag and a malformed version tag; the gate block now runs 37 rows) + 12 (scion-hub.fullname injectivity, preserved names, >63 digest, fullnameOverride upgrade path and NOTES disclosure).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -1539,6 +1539,177 @@ _selector_row "chart name, another release" scion-prod scion-hub
 _selector_row "nameOverride" scion-prod hub-override --set nameOverride=hub-override
 _selector_row "fullnameOverride does not reach the selector" t scion-hub --set fullnameOverride=something-else
 unset -f _matchlabels _podlabels _selector_row
+
+echo "== scion-hub.fullname injectivity and upgrade compatibility =="
+# Extract sorted "<Kind>/<metadata.name>" lines from a rendered manifest stream.
+_kind_names() {
+  awk '
+    /^---$/      { k=""; m=0; next }
+    /^kind: /    { k=$2; next }
+    /^metadata:/ { m=1; next }
+    m && /^[^ ]/ { m=0 }
+    m && /^  name: / && k != "" { print k "/" $2; m=0 }
+  ' | sort
+}
+_deploy_name() {
+  local rel="$1"; shift
+  local out rc
+  out="$("$HELM" template "$rel" "$CHART" "${BASE[@]}" -n scion-system "$@" 2>&1)"; rc=$?
+  [ "$rc" -eq 0 ] || return 1
+  printf '%s\n' "$out" | awk '
+    /^---$/      { k=""; m=0; next }
+    /^kind: /    { k=$2; next }
+    /^metadata:/ { m=1; next }
+    m && /^[^ ]/ { m=0 }
+    k == "Deployment" && m && /^  name: / { print $2; exit }
+  '
+}
+
+# 1. Two installs in one namespace ('prod' and 'prod-scion-hub'): all 8 rendered
+#    manifests have distinct names and zero overlapping Kind/name pairs.
+executed=$((executed + 1))
+_fn_a="$("$HELM" template prod "$CHART" "${BASE[@]}" -n scion-system 2>&1)"; _rc_fn_a=$?
+_fn_b="$("$HELM" template prod-scion-hub "$CHART" "${BASE[@]}" -n scion-system 2>&1)"; _rc_fn_b=$?
+_kn_a="$(printf '%s\n' "$_fn_a" | _kind_names)"
+_kn_b="$(printf '%s\n' "$_fn_b" | _kind_names)"
+_kn_a_n="$(printf '%s\n' "$_kn_a" | grep -c '/' || true)"
+_kn_b_n="$(printf '%s\n' "$_kn_b" | grep -c '/' || true)"
+_kn_union_n="$(printf '%s\n%s\n' "$_kn_a" "$_kn_b" | grep '/' | sort -u | wc -l | tr -d ' ')"
+if [ "$_rc_fn_a" -ne 0 ] || [ "$_rc_fn_b" -ne 0 ] || [ "$_kn_a_n" -ne 8 ] || [ "$_kn_b_n" -ne 8 ]; then
+  echo "FAIL  fullname two-release render failed or missed manifests (rc=${_rc_fn_a}/${_rc_fn_b}, counts=${_kn_a_n}/${_kn_b_n})"
+  failed=$((failed + 1))
+elif [ "$_kn_union_n" -eq 16 ] \
+     && printf '%s\n' "$_kn_a" | grep -qxF "Deployment/prod-scion-hub" \
+     && printf '%s\n' "$_kn_a" | grep -qxF "Secret/prod-scion-hub-session" \
+     && printf '%s\n' "$_kn_b" | grep -qxF "Deployment/prod-scion-hub-scion-hub" \
+     && printf '%s\n' "$_kn_b" | grep -qxF "Secret/prod-scion-hub-scion-hub-session"; then
+  echo "ok    fullname: 'prod' and 'prod-scion-hub' in one namespace render 16/16 disjoint Kind/name pairs"
+else
+  echo "FAIL  fullname: 'prod' and 'prod-scion-hub' share object names (distinct=${_kn_union_n}/16)"
+  failed=$((failed + 1))
+fi
+
+# 2. Chained suffix pair ('prod-scion-hub' vs 'prod-scion-hub-scion-hub') stays distinct.
+executed=$((executed + 1))
+_ch_a="$(_deploy_name prod-scion-hub)" || _ch_a=""
+_ch_b="$(_deploy_name prod-scion-hub-scion-hub)" || _ch_b=""
+if [ "$_ch_a" = "prod-scion-hub-scion-hub" ] && [ "$_ch_b" = "prod-scion-hub-scion-hub-scion-hub" ]; then
+  echo "ok    fullname: chained '-scion-hub' suffix releases stay distinct (${_ch_a} vs ${_ch_b})"
+else
+  echo "FAIL  fullname: chained suffix pair got '${_ch_a}' vs '${_ch_b}'"
+  failed=$((failed + 1))
+fi
+
+# 3-7. Documented 'scion-hub' release and common non-colliding shapes keep exact pre-fix names.
+_fullname_row() { # _fullname_row <label> <release> <want> [extra helm args...]
+  local label="$1" rel="$2" want="$3"; shift 3
+  executed=$((executed + 1))
+  local got
+  got="$(_deploy_name "$rel" "$@")" || got=""
+  if [ -n "$got" ] && [ "$got" = "$want" ]; then
+    echo "ok    fullname preserved (${label}): release '${rel}' -> '${got}'"
+  else
+    echo "FAIL  fullname preserved (${label}): release '${rel}' got '${got}', want '${want}'"
+    failed=$((failed + 1))
+  fi
+}
+_fullname_row "documented install name" scion-hub scion-hub
+_fullname_row "chart-name prefix" scion-hub-prod scion-hub-prod
+_fullname_row "chart-name infix" my-scion-hub-1 my-scion-hub-1
+_fullname_row "plain short release" myhub myhub-scion-hub
+_fullname_row "terraform hub-gke shape" tfha-gke-h3 tfha-gke-h3-scion-hub
+
+# 8. nameOverride suffix collision is separated while exact match is preserved.
+executed=$((executed + 1))
+_no_a="$(_deploy_name prod --set nameOverride=custom)" || _no_a=""
+_no_b="$(_deploy_name prod-custom --set nameOverride=custom)" || _no_b=""
+_no_c="$(_deploy_name custom --set nameOverride=custom)" || _no_c=""
+if [ "$_no_a" = "prod-custom" ] && [ "$_no_b" = "prod-custom-custom" ] && [ "$_no_c" = "custom" ]; then
+  echo "ok    fullname with nameOverride=custom: prod->${_no_a}, prod-custom->${_no_b}, custom->${_no_c}"
+else
+  echo "FAIL  fullname with nameOverride=custom: got '${_no_a}', '${_no_b}', '${_no_c}'"
+  failed=$((failed + 1))
+fi
+
+# 9. Conditional digest for >63 chars under a long periodic nameOverride where
+#    plain 'trunc 63 | trimSuffix "-"' merges both releases onto one 62-char name.
+executed=$((executed + 1))
+_long_r1="rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr"
+_long_r2="${_long_r1}-x"
+_long_no="x-x-x-x-x-x-x-x-x-x-x-x-x-x"
+_dg_a="$(_deploy_name "$_long_r1" --set nameOverride="$_long_no")" || _dg_a=""
+_dg_b="$(_deploy_name "$_long_r2" --set nameOverride="$_long_no")" || _dg_b=""
+if [ -n "$_dg_a" ] && [ -n "$_dg_b" ] \
+   && [ "$_dg_a" != "$_dg_b" ] \
+   && [ "${#_dg_a}" -le 63 ] && [ "${#_dg_b}" -le 63 ] \
+   && printf '%s\n' "$_dg_a" | grep -Eq '^[a-z]([-a-z0-9]*[a-z0-9])?-[0-9a-f]{10}$' \
+   && printf '%s\n' "$_dg_b" | grep -Eq '^[a-z]([-a-z0-9]*[a-z0-9])?-[0-9a-f]{10}$'; then
+  echo "ok    fullname >63 digest under long nameOverride separates shared-prefix releases (${_dg_a##*-} vs ${_dg_b##*-})"
+else
+  echo "FAIL  fullname >63 digest under long nameOverride: got '${_dg_a}' (${#_dg_a}) and '${_dg_b}' (${#_dg_b})"
+  failed=$((failed + 1))
+fi
+
+# 10. fullnameOverride preserves pre-fix object names for an existing '-scion-hub' release.
+executed=$((executed + 1))
+_fo_out="$("$HELM" template prod-scion-hub "$CHART" "${BASE[@]}" -n scion-system --set fullnameOverride=prod-scion-hub 2>&1)"; _fo_rc=$?
+_fo_kn="$(printf '%s\n' "$_fo_out" | _kind_names)"
+if [ "$_fo_rc" -eq 0 ] && [ "$_fo_kn" = "$_kn_a" ] && [ "$_kn_a_n" -eq 8 ]; then
+  echo "ok    fullnameOverride=prod-scion-hub keeps every pre-fix object name on upgrade"
+else
+  echo "FAIL  fullnameOverride=prod-scion-hub did not preserve pre-fix object names (rc=${_fo_rc})"
+  failed=$((failed + 1))
+fi
+
+# 11-12. NOTES.txt upgrade notice & Workload Identity rebind note fire iff fullname moved.
+_fn_notes_tmp="$(mktemp -d 2>/dev/null || true)"
+if [ -n "$_fn_notes_tmp" ] && cp -r "$CHART" "$_fn_notes_tmp/c" 2>/dev/null \
+   && { printf '{{- define "probe.notes" -}}\n'
+        cat "$CHART/templates/NOTES.txt"
+        printf '{{- end -}}\napiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: notes-probe\ndata:\n  notes: |\n'
+        printf '{{ include "probe.notes" . | indent 4 }}\n'
+      } >"$_fn_notes_tmp/c/templates/zz-notes-probe.yaml" 2>/dev/null; then
+  _render_fn_notes() {
+    local rel="$1"; shift
+    "$HELM" template "$rel" "$_fn_notes_tmp/c" "${BASE[@]}" -n scion-system \
+      --set serviceAccount.gcpServiceAccount=hub@proj.iam.gserviceaccount.com \
+      --show-only templates/zz-notes-probe.yaml "$@" 2>&1
+  }
+  executed=$((executed + 1))
+  _n_ren="$(_render_fn_notes prod-scion-hub)"; _rc_n_ren=$?
+  if [ "$_rc_n_ren" -eq 0 ] \
+     && printf '%s' "$_n_ren" | grep -qF "Scion hub prod-scion-hub-scion-hub installed" \
+     && printf '%s' "$_n_ren" | grep -qF "fullnameOverride: prod-scion-hub" \
+     && printf '%s' "$_n_ren" | grep -qF "roles/iam.workloadIdentityUser" \
+     && printf '%s' "$_n_ren" | grep -qF "scion-system/prod-scion-hub-scion-hub"; then
+    echo "ok    NOTES.txt prints fullnameOverride upgrade path and Workload Identity rebind note when fullname moved"
+  else
+    echo "FAIL  NOTES.txt missing fullnameOverride upgrade path or Workload Identity rebind note for prod-scion-hub (rc=${_rc_n_ren})"
+    failed=$((failed + 1))
+  fi
+
+  executed=$((executed + 1))
+  _n_sh="$(_render_fn_notes scion-hub)"; _rc_n_sh=$?
+  _n_pr="$(_render_fn_notes prod)"; _rc_n_pr=$?
+  _n_fo="$(_render_fn_notes prod-scion-hub --set fullnameOverride=prod-scion-hub)"; _rc_n_fo=$?
+  if [ "$_rc_n_sh" -eq 0 ] && [ "$_rc_n_pr" -eq 0 ] && [ "$_rc_n_fo" -eq 0 ] \
+     && printf '%s' "$_n_sh" | grep -qF "Scion hub scion-hub installed" \
+     && printf '%s' "$_n_pr" | grep -qF "Scion hub prod-scion-hub installed" \
+     && printf '%s' "$_n_fo" | grep -qF "Scion hub prod-scion-hub installed" \
+     && ! printf '%s\n%s\n%s' "$_n_sh" "$_n_pr" "$_n_fo" | grep -qF "UPGRADE NOTICE: THIS RELEASE'S FULL NAME HAS CHANGED"; then
+    echo "ok    NOTES.txt omits the fullname-rename notice when fullname did not move"
+  else
+    echo "FAIL  NOTES.txt falsely printed the fullname-rename notice or failed to render on unchanged releases"
+    failed=$((failed + 1))
+  fi
+else
+  executed=$((executed + 2))
+  echo "FAIL  could not set up NOTES probe for fullname checks"
+  echo "FAIL  could not set up NOTES probe for fullname silence checks"
+  failed=$((failed + 2))
+fi
+[ -n "$_fn_notes_tmp" ] && rm -rf "$_fn_notes_tmp"
+unset -f _kind_names _deploy_name _fullname_row _render_fn_notes
 
 echo "== hub identity is stable across upgrade and independent of the release name =="
 # hub.hubId must be used verbatim and must never be derived from anything Helm

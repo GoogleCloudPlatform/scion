@@ -19,8 +19,49 @@ limitations under the License.
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
-{{/* Fully qualified release name. */}}
+{{/*
+Fully qualified release name.
+
+When fullnameOverride is set, it is used directly (capped at 63 characters).
+Otherwise $name defaults to .Chart.Name ("scion-hub"), overridable with
+nameOverride.
+
+When .Release.Name already contains $name AND does not end in "-<name>",
+.Release.Name is returned unchanged: this preserves the documented
+"helm upgrade --install scion-hub" name as well as "scion-hub-*" names, while
+never ending in "-<name>". Every other release renders "<release>-<name>",
+which always ends in "-<name>" (or a 10-hex SHA-256 digest over
+"<release>/<name>" when a long nameOverride pushes "<release>-<name>" past 63
+characters). Because the two branches have disjoint output ranges and each
+branch is injective in .Release.Name, distinct releases in one namespace
+cannot share a default fullname (fixes C4).
+*/}}
 {{- define "scion-hub.fullname" -}}
+{{- if .Values.fullnameOverride }}
+{{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
+{{- else }}
+{{- $name := default .Chart.Name .Values.nameOverride }}
+{{- $suffix := printf "-%s" $name }}
+{{- if and (contains $name .Release.Name) (not (hasSuffix $suffix .Release.Name)) }}
+{{- .Release.Name | trunc 63 | trimSuffix "-" }}
+{{- else }}
+{{- $candidate := printf "%s-%s" .Release.Name $name }}
+{{- if le (len $candidate) 63 }}
+{{- $candidate | trimSuffix "-" }}
+{{- else }}
+{{- $digest := sha256sum (printf "%s/%s" .Release.Name $name) | trunc 10 }}
+{{- printf "%s-%s" ($candidate | trunc 52 | trimSuffix "-") $digest }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+Pre-C4 fullname (chart <= 0.1.0). Called ONLY by NOTES.txt and
+scion-hub.clusterRoleNameLegacy so upgrade disclosures can name pre-fix
+objects for releases whose fullname moved. DO NOT USE IT TO NAME AN OBJECT.
+*/}}
+{{- define "scion-hub.fullnameLegacy" -}}
 {{- if .Values.fullnameOverride }}
 {{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
 {{- else }}
@@ -333,25 +374,24 @@ and it was still the wrong shape of claim, so it is replaced by the true one:
     NOT ELIMINATE IT. THE (fullname, namespace) PAIR IS NOT A SECURITY
     BOUNDARY AND MUST NOT BE RELIED ON AS ONE.
 
-Two collision classes are DECLARED RESIDUALS of this change - known, measured,
-graded Critical by gke-deploy-lead, and open after this commit lands:
+Two collision classes were DECLARED RESIDUALS when the C1 truncation digest
+landed; C4 is now closed in scion-hub.fullname and C5 remains open:
 
-  C4  fullname is many-to-one in the release name, above. Release "prod" beside
-      release "prod-scion-hub" in ONE namespace share every generated name.
-      Measured 20 colliding release pairs over len(R) 1..43.
-  C5  the "-" this helper joins with is LEGAL INSIDE BOTH OPERANDS, so the
-      readable branch is an ambiguous concatenation: fullname "a-b" in namespace
-      "c" and fullname "a" in namespace "b-c" both render "a-b-c-agents".
-      Measured 3875 colliding pairs.
+  C4  (FIXED in scion-hub.fullname) fullname used to skip "-<name>" whenever
+      .Release.Name contained $name, collapsing (R, R-scion-hub) in one
+      namespace onto one fullname. scion-hub.fullname now appends "-<name>"
+      whenever .Release.Name ends in "-<name>".
+  C5  (OPEN) the "-" this helper joins with is LEGAL INSIDE BOTH OPERANDS, so
+      the readable branch is an ambiguous concatenation: fullname "a-b" in
+      namespace "c" and fullname "a" in namespace "b-c" both render
+      "a-b-c-agents".
 
-🔴 AND HERE IS THE PART A READER OF THIS FIX WILL GET WRONG IF NOBODY WRITES IT
-DOWN: NEITHER RESIDUAL TRUNCATES, AND THIS FIX IS GATED ON TRUNCATION. The gate
-is len($readable) > 63. C4 and C5 render at ordinary lengths - C5's example is
-33 bytes against a bound of 63 - so the digest branch never executes on their
-inputs and the identical names are emitted unchanged. THE GATE IS KEYED ON THE
-ONE PROPERTY BOTH REMAINING CRITICALS LACK. Do not read a green
-tests/rbac-collision.sh as "collisions are handled"; several of its assertions
-PIN THESE RESIDUALS AS PRESENT and go red when they are fixed.
+🔴 C5 DOES NOT TRUNCATE, AND THIS HELPER'S DIGEST IS GATED ON TRUNCATION. The
+gate is len($readable) > 63. C5 renders at ordinary lengths - C5's example is
+33 bytes against a bound of 63 - so the digest branch never executes on its
+inputs and the identical names are emitted unchanged. Do not read a green
+tests/rbac-collision.sh as "all cluster-scoped collisions are handled"; arm (q)
+PINS C5 AS PRESENT and goes red when it is fixed.
 
 What this commit does close is the class needing a LONG name: a silent collision
 arising FROM TRUNCATION, which is what C1 was. That is one class of three.
@@ -420,7 +460,7 @@ WHEN THIS CAN BE DELETED: when no supported upgrade path starts from a chart
 version at or before 0.1.0. Delete the NOTES block with it, not before.
 */}}
 {{- define "scion-hub.clusterRoleNameLegacy" -}}
-{{- printf "%s-%s-agents" (include "scion-hub.fullname" .) .Release.Namespace | trunc 63 | trimSuffix "-" -}}
+{{- printf "%s-%s-agents" (include "scion-hub.fullnameLegacy" .) .Release.Namespace | trunc 63 | trimSuffix "-" -}}
 {{- end }}
 
 {{/*

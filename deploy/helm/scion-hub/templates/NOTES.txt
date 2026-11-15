@@ -1,4 +1,5 @@
 {{- $fullName := include "scion-hub.fullname" . -}}
+{{- $legacyFullName := include "scion-hub.fullnameLegacy" . -}}
 {{- $hubId := include "scion-hub.hubId" . -}}
 Scion hub {{ $fullName }} installed in namespace {{ .Release.Namespace }}.
 
@@ -631,15 +632,67 @@ WARNING: replicaCount is {{ .Values.replicaCount }}.
   fails - roughly (N-1)/N of attempts. Load balancer session affinity does not
   fix this: it pins a client to a pod, not to the pod holding the channel.
 {{- end }}
+{{- if ne $fullName $legacyFullName }}
+
+UPGRADE NOTICE: THIS RELEASE'S FULL NAME HAS CHANGED
+
+  Chart versions up to 0.1.0 skipped appending the chart name whenever the
+  release name contained it, so a release ending in "-<chart-name>" (such as
+  "prod-scion-hub") shared every object name with a sibling "<prefix>" release
+  ("prod") in the same namespace (or truncated long "<release>-<nameOverride>"
+  names without a digest).
+
+  This release now uses full name:      {{ $fullName }}
+  Chart <= 0.1.0 used full name:        {{ $legacyFullName }}
+
+  If this is a first install, nothing is renamed and no extra step is needed.
+
+  IF YOU ARE UPGRADING AN EXISTING RELEASE FROM CHART <= 0.1.0:
+
+  1. To keep existing object names in place (only when NO sibling release in
+     namespace {{ .Release.Namespace }} already owns {{ $legacyFullName }}), set:
+
+       fullnameOverride: {{ $legacyFullName }}
+
+     This keeps the existing Deployment, Service, Secrets, ConfigMap, RBAC
+     objects, default relay TLS serverName, and ServiceAccount in place, and
+     avoids two Deployments briefly sharing app.kubernetes.io/instance={{ .Release.Name }}
+     during rollout.
+
+  2. If you move to the new full name {{ $fullName }} instead:
+{{- if and .Values.serviceAccount.create (not .Values.serviceAccount.name) }}
+     - Workload Identity: the Kubernetes ServiceAccount moved from
+       {{ $legacyFullName }} to {{ include "scion-hub.serviceAccountName" . }}.
+       Re-bind roles/iam.workloadIdentityUser to the new ServiceAccount so
+       Cloud SQL IAM authentication, GCS, and Secret Manager keep working:
+{{- if .Values.serviceAccount.gcpServiceAccount }}
+
+       gcloud iam service-accounts add-iam-policy-binding {{ .Values.serviceAccount.gcpServiceAccount }} \
+         --role roles/iam.workloadIdentityUser \
+         --member "serviceAccount:PROJECT.svc.id.goog[{{ .Release.Namespace }}/{{ include "scion-hub.serviceAccountName" . }}]"
+{{- else }}
+
+       gcloud iam service-accounts add-iam-policy-binding <GCP_SERVICE_ACCOUNT> \
+         --role roles/iam.workloadIdentityUser \
+         --member "serviceAccount:PROJECT.svc.id.goog[{{ .Release.Namespace }}/{{ include "scion-hub.serviceAccountName" . }}]"
+{{- end }}
+{{- end }}
+     - Update any external Ingress/Gateway backend referencing svc/{{ $legacyFullName }},
+       or any relay TLS certificate issued for {{ $legacyFullName }}-relay.{{ .Release.Namespace }}.svc
+       (unless conduit.internalTls.serverName is set explicitly).
+     - On helm template | kubectl apply (or Argo CD with prune off), delete the
+       old namespaced objects under {{ $legacyFullName }}* only after confirming
+       no sibling release in {{ .Release.Namespace }} still uses {{ $legacyFullName }}.
+{{- end }}
 {{ if and .Values.rbac.create .Values.runtime.listAllNamespaces -}}
 {{- $current := include "scion-hub.clusterRoleName" . -}}
 {{- $legacy := include "scion-hub.clusterRoleNameLegacy" . -}}
 {{- if ne $current $legacy }}
 {{/*
-  Renders ONLY when this release's cluster-scoped name changed, which happens
-  exactly when the old code truncated it. Installs that were never truncated
-  render nothing here, because for them nothing was renamed and there is no
-  orphan. See scion-hub.clusterRoleNameLegacy in _helpers.tpl.
+  Renders ONLY when this release's cluster-scoped name changed (either from the
+  63-character truncation digest or from a release-name suffix fullname change).
+  Installs whose cluster-scoped name did not move render nothing here.
+  See scion-hub.clusterRoleNameLegacy in _helpers.tpl.
 
   ON THE "NO .Values IN NOTES" RULE: the two strings below are object names, and
   naming the leftover object is the entire point of this block - an operator
@@ -651,10 +704,12 @@ WARNING: replicaCount is {{ .Values.replicaCount }}.
 */}}
 ACTION REQUIRED: THIS RELEASE'S CLUSTER-SCOPED RBAC OBJECTS HAVE BEEN RENAMED
 
-  Chart versions up to 0.1.0 could give two releases in different namespaces the
-  SAME ClusterRole and ClusterRoleBinding name, because the namespace was cut
-  off the end by a length limit. Those objects carry cluster-wide secrets
-  get/list/create/delete and pods/exec create. This release fixes the naming.
+  Chart versions up to 0.1.0 could give two releases the SAME ClusterRole and
+  ClusterRoleBinding name, either across namespaces when the namespace was cut
+  off the end by a length limit, or within one namespace when a release ending
+  in "-<chart-name>" shared a full name with "<prefix>". Those objects carry
+  cluster-wide secrets get/list/create/delete and pods/exec create. This release
+  fixes the naming.
 
   This release now uses:   {{ $current }}
   It previously used:      {{ $legacy }}
@@ -734,7 +789,12 @@ ACTION REQUIRED: THIS RELEASE'S CLUSTER-SCOPED RBAC OBJECTS HAVE BEEN RENAMED
   2. Move every release that shared the old name to a chart that includes this
      naming fix (by helm upgrade or by applying a new render). Step 1 cannot
      enumerate them for you; work from your own list of installs of this chart.
-     The object is an orphan only once every one of them runs such a chart.
+     Confirm that NO remaining release's current render still uses {{ $legacy }}
+     (for example, a sibling "<prefix>" release in the same namespace, or an
+     untruncated sibling namespace, whose own current name IS {{ $legacy }}). If
+     another release still legitimately uses {{ $legacy }}, do NOT delete it
+     (and re-apply that release if helm upgrade removed shared objects). The
+     object is an orphan only once no release renders {{ $legacy }}.
 
   3. Then, and only then, delete the BINDING - and only the binding:
 
