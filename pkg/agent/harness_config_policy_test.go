@@ -2661,9 +2661,7 @@ func TestRecordSecretsAtomic(t *testing.T) {
 		t.Fatalf("expected harness-secrets.old present mid-rename: %v", err)
 	}
 	strayTmp := filepath.Join(agentDir, secretsRecordTmpPrefix+"deadbeef")
-	if err := os.MkdirAll(strayTmp, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	writeSecretMap(t, strayTmp, map[string]string{"TOKEN_STRAY": "val-stray"})
 
 	restored, err := restoreSecretsRecord(agentDir, filepath.Join(t.TempDir(), "restore-home"), "agent-atomic", id1, nil)
 	if err != nil || !reflect.DeepEqual(restored, []string{"TOKEN_OLD"}) {
@@ -2672,7 +2670,6 @@ func TestRecordSecretsAtomic(t *testing.T) {
 	if _, err := os.Lstat(oldPath); !os.IsNotExist(err) {
 		t.Errorf("expected .old renamed back, stat err=%v", err)
 	}
-	_ = os.RemoveAll(strayTmp)
 
 	if replaced, err := recordSecrets(agentDir, home, "agent-atomic", recordUpdate{
 		Names: []string{"TOKEN_NEW"}, Current: id2, FreshSatisfied: true,
@@ -2687,6 +2684,66 @@ func TestRecordSecretsAtomic(t *testing.T) {
 	}
 	if entries, err := os.ReadDir(agentDir); err != nil || len(entries) != 1 || entries[0].Name() != config.HarnessSecretsRecordDirName {
 		t.Errorf("unexpected agentDir entries (err=%v): %v", err, entries)
+	}
+}
+
+func TestEnsureSecretsRecord_RecoversInterruptedSwap(t *testing.T) {
+	agentDir, home := t.TempDir(), filepath.Join(t.TempDir(), "home")
+	id := &harnessConfigIdentity{Name: "hc", Source: "broker-local", Revision: "sha256:r1"}
+	writeSecretMap(t, stagedSecretsDir(home), map[string]string{"GOOGLE_CLOUD_PROJECT": "p"})
+	if _, err := recordSecrets(agentDir, home, "a", recordUpdate{
+		Names: []string{"GOOGLE_CLOUD_PROJECT"}, Current: id, FreshSatisfied: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a broker crash between Rename(harness-secrets -> .old) and Rename(tmp -> harness-secrets),
+	// followed by ProvisionAgent's ensureSecretsRecord before the next Start.
+	if err := os.Rename(filepath.Join(agentDir, config.HarnessSecretsRecordDirName), filepath.Join(agentDir, secretsRecordOldDirName)); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureSecretsRecord(agentDir); err != nil {
+		t.Fatal(err)
+	}
+	got, err := restoreSecretsRecord(agentDir, filepath.Join(t.TempDir(), "h2"), "a", id, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, []string{"GOOGLE_CLOUD_PROJECT"}) {
+		t.Fatalf("restored = %v, want [GOOGLE_CLOUD_PROJECT] (.old was orphaned)", got)
+	}
+}
+
+func TestRecordSecrets_CleansLeftoverTmpDirs(t *testing.T) {
+	agentDir, home := t.TempDir(), filepath.Join(t.TempDir(), "home")
+	id := &harnessConfigIdentity{Name: "hc", Source: "broker-local", Revision: "sha256:r1"}
+	writeSecretMap(t, stagedSecretsDir(home), map[string]string{"TOKEN_KEEP": "val"})
+	if _, err := recordSecrets(agentDir, home, "a", recordUpdate{
+		Names: []string{"TOKEN_KEEP"}, Current: id, FreshSatisfied: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Leftover .tmp-* dirs from a crashed write are swept even when the guard preserves the record.
+	for _, sfx := range []string{"crash1", "crash2"} {
+		writeSecretMap(t, filepath.Join(agentDir, secretsRecordTmpPrefix+sfx), map[string]string{"LEAK": "v"})
+	}
+	emptyHome := filepath.Join(t.TempDir(), "empty-home")
+	if replaced, err := recordSecrets(agentDir, emptyHome, "a", recordUpdate{Current: id}); err != nil || replaced {
+		t.Fatalf("guarded recordSecrets = (%v, %v), want (false, nil)", replaced, err)
+	}
+	if matches, err := filepath.Glob(filepath.Join(agentDir, secretsRecordTmpPrefix+"*")); err != nil || len(matches) != 0 {
+		t.Fatalf("leftover tmp dirs after guarded recordSecrets = %v (err=%v), want none", matches, err)
+	}
+
+	// Also swept on a replacing write without interfering with the new tmp dir.
+	writeSecretMap(t, filepath.Join(agentDir, secretsRecordTmpPrefix+"crash3"), map[string]string{"LEAK": "v"})
+	if replaced, err := recordSecrets(agentDir, home, "a", recordUpdate{
+		Names: []string{"TOKEN_KEEP"}, Current: id, FreshSatisfied: true,
+	}); err != nil || !replaced {
+		t.Fatalf("replacing recordSecrets = (%v, %v), want (true, nil)", replaced, err)
+	}
+	if entries, err := os.ReadDir(agentDir); err != nil || len(entries) != 1 || entries[0].Name() != config.HarnessSecretsRecordDirName {
+		t.Fatalf("unexpected agentDir entries after replace (err=%v): %v", err, entries)
 	}
 }
 

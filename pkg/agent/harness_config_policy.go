@@ -559,9 +559,17 @@ const (
 	secretsRecordTmpPrefix  = config.HarnessSecretsRecordDirName + ".tmp-"
 )
 
-// ensureSecretsRecord creates an empty private secrets record in agentDir when
-// none exists, leaving an existing record as it is.
+// ensureSecretsRecord creates an empty private secrets record (0700 on Unix,
+// owner-only DACL on Windows) in agentDir when none exists, after recovering
+// any harness-secrets.old left by an interrupted swap. An empty record restores
+// nothing and is distinct from an absent record. An existing record directory,
+// including its permissions, is left unchanged (privatefs.Tree.MkdirAll does
+// not re-chmod existing directories; every recordSecrets replacement installs a
+// fresh private directory via rename).
 func ensureSecretsRecord(agentDir string) error {
+	if err := recoverSecretsRecordOld(agentDir); err != nil {
+		return err
+	}
 	tree, err := privatefs.OpenTree(agentDir, privatefs.TreeOptions{CreateAnchor: true})
 	if err != nil {
 		return err
@@ -591,14 +599,50 @@ func recoverSecretsRecordOld(agentDir string) error {
 	return tree.Rename(secretsRecordOldDirName, config.HarnessSecretsRecordDirName)
 }
 
+// cleanupSecretsRecordTmp removes leftover harness-secrets.tmp-* directories in
+// agentDir from an earlier crashed recordSecrets call. Callers must ensure no
+// concurrent recordSecrets write for the same agent can be in flight.
+func cleanupSecretsRecordTmp(agentDir string) error {
+	fi, err := os.Lstat(agentDir)
+	if os.IsNotExist(err) || (err == nil && !fi.IsDir()) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	matches, err := filepath.Glob(filepath.Join(agentDir, secretsRecordTmpPrefix+"*"))
+	if err != nil {
+		return err
+	}
+	for _, m := range matches {
+		if err := os.RemoveAll(m); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 var restoreSecretsAllowTestHook func(name string) bool
 
 // restoreSecretsRecord restores recorded regular secret files from
-// agentDir/harness-secrets into the agent home's staged secrets directory
-// (0700, files 0600), confined via pkg/agenthome. Exact identity matches
-// restore every recorded file; same-lineage revision changes with a non-nil
+// agentDir/harness-secrets into the agent home's cleared staged secrets
+// directory (0700, files 0600), and returns their names for
+// ContainerScriptHarness.SetRecordedSecrets. Any harness-secrets.old left by an
+// interrupted recordSecrets swap is recovered first.
+//
+// Exact identity matches restore every recorded regular file; same-lineage
+// revision changes (matching name, source, and hub record ID) with a non-nil
 // allow predicate restore only accepted names without writing filtered files to
-// the home; any other mismatch or missing identity restores nothing.
+// the home; any other mismatch, missing or unreadable identity, or unknown
+// current identity restores nothing.
+//
+// With no record (an agent provisioned before harness secrets were recorded),
+// nothing is restored, a warning names the agent, and an empty record is
+// created so the warning is not repeated.
+//
+// Writes into the home are confined via pkg/agenthome through one handle opened
+// on the home: a link at a secret file is replaced, never written through, and
+// a linked directory component is refused.
 func restoreSecretsRecord(agentDir, agentHome, agentID string, current *harnessConfigIdentity, allow func(name string) bool) ([]string, error) {
 	if err := recoverSecretsRecordOld(agentDir); err != nil {
 		return nil, err
@@ -673,11 +717,25 @@ type recordUpdate struct {
 
 var recordSecretsBetweenRenamesHook func() error
 
-// recordSecrets atomically updates agentDir/harness-secrets from staged secrets
-// (u.Names) and u.Current, preserving the existing same-lineage record when
-// !u.FreshSatisfied and replacing would lose a key valid for the target revision.
+// recordSecrets updates agentDir/harness-secrets from the regular secret files
+// referenced in u.Names (copied by content from the agent home's staged secrets
+// directory) together with u.Current (written last as .identity.json). It
+// returns replaced=true when a new record was installed, or replaced=false with
+// a nil error when an existing same-lineage record was preserved because
+// !u.FreshSatisfied and replacing would drop a recorded key still valid for the
+// target revision.
+//
+// At entry, any harness-secrets.old left by an interrupted swap is recovered
+// and any leftover harness-secrets.tmp-* directories from a prior crash are
+// removed. Replacements write a private harness-secrets.tmp-<hex> directory,
+// rename an existing harness-secrets aside to harness-secrets.old, rename the
+// populated temp directory into place, and remove .old; on a crash at any
+// point, recovery sees either the old or the new complete record.
 func recordSecrets(agentDir, agentHome, agentID string, u recordUpdate) (bool, error) {
 	if err := recoverSecretsRecordOld(agentDir); err != nil {
+		return false, err
+	}
+	if err := cleanupSecretsRecordTmp(agentDir); err != nil {
 		return false, err
 	}
 	record := filepath.Join(agentDir, config.HarnessSecretsRecordDirName)
