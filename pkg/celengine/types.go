@@ -255,23 +255,30 @@ type Kind struct {
 //
 // Structural evaluation-time bound (Elapsed <= one loop body + one guarded call,
 // capped by Program.Eval's Elapsed > EvalTimeout backstop):
-//  1. Bounded single host calls: outputBoundsDecorator enforces pre-call input
-//     and output byte limits (MaxOutputBytes), collection cardinality limits
-//     (MaxCollectionElements), fail-closed container walk bounds
-//     (MaxContainerDepth = 32, 2*MaxCollectionElements, 2*MaxOutputBytes on ==,
-//     !=, in, and %s format), linear KMP fallback for pathological substring
-//     patterns, cached IANA timezone lookups, and RE2 program-size / match-work
-//     bounds (len(input)*progSize <= MaxRegexWork; matches on very large payload
+//  1. Authoring-only regex compilation + bounded single host calls: matches()
+//     accepts string literal patterns only (non-literal patterns fail at
+//     Compile with CategoryRegexLiteralRequired) and runs a linear O(len(pat))
+//     pre-scan (MaxRegexPatternBytes, MaxRegexFoldedRangeRunes) before any
+//     regexp/syntax parse; evaluation never parses regular expressions.
+//     outputBoundsDecorator enforces pre-call input and output byte limits
+//     (MaxOutputBytes), collection cardinality limits (MaxCollectionElements),
+//     fail-closed container walk bounds (MaxContainerDepth = 32,
+//     2*MaxCollectionElements, 2*MaxOutputBytes on ==, !=, in, and %s format),
+//     linear KMP fallback for pathological substring patterns, embedded-only
+//     no-disk IANA timezone lookups, and RE2 program-size / match-work bounds
+//     (len(input)*progSize <= MaxRegexWork; matches on very large payload
 //     strings fails closed with ReasonCostLimit above MaxRegexWork).
 //  2. Proportional CostTracker charging up to CostLimit: every non-O(1) host
-//     call — including container == / !=, in_list / in_map, string_format (%s
+//     call — including container == / !=, in_list / in_map, map literal
+//     construction and map indexing with string/bytes keys, string_format (%s
 //     container walks and formatted output), counted-repetition matches
-//     (progSize factor), size(string), indexOf / lastIndexOf (including empty
-//     needle), string/bytes ordering and conversions, and dyn-dispatched
-//     multi-overload calls (overloadID == "") — charges visited container
-//     elements and scanned/produced bytes to the per-evaluation cost.Tracker
-//     cloned on each Program.Eval. DefaultCostLimit (250,000) bounds cumulative
-//     work across all calls and loop iterations within an evaluation.
+//     (stored plan-time progSize factor, never re-parsed), size(string),
+//     indexOf / lastIndexOf (including empty needle), string/bytes ordering
+//     and conversions, and dyn-dispatched multi-overload calls (overloadID == "")
+//     — charges visited container elements and scanned/produced/hashed bytes
+//     to the per-evaluation cost.Tracker cloned on each Program.Eval.
+//     DefaultCostLimit (250,000) bounds cumulative work across all calls and
+//     loop iterations within an evaluation.
 //  3. Per-iteration comprehension interruption + wall-clock backstop:
 //     DefaultInterruptFrequency = 1 checks the evaluation deadline on every
 //     comprehension iteration (all, exists, exists_one, filter, map), so once
@@ -288,6 +295,17 @@ const (
 	DefaultMaxCollectionElements        = 65_536
 	DefaultMaxRegexProgramSize          = 256
 	DefaultMaxRegexWork          int64  = 8 << 20 // 8 MiB-instructions (len(input) * regex program size)
+
+	// MaxRegexPatternBytes caps the UTF-8 byte length of a string literal
+	// pattern passed to matches() during the linear authoring pre-scan before
+	// regexp/syntax parses the pattern.
+	MaxRegexPatternBytes = 512
+
+	// MaxRegexFoldedRangeRunes caps the cumulative character-class [lo-hi]
+	// codepoint span intersecting [0x41, 0x1E943] across case-insensitive (?i)
+	// matches() patterns in an expression, bounding regexp/syntax's
+	// appendFoldedRange expansion before parsing.
+	MaxRegexFoldedRangeRunes = 2048
 
 	// MaxContainerDepth is the maximum container nesting depth traversed by
 	// fail-closed container equality (==, !=), list membership (in), and %s
@@ -430,15 +448,21 @@ func WithMaxExprBytes(n int) Option {
 
 // CompileError categories returned at authoring/compile time.
 const (
-	CategorySize            = "size"
-	CategorySyntax          = "syntax"
-	CategoryUnknownVariable = "unknown_variable"
-	CategoryUnknownFunction = "unknown_function"
-	CategoryType            = "type"
-	CategoryResultType      = "result_type"
+	CategorySize                 = "size"
+	CategorySyntax               = "syntax"
+	CategoryUnknownVariable      = "unknown_variable"
+	CategoryUnknownFunction      = "unknown_function"
+	CategoryType                 = "type"
+	CategoryResultType           = "result_type"
+	CategoryRegexLiteralRequired = "regex_literal_required"
 )
 
-// CompileError describes a structured parse, type-check, or result-type error.
+// CompileError describes a structured parse, type-check, regex-literal, or result-type error.
+//
+// Category is one of CategorySize ("size"), CategorySyntax ("syntax"),
+// CategoryUnknownVariable ("unknown_variable"), CategoryUnknownFunction
+// ("unknown_function"), CategoryType ("type"), CategoryResultType
+// ("result_type"), or CategoryRegexLiteralRequired ("regex_literal_required").
 type CompileError struct {
 	Line     int
 	Column   int

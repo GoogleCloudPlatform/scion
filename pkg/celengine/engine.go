@@ -76,7 +76,6 @@ func New(env Environment, limits Limits, cache CacheConfig) (*Engine, error) {
 		cel.EagerlyValidateDeclarations(true),
 		cel.ParserRecursionLimit(limits.RecursionDepth),
 		cel.ParserExpressionSizeLimit(limits.MaxExprBytes),
-		cel.RegexProgramSizeLimit(limits.MaxRegexProgramSize),
 	}
 
 	switch env.Macros {
@@ -206,6 +205,9 @@ func snapshotFunctions(celEnv *cel.Env) ([]string, map[string]struct{}, [32]byte
 
 // Functions returns a sorted copy of the environment's function and macro names
 // so consumers can pin the allowed surface against silent cel-go changes.
+// Note: matches remains in the function surface, restricted at Compile to
+// string literal patterns bounded by MaxRegexPatternBytes and
+// MaxRegexFoldedRangeRunes.
 func (e *Engine) Functions() []string {
 	return slices.Clone(e.functions)
 }
@@ -234,9 +236,9 @@ func (e *Engine) Invalidate(scope CacheScope) {
 	e.cache.invalidate(scope)
 }
 
-// Compile validates expr against the Engine's MaxExprBytes, parses, type-checks,
-// validates constant regular expressions, and verifies the static result type
-// against kind.Result.
+// Compile validates expr against the Engine's MaxExprBytes, parses, enforces
+// literal-only and pre-scanned regular expressions on matches(), type-checks,
+// and verifies the static result type against kind.Result.
 func (e *Engine) Compile(expr string, kind Kind) (Program, error) {
 	return e.CompileWithOptions(expr, kind)
 }
@@ -325,6 +327,11 @@ func (e *Engine) compileInternal(expr string, kind Kind, maxBytes int) (Program,
 		return Program{}, e.classifyParseIssues(iss, kind)
 	}
 
+	regexes, cerr := validateAndCompileMatchesAST(parsed, kind, e.limits.MaxRegexProgramSize)
+	if cerr != nil {
+		return Program{}, cerr
+	}
+
 	checked, iss := e.celEnv.Check(parsed)
 	if iss != nil && iss.Err() != nil {
 		return Program{}, e.classifyCheckIssues(parsed, iss, kind)
@@ -342,11 +349,14 @@ func (e *Engine) compileInternal(expr string, kind Kind, maxBytes int) (Program,
 		}
 	}
 
-	celProg, err := buildCELProgram(e.celEnv, checked, e.limits, e.rawFormat, e.tzCache)
+	celProg, err := buildCELProgram(e.celEnv, checked, e.limits, e.rawFormat, e.tzCache, regexes, false)
 	if err != nil {
 		line, col := rootLocation(checked)
 		cat := CategoryType
-		if errors.Is(err, errPlanBoundExceeded) || strings.Contains(err.Error(), "regex program size ") {
+		switch {
+		case errors.Is(err, errRegexLiteralRequired):
+			cat = CategoryRegexLiteralRequired
+		case errors.Is(err, errPlanBoundExceeded) || strings.Contains(err.Error(), "regex program size "):
 			cat = CategorySize
 		}
 		return Program{}, &CompileError{
@@ -362,6 +372,7 @@ func (e *Engine) compileInternal(expr string, kind Kind, maxBytes int) (Program,
 		celEnv:    e.celEnv,
 		rawFormat: e.rawFormat,
 		tzCache:   e.tzCache,
+		regexes:   regexes,
 		checked:   checked,
 		celProg:   celProg,
 		kind:      kind,
@@ -369,7 +380,7 @@ func (e *Engine) compileInternal(expr string, kind Kind, maxBytes int) (Program,
 	}, nil
 }
 
-func buildCELProgram(celEnv *cel.Env, checked *cel.Ast, limits Limits, rawFormat cel.Program, tzCache *tzLRUCache) (prog cel.Program, err error) {
+func buildCELProgram(celEnv *cel.Env, checked *cel.Ast, limits Limits, rawFormat cel.Program, tzCache *tzLRUCache, regexes map[string]precompiledRegex, forReplan bool) (prog cel.Program, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			if cancelled, ok := r.(interpreter.EvalCancelledError); ok && cancelled.Cause == interpreter.CostLimitExceeded {
@@ -382,10 +393,16 @@ func buildCELProgram(celEnv *cel.Env, checked *cel.Ast, limits Limits, rawFormat
 		}
 	}()
 	costEst, costOpts := buildCostTracking(limits)
+	evalOpts := cel.OptOptimize | cel.OptTrackCost
+	if forReplan && len(regexes) > 0 {
+		// Never invoke cel-go's MatchesRegexOptimization regex parser during Eval
+		// re-planning; boundedMatchesCall reuses Program.regexes directly.
+		evalOpts = cel.OptTrackCost
+	}
 	return celEnv.Program(
 		checked,
-		cel.CustomDecoratorV2(outputBoundsDecorator(limits, rawFormat, tzCache)),
-		cel.EvalOptions(cel.OptOptimize, cel.OptTrackCost),
+		cel.CustomDecoratorV2(outputBoundsDecorator(celEnv, limits, rawFormat, tzCache, regexes)),
+		cel.EvalOptions(evalOpts),
 		cel.CostTracking(costEst),
 		cel.CostTrackerOptions(costOpts...),
 		cel.CostLimit(limits.CostLimit),
@@ -518,6 +535,7 @@ type Program struct {
 	celEnv    *cel.Env
 	rawFormat cel.Program
 	tzCache   *tzLRUCache
+	regexes   map[string]precompiledRegex
 	checked   *cel.Ast
 	celProg   cel.Program
 	kind      Kind
@@ -561,7 +579,7 @@ func (p Program) Eval(ctx context.Context, act map[string]any, limits ...Limits)
 		eff.MaxCollectionElements != p.limits.MaxCollectionElements ||
 		eff.MaxRegexProgramSize != p.limits.MaxRegexProgramSize ||
 		eff.MaxRegexWork != p.limits.MaxRegexWork {
-		lowered, err := buildCELProgram(p.celEnv, p.checked, eff, p.rawFormat, p.tzCache)
+		lowered, err := buildCELProgram(p.celEnv, p.checked, eff, p.rawFormat, p.tzCache, p.regexes, true)
 		if err != nil {
 			if errors.Is(err, errPlanBoundExceeded) || strings.Contains(err.Error(), "regex program size ") {
 				return nil, EvalStats{}, &EvalError{Reason: ReasonCostLimit}

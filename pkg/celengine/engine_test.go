@@ -15,9 +15,14 @@
 package celengine_test
 
 import (
+	"archive/zip"
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -542,15 +547,15 @@ func TestLinearRE2MatchesAndDynamicRegexError(t *testing.T) {
 		t.Errorf("expected false match")
 	}
 
-	// Dynamic invalid regex fails at Eval with ReasonRuntime.
-	dynReProg, err := eng.Compile(`meta["input"].matches(meta["pattern"])`, boolKind)
-	if err != nil {
-		t.Fatalf("Compile dynamic matches: %v", err)
+	// Option A: non-literal regex pattern is rejected at Compile, never reaching Eval.
+	_, err = eng.Compile(`meta["input"].matches(meta["pattern"])`, boolKind)
+	if err == nil {
+		t.Fatalf("expected CompileError for dynamic matches pattern")
 	}
-	_, _, err = dynReProg.Eval(context.Background(), map[string]any{
-		"meta": map[string]string{"input": "abc", "pattern": "[invalid"},
-	})
-	assertEvalReason(t, err, celengine.ReasonRuntime)
+	var dynCerr *celengine.CompileError
+	if !errors.As(err, &dynCerr) || dynCerr.Category != celengine.CategoryRegexLiteralRequired {
+		t.Fatalf("Compile dynamic matches = %v, want Category %q", err, celengine.CategoryRegexLiteralRequired)
+	}
 }
 
 func TestCostLimitTimeoutAndCanceledDistinction(t *testing.T) {
@@ -1260,34 +1265,28 @@ func TestMatchesRegexSizeAndWorkBounds(t *testing.T) {
 		}
 	})
 
-	// 3. Dynamic regex patterns (both > MaxRegexProgramSize and > MaxRegexWork) fail fast with ReasonCostLimit.
-	t.Run("dynamic_oversized_and_overwork_patterns", func(t *testing.T) {
-		prog, err := eng.Compile(`event.s.matches(event.p) || true`, boolKind)
-		if err != nil {
-			t.Fatalf("Compile dynamic matches: %v", err)
-		}
-		s60k := strings.Repeat("a", 60*1024)
-		for _, pat := range []string{
-			`[a-z]{0,1000}x`,
-			strings.Repeat("a?", 80) + strings.Repeat("a", 80) + "x",
+	// 3. Dynamic regex patterns are rejected at Compile with CategoryRegexLiteralRequired (Option A).
+	t.Run("dynamic_patterns_rejected_at_compile", func(t *testing.T) {
+		for _, expr := range []string{
+			`event.s.matches(event.p) || true`,
+			`matches(string(event.s), string(event.p))`,
 		} {
-			start := time.Now()
-			res, _, evalErr := prog.Eval(ctx, map[string]any{
-				"event": map[string]any{"s": s60k, "p": pat},
-			})
-			elapsed := time.Since(start)
-			if res != nil {
-				t.Fatalf("pattern %q: expected nil Result (must not be swallowed by || true), got %v", pat[:12], res)
+			_, err := eng.Compile(expr, boolKind)
+			if err == nil {
+				t.Fatalf("Compile(%s): expected CompileError, got nil", expr)
 			}
-			assertCostLimitOrRaceTimeout(t, evalErr)
-			if elapsed > scaleWallBound(50*time.Millisecond) {
-				t.Errorf("pattern %q took %s, want <= %s", pat[:12], elapsed, scaleWallBound(50*time.Millisecond))
+			var cerr *celengine.CompileError
+			if !errors.As(err, &cerr) {
+				t.Fatalf("Compile(%s): expected *CompileError, got %T: %v", expr, err, err)
+			}
+			if cerr.Category != celengine.CategoryRegexLiteralRequired {
+				t.Fatalf("Compile(%s): Category = %q, want %q", expr, cerr.Category, celengine.CategoryRegexLiteralRequired)
 			}
 		}
 	})
 
-	// 4. Normal literal and dynamic matches on 60 KiB inputs within work bound succeed.
-	t.Run("normal_literal_and_dynamic_matches", func(t *testing.T) {
+	// 4. Normal literal matches on 60 KiB inputs within work bound succeed.
+	t.Run("normal_literal_matches_on_60k", func(t *testing.T) {
 		s60k := "webhook.deploy." + strings.Repeat("a", 60*1024)
 		litProg, err := semEng.Compile(`event.s.matches("^webhook\\.deploy\\..*$")`, boolKind)
 		if err != nil {
@@ -1299,20 +1298,6 @@ func TestMatchesRegexSizeAndWorkBounds(t *testing.T) {
 		}
 		if b, _ := res.Bool(); !b {
 			t.Fatalf("expected true match")
-		}
-
-		dynProg, err := semEng.Compile(`event.s.matches(event.p)`, boolKind)
-		if err != nil {
-			t.Fatalf("Compile normal dynamic: %v", err)
-		}
-		res, _, err = dynProg.Eval(ctx, map[string]any{
-			"event": map[string]any{"s": s60k, "p": `^webhook\.deploy\..*$`},
-		})
-		if err != nil {
-			t.Fatalf("Eval normal dynamic: %v", err)
-		}
-		if b, _ := res.Bool(); !b {
-			t.Fatalf("expected true dynamic match")
 		}
 	})
 
@@ -1917,6 +1902,505 @@ func TestTimezoneEmbeddedLRUCacheAndCost(t *testing.T) {
 			if stats.Cost >= 50 {
 				t.Errorf("Eval(%s) stats.Cost = %d, want < 50", expr, stats.Cost)
 			}
+		}
+	})
+
+	// 4. P5-O1 regression: timezone resolution NEVER reads $ZONEINFO or disk.
+	// Planting a valid TZif file under $ZONEINFO/Fake/Zone succeeds under stdlib
+	// time.LoadLocation, but celengine MUST reject it with ReasonRuntime.
+	t.Run("planted_ZONEINFO_directory_never_consulted_no_disk_io", func(t *testing.T) {
+		zr, err := zip.OpenReader("tzdata/zoneinfo.zip")
+		if err != nil {
+			t.Fatalf("open embedded zoneinfo.zip fixture: %v", err)
+		}
+		defer func() { _ = zr.Close() }()
+
+		var tokyoBytes []byte
+		for _, f := range zr.File {
+			if f.Name == "Asia/Tokyo" {
+				rc, err := f.Open()
+				if err != nil {
+					t.Fatalf("open Asia/Tokyo: %v", err)
+				}
+				tokyoBytes, err = io.ReadAll(rc)
+				_ = rc.Close()
+				if err != nil {
+					t.Fatalf("read Asia/Tokyo: %v", err)
+				}
+				break
+			}
+		}
+		if len(tokyoBytes) == 0 {
+			t.Fatalf("Asia/Tokyo not found in tzdata/zoneinfo.zip")
+		}
+
+		tmpDir := t.TempDir()
+		fakeZonePath := filepath.Join(tmpDir, "Fake", "Zone")
+		if err := os.MkdirAll(filepath.Dir(fakeZonePath), 0o755); err != nil {
+			t.Fatalf("mkdir Fake: %v", err)
+		}
+		if err := os.WriteFile(fakeZonePath, tokyoBytes, 0o644); err != nil {
+			t.Fatalf("write Fake/Zone: %v", err)
+		}
+
+		// Run in a fresh subprocess so Go's process-wide stdlib zoneinfoOnce
+		// latches ZONEINFO=tmpDir cleanly on every -count=N iteration.
+		cmd := exec.Command(os.Args[0], "-test.run=^TestPlantedZoneinfoSubprocess$", "-test.count=1")
+		cmd.Env = append(os.Environ(),
+			"ZONEINFO="+tmpDir,
+			"CELENGINE_TEST_PLANTED_ZONEINFO=1",
+		)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("TestPlantedZoneinfoSubprocess failed: %v\n%s", err, string(out))
+		}
+	})
+}
+
+func TestPlantedZoneinfoSubprocess(t *testing.T) {
+	if os.Getenv("CELENGINE_TEST_PLANTED_ZONEINFO") != "1" {
+		return
+	}
+	zoneDir := os.Getenv("ZONEINFO")
+	// Confirm stdlib time.LoadLocation WOULD resolve Fake/Zone from $ZONEINFO.
+	if _, stdErr := time.LoadLocation("Fake/Zone"); stdErr != nil {
+		t.Fatalf("expected stdlib time.LoadLocation(Fake/Zone) to succeed with ZONEINFO=%s: %v", zoneDir, stdErr)
+	}
+
+	boolKind := celengine.Kind{Name: "filter", Result: celengine.Bool()}
+	refTime := time.Date(2026, 11, 15, 12, 34, 56, 0, time.UTC)
+	freshEng := newTestEngine(t)
+	for _, expr := range []string{
+		`at.getHours("Fake/Zone") == 21`,
+		`at.getHours(meta["tz"]) == 21`,
+	} {
+		prog, err := freshEng.Compile(expr, boolKind)
+		if err != nil {
+			t.Fatalf("Compile(%s): %v", expr, err)
+		}
+		res, stats, evalErr := prog.Eval(context.Background(), map[string]any{
+			"at":   refTime,
+			"meta": map[string]string{"tz": "Fake/Zone"},
+		})
+		if res != nil {
+			t.Fatalf("Eval(%s) resolved planted disk zone Fake/Zone: %v", expr, res)
+		}
+		assertEvalReason(t, evalErr, celengine.ReasonRuntime)
+		if stats.Cost < 250 {
+			t.Errorf("Eval(%s) stats.Cost = %d, want >= 250", expr, stats.Cost)
+		}
+	}
+}
+
+func TestMatchesLiteralOnlyPreScanAndCommonPatterns(t *testing.T) {
+	eng := newTestEngine(t)
+	semEng := newSemanticLargeInputEngine(t)
+	boolKind := celengine.Kind{Name: "filter", Result: celengine.Bool()}
+	ctx := context.Background()
+
+	// 1. Non-literal pattern arguments (receiver, global, leading-dot global,
+	// payload field, attribute, concatenation, comprehension join, map/list index,
+	// conditional) fail at Compile with CategoryRegexLiteralRequired + position.
+	t.Run("non_literal_patterns_rejected_with_position_and_category", func(t *testing.T) {
+		exprBuiltPass6 := `"a".matches("(?i)" + [0,1,2].map(i, [0,1,2].map(j, r"[\x{41}-\x{1e942}]").join()).join())`
+		cases := []struct {
+			name       string
+			expr       string
+			wantLine   int
+			wantMinCol int
+		}{
+			{
+				name:       "receiver_payload_field",
+				expr:       `"a".matches(event.payload.p)`,
+				wantLine:   1,
+				wantMinCol: 13,
+			},
+			{
+				name:       "global_payload_field",
+				expr:       `matches("a", event.payload.p)`,
+				wantLine:   1,
+				wantMinCol: 14,
+			},
+			{
+				name:       "leading_dot_global_payload_field",
+				expr:       `.matches("a", event.payload.p)`,
+				wantLine:   1,
+				wantMinCol: 15,
+			},
+			{
+				name:       "attribute_pattern",
+				expr:       `"a".matches(meta["pat"])`,
+				wantLine:   1,
+				wantMinCol: 13,
+			},
+			{
+				name:       "concatenation_pattern",
+				expr:       `"a".matches("(?i)" + "[a-z]+")`,
+				wantLine:   1,
+				wantMinCol: 13,
+			},
+			{
+				name:       "pass6_expression_built_map_join_pattern",
+				expr:       exprBuiltPass6,
+				wantLine:   1,
+				wantMinCol: 13,
+			},
+			{
+				name:       "list_indexed_pattern",
+				expr:       `"a".matches(["^a$"][0])`,
+				wantLine:   1,
+				wantMinCol: 13,
+			},
+			{
+				name:       "map_indexed_pattern",
+				expr:       `"a".matches({"p": "^a$"}["p"])`,
+				wantLine:   1,
+				wantMinCol: 13,
+			},
+			{
+				name:       "conditional_pattern",
+				expr:       `"a".matches(active ? "^a$" : "^b$")`,
+				wantLine:   1,
+				wantMinCol: 13,
+			},
+			{
+				name:       "nested_in_comprehension",
+				expr:       `tags.exists(x, x.matches(meta["pat"]))`,
+				wantLine:   1,
+				wantMinCol: 26,
+			},
+			{
+				name:       "has_wrapped_receiver_non_literal",
+				expr:       `has(event.payload.p) && "a".matches(event.payload.p)`,
+				wantLine:   1,
+				wantMinCol: 37,
+			},
+			{
+				name:       "has_wrapped_global_non_literal",
+				expr:       `has(event.payload.p) ? matches("a", event.payload.p) : false`,
+				wantLine:   1,
+				wantMinCol: 37,
+			},
+			{
+				name:       "multiline_position",
+				expr:       "true &&\n  \"a\".matches(event.payload.p)",
+				wantLine:   2,
+				wantMinCol: 15,
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				start := time.Now()
+				_, err := eng.Compile(tc.expr, boolKind)
+				elapsed := time.Since(start)
+				if err == nil {
+					t.Fatalf("Compile(%s) succeeded, want CompileError", tc.expr)
+				}
+				var cerr *celengine.CompileError
+				if !errors.As(err, &cerr) {
+					t.Fatalf("Compile(%s) err = %T (%v), want *CompileError", tc.expr, err, err)
+				}
+				if cerr.Category != celengine.CategoryRegexLiteralRequired {
+					t.Errorf("Category = %q, want %q (err=%v)", cerr.Category, celengine.CategoryRegexLiteralRequired, cerr)
+				}
+				if cerr.Line != tc.wantLine || cerr.Column < tc.wantMinCol {
+					t.Errorf("pos = %d:%d, want line %d col >= %d", cerr.Line, cerr.Column, tc.wantLine, tc.wantMinCol)
+				}
+				if elapsed > scaleWallBound(50*time.Millisecond) {
+					t.Errorf("Compile(%s) took %s, want <= %s", tc.name, elapsed, scaleWallBound(50*time.Millisecond))
+				}
+			})
+		}
+	})
+
+	// 2. Linear authoring pre-scan rejects over-long literal patterns and
+	// case-folded character-class range bombs BEFORE regexp/syntax parses them.
+	t.Run("prescan_rejects_folded_ranges_and_overlong_patterns_fast", func(t *testing.T) {
+		// Pass-6 4,022-byte literal pattern (250 folded ranges; previously 2.8 s Compile).
+		pass6Literal := `"a".matches(r"(?i)[` + strings.Repeat(`\x{41}-\x{1e942}`, 250) + `]")`
+
+		// Multi-call cumulative folded-range span across one rule (10 calls * 320 runes = 3,200 > 2,048).
+		tenCalls := make([]string, 10)
+		for i := range tenCalls {
+			tenCalls[i] = `"a".matches(r"(?i)[\x{41}-\x{180}]")`
+		}
+		cumulativeExpr := strings.Join(tenCalls, " || ")
+
+		cases := []struct {
+			name string
+			expr string
+		}{
+			{name: "pass6_4k_literal_250_folded_ranges", expr: pass6Literal},
+			{name: "single_short_folded_range_hex_braces", expr: `"a".matches(r"(?i)[\x{41}-\x{1e942}]")`},
+			{name: "global_matches_short_folded_range", expr: `matches("a", r"(?i)[\x{41}-\x{1e942}]")`},
+			{name: "leading_dot_global_short_folded_range", expr: `.matches("a", r"(?i)[\x{41}-\x{1e942}]")`},
+			{name: "inline_flag_group_ims_folded_range", expr: `"a".matches(r"(?ims:[\x{41}-\x{1000}])")`},
+			{name: "late_inline_flag_folded_range", expr: `"a".matches(r"(?:foo)(?i)[\x{41}-\x{1000}]")`},
+			{name: "unclosed_posix_lookalike_folded_range", expr: `"a".matches(r"(?i)[[:\x{41}-\x{1000}]")`},
+			{name: "escaped_backslash_before_class_folded_range", expr: `"a".matches(r"(?i)\\[\x{41}-\x{1000}]")`},
+			{name: "utf8_literal_endpoints_folded_range", expr: `"a".matches("(?i)[A-\u1000]")`},
+			{name: "cumulative_multi_call_folded_ranges", expr: cumulativeExpr},
+			{name: "overlong_513_byte_pattern", expr: `"a".matches("` + strings.Repeat("a", celengine.MaxRegexPatternBytes+1) + `")`},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				start := time.Now()
+				_, err := eng.Compile(tc.expr, boolKind)
+				elapsed := time.Since(start)
+				if err == nil {
+					t.Fatalf("Compile(%s) succeeded, want CategorySize CompileError", tc.name)
+				}
+				var cerr *celengine.CompileError
+				if !errors.As(err, &cerr) {
+					t.Fatalf("Compile(%s) err = %T (%v), want *CompileError", tc.name, err, err)
+				}
+				if cerr.Category != celengine.CategorySize {
+					t.Errorf("Category = %q, want %q (err=%v)", cerr.Category, celengine.CategorySize, cerr)
+				}
+				if elapsed > scaleWallBound(50*time.Millisecond) {
+					t.Errorf("Compile(%s) took %s, want <= %s (pre-scan must run before syntax.Parse)", tc.name, elapsed, scaleWallBound(50*time.Millisecond))
+				}
+			})
+		}
+	})
+
+	// 3. Cached evaluation of allowed patterns containing '{' (counted repetitions
+	// and \x{..}) never re-parses: cost is identical across evaluations and fast.
+	t.Run("cached_literal_with_braces_never_reparses_and_cost_is_stable", func(t *testing.T) {
+		scope := celengine.CacheScope{Consumer: "test", ID: "brace-rule", Revision: 1}
+		expr := `meta["sha"].matches("^[0-9a-fA-F]{64}$") && meta["tag"].matches("(?i)^[\\x{41}-\\x{5a}]{4}-[0-9]{2}$")`
+		act := map[string]any{
+			"meta": map[string]string{
+				"sha": strings.Repeat("deadbeef", 8),
+				"tag": "AbCd-42",
+			},
+		}
+
+		prog1, err := eng.Cached(ctx, scope, expr, boolKind)
+		if err != nil {
+			t.Fatalf("Cached miss: %v", err)
+		}
+		res1, stats1, err := prog1.Eval(ctx, act)
+		if err != nil {
+			t.Fatalf("first Eval: %v", err)
+		}
+		if b, _ := res1.Bool(); !b {
+			t.Fatalf("expected true match on first Eval")
+		}
+
+		start := time.Now()
+		for i := 0; i < 100; i++ {
+			progHit, err := eng.Cached(ctx, scope, expr, boolKind)
+			if err != nil {
+				t.Fatalf("Cached hit %d: %v", i, err)
+			}
+			res, stats, err := progHit.Eval(ctx, act)
+			if err != nil {
+				t.Fatalf("Eval %d: %v", i, err)
+			}
+			if b, _ := res.Bool(); !b {
+				t.Fatalf("Eval %d = false, want true", i)
+			}
+			if stats.Cost != stats1.Cost {
+				t.Fatalf("Eval %d Cost = %d, want stable %d", i, stats.Cost, stats1.Cost)
+			}
+		}
+		if elapsed := time.Since(start); elapsed > scaleWallBound(100*time.Millisecond) {
+			t.Errorf("100 cached brace-pattern evaluations took %s, want <= %s", elapsed, scaleWallBound(100*time.Millisecond))
+		}
+	})
+
+	// 4. Common patterns (semver 2.0, SHA-256, UUID, conventional-commit, and
+	// 14-keyword (?i) alternation over 60 KiB) compile and evaluate within limits.
+	t.Run("common_patterns_and_14_keyword_60k_alternation_succeed", func(t *testing.T) {
+		commonCases := []struct {
+			name  string
+			pat   string
+			valid string
+			bad   string
+		}{
+			{
+				name:  "semver_2_0",
+				pat:   `^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$`,
+				valid: "v1.24.3-rc.1+build.20261115",
+				bad:   "v01.2.3",
+			},
+			{
+				name:  "sha256_hex",
+				pat:   `^[0-9a-fA-F]{64}$`,
+				valid: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+				bad:   "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85g",
+			},
+			{
+				name:  "uuid_v4",
+				pat:   `^(?i)[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`,
+				valid: "550e8400-e29b-41d4-a716-446655440000",
+				bad:   "550e8400-e29b-11d4-a716-446655440000",
+			},
+			{
+				name:  "conventional_commit",
+				pat:   `^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-zA-Z0-9_./-]+\))?!?: .+$`,
+				valid: "feat(triggers/cel)!: restrict matches to literal patterns",
+				bad:   "random commit message",
+			},
+		}
+
+		for _, tc := range commonCases {
+			t.Run(tc.name, func(t *testing.T) {
+				escaped := strings.ReplaceAll(tc.pat, `\`, `\\`)
+				prog, err := semEng.Compile(`meta["v"].matches("`+escaped+`")`, boolKind)
+				if err != nil {
+					t.Fatalf("Compile(%s): %v", tc.name, err)
+				}
+				res, _, err := prog.Eval(ctx, map[string]any{"meta": map[string]string{"v": tc.valid}})
+				if err != nil {
+					t.Fatalf("Eval valid(%s): %v", tc.name, err)
+				}
+				if b, _ := res.Bool(); !b {
+					t.Errorf("expected %q to match %s", tc.valid, tc.name)
+				}
+				res, _, err = prog.Eval(ctx, map[string]any{"meta": map[string]string{"v": tc.bad}})
+				if err != nil {
+					t.Fatalf("Eval bad(%s): %v", tc.name, err)
+				}
+				if b, _ := res.Bool(); b {
+					t.Errorf("expected %q NOT to match %s", tc.bad, tc.name)
+				}
+			})
+		}
+
+		// 14-keyword (?i) alternation over a 60 KiB body field under DefaultLimits
+		// (scaled only for -race instrumentation overhead).
+		ordEng := eng
+		if raceEnabled {
+			ordEng = semEng
+		}
+		kw14Expr := `event.body.matches("(?i)\\b(deploy|rollback|incident|outage|hotfix|release|canary|promote|degraded|critical|escalate|mitigate|resolved|postmortem)\\b")`
+		kw14Prog, err := ordEng.Compile(kw14Expr, boolKind)
+		if err != nil {
+			t.Fatalf("Compile 14-keyword (?i) alternation: %v", err)
+		}
+		body60k := strings.Repeat("status=healthy check=green ", 2270) + "incident detected in us-central1"
+		res, _, err := kw14Prog.Eval(ctx, map[string]any{"event": map[string]any{"body": body60k}})
+		if err != nil {
+			t.Fatalf("Eval 14-keyword (?i) alternation on 60 KiB: %v", err)
+		}
+		if b, _ := res.Bool(); !b {
+			t.Fatalf("expected 14-keyword (?i) alternation to match 60 KiB body")
+		}
+
+		// has()-wrapped receiver and global literal forms succeed cleanly.
+		hasExpr := `has(event.body) && event.body.matches("^ok$") && matches(string(event.body), "^ok$")`
+		hasProg, err := semEng.Compile(hasExpr, boolKind)
+		if err != nil {
+			t.Fatalf("Compile has()-wrapped literal matches: %v", err)
+		}
+		res, _, err = hasProg.Eval(ctx, map[string]any{"event": map[string]any{"body": "ok"}})
+		if err != nil {
+			t.Fatalf("Eval has()-wrapped literal matches: %v", err)
+		}
+		if b, _ := res.Bool(); !b {
+			t.Fatalf("expected has()-wrapped literal matches to evaluate true")
+		}
+	})
+}
+
+func TestMapStringAndBytesKeyHashingCost(t *testing.T) {
+	eng := newTestEngine(t)
+	semEng := newSemanticLargeInputEngine(t)
+	boolKind := celengine.Kind{Name: "filter", Result: celengine.Bool()}
+	ctx := context.Background()
+
+	// 1. Direct per-call cost checks on map literal construction, map index, and `in` map
+	// with a 60 KiB string key (byteScanCost(61440) = 6,144).
+	s60k := strings.Repeat("k", 60*1024)
+	const wantMinKeyCost uint64 = 6_000
+
+	t.Run("per_call_map_construct_index_and_in_charge_key_bytes", func(t *testing.T) {
+		act := map[string]any{
+			"meta": map[string]string{s60k: "ok", "ptr": s60k},
+			"event": map[string]any{
+				"k":    s60k,
+				"kb":   []byte(s60k),
+				"dmap": map[any]any{"x": 1},
+			},
+		}
+
+		for _, tc := range []struct {
+			name string
+			expr string
+			want bool
+		}{
+			{name: "map_literal_construct", expr: `size({string(event.k): 1}) == 1`, want: true},
+			{name: "map_index_string_key", expr: `meta[string(event.k)] == "ok"`, want: true},
+			{name: "nested_attr_map_index_string_key", expr: `meta[meta["ptr"]] == "ok"`, want: true},
+			{name: "in_map_string_key", expr: `string(event.k) in meta`, want: true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				prog, err := semEng.Compile(tc.expr, boolKind)
+				if err != nil {
+					t.Fatalf("Compile(%s): %v", tc.expr, err)
+				}
+				res, stats, err := prog.Eval(ctx, act)
+				if err != nil {
+					t.Fatalf("Eval(%s): %v", tc.expr, err)
+				}
+				if b, _ := res.Bool(); b != tc.want {
+					t.Fatalf("Eval(%s) = %v, want %v", tc.expr, b, tc.want)
+				}
+				if stats.Cost < wantMinKeyCost {
+					t.Errorf("%s Cost = %d, want >= %d (key-length proportional)", tc.name, stats.Cost, wantMinKeyCost)
+				}
+			})
+		}
+
+		// Dynamic `bytes in dynMap` rejects unsupported bytes map key at runtime in CEL,
+		// after boundedInCall pre-charges the bytes key length.
+		t.Run("in_map_bytes_key_precharged", func(t *testing.T) {
+			prog, err := semEng.Compile(`bytes(event.kb) in event.dmap`, boolKind)
+			if err != nil {
+				t.Fatalf("Compile: %v", err)
+			}
+			_, stats, err := prog.Eval(ctx, act)
+			if err == nil {
+				t.Fatal("expected ReasonRuntime for bytes map key")
+			}
+			if stats.Cost < wantMinKeyCost {
+				t.Errorf("bytes in map pre-charge Cost = %d, want >= %d", stats.Cost, wantMinKeyCost)
+			}
+		})
+	})
+
+	// 2. Pass-6 Consider probe: `{big: 1}[big] == 1` inside a 1,500-iteration loop
+	// with a 960 KiB `big` string MUST hit ReasonCostLimit rapidly instead of
+	// returning a decision after 1,500 uncharged 1-MiB hashes.
+	t.Run("pass6_consider_probe_960k_map_construct_and_index_loop_aborts", func(t *testing.T) {
+		loop := make([]int64, 1500)
+		for i := range loop {
+			loop[i] = int64(i)
+		}
+		s16 := make([]string, 16)
+		for i := range s16 {
+			s16[i] = s60k
+		}
+		expr := `[event.s16.join("")].all(b, event.loop.all(i, {b: 1}[b] == 1))`
+		prog, err := eng.Compile(expr, boolKind)
+		if err != nil {
+			t.Fatalf("Compile: %v", err)
+		}
+		start := time.Now()
+		res, _, evalErr := prog.Eval(ctx, map[string]any{
+			"event": map[string]any{"s16": s16, "loop": loop},
+		})
+		elapsed := time.Since(start)
+		if res != nil {
+			t.Fatalf("expected nil Result on 960 KiB map construct+index loop, got decision %v", res)
+		}
+		assertCostLimitOrRaceTimeout(t, evalErr)
+		if elapsed > scaleWallBound(2*celengine.DefaultEvalTimeout) {
+			t.Errorf("elapsed = %s, want <= %s", elapsed, scaleWallBound(2*celengine.DefaultEvalTimeout))
 		}
 	})
 }

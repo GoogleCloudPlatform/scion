@@ -739,10 +739,6 @@ func TestAmplifyingCallsOn64KiBPayloadBounded(t *testing.T) {
 			expr: `string(event.payload.s).matches("` + literalOverworkRegex + `")`,
 		},
 		{
-			name: "matches_dynamic_counted_repetition",
-			expr: `string(event.payload.s).matches(string(event.payload.p))`,
-		},
-		{
 			name: "short_circuit_or_cannot_bypass",
 			expr: `event.payload.s.split("").join(event.payload.s) == "" || true`,
 		},
@@ -842,12 +838,13 @@ func TestPathologicalRuleDoesNotBlockSubsequentTriggerOnSameEvent(t *testing.T) 
 
 		literalOverwork := strings.Repeat("a?", 80) + strings.Repeat("a", 80) + "x"
 		badRules := []struct {
-			id   string
-			expr string
+			id         string
+			expr       string
+			wantReason string
 		}{
-			{id: "trig-bad-dyn-re", expr: `string(event.payload.s).matches(string(event.payload.p))`},
-			{id: "trig-bad-lit-re", expr: `string(event.payload.s).matches("` + literalOverwork + `")`},
-			{id: "trig-bad-split-join", expr: `event.payload.s.split("").join(event.payload.s).size() > 0`},
+			{id: "trig-bad-dyn-re", expr: `string(event.payload.s).matches(string(event.payload.p))`, wantReason: triggerrule.SkipReasonNoLongerCompiles},
+			{id: "trig-bad-lit-re", expr: `string(event.payload.s).matches("` + literalOverwork + `")`, wantReason: triggerrule.SkipReasonEvalFailed},
+			{id: "trig-bad-split-join", expr: `event.payload.s.split("").join(event.payload.s).size() > 0`, wantReason: triggerrule.SkipReasonEvalFailed},
 		}
 
 		budget := newBenignSurvivalBudget()
@@ -861,8 +858,8 @@ func TestPathologicalRuleDoesNotBlockSubsequentTriggerOnSameEvent(t *testing.T) 
 				t.Fatalf("%s unexpectedly matched", br.id)
 			}
 			reason, ok := triggerrule.SkipReason(evalErr)
-			if !ok || reason != triggerrule.SkipReasonEvalFailed {
-				t.Fatalf("%s SkipReason = (%q, %v), want (%q, true) (err=%v)", br.id, reason, ok, triggerrule.SkipReasonEvalFailed, evalErr)
+			if !ok || reason != br.wantReason {
+				t.Fatalf("%s SkipReason = (%q, %v), want (%q, true) (err=%v)", br.id, reason, ok, br.wantReason, evalErr)
 			}
 		}
 
@@ -1132,4 +1129,172 @@ func TestSkipReasonPreservedWhenEngineWrapsDialectErrors(t *testing.T) {
 		t.Fatalf("caller cancel wrapping UncertainError: SkipReason = (%q, %v), want (\"\", false) (err=%v)",
 			reason, ok, evalErr)
 	}
+}
+
+func TestPass6RegexOptionAPreScanAndOrdinaryRules(t *testing.T) {
+	rules, err := triggerrule.NewDefault()
+	if err != nil {
+		t.Fatalf("NewDefault: %v", err)
+	}
+	ctx := context.Background()
+	maxCompileElapsed := 50 * time.Millisecond
+	if raceEnabled {
+		maxCompileElapsed = 500 * time.Millisecond
+	}
+
+	// 1. Authoring CompileMatch / CompileSubject rejects:
+	//    (a) Pass-6 4,022-byte folded-range literal (CategorySize, fast, no 2.8 s parse);
+	//    (b) payload-sourced pattern (CategoryRegexLiteralRequired);
+	//    (c) Pass-6 expression-built map/join pattern (CategoryRegexLiteralRequired).
+	t.Run("compile_rejects_pass6_folded_literal_payload_and_expr_patterns_fast", func(t *testing.T) {
+		pass6FoldedLiteral := `"a".matches(r"(?i)[` + strings.Repeat(`\x{41}-\x{1e942}`, 250) + `]")`
+		var z50, z80 strings.Builder
+		z50.WriteByte('[')
+		for i := 0; i < 50; i++ {
+			if i > 0 {
+				z50.WriteByte(',')
+			}
+			z50.WriteString("0")
+		}
+		z50.WriteByte(']')
+		z80.WriteByte('[')
+		for i := 0; i < 80; i++ {
+			if i > 0 {
+				z80.WriteByte(',')
+			}
+			z80.WriteString("0")
+		}
+		z80.WriteByte(']')
+		pass6ExprBuilt := `"a".matches("(?i)" + ` + z50.String() + `.map(i, ` + z80.String() + `.map(j, r"[\x{41}-\x{1e942}]").join()).join())`
+
+		cases := []struct {
+			name    string
+			expr    string
+			wantCat string
+		}{
+			{name: "pass6_folded_range_literal_4k", expr: pass6FoldedLiteral, wantCat: celengine.CategorySize},
+			{name: "payload_sourced_receiver_matches", expr: `"a".matches(event.payload.p)`, wantCat: celengine.CategoryRegexLiteralRequired},
+			{name: "payload_sourced_global_matches", expr: `matches("a", event.payload.p)`, wantCat: celengine.CategoryRegexLiteralRequired},
+			{name: "pass6_expr_built_folded_range", expr: pass6ExprBuilt, wantCat: celengine.CategoryRegexLiteralRequired},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				start := time.Now()
+				err := rules.CompileMatch(ctx, triggerrule.Rule{Expr: tc.expr})
+				elapsed := time.Since(start)
+				if err == nil {
+					t.Fatalf("CompileMatch(%s) succeeded, want *CompileError", tc.name)
+				}
+				var cerr *celengine.CompileError
+				if !errors.As(err, &cerr) {
+					t.Fatalf("CompileMatch(%s) err = %T (%v), want *CompileError", tc.name, err, err)
+				}
+				if cerr.Category != tc.wantCat {
+					t.Errorf("Category = %q, want %q (err=%v)", cerr.Category, tc.wantCat, cerr)
+				}
+				if cerr.Line <= 0 || cerr.Column <= 0 {
+					t.Errorf("invalid 1-based position %d:%d", cerr.Line, cerr.Column)
+				}
+				if elapsed > maxCompileElapsed {
+					t.Errorf("CompileMatch(%s) took %s, want <= %s", tc.name, elapsed, maxCompileElapsed)
+				}
+			})
+		}
+
+		// Also verify CompileSubject rejects non-literal matches in ternary subject expression.
+		subjErr := rules.CompileSubject(ctx, triggerrule.Rule{
+			Expr: `"a".matches(event.payload.p) ? "x" : "y"`,
+		})
+		var subjCerr *celengine.CompileError
+		if !errors.As(subjErr, &subjCerr) || subjCerr.Category != celengine.CategoryRegexLiteralRequired {
+			t.Fatalf("CompileSubject non-literal matches = %v, want Category %q", subjErr, celengine.CategoryRegexLiteralRequired)
+		}
+	})
+
+	// 2. If a stored pre-Option-A dynamic rule encounters the exact Pass-6 64 KiB
+	// 3,600-range payload at fire time, Match refuses at compile in milliseconds
+	// (SkipReasonNoLongerCompiles) and never parses the sender's payload as a regex.
+	t.Run("stored_dynamic_rule_against_64k_folded_payload_never_parses_payload", func(t *testing.T) {
+		bombedPat := `(?i)[` + strings.Repeat(`\\x{41}-\\x{1e942}`, 3200) + `]`
+		ev := sampleFireEvent(`{"p":"` + bombedPat + `"}`)
+		act, err := triggerrule.NewActivation(ev, hubfire.FireTriggerRef{ID: "trig-stored-dyn", Name: "stored-dyn"})
+		if err != nil {
+			t.Fatalf("NewActivation: %v", err)
+		}
+		scope := celengine.CacheScope{Consumer: triggerrule.ConsumerName, ID: "trig-stored-dyn", Revision: 1}
+
+		start := time.Now()
+		matched, evalErr := rules.Match(ctx, scope, triggerrule.Rule{Expr: `"a".matches(event.payload.p)`}, act)
+		elapsed := time.Since(start)
+		if matched {
+			t.Fatalf("unexpected match")
+		}
+		reason, ok := triggerrule.SkipReason(evalErr)
+		if !ok || reason != triggerrule.SkipReasonNoLongerCompiles {
+			t.Fatalf("SkipReason = (%q, %v), want (%q, true) (err=%v)", reason, ok, triggerrule.SkipReasonNoLongerCompiles, evalErr)
+		}
+		if elapsed > maxCompileElapsed {
+			t.Errorf("Match took %s, want <= %s", elapsed, maxCompileElapsed)
+		}
+	})
+
+	// 3. Ordinary rules: 14-keyword (?i) alternation over 60 KiB payload field,
+	// plus cached brace-containing patterns (SHA-256, UUID, semver, conventional-commit).
+	t.Run("ordinary_14_keyword_60k_and_cached_brace_patterns_succeed", func(t *testing.T) {
+		ordRulesEngine := rules
+		if raceEnabled {
+			lim := triggerrule.Stage1Limits()
+			lim.EvalTimeout = 500 * time.Millisecond
+			celEng, err := celengine.New(triggerrule.Env(), lim, celengine.DefaultCacheConfig())
+			if err != nil {
+				t.Fatalf("celengine.New: %v", err)
+			}
+			celDialect, err := ruleengine.NewCELDialect(celEng)
+			if err != nil {
+				t.Fatalf("NewCELDialect: %v", err)
+			}
+			re := ruleengine.NewEngine()
+			if err := re.Register(celDialect); err != nil {
+				t.Fatalf("Register: %v", err)
+			}
+			re.AllowConsumerDialects(triggerrule.ConsumerName, ruleengine.DialectCEL)
+			ordRulesEngine, err = triggerrule.New(re)
+			if err != nil {
+				t.Fatalf("triggerrule.New: %v", err)
+			}
+		}
+
+		body60k := strings.Repeat("normal log line ok ", 3200) + "CRITICAL alert fired"
+		payload := fmt.Sprintf(
+			`{"body":%q,"sha":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","uuid":"550e8400-e29b-41d4-a716-446655440000","ver":"v2.5.1-rc.2","msg":"fix(hub): guard webhook"}`,
+			body60k,
+		)
+		ev := sampleFireEvent(payload)
+		act, err := triggerrule.NewActivation(ev, hubfire.FireTriggerRef{ID: "trig-ord", Name: "ord"})
+		if err != nil {
+			t.Fatalf("NewActivation: %v", err)
+		}
+
+		ordRules := []string{
+			`string(event.payload.body).matches("(?i)\\b(deploy|rollback|incident|outage|hotfix|release|canary|promote|degraded|critical|escalate|mitigate|resolved|postmortem)\\b")`,
+			`string(event.payload.sha).matches("^[0-9a-fA-F]{64}$")`,
+			`string(event.payload.uuid).matches("^(?i)[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")`,
+			`string(event.payload.ver).matches("^v?(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$")`,
+			`string(event.payload.msg).matches("^(feat|fix|docs|chore)(\\([a-z0-9_/-]+\\))?!?: .+$")`,
+		}
+
+		for i, expr := range ordRules {
+			if err := ordRulesEngine.CompileMatch(ctx, triggerrule.Rule{Expr: expr}); err != nil {
+				t.Fatalf("CompileMatch[%d]: %v", i, err)
+			}
+			scope := celengine.CacheScope{Consumer: triggerrule.ConsumerName, ID: fmt.Sprintf("trig-ord-%d", i), Revision: 1}
+			for pass := 0; pass < 3; pass++ {
+				ok, err := ordRulesEngine.Match(ctx, scope, triggerrule.Rule{Expr: expr}, act)
+				if err != nil || !ok {
+					t.Fatalf("Match[%d] pass %d = (%v, %v), want (true, nil)", i, pass, ok, err)
+				}
+			}
+		}
+	})
 }

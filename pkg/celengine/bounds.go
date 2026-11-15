@@ -23,11 +23,11 @@ import (
 	"strings"
 	"sync"
 	"time"
-	_ "time/tzdata"
 	"unicode"
 	"unicode/utf8"
 
 	"cel.dev/cel-go/cel"
+	"cel.dev/cel-go/common/containers"
 	"cel.dev/cel-go/common/cost"
 	"cel.dev/cel-go/common/functions"
 	"cel.dev/cel-go/common/operators"
@@ -85,7 +85,7 @@ func buildRawFormatProgram() (cel.Program, error) {
 // interpreter.CostLimitExceeded (-> EvalError{Reason: ReasonCostLimit}) before
 // allocating or executing the unbounded work, and cannot be swallowed by
 // non-strict ||.
-func outputBoundsDecorator(limits Limits, rawFormat cel.Program, tzCache *tzLRUCache) interpreter.InterpretableDecoratorV2 {
+func outputBoundsDecorator(celEnv *cel.Env, limits Limits, rawFormat cel.Program, tzCache *tzLRUCache, regexes map[string]precompiledRegex) interpreter.InterpretableDecoratorV2 {
 	maxBytes := limits.MaxOutputBytes
 	maxElems := limits.MaxCollectionElements
 	maxRegexProgSize := limits.MaxRegexProgramSize
@@ -105,8 +105,31 @@ func outputBoundsDecorator(limits Limits, rawFormat cel.Program, tzCache *tzLRUC
 	if tzCache == nil {
 		tzCache = newTZLRUCache(maxCachedTimezones)
 	}
+	var attrFactory interpreter.AttributeFactory
+	if celEnv != nil {
+		attrFactory = interpreter.NewAttributeFactory(celEnv.Container, celEnv.CELTypeAdapter(), celEnv.CELTypeProvider())
+	} else {
+		attrFactory = interpreter.NewAttributeFactory(containers.DefaultContainer, types.DefaultTypeAdapter, nil)
+	}
 
 	return func(node interpreter.InterpretableV2) (interpreter.InterpretableV2, error) {
+		switch inst := node.(type) {
+		case *boundedAttr:
+			return node, nil
+		case interpreter.InterpretableAttribute:
+			return &boundedAttr{
+				InterpretableAttribute: inst,
+				attrFactory:            attrFactory,
+			}, nil
+		case interpreter.InterpretableConstructor:
+			if inst.Type() == types.MapType && !allInitValsConst(inst.InitVals()) {
+				return &boundedMapConstructor{
+					InterpretableConstructor: inst,
+				}, nil
+			}
+			return node, nil
+		}
+
 		call, ok := node.(interpreter.InterpretableCall)
 		if !ok {
 			return node, nil
@@ -117,7 +140,7 @@ func outputBoundsDecorator(limits Limits, rawFormat cel.Program, tzCache *tzLRUC
 		switch call.Function() {
 		case overloads.Matches:
 			if arity == 2 {
-				return newBoundedMatchesCall(call, maxBytes, maxRegexProgSize, maxRegexWork)
+				return newBoundedMatchesCall(call, maxBytes, maxRegexProgSize, maxRegexWork, regexes)
 			}
 		case "replace":
 			if arity == 3 || arity == 4 {
@@ -1681,6 +1704,8 @@ func (c *boundedInCall) Exec(frame *interpreter.ExecutionFrame) ref.Val {
 		callCost := uint64(1)
 		if sKey, ok := lVal.(types.String); ok {
 			callCost = atLeastOneCost(byteScanCost(len(sKey)))
+		} else if bKey, ok := lVal.(types.Bytes); ok {
+			callCost = atLeastOneCost(byteScanCost(len(bKey)))
 		}
 		chargePrecomputedCost(frame, c.ID(), callCost)
 	}
@@ -2120,10 +2145,11 @@ func (c *boundedTimezoneCall) Exec(frame *interpreter.ExecutionFrame) ref.Val {
 		return types.LabelErrNode(c.ID(), types.MaybeNoSuchOverloadErr(lVal))
 	}
 
-	// Uncached timezone lookup: pre-charge before consulting time.LoadLocation
-	// (backed by embedded time/tzdata) and cache both positive and negative outcomes.
+	// Uncached timezone lookup: pre-charge before resolving strictly from the
+	// embedded zoneinfo archive (never $ZONEINFO or host disk) and cache both
+	// positive and negative outcomes.
 	chargePrecomputedCost(frame, c.ID(), tzLookupErrorCost)
-	loc, err := time.LoadLocation(tz)
+	loc, err := loadEmbeddedLocation(tz)
 	c.tzCache.put(tz, loc, err)
 	if err != nil {
 		return types.LabelErrNode(c.ID(), types.WrapErr(err))
@@ -2134,22 +2160,174 @@ func (c *boundedTimezoneCall) Exec(frame *interpreter.ExecutionFrame) ref.Val {
 	return types.LabelErrNode(c.ID(), types.MaybeNoSuchOverloadErr(lVal))
 }
 
+func allInitValsConst(vals []interpreter.InterpretableV2) bool {
+	for _, v := range vals {
+		if _, ok := v.(interpreter.InterpretableConst); !ok {
+			return false
+		}
+	}
+	return true
+}
+
+type boundedMapConstructor struct {
+	interpreter.InterpretableConstructor
+}
+
+func (m *boundedMapConstructor) Eval(ctx interpreter.Activation) ref.Val {
+	return interpreter.EvalActivation(ctx, m.Exec)
+}
+
+func (m *boundedMapConstructor) Exec(frame *interpreter.ExecutionFrame) ref.Val {
+	checkFrameInterrupt(frame)
+	res := m.InterpretableConstructor.Exec(frame)
+	if mapper, ok := res.(traits.Mapper); ok {
+		var extra uint64
+		it := mapper.Iterator()
+		for it.HasNext() == types.True {
+			switch k := it.Next().(type) {
+			case types.String:
+				extra = cost.SafeAdd(extra, byteScanCost(len(k)))
+			case types.Bytes:
+				extra = cost.SafeAdd(extra, byteScanCost(len(k)))
+			}
+		}
+		if extra > 0 {
+			chargePrecomputedCost(frame, m.ID(), extra)
+		}
+	}
+	return res
+}
+
+func extraQualifierKeyCost(val any) uint64 {
+	var n int
+	switch k := val.(type) {
+	case string:
+		n = len(k)
+	case types.String:
+		n = len(k)
+	case []byte:
+		n = len(k)
+	case types.Bytes:
+		n = len(k)
+	default:
+		return 0
+	}
+	// cel-go's applyQualifiers already charges 1 unit via costs.Qualify(id).
+	// Charging byteScanCost(n)-1 brings total key-hashing cost to byteScanCost(n)
+	// while keeping short-key field accesses (<= 10 bytes) at cost 1.
+	c := byteScanCost(n)
+	if c <= 1 {
+		return 0
+	}
+	return c - 1
+}
+
+type boundedAttr struct {
+	interpreter.InterpretableAttribute
+	attrFactory interpreter.AttributeFactory
+}
+
+func (b *boundedAttr) Eval(vars interpreter.Activation) ref.Val {
+	return interpreter.EvalActivation(vars, b.Exec)
+}
+
+func (b *boundedAttr) AddQualifier(q interpreter.Qualifier) (interpreter.Attribute, error) {
+	switch qual := q.(type) {
+	case interpreter.ConstantQualifier:
+		if extra := extraQualifierKeyCost(qual.Value()); extra > 0 {
+			q = &costedConstQual{
+				ConstantQualifier: qual,
+				extraCost:         extra,
+			}
+		}
+	case *boundedAttr:
+		q = &costedAttrQual{
+			Attribute: qual.InterpretableAttribute,
+			fac:       b.attrFactory,
+		}
+	case interpreter.Attribute:
+		q = &costedAttrQual{
+			Attribute: qual,
+			fac:       b.attrFactory,
+		}
+	}
+	_, err := b.InterpretableAttribute.AddQualifier(q)
+	return b, err
+}
+
+type costedConstQual struct {
+	interpreter.ConstantQualifier
+	extraCost uint64
+}
+
+func (q *costedConstQual) Qualify(vars interpreter.Activation, obj any) (any, error) {
+	if frame, ok := vars.(*interpreter.ExecutionFrame); ok {
+		chargePrecomputedCost(frame, q.ID(), q.extraCost)
+	}
+	return q.ConstantQualifier.Qualify(vars, obj)
+}
+
+func (q *costedConstQual) QualifyIfPresent(vars interpreter.Activation, obj any, presenceOnly bool) (any, bool, error) {
+	if frame, ok := vars.(*interpreter.ExecutionFrame); ok {
+		chargePrecomputedCost(frame, q.ID(), q.extraCost)
+	}
+	return q.ConstantQualifier.QualifyIfPresent(vars, obj, presenceOnly)
+}
+
+type costedAttrQual struct {
+	interpreter.Attribute
+	fac interpreter.AttributeFactory
+}
+
+func (q *costedAttrQual) Qualify(vars interpreter.Activation, obj any) (any, error) {
+	val, err := q.Resolve(vars)
+	if err != nil {
+		return nil, err
+	}
+	if extra := extraQualifierKeyCost(val); extra > 0 {
+		if frame, ok := vars.(*interpreter.ExecutionFrame); ok {
+			chargePrecomputedCost(frame, q.ID(), extra)
+		}
+	}
+	qual, err := q.fac.NewQualifier(nil, q.ID(), val, q.IsOptional())
+	if err != nil {
+		return nil, err
+	}
+	return qual.Qualify(vars, obj)
+}
+
+func (q *costedAttrQual) QualifyIfPresent(vars interpreter.Activation, obj any, presenceOnly bool) (any, bool, error) {
+	val, err := q.Resolve(vars)
+	if err != nil {
+		return nil, false, err
+	}
+	if extra := extraQualifierKeyCost(val); extra > 0 {
+		if frame, ok := vars.(*interpreter.ExecutionFrame); ok {
+			chargePrecomputedCost(frame, q.ID(), extra)
+		}
+	}
+	qual, err := q.fac.NewQualifier(nil, q.ID(), val, q.IsOptional())
+	if err != nil {
+		return nil, false, err
+	}
+	return qual.QualifyIfPresent(vars, obj, presenceOnly)
+}
+
 // boundedMatchesCall wraps CEL's matches(string, string) in an InterpretableV2
 // that deliberately does NOT implement interpreter.InterpretableCall. In
 // cel-go, CustomDecoratorV2 runs before CompileRegexConstants (decRegexOptimizer,
 // which type-asserts InterpretableCall and replaces constant-pattern matches
 // nodes with a fresh NewCall). Returning a non-InterpretableCall node preserves
-// both constant-pattern pre-compilation and pre-call input * program-size work
-// bounds at evaluation time.
+// plan-time literal compilation, stored program-size cost charging (zero regex
+// parsing at evaluation time), and pre-call input * program-size work bounds.
 type boundedMatchesCall struct {
 	id               int64
-	origCall         interpreter.InterpretableCall
 	lhs              interpreter.InterpretableV2
 	rhs              interpreter.InterpretableV2
 	compiled         *regexp.Regexp
 	compiledProgSize int
+	patUnits         uint64
 	maxBytes         int
-	maxRegexProgSize int
 	maxRegexWork     int64
 }
 
@@ -2158,39 +2336,39 @@ func newBoundedMatchesCall(
 	maxBytes int,
 	maxRegexProgSize int,
 	maxRegexWork int64,
+	regexes map[string]precompiledRegex,
 ) (interpreter.InterpretableV2, error) {
 	args := call.Args()
-	node := &boundedMatchesCall{
+	constPat, isConst := args[1].(interpreter.InterpretableConst)
+	if !isConst {
+		return nil, errRegexLiteralRequired
+	}
+	patStr, ok := constPat.Value().(types.String)
+	if !ok {
+		return nil, errRegexLiteralRequired
+	}
+	pat := string(patStr)
+	if len(pat) > maxBytes {
+		abortOutputLimit()
+	}
+	entry, ok := regexes[pat]
+	if !ok || entry.re == nil {
+		return nil, errRegexLiteralRequired
+	}
+	if entry.progSize > maxRegexProgSize {
+		abortOutputLimit()
+	}
+	effPatLen := max(len(pat), entry.progSize)
+	return &boundedMatchesCall{
 		id:               call.ID(),
-		origCall:         call,
 		lhs:              args[0],
 		rhs:              args[1],
+		compiled:         entry.re,
+		compiledProgSize: entry.progSize,
+		patUnits:         atLeastOneCost((uint64(effPatLen) + 3) / 4),
 		maxBytes:         maxBytes,
-		maxRegexProgSize: maxRegexProgSize,
 		maxRegexWork:     maxRegexWork,
-	}
-	if constPat, isConst := args[1].(interpreter.InterpretableConst); isConst {
-		if patStr, ok := constPat.Value().(types.String); ok {
-			pat := string(patStr)
-			if len(pat) > maxBytes {
-				abortOutputLimit()
-			}
-			progSize, err := types.RegexProgramSize(pat)
-			if err != nil {
-				return nil, err
-			}
-			if progSize > maxRegexProgSize {
-				abortOutputLimit()
-			}
-			re, err := regexp.Compile(pat)
-			if err != nil {
-				return nil, err
-			}
-			node.compiled = re
-			node.compiledProgSize = progSize
-		}
-	}
-	return node, nil
+	}, nil
 }
 
 func (m *boundedMatchesCall) ID() int64 {
@@ -2202,12 +2380,7 @@ func (m *boundedMatchesCall) Eval(ctx interpreter.Activation) ref.Val {
 }
 
 func (m *boundedMatchesCall) Exec(frame *interpreter.ExecutionFrame) ref.Val {
-	if frame != nil && frame.CheckInterrupt() {
-		panic(interpreter.EvalCancelledError{
-			Cause:   interpreter.ContextCancelled,
-			Message: "operation cancelled: context interrupted",
-		})
-	}
+	checkFrameInterrupt(frame)
 	lVal := m.lhs.Exec(frame)
 	switch l := lVal.(type) {
 	case *types.Err:
@@ -2216,14 +2389,10 @@ func (m *boundedMatchesCall) Exec(frame *interpreter.ExecutionFrame) ref.Val {
 		rVal := m.rhs.Exec(frame)
 		if rUnk, ok := rVal.(*types.Unknown); ok {
 			merged := types.MergeUnknowns(l, rUnk)
-			if costs := frame.CostTracker(); costs != nil {
-				costs.EvalBinary(frame, m.id, m.origCall, lVal, rVal, merged)
-			}
+			chargePrecomputedCost(frame, m.id, 1)
 			return merged
 		}
-		if costs := frame.CostTracker(); costs != nil {
-			costs.EvalBinary(frame, m.id, m.origCall, lVal, rVal, lVal)
-		}
+		chargePrecomputedCost(frame, m.id, 1)
 		return lVal
 	}
 
@@ -2232,75 +2401,38 @@ func (m *boundedMatchesCall) Exec(frame *interpreter.ExecutionFrame) ref.Val {
 	case *types.Err:
 		return rVal
 	case *types.Unknown:
-		if costs := frame.CostTracker(); costs != nil {
-			costs.EvalBinary(frame, m.id, m.origCall, lVal, rVal, rVal)
-		}
+		chargePrecomputedCost(frame, m.id, 1)
 		return rVal
 	}
 
 	lStr, okL := lVal.(types.String)
 	if !okL {
-		res := types.MaybeNoSuchOverloadErr(lVal)
-		if costs := frame.CostTracker(); costs != nil {
-			costs.EvalBinary(frame, m.id, m.origCall, lVal, rVal, res)
-		}
-		return res
+		chargePrecomputedCost(frame, m.id, 1)
+		return types.LabelErrNode(m.id, types.MaybeNoSuchOverloadErr(lVal))
 	}
-	rStr, okR := rVal.(types.String)
-	if !okR {
-		res := types.MaybeNoSuchOverloadErr(rVal)
-		if costs := frame.CostTracker(); costs != nil {
-			costs.EvalBinary(frame, m.id, m.origCall, lVal, rVal, res)
-		}
-		return res
+	if _, okR := rVal.(types.String); !okR {
+		chargePrecomputedCost(frame, m.id, 1)
+		return types.LabelErrNode(m.id, types.MaybeNoSuchOverloadErr(rVal))
+	}
+	if m.compiled == nil {
+		chargePrecomputedCost(frame, m.id, 1)
+		return types.LabelErrNode(m.id, types.WrapErr(errRegexLiteralRequired))
 	}
 
 	inStr := string(lStr)
 	if len(inStr) > m.maxBytes {
 		abortOutputLimit()
 	}
-
-	re := m.compiled
-	progSize := m.compiledProgSize
-	if re == nil {
-		pat := string(rStr)
-		if len(pat) > m.maxBytes {
-			abortOutputLimit()
-		}
-		var err error
-		progSize, err = types.RegexProgramSize(pat)
-		if err != nil {
-			res := types.WrapErr(err)
-			if costs := frame.CostTracker(); costs != nil {
-				costs.EvalBinary(frame, m.id, m.origCall, lVal, rVal, res)
-			}
-			return res
-		}
-		if progSize > m.maxRegexProgSize {
-			abortOutputLimit()
-		}
-		if progSize > 0 && int64(len(inStr)) > m.maxRegexWork/int64(progSize) {
-			abortOutputLimit()
-		}
-		re, err = regexp.Compile(pat)
-		if err != nil {
-			res := types.WrapErr(err)
-			if costs := frame.CostTracker(); costs != nil {
-				costs.EvalBinary(frame, m.id, m.origCall, lVal, rVal, res)
-			}
-			return res
-		}
-	} else if progSize > 0 && int64(len(inStr)) > m.maxRegexWork/int64(progSize) {
+	if m.compiledProgSize > 0 && int64(len(inStr)) > m.maxRegexWork/int64(m.compiledProgSize) {
 		abortOutputLimit()
 	}
 
-	// Charge the CostTracker before executing re.MatchString (the matches cost
-	// depends only on input length and regex pattern/program size, never on the
-	// boolean match result) so a call that exceeds CostLimit aborts pre-call.
-	if costs := frame.CostTracker(); costs != nil {
-		costs.EvalBinary(frame, m.id, m.origCall, lVal, rVal, types.False)
-	}
-	return types.Bool(re.MatchString(inStr))
+	// Charge the CostTracker directly from stored plan-time patUnits (never
+	// re-parsing the regex) before executing MatchString so over-limit calls
+	// abort pre-call.
+	inUnits := atLeastOneCost(byteScanCost(len(inStr) + 1))
+	chargePrecomputedCost(frame, m.id, safeMulUint64(inUnits, m.patUnits))
+	return types.Bool(m.compiled.MatchString(inStr))
 }
 
 func uint64Ptr(v uint64) *uint64 {
@@ -2430,6 +2562,9 @@ func computeInCost(maxElems int, args []ref.Val) *uint64 {
 	if sKey, ok := lhs.(types.String); ok {
 		return uint64Ptr(atLeastOneCost(byteScanCost(len(sKey))))
 	}
+	if bKey, ok := lhs.(types.Bytes); ok {
+		return uint64Ptr(atLeastOneCost(byteScanCost(len(bKey))))
+	}
 	return uint64Ptr(1)
 }
 
@@ -2477,15 +2612,10 @@ func trackMatchesCost(args []ref.Val, _ ref.Val) *uint64 {
 	if !okL || !okR {
 		return uint64Ptr(1)
 	}
-	pat := string(patVal)
-	effPatLen := len(pat)
-	if strings.IndexByte(pat, '{') >= 0 {
-		if ps, err := types.RegexProgramSize(pat); err == nil && ps > effPatLen {
-			effPatLen = ps
-		}
-	}
+	// Note: boundedMatchesCall pre-charges from the stored plan-time program
+	// size without calling trackMatchesCost. This fallback never parses a regex.
 	inUnits := atLeastOneCost(byteScanCost(len(inVal) + 1))
-	patUnits := atLeastOneCost((uint64(effPatLen) + 3) / 4)
+	patUnits := atLeastOneCost((uint64(len(patVal)) + 3) / 4)
 	return uint64Ptr(safeMulUint64(inUnits, patUnits))
 }
 

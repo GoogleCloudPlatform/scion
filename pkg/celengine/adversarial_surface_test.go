@@ -177,7 +177,7 @@ func TestAdversarialSurfaceCoversEveryFunctionAndOverload(t *testing.T) {
 		"logical_and": {{name: "and_short_circuit_and_eval", expr: `b && (s == s)`}},
 		"logical_or": {
 			{name: "or_eval", expr: `!b || (s == s)`},
-			{name: "or_cannot_swallow_cost_limit", expr: `event.s64k.matches(event.reWork) || true`, wantEvalReason: ReasonCostLimit},
+			{name: "or_cannot_swallow_cost_limit", expr: `event.s64k.matches("` + strings.Repeat("a?", 80) + strings.Repeat("a", 80) + `x") || true`, wantEvalReason: ReasonCostLimit},
 		},
 		"conditional": {{name: "ternary_large_branches", expr: `(b ? s : "fallback").size() == 65536`}},
 
@@ -336,16 +336,20 @@ func TestAdversarialSurfaceCoversEveryFunctionAndOverload(t *testing.T) {
 		},
 		"matches": {
 			{name: "fn_matches_literal_oversized", expr: `matches(s, "[a-z]{0,1000}x")`, wantCompileCat: CategorySize},
+			{name: "fn_matches_literal_overlen", expr: `matches(s, "` + strings.Repeat("a", MaxRegexPatternBytes+1) + `")`, wantCompileCat: CategorySize},
+			{name: "fn_matches_literal_folded_range", expr: `matches(s, "(?i)[\\x{41}-\\x{1e942}]")`, wantCompileCat: CategorySize},
 			{name: "fn_matches_literal_overwork", expr: `matches(s, "` + strings.Repeat("a?", 80) + strings.Repeat("a", 80) + `x")`, wantEvalReason: ReasonCostLimit},
-			{name: "fn_matches_dynamic_oversized", expr: `matches(s, string(event.reBig))`, wantEvalReason: ReasonCostLimit},
-			{name: "fn_matches_dynamic_overwork", expr: `matches(s, string(event.reWork))`, wantEvalReason: ReasonCostLimit},
-			{name: "fn_matches_normal_64k", expr: `matches(s, string(event.reOk))`},
+			{name: "fn_matches_dynamic_rejected_compile", expr: `matches(s, string(event.reOk))`, wantCompileCat: CategoryRegexLiteralRequired},
+			{name: "fn_matches_expr_built_rejected_compile", expr: `matches(s, "^" + "a+$")`, wantCompileCat: CategoryRegexLiteralRequired},
+			{name: "fn_matches_normal_64k", expr: `matches(s, "^a+$")`},
 		},
 		"matches_string": {
 			{name: "member_matches_literal_oversized", expr: `s.matches("[a-z]{0,1000}x")`, wantCompileCat: CategorySize},
+			{name: "member_matches_literal_overlen", expr: `s.matches("` + strings.Repeat("a", MaxRegexPatternBytes+1) + `")`, wantCompileCat: CategorySize},
+			{name: "member_matches_literal_folded_range", expr: `s.matches("(?i)[\\x{41}-\\x{1e942}]")`, wantCompileCat: CategorySize},
 			{name: "member_matches_literal_overwork", expr: `s.matches("` + strings.Repeat("a?", 80) + strings.Repeat("a", 80) + `x")`, wantEvalReason: ReasonCostLimit},
-			{name: "member_matches_dynamic_oversized", expr: `s.matches(string(event.reBig))`, wantEvalReason: ReasonCostLimit},
-			{name: "member_matches_dynamic_overwork", expr: `s.matches(string(event.reWork))`, wantEvalReason: ReasonCostLimit},
+			{name: "member_matches_dynamic_rejected_compile", expr: `s.matches(string(event.reOk))`, wantCompileCat: CategoryRegexLiteralRequired},
+			{name: "member_matches_expr_built_rejected_compile", expr: `s.matches("^" + "a+$")`, wantCompileCat: CategoryRegexLiteralRequired},
 			{name: "member_matches_normal_64k", expr: `s.matches("^a+$")`},
 		},
 
