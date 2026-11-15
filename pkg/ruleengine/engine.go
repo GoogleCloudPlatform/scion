@@ -14,7 +14,9 @@
 
 // Package ruleengine provides a thin dialect registry, consumer allow-list,
 // budget accounting, and common decision/error types above concrete rule
-// evaluators such as pkg/celengine.
+// evaluators such as pkg/celengine. Its direct use of celengine value types
+// (EnvironmentRef.ResultType and celengine.CacheScope) is deliberate for
+// Stage 1 while CEL is the sole concrete dialect.
 package ruleengine
 
 import (
