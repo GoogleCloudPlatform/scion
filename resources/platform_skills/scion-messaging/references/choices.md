@@ -125,14 +125,17 @@ reply in the conversation when the user expects a result.
 
 ```bash
 scion decisions list
+scion decisions list --search staging
 scion decisions list --decided
 scion decisions list --all
 scion decisions show <key>
 ```
 
-`list` shows pending decisions by default; `--decided` shows answered ones and
-`--all` adds replaced versions. `show <key>` prints every version of a key with
-its choices and every recorded answer. Both take `--json`.
+`list` shows pending decisions by default; `--decided` shows answered ones,
+`--all` adds replaced versions, and `-q`/`--search <text>` (2 to 256 characters)
+searches the question, key, and effective answer label. `show <key>` prints
+every version of a key with its choices and every recorded answer. Both take
+`--json`.
 
 ## A user answers in words instead
 

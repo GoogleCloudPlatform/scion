@@ -29,8 +29,8 @@ import (
 func newDecisionsShowCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "show <key>",
-		Short: "Show all versions and answer history for a decision key",
-		Long: `Show every version of a decision key belonging to your agent, including choices
+		Short: "Show all versions and answer history for a Decision",
+		Long: `Show every version of a Decision key belonging to your agent, including choices
 and all recorded answer rows (both agent-interpreted and direct user answers).
 
 Examples:

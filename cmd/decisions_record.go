@@ -30,7 +30,7 @@ import (
 func newDecisionsRecordCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "record (<key> <choice-id> | <key>=<choice-id>...) --from <message-id>",
-		Short: "Record interpreted decision answer(s) from a user free-text reply",
+		Short: "Record interpreted Decision answer(s) from a user free-text reply",
 		Long: `Record one or more interpreted answers from a user's free-text reply message.
 
 Supports either a single positional pair or 1 to 10 key=choice-id pairs in one
