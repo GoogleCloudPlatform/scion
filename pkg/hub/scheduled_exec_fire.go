@@ -732,26 +732,3 @@ func (s *Server) recoverUnadmittedExecEvents(ctx context.Context, batch, budget 
 		}
 	}
 }
-
-// roundRobinByAgent orders runs one per target agent at a time, keeping each
-// agent's runs in their original order.
-func roundRobinByAgent(runs []store.ScheduledExecRun) []store.ScheduledExecRun {
-	var agents []string
-	byAgent := make(map[string][]store.ScheduledExecRun)
-	for _, r := range runs {
-		if _, ok := byAgent[r.TargetAgentID]; !ok {
-			agents = append(agents, r.TargetAgentID)
-		}
-		byAgent[r.TargetAgentID] = append(byAgent[r.TargetAgentID], r)
-	}
-	out := make([]store.ScheduledExecRun, 0, len(runs))
-	for len(out) < len(runs) {
-		for _, a := range agents {
-			if q := byAgent[a]; len(q) > 0 {
-				out = append(out, q[0])
-				byAgent[a] = q[1:]
-			}
-		}
-	}
-	return out
-}

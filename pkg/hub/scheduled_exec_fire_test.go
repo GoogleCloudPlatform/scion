@@ -622,8 +622,9 @@ func TestScheduledExecFire_TargetDeletedMidRun(t *testing.T) {
 }
 
 // TestScheduledExecFire_SweeperLeaseAndFairness: the sweeper records runs
-// past their lease as abandoned, and orders the rest round-robin across
-// agents.
+// past their lease as abandoned (fairness across agents is in the store
+// claim: TestClaimScheduledExecRunsForPoll_FairAcrossTargets and
+// TestScheduledExecP3R2_SlowAgentPrefixDoesNotStarveHealthy).
 func TestScheduledExecFire_SweeperLeaseAndFairness(t *testing.T) {
 	f := newExecRouteFixture(t)
 	ctx := context.Background()
@@ -644,13 +645,4 @@ func TestScheduledExecFire_SweeperLeaseAndFairness(t *testing.T) {
 	assert.Equal(t, store.ScheduledEventFailed, got.Status)
 	assert.Equal(t, execReasonOutcomeUnknown, got.Error)
 
-	ordered := roundRobinByAgent([]store.ScheduledExecRun{
-		{EventID: "1", TargetAgentID: "a"}, {EventID: "2", TargetAgentID: "a"}, {EventID: "3", TargetAgentID: "a"},
-		{EventID: "4", TargetAgentID: "b"}, {EventID: "5", TargetAgentID: "c"},
-	})
-	var got2 []string
-	for _, r := range ordered {
-		got2 = append(got2, r.EventID)
-	}
-	assert.Equal(t, []string{"1", "4", "5", "2", "3"}, got2)
 }
