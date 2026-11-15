@@ -536,8 +536,8 @@ const allProjectsDecisionsPendingBody = `{
      ]}
   ],
   "agents": [
-    {"id": "` + humanDecisionsBot + `", "name": "release-bot"},
-    {"id": "cccc3333-0000-4000-8000-000000000005", "name": "design-bot"}
+    {"id": "` + humanDecisionsBot + `", "name": "release-bot", "projectId": "proj-1"},
+    {"id": "cccc3333-0000-4000-8000-000000000005", "name": "design-bot", "projectId": "proj-2"}
   ],
   "answerers": [],
   "conversations": [
@@ -638,10 +638,65 @@ func TestDecisionsListHuman_AllProjectsProjectResolutionAndAmbiguity(t *testing.
 	assert.Contains(t, err.Error(), "p-1")
 	assert.Contains(t, err.Error(), "p-2")
 
+	// Shared #general topic and coordinator agent across projects in whole-scope
+	// facets: --project narrows facet resolution to that project; without
+	// --project, ambiguity exits 2, names each project, and hints --project.
+	const (
+		genScion = "11111111-1111-4111-8111-000000000001"
+		genWeb   = "22222222-2222-4222-8222-000000000002"
+		coord1   = "aaaa0000-0000-4000-8000-000000000001"
+		coord2   = "aaaa0000-0000-4000-8000-000000000002"
+	)
+	h.profilePending = `{"counts":{"waitingOnYou":0,"waitingOnOthers":0},"prompts":[],
+	  "agents":[
+	    {"id":"` + coord1 + `","name":"coordinator","hint":"aaaa0000","projectId":"proj-1"},
+	    {"id":"` + coord2 + `","name":"coordinator","hint":"aaaa0000","projectId":"proj-2"}
+	  ],
+	  "answerers":[],
+	  "conversations":[
+	    {"key":"` + genScion + `","label":"#general","projectId":"proj-1"},
+	    {"key":"` + genWeb + `","label":"#general","projectId":"proj-2"}
+	  ],
+	  "projects":[
+	    {"id":"proj-1","name":"Scion","slug":"scion"},
+	    {"id":"proj-2","name":"Web Site","slug":"web-site"}
+	  ],"truncatedProjects":false}`
+
+	_, err = runDecisionsTestCmd(t, "decisions", "list", "--all-projects", "--project", "scion", "--conversation", "general", "--agent", "coordinator")
+	require.NoError(t, err)
+	assert.Equal(t, "proj-1", h.lastProfile().Get("project"))
+	assert.Equal(t, genScion, h.lastProfile().Get("conversation"))
+	assert.Equal(t, coord1, h.lastProfile().Get("agent"))
+
+	_, err = runDecisionsTestCmd(t, "decisions", "list", "--all-projects", "--project", "Web Site", "--conversation", "#general", "--agent", "COORDINATOR")
+	require.NoError(t, err)
+	assert.Equal(t, "proj-2", h.lastProfile().Get("project"))
+	assert.Equal(t, genWeb, h.lastProfile().Get("conversation"))
+	assert.Equal(t, coord2, h.lastProfile().Get("agent"))
+
+	_, err = runDecisionsTestCmd(t, "decisions", "list", "--all-projects", "--conversation", "general")
+	require.Error(t, err)
+	assert.Equal(t, 2, exitCodeFor(err))
+	assert.Contains(t, err.Error(), `matches 2 conversations; pass a key or --project <name>:`)
+	assert.Contains(t, err.Error(), "scion  #general  "+genScion)
+	assert.Contains(t, err.Error(), "Web Site (web-site)  #general  "+genWeb)
+
+	_, err = runDecisionsTestCmd(t, "decisions", "list", "--all-projects", "--agent", "coordinator")
+	require.Error(t, err)
+	assert.Equal(t, 2, exitCodeFor(err))
+	assert.Contains(t, err.Error(), `matches 2 agents; pass an ID or --project <name>:`)
+	assert.Contains(t, err.Error(), "scion  coordinator (aaaa0000)  "+coord1)
+	assert.Contains(t, err.Error(), "Web Site (web-site)  coordinator (aaaa0000)  "+coord2)
+
 	// Beyond-200 cap: truncatedProjects=true and target project is absent from
-	// facets.Projects, resolved via /api/v1/projects (including --conversation).
-	h.profilePending = `{"counts":{"waitingOnYou":0,"waitingOnOthers":0},"prompts":[],"agents":[],"answerers":[],
-	  "conversations":[],"projects":[{"id":"proj-1","name":"Scion","slug":"scion"}],"truncatedProjects":true}`
+	// facets.Projects, resolved via /api/v1/projects. The re-fetched facets cover
+	// the whole scope (including shared #general and ops-bot in proj-1) just like
+	// the real hub; --project narrows them to proj-205.
+	h.profilePending = `{"counts":{"waitingOnYou":0,"waitingOnOthers":0},"prompts":[],
+	  "agents":[{"id":"` + coord1 + `","name":"ops-bot","projectId":"proj-1"}],
+	  "answerers":[],
+	  "conversations":[{"key":"` + genScion + `","label":"#general","projectId":"proj-1"}],
+	  "projects":[{"id":"proj-1","name":"Scion","slug":"scion"}],"truncatedProjects":true}`
 	h.hubProjects = []hubclient.Project{
 		{ID: "proj-205", Name: "Archive App", Slug: "archive-app"},
 		{ID: "proj-206", Name: "Legacy", Slug: "legacy-1"},
@@ -650,19 +705,29 @@ func TestDecisionsListHuman_AllProjectsProjectResolutionAndAmbiguity(t *testing.
 	h.profilePendingByProject = map[string]string{
 		"proj-205": `{"counts":{"waitingOnYou":1,"waitingOnOthers":0},"prompts":[
 		  {"project":{"id":"proj-205","name":"Archive App","slug":"archive-app"},"promptMessageId":"m205","promptAvailable":true,
-		   "chatKey":"bbbb0000-0000-4000-8000-000000000205","conversationLabel":"#ops","conversationAvailable":true,
+		   "chatKey":"bbbb0000-0000-4000-8000-000000000205","conversationLabel":"#general","conversationAvailable":true,
 		   "askerAgentId":"` + humanDecisionsBot + `","askerAgentName":"ops-bot","createdAt":"2026-11-13T04:48:00Z",
 		   "answerMode":"single","waitingOnYou":true,"canAnswer":true,
 		   "decisions":[{"rowId":"r205","messageId":"m205","key":"prune","ref":"ops-bot/prune","version":1,"status":"pending",
 		     "askerAgentId":"` + humanDecisionsBot + `","askerAgentName":"ops-bot","question":"Prune cold snapshots?","choices":[]}]}
-		],"agents":[{"id":"` + humanDecisionsBot + `","name":"ops-bot"}],"answerers":[],
-		"conversations":[{"key":"bbbb0000-0000-4000-8000-000000000205","label":"#ops","projectId":"proj-205"}],
-		"projects":[{"id":"proj-205","name":"Archive App","slug":"archive-app"}],"truncatedProjects":true}`,
+		],"agents":[
+		  {"id":"` + coord1 + `","name":"ops-bot","projectId":"proj-1"},
+		  {"id":"` + humanDecisionsBot + `","name":"ops-bot","projectId":"proj-205"}
+		],"answerers":[],
+		"conversations":[
+		  {"key":"` + genScion + `","label":"#general","projectId":"proj-1"},
+		  {"key":"bbbb0000-0000-4000-8000-000000000205","label":"#general","projectId":"proj-205"}
+		],
+		"projects":[
+		  {"id":"proj-1","name":"Scion","slug":"scion"},
+		  {"id":"proj-205","name":"Archive App","slug":"archive-app"}
+		],"truncatedProjects":true}`,
 	}
-	out205, err := runDecisionsTestCmd(t, "decisions", "list", "--all-projects", "--project", "Archive App", "--conversation", "#ops")
+	out205, err := runDecisionsTestCmd(t, "decisions", "list", "--all-projects", "--project", "Archive App", "--conversation", "general", "--agent", "ops-bot")
 	require.NoError(t, err)
 	assert.Equal(t, "proj-205", h.lastProfile().Get("project"))
 	assert.Equal(t, "bbbb0000-0000-4000-8000-000000000205", h.lastProfile().Get("conversation"))
+	assert.Equal(t, humanDecisionsBot, h.lastProfile().Get("agent"))
 	assert.Contains(t, out205, "archive-app")
 	assert.Contains(t, out205, "prune")
 

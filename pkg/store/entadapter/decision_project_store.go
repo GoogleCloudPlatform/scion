@@ -205,7 +205,7 @@ func (c *CompositeStore) ListDecisionAnswers(
 	q := c.client.DecisionAnswer.Query().
 		Where(
 			decisionanswer.ProjectIDIn(projectUUIDs...),
-			decisionAnswerInChatKeys(projectUUIDs, keys),
+			decisionAnswerInChatKeys(keys),
 		)
 	q = applyDecisionAnswerFilter(q, filter, agentUUID, provPred)
 	if cursor != "" {
@@ -352,7 +352,7 @@ func (c *CompositeStore) ListDecisionAnswersPerProject(
 		q := c.client.DecisionAnswer.Query().
 			Where(
 				decisionanswer.ProjectIDEQ(pUUID),
-				decisionAnswerInChatKeys([]uuid.UUID{pUUID}, projKeys),
+				decisionAnswerInChatKeys(projKeys),
 			)
 		q = applyDecisionAnswerFilter(q, projFilter, agentUUID, provPred)
 		rows, err := q.Order(ent.Desc(decisionanswer.FieldCreatedAt), ent.Desc(decisionanswer.FieldID)).
@@ -543,7 +543,7 @@ func (c *CompositeStore) ListDecisionFacets(
 			decisionanswer.ProjectIDIn(projectUUIDs...),
 			decisionanswer.AnsweredByUserIDNotNil(),
 			decisionanswer.AnsweredByUserIDNEQ(""),
-			decisionAnswerInChatKeys(projectUUIDs, keys),
+			decisionAnswerInChatKeys(keys),
 		).
 		Order(ent.Asc(decisionanswer.FieldAnsweredByUserID)).
 		Limit(maxProjectDecisionFacetItems).
@@ -662,7 +662,7 @@ func decisionChatKeyIn(projectCount int, keys []string) predicate.Decision {
 	}
 }
 
-func decisionAnswerInChatKeys(_ []uuid.UUID, keys []string) predicate.DecisionAnswer {
+func decisionAnswerInChatKeys(keys []string) predicate.DecisionAnswer {
 	vals := make([]any, len(keys))
 	for i, k := range keys {
 		vals[i] = k

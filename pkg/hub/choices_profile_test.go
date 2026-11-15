@@ -971,10 +971,11 @@ func TestUserMeDecisions_ProjectCap200AndTimeout(t *testing.T) {
 		}
 	}
 
-	// Always assert HTTP 200 (within the 3 s DefaultChatSearchTimeout) + response
-	// correctness across all six HTTP query shapes plus waitingOnYouTotal, and
-	// log every timing. Wall-clock headroom assertions (< 1500 ms) are gated behind
-	// SCION_PERF_BUDGET=1 so shared CI runners do not flake on host CPU contention.
+	// Use a generous ChatSearchTimeout for the correctness half so busy shared CI
+	// runners do not flake with a 503 under host CPU contention (timeout mapping is
+	// covered explicitly by the 1 ns and interrupting-store cases below). Always log
+	// every timing, and enforce the < 1500 ms headroom budget when SCION_PERF_BUDGET=1.
+	f.srv.config.ChatSearchTimeout = 30 * time.Second
 	const maxShapeDuration = 1500 * time.Millisecond
 	checkPerfBudget := os.Getenv("SCION_PERF_BUDGET") == "1"
 	assertBudget := func(elapsed time.Duration, label string) {

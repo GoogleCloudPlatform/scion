@@ -62,6 +62,7 @@ var decisionsHumanTarget = func() (hubclient.Client, string, error) {
 // ignoring projectPath so --project names a Hub project filter rather than a
 // local directory.
 var decisionsAllProjectsClient = func() (hubclient.Client, error) {
+	// --project is deliberately not a directory here (matching root.go's hubOnly skip).
 	resolvedPath, _, err := config.ResolveProjectPath("")
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve settings path: %w", err)
@@ -189,12 +190,12 @@ func runHumanDecisionsList(cmd *cobra.Command) error {
 			return errors.New(errMsgDecisionSearchUnsupported)
 		}
 		if conversation != "" {
-			if opts.Conversation, err = resolveDecisionConversation(conversation, facets.Conversations); err != nil {
+			if opts.Conversation, err = resolveDecisionConversation(conversation, facets.Conversations, nil); err != nil {
 				return err
 			}
 		}
 		if agent != "" {
-			if opts.AgentID, err = resolveDecisionAgent(agent, facets.Agents); err != nil {
+			if opts.AgentID, err = resolveDecisionAgent(agent, facets.Agents, nil); err != nil {
 				return err
 			}
 		}
@@ -251,8 +252,10 @@ func normDecisionName(s string) string {
 // resolveDecisionConversation maps --conversation to a chat key: a facet
 // key as is, else the one facet whose label matches. A value that matches
 // no label but has the shape of a chat key (a topic UUID or a dm: key) is
-// passed through, so the hub answers it (empty when not readable).
-func resolveDecisionConversation(value string, convs []hubclient.ProjectDecisionConversation) (string, error) {
+// passed through, so the hub answers it (empty when not readable). When
+// projectLabels is non-nil (--all-projects without --project), ambiguity
+// lines name each match's project and suggest --project.
+func resolveDecisionConversation(value string, convs []hubclient.ProjectDecisionConversation, projectLabels map[string]string) (string, error) {
 	for _, c := range convs {
 		if c.Key == value {
 			return c.Key, nil
@@ -275,15 +278,25 @@ func resolveDecisionConversation(value string, convs []hubclient.ProjectDecision
 	}
 	lines := make([]string, 0, len(matches))
 	for _, m := range matches {
-		lines = append(lines, fmt.Sprintf("  %s  %s", safeText(m.Label), safeText(m.Key)))
+		if proj := lookupDecisionProjectLabel(projectLabels, m.ProjectID); proj != "" {
+			lines = append(lines, fmt.Sprintf("  %s  %s  %s", proj, safeText(m.Label), safeText(m.Key)))
+		} else {
+			lines = append(lines, fmt.Sprintf("  %s  %s", safeText(m.Label), safeText(m.Key)))
+		}
 	}
-	return "", &decisionsAmbiguousError{msg: fmt.Sprintf("--conversation %q matches %d conversations; pass a key:\n%s",
-		safeText(value), len(matches), strings.Join(lines, "\n"))}
+	hint := "pass a key"
+	if projectLabels != nil {
+		hint = "pass a key or --project <name>"
+	}
+	return "", &decisionsAmbiguousError{msg: fmt.Sprintf("--conversation %q matches %d conversations; %s:\n%s",
+		safeText(value), len(matches), hint, strings.Join(lines, "\n"))}
 }
 
 // resolveDecisionAgent maps --agent to an agent ID: a facet ID as is, else
 // the one facet whose name matches. An unmatched UUID is passed through.
-func resolveDecisionAgent(value string, agents []hubclient.ProjectDecisionActor) (string, error) {
+// When projectLabels is non-nil (--all-projects without --project), ambiguity
+// lines name each match's project and suggest --project.
+func resolveDecisionAgent(value string, agents []hubclient.ProjectDecisionActor, projectLabels map[string]string) (string, error) {
 	for _, a := range agents {
 		if a.ID == value {
 			return a.ID, nil
@@ -310,10 +323,18 @@ func resolveDecisionAgent(value string, agents []hubclient.ProjectDecisionActor)
 		if m.Hint != "" {
 			name += " (" + safeText(m.Hint) + ")"
 		}
-		lines = append(lines, fmt.Sprintf("  %s  %s", name, safeText(m.ID)))
+		if proj := lookupDecisionProjectLabel(projectLabels, m.ProjectID); proj != "" {
+			lines = append(lines, fmt.Sprintf("  %s  %s  %s", proj, name, safeText(m.ID)))
+		} else {
+			lines = append(lines, fmt.Sprintf("  %s  %s", name, safeText(m.ID)))
+		}
 	}
-	return "", &decisionsAmbiguousError{msg: fmt.Sprintf("--agent %q matches %d agents; pass an ID:\n%s",
-		safeText(value), len(matches), strings.Join(lines, "\n"))}
+	hint := "pass an ID"
+	if projectLabels != nil {
+		hint = "pass an ID or --project <name>"
+	}
+	return "", &decisionsAmbiguousError{msg: fmt.Sprintf("--agent %q matches %d agents; %s:\n%s",
+		safeText(value), len(matches), hint, strings.Join(lines, "\n"))}
 }
 
 // decisionRowWaitingOnYou reports whether row d of prompt p is open and
@@ -475,6 +496,9 @@ func runHumanAllProjectsDecisionsList(cmd *cobra.Command, base hubclient.ListPro
 		if !facets.SupportsSearch() {
 			return errors.New(errMsgDecisionSearchUnsupported)
 		}
+		convs := facets.Conversations
+		agents := facets.Agents
+		var projectLabels map[string]string
 		if projectFilter != "" {
 			var inFacet bool
 			if myOpts.ProjectID, inFacet, err = resolveDecisionProject(ctx, client, projectFilter, facets.Projects); err != nil {
@@ -493,14 +517,21 @@ func runHumanAllProjectsDecisionsList(cmd *cobra.Command, base hubclient.ListPro
 					return formatProjectDecisionsError(err)
 				}
 			}
+			// Profile facets cover the whole scope (design D5); narrow options to
+			// the selected project so shared names like #general or coordinator
+			// resolve within --project rather than colliding across projects.
+			convs = filterConversationsByProject(facets.Conversations, myOpts.ProjectID)
+			agents = filterAgentsByProject(facets.Agents, myOpts.ProjectID)
+		} else {
+			projectLabels = decisionProjectLabels(facets.Projects)
 		}
 		if conversation != "" {
-			if myOpts.Conversation, err = resolveDecisionConversation(conversation, facets.Conversations); err != nil {
+			if myOpts.Conversation, err = resolveDecisionConversation(conversation, convs, projectLabels); err != nil {
 				return err
 			}
 		}
 		if agent != "" {
-			if myOpts.AgentID, err = resolveDecisionAgent(agent, facets.Agents); err != nil {
+			if myOpts.AgentID, err = resolveDecisionAgent(agent, agents, projectLabels); err != nil {
 				return err
 			}
 		}
@@ -645,6 +676,51 @@ func decisionProjectDisplay(ref hubclient.ProjectDecisionProjectRef) string {
 		return safeText(ref.ID)
 	}
 	return "-"
+}
+
+func decisionProjectLabels(projects []hubclient.ProjectDecisionProjectRef) map[string]string {
+	out := make(map[string]string, len(projects))
+	for _, p := range projects {
+		if p.ID == "" {
+			continue
+		}
+		label := decisionProjectDisplay(p)
+		if p.Name != "" && p.Slug != "" && !strings.EqualFold(p.Name, p.Slug) {
+			label = safeText(p.Name) + " (" + safeText(p.Slug) + ")"
+		}
+		out[p.ID] = label
+	}
+	return out
+}
+
+func lookupDecisionProjectLabel(projectLabels map[string]string, projectID string) string {
+	if projectLabels == nil {
+		return ""
+	}
+	if label := projectLabels[projectID]; label != "" {
+		return label
+	}
+	return safeText(projectID)
+}
+
+func filterConversationsByProject(convs []hubclient.ProjectDecisionConversation, projectID string) []hubclient.ProjectDecisionConversation {
+	out := make([]hubclient.ProjectDecisionConversation, 0, len(convs))
+	for _, c := range convs {
+		if c.ProjectID == projectID {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func filterAgentsByProject(agents []hubclient.ProjectDecisionActor, projectID string) []hubclient.ProjectDecisionActor {
+	out := make([]hubclient.ProjectDecisionActor, 0, len(agents))
+	for _, a := range agents {
+		if a.ProjectID == projectID {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 func writeAllProjectsWaitingDecisionsTable(out io.Writer, resp *hubclient.MyDecisionsResponse, filtered bool) {
