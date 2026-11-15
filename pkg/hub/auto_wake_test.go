@@ -286,7 +286,67 @@ func TestAutoWake_AgentDM_ConcurrentResumesOnce(t *testing.T) {
 		assert.Nil(t, e, "send %d", i)
 	}
 	assert.Len(t, disp.getStartCalls(), 1, "concurrent wakes resume the agent once")
-	assert.Equal(t, n, storedMessagesFor(t, s, target.ID), "every message is kept")
+	assert.Len(t, disp.getMessageCalls(), n, "every message is delivered after the single resume, none left deferred")
+	assertEveryRowDispatched(t, s, target.ID, n)
+}
+
+// assertEveryRowDispatched checks that recipientID has exactly n stored
+// messages and that every one is dispatched.
+func assertEveryRowDispatched(t *testing.T, s store.Store, recipientID string, n int) {
+	t.Helper()
+	res, err := s.ListMessages(context.Background(), store.MessageFilter{RecipientID: recipientID}, store.ListOptions{Limit: 100})
+	require.NoError(t, err)
+	require.Len(t, res.Items, n)
+	for _, m := range res.Items {
+		assert.Equal(t, store.MessageDispatchDispatched, m.DispatchState, "message %s", m.ID)
+	}
+}
+
+// A user DM racing other user DMs to the same idle-suspended agent waits
+// for the one resume and is delivered, instead of being kept deferred.
+func TestAutoWake_UserDM_ConcurrentAllDelivered(t *testing.T) {
+	srv, s, _, target, disp := autoWakeFixture(t, state.SuspendReasonIdle)
+	u := wakeLifecycleUser(t, s, "aw-user-conc", target.ProjectID, "agent.message", "agent.read")
+	awReadyOnStart(t, s, target.ID)
+
+	const n = 3
+	codes := make([]int, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			rec := requestAsIdentity(t, srv, authUser(u), http.MethodPost, "/api/v1/agents/"+target.ID+"/message",
+				map[string]interface{}{"message": "concurrent user"})
+			codes[i] = rec.Code
+		}(i)
+	}
+	wg.Wait()
+	for i, c := range codes {
+		assert.Equal(t, http.StatusOK, c, "send %d", i)
+	}
+	assert.Len(t, disp.getStartCalls(), 1, "one resume")
+	assert.Len(t, disp.getMessageCalls(), n, "every message is delivered")
+	assertEveryRowDispatched(t, s, target.ID, n)
+}
+
+// A DM to an idle-suspended agent that another start has already moved
+// to starting waits for that start, then delivers (no second resume).
+func TestAutoWake_AgentDM_TargetAlreadyStarting(t *testing.T) {
+	srv, s, sender, target, disp := autoWakeFixture(t, state.SuspendReasonIdle)
+	// The sender's copy was read while suspended; another wake has since
+	// written starting and holds the start claim.
+	stale := *target
+	_, err := s.ClaimAgentStart(context.Background(), target.ID, "other-wake", store.StartClaimWake, "", time.Minute)
+	require.NoError(t, err)
+	require.NoError(t, s.UpdateAgentStatus(context.Background(), target.ID, store.AgentStatusUpdate{Phase: string(state.PhaseStarting)}))
+	awReadyOnStart(t, s, target.ID)
+
+	res, dmErr := srv.ExecuteAgentDM(context.Background(), awAgentDMInput(sender, &stale, "during a wake"))
+	require.Nil(t, dmErr)
+	assert.Equal(t, AgentDMAccepted, res.Outcome)
+	assert.Empty(t, disp.getStartCalls(), "the start in progress is reused")
+	assert.Len(t, disp.getMessageCalls(), 1)
 }
 
 // --- Mention fan-out (async) ------------------------------------------------
@@ -348,6 +408,59 @@ func TestAutoWake_Mention(t *testing.T) {
 		assert.Equal(t, store.MessageDispatchFailed, m.DispatchState)
 		require.NotNil(t, m.DispatchFailureReason)
 		assert.Contains(t, *m.DispatchFailureReason, "auto-wake failed")
+	})
+
+	t.Run("a target another wake already moved to starting is waited for, then delivered", func(t *testing.T) {
+		srv, s, sender, target, disp := autoWakeFixture(t, state.SuspendReasonIdle)
+		stale := *target // the fan-out read it while suspended
+		require.NoError(t, s.UpdateAgentStatus(context.Background(), target.ID, store.AgentStatusUpdate{Phase: string(state.PhaseStarting)}))
+		awReadyOnStart(t, s, target.ID)
+
+		res, dmErr := srv.ExecuteAgentDM(context.Background(), awMentionInput(sender, &stale, "@target look"))
+		require.Nil(t, dmErr)
+		require.Equal(t, AgentDMWakeQueued, res.Outcome)
+		srv.waitAutoWakeIdle()
+
+		assert.Empty(t, disp.getStartCalls(), "no second resume")
+		require.Len(t, disp.getMessageCalls(), 1)
+		m, err := s.GetMessage(context.Background(), res.MessageID)
+		require.NoError(t, err)
+		assert.Equal(t, store.MessageDispatchDispatched, m.DispatchState)
+	})
+
+	t.Run("the attachment addressee is settled by the wake's outcome", func(t *testing.T) {
+		for _, fail := range []bool{false, true} {
+			srv, s, sender, target, disp := autoWakeFixture(t, state.SuspendReasonIdle)
+			if fail {
+				disp.startReturnErr = assert.AnError
+			} else {
+				awReadyOnStart(t, s, target.ID)
+			}
+			parent := &store.Message{
+				ID: api.NewUUID(), ProjectID: sender.ProjectID, Sender: "agent:" + sender.Slug, SenderID: sender.ID,
+				Recipient: "agent:" + sender.Slug, RecipientID: sender.ID, Msg: "parent", Type: "instruction",
+				AgentID: sender.ID, CreatedAt: time.Now(), DispatchState: store.MessageDispatchDispatched,
+			}
+			require.NoError(t, s.CreateMessage(context.Background(), parent))
+			row := srv.recordAttachmentAddressee(context.Background(), parent.ID, target.ID, "body-mention")
+			require.NotEmpty(t, row)
+
+			in := awMentionInput(sender, target, "@target with a file")
+			in.AttachmentAddressee = row
+			res, dmErr := srv.ExecuteAgentDM(context.Background(), in)
+			require.Nil(t, dmErr)
+			require.Equal(t, AgentDMWakeQueued, res.Outcome)
+			srv.waitAutoWakeIdle()
+
+			rows, err := s.ListAddressees(context.Background(), parent.ID)
+			require.NoError(t, err)
+			require.Len(t, rows, 1)
+			want := addresseeDelivered
+			if fail {
+				want = addresseeFailed
+			}
+			assert.Equal(t, want, rows[0].DeliveryState, "wake failed=%v", fail)
+		}
 	})
 
 	t.Run("user-suspended takes today's buffered dispatch, no wake", func(t *testing.T) {
@@ -689,6 +802,32 @@ func TestAutoWake_ChatSecondary(t *testing.T) {
 		}
 		assert.Equal(t, 1, toSecond, "the secondary's copy is delivered after the wake")
 		assert.Equal(t, store.MessageDispatchDispatched, mentionRow(t, f, second.ID).DispatchState)
+	})
+
+	t.Run("a woken lineage-mode secondary becomes a group participant", func(t *testing.T) {
+		f, second := setup(t, state.SuspendReasonIdle)
+		second.MessageMode = store.MessageModeLineage
+		second.Ancestry = []string{DevUserID}
+		require.NoError(t, f.s.UpdateAgent(t.Context(), second))
+		awReadyOnStart(t, f.s, second.ID)
+		rec := doRequest(t, f.srv, http.MethodPost, f.path(), map[string]any{"content": "hi @aw-chat-second"})
+		require.Equal(t, http.StatusCreated, rec.Code, "body=%s", rec.Body.String())
+		f.srv.waitAutoWakeIdle()
+
+		row := mentionRow(t, f, second.ID)
+		require.NotEmpty(t, row.ConversationID)
+		parts, err := f.s.ListParticipants(t.Context(), row.ConversationID)
+		require.NoError(t, err)
+		var found bool
+		for _, p := range parts {
+			if p.PrincipalKind == "agent" && p.PrincipalID == second.ID {
+				found = true
+			}
+		}
+		assert.True(t, found, "the woken secondary is a participant, so it can reply into the group")
+		decision, err := f.srv.agentGroupPostDecision(t.Context(), second, row.ConversationID)
+		require.NoError(t, err)
+		assert.True(t, decision.Allowed, "a lineage-mode participant may post into the group: %s", decision.Reason)
 	})
 
 	t.Run("a failed wake marks the secondary's copy failed", func(t *testing.T) {

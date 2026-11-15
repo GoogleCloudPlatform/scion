@@ -171,6 +171,12 @@ type AgentDMInput struct {
 	// exactly as unable to see the mention right now as a stopped one.
 	SkipPhaseGate bool
 
+	// AttachmentAddressee is the attachment addressee row the caller
+	// recorded for this delivery (recordAttachmentAddressee), or "". The
+	// caller settles it from the result, except on AgentDMWakeQueued:
+	// then the background wake settles it when it delivers or fails.
+	AttachmentAddressee string
+
 	// RecordLogged reports that the adapter already wrote this message's
 	// record to the message log (handleAgentMessage does so before it
 	// reaches here). When set, the operation does not write another.
@@ -449,6 +455,20 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			}
 			if input.BeforeWake != nil {
 				input.BeforeWake()
+			}
+			if autoWake {
+				// The hub's own wakes (other new work for this agent) are
+				// routine and the sender cannot know about them: wait for
+				// a start already in progress and deliver to it, instead
+				// of keeping the message deferred (wakeOrAwaitStart).
+				dmErr, awaitErr := s.wakeOrAwaitStart(ctx, input.TargetAgent)
+				if dmErr != nil {
+					return nil, dmErr
+				}
+				if awaitErr != nil {
+					return nil, startInProgressDMError(input.TargetAgent, awaitErr)
+				}
+				break
 			}
 			wakeResult, wakeErr := s.wakeAgentForDM(ctx, input.TargetAgent)
 			if wakeErr != nil {
@@ -883,6 +903,13 @@ func (s *Server) agentDMAutoWakeItem(input *AgentDMInput, storeMsg *store.Messag
 			} else if dispatcher := s.GetDispatcher(); dispatcher != nil && woken.RuntimeBrokerID != "" {
 				err = dispatchWithBrokerRetry(withDispatchMessageID(dctx, msgID), nil, dispatcher, woken, dispatchMsg.Msg, input.Urgent || input.Interrupt, dispatchMsg)
 			}
+			// As the synchronous fan-out settles it: an ambiguous dispatch
+			// counts as delivered, a definite failure as failed.
+			if err != nil && !isAmbiguousDispatchError(err) {
+				s.finishAttachmentAddressee(ctx, input.AttachmentAddressee, err)
+			} else {
+				s.finishAttachmentAddressee(ctx, input.AttachmentAddressee, nil)
+			}
 			if err != nil {
 				LogDMDispatchOutcome(input.SenderAgent, woken, msgID, DispatchFailed, err)
 				if isAmbiguousDispatchError(err) {
@@ -908,6 +935,7 @@ func (s *Server) agentDMAutoWakeItem(input *AgentDMInput, storeMsg *store.Messag
 		},
 		fail: func(ctx context.Context, dmErr *AgentDMError) {
 			err := fmt.Errorf("auto-wake failed: %s", dmErr.Message)
+			s.finishAttachmentAddressee(ctx, input.AttachmentAddressee, err)
 			LogDMDispatchOutcome(input.SenderAgent, input.TargetAgent, msgID, DispatchFailed, err)
 			if markErr := s.markFailed(ctx, msgID, err.Error()); markErr != nil {
 				s.messageLog.Error("agent DM: failed to mark message failed",

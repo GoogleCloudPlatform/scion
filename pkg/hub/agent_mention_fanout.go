@@ -426,12 +426,16 @@ func (s *Server) deliverAgentMentionCopy(ctx, aggregateCtx context.Context, in a
 		// message to an agent that isn't currently reachable. An agent
 		// the hub suspended (shouldAutoWake) is woken in the background
 		// and gets the mention once ready (AgentDMWakeQueued).
-		SkipPhaseGate: true,
+		SkipPhaseGate:       true,
+		AttachmentAddressee: addresseeRow,
 	})
 	dispatchCancel()
-	if dmErr != nil {
+	switch {
+	case dmErr != nil:
 		s.finishAttachmentAddressee(context.WithoutCancel(ctx), addresseeRow, errors.New(dmErr.Message))
-	} else {
+	case dmResult.Outcome == AgentDMWakeQueued:
+		// The background wake settles it when it delivers or fails.
+	default:
 		s.finishAttachmentAddressee(context.WithoutCancel(ctx), addresseeRow, nil)
 	}
 	if dmErr != nil {

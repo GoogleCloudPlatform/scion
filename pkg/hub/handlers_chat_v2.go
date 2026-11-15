@@ -2459,8 +2459,12 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 			// stored copy once ready; the send does not wait for it. A wake
 			// that fails marks the copy failed. A hub that is shutting down
 			// cannot start the wake, and the copy takes the dispatch below.
+			// It is registered as a group participant now, as the agent
+			// mention fan-out does for a queued wake, so a woken agent in
+			// lineage or branch mode can reply into the group.
 			if mentionPersisted && dispatcher != nil && s.shouldAutoWake(mentionAgent) &&
 				s.queueAutoWake(mentionAgent, s.chatSecondaryAutoWakeItem(mentionStoreMsg.ID, mentionAddressee, agentContent, mentionMsg)) {
+				dispatchedAgents = append(dispatchedAgents, mentionAgent)
 				continue
 			}
 			if dispatcher != nil {

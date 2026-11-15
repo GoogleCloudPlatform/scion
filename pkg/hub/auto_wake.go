@@ -180,8 +180,8 @@ func (s *Server) runAutoWake(ctx context.Context, agent *store.Agent, run *autoW
 // autoWakeAgent resumes agent for queued work and returns it as re-read
 // once ready. It re-reads the agent first: a target held, deleted, or
 // suspended by a user since the work was queued is not woken; one already
-// running needs nothing. A start already in progress (WakeDeferred) is
-// waited for, as a scheduled wake does.
+// running needs nothing. A start already in progress (the row reads
+// starting, or WakeDeferred) is waited for, as a scheduled wake does.
 func (s *Server) autoWakeAgent(ctx context.Context, agent *store.Agent) (*store.Agent, *AgentDMError) {
 	ctx, cancel := context.WithTimeout(ctx, autoWakeBudget)
 	defer cancel()
@@ -197,22 +197,14 @@ func (s *Server) autoWakeAgent(ctx context.Context, agent *store.Agent) (*store.
 		return nil, validateAgentDeliverable(current)
 	}
 
-	result, dmErr := s.wakeAgentForDM(ctx, current)
+	// A target another start is already bringing up (phase starting, or a
+	// held start claim) is waited for, then delivered to (wakeOrAwaitStart).
+	dmErr, awaitErr := s.wakeOrAwaitStart(ctx, current)
 	if dmErr != nil {
 		return nil, dmErr
 	}
-	if result != nil && result.Outcome == WakeDeferred {
-		err := s.waitForStartToBegin(ctx, current.ID, wakeReadyTimeout)
-		if err == nil {
-			_, err = s.waitForAgentReady(ctx, current.ID, wakeReadyTimeout)
-		}
-		if err != nil {
-			return nil, &AgentDMError{
-				Code:       ErrCodeUnavailable,
-				Message:    "agent was already starting and did not become ready",
-				HTTPStatus: http.StatusServiceUnavailable,
-			}
-		}
+	if awaitErr != nil {
+		return nil, startInProgressDMError(current, awaitErr)
 	}
 	fresh, err := s.store.GetAgent(ctx, current.ID)
 	if err != nil || fresh == nil {
