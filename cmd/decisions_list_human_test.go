@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -803,4 +804,120 @@ func TestDecisionsListHuman_AllProjectsTableAndJSONGolden(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
 	require.NoError(t, json.Unmarshal([]byte(allProjectsDecisionsPendingBody), &want))
 	assert.Equal(t, want, got)
+}
+
+func TestDecisionsListHuman_AllProjectsFacetTruncation500(t *testing.T) {
+	fixDecisionsClock(t)
+	h := newHumanDecisionsHub(t)
+	t.Setenv("SCION_CLI_MODE", "human")
+
+	const (
+		genScion = "7d0f1c2e-1111-4a5b-9c8d-000000000101"
+		genWeb   = "7d0f1c2e-1111-4a5b-9c8d-000000000102"
+		coord1   = "a4e8c0b1-2222-4d3e-8f9a-000000000101"
+		coord2   = "a4e8c0b1-2222-4d3e-8f9a-000000000102"
+		dmTrunc  = "dm:agent:a4e8c0b1-2222-4d3e-8f9a-000000000102:user:u-alice"
+	)
+
+	// Build 500-entry whole-scope facets: 499 filler items in proj-1 plus 1
+	// shared-name survivor (#general / coordinator in proj-1). proj-2's
+	// #general, #zeta, coordinator, and zeta-bot sorted past the 500 cap.
+	convs := make([]hubclient.ProjectDecisionConversation, 0, maxDecisionsFacetOptions)
+	agents := make([]hubclient.ProjectDecisionActor, 0, maxDecisionsFacetOptions)
+	for i := 0; i < maxDecisionsFacetOptions-1; i++ {
+		convs = append(convs, hubclient.ProjectDecisionConversation{
+			Key:       fmt.Sprintf("7d0f1c2e-1111-4a5b-9c8d-100000000%03d", i),
+			Label:     fmt.Sprintf("#topic-%03d", i),
+			ProjectID: "proj-1",
+		})
+		agents = append(agents, hubclient.ProjectDecisionActor{
+			ID:        fmt.Sprintf("a4e8c0b1-2222-4d3e-8f9a-100000000%03d", i),
+			Name:      fmt.Sprintf("agent-%03d", i),
+			ProjectID: "proj-1",
+		})
+	}
+	convs = append(convs, hubclient.ProjectDecisionConversation{
+		Key: genScion, Label: "#general", ProjectID: "proj-1",
+	})
+	agents = append(agents, hubclient.ProjectDecisionActor{
+		ID: coord1, Name: "coordinator", ProjectID: "proj-1",
+	})
+	require.Len(t, convs, maxDecisionsFacetOptions)
+	require.Len(t, agents, maxDecisionsFacetOptions)
+
+	body, err := json.Marshal(map[string]any{
+		"counts":        map[string]int{"waitingOnYou": 0, "waitingOnOthers": 0},
+		"waitingOnYou":  []any{},
+		"conversations": convs,
+		"agents":        agents,
+		"answerers":     []any{},
+		"projects": []hubclient.ProjectDecisionProjectRef{
+			{ID: "proj-1", Name: "Scion", Slug: "scion"},
+			{ID: "proj-2", Name: "Web Site", Slug: "web-site"},
+		},
+	})
+	require.NoError(t, err)
+	h.profilePending = string(body)
+
+	// (a) Name miss at 500 cap exits 2 with a clear truncation message.
+	_, err = runDecisionsTestCmd(t, "decisions", "list", "--all-projects", "--conversation", "#zeta")
+	require.Error(t, err)
+	assert.Equal(t, 2, exitCodeFor(err))
+	assert.Contains(t, err.Error(), "facet list truncated (500 conversations)")
+	assert.Contains(t, err.Error(), "pass the conversation key")
+
+	_, err = runDecisionsTestCmd(t, "decisions", "list", "--all-projects", "--agent", "zeta-bot")
+	require.Error(t, err)
+	assert.Equal(t, 2, exitCodeFor(err))
+	assert.Contains(t, err.Error(), "facet list truncated (500 agents)")
+	assert.Contains(t, err.Error(), "pass the agent ID")
+
+	// (b) Same-named item in another project without --project: the single
+	// visible survivor in proj-1 is NOT silently chosen; exits 2 naming it.
+	_, err = runDecisionsTestCmd(t, "decisions", "list", "--all-projects", "--conversation", "general")
+	require.Error(t, err)
+	assert.Equal(t, 2, exitCodeFor(err))
+	assert.Contains(t, err.Error(), "facet list truncated (500 conversations)")
+	assert.Contains(t, err.Error(), "pass the conversation key")
+	assert.Contains(t, err.Error(), "scion  #general  "+genScion)
+
+	_, err = runDecisionsTestCmd(t, "decisions", "list", "--all-projects", "--agent", "coordinator")
+	require.Error(t, err)
+	assert.Equal(t, 2, exitCodeFor(err))
+	assert.Contains(t, err.Error(), "facet list truncated (500 agents)")
+	assert.Contains(t, err.Error(), "pass the agent ID")
+	assert.Contains(t, err.Error(), "scion  coordinator  "+coord1)
+
+	// (c) Same-named item with --project web-site (whose #general / coordinator
+	// sorted past 500): proj-1's item is NOT chosen, and miss exits 2 as truncated.
+	_, err = runDecisionsTestCmd(t, "decisions", "list", "--all-projects", "--project", "web-site", "--conversation", "general")
+	require.Error(t, err)
+	assert.Equal(t, 2, exitCodeFor(err))
+	assert.Contains(t, err.Error(), "facet list truncated (500 conversations)")
+	assert.Contains(t, err.Error(), "pass the conversation key")
+	assert.NotContains(t, err.Error(), genScion)
+
+	_, err = runDecisionsTestCmd(t, "decisions", "list", "--all-projects", "--project", "web-site", "--agent", "coordinator")
+	require.Error(t, err)
+	assert.Equal(t, 2, exitCodeFor(err))
+	assert.Contains(t, err.Error(), "facet list truncated (500 agents)")
+	assert.Contains(t, err.Error(), "pass the agent ID")
+	assert.NotContains(t, err.Error(), coord1)
+
+	// (d) Narrowing with --project scion where the match belongs to proj-1 succeeds.
+	_, err = runDecisionsTestCmd(t, "decisions", "list", "--all-projects", "--project", "scion", "--conversation", "general", "--agent", "coordinator")
+	require.NoError(t, err)
+	assert.Equal(t, "proj-1", h.lastProfile().Get("project"))
+	assert.Equal(t, genScion, h.lastProfile().Get("conversation"))
+	assert.Equal(t, coord1, h.lastProfile().Get("agent"))
+
+	// (e) Explicit keys/IDs (including items cut past 500 and dm: keys) always pass through.
+	_, err = runDecisionsTestCmd(t, "decisions", "list", "--all-projects", "--conversation", genWeb, "--agent", coord2)
+	require.NoError(t, err)
+	assert.Equal(t, genWeb, h.lastProfile().Get("conversation"))
+	assert.Equal(t, coord2, h.lastProfile().Get("agent"))
+
+	_, err = runDecisionsTestCmd(t, "decisions", "list", "--all-projects", "--conversation", dmTrunc)
+	require.NoError(t, err)
+	assert.Equal(t, dmTrunc, h.lastProfile().Get("conversation"))
 }

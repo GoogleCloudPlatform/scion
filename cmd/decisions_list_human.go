@@ -39,6 +39,7 @@ const (
 	maxDecisionsListLimit     = 200
 	minDecisionsSearchRunes   = 2
 	maxDecisionsSearchRunes   = 256
+	maxDecisionsFacetOptions  = 500
 
 	errMsgProjectDecisionsDisabled  = "Decisions are not enabled on this hub (experiment web.project_decisions)"
 	errMsgDecisionSearchUnsupported = "this hub does not support decision search"
@@ -190,12 +191,12 @@ func runHumanDecisionsList(cmd *cobra.Command) error {
 			return errors.New(errMsgDecisionSearchUnsupported)
 		}
 		if conversation != "" {
-			if opts.Conversation, err = resolveDecisionConversation(conversation, facets.Conversations, nil); err != nil {
+			if opts.Conversation, err = resolveDecisionConversation(conversation, facets.Conversations, decisionFacetScope{}); err != nil {
 				return err
 			}
 		}
 		if agent != "" {
-			if opts.AgentID, err = resolveDecisionAgent(agent, facets.Agents, nil); err != nil {
+			if opts.AgentID, err = resolveDecisionAgent(agent, facets.Agents, decisionFacetScope{}); err != nil {
 				return err
 			}
 		}
@@ -249,13 +250,21 @@ func normDecisionName(s string) string {
 	return strings.ToLower(strings.TrimPrefix(strings.TrimSpace(s), "#"))
 }
 
+type decisionFacetScope struct {
+	projectID     string
+	projectLabels map[string]string
+	truncated     bool
+}
+
 // resolveDecisionConversation maps --conversation to a chat key: a facet
 // key as is, else the one facet whose label matches. A value that matches
 // no label but has the shape of a chat key (a topic UUID or a dm: key) is
 // passed through, so the hub answers it (empty when not readable). When
-// projectLabels is non-nil (--all-projects without --project), ambiguity
-// lines name each match's project and suggest --project.
-func resolveDecisionConversation(value string, convs []hubclient.ProjectDecisionConversation, projectLabels map[string]string) (string, error) {
+// scope.projectLabels is non-nil (--all-projects without --project), ambiguity
+// lines name each match's project and suggest --project. When scope.truncated
+// is true (the whole-scope facet hit the 500-entry cap), a name miss or an
+// unnarrowed single match exits 2 requiring a key rather than guessing.
+func resolveDecisionConversation(value string, convs []hubclient.ProjectDecisionConversation, scope decisionFacetScope) (string, error) {
 	for _, c := range convs {
 		if c.Key == value {
 			return c.Key, nil
@@ -269,23 +278,38 @@ func resolveDecisionConversation(value string, convs []hubclient.ProjectDecision
 	}
 	switch len(matches) {
 	case 1:
-		return matches[0].Key, nil
+		m := matches[0]
+		if scope.truncated && (scope.projectID == "" || m.ProjectID != scope.projectID) {
+			line := fmt.Sprintf("  %s  %s", safeText(m.Label), safeText(m.Key))
+			if proj := lookupDecisionProjectLabel(scope.projectLabels, m.ProjectID); proj != "" {
+				line = fmt.Sprintf("  %s  %s  %s", proj, safeText(m.Label), safeText(m.Key))
+			}
+			return "", &decisionsAmbiguousError{msg: fmt.Sprintf(
+				"facet list truncated (%d conversations): --conversation %q may also match another project; pass the conversation key:\n%s",
+				maxDecisionsFacetOptions, safeText(value), line)}
+		}
+		return m.Key, nil
 	case 0:
 		if _, err := uuid.Parse(value); err == nil || strings.HasPrefix(value, "dm:") {
 			return value, nil
+		}
+		if scope.truncated {
+			return "", &decisionsAmbiguousError{msg: fmt.Sprintf(
+				"facet list truncated (%d conversations): pass the conversation key for %q",
+				maxDecisionsFacetOptions, safeText(value))}
 		}
 		return "", fmt.Errorf("no conversation with Decisions matches %q", safeText(value))
 	}
 	lines := make([]string, 0, len(matches))
 	for _, m := range matches {
-		if proj := lookupDecisionProjectLabel(projectLabels, m.ProjectID); proj != "" {
+		if proj := lookupDecisionProjectLabel(scope.projectLabels, m.ProjectID); proj != "" {
 			lines = append(lines, fmt.Sprintf("  %s  %s  %s", proj, safeText(m.Label), safeText(m.Key)))
 		} else {
 			lines = append(lines, fmt.Sprintf("  %s  %s", safeText(m.Label), safeText(m.Key)))
 		}
 	}
 	hint := "pass a key"
-	if projectLabels != nil {
+	if scope.projectLabels != nil {
 		hint = "pass a key or --project <name>"
 	}
 	return "", &decisionsAmbiguousError{msg: fmt.Sprintf("--conversation %q matches %d conversations; %s:\n%s",
@@ -294,9 +318,11 @@ func resolveDecisionConversation(value string, convs []hubclient.ProjectDecision
 
 // resolveDecisionAgent maps --agent to an agent ID: a facet ID as is, else
 // the one facet whose name matches. An unmatched UUID is passed through.
-// When projectLabels is non-nil (--all-projects without --project), ambiguity
-// lines name each match's project and suggest --project.
-func resolveDecisionAgent(value string, agents []hubclient.ProjectDecisionActor, projectLabels map[string]string) (string, error) {
+// When scope.projectLabels is non-nil (--all-projects without --project),
+// ambiguity lines name each match's project and suggest --project. When
+// scope.truncated is true (the whole-scope facet hit the 500-entry cap), a
+// name miss or an unnarrowed single match exits 2 requiring an agent ID.
+func resolveDecisionAgent(value string, agents []hubclient.ProjectDecisionActor, scope decisionFacetScope) (string, error) {
 	for _, a := range agents {
 		if a.ID == value {
 			return a.ID, nil
@@ -310,10 +336,29 @@ func resolveDecisionAgent(value string, agents []hubclient.ProjectDecisionActor,
 	}
 	switch len(matches) {
 	case 1:
-		return matches[0].ID, nil
+		m := matches[0]
+		if scope.truncated && (scope.projectID == "" || m.ProjectID != scope.projectID) {
+			name := safeText(m.Name)
+			if m.Hint != "" {
+				name += " (" + safeText(m.Hint) + ")"
+			}
+			line := fmt.Sprintf("  %s  %s", name, safeText(m.ID))
+			if proj := lookupDecisionProjectLabel(scope.projectLabels, m.ProjectID); proj != "" {
+				line = fmt.Sprintf("  %s  %s  %s", proj, name, safeText(m.ID))
+			}
+			return "", &decisionsAmbiguousError{msg: fmt.Sprintf(
+				"facet list truncated (%d agents): --agent %q may also match another project; pass the agent ID:\n%s",
+				maxDecisionsFacetOptions, safeText(value), line)}
+		}
+		return m.ID, nil
 	case 0:
 		if _, err := uuid.Parse(value); err == nil {
 			return value, nil
+		}
+		if scope.truncated {
+			return "", &decisionsAmbiguousError{msg: fmt.Sprintf(
+				"facet list truncated (%d agents): pass the agent ID for %q",
+				maxDecisionsFacetOptions, safeText(value))}
 		}
 		return "", fmt.Errorf("no agent that asked Decisions matches %q", safeText(value))
 	}
@@ -323,14 +368,14 @@ func resolveDecisionAgent(value string, agents []hubclient.ProjectDecisionActor,
 		if m.Hint != "" {
 			name += " (" + safeText(m.Hint) + ")"
 		}
-		if proj := lookupDecisionProjectLabel(projectLabels, m.ProjectID); proj != "" {
+		if proj := lookupDecisionProjectLabel(scope.projectLabels, m.ProjectID); proj != "" {
 			lines = append(lines, fmt.Sprintf("  %s  %s  %s", proj, name, safeText(m.ID)))
 		} else {
 			lines = append(lines, fmt.Sprintf("  %s  %s", name, safeText(m.ID)))
 		}
 	}
 	hint := "pass an ID"
-	if projectLabels != nil {
+	if scope.projectLabels != nil {
 		hint = "pass an ID or --project <name>"
 	}
 	return "", &decisionsAmbiguousError{msg: fmt.Sprintf("--agent %q matches %d agents; %s:\n%s",
@@ -496,8 +541,6 @@ func runHumanAllProjectsDecisionsList(cmd *cobra.Command, base hubclient.ListPro
 		if !facets.SupportsSearch() {
 			return errors.New(errMsgDecisionSearchUnsupported)
 		}
-		convs := facets.Conversations
-		agents := facets.Agents
 		var projectLabels map[string]string
 		if projectFilter != "" {
 			var inFacet bool
@@ -517,21 +560,35 @@ func runHumanAllProjectsDecisionsList(cmd *cobra.Command, base hubclient.ListPro
 					return formatProjectDecisionsError(err)
 				}
 			}
+		} else {
+			projectLabels = decisionProjectLabels(facets.Projects)
+		}
+		convScope := decisionFacetScope{
+			projectID:     myOpts.ProjectID,
+			projectLabels: projectLabels,
+			truncated:     len(facets.Conversations) >= maxDecisionsFacetOptions,
+		}
+		agentScope := decisionFacetScope{
+			projectID:     myOpts.ProjectID,
+			projectLabels: projectLabels,
+			truncated:     len(facets.Agents) >= maxDecisionsFacetOptions,
+		}
+		convs := facets.Conversations
+		agents := facets.Agents
+		if myOpts.ProjectID != "" {
 			// Profile facets cover the whole scope (design D5); narrow options to
 			// the selected project so shared names like #general or coordinator
 			// resolve within --project rather than colliding across projects.
 			convs = filterConversationsByProject(facets.Conversations, myOpts.ProjectID)
 			agents = filterAgentsByProject(facets.Agents, myOpts.ProjectID)
-		} else {
-			projectLabels = decisionProjectLabels(facets.Projects)
 		}
 		if conversation != "" {
-			if myOpts.Conversation, err = resolveDecisionConversation(conversation, convs, projectLabels); err != nil {
+			if myOpts.Conversation, err = resolveDecisionConversation(conversation, convs, convScope); err != nil {
 				return err
 			}
 		}
 		if agent != "" {
-			if myOpts.AgentID, err = resolveDecisionAgent(agent, agents, projectLabels); err != nil {
+			if myOpts.AgentID, err = resolveDecisionAgent(agent, agents, agentScope); err != nil {
 				return err
 			}
 		}

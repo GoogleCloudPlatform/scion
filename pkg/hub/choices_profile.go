@@ -460,7 +460,7 @@ func (s *Server) profileDecisionScopes(
 			end = len(candidateIDs)
 		}
 		batch := candidateIDs[start:end]
-		res, err := s.store.ListProjectSummaries(ctx, store.ProjectFilter{MemberProjectIDs: batch}, store.ListOptions{Limit: len(batch)})
+		res, err := s.store.ListProjectSummaries(ctx, store.ProjectFilter{MemberProjectIDs: batch}, store.ListOptions{Limit: len(batch), SkipTotalCount: true})
 		if err != nil {
 			return nil, false, err
 		}
