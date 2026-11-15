@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 // hookScriptedEntry is what a fake manager reports as the harness-config
@@ -351,5 +352,67 @@ func TestHarnessPolicyHook_RestartEarlyCheckBeforeStop(t *testing.T) {
 	}
 	if d := refusalDetails(t, body); d[api.BrokerErrorDetailStartAttempted] != nil {
 		t.Errorf("early-check refusal must not carry %s, got %v", api.BrokerErrorDetailStartAttempted, d)
+	}
+}
+
+// ptone/scion#622: through Server.withHarnessConfigPolicy, a non-container-script
+// harness-config bundle containing capture_auth.py launches under both
+// AllowContainerScriptHarnesses settings, staging capture_auth.py when allowed
+// and suppressing it (plus capture-auth-config.json) when disallowed.
+func TestHarnessPolicyHook_CaptureAuthAssetStagingFollowsAllowSetting(t *testing.T) {
+	const declWithAuthYAML = "harness: generic\nimage: scion-base:test\nuser: scion\nauth:\n  default_type: auth-file\n  types:\n    auth-file:\n      required_files:\n        - name: DECL_CRED\n          type: file\n          target_suffix: .decl/creds.json\n"
+
+	for _, allow := range []bool{false, true} {
+		t.Run(fmt.Sprintf("allow=%v", allow), func(t *testing.T) {
+			srv, _, globalScion := dispatchTestEnv(t, allow)
+			writeHarnessConfig(t, globalScion, "decl-ca", declWithAuthYAML)
+			hcPath := filepath.Join(globalScion, "harness-configs", "decl-ca")
+			if err := os.WriteFile(filepath.Join(hcPath, "capture_auth.py"), []byte("#!/usr/bin/env python3\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			runs := 0
+			srv.manager = agent.NewManager(&runtime.MockRuntime{
+				ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+					return []api.AgentInfo{}, nil
+				},
+				RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+					runs++
+					return "mock-id", nil
+				},
+			})
+
+			ctx := srv.withHarnessConfigPolicy(context.Background())
+			if _, err := srv.manager.Start(ctx, api.StartOptions{
+				Name:          "decl-agent",
+				ProjectPath:   globalScion,
+				HarnessConfig: "decl-ca",
+				NoAuth:        true,
+			}); err != nil {
+				t.Fatalf("Start(allow=%v): %v", allow, err)
+			}
+			if runs != 1 {
+				t.Fatalf("runs = %d, want 1", runs)
+			}
+
+			home := config.GetAgentHomePath(globalScion, "decl-agent")
+			scriptPath := filepath.Join(home, ".scion", "harness", "capture_auth.py")
+			cfgPath := filepath.Join(home, ".scion", "harness", "inputs", "capture-auth-config.json")
+			if allow {
+				if info, err := os.Stat(scriptPath); err != nil || info.Mode()&0o111 == 0 {
+					t.Errorf("allow=true: expected executable capture_auth.py, got info=%v err=%v", info, err)
+				}
+				if _, err := os.Stat(cfgPath); err != nil {
+					t.Errorf("allow=true: expected capture-auth-config.json, got err=%v", err)
+				}
+			} else {
+				if _, err := os.Lstat(scriptPath); !os.IsNotExist(err) {
+					t.Errorf("allow=false: capture_auth.py must not be staged (stat err=%v)", err)
+				}
+				if _, err := os.Lstat(cfgPath); !os.IsNotExist(err) {
+					t.Errorf("allow=false: capture-auth-config.json must not be staged (stat err=%v)", err)
+				}
+			}
+		})
 	}
 }
