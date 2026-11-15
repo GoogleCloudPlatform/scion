@@ -184,7 +184,7 @@ func WithLoopbackServerForTesting(serverURL string, serverClient *http.Client) O
 			c.configErr = fmt.Errorf("%w: test server must bind a literal loopback IP and port", ErrInvalidEndpoint)
 			return
 		}
-		var tr http.RoundTripper = http.DefaultTransport
+		tr := http.DefaultTransport
 		if serverClient != nil && serverClient.Transport != nil {
 			tr = serverClient.Transport
 		}
