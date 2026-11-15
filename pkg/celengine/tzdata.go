@@ -60,13 +60,20 @@ func initEmbeddedTZData() {
 	embeddedTZBytes = index
 }
 
+// ensureEmbeddedTZData inflates the embedded zoneinfo archive once per process.
+// Engine.New invokes this at construction time so the first timezone evaluation
+// never pays archive decompression overhead inside its EvalTimeout budget.
+func ensureEmbeddedTZData() error {
+	embeddedTZOnce.Do(initEmbeddedTZData)
+	return embeddedTZErr
+}
+
 // loadEmbeddedLocation resolves an IANA timezone name strictly from the
 // embedded zoneinfo archive via time.LoadLocationFromTZData, without consulting
 // $ZONEINFO, /usr/share/zoneinfo, or any host filesystem path.
 func loadEmbeddedLocation(tz string) (*time.Location, error) {
-	embeddedTZOnce.Do(initEmbeddedTZData)
-	if embeddedTZErr != nil {
-		return nil, embeddedTZErr
+	if err := ensureEmbeddedTZData(); err != nil {
+		return nil, err
 	}
 	raw, ok := embeddedTZBytes[tz]
 	if !ok {

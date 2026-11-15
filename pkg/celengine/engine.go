@@ -71,6 +71,9 @@ func New(env Environment, limits Limits, cache CacheConfig) (*Engine, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := ensureEmbeddedTZData(); err != nil {
+		return nil, err
+	}
 
 	opts := []cel.EnvOption{
 		cel.EagerlyValidateDeclarations(true),
@@ -286,7 +289,7 @@ func (e *Engine) Cached(ctx context.Context, scope CacheScope, expr string, kind
 	if err != nil {
 		return Program{}, err
 	}
-	return e.cache.put(id, kind.Name, prog, scope), nil
+	return e.cache.put(id, kind.Name, len(expr), prog, scope), nil
 }
 
 func (e *Engine) effectiveMaxExprBytes(opts ...Option) int {
@@ -552,6 +555,11 @@ func (p Program) Kind() Kind {
 	return p.kind
 }
 
+// nowFunc is the clock used to measure Program.Eval elapsed wall-clock time;
+// internal tests override it to exercise the post-eval elapsed > EvalTimeout
+// backstop deterministically.
+var nowFunc = time.Now
+
 // Eval executes p against activation act under the engine's ceiling limits
 // (optionally lowered by per-call overrides). Lowered per-call plan limits
 // (CostLimit, InterruptFrequency, MaxOutputBytes, MaxCollectionElements,
@@ -596,9 +604,9 @@ func (p Program) Eval(ctx context.Context, act map[string]any, limits ...Limits)
 	evalCtx, cancel := context.WithTimeoutCause(ctx, eff.EvalTimeout, errEngineTimeout)
 	defer cancel()
 
-	start := time.Now()
+	start := nowFunc()
 	val, det, err := progToRun.ContextEval(evalCtx, act)
-	elapsed := time.Since(start)
+	elapsed := nowFunc().Sub(start)
 
 	var stats EvalStats
 	stats.Elapsed = elapsed

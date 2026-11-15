@@ -16,6 +16,7 @@ package celengine_test
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -1877,7 +1878,8 @@ func TestTimezoneEmbeddedLRUCacheAndCost(t *testing.T) {
 		assertCostLimitOrRaceTimeout(t, evalErr)
 	})
 
-	// 3. Fixed numeric offsets, UTC, empty string, and Local preserve CEL semantics at cost ~1.
+	// 3. Fixed numeric offsets, UTC, and empty string preserve CEL semantics at cost ~1,
+	// while "Local" is rejected deterministically at cost 250 (never host time.Local).
 	t.Run("fixed_offsets_and_builtin_zones", func(t *testing.T) {
 		exprs := []string{
 			`at.getHours("") == 12`,
@@ -1885,7 +1887,6 @@ func TestTimezoneEmbeddedLRUCacheAndCost(t *testing.T) {
 			`at.getHours("+05:30") == 17 && at.getMinutes("+05:30") == 30`,
 			`at.getHours("-00:30") == 11 && at.getMinutes("-00:30") == 30`,
 			`at.getHours("05:30") == 17`,
-			`at.getHours("Local") >= 0`,
 		}
 		for _, expr := range exprs {
 			prog, err := semEng.Compile(expr, boolKind)
@@ -1901,6 +1902,32 @@ func TestTimezoneEmbeddedLRUCacheAndCost(t *testing.T) {
 			}
 			if stats.Cost >= 50 {
 				t.Errorf("Eval(%s) stats.Cost = %d, want < 50", expr, stats.Cost)
+			}
+		}
+	})
+
+	t.Run("local_timezone_rejected_at_cost_250", func(t *testing.T) {
+		for _, expr := range []string{
+			`at.getHours("Local") >= 0`,
+			`at.getMinutes("Local") >= 0`,
+			`at.getDayOfWeek("Local") >= 0`,
+			`at.getFullYear("Local") >= 0`,
+			`at.getHours(meta["tz"]) >= 0`,
+		} {
+			prog, err := semEng.Compile(expr, boolKind)
+			if err != nil {
+				t.Fatalf("Compile(%s): %v", expr, err)
+			}
+			res, stats, evalErr := prog.Eval(ctx, map[string]any{
+				"at":   refTime,
+				"meta": map[string]string{"tz": "Local"},
+			})
+			if res != nil {
+				t.Fatalf("Eval(%s) resolved host time.Local: %v", expr, res)
+			}
+			assertEvalReason(t, evalErr, celengine.ReasonRuntime)
+			if stats.Cost < 250 || stats.Cost >= 300 {
+				t.Errorf("Eval(%s) stats.Cost = %d, want [250, 300)", expr, stats.Cost)
 			}
 		}
 	})
@@ -2403,4 +2430,234 @@ func TestMapStringAndBytesKeyHashingCost(t *testing.T) {
 			t.Errorf("elapsed = %s, want <= %s", elapsed, scaleWallBound(2*celengine.DefaultEvalTimeout))
 		}
 	})
+}
+
+func readZipEntries(t *testing.T, zipPath string) map[string][]byte {
+	t.Helper()
+	zr, err := zip.OpenReader(zipPath)
+	if err != nil {
+		t.Fatalf("open %s: %v", zipPath, err)
+	}
+	defer func() { _ = zr.Close() }()
+
+	entries := make(map[string][]byte, len(zr.File))
+	for _, f := range zr.File {
+		if f.FileInfo().IsDir() {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			t.Fatalf("open %s entry %q: %v", zipPath, f.Name, err)
+		}
+		data, err := io.ReadAll(rc)
+		_ = rc.Close()
+		if err != nil {
+			t.Fatalf("read %s entry %q: %v", zipPath, f.Name, err)
+		}
+		entries[f.Name] = data
+	}
+	return entries
+}
+
+func TestEmbeddedTZDataMatchesGOROOTZoneinfo(t *testing.T) {
+	out, err := exec.Command("go", "env", "GOROOT").Output()
+	if err != nil {
+		t.Skipf("go env GOROOT unavailable (%v); skipping tzdata drift check", err)
+	}
+	goroot := strings.TrimSpace(string(out))
+	if goroot == "" {
+		t.Skip("GOROOT is empty; skipping tzdata drift check")
+	}
+	gorootZip := filepath.Join(goroot, "lib", "time", "zoneinfo.zip")
+	if _, err := os.Stat(gorootZip); err != nil {
+		if os.IsNotExist(err) {
+			t.Skipf("%s not present in this environment; skipping tzdata drift check", gorootZip)
+		}
+		t.Fatalf("stat %s: %v", gorootZip, err)
+	}
+
+	embedded := readZipEntries(t, filepath.Join("tzdata", "zoneinfo.zip"))
+	upstream := readZipEntries(t, gorootZip)
+
+	if len(embedded) != len(upstream) {
+		t.Fatalf(
+			"embedded tzdata/zoneinfo.zip has %d entries, want %d from %s (regenerate per pkg/celengine/tzdata/README.md)",
+			len(embedded), len(upstream), gorootZip,
+		)
+	}
+	for name, want := range upstream {
+		got, ok := embedded[name]
+		if !ok {
+			t.Fatalf("embedded tzdata/zoneinfo.zip missing entry %q present in %s (regenerate per pkg/celengine/tzdata/README.md)", name, gorootZip)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("embedded tzdata/zoneinfo.zip entry %q differs from %s (regenerate per pkg/celengine/tzdata/README.md)", name, gorootZip)
+		}
+	}
+}
+
+func buildNearly4KiBOrChainExpr(seed int) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, `count == %d`, seed)
+	clause := fmt.Sprintf(` || count == %d`, seed+1_000_000)
+	for b.Len()+len(clause) <= 4000 {
+		b.WriteString(clause)
+	}
+	return b.String()
+}
+
+func TestProgramCacheByteBudgetEviction(t *testing.T) {
+	ctx := context.Background()
+	boolKind := celengine.Kind{Name: "filter", Result: celengine.Bool()}
+
+	t.Run("negative_max_bytes_rejected", func(t *testing.T) {
+		_, err := celengine.New(testEnv(), celengine.DefaultLimits(), celengine.CacheConfig{
+			MaxEntries: 16,
+			MaxBytes:   -1,
+		})
+		if err == nil {
+			t.Fatal("expected error for negative CacheConfig.MaxBytes")
+		}
+	})
+
+	t.Run("default_256k_budget_caps_4k_expressions_and_retained_heap", func(t *testing.T) {
+		eng, err := celengine.New(testEnv(), celengine.DefaultLimits(), celengine.DefaultCacheConfig())
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+
+		runtime.GC()
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+
+		const totalInserted = 100
+		for i := 0; i < totalInserted; i++ {
+			expr := buildNearly4KiBOrChainExpr(i)
+			scope := celengine.CacheScope{Consumer: "trigger", ID: fmt.Sprintf("trig-%d", i), Revision: 1}
+			if _, err := eng.Cached(ctx, scope, expr, boolKind); err != nil {
+				t.Fatalf("Cached[%d] (len=%d): %v", i, len(expr), err)
+			}
+		}
+
+		runtime.GC()
+		runtime.ReadMemStats(&after)
+
+		stats := eng.CacheStats()
+		if stats.Bytes > celengine.DefaultCacheMaxBytes {
+			t.Fatalf("CacheStats.Bytes = %d, want <= %d", stats.Bytes, celengine.DefaultCacheMaxBytes)
+		}
+		// 256 KiB / ~3,990 B <= 66 entries (well below the 200 inserted and 1,024 MaxEntries).
+		if stats.Entries <= 0 || stats.Entries > 66 {
+			t.Fatalf("CacheStats.Entries = %d, want in [1, 66] under 256 KiB budget", stats.Entries)
+		}
+		var retained int64
+		if after.HeapAlloc > before.HeapAlloc {
+			retained = int64(after.HeapAlloc - before.HeapAlloc)
+		}
+		const maxRetainedBytes = 48 << 20 // 48 MiB (vs ~337 MiB unbounded)
+		if retained > maxRetainedBytes {
+			t.Errorf("retained heap delta = %d MiB, want <= %d MiB", retained>>20, maxRetainedBytes>>20)
+		}
+	})
+
+	t.Run("custom_byte_budget_evicts_lru_and_keeps_mru", func(t *testing.T) {
+		eng, err := celengine.New(testEnv(), celengine.DefaultLimits(), celengine.CacheConfig{
+			MaxEntries: 100,
+			MaxBytes:   12 * 1024, // fits 3 x ~4,000 B expressions
+		})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		e0 := buildNearly4KiBOrChainExpr(10)
+		e1 := buildNearly4KiBOrChainExpr(20)
+		e2 := buildNearly4KiBOrChainExpr(30)
+		e3 := buildNearly4KiBOrChainExpr(40)
+
+		for i, expr := range []string{e0, e1, e2} {
+			if _, err := eng.Cached(ctx, celengine.CacheScope{}, expr, boolKind); err != nil {
+				t.Fatalf("Cached[%d]: %v", i, err)
+			}
+		}
+		if got := eng.CacheStats().Entries; got != 3 {
+			t.Fatalf("Entries = %d, want 3", got)
+		}
+		// Touch e0 so e1 becomes the LRU victim when e3 is inserted.
+		if _, err := eng.Cached(ctx, celengine.CacheScope{}, e0, boolKind); err != nil {
+			t.Fatalf("Cached(e0 hit): %v", err)
+		}
+		if _, err := eng.Cached(ctx, celengine.CacheScope{}, e3, boolKind); err != nil {
+			t.Fatalf("Cached(e3): %v", err)
+		}
+		stats := eng.CacheStats()
+		if stats.Bytes > 12*1024 {
+			t.Fatalf("Bytes = %d, want <= %d", stats.Bytes, 12*1024)
+		}
+		if stats.Entries != 3 {
+			t.Fatalf("Entries = %d, want 3", stats.Entries)
+		}
+		hitsBefore := stats.Hits
+		// e0 must still hit; e1 must miss.
+		if _, err := eng.Cached(ctx, celengine.CacheScope{}, e0, boolKind); err != nil {
+			t.Fatalf("Cached(e0): %v", err)
+		}
+		if got := eng.CacheStats().Hits; got != hitsBefore+1 {
+			t.Fatalf("expected e0 cache hit: Hits = %d, want %d", got, hitsBefore+1)
+		}
+		missesBefore := eng.CacheStats().Misses
+		if _, err := eng.Cached(ctx, celengine.CacheScope{}, e1, boolKind); err != nil {
+			t.Fatalf("Cached(e1): %v", err)
+		}
+		if got := eng.CacheStats().Misses; got != missesBefore+1 {
+			t.Fatalf("expected e1 cache miss after byte-budget eviction: Misses = %d, want %d", got, missesBefore+1)
+		}
+	})
+}
+
+// TestMaxRegexWorkPinnedAtRaisedCostLimit verifies the pre-call MaxRegexWork
+// bound at a CostLimit near MaxCostLimitCeiling (10M), where CostTracker
+// pre-charging (~313k) alone would permit the call and MatchString on a literal
+// non-matching input would return (false, nil) in microseconds if the
+// MaxRegexWork check in boundedMatchesCall.Exec were removed.
+func TestMaxRegexWorkPinnedAtRaisedCostLimit(t *testing.T) {
+	lim := celengine.DefaultLimits()
+	lim.CostLimit = celengine.MaxCostLimitCeiling
+	if raceEnabled {
+		lim.EvalTimeout = 500 * time.Millisecond
+	}
+
+	eng, err := celengine.New(testEnv(), lim, celengine.DefaultCacheConfig())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	boolKind := celengine.Kind{Name: "filter", Result: celengine.Bool()}
+
+	// 200-rune literal pattern compiles to ~203 RE2 instructions (<= 256 limit).
+	// Against a 60 KiB input (61,440 B), 61,440 * 203 = 12.47 Mi > MaxRegexWork (8 Mi),
+	// whereas CostTracker pre-charge is ~313k << CostLimit (10M).
+	pat200 := strings.Repeat("a", 200)
+	prog, err := eng.Compile(`event.s.matches("`+pat200+`")`, boolKind)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	in60k := strings.Repeat("b", 60*1024)
+	res, _, evalErr := prog.Eval(context.Background(), map[string]any{
+		"event": map[string]any{"s": in60k},
+	})
+	if res != nil {
+		t.Fatalf("expected nil Result when len(input)*progSize exceeds MaxRegexWork at raised CostLimit, got %v", res)
+	}
+	assertEvalReason(t, evalErr, celengine.ReasonCostLimit)
+
+	// Just below MaxRegexWork (32 KiB * 203 = 6.65 Mi <= 8 Mi) succeeds cleanly.
+	in32k := strings.Repeat("b", 32*1024)
+	okRes, _, okErr := prog.Eval(context.Background(), map[string]any{
+		"event": map[string]any{"s": in32k},
+	})
+	if okErr != nil {
+		t.Fatalf("Eval below MaxRegexWork failed: %v", okErr)
+	}
+	if b, _ := okRes.Bool(); b {
+		t.Fatalf("expected false match, got true")
+	}
 }

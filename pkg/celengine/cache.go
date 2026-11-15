@@ -26,26 +26,43 @@ import (
 // retained in an Engine's LRU cache.
 const DefaultCacheMaxEntries = 1024
 
+// DefaultCacheMaxBytes is the default maximum cumulative expression source
+// byte budget retained across cached programs (256 KiB: holds all 1,024 entries
+// for ordinary <= 256 B rules while capping ~4 KiB expressions at ~64 entries
+// so worst-case retained AST+plan heap stays bounded).
+const DefaultCacheMaxBytes = 256 * 1024
+
 // CacheConfig configures an Engine's content-addressed compiled-program LRU cache.
 type CacheConfig struct {
 	MaxEntries     int
+	MaxBytes       int
 	MaxPerConsumer int
 }
 
-// DefaultCacheConfig returns a CacheConfig with DefaultCacheMaxEntries (1024).
+// DefaultCacheConfig returns a CacheConfig with DefaultCacheMaxEntries (1024)
+// and DefaultCacheMaxBytes (256 KiB).
 func DefaultCacheConfig() CacheConfig {
-	return CacheConfig{MaxEntries: DefaultCacheMaxEntries}
+	return CacheConfig{
+		MaxEntries: DefaultCacheMaxEntries,
+		MaxBytes:   DefaultCacheMaxBytes,
+	}
 }
 
 func (c CacheConfig) normalize() (CacheConfig, error) {
 	if c.MaxEntries < 0 {
 		return CacheConfig{}, fmt.Errorf("celengine: CacheConfig.MaxEntries must be >= 0 (got %d)", c.MaxEntries)
 	}
+	if c.MaxBytes < 0 {
+		return CacheConfig{}, fmt.Errorf("celengine: CacheConfig.MaxBytes must be >= 0 (got %d)", c.MaxBytes)
+	}
 	if c.MaxPerConsumer < 0 {
 		return CacheConfig{}, fmt.Errorf("celengine: CacheConfig.MaxPerConsumer must be >= 0 (got %d)", c.MaxPerConsumer)
 	}
 	if c.MaxEntries == 0 {
 		c.MaxEntries = DefaultCacheMaxEntries
+	}
+	if c.MaxBytes == 0 {
+		c.MaxBytes = DefaultCacheMaxBytes
 	}
 	return c, nil
 }
@@ -66,6 +83,7 @@ func (s CacheScope) hasID() bool {
 // CacheStats reports point-in-time metrics for an Engine's program cache.
 type CacheStats struct {
 	Entries int
+	Bytes   int
 	Hits    uint64
 	Misses  uint64
 }
@@ -116,6 +134,7 @@ type scopeRecord struct {
 type cacheEntry struct {
 	key        cacheIdentity
 	prog       Program
+	weight     int
 	elem       *list.Element
 	slots      map[slotKey]struct{}
 	everScoped bool
@@ -124,7 +143,9 @@ type cacheEntry struct {
 type programCache struct {
 	mu             sync.Mutex
 	maxEntries     int
+	maxBytes       int
 	maxPerConsumer int
+	bytes          int
 	lru            *list.List // front = most recently used; Value = *cacheEntry
 	byKey          map[cacheIdentity]*cacheEntry
 	byScope        map[scopeKey]*scopeRecord
@@ -135,6 +156,7 @@ type programCache struct {
 func newProgramCache(cfg CacheConfig) *programCache {
 	return &programCache{
 		maxEntries:     cfg.MaxEntries,
+		maxBytes:       cfg.MaxBytes,
 		maxPerConsumer: cfg.MaxPerConsumer,
 		lru:            list.New(),
 		byKey:          make(map[cacheIdentity]*cacheEntry),
@@ -159,7 +181,7 @@ func (c *programCache) get(id cacheIdentity, kindName string, scope CacheScope) 
 	return ent.prog, true
 }
 
-func (c *programCache) put(id cacheIdentity, kindName string, prog Program, scope CacheScope) Program {
+func (c *programCache) put(id cacheIdentity, kindName string, exprBytes int, prog Program, scope CacheScope) Program {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -171,13 +193,16 @@ func (c *programCache) put(id cacheIdentity, kindName string, prog Program, scop
 		return ent.prog
 	}
 
+	weight := max(exprBytes, 1)
 	ent := &cacheEntry{
-		key:   id,
-		prog:  prog,
-		slots: make(map[slotKey]struct{}),
+		key:    id,
+		prog:   prog,
+		weight: weight,
+		slots:  make(map[slotKey]struct{}),
 	}
 	ent.elem = c.lru.PushFront(ent)
 	c.byKey[id] = ent
+	c.bytes += weight
 
 	if scope.hasID() {
 		c.bindScopeLocked(scope, kindName, ent)
@@ -186,7 +211,7 @@ func (c *programCache) put(id cacheIdentity, kindName string, prog Program, scop
 	if c.maxPerConsumer > 0 && scope.Consumer != "" {
 		c.enforceConsumerCapLocked(scope.Consumer, ent)
 	}
-	for c.lru.Len() > c.maxEntries {
+	for c.lru.Len() > c.maxEntries || (c.maxBytes > 0 && c.bytes > c.maxBytes) {
 		tail := c.lru.Back()
 		if tail == nil {
 			break
@@ -312,7 +337,13 @@ func entryHasConsumer(ent *cacheEntry, consumer string) bool {
 }
 
 func (c *programCache) removeEntryLocked(ent *cacheEntry) {
-	delete(c.byKey, ent.key)
+	if _, existed := c.byKey[ent.key]; existed {
+		delete(c.byKey, ent.key)
+		c.bytes -= ent.weight
+		if c.bytes < 0 {
+			c.bytes = 0
+		}
+	}
 	if ent.elem != nil {
 		c.lru.Remove(ent.elem)
 		ent.elem = nil
@@ -367,6 +398,7 @@ func (c *programCache) stats() CacheStats {
 	defer c.mu.Unlock()
 	return CacheStats{
 		Entries: c.lru.Len(),
+		Bytes:   c.bytes,
 		Hits:    c.hits,
 		Misses:  c.misses,
 	}

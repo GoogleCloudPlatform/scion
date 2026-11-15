@@ -2121,11 +2121,10 @@ func (c *boundedTimezoneCall) Exec(frame *interpreter.ExecutionFrame) ref.Val {
 		return types.LabelErrNode(c.ID(), types.MaybeNoSuchOverloadErr(lVal))
 	}
 	if tz == "Local" {
-		chargePrecomputedCost(frame, c.ID(), 1)
-		if out, handled := evalTimestampInLocation(fn, ts.In(time.Local)); handled {
-			return out
-		}
-		return types.LabelErrNode(c.ID(), types.MaybeNoSuchOverloadErr(lVal))
+		// Reject "Local" deterministically at tzLookupErrorCost (250) rather than
+		// consulting replica-dependent host $TZ / /etc/localtime state via time.Local.
+		chargePrecomputedCost(frame, c.ID(), tzLookupErrorCost)
+		return types.LabelErrNode(c.ID(), types.NewErr("unknown time zone Local"))
 	}
 
 	if !isSyntacticallyValidTZName(tz) {
