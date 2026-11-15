@@ -670,7 +670,9 @@ func (s *Server) deliverChoiceResponse(ctx context.Context, asker *store.Agent, 
 	sm.Metadata[messages.MetadataChoiceProvenance] = a.Provenance
 	dctx, cancel := context.WithTimeout(withDispatchMessageID(context.WithoutCancel(ctx), m.ID), 30*time.Second)
 	defer cancel()
-	if err := dispatchWithBrokerRetry(dctx, s.recordLog(), dispatcher, asker, line, false, sm); err != nil {
+	if _, err := s.holdOrDispatch(dctx, asker, m.ID, m, func() error {
+		return dispatchWithBrokerRetry(dctx, s.recordLog(), dispatcher, asker, line, false, sm)
+	}); err != nil {
 		s.messageLog.Error("choices: failed to deliver choice-response", "agent", asker.Slug, "message_id", m.ID, "error", err)
 		_ = s.markFailed(context.WithoutCancel(ctx), m.ID, err.Error())
 	}

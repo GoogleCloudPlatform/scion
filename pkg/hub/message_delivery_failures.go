@@ -358,10 +358,29 @@ func (s *Server) applyBrokerMessageFailureOutcome(ctx context.Context, brokerID 
 		)
 	}
 
+	s.notifyStoredMessageSenderFailed(ctx, agent, msg, reason)
+	return brokerFailureMarked
+}
+
+// notifyStoredMessageSenderFailed notifies an agent sender (via DELIVERY_FAILED
+// notice) or connected human browser clients (via PublishUserMessage) after the
+// stored message row's dispatch_state=failed write has already committed.
+func (s *Server) notifyStoredMessageSenderFailed(ctx context.Context, agent *store.Agent, msg *store.Message, reason string) {
+	if msg == nil {
+		return
+	}
 	// Tell an agent sender its message was not delivered, mirroring the
 	// DELIVERY_FAILED notice sent for synchronous broker failures.
 	if proxy := s.GetMessageBrokerProxy(); proxy != nil && strings.HasPrefix(msg.Sender, "agent:") && msg.SenderID != "" {
-		proxy.publishDeliveryFailed(ctx, agent.ProjectID, agent.Slug, &messages.StructuredMessage{
+		var projectID, agentSlug string
+		if agent != nil {
+			projectID = agent.ProjectID
+			agentSlug = agent.Slug
+		} else {
+			projectID = msg.ProjectID
+			agentSlug = strings.TrimPrefix(msg.Recipient, "agent:")
+		}
+		proxy.publishDeliveryFailed(ctx, projectID, agentSlug, &messages.StructuredMessage{
 			Sender:   msg.Sender,
 			SenderID: msg.SenderID,
 		}, errors.New(reason))
@@ -373,23 +392,12 @@ func (s *Server) applyBrokerMessageFailureOutcome(ctx context.Context, brokerID 
 	// (rather than only on next reload) and renders the "Failed" delivery
 	// badge the web chat client already supports for its own outbound
 	// messages (ptone/scion#1866).
-	//
-	// This function never calls CreateMessage itself — unlike the other
-	// PublishUserMessage call sites, it acts on a row persisted by an
-	// earlier request. msg came from the s.store.GetMessage(ctx, f.MessageID)
-	// lookup above, which already returned false on a missing/lookup-error
-	// row, and by this point s.markFailed(ctx, msg.ID, reason) has already
-	// written dispatch_state=failed for that same row (returning false above
-	// on error, before this point is reached). The two local field
-	// assignments just mirror that already-committed write onto the
-	// in-memory copy so the published event matches what markFailed
-	// persisted, rather than the stale pre-failure snapshot fetched above.
 	if strings.HasPrefix(msg.Sender, "user:") && s.events != nil {
-		msg.DispatchState = store.MessageDispatchFailed
-		msg.DispatchFailureReason = &reason
-		s.events.PublishUserMessage(ctx, msg, nil, nil)
+		cp := *msg
+		cp.DispatchState = store.MessageDispatchFailed
+		cp.DispatchFailureReason = &reason
+		s.events.PublishUserMessage(ctx, &cp, nil, nil)
 	}
-	return brokerFailureMarked
 }
 
 // maxFailureReasonBytes bounds the broker-supplied failure reason that is

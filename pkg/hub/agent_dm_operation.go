@@ -748,12 +748,15 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	dctx, dcancel := dispatchContext(ctx, agentDMDispatchTimeout)
 	defer dcancel()
 	var dispatchErr error
+	var held bool
 	if isManagedAgentRuntime(input.TargetAgent.Runtime) {
 		// D4: managed runtimes stay unconverted — a managed agent may not
 		// have the scion CLI to fetch with. Unchanged: input.Msg, full body.
 		dispatchErr = s.managedAgentMessage(dctx, input.TargetAgent, input.Msg, input.Urgent || input.Interrupt)
 	} else if dispatcher := s.GetDispatcher(); dispatcher != nil && input.TargetAgent.RuntimeBrokerID != "" {
-		dispatchErr = dispatchWithBrokerRetry(withDispatchMessageID(dctx, msgID), nil, dispatcher, input.TargetAgent, dispatchMsg.Msg, input.Urgent || input.Interrupt, dispatchMsg)
+		held, dispatchErr = s.holdOrDispatch(dctx, input.TargetAgent, msgID, storeMsg, func() error {
+			return dispatchWithBrokerRetry(withDispatchMessageID(dctx, msgID), nil, dispatcher, input.TargetAgent, dispatchMsg.Msg, input.Urgent || input.Interrupt, dispatchMsg)
+		})
 	}
 
 	// 12. Finalize dispatch state (#1689).
@@ -805,33 +808,36 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		return nil, dispatchFailedError(msgID)
 	}
 
-	// Dispatch succeeded — CAS pending→dispatched (AC-1).
-	dispatched, casErr := s.markDispatched(ctx, msgID)
-	if casErr != nil {
-		// Store failure after broker acceptance: the message IS dispatched
-		// but our state tracking is uncertain (AC-3). Return ambiguous
-		// with the stable message ID so the caller can correlate.
-		s.messageLog.Error("agent DM: MarkMessageDispatched store error (message dispatched)",
-			"message_id", msgID, "error", casErr)
-		// Audit: dispatch outcome (#1690) — dispatch succeeded but state tracking failed.
-		LogDMDispatchOutcome(input.SenderAgent, input.TargetAgent, msgID, DispatchSucceeded, casErr)
-		return &AgentDMResult{
-			Outcome:            AgentDMAmbiguous,
-			MessageID:          msgID,
-			Recipient:          storeMsg.Recipient,
-			RecipientID:        storeMsg.RecipientID,
-			ConversationID:     storeMsg.ConversationID,
-			DispatchErr:        fmt.Errorf("dispatch succeeded but state transition failed: %w", casErr),
-			AttachmentWarnings: attachmentWarnings,
-			ArtifactWarning:    artifactWarning,
-			BoundAttachments:   boundAttachments,
-		}, nil
-	}
-	if !dispatched {
-		// CAS miss — already transitioned by concurrent process.
-		// The dispatch itself succeeded; log for visibility but not an error.
-		s.messageLog.Warn("agent DM: MarkMessageDispatched CAS miss (already transitioned)",
-			"message_id", msgID)
+	// Dispatch succeeded — CAS pending→dispatched (AC-1), unless holdOrDispatch
+	// already moved the row directly to awaiting_session (ptone/scion#7881).
+	if !held {
+		dispatched, casErr := s.markDispatched(ctx, msgID)
+		if casErr != nil {
+			// Store failure after broker acceptance: the message IS dispatched
+			// but our state tracking is uncertain (AC-3). Return ambiguous
+			// with the stable message ID so the caller can correlate.
+			s.messageLog.Error("agent DM: MarkMessageDispatched store error (message dispatched)",
+				"message_id", msgID, "error", casErr)
+			// Audit: dispatch outcome (#1690) — dispatch succeeded but state tracking failed.
+			LogDMDispatchOutcome(input.SenderAgent, input.TargetAgent, msgID, DispatchSucceeded, casErr)
+			return &AgentDMResult{
+				Outcome:            AgentDMAmbiguous,
+				MessageID:          msgID,
+				Recipient:          storeMsg.Recipient,
+				RecipientID:        storeMsg.RecipientID,
+				ConversationID:     storeMsg.ConversationID,
+				DispatchErr:        fmt.Errorf("dispatch succeeded but state transition failed: %w", casErr),
+				AttachmentWarnings: attachmentWarnings,
+				ArtifactWarning:    artifactWarning,
+				BoundAttachments:   boundAttachments,
+			}, nil
+		}
+		if !dispatched {
+			// CAS miss — already transitioned by concurrent process.
+			// The dispatch itself succeeded; log for visibility but not an error.
+			s.messageLog.Warn("agent DM: MarkMessageDispatched CAS miss (already transitioned)",
+				"message_id", msgID)
+		}
 	}
 
 	// Audit: dispatch outcome (#1690).

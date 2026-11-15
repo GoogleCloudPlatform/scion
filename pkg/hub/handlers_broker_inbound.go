@@ -507,13 +507,11 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		return s.store.CreateMessage(r.Context(), storeMsg)
 	}
 
-	// Attachments stored as artifacts are bound to a stored message, and
-	// their delivery is redeemed against it, so a message that names them
-	// is persisted BEFORE dispatch, as the hub's other send paths do; a
-	// failed dispatch then marks the row failed. Its attachments are bound
-	// as the sender's, and planned for the recipient agent's inbox; plugin
-	// conversations are never projected into the scratchpad.
+	// Persist BEFORE dispatch so Conduit row binding (withDispatchMessageID)
+	// and awaiting_session hold/re-drive cover all broker-inbound messages,
+	// not only messages carrying attachments (ptone/scion#7881).
 	persisted := false
+	var persistErr error
 	var boundAttachments []AttachmentRef
 	if len(attachRefs) > 0 {
 		if err := persistInbound(); err != nil {
@@ -528,6 +526,25 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			s.bindProject(senderCtx, storeMsg, attachRefs), attachRefs)
 		req.Message.AttachmentDeliveries = attachmentDeliveries(storeMsg.ID, boundAttachments)
 		s.applyAttachmentPlan(r.Context(), agent, req.Message)
+	} else {
+		persistErr = persistInbound()
+		if persistErr == nil {
+			persisted = true
+		} else if agentReincarnating {
+			// F1 (p2a-r2 review): while the recipient is mid-`scion
+			// reincarnate`, dispatch is skipped below (agentReincarnating), so
+			// a persist failure means the message is neither saved nor
+			// dispatched — fail loudly so the caller can retry safely.
+			log.Error("Failed to persist inbound broker message",
+				"error", persistErr,
+				"message_id", storeMsg.ID,
+				"conversation_id", storeMsg.ConversationID,
+				"agent_id", agent.ID,
+			)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"failed to persist message; agent is reincarnating, retry", nil)
+			return
+		}
 	}
 
 	// Phase 9b(ii): render the delivery envelope before dispatch when the
@@ -584,10 +601,20 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	}
 	logMessageRecord(s.recordLog(), agent, &recordMsg)
 	if !agentReincarnating {
-		retryCtx, retryCancel := context.WithTimeout(r.Context(), 30*time.Second)
+		dispatchParent := r.Context()
+		inboundMsgID := ""
+		var inboundStorePtr *store.Message
+		if persisted {
+			dispatchParent = withDispatchMessageID(r.Context(), storeMsg.ID)
+			inboundMsgID = storeMsg.ID
+			inboundStorePtr = storeMsg
+		}
+		retryCtx, retryCancel := context.WithTimeout(dispatchParent, 30*time.Second)
 		defer retryCancel()
 
-		if err := dispatchWithBrokerRetry(retryCtx, nil, dispatcher, agent, req.Message.Msg, req.Message.Urgent, req.Message); errors.Is(err, ErrBrokerTimeout) {
+		if _, err := s.holdOrDispatch(retryCtx, agent, inboundMsgID, inboundStorePtr, func() error {
+			return dispatchWithBrokerRetry(retryCtx, nil, dispatcher, agent, req.Message.Msg, req.Message.Urgent, req.Message)
+		}); errors.Is(err, ErrBrokerTimeout) {
 			if persisted {
 				s.markInboundFailed(r.Context(), storeMsg.ID, err)
 			}
@@ -613,11 +640,6 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		"type", req.Message.Type,
 	)
 
-	// A message with attachments was persisted before dispatch (above).
-	var persistErr error
-	if !persisted {
-		persistErr = persistInbound()
-	}
 	if err := persistErr; err != nil {
 		log.Error("Failed to persist inbound broker message",
 			"error", err,
@@ -625,18 +647,6 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			"conversation_id", storeMsg.ConversationID,
 			"agent_id", agent.ID,
 		)
-		// F1 (p2a-r2 review): while the recipient is mid-`scion
-		// reincarnate`, dispatch was skipped above (agentReincarnating), so
-		// a persist failure here means the message is neither saved nor
-		// dispatched — the "deferred ⇒ persisted" promise the gate makes
-		// would be a lie. Fail loudly instead. This is safe to retry (no
-		// dispatch happened, so a retry cannot double-deliver), unlike the
-		// non-fatal case below where the dispatch already succeeded.
-		if agentReincarnating {
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-				"failed to persist message; agent is reincarnating, retry", nil)
-			return
-		}
 		// Non-fatal: the dispatch already succeeded, so the agent got the
 		// message. The agent now holds identifiers (message_id,
 		// conversation_id) that reference an unpersisted row. Failing the

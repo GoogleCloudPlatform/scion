@@ -3303,7 +3303,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			retryCtx, retryCancel := context.WithTimeout(dispatchCtx, 30*time.Second)
 			defer retryCancel()
 
-			if err := dispatchWithBrokerRetry(retryCtx, nil, dispatcher, agent, dispatchMsg.Msg, req.Interrupt, dispatchMsg); err != nil {
+			if _, err := s.holdOrDispatch(retryCtx, agent, persistedMsgID, nil, func() error {
+				return dispatchWithBrokerRetry(retryCtx, nil, dispatcher, agent, dispatchMsg.Msg, req.Interrupt, dispatchMsg)
+			}); err != nil {
 				if persistedMsgID != "" {
 					if markErr := s.markFailed(ctx, persistedMsgID, err.Error()); markErr != nil {
 						s.messageLog.Error("Failed to mark message as failed", "id", persistedMsgID, "error", markErr)
@@ -3785,7 +3787,15 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				groupDispatchCtx = withDispatchMessageID(ctx, storeMsg.ID)
 			}
 			retryCtx, retryCancel := context.WithTimeout(groupDispatchCtx, 30*time.Second)
-			if err := dispatchWithBrokerRetry(retryCtx, nil, dispatcher, agent, plainMessage, interrupt, &agentMsg); err != nil {
+			groupMsgID := ""
+			var groupStoreMsg *store.Message
+			if persisted {
+				groupMsgID = storeMsg.ID
+				groupStoreMsg = storeMsg
+			}
+			if _, err := s.holdOrDispatch(retryCtx, agent, groupMsgID, groupStoreMsg, func() error {
+				return dispatchWithBrokerRetry(retryCtx, nil, dispatcher, agent, plainMessage, interrupt, &agentMsg)
+			}); err != nil {
 				retryCancel()
 				if persisted {
 					if markErr := s.markFailed(ctx, storeMsg.ID, err.Error()); markErr != nil {
@@ -4348,7 +4358,15 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 			broadcastDispatchCtx = withDispatchMessageID(ctx, storeMsg.ID)
 		}
 		retryCtx, retryCancel := context.WithTimeout(broadcastDispatchCtx, 30*time.Second)
-		dispatchErr := dispatchWithBrokerRetry(retryCtx, s.recordLog(), dispatcher, &agent, agentMsg.Msg, interrupt, &agentMsg)
+		broadcastMsgID := ""
+		var broadcastStoreMsg *store.Message
+		if persisted {
+			broadcastMsgID = storeMsg.ID
+			broadcastStoreMsg = storeMsg
+		}
+		_, dispatchErr := s.holdOrDispatch(retryCtx, &agent, broadcastMsgID, broadcastStoreMsg, func() error {
+			return dispatchWithBrokerRetry(retryCtx, s.recordLog(), dispatcher, &agent, agentMsg.Msg, interrupt, &agentMsg)
+		})
 		retryCancel()
 
 		if dispatchErr != nil {
@@ -4699,7 +4717,15 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 			mentionDispatchParent = withDispatchMessageID(aggregateCtx, storeMsg.ID)
 		}
 		dispatchCtx, cancel := context.WithTimeout(mentionDispatchParent, 10*time.Second)
-		if dispatchErr := dispatchWithBrokerRetry(dispatchCtx, s.recordLog(), dispatcher, mentionAgent, mentionMsg.Msg, false, mentionMsg); dispatchErr != nil {
+		mentionMsgID := ""
+		var mentionStorePtr *store.Message
+		if persisted {
+			mentionMsgID = storeMsg.ID
+			mentionStorePtr = storeMsg
+		}
+		if _, dispatchErr := s.holdOrDispatch(dispatchCtx, mentionAgent, mentionMsgID, mentionStorePtr, func() error {
+			return dispatchWithBrokerRetry(dispatchCtx, s.recordLog(), dispatcher, mentionAgent, mentionMsg.Msg, false, mentionMsg)
+		}); dispatchErr != nil {
 			cancel()
 			if aggregateCtx.Err() != nil {
 				results[i].Status = "timeout"

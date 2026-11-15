@@ -4829,6 +4829,9 @@ func (s *Server) SetChannelRegistry(r *ChannelRegistry) {
 // SetMessageBrokerProxy sets the message broker proxy for pub/sub message routing.
 // When set, messages can be routed through the broker instead of direct dispatch.
 func (s *Server) SetMessageBrokerProxy(p *MessageBrokerProxy) {
+	if p != nil && p.holdOrDispatch == nil {
+		p.holdOrDispatch = s.holdOrDispatch
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.messageBrokerProxy = p
@@ -5514,6 +5517,7 @@ func (s *Server) StartMessageBroker(b eventbus.EventBus) {
 	}
 	proxy.recordArtifactRefs = s.recordMessageArtifacts
 	proxy.recordHumanMentions = s.recordHumanMentions
+	proxy.holdOrDispatch = s.holdOrDispatch
 	s.messageBrokerProxy = proxy
 	proxy.Start()
 
@@ -6249,24 +6253,9 @@ func (s *Server) messageEventHandler() EventHandler {
 		structuredMsg.Plain = payload.Plain
 		structuredMsg.Urgent = payload.Interrupt
 
-		// Phase 9f: render delivery envelope for scheduler messages.
-		// No persisted row and no conversation exist for scheduled
-		// deliveries, so MessageID and ConvResult are honestly absent.
-		if s.writeDenyEnabled() {
-			var ts time.Time
-			if t, err := time.Parse(time.RFC3339, structuredMsg.Timestamp); err == nil {
-				ts = t
-			}
-			structuredMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
-				ConvResult: nil,
-				Msg:        structuredMsg,
-				CreatedAt:  ts,
-			})
-		}
-
 		// A wake fire may have spent the handler's deadline on the resume
-		// (wakeScheduledTarget runs on its own budget); its dispatch gets
-		// a fresh bound, keeping the handler's values.
+		// (wakeScheduledTarget runs on its own budget); its persist and
+		// dispatch get a fresh bound, keeping the handler's values.
 		dispatchBase := ctx
 		if wake {
 			detached, cancelDetached := detachKeepFireAbort(ctx)
@@ -6276,7 +6265,27 @@ func (s *Server) messageEventHandler() EventHandler {
 		retryCtx, retryCancel := context.WithTimeout(dispatchBase, scheduledMessageDispatchTimeout)
 		defer retryCancel()
 
-		if err := dispatchWithBrokerRetry(retryCtx, s.recordLog(), dispatcher, agent, payload.Message, payload.Interrupt, structuredMsg); err != nil {
+		// Persist a store.Message row before dispatch so Conduit row binding
+		// and awaiting_session hold/re-drive cover scheduled messages
+		// including wake fires (ptone/scion#7881, Q5=a).
+		storeMsg, persistErr := s.persistScheduledMessageEvent(retryCtx, evt, agent, payload, structuredMsg)
+		if persistErr != nil {
+			return persistErr
+		}
+		if s.writeDenyEnabled() {
+			structuredMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+				MessageID:  storeMsg.ID,
+				ConvResult: nil,
+				Msg:        structuredMsg,
+				CreatedAt:  storeMsg.CreatedAt,
+			})
+		}
+
+		dispatchCtx := withDispatchMessageID(retryCtx, storeMsg.ID)
+		if _, err := s.holdOrDispatch(dispatchCtx, agent, storeMsg.ID, storeMsg, func() error {
+			return dispatchWithBrokerRetry(dispatchCtx, s.recordLog(), dispatcher, agent, payload.Message, payload.Interrupt, structuredMsg)
+		}); err != nil {
+			_ = s.markFailed(retryCtx, storeMsg.ID, err.Error())
 			if wake && scheduledFireAborted(ctx) {
 				return errScheduledWakeShutdown
 			}

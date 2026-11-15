@@ -2265,7 +2265,9 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		// dispatchWithBrokerRetry (effectiveInterrupt), the single place
 		// that decides it.
 		primaryInterrupt := interrupt && state.Phase(primaryAgent.Phase) == state.PhaseRunning
-		if err := dispatchWithBrokerRetry(retryCtx, nil, dispatcher, primaryAgent, agentContent, primaryInterrupt, msg); err != nil {
+		if _, err := s.holdOrDispatch(retryCtx, primaryAgent, storeMsg.ID, storeMsg, func() error {
+			return dispatchWithBrokerRetry(retryCtx, nil, dispatcher, primaryAgent, agentContent, primaryInterrupt, msg)
+		}); err != nil {
 			s.messageLog.Error("Failed to dispatch to agent", "agent", primaryAgent.Slug, "error", err)
 			_ = s.markFailed(ctx, storeMsg.ID, err.Error())
 			// Mirror the store update above in storeMsg so the response
@@ -2499,7 +2501,15 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 				// stopped and error secondaries also take the buffered
 				// non-interrupt dispatch.
 				mentionInterrupt := interrupt && state.Phase(mentionAgent.Phase) == state.PhaseRunning
-				if err := dispatchWithBrokerRetry(retryCtx, nil, dispatcher, mentionAgent, agentContent, mentionInterrupt, mentionMsg); err != nil {
+				mentionID := ""
+				var mentionPtr *store.Message
+				if mentionPersisted {
+					mentionID = mentionStoreMsg.ID
+					mentionPtr = mentionStoreMsg
+				}
+				if _, err := s.holdOrDispatch(retryCtx, mentionAgent, mentionID, mentionPtr, func() error {
+					return dispatchWithBrokerRetry(retryCtx, nil, dispatcher, mentionAgent, agentContent, mentionInterrupt, mentionMsg)
+				}); err != nil {
 					s.messageLog.Error("Failed to dispatch mention", "slug", mentionAgent.Slug, "error", err)
 					s.finishAttachmentAddressee(context.WithoutCancel(ctx), mentionAddressee, err)
 					mentionDispatchOK = false

@@ -206,9 +206,10 @@ func TestMessageID3881_ChatReply(t *testing.T) {
 	assert.Equal(t, origMsgID, raw["reply_to"], "reply_to keeps naming the replied-to message")
 }
 
-// Scheduled message deliveries store no message row, so the envelope omits
-// message_id rather than inventing one.
-func TestMessageID3881_SchedulerOmitsMessageID(t *testing.T) {
+// Scheduled message deliveries persist a store.Message row before dispatch
+// (ptone/scion#7881, Q5=a), so the rendered envelope carries that stored
+// message_id for Conduit row binding and awaiting_session hold/re-drive.
+func TestMessageID3881_SchedulerCarriesStoredMessageID(t *testing.T) {
 	srv, s := testServer(t)
 	projectID := seed3881AgentProject(t, s, "msgid3881-sched", "msgid3881-sched-a")
 	dispatcher := &recordingDispatcher{}
@@ -224,8 +225,9 @@ func TestMessageID3881_SchedulerOmitsMessageID(t *testing.T) {
 
 	calls := dispatcher.getCalls()
 	require.Len(t, calls, 1)
-	_, ok := envelopeMessageID3881(t, calls[0].StructuredMessage.DeliveryText)
-	assert.False(t, ok, "a delivery with no stored message must omit message_id")
+	id, ok := envelopeMessageID3881(t, calls[0].StructuredMessage.DeliveryText)
+	require.True(t, ok, "scheduled message envelope must carry the persisted message_id")
+	requireStoredFor3881(t, s, id, "msgid3881-sched-a")
 }
 
 // Status notifications store no message row either.

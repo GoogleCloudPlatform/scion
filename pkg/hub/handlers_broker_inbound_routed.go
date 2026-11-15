@@ -585,30 +585,10 @@ func (s *Server) dispatchRoutedRecipient(
 		msg.DeliveryText = messaging.RenderDeliveryText(renderInput)
 	}
 
-	// --- Dispatch ---
-	retryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	// The record is logged from a copy carrying the effective conversation,
-	// before dispatch, so the dispatched message is unchanged.
-	recordMsg := *msg
-	if effectiveConv != nil {
-		recordMsg.ConversationID = effectiveConv.ConversationID
-	}
-	logMessageRecord(s.recordLog(), agent, &recordMsg)
-	if err := dispatchWithBrokerRetry(retryCtx, nil, dispatcher, agent, msg.Msg, msg.Urgent, msg); errors.Is(err, ErrBrokerTimeout) {
-		result.Status = "error"
-		result.Error = "broker unreachable after 30s deadline"
-		return result
-	} else if err != nil {
-		s.messageLog.Error("routed inbound dispatch failed",
-			"agent_slug", agent.Slug, "error", err)
-		result.Status = "error"
-		result.Error = "dispatch failed: " + err.Error()
-		return result
-	}
-
-	// --- Persist ---
+	// --- Persist before dispatch (ptone/scion#7881) ---
+	// Persisting before dispatch allows Conduit row binding (withDispatchMessageID)
+	// and awaiting_session hold/re-drive, while preserving the non-fatal
+	// PersistenceWarning fallback when CreateMessage fails.
 	storeMsg := &store.Message{
 		ID:            msgID,
 		ProjectID:     params.req.ProjectID,
@@ -629,13 +609,56 @@ func (s *Server) dispatchRoutedRecipient(
 		storeMsg.ConversationID = effectiveConv.ConversationID
 	}
 	persisted := false
-	if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
-		s.messageLog.Error("Failed to persist routed inbound message",
-			"error", err, "message_id", msgID, "agent_slug", agent.Slug)
-		// Persistence failure after dispatch is nonfatal — dispatch succeeded.
-		result.PersistenceWarning = "message dispatched but persistence failed: " + err.Error()
-	} else {
+	persistErr := s.store.CreateMessage(ctx, storeMsg)
+	if persistErr == nil {
 		persisted = true
+	}
+
+	// --- Dispatch ---
+	dispatchParent := ctx
+	routedMsgID := ""
+	var routedStorePtr *store.Message
+	if persisted {
+		dispatchParent = withDispatchMessageID(ctx, msgID)
+		routedMsgID = msgID
+		routedStorePtr = storeMsg
+	}
+	retryCtx, cancel := context.WithTimeout(dispatchParent, 30*time.Second)
+	defer cancel()
+
+	// The record is logged from a copy carrying the effective conversation,
+	// before dispatch, so the dispatched message is unchanged.
+	recordMsg := *msg
+	if effectiveConv != nil {
+		recordMsg.ConversationID = effectiveConv.ConversationID
+	}
+	logMessageRecord(s.recordLog(), agent, &recordMsg)
+	if _, err := s.holdOrDispatch(retryCtx, agent, routedMsgID, routedStorePtr, func() error {
+		return dispatchWithBrokerRetry(retryCtx, nil, dispatcher, agent, msg.Msg, msg.Urgent, msg)
+	}); errors.Is(err, ErrBrokerTimeout) {
+		if persisted {
+			_ = s.markFailed(ctx, msgID, err.Error())
+		}
+		result.Status = "error"
+		result.Error = "broker unreachable after 30s deadline"
+		return result
+	} else if err != nil {
+		if persisted {
+			_ = s.markFailed(ctx, msgID, err.Error())
+		}
+		s.messageLog.Error("routed inbound dispatch failed",
+			"agent_slug", agent.Slug, "error", err)
+		result.Status = "error"
+		result.Error = "dispatch failed: " + err.Error()
+		return result
+	}
+
+	if persistErr != nil {
+		s.messageLog.Error("Failed to persist routed inbound message",
+			"error", persistErr, "message_id", msgID, "agent_slug", agent.Slug)
+		// Persistence failure is nonfatal once dispatch succeeded.
+		result.PersistenceWarning = "message dispatched but persistence failed: " + persistErr.Error()
+	} else {
 		s.events.PublishUserMessage(ctx, storeMsg, nil, nil)
 	}
 

@@ -134,7 +134,7 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 		// before it, and a replay returns before it too.
 		"choices_batch.go:publishChoiceResponseSet": "Called only after RecordAnswerSet stored the response row; a RecordAnswerSet error or a replay returns before it",
 
-		"message_delivery_failures.go:applyBrokerMessageFailure": "Acts on an already-persisted row (confirmed via GetMessage) after markFailed has already committed; publish mirrors the committed write, not a pending one",
+		"message_delivery_failures.go:notifyStoredMessageSenderFailed": "Acts only on already-persisted rows after FailUndeliveredMessage / ExpireHeldMessages has committed dispatch_state=failed; publish mirrors the committed write",
 	}
 
 	// -------------------------------------------------------------------

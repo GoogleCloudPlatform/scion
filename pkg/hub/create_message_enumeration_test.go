@@ -92,6 +92,12 @@ func TestCreateMessageEnumeration(t *testing.T) {
 		// Both broker paths also skip conversation resolution for broadcasts.
 		// No conversation ownership applies.
 		"handlers_agent_messaging.go:broadcastDirect": "Deferred pending group-conversation model; broadcast is one-to-many with no two-party key to derive",
+
+		// persistScheduledMessageEvent (ptone/scion#7881, Q5=a): scheduler
+		// system messages are timer/cron-originated system fires with no
+		// two-party chat conversation; ThreadID records evt.ID for authority
+		// re-validation on re-drive.
+		"message_hold.go:persistScheduledMessageEvent": "Scheduled system messages are timer/cron-originated with no two-party conversation key",
 	}
 
 	// Build combined set for lookup.
