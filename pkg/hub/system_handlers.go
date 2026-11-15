@@ -21,12 +21,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -962,6 +964,41 @@ func resolveBuildScript() string {
 	return path
 }
 
+// bundledHarnessBuildImagesFromFS maps each bundled harness directory in hfs
+// that ships a Dockerfile to the image configured in its config.yaml.
+func bundledHarnessBuildImagesFromFS(hfs fs.FS) map[string]string {
+	entries, err := fs.ReadDir(hfs, ".")
+	if err != nil {
+		return nil
+	}
+	images := make(map[string]string, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if _, err := fs.Stat(hfs, name+"/Dockerfile"); err != nil {
+			continue
+		}
+		data, err := fs.ReadFile(hfs, name+"/config.yaml")
+		if err != nil {
+			continue
+		}
+		cfg, err := config.ParseHarnessConfigYAML(data)
+		if err != nil {
+			continue
+		}
+		if img := strings.TrimSpace(cfg.Image); img != "" {
+			images[name] = img
+		}
+	}
+	return images
+}
+
+var bundledHarnessBuildImages = sync.OnceValue(func() map[string]string {
+	return bundledHarnessBuildImagesFromFS(harness.HarnessesFS())
+})
+
 func (s *Server) handleSystemImagesBuild(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w, http.MethodPost)
@@ -1009,9 +1046,9 @@ func (s *Server) handleSystemImagesBuild(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	allowed := map[string]bool{"claude": true, "gemini": true, "codex": true, "opencode": true}
+	allowed := bundledHarnessBuildImages()
 	for _, h := range req.Harnesses {
-		if !allowed[h] {
+		if _, ok := allowed[h]; !ok {
 			ValidationError(w, fmt.Sprintf("unknown harness %q", h), nil)
 			return
 		}
@@ -1067,14 +1104,22 @@ func (s *Server) runImageBuild(ctx context.Context, subject, buildScript string,
 	if err := cmd.Wait(); err != nil {
 		s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: "build failed: " + err.Error()})
 	} else {
-		for _, h := range harnesses {
-			s.events.PublishRaw(subject, map[string]string{
-				"image":  "scion-" + h + ":latest",
-				"status": "done",
-			})
-		}
-		s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: "build complete"})
+		s.publishImageBuildCompletion(subject, harnesses, bundledHarnessBuildImages())
 	}
+}
+
+func (s *Server) publishImageBuildCompletion(subject string, harnesses []string, images map[string]string) {
+	for _, h := range harnesses {
+		image := images[h]
+		if image == "" {
+			image = "scion-" + h + ":latest"
+		}
+		s.events.PublishRaw(subject, map[string]string{
+			"image":  image,
+			"status": "done",
+		})
+	}
+	s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: "build complete"})
 }
 
 // --- 5.2: Filesystem Endpoints ---
