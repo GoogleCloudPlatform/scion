@@ -831,15 +831,15 @@ func TestGroupMessage_AutoWakeHintForHubSuspendedMember(t *testing.T) {
 
 type afterWorkerReadStore struct {
 	store.Store
+	fault     *storeFaultSwitch
 	targetID  string
-	armed     atomic.Bool
 	fired     atomic.Bool
 	afterRead func()
 }
 
 func (w *afterWorkerReadStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
 	a, err := w.Store.GetAgent(ctx, id)
-	if err == nil && id == w.targetID && w.armed.Load() && w.fired.CompareAndSwap(false, true) {
+	if err == nil && w.fault.Active() && id == w.targetID && w.fired.CompareAndSwap(false, true) {
 		w.afterRead()
 	}
 	return a, err
@@ -909,7 +909,9 @@ func TestIdleSuspend_PostReadTOCTOU(t *testing.T) {
 	for _, tc := range stateCases {
 		t.Run("before_claim/"+tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			srv, rawStore := testServer(t)
+			srv, rawStore, wrapped, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *afterWorkerReadStore {
+				return &afterWorkerReadStore{Store: inner, fault: f}
+			})
 			disp := &runIntentDispatcher{}
 			srv.SetDispatcher(disp)
 			enableIdleSuspendForTest(t, srv, 15*time.Minute)
@@ -919,18 +921,14 @@ func TestIdleSuspend_PostReadTOCTOU(t *testing.T) {
 			snapshot := newIdleCandidateBrokerAgent(t, rawStore, "preclaim-"+tc.name, string(state.ActivityIdle), &pastGrace, now.Add(-15*time.Second))
 			db := rawStore.(*entadapter.CompositeStore).DB()
 
-			wrapped := &afterWorkerReadStore{
-				Store:    rawStore,
-				targetID: snapshot.ID,
-				afterRead: func() {
-					tc.mutate(t, func(q string, args ...any) {
-						_, err := db.ExecContext(ctx, q+" AND id = ?", append(args, snapshot.ID)...)
-						require.NoError(t, err)
-					})
-				},
+			wrapped.targetID = snapshot.ID
+			wrapped.afterRead = func() {
+				tc.mutate(t, func(q string, args ...any) {
+					_, err := db.ExecContext(ctx, q+" AND id = ?", append(args, snapshot.ID)...)
+					require.NoError(t, err)
+				})
 			}
-			srv.store = wrapped
-			wrapped.armed.Store(true)
+			fault.Arm()
 
 			srv.autoSuspendAgents(ctx, []autoSuspendItem{{agent: *snapshot, reason: state.SuspendReasonIdle}})
 
@@ -977,6 +975,9 @@ func TestIdleSuspend_PostReadTOCTOU(t *testing.T) {
 		t.Run("message_delivered_before_claim/"+dmPath, func(t *testing.T) {
 			ctx := context.Background()
 			srv, rawStore, sender, target := createWakeDMFixtures(t, string(state.PhaseRunning))
+			wrapped, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *afterWorkerReadStore {
+				return &afterWorkerReadStore{Store: inner, fault: f}
+			})
 			disp := &wakeTrackingDispatcher{}
 			srv.SetDispatcher(disp)
 			enableIdleSuspendForTest(t, srv, 15*time.Minute)
@@ -998,26 +999,21 @@ func TestIdleSuspend_PostReadTOCTOU(t *testing.T) {
 			require.NoError(t, err)
 			u := wakeLifecycleUser(t, rawStore, "dm-pre-"+dmPath, target.ProjectID, "agent.message", "agent.read")
 
-			wrapped := &afterWorkerReadStore{
-				Store:    rawStore,
-				targetID: snapshot.ID,
-				afterRead: func() {
-					// Deliver a DM right after the worker read the candidate,
-					// before ClaimIdleSuspend runs.
-					srv.store = rawStore
-					if dmPath == "agent_dm" {
-						res, dmErr := srv.ExecuteAgentDM(ctx, awAgentDMInput(sender, snapshot, "hello before claim"))
-						require.Nil(t, dmErr)
-						require.Equal(t, AgentDMAccepted, res.Outcome)
-					} else {
-						rec := requestAsIdentity(t, srv, authUser(u), http.MethodPost, "/api/v1/agents/"+snapshot.ID+"/message",
-							map[string]any{"message": "hello before claim"})
-						require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-					}
-				},
+			wrapped.targetID = snapshot.ID
+			wrapped.afterRead = func() {
+				// Deliver a DM right after the worker read the candidate,
+				// before ClaimIdleSuspend runs.
+				if dmPath == "agent_dm" {
+					res, dmErr := srv.ExecuteAgentDM(ctx, awAgentDMInput(sender, snapshot, "hello before claim"))
+					require.Nil(t, dmErr)
+					require.Equal(t, AgentDMAccepted, res.Outcome)
+				} else {
+					rec := requestAsIdentity(t, srv, authUser(u), http.MethodPost, "/api/v1/agents/"+snapshot.ID+"/message",
+						map[string]any{"message": "hello before claim"})
+					require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				}
 			}
-			srv.store = wrapped
-			wrapped.armed.Store(true)
+			fault.Arm()
 
 			srv.autoSuspendAgents(ctx, []autoSuspendItem{{agent: *snapshot, reason: state.SuspendReasonIdle}})
 
