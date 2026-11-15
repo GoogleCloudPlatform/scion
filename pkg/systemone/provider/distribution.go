@@ -26,8 +26,9 @@ const (
 	// SumTolerance is the allowed deviation from 1.0 when validating closed
 	// probability distributions (provider-design §6.3, §7.4).
 	SumTolerance = metrics.SumTolerance
-	// TieTolerance is the top-two probability margin at or below which a closed
-	// choice answer is classified as Uncertain("tie") (provider-design §4.3, §7.4).
+	// TieTolerance is the top-two probability margin at or below which a binary
+	// or closed-choice answer is classified as Uncertain("tie")
+	// (provider-design §4.3, §6.3, §7.4).
 	TieTolerance = 1e-9
 )
 
@@ -77,36 +78,59 @@ func ValidateDistribution(dist map[string]float64, declaredIDs []string) error {
 	return nil
 }
 
+// IsTie reports whether dist is tied at the top: its two largest probabilities
+// differ by at most TieTolerance (1e-9), or dist has fewer than two finite
+// options (provider-design §4.3, §6.3, §7.4). Binary and closed-choice answers
+// share this single predicate across adapter decoding and runtime classification
+// (for binary {"true": p, "false": 1 - p}, this is |2p - 1| <= 1e-9).
+func IsTie(dist map[string]float64) bool {
+	_, tied := ArgmaxChoice(dist)
+	return tied
+}
+
 // ArgmaxChoice returns the unique highest-probability option key in dist, or
-// ("", true) when the top two options are tied within TieTolerance (1e-9).
+// ("", true) when dist is tied at the top within TieTolerance (1e-9).
 // Ties are resolved deterministically regardless of Go map iteration order.
 func ArgmaxChoice(dist map[string]float64) (choice string, tied bool) {
 	if len(dist) < 2 {
 		return "", true
 	}
-	type kv struct {
-		key  string
-		prob float64
-	}
-	items := make([]kv, 0, len(dist))
+	var (
+		bestKey   string
+		bestProb  float64
+		hasBest   bool
+		second    float64
+		hasSecond bool
+	)
 	for k, p := range dist {
-		items = append(items, kv{key: k, prob: p})
-	}
-	sort.Slice(items, func(i, j int) bool {
-		if items[i].prob != items[j].prob {
-			return items[i].prob > items[j].prob
+		if math.IsNaN(p) || math.IsInf(p, 0) {
+			return "", true
 		}
-		return items[i].key < items[j].key
-	})
-	if items[0].prob-items[1].prob <= TieTolerance {
+		if !hasBest || p > bestProb || (p == bestProb && k < bestKey) {
+			if hasBest {
+				second = bestProb
+				hasSecond = true
+			}
+			bestKey = k
+			bestProb = p
+			hasBest = true
+			continue
+		}
+		if !hasSecond || p > second {
+			second = p
+			hasSecond = true
+		}
+	}
+	if !hasSecond || bestProb-second <= TieTolerance {
 		return "", true
 	}
-	return items[0].key, false
+	return bestKey, false
 }
 
 // BinaryDistribution validates pTrue in [0, 1] and builds the canonical
-// {"true": pTrue, "false": 1 - pTrue} distribution (provider-design §4.3, §7.4).
-// When pTrue == 0.5 exactly, val is nil and tied is true.
+// {"true": pTrue, "false": 1 - pTrue} distribution (provider-design §4.3, §6.3, §7.4).
+// When IsTie(dist) holds (|2*pTrue - 1| <= TieTolerance), val is nil and tied is
+// true; otherwise val points to (pTrue > 0.5).
 func BinaryDistribution(pTrue float64) (dist map[string]float64, val *bool, tied bool, err error) {
 	if math.IsNaN(pTrue) || math.IsInf(pTrue, 0) || pTrue < 0 || pTrue > 1 {
 		return nil, nil, false, NewProviderError(FailMalformedResponse, false, 0, 0, "binary probability must be finite and in [0, 1]")
@@ -115,7 +139,7 @@ func BinaryDistribution(pTrue float64) (dist map[string]float64, val *bool, tied
 		BinaryTrueKey:  pTrue,
 		BinaryFalseKey: 1.0 - pTrue,
 	}
-	if pTrue == 0.5 {
+	if IsTie(dist) {
 		return dist, nil, true, nil
 	}
 	b := pTrue > 0.5

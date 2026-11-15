@@ -168,16 +168,55 @@ func TestRegistry_RegisterLookupAndSideEffectFreeEnforcement(t *testing.T) {
 }
 
 func TestDistributionAndTieHelpers(t *testing.T) {
-	// Binary exact tie vs non-tie.
+	// Binary exact tie, near-0.5 tie boundary (uniform 1e-9 rule), and non-tie.
 	distTie, valTie, tied, err := provider.BinaryDistribution(0.5)
 	require.NoError(t, err)
 	assert.True(t, tied)
+	assert.True(t, provider.IsTie(distTie))
 	assert.Nil(t, valTie)
 	assert.Equal(t, map[string]float64{"true": 0.5, "false": 0.5}, distTie)
+
+	// Inside 1e-9 margin: |2p - 1| <= 1e-9 is a tie (Bool == nil, tied == true),
+	// including 0.5 ± 2e-10 and math.Nextafter(0.5+5e-10, 0) (the largest float64
+	// above 0.5 whose binary64 margin p-(1-p) = 9.9999986e-10 <= 1e-9).
+	for _, pNearTie := range []float64{
+		0.5 + 2e-10,
+		0.5 - 2e-10,
+		0.5 + 4e-10,
+		0.5 - 4e-10,
+		math.Nextafter(0.5+5e-10, 0),
+		math.Nextafter(0.5-5e-10, 1),
+	} {
+		distNear, valNear, nearTied, nearErr := provider.BinaryDistribution(pNearTie)
+		require.NoError(t, nearErr, "p=%g", pNearTie)
+		assert.True(t, nearTied, "expected tie for p=%.17g", pNearTie)
+		assert.True(t, provider.IsTie(distNear), "expected IsTie=true for p=%.17g", pNearTie)
+		assert.Nil(t, valNear, "expected nil Bool on tie for p=%.17g", pNearTie)
+	}
+
+	// Outside 1e-9 margin: 0.5 + 5e-10 rounds up in IEEE-754 binary64 by 0.37 ULP
+	// so p-(1-p) = 1.000000082740371e-9 > 1e-9, and 0.5 ± 2e-9 has |2p-1| = 4e-9 > 1e-9.
+	for _, tc := range []struct {
+		p    float64
+		want bool
+	}{
+		{p: 0.5 + 5e-10, want: true},
+		{p: 0.5 - 5e-10, want: false},
+		{p: 0.5 + 2e-9, want: true},
+		{p: 0.5 - 2e-9, want: false},
+	} {
+		distClear, valClear, clearTied, clearErr := provider.BinaryDistribution(tc.p)
+		require.NoError(t, clearErr, "p=%.17g", tc.p)
+		assert.False(t, clearTied, "expected non-tie for p=%.17g", tc.p)
+		assert.False(t, provider.IsTie(distClear), "expected IsTie=false for p=%.17g", tc.p)
+		require.NotNil(t, valClear, "expected non-nil Bool for p=%.17g", tc.p)
+		assert.Equal(t, tc.want, *valClear, "p=%.17g", tc.p)
+	}
 
 	distTrue, valTrue, tied, err := provider.BinaryDistribution(0.8)
 	require.NoError(t, err)
 	assert.False(t, tied)
+	assert.False(t, provider.IsTie(distTrue))
 	require.NotNil(t, valTrue)
 	assert.True(t, *valTrue)
 	assert.InDelta(t, 0.2, distTrue["false"], 1e-12)
@@ -194,6 +233,7 @@ func TestDistributionAndTieHelpers(t *testing.T) {
 	require.NoError(t, provider.ValidateDistribution(validDist, declared))
 	choice, choiceTied := provider.ArgmaxChoice(validDist)
 	assert.False(t, choiceTied)
+	assert.False(t, provider.IsTie(validDist))
 	assert.Equal(t, "engineering", choice)
 
 	// Tie within 1e-9 at the top yields tied=true, whereas a tie for runner-up does not.
@@ -201,12 +241,14 @@ func TestDistributionAndTieHelpers(t *testing.T) {
 	require.NoError(t, provider.ValidateDistribution(tiedChoiceDist, declared))
 	choice, choiceTied = provider.ArgmaxChoice(tiedChoiceDist)
 	assert.True(t, choiceTied)
+	assert.True(t, provider.IsTie(tiedChoiceDist))
 	assert.Empty(t, choice)
 
 	runnerUpTieDist := map[string]float64{"billing": 0.30, "engineering": 0.40, "cannot_tell": 0.30}
 	require.NoError(t, provider.ValidateDistribution(runnerUpTieDist, declared))
 	choice, choiceTied = provider.ArgmaxChoice(runnerUpTieDist)
 	assert.False(t, choiceTied)
+	assert.False(t, provider.IsTie(runnerUpTieDist))
 	assert.Equal(t, "engineering", choice)
 
 	// Malformed distributions fail with FailMalformedResponse and never renormalize.
