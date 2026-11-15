@@ -2070,6 +2070,16 @@ describe('<scion-page-project-decisions>', () => {
       if (url.searchParams.get('q') === 'slowsearch') {
         return timeoutResponse();
       }
+      // Mirror Design 13.3: limit=0 returns conversations: [] so facet hydration must use limit=1
+      if (url.searchParams.get('limit') === '0') {
+        return jsonResponse({
+          counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+          prompts: [],
+          agents: [],
+          answerers: [],
+          conversations: [],
+        });
+      }
       return jsonResponse({
         counts: { waitingOnYou: 1, waitingOnOthers: 0 },
         prompts: [makePrompt({ promptMessageId: 'm-recovered' })],
@@ -2082,6 +2092,15 @@ describe('<scion-page-project-decisions>', () => {
       if (url.searchParams.get('q') === 'slowsearch') {
         return timeoutResponse();
       }
+      if (url.searchParams.get('limit') === '0') {
+        return jsonResponse({
+          counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+          entries: [],
+          agents: [],
+          answerers: [],
+          conversations: [],
+        });
+      }
       return jsonResponse({
         counts: { waitingOnYou: 1, waitingOnOthers: 0 },
         entries: [makeLogEntry({ answerId: 'ans-recovered' })],
@@ -2091,8 +2110,10 @@ describe('<scion-page-project-decisions>', () => {
       });
     };
 
-    // 1. First-load SEARCH_TIMEOUT on Waiting on you (`/projects/p-1/decisions?q=slowsearch`)
-    const pendingEl = await mount({ path: '/projects/p-1/decisions?q=slowsearch' });
+    // 1. First-load SEARCH_TIMEOUT on Waiting on you (`/projects/p-1/decisions?q=slowsearch&conversation=topic-release`)
+    const pendingEl = await mount({
+      path: '/projects/p-1/decisions?q=slowsearch&conversation=topic-release',
+    });
     const pendingRoot = pendingEl.shadowRoot!;
     const pendingPanelEl = pendingRoot.querySelector<ScionDecisionsFilterPanel>(
       'scion-decisions-filter-panel'
@@ -2102,10 +2123,30 @@ describe('<scion-page-project-decisions>', () => {
     expect(pendingPanelEl).not.toBeNull();
     expect(pendingPanelEl?.supportsSearch).toBe(true);
 
+    // Fallback facet request ran with limit=1 and without q, populating Conversation/Agent pickers
+    // and resolving the raw `topic-release` key tag to `#release` while keeping the timeout alert
+    expect(
+      requests.some(
+        (r) => r.url.includes('tab=pending') && r.url.includes('limit=1') && !r.url.includes('q=')
+      )
+    ).toBe(true);
+
     const pendingPanel = panelRootOf(pendingEl);
     expect(pendingPanel.querySelector('sl-tag[data-filter-tag="q"]')?.textContent?.trim()).toBe(
       '"slowsearch"'
     );
+    expect(
+      pendingPanel.querySelector('sl-tag[data-filter-tag="conversation"]')?.textContent?.trim()
+    ).toBe('Conversation: #release');
+    expect(
+      pendingPanel.querySelector<HTMLElement & { options?: unknown[] }>(
+        '[data-filter="conversation"]'
+      )?.options
+    ).toEqual([{ value: 'topic-release', label: '#release' }]);
+    expect(
+      pendingPanel.querySelector<HTMLElement & { options?: unknown[] }>('[data-filter="agent"]')
+        ?.options
+    ).toEqual([{ value: 'a-rel', label: 'release-bot' }]);
     expect(pendingPanel.querySelector('[data-clear-filters]')).not.toBeNull();
 
     // "/" shortcut expands panel and exposes search input even on first-load timeout
@@ -2125,8 +2166,11 @@ describe('<scion-page-project-decisions>', () => {
     pendingEl.remove();
     window.localStorage.removeItem('scion:decisions:filters-open');
 
-    // 2. First-load SEARCH_TIMEOUT on Made (`/projects/p-1/decisions?tab=made&q=slowsearch`)
-    const madeEl = await mount({ path: '/projects/p-1/decisions?tab=made&q=slowsearch' });
+    // 2. First-load SEARCH_TIMEOUT on Made (`/projects/p-1/decisions?tab=made&q=slowsearch&conversation=topic-release`)
+    requests = [];
+    const madeEl = await mount({
+      path: '/projects/p-1/decisions?tab=made&q=slowsearch&conversation=topic-release',
+    });
     const madeRoot = madeEl.shadowRoot!;
     const madePanelEl = madeRoot.querySelector<ScionDecisionsFilterPanel>(
       'scion-decisions-filter-panel'
@@ -2137,11 +2181,27 @@ describe('<scion-page-project-decisions>', () => {
     expect(madeRoot.querySelector('.error-state')).toBeNull();
     expect(madePanelEl).not.toBeNull();
     expect(madePanelEl?.supportsSearch).toBe(true);
+    expect(
+      requests.some(
+        (r) => r.url.includes('tab=made') && r.url.includes('limit=1') && !r.url.includes('q=')
+      )
+    ).toBe(true);
 
     const madePanel = panelRootOf(madeEl);
     expect(madePanel.querySelector('sl-tag[data-filter-tag="q"]')?.textContent?.trim()).toBe(
       '"slowsearch"'
     );
+    expect(
+      madePanel.querySelector('sl-tag[data-filter-tag="conversation"]')?.textContent?.trim()
+    ).toBe('Conversation: #release');
+    expect(
+      madePanel.querySelector<HTMLElement & { options?: unknown[] }>('[data-filter="conversation"]')
+        ?.options
+    ).toEqual([{ value: 'topic-release', label: '#release' }]);
+    expect(
+      madePanel.querySelector<HTMLElement & { options?: unknown[] }>('[data-filter="agent"]')
+        ?.options
+    ).toEqual([{ value: 'a-rel', label: 'release-bot' }]);
     expect(madePanel.querySelector('[data-clear-filters]')).not.toBeNull();
 
     // "/" shortcut works on Made first-load timeout too
@@ -2416,5 +2476,93 @@ describe('<scion-page-project-decisions>', () => {
     ).toBe(true);
     expect(root2.querySelector('[data-prompt-card="m-fresh-pending"]')).not.toBeNull();
     expect(root2.querySelector('[data-prompt-card="m-stale-pending"]')).toBeNull();
+  });
+
+  it('does not merge old-filter >200 Pending tail rows on live SSE refresh when pendingNeedsReset is set', async () => {
+    enableBothFlags();
+    const agentUuid = '3f9c0a11-2222-4333-8444-555555555555';
+    const page1Prompts = Array.from({ length: 200 }, (_, i) =>
+      makePrompt({
+        promptMessageId: `m-old-${i}`,
+        decisions: [makeDecision({ rowId: `r-old-${i}`, messageId: `m-old-${i}` })],
+      })
+    );
+    const page2Prompts = Array.from({ length: 5 }, (_, i) =>
+      makePrompt({
+        promptMessageId: `m-old-tail-${i}`,
+        decisions: [makeDecision({ rowId: `r-old-tail-${i}`, messageId: `m-old-tail-${i}` })],
+      })
+    );
+
+    pendingHandler = (url): Promise<Response> => {
+      if (url.searchParams.get('agent') === agentUuid) {
+        return jsonResponse({
+          counts: { waitingOnYou: 205, waitingOnOthers: 0 },
+          filteredCounts: { waitingOnYou: 1, waitingOnOthers: 0 },
+          prompts: [
+            makePrompt({
+              promptMessageId: 'm-agent-only',
+              askerAgentId: agentUuid,
+              decisions: [makeDecision({ rowId: 'r-agent-only', messageId: 'm-agent-only' })],
+            }),
+          ],
+          agents: [{ id: agentUuid, name: 'release-bot' }],
+          answerers: [{ id: 'u-me', name: 'Alice' }],
+          conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+        });
+      }
+      if (url.searchParams.get('cursor') === 'cur-p2') {
+        return jsonResponse({
+          counts: { waitingOnYou: 205, waitingOnOthers: 0 },
+          prompts: page2Prompts,
+          agents: [{ id: agentUuid, name: 'release-bot' }],
+          answerers: [{ id: 'u-me', name: 'Alice' }],
+          conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+        });
+      }
+      return jsonResponse({
+        counts: { waitingOnYou: 205, waitingOnOthers: 0 },
+        prompts: page1Prompts,
+        nextCursor: 'cur-p2',
+        agents: [{ id: agentUuid, name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      });
+    };
+
+    const el = await mount({ path: '/projects/p-1/decisions' });
+    const root = el.shadowRoot!;
+
+    // Load page 2 so >200 unfiltered prompts (including `m-old-tail-0`) are in memory
+    root.querySelector<HTMLElement>('[data-load-more="pending"]')!.click();
+    await settle(el, 25);
+    expect(root.querySelector('[data-prompt-card="m-old-tail-0"]')).not.toBeNull();
+
+    // Switch to Made and apply shared `agent` filter -> marks Pending as pendingNeedsReset
+    root.querySelector<HTMLElement>('sl-tab[panel="made"]')!.click();
+    await settle(el, 20);
+    el.shadowRoot!.querySelector('scion-decisions-filter-panel')!.dispatchEvent(
+      new CustomEvent('decisions-filter-change', {
+        detail: { agent: agentUuid },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await settle(el, 20);
+
+    // Fire an SSE choice-prompt while on Made -> scheduleLiveRefresh must NOT run a `live` merge on Pending
+    stateManager.dispatchEvent(
+      new CustomEvent('chat-message-received', {
+        detail: { data: { projectId: 'p-1', type: 'choice-prompt' } },
+      })
+    );
+    await settle(el, 90);
+
+    // Switch back to Pending -> full reset runs for `agent=${agentUuid}`; old >200 tail row never leaks
+    root.querySelector<HTMLElement>('sl-tab[panel="pending"]')!.click();
+    await settle(el, 25);
+
+    expect(root.querySelector('[data-prompt-card="m-agent-only"]')).not.toBeNull();
+    expect(root.querySelector('[data-prompt-card="m-old-tail-0"]')).toBeNull();
   });
 });

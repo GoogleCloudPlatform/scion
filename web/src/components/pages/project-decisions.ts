@@ -254,6 +254,7 @@ export class ScionPageProjectDecisions extends LitElement {
   private madeRefreshDeferred = false;
   private madeStale = false;
   private madeNeedsReset = false;
+  private facetsHydrated = false;
   private routeDecodeError = false;
   private booted = false;
 
@@ -894,6 +895,7 @@ export class ScionPageProjectDecisions extends LitElement {
     answerers: ProjectDecisionActorView[],
     conversations?: ProjectDecisionConversationView[]
   ): void {
+    this.facetsHydrated = true;
     if (agents.length > 0 || this.facetsAgents.length === 0) {
       this.facetsAgents = agents;
     }
@@ -1036,6 +1038,9 @@ export class ScionPageProjectDecisions extends LitElement {
           this.supportsSearch = true;
           this.pendingSearchTimeout = true;
           this.error = null;
+          if (opts.mode === 'reset' && this.activeTab === 'pending' && !this.facetsHydrated) {
+            await this.hydrateFacetsAfterTimeout('pending', ac.signal, gen);
+          }
         } else {
           this.pendingSearchTimeout = false;
           this.error = err instanceof Error ? err.message : 'Failed to load decisions';
@@ -1048,11 +1053,54 @@ export class ScionPageProjectDecisions extends LitElement {
         if (this.pendingAbort === ac) this.pendingAbort = null;
         if (this.pendingRefreshDeferred) {
           this.pendingRefreshDeferred = false;
-          if (this.isConnected && this.enabled && !this.error && !this.pendingSearchTimeout) {
+          if (
+            this.isConnected &&
+            this.enabled &&
+            !this.error &&
+            !this.pendingSearchTimeout &&
+            !this.pendingNeedsReset
+          ) {
             void this.loadPendingPage({ mode: 'live' });
           }
         }
       }
+    }
+  }
+
+  private async hydrateFacetsAfterTimeout(
+    tab: 'pending' | 'made',
+    signal: AbortSignal,
+    expectedGen: number
+  ): Promise<void> {
+    if (this.facetsHydrated || !this.isConnected || !this.enabled || !this.projectId) return;
+    try {
+      if (tab === 'pending') {
+        const res = await fetchProjectPendingDecisions(this.projectId, {
+          limit: 1,
+          filter: {
+            conversation: this.filterConversation,
+            agent: this.filterAgent,
+          },
+          signal,
+        });
+        if (signal.aborted || expectedGen !== this.pendingGen || !this.isConnected) return;
+        this.counts = res.counts;
+        this.mergeFacets(res.agents, res.answerers, res.conversations);
+      } else {
+        const res = await fetchProjectMadeDecisions(
+          this.projectId,
+          { ...this.currentMadeFilter(), q: '' },
+          {
+            limit: 1,
+            signal,
+          }
+        );
+        if (signal.aborted || expectedGen !== this.madeGen || !this.isConnected) return;
+        this.counts = res.counts;
+        this.mergeFacets(res.agents, res.answerers, res.conversations);
+      }
+    } catch {
+      // Best-effort facet hydration: preserve the SEARCH_TIMEOUT warning alert on fallback failure.
     }
   }
 
@@ -1141,6 +1189,9 @@ export class ScionPageProjectDecisions extends LitElement {
           this.supportsSearch = true;
           this.madeSearchTimeout = true;
           this.madeError = null;
+          if (opts.mode === 'reset' && this.activeTab === 'made' && !this.facetsHydrated) {
+            await this.hydrateFacetsAfterTimeout('made', ac.signal, gen);
+          }
         } else {
           this.madeSearchTimeout = false;
           this.madeError = err instanceof Error ? err.message : 'Failed to load decision log';
@@ -1158,7 +1209,8 @@ export class ScionPageProjectDecisions extends LitElement {
             this.enabled &&
             !this.hasDateRangeError &&
             !this.madeError &&
-            !this.madeSearchTimeout
+            !this.madeSearchTimeout &&
+            !this.madeNeedsReset
           ) {
             if (this.activeTab === 'made') {
               void this.loadMadePage({ mode: 'live' });
@@ -1235,12 +1287,20 @@ export class ScionPageProjectDecisions extends LitElement {
       this.liveRefreshTimer = null;
       if (!this.isConnected || !this.enabled || !this.projectId) return;
       if (!this.error && !this.pendingSearchTimeout) {
-        void this.loadPendingPage({ mode: 'live' });
+        if (this.pendingNeedsReset) {
+          if (this.activeTab === 'pending') {
+            this.pendingNextCursor = '';
+            void this.loadPendingPage({ mode: 'reset' });
+          }
+        } else {
+          void this.loadPendingPage({ mode: 'live' });
+        }
       }
       if (this.activeTab === 'made') {
         if (
           !this.hasDateRangeError &&
           !this.madeSearchTimeout &&
+          !this.madeNeedsReset &&
           (this.madeLoaded || this.madeLoading)
         ) {
           void this.loadMadePage({ mode: 'live' });
@@ -1533,6 +1593,7 @@ export class ScionPageProjectDecisions extends LitElement {
 
   private retryAll(): void {
     this.booted = false;
+    this.facetsHydrated = false;
     void this.bootIfEnabled();
   }
 

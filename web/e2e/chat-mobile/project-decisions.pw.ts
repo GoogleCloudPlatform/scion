@@ -1205,12 +1205,17 @@ for (const theme of ['light', 'dark'] as const) {
       await expect(pageEl.locator('[data-waiting-badge]')).toHaveText('3');
       await expect(page).toHaveURL(new RegExp(`/projects/${PROJECT_ID}/decisions$`));
 
-      // First-load SEARCH_TIMEOUT via direct ?q=timeout-slow link still mounts filter panel, tag, and Clear
-      await page.goto(`/projects/${PROJECT_ID}/decisions?q=timeout-slow`, {
-        waitUntil: 'domcontentloaded',
-      });
+      // First-load SEARCH_TIMEOUT via direct ?q=timeout-slow&conversation=topic-release link mounts
+      // filter panel, hydrates facets (`Conversation: #release` resolved from key), and recovers on Clear
+      await page.goto(
+        `/projects/${PROJECT_ID}/decisions?q=timeout-slow&conversation=topic-release`,
+        { waitUntil: 'domcontentloaded' }
+      );
       await expect(timeoutAlert).toBeVisible({ timeout: 10_000 });
       await expect(panel.locator('[data-filter-tag="q"]')).toContainText('"timeout-slow"');
+      await expect(panel.locator('[data-filter-tag="conversation"]')).toContainText(
+        'Conversation: #release'
+      );
       await panel.locator('[data-clear-filters]').click();
       await expect(pageEl.locator('[data-waiting-badge]')).toHaveText('3');
       await expect(page).toHaveURL(new RegExp(`/projects/${PROJECT_ID}/decisions$`));
