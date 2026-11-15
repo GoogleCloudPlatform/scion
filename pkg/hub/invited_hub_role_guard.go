@@ -49,7 +49,10 @@ func isBuiltInSystemHubRoleDef(rd *store.RoleDefinition) bool {
 
 // rejectInvitedHubRoleBinding refuses binding a built-in system hub role to an
 // invited user, either directly or through a group that contains an invited
-// user. Store lookup failures other than missing target records fail closed.
+// user. Must be called inside WithTx: for group principals it acquires
+// LockInvitedHubRoleGuard before reading group memberships so concurrent group
+// member additions cannot write-skew on PostgreSQL (ptone/scion#8081). Store
+// lookup or lock failures fail closed.
 func rejectInvitedHubRoleBinding(ctx context.Context, st store.Store, rb *store.RoleBinding) error {
 	if rb == nil || rb.ScopeType != store.RoleScopeSystem {
 		return nil
@@ -80,6 +83,9 @@ func rejectInvitedHubRoleBinding(ctx context.Context, st store.Store, rb *store.
 			return errHubRoleOnInvitedUser
 		}
 	case store.RoleBindingPrincipalGroup:
+		if err := st.LockInvitedHubRoleGuard(ctx); err != nil {
+			return fmt.Errorf("lock invited hub role guard: %w", err)
+		}
 		users, err := transitiveGroupMemberUsers(ctx, st, rb.PrincipalID)
 		if err != nil {
 			return err
@@ -98,8 +104,23 @@ func rejectInvitedHubRoleBinding(ctx context.Context, st store.Store, rb *store.
 // rejectInvitedGroupHubRoleGrant refuses adding an invited user (or a child
 // group containing an invited user) to hub-members or to any group whose
 // ancestor closure includes hub-members or holds a built-in system hub role.
-// Store lookup failures fail closed.
+// Used for pre-transaction fast-fail checks; transactional mutations must re-run
+// rejectInvitedGroupHubRoleGrantTx inside WithTx. Store lookup failures fail closed.
 func rejectInvitedGroupHubRoleGrant(ctx context.Context, st store.Store, targetGroupID, memberType, memberID string) error {
+	return checkInvitedGroupHubRoleGrant(ctx, st, targetGroupID, memberType, memberID, false)
+}
+
+// rejectInvitedGroupHubRoleGrantTx is the transactional counterpart of
+// rejectInvitedGroupHubRoleGrant. When adding an invited user or nesting a
+// child group, it acquires LockInvitedHubRoleGuard before reading the group
+// closure or membership so concurrent role bindings or member additions cannot
+// write-skew on PostgreSQL (ptone/scion#8081). Adding an active user takes no
+// lock because user status never transitions back to invited.
+func rejectInvitedGroupHubRoleGrantTx(ctx context.Context, tx store.Store, targetGroupID, memberType, memberID string) error {
+	return checkInvitedGroupHubRoleGrant(ctx, tx, targetGroupID, memberType, memberID, true)
+}
+
+func checkInvitedGroupHubRoleGrant(ctx context.Context, st store.Store, targetGroupID, memberType, memberID string, lockTx bool) error {
 	switch memberType {
 	case store.GroupMemberTypeUser:
 		inv, err := isUserInvited(ctx, st, memberID)
@@ -109,6 +130,11 @@ func rejectInvitedGroupHubRoleGrant(ctx context.Context, st store.Store, targetG
 		if !inv {
 			return nil
 		}
+		if lockTx {
+			if err := st.LockInvitedHubRoleGuard(ctx); err != nil {
+				return fmt.Errorf("lock invited hub role guard: %w", err)
+			}
+		}
 		carries, err := groupClosureCarriesBuiltInHubRole(ctx, st, targetGroupID)
 		if err != nil {
 			return err
@@ -117,6 +143,11 @@ func rejectInvitedGroupHubRoleGrant(ctx context.Context, st store.Store, targetG
 			return errHubRoleOnInvitedUser
 		}
 	case store.GroupMemberTypeGroup:
+		if lockTx {
+			if err := st.LockInvitedHubRoleGuard(ctx); err != nil {
+				return fmt.Errorf("lock invited hub role guard: %w", err)
+			}
+		}
 		carries, err := groupClosureCarriesBuiltInHubRole(ctx, st, targetGroupID)
 		if err != nil {
 			return err

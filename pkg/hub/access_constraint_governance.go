@@ -845,6 +845,13 @@ func (gs *GovernanceService) ReplaceRoleBinding(ctx context.Context, oldBindingI
 			return fmt.Errorf("failed to load new role definition: %w", err)
 		}
 
+		// Acquire LockInvitedHubRoleGuard (when replacing with a group-scoped
+		// built-in system hub role) first in transaction lock order, before
+		// lockConstraintAdminGuard or row writes (ptone/scion#8081).
+		if err := rejectInvitedHubRoleBinding(ctx, tx, newBinding); err != nil {
+			return err
+		}
+
 		// Removing or moving an admin binding must leave a constraint
 		// admin at the old binding's scope.
 		keepsAdmin := roleHasConstraintAdmin(newRD) &&
@@ -857,10 +864,6 @@ func (gs *GovernanceService) ReplaceRoleBinding(ctx context.Context, oldBindingI
 			if err := checkRoleBindingRemovalAdminLockout(ctx, tx, gs.nowFunc(), existing); err != nil {
 				return err
 			}
-		}
-
-		if err := rejectInvitedHubRoleBinding(ctx, tx, newBinding); err != nil {
-			return err
 		}
 
 		// The create and the delete commit together or not at all.

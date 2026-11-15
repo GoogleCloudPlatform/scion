@@ -38,10 +38,28 @@ import (
 // GroupStore implements store.GroupStore using Ent ORM.
 type GroupStore struct {
 	client *ent.Client
+	inTx   bool
 	// now is the clock membership expiry (group_memberships.expires_at)
 	// is evaluated against; tests replace it. A GroupStore built without
 	// NewGroupStore uses time.Now.
 	now func() time.Time
+}
+
+// LockInvitedHubRoleGuard takes the transaction-scoped invited-user hub-role
+// guard advisory lock on PostgreSQL. SQLite serializes write transactions, so
+// once inside WithTx it is a no-op there.
+func (s *GroupStore) LockInvitedHubRoleGuard(ctx context.Context) error {
+	if !s.inTx {
+		return fmt.Errorf("%w: LockInvitedHubRoleGuard must be called inside WithTx", store.ErrInvalidInput)
+	}
+	if s.client.Driver().Dialect() != dialect.Postgres {
+		return nil
+	}
+	var res sql.Result
+	if err := s.client.Driver().Exec(ctx, "SELECT pg_advisory_xact_lock($1)", []any{int64(store.LockInvitedHubRoleGuard)}, &res); err != nil {
+		return fmt.Errorf("lock invited hub role guard: %w", err)
+	}
+	return nil
 }
 
 // NewGroupStore creates a new Ent-backed GroupStore.

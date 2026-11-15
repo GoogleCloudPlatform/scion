@@ -258,6 +258,16 @@ const (
 	// database, so a failover resumes where the last holder stopped.
 	LockChatRetention AdvisoryLockKey = 0x5C10002E
 
+	// LockInvitedHubRoleGuard serializes the invited-user hub-role guard
+	// (GroupStore.LockInvitedHubRoleGuard, ptone/scion#8081) across
+	// concurrent transactions that bind a built-in system hub role to a
+	// group or add an invited user or child group to a group, preventing
+	// READ COMMITTED write skew on PostgreSQL. Allocated as the next
+	// singleton key in the 0x5C10_0xxx block after LockChatRetention
+	// (0x5C10002E), and acquired first in transaction lock order via
+	// transaction-scoped pg_advisory_xact_lock (not AdvisoryLocker).
+	LockInvitedHubRoleGuard AdvisoryLockKey = 0x5C10002F
+
 	// LockAgentDelegatedCredentialPurge guards the hourly purge of agent
 	// delegated credential rows that expired more than the retention
 	// period ago (.design/agent-delegation.md §18.1). A value in an unused

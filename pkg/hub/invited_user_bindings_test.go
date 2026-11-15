@@ -27,11 +27,14 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1059,4 +1062,467 @@ func TestInvitedOwner_NotUsableUntilSignIn(t *testing.T) {
 	rec = doRequest(t, srv, http.MethodDelete,
 		fmt.Sprintf("/api/v1/projects/%s/members/principals/user/%s", project.ID, alice.ID), nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+}
+
+type invitedGuardLockRecorder struct {
+	mu                 sync.Mutex
+	txLockCalls        int
+	outsideTxLockCalls int
+	readBeforeTxLock   bool
+	failLock           bool
+}
+
+func (r *invitedGuardLockRecorder) reset(failLock bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.txLockCalls = 0
+	r.outsideTxLockCalls = 0
+	r.readBeforeTxLock = false
+	r.failLock = failLock
+}
+
+func (r *invitedGuardLockRecorder) snapshot() (txCalls, outsideCalls int, readBefore bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.txLockCalls, r.outsideTxLockCalls, r.readBeforeTxLock
+}
+
+type recordingInvitedGuardLockStore struct {
+	store.Store
+	fault  *storeFaultSwitch
+	rec    *invitedGuardLockRecorder
+	inTx   bool
+	locked bool
+}
+
+func (w *recordingInvitedGuardLockStore) LockInvitedHubRoleGuard(ctx context.Context) error {
+	if w.fault.Active() {
+		w.rec.mu.Lock()
+		if w.inTx {
+			w.rec.txLockCalls++
+			w.locked = true
+		} else {
+			w.rec.outsideTxLockCalls++
+		}
+		fail := w.rec.failLock
+		w.rec.mu.Unlock()
+		if fail {
+			return errors.New("injected LockInvitedHubRoleGuard fault")
+		}
+	}
+	return w.Store.LockInvitedHubRoleGuard(ctx)
+}
+
+func (w *recordingInvitedGuardLockStore) noteGuardClosureRead() {
+	if !w.fault.Active() || !w.inTx {
+		return
+	}
+	w.rec.mu.Lock()
+	if !w.locked {
+		w.rec.readBeforeTxLock = true
+	}
+	w.rec.mu.Unlock()
+}
+
+func (w *recordingInvitedGuardLockStore) GetGroupMembers(ctx context.Context, groupID string) ([]store.GroupMember, error) {
+	w.noteGuardClosureRead()
+	return w.Store.GetGroupMembers(ctx, groupID)
+}
+
+func (w *recordingInvitedGuardLockStore) GetParentGroups(ctx context.Context, groupID string) ([]string, error) {
+	w.noteGuardClosureRead()
+	return w.Store.GetParentGroups(ctx, groupID)
+}
+
+func (w *recordingInvitedGuardLockStore) ListRoleBindingsForPrincipals(ctx context.Context, principals []store.PrincipalRef, scopeTypes, scopeIDs []string) ([]*store.RoleBinding, error) {
+	w.noteGuardClosureRead()
+	return w.Store.ListRoleBindingsForPrincipals(ctx, principals, scopeTypes, scopeIDs)
+}
+
+func (w *recordingInvitedGuardLockStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	if !w.fault.Active() {
+		return w.Store.WithTx(ctx, fn)
+	}
+	return w.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&recordingInvitedGuardLockStore{
+			Store: tx,
+			fault: w.fault,
+			rec:   w.rec,
+			inTx:  true,
+		})
+	})
+}
+
+// TestInvitedUser_HubRoleGuard_LockDisciplineAndHotPaths verifies that
+// LockInvitedHubRoleGuard is acquired inside WithTx before reading group
+// membership or ancestor closures on the narrow group-mediated hub-role guard
+// paths, fails closed when lock acquisition errors, and is NOT acquired on
+// hot paths such as active-user group adds or non-group/non-built-in role
+// bindings (ptone/scion#8081).
+func TestInvitedUser_HubRoleGuard_LockDisciplineAndHotPaths(t *testing.T) {
+	recState := &invitedGuardLockRecorder{}
+	srv, s, wrapped, fault := testServerWithStoreFault(t, func(inner store.Store, sw *storeFaultSwitch) *recordingInvitedGuardLockStore {
+		return &recordingInvitedGuardLockStore{Store: inner, fault: sw, rec: recState}
+	})
+	ctx := context.Background()
+
+	active := &store.User{
+		ID: tid("usr-lock-active"), Email: "lock-active@test.com", DisplayName: "Lock Active",
+		Role: store.UserRoleMember, Status: store.UserStatusActive,
+	}
+	require.NoError(t, s.CreateUser(ctx, active))
+	carol := newInvitedUser(t, s, "usr-lock-carol", "lock-carol@test.com")
+
+	plainGroup := &store.Group{ID: tid("grp-lock-plain"), Name: "Plain", Slug: "lock-plain", GroupType: store.GroupTypeExplicit}
+	childGroup := &store.Group{ID: tid("grp-lock-child"), Name: "Child", Slug: "lock-child", GroupType: store.GroupTypeExplicit}
+	roleGroup := &store.Group{ID: tid("grp-lock-role"), Name: "Role", Slug: "lock-role", GroupType: store.GroupTypeExplicit}
+	require.NoError(t, s.CreateGroup(ctx, plainGroup))
+	require.NoError(t, s.CreateGroup(ctx, childGroup))
+	require.NoError(t, s.CreateGroup(ctx, roleGroup))
+
+	viewerRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubViewer, store.RoleScopeSystem)
+	require.NoError(t, err)
+	customSysRD, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name: "lock-custom-sys", ScopeType: store.RoleScopeSystem, Permissions: []string{"project.read"},
+	})
+	require.NoError(t, err)
+
+	fault.Arm()
+
+	// Hot path 1: adding an active user to a group takes zero advisory locks.
+	recState.reset(false)
+	httpRec := doRequest(t, srv, http.MethodPost, "/api/v1/groups/"+plainGroup.ID+"/members", AddGroupMemberRequest{
+		MemberType: store.GroupMemberTypeUser,
+		MemberID:   active.ID,
+		Role:       store.GroupMemberRoleMember,
+	})
+	require.Equal(t, http.StatusCreated, httpRec.Code, httpRec.Body.String())
+	txCalls, outsideCalls, _ := recState.snapshot()
+	assert.Equal(t, 0, txCalls, "active-user group add must not acquire LockInvitedHubRoleGuard")
+	assert.Equal(t, 0, outsideCalls)
+
+	// Hot path 2: binding a built-in system role directly to a user takes zero advisory locks.
+	recState.reset(false)
+	httpRec = doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
+		RoleDefinitionID: viewerRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      active.ID,
+		ScopeType:        store.RoleScopeSystem,
+	})
+	require.Equal(t, http.StatusCreated, httpRec.Code, httpRec.Body.String())
+	txCalls, outsideCalls, _ = recState.snapshot()
+	assert.Equal(t, 0, txCalls, "direct user role binding must not acquire LockInvitedHubRoleGuard")
+	assert.Equal(t, 0, outsideCalls)
+
+	// Hot path 3: binding a custom system role to a group takes zero advisory locks.
+	recState.reset(false)
+	httpRec = doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
+		RoleDefinitionID: customSysRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalGroup,
+		PrincipalID:      plainGroup.ID,
+		ScopeType:        store.RoleScopeSystem,
+	})
+	require.Equal(t, http.StatusCreated, httpRec.Code, httpRec.Body.String())
+	txCalls, outsideCalls, _ = recState.snapshot()
+	assert.Equal(t, 0, txCalls, "custom system role binding on group must not acquire LockInvitedHubRoleGuard")
+	assert.Equal(t, 0, outsideCalls)
+
+	// Guarded path 1: binding a built-in system hub role to a group locks inside WithTx before reading members.
+	recState.reset(false)
+	httpRec = doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
+		RoleDefinitionID: viewerRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalGroup,
+		PrincipalID:      roleGroup.ID,
+		ScopeType:        store.RoleScopeSystem,
+	})
+	require.Equal(t, http.StatusCreated, httpRec.Code, httpRec.Body.String())
+	txCalls, outsideCalls, readBefore := recState.snapshot()
+	assert.Equal(t, 1, txCalls)
+	assert.Equal(t, 0, outsideCalls)
+	assert.False(t, readBefore, "group member read ran before LockInvitedHubRoleGuard")
+
+	// Guarded path 2: adding an invited user to a group locks inside WithTx before reading closure.
+	recState.reset(false)
+	httpRec = doRequest(t, srv, http.MethodPost, "/api/v1/groups/"+childGroup.ID+"/members", AddGroupMemberRequest{
+		MemberType: store.GroupMemberTypeUser,
+		MemberID:   carol.ID,
+		Role:       store.GroupMemberRoleMember,
+	})
+	require.Equal(t, http.StatusCreated, httpRec.Code, httpRec.Body.String())
+	txCalls, outsideCalls, readBefore = recState.snapshot()
+	assert.Equal(t, 1, txCalls)
+	assert.Equal(t, 0, outsideCalls)
+	assert.False(t, readBefore, "group closure read ran before LockInvitedHubRoleGuard")
+
+	// Guarded path 3: adding a child group to a parent group locks inside WithTx before reading closure/members.
+	recState.reset(false)
+	httpRec = doRequest(t, srv, http.MethodPost, "/api/v1/groups/"+plainGroup.ID+"/members", AddGroupMemberRequest{
+		MemberType: store.GroupMemberTypeGroup,
+		MemberID:   childGroup.ID,
+		Role:       store.GroupMemberRoleMember,
+	})
+	require.Equal(t, http.StatusCreated, httpRec.Code, httpRec.Body.String())
+	txCalls, outsideCalls, readBefore = recState.snapshot()
+	assert.Equal(t, 1, txCalls)
+	assert.Equal(t, 0, outsideCalls)
+	assert.False(t, readBefore, "group nesting read ran before LockInvitedHubRoleGuard")
+
+	// Guarded path 4: GovernanceService.ReplaceRoleBinding on a group built-in hub role locks inside WithTx first.
+	replaceGroup := &store.Group{ID: tid("grp-lock-replace"), Name: "Replace", Slug: "lock-replace", GroupType: store.GroupTypeExplicit}
+	require.NoError(t, s.CreateGroup(ctx, replaceGroup))
+	existingRB, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: customSysRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalGroup,
+		PrincipalID:      replaceGroup.ID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+	gs := &GovernanceService{store: wrapped, nowFunc: time.Now}
+	recState.reset(false)
+	_, err = gs.ReplaceRoleBinding(ctx, existingRB.ID, &store.RoleBinding{
+		RoleDefinitionID: viewerRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalGroup,
+		PrincipalID:      replaceGroup.ID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	}, "")
+	require.NoError(t, err)
+	txCalls, outsideCalls, readBefore = recState.snapshot()
+	assert.Equal(t, 1, txCalls)
+	assert.Equal(t, 0, outsideCalls)
+	assert.False(t, readBefore, "ReplaceRoleBinding read group members before LockInvitedHubRoleGuard")
+
+	// Fail-closed check: lock failure aborts both role-binding creation and invited group-member add.
+	failGroup := &store.Group{ID: tid("grp-lock-fail"), Name: "Fail", Slug: "lock-fail", GroupType: store.GroupTypeExplicit}
+	require.NoError(t, s.CreateGroup(ctx, failGroup))
+	recState.reset(true)
+	httpRec = doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
+		RoleDefinitionID: viewerRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalGroup,
+		PrincipalID:      failGroup.ID,
+		ScopeType:        store.RoleScopeSystem,
+	})
+	assert.Equal(t, http.StatusInternalServerError, httpRec.Code, httpRec.Body.String())
+	rbs, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalGroup, failGroup.ID)
+	require.NoError(t, err)
+	assert.Empty(t, rbs)
+
+	recState.reset(true)
+	httpRec = doRequest(t, srv, http.MethodPost, "/api/v1/groups/"+failGroup.ID+"/members", AddGroupMemberRequest{
+		MemberType: store.GroupMemberTypeUser,
+		MemberID:   carol.ID,
+		Role:       store.GroupMemberRoleMember,
+	})
+	assert.Equal(t, http.StatusInternalServerError, httpRec.Code, httpRec.Body.String())
+	_, err = s.GetGroupMembership(ctx, failGroup.ID, store.GroupMemberTypeUser, carol.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
+func runInvitedHubRoleGuardConcurrentRaces(t *testing.T, srv *Server, s store.Store) {
+	t.Helper()
+	ctx := context.Background()
+
+	carol := newInvitedUser(t, s, "usr-race-carol", "race-carol@test.com")
+	viewerRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubViewer, store.RoleScopeSystem)
+	require.NoError(t, err)
+	hubMembers, err := s.GetGroupBySlug(ctx, hubMembersSlug)
+	require.NoError(t, err)
+
+	assertNoTransitiveHubRole := func(step string) {
+		t.Helper()
+		effGroups, err := s.GetEffectiveGroups(ctx, carol.ID)
+		require.NoError(t, err, step)
+		for _, gid := range effGroups {
+			require.NotEqual(t, hubMembers.ID, gid, "%s: invited user gained hub-members membership", step)
+		}
+		if len(effGroups) == 0 {
+			return
+		}
+		refs := make([]store.PrincipalRef, 0, len(effGroups))
+		for _, gid := range effGroups {
+			refs = append(refs, store.PrincipalRef{Type: store.RoleBindingPrincipalGroup, ID: gid})
+		}
+		rbs, err := s.ListRoleBindingsForPrincipals(ctx, refs, []string{store.RoleScopeSystem}, nil)
+		require.NoError(t, err, step)
+		for _, b := range rbs {
+			rd, rdErr := s.GetRoleDefinition(ctx, b.RoleDefinitionID)
+			require.NoError(t, rdErr, step)
+			require.False(t, isBuiltInSystemHubRoleDef(rd),
+				"%s: invited user transitively gained built-in system hub role %s via group %s", step, rd.Name, b.PrincipalID)
+		}
+	}
+
+	assertRacePair := func(step string, recA, recB *httptest.ResponseRecorder) {
+		t.Helper()
+		require.False(t, recA.Code == http.StatusCreated && recB.Code == http.StatusCreated,
+			"%s: write skew allowed both mutations to commit (A=%d %s, B=%d %s)",
+			step, recA.Code, recA.Body.String(), recB.Code, recB.Body.String())
+		for label, rec := range map[string]*httptest.ResponseRecorder{"A": recA, "B": recB} {
+			switch rec.Code {
+			case http.StatusCreated:
+			case http.StatusConflict:
+				assert.Contains(t, rec.Body.String(), errHubRoleOnInvitedUser.Error(), "%s (%s)", step, label)
+			default:
+				t.Fatalf("%s (%s): unexpected status %d: %s", step, label, rec.Code, rec.Body.String())
+			}
+		}
+		assert.True(t, recA.Code == http.StatusConflict || recB.Code == http.StatusConflict,
+			"%s: expected at least one 409 Conflict", step)
+	}
+
+	const iterations = 8
+	for iter := 0; iter < iterations; iter++ {
+		// Shape 1: direct group role binding vs adding invited user to the same group.
+		directGrp := &store.Group{
+			ID:        tid(fmt.Sprintf("grp-race-direct-%d", iter)),
+			Name:      fmt.Sprintf("Race Direct %d", iter),
+			Slug:      fmt.Sprintf("race-direct-%d", iter),
+			GroupType: store.GroupTypeExplicit,
+		}
+		require.NoError(t, s.CreateGroup(ctx, directGrp))
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		var recBind, recAdd *httptest.ResponseRecorder
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			recBind = doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
+				RoleDefinitionID: viewerRD.ID,
+				PrincipalType:    store.RoleBindingPrincipalGroup,
+				PrincipalID:      directGrp.ID,
+				ScopeType:        store.RoleScopeSystem,
+			})
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			recAdd = doRequest(t, srv, http.MethodPost, "/api/v1/groups/"+directGrp.ID+"/members", AddGroupMemberRequest{
+				MemberType: store.GroupMemberTypeUser,
+				MemberID:   carol.ID,
+				Role:       store.GroupMemberRoleMember,
+			})
+		}()
+		close(start)
+		wg.Wait()
+		assertRacePair(fmt.Sprintf("direct-%d", iter), recBind, recAdd)
+		assertNoTransitiveHubRole(fmt.Sprintf("direct-%d", iter))
+
+		// Shape 2: role binding on parent group P vs adding invited user to nested child group C.
+		parentGrp := &store.Group{
+			ID:        tid(fmt.Sprintf("grp-race-parent-%d", iter)),
+			Name:      fmt.Sprintf("Race Parent %d", iter),
+			Slug:      fmt.Sprintf("race-parent-%d", iter),
+			GroupType: store.GroupTypeExplicit,
+		}
+		childGrp := &store.Group{
+			ID:        tid(fmt.Sprintf("grp-race-child-%d", iter)),
+			Name:      fmt.Sprintf("Race Child %d", iter),
+			Slug:      fmt.Sprintf("race-child-%d", iter),
+			GroupType: store.GroupTypeExplicit,
+		}
+		require.NoError(t, s.CreateGroup(ctx, parentGrp))
+		require.NoError(t, s.CreateGroup(ctx, childGrp))
+		require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
+			GroupID:    parentGrp.ID,
+			MemberType: store.GroupMemberTypeGroup,
+			MemberID:   childGrp.ID,
+			Role:       store.GroupMemberRoleMember,
+		}))
+
+		start = make(chan struct{})
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			recBind = doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
+				RoleDefinitionID: viewerRD.ID,
+				PrincipalType:    store.RoleBindingPrincipalGroup,
+				PrincipalID:      parentGrp.ID,
+				ScopeType:        store.RoleScopeSystem,
+			})
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			recAdd = doRequest(t, srv, http.MethodPost, "/api/v1/groups/"+childGrp.ID+"/members", AddGroupMemberRequest{
+				MemberType: store.GroupMemberTypeUser,
+				MemberID:   carol.ID,
+				Role:       store.GroupMemberRoleMember,
+			})
+		}()
+		close(start)
+		wg.Wait()
+		assertRacePair(fmt.Sprintf("nested-bind-%d", iter), recBind, recAdd)
+		assertNoTransitiveHubRole(fmt.Sprintf("nested-bind-%d", iter))
+
+		// Shape 3: nesting child group C under role-bearing parent P vs adding invited user to C.
+		roleParent := &store.Group{
+			ID:        tid(fmt.Sprintf("grp-race-rparent-%d", iter)),
+			Name:      fmt.Sprintf("Race Role Parent %d", iter),
+			Slug:      fmt.Sprintf("race-rparent-%d", iter),
+			GroupType: store.GroupTypeExplicit,
+		}
+		nestChild := &store.Group{
+			ID:        tid(fmt.Sprintf("grp-race-nchild-%d", iter)),
+			Name:      fmt.Sprintf("Race Nest Child %d", iter),
+			Slug:      fmt.Sprintf("race-nchild-%d", iter),
+			GroupType: store.GroupTypeExplicit,
+		}
+		require.NoError(t, s.CreateGroup(ctx, roleParent))
+		require.NoError(t, s.CreateGroup(ctx, nestChild))
+		_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: viewerRD.ID,
+			PrincipalType:    store.RoleBindingPrincipalGroup,
+			PrincipalID:      roleParent.ID,
+			ScopeType:        store.RoleScopeSystem,
+			CreatedBy:        "test",
+		})
+		require.NoError(t, err)
+
+		start = make(chan struct{})
+		var recNest *httptest.ResponseRecorder
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			recNest = doRequest(t, srv, http.MethodPost, "/api/v1/groups/"+roleParent.ID+"/members", AddGroupMemberRequest{
+				MemberType: store.GroupMemberTypeGroup,
+				MemberID:   nestChild.ID,
+				Role:       store.GroupMemberRoleMember,
+			})
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			recAdd = doRequest(t, srv, http.MethodPost, "/api/v1/groups/"+nestChild.ID+"/members", AddGroupMemberRequest{
+				MemberType: store.GroupMemberTypeUser,
+				MemberID:   carol.ID,
+				Role:       store.GroupMemberRoleMember,
+			})
+		}()
+		close(start)
+		wg.Wait()
+		assertRacePair(fmt.Sprintf("nested-edge-%d", iter), recNest, recAdd)
+		assertNoTransitiveHubRole(fmt.Sprintf("nested-edge-%d", iter))
+	}
+}
+
+func TestInvitedUser_HubRoleGuard_ConcurrentGroupBindAndAdd(t *testing.T) {
+	srv, s := testServer(t)
+	runInvitedHubRoleGuardConcurrentRaces(t, srv, s)
+}
+
+// TestInvitedUser_HubRoleGuard_ConcurrentGroupBindAndAdd_Postgres exercises the
+// same concurrent group hub-role binding and invited-member/child-group races
+// under PostgreSQL READ COMMITTED (wired into HUB_INTEGRATION_POSTGRES_TESTS),
+// where LockInvitedHubRoleGuard is what prevents write skew (ptone/scion#8081).
+func TestInvitedUser_HubRoleGuard_ConcurrentGroupBindAndAdd_Postgres(t *testing.T) {
+	if !enttest.Active() {
+		t.Skip("requires -tags integration and SCION_TEST_POSTGRES_URL")
+	}
+	srv, s := testServerWithStore(t, entadapter.NewCompositeStore(enttest.NewClient(t)))
+	runInvitedHubRoleGuardConcurrentRaces(t, srv, s)
 }

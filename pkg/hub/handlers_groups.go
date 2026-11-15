@@ -341,7 +341,7 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 	// the audit record of each membership commit or roll back together.
 	if err := s.store.WithTx(ctx, func(tx store.Store) error {
 		if parentEdge != nil && createdBy != "" {
-			if err := rejectInvitedGroupHubRoleGrant(ctx, tx, parentEdge.GroupID, store.GroupMemberTypeUser, createdBy); err != nil {
+			if err := rejectInvitedGroupHubRoleGrantTx(ctx, tx, parentEdge.GroupID, store.GroupMemberTypeUser, createdBy); err != nil {
 				return err
 			}
 		}
@@ -935,7 +935,7 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 
 	// The membership and its audit record commit or roll back together.
 	if err := s.store.WithTx(ctx, func(tx store.Store) error {
-		if err := rejectInvitedGroupHubRoleGrant(ctx, tx, groupID, member.MemberType, member.MemberID); err != nil {
+		if err := rejectInvitedGroupHubRoleGrantTx(ctx, tx, groupID, member.MemberType, member.MemberID); err != nil {
 			return err
 		}
 		if err := tx.AddGroupMember(ctx, member); err != nil {

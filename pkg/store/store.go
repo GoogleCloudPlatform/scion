@@ -2869,6 +2869,17 @@ type GroupStore interface {
 	// GetGroupsByIDs retrieves groups by a list of IDs.
 	// Returns only groups that exist; missing IDs are silently skipped.
 	GetGroupsByIDs(ctx context.Context, ids []string) ([]Group, error)
+
+	// LockInvitedHubRoleGuard serializes group-mediated invited-user
+	// hub-role checks until the surrounding transaction ends, preventing
+	// READ COMMITTED write skew between granting a built-in system hub role
+	// to a group and adding an invited user or child group to a group
+	// (ptone/scion#8081). Must be called inside WithTx before taking other
+	// transaction locks (returns ErrInvalidInput outside WithTx). On
+	// PostgreSQL it acquires transaction-scoped LockInvitedHubRoleGuard; on
+	// SQLite, which serializes write transactions, it is a no-op once
+	// inside WithTx.
+	LockInvitedHubRoleGuard(ctx context.Context) error
 }
 
 // GroupFilter defines criteria for filtering groups.
