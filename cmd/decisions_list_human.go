@@ -170,13 +170,18 @@ func runHumanDecisionsList(cmd *cobra.Command) error {
 	wantJSON := decisionsWantJSON(cmd)
 	if strings.EqualFold(opts.UserID, "me") || (opts.Tab == hubclient.ProjectDecisionsTabMade && !wantJSON) {
 		me, err := client.Auth().Me(ctx)
-		switch {
-		case err == nil && me != nil:
+		if err == nil && me != nil {
 			meID = me.ID
-		case strings.EqualFold(opts.UserID, "me"):
-			return fmt.Errorf("resolve --answered-by me: %w", err)
 		}
 		if strings.EqualFold(opts.UserID, "me") {
+			// An empty ID would silently drop the filter and list
+			// everyone's answers.
+			switch {
+			case err != nil:
+				return fmt.Errorf("resolve --answered-by me: %w", err)
+			case meID == "":
+				return errors.New("resolve --answered-by me: the hub returned an empty identity")
+			}
 			opts.UserID = meID
 		}
 	}

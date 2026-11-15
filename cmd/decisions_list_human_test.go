@@ -99,11 +99,13 @@ type humanDecisionsHub struct {
 	made    string
 	status  int
 	errBody string
+	me      string
 }
 
 func newHumanDecisionsHub(t *testing.T) *humanDecisionsHub {
 	t.Helper()
-	h := &humanDecisionsHub{pending: humanDecisionsPendingBody, made: humanDecisionsMadeBody}
+	h := &humanDecisionsHub{pending: humanDecisionsPendingBody, made: humanDecisionsMadeBody,
+		me: `{"id":"u-alice","email":"alice@example.com","displayName":"Alice","role":"member"}`}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/projects/proj-1/decisions", func(w http.ResponseWriter, r *http.Request) {
 		h.mu.Lock()
@@ -122,8 +124,10 @@ func newHumanDecisionsHub(t *testing.T) *humanDecisionsHub {
 		_, _ = w.Write([]byte(h.pending))
 	})
 	mux.HandleFunc("/api/v1/auth/me", func(w http.ResponseWriter, _ *http.Request) {
+		h.mu.Lock()
+		defer h.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"u-alice","email":"alice@example.com","displayName":"Alice","role":"member"}`))
+		_, _ = w.Write([]byte(h.me))
 	})
 	mux.HandleFunc("/api/v1/agent/decisions", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -403,4 +407,26 @@ func TestDecisionsListHuman_MoreHintOnlyForWaitingOnYou(t *testing.T) {
 		"KEY       VER  QUESTION  AGENT        CONVERSATION  AGE\n"+
 		"ship-now  v1   Deploy?   release-bot  #release      12m ago\n"+
 		"More Decisions are waiting on you; raise --limit (up to 200) to list them.\n", out)
+}
+
+func TestDecisionsListHuman_AnsweredByMeNeedsAnIdentity(t *testing.T) {
+	h := newHumanDecisionsHub(t)
+	t.Setenv("SCION_CLI_MODE", "human")
+
+	for _, body := range []string{`{}`, `{"id":""}`, `null`} {
+		h.me = body
+		before := h.count()
+		_, err := runDecisionsTestCmd(t, "decisions", "list", "--made", "--answered-by", "me")
+		require.Error(t, err, "me=%s", body)
+		assert.Contains(t, err.Error(), "resolve --answered-by me", "me=%s", body)
+		assert.NotContains(t, err.Error(), "%!w", "me=%s", body)
+		assert.Equal(t, before, h.count(), "me=%s: no unfiltered list is requested", body)
+	}
+
+	// Without --answered-by me an empty identity only loses the "you" label.
+	h.me = `{}`
+	out, err := runDecisionsTestCmd(t, "decisions", "list", "--made")
+	require.NoError(t, err)
+	assert.Contains(t, out, "Alice")
+	assert.NotContains(t, out, " you ")
 }
