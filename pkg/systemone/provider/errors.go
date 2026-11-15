@@ -33,6 +33,7 @@ const (
 	FailUnavailable          FailReason = "unavailable"
 	FailRateLimited          FailReason = "rate_limited"
 	FailAuth                 FailReason = "auth"
+	FailEgressRefused        FailReason = "egress_refused"
 	FailMalformedResponse    FailReason = "malformed_response"
 	FailUnsupported          FailReason = "unsupported"
 	FailInputTooLarge        FailReason = "input_too_large"
@@ -65,6 +66,7 @@ var closedFailReasons = []FailReason{
 	FailUnavailable,
 	FailRateLimited,
 	FailAuth,
+	FailEgressRefused,
 	FailMalformedResponse,
 	FailUnsupported,
 	FailInputTooLarge,
@@ -77,7 +79,7 @@ var closedFailReasons = []FailReason{
 	FailInternal,
 }
 
-// AllFailReasons returns a copy of the closed 17-value Failed reason set.
+// AllFailReasons returns a copy of the closed 18-value Failed reason set.
 func AllFailReasons() []FailReason {
 	out := make([]FailReason, len(closedFailReasons))
 	copy(out, closedFailReasons)
@@ -94,6 +96,7 @@ func (r FailReason) Valid() bool {
 		FailUnavailable,
 		FailRateLimited,
 		FailAuth,
+		FailEgressRefused,
 		FailMalformedResponse,
 		FailUnsupported,
 		FailInputTooLarge,
@@ -131,6 +134,7 @@ func (r FailReason) FallbackEligible() bool {
 		FailUnavailable,
 		FailRateLimited,
 		FailAuth,
+		FailEgressRefused,
 		FailUnsupported,
 		FailModelMismatch,
 		FailThresholdUnvalidated:

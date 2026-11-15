@@ -31,7 +31,7 @@ import (
 
 func TestFailReasons_ClosedSetMatchesRuntimeDesign(t *testing.T) {
 	all := provider.AllFailReasons()
-	require.Len(t, all, 17, "runtime-design §6.3 defines exactly 17 closed Failed reasons")
+	require.Len(t, all, 18, "runtime-design §6.3 defines exactly 18 closed Failed reasons")
 
 	expectedRetryableLater := map[provider.FailReason]bool{
 		provider.FailUnavailable: true,
@@ -48,6 +48,7 @@ func TestFailReasons_ClosedSetMatchesRuntimeDesign(t *testing.T) {
 		provider.FailUnavailable:          true,
 		provider.FailRateLimited:          true,
 		provider.FailAuth:                 true,
+		provider.FailEgressRefused:        true,
 		provider.FailUnsupported:          true,
 		provider.FailModelMismatch:        true,
 		provider.FailThresholdUnvalidated: true,
