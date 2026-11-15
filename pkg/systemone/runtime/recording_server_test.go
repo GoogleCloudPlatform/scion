@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -988,8 +989,114 @@ func TestRuntime_EndToEndWithTypeSafeJevwireAdapter(t *testing.T) {
 	assert.Equal(t, []string{"jev-1.14.0", "jev-latest"}, models)
 
 	mu.Lock()
-	defer mu.Unlock()
 	assert.Equal(t, "Bearer "+secretKey, capturedHeaders.Get("Authorization"))
 	assert.NotContains(t, string(capturedBody), secretKey)
 	assert.Contains(t, string(capturedBody), probeText)
+	mu.Unlock()
+
+	t.Run("binary_tie_boundary_shared_provider_IsTie_across_jevwire_and_runtime", func(t *testing.T) {
+		binSpecRaw := `{
+		  "version": 1,
+		  "questions": [{"id": "q1", "type": "binary", "instructions": "Check."}],
+		  "output": {"question": "q1"}
+		}`
+		binCompiled := compileTestSpec(t, binSpecRaw, spec.KindFilter)
+
+		var noulVal atomic.Value
+		tieSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			p := noulVal.Load().(float64)
+			w.Header().Set("X-TypeSafe-Request-Id", "req_synth_tie")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(w, `{
+				"model": "jev-1.14.0",
+				"answers": {"q1": {"type": "noul", "noul": %.17g}},
+				"usage": {"input_tokens": 12, "output_tokens": 1}
+			}`, p)
+		}))
+		defer tieSrv.Close()
+
+		tieInst := runtime.Instance{
+			ID:       "inst-typesafe-tie",
+			Name:     "typesafe-tie",
+			Adapter:  jevwire.AdapterNameTypeSafe,
+			Model:    "jev-1.14.0",
+			Endpoint: tieSrv.URL,
+			Enabled:  true,
+			Revision: 1,
+		}
+		tieRT := runtime.New(
+			runtime.Config{
+				Instances:   runtime.StaticInstances(tieInst),
+				Credentials: runtime.StaticCredential(secretKey),
+			},
+			runtime.WithEgressOptionsForTesting(egress.WithLoopbackServerForTesting(tieSrv.URL, tieSrv.Client())),
+		)
+		defer tieRT.CloseIdleConnections()
+
+		// 0.5 + 4e-10 (|2p - 1| = 8e-10 <= 1e-9) -> Uncertain("tie"), never malformed_response.
+		noulVal.Store(0.5 + 4e-10)
+		_, err := tieRT.Evaluate(context.Background(), binCompiled, runtime.ProbeInput("borderline"), runtime.EvalOptions{})
+		require.Error(t, err)
+		evalTie, ok := runtime.EvaluationFrom(err)
+		require.True(t, ok)
+		assert.Equal(t, runtime.ClassUncertain, evalTie.Class)
+		assert.Equal(t, provider.UncertainTie, evalTie.Reason)
+		assert.True(t, evalTie.Answers["q1"].Tied)
+		assert.Nil(t, evalTie.Answers["q1"].Bool)
+
+		// Reviewer reproduction value 0.5000000003 (|2p - 1| = 6e-10 <= 1e-9) -> Uncertain("tie").
+		noulVal.Store(0.5000000003)
+		_, err = tieRT.Evaluate(context.Background(), binCompiled, runtime.ProbeInput("borderline-2"), runtime.EvalOptions{})
+		require.Error(t, err)
+		evalTie2, ok := runtime.EvaluationFrom(err)
+		require.True(t, ok)
+		assert.Equal(t, runtime.ClassUncertain, evalTie2.Class)
+		assert.Equal(t, provider.UncertainTie, evalTie2.Reason)
+
+		// 0.5 + 2e-9 (|2p - 1| = 4e-9 > 1e-9) -> Success(true).
+		noulVal.Store(0.5 + 2e-9)
+		decOK, err := tieRT.Evaluate(context.Background(), binCompiled, runtime.ProbeInput("clear"), runtime.EvalOptions{})
+		require.NoError(t, err)
+		assert.True(t, decOK.Bool)
+		assert.Equal(t, runtime.ClassSuccess, decOK.Eval.Class)
+	})
+
+	t.Run("http_429_preserves_provider_request_id_and_status_class", func(t *testing.T) {
+		errSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("X-TypeSafe-Request-Id", "req_synth_429_99")
+			w.Header().Set("Retry-After", "3")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(w, `{"detail":"rate limit exceeded"}`)
+		}))
+		defer errSrv.Close()
+
+		errInst := runtime.Instance{
+			ID:       "inst-typesafe-429",
+			Name:     "typesafe-429",
+			Adapter:  jevwire.AdapterNameTypeSafe,
+			Model:    "jev-1.14.0",
+			Endpoint: errSrv.URL,
+			Enabled:  true,
+			Revision: 1,
+		}
+		errRT := runtime.New(
+			runtime.Config{
+				Instances:   runtime.StaticInstances(errInst),
+				Credentials: runtime.StaticCredential(secretKey),
+			},
+			runtime.WithEgressOptionsForTesting(egress.WithLoopbackServerForTesting(errSrv.URL, errSrv.Client())),
+		)
+		defer errRT.CloseIdleConnections()
+
+		_, err := errRT.Evaluate(context.Background(), compiled, runtime.ProbeInput(probeText), runtime.EvalOptions{})
+		require.Error(t, err)
+		eval429, ok := runtime.EvaluationFrom(err)
+		require.True(t, ok)
+		assert.Equal(t, runtime.ClassFailed, eval429.Class)
+		assert.Equal(t, string(provider.FailRateLimited), eval429.Reason)
+		require.Len(t, eval429.Attempts, 1)
+		assert.Equal(t, "req_synth_429_99", eval429.Attempts[0].ProviderRequestID)
+		assert.Equal(t, "4xx", eval429.Attempts[0].HTTPStatusClass)
+	})
 }

@@ -188,9 +188,7 @@ func populateBinaryAnswer(
 			return AnswerRecord{}, provider.FailMalformedResponse
 		}
 		pTrue := ans.Distribution[provider.BinaryTrueKey]
-		pFalse := ans.Distribution[provider.BinaryFalseKey]
-		isTie := math.Abs(pTrue-pFalse) <= provider.TieTolerance
-		if isTie {
+		if provider.IsTie(ans.Distribution) {
 			if ans.Bool != nil {
 				return AnswerRecord{}, provider.FailMalformedResponse
 			}
@@ -199,7 +197,7 @@ func populateBinaryAnswer(
 			if ans.Tied {
 				return AnswerRecord{}, provider.FailMalformedResponse
 			}
-			want := pTrue > pFalse
+			want := pTrue > 0.5
 			if ans.Bool != nil && *ans.Bool != want {
 				return AnswerRecord{}, provider.FailMalformedResponse
 			}
