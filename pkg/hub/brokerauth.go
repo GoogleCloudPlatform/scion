@@ -333,6 +333,14 @@ func capabilitiesFromStrings(names []string) *store.BrokerCapabilities {
 			}
 			continue
 		}
+		// "restartingRuntime:<runtime>" adds one runtime to
+		// RestartingRuntimes (ptone/scion#7928).
+		if rt, ok := strings.CutPrefix(strings.TrimSpace(name), "restartingRuntime:"); ok {
+			if rt != "" && !slices.Contains(caps.RestartingRuntimes, rt) {
+				caps.RestartingRuntimes = append(caps.RestartingRuntimes, rt)
+			}
+			continue
+		}
 		switch strings.ToLower(strings.TrimSpace(name)) {
 		case "webpty", "web_pty":
 			caps.WebPTY = true

@@ -2032,6 +2032,10 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				// not affect the comparison.
 				// TestAgentStatusEventIgnoresHeartbeatConfigWrites fails if
 				// that stops being true.
+				// As for the agent's own report: a heartbeat moving the
+				// current run to limits_exceeded ends that run on its
+				// runtime (ptone/scion#7928).
+				s.stopRunOnLimitsExceeded(ctx, agent, statusUpdate)
 				if updated, err := s.store.GetAgent(ctx, agent.ID); err == nil && updated.DeletedAt.IsZero() {
 					if agentStatusVisiblyChanged(agent, updated) {
 						s.events.PublishAgentStatus(ctx, updated)

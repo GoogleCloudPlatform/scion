@@ -447,6 +447,7 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			ReprovisionEmptyPerAgent: true,
 			// Home reset on the local-disk runtimes (ptone/scion#7757).
 			ReprovisionResetHomeRuntimes: ReprovisionResetHomeRuntimes(),
+			RestartingRuntimes:           RestartingRuntimes(),
 			// Provision-rendered keys listed in changed_fields are
 			// re-rendered at start (ptone/scion#3982).
 			ChangedFields: true,

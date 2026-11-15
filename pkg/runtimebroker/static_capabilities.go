@@ -55,6 +55,7 @@ func StaticCapabilities(rt scionrt.Runtime, nodeImageRegistry string) *hubclient
 		// This broker's reprovision resets an agent home on the advertised
 		// runtimes (ptone/scion#7757).
 		ReprovisionResetHomeRuntimes: ReprovisionResetHomeRuntimes(),
+		RestartingRuntimes:           RestartingRuntimes(),
 		// This broker re-renders the provision-rendered keys the hub lists
 		// in changed_fields at start (ptone/scion#3982).
 		ChangedFields: true,
@@ -133,6 +134,9 @@ func StaticCapabilityNames(rt scionrt.Runtime) []string {
 	for _, rt := range c.ReprovisionResetHomeRuntimes {
 		names = append(names, ReprovisionResetHomeCapabilityPrefix+rt)
 	}
+	for _, rt := range c.RestartingRuntimes {
+		names = append(names, RestartingRuntimeCapabilityPrefix+rt)
+	}
 	add(c.ChangedFields, "changedFields")
 	add(c.ClearedFields, "clearedFields")
 	add(c.UnlimitedCountLimits, "unlimitedCountLimits")
@@ -152,4 +156,16 @@ const ReprovisionResetHomeCapabilityPrefix = "reprovisionResetHome:"
 // copy of the home elsewhere (an NFS leaf) are added once they clear it.
 func ReprovisionResetHomeRuntimes() []string {
 	return []string{"docker", "podman", "container", "cloudrun", "cloudrun-instances", "kubernetes"}
+}
+
+// RestartingRuntimeCapabilityPrefix starts the registration capability name
+// of each runtime in RestartingRuntimes ("restartingRuntime:cloudrun").
+const RestartingRuntimeCapabilityPrefix = "restartingRuntime:"
+
+// RestartingRuntimes returns the runtimes on which the platform may restart
+// an agent container that exited: Cloud Run Instances run under the
+// platform-default restart policy (ptone/scion#5141). Docker, Podman and
+// Kubernetes agents are never restarted (no restart policy, or Never).
+func RestartingRuntimes() []string {
+	return []string{"cloudrun", "cloudrun-instances"}
 }

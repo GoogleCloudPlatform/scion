@@ -52,6 +52,7 @@ const UNDECLARED_ALLOWED: readonly string[] = [
   'reprovision',
   'reprovisionEmptyPerAgent',
   'reprovisionResetHomeRuntimes',
+  'restartingRuntimes',
   'startsInFlight',
   'templateTiers',
   'unlimitedCountLimits',
