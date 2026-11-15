@@ -1,0 +1,622 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package egress
+
+import (
+	"bytes"
+	"context"
+	"crypto/tls"
+	"errors"
+	"fmt"
+	"go/parser"
+	"go/token"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/ssrfclient"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// fakeResolver returns fixed IP addresses without real DNS.
+type fakeResolver struct {
+	ips []net.IPAddr
+	err error
+}
+
+func (r *fakeResolver) LookupIPAddr(_ context.Context, _ string) ([]net.IPAddr, error) {
+	if r.err != nil {
+		return nil, r.err
+	}
+	return r.ips, nil
+}
+
+// recordingDialer records dialed addresses and optionally forwards to target.
+type recordingDialer struct {
+	mu     sync.Mutex
+	addrs  []string
+	target string
+	inner  ssrfclient.Dialer
+}
+
+func (d *recordingDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	d.mu.Lock()
+	d.addrs = append(d.addrs, addr)
+	d.mu.Unlock()
+	if d.inner == nil {
+		return nil, errors.New("unexpected dial")
+	}
+	dialAddr := addr
+	if d.target != "" {
+		dialAddr = d.target
+	}
+	return d.inner.DialContext(ctx, network, dialAddr)
+}
+
+func (d *recordingDialer) dialed() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := make([]string, len(d.addrs))
+	copy(out, d.addrs)
+	return out
+}
+
+// tlsClientConfigForServer extracts a tls.Config trusting ts's self-signed cert
+// with ServerName set to serverName so https://public.example:<port> verifies.
+func tlsClientConfigForServer(t *testing.T, ts *httptest.Server, serverName string) *tls.Config {
+	t.Helper()
+	tr, ok := ts.Client().Transport.(*http.Transport)
+	require.True(t, ok)
+	require.NotNil(t, tr.TLSClientConfig)
+	cfg := tr.TLSClientConfig.Clone()
+	cfg.ServerName = serverName
+	return cfg
+}
+
+// ---------------------------------------------------------------------------
+// AC-4: Private, loopback, and link-local destinations are refused
+// ---------------------------------------------------------------------------
+
+func TestEgress_RefusesPrivateLoopbackAndLinkLocalDestinations(t *testing.T) {
+	const secretKey = "sk-secret-do-not-leak-998877"
+
+	cases := []struct {
+		name string
+		ips  []net.IPAddr
+	}{
+		{"loopback IPv4", []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}},
+		{"loopback IPv6", []net.IPAddr{{IP: net.ParseIP("::1")}}},
+		{"private RFC1918 10/8", []net.IPAddr{{IP: net.ParseIP("10.1.2.3")}}},
+		{"private RFC1918 172.16/12", []net.IPAddr{{IP: net.ParseIP("172.20.0.5")}}},
+		{"private RFC1918 192.168/16", []net.IPAddr{{IP: net.ParseIP("192.168.10.20")}}},
+		{"private IPv6 ULA", []net.IPAddr{{IP: net.ParseIP("fd00::1234")}}},
+		{"shared CGNAT 100.64/10", []net.IPAddr{{IP: net.ParseIP("100.64.1.2")}}},
+		{"link-local cloud metadata", []net.IPAddr{{IP: net.ParseIP("169.254.169.254")}}},
+		{"link-local IPv6", []net.IPAddr{{IP: net.ParseIP("fe80::1")}}},
+		{"unspecified IPv4", []net.IPAddr{{IP: net.ParseIP("0.0.0.0")}}},
+		{"IPv4-mapped metadata", []net.IPAddr{{IP: net.IP{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 169, 254, 169, 254}}}},
+		{"all blocked mixed", []net.IPAddr{
+			{IP: net.ParseIP("10.0.0.1")},
+			{IP: net.ParseIP("127.0.0.1")},
+			{IP: net.ParseIP("169.254.169.254")},
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dialer := &recordingDialer{}
+			client := NewClient(
+				StaticBearer(secretKey),
+				WithDialerForTesting(&fakeResolver{ips: tc.ips}, dialer),
+			)
+
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://provider.example/v1/systemone", strings.NewReader(`{}`))
+			require.NoError(t, err)
+
+			resp, err := client.Do(req)
+			if resp != nil {
+				_ = resp.Body.Close()
+			}
+			require.Error(t, err)
+			assert.True(t, IsBlockedDestination(err), "expected blocked destination error, got: %v", err)
+			assert.ErrorIs(t, err, ErrBlockedDestination)
+			assert.Empty(t, dialer.dialed(), "raw dialer must never be invoked for blocked IPs")
+			assert.NotContains(t, err.Error(), secretKey, "secret key must never appear in error")
+		})
+	}
+}
+
+func TestEgress_ProductionDefaultRefusesDirectLoopbackServer(t *testing.T) {
+	const secretKey = "sk-live-secret-never-echo"
+
+	var hit bool
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	// Production NewClient with NO test options must refuse 127.0.0.1.
+	client := NewClient(StaticBearer(secretKey))
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, ts.URL+"/v1/systemone", strings.NewReader(`{}`))
+	require.NoError(t, err)
+
+	resp, err := client.Do(req)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	require.Error(t, err)
+	assert.True(t, IsBlockedDestination(err), "expected blocked destination error, got: %v", err)
+	assert.False(t, hit, "loopback server must never be reached with production defaults")
+	assert.NotContains(t, err.Error(), secretKey)
+}
+
+// ---------------------------------------------------------------------------
+// AC-4: Non-HTTPS schemes refused
+// ---------------------------------------------------------------------------
+
+func TestEgress_RefusesNonHTTPS(t *testing.T) {
+	const secretKey = "sk-scheme-secret-abc123"
+
+	dialer := &recordingDialer{}
+	client := NewClient(
+		StaticBearer(secretKey),
+		WithDialerForTesting(&fakeResolver{ips: []net.IPAddr{{IP: net.ParseIP("203.0.113.10")}}}, dialer),
+	)
+
+	for _, rawURL := range []string{
+		"http://api.typesafe.ai/v1/systemone",
+		"ws://api.typesafe.ai/v1/systemone",
+		"ftp://api.typesafe.ai/v1/systemone",
+	} {
+		t.Run(rawURL, func(t *testing.T) {
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, rawURL, strings.NewReader(`{}`))
+			require.NoError(t, err)
+
+			resp, err := client.Do(req)
+			if resp != nil {
+				_ = resp.Body.Close()
+			}
+			require.Error(t, err)
+			assert.True(t, IsSchemeNotAllowed(err), "expected scheme error, got: %v", err)
+			assert.ErrorIs(t, err, ErrSchemeNotAllowed)
+			assert.Empty(t, dialer.dialed(), "non-https request must fail before dialing")
+			assert.NotContains(t, err.Error(), secretKey)
+		})
+	}
+}
+
+func TestEgress_RefusesURLUserinfo(t *testing.T) {
+	const secretKey = "sk-userinfo-secret-xyz"
+
+	dialer := &recordingDialer{}
+	client := NewClient(
+		StaticBearer(secretKey),
+		WithDialerForTesting(&fakeResolver{ips: []net.IPAddr{{IP: net.ParseIP("203.0.113.10")}}}, dialer),
+	)
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://user:pw@api.typesafe.ai/v1/systemone", strings.NewReader(`{}`))
+	require.NoError(t, err)
+
+	resp, err := client.Do(req)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidEndpoint)
+	assert.Empty(t, dialer.dialed())
+	assert.NotContains(t, err.Error(), secretKey)
+}
+
+// ---------------------------------------------------------------------------
+// AC-4: Redirects refused
+// ---------------------------------------------------------------------------
+
+func TestEgress_RefusesRedirects(t *testing.T) {
+	const secretKey = "sk-redirect-secret-4567"
+
+	for _, status := range []int{
+		http.StatusMovedPermanently,
+		http.StatusFound,
+		http.StatusSeeOther,
+		http.StatusTemporaryRedirect,
+		http.StatusPermanentRedirect,
+	} {
+		t.Run(fmt.Sprintf("HTTP_%d", status), func(t *testing.T) {
+			var targetHit bool
+			targetSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				targetHit = true
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer targetSrv.Close()
+
+			redirectSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Location", targetSrv.URL+"/internal-secret-hop")
+				w.WriteHeader(status)
+			}))
+			defer redirectSrv.Close()
+
+			_, port, err := net.SplitHostPort(redirectSrv.Listener.Addr().String())
+			require.NoError(t, err)
+
+			dialer := &recordingDialer{
+				target: redirectSrv.Listener.Addr().String(),
+				inner:  &net.Dialer{Timeout: 5 * time.Second},
+			}
+			client := NewClient(
+				StaticBearer(secretKey),
+				WithDialerForTesting(&fakeResolver{ips: []net.IPAddr{{IP: net.ParseIP("203.0.113.25")}}}, dialer),
+				WithTLSConfigForTesting(tlsClientConfigForServer(t, redirectSrv, "127.0.0.1")),
+			)
+
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, fmt.Sprintf("https://public.example:%s/v1/systemone", port), strings.NewReader(`{}`))
+			require.NoError(t, err)
+
+			resp, err := client.Do(req)
+			if resp != nil {
+				_ = resp.Body.Close()
+			}
+			require.Error(t, err)
+			assert.True(t, IsRedirectBlocked(err), "expected redirect blocked, got: %v", err)
+			assert.ErrorIs(t, err, ErrRedirectBlocked)
+			assert.False(t, targetHit, "redirect target must never be contacted")
+			assert.NotContains(t, err.Error(), secretKey)
+			assert.NotContains(t, err.Error(), "internal-secret-hop", "redirect Location header must not be echoed in errors")
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AC-4: Response body capped at 1 MiB (distinguishable error -> malformed_response)
+// ---------------------------------------------------------------------------
+
+func TestEgress_ResponseBodyCapAt1MiB(t *testing.T) {
+	const secretKey = "sk-cap-secret-7890"
+
+	t.Run("exact_1MiB_succeeds", func(t *testing.T) {
+		payload := bytes.Repeat([]byte("a"), int(MaxResponseBytes))
+		ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(payload)
+		}))
+		defer ts.Close()
+
+		client := NewClient(StaticBearer(secretKey), WithLoopbackServerForTesting(ts.URL, ts.Client()))
+		resp, err := client.Get(ts.URL + "/v1/models")
+		require.NoError(t, err)
+		defer func() { _ = resp.Body.Close() }()
+
+		got, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		assert.Len(t, got, int(MaxResponseBytes))
+	})
+
+	t.Run("over_1MiB_with_content_length_fails", func(t *testing.T) {
+		payload := bytes.Repeat([]byte("b"), int(MaxResponseBytes)+1)
+		ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(payload)))
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(payload)
+		}))
+		defer ts.Close()
+
+		client := NewClient(StaticBearer(secretKey), WithLoopbackServerForTesting(ts.URL, ts.Client()))
+		resp, err := client.Get(ts.URL + "/v1/systemone")
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		require.Error(t, err)
+		assert.True(t, IsResponseTooLarge(err), "expected ErrResponseTooLarge, got: %v", err)
+		assert.ErrorIs(t, err, ErrResponseTooLarge)
+		assert.NotContains(t, err.Error(), secretKey)
+	})
+
+	t.Run("over_1MiB_chunked_without_content_length_fails", func(t *testing.T) {
+		ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			flusher, ok := w.(http.Flusher)
+			require.True(t, ok)
+			w.WriteHeader(http.StatusOK)
+			chunk := bytes.Repeat([]byte("c"), 64<<10)
+			// Write 16 * 64 KiB + 1 byte = 1 MiB + 1 byte as chunked stream.
+			for range 16 {
+				_, _ = w.Write(chunk)
+				flusher.Flush()
+			}
+			_, _ = w.Write([]byte("x"))
+			flusher.Flush()
+		}))
+		defer ts.Close()
+
+		client := NewClient(StaticBearer(secretKey), WithLoopbackServerForTesting(ts.URL, ts.Client()))
+		resp, err := client.Get(ts.URL + "/v1/systemone")
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		require.Error(t, err)
+		assert.True(t, IsResponseTooLarge(err), "expected ErrResponseTooLarge on chunked stream, got: %v", err)
+		assert.ErrorIs(t, err, ErrResponseTooLarge)
+		assert.NotContains(t, err.Error(), secretKey)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// AC-2 & AC-4: Bearer auth present ONLY in Authorization, never mutated onto
+// caller's Request, and NEVER echoed in errors
+// ---------------------------------------------------------------------------
+
+func TestEgress_BearerHeaderOnlyInWireAuthorizationAndNeverEchoedInErrors(t *testing.T) {
+	const secretKey = "sk-ultra-sensitive-bearer-key-31415926"
+
+	var (
+		gotHeaders http.Header
+		gotBody    string
+	)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders = r.Header.Clone()
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer ts.Close()
+
+	client := NewClient(
+		func(ctx context.Context) (string, error) {
+			return secretKey, nil
+		},
+		WithLoopbackServerForTesting(ts.URL, ts.Client()),
+	)
+
+	callerReq, err := http.NewRequestWithContext(context.Background(), http.MethodPost, ts.URL+"/v1/systemone", strings.NewReader(`{"model":"jev-1.14.0"}`))
+	require.NoError(t, err)
+	callerReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(callerReq)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+
+	// 1. Key appears on the wire in Authorization: Bearer <key>.
+	assert.Equal(t, "Bearer "+secretKey, gotHeaders.Get("Authorization"))
+
+	// 2. Key appears NOWHERE else in wire headers or wire body.
+	for name, vals := range gotHeaders {
+		if strings.EqualFold(name, "Authorization") {
+			continue
+		}
+		for _, v := range vals {
+			assert.NotContains(t, v, secretKey, "header %s leaked secret", name)
+		}
+	}
+	assert.NotContains(t, gotBody, secretKey)
+
+	// 3. Caller's original *http.Request was NOT mutated with the credential.
+	assert.Empty(t, callerReq.Header.Get("Authorization"), "RoundTrip must not mutate caller request headers")
+}
+
+func TestEgress_AuthSourceErrorsAndInvalidTokensNeverLeakCredential(t *testing.T) {
+	const secretKey = "sk-leaked-in-source-error-271828"
+
+	t.Run("nil_bearer_source", func(t *testing.T) {
+		client := NewClient(nil)
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://api.typesafe.ai/v1/models", nil)
+		require.NoError(t, err)
+		_, err = client.Do(req)
+		require.Error(t, err)
+		assert.True(t, IsAuthError(err))
+		assert.ErrorIs(t, err, ErrAuth)
+	})
+
+	t.Run("empty_token", func(t *testing.T) {
+		client := NewClient(StaticBearer("   "))
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://api.typesafe.ai/v1/models", nil)
+		require.NoError(t, err)
+		_, err = client.Do(req)
+		require.Error(t, err)
+		assert.True(t, IsAuthError(err))
+	})
+
+	t.Run("control_chars_in_token_never_echoed", func(t *testing.T) {
+		badKey := secretKey + "\r\nX-Injected: evil"
+		client := NewClient(StaticBearer(badKey))
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://api.typesafe.ai/v1/models", nil)
+		require.NoError(t, err)
+		_, err = client.Do(req)
+		require.Error(t, err)
+		assert.True(t, IsAuthError(err))
+		assert.NotContains(t, err.Error(), secretKey)
+		assert.NotContains(t, err.Error(), "X-Injected")
+	})
+
+	t.Run("bearer_source_error_containing_secret_is_scrubbed", func(t *testing.T) {
+		client := NewClient(func(context.Context) (string, error) {
+			return "", fmt.Errorf("vault failed for key %s", secretKey)
+		})
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://api.typesafe.ai/v1/models", nil)
+		require.NoError(t, err)
+		_, err = client.Do(req)
+		require.Error(t, err)
+		assert.True(t, IsAuthError(err))
+		assert.NotContains(t, err.Error(), secretKey, "bearer source error text must never propagate secret material")
+	})
+
+	t.Run("transport_error_containing_secret_is_scrubbed", func(t *testing.T) {
+		dialer := &recordingDialer{
+			inner: dialerFunc(func(context.Context, string, string) (net.Conn, error) {
+				return nil, fmt.Errorf("synthetic transport failure mentioning %s", secretKey)
+			}),
+		}
+		client := NewClient(
+			StaticBearer(secretKey),
+			WithDialerForTesting(&fakeResolver{ips: []net.IPAddr{{IP: net.ParseIP("203.0.113.99")}}}, dialer),
+		)
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://api.typesafe.ai/v1/models", nil)
+		require.NoError(t, err)
+		_, err = client.Do(req)
+		require.Error(t, err)
+		assert.NotContains(t, err.Error(), secretKey)
+	})
+}
+
+type dialerFunc func(ctx context.Context, network, addr string) (net.Conn, error)
+
+func (f dialerFunc) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	return f(ctx, network, addr)
+}
+
+func TestEgress_LoopbackTestSeamConfinedToExactLoopbackServer(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("other loopback server must not be reachable")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer other.Close()
+
+	client := NewClient(StaticBearer("sk-test"), WithLoopbackServerForTesting(ts.URL, ts.Client()))
+
+	// Allowed: the exact configured httptest server.
+	resp, err := client.Get(ts.URL + "/v1/models")
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+
+	// Refused: a DIFFERENT loopback port on http://127.0.0.1.
+	resp2, err := client.Get(other.URL + "/v1/models")
+	if resp2 != nil {
+		_ = resp2.Body.Close()
+	}
+	require.Error(t, err)
+	assert.True(t, IsSchemeNotAllowed(err) || IsBlockedDestination(err), "unexpected error: %v", err)
+
+	// Refused: passing a non-loopback URL into WithLoopbackServerForTesting fails closed.
+	badClient := NewClient(StaticBearer("sk-test"), WithLoopbackServerForTesting("https://api.typesafe.ai", ts.Client()))
+	resp3, err := badClient.Get("https://api.typesafe.ai/v1/models")
+	if resp3 != nil {
+		_ = resp3.Body.Close()
+	}
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidEndpoint)
+	assert.True(t, IsInvalidEndpoint(err))
+}
+
+func TestEgress_PreservesContextCancelAndDeadlineAndNon2xxResponsesUnderCap(t *testing.T) {
+	const secretKey = "sk-ctx-secret-999"
+
+	hangDone := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/hang" {
+			select {
+			case <-hangDone:
+			case <-r.Context().Done():
+			}
+			return
+		}
+		w.Header().Set("X-Typesafe-Request-Id", "req-abc")
+		w.Header().Set("Retry-After", "2")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"code":"rate_limited"}}`))
+	}))
+	defer ts.Close()
+	defer close(hangDone)
+
+	client := NewClient(StaticBearer(secretKey), WithLoopbackServerForTesting(ts.URL, ts.Client()))
+
+	t.Run("non_2xx_under_1MiB_returns_response_intact", func(t *testing.T) {
+		resp, err := client.Get(ts.URL + "/v1/systemone")
+		require.NoError(t, err)
+		defer func() { _ = resp.Body.Close() }()
+		assert.Equal(t, http.StatusTooManyRequests, resp.StatusCode)
+		assert.Equal(t, "req-abc", resp.Header.Get("X-Typesafe-Request-Id"))
+		assert.Equal(t, "2", resp.Header.Get("Retry-After"))
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		assert.JSONEq(t, `{"error":{"code":"rate_limited"}}`, string(body))
+	})
+
+	t.Run("context_deadline_exceeded_preserved", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+		defer cancel()
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, ts.URL+"/hang", strings.NewReader(`{}`))
+		require.NoError(t, err)
+		resp, err := client.Do(req)
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		require.Error(t, err)
+		assert.ErrorIs(t, err, context.DeadlineExceeded)
+		assert.NotContains(t, err.Error(), secretKey)
+	})
+
+	t.Run("context_canceled_preserved", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, ts.URL+"/hang", strings.NewReader(`{}`))
+		require.NoError(t, err)
+		resp, err := client.Do(req)
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		require.Error(t, err)
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.NotContains(t, err.Error(), secretKey)
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Import Guard (P1 brief §4 & common-dev-context)
+// ---------------------------------------------------------------------------
+
+func TestEgress_ImportGuard(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	require.NoError(t, err)
+	require.NotEmpty(t, files)
+
+	fset := token.NewFileSet()
+	nonTestCount := 0
+	for _, file := range files {
+		if strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+		nonTestCount++
+		parsed, err := parser.ParseFile(fset, file, nil, parser.ImportsOnly)
+		require.NoError(t, err)
+
+		for _, imp := range parsed.Imports {
+			path := strings.Trim(imp.Path.Value, `"`)
+			if !strings.HasPrefix(path, "github.com/GoogleCloudPlatform/scion/") {
+				// Must be Go standard library (no dots in first path element).
+				first, _, _ := strings.Cut(path, "/")
+				assert.NotContains(t, first, ".", "non-stdlib external import %q not allowed in egress", path)
+				continue
+			}
+			// Within this module, egress may depend ONLY on pkg/util/ssrfclient
+			// (never pkg/hub, pkg/store, pkg/secret, pkg/messaging, pkg/ruleengine,
+			// any trigger package, or pkg/systemone/runtime).
+			assert.Equal(t, "github.com/GoogleCloudPlatform/scion/pkg/util/ssrfclient", path,
+				"forbidden internal import %q in %s", path, file)
+		}
+	}
+	require.Greater(t, nonTestCount, 0, "expected at least one non-test Go file")
+}
