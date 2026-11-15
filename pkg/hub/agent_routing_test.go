@@ -221,6 +221,20 @@ func TestResolveRoutingAgents(t *testing.T) {
 			wantSlugs: []string{"foo"},
 		},
 		{
+			name:         "leading possessive mention overrides default: @foo's proposal",
+			content:      "@foo's proposal",
+			defaultAgent: agentPtr(alpha),
+			agents:       allAgents,
+			wantSlugs:    []string{"foo"},
+		},
+		{
+			name:         "additive typographic possessive mention: check @foo’s, please",
+			content:      "check @foo\u2019s, please",
+			defaultAgent: agentPtr(alpha),
+			agents:       allAgents,
+			wantSlugs:    []string{"alpha", "foo"},
+		},
+		{
 			name:         "pagination: agents beyond first page",
 			content:      "hello @baz",
 			defaultAgent: agentPtr(alpha),

@@ -1543,6 +1543,11 @@ func TestExtractMentions_Basic(t *testing.T) {
 			text: "(cc @bob)",
 			want: []string{"bob"},
 		},
+		{
+			name: "possessive mentions ascii and typographic",
+			text: "following @instance-investigator's proposal and @bob\u2019s,",
+			want: []string{"instance-investigator", "bob"},
+		},
 	}
 
 	for _, tc := range tests {
@@ -1683,6 +1688,40 @@ func TestSendMessageViaHub_OldHubShaped_MentionsFieldCarriesTheMention(t *testin
 	defer mu.Unlock()
 	require.Equal(t, []string{"bystander"}, capturedMentions,
 		"the old-hub-shaped server must still see the mention via the explicit field")
+}
+
+// TestSendMessageViaHub_PossessiveMentionNotifiesIntendedAgent reproduces
+// ptone/scion#8112: possessive @agent's and @agent’s mentions in a message body
+// must resolve and notify the intended project agent rather than emitting the
+// unresolved "@<agent>'s is not an agent in this project" stderr note.
+func TestSendMessageViaHub_PossessiveMentionNotifiesIntendedAgent(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	projectID := "project-msg-possessive-mention"
+	agents := []hubclient.Agent{
+		{Name: "primary-agent", Slug: "primary-agent", Status: "running"},
+		{Name: "instance-investigator", Slug: "instance-investigator", Status: "running"},
+	}
+	server, sent := newMessageMockHubServer(t, projectID, agents)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID}
+
+	origCC := msgCC
+	msgCC = nil
+	defer func() { msgCC = origCC }()
+
+	stderr := captureStderr(t, func() {
+		err = sendMessageViaHub(hubCtx, "primary-agent", "reviewing @instance-investigator's proposal and @instance-investigator\u2019s follow-up.", false, false, false)
+	})
+	require.NoError(t, err)
+	require.Contains(t, stderr, "Mention notification sent to @instance-investigator.")
+	require.NotContains(t, stderr, "is not an agent in this project; no agent was notified.")
+	require.Len(t, *sent, 1)
+	require.Equal(t, []string{"instance-investigator"}, (*sent)[0].Mentions)
 }
 
 // TestSendMessageViaConversation_OutboundConvRef_PrintsMentionWarning covers

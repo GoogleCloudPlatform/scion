@@ -72,7 +72,8 @@ type MentionResult struct {
 
 // ExtractMentions scans message text for @name tokens and returns a deduplicated
 // list of mentioned names (without the @ prefix). Trailing punctuation (except
-// underscores and hyphens) is stripped from each token.
+// underscores and hyphens) and trailing possessive suffixes ('s and ’s) are
+// stripped from each token.
 //
 // An @ preceded by a non-whitespace character (e.g. inside an email address like
 // user@example.com) is not treated as a mention trigger.
@@ -451,8 +452,8 @@ func blankRunes(out []rune, start, end int) {
 
 // IsLeadingMention reports whether text begins with an @-mention token
 // whose extracted name matches firstMentionName (case-insensitive).
-// The extraction uses the same rules as ExtractMentions: TrimPrefix "@",
-// then TrimRightFunc for trailing punctuation (except _ and -).
+// The extraction uses the same rules as ExtractMentions: TrimPrefix "@"
+// followed by trimMentionPunct.
 //
 // This is used to detect the "leading @-mention override" pattern where
 // a message starting with @agent-name signals explicit address override
@@ -462,10 +463,7 @@ func IsLeadingMention(text, firstMentionName string) bool {
 	if len(fields) == 0 || !strings.HasPrefix(fields[0], "@") {
 		return false
 	}
-	name := strings.TrimPrefix(fields[0], "@")
-	name = strings.TrimRightFunc(name, func(r rune) bool {
-		return unicode.IsPunct(r) && r != '_' && r != '-'
-	})
+	name := trimMentionPunct(strings.TrimPrefix(fields[0], "@"))
 	return name != "" && strings.EqualFold(name, firstMentionName)
 }
 
@@ -597,12 +595,37 @@ func agentMentionSlug(word string) (string, bool) {
 	return slug, true
 }
 
-// trimMentionPunct strips trailing punctuation, except underscores and
-// hyphens, from a mention name.
+// trimMentionPunct strips trailing punctuation (except underscores and
+// hyphens) and a trailing possessive suffix ('s or ’s, case-insensitive)
+// from a mention name.
 func trimMentionPunct(name string) string {
+	name = trimTrailingMentionPunct(name)
+	name = trimPossessiveSuffix(name)
+	return trimTrailingMentionPunct(name)
+}
+
+func trimTrailingMentionPunct(name string) string {
 	return strings.TrimRightFunc(name, func(r rune) bool {
 		return unicode.IsPunct(r) && r != '_' && r != '-'
 	})
+}
+
+func trimPossessiveSuffix(name string) string {
+	if len(name) < 2 {
+		return name
+	}
+	last := name[len(name)-1]
+	if last != 's' && last != 'S' {
+		return name
+	}
+	stem := name[:len(name)-1]
+	if strings.HasSuffix(stem, "'") {
+		return stem[:len(stem)-1]
+	}
+	if strings.HasSuffix(stem, "\u2019") {
+		return stem[:len(stem)-len("\u2019")]
+	}
+	return name
 }
 
 // RewriteAgentMentions rewrites every @-mention written in recipient syntax
