@@ -583,6 +583,7 @@ for (const theme of ['light', 'dark'] as const) {
       const pageEl = page.locator('scion-page-profile-decisions');
       await expect(pageEl).toBeVisible({ timeout: 15_000 });
       await expect(pageEl.locator('[data-waiting-badge]')).toHaveText('4');
+      await expect(pageEl.getByRole('radiogroup', { name: 'Sort decisions' })).toBeVisible();
 
       // Profile left nav shows Decisions at the top with badge "4" on desktop (and inside drawer on mobile).
       const profileNav = page.locator('scion-profile-nav').first();
@@ -687,6 +688,7 @@ for (const theme of ['light', 'dark'] as const) {
       await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
       const pageEl = page.locator('scion-page-profile-decisions');
       await expect(pageEl.locator('[data-made-group="proj-1"]')).toBeVisible({ timeout: 15_000 });
+      await expect(pageEl.getByRole('radiogroup', { name: 'Sort decisions' })).toBeVisible();
       await expect(pageEl.locator('[data-made-group="proj-2"]')).toBeVisible();
       await expect(pageEl.locator('[data-see-all-project="proj-1"]')).toHaveText(
         'See all in scion'

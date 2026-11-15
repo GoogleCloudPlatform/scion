@@ -69,6 +69,8 @@ function jsonResponse(body: unknown, status = 200): Promise<Response> {
   );
 }
 
+import '@shoelace-style/shoelace/dist/components/radio-group/radio-group.js';
+import '@shoelace-style/shoelace/dist/components/radio-button/radio-button.js';
 await import('./profile-decisions.js');
 type ScionPageProfileDecisions = import('./profile-decisions.js').ScionPageProfileDecisions;
 type ScionChatChoices = import('../shared/chat/chat-choices.js').ScionChatChoices;
@@ -429,6 +431,15 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
     expect(requestedUrls[0]).toBe('/api/v1/users/me/decisions?tab=pending&sort=project');
 
     // Two project section headers: scion (3 decisions across 2 prompts) and web-site (1 decision)
+    const sortGroup = el.shadowRoot?.querySelector<HTMLElement>('sl-radio-group[data-sort-switch]');
+    const innerRadiogroup =
+      sortGroup?.shadowRoot?.querySelector<HTMLElement>('[role="radiogroup"]');
+    const labelledById = innerRadiogroup?.getAttribute('aria-labelledby') ?? '';
+    expect(labelledById).toBe('label');
+    const innerSortLabel = sortGroup?.shadowRoot?.getElementById(labelledById);
+    expect(innerSortLabel?.getAttribute('aria-hidden')).toBe('false');
+    expect(innerSortLabel?.textContent?.trim()).toBe('Sort decisions');
+
     const groups = Array.from(
       el.shadowRoot?.querySelectorAll<HTMLElement>('[data-pending-group]') ?? []
     );
@@ -915,16 +926,25 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
       const tab = url.searchParams.get('tab') || 'pending';
       if (tab === 'pending') {
         const cur = url.searchParams.get('cursor');
+        const sort = url.searchParams.get('sort') || 'project';
+        const nextCursor =
+          cur === 'pending-cur-2'
+            ? 'pending-cur-3'
+            : cur
+              ? undefined
+              : sort === 'recent'
+                ? 'pending-recent-cur-2'
+                : 'pending-cur-2';
         return jsonResponse({
-          counts: { waitingOnYou: 2, waitingOnOthers: 0 },
+          counts: { waitingOnYou: 3, waitingOnOthers: 0 },
           prompts: [
             makePrompt({
               project: PROJ_SCION,
-              promptMessageId: cur ? 'm-page-2' : 'm-page-1',
+              promptMessageId: cur ? `m-${cur}` : `m-${sort}-1`,
               decisions: [
                 makeDecision({
-                  rowId: cur ? 'r-p2' : 'r-p1',
-                  messageId: cur ? 'm-page-2' : 'm-page-1',
+                  rowId: cur ? `r-${cur}` : `r-${sort}-1`,
+                  messageId: cur ? `m-${cur}` : `m-${sort}-1`,
                 }),
               ],
             }),
@@ -934,7 +954,7 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
           conversations: [{ key: 'topic:release', label: '#release', projectId: 'proj-1' }],
           projects: [PROJ_SCION, PROJ_WEB],
           truncatedProjects: false,
-          ...(cur ? {} : { nextCursor: 'pending-cur-2' }),
+          ...(nextCursor ? { nextCursor } : {}),
         });
       }
       return orig(url);
@@ -943,18 +963,23 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
     const el = await mount('/profile/decisions?tab=pending&sort=project');
     expect(el.shadowRoot?.querySelector('[data-load-more="pending"]')).not.toBeNull();
 
-    // Load page 2 on pending (uses cursor=pending-cur-2 once)
+    // Load page 2 on pending (uses cursor=pending-cur-2 once AND returns live cursor=pending-cur-3)
     el.shadowRoot?.querySelector<HTMLElement>('[data-load-more="pending"]')?.click();
     await settle(el, 25);
     expect(requestedUrls.filter((u) => u.includes('cursor=pending-cur-2'))).toHaveLength(1);
+    expect(el.shadowRoot?.querySelector('[data-load-more="pending"]')).not.toBeNull();
 
     const recordStart = requestedUrls.length;
 
-    // 1. Sort change on pending -> no cursor
+    // 1. Sort change on pending while holding live pending-cur-3 -> clears cursor immediately and sends no cursor
     el.shadowRoot?.querySelector<HTMLElement>('[data-sort-option="recent"]')?.click();
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('[data-load-more="pending"]')).toBeNull();
     await settle(el, 25);
+    // sort=recent returned live pending-recent-cur-2
+    expect(el.shadowRoot?.querySelector('[data-load-more="pending"]')).not.toBeNull();
 
-    // 2. Filter change on pending -> no cursor
+    // 2. Filter change on pending while holding live pending-recent-cur-2 -> sends no cursor
     el.shadowRoot?.querySelector('scion-decisions-filter-panel')?.dispatchEvent(
       new CustomEvent('decisions-filter-change', {
         detail: { project: 'proj-1' },
@@ -964,20 +989,32 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
     );
     await settle(el, 25);
 
-    // 3. Switch to Made (default sort=recent returns nextCursor=made-cur-2) -> no cursor on initial reset
+    // 3. Switch to Made (default sort=recent returns live nextCursor=made-cur-2) -> no cursor on initial reset
     el.shadowRoot?.querySelector<HTMLElement>('sl-tab[data-tab="made"]')?.click();
     await settle(el, 25);
+    expect(el.shadowRoot?.querySelector('[data-load-more="made"]')).not.toBeNull();
 
-    // 4. Sort change on Made -> no cursor
+    // 4a. Sort change on Made (recent -> project) while holding live made-cur-2, immediately followed by
+    // switching back to recent before sort=project settles -> made-cur-2 must already be cleared by setSort('project')
+    // so sort=recent cannot leak cursor=made-cur-2!
+    el.shadowRoot?.querySelector<HTMLElement>('[data-sort-option="project"]')?.click();
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('[data-load-more="made"]')).toBeNull();
+    el.shadowRoot?.querySelector<HTMLElement>('[data-sort-option="recent"]')?.click();
+    await settle(el, 25);
+    expect(el.shadowRoot?.querySelector('[data-load-more="made"]')).not.toBeNull();
+
+    // 4b. Sort change on Made (recent -> project) allowed to settle completely -> no cursor
     el.shadowRoot?.querySelector<HTMLElement>('[data-sort-option="project"]')?.click();
     await settle(el, 25);
+    expect(el.shadowRoot?.querySelector('[data-load-more="made"]')).toBeNull();
 
     // 5. Switch back to Pending -> no cursor
     el.shadowRoot?.querySelector<HTMLElement>('sl-tab[data-tab="pending"]')?.click();
     await settle(el, 25);
 
     const subsequentUrls = requestedUrls.slice(recordStart);
-    expect(subsequentUrls.length).toBeGreaterThanOrEqual(4);
+    expect(subsequentUrls.length).toBeGreaterThanOrEqual(5);
     expect(subsequentUrls.some((u) => u.includes('cursor='))).toBe(false);
   });
 

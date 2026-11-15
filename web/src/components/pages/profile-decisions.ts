@@ -144,6 +144,19 @@ export class ScionPageProfileDecisions extends LitElement {
         margin: 0 0 0.25rem;
       }
 
+      .sort-bar sl-radio-group::part(form-control-label) {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        clip-path: inset(50%);
+        white-space: nowrap;
+        border: 0;
+      }
+
       .sort-bar sl-radio-button::part(button) {
         background: var(--scion-surface, #ffffff);
         color: var(--scion-text, #1e293b);
@@ -286,7 +299,7 @@ export class ScionPageProfileDecisions extends LitElement {
         <sl-radio-group
           size="small"
           data-sort-switch
-          aria-label="Sort decisions"
+          label="Sort decisions"
           .value=${this.ctrl.sort}
           @sl-change=${(e: Event): void => this.onSortChange(e)}
         >
