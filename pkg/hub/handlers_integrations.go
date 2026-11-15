@@ -850,6 +850,15 @@ func (s *Server) handleUpdateIntegration(w http.ResponseWriter, r *http.Request,
 	}
 
 	if err := mgr.UpdatePlugin(name, repoPath); err != nil {
+		var permErr *plugin.PermissionError
+		if errors.As(err, &permErr) {
+			slog.Warn("Failed to update integration due to permissions", "plugin", name, "binary", permErr.BinaryPath, "error", err)
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeUnprocessable,
+				permErr.UserMessage(), map[string]interface{}{
+					"guidance": permErr.Guidance(repoPath),
+				})
+			return
+		}
 		slog.Error("Failed to update integration", "plugin", name, "error", err)
 		InternalError(w)
 		return
@@ -986,8 +995,7 @@ func (s *Server) handleInstallIntegration(w http.ResponseWriter, r *http.Request
 		// Config file and settings.yaml were written above — no build needed.
 		slog.Info("Plugin binary found on PATH, skipping build", "plugin", name, "binary", binaryName)
 
-		binaryPath, _ := exec.LookPath(binaryName)
-		if err := mgr.LoadOne(plugin.PluginTypeBroker, name, plugin.PluginEntry{Path: binaryPath, ConfigFile: configFilePath}, pluginsDir); err != nil {
+		if err := mgr.LoadOne(plugin.PluginTypeBroker, name, plugin.PluginEntry{ConfigFile: configFilePath}, pluginsDir); err != nil {
 			// LoadOne failing due to missing required config (e.g. bot_token) is
 			// expected on first install — the plugin is installed but not yet
 			// configured. Log a warning and continue; the operator must configure

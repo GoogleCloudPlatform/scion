@@ -107,6 +107,7 @@ func TestDiscoverPlugins_FromConfig(t *testing.T) {
 	assert.Equal(t, "nats", discovered[0].Name)
 	assert.Equal(t, PluginTypeBroker, discovered[0].Type)
 	assert.Equal(t, pluginPath, discovered[0].Path)
+	assert.False(t, discovered[0].ExplicitPath)
 	assert.True(t, discovered[0].FromConfig)
 	assert.Equal(t, "nats://localhost:4222", discovered[0].Config["url"])
 }
@@ -131,6 +132,30 @@ func TestDiscoverPlugins_ExplicitPath(t *testing.T) {
 	discovered := DiscoverPlugins(cfg, dir, logger)
 	assert.Len(t, discovered, 1)
 	assert.Equal(t, customPath, discovered[0].Path)
+	assert.True(t, discovered[0].ExplicitPath)
+}
+
+func TestDiscoverPlugins_MissingExplicitPathFallsBackToPluginsDir(t *testing.T) {
+	dir := t.TempDir()
+	logger := slog.Default()
+
+	brokerDir := filepath.Join(dir, "broker")
+	require.NoError(t, os.MkdirAll(brokerDir, 0755))
+	fallbackPath := filepath.Join(brokerDir, "scion-plugin-nats")
+	require.NoError(t, os.WriteFile(fallbackPath, []byte("#!/bin/sh\n"), 0755))
+
+	cfg := PluginsConfig{
+		Broker: map[string]PluginEntry{
+			"nats": {
+				Path: filepath.Join(dir, "missing", "scion-plugin-nats"),
+			},
+		},
+	}
+
+	discovered := DiscoverPlugins(cfg, dir, logger)
+	require.Len(t, discovered, 1)
+	assert.Equal(t, fallbackPath, discovered[0].Path)
+	assert.False(t, discovered[0].ExplicitPath)
 }
 
 func TestDiscoverPlugins_AutoDiscovery(t *testing.T) {

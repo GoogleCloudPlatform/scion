@@ -1387,6 +1387,90 @@ func TestUpdateIntegration_BuildError(t *testing.T) {
 	}
 }
 
+func TestUpdateIntegration_PermissionError_ExplicitPath(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	mgr := newMockIntegrationManager()
+	mgr.plugins["discord"] = map[string]string{}
+	mgr.updateErr = &plugin.PermissionError{
+		Plugin:       "discord",
+		BinaryPath:   "/usr/local/bin/scion-plugin-discord",
+		ExplicitPath: true,
+		Err:          os.ErrPermission,
+	}
+
+	srv, admin, ctx := integAdminServer(t, "upd-perm-exp")
+	srv.config.MaintenanceConfig.RepoPath = "/opt/scion-src"
+	srv.pluginManager = mgr
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/discord/update", nil)
+	req = req.WithContext(integSessionContext(ctx, admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
+
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&errResp))
+	assert.Equal(t, ErrCodeUnprocessable, errResp.Error.Code)
+	assert.Contains(t, errResp.Error.Message, "/usr/local/bin/scion-plugin-discord")
+	guidance, _ := errResp.Error.Details["guidance"].(string)
+	assert.Contains(t, guidance, "server.plugins.broker.discord.path")
+	assert.Contains(t, guidance, "sudo install -m 0755")
+}
+
+func TestUpdateIntegration_PermissionError_PluginsDir(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	mgr := newMockIntegrationManager()
+	mgr.plugins["discord"] = map[string]string{}
+	mgr.updateErr = &plugin.PermissionError{
+		Plugin:       "discord",
+		BinaryPath:   "/var/lib/scion/.scion/plugins/broker/scion-plugin-discord",
+		ExplicitPath: false,
+		Err:          os.ErrPermission,
+	}
+
+	srv, admin, ctx := integAdminServer(t, "upd-perm-dir")
+	srv.config.MaintenanceConfig.RepoPath = "/opt/scion-src"
+	srv.pluginManager = mgr
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/discord/update", nil)
+	req = req.WithContext(integSessionContext(ctx, admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
+
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&errResp))
+	assert.Equal(t, ErrCodeUnprocessable, errResp.Error.Code)
+	assert.Contains(t, errResp.Error.Message, "/var/lib/scion/.scion/plugins/broker")
+	guidance, _ := errResp.Error.Details["guidance"].(string)
+	assert.Contains(t, guidance, "sudo install -d -m 0755")
+}
+
+func TestInstallIntegration_OnPathDoesNotPinExplicitPath(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	binDir := t.TempDir()
+	fakeBin := filepath.Join(binDir, "scion-plugin-discord")
+	require.NoError(t, os.WriteFile(fakeBin, []byte("#!/bin/sh\n"), 0o755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	mgr := newMockIntegrationManager()
+	srv, admin, ctx := integAdminServer(t, "inst-path-nopin")
+	srv.pluginManager = mgr
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/discord/install", nil)
+	req = req.WithContext(integSessionContext(ctx, admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminIntegrationByName(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.Len(t, mgr.loadOneEntries, 1)
+	assert.Empty(t, mgr.loadOneEntries[0].Path, "PATH-discovered install must not set an explicit Path in memory when settings.yaml omits path")
+}
+
 // --- Install endpoint ---
 
 func TestInstallIntegration_NilPluginManager(t *testing.T) {
