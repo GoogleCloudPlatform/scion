@@ -40,12 +40,14 @@ import (
 // rely on entc.ClearLaunchResumePhaseHook, which clears activity_since on
 // any write of a phase other than running.
 func stampActivitySince(m *ent.AgentMutation, prevPhase, prevActivity string, now time.Time) {
+	// A field the mutation clears (ClearPhase/ClearActivity) becomes empty,
+	// not the stored value.
 	phase, ok := m.Phase()
-	if !ok {
+	if !ok && !m.PhaseCleared() {
 		phase = prevPhase
 	}
 	activity, ok := m.Activity()
-	if !ok {
+	if !ok && !m.ActivityCleared() {
 		activity = prevActivity
 	}
 	running := string(state.PhaseRunning)

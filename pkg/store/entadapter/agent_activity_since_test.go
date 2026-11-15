@@ -44,6 +44,19 @@ func requireStampedAfter(t *testing.T, since *time.Time, before time.Time, msg s
 	assert.False(t, since.Before(before.Add(-time.Millisecond)), "%s: activity_since %v predates the write at %v", msg, *since, before)
 }
 
+// backdateActivitySince moves the agent's stored activity_since an hour
+// back and returns the stored value, so a later write that must keep it, or
+// must move it forward, is checked without depending on clock resolution.
+func backdateActivitySince(t *testing.T, s *AgentStore, id string) time.Time {
+	t.Helper()
+	_, err := s.client.Agent.UpdateOneID(uuid.MustParse(id)).
+		SetActivitySince(time.Now().Add(-time.Hour)).Save(context.Background())
+	require.NoError(t, err)
+	since := activitySinceOf(t, s, id)
+	require.NotNil(t, since)
+	return *since
+}
+
 // An idle agent is neither stall-marked nor swept offline, matching
 // blocked, while a working agent with the same timestamps is.
 func TestAgentStore_IdleNotStalledOrOffline(t *testing.T) {
@@ -102,22 +115,21 @@ func TestAgentStore_ActivitySince_StatusUpdate(t *testing.T) {
 
 	beforeIdle := time.Now()
 	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Activity: "idle", Message: "nothing to do"}))
-	idleSince := activitySinceOf(t, s, a.ID)
-	requireStampedAfter(t, idleSince, beforeIdle, "thinking -> idle")
+	requireStampedAfter(t, activitySinceOf(t, s, a.ID), beforeIdle, "thinking -> idle")
 
 	// The same activity again, and a heartbeat with no activity, keep it.
-	time.Sleep(5 * time.Millisecond)
+	idleSince := backdateActivitySince(t, s, a.ID)
 	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Activity: "idle"}))
 	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{ContainerStatus: "Up 5 minutes"}))
 	got := activitySinceOf(t, s, a.ID)
 	require.NotNil(t, got)
-	assert.True(t, got.Equal(*idleSince), "re-reporting idle must not move activity_since: %v != %v", *got, *idleSince)
+	assert.True(t, got.Equal(idleSince), "re-reporting idle must not move activity_since: %v != %v", *got, idleSince)
 
 	beforeWork := time.Now()
 	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Activity: "working"}))
 	workSince := activitySinceOf(t, s, a.ID)
 	requireStampedAfter(t, workSince, beforeWork, "idle -> working")
-	assert.True(t, workSince.After(*idleSince), "a new activity moves activity_since forward")
+	assert.True(t, workSince.After(idleSince), "a new activity moves activity_since forward")
 
 	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "stopped"}))
 	assert.Nil(t, activitySinceOf(t, s, a.ID), "leaving running clears activity_since")
@@ -145,15 +157,14 @@ func TestAgentStore_ActivitySince_StallAndOffline(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, stalled, 1)
 	requireStampedAfter(t, stalled[0].ActivitySince, beforeStall, "stall mark (returned row)")
-	stallSince := activitySinceOf(t, s, a.ID)
-	requireStampedAfter(t, stallSince, beforeStall, "stall mark")
+	requireStampedAfter(t, activitySinceOf(t, s, a.ID), beforeStall, "stall mark")
 
-	time.Sleep(5 * time.Millisecond)
+	stallSince := backdateActivitySince(t, s, a.ID)
 	beforeUnstall := time.Now()
 	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Activity: "executing"}))
 	unstallSince := activitySinceOf(t, s, a.ID)
 	requireStampedAfter(t, unstallSince, beforeUnstall, "un-stall")
-	assert.True(t, unstallSince.After(*stallSince))
+	assert.True(t, unstallSince.After(stallSince))
 
 	b := makeAgent(projectID, "since-offline")
 	b.LastSeen = now.Add(-time.Hour)
@@ -267,4 +278,23 @@ func TestAgentStore_ActivitySince_LaunchSucceeded(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "running", got.Phase)
 	requireStampedAfter(t, got.ActivitySince, beforeReport, "launch succeeded")
+}
+
+// A mutation that clears the activity (ClearActivity) while the agent stays
+// running clears activity_since: the cleared field is empty, not the stored
+// value. No writer does this today; the guard keeps stampActivitySince
+// correct if one does.
+func TestAgentStore_ActivitySince_ClearedActivity(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	a := makeAgent(projectID, "since-cleared")
+	require.NoError(t, s.CreateAgent(ctx, a))
+	require.NotNil(t, activitySinceOf(t, s, a.ID))
+
+	upd := s.client.Agent.UpdateOneID(uuid.MustParse(a.ID)).ClearActivity()
+	stampActivitySince(upd.Mutation(), "running", a.Activity, time.Now())
+	_, err := upd.Save(ctx)
+	require.NoError(t, err)
+	assert.Nil(t, activitySinceOf(t, s, a.ID))
 }

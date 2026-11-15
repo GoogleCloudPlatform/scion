@@ -756,9 +756,13 @@ func TestDisplayAgents_Idle(t *testing.T) {
 	defer func() { filterActivity = "" }()
 
 	old := os.Stdout
-	r, w, _ := os.Pipe()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("failed to create pipe: %v", err)
+	}
 	os.Stdout = w
-	err := displayAgents(agents, false)
+	defer func() { os.Stdout = old }()
+	err = displayAgents(agents, false)
 	_ = w.Close()
 	os.Stdout = old
 	if err != nil {
