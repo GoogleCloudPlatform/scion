@@ -1185,5 +1185,99 @@ for (const theme of ['light', 'dark'] as const) {
       expect(bg).not.toBe('rgb(255, 255, 255)');
       expect(bg).not.toBe('rgba(0, 0, 0, 0)');
     });
+
+    test('set header with many keys wraps key pills without crushing title or icon (ptone/scion#8132)', async ({
+      page,
+    }, testInfo) => {
+      const keys = [
+        'channels',
+        'default-channel',
+        'url-scheme',
+        'hosting-storage',
+        'retention-backfill',
+        'cache-control',
+      ];
+      const decisions = keys.map((key, idx) =>
+        decision({
+          messageId: 'prompt-many',
+          rowId: `prompt-many-${key}`,
+          key,
+          question:
+            idx === 0
+              ? 'Which `release` channels should appear in the primary selector, and how should tags map to them?'
+              : `Decision for \`${key}\`?`,
+          defaultChoiceId: 'a',
+          choices:
+            idx === 0
+              ? [
+                  {
+                    id: 'a',
+                    label: 'Stable, Preview (incl. RC), and main',
+                    description:
+                      'vX.Y.Z -> Stable; vX.Y.Z-preview.N & vX.Y.Z-rc.N -> Preview; main -> HEAD.',
+                  },
+                  {
+                    id: 'b',
+                    label: 'Stable, RC, Preview, and main',
+                    description: 'Split vX.Y.Z-rc.N into its own RC channel alongside Stable.',
+                  },
+                ]
+              : [
+                  { id: 'a', label: 'Option A' },
+                  { id: 'b', label: 'Option B' },
+                ],
+        })
+      );
+      await openChoices(
+        page,
+        theme,
+        setThread('prompt-many', decisions, 'Six calls before implementation.')
+      );
+      await markdownReady(page, 'prompt-many');
+
+      const c = card(page, 'prompt-many');
+      const head = c.locator('.card-head');
+      const icon = head.locator('sl-icon[name="list-check"]');
+      const title = head.locator('.title');
+      const keyPills = head.locator('.key');
+
+      await head.evaluate((el) => {
+        let n: Node | null = el;
+        while (n) {
+          if (n instanceof HTMLElement && n.scrollTop > 0) n.scrollTop = 0;
+          n = n.parentNode ?? (n instanceof ShadowRoot ? n.host : null);
+        }
+      });
+      await shot(page, testInfo, theme, '14-set-many-keys', ['prompt-many']);
+
+      await expect(title).toHaveText('6 decisions');
+      await expect(keyPills).toHaveCount(keys.length);
+
+      const headBox = (await head.boundingBox())!;
+      const iconBox = (await icon.boundingBox())!;
+      const titleBox = (await title.boundingBox())!;
+      expect(headBox).not.toBeNull();
+      expect(iconBox).not.toBeNull();
+      expect(titleBox).not.toBeNull();
+
+      // Icon stays unshrunk and title renders on a single horizontal line (never a 1-char vertical column).
+      expect(iconBox.width).toBeGreaterThanOrEqual(12);
+      expect(titleBox.width).toBeGreaterThanOrEqual(60);
+      expect(titleBox.height).toBeLessThanOrEqual(30);
+      const titleLineCount = await title.evaluate((el) => el.getClientRects().length);
+      expect(titleLineCount).toBe(1);
+
+      // Every key pill stays horizontally within the header (wrapped onto additional rows, never clipped).
+      const pillBoxes = await Promise.all(
+        Array.from({ length: keys.length }, (_, i) => keyPills.nth(i).boundingBox())
+      );
+      for (let i = 0; i < pillBoxes.length; i++) {
+        const box = pillBoxes[i]!;
+        expect(box, `key pill ${keys[i]}`).not.toBeNull();
+        expect(box.x).toBeGreaterThanOrEqual(headBox.x - 1);
+        expect(box.x + box.width).toBeLessThanOrEqual(headBox.x + headBox.width + 1);
+      }
+      expect(pillBoxes[pillBoxes.length - 1]!.y).toBeGreaterThan(pillBoxes[0]!.y + 4);
+    });
   });
 }
