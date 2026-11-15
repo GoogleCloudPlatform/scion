@@ -174,6 +174,8 @@ func TestMessageHoldStore_ProofStampAndHoldCAS(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, store.MessageDispatchAwaitingSession, got.DispatchState)
 		assert.Equal(t, "run-initial", got.HoldLaunchID)
+		assert.Empty(t, got.NotReached, "single-use no_session proof must be consumed on HoldMessageAwaitingSession")
+		assert.Nil(t, got.NotReachedAt)
 		require.NotNil(t, got.HoldUntil)
 		assert.Equal(t, f.currentTime().Add(10*time.Minute), *got.HoldUntil)
 

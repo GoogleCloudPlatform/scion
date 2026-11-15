@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -710,6 +711,27 @@ func (s *Server) processClaimedHeldRow(
 	// buffered messages (H3, design.md §2) so they do not cut into processing
 	// of earlier held rows.
 	sm.Urgent = false
+	if s.writeDenyEnabled() {
+		var convRes *messaging.ConversationResult
+		if row.ConversationID != "" {
+			if conv, cerr := s.store.GetConversation(ctx, row.ConversationID); cerr == nil && conv != nil {
+				convRes = &messaging.ConversationResult{
+					ConversationID: conv.ID,
+					ExternalRef:    conv.ExternalRef,
+					Kind:           conv.Kind,
+					Surface:        conv.Surface,
+					DisplayName:    conv.DisplayName,
+				}
+			}
+		}
+		sm.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+			MessageID:  row.ID,
+			ConvResult: convRes,
+			Msg:        sm,
+			CreatedAt:  row.CreatedAt,
+			IsMention:  row.Type == messages.TypeMention,
+		})
+	}
 
 	if err := s.dispatchClaimedHeldMessage(dctx, dispatcher, target, sm); err != nil {
 		reason := sanitizeFailureReason(err.Error())

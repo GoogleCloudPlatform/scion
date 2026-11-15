@@ -33,7 +33,7 @@ import (
 // expectedTableCount is the number of domain tables in the hub schema
 // (excluding the schema_migrations bookkeeping table). The fixture must cover
 // every one of them.
-const expectedTableCount = 101
+const expectedTableCount = 102
 
 // TestFixtureCoverage is the CI coverage gate: it generates the fixture and
 // fails if any domain table has zero rows.
@@ -187,6 +187,17 @@ func TestFixtureLoadable(t *testing.T) {
 	assert.Equal(t, store.SystemOneAuthKindAPIKey, soInst.Auth.Kind)
 	assert.Equal(t, "TYPESAFE_API_KEY", soInst.Auth.SecretName)
 	assert.Equal(t, 5*time.Second, soInst.Limits.CallTimeout)
+
+	// The agent_delivery_holds marker and awaiting_session message row
+	// (ptone/scion#7881) must decode through the real store adapters.
+	hasDeliveryHold, err := composite.HasAgentDeliveryHold(ctx, agentID)
+	require.NoError(t, err, "agent_delivery_holds fixture row must be readable via MessageHoldStore")
+	assert.True(t, hasDeliveryHold)
+	heldMsg, err := composite.GetMessage(ctx, "88888888-8888-8888-8888-888888888889")
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchAwaitingSession, heldMsg.DispatchState)
+	require.NotNil(t, heldMsg.HoldUntil)
+	assert.Equal(t, "55555555-5555-5555-5555-5555555555aa", heldMsg.HoldLaunchID)
 }
 
 // TestFixtureDeterministic verifies the spec produces a stable set of row

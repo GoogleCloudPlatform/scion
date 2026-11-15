@@ -344,11 +344,26 @@ func Spec() []TableFixture {
 			},
 		}},
 		{Table: "messages", Rows: []row{
-			{
+			{ // NULL hold_until and not_reached_at exercise the nullable hold/proof columns
 				"id": messageID, "project_id": projectID,
 				"sender": "user:alice", "sender_id": userID, "recipient": "agent:worker",
 				"recipient_id": agentID, "msg": "do the thing — café ☕", "type": "instruction",
 				"agent_id": agentID, "created_at": baseTime,
+			},
+			{ // held message in awaiting_session (ptone/scion#7881): populated hold_until and hold_launch_id
+				"id": "88888888-8888-8888-8888-888888888889", "project_id": projectID,
+				"sender": "user:alice", "sender_id": userID, "recipient": "agent:worker",
+				"recipient_id": agentID, "msg": "held until session connects", "type": "instruction",
+				"agent_id": agentID, "dispatch_state": "awaiting_session",
+				"hold_until": baseTime.Add(10 * time.Minute), "hold_launch_id": "55555555-5555-5555-5555-5555555555aa",
+				"created_at": baseTime,
+			},
+		}},
+		{Table: "agent_delivery_holds", Rows: []row{
+			{ // per-agent hold marker paired with the awaiting_session message row above (ptone/scion#7881)
+				"agent_id": agentID, "hold_until": baseTime.Add(10 * time.Minute),
+				"launch_id": "55555555-5555-5555-5555-5555555555aa", "held_count": 1,
+				"created": baseTime,
 			},
 		}},
 		// ---- Choice prompt decisions ----

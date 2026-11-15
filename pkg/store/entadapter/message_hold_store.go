@@ -476,6 +476,8 @@ func (s *BrokerDispatchStore) HoldMessageAwaitingSession(ctx context.Context, p 
 			).
 			SetDispatchState(store.MessageDispatchAwaitingSession).
 			SetHoldUntil(effectiveHoldUntil).
+			ClearNotReached().
+			ClearNotReachedAt().
 			ClearDispatchedAt().
 			Save(ctx)
 		if err != nil {

@@ -352,6 +352,7 @@ var renderNeverCarries = map[string]string{
 	"notifications.go:dispatchToAgent":                          "notifications carry no attachments",
 	"server.go:messageEventHandler":                             "event notices carry no attachments",
 	"artifacts_review.go:deliverArtifactReview":                 "artifact review notices carry no attachments",
+	"message_hold_redrive.go:processClaimedHeldRow":             "held message re-drive excludes attachments (ptone/scion#7939)",
 }
 
 // renderSite is one RenderDeliveryText call: its file:function and whether

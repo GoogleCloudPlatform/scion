@@ -98,9 +98,6 @@ func (s *Server) persistScheduledMessageEvent(
 	structuredMsg *messages.StructuredMessage,
 ) (*store.Message, error) {
 	createdAt := time.Now().UTC()
-	if t, err := time.Parse(time.RFC3339, structuredMsg.Timestamp); err == nil {
-		createdAt = t.UTC()
-	}
 	senderProjID := evt.ProjectID
 	recipProjID := agent.ProjectID
 	storeMsg := &store.Message{
