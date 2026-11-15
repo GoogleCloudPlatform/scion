@@ -2196,6 +2196,12 @@ type MessageHoldStore interface {
 	// syncs or removes affected agents' hold markers in the same transaction,
 	// and returns the rows that transitioned.
 	ExpireHeldMessagesPastDeadline(ctx context.Context, reason string, limit int) ([]Message, error)
+
+	// ExpireHeldMessagesPastDeadlineForAgent atomically fails all
+	// awaiting_session rows for agentID whose hold_until <= database now with
+	// reason, syncs or removes agentID's hold marker in the same transaction,
+	// and returns the rows that transitioned (RV3-R1).
+	ExpireHeldMessagesPastDeadlineForAgent(ctx context.Context, agentID, reason string) ([]Message, error)
 }
 
 type redriveLeaseOwnerKey struct{}

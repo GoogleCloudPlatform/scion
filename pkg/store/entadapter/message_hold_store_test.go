@@ -877,3 +877,84 @@ func TestMessageHoldStore_ScheduledEventIDRoundTripAndJSONOmission(t *testing.T)
 	require.NoError(t, err)
 	assert.NotContains(t, string(raw), evtID, "ScheduledEventID must be omitted from JSON")
 }
+
+// TestMessageHoldStore_LaterEpisodeExtendsMarkerHoldUntil verifies RV3-O1:
+// when a second hold episode holds (or re-holds) a fresh row with a later
+// hold_until while an earlier marker still exists, the marker's hold_until
+// advances to the max across remaining awaiting_session rows so new sends keep
+// queueing behind unexpired held rows even after the first episode's bound
+// passes, while individual rows keep their own COALESCE(hold_until, now+10m).
+func TestMessageHoldStore_LaterEpisodeExtendsMarkerHoldUntil(t *testing.T) {
+	ctx := context.Background()
+	f := newHoldStoreFixture(t)
+
+	start := f.currentTime()
+	ep1Bound := start.Add(10 * time.Minute)
+
+	// Episode 1 at T=0: m1 held until T+10m; m2 created before marker (HoldUntil nil)
+	// so it represents an in-flight/cap-bypassed message from a later drop at T+6m.
+	m2 := f.createDispatchedMsg(t, "ep2-fresh", 0)
+	m1 := f.createDispatchedMsg(t, "ep1", time.Millisecond)
+	f.stampNoSession(t, m1.ID)
+	held1, err := f.cs.HoldMessageAwaitingSession(ctx, store.HoldMessageParams{
+		MessageID:   m1.ID,
+		AgentID:     f.agentID,
+		MaxProofAge: 2 * time.Minute,
+		HoldTTL:     10 * time.Minute,
+		MaxHeld:     100,
+	})
+	require.NoError(t, err)
+	require.True(t, held1)
+
+	// Episode 2 at T+6m while marker from Episode 1 still exists: m2 gets a
+	// fresh no_session proof and holds until T+16m.
+	f.advance(6 * time.Minute)
+	ep2Bound := f.currentTime().Add(10 * time.Minute)
+	f.stampNoSession(t, m2.ID)
+	held2, err := f.cs.HoldMessageAwaitingSession(ctx, store.HoldMessageParams{
+		MessageID:   m2.ID,
+		AgentID:     f.agentID,
+		MaxProofAge: 2 * time.Minute,
+		HoldTTL:     10 * time.Minute,
+		MaxHeld:     100,
+	})
+	require.NoError(t, err)
+	require.True(t, held2)
+
+	// Individual row bounds: m1 keeps T+10m (COALESCE), m2 gets T+16m.
+	got1, err := f.cs.GetMessage(ctx, m1.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got1.HoldUntil)
+	assert.True(t, got1.HoldUntil.Equal(ep1Bound), "m1 must keep its original T+10m bound")
+
+	got2, err := f.cs.GetMessage(ctx, m2.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got2.HoldUntil)
+	assert.True(t, got2.HoldUntil.Equal(ep2Bound), "m2 must get T+16m bound")
+
+	// Advance to T+11m (past Episode 1's T+10m bound, still within Episode 2's T+16m bound).
+	f.advance(5 * time.Minute)
+
+	// New send m3 at T+11m MUST still queue behind m2 because marker.HoldUntil extended to T+16m!
+	m3 := f.createDispatchedMsg(t, "ep2-queued-after-ep1-deadline", 2*time.Millisecond)
+	res3, err := f.cs.PrepareOrHoldMessage(ctx, f.agentID, m3.ID, 100)
+	require.NoError(t, err)
+	require.True(t, res3.Held, "new send must keep queueing behind m2 after Episode 1 deadline passed")
+	require.NotNil(t, res3.HoldUntil)
+	assert.True(t, res3.HoldUntil.Equal(ep2Bound), "queued row must inherit the extended Episode 2 marker bound")
+
+	// ExpireHeldMessagesPastDeadlineForAgent expires ONLY m1 (past T+10m) and keeps m2 + m3 + marker.
+	expired, err := f.cs.ExpireHeldMessagesPastDeadlineForAgent(ctx, f.agentID, "agent session did not connect")
+	require.NoError(t, err)
+	require.Len(t, expired, 1)
+	assert.Equal(t, m1.ID, expired[0].ID)
+
+	hasMarker, err := f.cs.HasAgentDeliveryHold(ctx, f.agentID)
+	require.NoError(t, err)
+	assert.True(t, hasMarker, "marker must remain for unexpired Episode 2 rows")
+
+	claimed, err := f.cs.ClaimHeldMessages(ctx, f.agentID, 64)
+	require.NoError(t, err)
+	require.Len(t, claimed, 2)
+	assert.Equal(t, []string{m2.ID, m3.ID}, []string{claimed[0].ID, claimed[1].ID})
+}

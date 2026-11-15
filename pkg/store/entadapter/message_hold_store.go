@@ -194,8 +194,10 @@ func markerLeaseActive(m *ent.AgentDeliveryHold, now time.Time) bool {
 // awaiting_session messages inside c's transaction: deletes the marker when
 // zero remain (unless an unexpired re-drive lease is held on the marker, in
 // which case HeldCount is set to 0 until ReleaseAgentRedriveLease completes),
-// updates held_count when the marker exists, or creates the marker with
-// fallbackHoldUntil (never extending an existing marker's bound).
+// updates held_count and extends hold_until to max(marker.HoldUntil, max
+// remaining awaiting_session hold_until) when a later hold episode holds rows
+// with a later deadline (RV3-O1, without ever extending individual message
+// rows' COALESCE bounds), or creates the marker when absent.
 func syncAgentDeliveryHold(ctx context.Context, c *ent.Client, agentID string, fallbackHoldUntil time.Time, launchID string, now time.Time) error {
 	count, err := countHeldMessages(ctx, c, agentID)
 	if err != nil {
@@ -221,30 +223,42 @@ func syncAgentDeliveryHold(ctx context.Context, c *ent.Client, agentID string, f
 		}
 		return nil
 	}
+
+	maxHoldUntil := fallbackHoldUntil
+	latest, qErr := c.Message.Query().
+		Where(messageDispatchAwaitingSessionLiteral(), message.RecipientIDEQ(agentID), message.HoldUntilNotNil()).
+		Order(ent.Desc(message.FieldHoldUntil)).
+		Select(message.FieldHoldUntil).
+		First(ctx)
+	if qErr == nil && latest.HoldUntil != nil && latest.HoldUntil.After(maxHoldUntil) {
+		maxHoldUntil = *latest.HoldUntil
+	}
+
 	if marker != nil {
-		if marker.HeldCount != count {
-			if err := c.AgentDeliveryHold.UpdateOneID(agentID).SetHeldCount(count).Exec(ctx); err != nil {
+		targetHoldUntil := marker.HoldUntil
+		if maxHoldUntil.After(targetHoldUntil) {
+			targetHoldUntil = maxHoldUntil
+		}
+		needLaunchUpdate := launchID != "" && marker.LaunchID != launchID
+		if marker.HeldCount != count || !targetHoldUntil.Equal(marker.HoldUntil) || needLaunchUpdate {
+			upd := c.AgentDeliveryHold.UpdateOneID(agentID).
+				SetHeldCount(count).
+				SetHoldUntil(targetHoldUntil)
+			if needLaunchUpdate {
+				upd = upd.SetLaunchID(launchID)
+			}
+			if err := upd.Exec(ctx); err != nil {
 				return mapError(err)
 			}
 		}
 		return nil
 	}
-	if fallbackHoldUntil.IsZero() {
-		// Derive from the earliest remaining held row if not supplied.
-		first, qErr := c.Message.Query().
-			Where(messageDispatchAwaitingSessionLiteral(), message.RecipientIDEQ(agentID), message.HoldUntilNotNil()).
-			Order(ent.Asc(message.FieldCreated), ent.Asc(message.FieldID)).
-			Select(message.FieldHoldUntil).
-			First(ctx)
-		if qErr == nil && first.HoldUntil != nil {
-			fallbackHoldUntil = *first.HoldUntil
-		} else {
-			fallbackHoldUntil = now
-		}
+	if maxHoldUntil.IsZero() {
+		maxHoldUntil = now
 	}
 	return mapError(c.AgentDeliveryHold.Create().
 		SetID(agentID).
-		SetHoldUntil(fallbackHoldUntil).
+		SetHoldUntil(maxHoldUntil).
 		SetLaunchID(launchID).
 		SetHeldCount(count).
 		SetCreated(now).
@@ -439,10 +453,6 @@ func (s *BrokerDispatchStore) HoldMessageAwaitingSession(ctx context.Context, p 
 			return err
 		}
 
-		marker, err := lockHoldMarker(ctx, c, p.AgentID)
-		if err != nil {
-			return err
-		}
 		heldCount, err := countHeldMessages(ctx, c, p.AgentID)
 		if err != nil {
 			return err
@@ -504,11 +514,7 @@ func (s *BrokerDispatchStore) HoldMessageAwaitingSession(ctx context.Context, p 
 			return nil
 		}
 
-		markerHoldUntil := effectiveHoldUntil
-		if marker != nil {
-			markerHoldUntil = marker.HoldUntil
-		}
-		if err := syncAgentDeliveryHold(ctx, c, p.AgentID, markerHoldUntil, agentRow.RunID, now); err != nil {
+		if err := syncAgentDeliveryHold(ctx, c, p.AgentID, effectiveHoldUntil, agentRow.RunID, now); err != nil {
 			return err
 		}
 		held = true
@@ -970,6 +976,69 @@ func (s *BrokerDispatchStore) ExpireHeldMessagesPastDeadline(ctx context.Context
 			}
 		}
 		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return expired, nil
+}
+
+// ExpireHeldMessagesPastDeadlineForAgent implements store.MessageHoldStore.
+func (s *BrokerDispatchStore) ExpireHeldMessagesPastDeadlineForAgent(ctx context.Context, agentID, reason string) ([]store.Message, error) {
+	if agentID == "" {
+		return nil, nil
+	}
+	var expired []store.Message
+	err := s.withHoldTx(ctx, func(c *ent.Client, now time.Time) error {
+		if agentUID, pErr := parseUUID(agentID); pErr == nil {
+			if _, err := lockAgentForHold(ctx, c, agentUID); err != nil {
+				return err
+			}
+		}
+		candidates, err := c.Message.Query().
+			Where(
+				messageDispatchAwaitingSessionLiteral(),
+				message.RecipientIDEQ(agentID),
+				message.HoldUntilNotNil(),
+				message.HoldUntilLTE(now),
+			).
+			Order(ent.Asc(message.FieldCreated), ent.Asc(message.FieldID)).
+			All(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		if len(candidates) == 0 {
+			return nil
+		}
+		expired = make([]store.Message, 0, len(candidates))
+		for _, cand := range candidates {
+			n, err := c.Message.Update().
+				Where(
+					message.IDEQ(cand.ID),
+					messageDispatchAwaitingSessionLiteral(),
+					message.HoldUntilNotNil(),
+					message.HoldUntilLTE(now),
+				).
+				SetDispatchState(store.MessageDispatchFailed).
+				SetNillableDispatchFailureReason(&reason).
+				ClearNotReached().
+				ClearNotReachedAt().
+				Save(ctx)
+			if err != nil {
+				return mapError(err)
+			}
+			if n != 1 {
+				continue
+			}
+			sm := *entMessageToStore(cand)
+			sm.DispatchState = store.MessageDispatchFailed
+			rCopy := reason
+			sm.DispatchFailureReason = &rCopy
+			sm.NotReached = ""
+			sm.NotReachedAt = nil
+			expired = append(expired, sm)
+		}
+		return syncAgentDeliveryHold(ctx, c, agentID, time.Time{}, "", now)
 	})
 	if err != nil {
 		return nil, err
