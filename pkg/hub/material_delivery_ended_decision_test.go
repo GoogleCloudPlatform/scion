@@ -41,7 +41,7 @@ func TestDispatchDelivery_EndedRequestStillRefusesSuspendedRoot(t *testing.T) {
 
 	// (a)
 	ctl := newDeliverySelector(m.d.authzService, m.agent, PurposeRestart)
-	env, _, err := m.d.selectDeliveryEnv(ended, ctl, m.agent)
+	env, _, err := m.d.selectDeliveryEnv(ended, ctl, m.agent, nil)
 	require.NoError(t, err)
 	require.Equal(t, "v", env[v.Key], "before the suspension the ended run delivers the item: no request-end refusal")
 
@@ -49,7 +49,7 @@ func TestDispatchDelivery_EndedRequestStillRefusesSuspendedRoot(t *testing.T) {
 	setUserStatus(t, m.store, m.projectOwnerID, store.UserStatusSuspended)
 
 	sel := newDeliverySelector(m.d.authzService, m.agent, PurposeRestart)
-	env, _, err = m.d.selectDeliveryEnv(ended, sel, m.agent)
+	env, _, err = m.d.selectDeliveryEnv(ended, sel, m.agent, nil)
 	require.NoError(t, err)
 	assert.NotContains(t, env, v.Key, "a suspended root user is refused after the request ended")
 	assert.Positive(t, sel.denied, "the item was decided and denied")

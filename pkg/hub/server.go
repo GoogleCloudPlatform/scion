@@ -979,6 +979,12 @@ type StartExtras struct {
 	// nothing, which the broker reads as "classification unavailable"; an
 	// empty non-nil map is sent as an empty object.
 	EnvClassifications map[string]api.EnvKind
+	// NoAuth carries the agent's no-credential intent (AppliedConfig.NoAuth)
+	// on every start and restart (wire key noAuth, the key create uses), so
+	// the broker launches the harness without credentials on every start
+	// path and leaves secret material out (buildStartContext). False sends
+	// nothing.
+	NoAuth bool
 }
 
 // applyStartExtras writes extras onto payload as flat top-level wire keys.
@@ -1013,6 +1019,9 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if extras.RunID != "" {
 		payload["runId"] = extras.RunID
+	}
+	if extras.NoAuth {
+		payload["noAuth"] = true
 	}
 	if extras.HubAgentDefaults != nil {
 		payload["hubAgentDefaults"] = extras.HubAgentDefaults

@@ -3898,6 +3898,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		// create. The hub never sends a template-derived image here
 		// (ptone/scion#1799).
 		Image string `json:"image,omitempty"`
+		// NoAuth is the agent's no-credential intent, under the key create
+		// uses (CreateAgentRequest.NoAuth); false from an older Hub.
+		NoAuth bool `json:"noAuth,omitempty"`
 		// AsyncLaunch, LaunchID, LaunchTimeoutSeconds and
 		// LaunchKeepaliveSeconds request an async start, under the same
 		// wire keys and meaning as a create's (CreateAgentRequest; design
@@ -4097,6 +4100,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		ResolvedEnv:              startReq.ResolvedEnv,
 		EnvClassifications:       startReq.EnvClassifications,
 		ResolvedSecrets:          startReq.ResolvedSecrets,
+		NoAuth:                   startReq.NoAuth,
 		SharedDirs:               startReq.SharedDirs,
 		WorkspaceMode:            startReq.WorkspaceMode,
 		RunID:                    startReq.RunID,
@@ -5245,6 +5249,8 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		// RunID is the hub-minted identity of the run this restart starts
 		// (ptone/scion#2550); see CreateAgentRequest.RunID.
 		RunID string `json:"runId,omitempty"`
+		// NoAuth mirrors the same field on the start path.
+		NoAuth bool `json:"noAuth,omitempty"`
 		// TemplateName mirrors the same field on the start path.
 		TemplateName string `json:"templateName,omitempty"`
 		// Profile mirrors the same field on the start path.
@@ -5408,6 +5414,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		ResolvedEnv:              restartReq.ResolvedEnv,
 		EnvClassifications:       restartReq.EnvClassifications,
 		ResolvedSecrets:          restartReq.ResolvedSecrets,
+		NoAuth:                   restartReq.NoAuth,
 		RunID:                    restartReq.RunID,
 		SharedWorkspace:          restartReq.SharedWorkspace,
 		HubProfile:               restartReq.Profile,

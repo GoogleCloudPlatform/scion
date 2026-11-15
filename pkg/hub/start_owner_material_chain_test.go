@@ -159,7 +159,7 @@ func omcStartDelivery(t *testing.T, d *HTTPAgentDispatcher, s store.Store, agent
 		assert.Equal(t, out.sharedSecret, userSecret(selected, sdAlwaysKey, sdAlwaysValue), "launch selection (%s) delivers %s as resolveSecrets does", purpose, sdAlwaysKey)
 		assert.Equal(t, out.privateSecret, userSecret(selected, sdPrivateKey, sdPrivateValue), "launch selection (%s) delivers %s as resolveSecrets does", purpose, sdPrivateKey)
 
-		selEnv, _, err := d.selectDeliveryEnv(ctx, newDeliverySelector(d.authzService, agent, purpose), agent)
+		selEnv, _, err := d.selectDeliveryEnv(ctx, newDeliverySelector(d.authzService, agent, purpose), agent, nil)
 		require.NoError(t, err)
 		assert.Equal(t, out.sharedEnv, selEnv[omcSharedEnvKey] == omcSharedEnvValue, "launch selection (%s) delivers %s as resolveEnvFromStorage does", purpose, omcSharedEnvKey)
 		assert.Equal(t, out.privateEnv, selEnv[omcPrivateEnvKey] == omcPrivateEnvValue, "launch selection (%s) delivers %s as resolveEnvFromStorage does", purpose, omcPrivateEnvKey)
@@ -883,7 +883,7 @@ func TestOwnerMaterialChain_WithheldObservable(t *testing.T) {
 	sel := newDeliverySelector(f.disp.authzService, agent, PurposeRestart)
 	_, _, err = f.disp.selectDeliverySecrets(context.Background(), sel, agent)
 	require.NoError(t, err)
-	_, _, err = f.disp.selectDeliveryEnv(context.Background(), newDeliverySelector(f.disp.authzService, agent, PurposeRestart), agent)
+	_, _, err = f.disp.selectDeliveryEnv(context.Background(), newDeliverySelector(f.disp.authzService, agent, PurposeRestart), agent, nil)
 	require.NoError(t, err)
 
 	recs := omcRecords(t, buf.String(), omcWithheldMsg)
@@ -1337,7 +1337,7 @@ func TestOwnerMaterialChain_EndedRequestDecidesOnMerits(t *testing.T) {
 	run := func(ctx context.Context, purpose MaterialPurpose) delivered {
 		secrets, _, err := f.disp.selectDeliverySecrets(ctx, newDeliverySelector(f.disp.authzService, agent, purpose), agent)
 		require.NoError(t, err)
-		env, _, err := f.disp.selectDeliveryEnv(ctx, newDeliverySelector(f.disp.authzService, agent, purpose), agent)
+		env, _, err := f.disp.selectDeliveryEnv(ctx, newDeliverySelector(f.disp.authzService, agent, purpose), agent, nil)
 		require.NoError(t, err)
 		_, privateSecretEnv := env[omcPrivateSecretEnvKey]
 		return delivered{
