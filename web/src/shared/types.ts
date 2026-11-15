@@ -467,8 +467,7 @@ export function isTerminalAvailable(agent: {
  */
 export function isRetainedSuspendActivity(activity: string | undefined): boolean {
   const lower = activity?.toLowerCase();
-  // ptone/scion#7858 adds 'harness_error' here.
-  return lower === 'idle' || lower === 'completed';
+  return lower === 'idle' || lower === 'completed' || lower === 'harness_error';
 }
 
 /**

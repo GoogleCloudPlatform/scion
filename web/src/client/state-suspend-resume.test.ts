@@ -83,8 +83,8 @@ describe('StateManager suspend and resume sticky-activity handling', () => {
     expect(sm.getAgent('a1')?.activity).toBe('');
   });
 
-  it('retains completed and idle across suspend and clears them on resume', () => {
-    for (const retained of ['completed', 'idle'] as const) {
+  it('retains completed, idle, and harness_error across suspend and clears them on resume', () => {
+    for (const retained of ['completed', 'idle', 'harness_error'] as const) {
       const sm = mk();
       sm.seedAgents([makeAgent({ phase: 'running', activity: retained })]);
 

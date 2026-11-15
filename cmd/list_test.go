@@ -2662,6 +2662,19 @@ func TestDisplayAgents_SuspendedRetainedActivity(t *testing.T) {
 			LastActivityEvent: now,
 		},
 		{
+			ID:                "id-2b",
+			Name:              "susp-harness-error",
+			Template:          "developer",
+			Runtime:           "docker",
+			Project:           "proj",
+			RuntimeBrokerName: "broker",
+			Phase:             "suspended",
+			Activity:          "harness_error",
+			Detail:            &api.AgentDetail{Message: "model API: APIError (status 400)"},
+			ContainerStatus:   "stopped",
+			LastActivityEvent: now,
+		},
+		{
 			ID:                "id-3",
 			Name:              "susp-plain",
 			Template:          "developer",
@@ -2692,13 +2705,15 @@ func TestDisplayAgents_SuspendedRetainedActivity(t *testing.T) {
 	require.NoError(t, err)
 
 	lines := strings.Split(strings.TrimSpace(out), "\n")
-	require.Len(t, lines, 5)
+	require.Len(t, lines, 6)
 	assert.Contains(t, lines[1], "suspended · completed")
 	assert.Contains(t, lines[2], "suspended · idle")
-	assert.Contains(t, lines[3], "suspended")
-	assert.NotContains(t, lines[3], "suspended ·")
+	assert.Contains(t, lines[3], "suspended · harness error")
+	assert.Contains(t, lines[3], "harness error: model API: APIError (status 400)")
+	assert.Contains(t, lines[4], "suspended")
 	assert.NotContains(t, lines[4], "suspended ·")
-	assert.NotContains(t, lines[4], "waiting on others", "non-retained activity on suspended row must not surface in table")
+	assert.NotContains(t, lines[5], "suspended ·")
+	assert.NotContains(t, lines[5], "waiting on others", "non-retained activity on suspended row must not surface in table")
 
 	outputFormat = "json"
 	jsonOut := captureStdout(t, func() { err = displayAgents(agents[:2], false) })

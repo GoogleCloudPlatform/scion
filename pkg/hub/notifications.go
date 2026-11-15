@@ -185,8 +185,9 @@ func (nd *NotificationDispatcher) handleEvent(evt Event) {
 	}
 
 	// Suspended agents match on phase ("suspended"), never on a retained
-	// pre-suspend activity such as completed or idle. Running/stopped agents
-	// match on activity and fall back to phase when activity is empty.
+	// pre-suspend activity such as completed, idle, or harness_error.
+	// Running/stopped agents match on activity and fall back to phase when
+	// activity is empty.
 	matchStatus := notificationEventStatus(statusEvt)
 
 	var watchedAgent *store.Agent
@@ -215,9 +216,9 @@ func (nd *NotificationDispatcher) handleEvent(evt Event) {
 		//     after the subscription's last notification. Heartbeats and stale
 		//     same-period re-reports (even if delivered after an intermediate
 		//     working event or a Hub restart) remain deduplicated.
-		//   - Every other trigger (WAITING_FOR_INPUT, STALLED, LIMITS_EXCEEDED,
-		//     ERROR, SUSPENDED, STOPPED, ...) keeps status-based deduplication
-		//     against the subscription's previous notification.
+		//   - Every other trigger (WAITING_FOR_INPUT, STALLED, HARNESS_ERROR,
+		//     LIMITS_EXCEEDED, ERROR, SUSPENDED, STOPPED, ...) keeps status-based
+		//     deduplication against the subscription's previous notification.
 		lastNotif, err := nd.store.GetLastNotification(ctx, sub.ID)
 		if err != nil {
 			nd.log.Error("Failed to get last notification",

@@ -7,7 +7,7 @@
 ## What changed
 
 - **State model (`pkg/agent/state`):**
-  - Added `Activity.IsRetainedOnSuspend()` (`idle`, `completed`; ptone/scion#7858 will add `harness_error`) and `RetainedSuspendActivity(activity, stalledFrom)`.
+  - Added `Activity.IsRetainedOnSuspend()` (`idle`, `completed`, `harness_error`, matched case-insensitively) and `RetainedSuspendActivity(activity, stalledFrom)`.
   - Updated `AgentState.Validate()` to permit `PhaseSuspended` combined with a retained activity alongside `PhaseStopped` with a terminal activity.
   - Kept legacy `DisplayStatus()` returning `"suspended"` for `PhaseSuspended` regardless of retained activity so older CLIs, brokers, and federation remain unaffected.
 - **Store & Hub suspend/resume (`pkg/store`, `pkg/hub`):**
@@ -16,10 +16,10 @@
   - Cleared retained activity across every resume path: `UpdateAgentStatus` (`suspended -> starting` and `suspended -> running`, with `startDispatch` rollback restoring `priorActivity` on failed launches while preserving `ClearTerminalRemnants` for mid-dispatch status writes and exit-field rules), async launch `beginLaunch` (`start`/`restart`, preserving terminal activities `crashed` and `limits_exceeded` on `stopped` starts), `handleExistingAgent`'s whole-row resume writes, and `wakeAgentForDM` before `waitForAgentReady` so DM wake waits for the new run's activity rather than returning immediately on pre-suspend `completed`/`idle`.
   - Removed `omitempty` from `AgentStatusEvent.Activity` so an explicit empty string reaches the web client whenever activity is cleared on suspend or resume.
 - **Notification matching & per-period dedupe (`pkg/hub/notifications.go`):**
-  - `notificationEventStatus` returns `evt.Phase` (`"suspended"`) whenever `evt.Phase == "suspended"`, so suspending an agent with retained `completed` or `idle` matches `SUSPENDED` only and never fires a false `COMPLETED` or `IDLE`.
-  - Added `NotificationStore.GetLastNotification` and updated `NotificationDispatcher` so `IDLE` and `COMPLETED` deduplicate per activity period using the stored agent row as the single source of truth (`phase == running`, `activity == matchStatus` case-insensitively, and `activity_since > notification.created_at`), whereas all other triggers (`STALLED`, `WAITING_FOR_INPUT`, `LIMITS_EXCEEDED`, `ERROR`, `SUSPENDED`, ...) retain status-based deduplication. Also narrowed `NotificationDispatcher.Start()` from `project.>.agent.status` to `project.*.agent.status` so non-status project events do not cross-match.
+  - `notificationEventStatus` returns `evt.Phase` (`"suspended"`) whenever `evt.Phase == "suspended"`, so suspending an agent with retained `completed`, `idle`, or `harness_error` matches `SUSPENDED` only and never fires a false `COMPLETED`, `IDLE`, or `HARNESS_ERROR`.
+  - Added `NotificationStore.GetLastNotification` and updated `NotificationDispatcher` so `IDLE` and `COMPLETED` deduplicate per activity period using the stored agent row as the single source of truth (`phase == running`, `activity == matchStatus` case-insensitively, and `activity_since > notification.created_at`), whereas all other triggers (`STALLED`, `WAITING_FOR_INPUT`, `HARNESS_ERROR`, `LIMITS_EXCEEDED`, `ERROR`, `SUSPENDED`, ...) retain status-based deduplication. Also narrowed `NotificationDispatcher.Start()` from `project.>.agent.status` to `project.*.agent.status` so non-status project events do not cross-match.
 - **CLI consumers (`cmd/list.go`, `cmd/project_health.go`):**
-  - `scion list` displays `"suspended · completed"` and `"suspended · idle"` in the `PHASE` column and excludes suspended rows from unqualified `--activity` filters unless `--phase suspended` is also given.
+  - `scion list` displays `"suspended · completed"`, `"suspended · idle"`, and `"suspended · harness error"` in the `PHASE` column and excludes suspended rows from unqualified `--activity` filters unless `--phase suspended` is also given.
   - `scion project health` excludes `suspended` rows from active `ProjectHealthSummary` activity counts, fixing the miscount where suspended agents inflated `Completed`, `Idle`, or `Blocked`.
 - **Web helpers (`web/src/`):**
   - Added `isRetainedSuspendActivity` (`shared/types.ts`) and `suspendedActivityLabel` (`shared/agent-state-display.ts`), wired into `agentStatusBadge` and `chat-members.ts` tooltips (`TERMINAL_STATUSES` and wobble settle handling also recognise `idle`).

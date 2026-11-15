@@ -111,11 +111,13 @@ func TestSuspendPathsRetainEligibleActivityAndClearOthers(t *testing.T) {
 			cases: []activityCase{
 				{name: "completed", activity: string(state.ActivityCompleted), wantActivity: string(state.ActivityCompleted)},
 				{name: "idle", activity: string(state.ActivityIdle), wantActivity: string(state.ActivityIdle)},
+				{name: "harness_error", activity: string(state.ActivityHarnessError), wantActivity: string(state.ActivityHarnessError)},
 				{name: "blocked", activity: string(state.ActivityBlocked), wantActivity: ""},
 				{name: "waiting_for_input", activity: string(state.ActivityWaitingForInput), wantActivity: ""},
 				{name: "working", activity: string(state.ActivityWorking), wantActivity: ""},
 				{name: "stalled_from_completed", activity: string(state.ActivityStalled), stalledFrom: string(state.ActivityCompleted), wantActivity: string(state.ActivityCompleted)},
 				{name: "stalled_from_idle", activity: string(state.ActivityStalled), stalledFrom: string(state.ActivityIdle), wantActivity: string(state.ActivityIdle)},
+				{name: "stalled_from_harness_error", activity: string(state.ActivityStalled), stalledFrom: string(state.ActivityHarnessError), wantActivity: string(state.ActivityHarnessError)},
 				{name: "stalled_from_working", activity: string(state.ActivityStalled), stalledFrom: string(state.ActivityWorking), wantActivity: ""},
 			},
 			run: func(t *testing.T, srv *Server, _ store.Store, a *store.Agent) *store.Agent {
@@ -144,6 +146,7 @@ func TestSuspendPathsRetainEligibleActivityAndClearOthers(t *testing.T) {
 			cases: []activityCase{
 				{name: "completed", activity: string(state.ActivityCompleted), wantActivity: string(state.ActivityCompleted)},
 				{name: "idle", activity: string(state.ActivityIdle), wantActivity: string(state.ActivityIdle)},
+				{name: "harness_error", activity: string(state.ActivityHarnessError), wantActivity: string(state.ActivityHarnessError)},
 				{name: "blocked", activity: string(state.ActivityBlocked), wantActivity: ""},
 				{name: "waiting_for_input", activity: string(state.ActivityWaitingForInput), wantActivity: ""},
 				{name: "working", activity: string(state.ActivityWorking), wantActivity: ""},

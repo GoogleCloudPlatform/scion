@@ -752,6 +752,9 @@ func TestHarnessErrorClassification(t *testing.T) {
 	if err := (AgentState{Phase: PhaseStopped, Activity: a}).Validate(); err == nil {
 		t.Error("stopped/harness_error should not validate")
 	}
+	if err := (AgentState{Phase: PhaseSuspended, Activity: a}).Validate(); err != nil {
+		t.Errorf("suspended/harness_error should validate as a retained suspend activity: %v", err)
+	}
 }
 
 func TestReadyTiming(t *testing.T) {
@@ -781,8 +784,9 @@ func TestExitReasonLabel(t *testing.T) {
 
 func TestActivityIsRetainedOnSuspend(t *testing.T) {
 	wantRetained := map[Activity]bool{
-		ActivityIdle:      true,
-		ActivityCompleted: true,
+		ActivityIdle:         true,
+		ActivityCompleted:    true,
+		ActivityHarnessError: true,
 	}
 	for _, a := range append(Activities(), Activity("")) {
 		want := wantRetained[a]
@@ -790,7 +794,7 @@ func TestActivityIsRetainedOnSuspend(t *testing.T) {
 			t.Errorf("Activity(%q).IsRetainedOnSuspend() = %v, want %v", a, got, want)
 		}
 	}
-	for _, upper := range []Activity{"IDLE", "COMPLETED", "Idle", "Completed"} {
+	for _, upper := range []Activity{"IDLE", "COMPLETED", "HARNESS_ERROR", "Idle", "Completed", "Harness_Error"} {
 		if !upper.IsRetainedOnSuspend() {
 			t.Errorf("Activity(%q).IsRetainedOnSuspend() = false, want true", upper)
 		}
@@ -811,8 +815,10 @@ func TestRetainedSuspendActivity(t *testing.T) {
 	}{
 		{"completed kept", ActivityCompleted, "", ActivityCompleted},
 		{"idle kept", ActivityIdle, "", ActivityIdle},
+		{"harness_error kept", ActivityHarnessError, "", ActivityHarnessError},
 		{"uppercase COMPLETED normalized", "COMPLETED", "", ActivityCompleted},
 		{"uppercase IDLE normalized", "IDLE", "", ActivityIdle},
+		{"uppercase HARNESS_ERROR normalized", "HARNESS_ERROR", "", ActivityHarnessError},
 		{"working cleared", ActivityWorking, "", ""},
 		{"blocked cleared", ActivityBlocked, "", ""},
 		{"waiting_for_input cleared", ActivityWaitingForInput, "", ""},
@@ -820,6 +826,7 @@ func TestRetainedSuspendActivity(t *testing.T) {
 		{"empty stays empty", "", "", ""},
 		{"stalled from completed restores completed", ActivityStalled, ActivityCompleted, ActivityCompleted},
 		{"stalled from idle restores idle", ActivityStalled, ActivityIdle, ActivityIdle},
+		{"stalled from harness_error restores harness_error", ActivityStalled, ActivityHarnessError, ActivityHarnessError},
 		{"uppercase STALLED from IDLE restores idle", "STALLED", "IDLE", ActivityIdle},
 		{"stalled from working cleared", ActivityStalled, ActivityWorking, ""},
 		{"stalled from blocked cleared", ActivityStalled, ActivityBlocked, ""},

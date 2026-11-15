@@ -660,10 +660,9 @@ func (a Activity) IsSuspendEligible() bool {
 // PhaseSuspended so that operators can tell what state the agent was in when
 // suspended. All other activities are cleared on suspend. Comparison is
 // case-insensitive.
-// ptone/scion#7858 adds ActivityHarnessError here.
 func (a Activity) IsRetainedOnSuspend() bool {
 	switch Activity(strings.ToLower(string(a))) {
-	case ActivityIdle, ActivityCompleted:
+	case ActivityIdle, ActivityCompleted, ActivityHarnessError:
 		return true
 	}
 	return false

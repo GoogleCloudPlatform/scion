@@ -41,6 +41,7 @@ func TestUpdateAgentStatus_SuspendRetainsOrClearsActivity(t *testing.T) {
 	}{
 		{name: "completed retained", activity: "completed", want: "completed"},
 		{name: "idle retained", activity: "idle", want: "idle"},
+		{name: "harness_error retained", activity: "harness_error", want: "harness_error"},
 		{name: "working cleared", activity: "working", want: ""},
 		{name: "thinking cleared", activity: "thinking", want: ""},
 		{name: "executing cleared", activity: "executing", want: ""},
@@ -51,7 +52,9 @@ func TestUpdateAgentStatus_SuspendRetainsOrClearsActivity(t *testing.T) {
 		{name: "crashed cleared", activity: "crashed", want: ""},
 		{name: "stalled from completed restores completed", activity: "stalled", stalledFrom: "completed", want: "completed"},
 		{name: "stalled from idle restores idle", activity: "stalled", stalledFrom: "idle", want: "idle"},
+		{name: "stalled from harness_error restores harness_error", activity: "stalled", stalledFrom: "harness_error", want: "harness_error"},
 		{name: "uppercase IDLE normalized to idle", activity: "IDLE", want: "idle"},
+		{name: "uppercase HARNESS_ERROR normalized to harness_error", activity: "HARNESS_ERROR", want: "harness_error"},
 		{name: "uppercase STALLED from COMPLETED restores completed", activity: "STALLED", stalledFrom: "COMPLETED", want: "completed"},
 		{name: "stalled from working cleared", activity: "stalled", stalledFrom: "working", want: ""},
 	}

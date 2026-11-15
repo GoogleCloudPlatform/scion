@@ -127,11 +127,13 @@ describe('projectWorkspaceModeIcon', () => {
 });
 
 describe('isRetainedSuspendActivity, isTerminalActivity, and getAgentDisplayStatus', () => {
-  it('recognises completed and idle case-insensitively as retained on suspend', () => {
+  it('recognises completed, idle, and harness_error case-insensitively as retained on suspend', () => {
     expect(isRetainedSuspendActivity('completed')).toBe(true);
     expect(isRetainedSuspendActivity('idle')).toBe(true);
+    expect(isRetainedSuspendActivity('harness_error')).toBe(true);
     expect(isRetainedSuspendActivity('COMPLETED')).toBe(true);
     expect(isRetainedSuspendActivity('IDLE')).toBe(true);
+    expect(isRetainedSuspendActivity('HARNESS_ERROR')).toBe(true);
     expect(isRetainedSuspendActivity('working')).toBe(false);
     expect(isRetainedSuspendActivity('blocked')).toBe(false);
     expect(isRetainedSuspendActivity('waiting_for_input')).toBe(false);

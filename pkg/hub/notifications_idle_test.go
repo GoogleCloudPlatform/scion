@@ -248,6 +248,36 @@ func TestNotificationDispatcher_SuspendedWithRetainedActivityFiresSuspendedOnly(
 		require.Len(t, notifs, 2)
 		assert.Equal(t, "SUSPENDED", notifs[0].Status)
 	})
+
+	t.Run("suspended with retained harness_error fires SUSPENDED only", func(t *testing.T) {
+		env := setupNotificationTest(t)
+		ctx := context.Background()
+		require.NoError(t, env.store.UpdateNotificationSubscriptionTriggers(
+			ctx, env.sub.ID, []string{NotificationStatusHarnessError, "SUSPENDED"},
+		))
+		env.nd.Start()
+		defer env.nd.Stop()
+
+		reportAndPublishActivity(t, env, string(state.PhaseRunning), string(state.ActivityHarnessError))
+		waitWatchedCalls(t, env, 1)
+		assert.Contains(t, watchedAgentCalls(env)[0].Message, NotificationStatusHarnessError)
+
+		// Move through working -> harness_error so last notification is HARNESS_ERROR,
+		// then suspend (retaining harness_error): must match SUSPENDED only.
+		require.NoError(t, env.store.UpdateAgentStatus(ctx, env.watched.ID, store.AgentStatusUpdate{
+			Phase: string(state.PhaseSuspended),
+		}))
+		suspended := mustGetAgent(t, env.store, env.watched.ID)
+		require.Equal(t, string(state.ActivityHarnessError), suspended.Activity)
+		env.pub.PublishAgentStatus(ctx, suspended)
+		waitWatchedCalls(t, env, 2)
+		flushNotificationDispatcher(t, env)
+
+		calls := watchedAgentCalls(env)
+		require.Len(t, calls, 2)
+		assert.Contains(t, calls[1].Message, "SUSPENDED")
+		assert.NotContains(t, calls[1].Message, NotificationStatusHarnessError)
+	})
 }
 
 func watchedAgentCalls(env *notificationTestEnv) []dispatchCall {
@@ -462,32 +492,35 @@ func TestNotificationDispatcher_PerPeriodEventOrderings(t *testing.T) {
 		}
 	}
 
-	for _, restart := range []bool{false, true} {
-		mode := "live"
-		if restart {
-			mode = "after_restart"
-		}
-		t.Run("STALLED/status_dedupe_across_working/"+mode, func(t *testing.T) {
-			env := setupNotificationTest(t)
-			ctx := context.Background()
-			require.NoError(t, env.store.UpdateNotificationSubscriptionTriggers(ctx, env.sub.ID, []string{"STALLED"}))
-			active := env.nd
-			active.Start()
-			defer func() { active.Stop() }()
-
-			reportAndPublishActivity(t, env, string(state.PhaseRunning), string(state.ActivityStalled))
-			waitWatchedCalls(t, env, 1)
+	for _, nonPerPeriod := range []state.Activity{state.ActivityStalled, state.ActivityHarnessError} {
+		trigger := strings.ToUpper(string(nonPerPeriod))
+		for _, restart := range []bool{false, true} {
+			mode := "live"
 			if restart {
-				restartNotificationDispatcher(env, &active)
+				mode = "after_restart"
 			}
-			reportAndPublishActivity(t, env, string(state.PhaseRunning), string(state.ActivityWorking))
-			reportAndPublishActivity(t, env, string(state.PhaseRunning), string(state.ActivityStalled))
-			flushNotificationDispatcher(t, env)
+			t.Run(trigger+"/status_dedupe_across_working/"+mode, func(t *testing.T) {
+				env := setupNotificationTest(t)
+				ctx := context.Background()
+				require.NoError(t, env.store.UpdateNotificationSubscriptionTriggers(ctx, env.sub.ID, []string{trigger}))
+				active := env.nd
+				active.Start()
+				defer func() { active.Stop() }()
 
-			calls := watchedAgentCalls(env)
-			require.Len(t, calls, 1, "STALLED must keep status-based deduplication across stalled -> working -> stalled")
-			assert.Contains(t, calls[0].Message, "STALLED")
-		})
+				reportAndPublishActivity(t, env, string(state.PhaseRunning), string(nonPerPeriod))
+				waitWatchedCalls(t, env, 1)
+				if restart {
+					restartNotificationDispatcher(env, &active)
+				}
+				reportAndPublishActivity(t, env, string(state.PhaseRunning), string(state.ActivityWorking))
+				reportAndPublishActivity(t, env, string(state.PhaseRunning), string(nonPerPeriod))
+				flushNotificationDispatcher(t, env)
+
+				calls := watchedAgentCalls(env)
+				require.Len(t, calls, 1, "%s must keep status-based deduplication across %s -> working -> %s", trigger, nonPerPeriod, nonPerPeriod)
+				assert.Contains(t, calls[0].Message, trigger)
+			})
+		}
 	}
 }
 
