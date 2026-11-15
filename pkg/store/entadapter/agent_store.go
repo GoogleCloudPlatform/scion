@@ -1856,9 +1856,12 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 			upd.SetActivity(su.Activity)
 		}
 		// A fresh activity report clears any stalled marker and refreshes the
-		// activity timestamp; tool_name tracks the new activity verbatim.
+		// activity timestamp; tool_name tracks the new activity verbatim. A
+		// failed-start rollback restoring priorActivity keeps LastActivityEvent.
 		upd.SetStalledFromActivity("")
-		upd.SetLastActivityEvent(now)
+		if !su.Restore {
+			upd.SetLastActivityEvent(now)
+		}
 		upd.SetToolName(su.ToolName)
 	} else if su.Phase == string(state.PhaseSuspended) {
 		// Transitioning to suspended: preserve retained activities (completed,
@@ -1911,32 +1914,31 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		upd.SetToolName("")
 	}
 
-	// A (re)start — a transition from a terminal phase to running — clears
-	// remnants from the prior stop or crash: the stale message, any terminal
-	// activity, any leftover stalled marker, and any exit code/reason from the
-	// stopped container. This is gated on the CURRENT phase being terminal so
-	// routine running→running heartbeats (which carry their own sticky-stalled
-	// rules in the broker handler) are left untouched. An explicit message,
-	// activity, or exit code in the same update wins.
+	// A (re)start — a transition from a terminal phase (stopped/error) to running
+	// — clears terminal remnants from the prior stop/crash: the stale crash/stop
+	// message and any leftover stalled marker. This is gated on the CURRENT phase
+	// being terminal so routine running→running heartbeats (which carry their own
+	// sticky-stalled rules in the broker handler) are left untouched. An explicit
+	// message in the same update (su.Message != "") wins and is set below.
 	// ClearTerminalRemnants applies the same clear whatever the current phase
 	// (a lifecycle start's final write; see store.AgentStatusUpdate).
 	if su.ClearTerminalRemnants || (su.Phase == "running" && store.IsTerminalPhase(current.Phase)) {
 		if su.Message == "" {
 			upd.SetMessage("")
 		}
-		if !activityProvided {
-			upd.SetActivity("")
-			upd.SetToolName("")
-		}
 		upd.SetStalledFromActivity("")
 		if su.ExitCode == nil {
 			upd.ClearExitCode()
 		}
 		upd.SetExitReason("")
-	} else if su.Phase == string(state.PhaseRunning) && current.Phase == string(state.PhaseSuspended) {
-		// Resuming directly from suspended to running clears any retained
-		// pre-suspend activity without disturbing exit fields (pinned by
-		// TestUpdateAgentStatus_ExitFieldsKeptOutsidePreRunningToRunning).
+	}
+	// Leaving suspended for starting or running clears any retained pre-suspend
+	// activity before the new container runs, without disturbing exit fields
+	// (pinned by TestUpdateAgentStatus_ExitFieldsKeptOutsidePreRunningToRunning)
+	// or a new container's activity posted during dispatch before
+	// ClearTerminalRemnants runs.
+	if current.Phase == string(state.PhaseSuspended) &&
+		(su.Phase == string(state.PhaseStarting) || su.Phase == string(state.PhaseRunning)) {
 		if !activityProvided {
 			upd.SetActivity("")
 			upd.SetToolName("")

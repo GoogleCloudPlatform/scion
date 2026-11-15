@@ -1542,14 +1542,13 @@ type AgentStatusUpdate struct {
 	ClearMessageIf string `json:"-"`
 	// ClearTerminalRemnants, when true, applies the clear a stopped/error ->
 	// running write gets whatever the stored phase is: the message (unless
-	// Message is set on this update), any prior activity and tool name (unless
-	// Activity is set on this update), the stalled marker, and the exit code
+	// Message is set on this update), the stalled marker, and the exit code
 	// and reason. A lifecycle start, restart or wake brings up a new
 	// generation of the agent, and its write after a successful dispatch
 	// uses this (the HTTP start/restart final write; the wake's
 	// post-dispatch starting write) because the row no longer reads
-	// stopped/error/suspended by then: beginStartDispatch writes starting first,
-	// and a heartbeat guarded during the dispatch may have stored the old
+	// stopped/error by then: beginStartDispatch writes starting first, and a
+	// heartbeat guarded during the dispatch may have stored the old
 	// container's exit message. Internal to the hub — json:"-".
 	ClearTerminalRemnants bool `json:"-"`
 	// ClearActivity, when true and Activity is empty, explicitly clears the

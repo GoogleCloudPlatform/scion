@@ -105,34 +105,49 @@ func TestUpdateAgentStatus_ResumeAndClearActivity(t *testing.T) {
 	assert.Empty(t, got1.Activity)
 	assert.Nil(t, got1.ActivitySince)
 
-	// 2. Dispatch starting -> rollback restores suspended + retained activity;
-	// ClearTerminalRemnants (start settle / DM wake readiness gate) clears it.
+	// 2. Dispatch starting clears retained activity before launch -> rollback
+	// restores suspended + retained activity without bumping LastActivityEvent;
+	// ClearTerminalRemnants preserves a new activity posted mid-dispatch.
 	a2 := makeAgent(projectID, "resume-via-starting")
 	a2.Phase = string(state.PhaseRunning)
 	a2.Activity = string(state.ActivityIdle)
 	require.NoError(t, s.CreateAgent(ctx, a2))
 	require.NoError(t, s.UpdateAgentStatus(ctx, a2.ID, store.AgentStatusUpdate{Phase: string(state.PhaseSuspended)}))
+	beforeStart, err := s.GetAgent(ctx, a2.ID)
+	require.NoError(t, err)
+	lastActBefore := beforeStart.LastActivityEvent
 
-	// beginStartDispatch marks starting with IfPhase=suspended.
+	// beginStartDispatch marks starting with IfPhase=suspended, clearing retained idle before launch.
 	require.NoError(t, s.UpdateAgentStatus(ctx, a2.ID, store.AgentStatusUpdate{
 		Phase:   string(state.PhaseStarting),
 		IfPhase: string(state.PhaseSuspended),
 	}))
-	// Failed dispatch rollback restores suspended with retained idle intact.
+	gotMidStart, err := s.GetAgent(ctx, a2.ID)
+	require.NoError(t, err)
+	assert.Empty(t, gotMidStart.Activity, "starting write from suspended clears retained activity before container launch")
+
+	// Failed dispatch rollback restores suspended with retained idle intact and keeps LastActivityEvent.
 	require.NoError(t, s.UpdateAgentStatus(ctx, a2.ID, store.AgentStatusUpdate{
-		Phase:   string(state.PhaseSuspended),
-		IfPhase: string(state.PhaseStarting),
-		Restore: true,
+		Phase:    string(state.PhaseSuspended),
+		Activity: string(state.ActivityIdle),
+		IfPhase:  string(state.PhaseStarting),
+		Restore:  true,
 	}))
 	gotRollback, err := s.GetAgent(ctx, a2.ID)
 	require.NoError(t, err)
 	assert.Equal(t, string(state.PhaseSuspended), gotRollback.Phase)
 	assert.Equal(t, string(state.ActivityIdle), gotRollback.Activity)
+	assert.True(t, gotRollback.LastActivityEvent.Equal(lastActBefore), "rollback restore must not bump LastActivityEvent")
 
-	// Successful start: starting, then ClearTerminalRemnants clears retained activity.
+	// Successful start: starting clears idle, new container reports working mid-dispatch,
+	// and ClearTerminalRemnants preserves working while clearing remnants.
 	require.NoError(t, s.UpdateAgentStatus(ctx, a2.ID, store.AgentStatusUpdate{
 		Phase:   string(state.PhaseStarting),
 		IfPhase: string(state.PhaseSuspended),
+	}))
+	require.NoError(t, s.UpdateAgentStatus(ctx, a2.ID, store.AgentStatusUpdate{
+		Activity: string(state.ActivityWorking),
+		Message:  "stale message",
 	}))
 	require.NoError(t, s.UpdateAgentStatus(ctx, a2.ID, store.AgentStatusUpdate{
 		Phase:                 string(state.PhaseStarting),
@@ -141,7 +156,8 @@ func TestUpdateAgentStatus_ResumeAndClearActivity(t *testing.T) {
 	}))
 	gotWakeStart, err := s.GetAgent(ctx, a2.ID)
 	require.NoError(t, err)
-	assert.Empty(t, gotWakeStart.Activity, "DM wake starting write must clear retained activity before readiness polling")
+	assert.Equal(t, string(state.ActivityWorking), gotWakeStart.Activity, "ClearTerminalRemnants must preserve new activity posted mid-dispatch")
+	assert.Empty(t, gotWakeStart.Message)
 
 	// 3. Explicit ClearActivity flag clears activity without touching phase.
 	a3 := makeAgent(projectID, "explicit-clear")

@@ -297,4 +297,18 @@ func TestResumePathsClearRetainedSuspendActivity(t *testing.T) {
 		assert.True(t, readySent.Load(), "wakeAgentForDM must wait for the new run's activity rather than returning early on retained completed")
 		assert.Equal(t, string(state.ActivityIdle), mustGetAgent(t, s, target.ID).Activity)
 	})
+
+	t.Run("failed wake rollback restores retained activity", func(t *testing.T) {
+		srv, s, _, target := createWakeDMFixtures(t, string(state.PhaseSuspended))
+		target.Activity = string(state.ActivityCompleted)
+		require.NoError(t, s.UpdateAgent(context.Background(), target))
+
+		srv.SetDispatcher(&wakeTrackingDispatcher{startReturnErr: assert.AnError})
+
+		_, dmErr := srv.wakeAgentForDM(context.Background(), target)
+		require.NotNil(t, dmErr)
+		persisted := mustGetAgent(t, s, target.ID)
+		assert.Equal(t, string(state.PhaseSuspended), persisted.Phase)
+		assert.Equal(t, string(state.ActivityCompleted), persisted.Activity, "failed wake rollback must restore retained suspend activity")
+	})
 }
