@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -30,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/lifecyclehooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/ssrfclient"
 )
 
 // Compile-time interface compliance check.
@@ -386,97 +386,16 @@ func (e *HTTPExecutor) buildRenderVars(ctx context.Context, hook *store.Lifecycl
 	return vars
 }
 
-// ssrfResolver abstracts DNS resolution for the SSRF-safe dialer.
-// Production uses net.DefaultResolver; tests can inject a fake to control
-// which IPs a hostname resolves to without real DNS.
-type ssrfResolver interface {
-	LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error)
-}
-
-// ssrfDialer abstracts the raw TCP dial for the SSRF-safe dialer.
-// Production uses a net.Dialer; tests can inject a fake to verify which
-// IP:port pairs are actually dialed.
-type ssrfDialer interface {
-	DialContext(ctx context.Context, network, addr string) (net.Conn, error)
-}
-
-// defaultSSRFResolver wraps net.DefaultResolver to satisfy ssrfResolver.
-type defaultSSRFResolver struct{}
-
-func (defaultSSRFResolver) LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error) {
-	return net.DefaultResolver.LookupIPAddr(ctx, host)
-}
-
 // newSSRFSafeClient creates an http.Client with SSRF-safe transport and
-// redirect blocking. The transport uses a DialContext that resolves the
-// hostname, selects the first non-blocked IP, and dials THAT SPECIFIC IP —
-// never the original hostname. This closes the DNS-rebinding TOCTOU window
-// (the dialed IP is always the one we validated). TLS SNI and the HTTP
-// Host header are unaffected because they come from req.URL.Host, not the
-// dial address.
-//
-// The client blocks ALL redirects. No redundant http.Client.Timeout —
-// the per-attempt context deadline is the single timeout mechanism.
+// redirect blocking via pkg/util/ssrfclient. Loopback and link-local
+// addresses are blocked while RFC 1918 private addresses remain allowed for
+// internal service registries. No redundant http.Client.Timeout is set — the
+// per-attempt context deadline is the single timeout mechanism.
 func newSSRFSafeClient() *http.Client {
-	return newSSRFSafeClientWith(defaultSSRFResolver{}, &net.Dialer{
-		Timeout:   30 * time.Second,
-		KeepAlive: 30 * time.Second,
+	return ssrfclient.NewClient(ssrfclient.Config{
+		AllowPrivateNetworks: true,
+		RedirectError:        errors.New("redirects are blocked for lifecycle hook requests (SSRF protection)"),
 	})
-}
-
-// newSSRFSafeClientWith creates an SSRF-safe http.Client using the provided
-// resolver and dialer. This is the injectable constructor used by tests.
-func newSSRFSafeClientWith(resolver ssrfResolver, dialer ssrfDialer) *http.Client {
-	transport := &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			// Resolve the address to check the actual IP before connecting.
-			host, port, err := net.SplitHostPort(addr)
-			if err != nil {
-				return nil, fmt.Errorf("SSRF protection: invalid address %q: %w", addr, err)
-			}
-			ips, err := resolver.LookupIPAddr(ctx, host)
-			if err != nil {
-				return nil, fmt.Errorf("SSRF protection: DNS lookup failed for %q: %w", host, err)
-			}
-
-			// Select the first non-blocked IP and dial it directly.
-			// This guarantees we connect to exactly the IP we validated,
-			// closing the DNS-rebinding TOCTOU window.
-			for _, ipAddr := range ips {
-				if !isBlockedSSRFTarget(ipAddr.IP) {
-					return dialer.DialContext(ctx, network, net.JoinHostPort(ipAddr.IP.String(), port))
-				}
-			}
-
-			// Every resolved IP is blocked — refuse without dialing.
-			return nil, fmt.Errorf("SSRF protection: all resolved IPs for %q are blocked (loopback/link-local)", host)
-		},
-	}
-	return &http.Client{
-		Transport: transport,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return fmt.Errorf("redirects are blocked for lifecycle hook requests (SSRF protection)")
-		},
-	}
-}
-
-// isBlockedSSRFTarget checks whether an IP address should be blocked for SSRF
-// protection. Per architect decision, ONLY loopback (127.0.0.0/8, ::1) and
-// link-local (169.254.0.0/16, fe80::/10) unicast+multicast are blocked.
-// RFC1918 (10/8, 172.16/12, 192.168/16) is intentionally ALLOWED because
-// internal service registries (Consul, internal catalogs) are a supported
-// use case. The check handles IPv4-mapped-IPv6 variants via Go's net.IP
-// normalization.
-func isBlockedSSRFTarget(ip net.IP) bool {
-	if ip == nil {
-		return false
-	}
-	return ip.IsLoopback() ||
-		ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() ||
-		// Unspecified addresses (0.0.0.0, ::) route to loopback on many
-		// platforms and would otherwise bypass the loopback block.
-		ip.IsUnspecified()
 }
 
 // doHTTPRequest executes a single HTTP request with the per-action timeout.

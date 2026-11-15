@@ -1,0 +1,179 @@
+{
+  "fixture_id": "F7",
+  "description": "TypeSafe Jev request encoding goldens (exact wire JSON shapes, preserved declared option order, model required on every request) and danger-zone header guard across POST /v1/systemone and GET /v1/models.",
+  "adapter": "typesafe",
+  "provenance": {
+    "notice": "synthetic from docs, not recorded from the live API (synthetic from docs, not a recorded response)",
+    "sources": [
+      "https://api.typesafe.ai/openapi.json (v0.2.0, SystemOneRequest required [model, state, questions])",
+      "https://docs.typesafe.ai/api/system-one.md (TypeSafe-Danger-Zone-Images and TypeSafe-Danger-Zone-Long-Context headers)"
+    ],
+    "unverified_items": ["U1", "U9"]
+  },
+  "invoke_cases": [
+    {
+      "name": "golden_mixed_preserves_declared_option_order_and_blocks_danger_zone_headers",
+      "note": "Options zebra -> alpha -> middle stay in declared order on wire; smuggled InstanceView.Options danger-zone keys never appear in HTTP headers.",
+      "model": "jev-1.14.0",
+      "instance_options": {
+        "TypeSafe-Danger-Zone-Images": "true",
+        "TypeSafe-Danger-Zone-Long-Context": "true"
+      },
+      "expected_path": "/v1/systemone",
+      "exact_request_key_order": true,
+      "expected_request_json": {
+        "model": "jev-1.14.0",
+        "state": {
+          "probe.text": "Route <ticket #42> & confirm whether an immediate choice is asked."
+        },
+        "questions": {
+          "asks_choice": {
+            "type": "noul",
+            "instructions": "Does `probe.text` ask the recipient to pick between alternatives?",
+            "criteria": {
+              "true": "Presents alternatives and asks for a pick.",
+              "false": "No pick among alternatives is requested."
+            }
+          },
+          "queue": {
+            "type": "choice",
+            "instructions": "Which queue handles `probe.text`?",
+            "criteria": {
+              "zebra": "Zebra escalation queue",
+              "alpha": "Alpha intake queue",
+              "middle": "Middle triage queue"
+            }
+          }
+        }
+      },
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "asks_choice",
+              "type": "binary",
+              "instructions": "Does `probe.text` ask the recipient to pick between alternatives?",
+              "criteria": {
+                "true": "Presents alternatives and asks for a pick.",
+                "false": "No pick among alternatives is requested."
+              }
+            },
+            {
+              "id": "queue",
+              "type": "choice",
+              "instructions": "Which queue handles `probe.text`?",
+              "options": [
+                {"id": "zebra", "description": "Zebra escalation queue"},
+                {"id": "alpha", "description": "Alpha intake queue"},
+                {"id": "middle", "description": "Middle triage queue"}
+              ]
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "Route <ticket #42> & confirm whether an immediate choice is asked.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "headers": {
+          "x-typesafe-request-id": "req_synth_f7_golden"
+        },
+        "raw_body": "{\"model\":\"jev-1.14.0\",\"answers\":{\"asks_choice\":{\"type\":\"noul\",\"noul\":0.85},\"queue\":{\"type\":\"choice\",\"choice\":\"alpha\",\"confidence\":0.55,\"probabilities\":{\"zebra\":0.15,\"alpha\":0.70,\"middle\":0.15}}},\"usage\":{\"input_tokens\":140,\"output_tokens\":16}}"
+      },
+      "expect_result": {
+        "resolved_model": "jev-1.14.0",
+        "provider_request_id": "req_synth_f7_golden",
+        "http_status": 200,
+        "usage": {
+          "input_tokens": 140,
+          "output_tokens": 16
+        },
+        "answers": {
+          "asks_choice": {
+            "primitive": "binary",
+            "status": "answered",
+            "tied": false,
+            "bool": true,
+            "distribution": {
+              "true": 0.85,
+              "false": 0.15
+            }
+          },
+          "queue": {
+            "primitive": "choice",
+            "status": "answered",
+            "tied": false,
+            "choice": "alpha",
+            "distribution": {
+              "zebra": 0.15,
+              "alpha": 0.7,
+              "middle": 0.15
+            },
+            "native_metrics": {
+              "typesafe.confidence": {
+                "value": 0.55,
+                "unit": "fraction",
+                "min": 0,
+                "max": 1,
+                "source": "provider-doc"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "missing_model_rejected_before_network",
+      "note": "OpenAPI 0.2.0 requires model on every request; empty InstanceView.Model fails closed with invalid_request.",
+      "model": "",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "billing",
+              "type": "binary",
+              "instructions": "Is this about billing?"
+            }
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Test.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{}"
+      },
+      "expect_error": {
+        "reason": "invalid_request",
+        "retryable": false
+      }
+    }
+  ],
+  "model_list_cases": [
+    {
+      "name": "models_endpoint_never_sends_danger_zone_headers",
+      "model": "jev-1.14.0",
+      "instance_options": {
+        "TypeSafe-Danger-Zone-Images": "true",
+        "TypeSafe-Danger-Zone-Long-Context": "true"
+      },
+      "expected_path": "/v1/models",
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"models\":[{\"name\":\"jev-1.14.0\",\"description\":\"Pinned Jev 1.14.0 release.\",\"release_date\":\"2026-09-15\"}]}"
+      },
+      "expect_models": ["jev-1.14.0"]
+    }
+  ]
+}
