@@ -81,7 +81,6 @@ func (DurableQueueItem) Indexes() []ent.Index {
 		index.Fields("kind", "project_id", "id"),
 		index.Fields("kind", "created_at"),
 		index.Fields("project_id"),
-		index.Fields("next_attempt_at"),
 	}
 }
 

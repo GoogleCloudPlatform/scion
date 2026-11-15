@@ -1541,11 +1541,6 @@ var (
 				Unique:  false,
 				Columns: []*schema.Column{DurableQueueItemsColumns[3]},
 			},
-			{
-				Name:    "durablequeueitem_next_attempt_at",
-				Unique:  false,
-				Columns: []*schema.Column{DurableQueueItemsColumns[9]},
-			},
 		},
 	}
 	// EntitlementBindingsColumns holds the columns for the "entitlement_bindings" table.
