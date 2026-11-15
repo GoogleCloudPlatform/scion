@@ -1003,3 +1003,46 @@ func TestStartNoAuth_NonOwnerStarterGitTokenNotDelivered(t *testing.T) {
 	}
 	assert.NotContains(t, f.fb.fetchedNames(), noAuthGitTokenKey, "no git token value was read (the owner has none in the secret store)")
 }
+
+// TestStartNoAuth_ReprovisionGatheredAsNeededWithheld: even when the context
+// carries reprovision-gathered as_needed names (GoogleCloudPlatform/scion#4845),
+// an agent without credentials skips stored as_needed env settings before
+// authorization and never delivers them on start; an agent with credentials on
+// the same context receives the setting.
+func TestStartNoAuth_ReprovisionGatheredAsNeededWithheld(t *testing.T) {
+	baseCtx := context.Background()
+	m := newLDFixture(t, "na-reprovision-gathered", ldOptions{})
+	require.NoError(t, m.store.CreateEnvVar(baseCtx, &store.EnvVar{
+		ID: api.NewUUID(), Key: "NA_GATHERED_PLAIN", Value: "na-canary-gathered-plain",
+		Scope: store.ScopeProject, ScopeID: m.agent.ProjectID,
+		InjectionMode: store.InjectionModeAsNeeded, CreatedBy: m.projectOwnerID,
+	}))
+
+	ctx := withReprovisionGatheredEnv(baseCtx)
+	recordReprovisionGatheredEnv(ctx, map[string]string{"NA_GATHERED_PLAIN": "ignored"}, nil)
+
+	m.agent.AppliedConfig.NoAuth = true
+	require.NoError(t, m.store.UpdateAgent(baseCtx, m.agent))
+
+	names, err := m.d.noAuthCredentialEnvNames(ctx, m.agent)
+	require.NoError(t, err)
+	sel := newDeliverySelector(m.authz, m.agent, PurposeRestart)
+	env, _, err := m.d.selectDeliveryEnvWith(ctx, sel, m.agent, names, reprovisionGatheredEnvFrom(ctx))
+	require.NoError(t, err)
+	assert.NotContains(t, env, "NA_GATHERED_PLAIN")
+	assert.Nil(t, sel.ident, "withheld as_needed setting must not trigger authorization")
+
+	require.NoError(t, m.d.DispatchAgentStart(ctx, m.agent, "task", false))
+	require.True(t, m.client.startCalled)
+	assert.True(t, m.client.lastStartExtras.NoAuth)
+	assert.NotContains(t, m.client.lastResolvedEnv, "NA_GATHERED_PLAIN")
+
+	// Control: with credentials enabled, the same gathered context admits the row.
+	m.agent.AppliedConfig.NoAuth = false
+	require.NoError(t, m.store.UpdateAgent(baseCtx, m.agent))
+	m.client.startCalled = false
+	require.NoError(t, m.d.DispatchAgentStart(ctx, m.agent, "task", false))
+	require.True(t, m.client.startCalled)
+	assert.False(t, m.client.lastStartExtras.NoAuth)
+	assert.Equal(t, "na-canary-gathered-plain", m.client.lastResolvedEnv["NA_GATHERED_PLAIN"])
+}
