@@ -1263,14 +1263,45 @@ export class ScionPageProjectDecisions extends LitElement {
     return false;
   }
 
+  private invalidateInFlightMadeLoad(): void {
+    this.madeNeedsReset = true;
+    this.madeSearchTimeout = false;
+    this.madeRefreshDeferred = false;
+    if (this.madeAbort || this.madeLoading || this.madeLoadingMore) {
+      ++this.madeGen;
+      this.madeAbort?.abort();
+      this.madeAbort = null;
+      this.madeLoading = false;
+      this.madeLoadingMore = false;
+    }
+  }
+
+  private invalidateInFlightPendingLoad(): void {
+    this.pendingNeedsReset = true;
+    this.pendingSearchTimeout = false;
+    this.pendingRefreshDeferred = false;
+    if (this.pendingAbort || this.pendingResetInFlight || this.pendingLoadingMore) {
+      ++this.pendingGen;
+      this.pendingAbort?.abort();
+      this.pendingAbort = null;
+      this.pendingResetInFlight = false;
+      this.pendingLoadingMore = false;
+    }
+  }
+
   private switchTab(next: 'pending' | 'made'): void {
     if (next !== 'pending' && next !== 'made') return;
     if (this.activeTab === next) return;
 
     const flushedSearch = this.flushDebouncedSearchIfPending();
     if (flushedSearch) {
-      this.pendingNeedsReset = true;
-      this.madeNeedsReset = true;
+      if (next === 'pending') {
+        this.invalidateInFlightMadeLoad();
+        this.pendingNeedsReset = true;
+      } else {
+        this.invalidateInFlightPendingLoad();
+        this.madeNeedsReset = true;
+      }
     }
 
     if (next === 'pending') {
@@ -1290,7 +1321,7 @@ export class ScionPageProjectDecisions extends LitElement {
         this.filterProvenance = '';
         this.filterFrom = '';
         this.filterTo = '';
-        this.madeNeedsReset = true;
+        this.invalidateInFlightMadeLoad();
       }
     }
 
@@ -1306,17 +1337,24 @@ export class ScionPageProjectDecisions extends LitElement {
 
     if (next === 'pending') {
       if (this.pendingNeedsReset) {
+        this.pendingNextCursor = '';
         void this.loadPendingPage({ mode: 'reset' });
       }
       return;
     }
 
-    if (!this.madeLoading && !this.hasDateRangeError) {
-      if (!this.madeLoaded || this.madeNeedsReset) {
+    if (!this.hasDateRangeError) {
+      if (this.madeNeedsReset) {
+        this.madeNextCursor = '';
+        this.madePagedBeyondFirst = false;
         void this.loadMadePage({ mode: 'reset' });
-      } else if (this.madeStale) {
-        this.madeStale = false;
-        void this.loadMadePage({ mode: 'live' });
+      } else if (!this.madeLoading) {
+        if (!this.madeLoaded) {
+          void this.loadMadePage({ mode: 'reset' });
+        } else if (this.madeStale) {
+          this.madeStale = false;
+          void this.loadMadePage({ mode: 'live' });
+        }
       }
     }
   }
@@ -1433,9 +1471,14 @@ export class ScionPageProjectDecisions extends LitElement {
     if (this.activeTab === 'pending') {
       if (opts.sharedChanged) {
         this.pendingNextCursor = '';
-        if (this.madeLoaded || this.madeSearchTimeout) {
-          this.madeNeedsReset = true;
-          this.madeSearchTimeout = false;
+        if (
+          this.madeLoaded ||
+          this.madeSearchTimeout ||
+          this.madeLoading ||
+          this.madeLoadingMore ||
+          this.madeAbort !== null
+        ) {
+          this.invalidateInFlightMadeLoad();
         }
         void this.loadPendingPage({ mode: 'reset' });
       }
@@ -1443,13 +1486,13 @@ export class ScionPageProjectDecisions extends LitElement {
     }
 
     if (opts.sharedChanged) {
-      this.pendingNeedsReset = true;
-      this.pendingSearchTimeout = false;
+      this.invalidateInFlightPendingLoad();
     }
     this.madeNextCursor = '';
     this.madePagedBeyondFirst = false;
     this.madeRefreshDeferred = false;
     if (this.hasDateRangeError) {
+      ++this.madeGen;
       this.madeAbort?.abort();
       this.madeAbort = null;
       this.madeLoading = false;

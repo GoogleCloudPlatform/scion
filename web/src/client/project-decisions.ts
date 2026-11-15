@@ -35,8 +35,10 @@ export const MAX_DECISIONS_CONVERSATION_BYTES = 256;
 
 const AGENT_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CALENDAR_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
-// eslint-disable-next-line no-control-regex -- reject control characters in URL parameters
-const CONTROL_CHAR_RE = /[\u0000-\u001f\u007f]/;
+// Matches Go strings.TrimSpace (which trims U+0085 NEL) plus JS whitespace/U+FEFF BOM at string edges.
+const EDGE_SPACE_RE = /^[\s\u0085]+|[\s\u0085]+$/g;
+// eslint-disable-next-line no-control-regex -- reject C0/DEL/C1 control characters in URL parameters
+const CONTROL_CHAR_RE = /[\u0000-\u001f\u007f-\u009f]/;
 
 /** Live pending counts across conversations in the project the caller can read. */
 export interface ProjectDecisionCounts {
@@ -224,13 +226,18 @@ export function hasDecisionsSearchCapability(
   return Array.isArray(res?.conversations);
 }
 
+function trimEdgeSpace(raw: string | undefined | null): string {
+  return (raw ?? '').replace(EDGE_SPACE_RE, '');
+}
+
 /**
- * Normalizes a `q` search query: trims whitespace and requires 2..256 Unicode
- * code points (matching Go's `utf8.RuneCountInString`), returning `''` otherwise.
+ * Normalizes a `q` search query: trims edge whitespace (matching both Go `strings.TrimSpace`
+ * and JS `.trim()`), rejects control characters, and requires 2..256 Unicode code points
+ * (matching Go's `utf8.RuneCountInString`), returning `''` otherwise.
  */
 export function normalizeDecisionsSearchQuery(raw: string | undefined | null): string {
-  const trimmed = (raw ?? '').trim();
-  if (!trimmed) return '';
+  const trimmed = trimEdgeSpace(raw);
+  if (!trimmed || CONTROL_CHAR_RE.test(trimmed)) return '';
   const runeCount = [...trimmed].length;
   if (runeCount < MIN_DECISIONS_SEARCH_RUNES || runeCount > MAX_DECISIONS_SEARCH_RUNES) {
     return '';
@@ -239,12 +246,12 @@ export function normalizeDecisionsSearchQuery(raw: string | undefined | null): s
 }
 
 export function isValidDecisionAgentId(raw: string | undefined | null): boolean {
-  const trimmed = (raw ?? '').trim();
+  const trimmed = trimEdgeSpace(raw);
   return trimmed.length > 0 && AGENT_UUID_RE.test(trimmed);
 }
 
 export function isValidDecisionCalendarDate(raw: string | undefined | null): boolean {
-  const trimmed = (raw ?? '').trim();
+  const trimmed = trimEdgeSpace(raw);
   const match = CALENDAR_DATE_RE.exec(trimmed);
   if (!match) return false;
   const year = Number(match[1]);
@@ -256,7 +263,7 @@ export function isValidDecisionCalendarDate(raw: string | undefined | null): boo
 }
 
 function cleanFilterValue(raw: string | undefined | null): string {
-  const trimmed = (raw ?? '').trim();
+  const trimmed = trimEdgeSpace(raw);
   if (!trimmed || trimmed === 'all') return '';
   return trimmed;
 }

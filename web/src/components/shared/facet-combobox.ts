@@ -631,9 +631,7 @@ export class ScionFacetCombobox extends LitElement {
                           id="${this.instanceId}-opt-${idx}"
                           role="option"
                           data-option-value=${option.value}
-                          aria-selected=${option.value === this.value || idx === this.activeIndex
-                            ? 'true'
-                            : 'false'}
+                          aria-selected=${option.value === this.value ? 'true' : 'false'}
                           @mouseenter=${(): void => {
                             this.activeIndex = idx;
                           }}

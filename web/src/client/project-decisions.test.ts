@@ -377,5 +377,13 @@ describe('Decisions URL state round-trip & validation (D10, D11)', () => {
       from: '',
       to: '',
     });
+
+    // U+0085 (NEL, trimmed by Go strings.TrimSpace), U+FEFF (BOM, trimmed by JS), and embedded control chars
+    // never slip a 1-rune or control-char query past client normalization to trigger a Hub 400
+    expect(parseDecisionsUrlState('?q=a%C2%85').q).toBe('');
+    expect(parseDecisionsUrlState('?q=a%EF%BB%BF').q).toBe('');
+    expect(parseDecisionsUrlState('?q=ab%00cd').q).toBe('');
+    expect(parseDecisionsUrlState('?q=a%C2%85b').q).toBe('');
+    expect(parseDecisionsUrlState('?q=%EF%BB%BFship%C2%85').q).toBe('ship');
   });
 });

@@ -2163,4 +2163,258 @@ describe('<scion-page-project-decisions>', () => {
     await settle(madeEl, 25);
     expect(madeRoot.querySelector('[data-prompt-card="m-recovered"]')).not.toBeNull();
   });
+
+  it('aborts superseded in-flight Made and Pending loads across tab round-trips and re-issues fresh requests (D10, AC 4)', async () => {
+    enableBothFlags();
+    const agentUuid = '3f9c0a11-2222-4333-8444-555555555555';
+
+    // 1. Reviewer pass-2 sequence (plus shared-filter variant):
+    //    Made request in flight -> switch to Pending -> change shared filter -> switch back to Made
+    let releaseStaleProvMade: (() => void) | null = null;
+    let staleProvAborted = false;
+    let releaseStaleAgentMade: (() => void) | null = null;
+    let staleAgentAborted = false;
+
+    pendingHandler = (url): Promise<Response> =>
+      jsonResponse({
+        counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+        filteredCounts: url.searchParams.get('q')
+          ? { waitingOnYou: 1, waitingOnOthers: 0 }
+          : undefined,
+        prompts: [makePrompt({ promptMessageId: 'm-pending' })],
+        agents: [{ id: agentUuid, name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      });
+
+    madeHandler = (url, init): Promise<Response> => {
+      const prov = url.searchParams.get('provenance');
+      const q = url.searchParams.get('q');
+      const agent = url.searchParams.get('agent');
+
+      if (prov === 'direct' && !q) {
+        init?.signal?.addEventListener('abort', () => {
+          staleProvAborted = true;
+        });
+        return new Promise<Response>((resolve) => {
+          releaseStaleProvMade = (): void => {
+            void jsonResponse({
+              counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+              entries: [
+                makeLogEntry({
+                  answerId: 'ans-stale-prov',
+                  decision: {
+                    ...makeLogEntry().decision,
+                    key: 'STALE_PROV',
+                    ref: 'STALE_PROV',
+                  },
+                }),
+              ],
+              agents: [{ id: agentUuid, name: 'release-bot' }],
+              answerers: [{ id: 'u-me', name: 'Alice' }],
+              conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+            }).then(resolve);
+          };
+        });
+      }
+
+      if (agent === agentUuid && !q) {
+        init?.signal?.addEventListener('abort', () => {
+          staleAgentAborted = true;
+        });
+        return new Promise<Response>((resolve) => {
+          releaseStaleAgentMade = (): void => {
+            void jsonResponse({
+              counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+              entries: [
+                makeLogEntry({
+                  answerId: 'ans-stale-agent',
+                  decision: {
+                    ...makeLogEntry().decision,
+                    key: 'STALE_AGENT',
+                    ref: 'STALE_AGENT',
+                  },
+                }),
+              ],
+              agents: [{ id: agentUuid, name: 'release-bot' }],
+              answerers: [{ id: 'u-me', name: 'Alice' }],
+              conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+            }).then(resolve);
+          };
+        });
+      }
+
+      const key = q === 'backfill' ? 'FRESH_BACKFILL' : 'INITIAL_MADE';
+      return jsonResponse({
+        counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+        entries: [
+          makeLogEntry({
+            answerId: `ans-${key.toLowerCase()}`,
+            decision: {
+              ...makeLogEntry().decision,
+              key,
+              ref: key,
+            },
+          }),
+        ],
+        agents: [{ id: agentUuid, name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      });
+    };
+
+    const el = await mount({ path: '/projects/p-1/decisions?tab=made' });
+    const root = el.shadowRoot!;
+
+    // 1a. Made-only filter (`provenance=direct`) in flight -> Pending -> `q=backfill` -> Made
+    el.shadowRoot!.querySelector('scion-decisions-filter-panel')!.dispatchEvent(
+      new CustomEvent('decisions-filter-change', {
+        detail: { provenance: 'direct' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await settle(el, 5);
+    expect(releaseStaleProvMade).not.toBeNull();
+
+    root.querySelector<HTMLElement>('sl-tab[panel="pending"]')!.click();
+    await settle(el, 10);
+    expect(staleProvAborted).toBe(true);
+
+    el.shadowRoot!.querySelector('scion-decisions-filter-panel')!.dispatchEvent(
+      new CustomEvent('decisions-filter-change', {
+        detail: { q: 'backfill' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await settle(el, 15);
+
+    root.querySelector<HTMLElement>('sl-tab[panel="made"]')!.click();
+    releaseStaleProvMade!();
+    await settle(el, 25);
+
+    expect(window.location.search).toBe('?tab=made&q=backfill');
+    expect(requests.some((r) => r.url.includes('tab=made') && r.url.includes('q=backfill'))).toBe(
+      true
+    );
+    expect(root.querySelector('[data-made-table]')?.textContent).toContain('FRESH_BACKFILL');
+    expect(root.querySelector('[data-made-table]')?.textContent).not.toContain('STALE_PROV');
+
+    // 1b. Shared filter (`agent`) in flight on Made -> Pending -> change `q=backfill` -> Made
+    el.shadowRoot!.querySelector('scion-decisions-filter-panel')!.dispatchEvent(
+      new CustomEvent('decisions-filters-clear', { bubbles: true, composed: true })
+    );
+    await settle(el, 20);
+
+    el.shadowRoot!.querySelector('scion-decisions-filter-panel')!.dispatchEvent(
+      new CustomEvent('decisions-filter-change', {
+        detail: { agent: agentUuid },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await settle(el, 5);
+    expect(releaseStaleAgentMade).not.toBeNull();
+    expect(staleAgentAborted).toBe(false);
+
+    // Switch to Pending (agent is shared so Made load stays in flight until shared filter changes on Pending)
+    root.querySelector<HTMLElement>('sl-tab[panel="pending"]')!.click();
+    await settle(el, 10);
+
+    el.shadowRoot!.querySelector('scion-decisions-filter-panel')!.dispatchEvent(
+      new CustomEvent('decisions-filter-change', {
+        detail: { q: 'backfill' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await settle(el, 10);
+    expect(staleAgentAborted).toBe(true);
+
+    root.querySelector<HTMLElement>('sl-tab[panel="made"]')!.click();
+    releaseStaleAgentMade!();
+    await settle(el, 25);
+
+    expect(window.location.search).toBe(`?tab=made&q=backfill&agent=${agentUuid}`);
+    expect(root.querySelector('[data-made-table]')?.textContent).toContain('FRESH_BACKFILL');
+    expect(root.querySelector('[data-made-table]')?.textContent).not.toContain('STALE_AGENT');
+    el.remove();
+
+    // 2. Mirror sequence: Pending request in flight -> switch to Made -> change shared filter -> switch back to Pending
+    let releaseStalePending: (() => void) | null = null;
+    let stalePendingAborted = false;
+
+    pendingHandler = (url, init): Promise<Response> => {
+      const q = url.searchParams.get('q');
+      if (q === 'slowfirst') {
+        init?.signal?.addEventListener('abort', () => {
+          stalePendingAborted = true;
+        });
+        return new Promise<Response>((resolve) => {
+          releaseStalePending = (): void => {
+            void jsonResponse({
+              counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+              filteredCounts: { waitingOnYou: 1, waitingOnOthers: 0 },
+              prompts: [makePrompt({ promptMessageId: 'm-stale-pending' })],
+              agents: [{ id: agentUuid, name: 'release-bot' }],
+              answerers: [{ id: 'u-me', name: 'Alice' }],
+              conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+            }).then(resolve);
+          };
+        });
+      }
+      const promptId = q === 'freshsecond' ? 'm-fresh-pending' : 'm-initial-pending';
+      return jsonResponse({
+        counts: { waitingOnYou: 1, waitingOnOthers: 0 },
+        filteredCounts: q ? { waitingOnYou: 1, waitingOnOthers: 0 } : undefined,
+        prompts: [makePrompt({ promptMessageId: promptId })],
+        agents: [{ id: agentUuid, name: 'release-bot' }],
+        answerers: [{ id: 'u-me', name: 'Alice' }],
+        conversations: [{ key: 'topic-release', label: '#release', projectId: 'p-1' }],
+      });
+    };
+
+    window.history.replaceState({}, '', '/projects/p-1/decisions');
+    const el2 = await mount({ path: '/projects/p-1/decisions' });
+    const root2 = el2.shadowRoot!;
+
+    el2.shadowRoot!.querySelector('scion-decisions-filter-panel')!.dispatchEvent(
+      new CustomEvent('decisions-filter-change', {
+        detail: { q: 'slowfirst' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await settle(el2, 5);
+    expect(releaseStalePending).not.toBeNull();
+    expect(stalePendingAborted).toBe(false);
+
+    // Switch to Made while Pending `q=slowfirst` is still in flight
+    root2.querySelector<HTMLElement>('sl-tab[panel="made"]')!.click();
+    await settle(el2, 15);
+
+    // Change shared filter `q=freshsecond` on Made -> aborts in-flight Pending load
+    el2.shadowRoot!.querySelector('scion-decisions-filter-panel')!.dispatchEvent(
+      new CustomEvent('decisions-filter-change', {
+        detail: { q: 'freshsecond' },
+        bubbles: true,
+        composed: true,
+      })
+    );
+    await settle(el2, 15);
+    expect(stalePendingAborted).toBe(true);
+
+    // Switch back to Pending -> issues fresh `q=freshsecond` Pending load; stale response is ignored
+    root2.querySelector<HTMLElement>('sl-tab[panel="pending"]')!.click();
+    releaseStalePending!();
+    await settle(el2, 25);
+
+    expect(window.location.search).toBe('?q=freshsecond');
+    expect(
+      requests.some((r) => r.url.includes('tab=pending') && r.url.includes('q=freshsecond'))
+    ).toBe(true);
+    expect(root2.querySelector('[data-prompt-card="m-fresh-pending"]')).not.toBeNull();
+    expect(root2.querySelector('[data-prompt-card="m-stale-pending"]')).toBeNull();
+  });
 });

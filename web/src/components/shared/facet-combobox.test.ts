@@ -159,6 +159,26 @@ describe('<scion-facet-combobox>', () => {
     expect(input.value).toBe('release-bot');
     expect(events).toEqual([{ value: 'a-rel-live', label: 'release-bot' }]);
 
+    // Re-open with ArrowDown when a value is already committed: aria-selected reflects only the committed
+    // option while aria-activedescendant tracks the keyboard-highlighted row
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    await el.updateComplete;
+    const reopenedOpts = Array.from(
+      el.shadowRoot!.querySelectorAll<HTMLElement>('[role="option"]')
+    );
+    expect(input.getAttribute('aria-activedescendant')).toBe(reopenedOpts[0]!.id);
+    expect(reopenedOpts.map((opt) => opt.getAttribute('aria-selected'))).toEqual([
+      'false',
+      'true',
+      'false',
+      'false',
+    ]);
+    // Close dropdown before testing Escape-to-clear
+    el.shadowRoot!.querySelector<HTMLElement>('[data-combobox-toggle]')!.dispatchEvent(
+      new MouseEvent('mousedown', { bubbles: true, cancelable: true })
+    );
+    await el.updateComplete;
+
     // Escape when a filter is committed (and not mid-typing a draft) removes the filter (D14)
     input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     await el.updateComplete;
