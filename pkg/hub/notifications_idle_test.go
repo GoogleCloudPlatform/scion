@@ -18,12 +18,14 @@ package hub
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -60,4 +62,188 @@ func TestNotificationDispatcher_IdleNotifiesSubscribedParent(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, notifs, 1)
 	assert.Equal(t, "IDLE", notifs[0].Status)
+}
+
+func reportAndPublishActivity(t *testing.T, env *notificationTestEnv, phase, activity string) {
+	t.Helper()
+	ctx := context.Background()
+	require.NoError(t, env.store.UpdateAgentStatus(ctx, env.watched.ID, store.AgentStatusUpdate{
+		Phase:    phase,
+		Activity: activity,
+	}))
+	fresh, err := env.store.GetAgent(ctx, env.watched.ID)
+	require.NoError(t, err)
+	env.pub.PublishAgentStatus(ctx, fresh)
+}
+
+func TestNotificationDispatcher_RepeatedIdlePeriodsNotifyEachTime(t *testing.T) {
+	env := setupNotificationTest(t)
+	require.NoError(t, env.store.UpdateNotificationSubscriptionTriggers(
+		context.Background(), env.sub.ID, []string{"COMPLETED", "IDLE", "WAITING_FOR_INPUT"},
+	))
+	env.nd.Start()
+	defer env.nd.Stop()
+
+	// Period 1: agent enters idle -> notifies once.
+	reportAndPublishActivity(t, env, string(state.PhaseRunning), string(state.ActivityIdle))
+	require.Eventually(t, func() bool {
+		return len(env.dispatcher.getCalls()) == 1
+	}, 2*time.Second, 20*time.Millisecond)
+	assert.Contains(t, env.dispatcher.getCalls()[0].Message, "IDLE")
+
+	// Re-report / heartbeat within the SAME idle period -> must NOT re-notify.
+	env.pub.PublishAgentStatus(context.Background(), mustGetAgent(t, env.store, env.watched.ID))
+	time.Sleep(150 * time.Millisecond)
+	assert.Len(t, env.dispatcher.getCalls(), 1, "re-reporting idle in the same period must be deduped")
+
+	// Agent leaves idle to working (non-notifying), then re-enters idle -> notifies a second time.
+	reportAndPublishActivity(t, env, string(state.PhaseRunning), string(state.ActivityWorking))
+	reportAndPublishActivity(t, env, string(state.PhaseRunning), string(state.ActivityIdle))
+
+	require.Eventually(t, func() bool {
+		return len(env.dispatcher.getCalls()) == 2
+	}, 2*time.Second, 20*time.Millisecond)
+	assert.Contains(t, env.dispatcher.getCalls()[1].Message, "IDLE")
+
+	notifs, err := env.store.GetNotifications(context.Background(), store.SubscriberTypeAgent, env.subscriber.Slug, false)
+	require.NoError(t, err)
+	assert.Len(t, notifs, 2)
+}
+
+func TestNotificationDispatcher_RepeatedCompletedPeriodsNotifyEachTime(t *testing.T) {
+	env := setupNotificationTest(t)
+	env.nd.Start()
+	defer env.nd.Stop()
+
+	// Period 1: completed -> notifies once.
+	reportAndPublishActivity(t, env, string(state.PhaseRunning), string(state.ActivityCompleted))
+	require.Eventually(t, func() bool {
+		return len(env.dispatcher.getCalls()) == 1
+	}, 2*time.Second, 20*time.Millisecond)
+
+	// Re-report within the same completed period -> deduped.
+	env.pub.PublishAgentStatus(context.Background(), mustGetAgent(t, env.store, env.watched.ID))
+	time.Sleep(150 * time.Millisecond)
+	assert.Len(t, env.dispatcher.getCalls(), 1)
+
+	// Transition completed -> working -> completed -> notifies a second time.
+	reportAndPublishActivity(t, env, string(state.PhaseRunning), string(state.ActivityWorking))
+	reportAndPublishActivity(t, env, string(state.PhaseRunning), string(state.ActivityCompleted))
+
+	require.Eventually(t, func() bool {
+		return len(env.dispatcher.getCalls()) == 2
+	}, 2*time.Second, 20*time.Millisecond)
+	assert.Contains(t, env.dispatcher.getCalls()[1].Message, "COMPLETED")
+}
+
+func TestNotificationDispatcher_CrossRestartActivitySinceDedupeAndReNotify(t *testing.T) {
+	env := setupNotificationTest(t)
+	require.NoError(t, env.store.UpdateNotificationSubscriptionTriggers(
+		context.Background(), env.sub.ID, []string{"COMPLETED", "IDLE"},
+	))
+	env.nd.Start()
+
+	// Period 1: idle -> notifies once.
+	reportAndPublishActivity(t, env, string(state.PhaseRunning), string(state.ActivityIdle))
+	require.Eventually(t, func() bool {
+		return len(env.dispatcher.getCalls()) == 1
+	}, 2*time.Second, 20*time.Millisecond)
+	env.nd.Stop()
+
+	// Simulate Hub restart: fresh NotificationDispatcher with empty in-memory state.
+	nd2 := NewNotificationDispatcher(env.store, env.pub, func() AgentDispatcher { return env.dispatcher }, slog.Default())
+	nd2.Start()
+	defer nd2.Stop()
+
+	// Case 1: Re-publish without leaving idle (ActivitySince predates the stored notification) -> deduped.
+	env.pub.PublishAgentStatus(context.Background(), mustGetAgent(t, env.store, env.watched.ID))
+	time.Sleep(150 * time.Millisecond)
+	assert.Len(t, env.dispatcher.getCalls(), 1, "cross-restart re-report of unchanged idle period must still dedupe")
+
+	// Case 2: Agent left idle while Hub was restarting (working -> idle advances ActivitySince past notif.CreatedAt) -> notifies.
+	time.Sleep(15 * time.Millisecond)
+	require.NoError(t, env.store.UpdateAgentStatus(context.Background(), env.watched.ID, store.AgentStatusUpdate{
+		Phase:    string(state.PhaseRunning),
+		Activity: string(state.ActivityWorking),
+	}))
+	reportAndPublishActivity(t, env, string(state.PhaseRunning), string(state.ActivityIdle))
+
+	require.Eventually(t, func() bool {
+		return len(env.dispatcher.getCalls()) == 2
+	}, 2*time.Second, 20*time.Millisecond)
+}
+
+func TestNotificationDispatcher_SuspendedWithRetainedActivityFiresSuspendedOnly(t *testing.T) {
+	t.Run("default subscription without SUSPENDED does not re-fire COMPLETED or IDLE on suspend", func(t *testing.T) {
+		env := setupNotificationTest(t)
+		require.NoError(t, env.store.UpdateNotificationSubscriptionTriggers(
+			context.Background(), env.sub.ID, []string{"COMPLETED", "IDLE"},
+		))
+		env.nd.Start()
+		defer env.nd.Stop()
+
+		// Running agent completes -> 1st COMPLETED notification.
+		reportAndPublishActivity(t, env, string(state.PhaseRunning), string(state.ActivityCompleted))
+		require.Eventually(t, func() bool {
+			return len(env.dispatcher.getCalls()) == 1
+		}, 2*time.Second, 20*time.Millisecond)
+
+		// Suspend retains activity="completed": must NOT fire a second COMPLETED notification.
+		require.NoError(t, env.store.UpdateAgentStatus(context.Background(), env.watched.ID, store.AgentStatusUpdate{
+			Phase: string(state.PhaseSuspended),
+		}))
+		suspended := mustGetAgent(t, env.store, env.watched.ID)
+		require.Equal(t, string(state.ActivityCompleted), suspended.Activity)
+		env.pub.PublishAgentStatus(context.Background(), suspended)
+
+		time.Sleep(150 * time.Millisecond)
+		assert.Len(t, env.dispatcher.getCalls(), 1, "suspended+completed must not match COMPLETED")
+
+		// Resume and complete again -> notifies COMPLETED for the new run.
+		require.NoError(t, env.store.UpdateAgentStatus(context.Background(), env.watched.ID, store.AgentStatusUpdate{
+			Phase:                 string(state.PhaseRunning),
+			ClearTerminalRemnants: true,
+		}))
+		env.pub.PublishAgentStatus(context.Background(), mustGetAgent(t, env.store, env.watched.ID))
+		reportAndPublishActivity(t, env, string(state.PhaseRunning), string(state.ActivityCompleted))
+
+		require.Eventually(t, func() bool {
+			return len(env.dispatcher.getCalls()) == 2
+		}, 2*time.Second, 20*time.Millisecond)
+	})
+
+	t.Run("subscription watching SUSPENDED and COMPLETED fires SUSPENDED only", func(t *testing.T) {
+		env := setupNotificationTest(t)
+		require.NoError(t, env.store.UpdateNotificationSubscriptionTriggers(
+			context.Background(), env.sub.ID, []string{"COMPLETED", "IDLE", "SUSPENDED"},
+		))
+		env.nd.Start()
+		defer env.nd.Stop()
+
+		// Running agent becomes idle -> IDLE notification (#1).
+		reportAndPublishActivity(t, env, string(state.PhaseRunning), string(state.ActivityIdle))
+		require.Eventually(t, func() bool {
+			return len(env.dispatcher.getCalls()) == 1
+		}, 2*time.Second, 20*time.Millisecond)
+		assert.Contains(t, env.dispatcher.getCalls()[0].Message, "IDLE")
+
+		// Agent is suspended with retained activity="idle" -> fires SUSPENDED (#2), never IDLE.
+		require.NoError(t, env.store.UpdateAgentStatus(context.Background(), env.watched.ID, store.AgentStatusUpdate{
+			Phase: string(state.PhaseSuspended),
+		}))
+		suspended := mustGetAgent(t, env.store, env.watched.ID)
+		require.Equal(t, string(state.ActivityIdle), suspended.Activity)
+		env.pub.PublishAgentStatus(context.Background(), suspended)
+
+		require.Eventually(t, func() bool {
+			return len(env.dispatcher.getCalls()) == 2
+		}, 2*time.Second, 20*time.Millisecond)
+		assert.Contains(t, env.dispatcher.getCalls()[1].Message, "SUSPENDED")
+		assert.NotContains(t, env.dispatcher.getCalls()[1].Message, "IDLE")
+
+		notifs, err := env.store.GetNotifications(context.Background(), store.SubscriberTypeAgent, env.subscriber.Slug, false)
+		require.NoError(t, err)
+		require.Len(t, notifs, 2)
+		assert.Equal(t, "SUSPENDED", notifs[0].Status)
+	})
 }

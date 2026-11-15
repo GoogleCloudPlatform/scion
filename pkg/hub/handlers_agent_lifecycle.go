@@ -339,7 +339,7 @@ func statusUpdateIsEmpty(su store.AgentStatusUpdate) bool {
 		su.RuntimeState == "" && su.TaskSummary == "" && !su.Heartbeat &&
 		len(su.Metadata) == 0 && su.CurrentTurns == nil && su.CurrentModelCalls == nil &&
 		su.StartedAt == "" && !su.ClearExit && su.ClearMessageIf == "" &&
-		!su.ClearTerminalRemnants && su.LiveWork == nil
+		!su.ClearTerminalRemnants && su.LiveWork == nil && !su.ClearActivity
 }
 
 // statusUpdateIsHeartbeatOnly reports whether su carries the heartbeat flag
@@ -657,10 +657,7 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	// status write keeps its own grants (ptone/scion#6403).
 	s.revokeSuspendedRunDelegationGrantsBestEffort(ctx, agent.ID, stopRunID)
 
-	agent.Phase = newPhase
-	agent.ContainerStatus = "stopped"
-	agent.Activity = ""
-	agent.SuspendReason = string(state.SuspendReasonUser)
+	s.syncAgentAfterStopRecord(ctx, agent, newPhase, string(state.SuspendReasonUser))
 	// A suspended agent has no running container: release its
 	// max_agents_per_broker reservation so it stops consuming broker
 	// capacity until it is resumed (ptone/scion#1963), and its

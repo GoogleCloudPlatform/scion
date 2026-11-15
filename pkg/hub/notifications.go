@@ -50,6 +50,13 @@ type NotificationDispatcher struct {
 	stopOnce         sync.Once
 	wg               sync.WaitGroup
 
+	// observedMu guards lastObservedStatus, which records the last
+	// notification-matching status seen per watched agent so transitions out
+	// of a notifying activity (for example idle -> working -> idle) re-arm
+	// notifications even when the intermediate activity does not notify.
+	observedMu         sync.Mutex
+	lastObservedStatus map[string]string
+
 	// channelRegistryFn returns the external notification channel registry
 	// in use (nil fn or nil registry = disabled). The Server sets it so a
 	// registry rebuilt from saved settings is used without restarting the
@@ -75,11 +82,12 @@ func (nd *NotificationDispatcher) offerAutoWake(subscriber *store.Agent) bool {
 // system starts (e.g. in combined hub+web mode).
 func NewNotificationDispatcher(s store.Store, events EventPublisher, getDispatcher func() AgentDispatcher, log *slog.Logger) *NotificationDispatcher {
 	return &NotificationDispatcher{
-		store:         s,
-		events:        events,
-		getDispatcher: getDispatcher,
-		log:           log,
-		stopCh:        make(chan struct{}),
+		store:              s,
+		events:             events,
+		getDispatcher:      getDispatcher,
+		log:                log,
+		stopCh:             make(chan struct{}),
+		lastObservedStatus: make(map[string]string),
 	}
 }
 
@@ -174,16 +182,19 @@ func (nd *NotificationDispatcher) handleEvent(evt Event) {
 	}
 
 	allSubs := append(agentSubs, projectSubs...)
+
+	// Suspended agents match on phase ("suspended"), never on a retained
+	// pre-suspend activity such as completed or idle. Running/stopped agents
+	// match on activity and fall back to phase when activity is empty.
+	matchStatus := notificationEventStatus(statusEvt)
+	prevObserved, hadObserved := nd.recordObservedStatus(statusEvt.AgentID, matchStatus)
+
 	if len(allSubs) == 0 {
 		return
 	}
 
-	// Use activity for matching (notifications trigger on activity changes).
-	// Fall back to phase when activity is empty (e.g. phase "error" has no activity).
-	matchStatus := statusEvt.Activity
-	if matchStatus == "" {
-		matchStatus = statusEvt.Phase
-	}
+	var watchedAgent *store.Agent
+	var watchedLoaded bool
 
 	// Deduplicate: one notification per (subscriber_type, subscriber_id).
 	// Agent-scoped subscriptions are checked first since they are more specific.
@@ -201,21 +212,65 @@ func (nd *NotificationDispatcher) handleEvent(evt Event) {
 			continue
 		}
 
-		// Dedup: check if the last notification for this subscription already has this status
-		lastStatus, err := nd.store.GetLastNotificationStatus(ctx, sub.ID)
+		// Dedup repeated heartbeats / status re-reports within a single
+		// period of matchStatus, while allowing a fresh period (after the
+		// agent left matchStatus to working/thinking/etc. and re-entered) to
+		// notify again.
+		lastNotif, err := nd.store.GetLastNotification(ctx, sub.ID)
 		if err != nil {
-			nd.log.Error("Failed to get last notification status",
+			nd.log.Error("Failed to get last notification",
 				"subscriptionID", sub.ID, "error", err)
 			continue
 		}
-		if strings.EqualFold(lastStatus, matchStatus) {
-			seen[dedupeKey] = true
-			continue
+		if lastNotif != nil && strings.EqualFold(lastNotif.Status, matchStatus) {
+			reentered := (hadObserved && !strings.EqualFold(prevObserved, matchStatus)) ||
+				nd.activityEnteredAfter(ctx, statusEvt.AgentID, lastNotif.CreatedAt, &watchedAgent, &watchedLoaded)
+			if !reentered {
+				seen[dedupeKey] = true
+				continue
+			}
 		}
 
 		seen[dedupeKey] = true
 		nd.storeAndDispatch(ctx, sub, statusEvt)
 	}
+}
+
+func (nd *NotificationDispatcher) recordObservedStatus(agentID, matchStatus string) (prev string, ok bool) {
+	nd.observedMu.Lock()
+	defer nd.observedMu.Unlock()
+	if nd.lastObservedStatus == nil {
+		nd.lastObservedStatus = make(map[string]string)
+	}
+	prev, ok = nd.lastObservedStatus[agentID]
+	nd.lastObservedStatus[agentID] = strings.ToUpper(matchStatus)
+	return prev, ok
+}
+
+func (nd *NotificationDispatcher) clearObservedStatus(agentID string) {
+	nd.observedMu.Lock()
+	defer nd.observedMu.Unlock()
+	delete(nd.lastObservedStatus, agentID)
+}
+
+func (nd *NotificationDispatcher) activityEnteredAfter(
+	ctx context.Context,
+	agentID string,
+	notifCreatedAt time.Time,
+	cached **store.Agent,
+	loaded *bool,
+) bool {
+	if !*loaded {
+		*loaded = true
+		if a, err := nd.store.GetAgent(ctx, agentID); err == nil {
+			*cached = a
+		}
+	}
+	a := *cached
+	return a != nil &&
+		state.Phase(a.Phase) == state.PhaseRunning &&
+		a.ActivitySince != nil &&
+		a.ActivitySince.After(notifCreatedAt)
 }
 
 // pendingDeletedNotification is one DELETED notification resolved before an
@@ -286,6 +341,7 @@ func (nd *NotificationDispatcher) DeliverDeletedNotifications(ctx context.Contex
 	go func() {
 		defer close(done)
 		for i := range pending {
+			nd.clearObservedStatus(pending[i].agent.ID)
 			nd.deliverDeletedNotification(ctx, &pending[i])
 		}
 	}()
@@ -361,9 +417,13 @@ func (nd *NotificationDispatcher) storeAndDispatchForAgent(ctx context.Context, 
 	nd.storeAndDispatchMessage(ctx, sub, evt, agent, formatNotificationMessage(agent, notificationEventStatus(evt)))
 }
 
-// notificationEventStatus is the status a notification for evt carries: its
-// activity, or its phase when the activity is empty.
+// notificationEventStatus is the status a notification for evt carries: for a
+// suspended agent it is always the phase ("suspended"), never a retained
+// activity; otherwise its activity, or its phase when the activity is empty.
 func notificationEventStatus(evt AgentStatusEvent) string {
+	if evt.Phase == string(state.PhaseSuspended) {
+		return evt.Phase
+	}
 	if evt.Activity != "" {
 		return evt.Activity
 	}
