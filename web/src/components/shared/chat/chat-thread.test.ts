@@ -9798,3 +9798,49 @@ describe('scion-chat-thread null conversation key', () => {
     expect(el.shadowRoot).not.toBeNull();
   });
 });
+
+describe('scion-chat-thread email mention highlighting (ptone/scion#8133)', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('passes thread members to bubbles so only known Scion user @<email> tokens render as mentions', async () => {
+    apiFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          items: [
+            {
+              id: 'm-email-1',
+              msg: 'Ping @alice@example.com, skip @unknown@example.com, mail user@example.com.',
+              sender: 'agent:coder',
+              senderId: 'agent-1',
+              type: 'assistant-reply',
+              createdAt: '2026-01-01T00:00:00Z',
+            },
+          ],
+        }),
+    } as unknown as Response);
+
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = 'topic:test-email-mentions';
+    el.members = [{ id: 'u-alice', name: 'Alice Smith', email: 'alice@example.com', kind: 'user' }];
+    document.body.appendChild(el);
+
+    await vi.waitFor(() => {
+      const bubble = el.shadowRoot?.querySelector('scion-chat-message');
+      const md = bubble?.shadowRoot?.querySelector('.md-content');
+      expect(md).toBeTruthy();
+      const spans = Array.from(md!.querySelectorAll('.mention'));
+      expect(spans.map((s) => s.getAttribute('data-mention'))).toEqual(['alice-smith']);
+      expect(md!.textContent?.trim()).toBe(
+        'Ping @alice-smith, skip @unknown@example.com, mail user@example.com.'
+      );
+    });
+  });
+});

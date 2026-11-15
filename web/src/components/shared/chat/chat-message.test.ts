@@ -159,6 +159,40 @@ describe('scion-chat-message @mentions', () => {
 
     expect(listener).not.toHaveBeenCalled();
   });
+
+  it('converts @<email> to a clickable mention only for known Scion users (ptone/scion#8133)', async () => {
+    const el = await mount('cc @alice@example.com and @unknown@example.com; mail user@example.com');
+    // Before roster arrives, neither @email is known so none should highlight.
+    expect(mentions(el)).toHaveLength(0);
+
+    // Once members arrive on the thread, known user email renders & acts as that user's mention.
+    el.members = [{ name: 'Alice Smith', email: 'alice@example.com', kind: 'user' }];
+    await el.updateComplete;
+    await Promise.resolve();
+    await el.updateComplete;
+
+    const spans = mentions(el);
+    expect(spans).toHaveLength(1);
+    expect(spans[0].getAttribute('data-mention')).toBe('alice-smith');
+    expect(spans[0].textContent).toBe('@alice-smith');
+
+    const seen: string[] = [];
+    const onMentionClick = (e: Event): void => {
+      seen.push((e as CustomEvent<{ slug: string }>).detail.slug);
+    };
+    document.addEventListener('mention-click', onMentionClick);
+    try {
+      spans[0].dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true }));
+    } finally {
+      document.removeEventListener('mention-click', onMentionClick);
+    }
+    expect(seen).toEqual(['alice-smith']);
+
+    const content = el.shadowRoot?.querySelector('.md-content');
+    expect(content?.textContent).toBe(
+      'cc @alice-smith and @unknown@example.com; mail user@example.com'
+    );
+  });
 });
 
 describe('scion-chat-message attachment previews', () => {

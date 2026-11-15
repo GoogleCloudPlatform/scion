@@ -240,6 +240,21 @@ func TestTranslateMentionsInbound(t *testing.T) {
 			want:    "Hey @unknown@example.com check this",
 		},
 		{
+			name:    "plain email in prose not translated",
+			content: "Mail john@example.com or user@example.com directly",
+			want:    "Mail john@example.com or user@example.com directly",
+		},
+		{
+			name:    "markdown wrapped known email translated while code and fences left alone",
+			content: "Ping **@john@example.com** or _@alice@example.com_, keep `@john@example.com`:\n```\n@alice@example.com\n```",
+			want:    "Ping **@john-smith** or _@alice-bob_, keep `@john@example.com`:\n```\n@alice@example.com\n```",
+		},
+		{
+			name:    "longer email domain suffix not partially matched",
+			content: "Hey @john@example.com.au and @john@example.com.",
+			want:    "Hey @john@example.com.au and @john-smith.",
+		},
+		{
 			name:    "no mentions",
 			content: "Just a regular message",
 			want:    "Just a regular message",

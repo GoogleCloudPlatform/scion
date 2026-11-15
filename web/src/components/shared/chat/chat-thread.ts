@@ -7782,6 +7782,7 @@ export class ScionChatThread extends LitElement {
             .attachmentRefs=${this.getMessageAttachmentRefs(msg.id)}
             .artifactRefs=${this.getMessageArtifactRefs(msg.id)}
             .currentUserId=${this.currentUserId}
+            .members=${this.members}
             routedTo=${msgRoutedTo}
             .replyPreview=${replyPreview}
             editedAt=${ext?.editedAt || ''}

@@ -375,3 +375,48 @@ func TestDeliveredSlugs(t *testing.T) {
 	slugs := DeliveredSlugs(results)
 	assert.Equal(t, []string{"alice", "bob"}, slugs)
 }
+
+func TestReplaceProseMention(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		old     string
+		new     string
+		want    string
+	}{
+		{
+			name:    "known email in prose and markdown wrappers",
+			content: "Ask @john@example.com, **@JOHN@EXAMPLE.COM**, _@john@example.com_, or (@john@example.com).",
+			old:     "john@example.com",
+			new:     "john-smith",
+			want:    "Ask @john-smith, **@john-smith**, _@john-smith_, or (@john-smith).",
+		},
+		{
+			name:    "leaves plain email in prose untouched",
+			content: "Email john@example.com or user@example.com directly.",
+			old:     "john@example.com",
+			new:     "john-smith",
+			want:    "Email john@example.com or user@example.com directly.",
+		},
+		{
+			name:    "does not partially match longer domain or local suffix",
+			content: "Skip @john@example.com.au and @@john@example.com and foo_@john@example.com.",
+			old:     "john@example.com",
+			new:     "john-smith",
+			want:    "Skip @john@example.com.au and @@john@example.com and foo_@john@example.com.",
+		},
+		{
+			name:    "skips inline code spans, fenced code blocks, and blockquotes",
+			content: "Use `@john@example.com` and ping @john@example.com:\n```\n@john@example.com\n```\n> @john@example.com",
+			old:     "john@example.com",
+			new:     "john-smith",
+			want:    "Use `@john@example.com` and ping @john-smith:\n```\n@john@example.com\n```\n> @john@example.com",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, ReplaceProseMention(tc.content, tc.old, tc.new))
+		})
+	}
+}

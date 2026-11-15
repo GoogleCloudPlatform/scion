@@ -14,7 +14,16 @@
 
 package hub
 
-import "strings"
+import (
+	"context"
+	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+)
+
+func mentionDisplaySlug(displayName string) string {
+	return strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(displayName))), "-")
+}
 
 // translateMentionsOutbound translates human-readable @firstname-lastname
 // mentions into @email format for agent consumption. This is called when a
@@ -28,7 +37,7 @@ func translateMentionsOutbound(content string, members []chatMemberEntry) string
 		if m.Kind != "user" || m.Email == "" || m.DisplayName == "" {
 			continue
 		}
-		slug := strings.ToLower(strings.ReplaceAll(m.DisplayName, " ", "-"))
+		slug := mentionDisplaySlug(m.DisplayName)
 		if slug == "" {
 			continue
 		}
@@ -37,10 +46,8 @@ func translateMentionsOutbound(content string, members []chatMemberEntry) string
 	return content
 }
 
-// translateMentionsInbound translates @email mentions from agent messages into
-// human-readable @firstname-lastname format. This is called when an agent
-// sends a message to a human thread, so the stored message renders correctly
-// in the native chat UI.
+// translateMentionsInbound translates @email mentions into human-readable
+// @firstname-lastname format for known human members.
 func translateMentionsInbound(content string, members []chatMemberEntry) string {
 	if !strings.Contains(content, "@") {
 		return content
@@ -49,7 +56,7 @@ func translateMentionsInbound(content string, members []chatMemberEntry) string 
 		if m.Kind != "user" || m.Email == "" || m.DisplayName == "" {
 			continue
 		}
-		slug := strings.ToLower(strings.ReplaceAll(m.DisplayName, " ", "-"))
+		slug := mentionDisplaySlug(m.DisplayName)
 		if slug == "" {
 			continue
 		}
@@ -58,70 +65,59 @@ func translateMentionsInbound(content string, members []chatMemberEntry) string 
 	return content
 }
 
-// isWordChar returns true for characters that are part of a word: letters,
-// digits, underscore, and hyphen. Everything else (whitespace, punctuation,
-// etc.) is considered a valid mention boundary.
-func isWordChar(b byte) bool {
-	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') ||
-		(b >= '0' && b <= '9') || b == '_' || b == '-'
-}
-
-// replaceMention replaces @oldName with @newName at word boundaries in content.
-// The match is case-insensitive. A word boundary before the @ is any
-// non-word character (whitespace, punctuation, etc.) or start-of-string.
-// A word boundary after the mention is end-of-string, whitespace, or common
-// punctuation. Hyphens and @ are NOT treated as word boundaries after the
-// mention, preventing partial matches like @john-smith matching inside
-// @john-smith-jones, and @user matching inside @user@example.com.
-func replaceMention(content, oldName, newName string) string {
-	if !strings.Contains(strings.ToLower(content), strings.ToLower("@"+oldName)) {
+// translateKnownEmailMentionsInbound rewrites standalone @<email> tokens in
+// prose to @<display-slug> when <email> resolves to a known Scion user — first
+// checking pre-resolved project members and falling back to GetUserByEmail for
+// any remaining @<email> tokens (such as Hub users without an explicit project
+// binding, or hub-scoped / user-DM threads without a project). Unknown emails,
+// plain prose emails without a leading '@', and code spans / fenced blocks /
+// '>' blockquotes are left unchanged (ptone/scion#8133).
+func (s *Server) translateKnownEmailMentionsInbound(ctx context.Context, content string, members []chatMemberEntry) string {
+	if !strings.Contains(content, "@") {
 		return content
 	}
-
-	target := "@" + strings.ToLower(oldName)
-	replacement := "@" + newName
-	lower := strings.ToLower(content)
-
-	var result strings.Builder
-	result.Grow(len(content))
-	pos := 0
-
-	for {
-		idx := strings.Index(lower[pos:], target)
-		if idx < 0 {
-			result.WriteString(content[pos:])
-			break
-		}
-		absIdx := pos + idx
-		end := absIdx + len(target)
-
-		// Check word boundary before the mention: must be at start of
-		// string or preceded by a non-word character (whitespace,
-		// punctuation, etc.). This allows mentions like (@user) and
-		// "@user" to be translated.
-		boundaryBefore := absIdx == 0 || !isWordChar(content[absIdx-1])
-
-		// Check word boundary after the mention: must be at end of string
-		// or followed by whitespace / common punctuation. Hyphens and @
-		// are intentionally excluded so @john-smith does not match inside
-		// @john-smith-jones and @user does not match inside @user@example.com.
-		boundaryAfter := end >= len(content)
-		if !boundaryAfter {
-			next := content[end]
-			boundaryAfter = next == ' ' || next == '\n' || next == '\t' || next == '\r' ||
-				next == ',' || next == '.' || next == '!' || next == '?' ||
-				next == ')' || next == '(' || next == ':' || next == ';' ||
-				next == '"' || next == '\'' || next == ']' || next == '['
-		}
-
-		if boundaryBefore && boundaryAfter {
-			result.WriteString(content[pos:absIdx])
-			result.WriteString(replacement)
-		} else {
-			result.WriteString(content[pos:end])
-		}
-		pos = end
+	if len(members) > 0 {
+		content = translateMentionsInbound(content, members)
 	}
+	if s == nil || s.store == nil {
+		return content
+	}
+	checked := make(map[string]bool, len(members))
+	for _, m := range members {
+		if m.Kind == "user" && m.Email != "" {
+			checked[strings.ToLower(strings.TrimSpace(m.Email))] = true
+		}
+	}
+	var extra []chatMemberEntry
+	for _, token := range messages.ExtractProseWrappedMentions(content) {
+		if !strings.Contains(token, "@") {
+			continue
+		}
+		lower := strings.ToLower(strings.TrimSpace(token))
+		if lower == "" || checked[lower] {
+			continue
+		}
+		checked[lower] = true
+		u, err := s.store.GetUserByEmail(ctx, token)
+		if err != nil || u == nil || u.DisplayName == "" {
+			continue
+		}
+		extra = append(extra, chatMemberEntry{
+			ID:          u.ID,
+			Kind:        "user",
+			DisplayName: u.DisplayName,
+			Email:       u.Email,
+		})
+	}
+	if len(extra) > 0 {
+		content = translateMentionsInbound(content, extra)
+	}
+	return content
+}
 
-	return result.String()
+// replaceMention replaces standalone @oldName mention tokens with @newName in
+// prose, skipping fenced code blocks, inline backtick code spans, and '>'
+// blockquote lines.
+func replaceMention(content, oldName, newName string) string {
+	return messages.ReplaceProseMention(content, oldName, newName)
 }

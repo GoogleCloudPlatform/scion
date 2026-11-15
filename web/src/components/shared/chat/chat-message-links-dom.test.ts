@@ -36,11 +36,15 @@ declare global {
 const UUID = '123e4567-e89b-12d3-a456-426614174000';
 
 /** Mount an agent's message and wait for its markdown to render. */
-async function mount(body: string): Promise<HTMLElement> {
+async function mount(
+  body: string,
+  members: Array<{ name: string; email: string; kind: 'user' | 'agent' }> = []
+): Promise<HTMLElement> {
   const el = document.createElement('scion-chat-message') as ScionChatMessage;
   el.body = body;
   el.fromAgent = true;
   el.senderIsAgent = true;
+  el.members = members;
   document.body.appendChild(el);
   let content: HTMLElement | null = null;
   for (let i = 0; i < 50 && !content; i++) {
@@ -177,5 +181,78 @@ describe('scion-chat-message text that looks like HTML', () => {
 
     expect(content.querySelector('a[href="/commits/abc1234"]')?.textContent).toBe('abc1234');
     expect(content.querySelector(`a[href="/sessions/${UUID}"]`)?.textContent).toBe(UUID);
+  });
+});
+
+describe('scion-chat-message email mention resolution (ptone/scion#8133)', () => {
+  const roster = [
+    { name: 'Alice Smith', email: 'alice@example.com', kind: 'user' as const },
+    { name: '', email: 'grace@example.com', kind: 'user' as const },
+  ];
+
+  it('renders @<email> for a known Scion user as that user mention', async () => {
+    const content = await mount(
+      'Ask @alice@example.com or **@ALICE@EXAMPLE.COM** and @grace@example.com.',
+      roster
+    );
+
+    const spans = Array.from(content.querySelectorAll('.mention'));
+    expect(spans.map((s) => s.getAttribute('data-mention'))).toEqual([
+      'alice-smith',
+      'alice-smith',
+      'grace@example.com',
+    ]);
+    expect(spans.map((s) => s.textContent)).toEqual([
+      '@alice-smith',
+      '@alice-smith',
+      '@grace@example.com',
+    ]);
+    expect(content.querySelector('a[href^="mailto:"]')).toBeNull();
+    expect(content.textContent?.trim()).toBe(
+      'Ask @alice-smith or @alice-smith and @grace@example.com.'
+    );
+  });
+
+  it('leaves @<email> for an unknown address as plain text with no mention or mailto highlight', async () => {
+    const content = await mount(
+      'Reach @unknown@example.com or (@nobody+tag@sub.example.org) about this.',
+      roster
+    );
+
+    expect(content.querySelectorAll('.mention')).toHaveLength(0);
+    expect(content.querySelectorAll('a[href^="mailto:"]')).toHaveLength(0);
+    expect(content.textContent?.trim()).toBe(
+      'Reach @unknown@example.com or (@nobody+tag@sub.example.org) about this.'
+    );
+  });
+
+  it('leaves plain user@example.com in prose unaffected by mention conversion or highlighting', async () => {
+    const content = await mount(
+      'Send feedback to user@example.com or alice@example.com directly.',
+      roster
+    );
+
+    expect(content.querySelectorAll('.mention')).toHaveLength(0);
+    const mailtos = Array.from(content.querySelectorAll('a[href^="mailto:"]'));
+    expect(mailtos.map((a) => a.getAttribute('href'))).toEqual([
+      'mailto:user@example.com',
+      'mailto:alice@example.com',
+    ]);
+    expect(mailtos.map((a) => a.textContent)).toEqual(['user@example.com', 'alice@example.com']);
+  });
+
+  it('leaves email addresses inside inline code spans and fenced code blocks untouched', async () => {
+    const content = await mount(
+      'Use `@alice@example.com` or `@unknown@example.com`:\n\n```\n@alice@example.com\nuser@example.com\n```',
+      roster
+    );
+
+    expect(content.querySelectorAll('.mention')).toHaveLength(0);
+    expect(content.querySelectorAll('a[href^="mailto:"]')).toHaveLength(0);
+    const codes = Array.from(content.querySelectorAll('code')).filter((c) => !c.closest('pre'));
+    expect(codes.map((c) => c.textContent)).toEqual(['@alice@example.com', '@unknown@example.com']);
+    expect(content.querySelector('pre')?.textContent).toContain(
+      '@alice@example.com\nuser@example.com'
+    );
   });
 });

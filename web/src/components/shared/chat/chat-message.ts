@@ -64,6 +64,7 @@ import './chat-file-preview.js';
 import type { PreviewTarget } from './chat-file-preview.js';
 import '../code-editor.js';
 import '../markdown-preview.js';
+import { userMentionSlug } from './prose-mentions.js';
 import './chat-choices.js';
 import './chat-choice-response.js';
 import { ANSWERABLE, chatChoicesEnabled } from '../../../client/chat-choices.js';
@@ -86,6 +87,14 @@ export interface AttachmentRefInfo {
   width?: number;
   /** Pixel height of an image attachment, when the server knows it. */
   height?: number;
+}
+
+/** Roster entry used to resolve `@<email>` mentions to known Scion users (ptone/scion#8133). */
+export interface ChatMessageMember {
+  name?: string;
+  displayName?: string;
+  email?: string;
+  kind?: string;
 }
 
 /**
@@ -572,18 +581,239 @@ function styleGithubRefsInText(text: string): LinkPiece[] | null {
   });
 }
 
+const MENTION_NON_BOUNDARY_PREV_RE = /[\p{L}\p{N}.@+/`-]/u;
+
+function prevCharBefore(text: string, index: number): { ch: string; start: number } | null {
+  if (index <= 0) return null;
+  const low = text.charCodeAt(index - 1);
+  if (low >= 0xdc00 && low <= 0xdfff && index >= 2) {
+    const high = text.charCodeAt(index - 2);
+    if (high >= 0xd800 && high <= 0xdbff) {
+      return { ch: text.slice(index - 2, index), start: index - 2 };
+    }
+  }
+  return { ch: text.charAt(index - 1), start: index - 1 };
+}
+
+function isValidMentionStart(text: string, atIndex: number): boolean {
+  let pos = atIndex;
+  while (pos > 0 && text.charCodeAt(pos - 1) === 0x5f /* '_' */) {
+    pos--;
+  }
+  const prev = prevCharBefore(text, pos);
+  return !prev || !MENTION_NON_BOUNDARY_PREV_RE.test(prev.ch);
+}
+
+function isAsciiWordOrUnderscore(code: number): boolean {
+  return (
+    (code >= 0x30 && code <= 0x39) ||
+    (code >= 0x41 && code <= 0x5a) ||
+    (code >= 0x61 && code <= 0x7a) ||
+    code === 0x5f
+  );
+}
+
+function isMentionSlugContinue(code: number): boolean {
+  return isAsciiWordOrUnderscore(code) || code === 0x2e /* '.' */ || code === 0x2d /* '-' */;
+}
+
+function isEmailLocalContinue(code: number): boolean {
+  return isMentionSlugContinue(code) || code === 0x2b /* '+' */;
+}
+
+function trimTrailingDots(text: string, start: number, end: number): number {
+  let cur = end;
+  while (cur > start && text.charCodeAt(cur - 1) === 0x2e /* '.' */) {
+    cur--;
+  }
+  return cur;
+}
+
+function mentionSpan(slug: string): HTMLSpanElement {
+  const span = document.createElement('span');
+  span.setAttribute('class', 'mention clickable');
+  span.setAttribute('data-mention', slug);
+  span.textContent = `@${slug}`;
+  return span;
+}
+
 /**
- * Wrap @mentions in one text node in styled, clickable spans. The slug is
- * limited to `[\w.-]`, with an optional `@project` part.
+ * Wrap @mentions in one text node in styled, clickable spans (ptone/scion#8133):
+ * - Non-email `@<slug>` tokens at a valid mention boundary render as `@<slug>` mentions.
+ * - `@<email>` tokens render as that user's canonical mention only when `<email>`
+ *   resolves to a known Scion user in `knownUsersByEmail`; unknown `@<email>` tokens
+ *   are left as literal plain text.
+ * - Plain `user@example.com` tokens (without a leading `@` at a mention boundary)
+ *   are left untouched.
+ *
+ * Uses explicit index scanning rather than regex lookbehind so older Safari
+ * (<16.4) engines never fail module parsing.
  */
-function styleMentionsInText(text: string): LinkPiece[] | null {
-  return replaceMatches(text, /@([\w.-]+(?:@[\w.-]+)?)/g, (m) => {
-    const span = document.createElement('span');
-    span.setAttribute('class', 'mention clickable');
-    span.setAttribute('data-mention', m[1]);
-    span.textContent = `@${m[1]}`;
-    return [span];
-  });
+function styleMentionsInText(
+  text: string,
+  knownUsersByEmail: ReadonlyMap<string, string>
+): LinkPiece[] | null {
+  if (!text.includes('@')) return null;
+
+  const pieces: LinkPiece[] = [];
+  let lastEmitted = 0;
+  let cursor = 0;
+  let matched = false;
+
+  while (cursor < text.length) {
+    const atIndex = text.indexOf('@', cursor);
+    if (atIndex < 0) break;
+
+    if (!isValidMentionStart(text, atIndex)) {
+      cursor = atIndex + 1;
+      continue;
+    }
+
+    const tokenStart = atIndex + 1;
+    if (tokenStart >= text.length || !isAsciiWordOrUnderscore(text.charCodeAt(tokenStart))) {
+      cursor = tokenStart;
+      continue;
+    }
+
+    let localEnd = tokenStart + 1;
+    while (localEnd < text.length && isEmailLocalContinue(text.charCodeAt(localEnd))) {
+      localEnd++;
+    }
+
+    if (localEnd < text.length && text.charCodeAt(localEnd) === 0x40 /* '@' */) {
+      // Candidate `@<local>@<domain>` email mention.
+      const domainStart = localEnd + 1;
+      if (domainStart >= text.length || !isAsciiWordOrUnderscore(text.charCodeAt(domainStart))) {
+        cursor = domainStart;
+        continue;
+      }
+      let domainEnd = domainStart + 1;
+      while (domainEnd < text.length && isMentionSlugContinue(text.charCodeAt(domainEnd))) {
+        domainEnd++;
+      }
+      if (domainEnd < text.length && text.charCodeAt(domainEnd) === 0x40 /* '@' */) {
+        // Multi-`@` sequence (e.g. `@a@b@c`) — not a valid mention or email.
+        while (
+          domainEnd < text.length &&
+          (isEmailLocalContinue(text.charCodeAt(domainEnd)) ||
+            text.charCodeAt(domainEnd) === 0x40) /* '@' */
+        ) {
+          domainEnd++;
+        }
+        cursor = domainEnd;
+        continue;
+      }
+
+      const trimmedDomainEnd = trimTrailingDots(text, domainStart, domainEnd);
+      if (trimmedDomainEnd <= domainStart) {
+        cursor = domainEnd;
+        continue;
+      }
+
+      const email = text.slice(tokenStart, trimmedDomainEnd).toLowerCase();
+      const resolvedSlug = knownUsersByEmail.get(email);
+      if (resolvedSlug) {
+        matched = true;
+        pieces.push(text.slice(lastEmitted, atIndex), mentionSpan(resolvedSlug));
+        lastEmitted = trimmedDomainEnd;
+        cursor = trimmedDomainEnd;
+      } else {
+        // Unknown email: leave `@<email>` as literal plain text.
+        cursor = domainEnd;
+      }
+      continue;
+    }
+
+    // Non-email `@<slug>` mention (`[\w.-]+`, without trailing sentence dots).
+    let slugEnd = tokenStart + 1;
+    while (slugEnd < text.length && isMentionSlugContinue(text.charCodeAt(slugEnd))) {
+      slugEnd++;
+    }
+    const trimmedSlugEnd = trimTrailingDots(text, tokenStart, slugEnd);
+    if (trimmedSlugEnd <= tokenStart) {
+      cursor = slugEnd;
+      continue;
+    }
+
+    const slug = text.slice(tokenStart, trimmedSlugEnd);
+    matched = true;
+    pieces.push(text.slice(lastEmitted, atIndex), mentionSpan(slug));
+    lastEmitted = trimmedSlugEnd;
+    cursor = trimmedSlugEnd;
+  }
+
+  if (!matched) return null;
+  pieces.push(text.slice(lastEmitted));
+  return pieces;
+}
+
+function isMailtoLink(el: Element): boolean {
+  return el.localName.toLowerCase() === 'a' && /^mailto:/i.test(el.getAttribute('href') ?? '');
+}
+
+/**
+ * `marked`'s GFM autolinker splits `@user@example.com` into a text node ending
+ * with `@` followed by `<a href="mailto:user@example.com">user@example.com</a>`.
+ * Merge those GFM-autolinked `@<email>` sequences back into plain text before
+ * the mention pass so known-user `@<email>` mentions render as mentions and
+ * unknown `@<email>` tokens remain plain text as entered, while bare
+ * `user@example.com` in prose keeps its ordinary `mailto:` link (ptone/scion#8133).
+ */
+function unwrapLeadingAtMailtoLinks(root: DocumentFragment): void {
+  const anchors = Array.from(root.querySelectorAll('a[href]'));
+  for (const a of anchors) {
+    if (a.closest('pre, code')) continue;
+    const href = a.getAttribute('href') ?? '';
+    if (!/^mailto:/i.test(href)) continue;
+    const rawAddr = href.slice(7);
+    if (!rawAddr || rawAddr.includes('?')) continue;
+    if (a.childNodes.length !== 1 || a.firstChild?.nodeType !== Node.TEXT_NODE) continue;
+    const linkText = a.textContent ?? '';
+    if (linkText.toLowerCase() !== rawAddr.toLowerCase()) continue;
+
+    const prev = a.previousSibling;
+    if (!prev || prev.nodeType !== Node.TEXT_NODE) continue;
+    const prevText = prev as Text;
+    if (!prevText.data.endsWith('@')) continue;
+    if (!isValidMentionStart(prevText.data, prevText.data.length - 1)) continue;
+
+    let merged = prevText.data + linkText;
+    const next = a.nextSibling;
+    if (next && next.nodeType === Node.TEXT_NODE) {
+      merged += (next as Text).data;
+      next.remove();
+    }
+    prevText.data = merged;
+    a.remove();
+  }
+}
+
+/** Build a lowercase-email -> canonical-mention-slug map for known Scion users. */
+function buildKnownUsersByEmail(
+  members: readonly ChatMessageMember[],
+  currentUserId: string
+): ReadonlyMap<string, string> {
+  const map = new Map<string, string>();
+  for (const m of members) {
+    if (m.kind === 'agent') continue;
+    const email = m.email?.trim().toLowerCase() ?? '';
+    if (!email || map.has(email)) continue;
+    const slug = userMentionSlug({ name: m.name || m.displayName || '', email });
+    if (slug) {
+      map.set(email, slug);
+    }
+  }
+  if (currentUserId) {
+    const self = peekUser(currentUserId);
+    const selfEmail = self?.email?.trim().toLowerCase() ?? '';
+    if (self && selfEmail && !map.has(selfEmail)) {
+      const slug = userMentionSlug({ name: self.displayName || '', email: selfEmail });
+      if (slug) {
+        map.set(selfEmail, slug);
+      }
+    }
+  }
+  return map;
 }
 
 /**
@@ -593,8 +823,9 @@ function styleMentionsInText(text: string): LinkPiece[] | null {
  * What each pass steps over:
  *
  * - Artifact references: code (`<pre>`, `<code>`) and existing links.
- * - @mentions: code, and the artifact links just built. Existing links are
- *   not stepped over, so an `@name` in a link's text is still styled.
+ * - @mentions: code, `mailto:` links, and the artifact links just built.
+ *   Non-`mailto:` links are not stepped over, so an `@name` in a markdown
+ *   link's text is still styled.
  * - Entity references: `<pre>` fences and existing links. Inline `<code>`
  *   is not stepped over, so a file path inside backticks still links.
  * - GitHub refs: code and existing links; a ref inside backticks is
@@ -605,7 +836,7 @@ function styleMentionsInText(text: string): LinkPiece[] | null {
  */
 function linkifyRenderedFragment(
   root: DocumentFragment,
-  opts: { artifacts: boolean; gcs: boolean }
+  opts: { artifacts: boolean; gcs: boolean; knownUsersByEmail: ReadonlyMap<string, string> }
 ): void {
   const isCode = elementsNamed('pre', 'code');
   const artifactLinks = new WeakSet<Element>();
@@ -614,7 +845,12 @@ function linkifyRenderedFragment(
       styleArtifactLinksInText(text, artifactLinks)
     );
   }
-  linkifyTextNodes(root, (el) => isCode(el) || artifactLinks.has(el), styleMentionsInText);
+  unwrapLeadingAtMailtoLinks(root);
+  linkifyTextNodes(
+    root,
+    (el) => isCode(el) || artifactLinks.has(el) || isMailtoLink(el),
+    (text) => styleMentionsInText(text, opts.knownUsersByEmail)
+  );
   linkifyTextNodes(root, elementsNamed('pre', 'a'), (text) =>
     styleEntityLinksInText(text, opts.gcs)
   );
@@ -913,6 +1149,13 @@ export class ScionChatMessage extends LitElement {
   /** The signed-in user's id; the artifact preview shows their artifacts' owner as "You". */
   @property()
   currentUserId = '';
+
+  /**
+   * Known roster members on the thread/hub, used to resolve `@<email>` mentions
+   * to known Scion users while leaving unknown emails unstyled (ptone/scion#8133).
+   */
+  @property({ type: Array })
+  members: readonly ChatMessageMember[] = [];
 
   /**
    * The rendered body: a `.md-content` element holding the markdown
@@ -2122,6 +2365,7 @@ export class ScionChatMessage extends LitElement {
       changed.has('body') ||
       changed.has('plain') ||
       changed.has('choiceIntro') ||
+      changed.has('members') ||
       cardMode !== this.renderedCardMode
     ) {
       this.renderedCardMode = cardMode;
@@ -2461,6 +2705,7 @@ export class ScionChatMessage extends LitElement {
       linkifyRenderedFragment(fragment, {
         artifacts: isFeatureEnabled(ARTIFACTS_FLAG),
         gcs: this.senderIsAgent && isFeatureEnabled('web.gcs_links'),
+        knownUsersByEmail: buildKnownUsersByEmail(this.members, this.currentUserId),
       });
       this.renderedContent = fragment.hasChildNodes() ? this.contentElement(fragment) : null;
     } catch {

@@ -824,3 +824,119 @@ func TestRecordMentions_BatchSkipsEmptyAndDuplicates(t *testing.T) {
 		t.Errorf("mention rows = %d; want 2", n)
 	}
 }
+
+// TestEmailMentionResolution_KnownUsersOnly verifies ptone/scion#8133 on the hub:
+//   - @<email> matching a known Scion user (either a project member or another
+//     Hub user) is translated to that user's @<display-slug> in stored/returned
+//     chat messages on both agent outbound and human chat send paths.
+//   - Dispatched agent messages preserve @<email> identifiers and agent
+//     @mention routing is unchanged.
+//   - Unknown @<email>, plain user@example.com in prose, and inline/fenced code
+//     are left unchanged.
+func TestEmailMentionResolution_KnownUsersOnly(t *testing.T) {
+	srv, s, wcs, proj, db := setupMentionDotTest(t)
+	d := &brokerMockDispatcher{}
+	srv.SetDispatcher(d)
+	ctx := context.Background()
+
+	_ = addHumanMember(t, s, proj.ID, "alice.smith@test.com", "Alice Smith")
+
+	// Known Scion user on the Hub who is NOT an explicit member of proj.
+	hubPeer := &store.User{
+		ID:          tid("email-mention-hub-peer"),
+		Email:       "hub.peer@test.com",
+		DisplayName: "Hub Peer",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	if err := s.CreateUser(ctx, hubPeer); err != nil {
+		t.Fatalf("CreateUser hubPeer: %v", err)
+	}
+
+	primary := &store.Agent{
+		ID: tid("email-mention-primary"), ProjectID: proj.ID, Name: "Builder", Slug: "em-builder",
+		Phase: "running", OwnerID: DevUserID, CreatedBy: DevUserID,
+	}
+	secondary := &store.Agent{
+		ID: tid("email-mention-secondary"), ProjectID: proj.ID, Name: "Reviewer", Slug: "em-reviewer",
+		Phase: "running", OwnerID: DevUserID, CreatedBy: DevUserID,
+	}
+	for _, ag := range []*store.Agent{primary, secondary} {
+		if err := s.CreateAgent(ctx, ag); err != nil {
+			t.Fatalf("CreateAgent %s: %v", ag.Slug, err)
+		}
+	}
+
+	topicID := tid("email-mention-topic")
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID: topicID, ProjectID: proj.ID, Name: "email-mentions",
+		CreatedBy: "dev", CreatedAt: time.Now().UTC(), DefaultAgent: primary.Slug,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	setTopicConversationID(t, db, s, topicID, proj.ID)
+	convID := def162GroupConv(t, s, proj.ID, topicID)
+
+	// 1. Human -> agent-routed chat send (with secondary @em-reviewer mention).
+	humanBody := "@em-builder ask @em-reviewer, cc @alice.smith@test.com and @hub.peer@test.com; " +
+		"leave @unknown@example.com, alice.smith@test.com, user@example.com, and `@alice.smith@test.com`:\n" +
+		"```\n@hub.peer@test.com\n```"
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages",
+		map[string]string{"content": humanBody})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("human send: %d %s", rec.Code, rec.Body.String())
+	}
+	var sendResp chatMessageResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &sendResp); err != nil {
+		t.Fatal(err)
+	}
+	wantHumanDisplay := "@em-builder ask @em-reviewer, cc @alice-smith and @hub-peer; " +
+		"leave @unknown@example.com, alice.smith@test.com, user@example.com, and `@alice.smith@test.com`:\n" +
+		"```\n@hub.peer@test.com\n```"
+	if sendResp.Content != wantHumanDisplay {
+		t.Errorf("human send response content =\n%s\nwant:\n%s", sendResp.Content, wantHumanDisplay)
+	}
+	storedHuman, err := s.GetMessage(ctx, sendResp.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedHuman.Msg != wantHumanDisplay {
+		t.Errorf("stored human msg =\n%s\nwant:\n%s", storedHuman.Msg, wantHumanDisplay)
+	}
+
+	// Agent @mention routing must remain unchanged (dispatched to both primary
+	// and secondary), and agents must still receive @<email> identifiers.
+	dispatched := d.getMessages()
+	if len(dispatched) != 2 {
+		t.Fatalf("dispatched count = %d; want 2 (primary + @em-reviewer)", len(dispatched))
+	}
+	for _, dm := range dispatched {
+		if dm.msg != humanBody {
+			t.Errorf("agent %s received body =\n%s\nwant original @<email> body:\n%s", dm.agentSlug, dm.msg, humanBody)
+		}
+	}
+
+	// 2. Agent outbound message to the conversation.
+	agentBody := "Done @alice.smith@test.com and **@hub.peer@test.com**; unknown @unknown@example.com, " +
+		"prose user@example.com, code `@hub.peer@test.com`."
+	rr := postOutboundConvRef(t, srv, proj.ID, primary.ID, agentBody, "conv:"+convID)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("agent outbound: %d %s", rr.Code, rr.Body.String())
+	}
+	var outResp struct {
+		MessageID string `json:"message_id"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &outResp); err != nil {
+		t.Fatal(err)
+	}
+	storedAgent, err := s.GetMessage(ctx, outResp.MessageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantAgentDisplay := "Done @alice-smith and **@hub-peer**; unknown @unknown@example.com, " +
+		"prose user@example.com, code `@hub.peer@test.com`."
+	if storedAgent.Msg != wantAgentDisplay {
+		t.Errorf("stored agent msg =\n%s\nwant:\n%s", storedAgent.Msg, wantAgentDisplay)
+	}
+}
