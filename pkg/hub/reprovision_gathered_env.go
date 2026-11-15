@@ -28,9 +28,9 @@ import (
 // restarts with such values (for example the Vertex AI project and location)
 // because the broker restores the auth secrets a prior start staged for that
 // harness-config. On a reincarnation — whether a harness switch, an in-place
-// reprovision whose prior record was overwritten or uses rotated hub values, or
-// a cross-broker move whose target broker has no prior record — the start leg
-// needs the current as_needed values the gather just resolved.
+// reincarnation (the broker's record may be overwritten, or the hub values
+// rotated), or a cross-broker move whose target broker has no prior record —
+// the start leg needs the current as_needed values the gather just resolved.
 //
 // With a holder, the start admits the as_needed env vars and environment
 // secrets stored under those names, through the same per-item delivery

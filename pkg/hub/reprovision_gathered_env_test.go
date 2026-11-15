@@ -91,6 +91,20 @@ func reincarnateStart(t *testing.T, m *ldFixture, homeReset bool) {
 	require.True(t, m.client.startCalled)
 }
 
+// reincarnateMoveStart runs a cross-broker move provision and its start the way
+// the reincarnate worker does, carrying a reprovisionGatheredEnv holder.
+func reincarnateMoveStart(t *testing.T, m *ldFixture) {
+	t.Helper()
+	m.broker.Capabilities = &store.BrokerCapabilities{AgentMove: true}
+	require.NoError(t, m.store.UpdateRuntimeBroker(context.Background(), m.broker))
+	m.agent.AppliedConfig.HarnessConfig = "claude"
+	m.client.createWithGatherFunc = vertexGatherFunc()
+	ctx := withReprovisionGatheredEnv(context.Background())
+	require.NoError(t, m.d.DispatchAgentProvisionForMove(ctx, m.agent, "agent-dir", ""))
+	require.NoError(t, m.d.DispatchAgentStart(ctx, m.agent, "task", false))
+	require.True(t, m.client.startCalled)
+}
+
 // TestReincarnateHomeResetStartCarriesReprovisionGatheredEnv is the
 // ptone/scion#7757 regression test: after a harness switch, the start that
 // follows the home-reset reprovision must carry the as_needed env the
@@ -154,17 +168,10 @@ func TestPlainReincarnateStartCarriesReprovisionGatheredEnv(t *testing.T) {
 func TestReincarnateMoveStartCarriesProvisionGatheredEnv(t *testing.T) {
 	t.Run("move provision carries gathered env to start", func(t *testing.T) {
 		m := newLDFixture(t, "move-gathered", ldOptions{})
-		m.broker.Capabilities = &store.BrokerCapabilities{AgentMove: true}
-		require.NoError(t, m.store.UpdateRuntimeBroker(context.Background(), m.broker))
 		m.asNeededEnv(t, "GOOGLE_CLOUD_PROJECT", "vertex-project-value", store.ScopeProject)
 		m.asNeededSecret(t, "GOOGLE_CLOUD_LOCATION", "vertex-location-value", store.ScopeProject)
 
-		m.agent.AppliedConfig.HarnessConfig = "claude"
-		m.client.createWithGatherFunc = vertexGatherFunc()
-		ctx := withReprovisionGatheredEnv(context.Background())
-		require.NoError(t, m.d.DispatchAgentProvisionForMove(ctx, m.agent, "agent-dir", ""))
-		require.NoError(t, m.d.DispatchAgentStart(ctx, m.agent, "task", false))
-		require.True(t, m.client.startCalled)
+		reincarnateMoveStart(t, m)
 
 		env := m.client.lastResolvedEnv
 		assert.Equal(t, "vertex-project-value", env["GOOGLE_CLOUD_PROJECT"])
@@ -216,7 +223,7 @@ func (s *ldHiddenKeyStore) GetEnvVar(ctx context.Context, key, scope, scopeID st
 	return s.Store.GetEnvVar(ctx, key, scope, scopeID)
 }
 
-func assertReincarnateStartAuthorizesGatheredEnv(t *testing.T, prefix string, homeReset bool) {
+func assertReincarnateStartAuthorizesGatheredEnv(t *testing.T, prefix string, run func(t *testing.T, m *ldFixture)) {
 	t.Helper()
 	for _, tc := range []struct {
 		name  string
@@ -237,7 +244,7 @@ func assertReincarnateStartAuthorizesGatheredEnv(t *testing.T, prefix string, ho
 			// The delivery decision refuses the region item only.
 			hdWithStore(t, m.authz, &ldHiddenKeyStore{Store: m.store, hidden: "GOOGLE_CLOUD_REGION"})
 
-			reincarnateStart(t, m, homeReset)
+			run(t, m)
 
 			assert.Equal(t, "vertex-project-value", m.client.lastResolvedEnv["GOOGLE_CLOUD_PROJECT"], "the admitted item is delivered")
 			assert.NotContains(t, m.client.lastResolvedEnv, "GOOGLE_CLOUD_REGION", "the refused item is not delivered")
@@ -254,7 +261,9 @@ func assertReincarnateStartAuthorizesGatheredEnv(t *testing.T, prefix string, ho
 // to the switch's start, though the reprovision gather resolved it, while an
 // admitted one is. The same holds for an as_needed env var.
 func TestReincarnateHomeResetStartAuthorizesGatheredEnv(t *testing.T) {
-	assertReincarnateStartAuthorizesGatheredEnv(t, "switch-denied", true)
+	assertReincarnateStartAuthorizesGatheredEnv(t, "switch-denied", func(t *testing.T, m *ldFixture) {
+		reincarnateStart(t, m, true)
+	})
 }
 
 // TestPlainReincarnateStartAuthorizesGatheredEnv is the homeReset=false twin
@@ -262,7 +271,17 @@ func TestReincarnateHomeResetStartAuthorizesGatheredEnv(t *testing.T) {
 // as_needed secrets and env vars remain denied by deliverySelector on plain
 // reincarnate starts.
 func TestPlainReincarnateStartAuthorizesGatheredEnv(t *testing.T) {
-	assertReincarnateStartAuthorizesGatheredEnv(t, "plain-denied", false)
+	assertReincarnateStartAuthorizesGatheredEnv(t, "plain-denied", func(t *testing.T, m *ldFixture) {
+		reincarnateStart(t, m, false)
+	})
+}
+
+// TestReincarnateMoveStartAuthorizesGatheredEnv is the cross-broker move twin
+// of TestReincarnateHomeResetStartAuthorizesGatheredEnv: unauthorized
+// as_needed secrets and env vars remain denied by deliverySelector when
+// DispatchAgentProvisionForMove precedes DispatchAgentStart.
+func TestReincarnateMoveStartAuthorizesGatheredEnv(t *testing.T) {
+	assertReincarnateStartAuthorizesGatheredEnv(t, "move-denied", reincarnateMoveStart)
 }
 
 // TestReprovisionGatheredEnvNames pins the holder: it keeps names only,
