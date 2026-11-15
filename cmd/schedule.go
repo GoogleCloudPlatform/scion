@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -31,6 +32,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const (
+	defaultExecTimeoutSeconds = 60
+	maxExecTimeoutSeconds     = 3600
+	maxExecArgc               = 64
+	maxExecArgBytes           = 4096
+	maxExecTotalBytes         = 16384
+)
+
 // Schedule command flags
 var (
 	scheduleType      string
@@ -41,6 +50,7 @@ var (
 	scheduleMessage   string
 	scheduleInterrupt bool
 	scheduleWake      bool
+	scheduleTimeout   string
 	scheduleName      string
 	scheduleCron      string
 	scheduleTimeZone  string
@@ -82,16 +92,29 @@ var scheduleCancelCmd = &cobra.Command{
 var scheduleCreateCmd = &cobra.Command{
 	Use:   "create",
 	Short: "Create a one-shot scheduled event",
-	Long:  `Create a one-shot scheduled event. Requires timing (--in or --at), --agent, and --message.`,
-	Args:  scheduleCreateArgs,
-	RunE:  runScheduleCreate,
+	Long: `Create a one-shot scheduled event. Requires timing (--in or --at) and --agent.
+
+For message events (default --type message), pass --message (and optionally --interrupt or --wake).
+For exec events (--type exec), pass the command argv after '--' (and optionally --timeout, default 60s, max 60m).
+
+Examples:
+  # Send a message in 15 minutes
+  scion schedule create --agent lead --in 15m --message "Recheck CI status"
+
+  # Run a command directly in an agent container in 10 minutes
+  scion schedule create --type exec --agent worker --in 10m --timeout 60s -- /usr/local/bin/check-queue`,
+	Args: scheduleCreateArgs,
+	RunE: runScheduleCreate,
 }
 
 // scheduleCreateRecurringCmd creates a new recurring schedule.
 var scheduleCreateRecurringCmd = &cobra.Command{
 	Use:   "create-recurring",
 	Short: "Create a recurring schedule",
-	Long: `Create a recurring schedule with a cron expression. Requires --name, --cron, --agent, and --message.
+	Long: `Create a recurring schedule with a cron expression. Requires --name, --cron, and --agent.
+
+For message schedules (default --type message), pass --message (and optionally --interrupt or --wake).
+For exec schedules (--type exec), pass the command argv after '--' (and optionally --timeout, default 60s, max 60m).
 
 The cron expression is evaluated in the zone given by --time-zone, an IANA
 name such as America/Los_Angeles; without it the expression is evaluated in
@@ -106,7 +129,10 @@ Examples:
   scion schedule create-recurring --name standup --cron "0 14 * * 1-5" --agent lead --message "standup"
 
   # 07:00 Pacific time every day, across daylight saving changes
-  scion schedule create-recurring --name digest --cron "0 7 * * *" --time-zone America/Los_Angeles --agent lead --message "digest"`,
+  scion schedule create-recurring --name digest --cron "0 7 * * *" --time-zone America/Los_Angeles --agent lead --message "digest"
+
+  # Run an exec probe every hour without starting an LLM turn
+  scion schedule create-recurring --type exec --name hourly-probe --cron "0 * * * *" --agent worker --timeout 60s -- /usr/local/bin/probe`,
 	RunE: runScheduleCreateRecurring,
 }
 
@@ -436,7 +462,7 @@ func scheduleGetViaHub(ctx context.Context, hubCtx *HubContext, projectID, resou
 		if isJSONOutput() {
 			return outputJSON(sched)
 		}
-		printScheduleDetail(sched)
+		printScheduleDetailWithExec(sched, fetchLatestScheduleExecSummary(ctx, hubCtx, projectID, sched))
 		return nil
 	}
 
@@ -456,7 +482,7 @@ func scheduleGetViaHub(ctx context.Context, hubCtx *HubContext, projectID, resou
 		if isJSONOutput() {
 			return outputJSON(sched)
 		}
-		printScheduleDetail(sched)
+		printScheduleDetailWithExec(sched, fetchLatestScheduleExecSummary(ctx, hubCtx, projectID, sched))
 		return nil
 	}
 
@@ -467,6 +493,19 @@ func scheduleGetViaHub(ctx context.Context, hubCtx *HubContext, projectID, resou
 		return wrapScheduleHubError(hubCtx, fmt.Errorf("failed to get recurring schedule: %w", schedErr))
 	}
 	return wrapScheduleHubError(hubCtx, fmt.Errorf("failed to get scheduled event or recurring schedule: %w", evtErr))
+}
+
+func fetchLatestScheduleExecSummary(ctx context.Context, hubCtx *HubContext, projectID string, sched *hubclient.Schedule) *hubclient.ExecSummary {
+	if sched == nil || sched.EventType != "exec" || sched.LastRunAt == nil || hubCtx == nil || hubCtx.Client == nil {
+		return nil
+	}
+	hist, err := hubCtx.Client.Schedules(projectID).History(ctx, sched.ID, &hubclient.ListScheduledEventsOptions{
+		Page: apiclient.PageOptions{Limit: 1},
+	})
+	if err != nil || hist == nil || len(hist.Events) == 0 {
+		return nil
+	}
+	return hist.Events[0].ExecSummary
 }
 
 func printEventDetail(evt *hubclient.ScheduledEvent) {
@@ -490,9 +529,29 @@ func printEventDetail(evt *hubclient.ScheduledEvent) {
 	}
 
 	printSchedulePayloadDetail(evt.EventType, evt.Payload)
+	if evt.ExecSummary != nil {
+		printEventExecSummary(evt.ExecSummary)
+	}
+}
+
+func printEventExecSummary(s *hubclient.ExecSummary) {
+	fmt.Printf("  Outcome:    %s\n", s.Outcome)
+	if s.ExitCode != nil {
+		fmt.Printf("  Exit Code:  %d\n", *s.ExitCode)
+	}
+	if s.DurationMS != nil {
+		fmt.Printf("  Duration:   %s\n", formatExecDurationMS(*s.DurationMS))
+	}
+	if s.OutputBytes != nil {
+		fmt.Printf("  Output:     %d B\n", *s.OutputBytes)
+	}
 }
 
 func printScheduleDetail(sched *hubclient.Schedule) {
+	printScheduleDetailWithExec(sched, nil)
+}
+
+func printScheduleDetailWithExec(sched *hubclient.Schedule, lastExec *hubclient.ExecSummary) {
 	fmt.Printf("Recurring Schedule: %s\n", sched.ID)
 	fmt.Printf("  Name:       %s\n", sched.Name)
 	fmt.Printf("  Status:     %s\n", sched.Status)
@@ -525,11 +584,72 @@ func printScheduleDetail(sched *hubclient.Schedule) {
 	if sched.LastRunError != "" {
 		fmt.Printf("  Last Error: %s\n", sched.LastRunError)
 	}
+	if lastExec != nil {
+		fmt.Printf("  Last Outcome: %s\n", lastExec.Outcome)
+		if lastExec.ExitCode != nil {
+			fmt.Printf("  Last Exit Code: %d\n", *lastExec.ExitCode)
+		}
+	}
 
 	printSchedulePayloadDetail(sched.EventType, sched.Payload)
 }
 
+type execPayloadView struct {
+	AgentID         string   `json:"agentId"`
+	AgentName       string   `json:"agentName"`
+	Command         []string `json:"command"`
+	TimeoutSeconds  int      `json:"timeoutSeconds"`
+	CommandRedacted bool     `json:"commandRedacted"`
+	Argc            int      `json:"argc"`
+	CommandSHA256   string   `json:"commandSha256"`
+}
+
+func formatExecArgv(argv []string) string {
+	quoted := make([]string, len(argv))
+	for i, a := range argv {
+		quoted[i] = strconv.Quote(a)
+	}
+	return "[" + strings.Join(quoted, ", ") + "]"
+}
+
+func formatExecDurationMS(ms int64) string {
+	if ms < 1000 {
+		return fmt.Sprintf("%dms", ms)
+	}
+	return (time.Duration(ms) * time.Millisecond).String()
+}
+
 func printSchedulePayloadDetail(eventType, rawPayload string) {
+	if eventType == "exec" {
+		var p execPayloadView
+		if rawPayload != "" {
+			_ = json.Unmarshal([]byte(rawPayload), &p)
+		}
+		if p.AgentName != "" {
+			fmt.Printf("  Agent:      %s\n", p.AgentName)
+		} else if p.AgentID != "" {
+			fmt.Printf("  Agent:      %s\n", p.AgentID)
+		}
+		if p.CommandRedacted {
+			if p.CommandSHA256 != "" {
+				fmt.Printf("  Command:    <redacted, %d args, sha256:%s>\n", p.Argc, p.CommandSHA256)
+			} else {
+				fmt.Printf("  Command:    <redacted>\n")
+			}
+		} else if len(p.Command) > 0 {
+			fmt.Printf("  Command:    %s\n", formatExecArgv(p.Command))
+		}
+		isCorruptRedacted := p.CommandRedacted && p.CommandSHA256 == "" && p.AgentID == "" && p.AgentName == "" && p.TimeoutSeconds == 0
+		if !isCorruptRedacted && rawPayload != "" {
+			timeoutSec := p.TimeoutSeconds
+			if timeoutSec <= 0 {
+				timeoutSec = defaultExecTimeoutSeconds
+			}
+			fmt.Printf("  Timeout:    %ds\n", timeoutSec)
+		}
+		return
+	}
+
 	var payload map[string]interface{}
 	if rawPayload != "" {
 		_ = json.Unmarshal([]byte(rawPayload), &payload)
@@ -583,11 +703,111 @@ func runScheduleCancel(cmd *cobra.Command, args []string) error {
 	})
 }
 
+func parseExecTimeoutSeconds(raw string) (int, error) {
+	if raw == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("invalid --timeout %q: must be a duration such as 60s or 5m", raw)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("--timeout must be positive (between 1s and %ds)", maxExecTimeoutSeconds)
+	}
+	if d%time.Second != 0 {
+		return 0, fmt.Errorf("--timeout must be whole seconds (got %s)", raw)
+	}
+	secs := int(d / time.Second)
+	if secs < 1 || secs > maxExecTimeoutSeconds {
+		return 0, fmt.Errorf("--timeout must be between 1s and %ds (60m)", maxExecTimeoutSeconds)
+	}
+	return secs, nil
+}
+
+func extractExecCommandArgs(cmd *cobra.Command, args []string) ([]string, error) {
+	if cmd != nil {
+		dash := cmd.ArgsLenAtDash()
+		if dash < 0 {
+			if len(args) > 0 {
+				return nil, fmt.Errorf("exec command must follow '--' (e.g. -- %s)", args[0])
+			}
+			return nil, fmt.Errorf("command is required after '--' for exec")
+		}
+		if dash > 0 {
+			return nil, fmt.Errorf("unexpected arguments before '--': %v", args[:dash])
+		}
+		args = args[dash:]
+	}
+	if len(args) == 0 {
+		return nil, fmt.Errorf("command is required after '--' for exec")
+	}
+	if len(args) > maxExecArgc {
+		return nil, fmt.Errorf("exec command exceeds maximum of %d arguments", maxExecArgc)
+	}
+	if args[0] == "" {
+		return nil, fmt.Errorf("exec command argv[0] must not be empty")
+	}
+	total := 0
+	for i, arg := range args {
+		if strings.IndexByte(arg, 0) >= 0 {
+			return nil, fmt.Errorf("exec command argument %d contains a NUL byte", i)
+		}
+		if len(arg) > maxExecArgBytes {
+			return nil, fmt.Errorf("exec command argument %d exceeds %d bytes", i, maxExecArgBytes)
+		}
+		total += len(arg)
+	}
+	if total > maxExecTotalBytes {
+		return nil, fmt.Errorf("exec command exceeds total limit of %d bytes", maxExecTotalBytes)
+	}
+	return args, nil
+}
+
+func validateScheduleTypeFlags(cmd *cobra.Command, args []string, resourcePlural string) error {
+	switch scheduleType {
+	case "message":
+		if scheduleAgent == "" {
+			return fmt.Errorf("--agent is required for message %s", resourcePlural)
+		}
+		if scheduleMessage == "" {
+			return fmt.Errorf("--message is required for message %s", resourcePlural)
+		}
+		if scheduleTimeout != "" {
+			return fmt.Errorf("--timeout is only valid with --type exec")
+		}
+		if cmd != nil && cmd.ArgsLenAtDash() >= 0 {
+			return fmt.Errorf("command arguments after '--' are only valid with --type exec")
+		}
+	case "exec":
+		if scheduleAgent == "" {
+			return fmt.Errorf("--agent is required for exec %s", resourcePlural)
+		}
+		if scheduleMessage != "" {
+			return fmt.Errorf("--message cannot be used with --type exec (pass command after '--')")
+		}
+		if scheduleInterrupt {
+			return fmt.Errorf("--interrupt cannot be used with --type exec")
+		}
+		if scheduleWake {
+			return fmt.Errorf("--wake is not supported with --type exec")
+		}
+		if _, err := parseExecTimeoutSeconds(scheduleTimeout); err != nil {
+			return err
+		}
+		if _, err := extractExecCommandArgs(cmd, args); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unsupported event type: %q (supported: message, exec)", scheduleType)
+	}
+	return nil
+}
+
 // scheduleCreateArgs validates schedule create's flags (timing and the
 // type-specific flags). It is the command's Args validator, so it runs
 // before root's PersistentPreRunE and its errors keep the usage block
-// (ptone/scion#2859). Positional args are not checked, as before.
-func scheduleCreateArgs(_ *cobra.Command, _ []string) error {
+// (ptone/scion#2859).
+func scheduleCreateArgs(cmd *cobra.Command, args []string) error {
 	if scheduleIn == "" && scheduleAt == "" {
 		return fmt.Errorf("either --in or --at is required")
 	}
@@ -595,19 +815,7 @@ func scheduleCreateArgs(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("--in and --at are mutually exclusive")
 	}
 
-	// Validate type-specific flags
-	switch scheduleType {
-	case "message":
-		if scheduleAgent == "" {
-			return fmt.Errorf("--agent is required for message events")
-		}
-		if scheduleMessage == "" {
-			return fmt.Errorf("--message is required for message events")
-		}
-	default:
-		return fmt.Errorf("unsupported event type: %q (supported: message)", scheduleType)
-	}
-	return nil
+	return validateScheduleTypeFlags(cmd, args, "events")
 }
 
 func runScheduleCreate(cmd *cobra.Command, args []string) error {
@@ -617,7 +825,14 @@ func runScheduleCreate(cmd *cobra.Command, args []string) error {
 	}
 	defer cancel()
 
-	req := buildCreateEventRequest()
+	return scheduleCreateViaHub(ctx, hubCtx, projectID, cmd, args)
+}
+
+func scheduleCreateViaHub(ctx context.Context, hubCtx *HubContext, projectID string, cmd *cobra.Command, args []string) error {
+	req, err := buildCreateEventRequestForCmd(cmd, args)
+	if err != nil {
+		return err
+	}
 	evt, err := hubCtx.Client.ScheduledEvents(projectID).Create(ctx, req)
 	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to create scheduled event: %w", err))
@@ -634,24 +849,22 @@ func runScheduleCreate(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func runScheduleCreateRecurring(cmd *cobra.Command, args []string) error {
+func validateScheduleCreateRecurring(cmd *cobra.Command, args []string) error {
 	if scheduleName == "" {
 		return newUsageError("--name is required")
 	}
 	if scheduleCron == "" {
 		return newUsageError("--cron is required")
 	}
-	// Validate type-specific flags
-	switch scheduleType {
-	case "message":
-		if scheduleAgent == "" {
-			return newUsageError("--agent is required for message schedules")
-		}
-		if scheduleMessage == "" {
-			return newUsageError("--message is required for message schedules")
-		}
-	default:
-		return newUsageError("unsupported event type: %q (supported: message)", scheduleType)
+	if err := validateScheduleTypeFlags(cmd, args, "schedules"); err != nil {
+		return newUsageError("%s", err.Error())
+	}
+	return nil
+}
+
+func runScheduleCreateRecurring(cmd *cobra.Command, args []string) error {
+	if err := validateScheduleCreateRecurring(cmd, args); err != nil {
+		return err
 	}
 
 	hubCtx, projectID, ctx, cancel, err := scheduleHubContext()
@@ -660,7 +873,14 @@ func runScheduleCreateRecurring(cmd *cobra.Command, args []string) error {
 	}
 	defer cancel()
 
-	req := buildCreateRecurringRequest()
+	return scheduleCreateRecurringViaHub(ctx, hubCtx, projectID, cmd, args)
+}
+
+func scheduleCreateRecurringViaHub(ctx context.Context, hubCtx *HubContext, projectID string, cmd *cobra.Command, args []string) error {
+	req, err := buildCreateRecurringRequestForCmd(cmd, args)
+	if err != nil {
+		return err
+	}
 	sched, err := hubCtx.Client.Schedules(projectID).Create(ctx, req)
 	if err != nil {
 		return wrapScheduleHubError(hubCtx, fmt.Errorf("failed to create recurring schedule: %w", err))
@@ -699,6 +919,32 @@ func buildCreateEventRequest() *hubclient.CreateScheduledEventRequest {
 	return req
 }
 
+func buildCreateEventRequestForCmd(cmd *cobra.Command, args []string) (*hubclient.CreateScheduledEventRequest, error) {
+	if scheduleType != "exec" {
+		return buildCreateEventRequest(), nil
+	}
+	argv, err := extractExecCommandArgs(cmd, args)
+	if err != nil {
+		return nil, err
+	}
+	timeoutSecs, err := parseExecTimeoutSeconds(scheduleTimeout)
+	if err != nil {
+		return nil, err
+	}
+	req := &hubclient.CreateScheduledEventRequest{
+		EventType:      scheduleType,
+		AgentName:      scheduleAgent,
+		Command:        argv,
+		TimeoutSeconds: timeoutSecs,
+	}
+	if scheduleIn != "" {
+		req.FireIn = scheduleIn
+	} else {
+		req.FireAt = scheduleAt
+	}
+	return req, nil
+}
+
 // buildCreateRecurringRequest builds the create request from the
 // create-recurring flags.
 func buildCreateRecurringRequest() *hubclient.CreateScheduleRequest {
@@ -712,6 +958,29 @@ func buildCreateRecurringRequest() *hubclient.CreateScheduleRequest {
 		Interrupt: scheduleInterrupt,
 		Wake:      scheduleWake,
 	}
+}
+
+func buildCreateRecurringRequestForCmd(cmd *cobra.Command, args []string) (*hubclient.CreateScheduleRequest, error) {
+	if scheduleType != "exec" {
+		return buildCreateRecurringRequest(), nil
+	}
+	argv, err := extractExecCommandArgs(cmd, args)
+	if err != nil {
+		return nil, err
+	}
+	timeoutSecs, err := parseExecTimeoutSeconds(scheduleTimeout)
+	if err != nil {
+		return nil, err
+	}
+	return &hubclient.CreateScheduleRequest{
+		Name:           scheduleName,
+		CronExpr:       scheduleCron,
+		TimeZone:       scheduleTimeZone,
+		EventType:      scheduleType,
+		AgentName:      scheduleAgent,
+		Command:        argv,
+		TimeoutSeconds: timeoutSecs,
+	}, nil
 }
 
 // scheduleZoneLabel returns the zone a schedule's cron expression is
@@ -817,19 +1086,21 @@ func runScheduleDelete(cmd *cobra.Command, args []string) error {
 }
 
 func runScheduleHistory(cmd *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		// No schedule ID - list all events (already done via 'schedule list --type events')
+		return newUsageError("schedule ID is required for history (usage: scion schedule history <id>)")
+	}
+
 	hubCtx, projectID, ctx, cancel, err := scheduleHubContext()
 	if err != nil {
 		return err
 	}
 	defer cancel()
 
-	if len(args) == 0 {
-		// No schedule ID - list all events (already done via 'schedule list --type events')
-		return newUsageError("schedule ID is required for history (usage: scion schedule history <id>)")
-	}
+	return scheduleHistoryViaHub(ctx, hubCtx, projectID, args[0])
+}
 
-	scheduleID := args[0]
-
+func scheduleHistoryViaHub(ctx context.Context, hubCtx *HubContext, projectID, scheduleID string) error {
 	// Resolve potentially truncated ID to full UUID (history only targets schedules)
 	fullID, _, resolveErr := resolveScheduleID(ctx, hubCtx, projectID, scheduleID, "schedule")
 	if resolveErr != nil {
@@ -845,15 +1116,31 @@ func runScheduleHistory(cmd *cobra.Command, args []string) error {
 		return outputJSON(resp)
 	}
 
-	events := resp.Events
+	printScheduleHistory(resp.Events)
+	return nil
+}
+
+func printScheduleHistory(events []hubclient.ScheduledEvent) {
 	if len(events) == 0 {
 		fmt.Println("No execution history found.")
-		return nil
+		return
+	}
+
+	hasExec := false
+	for _, evt := range events {
+		if evt.EventType == "exec" || evt.ExecSummary != nil {
+			hasExec = true
+			break
+		}
 	}
 
 	fmt.Printf("EXECUTION HISTORY (%d events)\n", len(events))
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(w, "ID\tSTATUS\tFIRED AT\tERROR")
+	if hasExec {
+		_, _ = fmt.Fprintln(w, "ID\tSTATUS\tOUTCOME\tEXIT\tDURATION\tOUTPUT\tFIRED AT\tERROR")
+	} else {
+		_, _ = fmt.Fprintln(w, "ID\tSTATUS\tFIRED AT\tERROR")
+	}
 	for _, evt := range events {
 		id := evt.ID
 		if len(id) > 8 {
@@ -870,11 +1157,28 @@ func runScheduleHistory(cmd *cobra.Command, args []string) error {
 				errStr = errStr[:60] + "..."
 			}
 		}
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", id, evt.Status, firedAt, errStr)
+		if hasExec {
+			outcome, exitStr, durStr, outStr := "-", "-", "-", "-"
+			if evt.ExecSummary != nil {
+				if evt.ExecSummary.Outcome != "" {
+					outcome = evt.ExecSummary.Outcome
+				}
+				if evt.ExecSummary.ExitCode != nil {
+					exitStr = strconv.Itoa(*evt.ExecSummary.ExitCode)
+				}
+				if evt.ExecSummary.DurationMS != nil {
+					durStr = formatExecDurationMS(*evt.ExecSummary.DurationMS)
+				}
+				if evt.ExecSummary.OutputBytes != nil {
+					outStr = fmt.Sprintf("%d B", *evt.ExecSummary.OutputBytes)
+				}
+			}
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", id, evt.Status, outcome, exitStr, durStr, outStr, firedAt, errStr)
+		} else {
+			_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", id, evt.Status, firedAt, errStr)
+		}
 	}
 	_ = w.Flush()
-
-	return nil
 }
 
 func init() {
@@ -891,28 +1195,38 @@ func init() {
 	scheduleCmd.AddCommand(scheduleHistoryCmd)
 
 	// List flags
-	scheduleListCmd.Flags().StringVar(&scheduleStatus, "status", "", "Filter by status (pending, firing, fired, cancelled, expired, failed, active, paused)")
-	scheduleListCmd.Flags().StringVar(&scheduleType, "type", "", "Filter by event type (e.g. message)")
+	scheduleListCmd.Flags().StringVar(&scheduleStatus, "status", "", "Filter by status (pending, firing, fired, skipped, cancelled, expired, failed, active, paused)")
+	scheduleListCmd.Flags().StringVar(&scheduleType, "type", "", "Filter by event type (message, dispatch_agent, exec)")
 	scheduleListCmd.Flags().StringVar(&scheduleListType, "show", "", "Filter by resource type: events, recurring, or all (default: all)")
 
 	// Create one-shot flags
-	scheduleCreateCmd.Flags().StringVar(&scheduleType, "type", "message", "Event type")
-	scheduleCreateCmd.Flags().StringVar(&scheduleIn, "in", "", "Schedule after a duration (e.g. 30m, 1h)")
-	scheduleCreateCmd.Flags().StringVar(&scheduleAt, "at", "", "Schedule at an absolute time (ISO 8601)")
-	scheduleCreateCmd.Flags().StringVar(&scheduleAgent, "agent", "", "Target agent name")
-	scheduleCreateCmd.Flags().StringVar(&scheduleMessage, "message", "", "Message body")
-	scheduleCreateCmd.Flags().BoolVar(&scheduleInterrupt, "interrupt", false, "Interrupt the agent")
-	scheduleCreateCmd.Flags().BoolVar(&scheduleWake, "wake", false, "Message events only: resume the target agent if it is suspended when the message fires (requires permission to start it)")
+	registerScheduleCreateFlags(scheduleCreateCmd)
 
 	// Create recurring flags
-	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleName, "name", "", "Schedule name (required)")
-	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleCron, "cron", "", "Cron expression, evaluated in --time-zone (required, 5-field: minute hour day month weekday)")
-	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleTimeZone, "time-zone", "", "IANA time zone the cron expression is evaluated in, e.g. America/Los_Angeles (default UTC)")
-	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleType, "type", "message", "Event type")
-	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleAgent, "agent", "", "Target agent name")
-	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleMessage, "message", "", "Message body")
-	scheduleCreateRecurringCmd.Flags().BoolVar(&scheduleInterrupt, "interrupt", false, "Interrupt the agent")
-	scheduleCreateRecurringCmd.Flags().BoolVar(&scheduleWake, "wake", false, "Message events only: resume the target agent if it is suspended when the message fires (requires permission to start it)")
+	registerScheduleCreateRecurringFlags(scheduleCreateRecurringCmd)
+}
+
+func registerScheduleCreateFlags(c *cobra.Command) {
+	c.Flags().StringVar(&scheduleType, "type", "message", "Event type (message or exec)")
+	c.Flags().StringVar(&scheduleIn, "in", "", "Schedule after a duration (e.g. 30m, 1h)")
+	c.Flags().StringVar(&scheduleAt, "at", "", "Schedule at an absolute time (ISO 8601)")
+	c.Flags().StringVar(&scheduleAgent, "agent", "", "Target agent name")
+	c.Flags().StringVar(&scheduleMessage, "message", "", "Message body (message events)")
+	c.Flags().BoolVar(&scheduleInterrupt, "interrupt", false, "Message events only: interrupt the agent")
+	c.Flags().BoolVar(&scheduleWake, "wake", false, "Message events only: resume the target agent if it is suspended when the message fires (requires permission to start it)")
+	c.Flags().StringVar(&scheduleTimeout, "timeout", "", "Exec events only: command timeout as a whole-second duration from 1s to 60m (default 60s)")
+}
+
+func registerScheduleCreateRecurringFlags(c *cobra.Command) {
+	c.Flags().StringVar(&scheduleName, "name", "", "Schedule name (required)")
+	c.Flags().StringVar(&scheduleCron, "cron", "", "Cron expression, evaluated in --time-zone (required, 5-field: minute hour day month weekday)")
+	c.Flags().StringVar(&scheduleTimeZone, "time-zone", "", "IANA time zone the cron expression is evaluated in, e.g. America/Los_Angeles (default UTC)")
+	c.Flags().StringVar(&scheduleType, "type", "message", "Event type (message or exec)")
+	c.Flags().StringVar(&scheduleAgent, "agent", "", "Target agent name")
+	c.Flags().StringVar(&scheduleMessage, "message", "", "Message body (message schedules)")
+	c.Flags().BoolVar(&scheduleInterrupt, "interrupt", false, "Message schedules only: interrupt the agent")
+	c.Flags().BoolVar(&scheduleWake, "wake", false, "Message schedules only: resume the target agent if it is suspended when the message fires (requires permission to start it)")
+	c.Flags().StringVar(&scheduleTimeout, "timeout", "", "Exec schedules only: command timeout as a whole-second duration from 1s to 60m (default 60s)")
 }
 
 // scheduleWhen renders a scheduled time relative to now. A pending time that
