@@ -318,8 +318,11 @@ func TestStatusUpdateIsEmpty_EveryFieldCounts(t *testing.T) {
 	// ReportSource, ReportRunID, Restore and Result (ptone/scion#4853), and
 	// ReportAgentToken (the restart window), likewise only
 	// condition or report on the write.
+	// SuspendReason (ptone/scion#7826) qualifies a Phase write and writes
+	// nothing on its own.
 	statusUpdatePreconditionFields := map[string]bool{"IfPhase": true, "IfRunID": true, "StartWrite": true, "GuardReincarnation": true,
-		"ReportSource": true, "ReportRunID": true, "ReportAgentToken": true, "Restore": true, "Result": true}
+		"ReportSource": true, "ReportRunID": true, "ReportAgentToken": true, "Restore": true, "Result": true,
+		"SuspendReason": true}
 
 	typ := reflect.TypeOf(store.AgentStatusUpdate{})
 	for i := 0; i < typ.NumField(); i++ {
