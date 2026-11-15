@@ -16,7 +16,9 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -29,6 +31,13 @@ import (
 // persistScheduledMessageEvent. External/client/agent/broker callers are never
 // allowed to set it (REQ-1 defense-in-depth alongside ScheduledEventID).
 const reservedSchedulerChannel = "scheduler"
+
+// holdFailReasonPrepareFailed is the fixed failure reason recorded when
+// PrepareOrHoldMessage fails before broker dispatch (ptone/scion#7881,
+// A2-S8, RV3-N2), preventing store error strings from reaching senders.
+const holdFailReasonPrepareFailed = "message hold check failed"
+
+var errHoldPrepareFailed = errors.New(holdFailReasonPrepareFailed)
 
 func isReservedSchedulerChannel(ch string) bool {
 	return strings.EqualFold(strings.TrimSpace(ch), reservedSchedulerChannel)
@@ -67,7 +76,9 @@ func (s *Server) holdOrDispatch(
 	res, err := s.store.PrepareOrHoldMessage(finCtx, agent.ID, messageID, s.heldMessagesCap())
 	finCancel()
 	if err != nil {
-		return false, fmt.Errorf("prepare or hold message: %w", err)
+		slog.Error("message-hold: prepare or hold message failed",
+			"agent_id", agent.ID, "message_id", messageID, "error", err)
+		return false, errHoldPrepareFailed
 	}
 	if storeMsg != nil {
 		storeMsg.HoldLaunchID = res.HoldLaunchID

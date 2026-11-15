@@ -2596,3 +2596,192 @@ func TestHoldA2_Round2_O1_SlowPassRenewsLeaseBlockingReplicaB(t *testing.T) {
 	assert.Equal(t, expected[:64], deliveries[0].MessageIDs)
 	assert.Equal(t, expected[64:], deliveries[1].MessageIDs)
 }
+
+type rv3CountingHoldStore struct {
+	store.Store
+	claims          atomic.Int64
+	acquires        atomic.Int64
+	failAgentExpiry atomic.Bool
+}
+
+func (s *rv3CountingHoldStore) ClaimHeldMessages(ctx context.Context, agentID string, limit int) ([]store.Message, error) {
+	s.claims.Add(1)
+	return s.Store.ClaimHeldMessages(ctx, agentID, limit)
+}
+
+func (s *rv3CountingHoldStore) AcquireAgentRedriveLease(ctx context.Context, agentID, ownerID string, ttl time.Duration) (bool, error) {
+	s.acquires.Add(1)
+	return s.Store.AcquireAgentRedriveLease(ctx, agentID, ownerID, ttl)
+}
+
+func (s *rv3CountingHoldStore) ExpireHeldMessagesPastDeadlineForAgent(ctx context.Context, agentID, reason string) ([]store.Message, error) {
+	if s.failAgentExpiry.Load() {
+		return nil, errors.New("injected inline deadline expiry fault")
+	}
+	return s.Store.ExpireHeldMessagesPastDeadlineForAgent(ctx, agentID, reason)
+}
+
+func TestHoldA2_Round3_RV3R1_ExpiredUnsweptRowNoBusyLoop(t *testing.T) {
+	t.Run("connect_with_expired_unswept_row_expires_inline_without_loop", func(t *testing.T) {
+		f := newHoldE2EFixture(t)
+		ctx := context.Background()
+		m := f.seedHeldMessage(t, "agent:"+f.agent.Slug, f.agent.ID, "expired-unswept", time.Now().Add(300*time.Millisecond))
+		time.Sleep(600 * time.Millisecond)
+
+		cs, _ := installStoreFault(t, f.srv, func(inner store.Store, _ *storeFaultSwitch) *rv3CountingHoldStore {
+			return &rv3CountingHoldStore{Store: inner}
+		})
+		f.connectDeliverSession(t, f.public.URL, true, nil)
+		time.Sleep(1 * time.Second)
+
+		claims := cs.claims.Load()
+		acq := cs.acquires.Load()
+		assert.LessOrEqual(t, claims, int64(5), "RV3-R1: re-drive must not busy-loop on an expired unswept row")
+		assert.LessOrEqual(t, acq, int64(5), "RV3-R1: lease acquisitions must stay bounded")
+
+		// Inline past-deadline expiry transitions m to failed with fixed reason + sender notice immediately.
+		got := f.waitMessageState(t, m.ID, store.MessageDispatchFailed)
+		require.NotNil(t, got.DispatchFailureReason)
+		assert.Equal(t, holdFailReasonSessionTimeout, *got.DispatchFailureReason)
+		require.Len(t, f.disp.notices(), 1)
+		assert.Contains(t, f.disp.notices()[0], holdFailReasonSessionTimeout)
+
+		hasHold, err := f.store.HasAgentDeliveryHold(ctx, f.launched.ID)
+		require.NoError(t, err)
+		assert.False(t, hasHold, "marker must be deleted after inline expiry and lease release")
+
+		f.srv.sweepHeldMessages(ctx)
+		after := cs.claims.Load()
+		time.Sleep(300 * time.Millisecond)
+		assert.Equal(t, after, cs.claims.Load(), "no further claims once marker is removed")
+	})
+
+	t.Run("faulted_inline_expiry_still_does_not_busy_loop", func(t *testing.T) {
+		f := newHoldE2EFixture(t)
+		ctx := context.Background()
+		m := f.seedHeldMessage(t, "agent:"+f.agent.Slug, f.agent.ID, "expired-faulted", time.Now().Add(200*time.Millisecond))
+		time.Sleep(400 * time.Millisecond)
+
+		cs, _ := installStoreFault(t, f.srv, func(inner store.Store, _ *storeFaultSwitch) *rv3CountingHoldStore {
+			w := &rv3CountingHoldStore{Store: inner}
+			w.failAgentExpiry.Store(true)
+			return w
+		})
+		f.connectDeliverSession(t, f.public.URL, true, nil)
+		time.Sleep(600 * time.Millisecond)
+
+		// Even when inline expiry fails so the marker stays present, claimedAny==false
+		// prevents deferred release from self-rescheduling!
+		claims := cs.claims.Load()
+		assert.LessOrEqual(t, claims, int64(3), "RV3-R1 defense-in-depth: claimedAny guard must stop loop even if inline expiry faults")
+
+		f.srv.sweepHeldMessages(ctx)
+		f.waitMessageState(t, m.ID, store.MessageDispatchFailed)
+	})
+}
+
+func TestHoldA2_Round3_RV3O1_LaterHoldEpisodeExtendsMarkerOrdering(t *testing.T) {
+	f := newHoldE2EFixture(t)
+	ctx := context.Background()
+
+	// Episode 1: seed a held row whose hold_until expires in 500ms.
+	m1 := f.seedHeldMessage(t, "agent:"+f.agent.Slug, f.agent.ID, "rv3o1-ep1", time.Now().Add(500*time.Millisecond))
+
+	// Episode 2: hold a fresh message via /deliver no_session + /message-failures awaiting_session (HoldTTL = 10m)
+	// while Episode 1's marker already exists.
+	m2 := &store.Message{
+		ID:            uuid.NewString(),
+		ProjectID:     f.launched.ProjectID,
+		AgentID:       f.launched.ID,
+		Sender:        "agent:" + f.agent.Slug,
+		SenderID:      f.agent.ID,
+		Recipient:     "agent:" + f.launched.Slug,
+		RecipientID:   f.launched.ID,
+		Msg:           "rv3o1-ep2",
+		Type:          messages.TypeInstruction,
+		DispatchState: store.MessageDispatchDispatched,
+		HoldLaunchID:  f.launched.RunID,
+		CreatedAt:     time.Now().UTC(),
+	}
+	require.NoError(t, f.store.CreateMessage(ctx, m2))
+	_, err := f.store.BindMessageDelivery(ctx, f.launched.ID, "d-rv3o1", []string{m2.ID}, time.Now().Add(time.Minute))
+	require.NoError(t, err)
+	require.NoError(t, f.store.UnbindMessageDeliveryWithProof(ctx, "d-rv3o1", []string{m2.ID}, agentcontrol.ReasonNoSession))
+	held, err := f.store.HoldMessageAwaitingSession(ctx, store.HoldMessageParams{
+		MessageID:   m2.ID,
+		AgentID:     f.launched.ID,
+		MaxProofAge: 2 * time.Minute,
+		HoldTTL:     10 * time.Minute,
+		MaxHeld:     100,
+	})
+	require.NoError(t, err)
+	require.True(t, held)
+
+	// Wait until Episode 1's 500ms bound passes while Episode 2's 10m bound is still live.
+	time.Sleep(700 * time.Millisecond)
+
+	// Live send m3 must STILL queue behind m2 via holdOrDispatch without calling the broker!
+	fresh, err := f.store.GetAgent(ctx, f.launched.ID)
+	require.NoError(t, err)
+	res3, dmErr := f.srv.ExecuteAgentDM(ctx, &AgentDMInput{
+		SenderAgent:    f.agent,
+		SenderIdentity: &storedAgentIdentity{agent: f.agent},
+		TargetAgent:    fresh,
+		ProjectID:      fresh.ProjectID,
+		Msg:            "rv3o1-ep2-live-3",
+		Type:           messages.TypeInstruction,
+	})
+	require.Nil(t, dmErr)
+	assert.Equal(t, 0, f.disp.dispatchCount(f.launched.Slug), "RV3-O1: live send must still queue behind Episode 2 held row after Episode 1 bound passed")
+	got3 := f.waitMessageState(t, res3.MessageID, store.MessageDispatchAwaitingSession)
+	assert.Equal(t, store.MessageDispatchAwaitingSession, got3.DispatchState)
+
+	// Connect session: m2 and m3 deliver in order, and m1 fails on deadline expiry.
+	f.connectDeliverSession(t, f.public.URL, true, nil)
+	f.waitMessageState(t, m2.ID, store.MessageDispatchDelivered)
+	f.waitMessageState(t, res3.MessageID, store.MessageDispatchDelivered)
+	f.waitMessageState(t, m1.ID, store.MessageDispatchFailed)
+
+	var deliveredIDs []string
+	for _, d := range f.disp.deliveries() {
+		deliveredIDs = append(deliveredIDs, d.MessageIDs...)
+	}
+	assert.Equal(t, []string{m2.ID, res3.MessageID}, deliveredIDs)
+}
+
+type failPrepareHoldStore struct {
+	store.Store
+}
+
+func (s *failPrepareHoldStore) PrepareOrHoldMessage(_ context.Context, _, _ string, _ int) (store.PrepareOrHoldResult, error) {
+	return store.PrepareOrHoldResult{}, errors.New("raw sqlite internal constraint detail xyz")
+}
+
+func TestHoldA2_Round3_RV3N2_HoldOrDispatchErrorUsesFixedReason(t *testing.T) {
+	f := newHoldE2EFixture(t)
+	ctx := context.Background()
+
+	installStoreFault(t, f.srv, func(inner store.Store, _ *storeFaultSwitch) *failPrepareHoldStore {
+		return &failPrepareHoldStore{Store: inner}
+	})
+
+	fresh, err := f.store.GetAgent(ctx, f.launched.ID)
+	require.NoError(t, err)
+	_, dmErr := f.srv.ExecuteAgentDM(ctx, &AgentDMInput{
+		SenderAgent:    f.agent,
+		SenderIdentity: &storedAgentIdentity{agent: f.agent},
+		TargetAgent:    fresh,
+		ProjectID:      fresh.ProjectID,
+		Msg:            "rv3n2-prepare-fault",
+		Type:           messages.TypeInstruction,
+	})
+	require.NotNil(t, dmErr)
+
+	msgs, err := f.store.ListMessages(ctx, store.MessageFilter{RecipientID: f.launched.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, msgs.Items, 1)
+	require.Equal(t, store.MessageDispatchFailed, msgs.Items[0].DispatchState)
+	require.NotNil(t, msgs.Items[0].DispatchFailureReason)
+	assert.Equal(t, holdFailReasonPrepareFailed, *msgs.Items[0].DispatchFailureReason)
+	assert.NotContains(t, *msgs.Items[0].DispatchFailureReason, "raw sqlite internal constraint detail xyz")
+}

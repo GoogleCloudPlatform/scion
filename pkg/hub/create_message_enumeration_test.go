@@ -95,8 +95,8 @@ func TestCreateMessageEnumeration(t *testing.T) {
 
 		// persistScheduledMessageEvent (ptone/scion#7881, Q5=a): scheduler
 		// system messages are timer/cron-originated system fires with no
-		// two-party chat conversation; ThreadID records evt.ID for authority
-		// re-validation on re-drive.
+		// two-party chat conversation; ScheduledEventID records evt.ID for
+		// authority re-validation on re-drive.
 		"message_hold.go:persistScheduledMessageEvent": "Scheduled system messages are timer/cron-originated with no two-party conversation key",
 	}
 

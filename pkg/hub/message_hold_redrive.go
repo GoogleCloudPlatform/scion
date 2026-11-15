@@ -547,6 +547,36 @@ func (s *Server) expireHeldMessagesForAgent(ctx context.Context, agentID, fixedR
 	s.notifyExpiredHeldMessages(finCtx, expired, fixedReason)
 }
 
+// expirePastDeadlineHeldMessagesForAgent expires past-deadline awaiting_session
+// rows for agentID inline when a re-drive pass claims nothing (RV3-R1), sending
+// sender failure notices with the fixed session-timeout reason instead of
+// leaving stale markers until the 30s backstop sweep.
+func (s *Server) expirePastDeadlineHeldMessagesForAgent(ctx context.Context, agentID string) {
+	if s == nil || s.store == nil || agentID == "" {
+		return
+	}
+	finCtx, finCancel := finalizationContext(ctx)
+	defer finCancel()
+
+	expired, err := s.store.ExpireHeldMessagesPastDeadlineForAgent(finCtx, agentID, holdFailReasonSessionTimeout)
+	if err != nil {
+		slog.Error("message-hold: expire due held messages for agent failed",
+			"agent_id", agentID, "error", err)
+		return
+	}
+	if len(expired) == 0 {
+		return
+	}
+	if s.messageLog != nil {
+		s.messageLog.Warn("expired held messages past hold_until",
+			"agent_id", agentID,
+			"expired_count", len(expired),
+			"reason", holdFailReasonSessionTimeout,
+		)
+	}
+	s.notifyExpiredHeldMessages(finCtx, expired, holdFailReasonSessionTimeout)
+}
+
 func (s *Server) notifyExpiredHeldMessages(ctx context.Context, expired []store.Message, reason string) {
 	agentCache := make(map[string]*store.Agent)
 	for i := range expired {
@@ -672,6 +702,7 @@ func (s *Server) redriveAgentHeldMessagesOnce(parentCtx context.Context, agentID
 		lastLeaseRenew = time.Now()
 		return true
 	}
+	claimedAny := false
 	reheldOnTransient := false
 	defer func() {
 		relCtx, relCancel := finalizationContext(ctx)
@@ -681,7 +712,9 @@ func (s *Server) redriveAgentHeldMessagesOnce(parentCtx context.Context, agentID
 			slog.Error("message-hold: release redrive lease failed", "agent_id", agentID, "error", rerr)
 			return
 		}
-		if !reheldOnTransient && ctx.Err() == nil && s.conduitDeliverEnabled() {
+		// Reschedule only when this pass actually claimed progress (RV3-R1), so an
+		// unswept past-deadline marker can never self-schedule into a tight loop.
+		if claimedAny && !reheldOnTransient && ctx.Err() == nil && s.conduitDeliverEnabled() {
 			chkCtx, chkCancel := finalizationContext(ctx)
 			stillHeld, herr := s.store.HasAgentDeliveryHold(chkCtx, agentID)
 			chkCancel()
@@ -708,8 +741,10 @@ func (s *Server) redriveAgentHeldMessagesOnce(parentCtx context.Context, agentID
 			return
 		}
 		if len(claimed) == 0 {
+			s.expirePastDeadlineHeldMessagesForAgent(ctx, agentID)
 			return
 		}
+		claimedAny = true
 		if s.messageLog != nil {
 			s.messageLog.Info("claimed held messages for conduit re-drive",
 				"agent_id", agentID,
