@@ -91,21 +91,29 @@ const humanDecisionsMadeBody = `{
 }`
 
 // humanDecisionsHub is a mock hub for the human-mode list: it records every
-// project decisions query and answers with the configured body.
+// project and profile decisions query and answers with the configured body.
 type humanDecisionsHub struct {
-	mu      sync.Mutex
-	queries []url.Values
-	pending string
-	made    string
-	status  int
-	errBody string
-	me      string
+	mu             sync.Mutex
+	queries        []url.Values
+	profileQueries []url.Values
+	pending        string
+	made           string
+	profilePending string
+	profileMade    string
+	status         int
+	errBody        string
+	me             string
 }
 
 func newHumanDecisionsHub(t *testing.T) *humanDecisionsHub {
 	t.Helper()
-	h := &humanDecisionsHub{pending: humanDecisionsPendingBody, made: humanDecisionsMadeBody,
-		me: `{"id":"u-alice","email":"alice@example.com","displayName":"Alice","role":"member"}`}
+	h := &humanDecisionsHub{
+		pending:        humanDecisionsPendingBody,
+		made:           humanDecisionsMadeBody,
+		profilePending: allProjectsDecisionsPendingBody,
+		profileMade:    allProjectsDecisionsMadeBody,
+		me:             `{"id":"u-alice","email":"alice@example.com","displayName":"Alice","role":"member"}`,
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/projects/proj-1/decisions", func(w http.ResponseWriter, r *http.Request) {
 		h.mu.Lock()
@@ -122,6 +130,22 @@ func newHumanDecisionsHub(t *testing.T) *humanDecisionsHub {
 			return
 		}
 		_, _ = w.Write([]byte(h.pending))
+	})
+	mux.HandleFunc("/api/v1/users/me/decisions", func(w http.ResponseWriter, r *http.Request) {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		h.profileQueries = append(h.profileQueries, r.URL.Query())
+		w.Header().Set("Content-Type", "application/json")
+		if h.status != 0 {
+			w.WriteHeader(h.status)
+			_, _ = w.Write([]byte(h.errBody))
+			return
+		}
+		if r.URL.Query().Get("tab") == "made" {
+			_, _ = w.Write([]byte(h.profileMade))
+			return
+		}
+		_, _ = w.Write([]byte(h.profilePending))
 	})
 	mux.HandleFunc("/api/v1/auth/me", func(w http.ResponseWriter, _ *http.Request) {
 		h.mu.Lock()
@@ -142,12 +166,32 @@ func newHumanDecisionsHub(t *testing.T) *humanDecisionsHub {
 		return c, "proj-1", err
 	}
 	t.Cleanup(func() { decisionsHumanTarget = origTarget })
+	origAllProjects := decisionsAllProjectsClient
+	decisionsAllProjectsClient = func() (hubclient.Client, error) {
+		return hubclient.New(srv.URL, hubclient.WithBearerToken("user-token"))
+	}
+	t.Cleanup(func() { decisionsAllProjectsClient = origAllProjects })
 	origFactory := decisionsClientFactory
 	decisionsClientFactory = func() (hubclient.Client, error) {
 		return hubclient.New(srv.URL, hubclient.WithAgentToken("agent-token"))
 	}
 	t.Cleanup(func() { decisionsClientFactory = origFactory })
 	return h
+}
+
+func (h *humanDecisionsHub) lastProfile() url.Values {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.profileQueries) == 0 {
+		return nil
+	}
+	return h.profileQueries[len(h.profileQueries)-1]
+}
+
+func (h *humanDecisionsHub) profileCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.profileQueries)
 }
 
 func (h *humanDecisionsHub) last() url.Values {
@@ -194,7 +238,7 @@ func TestDecisionsList_FlagsOfTheOtherMode(t *testing.T) {
 
 	t.Setenv("SCION_CLI_MODE", "agent")
 	for _, args := range [][]string{
-		{"--made"}, {"--waiting"}, {"--conversation", "x"},
+		{"--made"}, {"--waiting"}, {"--all-projects"}, {"--sort", "project"}, {"--conversation", "x"},
 		{"--agent", "x"}, {"--answered-by", "me"}, {"--provenance", "direct"}, {"--since", "2026-11-01"},
 		{"--until", "2026-11-01"}, {"--limit", "5"},
 	} {
@@ -214,8 +258,8 @@ func TestDecisionsList_FlagsOfTheOtherMode(t *testing.T) {
 
 	// Help hides the other mode's flags.
 	for mode, want := range map[CLIMode]struct{ shown, hidden []string }{
-		ModeAgent: {shown: []string{"pending", "decided", "all", "search", "json"}, hidden: []string{"made", "waiting", "conversation", "agent", "answered-by", "provenance", "since", "until", "limit"}},
-		ModeHuman: {shown: []string{"made", "waiting", "search", "conversation", "agent", "limit", "json"}, hidden: []string{"pending", "decided", "all"}},
+		ModeAgent: {shown: []string{"pending", "decided", "all", "search", "json"}, hidden: []string{"made", "waiting", "all-projects", "sort", "conversation", "agent", "answered-by", "provenance", "since", "until", "limit"}},
+		ModeHuman: {shown: []string{"made", "waiting", "all-projects", "sort", "search", "conversation", "agent", "limit", "json"}, hidden: []string{"pending", "decided", "all"}},
 	} {
 		root := &cobra.Command{Use: "scion"}
 		dec := newDecisionsCmd()
@@ -421,6 +465,13 @@ func TestDecisionsListHuman_AnsweredByMeNeedsAnIdentity(t *testing.T) {
 		assert.Contains(t, err.Error(), "resolve --answered-by me", "me=%s", body)
 		assert.NotContains(t, err.Error(), "%!w", "me=%s", body)
 		assert.Equal(t, before, h.count(), "me=%s: no unfiltered list is requested", body)
+
+		beforeProfile := h.profileCount()
+		_, err = runDecisionsTestCmd(t, "decisions", "list", "--all-projects", "--made", "--answered-by", "me")
+		require.Error(t, err, "all-projects me=%s", body)
+		assert.Contains(t, err.Error(), "resolve --answered-by me", "all-projects me=%s", body)
+		assert.NotContains(t, err.Error(), "%!w", "all-projects me=%s", body)
+		assert.Equal(t, beforeProfile, h.profileCount(), "all-projects me=%s: no unfiltered list is requested", body)
 	}
 
 	// Without --answered-by me an empty identity only loses the "you" label.
@@ -429,4 +480,196 @@ func TestDecisionsListHuman_AnsweredByMeNeedsAnIdentity(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, out, "Alice")
 	assert.NotContains(t, out, " you ")
+}
+
+const allProjectsDecisionsPendingBody = `{
+  "counts": {"waitingOnYou": 3, "waitingOnOthers": 1},
+  "prompts": [
+    {"project": {"id": "proj-1", "name": "Scion", "slug": "scion"}, "promptMessageId": "m1", "promptAvailable": true,
+     "chatKey": "` + humanDecisionsTopic + `", "conversationLabel": "#release", "conversationAvailable": true,
+     "askerAgentId": "` + humanDecisionsBot + `", "askerAgentName": "release-bot", "createdAt": "2026-11-13T04:48:00Z",
+     "answerMode": "single", "waitingOnYou": true, "canAnswer": true,
+     "decisions": [
+       {"rowId": "r1", "messageId": "m1", "key": "ship-now", "ref": "release-bot/ship-now", "version": 1, "status": "pending",
+        "askerAgentId": "` + humanDecisionsBot + `", "askerAgentName": "release-bot", "question": "Deploy to prod after tagging v0.9?", "choices": []}
+     ]},
+    {"project": {"id": "proj-1", "name": "Scion", "slug": "scion"}, "promptMessageId": "m2", "promptAvailable": true,
+     "chatKey": "` + humanDecisionsDM + `", "conversationLabel": "DM with nc-x", "conversationAvailable": true,
+     "askerAgentId": "bbbb2222-0000-4000-8000-000000000004", "askerAgentName": "nc-x", "createdAt": "2026-11-13T03:00:00Z",
+     "answerMode": "single", "waitingOnYou": true, "canAnswer": true,
+     "decisions": [
+       {"rowId": "r2", "messageId": "m2", "key": "migrate", "ref": "nc-x/migrate", "version": 3, "status": "pending",
+        "askerAgentId": "bbbb2222-0000-4000-8000-000000000004", "askerAgentName": "nc-x", "question": "Rotate the staging DB password?", "choices": []}
+     ]},
+    {"project": {"id": "proj-2", "name": "Web Site", "slug": "web-site"}, "promptMessageId": "m3", "promptAvailable": true,
+     "chatKey": "8e1f2d3c-2222-4b6c-8d9e-000000000002", "conversationLabel": "#landing", "conversationAvailable": true,
+     "askerAgentId": "cccc3333-0000-4000-8000-000000000005", "askerAgentName": "design-bot", "createdAt": "2026-11-12T05:00:00Z",
+     "answerMode": "single", "waitingOnYou": true, "canAnswer": true,
+     "decisions": [
+       {"rowId": "r3", "messageId": "m3", "key": "hero-img", "ref": "design-bot/hero-img", "version": 1, "status": "pending",
+        "askerAgentId": "cccc3333-0000-4000-8000-000000000005", "askerAgentName": "design-bot", "question": "Use the dark hero image?", "choices": []}
+     ]}
+  ],
+  "agents": [
+    {"id": "` + humanDecisionsBot + `", "name": "release-bot"},
+    {"id": "cccc3333-0000-4000-8000-000000000005", "name": "design-bot"}
+  ],
+  "answerers": [],
+  "conversations": [
+    {"key": "` + humanDecisionsTopic + `", "label": "#release", "projectId": "proj-1"},
+    {"key": "8e1f2d3c-2222-4b6c-8d9e-000000000002", "label": "#landing", "projectId": "proj-2"}
+  ],
+  "projects": [
+    {"id": "proj-1", "name": "Scion", "slug": "scion"},
+    {"id": "proj-2", "name": "Web Site", "slug": "web-site"}
+  ],
+  "truncatedProjects": false
+}`
+
+const allProjectsDecisionsMadeBody = `{
+  "counts": {"waitingOnYou": 3, "waitingOnOthers": 1},
+  "entries": [
+    {"project": {"id": "proj-1", "name": "Scion", "slug": "scion"}, "answerId": "a1",
+     "decision": {"rowId": "r9", "promptMessageId": "m9", "promptAvailable": true, "key": "migrate", "ref": "nc-x/migrate", "version": 2,
+                  "question": "Run the backfill on staging first?", "askerAgentId": "b", "askerAgentName": "nc-x"},
+     "choiceId": "1", "label": "Yes", "matchedDefault": false, "answeredByUserId": "u-alice", "answeredByName": "Alice",
+     "provenance": "direct", "outcome": "answer", "surface": "decisions_page", "sourceMessageAvailable": false,
+     "at": "2026-11-12T10:00:00Z", "chatKey": "` + humanDecisionsTopic + `", "conversationLabel": "#release", "conversationAvailable": true},
+    {"project": {"id": "proj-2", "name": "Web Site", "slug": "web-site"}, "answerId": "a2",
+     "decision": {"rowId": "r8", "promptMessageId": "m8", "promptAvailable": true, "key": "hero-img", "ref": "design-bot/hero-img", "version": 1,
+                  "question": "Use the dark hero image?", "askerAgentId": "c", "askerAgentName": "design-bot"},
+     "choiceId": "2", "label": "No", "matchedDefault": false, "answeredByUserId": "u-bob", "answeredByName": "Bob",
+     "provenance": "direct", "outcome": "confirm", "surface": "native", "sourceMessageAvailable": false,
+     "at": "2026-11-02T10:00:00Z", "chatKey": "8e1f2d3c-2222-4b6c-8d9e-000000000002", "conversationLabel": "#landing", "conversationAvailable": true}
+  ],
+  "agents": [], "answerers": [], "conversations": [],
+  "projects": [
+    {"id": "proj-1", "name": "Scion", "slug": "scion"},
+    {"id": "proj-2", "name": "Web Site", "slug": "web-site"}
+  ],
+  "truncatedProjects": false
+}`
+
+func TestDecisionsListHuman_AllProjectsProjectGateAndValidation(t *testing.T) {
+	root := &cobra.Command{Use: "scion"}
+	root.AddCommand(newDecisionsCmd())
+	listCmd, _, err := root.Find([]string{"decisions", "list"})
+	require.NoError(t, err)
+	assert.True(t, commandRequiresProject(listCmd), "without --all-projects, decisions list requires a project")
+	require.NoError(t, listCmd.Flags().Set("all-projects", "true"))
+	assert.False(t, commandRequiresProject(listCmd), "with --all-projects, decisions list runs outside any local project")
+
+	h := newHumanDecisionsHub(t)
+	t.Setenv("SCION_CLI_MODE", "human")
+
+	// --sort without --all-projects or with an invalid value is a usage error.
+	for _, args := range [][]string{
+		{"--sort", "recent"},
+		{"--all-projects", "--sort", "bogus"},
+	} {
+		_, err = runDecisionsTestCmd(t, append([]string{"decisions", "list"}, args...)...)
+		require.Error(t, err, "%v", args)
+		assert.True(t, isUsageError(err), "%v", args)
+	}
+	assert.Zero(t, h.count())
+	assert.Zero(t, h.profileCount())
+}
+
+func TestDecisionsListHuman_AllProjectsProjectResolutionAndAmbiguity(t *testing.T) {
+	h := newHumanDecisionsHub(t)
+	t.Setenv("SCION_CLI_MODE", "human")
+
+	outsiderUUID := "99999999-8888-4777-8666-555555555555"
+	for value, want := range map[string]string{
+		"scion":      "proj-1",
+		"SCION":      "proj-1",
+		"Web Site":   "proj-2",
+		"web-site":   "proj-2",
+		"proj-2":     "proj-2",
+		outsiderUUID: outsiderUUID, // unmatched UUID passed through; hub answers empty
+	} {
+		_, err := runDecisionsTestCmd(t, "decisions", "list", "--all-projects", "--project", value)
+		require.NoError(t, err, value)
+		assert.Equal(t, want, h.lastProfile().Get("project"), value)
+	}
+	assert.Zero(t, h.count(), "--all-projects never calls the single-project endpoint")
+
+	_, err := runDecisionsTestCmd(t, "decisions", "list", "--all-projects", "--project", "nonexistent")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `no project with Decisions matches "nonexistent"`)
+
+	// Two projects sharing a display name: ambiguous, exit 2.
+	h.profilePending = `{"counts":{"waitingOnYou":0,"waitingOnOthers":0},"prompts":[],"agents":[],"answerers":[],
+	  "conversations":[],"projects":[{"id":"p-1","name":"App","slug":"app-1"},{"id":"p-2","name":"App","slug":"app-2"}],"truncatedProjects":false}`
+	_, err = runDecisionsTestCmd(t, "decisions", "list", "--all-projects", "--project", "App")
+	require.Error(t, err)
+	assert.Equal(t, 2, exitCodeFor(err))
+	assert.Contains(t, err.Error(), "matches 2 projects")
+	assert.Contains(t, err.Error(), "p-1")
+	assert.Contains(t, err.Error(), "p-2")
+
+	// Experiment off (404) on the profile endpoint prints the design 5.4 message.
+	h.status = http.StatusNotFound
+	h.errBody = `{"error":{"code":"not_found","message":"route not found"}}`
+	_, err = runDecisionsTestCmd(t, "decisions", "list", "--all-projects")
+	require.Error(t, err)
+	assert.Equal(t, "Decisions are not enabled on this hub (experiment web.project_decisions)", err.Error())
+}
+
+func TestDecisionsListHuman_AllProjectsTableAndJSONGolden(t *testing.T) {
+	fixDecisionsClock(t)
+	h := newHumanDecisionsHub(t)
+	t.Setenv("SCION_CLI_MODE", "human")
+
+	// Waiting table (Mock F-6: PROJECT KEY VER QUESTION AGENT CONVERSATION AGE).
+	out, err := runDecisionsTestCmd(t, "decisions", "list", "--all-projects", "--sort", "recent")
+	require.NoError(t, err)
+	assert.Equal(t, url.Values{"tab": {"pending"}, "sort": {"recent"}, "limit": {"50"}}, h.lastProfile())
+	assert.Equal(t, ""+
+		"PROJECT   KEY       VER  QUESTION                            AGENT        CONVERSATION  AGE\n"+
+		"scion     ship-now  v1   Deploy to prod after tagging v0.9?  release-bot  #release      12m ago\n"+
+		"scion     migrate   v3   Rotate the staging DB password?     nc-x         DM with nc-x  2h ago\n"+
+		"web-site  hero-img  v1   Use the dark hero image?            design-bot   #landing      1d ago\n"+
+		"1 more waiting on others (use --json for details)\n", out)
+
+	// Made sort=recent (default on --made).
+	out, err = runDecisionsTestCmd(t, "decisions", "list", "--all-projects", "--made")
+	require.NoError(t, err)
+	assert.Equal(t, ""+
+		"PROJECT   WHEN            KEY       VER  QUESTION                            ANSWER  ANSWERED BY  PROVENANCE  AGENT       CONVERSATION\n"+
+		"scion     2026-11-12 UTC  migrate   v2   Run the backfill on staging first?  Yes     you          direct      nc-x        #release\n"+
+		"web-site  2026-11-02 UTC  hero-img  v1   Use the dark hero image?            No      Bob          confirmed   design-bot  #landing\n", out)
+
+	// Made sort=project overview (groups with more=true and truncatedProjects=true).
+	h.profileMade = `{
+	  "counts": {"waitingOnYou": 0, "waitingOnOthers": 0},
+	  "groups": [
+	    {"project": {"id": "proj-1", "name": "Scion", "slug": "scion"}, "more": true,
+	     "entries": [
+	       {"project": {"id": "proj-1", "name": "Scion", "slug": "scion"}, "answerId": "a1",
+	        "decision": {"rowId": "r9", "promptMessageId": "m9", "promptAvailable": true, "key": "migrate", "ref": "nc-x/migrate", "version": 2,
+	                     "question": "Run the backfill on staging first?", "askerAgentId": "b", "askerAgentName": "nc-x"},
+	        "choiceId": "1", "label": "Yes", "answeredByUserId": "u-alice", "answeredByName": "Alice",
+	        "provenance": "direct", "outcome": "answer", "surface": "decisions_page",
+	        "at": "2026-11-12T10:00:00Z", "chatKey": "` + humanDecisionsTopic + `", "conversationLabel": "#release", "conversationAvailable": true}
+	     ]}
+	  ],
+	  "agents": [], "answerers": [], "conversations": [], "projects": [], "truncatedProjects": true
+	}`
+	out, err = runDecisionsTestCmd(t, "decisions", "list", "--all-projects", "--made", "--sort", "project")
+	require.NoError(t, err)
+	assert.Equal(t, url.Values{"tab": {"made"}, "sort": {"project"}, "limit": {"50"}}, h.lastProfile())
+	assert.Equal(t, ""+
+		"PROJECT  WHEN            KEY      VER  QUESTION                            ANSWER  ANSWERED BY  PROVENANCE  AGENT  CONVERSATION\n"+
+		"scion    2026-11-12 UTC  migrate  v2   Run the backfill on staging first?  Yes     you          direct      nc-x   #release\n"+
+		"Some projects have more than 5 answers; pass --sort recent or --project <name> to list them.\n"+
+		"Showing your 200 most recently active projects; pass --project <name> to see others.\n", out)
+
+	// --json prints the profile API shape.
+	out, err = runDecisionsTestCmd(t, "decisions", "list", "--all-projects", "--json")
+	require.NoError(t, err)
+	var got, want map[string]any
+	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+	require.NoError(t, json.Unmarshal([]byte(allProjectsDecisionsPendingBody), &want))
+	assert.Equal(t, want, got)
 }

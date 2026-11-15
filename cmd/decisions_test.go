@@ -128,9 +128,15 @@ func runDecisionsTestCmd(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	prevFormat := outputFormat
 	outputFormat = ""
-	t.Cleanup(func() { outputFormat = prevFormat })
+	prevProject := projectPath
+	projectPath = ""
+	t.Cleanup(func() {
+		outputFormat = prevFormat
+		projectPath = prevProject
+	})
 
 	root := &cobra.Command{Use: "scion", SilenceUsage: true, SilenceErrors: true}
+	root.PersistentFlags().StringVarP(&projectPath, "project", "g", "", "")
 	root.AddCommand(newDecisionsCmd())
 	var out bytes.Buffer
 	root.SetOut(&out)

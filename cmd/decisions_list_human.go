@@ -27,6 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
@@ -55,6 +56,24 @@ var decisionsHumanTarget = func() (hubclient.Client, string, error) {
 		return nil, "", err
 	}
 	return client, projectID, nil
+}
+
+// decisionsAllProjectsClient returns the hub client for --all-projects,
+// ignoring projectPath so --project names a Hub project filter rather than a
+// local directory.
+var decisionsAllProjectsClient = func() (hubclient.Client, error) {
+	resolvedPath, _, err := config.ResolveProjectPath("")
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve settings path: %w", err)
+	}
+	settings, err := config.LoadSettings(resolvedPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load settings: %w", err)
+	}
+	if !hubConfigured() {
+		return nil, errHubNotConfigured
+	}
+	return getHubClient(settings)
 }
 
 // decisionsAmbiguousError is a --conversation or --agent name that matches
@@ -128,9 +147,24 @@ func validDecisionDateBound(v string) bool {
 }
 
 func runHumanDecisionsList(cmd *cobra.Command) error {
+	allProjects, _ := cmd.Flags().GetBool("all-projects")
+	sortMode, _ := cmd.Flags().GetString("sort")
+	sortMode = strings.TrimSpace(sortMode)
+	if cmd.Flags().Changed("sort") && !allProjects {
+		return newUsageError("--sort needs --all-projects")
+	}
+	switch sortMode {
+	case "", hubclient.DecisionsSortProject, hubclient.DecisionsSortRecent:
+	default:
+		return newUsageError("--sort must be %s or %s", hubclient.DecisionsSortProject, hubclient.DecisionsSortRecent)
+	}
+
 	opts, err := humanDecisionsListOptions(cmd)
 	if err != nil {
 		return err
+	}
+	if allProjects {
+		return runHumanAllProjectsDecisionsList(cmd, opts, sortMode)
 	}
 	conversation, _ := cmd.Flags().GetString("conversation")
 	conversation = strings.TrimSpace(conversation)
@@ -166,25 +200,12 @@ func runHumanDecisionsList(cmd *cobra.Command) error {
 		}
 	}
 
-	var meID string
 	wantJSON := decisionsWantJSON(cmd)
-	if strings.EqualFold(opts.UserID, "me") || (opts.Tab == hubclient.ProjectDecisionsTabMade && !wantJSON) {
-		me, err := client.Auth().Me(ctx)
-		if err == nil && me != nil {
-			meID = me.ID
-		}
-		if strings.EqualFold(opts.UserID, "me") {
-			// An empty ID would silently drop the filter and list
-			// everyone's answers.
-			switch {
-			case err != nil:
-				return fmt.Errorf("resolve --answered-by me: %w", err)
-			case meID == "":
-				return errors.New("resolve --answered-by me: the hub returned an empty identity")
-			}
-			opts.UserID = meID
-		}
+	meID, resolvedUserID, err := resolveDecisionsViewer(ctx, client, opts.UserID, opts.Tab == hubclient.ProjectDecisionsTabMade && !wantJSON)
+	if err != nil {
+		return err
 	}
+	opts.UserID = resolvedUserID
 
 	resp, err := svc.List(ctx, &opts)
 	if err != nil {
@@ -383,5 +404,282 @@ func writeMadeDecisionsTable(out io.Writer, resp *hubclient.ProjectDecisionsResp
 	_ = tw.Flush()
 	if resp.NextCursor != "" {
 		_, _ = fmt.Fprintf(out, "More answers; raise --limit (up to %d) to list them.\n", maxDecisionsListLimit)
+	}
+}
+
+func resolveDecisionsViewer(ctx context.Context, client hubclient.Client, userID string, wantYouLabel bool) (string, string, error) {
+	isMeFilter := strings.EqualFold(userID, "me")
+	if !isMeFilter && !wantYouLabel {
+		return "", userID, nil
+	}
+	var meID string
+	me, err := client.Auth().Me(ctx)
+	if err == nil && me != nil {
+		meID = me.ID
+	}
+	if isMeFilter {
+		// An empty ID would silently drop the filter and list everyone's answers.
+		switch {
+		case err != nil:
+			return "", "", fmt.Errorf("resolve --answered-by me: %w", err)
+		case meID == "":
+			return "", "", errors.New("resolve --answered-by me: the hub returned an empty identity")
+		}
+		userID = meID
+	}
+	return meID, userID, nil
+}
+
+func allProjectsFlagProjectFilter(cmd *cobra.Command) string {
+	pf := cmd.Flags().Lookup("project")
+	if pf == nil {
+		pf = cmd.InheritedFlags().Lookup("project")
+	}
+	if pf == nil || !pf.Changed {
+		return ""
+	}
+	return strings.TrimSpace(pf.Value.String())
+}
+
+func runHumanAllProjectsDecisionsList(cmd *cobra.Command, base hubclient.ListProjectDecisionsOptions, sortMode string) error {
+	conversation, _ := cmd.Flags().GetString("conversation")
+	conversation = strings.TrimSpace(conversation)
+	agent, _ := cmd.Flags().GetString("agent")
+	agent = strings.TrimSpace(agent)
+	projectFilter := allProjectsFlagProjectFilter(cmd)
+
+	client, err := decisionsAllProjectsClient()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+	defer cancel()
+	svc := client.MyDecisions()
+
+	myOpts := hubclient.ListMyDecisionsOptions{
+		Tab:        base.Tab,
+		Sort:       sortMode,
+		Limit:      base.Limit,
+		Query:      base.Query,
+		UserID:     base.UserID,
+		Provenance: base.Provenance,
+		From:       base.From,
+		To:         base.To,
+	}
+
+	if projectFilter != "" || conversation != "" || agent != "" {
+		facets, err := svc.List(ctx, &hubclient.ListMyDecisionsOptions{Tab: base.Tab, Limit: 1})
+		if err != nil {
+			return formatProjectDecisionsError(err)
+		}
+		if !facets.SupportsSearch() {
+			return errors.New(errMsgDecisionSearchUnsupported)
+		}
+		if projectFilter != "" {
+			if myOpts.ProjectID, err = resolveDecisionProject(projectFilter, facets.Projects); err != nil {
+				return err
+			}
+		}
+		if conversation != "" {
+			if myOpts.Conversation, err = resolveDecisionConversation(conversation, facets.Conversations); err != nil {
+				return err
+			}
+		}
+		if agent != "" {
+			if myOpts.AgentID, err = resolveDecisionAgent(agent, facets.Agents); err != nil {
+				return err
+			}
+		}
+	}
+
+	wantJSON := decisionsWantJSON(cmd)
+	meID, resolvedUserID, err := resolveDecisionsViewer(ctx, client, myOpts.UserID, myOpts.Tab == hubclient.ProjectDecisionsTabMade && !wantJSON)
+	if err != nil {
+		return err
+	}
+	myOpts.UserID = resolvedUserID
+
+	resp, err := svc.List(ctx, &myOpts)
+	if err != nil {
+		return formatProjectDecisionsError(err)
+	}
+	if myOpts.Query != "" && !resp.SupportsSearch() {
+		return errors.New(errMsgDecisionSearchUnsupported)
+	}
+
+	if wantJSON {
+		return writeJSONTo(cmd.OutOrStdout(), resp)
+	}
+	filtered := myOpts.ProjectID != "" || myOpts.Query != "" || myOpts.Conversation != "" || myOpts.AgentID != ""
+	if myOpts.Tab == hubclient.ProjectDecisionsTabMade {
+		filtered = filtered || myOpts.UserID != "" || myOpts.Provenance != "" || myOpts.From != "" || myOpts.To != ""
+		writeAllProjectsMadeDecisionsTable(cmd.OutOrStdout(), resp, meID, filtered)
+		return nil
+	}
+	writeAllProjectsWaitingDecisionsTable(cmd.OutOrStdout(), resp, filtered)
+	return nil
+}
+
+// resolveDecisionProject maps --project (with --all-projects) to a project ID:
+// a facet ID as is, else the one facet whose name or slug matches
+// case-insensitively. An unmatched UUID is passed through so the hub answers
+// empty when the caller is not a member.
+func resolveDecisionProject(value string, projects []hubclient.ProjectDecisionProjectRef) (string, error) {
+	for _, p := range projects {
+		if p.ID == value {
+			return p.ID, nil
+		}
+	}
+	norm := normDecisionName(value)
+	seen := make(map[string]bool)
+	var matches []hubclient.ProjectDecisionProjectRef
+	for _, p := range projects {
+		if seen[p.ID] {
+			continue
+		}
+		if (p.Name != "" && normDecisionName(p.Name) == norm) || (p.Slug != "" && normDecisionName(p.Slug) == norm) {
+			seen[p.ID] = true
+			matches = append(matches, p)
+		}
+	}
+	switch len(matches) {
+	case 1:
+		return matches[0].ID, nil
+	case 0:
+		if _, err := uuid.Parse(value); err == nil {
+			return value, nil
+		}
+		return "", fmt.Errorf("no project with Decisions matches %q", safeText(value))
+	}
+	lines := make([]string, 0, len(matches))
+	for _, m := range matches {
+		label := safeText(m.Name)
+		if m.Slug != "" && !strings.EqualFold(m.Name, m.Slug) {
+			label += " (" + safeText(m.Slug) + ")"
+		}
+		if label == "" {
+			label = safeText(m.Slug)
+		}
+		lines = append(lines, fmt.Sprintf("  %s  %s", label, safeText(m.ID)))
+	}
+	return "", &decisionsAmbiguousError{msg: fmt.Sprintf("--project %q matches %d projects; pass an ID:\n%s",
+		safeText(value), len(matches), strings.Join(lines, "\n"))}
+}
+
+func decisionProjectDisplay(ref hubclient.ProjectDecisionProjectRef) string {
+	if ref.Slug != "" {
+		return safeText(ref.Slug)
+	}
+	if ref.Name != "" {
+		return safeText(ref.Name)
+	}
+	if ref.ID != "" {
+		return safeText(ref.ID)
+	}
+	return "-"
+}
+
+func writeAllProjectsWaitingDecisionsTable(out io.Writer, resp *hubclient.MyDecisionsResponse, filtered bool) {
+	counts := resp.Counts
+	if resp.FilteredCounts != nil {
+		counts = *resp.FilteredCounts
+	}
+	var rows [][]string
+	for _, p := range resp.Prompts {
+		if !p.WaitingOnYou {
+			continue
+		}
+		projLabel := decisionProjectDisplay(p.Project)
+		for _, d := range p.Decisions {
+			if !decisionRowWaitingOnYou(p, d) {
+				continue
+			}
+			rows = append(rows, []string{
+				projLabel,
+				safeText(d.Key),
+				fmt.Sprintf("v%d", d.Version),
+				truncateRunes(collapseSingleLine(d.Question), decisionQuestionMaxWidth, true),
+				orDash(safeText(p.AskerAgentName)),
+				orDash(safeText(p.ConversationLabel)),
+				clitime.Ago(p.CreatedAt),
+			})
+		}
+	}
+	if len(rows) == 0 {
+		if filtered {
+			_, _ = fmt.Fprintln(out, "No Decisions waiting on you match.")
+		} else {
+			_, _ = fmt.Fprintln(out, "No Decisions waiting on you.")
+		}
+	} else {
+		tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(tw, "PROJECT\tKEY\tVER\tQUESTION\tAGENT\tCONVERSATION\tAGE")
+		for _, r := range rows {
+			_, _ = fmt.Fprintln(tw, strings.Join(r, "\t"))
+		}
+		_ = tw.Flush()
+	}
+	if resp.NextCursor != "" && len(rows) < counts.WaitingOnYou {
+		_, _ = fmt.Fprintf(out, "More Decisions are waiting on you; raise --limit (up to %d) to list them.\n", maxDecisionsListLimit)
+	}
+	if counts.WaitingOnOthers > 0 {
+		_, _ = fmt.Fprintf(out, "%d more waiting on others (use --json for details)\n", counts.WaitingOnOthers)
+	}
+	if resp.TruncatedProjects {
+		_, _ = fmt.Fprintln(out, "Showing your 200 most recently active projects; pass --project <name> to see others.")
+	}
+}
+
+func writeAllProjectsMadeDecisionsTable(out io.Writer, resp *hubclient.MyDecisionsResponse, meID string, filtered bool) {
+	entries := resp.Entries
+	anyGroupMore := false
+	if len(entries) == 0 && len(resp.Groups) > 0 {
+		for _, g := range resp.Groups {
+			entries = append(entries, g.Entries...)
+			if g.More {
+				anyGroupMore = true
+			}
+		}
+	}
+	if len(entries) == 0 {
+		if filtered {
+			_, _ = fmt.Fprintln(out, "No Decisions made match.")
+		} else {
+			_, _ = fmt.Fprintln(out, "No Decisions made.")
+		}
+		if resp.TruncatedProjects {
+			_, _ = fmt.Fprintln(out, "Showing your 200 most recently active projects; pass --project <name> to see others.")
+		}
+		return
+	}
+	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "PROJECT\tWHEN\tKEY\tVER\tQUESTION\tANSWER\tANSWERED BY\tPROVENANCE\tAGENT\tCONVERSATION")
+	for _, e := range entries {
+		answeredBy := orDash(safeText(e.AnsweredByName))
+		if meID != "" && e.AnsweredByUserID == meID {
+			answeredBy = "you"
+		}
+		_, _ = fmt.Fprintln(tw, strings.Join([]string{
+			decisionProjectDisplay(e.Project),
+			clitime.Format(e.At, clitime.Date),
+			safeText(e.Decision.Key),
+			fmt.Sprintf("v%d", e.Decision.Version),
+			truncateRunes(collapseSingleLine(e.Decision.Question), decisionQuestionMaxWidth, true),
+			orDash(collapseSingleLine(e.Label)),
+			answeredBy,
+			decisionProvenanceDisplay(&hubclient.DecisionAnswerView{Provenance: e.Provenance, Outcome: e.Outcome}),
+			orDash(safeText(e.Decision.AskerAgentName)),
+			orDash(safeText(e.ConversationLabel)),
+		}, "\t"))
+	}
+	_ = tw.Flush()
+	if resp.NextCursor != "" {
+		_, _ = fmt.Fprintf(out, "More answers; raise --limit (up to %d) to list them.\n", maxDecisionsListLimit)
+	}
+	if anyGroupMore {
+		_, _ = fmt.Fprintln(out, "Some projects have more than 5 answers; pass --sort recent or --project <name> to list them.")
+	}
+	if resp.TruncatedProjects {
+		_, _ = fmt.Fprintln(out, "Showing your 200 most recently active projects; pass --project <name> to see others.")
 	}
 }

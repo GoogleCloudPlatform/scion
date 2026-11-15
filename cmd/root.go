@@ -207,7 +207,7 @@ return an error instead of blocking.`,
 
 		// Hub-only commands never read local project settings: for them
 		// --project names a hub project, not a directory.
-		hubOnly := hubOnlyCommands[topLevelName(cmd)]
+		hubOnly := hubOnlyCommands[topLevelName(cmd)] || isAllProjectsDecisionsList(cmd)
 
 		if !hubOnly {
 			// Load settings to get cli.autohelp

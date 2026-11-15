@@ -128,12 +128,27 @@ func commandRequiresProject(cmd *cobra.Command) bool {
 	if isGlobalTemplatesUpdate(cmd) {
 		return false
 	}
+	// 'decisions list --all-projects' queries GET /api/v1/users/me/decisions
+	// across the user's Hub projects and needs no local project (ptone/scion#7995).
+	if isAllProjectsDecisionsList(cmd) {
+		return false
+	}
 	// design Amendment A26.2 O1: same reasoning as checkAgentContainerContext
 	// — --handoff-template never touches the project or the Hub.
 	if isReincarnateHandoffTemplateInvocation(cmd) {
 		return false
 	}
 	return true
+}
+
+// isAllProjectsDecisionsList reports whether cmd is 'decisions list' with
+// --all-projects set.
+func isAllProjectsDecisionsList(cmd *cobra.Command) bool {
+	if cmd == nil || cmd.Name() != "list" || cmd.Parent() == nil || cmd.Parent().Name() != "decisions" || !isTopLevel(cmd.Parent()) {
+		return false
+	}
+	allProjects, _ := cmd.Flags().GetBool("all-projects")
+	return allProjects
 }
 
 // isGlobalTemplatesUpdate reports whether cmd is 'templates update' with
