@@ -20,6 +20,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -501,4 +502,187 @@ func TestFireCoreNeverCallsSourceEffectCeiling(t *testing.T) {
 			return true
 		})
 	}
+}
+
+type fireCoreScheduleStore struct {
+	*mockScheduledEventStore
+	afterRunCalls int
+	lastRunErr    string
+}
+
+func (s *fireCoreScheduleStore) UpdateScheduleAfterRun(_ context.Context, _ string, _ time.Time, _ time.Time, errMsg string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.afterRunCalls++
+	s.lastRunErr = errMsg
+	return nil
+}
+
+func TestFireCoreSchedulerAdapters(t *testing.T) {
+	t.Parallel()
+
+	const projectID = "project-sched-adapter"
+
+	t.Run("one-shot fireEvent dispatches FireAction outcomes AfterRecord and Detached", func(t *testing.T) {
+		ms := newMockStore()
+		srv := newEventHandlerTestServer(ms)
+		sched := NewScheduler(ms, slog.Default())
+		sched.srv = srv
+		srv.scheduler = sched
+
+		rec := newFireCoreTestAuthority(ms, projectID)
+		baseEvt := store.ScheduledEvent{
+			ProjectID:            projectID,
+			FireAt:               time.Now().UTC(),
+			Payload:              `{"ok":true}`,
+			Status:               store.ScheduledEventPending,
+			InitiatorAttribution: rec.Attribution,
+			AuthorityCeiling:     rec.Ceiling,
+		}
+
+		statusAtAfter := ""
+		sched.RegisterAction(&fakeFireAction{
+			actionType: "act_fired",
+			permission: scheduledMessagePermission,
+			fireFn: func(ctx context.Context, req hubfire.FireRequest, _ FireAuthorized) (hubfire.FireOutcome, error) {
+				gotExec, ok := ExecutorContextFromContext(ctx)
+				require.True(t, ok)
+				assert.Equal(t, ExecutorContext{Kind: "scheduler", ID: "scheduled_event:" + req.Authority.FireID}, gotExec)
+				require.NotNil(t, req.Tracked)
+				return hubfire.FireOutcome{
+					Status: hubfire.FireStatusFired,
+					AfterRecord: func(context.Context) {
+						statusAtAfter = ms.getEvent(req.Authority.FireID).Status
+					},
+				}, nil
+			},
+		})
+		sched.RegisterAction(&fakeFireAction{
+			actionType: "act_skipped",
+			permission: scheduledMessagePermission,
+			fireFn: func(context.Context, hubfire.FireRequest, FireAuthorized) (hubfire.FireOutcome, error) {
+				return hubfire.FireOutcome{Status: hubfire.FireStatusSkipped, Error: "window missed"}, nil
+			},
+		})
+		sched.RegisterAction(&fakeFireAction{
+			actionType: "act_detached",
+			permission: scheduledMessagePermission,
+			fireFn: func(context.Context, hubfire.FireRequest, FireAuthorized) (hubfire.FireOutcome, error) {
+				return hubfire.FireOutcome{Status: hubfire.FireStatusFired, Detached: true}, nil
+			},
+		})
+
+		assert.ElementsMatch(t, []string{"act_fired", "act_skipped", "act_detached"}, sched.Status().EventHandlers)
+
+		firedEvt := baseEvt
+		firedEvt.ID = "evt-fired"
+		firedEvt.EventType = "act_fired"
+		require.NoError(t, ms.CreateScheduledEvent(context.Background(), &firedEvt))
+		sched.fireEvent(context.Background(), firedEvt, false)
+		assert.Equal(t, store.ScheduledEventFired, ms.getEvent("evt-fired").Status)
+		assert.Equal(t, store.ScheduledEventFired, statusAtAfter, "AfterRecord runs after fireEvent persists status")
+
+		skipEvt := baseEvt
+		skipEvt.ID = "evt-skipped"
+		skipEvt.EventType = "act_skipped"
+		require.NoError(t, ms.CreateScheduledEvent(context.Background(), &skipEvt))
+		sched.fireEvent(context.Background(), skipEvt, false)
+		gotSkip := ms.getEvent("evt-skipped")
+		assert.Equal(t, store.ScheduledEventSkipped, gotSkip.Status)
+		assert.Equal(t, "window missed", gotSkip.Error)
+
+		detEvt := baseEvt
+		detEvt.ID = "evt-detached"
+		detEvt.EventType = "act_detached"
+		require.NoError(t, ms.CreateScheduledEvent(context.Background(), &detEvt))
+		sched.fireEvent(context.Background(), detEvt, false)
+		assert.Equal(t, store.ScheduledEventPending, ms.getEvent("evt-detached").Status, "Detached leaves recording to tracker")
+
+		unkEvt := baseEvt
+		unkEvt.ID = "evt-unknown"
+		unkEvt.EventType = "no_such_type"
+		require.NoError(t, ms.CreateScheduledEvent(context.Background(), &unkEvt))
+		sched.fireEvent(context.Background(), unkEvt, false)
+		gotUnk := ms.getEvent("evt-unknown")
+		assert.Equal(t, store.ScheduledEventFailed, gotUnk.Status)
+		assert.Equal(t, "unknown event type: no_such_type", gotUnk.Error)
+	})
+
+	t.Run("recurring runScheduleFire dispatches FireAction outcomes AfterRecord and Detached", func(t *testing.T) {
+		ms := newMockStore()
+		fs := &fireCoreScheduleStore{mockScheduledEventStore: ms}
+		srv := newEventHandlerTestServer(fs)
+		srv.scheduler = NewScheduler(fs, slog.Default())
+		srv.scheduler.srv = srv
+
+		rec := newFireCoreTestAuthority(ms, projectID)
+		now := time.Now().UTC()
+		next := now.Add(time.Hour)
+
+		statusAtAfter := ""
+		srv.RegisterAction(&fakeFireAction{
+			actionType: "rec_fired",
+			permission: scheduledMessagePermission,
+			fireFn: func(ctx context.Context, req hubfire.FireRequest, _ FireAuthorized) (hubfire.FireOutcome, error) {
+				gotExec, ok := ExecutorContextFromContext(ctx)
+				require.True(t, ok)
+				assert.Equal(t, ExecutorContext{Kind: "schedule_evaluator", ID: "schedule:sched-1"}, gotExec)
+				assert.Equal(t, hubfire.DefinitionKindSchedule, req.Authority.DefinitionKind)
+				assert.Equal(t, "sched-1", req.Authority.DefinitionID)
+				return hubfire.FireOutcome{
+					Status: hubfire.FireStatusFired,
+					AfterRecord: func(context.Context) {
+						statusAtAfter = ms.getEvent(req.Authority.FireID).Status
+					},
+				}, nil
+			},
+		})
+		srv.RegisterAction(&fakeFireAction{
+			actionType: "rec_detached",
+			permission: scheduledMessagePermission,
+			fireFn: func(context.Context, hubfire.FireRequest, FireAuthorized) (hubfire.FireOutcome, error) {
+				return hubfire.FireOutcome{Status: hubfire.FireStatusFired, Detached: true}, nil
+			},
+		})
+
+		schedRow := store.Schedule{ID: "sched-1", ProjectID: projectID, EventType: "rec_fired"}
+		evt := store.ScheduledEvent{
+			ID:                   "rec-evt-1",
+			ProjectID:            projectID,
+			ScheduleID:           "sched-1",
+			EventType:            "rec_fired",
+			FireAt:               now,
+			Status:               store.ScheduledEventPending,
+			InitiatorAttribution: rec.Attribution,
+			AuthorityCeiling:     rec.Ceiling,
+		}
+		require.NoError(t, ms.CreateScheduledEvent(context.Background(), &evt))
+		srv.runScheduleFire(context.Background(), slog.Default(), schedRow, evt, now, next, nil)
+		assert.Equal(t, store.ScheduledEventFired, ms.getEvent("rec-evt-1").Status)
+		assert.Equal(t, store.ScheduledEventFired, statusAtAfter)
+		assert.Equal(t, 1, fs.afterRunCalls)
+		assert.Empty(t, fs.lastRunErr)
+
+		detSched := store.Schedule{ID: "sched-2", ProjectID: projectID, EventType: "rec_detached"}
+		detEvt := evt
+		detEvt.ID = "rec-evt-2"
+		detEvt.ScheduleID = "sched-2"
+		detEvt.EventType = "rec_detached"
+		require.NoError(t, ms.CreateScheduledEvent(context.Background(), &detEvt))
+		srv.runScheduleFire(context.Background(), slog.Default(), detSched, detEvt, now, next, nil)
+		assert.Equal(t, store.ScheduledEventPending, ms.getEvent("rec-evt-2").Status, "Detached leaves recording to tracker")
+		assert.Equal(t, 1, fs.afterRunCalls, "UpdateScheduleAfterRun skipped when Detached is true")
+
+		unkSched := store.Schedule{ID: "sched-3", ProjectID: projectID, EventType: "missing_rec"}
+		unkEvt := evt
+		unkEvt.ID = "rec-evt-3"
+		unkEvt.ScheduleID = "sched-3"
+		unkEvt.EventType = "missing_rec"
+		require.NoError(t, ms.CreateScheduledEvent(context.Background(), &unkEvt))
+		srv.runScheduleFire(context.Background(), slog.Default(), unkSched, unkEvt, now, next, nil)
+		assert.Equal(t, store.ScheduledEventFailed, ms.getEvent("rec-evt-3").Status)
+		assert.Equal(t, "unknown event type: missing_rec", ms.getEvent("rec-evt-3").Error)
+		assert.Equal(t, 2, fs.afterRunCalls)
+		assert.Equal(t, "unknown event type: missing_rec", fs.lastRunErr)
+	})
 }

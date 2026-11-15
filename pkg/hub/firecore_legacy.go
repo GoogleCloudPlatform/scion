@@ -16,14 +16,24 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// Everything in this file is temporary Phase 1a compatibility scaffolding.
+// EventHandler processes a scheduled event of a specific type on the legacy
+// pre-FireAction signature.
 // Removed in PR 2 (ptone/scion#8029).
+type EventHandler func(ctx context.Context, evt store.ScheduledEvent) error
+
+// RegisterEventHandler registers a legacy EventHandler on s via legacyAction so
+// existing scheduler test suites remain unchanged in Phase 1a.
+// Removed in PR 2 (ptone/scion#8029).
+func (s *Scheduler) RegisterEventHandler(eventType string, handler EventHandler) {
+	s.RegisterAction(newLegacyAction(eventType, handler))
+}
 
 type legacyScheduledEventKey struct{}
 
@@ -170,5 +180,54 @@ func (a *legacyAction) run(ctx context.Context, req hubfire.FireRequest) hubfire
 		Status:      hubfire.FireStatusFailed,
 		Error:       err.Error(),
 		AfterRecord: afterFn,
+	}
+}
+
+func (s *Server) registerFireActions() {
+	s.RegisterAction(newLegacyAction("message", s.messageEventHandler()))
+	s.RegisterAction(newLegacyAction("dispatch_agent", s.dispatchAgentEventHandler()))
+	s.RegisterAction(newLegacyAction(scheduledEventTypeExec, s.execEventHandler()))
+}
+
+func (s *Server) registerSchedulerActions() {
+	s.scheduler.srv = s
+	s.scheduler.RegisterAction(newLegacyAction("message", s.messageEventHandler()))
+	s.scheduler.RegisterAction(newLegacyAction("dispatch_agent", s.dispatchAgentEventHandler()))
+	s.scheduler.RegisterAction(newLegacyAction(scheduledEventTypeExec, s.execEventHandler()))
+}
+
+func scheduledFireRequest(srv *Server, evt store.ScheduledEvent, exec ExecutorContext, run *wakeFireRun) hubfire.FireRequest {
+	return hubfire.FireRequest{
+		ProjectID:  evt.ProjectID,
+		Authority:  scheduledRecordedAuthority(evt),
+		ActionType: evt.EventType,
+		Payload:    evt.Payload,
+		Executor:   exec,
+		FireAt:     evt.FireAt,
+		Tracked:    newScheduledFireTracker(srv, evt.ID, run),
+	}
+}
+
+func scheduledFireError(eventType string, out hubfire.FireOutcome) error {
+	if out.Detached {
+		switch out.Status {
+		case hubfire.FireStatusSkipped:
+			return outcomeRecorded(skipScheduledFire(out.Error))
+		case hubfire.FireStatusFailed, hubfire.FireStatusRefused:
+			return outcomeRecorded(errors.New(out.Error))
+		default:
+			return outcomeRecorded(nil)
+		}
+	}
+	switch out.Status {
+	case hubfire.FireStatusFired:
+		return nil
+	case hubfire.FireStatusSkipped:
+		return skipScheduledFire(out.Error)
+	default:
+		if out.Error == unknownActionTypeError(eventType) {
+			return fmt.Errorf("unknown event type: %s", eventType)
+		}
+		return errors.New(out.Error)
 	}
 }

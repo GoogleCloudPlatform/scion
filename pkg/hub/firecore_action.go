@@ -58,6 +58,13 @@ type FirePayloadValidator interface {
 	ValidatePayload(req hubfire.FireRequest) error
 }
 
+// fireServerAction is implemented by server-owned FireActions so standalone
+// Scheduler unit tests without Scheduler.srv set still resolve authority and
+// shutdown tracking against the action's Server.
+type fireServerAction interface {
+	server() *Server
+}
+
 type actionRegistry struct {
 	mu      sync.RWMutex
 	actions map[string]FireAction
@@ -97,10 +104,21 @@ func (s *Server) RegisterAction(a FireAction) {
 	s.actions.Register(a)
 }
 
-// LookupAction returns the FireAction registered for actionType.
+// LookupAction returns the FireAction registered for actionType. When s has a
+// scheduler with an explicit action registration (including test overrides via
+// RegisterEventHandler), that registration takes precedence over the server
+// defaults.
 func (s *Server) LookupAction(actionType string) (FireAction, bool) {
 	if s == nil {
 		return nil, false
+	}
+	s.mu.RLock()
+	sched := s.scheduler
+	s.mu.RUnlock()
+	if sched != nil {
+		if a, ok := sched.LookupAction(actionType); ok {
+			return a, true
+		}
 	}
 	return s.actions.Lookup(actionType)
 }
@@ -163,10 +181,20 @@ func (s *Server) fireActionWith(ctx context.Context, req hubfire.FireRequest, ac
 		}
 	}
 	if s == nil {
+		if sa, ok := action.(fireServerAction); ok {
+			s = sa.server()
+		}
+	}
+	if s == nil {
 		return hubfire.FireOutcome{
 			Status: hubfire.FireStatusFailed,
 			Error:  "fire action: server not configured",
 		}
+	}
+	if req.Tracked == nil {
+		req.Tracked = newScheduledFireTracker(s, req.Authority.FireID, nil)
+	} else if st, ok := req.Tracked.(*scheduledFireTracker); ok && st.srv == nil {
+		st.srv = s
 	}
 	auth, identity, err := s.resolveRecordedAuthority(ctx, req.Authority, req.ProjectID, action.Permission())
 	if err != nil {

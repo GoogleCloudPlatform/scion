@@ -55,6 +55,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/keymaterial"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/portview"
@@ -3968,6 +3969,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 
 	srv.oidcHandlers = NewOIDCHandlers(oidcDeps{srv})
 
+	srv.registerFireActions()
 	srv.registerRoutes()
 
 	return srv, nil
@@ -7418,50 +7420,61 @@ var scheduledWakeFireStopGrace = 5 * time.Second
 // records errScheduledWakeShutdown.
 func (s *Server) runScheduleFire(ctx context.Context, log *slog.Logger, sched store.Schedule, evt store.ScheduledEvent, now, nextRunAt time.Time, run *wakeFireRun) {
 	detachedFire := run != nil
-	afterRecord := &scheduledAfterRecord{}
-	ctx = context.WithValue(ctx, scheduledAfterRecordKey{}, afterRecord)
-	defer afterRecord.run()
-
 	var (
 		errMsg   string
 		skipped  bool
 		recorded bool
+		afterFn  func(context.Context)
 	)
-	handler, ok := s.scheduler.GetEventHandler(sched.EventType)
-	if !ok {
-		errMsg = fmt.Sprintf("unknown event type: %s", sched.EventType)
-		log.Error("schedule-evaluator: unknown event type", "event_type", sched.EventType)
-	} else {
-		// E.2b: mark this as deferred execution of the schedule, distinct
-		// from the initiator attribution just copied onto evt above.
-		handlerCtx, cancel := context.WithTimeout(
-			ContextWithExecutor(ctx, ExecutorContext{Kind: "schedule_evaluator", ID: "schedule:" + sched.ID}),
-			scheduledEventHandlerTimeout)
-		// A detached fire runs on its own goroutine (executeSchedule), outside
-		// the scheduler's panic recovery: contain a handler panic here, as
-		// fireEvent does, and record it as the fire's failure.
-		handlerErr := func() (err error) {
-			defer func() {
-				if r := recover(); r != nil {
-					err = fmt.Errorf("handler panicked: %v", r)
-					log.Error("schedule-evaluator: event handler panicked", "panic", r)
-				}
-			}()
-			return handler(handlerCtx, evt)
-		}()
-		if handlerErr == nil {
-			log.Info("schedule-evaluator: schedule fired successfully")
-		} else if outcome, ok := asOutcomeRecorded(handlerErr); ok {
-			recorded = true
-			log.Info("schedule-evaluator: event outcome recorded by its handler", "outcome", outcome)
-		} else if reason, ok := asScheduledSkip(handlerErr); ok {
-			skipped, errMsg = true, reason
-			log.Info("schedule-evaluator: schedule fire skipped", "reason", reason)
-		} else {
-			errMsg = handlerErr.Error()
-			log.Warn("schedule-evaluator: event handler failed", "error", handlerErr)
+	defer func() {
+		if afterFn != nil {
+			afterFn(context.WithoutCancel(ctx))
 		}
-		cancel()
+	}()
+	// E.2b: mark this as deferred execution of the schedule, distinct from the
+	// initiator attribution just copied onto evt above.
+	exec := ExecutorContext{Kind: "schedule_evaluator", ID: "schedule:" + sched.ID}
+	req := scheduledFireRequest(s, evt, exec, run)
+	if req.ActionType == "" {
+		req.ActionType = sched.EventType
+	}
+	handlerCtx, cancel := context.WithTimeout(
+		withFireHistoryCreator(withLegacyScheduledEvent(ContextWithExecutor(ctx, exec), evt), evt.CreatedBy),
+		scheduledEventHandlerTimeout)
+	// A detached fire runs on its own goroutine (executeSchedule), outside the
+	// scheduler's panic recovery: contain a handler panic here, as fireEvent
+	// does, and record it as the fire's failure.
+	var out hubfire.FireOutcome
+	panicked := false
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				panicked = true
+				errMsg = fmt.Sprintf("handler panicked: %v", r)
+				log.Error("schedule-evaluator: event handler panicked", "panic", r)
+			}
+		}()
+		out = s.fireAction(handlerCtx, req)
+	}()
+	cancel()
+	afterFn = out.AfterRecord
+	if !panicked {
+		switch {
+		case out.Detached:
+			recorded = true
+			log.Info("schedule-evaluator: event outcome recorded by its handler", "status", out.Status)
+		case out.Error == unknownActionTypeError(req.ActionType):
+			errMsg = fmt.Sprintf("unknown event type: %s", req.ActionType)
+			log.Error("schedule-evaluator: unknown event type", "event_type", req.ActionType)
+		case out.Status == hubfire.FireStatusSkipped:
+			skipped, errMsg = true, out.Error
+			log.Info("schedule-evaluator: schedule fire skipped", "reason", out.Error)
+		case out.Status != hubfire.FireStatusFired:
+			errMsg = out.Error
+			log.Warn("schedule-evaluator: event handler failed", "error", errMsg)
+		default:
+			log.Info("schedule-evaluator: schedule fired successfully")
+		}
 	}
 
 	if recorded {
@@ -7552,9 +7565,7 @@ func (s *Server) registerSchedulerHandlers() {
 	// applied live, and the handler skips the agent purge while it is 0.
 	// The scheduled-event purge inside it always runs.
 	s.scheduler.RegisterRecurringSingleton("soft-delete-purge", 60, store.LockSoftDeletePurge, s.purgeHandler())
-	s.scheduler.RegisterEventHandler("message", s.messageEventHandler())
-	s.scheduler.RegisterEventHandler("dispatch_agent", s.dispatchAgentEventHandler())
-	s.scheduler.RegisterEventHandler(scheduledEventTypeExec, s.execEventHandler())
+	s.registerSchedulerActions()
 	s.scheduler.RegisterRecurringSingleton("scheduled-exec-run-sweep", 1, store.LockScheduledExecRunSweep, s.scheduledExecRunSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("schedule-evaluator", 1, store.LockScheduleEvaluator, s.evaluateSchedulesHandler())
 	s.scheduler.RegisterRecurringSingleton("broker-heartbeat-timeout", 5, store.LockBrokerHeartbeatTimeout, s.brokerHeartbeatTimeoutHandler())
@@ -7704,6 +7715,7 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// The reads in registerSchedulerHandlers below run on this
 	// goroutine, after this write, so they need no lock.
 	sched := NewScheduler(s.store, logging.Subsystem("hub.scheduler"), schedOpts...)
+	sched.srv = s
 	s.mu.Lock()
 	s.scheduler = sched
 	s.mu.Unlock()
