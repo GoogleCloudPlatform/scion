@@ -120,4 +120,8 @@ type FireOutcome struct {
 	ResultRef string // message id, created agent id, or exec run id
 	// AfterRecord runs after the caller has persisted the fire outcome.
 	AfterRecord func(ctx context.Context)
+	// Detached indicates that the fire's outcome will be recorded later by its
+	// tracker (for example, wake and recurring exec fires on the once-write
+	// path); the caller must not record the outcome immediately.
+	Detached bool
 }
