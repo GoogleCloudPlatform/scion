@@ -45,7 +45,7 @@ func (SystemOneInstance) Fields() []ent.Field {
 			Comment("Registered adapter name (e.g. typesafe, google-genai, openai-compat, anthropic, bedrock)."),
 		field.String("model").
 			Default("").
-			Comment("Adapter-specific model identifier; empty for fixed-model adapters such as TypeSafe."),
+			Comment("Adapter-specific model identifier (e.g. jev-1.14.0 for TypeSafe); required when the adapter expects one."),
 		field.String("endpoint").
 			NotEmpty().
 			Comment("Base URL for provider calls; required so no vendor URL is hardcoded in core."),

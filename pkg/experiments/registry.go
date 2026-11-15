@@ -500,14 +500,12 @@ const WelcomeProject = "hub.welcome_project"
 // it is off.
 const ProjectDecisions = "web.project_decisions"
 
-// SystemOne gates Hub-side System One message rule evaluation and provider
-// instance management (ptone/scion#8044):
-// /api/v1/admin/system-one/instances[/{name}[/probe]],
-// scion admin system-one instance create|list|delete|probe, and System One
-// condition evaluation on message delivery. While it is off, the System One
-// routes answer 404, rules declaring a systemOne condition are skipped as
-// non-matching, and stored provider instances are kept. The design names it
-// "hub.system-one"; NamePattern allows no hyphen.
+// SystemOne gates Hub-scoped System One provider instance administration and
+// probing (ptone/scion#8044): /api/v1/admin/system-one/instances[/{name}[/probe]]
+// and scion admin system-one instance create|list|delete|probe, with runtime
+// probe evaluations bounded by server.hub.system_one.max_eval_time. While it is
+// off, the System One admin routes answer 404 and stored provider instances are
+// kept. The design names it "hub.system-one"; NamePattern allows no hyphen.
 const SystemOne = "hub.system_one"
 
 // compiled is the production experiment list. It is reachable only through
@@ -1006,7 +1004,7 @@ var compiled = []Experiment{
 	{
 		Name:        SystemOne,
 		Title:       "System One message guardrails",
-		Description: "Enables Hub-scoped System One provider instances (/api/v1/admin/system-one/instances[/{name}[/probe]] and scion admin system-one instance create|list|delete|probe) and semantic message rule evaluation on message delivery. While off, the System One routes answer 404, rules carrying a systemOne condition are skipped as non-matching, and stored provider instances are kept.",
+		Description: "Enables Hub-scoped System One provider instance administration and probing (/api/v1/admin/system-one/instances[/{name}[/probe]] and scion admin system-one instance create|list|delete|probe), with runtime probe evaluations bounded by server.hub.system_one.max_eval_time. While off, the System One admin routes answer 404 and stored provider instances are kept.",
 		Default:     false,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,

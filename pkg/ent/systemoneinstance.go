@@ -23,7 +23,7 @@ type SystemOneInstance struct {
 	Name string `json:"name,omitempty"`
 	// Registered adapter name (e.g. typesafe, google-genai, openai-compat, anthropic, bedrock).
 	Adapter string `json:"adapter,omitempty"`
-	// Adapter-specific model identifier; empty for fixed-model adapters such as TypeSafe.
+	// Adapter-specific model identifier (e.g. jev-1.14.0 for TypeSafe); required when the adapter expects one.
 	Model string `json:"model,omitempty"`
 	// Base URL for provider calls; required so no vendor URL is hardcoded in core.
 	Endpoint string `json:"endpoint,omitempty"`
