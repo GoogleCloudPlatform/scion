@@ -33,7 +33,7 @@ import (
 // expectedTableCount is the number of domain tables in the hub schema
 // (excluding the schema_migrations bookkeeping table). The fixture must cover
 // every one of them.
-const expectedTableCount = 98
+const expectedTableCount = 99
 
 // TestFixtureCoverage is the CI coverage gate: it generates the fixture and
 // fails if any domain table has zero rows.
@@ -173,6 +173,12 @@ func TestFixtureLoadable(t *testing.T) {
 	excluded, err = composite.IsProjectVisitorExcluded(ctx, visitorRuleID, federatedUserID)
 	require.NoError(t, err)
 	assert.False(t, excluded)
+
+	dqStats, err := composite.DurableQueueStats(ctx, "fixture.echo", projectID, baseTime)
+	require.NoError(t, err, "durable_queue_items fixture row must be readable via DurableQueueStore")
+	assert.Equal(t, int64(1), dqStats.Pending)
+	require.NotNil(t, dqStats.Oldest)
+	assert.True(t, dqStats.Oldest.Equal(baseTime))
 }
 
 // TestFixtureDeterministic verifies the spec produces a stable set of row

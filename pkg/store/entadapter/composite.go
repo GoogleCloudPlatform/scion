@@ -128,6 +128,7 @@ type CompositeStore struct {
 	*HubInstanceStore
 	*TestIdentityDelegationStore
 	*UserDeletionStore
+	*DurableQueueStore
 
 	client *ent.Client
 	inTx   bool // true when this CompositeStore wraps a transaction
@@ -271,6 +272,7 @@ func newTxCompositeStore(tx *ent.Tx) *CompositeStore {
 	txStore.SecretStore.inTx = true
 	txStore.PendingSecretStore.inTx = true
 	txStore.PendingSecretStore.txFencedWrite = &txStore.SecretStore.txFencedWrite
+	txStore.DurableQueueStore.inTx = true
 	return txStore
 }
 
@@ -323,6 +325,7 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		HubInstanceStore:            NewHubInstanceStore(client),
 		TestIdentityDelegationStore: NewTestIdentityDelegationStore(client),
 		UserDeletionStore:           NewUserDeletionStore(client),
+		DurableQueueStore:           NewDurableQueueStore(client),
 		client:                      client,
 	}
 }

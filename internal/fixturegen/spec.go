@@ -1151,5 +1151,17 @@ func Spec() []TableFixture {
 				"attempts": 1, "last_error": "", "updated_at": baseTime.Add(9 * time.Minute),
 			},
 		}},
+
+		// ---- Durable delivery queue items (pkg/durablequeue, ptone/scion#8025) ----
+		{Table: "durable_queue_items", Rows: []row{
+			{
+				"seq": int64(1), "kind": "fixture.echo", "dedup_key": "dq000000-0000-0000-0000-000000000001",
+				"project_id": projectID, "payload": `{"echo":"fixture"}`,
+				"not_before": baseTime, "created_at": baseTime,
+				"attempts": 1, "permanent_failures": 0,
+				"next_attempt_at": baseTime.Add(time.Minute),
+				"lease_owner":     "", "lease_until": nil, "last_error": "unavailable: fixture",
+			},
+		}},
 	}
 }

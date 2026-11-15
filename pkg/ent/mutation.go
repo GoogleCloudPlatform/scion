@@ -47,6 +47,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionkeycounter"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationadoption"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationedge"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/durablequeueitem"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entitlementbinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/envvar"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/externalidentity"
@@ -160,6 +161,7 @@ const (
 	TypeDecisionKeyCounter            = "DecisionKeyCounter"
 	TypeDelegationAdoption            = "DelegationAdoption"
 	TypeDelegationEdge                = "DelegationEdge"
+	TypeDurableQueueItem              = "DurableQueueItem"
 	TypeEntitlementBinding            = "EntitlementBinding"
 	TypeEnvVar                        = "EnvVar"
 	TypeExternalIdentity              = "ExternalIdentity"
@@ -45563,6 +45565,1023 @@ func (m *DelegationEdgeMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *DelegationEdgeMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown DelegationEdge edge %s", name)
+}
+
+// DurableQueueItemMutation represents an operation that mutates the DurableQueueItem nodes in the graph.
+type DurableQueueItemMutation struct {
+	config
+	op                    Op
+	typ                   string
+	id                    *int64
+	kind                  *string
+	dedup_key             *string
+	project_id            *string
+	payload               *string
+	not_before            *time.Time
+	created_at            *time.Time
+	attempts              *int
+	addattempts           *int
+	permanent_failures    *int
+	addpermanent_failures *int
+	next_attempt_at       *time.Time
+	lease_owner           *string
+	lease_until           *time.Time
+	last_error            *string
+	clearedFields         map[string]struct{}
+	done                  bool
+	oldValue              func(context.Context) (*DurableQueueItem, error)
+	predicates            []predicate.DurableQueueItem
+}
+
+var _ ent.Mutation = (*DurableQueueItemMutation)(nil)
+
+// durablequeueitemOption allows management of the mutation configuration using functional options.
+type durablequeueitemOption func(*DurableQueueItemMutation)
+
+// newDurableQueueItemMutation creates new mutation for the DurableQueueItem entity.
+func newDurableQueueItemMutation(c config, op Op, opts ...durablequeueitemOption) *DurableQueueItemMutation {
+	m := &DurableQueueItemMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeDurableQueueItem,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withDurableQueueItemID sets the ID field of the mutation.
+func withDurableQueueItemID(id int64) durablequeueitemOption {
+	return func(m *DurableQueueItemMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *DurableQueueItem
+		)
+		m.oldValue = func(ctx context.Context) (*DurableQueueItem, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().DurableQueueItem.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withDurableQueueItem sets the old DurableQueueItem of the mutation.
+func withDurableQueueItem(node *DurableQueueItem) durablequeueitemOption {
+	return func(m *DurableQueueItemMutation) {
+		m.oldValue = func(context.Context) (*DurableQueueItem, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m DurableQueueItemMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m DurableQueueItemMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of DurableQueueItem entities.
+func (m *DurableQueueItemMutation) SetID(id int64) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *DurableQueueItemMutation) ID() (id int64, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *DurableQueueItemMutation) IDs(ctx context.Context) ([]int64, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []int64{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().DurableQueueItem.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetKind sets the "kind" field.
+func (m *DurableQueueItemMutation) SetKind(s string) {
+	m.kind = &s
+}
+
+// Kind returns the value of the "kind" field in the mutation.
+func (m *DurableQueueItemMutation) Kind() (r string, exists bool) {
+	v := m.kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldKind returns the old "kind" field's value of the DurableQueueItem entity.
+// If the DurableQueueItem object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DurableQueueItemMutation) OldKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldKind: %w", err)
+	}
+	return oldValue.Kind, nil
+}
+
+// ResetKind resets all changes to the "kind" field.
+func (m *DurableQueueItemMutation) ResetKind() {
+	m.kind = nil
+}
+
+// SetDedupKey sets the "dedup_key" field.
+func (m *DurableQueueItemMutation) SetDedupKey(s string) {
+	m.dedup_key = &s
+}
+
+// DedupKey returns the value of the "dedup_key" field in the mutation.
+func (m *DurableQueueItemMutation) DedupKey() (r string, exists bool) {
+	v := m.dedup_key
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDedupKey returns the old "dedup_key" field's value of the DurableQueueItem entity.
+// If the DurableQueueItem object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DurableQueueItemMutation) OldDedupKey(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDedupKey is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDedupKey requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDedupKey: %w", err)
+	}
+	return oldValue.DedupKey, nil
+}
+
+// ResetDedupKey resets all changes to the "dedup_key" field.
+func (m *DurableQueueItemMutation) ResetDedupKey() {
+	m.dedup_key = nil
+}
+
+// SetProjectID sets the "project_id" field.
+func (m *DurableQueueItemMutation) SetProjectID(s string) {
+	m.project_id = &s
+}
+
+// ProjectID returns the value of the "project_id" field in the mutation.
+func (m *DurableQueueItemMutation) ProjectID() (r string, exists bool) {
+	v := m.project_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldProjectID returns the old "project_id" field's value of the DurableQueueItem entity.
+// If the DurableQueueItem object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DurableQueueItemMutation) OldProjectID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldProjectID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldProjectID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldProjectID: %w", err)
+	}
+	return oldValue.ProjectID, nil
+}
+
+// ResetProjectID resets all changes to the "project_id" field.
+func (m *DurableQueueItemMutation) ResetProjectID() {
+	m.project_id = nil
+}
+
+// SetPayload sets the "payload" field.
+func (m *DurableQueueItemMutation) SetPayload(s string) {
+	m.payload = &s
+}
+
+// Payload returns the value of the "payload" field in the mutation.
+func (m *DurableQueueItemMutation) Payload() (r string, exists bool) {
+	v := m.payload
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPayload returns the old "payload" field's value of the DurableQueueItem entity.
+// If the DurableQueueItem object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DurableQueueItemMutation) OldPayload(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPayload is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPayload requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPayload: %w", err)
+	}
+	return oldValue.Payload, nil
+}
+
+// ResetPayload resets all changes to the "payload" field.
+func (m *DurableQueueItemMutation) ResetPayload() {
+	m.payload = nil
+}
+
+// SetNotBefore sets the "not_before" field.
+func (m *DurableQueueItemMutation) SetNotBefore(t time.Time) {
+	m.not_before = &t
+}
+
+// NotBefore returns the value of the "not_before" field in the mutation.
+func (m *DurableQueueItemMutation) NotBefore() (r time.Time, exists bool) {
+	v := m.not_before
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldNotBefore returns the old "not_before" field's value of the DurableQueueItem entity.
+// If the DurableQueueItem object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DurableQueueItemMutation) OldNotBefore(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldNotBefore is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldNotBefore requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldNotBefore: %w", err)
+	}
+	return oldValue.NotBefore, nil
+}
+
+// ResetNotBefore resets all changes to the "not_before" field.
+func (m *DurableQueueItemMutation) ResetNotBefore() {
+	m.not_before = nil
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *DurableQueueItemMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *DurableQueueItemMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the DurableQueueItem entity.
+// If the DurableQueueItem object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DurableQueueItemMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *DurableQueueItemMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// SetAttempts sets the "attempts" field.
+func (m *DurableQueueItemMutation) SetAttempts(i int) {
+	m.attempts = &i
+	m.addattempts = nil
+}
+
+// Attempts returns the value of the "attempts" field in the mutation.
+func (m *DurableQueueItemMutation) Attempts() (r int, exists bool) {
+	v := m.attempts
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAttempts returns the old "attempts" field's value of the DurableQueueItem entity.
+// If the DurableQueueItem object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DurableQueueItemMutation) OldAttempts(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAttempts is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAttempts requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAttempts: %w", err)
+	}
+	return oldValue.Attempts, nil
+}
+
+// AddAttempts adds i to the "attempts" field.
+func (m *DurableQueueItemMutation) AddAttempts(i int) {
+	if m.addattempts != nil {
+		*m.addattempts += i
+	} else {
+		m.addattempts = &i
+	}
+}
+
+// AddedAttempts returns the value that was added to the "attempts" field in this mutation.
+func (m *DurableQueueItemMutation) AddedAttempts() (r int, exists bool) {
+	v := m.addattempts
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetAttempts resets all changes to the "attempts" field.
+func (m *DurableQueueItemMutation) ResetAttempts() {
+	m.attempts = nil
+	m.addattempts = nil
+}
+
+// SetPermanentFailures sets the "permanent_failures" field.
+func (m *DurableQueueItemMutation) SetPermanentFailures(i int) {
+	m.permanent_failures = &i
+	m.addpermanent_failures = nil
+}
+
+// PermanentFailures returns the value of the "permanent_failures" field in the mutation.
+func (m *DurableQueueItemMutation) PermanentFailures() (r int, exists bool) {
+	v := m.permanent_failures
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPermanentFailures returns the old "permanent_failures" field's value of the DurableQueueItem entity.
+// If the DurableQueueItem object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DurableQueueItemMutation) OldPermanentFailures(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPermanentFailures is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPermanentFailures requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPermanentFailures: %w", err)
+	}
+	return oldValue.PermanentFailures, nil
+}
+
+// AddPermanentFailures adds i to the "permanent_failures" field.
+func (m *DurableQueueItemMutation) AddPermanentFailures(i int) {
+	if m.addpermanent_failures != nil {
+		*m.addpermanent_failures += i
+	} else {
+		m.addpermanent_failures = &i
+	}
+}
+
+// AddedPermanentFailures returns the value that was added to the "permanent_failures" field in this mutation.
+func (m *DurableQueueItemMutation) AddedPermanentFailures() (r int, exists bool) {
+	v := m.addpermanent_failures
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetPermanentFailures resets all changes to the "permanent_failures" field.
+func (m *DurableQueueItemMutation) ResetPermanentFailures() {
+	m.permanent_failures = nil
+	m.addpermanent_failures = nil
+}
+
+// SetNextAttemptAt sets the "next_attempt_at" field.
+func (m *DurableQueueItemMutation) SetNextAttemptAt(t time.Time) {
+	m.next_attempt_at = &t
+}
+
+// NextAttemptAt returns the value of the "next_attempt_at" field in the mutation.
+func (m *DurableQueueItemMutation) NextAttemptAt() (r time.Time, exists bool) {
+	v := m.next_attempt_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldNextAttemptAt returns the old "next_attempt_at" field's value of the DurableQueueItem entity.
+// If the DurableQueueItem object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DurableQueueItemMutation) OldNextAttemptAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldNextAttemptAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldNextAttemptAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldNextAttemptAt: %w", err)
+	}
+	return oldValue.NextAttemptAt, nil
+}
+
+// ResetNextAttemptAt resets all changes to the "next_attempt_at" field.
+func (m *DurableQueueItemMutation) ResetNextAttemptAt() {
+	m.next_attempt_at = nil
+}
+
+// SetLeaseOwner sets the "lease_owner" field.
+func (m *DurableQueueItemMutation) SetLeaseOwner(s string) {
+	m.lease_owner = &s
+}
+
+// LeaseOwner returns the value of the "lease_owner" field in the mutation.
+func (m *DurableQueueItemMutation) LeaseOwner() (r string, exists bool) {
+	v := m.lease_owner
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLeaseOwner returns the old "lease_owner" field's value of the DurableQueueItem entity.
+// If the DurableQueueItem object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DurableQueueItemMutation) OldLeaseOwner(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLeaseOwner is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLeaseOwner requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLeaseOwner: %w", err)
+	}
+	return oldValue.LeaseOwner, nil
+}
+
+// ResetLeaseOwner resets all changes to the "lease_owner" field.
+func (m *DurableQueueItemMutation) ResetLeaseOwner() {
+	m.lease_owner = nil
+}
+
+// SetLeaseUntil sets the "lease_until" field.
+func (m *DurableQueueItemMutation) SetLeaseUntil(t time.Time) {
+	m.lease_until = &t
+}
+
+// LeaseUntil returns the value of the "lease_until" field in the mutation.
+func (m *DurableQueueItemMutation) LeaseUntil() (r time.Time, exists bool) {
+	v := m.lease_until
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLeaseUntil returns the old "lease_until" field's value of the DurableQueueItem entity.
+// If the DurableQueueItem object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DurableQueueItemMutation) OldLeaseUntil(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLeaseUntil is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLeaseUntil requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLeaseUntil: %w", err)
+	}
+	return oldValue.LeaseUntil, nil
+}
+
+// ClearLeaseUntil clears the value of the "lease_until" field.
+func (m *DurableQueueItemMutation) ClearLeaseUntil() {
+	m.lease_until = nil
+	m.clearedFields[durablequeueitem.FieldLeaseUntil] = struct{}{}
+}
+
+// LeaseUntilCleared returns if the "lease_until" field was cleared in this mutation.
+func (m *DurableQueueItemMutation) LeaseUntilCleared() bool {
+	_, ok := m.clearedFields[durablequeueitem.FieldLeaseUntil]
+	return ok
+}
+
+// ResetLeaseUntil resets all changes to the "lease_until" field.
+func (m *DurableQueueItemMutation) ResetLeaseUntil() {
+	m.lease_until = nil
+	delete(m.clearedFields, durablequeueitem.FieldLeaseUntil)
+}
+
+// SetLastError sets the "last_error" field.
+func (m *DurableQueueItemMutation) SetLastError(s string) {
+	m.last_error = &s
+}
+
+// LastError returns the value of the "last_error" field in the mutation.
+func (m *DurableQueueItemMutation) LastError() (r string, exists bool) {
+	v := m.last_error
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLastError returns the old "last_error" field's value of the DurableQueueItem entity.
+// If the DurableQueueItem object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DurableQueueItemMutation) OldLastError(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLastError is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLastError requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLastError: %w", err)
+	}
+	return oldValue.LastError, nil
+}
+
+// ResetLastError resets all changes to the "last_error" field.
+func (m *DurableQueueItemMutation) ResetLastError() {
+	m.last_error = nil
+}
+
+// Where appends a list predicates to the DurableQueueItemMutation builder.
+func (m *DurableQueueItemMutation) Where(ps ...predicate.DurableQueueItem) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the DurableQueueItemMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *DurableQueueItemMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.DurableQueueItem, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *DurableQueueItemMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *DurableQueueItemMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (DurableQueueItem).
+func (m *DurableQueueItemMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *DurableQueueItemMutation) Fields() []string {
+	fields := make([]string, 0, 12)
+	if m.kind != nil {
+		fields = append(fields, durablequeueitem.FieldKind)
+	}
+	if m.dedup_key != nil {
+		fields = append(fields, durablequeueitem.FieldDedupKey)
+	}
+	if m.project_id != nil {
+		fields = append(fields, durablequeueitem.FieldProjectID)
+	}
+	if m.payload != nil {
+		fields = append(fields, durablequeueitem.FieldPayload)
+	}
+	if m.not_before != nil {
+		fields = append(fields, durablequeueitem.FieldNotBefore)
+	}
+	if m.created_at != nil {
+		fields = append(fields, durablequeueitem.FieldCreatedAt)
+	}
+	if m.attempts != nil {
+		fields = append(fields, durablequeueitem.FieldAttempts)
+	}
+	if m.permanent_failures != nil {
+		fields = append(fields, durablequeueitem.FieldPermanentFailures)
+	}
+	if m.next_attempt_at != nil {
+		fields = append(fields, durablequeueitem.FieldNextAttemptAt)
+	}
+	if m.lease_owner != nil {
+		fields = append(fields, durablequeueitem.FieldLeaseOwner)
+	}
+	if m.lease_until != nil {
+		fields = append(fields, durablequeueitem.FieldLeaseUntil)
+	}
+	if m.last_error != nil {
+		fields = append(fields, durablequeueitem.FieldLastError)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *DurableQueueItemMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case durablequeueitem.FieldKind:
+		return m.Kind()
+	case durablequeueitem.FieldDedupKey:
+		return m.DedupKey()
+	case durablequeueitem.FieldProjectID:
+		return m.ProjectID()
+	case durablequeueitem.FieldPayload:
+		return m.Payload()
+	case durablequeueitem.FieldNotBefore:
+		return m.NotBefore()
+	case durablequeueitem.FieldCreatedAt:
+		return m.CreatedAt()
+	case durablequeueitem.FieldAttempts:
+		return m.Attempts()
+	case durablequeueitem.FieldPermanentFailures:
+		return m.PermanentFailures()
+	case durablequeueitem.FieldNextAttemptAt:
+		return m.NextAttemptAt()
+	case durablequeueitem.FieldLeaseOwner:
+		return m.LeaseOwner()
+	case durablequeueitem.FieldLeaseUntil:
+		return m.LeaseUntil()
+	case durablequeueitem.FieldLastError:
+		return m.LastError()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *DurableQueueItemMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case durablequeueitem.FieldKind:
+		return m.OldKind(ctx)
+	case durablequeueitem.FieldDedupKey:
+		return m.OldDedupKey(ctx)
+	case durablequeueitem.FieldProjectID:
+		return m.OldProjectID(ctx)
+	case durablequeueitem.FieldPayload:
+		return m.OldPayload(ctx)
+	case durablequeueitem.FieldNotBefore:
+		return m.OldNotBefore(ctx)
+	case durablequeueitem.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	case durablequeueitem.FieldAttempts:
+		return m.OldAttempts(ctx)
+	case durablequeueitem.FieldPermanentFailures:
+		return m.OldPermanentFailures(ctx)
+	case durablequeueitem.FieldNextAttemptAt:
+		return m.OldNextAttemptAt(ctx)
+	case durablequeueitem.FieldLeaseOwner:
+		return m.OldLeaseOwner(ctx)
+	case durablequeueitem.FieldLeaseUntil:
+		return m.OldLeaseUntil(ctx)
+	case durablequeueitem.FieldLastError:
+		return m.OldLastError(ctx)
+	}
+	return nil, fmt.Errorf("unknown DurableQueueItem field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *DurableQueueItemMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case durablequeueitem.FieldKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetKind(v)
+		return nil
+	case durablequeueitem.FieldDedupKey:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDedupKey(v)
+		return nil
+	case durablequeueitem.FieldProjectID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetProjectID(v)
+		return nil
+	case durablequeueitem.FieldPayload:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPayload(v)
+		return nil
+	case durablequeueitem.FieldNotBefore:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetNotBefore(v)
+		return nil
+	case durablequeueitem.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	case durablequeueitem.FieldAttempts:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAttempts(v)
+		return nil
+	case durablequeueitem.FieldPermanentFailures:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPermanentFailures(v)
+		return nil
+	case durablequeueitem.FieldNextAttemptAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetNextAttemptAt(v)
+		return nil
+	case durablequeueitem.FieldLeaseOwner:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLeaseOwner(v)
+		return nil
+	case durablequeueitem.FieldLeaseUntil:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLeaseUntil(v)
+		return nil
+	case durablequeueitem.FieldLastError:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLastError(v)
+		return nil
+	}
+	return fmt.Errorf("unknown DurableQueueItem field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *DurableQueueItemMutation) AddedFields() []string {
+	var fields []string
+	if m.addattempts != nil {
+		fields = append(fields, durablequeueitem.FieldAttempts)
+	}
+	if m.addpermanent_failures != nil {
+		fields = append(fields, durablequeueitem.FieldPermanentFailures)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *DurableQueueItemMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case durablequeueitem.FieldAttempts:
+		return m.AddedAttempts()
+	case durablequeueitem.FieldPermanentFailures:
+		return m.AddedPermanentFailures()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *DurableQueueItemMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case durablequeueitem.FieldAttempts:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddAttempts(v)
+		return nil
+	case durablequeueitem.FieldPermanentFailures:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddPermanentFailures(v)
+		return nil
+	}
+	return fmt.Errorf("unknown DurableQueueItem numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *DurableQueueItemMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(durablequeueitem.FieldLeaseUntil) {
+		fields = append(fields, durablequeueitem.FieldLeaseUntil)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *DurableQueueItemMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *DurableQueueItemMutation) ClearField(name string) error {
+	switch name {
+	case durablequeueitem.FieldLeaseUntil:
+		m.ClearLeaseUntil()
+		return nil
+	}
+	return fmt.Errorf("unknown DurableQueueItem nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *DurableQueueItemMutation) ResetField(name string) error {
+	switch name {
+	case durablequeueitem.FieldKind:
+		m.ResetKind()
+		return nil
+	case durablequeueitem.FieldDedupKey:
+		m.ResetDedupKey()
+		return nil
+	case durablequeueitem.FieldProjectID:
+		m.ResetProjectID()
+		return nil
+	case durablequeueitem.FieldPayload:
+		m.ResetPayload()
+		return nil
+	case durablequeueitem.FieldNotBefore:
+		m.ResetNotBefore()
+		return nil
+	case durablequeueitem.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	case durablequeueitem.FieldAttempts:
+		m.ResetAttempts()
+		return nil
+	case durablequeueitem.FieldPermanentFailures:
+		m.ResetPermanentFailures()
+		return nil
+	case durablequeueitem.FieldNextAttemptAt:
+		m.ResetNextAttemptAt()
+		return nil
+	case durablequeueitem.FieldLeaseOwner:
+		m.ResetLeaseOwner()
+		return nil
+	case durablequeueitem.FieldLeaseUntil:
+		m.ResetLeaseUntil()
+		return nil
+	case durablequeueitem.FieldLastError:
+		m.ResetLastError()
+		return nil
+	}
+	return fmt.Errorf("unknown DurableQueueItem field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *DurableQueueItemMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *DurableQueueItemMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *DurableQueueItemMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *DurableQueueItemMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *DurableQueueItemMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *DurableQueueItemMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *DurableQueueItemMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown DurableQueueItem unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *DurableQueueItemMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown DurableQueueItem edge %s", name)
 }
 
 // EntitlementBindingMutation represents an operation that mutates the EntitlementBinding nodes in the graph.

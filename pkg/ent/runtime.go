@@ -41,6 +41,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionkeycounter"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationadoption"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationedge"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/durablequeueitem"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entitlementbinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/envvar"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/externalidentity"
@@ -1490,6 +1491,66 @@ func init() {
 	delegationedgeDescID := delegationedgeFields[0].Descriptor()
 	// delegationedge.DefaultID holds the default value on creation for the id field.
 	delegationedge.DefaultID = delegationedgeDescID.Default.(func() uuid.UUID)
+	durablequeueitemFields := schema.DurableQueueItem{}.Fields()
+	_ = durablequeueitemFields
+	// durablequeueitemDescKind is the schema descriptor for kind field.
+	durablequeueitemDescKind := durablequeueitemFields[1].Descriptor()
+	// durablequeueitem.KindValidator is a validator for the "kind" field. It is called by the builders before save.
+	durablequeueitem.KindValidator = func() func(string) error {
+		validators := durablequeueitemDescKind.Validators
+		fns := [...]func(string) error{
+			validators[0].(func(string) error),
+			validators[1].(func(string) error),
+		}
+		return func(kind string) error {
+			for _, fn := range fns {
+				if err := fn(kind); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	// durablequeueitemDescDedupKey is the schema descriptor for dedup_key field.
+	durablequeueitemDescDedupKey := durablequeueitemFields[2].Descriptor()
+	// durablequeueitem.DedupKeyValidator is a validator for the "dedup_key" field. It is called by the builders before save.
+	durablequeueitem.DedupKeyValidator = func() func(string) error {
+		validators := durablequeueitemDescDedupKey.Validators
+		fns := [...]func(string) error{
+			validators[0].(func(string) error),
+			validators[1].(func(string) error),
+		}
+		return func(dedup_key string) error {
+			for _, fn := range fns {
+				if err := fn(dedup_key); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	// durablequeueitemDescProjectID is the schema descriptor for project_id field.
+	durablequeueitemDescProjectID := durablequeueitemFields[3].Descriptor()
+	// durablequeueitem.DefaultProjectID holds the default value on creation for the project_id field.
+	durablequeueitem.DefaultProjectID = durablequeueitemDescProjectID.Default.(string)
+	// durablequeueitemDescAttempts is the schema descriptor for attempts field.
+	durablequeueitemDescAttempts := durablequeueitemFields[7].Descriptor()
+	// durablequeueitem.DefaultAttempts holds the default value on creation for the attempts field.
+	durablequeueitem.DefaultAttempts = durablequeueitemDescAttempts.Default.(int)
+	// durablequeueitemDescPermanentFailures is the schema descriptor for permanent_failures field.
+	durablequeueitemDescPermanentFailures := durablequeueitemFields[8].Descriptor()
+	// durablequeueitem.DefaultPermanentFailures holds the default value on creation for the permanent_failures field.
+	durablequeueitem.DefaultPermanentFailures = durablequeueitemDescPermanentFailures.Default.(int)
+	// durablequeueitemDescLeaseOwner is the schema descriptor for lease_owner field.
+	durablequeueitemDescLeaseOwner := durablequeueitemFields[10].Descriptor()
+	// durablequeueitem.DefaultLeaseOwner holds the default value on creation for the lease_owner field.
+	durablequeueitem.DefaultLeaseOwner = durablequeueitemDescLeaseOwner.Default.(string)
+	// durablequeueitemDescLastError is the schema descriptor for last_error field.
+	durablequeueitemDescLastError := durablequeueitemFields[12].Descriptor()
+	// durablequeueitem.DefaultLastError holds the default value on creation for the last_error field.
+	durablequeueitem.DefaultLastError = durablequeueitemDescLastError.Default.(string)
+	// durablequeueitem.LastErrorValidator is a validator for the "last_error" field. It is called by the builders before save.
+	durablequeueitem.LastErrorValidator = durablequeueitemDescLastError.Validators[0].(func(string) error)
 	entitlementbindingFields := schema.EntitlementBinding{}.Fields()
 	_ = entitlementbindingFields
 	// entitlementbindingDescSubjectID is the schema descriptor for subject_id field.

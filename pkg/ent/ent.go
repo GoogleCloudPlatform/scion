@@ -47,6 +47,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionkeycounter"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationadoption"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationedge"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/durablequeueitem"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entitlementbinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/envvar"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/externalidentity"
@@ -204,6 +205,7 @@ func checkColumn(t, c string) error {
 			decisionkeycounter.Table:            decisionkeycounter.ValidColumn,
 			delegationadoption.Table:            delegationadoption.ValidColumn,
 			delegationedge.Table:                delegationedge.ValidColumn,
+			durablequeueitem.Table:              durablequeueitem.ValidColumn,
 			entitlementbinding.Table:            entitlementbinding.ValidColumn,
 			envvar.Table:                        envvar.ValidColumn,
 			externalidentity.Table:              externalidentity.ValidColumn,

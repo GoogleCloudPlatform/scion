@@ -111,6 +111,9 @@ type DelegationAdoption func(*sql.Selector)
 // DelegationEdge is the predicate function for delegationedge builders.
 type DelegationEdge func(*sql.Selector)
 
+// DurableQueueItem is the predicate function for durablequeueitem builders.
+type DurableQueueItem func(*sql.Selector)
+
 // EntitlementBinding is the predicate function for entitlementbinding builders.
 type EntitlementBinding func(*sql.Selector)
 
