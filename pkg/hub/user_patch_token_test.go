@@ -194,6 +194,9 @@ func TestUserPatchToken_StatusRequiresSuspendSelector(t *testing.T) {
 	rec = doRequestWithToken(t, srv, suspend, http.MethodPatch, "/api/v1/users/"+invited, map[string]string{"status": store.UserStatusActive})
 	assert.Equal(t, http.StatusConflict, rec.Code, "activating an invited user: %s", rec.Body.String())
 	assert.Equal(t, store.UserStatusInvited, upUser(t, s, invited).Status)
+	rec = doRequestWithToken(t, srv, suspend, http.MethodPatch, "/api/v1/users/"+invited, map[string]string{"status": store.UserStatusSuspended})
+	assert.Equal(t, http.StatusConflict, rec.Code, "suspending an invited user: %s", rec.Body.String())
+	assert.Equal(t, store.UserStatusInvited, upUser(t, s, invited).Status)
 
 	rec = doRequestAsUser(t, srv, upUser(t, s, admin), http.MethodPatch, path, map[string]string{"status": store.UserStatusSuspended})
 	require.Equal(t, http.StatusOK, rec.Code, "session: %s", rec.Body.String())

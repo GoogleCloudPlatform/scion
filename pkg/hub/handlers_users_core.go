@@ -801,16 +801,17 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 	// Invited users have no real role yet: the stored role is a placeholder and
 	// the role is assigned at first sign-in (see determineUserRole). Reject role
 	// changes so an admin cannot set a role that activation would silently
-	// overwrite. Suspending an invited user remains allowed; activation is rejected below.
+	// overwrite.
 	if needsPromote && user.Status == store.UserStatusInvited {
 		writeError(w, http.StatusConflict, ErrCodeConflict, errRoleOnInvitedUser.Error(), nil)
 		return
 	}
-	// Likewise, activating an invited user directly would leave the placeholder
-	// role in place and skip the invited->active branch at first sign-in, so
-	// the hub default would never be applied. Suspending remains allowed.
-	if activatesInvitedUser(updates.Status, user.Status) {
-		writeError(w, http.StatusConflict, ErrCodeConflict, errActivateInvitedUser.Error(), nil)
+	// Reject any status change on an invited user: activating directly would
+	// skip determineUserRole at first sign-in, and suspending would move the row
+	// off UserStatusInvited so invited-user guards stop applying and a later
+	// reactivation skips first sign-in. Revoking a pending invite deletes the user.
+	if statusErr := rejectInvitedStatusChange(updates.Status, user.Status); statusErr != nil {
+		writeError(w, http.StatusConflict, ErrCodeConflict, statusErr.Error(), nil)
 		return
 	}
 
@@ -839,8 +840,8 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 		if needsPromote && beforeStatus == store.UserStatusInvited {
 			return errRoleOnInvitedUser
 		}
-		if activatesInvitedUser(updates.Status, beforeStatus) {
-			return errActivateInvitedUser
+		if statusErr := rejectInvitedStatusChange(updates.Status, beforeStatus); statusErr != nil {
+			return statusErr
 		}
 
 		// Suspension must not leave a scope with no active constraint
@@ -962,7 +963,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 			writeUserDeletionInProgress(w, userDeletionInProgressFor(ctx, s.store, user.ID))
 			return
 		}
-		if errors.Is(err, errLastSuperAdmin) || errors.Is(err, errSelfDemotion) || errors.Is(err, errRoleOnInvitedUser) || errors.Is(err, errActivateInvitedUser) || errors.Is(err, errRoleOnTestFixture) {
+		if errors.Is(err, errLastSuperAdmin) || errors.Is(err, errSelfDemotion) || errors.Is(err, errRoleOnInvitedUser) || errors.Is(err, errActivateInvitedUser) || errors.Is(err, errSuspendInvitedUser) || errors.Is(err, errRoleOnTestFixture) {
 			writeError(w, http.StatusConflict, ErrCodeConflict, err.Error(), nil)
 		} else if errors.Is(err, errBindingStateDrift) {
 			writeBindingStateDrift(w, err)
@@ -1130,10 +1131,22 @@ var errRoleOnInvitedUser = errors.New("role is assigned when the user first sign
 // invited user.
 var errActivateInvitedUser = errors.New("invited users are activated at first sign-in")
 
-// activatesInvitedUser reports whether a PATCH status would move an invited
-// user straight to active, bypassing first sign-in.
-func activatesInvitedUser(newStatus *string, currentStatus string) bool {
-	return newStatus != nil && *newStatus == store.UserStatusActive && currentStatus == store.UserStatusInvited
+// errSuspendInvitedUser is returned when PATCH sets status=suspended on an
+// invited user.
+var errSuspendInvitedUser = errors.New("invited users cannot be suspended; remove the pending invite instead")
+
+// rejectInvitedStatusChange returns a conflict sentinel when a PATCH status
+// targets an invited user. Any transition out of UserStatusInvited via PATCH
+// (either straight to active or via suspended -> active) would bypass first
+// sign-in and the invited-user guards.
+func rejectInvitedStatusChange(newStatus *string, currentStatus string) error {
+	if newStatus == nil || currentStatus != store.UserStatusInvited {
+		return nil
+	}
+	if *newStatus == store.UserStatusSuspended {
+		return errSuspendInvitedUser
+	}
+	return errActivateInvitedUser
 }
 
 // bindingMutationKind describes what happened to super-admin bindings during
