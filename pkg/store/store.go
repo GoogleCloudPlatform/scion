@@ -1551,10 +1551,6 @@ type AgentStatusUpdate struct {
 	// heartbeat guarded during the dispatch may have stored the old
 	// container's exit message. Internal to the hub — json:"-".
 	ClearTerminalRemnants bool `json:"-"`
-	// ClearActivity, when true and Activity is empty, explicitly clears the
-	// stored activity, stalled marker, and tool name (where Activity:"" alone
-	// means "not provided"). Internal to the hub — json:"-".
-	ClearActivity bool `json:"-"`
 	// IfPhase, when non-empty, makes the update conditional: it applies only
 	// if the stored phase equals IfPhase, checked on the row read inside the
 	// update's transaction; otherwise UpdateAgentStatus returns

@@ -810,9 +810,13 @@ func (e *deletionEngine) run() deletionOutcome {
 	}
 
 	// Persist and deliver only after the row change succeeded. Each tail
-	// step recovers on its own: the delete has committed.
-	if nd := s.notificationDispatcher; nd != nil && len(pending) > 0 {
-		e.tailStep("deliver notifications", func() { nd.DeliverDeletedNotifications(e.base, pending) })
+	// step recovers on its own: the delete has committed. Always prune the
+	// in-memory observed-status entry even when no DELETED subscription matched.
+	if nd := s.notificationDispatcher; nd != nil {
+		nd.clearObservedStatus(agent.ID)
+		if len(pending) > 0 {
+			e.tailStep("deliver notifications", func() { nd.DeliverDeletedNotifications(e.base, pending) })
+		}
 	}
 
 	// Release quotas and the topic default binding (each bounded).

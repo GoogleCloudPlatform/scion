@@ -1749,7 +1749,6 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		su.ClearExit = false
 		su.ClearMessageIf = ""
 		su.ClearTerminalRemnants = false
-		su.ClearActivity = false
 	}
 
 	// The reincarnation guard (the hub's Guard 0b), repeated on the locked
@@ -1899,12 +1898,6 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		upd.SetStalledFromActivity("")
 		upd.SetLastActivityEvent(now)
 		unstalled = true
-	}
-
-	if su.ClearActivity && !activityProvided {
-		upd.SetActivity("")
-		upd.SetStalledFromActivity("")
-		upd.SetToolName("")
 	}
 	// A halt clears the activity outright, a terminal one included: the
 	// exit reason says how the run ended.

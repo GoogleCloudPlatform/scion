@@ -159,38 +159,50 @@ func TestUpdateAgentStatus_ResumeAndClearActivity(t *testing.T) {
 	assert.Equal(t, string(state.ActivityWorking), gotWakeStart.Activity, "ClearTerminalRemnants must preserve new activity posted mid-dispatch")
 	assert.Empty(t, gotWakeStart.Message)
 
-	// 3. Explicit ClearActivity flag clears activity without touching phase.
-	a3 := makeAgent(projectID, "explicit-clear")
+	// 3. Async BeginStartLaunch clears live/prior activity, stall marker, tool
+	// name, and activity_since on a row that still carries them (e.g. a restart
+	// from running or a start from stopped+crashed).
+	a3 := makeAgent(projectID, "async-restart-clear")
 	a3.Phase = string(state.PhaseRunning)
 	a3.Activity = string(state.ActivityCompleted)
-	a3.ToolName = "edit"
+	a3.StalledFromActivity = string(state.ActivityWorking)
+	a3.ToolName = "bash"
 	require.NoError(t, s.CreateAgent(ctx, a3))
-	require.NoError(t, s.UpdateAgentStatus(ctx, a3.ID, store.AgentStatusUpdate{ClearActivity: true}))
+	require.NotNil(t, activitySinceOf(t, s, a3.ID))
+	_, err = s.BeginStartLaunch(ctx, a3.ID, store.LaunchKindRestart, time.Minute, store.BeginLaunchOptions{
+		PriorPhase: string(state.PhaseRunning),
+	})
+	require.NoError(t, err)
 	got3, err := s.GetAgent(ctx, a3.ID)
 	require.NoError(t, err)
-	assert.Empty(t, got3.Activity)
+	assert.Equal(t, string(state.PhaseStarting), got3.Phase)
+	assert.Empty(t, got3.Activity, "async restart launch must clear prior activity")
+	assert.Empty(t, got3.StalledFromActivity)
 	assert.Empty(t, got3.ToolName)
 	assert.Nil(t, got3.ActivitySince)
 
-	// 4. Async BeginStartLaunch clears prior retained activity on the starting row.
-	a4 := makeAgent(projectID, "async-start-clear")
-	a4.Phase = string(state.PhaseRunning)
-	a4.Activity = string(state.ActivityCompleted)
+	a4 := makeAgent(projectID, "async-start-from-stopped-clear")
+	a4.Phase = string(state.PhaseStopped)
+	a4.Activity = string(state.ActivityCrashed)
+	a4.ToolName = "bash"
 	require.NoError(t, s.CreateAgent(ctx, a4))
-	require.NoError(t, s.UpdateAgentStatus(ctx, a4.ID, store.AgentStatusUpdate{Phase: string(state.PhaseSuspended)}))
 	require.NoError(t, s.UpdateAgentStatus(ctx, a4.ID, store.AgentStatusUpdate{
 		Phase:   string(state.PhaseStarting),
-		IfPhase: string(state.PhaseSuspended),
+		IfPhase: string(state.PhaseStopped),
 	}))
+	mid4, err := s.GetAgent(ctx, a4.ID)
+	require.NoError(t, err)
+	require.Equal(t, string(state.ActivityCrashed), mid4.Activity, "stopped -> starting leaves crashed on the row until BeginStartLaunch")
 	_, err = s.BeginStartLaunch(ctx, a4.ID, store.LaunchKindStart, time.Minute, store.BeginLaunchOptions{
-		PriorPhase: string(state.PhaseSuspended),
+		PriorPhase: string(state.PhaseStopped),
 	})
 	require.NoError(t, err)
 	got4, err := s.GetAgent(ctx, a4.ID)
 	require.NoError(t, err)
-	assert.Empty(t, got4.Activity, "async start launch must clear retained activity from suspended prior")
+	assert.Empty(t, got4.Activity, "async start launch must clear prior activity on starting row")
+	assert.Empty(t, got4.ToolName)
 
-	// 5. Case-variant re-report of the same activity does not move ActivitySince.
+	// 4. Case-variant re-report of the same activity does not move ActivitySince.
 	a5 := makeAgent(projectID, "case-stable-since")
 	a5.Phase = string(state.PhaseRunning)
 	a5.Activity = "completed"

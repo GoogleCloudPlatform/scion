@@ -461,11 +461,6 @@ export function isTerminalAvailable(agent: {
 }
 
 /**
- * Returns the display status string for an agent.
- * When the agent is running, shows the activity (e.g. 'thinking');
- * otherwise shows the lifecycle phase.
- */
-/**
  * Whether an activity is retained across a transition to `phase === 'suspended'`
  * so UI surfaces can display e.g. `"suspended · completed"`. Mirrors Go
  * `state.Activity.IsRetainedOnSuspend`.
@@ -475,6 +470,11 @@ export function isRetainedSuspendActivity(activity: string | undefined): boolean
   return activity === 'idle' || activity === 'completed';
 }
 
+/**
+ * Returns the display status string for an agent.
+ * When the agent is running, shows the activity (e.g. 'thinking');
+ * otherwise shows the lifecycle phase.
+ */
 export function getAgentDisplayStatus(agent: Agent): string {
   if (agent.phase === 'running' && agent.activity) {
     return agent.activity;

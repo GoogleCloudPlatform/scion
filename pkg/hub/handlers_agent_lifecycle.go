@@ -339,7 +339,7 @@ func statusUpdateIsEmpty(su store.AgentStatusUpdate) bool {
 		su.RuntimeState == "" && su.TaskSummary == "" && !su.Heartbeat &&
 		len(su.Metadata) == 0 && su.CurrentTurns == nil && su.CurrentModelCalls == nil &&
 		su.StartedAt == "" && !su.ClearExit && su.ClearMessageIf == "" &&
-		!su.ClearTerminalRemnants && su.LiveWork == nil && !su.ClearActivity
+		!su.ClearTerminalRemnants && su.LiveWork == nil
 }
 
 // statusUpdateIsHeartbeatOnly reports whether su carries the heartbeat flag
@@ -585,9 +585,10 @@ func (s *Server) harnessSupportsResume(ctx context.Context, agent *store.Agent) 
 // handler (the auto-suspend scheduler runs its own inline copy of these
 // steps): it validates harness resume support, syncs the workspace on
 // stop, dispatches the container stop to the runtime broker, persists
-// phase=suspended (container_status=stopped, activity cleared), and
-// publishes the resulting status event. It returns *errHarnessNoResume
-// when the harness cannot resume so callers can decline to suspend.
+// phase=suspended (container_status=stopped, retained activity preserved
+// or non-retained activity cleared), and publishes the resulting status
+// event. It returns *errHarnessNoResume when the harness cannot resume so
+// callers can decline to suspend.
 // The run intent is set to stopped before the dispatch. The handler passes
 // a ctx detached from the client (detachStopFromClient).
 func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {

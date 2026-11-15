@@ -247,3 +247,102 @@ func TestNotificationDispatcher_SuspendedWithRetainedActivityFiresSuspendedOnly(
 		assert.Equal(t, "SUSPENDED", notifs[0].Status)
 	})
 }
+
+func TestNotificationDispatcher_StaleReReportAfterRowMovedOnDoesNotReNotify(t *testing.T) {
+	env := setupNotificationTest(t)
+	ctx := context.Background()
+	require.NoError(t, env.store.UpdateNotificationSubscriptionTriggers(ctx, env.sub.ID, []string{"IDLE"}))
+	env.nd.Start()
+
+	reportAndPublishActivity(t, env, string(state.PhaseRunning), string(state.ActivityIdle))
+	require.Eventually(t, func() bool {
+		return len(env.dispatcher.getCalls()) == 1
+	}, 2*time.Second, 20*time.Millisecond)
+
+	// Capture a same-period idle snapshot before the row moves to working.
+	staleIdle := mustGetAgent(t, env.store, env.watched.ID)
+	time.Sleep(15 * time.Millisecond)
+	require.NoError(t, env.store.UpdateAgentStatus(ctx, env.watched.ID, store.AgentStatusUpdate{
+		Phase:    string(state.PhaseRunning),
+		Activity: string(state.ActivityWorking),
+	}))
+
+	// 1. In-process dispatcher handles the stale same-period idle re-report after the row moved on.
+	env.pub.PublishAgentStatus(ctx, staleIdle)
+	time.Sleep(200 * time.Millisecond)
+	assert.Len(t, env.dispatcher.getCalls(), 1, "a same-period idle re-report handled after the row moved on must not re-notify")
+	env.nd.Stop()
+
+	// 2. Fresh dispatcher after a Hub restart (`hadObserved == false`) must also reject the stale re-report.
+	nd2 := NewNotificationDispatcher(env.store, env.pub, func() AgentDispatcher { return env.dispatcher }, slog.Default())
+	nd2.Start()
+	defer nd2.Stop()
+	env.pub.PublishAgentStatus(ctx, staleIdle)
+	time.Sleep(200 * time.Millisecond)
+	assert.Len(t, env.dispatcher.getCalls(), 1, "post-restart stale idle re-report after the row moved on must not re-notify")
+}
+
+func TestNotificationDispatcher_NonPerPeriodTriggersKeepStatusDeduplication(t *testing.T) {
+	env := setupNotificationTest(t)
+	ctx := context.Background()
+	require.NoError(t, env.store.UpdateNotificationSubscriptionTriggers(ctx, env.sub.ID, []string{"STALLED", "WAITING_FOR_INPUT"}))
+	env.nd.Start()
+	defer env.nd.Stop()
+
+	// stalled -> working -> stalled must still deduplicate STALLED (not per-period).
+	reportAndPublishActivity(t, env, string(state.PhaseRunning), string(state.ActivityStalled))
+	require.Eventually(t, func() bool {
+		return len(env.dispatcher.getCalls()) == 1
+	}, 2*time.Second, 20*time.Millisecond)
+	assert.Contains(t, env.dispatcher.getCalls()[0].Message, "STALLED")
+
+	reportAndPublishActivity(t, env, string(state.PhaseRunning), string(state.ActivityWorking))
+	reportAndPublishActivity(t, env, string(state.PhaseRunning), string(state.ActivityStalled))
+	time.Sleep(200 * time.Millisecond)
+	assert.Len(t, env.dispatcher.getCalls(), 1, "STALLED must keep status-based deduplication across stalled -> working -> stalled")
+
+	// Switching to WAITING_FOR_INPUT notifies once, and waiting_for_input -> offline -> waiting_for_input stays deduplicated.
+	reportAndPublishActivity(t, env, string(state.PhaseRunning), string(state.ActivityWaitingForInput))
+	require.Eventually(t, func() bool {
+		return len(env.dispatcher.getCalls()) == 2
+	}, 2*time.Second, 20*time.Millisecond)
+	reportAndPublishActivity(t, env, string(state.PhaseRunning), string(state.ActivityOffline))
+	reportAndPublishActivity(t, env, string(state.PhaseRunning), string(state.ActivityWaitingForInput))
+	time.Sleep(200 * time.Millisecond)
+	assert.Len(t, env.dispatcher.getCalls(), 2, "WAITING_FOR_INPUT must keep status-based deduplication across offline blips")
+}
+
+func (nd *NotificationDispatcher) hasObservedStatus(agentID string) bool {
+	nd.observedMu.Lock()
+	defer nd.observedMu.Unlock()
+	_, ok := nd.lastObservedStatus[agentID]
+	return ok
+}
+
+func TestNotificationDispatcher_DeletePrunesObservedStatusWithoutDeletedSubscription(t *testing.T) {
+	env := setupNotificationTest(t)
+	ctx := context.Background()
+	require.NoError(t, env.store.UpdateNotificationSubscriptionTriggers(ctx, env.sub.ID, []string{"IDLE"}))
+	env.nd.Start()
+	defer env.nd.Stop()
+
+	reportAndPublishActivity(t, env, string(state.PhaseRunning), string(state.ActivityIdle))
+	require.Eventually(t, func() bool {
+		return env.nd.hasObservedStatus(env.watched.ID) && len(env.dispatcher.getCalls()) == 1
+	}, 2*time.Second, 20*time.Millisecond)
+
+	// Non-status project events (e.g. exposed-port updates) must not clobber
+	// lastObservedStatus or cause a subsequent same-period idle re-report to re-notify.
+	env.pub.PublishAgentPorts(ctx, mustGetAgent(t, env.store, env.watched.ID))
+	reportAndPublishActivity(t, env, string(state.PhaseRunning), string(state.ActivityIdle))
+	time.Sleep(150 * time.Millisecond)
+	assert.Len(t, env.dispatcher.getCalls(), 1)
+	assert.True(t, env.nd.hasObservedStatus(env.watched.ID))
+
+	// Deleting the agent when no DELETED subscription matched still prunes lastObservedStatus.
+	env.pub.PublishAgentDeleted(ctx, env.watched.ID, env.project.ID)
+	require.Eventually(t, func() bool {
+		return !env.nd.hasObservedStatus(env.watched.ID)
+	}, 2*time.Second, 20*time.Millisecond)
+	assert.Len(t, env.dispatcher.getCalls(), 1)
+}
