@@ -65,8 +65,13 @@ type naFixture struct {
 // naSetSecret stores a secret through the fixture's local backend.
 func naSetSecret(t *testing.T, m *ldFixture, name, value, secretType, scope string, allowProgeny bool) {
 	t.Helper()
+	naSetSecretAt(t, m, name, value, secretType, name, scope, allowProgeny)
+}
+
+func naSetSecretAt(t *testing.T, m *ldFixture, name, value, secretType, target, scope string, allowProgeny bool) {
+	t.Helper()
 	_, _, err := m.backend.Set(context.Background(), &secret.SetSecretInput{
-		Name: name, Value: value, SecretType: secretType, Target: name,
+		Name: name, Value: value, SecretType: secretType, Target: target,
 		Scope: scope, ScopeID: m.scopeID(scope), InjectionMode: store.InjectionModeAlways,
 		AllowProgeny: allowProgeny, CreatedBy: m.projectOwnerID,
 	})
@@ -90,8 +95,16 @@ func newNAFixture(t *testing.T, name string, noAuth bool, opts ldOptions, mutate
 		k := "NA_ENV_SECRET_" + up
 		naSetSecret(t, m, k, "na-canary-env-"+scope, store.SecretTypeEnvironment, scope, false)
 		add(k, "na-canary-env-"+scope)
-		k = "NA_FILE_SECRET_" + up
-		naSetSecret(t, m, k, "na-canary-file-"+scope, store.SecretTypeFile, scope, false)
+		if scope == store.ScopeHub {
+			// Only the telemetry credential file is deliverable at hub
+			// scope (#4713); using it keeps the hub file canary live for
+			// both the with-credentials control and noAuth suppression.
+			k = "scion-telemetry-gcp-credentials"
+			naSetSecretAt(t, m, k, "na-canary-file-"+scope, store.SecretTypeFile, "~/.scion/telemetry-gcp-credentials.json", scope, false)
+		} else {
+			k = "NA_FILE_SECRET_" + up
+			naSetSecret(t, m, k, "na-canary-file-"+scope, store.SecretTypeFile, scope, false)
+		}
 		add(k, "na-canary-file-"+scope)
 		// A stored setting marked secret at every scope.
 		k = "NA_SECRET_SETTING_" + up
