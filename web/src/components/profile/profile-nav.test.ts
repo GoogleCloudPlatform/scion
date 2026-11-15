@@ -380,3 +380,147 @@ describe('scion-profile-nav — pending secrets badge', () => {
     expect(secretsBadge(element)).toBeNull();
   });
 });
+
+describe('scion-profile-nav — Decisions entry & badge (ptone/scion#7996)', () => {
+  let element: HTMLElement | null = null;
+  let decisionsProbeCount = 0;
+
+  beforeAll(async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.resolve(jsonResponse({})))
+    );
+    await import('./profile-nav.js');
+  });
+
+  afterEach(async () => {
+    element?.remove();
+    element = null;
+    const flags = await import('../../utils/feature-flags.js');
+    delete window.__SCION_FEATURES__;
+    flags.resetServerFlagStateForTests();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  async function mountWithDecisions(options: {
+    flagsEnabled?: boolean;
+    probeStatus?: number;
+    waitingOnYou?: number;
+    currentPath?: string;
+  }): Promise<HTMLElement> {
+    decisionsProbeCount = 0;
+    const flags = await import('../../utils/feature-flags.js');
+    delete window.__SCION_FEATURES__;
+    flags.resetServerFlagStateForTests();
+    if (options.flagsEnabled ?? true) {
+      flags.setFeatureFlag(flags.PROJECT_DECISIONS_FLAG, true);
+      flags.setFeatureFlag(flags.CHAT_CHOICES_FLAG, true);
+    }
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const raw =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        if (raw.startsWith('/api/v1/users/me/decisions')) {
+          decisionsProbeCount++;
+          if (options.probeStatus === 404) {
+            return Promise.resolve(jsonResponse({ error: { code: 'not_found' } }, 404));
+          }
+          return Promise.resolve(
+            jsonResponse(
+              {
+                counts: {
+                  waitingOnYou: options.waitingOnYou ?? 0,
+                  waitingOnOthers: 2,
+                },
+              },
+              options.probeStatus ?? 200
+            )
+          );
+        }
+        return Promise.resolve(jsonResponse({ configured: false, pendingSecrets: [] }));
+      })
+    );
+
+    const el = document.createElement('scion-profile-nav') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+      user: User | null;
+      currentPath: string;
+    };
+    el.user = user('member');
+    el.currentPath = options.currentPath ?? '/profile/env';
+    document.body.appendChild(el);
+    for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0));
+    await el.updateComplete;
+    return el;
+  }
+
+  function decisionsLink(el: HTMLElement): HTMLAnchorElement | null {
+    return el.shadowRoot?.querySelector<HTMLAnchorElement>('a[href="/profile/decisions"]') ?? null;
+  }
+
+  function decisionsBadge(el: HTMLElement): HTMLElement | null {
+    return (
+      el.shadowRoot?.querySelector<HTMLElement>(
+        'a[href="/profile/decisions"] [data-decisions-nav-badge]'
+      ) ?? null
+    );
+  }
+
+  it('hides Decisions link and makes no probe request when flags are off', async () => {
+    element = await mountWithDecisions({ flagsEnabled: false, waitingOnYou: 4 });
+    expect(decisionsLink(element)).toBeNull();
+    expect(decisionsProbeCount).toBe(0);
+  });
+
+  it('renders Decisions at the top of profile nav with unfiltered waitingOnYou badge and active query matching', async () => {
+    element = await mountWithDecisions({
+      flagsEnabled: true,
+      waitingOnYou: 4,
+      currentPath: '/profile/decisions?tab=pending&sort=project',
+    });
+
+    const link = decisionsLink(element);
+    expect(link).not.toBeNull();
+    expect(link?.textContent).toContain('Decisions');
+    expect(link?.classList.contains('active')).toBe(true);
+
+    // Must appear before Configuration section
+    const navHtml = element.shadowRoot?.querySelector('nav.nav-container')?.innerHTML ?? '';
+    expect(navHtml.indexOf('/profile/decisions')).toBeGreaterThanOrEqual(0);
+    expect(navHtml.indexOf('/profile/decisions')).toBeLessThan(navHtml.indexOf('Configuration'));
+
+    const badgeEl = decisionsBadge(element);
+    expect(badgeEl?.textContent?.trim()).toBe('4');
+  });
+
+  it('hides the Decisions nav item when GET /api/v1/users/me/decisions?limit=0 returns 404 (§7)', async () => {
+    element = await mountWithDecisions({
+      flagsEnabled: true,
+      probeStatus: 404,
+    });
+    expect(decisionsProbeCount).toBe(1);
+    expect(decisionsLink(element)).toBeNull();
+  });
+
+  it('hides badge when waitingOnYou is 0 and updates live on count-changed event', async () => {
+    element = await mountWithDecisions({
+      flagsEnabled: true,
+      waitingOnYou: 0,
+    });
+    expect(decisionsLink(element)).not.toBeNull();
+    expect(decisionsBadge(element)).toBeNull();
+
+    const { dispatchProfileDecisionsCountChanged } =
+      await import('../../client/profile-decisions.js');
+    dispatchProfileDecisionsCountChanged(3);
+    await (element as HTMLElement & { updateComplete: Promise<boolean> }).updateComplete;
+    expect(decisionsBadge(element)?.textContent?.trim()).toBe('3');
+
+    dispatchProfileDecisionsCountChanged(0);
+    await (element as HTMLElement & { updateComplete: Promise<boolean> }).updateComplete;
+    expect(decisionsBadge(element)).toBeNull();
+  });
+});

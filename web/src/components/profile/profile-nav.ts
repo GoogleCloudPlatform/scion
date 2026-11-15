@@ -28,6 +28,12 @@ import {
   PENDING_SECRETS_CHANGED_EVENT,
   fetchPendingSecretCount,
 } from '../../client/pending-secrets.js';
+import {
+  PROFILE_DECISIONS_COUNT_CHANGED_EVENT,
+  fetchProfileDecisionProbe,
+} from '../../client/profile-decisions.js';
+import { stateManager } from '../../client/state.js';
+import { FEATURE_FLAGS_CHANGED_EVENT, projectDecisionsEnabled } from '../../utils/feature-flags.js';
 
 import type { User, Project } from '../../shared/types.js';
 
@@ -113,10 +119,64 @@ export class ScionProfileNav extends LitElement {
   @state()
   private pendingSecretCount = 0;
 
+  /** Whether both `web.project_decisions` and `web.chat_choices` are enabled. */
+  @state()
+  private decisionsEnabled = false;
+
+  /** Set to true when `GET /api/v1/users/me/decisions?limit=0` returns 404 (§7). */
+  @state()
+  private decisionsProbeHidden = false;
+
+  /** Unfiltered `counts.waitingOnYou` across member projects (R1). */
+  @state()
+  private decisionsWaitingCount = 0;
+
+  private decisionsProbeAbortController: AbortController | null = null;
+  private decisionsDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
   private boundOnPendingSecretsChanged = (e: Event): void => {
     const count = (e as CustomEvent<{ count?: number }>).detail?.count;
     if (typeof count === 'number') this.pendingSecretCount = count;
     else void this.loadPendingSecretCount();
+  };
+
+  private boundOnFeatureFlagsChanged = (): void => {
+    const next = projectDecisionsEnabled();
+    if (next === this.decisionsEnabled) return;
+    this.decisionsEnabled = next;
+    if (next) {
+      this.decisionsProbeHidden = false;
+      void this.loadProfileDecisionsCount();
+    } else {
+      this.decisionsProbeAbortController?.abort();
+      this.decisionsProbeAbortController = null;
+      this.decisionsWaitingCount = 0;
+      this.decisionsProbeHidden = false;
+    }
+  };
+
+  private boundOnProfileDecisionsCountChanged = (e: Event): void => {
+    const waitingOnYou = (e as CustomEvent<{ waitingOnYou?: number }>).detail?.waitingOnYou;
+    if (typeof waitingOnYou === 'number') {
+      this.decisionsWaitingCount = Math.max(0, waitingOnYou);
+      this.decisionsProbeHidden = false;
+    } else {
+      void this.loadProfileDecisionsCount();
+    }
+  };
+
+  private boundOnChoiceUpdated = (): void => {
+    if (!this.decisionsEnabled || this.decisionsProbeHidden) return;
+    if (this.isActive('/profile/decisions')) return;
+    this.scheduleProfileDecisionsRefresh();
+  };
+
+  private boundOnChatMessageReceived = (e: Event): void => {
+    if (!this.decisionsEnabled || this.decisionsProbeHidden) return;
+    if (this.isActive('/profile/decisions')) return;
+    const payload = (e as CustomEvent<{ data?: { message?: { choices?: unknown } } }>).detail?.data;
+    if (!payload?.message?.choices) return;
+    this.scheduleProfileDecisionsRefresh();
   };
 
   static override styles = css`
@@ -379,6 +439,26 @@ export class ScionProfileNav extends LitElement {
       display: none;
     }
 
+    .nav-section-decisions {
+      margin-bottom: 1rem;
+      padding-bottom: 0.75rem;
+      border-bottom: 1px solid var(--scion-border, #e2e8f0);
+    }
+
+    .decisions-nav-badge {
+      margin-left: auto;
+    }
+
+    .nav-link.active .decisions-nav-badge::part(base) {
+      background: rgba(255, 255, 255, 0.22);
+      color: #ffffff;
+      border-color: rgba(255, 255, 255, 0.45);
+    }
+
+    :host([collapsed]) .decisions-nav-badge {
+      display: none;
+    }
+
     .nav-link-external {
       display: flex;
       align-items: center;
@@ -545,12 +625,83 @@ export class ScionProfileNav extends LitElement {
     super.connectedCallback();
     void this.checkGitHubApp();
     void this.loadPendingSecretCount();
+    this.decisionsEnabled = projectDecisionsEnabled();
+    if (this.decisionsEnabled) {
+      void this.loadProfileDecisionsCount();
+    }
     window.addEventListener(PENDING_SECRETS_CHANGED_EVENT, this.boundOnPendingSecretsChanged);
+    window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
+    window.addEventListener(
+      PROFILE_DECISIONS_COUNT_CHANGED_EVENT,
+      this.boundOnProfileDecisionsCountChanged
+    );
+    stateManager.addEventListener('choice-updated', this.boundOnChoiceUpdated);
+    stateManager.addEventListener('chat-message-received', this.boundOnChatMessageReceived);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     window.removeEventListener(PENDING_SECRETS_CHANGED_EVENT, this.boundOnPendingSecretsChanged);
+    window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
+    window.removeEventListener(
+      PROFILE_DECISIONS_COUNT_CHANGED_EVENT,
+      this.boundOnProfileDecisionsCountChanged
+    );
+    stateManager.removeEventListener('choice-updated', this.boundOnChoiceUpdated);
+    stateManager.removeEventListener('chat-message-received', this.boundOnChatMessageReceived);
+    this.decisionsProbeAbortController?.abort();
+    this.decisionsProbeAbortController = null;
+    if (this.decisionsDebounceTimer !== null) {
+      clearTimeout(this.decisionsDebounceTimer);
+      this.decisionsDebounceTimer = null;
+    }
+  }
+
+  private scheduleProfileDecisionsRefresh(): void {
+    if (this.decisionsDebounceTimer !== null) {
+      clearTimeout(this.decisionsDebounceTimer);
+    }
+    this.decisionsDebounceTimer = setTimeout(() => {
+      this.decisionsDebounceTimer = null;
+      void this.loadProfileDecisionsCount();
+    }, 100);
+  }
+
+  private async loadProfileDecisionsCount(): Promise<void> {
+    if (!this.decisionsEnabled) return;
+    this.decisionsProbeAbortController?.abort();
+    const ac = new AbortController();
+    this.decisionsProbeAbortController = ac;
+    try {
+      const probe = await fetchProfileDecisionProbe(ac.signal);
+      if (ac.signal.aborted || probe === null) return;
+      if (!probe.available) {
+        this.decisionsProbeHidden = true;
+        this.decisionsWaitingCount = 0;
+        return;
+      }
+      this.decisionsProbeHidden = false;
+      this.decisionsWaitingCount = probe.waitingOnYou;
+    } finally {
+      if (this.decisionsProbeAbortController === ac) {
+        this.decisionsProbeAbortController = null;
+      }
+    }
+  }
+
+  private renderDecisionsBadge(): TemplateResult | typeof nothing {
+    if (this.decisionsWaitingCount <= 0) return nothing;
+    const n = this.decisionsWaitingCount;
+    const label = n === 1 ? '1 decision waiting on you' : `${n} decisions waiting on you`;
+    return html`<sl-badge
+      variant="primary"
+      pill
+      class="decisions-nav-badge"
+      data-decisions-nav-badge
+      title=${label}
+      aria-label=${label}
+      >${n}</sl-badge
+    >`;
   }
 
   private async loadPendingSecretCount(): Promise<void> {
@@ -643,6 +794,25 @@ export class ScionProfileNav extends LitElement {
         : ''}
 
       <nav class="nav-container">
+        ${this.decisionsEnabled && !this.decisionsProbeHidden
+          ? html`
+              <div class="nav-section nav-section-decisions">
+                <ul class="nav-list">
+                  <li class="nav-item">
+                    <a
+                      href="/profile/decisions"
+                      data-decisions-nav-link
+                      class="nav-link ${this.isActive('/profile/decisions') ? 'active' : ''}"
+                    >
+                      <sl-icon name="signpost-split"></sl-icon>
+                      <span class="nav-link-text">Decisions</span>
+                      ${this.renderDecisionsBadge()}
+                    </a>
+                  </li>
+                </ul>
+              </div>
+            `
+          : nothing}
         ${PROFILE_SECTIONS.map(
           (section) => html`
             <div class="nav-section">
@@ -727,7 +897,8 @@ export class ScionProfileNav extends LitElement {
   }
 
   private isActive(path: string): boolean {
-    return this.currentPath === path || this.currentPath.startsWith(path + '/');
+    const pathname = this.currentPath.split(/[?#]/, 1)[0] || '';
+    return pathname === path || pathname.startsWith(path + '/');
   }
 }
 

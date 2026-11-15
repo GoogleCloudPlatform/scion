@@ -39,6 +39,7 @@ import {
 
 const PROFILE_TITLES: Record<string, string> = {
   '/profile': 'Profile',
+  '/profile/decisions': 'Decisions',
   '/profile/env': 'Environment Variables',
   '/profile/secrets': 'Secrets',
   '/profile/settings': 'Settings',
@@ -246,7 +247,8 @@ export class ScionProfileShell extends LitElement {
   }
 
   private getPageTitle(): string {
-    return PROFILE_TITLES[this.currentPath] || 'Profile';
+    const pathname = this.currentPath.split(/[?#]/, 1)[0] || '';
+    return PROFILE_TITLES[pathname] || 'Profile';
   }
 
   private handleSidebarToggle(): void {
