@@ -119,6 +119,10 @@ type Client interface {
 	// interface (server configuration, project defaults, experiments).
 	AdminSettings() AdminSettingsService
 
+	// SystemOne returns the administrative System One provider instance
+	// operations interface (/api/v1/admin/system-one/instances).
+	SystemOne() SystemOneService
+
 	// ProjectInjectedSkills returns an InjectedSkillsService scoped to a project.
 	ProjectInjectedSkills(projectID string) InjectedSkillsService
 
@@ -200,6 +204,7 @@ type client struct {
 	invites               *inviteService
 	messaging             *messagingService
 	adminSettings         *adminSettingsService
+	systemOne             *systemOneService
 	artifacts             *artifactService
 	testIdentities        *testIdentityService
 	testIdentityDelegs    *testIdentityDelegationService
@@ -266,6 +271,7 @@ func New(baseURL string, opts ...Option) (Client, error) {
 	c.invites = &inviteService{c: c}
 	c.messaging = &messagingService{c: c}
 	c.adminSettings = &adminSettingsService{c: c}
+	c.systemOne = &systemOneService{c: c}
 	c.artifacts = &artifactService{c: c}
 	c.testIdentities = &testIdentityService{c: c}
 	c.testIdentityDelegs = &testIdentityDelegationService{c: c}
@@ -409,6 +415,11 @@ func (c *client) Invites() InviteService {
 // AdminSettings returns the hub administrative settings operations interface.
 func (c *client) AdminSettings() AdminSettingsService {
 	return c.adminSettings
+}
+
+// SystemOne returns the administrative System One provider instance operations interface.
+func (c *client) SystemOne() SystemOneService {
+	return c.systemOne
 }
 
 // Messaging returns the cross-project messaging operations interface.
