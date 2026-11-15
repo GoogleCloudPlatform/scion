@@ -429,6 +429,18 @@ func (f DelegationEdgeFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Val
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.DelegationEdgeMutation", m)
 }
 
+// The DurableQueueItemFunc type is an adapter to allow the use of ordinary
+// function as DurableQueueItem mutator.
+type DurableQueueItemFunc func(context.Context, *ent.DurableQueueItemMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f DurableQueueItemFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.DurableQueueItemMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.DurableQueueItemMutation", m)
+}
+
 // The EntitlementBindingFunc type is an adapter to allow the use of ordinary
 // function as EntitlementBinding mutator.
 type EntitlementBindingFunc func(context.Context, *ent.EntitlementBindingMutation) (ent.Value, error)

@@ -51,6 +51,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionkeycounter"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationadoption"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationedge"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/durablequeueitem"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entitlementbinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/envvar"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/externalidentity"
@@ -190,6 +191,8 @@ type Client struct {
 	DelegationAdoption *DelegationAdoptionClient
 	// DelegationEdge is the client for interacting with the DelegationEdge builders.
 	DelegationEdge *DelegationEdgeClient
+	// DurableQueueItem is the client for interacting with the DurableQueueItem builders.
+	DurableQueueItem *DurableQueueItemClient
 	// EntitlementBinding is the client for interacting with the EntitlementBinding builders.
 	EntitlementBinding *EntitlementBindingClient
 	// EnvVar is the client for interacting with the EnvVar builders.
@@ -360,6 +363,7 @@ func (c *Client) init() {
 	c.DecisionKeyCounter = NewDecisionKeyCounterClient(c.config)
 	c.DelegationAdoption = NewDelegationAdoptionClient(c.config)
 	c.DelegationEdge = NewDelegationEdgeClient(c.config)
+	c.DurableQueueItem = NewDurableQueueItemClient(c.config)
 	c.EntitlementBinding = NewEntitlementBindingClient(c.config)
 	c.EnvVar = NewEnvVarClient(c.config)
 	c.ExternalIdentity = NewExternalIdentityClient(c.config)
@@ -549,6 +553,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		DecisionKeyCounter:            NewDecisionKeyCounterClient(cfg),
 		DelegationAdoption:            NewDelegationAdoptionClient(cfg),
 		DelegationEdge:                NewDelegationEdgeClient(cfg),
+		DurableQueueItem:              NewDurableQueueItemClient(cfg),
 		EntitlementBinding:            NewEntitlementBindingClient(cfg),
 		EnvVar:                        NewEnvVarClient(cfg),
 		ExternalIdentity:              NewExternalIdentityClient(cfg),
@@ -665,6 +670,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		DecisionKeyCounter:            NewDecisionKeyCounterClient(cfg),
 		DelegationAdoption:            NewDelegationAdoptionClient(cfg),
 		DelegationEdge:                NewDelegationEdgeClient(cfg),
+		DurableQueueItem:              NewDurableQueueItemClient(cfg),
 		EntitlementBinding:            NewEntitlementBindingClient(cfg),
 		EnvVar:                        NewEnvVarClient(cfg),
 		ExternalIdentity:              NewExternalIdentityClient(cfg),
@@ -766,23 +772,23 @@ func (c *Client) Use(hooks ...Hook) {
 		c.ChatRetentionCursor, c.ChatRetentionRun, c.ConduitPrincipalEpoch,
 		c.ConduitSession, c.Conversation, c.ConversationParticipant, c.Decision,
 		c.DecisionAnswer, c.DecisionKeyCounter, c.DelegationAdoption, c.DelegationEdge,
-		c.EntitlementBinding, c.EnvVar, c.ExternalIdentity, c.GCPServiceAccount,
-		c.GitHubResolutionCache, c.GithubInstallation, c.Group, c.GroupMembership,
-		c.HarnessConfig, c.HubEncryptionMigration, c.HubEncryptionPolicy,
-		c.HubInstance, c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate,
-		c.InviteCode, c.LaunchReaperState, c.LifecycleHook, c.LifecycleHookAgentPhase,
-		c.LimitDefinition, c.MaintenanceOperation, c.MaintenanceOperationRun,
-		c.MembershipLossCheck, c.Message, c.MessageAddressee, c.MutationAudit,
-		c.NonceCache, c.Notification, c.NotificationSubscription, c.PendingSecret,
-		c.PolicyBinding, c.Project, c.ProjectContributor, c.ProjectPreStartHook,
-		c.ProjectSyncState, c.ProjectVisitorExclusion, c.ProjectVisitorRule,
-		c.RelayInstance, c.RoleBinding, c.RoleDefinition, c.RuntimeBroker,
-		c.RuntimeOrphan, c.Schedule, c.ScheduledEvent, c.Secret, c.Skill,
-		c.SkillInjection, c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate,
-		c.Template, c.TestIdentityDelegation, c.TestIdentityLoginCode,
-		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.UsageReservation,
-		c.User, c.UserAccessToken, c.UserDeletion, c.UserDeletionAgent,
-		c.UserTerminalWorkspace,
+		c.DurableQueueItem, c.EntitlementBinding, c.EnvVar, c.ExternalIdentity,
+		c.GCPServiceAccount, c.GitHubResolutionCache, c.GithubInstallation, c.Group,
+		c.GroupMembership, c.HarnessConfig, c.HubEncryptionMigration,
+		c.HubEncryptionPolicy, c.HubInstance, c.HubSetting, c.IntegrationConfig,
+		c.IntegrationUpdate, c.InviteCode, c.LaunchReaperState, c.LifecycleHook,
+		c.LifecycleHookAgentPhase, c.LimitDefinition, c.MaintenanceOperation,
+		c.MaintenanceOperationRun, c.MembershipLossCheck, c.Message,
+		c.MessageAddressee, c.MutationAudit, c.NonceCache, c.Notification,
+		c.NotificationSubscription, c.PendingSecret, c.PolicyBinding, c.Project,
+		c.ProjectContributor, c.ProjectPreStartHook, c.ProjectSyncState,
+		c.ProjectVisitorExclusion, c.ProjectVisitorRule, c.RelayInstance,
+		c.RoleBinding, c.RoleDefinition, c.RuntimeBroker, c.RuntimeOrphan, c.Schedule,
+		c.ScheduledEvent, c.Secret, c.Skill, c.SkillInjection, c.SkillRegistry,
+		c.SkillVersion, c.SubscriptionTemplate, c.Template, c.TestIdentityDelegation,
+		c.TestIdentityLoginCode, c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember,
+		c.UsageReservation, c.User, c.UserAccessToken, c.UserDeletion,
+		c.UserDeletionAgent, c.UserTerminalWorkspace,
 	} {
 		n.Use(hooks...)
 	}
@@ -802,23 +808,23 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.ChatRetentionCursor, c.ChatRetentionRun, c.ConduitPrincipalEpoch,
 		c.ConduitSession, c.Conversation, c.ConversationParticipant, c.Decision,
 		c.DecisionAnswer, c.DecisionKeyCounter, c.DelegationAdoption, c.DelegationEdge,
-		c.EntitlementBinding, c.EnvVar, c.ExternalIdentity, c.GCPServiceAccount,
-		c.GitHubResolutionCache, c.GithubInstallation, c.Group, c.GroupMembership,
-		c.HarnessConfig, c.HubEncryptionMigration, c.HubEncryptionPolicy,
-		c.HubInstance, c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate,
-		c.InviteCode, c.LaunchReaperState, c.LifecycleHook, c.LifecycleHookAgentPhase,
-		c.LimitDefinition, c.MaintenanceOperation, c.MaintenanceOperationRun,
-		c.MembershipLossCheck, c.Message, c.MessageAddressee, c.MutationAudit,
-		c.NonceCache, c.Notification, c.NotificationSubscription, c.PendingSecret,
-		c.PolicyBinding, c.Project, c.ProjectContributor, c.ProjectPreStartHook,
-		c.ProjectSyncState, c.ProjectVisitorExclusion, c.ProjectVisitorRule,
-		c.RelayInstance, c.RoleBinding, c.RoleDefinition, c.RuntimeBroker,
-		c.RuntimeOrphan, c.Schedule, c.ScheduledEvent, c.Secret, c.Skill,
-		c.SkillInjection, c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate,
-		c.Template, c.TestIdentityDelegation, c.TestIdentityLoginCode,
-		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.UsageReservation,
-		c.User, c.UserAccessToken, c.UserDeletion, c.UserDeletionAgent,
-		c.UserTerminalWorkspace,
+		c.DurableQueueItem, c.EntitlementBinding, c.EnvVar, c.ExternalIdentity,
+		c.GCPServiceAccount, c.GitHubResolutionCache, c.GithubInstallation, c.Group,
+		c.GroupMembership, c.HarnessConfig, c.HubEncryptionMigration,
+		c.HubEncryptionPolicy, c.HubInstance, c.HubSetting, c.IntegrationConfig,
+		c.IntegrationUpdate, c.InviteCode, c.LaunchReaperState, c.LifecycleHook,
+		c.LifecycleHookAgentPhase, c.LimitDefinition, c.MaintenanceOperation,
+		c.MaintenanceOperationRun, c.MembershipLossCheck, c.Message,
+		c.MessageAddressee, c.MutationAudit, c.NonceCache, c.Notification,
+		c.NotificationSubscription, c.PendingSecret, c.PolicyBinding, c.Project,
+		c.ProjectContributor, c.ProjectPreStartHook, c.ProjectSyncState,
+		c.ProjectVisitorExclusion, c.ProjectVisitorRule, c.RelayInstance,
+		c.RoleBinding, c.RoleDefinition, c.RuntimeBroker, c.RuntimeOrphan, c.Schedule,
+		c.ScheduledEvent, c.Secret, c.Skill, c.SkillInjection, c.SkillRegistry,
+		c.SkillVersion, c.SubscriptionTemplate, c.Template, c.TestIdentityDelegation,
+		c.TestIdentityLoginCode, c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember,
+		c.UsageReservation, c.User, c.UserAccessToken, c.UserDeletion,
+		c.UserDeletionAgent, c.UserTerminalWorkspace,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -897,6 +903,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.DelegationAdoption.mutate(ctx, m)
 	case *DelegationEdgeMutation:
 		return c.DelegationEdge.mutate(ctx, m)
+	case *DurableQueueItemMutation:
+		return c.DurableQueueItem.mutate(ctx, m)
 	case *EntitlementBindingMutation:
 		return c.EntitlementBinding.mutate(ctx, m)
 	case *EnvVarMutation:
@@ -5854,6 +5862,139 @@ func (c *DelegationEdgeClient) mutate(ctx context.Context, m *DelegationEdgeMuta
 		return (&DelegationEdgeDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown DelegationEdge mutation op: %q", m.Op())
+	}
+}
+
+// DurableQueueItemClient is a client for the DurableQueueItem schema.
+type DurableQueueItemClient struct {
+	config
+}
+
+// NewDurableQueueItemClient returns a client for the DurableQueueItem from the given config.
+func NewDurableQueueItemClient(c config) *DurableQueueItemClient {
+	return &DurableQueueItemClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `durablequeueitem.Hooks(f(g(h())))`.
+func (c *DurableQueueItemClient) Use(hooks ...Hook) {
+	c.hooks.DurableQueueItem = append(c.hooks.DurableQueueItem, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `durablequeueitem.Intercept(f(g(h())))`.
+func (c *DurableQueueItemClient) Intercept(interceptors ...Interceptor) {
+	c.inters.DurableQueueItem = append(c.inters.DurableQueueItem, interceptors...)
+}
+
+// Create returns a builder for creating a DurableQueueItem entity.
+func (c *DurableQueueItemClient) Create() *DurableQueueItemCreate {
+	mutation := newDurableQueueItemMutation(c.config, OpCreate)
+	return &DurableQueueItemCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of DurableQueueItem entities.
+func (c *DurableQueueItemClient) CreateBulk(builders ...*DurableQueueItemCreate) *DurableQueueItemCreateBulk {
+	return &DurableQueueItemCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *DurableQueueItemClient) MapCreateBulk(slice any, setFunc func(*DurableQueueItemCreate, int)) *DurableQueueItemCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &DurableQueueItemCreateBulk{err: fmt.Errorf("calling to DurableQueueItemClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*DurableQueueItemCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &DurableQueueItemCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for DurableQueueItem.
+func (c *DurableQueueItemClient) Update() *DurableQueueItemUpdate {
+	mutation := newDurableQueueItemMutation(c.config, OpUpdate)
+	return &DurableQueueItemUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *DurableQueueItemClient) UpdateOne(_m *DurableQueueItem) *DurableQueueItemUpdateOne {
+	mutation := newDurableQueueItemMutation(c.config, OpUpdateOne, withDurableQueueItem(_m))
+	return &DurableQueueItemUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *DurableQueueItemClient) UpdateOneID(id int64) *DurableQueueItemUpdateOne {
+	mutation := newDurableQueueItemMutation(c.config, OpUpdateOne, withDurableQueueItemID(id))
+	return &DurableQueueItemUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for DurableQueueItem.
+func (c *DurableQueueItemClient) Delete() *DurableQueueItemDelete {
+	mutation := newDurableQueueItemMutation(c.config, OpDelete)
+	return &DurableQueueItemDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *DurableQueueItemClient) DeleteOne(_m *DurableQueueItem) *DurableQueueItemDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *DurableQueueItemClient) DeleteOneID(id int64) *DurableQueueItemDeleteOne {
+	builder := c.Delete().Where(durablequeueitem.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &DurableQueueItemDeleteOne{builder}
+}
+
+// Query returns a query builder for DurableQueueItem.
+func (c *DurableQueueItemClient) Query() *DurableQueueItemQuery {
+	return &DurableQueueItemQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeDurableQueueItem},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a DurableQueueItem entity by its id.
+func (c *DurableQueueItemClient) Get(ctx context.Context, id int64) (*DurableQueueItem, error) {
+	return c.Query().Where(durablequeueitem.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *DurableQueueItemClient) GetX(ctx context.Context, id int64) *DurableQueueItem {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *DurableQueueItemClient) Hooks() []Hook {
+	return c.hooks.DurableQueueItem
+}
+
+// Interceptors returns the client interceptors.
+func (c *DurableQueueItemClient) Interceptors() []Interceptor {
+	return c.inters.DurableQueueItem
+}
+
+func (c *DurableQueueItemClient) mutate(ctx context.Context, m *DurableQueueItemMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&DurableQueueItemCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&DurableQueueItemUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&DurableQueueItemUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&DurableQueueItemDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown DurableQueueItem mutation op: %q", m.Op())
 	}
 }
 
@@ -14610,12 +14751,12 @@ type (
 		BrokerSetting, BrokerTargetInventory, ChatLinkCode, ChatRetentionCursor,
 		ChatRetentionRun, ConduitPrincipalEpoch, ConduitSession, Conversation,
 		ConversationParticipant, Decision, DecisionAnswer, DecisionKeyCounter,
-		DelegationAdoption, DelegationEdge, EntitlementBinding, EnvVar,
-		ExternalIdentity, GCPServiceAccount, GitHubResolutionCache, GithubInstallation,
-		Group, GroupMembership, HarnessConfig, HubEncryptionMigration,
-		HubEncryptionPolicy, HubInstance, HubSetting, IntegrationConfig,
-		IntegrationUpdate, InviteCode, LaunchReaperState, LifecycleHook,
-		LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
+		DelegationAdoption, DelegationEdge, DurableQueueItem, EntitlementBinding,
+		EnvVar, ExternalIdentity, GCPServiceAccount, GitHubResolutionCache,
+		GithubInstallation, Group, GroupMembership, HarnessConfig,
+		HubEncryptionMigration, HubEncryptionPolicy, HubInstance, HubSetting,
+		IntegrationConfig, IntegrationUpdate, InviteCode, LaunchReaperState,
+		LifecycleHook, LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
 		MaintenanceOperationRun, MembershipLossCheck, Message, MessageAddressee,
 		MutationAudit, NonceCache, Notification, NotificationSubscription,
 		PendingSecret, PolicyBinding, Project, ProjectContributor, ProjectPreStartHook,
@@ -14636,12 +14777,12 @@ type (
 		BrokerSetting, BrokerTargetInventory, ChatLinkCode, ChatRetentionCursor,
 		ChatRetentionRun, ConduitPrincipalEpoch, ConduitSession, Conversation,
 		ConversationParticipant, Decision, DecisionAnswer, DecisionKeyCounter,
-		DelegationAdoption, DelegationEdge, EntitlementBinding, EnvVar,
-		ExternalIdentity, GCPServiceAccount, GitHubResolutionCache, GithubInstallation,
-		Group, GroupMembership, HarnessConfig, HubEncryptionMigration,
-		HubEncryptionPolicy, HubInstance, HubSetting, IntegrationConfig,
-		IntegrationUpdate, InviteCode, LaunchReaperState, LifecycleHook,
-		LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
+		DelegationAdoption, DelegationEdge, DurableQueueItem, EntitlementBinding,
+		EnvVar, ExternalIdentity, GCPServiceAccount, GitHubResolutionCache,
+		GithubInstallation, Group, GroupMembership, HarnessConfig,
+		HubEncryptionMigration, HubEncryptionPolicy, HubInstance, HubSetting,
+		IntegrationConfig, IntegrationUpdate, InviteCode, LaunchReaperState,
+		LifecycleHook, LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
 		MaintenanceOperationRun, MembershipLossCheck, Message, MessageAddressee,
 		MutationAudit, NonceCache, Notification, NotificationSubscription,
 		PendingSecret, PolicyBinding, Project, ProjectContributor, ProjectPreStartHook,

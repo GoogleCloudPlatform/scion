@@ -82,6 +82,8 @@ type Tx struct {
 	DelegationAdoption *DelegationAdoptionClient
 	// DelegationEdge is the client for interacting with the DelegationEdge builders.
 	DelegationEdge *DelegationEdgeClient
+	// DurableQueueItem is the client for interacting with the DurableQueueItem builders.
+	DurableQueueItem *DurableQueueItemClient
 	// EntitlementBinding is the client for interacting with the EntitlementBinding builders.
 	EntitlementBinding *EntitlementBindingClient
 	// EnvVar is the client for interacting with the EnvVar builders.
@@ -372,6 +374,7 @@ func (tx *Tx) init() {
 	tx.DecisionKeyCounter = NewDecisionKeyCounterClient(tx.config)
 	tx.DelegationAdoption = NewDelegationAdoptionClient(tx.config)
 	tx.DelegationEdge = NewDelegationEdgeClient(tx.config)
+	tx.DurableQueueItem = NewDurableQueueItemClient(tx.config)
 	tx.EntitlementBinding = NewEntitlementBindingClient(tx.config)
 	tx.EnvVar = NewEnvVarClient(tx.config)
 	tx.ExternalIdentity = NewExternalIdentityClient(tx.config)

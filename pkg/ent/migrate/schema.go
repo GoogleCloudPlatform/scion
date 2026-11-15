@@ -1494,6 +1494,60 @@ var (
 			},
 		},
 	}
+	// DurableQueueItemsColumns holds the columns for the "durable_queue_items" table.
+	DurableQueueItemsColumns = []*schema.Column{
+		{Name: "seq", Type: field.TypeInt64, Increment: true},
+		{Name: "kind", Type: field.TypeString, Size: 64},
+		{Name: "dedup_key", Type: field.TypeString, Size: 256},
+		{Name: "project_id", Type: field.TypeString, Default: ""},
+		{Name: "payload", Type: field.TypeString, Size: 2147483647},
+		{Name: "not_before", Type: field.TypeTime},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "attempts", Type: field.TypeInt, Default: 0},
+		{Name: "permanent_failures", Type: field.TypeInt, Default: 0},
+		{Name: "next_attempt_at", Type: field.TypeTime},
+		{Name: "lease_owner", Type: field.TypeString, Default: ""},
+		{Name: "lease_until", Type: field.TypeTime, Nullable: true},
+		{Name: "last_error", Type: field.TypeString, Size: 256, Default: ""},
+	}
+	// DurableQueueItemsTable holds the schema information for the "durable_queue_items" table.
+	DurableQueueItemsTable = &schema.Table{
+		Name:       "durable_queue_items",
+		Columns:    DurableQueueItemsColumns,
+		PrimaryKey: []*schema.Column{DurableQueueItemsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "durablequeueitem_kind_dedup_key",
+				Unique:  true,
+				Columns: []*schema.Column{DurableQueueItemsColumns[1], DurableQueueItemsColumns[2]},
+			},
+			{
+				Name:    "durablequeueitem_kind_next_attempt_at_seq",
+				Unique:  false,
+				Columns: []*schema.Column{DurableQueueItemsColumns[1], DurableQueueItemsColumns[9], DurableQueueItemsColumns[0]},
+			},
+			{
+				Name:    "durablequeueitem_kind_project_id_seq",
+				Unique:  false,
+				Columns: []*schema.Column{DurableQueueItemsColumns[1], DurableQueueItemsColumns[3], DurableQueueItemsColumns[0]},
+			},
+			{
+				Name:    "durablequeueitem_kind_created_at",
+				Unique:  false,
+				Columns: []*schema.Column{DurableQueueItemsColumns[1], DurableQueueItemsColumns[6]},
+			},
+			{
+				Name:    "durablequeueitem_project_id",
+				Unique:  false,
+				Columns: []*schema.Column{DurableQueueItemsColumns[3]},
+			},
+			{
+				Name:    "durablequeueitem_next_attempt_at",
+				Unique:  false,
+				Columns: []*schema.Column{DurableQueueItemsColumns[9]},
+			},
+		},
+	}
 	// EntitlementBindingsColumns holds the columns for the "entitlement_bindings" table.
 	EntitlementBindingsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -3784,6 +3838,7 @@ var (
 		DecisionKeyCountersTable,
 		DelegationAdoptionsTable,
 		DelegationEdgesTable,
+		DurableQueueItemsTable,
 		EntitlementBindingsTable,
 		EnvVarsTable,
 		ExternalIdentitiesTable,
@@ -3932,6 +3987,9 @@ func init() {
 	}
 	DecisionKeyCountersTable.Annotation = &entsql.Annotation{
 		Table: "decision_key_counters",
+	}
+	DurableQueueItemsTable.Annotation = &entsql.Annotation{
+		Table: "durable_queue_items",
 	}
 	EntitlementBindingsTable.ForeignKeys[0].RefTable = LimitDefinitionsTable
 	EnvVarsTable.Annotation = &entsql.Annotation{
