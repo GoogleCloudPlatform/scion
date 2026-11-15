@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,6 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	sconduit "github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit"
 )
 
@@ -184,6 +186,53 @@ func TestConduitGrantKeyChangeHintsHubHeldTargets(t *testing.T) {
 	require.NoError(t, err)
 	require.Eventually(t, func() bool { _, ok := f.sciontool.Keys().Lookup(rot.KeyID); return ok },
 		10*time.Second, 10*time.Millisecond, "the agent installs the rotated-in key after the hint")
+}
+
+// registrationDelayClock wraps a relay Clock and pauses AfterFunc once when
+// Relay.Serve arms the session's lifetime GoAway timer (d == lifetimeDelay),
+// widening the window after Accept has sent Welcome on the wire and before
+// Serve moves the session from pending into sessions.
+type registrationDelayClock struct {
+	clock.Clock
+	lifetimeDelay time.Duration
+	pause         time.Duration
+	paused        atomic.Bool
+}
+
+func (c *registrationDelayClock) AfterFunc(d time.Duration, fn func()) clock.Timer {
+	if d == c.lifetimeDelay && c.paused.CompareAndSwap(false, true) {
+		time.Sleep(c.pause)
+	}
+	return c.Clock.AfterFunc(d, fn)
+}
+
+// TestConduitGrantKeyChangeHintsWhenRegistrationLagsWelcome reproduces
+// ptone/scion#6505: Welcome reaches the agent while the relay session is
+// still pending, so startAgent must wait for the relay to register the
+// session before returning; otherwise an immediate RotateConduitGrantKey
+// calls NotifyGrantKeysChanged before registration and hints zero sessions.
+func TestConduitGrantKeyChangeHintsWhenRegistrationLagsWelcome(t *testing.T) {
+	const lifetimeCap = 10 * time.Minute
+	var delayClock *registrationDelayClock
+	f := newConduitProxyFixtureRelay(t, http.NotFoundHandler(), nil, func(o *ConduitRelayOptions) {
+		o.LifetimeCap = lifetimeCap
+		delayClock = &registrationDelayClock{
+			Clock:         o.Clock,
+			lifetimeDelay: lifetimeCap - relay.LifetimeGoAwayLead,
+			pause:         150 * time.Millisecond,
+		}
+		o.Clock = delayClock
+	})
+	f.srv.SetEventPublisher(NewChannelEventPublisher())
+	f.startAgent(t)
+
+	ctx := context.Background()
+	f.clock.Advance(sconduit.GrantKeysHintInterval + time.Second)
+	rot, err := f.srv.RotateConduitGrantKey(ctx)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { _, ok := f.sciontool.Keys().Lookup(rot.KeyID); return ok },
+		10*time.Second, 10*time.Millisecond, "the agent installs the rotated-in key after the hint")
+	require.True(t, delayClock.paused.Load(), "lifetime timer arming hook did not fire during registration")
 }
 
 // revokedOnA rotates and activates a new key and caches the ring on b, then

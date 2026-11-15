@@ -394,7 +394,14 @@ func newConduitProxyFixture(t *testing.T, app http.Handler) *conduitProxyFixture
 // to the server before it starts serving (newRelayFixtureServer).
 func newConduitProxyFixtureServer(t *testing.T, app http.Handler, srvMod func(*Server)) *conduitProxyFixture {
 	t.Helper()
-	f := &conduitProxyFixture{relayFixture: newRelayFixtureServer(t, srvMod, nil), app: newProxyApp(t, app)}
+	return newConduitProxyFixtureRelay(t, app, srvMod, nil)
+}
+
+// newConduitProxyFixtureRelay is newConduitProxyFixtureServer with relayMod
+// applied to the in-process relay options before the relay starts.
+func newConduitProxyFixtureRelay(t *testing.T, app http.Handler, srvMod func(*Server), relayMod func(*ConduitRelayOptions)) *conduitProxyFixture {
+	t.Helper()
+	f := &conduitProxyFixture{relayFixture: newRelayFixtureServer(t, srvMod, relayMod), app: newProxyApp(t, app)}
 	f.base = f.public.URL
 	setConduitExperiment(t, f.srv, true)
 	require.True(t, f.srv.conduitServing())
@@ -458,6 +465,24 @@ func waitAgentGrantKeys(t *testing.T, srv *Server, keys grant.KeySet) {
 	require.NoError(t, err)
 	require.Eventually(t, func() bool { _, ok := keys.Lookup(signer.KeyID); return ok },
 		10*time.Second, 10*time.Millisecond, "the agent's first grant-key fetch")
+}
+
+// waitRelaySession waits, when srv's in-process relay admitted w, until
+// Serve has moved the session from pending into its registered table
+// (ptone/scion#6505, ptone/scion#5338). Welcome arrives while the session is
+// still pending, and NotifyGrantKeysChanged and CloseSessionsOf iterate
+// registered sessions only. The relay clock in fixtures is fake, so ctx
+// bounds the wait.
+func waitRelaySession(t *testing.T, srv *Server, w *conduitv1.Welcome) {
+	t.Helper()
+	rt := srv.conduit.Load()
+	if rt == nil || rt.relay == nil || rt.relay.InstanceID() != w.GetRelayInstanceId() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, _, ok := rt.relay.Local(ctx, w.GetSessionId())
+	require.True(t, ok, "conduit session did not register on the relay")
 }
 
 func newRelayFixture(t *testing.T, mod func(*ConduitRelayOptions)) *relayFixture {
@@ -754,19 +779,22 @@ func (f *conduitProxyFixture) withWriteTimeout(t *testing.T, d time.Duration) {
 }
 
 // startAgent runs a sciontool conduit agent for the launched agent and
-// returns once its session is admitted and, unless f.noAgentKeyWait, its
-// first grant-key fetch has installed the hub's current key
-// (waitAgentGrantKeys). stop ends it and waits for Run.
+// returns once its session is admitted, registered on the hub's relay (when
+// held in-process) and, unless f.noAgentKeyWait, its first grant-key fetch
+// has installed the hub's current key (waitAgentGrantKeys). stop ends it and
+// waits for Run.
 func (f *conduitProxyFixture) startAgent(t *testing.T) (stop func()) {
 	t.Helper()
 	admitted := make(chan *conduitv1.Welcome, 4)
 	stop, _ = f.runAgent(t, f.launched.RunID, admitted)
+	var w *conduitv1.Welcome
 	select {
-	case w := <-admitted:
+	case w = <-admitted:
 		require.Equal(t, f.launched.RunID, w.GetEndpointIncarnation())
 	case <-time.After(10 * time.Second):
 		t.Fatal("conduit session not admitted")
 	}
+	waitRelaySession(t, f.srv, w)
 	if !f.noAgentKeyWait {
 		waitAgentGrantKeys(t, f.srv, f.sciontool.Keys())
 	}
