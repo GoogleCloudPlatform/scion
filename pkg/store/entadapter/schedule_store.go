@@ -26,6 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schedule"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecpollcursor"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -1319,6 +1320,11 @@ func (s *ScheduleStore) PurgeOldScheduledEvents(ctx context.Context, cutoff time
 				return err
 			}
 			n += deleted
+		}
+		if _, err := c.ScheduledExecPollCursor.Delete().
+			Where(scheduledexecpollcursor.LastPolledAtLT(cutoff.UTC())).
+			Exec(ctx); err != nil {
+			return err
 		}
 		return nil
 	})

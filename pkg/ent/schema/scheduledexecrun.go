@@ -131,10 +131,13 @@ func (ScheduledExecRun) Fields() []ent.Field {
 			Default("").
 			Immutable(),
 		// last_polled_at is when the sweeper last claimed the run for a
-		// status poll (started_at at insert). The sweeper polls the
-		// least recently polled runs first, so its progress persists
-		// across bounded sweeps, deadline exits and replicas.
+		// status poll (started_at at insert).
 		field.Time("last_polled_at"),
+		// poll_seq orders unfinished runs of one target agent by when the
+		// sweeper last claimed them (0 at insert, monotonic across claims;
+		// ptone/scion#8096).
+		field.Int64("poll_seq").
+			Default(0),
 	}
 }
 
@@ -155,6 +158,7 @@ func (ScheduledExecRun) Indexes() []ent.Index {
 	return []ent.Index{
 		index.Fields("schedule_id", "finished_at"),
 		index.Fields("target_agent_id", "finished_at"),
+		index.Fields("target_agent_id", "finished_at", "poll_seq"),
 		index.Fields("project_id"),
 		index.Fields("finished_at", "lease_until"),
 		index.Fields("finished_at", "last_polled_at"),

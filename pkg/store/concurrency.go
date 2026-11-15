@@ -296,6 +296,12 @@ const (
 	// the range.
 	LockScheduledExecRunSweep AdvisoryLockKey = 0x5C10001C
 
+	// LockScheduledExecPollClaim serializes ClaimScheduledExecRunsForPoll's
+	// per-agent turn sequence allocation (ptone/scion#8096) via a
+	// transaction-scoped pg_advisory_xact_lock on PostgreSQL, not taken
+	// through AdvisoryLocker.
+	LockScheduledExecPollClaim AdvisoryLockKey = 0x5C10001D
+
 	// LockPendingSecretOwnerWrite is the CLASS ID for the per-owner pending
 	// secret write lock: a transaction-scoped
 	// pg_advisory_xact_lock(classid, objid) with objid
@@ -312,6 +318,13 @@ const (
 	// (ptone/scion#7883) are checked and applied atomically across
 	// replicas. In the per-object range; not taken through AdvisoryLocker.
 	LockScheduledEventQuota AdvisoryLockKey = 0x5C101005
+
+	// LockScheduledExecOverlap is the CLASS ID for the per-schedule recurring
+	// exec overlap lease check (ptone/scion#7884): a transaction-scoped
+	// pg_advisory_xact_lock(classid, objid) with objid
+	// StableProjectHash(schedule ID), taken by CreateScheduledExecRun so two
+	// replicas cannot insert concurrent active-lease runs for one schedule.
+	LockScheduledExecOverlap AdvisoryLockKey = 0x5C101006
 )
 
 // AdvisoryLocker is implemented by backends that can take a cluster-wide

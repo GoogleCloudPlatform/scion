@@ -69,6 +69,8 @@ type ScheduledExecRun struct {
 	LaunchID string `json:"launch_id,omitempty"`
 	// LastPolledAt holds the value of the "last_polled_at" field.
 	LastPolledAt time.Time `json:"last_polled_at,omitempty"`
+	// PollSeq holds the value of the "poll_seq" field.
+	PollSeq int64 `json:"poll_seq,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the ScheduledExecRunQuery when eager-loading is set.
 	Edges        ScheduledExecRunEdges `json:"edges"`
@@ -102,7 +104,7 @@ func (*ScheduledExecRun) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case scheduledexecrun.FieldScheduleID:
 			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
-		case scheduledexecrun.FieldAuthorizationRevision, scheduledexecrun.FieldArgc, scheduledexecrun.FieldTimeoutSeconds, scheduledexecrun.FieldExitCode, scheduledexecrun.FieldDurationMs, scheduledexecrun.FieldOutputBytes:
+		case scheduledexecrun.FieldAuthorizationRevision, scheduledexecrun.FieldArgc, scheduledexecrun.FieldTimeoutSeconds, scheduledexecrun.FieldExitCode, scheduledexecrun.FieldDurationMs, scheduledexecrun.FieldOutputBytes, scheduledexecrun.FieldPollSeq:
 			values[i] = new(sql.NullInt64)
 		case scheduledexecrun.FieldInitiatorPrincipalKind, scheduledexecrun.FieldInitiatorPrincipalID, scheduledexecrun.FieldInitiatorCredentialKind, scheduledexecrun.FieldInitiatorCredentialID, scheduledexecrun.FieldExecutorKind, scheduledexecrun.FieldExecutorID, scheduledexecrun.FieldCommandSha256, scheduledexecrun.FieldOutcome, scheduledexecrun.FieldRuntime, scheduledexecrun.FieldLaunchID:
 			values[i] = new(sql.NullString)
@@ -286,6 +288,12 @@ func (_m *ScheduledExecRun) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.LastPolledAt = value.Time
 			}
+		case scheduledexecrun.FieldPollSeq:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field poll_seq", values[i])
+			} else if value.Valid {
+				_m.PollSeq = value.Int64
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -411,6 +419,9 @@ func (_m *ScheduledExecRun) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("last_polled_at=")
 	builder.WriteString(_m.LastPolledAt.Format(time.ANSIC))
+	builder.WriteString(", ")
+	builder.WriteString("poll_seq=")
+	builder.WriteString(fmt.Sprintf("%v", _m.PollSeq))
 	builder.WriteByte(')')
 	return builder.String()
 }

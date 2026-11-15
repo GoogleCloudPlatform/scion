@@ -438,9 +438,18 @@ func Spec() []TableFixture {
 				"argc":           1, "timeout_seconds": 60,
 				"started_at": baseTime.Add(-time.Hour), "not_after": baseTime.Add(-time.Hour + time.Minute),
 				"lease_until": baseTime.Add(-time.Hour + 3*time.Minute), "finished_at": baseTime.Add(-time.Hour + time.Second),
-				"last_polled_at": baseTime.Add(-time.Hour),
-				"outcome":        "ok", "exit_code": 0, "duration_ms": 1000, "output_bytes": 0,
+				"last_polled_at": baseTime.Add(-time.Hour), "poll_seq": int64(1),
+				"outcome": "ok", "exit_code": 0, "duration_ms": 1000, "output_bytes": 0,
 				"runtime": "docker", "launch_id": "",
+			},
+		}},
+		// Persisted per-agent recovery-sweep turn cursor (ptone/scion#8096).
+		{Table: "scheduled_exec_poll_cursors", Rows: []row{
+			{
+				"id":              "5f100000-0000-0000-0000-000000000001",
+				"target_agent_id": agentID,
+				"turn_seq":        int64(1),
+				"last_polled_at":  baseTime.Add(-time.Hour),
 			},
 		}},
 		{Table: "lifecycle_hooks", Rows: []row{

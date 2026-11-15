@@ -525,3 +525,162 @@ func TestClaimScheduledExecRunsForPoll_FairAcrossTargets(t *testing.T) {
 		assert.Equal(t, slow, r.TargetAgentID)
 	}
 }
+
+// TestClaimScheduledExecRunsForPoll_SeveralSlowTargetsFairness (ptone/scion#8096):
+// 2 slow targets x 20 older runs and 1 healthy target x 1 newer run with 2
+// slots must give the healthy target a slot within two claims (one sweep),
+// even when claims share the same timestamp or previously polled slow runs
+// finish and are purged.
+func TestClaimScheduledExecRunsForPoll_SeveralSlowTargetsFairness(t *testing.T) {
+	s := newTestScheduleStore(t)
+	ctx := context.Background()
+	project := uuid.NewString()
+	// Force UUID order slowA < slowB < healthy so the first claim of 2
+	// picks slowA and slowB before healthy.
+	slowA := "00000000-0000-4000-8000-000000000001"
+	slowB := "00000000-0000-4000-8000-000000000002"
+	healthy := "ffffffff-ffff-4fff-8fff-ffffffffffff"
+	now := time.Now().UTC().Truncate(time.Second)
+
+	add := func(target string, started time.Time) string {
+		evt := newExecEvent(t, s, project, store.ScheduledEventFired, started)
+		run := newExecRun(evt)
+		run.TargetAgentID = target
+		run.StartedAt = started
+		run.LeaseUntil = now.Add(time.Hour)
+		require.NoError(t, s.CreateScheduledExecRun(ctx, run))
+		return evt.ID
+	}
+
+	for i := 0; i < 20; i++ {
+		add(slowA, now.Add(-time.Hour+time.Duration(i)*time.Second))
+		add(slowB, now.Add(-time.Hour+time.Duration(i)*time.Second))
+	}
+	healthyID := add(healthy, now.Add(-time.Minute))
+
+	var excluded []string
+	claim1, err := s.ClaimScheduledExecRunsForPoll(ctx, now, 2, excluded)
+	require.NoError(t, err)
+	require.Len(t, claim1, 2)
+	for _, r := range claim1 {
+		excluded = append(excluded, r.EventID)
+	}
+
+	// Second claim at the exact same instant: healthy MUST get a slot
+	// rather than waiting behind slowA and slowB's remaining 19 older runs.
+	claim2, err := s.ClaimScheduledExecRunsForPoll(ctx, now, 2, excluded)
+	require.NoError(t, err)
+	require.Len(t, claim2, 2)
+	gotHealthy := false
+	for _, r := range claim2 {
+		if r.EventID == healthyID {
+			gotHealthy = true
+		}
+	}
+	require.True(t, gotHealthy, "healthy target must get a turn on claim 2, got %+v", claim2)
+
+	// Finishing and purging the already-polled slow runs must not reset
+	// slowA or slowB's persisted turn ahead of slowB's next turn.
+	for _, r := range claim1 {
+		_, err := s.FinishScheduledExecRun(ctx, store.ScheduledExecRunFinish{
+			EventID: r.EventID, Outcome: store.ScheduledExecOutcomeOK,
+		})
+		require.NoError(t, err)
+	}
+	// claim2 gave slots to healthy and slowA; therefore slowB must lead claim3.
+	for _, r := range claim2 {
+		excluded = append(excluded, r.EventID)
+	}
+	claim3, err := s.ClaimScheduledExecRunsForPoll(ctx, now, 1, excluded)
+	require.NoError(t, err)
+	require.Len(t, claim3, 1)
+	assert.Equal(t, slowB, claim3[0].TargetAgentID, "persisted per-agent turn survives finished runs")
+}
+
+// TestClaimScheduledExecRunsForPoll_CandidateWindowStress (ptone/scion#8096):
+// more than 5,000 older unfinished runs on a slow target must not hide a
+// healthy target's newer run outside a candidate-row window.
+func TestClaimScheduledExecRunsForPoll_CandidateWindowStress(t *testing.T) {
+	s := newTestScheduleStore(t)
+	ctx := context.Background()
+	project := uuid.NewString()
+	slow := "00000000-0000-4000-8000-000000000001"
+	healthy := "ffffffff-ffff-4fff-8fff-ffffffffffff"
+	now := time.Now().UTC().Truncate(time.Second)
+
+	const slowCount = 5200
+	txClient, err := s.client.Tx(ctx)
+	require.NoError(t, err)
+	txStore := &ScheduleStore{client: txClient.Client(), inTx: true}
+	for i := 0; i < slowCount; i++ {
+		started := now.Add(-time.Hour + time.Duration(i)*time.Millisecond)
+		evt := &store.ScheduledEvent{
+			ID: uuid.NewString(), ProjectID: project, EventType: "exec",
+			FireAt: started, FiredAt: &started, Payload: `{"agentId":"x","command":["true"]}`,
+			Status: store.ScheduledEventFired,
+		}
+		require.NoError(t, txStore.CreateScheduledEvent(ctx, evt))
+		run := newExecRun(evt)
+		run.TargetAgentID = slow
+		run.StartedAt = started
+		run.LeaseUntil = now.Add(time.Hour)
+		require.NoError(t, txStore.CreateScheduledExecRun(ctx, run))
+	}
+	require.NoError(t, txClient.Commit())
+
+	healthyEvt := newExecEvent(t, s, project, store.ScheduledEventFired, now.Add(-time.Minute))
+	healthyRun := newExecRun(healthyEvt)
+	healthyRun.TargetAgentID = healthy
+	healthyRun.StartedAt = now.Add(-time.Minute)
+	healthyRun.LeaseUntil = now.Add(time.Hour)
+	require.NoError(t, s.CreateScheduledExecRun(ctx, healthyRun))
+
+	claimed, err := s.ClaimScheduledExecRunsForPoll(ctx, now, 32, nil)
+	require.NoError(t, err)
+	require.Len(t, claimed, 32)
+	var foundHealthy bool
+	for _, r := range claimed {
+		if r.EventID == healthyEvt.ID {
+			foundHealthy = true
+		}
+	}
+	assert.True(t, foundHealthy, "healthy target must be claimed in the first batch even beyond 5,000 slow rows")
+}
+
+// TestClaimScheduledExecRunsForPoll_OncePerSweepWithExclusions (ptone/scion#8096):
+// passing the sweep's already-claimed IDs claims every eligible run at most once.
+func TestClaimScheduledExecRunsForPoll_OncePerSweepWithExclusions(t *testing.T) {
+	s := newTestScheduleStore(t)
+	ctx := context.Background()
+	project := uuid.NewString()
+	now := time.Now().UTC()
+	targets := []string{uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()}
+
+	const total = 40
+	for i := 0; i < total; i++ {
+		evt := newExecEvent(t, s, project, store.ScheduledEventFired, now)
+		run := newExecRun(evt)
+		run.TargetAgentID = targets[i%len(targets)]
+		run.StartedAt = now.Add(time.Duration(i) * time.Millisecond)
+		run.LeaseUntil = now.Add(time.Hour)
+		require.NoError(t, s.CreateScheduledExecRun(ctx, run))
+	}
+
+	seen := map[string]int{}
+	var excluded []string
+	for {
+		claimed, err := s.ClaimScheduledExecRunsForPoll(ctx, now, 12, excluded)
+		require.NoError(t, err)
+		if len(claimed) == 0 {
+			break
+		}
+		for _, r := range claimed {
+			seen[r.EventID]++
+			excluded = append(excluded, r.EventID)
+		}
+	}
+	assert.Len(t, seen, total)
+	for id, count := range seen {
+		assert.Equal(t, 1, count, "run %s claimed more than once", id)
+	}
+}

@@ -176,6 +176,11 @@ func LastPolledAt(v time.Time) predicate.ScheduledExecRun {
 	return predicate.ScheduledExecRun(sql.FieldEQ(FieldLastPolledAt, v))
 }
 
+// PollSeq applies equality check predicate on the "poll_seq" field. It's identical to PollSeqEQ.
+func PollSeq(v int64) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldEQ(FieldPollSeq, v))
+}
+
 // EventIDEQ applies the EQ predicate on the "event_id" field.
 func EventIDEQ(v uuid.UUID) predicate.ScheduledExecRun {
 	return predicate.ScheduledExecRun(sql.FieldEQ(FieldEventID, v))
@@ -1409,6 +1414,46 @@ func LastPolledAtLT(v time.Time) predicate.ScheduledExecRun {
 // LastPolledAtLTE applies the LTE predicate on the "last_polled_at" field.
 func LastPolledAtLTE(v time.Time) predicate.ScheduledExecRun {
 	return predicate.ScheduledExecRun(sql.FieldLTE(FieldLastPolledAt, v))
+}
+
+// PollSeqEQ applies the EQ predicate on the "poll_seq" field.
+func PollSeqEQ(v int64) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldEQ(FieldPollSeq, v))
+}
+
+// PollSeqNEQ applies the NEQ predicate on the "poll_seq" field.
+func PollSeqNEQ(v int64) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldNEQ(FieldPollSeq, v))
+}
+
+// PollSeqIn applies the In predicate on the "poll_seq" field.
+func PollSeqIn(vs ...int64) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldIn(FieldPollSeq, vs...))
+}
+
+// PollSeqNotIn applies the NotIn predicate on the "poll_seq" field.
+func PollSeqNotIn(vs ...int64) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldNotIn(FieldPollSeq, vs...))
+}
+
+// PollSeqGT applies the GT predicate on the "poll_seq" field.
+func PollSeqGT(v int64) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldGT(FieldPollSeq, v))
+}
+
+// PollSeqGTE applies the GTE predicate on the "poll_seq" field.
+func PollSeqGTE(v int64) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldGTE(FieldPollSeq, v))
+}
+
+// PollSeqLT applies the LT predicate on the "poll_seq" field.
+func PollSeqLT(v int64) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldLT(FieldPollSeq, v))
+}
+
+// PollSeqLTE applies the LTE predicate on the "poll_seq" field.
+func PollSeqLTE(v int64) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldLTE(FieldPollSeq, v))
 }
 
 // HasEvent applies the HasEdge predicate on the "event" edge.

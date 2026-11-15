@@ -19,12 +19,14 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecpollcursor"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
@@ -278,54 +280,225 @@ func (s *ScheduleStore) ListExpiredScheduledExecRuns(ctx context.Context, now ti
 	return entScheduledExecRunsToStore(rows), nil
 }
 
-// scheduledExecClaimWindow bounds the candidate rows one claim reads.
-const scheduledExecClaimWindow = 5000
+// scheduledExecExcludeSQLCap bounds the SQL NOT IN list when excluding
+// already-claimed event IDs; any overflow is filtered in Go.
+const scheduledExecExcludeSQLCap = 10000
 
 // ClaimScheduledExecRunsForPoll returns up to limit unfinished runs whose
 // lease has not ended, skipping excludeEventIDs, chosen round-robin across
-// target agents (ptone/scion#7883 P3-R2): agents are taken in the order of
-// their least recently polled run, one run (their least recently polled)
-// each, and a second run of an agent only after every eligible agent had
-// one. The chosen runs' last_polled_at is set to now in the same
-// transaction (rows locked FOR UPDATE SKIP LOCKED on Postgres), so the
-// rotation across agents and across runs persists between sweeps.
+// the full eligible set of target agents on their persisted per-agent turn
+// (ptone/scion#8096):
+//
+//  1. Distinct eligible target_agent_id values are queried across the full
+//     unfinished, in-lease set (never capped by a candidate-row window).
+//  2. Eligible targets are ordered by their persisted turn_seq in
+//     scheduled_exec_poll_cursors (0 when never claimed, ties broken by
+//     target_agent_id), never by run timestamps and never rewound when
+//     polled runs finish or are purged.
+//  3. One least-polled run (by poll_seq, last_polled_at, event_id; FOR
+//     UPDATE SKIP LOCKED on Postgres) is chosen per target per round until
+//     limit runs are claimed or all eligible runs are exhausted.
+//  4. Claimed runs update poll_seq and last_polled_at, and each claimed
+//     target's cursor row is upserted with its latest monotonic turn_seq.
 func (s *ScheduleStore) ClaimScheduledExecRunsForPoll(ctx context.Context, now time.Time, limit int, excludeEventIDs []string) ([]store.ScheduledExecRun, error) {
 	limit = clampLimit(limit)
-	var exclude []uuid.UUID
+	excludeSet := make(map[uuid.UUID]struct{}, len(excludeEventIDs))
+	var excludeSQL []uuid.UUID
 	for _, id := range excludeEventIDs {
 		if uid, err := uuid.Parse(id); err == nil {
-			exclude = append(exclude, uid)
+			if _, dup := excludeSet[uid]; !dup {
+				excludeSet[uid] = struct{}{}
+				if len(excludeSQL) < scheduledExecExcludeSQLCap {
+					excludeSQL = append(excludeSQL, uid)
+				}
+			}
 		}
 	}
+	nowUTC := now.UTC()
 	var out []store.ScheduledExecRun
 	err := runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
-		q := c.ScheduledExecRun.Query().
-			Where(scheduledexecrun.FinishedAtIsNil(), scheduledexecrun.LeaseUntilGTE(now.UTC()))
-		if len(exclude) > 0 {
-			q = q.Where(scheduledexecrun.EventIDNotIn(exclude...))
-		}
-		q = q.Order(scheduledexecrun.ByLastPolledAt(), scheduledexecrun.ByEventID()).Limit(scheduledExecClaimWindow)
 		if isPostgres(c) {
-			q = q.ForUpdate(entsql.WithLockAction(entsql.SkipLocked))
+			var res sql.Result
+			if err := c.Driver().Exec(ctx, "SELECT pg_advisory_xact_lock($1)",
+				[]any{int64(store.LockScheduledExecPollClaim)}, &res); err != nil {
+				return fmt.Errorf("lock scheduled exec poll claim: %w", err)
+			}
 		}
-		rows, err := q.All(ctx)
-		if err != nil {
+
+		basePreds := []predicate.ScheduledExecRun{
+			scheduledexecrun.FinishedAtIsNil(),
+			scheduledexecrun.LeaseUntilGTE(nowUTC),
+		}
+		if len(excludeSQL) > 0 {
+			basePreds = append(basePreds, scheduledexecrun.EventIDNotIn(excludeSQL...))
+		}
+
+		var targets []uuid.UUID
+		if err := c.ScheduledExecRun.Query().
+			Where(basePreds...).
+			GroupBy(scheduledexecrun.FieldTargetAgentID).
+			Scan(ctx, &targets); err != nil {
 			return mapError(err)
 		}
-		chosen := roundRobinRunsByTarget(rows, limit)
+		if len(targets) == 0 {
+			return nil
+		}
+
+		turnByTarget := make(map[uuid.UUID]int64, len(targets))
+		for start := 0; start < len(targets); start += scheduledExecRunsByEventChunk {
+			end := min(start+scheduledExecRunsByEventChunk, len(targets))
+			cursors, err := c.ScheduledExecPollCursor.Query().
+				Where(scheduledexecpollcursor.TargetAgentIDIn(targets[start:end]...)).
+				All(ctx)
+			if err != nil {
+				return mapError(err)
+			}
+			for _, cur := range cursors {
+				turnByTarget[cur.TargetAgentID] = cur.TurnSeq
+			}
+		}
+
+		var maxSeq int64
+		topCursor, err := c.ScheduledExecPollCursor.Query().
+			Order(scheduledexecpollcursor.ByTurnSeq(entsql.OrderDesc())).
+			First(ctx)
+		if err != nil && !ent.IsNotFound(err) {
+			return mapError(err)
+		}
+		if topCursor != nil {
+			maxSeq = topCursor.TurnSeq
+		}
+
+		slices.SortFunc(targets, func(a, b uuid.UUID) int {
+			ta, tb := turnByTarget[a], turnByTarget[b]
+			if ta < tb {
+				return -1
+			}
+			if ta > tb {
+				return 1
+			}
+			sa, sb := a.String(), b.String()
+			if sa < sb {
+				return -1
+			}
+			if sa > sb {
+				return 1
+			}
+			return 0
+		})
+
+		chosen := make([]*ent.ScheduledExecRun, 0, limit)
+		pickedRunIDs := make(map[uuid.UUID][]uuid.UUID, len(targets))
+		exhausted := make(map[uuid.UUID]bool, len(targets))
+		overflowExclude := len(excludeSet) > len(excludeSQL)
+
+		for len(chosen) < limit {
+			activeTargets := len(targets) - len(exhausted)
+			if activeTargets == 0 {
+				break
+			}
+			progressed := false
+			for _, target := range targets {
+				if len(chosen) == limit {
+					break
+				}
+				if exhausted[target] {
+					continue
+				}
+				need := 1
+				if activeTargets == 1 {
+					need = limit - len(chosen)
+				}
+				preds := make([]predicate.ScheduledExecRun, 0, len(basePreds)+2)
+				preds = append(preds, basePreds...)
+				preds = append(preds, scheduledexecrun.TargetAgentIDEQ(target))
+				if picked := pickedRunIDs[target]; len(picked) > 0 {
+					preds = append(preds, scheduledexecrun.IDNotIn(picked...))
+				}
+				fetchLimit := need
+				if overflowExclude {
+					fetchLimit = min(maxListLimit, need+16)
+				}
+				q := c.ScheduledExecRun.Query().
+					Where(preds...).
+					Order(
+						scheduledexecrun.ByPollSeq(),
+						scheduledexecrun.ByLastPolledAt(),
+						scheduledexecrun.ByEventID(),
+					).
+					Limit(fetchLimit)
+				if isPostgres(c) {
+					q = q.ForUpdate(entsql.WithLockAction(entsql.SkipLocked))
+				}
+				rows, err := q.All(ctx)
+				if err != nil {
+					return mapError(err)
+				}
+				addedForTarget := 0
+				for _, r := range rows {
+					if overflowExclude {
+						if _, skip := excludeSet[r.EventID]; skip {
+							pickedRunIDs[target] = append(pickedRunIDs[target], r.ID)
+							continue
+						}
+					}
+					chosen = append(chosen, r)
+					pickedRunIDs[target] = append(pickedRunIDs[target], r.ID)
+					addedForTarget++
+					progressed = true
+					if addedForTarget == need || len(chosen) == limit {
+						break
+					}
+				}
+				if len(rows) < fetchLimit || activeTargets == 1 {
+					exhausted[target] = true
+					activeTargets = len(targets) - len(exhausted)
+				}
+			}
+			if !progressed {
+				break
+			}
+		}
+
 		if len(chosen) == 0 {
 			return nil
 		}
-		ids := make([]uuid.UUID, 0, len(chosen))
-		for _, r := range chosen {
-			ids = append(ids, r.ID)
+
+		latestTurn := make(map[uuid.UUID]int64, len(chosen))
+		var touchedTargets []uuid.UUID
+		for i, r := range chosen {
+			seq := maxSeq + int64(i) + 1
+			if err := c.ScheduledExecRun.UpdateOneID(r.ID).
+				SetLastPolledAt(nowUTC).
+				SetPollSeq(seq).
+				Exec(ctx); err != nil {
+				return mapError(err)
+			}
+			r.LastPolledAt = nowUTC
+			r.PollSeq = seq
+			if _, seen := latestTurn[r.TargetAgentID]; !seen {
+				touchedTargets = append(touchedTargets, r.TargetAgentID)
+			}
+			latestTurn[r.TargetAgentID] = seq
 		}
-		if _, err := c.ScheduledExecRun.Update().
-			Where(scheduledexecrun.IDIn(ids...)).
-			SetLastPolledAt(now.UTC()).
-			Save(ctx); err != nil {
+
+		builders := make([]*ent.ScheduledExecPollCursorCreate, 0, len(touchedTargets))
+		for _, target := range touchedTargets {
+			builders = append(builders, c.ScheduledExecPollCursor.Create().
+				SetTargetAgentID(target).
+				SetTurnSeq(latestTurn[target]).
+				SetLastPolledAt(nowUTC))
+		}
+		if err := c.ScheduledExecPollCursor.CreateBulk(builders...).
+			OnConflictColumns(scheduledexecpollcursor.FieldTargetAgentID).
+			Update(func(u *ent.ScheduledExecPollCursorUpsert) {
+				u.UpdateTurnSeq()
+				u.UpdateLastPolledAt()
+			}).
+			Exec(ctx); err != nil {
 			return mapError(err)
 		}
+
 		out = entScheduledExecRunsToStore(chosen)
 		return nil
 	})
@@ -333,33 +506,6 @@ func (s *ScheduleStore) ClaimScheduledExecRunsForPoll(ctx context.Context, now t
 		return nil, err
 	}
 	return out, nil
-}
-
-// roundRobinRunsByTarget picks up to limit of rows (ordered least recently
-// polled first) one per target agent per round, agents in the order of
-// their first row.
-func roundRobinRunsByTarget(rows []*ent.ScheduledExecRun, limit int) []*ent.ScheduledExecRun {
-	var targets []uuid.UUID
-	byTarget := make(map[uuid.UUID][]*ent.ScheduledExecRun)
-	for _, r := range rows {
-		if _, ok := byTarget[r.TargetAgentID]; !ok {
-			targets = append(targets, r.TargetAgentID)
-		}
-		byTarget[r.TargetAgentID] = append(byTarget[r.TargetAgentID], r)
-	}
-	out := make([]*ent.ScheduledExecRun, 0, min(limit, len(rows)))
-	for len(out) < limit && len(out) < len(rows) {
-		for _, t := range targets {
-			if len(out) == limit {
-				break
-			}
-			if q := byTarget[t]; len(q) > 0 {
-				out = append(out, q[0])
-				byTarget[t] = q[1:]
-			}
-		}
-	}
-	return out
 }
 
 func entScheduledExecRunsToStore(rows []*ent.ScheduledExecRun) []store.ScheduledExecRun {

@@ -94,6 +94,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimeorphan"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schedule"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecpollcursor"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schema"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/secret"
@@ -210,6 +211,7 @@ const (
 	TypeRuntimeOrphan                 = "RuntimeOrphan"
 	TypeSchedule                      = "Schedule"
 	TypeScheduledEvent                = "ScheduledEvent"
+	TypeScheduledExecPollCursor       = "ScheduledExecPollCursor"
 	TypeScheduledExecRun              = "ScheduledExecRun"
 	TypeSecret                        = "Secret"
 	TypeSkill                         = "Skill"
@@ -95107,6 +95109,482 @@ func (m *ScheduledEventMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown ScheduledEvent edge %s", name)
 }
 
+// ScheduledExecPollCursorMutation represents an operation that mutates the ScheduledExecPollCursor nodes in the graph.
+type ScheduledExecPollCursorMutation struct {
+	config
+	op              Op
+	typ             string
+	id              *uuid.UUID
+	target_agent_id *uuid.UUID
+	turn_seq        *int64
+	addturn_seq     *int64
+	last_polled_at  *time.Time
+	clearedFields   map[string]struct{}
+	done            bool
+	oldValue        func(context.Context) (*ScheduledExecPollCursor, error)
+	predicates      []predicate.ScheduledExecPollCursor
+}
+
+var _ ent.Mutation = (*ScheduledExecPollCursorMutation)(nil)
+
+// scheduledexecpollcursorOption allows management of the mutation configuration using functional options.
+type scheduledexecpollcursorOption func(*ScheduledExecPollCursorMutation)
+
+// newScheduledExecPollCursorMutation creates new mutation for the ScheduledExecPollCursor entity.
+func newScheduledExecPollCursorMutation(c config, op Op, opts ...scheduledexecpollcursorOption) *ScheduledExecPollCursorMutation {
+	m := &ScheduledExecPollCursorMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeScheduledExecPollCursor,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withScheduledExecPollCursorID sets the ID field of the mutation.
+func withScheduledExecPollCursorID(id uuid.UUID) scheduledexecpollcursorOption {
+	return func(m *ScheduledExecPollCursorMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *ScheduledExecPollCursor
+		)
+		m.oldValue = func(ctx context.Context) (*ScheduledExecPollCursor, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().ScheduledExecPollCursor.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withScheduledExecPollCursor sets the old ScheduledExecPollCursor of the mutation.
+func withScheduledExecPollCursor(node *ScheduledExecPollCursor) scheduledexecpollcursorOption {
+	return func(m *ScheduledExecPollCursorMutation) {
+		m.oldValue = func(context.Context) (*ScheduledExecPollCursor, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m ScheduledExecPollCursorMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m ScheduledExecPollCursorMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of ScheduledExecPollCursor entities.
+func (m *ScheduledExecPollCursorMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *ScheduledExecPollCursorMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *ScheduledExecPollCursorMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().ScheduledExecPollCursor.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetTargetAgentID sets the "target_agent_id" field.
+func (m *ScheduledExecPollCursorMutation) SetTargetAgentID(u uuid.UUID) {
+	m.target_agent_id = &u
+}
+
+// TargetAgentID returns the value of the "target_agent_id" field in the mutation.
+func (m *ScheduledExecPollCursorMutation) TargetAgentID() (r uuid.UUID, exists bool) {
+	v := m.target_agent_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTargetAgentID returns the old "target_agent_id" field's value of the ScheduledExecPollCursor entity.
+// If the ScheduledExecPollCursor object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledExecPollCursorMutation) OldTargetAgentID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTargetAgentID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTargetAgentID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTargetAgentID: %w", err)
+	}
+	return oldValue.TargetAgentID, nil
+}
+
+// ResetTargetAgentID resets all changes to the "target_agent_id" field.
+func (m *ScheduledExecPollCursorMutation) ResetTargetAgentID() {
+	m.target_agent_id = nil
+}
+
+// SetTurnSeq sets the "turn_seq" field.
+func (m *ScheduledExecPollCursorMutation) SetTurnSeq(i int64) {
+	m.turn_seq = &i
+	m.addturn_seq = nil
+}
+
+// TurnSeq returns the value of the "turn_seq" field in the mutation.
+func (m *ScheduledExecPollCursorMutation) TurnSeq() (r int64, exists bool) {
+	v := m.turn_seq
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTurnSeq returns the old "turn_seq" field's value of the ScheduledExecPollCursor entity.
+// If the ScheduledExecPollCursor object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledExecPollCursorMutation) OldTurnSeq(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTurnSeq is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTurnSeq requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTurnSeq: %w", err)
+	}
+	return oldValue.TurnSeq, nil
+}
+
+// AddTurnSeq adds i to the "turn_seq" field.
+func (m *ScheduledExecPollCursorMutation) AddTurnSeq(i int64) {
+	if m.addturn_seq != nil {
+		*m.addturn_seq += i
+	} else {
+		m.addturn_seq = &i
+	}
+}
+
+// AddedTurnSeq returns the value that was added to the "turn_seq" field in this mutation.
+func (m *ScheduledExecPollCursorMutation) AddedTurnSeq() (r int64, exists bool) {
+	v := m.addturn_seq
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetTurnSeq resets all changes to the "turn_seq" field.
+func (m *ScheduledExecPollCursorMutation) ResetTurnSeq() {
+	m.turn_seq = nil
+	m.addturn_seq = nil
+}
+
+// SetLastPolledAt sets the "last_polled_at" field.
+func (m *ScheduledExecPollCursorMutation) SetLastPolledAt(t time.Time) {
+	m.last_polled_at = &t
+}
+
+// LastPolledAt returns the value of the "last_polled_at" field in the mutation.
+func (m *ScheduledExecPollCursorMutation) LastPolledAt() (r time.Time, exists bool) {
+	v := m.last_polled_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLastPolledAt returns the old "last_polled_at" field's value of the ScheduledExecPollCursor entity.
+// If the ScheduledExecPollCursor object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledExecPollCursorMutation) OldLastPolledAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLastPolledAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLastPolledAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLastPolledAt: %w", err)
+	}
+	return oldValue.LastPolledAt, nil
+}
+
+// ResetLastPolledAt resets all changes to the "last_polled_at" field.
+func (m *ScheduledExecPollCursorMutation) ResetLastPolledAt() {
+	m.last_polled_at = nil
+}
+
+// Where appends a list predicates to the ScheduledExecPollCursorMutation builder.
+func (m *ScheduledExecPollCursorMutation) Where(ps ...predicate.ScheduledExecPollCursor) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the ScheduledExecPollCursorMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *ScheduledExecPollCursorMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.ScheduledExecPollCursor, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *ScheduledExecPollCursorMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *ScheduledExecPollCursorMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (ScheduledExecPollCursor).
+func (m *ScheduledExecPollCursorMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *ScheduledExecPollCursorMutation) Fields() []string {
+	fields := make([]string, 0, 3)
+	if m.target_agent_id != nil {
+		fields = append(fields, scheduledexecpollcursor.FieldTargetAgentID)
+	}
+	if m.turn_seq != nil {
+		fields = append(fields, scheduledexecpollcursor.FieldTurnSeq)
+	}
+	if m.last_polled_at != nil {
+		fields = append(fields, scheduledexecpollcursor.FieldLastPolledAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *ScheduledExecPollCursorMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case scheduledexecpollcursor.FieldTargetAgentID:
+		return m.TargetAgentID()
+	case scheduledexecpollcursor.FieldTurnSeq:
+		return m.TurnSeq()
+	case scheduledexecpollcursor.FieldLastPolledAt:
+		return m.LastPolledAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *ScheduledExecPollCursorMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case scheduledexecpollcursor.FieldTargetAgentID:
+		return m.OldTargetAgentID(ctx)
+	case scheduledexecpollcursor.FieldTurnSeq:
+		return m.OldTurnSeq(ctx)
+	case scheduledexecpollcursor.FieldLastPolledAt:
+		return m.OldLastPolledAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown ScheduledExecPollCursor field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *ScheduledExecPollCursorMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case scheduledexecpollcursor.FieldTargetAgentID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTargetAgentID(v)
+		return nil
+	case scheduledexecpollcursor.FieldTurnSeq:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTurnSeq(v)
+		return nil
+	case scheduledexecpollcursor.FieldLastPolledAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLastPolledAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown ScheduledExecPollCursor field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *ScheduledExecPollCursorMutation) AddedFields() []string {
+	var fields []string
+	if m.addturn_seq != nil {
+		fields = append(fields, scheduledexecpollcursor.FieldTurnSeq)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *ScheduledExecPollCursorMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case scheduledexecpollcursor.FieldTurnSeq:
+		return m.AddedTurnSeq()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *ScheduledExecPollCursorMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case scheduledexecpollcursor.FieldTurnSeq:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddTurnSeq(v)
+		return nil
+	}
+	return fmt.Errorf("unknown ScheduledExecPollCursor numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *ScheduledExecPollCursorMutation) ClearedFields() []string {
+	return nil
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *ScheduledExecPollCursorMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *ScheduledExecPollCursorMutation) ClearField(name string) error {
+	return fmt.Errorf("unknown ScheduledExecPollCursor nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *ScheduledExecPollCursorMutation) ResetField(name string) error {
+	switch name {
+	case scheduledexecpollcursor.FieldTargetAgentID:
+		m.ResetTargetAgentID()
+		return nil
+	case scheduledexecpollcursor.FieldTurnSeq:
+		m.ResetTurnSeq()
+		return nil
+	case scheduledexecpollcursor.FieldLastPolledAt:
+		m.ResetLastPolledAt()
+		return nil
+	}
+	return fmt.Errorf("unknown ScheduledExecPollCursor field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *ScheduledExecPollCursorMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *ScheduledExecPollCursorMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *ScheduledExecPollCursorMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *ScheduledExecPollCursorMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *ScheduledExecPollCursorMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *ScheduledExecPollCursorMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *ScheduledExecPollCursorMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown ScheduledExecPollCursor unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *ScheduledExecPollCursorMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown ScheduledExecPollCursor edge %s", name)
+}
+
 // ScheduledExecRunMutation represents an operation that mutates the ScheduledExecRun nodes in the graph.
 type ScheduledExecRunMutation struct {
 	config
@@ -95143,6 +95621,8 @@ type ScheduledExecRunMutation struct {
 	runtime                   *string
 	launch_id                 *string
 	last_polled_at            *time.Time
+	poll_seq                  *int64
+	addpoll_seq               *int64
 	clearedFields             map[string]struct{}
 	event                     *uuid.UUID
 	clearedevent              bool
@@ -96343,6 +96823,62 @@ func (m *ScheduledExecRunMutation) ResetLastPolledAt() {
 	m.last_polled_at = nil
 }
 
+// SetPollSeq sets the "poll_seq" field.
+func (m *ScheduledExecRunMutation) SetPollSeq(i int64) {
+	m.poll_seq = &i
+	m.addpoll_seq = nil
+}
+
+// PollSeq returns the value of the "poll_seq" field in the mutation.
+func (m *ScheduledExecRunMutation) PollSeq() (r int64, exists bool) {
+	v := m.poll_seq
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPollSeq returns the old "poll_seq" field's value of the ScheduledExecRun entity.
+// If the ScheduledExecRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledExecRunMutation) OldPollSeq(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPollSeq is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPollSeq requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPollSeq: %w", err)
+	}
+	return oldValue.PollSeq, nil
+}
+
+// AddPollSeq adds i to the "poll_seq" field.
+func (m *ScheduledExecRunMutation) AddPollSeq(i int64) {
+	if m.addpoll_seq != nil {
+		*m.addpoll_seq += i
+	} else {
+		m.addpoll_seq = &i
+	}
+}
+
+// AddedPollSeq returns the value that was added to the "poll_seq" field in this mutation.
+func (m *ScheduledExecRunMutation) AddedPollSeq() (r int64, exists bool) {
+	v := m.addpoll_seq
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetPollSeq resets all changes to the "poll_seq" field.
+func (m *ScheduledExecRunMutation) ResetPollSeq() {
+	m.poll_seq = nil
+	m.addpoll_seq = nil
+}
+
 // ClearEvent clears the "event" edge to the ScheduledEvent entity.
 func (m *ScheduledExecRunMutation) ClearEvent() {
 	m.clearedevent = true
@@ -96404,7 +96940,7 @@ func (m *ScheduledExecRunMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *ScheduledExecRunMutation) Fields() []string {
-	fields := make([]string, 0, 25)
+	fields := make([]string, 0, 26)
 	if m.event != nil {
 		fields = append(fields, scheduledexecrun.FieldEventID)
 	}
@@ -96480,6 +97016,9 @@ func (m *ScheduledExecRunMutation) Fields() []string {
 	if m.last_polled_at != nil {
 		fields = append(fields, scheduledexecrun.FieldLastPolledAt)
 	}
+	if m.poll_seq != nil {
+		fields = append(fields, scheduledexecrun.FieldPollSeq)
+	}
 	return fields
 }
 
@@ -96538,6 +97077,8 @@ func (m *ScheduledExecRunMutation) Field(name string) (ent.Value, bool) {
 		return m.LaunchID()
 	case scheduledexecrun.FieldLastPolledAt:
 		return m.LastPolledAt()
+	case scheduledexecrun.FieldPollSeq:
+		return m.PollSeq()
 	}
 	return nil, false
 }
@@ -96597,6 +97138,8 @@ func (m *ScheduledExecRunMutation) OldField(ctx context.Context, name string) (e
 		return m.OldLaunchID(ctx)
 	case scheduledexecrun.FieldLastPolledAt:
 		return m.OldLastPolledAt(ctx)
+	case scheduledexecrun.FieldPollSeq:
+		return m.OldPollSeq(ctx)
 	}
 	return nil, fmt.Errorf("unknown ScheduledExecRun field %s", name)
 }
@@ -96781,6 +97324,13 @@ func (m *ScheduledExecRunMutation) SetField(name string, value ent.Value) error 
 		}
 		m.SetLastPolledAt(v)
 		return nil
+	case scheduledexecrun.FieldPollSeq:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPollSeq(v)
+		return nil
 	}
 	return fmt.Errorf("unknown ScheduledExecRun field %s", name)
 }
@@ -96807,6 +97357,9 @@ func (m *ScheduledExecRunMutation) AddedFields() []string {
 	if m.addoutput_bytes != nil {
 		fields = append(fields, scheduledexecrun.FieldOutputBytes)
 	}
+	if m.addpoll_seq != nil {
+		fields = append(fields, scheduledexecrun.FieldPollSeq)
+	}
 	return fields
 }
 
@@ -96827,6 +97380,8 @@ func (m *ScheduledExecRunMutation) AddedField(name string) (ent.Value, bool) {
 		return m.AddedDurationMs()
 	case scheduledexecrun.FieldOutputBytes:
 		return m.AddedOutputBytes()
+	case scheduledexecrun.FieldPollSeq:
+		return m.AddedPollSeq()
 	}
 	return nil, false
 }
@@ -96877,6 +97432,13 @@ func (m *ScheduledExecRunMutation) AddField(name string, value ent.Value) error 
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.AddOutputBytes(v)
+		return nil
+	case scheduledexecrun.FieldPollSeq:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddPollSeq(v)
 		return nil
 	}
 	return fmt.Errorf("unknown ScheduledExecRun numeric field %s", name)
@@ -97012,6 +97574,9 @@ func (m *ScheduledExecRunMutation) ResetField(name string) error {
 		return nil
 	case scheduledexecrun.FieldLastPolledAt:
 		m.ResetLastPolledAt()
+		return nil
+	case scheduledexecrun.FieldPollSeq:
+		m.ResetPollSeq()
 		return nil
 	}
 	return fmt.Errorf("unknown ScheduledExecRun field %s", name)

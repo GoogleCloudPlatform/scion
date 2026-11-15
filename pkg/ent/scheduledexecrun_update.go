@@ -157,6 +157,27 @@ func (_u *ScheduledExecRunUpdate) SetNillableLastPolledAt(v *time.Time) *Schedul
 	return _u
 }
 
+// SetPollSeq sets the "poll_seq" field.
+func (_u *ScheduledExecRunUpdate) SetPollSeq(v int64) *ScheduledExecRunUpdate {
+	_u.mutation.ResetPollSeq()
+	_u.mutation.SetPollSeq(v)
+	return _u
+}
+
+// SetNillablePollSeq sets the "poll_seq" field if the given value is not nil.
+func (_u *ScheduledExecRunUpdate) SetNillablePollSeq(v *int64) *ScheduledExecRunUpdate {
+	if v != nil {
+		_u.SetPollSeq(*v)
+	}
+	return _u
+}
+
+// AddPollSeq adds value to the "poll_seq" field.
+func (_u *ScheduledExecRunUpdate) AddPollSeq(v int64) *ScheduledExecRunUpdate {
+	_u.mutation.AddPollSeq(v)
+	return _u
+}
+
 // Mutation returns the ScheduledExecRunMutation object of the builder.
 func (_u *ScheduledExecRunUpdate) Mutation() *ScheduledExecRunMutation {
 	return _u.mutation
@@ -255,6 +276,12 @@ func (_u *ScheduledExecRunUpdate) sqlSave(ctx context.Context) (_node int, err e
 	}
 	if value, ok := _u.mutation.LastPolledAt(); ok {
 		_spec.SetField(scheduledexecrun.FieldLastPolledAt, field.TypeTime, value)
+	}
+	if value, ok := _u.mutation.PollSeq(); ok {
+		_spec.SetField(scheduledexecrun.FieldPollSeq, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedPollSeq(); ok {
+		_spec.AddField(scheduledexecrun.FieldPollSeq, field.TypeInt64, value)
 	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
@@ -405,6 +432,27 @@ func (_u *ScheduledExecRunUpdateOne) SetNillableLastPolledAt(v *time.Time) *Sche
 	return _u
 }
 
+// SetPollSeq sets the "poll_seq" field.
+func (_u *ScheduledExecRunUpdateOne) SetPollSeq(v int64) *ScheduledExecRunUpdateOne {
+	_u.mutation.ResetPollSeq()
+	_u.mutation.SetPollSeq(v)
+	return _u
+}
+
+// SetNillablePollSeq sets the "poll_seq" field if the given value is not nil.
+func (_u *ScheduledExecRunUpdateOne) SetNillablePollSeq(v *int64) *ScheduledExecRunUpdateOne {
+	if v != nil {
+		_u.SetPollSeq(*v)
+	}
+	return _u
+}
+
+// AddPollSeq adds value to the "poll_seq" field.
+func (_u *ScheduledExecRunUpdateOne) AddPollSeq(v int64) *ScheduledExecRunUpdateOne {
+	_u.mutation.AddPollSeq(v)
+	return _u
+}
+
 // Mutation returns the ScheduledExecRunMutation object of the builder.
 func (_u *ScheduledExecRunUpdateOne) Mutation() *ScheduledExecRunMutation {
 	return _u.mutation
@@ -533,6 +581,12 @@ func (_u *ScheduledExecRunUpdateOne) sqlSave(ctx context.Context) (_node *Schedu
 	}
 	if value, ok := _u.mutation.LastPolledAt(); ok {
 		_spec.SetField(scheduledexecrun.FieldLastPolledAt, field.TypeTime, value)
+	}
+	if value, ok := _u.mutation.PollSeq(); ok {
+		_spec.SetField(scheduledexecrun.FieldPollSeq, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedPollSeq(); ok {
+		_spec.AddField(scheduledexecrun.FieldPollSeq, field.TypeInt64, value)
 	}
 	_node = &ScheduledExecRun{config: _u.config}
 	_spec.Assign = _node.assignValues

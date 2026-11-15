@@ -249,6 +249,9 @@ type Schedule func(*sql.Selector)
 // ScheduledEvent is the predicate function for scheduledevent builders.
 type ScheduledEvent func(*sql.Selector)
 
+// ScheduledExecPollCursor is the predicate function for scheduledexecpollcursor builders.
+type ScheduledExecPollCursor func(*sql.Selector)
+
 // ScheduledExecRun is the predicate function for scheduledexecrun builders.
 type ScheduledExecRun func(*sql.Selector)
 

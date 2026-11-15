@@ -159,7 +159,7 @@ func (s *Server) callAgentExec(ctx context.Context, agentID, launchID, route str
 	if agent.RunID != launchID {
 		return 0, nil, &AgentExecLaunchChangedError{AgentID: agentID}
 	}
-	return s.callAgentControlPinned(ctx, agent, route, body, agentcontrol.HubExecCallTimeout)
+	return s.callAgentControlPinned(ctx, agent, route, body, execSeamDuration(&scheduledExecCallTimeout))
 }
 
 // callAgentControlPinned is callAgentControlJSON for an agent snapshot the

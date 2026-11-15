@@ -65,6 +65,8 @@ var (
 	// scheduledExecStopGrace bounds how long shutdown waits for exec fires
 	// still at exec-start before it cancels them and the trackers.
 	scheduledExecStopGrace = 2 * time.Second
+	// scheduledExecCallTimeout bounds one exec-start or exec-status RPC.
+	scheduledExecCallTimeout = agentcontrol.HubExecCallTimeout
 )
 
 // scheduledExecAdmitWindow bounds how long after its claim an exec event
@@ -652,26 +654,55 @@ func (s *Server) sweepScheduledExecRuns(ctx context.Context) {
 	}
 
 	// Live runs: claimed fairly across target agents, polled with at most
-	// inFlight calls at once. A slow poll holds only its own slot: the next
-	// claimed run starts as soon as any slot frees.
+	// inFlight calls at once, and at most once per run per sweep
+	// (ptone/scion#8096). Slots are acquired before claiming from the store
+	// so cancelling a sweep while all slots are busy never advances the
+	// persisted turn of runs this sweep never polled.
+	if inFlight <= 0 || budget <= 0 {
+		return
+	}
 	sem := make(chan struct{}, inFlight)
 	var wg sync.WaitGroup
 	defer wg.Wait()
+	var claimedThisSweep []string
 	for polled := 0; polled < budget && ctx.Err() == nil; {
-		runs, err := s.store.ClaimScheduledExecRunsForPoll(ctx, time.Now(), inFlight, s.execRuns.ownedIDs())
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
+		reserved := 1
+		maxReserve := min(inFlight, budget-polled)
+		for reserved < maxReserve {
+			select {
+			case sem <- struct{}{}:
+				reserved++
+			default:
+				goto haveSlots
+			}
+		}
+	haveSlots:
+		owned := s.execRuns.ownedIDs()
+		exclude := make([]string, 0, len(owned)+len(claimedThisSweep))
+		exclude = append(exclude, owned...)
+		exclude = append(exclude, claimedThisSweep...)
+
+		runs, err := s.store.ClaimScheduledExecRunsForPoll(ctx, time.Now(), reserved, exclude)
 		if err != nil {
+			for i := 0; i < reserved; i++ {
+				<-sem
+			}
 			slog.Warn("Scheduler: exec run sweep: claim failed", "error", err)
 			return
+		}
+		for i := len(runs); i < reserved; i++ {
+			<-sem
 		}
 		if len(runs) == 0 {
 			return
 		}
 		for _, r := range runs {
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				return
-			}
+			claimedThisSweep = append(claimedThisSweep, r.EventID)
 			wg.Add(1)
 			go func(r store.ScheduledExecRun) {
 				defer wg.Done()
@@ -681,7 +712,7 @@ func (s *Server) sweepScheduledExecRuns(ctx context.Context) {
 			}(r)
 		}
 		polled += len(runs)
-		if len(runs) < inFlight {
+		if len(runs) < reserved {
 			return
 		}
 	}
