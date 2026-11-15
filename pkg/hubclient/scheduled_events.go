@@ -50,33 +50,47 @@ func (s *scheduledEventService) basePath() string {
 
 // CreateScheduledEventRequest is the client-side request for creating a scheduled event.
 type CreateScheduledEventRequest struct {
-	EventType string `json:"eventType"`
-	FireAt    string `json:"fireAt,omitempty"`
-	FireIn    string `json:"fireIn,omitempty"`
-	AgentID   string `json:"agentId,omitempty"`
-	AgentName string `json:"agentName,omitempty"`
-	Message   string `json:"message,omitempty"`
-	Interrupt bool   `json:"interrupt,omitempty"`
-	Plain     bool   `json:"plain,omitempty"`
-	Wake      bool   `json:"wake,omitempty"`
-	Template  string `json:"template,omitempty"`
-	Task      string `json:"task,omitempty"`
-	Branch    string `json:"branch,omitempty"`
+	EventType      string   `json:"eventType"`
+	FireAt         string   `json:"fireAt,omitempty"`
+	FireIn         string   `json:"fireIn,omitempty"`
+	Payload        string   `json:"payload,omitempty"`
+	AgentID        string   `json:"agentId,omitempty"`
+	AgentName      string   `json:"agentName,omitempty"`
+	Message        string   `json:"message,omitempty"`
+	Interrupt      bool     `json:"interrupt,omitempty"`
+	Plain          bool     `json:"plain,omitempty"`
+	Wake           bool     `json:"wake,omitempty"`
+	Template       string   `json:"template,omitempty"`
+	Task           string   `json:"task,omitempty"`
+	Branch         string   `json:"branch,omitempty"`
+	Command        []string `json:"command,omitempty"`
+	TimeoutSeconds int      `json:"timeoutSeconds,omitempty"`
+}
+
+// ExecSummary is the non-secret summary of a scheduled exec event's run.
+type ExecSummary struct {
+	Outcome     string     `json:"outcome"`
+	ExitCode    *int       `json:"exitCode,omitempty"`
+	DurationMS  *int64     `json:"durationMs,omitempty"`
+	OutputBytes *int64     `json:"outputBytes,omitempty"`
+	StartedAt   time.Time  `json:"startedAt"`
+	FinishedAt  *time.Time `json:"finishedAt,omitempty"`
 }
 
 // ScheduledEvent represents a scheduled event returned by the Hub API.
 type ScheduledEvent struct {
-	ID         string     `json:"id"`
-	ProjectID  string     `json:"projectId"`
-	EventType  string     `json:"eventType"`
-	FireAt     time.Time  `json:"fireAt"`
-	Payload    string     `json:"payload"`
-	Status     string     `json:"status"`
-	CreatedAt  time.Time  `json:"createdAt"`
-	CreatedBy  string     `json:"createdBy"`
-	FiredAt    *time.Time `json:"firedAt,omitempty"`
-	Error      string     `json:"error,omitempty"`
-	ScheduleID string     `json:"scheduleId,omitempty"`
+	ID          string       `json:"id"`
+	ProjectID   string       `json:"projectId"`
+	EventType   string       `json:"eventType"`
+	FireAt      time.Time    `json:"fireAt"`
+	Payload     string       `json:"payload"`
+	Status      string       `json:"status"`
+	CreatedAt   time.Time    `json:"createdAt"`
+	CreatedBy   string       `json:"createdBy"`
+	FiredAt     *time.Time   `json:"firedAt,omitempty"`
+	Error       string       `json:"error,omitempty"`
+	ScheduleID  string       `json:"scheduleId,omitempty"`
+	ExecSummary *ExecSummary `json:"execSummary,omitempty"`
 }
 
 // ListScheduledEventsOptions configures scheduled event listing.
