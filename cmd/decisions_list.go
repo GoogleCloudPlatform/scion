@@ -16,10 +16,13 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -41,29 +44,30 @@ with -q/--search (question, answer, key, agent or conversation name, at least
 (case-insensitive, # optional) or a key or ID. On --made, also narrow with
 --answered-by, --provenance, --since and --until (answer time).
 
-In agent mode, lists the decisions your agent has asked. By default only
-pending decisions; pass --decided for answered active decisions or --all to
-include pending, decided and replaced versions.
+In agent mode, lists the Decisions your agent has asked. By default only
+pending Decisions; pass --decided for answered active Decisions or --all to
+include pending, decided and replaced versions. Search with -q/--search
+(question, key or effective answer label, 2 to 256 characters).
 
 Examples:
   scion decisions list
   scion decisions list -q release
   scion decisions list --made --conversation release --since 2026-11-01
   scion decisions list --made --answered-by me --json
-  scion decisions list --decided        # agent mode
-  scion decisions list --all --json     # agent mode`,
+  scion decisions list --decided          # agent mode
+  scion decisions list --all -q release   # agent mode
+  scion decisions list --all --json       # agent mode`,
 		Args: cobra.NoArgs,
 		RunE: runDecisionsList,
 	}
 	// Agent mode.
-	cmd.Flags().Bool("pending", false, "List pending decisions only (default)")
-	cmd.Flags().Bool("decided", false, "List decided active decisions only")
-	cmd.Flags().Bool("all", false, "List pending, decided, and replaced decisions")
+	cmd.Flags().Bool("pending", false, "List pending Decisions only (default)")
+	cmd.Flags().Bool("decided", false, "List decided active Decisions only")
+	cmd.Flags().Bool("all", false, "List pending, decided, and replaced Decisions")
 	markFlagsForMode(cmd, ModeAgent, "pending", "decided", "all")
 	// Human mode.
 	cmd.Flags().Bool("waiting", false, "List Decisions waiting on you (default)")
 	cmd.Flags().Bool("made", false, "List the Decisions made (the answer log)")
-	cmd.Flags().StringP("search", "q", "", "Search question, answer, key, agent and conversation names (2 to 256 characters)")
 	cmd.Flags().String("conversation", "", "Only this conversation: a name such as #release or \"DM with nc-x\", or its key")
 	cmd.Flags().String("agent", "", "Only Decisions asked by this agent: a name or an agent ID")
 	cmd.Flags().String("answered-by", "", "With --made: only answers by this user: me or a user ID")
@@ -71,8 +75,10 @@ Examples:
 	cmd.Flags().String("since", "", "With --made: answered on or after this day (YYYY-MM-DD, UTC) or time (RFC3339)")
 	cmd.Flags().String("until", "", "With --made: answered on or before this day (YYYY-MM-DD, UTC) or time (RFC3339)")
 	cmd.Flags().Int("limit", defaultDecisionsListLimit, fmt.Sprintf("Maximum number of prompts or answers to list (1 to %d)", maxDecisionsListLimit))
-	markFlagsForMode(cmd, ModeHuman, "waiting", "made", "search", "conversation", "agent",
+	markFlagsForMode(cmd, ModeHuman, "waiting", "made", "conversation", "agent",
 		"answered-by", "provenance", "since", "until", "limit")
+	// Shared across human and agent mode.
+	cmd.Flags().StringP("search", "q", "", "Search Decisions (2 to 256 characters; question, key and answer, plus agent and conversation names in human mode)")
 	cmd.Flags().Bool("json", false, "Output in JSON format")
 	return cmd
 }
@@ -123,6 +129,12 @@ func runAgentDecisionsList(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
+	search, _ := cmd.Flags().GetString("search")
+	if search = strings.TrimSpace(search); search != "" {
+		if n := utf8.RuneCountInString(search); n < minDecisionsSearchRunes || n > maxDecisionsSearchRunes {
+			return newUsageError("--search must be %d to %d characters", minDecisionsSearchRunes, maxDecisionsSearchRunes)
+		}
+	}
 
 	client, err := decisionsClientFactory()
 	if err != nil {
@@ -137,11 +149,15 @@ func runAgentDecisionsList(cmd *cobra.Command) error {
 	for {
 		page, err := client.Decisions().List(ctx, &hubclient.ListAgentDecisionsOptions{
 			State:  state,
+			Query:  search,
 			Cursor: cursor,
 			Limit:  200,
 		})
 		if err != nil {
 			return formatDecisionAPIError(err)
+		}
+		if search != "" && page.Query == "" {
+			return errors.New(errMsgDecisionSearchUnsupported)
 		}
 		items = append(items, page.Items...)
 		if page.NextCursor == "" {
@@ -153,10 +169,15 @@ func runAgentDecisionsList(cmd *cobra.Command) error {
 	if decisionsWantJSON(cmd) {
 		return writeJSONTo(cmd.OutOrStdout(), hubclient.AgentDecisionListResponse{
 			Items: items,
+			Query: search,
 		})
 	}
 
 	if len(items) == 0 {
+		if search != "" {
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "No %s decisions match %q.\n", state, safeText(search))
+			return nil
+		}
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "No %s decisions.\n", state)
 		return nil
 	}

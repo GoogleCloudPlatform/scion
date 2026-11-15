@@ -23,6 +23,7 @@ import (
 	"sort"
 	"time"
 
+	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
@@ -1232,7 +1233,7 @@ func decodeDecisionListCursor(s string) (decisionListCursor, error) {
 }
 
 // ListAgentDecisions implements store.DecisionStore.
-func (c *CompositeStore) ListAgentDecisions(ctx context.Context, agentID string, state store.DecisionListState, cursor string, limit int) ([]*store.Decision, string, error) {
+func (c *CompositeStore) ListAgentDecisions(ctx context.Context, agentID string, state store.DecisionListState, query string, cursor string, limit int) ([]*store.Decision, string, error) {
 	agentUUID, err := parseGetID(agentID)
 	if err != nil {
 		return nil, "", err
@@ -1257,6 +1258,9 @@ func (c *CompositeStore) ListAgentDecisions(ctx context.Context, agentID string,
 		// All statuses (pending, decided, replaced).
 	default:
 		return nil, "", fmt.Errorf("%w: invalid decision state %q", store.ErrInvalidInput, state)
+	}
+	if query != "" {
+		q = q.Where(agentDecisionMatchesQuery(query))
 	}
 
 	if cursor != "" {
@@ -1306,6 +1310,52 @@ func (c *CompositeStore) ListAgentDecisions(ctx context.Context, agentID string,
 		items[i] = d
 	}
 	return items, nextCursor, nil
+}
+
+// agentDecisionMatchesQuery keeps decisions whose question text, key, or
+// effective answer's choice label contains q case-insensitively (D12).
+// ContainsFold escapes %, _ and \, so q matches literally (ILIKE on Postgres,
+// LOWER() LIKE on SQLite). There is no conversation label or agent name arm:
+// every row already belongs to the calling agent.
+func agentDecisionMatchesQuery(q string) predicate.Decision {
+	return decision.Or(
+		decision.QuestionContainsFold(q),
+		decision.KeyContainsFold(q),
+		effectiveAnswerLabelContainsFold(q),
+	)
+}
+
+// effectiveAnswerLabelContainsFold matches decisions whose effective answer
+// (Decision.EffectiveAnswer: the direct answer when present, otherwise the
+// agent-interpreted answer) has a choice_label containing q case-insensitively.
+func effectiveAnswerLabelContainsFold(q string) predicate.Decision {
+	return func(s *entsql.Selector) {
+		ta := entsql.Table(decisionanswer.Table).As("da_eff")
+		tDir := entsql.Table(decisionanswer.Table).As("da_dir")
+		noDirect := entsql.NotExists(
+			entsql.Select(tDir.C(decisionanswer.FieldID)).
+				From(tDir).
+				Where(entsql.And(
+					entsql.ColumnsEQ(tDir.C(decisionanswer.FieldDecisionRowID), s.C(decision.FieldID)),
+					entsql.EQ(tDir.C(decisionanswer.FieldProvenance), decisionanswer.ProvenanceDirect),
+				)),
+		)
+		s.Where(entsql.Exists(
+			entsql.Select(ta.C(decisionanswer.FieldID)).
+				From(ta).
+				Where(entsql.And(
+					entsql.ColumnsEQ(ta.C(decisionanswer.FieldDecisionRowID), s.C(decision.FieldID)),
+					entsql.ContainsFold(ta.C(decisionanswer.FieldChoiceLabel), q),
+					entsql.Or(
+						entsql.EQ(ta.C(decisionanswer.FieldProvenance), decisionanswer.ProvenanceDirect),
+						entsql.And(
+							entsql.EQ(ta.C(decisionanswer.FieldProvenance), decisionanswer.ProvenanceAgentInterpreted),
+							noDirect,
+						),
+					),
+				)),
+		))
+	}
 }
 
 // GetAgentDecisionVersions implements store.DecisionStore.

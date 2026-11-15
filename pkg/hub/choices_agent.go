@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
@@ -61,9 +62,12 @@ type AgentDecisionListItem struct {
 }
 
 // AgentDecisionListResponse is the 200 envelope of GET /api/v1/agent/decisions.
+// Query echoes the trimmed q filter when one was applied so the CLI can reject
+// older hubs that silently ignore unknown query parameters.
 type AgentDecisionListResponse struct {
 	Items      []AgentDecisionListItem `json:"items"`
 	NextCursor string                  `json:"nextCursor,omitempty"`
+	Query      string                  `json:"query,omitempty"`
 }
 
 // AgentDecisionVersionView is one version in GET /api/v1/agent/decisions/{key}.
@@ -197,18 +201,43 @@ func (s *Server) handleAgentDecisionList(w http.ResponseWriter, r *http.Request,
 		limit = n
 	}
 
+	var search string
+	searchCtx := ctx
+	if rawSearch := strings.TrimSpace(q.Get("q")); rawSearch != "" {
+		if n := utf8.RuneCountInString(rawSearch); n < minProjectDecisionsQueryRunes || n > maxProjectDecisionsQueryRunes {
+			ValidationError(w, fmt.Sprintf("q must be %d to %d characters", minProjectDecisionsQueryRunes, maxProjectDecisionsQueryRunes),
+				map[string]interface{}{"field": "q"})
+			return
+		}
+		search = rawSearch
+		var cancel context.CancelFunc
+		searchCtx, cancel = context.WithTimeout(ctx, s.chatSearchTimeout())
+		defer cancel()
+	}
+
 	cursor := q.Get("cursor")
-	rows, nextCursor, err := s.store.ListAgentDecisions(ctx, agentIdent.ID(), state, cursor, limit)
+	rows, nextCursor, err := s.store.ListAgentDecisions(searchCtx, agentIdent.ID(), state, search, cursor, limit)
 	if err != nil {
+		if r.Context().Err() != nil {
+			return
+		}
 		if errors.Is(err, store.ErrInvalidInput) {
 			ValidationError(w, err.Error(), nil)
+			return
+		}
+		if search != "" {
+			writeDecisionsError(w, r, searchCtx, err)
 			return
 		}
 		writeErrorFromErr(w, err, "")
 		return
 	}
 
-	convByPrompt := s.fallbackConversationsForDecisions(ctx, rows)
+	convByPrompt := s.fallbackConversationsForDecisions(searchCtx, rows)
+	if search != "" && errors.Is(searchCtx.Err(), context.DeadlineExceeded) {
+		writeDecisionsError(w, r, searchCtx, searchCtx.Err())
+		return
+	}
 	items := make([]AgentDecisionListItem, len(rows))
 	for i, d := range rows {
 		convID := d.ConversationID
@@ -233,6 +262,7 @@ func (s *Server) handleAgentDecisionList(w http.ResponseWriter, r *http.Request,
 	writeJSON(w, http.StatusOK, AgentDecisionListResponse{
 		Items:      items,
 		NextCursor: nextCursor,
+		Query:      search,
 	})
 }
 

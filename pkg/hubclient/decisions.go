@@ -45,6 +45,7 @@ type decisionService struct {
 // ListAgentDecisionsOptions configures GET /api/v1/agent/decisions.
 type ListAgentDecisionsOptions struct {
 	State  string // pending (default), decided, or all
+	Query  string // optional substring search (2..256 runes)
 	Cursor string
 	Limit  int
 }
@@ -111,6 +112,7 @@ type AgentDecisionListItem struct {
 type AgentDecisionListResponse struct {
 	Items      []AgentDecisionListItem `json:"items"`
 	NextCursor string                  `json:"nextCursor,omitempty"`
+	Query      string                  `json:"query,omitempty"`
 }
 
 // AgentDecisionVersionView is one version in AgentDecisionShowResponse.
@@ -164,6 +166,9 @@ func (s *decisionService) List(ctx context.Context, opts *ListAgentDecisionsOpti
 	if opts != nil {
 		if opts.State != "" {
 			query.Set("state", opts.State)
+		}
+		if opts.Query != "" {
+			query.Set("q", opts.Query)
 		}
 		if opts.Cursor != "" {
 			query.Set("cursor", opts.Cursor)

@@ -194,7 +194,7 @@ func TestDecisionsList_FlagsOfTheOtherMode(t *testing.T) {
 
 	t.Setenv("SCION_CLI_MODE", "agent")
 	for _, args := range [][]string{
-		{"--made"}, {"--waiting"}, {"-q", "release"}, {"--search", "release"}, {"--conversation", "x"},
+		{"--made"}, {"--waiting"}, {"--conversation", "x"},
 		{"--agent", "x"}, {"--answered-by", "me"}, {"--provenance", "direct"}, {"--since", "2026-11-01"},
 		{"--until", "2026-11-01"}, {"--limit", "5"},
 	} {
@@ -214,7 +214,7 @@ func TestDecisionsList_FlagsOfTheOtherMode(t *testing.T) {
 
 	// Help hides the other mode's flags.
 	for mode, want := range map[CLIMode]struct{ shown, hidden []string }{
-		ModeAgent: {shown: []string{"pending", "decided", "all", "json"}, hidden: []string{"made", "waiting", "search", "conversation", "agent", "answered-by", "provenance", "since", "until", "limit"}},
+		ModeAgent: {shown: []string{"pending", "decided", "all", "search", "json"}, hidden: []string{"made", "waiting", "conversation", "agent", "answered-by", "provenance", "since", "until", "limit"}},
 		ModeHuman: {shown: []string{"made", "waiting", "search", "conversation", "agent", "limit", "json"}, hidden: []string{"pending", "decided", "all"}},
 	} {
 		root := &cobra.Command{Use: "scion"}

@@ -151,6 +151,7 @@ func TestDecisionsList_TablePaginationAndJSON(t *testing.T) {
 	var seenStates []string
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/agent/decisions", func(w http.ResponseWriter, r *http.Request) {
+		assert.False(t, r.URL.Query().Has("q"), "without -q, agent list omits q")
 		state := r.URL.Query().Get("state")
 		cursor := r.URL.Query().Get("cursor")
 		seenStates = append(seenStates, state+":"+cursor)
@@ -456,4 +457,191 @@ func TestDecisionsRecord_BothFormsAndErrorRendering(t *testing.T) {
 	_, err = runDecisionsTestCmd(t, "decisions", "record", "--from", "reply-2", "D234=1")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "decisions need the web.chat_choices experiment")
+}
+
+func TestDecisionsListAgent_SearchValidationPaginationAndErrors(t *testing.T) {
+	t.Setenv("SCION_CLI_MODE", "agent")
+	fixedNow := time.Date(2026, 11, 13, 5, 0, 0, 0, time.UTC)
+	restoreNow := clitime.SetNow(func() time.Time { return fixedNow })
+	defer restoreNow()
+	clitime.SetZone(time.UTC)
+	defer clitime.SetZone(nil)
+
+	var seenRawQueries []string
+	serverMode := "ok"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/agent/decisions", func(w http.ResponseWriter, r *http.Request) {
+		seenRawQueries = append(seenRawQueries, r.URL.RawQuery)
+		w.Header().Set("Content-Type", "application/json")
+		if serverMode == "timeout" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":{"code":"SEARCH_TIMEOUT","message":"Search took too long. Try a longer phrase or search one space."}}`))
+			return
+		}
+		appliedQuery := strings.TrimSpace(r.URL.Query().Get("q"))
+		if serverMode == "old_hub" {
+			// Pre-P3 hub ignores q and omits the "query" marker.
+			next := "p2"
+			if r.URL.Query().Get("cursor") != "" {
+				next = ""
+			}
+			_ = json.NewEncoder(w).Encode(hubclient.AgentDecisionListResponse{
+				Items: []hubclient.AgentDecisionListItem{
+					{
+						RowID:          "row-unfiltered",
+						Key:            "unrelated-1",
+						Ref:            "ag/unrelated-1",
+						Version:        1,
+						Status:         "pending",
+						Question:       "Unrelated decision?",
+						ConversationID: "conv-1",
+						CreatedAt:      fixedNow.Add(-5 * time.Minute),
+					},
+				},
+				NextCursor: next,
+			})
+			return
+		}
+		if serverMode == "empty" {
+			_ = json.NewEncoder(w).Encode(hubclient.AgentDecisionListResponse{
+				Items: []hubclient.AgentDecisionListItem{},
+				Query: appliedQuery,
+			})
+			return
+		}
+		if r.URL.Query().Get("cursor") == "" {
+			_ = json.NewEncoder(w).Encode(hubclient.AgentDecisionListResponse{
+				Items: []hubclient.AgentDecisionListItem{
+					{
+						RowID:          "row-1",
+						Key:            "canary-1",
+						Ref:            "ag/canary-1",
+						Version:        1,
+						Status:         "pending",
+						Question:       "Roll out canary 50%?",
+						ConversationID: "conv-1",
+						CreatedAt:      fixedNow.Add(-10 * time.Minute),
+					},
+				},
+				NextCursor: "p2",
+				Query:      appliedQuery,
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(hubclient.AgentDecisionListResponse{
+			Items: []hubclient.AgentDecisionListItem{
+				{
+					RowID:          "row-2",
+					Key:            "canary-2",
+					Ref:            "ag/canary-2",
+					Version:        1,
+					Status:         "decided",
+					Question:       "Keep canary?",
+					ConversationID: "conv-1",
+					CreatedAt:      fixedNow.Add(-20 * time.Minute),
+					Answer: &hubclient.DecisionAnswerView{
+						ChoiceID:       "1",
+						Label:          "CanaryYes",
+						AnsweredByName: "Alice",
+						Provenance:     "direct",
+					},
+				},
+			},
+			Query: appliedQuery,
+		})
+	})
+	withMockDecisionsServer(t, mux)
+
+	// Client-side bounds validation sends no HTTP request.
+	for _, args := range [][]string{
+		{"decisions", "list", "-q", "a"},
+		{"decisions", "list", "--search", "  x  "},
+		{"decisions", "list", "-q", strings.Repeat("é", 257)},
+	} {
+		_, err := runDecisionsTestCmd(t, args...)
+		require.Error(t, err, "%v", args)
+		assert.True(t, isUsageError(err), "%v: %v", args, err)
+		assert.Contains(t, err.Error(), "--search must be 2 to 256 characters", "%v", args)
+	}
+	assert.Empty(t, seenRawQueries, "invalid --search sends no HTTP request")
+
+	// Whitespace-only -q behaves identically to omitting -q (no q query parameter).
+	serverMode = "empty"
+	outNoQ, err := runDecisionsTestCmd(t, "decisions", "list")
+	require.NoError(t, err)
+	outBlankQ, err := runDecisionsTestCmd(t, "decisions", "list", "-q", "   ")
+	require.NoError(t, err)
+	assert.Equal(t, "No pending decisions.\n", outNoQ)
+	assert.Equal(t, outNoQ, outBlankQ, "whitespace -q matches omitted -q byte-for-byte")
+	assert.Equal(t, []string{"limit=200&state=pending", "limit=200&state=pending"}, seenRawQueries)
+
+	// Empty search results with -q name the query across pending, decided, and all.
+	outEmptyPendingQ, err := runDecisionsTestCmd(t, "decisions", "list", "-q", "  release  ")
+	require.NoError(t, err)
+	assert.Equal(t, "No pending decisions match \"release\".\n", outEmptyPendingQ)
+
+	outEmptyDecidedQ, err := runDecisionsTestCmd(t, "decisions", "list", "--decided", "-q", "release")
+	require.NoError(t, err)
+	assert.Equal(t, "No decided decisions match \"release\".\n", outEmptyDecidedQ)
+
+	outEmptyAllQ, err := runDecisionsTestCmd(t, "decisions", "list", "--all", "-q", "release")
+	require.NoError(t, err)
+	assert.Equal(t, "No all decisions match \"release\".\n", outEmptyAllQ)
+
+	// Pre-P3 hub that ignores q (omits "query" marker) fails instead of returning unfiltered rows.
+	seenRawQueries = nil
+	serverMode = "old_hub"
+	_, err = runDecisionsTestCmd(t, "decisions", "list", "-q", "canary")
+	require.Error(t, err)
+	assert.Equal(t, "this hub does not support decision search", err.Error())
+	assert.Len(t, seenRawQueries, 1, "old hub check stops on first page before following cursor")
+
+	// Omitting -q against a pre-P3 hub continues to work.
+	outOldNoQ, err := runDecisionsTestCmd(t, "decisions", "list")
+	require.NoError(t, err)
+	assert.Contains(t, outOldNoQ, "unrelated-1")
+
+	// Search with cursor pagination across state flags and --json.
+	seenRawQueries = nil
+	serverMode = "ok"
+	outTable, err := runDecisionsTestCmd(t, "decisions", "list", "--all", "-q", "  canary 50%  ")
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"limit=200&q=canary+50%25&state=all",
+		"cursor=p2&limit=200&q=canary+50%25&state=all",
+	}, seenRawQueries)
+	assert.Contains(t, outTable, "canary-1")
+	assert.Contains(t, outTable, "canary-2")
+	assert.Contains(t, outTable, "CanaryYes")
+
+	seenRawQueries = nil
+	outJSON, err := runDecisionsTestCmd(t, "decisions", "list", "--decided", "--search", strings.Repeat("é", 256), "--json")
+	require.NoError(t, err)
+	require.Len(t, seenRawQueries, 2)
+	var parsed hubclient.AgentDecisionListResponse
+	require.NoError(t, json.Unmarshal([]byte(outJSON), &parsed))
+	assert.Len(t, parsed.Items, 2)
+	assert.Equal(t, strings.Repeat("é", 256), parsed.Query)
+
+	// 503 SEARCH_TIMEOUT surfaces the Hub's timeout message cleanly.
+	serverMode = "timeout"
+	_, err = runDecisionsTestCmd(t, "decisions", "list", "-q", "canary")
+	require.Error(t, err)
+	assert.Equal(t, "Search took too long. Try a longer phrase or search one space.", err.Error())
+
+	// Help text in agent mode uses "Decisions" (C4) and shows -q/--search while hiding human-only flags.
+	root := &cobra.Command{Use: "scion"}
+	root.AddCommand(newDecisionsCmd())
+	applyModeRestrictions(root, ModeAgent)
+	var helpBuf bytes.Buffer
+	root.SetOut(&helpBuf)
+	root.SetErr(&helpBuf)
+	root.SetArgs([]string{"decisions", "list", "--help"})
+	require.NoError(t, root.Execute())
+	helpText := helpBuf.String()
+	assert.Contains(t, helpText, "Decisions")
+	_, flagsSection, ok := strings.Cut(helpText, "\nFlags:\n")
+	require.True(t, ok, helpText)
+	assert.Contains(t, flagsSection, "-q, --search")
+	assert.NotContains(t, flagsSection, "--conversation")
 }

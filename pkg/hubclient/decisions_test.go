@@ -47,6 +47,9 @@ func TestDecisionService_ListShowAndRecord(t *testing.T) {
 		if got := r.URL.Query().Get("limit"); got != "25" {
 			t.Errorf("limit = %q, want 25", got)
 		}
+		if r.URL.Query().Has("q") {
+			t.Errorf("unexpected q parameter %q when Query is empty", r.URL.Query().Get("q"))
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(AgentDecisionListResponse{
 			Items: []AgentDecisionListItem{
@@ -179,5 +182,48 @@ func TestDecisionService_ListShowAndRecord(t *testing.T) {
 	}
 	if recResp.ResponseMessageID != "resp-msg-1" || recResp.BatchID != "batch-1" || len(recResp.Decisions) != 2 {
 		t.Fatalf("unexpected RecordInterpreted response: %+v", recResp)
+	}
+}
+
+func TestDecisionService_ListQueryParam(t *testing.T) {
+	var seenRawQueries []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenRawQueries = append(seenRawQueries, r.URL.RawQuery)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(AgentDecisionListResponse{
+			Query: r.URL.Query().Get("q"),
+		})
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL, WithAgentToken("agent-tok-1"))
+	if err != nil {
+		t.Fatalf("New client: %v", err)
+	}
+
+	ctx := context.Background()
+	withQ, err := c.Decisions().List(ctx, &ListAgentDecisionsOptions{State: "all", Query: "canary 50%"})
+	if err != nil {
+		t.Fatalf("List with Query: %v", err)
+	}
+	if withQ.Query != "canary 50%" {
+		t.Errorf("withQ.Query = %q, want %q", withQ.Query, "canary 50%")
+	}
+	withoutQ, err := c.Decisions().List(ctx, &ListAgentDecisionsOptions{State: "pending"})
+	if err != nil {
+		t.Fatalf("List without Query: %v", err)
+	}
+	if withoutQ.Query != "" {
+		t.Errorf("withoutQ.Query = %q, want empty", withoutQ.Query)
+	}
+
+	if len(seenRawQueries) != 2 {
+		t.Fatalf("len(seenRawQueries) = %d, want 2", len(seenRawQueries))
+	}
+	if want := "q=canary+50%25&state=all"; seenRawQueries[0] != want {
+		t.Errorf("seenRawQueries[0] = %q, want %q", seenRawQueries[0], want)
+	}
+	if want := "state=pending"; seenRawQueries[1] != want {
+		t.Errorf("seenRawQueries[1] = %q, want %q", seenRawQueries[1], want)
 	}
 }

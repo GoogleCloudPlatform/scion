@@ -1276,7 +1276,7 @@ func TestListAgentDecisions(t *testing.T) {
 	require.NoError(t, err)
 
 	// Default state ("") == pending: D1 v2, D3, D4 (3 rows).
-	pending, cur, err := f.cs.ListAgentDecisions(ctx, f.agentID, "", "", 0)
+	pending, cur, err := f.cs.ListAgentDecisions(ctx, f.agentID, "", "", "", 0)
 	require.NoError(t, err)
 	assert.Empty(t, cur)
 	require.Len(t, pending, 3)
@@ -1286,7 +1286,7 @@ func TestListAgentDecisions(t *testing.T) {
 	}
 
 	// Decided: D2 with its answer loaded.
-	decided, cur, err := f.cs.ListAgentDecisions(ctx, f.agentID, store.DecisionListStateDecided, "", 50)
+	decided, cur, err := f.cs.ListAgentDecisions(ctx, f.agentID, store.DecisionListStateDecided, "", "", 50)
 	require.NoError(t, err)
 	assert.Empty(t, cur)
 	require.Len(t, decided, 1)
@@ -1299,7 +1299,7 @@ func TestListAgentDecisions(t *testing.T) {
 	var seenIDs []string
 	pageCursor := ""
 	for {
-		page, next, err := f.cs.ListAgentDecisions(ctx, f.agentID, store.DecisionListStateAll, pageCursor, 2)
+		page, next, err := f.cs.ListAgentDecisions(ctx, f.agentID, store.DecisionListStateAll, "", pageCursor, 2)
 		require.NoError(t, err)
 		for _, d := range page {
 			seenIDs = append(seenIDs, d.ID)
@@ -1317,12 +1317,139 @@ func TestListAgentDecisions(t *testing.T) {
 	assert.Len(t, uniq, 5, "cursor pagination across timestamp ties must visit each row once")
 
 	// Validation errors: bad state, bad limit, bad cursor.
-	_, _, err = f.cs.ListAgentDecisions(ctx, f.agentID, "bogus", "", 10)
+	_, _, err = f.cs.ListAgentDecisions(ctx, f.agentID, "bogus", "", "", 10)
 	assert.ErrorIs(t, err, store.ErrInvalidInput)
-	_, _, err = f.cs.ListAgentDecisions(ctx, f.agentID, store.DecisionListStatePending, "", 201)
+	_, _, err = f.cs.ListAgentDecisions(ctx, f.agentID, store.DecisionListStatePending, "", "", 201)
 	assert.ErrorIs(t, err, store.ErrInvalidInput)
-	_, _, err = f.cs.ListAgentDecisions(ctx, f.agentID, store.DecisionListStatePending, "not-a-cursor", 10)
+	_, _, err = f.cs.ListAgentDecisions(ctx, f.agentID, store.DecisionListStatePending, "", "not-a-cursor", 10)
 	assert.ErrorIs(t, err, store.ErrInvalidInput)
+}
+
+func TestListAgentDecisions_Search(t *testing.T) {
+	f := newDecisionFixture(t)
+	ctx := context.Background()
+
+	// 1. Question-only match (pending).
+	qRow := f.create(t, false, messages.Decision{
+		Key:      "k-q",
+		Question: "Run the BACKFILL on staging first?",
+		Choices:  []messages.Choice{{ID: "1", Label: "CanaryOpt"}, {ID: "2", Label: "Skip"}},
+	}).Decisions[0].RowID
+	_ = qRow
+
+	// 2. Key-only match (pending).
+	keyRow := f.create(t, false, yesNo("MIGRATE-DB", "Proceed now?")).Decisions[0].RowID
+
+	// 3. Direct effective answer label match (decided).
+	dirRow := f.create(t, false, messages.Decision{
+		Key:      "k-dir",
+		Question: "Pick window?",
+		Choices:  []messages.Choice{{ID: "a", Label: "Overnight Window"}, {ID: "b", Label: "Lunch"}},
+	}).Decisions[0].RowID
+	_, _, err := f.cs.RecordAnswer(ctx, f.answer(dirRow, "a", "user-1", ""))
+	require.NoError(t, err)
+
+	// 4. Unconfirmed agent_interpreted effective answer label match (decided).
+	interpRow := f.create(t, false, messages.Decision{
+		Key:      "k-interp",
+		Question: "Pick region?",
+		Choices:  []messages.Choice{{ID: "1", Label: "eu-central"}, {ID: "2", Label: "us-east"}},
+	}).Decisions[0].RowID
+	_, _, err = f.cs.RecordAnswer(ctx, f.interpretedAnswer(interpRow, "1", "user-1"))
+	require.NoError(t, err)
+
+	// 5. Overridden agent_interpreted answer: interpreted as "AlphaOld", then
+	// overridden directly to "BetaNew". Effective answer is "BetaNew", so
+	// searching "AlphaOld" must NOT match while "BetaNew" MUST match (D12).
+	overRow := f.create(t, false, messages.Decision{
+		Key:      "k-over",
+		Question: "Which lane?",
+		Choices:  []messages.Choice{{ID: "1", Label: "AlphaOld"}, {ID: "2", Label: "BetaNew"}},
+	}).Decisions[0].RowID
+	_, _, err = f.cs.RecordAnswer(ctx, f.interpretedAnswer(overRow, "1", "user-1"))
+	require.NoError(t, err)
+	overrideIn := f.answer(overRow, "2", "user-1", "")
+	overrideIn.Outcome = store.DecisionOutcomeOverride
+	_, _, err = f.cs.RecordAnswer(ctx, overrideIn)
+	require.NoError(t, err)
+
+	// 6. Replaced version with an answer, plus v2 pending: state=all finds v1
+	// by its effective answer label, while state=pending and state=decided do not.
+	repV1 := f.create(t, false, messages.Decision{
+		Key:      "k-rep",
+		Question: "Proceed step?",
+		Choices:  []messages.Choice{{ID: "1", Label: "LegacyTrack"}, {ID: "2", Label: "Modern"}},
+	}).Decisions[0].RowID
+	_, _, err = f.cs.RecordAnswer(ctx, f.answer(repV1, "1", "user-1", ""))
+	require.NoError(t, err)
+	repV2 := f.create(t, true, yesNo("k-rep", "Proceed step v2?")).Decisions[0].RowID
+
+	// 7. Wildcard literals (%, _, \).
+	pctRow := f.create(t, false, yesNo("k-pct", `Mark 50%_done\now?`)).Decisions[0].RowID
+	f.create(t, false, yesNo("k-nopct", "Mark 50 percent xdoneznow?"))
+
+	// 8. Another agent's matching decision never leaks.
+	otherAgent := uuid.NewString()
+	otherIn := f.prompt("", false, yesNo("MIGRATE-DB", "Run the BACKFILL on staging first?"))
+	otherIn.AskerAgentID = otherAgent
+	otherIn.Message.SenderID = otherAgent
+	otherIn.Message.AgentID = otherAgent
+	_, err = f.cs.CreateChoicePrompt(ctx, otherIn)
+	require.NoError(t, err)
+
+	rowIDs := func(state store.DecisionListState, q string) []string {
+		t.Helper()
+		rows, _, err := f.cs.ListAgentDecisions(ctx, f.agentID, state, q, "", 50)
+		require.NoError(t, err)
+		out := make([]string, len(rows))
+		for i, r := range rows {
+			out[i] = r.ID
+		}
+		return out
+	}
+
+	t.Run("each arm alone, case-insensitive, effective answer only", func(t *testing.T) {
+		assert.Equal(t, []string{qRow}, rowIDs(store.DecisionListStateAll, "backfill"), "question text")
+		assert.Equal(t, []string{keyRow}, rowIDs(store.DecisionListStateAll, "migrate-db"), "decision key")
+		assert.Equal(t, []string{dirRow}, rowIDs(store.DecisionListStateAll, "overnight WINDOW"), "direct answer label")
+		assert.Equal(t, []string{interpRow}, rowIDs(store.DecisionListStateAll, "EU-CENTRAL"), "interpreted effective answer label")
+		assert.Equal(t, []string{overRow}, rowIDs(store.DecisionListStateAll, "betanew"), "overriding direct answer label")
+		assert.Empty(t, rowIDs(store.DecisionListStateAll, "alphaold"), "overridden interpreted label is not the effective answer")
+		assert.Empty(t, rowIDs(store.DecisionListStateAll, "canaryopt"), "unchosen choice label does not match")
+		assert.Empty(t, rowIDs(store.DecisionListStateAll, "asker"), "asker agent name is not an arm on the agent endpoint")
+	})
+
+	t.Run("wildcards match literally", func(t *testing.T) {
+		assert.Equal(t, []string{pctRow}, rowIDs(store.DecisionListStateAll, "%_"))
+		assert.Equal(t, []string{pctRow}, rowIDs(store.DecisionListStateAll, "50%"))
+		assert.Equal(t, []string{pctRow}, rowIDs(store.DecisionListStateAll, `done\now`))
+		assert.Empty(t, rowIDs(store.DecisionListStateAll, "50_p"))
+	})
+
+	t.Run("combined with state filter and cursor paging", func(t *testing.T) {
+		assert.Equal(t, []string{repV1}, rowIDs(store.DecisionListStateAll, "legacytrack"))
+		assert.Empty(t, rowIDs(store.DecisionListStatePending, "legacytrack"))
+		assert.Empty(t, rowIDs(store.DecisionListStateDecided, "legacytrack"))
+
+		assert.ElementsMatch(t, []string{keyRow, repV2}, rowIDs(store.DecisionListStatePending, "proceed"))
+		assert.Equal(t, []string{repV1}, rowIDs(store.DecisionListStateAll, "legacytrack"))
+
+		// Cursor paging over the 3 "proceed" rows in state=all, limit=2.
+		var paged []string
+		cur := ""
+		for page := 0; page < 5; page++ {
+			rows, next, err := f.cs.ListAgentDecisions(ctx, f.agentID, store.DecisionListStateAll, "proceed", cur, 2)
+			require.NoError(t, err)
+			for _, r := range rows {
+				paged = append(paged, r.ID)
+			}
+			if next == "" {
+				break
+			}
+			cur = next
+		}
+		assert.Equal(t, []string{repV2, repV1, keyRow}, paged)
+	})
 }
 
 func TestGetAgentDecisionVersions(t *testing.T) {
