@@ -73,7 +73,9 @@
     `choice_decisions` for single, override, and set answers.
   - Added `relay.Config.OnAgentSessionAdmitted`, wired alongside
     `hubRelaySessionRecheck` and a 30 s cluster-wide backstop sweep. Coalesced
-    per-agent workers acquire a DB-backed per-agent re-drive lease, claim
+    per-agent workers acquire a 2 min DB-backed per-agent re-drive lease
+    (renewed mid-batch and before/during/after settle waits so slow passes never
+    lose exclusivity across replicas), claim
     ordered batches of at most 64 rows via per-row conditional updates,
     re-validate target standing, `run_id == hold_launch_id`, sender existence,
     delegation grant, and `authorizeAgentMessage` or `scheduled_event_id`
