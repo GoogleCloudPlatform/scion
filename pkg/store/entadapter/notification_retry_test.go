@@ -356,3 +356,48 @@ func TestExpireStaleAgentNotifications(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, n, "a second pass expires nothing")
 }
+
+// ListParkedNotificationSubscribers selects the suspended, unheld agents
+// with a parked notification whose suspend reason is one asked for
+// (ptone/scion#7826): not a user-suspended one, one with no reason, a
+// running one, a held one, or one whose notifications are all dispatched.
+func TestListParkedNotificationSubscribers(t *testing.T) {
+	ctx := context.Background()
+	e := newRetryTestEnv(t)
+	const broker = "broker-1"
+	reasons := []string{string(state.SuspendReasonIdle), string(state.SuspendReasonStalled)}
+	add := func(slug, phase, reason string, pending bool) uuid.UUID {
+		id := uuid.New()
+		c := e.client.Agent.Create().SetID(id).SetSlug(slug).SetName(slug).
+			SetProjectID(e.projectID).SetRuntimeBrokerID(broker).SetPhase(phase)
+		if reason != "" {
+			c = c.SetSuspendReason(reason)
+		}
+		_, err := c.Save(ctx)
+		require.NoError(t, err)
+		e.addNotif(t, store.SubscriberTypeAgent, slug, time.Minute, !pending)
+		return id
+	}
+	idle := add("idle", string(state.PhaseSuspended), "idle", true)
+	stalled := add("stalled", string(state.PhaseSuspended), "stalled", true)
+	add("user", string(state.PhaseSuspended), "user", true)
+	add("no-reason", string(state.PhaseSuspended), "", true)
+	add("running", string(state.PhaseRunning), "", true)
+	add("all-dispatched", string(state.PhaseSuspended), "idle", false)
+	held := add("held", string(state.PhaseSuspended), "idle", true)
+	_, err := e.client.AgentHold.Create().
+		SetAgentID(held).SetProjectID(e.projectID).
+		SetCause("owner_access_ended").SetTrigger("member_remove").
+		SetRootPrincipalType("user").SetRootPrincipalID("u1").
+		Save(ctx)
+	require.NoError(t, err)
+
+	got, err := e.s.ListParkedNotificationSubscribers(ctx, reasons)
+	require.NoError(t, err)
+	sort.Strings(got)
+	assert.Equal(t, sortedIDs(idle.String(), stalled.String()), got)
+
+	none, err := e.s.ListParkedNotificationSubscribers(ctx, nil)
+	require.NoError(t, err)
+	assert.Empty(t, none)
+}

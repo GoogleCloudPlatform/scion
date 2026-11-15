@@ -55,6 +55,18 @@ type NotificationDispatcher struct {
 	// registry rebuilt from saved settings is used without restarting the
 	// dispatcher (ptone/scion#3904).
 	channelRegistryFn func() *ChannelRegistry
+
+	// autoWakeFn, when set, is offered each suspended subscriber whose
+	// notification is parked. It reports whether it queued a background
+	// wake (ptone/scion#7826); the notification stays parked either way
+	// and is delivered by the drain that follows a successful wake. The
+	// Server sets it (autoWakeNotificationSubscriber); nil = no auto-wake.
+	autoWakeFn func(subscriber *store.Agent) bool
+}
+
+// offerAutoWake offers a suspended subscriber to autoWakeFn.
+func (nd *NotificationDispatcher) offerAutoWake(subscriber *store.Agent) bool {
+	return nd.autoWakeFn != nil && nd.autoWakeFn(subscriber)
 }
 
 // NewNotificationDispatcher creates a new NotificationDispatcher.
@@ -458,7 +470,14 @@ func (nd *NotificationDispatcher) dispatchToAgent(ctx context.Context, sub *stor
 		// No running agent to deliver to: leave the notification pending
 		// with no attempt counted. The dispatch sweep leaves it out while
 		// the subscriber is suspended, delivers it after a resume, and
-		// expires it at notificationRetryMaxAge.
+		// expires it at notificationRetryMaxAge. A subscriber the hub
+		// suspended is woken in the background, and the drain after the
+		// wake delivers the parked notification (auto_wake.go).
+		if nd.offerAutoWake(subscriber) {
+			nd.log.Info("Subscriber agent is suspended; notification parked while it is woken",
+				"subscriberID", sub.SubscriberID, "notificationID", notif.ID)
+			return
+		}
 		nd.log.Info("Subscriber agent is suspended; notification parked until it resumes",
 			"subscriberID", sub.SubscriberID, "notificationID", notif.ID)
 		return

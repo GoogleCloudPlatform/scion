@@ -895,6 +895,53 @@ func writeHeldOverridesSuspended(b *entsql.Builder, extra func(*entsql.Builder))
 	b.WriteString(")")
 }
 
+// ListParkedNotificationSubscribers implements
+// store.NotificationStore.ListParkedNotificationSubscribers.
+func (s *NotificationStore) ListParkedNotificationSubscribers(ctx context.Context, reasons []string) ([]string, error) {
+	if len(reasons) == 0 {
+		return nil, nil
+	}
+	ids, err := s.client.Agent.Query().
+		Where(
+			agent.PhaseEQ(string(state.PhaseSuspended)),
+			agent.SuspendReasonIn(reasons...),
+			agent.DeletedAtIsNil(),
+			func(sel *entsql.Selector) {
+				sel.Where(entsql.P(func(b *entsql.Builder) {
+					b.WriteString("NOT ")
+					writeActiveHoldExpr(b)
+					b.WriteString(" AND EXISTS (SELECT 1 FROM ")
+					b.Ident(notification.Table)
+					b.WriteString(" WHERE ")
+					b.Ident(notification.Table).WriteString(".").Ident(notification.FieldSubscriberType)
+					b.WriteString(" = ").Arg(store.SubscriberTypeAgent)
+					b.WriteString(" AND ")
+					b.Ident(notification.Table).WriteString(".").Ident(notification.FieldDispatched)
+					b.WriteString(" = ").Arg(false)
+					b.WriteString(" AND ")
+					b.Ident(notification.Table).WriteString(".").Ident(notification.FieldSubscriberID)
+					b.WriteString(" = ")
+					b.Ident(agent.Table).WriteString(".").Ident(agent.FieldSlug)
+					b.WriteString(" AND ")
+					b.Ident(notification.Table).WriteString(".").Ident(notification.FieldProjectID)
+					b.WriteString(" = ")
+					b.Ident(agent.Table).WriteString(".").Ident(agent.FieldProjectID)
+					b.WriteString(")")
+				}))
+			},
+		).
+		Limit(undispatchedBatchLimit).
+		IDs(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list parked notification subscribers: %w", err)
+	}
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = id.String()
+	}
+	return out, nil
+}
+
 // GetUndispatchedAgentNotifications returns agent-targeted notifications with
 // dispatched=false, ordered oldest-first, limited to 100 rows. A
 // notification whose subscriber agent is suspended is not returned, unless

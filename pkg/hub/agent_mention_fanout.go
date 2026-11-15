@@ -418,12 +418,14 @@ func (s *Server) deliverAgentMentionCopy(ctx, aggregateCtx context.Context, in a
 		Channel:        in.Channel,
 		ThreadID:       threadID,
 		ProjectID:      in.Sender.ProjectID,
-		// A mention must not wake a stopped or suspended agent — that
-		// would be a surprising side effect of merely being mentioned —
-		// but it must also not be silently dropped just because the
-		// recipient isn't running right now: it still gets a persisted
-		// row and a dispatch attempt, the same as any other message to
-		// an agent that isn't currently reachable.
+		// A mention must not wake a stopped or user-suspended agent —
+		// that would be a surprising side effect of merely being
+		// mentioned — but it must also not be silently dropped just
+		// because the recipient isn't running right now: it still gets a
+		// persisted row and a dispatch attempt, the same as any other
+		// message to an agent that isn't currently reachable. An agent
+		// the hub suspended (shouldAutoWake) is woken in the background
+		// and gets the mention once ready (AgentDMWakeQueued).
 		SkipPhaseGate: true,
 	})
 	dispatchCancel()
