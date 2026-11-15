@@ -1201,8 +1201,7 @@ type brokerAgentHeartbeat struct {
 	RunID        string                    `json:"runId,omitempty"`
 	OtherEntries []brokerAgentRuntimeEntry `json:"otherEntries,omitempty"`
 	// AgentID mirrors hubclient.AgentHeartbeat.AgentID; empty from an
-	// older broker. Read only by the runtime orphan report
-	// (runtime_orphans.go).
+	// older broker, in which case the entry is matched by slug only.
 	AgentID string `json:"agentId,omitempty"`
 }
 
@@ -1527,9 +1526,10 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				continue
 			}
 			if agentHB.AgentID != "" && agentHB.AgentID != agent.ID {
-				// Another agent's entry under a reused slug. It is still
-				// applied below as before; the orphan report records it.
+				// Another agent's entry under a reused slug: skip it for the
+				// current agent and let the orphan report classify it.
 				report.orphanCandidates = append(report.orphanCandidates, runtimeOrphanCandidate{projectID: project.ProjectID, hb: agentHB, bySlug: agent})
+				continue
 			}
 			report.present[agent.ID] = true
 			runEntries.addOwn(agent, agentHB)

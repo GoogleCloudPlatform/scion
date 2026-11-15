@@ -239,3 +239,67 @@ func TestAdminRuntimeOrphans(t *testing.T) {
 	rec = doRequestAsUser(t, srv, admin, http.MethodPost, path, nil)
 	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code, rec.Body.String())
 }
+
+// TestHeartbeat_MismatchedAgentIDSkipped (ptone/scion#7983): when the current
+// agent's instance is missing and an older instance with the same slug but a
+// different agentId is reported, the current agent is not marked present or
+// observed and gets no status from it, while the old entry is still classified
+// superseded.
+func TestHeartbeat_MismatchedAgentIDSkipped(t *testing.T) {
+	f := newOrphanFixture(t, true)
+	ctx := context.Background()
+	cur := f.addAgent("reused", "running", "idle")
+	_, err := f.s.SetRunIntent(ctx, cur.ID, store.RunIntentStopped)
+	require.NoError(t, err)
+	before := f.snapshotAgents(cur)
+
+	old := brokerAgentHeartbeat{Slug: cur.Slug, AgentID: uuid.NewString(), Phase: "running", Activity: "working", RuntimeTarget: "docker"}
+	f.beat(completeInventory(), []brokerAgentHeartbeat{old})
+
+	f.assertAgentsUnchanged(before)
+	assert.True(t, f.hasClock(cur.ID), "current agent must not be marked present")
+	obs, err := f.s.GetRecoveryObservations(ctx, []string{cur.ID})
+	require.NoError(t, err)
+	require.Contains(t, obs, cur.ID)
+	assert.Equal(t, store.ObservedAbsent, obs[cur.ID].State, "current agent must be observed absent")
+	assert.Equal(t, map[string]string{cur.Slug: orphanSuperseded}, f.reasons())
+
+	f.expireClock(cur.ID)
+	f.beat(completeInventory(), []brokerAgentHeartbeat{old})
+	f.assertReconciled(cur.ID)
+}
+
+// TestHeartbeat_MatchingOrEmptyAgentIDApplies (ptone/scion#7983): an entry with
+// the current agent's ID, or without an agentId (older broker), still applies.
+func TestHeartbeat_MatchingOrEmptyAgentIDApplies(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		id   func(string) string
+	}{
+		{"matching agentId", func(id string) string { return id }},
+		{"non-canonical matching agentId", strings.ToUpper},
+		{"no agentId", func(string) string { return "" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newOrphanFixture(t, true)
+			ctx := context.Background()
+			cur := f.addAgent("live", "running", "idle")
+			_, err := f.s.SetRunIntent(ctx, cur.ID, store.RunIntentStopped)
+			require.NoError(t, err)
+			prevSeen := f.get(cur.ID).LastSeen
+			f.beat(completeInventory(), []brokerAgentHeartbeat{{
+				Slug: cur.Slug, AgentID: tc.id(cur.ID), Phase: "running", Activity: "working", RuntimeTarget: "docker",
+			}})
+
+			got := f.get(cur.ID)
+			assert.Equal(t, "working", got.Activity)
+			assert.Equal(t, "running", got.ContainerStatus)
+			assert.True(t, got.LastSeen.After(prevSeen))
+			assert.False(t, f.hasClock(cur.ID))
+			obs, err := f.s.GetRecoveryObservations(ctx, []string{cur.ID})
+			require.NoError(t, err)
+			assert.Equal(t, store.ObservedPresentRunning, obs[cur.ID].State)
+			assert.Empty(t, f.reasons())
+		})
+	}
+}
