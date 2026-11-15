@@ -12,6 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// The exec routes run only on Linux (execSupported; ExecEnabled never
+// registers them elsewhere), and these tests use POSIX paths and PATH
+// lists, so they build only there. exec_other_test.go covers the other
+// platforms.
+
+//go:build linux
+
 package control
 
 import (
@@ -948,5 +955,23 @@ func TestExecPreSpawnDeadlineGuard(t *testing.T) {
 	code, resp := f.start(t, req)
 	if code != http.StatusRequestTimeout || resp.Outcome != agentcontrol.ExecOutcomeExpiredBeforeStart || f.fx.total.Load() != 0 {
 		t.Fatalf("got %d %+v spawns=%d, want 408 expired_before_start and no spawn", code, resp, f.fx.total.Load())
+	}
+}
+
+// TestExecWorkdirFallback: the run's cwd is the preferred directory when it
+// exists; otherwise the HOME of the run's environment (kept unchanged from
+// the harness shell) when it is a directory, before /home/<user>; else /.
+func TestExecWorkdirFallback(t *testing.T) {
+	work, home := t.TempDir(), t.TempDir()
+	missing := filepath.Join(work, "missing")
+	env := []string{"PATH=/usr/bin", "HOME=" + home}
+	if got := execWorkdir(work, "scion", env); got != work {
+		t.Errorf("preferred: got %q, want %q", got, work)
+	}
+	if got := execWorkdir(missing, "no-such-user-"+filepath.Base(work), env); got != home {
+		t.Errorf("env HOME: got %q, want %q", got, home)
+	}
+	if got := execWorkdir(missing, "no-such-user-"+filepath.Base(work), []string{"HOME=" + missing}); got != "/" {
+		t.Errorf("no usable home: got %q, want /", got)
 	}
 }
