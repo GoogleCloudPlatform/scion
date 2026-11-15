@@ -379,17 +379,22 @@ func TestDecisionsBell_B2LifecycleAndG6Scenario(t *testing.T) {
 
 type notificationWriteCountStore struct {
 	store.Store
+	fault   *storeFaultSwitch
 	creates atomic.Int64
 	updates atomic.Int64
 }
 
 func (s *notificationWriteCountStore) CreateNotification(ctx context.Context, notif *store.Notification) error {
-	s.creates.Add(1)
+	if s.fault == nil || s.fault.Active() {
+		s.creates.Add(1)
+	}
 	return s.Store.CreateNotification(ctx, notif)
 }
 
 func (s *notificationWriteCountStore) UpdateNotificationState(ctx context.Context, id, message, resourceID string, acknowledged bool) error {
-	s.updates.Add(1)
+	if s.fault == nil || s.fault.Active() {
+		s.updates.Add(1)
+	}
 	return s.Store.UpdateNotificationState(ctx, id, message, resourceID, acknowledged)
 }
 
@@ -397,10 +402,11 @@ func (s *notificationWriteCountStore) UpdateNotificationState(ctx context.Contex
 // rapid 10-prompt burst within one debounce window coalesce into a single
 // notification write per user.
 func TestDecisionsBell_DebounceCoalescesBurst(t *testing.T) {
-	srv, baseStore, alice, bob, project := setupDemoPolicyTest(t)
-	spy := &notificationWriteCountStore{Store: baseStore}
-	srv.store = spy
+	srv, _, alice, bob, project, spy, fault := setupDemoPolicyTestWithFault(t, func(inner store.Store, f *storeFaultSwitch) *notificationWriteCountStore {
+		return &notificationWriteCountStore{Store: inner, fault: f}
+	})
 	f := newChoicesFixtureOn(t, srv, spy, alice, bob, project)
+	fault.Arm()
 	setProjectDecisionsExperiments(t, f.srv, true, true)
 	setFastDecisionBell(t, f.srv, 90*time.Millisecond)
 
@@ -440,12 +446,13 @@ func TestDecisionsBell_DebounceCoalescesBurst(t *testing.T) {
 
 type errAlreadyExistsOnceStore struct {
 	store.Store
+	fault    *storeFaultSwitch
 	injected atomic.Bool
 	seed     func(ctx context.Context) error
 }
 
 func (s *errAlreadyExistsOnceStore) CreateNotification(ctx context.Context, notif *store.Notification) error {
-	if s.injected.CompareAndSwap(false, true) {
+	if (s.fault == nil || s.fault.Active()) && s.injected.CompareAndSwap(false, true) {
 		if err := s.seed(ctx); err != nil {
 			return err
 		}
@@ -458,29 +465,28 @@ func (s *errAlreadyExistsOnceStore) CreateNotification(ctx context.Context, noti
 // concurrent recomputes and ErrAlreadyExists races on the deterministic UUIDv5
 // row ID converge cleanly on the true count without failing.
 func TestDecisionsBell_DeterministicIDConcurrentRace(t *testing.T) {
-	srv, baseStore, alice, bob, project := setupDemoPolicyTest(t)
-	raceStore := &errAlreadyExistsOnceStore{
-		Store: baseStore,
-		seed: func(ctx context.Context) error {
-			return baseStore.CreateNotification(ctx, &store.Notification{
-				ID:             decisionsWaitingNotificationID(bob.ID),
-				SubscriptionID: store.CreatorFallbackSubscriptionID,
-				AgentID:        uuid.Nil.String(),
-				ProjectID:      uuid.Nil.String(),
-				SubscriberType: store.SubscriberTypeUser,
-				SubscriberID:   bob.ID,
-				Status:         store.NotificationStatusDecisionsWaiting,
-				Message:        "1 decision is waiting on you in 1 project",
-				Kind:           store.NotificationKindDecisionsWaiting,
-				ResourceType:   store.NotificationResourceDecisions,
-				ResourceID:     "1",
-				Acknowledged:   true,
-				CreatedAt:      time.Now().UTC(),
-			})
-		},
+	srv, baseStore, alice, bob, project, raceStore, fault := setupDemoPolicyTestWithFault(t, func(inner store.Store, f *storeFaultSwitch) *errAlreadyExistsOnceStore {
+		return &errAlreadyExistsOnceStore{Store: inner, fault: f}
+	})
+	raceStore.seed = func(ctx context.Context) error {
+		return baseStore.CreateNotification(ctx, &store.Notification{
+			ID:             decisionsWaitingNotificationID(bob.ID),
+			SubscriptionID: store.CreatorFallbackSubscriptionID,
+			AgentID:        uuid.Nil.String(),
+			ProjectID:      uuid.Nil.String(),
+			SubscriberType: store.SubscriberTypeUser,
+			SubscriberID:   bob.ID,
+			Status:         store.NotificationStatusDecisionsWaiting,
+			Message:        "1 decision is waiting on you in 1 project",
+			Kind:           store.NotificationKindDecisionsWaiting,
+			ResourceType:   store.NotificationResourceDecisions,
+			ResourceID:     "1",
+			Acknowledged:   true,
+			CreatedAt:      time.Now().UTC(),
+		})
 	}
-	srv.store = raceStore
 	f := newChoicesFixtureOn(t, srv, raceStore, alice, bob, project)
+	fault.Arm()
 	setProjectDecisionsExperiments(t, f.srv, true, true)
 
 	// Seed 2 open DM decisions directly in the store (without background worker)
@@ -528,10 +534,11 @@ func TestDecisionsBell_DeterministicIDConcurrentRace(t *testing.T) {
 //     GET /api/v1/projects/{id}/decisions?tab=pending heals skipped/missed rows
 //     after responding, and performs zero writes when already in sync.
 func TestDecisionsBell_B8TopicCapAndB6Reconcile(t *testing.T) {
-	srv, baseStore, alice, bob, project := setupDemoPolicyTest(t)
-	spy := &notificationWriteCountStore{Store: baseStore}
-	srv.store = spy
+	srv, _, alice, bob, project, spy, fault := setupDemoPolicyTestWithFault(t, func(inner store.Store, f *storeFaultSwitch) *notificationWriteCountStore {
+		return &notificationWriteCountStore{Store: inner, fault: f}
+	})
 	f := newChoicesFixtureOn(t, srv, spy, alice, bob, project)
+	fault.Arm()
 	setProjectDecisionsExperiments(t, f.srv, true, true)
 	setFastDecisionBell(t, f.srv, 15*time.Millisecond)
 	ctx := context.Background()

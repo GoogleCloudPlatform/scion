@@ -257,11 +257,7 @@ func (s *Server) enqueueDecisionBellUser(userID string, reconcile bool) {
 		return
 	}
 	debounce := s.decisionBellDebounce()
-	now := time.Now()
-	dueAt := now.Add(debounce)
-	if reconcile {
-		dueAt = now
-	}
+	dueAt := time.Now().Add(debounce)
 
 	st := &s.decisionBell
 	st.mu.Lock()
@@ -310,8 +306,8 @@ func (s *Server) enqueueDecisionBellTopic(projectID, chatKey string) {
 	st.mu.Unlock()
 }
 
-// reconcileDecisionBellAsync schedules an immediate (0-delay) background
-// reconciliation for userID (design B6, C3).
+// reconcileDecisionBellAsync schedules a coalesced background reconciliation
+// for userID after responding (design B6, C3).
 func (s *Server) reconcileDecisionBellAsync(userID string) {
 	s.enqueueDecisionBellUser(userID, true)
 }
