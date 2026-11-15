@@ -124,13 +124,17 @@ type limState struct {
 
 // record is one queued WARN (or a Flush sentinel when ack is non-nil).
 type record struct {
-	msg   string
-	kind  string
-	op    string
-	pcs   [stackDepth]uintptr
-	npcs  int
-	attrs []slog.Attr
-	ack   chan struct{}
+	msg      string
+	kind     string
+	op       string
+	pcs      [stackDepth]uintptr
+	npcs     int
+	topPCS   [stackDepth]uintptr
+	ntopPCS  int
+	openPCS  [stackDepth]uintptr
+	nopenPCS int
+	attrs    []slog.Attr
+	ack      chan struct{}
 }
 
 // Monitor holds the configuration, rate limiter and emitter of one wrapped
@@ -281,15 +285,26 @@ func (m *Monitor) emit() {
 	}
 }
 
+func (m *Monitor) siteAttrs(r record) []slog.Attr {
+	attrs := r.attrs
+	if r.npcs > 0 {
+		attrs = append(attrs, slog.String("site", m.sites.site(r.pcs[:r.npcs])))
+	}
+	if r.ntopPCS > 0 {
+		attrs = append(attrs, slog.String("top_holder_site", m.sites.site(r.topPCS[:r.ntopPCS])))
+	}
+	if r.nopenPCS > 0 {
+		attrs = append(attrs, slog.String("holder_open_site", m.sites.site(r.openPCS[:r.nopenPCS])))
+	}
+	return attrs
+}
+
 func (m *Monitor) write(r record) {
 	if r.ack != nil {
 		close(r.ack)
 		return
 	}
-	attrs := r.attrs
-	if r.npcs > 0 {
-		attrs = append(attrs, slog.String("site", m.sites.site(r.pcs[:r.npcs])))
-	}
+	attrs := m.siteAttrs(r)
 	level := slog.LevelWarn
 	if r.msg == msgOpCap {
 		level = slog.LevelInfo
@@ -515,12 +530,13 @@ func overlap(s, e, from, to time.Time) time.Duration {
 	return e.Sub(s)
 }
 
-// attrs describes who held the connection during a wait over [from, to]:
+// fill records on r who held the connection during a wait over [from, to]:
 // holders (how many checkouts overlapped it; holderRingSize or more means
-// the ring was exhausted), the one with the most time in the window (its op,
-// caller site and overlap), and, when the waiter gave up, the checkout still
-// open at that moment.
-func (h *holderRing) attrs(m *Monitor, from, to time.Time, gaveUp bool) []slog.Attr {
+// the ring was exhausted), the one with the most time in the window, and,
+// when the waiter gave up, the checkout still open at that moment. Holder
+// stacks are copied onto r so their caller sites are formatted in write only
+// after rate limiting.
+func (h *holderRing) fill(m *Monitor, r *record, from, to time.Time, gaveUp bool) {
 	h.mu.Lock()
 	var (
 		n       int
@@ -545,18 +561,17 @@ func (h *holderRing) attrs(m *Monitor, from, to time.Time, gaveUp bool) []slog.A
 	}
 	h.mu.Unlock()
 
-	attrs := []slog.Attr{slog.Int("holders", n)}
+	r.attrs = append(r.attrs, slog.Int("holders", n))
 	if n > 0 {
-		attrs = append(attrs,
+		r.attrs = append(r.attrs,
 			slog.String("top_holder_op", m.op(top.pcs[:top.npcs])),
-			slog.String("top_holder_site", m.sites.site(top.pcs[:top.npcs])),
 			slog.Int64("top_holder_ms", topTime.Milliseconds()))
+		r.ntopPCS = copy(r.topPCS[:], top.pcs[:top.npcs])
 	}
 	if gaveUp && hasOpen && open.start.Before(to) {
-		attrs = append(attrs,
+		r.attrs = append(r.attrs,
 			slog.String("holder_open_op", m.op(open.pcs[:open.npcs])),
-			slog.String("holder_open_site", m.sites.site(open.pcs[:open.npcs])),
 			slog.Int64("holder_open_ms", to.Sub(open.start).Milliseconds()))
+		r.nopenPCS = copy(r.openPCS[:], open.pcs[:open.npcs])
 	}
-	return attrs
 }

@@ -190,12 +190,21 @@ func TestLockWaitNamesStoreCallerOnOneSecondHold(t *testing.T) {
 
 			baseWait := db.Stats().WaitCount
 			paused, resume := clk.Arm(db)
+			var resumeOnce sync.Once
+			unpause := func() { resumeOnce.Do(func() { close(resume) }) }
+			t.Cleanup(unpause)
 
 			holderErr := make(chan error, 1)
 			go func() {
 				holderErr <- hubCallerListingMessages(context.Background(), cs, tc.filter, tc.opts)
 			}()
-			<-paused
+			select {
+			case <-paused:
+			case err := <-holderErr:
+				t.Fatalf("holder completed without pausing checkout clock: %v", err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("timed out waiting for holder checkout to pause")
+			}
 
 			waiterErr := make(chan error, 1)
 			go func() {
@@ -208,10 +217,20 @@ func TestLockWaitNamesStoreCallerOnOneSecondHold(t *testing.T) {
 			// 1.1 s crosses LockWaitWarnThreshold (1 s) without crossing
 			// HoldWarnThreshold (2 s).
 			clk.Advance(1100 * time.Millisecond)
-			close(resume)
+			unpause()
 
-			require.NoError(t, <-holderErr)
-			require.NoError(t, <-waiterErr)
+			select {
+			case err := <-holderErr:
+				require.NoError(t, err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("timed out waiting for holder to finish")
+			}
+			select {
+			case err := <-waiterErr:
+				require.NoError(t, err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("timed out waiting for waiter to finish")
+			}
 			require.NoError(t, mon.Flush(5*time.Second))
 
 			require.Empty(t, h.byMsg(txdiag.MessageHold), "no db_tx_long_hold expected below 2s threshold")

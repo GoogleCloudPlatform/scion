@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -733,6 +734,12 @@ func attrMap(attrs []slog.Attr) map[string]slog.Value {
 	return out
 }
 
+func holderAttrs(m *Monitor, from, to time.Time, gaveUp bool) map[string]slog.Value {
+	var r record
+	m.holders.fill(m, &r, from, to, gaveUp)
+	return attrMap(m.siteAttrs(r))
+}
+
 // TestHolderRingConvoy: a waiter behind a convoy of five short holders is
 // told how many held the connection during its wait and which held longest.
 func TestHolderRingConvoy(t *testing.T) {
@@ -750,7 +757,7 @@ func TestHolderRingConvoy(t *testing.T) {
 	for i, s := range spans {
 		m.holders.closed(at(s.start), at(s.end), seedOp(m, uintptr(101+i), s.fn), 1)
 	}
-	got := attrMap(m.holders.attrs(m, at(0), at(2000), false))
+	got := holderAttrs(m, at(0), at(2000), false)
 	if got["holders"].Int64() != 5 || got["top_holder_op"].String() != "hub.c" || got["top_holder_site"].String() != "hub.c x.go:1" || got["top_holder_ms"].Int64() != 400 {
 		t.Fatalf("convoy attrs: %+v", got)
 	}
@@ -778,7 +785,7 @@ func TestHolderRingDeadlineWaiterNamesOpenHolder(t *testing.T) {
 	var pcs [stackDepth]uintptr
 	pcs[0] = 200
 	m.holders.opened(t0, pcs, 1)
-	got := attrMap(m.holders.attrs(m, t0.Add(100*time.Millisecond), t0.Add(3*time.Second), true))
+	got := holderAttrs(m, t0.Add(100*time.Millisecond), t0.Add(3*time.Second), true)
 	wantOp := "entadapter.(*MessageStore).ListMessages"
 	wantSite := "entadapter.(*MessageStore).ListMessages message_store.go:460 <- hub.(*Server).handleConvListMessages"
 	if got["holders"].Int64() != 1 || got["top_holder_op"].String() != wantOp || got["top_holder_site"].String() != wantSite || got["top_holder_ms"].Int64() != 2900 {
@@ -789,7 +796,7 @@ func TestHolderRingDeadlineWaiterNamesOpenHolder(t *testing.T) {
 	}
 	// Once that checkout ends, it is no longer open.
 	m.holders.closed(t0, t0.Add(4*time.Second), pcs, 1)
-	got = attrMap(m.holders.attrs(m, t0.Add(100*time.Millisecond), t0.Add(3*time.Second), true))
+	got = holderAttrs(m, t0.Add(100*time.Millisecond), t0.Add(3*time.Second), true)
 	if _, ok := got["holder_open_op"]; ok {
 		t.Fatalf("closed checkout still reported open: %+v", got)
 	}
@@ -807,9 +814,94 @@ func TestHolderRingWrapsAtCapacity(t *testing.T) {
 		s := t0.Add(time.Duration(i) * time.Millisecond)
 		m.holders.closed(s, s.Add(time.Millisecond), pcs, 1)
 	}
-	got := attrMap(m.holders.attrs(m, t0, t0.Add(time.Hour), false))
+	got := holderAttrs(m, t0, t0.Add(time.Hour), false)
 	if got["holders"].Int64() != holderRingSize {
 		t.Fatalf("holders = %v, want %d (ring exhausted)", got["holders"], holderRingSize)
+	}
+}
+
+// TestSuppressedLockWaitSkipsHolderSiteFormatting verifies that holder caller
+// sites are formatted only after the rate-limit check accepts the record, so
+// suppressed lock_wait lines do not symbolize or format holder sites.
+func TestSuppressedLockWaitSkipsHolderSiteFormatting(t *testing.T) {
+	clk := NewFakeClock()
+	h := &CaptureHandler{}
+	m := NewMonitor(Config{
+		Dialect:               DialectSQLite,
+		LockWaitWarnThreshold: time.Second,
+		WarnInterval:          time.Minute,
+		Logger:                newLogger(h),
+		Now:                   clk.Now,
+	})
+	t.Cleanup(m.Close)
+
+	// First lock_wait puts ("lock_wait", "hub.waiter") into its 1m cooldown.
+	m.warn(record{msg: msgLockWait, kind: "lock_wait", op: "hub.waiter"})
+
+	var caller [1]uintptr
+	if runtime.Callers(2, caller[:]) != 1 {
+		t.Fatal("runtime.Callers returned no frame")
+	}
+	realPC := caller[0]
+
+	m.sites.mu.Lock()
+	m.sites.pcs[400] = []frameInfo{
+		{fn: "entadapter.(*MessageStore).ListMessages", file: "message_store.go", line: 10, store: true},
+	}
+	m.sites.mu.Unlock()
+
+	var holderPCS [stackDepth]uintptr
+	holderPCS[0] = 400
+	holderPCS[1] = realPC
+	t0 := clk.Now()
+	m.holders.closed(t0, t0.Add(2*time.Second), holderPCS, 2)
+
+	// Suppressed lock_wait: op resolves from PC 400 alone, and holder site
+	// formatting must not run (leaving realPC unsymbolized).
+	clk.Advance(5 * time.Second)
+	var suppressed record
+	suppressed.msg = msgLockWait
+	suppressed.kind = "lock_wait"
+	suppressed.op = "hub.waiter"
+	m.holders.fill(m, &suppressed, t0, t0.Add(2*time.Second), false)
+	m.warn(suppressed)
+	if err := m.Flush(flushTimeout); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(h.Lines(MsgLockWait)); got != 1 {
+		t.Fatalf("got %d lock_wait lines after suppressed wait, want 1", got)
+	}
+	m.sites.mu.RLock()
+	_, symbolized := m.sites.pcs[realPC]
+	m.sites.mu.RUnlock()
+	if symbolized {
+		t.Fatal("suppressed lock_wait symbolized holder caller PC before rate-limit expiry")
+	}
+
+	// Once the rate-limit window expires, write formats top_holder_site and
+	// symbolizes realPC.
+	clk.Advance(time.Minute)
+	var emitted record
+	emitted.msg = msgLockWait
+	emitted.kind = "lock_wait"
+	emitted.op = "hub.waiter"
+	m.holders.fill(m, &emitted, t0, t0.Add(2*time.Second), false)
+	m.warn(emitted)
+	if err := m.Flush(flushTimeout); err != nil {
+		t.Fatal(err)
+	}
+	lines := h.Lines(MsgLockWait)
+	if len(lines) != 2 {
+		t.Fatalf("got %d lock_wait lines after interval, want 2", len(lines))
+	}
+	m.sites.mu.RLock()
+	_, symbolized = m.sites.pcs[realPC]
+	m.sites.mu.RUnlock()
+	if !symbolized {
+		t.Fatal("emitted lock_wait did not symbolize holder caller PC")
+	}
+	if !strings.Contains(lines[1].Str("top_holder_site"), "testing.tRunner") {
+		t.Errorf("top_holder_site = %q, want caller frame", lines[1].Str("top_holder_site"))
 	}
 }
 
