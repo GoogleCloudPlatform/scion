@@ -28,7 +28,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -232,30 +231,32 @@ func TestMessageID3881_SchedulerOmitsMessageID(t *testing.T) {
 	assert.Empty(t, rows.Items)
 }
 
-// With hub.conduit_deliver enabled, scheduled message deliveries persist a
-// store.Message row (with ScheduledEventID provenance) before dispatch
-// (ptone/scion#7881, Q5=a), so the rendered envelope carries that stored
-// message_id for Conduit row binding and awaiting_session hold/re-drive.
+// With hub.conduit_deliver enabled on a serving Conduit relay, scheduled
+// message deliveries persist a store.Message row (with ScheduledEventID
+// provenance) before dispatch (ptone/scion#7881, Q5=a), so the rendered
+// envelope carries that stored message_id for Conduit row binding and
+// awaiting_session hold/re-drive.
 func TestMessageID3881_SchedulerCarriesStoredMessageIDWithConduitDeliver(t *testing.T) {
-	srv, s := testServer(t)
-	setHoldTestSettings(t, srv, map[string]bool{conduitExperiment: true, experiments.ConduitDeliver: true})
-	projectID := seed3881AgentProject(t, s, "msgid3881-sched-on", "msgid3881-sched-on-a")
+	f := newHoldE2EFixture(t)
+	ctx := context.Background()
 	dispatcher := &recordingDispatcher{}
-	srv.SetDispatcher(dispatcher)
-	enableReadSwitch(t, srv)
+	f.srv.SetDispatcher(dispatcher)
 
-	payload, _ := json.Marshal(MessageEventPayload{AgentName: "msgid3881-sched-on-a", Message: "scheduled-on"})
-	evt := withAgentRevision(t, srv, store.ScheduledEvent{
-		ID: api.NewUUID(), ProjectID: projectID, EventType: "message", Payload: string(payload),
-		Status: store.ScheduledEventPending, CreatedBy: tid("msgid3881-sched-on-a"),
-	}, tid("msgid3881-sched-on-a"))
-	require.NoError(t, srv.messageEventHandler()(context.Background(), evt))
+	payload, _ := json.Marshal(MessageEventPayload{AgentName: f.launched.Slug, Message: "scheduled-on"})
+	evt := withAgentRevision(t, f.srv, store.ScheduledEvent{
+		ID: api.NewUUID(), ProjectID: f.launched.ProjectID, EventType: "message", Payload: string(payload),
+		Status: store.ScheduledEventPending, CreatedBy: f.agent.ID,
+	}, f.agent.ID)
+	require.NoError(t, f.store.CreateScheduledEvent(ctx, &evt))
+	require.NoError(t, f.srv.messageEventHandler()(ctx, evt))
 
 	calls := dispatcher.getCalls()
 	require.Len(t, calls, 1)
 	id, ok := envelopeMessageID3881(t, calls[0].StructuredMessage.DeliveryText)
 	require.True(t, ok, "scheduled message envelope with conduit_deliver on must carry the persisted message_id")
-	row := requireStoredFor3881(t, s, id, "msgid3881-sched-on-a")
+	row, err := f.store.GetMessage(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, f.launched.ID, row.AgentID)
 	assert.Equal(t, evt.ID, row.ScheduledEventID)
 }
 

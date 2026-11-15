@@ -615,11 +615,15 @@ func (s *Server) dispatchRoutedRecipient(
 	}
 	persisted := false
 	var persistErr error
-	if s.conduitDeliverEnabled() {
-		persistErr = s.store.CreateMessage(ctx, storeMsg)
-		if persistErr == nil {
+	persistRouted := func() error {
+		err := s.store.CreateMessage(ctx, storeMsg)
+		if err == nil {
 			persisted = true
 		}
+		return err
+	}
+	if s.conduitDeliverEnabled() {
+		persistErr = persistRouted()
 	}
 
 	// --- Dispatch ---
@@ -662,7 +666,7 @@ func (s *Server) dispatchRoutedRecipient(
 	}
 
 	if !persisted && persistErr == nil {
-		persistErr = s.store.CreateMessage(ctx, storeMsg)
+		persistErr = persistRouted()
 	}
 	if persistErr != nil {
 		s.messageLog.Error("Failed to persist routed inbound message",

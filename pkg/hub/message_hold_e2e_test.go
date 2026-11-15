@@ -515,6 +515,15 @@ func (s *Server) setHeldMessagesCapForTest(cap int) {
 	rt.mu.Unlock()
 }
 
+// setRedriveLeaseTTLForTest overrides the per-agent cross-replica re-drive
+// lease TTL for tests exercising mid-pass lease renewal (O-1).
+func (s *Server) setRedriveLeaseTTLForTest(ttl time.Duration) {
+	rt := s.holdRuntime()
+	rt.mu.Lock()
+	rt.leaseTTLOverride = ttl
+	rt.mu.Unlock()
+}
+
 type connectableControlAgent struct {
 	tmux   *recordingTmux
 	cancel context.CancelFunc
@@ -1734,15 +1743,30 @@ func ptrTime(t time.Time) *time.Time { return &t }
 
 func decodeHoldTestEnvelope(t *testing.T, pasted string) map[string]any {
 	t.Helper()
+	envs := decodeAllHoldTestEnvelopes(t, pasted)
+	require.NotEmpty(t, envs, "missing begin delimiter in %q", pasted)
+	return envs[0]
+}
+
+func decodeAllHoldTestEnvelopes(t *testing.T, pasted string) []map[string]any {
+	t.Helper()
 	const begin = "---BEGIN SCION MESSAGE---\n"
 	const end = "\n---END SCION MESSAGE---"
-	i := strings.Index(pasted, begin)
-	require.GreaterOrEqual(t, i, 0, "missing begin delimiter in %q", pasted)
-	rest := pasted[i+len(begin):]
-	j := strings.Index(rest, end)
-	require.GreaterOrEqual(t, j, 0, "missing end delimiter in %q", pasted)
-	var out map[string]any
-	require.NoError(t, json.Unmarshal([]byte(rest[:j]), &out))
+	var out []map[string]any
+	rest := pasted
+	for {
+		i := strings.Index(rest, begin)
+		if i < 0 {
+			break
+		}
+		afterBegin := rest[i+len(begin):]
+		j := strings.Index(afterBegin, end)
+		require.GreaterOrEqual(t, j, 0, "missing end delimiter in %q", pasted)
+		var env map[string]any
+		require.NoError(t, json.Unmarshal([]byte(afterBegin[:j]), &env))
+		out = append(out, env)
+		rest = afterBegin[j+len(end):]
+	}
 	return out
 }
 
@@ -2136,11 +2160,18 @@ func TestHoldA2_Round1_REQ3_OPT6_RefusedReholdAndTimeoutNeverOrphan(t *testing.T
 		assert.Equal(t, 0, f.disp.dispatchCount(f.launched.Slug))
 		assert.Empty(t, f.disp.notices())
 
-		// Subsequent normal pass delivers both re-held rows in order.
+		// Subsequent normal pass delivers both re-held rows coalesced into a
+		// single /deliver flush in creation order (AC A2-3b, R-4).
 		f.srv.redriveAgentHeldMessagesOnce(ctx, f.launched.ID)
 		f.waitMessageState(t, m1.ID, store.MessageDispatchDelivered)
 		f.waitMessageState(t, m2.ID, store.MessageDispatchDelivered)
-		require.Len(t, ca.tmux.pastedTexts(), 2)
+		deliveries := f.disp.deliveries()
+		require.Len(t, deliveries, 1, "two re-driven rows must coalesce into one /deliver flush (A2-3b)")
+		assert.Equal(t, []string{m1.ID, m2.ID}, deliveries[0].MessageIDs)
+		joined := strings.Join(ca.tmux.pastedTexts(), "\n\n")
+		i1 := strings.Index(joined, "timeout-rehold-1")
+		i2 := strings.Index(joined, "timeout-rehold-2")
+		require.True(t, i1 >= 0 && i2 > i1, "pasted text must contain both messages in creation order: %q", joined)
 	})
 }
 
@@ -2316,13 +2347,16 @@ func TestHoldA2_Round1_REQ5_FlagOffStillExpiresHeldRowsWithNotice(t *testing.T) 
 func TestHoldA2_Round1_OPT1_ChoiceResponsePreservesAgentLineAndMetadata(t *testing.T) {
 	f := newHoldE2EFixture(t)
 	ctx := context.Background()
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
+	require.NoError(t, wcs.Init())
+	f.srv.SetWebChatStore(wcs)
 	setHoldTestSettings(t, f.srv, map[string]bool{
 		conduitExperiment:             true,
 		experiments.ConduitDeliver:    true,
 		experiments.ChatChoices:       true,
 		experiments.ChatScheduledSend: true,
 	})
-	enableReadSwitch(t, f.srv)
 
 	owner, err := f.store.GetUser(ctx, f.launched.OwnerID)
 	require.NoError(t, err)
@@ -2435,16 +2469,10 @@ func TestHoldA2_Round1_OPT1_ChoiceResponsePreservesAgentLineAndMetadata(t *testi
 	f.waitMessageState(t, setAnsOut.ResponseMessageID, store.MessageDispatchDelivered)
 
 	// Note: realBrokerDispatcher coalesces rapid re-driven messages in MessageBuffer,
-	// so split pasted text into individual ---BEGIN SCION MESSAGE--- envelopes.
+	// so extract all ---BEGIN SCION MESSAGE--- envelopes across pasted chunks.
 	var pastedEnvs []map[string]any
 	for _, chunk := range ca.tmux.pastedTexts() {
-		const begin = "---BEGIN SCION MESSAGE---\n"
-		for _, part := range strings.Split(chunk, begin) {
-			if strings.TrimSpace(part) == "" {
-				continue
-			}
-			pastedEnvs = append(pastedEnvs, decodeHoldTestEnvelope(t, begin+part))
-		}
+		pastedEnvs = append(pastedEnvs, decodeAllHoldTestEnvelopes(t, chunk)...)
 	}
 	require.Len(t, pastedEnvs, 2)
 
@@ -2469,4 +2497,102 @@ func TestHoldA2_Round1_OPT1_ChoiceResponsePreservesAgentLineAndMetadata(t *testi
 	assert.Equal(t, setAnsOut.BatchID, setMeta[messages.MetadataChoiceBatch])
 	assert.Equal(t, "D234@1=1,1@1=a,ship-now@1=1", setMeta[messages.MetadataChoiceAnswers])
 	assert.Empty(t, setMeta[messages.MetadataChoiceKey])
+}
+
+func TestHoldA2_Round2_R1_FlagOffRoutedGroupRecordsUserParticipant(t *testing.T) {
+	env := setupRoutedTestEnv(t)
+	setHoldTestSettings(t, env.srv, map[string]bool{
+		conduitExperiment:          true,
+		experiments.ConduitDeliver: false,
+	})
+
+	rec := env.doRoutedRequest(t, routedThreadPost(env, "r1-flag-off-group-thread", "hello @beta"))
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	convID := latestConversationID(t, env.store, env.agent1.ID)
+	conv, err := env.store.GetConversation(context.Background(), convID)
+	require.NoError(t, err)
+	require.Equal(t, "group", conv.Kind)
+
+	assert.Equal(t, 1, countParticipants(t, env.store, convID, "user", env.user.ID),
+		"R-1: with hub.conduit_deliver off, routed group post must still record the posting user as a participant")
+	assert.Equal(t, 1, countParticipants(t, env.store, convID, "agent", env.agent1.ID))
+	assert.Equal(t, 1, countParticipants(t, env.store, convID, "agent", env.agent2.ID))
+}
+
+type slowHoldDispatcher struct {
+	AgentDispatcher
+	targetSlug string
+	perRowWait time.Duration
+}
+
+func (d *slowHoldDispatcher) DispatchAgentMessage(ctx context.Context, target *store.Agent, message string, interrupt bool, sm *messages.StructuredMessage) error {
+	if target.Slug == d.targetSlug && d.perRowWait > 0 {
+		time.Sleep(d.perRowWait)
+	}
+	return d.AgentDispatcher.DispatchAgentMessage(ctx, target, message, interrupt, sm)
+}
+
+func TestHoldA2_Round2_O1_SlowPassRenewsLeaseBlockingReplicaB(t *testing.T) {
+	f := newHoldE2EFixture(t)
+	ctx := context.Background()
+	f.srv.setHeldMessagesCapForTest(150)
+
+	// Shorten replica A's lease TTL to 300ms while batch 1 dispatch + settle
+	// takes >600ms total (~5ms * 64 = 320ms dispatch + 350ms settle pause).
+	// Without mid-batch and pre-settle lease renewals (O-1), replica A's 300ms
+	// lease would expire mid-batch and replica B would steal batch 2 early!
+	f.srv.setRedriveLeaseTTLForTest(300 * time.Millisecond)
+
+	srvB := f.newPeerHubServer(t, "hub-b-o1")
+	srvB.setRedriveLeaseTTLForTest(300 * time.Millisecond)
+
+	var expected []string
+	for i := 0; i < 100; i++ {
+		m := f.seedHeldMessage(t, "agent:"+f.agent.Slug, f.agent.ID, "o1-slow", time.Now().Add(10*time.Minute))
+		expected = append(expected, m.ID)
+	}
+
+	f.srv.SetDispatcher(&slowHoldDispatcher{
+		AgentDispatcher: f.disp,
+		targetSlug:      f.launched.Slug,
+		perRowWait:      5 * time.Millisecond,
+	})
+
+	settleEntered := make(chan struct{})
+	var settleOnce sync.Once
+	f.disp.mu.Lock()
+	f.disp.beforeDeliver = func(req *agentcontrol.DeliverRequest) {
+		settleOnce.Do(func() {
+			close(settleEntered)
+			// Hold batch 1 before /deliver bind for longer than the 300ms lease TTL!
+			time.Sleep(350 * time.Millisecond)
+		})
+	}
+	f.disp.mu.Unlock()
+
+	f.connectDeliverSession(t, f.public.URL, true, nil)
+
+	select {
+	case <-settleEntered:
+	case <-time.After(15 * time.Second):
+		t.Fatal("batch 1 never entered /deliver")
+	}
+
+	// Wait 200ms into the 350ms beforeDeliver sleep: total elapsed since replica A
+	// acquired its initial 300ms lease is now >520ms (> 300ms initial TTL!).
+	// Because replica A renewed mid-batch AND right before waitForBatchBoundOrSettled,
+	// replica B's competing pass must STILL be blocked and dispatch 0 rows from batch 2!
+	time.Sleep(200 * time.Millisecond)
+	srvB.redriveAgentHeldMessagesOnce(ctx, f.launched.ID)
+	assert.Equal(t, 64, f.disp.dispatchCount(f.launched.Slug),
+		"O-1: replica B must not claim or dispatch batch 2 during a slow batch-1 pass because replica A renewed its lease")
+
+	for _, id := range expected {
+		f.waitMessageState(t, id, store.MessageDispatchDelivered)
+	}
+	deliveries := f.disp.deliveries()
+	require.Len(t, deliveries, 2, "100 rows must still arrive in 2 ordered batches (64 + 36)")
+	assert.Equal(t, expected[:64], deliveries[0].MessageIDs)
+	assert.Equal(t, expected[64:], deliveries[1].MessageIDs)
 }

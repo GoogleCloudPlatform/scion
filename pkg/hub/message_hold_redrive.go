@@ -62,8 +62,10 @@ const (
 	messageHoldRedriveTimeout = 90 * time.Second
 
 	// messageHoldRedriveLeaseTTL bounds the DB-backed cross-replica per-agent
-	// re-drive lease (REQ-2). Renewed between 64-row batches; expires on crash.
-	messageHoldRedriveLeaseTTL = 60 * time.Second
+	// re-drive lease (REQ-2, O-1). Exceeds messageHoldRedriveTimeout (90s) and is
+	// also renewed mid-batch and before/after each inter-batch settle wait so a
+	// slow pass never loses its lease mid-drain, while still expiring on crash.
+	messageHoldRedriveLeaseTTL = 2 * time.Minute
 
 	// messageHoldSweepTimeout bounds one 30s backstop sweep pass.
 	messageHoldSweepTimeout = 20 * time.Second
@@ -90,15 +92,16 @@ var (
 // messageHoldRuntime coordinates coalesced per-agent re-drive workers and the
 // 30s backstop sweep on a Server replica.
 type messageHoldRuntime struct {
-	mu              sync.Mutex
-	stopped         bool
-	stopLoop        context.CancelFunc
-	abortCtx        context.Context
-	abort           context.CancelFunc
-	inFlight        map[string]bool
-	pending         map[string]bool
-	running         sync.WaitGroup
-	maxHeldOverride int // >0 overrides maxHeldMessagesPerAgent in tests
+	mu               sync.Mutex
+	stopped          bool
+	stopLoop         context.CancelFunc
+	abortCtx         context.Context
+	abort            context.CancelFunc
+	inFlight         map[string]bool
+	pending          map[string]bool
+	running          sync.WaitGroup
+	maxHeldOverride  int           // >0 overrides maxHeldMessagesPerAgent in tests
+	leaseTTLOverride time.Duration // >0 overrides messageHoldRedriveLeaseTTL in tests
 }
 
 func (s *Server) holdRuntime() *messageHoldRuntime {
@@ -129,6 +132,20 @@ func (s *Server) heldMessagesCap() int {
 		return override
 	}
 	return maxHeldMessagesPerAgent
+}
+
+func (s *Server) redriveLeaseTTL() time.Duration {
+	if s == nil {
+		return messageHoldRedriveLeaseTTL
+	}
+	rt := s.holdRuntime()
+	rt.mu.Lock()
+	override := rt.leaseTTLOverride
+	rt.mu.Unlock()
+	if override > 0 {
+		return override
+	}
+	return messageHoldRedriveLeaseTTL
 }
 
 // heldMessageTargetPhaseEligible reports whether an agent in phase may keep
@@ -633,13 +650,27 @@ func (s *Server) redriveAgentHeldMessagesOnce(parentCtx context.Context, agentID
 	// concurrent live sends queue behind the in-progress drain instead of
 	// overtaking earlier batches.
 	leaseOwner := api.NewUUID()
-	acquired, err := s.store.AcquireAgentRedriveLease(ctx, agentID, leaseOwner, messageHoldRedriveLeaseTTL)
+	leaseTTL := s.redriveLeaseTTL()
+	acquired, err := s.store.AcquireAgentRedriveLease(ctx, agentID, leaseOwner, leaseTTL)
 	if err != nil {
 		slog.Error("message-hold: acquire redrive lease failed", "agent_id", agentID, "error", err)
 		return
 	}
 	if !acquired {
 		return
+	}
+	lastLeaseRenew := time.Now()
+	renewLease := func() bool {
+		renewed, rerr := s.store.RenewAgentRedriveLease(ctx, agentID, leaseOwner, leaseTTL)
+		if rerr != nil {
+			slog.Error("message-hold: renew redrive lease failed", "agent_id", agentID, "error", rerr)
+			return false
+		}
+		if !renewed {
+			return false
+		}
+		lastLeaseRenew = time.Now()
+		return true
 	}
 	reheldOnTransient := false
 	defer func() {
@@ -688,6 +719,15 @@ func (s *Server) redriveAgentHeldMessagesOnce(parentCtx context.Context, agentID
 		}
 
 		for i := range claimed {
+			if time.Since(lastLeaseRenew) >= leaseTTL/2 {
+				if !renewLease() {
+					for j := i; j < len(claimed); j++ {
+						s.reholdOrFailClaimedRow(ctx, agentID, &claimed[j])
+					}
+					reheldOnTransient = true
+					break
+				}
+			}
 			row := &claimed[i]
 			outcome := s.processClaimedHeldRow(ctx, dispatcher, agentID, row)
 			switch outcome {
@@ -714,21 +754,31 @@ func (s *Server) redriveAgentHeldMessagesOnce(parentCtx context.Context, agentID
 		}
 
 		// Whenever 64 rows have been dispatched in the current batch window,
-		// wait until all of them have left 'dispatched' (bound to 'delivering',
-		// settled, or re-held) or the 30s cap passes, then renew the cross-replica
-		// lease before claiming the next batch so batches arrive strictly in
-		// order (AC A2-3b, REQ-2).
+		// renew the cross-replica lease, wait until all of them have left
+		// 'dispatched' (bound to 'delivering', settled, or re-held) or the 30s
+		// cap passes (continuing to renew the lease while waiting), and renew
+		// again before claiming the next batch so batches arrive strictly in
+		// order without lease lapse (AC A2-3b, REQ-2, O-1).
 		if len(pendingSettleIDs) >= messageHoldClaimBatchSize || (len(pendingSettleIDs) > 0 && len(claimed) == claimLimit) {
-			if reheldDuringFlush := s.waitForBatchBoundOrSettled(ctx, pendingSettleIDs); reheldDuringFlush {
+			if !renewLease() {
+				return
+			}
+			renewIfDue := func() bool {
+				if time.Since(lastLeaseRenew) < leaseTTL/2 {
+					return true
+				}
+				return renewLease()
+			}
+			reheldDuringFlush, leaseLost := s.waitForBatchBoundOrSettled(ctx, pendingSettleIDs, leaseTTL, renewIfDue)
+			if leaseLost {
+				return
+			}
+			if reheldDuringFlush {
 				reheldOnTransient = true
 				return
 			}
 			pendingSettleIDs = pendingSettleIDs[:0]
-			renewed, rerr := s.store.RenewAgentRedriveLease(ctx, agentID, leaseOwner, messageHoldRedriveLeaseTTL)
-			if rerr != nil || !renewed {
-				if rerr != nil {
-					slog.Error("message-hold: renew redrive lease failed", "agent_id", agentID, "error", rerr)
-				}
+			if !renewLease() {
 				return
 			}
 		}
@@ -1035,11 +1085,18 @@ func (s *Server) dispatchClaimedHeldMessage(
 // dispatch_state='dispatched' (i.e. bound to 'delivering', finished 'delivered',
 // failed, or re-held to 'awaiting_session') or messageHoldBatchSettleCap passes.
 // Uses a single GetMessagesByIDs IN query per poll with exponential backoff
-// capped at messageHoldBatchPollMaxInterval (OPT-3).
-// Returns reheld=true if any row settled back into 'awaiting_session'.
-func (s *Server) waitForBatchBoundOrSettled(ctx context.Context, messageIDs []string) (reheld bool) {
+// capped at messageHoldBatchPollMaxInterval (OPT-3) and renews the cross-replica
+// lease via renewIfDue while waiting (O-1).
+// Returns reheld=true if any row settled back into 'awaiting_session', or
+// leaseLost=true if renewIfDue reported lease loss.
+func (s *Server) waitForBatchBoundOrSettled(
+	ctx context.Context,
+	messageIDs []string,
+	leaseTTL time.Duration,
+	renewIfDue func() bool,
+) (reheld, leaseLost bool) {
 	if len(messageIDs) == 0 {
-		return false
+		return false, false
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, messageHoldBatchSettleCap)
 	defer cancel()
@@ -1072,22 +1129,36 @@ func (s *Server) waitForBatchBoundOrSettled(ctx context.Context, messageIDs []st
 	}
 
 	if check() {
-		return reheld
+		return reheld, false
+	}
+	maxInterval := messageHoldBatchPollMaxInterval
+	if leaseTTL > 0 && leaseTTL/3 < maxInterval {
+		if half := leaseTTL / 3; half >= messageHoldBatchPollInterval {
+			maxInterval = half
+		} else {
+			maxInterval = messageHoldBatchPollInterval
+		}
 	}
 	interval := messageHoldBatchPollInterval
+	if interval > maxInterval {
+		interval = maxInterval
+	}
 	timer := time.NewTimer(interval)
 	defer timer.Stop()
 	for {
 		select {
 		case <-waitCtx.Done():
-			return reheld
+			return reheld, false
 		case <-timer.C:
+			if renewIfDue != nil && !renewIfDue() {
+				return reheld, true
+			}
 			if check() {
-				return reheld
+				return reheld, false
 			}
 			interval *= 2
-			if interval > messageHoldBatchPollMaxInterval {
-				interval = messageHoldBatchPollMaxInterval
+			if interval > maxInterval {
+				interval = maxInterval
 			}
 			timer.Reset(interval)
 		}

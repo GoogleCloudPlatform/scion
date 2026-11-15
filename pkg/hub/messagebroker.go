@@ -1347,7 +1347,8 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 	}
 }
 
-// fanOutToProject dispatches a broadcast message to all running agents in a project.
+// holdOrDispatchMessage routes a persisted message-broker delivery through
+// Server.holdOrDispatch when wired, or invokes dispatchFn directly in tests.
 func (p *MessageBrokerProxy) holdOrDispatchMessage(ctx context.Context, agent *store.Agent, storeMsg *store.Message, dispatchFn func() error) (bool, error) {
 	if p != nil && p.holdOrDispatch != nil && storeMsg != nil {
 		return p.holdOrDispatch(ctx, agent, storeMsg.ID, storeMsg, dispatchFn)
@@ -1355,6 +1356,7 @@ func (p *MessageBrokerProxy) holdOrDispatchMessage(ctx context.Context, agent *s
 	return false, dispatchFn()
 }
 
+// fanOutToProject dispatches a broadcast message to all running agents in a project.
 func (p *MessageBrokerProxy) fanOutToProject(ctx context.Context, projectID string, msg *messages.StructuredMessage) {
 	result, err := p.store.ListAgents(ctx, store.AgentFilter{
 		ProjectID: projectID,

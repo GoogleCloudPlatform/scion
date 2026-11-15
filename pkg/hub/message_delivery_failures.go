@@ -248,12 +248,7 @@ func (s *Server) agentUsesConduitDelivery(ctx context.Context, agent *store.Agen
 	return hubConduitDeliverRuntimes[rt]
 }
 
-// applyBrokerMessageFailure validates and applies one reported failure.
-// Returns true when the message row was moved to failed.
-func (s *Server) applyBrokerMessageFailure(ctx context.Context, brokerID string, f messageDeliveryFailure) bool {
-	return s.applyBrokerMessageFailureOutcome(ctx, brokerID, f) == brokerFailureMarked
-}
-
+// applyBrokerMessageFailureOutcome validates and applies one reported failure.
 func (s *Server) applyBrokerMessageFailureOutcome(ctx context.Context, brokerID string, f messageDeliveryFailure) brokerFailureOutcome {
 	if f.MessageID == "" {
 		return brokerFailureIgnored
