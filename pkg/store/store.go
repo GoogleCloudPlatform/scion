@@ -873,6 +873,13 @@ type AgentStore interface {
 	// Returns the updated agent records for event publishing.
 	MarkStalledAgents(ctx context.Context, activityThreshold, heartbeatRecency time.Time) ([]Agent, error)
 
+	// ListIdleSuspendCandidates returns non-deleted running agents holding a
+	// suspend-eligible activity (state.SuspendEligibleActivities) whose
+	// activity_since is non-NULL and predates cutoff, and whose heartbeat
+	// (last_seen) is at or after heartbeatRecency. Offline agents and rows with
+	// a NULL activity_since are never returned.
+	ListIdleSuspendCandidates(ctx context.Context, cutoff, heartbeatRecency time.Time) ([]Agent, error)
+
 	// MarkAgentContainerMissing moves a running (or stopping) agent whose
 	// container its runtime broker no longer reports to phase=error with exit reason
 	// container_missing. An exit reason that is more specific about why the

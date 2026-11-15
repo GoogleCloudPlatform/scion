@@ -3090,6 +3090,27 @@ func (s *AgentStore) MarkStalledAgents(ctx context.Context, activityThreshold, h
 	return updated, nil
 }
 
+// ListIdleSuspendCandidates implements store.AgentStore.
+func (s *AgentStore) ListIdleSuspendCandidates(ctx context.Context, cutoff, heartbeatRecency time.Time) ([]store.Agent, error) {
+	rows, err := s.client.Agent.Query().Where(
+		agent.DeletedAtIsNil(),
+		agent.PhaseEQ(string(state.PhaseRunning)),
+		agent.ActivityIn(state.SuspendEligibleActivities()...),
+		agent.ActivitySinceNotNil(),
+		agent.ActivitySinceLT(cutoff.UTC()),
+		agent.LastSeenNotNil(),
+		agent.LastSeenGTE(heartbeatRecency.UTC()),
+	).All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]store.Agent, len(rows))
+	for i, a := range rows {
+		out[i] = *entAgentToStore(a)
+	}
+	return out, nil
+}
+
 // --- helpers ---
 
 // isTerminalActivity reports whether the activity is a terminal/sticky state

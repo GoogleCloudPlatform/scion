@@ -645,15 +645,26 @@ func (a Activity) IsSticky() bool {
 // auto-suspended by the hub's idle policy once the grace period has passed.
 // It is the only list of suspend-eligible activities: blocked and
 // waiting_for_input wait on a specific event and are never eligible.
-// harness_error is not eligible either: a suspended agent refuses messages,
-// and a message is what makes the harness retry. It may join this list once
-// a suspended agent wakes on new work.
+// harness_error is eligible because an idle-suspended agent auto-wakes on
+// new work so a message still makes the harness retry.
 func (a Activity) IsSuspendEligible() bool {
 	switch a {
-	case ActivityIdle, ActivityCompleted:
+	case ActivityIdle, ActivityCompleted, ActivityHarnessError:
 		return true
 	}
 	return false
+}
+
+// SuspendEligibleActivities returns the string values of all Activity
+// constants for which IsSuspendEligible reports true.
+func SuspendEligibleActivities() []string {
+	var out []string
+	for _, a := range allActivities {
+		if a.IsSuspendEligible() {
+			out = append(out, string(a))
+		}
+	}
+	return out
 }
 
 // IsRetainedOnSuspend reports whether this activity survives a transition to

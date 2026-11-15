@@ -302,6 +302,11 @@ const (
 	// through AdvisoryLocker.
 	LockScheduledExecPollClaim AdvisoryLockKey = 0x5C10001D
 
+	// LockAgentIdleSuspend guards the periodic idle auto-suspend sweep
+	// ("agent-idle-suspend", ptone/scion#7947), so one replica per tick
+	// scans and enqueues eligible idle/completed/harness_error agents.
+	LockAgentIdleSuspend AdvisoryLockKey = 0x5C100030
+
 	// LockPendingSecretOwnerWrite is the CLASS ID for the per-owner pending
 	// secret write lock: a transaction-scoped
 	// pg_advisory_xact_lock(classid, objid) with objid
