@@ -25,6 +25,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -66,6 +67,11 @@ type ContainerScriptHarness struct {
 	// (staged from the resolution or carried from the record), for the
 	// control plane to record (StagedSecretNames).
 	stagedSecretNames []string
+
+	// freshResolutionSatisfiedAuth reports whether the last ApplyAuthSettings'
+	// own resolution, before recorded secrets were merged, satisfied the
+	// selected auth type (FreshResolutionSatisfiedAuth).
+	freshResolutionSatisfiedAuth bool
 }
 
 // SetRecordedSecrets tells ApplyAuthSettings which secret files the control
@@ -82,6 +88,13 @@ func (c *ContainerScriptHarness) SetRecordedSecrets(names []string) {
 // that the last ApplyAuthSettings referenced in auth-candidates.json, sorted.
 func (c *ContainerScriptHarness) StagedSecretNames() []string {
 	return append([]string(nil), c.stagedSecretNames...)
+}
+
+// FreshResolutionSatisfiedAuth reports whether the last ApplyAuthSettings'
+// own resolution, before recorded secrets were merged, satisfied the selected
+// auth type.
+func (c *ContainerScriptHarness) FreshResolutionSatisfiedAuth() bool {
+	return c.freshResolutionSatisfiedAuth
 }
 
 // NewContainerScriptHarness constructs a ContainerScriptHarness from a resolved
@@ -313,6 +326,25 @@ const (
 	googleAppCredentialsField = "GoogleAppCredentials"
 )
 
+// resolveAuthSynthesisedKeys and resolveAuthClaudeSynthesisedKeys list the
+// environment keys ResolveAuth itself synthesises into resolved.EnvVars
+// (beyond auth.EnvVars). They must change together with ResolveAuth;
+// TestResolveAuthSynthesisedKeysAreRestorable enforces that every key
+// ResolveAuth produces is accepted by RestorableSecretName.
+var (
+	resolveAuthSynthesisedKeys = []string{
+		"SCION_HARNESS_SELECTED_AUTH",
+		"GOOGLE_CLOUD_PROJECT",
+		"GOOGLE_CLOUD_REGION",
+		"GOOGLE_CLOUD_LOCATION",
+	}
+	resolveAuthClaudeSynthesisedKeys = []string{
+		"ANTHROPIC_VERTEX_PROJECT_ID",
+		"CLOUD_ML_REGION",
+		"CLAUDE_CODE_USE_VERTEX",
+	}
+)
+
 // ResolveAuth returns a container-side auth plan: env candidates flow as files
 // under .scion/harness/secrets/, and any harness-native file mappings declared
 // in config_dir-bound auth metadata are surfaced to the runtime so the
@@ -469,6 +501,59 @@ func hasHigherPriorityClaudeAuth(auth api.AuthConfig) bool {
 	return auth.EnvVars["ANTHROPIC_API_KEY"] != "" ||
 		auth.EnvVars["CLAUDE_CODE_OAUTH_TOKEN"] != "" ||
 		auth.Files["ClaudeAuthFile"] != ""
+}
+
+// DeclaredAuthEnvKeys returns every env key a harness-config's auth metadata
+// lists, for any auth type: required_env any_of keys, required_files
+// alternative_env_keys and autodetect env keys. Returns nil when authMeta is
+// nil or declares no env keys.
+func DeclaredAuthEnvKeys(authMeta *config.HarnessAuthMetadata) map[string]struct{} {
+	if authMeta == nil {
+		return nil
+	}
+	keys := make(map[string]struct{})
+	for _, authType := range authMeta.Types {
+		for _, req := range authType.RequiredEnv {
+			for _, k := range req.AnyOf {
+				keys[k] = struct{}{}
+			}
+		}
+		for _, req := range authType.RequiredFiles {
+			for _, k := range req.AlternativeEnvKeys {
+				keys[k] = struct{}{}
+			}
+		}
+	}
+	for k := range authMeta.Autodetect.Env {
+		keys[k] = struct{}{}
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	return keys
+}
+
+// RestorableSecretName reports whether name is a secret this harness-config
+// revision could itself stage, so a record from an earlier revision of the
+// same config may restore it.
+func (c *ContainerScriptHarness) RestorableSecretName(name string) bool {
+	if c == nil || !isSafeEnvName(name) {
+		return false
+	}
+	if slices.Contains(resolveAuthSynthesisedKeys, name) {
+		return true
+	}
+	if c.entry.Harness == "claude" && slices.Contains(resolveAuthClaudeSynthesisedKeys, name) {
+		return true
+	}
+	if c.entry.Auth == nil {
+		return false
+	}
+	if c.isRequiredFileSecret(name) {
+		return true
+	}
+	_, ok := DeclaredAuthEnvKeys(c.entry.Auth)[name]
+	return ok
 }
 
 // ProvisionManifest is the JSON payload written to
@@ -690,6 +775,7 @@ func SetManifestAgentWorkspace(agentHome, containerWorkspace string) error {
 // handle opened on the home: a link at a staged file is replaced, never
 // written through, and a linked directory component is refused.
 func (c *ContainerScriptHarness) ApplyAuthSettings(agentHome string, resolved *api.ResolvedAuth) error {
+	c.freshResolutionSatisfiedAuth = false
 	if resolved == nil {
 		return nil
 	}
@@ -727,7 +813,8 @@ func (c *ContainerScriptHarness) ApplyAuthSettings(agentHome string, resolved *a
 	// already holds the new resolution's value because stageEnvSecretFiles
 	// wrote it over the restored one, so the new value wins either way.
 	existingEnvSecrets, existingFileSecrets := c.recordedSecretFiles(agentHome)
-	if !c.resolutionSatisfiesAuthType(selectedAuthType(c.entry.AuthSelectedType, resolved), resolved.EnvVars, envSecretFiles, fileSecretFiles, resolved.Files) {
+	c.freshResolutionSatisfiedAuth = c.resolutionSatisfiesAuthType(selectedAuthType(c.entry.AuthSelectedType, resolved), resolved.EnvVars, envSecretFiles, fileSecretFiles, resolved.Files)
+	if !c.freshResolutionSatisfiedAuth {
 		for k, v := range existingEnvSecrets {
 			envSecretFiles[k] = v
 		}
