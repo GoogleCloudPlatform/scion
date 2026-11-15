@@ -64,6 +64,9 @@ func classifyAndProject(
 		if failReason != "" {
 			return zero, ClassFailed, string(failReason)
 		}
+		if ans.ReportedModel != "" && rec.ReportedModel == "" {
+			eval.Notes = mergeNotes(eval.Notes, []string{provider.NoteModelUnreported})
+		}
 		answers[q.ID] = rec
 
 		if !req {
@@ -110,14 +113,24 @@ func validateAndBuildAnswerRecord(
 		return AnswerRecord{}, provider.FailMalformedResponse
 	}
 
+	notes := mergeNotes(nil, ans.Notes)
+	var cleanReportedModel string
+	if ans.ReportedModel != "" {
+		if m, ok := sanitizeProviderIdentifier(ans.ReportedModel); ok {
+			cleanReportedModel = m
+		} else {
+			notes = mergeNotes(notes, []string{provider.NoteModelUnreported})
+		}
+	}
+
 	rec := AnswerRecord{
 		QuestionID:    q.ID,
 		Primitive:     q.Type,
 		Status:        ans.Status,
 		Required:      required,
 		NativeMetrics: nativeCopy,
-		ReportedModel: ans.ReportedModel,
-		Notes:         copyStrings(ans.Notes),
+		ReportedModel: cleanReportedModel,
+		Notes:         notes,
 	}
 
 	lim := caps.Primitives[q.Type]
@@ -188,6 +201,7 @@ func populateBinaryAnswer(
 			return AnswerRecord{}, provider.FailMalformedResponse
 		}
 		pTrue := ans.Distribution[provider.BinaryTrueKey]
+		pFalse := ans.Distribution[provider.BinaryFalseKey]
 		if provider.IsTie(ans.Distribution) {
 			if ans.Bool != nil {
 				return AnswerRecord{}, provider.FailMalformedResponse
@@ -197,7 +211,7 @@ func populateBinaryAnswer(
 			if ans.Tied {
 				return AnswerRecord{}, provider.FailMalformedResponse
 			}
-			want := pTrue > 0.5
+			want := pTrue > pFalse
 			if ans.Bool != nil && *ans.Bool != want {
 				return AnswerRecord{}, provider.FailMalformedResponse
 			}
@@ -434,11 +448,4 @@ func cloneAndValidateNativeMetrics(in map[string]metrics.Metric) (map[string]met
 		cp[k] = m
 	}
 	return cp, true
-}
-
-func copyStrings(in []string) []string {
-	if len(in) == 0 {
-		return nil
-	}
-	return append([]string(nil), in...)
 }

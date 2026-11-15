@@ -64,6 +64,17 @@ func TestFailReasons_ClosedSetMatchesRuntimeDesign(t *testing.T) {
 	assert.False(t, provider.FailReason("").Valid())
 }
 
+func TestNotes_ClosedSet(t *testing.T) {
+	notes := provider.AllNotes()
+	require.Len(t, notes, 5)
+	for _, n := range notes {
+		assert.True(t, provider.IsValidNote(n), "expected %q to be valid closed note", n)
+	}
+	assert.False(t, provider.IsValidNote(""))
+	assert.False(t, provider.IsValidNote("arbitrary_provider_note"))
+	assert.False(t, provider.IsValidNote("model_unreported\n"))
+}
+
 func TestProviderError_CapsMessageAndUnwraps(t *testing.T) {
 	longUTF8 := strings.Repeat("é", 200) // 400 bytes in UTF-8
 	pe := provider.NewProviderError(provider.FailRateLimited, true, 2*time.Second, 429, longUTF8)

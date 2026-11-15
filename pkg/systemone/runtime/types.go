@@ -54,6 +54,10 @@ const (
 	// byte per token, since every token is >= 1 byte) used to prove non-truncation
 	// before calling a TruncationSilent adapter (runtime-design §4.3, §6.3; AC-3).
 	SilentBytesPerTokenPrecheck = 1
+	// MaxProviderIdentifierBytes bounds provider-reported identifier strings
+	// (ResolvedModel, ReportedModel, ProviderRequestID) before they enter
+	// content-free Evaluation provenance or logs (runtime-design §8.1).
+	MaxProviderIdentifierBytes = 128
 )
 
 // Class is the top-level evaluation outcome class (runtime-design §6.1).

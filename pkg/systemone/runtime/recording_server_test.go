@@ -536,7 +536,7 @@ func TestRuntime_AC4_EgressRecordingServerBoundaries(t *testing.T) {
 		assert.Equal(t, string(provider.FailEgressRefused), eval.Reason)
 	})
 
-	t.Run("credential_source_error_maps_to_auth_without_echoing_secret", func(t *testing.T) {
+	t.Run("credential_source_error_maps_to_unavailable_without_echoing_secret", func(t *testing.T) {
 		ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			t.Fatal("server must not be contacted when credential resolution fails")
 		}))
@@ -566,7 +566,39 @@ func TestRuntime_AC4_EgressRecordingServerBoundaries(t *testing.T) {
 		eval, ok := runtime.EvaluationFrom(err)
 		require.True(t, ok)
 		assert.Equal(t, runtime.ClassFailed, eval.Class)
-		assert.Equal(t, string(provider.FailAuth), eval.Reason)
+		assert.Equal(t, string(provider.FailUnavailable), eval.Reason)
+	})
+
+	t.Run("empty_or_invalid_credential_token_maps_to_auth_without_echoing_secret", func(t *testing.T) {
+		ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			t.Fatal("server must not be contacted when token is empty or malformed")
+		}))
+		defer ts.Close()
+
+		for _, badToken := range []string{"   ", secretKey + "\r\nX-Injected: 1"} {
+			reg := provider.NewRegistry()
+			reg.MustRegister(newWireRecordingAdapter())
+			inst := runtime.Instance{
+				Name: "jev-auth-bad", Adapter: "wire-test", Model: "jev-1.14.0", Endpoint: ts.URL, Enabled: true, Revision: 1,
+			}
+			rt := runtime.New(
+				runtime.Config{
+					Registry:    reg,
+					Instances:   runtime.StaticInstances(inst),
+					Credentials: runtime.StaticCredential(badToken),
+				},
+				runtime.WithEgressOptionsForTesting(egress.WithLoopbackServerForTesting(ts.URL, ts.Client())),
+			)
+			_, err := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("hi"), runtime.EvalOptions{})
+			rt.CloseIdleConnections()
+			require.Error(t, err)
+			assert.NotContains(t, err.Error(), secretKey)
+
+			eval, ok := runtime.EvaluationFrom(err)
+			require.True(t, ok)
+			assert.Equal(t, runtime.ClassFailed, eval.Class)
+			assert.Equal(t, string(provider.FailAuth), eval.Reason)
+		}
 	})
 
 	t.Run("http_status_401_429_503_single_attempt_classification", func(t *testing.T) {

@@ -15,8 +15,10 @@
 package runtime_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"math"
 	"strings"
 	"sync"
@@ -1094,6 +1096,30 @@ func TestRuntime_ListModels(t *testing.T) {
 		require.True(t, ok)
 		assert.Equal(t, provider.FailUnsupported, pe.Reason)
 	})
+
+	t.Run("adapter_panic_in_list_models_recovered_as_failed_internal", func(t *testing.T) {
+		base := newFakeAdapter(nil)
+		ml := &fakeModelListerAdapter{
+			fakeAdapter: base,
+			modelsFn: func(_ context.Context, _ provider.Transport, _ provider.InstanceView) ([]string, error) {
+				panic("LIST_MODELS_PANIC_DO_NOT_ECHO")
+			},
+		}
+		reg := provider.NewRegistry()
+		reg.MustRegister(ml)
+		rt := runtime.New(runtime.Config{
+			Registry:    reg,
+			Credentials: runtime.StaticCredential("sk-test"),
+		})
+
+		models, err := rt.ListModels(context.Background(), defaultTestInstance())
+		require.Error(t, err)
+		assert.Nil(t, models)
+		assert.NotContains(t, err.Error(), "LIST_MODELS_PANIC_DO_NOT_ECHO")
+		pe, ok := provider.AsProviderError(err)
+		require.True(t, ok)
+		assert.Equal(t, provider.FailInternal, pe.Reason)
+	})
 }
 
 type wrappedAdapterError struct {
@@ -1124,6 +1150,7 @@ func TestRuntime_WrappedEgressErrorOverridesProviderErrorReason(t *testing.T) {
 		{name: "wrapped_scheme_not_allowed", sentinel: egress.ErrSchemeNotAllowed, want: provider.FailEgressRefused},
 		{name: "wrapped_invalid_endpoint", sentinel: egress.ErrInvalidEndpoint, want: provider.FailEgressRefused},
 		{name: "wrapped_response_too_large", sentinel: egress.ErrResponseTooLarge, want: provider.FailMalformedResponse},
+		{name: "wrapped_credential_unavailable", sentinel: egress.ErrCredentialUnavailable, want: provider.FailUnavailable},
 		{name: "wrapped_auth", sentinel: egress.ErrAuth, want: provider.FailAuth},
 	}
 
@@ -1156,4 +1183,281 @@ func TestRuntime_WrappedEgressErrorOverridesProviderErrorReason(t *testing.T) {
 			assert.Equal(t, "5xx", eval.Attempts[0].HTTPStatusClass)
 		})
 	}
+}
+
+func TestRuntime_SanitizesProviderIdentifiersAndFiltersNotes(t *testing.T) {
+	binSpec := `{
+	  "version": 1,
+	  "questions": [{"id": "q1", "type": "binary", "instructions": "Check."}],
+	  "output": {"question": "q1"}
+	}`
+	compiled := compileTestSpec(t, binSpec, spec.KindFilter)
+
+	t.Run("oversize_64KiB_and_newline_identifiers_and_arbitrary_notes_dropped", func(t *testing.T) {
+		oversizeModel := strings.Repeat("M", 64<<10) + "\nlevel=ERROR msg=injected"
+		newlineAnsModel := "jev-ans\r\nspoofed_field=1"
+		oversizeReqID := strings.Repeat("R", 200) + "\ninjected"
+		arbitraryTopNote := "arbitrary_echoed_user_prompt_secret"
+		arbitraryAnsNote := "arbitrary_echoed_answer_note"
+
+		adapter := newFakeAdapter(func(_ context.Context, _ provider.Transport, _ provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
+			dist, val, _, _ := provider.BinaryDistribution(0.9)
+			return provider.ModelResult{
+				ResolvedModel:     oversizeModel,
+				ProviderRequestID: oversizeReqID,
+				HTTPStatus:        200,
+				Notes:             []string{arbitraryTopNote, provider.NoteClamped001To099},
+				Answers: map[string]provider.Answer{
+					"q1": {
+						QuestionID:    "q1",
+						Primitive:     spec.PrimitiveBinary,
+						Status:        provider.AnswerStatusAnswered,
+						Bool:          val,
+						Distribution:  dist,
+						ReportedModel: newlineAnsModel,
+						Notes:         []string{arbitraryAnsNote, provider.NoteConfidenceFormulaDeviation},
+					},
+				},
+			}, nil
+		})
+
+		var logBuf bytes.Buffer
+		logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+		reg := provider.NewRegistry()
+		reg.MustRegister(adapter)
+		rt := runtime.New(runtime.Config{
+			Registry:    reg,
+			Instances:   runtime.StaticInstances(defaultTestInstance()),
+			Credentials: runtime.StaticCredential("sk-test"),
+			Logger:      logger,
+		})
+
+		dec, err := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("hello"), runtime.EvalOptions{})
+		require.NoError(t, err)
+		assert.True(t, dec.Bool)
+		require.NotNil(t, dec.Eval)
+
+		// Violating ResolvedModel/ReportedModel/ProviderRequestID are dropped and NoteModelUnreported is recorded.
+		assert.Empty(t, dec.Eval.ResolvedModel)
+		assert.Empty(t, dec.Eval.EffectiveResolvedModel())
+		require.Len(t, dec.Eval.Attempts, 1)
+		assert.Empty(t, dec.Eval.Attempts[0].ReportedModel)
+		assert.Empty(t, dec.Eval.Attempts[0].ProviderRequestID)
+		assert.Equal(t, []string{provider.NoteClamped001To099, provider.NoteModelUnreported}, dec.Eval.Notes)
+
+		rec := dec.Eval.Answers["q1"]
+		assert.Empty(t, rec.ReportedModel)
+		assert.Equal(t, []string{provider.NoteConfidenceFormulaDeviation, provider.NoteModelUnreported}, rec.Notes)
+
+		evalJSON, err := json.Marshal(dec.Eval)
+		require.NoError(t, err)
+		jsonStr := string(evalJSON)
+		logs := logBuf.String()
+		require.NotEmpty(t, logs)
+
+		for _, forbidden := range []string{
+			"MMMMMMMM",
+			"msg=injected",
+			"jev-ans",
+			"spoofed_field",
+			"RRRRRRRR",
+			arbitraryTopNote,
+			arbitraryAnsNote,
+		} {
+			assert.NotContains(t, jsonStr, forbidden, "Evaluation JSON leaked unsanitized value %q", forbidden)
+			assert.NotContains(t, logs, forbidden, "debug logs leaked unsanitized value %q", forbidden)
+		}
+	})
+
+	t.Run("trimmed_valid_identifier_preserved_and_error_path_sanitized", func(t *testing.T) {
+		var logBuf bytes.Buffer
+		logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+		okAdapter := newFakeAdapter(func(_ context.Context, _ provider.Transport, _ provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
+			dist, val, _, _ := provider.BinaryDistribution(0.8)
+			return provider.ModelResult{
+				ResolvedModel:     "  jev-1.14.0  ",
+				ProviderRequestID: "  req_valid_123  ",
+				Answers: map[string]provider.Answer{
+					"q1": {QuestionID: "q1", Primitive: spec.PrimitiveBinary, Status: provider.AnswerStatusAnswered, Bool: val, Distribution: dist, ReportedModel: " jev-1.14.0 "},
+				},
+			}, nil
+		})
+		reg := provider.NewRegistry()
+		reg.MustRegister(okAdapter)
+		rt := runtime.New(runtime.Config{
+			Registry:    reg,
+			Instances:   runtime.StaticInstances(defaultTestInstance()),
+			Credentials: runtime.StaticCredential("sk-test"),
+			Logger:      logger,
+		})
+
+		dec, err := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("ok"), runtime.EvalOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, "jev-1.14.0", dec.Eval.ResolvedModel)
+		assert.Equal(t, "jev-1.14.0", dec.Eval.EffectiveResolvedModel())
+		assert.Equal(t, "jev-1.14.0", dec.Eval.Attempts[0].ReportedModel)
+		assert.Equal(t, "req_valid_123", dec.Eval.Attempts[0].ProviderRequestID)
+		assert.Equal(t, "jev-1.14.0", dec.Eval.Answers["q1"].ReportedModel)
+		assert.Empty(t, dec.Eval.Notes)
+
+		// Error path with hostile ResolvedModel + note must also scrub both.
+		errAdapter := newFakeAdapter(func(_ context.Context, _ provider.Transport, _ provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
+			return provider.ModelResult{
+				ResolvedModel: "bad-err-model\ninjected",
+				Notes:         []string{"arbitrary_err_secret"},
+				HTTPStatus:    503,
+			}, provider.NewProviderError(provider.FailUnavailable, true, 0, 503, "upstream unavailable")
+		})
+		regErr := provider.NewRegistry()
+		regErr.MustRegister(errAdapter)
+		rtErr := runtime.New(runtime.Config{
+			Registry:    regErr,
+			Instances:   runtime.StaticInstances(defaultTestInstance()),
+			Credentials: runtime.StaticCredential("sk-test"),
+			Logger:      logger,
+		})
+
+		_, err = rtErr.Evaluate(context.Background(), compiled, runtime.ProbeInput("err"), runtime.EvalOptions{})
+		require.Error(t, err)
+		evalErr, ok := runtime.EvaluationFrom(err)
+		require.True(t, ok)
+		assert.Empty(t, evalErr.ResolvedModel)
+		assert.Empty(t, evalErr.Attempts[0].ReportedModel)
+		assert.Equal(t, []string{provider.NoteModelUnreported}, evalErr.Notes)
+
+		errJSON, mErr := json.Marshal(evalErr)
+		require.NoError(t, mErr)
+		assert.NotContains(t, string(errJSON), "bad-err-model")
+		assert.NotContains(t, string(errJSON), "arbitrary_err_secret")
+		assert.NotContains(t, logBuf.String(), "bad-err-model")
+		assert.NotContains(t, logBuf.String(), "arbitrary_err_secret")
+	})
+}
+
+func TestRuntime_BinarySubUnitSumArgmaxRule(t *testing.T) {
+	binSpec := `{
+	  "version": 1,
+	  "questions": [{"id": "q1", "type": "binary", "instructions": "Check."}],
+	  "output": {"question": "q1"}
+	}`
+	compiled := compileTestSpec(t, binSpec, spec.KindFilter)
+
+	cases := []struct {
+		name      string
+		pTrue     float64
+		pFalse    float64
+		givenBool *bool
+		wantFail  bool
+		wantBool  bool
+	}{
+		{
+			name:      "sub_1_sum_within_tolerance_nil_bool_derives_true_by_argmax",
+			pTrue:     0.4998,
+			pFalse:    0.4994,
+			givenBool: nil,
+			wantBool:  true,
+		},
+		{
+			name:      "sub_1_sum_within_tolerance_matching_true_bool_succeeds",
+			pTrue:     0.4998,
+			pFalse:    0.4994,
+			givenBool: boolPtr(true),
+			wantBool:  true,
+		},
+		{
+			name:      "sub_1_sum_within_tolerance_contradictory_false_bool_rejected",
+			pTrue:     0.4998,
+			pFalse:    0.4994,
+			givenBool: boolPtr(false),
+			wantFail:  true,
+		},
+		{
+			name:      "sub_1_sum_within_tolerance_false_argmax_derives_false",
+			pTrue:     0.4994,
+			pFalse:    0.4998,
+			givenBool: nil,
+			wantBool:  false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			adapter := newFakeAdapter(func(_ context.Context, _ provider.Transport, _ provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
+				return provider.ModelResult{
+					ResolvedModel: "jev-1.14.0",
+					Answers: map[string]provider.Answer{
+						"q1": {
+							QuestionID: "q1",
+							Primitive:  spec.PrimitiveBinary,
+							Status:     provider.AnswerStatusAnswered,
+							Bool:       tc.givenBool,
+							Distribution: map[string]float64{
+								provider.BinaryTrueKey:  tc.pTrue,
+								provider.BinaryFalseKey: tc.pFalse,
+							},
+						},
+					},
+				}, nil
+			})
+			reg := provider.NewRegistry()
+			reg.MustRegister(adapter)
+			rt := runtime.New(runtime.Config{
+				Registry:    reg,
+				Instances:   runtime.StaticInstances(defaultTestInstance()),
+				Credentials: runtime.StaticCredential("sk-test"),
+			})
+
+			dec, err := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("check"), runtime.EvalOptions{})
+			if tc.wantFail {
+				require.Error(t, err)
+				eval, ok := runtime.EvaluationFrom(err)
+				require.True(t, ok)
+				assert.Equal(t, runtime.ClassFailed, eval.Class)
+				assert.Equal(t, string(provider.FailMalformedResponse), eval.Reason)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantBool, dec.Bool)
+		})
+	}
+}
+
+func TestRuntime_DeadlineCauseWinsOverSubsequentCallerCancel(t *testing.T) {
+	binSpec := `{
+	  "version": 1,
+	  "questions": [{"id": "q1", "type": "binary", "instructions": "Check."}],
+	  "output": {"question": "q1"}
+	}`
+	compiled := compileTestSpec(t, binSpec, spec.KindFilter)
+
+	callerCtx, callerCancel := context.WithCancel(context.Background())
+	defer callerCancel()
+
+	adapter := newFakeAdapter(func(attemptCtx context.Context, _ provider.Transport, _ provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
+		<-attemptCtx.Done()
+		// Cancel the parent caller context AFTER the runtime's own deadline has
+		// already expired on attemptCtx, before returning to Evaluate.
+		callerCancel()
+		return provider.ModelResult{}, attemptCtx.Err()
+	})
+
+	reg := provider.NewRegistry()
+	reg.MustRegister(adapter)
+	rt := runtime.New(runtime.Config{
+		Registry:    reg,
+		Instances:   runtime.StaticInstances(defaultTestInstance()),
+		Credentials: runtime.StaticCredential("sk-test"),
+		MaxEvalTime: 35 * time.Millisecond,
+	})
+
+	_, err := rt.Evaluate(callerCtx, compiled, runtime.ProbeInput("race"), runtime.EvalOptions{})
+	require.Error(t, err)
+	eval, ok := runtime.EvaluationFrom(err)
+	require.True(t, ok)
+	assert.Equal(t, runtime.ClassFailed, eval.Class)
+	assert.Equal(t, string(provider.FailTimeout), eval.Reason, "runtime deadline cause must win over a subsequent caller cancel")
+	require.Len(t, eval.Attempts, 1)
+	assert.Equal(t, string(provider.FailTimeout), eval.Attempts[0].Reason)
 }

@@ -26,6 +26,7 @@ import (
 	"net"
 	"net/url"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -331,14 +332,30 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 	attemptCause := context.Cause(attemptCtx)
 	attemptCancel()
 
+	var cleanResolvedModel string
+	var resolvedModelViolated bool
+	if !panicked && res.ResolvedModel != "" {
+		if m, ok := sanitizeProviderIdentifier(res.ResolvedModel); ok {
+			cleanResolvedModel = m
+		} else {
+			resolvedModelViolated = true
+		}
+	}
+	var cleanRequestID string
+	if !panicked && res.ProviderRequestID != "" {
+		if id, ok := sanitizeProviderIdentifier(res.ProviderRequestID); ok {
+			cleanRequestID = id
+		}
+	}
+
 	attempt := Attempt{
 		Instance:          inst.Name,
 		InstanceRevision:  inst.Revision,
 		Adapter:           adapter.Name(),
 		AdapterVersion:    adapter.Version(),
 		ConfiguredModel:   inst.Model,
-		ReportedModel:     res.ResolvedModel,
-		ProviderRequestID: res.ProviderRequestID,
+		ReportedModel:     cleanResolvedModel,
+		ProviderRequestID: cleanRequestID,
 		Location:          inst.Location,
 		Started:           attemptStart,
 		Duration:          attemptDuration,
@@ -362,10 +379,13 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 		attempt.Outcome = AttemptFailed
 		attempt.Reason = string(reason)
 		eval.Attempts = []Attempt{attempt}
-		if res.ResolvedModel != "" {
-			eval.ResolvedModel = res.ResolvedModel
+		if cleanResolvedModel != "" {
+			eval.ResolvedModel = cleanResolvedModel
 		}
 		eval.Notes = mergeNotes(eval.Notes, res.Notes)
+		if resolvedModelViolated {
+			eval.Notes = mergeNotes(eval.Notes, []string{provider.NoteModelUnreported})
+		}
 		return r.finishFailed(ctx, compiled.Kind, start, eval, reason)
 	}
 
@@ -376,10 +396,20 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 		attempt.Outcome = AttemptFailed
 		attempt.Reason = string(reason)
 		eval.Attempts = []Attempt{attempt}
+		if cleanResolvedModel != "" {
+			eval.ResolvedModel = cleanResolvedModel
+		}
+		eval.Notes = mergeNotes(eval.Notes, res.Notes)
+		if resolvedModelViolated {
+			eval.Notes = mergeNotes(eval.Notes, []string{provider.NoteModelUnreported})
+		}
 		return r.finishFailed(ctx, compiled.Kind, start, eval, reason)
 	}
-	eval.ResolvedModel = res.ResolvedModel
+	eval.ResolvedModel = cleanResolvedModel
 	eval.Notes = mergeNotes(eval.Notes, res.Notes)
+	if cleanResolvedModel == "" {
+		eval.Notes = mergeNotes(eval.Notes, []string{provider.NoteModelUnreported})
+	}
 
 	// Step 7: Validate decoded answers, compute portable metrics, apply argmax/abstain/tie,
 	// classify outcome, and project to consumer Kind (runtime-design §§5, 6, 8.1; AC-6).
@@ -432,7 +462,10 @@ func (r *Runtime) ListModels(ctx context.Context, inst Instance) ([]string, erro
 	if !ok {
 		return nil, provider.NewProviderError(provider.FailUnsupported, false, 0, 0, "adapter does not implement ModelLister")
 	}
-	caps, err := adapter.Capabilities(inst.View())
+	caps, err, capsPanicked := capabilitiesSafely(adapter, inst.View())
+	if capsPanicked {
+		return nil, provider.NewProviderError(provider.FailInternal, false, 0, 0, "adapter panic recovered")
+	}
 	if err != nil {
 		if pe, ok := provider.AsProviderError(err); ok {
 			return nil, pe
@@ -457,7 +490,10 @@ func (r *Runtime) ListModels(ctx context.Context, inst Instance) ([]string, erro
 	callCtx, cancel := context.WithDeadlineCause(ctx, ownDeadline, errRuntimeDeadline)
 	defer cancel()
 
-	models, err := lister.ListModels(callCtx, r.transportForInstance(inst), inst.View())
+	models, err, listPanicked := listModelsSafely(callCtx, lister, r.transportForInstance(inst), inst.View())
+	if listPanicked {
+		return nil, provider.NewProviderError(provider.FailInternal, false, 0, 0, "adapter panic recovered")
+	}
 	if err != nil {
 		reason, _ := classifyInvokeError(err, ctx.Err(), callCtx.Err(), context.Cause(callCtx))
 		httpStatus := 0
@@ -824,6 +860,38 @@ func invokeSafely(
 	return res, err, false
 }
 
+func capabilitiesSafely(
+	adapter provider.Adapter,
+	inst provider.InstanceView,
+) (caps provider.Capabilities, err error, panicked bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			panicked = true
+			caps = provider.Capabilities{}
+			err = nil
+		}
+	}()
+	caps, err = adapter.Capabilities(inst)
+	return caps, err, false
+}
+
+func listModelsSafely(
+	ctx context.Context,
+	lister provider.ModelLister,
+	transport provider.Transport,
+	inst provider.InstanceView,
+) (models []string, err error, panicked bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			panicked = true
+			models = nil
+			err = nil
+		}
+	}()
+	models, err = lister.ListModels(ctx, transport, inst)
+	return models, err, false
+}
+
 // classifyContextCause distinguishes runtime-owned deadline expiration
 // (FailTimeout) from caller context termination (FailCanceled) by inspecting
 // the context cause attached via context.WithDeadlineCause rather than
@@ -863,10 +931,13 @@ func classifyInvokeError(
 	// Redirects, blocked destinations, non-https schemes, and malformed/userinfo
 	// instance endpoint URLs are all instance-config / egress-policy refusals
 	// (FailEgressRefused); oversize responses (>1 MiB) are provider behavior
-	// (FailMalformedResponse); credential errors map to FailAuth.
+	// (FailMalformedResponse); missing/malformed tokens map to FailAuth while
+	// CredentialSource callback failures map to FailUnavailable.
 	switch {
 	case egress.IsResponseTooLarge(err):
 		return provider.FailMalformedResponse, statusClass
+	case egress.IsCredentialUnavailable(err):
+		return provider.FailUnavailable, statusClass
 	case egress.IsAuthError(err):
 		return provider.FailAuth, statusClass
 	case egress.IsRedirectBlocked(err),
@@ -953,10 +1024,27 @@ func clampDuration(d, ceiling time.Duration) time.Duration {
 	return d
 }
 
+// sanitizeProviderIdentifier validates a provider-reported identifier string
+// before copying it into content-free Evaluation, Attempt, AnswerRecord, or
+// debug logs: trimmed, non-empty, at most MaxProviderIdentifierBytes (128
+// bytes), and printable non-whitespace ASCII [\x21-\x7e].
+func sanitizeProviderIdentifier(raw string) (string, bool) {
+	s := strings.TrimSpace(raw)
+	if s == "" || len(s) > MaxProviderIdentifierBytes {
+		return "", false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x21 || s[i] > 0x7e {
+			return "", false
+		}
+	}
+	return s, true
+}
+
 func mergeNotes(existing []string, added []string) []string {
 	out := existing
 	for _, n := range added {
-		if n == "" || slices.Contains(out, n) {
+		if !provider.IsValidNote(n) || slices.Contains(out, n) {
 			continue
 		}
 		out = append(out, n)

@@ -81,11 +81,43 @@ const (
 	BinaryFalseKey = "false"
 
 	// Content-free provenance note constants (provider-design §6.1, §7.4; runtime-design §8.1).
-	NoteModelAliasReported      = "model_alias_reported"
-	NoteModelUnreported         = "model_unreported"
-	NoteClamped001To099         = "clamped_0.01_0.99"
-	NoteOptionsSortedByProvider = "options_sorted_by_provider"
+	NoteModelAliasReported         = "model_alias_reported"
+	NoteModelUnreported            = "model_unreported"
+	NoteClamped001To099            = "clamped_0.01_0.99"
+	NoteOptionsSortedByProvider    = "options_sorted_by_provider"
+	NoteConfidenceFormulaDeviation = "confidence_formula_deviation"
 )
+
+var closedNotes = []string{
+	NoteModelAliasReported,
+	NoteModelUnreported,
+	NoteClamped001To099,
+	NoteOptionsSortedByProvider,
+	NoteConfidenceFormulaDeviation,
+}
+
+// AllNotes returns a copy of the closed set of content-free provenance note
+// constants allowed on Evaluation and AnswerRecord (runtime-design §8.1).
+func AllNotes() []string {
+	out := make([]string, len(closedNotes))
+	copy(out, closedNotes)
+	return out
+}
+
+// IsValidNote reports whether note belongs to the closed set of content-free
+// provenance note constants (runtime-design §8.1).
+func IsValidNote(note string) bool {
+	switch note {
+	case NoteModelAliasReported,
+		NoteModelUnreported,
+		NoteClamped001To099,
+		NoteOptionsSortedByProvider,
+		NoteConfidenceFormulaDeviation:
+		return true
+	default:
+		return false
+	}
+}
 
 // AuthKind identifies the transport authentication mechanism declared by an
 // adapter in Capabilities.AuthScheme (runtime-design §4.3).
