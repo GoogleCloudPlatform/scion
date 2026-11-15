@@ -703,3 +703,70 @@ func TestDurableQueueConcurrentClaimDisjointSets(t *testing.T) {
 		assert.Len(t, seen, len(expected))
 	}
 }
+
+func TestDurableQueueTrimLockKey(t *testing.T) {
+	k1 := durableQueueTrimLockKey("trigger.event")
+	assert.Equal(t, k1, durableQueueTrimLockKey("trigger.event"))
+
+	k2 := durableQueueTrimLockKey("message.deliver")
+	k3 := durableQueueTrimLockKey("test.echo")
+	assert.NotEqual(t, k1, k2)
+	assert.NotEqual(t, k1, k3)
+	assert.NotEqual(t, k2, k3)
+
+	// Upper 32 bits carry the non-zero namespace prefix so per-kind trim locks
+	// never collide with store.AdvisoryLockKey singletons (upper 32 bits == 0).
+	for _, k := range []int64{k1, k2, k3} {
+		assert.Equal(t, durableQueueTrimLockPrefix, k>>32)
+	}
+}
+
+func TestDurableQueueConcurrentOverflowTrimExactExcess(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	for round := 0; round < 5; round++ {
+		kind := fmt.Sprintf("test.trim.%d", round)
+		for i := 0; i < 12; i++ {
+			_, err := cs.EnqueueDurableItem(ctx, nil, store.DurableQueueRow{
+				Kind:      kind,
+				DedupKey:  fmt.Sprintf("item-%02d", i),
+				ProjectID: "proj-a",
+				Payload:   []byte(`{}`),
+				CreatedAt: now,
+				NotBefore: now,
+			})
+			require.NoError(t, err)
+		}
+
+		start := make(chan struct{})
+		var (
+			t1, t2     store.DurableQueueTrim
+			err1, err2 error
+			wg         sync.WaitGroup
+		)
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			t1, err1 = cs.TrimDurableQueue(ctx, kind, now, 0, 7, 0)
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			t2, err2 = cs.TrimDurableQueue(ctx, kind, now, 0, 7, 0)
+		}()
+		close(start)
+		wg.Wait()
+
+		require.NoError(t, err1)
+		require.NoError(t, err2)
+		assert.Equal(t, 5, len(t1.Overflow)+len(t2.Overflow),
+			"round %d: concurrent overflow trims must drop exactly excess=5 rows, not 2*excess", round)
+
+		stats, err := cs.DurableQueueStats(ctx, kind, "", now)
+		require.NoError(t, err)
+		assert.Equal(t, int64(7), stats.Pending, "round %d: remaining rows must equal maxRows=7", round)
+	}
+}

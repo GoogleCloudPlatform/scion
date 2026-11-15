@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"slices"
 	"sort"
 	"time"
@@ -45,6 +46,29 @@ const durableQueueDeleteBatch = 500
 // a single TrimDurableQueue pass so maintenance stays bounded in memory and
 // lock scope even after an extended stall or lowered retention window.
 const durableQueueTrimPassLimit = 1000
+
+// durableQueueTrimLockPrefix namespaces per-kind durable queue trim advisory
+// locks in the upper 32 bits of Postgres's 64-bit pg_advisory_xact_lock(bigint)
+// keyspace, away from store.AdvisoryLockKey constants (whose upper 32 bits are
+// zero).
+const durableQueueTrimLockPrefix int64 = 0x5C10_2001
+
+func durableQueueTrimLockKey(kind string) int64 {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(kind))
+	return (durableQueueTrimLockPrefix << 32) | int64(h.Sum32())
+}
+
+func lockDurableQueueTrim(ctx context.Context, client *ent.Client, kind string) error {
+	if client.Driver().Dialect() != dialect.Postgres {
+		return nil
+	}
+	var res sql.Result
+	if err := client.Driver().Exec(ctx, "SELECT pg_advisory_xact_lock($1)", []any{durableQueueTrimLockKey(kind)}, &res); err != nil {
+		return fmt.Errorf("lock durable queue trim %q: %w", kind, err)
+	}
+	return nil
+}
 
 var durableQueueTrimSelectFields = []string{
 	durablequeueitem.FieldID,
@@ -386,7 +410,9 @@ func deleteDurableQueueRows(ctx context.Context, client *ent.Client, now time.Ti
 // DurableQueueTrim.More is set so the caller continues on the next pass.
 // Overflow trimming removes the oldest unleased items of the largest project
 // first (stage1-design §6.1 F5), never trimming a smaller project while a
-// larger project still has unleased items.
+// larger project still has unleased items. On PostgreSQL a transaction-scoped
+// per-kind advisory lock serializes concurrent trims so replicas never each
+// delete excess rows computed from the same unlocked COUNT.
 func (s *DurableQueueStore) TrimDurableQueue(ctx context.Context, kind string, now time.Time, maxAge time.Duration, maxRows, maxPermanent int) (store.DurableQueueTrim, error) {
 	if err := store.ValidateDurableQueueKind(kind); err != nil {
 		return store.DurableQueueTrim{}, err
@@ -396,6 +422,9 @@ func (s *DurableQueueStore) TrimDurableQueue(ctx context.Context, kind string, n
 
 	var trim store.DurableQueueTrim
 	err := runInEntTx(ctx, s.client, s.inTx, func(client *ent.Client) error {
+		if err := lockDurableQueueTrim(ctx, client, kind); err != nil {
+			return err
+		}
 		budget := passLimit
 
 		if maxAge > 0 && budget > 0 {
