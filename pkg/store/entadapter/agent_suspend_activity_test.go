@@ -173,4 +173,19 @@ func TestUpdateAgentStatus_ResumeAndClearActivity(t *testing.T) {
 	got4, err := s.GetAgent(ctx, a4.ID)
 	require.NoError(t, err)
 	assert.Empty(t, got4.Activity, "async start launch must clear retained activity from suspended prior")
+
+	// 5. Case-variant re-report of the same activity does not move ActivitySince.
+	a5 := makeAgent(projectID, "case-stable-since")
+	a5.Phase = string(state.PhaseRunning)
+	a5.Activity = "completed"
+	require.NoError(t, s.CreateAgent(ctx, a5))
+	initial5, err := s.GetAgent(ctx, a5.ID)
+	require.NoError(t, err)
+	require.NotNil(t, initial5.ActivitySince)
+	time.Sleep(15 * time.Millisecond)
+	require.NoError(t, s.UpdateAgentStatus(ctx, a5.ID, store.AgentStatusUpdate{Activity: "COMPLETED"}))
+	after5, err := s.GetAgent(ctx, a5.ID)
+	require.NoError(t, err)
+	require.NotNil(t, after5.ActivitySince)
+	assert.Equal(t, *initial5.ActivitySince, *after5.ActivitySince, "case-only re-report must keep ActivitySince stable")
 }
