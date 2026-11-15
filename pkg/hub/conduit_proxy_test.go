@@ -28,6 +28,8 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -243,20 +245,92 @@ func requireIPv6Loopback(t *testing.T) net.Listener {
 	return ln
 }
 
+// reserveRefusedLoopbackV4 binds an unconnected, non-listening TCP socket to
+// 127.0.0.1:port and returns a cleanup function that closes it. Holding the
+// bound socket keeps 127.0.0.1:port out of ephemeral and SO_REUSEADDR listener
+// binds, while omitting listen(2) ensures dials to 127.0.0.1:port still fail
+// with ECONNREFUSED.
+func reserveRefusedLoopbackV4(port int) (func() error, error) {
+	syscall.ForkLock.RLock()
+	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, syscall.IPPROTO_TCP)
+	if err == nil {
+		syscall.CloseOnExec(fd)
+	}
+	syscall.ForkLock.RUnlock()
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Bind(fd, &syscall.SockaddrInet4{Port: port, Addr: [4]byte{127, 0, 0, 1}}); err != nil {
+		_ = syscall.Close(fd)
+		return nil, err
+	}
+	return sync.OnceValue(func() error { return syscall.Close(fd) }), nil
+}
+
+// listenIPv6OnlyLoopback binds a dialable [::1] listener whose matching
+// 127.0.0.1 port is reserved without listening for the lifetime of t.
+func listenIPv6OnlyLoopback(t *testing.T) net.Listener {
+	t.Helper()
+	ln := requireIPv6Loopback(t)
+	var busy []net.Listener
+	defer func() {
+		for _, l := range busy {
+			_ = l.Close()
+		}
+	}()
+	for range 20 {
+		port := ln.Addr().(*net.TCPAddr).Port
+		releaseV4, err := reserveRefusedLoopbackV4(port)
+		if err == nil {
+			t.Cleanup(func() { _ = releaseV4() })
+			t.Cleanup(func() { _ = ln.Close() })
+			return ln
+		}
+		busy = append(busy, ln)
+		ln, err = net.Listen("tcp", "[::1]:0")
+		require.NoError(t, err)
+	}
+	_ = ln.Close()
+	t.Fatal("no port free on both [::1] and 127.0.0.1")
+	return nil
+}
+
+// TestListenIPv6OnlyLoopbackReservesV4AsRefused (ptone/scion#8077): while the
+// [::1] listener is open, no parallel test or fixture can bind 127.0.0.1 on the
+// same port, yet dialing 127.0.0.1:<port> still fails with ECONNREFUSED so the
+// conduit agent falls back to [::1].
+func TestListenIPv6OnlyLoopbackReservesV4AsRefused(t *testing.T) {
+	ln := listenIPv6OnlyLoopback(t)
+	port := ln.Addr().(*net.TCPAddr).Port
+	v4Addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+
+	stolen, err := net.Listen("tcp", v4Addr)
+	if err == nil {
+		_ = stolen.Close()
+	}
+	require.Error(t, err, "127.0.0.1:%d must remain reserved against listener binds", port)
+
+	dupRelease, err := reserveRefusedLoopbackV4(port)
+	if err == nil {
+		_ = dupRelease()
+	}
+	require.Error(t, err, "second reservation on 127.0.0.1:%d must fail", port)
+
+	c, err := net.DialTimeout("tcp", v4Addr, 2*time.Second)
+	if err == nil {
+		_ = c.Close()
+	}
+	require.ErrorIs(t, err, syscall.ECONNREFUSED, "127.0.0.1:%d must refuse dials", port)
+}
+
 // TestConduitProxyIPv6OnlyListener: a ::1 registration targets 127.0.0.1
 // inside the agent, and the agent's TCP target retries on [::1] when
 // 127.0.0.1 refuses, so a service listening only on ::1 answers over
 // conduit (ptone/scion#3489). Once nothing listens on either family the
 // proxy answers 502, for plain requests and WebSocket upgrades alike.
 func TestConduitProxyIPv6OnlyListener(t *testing.T) {
-	ln := requireIPv6Loopback(t)
-	t.Cleanup(func() { _ = ln.Close() })
+	ln := listenIPv6OnlyLoopback(t)
 	port := ln.Addr().(*net.TCPAddr).Port
-	if v4, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port))); err != nil {
-		t.Skipf("127.0.0.1:%d is in use: %v", port, err)
-	} else {
-		_ = v4.Close()
-	}
 	got := make(chan string, 4)
 	v6 := &http.Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
