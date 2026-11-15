@@ -240,3 +240,80 @@ func TestUncertainVsFailedErrorsAndBudgetTracker(t *testing.T) {
 		t.Fatalf("expected ErrBudgetExhausted, got %v", err)
 	}
 }
+
+func TestEvaluateTimeoutVsCallerCancellationAndTrackerRemainder(t *testing.T) {
+	limits := celengine.DefaultLimits()
+	limits.CostLimit = celengine.MaxCostLimitCeiling
+	limits.EvalTimeout = 20 * time.Millisecond
+	limits.InterruptFrequency = 1
+
+	env := celengine.Environment{
+		Name:    "timeout_test",
+		Version: 1,
+		Variables: []celengine.Variable{
+			{Name: "items", Type: celengine.List(celengine.String())},
+		},
+		Macros: celengine.MacrosStandard,
+	}
+	celEng, err := celengine.New(env, limits, celengine.DefaultCacheConfig())
+	if err != nil {
+		t.Fatalf("celengine.New: %v", err)
+	}
+	celDialect, err := ruleengine.NewCELDialect(celEng)
+	if err != nil {
+		t.Fatalf("NewCELDialect: %v", err)
+	}
+	eng := ruleengine.NewEngine()
+	if err := eng.Register(celDialect); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	compiled, err := eng.Compile(
+		context.Background(),
+		ruleengine.DialectCEL,
+		`items.all(a, items.all(b, items.all(c, a.size() + b.size() + c.size() >= 0)))`,
+		ruleengine.KindFilter,
+		ruleengine.EnvironmentRef{Consumer: "trigger", Name: "timeout_test"},
+	)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	listVal := make([]string, 150)
+	for i := range listVal {
+		listVal[i] = "elem"
+	}
+	input := ruleengine.Input{Activation: map[string]any{"items": listVal}}
+
+	// 1. Dialect/engine timeout surfaces as ReasonTimeout, not ReasonCanceled.
+	_, err = eng.Evaluate(context.Background(), compiled, input, ruleengine.Budget{})
+	var ferr *ruleengine.FailedError
+	if !errors.As(err, &ferr) || ferr.Reason != celengine.ReasonTimeout {
+		t.Fatalf("engine timeout: got %T (%v), want *FailedError{Reason: %q}", err, err, celengine.ReasonTimeout)
+	}
+
+	// 2. Remaining tracker budget tighter than dialect MaxEvalTime surfaces ErrBudgetExhausted.
+	remTracker := ruleengine.NewBudgetTracker(10 * time.Millisecond)
+	_, err = eng.Evaluate(context.Background(), compiled, input, ruleengine.Budget{Tracker: remTracker})
+	if !errors.Is(err, ruleengine.ErrBudgetExhausted) {
+		t.Fatalf("tracker remainder expiry: got %T (%v), want ErrBudgetExhausted", err, err)
+	}
+
+	// 3. Caller context expiring mid-eval surfaces ReasonCanceled.
+	callerCtx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+	_, err = eng.Evaluate(callerCtx, compiled, input, ruleengine.Budget{})
+	ferr = nil
+	if !errors.As(err, &ferr) || ferr.Reason != celengine.ReasonCanceled {
+		t.Fatalf("caller deadline mid-eval: got %T (%v), want *FailedError{Reason: %q}", err, err, celengine.ReasonCanceled)
+	}
+
+	// 4. Pre-canceled caller context surfaces ReasonCanceled even when tracker is exhausted.
+	preCanceled, preCancel := context.WithCancel(context.Background())
+	preCancel()
+	_, err = eng.Evaluate(preCanceled, compiled, input, ruleengine.Budget{Tracker: remTracker})
+	ferr = nil
+	if !errors.As(err, &ferr) || ferr.Reason != celengine.ReasonCanceled {
+		t.Fatalf("pre-canceled ctx: got %T (%v), want *FailedError{Reason: %q}", err, err, celengine.ReasonCanceled)
+	}
+}

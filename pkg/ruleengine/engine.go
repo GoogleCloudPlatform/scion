@@ -362,6 +362,11 @@ func (e *Engine) Invalidate(dialect, envName string, scope celengine.CacheScope)
 	}
 }
 
+var (
+	errDialectEvalTimeout = errors.New("ruleengine: dialect eval timeout exceeded")
+	errTrackerTimeout     = errors.New("ruleengine: aggregate budget tracker exhausted")
+)
+
 // Evaluate executes a compiled rule under the dialect's declared MaxEvalTime
 // and the caller's Budget. Non-nil errors always return a zero Decision.
 func (e *Engine) Evaluate(ctx context.Context, c Compiled, input Input, budget Budget) (Decision, error) {
@@ -370,6 +375,9 @@ func (e *Engine) Evaluate(ctx context.Context, c Compiled, input Input, budget B
 	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return Decision{}, &FailedError{Reason: celengine.ReasonCanceled, Cause: err}
 	}
 	if budget.Tracker != nil && budget.Tracker.Exhausted() {
 		return Decision{}, ErrBudgetExhausted
@@ -383,6 +391,7 @@ func (e *Engine) Evaluate(ctx context.Context, c Compiled, input Input, budget B
 	}
 
 	evalTimeout := d.Declares().MaxEvalTime
+	boundFromTracker := false
 	if budget.MaxEvalTime > 0 && (evalTimeout == 0 || budget.MaxEvalTime < evalTimeout) {
 		evalTimeout = budget.MaxEvalTime
 	}
@@ -393,24 +402,70 @@ func (e *Engine) Evaluate(ctx context.Context, c Compiled, input Input, budget B
 		}
 		if evalTimeout == 0 || rem < evalTimeout {
 			evalTimeout = rem
+			boundFromTracker = true
 		}
+	}
+
+	effBudget := budget
+	if evalTimeout > 0 {
+		effBudget.MaxEvalTime = evalTimeout
 	}
 
 	evalCtx := ctx
 	var cancel context.CancelFunc
 	if evalTimeout > 0 {
-		evalCtx, cancel = context.WithTimeout(ctx, evalTimeout)
+		cause := errDialectEvalTimeout
+		if boundFromTracker {
+			cause = errTrackerTimeout
+		}
+		evalCtx, cancel = context.WithTimeoutCause(ctx, evalTimeout, cause)
 		defer cancel()
 	}
 
 	start := time.Now()
-	dec, err := d.Evaluate(evalCtx, c, input, budget)
+	dec, err := d.Evaluate(evalCtx, c, input, effBudget)
 	elapsed := time.Since(start)
 	if budget.Tracker != nil {
 		budget.Tracker.Charge(elapsed)
 	}
 	if err != nil {
+		if callerErr := ctx.Err(); callerErr != nil {
+			return Decision{}, &FailedError{Reason: celengine.ReasonCanceled, Cause: callerErr}
+		}
+		if boundFromTracker && (isTimeoutFailure(err) || (errors.Is(context.Cause(evalCtx), errTrackerTimeout) && isTimeoutOrCancelFailure(err))) {
+			return Decision{}, ErrBudgetExhausted
+		}
+		if errors.Is(context.Cause(evalCtx), errDialectEvalTimeout) && isTimeoutOrCancelFailure(err) {
+			return Decision{}, &FailedError{
+				Reason: celengine.ReasonTimeout,
+				Cause:  &celengine.EvalError{Reason: celengine.ReasonTimeout},
+			}
+		}
 		return Decision{}, err
 	}
 	return dec, nil
+}
+
+func isTimeoutFailure(err error) bool {
+	var failedErr *FailedError
+	if errors.As(err, &failedErr) && failedErr.Reason == celengine.ReasonTimeout {
+		return true
+	}
+	var evalErr *celengine.EvalError
+	return errors.As(err, &evalErr) && evalErr.Reason == celengine.ReasonTimeout
+}
+
+func isTimeoutOrCancelFailure(err error) bool {
+	if isTimeoutFailure(err) {
+		return true
+	}
+	var failedErr *FailedError
+	if errors.As(err, &failedErr) && failedErr.Reason == celengine.ReasonCanceled {
+		return true
+	}
+	var evalErr *celengine.EvalError
+	if errors.As(err, &evalErr) && evalErr.Reason == celengine.ReasonCanceled {
+		return true
+	}
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
 }

@@ -366,6 +366,11 @@ func applyEvalOpts(opts []EvalOption) evalConfig {
 // Match evaluates rule for the trigger filter slot using the engine's program
 // cache. An empty rule.Expr returns (true, nil).
 func (r *Rules) Match(ctx context.Context, scope celengine.CacheScope, rule Rule, act Activation, opts ...EvalOption) (bool, error) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return false, &ruleengine.FailedError{Reason: celengine.ReasonCanceled, Cause: err}
+		}
+	}
 	cfg := applyEvalOpts(opts)
 	if cfg.tracker != nil && cfg.tracker.Exhausted() {
 		return false, ruleengine.ErrBudgetExhausted
@@ -402,6 +407,11 @@ func (r *Rules) Match(ctx context.Context, scope celengine.CacheScope, rule Rule
 // Subject evaluates rule for the trigger subject slot using the engine's
 // program cache.
 func (r *Rules) Subject(ctx context.Context, scope celengine.CacheScope, rule Rule, act Activation, opts ...EvalOption) (string, error) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return "", &ruleengine.FailedError{Reason: celengine.ReasonCanceled, Cause: err}
+		}
+	}
 	cfg := applyEvalOpts(opts)
 	if cfg.tracker != nil && cfg.tracker.Exhausted() {
 		return "", ruleengine.ErrBudgetExhausted
@@ -438,7 +448,7 @@ func (r *Rules) Subject(ctx context.Context, scope celengine.CacheScope, rule Ru
 // DeriveSubject evaluates rule when non-empty and validates the derived string
 // against Stage 1 bounds (non-empty, <= 256 bytes, printable UTF-8; §4.4, §6.3,
 // F6). On empty rule, evaluation error, or invalid derived output, it returns
-// fallback ( logging a content-free warning via logger when non-nil on failure).
+// fallback (logging a content-free warning via logger when non-nil on failure).
 func (r *Rules) DeriveSubject(
 	ctx context.Context,
 	scope celengine.CacheScope,
@@ -454,7 +464,10 @@ func (r *Rules) DeriveSubject(
 	derived, err := r.Subject(ctx, scope, rule, act, opts...)
 	if err != nil {
 		if logger != nil {
-			reason, _ := SkipReason(err)
+			reason, ok := SkipReason(err)
+			if !ok {
+				reason = celengine.ReasonCanceled
+			}
 			logger.Warn("trigger subject_rule failed; falling back to event subject",
 				"trigger_id", scope.ID,
 				"event_id", act.eventID,
@@ -504,11 +517,25 @@ func IsPrintableSubject(s string) bool {
 	return true
 }
 
-// SkipReason maps a non-nil Match/Subject error to the generic history reason
-// recorded on a skipped trigger_fires row (§6.3, §7.0a, §7.2). Returns ("", false)
-// when err is nil.
+// SkipReason maps a terminal Match/Subject rule error to the generic history
+// reason recorded on a skipped trigger_fires row (§6.3, §7.0a, §7.2). It returns
+// ("", false) when err is nil or when evaluation was aborted by caller context
+// cancellation or deadline (for example hub shutdown or lost lease), so callers
+// do not record transient infrastructure aborts as terminal rule skips.
 func SkipReason(err error) (string, bool) {
 	if err == nil {
+		return "", false
+	}
+	var failedErr *ruleengine.FailedError
+	if errors.As(err, &failedErr) && failedErr.Reason == celengine.ReasonCanceled {
+		return "", false
+	}
+	var evalErr *celengine.EvalError
+	if errors.As(err, &evalErr) && evalErr.Reason == celengine.ReasonCanceled {
+		return "", false
+	}
+	if !errors.As(err, &failedErr) && !errors.As(err, &evalErr) &&
+		(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
 		return "", false
 	}
 	if errors.Is(err, ruleengine.ErrBudgetExhausted) {
@@ -523,10 +550,8 @@ func SkipReason(err error) (string, bool) {
 	if errors.As(err, &uncertainErr) {
 		return SkipReasonRuleUncertain, true
 	}
-	var failedErr *ruleengine.FailedError
-	var evalErr *celengine.EvalError
 	if errors.As(err, &failedErr) || errors.As(err, &evalErr) {
 		return SkipReasonEvalFailed, true
 	}
-	return SkipReasonEvalFailed, true
+	return "", false
 }

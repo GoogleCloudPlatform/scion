@@ -547,3 +547,93 @@ func TestMatchAndSubjectShareCacheScopeWithoutEviction(t *testing.T) {
 		t.Fatalf("Entries after Invalidate = %d, want 0", got)
 	}
 }
+
+func TestMatchTimeoutAndCallerCancellationSkipReason(t *testing.T) {
+	limits := triggerrule.Stage1Limits()
+	limits.CostLimit = celengine.MaxCostLimitCeiling
+	limits.EvalTimeout = 20 * time.Millisecond
+	limits.InterruptFrequency = 1
+
+	celEng, err := celengine.New(triggerrule.Env(), limits, celengine.DefaultCacheConfig())
+	if err != nil {
+		t.Fatalf("celengine.New: %v", err)
+	}
+	celDialect, err := ruleengine.NewCELDialect(celEng)
+	if err != nil {
+		t.Fatalf("NewCELDialect: %v", err)
+	}
+	re := ruleengine.NewEngine()
+	if err := re.Register(celDialect); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	re.AllowConsumerDialects(triggerrule.ConsumerName, ruleengine.DialectCEL)
+	rules, err := triggerrule.New(re)
+	if err != nil {
+		t.Fatalf("triggerrule.New: %v", err)
+	}
+
+	var buf bytes.Buffer
+	buf.WriteString(`{"items":[`)
+	for i := 0; i < 150; i++ {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		buf.WriteString(`"elem"`)
+	}
+	buf.WriteString(`]}`)
+
+	ev := sampleFireEvent(buf.String())
+	tr := hubfire.FireTriggerRef{ID: "trig-timeout", Name: "timeout"}
+	act, err := triggerrule.NewActivation(ev, tr)
+	if err != nil {
+		t.Fatalf("NewActivation: %v", err)
+	}
+	scope := celengine.CacheScope{Consumer: triggerrule.ConsumerName, ID: tr.ID, Revision: 1}
+	slowRule := triggerrule.Rule{
+		Expr: `event.payload.items.all(a, event.payload.items.all(b, event.payload.items.all(c, string(a).size() + string(b).size() + string(c).size() >= 0)))`,
+	}
+
+	// 1. Pathological expression hits engine timeout -> ReasonTimeout and terminal skip reason.
+	_, err = rules.Match(context.Background(), scope, slowRule, act)
+	var ferr *ruleengine.FailedError
+	if !errors.As(err, &ferr) || ferr.Reason != celengine.ReasonTimeout {
+		t.Fatalf("Match pathological expr: got %T (%v), want *FailedError{Reason: %q}", err, err, celengine.ReasonTimeout)
+	}
+	if reason, ok := triggerrule.SkipReason(err); !ok || reason != triggerrule.SkipReasonEvalFailed {
+		t.Fatalf("SkipReason(timeout) = (%q, %v), want (%q, true)", reason, ok, triggerrule.SkipReasonEvalFailed)
+	}
+
+	// 2. Pre-canceled context is NOT a terminal skip reason (both cached and uncached).
+	preCanceled, preCancel := context.WithCancel(context.Background())
+	preCancel()
+	_, err = rules.Match(preCanceled, scope, slowRule, act)
+	if err == nil {
+		t.Fatalf("expected error on pre-canceled context")
+	}
+	if reason, ok := triggerrule.SkipReason(err); ok {
+		t.Fatalf("SkipReason(pre-canceled) = (%q, true), want (\"\", false)", reason)
+	}
+
+	// 3. Caller context expiring mid-evaluation is NOT a terminal skip reason.
+	shortCtx, shortCancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer shortCancel()
+	_, err = rules.Match(shortCtx, scope, slowRule, act)
+	ferr = nil
+	if !errors.As(err, &ferr) || ferr.Reason != celengine.ReasonCanceled {
+		t.Fatalf("Match caller deadline: got %T (%v), want *FailedError{Reason: %q}", err, err, celengine.ReasonCanceled)
+	}
+	if reason, ok := triggerrule.SkipReason(err); ok {
+		t.Fatalf("SkipReason(caller deadline) = (%q, true), want (\"\", false)", reason)
+	}
+
+	// 4. Per-event budget remainder expiring mid-eval maps to SkipReasonBudgetExhausted.
+	budget := triggerrule.NewEventBudget()
+	budget.Charge(triggerrule.EventRuleBudget - 8*time.Millisecond)
+	_, err = rules.Match(context.Background(), scope, slowRule, act, triggerrule.WithBudget(budget))
+	if !errors.Is(err, ruleengine.ErrBudgetExhausted) {
+		t.Fatalf("Match budget remainder expiry: got %T (%v), want ErrBudgetExhausted", err, err)
+	}
+	if reason, ok := triggerrule.SkipReason(err); !ok || reason != triggerrule.SkipReasonBudgetExhausted {
+		t.Fatalf("SkipReason(budget remainder) = (%q, %v), want (%q, true)", reason, ok, triggerrule.SkipReasonBudgetExhausted)
+	}
+}
