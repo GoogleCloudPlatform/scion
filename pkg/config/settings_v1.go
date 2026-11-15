@@ -1866,6 +1866,17 @@ type V1ServerHubConfig struct {
 	// Observability holds the hub's own metrics and trace export switches
 	// (server.hub.observability). Read at startup; changes need a restart.
 	Observability *V1ServerHubObservabilityConfig `json:"observability,omitempty" yaml:"observability,omitempty" koanf:"observability"`
+	// SystemOne holds Hub-wide System One rule evaluation settings
+	// (server.hub.system_one).
+	SystemOne *V1ServerHubSystemOneConfig `json:"system_one,omitempty" yaml:"system_one,omitempty" koanf:"system_one"`
+}
+
+// V1ServerHubSystemOneConfig holds Hub-wide System One rule evaluation
+// settings (server.hub.system_one).
+type V1ServerHubSystemOneConfig struct {
+	// MaxEvalTime bounds wall-clock evaluation of System One rules on a
+	// single message (e.g. "3s"; default "3s", hard max "30s").
+	MaxEvalTime string `json:"max_eval_time,omitempty" yaml:"max_eval_time,omitempty" koanf:"max_eval_time"`
 }
 
 // V1ServerHubObservabilityConfig holds the switches for the hub's own
@@ -4662,6 +4673,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				TracingEnabled: copyBoolPtr(o.TracingEnabled),
 			}
 		}
+		if so := v1.Hub.SystemOne; so != nil {
+			gc.Hub.SystemOne = HubSystemOneConfig{MaxEvalTime: so.MaxEvalTime}
+		}
 	}
 
 	if r := v1.Relay; r != nil {
@@ -5087,6 +5101,9 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			MetricsEnabled: copyBoolPtr(o.MetricsEnabled),
 			TracingEnabled: copyBoolPtr(o.TracingEnabled),
 		}
+	}
+	if so := gc.Hub.SystemOne; !so.IsZero() {
+		v1Hub.SystemOne = &V1ServerHubSystemOneConfig{MaxEvalTime: so.MaxEvalTime}
 	}
 	if gc.Hub.StartClaimLeaseTTL > 0 {
 		v1Hub.StartClaimLeaseTTL = gc.Hub.StartClaimLeaseTTL.String()

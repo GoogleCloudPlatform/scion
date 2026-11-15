@@ -250,6 +250,10 @@ type HubServerConfig struct {
 	// Observability holds the hub's own metrics and trace export switches
 	// (server.hub.observability). Read at startup; changes need a restart.
 	Observability HubObservabilityConfig `json:"observability" yaml:"observability" koanf:"observability"`
+
+	// SystemOne holds Hub-wide System One rule evaluation settings
+	// (server.hub.system_one).
+	SystemOne HubSystemOneConfig `json:"systemOne" yaml:"systemOne" koanf:"systemOne"`
 }
 
 // DefaultHubID generates a deterministic hub instance ID from the machine hostname.
