@@ -691,6 +691,12 @@ func (s *Server) publishChoiceUpdated(ctx context.Context, prompt *store.Message
 // stored project_id, message_id, and chat_key so SSE updates continue to work
 // after chat retention purges the prompt message.
 func (s *Server) publishChoiceUpdatedAt(ctx context.Context, projectID, messageID, threadID string, view DecisionView) {
+	namedUserID := ""
+	if view.Decision != nil {
+		namedUserID = view.Decision.AnsweredByUserID
+	}
+	defer s.enqueueDecisionBellEvent(projectID, threadID, namedUserID)
+
 	evt := map[string]interface{}{"decision": view, "messageId": messageID, "threadId": threadID}
 	if strings.HasPrefix(threadID, "dm:") {
 		parts := strings.Split(threadID, ":")

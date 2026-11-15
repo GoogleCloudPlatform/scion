@@ -2704,7 +2704,9 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 
 	// Project decisions page & answer log (ptone/scion#7799).
 	if subPath == "decisions" {
-		s.handleProjectDecisions(w, r, projectID)
+		s.withDecisionsBellReconcile(func(w http.ResponseWriter, r *http.Request) {
+			s.handleProjectDecisions(w, r, projectID)
+		})(w, r)
 		return
 	}
 	if strings.HasPrefix(subPath, "decisions/") {

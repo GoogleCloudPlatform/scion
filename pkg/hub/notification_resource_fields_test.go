@@ -65,8 +65,9 @@ func receiveRaw(t *testing.T, ch <-chan Event) map[string]json.RawMessage {
 }
 
 // resourceEventKeys are the user-event-only keys: kind and resource fields
-// (ptone/scion#5145) and the excerpt (ptone/scion#6853).
-var resourceEventKeys = []string{"kind", "resourceType", "resourceId", "excerpt"}
+// (ptone/scion#5145), the excerpt (ptone/scion#6853), and acknowledged state
+// for in-place notices (ptone/scion#7997).
+var resourceEventKeys = []string{"kind", "resourceType", "resourceId", "excerpt", "acknowledged"}
 
 // TestNotificationCreatedEvent_HasNoResourceFields pins the struct: the
 // broadcast payload type, which UserNotificationEvent embeds, declares no
@@ -175,4 +176,34 @@ func TestNotificationEvents_ExistingPayloadsUnchanged(t *testing.T) {
 			t.Fatalf("timeout waiting for %s event", c.name)
 		}
 	}
+}
+
+func TestNotificationEvents_AcknowledgedOnUserSubjectWhenTrue(t *testing.T) {
+	pub := NewChannelEventPublisher()
+	defer pub.Close()
+
+	user, unsubU := pub.Subscribe("user.u1.notification")
+	defer unsubU()
+
+	n := &store.Notification{
+		ID:             "n-dec",
+		SubscriptionID: store.CreatorFallbackSubscriptionID,
+		AgentID:        "00000000-0000-0000-0000-000000000000",
+		ProjectID:      "00000000-0000-0000-0000-000000000000",
+		SubscriberType: store.SubscriberTypeUser,
+		SubscriberID:   "u1",
+		Status:         store.NotificationStatusDecisionsWaiting,
+		Message:        "No decisions are waiting on you",
+		Acknowledged:   true,
+		CreatedAt:      time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC),
+		Kind:           store.NotificationKindDecisionsWaiting,
+		ResourceType:   store.NotificationResourceDecisions,
+		ResourceID:     "0",
+	}
+	pub.PublishUserNotification(context.Background(), n)
+
+	keys := receiveRaw(t, user)
+	assert.Equal(t, json.RawMessage("true"), keys["acknowledged"])
+	assert.Equal(t, json.RawMessage(`"decisions_waiting"`), keys["kind"])
+	assert.Equal(t, json.RawMessage(`"0"`), keys["resourceId"])
 }

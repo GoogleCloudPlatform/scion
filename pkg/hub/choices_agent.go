@@ -697,6 +697,8 @@ func (s *Server) handleAgentDecisionInterpreted(w http.ResponseWriter, r *http.R
 	for i, v := range views {
 		if prompt := promptsByID[updatedRows[i].MessageID]; prompt != nil {
 			s.publishChoiceUpdated(ctx, prompt, v)
+		} else {
+			s.publishChoiceUpdatedAt(ctx, updatedRows[i].ProjectID, updatedRows[i].MessageID, updatedRows[i].ChatKey, v)
 		}
 	}
 

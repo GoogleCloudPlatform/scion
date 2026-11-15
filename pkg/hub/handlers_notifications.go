@@ -371,6 +371,14 @@ func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, scopeNotificationsForToken(rows, caller.scopeNotifications(notifs)))
+		if !caller.isAgent() && !s.decisionsBellEnabled() {
+			for i := range notifs {
+				if notifs[i].Kind == store.NotificationKindDecisionsWaiting && !notifs[i].Acknowledged {
+					s.reconcileDecisionBellAsync(caller.ID)
+					break
+				}
+			}
+		}
 		return
 	}
 
