@@ -6,6 +6,8 @@ Copyright 2025 The Scion Authors.
 package dialects
 
 import (
+	"strings"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 )
 
@@ -79,6 +81,12 @@ func (d *ClaudeDialect) Parse(data map[string]interface{}) (*hooks.Event, error)
 			event.Data.Error = str
 		}
 	}
+	// A StopFailure is a turn that ended on an API error. Its error field
+	// is a bare category ("unknown", "authentication_failed", ...); the
+	// provider's message is in last_assistant_message.
+	if rawName == "StopFailure" {
+		event.Data.Error = claudeStopFailureError(data)
+	}
 	// A PostToolUseFailure is a failed tool call even when its error string
 	// is empty. is_interrupt marks a call the user interrupted.
 	if rawName == "PostToolUseFailure" {
@@ -115,6 +123,10 @@ func (d *ClaudeDialect) normalizeEventName(name string) string {
 		return hooks.EventToolEnd
 	case "Stop":
 		return hooks.EventAgentEnd
+	case "StopFailure":
+		// Claude Code fires StopFailure instead of Stop when the turn ends
+		// on an API error (captured from 2.1.325, testdata/claude).
+		return hooks.EventAgentError
 	case "SubagentStop":
 		return hooks.EventSubagentEnd
 	case "Notification":
@@ -126,4 +138,27 @@ func (d *ClaudeDialect) normalizeEventName(name string) string {
 	default:
 		return name
 	}
+}
+
+// claudeStopFailureCodeUnknown is the StopFailure error category Claude Code
+// sends when it has no more specific one (for example an HTTP 400).
+const claudeStopFailureCodeUnknown = "unknown"
+
+// claudeStopFailureError returns the turn error of a StopFailure payload:
+// "<category>: <message>", with the category left out when it is "unknown"
+// or missing, and the message (last_assistant_message, which carries the
+// provider's text, such as "API Error: 400 ...") left out when missing.
+func claudeStopFailureError(data map[string]interface{}) string {
+	code := strings.TrimSpace(getString(data, "error"))
+	message := strings.TrimSpace(getString(data, "last_assistant_message"))
+	if code == claudeStopFailureCodeUnknown {
+		code = ""
+	}
+	switch {
+	case code == "":
+		return message
+	case message == "":
+		return code
+	}
+	return code + ": " + message
 }

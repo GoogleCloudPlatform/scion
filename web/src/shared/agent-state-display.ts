@@ -113,6 +113,16 @@ export const ACTIVITY_DISPLAY: Record<AgentActivity, StateDisplay> = {
     pulse: false,
     label: 'limits exceeded',
   },
+  // The harness is alive at its prompt but its last turn failed on a
+  // model/API error; detail.message has the reason. A new message retries
+  // (ptone/scion#7858).
+  harness_error: {
+    emoji: '⚠️',
+    icon: 'exclamation-triangle',
+    variant: 'danger',
+    pulse: false,
+    label: 'harness error',
+  },
   stalled: { emoji: '⏳', icon: 'hourglass-bottom', variant: 'warning', pulse: false },
   offline: { emoji: '📡', icon: 'wifi-off', variant: 'neutral', pulse: false },
 };
@@ -161,6 +171,20 @@ export function isProvisionedOnly(agent: Pick<Agent, 'phase' | 'provisionedOnly'
   return agent.provisionedOnly === true && agent.phase === 'created';
 }
 
+/**
+ * The badge tooltip for a harness_error status: the reason the harness
+ * reported (detail.message), or undefined for any other status.
+ */
+export function harnessErrorHint(
+  agent: Pick<Agent, 'detail' | 'message'>,
+  status: string
+): string | undefined {
+  if (status !== 'harness_error') {
+    return undefined;
+  }
+  return agent.detail?.message || agent.message || undefined;
+}
+
 interface AgentStatusBadgeOptions {
   /** Badge status; defaults to getAgentDisplayStatus(agent). */
   status?: string;
@@ -180,7 +204,9 @@ export function agentStatusBadge(
   { status = getAgentDisplayStatus(agent), label, size, testId }: AgentStatusBadgeOptions = {}
 ): TemplateResult {
   const po = isProvisionedOnly(agent);
-  const hint = po ? `Not started yet. Use Start, or run: scion start ${agent.name}` : undefined;
+  const hint = po
+    ? `Not started yet. Use Start, or run: scion start ${agent.name}`
+    : harnessErrorHint(agent, status);
   return html`<scion-status-badge
     status=${status}
     label=${po ? PROVISIONED_ONLY_LABEL : (label ?? stateLabel(status))}

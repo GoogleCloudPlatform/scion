@@ -40,6 +40,9 @@ import type {
 } from '../shared/types.js';
 
 /** Activities that should not be overwritten by working/empty transitions */
+// harness_error is not in this set: the Hub already keeps it against
+// end-of-turn working, so a working delta for it is the Hub's real clear
+// (for example OpenCode's follow-up model step) and must apply.
 const STICKY_ACTIVITIES = new Set(['waiting_for_input', 'completed', 'limits_exceeded']);
 
 /**

@@ -514,10 +514,22 @@ func TestFormatNotificationMessage(t *testing.T) {
 			expected: "bot has STALLED (was thinking)",
 		},
 		{
-			name:     "STALLED with prior activity and message",
-			agent:    &store.Agent{Slug: "bot", StalledFromActivity: "executing", Message: "Stuck on build"},
+			name:     "STALLED does not append the stale pre-stall message",
+			agent:    &store.Agent{Slug: "bot", StalledFromActivity: "working", Message: "Ready"},
 			status:   "STALLED",
-			expected: "bot has STALLED (was executing): Stuck on build",
+			expected: "bot has STALLED (was working)",
+		},
+		{
+			name:     "HARNESS_ERROR without message",
+			agent:    &store.Agent{Slug: "bot"},
+			status:   "HARNESS_ERROR",
+			expected: "bot has a HARNESS_ERROR (harness alive; a new message retries)",
+		},
+		{
+			name:     "HARNESS_ERROR from the activity value",
+			agent:    &store.Agent{Slug: "bot", Message: "model API: APIError (status 400)"},
+			status:   "harness_error",
+			expected: "bot has a HARNESS_ERROR (harness alive; a new message retries): model API: APIError (status 400)",
 		},
 		{
 			name:     "Unknown status",
@@ -539,6 +551,38 @@ func TestFormatNotificationMessage(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+func TestFormatNotificationMessage_StalledAge(t *testing.T) {
+	agent := &store.Agent{
+		Slug:                "bot",
+		StalledFromActivity: "executing",
+		Message:             "Harness started",
+		LastActivityEvent:   time.Now().Add(-6*time.Minute - 10*time.Second),
+	}
+	assert.Equal(t, "bot has STALLED (was executing): no activity for 6m", formatNotificationMessage(agent, "STALLED"))
+}
+
+func TestFormatStallAge(t *testing.T) {
+	for d, want := range map[time.Duration]string{
+		-time.Second:                   "0s",
+		42 * time.Second:               "42s",
+		5*time.Minute + 59*time.Second: "5m",
+		time.Hour:                      "1h",
+		time.Hour + 5*time.Minute + 30*time.Second: "1h5m",
+	} {
+		assert.Equal(t, want, formatStallAge(d), d.String())
+	}
+}
+
+// TestNewNotifySubscription_DefaultTriggersIncludeHarnessError pins the
+// triggers an agent created with notify on gets: HARNESS_ERROR is a
+// separate trigger from ERROR, which stays phase-only.
+func TestNewNotifySubscription_DefaultTriggersIncludeHarnessError(t *testing.T) {
+	sub := newNotifySubscription("p1", store.SubscriberTypeAgent, "parent", "test")
+	require.NotNil(t, sub)
+	assert.Equal(t, []string{"COMPLETED", "IDLE", "WAITING_FOR_INPUT", "LIMITS_EXCEEDED", "STALLED", "ERROR", "HARNESS_ERROR", "HALTED"}, sub.TriggerActivities)
+	assert.True(t, sub.MatchesActivity("harness_error"))
 }
 
 func TestNotificationDispatcher_MultipleSubscribers(t *testing.T) {
@@ -764,6 +808,63 @@ func TestNotificationDispatcher_ErrorPhase(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, notifs, 1)
 	assert.Equal(t, "ERROR", notifs[0].Status)
+}
+
+// TestNotificationDispatcher_HarnessError checks that a harness_error
+// activity notifies HARNESS_ERROR subscribers with the reason, and that an
+// ERROR-only subscription (phase error) does not fire for it.
+func TestNotificationDispatcher_HarnessError(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		triggers []string
+		want     int
+	}{
+		{"default triggers fire", newNotifySubscription("", "", "x", "").TriggerActivities, 1},
+		{"ERROR subscriptions stay phase-only", []string{"COMPLETED", "ERROR"}, 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			env := setupNotificationTest(t)
+			ctx := context.Background()
+			require.NoError(t, env.store.DeleteNotificationSubscription(ctx, env.sub.ID))
+			require.NoError(t, env.store.CreateNotificationSubscription(ctx, &store.NotificationSubscription{
+				ID:                api.NewUUID(),
+				AgentID:           env.watched.ID,
+				SubscriberType:    store.SubscriberTypeAgent,
+				SubscriberID:      env.subscriber.Slug,
+				ProjectID:         env.project.ID,
+				TriggerActivities: tt.triggers,
+				CreatedAt:         time.Now().Add(-time.Minute),
+				CreatedBy:         "test",
+			}))
+			env.watched.Message = "model API: APIError (status 400)"
+			require.NoError(t, env.store.UpdateAgent(ctx, env.watched))
+
+			env.nd.Start()
+			defer env.nd.Stop()
+			env.publishStatus(string(state.ActivityHarnessError))
+
+			if tt.want == 0 {
+				// Publish a matching event after it, so the dispatcher has
+				// demonstrably processed the harness_error event first.
+				env.publishStatus("completed")
+				require.Eventually(t, func() bool {
+					return len(env.dispatcher.getCalls()) == 1
+				}, 2*time.Second, 50*time.Millisecond)
+				assert.Contains(t, env.dispatcher.getCalls()[0].Message, "COMPLETED")
+				return
+			}
+			require.Eventually(t, func() bool {
+				return len(env.dispatcher.getCalls()) == 1
+			}, 2*time.Second, 50*time.Millisecond)
+			assert.Equal(t,
+				"watched-agent has a HARNESS_ERROR (harness alive; a new message retries): model API: APIError (status 400)",
+				env.dispatcher.getCalls()[0].Message)
+			notifs, err := env.store.GetNotifications(ctx, store.SubscriberTypeAgent, env.subscriber.Slug, false)
+			require.NoError(t, err)
+			require.Len(t, notifs, 1)
+			assert.Equal(t, "HARNESS_ERROR", notifs[0].Status)
+		})
+	}
 }
 
 func TestNotificationDispatcher_BrokerUsedForUserNotification(t *testing.T) {

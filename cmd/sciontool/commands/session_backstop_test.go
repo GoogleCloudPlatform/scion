@@ -82,7 +82,7 @@ var lateSessionEnd = map[string]interface{}{"hook_event_name": "SessionEnd", "se
 
 // stopOutcome is the exit outcome of an agent stopped with SIGTERM, whose
 // harness was killed by the signal.
-func stopOutcome() exitOutcome { return classifyExit(-1, nil, nil, false, true) }
+func stopOutcome() exitOutcome { return classifyExit(-1, nil, nil, false, true, "") }
 
 // The stop path: the harness is killed, so SessionEnd never runs. The init
 // backstop reports the session once, with its ID and counts. A second check
@@ -133,7 +133,7 @@ func TestReportOpenSessionAtShutdown_CrashStatus(t *testing.T) {
 	home, fake, newClient := backstopEnv(t)
 	runHooks(t, openSessionEvents...)
 	code := 2
-	reportOpenSessionAtShutdown(home, classifyExit(0, nil, &code, false, false), newClient)
+	reportOpenSessionAtShutdown(home, classifyExit(0, nil, &code, false, false, ""), newClient)
 	reports := fake.Reports()
 	if len(reports) != 1 || reports[0].Session.Status != "error" {
 		t.Errorf("reports = %+v, want one with status error", reports)

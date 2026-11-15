@@ -69,12 +69,6 @@ func parentNotificationDialects() []parentNotificationDialect {
 		{"codex mapping", func(t *testing.T) *hooks.Event {
 			return codexParentEvent(t, "notification")
 		}},
-		{"copilot", func(t *testing.T) *hooks.Event {
-			return parentNotificationParse(t, parentNotificationMapping(t, "copilot"), map[string]interface{}{
-				"hook_event_name": "errorOccurred", "sessionId": "copilot-synthetic-session",
-				"error": map[string]interface{}{"message": "synthetic error"},
-			})
-		}},
 		{"grok-build", func(t *testing.T) *hooks.Event {
 			return parentNotificationParse(t, parentNotificationMapping(t, "grok-build"), map[string]interface{}{
 				"hookEventName": "Notification", "message": "permission",

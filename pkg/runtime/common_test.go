@@ -459,7 +459,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 				"-e FOO=BAR",
 				"tmux new-session -d -s scion -n agent sh -c ",
 				`'\''hello'\''`,
-				"; echo $? > /tmp/scion-harness-exit-code",
+				"; scion_hrc=$?; (umask 077; tmux capture-pane -p -J -S -40 -t \"$TMUX_PANE\" > /tmp/scion-harness-tail) 2>/dev/null; echo $scion_hrc > /tmp/scion-harness-exit-code",
 			},
 		},
 		{
@@ -474,7 +474,7 @@ func TestBuildCommonRunArgs(t *testing.T) {
 			wantIn: []string{
 				"tmux new-session -d -s scion -n agent sh -c ",
 				`'\''hello'\''`,
-				"; echo $? > /tmp/scion-harness-exit-code",
+				"; scion_hrc=$?; (umask 077; tmux capture-pane -p -J -S -40 -t \"$TMUX_PANE\" > /tmp/scion-harness-tail) 2>/dev/null; echo $scion_hrc > /tmp/scion-harness-exit-code",
 			},
 		},
 		{

@@ -221,7 +221,25 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 			Message:  message,
 		})
 
-	case hooks.EventToolEnd, hooks.EventAgentEnd, hooks.EventModelEnd:
+	case hooks.EventToolEnd, hooks.EventAgentEnd, hooks.EventModelEnd, hooks.EventAgentError:
+		// The parent's turn ended on a harness-reported error. The
+		// StatusHandler has recorded harness_error locally unless it kept
+		// completed, limits_exceeded or crashed; the Hub follows it.
+		if isTurnEndError(event) {
+			if readLocalActivity() != string(state.ActivityHarnessError) {
+				log.Debug("Hub: Skipping harness_error (local status held)")
+				return nil
+			}
+			reason := harnessErrorReason(event)
+			log.Debug("Hub: Reporting harness_error")
+			err = h.client.UpdateStatus(ctx, HarnessErrorStatusUpdate(reason))
+			break
+		}
+		// A sub-agent's failed turn is not the parent's and changes
+		// nothing the Hub shows.
+		if event.Name == hooks.EventAgentError {
+			return nil
+		}
 		// Check if local activity is sticky before sending working. The
 		// StatusHandler runs first in the same hook process, so a
 		// waiting_for_input that a Notification set has already been

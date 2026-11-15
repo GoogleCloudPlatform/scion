@@ -67,6 +67,14 @@ type EventData struct {
 	// failure of the tool.
 	Interrupted bool `json:"interrupted,omitempty"`
 
+	// Uncounted is true when the event reports a model call that call
+	// accounting must not count: max_model_calls, the gen_ai.api.calls
+	// metric, usage records and session model-call counts. A harness sets
+	// it (dialect mapping "uncounted") for an event it sends for only some
+	// of its calls, such as copilot's errorOccurred for a failed call, when
+	// it reports no successful ones. Status handling is unchanged.
+	Uncounted bool `json:"uncounted,omitempty"`
+
 	// Raw contains the original unparsed data
 	Raw map[string]interface{} `json:"raw,omitempty"`
 }
@@ -81,6 +89,16 @@ const (
 	EventAgentStart  = "agent-start"
 	EventAgentEnd    = "agent-end"
 	EventSubagentEnd = "subagent-end"
+
+	// EventAgentError is a turn that ended on an error, from a harness
+	// that reports a failed turn on a dedicated hook (claude and
+	// grok-build StopFailure) instead of agent-end with an error. Data.Error
+	// carries the reason.
+	EventAgentError = "agent-error"
+
+	// EventIgnored is a harness event that its dialect matched but
+	// discards (dialect mapping "skip_when"). No handler acts on it.
+	EventIgnored = "ignored"
 
 	// Tool execution events
 	EventToolStart = "tool-start"

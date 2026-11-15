@@ -238,12 +238,31 @@ func resumeFallbackCmdLine(resumeArgs, freshArgs []string) string {
 // recorded to state.HarnessExitCodeFile once it exits. The harness runs as
 // a tmux grandchild, so its exit code is otherwise invisible to the
 // `sciontool init` supervisor (which only sees the sh/container exit
-// code); reading the file lets init report crashes correctly. The whole
+// code); reading the file lets init report crashes correctly. Before that
+// file is written, the last 40 lines of the agent pane are saved to
+// state.HarnessTailFile, so a crash reason can carry the harness's last
+// output; the pane still exists while the wrapper shell runs, so the
+// capture precedes the pane-exited hook that ends the session. The whole
 // wrapper is single-quoted again so tmux's command parser treats it as one
 // word. shellPath is the shell binary to invoke ("sh" or "/bin/sh",
 // depending on what the runtime guarantees is resolvable for argv[0]).
 func tmuxAgentWindowCmd(shellPath, cmdLine string) string {
-	return shellPath + " -c " + shellQuote(cmdLine+"; echo $? > "+state.HarnessExitCodeFile)
+	return shellPath + " -c " + shellQuote(harnessWrapperLine(cmdLine, state.HarnessTailFile, state.HarnessExitCodeFile))
+}
+
+// harnessWrapperLine is the shell line tmuxAgentWindowCmd runs: cmdLine,
+// then the pane tail saved to tailFile, then cmdLine's exit status written
+// to exitCodeFile. The status is kept in scion_hrc right after cmdLine, so
+// a failing or missing tmux never changes the recorded code, and the
+// capture runs in a subshell with umask 077 and its errors discarded, so
+// the pane text (which may hold anything the harness printed) is readable
+// only by the agent user and root. The paths are written unquoted, so they
+// must be plain words (the fixed /tmp paths are); they are parameters only
+// so a test can run the line against temporary files.
+func harnessWrapperLine(cmdLine, tailFile, exitCodeFile string) string {
+	return cmdLine + "; scion_hrc=$?; " +
+		`(umask 077; tmux capture-pane -p -J -S -40 -t "$TMUX_PANE" > ` + tailFile + ") 2>/dev/null; " +
+		"echo $scion_hrc > " + exitCodeFile
 }
 
 // QuotedTaskBytes is the number of bytes task adds to the tmux command

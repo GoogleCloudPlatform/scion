@@ -23,7 +23,7 @@ scion.gcs_volumes=W3sic291cmNlIjoiIiwidGFyZ2V0IjoiL2djcy1hIiwiYnVja2V0IjoiYnVja2
 --label
 scion.bind_sources=W3sic291cmNlIjoiL2hvc3QvZGF0YSIsImRlc3RpbmF0aW9uIjoiL2RhdGEifV0=
 -e
-SCION_START_CMD=tmux new-session -d -s scion -n agent sh -c ''\''hello'\''; echo $? > /tmp/scion-harness-exit-code' \; set-option -g window-size latest \; new-window -t scion -n shell \; select-window -t scion:agent \; attach-session -t scion
+SCION_START_CMD=tmux new-session -d -s scion -n agent sh -c ''\''hello'\''; scion_hrc=$?; (umask 077; tmux capture-pane -p -J -S -40 -t "$TMUX_PANE" > /tmp/scion-harness-tail) 2>/dev/null; echo $scion_hrc > /tmp/scion-harness-exit-code' \; set-option -g window-size latest \; new-window -t scion -n shell \; select-window -t scion:agent \; attach-session -t scion
 scion-agent:latest
 sh
 -c

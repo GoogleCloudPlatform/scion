@@ -592,6 +592,8 @@ export class ScionSubscriptionManager extends LitElement {
         return 'Agent has stalled and is no longer making progress.';
       case 'ERROR':
         return 'Agent encountered an error.';
+      case 'HARNESS_ERROR':
+        return "Agent's harness reported a model or API error; a new message retries.";
       case 'DELETED':
         return 'Agent was deleted.';
       default:

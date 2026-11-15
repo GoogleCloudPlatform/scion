@@ -57,7 +57,7 @@
         "env": [
           {
             "name": "SCION_START_CMD",
-            "value": "tmux new-session -d -s scion -n agent sh -c 'sleep infinity; echo $? \u003e /tmp/scion-harness-exit-code' \\; set-option -g window-size latest \\; new-window -t scion -n shell \\; select-window -t scion:agent \\; attach-session -t scion"
+            "value": "tmux new-session -d -s scion -n agent sh -c 'sleep infinity; scion_hrc=$?; (umask 077; tmux capture-pane -p -J -S -40 -t \"$TMUX_PANE\" \u003e /tmp/scion-harness-tail) 2\u003e/dev/null; echo $scion_hrc \u003e /tmp/scion-harness-exit-code' \\; set-option -g window-size latest \\; new-window -t scion -n shell \\; select-window -t scion:agent \\; attach-session -t scion"
           },
           {
             "name": "API_KEY",

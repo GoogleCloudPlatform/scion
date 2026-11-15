@@ -1,0 +1,4 @@
+{"cwd": "/workspace", "hook_event_name": "sessionStart", "initialPrompt": "Say hello", "sessionId": "00000001-0000-4000-8000-000000000001", "source": "new", "timestamp": 0}
+{"cwd": "/workspace", "hook_event_name": "userPromptSubmitted", "prompt": "Say hello", "sessionId": "00000001-0000-4000-8000-000000000001", "timestamp": 0}
+{"cwd": "/workspace", "error": {"message": "{\"message\":\"Permission 'aiplatform.endpoints.predict' denied on resource (or it may not exist).\",\"type\":\"invalid_request_error\",\"code\":\"PERMISSION_DENIED\",\"param\":null}", "name": "Error"}, "errorContext": "model_call", "hook_event_name": "errorOccurred", "recoverable": true, "sessionId": "00000001-0000-4000-8000-000000000001", "timestamp": 0}
+{"cwd": "/workspace", "hook_event_name": "sessionEnd", "reason": "user_exit", "sessionId": "00000001-0000-4000-8000-000000000001", "timestamp": 0}

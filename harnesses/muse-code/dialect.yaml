@@ -52,9 +52,14 @@ mappings:
   # Model lifecycle (enables max_model_calls enforcement).
   PreLLMCall:
     event: model-start
+  # A failed model call carries error ("API error 400: ..."). Muse 1.4.20
+  # fires no Stop for a turn that fails this way (fixture:
+  # pkg/sciontool/hooks/dialects/testdata/muse-code), so this is the only
+  # hook that carries the reason.
   PostLLMCall:
     event: model-end
     fields:
+      error: error
       input_tokens: input_tokens
       output_tokens: output_tokens
       cached_tokens: cached_tokens

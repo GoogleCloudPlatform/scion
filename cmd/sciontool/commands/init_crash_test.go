@@ -138,7 +138,7 @@ func TestClassifyExit(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := classifyExit(tc.supervisedCode, tc.supervisorErr, tc.harnessCode, tc.limitsExceeded, tc.requestedShutdown)
+			got := classifyExit(tc.supervisedCode, tc.supervisorErr, tc.harnessCode, tc.limitsExceeded, tc.requestedShutdown, "")
 			if got.exitCode != tc.wantCode {
 				t.Errorf("exitCode = %d, want %d", got.exitCode, tc.wantCode)
 			}
@@ -182,7 +182,7 @@ func TestInitExitCode(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			outcome := classifyExit(tc.childCode, nil, tc.harnessCode, false, tc.requestedShutdown)
+			outcome := classifyExit(tc.childCode, nil, tc.harnessCode, false, tc.requestedShutdown, "")
 			if outcome.isCrash || outcome.limitsExceeded {
 				t.Fatalf("classifyExit = %+v, want a non-crash outcome", outcome)
 			}
@@ -252,23 +252,23 @@ func TestFinalStatusUpdate(t *testing.T) {
 
 func TestReadHarnessExitCode(t *testing.T) {
 	// Missing file -> nil.
-	_ = os.Remove(state.HarnessExitCodeFile)
+	_ = os.Remove(harnessExitCodePath)
 	if got := readHarnessExitCode(); got != nil {
 		t.Errorf("expected nil for missing file, got %v", *got)
 	}
 
 	// Valid code.
-	if err := os.WriteFile(state.HarnessExitCodeFile, []byte("137\n"), 0o644); err != nil {
+	if err := os.WriteFile(harnessExitCodePath, []byte("137\n"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	t.Cleanup(func() { _ = os.Remove(state.HarnessExitCodeFile) })
+	t.Cleanup(func() { _ = os.Remove(harnessExitCodePath) })
 	got := readHarnessExitCode()
 	if got == nil || *got != 137 {
 		t.Errorf("expected 137, got %v", got)
 	}
 
 	// Unparseable -> nil.
-	if err := os.WriteFile(state.HarnessExitCodeFile, []byte("garbage"), 0o644); err != nil {
+	if err := os.WriteFile(harnessExitCodePath, []byte("garbage"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	if got := readHarnessExitCode(); got != nil {
@@ -286,11 +286,11 @@ func TestReadHarnessExitCode_SymlinkRefused(t *testing.T) {
 		t.Fatalf("write target: %v", err)
 	}
 
-	_ = os.Remove(state.HarnessExitCodeFile)
-	if err := os.Symlink(target, state.HarnessExitCodeFile); err != nil {
+	_ = os.Remove(harnessExitCodePath)
+	if err := os.Symlink(target, harnessExitCodePath); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}
-	t.Cleanup(func() { _ = os.Remove(state.HarnessExitCodeFile) })
+	t.Cleanup(func() { _ = os.Remove(harnessExitCodePath) })
 
 	if got := readHarnessExitCode(); got != nil {
 		t.Errorf("expected nil for a symlinked exit-code path, got %v", *got)
@@ -310,11 +310,11 @@ func TestReadHarnessExitCode_SymlinkRefused(t *testing.T) {
 // waiting for a writer: readHarnessExitCode must return nil promptly
 // (O_NONBLOCK on open, then a regular-file check before ever reading).
 func TestReadHarnessExitCode_FIFODoesNotBlock(t *testing.T) {
-	_ = os.Remove(state.HarnessExitCodeFile)
-	if err := syscall.Mkfifo(state.HarnessExitCodeFile, 0o600); err != nil {
+	_ = os.Remove(harnessExitCodePath)
+	if err := syscall.Mkfifo(harnessExitCodePath, 0o600); err != nil {
 		t.Fatalf("mkfifo: %v", err)
 	}
-	t.Cleanup(func() { _ = os.Remove(state.HarnessExitCodeFile) })
+	t.Cleanup(func() { _ = os.Remove(harnessExitCodePath) })
 
 	done := make(chan *int, 1)
 	go func() { done <- readHarnessExitCode() }()
@@ -336,7 +336,7 @@ func TestReadHarnessExitCode_FIFODoesNotBlock(t *testing.T) {
 // so fail to parse) if the read weren't bounded. A bounded read must
 // return 42; an unbounded one would return nil.
 func TestReadHarnessExitCode_BoundedRead(t *testing.T) {
-	_ = os.Remove(state.HarnessExitCodeFile)
+	_ = os.Remove(harnessExitCodePath)
 	leading := strings.Repeat("0", harnessExitCodeMaxBytes-2) + "42"
 	if len(leading) != harnessExitCodeMaxBytes {
 		t.Fatalf("test setup: leading prefix is %d bytes, want %d", len(leading), harnessExitCodeMaxBytes)
@@ -345,10 +345,10 @@ func TestReadHarnessExitCode_BoundedRead(t *testing.T) {
 	if _, err := strconv.Atoi(oversized); err == nil {
 		t.Fatal("test setup: the full oversized content must not parse as an int (it needs to overflow)")
 	}
-	if err := os.WriteFile(state.HarnessExitCodeFile, []byte(oversized), 0o644); err != nil {
+	if err := os.WriteFile(harnessExitCodePath, []byte(oversized), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	t.Cleanup(func() { _ = os.Remove(state.HarnessExitCodeFile) })
+	t.Cleanup(func() { _ = os.Remove(harnessExitCodePath) })
 
 	got := readHarnessExitCode()
 	if got == nil || *got != 42 {

@@ -317,13 +317,24 @@ func resolveAgentHome(targetUID int, rootless bool) string {
 // independent of setupHostUser's real-environment-dependent agentHome
 // resolution.
 func reportInitFailure(agentHome string, cause error) {
+	reportInitFailureWithExitCode(agentHome, cause, nil)
+}
+
+// reportInitFailureWithExitCode is reportInitFailure that also sends the
+// harness exit code to the Hub when exitCode is non-nil, as the crash
+// report after the wait loop does (finalStatusUpdate). The immediate-exit
+// path uses it, so a harness that dies inside childStartupCheckWindow is
+// reported with its code like one that dies later.
+func reportInitFailureWithExitCode(agentHome string, cause error, exitCode *int) {
 	statusHandler := handlers.NewStatusHandler()
 	statusHandler.StatusPath = filepath.Join(agentHome, "agent-info.json")
 	errMsg := cause.Error()
 	_ = statusHandler.UpdatePhaseAndMessage(state.PhaseError, "", errMsg)
 	if hubClient := hub.NewClient(); hubClient != nil && hubClient.IsConfigured() {
 		hubCtx, hubCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		if hubErr := hubClient.ReportState(hubCtx, state.PhaseError, "", errMsg); hubErr != nil {
+		s := state.AgentState{Phase: state.PhaseError}
+		update := hub.StatusUpdate{Phase: state.PhaseError, Status: s.DisplayStatus(), Message: errMsg, ExitCode: exitCode}
+		if hubErr := hubClient.UpdateStatus(hubCtx, update); hubErr != nil {
 			log.Error("Failed to report init failure to Hub: %v", hubErr)
 		}
 		hubCancel()
@@ -1013,7 +1024,12 @@ func RunInit(args []string, opts InitRunOptions) int {
 			}
 			if !fallbackExists {
 				log.Error("Pre-start provisioning is required; aborting startup")
-				_ = statusHandler.UpdatePhaseAndMessage(state.PhaseError, "", fmt.Sprintf("pre-start hook failed: %v", err))
+				// Local state and the Hub, like the clone failure: a
+				// runtime whose broker cannot read agent-info.json
+				// would otherwise never see the reason. The error is
+				// bounded and its provisioner detail sanitized
+				// (hooks.HarnessProvisionFailureDetail).
+				reportInitFailure(agentHome, fmt.Errorf("pre-start hook failed: %w", err))
 				return 1
 			}
 		}
@@ -1249,6 +1265,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 		readyNonce = ""
 	}
 	readyMode := state.ReadyModeForStrategy(readySpec.Strategy)
+	removeStaleHarnessExitFiles()
 	harnessLaunchedAt := time.Now()
 
 	// The conduit SSH server and its host key are prepared, and the first
@@ -1298,6 +1315,17 @@ func RunInit(args []string, opts InitRunOptions) int {
 			return 1
 		}
 		log.Info("Child exited immediately with code %d (uid=%d, gid=%d)", result.code, os.Geteuid(), os.Getegid())
+		// tmux exits 0 once the agent window's session ends, so the child's
+		// code says nothing about the harness: take the harness's own code
+		// from the wrapper's file, and treat a missing file from the
+		// wrapper as the harness never starting.
+		harnessCode := readHarnessExitCode()
+		if outcome, crashed := classifyImmediateExit(result.code, harnessCode,
+			childRecordsHarnessExitCode(childArgs, os.Getenv), readHarnessTail(), requestedShutdown.Load()); crashed {
+			log.Error("Harness exited immediately: %s", outcome.message)
+			reportInitFailureWithExitCode(agentHome, errors.New(outcome.message), &outcome.exitCode)
+			return outcome.exitCode
+		}
 		// An immediate exit 0 is as clean as one after the wait loop, so a
 		// token file this init staged is removed on both paths alike.
 		stagedTokenCleanExit = result.code == 0
@@ -1371,12 +1399,28 @@ func RunInit(args []string, opts InitRunOptions) int {
 				})
 			}
 		}
+		// The harness_error watchdogs (init_harness_watchdog.go) start
+		// once the harness is ready, in the watcher's goroutine, so the
+		// shutdown path below stops them with it.
+		watchdogCfg := newHarnessWatchdogConfig(harnessWatchdogDeps{
+			LaunchedAt:       harnessLaunchedAt,
+			AgentHome:        agentHome,
+			StatusHandler:    statusHandler,
+			HubClient:        hubClient,
+			Pipeline:         telemetryPipeline,
+			TargetUID:        targetUID,
+			TargetGID:        targetGID,
+			CapturePane:      captureHarnessPane,
+			TurnEventsPath:   turnEventsFilePath,
+			PendingErrorPath: pendingHarnessErrorFilePath,
+		})
 		var readyWatchCtx context.Context
 		readyWatchCtx, readyWatchCancel = context.WithCancel(context.Background())
 		readyWatchDone = make(chan struct{})
 		go func() {
 			defer close(readyWatchDone)
-			watchHarnessReady(readyWatchCtx, readyCfg)
+			readiness := watchHarnessReady(readyWatchCtx, readyCfg)
+			runHarnessErrorWatchdogs(readyWatchCtx, watchdogCfg, readiness, time.Now())
 		}()
 
 		if hubClient != nil && hubClient.IsConfigured() {
@@ -1683,8 +1727,9 @@ waitLoop:
 		}
 	}
 
-	// Stop the readiness watcher first so it cannot report working after
-	// the harness has exited.
+	// Stop the readiness watcher and the harness_error watchdogs first so
+	// they cannot report working or harness_error after the harness has
+	// exited.
 	if readyWatchCancel != nil {
 		readyWatchCancel()
 		<-readyWatchDone
@@ -1736,7 +1781,7 @@ waitLoop:
 		log.Info("Recovered harness exit code %d from %s", *harnessCode, harnessExitCodePath)
 	}
 
-	outcome := classifyExit(result.code, result.err, harnessCode, limitsExceeded, requestedShutdown.Load())
+	outcome := classifyExit(result.code, result.err, harnessCode, limitsExceeded, requestedShutdown.Load(), readHarnessTail())
 	finalCode := outcome.exitCode
 	// Clean for the staged token file also requires that the child exited 0
 	// or that a stop was requested (RunInit then exits 0, see initExitCode):
@@ -2023,6 +2068,90 @@ func readHarnessExitCode() *int {
 	return &code
 }
 
+// harnessTailPath is the pane-tail file the tmux agent-window wrapper writes
+// before the exit-code file (state.HarnessTailFile). Like
+// harnessExitCodePath it is a variable only so tests can use a temp file.
+var harnessTailPath = state.HarnessTailFile
+
+// harnessTailMaxBytes bounds the read in readHarnessTail. The wrapper
+// captures 40 joined pane lines; a larger file is not read at all.
+const harnessTailMaxBytes = 1 << 20
+
+// harnessTailLines is how many of the last non-empty pane lines a crash
+// reason carries.
+const harnessTailLines = 5
+
+// readHarnessTail returns the last harnessTailLines non-empty lines of the
+// pane-tail file, joined with " | ", or "" if the file is missing, too
+// large or not a single-link regular file. The read refuses symlinks at
+// every path component and never blocks on a FIFO, for the same reasons
+// as readHarnessExitCode. The text is raw harness output: callers redact
+// it (handlers.FormatHarnessTailReason) before it leaves the process.
+func readHarnessTail() string {
+	data, err := dirfd.ReadFileNoFollow(harnessTailPath, harnessTailMaxBytes)
+	if err != nil {
+		return ""
+	}
+	return lastNonEmptyLines(string(data), harnessTailLines)
+}
+
+// removeStaleHarnessExitFiles removes the exit-code and pane-tail files a
+// previous harness run in this container left behind (a restarted
+// container keeps /tmp), so a reader after this run never takes the old
+// run's code or output for its own, and a missing exit-code file reliably
+// means this run's harness never recorded one. os.Remove does not follow a
+// symlink at the leaf.
+func removeStaleHarnessExitFiles() {
+	for _, p := range []string{harnessExitCodePath, harnessTailPath} {
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			log.Warn("Could not remove stale harness file %s: %v", p, err)
+		}
+	}
+}
+
+// errHarnessNotStarted is the supervisor error classifyExit receives when the
+// child exited within childStartupCheckWindow without the harness recording
+// an exit code: the tmux agent window never ran the harness wrapper (tmux
+// failed, or the session ended before the harness started).
+var errHarnessNotStarted = errors.New("the harness did not start: no harness exit code was recorded")
+
+// childRecordsHarnessExitCode reports whether the supervised child is the
+// tmux agent-window wrapper that writes harnessExitCodePath, so a missing
+// file means the harness never ran. The runtimes pass the wrapper in the
+// child's arguments, or in SCION_START_CMD when a FUSE mount step runs
+// first; any other child (a plain command) never writes the file.
+func childRecordsHarnessExitCode(childArgs []string, getenv func(string) string) bool {
+	for _, a := range childArgs {
+		if strings.Contains(a, harnessExitCodePath) {
+			return true
+		}
+	}
+	return strings.Contains(getenv("SCION_START_CMD"), harnessExitCodePath)
+}
+
+// classifyImmediateExit classifies a child that exited within
+// childStartupCheckWindow with no supervisor error. It reports a crash when
+// the harness recorded a non-zero exit code, when the child exited non-zero
+// with no harness code, or when the child is the harness wrapper and no
+// harness code was recorded at all; the outcome then carries the harness's
+// code rather than tmux's. Otherwise ok is false and the caller keeps the
+// child's own code.
+func classifyImmediateExit(childCode int, harnessCode *int, wrapped bool, harnessTail string, requestedShutdown bool) (exitOutcome, bool) {
+	switch {
+	case harnessCode != nil && *harnessCode != 0:
+		outcome := classifyExit(childCode, nil, harnessCode, false, requestedShutdown, harnessTail)
+		return outcome, outcome.isCrash
+	case harnessCode == nil && (childCode != 0 || wrapped):
+		var supErr error
+		if wrapped {
+			supErr = errHarnessNotStarted
+		}
+		outcome := classifyExit(childCode, supErr, nil, false, requestedShutdown, "")
+		return outcome, outcome.isCrash
+	}
+	return exitOutcome{}, false
+}
+
 // exitOutcome captures the classified result of a supervised agent exit.
 type exitOutcome struct {
 	exitCode       int
@@ -2086,7 +2215,14 @@ func finalStatusUpdate(outcome exitOutcome) hub.StatusUpdate {
 // failure not reflected in supervisedCode). requestedShutdown is true when
 // init received SIGTERM/SIGINT, indicating the container was intentionally
 // stopped — a signal-killed child (exit code -1) is expected, not a crash.
-func classifyExit(supervisedCode int, supervisorErr error, harnessCode *int, limitsExceeded bool, requestedShutdown bool) exitOutcome {
+//
+// harnessTail is the harness's last output (readHarnessTail); a crash with
+// a harness exit code appends it, redacted, as
+// "Agent crashed with exit code N: <tail>", with the oldest output cut
+// first so the whole reason fits the 300-rune cap. supervisorErr
+// errHarnessNotStarted (no harness code recorded) is reported as the
+// harness not starting, with the child's code or 1.
+func classifyExit(supervisedCode int, supervisorErr error, harnessCode *int, limitsExceeded bool, requestedShutdown bool, harnessTail string) exitOutcome {
 	if !limitsExceeded && supervisedCode == handlers.ExitCodeLimitsExceeded {
 		limitsExceeded = true
 	}
@@ -2108,6 +2244,14 @@ func classifyExit(supervisedCode int, supervisorErr error, harnessCode *int, lim
 		return exitOutcome{exitCode: 0, signaled: true}
 	}
 
+	if harnessCode == nil && errors.Is(supervisorErr, errHarnessNotStarted) {
+		if finalCode == 0 {
+			finalCode = 1
+		}
+		msg := fmt.Sprintf("Agent failed to start (exit code %d): %v", finalCode, supervisorErr)
+		return exitOutcome{exitCode: finalCode, isCrash: true, message: msg}
+	}
+
 	// A supervisor error with a zero exit code is itself a failure.
 	supervisorFailed := supervisorErr != nil && finalCode == 0
 	if supervisorFailed {
@@ -2124,6 +2268,9 @@ func classifyExit(supervisedCode int, supervisorErr error, harnessCode *int, lim
 		msg = fmt.Sprintf("Agent crashed (supervisor error: %v)", supervisorErr)
 	} else {
 		msg = fmt.Sprintf("Agent crashed with exit code %d", finalCode)
+		if harnessCode != nil && strings.TrimSpace(harnessTail) != "" {
+			msg = handlers.FormatHarnessTailReason(msg, harnessTail)
+		}
 	}
 	return exitOutcome{exitCode: finalCode, isCrash: true, message: msg}
 }

@@ -57,6 +57,7 @@ export type StatusType =
   | 'waiting_for_input'
   | 'completed'
   | 'limits_exceeded'
+  | 'harness_error'
   | 'stalled'
   | 'offline';
 

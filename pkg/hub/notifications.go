@@ -741,6 +741,12 @@ func (nd *NotificationDispatcher) createInboxMessage(ctx context.Context, sub *s
 // bell carries agent events only. Clients derive chat alerts from the
 // chat SSE stream (chat message and read-state events) instead.
 
+// NotificationStatusHarnessError is the notification trigger and status of a
+// running agent whose harness reported a turn-ending model, API or auth
+// error (activity harness_error, ptone/scion#7858). It is distinct from
+// ERROR, which matches only phase error (the harness process is dead).
+const NotificationStatusHarnessError = "HARNESS_ERROR"
+
 // formatNotificationMessage formats a notification message based on agent state and status.
 func formatNotificationMessage(agent *store.Agent, status string) string {
 	upper := strings.ToUpper(status)
@@ -770,10 +776,18 @@ func formatNotificationMessage(agent *store.Agent, status string) string {
 		}
 		return msg
 	case "STALLED":
+		// The message is left over from before the stall ("Ready",
+		// "Harness started") and would mislead, so it is not appended.
 		msg := fmt.Sprintf("%s has STALLED", agent.Slug)
 		if agent.StalledFromActivity != "" {
 			msg += " (was " + agent.StalledFromActivity + ")"
 		}
+		if !agent.LastActivityEvent.IsZero() {
+			msg += ": no activity for " + formatStallAge(time.Since(agent.LastActivityEvent))
+		}
+		return msg
+	case NotificationStatusHarnessError:
+		msg := fmt.Sprintf("%s has a HARNESS_ERROR (harness alive; a new message retries)", agent.Slug)
 		if agent.Message != "" {
 			msg += ": " + agent.Message
 		}
@@ -797,4 +811,25 @@ func formatNotificationMessage(agent *store.Agent, status string) string {
 	default:
 		return fmt.Sprintf("%s has reached status: %s", agent.Slug, upper)
 	}
+}
+
+// formatStallAge renders how long a stalled agent has had no activity, in
+// whole minutes ("6m", "1h5m"), or seconds under a minute.
+func formatStallAge(d time.Duration) string {
+	if d < time.Minute {
+		if d < 0 {
+			d = 0
+		}
+		return fmt.Sprintf("%ds", int(d/time.Second))
+	}
+	d = d.Truncate(time.Minute)
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d/time.Minute))
+	}
+	h := int(d / time.Hour)
+	m := int((d % time.Hour) / time.Minute)
+	if m == 0 {
+		return fmt.Sprintf("%dh", h)
+	}
+	return fmt.Sprintf("%dh%dm", h, m)
 }

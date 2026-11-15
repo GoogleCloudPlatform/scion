@@ -45,13 +45,24 @@ mappings:
       # resultType is a string; only "success" counts as a successful tool.
       success: toolResult.resultType
 
-  # Error events.
+  # Error events. Copilot 1.0.112 sends errorOccurred (errorContext
+  # "model_call", recoverable true) both for a model call it retries to
+  # success and for one that ends the turn (no agentStop follows), so it is
+  # a failed model call, not a failed turn and not a question for the user
+  # (fixtures: pkg/sciontool/hooks/dialects/testdata/copilot). Copilot
+  # sends no hook for a successful model call, so the event is uncounted:
+  # max_model_calls, the API-call metric and usage records do not count
+  # it. Only errorContext "model_call" was captured; other contexts are
+  # ignored.
   errorOccurred:
-    event: notification
+    event: model-end
+    uncounted: true
+    skip_when:
+      - field: errorContext
+        not_equals: model_call
     fields:
       session_id: sessionId
       error: error.message
-      message: error.message
 
   # Agent completion.
   agentStop:

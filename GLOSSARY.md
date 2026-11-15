@@ -430,9 +430,9 @@ _Avoid_: status, stage, lifecycle state
 _See also_: Activity (what the agent is *doing*, vs. its container stage)
 
 **Activity**:
-What a running agent is currently doing, such as `thinking`, `executing`, `waiting_for_input`, or `blocked`. Distinct from phase.
+What a running agent is currently doing, such as `thinking`, `executing`, `waiting_for_input`, `blocked`, or `harness_error`. Distinct from phase.
 _Avoid_: status, state, mode
-_See also_: Phase (the container stage), Blocked (a specific activity value)
+_See also_: Phase (the container stage), Blocked and Harness error (specific activity values)
 
 **Blocked**:
 The activity an agent assigns to itself when intentionally waiting for an expected event, so it is not mistaken for stalled.
@@ -440,9 +440,14 @@ _Avoid_: stalled, stuck, idle, waiting
 _See also_: Activity (Blocked is one of its values)
 
 **Stalled**:
-A platform-set activity for a `running` agent whose heartbeat is still arriving (the process is alive) but that has produced no activity events within the stall threshold (`server.hub.stalled_threshold`, default 5 minutes; a value under 2 minutes falls back to the default). Indicates a hung agent. Agents whose activity is `blocked`, `waiting_for_input`, `completed`, `limits_exceeded` or `offline` are excluded. Distinct from `offline`, which means no heartbeat for over 2 minutes.
+A platform-set activity for a `running` agent whose heartbeat is still arriving (the process is alive) but that has produced no activity events within the stall threshold (`server.hub.stalled_threshold`, default 5 minutes; a value under 2 minutes falls back to the default). Indicates a hung agent. Agents whose activity is `blocked`, `waiting_for_input`, `completed`, `limits_exceeded`, `harness_error` or `offline` are excluded. A stalled notification says how long the agent has had no activity. Distinct from `offline`, which means no heartbeat for over 2 minutes.
 _Avoid_: stuck, hung (as a state name), offline
-_See also_: Activity, Blocked, Auto-Suspend
+_See also_: Activity, Blocked, Harness error, Auto-Suspend
+
+**Harness error**:
+The `harness_error` activity of a `running` agent whose harness process is alive at its prompt but reported that a model, API or auth error ended its turn (for example a 400 from the model provider). The reason is in the agent's message, as `<source>: <text>` (for example `model API: APIError (status 400)`), redacted and at most 300 characters. Shown as `harness error` in `scion list` and the web UI; notifies the `HARNESS_ERROR` trigger, which is in the default triggers. Cleared by the harness's next turn-progress event (a new prompt, model call or tool call), so a new message to the agent retries. Excluded from stall detection; still marked `offline` when heartbeats stop. Distinct from the `error` phase, which means the harness process is dead, and from the `ERROR` trigger, which matches only that phase.
+_Avoid_: error (for a live agent), crashed, failed
+_See also_: Activity, Phase, Stalled
 
 **Auto-Suspend**:
 A Hub behavior, off by default (`server.hub.auto_suspend_stalled`), that suspends an agent when it is marked `stalled`, reclaiming its container. Agents whose harness does not support session resume are skipped. A message sent with wake (`scion message --wake`, or accepting the web UI's wake prompt) resumes the agent and then delivers it; a message without wake is not delivered (`scion message` gets `409 agent_not_running`).

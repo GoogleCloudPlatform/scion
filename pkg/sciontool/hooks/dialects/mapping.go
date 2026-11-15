@@ -30,6 +30,44 @@ type MappingDialectSpec struct {
 type MappingEntrySpec struct {
 	Event  string            `yaml:"event"`
 	Fields map[string]string `yaml:"fields,omitempty"`
+	// SkipWhen discards the event (normalized name hooks.EventIgnored)
+	// when any of its conditions holds on the payload.
+	SkipWhen []MappingConditionSpec `yaml:"skip_when,omitempty"`
+	// Uncounted marks the event as one that model-call accounting does
+	// not count (hooks.EventData.Uncounted).
+	Uncounted bool `yaml:"uncounted,omitempty"`
+}
+
+// MappingConditionSpec is a test on one payload field, named by a dotted
+// path as in Fields. Exactly one of Equals and NotEquals is set (checked
+// by LoadMappingDialect). A field that is missing or not a string reads as
+// "".
+type MappingConditionSpec struct {
+	Field     string  `yaml:"field"`
+	Equals    *string `yaml:"equals,omitempty"`
+	NotEquals *string `yaml:"not_equals,omitempty"`
+}
+
+// holds reports whether the condition is true for data.
+func (c MappingConditionSpec) holds(data map[string]interface{}) bool {
+	value := resolveFieldPath(data, c.Field)
+	switch {
+	case c.Equals != nil:
+		return value == *c.Equals
+	case c.NotEquals != nil:
+		return value != *c.NotEquals
+	}
+	return false
+}
+
+// skips reports whether any SkipWhen condition holds for data.
+func (m MappingEntrySpec) skips(data map[string]interface{}) bool {
+	for _, c := range m.SkipWhen {
+		if c.holds(data) {
+			return true
+		}
+	}
+	return false
 }
 
 // MappingDialect implements hooks.Dialect using a data-driven spec loaded from YAML.
@@ -76,6 +114,9 @@ func (d *MappingDialect) Parse(data map[string]interface{}) (*hooks.Event, error
 	if m, ok := d.spec.Mappings[rawName]; ok {
 		normalizedName = m.Event
 		entry = &m
+		if m.skips(data) {
+			normalizedName = hooks.EventIgnored
+		}
 	}
 
 	event := &hooks.Event{
@@ -120,6 +161,7 @@ func (d *MappingDialect) Parse(data map[string]interface{}) (*hooks.Event, error
 
 	// Apply custom field paths from the mapping entry, overriding defaults.
 	if entry != nil {
+		event.Data.Uncounted = entry.Uncounted
 		for field, path := range entry.Fields {
 			applyFieldPath(data, field, path, &event.Data)
 		}
@@ -335,6 +377,13 @@ func LoadMappingDialect(path string) (*MappingDialect, error) {
 	}
 	if spec.EventNameField == "" && len(spec.EventNameFields) == 0 {
 		return nil, fmt.Errorf("dialect spec missing required 'event_name_field' or 'event_name_fields' field")
+	}
+	for name, entry := range spec.Mappings {
+		for i, c := range entry.SkipWhen {
+			if c.Field == "" || (c.Equals == nil) == (c.NotEquals == nil) {
+				return nil, fmt.Errorf("dialect spec mapping %q skip_when[%d]: needs a field and exactly one of equals and not_equals", name, i)
+			}
+		}
 	}
 
 	return NewMappingDialect(spec), nil

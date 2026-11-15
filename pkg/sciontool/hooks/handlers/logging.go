@@ -51,6 +51,8 @@ func (h *LoggingHandler) eventToTag(event *hooks.Event) string {
 		return string(state.ActivityExecuting)
 	case hooks.EventToolEnd, hooks.EventAgentEnd:
 		return string(state.ActivityWorking)
+	case hooks.EventAgentError:
+		return string(state.ActivityHarnessError)
 	case hooks.EventNotification:
 		return string(state.ActivityWaitingForInput)
 	case hooks.EventResponseComplete:
@@ -98,6 +100,9 @@ func (h *LoggingHandler) formatLogMessage(event *hooks.Event) string {
 
 	case hooks.EventAgentEnd:
 		return "Agent turn completed"
+
+	case hooks.EventAgentError:
+		return "Agent turn failed"
 
 	case hooks.EventToolStart:
 		if event.Data.ToolName != "" {

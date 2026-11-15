@@ -142,6 +142,41 @@ func TestWaitForAgentAcceptsInput_AgentStops(t *testing.T) {
 	assert.Equal(t, 1, exitCodeFor(err))
 }
 
+// An agent whose harness is up but in harness_error is not ready: the wait
+// fails at once with the reason instead of reporting ready or timing out.
+func TestWaitForAgentAcceptsInput_HarnessError(t *testing.T) {
+	fastWaitReadyPoll(t)
+	_, err := waitForAgentAcceptsInput(context.Background(), waitReadyOptions{
+		AgentName: "a1",
+		Get: probeSequence(
+			readyProbe{Phase: "running", Activity: "initializing"},
+			readyProbe{Phase: "running", Activity: "harness_error", Message: "model API: 403 Permission denied\x1b[2J"},
+		),
+		Timeout: 5 * time.Second,
+	})
+	require.Error(t, err)
+	var te *waitReadyTimeoutError
+	assert.False(t, errors.As(err, &te), "a harness error is not a timeout")
+	assert.Equal(t, 1, exitCodeFor(err))
+	assert.Contains(t, err.Error(), "agent 'a1' has a harness error")
+	assert.Contains(t, err.Error(), ": model API: 403 Permission denied")
+	assert.NotContains(t, err.Error(), "\x1b", "the agent-controlled reason is made safe for the terminal")
+}
+
+// The Hub's message reaches the probe, and a crash's reason is part of
+// the error when the agent leaves the running phase.
+func TestWaitForAgentAcceptsInput_ErrorPhaseCarriesReason(t *testing.T) {
+	fastWaitReadyPoll(t)
+	p := hubReadyProbe(&hubclient.Agent{Phase: "error", Message: "Agent crashed with exit code 127: claude: not found"})
+	assert.Equal(t, "Agent crashed with exit code 127: claude: not found", p.Message)
+	_, err := waitForAgentAcceptsInput(context.Background(), waitReadyOptions{
+		AgentName: "a1", Get: probeSequence(p), Timeout: time.Second,
+	})
+	require.Error(t, err)
+	assert.Equal(t, 1, exitCodeFor(err))
+	assert.Contains(t, err.Error(), "entered phase error while waiting for it to accept input: Agent crashed with exit code 127: claude: not found")
+}
+
 func TestMarkWaitReadyReported(t *testing.T) {
 	assert.NoError(t, markWaitReadyReported(nil))
 

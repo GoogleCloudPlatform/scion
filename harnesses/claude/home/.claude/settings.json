@@ -35,6 +35,7 @@
     "SessionEnd": [{"matcher": "*", "hooks": [{"name": "scion-status", "type": "command", "command": "sciontool hook --dialect=claude"}]}],
     "UserPromptSubmit": [{"matcher": "*", "hooks": [{"name": "scion-status", "type": "command", "command": "sciontool hook --dialect=claude"}]}],
     "Stop": [{"matcher": "*", "hooks": [{"name": "scion-status", "type": "command", "command": "sciontool hook --dialect=claude"}]}],
+    "StopFailure": [{"matcher": "*", "hooks": [{"name": "scion-status", "type": "command", "command": "sciontool hook --dialect=claude"}]}],
     "SubagentStop": [{"matcher": "*", "hooks": [{"name": "scion-status", "type": "command", "command": "sciontool hook --dialect=claude"}]}],
     "PreToolUse": [{"matcher": "*", "hooks": [{"name": "scion-status", "type": "command", "command": "sciontool hook --dialect=claude"}]}],
     "PostToolUse": [{"matcher": "*", "hooks": [{"name": "scion-status", "type": "command", "command": "sciontool hook --dialect=claude"}]}],

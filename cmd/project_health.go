@@ -47,7 +47,7 @@ for a Scion project.
 
 Queries the Hub to report:
   - Agent counts across all lifecycle phases (created, provisioning, cloning, starting, running, stopping, stopped, error, suspended)
-  - Agent counts across all activity states (working, thinking, executing, waiting_for_input, blocked, idle, completed, stalled, limits_exceeded, offline, crashed)
+  - Agent counts across all activity states (working, thinking, executing, waiting_for_input, blocked, idle, completed, harness_error, stalled, limits_exceeded, offline, crashed)
   - Detailed agent matrix with template, harness, lifecycle phase, and activity state
   - Actionable troubleshooting hints for blocked, stalled, or errored agents
 
@@ -98,6 +98,7 @@ type ProjectHealthSummary struct {
 	Idle            int `json:"idle"`
 	Completed       int `json:"completed"`
 	LimitsExceeded  int `json:"limitsExceeded"`
+	HarnessError    int `json:"harnessError"` // running, but the harness's last turn failed on a model/API error
 	Stalled         int `json:"stalled"`
 	Offline         int `json:"offline"`
 	Crashed         int `json:"crashed"`
@@ -256,33 +257,7 @@ func runProjectHealth(cmd *cobra.Command, args []string) error {
 			Agents:    allAgents,
 		}
 
-		report.Summary.Total = len(allAgents)
-		for _, a := range allAgents {
-			switch state.Phase(a.Phase) {
-			case state.PhaseCreated:
-				report.Summary.Created++
-			case state.PhaseProvisioning:
-				report.Summary.Provisioning++
-			case state.PhaseCloning:
-				report.Summary.Cloning++
-			case state.PhaseStarting:
-				report.Summary.Starting++
-			case state.PhaseRunning:
-				report.Summary.Running++
-			case state.PhaseSuspended:
-				report.Summary.Suspended++
-			case state.PhaseStopping:
-				report.Summary.Stopping++
-			case state.PhaseStopped:
-				report.Summary.Stopped++
-			case state.PhaseError, state.PhaseHalted:
-				report.Summary.Error++
-			default:
-				report.Summary.OtherPhase++
-			}
-
-			report.Summary.addActivity(a.Activity)
-		}
+		report.Summary = summarizeAgents(allAgents)
 		reports = append(reports, report)
 	}
 
@@ -294,6 +269,39 @@ func runProjectHealth(cmd *cobra.Command, args []string) error {
 
 	printProjectHealthReports(os.Stdout, reports)
 	return nil
+}
+
+// summarizeAgents counts agents by phase and by activity.
+func summarizeAgents(agents []hubclient.Agent) ProjectHealthSummary {
+	var sum ProjectHealthSummary
+	sum.Total = len(agents)
+	for _, a := range agents {
+		switch state.Phase(a.Phase) {
+		case state.PhaseCreated:
+			sum.Created++
+		case state.PhaseProvisioning:
+			sum.Provisioning++
+		case state.PhaseCloning:
+			sum.Cloning++
+		case state.PhaseStarting:
+			sum.Starting++
+		case state.PhaseRunning:
+			sum.Running++
+		case state.PhaseSuspended:
+			sum.Suspended++
+		case state.PhaseStopping:
+			sum.Stopping++
+		case state.PhaseStopped:
+			sum.Stopped++
+		case state.PhaseError, state.PhaseHalted:
+			sum.Error++
+		default:
+			sum.OtherPhase++
+		}
+
+		sum.addActivity(a.Activity)
+	}
+	return sum
 }
 
 func formatPhaseSummary(s ProjectHealthSummary) string {
@@ -347,6 +355,8 @@ func (s *ProjectHealthSummary) addActivity(activity string) {
 		s.Completed++
 	case state.ActivityLimitsExceeded:
 		s.LimitsExceeded++
+	case state.ActivityHarnessError:
+		s.HarnessError++
 	case state.ActivityStalled:
 		s.Stalled++
 	case state.ActivityOffline:
@@ -373,6 +383,7 @@ func formatActivitySummary(s ProjectHealthSummary) string {
 		{"Executing", s.Executing},
 		{"WaitingForInput", s.WaitingForInput},
 		{"Idle", s.Idle},
+		{"HarnessError", s.HarnessError},
 		{"Stalled", s.Stalled},
 		{"LimitsExceeded", s.LimitsExceeded},
 		{"Offline", s.Offline},
@@ -436,13 +447,16 @@ func printProjectHealthReports(w io.Writer, reports []ProjectHealthReport) {
 		_ = tw.Flush()
 
 		// Troubleshooting hints for degraded states
-		if r.Summary.Blocked > 0 || r.Summary.Error > 0 || r.Summary.Stalled > 0 {
+		if r.Summary.Blocked > 0 || r.Summary.Error > 0 || r.Summary.HarnessError > 0 || r.Summary.Stalled > 0 {
 			_, _ = fmt.Fprintln(w)
 			if r.Summary.Blocked > 0 {
 				_, _ = fmt.Fprintf(w, "  ! %d agent(s) are blocked — run 'scion look <agent>' to see the block reason.\n", r.Summary.Blocked)
 			}
 			if r.Summary.Error > 0 {
 				_, _ = fmt.Fprintf(w, "  x %d agent(s) are in error phase. Run 'scion logs <agent>' or 'scion reset-auth <agent>'.\n", r.Summary.Error)
+			}
+			if r.Summary.HarnessError > 0 {
+				_, _ = fmt.Fprintf(w, "  x %d agent(s) have a harness error (harness alive; a new message retries). Run 'scion list' for the reason.\n", r.Summary.HarnessError)
 			}
 			if r.Summary.Stalled > 0 {
 				_, _ = fmt.Fprintf(w, "  ! %d agent(s) are stalled. Run 'scion look <agent>' to check terminal state.\n", r.Summary.Stalled)
