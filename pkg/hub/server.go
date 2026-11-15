@@ -2235,6 +2235,9 @@ type Server struct {
 	// converted broker audit events (P4 slice 1) emit through a SlogSink
 	// over it (wireBrokerAuditEnvelopes). Set in New, never replaced.
 	auditWriterHandler slog.Handler
+	// mutationAuditWork admits and joins async emitMutationAudit writes so
+	// CloseAuditWriter drains them before the store closes (ptone/scion#8111).
+	mutationAuditWork mutationAuditTracker
 
 	// cloudLoggingHealth reports the direct Cloud Logging path for the
 	// cloud_logging /healthz key (P2). Injected by cmd only when a Cloud
@@ -7763,11 +7766,15 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 	return s.CloseAuditWriter(ctx)
 }
 
-// CloseAuditWriter closes the asynchronous audit writer: admission stops
-// and queued records are drained, bounded by min(ctx deadline, the writer's
-// 5s drain timeout). Records emitted afterwards are counted as closed. It is
-// idempotent and nil-safe. It returns asyncwrite.ErrWorkerStuck when a
-// noncooperative log handler is still blocked at the deadline.
+// CloseAuditWriter stops async mutation-audit admission, joins in-flight
+// emitMutationAudit store writes up to min(ctx deadline, auditWriteTimeout)
+// (cancelling any write still blocked at that bound), and closes the
+// asynchronous decision/broker audit writer: admission stops and queued
+// records are drained, bounded by min(ctx deadline, the writer's 5s drain
+// timeout). Records emitted afterwards are dropped (mutation audit) or counted
+// as closed (decision/broker audit). It is idempotent and nil-safe. It returns
+// asyncwrite.ErrWorkerStuck when a noncooperative log handler is still blocked
+// at the deadline.
 //
 // Every after-drain path calls it, so it first writes the browser policy
 // report refusals counted while requests were draining (the report
@@ -7776,6 +7783,10 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 func (s *Server) CloseAuditWriter(ctx context.Context) error {
 	if s.cspReports != nil {
 		s.cspReports.Close()
+	}
+	if n := s.mutationAuditWork.stop(ctx, auditWriteTimeout); n > 0 {
+		slog.Warn("Mutation audit writes still running after shutdown wait; cancelled them",
+			"running", n, "timeout", auditWriteTimeout)
 	}
 	if s.auditWriter == nil {
 		return nil
@@ -7884,7 +7895,6 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		// (ptone/scion#4869).
 		s.brokerWork.closeAdmission()
 
-		// Wait for in-flight audit goroutines.
 		if cc != nil {
 			cc.Shutdown()
 		}
