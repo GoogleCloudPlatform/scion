@@ -205,6 +205,58 @@ func TestNewValidation(t *testing.T) {
 			cache: validCache,
 		},
 		{
+			name: "max regex program size above ceiling",
+			env:  validEnv,
+			limits: celengine.Limits{
+				MaxExprBytes:        4096,
+				RecursionDepth:      32,
+				CostLimit:           250_000,
+				EvalTimeout:         100 * time.Millisecond,
+				InterruptFrequency:  100,
+				MaxRegexProgramSize: celengine.MaxRegexProgramSizeCeiling + 1,
+			},
+			cache: validCache,
+		},
+		{
+			name: "negative max regex program size",
+			env:  validEnv,
+			limits: celengine.Limits{
+				MaxExprBytes:        4096,
+				RecursionDepth:      32,
+				CostLimit:           250_000,
+				EvalTimeout:         100 * time.Millisecond,
+				InterruptFrequency:  100,
+				MaxRegexProgramSize: -1,
+			},
+			cache: validCache,
+		},
+		{
+			name: "max regex work above ceiling",
+			env:  validEnv,
+			limits: celengine.Limits{
+				MaxExprBytes:       4096,
+				RecursionDepth:     32,
+				CostLimit:          250_000,
+				EvalTimeout:        100 * time.Millisecond,
+				InterruptFrequency: 100,
+				MaxRegexWork:       celengine.MaxRegexWorkCeiling + 1,
+			},
+			cache: validCache,
+		},
+		{
+			name: "negative max regex work",
+			env:  validEnv,
+			limits: celengine.Limits{
+				MaxExprBytes:       4096,
+				RecursionDepth:     32,
+				CostLimit:          250_000,
+				EvalTimeout:        100 * time.Millisecond,
+				InterruptFrequency: 100,
+				MaxRegexWork:       -1,
+			},
+			cache: validCache,
+		},
+		{
 			name:   "negative cache size",
 			env:    validEnv,
 			limits: validLimits,
@@ -1066,4 +1118,176 @@ func TestGuardedFunctionsNormalSemanticsPreserved(t *testing.T) {
 		_, _, evalErr := prog.Eval(ctx, act)
 		assertEvalReason(t, evalErr, celengine.ReasonRuntime)
 	}
+}
+
+func runNoPanic(t *testing.T, label string, fn func()) {
+	t.Helper()
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("%s escaped panic: %v", label, r)
+		}
+	}()
+	fn()
+}
+
+func TestPlanTimeBoundRecovery(t *testing.T) {
+	boolKind := celengine.Kind{Name: "filter", Result: celengine.Bool()}
+	ctx := context.Background()
+
+	t.Run("eval_replan_const_unary_exceeds_lowered_max_output_bytes", func(t *testing.T) {
+		eng := newTestEngine(t)
+		prog, err := eng.Compile(`string(b"0123456789abcdef0123456789") == "x"`, boolKind)
+		if err != nil {
+			t.Fatalf("Compile: %v", err)
+		}
+		runNoPanic(t, "Eval lowered MaxOutputBytes", func() {
+			res, _, evalErr := prog.Eval(ctx, nil, celengine.Limits{MaxOutputBytes: 8})
+			if res != nil {
+				t.Fatalf("expected nil Result, got %v", res)
+			}
+			assertEvalReason(t, evalErr, celengine.ReasonCostLimit)
+		})
+	})
+
+	t.Run("compile_const_unary_exceeds_engine_max_output_bytes", func(t *testing.T) {
+		lim := celengine.DefaultLimits()
+		lim.MaxOutputBytes = 1024
+		eng, err := celengine.New(testEnv(), lim, celengine.DefaultCacheConfig())
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		expr := `string(b"` + strings.Repeat("a", 2000) + `") == "x"`
+		runNoPanic(t, "Compile lowered MaxOutputBytes", func() {
+			_, compErr := eng.Compile(expr, boolKind)
+			if compErr == nil {
+				t.Fatalf("expected CompileError, got nil")
+			}
+			var cerr *celengine.CompileError
+			if !errors.As(compErr, &cerr) {
+				t.Fatalf("expected *CompileError, got %T: %v", compErr, compErr)
+			}
+			if cerr.Category != celengine.CategorySize {
+				t.Fatalf("CompileError.Category = %q, want %q (err: %v)", cerr.Category, celengine.CategorySize, cerr)
+			}
+		})
+	})
+}
+
+func TestMatchesRegexSizeAndWorkBounds(t *testing.T) {
+	eng := newTestEngine(t)
+	boolKind := celengine.Kind{Name: "filter", Result: celengine.Bool()}
+	ctx := context.Background()
+
+	// 1. Literal oversized counted-repetition regex fails at Compile with CategorySize.
+	t.Run("literal_oversized_regex_compile_error", func(t *testing.T) {
+		_, err := eng.Compile(`event.s.matches("[a-z]{0,1000}x")`, boolKind)
+		if err == nil {
+			t.Fatalf("expected CompileError for oversized literal regex")
+		}
+		var cerr *celengine.CompileError
+		if !errors.As(err, &cerr) {
+			t.Fatalf("expected *CompileError, got %T: %v", err, err)
+		}
+		if cerr.Category != celengine.CategorySize {
+			t.Fatalf("Category = %q, want %q (err: %v)", cerr.Category, celengine.CategorySize, cerr)
+		}
+	})
+
+	// 2. Literal regex within MaxRegexProgramSize (244 <= 256) that exceeds MaxRegexWork
+	// on a 60 KiB input MUST still be caught at Eval even with cel-go's CompileRegexConstants enabled.
+	t.Run("literal_in_size_limit_exceeds_work_bound_survives_optimizer", func(t *testing.T) {
+		pat := strings.Repeat("a?", 80) + strings.Repeat("a", 80) + "x"
+		prog, err := eng.Compile(`event.s.matches("`+pat+`")`, boolKind)
+		if err != nil {
+			t.Fatalf("Compile in-limit regex: %v", err)
+		}
+		start := time.Now()
+		res, _, evalErr := prog.Eval(ctx, map[string]any{
+			"event": map[string]any{"s": strings.Repeat("a", 60*1024)},
+		})
+		elapsed := time.Since(start)
+		if res != nil {
+			t.Fatalf("expected nil Result, got %v", res)
+		}
+		assertEvalReason(t, evalErr, celengine.ReasonCostLimit)
+		if elapsed > 50*time.Millisecond {
+			t.Errorf("pre-call work check took %s, want <= 50ms", elapsed)
+		}
+	})
+
+	// 3. Dynamic regex patterns (both > MaxRegexProgramSize and > MaxRegexWork) fail fast with ReasonCostLimit.
+	t.Run("dynamic_oversized_and_overwork_patterns", func(t *testing.T) {
+		prog, err := eng.Compile(`event.s.matches(event.p) || true`, boolKind)
+		if err != nil {
+			t.Fatalf("Compile dynamic matches: %v", err)
+		}
+		s60k := strings.Repeat("a", 60*1024)
+		for _, pat := range []string{
+			`[a-z]{0,1000}x`,
+			strings.Repeat("a?", 80) + strings.Repeat("a", 80) + "x",
+		} {
+			start := time.Now()
+			res, _, evalErr := prog.Eval(ctx, map[string]any{
+				"event": map[string]any{"s": s60k, "p": pat},
+			})
+			elapsed := time.Since(start)
+			if res != nil {
+				t.Fatalf("pattern %q: expected nil Result (must not be swallowed by || true), got %v", pat[:12], res)
+			}
+			assertEvalReason(t, evalErr, celengine.ReasonCostLimit)
+			if elapsed > 50*time.Millisecond {
+				t.Errorf("pattern %q took %s, want <= 50ms", pat[:12], elapsed)
+			}
+		}
+	})
+
+	// 4. Normal literal and dynamic matches on 60 KiB inputs within work bound succeed.
+	t.Run("normal_literal_and_dynamic_matches", func(t *testing.T) {
+		s60k := "webhook.deploy." + strings.Repeat("a", 60*1024)
+		litProg, err := eng.Compile(`event.s.matches("^webhook\\.deploy\\..*$")`, boolKind)
+		if err != nil {
+			t.Fatalf("Compile normal literal: %v", err)
+		}
+		res, _, err := litProg.Eval(ctx, map[string]any{"event": map[string]any{"s": s60k}})
+		if err != nil {
+			t.Fatalf("Eval normal literal: %v", err)
+		}
+		if b, _ := res.Bool(); !b {
+			t.Fatalf("expected true match")
+		}
+
+		dynProg, err := eng.Compile(`event.s.matches(event.p)`, boolKind)
+		if err != nil {
+			t.Fatalf("Compile normal dynamic: %v", err)
+		}
+		res, _, err = dynProg.Eval(ctx, map[string]any{
+			"event": map[string]any{"s": s60k, "p": `^webhook\.deploy\..*$`},
+		})
+		if err != nil {
+			t.Fatalf("Eval normal dynamic: %v", err)
+		}
+		if b, _ := res.Bool(); !b {
+			t.Fatalf("expected true dynamic match")
+		}
+	})
+}
+
+func TestEvalTimeoutBackstopNeverReturnsDecision(t *testing.T) {
+	eng := newTestEngine(t)
+	boolKind := celengine.Kind{Name: "filter", Result: celengine.Bool()}
+	prog, err := eng.Compile(`event.s.contains("needle")`, boolKind)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	// Single host call completes with err == nil before CEL's periodic interrupt check,
+	// while wall-clock Elapsed exceeds the 1ns per-call EvalTimeout.
+	res, stats, evalErr := prog.Eval(
+		context.Background(),
+		map[string]any{"event": map[string]any{"s": strings.Repeat("a", 60*1024) + "needle"}},
+		celengine.Limits{EvalTimeout: time.Nanosecond},
+	)
+	if res != nil {
+		t.Fatalf("expected nil Result when Elapsed (%s) exceeds EvalTimeout, got %v", stats.Elapsed, res)
+	}
+	assertEvalReason(t, evalErr, celengine.ReasonTimeout)
 }

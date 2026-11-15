@@ -173,6 +173,9 @@ func TestPublicAPIDoesNotExposeCelGo(t *testing.T) {
 				if !d.Name.IsExported() {
 					continue
 				}
+				if d.Recv != nil && !receiverTypeIsExported(d.Recv) {
+					continue
+				}
 				if d.Type.Params != nil {
 					for _, p := range d.Type.Params.List {
 						checkExpr("func "+d.Name.Name+" param", p.Type)
@@ -181,6 +184,9 @@ func TestPublicAPIDoesNotExposeCelGo(t *testing.T) {
 				if d.Type.Results != nil {
 					for _, r := range d.Type.Results.List {
 						checkExpr("func "+d.Name.Name+" result", r.Type)
+						if unexp := unexportedResultIdent(r.Type); unexp != "" {
+							t.Errorf("%s/func %s result returns unexported type %s", ent.Name(), d.Name.Name, unexp)
+						}
 					}
 				}
 			case *ast.GenDecl:
@@ -212,5 +218,49 @@ func TestPublicAPIDoesNotExposeCelGo(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func receiverTypeIsExported(recv *ast.FieldList) bool {
+	if recv == nil || len(recv.List) == 0 {
+		return false
+	}
+	expr := recv.List[0].Type
+	if star, ok := expr.(*ast.StarExpr); ok {
+		expr = star.X
+	}
+	if id, ok := expr.(*ast.Ident); ok {
+		return id.IsExported()
+	}
+	return true
+}
+
+func unexportedResultIdent(expr ast.Expr) string {
+	switch e := expr.(type) {
+	case *ast.StarExpr:
+		return unexportedResultIdent(e.X)
+	case *ast.ArrayType:
+		return unexportedResultIdent(e.Elt)
+	case *ast.Ident:
+		if e.IsExported() || isPredeclaredType(e.Name) {
+			return ""
+		}
+		return e.Name
+	default:
+		return ""
+	}
+}
+
+func isPredeclaredType(name string) bool {
+	switch name {
+	case "any", "bool", "byte", "comparable",
+		"complex64", "complex128", "error",
+		"float32", "float64",
+		"int", "int8", "int16", "int32", "int64",
+		"rune", "string",
+		"uint", "uint8", "uint16", "uint32", "uint64", "uintptr":
+		return true
+	default:
+		return false
 	}
 }

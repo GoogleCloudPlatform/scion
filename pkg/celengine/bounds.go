@@ -17,6 +17,7 @@ package celengine
 import (
 	"fmt"
 	"math"
+	"regexp"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -33,8 +34,9 @@ import (
 )
 
 const (
-	maxFormatContainerDepth = 32
-	maxPinnedFormatPrec     = 100
+	maxPinnedFormatPrec  = 100
+	rabinKarpPatMinBytes = 64
+	rabinKarpWorkCutoff  = 4 << 20 // 4 MiB-comparisons before switching to linear KMP
 )
 
 func abortOutputLimit() {
@@ -66,18 +68,28 @@ func buildRawFormatProgram() (cel.Program, error) {
 
 // outputBoundsDecorator wraps CEL call nodes whose output size, collection
 // cardinality, or inner loop work can amplify beyond their inputs within a
-// single uninterruptible host call. Exceeding Limits.MaxOutputBytes or
-// Limits.MaxCollectionElements aborts evaluation immediately with
+// single uninterruptible host call. Exceeding Limits.MaxOutputBytes,
+// Limits.MaxCollectionElements, Limits.MaxRegexProgramSize, or
+// Limits.MaxRegexWork aborts evaluation immediately with
 // interpreter.CostLimitExceeded (-> EvalError{Reason: ReasonCostLimit}) before
-// allocating the amplified result, and cannot be swallowed by non-strict ||.
+// allocating or executing the unbounded work, and cannot be swallowed by
+// non-strict ||.
 func outputBoundsDecorator(limits Limits, rawFormat cel.Program) interpreter.InterpretableDecoratorV2 {
 	maxBytes := limits.MaxOutputBytes
 	maxElems := limits.MaxCollectionElements
+	maxRegexProgSize := limits.MaxRegexProgramSize
+	maxRegexWork := limits.MaxRegexWork
 	if maxBytes <= 0 {
 		maxBytes = DefaultMaxOutputBytes
 	}
 	if maxElems <= 0 {
 		maxElems = DefaultMaxCollectionElements
+	}
+	if maxRegexProgSize <= 0 {
+		maxRegexProgSize = DefaultMaxRegexProgramSize
+	}
+	if maxRegexWork <= 0 {
+		maxRegexWork = DefaultMaxRegexWork
 	}
 
 	return func(node interpreter.InterpretableV2) (interpreter.InterpretableV2, error) {
@@ -89,6 +101,10 @@ func outputBoundsDecorator(limits Limits, rawFormat cel.Program) interpreter.Int
 		var impl functions.FunctionOp
 
 		switch call.Function() {
+		case overloads.Matches:
+			if arity == 2 {
+				return newBoundedMatchesCall(call, maxBytes, maxRegexProgSize, maxRegexWork)
+			}
 		case "replace":
 			if arity == 3 || arity == 4 {
 				impl = boundedReplace(maxBytes)
@@ -141,6 +157,26 @@ func outputBoundsDecorator(limits Limits, rawFormat cel.Program) interpreter.Int
 			if arity == 2 || arity == 3 {
 				impl = boundedSubstring(maxBytes)
 			}
+		case "trim":
+			if arity == 1 {
+				impl = boundedTrim(maxBytes)
+			}
+		case overloads.Contains:
+			if arity == 2 {
+				impl = boundedContains(maxBytes)
+			}
+		case overloads.StartsWith:
+			if arity == 2 {
+				impl = boundedStartsWith(maxBytes)
+			}
+		case overloads.EndsWith:
+			if arity == 2 {
+				impl = boundedEndsWith(maxBytes)
+			}
+		case overloads.Size:
+			if arity == 1 {
+				impl = boundedSize(maxBytes, maxElems)
+			}
 		case overloads.TypeConvertBytes:
 			if arity == 1 {
 				impl = boundedBytesConv(maxBytes)
@@ -148,6 +184,43 @@ func outputBoundsDecorator(limits Limits, rawFormat cel.Program) interpreter.Int
 		case overloads.TypeConvertString:
 			if arity == 1 {
 				impl = boundedStringConv(maxBytes)
+			}
+		case overloads.TypeConvertBool:
+			if arity == 1 {
+				impl = boundedScalarStringInputConv(maxBytes, types.BoolType)
+			}
+		case overloads.TypeConvertDouble:
+			if arity == 1 {
+				impl = boundedScalarStringInputConv(maxBytes, types.DoubleType)
+			}
+		case overloads.TypeConvertDuration:
+			if arity == 1 {
+				impl = boundedScalarStringInputConv(maxBytes, types.DurationType)
+			}
+		case overloads.TypeConvertInt:
+			if arity == 1 {
+				impl = boundedScalarStringInputConv(maxBytes, types.IntType)
+			}
+		case overloads.TypeConvertTimestamp:
+			if arity == 1 {
+				impl = boundedScalarStringInputConv(maxBytes, types.TimestampType)
+			}
+		case overloads.TypeConvertUint:
+			if arity == 1 {
+				impl = boundedScalarStringInputConv(maxBytes, types.UintType)
+			}
+		case overloads.TimeGetFullYear,
+			overloads.TimeGetMonth,
+			overloads.TimeGetDayOfYear,
+			overloads.TimeGetDayOfMonth,
+			overloads.TimeGetDate,
+			overloads.TimeGetDayOfWeek,
+			overloads.TimeGetHours,
+			overloads.TimeGetMinutes,
+			overloads.TimeGetSeconds,
+			overloads.TimeGetMilliseconds:
+			if arity == 2 {
+				impl = boundedTimezoneAccessor(call.Function(), call.OverloadID(), maxBytes)
 			}
 		case operators.Equals:
 			if arity == 2 {
@@ -227,6 +300,43 @@ func boundedReplace(maxBytes int) functions.FunctionOp {
 			if len(newStr) > 0 && k > (int64(maxBytes)-baseLen)/int64(len(newStr)) {
 				abortOutputLimit()
 			}
+		} else if shouldUseLinearKMPBytes(len(str), len(oldStr)) {
+			maxMatches := -1
+			if limit > 0 {
+				if limit > int64(len(str))+1 {
+					maxMatches = len(str) + 1
+				} else {
+					maxMatches = int(limit)
+				}
+			}
+			matches := kmpFindBytes(str, oldStr, maxMatches, 0)
+			if len(matches) == 0 {
+				return sVal
+			}
+			k = int64(len(matches))
+			if len(newStr) > len(oldStr) {
+				if len(newStr) > maxBytes {
+					abortOutputLimit()
+				}
+				delta := int64(len(newStr) - len(oldStr))
+				if k > (int64(maxBytes)-baseLen)/delta {
+					abortOutputLimit()
+				}
+			}
+			outLen := int(baseLen + k*int64(len(newStr)-len(oldStr)))
+			if outLen > maxBytes {
+				abortOutputLimit()
+			}
+			var sb strings.Builder
+			sb.Grow(outLen)
+			prev := 0
+			for _, pos := range matches {
+				sb.WriteString(str[prev:pos])
+				sb.WriteString(newStr)
+				prev = pos + len(oldStr)
+			}
+			sb.WriteString(str[prev:])
+			return types.String(sb.String())
 		} else {
 			if limit < 0 {
 				k = int64(strings.Count(str, oldStr))
@@ -241,7 +351,10 @@ func boundedReplace(maxBytes int) functions.FunctionOp {
 					rem = rem[idx+len(oldStr):]
 				}
 			}
-			if k > 0 && len(newStr) > len(oldStr) {
+			if k == 0 {
+				return sVal
+			}
+			if len(newStr) > len(oldStr) {
 				if len(newStr) > maxBytes {
 					abortOutputLimit()
 				}
@@ -308,7 +421,7 @@ func boundedJoin(maxBytes, maxElems int) functions.FunctionOp {
 			elem := list.Get(i)
 			str, ok := elem.(types.String)
 			if !ok {
-				return types.NewErr("join: invalid input: %v", elem)
+				return types.NewErr("join: invalid input type %s", elem.Type().TypeName())
 			}
 			total += int64(len(str))
 			if total > int64(maxBytes) {
@@ -357,6 +470,29 @@ func boundedSplit(maxBytes, maxElems int) functions.FunctionOp {
 		}
 		if limit == 1 {
 			return types.DefaultTypeAdapter.NativeToValue([]string{str})
+		}
+
+		if sep != "" && shouldUseLinearKMPBytes(len(str), len(sep)) {
+			maxMatches := -1
+			if limit > 1 {
+				if limit-1 > int64(len(str)) {
+					maxMatches = len(str)
+				} else {
+					maxMatches = int(limit - 1)
+				}
+			}
+			matches := kmpFindBytes(str, sep, maxMatches, maxElems)
+			if int64(len(matches))+1 > int64(maxElems) {
+				abortOutputLimit()
+			}
+			out := make([]string, 0, len(matches)+1)
+			prev := 0
+			for _, pos := range matches {
+				out = append(out, str[prev:pos])
+				prev = pos + len(sep)
+			}
+			out = append(out, str[prev:])
+			return types.DefaultTypeAdapter.NativeToValue(out)
 		}
 
 		var partsCount int64
@@ -630,7 +766,7 @@ func upperBoundDecimalBytes(arg ref.Val) int64 {
 }
 
 func measureFormatStringArg(b *formatBudget, arg ref.Val, depth int) {
-	if depth > maxFormatContainerDepth {
+	if depth > MaxContainerDepth {
 		abortOutputLimit()
 	}
 	switch v := arg.(type) {
@@ -1070,7 +1206,7 @@ func isContainerVal(v ref.Val) bool {
 }
 
 func checkContainerWalkBound(v ref.Val, b *formatBudget, depth int) {
-	if depth > maxFormatContainerDepth {
+	if depth > MaxContainerDepth {
 		abortOutputLimit()
 	}
 	switch c := v.(type) {
@@ -1141,4 +1277,359 @@ func boundedIn(maxBytes, maxElems int) functions.FunctionOp {
 		}
 		return rhs.(traits.Container).Contains(lhs)
 	}
+}
+
+func shouldUseLinearKMPBytes(textLen, patLen int) bool {
+	return patLen > rabinKarpPatMinBytes && int64(textLen)*int64(patLen) > rabinKarpWorkCutoff
+}
+
+// kmpFindBytes returns non-overlapping start byte offsets of pattern in text
+// using O(len(text) + len(pattern)) KMP so adversarial patterns longer than 64
+// bytes cannot trigger Go stdlib IndexRabinKarp's fixed-PrimeRK hash-collision
+// O(N*M) fallback. When limit >= 0, at most limit matches are returned; when
+// abortAfter > 0, exceeding abortAfter matches aborts immediately.
+func kmpFindBytes(text, pattern string, limit int, abortAfter int) []int {
+	m := len(pattern)
+	if m == 0 || len(text) < m || limit == 0 {
+		return nil
+	}
+	lps := make([]int32, m)
+	for i, length := 1, int32(0); i < m; {
+		if pattern[i] == pattern[length] {
+			length++
+			lps[i] = length
+			i++
+		} else if length != 0 {
+			length = lps[length-1]
+		} else {
+			lps[i] = 0
+			i++
+		}
+	}
+
+	var matches []int
+	for i, j := 0, int32(0); i < len(text); {
+		if text[i] == pattern[j] {
+			i++
+			j++
+			if int(j) == m {
+				matches = append(matches, i-m)
+				if abortAfter > 0 && len(matches) > abortAfter {
+					abortOutputLimit()
+				}
+				if limit > 0 && len(matches) >= limit {
+					return matches
+				}
+				j = 0 // non-overlapping matches
+			}
+		} else if j != 0 {
+			j = lps[j-1]
+		} else {
+			i++
+		}
+	}
+	return matches
+}
+
+func indexStringLinear(s, sub string) int {
+	if sub == "" {
+		return 0
+	}
+	if len(s) < len(sub) {
+		return -1
+	}
+	if !shouldUseLinearKMPBytes(len(s), len(sub)) {
+		return strings.Index(s, sub)
+	}
+	matches := kmpFindBytes(s, sub, 1, 0)
+	if len(matches) == 0 {
+		return -1
+	}
+	return matches[0]
+}
+
+func boundedTrim(maxBytes int) functions.FunctionOp {
+	return func(args ...ref.Val) ref.Val {
+		sVal, ok := args[0].(types.String)
+		if !ok {
+			return types.MaybeNoSuchOverloadErr(args[0])
+		}
+		str := string(sVal)
+		if len(str) > maxBytes {
+			abortOutputLimit()
+		}
+		return types.String(strings.TrimSpace(str))
+	}
+}
+
+func boundedContains(maxBytes int) functions.FunctionOp {
+	return func(args ...ref.Val) ref.Val {
+		sVal, ok := args[0].(types.String)
+		if !ok {
+			return types.MaybeNoSuchOverloadErr(args[0])
+		}
+		subVal, ok := args[1].(types.String)
+		if !ok {
+			return types.MaybeNoSuchOverloadErr(args[1])
+		}
+		str := string(sVal)
+		sub := string(subVal)
+		if len(str) > maxBytes || len(sub) > maxBytes {
+			abortOutputLimit()
+		}
+		return types.Bool(indexStringLinear(str, sub) >= 0)
+	}
+}
+
+func boundedStartsWith(maxBytes int) functions.FunctionOp {
+	return func(args ...ref.Val) ref.Val {
+		sVal, ok := args[0].(types.String)
+		if !ok {
+			return types.MaybeNoSuchOverloadErr(args[0])
+		}
+		preVal, ok := args[1].(types.String)
+		if !ok {
+			return types.MaybeNoSuchOverloadErr(args[1])
+		}
+		str := string(sVal)
+		pre := string(preVal)
+		if len(str) > maxBytes || len(pre) > maxBytes {
+			abortOutputLimit()
+		}
+		return types.Bool(strings.HasPrefix(str, pre))
+	}
+}
+
+func boundedEndsWith(maxBytes int) functions.FunctionOp {
+	return func(args ...ref.Val) ref.Val {
+		sVal, ok := args[0].(types.String)
+		if !ok {
+			return types.MaybeNoSuchOverloadErr(args[0])
+		}
+		sufVal, ok := args[1].(types.String)
+		if !ok {
+			return types.MaybeNoSuchOverloadErr(args[1])
+		}
+		str := string(sVal)
+		suf := string(sufVal)
+		if len(str) > maxBytes || len(suf) > maxBytes {
+			abortOutputLimit()
+		}
+		return types.Bool(strings.HasSuffix(str, suf))
+	}
+}
+
+func boundedSize(maxBytes, maxElems int) functions.FunctionOp {
+	return func(args ...ref.Val) ref.Val {
+		switch v := args[0].(type) {
+		case types.String:
+			if len(v) > maxBytes {
+				abortOutputLimit()
+			}
+			return types.Int(utf8.RuneCountInString(string(v)))
+		case types.Bytes:
+			if len(v) > maxBytes {
+				abortOutputLimit()
+			}
+			return types.Int(len(v))
+		case traits.Lister:
+			szVal, ok := v.Size().(types.Int)
+			if !ok || szVal < 0 || int64(szVal) > int64(maxElems) {
+				abortOutputLimit()
+			}
+			return szVal
+		case traits.Mapper:
+			szVal, ok := v.Size().(types.Int)
+			if !ok || szVal < 0 || int64(szVal) > int64(maxElems) {
+				abortOutputLimit()
+			}
+			return szVal
+		case traits.Sizer:
+			return v.Size()
+		default:
+			return types.MaybeNoSuchOverloadErr(args[0])
+		}
+	}
+}
+
+func boundedScalarStringInputConv(maxBytes int, targetType ref.Type) functions.FunctionOp {
+	return func(args ...ref.Val) ref.Val {
+		if s, ok := args[0].(types.String); ok && len(s) > maxBytes {
+			abortOutputLimit()
+		}
+		return args[0].ConvertToType(targetType)
+	}
+}
+
+func boundedTimezoneAccessor(fn, overload string, maxBytes int) functions.FunctionOp {
+	return func(args ...ref.Val) ref.Val {
+		if tz, ok := args[1].(types.String); ok && len(tz) > maxBytes {
+			abortOutputLimit()
+		}
+		if recv, ok := args[0].(traits.Receiver); ok {
+			return recv.Receive(fn, overload, args[1:])
+		}
+		return types.MaybeNoSuchOverloadErr(args[0])
+	}
+}
+
+// boundedMatchesCall wraps CEL's matches(string, string) in an InterpretableV2
+// that deliberately does NOT implement interpreter.InterpretableCall. In
+// cel-go, CustomDecoratorV2 runs before CompileRegexConstants (decRegexOptimizer,
+// which type-asserts InterpretableCall and replaces constant-pattern matches
+// nodes with a fresh NewCall). Returning a non-InterpretableCall node preserves
+// both constant-pattern pre-compilation and pre-call input * program-size work
+// bounds at evaluation time.
+type boundedMatchesCall struct {
+	id               int64
+	origCall         interpreter.InterpretableCall
+	lhs              interpreter.InterpretableV2
+	rhs              interpreter.InterpretableV2
+	compiled         *regexp.Regexp
+	compiledProgSize int
+	maxBytes         int
+	maxRegexProgSize int
+	maxRegexWork     int64
+}
+
+func newBoundedMatchesCall(
+	call interpreter.InterpretableCall,
+	maxBytes int,
+	maxRegexProgSize int,
+	maxRegexWork int64,
+) (interpreter.InterpretableV2, error) {
+	args := call.Args()
+	node := &boundedMatchesCall{
+		id:               call.ID(),
+		origCall:         call,
+		lhs:              args[0],
+		rhs:              args[1],
+		maxBytes:         maxBytes,
+		maxRegexProgSize: maxRegexProgSize,
+		maxRegexWork:     maxRegexWork,
+	}
+	if constPat, isConst := args[1].(interpreter.InterpretableConst); isConst {
+		if patStr, ok := constPat.Value().(types.String); ok {
+			pat := string(patStr)
+			if len(pat) > maxBytes {
+				abortOutputLimit()
+			}
+			progSize, err := types.RegexProgramSize(pat)
+			if err != nil {
+				return nil, err
+			}
+			if progSize > maxRegexProgSize {
+				abortOutputLimit()
+			}
+			re, err := regexp.Compile(pat)
+			if err != nil {
+				return nil, err
+			}
+			node.compiled = re
+			node.compiledProgSize = progSize
+		}
+	}
+	return node, nil
+}
+
+func (m *boundedMatchesCall) ID() int64 {
+	return m.id
+}
+
+func (m *boundedMatchesCall) Eval(ctx interpreter.Activation) ref.Val {
+	return interpreter.EvalActivation(ctx, m.Exec)
+}
+
+func (m *boundedMatchesCall) Exec(frame *interpreter.ExecutionFrame) ref.Val {
+	lVal := m.lhs.Exec(frame)
+	switch l := lVal.(type) {
+	case *types.Err:
+		return lVal
+	case *types.Unknown:
+		rVal := m.rhs.Exec(frame)
+		if rUnk, ok := rVal.(*types.Unknown); ok {
+			merged := types.MergeUnknowns(l, rUnk)
+			if costs := frame.CostTracker(); costs != nil {
+				costs.EvalBinary(frame, m.id, m.origCall, lVal, rVal, merged)
+			}
+			return merged
+		}
+		if costs := frame.CostTracker(); costs != nil {
+			costs.EvalBinary(frame, m.id, m.origCall, lVal, rVal, lVal)
+		}
+		return lVal
+	}
+
+	rVal := m.rhs.Exec(frame)
+	switch rVal.(type) {
+	case *types.Err:
+		return rVal
+	case *types.Unknown:
+		if costs := frame.CostTracker(); costs != nil {
+			costs.EvalBinary(frame, m.id, m.origCall, lVal, rVal, rVal)
+		}
+		return rVal
+	}
+
+	lStr, okL := lVal.(types.String)
+	if !okL {
+		res := types.MaybeNoSuchOverloadErr(lVal)
+		if costs := frame.CostTracker(); costs != nil {
+			costs.EvalBinary(frame, m.id, m.origCall, lVal, rVal, res)
+		}
+		return res
+	}
+	rStr, okR := rVal.(types.String)
+	if !okR {
+		res := types.MaybeNoSuchOverloadErr(rVal)
+		if costs := frame.CostTracker(); costs != nil {
+			costs.EvalBinary(frame, m.id, m.origCall, lVal, rVal, res)
+		}
+		return res
+	}
+
+	inStr := string(lStr)
+	if len(inStr) > m.maxBytes {
+		abortOutputLimit()
+	}
+
+	re := m.compiled
+	progSize := m.compiledProgSize
+	if re == nil {
+		pat := string(rStr)
+		if len(pat) > m.maxBytes {
+			abortOutputLimit()
+		}
+		var err error
+		progSize, err = types.RegexProgramSize(pat)
+		if err != nil {
+			res := types.WrapErr(err)
+			if costs := frame.CostTracker(); costs != nil {
+				costs.EvalBinary(frame, m.id, m.origCall, lVal, rVal, res)
+			}
+			return res
+		}
+		if progSize > m.maxRegexProgSize {
+			abortOutputLimit()
+		}
+		if progSize > 0 && int64(len(inStr)) > m.maxRegexWork/int64(progSize) {
+			abortOutputLimit()
+		}
+		re, err = regexp.Compile(pat)
+		if err != nil {
+			res := types.WrapErr(err)
+			if costs := frame.CostTracker(); costs != nil {
+				costs.EvalBinary(frame, m.id, m.origCall, lVal, rVal, res)
+			}
+			return res
+		}
+	} else if progSize > 0 && int64(len(inStr)) > m.maxRegexWork/int64(progSize) {
+		abortOutputLimit()
+	}
+
+	res := types.Bool(re.MatchString(inStr))
+	if costs := frame.CostTracker(); costs != nil {
+		costs.EvalBinary(frame, m.id, m.origCall, lVal, rVal, res)
+	}
+	return res
 }

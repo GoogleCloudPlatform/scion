@@ -252,25 +252,41 @@ type Kind struct {
 }
 
 // Default limit values and hard upper bounds enforced by New.
+//
+// In addition to per-string/bytes output bounds (MaxOutputBytes) and list
+// cardinality bounds (MaxCollectionElements), container equality (==, !=),
+// list membership (in), and %s string formatting enforce a fail-closed walk
+// bound (at most MaxContainerDepth = 32 nested containers and bounded visited
+// elements/bytes) so shared-structure DAGs built via comprehensions cannot
+// trigger exponential work inside a single host call.
 const (
 	DefaultMaxExprBytes                 = 4096
 	DefaultRecursionDepth               = 32
 	DefaultCostLimit             uint64 = 250_000
 	DefaultEvalTimeout                  = 100 * time.Millisecond
 	DefaultInterruptFrequency    uint   = 100
-	DefaultMaxOutputBytes               = 1 << 20 // 1 MiB per string/bytes value or formatted/ walk output
+	DefaultMaxOutputBytes               = 1 << 20 // 1 MiB per string/bytes value or formatted output
 	DefaultMaxCollectionElements        = 65_536
+	DefaultMaxRegexProgramSize          = 256
+	DefaultMaxRegexWork          int64  = 2 << 20 // 2 MiB-instructions (len(input) * regex program size)
+
+	// MaxContainerDepth is the maximum container nesting depth traversed by
+	// fail-closed container equality (==, !=), list membership (in), and %s
+	// string formatting before aborting with ReasonCostLimit.
+	MaxContainerDepth = 32
 
 	MaxEvalTimeoutCeiling               = time.Second
 	MaxCostLimitCeiling          uint64 = 10_000_000
 	MaxOutputBytesCeiling               = 4 << 20 // 4 MiB
 	MaxCollectionElementsCeiling        = 262_144
+	MaxRegexProgramSizeCeiling          = 1024
+	MaxRegexWorkCeiling          int64  = 8 << 20
 )
 
 // Limits bounds expression size, parser recursion, runtime cost, wall-clock time,
-// and per-call output / collection sizes. Zero values for MaxOutputBytes and
-// MaxCollectionElements default to DefaultMaxOutputBytes and
-// DefaultMaxCollectionElements in New.
+// per-call output / collection sizes, and RE2 program size / match work. Zero
+// values for MaxOutputBytes, MaxCollectionElements, MaxRegexProgramSize, and
+// MaxRegexWork default to their Default* constants in New.
 type Limits struct {
 	MaxExprBytes          int
 	RecursionDepth        int
@@ -279,6 +295,8 @@ type Limits struct {
 	InterruptFrequency    uint
 	MaxOutputBytes        int
 	MaxCollectionElements int
+	MaxRegexProgramSize   int
+	MaxRegexWork          int64
 }
 
 // DefaultLimits returns the Stage 1 standard engine limits.
@@ -291,6 +309,8 @@ func DefaultLimits() Limits {
 		InterruptFrequency:    DefaultInterruptFrequency,
 		MaxOutputBytes:        DefaultMaxOutputBytes,
 		MaxCollectionElements: DefaultMaxCollectionElements,
+		MaxRegexProgramSize:   DefaultMaxRegexProgramSize,
+		MaxRegexWork:          DefaultMaxRegexWork,
 	}
 }
 
@@ -300,6 +320,12 @@ func (l Limits) normalize() Limits {
 	}
 	if l.MaxCollectionElements == 0 {
 		l.MaxCollectionElements = DefaultMaxCollectionElements
+	}
+	if l.MaxRegexProgramSize == 0 {
+		l.MaxRegexProgramSize = DefaultMaxRegexProgramSize
+	}
+	if l.MaxRegexWork == 0 {
+		l.MaxRegexWork = DefaultMaxRegexWork
 	}
 	return l
 }
@@ -326,6 +352,12 @@ func (l Limits) validateCeiling() error {
 	if l.MaxCollectionElements < 0 || l.MaxCollectionElements > MaxCollectionElementsCeiling {
 		return fmt.Errorf("celengine: MaxCollectionElements must be in 1..%d (got %d)", MaxCollectionElementsCeiling, l.MaxCollectionElements)
 	}
+	if l.MaxRegexProgramSize < 0 || l.MaxRegexProgramSize > MaxRegexProgramSizeCeiling {
+		return fmt.Errorf("celengine: MaxRegexProgramSize must be in 1..%d (got %d)", MaxRegexProgramSizeCeiling, l.MaxRegexProgramSize)
+	}
+	if l.MaxRegexWork < 0 || l.MaxRegexWork > MaxRegexWorkCeiling {
+		return fmt.Errorf("celengine: MaxRegexWork must be in 1..%d (got %d)", MaxRegexWorkCeiling, l.MaxRegexWork)
+	}
 	return nil
 }
 
@@ -348,6 +380,12 @@ func (l Limits) clampEval(overrides ...Limits) Limits {
 		}
 		if o.MaxCollectionElements > 0 && o.MaxCollectionElements < eff.MaxCollectionElements {
 			eff.MaxCollectionElements = o.MaxCollectionElements
+		}
+		if o.MaxRegexProgramSize > 0 && o.MaxRegexProgramSize < eff.MaxRegexProgramSize {
+			eff.MaxRegexProgramSize = o.MaxRegexProgramSize
+		}
+		if o.MaxRegexWork > 0 && o.MaxRegexWork < eff.MaxRegexWork {
+			eff.MaxRegexWork = o.MaxRegexWork
 		}
 	}
 	return eff

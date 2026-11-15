@@ -33,7 +33,10 @@ import (
 
 const pinnedStringsExtVersion uint32 = 5
 
-var errEngineTimeout = errors.New("celengine: eval timeout exceeded")
+var (
+	errEngineTimeout     = errors.New("celengine: eval timeout exceeded")
+	errPlanBoundExceeded = errors.New("celengine: plan-time bound exceeded")
+)
 
 // Engine compiles, caches, and evaluates CEL expressions for a single immutable
 // consumer Environment and ceiling Limits.
@@ -72,6 +75,7 @@ func New(env Environment, limits Limits, cache CacheConfig) (*Engine, error) {
 		cel.EagerlyValidateDeclarations(true),
 		cel.ParserRecursionLimit(limits.RecursionDepth),
 		cel.ParserExpressionSizeLimit(limits.MaxExprBytes),
+		cel.RegexProgramSizeLimit(limits.MaxRegexProgramSize),
 	}
 
 	switch env.Macros {
@@ -339,12 +343,16 @@ func (e *Engine) compileInternal(expr string, kind Kind, maxBytes int) (Program,
 	celProg, err := buildCELProgram(e.celEnv, checked, e.limits, e.rawFormat)
 	if err != nil {
 		line, col := rootLocation(checked)
+		cat := CategoryType
+		if errors.Is(err, errPlanBoundExceeded) || strings.Contains(err.Error(), "regex program size ") {
+			cat = CategorySize
+		}
 		return Program{}, &CompileError{
 			Line:     line,
 			Column:   col,
 			Message:  err.Error(),
 			Kind:     kind.Name,
-			Category: CategoryType,
+			Category: cat,
 		}
 	}
 
@@ -358,7 +366,18 @@ func (e *Engine) compileInternal(expr string, kind Kind, maxBytes int) (Program,
 	}, nil
 }
 
-func buildCELProgram(celEnv *cel.Env, checked *cel.Ast, limits Limits, rawFormat cel.Program) (cel.Program, error) {
+func buildCELProgram(celEnv *cel.Env, checked *cel.Ast, limits Limits, rawFormat cel.Program) (prog cel.Program, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			if cancelled, ok := r.(interpreter.EvalCancelledError); ok && cancelled.Cause == interpreter.CostLimitExceeded {
+				prog = nil
+				err = fmt.Errorf("%w: %s", errPlanBoundExceeded, cancelled.Message)
+				return
+			}
+			prog = nil
+			err = fmt.Errorf("celengine: plan failed: %v", r)
+		}
+	}()
 	return celEnv.Program(
 		checked,
 		cel.CustomDecoratorV2(outputBoundsDecorator(limits, rawFormat)),
@@ -411,6 +430,8 @@ func (e *Engine) classifyCheckIssues(parsed *cel.Ast, iss *cel.Issues, kind Kind
 
 	msg := first.Message
 	switch {
+	case strings.HasPrefix(msg, "regex program size "):
+		cat = CategorySize
 	case strings.HasPrefix(msg, "undeclared reference to '"):
 		if exprNodeIsCall(parsed, first.ExprID) {
 			cat = CategoryUnknownFunction
@@ -507,8 +528,13 @@ func (p Program) Kind() Kind {
 }
 
 // Eval executes p against activation act under the engine's ceiling limits
-// (optionally lowered by per-call overrides). Every failure returns a non-nil
-// *EvalError and a nil Result; a failure never produces false or "".
+// (optionally lowered by per-call overrides). Lowered per-call plan limits
+// (CostLimit, InterruptFrequency, MaxOutputBytes, MaxCollectionElements,
+// MaxRegexProgramSize, or MaxRegexWork) re-plan the already-typechecked AST on
+// that evaluation; lowered EvalTimeout reuses the cached plan. Every failure
+// returns a non-nil *EvalError and a nil Result; a failure or an evaluation
+// whose wall-clock Elapsed exceeds the effective EvalTimeout never produces a
+// decision.
 func (p Program) Eval(ctx context.Context, act map[string]any, limits ...Limits) (Result, EvalStats, error) {
 	if p.celProg == nil {
 		return nil, EvalStats{}, &EvalError{Reason: ReasonRuntime}
@@ -525,9 +551,14 @@ func (p Program) Eval(ctx context.Context, act map[string]any, limits ...Limits)
 	if eff.CostLimit != p.limits.CostLimit ||
 		eff.InterruptFrequency != p.limits.InterruptFrequency ||
 		eff.MaxOutputBytes != p.limits.MaxOutputBytes ||
-		eff.MaxCollectionElements != p.limits.MaxCollectionElements {
+		eff.MaxCollectionElements != p.limits.MaxCollectionElements ||
+		eff.MaxRegexProgramSize != p.limits.MaxRegexProgramSize ||
+		eff.MaxRegexWork != p.limits.MaxRegexWork {
 		lowered, err := buildCELProgram(p.celEnv, p.checked, eff, p.rawFormat)
 		if err != nil {
+			if errors.Is(err, errPlanBoundExceeded) || strings.Contains(err.Error(), "regex program size ") {
+				return nil, EvalStats{}, &EvalError{Reason: ReasonCostLimit}
+			}
 			return nil, EvalStats{}, &EvalError{Reason: ReasonRuntime}
 		}
 		progToRun = lowered
@@ -554,6 +585,12 @@ func (p Program) Eval(ctx context.Context, act map[string]any, limits ...Limits)
 
 	if err != nil {
 		return nil, stats, classifyEvalError(ctx, evalCtx, err)
+	}
+	if ctx.Err() != nil {
+		return nil, stats, &EvalError{Reason: ReasonCanceled}
+	}
+	if elapsed > eff.EvalTimeout {
+		return nil, stats, &EvalError{Reason: ReasonTimeout}
 	}
 	if val == nil || types.IsUnknownOrError(val) {
 		return nil, stats, &EvalError{Reason: ReasonRuntime}
