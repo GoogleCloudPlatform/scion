@@ -699,10 +699,12 @@ type DecisionStore interface {
 
 	// ListAgentDecisions lists decision rows belonging to agentID
 	// (asker_agent_id = agentID) filtered by state (pending by default;
-	// decided; or all), newest first by (created_at DESC, id DESC) with
-	// opaque cursor pagination (default limit 50, max 200). Answers are
-	// loaded on every returned row.
-	ListAgentDecisions(ctx context.Context, agentID string, state DecisionListState, cursor string, limit int) (items []*Decision, nextCursor string, err error)
+	// decided; or all) and optional query (when non-empty, case-insensitive
+	// literal substring over the question text, key, or effective answer's
+	// choice label), newest first by (created_at DESC, id DESC) with opaque
+	// cursor pagination (default limit 50, max 200). Answers are loaded on
+	// every returned row.
+	ListAgentDecisions(ctx context.Context, agentID string, state DecisionListState, query string, cursor string, limit int) (items []*Decision, nextCursor string, err error)
 
 	// GetAgentDecisionVersions returns all versions of key belonging to
 	// agentID (asker_agent_id = agentID, key_norm = DecisionKeyNorm(key)),

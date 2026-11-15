@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
@@ -197,18 +198,43 @@ func (s *Server) handleAgentDecisionList(w http.ResponseWriter, r *http.Request,
 		limit = n
 	}
 
-	cursor := q.Get("cursor")
-	rows, nextCursor, err := s.store.ListAgentDecisions(ctx, agentIdent.ID(), state, cursor, limit)
-	if err != nil {
-		if errors.Is(err, store.ErrInvalidInput) {
-			ValidationError(w, err.Error(), nil)
+	var search string
+	searchCtx := ctx
+	if rawSearch := strings.TrimSpace(q.Get("q")); rawSearch != "" {
+		if n := utf8.RuneCountInString(rawSearch); n < minProjectDecisionsQueryRunes || n > maxProjectDecisionsQueryRunes {
+			ValidationError(w, fmt.Sprintf("q must be %d to %d characters", minProjectDecisionsQueryRunes, maxProjectDecisionsQueryRunes),
+				map[string]interface{}{"field": "q"})
 			return
 		}
-		writeErrorFromErr(w, err, "")
+		search = rawSearch
+		var cancel context.CancelFunc
+		searchCtx, cancel = context.WithTimeout(ctx, s.chatSearchTimeout())
+		defer cancel()
+	}
+
+	cursor := q.Get("cursor")
+	rows, nextCursor, err := s.store.ListAgentDecisions(searchCtx, agentIdent.ID(), state, search, cursor, limit)
+	if err != nil {
+		switch {
+		case r.Context().Err() != nil:
+			return
+		case search != "" && (errors.Is(searchCtx.Err(), context.DeadlineExceeded) || isChatSearchTimeout(err)):
+			writeChatSearchTimeout(w)
+		case errors.Is(err, store.ErrInvalidInput):
+			ValidationError(w, err.Error(), nil)
+		default:
+			writeErrorFromErr(w, err, "")
+		}
 		return
 	}
 
-	convByPrompt := s.fallbackConversationsForDecisions(ctx, rows)
+	convByPrompt := s.fallbackConversationsForDecisions(searchCtx, rows)
+	if search != "" && errors.Is(searchCtx.Err(), context.DeadlineExceeded) {
+		if r.Context().Err() == nil {
+			writeChatSearchTimeout(w)
+		}
+		return
+	}
 	items := make([]AgentDecisionListItem, len(rows))
 	for i, d := range rows {
 		convID := d.ConversationID

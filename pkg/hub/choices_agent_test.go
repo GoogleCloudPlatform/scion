@@ -20,11 +20,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -800,4 +805,227 @@ func TestAgentDecisions_ConfirmOverrideAndMixedBatchEndToEnd(t *testing.T) {
 	)
 	require.Equal(t, http.StatusOK, allConfRR.Code, allConfRR.Body.String())
 	assert.Equal(t, before, len(f.dispatcher.getMessages()), "an all-confirm set submit is not delivered to the agent")
+}
+
+func agentListKeys(t *testing.T, f *choicesFixture, agent *store.Agent, params url.Values) []string {
+	t.Helper()
+	path := "/api/v1/agent/decisions"
+	if len(params) > 0 {
+		path += "?" + params.Encode()
+	}
+	rr := f.agentDecisionReq(t, agent, http.MethodGet, path, nil)
+	require.Equal(t, http.StatusOK, rr.Code, "%s: %s", path, rr.Body.String())
+	var out AgentDecisionListResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
+	keys := make([]string, len(out.Items))
+	for i, it := range out.Items {
+		keys[i] = it.Key
+	}
+	return keys
+}
+
+func TestAgentDecisions_SearchArmsWildcardsPagingAndIsolation(t *testing.T) {
+	f := newChoicesFixture(t)
+	ctx := context.Background()
+
+	// Other agent's matching decision must never appear in f.agent's search.
+	otherAgent := &store.Agent{
+		ID: api.NewUUID(), Slug: "other-search-agent", Name: "other-search-agent",
+		ProjectID: f.project.ID, OwnerID: f.alice.ID, Phase: "running",
+		Created: time.Now(),
+	}
+	require.NoError(t, f.store.CreateAgent(ctx, otherAgent))
+	otherDecs, err := messages.NormalizeDecisions("choices", decisionInputs(t, `[{"id":"other-canary","question":"Deploy canary shard?","choices":["yes","no"]}]`))
+	require.NoError(t, err)
+	_, err = f.store.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+		Message: &store.Message{
+			ID: api.NewUUID(), ProjectID: f.project.ID, Sender: "agent:" + otherAgent.Slug, SenderID: otherAgent.ID,
+			Recipient: "chat", ThreadID: f.topicID, Channel: "web", CreatedAt: time.Now().UTC(),
+		},
+		Intro: "Other prompt", AskerAgentID: otherAgent.ID, AskerAgentName: otherAgent.Name, Decisions: otherDecs,
+	})
+	require.NoError(t, err)
+
+	// 1. Topic prompt in #sched-topic by sched-agent: pending, matches question & key,
+	//    must NOT match topic label ("sched-topic") or asker agent name ("sched-agent")
+	//    or unchosen choice labels ("CanaryLane", "BlueGreenLane").
+	_, pCanary := f.topicPrompt(t, `[{"id":"rollout-plan","question":"Roll out the CANARY shard now?","choices":[{"id":"c","label":"CanaryLane"},{"id":"b","label":"BlueGreenLane"}]}]`, false)
+	_ = pCanary
+	time.Sleep(2 * time.Millisecond)
+
+	// 2. Direct-answered decision: matches effective direct answer label ("OvernightWindow").
+	_, pDirect := f.topicPrompt(t, `[{"id":"maint-win","question":"Maintenance slot?","choices":[{"id":"a","label":"OvernightWindow"},{"id":"b","label":"MiddaySlot"}]}]`, false)
+	require.Equal(t, http.StatusOK, f.answer(t, f.bob, pDirect.Decisions[0].RowID, map[string]interface{}{"choice_id": "a"}).Code)
+	time.Sleep(2 * time.Millisecond)
+
+	// 3. Unconfirmed agent-interpreted decision: matches interpreted label ("SoftFreeze").
+	pInterp := f.sendPromptToBob(t, `[{"id":"freeze-mode","question":"Freeze policy?","choices":[{"id":"1","label":"SoftFreeze"},{"id":"2","label":"HardLock"}]}]`, false)
+	replyInterp := f.bobDMReply(t, pInterp.MessageID, "1")
+	rrInterp := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", RecordInterpretedRequest{
+		SourceMessageID: replyInterp.ID,
+		Answers:         []InterpretedAnswerInput{{Key: "freeze-mode", ChoiceID: "1"}},
+	})
+	require.Equal(t, http.StatusOK, rrInterp.Code, rrInterp.Body.String())
+	time.Sleep(2 * time.Millisecond)
+
+	// 4. Overridden decision: interpreted as "AlphaDraft", then overridden directly to "FinalCut".
+	//    Effective answer is "FinalCut"; "AlphaDraft" must NOT match!
+	pOver := f.sendPromptToBob(t, `[{"id":"cut-mode","question":"Release cut?","choices":[{"id":"1","label":"AlphaDraft"},{"id":"2","label":"FinalCut"}]}]`, false)
+	replyOver := f.bobDMReply(t, pOver.MessageID, "1")
+	rrOver := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", RecordInterpretedRequest{
+		SourceMessageID: replyOver.ID,
+		Answers:         []InterpretedAnswerInput{{Key: "cut-mode", ChoiceID: "1"}},
+	})
+	require.Equal(t, http.StatusOK, rrOver.Code, rrOver.Body.String())
+	require.Equal(t, http.StatusOK, f.answer(t, f.bob, pOver.Decisions[0].RowID, map[string]interface{}{"choice_id": "2"}).Code)
+	time.Sleep(2 * time.Millisecond)
+
+	// 5. Wildcard literals in question and key, plus a lookalike without wildcards.
+	f.topicPrompt(t, `[{"id":"rate_limit_v1","question":"Throttle at 50% of C:\\logs?","choices":["yes","no"]}]`, false)
+	time.Sleep(2 * time.Millisecond)
+	f.topicPrompt(t, `[{"id":"rateXlimitXv1","question":"Throttle at 500 of C:Xlogs?","choices":["yes","no"]}]`, false)
+	time.Sleep(2 * time.Millisecond)
+
+	// 6. Reposted key to exercise state=pending vs state=decided vs state=all + paging.
+	//    v1 has "shared-tag" in question, gets reposted (becomes replaced), v2 also has "shared-tag".
+	f.topicPrompt(t, `[{"id":"repost-k","question":"First shared-tag check?","choices":["yes","no"]}]`, false)
+	time.Sleep(2 * time.Millisecond)
+	f.topicPrompt(t, `[{"id":"repost-k","question":"Second shared-tag check?","choices":["yes","no"]}]`, true)
+	time.Sleep(2 * time.Millisecond)
+	_, pSharedDec := f.topicPrompt(t, `[{"id":"decided-tag","question":"Third shared-tag check?","choices":["yes","no"]}]`, false)
+	require.Equal(t, http.StatusOK, f.answer(t, f.bob, pSharedDec.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"}).Code)
+
+	// Arms on state=all:
+	assert.Equal(t, []string{"rollout-plan"}, agentListKeys(t, f, f.agent, url.Values{"state": {"all"}, "q": {"canary shard"}}), "question arm, case-insensitive, isolated from otherAgent")
+	assert.Equal(t, []string{"rollout-plan"}, agentListKeys(t, f, f.agent, url.Values{"state": {"all"}, "q": {"ROLLOUT-P"}}), "key arm, case-insensitive")
+	assert.Equal(t, []string{"maint-win"}, agentListKeys(t, f, f.agent, url.Values{"state": {"all"}, "q": {"overnightwindow"}}), "direct effective answer label")
+	assert.Equal(t, []string{"freeze-mode"}, agentListKeys(t, f, f.agent, url.Values{"state": {"all"}, "q": {"softfreeze"}}), "unconfirmed interpreted effective answer label")
+	assert.Equal(t, []string{"cut-mode"}, agentListKeys(t, f, f.agent, url.Values{"state": {"all"}, "q": {"finalcut"}}), "overriding direct answer label matches")
+	assert.Empty(t, agentListKeys(t, f, f.agent, url.Values{"state": {"all"}, "q": {"alphadraft"}}), "overridden interpreted label is not effective and must not match")
+	assert.Empty(t, agentListKeys(t, f, f.agent, url.Values{"state": {"all"}, "q": {"canarylane"}}), "unchosen choice option label must not match")
+	assert.Empty(t, agentListKeys(t, f, f.agent, url.Values{"state": {"all"}, "q": {"middaya"}}), "non-matching substring")
+
+	// D12 exclusions: no conversation label arm and no asker agent name arm.
+	assert.Empty(t, agentListKeys(t, f, f.agent, url.Values{"state": {"all"}, "q": {"sched-topic"}}), "conversation label must not match")
+	assert.Empty(t, agentListKeys(t, f, f.agent, url.Values{"state": {"all"}, "q": {"#sched"}}), "conversation #label must not match")
+	assert.Empty(t, agentListKeys(t, f, f.agent, url.Values{"state": {"all"}, "q": {"sched-agent"}}), "asker agent name must not match")
+	assert.Empty(t, agentListKeys(t, f, f.agent, url.Values{"state": {"all"}, "q": {"other-canary"}}), "other agent's decision must not leak")
+
+	// Wildcards %, _, \ match literally.
+	assert.Equal(t, []string{"rate_limit_v1"}, agentListKeys(t, f, f.agent, url.Values{"state": {"all"}, "q": {"50%"}}))
+	assert.Equal(t, []string{"rate_limit_v1"}, agentListKeys(t, f, f.agent, url.Values{"state": {"all"}, "q": {"rate_limit"}}))
+	assert.Equal(t, []string{"rate_limit_v1"}, agentListKeys(t, f, f.agent, url.Values{"state": {"all"}, "q": {`c:\logs`}}))
+
+	// Combined with state filter:
+	// "shared-tag" matches repost-k v2 (pending), decided-tag (decided), repost-k v1 (replaced).
+	assert.Equal(t, []string{"repost-k"}, agentListKeys(t, f, f.agent, url.Values{"q": {"shared-tag"}}), "default state=pending")
+	assert.Equal(t, []string{"decided-tag"}, agentListKeys(t, f, f.agent, url.Values{"state": {"decided"}, "q": {"shared-tag"}}))
+
+	// Cursor paging with state=all and limit=1 across the 3 "shared-tag" rows (newest first).
+	var pagedRefs []string
+	cursor := ""
+	for page := 0; page < 5; page++ {
+		params := url.Values{"state": {"all"}, "q": {"shared-tag"}, "limit": {"1"}}
+		if cursor != "" {
+			params.Set("cursor", cursor)
+		}
+		rr := f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions?"+params.Encode(), nil)
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		var out AgentDecisionListResponse
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
+		for _, it := range out.Items {
+			pagedRefs = append(pagedRefs, fmt.Sprintf("%s@%d", it.Key, it.Version))
+		}
+		if out.NextCursor == "" {
+			break
+		}
+		cursor = out.NextCursor
+	}
+	assert.Equal(t, []string{"decided-tag@1", "repost-k@2", "repost-k@1"}, pagedRefs)
+}
+
+func TestAgentDecisions_SearchValidationTimeoutAndExperimentGate(t *testing.T) {
+	f := newChoicesFixture(t)
+	f.topicPrompt(t, oneDecision, false)
+
+	// Bounds validation: 2..256 runes after trim; empty/whitespace means no q.
+	for name, qVal := range map[string]string{
+		"one rune":            "a",
+		"one rune after trim": "   a   ",
+		"257 multibyte runes": strings.Repeat("é", 257),
+	} {
+		rr := f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions?q="+url.QueryEscape(qVal), nil)
+		assert.Equal(t, http.StatusBadRequest, rr.Code, "%s: %s", name, rr.Body.String())
+	}
+	for name, qVal := range map[string]string{
+		"two runes":           "sh",
+		"256 multibyte runes": strings.Repeat("é", 256),
+		"whitespace is no q":  "   ",
+	} {
+		rr := f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions?q="+url.QueryEscape(qVal), nil)
+		require.Equal(t, http.StatusOK, rr.Code, "%s: %s", name, rr.Body.String())
+		if name == "whitespace is no q" {
+			var out AgentDecisionListResponse
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &out))
+			assert.Len(t, out.Items, 1, "whitespace-only q returns unfiltered list")
+		}
+	}
+
+	// Experiment gating (C3): web.chat_choices gates agent decisions?q= independently of web.project_decisions.
+	setProjectDecisionsExperiments(t, f.srv, true, false)
+	assert.Equal(t, []string{"D234"}, agentListKeys(t, f, f.agent, url.Values{"q": {"feature"}}),
+		"agent search works when web.chat_choices=true and web.project_decisions=false")
+
+	setProjectDecisionsExperiments(t, f.srv, false, true)
+	rrOff := f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions?q=feature", nil)
+	assert.Equal(t, http.StatusNotFound, rrOff.Code, "web.chat_choices=false returns 404 even when web.project_decisions=true")
+
+	setProjectDecisionsExperiments(t, f.srv, true, true)
+
+	// Timeout mapping: ChatSearchTimeout expiry with q returns 503 SEARCH_TIMEOUT; omitting q stays 200.
+	f.srv.config.ChatSearchTimeout = time.Nanosecond
+	rrTimeout := f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions?q=feature", nil)
+	assert.Equal(t, http.StatusServiceUnavailable, rrTimeout.Code, rrTimeout.Body.String())
+	assert.Equal(t, "SEARCH_TIMEOUT", errorCode(t, rrTimeout))
+
+	rrNoQ := f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions", nil)
+	assert.Equal(t, http.StatusOK, rrNoQ.Code, rrNoQ.Body.String())
+}
+
+type agentDecisionSearchFaultStore struct {
+	store.Store
+	fault     *storeFaultSwitch
+	interrupt bool
+}
+
+func (s *agentDecisionSearchFaultStore) ListAgentDecisions(ctx context.Context, agentID string, state store.DecisionListState, query string, cursor string, limit int) ([]*store.Decision, string, error) {
+	if s.fault.Active() {
+		if s.interrupt {
+			<-ctx.Done()
+			return nil, "", errors.New("interrupted (9)")
+		}
+		return nil, "", &pgconn.PgError{Code: pgQueryCanceled, Message: "canceling statement due to statement timeout"}
+	}
+	return s.Store.ListAgentDecisions(ctx, agentID, state, query, cursor, limit)
+}
+
+func TestAgentDecisions_SearchPostgresCancelAndInterruptMapToSearchTimeout(t *testing.T) {
+	var wrapped *agentDecisionSearchFaultStore
+	srv, s, alice, bob, project, wrapped, fault := setupDemoPolicyTestWithFault(t, func(inner store.Store, f *storeFaultSwitch) *agentDecisionSearchFaultStore {
+		return &agentDecisionSearchFaultStore{Store: inner, fault: f}
+	})
+	f := newChoicesFixtureOn(t, srv, s, alice, bob, project)
+	fault.Arm()
+
+	// Postgres SQLSTATE 57014 -> 503 SEARCH_TIMEOUT.
+	rrPg := f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions?q=feature", nil)
+	assert.Equal(t, http.StatusServiceUnavailable, rrPg.Code, rrPg.Body.String())
+	assert.Equal(t, "SEARCH_TIMEOUT", errorCode(t, rrPg))
+
+	// SQLite interrupt after searchCtx deadline expires (non-context error) -> 503 SEARCH_TIMEOUT.
+	wrapped.interrupt = true
+	f.srv.config.ChatSearchTimeout = 20 * time.Millisecond
+	rrInterrupt := f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions?q=feature", nil)
+	assert.Equal(t, http.StatusServiceUnavailable, rrInterrupt.Code, rrInterrupt.Body.String())
+	assert.Equal(t, "SEARCH_TIMEOUT", errorCode(t, rrInterrupt))
 }
