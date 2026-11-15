@@ -147,7 +147,7 @@ SQLITE_NONHUB_PKGS := ./pkg/hub/... ./perf/bench/seed/... ./pkg/conduit/... \
 	./pkg/store/entadapter/... ./pkg/artifacts/... ./pkg/brokerownership/... \
 	./pkg/brokerregistration/... ./pkg/ent/entc/... ./pkg/secret/... \
 	./pkg/store/storetest/... ./pkg/store/relaydb ./pkg/testinfra/... \
-	./pkg/observability/txdiag ./pkg/agent/tmuxdeliver
+	./pkg/observability/txdiag ./pkg/agent/tmuxdeliver ./pkg/durablequeue/...
 SQLITE_NONHUB_PKGS_CMD = go list $(SQLITE_NONHUB_PKGS) | grep -vx '$(HUB_PKG)'
 
 # SQLITE_CI_PKGS are the package patterns that blocking CI jobs test with
@@ -508,12 +508,25 @@ test-store-postgres-entadapter: test-store-postgres-env-check
 		fi; \
 	fi
 
-# test-store-postgres-tail: the storetest, pkg/store/enttest, pkg/ent/entc,
-# pkg/testinfra and cmd runs of test-store-postgres (after entadapter). The enttest run
-# includes TestSchemaSnapshot_MatchesAutoMigrate, which checks that the
-# schema snapshot the harness provisions test schemas from matches
-# entc.AutoMigrate.
+# test-store-postgres-tail: the storetest, pkg/store/enttest, pkg/durablequeue,
+# pkg/ent/entc, pkg/testinfra and cmd runs of test-store-postgres (after
+# entadapter). The enttest run includes TestSchemaSnapshot_MatchesAutoMigrate,
+# which checks that the schema snapshot the harness provisions test schemas
+# from matches entc.AutoMigrate.
 test-store-postgres-tail: test-store-postgres-env-check
+	@go test -tags integration -count=1 -timeout 10m -v \
+		./pkg/durablequeue/... > /tmp/test-launch-store-postgres-durablequeue.log 2>&1; \
+	status=$$?; \
+	cat /tmp/test-launch-store-postgres-durablequeue.log; \
+	if [ $$status -ne 0 ]; then exit $$status; fi; \
+	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-launch-store-postgres-durablequeue.log; then \
+		echo "ERROR: one or more pkg/durablequeue Postgres tests were skipped -- see '--- SKIP' lines above." >&2; \
+		exit 1; \
+	fi; \
+	if ! grep -qE '^--- PASS: TestEchoConsumer_TwoConcurrentDrainers ' /tmp/test-launch-store-postgres-durablequeue.log; then \
+		echo "ERROR: the pkg/durablequeue two-drainer Postgres test did not run." >&2; \
+		exit 1; \
+	fi
 	@go test -tags integration -count=1 -timeout 10m -v \
 		-run '^TestCompositeStore_CRUDParity$$/^group$$/^MembershipCleanup$$' \
 		./pkg/store/storetest/... > /tmp/test-launch-store-postgres-storetest.log 2>&1; \
