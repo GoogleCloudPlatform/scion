@@ -44,14 +44,17 @@ const (
 	EnvironmentVersion = 1
 )
 
-// Stage 1 trigger rule limits (§7.2, §4.2, §4.4).
+// Stage 1 trigger rule limits (§7.2, §4.2, §4.4, §8.1).
 const (
 	MaxMatchRuleBytes      = 4096
 	MaxSubjectRuleBytes    = 1024
 	MaxDerivedSubjectBytes = 256
 	MaxPayloadBytes        = 64 * 1024
-	MaxAttributesBytes     = 8 * 1024
-	EventRuleBudget        = time.Second
+	// MaxAttributesBytes is the Stage 1 8 KiB serialized attributes ceiling (§7.2,
+	// §8.1). Event ingress enforces this bound on serialized attribute bytes before
+	// persisting the event; NewEventActivation accepts the already-admitted map.
+	MaxAttributesBytes = 8 * 1024
+	EventRuleBudget    = time.Second
 )
 
 // Generic history reasons recorded on skipped trigger fires (§6.3, §7.0a, §7.2).
@@ -208,8 +211,10 @@ type Activation struct {
 	trigMap   map[string]any
 }
 
-// NewEventActivation parses ev.Payload once (when non-empty) and constructs a
-// base Activation that can be rebound per candidate trigger via WithTrigger.
+// NewEventActivation parses ev.Payload once (when non-empty valid JSON) and
+// constructs a base Activation that can be rebound per candidate trigger via
+// WithTrigger. Per §7.1, if ev.Payload is empty or is not valid JSON,
+// event.payload is omitted from the activation so has(event.payload) is false.
 func NewEventActivation(ev hubfire.FireEvent) (Activation, error) {
 	if len(ev.Payload) > MaxPayloadBytes {
 		return Activation{}, fmt.Errorf("triggerrule: payload length %d exceeds maximum %d bytes", len(ev.Payload), MaxPayloadBytes)
@@ -232,11 +237,9 @@ func NewEventActivation(ev hubfire.FireEvent) (Activation, error) {
 	}
 
 	if trimmed := bytes.TrimSpace(ev.Payload); len(trimmed) > 0 {
-		parsedPayload, err := parseJSONPayload(trimmed)
-		if err != nil {
-			return Activation{}, fmt.Errorf("triggerrule: decode event payload: %w", err)
+		if parsedPayload, err := parseJSONPayload(trimmed); err == nil {
+			eventMap["payload"] = parsedPayload
 		}
-		eventMap["payload"] = parsedPayload
 	}
 
 	var tr hubfire.FireTriggerRef

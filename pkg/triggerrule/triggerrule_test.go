@@ -122,6 +122,44 @@ func TestTriggerEnvironmentAndActivationFields(t *testing.T) {
 	}
 }
 
+func TestNonJSONPayloadOmitsEventPayload(t *testing.T) {
+	rules, err := triggerrule.NewDefault()
+	if err != nil {
+		t.Fatalf("NewDefault: %v", err)
+	}
+	ctx := context.Background()
+	tr := hubfire.FireTriggerRef{ID: "trig-nonjson", Name: "nonjson"}
+	scope := celengine.CacheScope{Consumer: triggerrule.ConsumerName, ID: tr.ID, Revision: 1}
+
+	ev := sampleFireEvent("plain-text-or-form-encoded-body")
+	act, err := triggerrule.NewActivation(ev, tr)
+	if err != nil {
+		t.Fatalf("NewActivation on non-JSON payload must succeed and omit event.payload, got: %v", err)
+	}
+
+	hasPayload, err := rules.Match(ctx, scope, triggerrule.Rule{Expr: `has(event.payload)`}, act)
+	if err != nil {
+		t.Fatalf("Match has(event.payload): %v", err)
+	}
+	if hasPayload {
+		t.Fatalf("has(event.payload) = true on non-JSON payload, want false")
+	}
+
+	// Non-payload trigger rules still evaluate normally on the same event.
+	matched, err := rules.Match(ctx, scope, triggerrule.Rule{
+		Expr: `event.type == "webhook.deploy.finished" && event.attributes.verified == "scion-v1"`,
+	}, act)
+	if err != nil || !matched {
+		t.Fatalf("non-payload Match on non-JSON event = (%v, %v), want (true, nil)", matched, err)
+	}
+
+	// Oversized payload (> 64 KiB) is still rejected by NewActivation.
+	oversized := sampleFireEvent(strings.Repeat("x", triggerrule.MaxPayloadBytes+1))
+	if _, err := triggerrule.NewActivation(oversized, tr); err == nil {
+		t.Fatalf("expected NewActivation error on payload exceeding MaxPayloadBytes")
+	}
+}
+
 func TestAuthoringCompileValidationAndDialects(t *testing.T) {
 	rules, err := triggerrule.NewDefault()
 	if err != nil {
