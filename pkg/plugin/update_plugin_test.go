@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -106,10 +107,13 @@ func TestUpdatePlugin_UnwritablePathDir_RelocatesToUserPluginsDir(t *testing.T) 
 
 	// UpdatePlugin should succeed by installing into <pluginsDir>/broker/scion-plugin-fake
 	// rather than failing with permission denied on systemBinDir.
-	err := mgr.UpdatePlugin("fake", repoDir)
+	res, err := mgr.UpdatePlugin("fake", repoDir)
 	require.NoError(t, err)
 
 	expectedInstalledPath := filepath.Join(pluginsDir, PluginTypeBroker, "scion-plugin-fake")
+	assert.True(t, res.Relocated)
+	assert.Equal(t, systemBinary, res.PreviousPath)
+	assert.Equal(t, expectedInstalledPath, res.BinaryPath)
 	info, statErr := os.Stat(expectedInstalledPath)
 	require.NoError(t, statErr, "rebuilt binary must be installed into user plugins directory")
 	assert.NotZero(t, info.Mode()&0o111, "installed binary must be executable")
@@ -160,7 +164,7 @@ func TestUpdatePlugin_ExplicitUnwritablePath_FailsClearlyWithoutStoppingPlugin(t
 	require.NoError(t, mgr.LoadAll(cfg, pluginsDir))
 	before := fakeHealth(t, mgr, "fake")
 
-	err := mgr.UpdatePlugin("fake", repoDir)
+	_, err := mgr.UpdatePlugin("fake", repoDir)
 	require.Error(t, err)
 
 	var permErr *PermissionError
@@ -168,9 +172,16 @@ func TestUpdatePlugin_ExplicitUnwritablePath_FailsClearlyWithoutStoppingPlugin(t
 	assert.ErrorIs(t, err, os.ErrPermission)
 	assert.True(t, permErr.ExplicitPath)
 	assert.Equal(t, systemBinary, permErr.BinaryPath)
+	assert.Equal(t, pluginsDir, permErr.PluginsDir)
 	assert.Contains(t, permErr.UserMessage(), systemBinary)
-	assert.Contains(t, permErr.Guidance(repoDir), "server.plugins.broker.fake.path")
-	assert.Contains(t, permErr.Guidance(repoDir), "sudo install -m 0755")
+	guidance := permErr.Guidance(repoDir)
+	assert.Contains(t, guidance, "server.plugins.broker.fake.path")
+	assert.Contains(t, guidance, "scion server restart")
+	assert.Contains(t, guidance, "Install")
+	assert.Contains(t, guidance, filepath.Join(pluginsDir, PluginTypeBroker))
+	assert.Contains(t, guidance, "mktemp -d")
+	assert.Contains(t, guidance, "sudo install -m 0755")
+	assert.NotContains(t, guidance, "/tmp/scion-plugin-")
 
 	// Must not write to <pluginsDir>/broker because explicit path in settings
 	// would shadow it on the next Hub restart.
@@ -217,7 +228,7 @@ func TestUpdatePlugin_UnwritableFallbackPluginsDir_FailsClearlyWithoutStoppingPl
 	require.NoError(t, mgr.LoadAll(cfg, pluginsDir))
 	before := fakeHealth(t, mgr, "fake")
 
-	err := mgr.UpdatePlugin("fake", repoDir)
+	_, err := mgr.UpdatePlugin("fake", repoDir)
 	require.Error(t, err)
 
 	var permErr *PermissionError
@@ -255,7 +266,11 @@ func TestUpdatePlugin_WritablePath_UpdatesInPlace(t *testing.T) {
 	require.NoError(t, mgr.LoadAll(cfg, pluginsDir))
 	before := fakeHealth(t, mgr, "fake")
 
-	require.NoError(t, mgr.UpdatePlugin("fake", repoDir))
+	res, err := mgr.UpdatePlugin("fake", repoDir)
+	require.NoError(t, err)
+	assert.False(t, res.Relocated)
+	assert.Empty(t, res.PreviousPath)
+	assert.Equal(t, binaryPath, res.BinaryPath)
 
 	after := fakeHealth(t, mgr, "fake")
 	assert.NotEqual(t, before["pid"], after["pid"])
@@ -264,4 +279,111 @@ func TestUpdatePlugin_WritablePath_UpdatesInPlace(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, entries, 1)
 	assert.Equal(t, "scion-plugin-fake", entries[0].Name())
+}
+
+func TestUpdatePlugin_ReadOnlyMountEROFS_RelocatesAndPinnedFailsClearly(t *testing.T) {
+	systemBinDir := filepath.Join(t.TempDir(), "ro-usr-local-bin")
+	require.NoError(t, os.MkdirAll(systemBinDir, 0o755))
+	systemBinary := filepath.Join(systemBinDir, "scion-plugin-fake")
+	writeFakePluginWrapper(t, systemBinary)
+
+	origMkdirTemp := mkdirTemp
+	mkdirTemp = func(dir, pattern string) (string, error) {
+		if dir == systemBinDir {
+			return "", &os.PathError{Op: "mkdir", Path: dir, Err: syscall.EROFS}
+		}
+		return origMkdirTemp(dir, pattern)
+	}
+	t.Cleanup(func() { mkdirTemp = origMkdirTemp })
+
+	t.Setenv("PATH", systemBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	pluginsDir := filepath.Join(t.TempDir(), "plugins")
+	repoDir := t.TempDir()
+	writeFakePluginSource(t, repoDir, "fake")
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	t.Run("path_discovered_relocates", func(t *testing.T) {
+		mgr := NewManager(logger)
+		t.Cleanup(mgr.Shutdown)
+
+		cfg := PluginsConfig{
+			Broker: map[string]PluginEntry{
+				"fake": {Config: map[string]string{"token": "ro-token"}},
+			},
+		}
+		require.NoError(t, mgr.LoadAll(cfg, pluginsDir))
+		before := fakeHealth(t, mgr, "fake")
+
+		res, err := mgr.UpdatePlugin("fake", repoDir)
+		require.NoError(t, err)
+		assert.True(t, res.Relocated)
+		assert.Equal(t, systemBinary, res.PreviousPath)
+		assert.Equal(t, filepath.Join(pluginsDir, PluginTypeBroker, "scion-plugin-fake"), res.BinaryPath)
+
+		after := fakeHealth(t, mgr, "fake")
+		assert.NotEqual(t, before["pid"], after["pid"])
+	})
+
+	t.Run("explicit_path_returns_permission_error", func(t *testing.T) {
+		mgr := NewManager(logger)
+		t.Cleanup(mgr.Shutdown)
+
+		explicitPluginsDir := filepath.Join(t.TempDir(), "plugins-explicit")
+		cfg := PluginsConfig{
+			Broker: map[string]PluginEntry{
+				"fake": {Path: systemBinary, Config: map[string]string{"token": "ro-token"}},
+			},
+		}
+		require.NoError(t, mgr.LoadAll(cfg, explicitPluginsDir))
+		before := fakeHealth(t, mgr, "fake")
+
+		_, err := mgr.UpdatePlugin("fake", repoDir)
+		require.Error(t, err)
+
+		var permErr *PermissionError
+		require.ErrorAs(t, err, &permErr)
+		assert.ErrorIs(t, err, syscall.EROFS)
+		assert.True(t, permErr.ExplicitPath)
+
+		after := fakeHealth(t, mgr, "fake")
+		assert.Equal(t, before["pid"], after["pid"])
+	})
+}
+
+func TestUpdatePlugin_RenameFailure_LeavesRunningPluginAlive(t *testing.T) {
+	pluginsDir := filepath.Join(t.TempDir(), "plugins")
+	brokerDir := filepath.Join(pluginsDir, PluginTypeBroker)
+	require.NoError(t, os.MkdirAll(brokerDir, 0o755))
+	binaryPath := filepath.Join(brokerDir, "scion-plugin-fake")
+	writeFakePluginWrapper(t, binaryPath)
+
+	repoDir := t.TempDir()
+	writeFakePluginSource(t, repoDir, "fake")
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mgr := NewManager(logger)
+	t.Cleanup(mgr.Shutdown)
+
+	cfg := PluginsConfig{
+		Broker: map[string]PluginEntry{
+			"fake": {Config: map[string]string{"token": "keep-alive"}},
+		},
+	}
+	require.NoError(t, mgr.LoadAll(cfg, pluginsDir))
+	before := fakeHealth(t, mgr, "fake")
+
+	// Replace the binary path on disk with a non-empty directory while the
+	// already-spawned plugin process continues running, forcing os.Rename to
+	// fail after go build succeeds.
+	require.NoError(t, os.Remove(binaryPath))
+	require.NoError(t, os.MkdirAll(filepath.Join(binaryPath, "nonempty"), 0o755))
+
+	_, err := mgr.UpdatePlugin("fake", repoDir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to move new binary into place")
+
+	after := fakeHealth(t, mgr, "fake")
+	assert.Equal(t, before["pid"], after["pid"], "failed rename must not kill the running plugin process")
 }

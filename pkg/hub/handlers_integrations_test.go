@@ -1394,6 +1394,7 @@ func TestUpdateIntegration_PermissionError_ExplicitPath(t *testing.T) {
 	mgr.updateErr = &plugin.PermissionError{
 		Plugin:       "discord",
 		BinaryPath:   "/usr/local/bin/scion-plugin-discord",
+		PluginsDir:   "/var/lib/scion/.scion/plugins",
 		ExplicitPath: true,
 		Err:          os.ErrPermission,
 	}
@@ -1415,7 +1416,77 @@ func TestUpdateIntegration_PermissionError_ExplicitPath(t *testing.T) {
 	assert.Contains(t, errResp.Error.Message, "/usr/local/bin/scion-plugin-discord")
 	guidance, _ := errResp.Error.Details["guidance"].(string)
 	assert.Contains(t, guidance, "server.plugins.broker.discord.path")
+	assert.Contains(t, guidance, "scion server restart")
+	assert.Contains(t, guidance, "Install")
+	assert.Contains(t, guidance, "/var/lib/scion/.scion/plugins/broker")
+	assert.Contains(t, guidance, "mktemp -d")
 	assert.Contains(t, guidance, "sudo install -m 0755")
+	assert.NotContains(t, guidance, "/tmp/scion-plugin-")
+}
+
+func TestUpdateIntegration_ReportsRelocation(t *testing.T) {
+	t.Run("relocated", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		mgr := newMockIntegrationManager()
+		mgr.plugins["discord"] = map[string]string{}
+		mgr.updateResult = plugin.UpdateResult{
+			BinaryPath:   "/var/lib/scion/.scion/plugins/broker/scion-plugin-discord",
+			PreviousPath: "/usr/local/bin/scion-plugin-discord",
+			Relocated:    true,
+		}
+
+		srv, admin, ctx := integAdminServer(t, "upd-reloc")
+		srv.config.MaintenanceConfig.RepoPath = "/opt/scion-src"
+		srv.pluginManager = mgr
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/discord/update", nil)
+		req = req.WithContext(integSessionContext(ctx, admin))
+		rr := httptest.NewRecorder()
+		srv.handleAdminIntegrationByName(rr, req)
+
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+		var body struct {
+			Status        string   `json:"status"`
+			RelocatedFrom string   `json:"relocated_from"`
+			BinaryPath    string   `json:"binary_path"`
+			Warnings      []string `json:"warnings"`
+		}
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&body))
+		assert.Equal(t, "ok", body.Status)
+		assert.Equal(t, "/usr/local/bin/scion-plugin-discord", body.RelocatedFrom)
+		assert.Equal(t, "/var/lib/scion/.scion/plugins/broker/scion-plugin-discord", body.BinaryPath)
+		require.Len(t, body.Warnings, 1)
+		assert.Contains(t, body.Warnings[0], "/usr/local/bin/scion-plugin-discord")
+		assert.Contains(t, body.Warnings[0], "/var/lib/scion/.scion/plugins/broker/scion-plugin-discord")
+	})
+
+	t.Run("in_place", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		mgr := newMockIntegrationManager()
+		mgr.plugins["discord"] = map[string]string{}
+		mgr.updateResult = plugin.UpdateResult{
+			BinaryPath: "/var/lib/scion/.scion/plugins/broker/scion-plugin-discord",
+			Relocated:  false,
+		}
+
+		srv, admin, ctx := integAdminServer(t, "upd-inplace")
+		srv.config.MaintenanceConfig.RepoPath = "/opt/scion-src"
+		srv.pluginManager = mgr
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/integrations/discord/update", nil)
+		req = req.WithContext(integSessionContext(ctx, admin))
+		rr := httptest.NewRecorder()
+		srv.handleAdminIntegrationByName(rr, req)
+
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+		var body map[string]interface{}
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&body))
+		assert.Equal(t, "ok", body["status"])
+		assert.NotContains(t, body, "relocated_from")
+		assert.NotContains(t, body, "warnings")
+	})
 }
 
 func TestUpdateIntegration_PermissionError_PluginsDir(t *testing.T) {
