@@ -154,6 +154,9 @@ func (DecisionAnswer) Indexes() []ent.Index {
 			Unique(),
 		// The project's decision log, newest first.
 		index.Fields("project_id", "created_at"),
+		// The decision log filtered by asking agent (Decisions agent
+		// filter on Made), newest first.
+		index.Fields("project_id", "asker_agent_id", "created_at"),
 		// History joins choice-response messages to their answer.
 		index.Fields("response_message_id"),
 		// User deletion clears answered_by_user_id on the user's answers.

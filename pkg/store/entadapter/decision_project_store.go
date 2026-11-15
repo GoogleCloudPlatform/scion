@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
@@ -35,6 +36,12 @@ const maxProjectDecisionFacetItems = 500
 type groupedDecisionAgent struct {
 	AskerAgentID uuid.UUID `json:"asker_agent_id"`
 	Name         string    `json:"name"`
+}
+
+type groupedDecisionAgentName struct {
+	AskerAgentID uuid.UUID `json:"asker_agent_id"`
+	Name         string    `json:"asker_agent_name"`
+	Latest       string    `json:"latest"`
 }
 
 type groupedDecisionAnswerer struct {
@@ -72,22 +79,22 @@ func (c *CompositeStore) ListProjectDecisionAgents(ctx context.Context, projectI
 	return out, nil
 }
 
-// ListProjectOpenPrompts implements store.DecisionStore.
-func (c *CompositeStore) ListProjectOpenPrompts(ctx context.Context, projectID string, chatKeys []string) ([]*store.ProjectDecisionPrompt, error) {
-	projectUUID, err := parseGetID(projectID)
+// ListOpenPrompts implements store.DecisionStore.
+func (c *CompositeStore) ListOpenPrompts(ctx context.Context, projectIDs, chatKeys []string) ([]*store.ProjectDecisionPrompt, error) {
+	projectUUIDs, err := parseProjectIDs(projectIDs)
 	if err != nil {
 		return nil, err
 	}
 	keys := cleanChatKeys(chatKeys)
-	if len(keys) == 0 {
+	if len(keys) == 0 || len(projectUUIDs) == 0 {
 		return nil, nil
 	}
 
-	// Find every non-settled decision row in (projectID, chatKeys):
+	// Find every non-settled decision row in (projectIDs, chatKeys):
 	// status == pending, OR (status == decided AND NOT EXISTS direct answer).
 	openRows, err := c.client.Decision.Query().
 		Where(
-			decision.ProjectID(projectUUID),
+			decision.ProjectIDIn(projectUUIDs...),
 			decision.ChatKeyIn(keys...),
 			decision.Or(
 				decision.StatusEQ(decision.StatusPending),
@@ -135,6 +142,7 @@ func (c *CompositeStore) ListProjectOpenPrompts(ctx context.Context, projectID s
 		}
 		first := ds[0]
 		prompts = append(prompts, &store.ProjectDecisionPrompt{
+			ProjectID:              first.ProjectID,
 			MessageID:              msgID,
 			ChatKey:                first.ChatKey,
 			AskerAgentID:           first.AskerAgentID,
@@ -154,16 +162,16 @@ func (c *CompositeStore) ListProjectOpenPrompts(ctx context.Context, projectID s
 	return prompts, nil
 }
 
-// ListProjectDecisionAnswers implements store.DecisionStore.
-func (c *CompositeStore) ListProjectDecisionAnswers(
+// ListDecisionAnswers implements store.DecisionStore.
+func (c *CompositeStore) ListDecisionAnswers(
 	ctx context.Context,
-	projectID string,
+	projectIDs []string,
 	chatKeys []string,
 	filter store.ProjectDecisionAnswerFilter,
 	cursor string,
 	limit int,
 ) ([]*store.ProjectDecisionAnswerEntry, string, error) {
-	projectUUID, err := parseGetID(projectID)
+	projectUUIDs, err := parseProjectIDs(projectIDs)
 	if err != nil {
 		return nil, "", err
 	}
@@ -194,15 +202,18 @@ func (c *CompositeStore) ListProjectDecisionAnswers(
 	}
 
 	keys := cleanChatKeys(chatKeys)
-	if limit == 0 || len(keys) == 0 {
+	if limit == 0 || len(keys) == 0 || len(projectUUIDs) == 0 {
 		return nil, "", nil
 	}
 
 	q := c.client.DecisionAnswer.Query().
 		Where(
-			decisionanswer.ProjectID(projectUUID),
-			decisionAnswerInChatKeys(projectUUID, keys),
+			decisionanswer.ProjectIDIn(projectUUIDs...),
+			decisionAnswerInChatKeys(projectUUIDs, keys),
 		)
+	if filter.Query != "" {
+		q = q.Where(decisionAnswerMatchesQuery(filter.Query, cleanChatKeys(filter.QueryChatKeys)))
+	}
 	if filter.AgentID != "" {
 		q = q.Where(decisionanswer.AskerAgentID(agentUUID))
 	}
@@ -327,45 +338,33 @@ func (c *CompositeStore) ListProjectDecisionAnswers(
 	return entries, nextCursor, nil
 }
 
-// ListProjectDecisionFacets implements store.DecisionStore.
-func (c *CompositeStore) ListProjectDecisionFacets(
+// ListDecisionFacets implements store.DecisionStore.
+func (c *CompositeStore) ListDecisionFacets(
 	ctx context.Context,
-	projectID string,
+	projectIDs []string,
 	chatKeys []string,
-) ([]store.ProjectDecisionActor, []store.ProjectDecisionActor, error) {
-	projectUUID, err := parseGetID(projectID)
+) ([]store.ProjectDecisionActor, []store.ProjectDecisionActor, []string, error) {
+	projectUUIDs, err := parseProjectIDs(projectIDs)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	keys := cleanChatKeys(chatKeys)
-	if len(keys) == 0 {
-		return nil, nil, nil
+	if len(keys) == 0 || len(projectUUIDs) == 0 {
+		return nil, nil, nil, nil
 	}
 
-	var decRows []groupedDecisionAgent
-	err = c.client.Decision.Query().
-		Where(decision.ProjectID(projectUUID), decision.ChatKeyIn(keys...)).
-		Order(ent.Asc(decision.FieldAskerAgentID)).
-		Limit(maxProjectDecisionFacetItems).
-		GroupBy(decision.FieldAskerAgentID).
-		Aggregate(ent.As(ent.Max(decision.FieldAskerAgentName), "name")).
-		Scan(ctx, &decRows)
+	agents, err := c.decisionAgentFacet(ctx, projectUUIDs, keys)
 	if err != nil {
-		return nil, nil, mapError(err)
+		return nil, nil, nil, err
 	}
-	agents := make([]store.ProjectDecisionActor, 0, len(decRows))
-	for _, r := range decRows {
-		agents = append(agents, store.ProjectDecisionActor{ID: r.AskerAgentID.String(), Name: r.Name})
-	}
-	sortProjectDecisionActors(agents)
 
 	var ansRows []groupedDecisionAnswerer
 	err = c.client.DecisionAnswer.Query().
 		Where(
-			decisionanswer.ProjectID(projectUUID),
+			decisionanswer.ProjectIDIn(projectUUIDs...),
 			decisionanswer.AnsweredByUserIDNotNil(),
 			decisionanswer.AnsweredByUserIDNEQ(""),
-			decisionAnswerInChatKeys(projectUUID, keys),
+			decisionAnswerInChatKeys(projectUUIDs, keys),
 		).
 		Order(ent.Asc(decisionanswer.FieldAnsweredByUserID)).
 		Limit(maxProjectDecisionFacetItems).
@@ -376,7 +375,7 @@ func (c *CompositeStore) ListProjectDecisionFacets(
 		).
 		Scan(ctx, &ansRows)
 	if err != nil {
-		return nil, nil, mapError(err)
+		return nil, nil, nil, mapError(err)
 	}
 	answerers := make([]store.ProjectDecisionActor, 0, len(ansRows))
 	for _, r := range ansRows {
@@ -391,7 +390,53 @@ func (c *CompositeStore) ListProjectDecisionFacets(
 	}
 	sortProjectDecisionActors(answerers)
 
-	return agents, answerers, nil
+	// Distinct chat keys with at least one decision. The result is a subset
+	// of keys, so its size is bounded by the caller's readable set.
+	convKeys, err := c.client.Decision.Query().
+		Where(decision.ProjectIDIn(projectUUIDs...), decision.ChatKeyIn(keys...)).
+		Unique(true).
+		Select(decision.FieldChatKey).
+		Strings(ctx)
+	if err != nil {
+		return nil, nil, nil, mapError(err)
+	}
+
+	return agents, answerers, convKeys, nil
+}
+
+// decisionAgentFacet returns the distinct asking agents of decisions in
+// (projectUUIDs, keys), each named by the asker_agent_name snapshot of its
+// newest decision.
+func (c *CompositeStore) decisionAgentFacet(ctx context.Context, projectUUIDs []uuid.UUID, keys []string) ([]store.ProjectDecisionActor, error) {
+	var rows []groupedDecisionAgentName
+	err := c.client.Decision.Query().
+		Where(decision.ProjectIDIn(projectUUIDs...), decision.ChatKeyIn(keys...)).
+		GroupBy(decision.FieldAskerAgentID, decision.FieldAskerAgentName).
+		Aggregate(ent.As(ent.Max(decision.FieldCreatedAt), "latest")).
+		Scan(ctx, &rows)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	type newest struct {
+		name   string
+		latest time.Time
+	}
+	byAgent := make(map[uuid.UUID]newest, len(rows))
+	for _, r := range rows {
+		latest := parseAggregateTime(r.Latest)
+		cur, ok := byAgent[r.AskerAgentID]
+		// Ties on the timestamp keep the greater name, so the result is
+		// deterministic.
+		if !ok || latest.After(cur.latest) || (latest.Equal(cur.latest) && r.Name > cur.name) {
+			byAgent[r.AskerAgentID] = newest{name: r.Name, latest: latest}
+		}
+	}
+	out := make([]store.ProjectDecisionActor, 0, len(byAgent))
+	for id, n := range byAgent {
+		out = append(out, store.ProjectDecisionActor{ID: id.String(), Name: n.name})
+	}
+	sortProjectDecisionActors(out)
+	return out, nil
 }
 
 func noDirectDecisionAnswer() predicate.Decision {
@@ -408,10 +453,14 @@ func noDirectDecisionAnswer() predicate.Decision {
 	}
 }
 
-func decisionAnswerInChatKeys(projectUUID uuid.UUID, keys []string) predicate.DecisionAnswer {
+func decisionAnswerInChatKeys(projectUUIDs []uuid.UUID, keys []string) predicate.DecisionAnswer {
 	vals := make([]any, len(keys))
 	for i, k := range keys {
 		vals[i] = k
+	}
+	projectVals := make([]any, len(projectUUIDs))
+	for i, id := range projectUUIDs {
+		projectVals[i] = id
 	}
 	return func(s *entsql.Selector) {
 		t := entsql.Table(decision.Table)
@@ -420,11 +469,36 @@ func decisionAnswerInChatKeys(projectUUID uuid.UUID, keys []string) predicate.De
 				From(t).
 				Where(entsql.And(
 					entsql.ColumnsEQ(t.C(decision.FieldID), s.C(decisionanswer.FieldDecisionRowID)),
-					entsql.EQ(t.C(decision.FieldProjectID), projectUUID),
+					entsql.In(t.C(decision.FieldProjectID), projectVals...),
 					entsql.In(t.C(decision.FieldChatKey), vals...),
 				)),
 		))
 	}
+}
+
+// decisionAnswerMatchesQuery keeps answers whose question text, choice label
+// or key snapshot contains q case-insensitively, or whose decision row's
+// asker_agent_name contains q or whose chat_key is in labelKeys. ContainsFold
+// escapes %, _ and \, so q matches literally (ILIKE on Postgres, LOWER() LIKE
+// on SQLite).
+func decisionAnswerMatchesQuery(q string, labelKeys []string) predicate.DecisionAnswer {
+	rowArms := []predicate.Decision{decision.AskerAgentNameContainsFold(q)}
+	if len(labelKeys) > 0 {
+		rowArms = append(rowArms, decision.ChatKeyIn(labelKeys...))
+	}
+	rowMatches := decision.Or(rowArms...)
+	return decisionanswer.Or(
+		decisionanswer.QuestionTextContainsFold(q),
+		decisionanswer.ChoiceLabelContainsFold(q),
+		decisionanswer.KeyContainsFold(q),
+		func(s *entsql.Selector) {
+			t := entsql.Table(decision.Table)
+			sub := entsql.Select(t.C(decision.FieldID)).From(t)
+			rowMatches(sub)
+			sub.Where(entsql.ColumnsEQ(t.C(decision.FieldID), s.C(decisionanswer.FieldDecisionRowID)))
+			s.Where(entsql.Exists(sub))
+		},
+	)
 }
 
 func answerProvenancePredicate(raw string) (predicate.DecisionAnswer, error) {
@@ -466,6 +540,43 @@ func (c *CompositeStore) existingMessageIDSet(ctx context.Context, ids []uuid.UU
 	out := make(map[string]bool, len(found))
 	for _, id := range found {
 		out[id.String()] = true
+	}
+	return out, nil
+}
+
+// parseAggregateTime parses a MAX(timestamp) aggregate scanned as text:
+// Postgres yields a time.Time that database/sql formats as RFC3339Nano, and
+// SQLite yields the stored text (the driver writes time.Time.String()
+// form), which loses its column type in an aggregate. An unparseable value
+// is the zero time.
+func parseAggregateTime(s string) time.Time {
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		"2006-01-02 15:04:05.999999999 -0700 MST",
+		"2006-01-02 15:04:05.999999999-07:00",
+		"2006-01-02 15:04:05.999999999Z07:00",
+		"2006-01-02 15:04:05.999999999",
+	} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
+}
+
+// parseProjectIDs parses and de-duplicates project UUIDs.
+func parseProjectIDs(ids []string) ([]uuid.UUID, error) {
+	out := make([]uuid.UUID, 0, len(ids))
+	seen := make(map[uuid.UUID]bool, len(ids))
+	for _, id := range ids {
+		u, err := parseGetID(id)
+		if err != nil {
+			return nil, err
+		}
+		if !seen[u] {
+			seen[u] = true
+			out = append(out, u)
+		}
 	}
 	return out, nil
 }

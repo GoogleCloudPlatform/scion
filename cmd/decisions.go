@@ -37,13 +37,16 @@ var decisionsCmd = newDecisionsCmd()
 func newDecisionsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "decisions",
-		Short: "Inspect and record answers for choice decisions",
-		Long: `Inspect choice decisions you have asked and record interpreted answers from user replies.
+		Short: "List Decisions, and inspect and record an agent's Decisions",
+		Long: `List Decisions. In human mode, list the Decisions waiting on you in the
+current project, or search the Decisions made. In agent mode, inspect the
+Decisions your agent has asked and record interpreted answers from user replies.
 
 Commands:
-  scion decisions list [--pending | --decided | --all]   List your decisions
-  scion decisions show <key>                             Show all versions and answers for a decision
-  scion decisions record ... --from <message-id>         Record interpreted answer(s) from a user reply`,
+  scion decisions list [--waiting | --made] [-q <text>]   List Decisions (human mode)
+  scion decisions list [--pending | --decided | --all]   List your agent's Decisions (agent mode)
+  scion decisions show <key>                             Show all versions and answers for a Decision (agent mode)
+  scion decisions record ... --from <message-id>         Record interpreted answer(s) from a user reply (agent mode)`,
 	}
 	cmd.AddCommand(
 		newDecisionsListCmd(),

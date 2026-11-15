@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sync"
 	"time"
 
@@ -179,6 +180,13 @@ func (s *Server) chatSearchTimeout() time.Duration {
 		return s.config.ChatSearchTimeout
 	}
 	return DefaultChatSearchTimeout
+}
+
+// writeChatSearchTimeout writes the answer to a search that passed its time
+// limit. Chat search and the Decisions search (design D9) share it.
+func writeChatSearchTimeout(w http.ResponseWriter) {
+	writeError(w, http.StatusServiceUnavailable, "SEARCH_TIMEOUT",
+		"Search took too long. Try a longer phrase or search one space.", nil)
 }
 
 // isChatSearchTimeout reports whether a search failed because its time

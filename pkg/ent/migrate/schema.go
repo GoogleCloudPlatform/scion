@@ -1336,6 +1336,11 @@ var (
 				Columns: []*schema.Column{DecisionAnswersColumns[2], DecisionAnswersColumns[23]},
 			},
 			{
+				Name:    "decisionanswer_project_id_asker_agent_id_created_at",
+				Unique:  false,
+				Columns: []*schema.Column{DecisionAnswersColumns[2], DecisionAnswersColumns[3], DecisionAnswersColumns[23]},
+			},
+			{
 				Name:    "decisionanswer_response_message_id",
 				Unique:  false,
 				Columns: []*schema.Column{DecisionAnswersColumns[17]},

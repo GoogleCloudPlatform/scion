@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
@@ -252,6 +253,64 @@ func applyModeRestrictions(root *cobra.Command, mode CLIMode) {
 	if mode == ModeAgent {
 		applyAgentMode(root)
 	}
+	hideOtherModeFlags(root, mode)
+}
+
+// cliModeFlagAnnotation marks a flag that only one CLI mode accepts. Its
+// value is the mode (ModeHuman or ModeAgent). In the other mode the flag is
+// hidden from help (applyModeRestrictions) and refused when set
+// (checkFlagsForMode).
+const cliModeFlagAnnotation = "scion_cli_mode"
+
+// markFlagsForMode marks cmd's local flags names as accepted only in mode.
+//
+// Hiding is automatic (applyModeRestrictions), but refusing is opt-in: a
+// command that marks flags must call checkFlagsForMode(cmd, resolveMode())
+// at the top of its RunE, before acting on any flag (as runDecisionsList
+// does). Without that call a marked flag set in the other mode is hidden
+// from help yet still accepted.
+func markFlagsForMode(cmd *cobra.Command, mode CLIMode, names ...string) {
+	for _, name := range names {
+		if err := cmd.Flags().SetAnnotation(name, cliModeFlagAnnotation, []string{string(mode)}); err != nil {
+			panic(fmt.Sprintf("markFlagsForMode: %s: %v", cmd.CommandPath(), err))
+		}
+	}
+}
+
+// flagModeOf returns the only mode that accepts f, or "" for every mode.
+func flagModeOf(f *pflag.Flag) CLIMode {
+	if v := f.Annotations[cliModeFlagAnnotation]; len(v) == 1 {
+		return CLIMode(v[0])
+	}
+	return ""
+}
+
+// hideOtherModeFlags hides, in every command under root, the flags marked
+// for a mode other than mode.
+func hideOtherModeFlags(root *cobra.Command, mode CLIMode) {
+	root.Flags().VisitAll(func(f *pflag.Flag) {
+		if m := flagModeOf(f); m != "" && m != mode {
+			f.Hidden = true
+		}
+	})
+	for _, child := range root.Commands() {
+		hideOtherModeFlags(child, mode)
+	}
+}
+
+// checkFlagsForMode returns a usage error naming the first flag set on cmd
+// that mode does not accept.
+func checkFlagsForMode(cmd *cobra.Command, mode CLIMode) error {
+	var err error
+	cmd.Flags().Visit(func(f *pflag.Flag) {
+		if err != nil {
+			return
+		}
+		if m := flagModeOf(f); m != "" && m != mode {
+			err = newUsageError("--%s is available only in %s mode; this CLI is in %s mode", f.Name, m, mode)
+		}
+	})
+	return err
 }
 
 func applyAgentMode(root *cobra.Command) {
