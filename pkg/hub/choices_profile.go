@@ -39,6 +39,8 @@ const (
 	DecisionsSortProject = "project"
 
 	maxProfileDecisionProjects          = 200
+	maxProfileCursorDoneProjects        = maxProfileDecisionProjects * 2
+	maxProfileCursorBytes               = 32768
 	profileMadeOverviewPerProject       = 5
 	maxProfileDecisionProjectParamBytes = 128
 	profileProjectSummariesBatchSize    = 500
@@ -146,7 +148,11 @@ func encodeProfileDecisionCursor(pq projectDecisionsQuery, pending *pendingPromp
 }
 
 func decodeProfileDecisionCursor(token string, pq projectDecisionsQuery) (profileDecisionCursor, error) {
-	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(token))
+	trimmed := strings.TrimSpace(token)
+	if len(trimmed) > maxProfileCursorBytes {
+		return profileDecisionCursor{}, errors.New("malformed cursor")
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(trimmed)
 	if err != nil {
 		return profileDecisionCursor{}, errors.New("malformed cursor")
 	}
@@ -167,11 +173,17 @@ func decodeProfileDecisionCursor(token string, pq projectDecisionsQuery) (profil
 		}
 		c.CreatedAt = c.CreatedAt.UTC()
 		if pq.sort == DecisionsSortProject {
-			if c.ProjectID == "" || c.GroupAt.IsZero() {
+			if c.ProjectID == "" || len(c.ProjectID) > maxProfileDecisionProjectParamBytes || len(c.DoneProjects) > maxProfileCursorDoneProjects {
 				return profileDecisionCursor{}, errors.New("malformed project pending cursor")
 			}
-			c.GroupAt = c.GroupAt.UTC()
-		} else if !c.GroupAt.IsZero() || c.ProjectID != "" {
+			seenDone := make(map[string]bool, len(c.DoneProjects))
+			for _, pid := range c.DoneProjects {
+				if pid == "" || len(pid) > maxProfileDecisionProjectParamBytes || pid == c.ProjectID || seenDone[pid] {
+					return profileDecisionCursor{}, errors.New("malformed project pending cursor")
+				}
+				seenDone[pid] = true
+			}
+		} else if len(c.DoneProjects) > 0 || c.ProjectID != "" {
 			return profileDecisionCursor{}, errors.New("malformed recent pending cursor")
 		}
 		return env, nil
@@ -478,7 +490,9 @@ func (s *Server) profileDecisionScopes(
 		for i, p := range ordered {
 			resources[i] = projectResource(p)
 		}
-		caps := s.authzService.ComputeCapabilitiesBatch(ctx, authIdentity, resources, "project")
+		// Evaluate ActionRead only (same decision path as ComputeCapabilitiesBatch
+		// without deciding the remaining project actions across 200 projects).
+		caps := s.authzService.ComputeCapabilitiesForActions(ctx, authIdentity, resources, []Action{ActionRead})
 		if err := ctx.Err(); err != nil {
 			return nil, false, err
 		}
@@ -625,7 +639,14 @@ func (s *Server) finishProfilePendingDecisions(
 // (0 = waitingOnYou, 1 = waitingOnOthers-only) by each project group's newest
 // prompt CreatedAt DESC (tie-broken by ProjectID ASC), then newest first
 // within each project group (CreatedAt DESC, MessageID DESC), and slices the
-// keyset page after cur (design R4, AC 7).
+// page after cur (design R4, AC 7).
+//
+// Because a group's live newest prompt timestamp shifts when a prompt is
+// added or answered inline, the cursor records the finished project IDs in
+// cur.Section plus the keyset position (CreatedAt, MessageID) inside the
+// active group cur.ProjectID: subsequent pages finish cur.ProjectID first,
+// skip cur.DoneProjects, and order remaining unfinished groups by live
+// groupAt DESC, ProjectID ASC.
 func paginateClassifiedPromptsByProject(
 	all []classifiedOpenPrompt,
 	cur *pendingPromptCursor,
@@ -649,66 +670,105 @@ func paginateClassifiedPromptsByProject(
 	groupAt := func(c classifiedOpenPrompt) time.Time {
 		return groupNewest[sectionProject{section: c.section, projectID: c.raw.ProjectID}]
 	}
-
-	ordered := make([]classifiedOpenPrompt, len(all))
-	copy(ordered, all)
-	sort.Slice(ordered, func(i, j int) bool {
-		a, b := ordered[i], ordered[j]
-		if a.section != b.section {
-			return a.section < b.section
-		}
-		ga, gb := groupAt(a), groupAt(b)
-		if !ga.Equal(gb) {
-			return ga.After(gb)
-		}
-		if a.raw.ProjectID != b.raw.ProjectID {
-			return a.raw.ProjectID < b.raw.ProjectID
-		}
+	promptBefore := func(a, b classifiedOpenPrompt) bool {
 		if !a.raw.CreatedAt.Equal(b.raw.CreatedAt) {
 			return a.raw.CreatedAt.After(b.raw.CreatedAt)
 		}
 		return a.raw.MessageID > b.raw.MessageID
-	})
-
-	start := 0
-	if cur != nil {
-		start = len(ordered)
-		for i, item := range ordered {
-			ig := groupAt(item)
-			after := false
-			switch {
-			case item.section != cur.Section:
-				after = item.section > cur.Section
-			case !ig.Equal(cur.GroupAt):
-				after = ig.Before(cur.GroupAt)
-			case item.raw.ProjectID != cur.ProjectID:
-				after = item.raw.ProjectID > cur.ProjectID
-			case !item.raw.CreatedAt.Equal(cur.CreatedAt):
-				after = item.raw.CreatedAt.Before(cur.CreatedAt)
-			default:
-				after = item.raw.MessageID < cur.MessageID
-			}
-			if after {
-				start = i
-				break
-			}
-		}
 	}
-	if start >= len(ordered) {
+	groupAndPromptOrder := func(items []classifiedOpenPrompt) {
+		sort.Slice(items, func(i, j int) bool {
+			a, b := items[i], items[j]
+			if a.section != b.section {
+				return a.section < b.section
+			}
+			ga, gb := groupAt(a), groupAt(b)
+			if !ga.Equal(gb) {
+				return ga.After(gb)
+			}
+			if a.raw.ProjectID != b.raw.ProjectID {
+				return a.raw.ProjectID < b.raw.ProjectID
+			}
+			return promptBefore(a, b)
+		})
+	}
+
+	var rem []classifiedOpenPrompt
+	if cur == nil {
+		rem = make([]classifiedOpenPrompt, len(all))
+		copy(rem, all)
+		groupAndPromptOrder(rem)
+	} else {
+		doneSet := make(map[string]bool, len(cur.DoneProjects))
+		for _, pid := range cur.DoneProjects {
+			doneSet[pid] = true
+		}
+		var activeGroup []classifiedOpenPrompt
+		var rest []classifiedOpenPrompt
+		for _, item := range all {
+			if item.section < cur.Section {
+				continue
+			}
+			if item.section == cur.Section {
+				if doneSet[item.raw.ProjectID] {
+					continue
+				}
+				if item.raw.ProjectID == cur.ProjectID {
+					afterInGroup := item.raw.CreatedAt.Before(cur.CreatedAt) ||
+						(item.raw.CreatedAt.Equal(cur.CreatedAt) && item.raw.MessageID < cur.MessageID)
+					if afterInGroup {
+						activeGroup = append(activeGroup, item)
+					}
+					continue
+				}
+			}
+			rest = append(rest, item)
+		}
+		sort.Slice(activeGroup, func(i, j int) bool {
+			return promptBefore(activeGroup[i], activeGroup[j])
+		})
+		groupAndPromptOrder(rest)
+		rem = make([]classifiedOpenPrompt, 0, len(activeGroup)+len(rest))
+		rem = append(rem, activeGroup...)
+		rem = append(rem, rest...)
+	}
+
+	if len(rem) == 0 {
 		return nil, nil
 	}
-	rem := ordered[start:]
 	if len(rem) <= limit {
 		return rem, nil
 	}
 	page := rem[:limit]
 	last := page[len(page)-1]
+
+	var done []string
+	seenDone := make(map[string]bool)
+	addDone := func(pid string) {
+		if pid == "" || pid == last.raw.ProjectID || seenDone[pid] {
+			return
+		}
+		seenDone[pid] = true
+		done = append(done, pid)
+	}
+	if cur != nil && cur.Section == last.section {
+		for _, pid := range cur.DoneProjects {
+			addDone(pid)
+		}
+		addDone(cur.ProjectID)
+	}
+	for _, item := range page {
+		if item.section == last.section {
+			addDone(item.raw.ProjectID)
+		}
+	}
+
 	return page, &pendingPromptCursor{
-		Section:   last.section,
-		GroupAt:   groupAt(last),
-		ProjectID: last.raw.ProjectID,
-		CreatedAt: last.raw.CreatedAt.UTC(),
-		MessageID: last.raw.MessageID,
+		Section:      last.section,
+		DoneProjects: done,
+		ProjectID:    last.raw.ProjectID,
+		CreatedAt:    last.raw.CreatedAt.UTC(),
+		MessageID:    last.raw.MessageID,
 	}
 }
 
@@ -777,10 +837,23 @@ func (s *Server) profileMadeByProjectGroups(
 	if limit == 0 {
 		return []ProfileDecisionMadeGroupView{}, nil
 	}
+	scopedKeys := listKeys
+	if len(targetProjectIDs) < len(set.projectIDs) {
+		targetSet := make(map[string]bool, len(targetProjectIDs))
+		for _, pid := range targetProjectIDs {
+			targetSet[pid] = true
+		}
+		scopedKeys = make([]string, 0, len(listKeys))
+		for _, k := range listKeys {
+			if targetSet[set.keyProject[k]] {
+				scopedKeys = append(scopedKeys, k)
+			}
+		}
+	}
 	byProject, err := s.store.ListDecisionAnswersPerProject(
 		ctx,
 		targetProjectIDs,
-		listKeys,
+		scopedKeys,
 		filter,
 		profileMadeOverviewPerProject+1,
 	)
@@ -854,18 +927,26 @@ func (s *Server) profileMadeByProjectGroups(
 // maxProfileDecisionProjects), and the count of distinct projects that hold at
 // least one of those decisions (design 5.2, for P6's bell reconciler).
 //
+// Contract: callers must pass a bounded ctx (for example
+// context.WithTimeout(ctx, s.chatSearchTimeout()) when wired by P6's summary
+// endpoint) so roll-up evaluation across up to 200 member projects honors the
+// same D9 search budget as GET /api/v1/users/me/decisions. Missing or
+// non-active accounts (suspended, invited, pending, deleting) return (0, 0, nil);
+// store lookup faults return (0, 0, err).
+//
 //nolint:unused // unwired in non-test code until the P6 bell summary endpoint lands (ptone/scion#7997)
 func (s *Server) waitingOnYouTotal(ctx context.Context, userID string) (total, projects int, err error) {
 	userID = strings.TrimSpace(userID)
 	if userID == "" {
 		return 0, 0, nil
 	}
-	u, err := s.store.GetUser(ctx, userID)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return 0, 0, nil
-		}
+	u, err := checkUserAccount(ctx, s.store, PrincipalContext{Kind: PrincipalKindUser, ID: userID})
+	switch classifyUserAccount(u, err) {
+	case accountAllowed:
+	case accountLookupFault:
 		return 0, 0, err
+	default:
+		return 0, 0, nil
 	}
 	if u == nil {
 		return 0, 0, nil

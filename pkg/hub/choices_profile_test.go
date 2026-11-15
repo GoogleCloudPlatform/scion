@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -711,15 +712,177 @@ func TestUserMeDecisions_MadeSortsOverviewAndSearch(t *testing.T) {
 	assert.Equal(t, []string{"alpha-1"}, entryKeys(qOverview.Groups[0].Entries))
 }
 
+func TestUserMeDecisions_ProjectSortPagingStability(t *testing.T) {
+	ctx := context.Background()
+	base := time.Date(2026, 11, 15, 1, 0, 0, 0, time.UTC)
+
+	seedPrompt := func(t *testing.T, f *choicesFixture, p *store.Project, topicID, key string, offsetSec int) string {
+		t.Helper()
+		botID := api.NewUUID()
+		decs, err := messages.NormalizeDecisions("choices", decisionInputs(t, `[{"id":"`+key+`","question":"`+key+`?","choices":["yes","no"]}]`))
+		require.NoError(t, err)
+		res, err := f.store.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+			Message: &store.Message{
+				ID: api.NewUUID(), ProjectID: p.ID, Sender: "agent:bot", SenderID: botID,
+				Recipient: "chat", ThreadID: topicID, Channel: "web",
+				CreatedAt: base.Add(time.Duration(offsetSec) * time.Second),
+			},
+			Intro: key, AskerAgentID: botID, AskerAgentName: "bot-" + key, Decisions: decs,
+		})
+		require.NoError(t, err)
+		return res.Decisions[0].RowID
+	}
+
+	promptKeys := func(prompts []ProjectDecisionPromptView) []string {
+		out := make([]string, len(prompts))
+		for i, p := range prompts {
+			out[i] = p.Decisions[0].Key
+		}
+		return out
+	}
+
+	t.Run("new prompt in later group does not skip older items", func(t *testing.T) {
+		f := newChoicesFixture(t)
+		setProjectDecisionsExperiments(t, f.srv, true, true)
+
+		projB := &store.Project{ID: api.NewUUID(), Name: "Beta", Slug: "beta", Created: base, Updated: base}
+		require.NoError(t, f.store.CreateProject(ctx, projB))
+		bindProjectMember(t, f.store, projB.ID, f.bob.ID)
+		tpB := createTestDecisionTopic(t, f.wcs, projB.ID, "general", f.bob.ID)
+
+		// Seed in chronological order (decisions.created_at uses time.Now()):
+		// Group B (projB): B4, B5. Group A (f.project): A9, A10.
+		seedPrompt(t, f, projB, tpB, "B4", 4)
+		seedPrompt(t, f, projB, tpB, "B5", 5)
+		seedPrompt(t, f, f.project, f.topicID, "A9", 9)
+		seedPrompt(t, f, f.project, f.topicID, "A10", 10)
+
+		p1 := decodeProfilePendingDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet,
+			userMeDecisionsPath+"?limit=2", nil))
+		assert.Equal(t, []string{"A10", "A9"}, promptKeys(p1.Prompts))
+		require.NotEmpty(t, p1.NextCursor)
+
+		// B11 arrives in group B between Page 1 and Page 2, raising B's groupAt above 10.
+		seedPrompt(t, f, projB, tpB, "B11", 11)
+
+		p2 := decodeProfilePendingDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet,
+			userMeDecisionsPath+"?limit=2&cursor="+url.QueryEscape(p1.NextCursor), nil))
+		assert.Equal(t, []string{"B11", "B5"}, promptKeys(p2.Prompts))
+		require.NotEmpty(t, p2.NextCursor)
+
+		p3 := decodeProfilePendingDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet,
+			userMeDecisionsPath+"?limit=2&cursor="+url.QueryEscape(p2.NextCursor), nil))
+		assert.Equal(t, []string{"B4"}, promptKeys(p3.Prompts))
+		assert.Empty(t, p3.NextCursor)
+	})
+
+	t.Run("inline answer mid-group finishes active group before later groups", func(t *testing.T) {
+		f := newChoicesFixture(t)
+		setProjectDecisionsExperiments(t, f.srv, true, true)
+
+		projB := &store.Project{ID: api.NewUUID(), Name: "Beta", Slug: "beta", Created: base, Updated: base}
+		require.NoError(t, f.store.CreateProject(ctx, projB))
+		bindProjectMember(t, f.store, projB.ID, f.bob.ID)
+		tpB := createTestDecisionTopic(t, f.wcs, projB.ID, "general", f.bob.ID)
+
+		seedPrompt(t, f, f.project, f.topicID, "A3", 3)
+		seedPrompt(t, f, projB, tpB, "B7", 7)
+		seedPrompt(t, f, projB, tpB, "B8", 8)
+		rowA9 := seedPrompt(t, f, f.project, f.topicID, "A9", 9)
+		rowA10 := seedPrompt(t, f, f.project, f.topicID, "A10", 10)
+
+		p1 := decodeProfilePendingDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet,
+			userMeDecisionsPath+"?limit=2", nil))
+		assert.Equal(t, []string{"A10", "A9"}, promptKeys(p1.Prompts))
+		require.NotEmpty(t, p1.NextCursor)
+
+		// Inline answer settles A10 and A9 so A's live groupAt drops to 3 (< B's 8).
+		for _, rid := range []string{rowA10, rowA9} {
+			_, _, err := f.store.RecordAnswer(ctx, &store.RecordAnswerInput{
+				DecisionRowID: rid, ChoiceID: "1", AnsweredByUserID: f.bob.ID, AnsweredByName: f.bob.DisplayName,
+				Provenance: store.DecisionProvenanceDirect, Surface: store.DecisionSurfaceDecisionsPage,
+				ResponseMessage: &store.Message{
+					ID: api.NewUUID(), ProjectID: f.project.ID, Sender: "user:" + f.bob.ID, SenderID: f.bob.ID,
+					Recipient: "chat", ThreadID: f.topicID, Channel: "web", CreatedAt: base.Add(20 * time.Second),
+				},
+			})
+			require.NoError(t, err)
+		}
+
+		p2 := decodeProfilePendingDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet,
+			userMeDecisionsPath+"?limit=2&cursor="+url.QueryEscape(p1.NextCursor), nil))
+		assert.Equal(t, []string{"A3", "B8"}, promptKeys(p2.Prompts))
+		require.NotEmpty(t, p2.NextCursor)
+
+		p3 := decodeProfilePendingDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet,
+			userMeDecisionsPath+"?limit=2&cursor="+url.QueryEscape(p2.NextCursor), nil))
+		assert.Equal(t, []string{"B7"}, promptKeys(p3.Prompts))
+		assert.Empty(t, p3.NextCursor)
+	})
+
+	t.Run("inline answer after crossing group does not repeat finished group", func(t *testing.T) {
+		f := newChoicesFixture(t)
+		setProjectDecisionsExperiments(t, f.srv, true, true)
+
+		projB := &store.Project{ID: api.NewUUID(), Name: "Beta", Slug: "beta", Created: base, Updated: base}
+		require.NoError(t, f.store.CreateProject(ctx, projB))
+		bindProjectMember(t, f.store, projB.ID, f.bob.ID)
+		tpB := createTestDecisionTopic(t, f.wcs, projB.ID, "general", f.bob.ID)
+
+		seedPrompt(t, f, f.project, f.topicID, "A4", 4)
+		seedPrompt(t, f, projB, tpB, "B7", 7)
+		seedPrompt(t, f, projB, tpB, "B8", 8)
+		rowA10 := seedPrompt(t, f, f.project, f.topicID, "A10", 10)
+
+		p1 := decodeProfilePendingDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet,
+			userMeDecisionsPath+"?limit=3", nil))
+		assert.Equal(t, []string{"A10", "A4", "B8"}, promptKeys(p1.Prompts))
+		require.NotEmpty(t, p1.NextCursor)
+
+		// A10 is answered inline; A4 remains open with groupAt=4 (< B's 8),
+		// but group A was already finished on Page 1 so A4 must not repeat.
+		_, _, err := f.store.RecordAnswer(ctx, &store.RecordAnswerInput{
+			DecisionRowID: rowA10, ChoiceID: "1", AnsweredByUserID: f.bob.ID, AnsweredByName: f.bob.DisplayName,
+			Provenance: store.DecisionProvenanceDirect, Surface: store.DecisionSurfaceDecisionsPage,
+			ResponseMessage: &store.Message{
+				ID: api.NewUUID(), ProjectID: f.project.ID, Sender: "user:" + f.bob.ID, SenderID: f.bob.ID,
+				Recipient: "chat", ThreadID: f.topicID, Channel: "web", CreatedAt: base.Add(20 * time.Second),
+			},
+		})
+		require.NoError(t, err)
+
+		p2 := decodeProfilePendingDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet,
+			userMeDecisionsPath+"?limit=3&cursor="+url.QueryEscape(p1.NextCursor), nil))
+		assert.Equal(t, []string{"B7"}, promptKeys(p2.Prompts))
+		assert.Empty(t, p2.NextCursor)
+
+		// Malformed DoneProjects (containing cur.ProjectID) is rejected with 400.
+		rawCur, err := base64.RawURLEncoding.DecodeString(p1.NextCursor)
+		require.NoError(t, err)
+		var env profileDecisionCursor
+		require.NoError(t, json.Unmarshal(rawCur, &env))
+		env.Pending.DoneProjects = append(env.Pending.DoneProjects, env.Pending.ProjectID)
+		badBytes, err := json.Marshal(env)
+		require.NoError(t, err)
+		badTok := base64.RawURLEncoding.EncodeToString(badBytes)
+		assert.Equal(t, http.StatusBadRequest, doRequestAsUser(t, f.srv, f.bob, http.MethodGet,
+			userMeDecisionsPath+"?limit=3&cursor="+url.QueryEscape(badTok), nil).Code)
+	})
+}
+
 func TestUserMeDecisions_ProjectCap200AndTimeout(t *testing.T) {
 	f := newChoicesFixture(t)
 	setProjectDecisionsExperiments(t, f.srv, true, true)
 	ctx := context.Background()
 
-	// Seed 202 member projects with open decisions: the oldest 2 fall beyond
-	// the 200-project cap, setting truncatedProjects=true.
-	const totalProjects = 202
-	base := time.Now().UTC().Add(-time.Hour)
+	// Realistic worst-case cap fixture: 205 member projects x 5 topics per project,
+	// each topic holding 1 open prompt + 1 settled answer (1,000 open prompts,
+	// 1,000 made answers, and 1,000 distinct agents across the 200 capped scopes).
+	const (
+		totalProjects    = 205
+		topicsPerProject = 5
+	)
+	base := time.Now().UTC().Add(-2 * time.Hour)
 	var oldestProjectID string
 
 	memberRole, err := f.store.GetRoleDefinitionByName(ctx, "project-member", store.RoleScopeProject)
@@ -742,33 +905,104 @@ func TestUserMeDecisions_ProjectCap200AndTimeout(t *testing.T) {
 			ScopeType: store.RoleScopeProject, ScopeID: p.ID, CreatedBy: "test",
 		})
 		require.NoError(t, err)
-		tpID := createTestDecisionTopic(t, f.wcs, p.ID, "general", f.bob.ID)
-		for a := 0; a < 3; a++ {
+		for tpIdx := 0; tpIdx < topicsPerProject; tpIdx++ {
+			tpID := createTestDecisionTopic(t, f.wcs, p.ID, fmt.Sprintf("topic-%d", tpIdx), f.bob.ID)
 			botID := api.NewUUID()
-			botName := fmt.Sprintf("bot-%03d-%d", i, a)
-			key := fmt.Sprintf("cap-k-%03d-%d", i, a)
-			decs, err := messages.NormalizeDecisions("choices", decisionInputs(t, `[{"id":"`+key+`","question":"`+key+`?","choices":["yes","no"]}]`))
+			botName := fmt.Sprintf("bot-%03d-%d", i, tpIdx)
+			openKey := fmt.Sprintf("cap-k-%03d-%d", i, tpIdx)
+			decs, err := messages.NormalizeDecisions("choices", decisionInputs(t, `[{"id":"`+openKey+`","question":"`+openKey+`?","choices":["yes","no"]}]`))
 			require.NoError(t, err)
+			ts := base.Add(time.Duration(i*20+tpIdx*2) * time.Second)
 			_, err = f.store.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
 				Message: &store.Message{
 					ID: api.NewUUID(), ProjectID: p.ID, Sender: "agent:" + botName, SenderID: botID,
 					Recipient: "chat", ThreadID: tpID, Channel: "web",
-					CreatedAt: base.Add(time.Duration(i*10+a) * time.Second),
+					CreatedAt: ts,
 				},
-				Intro: key, AskerAgentID: botID, AskerAgentName: botName, Decisions: decs,
+				Intro: openKey, AskerAgentID: botID, AskerAgentName: botName, Decisions: decs,
+			})
+			require.NoError(t, err)
+
+			madeKey := fmt.Sprintf("cap-m-%03d-%d", i, tpIdx)
+			madeDecs, err := messages.NormalizeDecisions("choices", decisionInputs(t, `[{"id":"`+madeKey+`","question":"`+madeKey+`?","choices":["yes","no"]}]`))
+			require.NoError(t, err)
+			madePrompt, err := f.store.CreateChoicePrompt(ctx, &store.ChoicePromptInput{
+				Message: &store.Message{
+					ID: api.NewUUID(), ProjectID: p.ID, Sender: "agent:" + botName, SenderID: botID,
+					Recipient: "chat", ThreadID: tpID, Channel: "web",
+					CreatedAt: ts.Add(time.Second),
+				},
+				Intro: madeKey, AskerAgentID: botID, AskerAgentName: botName, Decisions: madeDecs,
+			})
+			require.NoError(t, err)
+			_, _, err = f.store.RecordAnswer(ctx, &store.RecordAnswerInput{
+				DecisionRowID: madePrompt.Decisions[0].RowID, ChoiceID: "1",
+				AnsweredByUserID: f.bob.ID, AnsweredByName: f.bob.DisplayName,
+				Provenance: store.DecisionProvenanceDirect, Surface: store.DecisionSurfaceDecisionsPage,
+				ResponseMessage: &store.Message{
+					ID: api.NewUUID(), ProjectID: p.ID, Sender: "user:" + f.bob.ID, SenderID: f.bob.ID,
+					Recipient: "chat", ThreadID: tpID, Channel: "web", CreatedAt: ts.Add(time.Second),
+				},
 			})
 			require.NoError(t, err)
 		}
 	}
 
-	startRollup := time.Now()
-	resp := decodeProfilePendingDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?limit=200", nil))
-	rollupElapsed := time.Since(startRollup)
-	t.Logf("200-project profile decisions roll-up (600 distinct agents across 200 scopes, capped at %d): %v", maxProjectDecisionFacetOptions, rollupElapsed)
+	// Assert comfortable headroom well under the 3 s DefaultChatSearchTimeout
+	// across all six HTTP query shapes plus waitingOnYouTotal.
+	const maxShapeDuration = 1500 * time.Millisecond
+
+	startPendingProject := time.Now()
+	resp := decodeProfilePendingDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?limit=50", nil))
+	pendingProjectElapsed := time.Since(startPendingProject)
+	assert.Less(t, pendingProjectElapsed, maxShapeDuration, "pending sort=project")
+
+	startPendingRecent := time.Now()
+	respRecent := decodeProfilePendingDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?sort=recent&limit=50", nil))
+	pendingRecentElapsed := time.Since(startPendingRecent)
+	assert.Less(t, pendingRecentElapsed, maxShapeDuration, "pending sort=recent")
+	assert.Len(t, respRecent.Prompts, 50)
+
+	startMadeRecent := time.Now()
+	respMadeRecent := decodeProfileMadeDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?tab=made", nil))
+	madeRecentElapsed := time.Since(startMadeRecent)
+	assert.Less(t, madeRecentElapsed, maxShapeDuration, "tab=made sort=recent")
+	assert.Len(t, respMadeRecent.Entries, 50)
+
+	startMadeProject := time.Now()
+	respMadeProject := decodeProfileMadeByProjectDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?tab=made&sort=project", nil))
+	madeProjectElapsed := time.Since(startMadeProject)
+	assert.Less(t, madeProjectElapsed, maxShapeDuration, "tab=made sort=project")
+	assert.Len(t, respMadeProject.Groups, maxProfileDecisionProjects)
+
+	startLimitZero := time.Now()
+	respLimitZero := decodeProfilePendingDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?limit=0", nil))
+	limitZeroElapsed := time.Since(startLimitZero)
+	assert.Less(t, limitZeroElapsed, maxShapeDuration, "limit=0")
+	assert.Empty(t, respLimitZero.Prompts)
+
+	startSearch := time.Now()
+	respSearch := decodeProfilePendingDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?q=cap-k-1", nil))
+	searchElapsed := time.Since(startSearch)
+	assert.Less(t, searchElapsed, maxShapeDuration, "q=cap-k-1")
+	assert.NotEmpty(t, respSearch.Prompts)
+
+	startWaitingTotal := time.Now()
+	wCtx, wCancel := context.WithTimeout(ctx, f.srv.chatSearchTimeout())
+	wTot, wProjs, err := f.srv.waitingOnYouTotal(wCtx, f.bob.ID)
+	wCancel()
+	waitingTotalElapsed := time.Since(startWaitingTotal)
+	require.NoError(t, err)
+	assert.Less(t, waitingTotalElapsed, maxShapeDuration, "waitingOnYouTotal")
+	assert.Equal(t, maxProfileDecisionProjects*topicsPerProject, wTot)
+	assert.Equal(t, maxProfileDecisionProjects, wProjs)
+
+	t.Logf("200x5 profile roll-up timings: pending/project=%v pending/recent=%v made/recent=%v made/project=%v limit=0=%v q=%v waitingOnYouTotal=%v",
+		pendingProjectElapsed, pendingRecentElapsed, madeRecentElapsed, madeProjectElapsed, limitZeroElapsed, searchElapsed, waitingTotalElapsed)
 
 	// Also measure ListDecisionFacets directly across the 200 resolved scopes
-	// (600 distinct (asker_agent_id, asker_agent_name) pairs, no DB-side LIMIT).
-	measScopes, _, err := f.srv.profileDecisionScopes(ctx, NewAuthenticatedUser(f.bob.ID, f.bob.Email, f.bob.DisplayName, f.bob.Role, "web"), nil, f.wcs, "")
+	// (1,000 distinct (asker_agent_id, asker_agent_name) pairs, no DB-side LIMIT).
+	measScopes, _, err := f.srv.profileDecisionScopes(withAuthzInputMemo(ctx), NewAuthenticatedUser(f.bob.ID, f.bob.Email, f.bob.DisplayName, f.bob.Role, "web"), nil, f.wcs, "")
 	require.NoError(t, err)
 	measSet := newDecisionScopeSet(measScopes)
 	startFacets := time.Now()
@@ -777,12 +1011,13 @@ func TestUserMeDecisions_ProjectCap200AndTimeout(t *testing.T) {
 	require.NoError(t, err)
 	sortedAgents := decisionAgentFacetViews(measSet, rawAgents)
 	facetsTotalElapsed := time.Since(startFacets)
-	t.Logf("200-project ListDecisionFacets: rawAgents=%d rawConvs=%d db=%v db+sort+cap500=%v (capped=%d)",
+	t.Logf("200x5 ListDecisionFacets: rawAgents=%d rawConvs=%d db=%v db+sort+cap500=%v (capped=%d)",
 		len(rawAgents), len(rawConvKeys), facetsDBElapsed, facetsTotalElapsed, len(sortedAgents))
+
 	assert.True(t, resp.TruncatedProjects)
 	assert.Len(t, resp.Projects, maxProfileDecisionProjects)
-	assert.Len(t, resp.Agents, maxProjectDecisionFacetOptions, "600 distinct agents across 200 scopes must be capped at 500")
-	assert.Equal(t, maxProfileDecisionProjects*3, resp.Counts.WaitingOnYou)
+	assert.Len(t, resp.Agents, maxProjectDecisionFacetOptions, "1,000 distinct agents across 200 scopes must be capped at 500")
+	assert.Equal(t, maxProfileDecisionProjects*topicsPerProject, resp.Counts.WaitingOnYou)
 	for _, pr := range resp.Projects {
 		assert.NotEqual(t, oldestProjectID, pr.ID, "oldest project beyond 200 cap should not be in top 200")
 	}
@@ -792,8 +1027,8 @@ func TestUserMeDecisions_ProjectCap200AndTimeout(t *testing.T) {
 	picked := decodeProfilePendingDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet,
 		userMeDecisionsPath+"?project="+oldestProjectID, nil))
 	assert.True(t, picked.TruncatedProjects)
-	require.Len(t, picked.Prompts, 3)
-	assert.Equal(t, "cap-k-000-2", picked.Prompts[0].Decisions[0].Key)
+	require.Len(t, picked.Prompts, topicsPerProject)
+	assert.Equal(t, "cap-k-000-4", picked.Prompts[0].Decisions[0].Key)
 
 	// Design D9: every profile request runs under ChatSearchTimeout (even without q)
 	// and maps timeout errors (including non-context errors after deadline, such as
@@ -909,4 +1144,23 @@ func TestWaitingOnYouTotal(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 3, tot, "2 in f.project + 1 in projDM")
 	assert.Equal(t, 2, projs, "distinct projects with >=1 waitingOnYou decision")
+
+	// Suspended user -> (0, 0, nil) via checkUserAccount.
+	bobRow, err := f.store.GetUser(ctx, f.bob.ID)
+	require.NoError(t, err)
+	bobRow.Status = store.UserStatusSuspended
+	require.NoError(t, f.store.UpdateUser(ctx, bobRow))
+	tot, projs, err = f.srv.waitingOnYouTotal(ctx, f.bob.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 0, tot)
+	assert.Equal(t, 0, projs)
+
+	bobRow.Status = store.UserStatusActive
+	require.NoError(t, f.store.UpdateUser(ctx, bobRow))
+
+	// Expired/canceled bounded ctx surfaces an error.
+	expiredCtx, cancel := context.WithDeadline(ctx, time.Now().Add(-time.Second))
+	defer cancel()
+	_, _, err = f.srv.waitingOnYouTotal(expiredCtx, f.bob.ID)
+	require.Error(t, err)
 }

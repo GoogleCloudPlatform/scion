@@ -22,6 +22,9 @@ import (
 	"testing"
 	"time"
 
+	"entgo.io/ent/dialect"
+	entsql "entgo.io/ent/dialect/sql"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionanswer"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
@@ -216,4 +219,54 @@ func TestListDecisionAnswersPerProject_PerProjectLimitFiltersAndEnrichment(t *te
 	require.ErrorIs(t, err, store.ErrInvalidInput)
 	_, err = cs.ListDecisionAnswersPerProject(ctx, projects, aliceKeys, store.ProjectDecisionAnswerFilter{Provenance: "bad"}, 6)
 	require.ErrorIs(t, err, store.ErrInvalidInput)
+
+	// Large key slice exceeding maxDecisionAnswerKeyBatch (40,000 keys > SQLite's 32,766 limit)
+	// chunks safely and still caps each project at perProject.
+	hugeKeys := make([]string, 0, 40000)
+	hugeKeys = append(hugeKeys, topicBusy)
+	for i := 0; i < 39998; i++ {
+		hugeKeys = append(hugeKeys, fmt.Sprintf("unused-topic-%05d", i))
+	}
+	hugeKeys = append(hugeKeys, topicSmall)
+	byProjHuge, err := cs.ListDecisionAnswersPerProject(ctx, projects, hugeKeys, store.ProjectDecisionAnswerFilter{}, 6)
+	require.NoError(t, err)
+	require.Len(t, byProjHuge[pBusy], 6)
+	require.Len(t, byProjHuge[pSmall], 2)
+}
+
+func TestRankedDecisionAnswersSelector_PostgresAndSQLitePlaceholders(t *testing.T) {
+	p1, p2 := uuid.New(), uuid.New()
+	agentID := uuid.New()
+	now := time.Date(2026, 11, 15, 0, 0, 0, 0, time.UTC)
+	filter := store.ProjectDecisionAnswerFilter{
+		Query:         "deploy",
+		QueryChatKeys: []string{"topic-1"},
+		AgentID:       agentID.String(),
+		UserID:        "user-1",
+		Provenance:    store.ProjectDecisionProvenanceDirect,
+		From:          &now,
+	}
+	agentUUID, provPred, err := validateDecisionAnswerFilter(filter)
+	require.NoError(t, err)
+	preds := decisionAnswerFilterPredicates(filter, agentUUID, provPred)
+
+	for _, d := range []string{dialect.Postgres, dialect.SQLite} {
+		b := entsql.Dialect(d)
+		outerTable := b.Table(decisionanswer.Table)
+		ranked := rankedDecisionAnswersSelector(d, []uuid.UUID{p1, p2}, []string{"topic-1", "topic-2"}, preds, 6)
+		outer := b.Select(outerTable.C(decisionanswer.FieldID)).
+			From(outerTable).
+			Where(entsql.In(outerTable.C(decisionanswer.FieldID), ranked))
+		sqlStr, args := outer.Query()
+		assert.Contains(t, sqlStr, "ROW_NUMBER() OVER (PARTITION BY")
+		assert.NotEmpty(t, args)
+		if d == dialect.Postgres {
+			assert.Contains(t, sqlStr, fmt.Sprintf("$%d", len(args)), "highest placeholder must match arg count")
+			assert.NotContains(t, sqlStr, fmt.Sprintf("$%d", len(args)+1))
+			assert.NotContains(t, sqlStr, "?")
+		} else {
+			assert.Contains(t, sqlStr, "?")
+			assert.NotContains(t, sqlStr, "$1")
+		}
+	}
 }

@@ -173,13 +173,13 @@ type ProjectMadeDecisionsResponse struct {
 
 // pendingPromptCursor is the keyset cursor for tab=pending: section 0 is
 // "Waiting on you" prompts and section 1 is "Waiting on others"-only prompts.
-// GroupAt and ProjectID are populated on profile sort=project cursors.
+// DoneProjects and ProjectID are populated on profile sort=project cursors.
 type pendingPromptCursor struct {
-	Section   int       `json:"s"`
-	GroupAt   time.Time `json:"g,omitempty"`
-	ProjectID string    `json:"p,omitempty"`
-	CreatedAt time.Time `json:"t"`
-	MessageID string    `json:"m"`
+	Section      int       `json:"s"`
+	DoneProjects []string  `json:"d,omitempty"`
+	ProjectID    string    `json:"p,omitempty"`
+	CreatedAt    time.Time `json:"t"`
+	MessageID    string    `json:"m"`
 }
 
 func encodePendingPromptCursor(section int, createdAt time.Time, messageID string) (string, error) {
@@ -203,7 +203,7 @@ func decodePendingPromptCursor(token string) (pendingPromptCursor, error) {
 	if err := json.Unmarshal(raw, &c); err != nil {
 		return pendingPromptCursor{}, err
 	}
-	if (c.Section != 0 && c.Section != 1) || c.MessageID == "" || c.CreatedAt.IsZero() || !c.GroupAt.IsZero() || c.ProjectID != "" {
+	if (c.Section != 0 && c.Section != 1) || c.MessageID == "" || c.CreatedAt.IsZero() || len(c.DoneProjects) > 0 || c.ProjectID != "" {
 		return pendingPromptCursor{}, errors.New("malformed pending cursor")
 	}
 	c.CreatedAt = c.CreatedAt.UTC()
