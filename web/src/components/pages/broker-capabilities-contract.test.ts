@@ -48,6 +48,7 @@ const UNDECLARED_ALLOWED: readonly string[] = [
   'clearedFields',
   'clearedResourceSubfields',
   'emptyPerAgentWorkspace',
+  'ephemeralPersistence',
   'nodeImageRegistry',
   'reprovision',
   'reprovisionEmptyPerAgent',

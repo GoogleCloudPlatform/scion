@@ -529,6 +529,12 @@ type ScionConfig struct {
 	Hub           *AgentHubConfig            `json:"hub,omitempty" yaml:"hub,omitempty"`
 	Telemetry     *TelemetryConfig           `json:"telemetry,omitempty" yaml:"telemetry,omitempty"`
 
+	// Persistence is the agent's environment lifetime (persistent or
+	// ephemeral; empty is persistent). The hub resolves it at create and
+	// stamps it on the agent; the broker takes it from the dispatch
+	// (StartOptions.Persistence), never from a merged config.
+	Persistence Persistence `json:"persistence,omitempty" yaml:"persistence,omitempty"`
+
 	// CloneDepth sets the git clone depth for a clone-per-agent
 	// workspace: "full" or a positive integer. It overrides a profile's
 	// clone_depth. Empty keeps the profile value, else the default
@@ -1566,6 +1572,12 @@ type StartOptions struct {
 	// the runtime's configured account. It is per dispatch and never
 	// persisted, so it is recomputed on every start.
 	CloudRunIdentity *CloudRunIdentity `json:"-"`
+
+	// Persistence is the agent's stamped persistence, sent by the hub on
+	// every dispatch. Ephemeral gives the agent a fresh home and workspace
+	// at every start on a runtime that supports it; other runtimes refuse
+	// it. It is per dispatch and never persisted.
+	Persistence Persistence `json:"-"`
 
 	// ResolvedPlacement is the Kubernetes placement (node selector,
 	// tolerations, runtime class) the agent runtime server resolved for this

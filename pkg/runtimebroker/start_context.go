@@ -155,6 +155,10 @@ type startContextInputs struct {
 	// Config from CreateAgentConfig (nil for startAgent/restartAgent)
 	Config *CreateAgentConfig
 
+	// Persistence is the hub's stamped persistence for this dispatch
+	// (StartOptions.Persistence); see ephemeralPersistenceRefusal.
+	Persistence api.Persistence
+
 	// TelemetryPolicy is the project's enforced telemetry on/off sent on a
 	// start or restart body (create carries it as Config.TelemetryPolicy).
 	// See resolveTelemetryOverride.
@@ -285,6 +289,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// A flat cloudrun instance likewise refuses worktree-per-agent ahead of
 	// every ownership, project-file or worktree side effect (ptone/scion#7865).
 	if sce := s.flatCloudRunWorktreePerAgentRefusal(in); sce != nil {
+		return nil, sce
+	}
+	// An ephemeral start is refused, before any side effect, unless the hub
+	// sent its experiment with this dispatch.
+	if sce := ephemeralPersistenceRefusal(ctx, in); sce != nil {
 		return nil, sce
 	}
 
@@ -590,6 +599,12 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	}
 	if isCloudRunRuntimeName(dispatchRuntimeType) && effectiveWorktreePerAgentDispatch(in.WorkspaceMode, in.ResolvedEnv, in.Config) {
 		return nil, cloudRunWorktreePerAgentRefusalError(in.Name)
+	}
+	// Ephemeral persistence on the runtime this dispatch resolved (the
+	// profile's, not only the broker default the capability describes),
+	// refused before any agent file is provisioned.
+	if sce := persistenceRuntimeRefusal(in.Name, in.Persistence, res.Runtime); sce != nil {
+		return nil, sce
 	}
 	isKubernetes := isKubernetesRuntimeName(dispatchRuntimeType)
 
@@ -1012,6 +1027,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// --- Build StartOptions ---
 	opts := api.StartOptions{
 		Name:               in.Name,
+		Persistence:        in.Persistence,
 		BrokerMode:         true,
 		ProjectPath:        in.ProjectPath,
 		NoAuth:             in.NoAuth,

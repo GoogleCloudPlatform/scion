@@ -129,6 +129,12 @@ const K8sNFSHome = "hub.k8s_nfs_home"
 // exactly as before.
 const CloudRunNativeIdentity = "hub.cloudrun_native_identity"
 
+// CloudRunEphemeralAgents gates ephemeral persistence for Cloud Run agents
+// (ptone/scion#7780): the hub refuses an ephemeral create while it is off,
+// and sends its state with each dispatch so the broker refuses an ephemeral
+// start while it is off. Persistent agents are unchanged either way.
+const CloudRunEphemeralAgents = "hub.cloudrun_ephemeral_agents"
+
 // FlatRuntimeBrokers gates flat (single-target) Runtime Brokers: the hub
 // accepts single-target Runtime Broker registrations, pins new agents to
 // that target and refuses mismatched dispatches
@@ -598,6 +604,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#7374",
 		Owner:       "cloudrun-runtime",
 		ReviewBy:    "2027-02-04",
+	},
+	{
+		Name:        CloudRunEphemeralAgents,
+		Title:       "Ephemeral Cloud Run agents",
+		Description: "Lets an agent be created with persistence: ephemeral on a Cloud Run Runtime Broker. Its home and workspace live in the instance's memory and start fresh at every start: anything not pushed is lost when it stops. With it off, an ephemeral create is refused with experiment_disabled and the Runtime Broker refuses an ephemeral start; persistent agents are unchanged. On a flat Cloud Run Runtime Broker, hub.flat_cloudrun_target must be on too.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#7780",
+		Owner:       "cloudrun-runtime",
+		ReviewBy:    "2027-02-12",
 	},
 	{
 		Name:        FlatRuntimeBrokers,

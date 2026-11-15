@@ -190,6 +190,8 @@ var agentEditFields = []agentEditField{
 	// copy would do nothing. T2 once inline or hub-sourced plugins exist.
 	{Key: "config.agent_plugins", Tier: EditTierImmutable, LockedReason: editReasonTemplatePlugin},
 	{Key: "config.empty_per_agent_workspace", Tier: EditTierImmutable, LockedReason: editReasonWorkspace},
+	// Persistence is resolved and stamped once, at create (ptone/scion#7780).
+	{Key: "config.persistence", Tier: EditTierImmutable, LockedReason: editReasonImmutable},
 	{Key: "config.harness", Tier: EditTierImmutable, LockedReason: editReasonImmutable},
 	{Key: "config.harness_config", Tier: EditTierImmutable, LockedReason: editReasonImmutable},
 	{Key: "config.default_harness_config", Tier: EditTierImmutable, LockedReason: editReasonImmutable},

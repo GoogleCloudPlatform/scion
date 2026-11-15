@@ -149,6 +149,7 @@ var dispatchExperimentNames = []string{
 	experiments.K8sNFSHome,
 	experiments.AgentPlugins,
 	experiments.CloudRunNativeIdentity,
+	experiments.CloudRunEphemeralAgents,
 	experiments.ChatChoices,
 	experiments.Artifacts,
 }

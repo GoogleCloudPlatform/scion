@@ -105,6 +105,10 @@ type BrokerCapabilities struct {
 	// directory at <projectDir>/agents/<slug>/workspace (design #2703). The
 	// hub refuses to dispatch such agents to a broker without it (412).
 	EmptyPerAgentWorkspace bool `json:"emptyPerAgentWorkspace"`
+	// EphemeralPersistence indicates the broker's runtime can run an agent
+	// with persistence: ephemeral (ptone/scion#7780; Cloud Run only). The
+	// hub refuses an ephemeral create on a broker without it.
+	EphemeralPersistence bool `json:"ephemeralPersistence,omitempty"`
 	// AgentMove indicates this broker can take part in moving an agent to
 	// or from another broker on the same workspace export (`scion
 	// reincarnate --broker`). The hub refuses a move unless both brokers
@@ -320,6 +324,11 @@ type CreateAgentRequest struct {
 	// legacy Runtime Broker refuses any non-empty value. Checked before any
 	// side effect.
 	ExpectedRuntimeTargetID string `json:"expectedRuntimeTargetId,omitempty"`
+
+	// Persistence is the agent's persistence as the hub stamped it at
+	// create (ptone/scion#7780): ephemeral, or empty for persistent. The
+	// hub sends it on every create, start and restart.
+	Persistence api.Persistence `json:"persistence,omitempty"`
 
 	// ResolvedEnv contains the fully merged environment variables and secrets
 	// from all applicable scopes (user, project, runtime broker). These are resolved

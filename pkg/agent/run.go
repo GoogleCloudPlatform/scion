@@ -97,6 +97,17 @@ func sortedEnvVarKeys(envVars map[string]string) []string {
 }
 
 func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
+	// Refused before anything is provisioned or recorded (the broker
+	// refuses it earlier still, in buildStartContext).
+	if err := runtime.CheckPersistenceSupported(m.Runtime, opts.Persistence); err != nil {
+		return nil, err
+	}
+	// An ephemeral agent's session is never kept, so every start is a fresh
+	// one: the prompt-file task is sent again and the harness starts
+	// without its resume flag (ptone/scion#7780).
+	if opts.Persistence.IsEphemeral() {
+		opts.Resume = false
+	}
 	ctx = m.withWorkspaceLock(ctx)
 	startEntry := time.Now()
 	// callerHubEndpoint is opts.Env's SCION_HUB_ENDPOINT exactly as the
@@ -2474,6 +2485,7 @@ authDone:
 		Share:         nfsPodShare,
 		ClonePerAgent: opts.GitClone != nil && store.ResolveWorkspaceSharingMode(opts.Env["SCION_WORKSPACE_MODE"]) == store.SharingModeClonePerAgent,
 		AgentDirName:  nfsAgentDirName,
+		Ephemeral:     opts.Persistence.IsEphemeral(),
 	})
 
 	// Kubernetes shared-dir PVC defaults from settings: the profile's value,
@@ -2831,7 +2843,8 @@ authDone:
 			return ""
 		}(),
 		Debug:                util.DebugEnabled(),
-		Resume:               opts.Resume,
+		Resume:               harnessResume(opts),
+		Persistence:          opts.Persistence,
 		MetadataInterception: metadataInterceptionGranted(m.Runtime.Name(), networkMode, agentEnv),
 		ExtraHosts:           runExtraHosts,
 		NetworkMode:          networkMode,
@@ -3065,6 +3078,13 @@ authDone:
 	}, nil
 }
 
+// harnessResume reports whether the harness is launched with its resume
+// flag: on a resume, except for an ephemeral agent, whose session is never
+// kept and so always starts fresh (ptone/scion#7780).
+func harnessResume(opts api.StartOptions) bool {
+	return opts.Resume && !opts.Persistence.IsEphemeral()
+}
+
 // workspacePlacementInput is what a start resolved about its workspace.
 type workspacePlacementInput struct {
 	// Backend is the workspace backend that served the workspace ("" for
@@ -3081,6 +3101,9 @@ type workspacePlacementInput struct {
 	// AgentDirName is the agent's own directory on the export, when one
 	// was chosen (clone-per-agent and empty-per-agent on Kubernetes).
 	AgentDirName string
+	// Ephemeral is true for an agent with ephemeral persistence: its
+	// workspace is instance-local whatever the backend.
+	Ephemeral bool
 }
 
 // exportMountingRuntimes are the non-Kubernetes runtimes that mount the nfs
@@ -3110,7 +3133,7 @@ var exportMountingRuntimes = map[string]bool{
 // in its own agent directory, which also needs the share. Other runtimes count only when
 // listed in exportMountingRuntimes.
 func workspacePlacementFor(in workspacePlacementInput) string {
-	if in.Backend != "nfs" {
+	if in.Ephemeral || in.Backend != "nfs" {
 		return api.WorkspacePlacementLocal
 	}
 	if isKubernetesRuntime(in.Runtime) {

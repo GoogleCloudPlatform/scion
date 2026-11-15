@@ -570,6 +570,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	"web.gcs_links":                          testAdminPolicyDeny,
 	experiments.K8sNFSHome:                   testAdminPolicyDeny,
 	experiments.CloudRunNativeIdentity:       testAdminPolicyDeny,
+	experiments.CloudRunEphemeralAgents:      testAdminPolicyDeny,
 	experiments.FlatRuntimeBrokers:           testAdminPolicyDeny,
 	experiments.FlatCloudRunTarget:           testAdminPolicyDeny,
 	experiments.Artifacts:                    testAdminPolicyDeny,

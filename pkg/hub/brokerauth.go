@@ -356,6 +356,8 @@ func capabilitiesFromStrings(names []string) *store.BrokerCapabilities {
 			caps.AsyncStart = true
 		case "emptyperagentworkspace", "empty_per_agent_workspace":
 			caps.EmptyPerAgentWorkspace = true
+		case "ephemeralpersistence", "ephemeral_persistence":
+			caps.EphemeralPersistence = true
 		case "agentmove", "agent_move":
 			caps.AgentMove = true
 		case "agentmoverecreate", "agent_move_recreate":

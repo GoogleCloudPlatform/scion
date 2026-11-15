@@ -42,6 +42,7 @@ func StaticCapabilities(rt scionrt.Runtime, nodeImageRegistry string) *hubclient
 		AsyncLaunch:            true,
 		AsyncStart:             true, // async start of existing agents (ptone/scion#4669)
 		EmptyPerAgentWorkspace: scionrt.HasEmptyPerAgentSupport(rt),
+		EphemeralPersistence:   scionrt.HasEphemeralPersistenceSupport(rt),
 		// This broker honours localOnly deletes and confirms a moved
 		// agent's NFS workspace before provisioning it (agent move).
 		AgentMove: true,
@@ -128,6 +129,7 @@ func StaticCapabilityNames(rt scionrt.Runtime) []string {
 	add(c.AsyncLaunch, "asyncLaunch")
 	add(c.AsyncStart, "asyncStart")
 	add(c.EmptyPerAgentWorkspace, "emptyPerAgentWorkspace")
+	add(c.EphemeralPersistence, "ephemeralPersistence")
 	add(c.AgentMove, "agentMove")
 	add(c.AgentMoveRecreate, "agentMoveRecreate")
 	add(c.ReprovisionEmptyPerAgent, "reprovisionEmptyPerAgent")
