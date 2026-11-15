@@ -34,9 +34,10 @@ import (
 // for the life of the process.
 func TestStores_UsesRowLocks_ReadsDriverDialect(t *testing.T) {
 	stores := map[string]func(*ent.Client) func() bool{
-		"access_constraint": func(c *ent.Client) func() bool { return NewAccessConstraintStore(c).usesRowLocks },
-		"hub_setting":       func(c *ent.Client) func() bool { return NewHubSettingStore(c).usesRowLocks },
-		"lifecycle_hook":    func(c *ent.Client) func() bool { return NewLifecycleHookStore(c).usesRowLocks },
+		"access_constraint":   func(c *ent.Client) func() bool { return NewAccessConstraintStore(c).usesRowLocks },
+		"hub_setting":         func(c *ent.Client) func() bool { return NewHubSettingStore(c).usesRowLocks },
+		"lifecycle_hook":      func(c *ent.Client) func() bool { return NewLifecycleHookStore(c).usesRowLocks },
+		"system_one_instance": func(c *ent.Client) func() bool { return NewSystemOneInstanceStore(c).usesRowLocks },
 	}
 	for name, newStore := range stores {
 		for _, tc := range []struct {

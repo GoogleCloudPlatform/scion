@@ -101,6 +101,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillregistry"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillversion"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/subscriptiontemplate"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/systemoneinstance"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/template"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testidentitydelegation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testidentitylogincode"
@@ -214,6 +215,7 @@ const (
 	TypeSkillRegistry                 = "SkillRegistry"
 	TypeSkillVersion                  = "SkillVersion"
 	TypeSubscriptionTemplate          = "SubscriptionTemplate"
+	TypeSystemOneInstance             = "SystemOneInstance"
 	TypeTemplate                      = "Template"
 	TypeTestIdentityDelegation        = "TestIdentityDelegation"
 	TypeTestIdentityLoginCode         = "TestIdentityLoginCode"
@@ -101893,6 +101895,1698 @@ func (m *SubscriptionTemplateMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *SubscriptionTemplateMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown SubscriptionTemplate edge %s", name)
+}
+
+// SystemOneInstanceMutation represents an operation that mutates the SystemOneInstance nodes in the graph.
+type SystemOneInstanceMutation struct {
+	config
+	op                    Op
+	typ                   string
+	id                    *uuid.UUID
+	name                  *string
+	adapter               *string
+	model                 *string
+	endpoint              *string
+	location              *string
+	auth_kind             *systemoneinstance.AuthKind
+	auth_secret_name      *string
+	auth_header_name      *string
+	auth_scopes           *[]string
+	appendauth_scopes     []string
+	auth_audience         *string
+	options               *map[string]string
+	max_in_flight         *int
+	addmax_in_flight      *int
+	rate_per_sec          *float64
+	addrate_per_sec       *float64
+	max_input_tokens      *int
+	addmax_input_tokens   *int
+	call_timeout_ns       *int64
+	addcall_timeout_ns    *int64
+	allow_private_network *bool
+	enabled               *bool
+	revision              *int64
+	addrevision           *int64
+	created_by            *string
+	updated_by            *string
+	created_at            *time.Time
+	updated_at            *time.Time
+	clearedFields         map[string]struct{}
+	done                  bool
+	oldValue              func(context.Context) (*SystemOneInstance, error)
+	predicates            []predicate.SystemOneInstance
+}
+
+var _ ent.Mutation = (*SystemOneInstanceMutation)(nil)
+
+// systemoneinstanceOption allows management of the mutation configuration using functional options.
+type systemoneinstanceOption func(*SystemOneInstanceMutation)
+
+// newSystemOneInstanceMutation creates new mutation for the SystemOneInstance entity.
+func newSystemOneInstanceMutation(c config, op Op, opts ...systemoneinstanceOption) *SystemOneInstanceMutation {
+	m := &SystemOneInstanceMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeSystemOneInstance,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withSystemOneInstanceID sets the ID field of the mutation.
+func withSystemOneInstanceID(id uuid.UUID) systemoneinstanceOption {
+	return func(m *SystemOneInstanceMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *SystemOneInstance
+		)
+		m.oldValue = func(ctx context.Context) (*SystemOneInstance, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().SystemOneInstance.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withSystemOneInstance sets the old SystemOneInstance of the mutation.
+func withSystemOneInstance(node *SystemOneInstance) systemoneinstanceOption {
+	return func(m *SystemOneInstanceMutation) {
+		m.oldValue = func(context.Context) (*SystemOneInstance, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m SystemOneInstanceMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m SystemOneInstanceMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of SystemOneInstance entities.
+func (m *SystemOneInstanceMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *SystemOneInstanceMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *SystemOneInstanceMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().SystemOneInstance.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetName sets the "name" field.
+func (m *SystemOneInstanceMutation) SetName(s string) {
+	m.name = &s
+}
+
+// Name returns the value of the "name" field in the mutation.
+func (m *SystemOneInstanceMutation) Name() (r string, exists bool) {
+	v := m.name
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldName returns the old "name" field's value of the SystemOneInstance entity.
+// If the SystemOneInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SystemOneInstanceMutation) OldName(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldName is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldName requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldName: %w", err)
+	}
+	return oldValue.Name, nil
+}
+
+// ResetName resets all changes to the "name" field.
+func (m *SystemOneInstanceMutation) ResetName() {
+	m.name = nil
+}
+
+// SetAdapter sets the "adapter" field.
+func (m *SystemOneInstanceMutation) SetAdapter(s string) {
+	m.adapter = &s
+}
+
+// Adapter returns the value of the "adapter" field in the mutation.
+func (m *SystemOneInstanceMutation) Adapter() (r string, exists bool) {
+	v := m.adapter
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAdapter returns the old "adapter" field's value of the SystemOneInstance entity.
+// If the SystemOneInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SystemOneInstanceMutation) OldAdapter(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAdapter is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAdapter requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAdapter: %w", err)
+	}
+	return oldValue.Adapter, nil
+}
+
+// ResetAdapter resets all changes to the "adapter" field.
+func (m *SystemOneInstanceMutation) ResetAdapter() {
+	m.adapter = nil
+}
+
+// SetModel sets the "model" field.
+func (m *SystemOneInstanceMutation) SetModel(s string) {
+	m.model = &s
+}
+
+// Model returns the value of the "model" field in the mutation.
+func (m *SystemOneInstanceMutation) Model() (r string, exists bool) {
+	v := m.model
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldModel returns the old "model" field's value of the SystemOneInstance entity.
+// If the SystemOneInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SystemOneInstanceMutation) OldModel(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldModel is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldModel requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldModel: %w", err)
+	}
+	return oldValue.Model, nil
+}
+
+// ResetModel resets all changes to the "model" field.
+func (m *SystemOneInstanceMutation) ResetModel() {
+	m.model = nil
+}
+
+// SetEndpoint sets the "endpoint" field.
+func (m *SystemOneInstanceMutation) SetEndpoint(s string) {
+	m.endpoint = &s
+}
+
+// Endpoint returns the value of the "endpoint" field in the mutation.
+func (m *SystemOneInstanceMutation) Endpoint() (r string, exists bool) {
+	v := m.endpoint
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldEndpoint returns the old "endpoint" field's value of the SystemOneInstance entity.
+// If the SystemOneInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SystemOneInstanceMutation) OldEndpoint(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldEndpoint is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldEndpoint requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldEndpoint: %w", err)
+	}
+	return oldValue.Endpoint, nil
+}
+
+// ResetEndpoint resets all changes to the "endpoint" field.
+func (m *SystemOneInstanceMutation) ResetEndpoint() {
+	m.endpoint = nil
+}
+
+// SetLocation sets the "location" field.
+func (m *SystemOneInstanceMutation) SetLocation(s string) {
+	m.location = &s
+}
+
+// Location returns the value of the "location" field in the mutation.
+func (m *SystemOneInstanceMutation) Location() (r string, exists bool) {
+	v := m.location
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLocation returns the old "location" field's value of the SystemOneInstance entity.
+// If the SystemOneInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SystemOneInstanceMutation) OldLocation(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLocation is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLocation requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLocation: %w", err)
+	}
+	return oldValue.Location, nil
+}
+
+// ResetLocation resets all changes to the "location" field.
+func (m *SystemOneInstanceMutation) ResetLocation() {
+	m.location = nil
+}
+
+// SetAuthKind sets the "auth_kind" field.
+func (m *SystemOneInstanceMutation) SetAuthKind(sk systemoneinstance.AuthKind) {
+	m.auth_kind = &sk
+}
+
+// AuthKind returns the value of the "auth_kind" field in the mutation.
+func (m *SystemOneInstanceMutation) AuthKind() (r systemoneinstance.AuthKind, exists bool) {
+	v := m.auth_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAuthKind returns the old "auth_kind" field's value of the SystemOneInstance entity.
+// If the SystemOneInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SystemOneInstanceMutation) OldAuthKind(ctx context.Context) (v systemoneinstance.AuthKind, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAuthKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAuthKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAuthKind: %w", err)
+	}
+	return oldValue.AuthKind, nil
+}
+
+// ResetAuthKind resets all changes to the "auth_kind" field.
+func (m *SystemOneInstanceMutation) ResetAuthKind() {
+	m.auth_kind = nil
+}
+
+// SetAuthSecretName sets the "auth_secret_name" field.
+func (m *SystemOneInstanceMutation) SetAuthSecretName(s string) {
+	m.auth_secret_name = &s
+}
+
+// AuthSecretName returns the value of the "auth_secret_name" field in the mutation.
+func (m *SystemOneInstanceMutation) AuthSecretName() (r string, exists bool) {
+	v := m.auth_secret_name
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAuthSecretName returns the old "auth_secret_name" field's value of the SystemOneInstance entity.
+// If the SystemOneInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SystemOneInstanceMutation) OldAuthSecretName(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAuthSecretName is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAuthSecretName requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAuthSecretName: %w", err)
+	}
+	return oldValue.AuthSecretName, nil
+}
+
+// ResetAuthSecretName resets all changes to the "auth_secret_name" field.
+func (m *SystemOneInstanceMutation) ResetAuthSecretName() {
+	m.auth_secret_name = nil
+}
+
+// SetAuthHeaderName sets the "auth_header_name" field.
+func (m *SystemOneInstanceMutation) SetAuthHeaderName(s string) {
+	m.auth_header_name = &s
+}
+
+// AuthHeaderName returns the value of the "auth_header_name" field in the mutation.
+func (m *SystemOneInstanceMutation) AuthHeaderName() (r string, exists bool) {
+	v := m.auth_header_name
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAuthHeaderName returns the old "auth_header_name" field's value of the SystemOneInstance entity.
+// If the SystemOneInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SystemOneInstanceMutation) OldAuthHeaderName(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAuthHeaderName is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAuthHeaderName requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAuthHeaderName: %w", err)
+	}
+	return oldValue.AuthHeaderName, nil
+}
+
+// ResetAuthHeaderName resets all changes to the "auth_header_name" field.
+func (m *SystemOneInstanceMutation) ResetAuthHeaderName() {
+	m.auth_header_name = nil
+}
+
+// SetAuthScopes sets the "auth_scopes" field.
+func (m *SystemOneInstanceMutation) SetAuthScopes(s []string) {
+	m.auth_scopes = &s
+	m.appendauth_scopes = nil
+}
+
+// AuthScopes returns the value of the "auth_scopes" field in the mutation.
+func (m *SystemOneInstanceMutation) AuthScopes() (r []string, exists bool) {
+	v := m.auth_scopes
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAuthScopes returns the old "auth_scopes" field's value of the SystemOneInstance entity.
+// If the SystemOneInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SystemOneInstanceMutation) OldAuthScopes(ctx context.Context) (v []string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAuthScopes is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAuthScopes requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAuthScopes: %w", err)
+	}
+	return oldValue.AuthScopes, nil
+}
+
+// AppendAuthScopes adds s to the "auth_scopes" field.
+func (m *SystemOneInstanceMutation) AppendAuthScopes(s []string) {
+	m.appendauth_scopes = append(m.appendauth_scopes, s...)
+}
+
+// AppendedAuthScopes returns the list of values that were appended to the "auth_scopes" field in this mutation.
+func (m *SystemOneInstanceMutation) AppendedAuthScopes() ([]string, bool) {
+	if len(m.appendauth_scopes) == 0 {
+		return nil, false
+	}
+	return m.appendauth_scopes, true
+}
+
+// ClearAuthScopes clears the value of the "auth_scopes" field.
+func (m *SystemOneInstanceMutation) ClearAuthScopes() {
+	m.auth_scopes = nil
+	m.appendauth_scopes = nil
+	m.clearedFields[systemoneinstance.FieldAuthScopes] = struct{}{}
+}
+
+// AuthScopesCleared returns if the "auth_scopes" field was cleared in this mutation.
+func (m *SystemOneInstanceMutation) AuthScopesCleared() bool {
+	_, ok := m.clearedFields[systemoneinstance.FieldAuthScopes]
+	return ok
+}
+
+// ResetAuthScopes resets all changes to the "auth_scopes" field.
+func (m *SystemOneInstanceMutation) ResetAuthScopes() {
+	m.auth_scopes = nil
+	m.appendauth_scopes = nil
+	delete(m.clearedFields, systemoneinstance.FieldAuthScopes)
+}
+
+// SetAuthAudience sets the "auth_audience" field.
+func (m *SystemOneInstanceMutation) SetAuthAudience(s string) {
+	m.auth_audience = &s
+}
+
+// AuthAudience returns the value of the "auth_audience" field in the mutation.
+func (m *SystemOneInstanceMutation) AuthAudience() (r string, exists bool) {
+	v := m.auth_audience
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAuthAudience returns the old "auth_audience" field's value of the SystemOneInstance entity.
+// If the SystemOneInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SystemOneInstanceMutation) OldAuthAudience(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAuthAudience is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAuthAudience requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAuthAudience: %w", err)
+	}
+	return oldValue.AuthAudience, nil
+}
+
+// ResetAuthAudience resets all changes to the "auth_audience" field.
+func (m *SystemOneInstanceMutation) ResetAuthAudience() {
+	m.auth_audience = nil
+}
+
+// SetOptions sets the "options" field.
+func (m *SystemOneInstanceMutation) SetOptions(value map[string]string) {
+	m.options = &value
+}
+
+// Options returns the value of the "options" field in the mutation.
+func (m *SystemOneInstanceMutation) Options() (r map[string]string, exists bool) {
+	v := m.options
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOptions returns the old "options" field's value of the SystemOneInstance entity.
+// If the SystemOneInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SystemOneInstanceMutation) OldOptions(ctx context.Context) (v map[string]string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOptions is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOptions requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOptions: %w", err)
+	}
+	return oldValue.Options, nil
+}
+
+// ClearOptions clears the value of the "options" field.
+func (m *SystemOneInstanceMutation) ClearOptions() {
+	m.options = nil
+	m.clearedFields[systemoneinstance.FieldOptions] = struct{}{}
+}
+
+// OptionsCleared returns if the "options" field was cleared in this mutation.
+func (m *SystemOneInstanceMutation) OptionsCleared() bool {
+	_, ok := m.clearedFields[systemoneinstance.FieldOptions]
+	return ok
+}
+
+// ResetOptions resets all changes to the "options" field.
+func (m *SystemOneInstanceMutation) ResetOptions() {
+	m.options = nil
+	delete(m.clearedFields, systemoneinstance.FieldOptions)
+}
+
+// SetMaxInFlight sets the "max_in_flight" field.
+func (m *SystemOneInstanceMutation) SetMaxInFlight(i int) {
+	m.max_in_flight = &i
+	m.addmax_in_flight = nil
+}
+
+// MaxInFlight returns the value of the "max_in_flight" field in the mutation.
+func (m *SystemOneInstanceMutation) MaxInFlight() (r int, exists bool) {
+	v := m.max_in_flight
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldMaxInFlight returns the old "max_in_flight" field's value of the SystemOneInstance entity.
+// If the SystemOneInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SystemOneInstanceMutation) OldMaxInFlight(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldMaxInFlight is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldMaxInFlight requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldMaxInFlight: %w", err)
+	}
+	return oldValue.MaxInFlight, nil
+}
+
+// AddMaxInFlight adds i to the "max_in_flight" field.
+func (m *SystemOneInstanceMutation) AddMaxInFlight(i int) {
+	if m.addmax_in_flight != nil {
+		*m.addmax_in_flight += i
+	} else {
+		m.addmax_in_flight = &i
+	}
+}
+
+// AddedMaxInFlight returns the value that was added to the "max_in_flight" field in this mutation.
+func (m *SystemOneInstanceMutation) AddedMaxInFlight() (r int, exists bool) {
+	v := m.addmax_in_flight
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetMaxInFlight resets all changes to the "max_in_flight" field.
+func (m *SystemOneInstanceMutation) ResetMaxInFlight() {
+	m.max_in_flight = nil
+	m.addmax_in_flight = nil
+}
+
+// SetRatePerSec sets the "rate_per_sec" field.
+func (m *SystemOneInstanceMutation) SetRatePerSec(f float64) {
+	m.rate_per_sec = &f
+	m.addrate_per_sec = nil
+}
+
+// RatePerSec returns the value of the "rate_per_sec" field in the mutation.
+func (m *SystemOneInstanceMutation) RatePerSec() (r float64, exists bool) {
+	v := m.rate_per_sec
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRatePerSec returns the old "rate_per_sec" field's value of the SystemOneInstance entity.
+// If the SystemOneInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SystemOneInstanceMutation) OldRatePerSec(ctx context.Context) (v float64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRatePerSec is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRatePerSec requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRatePerSec: %w", err)
+	}
+	return oldValue.RatePerSec, nil
+}
+
+// AddRatePerSec adds f to the "rate_per_sec" field.
+func (m *SystemOneInstanceMutation) AddRatePerSec(f float64) {
+	if m.addrate_per_sec != nil {
+		*m.addrate_per_sec += f
+	} else {
+		m.addrate_per_sec = &f
+	}
+}
+
+// AddedRatePerSec returns the value that was added to the "rate_per_sec" field in this mutation.
+func (m *SystemOneInstanceMutation) AddedRatePerSec() (r float64, exists bool) {
+	v := m.addrate_per_sec
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetRatePerSec resets all changes to the "rate_per_sec" field.
+func (m *SystemOneInstanceMutation) ResetRatePerSec() {
+	m.rate_per_sec = nil
+	m.addrate_per_sec = nil
+}
+
+// SetMaxInputTokens sets the "max_input_tokens" field.
+func (m *SystemOneInstanceMutation) SetMaxInputTokens(i int) {
+	m.max_input_tokens = &i
+	m.addmax_input_tokens = nil
+}
+
+// MaxInputTokens returns the value of the "max_input_tokens" field in the mutation.
+func (m *SystemOneInstanceMutation) MaxInputTokens() (r int, exists bool) {
+	v := m.max_input_tokens
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldMaxInputTokens returns the old "max_input_tokens" field's value of the SystemOneInstance entity.
+// If the SystemOneInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SystemOneInstanceMutation) OldMaxInputTokens(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldMaxInputTokens is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldMaxInputTokens requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldMaxInputTokens: %w", err)
+	}
+	return oldValue.MaxInputTokens, nil
+}
+
+// AddMaxInputTokens adds i to the "max_input_tokens" field.
+func (m *SystemOneInstanceMutation) AddMaxInputTokens(i int) {
+	if m.addmax_input_tokens != nil {
+		*m.addmax_input_tokens += i
+	} else {
+		m.addmax_input_tokens = &i
+	}
+}
+
+// AddedMaxInputTokens returns the value that was added to the "max_input_tokens" field in this mutation.
+func (m *SystemOneInstanceMutation) AddedMaxInputTokens() (r int, exists bool) {
+	v := m.addmax_input_tokens
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetMaxInputTokens resets all changes to the "max_input_tokens" field.
+func (m *SystemOneInstanceMutation) ResetMaxInputTokens() {
+	m.max_input_tokens = nil
+	m.addmax_input_tokens = nil
+}
+
+// SetCallTimeoutNs sets the "call_timeout_ns" field.
+func (m *SystemOneInstanceMutation) SetCallTimeoutNs(i int64) {
+	m.call_timeout_ns = &i
+	m.addcall_timeout_ns = nil
+}
+
+// CallTimeoutNs returns the value of the "call_timeout_ns" field in the mutation.
+func (m *SystemOneInstanceMutation) CallTimeoutNs() (r int64, exists bool) {
+	v := m.call_timeout_ns
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCallTimeoutNs returns the old "call_timeout_ns" field's value of the SystemOneInstance entity.
+// If the SystemOneInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SystemOneInstanceMutation) OldCallTimeoutNs(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCallTimeoutNs is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCallTimeoutNs requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCallTimeoutNs: %w", err)
+	}
+	return oldValue.CallTimeoutNs, nil
+}
+
+// AddCallTimeoutNs adds i to the "call_timeout_ns" field.
+func (m *SystemOneInstanceMutation) AddCallTimeoutNs(i int64) {
+	if m.addcall_timeout_ns != nil {
+		*m.addcall_timeout_ns += i
+	} else {
+		m.addcall_timeout_ns = &i
+	}
+}
+
+// AddedCallTimeoutNs returns the value that was added to the "call_timeout_ns" field in this mutation.
+func (m *SystemOneInstanceMutation) AddedCallTimeoutNs() (r int64, exists bool) {
+	v := m.addcall_timeout_ns
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetCallTimeoutNs resets all changes to the "call_timeout_ns" field.
+func (m *SystemOneInstanceMutation) ResetCallTimeoutNs() {
+	m.call_timeout_ns = nil
+	m.addcall_timeout_ns = nil
+}
+
+// SetAllowPrivateNetwork sets the "allow_private_network" field.
+func (m *SystemOneInstanceMutation) SetAllowPrivateNetwork(b bool) {
+	m.allow_private_network = &b
+}
+
+// AllowPrivateNetwork returns the value of the "allow_private_network" field in the mutation.
+func (m *SystemOneInstanceMutation) AllowPrivateNetwork() (r bool, exists bool) {
+	v := m.allow_private_network
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAllowPrivateNetwork returns the old "allow_private_network" field's value of the SystemOneInstance entity.
+// If the SystemOneInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SystemOneInstanceMutation) OldAllowPrivateNetwork(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAllowPrivateNetwork is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAllowPrivateNetwork requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAllowPrivateNetwork: %w", err)
+	}
+	return oldValue.AllowPrivateNetwork, nil
+}
+
+// ResetAllowPrivateNetwork resets all changes to the "allow_private_network" field.
+func (m *SystemOneInstanceMutation) ResetAllowPrivateNetwork() {
+	m.allow_private_network = nil
+}
+
+// SetEnabled sets the "enabled" field.
+func (m *SystemOneInstanceMutation) SetEnabled(b bool) {
+	m.enabled = &b
+}
+
+// Enabled returns the value of the "enabled" field in the mutation.
+func (m *SystemOneInstanceMutation) Enabled() (r bool, exists bool) {
+	v := m.enabled
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldEnabled returns the old "enabled" field's value of the SystemOneInstance entity.
+// If the SystemOneInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SystemOneInstanceMutation) OldEnabled(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldEnabled is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldEnabled requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldEnabled: %w", err)
+	}
+	return oldValue.Enabled, nil
+}
+
+// ResetEnabled resets all changes to the "enabled" field.
+func (m *SystemOneInstanceMutation) ResetEnabled() {
+	m.enabled = nil
+}
+
+// SetRevision sets the "revision" field.
+func (m *SystemOneInstanceMutation) SetRevision(i int64) {
+	m.revision = &i
+	m.addrevision = nil
+}
+
+// Revision returns the value of the "revision" field in the mutation.
+func (m *SystemOneInstanceMutation) Revision() (r int64, exists bool) {
+	v := m.revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRevision returns the old "revision" field's value of the SystemOneInstance entity.
+// If the SystemOneInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SystemOneInstanceMutation) OldRevision(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRevision is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRevision requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRevision: %w", err)
+	}
+	return oldValue.Revision, nil
+}
+
+// AddRevision adds i to the "revision" field.
+func (m *SystemOneInstanceMutation) AddRevision(i int64) {
+	if m.addrevision != nil {
+		*m.addrevision += i
+	} else {
+		m.addrevision = &i
+	}
+}
+
+// AddedRevision returns the value that was added to the "revision" field in this mutation.
+func (m *SystemOneInstanceMutation) AddedRevision() (r int64, exists bool) {
+	v := m.addrevision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetRevision resets all changes to the "revision" field.
+func (m *SystemOneInstanceMutation) ResetRevision() {
+	m.revision = nil
+	m.addrevision = nil
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (m *SystemOneInstanceMutation) SetCreatedBy(s string) {
+	m.created_by = &s
+}
+
+// CreatedBy returns the value of the "created_by" field in the mutation.
+func (m *SystemOneInstanceMutation) CreatedBy() (r string, exists bool) {
+	v := m.created_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedBy returns the old "created_by" field's value of the SystemOneInstance entity.
+// If the SystemOneInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SystemOneInstanceMutation) OldCreatedBy(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedBy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedBy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedBy: %w", err)
+	}
+	return oldValue.CreatedBy, nil
+}
+
+// ResetCreatedBy resets all changes to the "created_by" field.
+func (m *SystemOneInstanceMutation) ResetCreatedBy() {
+	m.created_by = nil
+}
+
+// SetUpdatedBy sets the "updated_by" field.
+func (m *SystemOneInstanceMutation) SetUpdatedBy(s string) {
+	m.updated_by = &s
+}
+
+// UpdatedBy returns the value of the "updated_by" field in the mutation.
+func (m *SystemOneInstanceMutation) UpdatedBy() (r string, exists bool) {
+	v := m.updated_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdatedBy returns the old "updated_by" field's value of the SystemOneInstance entity.
+// If the SystemOneInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SystemOneInstanceMutation) OldUpdatedBy(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdatedBy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdatedBy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdatedBy: %w", err)
+	}
+	return oldValue.UpdatedBy, nil
+}
+
+// ResetUpdatedBy resets all changes to the "updated_by" field.
+func (m *SystemOneInstanceMutation) ResetUpdatedBy() {
+	m.updated_by = nil
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *SystemOneInstanceMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *SystemOneInstanceMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the SystemOneInstance entity.
+// If the SystemOneInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SystemOneInstanceMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *SystemOneInstanceMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// SetUpdatedAt sets the "updated_at" field.
+func (m *SystemOneInstanceMutation) SetUpdatedAt(t time.Time) {
+	m.updated_at = &t
+}
+
+// UpdatedAt returns the value of the "updated_at" field in the mutation.
+func (m *SystemOneInstanceMutation) UpdatedAt() (r time.Time, exists bool) {
+	v := m.updated_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdatedAt returns the old "updated_at" field's value of the SystemOneInstance entity.
+// If the SystemOneInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SystemOneInstanceMutation) OldUpdatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdatedAt: %w", err)
+	}
+	return oldValue.UpdatedAt, nil
+}
+
+// ResetUpdatedAt resets all changes to the "updated_at" field.
+func (m *SystemOneInstanceMutation) ResetUpdatedAt() {
+	m.updated_at = nil
+}
+
+// Where appends a list predicates to the SystemOneInstanceMutation builder.
+func (m *SystemOneInstanceMutation) Where(ps ...predicate.SystemOneInstance) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the SystemOneInstanceMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *SystemOneInstanceMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.SystemOneInstance, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *SystemOneInstanceMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *SystemOneInstanceMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (SystemOneInstance).
+func (m *SystemOneInstanceMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *SystemOneInstanceMutation) Fields() []string {
+	fields := make([]string, 0, 22)
+	if m.name != nil {
+		fields = append(fields, systemoneinstance.FieldName)
+	}
+	if m.adapter != nil {
+		fields = append(fields, systemoneinstance.FieldAdapter)
+	}
+	if m.model != nil {
+		fields = append(fields, systemoneinstance.FieldModel)
+	}
+	if m.endpoint != nil {
+		fields = append(fields, systemoneinstance.FieldEndpoint)
+	}
+	if m.location != nil {
+		fields = append(fields, systemoneinstance.FieldLocation)
+	}
+	if m.auth_kind != nil {
+		fields = append(fields, systemoneinstance.FieldAuthKind)
+	}
+	if m.auth_secret_name != nil {
+		fields = append(fields, systemoneinstance.FieldAuthSecretName)
+	}
+	if m.auth_header_name != nil {
+		fields = append(fields, systemoneinstance.FieldAuthHeaderName)
+	}
+	if m.auth_scopes != nil {
+		fields = append(fields, systemoneinstance.FieldAuthScopes)
+	}
+	if m.auth_audience != nil {
+		fields = append(fields, systemoneinstance.FieldAuthAudience)
+	}
+	if m.options != nil {
+		fields = append(fields, systemoneinstance.FieldOptions)
+	}
+	if m.max_in_flight != nil {
+		fields = append(fields, systemoneinstance.FieldMaxInFlight)
+	}
+	if m.rate_per_sec != nil {
+		fields = append(fields, systemoneinstance.FieldRatePerSec)
+	}
+	if m.max_input_tokens != nil {
+		fields = append(fields, systemoneinstance.FieldMaxInputTokens)
+	}
+	if m.call_timeout_ns != nil {
+		fields = append(fields, systemoneinstance.FieldCallTimeoutNs)
+	}
+	if m.allow_private_network != nil {
+		fields = append(fields, systemoneinstance.FieldAllowPrivateNetwork)
+	}
+	if m.enabled != nil {
+		fields = append(fields, systemoneinstance.FieldEnabled)
+	}
+	if m.revision != nil {
+		fields = append(fields, systemoneinstance.FieldRevision)
+	}
+	if m.created_by != nil {
+		fields = append(fields, systemoneinstance.FieldCreatedBy)
+	}
+	if m.updated_by != nil {
+		fields = append(fields, systemoneinstance.FieldUpdatedBy)
+	}
+	if m.created_at != nil {
+		fields = append(fields, systemoneinstance.FieldCreatedAt)
+	}
+	if m.updated_at != nil {
+		fields = append(fields, systemoneinstance.FieldUpdatedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *SystemOneInstanceMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case systemoneinstance.FieldName:
+		return m.Name()
+	case systemoneinstance.FieldAdapter:
+		return m.Adapter()
+	case systemoneinstance.FieldModel:
+		return m.Model()
+	case systemoneinstance.FieldEndpoint:
+		return m.Endpoint()
+	case systemoneinstance.FieldLocation:
+		return m.Location()
+	case systemoneinstance.FieldAuthKind:
+		return m.AuthKind()
+	case systemoneinstance.FieldAuthSecretName:
+		return m.AuthSecretName()
+	case systemoneinstance.FieldAuthHeaderName:
+		return m.AuthHeaderName()
+	case systemoneinstance.FieldAuthScopes:
+		return m.AuthScopes()
+	case systemoneinstance.FieldAuthAudience:
+		return m.AuthAudience()
+	case systemoneinstance.FieldOptions:
+		return m.Options()
+	case systemoneinstance.FieldMaxInFlight:
+		return m.MaxInFlight()
+	case systemoneinstance.FieldRatePerSec:
+		return m.RatePerSec()
+	case systemoneinstance.FieldMaxInputTokens:
+		return m.MaxInputTokens()
+	case systemoneinstance.FieldCallTimeoutNs:
+		return m.CallTimeoutNs()
+	case systemoneinstance.FieldAllowPrivateNetwork:
+		return m.AllowPrivateNetwork()
+	case systemoneinstance.FieldEnabled:
+		return m.Enabled()
+	case systemoneinstance.FieldRevision:
+		return m.Revision()
+	case systemoneinstance.FieldCreatedBy:
+		return m.CreatedBy()
+	case systemoneinstance.FieldUpdatedBy:
+		return m.UpdatedBy()
+	case systemoneinstance.FieldCreatedAt:
+		return m.CreatedAt()
+	case systemoneinstance.FieldUpdatedAt:
+		return m.UpdatedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *SystemOneInstanceMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case systemoneinstance.FieldName:
+		return m.OldName(ctx)
+	case systemoneinstance.FieldAdapter:
+		return m.OldAdapter(ctx)
+	case systemoneinstance.FieldModel:
+		return m.OldModel(ctx)
+	case systemoneinstance.FieldEndpoint:
+		return m.OldEndpoint(ctx)
+	case systemoneinstance.FieldLocation:
+		return m.OldLocation(ctx)
+	case systemoneinstance.FieldAuthKind:
+		return m.OldAuthKind(ctx)
+	case systemoneinstance.FieldAuthSecretName:
+		return m.OldAuthSecretName(ctx)
+	case systemoneinstance.FieldAuthHeaderName:
+		return m.OldAuthHeaderName(ctx)
+	case systemoneinstance.FieldAuthScopes:
+		return m.OldAuthScopes(ctx)
+	case systemoneinstance.FieldAuthAudience:
+		return m.OldAuthAudience(ctx)
+	case systemoneinstance.FieldOptions:
+		return m.OldOptions(ctx)
+	case systemoneinstance.FieldMaxInFlight:
+		return m.OldMaxInFlight(ctx)
+	case systemoneinstance.FieldRatePerSec:
+		return m.OldRatePerSec(ctx)
+	case systemoneinstance.FieldMaxInputTokens:
+		return m.OldMaxInputTokens(ctx)
+	case systemoneinstance.FieldCallTimeoutNs:
+		return m.OldCallTimeoutNs(ctx)
+	case systemoneinstance.FieldAllowPrivateNetwork:
+		return m.OldAllowPrivateNetwork(ctx)
+	case systemoneinstance.FieldEnabled:
+		return m.OldEnabled(ctx)
+	case systemoneinstance.FieldRevision:
+		return m.OldRevision(ctx)
+	case systemoneinstance.FieldCreatedBy:
+		return m.OldCreatedBy(ctx)
+	case systemoneinstance.FieldUpdatedBy:
+		return m.OldUpdatedBy(ctx)
+	case systemoneinstance.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	case systemoneinstance.FieldUpdatedAt:
+		return m.OldUpdatedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown SystemOneInstance field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *SystemOneInstanceMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case systemoneinstance.FieldName:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetName(v)
+		return nil
+	case systemoneinstance.FieldAdapter:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAdapter(v)
+		return nil
+	case systemoneinstance.FieldModel:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetModel(v)
+		return nil
+	case systemoneinstance.FieldEndpoint:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetEndpoint(v)
+		return nil
+	case systemoneinstance.FieldLocation:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLocation(v)
+		return nil
+	case systemoneinstance.FieldAuthKind:
+		v, ok := value.(systemoneinstance.AuthKind)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAuthKind(v)
+		return nil
+	case systemoneinstance.FieldAuthSecretName:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAuthSecretName(v)
+		return nil
+	case systemoneinstance.FieldAuthHeaderName:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAuthHeaderName(v)
+		return nil
+	case systemoneinstance.FieldAuthScopes:
+		v, ok := value.([]string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAuthScopes(v)
+		return nil
+	case systemoneinstance.FieldAuthAudience:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAuthAudience(v)
+		return nil
+	case systemoneinstance.FieldOptions:
+		v, ok := value.(map[string]string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOptions(v)
+		return nil
+	case systemoneinstance.FieldMaxInFlight:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetMaxInFlight(v)
+		return nil
+	case systemoneinstance.FieldRatePerSec:
+		v, ok := value.(float64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRatePerSec(v)
+		return nil
+	case systemoneinstance.FieldMaxInputTokens:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetMaxInputTokens(v)
+		return nil
+	case systemoneinstance.FieldCallTimeoutNs:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCallTimeoutNs(v)
+		return nil
+	case systemoneinstance.FieldAllowPrivateNetwork:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAllowPrivateNetwork(v)
+		return nil
+	case systemoneinstance.FieldEnabled:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetEnabled(v)
+		return nil
+	case systemoneinstance.FieldRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRevision(v)
+		return nil
+	case systemoneinstance.FieldCreatedBy:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedBy(v)
+		return nil
+	case systemoneinstance.FieldUpdatedBy:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdatedBy(v)
+		return nil
+	case systemoneinstance.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	case systemoneinstance.FieldUpdatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdatedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown SystemOneInstance field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *SystemOneInstanceMutation) AddedFields() []string {
+	var fields []string
+	if m.addmax_in_flight != nil {
+		fields = append(fields, systemoneinstance.FieldMaxInFlight)
+	}
+	if m.addrate_per_sec != nil {
+		fields = append(fields, systemoneinstance.FieldRatePerSec)
+	}
+	if m.addmax_input_tokens != nil {
+		fields = append(fields, systemoneinstance.FieldMaxInputTokens)
+	}
+	if m.addcall_timeout_ns != nil {
+		fields = append(fields, systemoneinstance.FieldCallTimeoutNs)
+	}
+	if m.addrevision != nil {
+		fields = append(fields, systemoneinstance.FieldRevision)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *SystemOneInstanceMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case systemoneinstance.FieldMaxInFlight:
+		return m.AddedMaxInFlight()
+	case systemoneinstance.FieldRatePerSec:
+		return m.AddedRatePerSec()
+	case systemoneinstance.FieldMaxInputTokens:
+		return m.AddedMaxInputTokens()
+	case systemoneinstance.FieldCallTimeoutNs:
+		return m.AddedCallTimeoutNs()
+	case systemoneinstance.FieldRevision:
+		return m.AddedRevision()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *SystemOneInstanceMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case systemoneinstance.FieldMaxInFlight:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddMaxInFlight(v)
+		return nil
+	case systemoneinstance.FieldRatePerSec:
+		v, ok := value.(float64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddRatePerSec(v)
+		return nil
+	case systemoneinstance.FieldMaxInputTokens:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddMaxInputTokens(v)
+		return nil
+	case systemoneinstance.FieldCallTimeoutNs:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddCallTimeoutNs(v)
+		return nil
+	case systemoneinstance.FieldRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddRevision(v)
+		return nil
+	}
+	return fmt.Errorf("unknown SystemOneInstance numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *SystemOneInstanceMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(systemoneinstance.FieldAuthScopes) {
+		fields = append(fields, systemoneinstance.FieldAuthScopes)
+	}
+	if m.FieldCleared(systemoneinstance.FieldOptions) {
+		fields = append(fields, systemoneinstance.FieldOptions)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *SystemOneInstanceMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *SystemOneInstanceMutation) ClearField(name string) error {
+	switch name {
+	case systemoneinstance.FieldAuthScopes:
+		m.ClearAuthScopes()
+		return nil
+	case systemoneinstance.FieldOptions:
+		m.ClearOptions()
+		return nil
+	}
+	return fmt.Errorf("unknown SystemOneInstance nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *SystemOneInstanceMutation) ResetField(name string) error {
+	switch name {
+	case systemoneinstance.FieldName:
+		m.ResetName()
+		return nil
+	case systemoneinstance.FieldAdapter:
+		m.ResetAdapter()
+		return nil
+	case systemoneinstance.FieldModel:
+		m.ResetModel()
+		return nil
+	case systemoneinstance.FieldEndpoint:
+		m.ResetEndpoint()
+		return nil
+	case systemoneinstance.FieldLocation:
+		m.ResetLocation()
+		return nil
+	case systemoneinstance.FieldAuthKind:
+		m.ResetAuthKind()
+		return nil
+	case systemoneinstance.FieldAuthSecretName:
+		m.ResetAuthSecretName()
+		return nil
+	case systemoneinstance.FieldAuthHeaderName:
+		m.ResetAuthHeaderName()
+		return nil
+	case systemoneinstance.FieldAuthScopes:
+		m.ResetAuthScopes()
+		return nil
+	case systemoneinstance.FieldAuthAudience:
+		m.ResetAuthAudience()
+		return nil
+	case systemoneinstance.FieldOptions:
+		m.ResetOptions()
+		return nil
+	case systemoneinstance.FieldMaxInFlight:
+		m.ResetMaxInFlight()
+		return nil
+	case systemoneinstance.FieldRatePerSec:
+		m.ResetRatePerSec()
+		return nil
+	case systemoneinstance.FieldMaxInputTokens:
+		m.ResetMaxInputTokens()
+		return nil
+	case systemoneinstance.FieldCallTimeoutNs:
+		m.ResetCallTimeoutNs()
+		return nil
+	case systemoneinstance.FieldAllowPrivateNetwork:
+		m.ResetAllowPrivateNetwork()
+		return nil
+	case systemoneinstance.FieldEnabled:
+		m.ResetEnabled()
+		return nil
+	case systemoneinstance.FieldRevision:
+		m.ResetRevision()
+		return nil
+	case systemoneinstance.FieldCreatedBy:
+		m.ResetCreatedBy()
+		return nil
+	case systemoneinstance.FieldUpdatedBy:
+		m.ResetUpdatedBy()
+		return nil
+	case systemoneinstance.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	case systemoneinstance.FieldUpdatedAt:
+		m.ResetUpdatedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown SystemOneInstance field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *SystemOneInstanceMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *SystemOneInstanceMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *SystemOneInstanceMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *SystemOneInstanceMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *SystemOneInstanceMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *SystemOneInstanceMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *SystemOneInstanceMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown SystemOneInstance unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *SystemOneInstanceMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown SystemOneInstance edge %s", name)
 }
 
 // TemplateMutation represents an operation that mutates the Template nodes in the graph.

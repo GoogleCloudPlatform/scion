@@ -576,6 +576,9 @@ type Store interface {
 
 	// Choice prompt decisions and answers (choices, ptone/scion#7514)
 	DecisionStore
+
+	// System One provider instances (ptone/scion#8044)
+	SystemOneInstanceStore
 }
 
 // AgentStore defines agent-related persistence operations.

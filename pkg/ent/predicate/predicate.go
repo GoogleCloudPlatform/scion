@@ -267,6 +267,9 @@ type SkillVersion func(*sql.Selector)
 // SubscriptionTemplate is the predicate function for subscriptiontemplate builders.
 type SubscriptionTemplate func(*sql.Selector)
 
+// SystemOneInstance is the predicate function for systemoneinstance builders.
+type SystemOneInstance func(*sql.Selector)
+
 // Template is the predicate function for template builders.
 type Template func(*sql.Selector)
 

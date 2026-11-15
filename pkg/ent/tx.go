@@ -186,6 +186,8 @@ type Tx struct {
 	SkillVersion *SkillVersionClient
 	// SubscriptionTemplate is the client for interacting with the SubscriptionTemplate builders.
 	SubscriptionTemplate *SubscriptionTemplateClient
+	// SystemOneInstance is the client for interacting with the SystemOneInstance builders.
+	SystemOneInstance *SystemOneInstanceClient
 	// Template is the client for interacting with the Template builders.
 	Template *TemplateClient
 	// TestIdentityDelegation is the client for interacting with the TestIdentityDelegation builders.
@@ -428,6 +430,7 @@ func (tx *Tx) init() {
 	tx.SkillRegistry = NewSkillRegistryClient(tx.config)
 	tx.SkillVersion = NewSkillVersionClient(tx.config)
 	tx.SubscriptionTemplate = NewSubscriptionTemplateClient(tx.config)
+	tx.SystemOneInstance = NewSystemOneInstanceClient(tx.config)
 	tx.Template = NewTemplateClient(tx.config)
 	tx.TestIdentityDelegation = NewTestIdentityDelegationClient(tx.config)
 	tx.TestIdentityLoginCode = NewTestIdentityLoginCodeClient(tx.config)
