@@ -497,6 +497,74 @@ at least 300 seconds to allow for first-boot migrations.
 
 ## 7. Install and upgrade
 
+### Upgrade impact
+
+:::caution[Set fullnameOverride before upgrading a *-scion-hub release]
+Releases whose name ends in `-scion-hub` (such as `prod-scion-hub`, excluding
+exact `scion-hub`) are **renamed on upgrade** from `<release>` to
+`<release>-scion-hub`. Helm prints `NOTES.txt` only **after** an upgrade has
+applied, so set `fullnameOverride` **before** running `helm upgrade` (or
+rendering GitOps manifests) to avoid replacing live objects mid-service.
+:::
+
+Earlier chart versions skipped appending `-scion-hub` whenever the release name
+contained `scion-hub`, so a release named `<prefix>-scion-hub` (`prod-scion-hub`)
+rendered the exact same object names as a sibling `<prefix>` release (`prod`) in
+the same namespace.
+
+- **Unchanged releases:** releases named `scion-hub` (as in the commands below),
+  `scion-hub-*`, infix names such as `my-scion-hub-1`, or names that do not
+  contain `scion-hub` (such as `prod` or `myhub`) keep their existing object
+  names unchanged.
+- **Renamed on upgrade:** releases whose name ends in `-scion-hub` (or
+  `-<nameOverride>`, excluding exact `scion-hub`) now render `<release>-scion-hub`
+  (for example, `prod-scion-hub` becomes `prod-scion-hub-scion-hub`).
+- **What breaks if an existing `*-scion-hub` release upgrades without
+  `fullnameOverride`:** Helm deletes and recreates the Deployment, Service,
+  ServiceAccount, Secrets, ConfigMap, and RBAC objects under
+  `<release>-scion-hub`:
+  - **Workload Identity binding:** when `serviceAccount.create` is `true` and
+    `serviceAccount.name` is not set explicitly, the Kubernetes
+    `ServiceAccount` moves from `<release>` to `<release>-scion-hub`. Because
+    `roles/iam.workloadIdentityUser` on the Google service account is still
+    bound only to `<release>`, Cloud SQL IAM authentication, Cloud Storage, and
+    Secret Manager fail until rebound.
+  - **Service name:** `Service/<release>` moves to
+    `Service/<release>-scion-hub`, breaking any Ingress, Gateway backend, or
+    external target pointing at `Service/<release>`.
+  - **Relay TLS SAN:** the default conduit relay `serverName` moves from
+    `<release>-relay.<namespace>.svc` to
+    `<release>-scion-hub-relay.<namespace>.svc`, breaking cross-replica relay
+    TLS verification unless the certificate is re-issued for the new SAN or
+    `conduit.internalTls.serverName` is set explicitly.
+
+**Set `fullnameOverride` BEFORE upgrading** an existing `*-scion-hub` release
+(when **no** sibling `<prefix>` release shares the namespace) so every
+chart-owned object keeps its current name in place without replacement, outage,
+or temporary Deployment pod-selector overlap:
+
+```yaml
+# Add to your values file BEFORE running helm upgrade:
+fullnameOverride: prod-scion-hub
+```
+
+If you instead want the release to move to the new `<release>-scion-hub` object
+names (for example, to share a namespace with `<prefix>`), complete these steps
+before or alongside the upgrade:
+
+1. **Workload Identity:** pre-bind `roles/iam.workloadIdentityUser` on the
+   Google service account to
+   `serviceAccount:<project-id>.svc.id.goog[<namespace>/<release>-scion-hub]`.
+2. **Service and relay TLS:** update any Ingress or Gateway backend that points
+   at `Service/<release>`, and issue a relay TLS certificate whose SAN matches
+   `<release>-scion-hub-relay.<namespace>.svc` (or set
+   `conduit.internalTls.serverName` explicitly to your existing SAN).
+3. **Rendered manifests (`helm template | kubectl apply` or Argo CD without
+   prune):** remove the previous `<release>*` objects only after confirming no
+   sibling `<prefix>` release in the namespace owns them.
+
+### Running install or upgrade
+
 From the repository root:
 
 ```bash
@@ -529,46 +597,6 @@ kubectl rollout restart deploy/scion-hub --namespace scion-system
 Rotating the session secret signs every user out. Other changes to
 `settings.yaml` alter the `checksum/settings` pod annotation and restart the pods
 on their own.
-
-### Upgrading an existing `*-scion-hub` release
-
-Earlier chart versions skipped the `-scion-hub` suffix whenever the release name
-contained `scion-hub`, so a release named `<prefix>-scion-hub` (for example,
-`prod-scion-hub`) rendered the exact same object names as a sibling release
-named `<prefix>` (`prod`) in the same namespace.
-
-- Releases named `scion-hub` (as in the commands above), `scion-hub-*`, or names
-  that do not contain `scion-hub` (such as `prod` or `myhub`) keep their
-  existing object names unchanged.
-- Releases whose name ends in `-scion-hub` (or `-<nameOverride>`) now append the
-  chart name (for example, `prod-scion-hub` renders `prod-scion-hub-scion-hub`).
-
-If you are upgrading an existing `*-scion-hub` release from chart `<= 0.1.0` and
-**no** sibling `<prefix>` release shares the namespace, pass `fullnameOverride`
-set to the previous full name so all chart-owned objects keep their current
-names without replacement or temporary Deployment pod-selector overlap:
-
-```yaml
-fullnameOverride: prod-scion-hub
-```
-
-If you instead let the release move to the new `<release>-scion-hub` object
-names:
-
-- **Workload Identity:** when `serviceAccount.create` is `true` and
-  `serviceAccount.name` is not set explicitly, the Kubernetes `ServiceAccount`
-  moves from `<release>` to `<release>-scion-hub`. Re-bind
-  `roles/iam.workloadIdentityUser` on the Google service account to
-  `serviceAccount:<project-id>.svc.id.goog[<namespace>/<release>-scion-hub]` so
-  Cloud SQL IAM authentication, Cloud Storage, and Secret Manager continue to
-  authenticate.
-- **Service and relay TLS:** update any Ingress or Gateway backend that points
-  at `Service/<release>`, and re-issue any relay TLS certificate whose SAN used
-  the default `<release>-relay.<namespace>.svc` (or set
-  `conduit.internalTls.serverName` explicitly).
-- **Rendered manifests (`helm template | kubectl apply` or Argo CD without
-  prune):** remove the previous `<release>*` objects only after confirming no
-  sibling `<prefix>` release in the namespace owns them.
 
 ---
 
