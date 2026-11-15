@@ -46,3 +46,8 @@ The `-x` flag is not a stronger clean — it is a different operation. Default t
 A concurrent edit to the deleted file raises a modify/delete conflict and halts the rebase — that case is handled, because it demands a decision. A concurrent edit that adds a *reference* to the deleted file **from a different file** produces no conflict at all: git sees two disjoint changes, reports "Successfully rebased," and leaves a dangling reference.
 
 After rebasing a deletion, **grep for the deleted name**. Any inbound-reference count taken before the rebase is stale by construction.
+
+## Non-Interactive Editor & Repository Config
+
+- **Bypass interactive editors with `GIT_EDITOR=true`:** Use `GIT_EDITOR=true git rebase --continue` (or `--no-edit` on `commit`/`merge`). Do **not** rely on `git -c core.editor=true <subcommand>` — agent harnesses often export `GIT_EDITOR=false` in command subshells, which overrides `-c core.editor` and aborts the command.
+- **Keep disallowed keys out of `.git/config`:** Never write `core.editor`, `core.hooksPath`, or other command-running/credential keys into repository git config; Runtime Brokers refuse to start or resume an agent whose checkout sets unallowed repository config keys. Pass non-editor options per command (`git -c <key>=<val> <subcommand>`).

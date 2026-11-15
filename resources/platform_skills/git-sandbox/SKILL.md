@@ -35,8 +35,8 @@ You are operating in a restricted, non-interactive sandbox environment. Follow t
   - **Continue Rebase:** `GIT_EDITOR=true git rebase --continue`
   - **Standard Merge:** `git merge main --no-edit`
   - **Manual Commit:** `git commit -m "Your message" --no-edit`
-  - **Any Other Command:** Set the editor per command: `GIT_EDITOR=true git <subcommand>`, or `git -c core.editor=true <subcommand>`.
-  - **Never** run `git config core.editor ...` or otherwise write `core.editor`, `core.hooksPath` or any other key outside the repository git config allow-list (`pkg/util/git_config_policy.go`) into the repository config: brokers refuse to start or resume an agent whose checkout sets one. Pass such options per command (`git -c core.editor=true <subcommand>`).
+  - **Any Other Command:** Set the editor via environment variable per command: `GIT_EDITOR=true git <subcommand>`. Do **not** rely on `git -c core.editor=true <subcommand>` — agent harnesses often export `GIT_EDITOR=false` in command subshells, and Git evaluates `GIT_EDITOR` ahead of `-c core.editor`.
+  - **Never** run `git config core.editor ...` or otherwise write `core.editor`, `core.hooksPath` or any other key outside the repository git config allow-list (`pkg/util/git_config_policy.go`) into the repository config: brokers refuse to start or resume an agent whose checkout sets one. Pass non-editor config flags per command (`git -c <key>=<val> <subcommand>`), and override the editor with `GIT_EDITOR=true`.
 
 ## 4. Conflict Resolution Loop
 
