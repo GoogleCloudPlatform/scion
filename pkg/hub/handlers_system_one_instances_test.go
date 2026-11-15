@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -694,4 +695,231 @@ func TestSystemOneInstances_CredentialSeparationAndSecretIsolation(t *testing.T)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 	_, err = localBackend.Get(ctx, delCreated.Auth.SecretName, store.ScopeHub, srv.hubID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
+type faultyDeleteSecretBackend struct {
+	secret.SecretBackend
+	mu         sync.Mutex
+	failDelete bool
+	setNames   []string
+}
+
+func (b *faultyDeleteSecretBackend) setFailDelete(v bool) {
+	b.mu.Lock()
+	b.failDelete = v
+	b.mu.Unlock()
+}
+
+func (b *faultyDeleteSecretBackend) recordedSets() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]string, len(b.setNames))
+	copy(out, b.setNames)
+	return out
+}
+
+func (b *faultyDeleteSecretBackend) Set(ctx context.Context, input *secret.SetSecretInput) (bool, *secret.SecretMeta, error) {
+	created, meta, err := b.SecretBackend.Set(ctx, input)
+	if err == nil && input != nil {
+		b.mu.Lock()
+		b.setNames = append(b.setNames, input.Name)
+		b.mu.Unlock()
+	}
+	return created, meta, err
+}
+
+func (b *faultyDeleteSecretBackend) Delete(ctx context.Context, name, scope, scopeID string) error {
+	b.mu.Lock()
+	fail := b.failDelete
+	b.mu.Unlock()
+	if fail {
+		return errors.New("injected secret backend delete error")
+	}
+	return b.SecretBackend.Delete(ctx, name, scope, scopeID)
+}
+
+func TestSystemOneInstances_DeleteSecretFirstAndForgetRuntime(t *testing.T) {
+	ctx := context.Background()
+	srv, s, localBackend := newSystemOneTestServer(t, true)
+	faultySecret := &faultyDeleteSecretBackend{SecretBackend: localBackend}
+	srv.SetSecretBackend(faultySecret)
+
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"id":"jev-1.14.0"}]}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(tlsSrv.Close)
+
+	srv.setSystemOneRuntimeOptions(
+		systemoneruntime.WithEgressOptionsForTesting(
+			egress.WithLoopbackServerForTesting(tlsSrv.URL, tlsSrv.Client()),
+		),
+	)
+
+	admin, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-del-order-admin", store.SystemRoleSuperAdmin))
+	require.NoError(t, err)
+
+	createRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":    "del-secret-first",
+		"adapter": "typesafe",
+		"model":   "jev-1.14.0",
+		"auth":    map[string]any{"kind": "api_key", "apiKey": "DEL_ORDER_KEY_901"},
+	})
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+	var created SystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(createRec.Body.Bytes(), &created))
+
+	instRow, err := s.GetSystemOneInstanceByName(ctx, "del-secret-first")
+	require.NoError(t, err)
+	instRow.Endpoint = tlsSrv.URL
+	require.NoError(t, s.UpdateSystemOneInstance(ctx, instRow))
+
+	// Warm the runtime transport cache for this instance before deletion.
+	probeRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/del-secret-first/probe", map[string]any{
+		"models": true,
+	})
+	require.Equal(t, http.StatusOK, probeRec.Code, probeRec.Body.String())
+
+	// Secret-delete failure must return 500 and keep the DB row intact so the
+	// operator can retry without orphaning the secret.
+	faultySecret.setFailDelete(true)
+	failDelRec := doRequestAsUser(t, srv, admin, http.MethodDelete, systemOneAdminPath+"/del-secret-first", nil)
+	require.Equal(t, http.StatusInternalServerError, failDelRec.Code, failDelRec.Body.String())
+
+	stillThere, err := s.GetSystemOneInstanceByName(ctx, "del-secret-first")
+	require.NoError(t, err, "DB row must remain when secret delete fails")
+	assert.Equal(t, created.ID, stillThere.ID)
+	getRec := doRequestAsUser(t, srv, admin, http.MethodGet, systemOneAdminPath+"/del-secret-first", nil)
+	assert.Equal(t, http.StatusOK, getRec.Code, getRec.Body.String())
+	_, err = localBackend.Get(ctx, created.Auth.SecretName, store.ScopeHub, srv.hubID)
+	require.NoError(t, err, "secret is still present before retry")
+
+	// Retry once secret backend recovers: returns 204 and removes both secret and row.
+	faultySecret.setFailDelete(false)
+	okDelRec := doRequestAsUser(t, srv, admin, http.MethodDelete, systemOneAdminPath+"/del-secret-first", nil)
+	require.Equal(t, http.StatusNoContent, okDelRec.Code, okDelRec.Body.String())
+
+	_, err = localBackend.Get(ctx, created.Auth.SecretName, store.ScopeHub, srv.hubID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	_, err = s.GetSystemOneInstanceByName(ctx, "del-secret-first")
+	assert.ErrorIs(t, err, store.ErrNotFound)
+
+	// Missing secret (ErrNotFound) during delete is treated as success so a
+	// partially cleaned-up row can always be removed.
+	createMissingRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":    "del-missing-secret",
+		"adapter": "typesafe",
+		"model":   "jev-1.14.0",
+		"auth":    map[string]any{"kind": "api_key", "apiKey": "DEL_MISSING_KEY_902"},
+	})
+	require.Equal(t, http.StatusCreated, createMissingRec.Code, createMissingRec.Body.String())
+	var createdMissing SystemOneInstanceResponse
+	require.NoError(t, json.Unmarshal(createMissingRec.Body.Bytes(), &createdMissing))
+
+	require.NoError(t, localBackend.Delete(ctx, createdMissing.Auth.SecretName, store.ScopeHub, srv.hubID))
+	missingDelRec := doRequestAsUser(t, srv, admin, http.MethodDelete, systemOneAdminPath+"/del-missing-secret", nil)
+	require.Equal(t, http.StatusNoContent, missingDelRec.Code, missingDelRec.Body.String())
+	_, err = s.GetSystemOneInstanceByName(ctx, "del-missing-secret")
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
+type failingCreateSystemOneInstanceStore struct {
+	store.Store
+	fault     *storeFaultSwitch
+	mu        sync.Mutex
+	failedIDs []string
+}
+
+func (w *failingCreateSystemOneInstanceStore) CreateSystemOneInstance(ctx context.Context, inst *store.SystemOneInstance) error {
+	if !w.fault.Active() {
+		return w.Store.CreateSystemOneInstance(ctx, inst)
+	}
+	w.mu.Lock()
+	w.failedIDs = append(w.failedIDs, inst.ID)
+	w.mu.Unlock()
+	return errors.New("injected CreateSystemOneInstance store failure")
+}
+
+func (w *failingCreateSystemOneInstanceStore) lastFailedID() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.failedIDs) == 0 {
+		return ""
+	}
+	return w.failedIDs[len(w.failedIDs)-1]
+}
+
+func TestSystemOneInstances_CreateStoreFaultRollsBackSecret(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServerWithOps(t, nil)
+	// Install store fault wrapper immediately after server construction, before
+	// any audited setup (store_fault_helpers_test.go).
+	faultStore, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *failingCreateSystemOneInstanceStore {
+		return &failingCreateSystemOneInstanceStore{Store: inner, fault: f}
+	})
+
+	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret-signing-key")
+	faultySecret := &faultyDeleteSecretBackend{SecretBackend: localBackend}
+	srv.SetSecretBackend(faultySecret)
+
+	var auditBuf syncBuffer
+	srv.envSecretLog = slog.New(slog.NewJSONHandler(&auditBuf, nil))
+
+	ops := srv.GetOperationalSettings()
+	doc := fmt.Sprintf(`{"overrides":{%q:true}}`, experiments.SystemOne)
+	_, err := ops.Update(ctx, "experiments", json.RawMessage(doc), "test", ops.SectionRevision("experiments"), "managed")
+	require.NoError(t, err)
+
+	admin, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-rollback-admin", store.SystemRoleSuperAdmin))
+	require.NoError(t, err)
+
+	const sentinelKey = "SENTINEL_ROLLBACK_KEY_778899"
+
+	// Case 1: CreateSystemOneInstance fails -> handler returns 500 and deletes
+	// the systemone.instance.<id> secret it wrote beforehand.
+	fault.Arm()
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":    "rollback-ok",
+		"adapter": "typesafe",
+		"model":   "jev-1.14.0",
+		"auth":    map[string]any{"kind": "api_key", "apiKey": sentinelKey},
+	})
+	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), sentinelKey)
+
+	failedID1 := faultStore.lastFailedID()
+	require.NotEmpty(t, failedID1, "CreateSystemOneInstance fault must have fired")
+	secretName1 := "systemone.instance." + failedID1
+	assert.Contains(t, faultySecret.recordedSets(), secretName1, "secret was written prior to store insert")
+
+	_, err = localBackend.Get(ctx, secretName1, store.ScopeHub, srv.hubID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "rollback must remove systemone.instance.<id> secret")
+	_, err = s.GetSystemOneInstanceByName(ctx, "rollback-ok")
+	assert.ErrorIs(t, err, store.ErrNotFound)
+
+	// Case 2: Both CreateSystemOneInstance and secret rollback delete fail ->
+	// audit log records instance_id and secret_name without leaking the key.
+	faultySecret.setFailDelete(true)
+	rec2 := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":    "rollback-fail-logged",
+		"adapter": "typesafe",
+		"model":   "jev-1.14.0",
+		"auth":    map[string]any{"kind": "api_key", "apiKey": sentinelKey},
+	})
+	require.Equal(t, http.StatusInternalServerError, rec2.Code, rec2.Body.String())
+
+	failedID2 := faultStore.lastFailedID()
+	require.NotEmpty(t, failedID2)
+	require.NotEqual(t, failedID1, failedID2)
+	secretName2 := "systemone.instance." + failedID2
+
+	logs := auditBuf.String()
+	assert.Contains(t, logs, "Failed to roll back System One instance credential after store failure")
+	assert.Contains(t, logs, failedID2)
+	assert.Contains(t, logs, secretName2)
+	assert.NotContains(t, logs, sentinelKey)
 }

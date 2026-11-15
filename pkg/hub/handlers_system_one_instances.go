@@ -46,6 +46,7 @@ const (
 	maxProbeSystemOneInstanceBodyBytes  = 256 * 1024
 	maxSystemOneAPIKeyBytes             = 8 * 1024
 	maxSystemOneModelBytes              = 128
+	maxSystemOneRuleIDBytes             = 128
 	maxSystemOneLocationBytes           = 128
 	maxSystemOneOptionsEntries          = 32
 	maxSystemOneOptionKeyBytes          = 64
@@ -694,7 +695,14 @@ func (s *Server) createSystemOneInstance(w http.ResponseWriter, r *http.Request,
 
 	if err := s.store.CreateSystemOneInstance(ctx, inst); err != nil {
 		// Roll back the hub-scoped internal secret if row creation fails.
-		_ = s.deleteSystemOneInstanceSecret(ctx, secretName)
+		if rbErr := s.deleteSystemOneInstanceSecret(ctx, secretName); rbErr != nil {
+			s.logSystemOneAudit().Error("Failed to roll back System One instance credential after store failure",
+				"instance_id", id,
+				"instance_name", name,
+				"secret_name", secretName,
+				"actor_id", actorID,
+			)
+		}
 		if errors.Is(err, store.ErrAlreadyExists) {
 			Conflict(w, fmt.Sprintf("System One instance %q already exists", name))
 			return
@@ -803,8 +811,23 @@ func (s *Server) deleteSystemOneInstance(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// Remove the hub-scoped internal credential first (treating ErrNotFound as
+	// success). If secret deletion fails, keep the DB row and answer 500 so the
+	// caller can retry without permanently orphaning the secret.
+	if delErr := s.deleteSystemOneInstanceSecret(ctx, inst.Auth.SecretName); delErr != nil {
+		s.logSystemOneAudit().Error("Failed to delete System One instance credential",
+			"instance_id", inst.ID,
+			"instance_name", inst.Name,
+			"secret_name", inst.Auth.SecretName,
+			"actor_id", user.ID(),
+		)
+		InternalError(w)
+		return
+	}
+
 	if err := s.store.DeleteSystemOneInstance(ctx, inst.ID); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
+			s.SystemOneRuntime().ForgetInstance(inst.ID)
 			NotFound(w, "system_one_instance")
 			return
 		}
@@ -812,14 +835,7 @@ func (s *Server) deleteSystemOneInstance(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	if delErr := s.deleteSystemOneInstanceSecret(ctx, inst.Auth.SecretName); delErr != nil {
-		s.logSystemOneAudit().Warn("Failed to delete System One instance secret after row removal",
-			"instance_id", inst.ID,
-			"instance_name", inst.Name,
-			"secret_name", inst.Auth.SecretName,
-			"actor_id", user.ID(),
-		)
-	}
+	s.SystemOneRuntime().ForgetInstance(inst.ID)
 
 	s.logSystemOneAudit().Info("System One instance deleted",
 		"instance_id", inst.ID,
@@ -966,7 +982,7 @@ func (s *Server) probeSystemOneInstance(w http.ResponseWriter, r *http.Request, 
 	}
 
 	ruleID := strings.TrimSpace(req.RuleID)
-	if len(ruleID) > maxSystemOneModelBytes || hasControlChars(ruleID) {
+	if len(ruleID) > maxSystemOneRuleIDBytes || hasControlChars(ruleID) {
 		ValidationError(w, "invalid ruleId", nil)
 		return
 	}

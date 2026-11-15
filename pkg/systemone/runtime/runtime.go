@@ -231,6 +231,24 @@ func (r *Runtime) CloseIdleConnections() {
 	}
 }
 
+// ForgetInstance evicts any cached egress transports for the given instance ID
+// regardless of revision, endpoint, or credential metadata, closing their idle
+// HTTP connections. A blank id is a no-op.
+func (r *Runtime) ForgetInstance(id string) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return
+	}
+	r.transportMu.Lock()
+	defer r.transportMu.Unlock()
+	for key, tr := range r.transports {
+		if key.id == id {
+			tr.CloseIdleConnections()
+			delete(r.transports, key)
+		}
+	}
+}
+
 // Evaluate executes a single bounded evaluation of compiled over input with no
 // retries, no fallback, and no caching (P1 scope; runtime-design §§6, 7.1, 8.1).
 //

@@ -1309,6 +1309,101 @@ func TestRuntime_TransportCacheKeyIsolatesEndpointAndAuth(t *testing.T) {
 	}, authHeadersB, "different endpoint must never reuse credential bound to previous endpoint")
 }
 
+func TestRuntime_ForgetInstanceEvictsAllKeysForID(t *testing.T) {
+	var mu sync.Mutex
+	var seenTransports []provider.Transport
+
+	base := newFakeAdapter(nil)
+	ml := &fakeModelListerAdapter{
+		fakeAdapter: base,
+		modelsFn: func(_ context.Context, tr provider.Transport, _ provider.InstanceView) ([]string, error) {
+			mu.Lock()
+			seenTransports = append(seenTransports, tr)
+			mu.Unlock()
+			return []string{"jev-1.14.0"}, nil
+		},
+	}
+	reg := provider.NewRegistry()
+	reg.MustRegister(ml)
+
+	rt := runtime.New(runtime.Config{
+		Registry: reg,
+		Credentials: func(_ context.Context, inst runtime.Instance) (string, error) {
+			return "tok-" + inst.Auth.SecretName, nil
+		},
+	})
+	defer rt.CloseIdleConnections()
+
+	lastTransport := func() provider.Transport {
+		mu.Lock()
+		defer mu.Unlock()
+		return seenTransports[len(seenTransports)-1]
+	}
+
+	targetA := runtime.Instance{
+		ID:       "inst-target",
+		Name:     "target",
+		Revision: 1,
+		Adapter:  "fake-typesafe",
+		Endpoint: "https://provider-a.example.test",
+		Enabled:  true,
+		Auth:     runtime.InstanceAuth{Kind: "api_key", SecretName: "secret-a"},
+	}
+	// Same ID + Revision, different Endpoint and SecretName (distinct transportKey).
+	targetB := targetA
+	targetB.Endpoint = "https://provider-b.example.test"
+	targetB.Auth.SecretName = "secret-b"
+
+	other := runtime.Instance{
+		ID:       "inst-other",
+		Name:     "other",
+		Revision: 1,
+		Adapter:  "fake-typesafe",
+		Endpoint: "https://provider-other.example.test",
+		Enabled:  true,
+		Auth:     runtime.InstanceAuth{Kind: "api_key", SecretName: "secret-other"},
+	}
+
+	_, err := rt.ListModels(context.Background(), targetA)
+	require.NoError(t, err)
+	trTargetA1 := lastTransport()
+
+	_, err = rt.ListModels(context.Background(), targetA)
+	require.NoError(t, err)
+	trTargetA2 := lastTransport()
+	require.Same(t, trTargetA1, trTargetA2, "transport for targetA should be cached before ForgetInstance")
+
+	_, err = rt.ListModels(context.Background(), targetB)
+	require.NoError(t, err)
+	trTargetB1 := lastTransport()
+	require.NotSame(t, trTargetA1, trTargetB1)
+
+	_, err = rt.ListModels(context.Background(), other)
+	require.NoError(t, err)
+	trOther1 := lastTransport()
+
+	// Blank ID is a no-op.
+	rt.ForgetInstance("   ")
+	_, err = rt.ListModels(context.Background(), targetA)
+	require.NoError(t, err)
+	require.Same(t, trTargetA1, lastTransport(), "blank ForgetInstance must not evict cached entries")
+
+	// Evict all keys belonging to inst-target regardless of endpoint/auth fields.
+	rt.ForgetInstance("inst-target")
+
+	_, err = rt.ListModels(context.Background(), targetA)
+	require.NoError(t, err)
+	require.NotSame(t, trTargetA1, lastTransport(), "targetA transport must be evicted after ForgetInstance")
+
+	_, err = rt.ListModels(context.Background(), targetB)
+	require.NoError(t, err)
+	require.NotSame(t, trTargetB1, lastTransport(), "targetB transport with same ID must also be evicted")
+
+	_, err = rt.ListModels(context.Background(), other)
+	require.NoError(t, err)
+	require.Same(t, trOther1, lastTransport(), "unrelated instance transport must remain cached")
+}
+
 type wrappedAdapterError struct {
 	pe    *provider.ProviderError
 	cause error
