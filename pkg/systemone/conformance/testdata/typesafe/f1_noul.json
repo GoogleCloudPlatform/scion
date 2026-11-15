@@ -1,0 +1,224 @@
+{
+  "fixture_id": "F1",
+  "description": "TypeSafe Jev binary (noul) question encoding and decoding: OpenAPI 0.2.0 example without criteria, synthetic NoulCriteria with-criteria variant, and exact 0.5 tie.",
+  "adapter": "typesafe",
+  "provenance": {
+    "notice": "synthetic from docs, not recorded from the live API (synthetic from docs, not a recorded response)",
+    "sources": [
+      "https://api.typesafe.ai/openapi.json (v0.2.0, POST /v1/systemone NoulQuestion, NoulCriteria, and NoulAnswer schema/example)",
+      "https://docs.typesafe.ai/primitives/noul.md"
+    ],
+    "unverified_items": ["U1"]
+  },
+  "invoke_cases": [
+    {
+      "name": "noul_without_criteria_openapi_example",
+      "note": "Derived from OpenAPI 0.2.0 NoulQuestion/NoulAnswer example (state wrapped as portable probe.text object per provider-design §4.1, §7.4).",
+      "model": "jev-latest",
+      "expected_path": "/v1/systemone",
+      "exact_request_key_order": true,
+      "expected_request_json": {
+        "model": "jev-latest",
+        "state": {
+          "probe.text": "I was charged twice for my subscription this month. Please refund the extra charge."
+        },
+        "questions": {
+          "billing": {
+            "type": "noul",
+            "instructions": "Is this message about billing?"
+          }
+        }
+      },
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "billing",
+              "type": "binary",
+              "instructions": "Is this message about billing?"
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "I was charged twice for my subscription this month. Please refund the extra charge.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "headers": {
+          "x-typesafe-request-id": "req_synth_f1_nocrit"
+        },
+        "raw_body": "{\"model\":\"jev-latest\",\"answers\":{\"billing\":{\"type\":\"noul\",\"noul\":0.98}},\"usage\":{\"input_tokens\":120,\"output_tokens\":12}}"
+      },
+      "expect_result": {
+        "resolved_model": "jev-latest",
+        "provider_request_id": "req_synth_f1_nocrit",
+        "http_status": 200,
+        "usage": {
+          "input_tokens": 120,
+          "output_tokens": 12
+        },
+        "notes": ["model_alias_reported"],
+        "answers": {
+          "billing": {
+            "primitive": "binary",
+            "status": "answered",
+            "tied": false,
+            "bool": true,
+            "distribution": {
+              "true": 0.98,
+              "false": 0.02
+            },
+            "portable_metrics": {
+              "p_top": 0.98,
+              "margin": 0.96,
+              "norm_entropy": 0.14144054254182067
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "noul_with_criteria_synthetic_from_schema",
+      "note": "Synthetic from OpenAPI 0.2.0 NoulCriteria schema ({true, false} descriptions), not a verbatim OpenAPI example.",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "exact_request_key_order": true,
+      "expected_request_json": {
+        "model": "jev-1.14.0",
+        "state": {
+          "probe.text": "Can we schedule the architecture review for Tuesday afternoon?"
+        },
+        "questions": {
+          "billing": {
+            "type": "noul",
+            "instructions": "Is this message about billing?",
+            "criteria": {
+              "true": "Concerns invoices, charges, payments, or refunds.",
+              "false": "Does not concern invoices, charges, payments, or refunds."
+            }
+          }
+        }
+      },
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "billing",
+              "type": "binary",
+              "instructions": "Is this message about billing?",
+              "criteria": {
+                "true": "Concerns invoices, charges, payments, or refunds.",
+                "false": "Does not concern invoices, charges, payments, or refunds."
+              }
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "Can we schedule the architecture review for Tuesday afternoon?",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "headers": {
+          "x-typesafe-request-id": "req_synth_f1_crit"
+        },
+        "raw_body": "{\"model\":\"jev-1.14.0\",\"answers\":{\"billing\":{\"type\":\"noul\",\"noul\":0.05}},\"usage\":{\"input_tokens\":96,\"output_tokens\":10}}"
+      },
+      "expect_result": {
+        "resolved_model": "jev-1.14.0",
+        "provider_request_id": "req_synth_f1_crit",
+        "http_status": 200,
+        "usage": {
+          "input_tokens": 96,
+          "output_tokens": 10
+        },
+        "answers": {
+          "billing": {
+            "primitive": "binary",
+            "status": "answered",
+            "tied": false,
+            "bool": false,
+            "distribution": {
+              "true": 0.05,
+              "false": 0.95
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "noul_exact_half_tie_signal",
+      "note": "Synthetic from provider-design §4.3, §7.4: noul == 0.5 exactly yields Tied=true and Bool=nil for runtime Uncertain(tie).",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "billing",
+              "type": "binary",
+              "instructions": "Is this message about billing?"
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "Following up on yesterday's note.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "headers": {
+          "x-typesafe-request-id": "req_synth_f1_tie"
+        },
+        "raw_body": "{\"model\":\"jev-1.14.0\",\"answers\":{\"billing\":{\"type\":\"noul\",\"noul\":0.5}},\"usage\":{\"input_tokens\":48,\"output_tokens\":8}}"
+      },
+      "expect_result": {
+        "resolved_model": "jev-1.14.0",
+        "provider_request_id": "req_synth_f1_tie",
+        "http_status": 200,
+        "usage": {
+          "input_tokens": 48,
+          "output_tokens": 8
+        },
+        "answers": {
+          "billing": {
+            "primitive": "binary",
+            "status": "answered",
+            "tied": true,
+            "distribution": {
+              "true": 0.5,
+              "false": 0.5
+            },
+            "portable_metrics": {
+              "p_top": 0.5,
+              "margin": 0.0,
+              "norm_entropy": 1.0
+            }
+          }
+        }
+      }
+    }
+  ]
+}

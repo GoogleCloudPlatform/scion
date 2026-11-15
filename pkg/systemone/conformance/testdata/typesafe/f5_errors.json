@@ -1,0 +1,599 @@
+{
+  "fixture_id": "F5",
+  "description": "TypeSafe Jev HTTP and transport error-mapping table (401, 400 max_tokens_exceeded string/object, 400 rule violation, 413, 415, 422 ValidationError list, 429 Retry-After/retry-after-ms/HTTP-date, 529, 5xx, 408, connection failure, >1 MiB body), proving error bodies never leak and P1 performs no retry.",
+  "adapter": "typesafe",
+  "provenance": {
+    "notice": "synthetic from docs, not recorded from the live API (synthetic from docs, not a recorded response)",
+    "sources": [
+      "https://docs.typesafe.ai/api/errors.md",
+      "https://api.typesafe.ai/openapi.json (v0.2.0, HTTPBadRequestError and HTTPValidationError schemas; 401/429/529 bodies synthetic per U2)"
+    ],
+    "unverified_items": ["U2", "U7"]
+  },
+  "invoke_cases": [
+    {
+      "name": "http_401_unauthorized",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "billing",
+              "type": "binary",
+              "instructions": "Is this message about billing?"
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "Synthetic probe text.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 401,
+        "raw_body": "{\"detail\":\"F5_ERROR_BODY_CANARY_401_UNAUTHORIZED\"}"
+      },
+      "expect_error": {
+        "reason": "auth",
+        "retryable": false,
+        "http_status": 401,
+        "error_body_canary": "F5_ERROR_BODY_CANARY_401_UNAUTHORIZED"
+      }
+    },
+    {
+      "name": "http_400_max_tokens_exceeded_string_detail",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "billing",
+              "type": "binary",
+              "instructions": "Is this message about billing?"
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "Synthetic probe text.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 400,
+        "raw_body": "{\"detail\":\"max_tokens_exceeded: F5_ERROR_BODY_CANARY_400_MAX_TOKENS_STR\"}"
+      },
+      "expect_error": {
+        "reason": "input_too_large",
+        "retryable": false,
+        "http_status": 400,
+        "error_body_canary": "F5_ERROR_BODY_CANARY_400_MAX_TOKENS_STR"
+      }
+    },
+    {
+      "name": "http_400_max_tokens_exceeded_object_detail",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "billing",
+              "type": "binary",
+              "instructions": "Is this message about billing?"
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "Synthetic probe text.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 400,
+        "raw_body": "{\"detail\":{\"code\":\"max_tokens_exceeded\",\"limit\":32768,\"echo\":\"F5_ERROR_BODY_CANARY_400_MAX_TOKENS_OBJ\"}}"
+      },
+      "expect_error": {
+        "reason": "input_too_large",
+        "retryable": false,
+        "http_status": 400,
+        "error_body_canary": "F5_ERROR_BODY_CANARY_400_MAX_TOKENS_OBJ"
+      }
+    },
+    {
+      "name": "http_400_rule_violation",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "billing",
+              "type": "binary",
+              "instructions": "Is this message about billing?"
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "Synthetic probe text.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 400,
+        "raw_body": "{\"detail\":\"unknown model: F5_ERROR_BODY_CANARY_400_RULE\"}"
+      },
+      "expect_error": {
+        "reason": "invalid_request",
+        "retryable": false,
+        "http_status": 400,
+        "error_body_canary": "F5_ERROR_BODY_CANARY_400_RULE"
+      }
+    },
+    {
+      "name": "http_413_payload_too_large",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "billing",
+              "type": "binary",
+              "instructions": "Is this message about billing?"
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "Synthetic probe text.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 413,
+        "raw_body": "{\"detail\":\"F5_ERROR_BODY_CANARY_413_LARGE\"}"
+      },
+      "expect_error": {
+        "reason": "input_too_large",
+        "retryable": false,
+        "http_status": 413,
+        "error_body_canary": "F5_ERROR_BODY_CANARY_413_LARGE"
+      }
+    },
+    {
+      "name": "http_415_unsupported_media_type",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "billing",
+              "type": "binary",
+              "instructions": "Is this message about billing?"
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "Synthetic probe text.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 415,
+        "raw_body": "{\"detail\":\"F5_ERROR_BODY_CANARY_415_MEDIA\"}"
+      },
+      "expect_error": {
+        "reason": "invalid_request",
+        "retryable": false,
+        "http_status": 415,
+        "error_body_canary": "F5_ERROR_BODY_CANARY_415_MEDIA"
+      }
+    },
+    {
+      "name": "http_422_validation_error_list",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "billing",
+              "type": "binary",
+              "instructions": "Is this message about billing?"
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "Synthetic probe text.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 422,
+        "raw_body": "{\"detail\":[{\"loc\":[\"body\",\"questions\",\"billing\"],\"msg\":\"F5_ERROR_BODY_CANARY_422_VALIDATION\",\"type\":\"value_error.missing\"}]}"
+      },
+      "expect_error": {
+        "reason": "invalid_request",
+        "retryable": false,
+        "http_status": 422,
+        "error_body_canary": "F5_ERROR_BODY_CANARY_422_VALIDATION"
+      }
+    },
+    {
+      "name": "http_429_rate_limited_retry_after_seconds",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "billing",
+              "type": "binary",
+              "instructions": "Is this message about billing?"
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "Synthetic probe text.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 429,
+        "headers": {
+          "Retry-After": "5"
+        },
+        "raw_body": "{\"detail\":\"F5_ERROR_BODY_CANARY_429_SEC\"}"
+      },
+      "expect_error": {
+        "reason": "rate_limited",
+        "retryable": true,
+        "http_status": 429,
+        "retry_after_ms": 5000,
+        "error_body_canary": "F5_ERROR_BODY_CANARY_429_SEC"
+      }
+    },
+    {
+      "name": "http_429_rate_limited_retry_after_ms",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "billing",
+              "type": "binary",
+              "instructions": "Is this message about billing?"
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "Synthetic probe text.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 429,
+        "headers": {
+          "Retry-After": "2",
+          "retry-after-ms": "275"
+        },
+        "raw_body": "{\"detail\":\"F5_ERROR_BODY_CANARY_429_MS\"}"
+      },
+      "expect_error": {
+        "reason": "rate_limited",
+        "retryable": true,
+        "http_status": 429,
+        "retry_after_ms": 275,
+        "error_body_canary": "F5_ERROR_BODY_CANARY_429_MS"
+      }
+    },
+    {
+      "name": "http_429_rate_limited_http_date",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "billing",
+              "type": "binary",
+              "instructions": "Is this message about billing?"
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "Synthetic probe text.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 429,
+        "retry_after_in_future": "10s",
+        "raw_body": "{\"detail\":\"F5_ERROR_BODY_CANARY_429_DATE\"}"
+      },
+      "expect_error": {
+        "reason": "rate_limited",
+        "retryable": true,
+        "http_status": 429,
+        "min_retry_after_ms": 1000,
+        "max_retry_after_ms": 15000,
+        "error_body_canary": "F5_ERROR_BODY_CANARY_429_DATE"
+      }
+    },
+    {
+      "name": "http_529_overloaded",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "billing",
+              "type": "binary",
+              "instructions": "Is this message about billing?"
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "Synthetic probe text.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 529,
+        "headers": {
+          "retry-after-ms": "500"
+        },
+        "raw_body": "{\"detail\":\"F5_ERROR_BODY_CANARY_529_OVERLOADED\"}"
+      },
+      "expect_error": {
+        "reason": "unavailable",
+        "retryable": true,
+        "http_status": 529,
+        "retry_after_ms": 500,
+        "error_body_canary": "F5_ERROR_BODY_CANARY_529_OVERLOADED"
+      }
+    },
+    {
+      "name": "http_502_bad_gateway",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "billing",
+              "type": "binary",
+              "instructions": "Is this message about billing?"
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "Synthetic probe text.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 502,
+        "raw_body": "<html>F5_ERROR_BODY_CANARY_502_UPSTREAM</html>"
+      },
+      "expect_error": {
+        "reason": "unavailable",
+        "retryable": true,
+        "http_status": 502,
+        "error_body_canary": "F5_ERROR_BODY_CANARY_502_UPSTREAM"
+      }
+    },
+    {
+      "name": "http_408_request_timeout",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "billing",
+              "type": "binary",
+              "instructions": "Is this message about billing?"
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "Synthetic probe text.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 408,
+        "raw_body": "{\"detail\":\"F5_ERROR_BODY_CANARY_408_TIMEOUT\"}"
+      },
+      "expect_error": {
+        "reason": "unavailable",
+        "retryable": true,
+        "http_status": 408,
+        "error_body_canary": "F5_ERROR_BODY_CANARY_408_TIMEOUT"
+      }
+    },
+    {
+      "name": "connection_drop_unavailable",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "billing",
+              "type": "binary",
+              "instructions": "Is this message about billing?"
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "Synthetic probe text.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "drop_connection": true
+      },
+      "expect_error": {
+        "reason": "unavailable",
+        "retryable": true
+      }
+    },
+    {
+      "name": "oversize_response_body_over_1mib",
+      "note": "AC-4: response body exceeding 1 MiB fails as malformed_response.",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "billing",
+              "type": "binary",
+              "instructions": "Is this message about billing?"
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "Synthetic probe text.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "oversize_body_bytes": 1048577
+      },
+      "expect_error": {
+        "reason": "malformed_response",
+        "retryable": false
+      }
+    }
+  ],
+  "model_list_cases": [
+    {
+      "name": "get_v1_models_401_auth",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/models",
+      "mock_response": {
+        "status_code": 401,
+        "raw_body": "{\"detail\":\"F5_MODELS_CANARY_401\"}"
+      },
+      "expect_error": {
+        "reason": "auth",
+        "retryable": false,
+        "http_status": 401,
+        "error_body_canary": "F5_MODELS_CANARY_401"
+      }
+    },
+    {
+      "name": "get_v1_models_400_bad_request",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/models",
+      "mock_response": {
+        "status_code": 400,
+        "raw_body": "{\"detail\":\"F5_MODELS_CANARY_400\"}"
+      },
+      "expect_error": {
+        "reason": "invalid_request",
+        "retryable": false,
+        "http_status": 400,
+        "error_body_canary": "F5_MODELS_CANARY_400"
+      }
+    }
+  ]
+}

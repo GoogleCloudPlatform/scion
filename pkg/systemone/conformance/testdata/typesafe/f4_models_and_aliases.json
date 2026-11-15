@@ -1,0 +1,195 @@
+{
+  "fixture_id": "F4",
+  "description": "TypeSafe Jev model provenance (U1: alias echo vs exact versioned ID) and GET /v1/models ModelMetadataList.",
+  "adapter": "typesafe",
+  "provenance": {
+    "notice": "synthetic from docs, not recorded from the live API (synthetic from docs, not a recorded response)",
+    "sources": [
+      "https://docs.typesafe.ai/models.md (claims versioned ID returned behind alias)",
+      "https://api.typesafe.ai/openapi.json (v0.2.0, response examples echo jev-latest; GET /v1/models ModelMetadataList schema)"
+    ],
+    "unverified_items": ["U1", "U5"]
+  },
+  "invoke_cases": [
+    {
+      "name": "alias_configured_versioned_model_returned",
+      "note": "Covers models.md claim (U1): jev-latest configured, exact jev-1.14.0 returned -> ResolvedModel='jev-1.14.0', no alias note.",
+      "model": "jev-latest",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "billing",
+              "type": "binary",
+              "instructions": "Is this message about billing?"
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "Synthetic model version test.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "headers": {
+          "x-typesafe-request-id": "req_synth_f4_ver"
+        },
+        "raw_body": "{\"model\":\"jev-1.14.0\",\"answers\":{\"billing\":{\"type\":\"noul\",\"noul\":0.25}},\"usage\":{\"input_tokens\":40,\"output_tokens\":6}}"
+      },
+      "expect_result": {
+        "resolved_model": "jev-1.14.0",
+        "provider_request_id": "req_synth_f4_ver",
+        "http_status": 200,
+        "usage": {
+          "input_tokens": 40,
+          "output_tokens": 6
+        },
+        "answers": {
+          "billing": {
+            "primitive": "binary",
+            "status": "answered",
+            "tied": false,
+            "bool": false,
+            "distribution": {
+              "true": 0.25,
+              "false": 0.75
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "alias_jev_latest_echoed_sets_note",
+      "note": "Covers OpenAPI 0.2.0 example behavior (U1): response echoes jev-latest -> adds model_alias_reported note.",
+      "model": "jev-latest",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "billing",
+              "type": "binary",
+              "instructions": "Is this message about billing?"
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "Synthetic alias echo test.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "headers": {
+          "x-typesafe-request-id": "req_synth_f4_latest"
+        },
+        "raw_body": "{\"model\":\"jev-latest\",\"answers\":{\"billing\":{\"type\":\"noul\",\"noul\":0.75}},\"usage\":{\"input_tokens\":40,\"output_tokens\":6}}"
+      },
+      "expect_result": {
+        "resolved_model": "jev-latest",
+        "provider_request_id": "req_synth_f4_latest",
+        "http_status": 200,
+        "usage": {
+          "input_tokens": 40,
+          "output_tokens": 6
+        },
+        "notes": ["model_alias_reported"],
+        "answers": {
+          "billing": {
+            "primitive": "binary",
+            "status": "answered",
+            "tied": false,
+            "bool": true,
+            "distribution": {
+              "true": 0.75,
+              "false": 0.25
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "alias_jev_preview_echoed_sets_note",
+      "note": "Known alias jev-preview also triggers model_alias_reported (provider-design §7.4).",
+      "model": "jev-preview",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "billing",
+              "type": "binary",
+              "instructions": "Is this message about billing?"
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "Synthetic preview alias echo test.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "headers": {
+          "x-typesafe-request-id": "req_synth_f4_preview"
+        },
+        "raw_body": "{\"model\":\"jev-preview\",\"answers\":{\"billing\":{\"type\":\"noul\",\"noul\":0.6}},\"usage\":{\"input_tokens\":40,\"output_tokens\":6}}"
+      },
+      "expect_result": {
+        "resolved_model": "jev-preview",
+        "provider_request_id": "req_synth_f4_preview",
+        "http_status": 200,
+        "usage": {
+          "input_tokens": 40,
+          "output_tokens": 6
+        },
+        "notes": ["model_alias_reported"],
+        "answers": {
+          "billing": {
+            "primitive": "binary",
+            "status": "answered",
+            "tied": false,
+            "bool": true,
+            "distribution": {
+              "true": 0.6,
+              "false": 0.4
+            }
+          }
+        }
+      }
+    }
+  ],
+  "model_list_cases": [
+    {
+      "name": "get_v1_models_openapi_schema",
+      "note": "Synthetic from OpenAPI 0.2.0 ModelMetadataList -> []ModelMetadata ({name, description, release_date}).",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/models",
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"models\":[{\"name\":\"jev-latest\",\"description\":\"General-purpose system one model.\",\"release_date\":\"2026-09-15\"},{\"name\":\"jev-1.14.0\",\"description\":\"Pinned Jev 1.14.0 release.\",\"release_date\":\"2026-09-15\"},{\"name\":\"jev-preview\",\"description\":\"Preview system one model.\",\"release_date\":\"2026-10-01\"}]}"
+      },
+      "expect_models": ["jev-latest", "jev-1.14.0", "jev-preview"]
+    }
+  ]
+}

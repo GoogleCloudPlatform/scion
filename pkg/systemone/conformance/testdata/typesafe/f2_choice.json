@@ -1,0 +1,357 @@
+{
+  "fixture_id": "F2",
+  "description": "TypeSafe Jev closed-choice encoding, decoding, native confidence recording, top-tie detection, abstain-option preservation, and U4 formula observation.",
+  "adapter": "typesafe",
+  "provenance": {
+    "notice": "synthetic from docs, not recorded from the live API (synthetic from docs, not a recorded response)",
+    "sources": [
+      "https://api.typesafe.ai/openapi.json (v0.2.0, POST /v1/systemone ChoiceQuestion and ChoiceAnswer example)",
+      "https://docs.typesafe.ai/confidence.md",
+      "https://docs.typesafe.ai/primitives/choice.md"
+    ],
+    "unverified_items": ["U1", "U3", "U4"]
+  },
+  "invoke_cases": [
+    {
+      "name": "choice_openapi_example",
+      "note": "Derived from OpenAPI 0.2.0 ChoiceQuestion/ChoiceAnswer example: p={angry:0.15, calm:0.8, excited:0.05}, confidence=0.7=(3*0.8-1)/2.",
+      "model": "jev-latest",
+      "expected_path": "/v1/systemone",
+      "exact_request_key_order": true,
+      "expected_request_json": {
+        "model": "jev-latest",
+        "state": {
+          "probe.text": "I was charged twice for my subscription this month. Please refund the extra charge."
+        },
+        "questions": {
+          "tone": {
+            "type": "choice",
+            "instructions": "What is the tone of this message?",
+            "criteria": {
+              "angry": "An upset or hostile message",
+              "calm": "A neutral or polite message",
+              "excited": "An enthusiastic or eager message"
+            }
+          }
+        }
+      },
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "tone",
+              "type": "choice",
+              "instructions": "What is the tone of this message?",
+              "options": [
+                {
+                  "id": "angry",
+                  "description": "An upset or hostile message"
+                },
+                {
+                  "id": "calm",
+                  "description": "A neutral or polite message"
+                },
+                {
+                  "id": "excited",
+                  "description": "An enthusiastic or eager message"
+                }
+              ]
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "I was charged twice for my subscription this month. Please refund the extra charge.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "headers": {
+          "x-typesafe-request-id": "req_synth_f2_openapi"
+        },
+        "raw_body": "{\"model\":\"jev-latest\",\"answers\":{\"tone\":{\"type\":\"choice\",\"choice\":\"calm\",\"confidence\":0.7,\"probabilities\":{\"angry\":0.15,\"calm\":0.8,\"excited\":0.05}}},\"usage\":{\"input_tokens\":120,\"output_tokens\":12}}"
+      },
+      "expect_result": {
+        "resolved_model": "jev-latest",
+        "provider_request_id": "req_synth_f2_openapi",
+        "http_status": 200,
+        "usage": {
+          "input_tokens": 120,
+          "output_tokens": 12
+        },
+        "notes": ["model_alias_reported"],
+        "answers": {
+          "tone": {
+            "primitive": "choice",
+            "status": "answered",
+            "tied": false,
+            "choice": "calm",
+            "distribution": {
+              "angry": 0.15,
+              "calm": 0.8,
+              "excited": 0.05
+            },
+            "native_metrics": {
+              "typesafe.confidence": {
+                "value": 0.7,
+                "unit": "fraction",
+                "min": 0,
+                "max": 1,
+                "source": "provider-doc"
+              }
+            },
+            "portable_metrics": {
+              "p_top": 0.8,
+              "margin": 0.65,
+              "norm_entropy": 0.5578578164321781
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "choice_top_tie_within_1e9",
+      "note": "Synthetic from provider-design §4.3, §7.4: top two options within 1e-9 produce Tied=true and Choice=nil for runtime Uncertain(tie).",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "tone",
+              "type": "choice",
+              "instructions": "What is the tone of this message?",
+              "options": [
+                {
+                  "id": "angry",
+                  "description": "An upset or hostile message"
+                },
+                {
+                  "id": "calm",
+                  "description": "A neutral or polite message"
+                },
+                {
+                  "id": "excited",
+                  "description": "An enthusiastic or eager message"
+                }
+              ]
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "Fine. Do whatever you think is best.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "headers": {
+          "x-typesafe-request-id": "req_synth_f2_tie"
+        },
+        "raw_body": "{\"model\":\"jev-1.14.0\",\"answers\":{\"tone\":{\"type\":\"choice\",\"choice\":\"angry\",\"confidence\":0.175,\"probabilities\":{\"angry\":0.45,\"calm\":0.45,\"excited\":0.10}}},\"usage\":{\"input_tokens\":88,\"output_tokens\":10}}"
+      },
+      "expect_result": {
+        "resolved_model": "jev-1.14.0",
+        "provider_request_id": "req_synth_f2_tie",
+        "http_status": 200,
+        "usage": {
+          "input_tokens": 88,
+          "output_tokens": 10
+        },
+        "answers": {
+          "tone": {
+            "primitive": "choice",
+            "status": "answered",
+            "tied": true,
+            "distribution": {
+              "angry": 0.45,
+              "calm": 0.45,
+              "excited": 0.1
+            },
+            "native_metrics": {
+              "typesafe.confidence": {
+                "value": 0.175,
+                "unit": "fraction",
+                "min": 0,
+                "max": 1,
+                "source": "provider-doc"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "choice_abstain_option_argmax_decoded_for_runtime",
+      "note": "Synthetic from provider-design §4.3: portable abstain:true option is sent as an ordinary choice option on the wire and returned as Choice when argmax.",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "topic",
+              "type": "choice",
+              "instructions": "Which topic is `probe.text` mainly about?",
+              "options": [
+                {
+                  "id": "billing",
+                  "description": "Invoices, payments, refunds"
+                },
+                {
+                  "id": "engineering",
+                  "description": "Bugs, outages, code"
+                },
+                {
+                  "id": "cannot_tell",
+                  "description": "The message does not say enough to decide",
+                  "abstain": true
+                }
+              ]
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "Hello!",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "headers": {
+          "x-typesafe-request-id": "req_synth_f2_abstain"
+        },
+        "raw_body": "{\"model\":\"jev-1.14.0\",\"answers\":{\"topic\":{\"type\":\"choice\",\"choice\":\"cannot_tell\",\"confidence\":0.625,\"probabilities\":{\"billing\":0.15,\"engineering\":0.10,\"cannot_tell\":0.75}}},\"usage\":{\"input_tokens\":64,\"output_tokens\":9}}"
+      },
+      "expect_result": {
+        "resolved_model": "jev-1.14.0",
+        "provider_request_id": "req_synth_f2_abstain",
+        "http_status": 200,
+        "usage": {
+          "input_tokens": 64,
+          "output_tokens": 9
+        },
+        "answers": {
+          "topic": {
+            "primitive": "choice",
+            "status": "answered",
+            "tied": false,
+            "choice": "cannot_tell",
+            "distribution": {
+              "billing": 0.15,
+              "engineering": 0.1,
+              "cannot_tell": 0.75
+            },
+            "native_metrics": {
+              "typesafe.confidence": {
+                "value": 0.625,
+                "unit": "fraction",
+                "min": 0,
+                "max": 1,
+                "source": "provider-doc"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "choice_u4_confidence_formula_deviation_noted_not_rejected",
+      "note": "Synthetic for U4 (provider-design §7.4): deviation from (n*p_max-1)/(n-1) adds observation note confidence_formula_deviation without failing validation.",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "tone",
+              "type": "choice",
+              "instructions": "What is the tone of this message?",
+              "options": [
+                {
+                  "id": "angry",
+                  "description": "An upset or hostile message"
+                },
+                {
+                  "id": "calm",
+                  "description": "A neutral or polite message"
+                },
+                {
+                  "id": "excited",
+                  "description": "An enthusiastic or eager message"
+                }
+              ]
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "Synthetic observation test.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "headers": {
+          "x-typesafe-request-id": "req_synth_f2_u4"
+        },
+        "raw_body": "{\"model\":\"jev-1.14.0\",\"answers\":{\"tone\":{\"type\":\"choice\",\"choice\":\"calm\",\"confidence\":0.55,\"probabilities\":{\"angry\":0.15,\"calm\":0.8,\"excited\":0.05}}},\"usage\":{\"input_tokens\":70,\"output_tokens\":9}}"
+      },
+      "expect_result": {
+        "resolved_model": "jev-1.14.0",
+        "provider_request_id": "req_synth_f2_u4",
+        "http_status": 200,
+        "usage": {
+          "input_tokens": 70,
+          "output_tokens": 9
+        },
+        "answers": {
+          "tone": {
+            "primitive": "choice",
+            "status": "answered",
+            "tied": false,
+            "choice": "calm",
+            "distribution": {
+              "angry": 0.15,
+              "calm": 0.8,
+              "excited": 0.05
+            },
+            "native_metrics": {
+              "typesafe.confidence": {
+                "value": 0.55,
+                "unit": "fraction",
+                "min": 0,
+                "max": 1,
+                "source": "provider-doc"
+              }
+            },
+            "notes": ["confidence_formula_deviation"]
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,388 @@
+{
+  "fixture_id": "F6",
+  "description": "TypeSafe Jev malformed 2xx response validation: missing/extra answer keys, partial or extra-key distributions, sum outside 1±1e-3, NaN, out-of-range probabilities, non-argmax choice, null choice, wrong answer type, missing required fields, and duplicate JSON keys.",
+  "adapter": "typesafe",
+  "provenance": {
+    "notice": "synthetic from docs, not recorded from the live API (synthetic from docs, not a recorded response)",
+    "sources": [
+      "https://api.typesafe.ai/openapi.json (v0.2.0, SystemOneResponse, NoulAnswer, ChoiceAnswer required fields)",
+      "https://docs.typesafe.ai/api/system-one.md (probabilities sum to approximately 1; U3 sum tolerance 1e-3)"
+    ],
+    "unverified_items": ["U3", "U4"]
+  },
+  "invoke_cases": [
+    {
+      "name": "missing_answer_key",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "tone",
+              "type": "choice",
+              "instructions": "What is the tone?",
+              "options": [
+                {"id": "angry", "description": "Upset"},
+                {"id": "calm", "description": "Neutral"},
+                {"id": "excited", "description": "Eager"}
+              ]
+            }
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Test.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"model\":\"jev-1.14.0\",\"answers\":{},\"usage\":{\"input_tokens\":20,\"output_tokens\":2}}"
+      },
+      "expect_error": {
+        "reason": "malformed_response",
+        "retryable": false,
+        "http_status": 200
+      }
+    },
+    {
+      "name": "extra_answer_key",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "tone",
+              "type": "choice",
+              "instructions": "What is the tone?",
+              "options": [
+                {"id": "angry", "description": "Upset"},
+                {"id": "calm", "description": "Neutral"},
+                {"id": "excited", "description": "Eager"}
+              ]
+            }
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Test.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"model\":\"jev-1.14.0\",\"answers\":{\"tone\":{\"type\":\"choice\",\"choice\":\"calm\",\"confidence\":0.7,\"probabilities\":{\"angry\":0.15,\"calm\":0.8,\"excited\":0.05}},\"unexpected\":{\"type\":\"noul\",\"noul\":0.5}},\"usage\":{\"input_tokens\":20,\"output_tokens\":2}}"
+      },
+      "expect_error": {
+        "reason": "malformed_response",
+        "retryable": false,
+        "http_status": 200
+      }
+    },
+    {
+      "name": "partial_distribution_missing_option_key",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "tone",
+              "type": "choice",
+              "instructions": "What is the tone?",
+              "options": [
+                {"id": "angry", "description": "Upset"},
+                {"id": "calm", "description": "Neutral"},
+                {"id": "excited", "description": "Eager"}
+              ]
+            }
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Test.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"model\":\"jev-1.14.0\",\"answers\":{\"tone\":{\"type\":\"choice\",\"choice\":\"calm\",\"confidence\":0.7,\"probabilities\":{\"angry\":0.2,\"calm\":0.8}}},\"usage\":{\"input_tokens\":20,\"output_tokens\":2}}"
+      },
+      "expect_error": {
+        "reason": "malformed_response",
+        "retryable": false,
+        "http_status": 200
+      }
+    },
+    {
+      "name": "extra_probability_key_outside_candidate_set",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "tone",
+              "type": "choice",
+              "instructions": "What is the tone?",
+              "options": [
+                {"id": "angry", "description": "Upset"},
+                {"id": "calm", "description": "Neutral"},
+                {"id": "excited", "description": "Eager"}
+              ]
+            }
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Test.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"model\":\"jev-1.14.0\",\"answers\":{\"tone\":{\"type\":\"choice\",\"choice\":\"calm\",\"confidence\":0.7,\"probabilities\":{\"angry\":0.15,\"calm\":0.8,\"excited\":0.05,\"sarcastic\":0.0}}},\"usage\":{\"input_tokens\":20,\"output_tokens\":2}}"
+      },
+      "expect_error": {
+        "reason": "malformed_response",
+        "retryable": false,
+        "http_status": 200
+      }
+    },
+    {
+      "name": "unnormalized_distribution_sum_0_9",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "tone",
+              "type": "choice",
+              "instructions": "What is the tone?",
+              "options": [
+                {"id": "angry", "description": "Upset"},
+                {"id": "calm", "description": "Neutral"},
+                {"id": "excited", "description": "Eager"}
+              ]
+            }
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Test.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"model\":\"jev-1.14.0\",\"answers\":{\"tone\":{\"type\":\"choice\",\"choice\":\"calm\",\"confidence\":0.7,\"probabilities\":{\"angry\":0.15,\"calm\":0.70,\"excited\":0.05}}},\"usage\":{\"input_tokens\":20,\"output_tokens\":2}}"
+      },
+      "expect_error": {
+        "reason": "malformed_response",
+        "retryable": false,
+        "http_status": 200
+      }
+    },
+    {
+      "name": "non_finite_nan_probability",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "tone",
+              "type": "choice",
+              "instructions": "What is the tone?",
+              "options": [
+                {"id": "angry", "description": "Upset"},
+                {"id": "calm", "description": "Neutral"},
+                {"id": "excited", "description": "Eager"}
+              ]
+            }
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Test.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"model\":\"jev-1.14.0\",\"answers\":{\"tone\":{\"type\":\"choice\",\"choice\":\"calm\",\"confidence\":0.7,\"probabilities\":{\"angry\":NaN,\"calm\":0.8,\"excited\":0.2}}},\"usage\":{\"input_tokens\":20,\"output_tokens\":2}}"
+      },
+      "expect_error": {
+        "reason": "malformed_response",
+        "retryable": false,
+        "http_status": 200
+      }
+    },
+    {
+      "name": "choice_not_argmax",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "tone",
+              "type": "choice",
+              "instructions": "What is the tone?",
+              "options": [
+                {"id": "angry", "description": "Upset"},
+                {"id": "calm", "description": "Neutral"},
+                {"id": "excited", "description": "Eager"}
+              ]
+            }
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Test.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"model\":\"jev-1.14.0\",\"answers\":{\"tone\":{\"type\":\"choice\",\"choice\":\"angry\",\"confidence\":0.7,\"probabilities\":{\"angry\":0.15,\"calm\":0.8,\"excited\":0.05}}},\"usage\":{\"input_tokens\":20,\"output_tokens\":2}}"
+      },
+      "expect_error": {
+        "reason": "malformed_response",
+        "retryable": false,
+        "http_status": 200
+      }
+    },
+    {
+      "name": "choice_outside_candidate_set",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "tone",
+              "type": "choice",
+              "instructions": "What is the tone?",
+              "options": [
+                {"id": "angry", "description": "Upset"},
+                {"id": "calm", "description": "Neutral"}
+              ]
+            }
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Test.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"model\":\"jev-1.14.0\",\"answers\":{\"tone\":{\"type\":\"choice\",\"choice\":\"unknown_route\",\"confidence\":0.6,\"probabilities\":{\"angry\":0.2,\"calm\":0.8}}},\"usage\":{\"input_tokens\":20,\"output_tokens\":2}}"
+      },
+      "expect_error": {
+        "reason": "malformed_response",
+        "retryable": false,
+        "http_status": 200
+      }
+    },
+    {
+      "name": "choice_null_on_typesafe_profile",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "tone",
+              "type": "choice",
+              "instructions": "What is the tone?",
+              "options": [
+                {"id": "angry", "description": "Upset"},
+                {"id": "calm", "description": "Neutral"}
+              ]
+            }
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Test.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"model\":\"jev-1.14.0\",\"answers\":{\"tone\":{\"type\":\"choice\",\"choice\":null,\"confidence\":0.0,\"probabilities\":{\"angry\":0.5,\"calm\":0.5}}},\"usage\":{\"input_tokens\":20,\"output_tokens\":2}}"
+      },
+      "expect_error": {
+        "reason": "malformed_response",
+        "retryable": false,
+        "http_status": 200
+      }
+    },
+    {
+      "name": "wrong_answer_type_choice_for_binary",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "billing",
+              "type": "binary",
+              "instructions": "Is this about billing?"
+            }
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Test.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"model\":\"jev-1.14.0\",\"answers\":{\"billing\":{\"type\":\"choice\",\"choice\":\"yes\",\"confidence\":0.9,\"probabilities\":{\"yes\":0.9,\"no\":0.1}}},\"usage\":{\"input_tokens\":20,\"output_tokens\":2}}"
+      },
+      "expect_error": {
+        "reason": "malformed_response",
+        "retryable": false,
+        "http_status": 200
+      }
+    },
+    {
+      "name": "binary_noul_out_of_range",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "billing",
+              "type": "binary",
+              "instructions": "Is this about billing?"
+            }
+          ]
+        },
+        "input": [
+          {"name": "probe.text", "kind": "text", "value": "Test.", "trust": "untrusted"}
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "raw_body": "{\"model\":\"jev-1.14.0\",\"answers\":{\"billing\":{\"type\":\"noul\",\"noul\":1.25}},\"usage\":{\"input_tokens\":20,\"output_tokens\":2}}"
+      },
+      "expect_error": {
+        "reason": "malformed_response",
+        "retryable": false,
+        "http_status": 200
+      }
+    }
+  ]
+}

@@ -1,0 +1,192 @@
+{
+  "fixture_id": "F3",
+  "description": "TypeSafe Jev multi-question request combining binary (noul) and closed-choice questions in one call, plus subset question selection.",
+  "adapter": "typesafe",
+  "provenance": {
+    "notice": "synthetic from docs, not recorded from the live API (synthetic from docs, not a recorded response)",
+    "sources": [
+      "https://docs.typesafe.ai/api/system-one.md",
+      "https://api.typesafe.ai/openapi.json (v0.2.0, POST /v1/systemone questions map and answers map)"
+    ],
+    "unverified_items": ["U1", "U3", "U4"]
+  },
+  "invoke_cases": [
+    {
+      "name": "mixed_binary_and_choice_single_request",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "billing",
+              "type": "binary",
+              "instructions": "Is this message about billing?",
+              "criteria": {
+                "true": "Concerns invoices, payments, or refunds.",
+                "false": "Does not concern invoices, payments, or refunds."
+              }
+            },
+            {
+              "id": "tone",
+              "type": "choice",
+              "instructions": "What is the tone of this message?",
+              "options": [
+                {
+                  "id": "angry",
+                  "description": "An upset or hostile message"
+                },
+                {
+                  "id": "calm",
+                  "description": "A neutral or polite message"
+                },
+                {
+                  "id": "excited",
+                  "description": "An enthusiastic or eager message"
+                }
+              ]
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "I was charged twice for my subscription this month. Please refund the extra charge.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "headers": {
+          "x-typesafe-request-id": "req_synth_f3_mixed"
+        },
+        "raw_body": "{\"model\":\"jev-1.14.0\",\"answers\":{\"billing\":{\"type\":\"noul\",\"noul\":0.98},\"tone\":{\"type\":\"choice\",\"choice\":\"calm\",\"confidence\":0.7,\"probabilities\":{\"angry\":0.15,\"calm\":0.8,\"excited\":0.05}}},\"usage\":{\"input_tokens\":164,\"output_tokens\":20}}"
+      },
+      "expect_result": {
+        "resolved_model": "jev-1.14.0",
+        "provider_request_id": "req_synth_f3_mixed",
+        "http_status": 200,
+        "usage": {
+          "input_tokens": 164,
+          "output_tokens": 20
+        },
+        "answers": {
+          "billing": {
+            "primitive": "binary",
+            "status": "answered",
+            "tied": false,
+            "bool": true,
+            "distribution": {
+              "true": 0.98,
+              "false": 0.02
+            }
+          },
+          "tone": {
+            "primitive": "choice",
+            "status": "answered",
+            "tied": false,
+            "choice": "calm",
+            "distribution": {
+              "angry": 0.15,
+              "calm": 0.8,
+              "excited": 0.05
+            },
+            "native_metrics": {
+              "typesafe.confidence": {
+                "value": 0.7,
+                "unit": "fraction",
+                "min": 0,
+                "max": 1,
+                "source": "provider-doc"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "mixed_rule_subset_question_selection",
+      "note": "ModelRequest.Questions selects only 'tone' out of a 2-question RuleSpec.",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "questions": ["tone"],
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "billing",
+              "type": "binary",
+              "instructions": "Is this message about billing?"
+            },
+            {
+              "id": "tone",
+              "type": "choice",
+              "instructions": "What is the tone of this message?",
+              "options": [
+                {
+                  "id": "angry",
+                  "description": "An upset or hostile message"
+                },
+                {
+                  "id": "calm",
+                  "description": "A neutral or polite message"
+                }
+              ]
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "Thank you for resolving the issue.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 200,
+        "headers": {
+          "x-typesafe-request-id": "req_synth_f3_subset"
+        },
+        "raw_body": "{\"model\":\"jev-1.14.0\",\"answers\":{\"tone\":{\"type\":\"choice\",\"choice\":\"calm\",\"confidence\":0.8,\"probabilities\":{\"angry\":0.1,\"calm\":0.9}}},\"usage\":{\"input_tokens\":72,\"output_tokens\":8}}"
+      },
+      "expect_result": {
+        "resolved_model": "jev-1.14.0",
+        "provider_request_id": "req_synth_f3_subset",
+        "http_status": 200,
+        "usage": {
+          "input_tokens": 72,
+          "output_tokens": 8
+        },
+        "answers": {
+          "tone": {
+            "primitive": "choice",
+            "status": "answered",
+            "tied": false,
+            "choice": "calm",
+            "distribution": {
+              "angry": 0.1,
+              "calm": 0.9
+            },
+            "native_metrics": {
+              "typesafe.confidence": {
+                "value": 0.8,
+                "unit": "fraction",
+                "min": 0,
+                "max": 1,
+                "source": "provider-doc"
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}
