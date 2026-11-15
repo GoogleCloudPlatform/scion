@@ -310,7 +310,10 @@ func TestListenIPv6OnlyLoopbackReservesV4AsRefused(t *testing.T) {
 	}
 	require.Error(t, err, "127.0.0.1:%d must remain reserved against listener binds", port)
 
-	_, err = reserveRefusedLoopbackV4(port)
+	dupRelease, err := reserveRefusedLoopbackV4(port)
+	if err == nil {
+		_ = dupRelease()
+	}
 	require.Error(t, err, "second reservation on 127.0.0.1:%d must fail", port)
 
 	c, err := net.DialTimeout("tcp", v4Addr, 2*time.Second)
