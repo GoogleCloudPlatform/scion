@@ -2242,23 +2242,50 @@ func TestHarnessConfigPolicy_StageCaptureAuthCallSitesAreGated(t *testing.T) {
 }
 
 // ptone/scion#622: when the context's harness-config policy refuses
-// container-script harnesses, a declarative harness-config still launches, but
+// container-script harnesses, a declarative harness-config still launches,
 // neither capture_auth.py nor capture-auth-config.json is staged on
-// ProvisionAgent, Start, or relaunch after an allowed start.
+// ProvisionAgent, Start, or relaunch after an allowed start, and suppression is
+// logged clearly for operators.
 func TestHarnessConfigPolicy_DisallowedSuppressesCaptureAuthStaging(t *testing.T) {
+	assertSuppressedLog := func(t *testing.T, logs, agentName, hcName string) {
+		t.Helper()
+		for _, want := range []string{
+			"capture-auth asset staging suppressed",
+			"agent=" + agentName,
+			"harness=generic",
+			"harness_config=" + hcName,
+			`reason="container-script harnesses disallowed"`,
+		} {
+			if !strings.Contains(logs, want) {
+				t.Errorf("expected suppression log containing %q, got:\n%s", want, logs)
+			}
+		}
+	}
+
 	t.Run("ProvisionAgent disallowed", func(t *testing.T) {
 		e := newPolicyTestEnv(t)
 		writeDeclCaptureAuthHC(t, e, "hc-decl-ca")
+		var logBuf bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+		t.Cleanup(func() { slog.SetDefault(prev) })
+
 		ctx := (&recordingPolicy{refuse: true}).ctx()
 		if _, _, _, err := ProvisionAgent(ctx, "prov-disallowed", "", "", "hc-decl-ca", e.scion, "", "", "", ""); err != nil {
 			t.Fatalf("ProvisionAgent with declarative harness under restrictive policy failed: %v", err)
 		}
 		assertCaptureAuthNotStaged(t, e, "prov-disallowed")
+		assertSuppressedLog(t, logBuf.String(), "prov-disallowed", "hc-decl-ca")
 	})
 
 	t.Run("Start disallowed", func(t *testing.T) {
 		e := newPolicyTestEnv(t)
 		writeDeclCaptureAuthHC(t, e, "hc-decl-ca")
+		var logBuf bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+		t.Cleanup(func() { slog.SetDefault(prev) })
+
 		runs := 0
 		ctx := (&recordingPolicy{refuse: true}).ctx()
 		if _, err := policyTestManager(&runs).Start(ctx, api.StartOptions{
@@ -2270,6 +2297,7 @@ func TestHarnessConfigPolicy_DisallowedSuppressesCaptureAuthStaging(t *testing.T
 			t.Errorf("expected container to run once, got %d", runs)
 		}
 		assertCaptureAuthNotStaged(t, e, "start-disallowed")
+		assertSuppressedLog(t, logBuf.String(), "start-disallowed", "hc-decl-ca")
 	})
 
 	t.Run("Relaunch disallowed clears previously staged capture-auth", func(t *testing.T) {
@@ -2283,6 +2311,11 @@ func TestHarnessConfigPolicy_DisallowedSuppressesCaptureAuthStaging(t *testing.T
 		}
 		assertCaptureAuthStaged(t, e, "relaunch-disallowed")
 
+		var logBuf bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+		t.Cleanup(func() { slog.SetDefault(prev) })
+
 		if _, err := mgr.Start((&recordingPolicy{refuse: true}).ctx(), opts); err != nil {
 			t.Fatalf("relaunch under restrictive policy: %v", err)
 		}
@@ -2290,14 +2323,21 @@ func TestHarnessConfigPolicy_DisallowedSuppressesCaptureAuthStaging(t *testing.T
 			t.Errorf("expected container to run twice, got %d", runs)
 		}
 		assertCaptureAuthNotStaged(t, e, "relaunch-disallowed")
+		assertSuppressedLog(t, logBuf.String(), "relaunch-disallowed", "hc-decl-ca")
 	})
 
 	t.Run("Stat error on capture_auth.py under restrictive policy fails closed on staging", func(t *testing.T) {
 		e := newPolicyTestEnv(t)
-		validDir := writeDeclCaptureAuthHC(t, e, "hc-stat-err")
-		hcDir, err := config.LoadHarnessConfigDir(validDir)
+		// Use policyTestDecl (no auth/required_files block) so hasCaptureAuthCredentials
+		// is false and ONLY the !errors.Is(statErr, os.ErrNotExist) clause triggers
+		// the policy probe.
+		e.projectHC(t, "hc-stat-err", policyTestDecl)
+		hcDir, err := config.LoadHarnessConfigDir(filepath.Join(e.scion, "harness-configs", "hc-stat-err"))
 		if err != nil {
 			t.Fatal(err)
+		}
+		if hasCaptureAuthCredentials(hcDir.Config.Auth) {
+			t.Fatal("fixture: expected no capture-auth credentials so only the stat-error clause applies")
 		}
 		notADir := filepath.Join(t.TempDir(), "regular-file")
 		if err := os.WriteFile(notADir, []byte("x"), 0o644); err != nil {
@@ -2305,22 +2345,36 @@ func TestHarnessConfigPolicy_DisallowedSuppressesCaptureAuthStaging(t *testing.T
 		}
 		hcDir.Path = filepath.Join(notADir, "hc") // Lstat("<regular-file>/hc/capture_auth.py") -> ENOTDIR
 		home := t.TempDir()
+		p := &recordingPolicy{refuse: true}
+		stageCalled := false
+
+		var logBuf bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, nil)))
+		t.Cleanup(func() { slog.SetDefault(prev) })
+
 		stageFallbackCaptureAuthAssets(
-			(&recordingPolicy{refuse: true}).ctx(),
+			p.ctx(),
+			"stat-err-agent",
 			harness.New("generic"),
 			"hc-stat-err",
 			hcDir,
 			home,
-			nil,
+			func(fn func() error) error {
+				stageCalled = true
+				return fn()
+			},
 		)
-		for _, rel := range []string{
-			filepath.Join(".scion", "harness", "capture_auth.py"),
-			filepath.Join(".scion", "harness", "inputs", "capture-auth-config.json"),
-		} {
-			if _, err := os.Lstat(filepath.Join(home, rel)); !os.IsNotExist(err) {
-				t.Errorf("%s was staged despite uncertain capture_auth.py stat under restrictive policy (stat err=%v)", rel, err)
-			}
+		if got := strings.Join(p.recorded(), ","); got != "hc-stat-err:scripted" {
+			t.Errorf("policy evaluations = %q, want %q", got, "hc-stat-err:scripted")
 		}
+		if stageCalled {
+			t.Error("StageCaptureAuthAssets must not be called when statting capture_auth.py fails under a restrictive policy")
+		}
+		if _, err := os.Lstat(filepath.Join(home, ".scion", "harness")); !os.IsNotExist(err) {
+			t.Errorf(".scion/harness was created despite uncertain capture_auth.py stat under restrictive policy (stat err=%v)", err)
+		}
+		assertSuppressedLog(t, logBuf.String(), "stat-err-agent", "hc-stat-err")
 	})
 
 	t.Run("Config-only without capture_auth.py disallowed", func(t *testing.T) {

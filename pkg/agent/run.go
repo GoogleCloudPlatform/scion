@@ -1232,7 +1232,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		// Restage the capture-auth assets a non-container-script harness
 		// keeps in the bundle when permitted by the context's harness-config
 		// policy, as ProvisionAgent stages them.
-		stageFallbackCaptureAuthAssets(ctx, h, harnessConfigName, resolvedHCDir, agentHome, func(fn func() error) error {
+		stageFallbackCaptureAuthAssets(ctx, opts.Name, h, harnessConfigName, resolvedHCDir, agentHome, func(fn func() error) error {
 			return writeAgentHome(ctx, fn)
 		})
 	}

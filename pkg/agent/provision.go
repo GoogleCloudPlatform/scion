@@ -3072,7 +3072,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// container when permitted by the context's harness-config policy.
 	// Container-script harnesses stage these during their own Provision();
 	// this path handles non-container-script fallbacks.
-	stageFallbackCaptureAuthAssets(ctx, h, harnessConfigName, hcDir, agentHome, nil)
+	stageFallbackCaptureAuthAssets(ctx, agentName, h, harnessConfigName, hcDir, agentHome, nil)
 
 	// Reload config to get harness updates (e.g. Env vars injected by harness).
 	// The reloaded file holds only the agent's own environment values; the

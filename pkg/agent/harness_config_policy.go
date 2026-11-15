@@ -136,6 +136,7 @@ func resetStagedProvisioning(agentHome string) error {
 //     the launch.
 func stageFallbackCaptureAuthAssets(
 	ctx context.Context,
+	agentName string,
 	h api.Harness,
 	harnessConfigName string,
 	hcDir *config.HarnessConfigDir,
@@ -154,6 +155,16 @@ func stageFallbackCaptureAuthAssets(
 				if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
 					fmt.Fprintf(os.Stderr, "Warning: capture-auth asset check failed; skipping staging under policy: %v\n", statErr)
 				}
+				harnessName := ""
+				if h != nil {
+					harnessName = h.Name()
+				}
+				slog.Info("capture-auth asset staging suppressed",
+					"agent", agentName,
+					"harness", harnessName,
+					"harness_config", harnessConfigName,
+					"reason", "container-script harnesses disallowed",
+				)
 				return
 			}
 		}
