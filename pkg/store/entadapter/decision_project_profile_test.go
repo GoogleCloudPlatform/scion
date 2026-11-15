@@ -18,12 +18,13 @@ package entadapter
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"testing"
 	"time"
 
-	"entgo.io/ent/dialect"
-	entsql "entgo.io/ent/dialect/sql"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/decision"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionanswer"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -176,7 +177,10 @@ func TestListDecisionAnswersPerProject_PerProjectLimitFiltersAndEnrichment(t *te
 	require.NoError(t, err)
 
 	projects := []string{pBusy, pSmall, pNone}
-	aliceKeys := []string{topicBusy, topicSmall}
+	aliceKeys := map[string][]string{
+		pBusy:  {topicBusy},
+		pSmall: {topicSmall},
+	}
 
 	// perProject=6 (5 + 1 sentinel for "more"): pBusy returns newest 6 of 7 (excluding secret DM),
 	// pSmall returns both 2 answers with PreviousChoiceLabel populated, pNone is omitted.
@@ -206,10 +210,38 @@ func TestListDecisionAnswersPerProject_PerProjectLimitFiltersAndEnrichment(t *te
 	require.Len(t, filtered[pSmall], 1)
 	assert.Equal(t, overrideAnsID, filtered[pSmall][0].Answer.ID)
 
+	// QueryChatKeys (conversation label match) scopes per project without matching other projects.
+	byConvLabel, err := cs.ListDecisionAnswersPerProject(ctx, projects, aliceKeys, store.ProjectDecisionAnswerFilter{
+		Query:         "nomatch-text-only-conv-label",
+		QueryChatKeys: []string{topicSmall},
+	}, 6)
+	require.NoError(t, err)
+	require.Len(t, byConvLabel, 1)
+	require.Len(t, byConvLabel[pSmall], 2)
+
+	// ListDecisionFacets carries each asking agent's ProjectID and leaves answerers without ProjectID.
+	facetAgents, facetAnswerers, _, err := cs.ListDecisionFacets(ctx, projects, []string{topicBusy, topicSmall})
+	require.NoError(t, err)
+	agentProjects := make(map[string]string, len(facetAgents))
+	for _, a := range facetAgents {
+		agentProjects[a.ID] = a.ProjectID
+	}
+	assert.Equal(t, map[string]string{
+		agentA: pBusy,
+		agentB: pSmall,
+	}, agentProjects)
+	require.NotEmpty(t, facetAnswerers)
+	for _, ans := range facetAnswerers {
+		assert.Empty(t, ans.ProjectID, "answerers span projects and must not carry ProjectID")
+	}
+
 	// Zero / empty cases and validation errors.
 	none, err := cs.ListDecisionAnswersPerProject(ctx, projects, aliceKeys, store.ProjectDecisionAnswerFilter{}, 0)
 	require.NoError(t, err)
 	assert.Nil(t, none)
+	emptyMap, err := cs.ListDecisionAnswersPerProject(ctx, projects, nil, store.ProjectDecisionAnswerFilter{}, 6)
+	require.NoError(t, err)
+	assert.Nil(t, emptyMap)
 
 	_, err = cs.ListDecisionAnswersPerProject(ctx, projects, aliceKeys, store.ProjectDecisionAnswerFilter{}, -1)
 	require.ErrorIs(t, err, store.ErrInvalidInput)
@@ -219,54 +251,135 @@ func TestListDecisionAnswersPerProject_PerProjectLimitFiltersAndEnrichment(t *te
 	require.ErrorIs(t, err, store.ErrInvalidInput)
 	_, err = cs.ListDecisionAnswersPerProject(ctx, projects, aliceKeys, store.ProjectDecisionAnswerFilter{Provenance: "bad"}, 6)
 	require.ErrorIs(t, err, store.ErrInvalidInput)
-
-	// Large key slice exceeding maxDecisionAnswerKeyBatch (40,000 keys > SQLite's 32,766 limit)
-	// chunks safely and still caps each project at perProject.
-	hugeKeys := make([]string, 0, 40000)
-	hugeKeys = append(hugeKeys, topicBusy)
-	for i := 0; i < 39998; i++ {
-		hugeKeys = append(hugeKeys, fmt.Sprintf("unused-topic-%05d", i))
-	}
-	hugeKeys = append(hugeKeys, topicSmall)
-	byProjHuge, err := cs.ListDecisionAnswersPerProject(ctx, projects, hugeKeys, store.ProjectDecisionAnswerFilter{}, 6)
-	require.NoError(t, err)
-	require.Len(t, byProjHuge[pBusy], 6)
-	require.Len(t, byProjHuge[pSmall], 2)
 }
 
-func TestRankedDecisionAnswersSelector_PostgresAndSQLitePlaceholders(t *testing.T) {
-	p1, p2 := uuid.New(), uuid.New()
-	agentID := uuid.New()
-	now := time.Date(2026, 11, 15, 0, 0, 0, 0, time.UTC)
-	filter := store.ProjectDecisionAnswerFilter{
-		Query:         "deploy",
-		QueryChatKeys: []string{"topic-1"},
-		AgentID:       agentID.String(),
-		UserID:        "user-1",
-		Provenance:    store.ProjectDecisionProvenanceDirect,
-		From:          &now,
+func TestListDecisionAnswersPerProject_HistoryScale(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping 100k-answer history scale test in short mode")
 	}
-	agentUUID, provPred, err := validateDecisionAnswerFilter(filter)
-	require.NoError(t, err)
-	preds := decisionAnswerFilterPredicates(filter, agentUUID, provPred)
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
 
-	for _, d := range []string{dialect.Postgres, dialect.SQLite} {
-		b := entsql.Dialect(d)
-		outerTable := b.Table(decisionanswer.Table)
-		ranked := rankedDecisionAnswersSelector(d, []uuid.UUID{p1, p2}, []string{"topic-1", "topic-2"}, preds, 6)
-		outer := b.Select(outerTable.C(decisionanswer.FieldID)).
-			From(outerTable).
-			Where(entsql.In(outerTable.C(decisionanswer.FieldID), ranked))
-		sqlStr, args := outer.Query()
-		assert.Contains(t, sqlStr, "ROW_NUMBER() OVER (PARTITION BY")
-		assert.NotEmpty(t, args)
-		if d == dialect.Postgres {
-			assert.Contains(t, sqlStr, fmt.Sprintf("$%d", len(args)), "highest placeholder must match arg count")
-			assert.NotContains(t, sqlStr, fmt.Sprintf("$%d", len(args)+1))
-			assert.NotContains(t, sqlStr, "?")
-		} else {
-			assert.Contains(t, sqlStr, "?")
-			assert.NotContains(t, sqlStr, "$1")
+	const (
+		numProjects       = 200
+		topicsPerProject  = 5
+		answersPerProject = 500 // 200 * 500 = 100,000 decided rows + 100,000 direct answers
+		perProjectLimit   = 6
+	)
+
+	projectIDs := make([]string, numProjects)
+	projectUUIDs := make([]uuid.UUID, numProjects)
+	keysByProject := make(map[string][]string, numProjects)
+	expectedTopIDs := make(map[string][]string, numProjects)
+
+	for p := 0; p < numProjects; p++ {
+		pid := backfillTestProject(t, cs, fmt.Sprintf("hist-proj-%03d", p))
+		projectIDs[p] = pid
+		projectUUIDs[p] = uuid.MustParse(pid)
+		topics := make([]string, topicsPerProject)
+		for tp := 0; tp < topicsPerProject; tp++ {
+			topics[tp] = uuid.NewString()
 		}
+		keysByProject[pid] = topics
+	}
+
+	userID := uuid.NewString()
+	base := time.Date(2026, 11, 15, 0, 0, 0, 0, time.UTC)
+	choices := []messages.Choice{{ID: "yes", Label: "Yes"}, {ID: "no", Label: "No"}}
+
+	histUUID := func(tag byte, p, j int) uuid.UUID {
+		var u uuid.UUID
+		u[0] = tag
+		binary.BigEndian.PutUint32(u[4:8], uint32(p+1))
+		binary.BigEndian.PutUint32(u[8:12], uint32(j+1))
+		u[6] = (u[6] & 0x0f) | 0x40
+		u[8] = (u[8] & 0x3f) | 0x80
+		return u
+	}
+
+	seedStart := time.Now()
+	tx, err := cs.client.Tx(ctx)
+	require.NoError(t, err)
+	for p := 0; p < numProjects; p++ {
+		pUUID := projectUUIDs[p]
+		pid := projectIDs[p]
+		topics := keysByProject[pid]
+		agentID := histUUID(0x10, p, 0)
+
+		decCreates := make([]*ent.DecisionCreate, answersPerProject)
+		ansCreates := make([]*ent.DecisionAnswerCreate, answersPerProject)
+		ansIDs := make([]string, answersPerProject)
+
+		for j := 0; j < answersPerProject; j++ {
+			decID := histUUID(0x20, p, j)
+			ansID := histUUID(0x30, p, j)
+			msgID := histUUID(0x40, p, j)
+			respMsgID := histUUID(0x50, p, j)
+			chatKey := topics[j%topicsPerProject]
+			key := fmt.Sprintf("h-%03d-%04d", p, j)
+			ts := base.Add(time.Duration(p*1000+j) * time.Second)
+
+			decCreates[j] = tx.Decision.Create().
+				SetID(decID).
+				SetProjectID(pUUID).
+				SetChatKey(chatKey).
+				SetMessageID(msgID).
+				SetPosition(0).
+				SetAskerAgentID(agentID).
+				SetAskerAgentName("hist-bot").
+				SetKey(key).
+				SetKeyNorm(key).
+				SetKeySource(decision.KeySourceAgent).
+				SetVersion(1).
+				SetQuestion("History question?").
+				SetChoices(choices).
+				SetStatus(decision.StatusDecided).
+				SetCreatedAt(ts).
+				SetDecidedAt(ts)
+
+			ansCreates[j] = tx.DecisionAnswer.Create().
+				SetID(ansID).
+				SetDecisionRowID(decID).
+				SetProjectID(pUUID).
+				SetAskerAgentID(agentID).
+				SetKey(key).
+				SetVersion(1).
+				SetQuestionText("History question?").
+				SetChoiceID("yes").
+				SetChoiceLabel("Yes").
+				SetAnsweredByUserID(userID).
+				SetAnsweredByName("Alice").
+				SetProvenance(decisionanswer.ProvenanceDirect).
+				SetOutcome(decisionanswer.OutcomeAnswer).
+				SetSurface(decisionanswer.SurfaceDecisionsPage).
+				SetResponseMessageID(respMsgID).
+				SetCreatedAt(ts)
+
+			ansIDs[j] = ansID.String()
+		}
+		require.NoError(t, tx.Decision.CreateBulk(decCreates...).Exec(ctx))
+		require.NoError(t, tx.DecisionAnswer.CreateBulk(ansCreates...).Exec(ctx))
+
+		top := make([]string, perProjectLimit)
+		for k := 0; k < perProjectLimit; k++ {
+			top[k] = ansIDs[answersPerProject-1-k]
+		}
+		expectedTopIDs[pid] = top
+	}
+	require.NoError(t, tx.Commit())
+	t.Logf("seeded %d decisions + %d answers across %d projects in %v",
+		numProjects*answersPerProject, numProjects*answersPerProject, numProjects, time.Since(seedStart))
+
+	queryStart := time.Now()
+	byProj, err := cs.ListDecisionAnswersPerProject(ctx, projectIDs, keysByProject, store.ProjectDecisionAnswerFilter{}, perProjectLimit)
+	queryElapsed := time.Since(queryStart)
+	require.NoError(t, err)
+	t.Logf("100k answers (%d projects x %d answers): ListDecisionAnswersPerProject(..., %d) took %v",
+		numProjects, answersPerProject, perProjectLimit, queryElapsed)
+
+	require.Len(t, byProj, numProjects)
+	for _, pid := range projectIDs {
+		require.Len(t, byProj[pid], perProjectLimit)
+		assert.Equal(t, expectedTopIDs[pid], answerIDs(byProj[pid]))
 	}
 }

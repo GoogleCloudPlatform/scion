@@ -837,23 +837,16 @@ func (s *Server) profileMadeByProjectGroups(
 	if limit == 0 {
 		return []ProfileDecisionMadeGroupView{}, nil
 	}
-	scopedKeys := listKeys
-	if len(targetProjectIDs) < len(set.projectIDs) {
-		targetSet := make(map[string]bool, len(targetProjectIDs))
-		for _, pid := range targetProjectIDs {
-			targetSet[pid] = true
-		}
-		scopedKeys = make([]string, 0, len(listKeys))
-		for _, k := range listKeys {
-			if targetSet[set.keyProject[k]] {
-				scopedKeys = append(scopedKeys, k)
-			}
+	keysByProject := make(map[string][]string, len(targetProjectIDs))
+	for _, k := range listKeys {
+		if pid := set.keyProject[k]; pid != "" {
+			keysByProject[pid] = append(keysByProject[pid], k)
 		}
 	}
 	byProject, err := s.store.ListDecisionAnswersPerProject(
 		ctx,
 		targetProjectIDs,
-		scopedKeys,
+		keysByProject,
 		filter,
 		profileMadeOverviewPerProject+1,
 	)
@@ -927,18 +920,22 @@ func (s *Server) profileMadeByProjectGroups(
 // maxProfileDecisionProjects), and the count of distinct projects that hold at
 // least one of those decisions (design 5.2, for P6's bell reconciler).
 //
-// Contract: callers must pass a bounded ctx (for example
-// context.WithTimeout(ctx, s.chatSearchTimeout()) when wired by P6's summary
-// endpoint) so roll-up evaluation across up to 200 member projects honors the
-// same D9 search budget as GET /api/v1/users/me/decisions. Missing or
-// non-active accounts (suspended, invited, pending, deleting) return (0, 0, nil);
-// store lookup faults return (0, 0, err).
+// Contract: roll-up evaluation across up to 200 member projects honors the D9
+// chat search time limit by construction — if ctx carries no deadline,
+// waitingOnYouTotal wraps it in context.WithTimeout(ctx, s.chatSearchTimeout()).
+// Missing or non-active accounts (suspended, invited, pending, deleting)
+// return (0, 0, nil); store lookup faults return (0, 0, err).
 //
 //nolint:unused // unwired in non-test code until the P6 bell summary endpoint lands (ptone/scion#7997)
 func (s *Server) waitingOnYouTotal(ctx context.Context, userID string) (total, projects int, err error) {
 	userID = strings.TrimSpace(userID)
 	if userID == "" {
 		return 0, 0, nil
+	}
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.chatSearchTimeout())
+		defer cancel()
 	}
 	u, err := checkUserAccount(ctx, s.store, PrincipalContext{Kind: PrincipalKindUser, ID: userID})
 	switch classifyUserAccount(u, err) {

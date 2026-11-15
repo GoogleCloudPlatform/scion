@@ -67,10 +67,13 @@ type ProjectDecisionCounts struct {
 // ProjectDecisionActorView is one filter-facet option (an asking agent or a
 // recorded answerer) scoped to conversations the caller can read. Hint tells
 // apart agents whose names collide ("deleted · 3f9c"); clients show it muted.
+// ProjectID is set on asking agents (an agent belongs to one project, design
+// D5) and omitted on answerers (users span projects).
 type ProjectDecisionActorView struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Hint string `json:"hint,omitempty"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Hint      string `json:"hint,omitempty"`
+	ProjectID string `json:"projectId,omitempty"`
 }
 
 // ProjectDecisionConversationView is one conversations-facet option: a
@@ -780,6 +783,13 @@ func (s *Server) decisionsCore(
 		if set.projects[pq.projectID] != nil {
 			targetProjectIDs = []string{pq.projectID}
 		}
+		var projKeys []string
+		for _, k := range listKeys {
+			if set.keyProject[k] == pq.projectID {
+				projKeys = append(projKeys, k)
+			}
+		}
+		listKeys = projKeys
 	}
 
 	// Live counts and classified prompt cards across all open prompts.
@@ -866,7 +876,19 @@ func decisionAgentFacetViews(set *decisionScopeSet, agents []store.ProjectDecisi
 		if label == "" {
 			label = a.ID
 		}
-		opts = append(opts, option{view: ProjectDecisionActorView{ID: a.ID, Name: label}, deleted: live == nil})
+		projectID := a.ProjectID
+		if projectID == "" && live != nil {
+			projectID = live.ProjectID
+		}
+		if projectID == "" {
+			if ag := set.agentsByID[a.ID]; ag != nil {
+				projectID = ag.ProjectID
+			}
+		}
+		opts = append(opts, option{
+			view:    ProjectDecisionActorView{ID: a.ID, Name: label, ProjectID: projectID},
+			deleted: live == nil,
+		})
 	}
 	groups := make(map[string][]int)
 	for i, o := range opts {

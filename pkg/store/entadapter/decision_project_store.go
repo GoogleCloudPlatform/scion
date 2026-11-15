@@ -41,6 +41,7 @@ type groupedDecisionAgent struct {
 
 type groupedDecisionAgentName struct {
 	AskerAgentID uuid.UUID `json:"asker_agent_id"`
+	ProjectID    uuid.UUID `json:"project_id"`
 	Name         string    `json:"asker_agent_name"`
 	Latest       string    `json:"latest"`
 }
@@ -295,19 +296,15 @@ func (c *CompositeStore) ProjectsWithDecisions(ctx context.Context, projectIDs [
 	return out, nil
 }
 
-// maxDecisionAnswerKeyBatch bounds the chat-key slice bound in one query so
-// callers with tens of thousands of topics stay comfortably under SQLite's
-// 32,766 bind-parameter limit while normal 200-project scopes execute in a
-// single windowed query.
-const maxDecisionAnswerKeyBatch = 8000
-
-// ListDecisionAnswersPerProject implements store.DecisionStore using a
-// ROW_NUMBER() OVER (PARTITION BY project_id ...) window query supported on
-// both SQLite (>=3.25) and Postgres.
+// ListDecisionAnswersPerProject implements store.DecisionStore using the
+// design R5 shape: one bounded LIMIT perProject query per target project
+// scoped to that project's own readable keys (served by
+// INDEX(project_id, created_at)), followed by a single batched enrichment
+// pass over the union of returned rows.
 func (c *CompositeStore) ListDecisionAnswersPerProject(
 	ctx context.Context,
 	projectIDs []string,
-	chatKeys []string,
+	chatKeysByProject map[string][]string,
 	filter store.ProjectDecisionAnswerFilter,
 	perProject int,
 ) (map[string][]*store.ProjectDecisionAnswerEntry, error) {
@@ -322,48 +319,49 @@ func (c *CompositeStore) ListDecisionAnswersPerProject(
 	if err != nil {
 		return nil, err
 	}
-
-	keys := cleanChatKeys(chatKeys)
-	if perProject == 0 || len(keys) == 0 || len(projectUUIDs) == 0 {
+	if perProject == 0 || len(projectUUIDs) == 0 || len(chatKeysByProject) == 0 {
 		return nil, nil
 	}
-	filterPreds := decisionAnswerFilterPredicates(filter, agentUUID, provPred)
 
-	var allRows []*ent.DecisionAnswer
-	if len(keys) <= maxDecisionAnswerKeyBatch {
-		rows, err := c.queryDecisionAnswersPerProjectBatch(ctx, projectUUIDs, keys, filterPreds, perProject)
-		if err != nil {
+	cleanedQueryKeys := cleanChatKeys(filter.QueryChatKeys)
+	allRows := make([]*ent.DecisionAnswer, 0, len(projectUUIDs)*perProject)
+	for _, pUUID := range projectUUIDs {
+		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		allRows = rows
-	} else {
-		for start := 0; start < len(keys); start += maxDecisionAnswerKeyBatch {
-			end := start + maxDecisionAnswerKeyBatch
-			if end > len(keys) {
-				end = len(keys)
-			}
-			rows, err := c.queryDecisionAnswersPerProjectBatch(ctx, projectUUIDs, keys[start:end], filterPreds, perProject)
-			if err != nil {
-				return nil, err
-			}
-			allRows = append(allRows, rows...)
+		pid := pUUID.String()
+		projKeys := cleanChatKeys(chatKeysByProject[pid])
+		if len(projKeys) == 0 {
+			continue
 		}
-		sort.Slice(allRows, func(i, j int) bool {
-			if !allRows[i].CreatedAt.Equal(allRows[j].CreatedAt) {
-				return allRows[i].CreatedAt.After(allRows[j].CreatedAt)
+		projFilter := filter
+		if filter.Query != "" && len(cleanedQueryKeys) > 0 {
+			projKeySet := make(map[string]bool, len(projKeys))
+			for _, k := range projKeys {
+				projKeySet[k] = true
 			}
-			return allRows[i].ID.String() > allRows[j].ID.String()
-		})
-		countsByProj := make(map[uuid.UUID]int, len(projectUUIDs))
-		capped := allRows[:0]
-		for _, r := range allRows {
-			if countsByProj[r.ProjectID] >= perProject {
-				continue
+			var qKeys []string
+			for _, qk := range cleanedQueryKeys {
+				if projKeySet[qk] {
+					qKeys = append(qKeys, qk)
+				}
 			}
-			countsByProj[r.ProjectID]++
-			capped = append(capped, r)
+			projFilter.QueryChatKeys = qKeys
 		}
-		allRows = capped
+
+		q := c.client.DecisionAnswer.Query().
+			Where(
+				decisionanswer.ProjectIDEQ(pUUID),
+				decisionAnswerInChatKeys([]uuid.UUID{pUUID}, projKeys),
+			)
+		q = applyDecisionAnswerFilter(q, projFilter, agentUUID, provPred)
+		rows, err := q.Order(ent.Desc(decisionanswer.FieldCreatedAt), ent.Desc(decisionanswer.FieldID)).
+			Limit(perProject).
+			All(ctx)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		allRows = append(allRows, rows...)
 	}
 	if len(allRows) == 0 {
 		return nil, nil
@@ -379,66 +377,6 @@ func (c *CompositeStore) ListDecisionAnswersPerProject(
 		out[pid] = append(out[pid], entry)
 	}
 	return out, nil
-}
-
-func (c *CompositeStore) queryDecisionAnswersPerProjectBatch(
-	ctx context.Context,
-	projectUUIDs []uuid.UUID,
-	keys []string,
-	filterPreds []predicate.DecisionAnswer,
-	perProject int,
-) ([]*ent.DecisionAnswer, error) {
-	rows, err := c.client.DecisionAnswer.Query().
-		Where(func(s *entsql.Selector) {
-			ranked := rankedDecisionAnswersSelector(s.Dialect(), projectUUIDs, keys, filterPreds, perProject)
-			s.Where(entsql.In(s.C(decisionanswer.FieldID), ranked))
-		}).
-		Order(ent.Desc(decisionanswer.FieldCreatedAt), ent.Desc(decisionanswer.FieldID)).
-		All(ctx)
-	if err != nil {
-		return nil, mapError(err)
-	}
-	return rows, nil
-}
-
-// rankedDecisionAnswersSelector builds:
-//
-//	SELECT ranked_da.id FROM (
-//	  SELECT id, ROW_NUMBER() OVER (PARTITION BY project_id ORDER BY created_at DESC, id DESC) AS rn
-//	  FROM decision_answers WHERE ...
-//	) AS ranked_da WHERE ranked_da.rn <= perProject
-func rankedDecisionAnswersSelector(
-	d string,
-	projectUUIDs []uuid.UUID,
-	keys []string,
-	filterPreds []predicate.DecisionAnswer,
-	perProject int,
-) *entsql.Selector {
-	b := entsql.Dialect(d)
-	daTable := b.Table(decisionanswer.Table)
-	inner := b.Select(daTable.C(decisionanswer.FieldID)).
-		AppendSelectExprAs(
-			entsql.ExprFunc(func(eb *entsql.Builder) {
-				eb.WriteString("ROW_NUMBER() OVER (PARTITION BY ")
-				eb.Ident(decisionanswer.FieldProjectID)
-				eb.WriteString(" ORDER BY ")
-				eb.Ident(decisionanswer.FieldCreatedAt)
-				eb.WriteString(" DESC, ")
-				eb.Ident(decisionanswer.FieldID)
-				eb.WriteString(" DESC)")
-			}),
-			"rn",
-		).
-		From(daTable)
-	decisionanswer.ProjectIDIn(projectUUIDs...)(inner)
-	decisionAnswerInChatKeys(projectUUIDs, keys)(inner)
-	for _, pred := range filterPreds {
-		pred(inner)
-	}
-	inner.As("ranked_da")
-	return b.Select(inner.C(decisionanswer.FieldID)).
-		From(inner).
-		Where(entsql.LTE(inner.C("rn"), perProject))
 }
 
 func validateDecisionAnswerFilter(filter store.ProjectDecisionAnswerFilter) (uuid.UUID, predicate.DecisionAnswer, error) {
@@ -647,20 +585,21 @@ func (c *CompositeStore) ListDecisionFacets(
 
 // decisionAgentFacet returns the distinct asking agents of decisions in
 // (projectUUIDs, keys), each named by the asker_agent_name snapshot of its
-// newest decision.
+// newest decision and carrying its project_id.
 func (c *CompositeStore) decisionAgentFacet(ctx context.Context, projectUUIDs []uuid.UUID, keys []string) ([]store.ProjectDecisionActor, error) {
 	var rows []groupedDecisionAgentName
 	err := c.client.Decision.Query().
 		Where(decision.ProjectIDIn(projectUUIDs...), decisionChatKeyIn(len(projectUUIDs), keys)).
-		GroupBy(decision.FieldAskerAgentID, decision.FieldAskerAgentName).
+		GroupBy(decision.FieldAskerAgentID, decision.FieldProjectID, decision.FieldAskerAgentName).
 		Aggregate(ent.As(ent.Max(decision.FieldCreatedAt), "latest")).
 		Scan(ctx, &rows)
 	if err != nil {
 		return nil, mapError(err)
 	}
 	type newest struct {
-		name   string
-		latest time.Time
+		name      string
+		projectID string
+		latest    time.Time
 	}
 	byAgent := make(map[uuid.UUID]newest, len(rows))
 	for _, r := range rows {
@@ -669,12 +608,12 @@ func (c *CompositeStore) decisionAgentFacet(ctx context.Context, projectUUIDs []
 		// Ties on the timestamp keep the greater name, so the result is
 		// deterministic.
 		if !ok || latest.After(cur.latest) || (latest.Equal(cur.latest) && r.Name > cur.name) {
-			byAgent[r.AskerAgentID] = newest{name: r.Name, latest: latest}
+			byAgent[r.AskerAgentID] = newest{name: r.Name, projectID: r.ProjectID.String(), latest: latest}
 		}
 	}
 	out := make([]store.ProjectDecisionActor, 0, len(byAgent))
 	for id, n := range byAgent {
-		out = append(out, store.ProjectDecisionActor{ID: id.String(), Name: n.name})
+		out = append(out, store.ProjectDecisionActor{ID: id.String(), Name: n.name, ProjectID: n.projectID})
 	}
 	sortProjectDecisionActors(out)
 	return out, nil

@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"testing"
 	"time"
 
@@ -532,11 +533,31 @@ func TestUserMeDecisions_PendingSortsPaginationAndProjectFilter(t *testing.T) {
 	// 1. Default sort on pending is "project" (R6):
 	// Section 0: Alpha's newest waitingOnYou is t-1m > Beta's t-2m -> [alpha-new, alpha-old, beta-mid]
 	// Section 1: [beta-other]
-	defResp := decodeProfilePendingDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath, nil))
+	defRaw := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath, nil)
+	defResp := decodeProfilePendingDecisions(t, defRaw)
 	assert.Equal(t, ProjectDecisionCounts{WaitingOnYou: 3, WaitingOnOthers: 1}, defResp.Counts)
 	assert.Nil(t, defResp.FilteredCounts)
 	assert.Equal(t, []string{"alpha-new", "alpha-old", "beta-mid", "beta-other"}, promptKeys(defResp.Prompts))
 	assert.Equal(t, []string{"proj-alpha", "proj-beta"}, profileProjectSlugs(defResp.Projects))
+
+	// Agents facet entries carry their projectId (design D5); answerers omit projectId.
+	agentProjByID := make(map[string]string, len(defResp.Agents))
+	for _, ag := range defResp.Agents {
+		agentProjByID[ag.ID] = ag.ProjectID
+	}
+	assert.Equal(t, map[string]string{
+		f.agent.ID:   f.project.ID,
+		agentBeta.ID: projBeta.ID,
+	}, agentProjByID)
+	require.Len(t, defResp.Answerers, 1)
+	assert.Equal(t, f.alice.ID, defResp.Answerers[0].ID)
+	assert.Empty(t, defResp.Answerers[0].ProjectID)
+	var rawFacets struct {
+		Answerers []map[string]any `json:"answerers"`
+	}
+	require.NoError(t, json.Unmarshal(defRaw.Body.Bytes(), &rawFacets))
+	require.Len(t, rawFacets.Answerers, 1)
+	assert.NotContains(t, rawFacets.Answerers[0], "projectId", "answerers must omit projectId")
 
 	// 2. Explicit sort=recent:
 	// Section 0 chronological: [alpha-new, beta-mid, alpha-old], then Section 1: [beta-other].
@@ -606,9 +627,11 @@ func TestUserMeDecisions_PendingSortsPaginationAndProjectFilter(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, doRequestAsUser(t, f.srv, f.alice, http.MethodGet,
 		userMeDecisionsPath+"?limit=1&sort=project&cursor="+url.QueryEscape(p1ByProj.NextCursor), nil).Code)
 
-	// Single-project endpoint cursor passed to profile endpoint -> 400.
+	// Single-project endpoint also populates projectId on agents and rejects profile cursor mixing (400).
 	projEndpointPage := decodePendingDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet,
 		"/api/v1/projects/"+f.project.ID+"/decisions?limit=1", nil))
+	require.Len(t, projEndpointPage.Agents, 1)
+	assert.Equal(t, f.project.ID, projEndpointPage.Agents[0].ProjectID)
 	require.NotEmpty(t, projEndpointPage.NextCursor)
 	assert.Equal(t, http.StatusBadRequest, doRequestAsUser(t, f.srv, f.bob, http.MethodGet,
 		userMeDecisionsPath+"?limit=1&sort=recent&cursor="+url.QueryEscape(projEndpointPage.NextCursor), nil).Code)
@@ -948,52 +971,59 @@ func TestUserMeDecisions_ProjectCap200AndTimeout(t *testing.T) {
 		}
 	}
 
-	// Assert comfortable headroom well under the 3 s DefaultChatSearchTimeout
-	// across all six HTTP query shapes plus waitingOnYouTotal.
+	// Always assert HTTP 200 (within the 3 s DefaultChatSearchTimeout) + response
+	// correctness across all six HTTP query shapes plus waitingOnYouTotal, and
+	// log every timing. Wall-clock headroom assertions (< 1500 ms) are gated behind
+	// SCION_PERF_BUDGET=1 so shared CI runners do not flake on host CPU contention.
 	const maxShapeDuration = 1500 * time.Millisecond
+	checkPerfBudget := os.Getenv("SCION_PERF_BUDGET") == "1"
+	assertBudget := func(elapsed time.Duration, label string) {
+		if checkPerfBudget {
+			assert.Less(t, elapsed, maxShapeDuration, label)
+		}
+	}
 
 	startPendingProject := time.Now()
 	resp := decodeProfilePendingDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?limit=50", nil))
 	pendingProjectElapsed := time.Since(startPendingProject)
-	assert.Less(t, pendingProjectElapsed, maxShapeDuration, "pending sort=project")
+	assertBudget(pendingProjectElapsed, "pending sort=project")
+	assert.Len(t, resp.Prompts, 50)
 
 	startPendingRecent := time.Now()
 	respRecent := decodeProfilePendingDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?sort=recent&limit=50", nil))
 	pendingRecentElapsed := time.Since(startPendingRecent)
-	assert.Less(t, pendingRecentElapsed, maxShapeDuration, "pending sort=recent")
+	assertBudget(pendingRecentElapsed, "pending sort=recent")
 	assert.Len(t, respRecent.Prompts, 50)
 
 	startMadeRecent := time.Now()
 	respMadeRecent := decodeProfileMadeDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?tab=made", nil))
 	madeRecentElapsed := time.Since(startMadeRecent)
-	assert.Less(t, madeRecentElapsed, maxShapeDuration, "tab=made sort=recent")
+	assertBudget(madeRecentElapsed, "tab=made sort=recent")
 	assert.Len(t, respMadeRecent.Entries, 50)
 
 	startMadeProject := time.Now()
 	respMadeProject := decodeProfileMadeByProjectDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?tab=made&sort=project", nil))
 	madeProjectElapsed := time.Since(startMadeProject)
-	assert.Less(t, madeProjectElapsed, maxShapeDuration, "tab=made sort=project")
+	assertBudget(madeProjectElapsed, "tab=made sort=project")
 	assert.Len(t, respMadeProject.Groups, maxProfileDecisionProjects)
 
 	startLimitZero := time.Now()
 	respLimitZero := decodeProfilePendingDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?limit=0", nil))
 	limitZeroElapsed := time.Since(startLimitZero)
-	assert.Less(t, limitZeroElapsed, maxShapeDuration, "limit=0")
+	assertBudget(limitZeroElapsed, "limit=0")
 	assert.Empty(t, respLimitZero.Prompts)
 
 	startSearch := time.Now()
 	respSearch := decodeProfilePendingDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"?q=cap-k-1", nil))
 	searchElapsed := time.Since(startSearch)
-	assert.Less(t, searchElapsed, maxShapeDuration, "q=cap-k-1")
+	assertBudget(searchElapsed, "q=cap-k-1")
 	assert.NotEmpty(t, respSearch.Prompts)
 
 	startWaitingTotal := time.Now()
-	wCtx, wCancel := context.WithTimeout(ctx, f.srv.chatSearchTimeout())
-	wTot, wProjs, err := f.srv.waitingOnYouTotal(wCtx, f.bob.ID)
-	wCancel()
+	wTot, wProjs, err := f.srv.waitingOnYouTotal(ctx, f.bob.ID)
 	waitingTotalElapsed := time.Since(startWaitingTotal)
 	require.NoError(t, err)
-	assert.Less(t, waitingTotalElapsed, maxShapeDuration, "waitingOnYouTotal")
+	assertBudget(waitingTotalElapsed, "waitingOnYouTotal")
 	assert.Equal(t, maxProfileDecisionProjects*topicsPerProject, wTot)
 	assert.Equal(t, maxProfileDecisionProjects, wProjs)
 
@@ -1162,5 +1192,10 @@ func TestWaitingOnYouTotal(t *testing.T) {
 	expiredCtx, cancel := context.WithDeadline(ctx, time.Now().Add(-time.Second))
 	defer cancel()
 	_, _, err = f.srv.waitingOnYouTotal(expiredCtx, f.bob.ID)
+	require.Error(t, err)
+
+	// Unbounded ctx (no deadline) automatically applies s.chatSearchTimeout().
+	f.srv.config.ChatSearchTimeout = time.Nanosecond
+	_, _, err = f.srv.waitingOnYouTotal(context.Background(), f.bob.ID)
 	require.Error(t, err)
 }
