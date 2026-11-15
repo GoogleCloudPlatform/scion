@@ -370,7 +370,9 @@ func TestDurableQueueClaimOrderingAndLeaseLifecycle(t *testing.T) {
 func TestDurableQueueTrimBoundsAndLargestProjectFirst(t *testing.T) {
 	ctx := context.Background()
 	cs := newTestCompositeStore(t)
-	now := time.Date(2026, 11, 15, 5, 0, 0, 0, time.UTC)
+	// Anchor to wall clock (truncated to ms for Postgres timestamptz) because
+	// DurableQueueStats evaluates Leased against time.Now().
+	now := time.Now().UTC().Truncate(time.Millisecond)
 
 	enq := func(kind, proj, key string, createdAt time.Time, perm int, leased bool) int64 {
 		t.Helper()
@@ -391,7 +393,7 @@ func TestDurableQueueTrimBoundsAndLargestProjectFirst(t *testing.T) {
 				upd = upd.SetPermanentFailures(perm).SetAttempts(perm)
 			}
 			if leased {
-				upd = upd.SetLeaseOwner("live-worker").SetLeaseUntil(now.Add(time.Minute))
+				upd = upd.SetLeaseOwner("live-worker").SetLeaseUntil(now.Add(5 * time.Minute))
 			}
 			require.NoError(t, upd.Exec(ctx))
 		}
