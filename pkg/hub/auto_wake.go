@@ -233,8 +233,17 @@ func (s *Server) autoWakeAgent(ctx context.Context, agent *store.Agent) (*store.
 	if dmErr := s.heldTargetRefusal(ctx, current); dmErr != nil {
 		return nil, dmErr
 	}
-	if state.Phase(current.Phase) == state.PhaseSuspended && !s.shouldAutoWake(current) {
-		return nil, validateAgentDeliverable(current)
+	// The same classification as the sync paths decides, so an error row
+	// that remembers a suspended resume (wakeAgentForDM acts on the
+	// effective resting phase) is never resumed here: a failed resume
+	// clears the reason, and that agent is not auto-woken again. A running
+	// target needs nothing; a starting one is only waited on.
+	switch state.Phase(current.Phase) {
+	case state.PhaseRunning, state.PhaseStarting:
+	default:
+		if s.autoWakeModeOf(current) == autoWakeNone {
+			return nil, validateAgentDeliverable(current)
+		}
 	}
 
 	// A target another start is already bringing up (phase starting, or a

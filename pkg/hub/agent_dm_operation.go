@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -910,6 +911,11 @@ func (s *Server) agentDMAutoWakeItem(input *AgentDMInput, storeMsg *store.Messag
 				err = s.managedAgentMessage(dctx, woken, input.Msg, input.Urgent || input.Interrupt)
 			} else if dispatcher := s.GetDispatcher(); dispatcher != nil && woken.RuntimeBrokerID != "" {
 				err = dispatchWithBrokerRetry(withDispatchMessageID(dctx, msgID), nil, dispatcher, woken, dispatchMsg.Msg, input.Urgent || input.Interrupt, dispatchMsg)
+			} else {
+				// No pre-check ran this late (the sync path's
+				// checkDispatchAvailability did, before the wake): nothing
+				// can be dispatched, so it is a definite failure.
+				err = errors.New("dispatch not available")
 			}
 			// The settle writes run on a short detached context, so a wake
 			// cut short at shutdown still records its outcome.

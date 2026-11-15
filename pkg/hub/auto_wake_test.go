@@ -408,6 +408,31 @@ func TestAutoWake_ErrorAfterFailedResumeIsNotAutoWoken(t *testing.T) {
 	assert.Equal(t, autoWakeNone, srv.autoWakeModeOf(got))
 }
 
+// A background run whose re-read finds an error row that remembers a
+// suspended resume (a failed asynchronous resume: no reason left) does not
+// resume it, although wakeAgentForDM would act on the effective resting
+// phase; the queued item fails instead.
+func TestAutoWake_AsyncRunSkipsErrorMemoryRow(t *testing.T) {
+	srv, s, _, target, disp := autoWakeFixture(t, state.SuspendReasonIdle)
+	ctx := context.Background()
+	require.NoError(t, s.UpdateAgentStatus(ctx, target.ID, store.AgentStatusUpdate{Phase: string(state.PhaseStarting)}))
+	launchID, err := s.BeginStartLaunch(ctx, target.ID, store.LaunchKindStart, 5*time.Minute, store.BeginLaunchOptions{PriorPhase: "suspended"})
+	require.NoError(t, err)
+	_, _, err = s.ApplyLaunchReport(ctx, target.ID, target.RuntimeBrokerID, store.LaunchReport{
+		LaunchID: launchID, InstanceID: "i1", State: store.LaunchReportStateFailed, ErrorCode: "boom"})
+	require.NoError(t, err)
+	row, err := s.GetAgent(ctx, target.ID)
+	require.NoError(t, err)
+	require.Equal(t, string(state.PhaseError), row.Phase, "fixture check: the failed resume ends in error")
+	require.Equal(t, string(state.PhaseSuspended), store.EffectiveRestingPhase(row), "fixture check: it remembers the suspended resume")
+	require.Equal(t, autoWakeNone, srv.autoWakeModeOf(row))
+	awReadyOnStart(t, s, target.ID)
+
+	_, dmErr := srv.autoWakeAgent(ctx, target) // the enqueuer's copy is idle-suspended
+	require.NotNil(t, dmErr, "the run refuses the error row")
+	assert.Empty(t, disp.getStartCalls(), "it is not resumed again")
+}
+
 // A DM whose fresh read sees the target starting, because a hub wake of
 // it is in flight, waits for that start and is delivered: no second
 // resume, no 409. The row is starting before the send, so the outcome

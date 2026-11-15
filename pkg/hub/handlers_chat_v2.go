@@ -2475,7 +2475,9 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 			// cannot start the wake, and the copy takes the dispatch below.
 			// It is registered as a group participant now, as the agent
 			// mention fan-out does for a queued wake, so a woken agent in
-			// lineage or branch mode can reply into the group.
+			// lineage or branch mode can reply into the group. On purpose
+			// before delivery: a participant is a listing index, not an
+			// ACL, so one whose wake then fails stays listed harmlessly.
 			if mentionPersisted && dispatcher != nil && s.shouldAutoWake(mentionAgent) &&
 				s.queueAutoWake(mentionAgent, s.chatSecondaryAutoWakeItem(mentionStoreMsg.ID, mentionAddressee, agentContent, mentionMsg)) {
 				dispatchedAgents = append(dispatchedAgents, mentionAgent)

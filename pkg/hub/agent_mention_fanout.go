@@ -460,7 +460,9 @@ func (s *Server) deliverAgentMentionCopy(ctx, aggregateCtx context.Context, in a
 	}
 
 	// The sender must be allowed to add the target under its message
-	// mode (group_message_mode.go).
+	// mode (group_message_mode.go). A wake-queued mention counts as
+	// delivered and is registered before its wake on purpose: a participant
+	// is a listing index, not an ACL.
 	if out.Status == "delivered" && registerAfter {
 		if joinOK, joinReason := s.groupAgentJoinAllowed(aggregateCtx, in.SenderIdent, target); !joinOK {
 			s.messageLog.Info("mention target not registered as group participant: message mode",
