@@ -30,18 +30,28 @@ import (
 
 const tokenMaxTokensExceeded = "max_tokens_exceeded"
 
-// classifyTransportError maps a transport / RoundTrip failure to a content-free
-// *provider.ProviderError without echoing raw error strings, URLs, or secrets.
-func classifyTransportError(ctx context.Context, err error) *provider.ProviderError {
+// isEgressSentinel reports whether err matches one of pkg/systemone/egress's
+// policy or body-cap sentinels. The runtime owns egress-error FailReason
+// classification (runtime-design §6.3), so jevwire passes these errors through
+// unwrapped without assigning a competing ProviderError.Reason.
+func isEgressSentinel(err error) bool {
+	return egress.IsRedirectBlocked(err) ||
+		egress.IsBlockedDestination(err) ||
+		egress.IsSchemeNotAllowed(err) ||
+		egress.IsInvalidEndpoint(err) ||
+		egress.IsResponseTooLarge(err) ||
+		egress.IsAuthError(err)
+}
+
+// classifyTransportError passes pkg/systemone/egress sentinels through raw so
+// the runtime classifies them, and maps plain connection / timeout / context
+// failures to a content-free *provider.ProviderError without echoing raw error
+// strings, URLs, or secrets.
+func classifyTransportError(ctx context.Context, err error) error {
+	if isEgressSentinel(err) {
+		return err
+	}
 	switch {
-	case egress.IsResponseTooLarge(err):
-		return provider.NewProviderError(provider.FailMalformedResponse, false, 0, 0, "provider response body exceeded 1 MiB limit")
-	case egress.IsAuthError(err):
-		return provider.NewProviderError(provider.FailAuth, false, 0, 0, "provider bearer credential invalid or unavailable")
-	case egress.IsRedirectBlocked(err):
-		return provider.NewProviderError(provider.FailMalformedResponse, false, 0, 0, "provider HTTP redirect refused")
-	case egress.IsInvalidEndpoint(err), egress.IsSchemeNotAllowed(err), egress.IsBlockedDestination(err):
-		return provider.NewProviderError(provider.FailInvalidRequest, false, 0, 0, "provider endpoint rejected by egress policy")
 	case errors.Is(err, context.Canceled) || (ctx != nil && errors.Is(ctx.Err(), context.Canceled)):
 		return provider.NewProviderError(provider.FailCanceled, false, 0, 0, "provider request canceled")
 	case errors.Is(err, context.DeadlineExceeded) || (ctx != nil && errors.Is(ctx.Err(), context.DeadlineExceeded)):

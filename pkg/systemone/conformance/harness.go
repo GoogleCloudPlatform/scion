@@ -72,11 +72,13 @@ type MockHTTPResponse struct {
 	DropConnection     bool              `json:"drop_connection,omitempty"`
 }
 
-// ExpectedError specifies the content-free ProviderError expected from an
-// InvokeCase or ModelListCase.
+// ExpectedError specifies the content-free ProviderError (or passed-through
+// egress sentinel when EgressSentinel is set) expected from an InvokeCase or
+// ModelListCase.
 type ExpectedError struct {
-	Reason          provider.FailReason `json:"reason"`
-	Retryable       bool                `json:"retryable"`
+	Reason          provider.FailReason `json:"reason,omitempty"`
+	EgressSentinel  string              `json:"egress_sentinel,omitempty"`
+	Retryable       bool                `json:"retryable,omitempty"`
 	HTTPStatus      int                 `json:"http_status,omitempty"`
 	RetryAfterMs    *int64              `json:"retry_after_ms,omitempty"`
 	MinRetryAfterMs *int64              `json:"min_retry_after_ms,omitempty"`
@@ -537,9 +539,39 @@ func assertExpectedError(t testing.TB, err error, want ExpectedError) {
 	assert.NotContains(t, err.Error(), defaultCanaryBearer,
 		"bearer credential must never appear in errors")
 
+	if want.EgressSentinel != "" {
+		if want.ErrorBodyCanary != "" {
+			assert.NotContains(t, err.Error(), want.ErrorBodyCanary,
+				"canary text must never appear in passed-through egress error")
+		}
+		switch want.EgressSentinel {
+		case "response_too_large":
+			assert.True(t, egress.IsResponseTooLarge(err),
+				"expected egress response_too_large sentinel pass-through, got %T: %v", err, err)
+		case "redirect_blocked":
+			assert.True(t, egress.IsRedirectBlocked(err),
+				"expected egress redirect_blocked sentinel pass-through, got %T: %v", err, err)
+		case "blocked_destination":
+			assert.True(t, egress.IsBlockedDestination(err),
+				"expected egress blocked_destination sentinel pass-through, got %T: %v", err, err)
+		case "scheme_not_allowed":
+			assert.True(t, egress.IsSchemeNotAllowed(err),
+				"expected egress scheme_not_allowed sentinel pass-through, got %T: %v", err, err)
+		case "invalid_endpoint":
+			assert.True(t, egress.IsInvalidEndpoint(err),
+				"expected egress invalid_endpoint sentinel pass-through, got %T: %v", err, err)
+		case "auth":
+			assert.True(t, egress.IsAuthError(err),
+				"expected egress auth sentinel pass-through, got %T: %v", err, err)
+		default:
+			t.Fatalf("unknown EgressSentinel %q in conformance fixture", want.EgressSentinel)
+		}
+		return
+	}
+
 	pe, ok := provider.AsProviderError(err)
 	require.True(t, ok, "adapter error must unwrap as *provider.ProviderError, got %T: %v", err, err)
-	assert.True(t, pe.Reason.Valid(), "ProviderError.Reason %q must belong to closed 17-value set", pe.Reason)
+	assert.True(t, pe.Reason.Valid(), "ProviderError.Reason %q must belong to closed FailReason set", pe.Reason)
 	assert.Equal(t, want.Reason, pe.Reason)
 	assert.Equal(t, want.Retryable, pe.Retryable)
 	if want.HTTPStatus > 0 {

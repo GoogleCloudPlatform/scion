@@ -706,7 +706,8 @@ func TestDecodeResponse_MalformedCasesNeverRenormalize(t *testing.T) {
 }
 
 func TestInvoke_OversizeBodyAndContextCancellation(t *testing.T) {
-	// > 1 MiB response body fails as FailMalformedResponse (AC-4).
+	// > 1 MiB response body passes egress.ErrResponseTooLarge through unwrapped
+	// so the runtime owns egress-error classification (runtime-design §6.3, AC-4).
 	oversizeSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(bytes.Repeat([]byte("x"), int(egress.MaxResponseBytes)+64))
@@ -729,18 +730,112 @@ func TestInvoke_OversizeBodyAndContextCancellation(t *testing.T) {
 
 	_, err := adapter.Invoke(context.Background(), transport, inst, req)
 	require.Error(t, err)
-	pe, ok := provider.AsProviderError(err)
-	require.True(t, ok)
-	assert.Equal(t, provider.FailMalformedResponse, pe.Reason)
+	assert.True(t, egress.IsResponseTooLarge(err), "expected egress.ErrResponseTooLarge pass-through, got %v", err)
+	_, ok := provider.AsProviderError(err)
+	assert.False(t, ok, "jevwire must not reclassify egress sentinels into ProviderError")
 
 	// Canceled caller context maps to FailCanceled.
 	ctxCanceled, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, err = adapter.Invoke(ctxCanceled, transport, inst, req)
 	require.Error(t, err)
-	pe, ok = provider.AsProviderError(err)
+	pe, ok := provider.AsProviderError(err)
 	require.True(t, ok)
 	assert.Equal(t, provider.FailCanceled, pe.Reason)
+
+	// Expired deadline context maps to FailTimeout.
+	ctxExpired, cancelDeadline := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelDeadline()
+	_, err = adapter.Invoke(ctxExpired, transport, inst, req)
+	require.Error(t, err)
+	pe, ok = provider.AsProviderError(err)
+	require.True(t, ok)
+	assert.Equal(t, provider.FailTimeout, pe.Reason)
+}
+
+func TestInvokeAndListModels_PassesEgressSentinelsThrough(t *testing.T) {
+	req := provider.ModelRequest{
+		Rule: spec.Spec{
+			Version:   1,
+			Questions: []spec.Question{{ID: "q", Type: spec.PrimitiveBinary, Instructions: "Check."}},
+		},
+		Input: []provider.InputField{{Name: spec.ProbeFieldText, Kind: provider.FieldKindText, Value: "hi", Trust: provider.TrustUntrusted}},
+	}
+	adapter := jevwire.NewTypeSafe()
+
+	t.Run("redirect_blocked", func(t *testing.T) {
+		redirectSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Location", "https://redirect.example/CANARY_REDIRECT_TARGET")
+			w.WriteHeader(http.StatusFound)
+		}))
+		defer redirectSrv.Close()
+
+		tr := egress.NewClient(
+			egress.StaticBearer("sk-redirect-canary"),
+			egress.WithLoopbackServerForTesting(redirectSrv.URL, redirectSrv.Client()),
+		)
+		inst := provider.InstanceView{Name: "jev-prod", Model: "jev-1.14.0", Endpoint: redirectSrv.URL}
+
+		_, err := adapter.Invoke(context.Background(), tr, inst, req)
+		require.Error(t, err)
+		assert.True(t, egress.IsRedirectBlocked(err), "Invoke must pass redirect sentinel through: %v", err)
+		assert.NotContains(t, err.Error(), "CANARY_REDIRECT_TARGET")
+		_, isPE := provider.AsProviderError(err)
+		assert.False(t, isPE)
+
+		_, err = adapter.ListModels(context.Background(), tr, inst)
+		require.Error(t, err)
+		assert.True(t, egress.IsRedirectBlocked(err), "ListModels must pass redirect sentinel through: %v", err)
+		_, isPE = provider.AsProviderError(err)
+		assert.False(t, isPE)
+	})
+
+	t.Run("blocked_destination", func(t *testing.T) {
+		// Production egress client refuses loopback/private literal IP before any TCP connect.
+		tr := egress.NewClient(egress.StaticBearer("sk-blocked-dest-canary"))
+		inst := provider.InstanceView{Name: "jev-prod", Model: "jev-1.14.0", Endpoint: "https://127.0.0.1:8443"}
+
+		_, err := adapter.Invoke(context.Background(), tr, inst, req)
+		require.Error(t, err)
+		assert.True(t, egress.IsBlockedDestination(err), "Invoke must pass blocked-destination sentinel through: %v", err)
+		_, isPE := provider.AsProviderError(err)
+		assert.False(t, isPE)
+
+		_, err = adapter.ListModels(context.Background(), tr, inst)
+		require.Error(t, err)
+		assert.True(t, egress.IsBlockedDestination(err), "ListModels must pass blocked-destination sentinel through: %v", err)
+		_, isPE = provider.AsProviderError(err)
+		assert.False(t, isPE)
+	})
+
+	t.Run("https_scheme_required", func(t *testing.T) {
+		// Production egress client refuses http:// before DNS resolution or dialing.
+		tr := egress.NewClient(egress.StaticBearer("sk-http-scheme-canary"))
+		inst := provider.InstanceView{Name: "jev-prod", Model: "jev-1.14.0", Endpoint: "http://198.51.100.10"}
+
+		_, err := adapter.Invoke(context.Background(), tr, inst, req)
+		require.Error(t, err)
+		assert.True(t, egress.IsSchemeNotAllowed(err), "Invoke must pass https-required sentinel through: %v", err)
+		_, isPE := provider.AsProviderError(err)
+		assert.False(t, isPE)
+
+		_, err = adapter.ListModels(context.Background(), tr, inst)
+		require.Error(t, err)
+		assert.True(t, egress.IsSchemeNotAllowed(err), "ListModels must pass https-required sentinel through: %v", err)
+		_, isPE = provider.AsProviderError(err)
+		assert.False(t, isPE)
+	})
+
+	t.Run("egress_auth_sentinel", func(t *testing.T) {
+		tr := egress.NewClient(egress.StaticBearer(""))
+		inst := provider.InstanceView{Name: "jev-prod", Model: "jev-1.14.0", Endpoint: "https://198.51.100.10"}
+
+		_, err := adapter.Invoke(context.Background(), tr, inst, req)
+		require.Error(t, err)
+		assert.True(t, egress.IsAuthError(err), "Invoke must pass egress auth sentinel through: %v", err)
+		_, isPE := provider.AsProviderError(err)
+		assert.False(t, isPE)
+	})
 }
 
 func TestDecodeResponse_JSONNestingDepthBound(t *testing.T) {

@@ -530,7 +530,7 @@
     },
     {
       "name": "oversize_response_body_over_1mib",
-      "note": "AC-4: response body exceeding 1 MiB fails as malformed_response.",
+      "note": "AC-4 / runtime-design §6.3: egress caps response bodies at 1 MiB and jevwire passes egress.ErrResponseTooLarge through so the runtime classifies it.",
       "model": "jev-1.14.0",
       "expected_path": "/v1/systemone",
       "request": {
@@ -559,8 +559,44 @@
         "oversize_body_bytes": 1048577
       },
       "expect_error": {
-        "reason": "malformed_response",
-        "retryable": false
+        "egress_sentinel": "response_too_large"
+      }
+    },
+    {
+      "name": "http_302_redirect_egress_passthrough",
+      "note": "AC-4 / runtime-design §6.3: egress refuses 3xx redirects and jevwire passes egress.ErrRedirectBlocked through so the runtime classifies it.",
+      "model": "jev-1.14.0",
+      "expected_path": "/v1/systemone",
+      "request": {
+        "rule": {
+          "version": 1,
+          "form": "portable",
+          "questions": [
+            {
+              "id": "billing",
+              "type": "binary",
+              "instructions": "Is this message about billing?"
+            }
+          ]
+        },
+        "input": [
+          {
+            "name": "probe.text",
+            "kind": "text",
+            "value": "Synthetic probe text.",
+            "trust": "untrusted"
+          }
+        ]
+      },
+      "mock_response": {
+        "status_code": 302,
+        "headers": {
+          "Location": "https://redirect.example/F5_REDIRECT_LOCATION_CANARY"
+        }
+      },
+      "expect_error": {
+        "egress_sentinel": "redirect_blocked",
+        "error_body_canary": "F5_REDIRECT_LOCATION_CANARY"
       }
     }
   ],

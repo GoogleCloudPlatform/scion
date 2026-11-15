@@ -170,7 +170,7 @@ func executeOnce(ctx context.Context, t provider.Transport, httpReq *http.Reques
 	}()
 
 	if resp.ContentLength > egress.MaxResponseBytes {
-		return resp, nil, provider.NewProviderError(provider.FailMalformedResponse, false, 0, resp.StatusCode, "provider response body exceeded 1 MiB limit")
+		return resp, nil, egress.ErrResponseTooLarge
 	}
 
 	var body []byte
@@ -178,12 +178,14 @@ func executeOnce(ctx context.Context, t provider.Transport, httpReq *http.Reques
 		var readErr error
 		body, readErr = io.ReadAll(io.LimitReader(resp.Body, egress.MaxResponseBytes+1))
 		if readErr != nil {
-			pe := classifyTransportError(ctx, readErr)
-			pe.HTTPStatus = resp.StatusCode
-			return resp, nil, pe
+			classified := classifyTransportError(ctx, readErr)
+			if pe, ok := provider.AsProviderError(classified); ok {
+				pe.HTTPStatus = resp.StatusCode
+			}
+			return resp, nil, classified
 		}
 		if int64(len(body)) > egress.MaxResponseBytes {
-			return resp, nil, provider.NewProviderError(provider.FailMalformedResponse, false, 0, resp.StatusCode, "provider response body exceeded 1 MiB limit")
+			return resp, nil, egress.ErrResponseTooLarge
 		}
 	}
 	return resp, body, nil
