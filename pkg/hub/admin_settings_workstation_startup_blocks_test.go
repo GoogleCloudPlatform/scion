@@ -89,6 +89,8 @@ func TestWorkstation_PutServerConfig_StartupBlockValidSaved(t *testing.T) {
 			[]string{"server", "hub", "platform_request_timeout"}, "900s"},
 		{"chat search timeout", `{"server":{"hub":{"chat":{"search":{"timeout":"5s"}}}}}`,
 			[]string{"server", "hub", "chat", "search", "timeout"}, "5s"},
+		{"system_one max_eval_time", `{"server":{"hub":{"system_one":{"max_eval_time":"5s"}}}}`,
+			[]string{"server", "hub", "system_one", "max_eval_time"}, "5s"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -145,6 +147,14 @@ func TestWorkstation_PutServerConfig_StartupBlockInvalidRejected(t *testing.T) {
 			`"chat":{"search":{"timeout":"-1s"}}`,
 			"server.hub.chat.search.timeout",
 			config.HubChatSearchConfig{Timeout: "-1s"}.Validate().Error()},
+		{"system_one max_eval_time not a duration",
+			`"system_one":{"max_eval_time":"soon"}`,
+			"server.hub.system_one.max_eval_time",
+			config.HubSystemOneConfig{MaxEvalTime: "soon"}.Validate().Error()},
+		{"system_one max_eval_time above maximum",
+			`"system_one":{"max_eval_time":"45s"}`,
+			"server.hub.system_one.max_eval_time",
+			config.HubSystemOneConfig{MaxEvalTime: "45s"}.Validate().Error()},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -325,6 +335,8 @@ func TestHosted_PutServerConfig_StartupBlocksStillLayer0(t *testing.T) {
 		// Round-5 item R5-01: the chat search block is Layer-0 on a hosted hub too.
 		{`{"server":{"hub":{"chat":{"search":{"timeout":"5s"}}}}}`, "server.hub.chat.search.timeout"},
 		{`{"server":{"hub":{"chat":{"search":{"timeout":"soon"}}}}}`, "server.hub.chat.search.timeout"},
+		{`{"server":{"hub":{"system_one":{"max_eval_time":"5s"}}}}`, "server.hub.system_one.max_eval_time"},
+		{`{"server":{"hub":{"system_one":{"max_eval_time":"45s"}}}}`, "server.hub.system_one.max_eval_time"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.body, func(t *testing.T) {
