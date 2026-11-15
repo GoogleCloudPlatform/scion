@@ -306,6 +306,15 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			HTTPStatus: http.StatusBadRequest,
 		}
 	}
+	if isReservedSchedulerChannel(input.Channel) {
+		dmErr := &AgentDMError{
+			Code:       ErrCodeValidationError,
+			Message:    fmt.Sprintf("channel %q is reserved for internal use", input.Channel),
+			HTTPStatus: http.StatusBadRequest,
+		}
+		LogDMAdmission(DMAuditEntryForDenial(input, ErrCodeValidationError, "reserved channel"))
+		return nil, dmErr
+	}
 
 	// ── Phase 1: Admission checks (no side effects) ─────────────────────
 	// All checks must pass before any content/lifecycle effects (AC-3).

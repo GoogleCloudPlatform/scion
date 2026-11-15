@@ -40,11 +40,13 @@ var errStoredMessageUnrecoverable = errors.New("stored message cannot be rebuilt
 // duplicate row, and sets ConversationAsserted = false.
 //
 // Documented functional limitations (design.md Phase A2 §3, T1):
-//   - Plain, Metadata (including allowlisted provenance and Choices keys), and
-//     the original pre-rendered DeliveryText are not stored on store.Message,
-//     so re-driven messages are formatted by the broker from StructuredMessage
-//     fields (including adding the standard sender envelope to messages
-//     originally sent plain).
+//   - Plain, caller Metadata, and the original pre-rendered DeliveryText are
+//     not stored on store.Message, so re-driven messages are formatted by the
+//     broker from StructuredMessage fields (including adding the standard
+//     sender envelope to messages originally sent plain). For TypeChoiceResponse,
+//     processClaimedHeldRow enriches the rebuilt StructuredMessage from the
+//     persisted decision_answers / decisions rows so the asking agent still
+//     receives the [choice-response] line and hub-set choice metadata.
 func storedMessageDispatch(ctx context.Context, row *store.Message) (context.Context, *messages.StructuredMessage, error) {
 	if row == nil {
 		return nil, nil, fmt.Errorf("%w: nil row", errStoredMessageUnrecoverable)

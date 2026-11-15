@@ -113,6 +113,10 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if isReservedSchedulerChannel(req.Message.Channel) {
+		ValidationError(w, fmt.Sprintf("channel %q is reserved for internal use", req.Message.Channel), nil)
+		return
+	}
 
 	// #2257 P2 (design auto-offload-large-dm §4.2 item 1): strip hub-reserved
 	// offload metadata keys from plugin-supplied messages before any further
@@ -507,9 +511,12 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		return s.store.CreateMessage(r.Context(), storeMsg)
 	}
 
-	// Persist BEFORE dispatch so Conduit row binding (withDispatchMessageID)
-	// and awaiting_session hold/re-drive cover all broker-inbound messages,
-	// not only messages carrying attachments (ptone/scion#7881).
+	// When hub.conduit_deliver is enabled, persist BEFORE dispatch so Conduit
+	// row binding (withDispatchMessageID) and awaiting_session hold/re-drive
+	// cover all broker-inbound messages, not only messages carrying attachments
+	// (ptone/scion#7881, REQ-4). When hub.conduit_deliver is off, preserve
+	// exact Phase A dispatch-first ordering for non-attachment messages.
+	conduitDeliverOn := s.conduitDeliverEnabled()
 	persisted := false
 	var persistErr error
 	var boundAttachments []AttachmentRef
@@ -526,7 +533,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			s.bindProject(senderCtx, storeMsg, attachRefs), attachRefs)
 		req.Message.AttachmentDeliveries = attachmentDeliveries(storeMsg.ID, boundAttachments)
 		s.applyAttachmentPlan(r.Context(), agent, req.Message)
-	} else {
+	} else if conduitDeliverOn {
 		persistErr = persistInbound()
 		if persistErr == nil {
 			persisted = true
@@ -640,6 +647,20 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		"type", req.Message.Type,
 	)
 
+	if !persisted && persistErr == nil {
+		persistErr = persistInbound()
+		if persistErr != nil && agentReincarnating {
+			log.Error("Failed to persist inbound broker message",
+				"error", persistErr,
+				"message_id", storeMsg.ID,
+				"conversation_id", storeMsg.ConversationID,
+				"agent_id", agent.ID,
+			)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"failed to persist message; agent is reincarnating, retry", nil)
+			return
+		}
+	}
 	if err := persistErr; err != nil {
 		log.Error("Failed to persist inbound broker message",
 			"error", err,

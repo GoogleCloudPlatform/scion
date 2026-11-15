@@ -17,12 +17,22 @@ package hub
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// reservedSchedulerChannel is the internal channel value stamped exclusively by
+// persistScheduledMessageEvent. External/client/agent/broker callers are never
+// allowed to set it (REQ-1 defense-in-depth alongside ScheduledEventID).
+const reservedSchedulerChannel = "scheduler"
+
+func isReservedSchedulerChannel(ch string) bool {
+	return strings.EqualFold(strings.TrimSpace(ch), reservedSchedulerChannel)
+}
 
 // holdOrDispatch enforces the per-agent awaiting_session hold gate before a
 // persisted message is dispatched to a runtime broker (ptone/scion#7881,
@@ -88,8 +98,9 @@ func (s *Server) holdOrDispatch(
 //
 // Scheduled system messages are timer/cron-originated rather than part of a
 // two-party chat conversation, so ConversationID is intentionally empty
-// (matching broadcastDirect); ThreadID records evt.ID so re-drive can
-// re-evaluate the scheduled event's authority and fire-time authorization.
+// (matching broadcastDirect); ScheduledEventID records immutable hub-only
+// provenance (never exposed or writable via client APIs) so re-drive
+// re-evaluates the scheduled event's authority and fire-time authorization.
 func (s *Server) persistScheduledMessageEvent(
 	ctx context.Context,
 	evt store.ScheduledEvent,
@@ -113,8 +124,9 @@ func (s *Server) persistScheduledMessageEvent(
 		Type:               structuredMsg.Type,
 		Urgent:             payload.Interrupt,
 		AgentID:            agent.ID,
-		Channel:            "scheduler",
+		Channel:            reservedSchedulerChannel,
 		ThreadID:           evt.ID,
+		ScheduledEventID:   evt.ID,
 		DispatchState:      store.MessageDispatchDispatched,
 		CreatedAt:          createdAt,
 	}

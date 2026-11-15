@@ -15,17 +15,22 @@
 package hub
 
 import (
+	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
@@ -35,9 +40,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// Fixed failure reasons for held messages (ptone/scion#7881, A2-S8).
+// Fixed failure reasons for held messages (ptone/scion#7881, A2-S8, OPT-5).
 // Never store or echo broker-supplied text or failure codes on held-row
-// expiry or re-validation failures.
+// expiry, re-validation, or re-drive failures.
 const (
 	holdFailReasonSessionTimeout       = "agent session did not connect"
 	holdFailReasonAgentStopped         = "agent stopped"
@@ -45,6 +50,7 @@ const (
 	holdFailReasonAgentRestarted       = "agent restarted before delivery"
 	holdFailReasonSenderUnauthorized   = "sender is no longer authorized"
 	holdFailReasonMessageUnrecoverable = "message cannot be re-delivered"
+	holdFailReasonBrokerDeliveryFailed = "broker delivery failed"
 )
 
 const (
@@ -55,12 +61,17 @@ const (
 	// messageHoldRedriveTimeout bounds a single detached per-agent re-drive pass.
 	messageHoldRedriveTimeout = 90 * time.Second
 
+	// messageHoldRedriveLeaseTTL bounds the DB-backed cross-replica per-agent
+	// re-drive lease (REQ-2). Renewed between 64-row batches; expires on crash.
+	messageHoldRedriveLeaseTTL = 60 * time.Second
+
 	// messageHoldSweepTimeout bounds one 30s backstop sweep pass.
 	messageHoldSweepTimeout = 20 * time.Second
 
-	// messageHoldBatchPollInterval is how often inter-batch settling checks
-	// whether the previous batch's rows have bound or left 'dispatched'.
-	messageHoldBatchPollInterval = 25 * time.Millisecond
+	// messageHoldBatchPollInterval is the initial inter-batch settling poll
+	// interval, backing off exponentially up to messageHoldBatchPollMaxInterval (OPT-3).
+	messageHoldBatchPollInterval    = 25 * time.Millisecond
+	messageHoldBatchPollMaxInterval = 250 * time.Millisecond
 
 	// messageHoldStopGrace bounds how long CleanupBackgroundResources waits
 	// for in-flight re-drive passes before cancelling abortCtx.
@@ -413,12 +424,15 @@ func (s *Server) stopMessageHoldSweeper(ctx context.Context) {
 // sweepHeldMessages runs one backstop sweep pass:
 //  1. Expires rows past hold_until (DB time, conditional on awaiting_session)
 //     with fixed reason "agent session did not connect" and notifies senders.
+//     Runs regardless of hub.conduit_deliver so turning the flag off never
+//     strands previously held rows (REQ-5).
 //  2. Inspects remaining agent_delivery_holds markers: fails stopped/deleted/held
-//     targets ("agent stopped"), fails connected sessions without deliver-message
-//     ("agent cannot receive messages over conduit"), and schedules re-drive for
-//     agents with an eligible cluster-wide deliver-message session (A2-S7).
+//     targets ("agent stopped") regardless of flag, and when hub.conduit_deliver
+//     is enabled fails connected sessions without deliver-message ("agent cannot
+//     receive messages over conduit") or schedules re-drive for agents with an
+//     eligible cluster-wide deliver-message session (A2-S7).
 func (s *Server) sweepHeldMessages(parentCtx context.Context) {
-	if s == nil || s.store == nil || !s.conduitDeliverEnabled() {
+	if s == nil || s.store == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(parentCtx, messageHoldSweepTimeout)
@@ -442,6 +456,7 @@ func (s *Server) sweepHeldMessages(parentCtx context.Context) {
 		slog.Error("message-hold: list agent delivery holds failed", "error", err)
 		return
 	}
+	conduitDeliverOn := s.conduitDeliverEnabled()
 	for _, agentID := range holdAgentIDs {
 		if ctx.Err() != nil {
 			return
@@ -459,6 +474,9 @@ func (s *Server) sweepHeldMessages(parentCtx context.Context) {
 		}
 		if !eligible {
 			s.expireHeldMessagesForAgent(ctx, agentID, holdFailReasonAgentStopped)
+			continue
+		}
+		if !conduitDeliverOn {
 			continue
 		}
 		sessState, serr := s.agentConduitDeliverSessionState(ctx, agent)
@@ -609,11 +627,51 @@ func (s *Server) redriveAgentHeldMessagesOnce(parentCtx context.Context, agentID
 		return
 	}
 
+	// Acquire cross-replica per-agent DB lease so only one Hub replica claims
+	// and drains batches for agentID at a time (REQ-2). While leased, the
+	// agent_delivery_holds marker stays present (even when held_count == 0) so
+	// concurrent live sends queue behind the in-progress drain instead of
+	// overtaking earlier batches.
+	leaseOwner := api.NewUUID()
+	acquired, err := s.store.AcquireAgentRedriveLease(ctx, agentID, leaseOwner, messageHoldRedriveLeaseTTL)
+	if err != nil {
+		slog.Error("message-hold: acquire redrive lease failed", "agent_id", agentID, "error", err)
+		return
+	}
+	if !acquired {
+		return
+	}
+	reheldOnTransient := false
+	defer func() {
+		relCtx, relCancel := finalizationContext(ctx)
+		rerr := s.store.ReleaseAgentRedriveLease(relCtx, agentID, leaseOwner)
+		relCancel()
+		if rerr != nil {
+			slog.Error("message-hold: release redrive lease failed", "agent_id", agentID, "error", rerr)
+			return
+		}
+		if !reheldOnTransient && ctx.Err() == nil && s.conduitDeliverEnabled() {
+			chkCtx, chkCancel := finalizationContext(ctx)
+			stillHeld, herr := s.store.HasAgentDeliveryHold(chkCtx, agentID)
+			chkCancel()
+			if herr == nil && stillHeld {
+				s.scheduleHeldMessageRedrive(agentID)
+			}
+		}
+	}()
+
+	claimCtx := store.WithRedriveLeaseOwner(ctx, leaseOwner)
+	var pendingSettleIDs []string
+
 	for {
 		if ctx.Err() != nil || !s.conduitDeliverEnabled() {
 			return
 		}
-		claimed, err := s.store.ClaimHeldMessages(ctx, agentID, messageHoldClaimBatchSize)
+		claimLimit := messageHoldClaimBatchSize - len(pendingSettleIDs)
+		if claimLimit <= 0 {
+			claimLimit = messageHoldClaimBatchSize
+		}
+		claimed, err := s.store.ClaimHeldMessages(claimCtx, agentID, claimLimit)
 		if err != nil {
 			slog.Error("message-hold: claim held messages failed", "agent_id", agentID, "error", err)
 			return
@@ -629,28 +687,21 @@ func (s *Server) redriveAgentHeldMessagesOnce(parentCtx context.Context, agentID
 			)
 		}
 
-		dispatchedIDs := make([]string, 0, len(claimed))
-		reheldOnTransient := false
-		maxHeld := s.heldMessagesCap()
 		for i := range claimed {
 			row := &claimed[i]
 			outcome := s.processClaimedHeldRow(ctx, dispatcher, agentID, row)
 			switch outcome {
 			case claimedRowDispatched:
-				dispatchedIDs = append(dispatchedIDs, row.ID)
+				pendingSettleIDs = append(pendingSettleIDs, row.ID)
 			case claimedRowFailed:
 			case claimedRowReheldTransient:
-				// R3 + Ordering: row i returned to awaiting_session due to a
-				// transient lookup error. Re-hold all remaining rows in this
-				// claimed batch so later messages never overtake row i.
+				// R3 + REQ-3 + OPT-6 + Ordering: row i was re-held (or failed if
+				// re-hold was refused) due to a transient lookup fault or pass
+				// timeout. Re-hold (or deterministically fail) all remaining
+				// rows in this claimed batch so later messages never overtake
+				// row i and no row remains stranded in 'dispatched'.
 				for j := i + 1; j < len(claimed); j++ {
-					rest := &claimed[j]
-					rctx, rcancel := finalizationContext(ctx)
-					if _, rerr := s.store.ReholdClaimedMessage(rctx, agentID, rest.ID, maxHeld); rerr != nil {
-						slog.Error("message-hold: re-hold remaining batch row failed",
-							"agent_id", agentID, "message_id", rest.ID, "error", rerr)
-					}
-					rcancel()
+					s.reholdOrFailClaimedRow(ctx, agentID, &claimed[j])
 				}
 				reheldOnTransient = true
 			}
@@ -662,18 +713,23 @@ func (s *Server) redriveAgentHeldMessagesOnce(parentCtx context.Context, agentID
 			return
 		}
 
-		// When more held rows may follow (full batch of 64 or hold marker still
-		// present), wait until the dispatched rows in this batch have left
-		// 'dispatched' (bound to 'delivering' or settled) or the 30s cap passes,
-		// so batches arrive in order (AC A2-3b).
-		if len(dispatchedIDs) > 0 {
-			hasMore, _ := s.store.HasAgentDeliveryHold(ctx, agentID)
-			if hasMore || len(claimed) == messageHoldClaimBatchSize {
-				if reheldDuringFlush := s.waitForBatchBoundOrSettled(ctx, dispatchedIDs); reheldDuringFlush {
-					// Session dropped during flush and rows returned to
-					// awaiting_session; wait for next session admission or sweep.
-					return
+		// Whenever 64 rows have been dispatched in the current batch window,
+		// wait until all of them have left 'dispatched' (bound to 'delivering',
+		// settled, or re-held) or the 30s cap passes, then renew the cross-replica
+		// lease before claiming the next batch so batches arrive strictly in
+		// order (AC A2-3b, REQ-2).
+		if len(pendingSettleIDs) >= messageHoldClaimBatchSize || (len(pendingSettleIDs) > 0 && len(claimed) == claimLimit) {
+			if reheldDuringFlush := s.waitForBatchBoundOrSettled(ctx, pendingSettleIDs); reheldDuringFlush {
+				reheldOnTransient = true
+				return
+			}
+			pendingSettleIDs = pendingSettleIDs[:0]
+			renewed, rerr := s.store.RenewAgentRedriveLease(ctx, agentID, leaseOwner, messageHoldRedriveLeaseTTL)
+			if rerr != nil || !renewed {
+				if rerr != nil {
+					slog.Error("message-hold: renew redrive lease failed", "agent_id", agentID, "error", rerr)
 				}
+				return
 			}
 		}
 	}
@@ -685,16 +741,20 @@ func (s *Server) processClaimedHeldRow(
 	agentID string,
 	row *store.Message,
 ) claimedRowOutcome {
+	if ctx.Err() != nil {
+		s.reholdOrFailClaimedRow(ctx, agentID, row)
+		return claimedRowReheldTransient
+	}
+
 	target, fixedReason, transientErr := s.revalidateClaimedHeldMessage(ctx, agentID, row)
-	if transientErr != nil {
-		slog.Warn("message-hold: transient error during re-validation; re-holding row",
-			"agent_id", agentID, "message_id", row.ID, "error", transientErr)
-		rctx, rcancel := finalizationContext(ctx)
-		if _, rerr := s.store.ReholdClaimedMessage(rctx, agentID, row.ID, s.heldMessagesCap()); rerr != nil {
-			slog.Error("message-hold: re-hold claimed message after transient error failed",
-				"agent_id", agentID, "message_id", row.ID, "error", rerr)
+	if transientErr != nil || ctx.Err() != nil {
+		errToLog := transientErr
+		if errToLog == nil {
+			errToLog = ctx.Err()
 		}
-		rcancel()
+		slog.Warn("message-hold: transient error or pass timeout during re-validation; re-holding row",
+			"agent_id", agentID, "message_id", row.ID, "error", errToLog)
+		s.reholdOrFailClaimedRow(ctx, agentID, row)
 		return claimedRowReheldTransient
 	}
 	if fixedReason != "" {
@@ -711,10 +771,40 @@ func (s *Server) processClaimedHeldRow(
 	// buffered messages (H3, design.md §2) so they do not cut into processing
 	// of earlier held rows.
 	sm.Urgent = false
+
+	// Choice responses store a chat summary in row.Msg while live delivery
+	// sends the hub-formatted [choice-response] line and hub-set choice
+	// metadata from decision_answers / decisions (OPT-1). Reconstruct both
+	// before RenderDeliveryText so legacy and envelope consumers match live send.
+	if row.Type == messages.TypeChoiceResponse {
+		choiceFailReason, choiceTransientErr := s.enrichHeldChoiceResponse(ctx, row, sm)
+		if choiceTransientErr != nil || ctx.Err() != nil {
+			errToLog := choiceTransientErr
+			if errToLog == nil {
+				errToLog = ctx.Err()
+			}
+			slog.Warn("message-hold: transient error enriching choice-response; re-holding row",
+				"agent_id", agentID, "message_id", row.ID, "error", errToLog)
+			s.reholdOrFailClaimedRow(ctx, agentID, row)
+			return claimedRowReheldTransient
+		}
+		if choiceFailReason != "" {
+			s.failClaimedHeldMessage(ctx, target, row, choiceFailReason)
+			return claimedRowFailed
+		}
+	}
+
 	if s.writeDenyEnabled() {
 		var convRes *messaging.ConversationResult
 		if row.ConversationID != "" {
-			if conv, cerr := s.store.GetConversation(ctx, row.ConversationID); cerr == nil && conv != nil {
+			conv, cerr := s.store.GetConversation(ctx, row.ConversationID)
+			if cerr != nil && !errors.Is(cerr, store.ErrNotFound) {
+				slog.Warn("message-hold: transient error loading conversation; re-holding row",
+					"agent_id", agentID, "message_id", row.ID, "error", cerr)
+				s.reholdOrFailClaimedRow(ctx, agentID, row)
+				return claimedRowReheldTransient
+			}
+			if conv != nil {
 				convRes = &messaging.ConversationResult{
 					ConversationID: conv.ID,
 					ExternalRef:    conv.ExternalRef,
@@ -733,21 +823,173 @@ func (s *Server) processClaimedHeldRow(
 		})
 	}
 
+	if ctx.Err() != nil {
+		s.reholdOrFailClaimedRow(ctx, agentID, row)
+		return claimedRowReheldTransient
+	}
+
 	if err := s.dispatchClaimedHeldMessage(dctx, dispatcher, target, sm); err != nil {
-		reason := sanitizeFailureReason(err.Error())
-		if reason == "" {
-			reason = "broker delivery failed on re-drive"
-		}
-		s.failClaimedHeldMessage(ctx, target, row, reason)
+		s.failClaimedHeldMessage(ctx, target, row, holdFailReasonBrokerDeliveryFailed)
 		return claimedRowFailed
 	}
 	return claimedRowDispatched
 }
 
+// reholdOrFailClaimedRow returns a never-dispatched claimed row to
+// awaiting_session (with maxHeld=0 so returning an already-admitted row never
+// trips the per-agent cap). When ReholdClaimedMessage refuses (reheld=false,
+// e.g. the target stopped, was deleted, or the row passed hold_until) or fails,
+// it deterministically transitions the row to failed with a fixed reason and
+// notifies the sender (REQ-3, OPT-6: a claimed row never remains stranded in
+// dispatch_state='dispatched').
+func (s *Server) reholdOrFailClaimedRow(ctx context.Context, agentID string, row *store.Message) {
+	if s == nil || s.store == nil || row == nil {
+		return
+	}
+	finCtx, finCancel := finalizationContext(ctx)
+	defer finCancel()
+
+	reheld, rerr := s.store.ReholdClaimedMessage(finCtx, agentID, row.ID, 0)
+	if rerr == nil && reheld {
+		return
+	}
+	if rerr != nil {
+		slog.Error("message-hold: re-hold claimed message failed; failing row",
+			"agent_id", agentID, "message_id", row.ID, "error", rerr)
+	}
+
+	var target *store.Agent
+	reason := holdFailReasonSessionTimeout
+	agent, gerr := s.store.GetAgent(finCtx, agentID)
+	switch {
+	case errors.Is(gerr, store.ErrNotFound):
+		reason = holdFailReasonAgentStopped
+	case gerr == nil && agent != nil:
+		target = agent
+		if eligible, eerr := s.heldTargetEligible(finCtx, agent); eerr == nil && !eligible {
+			reason = holdFailReasonAgentStopped
+		} else if row.HoldLaunchID == "" || agent.RunID == "" || agent.RunID != row.HoldLaunchID {
+			reason = holdFailReasonAgentRestarted
+		}
+	}
+	s.failClaimedHeldMessage(finCtx, target, row, reason)
+}
+
+func (s *Server) enrichHeldChoiceResponse(
+	ctx context.Context,
+	row *store.Message,
+	sm *messages.StructuredMessage,
+) (fixedReason string, transientErr error) {
+	byResp, err := s.store.GetDecisionAnswersByResponseMessageIDs(ctx, []string{row.ID})
+	if err != nil {
+		return "", fmt.Errorf("choice answer lookup: %w", err)
+	}
+	answers := byResp[row.ID]
+	if len(answers) == 0 {
+		return holdFailReasonMessageUnrecoverable, nil
+	}
+
+	if len(answers) == 1 && answers[0].BatchID == "" {
+		a := answers[0]
+		var overridden *store.DecisionAnswer
+		if a.Outcome == store.DecisionOutcomeOverride && a.DecisionRowID != "" {
+			d, derr := s.store.GetDecision(ctx, a.DecisionRowID)
+			if derr != nil && !errors.Is(derr, store.ErrNotFound) {
+				return "", fmt.Errorf("choice decision lookup: %w", derr)
+			}
+			if d != nil {
+				for _, cand := range d.Answers {
+					if cand.Provenance == store.DecisionProvenanceAgentInterpreted {
+						overridden = cand
+						break
+					}
+				}
+			}
+		}
+		sm.Msg = choiceResponseAgentLine(a, overridden)
+		sm.Metadata = messaging.StripReservedMetadata(sm.Metadata)
+		if sm.Metadata == nil {
+			sm.Metadata = make(map[string]string, 4)
+		}
+		sm.Metadata[messages.MetadataChoiceKey] = a.Key
+		sm.Metadata[messages.MetadataChoiceVersion] = strconv.Itoa(a.Version)
+		sm.Metadata[messages.MetadataChoiceID] = a.ChoiceID
+		sm.Metadata[messages.MetadataChoiceProvenance] = a.Provenance
+		return "", nil
+	}
+
+	batchID := answers[0].BatchID
+	if batchID == "" {
+		return holdFailReasonMessageUnrecoverable, nil
+	}
+	rowIDs := make([]string, 0, len(answers))
+	needOverridden := false
+	for _, a := range answers {
+		if a.BatchID != batchID {
+			return holdFailReasonMessageUnrecoverable, nil
+		}
+		if a.DecisionRowID != "" {
+			rowIDs = append(rowIDs, a.DecisionRowID)
+		}
+		if a.Outcome == store.DecisionOutcomeOverride {
+			needOverridden = true
+		}
+	}
+	rowsByID, rerr := s.store.GetDecisionRowsByIDs(ctx, rowIDs)
+	if rerr != nil {
+		return "", fmt.Errorf("choice set decision rows lookup: %w", rerr)
+	}
+	promptID := ""
+	for _, a := range answers {
+		if d := rowsByID[a.DecisionRowID]; d != nil && d.MessageID != "" {
+			promptID = d.MessageID
+			break
+		}
+	}
+	ordered := slices.Clone(answers)
+	slices.SortFunc(ordered, func(a, b *store.DecisionAnswer) int {
+		posA, posB := math.MaxInt, math.MaxInt
+		if d := rowsByID[a.DecisionRowID]; d != nil {
+			posA = d.Position
+		}
+		if d := rowsByID[b.DecisionRowID]; d != nil {
+			posB = d.Position
+		}
+		if c := cmp.Compare(posA, posB); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Key, b.Key)
+	})
+	var overridden map[string]*store.DecisionAnswer
+	if needOverridden && promptID != "" {
+		byPrompt, perr := s.store.GetDecisionsByMessageIDs(ctx, []string{promptID})
+		if perr != nil {
+			return "", fmt.Errorf("choice set prompt decisions lookup: %w", perr)
+		}
+		overridden = make(map[string]*store.DecisionAnswer)
+		for _, d := range byPrompt[promptID] {
+			for _, cand := range d.Answers {
+				if cand.Provenance == store.DecisionProvenanceAgentInterpreted {
+					overridden[d.ID] = cand
+					break
+				}
+			}
+		}
+	}
+	sm.Msg = choiceSetAgentLines(promptID, ordered, overridden)
+	sm.Metadata = messaging.StripReservedMetadata(sm.Metadata)
+	if sm.Metadata == nil {
+		sm.Metadata = make(map[string]string, 2)
+	}
+	sm.Metadata[messages.MetadataChoiceBatch] = batchID
+	sm.Metadata[messages.MetadataChoiceAnswers] = choiceAnswersMetadata(ordered)
+	return "", nil
+}
+
 func (s *Server) failClaimedHeldMessage(ctx context.Context, target *store.Agent, row *store.Message, reason string) {
 	finCtx, finCancel := finalizationContext(ctx)
+	defer finCancel()
 	won, err := s.store.FailUndeliveredMessage(finCtx, row.ID, reason)
-	finCancel()
 	if err != nil {
 		slog.Error("message-hold: failed to mark claimed row failed",
 			"message_id", row.ID, "reason", reason, "error", err)
@@ -768,7 +1010,7 @@ func (s *Server) failClaimedHeldMessage(ctx context.Context, target *store.Agent
 			"reason", reason,
 		)
 	}
-	s.notifyStoredMessageSenderFailed(ctx, target, row, reason)
+	s.notifyStoredMessageSenderFailed(finCtx, target, row, reason)
 }
 
 // dispatchClaimedHeldMessage hands a re-validated held row to the runtime broker
@@ -780,12 +1022,20 @@ func (s *Server) dispatchClaimedHeldMessage(
 	target *store.Agent,
 	sm *messages.StructuredMessage,
 ) error {
-	return dispatchWithBrokerRetry(dctx, s.recordLog(), dispatcher, target, sm.Msg, false, sm)
+	baseCtx := context.WithoutCancel(dctx)
+	if sm != nil && sm.StoredMessageID != "" {
+		baseCtx = withDispatchMessageID(baseCtx, sm.StoredMessageID)
+	}
+	callCtx, cancel := context.WithTimeout(baseCtx, 30*time.Second)
+	defer cancel()
+	return dispatchWithBrokerRetry(callCtx, s.recordLog(), dispatcher, target, sm.Msg, false, sm)
 }
 
 // waitForBatchBoundOrSettled waits until every row in messageIDs has left
 // dispatch_state='dispatched' (i.e. bound to 'delivering', finished 'delivered',
 // failed, or re-held to 'awaiting_session') or messageHoldBatchSettleCap passes.
+// Uses a single GetMessagesByIDs IN query per poll with exponential backoff
+// capped at messageHoldBatchPollMaxInterval (OPT-3).
 // Returns reheld=true if any row settled back into 'awaiting_session'.
 func (s *Server) waitForBatchBoundOrSettled(ctx context.Context, messageIDs []string) (reheld bool) {
 	if len(messageIDs) == 0 {
@@ -795,21 +1045,22 @@ func (s *Server) waitForBatchBoundOrSettled(ctx context.Context, messageIDs []st
 	defer cancel()
 
 	pending := slices.Clone(messageIDs)
-	ticker := time.NewTicker(messageHoldBatchPollInterval)
-	defer ticker.Stop()
-
 	check := func() (done bool) {
+		msgs, err := s.store.GetMessagesByIDs(waitCtx, pending)
+		if err != nil {
+			return false
+		}
+		byID := make(map[string]string, len(msgs))
+		for i := range msgs {
+			byID[msgs[i].ID] = msgs[i].DispatchState
+		}
 		stillDispatched := pending[:0]
 		for _, id := range pending {
-			m, err := s.store.GetMessage(waitCtx, id)
-			if err != nil {
-				if errors.Is(err, store.ErrNotFound) {
-					continue
-				}
-				stillDispatched = append(stillDispatched, id)
+			st, ok := byID[id]
+			if !ok {
 				continue
 			}
-			switch m.DispatchState {
+			switch st {
 			case store.MessageDispatchDispatched:
 				stillDispatched = append(stillDispatched, id)
 			case store.MessageDispatchAwaitingSession:
@@ -823,14 +1074,22 @@ func (s *Server) waitForBatchBoundOrSettled(ctx context.Context, messageIDs []st
 	if check() {
 		return reheld
 	}
+	interval := messageHoldBatchPollInterval
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
 	for {
 		select {
 		case <-waitCtx.Done():
 			return reheld
-		case <-ticker.C:
+		case <-timer.C:
 			if check() {
 				return reheld
 			}
+			interval *= 2
+			if interval > messageHoldBatchPollMaxInterval {
+				interval = messageHoldBatchPollMaxInterval
+			}
+			timer.Reset(interval)
 		}
 	}
 }
@@ -881,9 +1140,14 @@ func (s *Server) revalidateClaimedHeldMessage(
 }
 
 func (s *Server) revalidateHeldMessageSender(ctx context.Context, row *store.Message, target *store.Agent) (bool, error) {
-	// 1. Scheduled message event fire (persistScheduledMessageEvent sets
-	// Channel="scheduler", ThreadID=evt.ID).
-	if row.Channel == "scheduler" && row.ThreadID != "" {
+	// 1. Scheduled message event fire: selected ONLY from hub-recorded immutable
+	// provenance (row.ScheduledEventID plus the scheduler system sender tuple),
+	// never from client-controllable Channel or ThreadID (REQ-1).
+	if row.ScheduledEventID != "" {
+		if row.Sender != "scheduler" || row.SenderID != "SCHEDULER" ||
+			row.Type != messages.TypeSystem || row.DelegationGrantID != "" || row.AuthorizingUserID != "" {
+			return false, nil
+		}
 		return s.revalidateScheduledHeldMessage(ctx, row, target)
 	}
 
@@ -919,16 +1183,69 @@ func (s *Server) revalidateHeldMessageSender(ctx context.Context, row *store.Mes
 }
 
 func (s *Server) revalidateScheduledHeldMessage(ctx context.Context, row *store.Message, target *store.Agent) (bool, error) {
-	evt, err := s.store.GetScheduledEvent(ctx, row.ThreadID)
+	if row.ScheduledEventID == "" || target == nil {
+		return false, nil
+	}
+	evt, err := s.store.GetScheduledEvent(ctx, row.ScheduledEventID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return false, nil
 		}
 		return false, fmt.Errorf("scheduled event lookup: %w", err)
 	}
-	if evt == nil {
+	if evt == nil || evt.EventType != "message" || evt.ProjectID == "" {
 		return false, nil
 	}
+	if row.SenderProjectID == nil || *row.SenderProjectID != evt.ProjectID || evt.ProjectID != target.ProjectID {
+		return false, nil
+	}
+	var payload MessageEventPayload
+	if err := json.Unmarshal([]byte(evt.Payload), &payload); err != nil {
+		return false, nil
+	}
+	targetMatched := false
+	switch {
+	case payload.AgentID != "":
+		targetMatched = payload.AgentID == target.ID
+	case payload.AgentName != "":
+		targetMatched = strings.EqualFold(payload.AgentName, target.Slug) ||
+			strings.EqualFold(payload.AgentName, target.Name) ||
+			strings.EqualFold(api.Slugify(payload.AgentName), target.Slug)
+	}
+	if !targetMatched {
+		return false, nil
+	}
+
+	if err := s.scheduledFireStanding(ctx, *evt, target); err != nil {
+		if errors.Is(err, errScheduledMessageRefused) {
+			// Probe whether target hold or authoring agent standing lookup had a
+			// transient store error (R3) vs a definite standing refusal.
+			if _, herr := s.agentHeld(ctx, target.ID); herr != nil {
+				return false, fmt.Errorf("scheduled target hold lookup: %w", herr)
+			}
+			var authors []string
+			if init := s.scheduledInitiator(evt.InitiatorAttribution); !init.LegacyUnknown &&
+				init.PrincipalKind == store.DelegationPrincipalAgent && init.PrincipalID != "" {
+				authors = append(authors, init.PrincipalID)
+			}
+			if evt.CreatedBy != "" {
+				authors = append(authors, evt.CreatedBy)
+			}
+			for _, id := range authors {
+				creator, gerr := s.store.GetAgent(ctx, id)
+				if gerr != nil && !errors.Is(gerr, store.ErrNotFound) {
+					return false, fmt.Errorf("scheduled author lookup: %w", gerr)
+				}
+				if creator != nil {
+					if serr := s.agentStanding(ctx, creator.ID); serr != nil && !errors.Is(serr, errAgentNotInStanding) {
+						return false, fmt.Errorf("scheduled author standing lookup: %w", serr)
+					}
+				}
+			}
+		}
+		return false, nil
+	}
+
 	auth, identity, err := s.resolveScheduledAuthority(ctx, *evt)
 	if err != nil {
 		if errors.Is(err, errScheduledAuthorityDenied) || errors.Is(err, errScheduledAuthorityUnrecorded) {

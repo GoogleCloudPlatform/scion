@@ -38,6 +38,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
@@ -345,7 +346,7 @@ func (d *realBrokerDispatcher) DispatchAgentMessage(ctx context.Context, target 
 				Code:      hubclient.MessageFailureCodeAwaitingSession,
 				Reason:    "broker delivery failed: " + err.Error(),
 			})
-			if out.Held > 0 || out.Marked > 0 {
+			if out.Held > 0 {
 				return nil
 			}
 		}
@@ -380,9 +381,43 @@ func (d *realBrokerDispatcher) deliveries() []agentcontrol.DeliverRequest {
 
 type holdE2EFixture struct {
 	*ptyConduitFixture
-	broker string
-	disp   *realBrokerDispatcher
-	fault  *conduitFaultStore
+	broker         string
+	disp           *realBrokerDispatcher
+	fault          *conduitFaultStore
+	sharedRegStore registry.Store
+	sharedReg      *registry.Registry
+}
+
+func (f *holdE2EFixture) newPeerHubServer(t *testing.T, instanceID string) *Server {
+	t.Helper()
+	ctx := context.Background()
+	srvB, err := newTestHubServer(t, ServerConfig{}, f.store)
+	require.NoError(t, err)
+	srvB.conduitGrants = f.srv.conduitGrants
+	setHoldTestSettings(t, srvB, map[string]bool{conduitExperiment: true, experiments.ConduitDeliver: true})
+	srvB.SetDispatcher(f.disp)
+
+	internalB := httptest.NewServer(srvB.ConduitInternalHandler())
+	t.Cleanup(internalB.Close)
+
+	authB, err := relay.NewHMACPeerAuthFromSecret(relay.HMACPeerAuthConfig{Secret: f.peerSecret, SelfID: instanceID})
+	require.NoError(t, err)
+	require.NoError(t, srvB.StartConduitRelay(ctx, ConduitRelayOptions{
+		InstanceID:       instanceID,
+		InternalEndpoint: internalB.URL,
+		HTTPClient:       internalB.Client(),
+		PeerAuth:         authB,
+		Store:            f.sharedRegStore,
+		Registry:         f.sharedReg,
+		Clock:            clock.NewFake(f.clock.Now()),
+		sessionWriteWait: conduitFixtureWriteWait,
+	}))
+	t.Cleanup(func() {
+		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		srvB.shutdownConduitRelay(sctx)
+	})
+	return srvB
 }
 
 func setHoldTestSettings(t *testing.T, srv *Server, exps map[string]bool) {
@@ -401,19 +436,41 @@ func setHoldTestSettings(t *testing.T, srv *Server, exps map[string]bool) {
 
 func newHoldE2EFixture(t *testing.T) *holdE2EFixture {
 	t.Helper()
-	var fs *conduitFaultStore
+	var (
+		fs             *conduitFaultStore
+		srvPtr         atomic.Pointer[Server]
+		sharedRegStore registry.Store
+		sharedReg      *registry.Registry
+	)
+	internalA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s := srvPtr.Load(); s != nil {
+			s.ConduitInternalHandler().ServeHTTP(w, r)
+			return
+		}
+		http.Error(w, "not ready", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(internalA.Close)
+
 	pf := newPTYConduitFixtureServer(t, func(srv *Server) {
+		srvPtr.Store(srv)
 		fs, _ = installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *conduitFaultStore {
 			return &conduitFaultStore{Store: inner}
 		})
 		if srv.authzService != nil {
 			srv.authzService.store = fs
 		}
+	}, func(o *ConduitRelayOptions) {
+		o.InternalEndpoint = internalA.URL
+		o.HTTPClient = internalA.Client()
+		sharedRegStore = o.Store
+		sharedReg = o.Registry
 	})
 	f := &holdE2EFixture{
 		ptyConduitFixture: pf,
 		broker:            pf.launched.RuntimeBrokerID,
 		fault:             fs,
+		sharedRegStore:    sharedRegStore,
+		sharedReg:         sharedReg,
 	}
 	ctx := context.Background()
 	f.agent.Phase = string(state.PhaseRunning)
@@ -984,22 +1041,7 @@ func TestHoldA2_4_MultiReplicaClaimAndCrossReplicaSessionSweep(t *testing.T) {
 		ctx := context.Background()
 
 		// Build a second Hub replica sharing the database, registry, and broker.
-		srvB, err := New(ServerConfig{}, f.store)
-		require.NoError(t, err)
-		srvB.conduitGrants = f.srv.conduitGrants
-		setHoldTestSettings(t, srvB, map[string]bool{conduitExperiment: true, experiments.ConduitDeliver: true})
-		srvB.SetDispatcher(f.disp)
-		authB, err := relay.NewHMACPeerAuthFromSecret(relay.HMACPeerAuthConfig{Secret: f.peerSecret, SelfID: "hub-b-srv"})
-		require.NoError(t, err)
-		require.NoError(t, srvB.StartConduitRelay(ctx, ConduitRelayOptions{
-			InstanceID: "hub-b-srv", PeerAuth: authB, Store: f.regStore, Registry: f.reg,
-			Clock: clock.NewFake(f.clock.Now()), sessionWriteWait: conduitFixtureWriteWait,
-		}))
-		t.Cleanup(func() {
-			sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			srvB.shutdownConduitRelay(sctx)
-		})
+		srvB := f.newPeerHubServer(t, "hub-b-srv")
 
 		var ids []string
 		for i := 0; i < 20; i++ {
@@ -1008,6 +1050,11 @@ func TestHoldA2_4_MultiReplicaClaimAndCrossReplicaSessionSweep(t *testing.T) {
 		}
 
 		f.connectDeliverSession(t, f.public.URL, true, nil)
+		fresh, err := f.store.GetAgent(ctx, f.launched.ID)
+		require.NoError(t, err)
+		stB, errB := srvB.agentConduitDeliverSessionState(ctx, fresh)
+		require.NoError(t, errB)
+		require.Equal(t, agentDeliverSessionReady, stB, "replica B must resolve the admitted session via shared registry")
 
 		var wg sync.WaitGroup
 		wg.Add(3)
@@ -1020,6 +1067,11 @@ func TestHoldA2_4_MultiReplicaClaimAndCrossReplicaSessionSweep(t *testing.T) {
 			f.waitMessageState(t, id, store.MessageDispatchDelivered)
 		}
 		assert.Equal(t, 20, f.disp.dispatchCount(f.launched.Slug), "each held message must be claimed and dispatched once across replicas")
+		var deliveredIDs []string
+		for _, d := range f.disp.deliveries() {
+			deliveredIDs = append(deliveredIDs, d.MessageIDs...)
+		}
+		assert.Equal(t, ids, deliveredIDs, "held messages must arrive in creation order across replicas")
 		assert.Empty(t, f.disp.notices())
 	})
 
@@ -1692,4 +1744,729 @@ func decodeHoldTestEnvelope(t *testing.T, pasted string) map[string]any {
 	var out map[string]any
 	require.NoError(t, json.Unmarshal([]byte(rest[:j]), &out))
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// Round 1 review regressions (ptone/scion#7881, PR ptone/scion#8097)
+// ---------------------------------------------------------------------------
+
+func (f *holdE2EFixture) seedHeldWith(t *testing.T, sender, senderID, body string, mutate func(*store.Message)) *store.Message {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	m := &store.Message{
+		ID:            uuid.NewString(),
+		ProjectID:     f.launched.ProjectID,
+		AgentID:       f.launched.ID,
+		Sender:        sender,
+		SenderID:      senderID,
+		Recipient:     "agent:" + f.launched.Slug,
+		RecipientID:   f.launched.ID,
+		Msg:           body,
+		Type:          messages.TypeInstruction,
+		DispatchState: store.MessageDispatchDispatched,
+		HoldLaunchID:  f.launched.RunID,
+		CreatedAt:     now,
+	}
+	if mutate != nil {
+		mutate(m)
+	}
+	require.NoError(t, f.store.CreateMessage(ctx, m))
+	did := "seed-" + m.ID
+	_, err := f.store.BindMessageDelivery(ctx, f.launched.ID, did, []string{m.ID}, now.Add(time.Minute))
+	require.NoError(t, err)
+	require.NoError(t, f.store.UnbindMessageDeliveryWithProof(ctx, did, []string{m.ID}, agentcontrol.ReasonNoSession))
+	ok, err := f.store.HoldMessageAwaitingSession(ctx, store.HoldMessageParams{
+		MessageID:   m.ID,
+		AgentID:     f.launched.ID,
+		MaxProofAge: 2 * time.Minute,
+		HoldTTL:     10 * time.Minute,
+		MaxHeld:     f.srv.heldMessagesCap(),
+	})
+	require.NoError(t, err)
+	require.True(t, ok)
+	return m
+}
+
+func postHoldBrokerJSON(t *testing.T, srv *Server, path string, payload any) *httptest.ResponseRecorder {
+	t.Helper()
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Scion-Plugin-Name", "test-plugin")
+	req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity("test-broker")))
+	rec := httptest.NewRecorder()
+	srv.mux.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestHoldA2_Round1_REQ1_SchedulerChannelRejectedAndSpoofBlocked(t *testing.T) {
+	t.Run("all_external_agent_and_broker_ingress_paths_reject_scheduler_channel", func(t *testing.T) {
+		f := newHoldE2EFixture(t)
+		ctx := context.Background()
+
+		owner, err := f.store.GetUser(ctx, f.launched.OwnerID)
+		require.NoError(t, err)
+		evtID := api.NewUUID()
+
+		// 1. Public user/agent message API (reviewer's TestA2Rev_UserAPIPersistsSchedulerChannel).
+		userBody := `{"structured_message":{"msg":"spoof-via-api","type":"instruction","channel":"scheduler","thread_id":"` + evtID + `"}}`
+		req, err := http.NewRequest(http.MethodPost, f.public.URL+"/api/v1/agents/"+f.launched.ID+"/message", bytes.NewReader([]byte(userBody)))
+		require.NoError(t, err)
+		req.Header.Set("Authorization", "Bearer "+f.userToken)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+		assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+
+		// 2. Agent outbound-message API.
+		outBody := `{"recipient":"user:` + owner.Email + `","msg":"spoof-outbound","channel":" SCHEDULER "}`
+		outReq, err := http.NewRequest(http.MethodPost, f.public.URL+"/api/v1/agents/"+f.agent.ID+"/outbound-message", bytes.NewReader([]byte(outBody)))
+		require.NoError(t, err)
+		outReq.Header.Set("Authorization", "Bearer "+f.agentToken(t, f.agent))
+		outReq.Header.Set("Content-Type", "application/json")
+		outResp, err := http.DefaultClient.Do(outReq)
+		require.NoError(t, err)
+		_ = outResp.Body.Close()
+		assert.Equal(t, http.StatusBadRequest, outResp.StatusCode)
+
+		// 3. Project broadcast API.
+		bcastBody := `{"structured_message":{"msg":"spoof-bcast","type":"instruction","channel":"scheduler"}}`
+		bcastReq, err := http.NewRequest(http.MethodPost, f.public.URL+"/api/v1/projects/"+f.launched.ProjectID+"/broadcast", bytes.NewReader([]byte(bcastBody)))
+		require.NoError(t, err)
+		bcastReq.Header.Set("Authorization", "Bearer "+f.userToken)
+		bcastReq.Header.Set("Content-Type", "application/json")
+		bcastResp, err := http.DefaultClient.Do(bcastReq)
+		require.NoError(t, err)
+		_ = bcastResp.Body.Close()
+		assert.Equal(t, http.StatusBadRequest, bcastResp.StatusCode)
+
+		// 4. ExecuteAgentDM.
+		_, dmErr := f.srv.ExecuteAgentDM(ctx, &AgentDMInput{
+			SenderAgent:    f.agent,
+			SenderIdentity: &storedAgentIdentity{agent: f.agent},
+			TargetAgent:    f.launched,
+			ProjectID:      f.launched.ProjectID,
+			Msg:            "spoof-dm",
+			Type:           messages.TypeInstruction,
+			Channel:        "scheduler",
+		})
+		require.NotNil(t, dmErr)
+		assert.Equal(t, http.StatusBadRequest, dmErr.HTTPStatus)
+
+		// 5. Broker legacy inbound.
+		recLegacy := postHoldBrokerJSON(t, f.srv, "/api/v1/broker/inbound", inboundMessageRequest{
+			Topic: "scion.project." + f.launched.ProjectID + ".agent." + f.launched.Slug + ".messages",
+			Message: &messages.StructuredMessage{
+				Version: messages.Version, Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Channel: "scheduler", ThreadID: evtID,
+				Sender: "user:" + owner.Email, Recipient: "agent:" + f.launched.Slug,
+				Msg: "spoof-broker-inbound", Type: messages.TypeInstruction,
+			},
+		})
+		assert.Equal(t, http.StatusBadRequest, recLegacy.Code, recLegacy.Body.String())
+
+		// 6. Broker routed inbound.
+		recRouted := postHoldBrokerJSON(t, f.srv, "/api/v1/broker/inbound/routed", routedInboundRequest{
+			ProjectID: f.launched.ProjectID, DefaultAgent: f.launched.Slug,
+			Message: &messages.StructuredMessage{
+				Version: messages.Version, Channel: "scheduler", ThreadID: evtID,
+				Sender: "user:" + owner.Email, Msg: "spoof-broker-routed", Type: messages.TypeInstruction,
+			},
+		})
+		assert.Equal(t, http.StatusBadRequest, recRouted.Code, recRouted.Body.String())
+
+		listed, err := f.store.ListMessages(ctx, store.MessageFilter{ProjectID: f.launched.ProjectID}, store.ListOptions{Limit: 20})
+		require.NoError(t, err)
+		assert.Empty(t, listed.Items, "no rejected channel=scheduler request may persist a message row")
+	})
+
+	t.Run("suspended_sender_cannot_bypass_revalidation_via_channel_thread_id_or_mismatched_event", func(t *testing.T) {
+		f := newHoldE2EFixture(t)
+		ctx := context.Background()
+
+		// Valid scheduled event targeting f.launched, plus another targeting f.agent.
+		payloadTarget := `{"agentName":"` + f.launched.Slug + `","message":"legit"}`
+		evtTarget := withAgentRevision(t, f.srv, store.ScheduledEvent{
+			ID: api.NewUUID(), ProjectID: f.launched.ProjectID, EventType: "message",
+			Payload: payloadTarget, Status: store.ScheduledEventPending, CreatedBy: f.agent.ID,
+		}, f.agent.ID)
+		require.NoError(t, f.store.CreateScheduledEvent(ctx, &evtTarget))
+
+		payloadOther := `{"agentName":"` + f.agent.Slug + `","message":"other"}`
+		evtOther := withAgentRevision(t, f.srv, store.ScheduledEvent{
+			ID: api.NewUUID(), ProjectID: f.launched.ProjectID, EventType: "message",
+			Payload: payloadOther, Status: store.ScheduledEventPending, CreatedBy: f.agent.ID,
+		}, f.agent.ID)
+		require.NoError(t, f.store.CreateScheduledEvent(ctx, &evtOther))
+
+		uid := tid("req1-spoof-user")
+		createTestUserWithProjectRole(t, f.store, uid, "req1-spoof@conduit.test", f.launched.ProjectID, store.ProjectRoleMember)
+		ensureHubMembership(ctx, f.store, uid)
+
+		control := f.seedHeldWith(t, "user:"+uid, uid, "control-no-spoof", nil)
+		spoofChannel := f.seedHeldWith(t, "user:"+uid, uid, "spoofed-scheduler-channel", func(m *store.Message) {
+			m.Channel = "scheduler"
+			m.ThreadID = evtTarget.ID
+		})
+		senderProj := f.launched.ProjectID
+		mismatchedEvt := f.seedHeldWith(t, "scheduler", "SCHEDULER", "mismatched-target-event", func(m *store.Message) {
+			m.Type = messages.TypeSystem
+			m.Channel = "scheduler"
+			m.ThreadID = evtOther.ID
+			m.ScheduledEventID = evtOther.ID
+			m.SenderProjectID = &senderProj
+		})
+
+		u, err := f.store.GetUser(ctx, uid)
+		require.NoError(t, err)
+		u.Status = store.UserStatusSuspended
+		require.NoError(t, f.store.UpdateUser(ctx, u))
+
+		ca := f.connectDeliverSession(t, f.public.URL, true, nil)
+		for _, m := range []*store.Message{control, spoofChannel, mismatchedEvt} {
+			got := f.waitMessageState(t, m.ID, store.MessageDispatchFailed)
+			require.NotNil(t, got.DispatchFailureReason)
+			assert.Equal(t, holdFailReasonSenderUnauthorized, *got.DispatchFailureReason)
+		}
+		assert.Empty(t, ca.tmux.pastedTexts())
+	})
+}
+
+type pausingHoldDispatcher struct {
+	AgentDispatcher
+	targetSlug  string
+	once        sync.Once
+	releaseOnce sync.Once
+	entered     chan struct{}
+	release     chan struct{}
+}
+
+func (p *pausingHoldDispatcher) unblock() {
+	p.releaseOnce.Do(func() {
+		close(p.release)
+	})
+}
+
+func (p *pausingHoldDispatcher) DispatchAgentMessage(ctx context.Context, target *store.Agent, message string, interrupt bool, sm *messages.StructuredMessage) error {
+	if target.Slug == p.targetSlug {
+		p.once.Do(func() {
+			close(p.entered)
+			<-p.release
+		})
+	}
+	return p.AgentDispatcher.DispatchAgentMessage(ctx, target, message, interrupt, sm)
+}
+
+func TestHoldA2_Round1_REQ2_CrossReplicaBatchOrdering150(t *testing.T) {
+	t.Run("second_hub_server", func(t *testing.T) { runHoldA2CrossReplicaOrdering150(t, false) })
+	t.Run("second_pass_same_store", func(t *testing.T) { runHoldA2CrossReplicaOrdering150(t, true) })
+}
+
+func runHoldA2CrossReplicaOrdering150(t *testing.T, sameProcessSecondPass bool) {
+	f := newHoldE2EFixture(t)
+	ctx := context.Background()
+	f.srv.setHeldMessagesCapForTest(200)
+
+	srvB := f.newPeerHubServer(t, "hub-b-req2")
+
+	var expected []string
+	for i := 0; i < 150; i++ {
+		m := f.seedHeldMessage(t, "agent:"+f.agent.Slug, f.agent.ID, "xrep-150", time.Now().Add(10*time.Minute))
+		expected = append(expected, m.ID)
+	}
+
+	pd := &pausingHoldDispatcher{
+		AgentDispatcher: f.disp,
+		targetSlug:      f.launched.Slug,
+		entered:         make(chan struct{}),
+		release:         make(chan struct{}),
+	}
+	t.Cleanup(pd.unblock)
+	f.srv.SetDispatcher(pd)
+
+	f.connectDeliverSession(t, f.public.URL, true, nil)
+	select {
+	case <-pd.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("replica A never started dispatching batch 1")
+	}
+
+	fresh, gerr := f.store.GetAgent(ctx, f.launched.ID)
+	require.NoError(t, gerr)
+	stB, errB := srvB.agentConduitDeliverSessionState(ctx, fresh)
+	require.NoError(t, errB)
+	require.Equal(t, agentDeliverSessionReady, stB, "replica B must see the admitted session")
+
+	second := srvB
+	if sameProcessSecondPass {
+		second = f.srv
+	}
+	bDone := make(chan struct{})
+	go func() {
+		defer close(bDone)
+		second.redriveAgentHeldMessagesOnce(ctx, f.launched.ID)
+	}()
+	select {
+	case <-bDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("competing replica pass should return immediately on active lease")
+	}
+	assert.Equal(t, 0, f.disp.dispatchCount(f.launched.Slug), "competing replica must not dispatch any batch while replica A holds the per-agent lease")
+
+	// Live arrival while lease is active queues behind the drain rather than overtaking batch 1.
+	liveRes, dmErr := f.srv.ExecuteAgentDM(ctx, &AgentDMInput{
+		SenderAgent:    f.agent,
+		SenderIdentity: &storedAgentIdentity{agent: f.agent},
+		TargetAgent:    fresh,
+		ProjectID:      fresh.ProjectID,
+		Msg:            "xrep-live-151",
+		Type:           messages.TypeInstruction,
+	})
+	require.Nil(t, dmErr)
+	liveRow, lerr := f.store.GetMessage(ctx, liveRes.MessageID)
+	require.NoError(t, lerr)
+	assert.Equal(t, store.MessageDispatchAwaitingSession, liveRow.DispatchState, "live send during leased drain must queue behind hold")
+	expected = append(expected, liveRes.MessageID)
+
+	pd.unblock()
+
+	for _, id := range expected {
+		f.waitMessageState(t, id, store.MessageDispatchDelivered)
+	}
+	var got []string
+	for _, d := range f.disp.deliveries() {
+		assert.LessOrEqual(t, len(d.MessageIDs), messageHoldClaimBatchSize, "each Conduit deliver-message RPC must stay within 64 IDs")
+		got = append(got, d.MessageIDs...)
+	}
+	assert.Equal(t, expected, got, "1..151 must arrive strictly in creation order across replicas")
+}
+
+type stopOnGetUserHoldStore struct {
+	store.Store
+	inner   store.Store
+	agentID string
+	userID  string
+	once    sync.Once
+}
+
+func (s *stopOnGetUserHoldStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	if id == s.userID {
+		var fired bool
+		s.once.Do(func() {
+			fired = true
+			a, err := s.inner.GetAgent(ctx, s.agentID)
+			if err == nil {
+				a.Phase = string(state.PhaseStopped)
+				_ = s.inner.UpdateAgent(ctx, a)
+			}
+		})
+		if fired {
+			return nil, errors.New("injected transient user lookup fault")
+		}
+	}
+	return s.Store.GetUser(ctx, id)
+}
+
+type cancelAfterClaimHoldStore struct {
+	store.Store
+	cancel context.CancelFunc
+	once   sync.Once
+}
+
+func (s *cancelAfterClaimHoldStore) ClaimHeldMessages(ctx context.Context, agentID string, limit int) ([]store.Message, error) {
+	claimed, err := s.Store.ClaimHeldMessages(ctx, agentID, limit)
+	if err == nil && len(claimed) > 0 {
+		s.once.Do(func() {
+			if s.cancel != nil {
+				s.cancel()
+			}
+		})
+	}
+	return claimed, err
+}
+
+func TestHoldA2_Round1_REQ3_OPT6_RefusedReholdAndTimeoutNeverOrphan(t *testing.T) {
+	t.Run("refused_rehold_on_stopped_agent_fails_all_claimed_rows_with_notices", func(t *testing.T) {
+		f := newHoldE2EFixture(t)
+		m1 := f.seedHeldMessage(t, "user:"+f.launched.OwnerID, f.launched.OwnerID, "orphan-1-user", time.Now().Add(10*time.Minute))
+		m2 := f.seedHeldMessage(t, "agent:"+f.agent.Slug, f.agent.ID, "orphan-2-agent", time.Now().Add(10*time.Minute))
+
+		installStoreFault(t, f.srv, func(inner store.Store, _ *storeFaultSwitch) *stopOnGetUserHoldStore {
+			return &stopOnGetUserHoldStore{Store: inner, inner: f.store, agentID: f.launched.ID, userID: f.launched.OwnerID}
+		})
+		f.connectDeliverSession(t, f.public.URL, true, nil)
+
+		got1 := f.waitMessageState(t, m1.ID, store.MessageDispatchFailed)
+		got2 := f.waitMessageState(t, m2.ID, store.MessageDispatchFailed)
+		require.NotNil(t, got1.DispatchFailureReason)
+		require.NotNil(t, got2.DispatchFailureReason)
+		assert.Equal(t, holdFailReasonAgentStopped, *got1.DispatchFailureReason)
+		assert.Equal(t, holdFailReasonAgentStopped, *got2.DispatchFailureReason)
+		assert.Equal(t, 0, f.disp.dispatchCount(f.launched.Slug))
+		require.Len(t, f.disp.notices(), 1, "agent sender of m2 must receive DELIVERY_FAILED notice")
+		assert.Contains(t, f.disp.notices()[0], holdFailReasonAgentStopped)
+	})
+
+	t.Run("pass_context_timeout_treats_claimed_rows_as_transient_and_reholds", func(t *testing.T) {
+		f := newHoldE2EFixture(t)
+		ctx := context.Background()
+
+		// Connect session first when no rows are held, then seed held rows so we
+		// drive one explicit pass whose context cancels right after ClaimHeldMessages.
+		ca := f.connectDeliverSession(t, f.public.URL, true, nil)
+		m1 := f.seedHeldMessage(t, "agent:"+f.agent.Slug, f.agent.ID, "timeout-rehold-1", time.Now().Add(10*time.Minute))
+		m2 := f.seedHeldMessage(t, "agent:"+f.agent.Slug, f.agent.ID, "timeout-rehold-2", time.Now().Add(10*time.Minute))
+
+		passCtx, passCancel := context.WithCancel(ctx)
+		wrapper, _ := installStoreFault(t, f.srv, func(inner store.Store, _ *storeFaultSwitch) *cancelAfterClaimHoldStore {
+			return &cancelAfterClaimHoldStore{Store: inner, cancel: passCancel}
+		})
+		f.srv.redriveAgentHeldMessagesOnce(passCtx, f.launched.ID)
+		wrapper.cancel = nil
+
+		for _, id := range []string{m1.ID, m2.ID} {
+			got, err := f.store.GetMessage(ctx, id)
+			require.NoError(t, err)
+			assert.Equal(t, store.MessageDispatchAwaitingSession, got.DispatchState,
+				"claimed row must return to awaiting_session on pass timeout, never fail or stick in dispatched")
+		}
+		assert.Equal(t, 0, f.disp.dispatchCount(f.launched.Slug))
+		assert.Empty(t, f.disp.notices())
+
+		// Subsequent normal pass delivers both re-held rows in order.
+		f.srv.redriveAgentHeldMessagesOnce(ctx, f.launched.ID)
+		f.waitMessageState(t, m1.ID, store.MessageDispatchDelivered)
+		f.waitMessageState(t, m2.ID, store.MessageDispatchDelivered)
+		require.Len(t, ca.tmux.pastedTexts(), 2)
+	})
+}
+
+type recordingContextIDDispatcher struct {
+	AgentDispatcher
+	mu      sync.Mutex
+	ctxIDs  []string
+	failErr error
+}
+
+func (d *recordingContextIDDispatcher) DispatchAgentMessage(ctx context.Context, _ *store.Agent, _ string, _ bool, _ *messages.StructuredMessage) error {
+	d.mu.Lock()
+	d.ctxIDs = append(d.ctxIDs, dispatchMessageIDFromContext(ctx))
+	err := d.failErr
+	d.mu.Unlock()
+	return err
+}
+
+func TestHoldA2_Round1_REQ4_FlagOffMatchesPhaseAForSchedulerAndBrokerInbound(t *testing.T) {
+	t.Run("scheduler_message_fire_stores_no_row_with_flag_off", func(t *testing.T) {
+		f := newHoldE2EFixture(t)
+		ctx := context.Background()
+		setHoldTestSettings(t, f.srv, map[string]bool{conduitExperiment: true, experiments.ConduitDeliver: false})
+		recDisp := &recordingContextIDDispatcher{AgentDispatcher: f.disp}
+		f.srv.SetDispatcher(recDisp)
+
+		payload := `{"agentName":"` + f.launched.Slug + `","message":"flag-off-sched"}`
+		evt := withAgentRevision(t, f.srv, store.ScheduledEvent{
+			ID: api.NewUUID(), ProjectID: f.launched.ProjectID, EventType: "message",
+			Payload: payload, Status: store.ScheduledEventPending, CreatedBy: f.agent.ID,
+		}, f.agent.ID)
+		require.NoError(t, f.store.CreateScheduledEvent(ctx, &evt))
+		require.NoError(t, f.srv.messageEventHandler()(ctx, evt))
+
+		listed, err := f.store.ListMessages(ctx, store.MessageFilter{RecipientID: f.launched.ID}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		assert.Empty(t, listed.Items, "flag off: scheduler fire must not persist a messages row")
+		require.Len(t, recDisp.ctxIDs, 1)
+		assert.Empty(t, recDisp.ctxIDs[0], "flag off: scheduler fire must not set dispatch message_id")
+	})
+
+	t.Run("broker_inbound_and_routed_dispatch_before_persist_with_flag_off", func(t *testing.T) {
+		f := newHoldE2EFixture(t)
+		ctx := context.Background()
+		setHoldTestSettings(t, f.srv, map[string]bool{conduitExperiment: true, experiments.ConduitDeliver: false})
+		owner, err := f.store.GetUser(ctx, f.launched.OwnerID)
+		require.NoError(t, err)
+
+		recDisp := &recordingContextIDDispatcher{AgentDispatcher: f.disp, failErr: errors.New("simulated broker down")}
+		f.srv.SetDispatcher(recDisp)
+
+		recLegacy := postHoldBrokerJSON(t, f.srv, "/api/v1/broker/inbound", inboundMessageRequest{
+			Topic: "scion.project." + f.launched.ProjectID + ".agent." + f.launched.Slug + ".messages",
+			Message: &messages.StructuredMessage{
+				Version: messages.Version, Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Channel: "telegram", Sender: "user:" + owner.Email, Recipient: "agent:" + f.launched.Slug,
+				Msg: "legacy-flag-off", Type: messages.TypeInstruction,
+			},
+		})
+		assert.Equal(t, http.StatusBadGateway, recLegacy.Code)
+
+		recRouted := postHoldBrokerJSON(t, f.srv, "/api/v1/broker/inbound/routed", routedInboundRequest{
+			ProjectID: f.launched.ProjectID, DefaultAgent: f.launched.Slug,
+			Message: &messages.StructuredMessage{
+				Version: messages.Version, Channel: "telegram", Sender: "user:" + owner.Email,
+				Msg: "routed-flag-off", Type: messages.TypeInstruction,
+			},
+		})
+		assert.Equal(t, http.StatusBadGateway, recRouted.Code)
+
+		require.Len(t, recDisp.ctxIDs, 2)
+		assert.Empty(t, recDisp.ctxIDs[0], "flag off: legacy broker inbound must not set dispatch message_id")
+		assert.Empty(t, recDisp.ctxIDs[1], "flag off: routed broker inbound must not set dispatch message_id")
+
+		listed, err := f.store.ListMessages(ctx, store.MessageFilter{RecipientID: f.launched.ID}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		assert.Empty(t, listed.Items, "flag off: failed broker-inbound dispatches must not persist pre-dispatch rows")
+
+		// When dispatch succeeds with flag off, post-dispatch persistence still writes both rows.
+		recDisp.mu.Lock()
+		recDisp.failErr = nil
+		recDisp.mu.Unlock()
+
+		okLegacy := postHoldBrokerJSON(t, f.srv, "/api/v1/broker/inbound", inboundMessageRequest{
+			Topic: "scion.project." + f.launched.ProjectID + ".agent." + f.launched.Slug + ".messages",
+			Message: &messages.StructuredMessage{
+				Version: messages.Version, Timestamp: time.Now().UTC().Format(time.RFC3339),
+				Channel: "telegram", Sender: "user:" + owner.Email, Recipient: "agent:" + f.launched.Slug,
+				Msg: "legacy-ok", Type: messages.TypeInstruction,
+			},
+		})
+		require.Equal(t, http.StatusOK, okLegacy.Code, okLegacy.Body.String())
+
+		okRouted := postHoldBrokerJSON(t, f.srv, "/api/v1/broker/inbound/routed", routedInboundRequest{
+			ProjectID: f.launched.ProjectID, DefaultAgent: f.launched.Slug,
+			Message: &messages.StructuredMessage{
+				Version: messages.Version, Channel: "telegram", Sender: "user:" + owner.Email,
+				Msg: "routed-ok", Type: messages.TypeInstruction,
+			},
+		})
+		require.Equal(t, http.StatusOK, okRouted.Code, okRouted.Body.String())
+
+		listedAfter, err := f.store.ListMessages(ctx, store.MessageFilter{RecipientID: f.launched.ID}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		assert.Len(t, listedAfter.Items, 2)
+	})
+}
+
+func TestHoldA2_Round1_REQ5_FlagOffStillExpiresHeldRowsWithNotice(t *testing.T) {
+	f := newHoldE2EFixture(t)
+	ctx := context.Background()
+
+	// Create a second agent to test stopped-agent sweep cleanup with flag off too.
+	agent2 := &store.Agent{
+		ID:              tid("req5-stopped-target"),
+		Name:            "req5-stopped-target",
+		Slug:            "req5-stopped-target",
+		ProjectID:       f.launched.ProjectID,
+		RuntimeBrokerID: f.broker,
+		Runtime:         "cloudrun",
+		Phase:           string(state.PhaseRunning),
+		RunID:           uuid.NewString(),
+		OwnerID:         f.launched.OwnerID,
+		CreatedBy:       f.launched.OwnerID,
+	}
+	require.NoError(t, f.store.CreateAgent(ctx, agent2))
+
+	// Hold m1 (short TTL) on f.launched and m2 (long TTL) on agent2 while flag is ON.
+	m1 := f.seedHeldMessage(t, "agent:"+f.agent.Slug, f.agent.ID, "flag-off-ttl", time.Now().Add(25*time.Millisecond))
+	m2 := &store.Message{
+		ID:            uuid.NewString(),
+		ProjectID:     agent2.ProjectID,
+		AgentID:       agent2.ID,
+		Sender:        "agent:" + f.agent.Slug,
+		SenderID:      f.agent.ID,
+		Recipient:     "agent:" + agent2.Slug,
+		RecipientID:   agent2.ID,
+		Msg:           "flag-off-stopped",
+		Type:          messages.TypeInstruction,
+		DispatchState: store.MessageDispatchDispatched,
+		HoldLaunchID:  agent2.RunID,
+		CreatedAt:     time.Now().UTC(),
+	}
+	require.NoError(t, f.store.CreateMessage(ctx, m2))
+	_, err := f.store.BindMessageDelivery(ctx, agent2.ID, "seed-"+m2.ID, []string{m2.ID}, time.Now().Add(time.Minute))
+	require.NoError(t, err)
+	require.NoError(t, f.store.UnbindMessageDeliveryWithProof(ctx, "seed-"+m2.ID, []string{m2.ID}, agentcontrol.ReasonNoSession))
+	ok, err := f.store.HoldMessageAwaitingSession(ctx, store.HoldMessageParams{
+		MessageID: m2.ID, AgentID: agent2.ID, MaxProofAge: 2 * time.Minute, HoldTTL: 10 * time.Minute, MaxHeld: 100,
+	})
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	// Flip hub.conduit_deliver OFF, let m1 pass hold_until, and mark agent2 stopped.
+	setHoldTestSettings(t, f.srv, map[string]bool{conduitExperiment: true, experiments.ConduitDeliver: false})
+	time.Sleep(45 * time.Millisecond)
+	agent2.Phase = string(state.PhaseStopped)
+	require.NoError(t, f.store.UpdateAgent(ctx, agent2))
+
+	f.srv.sweepHeldMessages(ctx)
+
+	got1 := f.waitMessageState(t, m1.ID, store.MessageDispatchFailed)
+	require.NotNil(t, got1.DispatchFailureReason)
+	assert.Equal(t, holdFailReasonSessionTimeout, *got1.DispatchFailureReason)
+
+	got2 := f.waitMessageState(t, m2.ID, store.MessageDispatchFailed)
+	require.NotNil(t, got2.DispatchFailureReason)
+	assert.Equal(t, holdFailReasonAgentStopped, *got2.DispatchFailureReason)
+
+	require.Len(t, f.disp.notices(), 2, "both senders must receive failure notices even with hub.conduit_deliver off")
+}
+
+func TestHoldA2_Round1_OPT1_ChoiceResponsePreservesAgentLineAndMetadata(t *testing.T) {
+	f := newHoldE2EFixture(t)
+	ctx := context.Background()
+	setHoldTestSettings(t, f.srv, map[string]bool{
+		conduitExperiment:             true,
+		experiments.ConduitDeliver:    true,
+		experiments.ChatChoices:       true,
+		experiments.ChatScheduledSend: true,
+	})
+	enableReadSwitch(t, f.srv)
+
+	owner, err := f.store.GetUser(ctx, f.launched.OwnerID)
+	require.NoError(t, err)
+
+	sendChoicePromptFromLaunched := func(rawDecisions string) struct {
+		MessageID string                 `json:"message_id"`
+		Decisions []ChoiceDecisionResult `json:"decisions"`
+	} {
+		var decs []messages.DecisionInput
+		require.NoError(t, json.Unmarshal([]byte(rawDecisions), &decs))
+		body, err := json.Marshal(OutboundMessageRequest{
+			Recipient: "user:" + owner.Email,
+			Msg:       "Please choose",
+			Choices:   decs,
+		})
+		require.NoError(t, err)
+		req, err := http.NewRequest(http.MethodPost, f.public.URL+"/api/v1/agents/"+f.launched.ID+"/outbound-message", bytes.NewReader(body))
+		require.NoError(t, err)
+		req.Header.Set("Authorization", "Bearer "+f.agentToken(t, f.launched))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer func() { _ = resp.Body.Close() }()
+		rb, _ := io.ReadAll(resp.Body)
+		require.Equal(t, http.StatusOK, resp.StatusCode, string(rb))
+		var out struct {
+			MessageID string                 `json:"message_id"`
+			Decisions []ChoiceDecisionResult `json:"decisions"`
+		}
+		require.NoError(t, json.Unmarshal(rb, &out))
+		return out
+	}
+
+	// 1. Single-decision prompt with an agent_interpreted answer ("no" = choice 2),
+	//    then overridden by the user ("yes" = choice 1) while f.launched has no session.
+	singleOut := sendChoicePromptFromLaunched(`[{"id":"D10","question":"Ship the feature now?","choices":["yes","no"],"default":"yes"}]`)
+	require.Len(t, singleOut.Decisions, 1)
+	singleRowID := singleOut.Decisions[0].RowID
+
+	srcMsg := &store.Message{
+		ID: uuid.NewString(), ProjectID: f.launched.ProjectID, AgentID: f.launched.ID,
+		Sender: "user:" + owner.Email, SenderID: owner.ID,
+		Recipient: "agent:" + f.launched.Slug, RecipientID: f.launched.ID,
+		Msg: "maybe not yet", Type: messages.TypeInstruction,
+		DispatchState: store.MessageDispatchDelivered, CreatedAt: time.Now().UTC(),
+	}
+	require.NoError(t, f.store.CreateMessage(ctx, srcMsg))
+	interpResp := &store.Message{
+		ID: uuid.NewString(), ProjectID: f.launched.ProjectID, AgentID: f.launched.ID,
+		Sender: "agent:" + f.launched.Slug, SenderID: f.launched.ID,
+		Recipient: "user:" + owner.Email, RecipientID: owner.ID,
+		Msg: "recorded interpreted no", Type: messages.TypeChoiceResponse,
+		DispatchState: store.MessageDispatchDelivered, CreatedAt: time.Now().UTC(),
+	}
+	_, _, err = f.store.RecordAnswer(ctx, &store.RecordAnswerInput{
+		DecisionRowID:        singleRowID,
+		ChoiceID:             "2",
+		AnsweredByUserID:     owner.ID,
+		AnsweredByName:       owner.DisplayName,
+		AnsweredByEmail:      owner.Email,
+		Provenance:           store.DecisionProvenanceAgentInterpreted,
+		InterpretedByAgentID: f.launched.ID,
+		SourceMessageID:      srcMsg.ID,
+		Surface:              store.DecisionSurfaceNative,
+		ResponseMessage:      interpResp,
+	})
+	require.NoError(t, err)
+
+	ansBody, _ := json.Marshal(map[string]any{"choice_id": "1"})
+	ansReq, err := http.NewRequest(http.MethodPost, f.public.URL+"/api/v1/decisions/"+singleRowID+"/answer", bytes.NewReader(ansBody))
+	require.NoError(t, err)
+	ansReq.Header.Set("Authorization", "Bearer "+f.userToken)
+	ansReq.Header.Set("Content-Type", "application/json")
+	ansResp, err := http.DefaultClient.Do(ansReq)
+	require.NoError(t, err)
+	ansBytes, _ := io.ReadAll(ansResp.Body)
+	_ = ansResp.Body.Close()
+	require.Equal(t, http.StatusOK, ansResp.StatusCode, string(ansBytes))
+	var singleAnsOut DecisionAnswerResponse
+	require.NoError(t, json.Unmarshal(ansBytes, &singleAnsOut))
+	f.waitMessageState(t, singleAnsOut.ResponseMessageID, store.MessageDispatchAwaitingSession)
+
+	// 2. Three-decision set prompt answered via POST /api/v1/choice-prompts/{id}/answers
+	//    while f.launched is held in awaiting_session.
+	setOut := sendChoicePromptFromLaunched(`[{"id":"D234","question":"Ship the feature now?","choices":["yes","no"],"default":"yes"},{"question":"Which approach?","choices":[{"id":"a","label":"Extend"},{"id":"b","label":"New type"}]},{"id":"ship-now","question":"Deploy today?","choices":["yes","no"],"default":"no"}]`)
+	require.Len(t, setOut.Decisions, 3)
+	setAnsBody, _ := json.Marshal(map[string]any{
+		"answers": []map[string]any{
+			{"decision_row_id": setOut.Decisions[0].RowID, "choice_id": "1"},
+			{"decision_row_id": setOut.Decisions[1].RowID, "choice_id": "a"},
+			{"decision_row_id": setOut.Decisions[2].RowID, "choice_id": "1"},
+		},
+	})
+	setReq, err := http.NewRequest(http.MethodPost, f.public.URL+"/api/v1/choice-prompts/"+setOut.MessageID+"/answers", bytes.NewReader(setAnsBody))
+	require.NoError(t, err)
+	setReq.Header.Set("Authorization", "Bearer "+f.userToken)
+	setReq.Header.Set("Content-Type", "application/json")
+	setResp, err := http.DefaultClient.Do(setReq)
+	require.NoError(t, err)
+	setBytes, _ := io.ReadAll(setResp.Body)
+	_ = setResp.Body.Close()
+	require.Equal(t, http.StatusOK, setResp.StatusCode, string(setBytes))
+	var setAnsOut ChoiceSetAnswerResponse
+	require.NoError(t, json.Unmarshal(setBytes, &setAnsOut))
+	f.waitMessageState(t, setAnsOut.ResponseMessageID, store.MessageDispatchAwaitingSession)
+
+	// Connect Conduit session and verify both re-driven choice-response envelopes.
+	ca := f.connectDeliverSession(t, f.public.URL, true, nil)
+	f.waitMessageState(t, singleAnsOut.ResponseMessageID, store.MessageDispatchDelivered)
+	f.waitMessageState(t, setAnsOut.ResponseMessageID, store.MessageDispatchDelivered)
+
+	// Note: realBrokerDispatcher coalesces rapid re-driven messages in MessageBuffer,
+	// so split pasted text into individual ---BEGIN SCION MESSAGE--- envelopes.
+	var pastedEnvs []map[string]any
+	for _, chunk := range ca.tmux.pastedTexts() {
+		const begin = "---BEGIN SCION MESSAGE---\n"
+		for _, part := range strings.Split(chunk, begin) {
+			if strings.TrimSpace(part) == "" {
+				continue
+			}
+			pastedEnvs = append(pastedEnvs, decodeHoldTestEnvelope(t, begin+part))
+		}
+	}
+	require.Len(t, pastedEnvs, 2)
+
+	assert.Equal(t, singleAnsOut.ResponseMessageID, pastedEnvs[0]["message_id"])
+	singleMsgText, _ := pastedEnvs[0]["msg"].(string)
+	assert.Contains(t, singleMsgText, `[choice-response] D10 v1 ("Ship the feature now?") answer=yes (choice 1) by `+owner.Email+`, overriding interpreted answer no`)
+	singleMeta, _ := pastedEnvs[0]["metadata"].(map[string]any)
+	require.NotNil(t, singleMeta)
+	assert.Equal(t, "D10", singleMeta[messages.MetadataChoiceKey])
+	assert.Equal(t, "1", singleMeta[messages.MetadataChoiceVersion])
+	assert.Equal(t, "1", singleMeta[messages.MetadataChoiceID])
+	assert.Equal(t, store.DecisionProvenanceDirect, singleMeta[messages.MetadataChoiceProvenance])
+
+	assert.Equal(t, setAnsOut.ResponseMessageID, pastedEnvs[1]["message_id"])
+	setMsgText, _ := pastedEnvs[1]["msg"].(string)
+	assert.Contains(t, setMsgText, "[choice-response] 3 decisions answered by "+owner.Email+" (prompt "+setOut.MessageID+")")
+	assert.Contains(t, setMsgText, `D234 v1 ("Ship the feature now?") answer=yes (choice 1, recommended)`)
+	assert.Contains(t, setMsgText, `1 v1 ("Which approach?") answer=Extend (choice a)`)
+	assert.Contains(t, setMsgText, `ship-now v1 ("Deploy today?") answer=yes (choice 1)`)
+	setMeta, _ := pastedEnvs[1]["metadata"].(map[string]any)
+	require.NotNil(t, setMeta)
+	assert.Equal(t, setAnsOut.BatchID, setMeta[messages.MetadataChoiceBatch])
+	assert.Equal(t, "D234@1=1,1@1=a,ship-now@1=1", setMeta[messages.MetadataChoiceAnswers])
+	assert.Empty(t, setMeta[messages.MetadataChoiceKey])
 }

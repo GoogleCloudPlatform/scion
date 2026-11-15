@@ -6271,27 +6271,42 @@ func (s *Server) messageEventHandler() EventHandler {
 		retryCtx, retryCancel := context.WithTimeout(dispatchBase, scheduledMessageDispatchTimeout)
 		defer retryCancel()
 
-		// Persist a store.Message row before dispatch so Conduit row binding
-		// and awaiting_session hold/re-drive cover scheduled messages
-		// including wake fires (ptone/scion#7881, Q5=a).
-		storeMsg, persistErr := s.persistScheduledMessageEvent(retryCtx, evt, agent, payload, structuredMsg)
-		if persistErr != nil {
-			return persistErr
+		// When hub.conduit_deliver is enabled, persist a store.Message row
+		// before dispatch so Conduit row binding and awaiting_session
+		// hold/re-drive cover scheduled messages including wake fires
+		// (ptone/scion#7881, Q5=a, REQ-4). When hub.conduit_deliver is off,
+		// preserve exact Phase A no-row / omitted-message_id behavior.
+		var storeMsg *store.Message
+		holdMsgID := ""
+		renderMessageID := ""
+		renderCreatedAt := time.Now().UTC()
+		dispatchCtx := retryCtx
+		if s.conduitDeliverEnabled() {
+			var persistErr error
+			storeMsg, persistErr = s.persistScheduledMessageEvent(retryCtx, evt, agent, payload, structuredMsg)
+			if persistErr != nil {
+				return persistErr
+			}
+			holdMsgID = storeMsg.ID
+			renderMessageID = storeMsg.ID
+			renderCreatedAt = storeMsg.CreatedAt
+			dispatchCtx = withDispatchMessageID(retryCtx, storeMsg.ID)
 		}
 		if s.writeDenyEnabled() {
 			structuredMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
-				MessageID:  storeMsg.ID,
+				MessageID:  renderMessageID,
 				ConvResult: nil,
 				Msg:        structuredMsg,
-				CreatedAt:  storeMsg.CreatedAt,
+				CreatedAt:  renderCreatedAt,
 			})
 		}
 
-		dispatchCtx := withDispatchMessageID(retryCtx, storeMsg.ID)
-		if _, err := s.holdOrDispatch(dispatchCtx, agent, storeMsg.ID, storeMsg, func() error {
+		if _, err := s.holdOrDispatch(dispatchCtx, agent, holdMsgID, storeMsg, func() error {
 			return dispatchWithBrokerRetry(dispatchCtx, s.recordLog(), dispatcher, agent, payload.Message, payload.Interrupt, structuredMsg)
 		}); err != nil {
-			_ = s.markFailed(retryCtx, storeMsg.ID, err.Error())
+			if storeMsg != nil {
+				_ = s.markFailed(retryCtx, storeMsg.ID, err.Error())
+			}
 			if wake && scheduledFireAborted(ctx) {
 				return errScheduledWakeShutdown
 			}

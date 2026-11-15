@@ -132,6 +132,10 @@ func (s *Server) handleBrokerInboundRouted(w http.ResponseWriter, r *http.Reques
 		ValidationError(w, "message is required", map[string]interface{}{"field": "message"})
 		return
 	}
+	if isReservedSchedulerChannel(req.Message.Channel) {
+		ValidationError(w, fmt.Sprintf("channel %q is reserved for internal use", req.Message.Channel), nil)
+		return
+	}
 	if !strings.HasPrefix(req.Message.Sender, "user:") {
 		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
 			"sender must use user: prefix for mapped identity", nil)
@@ -585,10 +589,11 @@ func (s *Server) dispatchRoutedRecipient(
 		msg.DeliveryText = messaging.RenderDeliveryText(renderInput)
 	}
 
-	// --- Persist before dispatch (ptone/scion#7881) ---
+	// --- Persist before dispatch when hub.conduit_deliver is enabled (ptone/scion#7881, REQ-4) ---
 	// Persisting before dispatch allows Conduit row binding (withDispatchMessageID)
 	// and awaiting_session hold/re-drive, while preserving the non-fatal
-	// PersistenceWarning fallback when CreateMessage fails.
+	// PersistenceWarning fallback when CreateMessage fails. When hub.conduit_deliver
+	// is off, preserve exact Phase A dispatch-first ordering.
 	storeMsg := &store.Message{
 		ID:            msgID,
 		ProjectID:     params.req.ProjectID,
@@ -609,9 +614,12 @@ func (s *Server) dispatchRoutedRecipient(
 		storeMsg.ConversationID = effectiveConv.ConversationID
 	}
 	persisted := false
-	persistErr := s.store.CreateMessage(ctx, storeMsg)
-	if persistErr == nil {
-		persisted = true
+	var persistErr error
+	if s.conduitDeliverEnabled() {
+		persistErr = s.store.CreateMessage(ctx, storeMsg)
+		if persistErr == nil {
+			persisted = true
+		}
 	}
 
 	// --- Dispatch ---
@@ -653,6 +661,9 @@ func (s *Server) dispatchRoutedRecipient(
 		return result
 	}
 
+	if !persisted && persistErr == nil {
+		persistErr = s.store.CreateMessage(ctx, storeMsg)
+	}
 	if persistErr != nil {
 		s.messageLog.Error("Failed to persist routed inbound message",
 			"error", persistErr, "message_id", msgID, "agent_slug", agent.Slug)

@@ -1147,6 +1147,10 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
+	if isReservedSchedulerChannel(req.Channel) {
+		ValidationError(w, fmt.Sprintf("channel %q is reserved for internal use", req.Channel), nil)
+		return
+	}
 
 	// choice-prompt and choice-response are minted by the hub only.
 	if rejectHubMintedType(w, req.Type) {
@@ -2065,6 +2069,10 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// success, but never persisted, dispatched or published.
 	if req.StructuredMessage != nil && req.StructuredMessage.Type == messages.TypeAssistantReply {
 		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "dropped"})
+		return
+	}
+	if req.StructuredMessage != nil && isReservedSchedulerChannel(req.StructuredMessage.Channel) {
+		ValidationError(w, fmt.Sprintf("channel %q is reserved for internal use", req.StructuredMessage.Channel), nil)
 		return
 	}
 
@@ -4081,6 +4089,10 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 
 	if req.StructuredMessage == nil {
 		ValidationError(w, "structured_message is required", nil)
+		return
+	}
+	if isReservedSchedulerChannel(req.StructuredMessage.Channel) {
+		ValidationError(w, fmt.Sprintf("channel %q is reserved for internal use", req.StructuredMessage.Channel), nil)
 		return
 	}
 	// A broadcast carries text: attachment ids are refused above, and the
