@@ -1483,6 +1483,9 @@ func (s *Server) recordStopStatus(ctx context.Context, agentID, runID, action st
 	if err != nil {
 		return false, err
 	}
+	if upd.Phase != "" && !heldMessageTargetPhaseEligible(upd.Phase) {
+		s.expireHeldMessagesForAgent(ctx, agentID, holdFailReasonAgentStopped)
+	}
 	return true, nil
 }
 
@@ -2577,6 +2580,9 @@ type Server struct {
 
 	// Message broker proxy for pub/sub message routing (nil = disabled)
 	messageBrokerProxy *MessageBrokerProxy
+
+	// messageHold coordinates awaiting_session re-drive workers and 30s sweep (ptone/scion#7881).
+	messageHold *messageHoldRuntime
 
 	// User last-seen activity tracker (nil = disabled)
 	userActivity *UserActivityTracker
@@ -7674,6 +7680,9 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// Start the scheduled chat message sweeper (exits when ctx is cancelled).
 	s.startScheduledSendSweeper(ctx)
 
+	// Start the held-message backstop sweeper for Conduit deliver-message (ptone/scion#7881).
+	s.startMessageHoldSweeper(ctx)
+
 	// Starred messages need a chat store with the star capability; report
 	// a misconfiguration at startup (requests answer 503 meanwhile).
 	s.validateMessageStarStore()
@@ -7932,6 +7941,9 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		// Let a scheduled chat message being delivered finish (bounded)
 		// while the stores and event publisher are still open.
 		s.stopScheduledSendSweeper(ctx)
+
+		// Stop the Conduit held-message sweeper and wait (bounded) for in-flight re-drives.
+		s.stopMessageHoldSweeper(ctx)
 
 		// Wait for a thread group migration pass in progress; the cancelled
 		// ctx above makes its store calls return.

@@ -1259,6 +1259,8 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 				Message: createRowRemoveFailedMessage,
 			}); err != nil {
 				s.agentLifecycleLog.Warn("Create-failure cleanup: marking the row failed also failed", "agent_id", agent.ID, "error", err)
+			} else {
+				s.expireHeldMessagesForAgent(mctx, agent.ID, holdFailReasonAgentStopped)
 			}
 			return
 		}
@@ -1303,6 +1305,8 @@ func (s *Server) markCreateCleanupRefused(ctx context.Context, agentID, runID, m
 			"agent_id", agentID, "hub_run_id", runID, "current_run_id", current)
 	case err != nil:
 		s.agentLifecycleLog.Warn("Create-failure cleanup: marking the kept row failed also failed", "agent_id", agentID, "error", err)
+	default:
+		s.expireHeldMessagesForAgent(mctx, agentID, holdFailReasonAgentStopped)
 	}
 }
 

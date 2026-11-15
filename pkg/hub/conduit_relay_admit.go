@@ -230,6 +230,9 @@ func (s *Server) writeRelayAdmission(w http.ResponseWriter, r *http.Request, a c
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+	if p.Kind == registry.PrincipalAgent {
+		s.scheduleExternalRelayAgentAdmissionNudge(p.ID)
+	}
 }
 
 // relayUserAuthTypes are the user credential kinds a separate relay's

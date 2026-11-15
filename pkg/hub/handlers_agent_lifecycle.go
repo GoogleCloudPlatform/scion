@@ -238,6 +238,9 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 	// A report moving the current run to limits_exceeded ends that run on
 	// its runtime (ptone/scion#7928).
 	s.stopRunOnLimitsExceeded(ctx, before, status)
+	if status.Phase != "" && !heldMessageTargetPhaseEligible(status.Phase) {
+		s.expireHeldMessagesForAgent(ctx, id, holdFailReasonAgentStopped)
+	}
 
 	// A heartbeat-only report writes only last_seen, which no status event
 	// carries, so it publishes nothing and skips the re-read
@@ -1505,6 +1508,7 @@ func (s *Server) queueOfflineStop(ctx context.Context, w http.ResponseWriter, ag
 	agent.ContainerStatus = containerStatusStopQueued
 	agent.Activity = ""
 	agent.Message = offlineStopMessage
+	s.expireHeldMessagesForAgent(ctx, agent.ID, holdFailReasonAgentStopped)
 	s.events.PublishAgentStatus(ctx, agent)
 
 	// The broker may have reconnected after the reachability check, in which

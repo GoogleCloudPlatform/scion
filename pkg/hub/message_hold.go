@@ -54,7 +54,7 @@ func (s *Server) holdOrDispatch(
 	}
 
 	finCtx, finCancel := finalizationContext(ctx)
-	res, err := s.store.PrepareOrHoldMessage(finCtx, agent.ID, messageID, maxHeldMessagesPerAgent)
+	res, err := s.store.PrepareOrHoldMessage(finCtx, agent.ID, messageID, s.heldMessagesCap())
 	finCancel()
 	if err != nil {
 		return false, fmt.Errorf("prepare or hold message: %w", err)

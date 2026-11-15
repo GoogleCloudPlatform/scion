@@ -168,6 +168,7 @@ func (s *Server) stopCurrentRun(ctx context.Context, agentID, runID, action stri
 		}
 		return true
 	}
+	s.expireHeldMessagesForAgent(ctx, agentID, holdFailReasonAgentStopped)
 	// A stopped agent has no running container: release its broker and
 	// project reservations, but only for the stopped run and not while a
 	// start claim holds the agent, as for an observed phase change.

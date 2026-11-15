@@ -541,6 +541,9 @@ func (s *Server) handleManagedAgentLifecycle(w http.ResponseWriter, r *http.Requ
 		writeDeleteWon(w, agent.ID, deletedWhileStartingMessage, nil)
 		return
 	}
+	if !heldMessageTargetPhaseEligible(agent.Phase) {
+		s.expireHeldMessagesForAgent(ctx, agent.ID, holdFailReasonAgentStopped)
+	}
 	s.events.PublishAgentStatus(ctx, agent)
 
 	respAgent := *agent

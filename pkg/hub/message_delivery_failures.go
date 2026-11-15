@@ -294,7 +294,7 @@ func (s *Server) applyBrokerMessageFailureOutcome(ctx context.Context, brokerID 
 			AgentID:     agent.ID,
 			MaxProofAge: messageHoldMaxProofAge,
 			HoldTTL:     messageHoldTTL,
-			MaxHeld:     maxHeldMessagesPerAgent,
+			MaxHeld:     s.heldMessagesCap(),
 		})
 		finCancel()
 		if hErr != nil {

@@ -273,6 +273,7 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 			s.recordBrokerSessionsSuperseded(brokerID, brokerSupersededAtAdmission, closed)
 		},
 		OnBrokerIncarnationFlap: s.recordBrokerIncarnationFlap,
+		OnAgentSessionAdmitted:  s.onAgentConduitSessionAdmitted,
 		Logger:                  slog.Default().With("subsystem", "hub.conduit"),
 	})
 	if err != nil {

@@ -264,6 +264,8 @@ func (d *startDispatch) rollback(ctx context.Context) {
 		if err != nil && !errors.Is(err, store.ErrPhaseMismatch) {
 			d.s.agentLifecycleLog.Warn("start dispatch: failed to restore prior phase after failed dispatch",
 				"agent_id", d.agent.ID, "prior_phase", d.priorPhase, "error", err)
+		} else if err == nil && !heldMessageTargetPhaseEligible(d.priorPhase) {
+			d.s.expireHeldMessagesForAgent(rctx, d.agent.ID, holdFailReasonAgentStopped)
 		}
 	}
 	d.s.rollbackBrokerQuota(ctx, d.agent, d.reserved)

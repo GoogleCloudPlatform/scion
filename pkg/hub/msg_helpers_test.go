@@ -137,6 +137,12 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	{file: "server.go", function: "messageEventHandler", symbol: "dispatchWithBrokerRetry",
 		class: "guarded", reason: "C1 containment: authorizeScheduledMessageFire before dispatch"},
 
+	// message_hold_redrive.go: dispatchClaimedHeldMessage — GUARDED (ptone/scion#7881, A2-S4).
+	// revalidateClaimedHeldMessage re-evaluates target incarnation, delegation grant,
+	// and authorizeAgentMessage immediately before dispatchClaimedHeldMessage.
+	{file: "message_hold_redrive.go", function: "dispatchClaimedHeldMessage", symbol: "dispatchWithBrokerRetry",
+		class: "guarded", reason: "A2-S4: revalidateClaimedHeldMessage runs authorizeAgentMessage before dispatchClaimedHeldMessage"},
+
 	// server.go: dispatchAgentEventHandler — guarded at server.go:3103
 	// (authorizeScheduledAgentCreate).
 	{file: "server.go", function: "dispatchAgentEventHandler", symbol: "DispatchAgentCreate",
