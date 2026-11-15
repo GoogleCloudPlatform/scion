@@ -373,3 +373,21 @@ func TestNewSampler_HarnessRootDepthBounds(t *testing.T) {
 		assert.Equal(t, want, NewSampler(Config{HarnessRootDepth: in}).rootDepth, "HarnessRootDepth %d", in)
 	}
 }
+
+// A torn /proc read during PID reuse can show a parent cycle. Here the tmux
+// server (whose command line names the exit-code file, as its start command
+// can) appears as a child of its own pane root. The baseline walk must
+// terminate rather than recurse forever (upstream review on
+// GoogleCloudPlatform/scion#4874).
+func TestSample_ParentCycleTerminates(t *testing.T) {
+	f := newFakeProcTree(t)
+	tree := []fakeProc{
+		{pid: 1, ppid: 0, comm: "sciontool", uid: 0, ticks: 1, start: 1},
+		{pid: 40, ppid: 41, comm: "tmux: server", uid: agentUID, ticks: 100, start: 14, cmdline: wrapperCmdline},
+		{pid: 41, ppid: 40, comm: "sh", uid: agentUID, ticks: 1, start: 15, cmdline: wrapperCmdline},
+		{pid: 42, ppid: 41, comm: "claude", uid: agentUID, ticks: 1000, start: 16},
+	}
+	assert.Nil(t, f.sample(tree...))
+	tree[3].ticks += 500
+	assert.Nil(t, f.sample(tree...), "the harness root stays excluded")
+}

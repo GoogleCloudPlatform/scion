@@ -128,6 +128,9 @@ type Sampler struct {
 	prev map[int]procSample
 	// tool tracks the progress of the tool call Tier 1 last saw.
 	tool toolProgress
+	// boot caches the boot time from /proc/stat once it has been read; it
+	// does not change while the container runs.
+	boot time.Time
 }
 
 // toolProgress is the last fingerprint of a tool call's process tree and
@@ -262,7 +265,10 @@ func (s *Sampler) toolCall(procs map[int]*proc, excluded, harness map[int]bool, 
 		s.tool = toolProgress{}
 		return nil
 	}
-	boot := readBootTime(s.procRoot)
+	if s.boot.IsZero() {
+		s.boot = readBootTime(s.procRoot)
+	}
+	boot := s.boot
 	if boot.IsZero() {
 		s.tool = toolProgress{}
 		return nil
@@ -396,8 +402,15 @@ func (s *Sampler) baseline(procs map[int]*proc) (excluded, harness map[int]bool)
 	// a wrapper, and a wrapper's other children are the harness root. A
 	// harness launched through a launcher (Config.HarnessRootDepth > 1)
 	// also has the launcher's descendants down to that depth excluded.
+	// visited stops the walk on a parent cycle, which a torn read of /proc
+	// during PID reuse can show: a process is walked at most once.
+	visited := make(map[int]bool)
 	var excludeHarness func(pid, depth int)
 	excludeHarness = func(pid, depth int) {
+		if visited[pid] {
+			return
+		}
+		visited[pid] = true
 		excluded[pid] = true
 		harness[pid] = true
 		if depth > 1 {
@@ -408,6 +421,10 @@ func (s *Sampler) baseline(procs map[int]*proc) (excluded, harness map[int]bool)
 	}
 	var excludeWrapper func(pid int)
 	excludeWrapper = func(pid int) {
+		if visited[pid] {
+			return
+		}
+		visited[pid] = true
 		excluded[pid] = true
 		for _, c := range children[pid] {
 			if hasHarnessMarker(s.procRoot, c) {

@@ -362,3 +362,15 @@ func TestReadBootTime(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(root, "stat"), []byte("cpu 1 2\nbtime nope\n"), 0o644))
 	assert.True(t, readBootTime(root).IsZero())
 }
+
+// The boot time is read from /proc/stat once and cached: a later sample
+// whose /proc has no stat file still dates the tool call's processes.
+func TestToolCall_BootTimeIsCached(t *testing.T) {
+	f := newToolCallTree(t)
+	require.NotNil(t, f.sample(append(idleTree(0), ghWatch(1000)...)...))
+	f.boot = time.Time{} // the next fixture writes no /proc/stat
+	f.now = f.now.Add(30 * time.Second)
+	lw := f.sample(append(idleTree(100), ghWatch(2000)...)...)
+	require.NotNil(t, lw)
+	assert.Equal(t, KindToolCall, lw.Kind)
+}

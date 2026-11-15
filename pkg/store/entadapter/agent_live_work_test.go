@@ -311,3 +311,27 @@ func TestAgentStore_StallThenLiveWorkThenSweep(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "executing", got.Activity)
 }
+
+// An agent stalled with no activity (a running agent before its first
+// activity report: stalled_from_activity is empty) gets that empty activity
+// back. The un-stall restores what the stall replaced and invents nothing,
+// not even executing (upstream review on GoogleCloudPlatform/scion#4874).
+func TestAgentStore_UpdateAgentStatus_LiveWorkUnstallRestoresEmptyActivity(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	a := makeAgent(projectID, "unstall-empty")
+	a.Phase = "running"
+	a.Activity = "stalled"
+	require.NoError(t, s.CreateAgent(ctx, a))
+
+	var res store.AgentStatusResult
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+		Heartbeat: true, LiveWork: &store.LiveWork{Kind: "process", SuppressStall: true}, Result: &res,
+	}))
+	assert.True(t, res.Unstalled)
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "", got.Activity)
+	assert.Empty(t, got.StalledFromActivity)
+}
