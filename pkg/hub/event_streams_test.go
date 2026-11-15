@@ -480,6 +480,12 @@ func TestStatusUpdateIsHeartbeatOnly(t *testing.T) {
 		{"heartbeat with phase", store.AgentStatusUpdate{Heartbeat: true, Phase: "running"}, false},
 		{"heartbeat with activity", store.AgentStatusUpdate{Heartbeat: true, Activity: "thinking"}, false},
 		{"heartbeat with turns", store.AgentStatusUpdate{Heartbeat: true, CurrentTurns: &turns}, false},
+		// Live work (ptone/scion#7855) writes only the live-work
+		// timestamps, so the heartbeat stays heartbeat-only.
+		{"heartbeat with live work", store.AgentStatusUpdate{
+			Heartbeat: true, LiveWork: &store.LiveWork{Kind: "process", SuppressStall: true},
+		}, true},
+		{"live work without heartbeat", store.AgentStatusUpdate{LiveWork: &store.LiveWork{Kind: "process"}}, false},
 		{"activity alone", store.AgentStatusUpdate{Activity: "thinking"}, false},
 	}
 	for _, c := range cases {

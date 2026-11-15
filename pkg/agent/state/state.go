@@ -109,6 +109,16 @@ const (
 // FormatReadySpecEnv.
 const HarnessReadyEnv = "SCION_HARNESS_READY"
 
+// LivenessHarnessRootDepthEnv names the environment variable a harness
+// config sets (in its env map) when the harness's TUI is not the direct
+// child of the agent window's wrapper: it is how many process levels below
+// the wrapper the liveness sampler treats as the harness itself (default 1).
+// Codex sets 2: its npm launcher (node bin/codex.js) spawns the native TUI
+// as a child. It travels in the existing env map, not a new config.yaml
+// key, so the bundled config still validates on older binaries
+// (ptone/scion#5196).
+const LivenessHarnessRootDepthEnv = "SCION_LIVENESS_HARNESS_ROOT_DEPTH"
+
 // DefaultReadySpec returns the ready spec used for strategy when no value is
 // configured: the readiness constants above. An unknown strategy gets the
 // delay defaults.

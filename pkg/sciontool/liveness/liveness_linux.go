@@ -1,0 +1,31 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build linux
+
+package liveness
+
+import (
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+)
+
+// Sample walks /proc once and returns the live work it shows, or nil. act
+// and actSince are the agent's current activity and when it began, from
+// agent-info.json (actSince zero when unknown, which turns the tool-call
+// tier off). The first call reports no CPU work: it records the baseline.
+func (s *Sampler) Sample(now time.Time, act state.Activity, actSince time.Time) *LiveWork {
+	return s.sample(now, act, actSince)
+}

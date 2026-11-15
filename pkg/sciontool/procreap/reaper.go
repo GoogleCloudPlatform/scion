@@ -96,6 +96,15 @@ func isManagedPID(pid int) bool {
 	return ok
 }
 
+// IsManagedPID is the read-only view of the managed-PID registry for other
+// packages: it reports whether pid is a child process sciontool itself
+// started and is waiting on (the supervised harness child, sidecar
+// services, conduit sessions, and RunManaged commands). The liveness
+// sampler excludes these subtrees from agent work.
+func IsManagedPID(pid int) bool {
+	return isManagedPID(pid)
+}
+
 // zombieProc pairs a zombie child's PID with its process name (best-effort;
 // "unknown" if the name could not be read), as observed during a single
 // scanZombies pass.

@@ -433,6 +433,15 @@ The `command` block defines how the agent's primary LLM tool is invoked.
 *   `resume_flag`: CLI flag to resume a previous session (e.g., `--session`).
 *   `system_prompt_flag`: CLI flag for the system prompt.
 
+#### Launcher harnesses and live-work detection
+
+The Hub's live-work detection treats the process `command.base` starts as the harness itself, never as work, because a TUI keeps redrawing while it waits (see [Agent Lifecycle](/scion/local/agent-lifecycle/#auto-suspend-of-stalled-agents)). Some tools start through a launcher that keeps running and spawns the real TUI as a child. Codex's npm launcher (`node bin/codex.js`) is one. For a harness like that, set `SCION_LIVENESS_HARNESS_ROOT_DEPTH` in the config's `env` map. The value is the number of process levels counted as the harness, so the launcher and its TUI make 2. The default is 1 and the maximum is 4. Without it, a hung agent's animated status can keep it from ever being marked stalled.
+
+```yaml
+env:
+  SCION_LIVENESS_HARNESS_ROOT_DEPTH: "2"
+```
+
 ### Environment Templates (`env_template`)
 
 The `env_template` block defines a map of environment variables to inject into the container, with support for Go template variable substitution.

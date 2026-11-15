@@ -389,6 +389,30 @@ same check that marks it stalled, unless the agent's harness does not support
 session resume. Agents already `stalled` when you turn auto-suspend on are not
 suspended unless they become active and stall again.
 
+A long build, a test run or a background job emits no activity events, so the
+Hub also looks for **live work**. On each 30-second heartbeat, `sciontool init`
+checks the container for two things:
+
+- **A tool call in flight.** The activity is `executing` and a process the
+  harness started after the tool call began is still running, even one that
+  uses no CPU, such as `gh run watch`. MCP and language servers started earlier
+  don't count.
+- **CPU work.** A process used at least 1% of one core since the previous
+  heartbeat.
+
+The tmux server, the pane shells, the harness's own process, sciontool and its
+services don't count. An agent whose container reported live work within the
+stall threshold is not marked `stalled`, and a `stalled` agent whose container
+reports live work returns to its previous activity. An idle agent, including one
+with idle MCP or language servers, still stalls at the threshold.
+
+A tool call holds off the stall for at most 60 minutes. It stops earlier when
+its processes make no progress for 10 minutes: the same processes, with no new
+CPU time and no reads or writes. A command waiting on a prompt or a dead
+connection is flagged this way. CPU work is not capped. Either way, auto-suspend
+skips an agent whose container reported live work in the last 90 seconds, so a
+running tool call is never suspended.
+
 Auto-suspend uses the same machinery as a manual `scion suspend`, so the agent's
 phase becomes `suspended`, its harness session is preserved, and its Hub
 credentials and active delegation grants are revoked. The agent

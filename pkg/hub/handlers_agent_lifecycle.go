@@ -229,6 +229,8 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 	// A reincarnation that starts after the read above must still win: the
 	// store re-checks Guard 0b on the row it locks (ptone/scion#2887).
 	status.GuardReincarnation = true
+	var result store.AgentStatusResult
+	status.Result = &result
 	if err := s.store.UpdateAgentStatus(ctx, id, status); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -240,8 +242,10 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 	// A heartbeat-only report writes only last_seen, which no status event
 	// carries, so it publishes nothing and skips the re-read
 	// (ptone/scion#5233). Freshness reaches clients with the next real
-	// change, a resync, or the agent list's own refresh.
-	if statusUpdateIsHeartbeatOnly(status) {
+	// change, a resync, or the agent list's own refresh. A heartbeat whose
+	// live work un-stalled the agent changed its activity, so it publishes
+	// (ptone/scion#7855).
+	if statusUpdateIsHeartbeatOnly(status) && !result.Unstalled {
 		writeJSON(w, http.StatusOK, statusUpdateResult{Applied: true})
 		return
 	}
@@ -335,17 +339,20 @@ func statusUpdateIsEmpty(su store.AgentStatusUpdate) bool {
 		su.RuntimeState == "" && su.TaskSummary == "" && !su.Heartbeat &&
 		len(su.Metadata) == 0 && su.CurrentTurns == nil && su.CurrentModelCalls == nil &&
 		su.StartedAt == "" && !su.ClearExit && su.ClearMessageIf == "" &&
-		!su.ClearTerminalRemnants
+		!su.ClearTerminalRemnants && su.LiveWork == nil
 }
 
 // statusUpdateIsHeartbeatOnly reports whether su carries the heartbeat flag
 // and nothing else statusUpdateIsEmpty counts: the agent's periodic
-// heartbeat report. It publishes no status event (ptone/scion#5233).
+// heartbeat report. It publishes no status event (ptone/scion#5233). The
+// heartbeat's live work (ptone/scion#7855) keeps it heartbeat-only: it
+// writes only the live-work timestamps, which no status event carries.
 func statusUpdateIsHeartbeatOnly(su store.AgentStatusUpdate) bool {
 	if !su.Heartbeat {
 		return false
 	}
 	su.Heartbeat = false
+	su.LiveWork = nil
 	return statusUpdateIsEmpty(su)
 }
 

@@ -42,6 +42,11 @@ type AgentStatusResult struct {
 	// (stopped or error); otherwise "". Callers use it to keep firing the
 	// stopped/error notifications and hooks that write would have fired.
 	HaltedFrom string
+	// Unstalled is true when this write cleared the stalled marker because
+	// the container reported stall-suppressing live work
+	// (ptone/scion#7855). The activity changed, so the caller publishes it
+	// even for a heartbeat-only report.
+	Unstalled bool
 }
 
 // IsHaltEvidence reports whether an exit reason shows that the platform,

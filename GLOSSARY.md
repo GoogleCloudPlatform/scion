@@ -440,17 +440,22 @@ _Avoid_: stalled, stuck, idle, waiting
 _See also_: Activity (Blocked is one of its values)
 
 **Stalled**:
-A platform-set activity for a `running` agent whose heartbeat is still arriving (the process is alive) but that has produced no activity events within the stall threshold (`server.hub.stalled_threshold`, default 5 minutes; a value under 2 minutes falls back to the default). Indicates a hung agent. Agents whose activity is `blocked`, `waiting_for_input`, `completed`, `limits_exceeded`, `harness_error` or `offline` are excluded. A stalled notification says how long the agent has had no activity. Distinct from `offline`, which means no heartbeat for over 2 minutes.
+A platform-set activity for a `running` agent whose heartbeat is still arriving (the process is alive) but that has produced no activity events within the stall threshold (`server.hub.stalled_threshold`, default 5 minutes; a value under 2 minutes falls back to the default). Indicates a hung agent. Agents whose activity is `blocked`, `idle`, `waiting_for_input`, `completed`, `limits_exceeded`, `harness_error` or `offline` are excluded, and so is an agent whose container reported live work within the threshold. A stalled agent whose container then reports live work gets its previous activity back. A tool call stops holding off the stall after 60 minutes, or after 10 minutes without progress, but its agent is still never auto-suspended. A stalled notification says how long the agent has had no activity. Distinct from `offline`, which means no heartbeat for over 2 minutes.
 _Avoid_: stuck, hung (as a state name), offline
-_See also_: Activity, Blocked, Harness error, Auto-Suspend
+_See also_: Activity, Blocked, Harness error, Auto-Suspend, Live work
 
 **Harness error**:
 The `harness_error` activity of a `running` agent whose harness process is alive at its prompt but reported that a model, API or auth error ended its turn (for example a 400 from the model provider). The reason is in the agent's message, as `<source>: <text>` (for example `model API: APIError (status 400)`), redacted and at most 300 characters. Shown as `harness error` in `scion list` and the web UI; notifies the `HARNESS_ERROR` trigger, which is in the default triggers. Cleared by the harness's next turn-progress event (a new prompt, model call or tool call), so a new message to the agent retries. Excluded from stall detection; still marked `offline` when heartbeats stop. Distinct from the `error` phase, which means the harness process is dead, and from the `ERROR` trigger, which matches only that phase.
 _Avoid_: error (for a live agent), crashed, failed
 _See also_: Activity, Phase, Stalled
 
+**Live work**:
+Work in an agent's container that emits no activity events, such as a build, a test run or a background job the agent is waiting on. `sciontool init` samples `/proc` on each 30-second Hub heartbeat. It reports a tool call in flight: while the activity is `executing`, a process the harness started after the tool call began, whatever its CPU use. It also reports a process doing CPU work (at least 1% of one core since the previous sample). The tmux server, the pane shells, the harness's own process, sciontool and its services don't count. The Hub records it as `lastLiveWorkAt` and `lastLiveProcessAt`. An agent with live work is not marked `stalled` and is not auto-suspended. A tool call holds off the stall for at most 60 minutes, and for only 10 minutes when its processes make no progress (no change in their set, CPU time or I/O). Detection never sets an activity, except to restore the one a stall replaced. While live work runs, `sciontool init`'s API-error watchdog also holds off reporting a swallowed model API error as `harness_error`: the turn is not over.
+_Avoid_: busy (as a state name)
+_See also_: Stalled, Auto-Suspend
+
 **Auto-Suspend**:
-A Hub behavior, off by default (`server.hub.auto_suspend_stalled`), that suspends an agent when it is marked `stalled`, reclaiming its container. Agents whose harness does not support session resume are skipped. A message sent with wake (`scion message --wake`, or accepting the web UI's wake prompt) resumes the agent and then delivers it; a message without wake is not delivered (`scion message` gets `409 agent_not_running`).
+A Hub behavior, off by default (`server.hub.auto_suspend_stalled`), that suspends an agent when it is marked `stalled`, reclaiming its container. Agents whose harness does not support session resume are skipped, and so are agents whose container reported live work in the last 90 seconds. A message sent with wake (`scion message --wake`, or accepting the web UI's wake prompt) resumes the agent and then delivers it; a message without wake is not delivered (`scion message` gets `409 agent_not_running`).
 _Avoid_: idle timeout, auto-stop
 _See also_: Stalled, Phase
 

@@ -111,6 +111,10 @@ type Agent struct {
 	LastSeen *time.Time `json:"last_seen,omitempty"`
 	// LastActivityEvent holds the value of the "last_activity_event" field.
 	LastActivityEvent *time.Time `json:"last_activity_event,omitempty"`
+	// LastLiveProcessAt holds the value of the "last_live_process_at" field.
+	LastLiveProcessAt *time.Time `json:"last_live_process_at,omitempty"`
+	// LastLiveWorkAt holds the value of the "last_live_work_at" field.
+	LastLiveWorkAt *time.Time `json:"last_live_work_at,omitempty"`
 	// StartedAt holds the value of the "started_at" field.
 	StartedAt *time.Time `json:"started_at,omitempty"`
 	// DeletedAt holds the value of the "deleted_at" field.
@@ -298,7 +302,7 @@ func (*Agent) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullInt64)
 		case agent.FieldSlug, agent.FieldName, agent.FieldTemplate, agent.FieldStatus, agent.FieldMessageMode, agent.FieldPhase, agent.FieldActivity, agent.FieldToolName, agent.FieldConnectionState, agent.FieldContainerStatus, agent.FieldExitReason, agent.FieldRuntimeState, agent.FieldStalledFromActivity, agent.FieldImage, agent.FieldRuntime, agent.FieldRuntimeBrokerID, agent.FieldWorkspacePlacement, agent.FieldPinnedRuntimeBrokerID, agent.FieldPinnedRuntimeTargetID, agent.FieldPinnedRuntimeTargetType, agent.FieldTaskSummary, agent.FieldMessage, agent.FieldAppliedConfig, agent.FieldEffectiveConfig, agent.FieldPendingConfig, agent.FieldHarnessConfig, agent.FieldReincarnationState, agent.FieldLaunchID, agent.FieldLaunchRunID, agent.FieldRunID, agent.FieldSSHHostKey, agent.FieldSSHHostKeyRunID, agent.FieldLaunchState, agent.FieldLaunchEndReason, agent.FieldLaunchKind, agent.FieldLaunchOwner, agent.FieldLaunchStep, agent.FieldLaunchError, agent.FieldLaunchCause, agent.FieldLaunchPriorPhase, agent.FieldLaunchResumePhase, agent.FieldDeletionState, agent.FieldDeletionCode, agent.FieldDeletionError, agent.FieldDeletionPrior, agent.FieldDeletionRequest, agent.FieldRunIntent, agent.FieldStartClaimID, agent.FieldStartClaimKind, agent.FieldStartClaimState, agent.FieldStartClaimOwner, agent.FieldStartClaimTarget, agent.FieldStartClaimLaunchID, agent.FieldSoftDeleteOpID:
 			values[i] = new(sql.NullString)
-		case agent.FieldCreated, agent.FieldUpdated, agent.FieldLastSeen, agent.FieldLastActivityEvent, agent.FieldStartedAt, agent.FieldDeletedAt, agent.FieldReincarnationUpdatedAt, agent.FieldRunIDUpdatedAt, agent.FieldLaunchDeadline, agent.FieldLaunchLastReportAt, agent.FieldDeletionLeaseAt, agent.FieldDeletionStartedAt, agent.FieldDeletionFailedAt, agent.FieldRunIntentAt, agent.FieldRunIntentMarkedAt, agent.FieldStartClaimAt, agent.FieldStartClaimLeaseUntil, agent.FieldStartClaimUnconfirmedAt, agent.FieldStartClaimHoldUntil, agent.FieldActivitySince:
+		case agent.FieldCreated, agent.FieldUpdated, agent.FieldLastSeen, agent.FieldLastActivityEvent, agent.FieldLastLiveProcessAt, agent.FieldLastLiveWorkAt, agent.FieldStartedAt, agent.FieldDeletedAt, agent.FieldReincarnationUpdatedAt, agent.FieldRunIDUpdatedAt, agent.FieldLaunchDeadline, agent.FieldLaunchLastReportAt, agent.FieldDeletionLeaseAt, agent.FieldDeletionStartedAt, agent.FieldDeletionFailedAt, agent.FieldRunIntentAt, agent.FieldRunIntentMarkedAt, agent.FieldStartClaimAt, agent.FieldStartClaimLeaseUntil, agent.FieldStartClaimUnconfirmedAt, agent.FieldStartClaimHoldUntil, agent.FieldActivitySince:
 			values[i] = new(sql.NullTime)
 		case agent.FieldID, agent.FieldProjectID:
 			values[i] = new(uuid.UUID)
@@ -611,6 +615,20 @@ func (_m *Agent) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.LastActivityEvent = new(time.Time)
 				*_m.LastActivityEvent = value.Time
+			}
+		case agent.FieldLastLiveProcessAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field last_live_process_at", values[i])
+			} else if value.Valid {
+				_m.LastLiveProcessAt = new(time.Time)
+				*_m.LastLiveProcessAt = value.Time
+			}
+		case agent.FieldLastLiveWorkAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field last_live_work_at", values[i])
+			} else if value.Valid {
+				_m.LastLiveWorkAt = new(time.Time)
+				*_m.LastLiveWorkAt = value.Time
 			}
 		case agent.FieldStartedAt:
 			if value, ok := values[i].(*sql.NullTime); !ok {
@@ -1154,6 +1172,16 @@ func (_m *Agent) String() string {
 	builder.WriteString(", ")
 	if v := _m.LastActivityEvent; v != nil {
 		builder.WriteString("last_activity_event=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	if v := _m.LastLiveProcessAt; v != nil {
+		builder.WriteString("last_live_process_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	if v := _m.LastLiveWorkAt; v != nil {
+		builder.WriteString("last_live_work_at=")
 		builder.WriteString(v.Format(time.ANSIC))
 	}
 	builder.WriteString(", ")

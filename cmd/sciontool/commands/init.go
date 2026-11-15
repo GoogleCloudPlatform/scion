@@ -41,6 +41,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/liveness"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/metadata"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
@@ -1402,6 +1403,10 @@ func RunInit(args []string, opts InitRunOptions) int {
 		// The harness_error watchdogs (init_harness_watchdog.go) start
 		// once the harness is ready, in the watcher's goroutine, so the
 		// shutdown path below stops them with it.
+		// The heartbeat's live-work samples, shared with the API-error
+		// watchdog (ptone/scion#7855): live work means the turn is not
+		// over, so a swallowed API error is not yet a harness error.
+		liveWork := newLiveWorkRecorder()
 		watchdogCfg := newHarnessWatchdogConfig(harnessWatchdogDeps{
 			LaunchedAt:       harnessLaunchedAt,
 			AgentHome:        agentHome,
@@ -1413,6 +1418,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 			CapturePane:      captureHarnessPane,
 			TurnEventsPath:   turnEventsFilePath,
 			PendingErrorPath: pendingHarnessErrorFilePath,
+			LiveWork:         liveWork.Live,
 		})
 		var readyWatchCtx context.Context
 		readyWatchCtx, readyWatchCancel = context.WithCancel(context.Background())
@@ -1436,6 +1442,13 @@ func RunInit(args []string, opts InitRunOptions) int {
 				OnSuccess: func() {
 					log.Debug("Heartbeat sent successfully")
 				},
+				// Live work (ptone/scion#7855): the Hub keeps an agent
+				// with a tool call in flight, or whose container is doing
+				// CPU work, from being marked stalled or auto-suspended.
+				LiveWork: liveWork.record(livenessProvider(liveness.NewSampler(liveness.Config{
+					AgentUID:         livenessAgentUID(targetUID),
+					HarnessRootDepth: livenessHarnessRootDepth(os.Getenv),
+				}), statusHandler.CurrentActivitySince)),
 			})
 			log.Info("Started Hub heartbeat loop (interval: %s)", hub.DefaultHeartbeatInterval)
 
@@ -2017,6 +2030,44 @@ var (
 	runReportStoppingToHub = reportStoppingToHub
 	runServicesShutdown    = func(ctx context.Context, m *services.Manager) error { return m.Shutdown(ctx) }
 )
+
+// livenessProvider returns the heartbeat's live-work callback: it samples
+// with the activity agent-info.json records and when that activity began,
+// which the tool-call tier needs. The sampler only reads agent-info.json.
+func livenessProvider(s *liveness.Sampler, activity func() (state.Activity, time.Time)) func() *liveness.LiveWork {
+	return func() *liveness.LiveWork {
+		act, since := activity()
+		return s.Sample(time.Now(), act, since)
+	}
+}
+
+// livenessAgentUID is the UID the agent's processes run as, for the
+// liveness sampler: targetUID when init drops privileges to it, otherwise
+// init's own UID, which the harness then inherits (rootless or no host
+// user; see setupHostUser).
+func livenessAgentUID(targetUID int) int {
+	if targetUID > 0 {
+		return targetUID
+	}
+	return os.Getuid()
+}
+
+// livenessHarnessRootDepth reads the harness config's
+// state.LivenessHarnessRootDepthEnv for the liveness sampler: unset means
+// 1, and an unparsable value is logged and treated as 1 (the sampler also
+// clamps the range).
+func livenessHarnessRootDepth(getenv func(string) string) int {
+	raw := getenv(state.LivenessHarnessRootDepthEnv)
+	if raw == "" {
+		return 1
+	}
+	depth, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		log.Warn("Liveness: ignoring %s=%q (not an integer); using 1", state.LivenessHarnessRootDepthEnv, raw)
+		return 1
+	}
+	return depth
+}
 
 // harnessExitCodePath is the harness exit-code file readHarnessExitCode
 // reads. It is a variable only so a RunInit test can point it at a temp
