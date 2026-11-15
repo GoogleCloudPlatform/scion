@@ -506,6 +506,39 @@ test.describe('Project Decisions page on real hub (web.project_decisions + web.c
         .allTextContents();
       expect(userFilterOptionsB.join(' ')).not.toContain('Alice');
 
+      // 6b. Real-hub P2 filter panel + search capability + zero DM leakage via q=9482:
+      const panelB = decisionsB.locator('scion-decisions-filter-panel');
+      await expect(panelB).toBeVisible();
+      await panelB.getByRole('button', { name: /Search and filters/i, expanded: false }).click();
+      const convInputB = panelB
+        .locator('scion-facet-combobox[data-filter="conversation"]')
+        .getByRole('combobox', { name: 'Conversation' });
+      await convInputB.click();
+      const convOptionLabelsB = await panelB
+        .locator('scion-facet-combobox[data-filter="conversation"]')
+        .getByRole('option')
+        .allTextContents();
+      expect(convOptionLabelsB.join(' ')).toContain('#release');
+      expect(convOptionLabelsB.join(' ').toLowerCase()).not.toContain('dm');
+
+      await pageB.goto(`/projects/${projectId}/decisions?q=9482`, {
+        waitUntil: 'domcontentloaded',
+      });
+      await expect(decisionsB.locator('[data-waiting-badge]')).toHaveText('0 of 1', {
+        timeout: 15_000,
+      });
+      await expect(decisionsB.locator('[data-no-match="pending"]')).toContainText(
+        'No decisions match these filters'
+      );
+
+      // User A searching q=9482 on Made finds the purged DM decision via P1+P2 search + URL state:
+      await tab1.goto(`/projects/${projectId}/decisions?tab=made&q=9482`, {
+        waitUntil: 'domcontentloaded',
+      });
+      const panelA = decisionsTab1.locator('scion-decisions-filter-panel');
+      await expect(panelA.locator('[data-filter-tag="q"]')).toContainText('"9482"');
+      await expect(madeTableA).toContainText('D-DM-SECRET');
+
       // 7. Navigating User A back to /projects/:id shows the Decisions header badge decremented to 1.
       await tab1.goto(`/projects/${projectId}`, { waitUntil: 'domcontentloaded' });
       const headerBtnAAfter = tab1.locator('[data-decisions-button]');

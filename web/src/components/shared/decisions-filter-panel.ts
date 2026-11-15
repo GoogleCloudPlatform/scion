@@ -256,6 +256,53 @@ export class ScionDecisionsFilterPanel extends LitElement {
       width: 100%;
     }
 
+    sl-tag::part(base) {
+      background: var(--scion-bg-subtle, #f1f5f9);
+      border-color: var(--scion-border, #e2e8f0);
+      color: var(--scion-text, #1e293b);
+    }
+
+    sl-tag::part(remove-button) {
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    sl-input::part(form-control-label),
+    sl-select::part(form-control-label) {
+      color: var(--scion-text, #1e293b);
+    }
+
+    sl-input::part(base),
+    sl-select::part(combobox) {
+      border-color: var(--scion-border, #e2e8f0);
+      background: var(--scion-surface, #ffffff);
+    }
+
+    sl-input::part(input),
+    sl-select::part(display-input) {
+      color: var(--scion-text, #1e293b);
+    }
+
+    sl-input::part(input)::placeholder,
+    sl-select::part(display-input)::placeholder {
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    sl-input::part(prefix),
+    sl-input::part(clear-button),
+    sl-select::part(expand-icon),
+    sl-select::part(clear-button) {
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    sl-select::part(listbox) {
+      background: var(--scion-surface, #ffffff);
+      border-color: var(--scion-border, #e2e8f0);
+    }
+
+    sl-option::part(base) {
+      color: var(--scion-text, #1e293b);
+    }
+
     .row2 {
       display: flex;
       gap: 0.5rem;

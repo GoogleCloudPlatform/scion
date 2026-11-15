@@ -189,7 +189,7 @@ export class ScionFacetCombobox extends LitElement {
     label {
       font-size: var(--sl-input-label-font-size-small, 0.875rem);
       font-weight: var(--sl-input-label-font-weight, 400);
-      color: var(--sl-input-label-color, var(--scion-text, #1e293b));
+      color: var(--scion-text, #1e293b);
       line-height: 1.25;
     }
 
@@ -197,12 +197,12 @@ export class ScionFacetCombobox extends LitElement {
       display: flex;
       align-items: center;
       gap: 0.25rem;
-      border: 1px solid var(--sl-input-border-color, var(--scion-border, #e2e8f0));
+      border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: var(--sl-input-border-radius-small, 0.25rem);
       height: var(--sl-input-height-small, 1.875rem);
       padding: 0 0.45rem 0 0.6rem;
-      background: var(--sl-input-background-color, var(--scion-surface, #ffffff));
-      color: var(--sl-input-color, var(--scion-text, #1e293b));
+      background: var(--scion-surface, #ffffff);
+      color: var(--scion-text, #1e293b);
       transition:
         border-color 0.12s ease,
         box-shadow 0.12s ease;
@@ -232,7 +232,13 @@ export class ScionFacetCombobox extends LitElement {
     }
 
     input::placeholder {
-      color: var(--sl-input-placeholder-color, var(--scion-text-muted, #64748b));
+      color: var(--scion-text-muted, #64748b);
+    }
+
+    @media (pointer: coarse) {
+      input {
+        font-size: max(16px, 0.875rem);
+      }
     }
 
     .icon-btn {
