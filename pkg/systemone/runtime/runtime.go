@@ -856,16 +856,24 @@ func classifyInvokeError(
 		return classifyContextCause(callerErr, attemptCause), statusClass
 	}
 
-	// Egress transport error invariants (AC-4, runtime-design §4.3, §6.3).
+	// Egress transport error invariants (AC-4, runtime-design §§4.3, 6.3).
+	// Checked via errors.Is BEFORE reading ProviderError.Reason so runtime
+	// remains the single authority for egress sentinels whether adapters pass
+	// them through raw or wrap them in an error implementing Unwrap.
+	// Redirects, blocked destinations, non-https schemes, and malformed/userinfo
+	// instance endpoint URLs are all instance-config / egress-policy refusals
+	// (FailEgressRefused); oversize responses (>1 MiB) are provider behavior
+	// (FailMalformedResponse); credential errors map to FailAuth.
 	switch {
 	case egress.IsResponseTooLarge(err):
 		return provider.FailMalformedResponse, statusClass
 	case egress.IsAuthError(err):
 		return provider.FailAuth, statusClass
-	case egress.IsSchemeNotAllowed(err), egress.IsInvalidEndpoint(err):
-		return provider.FailInvalidRequest, statusClass
-	case egress.IsBlockedDestination(err), egress.IsRedirectBlocked(err):
-		return provider.FailUnavailable, statusClass
+	case egress.IsRedirectBlocked(err),
+		egress.IsBlockedDestination(err),
+		egress.IsSchemeNotAllowed(err),
+		egress.IsInvalidEndpoint(err):
+		return provider.FailEgressRefused, statusClass
 	}
 
 	if pe, ok := provider.AsProviderError(err); ok {

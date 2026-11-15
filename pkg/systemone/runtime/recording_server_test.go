@@ -439,7 +439,7 @@ func TestRuntime_AC4_EgressRecordingServerBoundaries(t *testing.T) {
 		assert.Equal(t, string(provider.FailMalformedResponse), eval.Reason)
 	})
 
-	t.Run("redirect_302_refused_and_mapped_to_unavailable", func(t *testing.T) {
+	t.Run("redirect_302_refused_and_mapped_to_egress_refused", func(t *testing.T) {
 		var targetHit atomic.Int32
 		redirectTarget := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			targetHit.Add(1)
@@ -476,10 +476,10 @@ func TestRuntime_AC4_EgressRecordingServerBoundaries(t *testing.T) {
 		eval, ok := runtime.EvaluationFrom(err)
 		require.True(t, ok)
 		assert.Equal(t, runtime.ClassFailed, eval.Class)
-		assert.Equal(t, string(provider.FailUnavailable), eval.Reason)
+		assert.Equal(t, string(provider.FailEgressRefused), eval.Reason)
 	})
 
-	t.Run("blocked_private_ip_ssrf_maps_to_unavailable_without_dialing", func(t *testing.T) {
+	t.Run("blocked_private_ip_ssrf_maps_to_egress_refused_without_dialing", func(t *testing.T) {
 		var dialed atomic.Int32
 		resolver := fakeResolverFunc(func(_ context.Context, _ string) ([]net.IPAddr, error) {
 			return []net.IPAddr{{IP: net.ParseIP("10.0.0.42")}}, nil
@@ -512,10 +512,10 @@ func TestRuntime_AC4_EgressRecordingServerBoundaries(t *testing.T) {
 		eval, ok := runtime.EvaluationFrom(err)
 		require.True(t, ok)
 		assert.Equal(t, runtime.ClassFailed, eval.Class)
-		assert.Equal(t, string(provider.FailUnavailable), eval.Reason)
+		assert.Equal(t, string(provider.FailEgressRefused), eval.Reason)
 	})
 
-	t.Run("non_https_endpoint_maps_to_invalid_request", func(t *testing.T) {
+	t.Run("non_https_endpoint_maps_to_egress_refused", func(t *testing.T) {
 		reg := provider.NewRegistry()
 		reg.MustRegister(newWireRecordingAdapter())
 		inst := runtime.Instance{
@@ -533,7 +533,7 @@ func TestRuntime_AC4_EgressRecordingServerBoundaries(t *testing.T) {
 		eval, ok := runtime.EvaluationFrom(err)
 		require.True(t, ok)
 		assert.Equal(t, runtime.ClassFailed, eval.Class)
-		assert.Equal(t, string(provider.FailInvalidRequest), eval.Reason)
+		assert.Equal(t, string(provider.FailEgressRefused), eval.Reason)
 	})
 
 	t.Run("credential_source_error_maps_to_auth_without_echoing_secret", func(t *testing.T) {
@@ -1098,5 +1098,125 @@ func TestRuntime_EndToEndWithTypeSafeJevwireAdapter(t *testing.T) {
 		require.Len(t, eval429.Attempts, 1)
 		assert.Equal(t, "req_synth_429_99", eval429.Attempts[0].ProviderRequestID)
 		assert.Equal(t, "4xx", eval429.Attempts[0].HTTPStatusClass)
+	})
+
+	t.Run("ac4_jevwire_redirect_302_maps_to_egress_refused", func(t *testing.T) {
+		var targetHit atomic.Int32
+		redirectTarget := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			targetHit.Add(1)
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer redirectTarget.Close()
+
+		redirSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, redirectTarget.URL+"/steal", http.StatusFound)
+		}))
+		defer redirSrv.Close()
+
+		redirInst := runtime.Instance{
+			Name: "typesafe-redir", Adapter: jevwire.AdapterNameTypeSafe, Model: "jev-1.14.0", Endpoint: redirSrv.URL, Enabled: true, Revision: 1,
+		}
+		redirRT := runtime.New(
+			runtime.Config{
+				Instances:   runtime.StaticInstances(redirInst),
+				Credentials: runtime.StaticCredential(secretKey),
+			},
+			runtime.WithEgressOptionsForTesting(egress.WithLoopbackServerForTesting(redirSrv.URL, redirSrv.Client())),
+		)
+		defer redirRT.CloseIdleConnections()
+
+		_, err := redirRT.Evaluate(context.Background(), compiled, runtime.ProbeInput(probeText), runtime.EvalOptions{})
+		require.Error(t, err)
+		assert.Zero(t, targetHit.Load(), "redirect target must never be contacted")
+		assert.NotContains(t, err.Error(), secretKey)
+		assert.NotContains(t, err.Error(), "/steal")
+
+		evalRedir, ok := runtime.EvaluationFrom(err)
+		require.True(t, ok)
+		assert.Equal(t, runtime.ClassFailed, evalRedir.Class)
+		assert.Equal(t, string(provider.FailEgressRefused), evalRedir.Reason)
+	})
+
+	t.Run("ac4_jevwire_blocked_destination_maps_to_egress_refused", func(t *testing.T) {
+		var dialed atomic.Int32
+		resolver := fakeResolverFunc(func(_ context.Context, _ string) ([]net.IPAddr, error) {
+			return []net.IPAddr{{IP: net.ParseIP("10.0.0.42")}}, nil
+		})
+		dialer := fakeDialerFunc(func(_ context.Context, _, _ string) (net.Conn, error) {
+			dialed.Add(1)
+			return nil, errors.New("unexpected dial")
+		})
+
+		ssrfInst := runtime.Instance{
+			Name: "typesafe-ssrf", Adapter: jevwire.AdapterNameTypeSafe, Model: "jev-1.14.0", Endpoint: "https://internal.example.invalid", Enabled: true, Revision: 1,
+		}
+		ssrfRT := runtime.New(
+			runtime.Config{
+				Instances:   runtime.StaticInstances(ssrfInst),
+				Credentials: runtime.StaticCredential(secretKey),
+			},
+			runtime.WithEgressOptionsForTesting(egress.WithDialerForTesting(resolver, dialer)),
+		)
+		defer ssrfRT.CloseIdleConnections()
+
+		_, err := ssrfRT.Evaluate(context.Background(), compiled, runtime.ProbeInput(probeText), runtime.EvalOptions{})
+		require.Error(t, err)
+		assert.Zero(t, dialed.Load(), "blocked private IP must not be dialed")
+		assert.NotContains(t, err.Error(), secretKey)
+
+		evalSSRF, ok := runtime.EvaluationFrom(err)
+		require.True(t, ok)
+		assert.Equal(t, runtime.ClassFailed, evalSSRF.Class)
+		assert.Equal(t, string(provider.FailEgressRefused), evalSSRF.Reason)
+	})
+
+	t.Run("ac4_jevwire_non_https_endpoint_maps_to_egress_refused", func(t *testing.T) {
+		httpInst := runtime.Instance{
+			Name: "typesafe-http", Adapter: jevwire.AdapterNameTypeSafe, Model: "jev-1.14.0", Endpoint: "http://plaintext.example.invalid", Enabled: true, Revision: 1,
+		}
+		httpRT := runtime.New(runtime.Config{
+			Instances:   runtime.StaticInstances(httpInst),
+			Credentials: runtime.StaticCredential(secretKey),
+		})
+		defer httpRT.CloseIdleConnections()
+
+		_, err := httpRT.Evaluate(context.Background(), compiled, runtime.ProbeInput(probeText), runtime.EvalOptions{})
+		require.Error(t, err)
+		assert.NotContains(t, err.Error(), secretKey)
+
+		evalHTTP, ok := runtime.EvaluationFrom(err)
+		require.True(t, ok)
+		assert.Equal(t, runtime.ClassFailed, evalHTTP.Class)
+		assert.Equal(t, string(provider.FailEgressRefused), evalHTTP.Reason)
+	})
+
+	t.Run("ac4_jevwire_oversize_response_over_1MiB_maps_to_malformed_response", func(t *testing.T) {
+		bigSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(bytes.Repeat([]byte("a"), int(egress.MaxResponseBytes)+64))
+		}))
+		defer bigSrv.Close()
+
+		bigInst := runtime.Instance{
+			Name: "typesafe-big", Adapter: jevwire.AdapterNameTypeSafe, Model: "jev-1.14.0", Endpoint: bigSrv.URL, Enabled: true, Revision: 1,
+		}
+		bigRT := runtime.New(
+			runtime.Config{
+				Instances:   runtime.StaticInstances(bigInst),
+				Credentials: runtime.StaticCredential(secretKey),
+			},
+			runtime.WithEgressOptionsForTesting(egress.WithLoopbackServerForTesting(bigSrv.URL, bigSrv.Client())),
+		)
+		defer bigRT.CloseIdleConnections()
+
+		_, err := bigRT.Evaluate(context.Background(), compiled, runtime.ProbeInput(probeText), runtime.EvalOptions{})
+		require.Error(t, err)
+		assert.NotContains(t, err.Error(), secretKey)
+
+		evalBig, ok := runtime.EvaluationFrom(err)
+		require.True(t, ok)
+		assert.Equal(t, runtime.ClassFailed, evalBig.Class)
+		assert.Equal(t, string(provider.FailMalformedResponse), evalBig.Reason)
 	})
 }

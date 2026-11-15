@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/systemone/egress"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/metrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/provider"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/runtime"
@@ -1093,4 +1094,66 @@ func TestRuntime_ListModels(t *testing.T) {
 		require.True(t, ok)
 		assert.Equal(t, provider.FailUnsupported, pe.Reason)
 	})
+}
+
+type wrappedAdapterError struct {
+	pe    *provider.ProviderError
+	cause error
+}
+
+func (e wrappedAdapterError) Error() string { return e.pe.Error() }
+func (e wrappedAdapterError) Unwrap() []error {
+	return []error{e.pe, e.cause}
+}
+
+func TestRuntime_WrappedEgressErrorOverridesProviderErrorReason(t *testing.T) {
+	binSpec := `{
+	  "version": 1,
+	  "questions": [{"id": "q1", "type": "binary", "instructions": "Check."}],
+	  "output": {"question": "q1"}
+	}`
+	compiled := compileTestSpec(t, binSpec, spec.KindFilter)
+
+	cases := []struct {
+		name     string
+		sentinel error
+		want     provider.FailReason
+	}{
+		{name: "wrapped_redirect_blocked", sentinel: egress.ErrRedirectBlocked, want: provider.FailEgressRefused},
+		{name: "wrapped_blocked_destination", sentinel: egress.ErrBlockedDestination, want: provider.FailEgressRefused},
+		{name: "wrapped_scheme_not_allowed", sentinel: egress.ErrSchemeNotAllowed, want: provider.FailEgressRefused},
+		{name: "wrapped_invalid_endpoint", sentinel: egress.ErrInvalidEndpoint, want: provider.FailEgressRefused},
+		{name: "wrapped_response_too_large", sentinel: egress.ErrResponseTooLarge, want: provider.FailMalformedResponse},
+		{name: "wrapped_auth", sentinel: egress.ErrAuth, want: provider.FailAuth},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			adapter := newFakeAdapter(func(_ context.Context, _ provider.Transport, _ provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
+				// Deliberately wrap inside a ProviderError carrying a conflicting Reason
+				// to verify runtime's errors.Is egress table wins before pe.Reason is read.
+				return provider.ModelResult{}, wrappedAdapterError{
+					pe:    provider.NewProviderError(provider.FailInternal, false, 0, 502, "adapter wrapper"),
+					cause: tc.sentinel,
+				}
+			})
+			reg := provider.NewRegistry()
+			reg.MustRegister(adapter)
+			rt := runtime.New(runtime.Config{
+				Registry:    reg,
+				Instances:   runtime.StaticInstances(defaultTestInstance()),
+				Credentials: runtime.StaticCredential("sk-test"),
+			})
+
+			_, err := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput("probe"), runtime.EvalOptions{})
+			require.Error(t, err)
+			eval, ok := runtime.EvaluationFrom(err)
+			require.True(t, ok)
+			assert.Equal(t, runtime.ClassFailed, eval.Class)
+			assert.Equal(t, string(tc.want), eval.Reason)
+			require.Len(t, eval.Attempts, 1)
+			assert.Equal(t, string(tc.want), eval.Attempts[0].Reason)
+			assert.Equal(t, "5xx", eval.Attempts[0].HTTPStatusClass)
+		})
+	}
 }
