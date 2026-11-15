@@ -226,13 +226,18 @@ func (r *ExecStatusRequest) Validate() error {
 }
 
 // ExecArgvDigest is the hex sha256 of argv encoded as a canonical JSON
-// array of strings: the command digest the hub records and sciontool binds
-// a run_id to.
+// array of strings (compact separators, SetEscapeHTML(false) so '&', '<'
+// and '>' stay raw UTF-8 rather than \u0026/\u003c/\u003e): the command
+// digest the hub records and sciontool binds a run_id to.
 func ExecArgvDigest(argv []string) string {
 	if argv == nil {
 		argv = []string{}
 	}
-	b, _ := json.Marshal(argv) // a []string always encodes
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(argv) // a []string always encodes
+	b := bytes.TrimSuffix(buf.Bytes(), []byte{'\n'})
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }
