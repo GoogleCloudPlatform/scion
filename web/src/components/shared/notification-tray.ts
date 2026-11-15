@@ -37,6 +37,7 @@ import {
 } from '../../client/push-preference.js';
 import type { User, Notification } from '../../shared/types.js';
 import { formatRelative } from '../../utils/time.js';
+import { FEATURE_FLAGS_CHANGED_EVENT, projectDecisionsEnabled } from '../../utils/feature-flags.js';
 import { navigateTo } from '../../client/navigation.js';
 import { coalescedRefresh, type CoalescedRefresh } from '../../client/coalesced-refresh.js';
 import { visibleInterval } from '../../client/visible-interval.js';
@@ -72,6 +73,37 @@ export function pendingSecretLink(n: Notification): string | null {
   return n.kind === SECRET_PENDING_KIND || n.status === SECRET_PENDING_STATUS
     ? PROFILE_SECRETS_PATH
     : null;
+}
+
+/**
+ * Coalesced cross-project Decisions notification (ptone/scion#7997). At most
+ * one unacknowledged row exists per user; it stays pinned at the top of the
+ * tray and links to Profile > Decisions (Waiting on you).
+ */
+export const DECISIONS_WAITING_KIND = 'decisions_waiting';
+export const DECISIONS_WAITING_STATUS = 'DECISIONS_WAITING';
+export const PROFILE_DECISIONS_PENDING_PATH = '/profile/decisions?tab=pending';
+
+/** Whether a notification row is the coalesced Decisions bell item. */
+export function isDecisionsWaiting(n: Pick<Notification, 'kind' | 'status'>): boolean {
+  return n.kind === DECISIONS_WAITING_KIND || n.status === DECISIONS_WAITING_STATUS;
+}
+
+/** The Profile > Decisions path for a decisions_waiting row, or null for any other row. */
+export function decisionsWaitingLink(n: Notification): string | null {
+  return isDecisionsWaiting(n) ? PROFILE_DECISIONS_PENDING_PATH : null;
+}
+
+function parseDecisionsCount(n: Pick<Notification, 'resourceId'>): number {
+  const parsed = Number.parseInt(n.resourceId ?? '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+}
+
+function pinDecisionsWaitingFirst(list: Notification[]): Notification[] {
+  const pinned = list.filter((n) => isDecisionsWaiting(n));
+  if (pinned.length === 0) return list;
+  const rest = list.filter((n) => !isDecisionsWaiting(n));
+  return [...pinned, ...rest];
 }
 
 /**
@@ -178,6 +210,25 @@ export function notificationFromEvent(data: unknown, userId: string | null): Not
   };
 }
 
+/**
+ * Extracts a user-scoped SSE update whose `acknowledged` flag is `true`
+ * (e.g. `decisions_waiting` clearing when `waitingOnYou` reaches 0), or null.
+ * Kept separate from `notificationFromEvent` so callers expecting only
+ * unacknowledged rows from `notificationFromEvent` see unchanged behavior.
+ */
+export function acknowledgedNotificationFromEvent(
+  data: unknown,
+  userId: string | null
+): { id: string; isDecisions: boolean } | null {
+  if (!userId || !data || typeof data !== 'object') return null;
+  const d = data as Record<string, unknown>;
+  if (d.acknowledged !== true) return null;
+  if (typeof d.id !== 'string' || !d.id) return null;
+  if (d.subscriberId !== undefined && d.subscriberId !== userId) return null;
+  const isDecisions = d.kind === DECISIONS_WAITING_KIND || d.status === DECISIONS_WAITING_STATUS;
+  return { id: d.id, isDecisions };
+}
+
 const POLL_INTERVAL_MS = 5 * 60_000; // 5 minutes — fallback only; SSE delivers in real-time
 
 @customElement('scion-notification-tray')
@@ -199,9 +250,16 @@ export class ScionNotificationTray extends LitElement {
   private boundOnClickOutside = this.onClickOutside.bind(this);
   private boundOnNotification = this.onNotificationEvent.bind(this);
   private boundOnPushPreference = (): void => this.syncPushState();
+  private boundOnFeatureFlagsChanged = (): void => this.onFeatureFlagsChanged();
 
   /** IDs already seen — used to detect genuinely new notifications. */
   private seenIds = new Set<string>();
+
+  /** Last observed count for decisions_waiting; governs browser push on increases. */
+  private lastDecisionsCount = 0;
+
+  /** Mirrors projectDecisionsEnabled() so async flag loading at boot triggers reconcile + refresh. */
+  private decisionsFlagEnabled = false;
 
   /** Suppresses browser push for the initial fetch so existing notifications don't fire. */
   private initialFetchDone = false;
@@ -241,10 +299,12 @@ export class ScionNotificationTray extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    this.decisionsFlagEnabled = projectDecisionsEnabled();
     this.syncPushState();
     // Keep in step with the profile settings page, which writes the same
     // preference. Two toggles disagreeing about one setting is worse than one.
     window.addEventListener(PUSH_PREFERENCE_EVENT, this.boundOnPushPreference);
+    window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
     this.syncUser();
   }
 
@@ -255,6 +315,7 @@ export class ScionNotificationTray extends LitElement {
     // A reconnect starts afresh, as a first mount does.
     this.activeUserId = null;
     window.removeEventListener(PUSH_PREFERENCE_EVENT, this.boundOnPushPreference);
+    window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
     document.removeEventListener('click', this.boundOnClickOutside, true);
   }
 
@@ -285,7 +346,9 @@ export class ScionNotificationTray extends LitElement {
       // Loading stops on disconnect and restarts in connectedCallback.
       if (!this.isConnected) return;
       this.activeUserId = id;
+      this.decisionsFlagEnabled = projectDecisionsEnabled();
       void this.fetchNotifications();
+      this.reconcileDecisionsBell();
       this.startPolling();
       this.listenForNotifications();
     } else {
@@ -294,6 +357,30 @@ export class ScionNotificationTray extends LitElement {
       this.stopListeningForNotifications();
       this.notifications = [];
     }
+  }
+
+  private onFeatureFlagsChanged(): void {
+    const enabled = projectDecisionsEnabled();
+    if (enabled === this.decisionsFlagEnabled) return;
+    this.decisionsFlagEnabled = enabled;
+    if (!this.activeUserId) return;
+    if (enabled) {
+      this.reconcileDecisionsBell();
+      void this.fetchNotifications();
+    } else {
+      this.lastDecisionsCount = 0;
+      this.notifications = this.notifications.filter((n) => !isDecisionsWaiting(n));
+    }
+  }
+
+  /**
+   * Fires a zero-row pending decisions read (B6) so the hub reconciles the
+   * caller's coalesced `decisions_waiting` bell row asynchronously after
+   * responding; any healed row arrives via `user.{id}.notification`.
+   */
+  private reconcileDecisionsBell(): void {
+    if (!projectDecisionsEnabled() || !this.user?.id) return;
+    void apiFetch('/api/v1/users/me/decisions?tab=pending&limit=0').catch(() => {});
   }
 
   // ---------------------------------------------------------------------------
@@ -312,6 +399,7 @@ export class ScionNotificationTray extends LitElement {
     this.stateUserId = id;
     this.notifications = [];
     this.seenIds = new Set();
+    this.lastDecisionsCount = 0;
     this.upsertedAtSeq.clear();
     this.initialFetchDone = false;
     // The next user's first fetch answers any event the previous user's
@@ -411,9 +499,22 @@ export class ScionNotificationTray extends LitElement {
     // first fetch has finished there is no list to add to (and no seen set
     // to tell a new row by), so that fetch is joined by fetching as well.
     const detail = (e as CustomEvent<{ data?: unknown } | undefined>).detail;
-    const n = this.initialFetchDone
-      ? notificationFromEvent(detail?.data, this.user?.id ?? null)
-      : null;
+    const userId = this.user?.id ?? null;
+    if (this.initialFetchDone) {
+      const ack = acknowledgedNotificationFromEvent(detail?.data, userId);
+      if (ack) {
+        if (ack.isDecisions) {
+          this.lastDecisionsCount = 0;
+        }
+        this.upsertedAtSeq.delete(ack.id);
+        this.seenIds.delete(ack.id);
+        if (this.notifications.some((x) => x.id === ack.id)) {
+          this.notifications = this.notifications.filter((x) => x.id !== ack.id);
+        }
+        return;
+      }
+    }
+    const n = this.initialFetchDone ? notificationFromEvent(detail?.data, userId) : null;
     if (n) {
       this.upsertNotification(n);
       return;
@@ -425,15 +526,25 @@ export class ScionNotificationTray extends LitElement {
   private upsertNotification(n: Notification): void {
     // Chat rows no longer belong in the bell (see fetchNotifications).
     if (RETIRED_CHAT_STATUSES.has(n.status)) return;
-    if (!this.seenIds.has(n.id)) {
+    if (isDecisionsWaiting(n)) {
+      if (!projectDecisionsEnabled()) return;
+      const nextCount = parseDecisionsCount(n);
+      const currentlyShown = this.notifications.some((x) => x.id === n.id);
+      if (!currentlyShown || nextCount > this.lastDecisionsCount) {
+        this.dispatchBrowserNotification(n);
+      }
+      this.lastDecisionsCount = nextCount;
+      this.seenIds.add(n.id);
+    } else if (!this.seenIds.has(n.id)) {
       this.dispatchBrowserNotification(n);
       this.seenIds.add(n.id);
     }
     this.upsertedAtSeq.set(n.id, this.fetchSeq);
-    // The list is newest first, as the endpoint returns it.
+    // The list is newest first, with decisions_waiting pinned at index 0.
     const at = this.notifications.findIndex((x) => x.id === n.id);
-    this.notifications =
+    const updated =
       at < 0 ? [n, ...this.notifications] : this.notifications.map((x, i) => (i === at ? n : x));
+    this.notifications = pinDecisionsWaitingFirst(updated);
   }
 
   // ---------------------------------------------------------------------------
@@ -451,16 +562,25 @@ export class ScionNotificationTray extends LitElement {
       // A newer request's answer is already shown: this one is older.
       if (seq < this.appliedSeq) return;
       this.appliedSeq = seq;
+      const decisionsOn = projectDecisionsEnabled();
       // Older chat rows can still be unacknowledged; chat no longer belongs
       // in the bell, so they are neither listed, counted nor popped.
-      const incoming = (data ?? []).filter((n) => !RETIRED_CHAT_STATUSES.has(n.status));
+      const incoming = (data ?? []).filter(
+        (n) => !RETIRED_CHAT_STATUSES.has(n.status) && (decisionsOn || !isDecisionsWaiting(n))
+      );
 
-      // Detect new notifications (IDs not previously seen) and dispatch
-      // browser push for them — but only after the first fetch so we don't
-      // blast existing unacknowledged notifications on page load.
+      // Detect new notifications (IDs not previously seen, or decisions_waiting
+      // appearing / increasing) and dispatch browser push — but only after the
+      // first fetch so we don't blast existing unacknowledged rows on page load.
       if (this.initialFetchDone) {
         for (const n of incoming) {
-          if (!this.seenIds.has(n.id)) {
+          if (isDecisionsWaiting(n)) {
+            const nextCount = parseDecisionsCount(n);
+            const currentlyShown = this.notifications.some((x) => x.id === n.id);
+            if (!currentlyShown || nextCount > this.lastDecisionsCount) {
+              this.dispatchBrowserNotification(n);
+            }
+          } else if (!this.seenIds.has(n.id)) {
             this.dispatchBrowserNotification(n);
           }
         }
@@ -470,12 +590,17 @@ export class ScionNotificationTray extends LitElement {
       // answer: keep them (they are already seen). Older ones are answered.
       const incomingIds = new Set(incoming.map((n) => n.id));
       const kept = this.notifications.filter(
-        (n) => !incomingIds.has(n.id) && (this.upsertedAtSeq.get(n.id) ?? -1) >= seq
+        (n) =>
+          !incomingIds.has(n.id) &&
+          (this.upsertedAtSeq.get(n.id) ?? -1) >= seq &&
+          (decisionsOn || !isDecisionsWaiting(n))
       );
       for (const [id, at] of this.upsertedAtSeq) {
         if (at < seq) this.upsertedAtSeq.delete(id);
       }
-      const next = [...kept, ...incoming];
+      const next = pinDecisionsWaitingFirst([...kept, ...incoming]);
+      const decisionsRow = next.find((n) => isDecisionsWaiting(n));
+      this.lastDecisionsCount = decisionsRow ? parseDecisionsCount(decisionsRow) : 0;
 
       // Update seen set to current snapshot
       this.seenIds = new Set(next.map((n) => n.id));
@@ -495,12 +620,13 @@ export class ScionNotificationTray extends LitElement {
       return;
     }
 
-    const title = this.browserNotificationTitle(n.status);
+    const decisions = isDecisionsWaiting(n);
+    const title = decisions ? 'Decisions waiting' : this.browserNotificationTitle(n.status);
     // The Notification API shows the body as plain text.
     const excerpt = reviewSummaryExcerpt(n);
     new window.Notification(title, {
       body: excerpt ? `${n.message}\n\u201c${excerpt}\u201d` : n.message,
-      tag: n.id, // deduplicate if the same notification is seen again
+      tag: decisions ? DECISIONS_WAITING_KIND : n.id, // deduplicate in OS notification center
       icon: '/scion-notification-icon.png',
     });
   }
@@ -519,6 +645,8 @@ export class ScionNotificationTray extends LitElement {
         return 'Review Submitted';
       case SECRET_PENDING_STATUS:
         return 'Secret Awaiting Approval';
+      case DECISIONS_WAITING_STATUS:
+        return 'Decisions waiting';
       default:
         return 'Scion Notification';
     }
@@ -559,8 +687,9 @@ export class ScionNotificationTray extends LitElement {
       requestAnimationFrame(() => {
         document.addEventListener('click', this.boundOnClickOutside, true);
       });
-      // Refresh on open
+      // Refresh on open and reconcile Decisions bell asynchronously (B6)
       void this.fetchNotifications();
+      this.reconcileDecisionsBell();
     } else {
       document.removeEventListener('click', this.boundOnClickOutside, true);
     }
@@ -590,6 +719,8 @@ export class ScionNotificationTray extends LitElement {
         return 'calendar-x';
       case SECRET_PENDING_STATUS:
         return 'shield-lock';
+      case DECISIONS_WAITING_STATUS:
+        return 'signpost-split';
       default:
         return 'info-circle-fill';
     }
@@ -605,6 +736,8 @@ export class ScionNotificationTray extends LitElement {
       case 'LIMITS_EXCEEDED':
       case SCHEDULE_BLOCKED_STATUS:
         return 'status-danger';
+      case DECISIONS_WAITING_STATUS:
+        return 'status-primary';
       default:
         return 'status-info';
     }
@@ -763,6 +896,22 @@ export class ScionNotificationTray extends LitElement {
       background: var(--scion-bg-subtle, #f1f5f9);
     }
 
+    .notif-item.pinned {
+      background: color-mix(
+        in srgb,
+        var(--scion-primary, #3b82f6) 5%,
+        var(--scion-surface, #ffffff)
+      );
+    }
+
+    .notif-item.pinned:hover {
+      background: color-mix(
+        in srgb,
+        var(--scion-primary, #3b82f6) 9%,
+        var(--scion-surface, #ffffff)
+      );
+    }
+
     .notif-icon {
       flex-shrink: 0;
       display: flex;
@@ -786,6 +935,10 @@ export class ScionNotificationTray extends LitElement {
       color: var(--scion-danger, #ef4444);
     }
 
+    .status-primary sl-icon {
+      color: var(--scion-primary, #3b82f6);
+    }
+
     .status-info sl-icon {
       color: var(--scion-text-muted, #64748b);
     }
@@ -793,6 +946,14 @@ export class ScionNotificationTray extends LitElement {
     .notif-body {
       flex: 1;
       min-width: 0;
+    }
+
+    .notif-title {
+      font-size: 0.75rem;
+      font-weight: 600;
+      line-height: 1.3;
+      color: var(--scion-text, #1e293b);
+      margin-bottom: 0.125rem;
     }
 
     .notif-message {
@@ -850,6 +1011,10 @@ export class ScionNotificationTray extends LitElement {
     .notif-meta a {
       color: var(--scion-primary, #3b82f6);
       text-decoration: none;
+    }
+
+    .notif-meta a.decisions-open-link {
+      font-weight: 600;
     }
 
     .notif-meta a:hover {
@@ -1076,12 +1241,16 @@ export class ScionNotificationTray extends LitElement {
     const excerpt = reviewSummaryExcerpt(n);
     const artifactLink = reviewSummaryLink(n);
     const secretsLink = pendingSecretLink(n);
+    const decisionsLink = decisionsWaitingLink(n);
+    const isDecisions = decisionsLink !== null;
+    const iconStatus = isDecisions ? DECISIONS_WAITING_STATUS : n.status;
     return html`
-      <div class="notif-item">
-        <div class="notif-icon ${this.statusClass(n.status)}">
-          <sl-icon name=${this.statusIcon(n.status)}></sl-icon>
+      <div class="notif-item ${isDecisions ? 'pinned' : ''}">
+        <div class="notif-icon ${this.statusClass(iconStatus)}">
+          <sl-icon name=${this.statusIcon(iconStatus)}></sl-icon>
         </div>
         <div class="notif-body">
+          ${isDecisions ? html`<div class="notif-title">Decisions waiting</div>` : nothing}
           <div class="notif-message">${n.message}</div>
           <sl-tooltip content=${n.message} hoist>
             <span class="truncation-badge" style="display:none">...</span>
@@ -1089,6 +1258,15 @@ export class ScionNotificationTray extends LitElement {
           ${excerpt ? html`<div class="notif-excerpt">“${excerpt}”</div>` : nothing}
           <div class="notif-meta">
             <span>${this.relativeTime(n.createdAt)}</span>
+            ${decisionsLink
+              ? html`<a
+                  href=${decisionsLink}
+                  class="decisions-open-link"
+                  @click=${(e: Event): void => this.navigateToPath(e, decisionsLink)}
+                >
+                  Open Decisions
+                </a>`
+              : nothing}
             ${artifactLink
               ? html`<a
                   href=${artifactLink}
