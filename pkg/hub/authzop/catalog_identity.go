@@ -547,7 +547,7 @@ var identityOperations = []OperationSpec{
 	{
 		ID:          "user.admin.suspend",
 		Domain:      "user.admin",
-		Description: "Suspend or reactivate a user account (dispatched from PATCH /api/v1/users/{id} when status field is present). A token needs user:suspend on a hub boundary, checked on the hub-level user record. The caller's own status and activating an invited user are refused for every credential",
+		Description: "Suspend or reactivate a user account (dispatched from PATCH /api/v1/users/{id} when status field is present). A token needs user:suspend on a hub boundary, checked on the hub-level user record. The caller's own status and changing an invited user's status are refused for every credential",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointInternalDispatch, Pattern: "updateUser:status-field"},
 		},
@@ -570,6 +570,7 @@ var identityOperations = []OperationSpec{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestUserPatchToken_StatusRequiresSuspendSelector"},
 			{Package: "pkg/hub", Function: "TestUserPatchToken_SelfStatusGuardStillApplies"},
+			{Package: "pkg/hub", Function: "TestUpdateUser_SuspendInvitedUserConflict"},
 		},
 		Bearer: BearerDisposition{Kind: BearerAdmit, Target: BearerTargetHubInstance, Boundaries: []BearerBoundary{BearerBoundaryHub}, Pin: "TestUserPatchToken_StatusRequiresSuspendSelector"},
 	},

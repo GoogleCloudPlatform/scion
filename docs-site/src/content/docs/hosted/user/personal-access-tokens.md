@@ -152,7 +152,7 @@ user record, and your user must also hold the matching permission:
 - A forced delete with a token also needs `agent.delete` on each of the user's agents through
   the token: the token's scopes must include `agent:delete`.
 - Changing your own profile or role still needs a sign-in. No credential can change your own
-  status, delete your own account, or activate an invited user. The last super-admin,
+  status, delete your own account, or change an invited user's status. The last super-admin,
   last-project-owner and blocker rules of a delete apply to tokens as to sign-in sessions.
 
 ### Hub-boundary tokens for global catalog authoring

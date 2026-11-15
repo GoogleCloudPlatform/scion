@@ -2909,20 +2909,110 @@ func TestUpdateUser_RoleAndStatusOnInvitedUserConflict(t *testing.T) {
 	assert.Equal(t, store.UserStatusInvited, got.Status)
 }
 
-// TestSuspendUser_InvitedUserAllowed verifies status changes on invited users
-// remain allowed.
-func TestSuspendUser_InvitedUserAllowed(t *testing.T) {
+// TestUpdateUser_SuspendInvitedUserConflict verifies PATCH status=suspended on
+// an invited user returns 409 (ptone/scion#2070): pending invites are revoked
+// by deleting the user rather than suspended, so invited -> suspended -> active
+// cannot bypass default_user_role or invited-only role guards.
+func TestUpdateUser_SuspendInvitedUserConflict(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 	user := createInvitedUser(t, s, "suspend")
 
 	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user.ID,
 		map[string]string{"status": "suspended"})
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "invited users cannot be suspended; remove the pending invite instead")
 
 	got, err := s.GetUser(ctx, user.ID)
 	require.NoError(t, err)
-	assert.Equal(t, "suspended", got.Status)
+	assert.Equal(t, store.UserStatusInvited, got.Status)
+	assert.Equal(t, store.UserRoleMember, got.Role)
+	grants := observeHubRoleGrants(t, s, user.ID)
+	assert.False(t, grants.InHubMembers)
+	assert.Equal(t, 0, grants.HubViewerBindings)
+}
+
+// TestUpdateUser_SuspendInvitedUserNonAdminDenied verifies authorization runs
+// before the invited-suspend guard: without user.suspend the caller gets 403.
+func TestUpdateUser_SuspendInvitedUserNonAdminDenied(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	user := createInvitedUser(t, s, "suspend-nonadmin")
+
+	actor := &store.User{
+		ID:          tid("invited-suspend-actor"),
+		Email:       "invitedsuspendactor@example.com",
+		DisplayName: "Plain Member",
+		Role:        "member",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, actor))
+
+	rec := doRequestAsUser(t, srv, actor, http.MethodPatch, "/api/v1/users/"+user.ID,
+		map[string]string{"status": "suspended"})
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+}
+
+// TestUpdateUser_SuspendInvitedUserWithMetadataConflict verifies a PATCH
+// combining status=suspended with profile fields on an invited user is
+// rejected as a whole and leaves profile fields untouched.
+func TestUpdateUser_SuspendInvitedUserWithMetadataConflict(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	user := createInvitedUser(t, s, "suspend-mixed")
+
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user.ID,
+		map[string]string{"status": "suspended", "displayName": "Renamed"})
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+
+	got, err := s.GetUser(ctx, user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.UserStatusInvited, got.Status)
+	assert.Equal(t, "Invited suspend-mixed", got.DisplayName)
+}
+
+// TestInvitedUser_SuspendLaunderingBlocked verifies an invited user cannot be
+// moved through invited -> suspended -> active to bypass default_user_role or
+// invited-only hub-role restrictions, and still receives default_user_role at
+// first sign-in (ptone/scion#2070).
+func TestInvitedUser_SuspendLaunderingBlocked(t *testing.T) {
+	srv, s := testServer(t)
+	srv.config.DefaultUserRole = store.UserRoleViewer
+	ctx := context.Background()
+	user := createInvitedUser(t, s, "launder")
+
+	// Step 1: attempting to launder status via invited -> suspended is refused.
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user.ID,
+		map[string]string{"status": store.UserStatusSuspended})
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+
+	// Invited-only restrictions remain in force on the untouched invited row.
+	rec = doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user.ID,
+		map[string]string{"role": store.UserRoleAdmin})
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+
+	viewerRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubViewer, store.RoleScopeSystem)
+	require.NoError(t, err)
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/admin/role-bindings", createRoleBindingRequest{
+		RoleDefinitionID: viewerRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      user.ID,
+		ScopeType:        store.RoleScopeSystem,
+	})
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+
+	// First sign-in activates the user and applies default_user_role=viewer
+	// rather than keeping the placeholder member role.
+	activated, err := srv.provisionUser(ctx, &ExternalUserInfo{
+		Email:       user.Email,
+		DisplayName: "Activated Viewer",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, store.UserStatusActive, activated.Status)
+	assert.Equal(t, store.UserRoleViewer, activated.Role)
+	grants := observeHubRoleGrants(t, s, user.ID)
+	assert.False(t, grants.InHubMembers)
+	assert.Equal(t, 1, grants.HubViewerBindings)
 }
 
 // TestUpdateUser_RoleOnInvitedUserNonAdminDenied verifies authorization runs

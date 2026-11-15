@@ -110,6 +110,7 @@ func TestAdvisoryLockKeys_NonOverlapping(t *testing.T) {
 		LockTestIdentityReaper,
 		LockAgentDelegatedCredentialPurge,
 		LockChatRetention,
+		LockInvitedHubRoleGuard,
 		LockPendingSecretExpiry,
 	}
 
@@ -212,6 +213,7 @@ func TestAdvisoryLockKeys_AllUnique(t *testing.T) {
 		{"LockTestIdentityReaper", LockTestIdentityReaper},
 		{"LockAgentDelegatedCredentialPurge", LockAgentDelegatedCredentialPurge},
 		{"LockChatRetention", LockChatRetention},
+		{"LockInvitedHubRoleGuard", LockInvitedHubRoleGuard},
 		{"LockHubSettingsGuardedBatch", LockHubSettingsGuardedBatch},
 		{"LockPendingSecretExpiry", LockPendingSecretExpiry},
 		{"LockPendingSecretOwnerWrite", LockPendingSecretOwnerWrite},
