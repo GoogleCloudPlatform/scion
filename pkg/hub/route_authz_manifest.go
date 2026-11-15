@@ -213,6 +213,7 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/admin/diagnostics/logs":             "admin", // Diagnostics logs
 	"/api/v1/admin/health/summary":               "admin", // Health summary
 	"/api/v1/admin/orphaned-agents":              "admin", // Orphaned and revoked agents (session only)
+	"/api/v1/admin/runtime-orphans":              "admin", // Runtime objects with no hub agent (session only)
 	"/api/v1/admin/messaging":                    "admin", // Admin messaging
 	"/api/v1/admin/messaging/divergence":         "admin", // Admin messaging divergence check
 	"/api/v1/admin/experiments":                  "admin", // Admin experiment overrides

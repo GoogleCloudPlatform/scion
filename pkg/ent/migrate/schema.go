@@ -2940,6 +2940,38 @@ var (
 			},
 		},
 	}
+	// RuntimeOrphansColumns holds the columns for the "runtime_orphans" table.
+	RuntimeOrphansColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "kind", Type: field.TypeString},
+		{Name: "broker_id", Type: field.TypeString},
+		{Name: "runtime_target", Type: field.TypeString, Default: ""},
+		{Name: "project_id", Type: field.TypeString, Default: ""},
+		{Name: "slug", Type: field.TypeString, Default: ""},
+		{Name: "agent_id", Type: field.TypeString, Default: ""},
+		{Name: "run_id", Type: field.TypeString, Default: ""},
+		{Name: "reason", Type: field.TypeString},
+		{Name: "observed_phase", Type: field.TypeString, Default: ""},
+		{Name: "first_seen_at", Type: field.TypeTime},
+		{Name: "last_seen_at", Type: field.TypeTime},
+		{Name: "missed_inventories", Type: field.TypeInt, Default: 0},
+		{Name: "action_state", Type: field.TypeString, Default: "none"},
+		{Name: "action_at", Type: field.TypeTime, Nullable: true},
+		{Name: "action_error", Type: field.TypeString, Default: ""},
+	}
+	// RuntimeOrphansTable holds the schema information for the "runtime_orphans" table.
+	RuntimeOrphansTable = &schema.Table{
+		Name:       "runtime_orphans",
+		Columns:    RuntimeOrphansColumns,
+		PrimaryKey: []*schema.Column{RuntimeOrphansColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "runtimeorphan_kind_broker_id_runtime_target_project_id_slug_agent_id",
+				Unique:  true,
+				Columns: []*schema.Column{RuntimeOrphansColumns[1], RuntimeOrphansColumns[2], RuntimeOrphansColumns[3], RuntimeOrphansColumns[4], RuntimeOrphansColumns[5], RuntimeOrphansColumns[6]},
+			},
+		},
+	}
 	// SchedulesColumns holds the columns for the "schedules" table.
 	SchedulesColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -3776,6 +3808,7 @@ var (
 		RoleBindingsTable,
 		RoleDefinitionsTable,
 		RuntimeBrokersTable,
+		RuntimeOrphansTable,
 		SchedulesTable,
 		ScheduledEventsTable,
 		SecretsTable,

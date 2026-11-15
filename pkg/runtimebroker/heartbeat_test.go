@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -473,6 +474,38 @@ func TestHeartbeatService_ReportsRunIDLabel(t *testing.T) {
 	}
 	if v, ok := got["unlabelled"]; !ok || v != "" {
 		t.Errorf("unlabelled entry RunID = %q (reported %v), want empty", v, ok)
+	}
+}
+
+// TestHeartbeatService_ReportsAgentID: each entry carries its Hub agent ID,
+// from AgentInfo.ID or else the agent_id label, and none when neither is
+// known or the value is not a UUID, such as a legacy container's name label
+// (ptone/scion#7930).
+func TestHeartbeatService_ReportsAgentID(t *testing.T) {
+	id1, id2 := "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"
+	client := &mockRuntimeBrokerService{}
+	manager := &heartbeatMockManager{
+		agents: []api.AgentInfo{
+			{Name: "by-id", ProjectID: "project-1", Phase: "running", ID: id1, Labels: map[string]string{api.LabelAgentID: id2}},
+			{Name: "by-label", ProjectID: "project-1", Phase: "running", Labels: map[string]string{api.LabelAgentID: id2}},
+			{Name: "legacy", ProjectID: "project-1", Phase: "running", Labels: map[string]string{api.LabelAgentID: "legacy"}},
+			{Name: "upper", ProjectID: "project-1", Phase: "running", Labels: map[string]string{api.LabelAgentID: "{" + strings.ToUpper(id2) + "}"}},
+			{Name: "unknown", ProjectID: "project-1", Phase: "running"},
+		},
+	}
+	svc := NewHeartbeatService(client, "test-host", time.Hour, manager, nil, slog.Default())
+	if err := svc.ForceHeartbeat(context.Background()); err != nil {
+		t.Fatalf("ForceHeartbeat failed: %v", err)
+	}
+	got := map[string]string{}
+	for _, p := range client.getHeartbeatCalls()[0].Heartbeat.Projects {
+		for _, a := range p.Agents {
+			got[a.Slug] = a.AgentID
+		}
+	}
+	want := map[string]string{"by-id": id1, "by-label": id2, "legacy": "", "upper": id2, "unknown": ""}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("agent IDs = %v, want %v", got, want)
 	}
 }
 

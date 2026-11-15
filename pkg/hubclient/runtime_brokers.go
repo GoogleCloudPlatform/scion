@@ -425,6 +425,10 @@ type AgentHeartbeat struct {
 	// (api.AgentInfo.RunID); empty for an unlabelled entry. An older broker
 	// omits it.
 	RunID string `json:"runId,omitempty"`
+	// AgentID is the listed entry's Hub agent ID (its agent_id label, or
+	// the ID the runtime reports); empty when unknown. An older broker
+	// omits it, and the Hub then matches the entry by slug only.
+	AgentID string `json:"agentId,omitempty"`
 	// OtherEntries are the agent's entries listed by other targets of this
 	// broker, which the heartbeat does not report as agents of their own
 	// (one agent per project and name), each with its target and label.

@@ -164,6 +164,8 @@ type Tx struct {
 	RoleDefinition *RoleDefinitionClient
 	// RuntimeBroker is the client for interacting with the RuntimeBroker builders.
 	RuntimeBroker *RuntimeBrokerClient
+	// RuntimeOrphan is the client for interacting with the RuntimeOrphan builders.
+	RuntimeOrphan *RuntimeOrphanClient
 	// Schedule is the client for interacting with the Schedule builders.
 	Schedule *ScheduleClient
 	// ScheduledEvent is the client for interacting with the ScheduledEvent builders.
@@ -411,6 +413,7 @@ func (tx *Tx) init() {
 	tx.RoleBinding = NewRoleBindingClient(tx.config)
 	tx.RoleDefinition = NewRoleDefinitionClient(tx.config)
 	tx.RuntimeBroker = NewRuntimeBrokerClient(tx.config)
+	tx.RuntimeOrphan = NewRuntimeOrphanClient(tx.config)
 	tx.Schedule = NewScheduleClient(tx.config)
 	tx.ScheduledEvent = NewScheduledEventClient(tx.config)
 	tx.Secret = NewSecretClient(tx.config)
