@@ -31,8 +31,15 @@ import (
 // silently report op=unknown.
 const stackDepth = 32
 
-// siteFrames is how many non-infrastructure frames the WARN's site lists.
-const siteFrames = 3
+// siteFrames is how many non-infrastructure frames the WARN's site lists by
+// default. When frames inside the store adapter (funnelPkg) leave fewer than
+// minCallerFrames frames outside it, site walks up to maxSiteFrames so the
+// caller that invoked the store method is still named.
+const (
+	siteFrames      = 3
+	minCallerFrames = 2
+	maxSiteFrames   = 6
+)
 
 // maxOps caps the number of distinct op values. Past it, an op is reported
 // as OpOther, which bounds both the metric label and the rate limiter.
@@ -116,6 +123,7 @@ type frameInfo struct {
 	file  string // base file name
 	line  int
 	infra bool
+	store bool
 }
 
 // callsites caches the symbolized frames of each PC and interns op names.
@@ -150,6 +158,7 @@ func (c *callsites) frames(pc uintptr) []frameInfo {
 				file:  filepath.Base(fr.File),
 				line:  fr.Line,
 				infra: isInfra(fr.Function),
+				store: strings.HasPrefix(fr.Function, funnelPkg),
 			})
 		}
 		if !more {
@@ -235,15 +244,20 @@ func (c *callsites) intern(name string) (op string, capped bool) {
 	return name, false
 }
 
-// site formats the first siteFrames non-infrastructure frames as
+// site formats the first siteFrames non-infrastructure frames (extended up to
+// maxSiteFrames when needed to include minCallerFrames outside funnelPkg) as
 // "fn file:line <- fn <- fn". It is called only when a WARN is emitted.
 func (c *callsites) site(pcs []uintptr) string {
 	var b strings.Builder
 	n := 0
+	outside := 0
 	for _, pc := range pcs {
 		for _, f := range c.frames(pc) {
 			if f.infra {
 				continue
+			}
+			if !f.store {
+				outside++
 			}
 			switch n {
 			case 0:
@@ -253,7 +267,7 @@ func (c *callsites) site(pcs []uintptr) string {
 				b.WriteString(f.fn)
 			}
 			n++
-			if n == siteFrames {
+			if (n >= siteFrames && outside >= minCallerFrames) || n == maxSiteFrames {
 				return b.String()
 			}
 		}

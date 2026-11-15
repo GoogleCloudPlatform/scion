@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -553,15 +554,16 @@ func TestLockWaitOutcomes(t *testing.T) {
 				t.Errorf("lock_wait line: %+v", l.Attrs)
 			}
 			// The holder is named: one checkout overlapped the 2 s wait.
-			if l := lines[0]; l.Int("holders") != 1 || l.Int("top_holder_ms") != 2000 || l.Str("top_holder_op") == "" {
+			if l := lines[0]; l.Int("holders") != 1 || l.Int("top_holder_ms") != 2000 || l.Str("top_holder_op") == "" || l.Str("top_holder_site") == "" {
 				t.Errorf("holder fields: %+v", l.Attrs)
 			}
 			_, hasOpen := lines[0].Attrs["holder_open_op"]
+			_, hasOpenSite := lines[0].Attrs["holder_open_site"]
 			if tc.fire != nil {
-				if !hasOpen || lines[0].Int("holder_open_ms") != 2000 {
-					t.Errorf("a waiter that gave up must name the open holder: %+v", lines[0].Attrs)
+				if !hasOpen || !hasOpenSite || lines[0].Int("holder_open_ms") != 2000 || lines[0].Str("holder_open_site") == "" {
+					t.Errorf("a waiter that gave up must name the open holder and its site: %+v", lines[0].Attrs)
 				}
-			} else if hasOpen {
+			} else if hasOpen || hasOpenSite {
 				t.Errorf("an acquired waiter reports an open holder: %+v", lines[0].Attrs)
 			}
 			if got := hs.mon.pending.Load(); got != 0 {
@@ -732,6 +734,12 @@ func attrMap(attrs []slog.Attr) map[string]slog.Value {
 	return out
 }
 
+func holderAttrs(m *Monitor, from, to time.Time, gaveUp bool) map[string]slog.Value {
+	var r record
+	m.holders.fill(m, &r, from, to, gaveUp)
+	return attrMap(m.siteAttrs(r))
+}
+
 // TestHolderRingConvoy: a waiter behind a convoy of five short holders is
 // told how many held the connection during its wait and which held longest.
 func TestHolderRingConvoy(t *testing.T) {
@@ -749,35 +757,51 @@ func TestHolderRingConvoy(t *testing.T) {
 	for i, s := range spans {
 		m.holders.closed(at(s.start), at(s.end), seedOp(m, uintptr(101+i), s.fn), 1)
 	}
-	got := attrMap(m.holders.attrs(m, at(0), at(2000), false))
-	if got["holders"].Int64() != 5 || got["top_holder_op"].String() != "hub.c" || got["top_holder_ms"].Int64() != 400 {
+	got := holderAttrs(m, at(0), at(2000), false)
+	if got["holders"].Int64() != 5 || got["top_holder_op"].String() != "hub.c" || got["top_holder_site"].String() != "hub.c x.go:1" || got["top_holder_ms"].Int64() != 400 {
 		t.Fatalf("convoy attrs: %+v", got)
 	}
 	if _, ok := got["holder_open_op"]; ok {
 		t.Fatalf("no open checkout, yet holder_open_op is set: %+v", got)
 	}
+	if _, ok := got["holder_open_site"]; ok {
+		t.Fatalf("no open checkout, yet holder_open_site is set: %+v", got)
+	}
 }
 
 // TestHolderRingDeadlineWaiterNamesOpenHolder: a waiter that gives up while
-// one checkout is still open is told who that holder is and for how long it
-// had held the connection.
+// one checkout is still open is told who that holder is, its caller site, and
+// for how long it had held the connection.
 func TestHolderRingDeadlineWaiterNamesOpenHolder(t *testing.T) {
 	m := NewMonitor(Config{Dialect: DialectSQLite, Logger: newLogger(&CaptureHandler{})})
 	t.Cleanup(m.Close)
 	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	m.holders.opened(t0, seedOp(m, 200, "hub.slow"), 1)
-	got := attrMap(m.holders.attrs(m, t0.Add(100*time.Millisecond), t0.Add(3*time.Second), true))
-	if got["holders"].Int64() != 1 || got["top_holder_op"].String() != "hub.slow" || got["top_holder_ms"].Int64() != 2900 {
+	m.sites.mu.Lock()
+	m.sites.pcs[200] = []frameInfo{
+		{fn: "entadapter.(*MessageStore).ListMessages", file: "message_store.go", line: 460, store: true},
+		{fn: "hub.(*Server).handleConvListMessages", file: "handlers_conversations.go", line: 559},
+	}
+	m.sites.mu.Unlock()
+	var pcs [stackDepth]uintptr
+	pcs[0] = 200
+	m.holders.opened(t0, pcs, 1)
+	got := holderAttrs(m, t0.Add(100*time.Millisecond), t0.Add(3*time.Second), true)
+	wantOp := "entadapter.(*MessageStore).ListMessages"
+	wantSite := "entadapter.(*MessageStore).ListMessages message_store.go:460 <- hub.(*Server).handleConvListMessages"
+	if got["holders"].Int64() != 1 || got["top_holder_op"].String() != wantOp || got["top_holder_site"].String() != wantSite || got["top_holder_ms"].Int64() != 2900 {
 		t.Fatalf("attrs: %+v", got)
 	}
-	if got["holder_open_op"].String() != "hub.slow" || got["holder_open_ms"].Int64() != 3000 {
+	if got["holder_open_op"].String() != wantOp || got["holder_open_site"].String() != wantSite || got["holder_open_ms"].Int64() != 3000 {
 		t.Fatalf("open holder: %+v", got)
 	}
 	// Once that checkout ends, it is no longer open.
-	m.holders.closed(t0, t0.Add(4*time.Second), seedOp(m, 200, "hub.slow"), 1)
-	got = attrMap(m.holders.attrs(m, t0.Add(100*time.Millisecond), t0.Add(3*time.Second), true))
+	m.holders.closed(t0, t0.Add(4*time.Second), pcs, 1)
+	got = holderAttrs(m, t0.Add(100*time.Millisecond), t0.Add(3*time.Second), true)
 	if _, ok := got["holder_open_op"]; ok {
 		t.Fatalf("closed checkout still reported open: %+v", got)
+	}
+	if _, ok := got["holder_open_site"]; ok {
+		t.Fatalf("closed checkout still reported holder_open_site: %+v", got)
 	}
 }
 
@@ -790,9 +814,94 @@ func TestHolderRingWrapsAtCapacity(t *testing.T) {
 		s := t0.Add(time.Duration(i) * time.Millisecond)
 		m.holders.closed(s, s.Add(time.Millisecond), pcs, 1)
 	}
-	got := attrMap(m.holders.attrs(m, t0, t0.Add(time.Hour), false))
+	got := holderAttrs(m, t0, t0.Add(time.Hour), false)
 	if got["holders"].Int64() != holderRingSize {
 		t.Fatalf("holders = %v, want %d (ring exhausted)", got["holders"], holderRingSize)
+	}
+}
+
+// TestSuppressedLockWaitSkipsHolderSiteFormatting verifies that holder caller
+// sites are formatted only after the rate-limit check accepts the record, so
+// suppressed lock_wait lines do not symbolize or format holder sites.
+func TestSuppressedLockWaitSkipsHolderSiteFormatting(t *testing.T) {
+	clk := NewFakeClock()
+	h := &CaptureHandler{}
+	m := NewMonitor(Config{
+		Dialect:               DialectSQLite,
+		LockWaitWarnThreshold: time.Second,
+		WarnInterval:          time.Minute,
+		Logger:                newLogger(h),
+		Now:                   clk.Now,
+	})
+	t.Cleanup(m.Close)
+
+	// First lock_wait puts ("lock_wait", "hub.waiter") into its 1m cooldown.
+	m.warn(record{msg: msgLockWait, kind: "lock_wait", op: "hub.waiter"})
+
+	var caller [1]uintptr
+	if runtime.Callers(2, caller[:]) != 1 {
+		t.Fatal("runtime.Callers returned no frame")
+	}
+	realPC := caller[0]
+
+	m.sites.mu.Lock()
+	m.sites.pcs[400] = []frameInfo{
+		{fn: "entadapter.(*MessageStore).ListMessages", file: "message_store.go", line: 10, store: true},
+	}
+	m.sites.mu.Unlock()
+
+	var holderPCS [stackDepth]uintptr
+	holderPCS[0] = 400
+	holderPCS[1] = realPC
+	t0 := clk.Now()
+	m.holders.closed(t0, t0.Add(2*time.Second), holderPCS, 2)
+
+	// Suppressed lock_wait: op resolves from PC 400 alone, and holder site
+	// formatting must not run (leaving realPC unsymbolized).
+	clk.Advance(5 * time.Second)
+	var suppressed record
+	suppressed.msg = msgLockWait
+	suppressed.kind = "lock_wait"
+	suppressed.op = "hub.waiter"
+	m.holders.fill(m, &suppressed, t0, t0.Add(2*time.Second), false)
+	m.warn(suppressed)
+	if err := m.Flush(flushTimeout); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(h.Lines(MsgLockWait)); got != 1 {
+		t.Fatalf("got %d lock_wait lines after suppressed wait, want 1", got)
+	}
+	m.sites.mu.RLock()
+	_, symbolized := m.sites.pcs[realPC]
+	m.sites.mu.RUnlock()
+	if symbolized {
+		t.Fatal("suppressed lock_wait symbolized holder caller PC before rate-limit expiry")
+	}
+
+	// Once the rate-limit window expires, write formats top_holder_site and
+	// symbolizes realPC.
+	clk.Advance(time.Minute)
+	var emitted record
+	emitted.msg = msgLockWait
+	emitted.kind = "lock_wait"
+	emitted.op = "hub.waiter"
+	m.holders.fill(m, &emitted, t0, t0.Add(2*time.Second), false)
+	m.warn(emitted)
+	if err := m.Flush(flushTimeout); err != nil {
+		t.Fatal(err)
+	}
+	lines := h.Lines(MsgLockWait)
+	if len(lines) != 2 {
+		t.Fatalf("got %d lock_wait lines after interval, want 2", len(lines))
+	}
+	m.sites.mu.RLock()
+	_, symbolized = m.sites.pcs[realPC]
+	m.sites.mu.RUnlock()
+	if !symbolized {
+		t.Fatal("emitted lock_wait did not symbolize holder caller PC")
+	}
+	if !strings.Contains(lines[1].Str("top_holder_site"), "testing.tRunner") {
+		t.Errorf("top_holder_site = %q, want caller frame", lines[1].Str("top_holder_site"))
 	}
 }
 
@@ -822,10 +931,56 @@ func TestLockWaitHolderFieldsOmittedOnPostgres(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("got %d lock_wait lines, want 1", len(lines))
 	}
-	for _, k := range []string{"holders", "top_holder_op", "holder_open_op"} {
+	for _, k := range []string{"holders", "top_holder_op", "top_holder_site", "holder_open_op", "holder_open_site"} {
 		if _, ok := lines[0].Attrs[k]; ok {
 			t.Errorf("Postgres lock_wait line carries %s: %+v", k, lines[0].Attrs)
 		}
+	}
+}
+
+// TestSiteWalksPastInternalStoreFrames verifies that when a store method uses
+// internal helpers or closures in pkg/store/entadapter, site extends past
+// siteFrames (up to maxSiteFrames) so the caller outside entadapter is still
+// named, while non-store stacks stay at siteFrames.
+func TestSiteWalksPastInternalStoreFrames(t *testing.T) {
+	c := newCallsites()
+	c.pcs[1] = []frameInfo{
+		{fn: "entadapter.(*MessageStore).ListMessages.func1", file: "message_store.go", line: 517, store: true},
+		{fn: "entadapter.participantPage", file: "message_store.go", line: 567, store: true},
+		{fn: "entadapter.(*MessageStore).ListMessages", file: "message_store.go", line: 524, store: true},
+		{fn: "hub.(*Server).handleChatV2CatchUp", file: "handlers_chat_v2.go", line: 3564},
+		{fn: "hub.(*Server).withAuth", file: "routes.go", line: 100},
+		{fn: "net/http.HandlerFunc.ServeHTTP", file: "server.go", line: 2100},
+	}
+	got := c.site([]uintptr{1})
+	want := "entadapter.(*MessageStore).ListMessages.func1 message_store.go:517 <- entadapter.participantPage <- entadapter.(*MessageStore).ListMessages <- hub.(*Server).handleChatV2CatchUp <- hub.(*Server).withAuth"
+	if got != want {
+		t.Errorf("site = %q, want %q", got, want)
+	}
+
+	// Non-store stack still stops at siteFrames (3).
+	c.pcs[2] = []frameInfo{
+		{fn: "hub.a", file: "a.go", line: 10},
+		{fn: "hub.b", file: "b.go", line: 20},
+		{fn: "hub.c", file: "c.go", line: 30},
+		{fn: "hub.d", file: "d.go", line: 40},
+	}
+	if got := c.site([]uintptr{2}); got != "hub.a a.go:10 <- hub.b <- hub.c" {
+		t.Errorf("non-store site = %q", got)
+	}
+
+	// Deep store-only stack is still bounded by maxSiteFrames.
+	c.pcs[3] = []frameInfo{
+		{fn: "entadapter.f1", file: "s.go", line: 1, store: true},
+		{fn: "entadapter.f2", file: "s.go", line: 2, store: true},
+		{fn: "entadapter.f3", file: "s.go", line: 3, store: true},
+		{fn: "entadapter.f4", file: "s.go", line: 4, store: true},
+		{fn: "entadapter.f5", file: "s.go", line: 5, store: true},
+		{fn: "entadapter.f6", file: "s.go", line: 6, store: true},
+		{fn: "entadapter.f7", file: "s.go", line: 7, store: true},
+	}
+	if got := c.site([]uintptr{3}); got != "entadapter.f1 s.go:1 <- entadapter.f2 <- entadapter.f3 <- entadapter.f4 <- entadapter.f5 <- entadapter.f6" {
+		t.Errorf("deep store site = %q", got)
 	}
 }
 
