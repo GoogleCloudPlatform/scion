@@ -14,15 +14,15 @@
 
 // Package celengine provides a consumer-neutral, bounded, no-I/O CEL expression
 // compiler, content-addressed program cache, and evaluator. It is the sole
-// importer of github.com/google/cel-go in the repository.
+// importer of cel.dev/cel-go in the repository.
 package celengine
 
 import (
 	"fmt"
 	"time"
 
-	"github.com/google/cel-go/cel"
-	"github.com/google/cel-go/common/types"
+	"cel.dev/cel-go/cel"
+	"cel.dev/cel-go/common/types"
 )
 
 type typeKind uint8

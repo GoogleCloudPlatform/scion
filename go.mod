@@ -4,6 +4,7 @@ go 1.26.1
 
 require (
 	ariga.io/atlas v0.32.1-0.20250325101103-175b25e1c1b9
+	cel.dev/cel-go v0.33.2
 	cloud.google.com/go/auth v0.20.0
 	cloud.google.com/go/cloudbuild v1.25.0
 	cloud.google.com/go/compute/metadata v0.9.0
@@ -24,7 +25,6 @@ require (
 	github.com/dustin/go-humanize v1.0.1
 	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/go-viper/mapstructure/v2 v2.5.0
-	github.com/google/cel-go v0.31.0
 	github.com/google/uuid v1.6.0
 	github.com/googleapis/gax-go/v2 v2.22.0
 	github.com/gorilla/securecookie v1.1.2

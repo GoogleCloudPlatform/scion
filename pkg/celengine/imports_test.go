@@ -143,7 +143,8 @@ func TestPublicAPIDoesNotExposeCelGo(t *testing.T) {
 		celAliases := map[string]string{}
 		for _, spec := range f.Imports {
 			imp, _ := strconv.Unquote(spec.Path.Value)
-			if imp == "github.com/google/cel-go" || strings.HasPrefix(imp, "github.com/google/cel-go/") {
+			if imp == "github.com/google/cel-go" || strings.HasPrefix(imp, "github.com/google/cel-go/") ||
+				imp == "cel.dev/cel-go" || strings.HasPrefix(imp, "cel.dev/cel-go/") {
 				alias := filepath.Base(imp)
 				if spec.Name != nil {
 					alias = spec.Name.Name

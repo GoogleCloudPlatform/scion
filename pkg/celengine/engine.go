@@ -23,13 +23,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/cel-go/cel"
-	"github.com/google/cel-go/common"
-	celast "github.com/google/cel-go/common/ast"
-	"github.com/google/cel-go/common/types"
-	"github.com/google/cel-go/ext"
-	"github.com/google/cel-go/interpreter"
+	"cel.dev/cel-go/cel"
+	"cel.dev/cel-go/common"
+	celast "cel.dev/cel-go/common/ast"
+	"cel.dev/cel-go/common/types"
+	"cel.dev/cel-go/ext"
+	"cel.dev/cel-go/interpreter"
 )
+
+const pinnedStringsExtVersion uint32 = 5
 
 var errEngineTimeout = errors.New("celengine: eval timeout exceeded")
 
@@ -87,7 +89,7 @@ func New(env Environment, limits Limits, cache CacheConfig) (*Engine, error) {
 		seenExt[extName] = true
 		switch extName {
 		case ExtensionStrings:
-			opts = append(opts, ext.Strings())
+			opts = append(opts, ext.Strings(ext.StringsVersion(pinnedStringsExtVersion)))
 		default:
 			return nil, fmt.Errorf("celengine: unsupported Extension %q", extName)
 		}
