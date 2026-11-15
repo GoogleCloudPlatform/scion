@@ -162,7 +162,14 @@ func (h *OIDCHandlers) HandleAgentIdentityToken(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// 6. Build claims.
+	// 6. Enforce delegation standing: refuse external tokens when the
+	// agent or its delegation chain is not in good standing, or when
+	// standing cannot be evaluated.
+	if h.d.AgentStandingForbidden(r.Context(), w, agentRecord.ID) {
+		return
+	}
+
+	// 7. Build claims.
 	now := time.Now()
 	expiresAt := now.Add(h.d.TokenLifetime())
 
@@ -199,7 +206,7 @@ func (h *OIDCHandlers) HandleAgentIdentityToken(w http.ResponseWriter, r *http.R
 		TokenKind: TokenKindAgent,
 	}
 
-	// 7. Sign with RS256.
+	// 8. Sign with RS256.
 	signer := h.d.KeyManager().Signer()
 	token, err := jwt.Signed(signer).Claims(claims).Serialize()
 	if err != nil {
@@ -211,7 +218,7 @@ func (h *OIDCHandlers) HandleAgentIdentityToken(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// 8. Audit log.
+	// 9. Audit log.
 	slog.Info("OIDC identity token issued",
 		"agent_id", agent.Subject,
 		"project_id", agent.ProjectID,
@@ -220,7 +227,7 @@ func (h *OIDCHandlers) HandleAgentIdentityToken(w http.ResponseWriter, r *http.R
 		"expires_at", expiresAt.UTC().Format(time.RFC3339),
 	)
 
-	// 9. Return 200 with token and expiry.
+	// 10. Return 200 with token and expiry.
 	apierr.WriteJSON(w, http.StatusOK, IdentityTokenResponse{
 		Token:     token,
 		ExpiresAt: expiresAt,
