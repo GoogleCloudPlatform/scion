@@ -581,7 +581,7 @@ func TestFormatStallAge(t *testing.T) {
 func TestNewNotifySubscription_DefaultTriggersIncludeHarnessError(t *testing.T) {
 	sub := newNotifySubscription("p1", store.SubscriberTypeAgent, "parent", "test")
 	require.NotNil(t, sub)
-	assert.Equal(t, []string{"COMPLETED", "WAITING_FOR_INPUT", "LIMITS_EXCEEDED", "STALLED", "ERROR", "HARNESS_ERROR", "HALTED"}, sub.TriggerActivities)
+	assert.Equal(t, []string{"COMPLETED", "IDLE", "WAITING_FOR_INPUT", "LIMITS_EXCEEDED", "STALLED", "ERROR", "HARNESS_ERROR", "HALTED"}, sub.TriggerActivities)
 	assert.True(t, sub.MatchesActivity("harness_error"))
 }
 
