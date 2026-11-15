@@ -123,6 +123,20 @@ func TestAPIOutcomeFromRecord(t *testing.T) {
 	}
 }
 
+func TestProviderErrorMessage(t *testing.T) {
+	for _, tc := range []struct{ name, in, want string }{
+		{"json body", `{"error":{"code":400,"message":"bad model"}}`, "bad model"},
+		{"leading newline and spaces", "\n  {\"error\":{\"message\":\"denied\"}}\n", "denied"},
+		{"plain text", "403 permission denied", "403 permission denied"},
+		{"json without a message", " {\"error\":{}}", " {\"error\":{}}"},
+		{"malformed json", "\n {\"error\":", "\n {\"error\":"},
+	} {
+		if got := providerErrorMessage(tc.in); got != tc.want {
+			t.Errorf("%s: providerErrorMessage(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
+		}
+	}
+}
+
 // SetAPIOutcomeObserver is safe on a nil pipeline and with a nil observer.
 func TestPipelineAPIOutcomeObserver(t *testing.T) {
 	var nilPipeline *Pipeline

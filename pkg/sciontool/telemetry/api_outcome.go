@@ -90,9 +90,10 @@ func apiOutcomeFromRecord(record *logspb.LogRecord, increment usageIncrement, re
 
 // providerErrorMessage returns the provider's own message when msg is a
 // JSON error body ({"error":{"message":...}}, as gemini_cli reports it),
-// and msg otherwise.
+// surrounding whitespace allowed, and msg unchanged otherwise.
 func providerErrorMessage(msg string) string {
-	if !strings.HasPrefix(msg, "{") {
+	trimmed := strings.TrimSpace(msg)
+	if !strings.HasPrefix(trimmed, "{") {
 		return msg
 	}
 	var body struct {
@@ -100,7 +101,7 @@ func providerErrorMessage(msg string) string {
 			Message string `json:"message"`
 		} `json:"error"`
 	}
-	if err := json.Unmarshal([]byte(msg), &body); err != nil {
+	if err := json.Unmarshal([]byte(trimmed), &body); err != nil {
 		return msg
 	}
 	if m := strings.TrimSpace(body.Error.Message); m != "" {
