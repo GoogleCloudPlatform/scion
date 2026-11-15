@@ -43,9 +43,11 @@ const (
 //  1. pkg/systemone/... must not import pkg/hub, pkg/messaging, pkg/store, any
 //     trigger package, or (in P1a) pkg/ruleengine / pkg/celengine.
 //  2. pkg/systemone/provider/... must not import pkg/secret, pkg/store, or
-//     pkg/systemone/runtime.
-//  3. Only pkg/systemone/egress may construct an outbound http.Client in
-//     non-test Go files under pkg/systemone/...
+//     pkg/systemone/runtime, and non-test files under pkg/systemone/provider/...
+//     must not reference egress.NewClient, egress.StaticBearer, or egress.With*.
+//  3. Only pkg/systemone/egress may construct an outbound http.Client or
+//     http.Transport (including zero-value var specs) in non-test Go files
+//     under pkg/systemone/...
 //  4. Exported *ForTesting seams from pkg/systemone/... may only be referenced
 //     from _test.go files and pkg/systemone/conformance.
 func TestImportGuards_SystemOneBoundaries(t *testing.T) {
@@ -138,17 +140,25 @@ func TestImportGuards_SelfTestDetectsViolations(t *testing.T) {
 		scionModulePath + "/pkg/secret",
 	}, chain)
 
-	// HTTP client AST scanner allows pkg/systemone/egress and _test.go, but flags adapter construction.
-	write("pkg/systemone/egress/client.go", "package egress\nimport \"net/http\"\nfunc New() *http.Client { return &http.Client{} }\n")
-	write("pkg/systemone/provider/ok_test.go", "package provider\nimport \"net/http\"\nvar _ = &http.Client{}\n")
+	// HTTP client AST scanner allows pkg/systemone/egress, _test.go, pointer var specs,
+	// runtime egress.NewClient, and provider egress error/constant sentinels, while flagging
+	// adapter/non-egress client construction, zero-value ValueSpecs, and provider egress constructors.
+	write("pkg/systemone/egress/client.go", "package egress\nimport \"net/http\"\nvar zeroTr http.Transport\nfunc New() *http.Client { return &http.Client{} }\n")
+	write("pkg/systemone/provider/ok_test.go", "package provider\nimport (\n\t\"net/http\"\n\t\""+egressPkg+"\"\n)\nvar testClient http.Client\nvar _ = &http.Client{}\nvar _ = egress.NewClient\nvar _ = egress.StaticBearer\n")
+	write("pkg/systemone/provider/ok_ptr.go", "package provider\nimport \"net/http\"\nvar nilClientPtr *http.Client\n")
+	write("pkg/systemone/provider/jevwire/ok_sentinels.go", "package jevwire\nimport \""+egressPkg+"\"\nvar maxB = egress.MaxResponseBytes\nvar _ = egress.IsRedirectBlocked\n")
+	write("pkg/systemone/runtime/ok_runtime_egress.go", "package runtime\nimport \""+egressPkg+"\"\nvar _ = egress.NewClient\n")
 	vClean, err := scanUnauthorizedHTTPClientConstruction(filepath.Join(tmp, "pkg", "systemone"))
 	require.NoError(t, err)
 	assert.Empty(t, vClean)
 
 	write("pkg/systemone/provider/bad.go", "package provider\nimport \"net/http\"\nfunc bad() *http.Client { _ = http.DefaultClient; return new(http.Client) }\n")
+	write("pkg/systemone/provider/bad_varspec.go", "package provider\nimport \"net/http\"\nvar zeroClient http.Client\n")
+	write("pkg/systemone/runtime/bad_varspec.go", "package runtime\nimport \"net/http\"\nfunc f() { var zeroTr http.Transport; _ = zeroTr }\n")
+	write("pkg/systemone/provider/jevwire/bad_egress.go", "package jevwire\nimport eg \""+egressPkg+"\"\nvar (\n\t_ = eg.NewClient\n\t_ = eg.StaticBearer\n\t_ = eg.WithCustomOption\n)\n")
 	vBad, err := scanUnauthorizedHTTPClientConstruction(filepath.Join(tmp, "pkg", "systemone"))
 	require.NoError(t, err)
-	assert.Len(t, vBad, 2)
+	assert.Len(t, vBad, 7, "expected 2 (DefaultClient + new) + 2 (ValueSpecs) + 3 (egress NewClient/StaticBearer/With*) violations, got: %v", vBad)
 
 	// *ForTesting AST scanner allows declarations, _test.go files, and pkg/systemone/conformance,
 	// while flagging references from non-test files inside or outside pkg/systemone/...
@@ -291,6 +301,7 @@ func listInModuleImports(root, pkg string) ([]string, error) {
 
 func scanUnauthorizedHTTPClientConstruction(systemOneDir string) ([]string, error) {
 	egressDir := filepath.Join(systemOneDir, "egress")
+	providerDir := filepath.Join(systemOneDir, "provider")
 	fset := token.NewFileSet()
 	var violations []string
 
@@ -317,25 +328,55 @@ func scanUnauthorizedHTTPClientConstruction(systemOneDir string) ([]string, erro
 			return err
 		}
 
+		inProvider := p == providerDir || strings.HasPrefix(p, providerDir+string(filepath.Separator))
 		httpAliases := make(map[string]bool)
+		egressAliases := make(map[string]bool)
 		for _, imp := range f.Imports {
 			pathVal, err := strconv.Unquote(imp.Path.Value)
-			if err != nil || pathVal != "net/http" {
+			if err != nil {
 				continue
 			}
-			if imp.Name != nil {
-				if imp.Name.Name != "_" && imp.Name.Name != "." {
-					httpAliases[imp.Name.Name] = true
+			switch {
+			case pathVal == "net/http":
+				if imp.Name != nil {
+					switch imp.Name.Name {
+					case "_":
+					case ".":
+						pos := fset.Position(imp.Pos())
+						violations = append(violations, fmt.Sprintf("%s:%d: dot-import of net/http forbidden outside egress", pos.Filename, pos.Line))
+					default:
+						httpAliases[imp.Name.Name] = true
+					}
+				} else {
+					httpAliases["http"] = true
 				}
-			} else {
-				httpAliases["http"] = true
+			case inProvider && pathVal == egressPkg:
+				if imp.Name != nil {
+					switch imp.Name.Name {
+					case "_":
+					case ".":
+						pos := fset.Position(imp.Pos())
+						violations = append(violations, fmt.Sprintf("%s:%d: dot-import of pkg/systemone/egress forbidden in provider package", pos.Filename, pos.Line))
+					default:
+						egressAliases[imp.Name.Name] = true
+					}
+				} else {
+					egressAliases["egress"] = true
+				}
 			}
 		}
-		if len(httpAliases) == 0 {
+		if len(httpAliases) == 0 && len(egressAliases) == 0 {
 			return nil
 		}
 
 		isHTTPSelector := func(expr ast.Expr, selName string) bool {
+			for {
+				par, ok := expr.(*ast.ParenExpr)
+				if !ok {
+					break
+				}
+				expr = par.X
+			}
 			sel, ok := expr.(*ast.SelectorExpr)
 			if !ok || sel.Sel.Name != selName {
 				return false
@@ -351,6 +392,11 @@ func scanUnauthorizedHTTPClientConstruction(systemOneDir string) ([]string, erro
 					pos := fset.Position(node.Pos())
 					violations = append(violations, fmt.Sprintf("%s:%d: unauthorized net/http literal outside egress", pos.Filename, pos.Line))
 				}
+			case *ast.ValueSpec:
+				if node.Type != nil && (isHTTPSelector(node.Type, "Client") || isHTTPSelector(node.Type, "Transport")) {
+					pos := fset.Position(node.Pos())
+					violations = append(violations, fmt.Sprintf("%s:%d: unauthorized http.Client/Transport value spec outside egress", pos.Filename, pos.Line))
+				}
 			case *ast.CallExpr:
 				if id, ok := node.Fun.(*ast.Ident); ok && id.Name == "new" && len(node.Args) == 1 {
 					if isHTTPSelector(node.Args[0], "Client") || isHTTPSelector(node.Args[0], "Transport") {
@@ -365,10 +411,19 @@ func scanUnauthorizedHTTPClientConstruction(systemOneDir string) ([]string, erro
 					}
 				}
 			case *ast.SelectorExpr:
-				if id, ok := node.X.(*ast.Ident); ok && httpAliases[id.Name] {
-					if node.Sel.Name == "DefaultClient" || node.Sel.Name == "DefaultTransport" {
-						pos := fset.Position(node.Pos())
-						violations = append(violations, fmt.Sprintf("%s:%d: reference to http.%s outside egress", pos.Filename, pos.Line, node.Sel.Name))
+				if id, ok := node.X.(*ast.Ident); ok {
+					if httpAliases[id.Name] {
+						if node.Sel.Name == "DefaultClient" || node.Sel.Name == "DefaultTransport" {
+							pos := fset.Position(node.Pos())
+							violations = append(violations, fmt.Sprintf("%s:%d: reference to http.%s outside egress", pos.Filename, pos.Line, node.Sel.Name))
+						}
+					}
+					if egressAliases[id.Name] {
+						selName := node.Sel.Name
+						if selName == "NewClient" || selName == "StaticBearer" || strings.HasPrefix(selName, "With") {
+							pos := fset.Position(node.Sel.Pos())
+							violations = append(violations, fmt.Sprintf("%s:%d: unauthorized reference to %s.%s in provider package", pos.Filename, pos.Line, id.Name, selName))
+						}
 					}
 				}
 			}
