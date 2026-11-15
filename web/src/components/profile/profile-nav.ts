@@ -31,6 +31,8 @@ import {
 import {
   PROFILE_DECISIONS_COUNT_CHANGED_EVENT,
   fetchProfileDecisionProbe,
+  getCachedProfileDecisionProbe,
+  scheduleSharedProfileDecisionProbeRefresh,
 } from '../../client/profile-decisions.js';
 import { stateManager } from '../../client/state.js';
 import { FEATURE_FLAGS_CHANGED_EVENT, projectDecisionsEnabled } from '../../utils/feature-flags.js';
@@ -131,9 +133,6 @@ export class ScionProfileNav extends LitElement {
   @state()
   private decisionsWaitingCount = 0;
 
-  private decisionsProbeAbortController: AbortController | null = null;
-  private decisionsDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-
   private boundOnPendingSecretsChanged = (e: Event): void => {
     const count = (e as CustomEvent<{ count?: number }>).detail?.count;
     if (typeof count === 'number') this.pendingSecretCount = count;
@@ -145,30 +144,38 @@ export class ScionProfileNav extends LitElement {
     if (next === this.decisionsEnabled) return;
     this.decisionsEnabled = next;
     if (next) {
-      this.decisionsProbeHidden = false;
-      void this.loadProfileDecisionsCount();
+      this.syncOrProbeDecisionsCount();
     } else {
-      this.decisionsProbeAbortController?.abort();
-      this.decisionsProbeAbortController = null;
       this.decisionsWaitingCount = 0;
       this.decisionsProbeHidden = false;
     }
   };
 
   private boundOnProfileDecisionsCountChanged = (e: Event): void => {
-    const waitingOnYou = (e as CustomEvent<{ waitingOnYou?: number }>).detail?.waitingOnYou;
-    if (typeof waitingOnYou === 'number') {
-      this.decisionsWaitingCount = Math.max(0, waitingOnYou);
+    const detail = (e as CustomEvent<{ available?: boolean; waitingOnYou?: number }>).detail;
+    if (detail?.available === false) {
+      this.decisionsProbeHidden = true;
+      this.decisionsWaitingCount = 0;
+      return;
+    }
+    if (typeof detail?.waitingOnYou === 'number') {
+      this.decisionsWaitingCount = Math.max(0, detail.waitingOnYou);
       this.decisionsProbeHidden = false;
     } else {
-      void this.loadProfileDecisionsCount();
+      scheduleSharedProfileDecisionProbeRefresh();
     }
   };
 
   private boundOnChoiceUpdated = (): void => {
     if (!this.decisionsEnabled || this.decisionsProbeHidden) return;
     if (this.isActive('/profile/decisions')) return;
-    this.scheduleProfileDecisionsRefresh();
+    scheduleSharedProfileDecisionProbeRefresh();
+  };
+
+  private boundOnNotificationCreated = (): void => {
+    if (!this.decisionsEnabled || this.decisionsProbeHidden) return;
+    if (this.isActive('/profile/decisions')) return;
+    scheduleSharedProfileDecisionProbeRefresh();
   };
 
   private boundOnChatMessageReceived = (e: Event): void => {
@@ -176,7 +183,7 @@ export class ScionProfileNav extends LitElement {
     if (this.isActive('/profile/decisions')) return;
     const payload = (e as CustomEvent<{ data?: { message?: { choices?: unknown } } }>).detail?.data;
     if (!payload?.message?.choices) return;
-    this.scheduleProfileDecisionsRefresh();
+    scheduleSharedProfileDecisionProbeRefresh();
   };
 
   static override styles = css`
@@ -627,7 +634,7 @@ export class ScionProfileNav extends LitElement {
     void this.loadPendingSecretCount();
     this.decisionsEnabled = projectDecisionsEnabled();
     if (this.decisionsEnabled) {
-      void this.loadProfileDecisionsCount();
+      this.syncOrProbeDecisionsCount();
     }
     window.addEventListener(PENDING_SECRETS_CHANGED_EVENT, this.boundOnPendingSecretsChanged);
     window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
@@ -636,6 +643,7 @@ export class ScionProfileNav extends LitElement {
       this.boundOnProfileDecisionsCountChanged
     );
     stateManager.addEventListener('choice-updated', this.boundOnChoiceUpdated);
+    stateManager.addEventListener('notification-created', this.boundOnNotificationCreated);
     stateManager.addEventListener('chat-message-received', this.boundOnChatMessageReceived);
   }
 
@@ -648,45 +656,41 @@ export class ScionProfileNav extends LitElement {
       this.boundOnProfileDecisionsCountChanged
     );
     stateManager.removeEventListener('choice-updated', this.boundOnChoiceUpdated);
+    stateManager.removeEventListener('notification-created', this.boundOnNotificationCreated);
     stateManager.removeEventListener('chat-message-received', this.boundOnChatMessageReceived);
-    this.decisionsProbeAbortController?.abort();
-    this.decisionsProbeAbortController = null;
-    if (this.decisionsDebounceTimer !== null) {
-      clearTimeout(this.decisionsDebounceTimer);
-      this.decisionsDebounceTimer = null;
-    }
   }
 
-  private scheduleProfileDecisionsRefresh(): void {
-    if (this.decisionsDebounceTimer !== null) {
-      clearTimeout(this.decisionsDebounceTimer);
+  private syncOrProbeDecisionsCount(): void {
+    const cached = getCachedProfileDecisionProbe();
+    if (cached !== null) {
+      this.decisionsProbeHidden = !cached.available;
+      this.decisionsWaitingCount = cached.available ? cached.waitingOnYou : 0;
+      return;
     }
-    this.decisionsDebounceTimer = setTimeout(() => {
-      this.decisionsDebounceTimer = null;
-      void this.loadProfileDecisionsCount();
-    }, 100);
+    if (this.isActive('/profile/decisions')) {
+      // Let <scion-page-profile-decisions> start its page fetch first in the same
+      // mount tick so the nav piggybacks on it instead of issuing a second ?limit=0 probe.
+      queueMicrotask(() => {
+        if (this.isConnected && this.decisionsEnabled) {
+          void this.loadProfileDecisionsCount();
+        }
+      });
+      return;
+    }
+    void this.loadProfileDecisionsCount();
   }
 
   private async loadProfileDecisionsCount(): Promise<void> {
     if (!this.decisionsEnabled) return;
-    this.decisionsProbeAbortController?.abort();
-    const ac = new AbortController();
-    this.decisionsProbeAbortController = ac;
-    try {
-      const probe = await fetchProfileDecisionProbe(ac.signal);
-      if (ac.signal.aborted || probe === null) return;
-      if (!probe.available) {
-        this.decisionsProbeHidden = true;
-        this.decisionsWaitingCount = 0;
-        return;
-      }
-      this.decisionsProbeHidden = false;
-      this.decisionsWaitingCount = probe.waitingOnYou;
-    } finally {
-      if (this.decisionsProbeAbortController === ac) {
-        this.decisionsProbeAbortController = null;
-      }
+    const probe = await fetchProfileDecisionProbe();
+    if (!this.isConnected || !this.decisionsEnabled || probe === null) return;
+    if (!probe.available) {
+      this.decisionsProbeHidden = true;
+      this.decisionsWaitingCount = 0;
+      return;
     }
+    this.decisionsProbeHidden = false;
+    this.decisionsWaitingCount = probe.waitingOnYou;
   }
 
   private renderDecisionsBadge(): TemplateResult | typeof nothing {

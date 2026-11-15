@@ -27,6 +27,7 @@ import type {
 } from '../../client/project-decisions.js';
 import {
   PROFILE_DECISIONS_COUNT_CHANGED_EVENT,
+  resetProfileDecisionProbeCacheForTests,
   type ProfileMadeByProjectDecisionsResponse,
   type ProfileMadeRecentDecisionsResponse,
   type ProfilePendingDecisionsResponse,
@@ -189,6 +190,7 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
   beforeEach(() => {
     requestedUrls = [];
     answerRequests = [];
+    resetProfileDecisionProbeCacheForTests();
     delete window.__SCION_FEATURES__;
     resetServerFlagStateForTests();
     window.history.replaceState(null, '', '/profile/decisions');
@@ -384,6 +386,7 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
 
   afterEach(() => {
     document.body.innerHTML = '';
+    resetProfileDecisionProbeCacheForTests();
     delete window.__SCION_FEATURES__;
     resetServerFlagStateForTests();
     vi.unstubAllGlobals();
@@ -802,5 +805,33 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
     await settle(el, 25);
     expect(window.location.search).toBe('?tab=pending&sort=project');
     expect(el.shadowRoot?.querySelectorAll('[data-prompt-card]')).toHaveLength(1);
+  });
+
+  it('piggybacks <scion-profile-nav> badge onto <scion-page-profile-decisions> fetch without issuing a ?limit=0 probe', async () => {
+    await import('../profile/profile-nav.js');
+    setFeatureFlag(PROJECT_DECISIONS_FLAG, true);
+    setFeatureFlag(CHAT_CHOICES_FLAG, true);
+
+    window.history.replaceState(null, '', '/profile/decisions');
+    const nav = document.createElement('scion-profile-nav') as HTMLElement & {
+      updateComplete: Promise<boolean>;
+      currentPath: string;
+    };
+    nav.currentPath = '/profile/decisions';
+    const page = document.createElement('scion-page-profile-decisions');
+    page.pageData = {
+      path: '/profile/decisions',
+      user: { id: 'u-me', email: 'alice@example.com', name: 'Alice' },
+    } as PageData;
+
+    document.body.appendChild(nav);
+    document.body.appendChild(page);
+    await settle(page, 25);
+    await nav.updateComplete;
+
+    expect(requestedUrls.some((u) => u.includes('limit=0'))).toBe(false);
+    expect(requestedUrls).toEqual(['/api/v1/users/me/decisions?tab=pending&sort=project']);
+    const badge = nav.shadowRoot?.querySelector('[data-decisions-nav-badge]');
+    expect(badge?.textContent?.trim()).toBe('4');
   });
 });

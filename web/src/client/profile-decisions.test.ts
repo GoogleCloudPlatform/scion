@@ -30,10 +30,13 @@ const {
   buildProfileDecisionsUrlSearch,
   defaultProfileDecisionsSort,
   dispatchProfileDecisionsCountChanged,
+  dispatchProfileDecisionsNotFound,
   fetchProfileDecisionProbe,
   fetchProfileMadeDecisions,
   fetchProfilePendingDecisions,
+  getCachedProfileDecisionProbe,
   parseProfileDecisionsUrlState,
+  resetProfileDecisionProbeCacheForTests,
 } = await import('./profile-decisions.js');
 
 function res(status: number, body: unknown): Response {
@@ -162,6 +165,7 @@ describe('profile-decisions URL state (D10, R6)', () => {
 describe('profile-decisions API client (R1, R3, R4, R5, §7)', () => {
   beforeEach(() => {
     apiFetch.mockReset();
+    resetProfileDecisionProbeCacheForTests();
   });
 
   it('builds profile query strings and omits cursor on made+project overview', () => {
@@ -274,36 +278,78 @@ describe('profile-decisions API client (R1, R3, R4, R5, §7)', () => {
     }
   });
 
-  it('probes GET /api/v1/users/me/decisions?limit=0 with authErrors=caller and distinguishes 200, 404, and transient errors', async () => {
-    apiFetch.mockResolvedValueOnce(res(200, { counts: { waitingOnYou: 4, waitingOnOthers: 5 } }));
-    await expect(fetchProfileDecisionProbe()).resolves.toEqual({
-      available: true,
-      waitingOnYou: 4,
-    });
+  it('probes GET /api/v1/users/me/decisions?limit=0 with authErrors=caller, caches 200/404, deduplicates concurrent calls, and retries transient errors', async () => {
+    let resolveFirst!: (r: Response) => void;
+    apiFetch.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveFirst = resolve;
+        })
+    );
+    const p1 = fetchProfileDecisionProbe();
+    const p2 = fetchProfileDecisionProbe();
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+    resolveFirst(res(200, { counts: { waitingOnYou: 4, waitingOnOthers: 5 } }));
+
+    await expect(Promise.all([p1, p2])).resolves.toEqual([
+      { available: true, waitingOnYou: 4 },
+      { available: true, waitingOnYou: 4 },
+    ]);
     expect(apiFetch).toHaveBeenLastCalledWith('/api/v1/users/me/decisions?limit=0', {
       authErrors: 'caller',
     });
 
+    // Cached reuse without issuing another HTTP request
+    await expect(fetchProfileDecisionProbe()).resolves.toEqual({
+      available: true,
+      waitingOnYou: 4,
+    });
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+    expect(getCachedProfileDecisionProbe()).toEqual({ available: true, waitingOnYou: 4 });
+
+    // Force refresh updates cached value
+    apiFetch.mockResolvedValueOnce(res(200, { counts: { waitingOnYou: 2, waitingOnOthers: 5 } }));
+    await expect(fetchProfileDecisionProbe({ forceRefresh: true })).resolves.toEqual({
+      available: true,
+      waitingOnYou: 2,
+    });
+    expect(apiFetch).toHaveBeenCalledTimes(2);
+
+    // 404 is cached as unavailable
+    resetProfileDecisionProbeCacheForTests();
     apiFetch.mockResolvedValueOnce(res(404, { error: { code: 'not_found' } }));
     await expect(fetchProfileDecisionProbe()).resolves.toEqual({
       available: false,
       waitingOnYou: 0,
     });
+    await expect(fetchProfileDecisionProbe()).resolves.toEqual({
+      available: false,
+      waitingOnYou: 0,
+    });
+    expect(apiFetch).toHaveBeenCalledTimes(3);
 
+    // Transient 503 returns null and is NOT cached
+    resetProfileDecisionProbeCacheForTests();
     apiFetch.mockResolvedValueOnce(res(503, { error: { code: 'unavailable' } }));
     await expect(fetchProfileDecisionProbe()).resolves.toBeNull();
+    expect(getCachedProfileDecisionProbe()).toBeNull();
   });
 
-  it('dispatches count-changed events for profile nav badge synchronization', () => {
-    const received: number[] = [];
+  it('dispatches count-changed and not-found events for profile nav badge synchronization', () => {
+    const received: Array<{ available: boolean; waitingOnYou: number }> = [];
     const listener = (ev: Event): void => {
-      received.push((ev as CustomEvent<{ waitingOnYou: number }>).detail.waitingOnYou);
+      received.push((ev as CustomEvent<{ available: boolean; waitingOnYou: number }>).detail);
     };
     window.addEventListener(PROFILE_DECISIONS_COUNT_CHANGED_EVENT, listener);
     try {
       dispatchProfileDecisionsCountChanged(3);
       dispatchProfileDecisionsCountChanged(-2);
-      expect(received).toEqual([3, 0]);
+      dispatchProfileDecisionsNotFound();
+      expect(received).toEqual([
+        { available: true, waitingOnYou: 3 },
+        { available: true, waitingOnYou: 0 },
+        { available: false, waitingOnYou: 0 },
+      ]);
     } finally {
       window.removeEventListener(PROFILE_DECISIONS_COUNT_CHANGED_EVENT, listener);
     }

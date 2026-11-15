@@ -66,6 +66,7 @@ import {
   cleanProfileProjectValue,
   defaultProfileDecisionsSort,
   dispatchProfileDecisionsCountChanged,
+  dispatchProfileDecisionsNotFound,
   fetchProfileMadeDecisions,
   fetchProfilePendingDecisions,
   parseProfileDecisionsUrlState,
@@ -658,6 +659,17 @@ export class ScionPageProfileDecisions extends LitElement {
       margin: 0.85rem 0;
     }
 
+    .more sl-button::part(base) {
+      background: var(--scion-surface, #ffffff);
+      color: var(--scion-text, #1e293b);
+      border-color: var(--scion-border, #e2e8f0);
+    }
+
+    .more sl-button::part(base):hover {
+      background: var(--scion-bg-subtle, #f1f5f9);
+      color: var(--scion-text, #1e293b);
+    }
+
     .empty {
       text-align: center;
       padding: 2.5rem 1rem;
@@ -1132,6 +1144,7 @@ export class ScionPageProfileDecisions extends LitElement {
       if (err instanceof DecisionsApiError && err.status === 404) {
         this.hubNotFound = true;
         this.error = null;
+        dispatchProfileDecisionsNotFound();
         return;
       }
       if (opts.mode !== 'live') {
@@ -1330,6 +1343,7 @@ export class ScionPageProfileDecisions extends LitElement {
       if (err instanceof DecisionsApiError && err.status === 404) {
         this.hubNotFound = true;
         this.madeError = null;
+        dispatchProfileDecisionsNotFound();
         return;
       }
       if (opts.mode !== 'live') {

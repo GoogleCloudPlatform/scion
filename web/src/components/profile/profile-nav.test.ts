@@ -383,6 +383,7 @@ describe('scion-profile-nav — pending secrets badge', () => {
 
 describe('scion-profile-nav — Decisions entry & badge (ptone/scion#7996)', () => {
   let element: HTMLElement | null = null;
+  let secondaryElement: HTMLElement | null = null;
   let decisionsProbeCount = 0;
 
   beforeAll(async () => {
@@ -396,6 +397,11 @@ describe('scion-profile-nav — Decisions entry & badge (ptone/scion#7996)', () 
   afterEach(async () => {
     element?.remove();
     element = null;
+    secondaryElement?.remove();
+    secondaryElement = null;
+    const { resetProfileDecisionProbeCacheForTests } =
+      await import('../../client/profile-decisions.js');
+    resetProfileDecisionProbeCacheForTests();
     const flags = await import('../../utils/feature-flags.js');
     delete window.__SCION_FEATURES__;
     flags.resetServerFlagStateForTests();
@@ -410,6 +416,9 @@ describe('scion-profile-nav — Decisions entry & badge (ptone/scion#7996)', () 
     currentPath?: string;
   }): Promise<HTMLElement> {
     decisionsProbeCount = 0;
+    const { resetProfileDecisionProbeCacheForTests } =
+      await import('../../client/profile-decisions.js');
+    resetProfileDecisionProbeCacheForTests();
     const flags = await import('../../utils/feature-flags.js');
     delete window.__SCION_FEATURES__;
     flags.resetServerFlagStateForTests();
@@ -522,5 +531,89 @@ describe('scion-profile-nav — Decisions entry & badge (ptone/scion#7996)', () 
     dispatchProfileDecisionsCountChanged(0);
     await (element as HTMLElement & { updateComplete: Promise<boolean> }).updateComplete;
     expect(decisionsBadge(element)).toBeNull();
+  });
+
+  it('shares a single ?limit=0 probe across dual nav instances and route changes, refreshing on SSE events', async () => {
+    let liveWaiting = 4;
+    decisionsProbeCount = 0;
+    const { resetProfileDecisionProbeCacheForTests } =
+      await import('../../client/profile-decisions.js');
+    resetProfileDecisionProbeCacheForTests();
+    const flags = await import('../../utils/feature-flags.js');
+    delete window.__SCION_FEATURES__;
+    flags.resetServerFlagStateForTests();
+    flags.setFeatureFlag(flags.PROJECT_DECISIONS_FLAG, true);
+    flags.setFeatureFlag(flags.CHAT_CHOICES_FLAG, true);
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const raw =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        if (raw.startsWith('/api/v1/users/me/decisions')) {
+          decisionsProbeCount++;
+          return Promise.resolve(
+            jsonResponse({ counts: { waitingOnYou: liveWaiting, waitingOnOthers: 1 } }, 200)
+          );
+        }
+        return Promise.resolve(jsonResponse({ configured: false, pendingSecrets: [] }));
+      })
+    );
+
+    type NavEl = HTMLElement & {
+      updateComplete: Promise<boolean>;
+      user: User | null;
+      currentPath: string;
+    };
+    const desktopNav = document.createElement('scion-profile-nav') as NavEl;
+    desktopNav.user = user('member');
+    desktopNav.currentPath = '/profile/env';
+
+    const drawerNav = document.createElement('scion-profile-nav') as NavEl;
+    drawerNav.user = user('member');
+    drawerNav.currentPath = '/profile/env';
+
+    element = desktopNav;
+    secondaryElement = drawerNav;
+    document.body.appendChild(desktopNav);
+    document.body.appendChild(drawerNav);
+
+    for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0));
+    await desktopNav.updateComplete;
+    await drawerNav.updateComplete;
+
+    expect(decisionsProbeCount).toBe(1);
+    expect(decisionsBadge(desktopNav)?.textContent?.trim()).toBe('4');
+    expect(decisionsBadge(drawerNav)?.textContent?.trim()).toBe('4');
+
+    // Navigating across /profile/* routes does NOT refetch ?limit=0
+    desktopNav.currentPath = '/profile/secrets';
+    drawerNav.currentPath = '/profile/secrets';
+    await desktopNav.updateComplete;
+    await drawerNav.updateComplete;
+    expect(decisionsProbeCount).toBe(1);
+
+    // Remounting another <scion-profile-nav> reuses the cached probe without refetching
+    drawerNav.remove();
+    const remountedNav = document.createElement('scion-profile-nav') as NavEl;
+    remountedNav.user = user('member');
+    remountedNav.currentPath = '/profile/tokens';
+    secondaryElement = remountedNav;
+    document.body.appendChild(remountedNav);
+    await remountedNav.updateComplete;
+    expect(decisionsProbeCount).toBe(1);
+    expect(decisionsBadge(remountedNav)?.textContent?.trim()).toBe('4');
+
+    // SSE notification-created triggers ONE debounced shared refresh for both nav instances
+    liveWaiting = 6;
+    const { stateManager } = await import('../../client/state.js');
+    stateManager.dispatchEvent(new CustomEvent('notification-created', { detail: {} }));
+    await new Promise((r) => setTimeout(r, 140));
+    await desktopNav.updateComplete;
+    await remountedNav.updateComplete;
+
+    expect(decisionsProbeCount).toBe(2);
+    expect(decisionsBadge(desktopNav)?.textContent?.trim()).toBe('6');
+    expect(decisionsBadge(remountedNav)?.textContent?.trim()).toBe('6');
   });
 });
