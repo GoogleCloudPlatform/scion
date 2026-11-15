@@ -19,6 +19,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentcredential"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentdelegatedcredential"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentdelegationgrant"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentdeliveryhold"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agenthold"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentidentitykey"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentlifecyclecursor"
@@ -135,6 +136,7 @@ const (
 	TypeAgentCredential               = "AgentCredential"
 	TypeAgentDelegatedCredential      = "AgentDelegatedCredential"
 	TypeAgentDelegationGrant          = "AgentDelegationGrant"
+	TypeAgentDeliveryHold             = "AgentDeliveryHold"
 	TypeAgentHold                     = "AgentHold"
 	TypeAgentIdentityKey              = "AgentIdentityKey"
 	TypeAgentLifecycleCursor          = "AgentLifecycleCursor"
@@ -16285,6 +16287,558 @@ func (m *AgentDelegationGrantMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *AgentDelegationGrantMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown AgentDelegationGrant edge %s", name)
+}
+
+// AgentDeliveryHoldMutation represents an operation that mutates the AgentDeliveryHold nodes in the graph.
+type AgentDeliveryHoldMutation struct {
+	config
+	op            Op
+	typ           string
+	id            *string
+	hold_until    *time.Time
+	launch_id     *string
+	held_count    *int
+	addheld_count *int
+	created       *time.Time
+	clearedFields map[string]struct{}
+	done          bool
+	oldValue      func(context.Context) (*AgentDeliveryHold, error)
+	predicates    []predicate.AgentDeliveryHold
+}
+
+var _ ent.Mutation = (*AgentDeliveryHoldMutation)(nil)
+
+// agentdeliveryholdOption allows management of the mutation configuration using functional options.
+type agentdeliveryholdOption func(*AgentDeliveryHoldMutation)
+
+// newAgentDeliveryHoldMutation creates new mutation for the AgentDeliveryHold entity.
+func newAgentDeliveryHoldMutation(c config, op Op, opts ...agentdeliveryholdOption) *AgentDeliveryHoldMutation {
+	m := &AgentDeliveryHoldMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeAgentDeliveryHold,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withAgentDeliveryHoldID sets the ID field of the mutation.
+func withAgentDeliveryHoldID(id string) agentdeliveryholdOption {
+	return func(m *AgentDeliveryHoldMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *AgentDeliveryHold
+		)
+		m.oldValue = func(ctx context.Context) (*AgentDeliveryHold, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().AgentDeliveryHold.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withAgentDeliveryHold sets the old AgentDeliveryHold of the mutation.
+func withAgentDeliveryHold(node *AgentDeliveryHold) agentdeliveryholdOption {
+	return func(m *AgentDeliveryHoldMutation) {
+		m.oldValue = func(context.Context) (*AgentDeliveryHold, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m AgentDeliveryHoldMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m AgentDeliveryHoldMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of AgentDeliveryHold entities.
+func (m *AgentDeliveryHoldMutation) SetID(id string) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *AgentDeliveryHoldMutation) ID() (id string, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *AgentDeliveryHoldMutation) IDs(ctx context.Context) ([]string, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []string{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().AgentDeliveryHold.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetHoldUntil sets the "hold_until" field.
+func (m *AgentDeliveryHoldMutation) SetHoldUntil(t time.Time) {
+	m.hold_until = &t
+}
+
+// HoldUntil returns the value of the "hold_until" field in the mutation.
+func (m *AgentDeliveryHoldMutation) HoldUntil() (r time.Time, exists bool) {
+	v := m.hold_until
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldHoldUntil returns the old "hold_until" field's value of the AgentDeliveryHold entity.
+// If the AgentDeliveryHold object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentDeliveryHoldMutation) OldHoldUntil(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldHoldUntil is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldHoldUntil requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldHoldUntil: %w", err)
+	}
+	return oldValue.HoldUntil, nil
+}
+
+// ResetHoldUntil resets all changes to the "hold_until" field.
+func (m *AgentDeliveryHoldMutation) ResetHoldUntil() {
+	m.hold_until = nil
+}
+
+// SetLaunchID sets the "launch_id" field.
+func (m *AgentDeliveryHoldMutation) SetLaunchID(s string) {
+	m.launch_id = &s
+}
+
+// LaunchID returns the value of the "launch_id" field in the mutation.
+func (m *AgentDeliveryHoldMutation) LaunchID() (r string, exists bool) {
+	v := m.launch_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLaunchID returns the old "launch_id" field's value of the AgentDeliveryHold entity.
+// If the AgentDeliveryHold object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentDeliveryHoldMutation) OldLaunchID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLaunchID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLaunchID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLaunchID: %w", err)
+	}
+	return oldValue.LaunchID, nil
+}
+
+// ClearLaunchID clears the value of the "launch_id" field.
+func (m *AgentDeliveryHoldMutation) ClearLaunchID() {
+	m.launch_id = nil
+	m.clearedFields[agentdeliveryhold.FieldLaunchID] = struct{}{}
+}
+
+// LaunchIDCleared returns if the "launch_id" field was cleared in this mutation.
+func (m *AgentDeliveryHoldMutation) LaunchIDCleared() bool {
+	_, ok := m.clearedFields[agentdeliveryhold.FieldLaunchID]
+	return ok
+}
+
+// ResetLaunchID resets all changes to the "launch_id" field.
+func (m *AgentDeliveryHoldMutation) ResetLaunchID() {
+	m.launch_id = nil
+	delete(m.clearedFields, agentdeliveryhold.FieldLaunchID)
+}
+
+// SetHeldCount sets the "held_count" field.
+func (m *AgentDeliveryHoldMutation) SetHeldCount(i int) {
+	m.held_count = &i
+	m.addheld_count = nil
+}
+
+// HeldCount returns the value of the "held_count" field in the mutation.
+func (m *AgentDeliveryHoldMutation) HeldCount() (r int, exists bool) {
+	v := m.held_count
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldHeldCount returns the old "held_count" field's value of the AgentDeliveryHold entity.
+// If the AgentDeliveryHold object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentDeliveryHoldMutation) OldHeldCount(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldHeldCount is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldHeldCount requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldHeldCount: %w", err)
+	}
+	return oldValue.HeldCount, nil
+}
+
+// AddHeldCount adds i to the "held_count" field.
+func (m *AgentDeliveryHoldMutation) AddHeldCount(i int) {
+	if m.addheld_count != nil {
+		*m.addheld_count += i
+	} else {
+		m.addheld_count = &i
+	}
+}
+
+// AddedHeldCount returns the value that was added to the "held_count" field in this mutation.
+func (m *AgentDeliveryHoldMutation) AddedHeldCount() (r int, exists bool) {
+	v := m.addheld_count
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetHeldCount resets all changes to the "held_count" field.
+func (m *AgentDeliveryHoldMutation) ResetHeldCount() {
+	m.held_count = nil
+	m.addheld_count = nil
+}
+
+// SetCreated sets the "created" field.
+func (m *AgentDeliveryHoldMutation) SetCreated(t time.Time) {
+	m.created = &t
+}
+
+// Created returns the value of the "created" field in the mutation.
+func (m *AgentDeliveryHoldMutation) Created() (r time.Time, exists bool) {
+	v := m.created
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreated returns the old "created" field's value of the AgentDeliveryHold entity.
+// If the AgentDeliveryHold object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentDeliveryHoldMutation) OldCreated(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreated is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreated requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreated: %w", err)
+	}
+	return oldValue.Created, nil
+}
+
+// ResetCreated resets all changes to the "created" field.
+func (m *AgentDeliveryHoldMutation) ResetCreated() {
+	m.created = nil
+}
+
+// Where appends a list predicates to the AgentDeliveryHoldMutation builder.
+func (m *AgentDeliveryHoldMutation) Where(ps ...predicate.AgentDeliveryHold) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the AgentDeliveryHoldMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *AgentDeliveryHoldMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.AgentDeliveryHold, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *AgentDeliveryHoldMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *AgentDeliveryHoldMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (AgentDeliveryHold).
+func (m *AgentDeliveryHoldMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *AgentDeliveryHoldMutation) Fields() []string {
+	fields := make([]string, 0, 4)
+	if m.hold_until != nil {
+		fields = append(fields, agentdeliveryhold.FieldHoldUntil)
+	}
+	if m.launch_id != nil {
+		fields = append(fields, agentdeliveryhold.FieldLaunchID)
+	}
+	if m.held_count != nil {
+		fields = append(fields, agentdeliveryhold.FieldHeldCount)
+	}
+	if m.created != nil {
+		fields = append(fields, agentdeliveryhold.FieldCreated)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *AgentDeliveryHoldMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case agentdeliveryhold.FieldHoldUntil:
+		return m.HoldUntil()
+	case agentdeliveryhold.FieldLaunchID:
+		return m.LaunchID()
+	case agentdeliveryhold.FieldHeldCount:
+		return m.HeldCount()
+	case agentdeliveryhold.FieldCreated:
+		return m.Created()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *AgentDeliveryHoldMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case agentdeliveryhold.FieldHoldUntil:
+		return m.OldHoldUntil(ctx)
+	case agentdeliveryhold.FieldLaunchID:
+		return m.OldLaunchID(ctx)
+	case agentdeliveryhold.FieldHeldCount:
+		return m.OldHeldCount(ctx)
+	case agentdeliveryhold.FieldCreated:
+		return m.OldCreated(ctx)
+	}
+	return nil, fmt.Errorf("unknown AgentDeliveryHold field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *AgentDeliveryHoldMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case agentdeliveryhold.FieldHoldUntil:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetHoldUntil(v)
+		return nil
+	case agentdeliveryhold.FieldLaunchID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLaunchID(v)
+		return nil
+	case agentdeliveryhold.FieldHeldCount:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetHeldCount(v)
+		return nil
+	case agentdeliveryhold.FieldCreated:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreated(v)
+		return nil
+	}
+	return fmt.Errorf("unknown AgentDeliveryHold field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *AgentDeliveryHoldMutation) AddedFields() []string {
+	var fields []string
+	if m.addheld_count != nil {
+		fields = append(fields, agentdeliveryhold.FieldHeldCount)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *AgentDeliveryHoldMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case agentdeliveryhold.FieldHeldCount:
+		return m.AddedHeldCount()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *AgentDeliveryHoldMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case agentdeliveryhold.FieldHeldCount:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddHeldCount(v)
+		return nil
+	}
+	return fmt.Errorf("unknown AgentDeliveryHold numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *AgentDeliveryHoldMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(agentdeliveryhold.FieldLaunchID) {
+		fields = append(fields, agentdeliveryhold.FieldLaunchID)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *AgentDeliveryHoldMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *AgentDeliveryHoldMutation) ClearField(name string) error {
+	switch name {
+	case agentdeliveryhold.FieldLaunchID:
+		m.ClearLaunchID()
+		return nil
+	}
+	return fmt.Errorf("unknown AgentDeliveryHold nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *AgentDeliveryHoldMutation) ResetField(name string) error {
+	switch name {
+	case agentdeliveryhold.FieldHoldUntil:
+		m.ResetHoldUntil()
+		return nil
+	case agentdeliveryhold.FieldLaunchID:
+		m.ResetLaunchID()
+		return nil
+	case agentdeliveryhold.FieldHeldCount:
+		m.ResetHeldCount()
+		return nil
+	case agentdeliveryhold.FieldCreated:
+		m.ResetCreated()
+		return nil
+	}
+	return fmt.Errorf("unknown AgentDeliveryHold field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *AgentDeliveryHoldMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *AgentDeliveryHoldMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *AgentDeliveryHoldMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *AgentDeliveryHoldMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *AgentDeliveryHoldMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *AgentDeliveryHoldMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *AgentDeliveryHoldMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown AgentDeliveryHold unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *AgentDeliveryHoldMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown AgentDeliveryHold edge %s", name)
 }
 
 // AgentHoldMutation represents an operation that mutates the AgentHold nodes in the graph.
@@ -67017,6 +67571,10 @@ type MessageMutation struct {
 	delivery_id             *string
 	delivering_at           *time.Time
 	delivery_outcome        *string
+	hold_until              *time.Time
+	hold_launch_id          *string
+	not_reached             *string
+	not_reached_at          *time.Time
 	channel                 *string
 	thread_id               *string
 	conversation_id         *uuid.UUID
@@ -67900,6 +68458,202 @@ func (m *MessageMutation) ResetDeliveryOutcome() {
 	delete(m.clearedFields, message.FieldDeliveryOutcome)
 }
 
+// SetHoldUntil sets the "hold_until" field.
+func (m *MessageMutation) SetHoldUntil(t time.Time) {
+	m.hold_until = &t
+}
+
+// HoldUntil returns the value of the "hold_until" field in the mutation.
+func (m *MessageMutation) HoldUntil() (r time.Time, exists bool) {
+	v := m.hold_until
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldHoldUntil returns the old "hold_until" field's value of the Message entity.
+// If the Message object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessageMutation) OldHoldUntil(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldHoldUntil is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldHoldUntil requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldHoldUntil: %w", err)
+	}
+	return oldValue.HoldUntil, nil
+}
+
+// ClearHoldUntil clears the value of the "hold_until" field.
+func (m *MessageMutation) ClearHoldUntil() {
+	m.hold_until = nil
+	m.clearedFields[message.FieldHoldUntil] = struct{}{}
+}
+
+// HoldUntilCleared returns if the "hold_until" field was cleared in this mutation.
+func (m *MessageMutation) HoldUntilCleared() bool {
+	_, ok := m.clearedFields[message.FieldHoldUntil]
+	return ok
+}
+
+// ResetHoldUntil resets all changes to the "hold_until" field.
+func (m *MessageMutation) ResetHoldUntil() {
+	m.hold_until = nil
+	delete(m.clearedFields, message.FieldHoldUntil)
+}
+
+// SetHoldLaunchID sets the "hold_launch_id" field.
+func (m *MessageMutation) SetHoldLaunchID(s string) {
+	m.hold_launch_id = &s
+}
+
+// HoldLaunchID returns the value of the "hold_launch_id" field in the mutation.
+func (m *MessageMutation) HoldLaunchID() (r string, exists bool) {
+	v := m.hold_launch_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldHoldLaunchID returns the old "hold_launch_id" field's value of the Message entity.
+// If the Message object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessageMutation) OldHoldLaunchID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldHoldLaunchID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldHoldLaunchID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldHoldLaunchID: %w", err)
+	}
+	return oldValue.HoldLaunchID, nil
+}
+
+// ClearHoldLaunchID clears the value of the "hold_launch_id" field.
+func (m *MessageMutation) ClearHoldLaunchID() {
+	m.hold_launch_id = nil
+	m.clearedFields[message.FieldHoldLaunchID] = struct{}{}
+}
+
+// HoldLaunchIDCleared returns if the "hold_launch_id" field was cleared in this mutation.
+func (m *MessageMutation) HoldLaunchIDCleared() bool {
+	_, ok := m.clearedFields[message.FieldHoldLaunchID]
+	return ok
+}
+
+// ResetHoldLaunchID resets all changes to the "hold_launch_id" field.
+func (m *MessageMutation) ResetHoldLaunchID() {
+	m.hold_launch_id = nil
+	delete(m.clearedFields, message.FieldHoldLaunchID)
+}
+
+// SetNotReached sets the "not_reached" field.
+func (m *MessageMutation) SetNotReached(s string) {
+	m.not_reached = &s
+}
+
+// NotReached returns the value of the "not_reached" field in the mutation.
+func (m *MessageMutation) NotReached() (r string, exists bool) {
+	v := m.not_reached
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldNotReached returns the old "not_reached" field's value of the Message entity.
+// If the Message object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessageMutation) OldNotReached(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldNotReached is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldNotReached requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldNotReached: %w", err)
+	}
+	return oldValue.NotReached, nil
+}
+
+// ClearNotReached clears the value of the "not_reached" field.
+func (m *MessageMutation) ClearNotReached() {
+	m.not_reached = nil
+	m.clearedFields[message.FieldNotReached] = struct{}{}
+}
+
+// NotReachedCleared returns if the "not_reached" field was cleared in this mutation.
+func (m *MessageMutation) NotReachedCleared() bool {
+	_, ok := m.clearedFields[message.FieldNotReached]
+	return ok
+}
+
+// ResetNotReached resets all changes to the "not_reached" field.
+func (m *MessageMutation) ResetNotReached() {
+	m.not_reached = nil
+	delete(m.clearedFields, message.FieldNotReached)
+}
+
+// SetNotReachedAt sets the "not_reached_at" field.
+func (m *MessageMutation) SetNotReachedAt(t time.Time) {
+	m.not_reached_at = &t
+}
+
+// NotReachedAt returns the value of the "not_reached_at" field in the mutation.
+func (m *MessageMutation) NotReachedAt() (r time.Time, exists bool) {
+	v := m.not_reached_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldNotReachedAt returns the old "not_reached_at" field's value of the Message entity.
+// If the Message object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessageMutation) OldNotReachedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldNotReachedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldNotReachedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldNotReachedAt: %w", err)
+	}
+	return oldValue.NotReachedAt, nil
+}
+
+// ClearNotReachedAt clears the value of the "not_reached_at" field.
+func (m *MessageMutation) ClearNotReachedAt() {
+	m.not_reached_at = nil
+	m.clearedFields[message.FieldNotReachedAt] = struct{}{}
+}
+
+// NotReachedAtCleared returns if the "not_reached_at" field was cleared in this mutation.
+func (m *MessageMutation) NotReachedAtCleared() bool {
+	_, ok := m.clearedFields[message.FieldNotReachedAt]
+	return ok
+}
+
+// ResetNotReachedAt resets all changes to the "not_reached_at" field.
+func (m *MessageMutation) ResetNotReachedAt() {
+	m.not_reached_at = nil
+	delete(m.clearedFields, message.FieldNotReachedAt)
+}
+
 // SetChannel sets the "channel" field.
 func (m *MessageMutation) SetChannel(s string) {
 	m.channel = &s
@@ -68313,7 +69067,7 @@ func (m *MessageMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *MessageMutation) Fields() []string {
-	fields := make([]string, 0, 26)
+	fields := make([]string, 0, 30)
 	if m.project_id != nil {
 		fields = append(fields, message.FieldProjectID)
 	}
@@ -68367,6 +69121,18 @@ func (m *MessageMutation) Fields() []string {
 	}
 	if m.delivery_outcome != nil {
 		fields = append(fields, message.FieldDeliveryOutcome)
+	}
+	if m.hold_until != nil {
+		fields = append(fields, message.FieldHoldUntil)
+	}
+	if m.hold_launch_id != nil {
+		fields = append(fields, message.FieldHoldLaunchID)
+	}
+	if m.not_reached != nil {
+		fields = append(fields, message.FieldNotReached)
+	}
+	if m.not_reached_at != nil {
+		fields = append(fields, message.FieldNotReachedAt)
 	}
 	if m.channel != nil {
 		fields = append(fields, message.FieldChannel)
@@ -68436,6 +69202,14 @@ func (m *MessageMutation) Field(name string) (ent.Value, bool) {
 		return m.DeliveringAt()
 	case message.FieldDeliveryOutcome:
 		return m.DeliveryOutcome()
+	case message.FieldHoldUntil:
+		return m.HoldUntil()
+	case message.FieldHoldLaunchID:
+		return m.HoldLaunchID()
+	case message.FieldNotReached:
+		return m.NotReached()
+	case message.FieldNotReachedAt:
+		return m.NotReachedAt()
 	case message.FieldChannel:
 		return m.Channel()
 	case message.FieldThreadID:
@@ -68497,6 +69271,14 @@ func (m *MessageMutation) OldField(ctx context.Context, name string) (ent.Value,
 		return m.OldDeliveringAt(ctx)
 	case message.FieldDeliveryOutcome:
 		return m.OldDeliveryOutcome(ctx)
+	case message.FieldHoldUntil:
+		return m.OldHoldUntil(ctx)
+	case message.FieldHoldLaunchID:
+		return m.OldHoldLaunchID(ctx)
+	case message.FieldNotReached:
+		return m.OldNotReached(ctx)
+	case message.FieldNotReachedAt:
+		return m.OldNotReachedAt(ctx)
 	case message.FieldChannel:
 		return m.OldChannel(ctx)
 	case message.FieldThreadID:
@@ -68648,6 +69430,34 @@ func (m *MessageMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetDeliveryOutcome(v)
 		return nil
+	case message.FieldHoldUntil:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetHoldUntil(v)
+		return nil
+	case message.FieldHoldLaunchID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetHoldLaunchID(v)
+		return nil
+	case message.FieldNotReached:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetNotReached(v)
+		return nil
+	case message.FieldNotReachedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetNotReachedAt(v)
+		return nil
 	case message.FieldChannel:
 		v, ok := value.(string)
 		if !ok {
@@ -68761,6 +69571,18 @@ func (m *MessageMutation) ClearedFields() []string {
 	if m.FieldCleared(message.FieldDeliveryOutcome) {
 		fields = append(fields, message.FieldDeliveryOutcome)
 	}
+	if m.FieldCleared(message.FieldHoldUntil) {
+		fields = append(fields, message.FieldHoldUntil)
+	}
+	if m.FieldCleared(message.FieldHoldLaunchID) {
+		fields = append(fields, message.FieldHoldLaunchID)
+	}
+	if m.FieldCleared(message.FieldNotReached) {
+		fields = append(fields, message.FieldNotReached)
+	}
+	if m.FieldCleared(message.FieldNotReachedAt) {
+		fields = append(fields, message.FieldNotReachedAt)
+	}
 	if m.FieldCleared(message.FieldChannel) {
 		fields = append(fields, message.FieldChannel)
 	}
@@ -68822,6 +69644,18 @@ func (m *MessageMutation) ClearField(name string) error {
 		return nil
 	case message.FieldDeliveryOutcome:
 		m.ClearDeliveryOutcome()
+		return nil
+	case message.FieldHoldUntil:
+		m.ClearHoldUntil()
+		return nil
+	case message.FieldHoldLaunchID:
+		m.ClearHoldLaunchID()
+		return nil
+	case message.FieldNotReached:
+		m.ClearNotReached()
+		return nil
+	case message.FieldNotReachedAt:
+		m.ClearNotReachedAt()
 		return nil
 	case message.FieldChannel:
 		m.ClearChannel()
@@ -68905,6 +69739,18 @@ func (m *MessageMutation) ResetField(name string) error {
 		return nil
 	case message.FieldDeliveryOutcome:
 		m.ResetDeliveryOutcome()
+		return nil
+	case message.FieldHoldUntil:
+		m.ResetHoldUntil()
+		return nil
+	case message.FieldHoldLaunchID:
+		m.ResetHoldLaunchID()
+		return nil
+	case message.FieldNotReached:
+		m.ResetNotReached()
+		return nil
+	case message.FieldNotReachedAt:
+		m.ResetNotReachedAt()
 		return nil
 	case message.FieldChannel:
 		m.ResetChannel()

@@ -50,6 +50,14 @@ const (
 	FieldDeliveringAt = "delivering_at"
 	// FieldDeliveryOutcome holds the string denoting the delivery_outcome field in the database.
 	FieldDeliveryOutcome = "delivery_outcome"
+	// FieldHoldUntil holds the string denoting the hold_until field in the database.
+	FieldHoldUntil = "hold_until"
+	// FieldHoldLaunchID holds the string denoting the hold_launch_id field in the database.
+	FieldHoldLaunchID = "hold_launch_id"
+	// FieldNotReached holds the string denoting the not_reached field in the database.
+	FieldNotReached = "not_reached"
+	// FieldNotReachedAt holds the string denoting the not_reached_at field in the database.
+	FieldNotReachedAt = "not_reached_at"
 	// FieldChannel holds the string denoting the channel field in the database.
 	FieldChannel = "channel"
 	// FieldThreadID holds the string denoting the thread_id field in the database.
@@ -91,6 +99,10 @@ var Columns = []string{
 	FieldDeliveryID,
 	FieldDeliveringAt,
 	FieldDeliveryOutcome,
+	FieldHoldUntil,
+	FieldHoldLaunchID,
+	FieldNotReached,
+	FieldNotReachedAt,
 	FieldChannel,
 	FieldThreadID,
 	FieldConversationID,
@@ -130,6 +142,10 @@ var (
 	DeliveryIDValidator func(string) error
 	// DeliveryOutcomeValidator is a validator for the "delivery_outcome" field. It is called by the builders before save.
 	DeliveryOutcomeValidator func(string) error
+	// HoldLaunchIDValidator is a validator for the "hold_launch_id" field. It is called by the builders before save.
+	HoldLaunchIDValidator func(string) error
+	// NotReachedValidator is a validator for the "not_reached" field. It is called by the builders before save.
+	NotReachedValidator func(string) error
 	// ChannelValidator is a validator for the "channel" field. It is called by the builders before save.
 	ChannelValidator func(string) error
 	// ThreadIDValidator is a validator for the "thread_id" field. It is called by the builders before save.
@@ -236,6 +252,26 @@ func ByDeliveringAt(opts ...sql.OrderTermOption) OrderOption {
 // ByDeliveryOutcome orders the results by the delivery_outcome field.
 func ByDeliveryOutcome(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldDeliveryOutcome, opts...).ToFunc()
+}
+
+// ByHoldUntil orders the results by the hold_until field.
+func ByHoldUntil(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldHoldUntil, opts...).ToFunc()
+}
+
+// ByHoldLaunchID orders the results by the hold_launch_id field.
+func ByHoldLaunchID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldHoldLaunchID, opts...).ToFunc()
+}
+
+// ByNotReached orders the results by the not_reached field.
+func ByNotReached(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldNotReached, opts...).ToFunc()
+}
+
+// ByNotReachedAt orders the results by the not_reached_at field.
+func ByNotReachedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldNotReachedAt, opts...).ToFunc()
 }
 
 // ByChannel orders the results by the channel field.

@@ -2571,7 +2571,36 @@ const (
 	// partial answer, an ambiguous call, or a stale delivering row). It is
 	// never re-driven.
 	MessageDispatchPartial = "partial"
+	// MessageDispatchAwaitingSession marks a row proved not to reach a
+	// conduit-delivered agent because no conduit session was connected
+	// (ptone/scion#7881), or queued behind earlier held rows on the same
+	// agent. Re-driven in creation order once a session advertising
+	// deliver-message connects, or failed on expiry/stop.
+	MessageDispatchAwaitingSession = "awaiting_session"
 )
+
+// Message.NotReached proof values stamped by the hub's /deliver handler.
+const (
+	MessageNotReachedNoSession = "no_session"
+)
+
+// PrepareOrHoldResult reports what PrepareOrHoldMessage recorded on a row
+// before broker dispatch.
+type PrepareOrHoldResult struct {
+	Held         bool
+	HoldUntil    *time.Time
+	HoldLaunchID string
+}
+
+// HoldMessageParams carries the inputs for HoldMessageAwaitingSession's
+// atomic compare-and-set transition into awaiting_session.
+type HoldMessageParams struct {
+	MessageID   string
+	AgentID     string
+	MaxProofAge time.Duration
+	HoldTTL     time.Duration
+	MaxHeld     int
+}
 
 // DeliveryOutcomeUnknownPartial is the delivery_outcome stored when a row
 // bound to a conduit delivery ends without a known answer: the stale sweep,
@@ -3652,6 +3681,13 @@ type Message struct {
 	DispatchState         string     `json:"dispatchState,omitempty"`
 	DispatchedAt          *time.Time `json:"dispatchedAt,omitempty"`
 	DispatchFailureReason *string    `json:"dispatchFailureReason,omitempty"`
+
+	// Hold-until-session re-drive fields (ptone/scion#7881). Internal store
+	// fields only — never serialized to API, history, or SSE responses.
+	HoldUntil    *time.Time `json:"-"`
+	HoldLaunchID string     `json:"-"`
+	NotReached   string     `json:"-"`
+	NotReachedAt *time.Time `json:"-"`
 
 	// DeferredAttachments is never stored. For a deferred message, the
 	// conversation messages route lists its attachments stored as

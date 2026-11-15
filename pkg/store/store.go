@@ -425,6 +425,9 @@ type Store interface {
 	// BrokerDispatch operations (multi-node command dispatch)
 	BrokerDispatchStore
 
+	// Hold-until-session re-drive operations (ptone/scion#7881)
+	MessageHoldStore
+
 	// Template operations
 	TemplateStore
 
@@ -2105,6 +2108,68 @@ type BrokerDispatchStore interface {
 	// an agent recipient is ever legitimately in either state. Returns the
 	// number repaired.
 	BackfillNonAgentDispatchState(ctx context.Context, expiredReason string) (int, error)
+}
+
+// MessageHoldStore defines persistence operations for hold-until-session
+// re-drive of conduit-delivered messages (ptone/scion#7881). Kept as its own
+// sub-interface (implemented by BrokerDispatchStore) so test doubles of
+// BrokerDispatchStore alone do not need to stub hold methods.
+type MessageHoldStore interface {
+	// UnbindMessageDeliveryWithProof moves rows still delivering under
+	// deliveryID back to dispatched (compare-and-set on delivering and
+	// deliveryID). When notReached is non-empty (store.MessageNotReachedNoSession),
+	// it stamps not_reached and not_reached_at (on the database clock) in the
+	// same conditional write.
+	UnbindMessageDeliveryWithProof(ctx context.Context, deliveryID string, messageIDs []string, notReached string) error
+
+	// PrepareOrHoldMessage runs before broker dispatch for conduit-delivered
+	// agents: in one transaction under the target agent's row lock it captures
+	// the agent's current run_id into hold_launch_id on messageID, and if the
+	// agent currently has a hold marker (agent_delivery_holds), is eligible
+	// for holding, and is under maxHeld, transitions the row to
+	// awaiting_session with hold_until = COALESCE(hold_until, marker.hold_until)
+	// and updates held_count.
+	PrepareOrHoldMessage(ctx context.Context, agentID, messageID string, maxHeld int) (PrepareOrHoldResult, error)
+
+	// HoldMessageAwaitingSession atomically evaluates the hold preconditions
+	// for a broker awaiting_session report and, when all hold, moves the row
+	// from dispatched to awaiting_session with hold_until = COALESCE(hold_until,
+	// now + HoldTTL) (database clock) and creates or updates the agent's hold
+	// marker in the same transaction.
+	HoldMessageAwaitingSession(ctx context.Context, p HoldMessageParams) (bool, error)
+
+	// ClaimHeldMessages atomically claims up to limit unexpired rows in
+	// awaiting_session for agentID, ordered by (created, id), transitioning
+	// each claimed row to dispatched (keeping hold_until, hold_launch_id, and
+	// the proof stamp) and syncing or deleting the agent's hold marker in the
+	// same transaction.
+	ClaimHeldMessages(ctx context.Context, agentID string, limit int) ([]Message, error)
+
+	// ReholdClaimedMessage returns a claimed dispatched row back to
+	// awaiting_session under its original hold_until when re-validation hits
+	// a transient store or authz error (R3), syncing the hold marker in the
+	// same transaction.
+	ReholdClaimedMessage(ctx context.Context, agentID, messageID string, maxHeld int) (bool, error)
+
+	// HasAgentDeliveryHold reports whether agentID currently has an
+	// agent_delivery_holds marker row.
+	HasAgentDeliveryHold(ctx context.Context, agentID string) (bool, error)
+
+	// ListAgentDeliveryHoldAgentIDs returns the agent IDs that currently have
+	// an agent_delivery_holds marker row, ordered by marker creation time.
+	ListAgentDeliveryHoldAgentIDs(ctx context.Context) ([]string, error)
+
+	// ExpireHeldMessagesForAgent atomically fails all awaiting_session rows
+	// for agentID with reason, removes the agent's hold marker in the same
+	// transaction, and returns the rows that transitioned so callers can send
+	// sender failure notices.
+	ExpireHeldMessagesForAgent(ctx context.Context, agentID, reason string) ([]Message, error)
+
+	// ExpireHeldMessagesPastDeadline atomically fails up to limit
+	// awaiting_session rows whose hold_until <= database now with reason,
+	// syncs or removes affected agents' hold markers in the same transaction,
+	// and returns the rows that transitioned.
+	ExpireHeldMessagesPastDeadline(ctx context.Context, reason string, limit int) ([]Message, error)
 }
 
 // TemplateStore defines template persistence operations.

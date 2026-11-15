@@ -244,6 +244,62 @@ func (_c *MessageCreate) SetNillableDeliveryOutcome(v *string) *MessageCreate {
 	return _c
 }
 
+// SetHoldUntil sets the "hold_until" field.
+func (_c *MessageCreate) SetHoldUntil(v time.Time) *MessageCreate {
+	_c.mutation.SetHoldUntil(v)
+	return _c
+}
+
+// SetNillableHoldUntil sets the "hold_until" field if the given value is not nil.
+func (_c *MessageCreate) SetNillableHoldUntil(v *time.Time) *MessageCreate {
+	if v != nil {
+		_c.SetHoldUntil(*v)
+	}
+	return _c
+}
+
+// SetHoldLaunchID sets the "hold_launch_id" field.
+func (_c *MessageCreate) SetHoldLaunchID(v string) *MessageCreate {
+	_c.mutation.SetHoldLaunchID(v)
+	return _c
+}
+
+// SetNillableHoldLaunchID sets the "hold_launch_id" field if the given value is not nil.
+func (_c *MessageCreate) SetNillableHoldLaunchID(v *string) *MessageCreate {
+	if v != nil {
+		_c.SetHoldLaunchID(*v)
+	}
+	return _c
+}
+
+// SetNotReached sets the "not_reached" field.
+func (_c *MessageCreate) SetNotReached(v string) *MessageCreate {
+	_c.mutation.SetNotReached(v)
+	return _c
+}
+
+// SetNillableNotReached sets the "not_reached" field if the given value is not nil.
+func (_c *MessageCreate) SetNillableNotReached(v *string) *MessageCreate {
+	if v != nil {
+		_c.SetNotReached(*v)
+	}
+	return _c
+}
+
+// SetNotReachedAt sets the "not_reached_at" field.
+func (_c *MessageCreate) SetNotReachedAt(v time.Time) *MessageCreate {
+	_c.mutation.SetNotReachedAt(v)
+	return _c
+}
+
+// SetNillableNotReachedAt sets the "not_reached_at" field if the given value is not nil.
+func (_c *MessageCreate) SetNillableNotReachedAt(v *time.Time) *MessageCreate {
+	if v != nil {
+		_c.SetNotReachedAt(*v)
+	}
+	return _c
+}
+
 // SetChannel sets the "channel" field.
 func (_c *MessageCreate) SetChannel(v string) *MessageCreate {
 	_c.mutation.SetChannel(v)
@@ -484,6 +540,16 @@ func (_c *MessageCreate) check() error {
 			return &ValidationError{Name: "delivery_outcome", err: fmt.Errorf(`ent: validator failed for field "Message.delivery_outcome": %w`, err)}
 		}
 	}
+	if v, ok := _c.mutation.HoldLaunchID(); ok {
+		if err := message.HoldLaunchIDValidator(v); err != nil {
+			return &ValidationError{Name: "hold_launch_id", err: fmt.Errorf(`ent: validator failed for field "Message.hold_launch_id": %w`, err)}
+		}
+	}
+	if v, ok := _c.mutation.NotReached(); ok {
+		if err := message.NotReachedValidator(v); err != nil {
+			return &ValidationError{Name: "not_reached", err: fmt.Errorf(`ent: validator failed for field "Message.not_reached": %w`, err)}
+		}
+	}
 	if v, ok := _c.mutation.Channel(); ok {
 		if err := message.ChannelValidator(v); err != nil {
 			return &ValidationError{Name: "channel", err: fmt.Errorf(`ent: validator failed for field "Message.channel": %w`, err)}
@@ -604,6 +670,22 @@ func (_c *MessageCreate) createSpec() (*Message, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.DeliveryOutcome(); ok {
 		_spec.SetField(message.FieldDeliveryOutcome, field.TypeString, value)
 		_node.DeliveryOutcome = &value
+	}
+	if value, ok := _c.mutation.HoldUntil(); ok {
+		_spec.SetField(message.FieldHoldUntil, field.TypeTime, value)
+		_node.HoldUntil = &value
+	}
+	if value, ok := _c.mutation.HoldLaunchID(); ok {
+		_spec.SetField(message.FieldHoldLaunchID, field.TypeString, value)
+		_node.HoldLaunchID = &value
+	}
+	if value, ok := _c.mutation.NotReached(); ok {
+		_spec.SetField(message.FieldNotReached, field.TypeString, value)
+		_node.NotReached = &value
+	}
+	if value, ok := _c.mutation.NotReachedAt(); ok {
+		_spec.SetField(message.FieldNotReachedAt, field.TypeTime, value)
+		_node.NotReachedAt = &value
 	}
 	if value, ok := _c.mutation.Channel(); ok {
 		_spec.SetField(message.FieldChannel, field.TypeString, value)
@@ -956,6 +1038,78 @@ func (u *MessageUpsert) UpdateDeliveryOutcome() *MessageUpsert {
 // ClearDeliveryOutcome clears the value of the "delivery_outcome" field.
 func (u *MessageUpsert) ClearDeliveryOutcome() *MessageUpsert {
 	u.SetNull(message.FieldDeliveryOutcome)
+	return u
+}
+
+// SetHoldUntil sets the "hold_until" field.
+func (u *MessageUpsert) SetHoldUntil(v time.Time) *MessageUpsert {
+	u.Set(message.FieldHoldUntil, v)
+	return u
+}
+
+// UpdateHoldUntil sets the "hold_until" field to the value that was provided on create.
+func (u *MessageUpsert) UpdateHoldUntil() *MessageUpsert {
+	u.SetExcluded(message.FieldHoldUntil)
+	return u
+}
+
+// ClearHoldUntil clears the value of the "hold_until" field.
+func (u *MessageUpsert) ClearHoldUntil() *MessageUpsert {
+	u.SetNull(message.FieldHoldUntil)
+	return u
+}
+
+// SetHoldLaunchID sets the "hold_launch_id" field.
+func (u *MessageUpsert) SetHoldLaunchID(v string) *MessageUpsert {
+	u.Set(message.FieldHoldLaunchID, v)
+	return u
+}
+
+// UpdateHoldLaunchID sets the "hold_launch_id" field to the value that was provided on create.
+func (u *MessageUpsert) UpdateHoldLaunchID() *MessageUpsert {
+	u.SetExcluded(message.FieldHoldLaunchID)
+	return u
+}
+
+// ClearHoldLaunchID clears the value of the "hold_launch_id" field.
+func (u *MessageUpsert) ClearHoldLaunchID() *MessageUpsert {
+	u.SetNull(message.FieldHoldLaunchID)
+	return u
+}
+
+// SetNotReached sets the "not_reached" field.
+func (u *MessageUpsert) SetNotReached(v string) *MessageUpsert {
+	u.Set(message.FieldNotReached, v)
+	return u
+}
+
+// UpdateNotReached sets the "not_reached" field to the value that was provided on create.
+func (u *MessageUpsert) UpdateNotReached() *MessageUpsert {
+	u.SetExcluded(message.FieldNotReached)
+	return u
+}
+
+// ClearNotReached clears the value of the "not_reached" field.
+func (u *MessageUpsert) ClearNotReached() *MessageUpsert {
+	u.SetNull(message.FieldNotReached)
+	return u
+}
+
+// SetNotReachedAt sets the "not_reached_at" field.
+func (u *MessageUpsert) SetNotReachedAt(v time.Time) *MessageUpsert {
+	u.Set(message.FieldNotReachedAt, v)
+	return u
+}
+
+// UpdateNotReachedAt sets the "not_reached_at" field to the value that was provided on create.
+func (u *MessageUpsert) UpdateNotReachedAt() *MessageUpsert {
+	u.SetExcluded(message.FieldNotReachedAt)
+	return u
+}
+
+// ClearNotReachedAt clears the value of the "not_reached_at" field.
+func (u *MessageUpsert) ClearNotReachedAt() *MessageUpsert {
+	u.SetNull(message.FieldNotReachedAt)
 	return u
 }
 
@@ -1388,6 +1542,90 @@ func (u *MessageUpsertOne) UpdateDeliveryOutcome() *MessageUpsertOne {
 func (u *MessageUpsertOne) ClearDeliveryOutcome() *MessageUpsertOne {
 	return u.Update(func(s *MessageUpsert) {
 		s.ClearDeliveryOutcome()
+	})
+}
+
+// SetHoldUntil sets the "hold_until" field.
+func (u *MessageUpsertOne) SetHoldUntil(v time.Time) *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetHoldUntil(v)
+	})
+}
+
+// UpdateHoldUntil sets the "hold_until" field to the value that was provided on create.
+func (u *MessageUpsertOne) UpdateHoldUntil() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateHoldUntil()
+	})
+}
+
+// ClearHoldUntil clears the value of the "hold_until" field.
+func (u *MessageUpsertOne) ClearHoldUntil() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearHoldUntil()
+	})
+}
+
+// SetHoldLaunchID sets the "hold_launch_id" field.
+func (u *MessageUpsertOne) SetHoldLaunchID(v string) *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetHoldLaunchID(v)
+	})
+}
+
+// UpdateHoldLaunchID sets the "hold_launch_id" field to the value that was provided on create.
+func (u *MessageUpsertOne) UpdateHoldLaunchID() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateHoldLaunchID()
+	})
+}
+
+// ClearHoldLaunchID clears the value of the "hold_launch_id" field.
+func (u *MessageUpsertOne) ClearHoldLaunchID() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearHoldLaunchID()
+	})
+}
+
+// SetNotReached sets the "not_reached" field.
+func (u *MessageUpsertOne) SetNotReached(v string) *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetNotReached(v)
+	})
+}
+
+// UpdateNotReached sets the "not_reached" field to the value that was provided on create.
+func (u *MessageUpsertOne) UpdateNotReached() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateNotReached()
+	})
+}
+
+// ClearNotReached clears the value of the "not_reached" field.
+func (u *MessageUpsertOne) ClearNotReached() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearNotReached()
+	})
+}
+
+// SetNotReachedAt sets the "not_reached_at" field.
+func (u *MessageUpsertOne) SetNotReachedAt(v time.Time) *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetNotReachedAt(v)
+	})
+}
+
+// UpdateNotReachedAt sets the "not_reached_at" field to the value that was provided on create.
+func (u *MessageUpsertOne) UpdateNotReachedAt() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateNotReachedAt()
+	})
+}
+
+// ClearNotReachedAt clears the value of the "not_reached_at" field.
+func (u *MessageUpsertOne) ClearNotReachedAt() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearNotReachedAt()
 	})
 }
 
@@ -1996,6 +2234,90 @@ func (u *MessageUpsertBulk) UpdateDeliveryOutcome() *MessageUpsertBulk {
 func (u *MessageUpsertBulk) ClearDeliveryOutcome() *MessageUpsertBulk {
 	return u.Update(func(s *MessageUpsert) {
 		s.ClearDeliveryOutcome()
+	})
+}
+
+// SetHoldUntil sets the "hold_until" field.
+func (u *MessageUpsertBulk) SetHoldUntil(v time.Time) *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetHoldUntil(v)
+	})
+}
+
+// UpdateHoldUntil sets the "hold_until" field to the value that was provided on create.
+func (u *MessageUpsertBulk) UpdateHoldUntil() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateHoldUntil()
+	})
+}
+
+// ClearHoldUntil clears the value of the "hold_until" field.
+func (u *MessageUpsertBulk) ClearHoldUntil() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearHoldUntil()
+	})
+}
+
+// SetHoldLaunchID sets the "hold_launch_id" field.
+func (u *MessageUpsertBulk) SetHoldLaunchID(v string) *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetHoldLaunchID(v)
+	})
+}
+
+// UpdateHoldLaunchID sets the "hold_launch_id" field to the value that was provided on create.
+func (u *MessageUpsertBulk) UpdateHoldLaunchID() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateHoldLaunchID()
+	})
+}
+
+// ClearHoldLaunchID clears the value of the "hold_launch_id" field.
+func (u *MessageUpsertBulk) ClearHoldLaunchID() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearHoldLaunchID()
+	})
+}
+
+// SetNotReached sets the "not_reached" field.
+func (u *MessageUpsertBulk) SetNotReached(v string) *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetNotReached(v)
+	})
+}
+
+// UpdateNotReached sets the "not_reached" field to the value that was provided on create.
+func (u *MessageUpsertBulk) UpdateNotReached() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateNotReached()
+	})
+}
+
+// ClearNotReached clears the value of the "not_reached" field.
+func (u *MessageUpsertBulk) ClearNotReached() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearNotReached()
+	})
+}
+
+// SetNotReachedAt sets the "not_reached_at" field.
+func (u *MessageUpsertBulk) SetNotReachedAt(v time.Time) *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetNotReachedAt(v)
+	})
+}
+
+// UpdateNotReachedAt sets the "not_reached_at" field to the value that was provided on create.
+func (u *MessageUpsertBulk) UpdateNotReachedAt() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateNotReachedAt()
+	})
+}
+
+// ClearNotReachedAt clears the value of the "not_reached_at" field.
+func (u *MessageUpsertBulk) ClearNotReachedAt() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearNotReachedAt()
 	})
 }
 

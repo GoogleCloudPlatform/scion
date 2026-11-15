@@ -67,8 +67,8 @@ func (Message) Fields() []ent.Field {
 			Optional(),
 		// dispatch_state tracks cross-node delivery:
 		// pending|dispatched|failed|deferred|no_recipient, plus
-		// delivering|delivered|partial for a delivery over conduit (see the
-		// store.MessageDispatch* constants).
+		// delivering|delivered|partial|awaiting_session for a delivery over
+		// conduit (see the store.MessageDispatch* constants).
 		// After Phase 4 (no-queuing delivery), every writer sets the state
 		// explicitly. Only ExecuteAgentDM writes "pending", for the length of its
 		// dispatch; a row stays pending only after a deadline-ambiguous dispatch,
@@ -99,6 +99,26 @@ func (Message) Fields() []ent.Field {
 			Optional().
 			Nillable().
 			MaxLen(256),
+		// hold_until, hold_launch_id, not_reached and not_reached_at track
+		// hold-until-session re-drive for deliver-message (ptone/scion#7881,
+		// .design/conduit/v2.22-deliver-message.md §2.5/§2.6). hold_until is
+		// set once via COALESCE and never extended; hold_launch_id pins the
+		// target agent's run_id at send time; not_reached/not_reached_at
+		// record the hub's own proof that /deliver saw router.ErrNoSession.
+		field.Time("hold_until").
+			Optional().
+			Nillable(),
+		field.String("hold_launch_id").
+			Optional().
+			Nillable().
+			MaxLen(128),
+		field.String("not_reached").
+			Optional().
+			Nillable().
+			MaxLen(32),
+		field.Time("not_reached_at").
+			Optional().
+			Nillable(),
 		// channel identifies the integration that originated or targets
 		// this message (e.g. "web", "discord", "telegram").
 		field.String("channel").
@@ -201,6 +221,17 @@ func (Message) Indexes() []ent.Index {
 		index.Fields("delivering_at").
 			StorageKey("message_delivering_at").
 			Annotations(entsql.IndexWhere("dispatch_state = 'delivering'")),
+		// Hold-until-session re-drive (ptone/scion#7881): claims and expiry
+		// sweeps filter on dispatch_state = 'awaiting_session' and order by
+		// created, id (or recipient_id, created, id). Held rows are transient,
+		// so partial indexes keep claims and the 30 s sweep proportional to
+		// held rows rather than the full table.
+		index.Fields("created", "id").
+			StorageKey("message_awaiting_session_created_id").
+			Annotations(entsql.IndexWhere("dispatch_state = 'awaiting_session'")),
+		index.Fields("recipient_id", "created", "id").
+			StorageKey("message_awaiting_session_recipient_created_id").
+			Annotations(entsql.IndexWhere("dispatch_state = 'awaiting_session'")),
 		// The conversation consistency check reads the latest messages of a
 		// DM pair, one query per direction, filtering on sender_id and
 		// recipient_id and ordering by created, id. The single-column

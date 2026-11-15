@@ -145,6 +145,26 @@ func DeliveryOutcome(v string) predicate.Message {
 	return predicate.Message(sql.FieldEQ(FieldDeliveryOutcome, v))
 }
 
+// HoldUntil applies equality check predicate on the "hold_until" field. It's identical to HoldUntilEQ.
+func HoldUntil(v time.Time) predicate.Message {
+	return predicate.Message(sql.FieldEQ(FieldHoldUntil, v))
+}
+
+// HoldLaunchID applies equality check predicate on the "hold_launch_id" field. It's identical to HoldLaunchIDEQ.
+func HoldLaunchID(v string) predicate.Message {
+	return predicate.Message(sql.FieldEQ(FieldHoldLaunchID, v))
+}
+
+// NotReached applies equality check predicate on the "not_reached" field. It's identical to NotReachedEQ.
+func NotReached(v string) predicate.Message {
+	return predicate.Message(sql.FieldEQ(FieldNotReached, v))
+}
+
+// NotReachedAt applies equality check predicate on the "not_reached_at" field. It's identical to NotReachedAtEQ.
+func NotReachedAt(v time.Time) predicate.Message {
+	return predicate.Message(sql.FieldEQ(FieldNotReachedAt, v))
+}
+
 // Channel applies equality check predicate on the "channel" field. It's identical to ChannelEQ.
 func Channel(v string) predicate.Message {
 	return predicate.Message(sql.FieldEQ(FieldChannel, v))
@@ -1203,6 +1223,256 @@ func DeliveryOutcomeEqualFold(v string) predicate.Message {
 // DeliveryOutcomeContainsFold applies the ContainsFold predicate on the "delivery_outcome" field.
 func DeliveryOutcomeContainsFold(v string) predicate.Message {
 	return predicate.Message(sql.FieldContainsFold(FieldDeliveryOutcome, v))
+}
+
+// HoldUntilEQ applies the EQ predicate on the "hold_until" field.
+func HoldUntilEQ(v time.Time) predicate.Message {
+	return predicate.Message(sql.FieldEQ(FieldHoldUntil, v))
+}
+
+// HoldUntilNEQ applies the NEQ predicate on the "hold_until" field.
+func HoldUntilNEQ(v time.Time) predicate.Message {
+	return predicate.Message(sql.FieldNEQ(FieldHoldUntil, v))
+}
+
+// HoldUntilIn applies the In predicate on the "hold_until" field.
+func HoldUntilIn(vs ...time.Time) predicate.Message {
+	return predicate.Message(sql.FieldIn(FieldHoldUntil, vs...))
+}
+
+// HoldUntilNotIn applies the NotIn predicate on the "hold_until" field.
+func HoldUntilNotIn(vs ...time.Time) predicate.Message {
+	return predicate.Message(sql.FieldNotIn(FieldHoldUntil, vs...))
+}
+
+// HoldUntilGT applies the GT predicate on the "hold_until" field.
+func HoldUntilGT(v time.Time) predicate.Message {
+	return predicate.Message(sql.FieldGT(FieldHoldUntil, v))
+}
+
+// HoldUntilGTE applies the GTE predicate on the "hold_until" field.
+func HoldUntilGTE(v time.Time) predicate.Message {
+	return predicate.Message(sql.FieldGTE(FieldHoldUntil, v))
+}
+
+// HoldUntilLT applies the LT predicate on the "hold_until" field.
+func HoldUntilLT(v time.Time) predicate.Message {
+	return predicate.Message(sql.FieldLT(FieldHoldUntil, v))
+}
+
+// HoldUntilLTE applies the LTE predicate on the "hold_until" field.
+func HoldUntilLTE(v time.Time) predicate.Message {
+	return predicate.Message(sql.FieldLTE(FieldHoldUntil, v))
+}
+
+// HoldUntilIsNil applies the IsNil predicate on the "hold_until" field.
+func HoldUntilIsNil() predicate.Message {
+	return predicate.Message(sql.FieldIsNull(FieldHoldUntil))
+}
+
+// HoldUntilNotNil applies the NotNil predicate on the "hold_until" field.
+func HoldUntilNotNil() predicate.Message {
+	return predicate.Message(sql.FieldNotNull(FieldHoldUntil))
+}
+
+// HoldLaunchIDEQ applies the EQ predicate on the "hold_launch_id" field.
+func HoldLaunchIDEQ(v string) predicate.Message {
+	return predicate.Message(sql.FieldEQ(FieldHoldLaunchID, v))
+}
+
+// HoldLaunchIDNEQ applies the NEQ predicate on the "hold_launch_id" field.
+func HoldLaunchIDNEQ(v string) predicate.Message {
+	return predicate.Message(sql.FieldNEQ(FieldHoldLaunchID, v))
+}
+
+// HoldLaunchIDIn applies the In predicate on the "hold_launch_id" field.
+func HoldLaunchIDIn(vs ...string) predicate.Message {
+	return predicate.Message(sql.FieldIn(FieldHoldLaunchID, vs...))
+}
+
+// HoldLaunchIDNotIn applies the NotIn predicate on the "hold_launch_id" field.
+func HoldLaunchIDNotIn(vs ...string) predicate.Message {
+	return predicate.Message(sql.FieldNotIn(FieldHoldLaunchID, vs...))
+}
+
+// HoldLaunchIDGT applies the GT predicate on the "hold_launch_id" field.
+func HoldLaunchIDGT(v string) predicate.Message {
+	return predicate.Message(sql.FieldGT(FieldHoldLaunchID, v))
+}
+
+// HoldLaunchIDGTE applies the GTE predicate on the "hold_launch_id" field.
+func HoldLaunchIDGTE(v string) predicate.Message {
+	return predicate.Message(sql.FieldGTE(FieldHoldLaunchID, v))
+}
+
+// HoldLaunchIDLT applies the LT predicate on the "hold_launch_id" field.
+func HoldLaunchIDLT(v string) predicate.Message {
+	return predicate.Message(sql.FieldLT(FieldHoldLaunchID, v))
+}
+
+// HoldLaunchIDLTE applies the LTE predicate on the "hold_launch_id" field.
+func HoldLaunchIDLTE(v string) predicate.Message {
+	return predicate.Message(sql.FieldLTE(FieldHoldLaunchID, v))
+}
+
+// HoldLaunchIDContains applies the Contains predicate on the "hold_launch_id" field.
+func HoldLaunchIDContains(v string) predicate.Message {
+	return predicate.Message(sql.FieldContains(FieldHoldLaunchID, v))
+}
+
+// HoldLaunchIDHasPrefix applies the HasPrefix predicate on the "hold_launch_id" field.
+func HoldLaunchIDHasPrefix(v string) predicate.Message {
+	return predicate.Message(sql.FieldHasPrefix(FieldHoldLaunchID, v))
+}
+
+// HoldLaunchIDHasSuffix applies the HasSuffix predicate on the "hold_launch_id" field.
+func HoldLaunchIDHasSuffix(v string) predicate.Message {
+	return predicate.Message(sql.FieldHasSuffix(FieldHoldLaunchID, v))
+}
+
+// HoldLaunchIDIsNil applies the IsNil predicate on the "hold_launch_id" field.
+func HoldLaunchIDIsNil() predicate.Message {
+	return predicate.Message(sql.FieldIsNull(FieldHoldLaunchID))
+}
+
+// HoldLaunchIDNotNil applies the NotNil predicate on the "hold_launch_id" field.
+func HoldLaunchIDNotNil() predicate.Message {
+	return predicate.Message(sql.FieldNotNull(FieldHoldLaunchID))
+}
+
+// HoldLaunchIDEqualFold applies the EqualFold predicate on the "hold_launch_id" field.
+func HoldLaunchIDEqualFold(v string) predicate.Message {
+	return predicate.Message(sql.FieldEqualFold(FieldHoldLaunchID, v))
+}
+
+// HoldLaunchIDContainsFold applies the ContainsFold predicate on the "hold_launch_id" field.
+func HoldLaunchIDContainsFold(v string) predicate.Message {
+	return predicate.Message(sql.FieldContainsFold(FieldHoldLaunchID, v))
+}
+
+// NotReachedEQ applies the EQ predicate on the "not_reached" field.
+func NotReachedEQ(v string) predicate.Message {
+	return predicate.Message(sql.FieldEQ(FieldNotReached, v))
+}
+
+// NotReachedNEQ applies the NEQ predicate on the "not_reached" field.
+func NotReachedNEQ(v string) predicate.Message {
+	return predicate.Message(sql.FieldNEQ(FieldNotReached, v))
+}
+
+// NotReachedIn applies the In predicate on the "not_reached" field.
+func NotReachedIn(vs ...string) predicate.Message {
+	return predicate.Message(sql.FieldIn(FieldNotReached, vs...))
+}
+
+// NotReachedNotIn applies the NotIn predicate on the "not_reached" field.
+func NotReachedNotIn(vs ...string) predicate.Message {
+	return predicate.Message(sql.FieldNotIn(FieldNotReached, vs...))
+}
+
+// NotReachedGT applies the GT predicate on the "not_reached" field.
+func NotReachedGT(v string) predicate.Message {
+	return predicate.Message(sql.FieldGT(FieldNotReached, v))
+}
+
+// NotReachedGTE applies the GTE predicate on the "not_reached" field.
+func NotReachedGTE(v string) predicate.Message {
+	return predicate.Message(sql.FieldGTE(FieldNotReached, v))
+}
+
+// NotReachedLT applies the LT predicate on the "not_reached" field.
+func NotReachedLT(v string) predicate.Message {
+	return predicate.Message(sql.FieldLT(FieldNotReached, v))
+}
+
+// NotReachedLTE applies the LTE predicate on the "not_reached" field.
+func NotReachedLTE(v string) predicate.Message {
+	return predicate.Message(sql.FieldLTE(FieldNotReached, v))
+}
+
+// NotReachedContains applies the Contains predicate on the "not_reached" field.
+func NotReachedContains(v string) predicate.Message {
+	return predicate.Message(sql.FieldContains(FieldNotReached, v))
+}
+
+// NotReachedHasPrefix applies the HasPrefix predicate on the "not_reached" field.
+func NotReachedHasPrefix(v string) predicate.Message {
+	return predicate.Message(sql.FieldHasPrefix(FieldNotReached, v))
+}
+
+// NotReachedHasSuffix applies the HasSuffix predicate on the "not_reached" field.
+func NotReachedHasSuffix(v string) predicate.Message {
+	return predicate.Message(sql.FieldHasSuffix(FieldNotReached, v))
+}
+
+// NotReachedIsNil applies the IsNil predicate on the "not_reached" field.
+func NotReachedIsNil() predicate.Message {
+	return predicate.Message(sql.FieldIsNull(FieldNotReached))
+}
+
+// NotReachedNotNil applies the NotNil predicate on the "not_reached" field.
+func NotReachedNotNil() predicate.Message {
+	return predicate.Message(sql.FieldNotNull(FieldNotReached))
+}
+
+// NotReachedEqualFold applies the EqualFold predicate on the "not_reached" field.
+func NotReachedEqualFold(v string) predicate.Message {
+	return predicate.Message(sql.FieldEqualFold(FieldNotReached, v))
+}
+
+// NotReachedContainsFold applies the ContainsFold predicate on the "not_reached" field.
+func NotReachedContainsFold(v string) predicate.Message {
+	return predicate.Message(sql.FieldContainsFold(FieldNotReached, v))
+}
+
+// NotReachedAtEQ applies the EQ predicate on the "not_reached_at" field.
+func NotReachedAtEQ(v time.Time) predicate.Message {
+	return predicate.Message(sql.FieldEQ(FieldNotReachedAt, v))
+}
+
+// NotReachedAtNEQ applies the NEQ predicate on the "not_reached_at" field.
+func NotReachedAtNEQ(v time.Time) predicate.Message {
+	return predicate.Message(sql.FieldNEQ(FieldNotReachedAt, v))
+}
+
+// NotReachedAtIn applies the In predicate on the "not_reached_at" field.
+func NotReachedAtIn(vs ...time.Time) predicate.Message {
+	return predicate.Message(sql.FieldIn(FieldNotReachedAt, vs...))
+}
+
+// NotReachedAtNotIn applies the NotIn predicate on the "not_reached_at" field.
+func NotReachedAtNotIn(vs ...time.Time) predicate.Message {
+	return predicate.Message(sql.FieldNotIn(FieldNotReachedAt, vs...))
+}
+
+// NotReachedAtGT applies the GT predicate on the "not_reached_at" field.
+func NotReachedAtGT(v time.Time) predicate.Message {
+	return predicate.Message(sql.FieldGT(FieldNotReachedAt, v))
+}
+
+// NotReachedAtGTE applies the GTE predicate on the "not_reached_at" field.
+func NotReachedAtGTE(v time.Time) predicate.Message {
+	return predicate.Message(sql.FieldGTE(FieldNotReachedAt, v))
+}
+
+// NotReachedAtLT applies the LT predicate on the "not_reached_at" field.
+func NotReachedAtLT(v time.Time) predicate.Message {
+	return predicate.Message(sql.FieldLT(FieldNotReachedAt, v))
+}
+
+// NotReachedAtLTE applies the LTE predicate on the "not_reached_at" field.
+func NotReachedAtLTE(v time.Time) predicate.Message {
+	return predicate.Message(sql.FieldLTE(FieldNotReachedAt, v))
+}
+
+// NotReachedAtIsNil applies the IsNil predicate on the "not_reached_at" field.
+func NotReachedAtIsNil() predicate.Message {
+	return predicate.Message(sql.FieldIsNull(FieldNotReachedAt))
+}
+
+// NotReachedAtNotNil applies the NotNil predicate on the "not_reached_at" field.
+func NotReachedAtNotNil() predicate.Message {
+	return predicate.Message(sql.FieldNotNull(FieldNotReachedAt))
 }
 
 // ChannelEQ applies the EQ predicate on the "channel" field.

@@ -128,6 +128,8 @@ func (s *BrokerDispatchStore) bindOnce(ctx context.Context, recipientID, deliver
 		SetDispatchState(store.MessageDispatchDelivering).
 		SetDeliveryID(deliveryID).
 		SetDeliveringAt(now).
+		ClearNotReached().
+		ClearNotReachedAt().
 		Save(ctx)
 	if err != nil {
 		return store.DeliveryBind{}, false, mapError(err)

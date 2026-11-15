@@ -1,0 +1,677 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !no_sqlite
+
+package entadapter
+
+import (
+	"context"
+	"encoding/json"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	entsql "entgo.io/ent/dialect/sql"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
+)
+
+type holdStoreFixture struct {
+	client    *ent.Client
+	cs        *CompositeStore
+	projectID string
+	agentID   string
+	nowMu     sync.Mutex
+	now       time.Time
+}
+
+func newHoldStoreFixture(t *testing.T) *holdStoreFixture {
+	t.Helper()
+	ctx := context.Background()
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	baseNow := time.Date(2026, 11, 15, 0, 0, 0, 0, time.UTC)
+
+	f := &holdStoreFixture{
+		client:    client,
+		cs:        cs,
+		projectID: uuid.NewString(),
+		agentID:   uuid.NewString(),
+		now:       baseNow,
+	}
+	cs.SetMessageHoldClockForTest(func() time.Time {
+		f.nowMu.Lock()
+		defer f.nowMu.Unlock()
+		return f.now
+	})
+
+	require.NoError(t, cs.CreateProject(ctx, &store.Project{
+		ID:   f.projectID,
+		Name: "Hold Test Project",
+		Slug: "hold-test-" + f.projectID[:8],
+	}))
+	require.NoError(t, cs.CreateAgent(ctx, &store.Agent{
+		ID:        f.agentID,
+		Slug:      "cloudrun-agent",
+		Name:      "Cloud Run Agent",
+		ProjectID: f.projectID,
+		Phase:     "starting",
+		Runtime:   "cloudrun",
+	}))
+	_, err := cs.SetAgentRunID(ctx, f.agentID, "run-initial", nil)
+	require.NoError(t, err)
+	return f
+}
+
+func (f *holdStoreFixture) advance(d time.Duration) time.Time {
+	f.nowMu.Lock()
+	defer f.nowMu.Unlock()
+	f.now = f.now.Add(d)
+	return f.now
+}
+
+func (f *holdStoreFixture) currentTime() time.Time {
+	f.nowMu.Lock()
+	defer f.nowMu.Unlock()
+	return f.now
+}
+
+func (f *holdStoreFixture) createDispatchedMsg(t *testing.T, body string, createdOffset time.Duration) *store.Message {
+	t.Helper()
+	m := newTestMessage(uuid.NewString(), f.agentID)
+	m.ProjectID = f.projectID
+	m.Recipient = "agent:cloudrun-agent"
+	m.Msg = body
+	m.DispatchState = store.MessageDispatchDispatched
+	created := f.currentTime().Add(createdOffset)
+	m.CreatedAt = created
+	m.DispatchedAt = &created
+	require.NoError(t, f.cs.CreateMessage(context.Background(), m))
+	return m
+}
+
+func (f *holdStoreFixture) stampNoSession(t *testing.T, msgIDs ...string) {
+	t.Helper()
+	ctx := context.Background()
+	deliveryID := "deliv-" + uuid.NewString()
+	res, err := f.cs.BindMessageDelivery(ctx, f.agentID, deliveryID, msgIDs, f.currentTime())
+	require.NoError(t, err)
+	require.Equal(t, store.DeliveryBound, res.Result)
+	require.NoError(t, f.cs.UnbindMessageDeliveryWithProof(ctx, deliveryID, msgIDs, store.MessageNotReachedNoSession))
+}
+
+func TestMessageHoldStore_ProofStampAndHoldCAS(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("holds only fresh no_session proof and creates marker atomically", func(t *testing.T) {
+		f := newHoldStoreFixture(t)
+		m := f.createDispatchedMsg(t, "secret boot prompt", 0)
+
+		prep, err := f.cs.PrepareOrHoldMessage(ctx, f.agentID, m.ID, 100)
+		require.NoError(t, err)
+		assert.False(t, prep.Held)
+		assert.Equal(t, "run-initial", prep.HoldLaunchID)
+
+		// Unstamped dispatched row (e.g. exec path) cannot be held.
+		held, err := f.cs.HoldMessageAwaitingSession(ctx, store.HoldMessageParams{
+			MessageID:   m.ID,
+			AgentID:     f.agentID,
+			MaxProofAge: 2 * time.Minute,
+			HoldTTL:     10 * time.Minute,
+			MaxHeld:     100,
+		})
+		require.NoError(t, err)
+		assert.False(t, held, "unstamped dispatched row must never be held")
+
+		// Plain unbind (not_advertised) leaves no proof stamp -> still rejected.
+		res, err := f.cs.BindMessageDelivery(ctx, f.agentID, "d-unadv", []string{m.ID}, f.currentTime())
+		require.NoError(t, err)
+		require.Equal(t, store.DeliveryBound, res.Result)
+		require.NoError(t, f.cs.UnbindMessageDelivery(ctx, "d-unadv", []string{m.ID}))
+
+		held, err = f.cs.HoldMessageAwaitingSession(ctx, store.HoldMessageParams{
+			MessageID:   m.ID,
+			AgentID:     f.agentID,
+			MaxProofAge: 2 * time.Minute,
+			HoldTTL:     10 * time.Minute,
+			MaxHeld:     100,
+		})
+		require.NoError(t, err)
+		assert.False(t, held, "not_advertised unbind must not allow hold")
+
+		// Hub-stamped no_session proof -> CAS holds row and creates marker.
+		f.stampNoSession(t, m.ID)
+		held, err = f.cs.HoldMessageAwaitingSession(ctx, store.HoldMessageParams{
+			MessageID:   m.ID,
+			AgentID:     f.agentID,
+			MaxProofAge: 2 * time.Minute,
+			HoldTTL:     10 * time.Minute,
+			MaxHeld:     100,
+		})
+		require.NoError(t, err)
+		assert.True(t, held)
+
+		got, err := f.cs.GetMessage(ctx, m.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.MessageDispatchAwaitingSession, got.DispatchState)
+		assert.Equal(t, "run-initial", got.HoldLaunchID)
+		require.NotNil(t, got.HoldUntil)
+		assert.Equal(t, f.currentTime().Add(10*time.Minute), *got.HoldUntil)
+
+		// Internal hold/proof fields are json:"-" and never serialize.
+		rawJSON, err := json.Marshal(got)
+		require.NoError(t, err)
+		assert.NotContains(t, string(rawJSON), "holdUntil")
+		assert.NotContains(t, string(rawJSON), "holdLaunchId")
+		assert.NotContains(t, string(rawJSON), "notReached")
+
+		hasHold, err := f.cs.HasAgentDeliveryHold(ctx, f.agentID)
+		require.NoError(t, err)
+		assert.True(t, hasHold)
+
+		// M-03 & M-04: awaiting_session is neither bindable nor failed by FailUndeliveredMessage.
+		bindRes, err := f.cs.BindMessageDelivery(ctx, f.agentID, "d-stale", []string{m.ID}, f.currentTime())
+		require.NoError(t, err)
+		assert.Equal(t, store.DeliveryConflict, bindRes.Result)
+
+		won, err := f.cs.FailUndeliveredMessage(ctx, m.ID, "late broker failure")
+		require.NoError(t, err)
+		assert.False(t, won)
+
+		got, err = f.cs.GetMessage(ctx, m.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.MessageDispatchAwaitingSession, got.DispatchState)
+	})
+
+	t.Run("rejects stale proof, delivering/partial rows, and ineligible agent states", func(t *testing.T) {
+		f := newHoldStoreFixture(t)
+
+		// Stale proof (> 2m old).
+		stale := f.createDispatchedMsg(t, "stale proof", 0)
+		f.stampNoSession(t, stale.ID)
+		f.advance(2*time.Minute + time.Second)
+
+		held, err := f.cs.HoldMessageAwaitingSession(ctx, store.HoldMessageParams{
+			MessageID:   stale.ID,
+			AgentID:     f.agentID,
+			MaxProofAge: 2 * time.Minute,
+			HoldTTL:     10 * time.Minute,
+			MaxHeld:     100,
+		})
+		require.NoError(t, err)
+		assert.False(t, held, "proof older than MaxProofAge must be rejected")
+
+		// Later bind clears a fresh proof stamp, and delivering/partial are rejected.
+		ambig := f.createDispatchedMsg(t, "ambiguous", 0)
+		f.stampNoSession(t, ambig.ID)
+		res, err := f.cs.BindMessageDelivery(ctx, f.agentID, "d-live", []string{ambig.ID}, f.currentTime())
+		require.NoError(t, err)
+		require.Equal(t, store.DeliveryBound, res.Result)
+
+		gotAmbig, err := f.cs.GetMessage(ctx, ambig.ID)
+		require.NoError(t, err)
+		assert.Empty(t, gotAmbig.NotReached, "BindMessageDelivery must clear not_reached stamp")
+		assert.Nil(t, gotAmbig.NotReachedAt)
+
+		held, err = f.cs.HoldMessageAwaitingSession(ctx, store.HoldMessageParams{
+			MessageID:   ambig.ID,
+			AgentID:     f.agentID,
+			MaxProofAge: 2 * time.Minute,
+			HoldTTL:     10 * time.Minute,
+			MaxHeld:     100,
+		})
+		require.NoError(t, err)
+		assert.False(t, held, "delivering row must never be held")
+
+		_, err = f.cs.FinishMessageDelivery(ctx, "d-live", []string{ambig.ID}, store.MessageDispatchPartial, store.DeliveryOutcomeUnknownPartial)
+		require.NoError(t, err)
+		held, err = f.cs.HoldMessageAwaitingSession(ctx, store.HoldMessageParams{
+			MessageID:   ambig.ID,
+			AgentID:     f.agentID,
+			MaxProofAge: 2 * time.Minute,
+			HoldTTL:     10 * time.Minute,
+			MaxHeld:     100,
+		})
+		require.NoError(t, err)
+		assert.False(t, held, "partial row must never be held")
+
+		// Non-awaiting_session failure clears proof stamp (R1).
+		r1Msg := f.createDispatchedMsg(t, "exec fail", 0)
+		f.stampNoSession(t, r1Msg.ID)
+		won, err := f.cs.FailUndeliveredMessage(ctx, r1Msg.ID, "exec failed")
+		require.NoError(t, err)
+		assert.True(t, won)
+		gotR1, err := f.cs.GetMessage(ctx, r1Msg.ID)
+		require.NoError(t, err)
+		assert.Empty(t, gotR1.NotReached)
+		assert.Nil(t, gotR1.NotReachedAt)
+
+		// Active AgentHold blocks HoldMessageAwaitingSession.
+		heldTargetMsg := f.createDispatchedMsg(t, "held target", 0)
+		f.stampNoSession(t, heldTargetMsg.ID)
+		_, err = f.cs.CreateAgentHolds(ctx, []*store.AgentHold{{
+			AgentID:           f.agentID,
+			ProjectID:         f.projectID,
+			Cause:             store.AgentHoldCauseOwnerAccessEnded,
+			RootPrincipalType: "user",
+			RootPrincipalID:   uuid.NewString(),
+			Trigger:           store.MembershipLossTriggerMemberRemove,
+			ActorKind:         "system",
+			ActorID:           "test",
+		}})
+		require.NoError(t, err)
+
+		held, err = f.cs.HoldMessageAwaitingSession(ctx, store.HoldMessageParams{
+			MessageID:   heldTargetMsg.ID,
+			AgentID:     f.agentID,
+			MaxProofAge: 2 * time.Minute,
+			HoldTTL:     10 * time.Minute,
+			MaxHeld:     100,
+		})
+		require.NoError(t, err)
+		assert.False(t, held, "agent under active AgentHold must not enter awaiting_session")
+	})
+}
+
+func TestMessageHoldStore_PrepareOrHoldAndCap(t *testing.T) {
+	ctx := context.Background()
+	f := newHoldStoreFixture(t)
+
+	// Message 1 enters hold via broker report; cap = 3.
+	m1 := f.createDispatchedMsg(t, "m1", 0)
+	_, err := f.cs.PrepareOrHoldMessage(ctx, f.agentID, m1.ID, 3)
+	require.NoError(t, err)
+	f.stampNoSession(t, m1.ID)
+	held, err := f.cs.HoldMessageAwaitingSession(ctx, store.HoldMessageParams{
+		MessageID:   m1.ID,
+		AgentID:     f.agentID,
+		MaxProofAge: 2 * time.Minute,
+		HoldTTL:     10 * time.Minute,
+		MaxHeld:     3,
+	})
+	require.NoError(t, err)
+	require.True(t, held)
+
+	f.advance(10 * time.Second)
+
+	// M-01: Messages 2 and 3 arrive while marker exists -> held pre-dispatch with marker's hold_until.
+	m2 := f.createDispatchedMsg(t, "m2", 0)
+	res2, err := f.cs.PrepareOrHoldMessage(ctx, f.agentID, m2.ID, 3)
+	require.NoError(t, err)
+	assert.True(t, res2.Held)
+
+	m3 := f.createDispatchedMsg(t, "m3", time.Millisecond)
+	res3, err := f.cs.PrepareOrHoldMessage(ctx, f.agentID, m3.ID, 3)
+	require.NoError(t, err)
+	assert.True(t, res3.Held)
+
+	// AC A2-6: 4th message exceeds MaxHeld=3 -> PrepareOrHoldMessage stamps launch_id and returns Held=false;
+	// HoldMessageAwaitingSession also refuses over cap.
+	m4 := f.createDispatchedMsg(t, "m4-over-cap", 2*time.Millisecond)
+	res4, err := f.cs.PrepareOrHoldMessage(ctx, f.agentID, m4.ID, 3)
+	require.NoError(t, err)
+	assert.False(t, res4.Held)
+	assert.Equal(t, "run-initial", res4.HoldLaunchID)
+
+	f.stampNoSession(t, m4.ID)
+	held4, err := f.cs.HoldMessageAwaitingSession(ctx, store.HoldMessageParams{
+		MessageID:   m4.ID,
+		AgentID:     f.agentID,
+		MaxProofAge: 2 * time.Minute,
+		HoldTTL:     10 * time.Minute,
+		MaxHeld:     3,
+	})
+	require.NoError(t, err)
+	assert.False(t, held4, "HoldMessageAwaitingSession must enforce per-agent cap")
+
+	// Claim all 3 held rows: returned in creation order, marker deleted in same tx.
+	claimed, err := f.cs.ClaimHeldMessages(ctx, f.agentID, 64)
+	require.NoError(t, err)
+	require.Len(t, claimed, 3)
+	assert.Equal(t, []string{m1.ID, m2.ID, m3.ID}, []string{claimed[0].ID, claimed[1].ID, claimed[2].ID})
+
+	hasMarker, err := f.cs.HasAgentDeliveryHold(ctx, f.agentID)
+	require.NoError(t, err)
+	assert.False(t, hasMarker, "marker must be deleted when final held batch is claimed")
+}
+
+func TestMessageHoldStore_COALESCENeverExtendsHoldUntil(t *testing.T) {
+	ctx := context.Background()
+	f := newHoldStoreFixture(t)
+
+	start := f.currentTime()
+	wantHoldUntil := start.Add(10 * time.Minute)
+
+	m := f.createDispatchedMsg(t, "flapping session", 0)
+	_, err := f.cs.PrepareOrHoldMessage(ctx, f.agentID, m.ID, 100)
+	require.NoError(t, err)
+	f.stampNoSession(t, m.ID)
+
+	held, err := f.cs.HoldMessageAwaitingSession(ctx, store.HoldMessageParams{
+		MessageID:   m.ID,
+		AgentID:     f.agentID,
+		MaxProofAge: 2 * time.Minute,
+		HoldTTL:     10 * time.Minute,
+		MaxHeld:     100,
+	})
+	require.NoError(t, err)
+	require.True(t, held)
+
+	// 4 minutes later: claim row, hit transient authz lookup error -> ReholdClaimedMessage (M-11 / R3).
+	f.advance(4 * time.Minute)
+	claimed, err := f.cs.ClaimHeldMessages(ctx, f.agentID, 64)
+	require.NoError(t, err)
+	require.Len(t, claimed, 1)
+	require.NotNil(t, claimed[0].HoldUntil)
+	assert.Equal(t, wantHoldUntil, *claimed[0].HoldUntil)
+
+	reheld, err := f.cs.ReholdClaimedMessage(ctx, f.agentID, m.ID, 100)
+	require.NoError(t, err)
+	assert.True(t, reheld)
+
+	hasMarker, err := f.cs.HasAgentDeliveryHold(ctx, f.agentID)
+	require.NoError(t, err)
+	assert.True(t, hasMarker, "ReholdClaimedMessage must restore marker")
+
+	// 3 minutes later (T+7m): claim again, dispatch, session drops -> new no_session proof and HoldMessageAwaitingSession.
+	f.advance(3 * time.Minute)
+	claimed, err = f.cs.ClaimHeldMessages(ctx, f.agentID, 64)
+	require.NoError(t, err)
+	require.Len(t, claimed, 1)
+
+	f.stampNoSession(t, m.ID)
+	held, err = f.cs.HoldMessageAwaitingSession(ctx, store.HoldMessageParams{
+		MessageID:   m.ID,
+		AgentID:     f.agentID,
+		MaxProofAge: 2 * time.Minute,
+		HoldTTL:     10 * time.Minute,
+		MaxHeld:     100,
+	})
+	require.NoError(t, err)
+	require.True(t, held)
+
+	got, err := f.cs.GetMessage(ctx, m.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.HoldUntil)
+	assert.Equal(t, wantHoldUntil, *got.HoldUntil, "re-hold must preserve original hold_until via COALESCE")
+
+	// Advance past original 10m bound (T+10m+1s): claim returns nothing, re-hold refused, sweep expires it.
+	f.advance(3*time.Minute + time.Second)
+	claimedAfterDeadline, err := f.cs.ClaimHeldMessages(ctx, f.agentID, 64)
+	require.NoError(t, err)
+	assert.Empty(t, claimedAfterDeadline)
+
+	expired, err := f.cs.ExpireHeldMessagesPastDeadline(ctx, "agent session did not connect", 100)
+	require.NoError(t, err)
+	require.Len(t, expired, 1)
+	assert.Equal(t, m.ID, expired[0].ID)
+
+	hasMarker, err = f.cs.HasAgentDeliveryHold(ctx, f.agentID)
+	require.NoError(t, err)
+	assert.False(t, hasMarker)
+}
+
+// TestMessageHoldStore_ConcurrentClaimWithReadWriteInterceptor verifies M-08 /
+// AC A2-4 / A2-S7: three concurrent ClaimHeldMessages callers (two admission
+// triggers plus the 30s sweep) paused by an Ent query interceptor right after
+// reading the same candidate rows and released simultaneously claim each row
+// at most once.
+func TestMessageHoldStore_ConcurrentClaimWithReadWriteInterceptor(t *testing.T) {
+	ctx := context.Background()
+	f := newHoldStoreFixture(t)
+
+	const totalRows = 20
+	wantIDs := make([]string, totalRows)
+	for i := 0; i < totalRows; i++ {
+		m := f.createDispatchedMsg(t, "msg", time.Duration(i)*time.Millisecond)
+		wantIDs[i] = m.ID
+		if i == 0 {
+			_, err := f.cs.PrepareOrHoldMessage(ctx, f.agentID, m.ID, 100)
+			require.NoError(t, err)
+			f.stampNoSession(t, m.ID)
+			held, err := f.cs.HoldMessageAwaitingSession(ctx, store.HoldMessageParams{
+				MessageID:   m.ID,
+				AgentID:     f.agentID,
+				MaxProofAge: 2 * time.Minute,
+				HoldTTL:     10 * time.Minute,
+				MaxHeld:     100,
+			})
+			require.NoError(t, err)
+			require.True(t, held)
+		} else {
+			res, err := f.cs.PrepareOrHoldMessage(ctx, f.agentID, m.ID, 100)
+			require.NoError(t, err)
+			require.True(t, res.Held)
+		}
+	}
+
+	type pauseFlagKey struct{}
+	const callers = 3
+	var arrived atomic.Int32
+	allRead := make(chan struct{})
+	release := make(chan struct{})
+
+	f.client.Message.Intercept(ent.InterceptFunc(func(next ent.Querier) ent.Querier {
+		return ent.QuerierFunc(func(qCtx context.Context, query ent.Query) (ent.Value, error) {
+			val, err := next.Query(qCtx, query)
+			if flag, ok := qCtx.Value(pauseFlagKey{}).(*atomic.Bool); ok && flag.CompareAndSwap(false, true) {
+				if arrived.Add(1) == callers {
+					close(allRead)
+				}
+				<-release
+			}
+			return val, err
+		})
+	}))
+
+	var wg sync.WaitGroup
+	results := make([][]store.Message, callers)
+	errs := make([]error, callers)
+
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			var once atomic.Bool
+			pCtx := context.WithValue(ctx, pauseFlagKey{}, &once)
+			results[idx], errs[idx] = f.cs.ClaimHeldMessages(pCtx, f.agentID, 64)
+		}(i)
+	}
+
+	<-allRead
+	close(release)
+	wg.Wait()
+
+	seen := make(map[string]int, totalRows)
+	totalClaimed := 0
+	for i := 0; i < callers; i++ {
+		require.NoError(t, errs[i])
+		for _, m := range results[i] {
+			seen[m.ID]++
+			totalClaimed++
+		}
+	}
+	assert.Equal(t, totalRows, totalClaimed, "every held row must be claimed exactly once across all concurrent callers")
+	for _, id := range wantIDs {
+		assert.Equal(t, 1, seen[id], "row %s claimed %d times", id, seen[id])
+	}
+
+	hasMarker, err := f.cs.HasAgentDeliveryHold(ctx, f.agentID)
+	require.NoError(t, err)
+	assert.False(t, hasMarker)
+}
+
+// TestMessageHoldStore_InterleavingPrepareAndClaim exercises M-02: new sends
+// calling PrepareOrHoldMessage interleaved with ClaimHeldMessages batches.
+func TestMessageHoldStore_InterleavingPrepareAndClaim(t *testing.T) {
+	ctx := context.Background()
+	f := newHoldStoreFixture(t)
+
+	seed := f.createDispatchedMsg(t, "seed", 0)
+	_, err := f.cs.PrepareOrHoldMessage(ctx, f.agentID, seed.ID, 100)
+	require.NoError(t, err)
+	f.stampNoSession(t, seed.ID)
+	held, err := f.cs.HoldMessageAwaitingSession(ctx, store.HoldMessageParams{
+		MessageID:   seed.ID,
+		AgentID:     f.agentID,
+		MaxProofAge: 2 * time.Minute,
+		HoldTTL:     10 * time.Minute,
+		MaxHeld:     100,
+	})
+	require.NoError(t, err)
+	require.True(t, held)
+
+	const dynamicSends = 25
+	directDispatched := make(map[string]bool)
+	var directMu sync.Mutex
+	var claimedIDs []string
+	var claimedMu sync.Mutex
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < dynamicSends; i++ {
+			m := f.createDispatchedMsg(t, "dyn", time.Duration(i+1)*time.Millisecond)
+			res, pErr := f.cs.PrepareOrHoldMessage(ctx, f.agentID, m.ID, 100)
+			require.NoError(t, pErr)
+			if !res.Held {
+				directMu.Lock()
+				directDispatched[m.ID] = true
+				directMu.Unlock()
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < dynamicSends; i++ {
+			batch, cErr := f.cs.ClaimHeldMessages(ctx, f.agentID, 5)
+			require.NoError(t, cErr)
+			claimedMu.Lock()
+			for _, m := range batch {
+				claimedIDs = append(claimedIDs, m.ID)
+			}
+			claimedMu.Unlock()
+		}
+	}()
+	wg.Wait()
+
+	// Drain any remaining held rows after writers finish.
+	rest, err := f.cs.ClaimHeldMessages(ctx, f.agentID, 100)
+	require.NoError(t, err)
+	for _, m := range rest {
+		claimedIDs = append(claimedIDs, m.ID)
+	}
+
+	seen := make(map[string]int)
+	for _, id := range claimedIDs {
+		seen[id]++
+		assert.False(t, directDispatched[id], "row %s was both held-claimed and directly dispatched", id)
+	}
+	for id := range directDispatched {
+		seen[id]++
+	}
+	assert.Equal(t, 1+dynamicSends, len(seen), "every message must be accounted for exactly once")
+	for id, count := range seen {
+		assert.Equal(t, 1, count, "row %s accounted %d times", id, count)
+	}
+
+	hasMarker, err := f.cs.HasAgentDeliveryHold(ctx, f.agentID)
+	require.NoError(t, err)
+	assert.False(t, hasMarker)
+}
+
+// TestMessageHoldStore_ExpiryAndSweepsIgnoreAwaitingSession covers M-06, M-10,
+// M-13, AC A2-5, AC A2-9, and verifies partial index usage on SQLite.
+func TestMessageHoldStore_ExpiryAndSweepsIgnoreAwaitingSession(t *testing.T) {
+	ctx := context.Background()
+	f := newHoldStoreFixture(t)
+
+	mHeld := f.createDispatchedMsg(t, "held", 0)
+	_, err := f.cs.PrepareOrHoldMessage(ctx, f.agentID, mHeld.ID, 100)
+	require.NoError(t, err)
+	f.stampNoSession(t, mHeld.ID)
+	ok, err := f.cs.HoldMessageAwaitingSession(ctx, store.HoldMessageParams{
+		MessageID:   mHeld.ID,
+		AgentID:     f.agentID,
+		MaxProofAge: 2 * time.Minute,
+		HoldTTL:     10 * time.Minute,
+		MaxHeld:     100,
+	})
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	mDelivering := f.createDispatchedMsg(t, "delivering", time.Millisecond)
+	bindRes, err := f.cs.BindMessageDelivery(ctx, f.agentID, "d-keep", []string{mDelivering.ID}, f.currentTime())
+	require.NoError(t, err)
+	require.Equal(t, store.DeliveryBound, bindRes.Result)
+
+	// M-13 / AC A2-9: stuck-pending sweep, stale-delivery sweep, and ListPendingMessages ignore awaiting_session.
+	farFuture := f.currentTime().Add(48 * time.Hour)
+	cnt, err := f.cs.CountStuckPendingMessages(ctx, farFuture)
+	require.NoError(t, err)
+	assert.Zero(t, cnt)
+
+	expPending, err := f.cs.ExpireAndListStuckPendingMessages(ctx, farFuture, "expired pending")
+	require.NoError(t, err)
+	assert.Empty(t, expPending)
+
+	sweptDelivering, err := f.cs.SweepStaleDeliveries(ctx, f.currentTime().Add(-time.Minute), store.DeliveryOutcomeUnknownPartial)
+	require.NoError(t, err)
+	assert.Zero(t, sweptDelivering)
+
+	// Verify SQLite partial index usage on awaiting_session query.
+	var rows entsql.Rows
+	require.NoError(t, f.client.Driver().Query(ctx,
+		"EXPLAIN QUERY PLAN SELECT id FROM messages WHERE dispatch_state = 'awaiting_session' AND recipient_id = ? ORDER BY created, id LIMIT 64",
+		[]any{f.agentID}, &rows))
+	var plans []string
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		require.NoError(t, rows.Scan(&id, &parent, &notused, &detail))
+		plans = append(plans, detail)
+	}
+	_ = rows.Close()
+	assert.True(t, strings.Contains(strings.Join(plans, " "), "message_awaiting_session"),
+		"expected partial index in query plan, got: %v", plans)
+
+	// M-10: ExpireHeldMessagesForAgent fails held rows, deletes marker, leaves delivering row untouched.
+	expired, err := f.cs.ExpireHeldMessagesForAgent(ctx, f.agentID, "agent stopped")
+	require.NoError(t, err)
+	require.Len(t, expired, 1)
+	assert.Equal(t, mHeld.ID, expired[0].ID)
+
+	gotHeld, err := f.cs.GetMessage(ctx, mHeld.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchFailed, gotHeld.DispatchState)
+	require.NotNil(t, gotHeld.DispatchFailureReason)
+	assert.Equal(t, "agent stopped", *gotHeld.DispatchFailureReason)
+
+	gotDeliv, err := f.cs.GetMessage(ctx, mDelivering.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchDelivering, gotDeliv.DispatchState)
+
+	hasMarker, err := f.cs.HasAgentDeliveryHold(ctx, f.agentID)
+	require.NoError(t, err)
+	assert.False(t, hasMarker)
+}

@@ -108,6 +108,10 @@ func entMessageToStore(e *ent.Message) *store.Message {
 		DispatchState:         e.DispatchState,
 		DispatchedAt:          e.DispatchedAt,
 		DispatchFailureReason: e.DispatchFailureReason,
+		HoldUntil:             e.HoldUntil,
+		HoldLaunchID:          derefString(e.HoldLaunchID),
+		NotReached:            derefString(e.NotReached),
+		NotReachedAt:          e.NotReachedAt,
 	}
 }
 
@@ -205,6 +209,18 @@ func (s *MessageStore) CreateMessage(ctx context.Context, msg *store.Message) er
 	// deliverable), so its reason must persist with the same write.
 	if msg.DispatchFailureReason != nil {
 		create.SetDispatchFailureReason(*msg.DispatchFailureReason)
+	}
+	if msg.HoldUntil != nil {
+		create.SetHoldUntil(*msg.HoldUntil)
+	}
+	if msg.HoldLaunchID != "" {
+		create.SetHoldLaunchID(msg.HoldLaunchID)
+	}
+	if msg.NotReached != "" {
+		create.SetNotReached(msg.NotReached)
+	}
+	if msg.NotReachedAt != nil {
+		create.SetNotReachedAt(*msg.NotReachedAt)
 	}
 	if !msg.CreatedAt.IsZero() {
 		create.SetCreated(msg.CreatedAt)

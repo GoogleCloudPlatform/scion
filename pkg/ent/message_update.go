@@ -335,6 +335,86 @@ func (_u *MessageUpdate) ClearDeliveryOutcome() *MessageUpdate {
 	return _u
 }
 
+// SetHoldUntil sets the "hold_until" field.
+func (_u *MessageUpdate) SetHoldUntil(v time.Time) *MessageUpdate {
+	_u.mutation.SetHoldUntil(v)
+	return _u
+}
+
+// SetNillableHoldUntil sets the "hold_until" field if the given value is not nil.
+func (_u *MessageUpdate) SetNillableHoldUntil(v *time.Time) *MessageUpdate {
+	if v != nil {
+		_u.SetHoldUntil(*v)
+	}
+	return _u
+}
+
+// ClearHoldUntil clears the value of the "hold_until" field.
+func (_u *MessageUpdate) ClearHoldUntil() *MessageUpdate {
+	_u.mutation.ClearHoldUntil()
+	return _u
+}
+
+// SetHoldLaunchID sets the "hold_launch_id" field.
+func (_u *MessageUpdate) SetHoldLaunchID(v string) *MessageUpdate {
+	_u.mutation.SetHoldLaunchID(v)
+	return _u
+}
+
+// SetNillableHoldLaunchID sets the "hold_launch_id" field if the given value is not nil.
+func (_u *MessageUpdate) SetNillableHoldLaunchID(v *string) *MessageUpdate {
+	if v != nil {
+		_u.SetHoldLaunchID(*v)
+	}
+	return _u
+}
+
+// ClearHoldLaunchID clears the value of the "hold_launch_id" field.
+func (_u *MessageUpdate) ClearHoldLaunchID() *MessageUpdate {
+	_u.mutation.ClearHoldLaunchID()
+	return _u
+}
+
+// SetNotReached sets the "not_reached" field.
+func (_u *MessageUpdate) SetNotReached(v string) *MessageUpdate {
+	_u.mutation.SetNotReached(v)
+	return _u
+}
+
+// SetNillableNotReached sets the "not_reached" field if the given value is not nil.
+func (_u *MessageUpdate) SetNillableNotReached(v *string) *MessageUpdate {
+	if v != nil {
+		_u.SetNotReached(*v)
+	}
+	return _u
+}
+
+// ClearNotReached clears the value of the "not_reached" field.
+func (_u *MessageUpdate) ClearNotReached() *MessageUpdate {
+	_u.mutation.ClearNotReached()
+	return _u
+}
+
+// SetNotReachedAt sets the "not_reached_at" field.
+func (_u *MessageUpdate) SetNotReachedAt(v time.Time) *MessageUpdate {
+	_u.mutation.SetNotReachedAt(v)
+	return _u
+}
+
+// SetNillableNotReachedAt sets the "not_reached_at" field if the given value is not nil.
+func (_u *MessageUpdate) SetNillableNotReachedAt(v *time.Time) *MessageUpdate {
+	if v != nil {
+		_u.SetNotReachedAt(*v)
+	}
+	return _u
+}
+
+// ClearNotReachedAt clears the value of the "not_reached_at" field.
+func (_u *MessageUpdate) ClearNotReachedAt() *MessageUpdate {
+	_u.mutation.ClearNotReachedAt()
+	return _u
+}
+
 // SetChannel sets the "channel" field.
 func (_u *MessageUpdate) SetChannel(v string) *MessageUpdate {
 	_u.mutation.SetChannel(v)
@@ -449,6 +529,16 @@ func (_u *MessageUpdate) check() error {
 			return &ValidationError{Name: "delivery_outcome", err: fmt.Errorf(`ent: validator failed for field "Message.delivery_outcome": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.HoldLaunchID(); ok {
+		if err := message.HoldLaunchIDValidator(v); err != nil {
+			return &ValidationError{Name: "hold_launch_id", err: fmt.Errorf(`ent: validator failed for field "Message.hold_launch_id": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.NotReached(); ok {
+		if err := message.NotReachedValidator(v); err != nil {
+			return &ValidationError{Name: "not_reached", err: fmt.Errorf(`ent: validator failed for field "Message.not_reached": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.Channel(); ok {
 		if err := message.ChannelValidator(v); err != nil {
 			return &ValidationError{Name: "channel", err: fmt.Errorf(`ent: validator failed for field "Message.channel": %w`, err)}
@@ -554,6 +644,30 @@ func (_u *MessageUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.DeliveryOutcomeCleared() {
 		_spec.ClearField(message.FieldDeliveryOutcome, field.TypeString)
+	}
+	if value, ok := _u.mutation.HoldUntil(); ok {
+		_spec.SetField(message.FieldHoldUntil, field.TypeTime, value)
+	}
+	if _u.mutation.HoldUntilCleared() {
+		_spec.ClearField(message.FieldHoldUntil, field.TypeTime)
+	}
+	if value, ok := _u.mutation.HoldLaunchID(); ok {
+		_spec.SetField(message.FieldHoldLaunchID, field.TypeString, value)
+	}
+	if _u.mutation.HoldLaunchIDCleared() {
+		_spec.ClearField(message.FieldHoldLaunchID, field.TypeString)
+	}
+	if value, ok := _u.mutation.NotReached(); ok {
+		_spec.SetField(message.FieldNotReached, field.TypeString, value)
+	}
+	if _u.mutation.NotReachedCleared() {
+		_spec.ClearField(message.FieldNotReached, field.TypeString)
+	}
+	if value, ok := _u.mutation.NotReachedAt(); ok {
+		_spec.SetField(message.FieldNotReachedAt, field.TypeTime, value)
+	}
+	if _u.mutation.NotReachedAtCleared() {
+		_spec.ClearField(message.FieldNotReachedAt, field.TypeTime)
 	}
 	if value, ok := _u.mutation.Channel(); ok {
 		_spec.SetField(message.FieldChannel, field.TypeString, value)
@@ -911,6 +1025,86 @@ func (_u *MessageUpdateOne) ClearDeliveryOutcome() *MessageUpdateOne {
 	return _u
 }
 
+// SetHoldUntil sets the "hold_until" field.
+func (_u *MessageUpdateOne) SetHoldUntil(v time.Time) *MessageUpdateOne {
+	_u.mutation.SetHoldUntil(v)
+	return _u
+}
+
+// SetNillableHoldUntil sets the "hold_until" field if the given value is not nil.
+func (_u *MessageUpdateOne) SetNillableHoldUntil(v *time.Time) *MessageUpdateOne {
+	if v != nil {
+		_u.SetHoldUntil(*v)
+	}
+	return _u
+}
+
+// ClearHoldUntil clears the value of the "hold_until" field.
+func (_u *MessageUpdateOne) ClearHoldUntil() *MessageUpdateOne {
+	_u.mutation.ClearHoldUntil()
+	return _u
+}
+
+// SetHoldLaunchID sets the "hold_launch_id" field.
+func (_u *MessageUpdateOne) SetHoldLaunchID(v string) *MessageUpdateOne {
+	_u.mutation.SetHoldLaunchID(v)
+	return _u
+}
+
+// SetNillableHoldLaunchID sets the "hold_launch_id" field if the given value is not nil.
+func (_u *MessageUpdateOne) SetNillableHoldLaunchID(v *string) *MessageUpdateOne {
+	if v != nil {
+		_u.SetHoldLaunchID(*v)
+	}
+	return _u
+}
+
+// ClearHoldLaunchID clears the value of the "hold_launch_id" field.
+func (_u *MessageUpdateOne) ClearHoldLaunchID() *MessageUpdateOne {
+	_u.mutation.ClearHoldLaunchID()
+	return _u
+}
+
+// SetNotReached sets the "not_reached" field.
+func (_u *MessageUpdateOne) SetNotReached(v string) *MessageUpdateOne {
+	_u.mutation.SetNotReached(v)
+	return _u
+}
+
+// SetNillableNotReached sets the "not_reached" field if the given value is not nil.
+func (_u *MessageUpdateOne) SetNillableNotReached(v *string) *MessageUpdateOne {
+	if v != nil {
+		_u.SetNotReached(*v)
+	}
+	return _u
+}
+
+// ClearNotReached clears the value of the "not_reached" field.
+func (_u *MessageUpdateOne) ClearNotReached() *MessageUpdateOne {
+	_u.mutation.ClearNotReached()
+	return _u
+}
+
+// SetNotReachedAt sets the "not_reached_at" field.
+func (_u *MessageUpdateOne) SetNotReachedAt(v time.Time) *MessageUpdateOne {
+	_u.mutation.SetNotReachedAt(v)
+	return _u
+}
+
+// SetNillableNotReachedAt sets the "not_reached_at" field if the given value is not nil.
+func (_u *MessageUpdateOne) SetNillableNotReachedAt(v *time.Time) *MessageUpdateOne {
+	if v != nil {
+		_u.SetNotReachedAt(*v)
+	}
+	return _u
+}
+
+// ClearNotReachedAt clears the value of the "not_reached_at" field.
+func (_u *MessageUpdateOne) ClearNotReachedAt() *MessageUpdateOne {
+	_u.mutation.ClearNotReachedAt()
+	return _u
+}
+
 // SetChannel sets the "channel" field.
 func (_u *MessageUpdateOne) SetChannel(v string) *MessageUpdateOne {
 	_u.mutation.SetChannel(v)
@@ -1038,6 +1232,16 @@ func (_u *MessageUpdateOne) check() error {
 			return &ValidationError{Name: "delivery_outcome", err: fmt.Errorf(`ent: validator failed for field "Message.delivery_outcome": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.HoldLaunchID(); ok {
+		if err := message.HoldLaunchIDValidator(v); err != nil {
+			return &ValidationError{Name: "hold_launch_id", err: fmt.Errorf(`ent: validator failed for field "Message.hold_launch_id": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.NotReached(); ok {
+		if err := message.NotReachedValidator(v); err != nil {
+			return &ValidationError{Name: "not_reached", err: fmt.Errorf(`ent: validator failed for field "Message.not_reached": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.Channel(); ok {
 		if err := message.ChannelValidator(v); err != nil {
 			return &ValidationError{Name: "channel", err: fmt.Errorf(`ent: validator failed for field "Message.channel": %w`, err)}
@@ -1160,6 +1364,30 @@ func (_u *MessageUpdateOne) sqlSave(ctx context.Context) (_node *Message, err er
 	}
 	if _u.mutation.DeliveryOutcomeCleared() {
 		_spec.ClearField(message.FieldDeliveryOutcome, field.TypeString)
+	}
+	if value, ok := _u.mutation.HoldUntil(); ok {
+		_spec.SetField(message.FieldHoldUntil, field.TypeTime, value)
+	}
+	if _u.mutation.HoldUntilCleared() {
+		_spec.ClearField(message.FieldHoldUntil, field.TypeTime)
+	}
+	if value, ok := _u.mutation.HoldLaunchID(); ok {
+		_spec.SetField(message.FieldHoldLaunchID, field.TypeString, value)
+	}
+	if _u.mutation.HoldLaunchIDCleared() {
+		_spec.ClearField(message.FieldHoldLaunchID, field.TypeString)
+	}
+	if value, ok := _u.mutation.NotReached(); ok {
+		_spec.SetField(message.FieldNotReached, field.TypeString, value)
+	}
+	if _u.mutation.NotReachedCleared() {
+		_spec.ClearField(message.FieldNotReached, field.TypeString)
+	}
+	if value, ok := _u.mutation.NotReachedAt(); ok {
+		_spec.SetField(message.FieldNotReachedAt, field.TypeTime, value)
+	}
+	if _u.mutation.NotReachedAtCleared() {
+		_spec.ClearField(message.FieldNotReachedAt, field.TypeTime)
 	}
 	if value, ok := _u.mutation.Channel(); ok {
 		_spec.SetField(message.FieldChannel, field.TypeString, value)

@@ -464,6 +464,32 @@ var (
 			},
 		},
 	}
+	// AgentDeliveryHoldsColumns holds the columns for the "agent_delivery_holds" table.
+	AgentDeliveryHoldsColumns = []*schema.Column{
+		{Name: "agent_id", Type: field.TypeString},
+		{Name: "hold_until", Type: field.TypeTime},
+		{Name: "launch_id", Type: field.TypeString, Nullable: true, Size: 128, Default: ""},
+		{Name: "held_count", Type: field.TypeInt, Default: 0},
+		{Name: "created", Type: field.TypeTime},
+	}
+	// AgentDeliveryHoldsTable holds the schema information for the "agent_delivery_holds" table.
+	AgentDeliveryHoldsTable = &schema.Table{
+		Name:       "agent_delivery_holds",
+		Columns:    AgentDeliveryHoldsColumns,
+		PrimaryKey: []*schema.Column{AgentDeliveryHoldsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "agentdeliveryhold_hold_until",
+				Unique:  false,
+				Columns: []*schema.Column{AgentDeliveryHoldsColumns[1]},
+			},
+			{
+				Name:    "agentdeliveryhold_created",
+				Unique:  false,
+				Columns: []*schema.Column{AgentDeliveryHoldsColumns[4]},
+			},
+		},
+	}
 	// AgentHoldsColumns holds the columns for the "agent_holds" table.
 	AgentHoldsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -2246,6 +2272,10 @@ var (
 		{Name: "delivery_id", Type: field.TypeString, Nullable: true, Size: 64},
 		{Name: "delivering_at", Type: field.TypeTime, Nullable: true},
 		{Name: "delivery_outcome", Type: field.TypeString, Nullable: true, Size: 256},
+		{Name: "hold_until", Type: field.TypeTime, Nullable: true},
+		{Name: "hold_launch_id", Type: field.TypeString, Nullable: true, Size: 128},
+		{Name: "not_reached", Type: field.TypeString, Nullable: true, Size: 32},
+		{Name: "not_reached_at", Type: field.TypeTime, Nullable: true},
 		{Name: "channel", Type: field.TypeString, Nullable: true, Size: 64},
 		{Name: "thread_id", Type: field.TypeString, Nullable: true, Size: 256},
 		{Name: "conversation_id", Type: field.TypeUUID, Nullable: true},
@@ -2274,47 +2304,47 @@ var (
 			{
 				Name:    "message_created",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[26]},
+				Columns: []*schema.Column{MessagesColumns[30]},
 			},
 			{
 				Name:    "message_conversation_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[21]},
+				Columns: []*schema.Column{MessagesColumns[25]},
 			},
 			{
 				Name:    "message_conversation_id_channel_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[21], MessagesColumns[19], MessagesColumns[26], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[25], MessagesColumns[23], MessagesColumns[30], MessagesColumns[0]},
 			},
 			{
 				Name:    "message_thread_id_channel_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[20], MessagesColumns[19], MessagesColumns[26], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[24], MessagesColumns[23], MessagesColumns[30], MessagesColumns[0]},
 			},
 			{
 				Name:    "message_project_id_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[1], MessagesColumns[26], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[1], MessagesColumns[30], MessagesColumns[0]},
 			},
 			{
 				Name:    "message_sender_id_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[3], MessagesColumns[26], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[3], MessagesColumns[30], MessagesColumns[0]},
 			},
 			{
 				Name:    "message_recipient_id_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[5], MessagesColumns[26], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[5], MessagesColumns[30], MessagesColumns[0]},
 			},
 			{
 				Name:    "message_project_id_sender_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[1], MessagesColumns[2], MessagesColumns[26], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[1], MessagesColumns[2], MessagesColumns[30], MessagesColumns[0]},
 			},
 			{
 				Name:    "message_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[26], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[30], MessagesColumns[0]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "dispatch_state = 'pending'",
 				},
@@ -2322,7 +2352,7 @@ var (
 			{
 				Name:    "message_failed_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[26], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[30], MessagesColumns[0]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "dispatch_state = 'failed'",
 				},
@@ -2336,9 +2366,25 @@ var (
 				},
 			},
 			{
+				Name:    "message_awaiting_session_created_id",
+				Unique:  false,
+				Columns: []*schema.Column{MessagesColumns[30], MessagesColumns[0]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "dispatch_state = 'awaiting_session'",
+				},
+			},
+			{
+				Name:    "message_awaiting_session_recipient_created_id",
+				Unique:  false,
+				Columns: []*schema.Column{MessagesColumns[5], MessagesColumns[30], MessagesColumns[0]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "dispatch_state = 'awaiting_session'",
+				},
+			},
+			{
 				Name:    "message_sender_id_recipient_id_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[3], MessagesColumns[5], MessagesColumns[26], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[3], MessagesColumns[5], MessagesColumns[30], MessagesColumns[0]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "recipient_id IS NOT NULL",
 				},
@@ -2346,7 +2392,7 @@ var (
 			{
 				Name:    "message_thread_id_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[20], MessagesColumns[26], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[24], MessagesColumns[30], MessagesColumns[0]},
 			},
 		},
 	}
@@ -3927,6 +3973,7 @@ var (
 		AgentCredentialsTable,
 		AgentDelegatedCredentialsTable,
 		AgentDelegationGrantsTable,
+		AgentDeliveryHoldsTable,
 		AgentHoldsTable,
 		AgentIdentityKeysTable,
 		AgentLifecycleCursorsTable,
@@ -4043,6 +4090,9 @@ func init() {
 	AgentDelegationGrantsTable.Annotation.Checks = map[string]string{
 		"agent_delegation_grants_boundary_check": "((boundary_kind = 'project' AND boundary_project_id IS NOT NULL) OR (boundary_kind = 'hub' AND boundary_project_id IS NULL))",
 		"agent_delegation_grants_ceiling_check":  "(ceiling_version >= 1)",
+	}
+	AgentDeliveryHoldsTable.Annotation = &entsql.Annotation{
+		Table: "agent_delivery_holds",
 	}
 	AgentHoldsTable.ForeignKeys[0].RefTable = AgentsTable
 	AgentHoldsTable.Annotation = &entsql.Annotation{
