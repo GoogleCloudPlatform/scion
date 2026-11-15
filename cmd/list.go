@@ -759,11 +759,14 @@ func exitReasonPhaseLabel(phase, exitReason string) string {
 }
 
 // suspendedPhaseLabel shows why a suspended agent was suspended next to its
-// phase, e.g. "suspended (idle)", when a known reason is recorded; any other
-// phase, or no or an unknown reason, is returned unchanged.
+// phase, e.g. "suspended (idle)" or "suspended · completed (idle)", when a
+// known reason is recorded; any other phase, or no or an unknown reason, is
+// returned unchanged.
 func suspendedPhaseLabel(phase, reason string) string {
 	r := state.SuspendReason(reason)
-	if phase == string(state.PhaseSuspended) && r != "" && r.IsValid() {
+	isSuspended := phase == string(state.PhaseSuspended) ||
+		strings.HasPrefix(phase, string(state.PhaseSuspended)+" · ")
+	if isSuspended && r != "" && r.IsValid() {
 		return phase + " (" + reason + ")"
 	}
 	return phase

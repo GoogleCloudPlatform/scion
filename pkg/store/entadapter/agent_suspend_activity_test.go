@@ -247,3 +247,131 @@ func TestUpdateAgentStatus_ResumeAndClearActivity(t *testing.T) {
 	require.NotNil(t, after5.ActivitySince)
 	assert.True(t, after5.ActivitySince.Equal(initial5), "case-only re-report must keep ActivitySince stable: %v != %v", *after5.ActivitySince, initial5)
 }
+
+func TestUpdateAgentStatus_SuspendReasonAndRetainedActivityTogether(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	cases := []struct {
+		name         string
+		activity     string
+		stalledFrom  string
+		reason       state.SuspendReason
+		wantActivity string
+	}{
+		{
+			name:         "idle policy on completed writes reason and retains completed",
+			activity:     string(state.ActivityCompleted),
+			reason:       state.SuspendReasonIdle,
+			wantActivity: string(state.ActivityCompleted),
+		},
+		{
+			name:         "idle policy on idle writes reason and retains idle",
+			activity:     string(state.ActivityIdle),
+			reason:       state.SuspendReasonIdle,
+			wantActivity: string(state.ActivityIdle),
+		},
+		{
+			name:         "stalled policy on stalled-from-completed writes stalled reason and restores completed",
+			activity:     string(state.ActivityStalled),
+			stalledFrom:  string(state.ActivityCompleted),
+			reason:       state.SuspendReasonStalled,
+			wantActivity: string(state.ActivityCompleted),
+		},
+		{
+			name:         "stalled policy on stalled-from-idle writes stalled reason and restores idle",
+			activity:     string(state.ActivityStalled),
+			stalledFrom:  string(state.ActivityIdle),
+			reason:       state.SuspendReasonStalled,
+			wantActivity: string(state.ActivityIdle),
+		},
+		{
+			name:         "user suspend on harness_error writes user reason and retains harness_error",
+			activity:     string(state.ActivityHarnessError),
+			reason:       state.SuspendReasonUser,
+			wantActivity: string(state.ActivityHarnessError),
+		},
+		{
+			name:         "user suspend on blocked writes user reason and clears activity",
+			activity:     string(state.ActivityBlocked),
+			reason:       state.SuspendReasonUser,
+			wantActivity: "",
+		},
+	}
+
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := makeAgent(projectID, fmt.Sprintf("susp-reason-act-%d", i))
+			a.Phase = string(state.PhaseRunning)
+			a.Activity = tc.activity
+			a.ToolName = "bash"
+			require.NoError(t, s.CreateAgent(ctx, a))
+			if tc.stalledFrom != "" {
+				row, err := s.GetAgent(ctx, a.ID)
+				require.NoError(t, err)
+				row.StalledFromActivity = tc.stalledFrom
+				require.NoError(t, s.UpdateAgent(ctx, row))
+			}
+
+			// Single UpdateAgentStatus write sets suspend_reason and computes retained activity atomically.
+			require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+				Phase:           string(state.PhaseSuspended),
+				ContainerStatus: "stopped",
+				SuspendReason:   string(tc.reason),
+			}))
+
+			got, err := s.GetAgent(ctx, a.ID)
+			require.NoError(t, err)
+			assert.Equal(t, string(state.PhaseSuspended), got.Phase)
+			assert.Equal(t, string(tc.reason), got.SuspendReason)
+			assert.Equal(t, tc.wantActivity, got.Activity)
+			assert.Empty(t, got.StalledFromActivity)
+			assert.Empty(t, got.ToolName)
+			assert.Nil(t, got.ActivitySince)
+
+			// A repeat suspended write with no explicit reason or activity preserves both.
+			require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+				Phase: string(state.PhaseSuspended),
+			}))
+			gotRepeat, err := s.GetAgent(ctx, a.ID)
+			require.NoError(t, err)
+			assert.Equal(t, string(tc.reason), gotRepeat.SuspendReason)
+			assert.Equal(t, tc.wantActivity, gotRepeat.Activity)
+
+			// Starting clears retained activity while ClearSuspendReasonHook keeps suspend_reason;
+			// failed-resume rollback restores retained activity and keeps suspend_reason.
+			lastActBefore := gotRepeat.LastActivityEvent
+			require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+				Phase:   string(state.PhaseStarting),
+				IfPhase: string(state.PhaseSuspended),
+			}))
+			gotStarting, err := s.GetAgent(ctx, a.ID)
+			require.NoError(t, err)
+			assert.Empty(t, gotStarting.Activity)
+			assert.Equal(t, string(tc.reason), gotStarting.SuspendReason)
+
+			require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+				Phase:    string(state.PhaseSuspended),
+				Activity: tc.wantActivity,
+				IfPhase:  string(state.PhaseStarting),
+				Restore:  true,
+			}))
+			gotRolledBack, err := s.GetAgent(ctx, a.ID)
+			require.NoError(t, err)
+			assert.Equal(t, string(state.PhaseSuspended), gotRolledBack.Phase)
+			assert.Equal(t, string(tc.reason), gotRolledBack.SuspendReason)
+			assert.Equal(t, tc.wantActivity, gotRolledBack.Activity)
+			assert.True(t, gotRolledBack.LastActivityEvent.Equal(lastActBefore))
+
+			// Resuming to running clears both retained activity and suspend_reason.
+			require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+				Phase: string(state.PhaseRunning),
+			}))
+			gotResumed, err := s.GetAgent(ctx, a.ID)
+			require.NoError(t, err)
+			assert.Equal(t, string(state.PhaseRunning), gotResumed.Phase)
+			assert.Empty(t, gotResumed.Activity)
+			assert.Empty(t, gotResumed.SuspendReason)
+		})
+	}
+}

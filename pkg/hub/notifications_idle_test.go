@@ -557,3 +557,65 @@ func TestNotificationDispatcher_NonPerPeriodTriggersKeepStatusDeduplication(t *t
 	flushNotificationDispatcher(t, env)
 	assert.Len(t, watchedAgentCalls(env), 3)
 }
+
+func TestNotificationDispatcher_AutoSuspendStalledWithRetainedActivityFiresSuspendedOnly(t *testing.T) {
+	ctx := context.Background()
+	for _, preStall := range []state.Activity{state.ActivityCompleted, state.ActivityIdle, state.ActivityHarnessError} {
+		t.Run("stalled_from_"+string(preStall), func(t *testing.T) {
+			srv, s, _, _ := engineTestServer(t)
+			disp := &recordingDispatcher{}
+			nd := NewNotificationDispatcher(s, srv.events, func() AgentDispatcher { return disp }, slog.Default())
+			nd.Start()
+			defer nd.Stop()
+
+			agent := createSuspendActivityTestAgent(
+				t, s, "notif-autosusp-"+string(preStall), string(state.ActivityStalled), string(preStall),
+			)
+
+			subscriber := &store.Agent{
+				ID:              tid("notif-sub-" + string(preStall)),
+				Name:            "notif-sub-" + string(preStall),
+				Slug:            "notif-sub-" + string(preStall),
+				ProjectID:       agent.ProjectID,
+				RuntimeBrokerID: agent.RuntimeBrokerID,
+				Phase:           string(state.PhaseRunning),
+			}
+			require.NoError(t, s.CreateAgent(ctx, subscriber))
+
+			sub := &store.NotificationSubscription{
+				ID:                tid("notif-autosusp-sub-" + string(preStall)),
+				Scope:             store.SubscriptionScopeAgent,
+				AgentID:           agent.ID,
+				ProjectID:         agent.ProjectID,
+				SubscriberType:    store.SubscriberTypeAgent,
+				SubscriberID:      subscriber.Slug,
+				TriggerActivities: []string{"COMPLETED", "IDLE", "HARNESS_ERROR", "STALLED", "SUSPENDED"},
+				CreatedAt:         time.Now(),
+				CreatedBy:         "test",
+			}
+			require.NoError(t, s.CreateNotificationSubscription(ctx, sub))
+
+			srv.autoSuspendStalledAgents(ctx, []store.Agent{*mustGetAgent(t, s, agent.ID)})
+
+			persisted := mustGetAgent(t, s, agent.ID)
+			assert.Equal(t, string(state.PhaseSuspended), persisted.Phase)
+			assert.Equal(t, string(state.SuspendReasonStalled), persisted.SuspendReason)
+			assert.Equal(t, string(preStall), persisted.Activity)
+
+			require.Eventually(t, func() bool {
+				return len(disp.getCalls()) >= 1
+			}, 2*time.Second, 20*time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
+
+			calls := disp.getCalls()
+			require.Len(t, calls, 1, "auto-suspend with reason=stalled and retained %s must fire SUSPENDED only", preStall)
+			assert.Contains(t, calls[0].Message, "SUSPENDED")
+			assert.NotContains(t, calls[0].Message, strings.ToUpper(string(preStall)))
+
+			notifs, err := s.GetNotifications(ctx, store.SubscriberTypeAgent, subscriber.Slug, false)
+			require.NoError(t, err)
+			require.Len(t, notifs, 1)
+			assert.Equal(t, "SUSPENDED", notifs[0].Status)
+		})
+	}
+}

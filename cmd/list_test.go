@@ -507,6 +507,12 @@ func TestSuspendedPhaseLabel(t *testing.T) {
 	assert.Equal(t, "suspended (idle)", suspendedPhaseLabel("suspended", "idle"))
 	assert.Equal(t, "suspended (stalled)", suspendedPhaseLabel("suspended", "stalled"))
 	assert.Equal(t, "suspended (user)", suspendedPhaseLabel("suspended", "user"))
+	assert.Equal(t, "suspended · completed (idle)", suspendedPhaseLabel("suspended · completed", "idle"))
+	assert.Equal(t, "suspended · idle (idle)", suspendedPhaseLabel("suspended · idle", "idle"))
+	assert.Equal(t, "suspended · completed (stalled)", suspendedPhaseLabel("suspended · completed", "stalled"))
+	assert.Equal(t, "suspended · harness error (user)", suspendedPhaseLabel("suspended · harness error", "user"))
+	assert.Equal(t, "suspended · completed", suspendedPhaseLabel("suspended · completed", ""), "retained activity with no reason")
+	assert.Equal(t, "suspended · completed", suspendedPhaseLabel("suspended · completed", "evil\x1b[2J"), "retained activity ignores unknown reason")
 	assert.Equal(t, "suspended", suspendedPhaseLabel("suspended", ""), "no reason recorded")
 	assert.Equal(t, "suspended", suspendedPhaseLabel("suspended", "evil\x1b[2J"), "only known reasons are shown")
 	assert.Equal(t, "running", suspendedPhaseLabel("running", "idle"), "only suspended shows its reason")
@@ -2695,6 +2701,33 @@ func TestDisplayAgents_SuspendedRetainedActivity(t *testing.T) {
 			RuntimeBrokerName: "broker",
 			Phase:             "suspended",
 			Activity:          "blocked",
+			SuspendReason:     "user",
+			ContainerStatus:   "stopped",
+			LastActivityEvent: now,
+		},
+		{
+			ID:                "id-5",
+			Name:              "susp-completed-idle-reason",
+			Template:          "developer",
+			Runtime:           "docker",
+			Project:           "proj",
+			RuntimeBrokerName: "broker",
+			Phase:             "suspended",
+			Activity:          "completed",
+			SuspendReason:     "idle",
+			ContainerStatus:   "stopped",
+			LastActivityEvent: now,
+		},
+		{
+			ID:                "id-6",
+			Name:              "susp-idle-stalled-reason",
+			Template:          "developer",
+			Runtime:           "docker",
+			Project:           "proj",
+			RuntimeBrokerName: "broker",
+			Phase:             "suspended",
+			Activity:          "idle",
+			SuspendReason:     "stalled",
 			ContainerStatus:   "stopped",
 			LastActivityEvent: now,
 		},
@@ -2705,14 +2738,17 @@ func TestDisplayAgents_SuspendedRetainedActivity(t *testing.T) {
 	require.NoError(t, err)
 
 	lines := strings.Split(strings.TrimSpace(out), "\n")
-	require.Len(t, lines, 6)
+	require.Len(t, lines, 8)
 	assert.Contains(t, lines[1], "suspended · completed")
 	assert.Contains(t, lines[2], "suspended · idle")
 	assert.Contains(t, lines[3], "suspended · harness error")
 	assert.Contains(t, lines[3], "harness error: model API: APIError (status 400)")
 	assert.Contains(t, lines[4], "suspended")
 	assert.NotContains(t, lines[4], "suspended ·")
+	assert.Contains(t, lines[5], "suspended (user)")
 	assert.NotContains(t, lines[5], "suspended ·")
+	assert.Contains(t, lines[6], "suspended · completed (idle)")
+	assert.Contains(t, lines[7], "suspended · idle (stalled)")
 	assert.NotContains(t, lines[5], "waiting on others", "non-retained activity on suspended row must not surface in table")
 
 	outputFormat = "json"

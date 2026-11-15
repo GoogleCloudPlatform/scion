@@ -1839,7 +1839,7 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 
 	if su.Phase != "" {
 		upd.SetPhase(su.Phase)
-		if su.Phase == string(state.PhaseSuspended) && su.SuspendReason != "" {
+		if strings.EqualFold(su.Phase, string(state.PhaseSuspended)) && su.SuspendReason != "" {
 			upd.SetSuspendReason(su.SuspendReason)
 		}
 	}
@@ -1865,8 +1865,8 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		upd.SetToolName(su.ToolName)
 	} else if strings.EqualFold(su.Phase, string(state.PhaseSuspended)) {
 		// Transitioning to suspended: preserve retained activities (completed,
-		// idle; computed from stalled_from_activity when stalled) and clear any
-		// other activity, stall marker, and tool name.
+		// idle, harness_error; computed from stalled_from_activity when stalled)
+		// and clear any other activity, stall marker, and tool name.
 		retained := string(state.RetainedSuspendActivity(
 			state.Activity(current.Activity),
 			state.Activity(current.StalledFromActivity),

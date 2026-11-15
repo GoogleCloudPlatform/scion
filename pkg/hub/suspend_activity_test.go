@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -102,12 +103,14 @@ func TestSuspendPathsRetainEligibleActivityAndClearOthers(t *testing.T) {
 	}
 
 	paths := []struct {
-		name  string
-		cases []activityCase
-		run   func(t *testing.T, srv *Server, s store.Store, a *store.Agent) *store.Agent
+		name       string
+		wantReason string
+		cases      []activityCase
+		run        func(t *testing.T, srv *Server, s store.Store, a *store.Agent) *store.Agent
 	}{
 		{
-			name: "http-suspend",
+			name:       "http-suspend",
+			wantReason: string(state.SuspendReasonUser),
 			cases: []activityCase{
 				{name: "completed", activity: string(state.ActivityCompleted), wantActivity: string(state.ActivityCompleted)},
 				{name: "idle", activity: string(state.ActivityIdle), wantActivity: string(state.ActivityIdle)},
@@ -129,10 +132,12 @@ func TestSuspendPathsRetainEligibleActivityAndClearOthers(t *testing.T) {
 			},
 		},
 		{
-			name: "auto-suspend",
+			name:       "auto-suspend",
+			wantReason: string(state.SuspendReasonStalled),
 			cases: []activityCase{
 				{name: "stalled_from_completed", activity: string(state.ActivityStalled), stalledFrom: string(state.ActivityCompleted), wantActivity: string(state.ActivityCompleted)},
 				{name: "stalled_from_idle", activity: string(state.ActivityStalled), stalledFrom: string(state.ActivityIdle), wantActivity: string(state.ActivityIdle)},
+				{name: "stalled_from_harness_error", activity: string(state.ActivityStalled), stalledFrom: string(state.ActivityHarnessError), wantActivity: string(state.ActivityHarnessError)},
 				{name: "stalled_from_working", activity: string(state.ActivityStalled), stalledFrom: string(state.ActivityWorking), wantActivity: ""},
 				{name: "stalled_from_waiting", activity: string(state.ActivityStalled), stalledFrom: string(state.ActivityWaitingForInput), wantActivity: ""},
 			},
@@ -142,7 +147,8 @@ func TestSuspendPathsRetainEligibleActivityAndClearOthers(t *testing.T) {
 			},
 		},
 		{
-			name: "membership-hold",
+			name:       "membership-hold",
+			wantReason: "",
 			cases: []activityCase{
 				{name: "completed", activity: string(state.ActivityCompleted), wantActivity: string(state.ActivityCompleted)},
 				{name: "idle", activity: string(state.ActivityIdle), wantActivity: string(state.ActivityIdle)},
@@ -174,6 +180,7 @@ func TestSuspendPathsRetainEligibleActivityAndClearOthers(t *testing.T) {
 
 					persisted := mustGetAgent(t, s, agent.ID)
 					assert.Equal(t, string(state.PhaseSuspended), persisted.Phase)
+					assert.Equal(t, path.wantReason, persisted.SuspendReason)
 					assert.Equal(t, tc.wantActivity, persisted.Activity)
 					assert.Empty(t, persisted.StalledFromActivity)
 					assert.Empty(t, persisted.ToolName)
@@ -181,6 +188,7 @@ func TestSuspendPathsRetainEligibleActivityAndClearOthers(t *testing.T) {
 
 					if httpResp != nil {
 						assert.Equal(t, string(state.PhaseSuspended), httpResp.Phase)
+						assert.Equal(t, path.wantReason, httpResp.SuspendReason, "HTTP response must carry suspend reason")
 						assert.Equal(t, tc.wantActivity, httpResp.Activity, "HTTP response must carry retained/cleared activity")
 					}
 
@@ -313,5 +321,112 @@ func TestResumePathsClearRetainedSuspendActivity(t *testing.T) {
 		persisted := mustGetAgent(t, s, target.ID)
 		assert.Equal(t, string(state.PhaseSuspended), persisted.Phase)
 		assert.Equal(t, string(state.ActivityCompleted), persisted.Activity, "failed wake rollback must restore retained suspend activity")
+	})
+}
+
+func enableIdleSuspendForTest(t *testing.T, srv *Server) {
+	t.Helper()
+	var active []experiments.Experiment
+	for _, e := range experiments.Default().All() {
+		if e.Name == experiments.IdleSuspend {
+			e.Default = true
+		}
+		active = append(active, e)
+	}
+	reg, err := experiments.NewRegistry(active, nil)
+	require.NoError(t, err)
+	srv.experiments = reg
+}
+
+func TestAutoWakeClearsRetainedSuspendActivity(t *testing.T) {
+	ctx := context.Background()
+
+	for _, reason := range []state.SuspendReason{state.SuspendReasonIdle, state.SuspendReasonStalled} {
+		for _, retained := range []state.Activity{state.ActivityCompleted, state.ActivityIdle, state.ActivityHarnessError} {
+			t.Run(string(reason)+"_"+string(retained), func(t *testing.T) {
+				srv, s, sender, target := createWakeDMFixtures(t, string(state.PhaseRunning))
+				enableIdleSuspendForTest(t, srv)
+				t.Cleanup(func() { srv.autoWakeWork.wg.Wait() })
+
+				require.NoError(t, s.UpdateAgentStatus(ctx, target.ID, store.AgentStatusUpdate{
+					Phase:    string(state.PhaseRunning),
+					Activity: string(retained),
+				}))
+				require.NoError(t, s.UpdateAgentStatus(ctx, target.ID, store.AgentStatusUpdate{
+					Phase:         string(state.PhaseSuspended),
+					SuspendReason: string(reason),
+				}))
+				suspended := mustGetAgent(t, s, target.ID)
+				require.Equal(t, string(retained), suspended.Activity)
+				require.Equal(t, string(reason), suspended.SuspendReason)
+
+				disp := &wakeTrackingDispatcher{}
+				srv.SetDispatcher(disp)
+
+				var readySent atomic.Bool
+				go func() {
+					time.Sleep(150 * time.Millisecond)
+					readySent.Store(true)
+					_ = s.UpdateAgentStatus(ctx, target.ID, store.AgentStatusUpdate{
+						Phase:    string(state.PhaseRunning),
+						Activity: string(state.ActivityWorking),
+					})
+				}()
+
+				res, dmErr := srv.ExecuteAgentDM(ctx, &AgentDMInput{
+					SenderAgent:    sender,
+					SenderIdentity: wakeDMSenderIdentity(sender, ScopeProjectRead),
+					TargetAgent:    suspended,
+					Msg:            "auto-wake work",
+					Type:           "instruction",
+					ProjectID:      sender.ProjectID,
+				})
+				require.Nil(t, dmErr)
+				require.NotNil(t, res)
+				assert.Equal(t, AgentDMAccepted, res.Outcome)
+				assert.True(t, readySent.Load(), "auto-wake must clear retained %s before waitForAgentReady rather than returning early", retained)
+				require.Len(t, disp.getStartCalls(), 1)
+				require.Len(t, disp.getMessageCalls(), 1)
+				assert.Equal(t, "auto-wake work", disp.getMessageCalls()[0].Message)
+
+				woken := mustGetAgent(t, s, target.ID)
+				assert.Equal(t, string(state.PhaseRunning), woken.Phase)
+				assert.Equal(t, string(state.ActivityWorking), woken.Activity)
+				assert.Empty(t, woken.SuspendReason, "auto-wake resume must clear suspend_reason")
+			})
+		}
+	}
+
+	t.Run("failed auto-wake rollback preserves both suspend_reason and retained activity", func(t *testing.T) {
+		srv, s, sender, target := createWakeDMFixtures(t, string(state.PhaseRunning))
+		enableIdleSuspendForTest(t, srv)
+		t.Cleanup(func() { srv.autoWakeWork.wg.Wait() })
+
+		require.NoError(t, s.UpdateAgentStatus(ctx, target.ID, store.AgentStatusUpdate{
+			Phase:    string(state.PhaseRunning),
+			Activity: string(state.ActivityCompleted),
+		}))
+		require.NoError(t, s.UpdateAgentStatus(ctx, target.ID, store.AgentStatusUpdate{
+			Phase:         string(state.PhaseSuspended),
+			SuspendReason: string(state.SuspendReasonIdle),
+		}))
+		suspended := mustGetAgent(t, s, target.ID)
+
+		srv.SetDispatcher(&wakeTrackingDispatcher{startReturnErr: assert.AnError})
+
+		_, dmErr := srv.ExecuteAgentDM(ctx, &AgentDMInput{
+			SenderAgent:    sender,
+			SenderIdentity: wakeDMSenderIdentity(sender, ScopeProjectRead),
+			TargetAgent:    suspended,
+			Msg:            "auto-wake fail",
+			Type:           "instruction",
+			ProjectID:      sender.ProjectID,
+		})
+		require.NotNil(t, dmErr)
+
+		rolledBack := mustGetAgent(t, s, target.ID)
+		assert.Equal(t, string(state.PhaseSuspended), rolledBack.Phase)
+		assert.Equal(t, string(state.SuspendReasonIdle), rolledBack.SuspendReason)
+		assert.Equal(t, string(state.ActivityCompleted), rolledBack.Activity)
 	})
 }
