@@ -656,6 +656,32 @@ func (a Activity) IsSuspendEligible() bool {
 	return false
 }
 
+// IsRetainedOnSuspend reports whether this activity survives a transition to
+// PhaseSuspended so that operators can tell what state the agent was in when
+// suspended. All other activities are cleared on suspend.
+// ptone/scion#7858 adds ActivityHarnessError here.
+func (a Activity) IsRetainedOnSuspend() bool {
+	switch a {
+	case ActivityIdle, ActivityCompleted:
+		return true
+	}
+	return false
+}
+
+// RetainedSuspendActivity returns the activity to preserve on transition to
+// PhaseSuspended, or "" when the activity should be cleared. For a stalled
+// agent, the candidate is stalledFrom rather than stalled itself.
+func RetainedSuspendActivity(activity, stalledFrom Activity) Activity {
+	candidate := activity
+	if candidate == ActivityStalled {
+		candidate = stalledFrom
+	}
+	if candidate.IsRetainedOnSuspend() {
+		return candidate
+	}
+	return ""
+}
+
 // IsTerminal reports whether this activity represents a terminal outcome that
 // survives the phase transition to stopped. Terminal activities carry
 // information about HOW the agent stopped and are valid when phase is stopped.
@@ -751,8 +777,8 @@ func (s AgentState) DisplayStatus() string {
 }
 
 // Validate checks cross-field constraints on the agent state.
-// Activity is only meaningful when phase is running; setting an activity
-// with a non-running phase is invalid.
+// Activity is meaningful when phase is running, when phase is stopped with a
+// terminal activity, or when phase is suspended with a retained activity.
 func (s AgentState) Validate() error {
 	if err := s.Phase.Validate(); err != nil {
 		return err
@@ -761,7 +787,9 @@ func (s AgentState) Validate() error {
 		return err
 	}
 	if s.Activity != "" && s.Phase != PhaseRunning {
-		if s.Phase != PhaseStopped || !s.Activity.IsTerminal() {
+		validStopped := s.Phase == PhaseStopped && s.Activity.IsTerminal()
+		validSuspended := s.Phase == PhaseSuspended && s.Activity.IsRetainedOnSuspend()
+		if !validStopped && !validSuspended {
 			return fmt.Errorf("activity %q is not valid when phase is %q (must be %q)", s.Activity, s.Phase, PhaseRunning)
 		}
 	}
