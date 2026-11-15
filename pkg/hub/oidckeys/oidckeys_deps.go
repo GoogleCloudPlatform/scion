@@ -16,6 +16,7 @@ package oidckeys
 
 import (
 	"context"
+	"net/http"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -41,6 +42,11 @@ type OIDCDeps interface {
 	// CallerAgent returns the authenticated agent of the request, and
 	// false when the request carries no agent token.
 	CallerAgent(ctx context.Context) (OIDCCallerAgent, bool)
+	// AgentStandingForbidden checks whether agentID is in good delegation
+	// standing and writes the generic refusal response when it is not
+	// (403 Forbidden for a policy refusal, 500 for a lookup fault),
+	// reporting whether a response was written.
+	AgentStandingForbidden(ctx context.Context, w http.ResponseWriter, agentID string) bool
 }
 
 // OIDCRateLimiter is a per-key request limiter.

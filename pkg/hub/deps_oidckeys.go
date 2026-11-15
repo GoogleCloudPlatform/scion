@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"net/http"
 	"time"
 )
 
@@ -55,6 +56,10 @@ func (d oidcDeps) CallerAgent(ctx context.Context) (OIDCCallerAgent, bool) {
 		Ancestry:                c.Ancestry,
 		CanRequestIdentityToken: c.HasScope(ScopeIdentityToken),
 	}, true
+}
+
+func (d oidcDeps) AgentStandingForbidden(ctx context.Context, w http.ResponseWriter, agentID string) bool {
+	return d.s.agentStandingForbidden(ctx, w, agentID)
 }
 
 // oidcArea returns the server's OIDC endpoint handlers. New sets

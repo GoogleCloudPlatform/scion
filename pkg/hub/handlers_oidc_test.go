@@ -617,3 +617,137 @@ func TestHandleAgentIdentityToken_ForbiddenMessage(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &errResp))
 	assert.Contains(t, errResp.Error.Message, "agent not authorized to request identity tokens")
 }
+
+// TestHandleAgentIdentityToken_DelegationStanding verifies that OIDC identity
+// token minting enforces live agent delegation standing through the full HTTP
+// stack, refusing agents whose delegating root user is suspended or removed
+// from the project (even while the agent still holds an unexpired Hub JWT with
+// no AgentHold), allowing active delegators, and matching the refusal status
+// and body of the other token-minting endpoints.
+func TestHandleAgentIdentityToken_DelegationStanding(t *testing.T) {
+	newOIDCFixture := func(t *testing.T, name string) (*msFixture, string, string) {
+		t.Helper()
+		srv := testOIDCServerWithRoutes(t)
+		t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+		f := newMSFixtureOn(t, name, srv, srv.store)
+		scopes := append(append([]AgentTokenScope{}, ScopesForRole(AgentRoleFull)...), ScopeIdentityToken)
+		return f, f.agentToken(f.agentA, scopes...), f.agentToken(f.childC, scopes...)
+	}
+
+	mintOIDC := func(t *testing.T, srv *Server, tok string) *httptest.ResponseRecorder {
+		t.Helper()
+		return doRequestWithAgentToken(t, srv, http.MethodPost, "/api/v1/agent/identity-token",
+			map[string]string{"audience": "https://api.example.com"}, tok)
+	}
+
+	assertGenericForbidden := func(t *testing.T, rec *httptest.ResponseRecorder, label string) {
+		t.Helper()
+		require.Equal(t, http.StatusForbidden, rec.Code, "%s: %s", label, rec.Body.String())
+		var errResp ErrorResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp), "%s: %s", label, rec.Body.String())
+		assert.Equal(t, ErrCodeForbidden, errResp.Error.Code, label)
+		assert.Equal(t, "Insufficient permissions", errResp.Error.Message, label)
+	}
+
+	t.Run("active delegator succeeds for direct and child agents", func(t *testing.T) {
+		f, tokA, tokC := newOIDCFixture(t, "oidc-active")
+
+		for _, tc := range []struct {
+			label string
+			agent *store.Agent
+			tok   string
+		}{
+			{"direct agent", f.agentA, tokA},
+			{"child agent", f.childC, tokC},
+		} {
+			rec := mintOIDC(t, f.srv, tc.tok)
+			require.Equal(t, http.StatusOK, rec.Code, "%s: %s", tc.label, rec.Body.String())
+			var resp identityTokenResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			require.NotEmpty(t, resp.Token)
+
+			jwks := f.srv.oidcKeyManager.JWKS()
+			parsed, err := jwt.ParseSigned(resp.Token, []jose.SignatureAlgorithm{jose.RS256})
+			require.NoError(t, err)
+			var claims OIDCIdentityTokenClaims
+			require.NoError(t, parsed.Claims(jwks.Keys[0].Key, &claims))
+			assert.Equal(t, tc.agent.ID, claims.Subject)
+			assert.Equal(t, f.userID, claims.RootUser)
+		}
+	})
+
+	t.Run("suspended delegator refused and matches other minting paths", func(t *testing.T) {
+		f, tokA, tokC := newOIDCFixture(t, "oidc-suspended")
+		ctx := context.Background()
+
+		// Baseline: active delegator can mint.
+		require.Equal(t, http.StatusOK, mintOIDC(t, f.srv, tokA).Code)
+
+		// Suspend the delegating user without writing an AgentHold, so the
+		// unexpired Hub JWT passes UnifiedAuthMiddleware and reaches the handler.
+		u, err := f.s.GetUser(ctx, f.userID)
+		require.NoError(t, err)
+		u.Status = store.UserStatusSuspended
+		require.NoError(t, f.s.UpdateUser(ctx, u))
+		require.False(t, f.held(f.agentA.ID))
+		requireStandingReason(t, f.srv.agentStanding(ctx, f.agentA.ID), standingReasonRootInactive)
+		requireStandingReason(t, f.srv.agentStanding(ctx, f.childC.ID), standingReasonRootInactive)
+
+		oidcRecA := mintOIDC(t, f.srv, tokA)
+		assertGenericForbidden(t, oidcRecA, "oidc identity-token (direct)")
+		assertGenericForbidden(t, mintOIDC(t, f.srv, tokC), "oidc identity-token (child)")
+
+		// Parity with GCP access token, GCP identity token, GitHub App token
+		// refresh, and Hub JWT refresh: all refuse with the same 403 body.
+		for _, peer := range []struct {
+			name string
+			path string
+			body interface{}
+		}{
+			{"gcp-token", "/api/v1/agent/gcp-token", map[string]interface{}{}},
+			{"gcp-identity-token", "/api/v1/agent/gcp-identity-token", map[string]string{"audience": "https://api.example.com"}},
+			{"github-refresh-token", "/api/v1/agents/" + f.agentA.ID + "/refresh-token", nil},
+			{"hub-jwt-refresh", "/api/v1/agents/" + f.agentA.ID + "/token/refresh", nil},
+		} {
+			peerRec := doRequestWithAgentToken(t, f.srv, http.MethodPost, peer.path, peer.body, tokA)
+			assert.Equal(t, oidcRecA.Code, peerRec.Code, peer.name)
+			assert.Equal(t, oidcRecA.Body.String(), peerRec.Body.String(), peer.name)
+		}
+	})
+
+	t.Run("removed delegator refused", func(t *testing.T) {
+		f, tokA, tokC := newOIDCFixture(t, "oidc-removed")
+		ctx := context.Background()
+
+		f.dropBindings(f.userID)
+		require.False(t, f.held(f.agentA.ID))
+		requireStandingReason(t, f.srv.agentStanding(ctx, f.agentA.ID), standingReasonRootNotAdmitted)
+		requireStandingReason(t, f.srv.agentStanding(ctx, f.childC.ID), standingReasonRootNotAdmitted)
+
+		assertGenericForbidden(t, mintOIDC(t, f.srv, tokA), "oidc identity-token (direct)")
+		assertGenericForbidden(t, mintOIDC(t, f.srv, tokC), "oidc identity-token (child)")
+	})
+
+	t.Run("standing lookup fault fails closed with 500", func(t *testing.T) {
+		f, _, fault := newMSFixtureWithStoreFault(t, "oidc-fault", func(inner store.Store, sw *storeFaultSwitch) *probeFaultStore {
+			return &probeFaultStore{Store: inner, fault: sw}
+		})
+		installTestOIDCKeyManager(t, f.srv)
+		f.srv.oidcTokenLifetime = 15 * time.Minute
+
+		claims := &AgentTokenClaims{
+			Claims:    jwt.Claims{Subject: f.agentA.ID},
+			ProjectID: f.projectID,
+			Scopes:    []AgentTokenScope{ScopeAgentStatusUpdate, ScopeIdentityToken},
+			Ancestry:  f.agentA.Ancestry,
+		}
+		require.Equal(t, http.StatusOK, doIdentityTokenRequest(t, f.srv, claims, identityTokenRequest{Audience: "https://api.example.com"}).Code)
+
+		fault.Arm()
+		rec := doIdentityTokenRequest(t, f.srv, claims, identityTokenRequest{Audience: "https://api.example.com"})
+		require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+		var errResp ErrorResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+		assert.Equal(t, ErrCodeInternalError, errResp.Error.Code)
+	})
+}

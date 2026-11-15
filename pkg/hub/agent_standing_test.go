@@ -374,6 +374,19 @@ func TestStandingGates_RemovedRootDenied(t *testing.T) {
 		_ = json.Unmarshal(rec.Body.Bytes(), &body)
 		assert.Equal(t, "Insufficient permissions", body.Error.Message, "refused by the standing check, before the assignment lookup")
 	})
+	t.Run("oidcIdentityToken", func(t *testing.T) {
+		installTestOIDCKeyManager(t, f.srv)
+		f.srv.oidcTokenLifetime = 15 * time.Minute
+		claims, err := f.srv.agentTokenService.ValidateAgentToken(f.agentToken(f.agentA, ScopeIdentityToken))
+		require.NoError(t, err)
+		rec := doIdentityTokenRequest(t, f.srv, claims, identityTokenRequest{Audience: "https://api.example.com"})
+		isForbidden(t, rec)
+		var body struct {
+			Error struct{ Message string } `json:"error"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &body)
+		assert.Equal(t, "Insufficient permissions", body.Error.Message)
+	})
 }
 
 // Gates that read the hold itself: one fixture with A held, U still a member.
@@ -411,6 +424,20 @@ func TestStandingGates_HeldAgent(t *testing.T) {
 			rec := doRequestWithAgentToken(t, f.srv, http.MethodPost, path, map[string]interface{}{}, tokA)
 			require.Equal(t, http.StatusUnauthorized, rec.Code, path+": "+rec.Body.String())
 		}
+	})
+	t.Run("noOIDCIdentityTokenAfterHold", func(t *testing.T) {
+		oidcSrv := testOIDCServerWithRoutes(t)
+		t.Cleanup(func() { _ = oidcSrv.Shutdown(context.Background()) })
+		oidcF := newMSFixtureOn(t, "gates-held-oidc", oidcSrv, oidcSrv.store)
+		oidcTok := oidcF.agentToken(oidcF.agentA, append(append([]AgentTokenScope{}, ScopesForRole(AgentRoleFull)...), ScopeIdentityToken)...)
+		oidcF.hold(oidcF.agentA.ID, oidcF.userID)
+		rec := doRequestWithAgentToken(t, oidcF.srv, http.MethodPost, "/api/v1/agent/identity-token", map[string]string{"audience": "https://api.example.com"}, oidcTok)
+		require.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+		// And even if a caller reaches the handler directly with claims in context, standing refuses.
+		claims, err := oidcF.srv.agentTokenService.ValidateAgentToken(oidcTok)
+		require.NoError(t, err)
+		directRec := doIdentityTokenRequest(t, oidcF.srv, claims, identityTokenRequest{Audience: "https://api.example.com"})
+		require.Equal(t, http.StatusForbidden, directRec.Code, directRec.Body.String())
 	})
 	t.Run("standingForbiddenHelperRefusesHeld", func(t *testing.T) {
 		rec := httptest.NewRecorder()
