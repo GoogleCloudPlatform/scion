@@ -18,7 +18,9 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	core "github.com/GoogleCloudPlatform/scion/pkg/conduit"
@@ -81,8 +83,9 @@ func (p portForwarding) run(ctx context.Context) {
 // newPortForwarding wires portForwarding to the hub client; getenv reads
 // the agent environment (os.Getenv outside tests). ptyUser is the agent
 // user that PTY streams' tmux clients run as; ssh is the conduit SSH
-// server (prepareConduitSSH), nil when there is none.
-func newPortForwarding(c *hub.Client, disableConduit bool, ptyUser conduit.PTYUser, ssh *sshd.Config, getenv func(string) string) portForwarding {
+// server (prepareConduitSSH), nil when there is none. deliver, when not nil,
+// registers the deliver-message control route (conduitDeliverOptions).
+func newPortForwarding(c *hub.Client, disableConduit bool, ptyUser conduit.PTYUser, ssh *sshd.Config, deliver *control.DeliverOptions, getenv func(string) string) portForwarding {
 	return portForwarding{
 		getenv:         getenv,
 		disableConduit: disableConduit,
@@ -90,7 +93,7 @@ func newPortForwarding(c *hub.Client, disableConduit bool, ptyUser conduit.PTYUs
 			// The control handler is the session's only RPC target: a
 			// hub-originated RpcRequest reaches /v1/control/* and nothing
 			// else in sciontool.
-			ctl := control.New(control.Options{KickTokenRefresh: c.KickTokenRefresh})
+			ctl := control.New(control.Options{KickTokenRefresh: c.KickTokenRefresh, Deliver: deliver})
 			a, err := conduit.New(conduit.Options{
 				HubURL:                c.HubURL(),
 				AgentID:               c.AgentID(),
@@ -155,6 +158,43 @@ func (r authRefreshingAgent) Run(ctx context.Context) error {
 	})
 	defer unsubscribe()
 	return r.agent.Run(ctx)
+}
+
+// conduitDeliverOptions returns the deliver-message route options, or nil
+// when the route must not be registered (design v2.22 §1.5): the agent was
+// launched without hub.conduit_deliver, tmux is not on PATH, or the child
+// does not run the harness in the "scion" tmux session the route pastes
+// into. Commands run as the PTY user, which owns that tmux server.
+func conduitDeliverOptions(getenv func(string) string, lookPath func(string) (string, error), childArgs []string, u conduit.PTYUser) *control.DeliverOptions {
+	_, err := lookPath("tmux")
+	if !control.DeliverEnabled(getenv, err == nil) || !childRunsScionTmux(childArgs) {
+		return nil
+	}
+	return &control.DeliverOptions{Runner: control.NewLocalRunner(u.UID, u.GID, u.Username, u.RequirePrivilegeDrop)}
+}
+
+// childRunsScionTmux reports whether the child command starts tmux session
+// "scion" (`tmux new-session ... -s scion ...`), where the harness runs in
+// window 0. The runtimes pass it as one shell string (`sh -c "tmux
+// new-session -d -s scion -n agent ..."`, pkg/runtime/common.go
+// buildTmuxStartCmd), so every argument is split into words.
+func childRunsScionTmux(args []string) bool {
+	var words []string
+	for _, a := range args {
+		words = append(words, strings.Fields(a)...)
+	}
+	tmux, newSession := false, false
+	for i, w := range words {
+		switch {
+		case filepath.Base(w) == "tmux":
+			tmux, newSession = true, false
+		case tmux && (w == "new-session" || w == "new"):
+			newSession = true
+		case tmux && newSession && w == "-s" && i+1 < len(words) && words[i+1] == "scion":
+			return true
+		}
+	}
+	return false
 }
 
 // conduitPTYUser is the identity PTY streams' tmux clients run as: the

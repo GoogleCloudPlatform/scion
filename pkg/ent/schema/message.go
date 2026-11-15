@@ -66,7 +66,8 @@ func (Message) Fields() []ent.Field {
 		field.String("group_id").
 			Optional(),
 		// dispatch_state tracks cross-node delivery:
-		// pending|dispatched|failed|deferred|no_recipient (see the
+		// pending|dispatched|failed|deferred|no_recipient, plus
+		// delivering|delivered|partial for a delivery over conduit (see the
 		// store.MessageDispatch* constants).
 		// After Phase 4 (no-queuing delivery), every writer sets the state
 		// explicitly. Only ExecuteAgentDM writes "pending", for the length of its
@@ -82,6 +83,22 @@ func (Message) Fields() []ent.Field {
 		field.Time("dispatched_at").
 			Optional().
 			Nillable(),
+		// delivery_id, delivering_at and delivery_outcome bind the row to
+		// one deliver-message flush over the agent's conduit session
+		// (dispatch_state delivering, delivered or partial; design
+		// .design/conduit/v2.22-deliver-message.md §2.6). delivery_outcome
+		// is the stored answer JSON ({"outcome","stage"}), never text.
+		field.String("delivery_id").
+			Optional().
+			Nillable().
+			MaxLen(64),
+		field.Time("delivering_at").
+			Optional().
+			Nillable(),
+		field.String("delivery_outcome").
+			Optional().
+			Nillable().
+			MaxLen(256),
 		// channel identifies the integration that originated or targets
 		// this message (e.g. "web", "discord", "telegram").
 		field.String("channel").
@@ -178,6 +195,12 @@ func (Message) Indexes() []ent.Index {
 		index.Fields("created", "id").
 			StorageKey("message_failed_created_id").
 			Annotations(entsql.IndexWhere("dispatch_state = 'failed'")),
+		// The stale-delivery sweep finds rows left in delivering (a hub
+		// restart mid-delivery) by delivering_at. Such rows are rare and
+		// short-lived, so a partial index keeps the sweep tiny.
+		index.Fields("delivering_at").
+			StorageKey("message_delivering_at").
+			Annotations(entsql.IndexWhere("dispatch_state = 'delivering'")),
 		// The conversation consistency check reads the latest messages of a
 		// DM pair, one query per direction, filtering on sender_id and
 		// recipient_id and ordering by created, id. The single-column

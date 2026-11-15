@@ -290,21 +290,73 @@ func (s *BrokerDispatchStore) MarkMessageDispatched(ctx context.Context, id stri
 	return affected == 1, nil
 }
 
-// MarkMessageFailed sets a message's dispatch_state to "failed" and records the reason.
+// MarkMessageFailed sets a message's dispatch_state to "failed" and records
+// the reason. A failed or delivered row is left alone: a conduit delivery
+// that completed is never turned into a failure (review R4). See
+// failMessage for a delivering row.
 func (s *BrokerDispatchStore) MarkMessageFailed(ctx context.Context, id string, reason string) error {
+	_, err := s.failMessage(ctx, id, reason, nil)
+	return err
+}
+
+// FailUndeliveredMessage implements store.BrokerDispatchStore.
+func (s *BrokerDispatchStore) FailUndeliveredMessage(ctx context.Context, id string, reason string) (bool, error) {
+	return s.failMessage(ctx, id, reason, []string{
+		store.MessageDispatchPending, store.MessageDispatchDispatched,
+		store.MessageDispatchDelivering, store.MessageDispatchPartial,
+	})
+}
+
+// failMessage moves row id to failed with reason, from any state in from
+// (nil: any state but failed and delivered), and reports whether it did.
+// Each transition is one conditional UPDATE, so a racing /deliver finish
+// and this write can never both win. A row still delivering also gets the
+// stored outcome partial-unknown in the same write, so a same-id /deliver
+// replays it instead of answering bound, and the delivery's own finish
+// (compare-and-set on delivering) can no longer change it.
+func (s *BrokerDispatchStore) failMessage(ctx context.Context, id, reason string, from []string) (bool, error) {
 	uid, err := parseUUID(id)
 	if err != nil {
-		return err
+		return false, err
 	}
-	_, err = s.client.Message.Update().
-		Where(message.IDEQ(uid), message.DispatchStateNEQ(store.MessageDispatchFailed)).
-		SetDispatchState(store.MessageDispatchFailed).
+	allowed := func(state string) bool {
+		if from == nil {
+			return state != store.MessageDispatchFailed && state != store.MessageDispatchDelivered
+		}
+		for _, f := range from {
+			if f == state {
+				return true
+			}
+		}
+		return false
+	}
+	if allowed(store.MessageDispatchDelivering) {
+		n, err := s.client.Message.Update().
+			Where(message.IDEQ(uid), message.DispatchStateEQ(store.MessageDispatchDelivering)).
+			SetDispatchState(store.MessageDispatchFailed).
+			SetNillableDispatchFailureReason(&reason).
+			SetDeliveryOutcome(store.DeliveryOutcomeUnknownPartial).
+			Save(ctx)
+		if err != nil {
+			return false, mapError(err)
+		}
+		if n > 0 {
+			return true, nil
+		}
+	}
+	q := s.client.Message.Update().Where(message.IDEQ(uid), message.DispatchStateNEQ(store.MessageDispatchDelivering))
+	if from == nil {
+		q = q.Where(message.DispatchStateNotIn(store.MessageDispatchFailed, store.MessageDispatchDelivered))
+	} else {
+		q = q.Where(message.DispatchStateIn(from...))
+	}
+	n, err := q.SetDispatchState(store.MessageDispatchFailed).
 		SetNillableDispatchFailureReason(&reason).
 		Save(ctx)
 	if err != nil {
-		return mapError(err)
+		return false, mapError(err)
 	}
-	return nil
+	return n > 0, nil
 }
 
 // CountBrokerDispatchHealth returns the number of in_progress dispatches whose

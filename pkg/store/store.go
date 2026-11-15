@@ -1996,8 +1996,42 @@ type BrokerDispatchStore interface {
 	// MarkMessageDispatched CAS-flips a message pending->dispatched (dedupes drains).
 	MarkMessageDispatched(ctx context.Context, id string) (dispatched bool, err error)
 
-	// MarkMessageFailed sets a message's dispatch_state to "failed" with a reason.
+	// MarkMessageFailed sets a message's dispatch_state to "failed" with a
+	// reason. A failed or delivered row is left alone; a delivering row
+	// also gets the stored outcome DeliveryOutcomeUnknownPartial.
 	MarkMessageFailed(ctx context.Context, id string, reason string) error
+
+	// FailUndeliveredMessage is MarkMessageFailed for a broker's async
+	// failure report: only a pending, dispatched, delivering or partial row
+	// is failed, in one conditional write. It reports whether this call
+	// made the transition; a failure notice is sent only then.
+	FailUndeliveredMessage(ctx context.Context, id string, reason string) (bool, error)
+
+	// BindMessageDelivery binds the rows messageIDs, all addressed to agent
+	// recipientID, to one deliver-message flush deliveryID in one
+	// transaction (design v2.22 §2.6): every row in a bindable state moves
+	// to delivering with delivery_id and delivering_at = now, or nothing
+	// changes. A same-id call while the rows are delivering is DeliveryInFlight (another call owns the delivery), a same-id call on final
+	// rows DeliveryReplay; anything else is DeliveryConflict. A missing row,
+	// or one addressed to another agent, is store.ErrNotFound.
+	BindMessageDelivery(ctx context.Context, recipientID, deliveryID string, messageIDs []string, now time.Time) (DeliveryBind, error)
+
+	// UnbindMessageDelivery moves the rows still delivering under
+	// deliveryID back to dispatched (compare-and-set on the id), after the
+	// hub's own call proved nothing was pasted. Rows in any other state are
+	// left alone.
+	UnbindMessageDelivery(ctx context.Context, deliveryID string, messageIDs []string) error
+
+	// FinishMessageDelivery moves the rows still delivering under
+	// deliveryID to state (delivered or partial) and stores outcome
+	// (compare-and-set on delivering and the id, so a late answer never
+	// overwrites the stale sweep). It returns the number of rows changed.
+	FinishMessageDelivery(ctx context.Context, deliveryID string, messageIDs []string, state, outcome string) (int, error)
+
+	// SweepStaleDeliveries moves rows left delivering since before cutoff
+	// to partial with outcome (a hub restart mid-delivery). They are never
+	// moved back to dispatched or re-driven. It returns the rows changed.
+	SweepStaleDeliveries(ctx context.Context, cutoff time.Time, outcome string) (int, error)
 
 	// ListPendingMessages returns pending messages whose target agent is on the broker.
 	ListPendingMessages(ctx context.Context, brokerID string) ([]Message, error)

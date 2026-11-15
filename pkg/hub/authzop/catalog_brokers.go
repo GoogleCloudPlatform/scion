@@ -200,6 +200,32 @@ var brokerOperations = []OperationSpec{
 		Bearer: NonUser(),
 	},
 	{
+		ID:          "broker.agent.deliver",
+		Domain:      "broker",
+		Description: "Relay one deliver-message flush from a broker to an agent it runs, over the agent's conduit session (design v2.22 deliver-message)",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/runtime-brokers/{id}/agents/{agentId}/deliver", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalBroker},
+		Credentials:      []CredentialKind{CredentialBrokerToken},
+		ResourceResolver: "broker-self",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden, DenialConflict},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestBearerDisposition_EveryRoutePatternCovered"},
+			{Package: "pkg/hub", Function: "TestBrokerAgentDeliver_Authorization"},
+		},
+		Exemptions: []Exemption{{
+			Kind:   ExemptionInternalOnly,
+			Reason: "The broker authenticates with its own HMAC credential for an agent assigned to it; the user's authority was checked at the message route (agent.message) before the bound message rows were written",
+			Scope:  "broker self access, agent assigned to the broker",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: NonUser(),
+	},
+	{
 		ID:          "broker.agent.workspacedownload",
 		Domain:      "broker",
 		Description: "Issue signed download URLs for the uploaded workspace files of an agent the broker runs",

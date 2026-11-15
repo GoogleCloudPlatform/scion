@@ -18,6 +18,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -61,6 +62,15 @@ func (s *Server) brokerMessageSweepHandler() func(ctx context.Context) {
 		// holding a connection while waiting, which worsens the thundering herd.
 		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
+
+		// Rows left delivering by a conduit delivery whose hub went away
+		// mid-call (design v2.22 §2.6) become partial, never dispatched:
+		// the paste may have happened, so they are never re-driven.
+		if n, err := s.store.SweepStaleDeliveries(ctx, time.Now().Add(-agentcontrol.StaleDelivering), staleDeliveryOutcome); err != nil {
+			s.agentLifecycleLog.Error("sweep: stale conduit deliveries failed", "error", err)
+		} else if n > 0 {
+			s.agentLifecycleLog.Warn("sweep: stale conduit deliveries marked partial", "count", n)
+		}
 
 		// The gauge is a bounded count (ptone/scion#6648): the sweep reads at
 		// most stuckMessageCountCap+1 stuck IDs from the partial pending index

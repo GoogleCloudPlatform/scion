@@ -156,11 +156,12 @@ const FlatRuntimeBrokers = "hub.flat_runtime_brokers"
 const FlatCloudRunTarget = "hub.flat_cloudrun_target"
 
 // ConduitDeliver gates message delivery over an agent's Conduit session (the
-// deliver-message control route; ptone/scion#7353). It requires hub.conduit:
-// the hub enforces both. It lands in slices: until the sciontool route, the
-// hub endpoint and the broker caller are in, turning it on changes nothing,
-// and delivery keeps using runtime exec. It is enforced in hub server code;
-// what agents are told at start is fixed at launch, so an agent started
+// deliver-message control route; ptone/scion#7353,
+// .design/conduit/v2.22-deliver-message.md). It requires hub.conduit: the
+// hub enforces both, on its broker-facing /deliver endpoint and when it
+// tells brokers and agents at launch. An agent launched with it registers
+// the route; its broker then sends that agent's deliveries through the hub
+// instead of runtime exec (Cloud Run agents in this phase). An agent started
 // before it was turned on keeps using exec until it restarts.
 const ConduitDeliver = "hub.conduit_deliver"
 
@@ -688,7 +689,7 @@ var compiled = []Experiment{
 	{
 		Name:        ConduitDeliver,
 		Title:       "Message delivery over Conduit",
-		Description: "Delivers messages to an agent over its Conduit session (the deliver-message control route) instead of through runtime exec, for agents whose session offers it; Cloud Run agents first. Requires hub.conduit. Lands in parts: until all of them are in, it changes nothing and delivery uses runtime exec. Agents started before it is turned on keep using exec until they restart. Text and interrupts only; attachments stay on exec.",
+		Description: "Delivers messages to Cloud Run agents over their Conduit session (the deliver-message control route) instead of through runtime exec, so no IAP exec connector is needed. Requires hub.conduit. Agents started before it is turned on keep using exec until they restart; Docker and Kubernetes agents keep using exec. Text and interrupts only: messages with attachments, oversize text or delivery settings outside the route bounds use exec where the runtime has it. Before an agent's session is up, delivery retries, then uses exec or fails before anything is pasted.",
 		Default:     false,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,

@@ -275,6 +275,66 @@ func (_u *MessageUpdate) ClearDispatchedAt() *MessageUpdate {
 	return _u
 }
 
+// SetDeliveryID sets the "delivery_id" field.
+func (_u *MessageUpdate) SetDeliveryID(v string) *MessageUpdate {
+	_u.mutation.SetDeliveryID(v)
+	return _u
+}
+
+// SetNillableDeliveryID sets the "delivery_id" field if the given value is not nil.
+func (_u *MessageUpdate) SetNillableDeliveryID(v *string) *MessageUpdate {
+	if v != nil {
+		_u.SetDeliveryID(*v)
+	}
+	return _u
+}
+
+// ClearDeliveryID clears the value of the "delivery_id" field.
+func (_u *MessageUpdate) ClearDeliveryID() *MessageUpdate {
+	_u.mutation.ClearDeliveryID()
+	return _u
+}
+
+// SetDeliveringAt sets the "delivering_at" field.
+func (_u *MessageUpdate) SetDeliveringAt(v time.Time) *MessageUpdate {
+	_u.mutation.SetDeliveringAt(v)
+	return _u
+}
+
+// SetNillableDeliveringAt sets the "delivering_at" field if the given value is not nil.
+func (_u *MessageUpdate) SetNillableDeliveringAt(v *time.Time) *MessageUpdate {
+	if v != nil {
+		_u.SetDeliveringAt(*v)
+	}
+	return _u
+}
+
+// ClearDeliveringAt clears the value of the "delivering_at" field.
+func (_u *MessageUpdate) ClearDeliveringAt() *MessageUpdate {
+	_u.mutation.ClearDeliveringAt()
+	return _u
+}
+
+// SetDeliveryOutcome sets the "delivery_outcome" field.
+func (_u *MessageUpdate) SetDeliveryOutcome(v string) *MessageUpdate {
+	_u.mutation.SetDeliveryOutcome(v)
+	return _u
+}
+
+// SetNillableDeliveryOutcome sets the "delivery_outcome" field if the given value is not nil.
+func (_u *MessageUpdate) SetNillableDeliveryOutcome(v *string) *MessageUpdate {
+	if v != nil {
+		_u.SetDeliveryOutcome(*v)
+	}
+	return _u
+}
+
+// ClearDeliveryOutcome clears the value of the "delivery_outcome" field.
+func (_u *MessageUpdate) ClearDeliveryOutcome() *MessageUpdate {
+	_u.mutation.ClearDeliveryOutcome()
+	return _u
+}
+
 // SetChannel sets the "channel" field.
 func (_u *MessageUpdate) SetChannel(v string) *MessageUpdate {
 	_u.mutation.SetChannel(v)
@@ -379,6 +439,16 @@ func (_u *MessageUpdate) check() error {
 			return &ValidationError{Name: "recipient", err: fmt.Errorf(`ent: validator failed for field "Message.recipient": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.DeliveryID(); ok {
+		if err := message.DeliveryIDValidator(v); err != nil {
+			return &ValidationError{Name: "delivery_id", err: fmt.Errorf(`ent: validator failed for field "Message.delivery_id": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.DeliveryOutcome(); ok {
+		if err := message.DeliveryOutcomeValidator(v); err != nil {
+			return &ValidationError{Name: "delivery_outcome", err: fmt.Errorf(`ent: validator failed for field "Message.delivery_outcome": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.Channel(); ok {
 		if err := message.ChannelValidator(v); err != nil {
 			return &ValidationError{Name: "channel", err: fmt.Errorf(`ent: validator failed for field "Message.channel": %w`, err)}
@@ -466,6 +536,24 @@ func (_u *MessageUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.DispatchedAtCleared() {
 		_spec.ClearField(message.FieldDispatchedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.DeliveryID(); ok {
+		_spec.SetField(message.FieldDeliveryID, field.TypeString, value)
+	}
+	if _u.mutation.DeliveryIDCleared() {
+		_spec.ClearField(message.FieldDeliveryID, field.TypeString)
+	}
+	if value, ok := _u.mutation.DeliveringAt(); ok {
+		_spec.SetField(message.FieldDeliveringAt, field.TypeTime, value)
+	}
+	if _u.mutation.DeliveringAtCleared() {
+		_spec.ClearField(message.FieldDeliveringAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.DeliveryOutcome(); ok {
+		_spec.SetField(message.FieldDeliveryOutcome, field.TypeString, value)
+	}
+	if _u.mutation.DeliveryOutcomeCleared() {
+		_spec.ClearField(message.FieldDeliveryOutcome, field.TypeString)
 	}
 	if value, ok := _u.mutation.Channel(); ok {
 		_spec.SetField(message.FieldChannel, field.TypeString, value)
@@ -763,6 +851,66 @@ func (_u *MessageUpdateOne) ClearDispatchedAt() *MessageUpdateOne {
 	return _u
 }
 
+// SetDeliveryID sets the "delivery_id" field.
+func (_u *MessageUpdateOne) SetDeliveryID(v string) *MessageUpdateOne {
+	_u.mutation.SetDeliveryID(v)
+	return _u
+}
+
+// SetNillableDeliveryID sets the "delivery_id" field if the given value is not nil.
+func (_u *MessageUpdateOne) SetNillableDeliveryID(v *string) *MessageUpdateOne {
+	if v != nil {
+		_u.SetDeliveryID(*v)
+	}
+	return _u
+}
+
+// ClearDeliveryID clears the value of the "delivery_id" field.
+func (_u *MessageUpdateOne) ClearDeliveryID() *MessageUpdateOne {
+	_u.mutation.ClearDeliveryID()
+	return _u
+}
+
+// SetDeliveringAt sets the "delivering_at" field.
+func (_u *MessageUpdateOne) SetDeliveringAt(v time.Time) *MessageUpdateOne {
+	_u.mutation.SetDeliveringAt(v)
+	return _u
+}
+
+// SetNillableDeliveringAt sets the "delivering_at" field if the given value is not nil.
+func (_u *MessageUpdateOne) SetNillableDeliveringAt(v *time.Time) *MessageUpdateOne {
+	if v != nil {
+		_u.SetDeliveringAt(*v)
+	}
+	return _u
+}
+
+// ClearDeliveringAt clears the value of the "delivering_at" field.
+func (_u *MessageUpdateOne) ClearDeliveringAt() *MessageUpdateOne {
+	_u.mutation.ClearDeliveringAt()
+	return _u
+}
+
+// SetDeliveryOutcome sets the "delivery_outcome" field.
+func (_u *MessageUpdateOne) SetDeliveryOutcome(v string) *MessageUpdateOne {
+	_u.mutation.SetDeliveryOutcome(v)
+	return _u
+}
+
+// SetNillableDeliveryOutcome sets the "delivery_outcome" field if the given value is not nil.
+func (_u *MessageUpdateOne) SetNillableDeliveryOutcome(v *string) *MessageUpdateOne {
+	if v != nil {
+		_u.SetDeliveryOutcome(*v)
+	}
+	return _u
+}
+
+// ClearDeliveryOutcome clears the value of the "delivery_outcome" field.
+func (_u *MessageUpdateOne) ClearDeliveryOutcome() *MessageUpdateOne {
+	_u.mutation.ClearDeliveryOutcome()
+	return _u
+}
+
 // SetChannel sets the "channel" field.
 func (_u *MessageUpdateOne) SetChannel(v string) *MessageUpdateOne {
 	_u.mutation.SetChannel(v)
@@ -880,6 +1028,16 @@ func (_u *MessageUpdateOne) check() error {
 			return &ValidationError{Name: "recipient", err: fmt.Errorf(`ent: validator failed for field "Message.recipient": %w`, err)}
 		}
 	}
+	if v, ok := _u.mutation.DeliveryID(); ok {
+		if err := message.DeliveryIDValidator(v); err != nil {
+			return &ValidationError{Name: "delivery_id", err: fmt.Errorf(`ent: validator failed for field "Message.delivery_id": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.DeliveryOutcome(); ok {
+		if err := message.DeliveryOutcomeValidator(v); err != nil {
+			return &ValidationError{Name: "delivery_outcome", err: fmt.Errorf(`ent: validator failed for field "Message.delivery_outcome": %w`, err)}
+		}
+	}
 	if v, ok := _u.mutation.Channel(); ok {
 		if err := message.ChannelValidator(v); err != nil {
 			return &ValidationError{Name: "channel", err: fmt.Errorf(`ent: validator failed for field "Message.channel": %w`, err)}
@@ -984,6 +1142,24 @@ func (_u *MessageUpdateOne) sqlSave(ctx context.Context) (_node *Message, err er
 	}
 	if _u.mutation.DispatchedAtCleared() {
 		_spec.ClearField(message.FieldDispatchedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.DeliveryID(); ok {
+		_spec.SetField(message.FieldDeliveryID, field.TypeString, value)
+	}
+	if _u.mutation.DeliveryIDCleared() {
+		_spec.ClearField(message.FieldDeliveryID, field.TypeString)
+	}
+	if value, ok := _u.mutation.DeliveringAt(); ok {
+		_spec.SetField(message.FieldDeliveringAt, field.TypeTime, value)
+	}
+	if _u.mutation.DeliveringAtCleared() {
+		_spec.ClearField(message.FieldDeliveringAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.DeliveryOutcome(); ok {
+		_spec.SetField(message.FieldDeliveryOutcome, field.TypeString, value)
+	}
+	if _u.mutation.DeliveryOutcomeCleared() {
+		_spec.ClearField(message.FieldDeliveryOutcome, field.TypeString)
 	}
 	if value, ok := _u.mutation.Channel(); ok {
 		_spec.SetField(message.FieldChannel, field.TypeString, value)

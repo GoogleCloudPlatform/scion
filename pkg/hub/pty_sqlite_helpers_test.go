@@ -195,9 +195,16 @@ func capturePTYLogs(t *testing.T) *lockedLogBuffer {
 // returns once the session is admitted.
 func (f *ptyConduitFixture) startControlAgent(t *testing.T, hubURL string, advertise bool, wrap func(conduit.RPCHandler) conduit.RPCHandler) *controlAgent {
 	t.Helper()
+	return f.startControlAgentWithDeliver(t, hubURL, advertise, nil, wrap)
+}
+
+// startControlAgentWithDeliver is startControlAgent with the
+// deliver-message route registered when deliver is not nil.
+func (f *ptyConduitFixture) startControlAgentWithDeliver(t *testing.T, hubURL string, advertise bool, deliver *control.DeliverOptions, wrap func(conduit.RPCHandler) conduit.RPCHandler) *controlAgent {
+	t.Helper()
 	guardSciontoolLog()
 	ca := &controlAgent{paths: make(chan string, 16)}
-	ctl := control.New(control.Options{KickTokenRefresh: func() { ca.kicks.Add(1) }})
+	ctl := control.New(control.Options{KickTokenRefresh: func() { ca.kicks.Add(1) }, Deliver: deliver})
 	h := control.RPCHandler(ctl)
 	if wrap != nil {
 		h = wrap(h)

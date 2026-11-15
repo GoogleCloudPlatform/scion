@@ -5741,8 +5741,9 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 
 	// Resolve the correct manager for this agent (may be on an auxiliary runtime like K8s)
 	mgr := s.resolveManagerForAgent(ctx, id, projectID)
+	s.enableConduitDelivery(mgr)
 
-	msgCtx := ctx
+	msgCtx := agent.WithDeliveryMessageID(ctx, req.MessageID)
 	if !req.Interrupt && req.MessageID != "" {
 		// Non-interrupt messages are buffered and delivered after this
 		// handler has already answered 200. Register a callback so a
@@ -5757,7 +5758,7 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 			failure.ProjectID = req.ProjectID
 		}
 		connName := r.Header.Get("X-Scion-Hub-Connection")
-		msgCtx = agent.WithDeliveryFailureHandler(ctx, func(deliveryErr error) {
+		msgCtx = agent.WithDeliveryFailureHandler(msgCtx, func(deliveryErr error) {
 			f := failure
 			f.Reason = "broker delivery failed: " + deliveryErr.Error()
 			go s.reportMessageFailure(connName, f)

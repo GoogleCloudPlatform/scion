@@ -25,6 +25,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
@@ -63,6 +64,14 @@ type RuntimeBrokerService interface {
 	// into its delivery buffer but failed to deliver, so the hub can mark
 	// them failed instead of leaving them "dispatched".
 	ReportMessageFailures(ctx context.Context, brokerID string, req *MessageFailuresReport) error
+
+	// DeliverMessage asks the hub to run one deliver-message flush on the
+	// agent over its conduit session (design v2.22 §2.1). It returns the
+	// hub's status and decoded answer (zero when the body is not a
+	// deliver-message answer, as with a 404 for the experiment off). The
+	// request is sent once, never retried by the transport. err is set only
+	// for a transport failure, with status 0.
+	DeliverMessage(ctx context.Context, brokerID, agentID string, req *agentcontrol.DeliverRequest) (int, agentcontrol.DeliverResponse, error)
 
 	// ReportAgentLaunch sends one broker->hub launch report (design
 	// t1-async-create-v11.md §3.2, §7 P1b-1): a claim, checkpoint, progress
@@ -659,6 +668,28 @@ func (s *runtimeBrokerService) ReportMessageFailures(ctx context.Context, broker
 		return err
 	}
 	return apiclient.CheckResponse(resp)
+}
+
+// DeliverMessage posts one deliver-message flush to the hub. See the
+// RuntimeBrokerService doc comment.
+func (s *runtimeBrokerService) DeliverMessage(ctx context.Context, brokerID, agentID string, req *agentcontrol.DeliverRequest) (int, agentcontrol.DeliverResponse, error) {
+	path := "/api/v1/runtime-brokers/" + url.PathEscape(brokerID) + "/agents/" + url.PathEscape(agentID) + "/deliver"
+	// The hub may hold the call for its whole 110 s budget (a readiness
+	// wait of up to 90 s, then the paste), longer than the client's
+	// default timeout: this request gets the broker's 115 s instead. The
+	// caller's ctx still applies when it is shorter (review R2).
+	ctx = apiclient.WithRequestTimeout(ctx, agentcontrol.BrokerDeliverTimeout)
+	resp, err := s.c.postNoRetry(ctx, path, req, nil)
+	if err != nil {
+		return 0, agentcontrol.DeliverResponse{}, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if err != nil {
+		return 0, agentcontrol.DeliverResponse{}, fmt.Errorf("read deliver answer: %w", err)
+	}
+	out, _ := agentcontrol.DecodeDeliverResponse(body)
+	return resp.StatusCode, out, nil
 }
 
 // ReportAgentLaunch posts one launch report. See the RuntimeBrokerService

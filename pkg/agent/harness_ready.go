@@ -239,7 +239,21 @@ func parseReadinessProbe(out string, settleFallback, settle time.Duration) readi
 // It returns at once when ctx is cancelled (MessageBuffer.Close), so shutdown
 // never waits. Any error resolving the target returns at once too: delivery
 // then reports it as before.
+//
+// A target that delivers over conduit is not probed here (gap G7 of the
+// v2.22 freeze): sciontool waits for readiness itself, and an exec
+// fallback waits then (waitHarnessReadyNow).
 func (m *AgentManager) waitHarnessReady(ctx context.Context, agentID, projectID string) {
+	m.waitHarnessReadyFor(ctx, agentID, projectID, true)
+}
+
+// waitHarnessReadyNow is waitHarnessReady for a target that delivers over
+// conduit too: the exec fallback of a conduit delivery.
+func (m *AgentManager) waitHarnessReadyNow(ctx context.Context, agentID, projectID string) {
+	m.waitHarnessReadyFor(ctx, agentID, projectID, false)
+}
+
+func (m *AgentManager) waitHarnessReadyFor(ctx context.Context, agentID, projectID string, skipConduit bool) {
 	timings := m.readyTimings.withDefaults()
 	start := time.Now()
 	deadline := start.Add(timings.Deadline)
@@ -253,6 +267,9 @@ func (m *AgentManager) waitHarnessReady(ctx context.Context, agentID, projectID 
 	// refuses the name (deliverImmediate).
 	if err := m.refuseAmbiguousOwnedTarget(agentID, projectID, matches); err != nil {
 		slog.Debug("harness readiness not waited for: ambiguous target", "agent", agentID, "error", err)
+		return
+	}
+	if skipConduit && m.usesConduitTransport(target) {
 		return
 	}
 

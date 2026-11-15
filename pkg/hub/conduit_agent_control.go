@@ -87,24 +87,51 @@ func (s *Server) RequestAgentTokenRotation(ctx context.Context, agentID string) 
 }
 
 // callAgentControl calls POST /v1/control/<route> on the agent's conduit
-// session and maps the answer: want is nil, anything else an
-// AgentControlStatusError. The route is called only if the resolved
-// session advertises it. The router is asked for no capability: the
-// registry would filter a session that lacks it, which would report a
-// connected agent as having no session.
+// session with no body and maps the answer: want is nil, anything else an
+// AgentControlStatusError. See callAgentControlJSON.
 func (s *Server) callAgentControl(ctx context.Context, agentID, route string, want int) error {
-	if !s.conduitRoutable() {
-		return router.ErrNoSession
-	}
-	rtr := s.conduitRouter()
-	if rtr == nil {
-		return router.ErrNoSession
-	}
-	agent, err := s.store.GetAgent(ctx, agentID)
+	status, _, err := s.callAgentControlJSON(ctx, agentID, route, nil, agentControlCallTimeout)
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(ctx, agentControlCallTimeout)
+	if status != want {
+		return &AgentControlStatusError{AgentID: agentID, Route: route, Status: status}
+	}
+	return nil
+}
+
+// callAgentControlJSON calls POST /v1/control/<route> on the agent's
+// conduit session (local, or on another hub node through its relay) and
+// returns the agent's status and response body as they are; the caller
+// maps them. body, when not nil, is sent as application/json. timeout caps
+// the call as a whole (resolution, re-resolutions and the RPC); the
+// caller's ctx may be shorter, and its cancellation reaches the agent as
+// RpcCancel.
+//
+// The route is called only if the resolved session advertises it in
+// Hello.capabilities.rpc. The router is asked for no capability: the
+// registry would filter a session that lacks it, which would report a
+// connected agent as having no session.
+//
+// Errors (status 0): router.ErrNoSession (possibly wrapped) when there is
+// no eligible session, or hub.conduit is off; ErrAgentControlNotAdvertised
+// (wrapped) when the session does not list the route, and no RPC was sent;
+// the store error when the agent cannot be read; otherwise the router's or
+// session's error (a timeout or a drop after send is ambiguous: the agent
+// may have acted).
+func (s *Server) callAgentControlJSON(ctx context.Context, agentID, route string, body []byte, timeout time.Duration) (int, []byte, error) {
+	if !s.conduitRoutable() {
+		return 0, nil, router.ErrNoSession
+	}
+	rtr := s.conduitRouter()
+	if rtr == nil {
+		return 0, nil, router.ErrNoSession
+	}
+	agent, err := s.store.GetAgent(ctx, agentID)
+	if err != nil {
+		return 0, nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	req := router.Request{
 		Op:    router.OpStatefulRPC,
@@ -113,20 +140,26 @@ func (s *Server) callAgentControl(ctx context.Context, agentID, route string, wa
 		Want:  registry.Want{ProjectID: agent.ProjectID},
 		Agent: agentIncarnationFacts(agent),
 	}
-	return rtr.Do(ctx, req, func(ctx context.Context, res router.Resolved) error {
+	rpc := &conduitv1.RpcRequest{Method: http.MethodPost, Path: agentControlPrefix + route}
+	if body != nil {
+		rpc.Body = body
+		rpc.Headers = map[string]string{"Content-Type": "application/json"}
+	}
+	var status int
+	var respBody []byte
+	err = rtr.Do(ctx, req, func(ctx context.Context, res router.Resolved) error {
 		if !slices.Contains(res.Session.Info().Capabilities.GetRpc(), route) {
 			return fmt.Errorf("%w: agent %s, route %s", ErrAgentControlNotAdvertised, agent.ID, route)
 		}
-		resp, err := res.Session.Call(ctx, &conduitv1.RpcRequest{
-			Method: http.MethodPost,
-			Path:   agentControlPrefix + route,
-		})
+		resp, err := res.Session.Call(ctx, rpc)
 		if err != nil {
 			return err
 		}
-		if int(resp.GetStatus()) != want {
-			return &AgentControlStatusError{AgentID: agent.ID, Route: route, Status: int(resp.GetStatus())}
-		}
+		status, respBody = int(resp.GetStatus()), resp.GetBody()
 		return nil
 	})
+	if err != nil {
+		return 0, nil, err
+	}
+	return status, respBody, nil
 }

@@ -20,8 +20,14 @@
 // reach.
 //
 // Every route answers POST only (other methods get 405), unknown paths
-// get 404, and every route is idempotent or coalescing. No request or
-// response body carries a credential.
+// get 404, and no request or response body carries a credential (Conduit
+// design §3.7). Every route is idempotent, coalescing, or idempotent by key:
+// a route that acts (deliver-message) takes an idempotency key in its JSON
+// body, and a replay of a finished key answers the stored outcome with
+// "replayed": true and never acts twice (§3.7 as amended by v2.22; see
+// .design/conduit/v2.22-deliver-message.md). A body-carrying route takes
+// application/json only and refuses unknown fields with 400; its wire
+// contract lives in pkg/agentcontrol.
 package control
 
 import (
@@ -45,6 +51,9 @@ type Options struct {
 	// block and must not refresh the token itself; the loop coalesces
 	// kicks and keeps refreshes single-flight. Required.
 	KickTokenRefresh func()
+	// Deliver, when set, registers deliver-message (RouteDeliverMessage)
+	// and so advertises it. Set it only when DeliverEnabled holds.
+	Deliver *DeliverOptions
 }
 
 // Handler serves the /v1/control/* routes.
@@ -54,7 +63,7 @@ type Handler struct {
 }
 
 // New returns a Handler serving the routes opts supports. It panics if
-// KickTokenRefresh is nil.
+// KickTokenRefresh is nil, or Deliver is set without a Runner.
 func New(opts Options) *Handler {
 	if opts.KickTokenRefresh == nil {
 		panic("control: KickTokenRefresh is required")
@@ -65,6 +74,9 @@ func New(opts Options) *Handler {
 		kick()
 		w.WriteHeader(http.StatusAccepted)
 	})
+	if opts.Deliver != nil {
+		h.add(RouteDeliverMessage, newDeliverRoute(*opts.Deliver).serve)
+	}
 	return h
 }
 
