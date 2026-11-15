@@ -93990,6 +93990,7 @@ type ScheduledExecRunMutation struct {
 	timeout_seconds           *int
 	addtimeout_seconds        *int
 	started_at                *time.Time
+	not_after                 *time.Time
 	lease_until               *time.Time
 	finished_at               *time.Time
 	outcome                   *scheduledexecrun.Outcome
@@ -94727,6 +94728,42 @@ func (m *ScheduledExecRunMutation) ResetStartedAt() {
 	m.started_at = nil
 }
 
+// SetNotAfter sets the "not_after" field.
+func (m *ScheduledExecRunMutation) SetNotAfter(t time.Time) {
+	m.not_after = &t
+}
+
+// NotAfter returns the value of the "not_after" field in the mutation.
+func (m *ScheduledExecRunMutation) NotAfter() (r time.Time, exists bool) {
+	v := m.not_after
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldNotAfter returns the old "not_after" field's value of the ScheduledExecRun entity.
+// If the ScheduledExecRun object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ScheduledExecRunMutation) OldNotAfter(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldNotAfter is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldNotAfter requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldNotAfter: %w", err)
+	}
+	return oldValue.NotAfter, nil
+}
+
+// ResetNotAfter resets all changes to the "not_after" field.
+func (m *ScheduledExecRunMutation) ResetNotAfter() {
+	m.not_after = nil
+}
+
 // SetLeaseUntil sets the "lease_until" field.
 func (m *ScheduledExecRunMutation) SetLeaseUntil(t time.Time) {
 	m.lease_until = &t
@@ -95227,7 +95264,7 @@ func (m *ScheduledExecRunMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *ScheduledExecRunMutation) Fields() []string {
-	fields := make([]string, 0, 24)
+	fields := make([]string, 0, 25)
 	if m.event != nil {
 		fields = append(fields, scheduledexecrun.FieldEventID)
 	}
@@ -95272,6 +95309,9 @@ func (m *ScheduledExecRunMutation) Fields() []string {
 	}
 	if m.started_at != nil {
 		fields = append(fields, scheduledexecrun.FieldStartedAt)
+	}
+	if m.not_after != nil {
+		fields = append(fields, scheduledexecrun.FieldNotAfter)
 	}
 	if m.lease_until != nil {
 		fields = append(fields, scheduledexecrun.FieldLeaseUntil)
@@ -95338,6 +95378,8 @@ func (m *ScheduledExecRunMutation) Field(name string) (ent.Value, bool) {
 		return m.TimeoutSeconds()
 	case scheduledexecrun.FieldStartedAt:
 		return m.StartedAt()
+	case scheduledexecrun.FieldNotAfter:
+		return m.NotAfter()
 	case scheduledexecrun.FieldLeaseUntil:
 		return m.LeaseUntil()
 	case scheduledexecrun.FieldFinishedAt:
@@ -95395,6 +95437,8 @@ func (m *ScheduledExecRunMutation) OldField(ctx context.Context, name string) (e
 		return m.OldTimeoutSeconds(ctx)
 	case scheduledexecrun.FieldStartedAt:
 		return m.OldStartedAt(ctx)
+	case scheduledexecrun.FieldNotAfter:
+		return m.OldNotAfter(ctx)
 	case scheduledexecrun.FieldLeaseUntil:
 		return m.OldLeaseUntil(ctx)
 	case scheduledexecrun.FieldFinishedAt:
@@ -95526,6 +95570,13 @@ func (m *ScheduledExecRunMutation) SetField(name string, value ent.Value) error 
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetStartedAt(v)
+		return nil
+	case scheduledexecrun.FieldNotAfter:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetNotAfter(v)
 		return nil
 	case scheduledexecrun.FieldLeaseUntil:
 		v, ok := value.(time.Time)
@@ -95791,6 +95842,9 @@ func (m *ScheduledExecRunMutation) ResetField(name string) error {
 		return nil
 	case scheduledexecrun.FieldStartedAt:
 		m.ResetStartedAt()
+		return nil
+	case scheduledexecrun.FieldNotAfter:
+		m.ResetNotAfter()
 		return nil
 	case scheduledexecrun.FieldLeaseUntil:
 		m.ResetLeaseUntil()

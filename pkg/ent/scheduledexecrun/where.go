@@ -131,6 +131,11 @@ func StartedAt(v time.Time) predicate.ScheduledExecRun {
 	return predicate.ScheduledExecRun(sql.FieldEQ(FieldStartedAt, v))
 }
 
+// NotAfter applies equality check predicate on the "not_after" field. It's identical to NotAfterEQ.
+func NotAfter(v time.Time) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldEQ(FieldNotAfter, v))
+}
+
 // LeaseUntil applies equality check predicate on the "lease_until" field. It's identical to LeaseUntilEQ.
 func LeaseUntil(v time.Time) predicate.ScheduledExecRun {
 	return predicate.ScheduledExecRun(sql.FieldEQ(FieldLeaseUntil, v))
@@ -934,6 +939,46 @@ func StartedAtLT(v time.Time) predicate.ScheduledExecRun {
 // StartedAtLTE applies the LTE predicate on the "started_at" field.
 func StartedAtLTE(v time.Time) predicate.ScheduledExecRun {
 	return predicate.ScheduledExecRun(sql.FieldLTE(FieldStartedAt, v))
+}
+
+// NotAfterEQ applies the EQ predicate on the "not_after" field.
+func NotAfterEQ(v time.Time) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldEQ(FieldNotAfter, v))
+}
+
+// NotAfterNEQ applies the NEQ predicate on the "not_after" field.
+func NotAfterNEQ(v time.Time) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldNEQ(FieldNotAfter, v))
+}
+
+// NotAfterIn applies the In predicate on the "not_after" field.
+func NotAfterIn(vs ...time.Time) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldIn(FieldNotAfter, vs...))
+}
+
+// NotAfterNotIn applies the NotIn predicate on the "not_after" field.
+func NotAfterNotIn(vs ...time.Time) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldNotIn(FieldNotAfter, vs...))
+}
+
+// NotAfterGT applies the GT predicate on the "not_after" field.
+func NotAfterGT(v time.Time) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldGT(FieldNotAfter, v))
+}
+
+// NotAfterGTE applies the GTE predicate on the "not_after" field.
+func NotAfterGTE(v time.Time) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldGTE(FieldNotAfter, v))
+}
+
+// NotAfterLT applies the LT predicate on the "not_after" field.
+func NotAfterLT(v time.Time) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldLT(FieldNotAfter, v))
+}
+
+// NotAfterLTE applies the LTE predicate on the "not_after" field.
+func NotAfterLTE(v time.Time) predicate.ScheduledExecRun {
+	return predicate.ScheduledExecRun(sql.FieldLTE(FieldNotAfter, v))
 }
 
 // LeaseUntilEQ applies the EQ predicate on the "lease_until" field.

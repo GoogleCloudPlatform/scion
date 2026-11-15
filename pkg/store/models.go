@@ -3889,7 +3889,10 @@ type ScheduledExecRun struct {
 	Argc           int
 	TimeoutSeconds int
 
-	StartedAt  time.Time
+	StartedAt time.Time
+	// NotAfter is the start-admission deadline sent with exec-start,
+	// frozen at admission (zero: StartedAt).
+	NotAfter   time.Time
 	LeaseUntil time.Time
 	FinishedAt *time.Time
 

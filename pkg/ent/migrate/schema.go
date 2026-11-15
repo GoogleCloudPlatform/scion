@@ -3171,6 +3171,7 @@ var (
 		{Name: "argc", Type: field.TypeInt},
 		{Name: "timeout_seconds", Type: field.TypeInt},
 		{Name: "started_at", Type: field.TypeTime},
+		{Name: "not_after", Type: field.TypeTime},
 		{Name: "lease_until", Type: field.TypeTime},
 		{Name: "finished_at", Type: field.TypeTime, Nullable: true},
 		{Name: "outcome", Type: field.TypeEnum, Enums: []string{"starting", "running", "ok", "nonzero", "timeout", "skipped", "error", "abandoned"}, Default: "starting"},
@@ -3190,7 +3191,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "scheduled_exec_runs_scheduled_events_exec_run",
-				Columns:    []*schema.Column{ScheduledExecRunsColumns[24]},
+				Columns:    []*schema.Column{ScheduledExecRunsColumns[25]},
 				RefColumns: []*schema.Column{ScheduledEventsColumns[0]},
 				OnDelete:   schema.Cascade,
 			},
@@ -3199,12 +3200,12 @@ var (
 			{
 				Name:    "scheduledexecrun_schedule_id_finished_at",
 				Unique:  false,
-				Columns: []*schema.Column{ScheduledExecRunsColumns[1], ScheduledExecRunsColumns[16]},
+				Columns: []*schema.Column{ScheduledExecRunsColumns[1], ScheduledExecRunsColumns[17]},
 			},
 			{
 				Name:    "scheduledexecrun_target_agent_id_finished_at",
 				Unique:  false,
-				Columns: []*schema.Column{ScheduledExecRunsColumns[3], ScheduledExecRunsColumns[16]},
+				Columns: []*schema.Column{ScheduledExecRunsColumns[3], ScheduledExecRunsColumns[17]},
 			},
 			{
 				Name:    "scheduledexecrun_project_id",
@@ -3214,12 +3215,12 @@ var (
 			{
 				Name:    "scheduledexecrun_finished_at_lease_until",
 				Unique:  false,
-				Columns: []*schema.Column{ScheduledExecRunsColumns[16], ScheduledExecRunsColumns[15]},
+				Columns: []*schema.Column{ScheduledExecRunsColumns[17], ScheduledExecRunsColumns[16]},
 			},
 			{
 				Name:    "scheduledexecrun_finished_at_last_polled_at",
 				Unique:  false,
-				Columns: []*schema.Column{ScheduledExecRunsColumns[16], ScheduledExecRunsColumns[23]},
+				Columns: []*schema.Column{ScheduledExecRunsColumns[17], ScheduledExecRunsColumns[24]},
 			},
 		},
 	}

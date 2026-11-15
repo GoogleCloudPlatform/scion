@@ -52,6 +52,7 @@ func entScheduledExecRunToStore(e *ent.ScheduledExecRun) store.ScheduledExecRun 
 		Argc:                    e.Argc,
 		TimeoutSeconds:          e.TimeoutSeconds,
 		StartedAt:               e.StartedAt,
+		NotAfter:                e.NotAfter,
 		LeaseUntil:              e.LeaseUntil,
 		FinishedAt:              e.FinishedAt,
 		Outcome:                 string(e.Outcome),
@@ -101,6 +102,9 @@ func (s *ScheduleStore) CreateScheduledExecRun(ctx context.Context, run *store.S
 	if run.StartedAt.IsZero() {
 		run.StartedAt = time.Now()
 	}
+	if run.NotAfter.IsZero() {
+		run.NotAfter = run.StartedAt
+	}
 	create := s.client.ScheduledExecRun.Create().
 		SetEventID(eid).
 		SetLastPolledAt(run.StartedAt.UTC()).
@@ -117,6 +121,7 @@ func (s *ScheduleStore) CreateScheduledExecRun(ctx context.Context, run *store.S
 		SetArgc(run.Argc).
 		SetTimeoutSeconds(run.TimeoutSeconds).
 		SetStartedAt(run.StartedAt.UTC()).
+		SetNotAfter(run.NotAfter.UTC()).
 		SetLeaseUntil(run.LeaseUntil.UTC()).
 		SetOutcome(scheduledexecrun.Outcome(run.Outcome)).
 		SetRuntime(run.Runtime).
@@ -273,11 +278,19 @@ func (s *ScheduleStore) ListExpiredScheduledExecRuns(ctx context.Context, now ti
 	return entScheduledExecRunsToStore(rows), nil
 }
 
+// scheduledExecClaimWindow bounds the candidate rows one claim reads.
+const scheduledExecClaimWindow = 5000
+
 // ClaimScheduledExecRunsForPoll returns up to limit unfinished runs whose
-// lease has not ended, least recently polled first, skipping excludeIDs
-// (event IDs), and sets their last_polled_at to now in the same
-// transaction (on Postgres the rows are selected FOR UPDATE SKIP LOCKED).
+// lease has not ended, skipping excludeEventIDs, chosen round-robin across
+// target agents (ptone/scion#7883 P3-R2): agents are taken in the order of
+// their least recently polled run, one run (their least recently polled)
+// each, and a second run of an agent only after every eligible agent had
+// one. The chosen runs' last_polled_at is set to now in the same
+// transaction (rows locked FOR UPDATE SKIP LOCKED on Postgres), so the
+// rotation across agents and across runs persists between sweeps.
 func (s *ScheduleStore) ClaimScheduledExecRunsForPoll(ctx context.Context, now time.Time, limit int, excludeEventIDs []string) ([]store.ScheduledExecRun, error) {
+	limit = clampLimit(limit)
 	var exclude []uuid.UUID
 	for _, id := range excludeEventIDs {
 		if uid, err := uuid.Parse(id); err == nil {
@@ -291,7 +304,7 @@ func (s *ScheduleStore) ClaimScheduledExecRunsForPoll(ctx context.Context, now t
 		if len(exclude) > 0 {
 			q = q.Where(scheduledexecrun.EventIDNotIn(exclude...))
 		}
-		q = q.Order(scheduledexecrun.ByLastPolledAt(), scheduledexecrun.ByEventID()).Limit(clampLimit(limit))
+		q = q.Order(scheduledexecrun.ByLastPolledAt(), scheduledexecrun.ByEventID()).Limit(scheduledExecClaimWindow)
 		if isPostgres(c) {
 			q = q.ForUpdate(entsql.WithLockAction(entsql.SkipLocked))
 		}
@@ -299,11 +312,12 @@ func (s *ScheduleStore) ClaimScheduledExecRunsForPoll(ctx context.Context, now t
 		if err != nil {
 			return mapError(err)
 		}
-		if len(rows) == 0 {
+		chosen := roundRobinRunsByTarget(rows, limit)
+		if len(chosen) == 0 {
 			return nil
 		}
-		ids := make([]uuid.UUID, 0, len(rows))
-		for _, r := range rows {
+		ids := make([]uuid.UUID, 0, len(chosen))
+		for _, r := range chosen {
 			ids = append(ids, r.ID)
 		}
 		if _, err := c.ScheduledExecRun.Update().
@@ -312,13 +326,40 @@ func (s *ScheduleStore) ClaimScheduledExecRunsForPoll(ctx context.Context, now t
 			Save(ctx); err != nil {
 			return mapError(err)
 		}
-		out = entScheduledExecRunsToStore(rows)
+		out = entScheduledExecRunsToStore(chosen)
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+// roundRobinRunsByTarget picks up to limit of rows (ordered least recently
+// polled first) one per target agent per round, agents in the order of
+// their first row.
+func roundRobinRunsByTarget(rows []*ent.ScheduledExecRun, limit int) []*ent.ScheduledExecRun {
+	var targets []uuid.UUID
+	byTarget := make(map[uuid.UUID][]*ent.ScheduledExecRun)
+	for _, r := range rows {
+		if _, ok := byTarget[r.TargetAgentID]; !ok {
+			targets = append(targets, r.TargetAgentID)
+		}
+		byTarget[r.TargetAgentID] = append(byTarget[r.TargetAgentID], r)
+	}
+	out := make([]*ent.ScheduledExecRun, 0, min(limit, len(rows)))
+	for len(out) < limit && len(out) < len(rows) {
+		for _, t := range targets {
+			if len(out) == limit {
+				break
+			}
+			if q := byTarget[t]; len(q) > 0 {
+				out = append(out, q[0])
+				byTarget[t] = q[1:]
+			}
+		}
+	}
+	return out
 }
 
 func entScheduledExecRunsToStore(rows []*ent.ScheduledExecRun) []store.ScheduledExecRun {

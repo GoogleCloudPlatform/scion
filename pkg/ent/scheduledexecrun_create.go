@@ -187,6 +187,12 @@ func (_c *ScheduledExecRunCreate) SetNillableStartedAt(v *time.Time) *ScheduledE
 	return _c
 }
 
+// SetNotAfter sets the "not_after" field.
+func (_c *ScheduledExecRunCreate) SetNotAfter(v time.Time) *ScheduledExecRunCreate {
+	_c.mutation.SetNotAfter(v)
+	return _c
+}
+
 // SetLeaseUntil sets the "lease_until" field.
 func (_c *ScheduledExecRunCreate) SetLeaseUntil(v time.Time) *ScheduledExecRunCreate {
 	_c.mutation.SetLeaseUntil(v)
@@ -450,6 +456,9 @@ func (_c *ScheduledExecRunCreate) check() error {
 	if _, ok := _c.mutation.StartedAt(); !ok {
 		return &ValidationError{Name: "started_at", err: errors.New(`ent: missing required field "ScheduledExecRun.started_at"`)}
 	}
+	if _, ok := _c.mutation.NotAfter(); !ok {
+		return &ValidationError{Name: "not_after", err: errors.New(`ent: missing required field "ScheduledExecRun.not_after"`)}
+	}
 	if _, ok := _c.mutation.LeaseUntil(); !ok {
 		return &ValidationError{Name: "lease_until", err: errors.New(`ent: missing required field "ScheduledExecRun.lease_until"`)}
 	}
@@ -564,6 +573,10 @@ func (_c *ScheduledExecRunCreate) createSpec() (*ScheduledExecRun, *sqlgraph.Cre
 	if value, ok := _c.mutation.StartedAt(); ok {
 		_spec.SetField(scheduledexecrun.FieldStartedAt, field.TypeTime, value)
 		_node.StartedAt = value
+	}
+	if value, ok := _c.mutation.NotAfter(); ok {
+		_spec.SetField(scheduledexecrun.FieldNotAfter, field.TypeTime, value)
+		_node.NotAfter = value
 	}
 	if value, ok := _c.mutation.LeaseUntil(); ok {
 		_spec.SetField(scheduledexecrun.FieldLeaseUntil, field.TypeTime, value)
@@ -845,6 +858,9 @@ func (u *ScheduledExecRunUpsertOne) UpdateNewValues() *ScheduledExecRunUpsertOne
 		}
 		if _, exists := u.create.mutation.StartedAt(); exists {
 			s.SetIgnore(scheduledexecrun.FieldStartedAt)
+		}
+		if _, exists := u.create.mutation.NotAfter(); exists {
+			s.SetIgnore(scheduledexecrun.FieldNotAfter)
 		}
 		if _, exists := u.create.mutation.LeaseUntil(); exists {
 			s.SetIgnore(scheduledexecrun.FieldLeaseUntil)
@@ -1246,6 +1262,9 @@ func (u *ScheduledExecRunUpsertBulk) UpdateNewValues() *ScheduledExecRunUpsertBu
 			}
 			if _, exists := b.mutation.StartedAt(); exists {
 				s.SetIgnore(scheduledexecrun.FieldStartedAt)
+			}
+			if _, exists := b.mutation.NotAfter(); exists {
+				s.SetIgnore(scheduledexecrun.FieldNotAfter)
 			}
 			if _, exists := b.mutation.LeaseUntil(); exists {
 				s.SetIgnore(scheduledexecrun.FieldLeaseUntil)

@@ -49,6 +49,8 @@ type ScheduledExecRun struct {
 	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
 	// StartedAt holds the value of the "started_at" field.
 	StartedAt time.Time `json:"started_at,omitempty"`
+	// NotAfter holds the value of the "not_after" field.
+	NotAfter time.Time `json:"not_after,omitempty"`
 	// LeaseUntil holds the value of the "lease_until" field.
 	LeaseUntil time.Time `json:"lease_until,omitempty"`
 	// FinishedAt holds the value of the "finished_at" field.
@@ -104,7 +106,7 @@ func (*ScheduledExecRun) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullInt64)
 		case scheduledexecrun.FieldInitiatorPrincipalKind, scheduledexecrun.FieldInitiatorPrincipalID, scheduledexecrun.FieldInitiatorCredentialKind, scheduledexecrun.FieldInitiatorCredentialID, scheduledexecrun.FieldExecutorKind, scheduledexecrun.FieldExecutorID, scheduledexecrun.FieldCommandSha256, scheduledexecrun.FieldOutcome, scheduledexecrun.FieldRuntime, scheduledexecrun.FieldLaunchID:
 			values[i] = new(sql.NullString)
-		case scheduledexecrun.FieldStartedAt, scheduledexecrun.FieldLeaseUntil, scheduledexecrun.FieldFinishedAt, scheduledexecrun.FieldLastPolledAt:
+		case scheduledexecrun.FieldStartedAt, scheduledexecrun.FieldNotAfter, scheduledexecrun.FieldLeaseUntil, scheduledexecrun.FieldFinishedAt, scheduledexecrun.FieldLastPolledAt:
 			values[i] = new(sql.NullTime)
 		case scheduledexecrun.FieldID, scheduledexecrun.FieldEventID, scheduledexecrun.FieldProjectID, scheduledexecrun.FieldTargetAgentID:
 			values[i] = new(uuid.UUID)
@@ -219,6 +221,12 @@ func (_m *ScheduledExecRun) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field started_at", values[i])
 			} else if value.Valid {
 				_m.StartedAt = value.Time
+			}
+		case scheduledexecrun.FieldNotAfter:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field not_after", values[i])
+			} else if value.Valid {
+				_m.NotAfter = value.Time
 			}
 		case scheduledexecrun.FieldLeaseUntil:
 			if value, ok := values[i].(*sql.NullTime); !ok {
@@ -365,6 +373,9 @@ func (_m *ScheduledExecRun) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("started_at=")
 	builder.WriteString(_m.StartedAt.Format(time.ANSIC))
+	builder.WriteString(", ")
+	builder.WriteString("not_after=")
+	builder.WriteString(_m.NotAfter.Format(time.ANSIC))
 	builder.WriteString(", ")
 	builder.WriteString("lease_until=")
 	builder.WriteString(_m.LeaseUntil.Format(time.ANSIC))

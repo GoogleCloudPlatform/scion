@@ -67,10 +67,12 @@ func (e *AgentExecLaunchChangedError) Error() string {
 func (e *AgentExecLaunchChangedError) Unwrap() error { return ErrAgentExecLaunchChanged }
 
 // StartAgentExecRun sends exec-start for one admitted run to the agent's
-// launch launchID. It sets req.V and req.NotAfterUnixMS (send time plus
-// agentcontrol.ExecNotAfter, on the hub clock) and validates req before
-// sending; an invalid req is an *agentcontrol.ExecFieldError and nothing is
-// sent.
+// launch launchID. It sets req.V and, when the caller left it zero,
+// req.NotAfterUnixMS (send time plus agentcontrol.ExecNotAfter, on the hub
+// clock). The scheduler passes the deadline it froze at admission, which is
+// never refreshed for a delayed send (ptone/scion#7883 P3-R1). req is
+// validated before sending; an invalid req is an
+// *agentcontrol.ExecFieldError and nothing is sent.
 //
 // It is the hub gate of AC18: nothing is sent unless hub.exec_schedules and
 // hub.conduit are both on and conduit is served (ErrExecSchedulesDisabled).
@@ -93,7 +95,9 @@ func (s *Server) StartAgentExecRun(ctx context.Context, agentID, launchID string
 		return agentcontrol.ExecResult{}, ErrExecSchedulesDisabled
 	}
 	req.V = agentcontrol.ExecVersion
-	req.NotAfterUnixMS = time.Now().Add(agentcontrol.ExecNotAfter).UnixMilli()
+	if req.NotAfterUnixMS <= 0 {
+		req.NotAfterUnixMS = time.Now().Add(agentcontrol.ExecNotAfter).UnixMilli()
+	}
 	if err := req.Validate(); err != nil {
 		return agentcontrol.ExecResult{}, err
 	}

@@ -2879,11 +2879,11 @@ func init() {
 	// scheduledexecrun.DefaultStartedAt holds the default value on creation for the started_at field.
 	scheduledexecrun.DefaultStartedAt = scheduledexecrunDescStartedAt.Default.(func() time.Time)
 	// scheduledexecrunDescRuntime is the schema descriptor for runtime field.
-	scheduledexecrunDescRuntime := scheduledexecrunFields[22].Descriptor()
+	scheduledexecrunDescRuntime := scheduledexecrunFields[23].Descriptor()
 	// scheduledexecrun.DefaultRuntime holds the default value on creation for the runtime field.
 	scheduledexecrun.DefaultRuntime = scheduledexecrunDescRuntime.Default.(string)
 	// scheduledexecrunDescLaunchID is the schema descriptor for launch_id field.
-	scheduledexecrunDescLaunchID := scheduledexecrunFields[23].Descriptor()
+	scheduledexecrunDescLaunchID := scheduledexecrunFields[24].Descriptor()
 	// scheduledexecrun.DefaultLaunchID holds the default value on creation for the launch_id field.
 	scheduledexecrun.DefaultLaunchID = scheduledexecrunDescLaunchID.Default.(string)
 	// scheduledexecrunDescID is the schema descriptor for id field.

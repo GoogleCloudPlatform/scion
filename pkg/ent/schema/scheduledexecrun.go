@@ -96,6 +96,13 @@ func (ScheduledExecRun) Fields() []ent.Field {
 		field.Time("started_at").
 			Default(time.Now).
 			Immutable(),
+		// not_after is the start-admission deadline sent as
+		// not_after_unix_ms, frozen at admission: a delayed fire never
+		// refreshes it, so sciontool refuses any start received after
+		// not_after + tolerance, and recovery can treat a run never seen
+		// started as absent after that (ptone/scion#7883 P3-R1).
+		field.Time("not_after").
+			Immutable(),
 		// lease_until is started_at + timeout + 120s, fixed at admission.
 		field.Time("lease_until").
 			Immutable(),

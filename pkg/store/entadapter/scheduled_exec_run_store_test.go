@@ -480,3 +480,48 @@ func TestUnadmittedScheduledEvents(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, sc.ErrorCount, "the recurring event's schedule records the failed run")
 }
+
+// TestClaimScheduledExecRunsForPoll_FairAcrossTargets (P3-R2): a target with
+// many older runs does not take every slot; each target gets one run per
+// round, in the order of its least recently polled run.
+func TestClaimScheduledExecRunsForPoll_FairAcrossTargets(t *testing.T) {
+	s := newTestScheduleStore(t)
+	ctx := context.Background()
+	project := uuid.NewString()
+	slow, healthy := uuid.NewString(), uuid.NewString()
+	now := time.Now()
+	add := func(target string, started time.Time) string {
+		evt := newExecEvent(t, s, project, store.ScheduledEventFired, now)
+		run := newExecRun(evt)
+		run.TargetAgentID = target
+		run.StartedAt = started
+		run.LeaseUntil = now.Add(time.Hour)
+		require.NoError(t, s.CreateScheduledExecRun(ctx, run))
+		return evt.ID
+	}
+	var slowIDs []string
+	for i := 0; i < 4; i++ {
+		slowIDs = append(slowIDs, add(slow, now.Add(-time.Hour+time.Duration(i)*time.Second)))
+	}
+	healthyID := add(healthy, now.Add(-time.Minute))
+
+	claimed, err := s.ClaimScheduledExecRunsForPoll(ctx, now, 2, nil)
+	require.NoError(t, err)
+	require.Len(t, claimed, 2)
+	assert.ElementsMatch(t, []string{slowIDs[0], healthyID}, []string{claimed[0].EventID, claimed[1].EventID})
+
+	// Next round: every eligible target gets a turn again (the healthy
+	// target's only run included) and the slow target's runs rotate.
+	claimed, err = s.ClaimScheduledExecRunsForPoll(ctx, now.Add(time.Second), 2, nil)
+	require.NoError(t, err)
+	require.Len(t, claimed, 2)
+	assert.ElementsMatch(t, []string{slowIDs[1], healthyID}, []string{claimed[0].EventID, claimed[1].EventID})
+
+	// With only the slow target eligible, both slots go to its runs.
+	claimed, err = s.ClaimScheduledExecRunsForPoll(ctx, now.Add(2*time.Second), 2, []string{healthyID})
+	require.NoError(t, err)
+	require.Len(t, claimed, 2)
+	for _, r := range claimed {
+		assert.Equal(t, slow, r.TargetAgentID)
+	}
+}

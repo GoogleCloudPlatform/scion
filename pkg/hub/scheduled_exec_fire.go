@@ -93,14 +93,16 @@ func execSeamInt(v *int) int {
 	return *v
 }
 
-// scheduledExecStartUnknownAfter is how long after a run's insert a 404
-// from exec-status is definitive for a run never seen running: the start
-// can no longer be admitted. The hub sets not_after_unix_ms to its send
-// time plus ExecNotAfter, the send follows the insert within the call
-// timeout, and sciontool spawns only while now <= not_after + tolerance;
-// the design's extra 10s follows. A variable only as a test seam.
-var scheduledExecStartUnknownAfter = agentcontrol.HubExecCallTimeout + agentcontrol.ExecNotAfter +
-	agentcontrol.ExecClockTolerance + 10*time.Second
+// scheduledExecNotAfter is how far after admission a run's start-admission
+// deadline (not_after) is frozen. A variable only as a test seam.
+var scheduledExecNotAfter = agentcontrol.ExecNotAfter
+
+// scheduledExecStartAbsentGrace is how long after a run's frozen not_after
+// a 404 from exec-status is definitive for a run never seen running:
+// sciontool spawns only while now <= not_after + tolerance (at receipt and
+// again before spawn), so no start can begin later; the design's extra 10s
+// follows. A variable only as a test seam.
+var scheduledExecStartAbsentGrace = agentcontrol.ExecClockTolerance + 10*time.Second
 
 // scheduledExecRunTracker is the replica's in-memory state of exec runs.
 // The zero value is ready to use.
@@ -275,6 +277,7 @@ func (s *Server) fireScheduledExec(ctx context.Context, evt store.ScheduledEvent
 		Argc:                    len(p.Command),
 		TimeoutSeconds:          timeout,
 		StartedAt:               now,
+		NotAfter:                now.Add(execSeamDuration(&scheduledExecNotAfter)),
 		LeaseUntil:              now.Add(time.Duration(timeout)*time.Second + execSeamDuration(&scheduledExecLeaseGrace)),
 		Outcome:                 store.ScheduledExecOutcomeStarting,
 		Runtime:                 target.Runtime,
@@ -288,20 +291,6 @@ func (s *Server) fireScheduledExec(ctx context.Context, evt store.ScheduledEvent
 	}
 	s.auditScheduledExec(ctx, newScheduledExecFireAudit(ctx, ScheduledExecAuditAdmit, evt, p))
 	scheduledExecFireStage(scheduledExecStageAdmitted, evt.ID)
-
-	// One exec-start attempt. It runs past the fire handler's deadline on
-	// the call's own timeout, and is cancelled only when the shutdown gives
-	// up waiting (workCtx); an ambiguous result is only ever polled.
-	startCtx, cancelStart := context.WithCancel(context.WithoutCancel(ctx))
-	stopStart := context.AfterFunc(workCtx, cancelStart)
-	res, startErr := s.StartAgentExecRun(startCtx, target.ID, target.RunID, agentcontrol.ExecStartRequest{
-		RunID:    evt.ID,
-		Argv:     p.Command,
-		TimeoutS: timeout,
-	})
-	stopStart()
-	cancelStart()
-	scheduledExecFireStage(scheduledExecStageStarted, evt.ID)
 
 	// From here on the run row exists, so another replica's sweeper may
 	// record the outcome at any moment. Every outcome is therefore recorded
@@ -330,6 +319,44 @@ func (s *Server) fireScheduledExec(ctx context.Context, evt store.ScheduledEvent
 		// The claim already recorded the event as fired (or expired).
 		return outcomeRecorded(nil)
 	}
+
+	// Dispatch guard (P3-R1): a fire delayed after the insert must not
+	// start a run that recovery has already finished, or whose frozen
+	// start deadline has passed. A pause between this check and the send
+	// cannot start it late either: exec-start carries the frozen
+	// not_after, and sciontool refuses a start received after not_after +
+	// tolerance, which is also when recovery treats it as absent.
+	checkCtx, cancelCheck := context.WithTimeout(context.WithoutCancel(ctx), scheduledEventRecordTimeout)
+	current, checkErr := s.store.GetScheduledExecRun(checkCtx, evt.ID)
+	cancelCheck()
+	switch {
+	case checkErr != nil:
+		log.Warn("Scheduler: exec run not re-read before dispatch; nothing sent", "error", checkErr)
+		return failRun(execReasonDispatchFailed)
+	case current.FinishedAt != nil:
+		log.Warn("Scheduler: exec run already finished before dispatch; nothing sent", "outcome", current.Outcome)
+		return outcomeRecorded(nil)
+	case time.Now().After(run.NotAfter):
+		log.Warn("Scheduler: exec run start deadline passed before dispatch; nothing sent")
+		return failRun(execReasonStartExpired)
+	}
+	scheduledExecFireStage(scheduledExecStageChecked, evt.ID)
+
+	// One exec-start attempt, with the frozen deadline. It runs past the
+	// fire handler's deadline on the call's own timeout, and is cancelled
+	// only when the shutdown gives up waiting (workCtx); an ambiguous
+	// result is only ever polled.
+	startCtx, cancelStart := context.WithCancel(context.WithoutCancel(ctx))
+	stopStart := context.AfterFunc(workCtx, cancelStart)
+	res, startErr := s.StartAgentExecRun(startCtx, target.ID, target.RunID, agentcontrol.ExecStartRequest{
+		RunID:          evt.ID,
+		Argv:           p.Command,
+		TimeoutS:       timeout,
+		NotAfterUnixMS: run.NotAfter.UnixMilli(),
+	})
+	stopStart()
+	cancelStart()
+	scheduledExecFireStage(scheduledExecStageStarted, evt.ID)
 
 	if startErr != nil {
 		switch {
@@ -389,6 +416,9 @@ const (
 	// scheduledExecStageAdmitted: the run row is written; exec-start is
 	// not sent yet.
 	scheduledExecStageAdmitted = "admitted"
+	// scheduledExecStageChecked: the dispatch guard passed; exec-start is
+	// about to be sent.
+	scheduledExecStageChecked = "checked"
 	// scheduledExecStageStarted: exec-start has answered (or failed);
 	// nothing is recorded yet.
 	scheduledExecStageStarted = "started"
@@ -569,8 +599,9 @@ func (s *Server) pollScheduledExecRunOnce(ctx context.Context, run *store.Schedu
 			// 1), so the container, restarted.
 			return failed(store.ScheduledExecOutcomeAbandoned, execReasonAgentRestarted)
 		}
-		if time.Since(run.StartedAt) > execSeamDuration(&scheduledExecStartUnknownAfter) {
-			// The admission window has closed: the start never arrived.
+		if time.Now().After(run.NotAfter.Add(execSeamDuration(&scheduledExecStartAbsentGrace))) {
+			// The frozen start deadline plus tolerance has passed: the
+			// start never arrived and can no longer be admitted.
 			return failed(store.ScheduledExecOutcomeError, execReasonDispatchFailed)
 		}
 		return false
@@ -620,6 +651,12 @@ func (s *Server) sweepScheduledExecRuns(ctx context.Context) {
 		}
 	}
 
+	// Live runs: claimed fairly across target agents, polled with at most
+	// inFlight calls at once. A slow poll holds only its own slot: the next
+	// claimed run starts as soon as any slot frees.
+	sem := make(chan struct{}, inFlight)
+	var wg sync.WaitGroup
+	defer wg.Wait()
 	for polled := 0; polled < budget && ctx.Err() == nil; {
 		runs, err := s.store.ClaimScheduledExecRunsForPoll(ctx, time.Now(), inFlight, s.execRuns.ownedIDs())
 		if err != nil {
@@ -629,16 +666,20 @@ func (s *Server) sweepScheduledExecRuns(ctx context.Context) {
 		if len(runs) == 0 {
 			return
 		}
-		var wg sync.WaitGroup
-		for _, r := range roundRobinByAgent(runs) {
+		for _, r := range runs {
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
 			wg.Add(1)
 			go func(r store.ScheduledExecRun) {
 				defer wg.Done()
+				defer func() { <-sem }()
 				var unavailable bool
 				s.pollScheduledExecRunOnce(ctx, &r, &unavailable)
 			}(r)
 		}
-		wg.Wait()
 		polled += len(runs)
 		if len(runs) < inFlight {
 			return

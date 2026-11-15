@@ -46,6 +46,8 @@ const (
 	FieldTimeoutSeconds = "timeout_seconds"
 	// FieldStartedAt holds the string denoting the started_at field in the database.
 	FieldStartedAt = "started_at"
+	// FieldNotAfter holds the string denoting the not_after field in the database.
+	FieldNotAfter = "not_after"
 	// FieldLeaseUntil holds the string denoting the lease_until field in the database.
 	FieldLeaseUntil = "lease_until"
 	// FieldFinishedAt holds the string denoting the finished_at field in the database.
@@ -95,6 +97,7 @@ var Columns = []string{
 	FieldArgc,
 	FieldTimeoutSeconds,
 	FieldStartedAt,
+	FieldNotAfter,
 	FieldLeaseUntil,
 	FieldFinishedAt,
 	FieldOutcome,
@@ -256,6 +259,11 @@ func ByTimeoutSeconds(opts ...sql.OrderTermOption) OrderOption {
 // ByStartedAt orders the results by the started_at field.
 func ByStartedAt(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldStartedAt, opts...).ToFunc()
+}
+
+// ByNotAfter orders the results by the not_after field.
+func ByNotAfter(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldNotAfter, opts...).ToFunc()
 }
 
 // ByLeaseUntil orders the results by the lease_until field.
