@@ -44,6 +44,10 @@ func warnRemovedMode(source string) {
 // --apply, --status, --rollback). It is human mode only: it acts on this
 // host's Runtime Broker identity, settings and Hub rows, which an agent in
 // a container must not change. cmd/platform_gate.go keeps it off Windows.
+//
+// Deliberately absent: "admin" and "admin.system-one.instance.*" (create,
+// list, delete, probe). Decision system-one-admin-cli v1 keeps Hub System One
+// provider instance and credential administration human-mode only.
 var agentAllowed = map[string]bool{
 	"create":                      true,
 	"delete":                      true,

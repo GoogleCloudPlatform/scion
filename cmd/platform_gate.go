@@ -233,6 +233,18 @@ var windowsAllowed = map[string]bool{
 	"hub.invite.revoke":             true,
 	"hub.invite.delete":             true,
 
+	// Hub System One provider instance administration: pure Hub API calls and
+	// read-only user-supplied input files (--key-file, --spec-file,
+	// --text-file), with no local file writes. admin.promote opens the local
+	// Hub database directly and deliberately stays gated off Windows.
+	"admin":                            true,
+	"admin.system-one":                 true,
+	"admin.system-one.instance":        true,
+	"admin.system-one.instance.create": true,
+	"admin.system-one.instance.list":   true,
+	"admin.system-one.instance.delete": true,
+	"admin.system-one.instance.probe":  true,
+
 	"version":    true,
 	"help":       true,
 	"completion": true,
