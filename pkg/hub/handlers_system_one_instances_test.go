@@ -242,7 +242,8 @@ func TestSystemOneInstances_CRUDAndProbe(t *testing.T) {
 		mu.Lock()
 		seenAuth = append(seenAuth, r.Header.Get("Authorization"))
 		for name := range r.Header {
-			if strings.HasPrefix(strings.ToLower(name), "x-typesafe-") {
+			lower := strings.ToLower(name)
+			if strings.HasPrefix(lower, "x-typesafe-") || strings.Contains(lower, "danger-zone") {
 				seenDangerHdrs = append(seenDangerHdrs, name)
 			}
 		}
@@ -266,7 +267,7 @@ func TestSystemOneInstances_CRUDAndProbe(t *testing.T) {
 			mu.Unlock()
 
 			w.Header().Set("Content-Type", "application/json")
-			w.Header().Set("X-Request-Id", "req-probe-42")
+			w.Header().Set("X-Typesafe-Request-Id", "req-probe-42")
 			resp := fmt.Sprintf(`{
 				"model": %q,
 				"answers": {
@@ -451,23 +452,25 @@ func TestSystemOneInstances_CRUDAndProbe(t *testing.T) {
 	)
 
 	inlineSpec := map[string]any{
-		"spec_version": 1,
+		"version": 1,
 		"questions": []map[string]any{
 			{
 				"id":           "safe",
 				"type":         "binary",
-				"instructions": "Assess whether {{input.text}} is safe.",
-				"true_if":      "Safe to proceed",
-				"false_if":     "Unsafe",
+				"instructions": "Assess whether probe.text is safe.",
+				"criteria": map[string]any{
+					"true":  "Safe to proceed",
+					"false": "Unsafe",
+				},
 			},
 			{
 				"id":           "severity",
 				"type":         "choice",
-				"instructions": "Classify severity of {{input.text}}.",
+				"instructions": "Classify severity of probe.text.",
 				"options": []map[string]any{
-					{"id": "low", "when": "Low risk"},
-					{"id": "medium", "when": "Moderate risk"},
-					{"id": "high", "when": "High risk"},
+					{"id": "low", "description": "Low risk"},
+					{"id": "medium", "description": "Moderate risk"},
+					{"id": "high", "description": "High risk"},
 				},
 			},
 		},
@@ -533,13 +536,15 @@ func TestSystemOneInstances_CRUDAndProbe(t *testing.T) {
 	assert.NotContains(t, logs, sentinelKeyB)
 	assert.NotContains(t, logs, sentinelInput)
 
-	// Capability rejection: uncertain_if on binary question -> 400 category="capability".
+	// Capability rejection: uncertain_if threshold rule -> 400 category="capability".
 	capRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath+"/typesafe-fast/probe", map[string]any{
 		"spec": map[string]any{
-			"spec_version": 1,
+			"version": 1,
 			"questions": []map[string]any{{
-				"id": "q1", "type": "binary", "instructions": "Check {{input.text}}",
-				"true_if": "Yes", "false_if": "No", "uncertain_if": "Unsure",
+				"id": "q1", "type": "binary", "instructions": "Check probe.text.",
+			}},
+			"uncertain_if": []map[string]any{{
+				"question": "q1", "metric": "p_top", "below": 0.8,
 			}},
 		},
 		"probe": map[string]any{"text": "hello"},
