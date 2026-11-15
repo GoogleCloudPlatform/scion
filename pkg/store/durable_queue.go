@@ -100,11 +100,15 @@ type DurableQueueFailure struct {
 }
 
 // DurableQueueTrim reports the rows removed by one TrimDurableQueue pass,
-// grouped by drop reason.
+// grouped by drop reason. Trimmed rows carry metadata only
+// (Seq, Kind, ProjectID, DedupKey, CreatedAt); Payload is nil.
 type DurableQueueTrim struct {
 	Age      []DurableQueueRow
 	Overflow []DurableQueueRow
 	Poison   []DurableQueueRow
+	// More is true when the per-pass candidate cap was reached and additional
+	// unleased rows remain eligible for trimming on the next pass.
+	More bool
 }
 
 // DurableQueueStats is a point-in-time sample of durable_queue_items for a
@@ -144,9 +148,11 @@ type DurableQueueStore interface {
 	// FailDurableItem records a failure or lease release on seq while leased
 	// by owner and clears the lease; returns held=false when the lease was lost.
 	FailDurableItem(ctx context.Context, seq int64, owner string, f DurableQueueFailure) (held bool, err error)
-	// TrimDurableQueue removes unleased rows of kind exceeding maxAge,
-	// maxPermanent, or maxRows (removing oldest items of the largest project
-	// first on overflow) and returns the dropped rows by reason.
+	// TrimDurableQueue removes up to a bounded batch of unleased rows of kind
+	// exceeding maxAge, maxPermanent, or maxRows (removing oldest items of the
+	// largest project first on overflow) and returns the dropped rows' metadata
+	// (without Payload) by reason. When More is true on the returned struct,
+	// additional candidates remain for the next maintenance pass.
 	TrimDurableQueue(ctx context.Context, kind string, now time.Time, maxAge time.Duration, maxRows, maxPermanent int) (DurableQueueTrim, error)
 	// DurableQueueStats samples pending count, oldest created_at, and active
 	// leased count for kind. When projectID is "", all projects are sampled.

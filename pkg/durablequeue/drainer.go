@@ -112,6 +112,9 @@ type DrainerConfig struct {
 	MaxPermanent int           // default 5
 	MaxAge       time.Duration // default 72 h
 
+	// OnDrop is invoked when maintenance trims items by age, overflow, or
+	// poison bounds. Reported Items carry metadata only (Seq, Kind, ProjectID,
+	// DedupKey, CreatedAt); Payload is nil.
 	OnDrop  func(ctx context.Context, dropped []Item, reason string)
 	Metrics Metrics
 	Logger  *slog.Logger
@@ -228,8 +231,10 @@ func (d *Drainer) Blocked() bool {
 }
 
 // Run polls every PollInterval and on Wake until ctx is cancelled, running
-// trim + gauge maintenance every MaintenanceInterval. On ctx cancellation it
-// executes one final pass bounded by ShutdownBudget before returning.
+// trim + gauge maintenance every MaintenanceInterval (or immediately on the
+// next pass when a bounded trim pass reports additional candidates remaining).
+// On ctx cancellation it executes one final pass bounded by ShutdownBudget
+// before returning.
 func (d *Drainer) Run(ctx context.Context) {
 	if d.unregister != nil {
 		defer d.unregister()
@@ -239,25 +244,42 @@ func (d *Drainer) Run(ctx context.Context) {
 
 	var nextMaintenance time.Time // maintain on the first pass
 	for {
+		if ctx.Err() != nil {
+			d.runShutdownDrain(ctx)
+			return
+		}
 		now := d.cfg.Now()
 		maintain := !now.Before(nextMaintenance)
-		if maintain {
-			nextMaintenance = now.Add(d.cfg.MaintenanceInterval)
-		}
-		if _, err := d.drainPass(ctx, maintain); err != nil && ctx.Err() == nil {
+		_, trimMore, err := d.drainPass(ctx, maintain)
+		if err != nil && ctx.Err() == nil {
 			d.cfg.Logger.Warn("durable queue drain pass failed", "kind", d.cfg.Kind, "error", err)
+		}
+		if maintain {
+			if trimMore && err == nil {
+				// Per-pass trim cap was reached; keep maintenance due and nudge
+				// Wake so trimming continues on the next pass without holding
+				// one giant transaction or starving claims/shutdown.
+				nextMaintenance = time.Time{}
+				d.Wake()
+			} else {
+				nextMaintenance = now.Add(d.cfg.MaintenanceInterval)
+			}
 		}
 		select {
 		case <-ctx.Done():
-			fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), d.cfg.ShutdownBudget)
-			if _, err := d.DrainOnce(fctx); err != nil {
-				d.cfg.Logger.Info("durable queue final drain incomplete; items remain queued", "kind", d.cfg.Kind, "error", err)
-			}
-			cancel()
+			d.runShutdownDrain(ctx)
 			return
 		case <-ticker.C:
 		case <-d.wake:
 		}
+	}
+}
+
+func (d *Drainer) runShutdownDrain(ctx context.Context) {
+	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), d.cfg.ShutdownBudget)
+	defer cancel()
+	if _, err := d.DrainOnce(fctx); err != nil {
+		d.cfg.Logger.Info("durable queue final drain incomplete; items remain queued", "kind", d.cfg.Kind, "error", err)
 	}
 }
 
@@ -266,27 +288,30 @@ func (d *Drainer) Run(ctx context.Context) {
 // no-op. DrainOnce must not be called concurrently with Run on the same
 // Drainer.
 func (d *Drainer) DrainOnce(ctx context.Context) (DrainResult, error) {
-	return d.drainPass(ctx, true)
+	res, _, err := d.drainPass(ctx, true)
+	return res, err
 }
 
 func (d *Drainer) nextClaimOwner() string {
 	return d.ownerPrefix + ":" + uuid.NewString()
 }
 
-func (d *Drainer) drainPass(ctx context.Context, maintain bool) (DrainResult, error) {
+func (d *Drainer) drainPass(ctx context.Context, maintain bool) (DrainResult, bool, error) {
 	var res DrainResult
 	if d.cfg.Enabled != nil && !d.cfg.Enabled() {
 		res.Remaining = -1
-		return res, nil
+		return res, false, nil
 	}
 
+	var trimMore bool
 	now := d.cfg.Now().UTC()
 	if maintain {
-		dropped, err := d.trimAndReport(ctx, now)
+		dropped, more, err := d.trimAndReport(ctx, now)
 		if err != nil {
-			return res, fmt.Errorf("trim: %w", err)
+			return res, false, fmt.Errorf("trim: %w", err)
 		}
 		res.Dropped += dropped
+		trimMore = more
 	}
 
 	hitPoisonBound := false
@@ -301,7 +326,7 @@ func (d *Drainer) drainPass(ctx context.Context, maintain bool) (DrainResult, er
 		claimOwner := d.nextClaimOwner()
 		rows, err := d.cfg.Store.ClaimDurableItems(ctx, d.cfg.Kind, claimOwner, now, now.Add(d.cfg.LeaseDuration), batch)
 		if err != nil {
-			return res, fmt.Errorf("claim: %w", err)
+			return res, trimMore, fmt.Errorf("claim: %w", err)
 		}
 		res.Claimed = len(rows)
 		if len(rows) > 0 {
@@ -338,20 +363,23 @@ func (d *Drainer) drainPass(ctx context.Context, maintain bool) (DrainResult, er
 	// OnDrop fires promptly and the item is never left pending until the next
 	// maintenance window.
 	if hitPoisonBound && ctx.Err() == nil {
-		dropped, err := d.trimAndReport(ctx, d.cfg.Now().UTC())
+		dropped, more, err := d.trimAndReport(ctx, d.cfg.Now().UTC())
 		if err != nil {
-			return res, fmt.Errorf("poison trim: %w", err)
+			return res, trimMore, fmt.Errorf("poison trim: %w", err)
 		}
 		res.Dropped += dropped
+		if more {
+			trimMore = true
+		}
 	}
 
 	if !maintain {
 		res.Remaining = -1
-		return res, nil
+		return res, trimMore, nil
 	}
 	stats, err := d.cfg.Store.DurableQueueStats(ctx, d.cfg.Kind, "")
 	if err != nil {
-		return res, fmt.Errorf("stats: %w", err)
+		return res, trimMore, fmt.Errorf("stats: %w", err)
 	}
 	res.Remaining = stats.Pending
 	var oldestAge time.Duration
@@ -361,7 +389,7 @@ func (d *Drainer) drainPass(ctx context.Context, maintain bool) (DrainResult, er
 		}
 	}
 	d.cfg.Metrics.ObserveQueue(d.cfg.Kind, stats.Pending, stats.Leased, oldestAge)
-	return res, nil
+	return res, trimMore, nil
 }
 
 type rowOutcome int
@@ -564,10 +592,10 @@ func (d *Drainer) unblock() {
 	}
 }
 
-func (d *Drainer) trimAndReport(ctx context.Context, now time.Time) (int, error) {
+func (d *Drainer) trimAndReport(ctx context.Context, now time.Time) (int, bool, error) {
 	trim, err := d.cfg.Store.TrimDurableQueue(ctx, d.cfg.Kind, now, d.cfg.MaxAge, d.cfg.MaxRows, d.cfg.MaxPermanent)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	total := 0
 	for _, group := range []struct {
@@ -601,7 +629,7 @@ func (d *Drainer) trimAndReport(ctx context.Context, now time.Time) (int, error)
 			d.invokeOnDrop(ctx, items, group.reason)
 		}
 	}
-	return total, nil
+	return total, trim.More, nil
 }
 
 func (d *Drainer) invokeOnDrop(ctx context.Context, dropped []Item, reason string) {

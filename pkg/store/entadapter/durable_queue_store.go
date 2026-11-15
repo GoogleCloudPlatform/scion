@@ -41,12 +41,33 @@ var _ store.DurableQueueStore = (*DurableQueueStore)(nil)
 // durableQueueDeleteBatch bounds the IN lists of trim deletes.
 const durableQueueDeleteBatch = 500
 
+// durableQueueTrimPassLimit caps total trim candidates selected and deleted in
+// a single TrimDurableQueue pass so maintenance stays bounded in memory and
+// lock scope even after an extended stall or lowered retention window.
+const durableQueueTrimPassLimit = 1000
+
+var durableQueueTrimSelectFields = []string{
+	durablequeueitem.FieldID,
+	durablequeueitem.FieldKind,
+	durablequeueitem.FieldProjectID,
+	durablequeueitem.FieldDedupKey,
+	durablequeueitem.FieldCreatedAt,
+}
+
 // DurableQueueStore implements store.DurableQueueStore over Ent.
 // Embedded by CompositeStore so callers can type-assert store.DurableQueueStore
 // without expanding store.Store.
 type DurableQueueStore struct {
-	client *ent.Client
-	inTx   bool
+	client        *ent.Client
+	inTx          bool
+	trimPassLimit int // test override; <= 0 uses durableQueueTrimPassLimit
+}
+
+func (s *DurableQueueStore) effectiveTrimPassLimit() int {
+	if s.trimPassLimit > 0 {
+		return s.trimPassLimit
+	}
+	return durableQueueTrimPassLimit
 }
 
 // NewDurableQueueStore creates an Ent-backed DurableQueueStore.
@@ -309,6 +330,16 @@ func (s *DurableQueueStore) FailDurableItem(ctx context.Context, seq int64, owne
 	return n > 0, nil
 }
 
+func entDurableQueueTrimItemToStore(r *ent.DurableQueueItem) store.DurableQueueRow {
+	return store.DurableQueueRow{
+		Seq:       r.ID,
+		Kind:      r.Kind,
+		DedupKey:  r.DedupKey,
+		ProjectID: r.ProjectID,
+		CreatedAt: r.CreatedAt.UTC(),
+	}
+}
+
 func lockQueueTrimCandidates(client *ent.Client, q *ent.DurableQueueItemQuery) *ent.DurableQueueItemQuery {
 	if client.Driver().Dialect() == dialect.Postgres {
 		q = q.ForUpdate(entsql.WithLockAction(entsql.SkipLocked))
@@ -341,7 +372,7 @@ func deleteDurableQueueRows(ctx context.Context, client *ent.Client, now time.Ti
 		}
 		for _, r := range chunk {
 			if !kept[r.ID] {
-				gone = append(gone, entDurableQueueItemToStore(r))
+				gone = append(gone, entDurableQueueTrimItemToStore(r))
 			}
 		}
 	}
@@ -349,49 +380,80 @@ func deleteDurableQueueRows(ctx context.Context, client *ent.Client, now time.Ti
 }
 
 // TrimDurableQueue implements store.DurableQueueStore.
-// Rows under a live lease are never trimmed. Overflow trimming removes the
-// oldest unleased items of the largest project first (stage1-design §6.1 F5),
-// never trimming a smaller project while a larger project still has unleased
-// items.
+// Rows under a live lease are never trimmed. Candidate queries project only
+// metadata columns (seq, kind, project_id, dedup_key, created_at) and cap total
+// candidates per pass; when the cap is reached with eligible rows remaining,
+// DurableQueueTrim.More is set so the caller continues on the next pass.
+// Overflow trimming removes the oldest unleased items of the largest project
+// first (stage1-design §6.1 F5), never trimming a smaller project while a
+// larger project still has unleased items.
 func (s *DurableQueueStore) TrimDurableQueue(ctx context.Context, kind string, now time.Time, maxAge time.Duration, maxRows, maxPermanent int) (store.DurableQueueTrim, error) {
 	if err := store.ValidateDurableQueueKind(kind); err != nil {
 		return store.DurableQueueTrim{}, err
 	}
 	now = now.UTC()
+	passLimit := s.effectiveTrimPassLimit()
 
 	var trim store.DurableQueueTrim
 	err := runInEntTx(ctx, s.client, s.inTx, func(client *ent.Client) error {
-		if maxAge > 0 {
+		budget := passLimit
+
+		if maxAge > 0 && budget > 0 {
 			aged, err := lockQueueTrimCandidates(client, client.DurableQueueItem.Query().
 				Where(
 					durablequeueitem.KindEQ(kind),
 					queueItemUnleased(now),
 					durablequeueitem.CreatedAtLT(now.Add(-maxAge)),
 				).
-				Order(ent.Asc(durablequeueitem.FieldID))).
+				Order(ent.Asc(durablequeueitem.FieldID)).
+				Limit(budget+1)).
+				Select(durableQueueTrimSelectFields...).
 				All(ctx)
 			if err != nil {
 				return err
 			}
+			if len(aged) > budget {
+				aged = aged[:budget]
+				trim.More = true
+			}
+			budget -= len(aged)
 			if trim.Age, err = deleteDurableQueueRows(ctx, client, now, aged); err != nil {
 				return err
 			}
 		}
 
 		if maxPermanent > 0 {
-			poison, err := lockQueueTrimCandidates(client, client.DurableQueueItem.Query().
+			pq := client.DurableQueueItem.Query().
 				Where(
 					durablequeueitem.KindEQ(kind),
 					queueItemUnleased(now),
 					durablequeueitem.PermanentFailuresGTE(maxPermanent),
-				).
-				Order(ent.Asc(durablequeueitem.FieldID))).
-				All(ctx)
-			if err != nil {
-				return err
-			}
-			if trim.Poison, err = deleteDurableQueueRows(ctx, client, now, poison); err != nil {
-				return err
+				)
+			if budget <= 0 {
+				hasPoison, err := pq.Exist(ctx)
+				if err != nil {
+					return err
+				}
+				if hasPoison {
+					trim.More = true
+				}
+			} else {
+				poison, err := lockQueueTrimCandidates(client, pq.
+					Order(ent.Asc(durablequeueitem.FieldID)).
+					Limit(budget+1)).
+					Select(durableQueueTrimSelectFields...).
+					All(ctx)
+				if err != nil {
+					return err
+				}
+				if len(poison) > budget {
+					poison = poison[:budget]
+					trim.More = true
+				}
+				budget -= len(poison)
+				if trim.Poison, err = deleteDurableQueueRows(ctx, client, now, poison); err != nil {
+					return err
+				}
 			}
 		}
 
@@ -403,11 +465,26 @@ func (s *DurableQueueStore) TrimDurableQueue(ctx context.Context, kind string, n
 				return err
 			}
 			if excess := total - maxRows; excess > 0 {
-				overflow, err := trimOverflowByLargestProject(ctx, client, kind, now, excess)
-				if err != nil {
-					return err
+				if budget <= 0 {
+					hasUnleased, err := client.DurableQueueItem.Query().
+						Where(durablequeueitem.KindEQ(kind), queueItemUnleased(now)).
+						Exist(ctx)
+					if err != nil {
+						return err
+					}
+					if hasUnleased {
+						trim.More = true
+					}
+				} else {
+					overflow, moreOverflow, err := trimOverflowByLargestProject(ctx, client, kind, now, excess, budget)
+					if err != nil {
+						return err
+					}
+					trim.Overflow = overflow
+					if moreOverflow {
+						trim.More = true
+					}
 				}
-				trim.Overflow = overflow
 			}
 		}
 		return nil
@@ -418,7 +495,7 @@ func (s *DurableQueueStore) TrimDurableQueue(ctx context.Context, kind string, n
 	return trim, nil
 }
 
-func trimOverflowByLargestProject(ctx context.Context, client *ent.Client, kind string, now time.Time, excess int) ([]store.DurableQueueRow, error) {
+func trimOverflowByLargestProject(ctx context.Context, client *ent.Client, kind string, now time.Time, excess, candBudget int) ([]store.DurableQueueRow, bool, error) {
 	var buckets []struct {
 		ProjectID string `json:"project_id"`
 		Count     int    `json:"count"`
@@ -428,7 +505,7 @@ func trimOverflowByLargestProject(ctx context.Context, client *ent.Client, kind 
 		GroupBy(durablequeueitem.FieldProjectID).
 		Aggregate(ent.Count()).
 		Scan(ctx, &buckets); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	counts := make(map[string]int, len(buckets))
@@ -438,7 +515,7 @@ func trimOverflowByLargestProject(ctx context.Context, client *ent.Client, kind 
 	exhausted := make(map[string]bool)
 	var dropped []store.DurableQueueRow
 
-	for excess > 0 {
+	for excess > 0 && candBudget > 0 {
 		maxCount := 0
 		for proj, c := range counts {
 			if !exhausted[proj] && c > maxCount {
@@ -463,13 +540,14 @@ func trimOverflowByLargestProject(ctx context.Context, client *ent.Client, kind 
 		}
 		sort.Strings(topProjects)
 
-		perProject := min(maxCount-secondMax, excess/len(topProjects))
+		stepBudget := min(excess, candBudget)
+		perProject := min(maxCount-secondMax, stepBudget/len(topProjects))
 		if perProject > 0 {
 			for _, proj := range topProjects {
-				if excess <= 0 {
+				if excess <= 0 || candBudget <= 0 {
 					break
 				}
-				limit := min(perProject, excess)
+				limit := min(perProject, min(excess, candBudget))
 				cand, err := lockQueueTrimCandidates(client, client.DurableQueueItem.Query().
 					Where(
 						durablequeueitem.KindEQ(kind),
@@ -478,13 +556,15 @@ func trimOverflowByLargestProject(ctx context.Context, client *ent.Client, kind 
 					).
 					Order(ent.Asc(durablequeueitem.FieldID)).
 					Limit(limit)).
+					Select(durableQueueTrimSelectFields...).
 					All(ctx)
 				if err != nil {
-					return nil, err
+					return nil, false, err
 				}
+				candBudget -= len(cand)
 				gone, err := deleteDurableQueueRows(ctx, client, now, cand)
 				if err != nil {
-					return nil, err
+					return nil, false, err
 				}
 				dropped = append(dropped, gone...)
 				counts[proj] -= len(gone)
@@ -496,8 +576,8 @@ func trimOverflowByLargestProject(ctx context.Context, client *ent.Client, kind 
 			continue
 		}
 
-		// excess < len(topProjects): delete the single oldest unleased row
-		// across the tied-for-largest projects, breaking the tie on seq.
+		// min(excess, candBudget) < len(topProjects): delete the single oldest
+		// unleased row across the tied-for-largest projects, breaking ties on seq.
 		cand, err := lockQueueTrimCandidates(client, client.DurableQueueItem.Query().
 			Where(
 				durablequeueitem.KindEQ(kind),
@@ -506,9 +586,10 @@ func trimOverflowByLargestProject(ctx context.Context, client *ent.Client, kind 
 			).
 			Order(ent.Asc(durablequeueitem.FieldID)).
 			Limit(1)).
+			Select(durableQueueTrimSelectFields...).
 			All(ctx)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if len(cand) == 0 {
 			for _, proj := range topProjects {
@@ -516,9 +597,10 @@ func trimOverflowByLargestProject(ctx context.Context, client *ent.Client, kind 
 			}
 			continue
 		}
+		candBudget -= len(cand)
 		gone, err := deleteDurableQueueRows(ctx, client, now, cand)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if len(gone) == 0 {
 			// Concurrent claimer took cand[0]; retry in the next iteration.
@@ -537,7 +619,30 @@ func trimOverflowByLargestProject(ctx context.Context, client *ent.Client, kind 
 	sort.Slice(dropped, func(i, j int) bool {
 		return dropped[i].Seq < dropped[j].Seq
 	})
-	return dropped, nil
+
+	more := false
+	if excess > 0 && candBudget <= 0 {
+		var nonExhausted []string
+		for proj, c := range counts {
+			if !exhausted[proj] && c > 0 {
+				nonExhausted = append(nonExhausted, proj)
+			}
+		}
+		if len(nonExhausted) > 0 {
+			hasUnleased, err := client.DurableQueueItem.Query().
+				Where(
+					durablequeueitem.KindEQ(kind),
+					durablequeueitem.ProjectIDIn(nonExhausted...),
+					queueItemUnleased(now),
+				).
+				Exist(ctx)
+			if err != nil {
+				return nil, false, err
+			}
+			more = hasUnleased
+		}
+	}
+	return dropped, more, nil
 }
 
 // DurableQueueStats implements store.DurableQueueStore.

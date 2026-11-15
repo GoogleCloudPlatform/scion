@@ -426,11 +426,16 @@ func TestEchoConsumer_TrimByAgeRowsAndPoisonWithMetrics(t *testing.T) {
 
 	require.Len(t, dropsByReason[durablequeue.DropReasonAge], 1)
 	assert.Equal(t, "aged-1", dropsByReason[durablequeue.DropReasonAge][0].DedupKey)
+	assert.Equal(t, "proj-small", dropsByReason[durablequeue.DropReasonAge][0].ProjectID)
+	assert.Positive(t, dropsByReason[durablequeue.DropReasonAge][0].Seq)
+	assert.Nil(t, dropsByReason[durablequeue.DropReasonAge][0].Payload, "trim must not load payload bytes")
 
 	require.Len(t, dropsByReason[durablequeue.DropReasonOverflow], 3)
 	for i, it := range dropsByReason[durablequeue.DropReasonOverflow] {
 		assert.Equal(t, "proj-flood", it.ProjectID)
 		assert.Equal(t, fmt.Sprintf("flood-%d", i), it.DedupKey)
+		assert.Positive(t, it.Seq)
+		assert.Nil(t, it.Payload, "trim must not load payload bytes")
 	}
 
 	// Pass 2 after 2s backoff: poison item fails permanently 2nd time -> hits MaxPermanent=2 -> immediately trimmed!
@@ -443,7 +448,10 @@ func TestEchoConsumer_TrimByAgeRowsAndPoisonWithMetrics(t *testing.T) {
 
 	require.Len(t, dropsByReason[durablequeue.DropReasonPoison], 1)
 	assert.Equal(t, "poison-1", dropsByReason[durablequeue.DropReasonPoison][0].DedupKey)
-	assert.Equal(t, []byte(`not-valid-json`), dropsByReason[durablequeue.DropReasonPoison][0].Payload)
+	assert.Equal(t, "proj-small", dropsByReason[durablequeue.DropReasonPoison][0].ProjectID)
+	assert.Positive(t, dropsByReason[durablequeue.DropReasonPoison][0].Seq)
+	assert.False(t, dropsByReason[durablequeue.DropReasonPoison][0].CreatedAt.IsZero())
+	assert.Nil(t, dropsByReason[durablequeue.DropReasonPoison][0].Payload, "trim must not load payload bytes")
 
 	metrics.mu.Lock()
 	assert.Equal(t, 5, metrics.done)

@@ -424,17 +424,24 @@ func TestDurableQueueTrimBoundsAndLargestProjectFirst(t *testing.T) {
 
 	trim, err := cs.TrimDurableQueue(ctx, "test.echo", now, 72*time.Hour, 9, 5)
 	require.NoError(t, err)
+	assert.False(t, trim.More)
 
 	require.Len(t, trim.Age, 1)
 	assert.Equal(t, agedSeq, trim.Age[0].Seq)
+	assert.Equal(t, "aged-unleased", trim.Age[0].DedupKey)
+	assert.Equal(t, "proj-small", trim.Age[0].ProjectID)
+	assert.Nil(t, trim.Age[0].Payload)
 
 	require.Len(t, trim.Poison, 1)
 	assert.Equal(t, poisonSeq, trim.Poison[0].Seq)
+	assert.Equal(t, "poison-unleased", trim.Poison[0].DedupKey)
+	assert.Nil(t, trim.Poison[0].Payload)
 
 	require.Len(t, trim.Overflow, 7)
 	for i := 0; i < 7; i++ {
 		assert.Equal(t, floodSeqs[i], trim.Overflow[i].Seq)
 		assert.Equal(t, "proj-flood", trim.Overflow[i].ProjectID)
+		assert.Nil(t, trim.Overflow[i].Payload)
 	}
 
 	// Verify surviving counts per project and on other.kind.
@@ -457,6 +464,110 @@ func TestDurableQueueTrimBoundsAndLargestProjectFirst(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), stOther.Pending)
 	_ = otherKindSeq
+}
+
+func TestDurableQueueTrimPassCapAndMetadataProjection(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	cs.trimPassLimit = 4
+	now := time.Date(2026, 11, 15, 5, 30, 0, 0, time.UTC)
+	bigPayload := []byte(`{"blob":"` + strings.Repeat("x", 4096) + `"}`)
+
+	insertRow := func(proj, key string, createdAt time.Time, perm int, leased bool) int64 {
+		t.Helper()
+		seq, err := cs.EnqueueDurableItem(ctx, nil, store.DurableQueueRow{
+			Kind:      "test.echo",
+			DedupKey:  key,
+			ProjectID: proj,
+			Payload:   bigPayload,
+			CreatedAt: createdAt,
+			NotBefore: createdAt,
+		})
+		require.NoError(t, err)
+		if perm > 0 || leased {
+			upd := cs.client.DurableQueueItem.UpdateOneID(seq)
+			if perm > 0 {
+				upd = upd.SetPermanentFailures(perm).SetAttempts(perm)
+			}
+			if leased {
+				upd = upd.SetLeaseOwner("live-worker").SetLeaseUntil(now.Add(5 * time.Minute))
+			}
+			require.NoError(t, upd.Exec(ctx))
+		}
+		return seq
+	}
+
+	// Seed:
+	// - 5 aged unleased rows (proj-small)
+	// - 3 poison unleased rows (proj-small)
+	// - 13 overflow unleased rows (proj-flood) + 2 unleased rows (proj-small) + 2 leased rows (proj-small)
+	// After 5 aged + 3 poison are trimmed (8 rows), 17 rows remain (13 in proj-flood, 4 in proj-small).
+	// With maxRows = 9 (excess = 8), proj-flood drops from 13 -> 5 (always strictly larger than
+	// proj-small's 4), so all 8 overflow trims must come exclusively from proj-flood across
+	// bounded passes of <= 4 rows!
+	for i := 0; i < 5; i++ {
+		insertRow("proj-small", uuid.NewString(), now.Add(-80*time.Hour), 0, false)
+	}
+	for i := 0; i < 3; i++ {
+		insertRow("proj-small", uuid.NewString(), now.Add(-time.Minute), 5, false)
+	}
+	for i := 0; i < 13; i++ {
+		insertRow("proj-flood", uuid.NewString(), now, 0, false)
+	}
+	for i := 0; i < 2; i++ {
+		insertRow("proj-small", uuid.NewString(), now, 0, false)
+	}
+	for i := 0; i < 2; i++ {
+		insertRow("proj-small", uuid.NewString(), now, 0, true)
+	}
+
+	var totalAge, totalPoison, totalOverflow int
+	passes := 0
+	for {
+		passes++
+		require.LessOrEqual(t, passes, 10, "bounded trim must converge in a finite number of passes")
+		tr, err := cs.TrimDurableQueue(ctx, "test.echo", now, 72*time.Hour, 9, 5)
+		require.NoError(t, err)
+
+		passDropped := len(tr.Age) + len(tr.Poison) + len(tr.Overflow)
+		assert.LessOrEqual(t, passDropped, 4, "each pass must obey trimPassLimit")
+		for _, r := range append(append(tr.Age, tr.Poison...), tr.Overflow...) {
+			assert.Positive(t, r.Seq)
+			assert.Equal(t, "test.echo", r.Kind)
+			assert.NotEmpty(t, r.DedupKey)
+			assert.False(t, r.CreatedAt.IsZero())
+			assert.Nil(t, r.Payload, "trimmed rows must omit payload")
+		}
+		for _, r := range tr.Overflow {
+			assert.Equal(t, "proj-flood", r.ProjectID, "overflow must trim only the largest project")
+		}
+		totalAge += len(tr.Age)
+		totalPoison += len(tr.Poison)
+		totalOverflow += len(tr.Overflow)
+
+		if !tr.More {
+			break
+		}
+	}
+
+	assert.Equal(t, 4, passes, "16 total drops at cap 4 -> 4 bounded passes")
+	assert.Equal(t, 5, totalAge)
+	assert.Equal(t, 3, totalPoison)
+	assert.Equal(t, 8, totalOverflow)
+
+	// Also verify no More busy-spin when remaining excess rows become live-leased only:
+	// 9 rows remain (5 unleased in proj-flood + 2 unleased in proj-small + 2 leased in proj-small).
+	// Lower maxRows to 1 (cap 4): Pass A drops 4 (More=true), Pass B drops remaining 3 unleased
+	// leaving only the 2 live-leased rows above maxRows=1 -> More must be false!
+	trCapA, err := cs.TrimDurableQueue(ctx, "test.echo", now, 72*time.Hour, 1, 5)
+	require.NoError(t, err)
+	assert.Len(t, trCapA.Overflow, 4)
+	assert.True(t, trCapA.More)
+
+	trLeasedOnly, err := cs.TrimDurableQueue(ctx, "test.echo", now, 72*time.Hour, 1, 5)
+	require.NoError(t, err)
+	assert.Len(t, trLeasedOnly.Overflow, 3)
+	assert.False(t, trLeasedOnly.More, "More must be false when only live-leased rows remain above maxRows")
 }
 
 func TestDurableQueueStats(t *testing.T) {

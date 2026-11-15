@@ -38,11 +38,12 @@ import (
 // memQueueStore is a thread-safe in-memory DurableQueueStore used by fast
 // no_sqlite unit tests.
 type memQueueStore struct {
-	mu      sync.Mutex
-	nextSeq int64
-	rows    map[int64]*store.DurableQueueRow
-	renews  int
-	loseAt  int // when > 0, RenewDurableLease returns held=false starting on this renew call
+	mu        sync.Mutex
+	nextSeq   int64
+	rows      map[int64]*store.DurableQueueRow
+	renews    int
+	loseAt    int // when > 0, RenewDurableLease returns held=false starting on this renew call
+	trimLimit int // when > 0, caps trimmed rows per TrimDurableQueue pass and sets More
 }
 
 func newMemQueueStore() *memQueueStore {
@@ -173,23 +174,55 @@ func (m *memQueueStore) TrimDurableQueue(_ context.Context, kind string, now tim
 	unleased := func(r *store.DurableQueueRow) bool {
 		return r.LeaseUntil == nil || r.LeaseUntil.Before(now)
 	}
+	var seqs []int64
+	for seq := range m.rows {
+		seqs = append(seqs, seq)
+	}
+	sort.Slice(seqs, func(i, j int) bool { return seqs[i] < seqs[j] })
+
+	metaOnly := func(r *store.DurableQueueRow) store.DurableQueueRow {
+		return store.DurableQueueRow{
+			Seq:       r.Seq,
+			Kind:      r.Kind,
+			DedupKey:  r.DedupKey,
+			ProjectID: r.ProjectID,
+			CreatedAt: r.CreatedAt,
+		}
+	}
+
+	budget := len(seqs) + 1
+	if m.trimLimit > 0 {
+		budget = m.trimLimit
+	}
 	var trim store.DurableQueueTrim
-	for seq, r := range m.rows {
+	for _, seq := range seqs {
+		r := m.rows[seq]
 		if r.Kind != kind || !unleased(r) {
 			continue
 		}
 		if maxAge > 0 && r.CreatedAt.Before(now.Add(-maxAge)) {
-			trim.Age = append(trim.Age, *r)
+			if budget <= 0 {
+				trim.More = true
+				break
+			}
+			trim.Age = append(trim.Age, metaOnly(r))
 			delete(m.rows, seq)
+			budget--
 		}
 	}
-	for seq, r := range m.rows {
-		if r.Kind != kind || !unleased(r) {
+	for _, seq := range seqs {
+		r, ok := m.rows[seq]
+		if !ok || r.Kind != kind || !unleased(r) {
 			continue
 		}
 		if maxPermanent > 0 && r.PermanentFailures >= maxPermanent {
-			trim.Poison = append(trim.Poison, *r)
+			if budget <= 0 {
+				trim.More = true
+				break
+			}
+			trim.Poison = append(trim.Poison, metaOnly(r))
 			delete(m.rows, seq)
+			budget--
 		}
 	}
 	_ = maxRows
@@ -799,4 +832,74 @@ func TestQueueWakeAndRunShutdownFinalPass(t *testing.T) {
 	default:
 		t.Fatal("expected bounded final shutdown pass to drain queued item")
 	}
+}
+
+func TestDrainerRunContinuesBoundedTrimAcrossPasses(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	st := newMemQueueStore()
+	st.trimLimit = 3
+	now := time.Date(2026, 11, 15, 9, 30, 0, 0, time.UTC)
+	q := durablequeue.NewQueue(st, durablequeue.WithQueueClock(func() time.Time { return now }))
+
+	for i := 0; i < 10; i++ {
+		_, err := q.Enqueue(ctx, nil, durablequeue.Item{
+			Kind:      "test.echo",
+			DedupKey:  fmt.Sprintf("aged-%02d", i),
+			ProjectID: "proj-a",
+			Payload:   []byte(`{"large":"payload"}`),
+			CreatedAt: now.Add(-100 * time.Hour),
+			NotBefore: now.Add(time.Hour), // not claim-due, only trim-eligible
+		})
+		require.NoError(t, err)
+	}
+
+	var (
+		dropMu      sync.Mutex
+		dropBatches []int
+		droppedKeys []string
+	)
+	d, err := durablequeue.NewDrainer(durablequeue.DrainerConfig{
+		Store:               st,
+		Kind:                "test.echo",
+		MaxAge:              72 * time.Hour,
+		PollInterval:        time.Hour, // only trim.More self-wake can advance passes promptly
+		MaintenanceInterval: time.Hour,
+		Now:                 func() time.Time { return now },
+		Logger:              quietLogger(),
+		OnDrop: func(_ context.Context, dropped []durablequeue.Item, reason string) {
+			dropMu.Lock()
+			defer dropMu.Unlock()
+			assert.Equal(t, durablequeue.DropReasonAge, reason)
+			dropBatches = append(dropBatches, len(dropped))
+			for _, it := range dropped {
+				assert.Nil(t, it.Payload)
+				droppedKeys = append(droppedKeys, it.DedupKey)
+			}
+		},
+		Handler: func(_ context.Context, _ durablequeue.Item, _ durablequeue.Lease) durablequeue.Result {
+			return durablequeue.Result{Done: true}
+		},
+	})
+	require.NoError(t, err)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		d.Run(ctx)
+	}()
+
+	require.Eventually(t, func() bool {
+		dropMu.Lock()
+		defer dropMu.Unlock()
+		return len(droppedKeys) == 10
+	}, 2*time.Second, 10*time.Millisecond)
+
+	cancel()
+	<-done
+
+	dropMu.Lock()
+	defer dropMu.Unlock()
+	assert.Equal(t, []int{3, 3, 3, 1}, dropBatches)
 }
