@@ -253,34 +253,55 @@ type Kind struct {
 
 // Default limit values and hard upper bounds enforced by New.
 const (
-	DefaultMaxExprBytes              = 4096
-	DefaultRecursionDepth            = 32
-	DefaultCostLimit          uint64 = 250_000
-	DefaultEvalTimeout               = 100 * time.Millisecond
-	DefaultInterruptFrequency uint   = 100
+	DefaultMaxExprBytes                 = 4096
+	DefaultRecursionDepth               = 32
+	DefaultCostLimit             uint64 = 250_000
+	DefaultEvalTimeout                  = 100 * time.Millisecond
+	DefaultInterruptFrequency    uint   = 100
+	DefaultMaxOutputBytes               = 1 << 20 // 1 MiB per string/bytes value or formatted/ walk output
+	DefaultMaxCollectionElements        = 65_536
 
-	MaxEvalTimeoutCeiling        = time.Second
-	MaxCostLimitCeiling   uint64 = 10_000_000
+	MaxEvalTimeoutCeiling               = time.Second
+	MaxCostLimitCeiling          uint64 = 10_000_000
+	MaxOutputBytesCeiling               = 4 << 20 // 4 MiB
+	MaxCollectionElementsCeiling        = 262_144
 )
 
-// Limits bounds expression size, parser recursion, runtime cost, and wall-clock time.
+// Limits bounds expression size, parser recursion, runtime cost, wall-clock time,
+// and per-call output / collection sizes. Zero values for MaxOutputBytes and
+// MaxCollectionElements default to DefaultMaxOutputBytes and
+// DefaultMaxCollectionElements in New.
 type Limits struct {
-	MaxExprBytes       int
-	RecursionDepth     int
-	CostLimit          uint64
-	EvalTimeout        time.Duration
-	InterruptFrequency uint
+	MaxExprBytes          int
+	RecursionDepth        int
+	CostLimit             uint64
+	EvalTimeout           time.Duration
+	InterruptFrequency    uint
+	MaxOutputBytes        int
+	MaxCollectionElements int
 }
 
 // DefaultLimits returns the Stage 1 standard engine limits.
 func DefaultLimits() Limits {
 	return Limits{
-		MaxExprBytes:       DefaultMaxExprBytes,
-		RecursionDepth:     DefaultRecursionDepth,
-		CostLimit:          DefaultCostLimit,
-		EvalTimeout:        DefaultEvalTimeout,
-		InterruptFrequency: DefaultInterruptFrequency,
+		MaxExprBytes:          DefaultMaxExprBytes,
+		RecursionDepth:        DefaultRecursionDepth,
+		CostLimit:             DefaultCostLimit,
+		EvalTimeout:           DefaultEvalTimeout,
+		InterruptFrequency:    DefaultInterruptFrequency,
+		MaxOutputBytes:        DefaultMaxOutputBytes,
+		MaxCollectionElements: DefaultMaxCollectionElements,
 	}
+}
+
+func (l Limits) normalize() Limits {
+	if l.MaxOutputBytes == 0 {
+		l.MaxOutputBytes = DefaultMaxOutputBytes
+	}
+	if l.MaxCollectionElements == 0 {
+		l.MaxCollectionElements = DefaultMaxCollectionElements
+	}
+	return l
 }
 
 func (l Limits) validateCeiling() error {
@@ -299,6 +320,12 @@ func (l Limits) validateCeiling() error {
 	if l.InterruptFrequency == 0 {
 		return fmt.Errorf("celengine: InterruptFrequency must be > 0")
 	}
+	if l.MaxOutputBytes < 0 || l.MaxOutputBytes > MaxOutputBytesCeiling {
+		return fmt.Errorf("celengine: MaxOutputBytes must be in 1..%d (got %d)", MaxOutputBytesCeiling, l.MaxOutputBytes)
+	}
+	if l.MaxCollectionElements < 0 || l.MaxCollectionElements > MaxCollectionElementsCeiling {
+		return fmt.Errorf("celengine: MaxCollectionElements must be in 1..%d (got %d)", MaxCollectionElementsCeiling, l.MaxCollectionElements)
+	}
 	return nil
 }
 
@@ -315,6 +342,12 @@ func (l Limits) clampEval(overrides ...Limits) Limits {
 		}
 		if o.InterruptFrequency > 0 && o.InterruptFrequency < eff.InterruptFrequency {
 			eff.InterruptFrequency = o.InterruptFrequency
+		}
+		if o.MaxOutputBytes > 0 && o.MaxOutputBytes < eff.MaxOutputBytes {
+			eff.MaxOutputBytes = o.MaxOutputBytes
+		}
+		if o.MaxCollectionElements > 0 && o.MaxCollectionElements < eff.MaxCollectionElements {
+			eff.MaxCollectionElements = o.MaxCollectionElements
 		}
 	}
 	return eff

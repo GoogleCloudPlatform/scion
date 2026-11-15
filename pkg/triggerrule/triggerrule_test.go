@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -674,4 +675,124 @@ func TestMatchTimeoutAndCallerCancellationSkipReason(t *testing.T) {
 	if reason, ok := triggerrule.SkipReason(err); !ok || reason != triggerrule.SkipReasonBudgetExhausted {
 		t.Fatalf("SkipReason(budget remainder) = (%q, %v), want (%q, true)", reason, ok, triggerrule.SkipReasonBudgetExhausted)
 	}
+}
+
+func TestAmplifyingCallsOn64KiBPayloadBounded(t *testing.T) {
+	rules, err := triggerrule.NewDefault()
+	if err != nil {
+		t.Fatalf("NewDefault: %v", err)
+	}
+	ctx := context.Background()
+
+	// Build a ~62 KiB valid JSON payload (within the 64 KiB ingress bound).
+	s60k := strings.Repeat("a", 60*1024)
+	payload := `{"s":"` + s60k + `","q":"` + strings.Repeat(`\"`, 1024) + `"}`
+	if len(payload) > triggerrule.MaxPayloadBytes {
+		t.Fatalf("test payload length %d exceeds MaxPayloadBytes %d", len(payload), triggerrule.MaxPayloadBytes)
+	}
+
+	ev := sampleFireEvent(payload)
+	tr := hubfire.FireTriggerRef{ID: "trig-amp", Name: "amplifying-guard"}
+	act, err := triggerrule.NewActivation(ev, tr)
+	if err != nil {
+		t.Fatalf("NewActivation: %v", err)
+	}
+
+	nestedListConcat := `[event.payload.s.split("")].map(l, (l + l).size() > 0)[0]`
+
+	matchVectors := []struct {
+		name string
+		expr string
+	}{
+		{
+			name: "split_join_amplification",
+			expr: `event.payload.s.split("").join(event.payload.s).size() > 0`,
+		},
+		{
+			name: "replace_amplification",
+			expr: `event.payload.s.replace("a", event.payload.s).size() > 0`,
+		},
+		{
+			name: "replace_empty_old_amplification",
+			expr: `event.payload.s.replace("", event.payload.s).size() > 0`,
+		},
+		{
+			name: "format_list_amplification",
+			expr: `"%s".format([[event.payload.s, event.payload.s, event.payload.s, event.payload.s, event.payload.s, event.payload.s, event.payload.s, event.payload.s, event.payload.s, event.payload.s, event.payload.s, event.payload.s, event.payload.s, event.payload.s, event.payload.s, event.payload.s, event.payload.s, event.payload.s]]).size() > 0`,
+		},
+		{
+			name: "strings_quote_amplification",
+			expr: `[event.payload.q].map(a, [a + a].map(b, [b + b].map(c, [c + c].map(d, [d + d].map(e, [e + e].map(f, [f + f].map(g, [g + g].map(h, [h + h].map(k, strings.quote(k + k))))))))))[0][0][0][0][0][0][0][0][0].size() > 0`,
+		},
+		{
+			name: "string_concat_amplification",
+			expr: `[event.payload.s].map(a, [a + a].map(b, [b + b].map(c, [c + c].map(d, [d + d].map(e, e + e)))))[0][0][0][0][0].size() > 0`,
+		},
+		{
+			name: "list_concat_amplification",
+			expr: nestedListConcat,
+		},
+		{
+			name: "short_circuit_or_cannot_bypass",
+			expr: `event.payload.s.split("").join(event.payload.s) == "" || true`,
+		},
+	}
+
+	maxElapsed := 2 * triggerrule.Stage1Limits().EvalTimeout
+	const maxAllocDelta = 64 << 20 // 64 MiB
+
+	for i, tc := range matchVectors {
+		t.Run(tc.name, func(t *testing.T) {
+			scope := celengine.CacheScope{Consumer: triggerrule.ConsumerName, ID: tr.ID, Revision: int64(i + 1)}
+
+			var mBefore, mAfter runtime.MemStats
+			runtime.ReadMemStats(&mBefore)
+			start := time.Now()
+			matched, evalErr := rules.Match(ctx, scope, triggerrule.Rule{Expr: tc.expr}, act)
+			elapsed := time.Since(start)
+			runtime.ReadMemStats(&mAfter)
+
+			if matched {
+				t.Fatalf("Match(%s) = true, want false on cost_limit error", tc.name)
+			}
+			var ferr *ruleengine.FailedError
+			if !errors.As(evalErr, &ferr) || ferr.Reason != celengine.ReasonCostLimit {
+				t.Fatalf("Match(%s) err = %T (%v), want *FailedError{Reason: %q}", tc.name, evalErr, evalErr, celengine.ReasonCostLimit)
+			}
+			if reason, ok := triggerrule.SkipReason(evalErr); !ok || reason != triggerrule.SkipReasonEvalFailed {
+				t.Fatalf("SkipReason = (%q, %v), want (%q, true)", reason, ok, triggerrule.SkipReasonEvalFailed)
+			}
+			if elapsed > maxElapsed {
+				t.Errorf("elapsed %s exceeds 2x EvalTimeout (%s)", elapsed, maxElapsed)
+			}
+			allocDelta := mAfter.TotalAlloc - mBefore.TotalAlloc
+			if allocDelta > maxAllocDelta {
+				t.Errorf("TotalAlloc delta %d bytes (%.2f MiB) exceeds 64 MiB bound", allocDelta, float64(allocDelta)/(1<<20))
+			}
+		})
+	}
+
+	// Also verify Subject / DeriveSubject falls back safely within time & memory bounds.
+	t.Run("subject_amplification_falls_back", func(t *testing.T) {
+		scope := celengine.CacheScope{Consumer: triggerrule.ConsumerName, ID: tr.ID, Revision: 99}
+		var mBefore, mAfter runtime.MemStats
+		runtime.ReadMemStats(&mBefore)
+		start := time.Now()
+		got := rules.DeriveSubject(ctx, scope, triggerrule.Rule{
+			Expr: `event.payload.s.split("").join(event.payload.s)`,
+		}, act, ev.Subject, nil)
+		elapsed := time.Since(start)
+		runtime.ReadMemStats(&mAfter)
+
+		if got != ev.Subject {
+			t.Fatalf("DeriveSubject = %q, want fallback %q", got, ev.Subject)
+		}
+		if elapsed > maxElapsed {
+			t.Errorf("elapsed %s exceeds 2x EvalTimeout (%s)", elapsed, maxElapsed)
+		}
+		allocDelta := mAfter.TotalAlloc - mBefore.TotalAlloc
+		if allocDelta > maxAllocDelta {
+			t.Errorf("TotalAlloc delta %d bytes exceeds 64 MiB bound", allocDelta)
+		}
+	})
 }

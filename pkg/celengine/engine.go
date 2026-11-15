@@ -41,6 +41,7 @@ type Engine struct {
 	env       Environment
 	limits    Limits
 	celEnv    *cel.Env
+	rawFormat cel.Program
 	functions []string
 	fnSetMap  map[string]struct{}
 	fnSetHash [32]byte
@@ -61,6 +62,7 @@ func New(env Environment, limits Limits, cache CacheConfig) (*Engine, error) {
 	if err := limits.validateCeiling(); err != nil {
 		return nil, err
 	}
+	limits = limits.normalize()
 	normCache, err := cache.normalize()
 	if err != nil {
 		return nil, err
@@ -118,6 +120,14 @@ func New(env Environment, limits Limits, cache CacheConfig) (*Engine, error) {
 		return nil, fmt.Errorf("celengine: build cel.Env: %w", err)
 	}
 
+	var rawFormat cel.Program
+	if seenExt[ExtensionStrings] {
+		rawFormat, err = buildRawFormatProgram()
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	fns, fnSetMap, fnSetHash := snapshotFunctions(celEnv)
 	envCopy := Environment{
 		Name:       env.Name,
@@ -134,6 +144,7 @@ func New(env Environment, limits Limits, cache CacheConfig) (*Engine, error) {
 		env:       envCopy,
 		limits:    limits,
 		celEnv:    celEnv,
+		rawFormat: rawFormat,
 		functions: fns,
 		fnSetMap:  fnSetMap,
 		fnSetHash: fnSetHash,
@@ -325,7 +336,7 @@ func (e *Engine) compileInternal(expr string, kind Kind, maxBytes int) (Program,
 		}
 	}
 
-	celProg, err := buildCELProgram(e.celEnv, checked, e.limits.CostLimit, e.limits.InterruptFrequency)
+	celProg, err := buildCELProgram(e.celEnv, checked, e.limits, e.rawFormat)
 	if err != nil {
 		line, col := rootLocation(checked)
 		return Program{}, &CompileError{
@@ -338,20 +349,22 @@ func (e *Engine) compileInternal(expr string, kind Kind, maxBytes int) (Program,
 	}
 
 	return Program{
-		celEnv:  e.celEnv,
-		checked: checked,
-		celProg: celProg,
-		kind:    kind,
-		limits:  e.limits,
+		celEnv:    e.celEnv,
+		rawFormat: e.rawFormat,
+		checked:   checked,
+		celProg:   celProg,
+		kind:      kind,
+		limits:    e.limits,
 	}, nil
 }
 
-func buildCELProgram(celEnv *cel.Env, checked *cel.Ast, costLimit uint64, interruptFreq uint) (cel.Program, error) {
+func buildCELProgram(celEnv *cel.Env, checked *cel.Ast, limits Limits, rawFormat cel.Program) (cel.Program, error) {
 	return celEnv.Program(
 		checked,
+		cel.CustomDecoratorV2(outputBoundsDecorator(limits, rawFormat)),
 		cel.EvalOptions(cel.OptOptimize, cel.OptTrackCost),
-		cel.CostLimit(costLimit),
-		cel.InterruptCheckFrequency(interruptFreq),
+		cel.CostLimit(limits.CostLimit),
+		cel.InterruptCheckFrequency(limits.InterruptFrequency),
 	)
 }
 
@@ -475,11 +488,12 @@ func rootLocation(checked *cel.Ast) (int, int) {
 // Program is an immutable compiled CEL expression bound to its Engine's
 // Environment, Kind, and ceiling Limits.
 type Program struct {
-	celEnv  *cel.Env
-	checked *cel.Ast
-	celProg cel.Program
-	kind    Kind
-	limits  Limits
+	celEnv    *cel.Env
+	rawFormat cel.Program
+	checked   *cel.Ast
+	celProg   cel.Program
+	kind      Kind
+	limits    Limits
 }
 
 // IsZero reports whether p is an uninitialized Program value.
@@ -508,8 +522,11 @@ func (p Program) Eval(ctx context.Context, act map[string]any, limits ...Limits)
 
 	eff := p.limits.clampEval(limits...)
 	progToRun := p.celProg
-	if eff.CostLimit != p.limits.CostLimit || eff.InterruptFrequency != p.limits.InterruptFrequency {
-		lowered, err := buildCELProgram(p.celEnv, p.checked, eff.CostLimit, eff.InterruptFrequency)
+	if eff.CostLimit != p.limits.CostLimit ||
+		eff.InterruptFrequency != p.limits.InterruptFrequency ||
+		eff.MaxOutputBytes != p.limits.MaxOutputBytes ||
+		eff.MaxCollectionElements != p.limits.MaxCollectionElements {
+		lowered, err := buildCELProgram(p.celEnv, p.checked, eff, p.rawFormat)
 		if err != nil {
 			return nil, EvalStats{}, &EvalError{Reason: ReasonRuntime}
 		}

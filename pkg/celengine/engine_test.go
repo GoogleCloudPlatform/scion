@@ -17,6 +17,7 @@ package celengine_test
 import (
 	"context"
 	"errors"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -161,6 +162,45 @@ func TestNewValidation(t *testing.T) {
 				CostLimit:          10_000_001,
 				EvalTimeout:        100 * time.Millisecond,
 				InterruptFrequency: 100,
+			},
+			cache: validCache,
+		},
+		{
+			name: "max output bytes above ceiling",
+			env:  validEnv,
+			limits: celengine.Limits{
+				MaxExprBytes:       4096,
+				RecursionDepth:     32,
+				CostLimit:          250_000,
+				EvalTimeout:        100 * time.Millisecond,
+				InterruptFrequency: 100,
+				MaxOutputBytes:     celengine.MaxOutputBytesCeiling + 1,
+			},
+			cache: validCache,
+		},
+		{
+			name: "negative max output bytes",
+			env:  validEnv,
+			limits: celengine.Limits{
+				MaxExprBytes:       4096,
+				RecursionDepth:     32,
+				CostLimit:          250_000,
+				EvalTimeout:        100 * time.Millisecond,
+				InterruptFrequency: 100,
+				MaxOutputBytes:     -1,
+			},
+			cache: validCache,
+		},
+		{
+			name: "max collection elements above ceiling",
+			env:  validEnv,
+			limits: celengine.Limits{
+				MaxExprBytes:          4096,
+				RecursionDepth:        32,
+				CostLimit:             250_000,
+				EvalTimeout:           100 * time.Millisecond,
+				InterruptFrequency:    100,
+				MaxCollectionElements: celengine.MaxCollectionElementsCeiling + 1,
 			},
 			cache: validCache,
 		},
@@ -658,5 +698,372 @@ func assertEvalReason(t *testing.T, err error, wantReason string) {
 	}
 	if eerr.Reason != wantReason {
 		t.Fatalf("EvalError.Reason = %q, want %q", eerr.Reason, wantReason)
+	}
+}
+
+func TestMaxOutputBytesLimitEnforced(t *testing.T) {
+	lim := celengine.DefaultLimits()
+	lim.MaxOutputBytes = 4096
+	lim.MaxCollectionElements = 256
+
+	eng, err := celengine.New(testEnv(), lim, celengine.DefaultCacheConfig())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	boolKind := celengine.Kind{Name: "filter", Result: celengine.Bool()}
+	ctx := context.Background()
+
+	s1k := strings.Repeat("a", 1024)
+	quotes2k := strings.Repeat(`"`, 2500)
+	act := map[string]any{
+		"event": map[string]any{
+			"s":      s1k,
+			"quotes": quotes2k,
+		},
+	}
+
+	cases := []struct {
+		name string
+		expr string
+	}{
+		{name: "split_join", expr: `event.s.split("").join(event.s).size() > 0`},
+		{name: "replace_all", expr: `event.s.replace("a", event.s).size() > 0`},
+		{name: "replace_empty_old", expr: `event.s.replace("", event.s).size() > 0`},
+		{name: "replace_n", expr: `event.s.replace("a", event.s, 10).size() > 0`},
+		{name: "split_elements", expr: `event.s.split("").size() > 0`},
+		{name: "format_args", expr: `"%s%s%s%s%s".format([event.s, event.s, event.s, event.s, event.s]).size() > 0`},
+		{name: "format_nested_list", expr: `"%s".format([[event.s, event.s, event.s, event.s, event.s]]).size() > 0`},
+		{name: "format_hex_double", expr: `"%x%x%x".format([event.s, event.s, event.s]).size() > 0`},
+		{name: "strings_quote", expr: `strings.quote(event.quotes).size() > 0`},
+		{name: "add_string", expr: `[event.s].map(a, [a + a].map(b, [b + b].map(c, c + c)))[0][0][0].size() > 4096`},
+		{name: "add_bytes", expr: `[bytes(event.s)].map(a, [a + a].map(b, [b + b].map(c, c + c)))[0][0][0].size() > 4096`},
+		{name: "add_list", expr: `[[1, 2, 3, 4, 5]].map(a, [a + a].map(b, [b + b].map(c, [c + c].map(d, [d + d].map(e, [e + e].map(f, f + f))))))[0][0][0][0][0][0].size() > 0`},
+		{name: "non_strict_or_cannot_swallow", expr: `event.s.replace("a", event.s) == "" || true`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prog, err := eng.Compile(tc.expr, boolKind)
+			if err != nil {
+				t.Fatalf("Compile(%s): %v", tc.expr, err)
+			}
+			res, _, evalErr := prog.Eval(ctx, act)
+			if res != nil {
+				t.Fatalf("expected nil Result on output limit violation, got %v", res)
+			}
+			assertEvalReason(t, evalErr, celengine.ReasonCostLimit)
+		})
+	}
+}
+
+func TestAmplifyingFunctionsBoundedOn64KiBPayload(t *testing.T) {
+	eng := newTestEngine(t)
+	boolKind := celengine.Kind{Name: "filter", Result: celengine.Bool()}
+	ctx := context.Background()
+
+	s60k := strings.Repeat("a", 60*1024)
+	quotes60k := strings.Repeat("\n", 60*1024)
+	act := map[string]any{
+		"event": map[string]any{
+			"s":       s60k,
+			"quotes":  quotes60k,
+			"oversiz": strings.Repeat("z", 2<<20),
+		},
+	}
+
+	// 60 KiB split("") = 61,440 elements; l + l = 122,880 > MaxCollectionElements (65,536).
+	nestedListConcat := `[event.s.split("")].map(l, (l + l).size() > 0)[0]`
+
+	// Nested DAG of 8-element lists (each list has Size()==8, 6 levels => 8^6 = 262,144 leaves,
+	// well under ParserRecursionLimit(32) while exceeding the container walk bound).
+	buildDAG := func(seed string) string {
+		cur := "[[" + seed + "]]"
+		for i := 0; i < 6; i++ {
+			v := "d" + string(rune('a'+i))
+			cur += ".map(" + v + ", [[" + v + ", " + v + ", " + v + ", " + v + ", " + v + ", " + v + ", " + v + ", " + v + "]])[0]"
+		}
+		return cur
+	}
+	dagEqExpr := buildDAG("1") + " == " + buildDAG("1")
+	dagNeExpr := buildDAG("1") + " != " + buildDAG("2")
+	dagInExpr := buildDAG("2") + " in [" + buildDAG("1") + "]"
+
+	cases := []struct {
+		name string
+		expr string
+	}{
+		{
+			name: "split_empty_join_60k",
+			expr: `event.s.split("").join(event.s).size() > 0`,
+		},
+		{
+			name: "replace_all_60k",
+			expr: `event.s.replace("a", event.s).size() > 0`,
+		},
+		{
+			name: "replace_empty_old_60k",
+			expr: `event.s.replace("", event.s).size() > 0`,
+		},
+		{
+			name: "replace_n_60k",
+			expr: `event.s.replace("a", event.s, 20).size() > 0`,
+		},
+		{
+			name: "format_repeated_60k",
+			expr: `"%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s".format([event.s, event.s, event.s, event.s, event.s, event.s, event.s, event.s, event.s, event.s, event.s, event.s, event.s, event.s, event.s, event.s, event.s, event.s]).size() > 0`,
+		},
+		{
+			name: "format_nested_list_60k",
+			expr: `"%s".format([[event.s, event.s, event.s, event.s, event.s, event.s, event.s, event.s, event.s, event.s, event.s, event.s, event.s, event.s, event.s, event.s, event.s, event.s]]).size() > 0`,
+		},
+		{
+			name: "format_hex_doubling_60k",
+			expr: `"%x%x%x%x%x%x%x%x%x%x".format([event.s, event.s, event.s, event.s, event.s, event.s, event.s, event.s, event.s, event.s]).size() > 0`,
+		},
+		{
+			name: "strings_quote_doubling",
+			expr: `[event.quotes].map(a, [a + a].map(b, [b + b].map(c, [c + c].map(d, strings.quote(d + d)))))[0][0][0][0].size() > 0`,
+		},
+		{
+			name: "string_add_doubling",
+			expr: `[event.s].map(a, [a + a].map(b, [b + b].map(c, [c + c].map(d, [d + d].map(e, e + e)))))[0][0][0][0][0].size() > 0`,
+		},
+		{
+			name: "bytes_add_doubling",
+			expr: `[bytes(event.s)].map(a, [a + a].map(b, [b + b].map(c, [c + c].map(d, [d + d].map(e, e + e)))))[0][0][0][0][0].size() > 0`,
+		},
+		{
+			name: "split_over_max_collection_elements",
+			expr: `[event.s].map(a, [a + a].map(b, b.split("")))[0][0].size() > 0`,
+		},
+		{
+			name: "concat_list_over_max_collection_elements",
+			expr: nestedListConcat,
+		},
+		{
+			name: "nested_dag_equality",
+			expr: dagEqExpr,
+		},
+		{
+			name: "nested_dag_inequality",
+			expr: dagNeExpr,
+		},
+		{
+			name: "nested_dag_in",
+			expr: dagInExpr,
+		},
+		{
+			name: "oversized_activation_lowerAscii",
+			expr: `event.oversiz.lowerAscii().size() > 0`,
+		},
+		{
+			name: "oversized_activation_reverse",
+			expr: `event.oversiz.reverse().size() > 0`,
+		},
+		{
+			name: "oversized_activation_substring",
+			expr: `event.oversiz.substring(0, 10).size() > 0`,
+		},
+		{
+			name: "oversized_activation_charAt",
+			expr: `event.oversiz.charAt(0) == "z"`,
+		},
+		{
+			name: "oversized_activation_indexOf",
+			expr: `event.oversiz.indexOf("z") >= 0`,
+		},
+	}
+
+	maxElapsed := 2 * celengine.DefaultLimits().EvalTimeout
+	const maxAllocDelta = 64 << 20 // 64 MiB
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prog, err := eng.Compile(tc.expr, boolKind)
+			if err != nil {
+				t.Fatalf("Compile: %v", err)
+			}
+
+			var mBefore, mAfter runtime.MemStats
+			runtime.ReadMemStats(&mBefore)
+			start := time.Now()
+			res, _, evalErr := prog.Eval(ctx, act)
+			elapsed := time.Since(start)
+			runtime.ReadMemStats(&mAfter)
+
+			if res != nil {
+				t.Fatalf("expected nil Result, got %v", res)
+			}
+			assertEvalReason(t, evalErr, celengine.ReasonCostLimit)
+			if elapsed > maxElapsed {
+				t.Errorf("elapsed %s exceeds 2x EvalTimeout (%s)", elapsed, maxElapsed)
+			}
+			allocDelta := mAfter.TotalAlloc - mBefore.TotalAlloc
+			if allocDelta > maxAllocDelta {
+				t.Errorf("TotalAlloc delta %d bytes (%.2f MiB) exceeds 64 MiB bound", allocDelta, float64(allocDelta)/(1<<20))
+			}
+		})
+	}
+
+	// Verify linear-time KMP indexOf / lastIndexOf on worst-case "aaa...a" vs "aaa...ab"
+	// within the 1 MiB output bound completes fast instead of O(N*M) CPU stall.
+	t.Run("linear_time_indexOf_and_lastIndexOf", func(t *testing.T) {
+		haystack := strings.Repeat("a", 200*1024)
+		needle := strings.Repeat("a", 100*1024) + "b"
+		searchAct := map[string]any{
+			"event": map[string]any{
+				"h": haystack,
+				"n": needle,
+			},
+		}
+		// Raise CostLimit slightly so stringSearchCostModel (which charges N*M*0.1) does
+		// not mask CPU time, or test under a 10M CostLimit engine to prove the search itself
+		// runs in O(N+M) milliseconds rather than O(N*M) seconds.
+		highCostLim := celengine.DefaultLimits()
+		highCostLim.CostLimit = celengine.MaxCostLimitCeiling
+		searchEng, err := celengine.New(testEnv(), highCostLim, celengine.DefaultCacheConfig())
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		for _, expr := range []string{`event.h.indexOf(event.n) == -1`, `event.h.lastIndexOf(event.n) == -1`} {
+			prog, err := searchEng.Compile(expr, boolKind)
+			if err != nil {
+				t.Fatalf("Compile(%s): %v", expr, err)
+			}
+			start := time.Now()
+			res, _, evalErr := prog.Eval(ctx, searchAct)
+			elapsed := time.Since(start)
+			// Under stringSearchCostModel 200k*100k*0.1 > 10M, CostTracker charges AFTER the call:
+			// either it returns true or ReasonCostLimit, and critically the call itself MUST finish
+			// in well under 2x EvalTimeout (200ms) instead of ~5s of O(N*M) rune loops!
+			if evalErr != nil {
+				assertEvalReason(t, evalErr, celengine.ReasonCostLimit)
+			} else if got, _ := res.Bool(); !got {
+				t.Fatalf("%s = false, want true", expr)
+			}
+			if elapsed > maxElapsed {
+				t.Errorf("%s took %s, want <= %s (must use linear-time search)", expr, elapsed, maxElapsed)
+			}
+		}
+	})
+}
+
+func TestGuardedFunctionsNormalSemanticsPreserved(t *testing.T) {
+	eng := newTestEngine(t)
+	boolKind := celengine.Kind{Name: "filter", Result: celengine.Bool()}
+	strKind := celengine.Kind{Name: "subject", Result: celengine.String()}
+	ctx := context.Background()
+
+	act := map[string]any{
+		"event": map[string]any{
+			"s":    "hello mellow",
+			"uni":  "héllo 🌍 héllo",
+			"bad":  string([]byte{'a', 0xff, 'b'}),
+			"nums": []any{int64(1), int64(2), int64(3)},
+			"mix":  []any{"a", int64(2)},
+			"dynN": "not-an-int",
+		},
+		"tags":  []string{"alpha", "beta", "gamma"},
+		"meta":  map[string]string{"k": "v"},
+		"count": int64(42),
+		"ratio": 3.14,
+		"at":    time.Date(2026, 11, 15, 4, 0, 0, 0, time.UTC),
+	}
+
+	trueExprs := []string{
+		`event.s.replace("he", "we") == "wello mellow"`,
+		`"hello hello".replace("he", "we", 1) == "wello hello"`,
+		`"hello hello".replace("he", "we", 0) == "hello hello"`,
+		`"hello hello".replace("he", "we", -1) == "wello wello"`,
+		`"ab".replace("", "_") == "_a_b_"`,
+		`"ab".replace("", "_", 2) == "_a_b"`,
+		`tags.join() == "alphabetagamma"`,
+		`tags.join("-") == "alpha-beta-gamma"`,
+		`[].join("/") == ""`,
+		`"a,b,c".split(",") == ["a", "b", "c"]`,
+		`"a,b,c".split(",", 0) == []`,
+		`"a,b,c".split(",", 1) == ["a,b,c"]`,
+		`"a,b,c".split(",", 2) == ["a", "b,c"]`,
+		`"a,b,c".split(",", -1) == ["a", "b", "c"]`,
+		`"hé".split("") == ["h", "é"]`,
+		`"%s:%d:%.2f:%x:%X:%o:%b:%%".format(["ok", count, ratio, "ab", 26, 8, true]) == "ok:42:3.14:6162:1A:10:1:%"`,
+		`"%s".format([[1, 2, {"a": "x"}]]) == "[1, 2, {a: x}]"`,
+		`strings.quote("hi \"there\"\n\t\\") == "\"hi \\\"there\\\"\\n\\t\\\\\""`,
+		`strings.quote(event.bad) == "\"a\ufffdb\""`,
+		`event.s.indexOf("") == 0`,
+		`event.s.indexOf("", 5) == 5`,
+		`event.s.indexOf("", 99) == 12`,
+		`event.s.indexOf("ello") == 1`,
+		`event.s.indexOf("ello", 2) == 7`,
+		`event.s.indexOf("ello", 20) == -1`,
+		`event.uni.indexOf("🌍") == 6`,
+		`event.uni.indexOf("héllo", 1) == 8`,
+		`event.s.lastIndexOf("") == 12`,
+		`event.s.lastIndexOf("", 4) == 4`,
+		`event.s.lastIndexOf("", 99) == 12`,
+		`event.s.lastIndexOf("ello") == 7`,
+		`event.s.lastIndexOf("ello", 6) == 1`,
+		`event.s.lastIndexOf("ello", 20) == -1`,
+		`event.uni.lastIndexOf("héllo") == 8`,
+		`event.uni.lastIndexOf("héllo", 7) == 0`,
+		`event.uni.charAt(6) == "🌍"`,
+		`"hello".charAt(5) == ""`,
+		`"TacoCÆt".lowerAscii() == "tacocÆt"`,
+		`"TacoCÆt".upperAscii() == "TACOCÆT"`,
+		`"héllo 🌍".reverse() == "🌍 olléh"`,
+		`event.uni.substring(6) == "🌍 héllo"`,
+		`event.uni.substring(6, 7) == "🌍"`,
+		`count + 8 == 50`,
+		`ratio + 0.86 == 4.0`,
+		`"foo" + "bar" == "foobar"`,
+		`bytes("ab") + bytes("cd") == bytes("abcd")`,
+		`[1, 2] + [3, 4] == [1, 2, 3, 4]`,
+		`tags.map(t, t.upperAscii()) == ["ALPHA", "BETA", "GAMMA"]`,
+		`at + duration("10s") > at`,
+		`"beta" in tags`,
+		`!("delta" in tags)`,
+		`"k" in meta`,
+	}
+
+	for _, expr := range trueExprs {
+		prog, err := eng.Compile(expr, boolKind)
+		if err != nil {
+			t.Fatalf("Compile(%s): %v", expr, err)
+		}
+		res, _, err := prog.Eval(ctx, act)
+		if err != nil {
+			t.Fatalf("Eval(%s) unexpected error: %v", expr, err)
+		}
+		got, err := res.Bool()
+		if err != nil || !got {
+			t.Fatalf("Eval(%s) = (%v, %v), want (true, nil)", expr, got, err)
+		}
+	}
+
+	// Verify runtime errors on invalid indices/types still surface as ReasonRuntime (and can be short-circuited by || when non-cost errors).
+	runtimeErrExprs := []string{
+		`"hello".charAt(-1)`,
+		`"hello".charAt(6)`,
+		`"hello".substring(-1)`,
+		`"hello".substring(3, 2)`,
+		`"hello".substring(0, 9)`,
+		`"%d".format([event.dynN])`,
+		`event.mix.join(",")`,
+	}
+	for _, expr := range runtimeErrExprs {
+		prog, err := eng.Compile(expr, strKind)
+		if err != nil {
+			t.Fatalf("Compile(%s): %v", expr, err)
+		}
+		_, _, evalErr := prog.Eval(ctx, act)
+		assertEvalReason(t, evalErr, celengine.ReasonRuntime)
+	}
+	for _, expr := range []string{`"hello".indexOf("e", -1) == 0`, `"hello".lastIndexOf("e", -1) == 0`} {
+		prog, err := eng.Compile(expr, boolKind)
+		if err != nil {
+			t.Fatalf("Compile(%s): %v", expr, err)
+		}
+		_, _, evalErr := prog.Eval(ctx, act)
+		assertEvalReason(t, evalErr, celengine.ReasonRuntime)
 	}
 }
