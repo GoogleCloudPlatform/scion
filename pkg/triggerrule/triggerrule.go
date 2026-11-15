@@ -531,32 +531,49 @@ func SkipReason(err error) (string, bool) {
 	if err == nil {
 		return "", false
 	}
-	var failedErr *ruleengine.FailedError
-	if errors.As(err, &failedErr) && failedErr.Reason == celengine.ReasonCanceled {
+	if reason, ok, matched := classifyRuleErrorTopDown(err); matched {
+		return reason, ok
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return "", false
-	}
-	var evalErr *celengine.EvalError
-	if errors.As(err, &evalErr) && evalErr.Reason == celengine.ReasonCanceled {
-		return "", false
-	}
-	if !errors.As(err, &failedErr) && !errors.As(err, &evalErr) &&
-		(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
-		return "", false
-	}
-	if errors.Is(err, ruleengine.ErrBudgetExhausted) {
-		return SkipReasonBudgetExhausted, true
-	}
-	var compileErr *celengine.CompileError
-	var unsupportedErr *ruleengine.UnsupportedDialectError
-	if errors.As(err, &compileErr) || errors.As(err, &unsupportedErr) {
-		return SkipReasonNoLongerCompiles, true
-	}
-	var uncertainErr *ruleengine.UncertainError
-	if errors.As(err, &uncertainErr) {
-		return SkipReasonRuleUncertain, true
-	}
-	if errors.As(err, &failedErr) || errors.As(err, &evalErr) {
-		return SkipReasonEvalFailed, true
 	}
 	return "", false
+}
+
+func classifyRuleErrorTopDown(err error) (reason string, isSkip bool, matched bool) {
+	if err == nil {
+		return "", false, false
+	}
+	if err == ruleengine.ErrBudgetExhausted {
+		return SkipReasonBudgetExhausted, true, true
+	}
+	switch e := err.(type) {
+	case *ruleengine.FailedError:
+		if e.Reason == celengine.ReasonCanceled {
+			return "", false, true
+		}
+		return SkipReasonEvalFailed, true, true
+	case *ruleengine.UncertainError:
+		return SkipReasonRuleUncertain, true, true
+	case *celengine.CompileError, *ruleengine.UnsupportedDialectError:
+		return SkipReasonNoLongerCompiles, true, true
+	case *celengine.EvalError:
+		if e.Reason == celengine.ReasonCanceled {
+			return "", false, true
+		}
+		return SkipReasonEvalFailed, true, true
+	}
+
+	if multi, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, sub := range multi.Unwrap() {
+			if r, s, m := classifyRuleErrorTopDown(sub); m {
+				return r, s, true
+			}
+		}
+		return "", false, false
+	}
+	if single, ok := err.(interface{ Unwrap() error }); ok {
+		return classifyRuleErrorTopDown(single.Unwrap())
+	}
+	return "", false, false
 }

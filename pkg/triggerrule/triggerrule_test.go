@@ -1022,3 +1022,91 @@ func TestPathologicalRuleDoesNotBlockSubsequentTriggerOnSameEvent(t *testing.T) 
 		}
 	})
 }
+
+type wrappingStubDialect struct {
+	evalFn func(ctx context.Context) error
+}
+
+func (d *wrappingStubDialect) Name() string { return "wrap_stub" }
+func (d *wrappingStubDialect) Declares() ruleengine.Capabilities {
+	return ruleengine.Capabilities{
+		PerformsIO:  true,
+		MaxEvalTime: 20 * time.Millisecond,
+		ResultKinds: []ruleengine.Kind{ruleengine.KindFilter},
+	}
+}
+func (d *wrappingStubDialect) Compile(_ context.Context, rule string, kind ruleengine.Kind, _ ruleengine.EnvironmentRef) (ruleengine.Compiled, error) {
+	return ruleengine.NewCompiled(d.Name(), kind, rule), nil
+}
+func (d *wrappingStubDialect) Evaluate(ctx context.Context, _ ruleengine.Compiled, _ ruleengine.Input, _ ruleengine.Budget) (ruleengine.Decision, error) {
+	return ruleengine.Decision{}, d.evalFn(ctx)
+}
+
+func TestSkipReasonPreservedWhenEngineWrapsDialectErrors(t *testing.T) {
+	celEng, err := celengine.New(triggerrule.Env(), triggerrule.Stage1Limits(), celengine.DefaultCacheConfig())
+	if err != nil {
+		t.Fatalf("celengine.New: %v", err)
+	}
+	celDialect, err := ruleengine.NewCELDialect(celEng)
+	if err != nil {
+		t.Fatalf("NewCELDialect: %v", err)
+	}
+	stub := &wrappingStubDialect{}
+	re := ruleengine.NewEngine()
+	if err := re.Register(celDialect); err != nil {
+		t.Fatalf("Register CEL: %v", err)
+	}
+	if err := re.Register(stub); err != nil {
+		t.Fatalf("Register stub: %v", err)
+	}
+	re.AllowConsumerDialects(triggerrule.ConsumerName, ruleengine.DialectCEL, "wrap_stub")
+
+	rules, err := triggerrule.New(re)
+	if err != nil {
+		t.Fatalf("triggerrule.New: %v", err)
+	}
+
+	ev := sampleFireEvent(`{"env":"prod"}`)
+	act, err := triggerrule.NewActivation(ev, hubfire.FireTriggerRef{ID: "trig-wrap", Name: "wrap"})
+	if err != nil {
+		t.Fatalf("NewActivation: %v", err)
+	}
+	scope := celengine.CacheScope{Consumer: triggerrule.ConsumerName, ID: "trig-wrap", Revision: 1}
+	rule := triggerrule.Rule{Dialect: "wrap_stub", Expr: "check"}
+
+	// 1. Dialect timeout wrapping an inner UncertainError still maps to SkipReasonEvalFailed.
+	stub.evalFn = func(ctx context.Context) error {
+		<-ctx.Done()
+		return &ruleengine.UncertainError{Reason: "inner_uncertain", Cause: ctx.Err()}
+	}
+	_, evalErr := rules.Match(context.Background(), scope, rule, act)
+	if reason, ok := triggerrule.SkipReason(evalErr); !ok || reason != triggerrule.SkipReasonEvalFailed {
+		t.Fatalf("timeout wrapping UncertainError: SkipReason = (%q, %v), want (%q, true) (err=%v)",
+			reason, ok, triggerrule.SkipReasonEvalFailed, evalErr)
+	}
+
+	// 2. Tracker budget exhausted wrapping an inner canceled FailedError still maps to SkipReasonBudgetExhausted.
+	stub.evalFn = func(ctx context.Context) error {
+		<-ctx.Done()
+		return &ruleengine.FailedError{Reason: celengine.ReasonCanceled, Cause: ctx.Err()}
+	}
+	tightTracker := ruleengine.NewBudgetTracker(8 * time.Millisecond)
+	_, evalErr = rules.Match(context.Background(), scope, rule, act, triggerrule.WithBudget(tightTracker))
+	if reason, ok := triggerrule.SkipReason(evalErr); !ok || reason != triggerrule.SkipReasonBudgetExhausted {
+		t.Fatalf("budget exhausted wrapping inner canceled: SkipReason = (%q, %v), want (%q, true) (err=%v)",
+			reason, ok, triggerrule.SkipReasonBudgetExhausted, evalErr)
+	}
+
+	// 3. Caller cancellation wrapping an inner UncertainError still returns ("", false).
+	stub.evalFn = func(ctx context.Context) error {
+		<-ctx.Done()
+		return &ruleengine.UncertainError{Reason: "inner_uncertain", Cause: ctx.Err()}
+	}
+	callerCtx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+	_, evalErr = rules.Match(callerCtx, scope, rule, act)
+	if reason, ok := triggerrule.SkipReason(evalErr); ok || reason != "" {
+		t.Fatalf("caller cancel wrapping UncertainError: SkipReason = (%q, %v), want (\"\", false) (err=%v)",
+			reason, ok, evalErr)
+	}
+}

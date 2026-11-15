@@ -59,9 +59,12 @@ type EnvironmentRef struct {
 	ResultType   celengine.Type
 }
 
-// Input supplies evaluation data to a Dialect.
+// Input supplies evaluation data to a Dialect. Activation carries variable
+// bindings for expression dialects such as CEL; Payload carries optional typed
+// dialect input alongside Activation (ignored by CELDialect).
 type Input struct {
 	Activation map[string]any
+	Payload    any
 }
 
 // ErrBudgetExhausted is returned when an aggregate BudgetTracker has no remaining time.
@@ -432,15 +435,18 @@ func (e *Engine) Evaluate(ctx context.Context, c Compiled, input Input, budget B
 	}
 	if err != nil {
 		if callerErr := ctx.Err(); callerErr != nil {
-			return Decision{}, &FailedError{Reason: celengine.ReasonCanceled, Cause: callerErr}
+			return Decision{}, &FailedError{
+				Reason: celengine.ReasonCanceled,
+				Cause:  errors.Join(callerErr, err),
+			}
 		}
 		if boundFromTracker && (isTimeoutFailure(err) || (errors.Is(context.Cause(evalCtx), errTrackerTimeout) && isTimeoutOrCancelFailure(err))) {
-			return Decision{}, ErrBudgetExhausted
+			return Decision{}, fmt.Errorf("%w: %w", ErrBudgetExhausted, err)
 		}
 		if errors.Is(context.Cause(evalCtx), errDialectEvalTimeout) && isTimeoutOrCancelFailure(err) {
 			return Decision{}, &FailedError{
 				Reason: celengine.ReasonTimeout,
-				Cause:  &celengine.EvalError{Reason: celengine.ReasonTimeout},
+				Cause:  errors.Join(&celengine.EvalError{Reason: celengine.ReasonTimeout}, err),
 			}
 		}
 		return Decision{}, err

@@ -317,3 +317,175 @@ func TestEvaluateTimeoutVsCallerCancellationAndTrackerRemainder(t *testing.T) {
 		t.Fatalf("pre-canceled ctx: got %T (%v), want *FailedError{Reason: %q}", err, err, celengine.ReasonCanceled)
 	}
 }
+
+type typedPayload struct {
+	Verdict string
+	Score   float64
+}
+
+type payloadCapturingDialect struct {
+	gotPayload any
+	returnErr  func(ctx context.Context) error
+}
+
+func (d *payloadCapturingDialect) Name() string { return "typed_dialect" }
+func (d *payloadCapturingDialect) Declares() ruleengine.Capabilities {
+	return ruleengine.Capabilities{
+		PerformsIO:  true,
+		MaxEvalTime: 25 * time.Millisecond,
+		ResultKinds: []ruleengine.Kind{ruleengine.KindFilter},
+	}
+}
+func (d *payloadCapturingDialect) Compile(_ context.Context, rule string, kind ruleengine.Kind, _ ruleengine.EnvironmentRef) (ruleengine.Compiled, error) {
+	return ruleengine.NewCompiled(d.Name(), kind, rule), nil
+}
+func (d *payloadCapturingDialect) Evaluate(ctx context.Context, c ruleengine.Compiled, input ruleengine.Input, _ ruleengine.Budget) (ruleengine.Decision, error) {
+	d.gotPayload = input.Payload
+	if d.returnErr != nil {
+		return ruleengine.Decision{}, d.returnErr(ctx)
+	}
+	tp, ok := input.Payload.(typedPayload)
+	return ruleengine.Decision{
+		Kind: c.Kind(),
+		Bool: ok && tp.Verdict == "approve" && input.Activation["ok"] == true,
+	}, nil
+}
+
+func TestInputPayloadPassedToDialectAndIgnoredByCEL(t *testing.T) {
+	celEng := newTestCELEngine(t, "trigger")
+	celDialect, err := ruleengine.NewCELDialect(celEng)
+	if err != nil {
+		t.Fatalf("NewCELDialect: %v", err)
+	}
+	typed := &payloadCapturingDialect{}
+
+	eng := ruleengine.NewEngine()
+	if err := eng.Register(celDialect); err != nil {
+		t.Fatalf("Register CEL: %v", err)
+	}
+	if err := eng.Register(typed); err != nil {
+		t.Fatalf("Register typed: %v", err)
+	}
+
+	ctx := context.Background()
+	wantPayload := typedPayload{Verdict: "approve", Score: 0.98}
+
+	// 1. Typed dialect receives Input.Payload beside Input.Activation.
+	compTyped, err := eng.Compile(ctx, "typed_dialect", "approve", ruleengine.KindFilter, ruleengine.EnvironmentRef{
+		Consumer: "system_one",
+		Name:     "system_one",
+	})
+	if err != nil {
+		t.Fatalf("Compile typed: %v", err)
+	}
+	dec, err := eng.Evaluate(ctx, compTyped, ruleengine.Input{
+		Activation: map[string]any{"ok": true},
+		Payload:    wantPayload,
+	}, ruleengine.Budget{})
+	if err != nil {
+		t.Fatalf("Evaluate typed: %v", err)
+	}
+	if !dec.Bool || typed.gotPayload != wantPayload {
+		t.Fatalf("got Bool=%v Payload=%#v, want true and %#v", dec.Bool, typed.gotPayload, wantPayload)
+	}
+
+	// 2. CELDialect ignores Input.Payload and evaluates Activation unchanged.
+	compCEL, err := eng.Compile(ctx, ruleengine.DialectCEL, `event.kind == "deploy"`, ruleengine.KindFilter, ruleengine.EnvironmentRef{
+		Consumer: "trigger",
+		Name:     "trigger",
+	})
+	if err != nil {
+		t.Fatalf("Compile CEL: %v", err)
+	}
+	celDec, err := eng.Evaluate(ctx, compCEL, ruleengine.Input{
+		Activation: map[string]any{"event": map[string]any{"kind": "deploy"}},
+		Payload:    wantPayload,
+	}, ruleengine.Budget{})
+	if err != nil || !celDec.Bool {
+		t.Fatalf("CEL Evaluate with Payload = (%+v, %v), want Bool=true, nil", celDec, err)
+	}
+}
+
+func TestEvaluateWrapsDialectErrorAcrossTimeoutBudgetAndCancel(t *testing.T) {
+	errProviderRootCause := errors.New("provider stream aborted")
+
+	eng := ruleengine.NewEngine()
+	dialect := &payloadCapturingDialect{}
+	if err := eng.Register(dialect); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	comp, err := eng.Compile(context.Background(), "typed_dialect", "rule", ruleengine.KindFilter, ruleengine.EnvironmentRef{
+		Consumer: "system_one",
+		Name:     "system_one",
+	})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+
+	// 1. Dialect timeout replaces outer classification with ReasonTimeout while wrapping
+	// the dialect's UncertainError and its Cause.
+	dialect.returnErr = func(ctx context.Context) error {
+		<-ctx.Done()
+		return &ruleengine.UncertainError{
+			Reason: "partial_judgment",
+			Cause:  errors.Join(ctx.Err(), errProviderRootCause),
+		}
+	}
+	_, err = eng.Evaluate(context.Background(), comp, ruleengine.Input{}, ruleengine.Budget{})
+	var outerFailed *ruleengine.FailedError
+	if !errors.As(err, &outerFailed) || outerFailed.Reason != celengine.ReasonTimeout {
+		t.Fatalf("timeout outer error = %T (%v), want *FailedError{Reason: %q}", err, err, celengine.ReasonTimeout)
+	}
+	var wrappedUncertain *ruleengine.UncertainError
+	if !errors.As(err, &wrappedUncertain) || wrappedUncertain.Reason != "partial_judgment" {
+		t.Fatalf("errors.As(*UncertainError) failed on wrapped timeout error: %v", err)
+	}
+	if !errors.Is(err, errProviderRootCause) {
+		t.Fatalf("errors.Is(errProviderRootCause) = false on wrapped timeout error: %v", err)
+	}
+
+	// 2. Tracker budget exhaustion returns ErrBudgetExhausted while wrapping the dialect's FailedError and Cause.
+	dialect.returnErr = func(ctx context.Context) error {
+		<-ctx.Done()
+		return &ruleengine.FailedError{
+			Reason: "provider_deadline",
+			Cause:  errors.Join(ctx.Err(), errProviderRootCause),
+		}
+	}
+	tracker := ruleengine.NewBudgetTracker(10 * time.Millisecond)
+	_, err = eng.Evaluate(context.Background(), comp, ruleengine.Input{}, ruleengine.Budget{Tracker: tracker})
+	if !errors.Is(err, ruleengine.ErrBudgetExhausted) {
+		t.Fatalf("budget exhausted error = %v, want errors.Is(ErrBudgetExhausted)", err)
+	}
+	var wrappedFailed *ruleengine.FailedError
+	if !errors.As(err, &wrappedFailed) || wrappedFailed.Reason != "provider_deadline" {
+		t.Fatalf("errors.As(*FailedError) failed on wrapped budget error: got %+v (%v)", wrappedFailed, err)
+	}
+	if !errors.Is(err, errProviderRootCause) {
+		t.Fatalf("errors.Is(errProviderRootCause) = false on wrapped budget error: %v", err)
+	}
+
+	// 3. Caller cancellation returns outer FailedError{Reason: "canceled"} while wrapping
+	// the dialect's UncertainError and its Cause.
+	dialect.returnErr = func(ctx context.Context) error {
+		<-ctx.Done()
+		return &ruleengine.UncertainError{
+			Reason: "caller_aborted_stream",
+			Cause:  errProviderRootCause,
+		}
+	}
+	callerCtx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+	_, err = eng.Evaluate(callerCtx, comp, ruleengine.Input{}, ruleengine.Budget{})
+	outerFailed = nil
+	if !errors.As(err, &outerFailed) || outerFailed.Reason != celengine.ReasonCanceled {
+		t.Fatalf("caller cancel outer error = %T (%v), want *FailedError{Reason: %q}", err, err, celengine.ReasonCanceled)
+	}
+	wrappedUncertain = nil
+	if !errors.As(err, &wrappedUncertain) || wrappedUncertain.Reason != "caller_aborted_stream" {
+		t.Fatalf("errors.As(*UncertainError) failed on wrapped caller-cancel error: %v", err)
+	}
+	if !errors.Is(err, errProviderRootCause) {
+		t.Fatalf("errors.Is(errProviderRootCause) = false on wrapped caller-cancel error: %v", err)
+	}
+}
