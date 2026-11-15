@@ -454,7 +454,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			mode = s.autoWakeModeOf(input.TargetAgent)
 		}
 		isFanoutMention := input.SkipPhaseGate && input.Type == messages.TypeMention
-		autoWake = mode == autoWakeResume || (mode == autoWakeAwait && !isFanoutMention)
+		autoWake = mode == autoWakeResume || (mode == autoWakeAwait && (!isFanoutMention || input.TargetAgent.HasActiveIdleSuspendClaim(time.Now())))
 		switch {
 		case holdErr != nil:
 			return nil, heldLookupFaultDMError()
@@ -730,6 +730,15 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// and the dispatch runs after the background wake. A hub that is
 	// shutting down cannot start the wake; the mention then takes the
 	// dispatch below, as it would without auto-wake.
+	isFanoutMention := input.SkipPhaseGate && input.Type == messages.TypeMention
+	if !wakeQueued && isFanoutMention {
+		if fresh, merr := s.store.MarkAgentDelivery(ctx, input.TargetAgent.ID); merr == nil && fresh != nil {
+			*input.TargetAgent = *fresh
+			if s.shouldQueueAutoWake(input.TargetAgent) && !s.agentHeldOrUnknown(ctx, input.TargetAgent.ID) {
+				wakeQueued = true
+			}
+		}
+	}
 	if wakeQueued && s.queueAutoWake(input.TargetAgent, s.agentDMAutoWakeItem(input, storeMsg, structuredMsg, dispatchMsg)) {
 		return &AgentDMResult{
 			Outcome:            AgentDMWakeQueued,
@@ -756,6 +765,18 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// the dispatch, so only a deadline can leave a row ambiguous.
 	dctx, dcancel := dispatchContext(ctx, agentDMDispatchTimeout)
 	defer dcancel()
+	if !isFanoutMention {
+		dmErr, awaitErr := s.ensureDeliverableBeforeDispatch(dctx, input.TargetAgent)
+		if awaitErr != nil {
+			dmErr = startInProgressDMError(input.TargetAgent, awaitErr)
+		}
+		if dmErr != nil {
+			s.finishAttachmentAddressee(dctx, input.AttachmentAddressee, errors.New(dmErr.Message))
+			_ = s.markFailed(dctx, msgID, dmErr.Message)
+			LogDMDispatchOutcome(input.SenderAgent, input.TargetAgent, msgID, DispatchFailed, errors.New(dmErr.Message))
+			return nil, dmErr
+		}
+	}
 	var dispatchErr error
 	var held bool
 	if isManagedAgentRuntime(input.TargetAgent.Runtime) {
@@ -921,6 +942,9 @@ func (s *Server) agentDMAutoWakeItem(input *AgentDMInput, storeMsg *store.Messag
 		deliver: func(ctx context.Context, woken *store.Agent) {
 			dctx, cancel := context.WithTimeout(ctx, agentDMDispatchTimeout)
 			defer cancel()
+			if marked, merr := s.store.MarkAgentDelivery(dctx, woken.ID); merr == nil && marked != nil {
+				woken = marked
+			}
 			var err error
 			var held bool
 			if isManagedAgentRuntime(woken.Runtime) {

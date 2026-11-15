@@ -150,6 +150,17 @@ var errStartInProgressNotReady = errors.New("target agent was already starting a
 // Nothing is started by the wait; the caller's delivery authorization
 // covers delivering to the run another start brought up.
 func (s *Server) wakeOrAwaitStart(ctx context.Context, agent *store.Agent) (dmErr *AgentDMError, awaitErr error) {
+	if agent != nil && agent.HasActiveIdleSuspendClaim(time.Now()) {
+		if err := s.waitForIdleSuspendToSettle(ctx, agent); err != nil {
+			return nil, err
+		}
+		if state.Phase(agent.Phase) == state.PhaseRunning {
+			return nil, nil
+		}
+		if s.autoWakeModeOf(agent) == autoWakeNone {
+			return validateAgentDeliverable(agent), nil
+		}
+	}
 	if state.Phase(agent.Phase) == state.PhaseStarting {
 		return nil, s.awaitStartInProgress(ctx, agent)
 	}
@@ -163,6 +174,31 @@ func (s *Server) wakeOrAwaitStart(ctx context.Context, agent *store.Agent) (dmEr
 	s.messageLog.Info("wake: another start of the target is in progress; waiting for it",
 		"agent_id", agent.ID, "holder", string(agent.StartClaimKind))
 	return nil, s.awaitStartInProgress(ctx, agent)
+}
+
+// waitForIdleSuspendToSettle waits, up to wakeReadyTimeout, for an active
+// idle-suspend claim on agent to clear, refreshing *agent to the settled row.
+func (s *Server) waitForIdleSuspendToSettle(ctx context.Context, agent *store.Agent) error {
+	ctx, cancel := context.WithTimeout(ctx, wakeReadyTimeout)
+	defer cancel()
+	for {
+		fresh, err := s.store.GetAgent(ctx, agent.ID)
+		if err != nil {
+			return fmt.Errorf("failed to check agent status during idle suspend: %w", err)
+		}
+		if fresh == nil {
+			return store.ErrNotFound
+		}
+		*agent = *fresh
+		if !fresh.HasActiveIdleSuspendClaim(time.Now()) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return errStartInProgressNotReady
+		case <-time.After(scheduledWakePollInterval):
+		}
+	}
 }
 
 // startInProgressDMError is the direct-message answer to a wait on a start

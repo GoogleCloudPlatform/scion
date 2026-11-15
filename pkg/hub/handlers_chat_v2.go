@@ -1889,8 +1889,8 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	// keeps the unreachable handling above.
 	wakePrimary := false
 	autoWakePrimary := !primaryReincarnating && primaryAgent.DeletedAt.IsZero() &&
-		s.shouldAutoWake(primaryAgent) && !s.agentHeldOrUnknown(ctx, primaryAgent.ID)
-	if !primaryReincarnating && state.Phase(primaryAgent.Phase) == state.PhaseSuspended &&
+		s.shouldQueueAutoWake(primaryAgent) && !s.agentHeldOrUnknown(ctx, primaryAgent.ID)
+	if !primaryReincarnating && (state.Phase(primaryAgent.Phase) == state.PhaseSuspended || autoWakePrimary) &&
 		primaryAgent.DeletedAt.IsZero() && (opts.Wake || opts.OfferWake || autoWakePrimary) {
 		switch {
 		case autoWakePrimary:
@@ -2242,6 +2242,30 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	if primaryReincarnating || primaryUnreachable {
 		primaryDispatchOK = false
 	} else if dispatcher != nil {
+		if fresh, merr := s.store.MarkAgentDelivery(ctx, primaryAgent.ID); merr == nil && fresh != nil {
+			*primaryAgent = *fresh
+			if s.shouldQueueAutoWake(primaryAgent) && !s.agentHeldOrUnknown(ctx, primaryAgent.ID) {
+				wakeCtx, cancelWake := context.WithTimeout(ctx, chatWakeResumeBudget)
+				dmErr, awaitErr := s.wakeOrAwaitStart(wakeCtx, primaryAgent)
+				cancelWake()
+				if dmErr != nil || awaitErr != nil {
+					failReason := "auto-wake failed"
+					if dmErr != nil {
+						failReason = dmErr.Message
+					} else if awaitErr != nil {
+						failReason = awaitErr.Error()
+					}
+					_ = s.markFailed(ctx, storeMsg.ID, failReason)
+					storeMsg.DispatchState = store.MessageDispatchFailed
+					storeMsg.DispatchFailureReason = &failReason
+					primaryDispatchOK = false
+				} else if marked, mmerr := s.store.MarkAgentDelivery(ctx, primaryAgent.ID); mmerr == nil && marked != nil {
+					*primaryAgent = *marked
+				}
+			}
+		}
+	}
+	if primaryDispatchOK && !primaryReincarnating && !primaryUnreachable && dispatcher != nil {
 		// withDispatchMessageID carries the hub message ID to the broker so a
 		// later buffered-delivery failure report (#1820) can mark this row
 		// failed even though this synchronous call returns nil (message_delivery_failures.go).
@@ -2486,7 +2510,11 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 			// lineage or branch mode can reply into the group. On purpose
 			// before delivery: a participant is a listing index, not an
 			// ACL, so one whose wake then fails stays listed harmlessly.
-			if mentionPersisted && dispatcher != nil && s.shouldAutoWake(mentionAgent) &&
+			if fresh, merr := s.store.MarkAgentDelivery(ctx, mentionAgent.ID); merr == nil && fresh != nil {
+				*mentionAgent = *fresh
+			}
+			if mentionPersisted && dispatcher != nil && s.shouldQueueAutoWake(mentionAgent) &&
+				!s.agentHeldOrUnknown(ctx, mentionAgent.ID) &&
 				s.queueAutoWake(mentionAgent, s.chatSecondaryAutoWakeItem(mentionStoreMsg.ID, mentionAddressee, agentContent, mentionMsg)) {
 				dispatchedAgents = append(dispatchedAgents, mentionAgent)
 				continue

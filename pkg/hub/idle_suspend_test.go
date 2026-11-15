@@ -21,6 +21,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -251,6 +253,11 @@ func TestIdleSuspend_LiveWorkGuardTable(t *testing.T) {
 				got, err := s.GetAgent(ctx, agent.ID)
 				require.NoError(t, err)
 				if tc.expectSkip {
+					assert.Zero(t, disp.stops.Load(), "candidate query must filter out recent live work")
+					// Also invoke the worker directly to prove the authoritative worker guard logs and skips.
+					srv.autoSuspendAgents(ctx, []autoSuspendItem{{agent: *agent, reason: state.SuspendReasonIdle}})
+					got, err = s.GetAgent(ctx, agent.ID)
+					require.NoError(t, err)
 					assert.Zero(t, disp.stops.Load(), "agent with recent live work must not be stopped")
 					assert.Equal(t, string(state.PhaseRunning), got.Phase)
 					assert.Empty(t, got.SuspendReason)
@@ -438,6 +445,17 @@ func TestIdleSuspend_FreshRereadSkipsChangedState(t *testing.T) {
 			wantSuspend: false,
 		},
 		{
+			name: "heartbeat went stale (offline guard on fresh read)",
+			mutate: func(t *testing.T, s store.Store, id string, now time.Time) {
+				db := s.(*entadapter.CompositeStore).DB()
+				_, err := db.ExecContext(context.Background(),
+					"UPDATE agents SET last_seen = ? WHERE id = ?",
+					now.Add(-(agentHeartbeatRecency + 15*time.Second)).UTC(), id)
+				require.NoError(t, err)
+			},
+			wantSuspend: false,
+		},
+		{
 			name:        "unchanged candidate suspends",
 			mutate:      func(_ *testing.T, _ store.Store, _ string, _ time.Time) {},
 			wantSuspend: true,
@@ -475,34 +493,40 @@ func TestIdleSuspend_FreshRereadSkipsChangedState(t *testing.T) {
 }
 
 func TestIdleSuspend_LifecycleOpInFlightSkipped(t *testing.T) {
-	ctx := context.Background()
-	srv, s := testServer(t)
-	disp := &runIntentDispatcher{}
-	srv.SetDispatcher(disp)
-	enableIdleSuspendForTest(t, srv, 15*time.Minute)
+	for _, reason := range []state.SuspendReason{state.SuspendReasonIdle, state.SuspendReasonStalled} {
+		t.Run(string(reason), func(t *testing.T) {
+			ctx := context.Background()
+			srv, s := testServer(t)
+			disp := &runIntentDispatcher{}
+			srv.SetDispatcher(disp)
+			enableIdleSuspendForTest(t, srv, 15*time.Minute)
 
-	now := time.Now().UTC()
-	pastGrace := now.Add(-20 * time.Minute)
-	agent := newIdleCandidateBrokerAgent(t, s, "op-inflight", string(state.ActivityIdle), &pastGrace, now.Add(-20*time.Second))
+			now := time.Now().UTC()
+			pastGrace := now.Add(-20 * time.Minute)
+			act := string(state.ActivityIdle)
+			if reason == state.SuspendReasonStalled {
+				act = string(state.ActivityStalled)
+			}
+			agent := newIdleCandidateBrokerAgent(t, s, "op-inflight-"+string(reason), act, &pastGrace, now.Add(-20*time.Second))
 
-	end := srv.beginLifecycleOp(agent.ID)
-	srv.agentIdleSuspendHandler()(ctx)
-	srv.waitAutoSuspendIdle()
+			end := srv.beginLifecycleOp(agent.ID)
+			srv.autoSuspendAgents(ctx, []autoSuspendItem{{agent: *agent, reason: reason}})
 
-	assert.Zero(t, disp.stops.Load(), "in-flight lifecycle operation must block idle auto-suspend")
-	got, err := s.GetAgent(ctx, agent.ID)
-	require.NoError(t, err)
-	assert.Equal(t, string(state.PhaseRunning), got.Phase)
+			assert.Zero(t, disp.stops.Load(), "in-flight lifecycle operation must block auto-suspend")
+			got, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, string(state.PhaseRunning), got.Phase)
 
-	end()
-	srv.agentIdleSuspendHandler()(ctx)
-	srv.waitAutoSuspendIdle()
+			end()
+			srv.autoSuspendAgents(ctx, []autoSuspendItem{{agent: *agent, reason: reason}})
 
-	assert.Equal(t, int32(1), disp.stops.Load())
-	got, err = s.GetAgent(ctx, agent.ID)
-	require.NoError(t, err)
-	assert.Equal(t, string(state.PhaseSuspended), got.Phase)
-	assert.Equal(t, string(state.SuspendReasonIdle), got.SuspendReason)
+			assert.Equal(t, int32(1), disp.stops.Load())
+			got, err = s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, string(state.PhaseSuspended), got.Phase)
+			assert.Equal(t, string(reason), got.SuspendReason)
+		})
+	}
 }
 
 func TestIdleSuspend_HarnessResumeSupport(t *testing.T) {
@@ -687,6 +711,58 @@ func TestSuspendConversion_HubSuspendedToUser(t *testing.T) {
 			assert.Contains(t, rec.Body.String(), "Only running agents can be suspended.")
 		}
 	})
+
+	t.Run("experiment off keeps 400 validation error on hub-suspended agent", func(t *testing.T) {
+		for _, reason := range []state.SuspendReason{state.SuspendReasonIdle, state.SuspendReasonStalled} {
+			ctx := context.Background()
+			srv, s, _, target, _ := autoWakeFixture(t, reason)
+			setIdleSuspendExperiment(t, srv, false)
+			u := wakeLifecycleUser(t, s, "conv-expoff-"+string(reason), target.ProjectID, "agent.lifecycle", "agent.read")
+
+			rec := requestAsIdentity(t, srv, authUser(u), http.MethodPost, "/api/v1/agents/"+target.ID+"/suspend", nil)
+			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "Only running agents can be suspended.")
+
+			got, err := s.GetAgent(ctx, target.ID)
+			require.NoError(t, err)
+			assert.Equal(t, string(reason), got.SuspendReason)
+		}
+	})
+
+	t.Run("refuses conversion while start claim or lifecycle op is held", func(t *testing.T) {
+		ctx := context.Background()
+		srv, s, _, target, _ := autoWakeFixture(t, state.SuspendReasonIdle)
+		u := wakeLifecycleUser(t, s, "conv-claimed", target.ProjectID, "agent.lifecycle", "agent.read")
+
+		// 1. Held start claim (an auto-wake in progress before writing phase=starting).
+		claim, err := s.ClaimAgentStart(ctx, target.ID, "hub-wake", store.StartClaimWake, "", 30*time.Second)
+		require.NoError(t, err)
+
+		rec := requestAsIdentity(t, srv, authUser(u), http.MethodPost, "/api/v1/agents/"+target.ID+"/suspend", nil)
+		require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		got, err := s.GetAgent(ctx, target.ID)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.SuspendReasonIdle), got.SuspendReason, "conversion must not overwrite reason while start claim is held")
+
+		_, err = s.ReleaseAgentStart(ctx, target.ID, claim.ID, "hub-wake")
+		require.NoError(t, err)
+
+		// 2. Held in-process lifecycle op.
+		endOp := srv.beginLifecycleOp(target.ID)
+		rec = requestAsIdentity(t, srv, authUser(u), http.MethodPost, "/api/v1/agents/"+target.ID+"/suspend", nil)
+		require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		got, err = s.GetAgent(ctx, target.ID)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.SuspendReasonIdle), got.SuspendReason)
+		endOp()
+
+		// Once released, conversion succeeds.
+		rec = requestAsIdentity(t, srv, authUser(u), http.MethodPost, "/api/v1/agents/"+target.ID+"/suspend", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		got, err = s.GetAgent(ctx, target.ID)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.SuspendReasonUser), got.SuspendReason)
+	})
 }
 
 func TestGroupMessage_AutoWakeHintForHubSuspendedMember(t *testing.T) {
@@ -749,6 +825,299 @@ func TestGroupMessage_AutoWakeHintForHubSuspendedMember(t *testing.T) {
 			} else {
 				assert.Contains(t, suspRes.Error, "message it directly with --wake")
 			}
+		})
+	}
+}
+
+type afterWorkerReadStore struct {
+	store.Store
+	targetID  string
+	armed     atomic.Bool
+	fired     atomic.Bool
+	afterRead func()
+}
+
+func (w *afterWorkerReadStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	a, err := w.Store.GetAgent(ctx, id)
+	if err == nil && id == w.targetID && w.armed.Load() && w.fired.CompareAndSwap(false, true) {
+		w.afterRead()
+	}
+	return a, err
+}
+
+type stopMutatingDispatcher struct {
+	runIntentDispatcher
+	onStop func(ctx context.Context, a *store.Agent)
+}
+
+func (d *stopMutatingDispatcher) DispatchAgentStop(ctx context.Context, a *store.Agent) error {
+	if d.onStop != nil {
+		d.onStop(ctx, a)
+	}
+	return d.runIntentDispatcher.DispatchAgentStop(ctx, a)
+}
+
+type blockingStopWakeDispatcher struct {
+	wakeTrackingDispatcher
+	stopOnce    sync.Once
+	stopEntered chan struct{}
+	releaseStop chan struct{}
+}
+
+func (d *blockingStopWakeDispatcher) DispatchAgentStop(ctx context.Context, a *store.Agent) error {
+	d.stopOnce.Do(func() { close(d.stopEntered) })
+	select {
+	case <-d.releaseStop:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return nil
+}
+
+// TestIdleSuspend_PostReadTOCTOU verifies C1: state changes or deliveries that
+// land AFTER autoSuspendAgent's initial GetAgent read (either before
+// ClaimIdleSuspend or during DispatchAgentStop) never lose a message and never
+// leave an active/blocked/waiting agent idle-suspended.
+func TestIdleSuspend_PostReadTOCTOU(t *testing.T) {
+	stateCases := []struct {
+		name   string
+		mutate func(t *testing.T, dbExec func(query string, args ...any))
+	}{
+		{
+			name: "blocked",
+			mutate: func(_ *testing.T, dbExec func(string, ...any)) {
+				now := time.Now().UTC()
+				dbExec("UPDATE agents SET activity = ?, activity_since = ? WHERE 1=1", string(state.ActivityBlocked), now)
+			},
+		},
+		{
+			name: "waiting_for_input",
+			mutate: func(_ *testing.T, dbExec func(string, ...any)) {
+				now := time.Now().UTC()
+				dbExec("UPDATE agents SET activity = ?, activity_since = ? WHERE 1=1", string(state.ActivityWaitingForInput), now)
+			},
+		},
+		{
+			name: "live_work",
+			mutate: func(_ *testing.T, dbExec func(string, ...any)) {
+				now := time.Now().UTC()
+				dbExec("UPDATE agents SET last_live_process_at = ? WHERE 1=1", now)
+			},
+		},
+	}
+
+	for _, tc := range stateCases {
+		t.Run("before_claim/"+tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			srv, rawStore := testServer(t)
+			disp := &runIntentDispatcher{}
+			srv.SetDispatcher(disp)
+			enableIdleSuspendForTest(t, srv, 15*time.Minute)
+
+			now := time.Now().UTC()
+			pastGrace := now.Add(-20 * time.Minute)
+			snapshot := newIdleCandidateBrokerAgent(t, rawStore, "preclaim-"+tc.name, string(state.ActivityIdle), &pastGrace, now.Add(-15*time.Second))
+			db := rawStore.(*entadapter.CompositeStore).DB()
+
+			wrapped := &afterWorkerReadStore{
+				Store:    rawStore,
+				targetID: snapshot.ID,
+				afterRead: func() {
+					tc.mutate(t, func(q string, args ...any) {
+						_, err := db.ExecContext(ctx, q+" AND id = ?", append(args, snapshot.ID)...)
+						require.NoError(t, err)
+					})
+				},
+			}
+			srv.store = wrapped
+			wrapped.armed.Store(true)
+
+			srv.autoSuspendAgents(ctx, []autoSuspendItem{{agent: *snapshot, reason: state.SuspendReasonIdle}})
+
+			assert.Zero(t, disp.stops.Load(), "ClaimIdleSuspend must abort before DispatchAgentStop when %s lands after GetAgent", tc.name)
+			got, err := rawStore.GetAgent(ctx, snapshot.ID)
+			require.NoError(t, err)
+			assert.Equal(t, string(state.PhaseRunning), got.Phase)
+			assert.Empty(t, got.SuspendReason)
+			assert.Equal(t, store.RunIntentRunning, got.RunIntent)
+			assert.False(t, got.HasActiveIdleSuspendClaim(time.Now()))
+		})
+
+		t.Run("during_stop_dispatch/"+tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			srv, s := testServer(t)
+			db := s.(*entadapter.CompositeStore).DB()
+			disp := &stopMutatingDispatcher{
+				onStop: func(_ context.Context, a *store.Agent) {
+					tc.mutate(t, func(q string, args ...any) {
+						_, err := db.ExecContext(ctx, q+" AND id = ?", append(args, a.ID)...)
+						require.NoError(t, err)
+					})
+				},
+			}
+			srv.SetDispatcher(disp)
+			enableIdleSuspendForTest(t, srv, 15*time.Minute)
+
+			now := time.Now().UTC()
+			pastGrace := now.Add(-20 * time.Minute)
+			snapshot := newIdleCandidateBrokerAgent(t, s, "midstop-"+tc.name, string(state.ActivityIdle), &pastGrace, now.Add(-15*time.Second))
+
+			srv.autoSuspendAgents(ctx, []autoSuspendItem{{agent: *snapshot, reason: state.SuspendReasonIdle}})
+
+			got, err := s.GetAgent(ctx, snapshot.ID)
+			require.NoError(t, err)
+			assert.Equal(t, string(state.PhaseRunning), got.Phase, "recordStopStatus IfIdleSuspend must reject when %s lands during stop", tc.name)
+			assert.Empty(t, got.SuspendReason)
+			assert.Equal(t, store.RunIntentRunning, got.RunIntent)
+			assert.False(t, got.HasActiveIdleSuspendClaim(time.Now()))
+		})
+	}
+
+	for _, dmPath := range []string{"agent_dm", "user_dm"} {
+		t.Run("message_delivered_before_claim/"+dmPath, func(t *testing.T) {
+			ctx := context.Background()
+			srv, rawStore, sender, target := createWakeDMFixtures(t, string(state.PhaseRunning))
+			disp := &wakeTrackingDispatcher{}
+			srv.SetDispatcher(disp)
+			enableIdleSuspendForTest(t, srv, 15*time.Minute)
+
+			_, err := rawStore.SetRunIntent(ctx, target.ID, store.RunIntentRunning)
+			require.NoError(t, err)
+			require.NoError(t, rawStore.UpdateAgentStatus(ctx, target.ID, store.AgentStatusUpdate{
+				Phase:    string(state.PhaseRunning),
+				Activity: string(state.ActivityIdle),
+			}))
+			now := time.Now().UTC()
+			db := rawStore.(*entadapter.CompositeStore).DB()
+			_, err = db.ExecContext(ctx,
+				"UPDATE agents SET run_id = ?, activity_since = ?, last_seen = ? WHERE id = ?",
+				"run-dm-pre-"+dmPath, now.Add(-20*time.Minute), now.Add(-15*time.Second), target.ID,
+			)
+			require.NoError(t, err)
+			snapshot, err := rawStore.GetAgent(ctx, target.ID)
+			require.NoError(t, err)
+			u := wakeLifecycleUser(t, rawStore, "dm-pre-"+dmPath, target.ProjectID, "agent.message", "agent.read")
+
+			wrapped := &afterWorkerReadStore{
+				Store:    rawStore,
+				targetID: snapshot.ID,
+				afterRead: func() {
+					// Deliver a DM right after the worker read the candidate,
+					// before ClaimIdleSuspend runs.
+					srv.store = rawStore
+					if dmPath == "agent_dm" {
+						res, dmErr := srv.ExecuteAgentDM(ctx, awAgentDMInput(sender, snapshot, "hello before claim"))
+						require.Nil(t, dmErr)
+						require.Equal(t, AgentDMAccepted, res.Outcome)
+					} else {
+						rec := requestAsIdentity(t, srv, authUser(u), http.MethodPost, "/api/v1/agents/"+snapshot.ID+"/message",
+							map[string]any{"message": "hello before claim"})
+						require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+					}
+				},
+			}
+			srv.store = wrapped
+			wrapped.armed.Store(true)
+
+			srv.autoSuspendAgents(ctx, []autoSuspendItem{{agent: *snapshot, reason: state.SuspendReasonIdle}})
+
+			got, err := rawStore.GetAgent(ctx, snapshot.ID)
+			require.NoError(t, err)
+			assert.Equal(t, string(state.PhaseRunning), got.Phase, "message delivered before claim must prevent idle suspend")
+			assert.Empty(t, got.SuspendReason)
+			assert.Empty(t, disp.getStartCalls())
+			msgs := disp.getMessageCalls()
+			require.Len(t, msgs, 1)
+			assert.Equal(t, "hello before claim", msgs[0].Message)
+		})
+
+		t.Run("message_during_claimed_stop_awaits_and_autowakes/"+dmPath, func(t *testing.T) {
+			ctx := context.Background()
+			srv, s, sender, target := createWakeDMFixtures(t, string(state.PhaseRunning))
+			disp := &blockingStopWakeDispatcher{
+				stopEntered: make(chan struct{}),
+				releaseStop: make(chan struct{}),
+			}
+			srv.SetDispatcher(disp)
+			t.Cleanup(srv.waitAutoWakeIdle)
+			enableIdleSuspendForTest(t, srv, 15*time.Minute)
+
+			_, err := s.SetRunIntent(ctx, target.ID, store.RunIntentRunning)
+			require.NoError(t, err)
+			require.NoError(t, s.UpdateAgentStatus(ctx, target.ID, store.AgentStatusUpdate{
+				Phase:    string(state.PhaseRunning),
+				Activity: string(state.ActivityIdle),
+			}))
+			now := time.Now().UTC()
+			db := s.(*entadapter.CompositeStore).DB()
+			_, err = db.ExecContext(ctx,
+				"UPDATE agents SET run_id = ?, activity_since = ?, last_seen = ? WHERE id = ?",
+				"run-dm-mid-"+dmPath, now.Add(-20*time.Minute), now.Add(-15*time.Second), target.ID,
+			)
+			require.NoError(t, err)
+			snapshot, err := s.GetAgent(ctx, target.ID)
+			require.NoError(t, err)
+			u := wakeLifecycleUser(t, s, "dm-mid-"+dmPath, target.ProjectID, "agent.message", "agent.read")
+			awReadyOnStart(t, s, target.ID)
+
+			sweepDone := make(chan struct{})
+			go func() {
+				defer close(sweepDone)
+				srv.autoSuspendAgents(ctx, []autoSuspendItem{{agent: *snapshot, reason: state.SuspendReasonIdle}})
+			}()
+
+			// Wait until ClaimIdleSuspend has committed and DispatchAgentStop is in flight.
+			<-disp.stopEntered
+			claimed, err := s.GetAgent(ctx, target.ID)
+			require.NoError(t, err)
+			require.True(t, claimed.HasActiveIdleSuspendClaim(time.Now()), "idle-suspend claim must be held during DispatchAgentStop")
+
+			// Start the DM while the container is being stopped.
+			dmDone := make(chan error, 1)
+			go func() {
+				if dmPath == "agent_dm" {
+					res, dmErr := srv.ExecuteAgentDM(ctx, awAgentDMInput(sender, snapshot, "hello during stop"))
+					if dmErr != nil {
+						dmDone <- fmt.Errorf("dmErr: %s: %s", dmErr.Code, dmErr.Message)
+						return
+					}
+					if res.Outcome != AgentDMAccepted {
+						dmDone <- fmt.Errorf("unexpected outcome: %v", res.Outcome)
+						return
+					}
+					dmDone <- nil
+				} else {
+					rec := requestAsIdentity(t, srv, authUser(u), http.MethodPost, "/api/v1/agents/"+snapshot.ID+"/message",
+						map[string]any{"message": "hello during stop"})
+					if rec.Code != http.StatusOK {
+						dmDone <- fmt.Errorf("status %d: %s", rec.Code, rec.Body.String())
+						return
+					}
+					dmDone <- nil
+				}
+			}()
+
+			// Give the DM goroutine time to enter MarkAgentDelivery + waitForIdleSuspendToSettle;
+			// it must NOT deliver into the dying container while stop is in flight.
+			time.Sleep(25 * time.Millisecond)
+			assert.Empty(t, disp.getMessageCalls(), "DM must not dispatch into dying container while claim is held")
+
+			// Let DispatchAgentStop finish -> agent suspends -> DM awaits, auto-wakes, and delivers.
+			close(disp.releaseStop)
+			<-sweepDone
+			require.NoError(t, <-dmDone)
+
+			require.Len(t, disp.getStartCalls(), 1, "agent must be auto-woken after idle suspend settles")
+			assert.True(t, disp.getStartCalls()[0].Continue)
+			msgs := disp.getMessageCalls()
+			require.Len(t, msgs, 1)
+			assert.Equal(t, "hello during stop", msgs[0].Message)
+
+			after, err := s.GetAgent(ctx, target.ID)
+			require.NoError(t, err)
+			assert.Equal(t, string(state.PhaseRunning), after.Phase)
+			assert.Empty(t, after.SuspendReason)
+			assert.False(t, after.HasActiveIdleSuspendClaim(time.Now()))
 		})
 	}
 }

@@ -3262,6 +3262,26 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// reached the migrating primary. Gating them here silently dropped both
 	// with no way for the sender to tell.
 	if !deferDelivery {
+		if delegatedSender {
+			if fresh, merr := s.store.MarkAgentDelivery(ctx, agent.ID); merr == nil && fresh != nil {
+				*agent = *fresh
+			}
+		} else {
+			s.extendWriteDeadlineForDMWake(ctx, w)
+			dmErr, awaitErr := s.ensureDeliverableBeforeDispatch(ctx, agent)
+			if awaitErr != nil {
+				dmErr = startInProgressDMError(agent, awaitErr)
+			}
+			if dmErr != nil {
+				if persistedMsgID != "" {
+					if markErr := s.markFailed(ctx, persistedMsgID, dmErr.Message); markErr != nil {
+						s.messageLog.Error("Failed to mark message as failed", "id", persistedMsgID, "error", markErr)
+					}
+				}
+				WriteAgentDMError(w, dmErr)
+				return
+			}
+		}
 		// Managed agent path: deliver message directly via backend, bypass broker.
 		if isManagedAgentRuntime(agent.Runtime) {
 			if err := s.managedAgentMessage(ctx, agent, plainMessage, req.Interrupt); err != nil {
@@ -3789,6 +3809,26 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 			if gateReason != nil {
 				results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: *gateReason}
 				continue
+			}
+
+			if fresh, merr := s.store.MarkAgentDelivery(ctx, agent.ID); merr == nil && fresh != nil {
+				*agent = *fresh
+				if fresh.HasActiveIdleSuspendClaim(time.Now()) || state.Phase(store.EffectiveRestingPhase(fresh)) != state.PhaseRunning {
+					checkAgent := *fresh
+					if fresh.HasActiveIdleSuspendClaim(time.Now()) {
+						checkAgent.Phase = string(state.PhaseSuspended)
+						checkAgent.SuspendReason = string(state.SuspendReasonIdle)
+					}
+					reason := "agent is not running"
+					if dmErr := s.groupMemberDeliverableError(&checkAgent); dmErr != nil {
+						reason = dmErr.Message
+					}
+					if persisted {
+						_ = s.markFailed(ctx, storeMsg.ID, reason)
+					}
+					results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: reason}
+					continue
+				}
 			}
 
 			// ptone/scion#1839: carry the per-member persisted message ID
@@ -4721,6 +4761,19 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 		if mentionAgent.RuntimeBrokerID == "" {
 			results[i].Status = "error"
 			results[i].Error = "agent has no runtime broker"
+			continue
+		}
+
+		if fresh, merr := s.store.MarkAgentDelivery(ctx, mentionAgent.ID); merr == nil && fresh != nil {
+			*mentionAgent = *fresh
+		}
+		if persisted && s.shouldQueueAutoWake(mentionAgent) && !s.agentHeldOrUnknown(ctx, mentionAgent.ID) &&
+			s.queueAutoWake(mentionAgent, s.chatSecondaryAutoWakeItem(storeMsg.ID, "", mentionMsg.Msg, mentionMsg)) {
+			if groupConversationID != "" {
+				if joinOK, _ := s.groupAgentJoinAllowed(ctx, senderIdentity, mentionAgent); joinOK {
+					s.ensureGroupParticipants(ctx, groupConversationID, []*store.Agent{mentionAgent})
+				}
+			}
 			continue
 		}
 

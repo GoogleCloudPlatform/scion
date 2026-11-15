@@ -521,7 +521,11 @@ func (nd *NotificationDispatcher) dispatchToAgent(ctx context.Context, sub *stor
 		return
 	}
 
-	if subscriberSuspended(subscriber) {
+	if fresh, merr := nd.store.MarkAgentDelivery(ctx, subscriber.ID); merr == nil && fresh != nil {
+		subscriber = fresh
+	}
+
+	if subscriberSuspended(subscriber) || subscriber.HasActiveIdleSuspendClaim(time.Now()) {
 		// No running agent to deliver to: leave the notification pending
 		// with no attempt counted. The dispatch sweep leaves it out while
 		// the subscriber is suspended, delivers it after a resume, and

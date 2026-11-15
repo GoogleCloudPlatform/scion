@@ -711,6 +711,20 @@ func (s *Server) swapRunIntent(ctx context.Context, agent *store.Agent, intent s
 	return prior, at, nil
 }
 
+// claimIdleSuspend atomically checks the idle-suspend guards on the locked
+// agent row, swaps run_intent to stopped, and records an idle-suspend claim
+// lease before DispatchAgentStop runs.
+func (s *Server) claimIdleSuspend(ctx context.Context, agent *store.Agent, cond store.IdleSuspendCondition) (store.RunIntent, time.Time, error) {
+	prior, at, err := s.store.ClaimIdleSuspend(ctx, agent.ID, cond)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	agent.RunIntent = store.RunIntentStopped
+	stored := at
+	agent.RunIntentAt = &stored
+	return prior, at, nil
+}
+
 // AgentLifecycleStartRequest is the optional JSON body for the "start"
 // lifecycle action. It is empty for a normal start; ForceResume is only
 // meaningful when the agent is in phase=error, where it requests a

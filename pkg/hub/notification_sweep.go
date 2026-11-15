@@ -431,7 +431,11 @@ func (nd *NotificationDispatcher) retryDispatch(ctx context.Context, notif *stor
 	// query leaves them out until the agent leaves the suspended phase, and
 	// the sweep expires them at notificationRetryMaxAge. Reaching here means
 	// the agent was suspended after the query selected the row.
-	if subscriberSuspended(subscriber) {
+	if fresh, merr := nd.store.MarkAgentDelivery(ctx, subscriber.ID); merr == nil && fresh != nil {
+		subscriber = fresh
+	}
+
+	if subscriberSuspended(subscriber) || subscriber.HasActiveIdleSuspendClaim(time.Now()) {
 		nd.log.Debug("retry: subscriber is suspended, reverting claim",
 			"subscriberID", sub.SubscriberID, "notificationID", notif.ID)
 		nd.revertClaim(ctx, notif.ID)
