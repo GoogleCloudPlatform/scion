@@ -220,6 +220,8 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 	}
 	sa.LastLiveProcessAt = copyTimePtr(a.LastLiveProcessAt)
 	sa.LastLiveWorkAt = copyTimePtr(a.LastLiveWorkAt)
+	sa.LastDeliveryAt = copyTimePtr(a.LastDeliveryAt)
+	sa.IdleSuspendClaimUntil = copyTimePtr(a.IdleSuspendClaimUntil)
 	if a.StartedAt != nil {
 		sa.StartedAt = *a.StartedAt
 	}
@@ -1703,6 +1705,15 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	if su.IfRunID != "" && current.RunID != su.IfRunID {
 		return store.ErrRunChanged
 	}
+	if su.IfNoStartClaim && (heldClaimError(current) != nil || (current.IdleSuspendClaimUntil != nil && time.Now().Before(*current.IdleSuspendClaimUntil))) {
+		return store.ErrClaimPredicate
+	}
+	if su.IfAutoWakeReason && (current.SuspendReason == nil || !state.SuspendReason(*current.SuspendReason).AutoWakes()) {
+		return store.ErrPhaseMismatch
+	}
+	if su.IfIdleSuspend != nil && !checkIdleSuspendRow(current, *su.IfIdleSuspend, time.Now(), true) {
+		return store.ErrIdleSuspendPrecondition
+	}
 
 	// The exit reason is a closed set: a value outside it is dropped here,
 	// whatever the caller, before any rule reads it.
@@ -2032,6 +2043,9 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 			upd.SetLaunchState(store.LaunchStateEnded)
 			upd.SetLaunchEndReason(store.LaunchEndReasonRunningObserved)
 		}
+	}
+	if su.Phase == string(state.PhaseStarting) || (su.Phase == string(state.PhaseRunning) && su.StartWrite) {
+		upd.ClearIdleSuspendClaimUntil()
 	}
 
 	if su.Message != "" {
@@ -3091,8 +3105,8 @@ func (s *AgentStore) MarkStalledAgents(ctx context.Context, activityThreshold, h
 }
 
 // ListIdleSuspendCandidates implements store.AgentStore.
-func (s *AgentStore) ListIdleSuspendCandidates(ctx context.Context, cutoff, heartbeatRecency time.Time) ([]store.Agent, error) {
-	rows, err := s.client.Agent.Query().Where(
+func (s *AgentStore) ListIdleSuspendCandidates(ctx context.Context, cutoff, heartbeatRecency, liveWorkCutoff time.Time, limit int) ([]store.Agent, error) {
+	q := s.client.Agent.Query().Where(
 		agent.DeletedAtIsNil(),
 		agent.PhaseEQ(string(state.PhaseRunning)),
 		agent.ActivityIn(state.SuspendEligibleActivities()...),
@@ -3100,7 +3114,15 @@ func (s *AgentStore) ListIdleSuspendCandidates(ctx context.Context, cutoff, hear
 		agent.ActivitySinceLT(cutoff.UTC()),
 		agent.LastSeenNotNil(),
 		agent.LastSeenGTE(heartbeatRecency.UTC()),
-	).All(ctx)
+		agent.Or(
+			agent.LastLiveProcessAtIsNil(),
+			agent.LastLiveProcessAtLT(liveWorkCutoff.UTC()),
+		),
+	)
+	if limit > 0 {
+		q = q.Limit(limit)
+	}
+	rows, err := q.All(ctx)
 	if err != nil {
 		return nil, mapError(err)
 	}

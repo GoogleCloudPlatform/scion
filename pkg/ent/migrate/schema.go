@@ -249,6 +249,8 @@ var (
 		{Name: "start_claim_launch_id", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "soft_delete_op_id", Type: field.TypeString, Nullable: true},
 		{Name: "activity_since", Type: field.TypeTime, Nullable: true},
+		{Name: "last_delivery_at", Type: field.TypeTime, Nullable: true},
+		{Name: "idle_suspend_claim_until", Type: field.TypeTime, Nullable: true},
 		{Name: "project_id", Type: field.TypeUUID},
 	}
 	// AgentsTable holds the schema information for the "agents" table.
@@ -259,7 +261,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "agents_projects_agents",
-				Columns:    []*schema.Column{AgentsColumns[99]},
+				Columns:    []*schema.Column{AgentsColumns[101]},
 				RefColumns: []*schema.Column{ProjectsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -278,17 +280,17 @@ var (
 			{
 				Name:    "agent_slug_project_id",
 				Unique:  true,
-				Columns: []*schema.Column{AgentsColumns[3], AgentsColumns[99]},
+				Columns: []*schema.Column{AgentsColumns[3], AgentsColumns[101]},
 			},
 			{
 				Name:    "agent_project_id_owner_id",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[99], AgentsColumns[8]},
+				Columns: []*schema.Column{AgentsColumns[101], AgentsColumns[8]},
 			},
 			{
 				Name:    "agent_project_id_created_by",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[99], AgentsColumns[7]},
+				Columns: []*schema.Column{AgentsColumns[101], AgentsColumns[7]},
 			},
 			{
 				Name:    "agent_launch_deadline",

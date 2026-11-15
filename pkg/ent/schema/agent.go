@@ -586,6 +586,29 @@ func (Agent) Fields() []ent.Field {
 		field.Time("activity_since").
 			Optional().
 			Nillable(),
+
+		// last_delivery_at is the store-clock time of the most recent
+		// hub-side delivery mark written before handing an item (DM,
+		// mention, chat send, notification, scheduled fire) to a running
+		// agent (ptone/scion#7947). The idle auto-suspend CAS checks it so
+		// an item dispatched just before the Container's prompt-submit hook
+		// changes activity is never stopped mid-turn. Written only by
+		// AgentStore.MarkAgentDelivery, never by CreateAgent or UpdateAgent.
+		field.Time("last_delivery_at").
+			Optional().
+			Nillable(),
+
+		// idle_suspend_claim_until is the store-clock lease expiry of an
+		// in-flight idle auto-suspend stop dispatch (ptone/scion#7947).
+		// Written atomically with run_intent=stopped by
+		// AgentStore.ClaimIdleSuspend before DispatchAgentStop and cleared
+		// once the suspension (and its credential/quota settlement) finishes
+		// or aborts. Delivery paths that observe an unexpired claim wait for
+		// the suspension to settle and then auto-wake, rather than
+		// dispatching into the dying container.
+		field.Time("idle_suspend_claim_until").
+			Optional().
+			Nillable(),
 	}
 }
 

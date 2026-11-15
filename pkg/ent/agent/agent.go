@@ -214,6 +214,10 @@ const (
 	FieldSoftDeleteOpID = "soft_delete_op_id"
 	// FieldActivitySince holds the string denoting the activity_since field in the database.
 	FieldActivitySince = "activity_since"
+	// FieldLastDeliveryAt holds the string denoting the last_delivery_at field in the database.
+	FieldLastDeliveryAt = "last_delivery_at"
+	// FieldIdleSuspendClaimUntil holds the string denoting the idle_suspend_claim_until field in the database.
+	FieldIdleSuspendClaimUntil = "idle_suspend_claim_until"
 	// EdgeProject holds the string denoting the project edge name in mutations.
 	EdgeProject = "project"
 	// EdgeMemberships holds the string denoting the memberships edge name in mutations.
@@ -365,6 +369,8 @@ var Columns = []string{
 	FieldStartClaimLaunchID,
 	FieldSoftDeleteOpID,
 	FieldActivitySince,
+	FieldLastDeliveryAt,
+	FieldIdleSuspendClaimUntil,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -1002,6 +1008,16 @@ func BySoftDeleteOpID(opts ...sql.OrderTermOption) OrderOption {
 // ByActivitySince orders the results by the activity_since field.
 func ByActivitySince(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldActivitySince, opts...).ToFunc()
+}
+
+// ByLastDeliveryAt orders the results by the last_delivery_at field.
+func ByLastDeliveryAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldLastDeliveryAt, opts...).ToFunc()
+}
+
+// ByIdleSuspendClaimUntil orders the results by the idle_suspend_claim_until field.
+func ByIdleSuspendClaimUntil(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldIdleSuspendClaimUntil, opts...).ToFunc()
 }
 
 // ByProjectField orders the results by project field.

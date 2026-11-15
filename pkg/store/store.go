@@ -875,10 +875,31 @@ type AgentStore interface {
 
 	// ListIdleSuspendCandidates returns non-deleted running agents holding a
 	// suspend-eligible activity (state.SuspendEligibleActivities) whose
-	// activity_since is non-NULL and predates cutoff, and whose heartbeat
-	// (last_seen) is at or after heartbeatRecency. Offline agents and rows with
-	// a NULL activity_since are never returned.
-	ListIdleSuspendCandidates(ctx context.Context, cutoff, heartbeatRecency time.Time) ([]Agent, error)
+	// activity_since is non-NULL and predates cutoff, whose heartbeat
+	// (last_seen) is at or after heartbeatRecency, and whose
+	// last_live_process_at is NULL or predates liveWorkCutoff. Offline agents
+	// and rows with a NULL activity_since are never returned. A positive limit
+	// bounds the number of rows returned.
+	ListIdleSuspendCandidates(ctx context.Context, cutoff, heartbeatRecency, liveWorkCutoff time.Time, limit int) ([]Agent, error)
+
+	// ClaimIdleSuspend atomically checks that agentID still satisfies cond on
+	// the locked row (phase=running, matching run_id/activity/activity_since
+	// past grace, recent heartbeat when HeartbeatRecency > 0, stale live work,
+	// no start/delete/reincarnation claim, and no delivery since
+	// activity_since), swaps run_intent to stopped, and sets
+	// idle_suspend_claim_until to now+cond.ClaimTTL. Returns
+	// ErrIdleSuspendPrecondition when any guard fails.
+	ClaimIdleSuspend(ctx context.Context, agentID string, cond IdleSuspendCondition) (prior RunIntent, at time.Time, err error)
+
+	// ClearIdleSuspendClaim clears idle_suspend_claim_until on agentID.
+	ClearIdleSuspendClaim(ctx context.Context, agentID string) error
+
+	// MarkAgentDelivery records last_delivery_at on agentID under the row lock
+	// when no active idle-suspend claim is held and the agent is running or
+	// starting, and returns the fresh Agent snapshot (including any active
+	// idle_suspend_claim_until or phase transition) for delivery/auto-wake
+	// classification.
+	MarkAgentDelivery(ctx context.Context, agentID string) (*Agent, error)
 
 	// MarkAgentContainerMissing moves a running (or stopping) agent whose
 	// container its runtime broker no longer reports to phase=error with exit reason
@@ -1584,6 +1605,22 @@ type AgentStatusUpdate struct {
 	// stop dispatched for run X sets it to X, so the stop never marks a
 	// newer run stopped. Internal to the hub — json:"-".
 	IfRunID string `json:"-"`
+	// IfIdleSuspend, when non-nil, makes the update conditional on the locked
+	// row still satisfying the idle-suspend guards (phase=running, matching
+	// run_id/activity/activity_since, stale live work, no delivery since
+	// activity_since, and no start/delete/reincarnation claim); otherwise
+	// UpdateAgentStatus returns ErrIdleSuspendPrecondition and writes nothing.
+	// Internal to the hub — json:"-".
+	IfIdleSuspend *IdleSuspendCondition `json:"-"`
+	// IfNoStartClaim, when true, makes the update conditional on no start
+	// claim being held on the locked row; otherwise UpdateAgentStatus returns
+	// ErrClaimPredicate and writes nothing. Internal to the hub — json:"-".
+	IfNoStartClaim bool `json:"-"`
+	// IfAutoWakeReason, when true, makes the update conditional on the stored
+	// suspend_reason being an auto-waking reason (idle or stalled); otherwise
+	// UpdateAgentStatus returns ErrPhaseMismatch and writes nothing. Internal
+	// to the hub — json:"-".
+	IfAutoWakeReason bool `json:"-"`
 	// StartWrite marks a start's own post-dispatch status write. Its delete
 	// guard uses the start-block rule (DeletionHoldsRow) instead of the
 	// lease-aware active rule: a finalizing row holds even with its lease

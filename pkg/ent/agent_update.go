@@ -1835,6 +1835,46 @@ func (_u *AgentUpdate) ClearActivitySince() *AgentUpdate {
 	return _u
 }
 
+// SetLastDeliveryAt sets the "last_delivery_at" field.
+func (_u *AgentUpdate) SetLastDeliveryAt(v time.Time) *AgentUpdate {
+	_u.mutation.SetLastDeliveryAt(v)
+	return _u
+}
+
+// SetNillableLastDeliveryAt sets the "last_delivery_at" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableLastDeliveryAt(v *time.Time) *AgentUpdate {
+	if v != nil {
+		_u.SetLastDeliveryAt(*v)
+	}
+	return _u
+}
+
+// ClearLastDeliveryAt clears the value of the "last_delivery_at" field.
+func (_u *AgentUpdate) ClearLastDeliveryAt() *AgentUpdate {
+	_u.mutation.ClearLastDeliveryAt()
+	return _u
+}
+
+// SetIdleSuspendClaimUntil sets the "idle_suspend_claim_until" field.
+func (_u *AgentUpdate) SetIdleSuspendClaimUntil(v time.Time) *AgentUpdate {
+	_u.mutation.SetIdleSuspendClaimUntil(v)
+	return _u
+}
+
+// SetNillableIdleSuspendClaimUntil sets the "idle_suspend_claim_until" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableIdleSuspendClaimUntil(v *time.Time) *AgentUpdate {
+	if v != nil {
+		_u.SetIdleSuspendClaimUntil(*v)
+	}
+	return _u
+}
+
+// ClearIdleSuspendClaimUntil clears the value of the "idle_suspend_claim_until" field.
+func (_u *AgentUpdate) ClearIdleSuspendClaimUntil() *AgentUpdate {
+	_u.mutation.ClearIdleSuspendClaimUntil()
+	return _u
+}
+
 // SetProject sets the "project" edge to the Project entity.
 func (_u *AgentUpdate) SetProject(v *Project) *AgentUpdate {
 	return _u.SetProjectID(v.ID)
@@ -2623,6 +2663,18 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.ActivitySinceCleared() {
 		_spec.ClearField(agent.FieldActivitySince, field.TypeTime)
+	}
+	if value, ok := _u.mutation.LastDeliveryAt(); ok {
+		_spec.SetField(agent.FieldLastDeliveryAt, field.TypeTime, value)
+	}
+	if _u.mutation.LastDeliveryAtCleared() {
+		_spec.ClearField(agent.FieldLastDeliveryAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.IdleSuspendClaimUntil(); ok {
+		_spec.SetField(agent.FieldIdleSuspendClaimUntil, field.TypeTime, value)
+	}
+	if _u.mutation.IdleSuspendClaimUntilCleared() {
+		_spec.ClearField(agent.FieldIdleSuspendClaimUntil, field.TypeTime)
 	}
 	if _u.mutation.ProjectCleared() {
 		edge := &sqlgraph.EdgeSpec{
@@ -4652,6 +4704,46 @@ func (_u *AgentUpdateOne) ClearActivitySince() *AgentUpdateOne {
 	return _u
 }
 
+// SetLastDeliveryAt sets the "last_delivery_at" field.
+func (_u *AgentUpdateOne) SetLastDeliveryAt(v time.Time) *AgentUpdateOne {
+	_u.mutation.SetLastDeliveryAt(v)
+	return _u
+}
+
+// SetNillableLastDeliveryAt sets the "last_delivery_at" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableLastDeliveryAt(v *time.Time) *AgentUpdateOne {
+	if v != nil {
+		_u.SetLastDeliveryAt(*v)
+	}
+	return _u
+}
+
+// ClearLastDeliveryAt clears the value of the "last_delivery_at" field.
+func (_u *AgentUpdateOne) ClearLastDeliveryAt() *AgentUpdateOne {
+	_u.mutation.ClearLastDeliveryAt()
+	return _u
+}
+
+// SetIdleSuspendClaimUntil sets the "idle_suspend_claim_until" field.
+func (_u *AgentUpdateOne) SetIdleSuspendClaimUntil(v time.Time) *AgentUpdateOne {
+	_u.mutation.SetIdleSuspendClaimUntil(v)
+	return _u
+}
+
+// SetNillableIdleSuspendClaimUntil sets the "idle_suspend_claim_until" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableIdleSuspendClaimUntil(v *time.Time) *AgentUpdateOne {
+	if v != nil {
+		_u.SetIdleSuspendClaimUntil(*v)
+	}
+	return _u
+}
+
+// ClearIdleSuspendClaimUntil clears the value of the "idle_suspend_claim_until" field.
+func (_u *AgentUpdateOne) ClearIdleSuspendClaimUntil() *AgentUpdateOne {
+	_u.mutation.ClearIdleSuspendClaimUntil()
+	return _u
+}
+
 // SetProject sets the "project" edge to the Project entity.
 func (_u *AgentUpdateOne) SetProject(v *Project) *AgentUpdateOne {
 	return _u.SetProjectID(v.ID)
@@ -5470,6 +5562,18 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	}
 	if _u.mutation.ActivitySinceCleared() {
 		_spec.ClearField(agent.FieldActivitySince, field.TypeTime)
+	}
+	if value, ok := _u.mutation.LastDeliveryAt(); ok {
+		_spec.SetField(agent.FieldLastDeliveryAt, field.TypeTime, value)
+	}
+	if _u.mutation.LastDeliveryAtCleared() {
+		_spec.ClearField(agent.FieldLastDeliveryAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.IdleSuspendClaimUntil(); ok {
+		_spec.SetField(agent.FieldIdleSuspendClaimUntil, field.TypeTime, value)
+	}
+	if _u.mutation.IdleSuspendClaimUntilCleared() {
+		_spec.ClearField(agent.FieldIdleSuspendClaimUntil, field.TypeTime)
 	}
 	if _u.mutation.ProjectCleared() {
 		edge := &sqlgraph.EdgeSpec{

@@ -1352,6 +1352,34 @@ func (_c *AgentCreate) SetNillableActivitySince(v *time.Time) *AgentCreate {
 	return _c
 }
 
+// SetLastDeliveryAt sets the "last_delivery_at" field.
+func (_c *AgentCreate) SetLastDeliveryAt(v time.Time) *AgentCreate {
+	_c.mutation.SetLastDeliveryAt(v)
+	return _c
+}
+
+// SetNillableLastDeliveryAt sets the "last_delivery_at" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableLastDeliveryAt(v *time.Time) *AgentCreate {
+	if v != nil {
+		_c.SetLastDeliveryAt(*v)
+	}
+	return _c
+}
+
+// SetIdleSuspendClaimUntil sets the "idle_suspend_claim_until" field.
+func (_c *AgentCreate) SetIdleSuspendClaimUntil(v time.Time) *AgentCreate {
+	_c.mutation.SetIdleSuspendClaimUntil(v)
+	return _c
+}
+
+// SetNillableIdleSuspendClaimUntil sets the "idle_suspend_claim_until" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableIdleSuspendClaimUntil(v *time.Time) *AgentCreate {
+	if v != nil {
+		_c.SetIdleSuspendClaimUntil(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *AgentCreate) SetID(v uuid.UUID) *AgentCreate {
 	_c.mutation.SetID(v)
@@ -2138,6 +2166,14 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.ActivitySince(); ok {
 		_spec.SetField(agent.FieldActivitySince, field.TypeTime, value)
 		_node.ActivitySince = &value
+	}
+	if value, ok := _c.mutation.LastDeliveryAt(); ok {
+		_spec.SetField(agent.FieldLastDeliveryAt, field.TypeTime, value)
+		_node.LastDeliveryAt = &value
+	}
+	if value, ok := _c.mutation.IdleSuspendClaimUntil(); ok {
+		_spec.SetField(agent.FieldIdleSuspendClaimUntil, field.TypeTime, value)
+		_node.IdleSuspendClaimUntil = &value
 	}
 	if nodes := _c.mutation.ProjectIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
@@ -3901,6 +3937,42 @@ func (u *AgentUpsert) UpdateActivitySince() *AgentUpsert {
 // ClearActivitySince clears the value of the "activity_since" field.
 func (u *AgentUpsert) ClearActivitySince() *AgentUpsert {
 	u.SetNull(agent.FieldActivitySince)
+	return u
+}
+
+// SetLastDeliveryAt sets the "last_delivery_at" field.
+func (u *AgentUpsert) SetLastDeliveryAt(v time.Time) *AgentUpsert {
+	u.Set(agent.FieldLastDeliveryAt, v)
+	return u
+}
+
+// UpdateLastDeliveryAt sets the "last_delivery_at" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateLastDeliveryAt() *AgentUpsert {
+	u.SetExcluded(agent.FieldLastDeliveryAt)
+	return u
+}
+
+// ClearLastDeliveryAt clears the value of the "last_delivery_at" field.
+func (u *AgentUpsert) ClearLastDeliveryAt() *AgentUpsert {
+	u.SetNull(agent.FieldLastDeliveryAt)
+	return u
+}
+
+// SetIdleSuspendClaimUntil sets the "idle_suspend_claim_until" field.
+func (u *AgentUpsert) SetIdleSuspendClaimUntil(v time.Time) *AgentUpsert {
+	u.Set(agent.FieldIdleSuspendClaimUntil, v)
+	return u
+}
+
+// UpdateIdleSuspendClaimUntil sets the "idle_suspend_claim_until" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateIdleSuspendClaimUntil() *AgentUpsert {
+	u.SetExcluded(agent.FieldIdleSuspendClaimUntil)
+	return u
+}
+
+// ClearIdleSuspendClaimUntil clears the value of the "idle_suspend_claim_until" field.
+func (u *AgentUpsert) ClearIdleSuspendClaimUntil() *AgentUpsert {
+	u.SetNull(agent.FieldIdleSuspendClaimUntil)
 	return u
 }
 
@@ -5868,6 +5940,48 @@ func (u *AgentUpsertOne) UpdateActivitySince() *AgentUpsertOne {
 func (u *AgentUpsertOne) ClearActivitySince() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearActivitySince()
+	})
+}
+
+// SetLastDeliveryAt sets the "last_delivery_at" field.
+func (u *AgentUpsertOne) SetLastDeliveryAt(v time.Time) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLastDeliveryAt(v)
+	})
+}
+
+// UpdateLastDeliveryAt sets the "last_delivery_at" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateLastDeliveryAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLastDeliveryAt()
+	})
+}
+
+// ClearLastDeliveryAt clears the value of the "last_delivery_at" field.
+func (u *AgentUpsertOne) ClearLastDeliveryAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLastDeliveryAt()
+	})
+}
+
+// SetIdleSuspendClaimUntil sets the "idle_suspend_claim_until" field.
+func (u *AgentUpsertOne) SetIdleSuspendClaimUntil(v time.Time) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetIdleSuspendClaimUntil(v)
+	})
+}
+
+// UpdateIdleSuspendClaimUntil sets the "idle_suspend_claim_until" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateIdleSuspendClaimUntil() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateIdleSuspendClaimUntil()
+	})
+}
+
+// ClearIdleSuspendClaimUntil clears the value of the "idle_suspend_claim_until" field.
+func (u *AgentUpsertOne) ClearIdleSuspendClaimUntil() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearIdleSuspendClaimUntil()
 	})
 }
 
@@ -8002,6 +8116,48 @@ func (u *AgentUpsertBulk) UpdateActivitySince() *AgentUpsertBulk {
 func (u *AgentUpsertBulk) ClearActivitySince() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearActivitySince()
+	})
+}
+
+// SetLastDeliveryAt sets the "last_delivery_at" field.
+func (u *AgentUpsertBulk) SetLastDeliveryAt(v time.Time) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetLastDeliveryAt(v)
+	})
+}
+
+// UpdateLastDeliveryAt sets the "last_delivery_at" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateLastDeliveryAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateLastDeliveryAt()
+	})
+}
+
+// ClearLastDeliveryAt clears the value of the "last_delivery_at" field.
+func (u *AgentUpsertBulk) ClearLastDeliveryAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearLastDeliveryAt()
+	})
+}
+
+// SetIdleSuspendClaimUntil sets the "idle_suspend_claim_until" field.
+func (u *AgentUpsertBulk) SetIdleSuspendClaimUntil(v time.Time) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetIdleSuspendClaimUntil(v)
+	})
+}
+
+// UpdateIdleSuspendClaimUntil sets the "idle_suspend_claim_until" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateIdleSuspendClaimUntil() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateIdleSuspendClaimUntil()
+	})
+}
+
+// ClearIdleSuspendClaimUntil clears the value of the "idle_suspend_claim_until" field.
+func (u *AgentUpsertBulk) ClearIdleSuspendClaimUntil() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearIdleSuspendClaimUntil()
 	})
 }
 
