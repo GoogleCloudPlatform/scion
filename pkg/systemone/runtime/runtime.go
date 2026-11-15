@@ -35,6 +35,13 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/spec"
 )
 
+// errRuntimeDeadline is the sentinel cause attached via context.WithDeadlineCause
+// to every runtime-derived deadline so Evaluate and ListModels deterministically
+// distinguish runtime-owned timeouts (FailTimeout) from caller context
+// termination (FailCanceled) by cause rather than wall-clock timestamps
+// (runtime-design §§3, 6.2, 7.1).
+var errRuntimeDeadline = errors.New("systemone runtime: evaluation deadline exceeded")
+
 // CredentialSource resolves the raw bearer API key (without the "Bearer "
 // prefix) for inst at request time. Implementations (such as Hub secret-store
 // wiring) must never log or echo secret values. Runtime passes a bound
@@ -260,9 +267,13 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 	baseOwnDur := r.effectiveOwnDuration(compiled.Timeout, opts, 0)
 	ownDeadline := start.Add(baseOwnDur)
 
-	if ctx.Err() != nil {
-		reason := classifyContextStop(ctx, ownDeadline)
-		return r.finishFailed(ctx, compiled.Kind, start, eval, reason)
+	initCtx, initCancel := context.WithDeadlineCause(ctx, ownDeadline, errRuntimeDeadline)
+	initErr := initCtx.Err()
+	initCause := context.Cause(initCtx)
+	parentErr := ctx.Err()
+	initCancel()
+	if initErr != nil || parentErr != nil {
+		return r.finishFailed(ctx, compiled.Kind, start, eval, classifyContextCause(parentErr, initCause))
 	}
 
 	// Step 1: Select and validate bounded probe environment fields (AC-2, AC-3).
@@ -273,8 +284,8 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 	}
 
 	// Step 2: Resolve eligible instance and adapter (runtime-design §4.5).
-	resolveCtx, resolveCancel := context.WithDeadline(ctx, ownDeadline)
-	inst, adapter, caps, resolveReason := r.resolveBinding(resolveCtx, ctx, ownDeadline, compiled, opts)
+	resolveCtx, resolveCancel := context.WithDeadlineCause(ctx, ownDeadline, errRuntimeDeadline)
+	inst, adapter, caps, resolveReason := r.resolveBinding(resolveCtx, ctx, compiled, opts)
 	resolveCancel()
 	if resolveReason != "" {
 		return r.finishFailed(ctx, compiled.Kind, start, eval, resolveReason)
@@ -298,11 +309,13 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 	// Step 5: Tighten runtime-owned deadline with per-instance CallTimeout ceiling (§7.1).
 	attemptOwnDur := r.effectiveOwnDuration(compiled.Timeout, opts, inst.Limits.CallTimeout)
 	ownDeadline = start.Add(attemptOwnDur)
-	if !time.Now().Before(ownDeadline) && ctx.Err() == nil {
-		return r.finishFailed(ctx, compiled.Kind, start, eval, provider.FailTimeout)
-	}
-	if ctx.Err() != nil {
-		return r.finishFailed(ctx, compiled.Kind, start, eval, classifyContextStop(ctx, ownDeadline))
+	checkCtx, checkCancel := context.WithDeadlineCause(ctx, ownDeadline, errRuntimeDeadline)
+	checkErr := checkCtx.Err()
+	checkCause := context.Cause(checkCtx)
+	parentErr = ctx.Err()
+	checkCancel()
+	if checkErr != nil || parentErr != nil {
+		return r.finishFailed(ctx, compiled.Kind, start, eval, classifyContextCause(parentErr, checkCause))
 	}
 
 	// Step 6: Build credential-free ModelRequest from compiled spec + selected fields only (AC-2).
@@ -311,11 +324,12 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 	transport := r.transportForInstance(inst)
 
 	attemptStart := time.Now().UTC()
-	attemptCtx, attemptCancel := context.WithDeadline(ctx, ownDeadline)
+	attemptCtx, attemptCancel := context.WithDeadlineCause(ctx, ownDeadline, errRuntimeDeadline)
 	res, invokeErr, panicked := invokeSafely(attemptCtx, adapter, transport, instView, req)
 	attemptDuration := time.Since(attemptStart)
 	callerErr := ctx.Err()
 	attemptErr := attemptCtx.Err()
+	attemptCause := context.Cause(attemptCtx)
 	attemptCancel()
 
 	attempt := Attempt{
@@ -342,7 +356,7 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 	}
 
 	if invokeErr != nil {
-		reason, statusClass := classifyInvokeError(invokeErr, callerErr, attemptErr, ownDeadline)
+		reason, statusClass := classifyInvokeError(invokeErr, callerErr, attemptErr, attemptCause)
 		if statusClass != "" {
 			attempt.HTTPStatusClass = statusClass
 		}
@@ -359,7 +373,7 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 	// Even if Adapter.Invoke returned nil error, enforce deadline/cancel if the
 	// context expired concurrently before Invoke returned.
 	if callerErr != nil || attemptErr != nil {
-		reason, _ := classifyInvokeError(attemptErr, callerErr, attemptErr, ownDeadline)
+		reason := classifyContextCause(callerErr, attemptCause)
 		attempt.Outcome = AttemptFailed
 		attempt.Reason = string(reason)
 		eval.Attempts = []Attempt{attempt}
@@ -441,12 +455,12 @@ func (r *Runtime) ListModels(ctx context.Context, inst Instance) ([]string, erro
 	}
 	ownDeadline := start.Add(ownDur)
 
-	callCtx, cancel := context.WithDeadline(ctx, ownDeadline)
+	callCtx, cancel := context.WithDeadlineCause(ctx, ownDeadline, errRuntimeDeadline)
 	defer cancel()
 
 	models, err := lister.ListModels(callCtx, r.transportForInstance(inst), inst.View())
 	if err != nil {
-		reason, statusClass := classifyInvokeError(err, ctx.Err(), callCtx.Err(), ownDeadline)
+		reason, statusClass := classifyInvokeError(err, ctx.Err(), callCtx.Err(), context.Cause(callCtx))
 		httpStatus := 0
 		retryable := false
 		var retryAfter time.Duration
@@ -499,7 +513,6 @@ func (r *Runtime) effectiveOwnDuration(ruleTimeout time.Duration, opts EvalOptio
 func (r *Runtime) resolveBinding(
 	resolveCtx context.Context,
 	callerCtx context.Context,
-	ownDeadline time.Time,
 	compiled *spec.Compiled,
 	opts EvalOptions,
 ) (Instance, provider.Adapter, provider.Capabilities, provider.FailReason) {
@@ -523,7 +536,7 @@ func (r *Runtime) resolveBinding(
 		got, found, err := r.instances.GetInstance(resolveCtx, compiled.Spec.Binding.Instance)
 		if err != nil {
 			if callerCtx.Err() != nil || resolveCtx.Err() != nil {
-				return Instance{}, nil, provider.Capabilities{}, classifyContextStop(callerCtx, ownDeadline)
+				return Instance{}, nil, provider.Capabilities{}, classifyContextCause(callerCtx.Err(), context.Cause(resolveCtx))
 			}
 			return Instance{}, nil, provider.Capabilities{}, provider.FailUnavailable
 		}
@@ -539,7 +552,7 @@ func (r *Runtime) resolveBinding(
 		got, found, err := r.instances.GetInstance(resolveCtx, r.defaultInstance)
 		if err != nil {
 			if callerCtx.Err() != nil || resolveCtx.Err() != nil {
-				return Instance{}, nil, provider.Capabilities{}, classifyContextStop(callerCtx, ownDeadline)
+				return Instance{}, nil, provider.Capabilities{}, classifyContextCause(callerCtx.Err(), context.Cause(resolveCtx))
 			}
 			return Instance{}, nil, provider.Capabilities{}, provider.FailUnavailable
 		}
@@ -555,7 +568,7 @@ func (r *Runtime) resolveBinding(
 		all, err := r.instances.ListInstances(resolveCtx)
 		if err != nil {
 			if callerCtx.Err() != nil || resolveCtx.Err() != nil {
-				return Instance{}, nil, provider.Capabilities{}, classifyContextStop(callerCtx, ownDeadline)
+				return Instance{}, nil, provider.Capabilities{}, classifyContextCause(callerCtx.Err(), context.Cause(resolveCtx))
 			}
 			return Instance{}, nil, provider.Capabilities{}, provider.FailUnavailable
 		}
@@ -748,7 +761,7 @@ func checkMaxInputTokensBytes(totalBytes int, caps provider.Capabilities, limits
 
 	if caps.Truncation == provider.TruncationSilent {
 		// Silent-truncation adapters must prove non-truncation conservatively (1 byte/token).
-		if effMaxTokens <= 0 || totalBytes > effMaxTokens {
+		if effMaxTokens <= 0 || totalBytes > effMaxTokens*SilentBytesPerTokenPrecheck {
 			return provider.FailInputTooLarge
 		}
 		return ""
@@ -813,17 +826,15 @@ func invokeSafely(
 	return res, err, false
 }
 
-// classifyContextStop distinguishes runtime-owned deadline expiration
-// (FailTimeout) from caller context termination (FailCanceled) per
-// runtime-design §§3, 6.2 and Stage 1 §7.0.
-func classifyContextStop(callerCtx context.Context, ownDeadline time.Time) provider.FailReason {
-	if errors.Is(callerCtx.Err(), context.Canceled) {
-		return provider.FailCanceled
-	}
-	if !time.Now().Before(ownDeadline) {
+// classifyContextCause distinguishes runtime-owned deadline expiration
+// (FailTimeout) from caller context termination (FailCanceled) by inspecting
+// the context cause attached via context.WithDeadlineCause rather than
+// comparing wall-clock timestamps (runtime-design §§3, 6.2; Stage 1 §7.0).
+func classifyContextCause(callerErr, runCause error) provider.FailReason {
+	if errors.Is(runCause, errRuntimeDeadline) {
 		return provider.FailTimeout
 	}
-	if callerCtx.Err() != nil {
+	if callerErr != nil {
 		return provider.FailCanceled
 	}
 	return provider.FailTimeout
@@ -833,28 +844,18 @@ func classifyInvokeError(
 	err error,
 	callerErr error,
 	attemptErr error,
-	ownDeadline time.Time,
+	attemptCause error,
 ) (provider.FailReason, string) {
 	var statusClass string
 	if pe, ok := provider.AsProviderError(err); ok {
 		statusClass = pe.StatusClass()
 	}
 
-	// Context termination precedence (§6.2, §7.1, §7.7):
-	// 1. Explicit caller cancellation -> FailCanceled.
-	// 2. Runtime's own deadline expired while caller ctx was not canceled -> FailTimeout.
-	// 3. Caller ctx deadline expired before runtime's own deadline -> FailCanceled.
+	// Context termination by cause (§6.2, §7.1, §7.7):
+	// context.Cause(attemptCtx) == errRuntimeDeadline -> FailTimeout;
+	// otherwise parent ctx.Err() != nil -> FailCanceled.
 	if callerErr != nil || attemptErr != nil {
-		if errors.Is(callerErr, context.Canceled) {
-			return provider.FailCanceled, statusClass
-		}
-		if errors.Is(attemptErr, context.DeadlineExceeded) && callerErr == nil {
-			return provider.FailTimeout, statusClass
-		}
-		if !time.Now().Before(ownDeadline) {
-			return provider.FailTimeout, statusClass
-		}
-		return provider.FailCanceled, statusClass
+		return classifyContextCause(callerErr, attemptCause), statusClass
 	}
 
 	// Egress transport error invariants (AC-4, runtime-design §4.3, §6.3).

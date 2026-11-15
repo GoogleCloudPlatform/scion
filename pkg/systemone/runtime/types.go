@@ -42,9 +42,18 @@ const (
 	DefaultRuleTimeout = 2 * time.Second
 	// DefaultCallTimeout is the default per-instance CallTimeout ceiling when unset (5 s).
 	DefaultCallTimeout = 5 * time.Second
-	// BytesPerTokenPrecheck is the conservative bytes-per-token upper bound used
-	// for the pre-call MaxInputTokens check on non-silent adapters (runtime-design §4.3, §4.4; AC-3).
-	BytesPerTokenPrecheck = 4
+	// BytesPerTokenPrecheck is the loose bytes-per-token upper-bound guard used
+	// for the pre-call MaxInputTokens check on non-silent adapters
+	// (TruncationNever / TruncationReported). Multibyte UTF-8 text (CJK, emoji)
+	// can run well over 4 bytes per token, and non-silent providers enforce token
+	// limits authoritatively (e.g. TypeSafe 400 max_tokens_exceeded ->
+	// input_too_large), so this guard rejects only totalInputBytes >
+	// effectiveMaxTokens * 16 (runtime-design §4.3, §4.4; AC-3).
+	BytesPerTokenPrecheck = 16
+	// SilentBytesPerTokenPrecheck is the strict bytes-per-token lower bound (1
+	// byte per token, since every token is >= 1 byte) used to prove non-truncation
+	// before calling a TruncationSilent adapter (runtime-design §4.3, §6.3; AC-3).
+	SilentBytesPerTokenPrecheck = 1
 )
 
 // Class is the top-level evaluation outcome class (runtime-design §6.1).

@@ -148,8 +148,8 @@ func compileTestSpec(t *testing.T, raw string, kind spec.Kind) *spec.Compiled {
 	return c
 }
 
-func boolPtr(v bool) *bool       { return &v }
-func strPtr(v string) *string    { return &v }
+func boolPtr(v bool) *bool    { return &v }
+func strPtr(v string) *string { return &v }
 
 const mixedSpecJSON = `{
   "version": 1,
@@ -392,7 +392,7 @@ func TestRuntime_AC3_ProbeOversizeAndBytesPrecheck(t *testing.T) {
 			t.Fatal("adapter must not be called when input exceeds MaxInputTokens bytes pre-check")
 			return provider.ModelResult{}, nil
 		})
-		adapter.caps.MaxInputTokens = 100 // 100 tokens * 4 bytes/token = 400 bytes pre-check ceiling
+		adapter.caps.MaxInputTokens = 100 // 100 tokens * 16 bytes/token = 1600 bytes loose pre-check ceiling
 		reg := provider.NewRegistry()
 		reg.MustRegister(adapter)
 		rt := runtime.New(runtime.Config{
@@ -401,8 +401,8 @@ func TestRuntime_AC3_ProbeOversizeAndBytesPrecheck(t *testing.T) {
 			Credentials: runtime.StaticCredential("sk-test"),
 		})
 
-		text401 := strings.Repeat("b", 100*runtime.BytesPerTokenPrecheck+1)
-		_, err := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput(text401), runtime.EvalOptions{})
+		overPrecheck := strings.Repeat("b", 100*runtime.BytesPerTokenPrecheck+1)
+		_, err := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput(overPrecheck), runtime.EvalOptions{})
 		require.Error(t, err)
 		assert.Equal(t, 0, adapter.callCount())
 
@@ -410,6 +410,32 @@ func TestRuntime_AC3_ProbeOversizeAndBytesPrecheck(t *testing.T) {
 		require.True(t, ok)
 		assert.Equal(t, runtime.ClassFailed, eval.Class)
 		assert.Equal(t, string(provider.FailInputTooLarge), eval.Reason)
+	})
+
+	t.Run("multibyte_cjk_under_16_bytes_per_token_is_not_falsely_rejected_on_non_silent_adapter", func(t *testing.T) {
+		adapter := newFakeAdapter(func(_ context.Context, _ provider.Transport, _ provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
+			dist, val, _, _ := provider.BinaryDistribution(0.9)
+			return provider.ModelResult{
+				ResolvedModel: "jev-1.14.0",
+				Answers: map[string]provider.Answer{
+					"q1": {QuestionID: "q1", Primitive: spec.PrimitiveBinary, Status: provider.AnswerStatusAnswered, Bool: val, Distribution: dist},
+				},
+			}, nil
+		})
+		adapter.caps.MaxInputTokens = 100 // 600 bytes (e.g. 200 3-byte CJK runes) fits well under 100 * 16 = 1600
+		reg := provider.NewRegistry()
+		reg.MustRegister(adapter)
+		rt := runtime.New(runtime.Config{
+			Registry:    reg,
+			Instances:   runtime.StaticInstances(defaultTestInstance()),
+			Credentials: runtime.StaticCredential("sk-test"),
+		})
+
+		cjkText := strings.Repeat("語", 200) // 600 UTF-8 bytes
+		dec, err := rt.Evaluate(context.Background(), compiled, runtime.ProbeInput(cjkText), runtime.EvalOptions{})
+		require.NoError(t, err)
+		assert.True(t, dec.Bool)
+		assert.Equal(t, 1, adapter.callCount())
 	})
 
 	t.Run("silent_truncation_adapter_enforces_strict_1_byte_per_token", func(t *testing.T) {
