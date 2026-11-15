@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"time"
 
 	"entgo.io/ent/dialect"
@@ -1862,7 +1863,7 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 			upd.SetLastActivityEvent(now)
 		}
 		upd.SetToolName(su.ToolName)
-	} else if su.Phase == string(state.PhaseSuspended) {
+	} else if strings.EqualFold(su.Phase, string(state.PhaseSuspended)) {
 		// Transitioning to suspended: preserve retained activities (completed,
 		// idle; computed from stalled_from_activity when stalled) and clear any
 		// other activity, stall marker, and tool name.
@@ -3041,7 +3042,7 @@ func (s *AgentStore) MarkStalledAgents(ctx context.Context, activityThreshold, h
 // isTerminalActivity reports whether the activity is a terminal/sticky state
 // that a non-terminal status report must not overwrite on a stopped agent.
 func isTerminalActivity(activity string) bool {
-	return activity == "crashed" || activity == "limits_exceeded"
+	return strings.EqualFold(activity, "crashed") || strings.EqualFold(activity, "limits_exceeded")
 }
 
 // marshalAppliedConfig serializes the applied-config document to JSON text,

@@ -36,6 +36,7 @@ import {
   stateLabel,
   suspendedActivityLabel,
 } from '../../../shared/agent-state-display.js';
+import { isTerminalActivity } from '../../../shared/types.js';
 import { apiFetch } from '../../../client/api.js';
 import { navigateTo } from '../../../client/main.js';
 import { openTerminal, terminalHref, agentGraphHref } from '../../../client/open-terminal.js';
@@ -1133,9 +1134,12 @@ export class ScionChatMembers extends LitElement {
     // "Updated" is the last state change — matching the agent list's column,
     // not the `lastSeen` heartbeat.
     const lowerActivity = a.activity ? a.activity.toLowerCase() : undefined;
+    const showActivity =
+      lowerActivity &&
+      (a.phase === 'running' || (a.phase === 'stopped' && isTerminalActivity(lowerActivity)));
     const detailText =
       a.detailMessage ||
-      (a.phase === 'running' && lowerActivity ? stateLabel(lowerActivity) : '') ||
+      (showActivity ? stateLabel(lowerActivity) : '') ||
       suspendedActivityLabel({ phase: a.phase, activity: lowerActivity }) ||
       a.phase ||
       'unknown';

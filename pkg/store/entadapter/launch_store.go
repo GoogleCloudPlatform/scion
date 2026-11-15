@@ -261,10 +261,14 @@ func (s *AgentStore) beginLaunch(ctx context.Context, agentID, kind string, time
 		SetLaunchRunID(boundLaunchRunID(current.RunID, opts.RunID))
 	if kind != store.LaunchKindCreate {
 		// A start or restart launch begins a new run: clear any retained or
-		// prior-run activity so neither a pre-harness heartbeat nor
-		// failedAfterRunningObservedApplies reads it as live activity.
-		upd.SetActivity("").
-			SetStalledFromActivity("").
+		// non-terminal prior-run activity so neither a pre-harness heartbeat
+		// nor failedAfterRunningObservedApplies reads it as live activity,
+		// while preserving terminal activities (crashed, limits_exceeded) if a
+		// start from stopped fails and rolls back to stopped.
+		if !isTerminalActivity(current.Activity) {
+			upd.SetActivity("")
+		}
+		upd.SetStalledFromActivity("").
 			SetToolName("").
 			ClearActivitySince()
 	}

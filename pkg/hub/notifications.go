@@ -50,13 +50,6 @@ type NotificationDispatcher struct {
 	stopOnce         sync.Once
 	wg               sync.WaitGroup
 
-	// observedMu guards lastObservedStatus, which records the last
-	// notification-matching status seen per watched agent so transitions out
-	// of a notifying activity (for example idle -> working -> idle) re-arm
-	// notifications even when the intermediate activity does not notify.
-	observedMu         sync.Mutex
-	lastObservedStatus map[string]string
-
 	// channelRegistryFn returns the external notification channel registry
 	// in use (nil fn or nil registry = disabled). The Server sets it so a
 	// registry rebuilt from saved settings is used without restarting the
@@ -82,12 +75,11 @@ func (nd *NotificationDispatcher) offerAutoWake(subscriber *store.Agent) bool {
 // system starts (e.g. in combined hub+web mode).
 func NewNotificationDispatcher(s store.Store, events EventPublisher, getDispatcher func() AgentDispatcher, log *slog.Logger) *NotificationDispatcher {
 	return &NotificationDispatcher{
-		store:              s,
-		events:             events,
-		getDispatcher:      getDispatcher,
-		log:                log,
-		stopCh:             make(chan struct{}),
-		lastObservedStatus: make(map[string]string),
+		store:         s,
+		events:        events,
+		getDispatcher: getDispatcher,
+		log:           log,
+		stopCh:        make(chan struct{}),
 	}
 }
 
@@ -99,20 +91,15 @@ func (nd *NotificationDispatcher) SetBrokerProxy(p *MessageBrokerProxy) {
 	nd.brokerProxy = p
 }
 
-// Start subscribes to agent status and deletion events and spawns a goroutine
-// to process them. DELETED notifications are not driven by the agent.deleted
-// event: the delete engine resolves them before the row changes and delivers
-// them after (ResolveDeletedNotifications, design ptone/scion#2483 §2.3); the
-// agent.*.deleted pattern only prunes per-agent observed-status state.
+// Start subscribes to agent status events and spawns a goroutine to process
+// them. DELETED notifications are not driven by the agent.deleted event: the
+// delete engine resolves them before the row changes and delivers them after
+// (ResolveDeletedNotifications, design ptone/scion#2483 §2.3).
 func (nd *NotificationDispatcher) Start() {
 	// Use "*" (single-token wildcard) rather than ">" so "project.*.agent.status"
 	// does not cross-match non-status project subjects (such as ".agent.ports" or
-	// ".agent.deleted"), and share a single channel with "agent.*.deleted" so
-	// status and delete events are processed in publish order.
-	ch, unsubscribe := nd.events.Subscribe(
-		"project.*.agent.status",
-		"agent.*.deleted",
-	)
+	// ".agent.deleted").
+	ch, unsubscribe := nd.events.Subscribe("project.*.agent.status")
 
 	nd.wg.Add(1)
 	go func() {
@@ -124,12 +111,7 @@ func (nd *NotificationDispatcher) Start() {
 				if !ok {
 					return
 				}
-				switch {
-				case strings.HasSuffix(evt.Subject, ".agent.status"):
-					nd.handleEvent(evt)
-				case strings.HasPrefix(evt.Subject, "agent.") && strings.HasSuffix(evt.Subject, ".deleted"):
-					nd.handleDeletedEvent(evt)
-				}
+				nd.handleEvent(evt)
 			case <-nd.stopCh:
 				return
 			}
@@ -198,16 +180,14 @@ func (nd *NotificationDispatcher) handleEvent(evt Event) {
 	}
 
 	allSubs := append(agentSubs, projectSubs...)
+	if len(allSubs) == 0 {
+		return
+	}
 
 	// Suspended agents match on phase ("suspended"), never on a retained
 	// pre-suspend activity such as completed or idle. Running/stopped agents
 	// match on activity and fall back to phase when activity is empty.
 	matchStatus := notificationEventStatus(statusEvt)
-	prevObserved, hadObserved := nd.recordObservedStatus(statusEvt.AgentID, matchStatus)
-
-	if len(allSubs) == 0 {
-		return
-	}
 
 	var watchedAgent *store.Agent
 	var watchedLoaded bool
@@ -229,10 +209,12 @@ func (nd *NotificationDispatcher) handleEvent(evt Event) {
 		}
 
 		// Deduplicate repeated notifications:
-		//   - For IDLE and COMPLETED, each distinct activity period notifies
-		//     once (an agent that leaves for working/thinking/etc. and later
-		//     re-enters IDLE or COMPLETED notifies again), while heartbeats and
-		//     re-reports within the same period remain deduplicated.
+		//   - For IDLE and COMPLETED, the stored agent row is authoritative:
+		//     a new period notifies only when the current row is running, its
+		//     activity matches matchStatus, and its activity_since is strictly
+		//     after the subscription's last notification. Heartbeats and stale
+		//     same-period re-reports (even if delivered after an intermediate
+		//     working event or a Hub restart) remain deduplicated.
 		//   - Every other trigger (WAITING_FOR_INPUT, STALLED, LIMITS_EXCEEDED,
 		//     ERROR, SUSPENDED, STOPPED, ...) keeps status-based deduplication
 		//     against the subscription's previous notification.
@@ -243,13 +225,8 @@ func (nd *NotificationDispatcher) handleEvent(evt Event) {
 			continue
 		}
 		if lastNotif != nil && strings.EqualFold(lastNotif.Status, matchStatus) {
-			if !isPerPeriodNotificationStatus(matchStatus) {
-				seen[dedupeKey] = true
-				continue
-			}
-			reentered := (hadObserved && !strings.EqualFold(prevObserved, matchStatus)) ||
-				nd.activityEnteredAfter(ctx, statusEvt.AgentID, matchStatus, lastNotif.CreatedAt, &watchedAgent, &watchedLoaded)
-			if !reentered {
+			if !isPerPeriodNotificationStatus(matchStatus) ||
+				!nd.activityEnteredAfter(ctx, statusEvt.AgentID, matchStatus, lastNotif.CreatedAt, &watchedAgent, &watchedLoaded) {
 				seen[dedupeKey] = true
 				continue
 			}
@@ -263,34 +240,6 @@ func (nd *NotificationDispatcher) handleEvent(evt Event) {
 func isPerPeriodNotificationStatus(status string) bool {
 	return strings.EqualFold(status, string(state.ActivityIdle)) ||
 		strings.EqualFold(status, string(state.ActivityCompleted))
-}
-
-func (nd *NotificationDispatcher) handleDeletedEvent(evt Event) {
-	var deletedEvt AgentDeletedEvent
-	if err := json.Unmarshal(evt.Data, &deletedEvt); err != nil {
-		nd.log.Error("Failed to unmarshal agent deleted event for notifications", "error", err)
-		return
-	}
-	if deletedEvt.AgentID != "" {
-		nd.clearObservedStatus(deletedEvt.AgentID)
-	}
-}
-
-func (nd *NotificationDispatcher) recordObservedStatus(agentID, matchStatus string) (prev string, ok bool) {
-	nd.observedMu.Lock()
-	defer nd.observedMu.Unlock()
-	if nd.lastObservedStatus == nil {
-		nd.lastObservedStatus = make(map[string]string)
-	}
-	prev, ok = nd.lastObservedStatus[agentID]
-	nd.lastObservedStatus[agentID] = strings.ToUpper(matchStatus)
-	return prev, ok
-}
-
-func (nd *NotificationDispatcher) clearObservedStatus(agentID string) {
-	nd.observedMu.Lock()
-	defer nd.observedMu.Unlock()
-	delete(nd.lastObservedStatus, agentID)
 }
 
 func (nd *NotificationDispatcher) activityEnteredAfter(
@@ -309,7 +258,7 @@ func (nd *NotificationDispatcher) activityEnteredAfter(
 	}
 	a := *cached
 	return a != nil &&
-		state.Phase(a.Phase) == state.PhaseRunning &&
+		strings.EqualFold(a.Phase, string(state.PhaseRunning)) &&
 		strings.EqualFold(a.Activity, matchStatus) &&
 		a.ActivitySince != nil &&
 		a.ActivitySince.After(notifCreatedAt)
@@ -383,7 +332,6 @@ func (nd *NotificationDispatcher) DeliverDeletedNotifications(ctx context.Contex
 	go func() {
 		defer close(done)
 		for i := range pending {
-			nd.clearObservedStatus(pending[i].agent.ID)
 			nd.deliverDeletedNotification(ctx, &pending[i])
 		}
 	}()

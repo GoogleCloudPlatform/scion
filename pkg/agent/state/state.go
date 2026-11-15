@@ -658,23 +658,24 @@ func (a Activity) IsSuspendEligible() bool {
 
 // IsRetainedOnSuspend reports whether this activity survives a transition to
 // PhaseSuspended so that operators can tell what state the agent was in when
-// suspended. All other activities are cleared on suspend.
+// suspended. All other activities are cleared on suspend. Comparison is
+// case-insensitive.
 // ptone/scion#7858 adds ActivityHarnessError here.
 func (a Activity) IsRetainedOnSuspend() bool {
-	switch a {
+	switch Activity(strings.ToLower(string(a))) {
 	case ActivityIdle, ActivityCompleted:
 		return true
 	}
 	return false
 }
 
-// RetainedSuspendActivity returns the activity to preserve on transition to
-// PhaseSuspended, or "" when the activity should be cleared. For a stalled
-// agent, the candidate is stalledFrom rather than stalled itself.
+// RetainedSuspendActivity returns the canonical lowercase activity to preserve
+// on transition to PhaseSuspended, or "" when the activity should be cleared.
+// For a stalled agent, the candidate is stalledFrom rather than stalled itself.
 func RetainedSuspendActivity(activity, stalledFrom Activity) Activity {
-	candidate := activity
+	candidate := Activity(strings.ToLower(string(activity)))
 	if candidate == ActivityStalled {
-		candidate = stalledFrom
+		candidate = Activity(strings.ToLower(string(stalledFrom)))
 	}
 	if candidate.IsRetainedOnSuspend() {
 		return candidate

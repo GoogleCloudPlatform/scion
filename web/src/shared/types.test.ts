@@ -28,6 +28,7 @@ import {
   getAgentDisplayStatus,
   isEmptyPerAgentWorkspace,
   isRetainedSuspendActivity,
+  isTerminalActivity,
   lifecycleActionRequestInit,
   projectWorkspaceModeIcon,
   RESUME_BEST_EFFORT_CONFIRM_MESSAGE,
@@ -125,15 +126,26 @@ describe('projectWorkspaceModeIcon', () => {
   });
 });
 
-describe('isRetainedSuspendActivity and getAgentDisplayStatus', () => {
-  it('recognises completed and idle as retained on suspend', () => {
+describe('isRetainedSuspendActivity, isTerminalActivity, and getAgentDisplayStatus', () => {
+  it('recognises completed and idle case-insensitively as retained on suspend', () => {
     expect(isRetainedSuspendActivity('completed')).toBe(true);
     expect(isRetainedSuspendActivity('idle')).toBe(true);
+    expect(isRetainedSuspendActivity('COMPLETED')).toBe(true);
+    expect(isRetainedSuspendActivity('IDLE')).toBe(true);
     expect(isRetainedSuspendActivity('working')).toBe(false);
     expect(isRetainedSuspendActivity('blocked')).toBe(false);
     expect(isRetainedSuspendActivity('waiting_for_input')).toBe(false);
     expect(isRetainedSuspendActivity('')).toBe(false);
     expect(isRetainedSuspendActivity(undefined)).toBe(false);
+  });
+
+  it('recognises crashed and limits_exceeded as terminal activities', () => {
+    expect(isTerminalActivity('crashed')).toBe(true);
+    expect(isTerminalActivity('limits_exceeded')).toBe(true);
+    expect(isTerminalActivity('CRASHED')).toBe(true);
+    expect(isTerminalActivity('completed')).toBe(false);
+    expect(isTerminalActivity('working')).toBe(false);
+    expect(isTerminalActivity(undefined)).toBe(false);
   });
 
   it('returns suspended as the display status even when activity is retained', () => {

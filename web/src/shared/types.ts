@@ -466,8 +466,18 @@ export function isTerminalAvailable(agent: {
  * `state.Activity.IsRetainedOnSuspend`.
  */
 export function isRetainedSuspendActivity(activity: string | undefined): boolean {
+  const lower = activity?.toLowerCase();
   // ptone/scion#7858 adds 'harness_error' here.
-  return activity === 'idle' || activity === 'completed';
+  return lower === 'idle' || lower === 'completed';
+}
+
+/**
+ * Whether an activity represents a terminal stop outcome that remains valid on
+ * `phase === 'stopped'`. Mirrors Go `state.Activity.IsTerminal`.
+ */
+export function isTerminalActivity(activity: string | undefined): boolean {
+  const lower = activity?.toLowerCase();
+  return lower === 'crashed' || lower === 'limits_exceeded';
 }
 
 /**

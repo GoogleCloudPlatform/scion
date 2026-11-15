@@ -790,6 +790,16 @@ func TestActivityIsRetainedOnSuspend(t *testing.T) {
 			t.Errorf("Activity(%q).IsRetainedOnSuspend() = %v, want %v", a, got, want)
 		}
 	}
+	for _, upper := range []Activity{"IDLE", "COMPLETED", "Idle", "Completed"} {
+		if !upper.IsRetainedOnSuspend() {
+			t.Errorf("Activity(%q).IsRetainedOnSuspend() = false, want true", upper)
+		}
+	}
+	for _, nonRetained := range []Activity{"WORKING", "STALLED", "CRASHED"} {
+		if nonRetained.IsRetainedOnSuspend() {
+			t.Errorf("Activity(%q).IsRetainedOnSuspend() = true, want false", nonRetained)
+		}
+	}
 }
 
 func TestRetainedSuspendActivity(t *testing.T) {
@@ -801,6 +811,8 @@ func TestRetainedSuspendActivity(t *testing.T) {
 	}{
 		{"completed kept", ActivityCompleted, "", ActivityCompleted},
 		{"idle kept", ActivityIdle, "", ActivityIdle},
+		{"uppercase COMPLETED normalized", "COMPLETED", "", ActivityCompleted},
+		{"uppercase IDLE normalized", "IDLE", "", ActivityIdle},
 		{"working cleared", ActivityWorking, "", ""},
 		{"blocked cleared", ActivityBlocked, "", ""},
 		{"waiting_for_input cleared", ActivityWaitingForInput, "", ""},
@@ -808,6 +820,7 @@ func TestRetainedSuspendActivity(t *testing.T) {
 		{"empty stays empty", "", "", ""},
 		{"stalled from completed restores completed", ActivityStalled, ActivityCompleted, ActivityCompleted},
 		{"stalled from idle restores idle", ActivityStalled, ActivityIdle, ActivityIdle},
+		{"uppercase STALLED from IDLE restores idle", "STALLED", "IDLE", ActivityIdle},
 		{"stalled from working cleared", ActivityStalled, ActivityWorking, ""},
 		{"stalled from blocked cleared", ActivityStalled, ActivityBlocked, ""},
 		{"stalled with empty stalledFrom cleared", ActivityStalled, "", ""},

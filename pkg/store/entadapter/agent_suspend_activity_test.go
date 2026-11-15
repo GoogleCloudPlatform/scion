@@ -18,6 +18,7 @@ package entadapter
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -50,12 +51,14 @@ func TestUpdateAgentStatus_SuspendRetainsOrClearsActivity(t *testing.T) {
 		{name: "crashed cleared", activity: "crashed", want: ""},
 		{name: "stalled from completed restores completed", activity: "stalled", stalledFrom: "completed", want: "completed"},
 		{name: "stalled from idle restores idle", activity: "stalled", stalledFrom: "idle", want: "idle"},
+		{name: "uppercase IDLE normalized to idle", activity: "IDLE", want: "idle"},
+		{name: "uppercase STALLED from COMPLETED restores completed", activity: "STALLED", stalledFrom: "COMPLETED", want: "completed"},
 		{name: "stalled from working cleared", activity: "stalled", stalledFrom: "working", want: ""},
 	}
 
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			a := makeAgent(projectID, "susp-case-"+string(rune('a'+i)))
+			a := makeAgent(projectID, fmt.Sprintf("susp-case-%d", i))
 			a.Phase = string(state.PhaseRunning)
 			a.Activity = tc.activity
 			a.ToolName = "bash"
@@ -159,9 +162,10 @@ func TestUpdateAgentStatus_ResumeAndClearActivity(t *testing.T) {
 	assert.Equal(t, string(state.ActivityWorking), gotWakeStart.Activity, "ClearTerminalRemnants must preserve new activity posted mid-dispatch")
 	assert.Empty(t, gotWakeStart.Message)
 
-	// 3. Async BeginStartLaunch clears live/prior activity, stall marker, tool
-	// name, and activity_since on a row that still carries them (e.g. a restart
-	// from running or a start from stopped+crashed).
+	// 3. Async BeginStartLaunch clears live/non-terminal activity, stall marker,
+	// tool name, and activity_since on a row that still carries them, while
+	// preserving terminal activities (crashed, limits_exceeded) on a start from
+	// stopped so a failed async start keeps how the prior run stopped.
 	a3 := makeAgent(projectID, "async-restart-clear")
 	a3.Phase = string(state.PhaseRunning)
 	a3.Activity = string(state.ActivityCompleted)
@@ -176,31 +180,57 @@ func TestUpdateAgentStatus_ResumeAndClearActivity(t *testing.T) {
 	got3, err := s.GetAgent(ctx, a3.ID)
 	require.NoError(t, err)
 	assert.Equal(t, string(state.PhaseStarting), got3.Phase)
-	assert.Empty(t, got3.Activity, "async restart launch must clear prior activity")
+	assert.Empty(t, got3.Activity, "async restart launch must clear non-terminal prior activity")
 	assert.Empty(t, got3.StalledFromActivity)
 	assert.Empty(t, got3.ToolName)
 	assert.Nil(t, got3.ActivitySince)
 
-	a4 := makeAgent(projectID, "async-start-from-stopped-clear")
-	a4.Phase = string(state.PhaseStopped)
-	a4.Activity = string(state.ActivityCrashed)
-	a4.ToolName = "bash"
-	require.NoError(t, s.CreateAgent(ctx, a4))
-	require.NoError(t, s.UpdateAgentStatus(ctx, a4.ID, store.AgentStatusUpdate{
-		Phase:   string(state.PhaseStarting),
-		IfPhase: string(state.PhaseStopped),
-	}))
-	mid4, err := s.GetAgent(ctx, a4.ID)
-	require.NoError(t, err)
-	require.Equal(t, string(state.ActivityCrashed), mid4.Activity, "stopped -> starting leaves crashed on the row until BeginStartLaunch")
-	_, err = s.BeginStartLaunch(ctx, a4.ID, store.LaunchKindStart, time.Minute, store.BeginLaunchOptions{
-		PriorPhase: string(state.PhaseStopped),
+	a4a := makeAgent(projectID, "async-start-nonterminal-clear")
+	a4a.Phase = string(state.PhaseStarting)
+	a4a.Activity = string(state.ActivityIdle)
+	a4a.ToolName = "bash"
+	require.NoError(t, s.CreateAgent(ctx, a4a))
+	_, err = s.BeginStartLaunch(ctx, a4a.ID, store.LaunchKindStart, time.Minute, store.BeginLaunchOptions{
+		PriorPhase: string(state.PhaseSuspended),
 	})
 	require.NoError(t, err)
-	got4, err := s.GetAgent(ctx, a4.ID)
+	got4a, err := s.GetAgent(ctx, a4a.ID)
 	require.NoError(t, err)
-	assert.Empty(t, got4.Activity, "async start launch must clear prior activity on starting row")
-	assert.Empty(t, got4.ToolName)
+	assert.Empty(t, got4a.Activity, "async start launch must clear non-terminal activity on starting row")
+	assert.Empty(t, got4a.ToolName)
+
+	for _, termAct := range []state.Activity{state.ActivityCrashed, state.ActivityLimitsExceeded} {
+		a4b := makeAgent(projectID, "async-start-keep-"+string(termAct))
+		a4b.Phase = string(state.PhaseStopped)
+		a4b.Activity = string(termAct)
+		a4b.ToolName = "bash"
+		require.NoError(t, s.CreateAgent(ctx, a4b))
+		require.NoError(t, s.UpdateAgentStatus(ctx, a4b.ID, store.AgentStatusUpdate{
+			Phase:   string(state.PhaseStarting),
+			IfPhase: string(state.PhaseStopped),
+		}))
+		launchID4b, err := s.BeginStartLaunch(ctx, a4b.ID, store.LaunchKindStart, time.Minute, store.BeginLaunchOptions{
+			PriorPhase: string(state.PhaseStopped),
+		})
+		require.NoError(t, err)
+		got4b, err := s.GetAgent(ctx, a4b.ID)
+		require.NoError(t, err)
+		assert.Equal(t, string(termAct), got4b.Activity, "BeginStartLaunch must preserve terminal activity %s", termAct)
+		assert.Empty(t, got4b.ToolName)
+
+		// If the async start fails, startLaunchFailureEnd restores stopped and keeps the terminal activity.
+		_, _, err = s.ApplyLaunchReport(ctx, a4b.ID, a4b.RuntimeBrokerID, store.LaunchReport{
+			LaunchID:   launchID4b,
+			InstanceID: "i1",
+			State:      store.LaunchReportStateFailed,
+			ErrorCode:  "runtime_error",
+		})
+		require.NoError(t, err)
+		failed4b, err := s.GetAgent(ctx, a4b.ID)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseStopped), failed4b.Phase)
+		assert.Equal(t, string(termAct), failed4b.Activity, "failed async start from stopped+%s must preserve terminal activity", termAct)
+	}
 
 	// 4. Case-variant re-report of the same activity does not move ActivitySince.
 	a5 := makeAgent(projectID, "case-stable-since")

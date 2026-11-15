@@ -178,6 +178,18 @@ describe('scion-chat-members agent tooltip', () => {
 
     const stoppedStaleWork = await mount([agent({ phase: 'stopped', activity: 'working' })]);
     expect(tooltipContent(stoppedStaleWork)).toBe('stopped');
+    document.body.innerHTML = '';
+
+    const stoppedCrashed = await mount([
+      agent({ phase: 'stopped', activity: 'crashed' as never }),
+    ]);
+    expect(tooltipContent(stoppedCrashed)).toBe('crashed');
+    document.body.innerHTML = '';
+
+    const stoppedLimits = await mount([
+      agent({ phase: 'stopped', activity: 'limits_exceeded' }),
+    ]);
+    expect(tooltipContent(stoppedLimits)).toBe('limits exceeded');
   });
 });
 
