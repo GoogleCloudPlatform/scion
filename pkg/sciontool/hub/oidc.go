@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
@@ -62,9 +63,7 @@ func (c *Client) configureOIDCTransport() {
 	mode := transportauth.ModeFromEnv()
 	if src := newTransportFileSource(); src != nil {
 		src.WarnLog = log.Debug
-		c.oidcSource = src
-		c.oidcMode = mode
-		c.client.Transport = transportauth.Wrap(c.client.Transport, src, mode)
+		c.setOIDCTransport(src, mode)
 		log.Debug("Configured OIDC transport: injected mode (hub-provided token, file-backed)")
 		return
 	}
@@ -76,10 +75,8 @@ func (c *Client) configureOIDCTransport() {
 	if transportauth.IsProxyMode(os.Getenv(transportauth.EnvTransportMode)) {
 		src := NewTransportTokenFileSource()
 		src.WarnLog = log.Debug
-		c.oidcSource = src
-		c.oidcMode = mode
 		c.oidcLate = true
-		c.client.Transport = transportauth.Wrap(c.client.Transport, src, mode)
+		c.setOIDCTransport(src, mode)
 		log.Debug("Configured OIDC transport: file-backed mode without a bootstrap token (proxy mode)")
 	}
 }
@@ -102,9 +99,7 @@ func (c *Client) configureMetadataTransport(mode transportauth.HeaderMode) bool 
 	}
 
 	source := transportauth.NewMetadataSource(audience)
-	c.oidcSource = source
-	c.oidcMode = mode
-	c.client.Transport = transportauth.Wrap(c.client.Transport, source, mode)
+	c.setOIDCTransport(source, mode)
 	log.Debug("Configured OIDC transport: metadata mode (audience=%s)", audience)
 	return true
 }
@@ -162,7 +157,30 @@ func (c *Client) ApplyTransportHeaders(h http.Header) error {
 // source, sent in the header selected by mode. NewClient configures this
 // automatically; it is for clients built with NewClientWithConfig.
 func (c *Client) SetTransportAuth(src transportauth.TokenSource, mode transportauth.HeaderMode) {
+	c.setOIDCTransport(src, mode)
+}
+
+// setOIDCTransport installs src and mode on c.client, unwrapping any prior
+// hub-only transport layer and re-applying the hub origin rule so cross-origin
+// redirect hops never receive the transport credential.
+func (c *Client) setOIDCTransport(src transportauth.TokenSource, mode transportauth.HeaderMode) {
 	c.oidcSource = src
 	c.oidcMode = mode
-	c.client.Transport = transportauth.Wrap(c.client.Transport, src, mode)
+	if c.client == nil {
+		c.client = &http.Client{Timeout: DefaultTimeout}
+	}
+	base := c.client.Transport
+	for i := 0; i < 8; i++ {
+		l, ok := base.(apiclient.HubOnlyRoundTripper)
+		if !ok {
+			break
+		}
+		base = l.HubOnlyBase()
+	}
+	baseClient := *c.client
+	baseClient.CheckRedirect = nil
+	baseClient.Transport = transportauth.Wrap(base, src, mode)
+	scoped := apiclient.HubScopedHTTPClient(&baseClient, c.hubURL)
+	c.client.Transport = scoped.Transport
+	c.client.CheckRedirect = scoped.CheckRedirect
 }
