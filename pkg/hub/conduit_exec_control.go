@@ -129,6 +129,12 @@ func (s *Server) callAgentExec(ctx context.Context, agentID, launchID, route str
 	if err != nil {
 		return 0, nil, err
 	}
+	if agent == nil {
+		// The store contract returns ErrNotFound rather than a nil row;
+		// a store (or wrapper) that breaks it is treated the same way, and
+		// nothing is sent.
+		return 0, nil, store.ErrNotFound
+	}
 	if agent.RunID != launchID {
 		return 0, nil, &AgentExecLaunchChangedError{AgentID: agentID}
 	}
