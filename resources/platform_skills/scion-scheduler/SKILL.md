@@ -26,7 +26,7 @@ When waiting on an external, non-agent process (CI run, build job, deploy,
 third-party API), calling `sciontool status blocked "..."` alone is **not
 sufficient**. That command marks intentional waiting for the stall detector —
 it does not poll anything or wake you when the external condition resolves.
-Without a separate wake mechanism, you go fully idle and only resume if an
+Without a separate wake mechanism, you sit waiting and only resume if an
 unrelated inbound message happens to arrive.
 
 **Correct pattern:** schedule a self-callback, then set blocked status.
@@ -48,9 +48,17 @@ detector from flagging you during the wait. **Neither replaces the other.**
 agent or a scheduled event already tracked by the orchestration system —
 those fire their own state-change notifications.
 
+Use `blocked` for these specific waits, and always while your own background
+job or process runs. When you have no further work until something new
+arrives, signal `sciontool status idle "<reason>"` instead. If your only
+pending event is a scheduled message hours away, `idle` is fine: the schedule
+will wake you.
+
 ## Waking a suspended agent
 
-A scheduled message to a suspended agent fails unless the schedule sets
+An agent that Scion suspended because it was idle or completed is woken
+by any scheduled message, without `--wake`. For any other suspended agent,
+a scheduled message fails unless the schedule sets
 `--wake` (on `create` or `create-recurring`). With `--wake` the fire resumes
 the agent, then delivers. It needs permission to start the agent; without
 it, or for a held agent, the fire is refused and nothing starts. A stopped

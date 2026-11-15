@@ -155,6 +155,10 @@ type Client interface {
 	// Decisions returns the agent self-service decision operations interface.
 	Decisions() DecisionService
 
+	// ProjectDecisions returns a project's Decisions as the calling user
+	// sees them (Waiting on you and Made).
+	ProjectDecisions(projectID string) ProjectDecisionService
+
 	// Health checks API availability.
 	Health(ctx context.Context) (*HealthResponse, error)
 

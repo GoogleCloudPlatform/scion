@@ -34,6 +34,13 @@ func TestStatusDefinitionHubUpdate(t *testing.T) {
 			wantMessage:  "details",
 		},
 		{
+			name:         "idle",
+			statusType:   "idle",
+			wantActivity: state.ActivityIdle,
+			wantStatus:   "idle",
+			wantMessage:  "details",
+		},
+		{
 			name:            "task completed",
 			statusType:      "task_completed",
 			wantActivity:    state.ActivityCompleted,

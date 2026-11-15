@@ -20,7 +20,9 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -232,4 +234,183 @@ func TestIsSystemProjectAgentsGroup(t *testing.T) {
 			assert.Equal(t, tt.expect, isSystemProjectAgentsGroup(tt.group, projectID))
 		})
 	}
+}
+
+// TestGetProject_SecurityGatePrecedesGroupWrites verifies that getProject
+// enforces CheckAccess before backfilling project groups, so denied callers
+// cause no store writes while authorized user and agent callers still backfill
+// and read the project as before (ptone/scion#1393).
+func TestGetProject_SecurityGatePrecedesGroupWrites(t *testing.T) {
+	setupPreBackfillProject := func(t *testing.T, slug string) (
+		srv *Server,
+		s store.Store,
+		alice *store.User,
+		bob *store.User,
+		project *store.Project,
+		agentsSlug string,
+		membersSlug string,
+	) {
+		t.Helper()
+		srv, s = testServer(t)
+		ctx := context.Background()
+
+		alice = &store.User{
+			ID:          api.NewUUID(),
+			Email:       "alice-" + slug + "@test.com",
+			DisplayName: "Alice",
+			Role:        store.UserRoleMember,
+			Status:      "active",
+			Created:     time.Now(),
+		}
+		require.NoError(t, s.CreateUser(ctx, alice))
+		ensureHubMembership(ctx, s, alice.ID)
+
+		bob = &store.User{
+			ID:          api.NewUUID(),
+			Email:       "bob-" + slug + "@test.com",
+			DisplayName: "Bob",
+			Role:        store.UserRoleMember,
+			Status:      "active",
+			Created:     time.Now(),
+		}
+		require.NoError(t, s.CreateUser(ctx, bob))
+		ensureHubMembership(ctx, s, bob.ID)
+
+		project = &store.Project{
+			ID:        api.NewUUID(),
+			Name:      "Pre-Backfill " + slug,
+			Slug:      slug,
+			OwnerID:   alice.ID,
+			CreatedBy: alice.ID,
+			Created:   time.Now(),
+			Updated:   time.Now(),
+		}
+		require.NoError(t, s.CreateProject(ctx, project))
+		require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, project.ID, alice.ID))
+
+		agentsSlug = "project:" + project.Slug + ":agents"
+		membersSlug = projectMembersGroupSlug(project.Slug)
+
+		// Precondition: neither system group exists before getProject runs.
+		_, err := s.GetGroupBySlug(ctx, agentsSlug)
+		require.ErrorIs(t, err, store.ErrNotFound)
+		_, err = s.GetGroupByProjectID(ctx, project.ID)
+		require.ErrorIs(t, err, store.ErrNotFound)
+		_, err = s.GetGroupBySlug(ctx, membersSlug)
+		require.ErrorIs(t, err, store.ErrNotFound)
+
+		return srv, s, alice, bob, project, agentsSlug, membersSlug
+	}
+
+	assertNoProjectGroupsCreated := func(t *testing.T, s store.Store, projectID, agentsSlug, membersSlug string) {
+		t.Helper()
+		ctx := context.Background()
+		_, err := s.GetGroupBySlug(ctx, agentsSlug)
+		assert.ErrorIs(t, err, store.ErrNotFound, "denied getProject must not create project_agents group by slug")
+		_, err = s.GetGroupByProjectID(ctx, projectID)
+		assert.ErrorIs(t, err, store.ErrNotFound, "denied getProject must not create project_agents group for project")
+		_, err = s.GetGroupBySlug(ctx, membersSlug)
+		assert.ErrorIs(t, err, store.ErrNotFound, "denied getProject must not create project members group")
+	}
+
+	assertBothProjectGroupsCreated := func(t *testing.T, s store.Store, projectID, agentsSlug, membersSlug string) {
+		t.Helper()
+		ctx := context.Background()
+		agentsGroup, err := s.GetGroupBySlug(ctx, agentsSlug)
+		require.NoError(t, err, "authorized getProject should backfill project_agents group")
+		assert.Equal(t, projectID, agentsGroup.ProjectID)
+		assert.Equal(t, store.GroupTypeProjectAgents, agentsGroup.GroupType)
+		assert.Equal(t, "true", agentsGroup.Annotations[store.AnnotationProjectAgentsGroup])
+
+		byProj, err := s.GetGroupByProjectID(ctx, projectID)
+		require.NoError(t, err)
+		assert.Equal(t, agentsGroup.ID, byProj.ID)
+
+		membersGroup, err := s.GetGroupBySlug(ctx, membersSlug)
+		require.NoError(t, err, "authorized getProject should backfill project members group")
+		assert.Equal(t, projectID, membersGroup.ProjectID)
+		assert.Equal(t, "true", membersGroup.Annotations[store.AnnotationProjectMembersGroup])
+	}
+
+	t.Run("unauthorized user causes no group writes", func(t *testing.T) {
+		srv, s, _, bob, project, agentsSlug, membersSlug := setupPreBackfillProject(t, "secgate-unauth-user")
+
+		rec := doRequestAsUser(t, srv, bob, http.MethodGet, "/api/v1/projects/"+project.ID, nil)
+		require.Equal(t, http.StatusNotFound, rec.Code, "body: %s", rec.Body.String())
+
+		assertNoProjectGroupsCreated(t, s, project.ID, agentsSlug, membersSlug)
+	})
+
+	t.Run("unauthorized agent from another project causes no group writes", func(t *testing.T) {
+		srv, s, _, bob, project, agentsSlug, membersSlug := setupPreBackfillProject(t, "secgate-unauth-agent")
+		ctx := context.Background()
+
+		otherProject := &store.Project{
+			ID:        api.NewUUID(),
+			Name:      "Bob Project",
+			Slug:      "secgate-bob-other",
+			OwnerID:   bob.ID,
+			CreatedBy: bob.ID,
+			Created:   time.Now(),
+			Updated:   time.Now(),
+		}
+		require.NoError(t, s.CreateProject(ctx, otherProject))
+		require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, otherProject.ID, bob.ID))
+
+		foreignAgentID := api.NewUUID()
+		createDCAgent(t, s, foreignAgentID, otherProject.ID, bob.ID, AgentRoleBaseline)
+		seedRecordedDelegationEdge(t, s, "user", bob.ID, "agent", foreignAgentID, store.RoleScopeProject, otherProject.ID, string(AgentRoleBaseline))
+
+		tok, err := srv.GetAgentTokenService().GenerateAgentToken(foreignAgentID, otherProject.ID, []AgentTokenScope{ScopeProjectRead}, nil)
+		require.NoError(t, err)
+
+		rec := doRequestWithAgentToken(t, srv, http.MethodGet, "/api/v1/projects/"+project.ID, nil, tok)
+		require.Equal(t, http.StatusNotFound, rec.Code, "body: %s", rec.Body.String())
+
+		assertNoProjectGroupsCreated(t, s, project.ID, agentsSlug, membersSlug)
+	})
+
+	t.Run("missing identity causes no group writes", func(t *testing.T) {
+		srv, s, _, _, project, agentsSlug, membersSlug := setupPreBackfillProject(t, "secgate-no-identity")
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/projects/"+project.ID, nil)
+		rec := httptest.NewRecorder()
+		srv.getProject(rec, req, project.ID)
+		require.Equal(t, http.StatusNotFound, rec.Code, "body: %s", rec.Body.String())
+
+		assertNoProjectGroupsCreated(t, s, project.ID, agentsSlug, membersSlug)
+	})
+
+	t.Run("authorized user backfills both groups and returns project", func(t *testing.T) {
+		srv, s, alice, _, project, agentsSlug, membersSlug := setupPreBackfillProject(t, "secgate-auth-user")
+
+		rec := doRequestAsUser(t, srv, alice, http.MethodGet, "/api/v1/projects/"+project.ID, nil)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+		var resp ProjectWithCapabilities
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		assert.Equal(t, project.ID, resp.ID)
+
+		assertBothProjectGroupsCreated(t, s, project.ID, agentsSlug, membersSlug)
+	})
+
+	t.Run("authorized project agent backfills both groups and returns project", func(t *testing.T) {
+		srv, s, alice, _, project, agentsSlug, membersSlug := setupPreBackfillProject(t, "secgate-auth-agent")
+
+		agentID := api.NewUUID()
+		createDCAgent(t, s, agentID, project.ID, alice.ID, AgentRoleBaseline)
+		seedRecordedDelegationEdge(t, s, "user", alice.ID, "agent", agentID, store.RoleScopeProject, project.ID, string(AgentRoleBaseline))
+
+		tok, err := srv.GetAgentTokenService().GenerateAgentToken(agentID, project.ID, []AgentTokenScope{ScopeProjectRead}, nil)
+		require.NoError(t, err)
+
+		rec := doRequestWithAgentToken(t, srv, http.MethodGet, "/api/v1/projects/"+project.ID, nil, tok)
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+		var resp ProjectWithCapabilities
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+		assert.Equal(t, project.ID, resp.ID)
+
+		assertBothProjectGroupsCreated(t, s, project.ID, agentsSlug, membersSlug)
+	})
 }

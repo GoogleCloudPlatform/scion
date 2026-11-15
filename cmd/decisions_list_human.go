@@ -1,0 +1,387 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package cmd
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"text/tabwriter"
+	"time"
+	"unicode/utf8"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/google/uuid"
+	"github.com/spf13/cobra"
+)
+
+// Human-mode scion decisions list (design C1, section 5.4).
+const (
+	defaultDecisionsListLimit = 50
+	maxDecisionsListLimit     = 200
+	minDecisionsSearchRunes   = 2
+	maxDecisionsSearchRunes   = 256
+
+	errMsgProjectDecisionsDisabled  = "Decisions are not enabled on this hub (experiment web.project_decisions)"
+	errMsgDecisionSearchUnsupported = "this hub does not support decision search"
+)
+
+// decisionsHumanTarget returns the hub client and the ID of the project the
+// human-mode list reads.
+var decisionsHumanTarget = func() (hubclient.Client, string, error) {
+	settings, client, err := requireHubClient()
+	if err != nil {
+		return nil, "", err
+	}
+	projectID, err := resolveProjectID(settings, "")
+	if err != nil {
+		return nil, "", err
+	}
+	return client, projectID, nil
+}
+
+// decisionsAmbiguousError is a --conversation or --agent name that matches
+// more than one facet option. It exits with status 2.
+type decisionsAmbiguousError struct{ msg string }
+
+func (e *decisionsAmbiguousError) Error() string { return e.msg }
+func (e *decisionsAmbiguousError) ExitCode() int { return 2 }
+
+// humanDecisionsListOptions validates the human-mode flags into list
+// options. --conversation, --agent and --answered-by me are resolved later.
+func humanDecisionsListOptions(cmd *cobra.Command) (hubclient.ListProjectDecisionsOptions, error) {
+	flags := cmd.Flags()
+	waiting, _ := flags.GetBool("waiting")
+	made, _ := flags.GetBool("made")
+	if waiting && made {
+		return hubclient.ListProjectDecisionsOptions{}, newUsageError("pass at most one of --waiting or --made")
+	}
+	opts := hubclient.ListProjectDecisionsOptions{Tab: hubclient.ProjectDecisionsTabPending}
+	if made {
+		opts.Tab = hubclient.ProjectDecisionsTabMade
+	}
+
+	limit, _ := flags.GetInt("limit")
+	if limit < 1 || limit > maxDecisionsListLimit {
+		return opts, newUsageError("--limit must be between 1 and %d", maxDecisionsListLimit)
+	}
+	opts.Limit = limit
+
+	search, _ := flags.GetString("search")
+	if search = strings.TrimSpace(search); search != "" {
+		if n := utf8.RuneCountInString(search); n < minDecisionsSearchRunes || n > maxDecisionsSearchRunes {
+			return opts, newUsageError("--search must be %d to %d characters", minDecisionsSearchRunes, maxDecisionsSearchRunes)
+		}
+		opts.Query = search
+	}
+
+	for _, name := range []string{"answered-by", "provenance", "since", "until"} {
+		if flags.Changed(name) && !made {
+			return opts, newUsageError("--%s needs --made", name)
+		}
+	}
+	opts.UserID, _ = flags.GetString("answered-by")
+	opts.UserID = strings.TrimSpace(opts.UserID)
+	provenance, _ := flags.GetString("provenance")
+	switch provenance = strings.TrimSpace(provenance); provenance {
+	case "", "direct", "interpreted", "confirmed", "overridden":
+		opts.Provenance = provenance
+	default:
+		return opts, newUsageError("--provenance must be one of direct, interpreted, confirmed, overridden")
+	}
+	for flag, dst := range map[string]*string{"since": &opts.From, "until": &opts.To} {
+		v, _ := flags.GetString(flag)
+		v = strings.TrimSpace(v)
+		if v != "" && !validDecisionDateBound(v) {
+			return opts, newUsageError("--%s must be YYYY-MM-DD or RFC3339", flag)
+		}
+		*dst = v
+	}
+	return opts, nil
+}
+
+// validDecisionDateBound reports whether v is a UTC day (YYYY-MM-DD) or an
+// RFC3339 time, the forms the hub accepts for from and to.
+func validDecisionDateBound(v string) bool {
+	if _, err := time.Parse("2006-01-02", v); err == nil {
+		return true
+	}
+	_, err := time.Parse(time.RFC3339Nano, v)
+	return err == nil
+}
+
+func runHumanDecisionsList(cmd *cobra.Command) error {
+	opts, err := humanDecisionsListOptions(cmd)
+	if err != nil {
+		return err
+	}
+	conversation, _ := cmd.Flags().GetString("conversation")
+	conversation = strings.TrimSpace(conversation)
+	agent, _ := cmd.Flags().GetString("agent")
+	agent = strings.TrimSpace(agent)
+
+	client, projectID, err := decisionsHumanTarget()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+	defer cancel()
+	svc := client.ProjectDecisions(projectID)
+
+	// Names resolve against the facets, which cover the whole scope.
+	if conversation != "" || agent != "" {
+		facets, err := svc.List(ctx, &hubclient.ListProjectDecisionsOptions{Tab: opts.Tab, Limit: 1})
+		if err != nil {
+			return formatProjectDecisionsError(err)
+		}
+		if !facets.SupportsSearch() {
+			return errors.New(errMsgDecisionSearchUnsupported)
+		}
+		if conversation != "" {
+			if opts.Conversation, err = resolveDecisionConversation(conversation, facets.Conversations); err != nil {
+				return err
+			}
+		}
+		if agent != "" {
+			if opts.AgentID, err = resolveDecisionAgent(agent, facets.Agents); err != nil {
+				return err
+			}
+		}
+	}
+
+	var meID string
+	wantJSON := decisionsWantJSON(cmd)
+	if strings.EqualFold(opts.UserID, "me") || (opts.Tab == hubclient.ProjectDecisionsTabMade && !wantJSON) {
+		me, err := client.Auth().Me(ctx)
+		if err == nil && me != nil {
+			meID = me.ID
+		}
+		if strings.EqualFold(opts.UserID, "me") {
+			// An empty ID would silently drop the filter and list
+			// everyone's answers.
+			switch {
+			case err != nil:
+				return fmt.Errorf("resolve --answered-by me: %w", err)
+			case meID == "":
+				return errors.New("resolve --answered-by me: the hub returned an empty identity")
+			}
+			opts.UserID = meID
+		}
+	}
+
+	resp, err := svc.List(ctx, &opts)
+	if err != nil {
+		return formatProjectDecisionsError(err)
+	}
+	if opts.Query != "" && !resp.SupportsSearch() {
+		return errors.New(errMsgDecisionSearchUnsupported)
+	}
+
+	if wantJSON {
+		return writeJSONTo(cmd.OutOrStdout(), resp)
+	}
+	filtered := opts.Query != "" || opts.Conversation != "" || opts.AgentID != ""
+	if opts.Tab == hubclient.ProjectDecisionsTabMade {
+		filtered = filtered || opts.UserID != "" || opts.Provenance != "" || opts.From != "" || opts.To != ""
+		writeMadeDecisionsTable(cmd.OutOrStdout(), resp, meID, filtered)
+		return nil
+	}
+	writeWaitingDecisionsTable(cmd.OutOrStdout(), resp, filtered)
+	return nil
+}
+
+// formatProjectDecisionsError maps a project decisions API error: a 404
+// from the experiment gate names the experiment, a missing project says so.
+func formatProjectDecisionsError(err error) error {
+	var apiErr *apiclient.APIError
+	if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+		if strings.HasPrefix(apiErr.Message, "Project") {
+			return errors.New("project not found on this hub")
+		}
+		//nolint:staticcheck // ST1005: fixed user-facing text from design 5.4, pinned by TestDecisionsListHuman_ExperimentOffAndOldHub.
+		return errors.New(errMsgProjectDecisionsDisabled)
+	}
+	return formatDecisionAPIError(err)
+}
+
+// normDecisionName folds a conversation or agent name for matching: case is
+// ignored and a leading # is optional.
+func normDecisionName(s string) string {
+	return strings.ToLower(strings.TrimPrefix(strings.TrimSpace(s), "#"))
+}
+
+// resolveDecisionConversation maps --conversation to a chat key: a facet
+// key as is, else the one facet whose label matches. A value that matches
+// no label but has the shape of a chat key (a topic UUID or a dm: key) is
+// passed through, so the hub answers it (empty when not readable).
+func resolveDecisionConversation(value string, convs []hubclient.ProjectDecisionConversation) (string, error) {
+	for _, c := range convs {
+		if c.Key == value {
+			return c.Key, nil
+		}
+	}
+	var matches []hubclient.ProjectDecisionConversation
+	for _, c := range convs {
+		if normDecisionName(c.Label) == normDecisionName(value) {
+			matches = append(matches, c)
+		}
+	}
+	switch len(matches) {
+	case 1:
+		return matches[0].Key, nil
+	case 0:
+		if _, err := uuid.Parse(value); err == nil || strings.HasPrefix(value, "dm:") {
+			return value, nil
+		}
+		return "", fmt.Errorf("no conversation with Decisions matches %q", safeText(value))
+	}
+	lines := make([]string, 0, len(matches))
+	for _, m := range matches {
+		lines = append(lines, fmt.Sprintf("  %s  %s", safeText(m.Label), safeText(m.Key)))
+	}
+	return "", &decisionsAmbiguousError{msg: fmt.Sprintf("--conversation %q matches %d conversations; pass a key:\n%s",
+		safeText(value), len(matches), strings.Join(lines, "\n"))}
+}
+
+// resolveDecisionAgent maps --agent to an agent ID: a facet ID as is, else
+// the one facet whose name matches. An unmatched UUID is passed through.
+func resolveDecisionAgent(value string, agents []hubclient.ProjectDecisionActor) (string, error) {
+	for _, a := range agents {
+		if a.ID == value {
+			return a.ID, nil
+		}
+	}
+	var matches []hubclient.ProjectDecisionActor
+	for _, a := range agents {
+		if normDecisionName(a.Name) == normDecisionName(value) {
+			matches = append(matches, a)
+		}
+	}
+	switch len(matches) {
+	case 1:
+		return matches[0].ID, nil
+	case 0:
+		if _, err := uuid.Parse(value); err == nil {
+			return value, nil
+		}
+		return "", fmt.Errorf("no agent that asked Decisions matches %q", safeText(value))
+	}
+	lines := make([]string, 0, len(matches))
+	for _, m := range matches {
+		name := safeText(m.Name)
+		if m.Hint != "" {
+			name += " (" + safeText(m.Hint) + ")"
+		}
+		lines = append(lines, fmt.Sprintf("  %s  %s", name, safeText(m.ID)))
+	}
+	return "", &decisionsAmbiguousError{msg: fmt.Sprintf("--agent %q matches %d agents; pass an ID:\n%s",
+		safeText(value), len(matches), strings.Join(lines, "\n"))}
+}
+
+// decisionRowWaitingOnYou reports whether row d of prompt p is open and
+// waiting on the viewer: pending, or decided by an unconfirmed interpreted
+// answer, with no waiting-on-others reason.
+func decisionRowWaitingOnYou(p hubclient.ProjectDecisionPrompt, d hubclient.DecisionView) bool {
+	open := d.Status == "pending" || (d.Status == "decided" && d.Decision != nil && d.Decision.Provenance == "agent_interpreted")
+	return open && p.WaitingReasons[d.RowID] == ""
+}
+
+func writeWaitingDecisionsTable(out io.Writer, resp *hubclient.ProjectDecisionsResponse, filtered bool) {
+	counts := resp.Counts
+	if resp.FilteredCounts != nil {
+		counts = *resp.FilteredCounts
+	}
+	var rows [][]string
+	for _, p := range resp.Prompts {
+		if !p.WaitingOnYou {
+			continue
+		}
+		for _, d := range p.Decisions {
+			if !decisionRowWaitingOnYou(p, d) {
+				continue
+			}
+			rows = append(rows, []string{
+				safeText(d.Key),
+				fmt.Sprintf("v%d", d.Version),
+				truncateRunes(collapseSingleLine(d.Question), decisionQuestionMaxWidth, true),
+				orDash(safeText(p.AskerAgentName)),
+				orDash(safeText(p.ConversationLabel)),
+				clitime.Ago(p.CreatedAt),
+			})
+		}
+	}
+	if len(rows) == 0 {
+		if filtered {
+			_, _ = fmt.Fprintln(out, "No Decisions waiting on you match.")
+		} else {
+			_, _ = fmt.Fprintln(out, "No Decisions waiting on you.")
+		}
+	} else {
+		tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+		_, _ = fmt.Fprintln(tw, "KEY\tVER\tQUESTION\tAGENT\tCONVERSATION\tAGE")
+		for _, r := range rows {
+			_, _ = fmt.Fprintln(tw, strings.Join(r, "\t"))
+		}
+		_ = tw.Flush()
+	}
+	// Pages list waiting-on-you prompts before waiting-on-others ones, so
+	// a next page holds more of yours only while rows shown fall short of
+	// the waiting-on-you count.
+	if resp.NextCursor != "" && len(rows) < counts.WaitingOnYou {
+		_, _ = fmt.Fprintf(out, "More Decisions are waiting on you; raise --limit (up to %d) to list them.\n", maxDecisionsListLimit)
+	}
+	if counts.WaitingOnOthers > 0 {
+		_, _ = fmt.Fprintf(out, "%d more waiting on others (use --json for details)\n", counts.WaitingOnOthers)
+	}
+}
+
+func writeMadeDecisionsTable(out io.Writer, resp *hubclient.ProjectDecisionsResponse, meID string, filtered bool) {
+	if len(resp.Entries) == 0 {
+		if filtered {
+			_, _ = fmt.Fprintln(out, "No Decisions made match.")
+		} else {
+			_, _ = fmt.Fprintln(out, "No Decisions made.")
+		}
+		return
+	}
+	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "WHEN\tKEY\tVER\tQUESTION\tANSWER\tANSWERED BY\tPROVENANCE\tAGENT\tCONVERSATION")
+	for _, e := range resp.Entries {
+		answeredBy := orDash(safeText(e.AnsweredByName))
+		if meID != "" && e.AnsweredByUserID == meID {
+			answeredBy = "you"
+		}
+		_, _ = fmt.Fprintln(tw, strings.Join([]string{
+			clitime.Format(e.At, clitime.Date),
+			safeText(e.Decision.Key),
+			fmt.Sprintf("v%d", e.Decision.Version),
+			truncateRunes(collapseSingleLine(e.Decision.Question), decisionQuestionMaxWidth, true),
+			orDash(collapseSingleLine(e.Label)),
+			answeredBy,
+			decisionProvenanceDisplay(&hubclient.DecisionAnswerView{Provenance: e.Provenance, Outcome: e.Outcome}),
+			orDash(safeText(e.Decision.AskerAgentName)),
+			orDash(safeText(e.ConversationLabel)),
+		}, "\t"))
+	}
+	_ = tw.Flush()
+	if resp.NextCursor != "" {
+		_, _ = fmt.Fprintf(out, "More answers; raise --limit (up to %d) to list them.\n", maxDecisionsListLimit)
+	}
+}

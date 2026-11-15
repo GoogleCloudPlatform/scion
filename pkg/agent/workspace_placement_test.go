@@ -127,6 +127,7 @@ func TestWorkspacePlacementFor(t *testing.T) {
 		{"apple container nfs", workspacePlacementInput{Backend: "nfs", Runtime: "container"}, api.WorkspacePlacementExport},
 		{"cloudrun nfs", workspacePlacementInput{Backend: "nfs", Runtime: "cloudrun"}, api.WorkspacePlacementExport},
 		{"cloudrun nfs clone-per-agent (its own workspace on the export)", workspacePlacementInput{Backend: "nfs", Runtime: "cloudrun", ClonePerAgent: true}, api.WorkspacePlacementExport},
+		{"cloudrun nfs clone-per-agent ephemeral (instance-local)", workspacePlacementInput{Backend: "nfs", Runtime: "cloudrun", ClonePerAgent: true, Ephemeral: true}, api.WorkspacePlacementLocal},
 		{"cloudrun-sandbox nfs (copies to local disk)", workspacePlacementInput{Backend: "nfs", Runtime: "cloudrun-sandbox"}, api.WorkspacePlacementLocal},
 		{"substrate nfs (never mounts)", workspacePlacementInput{Backend: "nfs", Runtime: "substrate"}, api.WorkspacePlacementLocal},
 		{"unknown runtime nfs", workspacePlacementInput{Backend: "nfs", Runtime: "future-runtime"}, api.WorkspacePlacementLocal},
@@ -142,4 +143,11 @@ func TestWorkspacePlacementFor(t *testing.T) {
 	for _, tc := range cases {
 		assert.Equal(t, tc.want, workspacePlacementFor(tc.in), tc.name)
 	}
+}
+
+func TestHarnessResume(t *testing.T) {
+	assert.True(t, harnessResume(api.StartOptions{Resume: true}))
+	assert.True(t, harnessResume(api.StartOptions{Resume: true, Persistence: api.PersistencePersistent}))
+	assert.False(t, harnessResume(api.StartOptions{Resume: true, Persistence: api.PersistenceEphemeral}))
+	assert.False(t, harnessResume(api.StartOptions{}))
 }

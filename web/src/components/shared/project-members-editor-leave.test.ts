@@ -68,6 +68,7 @@ function group(principalId: string, r: AssignableProjectRole, name: string): Pro
     principalType: 'user',
     principalId,
     principalDisplayName: name,
+    principalStatus: 'active',
     builtInRoleName: r.name,
     bindings: [
       {

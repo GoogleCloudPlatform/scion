@@ -144,9 +144,10 @@ type messageDeliveryFailuresResponse struct {
 // were accepted into its delivery buffer but could not be delivered.
 //
 // Only the broker itself may report, and only for messages whose recipient
-// agent is assigned to that broker. Rows not in pending/dispatched state are
-// left untouched, so a report can never resurrect or overwrite a terminal
-// state set by the hub.
+// agent is assigned to that broker. Rows not in pending, dispatched,
+// delivering or partial state are left untouched, so a report can never
+// resurrect or overwrite a terminal state set by the hub (delivered,
+// failed, deferred, no_recipient).
 func (s *Server) handleBrokerMessageFailures(w http.ResponseWriter, r *http.Request, brokerID string) {
 	ctx := r.Context()
 
@@ -218,6 +219,12 @@ func (s *Server) applyBrokerMessageFailure(ctx context.Context, brokerID string,
 
 	switch msg.DispatchState {
 	case store.MessageDispatchDispatched, store.MessageDispatchPending:
+	case store.MessageDispatchPartial, store.MessageDispatchDelivering:
+		// A conduit delivery that may have pasted (gap G5 of the v2.22
+		// freeze): the row is failed and the sender told, as with a
+		// partial exec delivery. delivery_id and delivery_outcome stay, so
+		// a same-id /deliver still replays without calling the agent. A
+		// delivered row is never failed.
 	default:
 		return false
 	}
@@ -226,9 +233,19 @@ func (s *Server) applyBrokerMessageFailure(ctx context.Context, brokerID string,
 	if reason == "" {
 		reason = "broker delivery failed after buffering"
 	}
-	if err := s.markFailed(ctx, msg.ID, reason); err != nil {
+	// One conditional write decides (review R4): a /deliver finish racing
+	// this report wins or loses atomically, a delivered row is never
+	// failed, and the notices below go out only when this call made the
+	// transition.
+	finCtx, finCancel := finalizationContext(ctx)
+	won, err := s.store.FailUndeliveredMessage(finCtx, msg.ID, reason)
+	finCancel()
+	if err != nil {
 		slog.Error("message-failures: failed to mark message failed",
 			"broker_id", brokerID, "message_id", msg.ID, "error", err)
+		return false
+	}
+	if !won {
 		return false
 	}
 	if s.messageLog != nil {

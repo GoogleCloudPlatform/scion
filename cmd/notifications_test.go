@@ -464,7 +464,7 @@ func TestRunNotificationsList_AgentHubContext_HubNotEnabledInSettings(t *testing
 }
 
 func TestDefaultTriggers(t *testing.T) {
-	expected := []string{"COMPLETED", "WAITING_FOR_INPUT", "LIMITS_EXCEEDED"}
+	expected := []string{"COMPLETED", "IDLE", "WAITING_FOR_INPUT", "LIMITS_EXCEEDED"}
 	if len(defaultTriggers) != len(expected) {
 		t.Fatalf("defaultTriggers length = %d, want %d", len(defaultTriggers), len(expected))
 	}

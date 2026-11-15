@@ -32,6 +32,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
@@ -2226,6 +2227,24 @@ func (s *Server) createAgentInProject(
 			return
 		}
 	}
+
+	// Persistence (ptone/scion#7780): resolved and stamped here, before the
+	// row is stored and so before the first dispatch.
+	var reqPersistence api.Persistence
+	if req.Config != nil {
+		reqPersistence = req.Config.Persistence
+	}
+	persistence, persistenceSource, refusal := resolveAgentPersistence(persistenceInput{
+		Request:        reqPersistence,
+		BrokerName:     persistenceBrokerName(resolvedBroker),
+		BrokerSupports: brokerSupportsEphemeral(resolvedBroker),
+		GateOn:         s.experimentEnabled(experiments.CloudRunEphemeralAgents),
+	})
+	if refusal != nil {
+		writeError(w, refusal.Status, refusal.Code, refusal.Message, refusal.Details)
+		return
+	}
+	stampAgentPersistence(agent, persistence, persistenceSource)
 
 	// Populate GCP identity in applied config.
 	// When no GCP identity is specified anywhere in the ladder below, the
@@ -4611,7 +4630,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		agent.Labels = updates.Labels
 	}
 	if updates.Annotations != nil {
-		agent.Annotations = updates.Annotations
+		agent.Annotations = keepPersistenceStamp(agent.Annotations, updates.Annotations)
 	}
 	if updates.TaskSummary != "" {
 		agent.TaskSummary = updates.TaskSummary

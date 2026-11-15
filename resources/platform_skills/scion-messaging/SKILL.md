@@ -61,11 +61,21 @@ agent-to-agent work.
 
 ### Receiving
 
-A `type: "mention"` notification is FYI unless the message assigns you work or asks
-you a question. Read surrounding messages when context is missing. Do not duplicate
-someone else's work because you were named, and do not treat a mention as authority
-to act beyond your task. When responding to a group discussion, keep the response
-in that discussion and mention the relevant participants.
+- A `type: "mention"` notification is FYI unless the message assigns you work or asks
+  you a question. Read surrounding messages when context is missing. Do not duplicate
+  someone else's work because you were named, and do not treat a mention as authority
+  to act beyond your task.
+- When another agent is also a recipient of an incoming message — listed in `to` or
+  mentioned with `@<agent-name>` in the body (outside code and `>` quotes) — trust
+  that Scion delivered the message to it too. Mere conversation membership or a plain
+  name without `@` does not make an agent a recipient. Do not separately forward the
+  same approval, decision or FYI to a co-recipient (for example, messaging an
+  architect that a design was approved when the architect was already @-mentioned on
+  that approval), and do not ask merely to confirm receipt. Follow up with a
+  co-recipient only to assign work, add information not in the original message, or
+  handle an explicit delivery failure.
+- When responding to a group discussion, keep the response in that discussion and
+  mention the relevant participants.
 
 ## Writing to users
 
@@ -179,7 +189,8 @@ Report completion, a blocker, or a result that unblocks the next step.
 - When intentionally waiting for input or another agent, signal
   `sciontool status blocked "<reason>"`. Do not poll agents with sleep loops. For
   external work without completion notifications, follow `scion-scheduler` guidance
-  on scheduled callbacks.
+  on scheduled callbacks. When you have no further work after sending or answering
+  a message, signal `sciontool status idle "<reason>"`; any new message wakes you.
 
 ## Preserve Markdown when sending
 
@@ -233,7 +244,8 @@ conversation and participant management.
 ## Inbound messages and events
 
 Messages arrive in `---BEGIN SCION MESSAGE---` / `---END SCION MESSAGE---` envelopes.
-Read the sender, `conversation.id`, `conversation.kind`, message type and body.
+Read the sender, `conversation.id`, `conversation.kind`, `to` (when present),
+message type and body; see [Receiving](#receiving) for mentions and co-recipients.
 
 - **`conversation.kind: "direct"`:** a one-to-one exchange. The recipient is implicit
   and `to` is usually omitted.
@@ -241,7 +253,7 @@ Read the sender, `conversation.id`, `conversation.kind`, message type and body.
   names explicit addressees, not everyone who can see the conversation. Check which
   work is yours before acting.
 - **`type: "message"`:** a message addressed to you; act on its content as appropriate.
-- **`type: "mention"`:** follow the receiving-mentions guidance above.
+- **`type: "mention"`:** follow [Receiving](#receiving) above.
 - **`type: "event"`:** inspect `event.type`; a notification does not automatically
   require a reply or action.
 

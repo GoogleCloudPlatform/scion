@@ -626,14 +626,21 @@ In agent mode (inside agent containers), every subcommand except `delete` is ava
 
 ### `scion decisions`
 
-Lists and shows the choice decisions an agent has asked with `scion message --choices`, and records answers the agent interpreted from a user's free-text reply. Requires the `web.chat_choices` [experiment](/scion/reference/experiments/) (off by default); while it is off, every subcommand fails with `decisions need the web.chat_choices experiment`. Only agents can use it: the commands are available in agent mode, and the Hub refuses any caller that is not an agent with `403 agents_only`. Each agent sees only its own decisions. See [Multiple-Choice Decisions](/scion/hosted/user/messaging/#multiple-choice-decisions-experimental) for how decisions are asked and answered.
+Lists Decisions. In human mode, `list` shows the Decisions in the current project that are waiting on you, or searches the Decisions made. In agent mode, the subcommands list and show the Decisions an agent has asked with `scion message --choices`, and record answers the agent interpreted from a user's free-text reply. The mode comes from `SCION_CLI_MODE` or `cli.mode`; flags of the other mode are hidden from help and refused with a usage error that names the mode.
+
+Agent mode requires the `web.chat_choices` [experiment](/scion/reference/experiments/) (off by default); while it is off, every subcommand fails with `decisions need the web.chat_choices experiment`. The Hub refuses an agent-mode request from a caller that is not an agent with `403 agents_only`, and each agent sees only its own Decisions. Human mode requires `web.project_decisions` and `web.chat_choices`; while either is off, `list` fails with `Decisions are not enabled on this hub (experiment web.project_decisions)`. See [Multiple-Choice Decisions](/scion/hosted/user/messaging/#multiple-choice-decisions-experimental) for how Decisions are asked and answered.
 
 **Usage:** `scion decisions [command] [flags]`
 
 - **Commands:**
-    - `list`: List your decisions, one row per version, with the columns `KEY`, `VER`, `STATUS`, `QUESTION` (cut to 50 characters), `ANSWER`, `ANSWERED BY`, `PROVENANCE`, `CONVERSATION` and `AGE`. `PROVENANCE` is `direct` (answered by the user), `interpreted` (recorded by the agent from a reply), `confirmed` or `overridden` (the user answered directly after an interpreted answer, with the same or a different choice), or `-` when there is no answer. With no decisions to show, prints `No <state> decisions.`
+    - `list` (human mode): List the Decisions of the current project from `GET /api/v1/projects/{id}/decisions`.
+        - By default (`--waiting`), lists the Decisions waiting on you, one row per open decision, with the columns `KEY`, `VER`, `QUESTION` (cut to 50 characters), `AGENT`, `CONVERSATION` and `AGE`, followed by `N more waiting on others (use --json for details)` when others must act on some. `--made` lists the answer log instead, newest first, with the columns `WHEN`, `KEY`, `VER`, `QUESTION`, `ANSWER`, `ANSWERED BY` (`you` for your own answers), `PROVENANCE`, `AGENT` and `CONVERSATION`.
+        - Flags: `-q`/`--search <text>` (2 to 256 characters; case-insensitive substring of the question, the answer, the key, the asking agent's name or the conversation name), `--conversation <name|key>`, `--agent <name|id>`, `--limit <n>` (1 to 200 prompts or answers; default 50). With `--made` only: `--answered-by me|<user-id>`, `--provenance direct|interpreted|confirmed|overridden`, `--since` and `--until` (`YYYY-MM-DD` as a UTC day, or RFC3339; the answer time). Filters combine with AND.
+        - `--conversation` and `--agent` match the names of the conversations and agents that have Decisions you can read: exactly, ignoring case, with the leading `#` optional (`release` matches `#release`). A name that matches several prints the matches and exits with status 2. A key or ID is used as given; the key of a conversation you cannot read lists nothing.
+        - On a Hub without Decisions search, `-q`, `--conversation` and `--agent` fail with `this hub does not support decision search`.
+    - `list` (agent mode): List your decisions, one row per version, with the columns `KEY`, `VER`, `STATUS`, `QUESTION` (cut to 50 characters), `ANSWER`, `ANSWERED BY`, `PROVENANCE`, `CONVERSATION` and `AGE`. `PROVENANCE` is `direct` (answered by the user), `interpreted` (recorded by the agent from a reply), `confirmed` or `overridden` (the user answered directly after an interpreted answer, with the same or a different choice), or `-` when there is no answer. With no decisions to show, prints `No <state> decisions.`
         - Flags: `--pending` (pending decisions only; the default), `--decided` (answered decisions that have not been replaced), `--all` (pending, decided and replaced versions). Pass at most one of the three.
-    - `show <key>`: Show every version of a decision key: status, the version that replaced it, question, conversation, prompt message ID, when it was created and decided, its choices (ID and label), and every answer recorded on it, interpreted and direct, with the choice, provenance, who answered, the surface, the time and, for an interpreted answer, the source message ID. An unknown key fails with `404 decision_not_found`.
+    - `show <key>` (agent mode): Show every version of a decision key: status, the version that replaced it, question, conversation, prompt message ID, when it was created and decided, its choices (ID and label), and every answer recorded on it, interpreted and direct, with the choice, provenance, who answered, the surface, the time and, for an interpreted answer, the source message ID. An unknown key fails with `404 decision_not_found`.
     - `record <key> <choice-id> --from <message-id>`: Record the answer the agent interpreted from a user's free-text reply. `<choice-id>` is the choice's `id`, as `show` lists it.
     - `record --from <message-id> <key>=<choice-id>...`: Record 1 to 10 interpreted answers from the same reply in one batch. The batch is atomic: if any pair is refused, nothing is recorded. Don't mix this form with the positional form in one command, and don't repeat a key.
 - **Flags:**
@@ -652,8 +659,10 @@ Lists and shows the choice decisions an agent has asked with `scion message --ch
 On success, `record` prints each key with its version, the recorded label and choice ID. The Hub posts one `choice-response` message in the conversation (for example "*agent* recorded *name*'s answer **Yes** to **D234**, interpreted from their reply"), which is not delivered back to the agent, and marks the decisions decided. Each `record` call is a new request: running it again after it succeeded fails with "already answered".
 
 ```bash
-scion decisions list
-scion decisions list --all --json
+scion decisions list                                   # human mode: waiting on you
+scion decisions list --search release
+scion decisions list --made --conversation release --since 2026-11-01
+scion decisions list --all --json                      # agent mode
 scion decisions show D234
 scion decisions record D234 yes --from 5d0c8a2e-7f41-4b8e-9c1a-2f6e0b3d9a17
 scion decisions record --from 5d0c8a2e-7f41-4b8e-9c1a-2f6e0b3d9a17 D234=yes 17=b
@@ -1589,7 +1598,7 @@ Manages notifications and notification subscriptions.
     - Flags:
         - `--agent <name-or-id>`: Subscribe to specific agent.
         - `--project <name>`: Specify project (inferred from context if omitted).
-        - `--triggers <triggers>`: Trigger activities to subscribe to. This flag is **repeatable** and also accepts a **comma-separated list** of triggers (e.g., `--triggers COMPLETED,WAITING_FOR_INPUT --triggers LIMITS_EXCEEDED`). Default: `COMPLETED,WAITING_FOR_INPUT,LIMITS_EXCEEDED`. Strict empty-value validation is enforced.
+        - `--triggers <triggers>`: Trigger activities to subscribe to. This flag is **repeatable** and also accepts a **comma-separated list** of triggers (e.g., `--triggers COMPLETED,WAITING_FOR_INPUT --triggers LIMITS_EXCEEDED`). Default: `COMPLETED,IDLE,WAITING_FOR_INPUT,LIMITS_EXCEEDED`. Strict empty-value validation is enforced.
 - `scion notifications unsubscribe <id>`: Remove a subscription.
     - Flags: `--all` (remove all subscriptions in the project), `--project <name>`.
 - `scion notifications update <id>`: Update a subscription's trigger activities.

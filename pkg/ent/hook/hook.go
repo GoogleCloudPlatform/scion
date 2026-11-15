@@ -921,6 +921,18 @@ func (f RuntimeBrokerFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Valu
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.RuntimeBrokerMutation", m)
 }
 
+// The RuntimeOrphanFunc type is an adapter to allow the use of ordinary
+// function as RuntimeOrphan mutator.
+type RuntimeOrphanFunc func(context.Context, *ent.RuntimeOrphanMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f RuntimeOrphanFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.RuntimeOrphanMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.RuntimeOrphanMutation", m)
+}
+
 // The ScheduleFunc type is an adapter to allow the use of ordinary
 // function as Schedule mutator.
 type ScheduleFunc func(context.Context, *ent.ScheduleMutation) (ent.Value, error)

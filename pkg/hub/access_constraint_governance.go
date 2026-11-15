@@ -859,6 +859,10 @@ func (gs *GovernanceService) ReplaceRoleBinding(ctx context.Context, oldBindingI
 			}
 		}
 
+		if err := rejectInvitedHubRoleBinding(ctx, tx, newBinding); err != nil {
+			return err
+		}
+
 		// The create and the delete commit together or not at all.
 		created, err = tx.CreateRoleBinding(ctx, newBinding)
 		if err != nil {

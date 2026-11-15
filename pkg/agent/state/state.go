@@ -468,6 +468,14 @@ const (
 	ActivityStalled         Activity = "stalled"
 	ActivityOffline         Activity = "offline"
 	ActivityCrashed         Activity = "crashed"
+
+	// ActivityIdle is agent-reported only (`sciontool status idle`): the
+	// agent has no known future action until new work arrives, for example
+	// between assignments or after answering a message when no task was
+	// assigned. Unlike blocked it waits on no specific event. The platform
+	// never infers it.
+	ActivityIdle Activity = "idle"
+
 	// ActivityHarnessError means the harness process is alive at its prompt
 	// but reported that a model, API or auth error ended its turn. The
 	// reason is in Detail.Message. It is sticky and is cleared by the next
@@ -569,6 +577,7 @@ var allActivities = []Activity{
 	ActivityExecuting,
 	ActivityWaitingForInput,
 	ActivityBlocked,
+	ActivityIdle,
 	ActivityCompleted,
 	ActivityLimitsExceeded,
 	ActivityStalled,
@@ -615,8 +624,23 @@ func (a Activity) Validate() error {
 // by any other turn-progress event (model-start, tool-start).
 func (a Activity) IsSticky() bool {
 	switch a {
-	case ActivityWaitingForInput, ActivityBlocked, ActivityCompleted, ActivityLimitsExceeded, ActivityCrashed,
+	case ActivityWaitingForInput, ActivityBlocked, ActivityIdle, ActivityCompleted, ActivityLimitsExceeded, ActivityCrashed,
 		ActivityHarnessError:
+		return true
+	}
+	return false
+}
+
+// IsSuspendEligible reports whether an agent holding this activity may be
+// auto-suspended by the hub's idle policy once the grace period has passed.
+// It is the only list of suspend-eligible activities: blocked and
+// waiting_for_input wait on a specific event and are never eligible.
+// harness_error is not eligible either: a suspended agent refuses messages,
+// and a message is what makes the harness retry. It may join this list once
+// a suspended agent wakes on new work.
+func (a Activity) IsSuspendEligible() bool {
+	switch a {
+	case ActivityIdle, ActivityCompleted:
 		return true
 	}
 	return false
@@ -639,7 +663,7 @@ func (a Activity) IsTerminal() bool {
 func (a Activity) ImpliesRunning() bool {
 	switch a {
 	case ActivityWorking, ActivityThinking, ActivityExecuting,
-		ActivityWaitingForInput, ActivityBlocked, ActivityCompleted, ActivityHarnessError:
+		ActivityWaitingForInput, ActivityBlocked, ActivityIdle, ActivityCompleted, ActivityHarnessError:
 		return true
 	}
 	return false

@@ -47,7 +47,7 @@ for a Scion project.
 
 Queries the Hub to report:
   - Agent counts across all lifecycle phases (created, provisioning, cloning, starting, running, stopping, stopped, error, suspended)
-  - Agent counts across all activity states (working, thinking, executing, waiting_for_input, blocked, completed, harness_error, stalled, limits_exceeded, offline, crashed)
+  - Agent counts across all activity states (working, thinking, executing, waiting_for_input, blocked, idle, completed, harness_error, stalled, limits_exceeded, offline, crashed)
   - Detailed agent matrix with template, harness, lifecycle phase, and activity state
   - Actionable troubleshooting hints for blocked, stalled, or errored agents
 
@@ -95,6 +95,7 @@ type ProjectHealthSummary struct {
 	Executing       int `json:"executing"`
 	WaitingForInput int `json:"waitingForInput"`
 	Blocked         int `json:"blocked"`
+	Idle            int `json:"idle"`
 	Completed       int `json:"completed"`
 	LimitsExceeded  int `json:"limitsExceeded"`
 	HarnessError    int `json:"harnessError"` // running, but the harness's last turn failed on a model/API error
@@ -298,36 +299,7 @@ func summarizeAgents(agents []hubclient.Agent) ProjectHealthSummary {
 			sum.OtherPhase++
 		}
 
-		switch state.Activity(a.Activity) {
-		case "":
-			// No activity set (e.g., when agent is not running)
-		case state.ActivityInitializing:
-			sum.Initializing++
-		case state.ActivityWorking:
-			sum.Working++
-		case state.ActivityThinking:
-			sum.Thinking++
-		case state.ActivityExecuting:
-			sum.Executing++
-		case state.ActivityWaitingForInput:
-			sum.WaitingForInput++
-		case state.ActivityBlocked:
-			sum.Blocked++
-		case state.ActivityCompleted:
-			sum.Completed++
-		case state.ActivityLimitsExceeded:
-			sum.LimitsExceeded++
-		case state.ActivityHarnessError:
-			sum.HarnessError++
-		case state.ActivityStalled:
-			sum.Stalled++
-		case state.ActivityOffline:
-			sum.Offline++
-		case state.ActivityCrashed:
-			sum.Crashed++
-		default:
-			sum.OtherActivity++
-		}
+		sum.addActivity(a.Activity)
 	}
 	return sum
 }
@@ -359,6 +331,43 @@ func formatPhaseSummary(s ProjectHealthSummary) string {
 	return strings.Join(parts, " | ")
 }
 
+// addActivity counts one agent's activity. idle is a healthy state: it is
+// counted, never flagged.
+func (s *ProjectHealthSummary) addActivity(activity string) {
+	switch state.Activity(activity) {
+	case "":
+		// No activity set (e.g., when agent is not running)
+	case state.ActivityInitializing:
+		s.Initializing++
+	case state.ActivityWorking:
+		s.Working++
+	case state.ActivityThinking:
+		s.Thinking++
+	case state.ActivityExecuting:
+		s.Executing++
+	case state.ActivityWaitingForInput:
+		s.WaitingForInput++
+	case state.ActivityBlocked:
+		s.Blocked++
+	case state.ActivityIdle:
+		s.Idle++
+	case state.ActivityCompleted:
+		s.Completed++
+	case state.ActivityLimitsExceeded:
+		s.LimitsExceeded++
+	case state.ActivityHarnessError:
+		s.HarnessError++
+	case state.ActivityStalled:
+		s.Stalled++
+	case state.ActivityOffline:
+		s.Offline++
+	case state.ActivityCrashed:
+		s.Crashed++
+	default:
+		s.OtherActivity++
+	}
+}
+
 func formatActivitySummary(s ProjectHealthSummary) string {
 	parts := []string{
 		fmt.Sprintf("Working=%d", s.Working),
@@ -373,6 +382,7 @@ func formatActivitySummary(s ProjectHealthSummary) string {
 		{"Starting", s.Initializing},
 		{"Executing", s.Executing},
 		{"WaitingForInput", s.WaitingForInput},
+		{"Idle", s.Idle},
 		{"HarnessError", s.HarnessError},
 		{"Stalled", s.Stalled},
 		{"LimitsExceeded", s.LimitsExceeded},

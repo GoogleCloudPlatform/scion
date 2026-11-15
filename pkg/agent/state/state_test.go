@@ -85,6 +85,7 @@ func TestActivityIsValid(t *testing.T) {
 		{ActivityExecuting, true},
 		{ActivityWaitingForInput, true},
 		{ActivityBlocked, true},
+		{ActivityIdle, true},
 		{ActivityCompleted, true},
 		{ActivityLimitsExceeded, true},
 		{ActivityStalled, true},
@@ -141,6 +142,7 @@ func TestActivityIsSticky(t *testing.T) {
 	}{
 		{ActivityWaitingForInput, true},
 		{ActivityBlocked, true},
+		{ActivityIdle, true},
 		{ActivityCompleted, true},
 		{ActivityLimitsExceeded, true},
 		{ActivityCrashed, true},
@@ -166,6 +168,19 @@ func TestActivityIsSticky(t *testing.T) {
 	}
 }
 
+// TestActivityIsSuspendEligible covers every activity: only idle and
+// completed may be auto-suspended by the idle policy; blocked and
+// waiting_for_input wait on a specific event and never are, and neither is
+// harness_error, which a message to the agent must be able to retry.
+func TestActivityIsSuspendEligible(t *testing.T) {
+	eligible := map[Activity]bool{ActivityIdle: true, ActivityCompleted: true}
+	for _, a := range append(Activities(), "") {
+		if got := a.IsSuspendEligible(); got != eligible[a] {
+			t.Errorf("Activity(%q).IsSuspendEligible() = %v, want %v", a, got, eligible[a])
+		}
+	}
+}
+
 func TestActivityIsPlatformSet(t *testing.T) {
 	tests := []struct {
 		activity Activity
@@ -178,6 +193,7 @@ func TestActivityIsPlatformSet(t *testing.T) {
 		{ActivityExecuting, false},
 		{ActivityWaitingForInput, false},
 		{ActivityBlocked, false},
+		{ActivityIdle, false},
 		{ActivityCompleted, false},
 		{ActivityLimitsExceeded, false},
 		{ActivityCrashed, false},
@@ -209,6 +225,7 @@ func TestActivityIsTerminal(t *testing.T) {
 		{ActivityExecuting, false},
 		{ActivityWaitingForInput, false},
 		{ActivityBlocked, false},
+		{ActivityIdle, false},
 		{ActivityCompleted, false},
 		{ActivityStalled, false},
 		{ActivityOffline, false},
@@ -536,7 +553,7 @@ func TestPhaseIsActivePhase(t *testing.T) {
 
 func TestActivityImpliesRunning(t *testing.T) {
 	implies := []Activity{ActivityWorking, ActivityThinking, ActivityExecuting,
-		ActivityWaitingForInput, ActivityBlocked, ActivityCompleted, ActivityHarnessError}
+		ActivityWaitingForInput, ActivityBlocked, ActivityIdle, ActivityCompleted, ActivityHarnessError}
 	for _, a := range implies {
 		if !a.ImpliesRunning() {
 			t.Errorf("Activity(%q).ImpliesRunning() = false, want true", a)
@@ -553,8 +570,8 @@ func TestActivityImpliesRunning(t *testing.T) {
 
 func TestActivitiesEnumeration(t *testing.T) {
 	activities := Activities()
-	if len(activities) != 12 {
-		t.Fatalf("Activities() returned %d items, want 12", len(activities))
+	if len(activities) != 13 {
+		t.Fatalf("Activities() returned %d items, want 13", len(activities))
 	}
 
 	// Verify all returned activities are valid.
@@ -616,6 +633,7 @@ func TestAgentStateAcceptsInput(t *testing.T) {
 		{PhaseRunning, ActivityExecuting, true},
 		{PhaseRunning, ActivityWaitingForInput, true},
 		{PhaseRunning, ActivityBlocked, true},
+		{PhaseRunning, ActivityIdle, true},
 		{PhaseRunning, ActivityCompleted, true},
 		{PhaseRunning, ActivityStalled, true},
 		{PhaseRunning, ActivityOffline, true},

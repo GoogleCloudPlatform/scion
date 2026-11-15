@@ -43,6 +43,7 @@ type RunConfig struct {
 	Task               string
 	CommandArgs        []string
 	Resume             bool
+	Persistence        api.Persistence // from the dispatch; ephemeral only where HasEphemeralPersistenceSupport (ptone/scion#7780)
 	TelemetryEnabled   bool
 	Resources          *api.ResourceSpec
 	Kubernetes         *api.KubernetesConfig

@@ -63,6 +63,21 @@ func (f *fakeDispatchStore) MarkMessageDispatched(_ context.Context, _ string) (
 func (f *fakeDispatchStore) MarkMessageFailed(_ context.Context, _, _ string) error {
 	return nil
 }
+func (f *fakeDispatchStore) FailUndeliveredMessage(_ context.Context, _, _ string) (bool, error) {
+	return false, nil
+}
+func (f *fakeDispatchStore) BindMessageDelivery(_ context.Context, _, _ string, _ []string, _ time.Time) (store.DeliveryBind, error) {
+	return store.DeliveryBind{}, nil
+}
+func (f *fakeDispatchStore) UnbindMessageDelivery(_ context.Context, _ string, _ []string) error {
+	return nil
+}
+func (f *fakeDispatchStore) FinishMessageDelivery(_ context.Context, _ string, _ []string, _, _ string) (int, error) {
+	return 0, nil
+}
+func (f *fakeDispatchStore) SweepStaleDeliveries(_ context.Context, _ time.Time, _ string) (int, error) {
+	return 0, nil
+}
 func (f *fakeDispatchStore) ListPendingMessages(_ context.Context, _ string) ([]store.Message, error) {
 	return nil, nil
 }

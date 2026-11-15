@@ -448,8 +448,9 @@ const envHubExperiments = "SCION_HUB_EXPERIMENTS"
 
 // agentExperimentNames is the allow-list of dispatch experiments sent to
 // the agent in envHubExperiments. Any other entry of the dispatch set stays
-// between hub and broker.
-var agentExperimentNames = []string{conduitExperiment}
+// between hub and broker. hub.conduit_deliver tells sciontool to register
+// the deliver-message control route (design v2.22 §1.5).
+var agentExperimentNames = []string{conduitExperiment, conduitDeliverExperiment}
 
 // applyAgentExperiments sets envHubExperiments to the allow-listed entries
 // of dispatched, or removes it when there are none. The hub owns the
@@ -923,6 +924,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 	if agent.IsPinned() {
 		req.ExpectedRuntimeTargetID = agent.PinnedRuntimeTargetID
 	}
+	req.Persistence = dispatchPersistence(agent)
 
 	// Propagate attach mode from applied config
 	if agent.AppliedConfig != nil {
@@ -4017,6 +4019,7 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 	extras.Profile = dispatchProfile(agent)
 	// A flat Runtime Broker receives the agent's valid pinned target.
 	extras.ExpectedRuntimeTargetID = validPinnedTarget(agent)
+	extras.Persistence = dispatchPersistence(agent)
 	if d.creatorSkillPreResolver != nil {
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)
 	}
@@ -4314,6 +4317,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	}
 	// A flat Runtime Broker receives the agent's valid pinned target.
 	extras.ExpectedRuntimeTargetID = validPinnedTarget(agent)
+	extras.Persistence = dispatchPersistence(agent)
 	if d.creatorSkillPreResolver != nil {
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)
 	}

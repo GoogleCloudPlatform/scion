@@ -202,6 +202,10 @@ var reflectFillStoreAgentSkipFields = map[string]bool{
 	// SetAgentSSHHostKey; CreateAgent and UpdateAgent never write them.
 	"SSHHostKey":      true,
 	"SSHHostKeyRunID": true,
+	// activity_since is store-managed (ptone/scion#7944): the store derives
+	// it from the row's own phase and activity and ignores the caller's
+	// value, so a reflection-filled value cannot round-trip.
+	"ActivitySince": true,
 	// workspace_placement is written only through SetAgentWorkspacePlacement
 	// (ptone/scion#2727): CreateAgent and UpdateAgent never write it, so it
 	// cannot round-trip here. It is not an authz input.

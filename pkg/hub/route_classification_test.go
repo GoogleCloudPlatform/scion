@@ -158,6 +158,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/admin/diagnostics/logs":                 "hub-admin:diagnostics",
 	"/api/v1/admin/health/summary":                   "hub-admin:health",
 	"/api/v1/admin/orphaned-agents":                  "hub-admin:health",
+	"/api/v1/admin/runtime-orphans":                  "hub-admin:health",
 	"/api/v1/admin/messaging":                        "hub-admin:messaging",
 	"/api/v1/admin/experiments":                      "hub-admin:experiments",
 	"/api/v1/admin/profiling":                        "hub-admin:profiling",

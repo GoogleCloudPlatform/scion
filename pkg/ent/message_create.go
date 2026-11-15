@@ -202,6 +202,48 @@ func (_c *MessageCreate) SetNillableDispatchedAt(v *time.Time) *MessageCreate {
 	return _c
 }
 
+// SetDeliveryID sets the "delivery_id" field.
+func (_c *MessageCreate) SetDeliveryID(v string) *MessageCreate {
+	_c.mutation.SetDeliveryID(v)
+	return _c
+}
+
+// SetNillableDeliveryID sets the "delivery_id" field if the given value is not nil.
+func (_c *MessageCreate) SetNillableDeliveryID(v *string) *MessageCreate {
+	if v != nil {
+		_c.SetDeliveryID(*v)
+	}
+	return _c
+}
+
+// SetDeliveringAt sets the "delivering_at" field.
+func (_c *MessageCreate) SetDeliveringAt(v time.Time) *MessageCreate {
+	_c.mutation.SetDeliveringAt(v)
+	return _c
+}
+
+// SetNillableDeliveringAt sets the "delivering_at" field if the given value is not nil.
+func (_c *MessageCreate) SetNillableDeliveringAt(v *time.Time) *MessageCreate {
+	if v != nil {
+		_c.SetDeliveringAt(*v)
+	}
+	return _c
+}
+
+// SetDeliveryOutcome sets the "delivery_outcome" field.
+func (_c *MessageCreate) SetDeliveryOutcome(v string) *MessageCreate {
+	_c.mutation.SetDeliveryOutcome(v)
+	return _c
+}
+
+// SetNillableDeliveryOutcome sets the "delivery_outcome" field if the given value is not nil.
+func (_c *MessageCreate) SetNillableDeliveryOutcome(v *string) *MessageCreate {
+	if v != nil {
+		_c.SetDeliveryOutcome(*v)
+	}
+	return _c
+}
+
 // SetChannel sets the "channel" field.
 func (_c *MessageCreate) SetChannel(v string) *MessageCreate {
 	_c.mutation.SetChannel(v)
@@ -432,6 +474,16 @@ func (_c *MessageCreate) check() error {
 	if _, ok := _c.mutation.DispatchState(); !ok {
 		return &ValidationError{Name: "dispatch_state", err: errors.New(`ent: missing required field "Message.dispatch_state"`)}
 	}
+	if v, ok := _c.mutation.DeliveryID(); ok {
+		if err := message.DeliveryIDValidator(v); err != nil {
+			return &ValidationError{Name: "delivery_id", err: fmt.Errorf(`ent: validator failed for field "Message.delivery_id": %w`, err)}
+		}
+	}
+	if v, ok := _c.mutation.DeliveryOutcome(); ok {
+		if err := message.DeliveryOutcomeValidator(v); err != nil {
+			return &ValidationError{Name: "delivery_outcome", err: fmt.Errorf(`ent: validator failed for field "Message.delivery_outcome": %w`, err)}
+		}
+	}
 	if v, ok := _c.mutation.Channel(); ok {
 		if err := message.ChannelValidator(v); err != nil {
 			return &ValidationError{Name: "channel", err: fmt.Errorf(`ent: validator failed for field "Message.channel": %w`, err)}
@@ -540,6 +592,18 @@ func (_c *MessageCreate) createSpec() (*Message, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.DispatchedAt(); ok {
 		_spec.SetField(message.FieldDispatchedAt, field.TypeTime, value)
 		_node.DispatchedAt = &value
+	}
+	if value, ok := _c.mutation.DeliveryID(); ok {
+		_spec.SetField(message.FieldDeliveryID, field.TypeString, value)
+		_node.DeliveryID = &value
+	}
+	if value, ok := _c.mutation.DeliveringAt(); ok {
+		_spec.SetField(message.FieldDeliveringAt, field.TypeTime, value)
+		_node.DeliveringAt = &value
+	}
+	if value, ok := _c.mutation.DeliveryOutcome(); ok {
+		_spec.SetField(message.FieldDeliveryOutcome, field.TypeString, value)
+		_node.DeliveryOutcome = &value
 	}
 	if value, ok := _c.mutation.Channel(); ok {
 		_spec.SetField(message.FieldChannel, field.TypeString, value)
@@ -838,6 +902,60 @@ func (u *MessageUpsert) UpdateDispatchedAt() *MessageUpsert {
 // ClearDispatchedAt clears the value of the "dispatched_at" field.
 func (u *MessageUpsert) ClearDispatchedAt() *MessageUpsert {
 	u.SetNull(message.FieldDispatchedAt)
+	return u
+}
+
+// SetDeliveryID sets the "delivery_id" field.
+func (u *MessageUpsert) SetDeliveryID(v string) *MessageUpsert {
+	u.Set(message.FieldDeliveryID, v)
+	return u
+}
+
+// UpdateDeliveryID sets the "delivery_id" field to the value that was provided on create.
+func (u *MessageUpsert) UpdateDeliveryID() *MessageUpsert {
+	u.SetExcluded(message.FieldDeliveryID)
+	return u
+}
+
+// ClearDeliveryID clears the value of the "delivery_id" field.
+func (u *MessageUpsert) ClearDeliveryID() *MessageUpsert {
+	u.SetNull(message.FieldDeliveryID)
+	return u
+}
+
+// SetDeliveringAt sets the "delivering_at" field.
+func (u *MessageUpsert) SetDeliveringAt(v time.Time) *MessageUpsert {
+	u.Set(message.FieldDeliveringAt, v)
+	return u
+}
+
+// UpdateDeliveringAt sets the "delivering_at" field to the value that was provided on create.
+func (u *MessageUpsert) UpdateDeliveringAt() *MessageUpsert {
+	u.SetExcluded(message.FieldDeliveringAt)
+	return u
+}
+
+// ClearDeliveringAt clears the value of the "delivering_at" field.
+func (u *MessageUpsert) ClearDeliveringAt() *MessageUpsert {
+	u.SetNull(message.FieldDeliveringAt)
+	return u
+}
+
+// SetDeliveryOutcome sets the "delivery_outcome" field.
+func (u *MessageUpsert) SetDeliveryOutcome(v string) *MessageUpsert {
+	u.Set(message.FieldDeliveryOutcome, v)
+	return u
+}
+
+// UpdateDeliveryOutcome sets the "delivery_outcome" field to the value that was provided on create.
+func (u *MessageUpsert) UpdateDeliveryOutcome() *MessageUpsert {
+	u.SetExcluded(message.FieldDeliveryOutcome)
+	return u
+}
+
+// ClearDeliveryOutcome clears the value of the "delivery_outcome" field.
+func (u *MessageUpsert) ClearDeliveryOutcome() *MessageUpsert {
+	u.SetNull(message.FieldDeliveryOutcome)
 	return u
 }
 
@@ -1207,6 +1325,69 @@ func (u *MessageUpsertOne) UpdateDispatchedAt() *MessageUpsertOne {
 func (u *MessageUpsertOne) ClearDispatchedAt() *MessageUpsertOne {
 	return u.Update(func(s *MessageUpsert) {
 		s.ClearDispatchedAt()
+	})
+}
+
+// SetDeliveryID sets the "delivery_id" field.
+func (u *MessageUpsertOne) SetDeliveryID(v string) *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetDeliveryID(v)
+	})
+}
+
+// UpdateDeliveryID sets the "delivery_id" field to the value that was provided on create.
+func (u *MessageUpsertOne) UpdateDeliveryID() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateDeliveryID()
+	})
+}
+
+// ClearDeliveryID clears the value of the "delivery_id" field.
+func (u *MessageUpsertOne) ClearDeliveryID() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearDeliveryID()
+	})
+}
+
+// SetDeliveringAt sets the "delivering_at" field.
+func (u *MessageUpsertOne) SetDeliveringAt(v time.Time) *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetDeliveringAt(v)
+	})
+}
+
+// UpdateDeliveringAt sets the "delivering_at" field to the value that was provided on create.
+func (u *MessageUpsertOne) UpdateDeliveringAt() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateDeliveringAt()
+	})
+}
+
+// ClearDeliveringAt clears the value of the "delivering_at" field.
+func (u *MessageUpsertOne) ClearDeliveringAt() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearDeliveringAt()
+	})
+}
+
+// SetDeliveryOutcome sets the "delivery_outcome" field.
+func (u *MessageUpsertOne) SetDeliveryOutcome(v string) *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetDeliveryOutcome(v)
+	})
+}
+
+// UpdateDeliveryOutcome sets the "delivery_outcome" field to the value that was provided on create.
+func (u *MessageUpsertOne) UpdateDeliveryOutcome() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateDeliveryOutcome()
+	})
+}
+
+// ClearDeliveryOutcome clears the value of the "delivery_outcome" field.
+func (u *MessageUpsertOne) ClearDeliveryOutcome() *MessageUpsertOne {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearDeliveryOutcome()
 	})
 }
 
@@ -1752,6 +1933,69 @@ func (u *MessageUpsertBulk) UpdateDispatchedAt() *MessageUpsertBulk {
 func (u *MessageUpsertBulk) ClearDispatchedAt() *MessageUpsertBulk {
 	return u.Update(func(s *MessageUpsert) {
 		s.ClearDispatchedAt()
+	})
+}
+
+// SetDeliveryID sets the "delivery_id" field.
+func (u *MessageUpsertBulk) SetDeliveryID(v string) *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetDeliveryID(v)
+	})
+}
+
+// UpdateDeliveryID sets the "delivery_id" field to the value that was provided on create.
+func (u *MessageUpsertBulk) UpdateDeliveryID() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateDeliveryID()
+	})
+}
+
+// ClearDeliveryID clears the value of the "delivery_id" field.
+func (u *MessageUpsertBulk) ClearDeliveryID() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearDeliveryID()
+	})
+}
+
+// SetDeliveringAt sets the "delivering_at" field.
+func (u *MessageUpsertBulk) SetDeliveringAt(v time.Time) *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetDeliveringAt(v)
+	})
+}
+
+// UpdateDeliveringAt sets the "delivering_at" field to the value that was provided on create.
+func (u *MessageUpsertBulk) UpdateDeliveringAt() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateDeliveringAt()
+	})
+}
+
+// ClearDeliveringAt clears the value of the "delivering_at" field.
+func (u *MessageUpsertBulk) ClearDeliveringAt() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearDeliveringAt()
+	})
+}
+
+// SetDeliveryOutcome sets the "delivery_outcome" field.
+func (u *MessageUpsertBulk) SetDeliveryOutcome(v string) *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.SetDeliveryOutcome(v)
+	})
+}
+
+// UpdateDeliveryOutcome sets the "delivery_outcome" field to the value that was provided on create.
+func (u *MessageUpsertBulk) UpdateDeliveryOutcome() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.UpdateDeliveryOutcome()
+	})
+}
+
+// ClearDeliveryOutcome clears the value of the "delivery_outcome" field.
+func (u *MessageUpsertBulk) ClearDeliveryOutcome() *MessageUpsertBulk {
+	return u.Update(func(s *MessageUpsert) {
+		s.ClearDeliveryOutcome()
 	})
 }
 

@@ -143,7 +143,7 @@ func TestCodexSubagent_AgentSetWaitingKept(t *testing.T) {
 // these statuses, since it only ever cleared waiting_for_input. The new
 // tool-start guarantee is the agent-set wait in AgentSetWaitingKept.
 func TestCodexSubagent_OtherHeldActivitiesKept(t *testing.T) {
-	for _, held := range []state.Activity{state.ActivityCompleted, state.ActivityBlocked, state.ActivityLimitsExceeded, state.ActivityCrashed} {
+	for _, held := range []state.Activity{state.ActivityCompleted, state.ActivityBlocked, state.ActivityIdle, state.ActivityLimitsExceeded, state.ActivityCrashed} {
 		for _, raw := range []string{"UserPromptSubmit", "PreToolUse"} {
 			t.Run(string(held)+"/"+raw, func(t *testing.T) {
 				statusPath := filepath.Join(t.TempDir(), "agent-info.json")

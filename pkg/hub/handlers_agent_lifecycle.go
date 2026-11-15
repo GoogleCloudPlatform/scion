@@ -116,7 +116,8 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 	status.ReportRunID = presentedAgentTokenRunID(ctx)
 	_, status.ReportAgentToken = identity.(AgentIdentity)
 	// before is the row as read ahead of the write, for the
-	// limits_exceeded stop below; nil when the guards did not run.
+	// limits_exceeded stop and error phase log below; nil when the
+	// guards did not run.
 	var before *store.Agent
 	if statusUpdateTouchesGuardedFields(status) {
 		agent, err := s.store.GetAgent(ctx, id)
@@ -251,6 +252,7 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 	if agent, err := s.store.GetAgent(ctx, id); err == nil {
 		if agent.DeletedAt.IsZero() {
 			s.events.PublishAgentStatus(ctx, agent)
+			s.logAgentErrorPhaseEntry(before, agent, errorPhaseSourceAgentStatus)
 		}
 	} else {
 		s.agentLifecycleLog.Warn("Failed to fetch agent for status event", "agent_id", id, "error", err)

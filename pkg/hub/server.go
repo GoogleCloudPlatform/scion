@@ -929,6 +929,9 @@ type StartExtras struct {
 	// sent to a flat Runtime Broker (wire key expectedRuntimeTargetId).
 	// Empty for an unpinned agent.
 	ExpectedRuntimeTargetID string
+	// Persistence is the agent's stamped persistence (wire key
+	// persistence; dispatchPersistence). Empty sends nothing.
+	Persistence api.Persistence
 	// TemplateID and TemplateHash identify the agent's Hub template
 	// (AppliedConfig.TemplateID/TemplateHash), the same values create sends
 	// in RemoteAgentConfig. The broker hydrates the template from them only
@@ -1028,6 +1031,9 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if extras.ExpectedRuntimeTargetID != "" {
 		payload["expectedRuntimeTargetId"] = extras.ExpectedRuntimeTargetID
+	}
+	if extras.Persistence != "" {
+		payload["persistence"] = extras.Persistence
 	}
 	if extras.TemplateID != "" {
 		payload["templateId"] = extras.TemplateID
@@ -1650,6 +1656,9 @@ type RemoteCreateAgentRequest struct {
 	// create-shaped dispatch to a flat Runtime Broker carries it and none to
 	// a legacy one does.
 	ExpectedRuntimeTargetID string `json:"expectedRuntimeTargetId,omitempty"`
+	// Persistence is the agent's stamped persistence (dispatchPersistence):
+	// ephemeral, or empty for a persistent agent.
+	Persistence api.Persistence `json:"persistence,omitempty"`
 }
 
 // ResolvedSecret represents a secret resolved by the Hub for projection into an agent container.
@@ -8233,6 +8242,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/diagnostics/logs", s.guarded("/api/v1/admin/diagnostics/logs", s.handleDiagnosticsLogs))
 	s.mux.HandleFunc("/api/v1/admin/health/summary", s.guarded("/api/v1/admin/health/summary", s.handleHealthSummary))
 	s.mux.HandleFunc("/api/v1/admin/orphaned-agents", s.guarded("/api/v1/admin/orphaned-agents", s.handleAdminOrphanedAgents))
+	s.mux.HandleFunc("/api/v1/admin/runtime-orphans", s.guarded("/api/v1/admin/runtime-orphans", s.handleAdminRuntimeOrphans))
 	s.mux.HandleFunc("/api/v1/admin/messaging/divergence", s.guarded("/api/v1/admin/messaging/divergence", s.handleAdminMessagingDivergence))
 	s.mux.HandleFunc("/api/v1/metrics/", s.guarded("/api/v1/metrics/", s.handleMetricsDashboard))
 	s.mux.HandleFunc("/api/v1/admin/metrics-dashboard", s.guarded("/api/v1/admin/metrics-dashboard", s.handleAdminMetricsDashboard)) // legacy backward-compat

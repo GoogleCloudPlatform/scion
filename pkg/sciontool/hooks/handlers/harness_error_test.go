@@ -357,3 +357,52 @@ func TestStatusHandler_TurnEndErrorOutsideRunningIsIgnored(t *testing.T) {
 		assert.Equal(t, "harness_error", readAgentInfoMap(t, h.StatusPath)["activity"])
 	})
 }
+
+// TestStatusHandler_IdleAndHarnessError pins how the agent-reported idle
+// activity (ptone/scion#7826) and harness_error interact. idle is cleared
+// only by the new-work events (isNewWorkEvent), like blocked: the
+// harness-progress events that clear harness_error (model-start, an
+// error-free model-end, tool-start) keep it. A turn that ends on an error
+// after idle is newer than idle and replaces it, as it replaces blocked.
+func TestStatusHandler_IdleAndHarnessError(t *testing.T) {
+	const idle = `{"phase":"running","activity":"idle","detail":{"message":"no task assigned"}}`
+	for _, tt := range []struct {
+		name  string
+		event *hooks.Event
+	}{
+		{"model-start", &hooks.Event{Name: hooks.EventModelStart}},
+		{"error-free model-end", &hooks.Event{Name: hooks.EventModelEnd}},
+		{"tool-start", &hooks.Event{Name: hooks.EventToolStart, Data: hooks.EventData{ToolName: "bash"}}},
+	} {
+		t.Run(tt.name+" keeps idle", func(t *testing.T) {
+			h := newTempStatusHandler(t)
+			writeAgentInfoJSON(t, h, idle)
+			require.NoError(t, h.Handle(tt.event))
+			assert.Equal(t, "idle", readAgentInfoMap(t, h.StatusPath)["activity"])
+		})
+	}
+	t.Run("prompt-submit clears idle", func(t *testing.T) {
+		h := newTempStatusHandler(t)
+		writeAgentInfoJSON(t, h, idle)
+		require.NoError(t, h.Handle(&hooks.Event{Name: hooks.EventPromptSubmit}))
+		assert.Equal(t, "thinking", readAgentInfoMap(t, h.StatusPath)["activity"])
+	})
+	t.Run("a turn-end error replaces idle", func(t *testing.T) {
+		h := newTempStatusHandler(t)
+		writeAgentInfoJSON(t, h, idle)
+		require.NoError(t, h.Handle(turnEndErrorEvent("APIError (status 400)")))
+		info := readAgentInfoMap(t, h.StatusPath)
+		assert.Equal(t, "harness_error", info["activity"])
+		assert.Equal(t, "model API: APIError (status 400)", detailMessage(info))
+	})
+	t.Run("the watchdogs' conditional write never replaces idle", func(t *testing.T) {
+		h := newTempStatusHandler(t)
+		writeAgentInfoJSON(t, h, idle)
+		wrote, err := h.SetHarnessErrorIf("harness did not start the initial task", func(a state.Activity) bool {
+			return a != "" && !a.IsSticky()
+		})
+		require.NoError(t, err)
+		assert.False(t, wrote)
+		assert.Equal(t, "idle", readAgentInfoMap(t, h.StatusPath)["activity"])
+	})
+}

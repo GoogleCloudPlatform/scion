@@ -59,3 +59,83 @@ func TestPromoteUserToAdmin_RefusesTestIdentity(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, bindings)
 }
+
+// TestPromoteUserToAdmin_RefusesInvitedUser: `scion admin promote` refuses to
+// promote an invited user whose hub role is assigned at first sign-in.
+func TestPromoteUserToAdmin_RefusesInvitedUser(t *testing.T) {
+	ctx := context.Background()
+	s := newRecoveryTestStore(t)
+
+	_, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:      store.SystemRoleSuperAdmin,
+		ScopeType: store.RoleScopeSystem,
+		System:    true,
+	})
+	require.NoError(t, err)
+
+	invited := &store.User{
+		ID:      uuid.NewString(),
+		Email:   "pending-admin@example.com",
+		Role:    store.UserRoleMember,
+		Status:  store.UserStatusInvited,
+		Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, invited))
+
+	var out bytes.Buffer
+	err = promoteUserToAdmin(ctx, s, invited.Email, &out)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "hub roles are assigned when the user first signs in")
+
+	got, err := s.GetUser(ctx, invited.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.UserRoleMember, got.Role)
+	assert.Equal(t, store.UserStatusInvited, got.Status)
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, invited.ID)
+	require.NoError(t, err)
+	assert.Empty(t, bindings)
+}
+
+type nilTxUserStore struct {
+	store.Store
+	inTx bool
+}
+
+func (s *nilTxUserStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	if s.inTx {
+		return nil, nil
+	}
+	return s.Store.GetUser(ctx, id)
+}
+
+func (s *nilTxUserStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return s.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&nilTxUserStore{Store: tx, inTx: true})
+	})
+}
+
+func TestPromoteUserToAdmin_NilTxUserFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	s := newRecoveryTestStore(t)
+
+	_, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:      store.SystemRoleSuperAdmin,
+		ScopeType: store.RoleScopeSystem,
+		System:    true,
+	})
+	require.NoError(t, err)
+
+	active := &store.User{
+		ID:      uuid.NewString(),
+		Email:   "active-nil-tx@example.com",
+		Role:    store.UserRoleMember,
+		Status:  store.UserStatusActive,
+		Created: time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, active))
+
+	var out bytes.Buffer
+	err = promoteUserToAdmin(ctx, &nilTxUserStore{Store: s}, active.Email, &out)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+}

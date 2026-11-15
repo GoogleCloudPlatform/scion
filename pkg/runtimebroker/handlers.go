@@ -434,6 +434,7 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			// EmptyPerAgentWorkspace, like Attach, reflects the default
 			// runtime (false for Cloud Run, which rejects the mode).
 			EmptyPerAgentWorkspace: scionrt.HasEmptyPerAgentSupport(rt),
+			EphemeralPersistence:   scionrt.HasEphemeralPersistenceSupport(rt),
 			// This broker honours localOnly deletes and confirms a moved
 			// agent's NFS workspace before provisioning it (agent move).
 			AgentMove: true,
@@ -1801,6 +1802,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		WorkspaceMode:      req.WorkspaceMode,
 		RunID:              req.RunID,
 		PreviousProjectIDs: req.PreviousProjectIDs,
+		Persistence:        req.Persistence,
 		HTTPRequest:        r,
 		Operation:          opCreate,
 		OwnedAbandon:       ownedAbandon,
@@ -3888,6 +3890,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		// ExpectedRuntimeTargetID is the agent's pinned runtime target
 		// (flat Runtime Brokers; see CreateAgentRequest).
 		ExpectedRuntimeTargetID string `json:"expectedRuntimeTargetId,omitempty"`
+		// Persistence is the agent's stamped persistence (see
+		// CreateAgentRequest.Persistence).
+		Persistence api.Persistence `json:"persistence,omitempty"`
 		// Image is the user's explicit image, which the hub sends on every
 		// start so it ranks as the top tier (opts.Image) exactly as on
 		// create. The hub never sends a template-derived image here
@@ -4100,6 +4105,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		TemplateID:               startReq.TemplateID,
 		TemplateHash:             startReq.TemplateHash,
 		HubProfile:               startReq.Profile,
+		Persistence:              startReq.Persistence,
 		HTTPRequest:              r,
 		Operation:                opHTTPStart,
 	})
@@ -5249,6 +5255,8 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		TelemetryPolicy *bool `json:"telemetryPolicy,omitempty"`
 		// ExpectedRuntimeTargetID mirrors the same field on the start path.
 		ExpectedRuntimeTargetID string `json:"expectedRuntimeTargetId,omitempty"`
+		// Persistence mirrors the same field on the start path.
+		Persistence api.Persistence `json:"persistence,omitempty"`
 		// Image mirrors the same field on the start path: the user's
 		// explicit image, applied as the top tier (ptone/scion#1799).
 		Image string `json:"image,omitempty"`
@@ -5403,6 +5411,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		RunID:                    restartReq.RunID,
 		SharedWorkspace:          restartReq.SharedWorkspace,
 		HubProfile:               restartReq.Profile,
+		Persistence:              restartReq.Persistence,
 		TemplateName:             restartReq.TemplateName,
 		TelemetryPolicy:          restartReq.TelemetryPolicy,
 		TemplateID:               restartReq.TemplateID,
@@ -5732,8 +5741,9 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 
 	// Resolve the correct manager for this agent (may be on an auxiliary runtime like K8s)
 	mgr := s.resolveManagerForAgent(ctx, id, projectID)
+	s.enableConduitDelivery(mgr)
 
-	msgCtx := ctx
+	msgCtx := agent.WithDeliveryMessageID(ctx, req.MessageID)
 	if !req.Interrupt && req.MessageID != "" {
 		// Non-interrupt messages are buffered and delivered after this
 		// handler has already answered 200. Register a callback so a
@@ -5748,7 +5758,7 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 			failure.ProjectID = req.ProjectID
 		}
 		connName := r.Header.Get("X-Scion-Hub-Connection")
-		msgCtx = agent.WithDeliveryFailureHandler(ctx, func(deliveryErr error) {
+		msgCtx = agent.WithDeliveryFailureHandler(msgCtx, func(deliveryErr error) {
 			f := failure
 			f.Reason = "broker delivery failed: " + deliveryErr.Error()
 			go s.reportMessageFailure(connName, f)

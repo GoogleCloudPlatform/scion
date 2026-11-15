@@ -17,6 +17,9 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // ErrLogsNotSupported is returned by GetLogs when a runtime cannot serve
@@ -27,6 +30,16 @@ import (
 // text never reaches a caller in its place. A runtime that supports logs
 // never returns this.
 var ErrLogsNotSupported = errors.New("agent logs are not available on this runtime")
+
+// ExecCapability is implemented by a runtime whose exec depends on its
+// configuration. ExecAvailable reports, without running anything, whether
+// Exec and ExecWithStdin can reach an agent at all (for Cloud Run: an exec
+// connector is configured). It says nothing about a particular container
+// or its tmux session. A runtime that does not implement it always has
+// exec.
+type ExecCapability interface {
+	ExecAvailable() bool
+}
 
 // RecordlessActor identifies one actor a RecordlessActorProber found running
 // with no in-memory record of which request created it — for example, after
@@ -164,6 +177,37 @@ type EmptyPerAgentCapableRuntime interface {
 func HasEmptyPerAgentSupport(rt Runtime) bool {
 	ec, ok := rt.(EmptyPerAgentCapableRuntime)
 	return !ok || ec.SupportsEmptyPerAgentWorkspace()
+}
+
+// EphemeralPersistenceRuntime is an optional capability a Runtime implements
+// when it can run an agent with api.PersistenceEphemeral: a fresh home and
+// workspace at every start (ptone/scion#7780). No runtime implements it
+// yet (Cloud Run will); a runtime without it refuses an ephemeral start
+// (CheckPersistenceSupported).
+type EphemeralPersistenceRuntime interface {
+	SupportsEphemeralPersistence() bool
+}
+
+// HasEphemeralPersistenceSupport reports whether rt implements
+// EphemeralPersistenceRuntime and reports true (missing capability means
+// unsupported).
+func HasEphemeralPersistenceSupport(rt Runtime) bool {
+	ep, ok := rt.(EphemeralPersistenceRuntime)
+	return ok && ep.SupportsEphemeralPersistence()
+}
+
+// CheckPersistenceSupported refuses an ephemeral run on a runtime without
+// HasEphemeralPersistenceSupport. The hub refuses such a create already;
+// this backs it up for a dispatch that bypasses it.
+func CheckPersistenceSupported(rt Runtime, p api.Persistence) error {
+	if p.IsEphemeral() && !HasEphemeralPersistenceSupport(rt) {
+		name := "selected"
+		if rt != nil {
+			name = rt.Name()
+		}
+		return fmt.Errorf("ephemeral persistence is not supported by the %s runtime", name)
+	}
+	return nil
 }
 
 // AgentResourceCleaner is an optional capability a Runtime may implement

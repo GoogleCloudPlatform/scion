@@ -89,6 +89,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/rolebinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/roledefinition"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimebroker"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimeorphan"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schedule"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schema"
@@ -200,6 +201,7 @@ const (
 	TypeRoleBinding                   = "RoleBinding"
 	TypeRoleDefinition                = "RoleDefinition"
 	TypeRuntimeBroker                 = "RuntimeBroker"
+	TypeRuntimeOrphan                 = "RuntimeOrphan"
 	TypeSchedule                      = "Schedule"
 	TypeScheduledEvent                = "ScheduledEvent"
 	TypeSecret                        = "Secret"
@@ -4677,6 +4679,7 @@ type AgentMutation struct {
 	start_claim_hold_until     *time.Time
 	start_claim_launch_id      *string
 	soft_delete_op_id          *string
+	activity_since             *time.Time
 	clearedFields              map[string]struct{}
 	project                    *uuid.UUID
 	clearedproject             bool
@@ -9411,6 +9414,55 @@ func (m *AgentMutation) ResetSoftDeleteOpID() {
 	delete(m.clearedFields, agent.FieldSoftDeleteOpID)
 }
 
+// SetActivitySince sets the "activity_since" field.
+func (m *AgentMutation) SetActivitySince(t time.Time) {
+	m.activity_since = &t
+}
+
+// ActivitySince returns the value of the "activity_since" field in the mutation.
+func (m *AgentMutation) ActivitySince() (r time.Time, exists bool) {
+	v := m.activity_since
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldActivitySince returns the old "activity_since" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldActivitySince(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldActivitySince is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldActivitySince requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldActivitySince: %w", err)
+	}
+	return oldValue.ActivitySince, nil
+}
+
+// ClearActivitySince clears the value of the "activity_since" field.
+func (m *AgentMutation) ClearActivitySince() {
+	m.activity_since = nil
+	m.clearedFields[agent.FieldActivitySince] = struct{}{}
+}
+
+// ActivitySinceCleared returns if the "activity_since" field was cleared in this mutation.
+func (m *AgentMutation) ActivitySinceCleared() bool {
+	_, ok := m.clearedFields[agent.FieldActivitySince]
+	return ok
+}
+
+// ResetActivitySince resets all changes to the "activity_since" field.
+func (m *AgentMutation) ResetActivitySince() {
+	m.activity_since = nil
+	delete(m.clearedFields, agent.FieldActivitySince)
+}
+
 // ClearProject clears the "project" edge to the Project entity.
 func (m *AgentMutation) ClearProject() {
 	m.clearedproject = true
@@ -9688,7 +9740,7 @@ func (m *AgentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentMutation) Fields() []string {
-	fields := make([]string, 0, 95)
+	fields := make([]string, 0, 96)
 	if m.fixture_root_id != nil {
 		fields = append(fields, agent.FieldFixtureRootID)
 	}
@@ -9974,6 +10026,9 @@ func (m *AgentMutation) Fields() []string {
 	if m.soft_delete_op_id != nil {
 		fields = append(fields, agent.FieldSoftDeleteOpID)
 	}
+	if m.activity_since != nil {
+		fields = append(fields, agent.FieldActivitySince)
+	}
 	return fields
 }
 
@@ -10172,6 +10227,8 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.StartClaimLaunchID()
 	case agent.FieldSoftDeleteOpID:
 		return m.SoftDeleteOpID()
+	case agent.FieldActivitySince:
+		return m.ActivitySince()
 	}
 	return nil, false
 }
@@ -10371,6 +10428,8 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldStartClaimLaunchID(ctx)
 	case agent.FieldSoftDeleteOpID:
 		return m.OldSoftDeleteOpID(ctx)
+	case agent.FieldActivitySince:
+		return m.OldActivitySince(ctx)
 	}
 	return nil, fmt.Errorf("unknown Agent field %s", name)
 }
@@ -11045,6 +11104,13 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetSoftDeleteOpID(v)
 		return nil
+	case agent.FieldActivitySince:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetActivitySince(v)
+		return nil
 	}
 	return fmt.Errorf("unknown Agent field %s", name)
 }
@@ -11393,6 +11459,9 @@ func (m *AgentMutation) ClearedFields() []string {
 	if m.FieldCleared(agent.FieldSoftDeleteOpID) {
 		fields = append(fields, agent.FieldSoftDeleteOpID)
 	}
+	if m.FieldCleared(agent.FieldActivitySince) {
+		fields = append(fields, agent.FieldActivitySince)
+	}
 	return fields
 }
 
@@ -11637,6 +11706,9 @@ func (m *AgentMutation) ClearField(name string) error {
 		return nil
 	case agent.FieldSoftDeleteOpID:
 		m.ClearSoftDeleteOpID()
+		return nil
+	case agent.FieldActivitySince:
+		m.ClearActivitySince()
 		return nil
 	}
 	return fmt.Errorf("unknown Agent nullable field %s", name)
@@ -11930,6 +12002,9 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldSoftDeleteOpID:
 		m.ResetSoftDeleteOpID()
+		return nil
+	case agent.FieldActivitySince:
+		m.ResetActivitySince()
 		return nil
 	}
 	return fmt.Errorf("unknown Agent field %s", name)
@@ -65697,6 +65772,9 @@ type MessageMutation struct {
 	dispatch_state          *string
 	dispatch_failure_reason *string
 	dispatched_at           *time.Time
+	delivery_id             *string
+	delivering_at           *time.Time
+	delivery_outcome        *string
 	channel                 *string
 	thread_id               *string
 	conversation_id         *uuid.UUID
@@ -66433,6 +66511,153 @@ func (m *MessageMutation) ResetDispatchedAt() {
 	delete(m.clearedFields, message.FieldDispatchedAt)
 }
 
+// SetDeliveryID sets the "delivery_id" field.
+func (m *MessageMutation) SetDeliveryID(s string) {
+	m.delivery_id = &s
+}
+
+// DeliveryID returns the value of the "delivery_id" field in the mutation.
+func (m *MessageMutation) DeliveryID() (r string, exists bool) {
+	v := m.delivery_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeliveryID returns the old "delivery_id" field's value of the Message entity.
+// If the Message object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessageMutation) OldDeliveryID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeliveryID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeliveryID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeliveryID: %w", err)
+	}
+	return oldValue.DeliveryID, nil
+}
+
+// ClearDeliveryID clears the value of the "delivery_id" field.
+func (m *MessageMutation) ClearDeliveryID() {
+	m.delivery_id = nil
+	m.clearedFields[message.FieldDeliveryID] = struct{}{}
+}
+
+// DeliveryIDCleared returns if the "delivery_id" field was cleared in this mutation.
+func (m *MessageMutation) DeliveryIDCleared() bool {
+	_, ok := m.clearedFields[message.FieldDeliveryID]
+	return ok
+}
+
+// ResetDeliveryID resets all changes to the "delivery_id" field.
+func (m *MessageMutation) ResetDeliveryID() {
+	m.delivery_id = nil
+	delete(m.clearedFields, message.FieldDeliveryID)
+}
+
+// SetDeliveringAt sets the "delivering_at" field.
+func (m *MessageMutation) SetDeliveringAt(t time.Time) {
+	m.delivering_at = &t
+}
+
+// DeliveringAt returns the value of the "delivering_at" field in the mutation.
+func (m *MessageMutation) DeliveringAt() (r time.Time, exists bool) {
+	v := m.delivering_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeliveringAt returns the old "delivering_at" field's value of the Message entity.
+// If the Message object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessageMutation) OldDeliveringAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeliveringAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeliveringAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeliveringAt: %w", err)
+	}
+	return oldValue.DeliveringAt, nil
+}
+
+// ClearDeliveringAt clears the value of the "delivering_at" field.
+func (m *MessageMutation) ClearDeliveringAt() {
+	m.delivering_at = nil
+	m.clearedFields[message.FieldDeliveringAt] = struct{}{}
+}
+
+// DeliveringAtCleared returns if the "delivering_at" field was cleared in this mutation.
+func (m *MessageMutation) DeliveringAtCleared() bool {
+	_, ok := m.clearedFields[message.FieldDeliveringAt]
+	return ok
+}
+
+// ResetDeliveringAt resets all changes to the "delivering_at" field.
+func (m *MessageMutation) ResetDeliveringAt() {
+	m.delivering_at = nil
+	delete(m.clearedFields, message.FieldDeliveringAt)
+}
+
+// SetDeliveryOutcome sets the "delivery_outcome" field.
+func (m *MessageMutation) SetDeliveryOutcome(s string) {
+	m.delivery_outcome = &s
+}
+
+// DeliveryOutcome returns the value of the "delivery_outcome" field in the mutation.
+func (m *MessageMutation) DeliveryOutcome() (r string, exists bool) {
+	v := m.delivery_outcome
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeliveryOutcome returns the old "delivery_outcome" field's value of the Message entity.
+// If the Message object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessageMutation) OldDeliveryOutcome(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeliveryOutcome is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeliveryOutcome requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeliveryOutcome: %w", err)
+	}
+	return oldValue.DeliveryOutcome, nil
+}
+
+// ClearDeliveryOutcome clears the value of the "delivery_outcome" field.
+func (m *MessageMutation) ClearDeliveryOutcome() {
+	m.delivery_outcome = nil
+	m.clearedFields[message.FieldDeliveryOutcome] = struct{}{}
+}
+
+// DeliveryOutcomeCleared returns if the "delivery_outcome" field was cleared in this mutation.
+func (m *MessageMutation) DeliveryOutcomeCleared() bool {
+	_, ok := m.clearedFields[message.FieldDeliveryOutcome]
+	return ok
+}
+
+// ResetDeliveryOutcome resets all changes to the "delivery_outcome" field.
+func (m *MessageMutation) ResetDeliveryOutcome() {
+	m.delivery_outcome = nil
+	delete(m.clearedFields, message.FieldDeliveryOutcome)
+}
+
 // SetChannel sets the "channel" field.
 func (m *MessageMutation) SetChannel(s string) {
 	m.channel = &s
@@ -66846,7 +67071,7 @@ func (m *MessageMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *MessageMutation) Fields() []string {
-	fields := make([]string, 0, 23)
+	fields := make([]string, 0, 26)
 	if m.project_id != nil {
 		fields = append(fields, message.FieldProjectID)
 	}
@@ -66891,6 +67116,15 @@ func (m *MessageMutation) Fields() []string {
 	}
 	if m.dispatched_at != nil {
 		fields = append(fields, message.FieldDispatchedAt)
+	}
+	if m.delivery_id != nil {
+		fields = append(fields, message.FieldDeliveryID)
+	}
+	if m.delivering_at != nil {
+		fields = append(fields, message.FieldDeliveringAt)
+	}
+	if m.delivery_outcome != nil {
+		fields = append(fields, message.FieldDeliveryOutcome)
 	}
 	if m.channel != nil {
 		fields = append(fields, message.FieldChannel)
@@ -66954,6 +67188,12 @@ func (m *MessageMutation) Field(name string) (ent.Value, bool) {
 		return m.DispatchFailureReason()
 	case message.FieldDispatchedAt:
 		return m.DispatchedAt()
+	case message.FieldDeliveryID:
+		return m.DeliveryID()
+	case message.FieldDeliveringAt:
+		return m.DeliveringAt()
+	case message.FieldDeliveryOutcome:
+		return m.DeliveryOutcome()
 	case message.FieldChannel:
 		return m.Channel()
 	case message.FieldThreadID:
@@ -67009,6 +67249,12 @@ func (m *MessageMutation) OldField(ctx context.Context, name string) (ent.Value,
 		return m.OldDispatchFailureReason(ctx)
 	case message.FieldDispatchedAt:
 		return m.OldDispatchedAt(ctx)
+	case message.FieldDeliveryID:
+		return m.OldDeliveryID(ctx)
+	case message.FieldDeliveringAt:
+		return m.OldDeliveringAt(ctx)
+	case message.FieldDeliveryOutcome:
+		return m.OldDeliveryOutcome(ctx)
 	case message.FieldChannel:
 		return m.OldChannel(ctx)
 	case message.FieldThreadID:
@@ -67139,6 +67385,27 @@ func (m *MessageMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetDispatchedAt(v)
 		return nil
+	case message.FieldDeliveryID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeliveryID(v)
+		return nil
+	case message.FieldDeliveringAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeliveringAt(v)
+		return nil
+	case message.FieldDeliveryOutcome:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeliveryOutcome(v)
+		return nil
 	case message.FieldChannel:
 		v, ok := value.(string)
 		if !ok {
@@ -67243,6 +67510,15 @@ func (m *MessageMutation) ClearedFields() []string {
 	if m.FieldCleared(message.FieldDispatchedAt) {
 		fields = append(fields, message.FieldDispatchedAt)
 	}
+	if m.FieldCleared(message.FieldDeliveryID) {
+		fields = append(fields, message.FieldDeliveryID)
+	}
+	if m.FieldCleared(message.FieldDeliveringAt) {
+		fields = append(fields, message.FieldDeliveringAt)
+	}
+	if m.FieldCleared(message.FieldDeliveryOutcome) {
+		fields = append(fields, message.FieldDeliveryOutcome)
+	}
 	if m.FieldCleared(message.FieldChannel) {
 		fields = append(fields, message.FieldChannel)
 	}
@@ -67295,6 +67571,15 @@ func (m *MessageMutation) ClearField(name string) error {
 		return nil
 	case message.FieldDispatchedAt:
 		m.ClearDispatchedAt()
+		return nil
+	case message.FieldDeliveryID:
+		m.ClearDeliveryID()
+		return nil
+	case message.FieldDeliveringAt:
+		m.ClearDeliveringAt()
+		return nil
+	case message.FieldDeliveryOutcome:
+		m.ClearDeliveryOutcome()
 		return nil
 	case message.FieldChannel:
 		m.ClearChannel()
@@ -67369,6 +67654,15 @@ func (m *MessageMutation) ResetField(name string) error {
 		return nil
 	case message.FieldDispatchedAt:
 		m.ResetDispatchedAt()
+		return nil
+	case message.FieldDeliveryID:
+		m.ResetDeliveryID()
+		return nil
+	case message.FieldDeliveringAt:
+		m.ResetDeliveringAt()
+		return nil
+	case message.FieldDeliveryOutcome:
+		m.ResetDeliveryOutcome()
 		return nil
 	case message.FieldChannel:
 		m.ResetChannel()
@@ -86915,6 +87209,1152 @@ func (m *RuntimeBrokerMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *RuntimeBrokerMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown RuntimeBroker edge %s", name)
+}
+
+// RuntimeOrphanMutation represents an operation that mutates the RuntimeOrphan nodes in the graph.
+type RuntimeOrphanMutation struct {
+	config
+	op                    Op
+	typ                   string
+	id                    *uuid.UUID
+	kind                  *string
+	broker_id             *string
+	runtime_target        *string
+	project_id            *string
+	slug                  *string
+	agent_id              *string
+	run_id                *string
+	reason                *string
+	observed_phase        *string
+	first_seen_at         *time.Time
+	last_seen_at          *time.Time
+	missed_inventories    *int
+	addmissed_inventories *int
+	action_state          *string
+	action_at             *time.Time
+	action_error          *string
+	clearedFields         map[string]struct{}
+	done                  bool
+	oldValue              func(context.Context) (*RuntimeOrphan, error)
+	predicates            []predicate.RuntimeOrphan
+}
+
+var _ ent.Mutation = (*RuntimeOrphanMutation)(nil)
+
+// runtimeorphanOption allows management of the mutation configuration using functional options.
+type runtimeorphanOption func(*RuntimeOrphanMutation)
+
+// newRuntimeOrphanMutation creates new mutation for the RuntimeOrphan entity.
+func newRuntimeOrphanMutation(c config, op Op, opts ...runtimeorphanOption) *RuntimeOrphanMutation {
+	m := &RuntimeOrphanMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeRuntimeOrphan,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withRuntimeOrphanID sets the ID field of the mutation.
+func withRuntimeOrphanID(id uuid.UUID) runtimeorphanOption {
+	return func(m *RuntimeOrphanMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *RuntimeOrphan
+		)
+		m.oldValue = func(ctx context.Context) (*RuntimeOrphan, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().RuntimeOrphan.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withRuntimeOrphan sets the old RuntimeOrphan of the mutation.
+func withRuntimeOrphan(node *RuntimeOrphan) runtimeorphanOption {
+	return func(m *RuntimeOrphanMutation) {
+		m.oldValue = func(context.Context) (*RuntimeOrphan, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m RuntimeOrphanMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m RuntimeOrphanMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of RuntimeOrphan entities.
+func (m *RuntimeOrphanMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *RuntimeOrphanMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *RuntimeOrphanMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().RuntimeOrphan.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetKind sets the "kind" field.
+func (m *RuntimeOrphanMutation) SetKind(s string) {
+	m.kind = &s
+}
+
+// Kind returns the value of the "kind" field in the mutation.
+func (m *RuntimeOrphanMutation) Kind() (r string, exists bool) {
+	v := m.kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldKind returns the old "kind" field's value of the RuntimeOrphan entity.
+// If the RuntimeOrphan object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeOrphanMutation) OldKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldKind: %w", err)
+	}
+	return oldValue.Kind, nil
+}
+
+// ResetKind resets all changes to the "kind" field.
+func (m *RuntimeOrphanMutation) ResetKind() {
+	m.kind = nil
+}
+
+// SetBrokerID sets the "broker_id" field.
+func (m *RuntimeOrphanMutation) SetBrokerID(s string) {
+	m.broker_id = &s
+}
+
+// BrokerID returns the value of the "broker_id" field in the mutation.
+func (m *RuntimeOrphanMutation) BrokerID() (r string, exists bool) {
+	v := m.broker_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBrokerID returns the old "broker_id" field's value of the RuntimeOrphan entity.
+// If the RuntimeOrphan object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeOrphanMutation) OldBrokerID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBrokerID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBrokerID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBrokerID: %w", err)
+	}
+	return oldValue.BrokerID, nil
+}
+
+// ResetBrokerID resets all changes to the "broker_id" field.
+func (m *RuntimeOrphanMutation) ResetBrokerID() {
+	m.broker_id = nil
+}
+
+// SetRuntimeTarget sets the "runtime_target" field.
+func (m *RuntimeOrphanMutation) SetRuntimeTarget(s string) {
+	m.runtime_target = &s
+}
+
+// RuntimeTarget returns the value of the "runtime_target" field in the mutation.
+func (m *RuntimeOrphanMutation) RuntimeTarget() (r string, exists bool) {
+	v := m.runtime_target
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRuntimeTarget returns the old "runtime_target" field's value of the RuntimeOrphan entity.
+// If the RuntimeOrphan object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeOrphanMutation) OldRuntimeTarget(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRuntimeTarget is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRuntimeTarget requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRuntimeTarget: %w", err)
+	}
+	return oldValue.RuntimeTarget, nil
+}
+
+// ResetRuntimeTarget resets all changes to the "runtime_target" field.
+func (m *RuntimeOrphanMutation) ResetRuntimeTarget() {
+	m.runtime_target = nil
+}
+
+// SetProjectID sets the "project_id" field.
+func (m *RuntimeOrphanMutation) SetProjectID(s string) {
+	m.project_id = &s
+}
+
+// ProjectID returns the value of the "project_id" field in the mutation.
+func (m *RuntimeOrphanMutation) ProjectID() (r string, exists bool) {
+	v := m.project_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldProjectID returns the old "project_id" field's value of the RuntimeOrphan entity.
+// If the RuntimeOrphan object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeOrphanMutation) OldProjectID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldProjectID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldProjectID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldProjectID: %w", err)
+	}
+	return oldValue.ProjectID, nil
+}
+
+// ResetProjectID resets all changes to the "project_id" field.
+func (m *RuntimeOrphanMutation) ResetProjectID() {
+	m.project_id = nil
+}
+
+// SetSlug sets the "slug" field.
+func (m *RuntimeOrphanMutation) SetSlug(s string) {
+	m.slug = &s
+}
+
+// Slug returns the value of the "slug" field in the mutation.
+func (m *RuntimeOrphanMutation) Slug() (r string, exists bool) {
+	v := m.slug
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSlug returns the old "slug" field's value of the RuntimeOrphan entity.
+// If the RuntimeOrphan object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeOrphanMutation) OldSlug(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSlug is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSlug requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSlug: %w", err)
+	}
+	return oldValue.Slug, nil
+}
+
+// ResetSlug resets all changes to the "slug" field.
+func (m *RuntimeOrphanMutation) ResetSlug() {
+	m.slug = nil
+}
+
+// SetAgentID sets the "agent_id" field.
+func (m *RuntimeOrphanMutation) SetAgentID(s string) {
+	m.agent_id = &s
+}
+
+// AgentID returns the value of the "agent_id" field in the mutation.
+func (m *RuntimeOrphanMutation) AgentID() (r string, exists bool) {
+	v := m.agent_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAgentID returns the old "agent_id" field's value of the RuntimeOrphan entity.
+// If the RuntimeOrphan object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeOrphanMutation) OldAgentID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAgentID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAgentID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAgentID: %w", err)
+	}
+	return oldValue.AgentID, nil
+}
+
+// ResetAgentID resets all changes to the "agent_id" field.
+func (m *RuntimeOrphanMutation) ResetAgentID() {
+	m.agent_id = nil
+}
+
+// SetRunID sets the "run_id" field.
+func (m *RuntimeOrphanMutation) SetRunID(s string) {
+	m.run_id = &s
+}
+
+// RunID returns the value of the "run_id" field in the mutation.
+func (m *RuntimeOrphanMutation) RunID() (r string, exists bool) {
+	v := m.run_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRunID returns the old "run_id" field's value of the RuntimeOrphan entity.
+// If the RuntimeOrphan object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeOrphanMutation) OldRunID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRunID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRunID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRunID: %w", err)
+	}
+	return oldValue.RunID, nil
+}
+
+// ResetRunID resets all changes to the "run_id" field.
+func (m *RuntimeOrphanMutation) ResetRunID() {
+	m.run_id = nil
+}
+
+// SetReason sets the "reason" field.
+func (m *RuntimeOrphanMutation) SetReason(s string) {
+	m.reason = &s
+}
+
+// Reason returns the value of the "reason" field in the mutation.
+func (m *RuntimeOrphanMutation) Reason() (r string, exists bool) {
+	v := m.reason
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldReason returns the old "reason" field's value of the RuntimeOrphan entity.
+// If the RuntimeOrphan object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeOrphanMutation) OldReason(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldReason is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldReason requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldReason: %w", err)
+	}
+	return oldValue.Reason, nil
+}
+
+// ResetReason resets all changes to the "reason" field.
+func (m *RuntimeOrphanMutation) ResetReason() {
+	m.reason = nil
+}
+
+// SetObservedPhase sets the "observed_phase" field.
+func (m *RuntimeOrphanMutation) SetObservedPhase(s string) {
+	m.observed_phase = &s
+}
+
+// ObservedPhase returns the value of the "observed_phase" field in the mutation.
+func (m *RuntimeOrphanMutation) ObservedPhase() (r string, exists bool) {
+	v := m.observed_phase
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldObservedPhase returns the old "observed_phase" field's value of the RuntimeOrphan entity.
+// If the RuntimeOrphan object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeOrphanMutation) OldObservedPhase(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldObservedPhase is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldObservedPhase requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldObservedPhase: %w", err)
+	}
+	return oldValue.ObservedPhase, nil
+}
+
+// ResetObservedPhase resets all changes to the "observed_phase" field.
+func (m *RuntimeOrphanMutation) ResetObservedPhase() {
+	m.observed_phase = nil
+}
+
+// SetFirstSeenAt sets the "first_seen_at" field.
+func (m *RuntimeOrphanMutation) SetFirstSeenAt(t time.Time) {
+	m.first_seen_at = &t
+}
+
+// FirstSeenAt returns the value of the "first_seen_at" field in the mutation.
+func (m *RuntimeOrphanMutation) FirstSeenAt() (r time.Time, exists bool) {
+	v := m.first_seen_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFirstSeenAt returns the old "first_seen_at" field's value of the RuntimeOrphan entity.
+// If the RuntimeOrphan object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeOrphanMutation) OldFirstSeenAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFirstSeenAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFirstSeenAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFirstSeenAt: %w", err)
+	}
+	return oldValue.FirstSeenAt, nil
+}
+
+// ResetFirstSeenAt resets all changes to the "first_seen_at" field.
+func (m *RuntimeOrphanMutation) ResetFirstSeenAt() {
+	m.first_seen_at = nil
+}
+
+// SetLastSeenAt sets the "last_seen_at" field.
+func (m *RuntimeOrphanMutation) SetLastSeenAt(t time.Time) {
+	m.last_seen_at = &t
+}
+
+// LastSeenAt returns the value of the "last_seen_at" field in the mutation.
+func (m *RuntimeOrphanMutation) LastSeenAt() (r time.Time, exists bool) {
+	v := m.last_seen_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLastSeenAt returns the old "last_seen_at" field's value of the RuntimeOrphan entity.
+// If the RuntimeOrphan object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeOrphanMutation) OldLastSeenAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLastSeenAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLastSeenAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLastSeenAt: %w", err)
+	}
+	return oldValue.LastSeenAt, nil
+}
+
+// ResetLastSeenAt resets all changes to the "last_seen_at" field.
+func (m *RuntimeOrphanMutation) ResetLastSeenAt() {
+	m.last_seen_at = nil
+}
+
+// SetMissedInventories sets the "missed_inventories" field.
+func (m *RuntimeOrphanMutation) SetMissedInventories(i int) {
+	m.missed_inventories = &i
+	m.addmissed_inventories = nil
+}
+
+// MissedInventories returns the value of the "missed_inventories" field in the mutation.
+func (m *RuntimeOrphanMutation) MissedInventories() (r int, exists bool) {
+	v := m.missed_inventories
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldMissedInventories returns the old "missed_inventories" field's value of the RuntimeOrphan entity.
+// If the RuntimeOrphan object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeOrphanMutation) OldMissedInventories(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldMissedInventories is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldMissedInventories requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldMissedInventories: %w", err)
+	}
+	return oldValue.MissedInventories, nil
+}
+
+// AddMissedInventories adds i to the "missed_inventories" field.
+func (m *RuntimeOrphanMutation) AddMissedInventories(i int) {
+	if m.addmissed_inventories != nil {
+		*m.addmissed_inventories += i
+	} else {
+		m.addmissed_inventories = &i
+	}
+}
+
+// AddedMissedInventories returns the value that was added to the "missed_inventories" field in this mutation.
+func (m *RuntimeOrphanMutation) AddedMissedInventories() (r int, exists bool) {
+	v := m.addmissed_inventories
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetMissedInventories resets all changes to the "missed_inventories" field.
+func (m *RuntimeOrphanMutation) ResetMissedInventories() {
+	m.missed_inventories = nil
+	m.addmissed_inventories = nil
+}
+
+// SetActionState sets the "action_state" field.
+func (m *RuntimeOrphanMutation) SetActionState(s string) {
+	m.action_state = &s
+}
+
+// ActionState returns the value of the "action_state" field in the mutation.
+func (m *RuntimeOrphanMutation) ActionState() (r string, exists bool) {
+	v := m.action_state
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldActionState returns the old "action_state" field's value of the RuntimeOrphan entity.
+// If the RuntimeOrphan object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeOrphanMutation) OldActionState(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldActionState is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldActionState requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldActionState: %w", err)
+	}
+	return oldValue.ActionState, nil
+}
+
+// ResetActionState resets all changes to the "action_state" field.
+func (m *RuntimeOrphanMutation) ResetActionState() {
+	m.action_state = nil
+}
+
+// SetActionAt sets the "action_at" field.
+func (m *RuntimeOrphanMutation) SetActionAt(t time.Time) {
+	m.action_at = &t
+}
+
+// ActionAt returns the value of the "action_at" field in the mutation.
+func (m *RuntimeOrphanMutation) ActionAt() (r time.Time, exists bool) {
+	v := m.action_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldActionAt returns the old "action_at" field's value of the RuntimeOrphan entity.
+// If the RuntimeOrphan object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeOrphanMutation) OldActionAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldActionAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldActionAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldActionAt: %w", err)
+	}
+	return oldValue.ActionAt, nil
+}
+
+// ClearActionAt clears the value of the "action_at" field.
+func (m *RuntimeOrphanMutation) ClearActionAt() {
+	m.action_at = nil
+	m.clearedFields[runtimeorphan.FieldActionAt] = struct{}{}
+}
+
+// ActionAtCleared returns if the "action_at" field was cleared in this mutation.
+func (m *RuntimeOrphanMutation) ActionAtCleared() bool {
+	_, ok := m.clearedFields[runtimeorphan.FieldActionAt]
+	return ok
+}
+
+// ResetActionAt resets all changes to the "action_at" field.
+func (m *RuntimeOrphanMutation) ResetActionAt() {
+	m.action_at = nil
+	delete(m.clearedFields, runtimeorphan.FieldActionAt)
+}
+
+// SetActionError sets the "action_error" field.
+func (m *RuntimeOrphanMutation) SetActionError(s string) {
+	m.action_error = &s
+}
+
+// ActionError returns the value of the "action_error" field in the mutation.
+func (m *RuntimeOrphanMutation) ActionError() (r string, exists bool) {
+	v := m.action_error
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldActionError returns the old "action_error" field's value of the RuntimeOrphan entity.
+// If the RuntimeOrphan object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RuntimeOrphanMutation) OldActionError(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldActionError is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldActionError requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldActionError: %w", err)
+	}
+	return oldValue.ActionError, nil
+}
+
+// ResetActionError resets all changes to the "action_error" field.
+func (m *RuntimeOrphanMutation) ResetActionError() {
+	m.action_error = nil
+}
+
+// Where appends a list predicates to the RuntimeOrphanMutation builder.
+func (m *RuntimeOrphanMutation) Where(ps ...predicate.RuntimeOrphan) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the RuntimeOrphanMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *RuntimeOrphanMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.RuntimeOrphan, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *RuntimeOrphanMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *RuntimeOrphanMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (RuntimeOrphan).
+func (m *RuntimeOrphanMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *RuntimeOrphanMutation) Fields() []string {
+	fields := make([]string, 0, 15)
+	if m.kind != nil {
+		fields = append(fields, runtimeorphan.FieldKind)
+	}
+	if m.broker_id != nil {
+		fields = append(fields, runtimeorphan.FieldBrokerID)
+	}
+	if m.runtime_target != nil {
+		fields = append(fields, runtimeorphan.FieldRuntimeTarget)
+	}
+	if m.project_id != nil {
+		fields = append(fields, runtimeorphan.FieldProjectID)
+	}
+	if m.slug != nil {
+		fields = append(fields, runtimeorphan.FieldSlug)
+	}
+	if m.agent_id != nil {
+		fields = append(fields, runtimeorphan.FieldAgentID)
+	}
+	if m.run_id != nil {
+		fields = append(fields, runtimeorphan.FieldRunID)
+	}
+	if m.reason != nil {
+		fields = append(fields, runtimeorphan.FieldReason)
+	}
+	if m.observed_phase != nil {
+		fields = append(fields, runtimeorphan.FieldObservedPhase)
+	}
+	if m.first_seen_at != nil {
+		fields = append(fields, runtimeorphan.FieldFirstSeenAt)
+	}
+	if m.last_seen_at != nil {
+		fields = append(fields, runtimeorphan.FieldLastSeenAt)
+	}
+	if m.missed_inventories != nil {
+		fields = append(fields, runtimeorphan.FieldMissedInventories)
+	}
+	if m.action_state != nil {
+		fields = append(fields, runtimeorphan.FieldActionState)
+	}
+	if m.action_at != nil {
+		fields = append(fields, runtimeorphan.FieldActionAt)
+	}
+	if m.action_error != nil {
+		fields = append(fields, runtimeorphan.FieldActionError)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *RuntimeOrphanMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case runtimeorphan.FieldKind:
+		return m.Kind()
+	case runtimeorphan.FieldBrokerID:
+		return m.BrokerID()
+	case runtimeorphan.FieldRuntimeTarget:
+		return m.RuntimeTarget()
+	case runtimeorphan.FieldProjectID:
+		return m.ProjectID()
+	case runtimeorphan.FieldSlug:
+		return m.Slug()
+	case runtimeorphan.FieldAgentID:
+		return m.AgentID()
+	case runtimeorphan.FieldRunID:
+		return m.RunID()
+	case runtimeorphan.FieldReason:
+		return m.Reason()
+	case runtimeorphan.FieldObservedPhase:
+		return m.ObservedPhase()
+	case runtimeorphan.FieldFirstSeenAt:
+		return m.FirstSeenAt()
+	case runtimeorphan.FieldLastSeenAt:
+		return m.LastSeenAt()
+	case runtimeorphan.FieldMissedInventories:
+		return m.MissedInventories()
+	case runtimeorphan.FieldActionState:
+		return m.ActionState()
+	case runtimeorphan.FieldActionAt:
+		return m.ActionAt()
+	case runtimeorphan.FieldActionError:
+		return m.ActionError()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *RuntimeOrphanMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case runtimeorphan.FieldKind:
+		return m.OldKind(ctx)
+	case runtimeorphan.FieldBrokerID:
+		return m.OldBrokerID(ctx)
+	case runtimeorphan.FieldRuntimeTarget:
+		return m.OldRuntimeTarget(ctx)
+	case runtimeorphan.FieldProjectID:
+		return m.OldProjectID(ctx)
+	case runtimeorphan.FieldSlug:
+		return m.OldSlug(ctx)
+	case runtimeorphan.FieldAgentID:
+		return m.OldAgentID(ctx)
+	case runtimeorphan.FieldRunID:
+		return m.OldRunID(ctx)
+	case runtimeorphan.FieldReason:
+		return m.OldReason(ctx)
+	case runtimeorphan.FieldObservedPhase:
+		return m.OldObservedPhase(ctx)
+	case runtimeorphan.FieldFirstSeenAt:
+		return m.OldFirstSeenAt(ctx)
+	case runtimeorphan.FieldLastSeenAt:
+		return m.OldLastSeenAt(ctx)
+	case runtimeorphan.FieldMissedInventories:
+		return m.OldMissedInventories(ctx)
+	case runtimeorphan.FieldActionState:
+		return m.OldActionState(ctx)
+	case runtimeorphan.FieldActionAt:
+		return m.OldActionAt(ctx)
+	case runtimeorphan.FieldActionError:
+		return m.OldActionError(ctx)
+	}
+	return nil, fmt.Errorf("unknown RuntimeOrphan field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *RuntimeOrphanMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case runtimeorphan.FieldKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetKind(v)
+		return nil
+	case runtimeorphan.FieldBrokerID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBrokerID(v)
+		return nil
+	case runtimeorphan.FieldRuntimeTarget:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRuntimeTarget(v)
+		return nil
+	case runtimeorphan.FieldProjectID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetProjectID(v)
+		return nil
+	case runtimeorphan.FieldSlug:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSlug(v)
+		return nil
+	case runtimeorphan.FieldAgentID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAgentID(v)
+		return nil
+	case runtimeorphan.FieldRunID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRunID(v)
+		return nil
+	case runtimeorphan.FieldReason:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetReason(v)
+		return nil
+	case runtimeorphan.FieldObservedPhase:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetObservedPhase(v)
+		return nil
+	case runtimeorphan.FieldFirstSeenAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFirstSeenAt(v)
+		return nil
+	case runtimeorphan.FieldLastSeenAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLastSeenAt(v)
+		return nil
+	case runtimeorphan.FieldMissedInventories:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetMissedInventories(v)
+		return nil
+	case runtimeorphan.FieldActionState:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetActionState(v)
+		return nil
+	case runtimeorphan.FieldActionAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetActionAt(v)
+		return nil
+	case runtimeorphan.FieldActionError:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetActionError(v)
+		return nil
+	}
+	return fmt.Errorf("unknown RuntimeOrphan field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *RuntimeOrphanMutation) AddedFields() []string {
+	var fields []string
+	if m.addmissed_inventories != nil {
+		fields = append(fields, runtimeorphan.FieldMissedInventories)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *RuntimeOrphanMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case runtimeorphan.FieldMissedInventories:
+		return m.AddedMissedInventories()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *RuntimeOrphanMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case runtimeorphan.FieldMissedInventories:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddMissedInventories(v)
+		return nil
+	}
+	return fmt.Errorf("unknown RuntimeOrphan numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *RuntimeOrphanMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(runtimeorphan.FieldActionAt) {
+		fields = append(fields, runtimeorphan.FieldActionAt)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *RuntimeOrphanMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *RuntimeOrphanMutation) ClearField(name string) error {
+	switch name {
+	case runtimeorphan.FieldActionAt:
+		m.ClearActionAt()
+		return nil
+	}
+	return fmt.Errorf("unknown RuntimeOrphan nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *RuntimeOrphanMutation) ResetField(name string) error {
+	switch name {
+	case runtimeorphan.FieldKind:
+		m.ResetKind()
+		return nil
+	case runtimeorphan.FieldBrokerID:
+		m.ResetBrokerID()
+		return nil
+	case runtimeorphan.FieldRuntimeTarget:
+		m.ResetRuntimeTarget()
+		return nil
+	case runtimeorphan.FieldProjectID:
+		m.ResetProjectID()
+		return nil
+	case runtimeorphan.FieldSlug:
+		m.ResetSlug()
+		return nil
+	case runtimeorphan.FieldAgentID:
+		m.ResetAgentID()
+		return nil
+	case runtimeorphan.FieldRunID:
+		m.ResetRunID()
+		return nil
+	case runtimeorphan.FieldReason:
+		m.ResetReason()
+		return nil
+	case runtimeorphan.FieldObservedPhase:
+		m.ResetObservedPhase()
+		return nil
+	case runtimeorphan.FieldFirstSeenAt:
+		m.ResetFirstSeenAt()
+		return nil
+	case runtimeorphan.FieldLastSeenAt:
+		m.ResetLastSeenAt()
+		return nil
+	case runtimeorphan.FieldMissedInventories:
+		m.ResetMissedInventories()
+		return nil
+	case runtimeorphan.FieldActionState:
+		m.ResetActionState()
+		return nil
+	case runtimeorphan.FieldActionAt:
+		m.ResetActionAt()
+		return nil
+	case runtimeorphan.FieldActionError:
+		m.ResetActionError()
+		return nil
+	}
+	return fmt.Errorf("unknown RuntimeOrphan field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *RuntimeOrphanMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *RuntimeOrphanMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *RuntimeOrphanMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *RuntimeOrphanMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *RuntimeOrphanMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *RuntimeOrphanMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *RuntimeOrphanMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown RuntimeOrphan unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *RuntimeOrphanMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown RuntimeOrphan edge %s", name)
 }
 
 // ScheduleMutation represents an operation that mutates the Schedule nodes in the graph.

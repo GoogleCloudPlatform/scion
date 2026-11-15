@@ -5344,8 +5344,7 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 		s.recordChatSearch(ctx, slog.Default(), shape)
 		if shape.outcome == chatSearchOutcomeTimeout {
 			// No partial results: the whole search is refused.
-			writeError(w, http.StatusServiceUnavailable, "SEARCH_TIMEOUT",
-				"Search took too long. Try a longer phrase or search one space.", nil)
+			writeChatSearchTimeout(w)
 		}
 		return true
 	}
@@ -5483,8 +5482,7 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 			shape.outcome = chatSearchOutcomeTimeout
 			shape.duration = time.Since(searchStart)
 			s.recordChatSearch(ctx, slog.Default(), shape)
-			writeError(w, http.StatusServiceUnavailable, "SEARCH_TIMEOUT",
-				"Search took too long. Try a longer phrase or search one space.", nil)
+			writeChatSearchTimeout(w)
 			return
 		}
 		shape.outcome = chatSearchOutcomeError

@@ -240,6 +240,10 @@ func (r *CloudRunRuntime) resolveConfig(ctx context.Context) error {
 
 func (r *CloudRunRuntime) Name() string { return "cloudrun" }
 
+// ExecAvailable implements ExecCapability: exec needs a configured exec
+// connector (IAP).
+func (r *CloudRunRuntime) ExecAvailable() bool { return r.exec != nil }
+
 // SupportsEmptyPerAgentWorkspace reports false: Run rejects empty-per-agent
 // workspaces (rejectEmptyPerAgentOnCloudRun), so a broker whose default
 // runtime is Cloud Run must not advertise the capability.

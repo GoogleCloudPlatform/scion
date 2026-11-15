@@ -466,6 +466,18 @@ func TestFormatNotificationMessage(t *testing.T) {
 			expected: "helper is WAITING_FOR_INPUT: Need API key",
 		},
 		{
+			name:     "IDLE without message",
+			agent:    &store.Agent{Slug: "lead"},
+			status:   "IDLE",
+			expected: "lead is IDLE",
+		},
+		{
+			name:     "IDLE with message",
+			agent:    &store.Agent{Slug: "lead", Message: "Between assignments"},
+			status:   "idle",
+			expected: "lead is IDLE: Between assignments",
+		},
+		{
 			name:     "LIMITS_EXCEEDED without message",
 			agent:    &store.Agent{Slug: "cruncher"},
 			status:   "LIMITS_EXCEEDED",

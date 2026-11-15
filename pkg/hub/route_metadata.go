@@ -1049,6 +1049,15 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Permission:     "hub.health.read", Resource: "hub", Action: "read",
 		SessionOnly: authzop.ReasonGovernancePending,
 	},
+	// Runtime objects no hub agent owns (ptone/scion#7930), an operator
+	// diagnostic under the permission of the health summary. Session only
+	// (GOV_PENDING).
+	"/api/v1/admin/runtime-orphans": {
+		Pattern: "/api/v1/admin/runtime-orphans", RouteID: "admin.runtimeOrphans",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.health.read", Resource: "hub", Action: "read",
+		SessionOnly: authzop.ReasonGovernancePending,
+	},
 	"/api/v1/admin/messaging/divergence": {
 		Pattern: "/api/v1/admin/messaging/divergence", RouteID: "admin.messaging.divergence",
 		Classification: RouteHubAdmin,

@@ -190,7 +190,7 @@ func (d *EntDriver) finish(p *probe, err error, req string) {
 		slog.String("req", req),
 	}}
 	if m.sqlite {
-		r.attrs = append(r.attrs, m.holders.attrs(m, p.requested, end, outcome != OutcomeAcquired)...)
+		m.holders.fill(m, &r, p.requested, end, outcome != OutcomeAcquired)
 	}
 	r.npcs = copy(r.pcs[:], pcs[:n])
 	m.warn(r)

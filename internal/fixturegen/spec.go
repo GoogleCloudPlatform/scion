@@ -303,6 +303,15 @@ func Spec() []TableFixture {
 				"run_id": "fixture-run-1", "broker_id": brokerID, "seen_at": baseTime,
 			},
 		}},
+		{Table: "runtime_orphans", Rows: []row{
+			{ // an instance a broker reported with no hub agent
+				"id": "b8000000-0000-0000-0000-000000000001", "kind": "instance", "broker_id": brokerID,
+				"runtime_target": "docker", "project_id": projectID, "slug": "fixture-orphan",
+				"agent_id": "", "run_id": "fixture-run-2", "reason": "no_agent", "observed_phase": "running",
+				"first_seen_at": baseTime, "last_seen_at": baseTime, "missed_inventories": 0,
+				"action_state": "none", "action_error": "",
+			},
+		}},
 		{Table: "broker_join_tokens", Rows: []row{
 			{
 				"broker_id": brokerID, "token_hash": "abc123hash", "expires_at": baseTime.Add(time.Hour),

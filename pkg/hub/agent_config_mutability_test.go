@@ -78,6 +78,7 @@ var wantEditTier = map[string]EditTier{
 	"config.clone_depth":               EditTierImmutable,
 	"config.explicit_workspace":        EditTierImmutable,
 	"config.empty_per_agent_workspace": EditTierImmutable,
+	"config.persistence":               EditTierImmutable,
 	"config.harness":                   EditTierImmutable,
 	"config.harness_config":            EditTierImmutable,
 	"config.default_harness_config":    EditTierImmutable,

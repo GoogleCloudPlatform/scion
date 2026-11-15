@@ -1,0 +1,102 @@
+{
+  "containers": [
+    {
+      "args": [
+        "sleep",
+        "infinity"
+      ],
+      "env": [
+        {
+          "name": "FOO",
+          "value": "bar"
+        },
+        {
+          "name": "SCION_WORKSPACE_MODE",
+          "value": "clone-per-agent"
+        },
+        {
+          "name": "SCION_GIT_CLONE_URL",
+          "value": "https://example.com/org/repo.git"
+        },
+        {
+          "name": "SCION_HOST_UID",
+          "value": "1000"
+        },
+        {
+          "name": "SCION_HOST_GID",
+          "value": "1000"
+        },
+        {
+          "name": "SCION_HARNESS_SECRETS_DIR",
+          "value": "/run/scion/mem/harness-secrets"
+        },
+        {
+          "name": "SCION_HARNESS_OUTPUTS_DIR",
+          "value": "/run/scion/mem/outputs"
+        },
+        {
+          "name": "SCION_STARTUP_LISTENER_PORT",
+          "value": "18381"
+        }
+      ],
+      "image": "us-docker.pkg.dev/p/r/scion-claude:latest",
+      "name": "scion-agent",
+      "ports": [
+        {
+          "containerPort": 18381
+        }
+      ],
+      "startupProbe": {
+        "failureThreshold": 24,
+        "periodSeconds": 10,
+        "tcpSocket": {
+          "port": 18381
+        }
+      },
+      "volumeMounts": [
+        {
+          "mountPath": "/workspace",
+          "name": "workspace"
+        },
+        {
+          "mountPath": "/home/scion",
+          "name": "home"
+        },
+        {
+          "mountPath": "/run/scion/mem",
+          "name": "scion-mem"
+        }
+      ]
+    }
+  ],
+  "labels": {
+    "agent_id": "6f1c2b3a-4d5e-4f60-8a9b-0c1d2e3f4a5b",
+    "scion_name": "dev",
+    "scion_run_id": "run-1"
+  },
+  "launchStage": "ALPHA",
+  "serviceAccount": "sa@p.iam.gserviceaccount.com",
+  "volumes": [
+    {
+      "name": "workspace",
+      "nfs": {
+        "path": "/share/projects/p1/agents/dev/workspace",
+        "server": "10.0.0.2"
+      }
+    },
+    {
+      "name": "home",
+      "nfs": {
+        "path": "/share/projects/p1/agents/dev/home-6f1c2b3a-4d5e-4f60-8a9b-0c1d2e3f4a5b",
+        "server": "10.0.0.2"
+      }
+    },
+    {
+      "emptyDir": {
+        "medium": "MEMORY",
+        "sizeLimit": "16Mi"
+      },
+      "name": "scion-mem"
+    }
+  ]
+}

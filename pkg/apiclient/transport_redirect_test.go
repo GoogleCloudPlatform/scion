@@ -443,3 +443,56 @@ func TestAuthenticatedHTTPClient_AgentTokenRedirectToOtherHostOmitsAgentHeaders(
 		t.Errorf("hop to storage.test carried headers %s, want only X-Custom", got)
 	}
 }
+
+func TestHubScopedHTTPClient(t *testing.T) {
+	t.Run("scopes_headers_and_transportauth_and_reuses_wrapper", func(t *testing.T) {
+		rec := &hopRecorder{}
+		n := redirectNet(t, rec, "http://storage.test/landed")
+		base := &http.Client{
+			Transport: transportauth.Wrap(n.transport(), stubTokenSource{tok: "transport-token"}, transportauth.HeaderAuthorization),
+			Timeout:   10 * time.Second,
+		}
+		scoped := HubScopedHTTPClient(base, "http://hub.test")
+		rescoped := HubScopedHTTPClient(scoped, "http://hub.test")
+		if scoped.Transport != rescoped.Transport {
+			t.Error("re-scoping with the same baseURL wrapped Transport a second time")
+		}
+
+		req := newGet(t, "http://hub.test/start")
+		req.Header.Set("X-Scion-Agent-Token", "agent-token")
+		req.Header.Set("X-Scion-Run-Id", "run-1")
+		req.Header.Set("X-Custom", "kept")
+		mustGet(t, rescoped, req)
+
+		start, _ := rec.headers("hub.test/start")
+		if got := headerNames(start); got != "Authorization,X-Custom,X-Scion-Agent-Token,X-Scion-Run-Id" {
+			t.Errorf("hub request headers = %s, want Authorization,X-Custom,X-Scion-Agent-Token,X-Scion-Run-Id", got)
+		}
+		landed, ok := rec.headers("storage.test/landed")
+		if !ok {
+			t.Fatal("redirect to storage.test was not followed")
+		}
+		if got := headerNames(landed); got != "X-Custom" {
+			t.Errorf("hop to storage.test carried headers %s, want only X-Custom", got)
+		}
+	})
+
+	t.Run("forwards_close_idle_connections_below_transportauth", func(t *testing.T) {
+		spy := &idleCloseSpy{}
+		base := &http.Client{
+			Transport: transportauth.Wrap(spy, stubTokenSource{tok: "transport-token"}, transportauth.HeaderAuthorization),
+		}
+		scoped := HubScopedHTTPClient(base, "http://hub.test")
+		scoped.CloseIdleConnections()
+		if spy.calls != 1 {
+			t.Errorf("CloseIdleConnections calls = %d, want 1", spy.calls)
+		}
+	})
+
+	t.Run("nil_base_uses_default_client", func(t *testing.T) {
+		scoped := HubScopedHTTPClient(nil, "http://hub.test")
+		if scoped == nil || scoped == http.DefaultClient || scoped.CheckRedirect == nil {
+			t.Fatalf("HubScopedHTTPClient(nil) = %+v, want distinct copy with CheckRedirect", scoped)
+		}
+	})
+}

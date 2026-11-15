@@ -1,0 +1,17 @@
+# Release Notes (2026-11-11)
+
+This day made orphaned agents visible, let Hub operators restrict what users can reach inside agents, and added a pre-start NFS health check on Kubernetes. It also kept secret environment values out of Podman's command line and fixed two Hub identity-handling bugs.
+
+## 🚀 Features
+* **Orphaned and revoked agents are visible** (#4761): The Hub now computes each agent's authority state (`live`, `orphaned`, `revoked` or `unrecorded`) from its recorded delegation chain whenever the agent is read. An orphaned agent, such as a child whose parent was deleted, keeps running but is denied every request that needs its delegation. The state shows as an Orphaned or Revoked badge in the web UI, as `running (ORPHANED)` in `scion list`, as a cause line in `scion look`, and as `authority` on `GET /api/v1/agents/{id}`. Hub admins can list affected agents with `GET /api/v1/admin/orphaned-agents`. The only remediation is to stop or delete the agent.
+* **Restrict what users reach inside agents** (#3655): Three new `server.hub.conduit` settings let a Hub operator turn off the agents' embedded SSH server (`disable_ssh`), deny specific agent-local ports to every tunnel, the port proxy and SSH forwarding (`deny_ports`), and refuse SSH Unix socket forwarding (`disable_ssh_socket_forwarding`). They suit agents that share a container with local services such as a credential proxy. A refused SSH tunnel exits with code 5. *(Contributor: Stephen Ierodiaconou)*
+* **NFS volume health check on Kubernetes** (#4647): After the agent Pod is running and before the agent starts, the Runtime Broker checks each NFS volume from inside the container for being mounted, readable and, unless read-only, writable. A volume that fails three consecutive checks 5 seconds apart fails the start with `volume_unhealthy` in the `container_start` step.
+* **Next release branch is created with the stable tag** (#4764): `promote-stable.sh` now creates `release/vX.(Y+1)` atomically with the stable tag, so the weekly preview workflow has a line to roll forward. `--no-next-branch` pushes only the tag.
+
+## 🔒 Security
+* **Secret environment values stay out of Podman's command line** (#4673): Secret values are handed to `podman` through its environment instead of `-e KEY=VALUE` arguments, where any local user could read them from `/proc/<pid>/cmdline`. Rootless Podman's pause process is started first without them so they don't linger in its environment. *(Contributor: Stephen Ierodiaconou)*
+
+## 🐛 Fixes
+* **Block identity ignores the project service account** (#4768): An agent whose GCP identity is explicitly `block` no longer counts the project's verified service account as a credential. Creating it now falls back to the no-auth path instead of failing on a missing `ANTHROPIC_API_KEY`.
+* **Cloud Run native flag cleared on best-effort delete and restore** (#4766): A best-effort delete that finalized without a confirmed broker delete left the native Cloud Run decision set, so a restored agent kept its GCP tokens withheld. The decision is now cleared at both delete points and after a restore commits. A failed mandatory dispatch still keeps it.
+* **Starter Hub keeps operator settings on `--full` updates** (#3422): `gce-start-hub.sh --full` merges the generated `settings.yaml` over the existing file, so operator-owned sections (`server.plugins`, `server.message_broker`, `plugins`) survive, and it aborts without overwriting if the merge fails. *(Contributor: rootkiller6788)*

@@ -245,6 +245,7 @@ var (
 		{Name: "start_claim_hold_until", Type: field.TypeTime, Nullable: true},
 		{Name: "start_claim_launch_id", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "soft_delete_op_id", Type: field.TypeString, Nullable: true},
+		{Name: "activity_since", Type: field.TypeTime, Nullable: true},
 		{Name: "project_id", Type: field.TypeUUID},
 	}
 	// AgentsTable holds the schema information for the "agents" table.
@@ -255,7 +256,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "agents_projects_agents",
-				Columns:    []*schema.Column{AgentsColumns[95]},
+				Columns:    []*schema.Column{AgentsColumns[96]},
 				RefColumns: []*schema.Column{ProjectsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -274,17 +275,17 @@ var (
 			{
 				Name:    "agent_slug_project_id",
 				Unique:  true,
-				Columns: []*schema.Column{AgentsColumns[3], AgentsColumns[95]},
+				Columns: []*schema.Column{AgentsColumns[3], AgentsColumns[96]},
 			},
 			{
 				Name:    "agent_project_id_owner_id",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[95], AgentsColumns[8]},
+				Columns: []*schema.Column{AgentsColumns[96], AgentsColumns[8]},
 			},
 			{
 				Name:    "agent_project_id_created_by",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[95], AgentsColumns[7]},
+				Columns: []*schema.Column{AgentsColumns[96], AgentsColumns[7]},
 			},
 			{
 				Name:    "agent_launch_deadline",
@@ -1336,6 +1337,11 @@ var (
 				Columns: []*schema.Column{DecisionAnswersColumns[2], DecisionAnswersColumns[23]},
 			},
 			{
+				Name:    "decisionanswer_project_id_asker_agent_id_created_at",
+				Unique:  false,
+				Columns: []*schema.Column{DecisionAnswersColumns[2], DecisionAnswersColumns[3], DecisionAnswersColumns[23]},
+			},
+			{
 				Name:    "decisionanswer_response_message_id",
 				Unique:  false,
 				Columns: []*schema.Column{DecisionAnswersColumns[17]},
@@ -2185,6 +2191,9 @@ var (
 		{Name: "dispatch_state", Type: field.TypeString, Default: "pending"},
 		{Name: "dispatch_failure_reason", Type: field.TypeString, Nullable: true},
 		{Name: "dispatched_at", Type: field.TypeTime, Nullable: true},
+		{Name: "delivery_id", Type: field.TypeString, Nullable: true, Size: 64},
+		{Name: "delivering_at", Type: field.TypeTime, Nullable: true},
+		{Name: "delivery_outcome", Type: field.TypeString, Nullable: true, Size: 256},
 		{Name: "channel", Type: field.TypeString, Nullable: true, Size: 64},
 		{Name: "thread_id", Type: field.TypeString, Nullable: true, Size: 256},
 		{Name: "conversation_id", Type: field.TypeUUID, Nullable: true},
@@ -2213,47 +2222,47 @@ var (
 			{
 				Name:    "message_created",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[23]},
+				Columns: []*schema.Column{MessagesColumns[26]},
 			},
 			{
 				Name:    "message_conversation_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[18]},
+				Columns: []*schema.Column{MessagesColumns[21]},
 			},
 			{
 				Name:    "message_conversation_id_channel_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[18], MessagesColumns[16], MessagesColumns[23], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[21], MessagesColumns[19], MessagesColumns[26], MessagesColumns[0]},
 			},
 			{
 				Name:    "message_thread_id_channel_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[17], MessagesColumns[16], MessagesColumns[23], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[20], MessagesColumns[19], MessagesColumns[26], MessagesColumns[0]},
 			},
 			{
 				Name:    "message_project_id_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[1], MessagesColumns[23], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[1], MessagesColumns[26], MessagesColumns[0]},
 			},
 			{
 				Name:    "message_sender_id_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[3], MessagesColumns[23], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[3], MessagesColumns[26], MessagesColumns[0]},
 			},
 			{
 				Name:    "message_recipient_id_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[5], MessagesColumns[23], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[5], MessagesColumns[26], MessagesColumns[0]},
 			},
 			{
 				Name:    "message_project_id_sender_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[1], MessagesColumns[2], MessagesColumns[23], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[1], MessagesColumns[2], MessagesColumns[26], MessagesColumns[0]},
 			},
 			{
 				Name:    "message_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[23], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[26], MessagesColumns[0]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "dispatch_state = 'pending'",
 				},
@@ -2261,15 +2270,23 @@ var (
 			{
 				Name:    "message_failed_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[23], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[26], MessagesColumns[0]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "dispatch_state = 'failed'",
 				},
 			},
 			{
+				Name:    "message_delivering_at",
+				Unique:  false,
+				Columns: []*schema.Column{MessagesColumns[17]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "dispatch_state = 'delivering'",
+				},
+			},
+			{
 				Name:    "message_sender_id_recipient_id_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[3], MessagesColumns[5], MessagesColumns[23], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[3], MessagesColumns[5], MessagesColumns[26], MessagesColumns[0]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "recipient_id IS NOT NULL",
 				},
@@ -2277,7 +2294,7 @@ var (
 			{
 				Name:    "message_thread_id_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[17], MessagesColumns[23], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[20], MessagesColumns[26], MessagesColumns[0]},
 			},
 		},
 	}
@@ -2937,6 +2954,38 @@ var (
 				Name:    "runtimebroker_runtime_target_id",
 				Unique:  true,
 				Columns: []*schema.Column{RuntimeBrokersColumns[30]},
+			},
+		},
+	}
+	// RuntimeOrphansColumns holds the columns for the "runtime_orphans" table.
+	RuntimeOrphansColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "kind", Type: field.TypeString},
+		{Name: "broker_id", Type: field.TypeString},
+		{Name: "runtime_target", Type: field.TypeString, Default: ""},
+		{Name: "project_id", Type: field.TypeString, Default: ""},
+		{Name: "slug", Type: field.TypeString, Default: ""},
+		{Name: "agent_id", Type: field.TypeString, Default: ""},
+		{Name: "run_id", Type: field.TypeString, Default: ""},
+		{Name: "reason", Type: field.TypeString},
+		{Name: "observed_phase", Type: field.TypeString, Default: ""},
+		{Name: "first_seen_at", Type: field.TypeTime},
+		{Name: "last_seen_at", Type: field.TypeTime},
+		{Name: "missed_inventories", Type: field.TypeInt, Default: 0},
+		{Name: "action_state", Type: field.TypeString, Default: "none"},
+		{Name: "action_at", Type: field.TypeTime, Nullable: true},
+		{Name: "action_error", Type: field.TypeString, Default: ""},
+	}
+	// RuntimeOrphansTable holds the schema information for the "runtime_orphans" table.
+	RuntimeOrphansTable = &schema.Table{
+		Name:       "runtime_orphans",
+		Columns:    RuntimeOrphansColumns,
+		PrimaryKey: []*schema.Column{RuntimeOrphansColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "runtimeorphan_kind_broker_id_runtime_target_project_id_slug_agent_id",
+				Unique:  true,
+				Columns: []*schema.Column{RuntimeOrphansColumns[1], RuntimeOrphansColumns[2], RuntimeOrphansColumns[3], RuntimeOrphansColumns[4], RuntimeOrphansColumns[5], RuntimeOrphansColumns[6]},
 			},
 		},
 	}
@@ -3776,6 +3825,7 @@ var (
 		RoleBindingsTable,
 		RoleDefinitionsTable,
 		RuntimeBrokersTable,
+		RuntimeOrphansTable,
 		SchedulesTable,
 		ScheduledEventsTable,
 		SecretsTable,

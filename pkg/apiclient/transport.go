@@ -209,31 +209,46 @@ func (t *Transport) Do(ctx context.Context, req *http.Request) (*http.Response, 
 	return resp, nil
 }
 
-// hubScopedClient returns the client Do sends with: a shallow copy of
-// HTTPClient (sharing its RoundTripper and connection pool) whose redirect
-// policy applies the hub origin rule. A redirect hop to another origin than
-// BaseURL's has the credential headers and the X-Scion-* headers removed,
-// then HTTPClient.CheckRedirect (or the 10-hop limit) applies; same-origin
-// hops are unchanged. When HTTPClient.Transport is a HubOnlyRoundTripper
-// (transportauth.Wrap), such a hop is also sent below that layer, so the
-// transport credential is not added to it again. The first request of each
-// attempt is sent exactly as before.
-func (t *Transport) hubScopedClient() *http.Client {
-	base := t.HTTPClient
+// HubScopedHTTPClient returns a shallow copy of base (or http.DefaultClient
+// when base is nil), sharing its RoundTripper and connection pool, whose
+// redirect policy applies the hub origin rule for baseURL. A redirect hop to
+// another origin than baseURL's has the credential headers and the X-Scion-*
+// headers removed, then base.CheckRedirect (or the 10-hop limit) applies;
+// same-origin hops are unchanged. When base.Transport is a
+// HubOnlyRoundTripper (such as transportauth.Wrap), such a hop is also sent
+// below that layer, so the transport credential is not added to it again. The
+// first request of each attempt is sent unchanged.
+func HubScopedHTTPClient(base *http.Client, baseURL string) *http.Client {
 	if base == nil {
 		base = http.DefaultClient
 	}
-	hub := parseOrigin(t.BaseURL)
+	hub := parseOrigin(baseURL)
 	c := *base
 	c.CheckRedirect = hubRedirectPolicy(hub, base.CheckRedirect)
 	if _, ok := base.Transport.(HubOnlyRoundTripper); ok {
-		c.Transport = &redirectHopRoundTripper{
-			base:  base.Transport,
-			other: withoutHubOnlyLayers(base.Transport),
-			hub:   hub,
-		}
+		c.Transport = scopeRedirectHopTransport(base.Transport, hub)
 	}
 	return &c
+}
+
+// hubScopedClient returns the client Do sends with: HubScopedHTTPClient for
+// HTTPClient and BaseURL.
+func (t *Transport) hubScopedClient() *http.Client {
+	return HubScopedHTTPClient(t.HTTPClient, t.BaseURL)
+}
+
+func scopeRedirectHopTransport(rt http.RoundTripper, hub origin) http.RoundTripper {
+	if rh, ok := rt.(*redirectHopRoundTripper); ok {
+		if rh.hub == hub {
+			return rh
+		}
+		rt = rh.base
+	}
+	return &redirectHopRoundTripper{
+		base:  rt,
+		other: withoutHubOnlyLayers(rt),
+		hub:   hub,
+	}
 }
 
 // hubRedirectPolicy returns a CheckRedirect function that removes the
@@ -286,6 +301,27 @@ func (rt *redirectHopRoundTripper) RoundTrip(req *http.Request) (*http.Response,
 		return other.RoundTrip(req)
 	}
 	return rt.base.RoundTrip(req)
+}
+
+// HubOnlyBase implements HubOnlyRoundTripper so withoutHubOnlyLayers peels
+// both this wrapper and the hub-only layers it wraps.
+func (rt *redirectHopRoundTripper) HubOnlyBase() http.RoundTripper {
+	return rt.other
+}
+
+// CloseIdleConnections forwards cleanup to the wrapped transport when supported.
+func (rt *redirectHopRoundTripper) CloseIdleConnections() {
+	if closer, ok := rt.base.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+		return
+	}
+	other := rt.other
+	if other == nil {
+		other = http.DefaultTransport
+	}
+	if closer, ok := other.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
 }
 
 // bodyRewindable reports whether req can be re-sent with its full body: it

@@ -31,23 +31,48 @@ const decisionQuestionMaxWidth = 50
 func newDecisionsListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List choice decisions you have asked",
-		Long: `List choice decisions asked by your agent identity.
+		Short: "List Decisions waiting on you, or the Decisions made",
+		Long: `List Decisions.
 
-By default, lists only pending decisions. Pass --decided for answered active
-decisions or --all to include pending, decided, and replaced versions.
+In human mode, lists the Decisions in the current project that are waiting on
+you (the default, --waiting) or the log of Decisions made (--made). Search
+with -q/--search (question, answer, key, agent or conversation name, at least
+2 characters) and narrow with --conversation and --agent, which take a name
+(case-insensitive, # optional) or a key or ID. On --made, also narrow with
+--answered-by, --provenance, --since and --until (answer time).
+
+In agent mode, lists the decisions your agent has asked. By default only
+pending decisions; pass --decided for answered active decisions or --all to
+include pending, decided and replaced versions.
 
 Examples:
   scion decisions list
-  scion decisions list --decided
-  scion decisions list --all
-  scion decisions list --all --json`,
+  scion decisions list -q release
+  scion decisions list --made --conversation release --since 2026-11-01
+  scion decisions list --made --answered-by me --json
+  scion decisions list --decided        # agent mode
+  scion decisions list --all --json     # agent mode`,
 		Args: cobra.NoArgs,
 		RunE: runDecisionsList,
 	}
+	// Agent mode.
 	cmd.Flags().Bool("pending", false, "List pending decisions only (default)")
 	cmd.Flags().Bool("decided", false, "List decided active decisions only")
 	cmd.Flags().Bool("all", false, "List pending, decided, and replaced decisions")
+	markFlagsForMode(cmd, ModeAgent, "pending", "decided", "all")
+	// Human mode.
+	cmd.Flags().Bool("waiting", false, "List Decisions waiting on you (default)")
+	cmd.Flags().Bool("made", false, "List the Decisions made (the answer log)")
+	cmd.Flags().StringP("search", "q", "", "Search question, answer, key, agent and conversation names (2 to 256 characters)")
+	cmd.Flags().String("conversation", "", "Only this conversation: a name such as #release or \"DM with nc-x\", or its key")
+	cmd.Flags().String("agent", "", "Only Decisions asked by this agent: a name or an agent ID")
+	cmd.Flags().String("answered-by", "", "With --made: only answers by this user: me or a user ID")
+	cmd.Flags().String("provenance", "", "With --made: direct, interpreted, confirmed or overridden")
+	cmd.Flags().String("since", "", "With --made: answered on or after this day (YYYY-MM-DD, UTC) or time (RFC3339)")
+	cmd.Flags().String("until", "", "With --made: answered on or before this day (YYYY-MM-DD, UTC) or time (RFC3339)")
+	cmd.Flags().Int("limit", defaultDecisionsListLimit, fmt.Sprintf("Maximum number of prompts or answers to list (1 to %d)", maxDecisionsListLimit))
+	markFlagsForMode(cmd, ModeHuman, "waiting", "made", "search", "conversation", "agent",
+		"answered-by", "provenance", "since", "until", "limit")
 	cmd.Flags().Bool("json", false, "Output in JSON format")
 	return cmd
 }
@@ -80,7 +105,20 @@ func resolveDecisionsListState(cmd *cobra.Command) (string, error) {
 	}
 }
 
+// runDecisionsList lists the caller's project Decisions in human mode and
+// the agent's own decisions in agent mode (design C1).
 func runDecisionsList(cmd *cobra.Command, _ []string) error {
+	mode := resolveMode()
+	if err := checkFlagsForMode(cmd, mode); err != nil {
+		return err
+	}
+	if mode == ModeHuman {
+		return runHumanDecisionsList(cmd)
+	}
+	return runAgentDecisionsList(cmd)
+}
+
+func runAgentDecisionsList(cmd *cobra.Command) error {
 	state, err := resolveDecisionsListState(cmd)
 	if err != nil {
 		return err

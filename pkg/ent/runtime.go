@@ -81,6 +81,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/rolebinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/roledefinition"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimebroker"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimeorphan"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schedule"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schema"
@@ -2139,16 +2140,24 @@ func init() {
 	messageDescDispatchState := messageFields[13].Descriptor()
 	// message.DefaultDispatchState holds the default value on creation for the dispatch_state field.
 	message.DefaultDispatchState = messageDescDispatchState.Default.(string)
+	// messageDescDeliveryID is the schema descriptor for delivery_id field.
+	messageDescDeliveryID := messageFields[16].Descriptor()
+	// message.DeliveryIDValidator is a validator for the "delivery_id" field. It is called by the builders before save.
+	message.DeliveryIDValidator = messageDescDeliveryID.Validators[0].(func(string) error)
+	// messageDescDeliveryOutcome is the schema descriptor for delivery_outcome field.
+	messageDescDeliveryOutcome := messageFields[18].Descriptor()
+	// message.DeliveryOutcomeValidator is a validator for the "delivery_outcome" field. It is called by the builders before save.
+	message.DeliveryOutcomeValidator = messageDescDeliveryOutcome.Validators[0].(func(string) error)
 	// messageDescChannel is the schema descriptor for channel field.
-	messageDescChannel := messageFields[16].Descriptor()
+	messageDescChannel := messageFields[19].Descriptor()
 	// message.ChannelValidator is a validator for the "channel" field. It is called by the builders before save.
 	message.ChannelValidator = messageDescChannel.Validators[0].(func(string) error)
 	// messageDescThreadID is the schema descriptor for thread_id field.
-	messageDescThreadID := messageFields[17].Descriptor()
+	messageDescThreadID := messageFields[20].Descriptor()
 	// message.ThreadIDValidator is a validator for the "thread_id" field. It is called by the builders before save.
 	message.ThreadIDValidator = messageDescThreadID.Validators[0].(func(string) error)
 	// messageDescCreated is the schema descriptor for created field.
-	messageDescCreated := messageFields[23].Descriptor()
+	messageDescCreated := messageFields[26].Descriptor()
 	// message.DefaultCreated holds the default value on creation for the created field.
 	message.DefaultCreated = messageDescCreated.Default.(func() time.Time)
 	// messageDescID is the schema descriptor for id field.
@@ -2607,6 +2616,60 @@ func init() {
 	runtimebrokerDescID := runtimebrokerFields[0].Descriptor()
 	// runtimebroker.DefaultID holds the default value on creation for the id field.
 	runtimebroker.DefaultID = runtimebrokerDescID.Default.(func() uuid.UUID)
+	runtimeorphanFields := schema.RuntimeOrphan{}.Fields()
+	_ = runtimeorphanFields
+	// runtimeorphanDescKind is the schema descriptor for kind field.
+	runtimeorphanDescKind := runtimeorphanFields[1].Descriptor()
+	// runtimeorphan.KindValidator is a validator for the "kind" field. It is called by the builders before save.
+	runtimeorphan.KindValidator = runtimeorphanDescKind.Validators[0].(func(string) error)
+	// runtimeorphanDescBrokerID is the schema descriptor for broker_id field.
+	runtimeorphanDescBrokerID := runtimeorphanFields[2].Descriptor()
+	// runtimeorphan.BrokerIDValidator is a validator for the "broker_id" field. It is called by the builders before save.
+	runtimeorphan.BrokerIDValidator = runtimeorphanDescBrokerID.Validators[0].(func(string) error)
+	// runtimeorphanDescRuntimeTarget is the schema descriptor for runtime_target field.
+	runtimeorphanDescRuntimeTarget := runtimeorphanFields[3].Descriptor()
+	// runtimeorphan.DefaultRuntimeTarget holds the default value on creation for the runtime_target field.
+	runtimeorphan.DefaultRuntimeTarget = runtimeorphanDescRuntimeTarget.Default.(string)
+	// runtimeorphanDescProjectID is the schema descriptor for project_id field.
+	runtimeorphanDescProjectID := runtimeorphanFields[4].Descriptor()
+	// runtimeorphan.DefaultProjectID holds the default value on creation for the project_id field.
+	runtimeorphan.DefaultProjectID = runtimeorphanDescProjectID.Default.(string)
+	// runtimeorphanDescSlug is the schema descriptor for slug field.
+	runtimeorphanDescSlug := runtimeorphanFields[5].Descriptor()
+	// runtimeorphan.DefaultSlug holds the default value on creation for the slug field.
+	runtimeorphan.DefaultSlug = runtimeorphanDescSlug.Default.(string)
+	// runtimeorphanDescAgentID is the schema descriptor for agent_id field.
+	runtimeorphanDescAgentID := runtimeorphanFields[6].Descriptor()
+	// runtimeorphan.DefaultAgentID holds the default value on creation for the agent_id field.
+	runtimeorphan.DefaultAgentID = runtimeorphanDescAgentID.Default.(string)
+	// runtimeorphanDescRunID is the schema descriptor for run_id field.
+	runtimeorphanDescRunID := runtimeorphanFields[7].Descriptor()
+	// runtimeorphan.DefaultRunID holds the default value on creation for the run_id field.
+	runtimeorphan.DefaultRunID = runtimeorphanDescRunID.Default.(string)
+	// runtimeorphanDescReason is the schema descriptor for reason field.
+	runtimeorphanDescReason := runtimeorphanFields[8].Descriptor()
+	// runtimeorphan.ReasonValidator is a validator for the "reason" field. It is called by the builders before save.
+	runtimeorphan.ReasonValidator = runtimeorphanDescReason.Validators[0].(func(string) error)
+	// runtimeorphanDescObservedPhase is the schema descriptor for observed_phase field.
+	runtimeorphanDescObservedPhase := runtimeorphanFields[9].Descriptor()
+	// runtimeorphan.DefaultObservedPhase holds the default value on creation for the observed_phase field.
+	runtimeorphan.DefaultObservedPhase = runtimeorphanDescObservedPhase.Default.(string)
+	// runtimeorphanDescMissedInventories is the schema descriptor for missed_inventories field.
+	runtimeorphanDescMissedInventories := runtimeorphanFields[12].Descriptor()
+	// runtimeorphan.DefaultMissedInventories holds the default value on creation for the missed_inventories field.
+	runtimeorphan.DefaultMissedInventories = runtimeorphanDescMissedInventories.Default.(int)
+	// runtimeorphanDescActionState is the schema descriptor for action_state field.
+	runtimeorphanDescActionState := runtimeorphanFields[13].Descriptor()
+	// runtimeorphan.DefaultActionState holds the default value on creation for the action_state field.
+	runtimeorphan.DefaultActionState = runtimeorphanDescActionState.Default.(string)
+	// runtimeorphanDescActionError is the schema descriptor for action_error field.
+	runtimeorphanDescActionError := runtimeorphanFields[15].Descriptor()
+	// runtimeorphan.DefaultActionError holds the default value on creation for the action_error field.
+	runtimeorphan.DefaultActionError = runtimeorphanDescActionError.Default.(string)
+	// runtimeorphanDescID is the schema descriptor for id field.
+	runtimeorphanDescID := runtimeorphanFields[0].Descriptor()
+	// runtimeorphan.DefaultID holds the default value on creation for the id field.
+	runtimeorphan.DefaultID = runtimeorphanDescID.Default.(func() uuid.UUID)
 	scheduleMixin := schema.Schedule{}.Mixin()
 	scheduleMixinFields1 := scheduleMixin[1].Fields()
 	_ = scheduleMixinFields1

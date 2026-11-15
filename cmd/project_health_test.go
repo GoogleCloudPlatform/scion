@@ -182,3 +182,17 @@ func TestSummarizeAgents_CountsHarnessErrorWithErrors(t *testing.T) {
 	}})
 	assert.Contains(t, buf.String(), "1 agent(s) have a harness error")
 }
+
+// idle is counted on its own and shown in the activity line; it is a
+// healthy state, so it is not lumped into Other.
+func TestProjectHealthSummary_IdleCount(t *testing.T) {
+	var s ProjectHealthSummary
+	for _, a := range []string{"idle", "idle", "blocked", "working"} {
+		s.addActivity(a)
+	}
+	assert.Equal(t, 2, s.Idle)
+	assert.Equal(t, 1, s.Blocked)
+	assert.Equal(t, 0, s.OtherActivity)
+	assert.Contains(t, formatActivitySummary(s), "Idle=2")
+	assert.NotContains(t, formatActivitySummary(ProjectHealthSummary{Working: 1}), "Idle")
+}

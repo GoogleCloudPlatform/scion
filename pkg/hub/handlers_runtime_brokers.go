@@ -312,6 +312,20 @@ func (s *Server) handleRuntimeBrokerRoutes(w http.ResponseWriter, r *http.Reques
 			s.handleAgentLaunchReport(w, r, brokerID, agentID)
 			return
 		}
+		// The broker's deliver-message relay (design v2.22 §2.1), POST
+		// .../agents/{agentId}/deliver, with the same segment rules.
+		if agentID, ok := strings.CutSuffix(agentPath, "/deliver"); ok {
+			if agentID == "" || strings.Contains(agentID, "/") {
+				NotFound(w, "Agent")
+				return
+			}
+			if r.Method != http.MethodPost {
+				MethodNotAllowed(w, http.MethodPost)
+				return
+			}
+			s.handleBrokerAgentDeliver(w, r, brokerID, agentID)
+			return
+		}
 		// The broker-self signed workspace download, POST
 		// .../agents/{agentId}/workspace-download, with the same segment
 		// rules as the launch report.
@@ -1186,6 +1200,9 @@ type brokerAgentHeartbeat struct {
 	// store's run check (AgentStatusUpdate.ReportRunID).
 	RunID        string                    `json:"runId,omitempty"`
 	OtherEntries []brokerAgentRuntimeEntry `json:"otherEntries,omitempty"`
+	// AgentID mirrors hubclient.AgentHeartbeat.AgentID; empty from an
+	// older broker, in which case the entry is matched by slug only.
+	AgentID string `json:"agentId,omitempty"`
 }
 
 // brokerAgentRuntimeEntry mirrors hubclient.AgentRuntimeEntry.
@@ -1485,12 +1502,14 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	runEntries := newHeartbeatRunEntries()
 	for _, project := range heartbeat.Projects {
 		for _, agentHB := range project.Agents {
+			agentHB.AgentID = heartbeatAgentID(agentHB.AgentID)
 			// Look up the agent by name (slug) within the project
 			agent, err := s.store.GetAgentBySlug(ctx, project.ProjectID, agentHB.Slug)
 			if err != nil {
 				// Agent not found in this project - skip silently
 				// This can happen if the agent exists locally but isn't registered on the Hub
 				report.unresolvedSlugs[agentHB.Slug] = true
+				report.orphanCandidates = append(report.orphanCandidates, runtimeOrphanCandidate{projectID: project.ProjectID, hb: agentHB, lookupErr: err})
 				continue
 			}
 
@@ -1499,10 +1518,17 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			if agent.RuntimeBrokerID != id {
 				runEntries.addOffBroker(agent, agentHB)
 				report.unresolvedSlugs[agentHB.Slug] = true
+				report.orphanCandidates = append(report.orphanCandidates, runtimeOrphanCandidate{projectID: project.ProjectID, hb: agentHB, bySlug: agent})
 				slog.Warn("Broker attempted to update agent owned by different broker",
 					"brokerID", id,
 					"agentBrokerID", agent.RuntimeBrokerID,
 					"agent_id", agent.ID)
+				continue
+			}
+			if agentHB.AgentID != "" && agentHB.AgentID != agent.ID {
+				// Another agent's entry under a reused slug: skip it for the
+				// current agent and let the orphan report classify it.
+				report.orphanCandidates = append(report.orphanCandidates, runtimeOrphanCandidate{projectID: project.ProjectID, hb: agentHB, bySlug: agent})
 				continue
 			}
 			report.present[agent.ID] = true
@@ -2040,6 +2066,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 					if agentStatusVisiblyChanged(agent, updated) {
 						s.events.PublishAgentStatus(ctx, updated)
 					}
+					s.logAgentErrorPhaseEntry(agent, updated, errorPhaseSourceHeartbeat)
 					if statusResult.Halted {
 						s.onAgentHalted(ctx, updated, statusResult.HaltedFrom)
 					}
@@ -2061,6 +2088,10 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	// Record runtime observations for start claims, once, outside the
 	// per-agent loop and in a single store transaction.
 	s.recordRecoveryObservations(ctx, id, prevBroker, &heartbeat, report)
+
+	// Record runtime entries no hub agent owns (report only; gated by
+	// experiment, see runtime_orphans.go).
+	s.recordRuntimeOrphans(ctx, id, &heartbeat, report)
 
 	// Stop agents that run although their run intent is stopped (a start
 	// that reached the broker after a stop).

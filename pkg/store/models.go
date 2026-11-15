@@ -69,6 +69,12 @@ type Agent struct {
 	// Stalled detection
 	StalledFromActivity string `json:"stalledFromActivity,omitempty"` // Activity before stalled; empty when not stalled
 
+	// ActivitySince is when Activity last changed value; nil when phase is
+	// not running. The store manages it: UpdateAgent and CreateAgent ignore
+	// the caller's value. It is internal (the idle-suspend grace reads it)
+	// and not part of the API response.
+	ActivitySince *time.Time `json:"-"`
+
 	// Runtime configuration
 	Image           string        `json:"image,omitempty"`
 	Detached        bool          `json:"detached"`
@@ -1435,6 +1441,10 @@ type BrokerCapabilities struct {
 	// agent on non-git projects). The hub refuses to dispatch such agents to
 	// brokers without it, returning 412 (fail closed; design #2703 D3).
 	EmptyPerAgentWorkspace bool `json:"emptyPerAgentWorkspace"`
+	// EphemeralPersistence indicates the broker's runtime can run an agent
+	// with persistence: ephemeral (ptone/scion#7780; Cloud Run only). The
+	// hub refuses an ephemeral create on a broker without it.
+	EphemeralPersistence bool `json:"ephemeralPersistence,omitempty"`
 	// AgentMove indicates the broker can take part in moving an agent
 	// between brokers that share a workspace export (`scion reincarnate
 	// --broker`). The hub refuses a move unless both the source and the
@@ -2534,7 +2544,58 @@ const (
 	// @mention). It is saved to the thread but no agent was given it, so it
 	// must not read as "dispatched". Terminal: nothing retries it.
 	MessageDispatchNoRecipient = "no_recipient"
+	// MessageDispatchDelivering marks a row bound to one deliver-message
+	// flush over the recipient's conduit session (delivery_id), between
+	// the hub's bind and the agent's answer (design
+	// .design/conduit/v2.22-deliver-message.md §2.6).
+	MessageDispatchDelivering = "delivering"
+	// MessageDispatchDelivered: the bound flush was pasted and submitted.
+	MessageDispatchDelivered = "delivered"
+	// MessageDispatchPartial: the bound flush may have been pasted (a
+	// partial answer, an ambiguous call, or a stale delivering row). It is
+	// never re-driven.
+	MessageDispatchPartial = "partial"
 )
+
+// DeliveryOutcomeUnknownPartial is the delivery_outcome stored when a row
+// bound to a conduit delivery ends without a known answer: the stale sweep,
+// or a failure recorded while it was delivering. A same-id /deliver replays
+// it.
+const DeliveryOutcomeUnknownPartial = `{"outcome":"partial","stage":"unknown"}`
+
+// ErrDeliveryContended: BindMessageDelivery kept losing its conditional
+// update to concurrent writers although the rows read bindable. Nothing
+// was bound; the hub answers "not reached", so the broker may retry.
+var ErrDeliveryContended = errors.New("store: message delivery bind contended")
+
+// DeliveryBindResult is how BindMessageDelivery treated a /deliver call.
+type DeliveryBindResult int
+
+const (
+	// DeliveryBound: every row moved to delivering under the id.
+	DeliveryBound DeliveryBindResult = iota
+	// DeliveryInFlight: every row carries the same id and at least one is
+	// still delivering (another may already have failed under it):
+	// another call owns the delivery. The caller must not call the agent,
+	// unbind or finish the rows.
+	DeliveryInFlight
+	// DeliveryReplay: every row is final (delivered, partial or failed)
+	// under the same id; Outcome holds the stored answer and the agent is
+	// not called.
+	DeliveryReplay
+	// DeliveryConflict: some row is bound to another delivery, past
+	// delivering, or not in a bindable state; nothing changed.
+	DeliveryConflict
+)
+
+// DeliveryBind is BindMessageDelivery's result.
+type DeliveryBind struct {
+	Result DeliveryBindResult
+	// Outcome is the replayed outcome JSON, for DeliveryReplay: the rows'
+	// common stored delivery_outcome, or partial/unknown when they differ
+	// or one has none (never one row's outcome for the others).
+	Outcome string
+}
 
 // MessageEnteredPendingLogMsg is the text of the one structured log line
 // written whenever a message row is persisted in dispatch_state "pending"

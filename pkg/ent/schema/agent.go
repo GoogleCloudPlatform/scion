@@ -555,6 +555,17 @@ func (Agent) Fields() []ent.Field {
 		field.String("soft_delete_op_id").
 			Optional().
 			Nillable(),
+
+		// activity_since is when the stored activity last changed value
+		// (an agent status report, a stall mark or un-stall, an offline
+		// sweep). It is store-managed, never written from a caller's
+		// struct, and NULL whenever phase is not running. Unlike
+		// last_activity_event, later hook traffic on an unchanged (sticky)
+		// activity does not refresh it, so the idle-suspend grace is
+		// measured from it.
+		field.Time("activity_since").
+			Optional().
+			Nillable(),
 	}
 }
 

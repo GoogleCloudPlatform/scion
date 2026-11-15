@@ -129,6 +129,12 @@ const K8sNFSHome = "hub.k8s_nfs_home"
 // exactly as before.
 const CloudRunNativeIdentity = "hub.cloudrun_native_identity"
 
+// CloudRunEphemeralAgents gates ephemeral persistence for Cloud Run agents
+// (ptone/scion#7780): the hub refuses an ephemeral create while it is off,
+// and sends its state with each dispatch so the broker refuses an ephemeral
+// start while it is off. Persistent agents are unchanged either way.
+const CloudRunEphemeralAgents = "hub.cloudrun_ephemeral_agents"
+
 // FlatRuntimeBrokers gates flat (single-target) Runtime Brokers: the hub
 // accepts single-target Runtime Broker registrations, pins new agents to
 // that target and refuses mismatched dispatches
@@ -150,11 +156,12 @@ const FlatRuntimeBrokers = "hub.flat_runtime_brokers"
 const FlatCloudRunTarget = "hub.flat_cloudrun_target"
 
 // ConduitDeliver gates message delivery over an agent's Conduit session (the
-// deliver-message control route; ptone/scion#7353). It requires hub.conduit:
-// the hub enforces both. It lands in slices: until the sciontool route, the
-// hub endpoint and the broker caller are in, turning it on changes nothing,
-// and delivery keeps using runtime exec. It is enforced in hub server code;
-// what agents are told at start is fixed at launch, so an agent started
+// deliver-message control route; ptone/scion#7353,
+// .design/conduit/v2.22-deliver-message.md). It requires hub.conduit: the
+// hub enforces both, on its broker-facing /deliver endpoint and when it
+// tells brokers and agents at launch. An agent launched with it registers
+// the route; its broker then sends that agent's deliveries through the hub
+// instead of runtime exec (Cloud Run agents in this phase). An agent started
 // before it was turned on keeps using exec until it restarts.
 const ConduitDeliver = "hub.conduit_deliver"
 
@@ -443,6 +450,15 @@ const ReincarnateHarnessSwitch = "hub.reincarnate_harness_switch"
 // an unset image_tag leaves every image reference unchanged.
 const ImageTagVersionDefault = "hub.image_tag_version_default"
 
+// RuntimeOrphanReconcile gates the runtime orphan report
+// (ptone/scion#7930): the hub classifies the broker heartbeat inventory
+// entries no hub agent owns, records them in runtime_orphans, logs each new
+// one, exports scion.hub.runtime_orphans and serves GET
+// /api/v1/admin/runtime-orphans. Report only: nothing is stopped or
+// deleted. While it is off the hub classifies and writes nothing, and the
+// route answers 404.
+const RuntimeOrphanReconcile = "hub.runtime_orphan_reconcile"
+
 // ProjectSelfLeave gates project self-leave (ptone/scion#7494): POST
 // /api/v1/projects/{id}/leave, with which a user removes their own direct
 // project bindings, and the canLeave and leaveBlockedReason capabilities.
@@ -591,6 +607,17 @@ var compiled = []Experiment{
 		ReviewBy:    "2027-02-04",
 	},
 	{
+		Name:        CloudRunEphemeralAgents,
+		Title:       "Ephemeral Cloud Run agents",
+		Description: "Lets an agent be created with persistence: ephemeral on a Cloud Run Runtime Broker. Its home and workspace live in the instance's memory and start fresh at every start: anything not pushed is lost when it stops. With it off, an ephemeral create is refused with experiment_disabled and the Runtime Broker refuses an ephemeral start; persistent agents are unchanged. On a flat Cloud Run Runtime Broker, hub.flat_cloudrun_target must be on too.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#7780",
+		Owner:       "cloudrun-runtime",
+		ReviewBy:    "2027-02-12",
+	},
+	{
 		Name:        FlatRuntimeBrokers,
 		Title:       "Flat Runtime Brokers",
 		Description: "Lets a Runtime Broker serve exactly one runtime target with a stable identity: the hub accepts single-target Runtime Broker registrations, pins new agents to that target and rejects mismatched dispatches. Existing profile-based Runtime Brokers are unchanged. The web layer only lets the web UI read the flag (presentation only); every hub check is LayerServer. With it on, the web UI shows the Brokers area.",
@@ -662,7 +689,7 @@ var compiled = []Experiment{
 	{
 		Name:        ConduitDeliver,
 		Title:       "Message delivery over Conduit",
-		Description: "Delivers messages to an agent over its Conduit session (the deliver-message control route) instead of through runtime exec, for agents whose session offers it; Cloud Run agents first. Requires hub.conduit. Lands in parts: until all of them are in, it changes nothing and delivery uses runtime exec. Agents started before it is turned on keep using exec until they restart. Text and interrupts only; attachments stay on exec.",
+		Description: "Delivers messages to Cloud Run agents over their Conduit session (the deliver-message control route) instead of through runtime exec, so no IAP exec connector is needed. Requires hub.conduit. Agents started before it is turned on keep using exec until they restart; Docker and Kubernetes agents keep using exec. Text and interrupts only: messages with attachments, oversize text or delivery settings outside the route bounds use exec where the runtime has it. Before an agent's session is up, delivery retries, then uses exec or fails before anything is pasted.",
 		Default:     false,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,
@@ -913,6 +940,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#6625",
 		Owner:       "hub",
 		ReviewBy:    "2027-02-05",
+	},
+	{
+		Name:        RuntimeOrphanReconcile,
+		Title:       "Runtime orphan report",
+		Description: "Reports runtime objects (containers, pods, Cloud Run instances) that no Hub agent owns, from each Runtime Broker heartbeat's complete inventory: a warning log per new orphan, the scion.hub.runtime_orphans gauge and GET /api/v1/admin/runtime-orphans. Report only; nothing is stopped or deleted. While it is off, nothing is classified or recorded and the route answers 404.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#7930",
+		Owner:       "cloudrun-runtime",
+		ReviewBy:    "2027-03-31",
 	},
 }
 

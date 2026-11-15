@@ -72,7 +72,7 @@ const defaultRun = makeRunner();
 // does not count. Shell quoting is not parsed: a separator inside quotes
 // still matches, e.g. echo "x; sciontool status blocked" counts.
 const STICKY_STATUS_RE =
-  /(?:^|[;&|\n({`])\s*(?:(?:then|do|else)\s+)?(?:[^\s;&|()`'"]*\/)?sciontool\s+status\s+(?:ask_user|blocked|limits_exceeded|task_completed)\b/;
+  /(?:^|[;&|\n({`])\s*(?:(?:then|do|else)\s+)?(?:[^\s;&|()`'"]*\/)?sciontool\s+status\s+(?:ask_user|blocked|idle|limits_exceeded|task_completed)\b/;
 
 const TRUST_DECISIONS = { never: 'no', always: 'yes', ask: 'undecided' };
 
@@ -124,7 +124,7 @@ export function createHandlers({ run = defaultRun, env = process.env } = {}) {
   // agent_settled (which fires after agent_end once pi will not continue).
   let lastRunFailed = false;
   let lastMessages;
-  // Set when the agent ran `sciontool status ask_user|blocked|limits_exceeded|task_completed`
+  // Set when the agent ran `sciontool status ask_user|blocked|idle|limits_exceeded|task_completed`
   // since the last human/RPC input (reset in input()).
   let agentSetStatus = false;
 

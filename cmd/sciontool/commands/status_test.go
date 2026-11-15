@@ -70,6 +70,18 @@ func TestStatusCommand(t *testing.T) {
 			wantLogContains: "Agent blocked: Agent is blocked",
 		},
 		{
+			name:            "idle with message",
+			args:            []string{"status", "idle", "No task assigned"},
+			wantActivity:    "idle",
+			wantLogContains: "Agent idle: No task assigned",
+		},
+		{
+			name:            "idle with default message",
+			args:            []string{"status", "idle"},
+			wantActivity:    "idle",
+			wantLogContains: "Agent idle: Agent is idle",
+		},
+		{
 			name:            "limits_exceeded with message",
 			args:            []string{"status", "limits_exceeded", "max_turns of 50 exceeded"},
 			wantActivity:    "limits_exceeded",
@@ -148,5 +160,19 @@ func TestStatusCommandUnknownType(t *testing.T) {
 	output := buf.String()
 	if !bytes.Contains([]byte(output), []byte("unknown status type")) {
 		t.Errorf("expected error message about unknown status type, got: %s", output)
+	}
+}
+
+// TestStatusHelpListsIdle checks that the help lists idle and states the
+// rule that separates it from blocked and task_completed.
+func TestStatusHelpListsIdle(t *testing.T) {
+	for _, want := range []string{
+		"idle Signal that the agent has nothing to do until new work arrives",
+		"is blocked; nothing to do until a new message or task arrives is idle;",
+		"sciontool status idle ",
+	} {
+		if !strings.Contains(strings.Join(strings.Fields(statusCmd.Long), " "), strings.Join(strings.Fields(want), " ")) {
+			t.Errorf("status help does not contain %q", want)
+		}
 	}
 }
