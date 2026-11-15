@@ -1141,3 +1141,113 @@ func TestDrainerRunContinuesBoundedTrimAcrossPasses(t *testing.T) {
 	defer dropMu.Unlock()
 	assert.Equal(t, []int{3, 3, 3, 1}, dropBatches)
 }
+
+func TestPreHandleRenewSkipsReclaimedBatchTail(t *testing.T) {
+	ctx := context.Background()
+	st := newMemQueueStore()
+
+	cur := time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC)
+	var clockMu sync.Mutex
+	nowFn := func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return cur
+	}
+	advance := func(d time.Duration) {
+		clockMu.Lock()
+		cur = cur.Add(d)
+		clockMu.Unlock()
+	}
+
+	q := durablequeue.NewQueue(st, durablequeue.WithQueueClock(nowFn))
+	for _, key := range []string{"batch-1", "batch-2"} {
+		_, err := q.Enqueue(ctx, nil, durablequeue.Item{
+			Kind:     "test.echo",
+			DedupKey: key,
+			Payload:  []byte(`{}`),
+		})
+		require.NoError(t, err)
+	}
+
+	d2ClaimedItem2 := make(chan struct{})
+	releaseD2 := make(chan struct{})
+	var (
+		mu        sync.Mutex
+		d1Handled []string
+		d2Handled []string
+		r2        durablequeue.DrainResult
+		d2Wg      sync.WaitGroup
+	)
+
+	d2, err := durablequeue.NewDrainer(durablequeue.DrainerConfig{
+		Store:          st,
+		Kind:           "test.echo",
+		Owner:          "replica-2",
+		BatchSize:      2,
+		LeaseDuration:  5 * time.Second,
+		HandlerTimeout: 4 * time.Second,
+		Now:            nowFn,
+		Logger:         quietLogger(),
+		Handler: func(_ context.Context, item durablequeue.Item, _ durablequeue.Lease) durablequeue.Result {
+			mu.Lock()
+			d2Handled = append(d2Handled, item.DedupKey)
+			mu.Unlock()
+			close(d2ClaimedItem2)
+			<-releaseD2
+			return durablequeue.Result{Done: true}
+		},
+	})
+	require.NoError(t, err)
+
+	d1, err := durablequeue.NewDrainer(durablequeue.DrainerConfig{
+		Store:          st,
+		Kind:           "test.echo",
+		Owner:          "replica-1",
+		BatchSize:      2,
+		LeaseDuration:  5 * time.Second,
+		HandlerTimeout: 4 * time.Second,
+		Now:            nowFn,
+		Logger:         quietLogger(),
+		Handler: func(hctx context.Context, item durablequeue.Item, lease durablequeue.Lease) durablequeue.Result {
+			mu.Lock()
+			d1Handled = append(d1Handled, item.DedupKey)
+			mu.Unlock()
+			if item.DedupKey == "batch-1" {
+				// Extend batch-1's lease at +4s (to +9s) while batch-2's unrenewed
+				// claim lease remains at +5s, then advance to +6s so batch-2's
+				// lease expires and replica-2 re-claims batch-2 before batch-1 returns.
+				advance(4 * time.Second)
+				held, rerr := lease.Renew(hctx)
+				require.NoError(t, rerr)
+				require.True(t, held)
+				advance(2 * time.Second)
+
+				d2Wg.Add(1)
+				go func() {
+					defer d2Wg.Done()
+					var derr error
+					r2, derr = d2.DrainOnce(ctx)
+					require.NoError(t, derr)
+				}()
+				<-d2ClaimedItem2
+			}
+			return durablequeue.Result{Done: true}
+		},
+	})
+	require.NoError(t, err)
+
+	r1, err := d1.DrainOnce(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 2, r1.Claimed)
+	assert.Equal(t, 1, r1.Done)
+
+	close(releaseD2)
+	d2Wg.Wait()
+	assert.Equal(t, 1, r2.Claimed)
+	assert.Equal(t, 1, r2.Done)
+
+	mu.Lock()
+	assert.Equal(t, []string{"batch-1"}, d1Handled, "d1 must skip invoking Handler on batch-2 once its pre-handle lease renew fails")
+	assert.Equal(t, []string{"batch-2"}, d2Handled)
+	mu.Unlock()
+}
