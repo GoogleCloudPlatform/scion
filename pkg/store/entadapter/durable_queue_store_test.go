@@ -19,7 +19,9 @@ package entadapter
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -634,4 +636,63 @@ func TestDurableQueueStats(t *testing.T) {
 	assert.Zero(t, p2Stats.Leased)
 	require.NotNil(t, p2Stats.Oldest)
 	assert.True(t, p2Stats.Oldest.Equal(now))
+}
+
+func TestDurableQueueConcurrentClaimDisjointSets(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	now := time.Date(2026, 11, 15, 6, 0, 0, 0, time.UTC)
+
+	for round := 0; round < 5; round++ {
+		kind := fmt.Sprintf("claim.round_%d", round)
+		expected := make(map[int64]bool, 30)
+		for i := 0; i < 30; i++ {
+			seq, err := cs.EnqueueDurableItem(ctx, nil, store.DurableQueueRow{
+				Kind:      kind,
+				DedupKey:  fmt.Sprintf("item-%02d", i),
+				Payload:   []byte(`{}`),
+				CreatedAt: now,
+				NotBefore: now,
+			})
+			require.NoError(t, err)
+			expected[seq] = true
+		}
+
+		start := make(chan struct{})
+		var (
+			c1, c2     []store.DurableQueueRow
+			err1, err2 error
+			wg         sync.WaitGroup
+		)
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			c1, err1 = cs.ClaimDurableItems(ctx, kind, "claimer-1", now, now.Add(time.Minute), 20)
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			c2, err2 = cs.ClaimDurableItems(ctx, kind, "claimer-2", now, now.Add(time.Minute), 20)
+		}()
+		close(start)
+		wg.Wait()
+
+		require.NoError(t, err1)
+		require.NoError(t, err2)
+		assert.GreaterOrEqual(t, len(c1), 10, "round %d: claimer-1 should claim at least 10 of 30 rows", round)
+		assert.GreaterOrEqual(t, len(c2), 10, "round %d: claimer-2 should claim at least 10 of 30 rows", round)
+		assert.Equal(t, 30, len(c1)+len(c2), "round %d: disjoint claims must partition all 30 rows", round)
+
+		seen := make(map[int64]string, 30)
+		for _, r := range c1 {
+			assert.NotContains(t, seen, r.Seq, "round %d: duplicate seq %d in claimer-1", round, r.Seq)
+			seen[r.Seq] = "claimer-1"
+		}
+		for _, r := range c2 {
+			assert.NotContains(t, seen, r.Seq, "round %d: seq %d claimed by both claimers", round, r.Seq)
+			seen[r.Seq] = "claimer-2"
+		}
+		assert.Len(t, seen, len(expected))
+	}
 }

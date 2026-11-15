@@ -470,66 +470,23 @@ func TestEchoConsumer_TwoConcurrentDrainers(t *testing.T) {
 	cs := newEchoDBStore(t)
 	q := durablequeue.NewQueue(cs)
 
-	const totalItems = 60
+	const (
+		totalItems     = 60
+		initialBacklog = 40
+	)
 	var (
-		mu       sync.Mutex
-		handled  = make(map[string]string, totalItems)
-		retried1 = make(map[string]bool)
+		mu               sync.Mutex
+		invocations      = make(map[string]int, totalItems)
+		successes        = make(map[string]int, totalItems)
+		seqByID          = make(map[string]int64, totalItems)
+		bodies           = make(map[string]string, totalItems)
+		handledByDrainer = make(map[string]int, 2)
+		retriedOnce      = make(map[string]bool)
+		totalDone        int
 	)
 
-	makeHandler := func() durablequeue.Handler {
-		return func(_ context.Context, item durablequeue.Item, _ durablequeue.Lease) durablequeue.Result {
-			var msg echoMessage
-			if err := json.Unmarshal(item.Payload, &msg); err != nil {
-				return durablequeue.Result{Permanent: true, Err: err}
-			}
-			mu.Lock()
-			// Inject one fast retry on every 7th item to exercise concurrent re-claim.
-			if item.Seq%7 == 0 && !retried1[msg.ID] {
-				retried1[msg.ID] = true
-				mu.Unlock()
-				return durablequeue.Result{
-					RetryAt: time.Now().UTC().Add(5 * time.Millisecond),
-					Err:     errors.New("transient hiccup"),
-				}
-			}
-			handled[msg.ID] = msg.Body
-			mu.Unlock()
-			return durablequeue.Result{Done: true}
-		}
-	}
-
-	d1, err := durablequeue.NewDrainer(durablequeue.DrainerConfig{
-		Store:        cs,
-		Queue:        q,
-		Kind:         "test.echo",
-		Owner:        "replica-1",
-		PollInterval: 15 * time.Millisecond,
-		BatchSize:    7,
-		Logger:       quietLogger(),
-		Handler:      makeHandler(),
-	})
-	require.NoError(t, err)
-
-	d2, err := durablequeue.NewDrainer(durablequeue.DrainerConfig{
-		Store:        cs,
-		Queue:        q,
-		Kind:         "test.echo",
-		Owner:        "replica-2",
-		PollInterval: 15 * time.Millisecond,
-		BatchSize:    7,
-		Logger:       quietLogger(),
-		Handler:      makeHandler(),
-	})
-	require.NoError(t, err)
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() { defer wg.Done(); d1.Run(ctx) }()
-	go func() { defer wg.Done(); d2.Run(ctx) }()
-
-	// Enqueue 60 items concurrently with the two running drainers, nudging Wake periodically.
-	for i := 0; i < totalItems; i++ {
+	enqueueOne := func(i int) {
+		t.Helper()
 		id := fmt.Sprintf("msg-%03d", i)
 		payload, merr := json.Marshal(echoMessage{ID: id, Body: "echo:" + id})
 		require.NoError(t, merr)
@@ -542,7 +499,94 @@ func TestEchoConsumer_TwoConcurrentDrainers(t *testing.T) {
 			})
 			return eerr
 		}))
-		if i%10 == 0 {
+	}
+
+	// Seed an initial backlog before starting the two drainers so both replicas
+	// contend immediately on claim batches, then enqueue the remainder live.
+	for i := 0; i < initialBacklog; i++ {
+		enqueueOne(i)
+	}
+
+	makeHandler := func(replica string) durablequeue.Handler {
+		return func(_ context.Context, item durablequeue.Item, _ durablequeue.Lease) durablequeue.Result {
+			var msg echoMessage
+			if err := json.Unmarshal(item.Payload, &msg); err != nil {
+				return durablequeue.Result{Permanent: true, Err: err}
+			}
+			mu.Lock()
+			invocations[msg.ID]++
+			if prev, ok := seqByID[msg.ID]; ok {
+				assert.Equal(t, prev, item.Seq)
+			} else {
+				seqByID[msg.ID] = item.Seq
+			}
+			// Inject one fast retry on every 7th item to exercise concurrent re-claim.
+			if item.Seq%7 == 0 && !retriedOnce[msg.ID] {
+				retriedOnce[msg.ID] = true
+				mu.Unlock()
+				return durablequeue.Result{
+					RetryAt: time.Now().UTC().Add(5 * time.Millisecond),
+					Err:     errors.New("transient hiccup"),
+				}
+			}
+			mu.Unlock()
+
+			// Hold the lease briefly while doing simulated work so the sibling
+			// drainer concurrently polls/claims while this batch is in flight.
+			time.Sleep(2 * time.Millisecond)
+
+			mu.Lock()
+			successes[msg.ID]++
+			bodies[msg.ID] = msg.Body
+			handledByDrainer[replica]++
+			totalDone++
+			mu.Unlock()
+			return durablequeue.Result{Done: true}
+		}
+	}
+
+	d1, err := durablequeue.NewDrainer(durablequeue.DrainerConfig{
+		Store:        cs,
+		Queue:        q,
+		Kind:         "test.echo",
+		Owner:        "replica-1",
+		PollInterval: 10 * time.Millisecond,
+		BatchSize:    5,
+		Logger:       quietLogger(),
+		Handler:      makeHandler("replica-1"),
+	})
+	require.NoError(t, err)
+
+	d2, err := durablequeue.NewDrainer(durablequeue.DrainerConfig{
+		Store:        cs,
+		Queue:        q,
+		Kind:         "test.echo",
+		Owner:        "replica-2",
+		PollInterval: 10 * time.Millisecond,
+		BatchSize:    5,
+		Logger:       quietLogger(),
+		Handler:      makeHandler("replica-2"),
+	})
+	require.NoError(t, err)
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		d1.Run(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		d2.Run(ctx)
+	}()
+	close(start)
+
+	for i := initialBacklog; i < totalItems; i++ {
+		enqueueOne(i)
+		if i%5 == 0 {
 			q.Wake("test.echo")
 		}
 	}
@@ -550,9 +594,9 @@ func TestEchoConsumer_TwoConcurrentDrainers(t *testing.T) {
 
 	require.Eventually(t, func() bool {
 		mu.Lock()
-		n := len(handled)
+		done := totalDone
 		mu.Unlock()
-		if n < totalItems {
+		if done < totalItems {
 			return false
 		}
 		st, serr := cs.DurableQueueStats(ctx, "test.echo", "")
@@ -564,9 +608,20 @@ func TestEchoConsumer_TwoConcurrentDrainers(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	require.Len(t, handled, totalItems)
+	assert.GreaterOrEqual(t, handledByDrainer["replica-1"], 1, "replica-1 must handle work")
+	assert.GreaterOrEqual(t, handledByDrainer["replica-2"], 1, "replica-2 must handle work")
+	assert.Equal(t, totalItems, handledByDrainer["replica-1"]+handledByDrainer["replica-2"],
+		"no item may be completed more than once across drainers")
+
+	require.Len(t, successes, totalItems)
 	for i := 0; i < totalItems; i++ {
 		id := fmt.Sprintf("msg-%03d", i)
-		assert.Equal(t, "echo:"+id, handled[id])
+		assert.Equal(t, 1, successes[id], "item %s must succeed exactly once", id)
+		expectedCalls := 1
+		if seqByID[id]%7 == 0 {
+			expectedCalls = 2
+		}
+		assert.Equal(t, expectedCalls, invocations[id], "item %s (seq %d) invocation count", id, seqByID[id])
+		assert.Equal(t, "echo:"+id, bodies[id])
 	}
 }
