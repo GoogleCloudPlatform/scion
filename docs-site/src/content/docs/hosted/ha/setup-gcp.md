@@ -277,11 +277,15 @@ account's ambient credentials. This works because the Hub SA has `roles/containe
 The Hub uses a 32-byte hex session and JWT signing key shared across replicas. Generate it directly into Secret Manager so the plaintext value is never printed to your terminal, written to disk, or stored in the Cloud Run service spec:
 
 ```bash
-printf '%s' "$(openssl rand -hex 32)" | gcloud secrets create scion-hub-session-secret \
+openssl rand -hex 32 | tr -d '\n' | gcloud secrets create scion-hub-session-secret \
   --data-file=- \
   --replication-policy=automatic \
   --project=$PROJECT_ID
 ```
+
+:::note[Existing deployments]
+If you already deployed `scion-hub` with `SCION_SERVER_SESSION_SECRET` (or `SESSION_SECRET`) set directly in `--set-env-vars`, seed `scion-hub-session-secret` with the current value from the running revision's environment instead of generating a new random key, then redeploy in [Section 3d](#3d-deploy-the-hub-to-cloud-run). Generating a new value rotates the session and legacy JWT signing key, signing every user out and invalidating existing Hub-signed tokens.
+:::
 
 ### Infrastructure Verification Checklist
 
@@ -1003,7 +1007,7 @@ rm /tmp/settings-final.yaml
 
 ### 3d. Deploy the Hub to Cloud Run
 
-We can now deploy the Hub to Cloud Run cleanly. Notice that we mount the kubeconfig and `settings.yaml` files as secrets under `/etc/scion/` and `/home/scion/.scion/` and inject `SCION_SERVER_SESSION_SECRET` from Secret Manager, keeping secrets out of the command line and revision environment literals.
+We can now deploy the Hub to Cloud Run cleanly. Notice that we mount the kubeconfig and `settings.yaml` files as secrets under `/etc/scion/` and `/home/scion/.scion/` and inject `SCION_SERVER_SESSION_SECRET` from Secret Manager, keeping secrets out of the command line and revision environment literals (if migrating an existing service from a literal env var, seed `scion-hub-session-secret` with the current value first — see [Section 1f](#1f-generate-session-secret)).
 
 ```bash
 gcloud run deploy scion-hub \
