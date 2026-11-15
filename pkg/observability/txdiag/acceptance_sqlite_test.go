@@ -274,6 +274,80 @@ func TestAcceptanceDeadlineWaiter(t *testing.T) {
 	if l.Str("outcome") != txdiag.OutcomeDeadline || l.Int("wait_ms") < 2000 || l.Str("op") != "txdiag_test.deadlineWaiter" {
 		t.Errorf("lock_wait line: %+v", l.Attrs)
 	}
+	if !strings.Contains(l.Str("holder_open_site"), "txdiag_test.TestAcceptanceDeadlineWaiter") {
+		t.Errorf("holder_open_site = %q, want it to name TestAcceptanceDeadlineWaiter", l.Str("holder_open_site"))
+	}
+}
+
+// sharedStoreOp simulates a store query/operation invoked by multiple callers.
+//
+//go:noinline
+func sharedStoreOp(ctx context.Context, c *ent.Client) (*ent.Tx, error) {
+	tx, err := c.Tx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := newSetting(ctx, tx.Client(), "shared"); err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	return tx, nil
+}
+
+// callerHoldingOneSecond invokes sharedStoreOp on behalf of a specific caller.
+//
+//go:noinline
+func callerHoldingOneSecond(ctx context.Context, c *ent.Client) (*ent.Tx, error) {
+	return sharedStoreOp(ctx, c)
+}
+
+// TestAcceptanceOneSecondHolderLogsCallerOnLockWait verifies ptone/scion#7593:
+// when a shared operation holds the lock for ~1 s (at or above the 1 s
+// lock-wait threshold, below the 2 s long-hold threshold so no db_tx_long_hold
+// line fires), the db_lock_wait line itself names both the holding operation
+// and the caller that invoked it.
+func TestAcceptanceOneSecondHolderLogsCallerOnLockWait(t *testing.T) {
+	e := openEnv(t, nil)
+	ctx := context.Background()
+	base := e.db.Stats().WaitCount
+
+	holder, err := callerHoldingOneSecond(ctx, e.client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := make(chan error, 1)
+	go func() { res <- waitWriterTx(ctx, e.client) }()
+	e.waitForWaiters(t, base+1)
+
+	// 1.1 s crosses LockWaitWarnThreshold (1 s) without crossing
+	// HoldWarnThreshold (2 s).
+	e.clk.Advance(1100 * time.Millisecond)
+	if err := holder.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-res; err != nil {
+		t.Fatal(err)
+	}
+	e.flush(t)
+
+	if holds := e.h.Lines(txdiag.MsgHold); len(holds) != 0 {
+		t.Fatalf("expected 0 hold lines below 2s threshold, got %d: %+v", len(holds), holds)
+	}
+	waits := e.h.Lines(txdiag.MsgLockWait)
+	if len(waits) != 1 {
+		t.Fatalf("got %d lock_wait lines, want 1: %+v", len(waits), waits)
+	}
+	l := waits[0]
+	if got := l.Str("top_holder_op"); got != "txdiag_test.sharedStoreOp" {
+		t.Errorf("top_holder_op = %q, want txdiag_test.sharedStoreOp", got)
+	}
+	site := l.Str("top_holder_site")
+	if !strings.HasPrefix(site, "txdiag_test.sharedStoreOp acceptance_sqlite_test.go:") {
+		t.Errorf("top_holder_site = %q, want prefix txdiag_test.sharedStoreOp", site)
+	}
+	if !strings.Contains(site, "<- txdiag_test.callerHoldingOneSecond") {
+		t.Errorf("top_holder_site = %q, want caller txdiag_test.callerHoldingOneSecond", site)
+	}
 }
 
 // updateViaHooks makes a non-transactional ent mutation, which runs through

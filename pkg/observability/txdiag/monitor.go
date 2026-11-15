@@ -517,8 +517,9 @@ func overlap(s, e, from, to time.Time) time.Duration {
 
 // attrs describes who held the connection during a wait over [from, to]:
 // holders (how many checkouts overlapped it; holderRingSize or more means
-// the ring was exhausted), the one with the most time in the window, and,
-// when the waiter gave up, the checkout still open at that moment.
+// the ring was exhausted), the one with the most time in the window (its op,
+// caller site and overlap), and, when the waiter gave up, the checkout still
+// open at that moment.
 func (h *holderRing) attrs(m *Monitor, from, to time.Time, gaveUp bool) []slog.Attr {
 	h.mu.Lock()
 	var (
@@ -548,11 +549,13 @@ func (h *holderRing) attrs(m *Monitor, from, to time.Time, gaveUp bool) []slog.A
 	if n > 0 {
 		attrs = append(attrs,
 			slog.String("top_holder_op", m.op(top.pcs[:top.npcs])),
+			slog.String("top_holder_site", m.sites.site(top.pcs[:top.npcs])),
 			slog.Int64("top_holder_ms", topTime.Milliseconds()))
 	}
 	if gaveUp && hasOpen && open.start.Before(to) {
 		attrs = append(attrs,
 			slog.String("holder_open_op", m.op(open.pcs[:open.npcs])),
+			slog.String("holder_open_site", m.sites.site(open.pcs[:open.npcs])),
 			slog.Int64("holder_open_ms", to.Sub(open.start).Milliseconds()))
 	}
 	return attrs
