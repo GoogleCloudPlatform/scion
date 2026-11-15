@@ -19,10 +19,13 @@ import (
 	"math"
 	"regexp"
 	"strings"
+	"sync"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
 	"cel.dev/cel-go/cel"
+	"cel.dev/cel-go/common/cost"
 	"cel.dev/cel-go/common/functions"
 	"cel.dev/cel-go/common/operators"
 	"cel.dev/cel-go/common/overloads"
@@ -37,6 +40,9 @@ const (
 	maxPinnedFormatPrec  = 100
 	rabinKarpPatMinBytes = 64
 	rabinKarpWorkCutoff  = 4 << 20 // 4 MiB-comparisons before switching to linear KMP
+	maxCachedTimezones   = 256
+	maxCachedTzNameBytes = 128
+	tzLookupErrorCost    = 250
 )
 
 func abortOutputLimit() {
@@ -119,7 +125,12 @@ func outputBoundsDecorator(limits Limits, rawFormat cel.Program) interpreter.Int
 			}
 		case "format":
 			if arity == 2 && rawFormat != nil {
-				impl = boundedFormat(maxBytes, maxElems, rawFormat)
+				return &boundedFormatCall{
+					InterpretableCall: call,
+					maxBytes:          maxBytes,
+					maxElems:          maxElems,
+					rawFormat:         rawFormat,
+				}, nil
 			}
 		case "strings.quote":
 			if arity == 1 {
@@ -224,23 +235,77 @@ func outputBoundsDecorator(limits Limits, rawFormat cel.Program) interpreter.Int
 			}
 		case operators.Equals:
 			if arity == 2 {
-				impl = boundedEqNe(true, maxBytes, maxElems)
+				return &boundedEqNeCall{
+					InterpretableCall: call,
+					wantEq:            true,
+					maxBytes:          maxBytes,
+					maxElems:          maxElems,
+				}, nil
 			}
 		case operators.NotEquals:
 			if arity == 2 {
-				impl = boundedEqNe(false, maxBytes, maxElems)
+				return &boundedEqNeCall{
+					InterpretableCall: call,
+					wantEq:            false,
+					maxBytes:          maxBytes,
+					maxElems:          maxElems,
+				}, nil
 			}
 		case operators.In, operators.OldIn, overloads.DeprecatedIn:
 			if arity == 2 {
-				impl = boundedIn(maxBytes, maxElems)
+				return &boundedInCall{
+					InterpretableCall: call,
+					maxBytes:          maxBytes,
+					maxElems:          maxElems,
+				}, nil
 			}
 		}
 
 		if impl == nil {
 			return node, nil
 		}
-		return interpreter.NewCall(call.ID(), call.Function(), call.OverloadID(), call.Args(), impl), nil
+		return &interruptibleCall{
+			InterpretableCall: interpreter.NewCall(call.ID(), call.Function(), call.OverloadID(), call.Args(), impl),
+		}, nil
 	}
+}
+
+const prechargedWalkOverloadID = "_celengine_precharged_walk"
+
+type prechargedCall struct{}
+
+func (prechargedCall) Function() string   { return prechargedWalkOverloadID }
+func (prechargedCall) OverloadID() string { return prechargedWalkOverloadID }
+
+func checkFrameInterrupt(frame *interpreter.ExecutionFrame) {
+	if frame != nil && frame.CheckInterrupt() {
+		panic(interpreter.EvalCancelledError{
+			Cause:   interpreter.ContextCancelled,
+			Message: "operation cancelled: context interrupted",
+		})
+	}
+}
+
+func chargePrecomputedCost(frame *interpreter.ExecutionFrame, id int64, callCost uint64) {
+	if frame == nil {
+		return
+	}
+	if costs := frame.CostTracker(); costs != nil {
+		costs.EvalZeroArity(frame, id, prechargedCall{}, types.Uint(callCost))
+	}
+}
+
+type interruptibleCall struct {
+	interpreter.InterpretableCall
+}
+
+func (c *interruptibleCall) Eval(ctx interpreter.Activation) ref.Val {
+	return interpreter.EvalActivation(ctx, c.Exec)
+}
+
+func (c *interruptibleCall) Exec(frame *interpreter.ExecutionFrame) ref.Val {
+	checkFrameInterrupt(frame)
+	return c.InterpretableCall.Exec(frame)
 }
 
 func boundedReplace(maxBytes int) functions.FunctionOp {
@@ -616,38 +681,76 @@ func boundedQuote(maxBytes int) functions.FunctionOp {
 	}
 }
 
-func boundedFormat(maxBytes, maxElems int, rawFormat cel.Program) functions.FunctionOp {
-	return func(args ...ref.Val) ref.Val {
-		fmtVal, ok := args[0].(types.String)
-		if !ok {
-			return types.MaybeNoSuchOverloadErr(args[0])
-		}
-		argList, ok := args[1].(traits.Lister)
-		if !ok {
-			return types.MaybeNoSuchOverloadErr(args[1])
-		}
-		fmtStr := string(fmtVal)
-		if len(fmtStr) > maxBytes {
-			abortOutputLimit()
-		}
+type boundedFormatCall struct {
+	interpreter.InterpretableCall
+	maxBytes  int
+	maxElems  int
+	rawFormat cel.Program
+}
 
-		checkFormatOutputBound(fmtStr, argList, maxBytes, maxElems)
+func (c *boundedFormatCall) Eval(ctx interpreter.Activation) ref.Val {
+	return interpreter.EvalActivation(ctx, c.Exec)
+}
 
-		out, _, err := rawFormat.Eval(map[string]any{
-			"_fmt":  fmtVal,
-			"_args": argList,
-		})
-		if err != nil {
-			if types.IsError(out) {
-				return out
-			}
-			return types.WrapErr(err)
+func (c *boundedFormatCall) Exec(frame *interpreter.ExecutionFrame) ref.Val {
+	checkFrameInterrupt(frame)
+	args := c.Args()
+	lVal := args[0].Exec(frame)
+	switch l := lVal.(type) {
+	case *types.Err:
+		return lVal
+	case *types.Unknown:
+		rVal := args[1].Exec(frame)
+		if rUnk, ok := rVal.(*types.Unknown); ok {
+			merged := types.MergeUnknowns(l, rUnk)
+			chargePrecomputedCost(frame, c.ID(), 1)
+			return merged
 		}
-		if s, ok := out.(types.String); ok && len(s) > maxBytes {
-			abortOutputLimit()
-		}
-		return out
+		chargePrecomputedCost(frame, c.ID(), 1)
+		return lVal
 	}
+	rVal := args[1].Exec(frame)
+	switch rVal.(type) {
+	case *types.Err:
+		return rVal
+	case *types.Unknown:
+		chargePrecomputedCost(frame, c.ID(), 1)
+		return rVal
+	}
+
+	fmtVal, ok := lVal.(types.String)
+	if !ok {
+		chargePrecomputedCost(frame, c.ID(), 1)
+		return types.LabelErrNode(c.ID(), types.MaybeNoSuchOverloadErr(lVal))
+	}
+	argList, ok := rVal.(traits.Lister)
+	if !ok {
+		chargePrecomputedCost(frame, c.ID(), 1)
+		return types.LabelErrNode(c.ID(), types.MaybeNoSuchOverloadErr(rVal))
+	}
+	fmtStr := string(fmtVal)
+	if len(fmtStr) > c.maxBytes {
+		abortOutputLimit()
+	}
+
+	estOutBytes, walkedElems := checkFormatOutputBound(fmtStr, argList, c.maxBytes, c.maxElems)
+	callCost := cost.SafeAdd(1, cost.SafeAdd(byteScanCost(len(fmtStr)), cost.SafeAdd(byteScanCost(estOutBytes), walkedElems)))
+	chargePrecomputedCost(frame, c.ID(), callCost)
+
+	out, _, err := c.rawFormat.Eval(map[string]any{
+		"_fmt":  fmtVal,
+		"_args": argList,
+	})
+	if err != nil {
+		if types.IsError(out) {
+			return types.LabelErrNode(c.ID(), out)
+		}
+		return types.LabelErrNode(c.ID(), types.WrapErr(err))
+	}
+	if s, ok := out.(types.String); ok && len(s) > c.maxBytes {
+		abortOutputLimit()
+	}
+	return types.LabelErrNode(c.ID(), out)
 }
 
 type formatBudget struct {
@@ -669,19 +772,24 @@ func (b *formatBudget) chargeElems(n int64) {
 	}
 }
 
-func checkFormatOutputBound(fmtStr string, argList traits.Lister, maxBytes, maxElems int) {
+func checkFormatOutputBound(fmtStr string, argList traits.Lister, maxBytes, maxElems int) (estOutBytes int, walkedElems uint64) {
 	szVal, ok := argList.Size().(types.Int)
 	if !ok {
-		return
+		return 0, 0
 	}
 	argCount := int64(szVal)
 	if argCount < 0 {
 		abortOutputLimit()
 	}
 
+	initBytes := int64(maxBytes)
+	initElems := int64(maxElems)
 	b := formatBudget{
-		remBytes: int64(maxBytes),
-		remElems: int64(maxElems),
+		remBytes: initBytes,
+		remElems: initElems,
+	}
+	finish := func() (int, uint64) {
+		return int(initBytes - b.remBytes), uint64(initElems - b.remElems)
 	}
 
 	var argIdx int64
@@ -698,7 +806,7 @@ func checkFormatOutputBound(fmtStr string, argList traits.Lister, maxBytes, maxE
 		}
 		if i+1 >= len(fmtStr) || argIdx >= argCount {
 			// Malformed format string or missing arg; let rawFormat produce the exact CEL error.
-			return
+			return finish()
 		}
 		j := i + 1
 		prec := 6
@@ -713,7 +821,7 @@ func checkFormatOutputBound(fmtStr string, argList traits.Lister, maxBytes, maxE
 				j++
 			}
 			if j >= len(fmtStr) || j == startDigits || precVal > maxPinnedFormatPrec {
-				return
+				return finish()
 			}
 			prec = precVal
 		}
@@ -746,9 +854,10 @@ func checkFormatOutputBound(fmtStr string, argList traits.Lister, maxBytes, maxE
 		case 'o':
 			b.chargeBytes(23)
 		default:
-			return
+			return finish()
 		}
 	}
+	return finish()
 }
 
 func upperBoundDecimalBytes(arg ref.Val) int64 {
@@ -881,13 +990,14 @@ func boundedIndexOf(maxBytes int) functions.FunctionOp {
 			return types.NewErr("index out of range: %d", offset)
 		}
 
-		runes := []rune(str)
 		if sub == "" {
-			if offset > int64(len(runes)) {
-				return types.Int(len(runes))
+			runeLen := int64(utf8.RuneCountInString(str))
+			if offset > runeLen {
+				return types.Int(runeLen)
 			}
 			return types.Int(offset)
 		}
+		runes := []rune(str)
 		if offset >= int64(len(runes)) {
 			return types.Int(-1)
 		}
@@ -933,13 +1043,14 @@ func boundedLastIndexOf(maxBytes int) functions.FunctionOp {
 			}
 		}
 
-		runes := []rune(str)
 		if sub == "" {
-			if !hasOffset || offset > int64(len(runes)) {
-				return types.Int(len(runes))
+			runeLen := int64(utf8.RuneCountInString(str))
+			if !hasOffset || offset > runeLen {
+				return types.Int(runeLen)
 			}
 			return types.Int(offset)
 		}
+		runes := []rune(str)
 		if len(runes) == 0 {
 			return types.Int(-1)
 		}
@@ -1030,14 +1141,20 @@ func boundedCharAt(maxBytes int) functions.FunctionOp {
 			abortOutputLimit()
 		}
 		ind := int64(indVal)
-		runes := []rune(str)
-		if ind < 0 || ind > int64(len(runes)) {
+		if ind < 0 {
 			return types.NewErr("index out of range: %d", ind)
 		}
-		if ind == int64(len(runes)) {
+		var pos int64
+		for _, r := range str {
+			if pos == ind {
+				return types.String(r)
+			}
+			pos++
+		}
+		if ind == pos {
 			return types.String("")
 		}
-		return types.String(runes[ind])
+		return types.NewErr("index out of range: %d", ind)
 	}
 }
 
@@ -1240,43 +1357,138 @@ func checkContainerWalkBound(v ref.Val, b *formatBudget, depth int) {
 	}
 }
 
-func boundedEqNe(wantEq bool, maxBytes, maxElems int) functions.FunctionOp {
-	return func(args ...ref.Val) ref.Val {
-		lhs, rhs := args[0], args[1]
-		if isContainerVal(lhs) || isContainerVal(rhs) {
-			b := formatBudget{
-				remBytes: int64(maxBytes) * 2,
-				remElems: int64(maxElems) * 2,
-			}
-			checkContainerWalkBound(lhs, &b, 0)
-			checkContainerWalkBound(rhs, &b, 0)
-		}
-		eq := types.Equal(lhs, rhs)
-		if wantEq {
-			return eq
-		}
-		return types.Bool(eq != types.True)
-	}
+type boundedEqNeCall struct {
+	interpreter.InterpretableCall
+	wantEq   bool
+	maxBytes int
+	maxElems int
 }
 
-func boundedIn(maxBytes, maxElems int) functions.FunctionOp {
-	return func(args ...ref.Val) ref.Val {
-		lhs, rhs := args[0], args[1]
-		if !rhs.Type().HasTrait(traits.ContainerType) {
-			return types.ValOrErr(rhs, "no such overload")
-		}
-		// Map key lookup is O(1) for primitive keys; list membership or nested container
-		// comparison walks the container.
-		if _, isList := rhs.(traits.Lister); isList || isContainerVal(lhs) {
-			b := formatBudget{
-				remBytes: int64(maxBytes) * 2,
-				remElems: int64(maxElems) * 2,
-			}
-			checkContainerWalkBound(lhs, &b, 0)
-			checkContainerWalkBound(rhs, &b, 0)
-		}
-		return rhs.(traits.Container).Contains(lhs)
+func (c *boundedEqNeCall) Eval(ctx interpreter.Activation) ref.Val {
+	return interpreter.EvalActivation(ctx, c.Exec)
+}
+
+func (c *boundedEqNeCall) Exec(frame *interpreter.ExecutionFrame) ref.Val {
+	checkFrameInterrupt(frame)
+	args := c.Args()
+	lVal := args[0].Exec(frame)
+	if types.IsError(lVal) {
+		chargePrecomputedCost(frame, c.ID(), 1)
+		return lVal
 	}
+	rVal := args[1].Exec(frame)
+	if types.IsError(rVal) {
+		chargePrecomputedCost(frame, c.ID(), 1)
+		return rVal
+	}
+	if lUnk, okL := lVal.(*types.Unknown); okL {
+		if rUnk, okR := rVal.(*types.Unknown); okR {
+			merged := types.MergeUnknowns(lUnk, rUnk)
+			chargePrecomputedCost(frame, c.ID(), 1)
+			return merged
+		}
+		chargePrecomputedCost(frame, c.ID(), 1)
+		return lVal
+	}
+	if types.IsUnknown(rVal) {
+		chargePrecomputedCost(frame, c.ID(), 1)
+		return rVal
+	}
+
+	callCost := uint64(1)
+	if isContainerVal(lVal) || isContainerVal(rVal) {
+		initBytes := int64(c.maxBytes) * 2
+		initElems := int64(c.maxElems) * 2
+		b := formatBudget{
+			remBytes: initBytes,
+			remElems: initElems,
+		}
+		checkContainerWalkBound(lVal, &b, 0)
+		checkContainerWalkBound(rVal, &b, 0)
+		walkedElems := uint64(initElems - b.remElems)
+		walkedBytes := int(initBytes - b.remBytes)
+		callCost = cost.SafeAdd(1, cost.SafeAdd(walkedElems, byteScanCost(walkedBytes)))
+	} else if lStr, okL := lVal.(types.String); okL {
+		if rStr, okR := rVal.(types.String); okR {
+			callCost = atLeastOneCost(byteScanCost(min(len(lStr), len(rStr))))
+		}
+	} else if lBytes, okL := lVal.(types.Bytes); okL {
+		if rBytes, okR := rVal.(types.Bytes); okR {
+			callCost = atLeastOneCost(byteScanCost(min(len(lBytes), len(rBytes))))
+		}
+	}
+
+	// Charge walked elements + bytes before types.Equal so crossing CostLimit
+	// aborts pre-comparison without walking the containers a second time.
+	chargePrecomputedCost(frame, c.ID(), callCost)
+
+	eq := types.Equal(lVal, rVal)
+	if c.wantEq {
+		return eq
+	}
+	return types.Bool(eq != types.True)
+}
+
+type boundedInCall struct {
+	interpreter.InterpretableCall
+	maxBytes int
+	maxElems int
+}
+
+func (c *boundedInCall) Eval(ctx interpreter.Activation) ref.Val {
+	return interpreter.EvalActivation(ctx, c.Exec)
+}
+
+func (c *boundedInCall) Exec(frame *interpreter.ExecutionFrame) ref.Val {
+	checkFrameInterrupt(frame)
+	args := c.Args()
+	lVal := args[0].Exec(frame)
+	switch l := lVal.(type) {
+	case *types.Err:
+		return lVal
+	case *types.Unknown:
+		rVal := args[1].Exec(frame)
+		if rUnk, ok := rVal.(*types.Unknown); ok {
+			merged := types.MergeUnknowns(l, rUnk)
+			chargePrecomputedCost(frame, c.ID(), 1)
+			return merged
+		}
+		chargePrecomputedCost(frame, c.ID(), 1)
+		return lVal
+	}
+	rVal := args[1].Exec(frame)
+	switch rVal.(type) {
+	case *types.Err:
+		return rVal
+	case *types.Unknown:
+		chargePrecomputedCost(frame, c.ID(), 1)
+		return rVal
+	}
+
+	if !rVal.Type().HasTrait(traits.ContainerType) {
+		chargePrecomputedCost(frame, c.ID(), 1)
+		return types.LabelErrNode(c.ID(), types.ValOrErr(rVal, "no such overload"))
+	}
+
+	callCost := uint64(1)
+	if _, isList := rVal.(traits.Lister); isList || isContainerVal(lVal) {
+		initBytes := int64(c.maxBytes) * 2
+		initElems := int64(c.maxElems) * 2
+		b := formatBudget{
+			remBytes: initBytes,
+			remElems: initElems,
+		}
+		checkContainerWalkBound(lVal, &b, 0)
+		checkContainerWalkBound(rVal, &b, 0)
+		walkedElems := uint64(initElems - b.remElems)
+		walkedBytes := int(initBytes - b.remBytes)
+		callCost = cost.SafeAdd(1, cost.SafeAdd(walkedElems, byteScanCost(walkedBytes)))
+	} else if sKey, ok := lVal.(types.String); ok {
+		callCost = atLeastOneCost(byteScanCost(len(sKey)))
+	}
+
+	chargePrecomputedCost(frame, c.ID(), callCost)
+	return types.LabelErrNode(c.ID(), rVal.(traits.Container).Contains(lVal))
 }
 
 func shouldUseLinearKMPBytes(textLen, patLen int) bool {
@@ -1461,10 +1673,73 @@ func boundedScalarStringInputConv(maxBytes int, targetType ref.Type) functions.F
 	}
 }
 
+var (
+	tzCacheMu sync.RWMutex
+	tzCache   = make(map[string]*time.Location, 16)
+)
+
+func loadCachedLocation(tz string) (*time.Location, bool) {
+	if len(tz) > maxCachedTzNameBytes || strings.Contains(tz, ":") {
+		return nil, false
+	}
+	tzCacheMu.RLock()
+	loc, ok := tzCache[tz]
+	tzCacheMu.RUnlock()
+	if ok {
+		return loc, true
+	}
+	loaded, err := time.LoadLocation(tz)
+	if err != nil {
+		return nil, false
+	}
+	tzCacheMu.Lock()
+	if len(tzCache) < maxCachedTimezones {
+		tzCache[tz] = loaded
+	}
+	tzCacheMu.Unlock()
+	return loaded, true
+}
+
+func evalTimestampInLocation(fn string, t time.Time) (ref.Val, bool) {
+	switch fn {
+	case overloads.TimeGetFullYear:
+		return types.Int(t.Year()), true
+	case overloads.TimeGetMonth:
+		return types.Int(t.Month() - 1), true
+	case overloads.TimeGetDayOfYear:
+		return types.Int(t.YearDay() - 1), true
+	case overloads.TimeGetDayOfMonth:
+		return types.Int(t.Day() - 1), true
+	case overloads.TimeGetDate:
+		return types.Int(t.Day()), true
+	case overloads.TimeGetDayOfWeek:
+		return types.Int(t.Weekday()), true
+	case overloads.TimeGetHours:
+		return types.Int(t.Hour()), true
+	case overloads.TimeGetMinutes:
+		return types.Int(t.Minute()), true
+	case overloads.TimeGetSeconds:
+		return types.Int(t.Second()), true
+	case overloads.TimeGetMilliseconds:
+		return types.Int(t.Nanosecond() / 1_000_000), true
+	default:
+		return nil, false
+	}
+}
+
 func boundedTimezoneAccessor(fn, overload string, maxBytes int) functions.FunctionOp {
 	return func(args ...ref.Val) ref.Val {
-		if tz, ok := args[1].(types.String); ok && len(tz) > maxBytes {
-			abortOutputLimit()
+		if tz, ok := args[1].(types.String); ok {
+			if len(tz) > maxBytes {
+				abortOutputLimit()
+			}
+			if ts, isTS := args[0].(types.Timestamp); isTS {
+				if loc, cached := loadCachedLocation(string(tz)); cached {
+					if out, handled := evalTimestampInLocation(fn, ts.In(loc)); handled {
+						return out
+					}
+				}
+			}
 		}
 		if recv, ok := args[0].(traits.Receiver); ok {
 			return recv.Receive(fn, overload, args[1:])
@@ -1541,6 +1816,12 @@ func (m *boundedMatchesCall) Eval(ctx interpreter.Activation) ref.Val {
 }
 
 func (m *boundedMatchesCall) Exec(frame *interpreter.ExecutionFrame) ref.Val {
+	if frame != nil && frame.CheckInterrupt() {
+		panic(interpreter.EvalCancelledError{
+			Cause:   interpreter.ContextCancelled,
+			Message: "operation cancelled: context interrupted",
+		})
+	}
 	lVal := m.lhs.Exec(frame)
 	switch l := lVal.(type) {
 	case *types.Err:
@@ -1627,9 +1908,398 @@ func (m *boundedMatchesCall) Exec(frame *interpreter.ExecutionFrame) ref.Val {
 		abortOutputLimit()
 	}
 
-	res := types.Bool(re.MatchString(inStr))
+	// Charge the CostTracker before executing re.MatchString (the matches cost
+	// depends only on input length and regex pattern/program size, never on the
+	// boolean match result) so a call that exceeds CostLimit aborts pre-call.
 	if costs := frame.CostTracker(); costs != nil {
-		costs.EvalBinary(frame, m.id, m.origCall, lVal, rVal, res)
+		costs.EvalBinary(frame, m.id, m.origCall, lVal, rVal, types.False)
 	}
-	return res
+	return types.Bool(re.MatchString(inStr))
+}
+
+func uint64Ptr(v uint64) *uint64 {
+	return &v
+}
+
+func atLeastOneCost(v uint64) uint64 {
+	if v == 0 {
+		return 1
+	}
+	return v
+}
+
+func byteScanCost(n int) uint64 {
+	if n <= 0 {
+		return 0
+	}
+	return (uint64(n) + 9) / 10
+}
+
+func safeMulUint64(a, b uint64) uint64 {
+	if a == 0 || b == 0 {
+		return 0
+	}
+	if a > math.MaxUint64/b {
+		return math.MaxUint64
+	}
+	return a * b
+}
+
+func measureContainerCost(v ref.Val, remElems *int64, depth int) uint64 {
+	if depth > MaxContainerDepth || *remElems < 0 {
+		return 1
+	}
+	switch c := v.(type) {
+	case types.String:
+		return byteScanCost(len(c))
+	case types.Bytes:
+		return byteScanCost(len(c))
+	case traits.Lister:
+		szVal, ok := c.Size().(types.Int)
+		if !ok || szVal < 0 {
+			return 1
+		}
+		sz := int64(szVal)
+		*remElems -= sz
+		total := cost.SafeAdd(1, uint64(sz))
+		if *remElems < 0 {
+			return total
+		}
+		for i := types.Int(0); i < szVal; i++ {
+			elem := c.Get(i)
+			switch s := elem.(type) {
+			case types.String:
+				total = cost.SafeAdd(total, byteScanCost(len(s)))
+			case types.Bytes:
+				total = cost.SafeAdd(total, byteScanCost(len(s)))
+			case traits.Lister, traits.Mapper:
+				total = cost.SafeAdd(total, measureContainerCost(elem, remElems, depth+1))
+			}
+			if *remElems < 0 {
+				break
+			}
+		}
+		return total
+	case traits.Mapper:
+		szVal, ok := c.Size().(types.Int)
+		if !ok || szVal < 0 {
+			return 1
+		}
+		sz := int64(szVal)
+		*remElems -= sz
+		total := cost.SafeAdd(1, uint64(sz))
+		if *remElems < 0 {
+			return total
+		}
+		it := c.Iterator()
+		for it.HasNext() == types.True {
+			k := it.Next()
+			total = cost.SafeAdd(total, measureContainerCost(k, remElems, depth+1))
+			if mv, found := c.Find(k); found {
+				total = cost.SafeAdd(total, measureContainerCost(mv, remElems, depth+1))
+			}
+			if *remElems < 0 {
+				break
+			}
+		}
+		return total
+	default:
+		return 0
+	}
+}
+
+func computeEqNeCost(maxElems int, args []ref.Val) *uint64 {
+	if len(args) != 2 {
+		return uint64Ptr(1)
+	}
+	lhs, rhs := args[0], args[1]
+	if isContainerVal(lhs) || isContainerVal(rhs) {
+		rem := int64(maxElems) * 2
+		c := cost.SafeAdd(1, cost.SafeAdd(measureContainerCost(lhs, &rem, 0), measureContainerCost(rhs, &rem, 0)))
+		return uint64Ptr(c)
+	}
+	if lStr, okL := lhs.(types.String); okL {
+		if rStr, okR := rhs.(types.String); okR {
+			return uint64Ptr(atLeastOneCost(byteScanCost(min(len(lStr), len(rStr)))))
+		}
+	}
+	if lBytes, okL := lhs.(types.Bytes); okL {
+		if rBytes, okR := rhs.(types.Bytes); okR {
+			return uint64Ptr(atLeastOneCost(byteScanCost(min(len(lBytes), len(rBytes)))))
+		}
+	}
+	return uint64Ptr(1)
+}
+
+func computeInCost(maxElems int, args []ref.Val) *uint64 {
+	if len(args) != 2 {
+		return uint64Ptr(1)
+	}
+	lhs, rhs := args[0], args[1]
+	if _, isList := rhs.(traits.Lister); isList || isContainerVal(lhs) {
+		rem := int64(maxElems) * 2
+		c := cost.SafeAdd(1, cost.SafeAdd(measureContainerCost(lhs, &rem, 0), measureContainerCost(rhs, &rem, 0)))
+		return uint64Ptr(c)
+	}
+	if sKey, ok := lhs.(types.String); ok {
+		return uint64Ptr(atLeastOneCost(byteScanCost(len(sKey))))
+	}
+	return uint64Ptr(1)
+}
+
+func computeFormatCost(maxElems int, args []ref.Val, result ref.Val) *uint64 {
+	if len(args) != 2 {
+		return uint64Ptr(1)
+	}
+	total := uint64(1)
+	if fmtStr, ok := args[0].(types.String); ok {
+		total = cost.SafeAdd(total, byteScanCost(len(fmtStr)))
+	}
+	if outStr, ok := result.(types.String); ok {
+		total = cost.SafeAdd(total, byteScanCost(len(outStr)))
+	}
+	if argList, ok := args[1].(traits.Lister); ok {
+		rem := int64(maxElems)
+		total = cost.SafeAdd(total, measureContainerCost(argList, &rem, 0))
+	}
+	return uint64Ptr(total)
+}
+
+func trackOrderCost(args []ref.Val, _ ref.Val) *uint64 {
+	if len(args) != 2 {
+		return uint64Ptr(1)
+	}
+	if lStr, okL := args[0].(types.String); okL {
+		if rStr, okR := args[1].(types.String); okR {
+			return uint64Ptr(atLeastOneCost(byteScanCost(min(len(lStr), len(rStr)))))
+		}
+	}
+	if lBytes, okL := args[0].(types.Bytes); okL {
+		if rBytes, okR := args[1].(types.Bytes); okR {
+			return uint64Ptr(atLeastOneCost(byteScanCost(min(len(lBytes), len(rBytes)))))
+		}
+	}
+	return uint64Ptr(1)
+}
+
+func trackMatchesCost(args []ref.Val, _ ref.Val) *uint64 {
+	if len(args) != 2 {
+		return uint64Ptr(1)
+	}
+	inVal, okL := args[0].(types.String)
+	patVal, okR := args[1].(types.String)
+	if !okL || !okR {
+		return uint64Ptr(1)
+	}
+	pat := string(patVal)
+	effPatLen := len(pat)
+	if strings.IndexByte(pat, '{') >= 0 {
+		if ps, err := types.RegexProgramSize(pat); err == nil && ps > effPatLen {
+			effPatLen = ps
+		}
+	}
+	inUnits := atLeastOneCost(byteScanCost(len(inVal) + 1))
+	patUnits := atLeastOneCost((uint64(effPatLen) + 3) / 4)
+	return uint64Ptr(safeMulUint64(inUnits, patUnits))
+}
+
+func trackStringSizeCost(args []ref.Val, _ ref.Val) *uint64 {
+	if len(args) == 1 {
+		if s, ok := args[0].(types.String); ok {
+			return uint64Ptr(atLeastOneCost(byteScanCost(len(s))))
+		}
+	}
+	return uint64Ptr(1)
+}
+
+func trackStringSearchCost(args []ref.Val, _ ref.Val) *uint64 {
+	if len(args) >= 2 {
+		s, ok0 := args[0].(types.String)
+		sub, ok1 := args[1].(types.String)
+		if ok0 && ok1 {
+			sLen := max(1, len(s))
+			subLen := max(1, len(sub))
+			prod := safeMulUint64(uint64(sLen), uint64(subLen))
+			scan := prod / 10
+			if prod%10 != 0 {
+				scan = cost.SafeAdd(scan, 1)
+			}
+			return uint64Ptr(cost.SafeAdd(1, scan))
+		}
+	}
+	return uint64Ptr(1)
+}
+
+func trackStringInputConvCost(args []ref.Val, _ ref.Val) *uint64 {
+	if len(args) == 1 {
+		if s, ok := args[0].(types.String); ok {
+			return uint64Ptr(atLeastOneCost(byteScanCost(len(s))))
+		}
+	}
+	return uint64Ptr(1)
+}
+
+func trackTimezoneCost(_ []ref.Val, result ref.Val) *uint64 {
+	if types.IsError(result) {
+		return uint64Ptr(tzLookupErrorCost)
+	}
+	return uint64Ptr(1)
+}
+
+type runtimeCostEstimator struct {
+	maxElems int
+}
+
+func (e runtimeCostEstimator) CallCost(fn, overloadID string, args []ref.Val, result ref.Val) *uint64 {
+	// Named overloads are handled by OverloadTracker / StandardOverloadTrackers.
+	// Dynamic dispatch on dyn values (e.g. event.payload.*) leaves overloadID == "",
+	// which cel-go's Tracker.CostCall would otherwise price at a flat 1.
+	if overloadID != "" {
+		return nil
+	}
+	switch fn {
+	case operators.In, operators.OldIn, overloads.DeprecatedIn:
+		return computeInCost(e.maxElems, args)
+	case operators.Equals, operators.NotEquals:
+		return computeEqNeCost(e.maxElems, args)
+	case operators.Add:
+		if len(args) == 2 {
+			switch l := args[0].(type) {
+			case types.String:
+				if r, ok := args[1].(types.String); ok {
+					return uint64Ptr(atLeastOneCost(byteScanCost(len(l) + len(r))))
+				}
+			case types.Bytes:
+				if r, ok := args[1].(types.Bytes); ok {
+					return uint64Ptr(atLeastOneCost(byteScanCost(len(l) + len(r))))
+				}
+			}
+		}
+		return uint64Ptr(1)
+	case operators.Less, operators.LessEquals, operators.Greater, operators.GreaterEquals:
+		return trackOrderCost(args, result)
+	case overloads.Size:
+		return trackStringSizeCost(args, result)
+	case overloads.TypeConvertString, overloads.TypeConvertBytes:
+		if len(args) == 1 {
+			switch v := args[0].(type) {
+			case types.String:
+				return uint64Ptr(atLeastOneCost(byteScanCost(len(v))))
+			case types.Bytes:
+				return uint64Ptr(atLeastOneCost(byteScanCost(len(v))))
+			}
+		}
+		return uint64Ptr(1)
+	case overloads.TypeConvertBool,
+		overloads.TypeConvertInt,
+		overloads.TypeConvertUint,
+		overloads.TypeConvertDouble,
+		overloads.TypeConvertTimestamp,
+		overloads.TypeConvertDuration:
+		return trackStringInputConvCost(args, result)
+	case overloads.Matches:
+		return trackMatchesCost(args, result)
+	case overloads.Contains:
+		if len(args) == 2 {
+			if s, ok0 := args[0].(types.String); ok0 {
+				if sub, ok1 := args[1].(types.String); ok1 {
+					return uint64Ptr(atLeastOneCost(safeMulUint64(byteScanCost(len(s)), byteScanCost(len(sub)))))
+				}
+			}
+		}
+		return uint64Ptr(1)
+	case overloads.StartsWith, overloads.EndsWith:
+		if len(args) == 2 {
+			if sub, ok := args[1].(types.String); ok {
+				return uint64Ptr(atLeastOneCost(byteScanCost(len(sub))))
+			}
+		}
+		return uint64Ptr(1)
+	case overloads.TimeGetFullYear,
+		overloads.TimeGetMonth,
+		overloads.TimeGetDayOfYear,
+		overloads.TimeGetDate,
+		overloads.TimeGetDayOfMonth,
+		overloads.TimeGetDayOfWeek,
+		overloads.TimeGetHours,
+		overloads.TimeGetMinutes,
+		overloads.TimeGetSeconds,
+		overloads.TimeGetMilliseconds:
+		if len(args) == 2 {
+			return trackTimezoneCost(args, result)
+		}
+		return uint64Ptr(1)
+	default:
+		return nil
+	}
+}
+
+func buildCostTracking(limits Limits) (cost.ActualCostEstimator, []cost.TrackerOption) {
+	maxElems := limits.MaxCollectionElements
+	if maxElems <= 0 {
+		maxElems = DefaultMaxCollectionElements
+	}
+	eqNeTracker := func(args []ref.Val, _ ref.Val) *uint64 {
+		return computeEqNeCost(maxElems, args)
+	}
+	inTracker := func(args []ref.Val, _ ref.Val) *uint64 {
+		return computeInCost(maxElems, args)
+	}
+	formatTracker := func(args []ref.Val, result ref.Val) *uint64 {
+		return computeFormatCost(maxElems, args, result)
+	}
+
+	opts := []cost.TrackerOption{
+		cost.OverloadTracker(prechargedWalkOverloadID, func(_ []ref.Val, result ref.Val) *uint64 {
+			if u, ok := result.(types.Uint); ok {
+				v := uint64(u)
+				return &v
+			}
+			return uint64Ptr(1)
+		}),
+		cost.OverloadTracker(overloads.Equals, eqNeTracker),
+		cost.OverloadTracker(overloads.NotEquals, eqNeTracker),
+		cost.OverloadTracker(overloads.InList, inTracker),
+		cost.OverloadTracker(overloads.InMap, inTracker),
+		cost.OverloadTracker(overloads.DeprecatedIn, inTracker),
+		cost.OverloadTracker(overloads.ExtFormatString, formatTracker),
+		cost.OverloadTracker(overloads.Matches, trackMatchesCost),
+		cost.OverloadTracker(overloads.MatchesString, trackMatchesCost),
+
+		cost.OverloadTracker(overloads.LessString, trackOrderCost),
+		cost.OverloadTracker(overloads.LessEqualsString, trackOrderCost),
+		cost.OverloadTracker(overloads.GreaterString, trackOrderCost),
+		cost.OverloadTracker(overloads.GreaterEqualsString, trackOrderCost),
+		cost.OverloadTracker(overloads.LessBytes, trackOrderCost),
+		cost.OverloadTracker(overloads.LessEqualsBytes, trackOrderCost),
+		cost.OverloadTracker(overloads.GreaterBytes, trackOrderCost),
+		cost.OverloadTracker(overloads.GreaterEqualsBytes, trackOrderCost),
+
+		cost.OverloadTracker(overloads.SizeString, trackStringSizeCost),
+		cost.OverloadTracker(overloads.SizeStringInst, trackStringSizeCost),
+
+		cost.OverloadTracker("string_index_of_string", trackStringSearchCost),
+		cost.OverloadTracker("string_index_of_string_int", trackStringSearchCost),
+		cost.OverloadTracker("string_last_index_of_string", trackStringSearchCost),
+		cost.OverloadTracker("string_last_index_of_string_int", trackStringSearchCost),
+
+		cost.OverloadTracker(overloads.StringToBool, trackStringInputConvCost),
+		cost.OverloadTracker(overloads.StringToInt, trackStringInputConvCost),
+		cost.OverloadTracker(overloads.StringToUint, trackStringInputConvCost),
+		cost.OverloadTracker(overloads.StringToDouble, trackStringInputConvCost),
+		cost.OverloadTracker(overloads.StringToTimestamp, trackStringInputConvCost),
+		cost.OverloadTracker(overloads.StringToDuration, trackStringInputConvCost),
+
+		cost.OverloadTracker(overloads.TimestampToYearWithTz, trackTimezoneCost),
+		cost.OverloadTracker(overloads.TimestampToMonthWithTz, trackTimezoneCost),
+		cost.OverloadTracker(overloads.TimestampToDayOfYearWithTz, trackTimezoneCost),
+		cost.OverloadTracker(overloads.TimestampToDayOfMonthZeroBasedWithTz, trackTimezoneCost),
+		cost.OverloadTracker(overloads.TimestampToDayOfMonthOneBasedWithTz, trackTimezoneCost),
+		cost.OverloadTracker(overloads.TimestampToDayOfWeekWithTz, trackTimezoneCost),
+		cost.OverloadTracker(overloads.TimestampToHoursWithTz, trackTimezoneCost),
+		cost.OverloadTracker(overloads.TimestampToMinutesWithTz, trackTimezoneCost),
+		cost.OverloadTracker(overloads.TimestampToSecondsWithTz, trackTimezoneCost),
+		cost.OverloadTracker(overloads.TimestampToMillisecondsWithTz, trackTimezoneCost),
+	}
+	return runtimeCostEstimator{maxElems: maxElems}, opts
 }

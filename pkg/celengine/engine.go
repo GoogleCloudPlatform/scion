@@ -378,10 +378,13 @@ func buildCELProgram(celEnv *cel.Env, checked *cel.Ast, limits Limits, rawFormat
 			err = fmt.Errorf("celengine: plan failed: %v", r)
 		}
 	}()
+	costEst, costOpts := buildCostTracking(limits)
 	return celEnv.Program(
 		checked,
 		cel.CustomDecoratorV2(outputBoundsDecorator(limits, rawFormat)),
 		cel.EvalOptions(cel.OptOptimize, cel.OptTrackCost),
+		cel.CostTracking(costEst),
+		cel.CostTrackerOptions(costOpts...),
 		cel.CostLimit(limits.CostLimit),
 		cel.InterruptCheckFrequency(limits.InterruptFrequency),
 	)
@@ -635,7 +638,10 @@ func classifyEvalError(callerCtx, evalCtx context.Context, err error) *EvalError
 	if errors.Is(err, errEngineTimeout) || (evalCtx.Err() != nil && errors.Is(context.Cause(evalCtx), errEngineTimeout)) {
 		return &EvalError{Reason: ReasonTimeout}
 	}
-	if errors.Is(err, interpreter.InterruptError{}) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if (errors.As(err, &cancelled) && cancelled.Cause == interpreter.ContextCancelled) ||
+		errors.Is(err, interpreter.InterruptError{}) ||
+		errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded) {
 		return &EvalError{Reason: ReasonCanceled}
 	}
 

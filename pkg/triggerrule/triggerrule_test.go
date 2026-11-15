@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"runtime"
 	"slices"
@@ -865,6 +866,76 @@ func TestPathologicalRuleDoesNotBlockSubsequentTriggerOnSameEvent(t *testing.T) 
 
 		if subj != "deploy:prod" {
 			t.Fatalf("benign DeriveSubject = %q, want %q", subj, "deploy:prod")
+		}
+		if elapsed > triggerrule.EventRuleBudget {
+			t.Errorf("end-to-end event evaluation took %s, want <= %s", elapsed, triggerrule.EventRuleBudget)
+		}
+	})
+
+	t.Run("container_eq_comprehension_rule_then_benign_rule_matches_under_1s", func(t *testing.T) {
+		rules, err := triggerrule.NewDefault()
+		if err != nil {
+			t.Fatalf("NewDefault: %v", err)
+		}
+
+		var buf bytes.Buffer
+		buf.WriteString(`{"env":"prod","s":"`)
+		buf.WriteString(strings.Repeat("a", 20_000))
+		buf.WriteString(`","l":[`)
+		for i := 0; i < 12_000; i++ {
+			if i > 0 {
+				buf.WriteByte(',')
+			}
+			buf.WriteByte('0')
+		}
+		buf.WriteString(`]}`)
+		if buf.Len() > triggerrule.MaxPayloadBytes {
+			t.Fatalf("payload len %d exceeds MaxPayloadBytes %d", buf.Len(), triggerrule.MaxPayloadBytes)
+		}
+
+		ev := sampleFireEvent(buf.String())
+		baseAct, err := triggerrule.NewEventActivation(ev)
+		if err != nil {
+			t.Fatalf("NewEventActivation: %v", err)
+		}
+
+		terms := make([]string, 25)
+		for i := range terms {
+			terms[i] = fmt.Sprintf(
+				"[event.payload.l,event.payload.l,event.payload.l,event.payload.l,event.payload.l]==[event.payload.l,event.payload.l,event.payload.l,event.payload.l,%d]",
+				i,
+			)
+		}
+		eqComprehensionExpr := "event.payload.l.exists(x," + strings.Join(terms, "||") + ")"
+		if len(eqComprehensionExpr) > triggerrule.MaxMatchRuleBytes {
+			t.Fatalf("eqComprehensionExpr len %d exceeds MaxMatchRuleBytes %d", len(eqComprehensionExpr), triggerrule.MaxMatchRuleBytes)
+		}
+
+		budget := triggerrule.NewEventBudget()
+		start := time.Now()
+
+		badAct := baseAct.WithTrigger(hubfire.FireTriggerRef{ID: "trig-bad-eq-comp", Name: "bad-eq-comp"})
+		badScope := celengine.CacheScope{Consumer: triggerrule.ConsumerName, ID: "trig-bad-eq-comp", Revision: 1}
+		matched, evalErr := rules.Match(ctx, badScope, triggerrule.Rule{Expr: eqComprehensionExpr}, badAct, triggerrule.WithBudget(budget))
+		badElapsed := time.Since(start)
+		t.Logf("bad eq comprehension elapsed=%s err=%v", badElapsed, evalErr)
+		if matched {
+			t.Fatalf("trig-bad-eq-comp unexpectedly matched")
+		}
+		reason, ok := triggerrule.SkipReason(evalErr)
+		if !ok || reason != triggerrule.SkipReasonEvalFailed {
+			t.Fatalf("trig-bad-eq-comp SkipReason = (%q, %v), want (%q, true) (err=%v)", reason, ok, triggerrule.SkipReasonEvalFailed, evalErr)
+		}
+
+		benignRef := hubfire.FireTriggerRef{ID: "trig-benign-after-eq", Name: "benign"}
+		benignAct := baseAct.WithTrigger(benignRef)
+		benignScope := celengine.CacheScope{Consumer: triggerrule.ConsumerName, ID: benignRef.ID, Revision: 1}
+		matched, err = rules.Match(ctx, benignScope, triggerrule.Rule{
+			Expr: `event.type == "webhook.deploy.finished" && event.payload.env == "prod"`,
+		}, benignAct, triggerrule.WithBudget(budget))
+		elapsed := time.Since(start)
+		if err != nil || !matched {
+			t.Fatalf("benign trigger Match = (%v, %v), want (true, nil) (total elapsed=%s)", matched, err, elapsed)
 		}
 		if elapsed > triggerrule.EventRuleBudget {
 			t.Errorf("end-to-end event evaluation took %s, want <= %s", elapsed, triggerrule.EventRuleBudget)

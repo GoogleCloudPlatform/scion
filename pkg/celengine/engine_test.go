@@ -17,6 +17,7 @@ package celengine_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"runtime"
 	"slices"
 	"strings"
@@ -1270,6 +1271,77 @@ func TestMatchesRegexSizeAndWorkBounds(t *testing.T) {
 			t.Fatalf("expected true dynamic match")
 		}
 	})
+
+	// 5. Realistic keyword and conventional-commit patterns succeed on full 64 KiB
+	// payloads under DefaultMaxRegexWork = 8 MiB, while repeated counted-repetition
+	// matches calls charge progSize to CostTracker and abort on cost_limit.
+	t.Run("realistic_patterns_on_64k_and_counted_rep_cost_charged", func(t *testing.T) {
+		s64k := strings.Repeat("ok ", 21840) + "panic: boom" // ~65,531 bytes <= 64 KiB
+		commit64k := "feat(triggers): " + strings.Repeat("x", 65500)
+
+		kwProg, err := eng.Compile(`event.s.matches("(?i)\\b(error|failed|panic)\\b")`, boolKind)
+		if err != nil {
+			t.Fatalf("Compile keyword regex: %v", err)
+		}
+		res, _, err := kwProg.Eval(ctx, map[string]any{"event": map[string]any{"s": s64k}})
+		if err != nil {
+			t.Fatalf("Eval keyword regex on 64k: %v", err)
+		}
+		if b, _ := res.Bool(); !b {
+			t.Fatalf("expected keyword regex match on 64k")
+		}
+
+		ccProg, err := eng.Compile(`event.s.matches("^(feat|fix|chore)(\\([a-z0-9_-]+\\))?!?: .+")`, boolKind)
+		if err != nil {
+			t.Fatalf("Compile conventional-commit regex: %v", err)
+		}
+		res, _, err = ccProg.Eval(ctx, map[string]any{"event": map[string]any{"s": commit64k}})
+		if err != nil {
+			t.Fatalf("Eval conventional-commit regex on 64k: %v", err)
+		}
+		if b, _ := res.Bool(); !b {
+			t.Fatalf("expected conventional-commit regex match on 64k")
+		}
+
+		// "a{1,120}b" has len=9 but progSize=244: upstream len-based cost would charge
+		// only ~303 on 1 KiB (allowing >800 calls), whereas progSize-based charging
+		// charges 6,161 per call and aborts repeated matches on CostLimit (or
+		// ReasonTimeout via CheckInterrupt under -race instrumentation).
+		s1kA := strings.Repeat("a", 1_000)
+		singleRepProg, err := eng.Compile(`event.s.matches("a{1,120}b")`, boolKind)
+		if err != nil {
+			t.Fatalf("Compile single counted-rep: %v", err)
+		}
+		_, singleStats, err := singleRepProg.Eval(ctx, map[string]any{"event": map[string]any{"s": s1kA}})
+		if err != nil {
+			t.Fatalf("Eval single counted-rep: %v", err)
+		}
+		if singleStats.Cost < 6_000 {
+			t.Fatalf("single counted-rep Cost = %d, want >= 6000 (progSize-proportional)", singleStats.Cost)
+		}
+
+		repLoopProg, err := eng.Compile(`event.l.exists(x, event.s.matches("a{1,120}b"))`, boolKind)
+		if err != nil {
+			t.Fatalf("Compile counted-repetition loop: %v", err)
+		}
+		loopIdx := make([]any, 200)
+		for i := range loopIdx {
+			loopIdx[i] = int64(i)
+		}
+		start := time.Now()
+		res, _, evalErr := repLoopProg.Eval(ctx, map[string]any{"event": map[string]any{"s": s1kA, "l": loopIdx}})
+		elapsed := time.Since(start)
+		if res != nil {
+			t.Fatalf("expected nil Result on counted-repetition matches loop, got %v", res)
+		}
+		var repEvalErr *celengine.EvalError
+		if !errors.As(evalErr, &repEvalErr) || (repEvalErr.Reason != celengine.ReasonCostLimit && repEvalErr.Reason != celengine.ReasonTimeout) {
+			t.Fatalf("EvalError = %v, want cost_limit or timeout", evalErr)
+		}
+		if elapsed > 2*celengine.DefaultEvalTimeout {
+			t.Errorf("counted-repetition loop took %s, want <= %s", elapsed, 2*celengine.DefaultEvalTimeout)
+		}
+	})
 }
 
 func TestEvalTimeoutBackstopNeverReturnsDecision(t *testing.T) {
@@ -1290,4 +1362,231 @@ func TestEvalTimeoutBackstopNeverReturnsDecision(t *testing.T) {
 		t.Fatalf("expected nil Result when Elapsed (%s) exceeds EvalTimeout, got %v", stats.Elapsed, res)
 	}
 	assertEvalReason(t, evalErr, celengine.ReasonTimeout)
+}
+
+func TestComprehensionContainerWalkAndFormatBounded(t *testing.T) {
+	eng := newTestEngine(t)
+	boolKind := celengine.Kind{Name: "filter", Result: celengine.Bool()}
+	ctx := context.Background()
+
+	list12k := make([]any, 12_000)
+	for i := range list12k {
+		list12k[i] = int64(0)
+	}
+	s20k := strings.Repeat("a", 20_000)
+	nestedDyn := []any{[]any{list12k, list12k, list12k, int64(-1)}}
+
+	act := map[string]any{
+		"event": map[string]any{
+			"s":  s20k,
+			"l":  list12k,
+			"ll": nestedDyn,
+		},
+	}
+
+	buildDisjunction := func(termFmt string, count int) string {
+		terms := make([]string, count)
+		for i := range terms {
+			terms[i] = fmt.Sprintf(termFmt, i)
+		}
+		return "event.l.exists(x, " + strings.Join(terms, " || ") + ")"
+	}
+
+	probes := []struct {
+		name string
+		expr string
+	}{
+		{
+			name: "eq_25_terms_in_exists",
+			expr: buildDisjunction("[event.l,event.l,event.l,event.l,event.l] == [event.l,event.l,event.l,event.l,%d]", 25),
+		},
+		{
+			name: "in_list_25_terms_in_exists",
+			expr: buildDisjunction("[event.l,event.l,event.l,event.l] in [[event.l,event.l,event.l,%d]]", 25),
+		},
+		{
+			name: "in_dyn_25_terms_in_exists",
+			expr: buildDisjunction("[event.l,event.l,event.l,%d] in event.ll", 25),
+		},
+		{
+			name: "format_31_terms_in_exists",
+			expr: buildDisjunction(`"%%s".format([event.l]) == "b%d"`, 31),
+		},
+	}
+
+	maxElapsed := 2 * celengine.DefaultEvalTimeout
+	const maxAllocDelta = 64 << 20 // 64 MiB
+
+	for _, tc := range probes {
+		t.Run(tc.name, func(t *testing.T) {
+			if len(tc.expr) > celengine.DefaultMaxExprBytes {
+				t.Fatalf("probe len %d exceeds DefaultMaxExprBytes %d", len(tc.expr), celengine.DefaultMaxExprBytes)
+			}
+			prog, err := eng.Compile(tc.expr, boolKind)
+			if err != nil {
+				t.Fatalf("Compile(%s, %dB): %v", tc.name, len(tc.expr), err)
+			}
+
+			var mBefore, mAfter runtime.MemStats
+			runtime.ReadMemStats(&mBefore)
+			start := time.Now()
+			res, stats, evalErr := prog.Eval(ctx, act)
+			elapsed := time.Since(start)
+			runtime.ReadMemStats(&mAfter)
+
+			allocDelta := mAfter.TotalAlloc - mBefore.TotalAlloc
+			t.Logf("probe=%s bytes=%d elapsed=%s alloc=%.2fMiB cost=%d err=%v",
+				tc.name, len(tc.expr), elapsed, float64(allocDelta)/(1<<20), stats.Cost, evalErr)
+
+			if res != nil {
+				t.Fatalf("expected nil Result on bounded abort, got %v", res)
+			}
+			if evalErr == nil {
+				t.Fatalf("expected non-nil EvalError, got nil")
+			}
+			var eerr *celengine.EvalError
+			if !errors.As(evalErr, &eerr) || (eerr.Reason != celengine.ReasonCostLimit && eerr.Reason != celengine.ReasonTimeout) {
+				t.Fatalf("EvalError = %v, want cost_limit or timeout", evalErr)
+			}
+			if elapsed > maxElapsed {
+				t.Errorf("elapsed %s exceeds 2x EvalTimeout (%s)", elapsed, maxElapsed)
+			}
+			if allocDelta > maxAllocDelta {
+				t.Errorf("TotalAlloc delta %.2f MiB exceeds 64 MiB", float64(allocDelta)/(1<<20))
+			}
+
+			// Re-evaluating the same shared Program on a small input must use a fresh
+			// per-evaluation cost tracker (never poisoned by the prior cost_limit abort).
+			benignAct := map[string]any{
+				"event": map[string]any{
+					"s":  "a",
+					"l":  []any{int64(0)},
+					"ll": []any{[]any{[]any{int64(0)}, []any{int64(0)}, []any{int64(0)}, int64(-1)}},
+				},
+			}
+			res2, _, err2 := prog.Eval(ctx, benignAct)
+			if err2 != nil {
+				t.Fatalf("subsequent benign Eval on shared Program failed: %v", err2)
+			}
+			if b, boolErr := res2.Bool(); boolErr != nil || b {
+				t.Fatalf("subsequent benign Eval = (%v, %v), want (false, nil)", b, boolErr)
+			}
+		})
+	}
+
+	t.Run("default_interrupt_frequency_bounds_high_cost_ceiling", func(t *testing.T) {
+		if celengine.DefaultInterruptFrequency != 1 {
+			t.Fatalf("DefaultInterruptFrequency = %d, want 1", celengine.DefaultInterruptFrequency)
+		}
+		lim := celengine.DefaultLimits()
+		lim.CostLimit = celengine.MaxCostLimitCeiling
+		hiEng, err := celengine.New(testEnv(), lim, celengine.DefaultCacheConfig())
+		if err != nil {
+			t.Fatalf("New high-cost engine: %v", err)
+		}
+		expr := "event.l.exists(x, [event.l] == [event.l] && x == -1)"
+		prog, err := hiEng.Compile(expr, boolKind)
+		if err != nil {
+			t.Fatalf("Compile: %v", err)
+		}
+		start := time.Now()
+		res, _, evalErr := prog.Eval(ctx, act)
+		elapsed := time.Since(start)
+		if res != nil {
+			t.Fatalf("expected nil Result, got %v", res)
+		}
+		var eerr *celengine.EvalError
+		if !errors.As(evalErr, &eerr) || (eerr.Reason != celengine.ReasonTimeout && eerr.Reason != celengine.ReasonCostLimit) {
+			t.Fatalf("EvalError = %v, want timeout or cost_limit", evalErr)
+		}
+		if elapsed > maxElapsed {
+			t.Errorf("elapsed %s under MaxCostLimitCeiling exceeds 2x EvalTimeout (%s)", elapsed, maxElapsed)
+		}
+	})
+}
+
+func TestOptionalCeilingValidationErrorMessages(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*celengine.Limits)
+		field  string
+	}{
+		{
+			name:   "negative_max_output_bytes",
+			mutate: func(l *celengine.Limits) { l.MaxOutputBytes = -1 },
+			field:  "MaxOutputBytes must be 0 (default) or 1..",
+		},
+		{
+			name:   "above_ceiling_max_collection_elements",
+			mutate: func(l *celengine.Limits) { l.MaxCollectionElements = celengine.MaxCollectionElementsCeiling + 1 },
+			field:  "MaxCollectionElements must be 0 (default) or 1..",
+		},
+		{
+			name:   "negative_max_regex_program_size",
+			mutate: func(l *celengine.Limits) { l.MaxRegexProgramSize = -1 },
+			field:  "MaxRegexProgramSize must be 0 (default) or 1..",
+		},
+		{
+			name:   "above_ceiling_max_regex_work",
+			mutate: func(l *celengine.Limits) { l.MaxRegexWork = celengine.MaxRegexWorkCeiling + 1 },
+			field:  "MaxRegexWork must be 0 (default) or 1..",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			lim := celengine.DefaultLimits()
+			tc.mutate(&lim)
+			_, err := celengine.New(testEnv(), lim, celengine.DefaultCacheConfig())
+			if err == nil {
+				t.Fatalf("expected error for %s, got nil", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.field) {
+				t.Errorf("error %q does not contain %q", err.Error(), tc.field)
+			}
+		})
+	}
+}
+
+func TestSystemOneModeBenignProseRegexAndPredicateProbe(t *testing.T) {
+	eng := newTestEngine(t)
+	boolKind := celengine.Kind{Name: "filter", Result: celengine.Bool()}
+
+	prose16k := strings.Repeat("Reviewing candidate change notes and rollout telemetry. ", 295) +
+		"Decision: please ESCALATE to the release lead before rollout."
+	if len(prose16k) < 16*1024 {
+		t.Fatalf("prose16k len = %d, want >= 16 KiB", len(prose16k))
+	}
+
+	expr := `active && count >= 1 && ratio < 1.0 && size(tags) == 0 && ` +
+		`meta["tier"] == "prod" && ` +
+		`event.prose.matches("(?i)\\b(approve|reject|defer|escalate|hold)\\b")`
+	prog, err := eng.Compile(expr, boolKind)
+	if err != nil {
+		t.Fatalf("Compile benign prose regex rule: %v", err)
+	}
+
+	act := map[string]any{
+		"active": true,
+		"count":  int64(3),
+		"ratio":  0.42,
+		"tags":   []string{},
+		"meta":   map[string]string{"tier": "prod"},
+		"event": map[string]any{
+			"prose": prose16k,
+		},
+	}
+
+	res, stats, err := prog.Eval(context.Background(), act)
+	t.Logf("system_one_benign_probe: prose_bytes=%d elapsed=%s cost=%d", len(prose16k), stats.Elapsed, stats.Cost)
+	if err != nil {
+		t.Fatalf("Eval benign prose regex rule failed under DefaultLimits: %v (stats=%+v)", err, stats)
+	}
+	matched, err := res.Bool()
+	if err != nil || !matched {
+		t.Fatalf("res.Bool() = (%v, %v), want (true, nil)", matched, err)
+	}
+	if stats.Cost >= celengine.DefaultCostLimit {
+		t.Fatalf("stats.Cost = %d, want < DefaultCostLimit (%d)", stats.Cost, celengine.DefaultCostLimit)
+	}
 }

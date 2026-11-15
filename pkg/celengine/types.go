@@ -253,22 +253,41 @@ type Kind struct {
 
 // Default limit values and hard upper bounds enforced by New.
 //
-// In addition to per-string/bytes output bounds (MaxOutputBytes) and list
-// cardinality bounds (MaxCollectionElements), container equality (==, !=),
-// list membership (in), and %s string formatting enforce a fail-closed walk
-// bound (at most MaxContainerDepth = 32 nested containers and bounded visited
-// elements/bytes) so shared-structure DAGs built via comprehensions cannot
-// trigger exponential work inside a single host call.
+// Structural evaluation-time bound (Elapsed <= one loop body + one guarded call,
+// capped by Program.Eval's Elapsed > EvalTimeout backstop):
+//  1. Bounded single host calls: outputBoundsDecorator enforces pre-call input
+//     and output byte limits (MaxOutputBytes), collection cardinality limits
+//     (MaxCollectionElements), fail-closed container walk bounds
+//     (MaxContainerDepth = 32, 2*MaxCollectionElements, 2*MaxOutputBytes on ==,
+//     !=, in, and %s format), linear KMP fallback for pathological substring
+//     patterns, cached IANA timezone lookups, and RE2 program-size / match-work
+//     bounds (len(input)*progSize <= MaxRegexWork; matches on very large payload
+//     strings fails closed with ReasonCostLimit above MaxRegexWork).
+//  2. Proportional CostTracker charging up to CostLimit: every non-O(1) host
+//     call — including container == / !=, in_list / in_map, string_format (%s
+//     container walks and formatted output), counted-repetition matches
+//     (progSize factor), size(string), indexOf / lastIndexOf (including empty
+//     needle), string/bytes ordering and conversions, and dyn-dispatched
+//     multi-overload calls (overloadID == "") — charges visited container
+//     elements and scanned/produced bytes to the per-evaluation cost.Tracker
+//     cloned on each Program.Eval. DefaultCostLimit (250,000) bounds cumulative
+//     work across all calls and loop iterations within an evaluation.
+//  3. Per-iteration comprehension interruption + wall-clock backstop:
+//     DefaultInterruptFrequency = 1 checks the evaluation deadline on every
+//     comprehension iteration (all, exists, exists_one, filter, map), so once
+//     EvalTimeout fires, execution overruns by at most the remainder of the
+//     current iteration body (bounded by (1) and (2)), and Program.Eval rejects
+//     any post-return Elapsed > EvalTimeout with ReasonTimeout.
 const (
 	DefaultMaxExprBytes                 = 4096
 	DefaultRecursionDepth               = 32
 	DefaultCostLimit             uint64 = 250_000
 	DefaultEvalTimeout                  = 100 * time.Millisecond
-	DefaultInterruptFrequency    uint   = 100
+	DefaultInterruptFrequency    uint   = 1
 	DefaultMaxOutputBytes               = 1 << 20 // 1 MiB per string/bytes value or formatted output
 	DefaultMaxCollectionElements        = 65_536
 	DefaultMaxRegexProgramSize          = 256
-	DefaultMaxRegexWork          int64  = 2 << 20 // 2 MiB-instructions (len(input) * regex program size)
+	DefaultMaxRegexWork          int64  = 8 << 20 // 8 MiB-instructions (len(input) * regex program size)
 
 	// MaxContainerDepth is the maximum container nesting depth traversed by
 	// fail-closed container equality (==, !=), list membership (in), and %s
@@ -347,16 +366,16 @@ func (l Limits) validateCeiling() error {
 		return fmt.Errorf("celengine: InterruptFrequency must be > 0")
 	}
 	if l.MaxOutputBytes < 0 || l.MaxOutputBytes > MaxOutputBytesCeiling {
-		return fmt.Errorf("celengine: MaxOutputBytes must be in 1..%d (got %d)", MaxOutputBytesCeiling, l.MaxOutputBytes)
+		return fmt.Errorf("celengine: MaxOutputBytes must be 0 (default) or 1..%d (got %d)", MaxOutputBytesCeiling, l.MaxOutputBytes)
 	}
 	if l.MaxCollectionElements < 0 || l.MaxCollectionElements > MaxCollectionElementsCeiling {
-		return fmt.Errorf("celengine: MaxCollectionElements must be in 1..%d (got %d)", MaxCollectionElementsCeiling, l.MaxCollectionElements)
+		return fmt.Errorf("celengine: MaxCollectionElements must be 0 (default) or 1..%d (got %d)", MaxCollectionElementsCeiling, l.MaxCollectionElements)
 	}
 	if l.MaxRegexProgramSize < 0 || l.MaxRegexProgramSize > MaxRegexProgramSizeCeiling {
-		return fmt.Errorf("celengine: MaxRegexProgramSize must be in 1..%d (got %d)", MaxRegexProgramSizeCeiling, l.MaxRegexProgramSize)
+		return fmt.Errorf("celengine: MaxRegexProgramSize must be 0 (default) or 1..%d (got %d)", MaxRegexProgramSizeCeiling, l.MaxRegexProgramSize)
 	}
 	if l.MaxRegexWork < 0 || l.MaxRegexWork > MaxRegexWorkCeiling {
-		return fmt.Errorf("celengine: MaxRegexWork must be in 1..%d (got %d)", MaxRegexWorkCeiling, l.MaxRegexWork)
+		return fmt.Errorf("celengine: MaxRegexWork must be 0 (default) or 1..%d (got %d)", MaxRegexWorkCeiling, l.MaxRegexWork)
 	}
 	return nil
 }
