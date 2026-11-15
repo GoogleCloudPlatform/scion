@@ -16,7 +16,11 @@
 # Staged to $HOME/.scion/harness/dialect.yaml at agent start.
 dialect: grok-build
 
-event_name_fields: [hookEventName, hook_event_name, type]
+# Grok 1.0.77 sends both hookEventName (snake_case, e.g. "stop_failure") and
+# hook_event_name (PascalCase, e.g. "StopFailure"). The mappings below use the
+# PascalCase names, so hook_event_name is tried first (fixture:
+# pkg/sciontool/hooks/dialects/testdata/grok-build).
+event_name_fields: [hook_event_name, hookEventName, type]
 
 mappings:
   # Session lifecycle.
@@ -35,13 +39,20 @@ mappings:
     fields:
       prompt: prompt
 
-  # Agent completion.
+  # Agent completion. Killing grok 1.0.77 sends SessionEnd and then a Stop
+  # with reason "shutdown"; that Stop ends no turn, and after session-end
+  # it would report working for a stopped agent, so it is ignored.
   Stop:
     event: agent-end
+    skip_when:
+      - field: reason
+        equals: shutdown
+  # A turn that ended on an API error. error is a bare category
+  # ("invalid_request"); errorDetails has the status and provider message.
   StopFailure:
-    event: agent-end
+    event: agent-error
     fields:
-      error: error
+      error: errorDetails
   StopCancelled:
     event: agent-end
 
@@ -87,8 +98,15 @@ mappings:
     fields:
       source: source
 
-  # Notifications.
+  # Notifications. Grok 1.0.77 also sends a Notification with
+  # notificationType "agent_error" on every failed turn, just before
+  # StopFailure (fixture: pkg/sciontool/hooks/dialects/testdata/grok-build).
+  # It is not a question for the user, and StopFailure reports the error,
+  # so it is ignored.
   Notification:
     event: notification
+    skip_when:
+      - field: notificationType
+        equals: agent_error
     fields:
       message: message

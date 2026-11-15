@@ -252,9 +252,16 @@ func TestCopilotDialect_CamelCasePayloads(t *testing.T) {
 		assert.Equal(t, "s1", ev.Data.SessionID)
 	})
 	t.Run("error object", func(t *testing.T) {
-		ev := parse("errorOccurred", `{"sessionId":"s1","error":{"message":"boom","name":"Error"}}`)
+		// A failed model call, not a question for the user (copilot
+		// fixtures in pkg/sciontool/hooks/dialects/testdata/copilot).
+		ev := parse("errorOccurred", `{"sessionId":"s1","errorContext":"model_call","error":{"message":"boom","name":"Error"}}`)
+		assert.Equal(t, hooks.EventModelEnd, ev.Name)
 		assert.Equal(t, "boom", ev.Data.Error)
-		assert.Equal(t, "boom", ev.Data.Message)
+		assert.True(t, ev.Data.Uncounted)
+		assert.Empty(t, ev.Data.Message)
+		// Only errorContext model_call was captured; other errors are ignored.
+		ev = parse("errorOccurred", `{"sessionId":"s1","error":{"message":"boom","name":"Error"}}`)
+		assert.Equal(t, hooks.EventIgnored, ev.Name)
 	})
 	t.Run("no payload still maps the event", func(t *testing.T) {
 		ev := parse("agentStop", ``)

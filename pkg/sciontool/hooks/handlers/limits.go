@@ -117,7 +117,9 @@ func (h *LimitsHandler) Handle(event *hooks.Event) error {
 		return h.incrementAndCheck("turn_count", h.maxTurns, "max_turns")
 
 	case hooks.EventModelEnd:
-		if h.maxModelCalls <= 0 {
+		// An uncounted model-end (copilot's failed-call errorOccurred) is
+		// not a count of the harness's model calls.
+		if h.maxModelCalls <= 0 || event.Data.Uncounted {
 			return nil
 		}
 		return h.incrementAndCheck("model_call_count", h.maxModelCalls, "max_model_calls")

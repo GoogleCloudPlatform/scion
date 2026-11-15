@@ -648,6 +648,12 @@ type UsageDeriver struct {
 	// Pipeline before the deriver is published.
 	sessionUsage func(SessionUsage)
 
+	// apiOutcome, if set, receives the APIOutcome of each recorded log
+	// increment (not a duplicate), for sciontool init's API-error watchdog
+	// (ptone/scion#7858). Set by the Pipeline before the deriver is
+	// published.
+	apiOutcome func(APIOutcome)
+
 	// analytics, if set, receives one agent.usage event per accepted
 	// increment, appended to the outbox BEFORE the counters are updated
 	// (WP2 design section 2). Set by the Pipeline before the deriver is
@@ -775,7 +781,9 @@ func resourceIdentityFingerprint() string {
 // ProcessResourceLogs derives usage from raw, pre-filter log records. It
 // must run before the event filter drops records (design §3.3: derivation
 // must not depend on Filter.Include), and reads only the event name, model,
-// status and numeric token attributes — nothing else leaves this function.
+// status and numeric token attributes — nothing else leaves this function,
+// except a failed call's HTTP status and error text, which go only to the
+// in-process APIOutcomeObserver (see APIOutcome), never to an exporter.
 // Called from Pipeline.handleLogs before the policy's event filter.
 func (d *UsageDeriver) ProcessResourceLogs(ctx context.Context, resourceLogs []*logspb.ResourceLogs) {
 	if d == nil || len(d.rules) == 0 {
@@ -1004,6 +1012,9 @@ func (d *UsageDeriver) observeRecord(ctx context.Context, scopeName string, reso
 		d.recordAnalytics(obs)
 		d.record(ctx, increment)
 		d.derived.Add(1)
+		if d.apiOutcome != nil && increment.Calls != 0 {
+			d.apiOutcome(apiOutcomeFromRecord(record, increment, time.Now()))
+		}
 		return true
 	}
 	return false

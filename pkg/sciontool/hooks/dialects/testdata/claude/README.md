@@ -42,3 +42,39 @@ In this version the parent's sub-agent tool is named `Agent`.
 
 Records are re-serialised with sorted keys. All other fields and values are
 as captured.
+
+# Claude Code API-error hook-payload fixtures
+
+Claude Code 2.1.325 (`@anthropic-ai/claude-code` npm), TUI started as
+`claude --dangerously-skip-permissions 'Say hello'` with
+`ANTHROPIC_BASE_URL` pointed at the mock and every event in
+`harnesses/claude/home/.claude/settings.json` plus `StopFailure`
+registered.
+
+- `api-error-400-2.1.325.jsonl`: 400 on every call; a second prompt typed.
+- `api-error-401-2.1.325.jsonl`: 401 on every call.
+
+A failed turn fires **`StopFailure` instead of `Stop`**, with `error` a bare
+category (`"unknown"` for the 400, `"authentication_failed"` for the 401)
+and `last_assistant_message` the provider text (`"API Error: 400 ..."`).
+(Headless `claude -p` fired no `StopFailure` for the 401; the TUI did.)
+
+## How it was captured (all API-error fixtures)
+
+Captured 2026-11-14 for ptone/scion#7937. The CLI ran in its interactive
+TUI inside tmux (as Scion runs it; codex also once headless), from a
+throwaway home and project, with the harness's own hook registration
+pointed at a script that appended each stdin payload to a file. The model
+endpoint was a local mock that answers every request with HTTP 400 (or 401)
+and the body `Permission 'aiplatform.endpoints.predict' denied on resource
+(or it may not exist).` in the provider's error shape. No real credentials
+were used. Where a record shows a second turn, a follow-up prompt was typed
+into the TUI. The capture scripts are kept with the evidence in the
+project's scratchpad (`evidence/b2a-hook-fixtures/scripts`).
+
+Scrubs (`scrub.py`): capture-host paths become `/workspace` and
+`/home/user`; UUIDs become synthetic `0000000N-0000-4000-8000-...`
+values; timestamps are zeroed; bulky fields with no status signal
+(`stack`, `options`, `messages`, `tools`, `system_prompt`, `llm_request`,
+`workspacePaths`) are removed. Records are re-serialised with sorted keys.
+Everything else is as captured.

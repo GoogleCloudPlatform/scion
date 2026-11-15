@@ -35,6 +35,14 @@ import (
 // grandchild whose exit code is otherwise invisible to the supervisor).
 const HarnessExitCodeFile = "/tmp/scion-harness-exit-code"
 
+// HarnessTailFile is the container-local path where the tmux agent-window
+// wrapper saves the last lines of the harness pane once the harness exits,
+// before it writes HarnessExitCodeFile. `sciontool init` appends the last
+// non-empty lines to the crash reason ("Agent crashed with exit code N:
+// <tail>"), so a reader that waits on the exit-code file also sees the
+// tail. Like HarnessExitCodeFile it is a shared runtime/init contract.
+const HarnessTailFile = "/tmp/scion-harness-tail"
+
 // HarnessInitRunFile is the container-local path where `sciontool init`
 // records the current init run, written at the start of each run before the
 // tmux session is created. Line 1 is "nonce=HEX mode=hook" or
@@ -460,6 +468,13 @@ const (
 	ActivityStalled         Activity = "stalled"
 	ActivityOffline         Activity = "offline"
 	ActivityCrashed         Activity = "crashed"
+	// ActivityHarnessError means the harness process is alive at its prompt
+	// but reported that a model, API or auth error ended its turn. The
+	// reason is in Detail.Message. It is sticky and is cleared by the next
+	// turn-progress hook (a new message makes the harness retry). Only
+	// sciontool sets it, from a harness signal; a dead harness is
+	// PhaseError instead. Displayed as "harness error".
+	ActivityHarnessError Activity = "harness_error"
 )
 
 // ExitReason describes why an agent process terminated. Unlike Activity
@@ -559,6 +574,7 @@ var allActivities = []Activity{
 	ActivityStalled,
 	ActivityOffline,
 	ActivityCrashed,
+	ActivityHarnessError,
 }
 
 // Activities returns a copy of all valid Activity values.
@@ -595,10 +611,12 @@ func (a Activity) Validate() error {
 
 // IsSticky reports whether this activity resists being overwritten by normal
 // event-driven updates. Sticky activities are only cleared by "new work" events
-// (prompt-submit, agent-start, session-start).
+// (prompt-submit, agent-start, session-start); harness_error is also cleared
+// by any other turn-progress event (model-start, tool-start).
 func (a Activity) IsSticky() bool {
 	switch a {
-	case ActivityWaitingForInput, ActivityBlocked, ActivityCompleted, ActivityLimitsExceeded, ActivityCrashed:
+	case ActivityWaitingForInput, ActivityBlocked, ActivityCompleted, ActivityLimitsExceeded, ActivityCrashed,
+		ActivityHarnessError:
 		return true
 	}
 	return false
@@ -621,7 +639,7 @@ func (a Activity) IsTerminal() bool {
 func (a Activity) ImpliesRunning() bool {
 	switch a {
 	case ActivityWorking, ActivityThinking, ActivityExecuting,
-		ActivityWaitingForInput, ActivityBlocked, ActivityCompleted:
+		ActivityWaitingForInput, ActivityBlocked, ActivityCompleted, ActivityHarnessError:
 		return true
 	}
 	return false
@@ -664,12 +682,16 @@ func (s AgentState) AcceptsInput() bool {
 }
 
 // DisplayLabel returns the user-facing label for an activity. It differs
-// from the raw value only for initializing, which is shown as "starting".
-// Use it in display code keyed on activity; the legacy Status string comes
-// from DisplayStatus instead.
+// from the raw value only for initializing, which is shown as "starting",
+// and harness_error, which is shown as "harness error". Use it in display
+// code keyed on activity; the legacy Status string comes from DisplayStatus
+// instead.
 func (a Activity) DisplayLabel() string {
-	if a == ActivityInitializing {
+	switch a {
+	case ActivityInitializing:
 		return "starting"
+	case ActivityHarnessError:
+		return "harness error"
 	}
 	return string(a)
 }

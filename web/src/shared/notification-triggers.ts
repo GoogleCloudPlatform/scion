@@ -31,6 +31,7 @@ export const DEFAULT_TRIGGERS: readonly string[] = [
   'LIMITS_EXCEEDED',
   'STALLED',
   'ERROR',
+  'HARNESS_ERROR',
   'HALTED',
 ];
 
@@ -41,6 +42,7 @@ export const ALL_TRIGGERS: readonly string[] = [
   'LIMITS_EXCEEDED',
   'STALLED',
   'ERROR',
+  'HARNESS_ERROR',
   'HALTED',
   'DELETED',
 ];
@@ -53,6 +55,8 @@ const TRIGGER_LABELS: Record<string, string> = {
   LIMITS_EXCEEDED: 'Limits Exceeded',
   STALLED: 'Stalled',
   ERROR: 'Error',
+  // A live harness reported a model, API or auth error (ptone/scion#7858).
+  HARNESS_ERROR: 'Harness Error',
   // The platform ended a run that should still be running (ptone/scion#4853).
   HALTED: 'Halted',
   DELETED: 'Deleted',

@@ -454,12 +454,33 @@ func TestHubAgentToAgentInfo_HarnessConfigFallbackToAppliedConfig(t *testing.T) 
 	}
 }
 
-func TestHaltedPhaseLabel(t *testing.T) {
-	assert.Equal(t, "halted (preempted)", haltedPhaseLabel("halted", "preempted"))
-	assert.Equal(t, "halted (out of memory)", haltedPhaseLabel("halted", "oom_killed"))
-	assert.Equal(t, "halted (unknown)", haltedPhaseLabel("halted", "evil\x1b[2J"), "only fixed labels are shown")
-	assert.Equal(t, "halted (unknown)", haltedPhaseLabel("halted", ""))
-	assert.Equal(t, "stopped", haltedPhaseLabel("stopped", "preempted"), "only halted shows its reason")
+func TestExitReasonPhaseLabel(t *testing.T) {
+	assert.Equal(t, "halted (preempted)", exitReasonPhaseLabel("halted", "preempted"))
+	assert.Equal(t, "halted (out of memory)", exitReasonPhaseLabel("halted", "oom_killed"))
+	assert.Equal(t, "halted (unknown)", exitReasonPhaseLabel("halted", "evil\x1b[2J"), "only fixed labels are shown")
+	assert.Equal(t, "halted (unknown)", exitReasonPhaseLabel("halted", ""))
+	assert.Equal(t, "error (crashed)", exitReasonPhaseLabel("error", "crashed"))
+	assert.Equal(t, "error (out of memory)", exitReasonPhaseLabel("error", "oom_killed"))
+	assert.Equal(t, "error (unknown)", exitReasonPhaseLabel("error", "evil\x1b[2J"), "only fixed labels are shown")
+	assert.Equal(t, "error", exitReasonPhaseLabel("error", ""), "an init failure records no exit reason")
+	assert.Equal(t, "stopped", exitReasonPhaseLabel("stopped", "preempted"), "only halted and error show their reason")
+}
+
+func TestDisplayAgents_HubErrorShowsExitReason(t *testing.T) {
+	prev := outputFormat
+	outputFormat = ""
+	t.Cleanup(func() { outputFormat = prev })
+
+	code := 1
+	info := hubAgentToAgentInfo(hubclient.Agent{Slug: "crashed-agent", Phase: "error", ExitReason: "crashed", ExitCode: &code,
+		Message: "Agent crashed with exit code 1: Error: invalid flag"})
+
+	var err error
+	out := captureStdout(t, func() { err = displayAgents([]api.AgentInfo{info}, false) })
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	require.Len(t, lines, 2, out)
+	assert.Contains(t, lines[1], "error (crashed)")
 }
 
 func TestDisplayAgents_HubHaltedShowsReason(t *testing.T) {
@@ -2457,4 +2478,86 @@ func TestListAgentsViaHub_BareRelationshipFlag_ModeDefaults(t *testing.T) {
 		require.NoError(t, run(hubCtx))
 		assert.Equal(t, callingUserID, gotLineageRootID)
 	})
+}
+
+func TestFormatAgentLastActivity(t *testing.T) {
+	ago := time.Now().Add(-2*time.Minute - 5*time.Second)
+	tests := []struct {
+		name     string
+		agent    api.AgentInfo
+		expected string
+	}{
+		{
+			name:     "harness_error shows its reason",
+			agent:    api.AgentInfo{Activity: "harness_error", Detail: &api.AgentDetail{Message: "model API: APIError (status 400)"}},
+			expected: "harness error: model API: APIError (status 400), 2m ago",
+		},
+		{
+			name:     "harness_error reason is capped at 40 runes",
+			agent:    api.AgentInfo{Activity: "harness_error", Detail: &api.AgentDetail{Message: "model API: " + strings.Repeat("é", 60)}},
+			expected: "harness error: model API: " + strings.Repeat("é", 26) + "..., 2m ago",
+		},
+		{
+			name:     "harness_error reason with terminal control characters is made safe",
+			agent:    api.AgentInfo{Activity: "harness_error", Detail: &api.AgentDetail{Message: "model API: \x1b[31mbad\nrequest"}},
+			expected: "harness error: model API: \ufffd[31mbad\ufffdrequest, 2m ago",
+		},
+		{
+			name:     "harness_error without a reason",
+			agent:    api.AgentInfo{Activity: "harness_error"},
+			expected: "harness error, 2m ago",
+		},
+		{
+			name:     "stalled shows the activity it stalled from",
+			agent:    api.AgentInfo{Activity: "stalled", StalledFromActivity: "executing"},
+			expected: "stalled (was executing), 2m ago",
+		},
+		{
+			name:     "other activities are unchanged",
+			agent:    api.AgentInfo{Activity: "thinking", Detail: &api.AgentDetail{Message: "Processing"}},
+			expected: "thinking, 2m ago",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, formatAgentLastActivity(tt.agent, ago))
+		})
+	}
+}
+
+// TestHubAgentToAgentInfo_HarnessErrorFields checks that list JSON carries
+// the Hub message (as detail.message), the launch and stalledFromActivity.
+func TestHubAgentToAgentInfo_HarnessErrorFields(t *testing.T) {
+	info := hubAgentToAgentInfo(hubclient.Agent{
+		Slug:                "a",
+		Phase:               "running",
+		Activity:            "stalled",
+		StalledFromActivity: "executing",
+		Message:             "model API: APIError (status 400)",
+		Launch:              &hubclient.AgentLaunch{ID: "l1", State: "ended", Kind: "start", EndReason: "running"},
+	})
+	require.NotNil(t, info.Detail)
+	assert.Equal(t, "model API: APIError (status 400)", info.Detail.Message)
+	assert.Equal(t, "executing", info.StalledFromActivity)
+	require.NotNil(t, info.Launch)
+	assert.Equal(t, "l1", info.Launch.ID)
+
+	data, err := json.Marshal(info)
+	require.NoError(t, err)
+	var decoded map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &decoded))
+	assert.Equal(t, "executing", decoded["stalledFromActivity"])
+	assert.Equal(t, map[string]interface{}{"message": "model API: APIError (status 400)"}, decoded["detail"])
+	assert.Equal(t, "l1", decoded["launch"].(map[string]interface{})["id"])
+
+	// No message, no detail.
+	assert.Nil(t, hubAgentToAgentInfo(hubclient.Agent{Slug: "b"}).Detail)
+}
+
+// TestHubclientAgent_DecodesStalledFromActivity pins that the REST field the
+// Hub sends is no longer dropped by hubclient.Agent.
+func TestHubclientAgent_DecodesStalledFromActivity(t *testing.T) {
+	var a hubclient.Agent
+	require.NoError(t, json.Unmarshal([]byte(`{"slug":"a","activity":"stalled","stalledFromActivity":"working"}`), &a))
+	assert.Equal(t, "working", a.StalledFromActivity)
 }

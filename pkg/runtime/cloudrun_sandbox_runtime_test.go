@@ -1045,7 +1045,7 @@ func TestBuildEntrypoint_WithHarness(t *testing.T) {
 		"select-window -t scion:agent",
 		"while tmux has-session -t scion",
 		"claude",
-		"echo $? >",
+		"echo $scion_hrc > /tmp/scion-harness-exit-code",
 		// #22 entrypoint output capture preserved (log only; no .rc file).
 		entrypointLogFile,
 	} {

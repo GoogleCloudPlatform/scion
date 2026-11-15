@@ -431,6 +431,7 @@ export type AgentActivity =
   | 'blocked'
   | 'completed'
   | 'limits_exceeded'
+  | 'harness_error'
   | 'stalled'
   | 'offline';
 

@@ -108,8 +108,17 @@ ends, then classifies it:
 | Crash / OOM / `SIGKILL` (non-zero) | `error` | — (cleared) |
 
 A crash surfaces as the **`error` phase** — the activity is cleared, and the
-crash detail is carried in the agent's message (e.g. `Agent crashed with exit
-code 137`). On Kubernetes, a container killed for exceeding its memory limit
+crash detail is carried in the agent's message, with the last lines the
+harness printed (up to five, on one line and redacted for credentials; the
+whole message is cut to 300 characters by dropping the oldest output first),
+e.g. `Agent crashed with exit code 1: Error: unknown option
+'--frob'`. `scion list` shows the exit reason next to the phase when one is
+recorded, e.g. `error (crashed)`. A harness that exits within its first moments
+(a missing binary, a wrapper script that fails) is reported the same way, with
+its own exit code; if the harness never started at all, the message reads
+`Agent failed to start (exit code 1): …`. A failed pre-start hook or harness
+provisioning step leaves the agent in `error` with the message
+`pre-start hook failed: <reason>` on every runtime. On Kubernetes, a container killed for exceeding its memory limit
 carries exit reason `oom_killed` and a memory-limit message instead (see
 [Out-of-memory kills](/scion/hosted/ha/kubernetes/#out-of-memory-kills)). Two paths can set `error`: `sciontool` reports it from the recovered
 exit code (the authoritative path), and the Hub also derives `error` from a
@@ -252,6 +261,118 @@ failed with the agent in `error`. Fix the reported cause and follow the Hub's hi
   `scion reincarnate <agent> --harness <old-config>`. This performs another reset;
   it does not recover the previous home's contents.
 
+## Harness Errors: the harness is still running
+
+A harness can fail without exiting. When the model provider rejects a request
+(for example a `400` for a denied permission, an expired credential, or an
+unknown model), most harnesses print the error in their terminal and return to
+their prompt. The process keeps running, so there is no crash to report.
+
+When the harness reports such a turn-ending error on its completion hook, the
+agent stays in the `running` phase with the **`harness_error`** activity, and
+the reason is in the agent's message, for example
+`model API: APIError (status 400)`. The reason is put on one line, redacted
+for credentials and cut to 300 characters.
+
+- `scion list` shows it in **LAST ACTIVITY** as
+  `harness error: model API: APIError (status 400), 2m ago`, and
+  `scion list --format json` carries the reason in `detail.message`.
+- Subscribers with the `HARNESS_ERROR` trigger get a notification with the
+  reason. `HARNESS_ERROR` is in the default triggers. The `ERROR` trigger still
+  matches only the `error` phase, a dead harness.
+- The agent is not marked `stalled` while it shows `harness_error`, so the
+  reason is not replaced by a stall. It is still marked `offline` if its
+  heartbeats stop.
+- The next sign that the harness is making progress (a new prompt, a model
+  call or a tool call) clears it. Fix the cause, then send the agent a message
+  to make it retry: `scion message <agent-name> "continue"`.
+
+The web UI shows it as a red **harness error** badge; hover over the badge to
+see the reason.
+
+Whether a harness reports the error on a hook depends on the harness. This
+was checked by running each harness CLI against a model endpoint that
+answers with a `400`:
+
+| Harness | Hook that reports the failed turn | Shows `harness_error` from its hook |
+|---|---|---|
+| Claude Code (2.1.325) | `StopFailure`, with the provider's message | Yes, also for a `401` (`authentication_failed: ...`) |
+| Antigravity (1.5.9) | `Stop` with `error` | Yes |
+| grok-build (1.0.77) | `StopFailure` with `errorDetails` | Yes |
+| OpenCode (1.19.5) | `session.idle` with the bridge's error | Yes; the reason has the error name and status, not the provider's message |
+| Pi | `agent_end` with `error` from the bridge | Yes (bridge test payloads) |
+| Codex (0.169.0) | None: a failed turn fires no `Stop` and no notify | No; the agent stays `thinking`, and never `completed` |
+| Gemini CLI (0.68.0) | None: `AfterAgent` fires without an error | No; the agent shows `working` |
+| Copilot CLI (1.0.112) | `errorOccurred`, but it looks the same for an error Copilot then retries successfully, and no `agentStop` follows a failed turn | No; it is recorded as a failed model call, and the agent shows `working` |
+| Muse Code (1.4.20) | Only the failed model call (`PostLLMCall` with `error`); no turn end | No |
+| Hermes | No hooks | No |
+
+For a harness marked No, the agent can still be marked `stalled` after the
+stall threshold; `scion look <agent-name>` shows the error in its terminal.
+
+### Errors that no completion hook reports
+
+Some harnesses show a model error in their terminal without reporting it on a
+completion hook, and some never get as far as the first turn. `sciontool init`
+watches for both cases inside the agent container:
+
+- **Model API errors seen in telemetry.** When the harness exports telemetry
+  (Claude Code, Gemini CLI and Codex with telemetry enabled), Scion reads each
+  model API attempt from it. The agent gets `harness_error` with the reason
+  `model API <status>: <message>` when all of the following are true:
+  - the latest attempt of the agent's main model failed with `400`, `401`,
+    `403` or `404`. A failed call to another model, such as a sub-agent or a
+    small background model, does not count;
+  - the agent is `thinking` or `working`;
+  - after the failure, nothing else happened for a while: no successful
+    attempt, no new turn, no status change. The wait is 30 seconds once the
+    harness has visibly ended its turn (it wrote `working` after the
+    failure). It is 2 minutes while the turn has not visibly ended, because
+    the harness may still be streaming a retry or the main model's answer.
+
+  A retried transient error, such as a `503` followed by a success, does not
+  count. A status change after the failure, for example the harness writing
+  `working` when its turn ends, starts the wait again but never cancels the
+  report.
+- **The initial task did not start.** If the agent was started with a task and
+  its harness reports turn events, Scion checks 3 minutes after the harness is
+  ready. The agent gets `harness_error` with the reason
+  `harness did not start the initial task: <detail>` in either case:
+  - no turn started at all (for example the harness is stuck at a login or
+    authorization screen);
+  - the turn so far ended on a failed model call that the harness reported on a
+    model hook.
+
+  A started turn shows as a prompt, a model call or a tool call, or as a model
+  step or turn that ended without an error. OpenCode and Pi report nothing
+  when the initial prompt starts, so their first finished model step, first
+  tool call or finished turn is what counts. If one of these arrives after the
+  report, the report is withdrawn and the agent returns to `working`.
+
+  The detail is that model error when there is one. Otherwise it is the last
+  lines of the harness terminal, redacted and cut like every reason. Hermes
+  reports no turn events and is not checked.
+
+An error the harness reports on its completion hook takes precedence. Neither
+check replaces it or reports it a second time.
+
+Gaps that remain: without telemetry, a Codex turn that fails after the prompt
+is still marked `stalled`. The same applies to a GitHub Copilot turn that
+fails after the prompt, and to a model error after the first turn on a harness
+with no completion-hook error (muse-code).
+
+Some healthy first turns are briefly reported as not started:
+
+- On OpenCode and Pi, a first model step that runs for more than 3 minutes
+  before its first tool call, or before it finishes.
+- On GitHub Copilot, a transient model error that Copilot retries
+  successfully early in the first turn, when no tool call follows before the
+  3-minute check. Copilot reports failed model calls but not successful ones.
+
+Scion retracts such a report and returns the agent to `working` as soon as
+the harness reports a finished step or turn, or a tool call. It never
+retracts a harness error that the harness itself reported.
+
 ## Auto-Suspend of Stalled Agents
 
 To reclaim resources from agents that are no longer making progress, the Hub can
@@ -299,6 +420,7 @@ Always start by running `scion look <agent-name>` to inspect the active screen s
 
 | Symptom | Probable Cause | Correct Recovery Action |
 |---|---|---|
+| **`harness error`** in `scion list` | The harness reported that the model provider rejected its turn (the reason is in the message, for example `model API: APIError (status 400)`). The harness is still running. | Fix the cause (credentials, model name, permissions), then send `scion message <agent-name> "continue"` to retry. Do *not* recreate the agent. |
 | **Transient API errors** in logs | LLM provider rate-limits, quotas, or minor timeouts. | Send a wake-up command: `scion message <agent-name> "continue"`. Do *not* recreate the agent. |
 | **`LIMITS_EXCEEDED`** state | The agent reached its configured turn, model call, or duration ceiling. | Send a continue command: `scion message <agent-name> "continue"`. This clears the ceiling for another cycle. |
 | **Cryptographic primitive error** | The Hub regenerated its signing keys (e.g., on restart) or there is a key mismatch in a multi-replica deployment. | Send `scion message <agent-name> "continue"`. Message delivery does not rely on the agent's own token. If looping, contact the operator: the Hub's `SharedSigningSecret` (`SCION_SERVER_SESSION_SECRET`) must be pinned in the deploy config. |

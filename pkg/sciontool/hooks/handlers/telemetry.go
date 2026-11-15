@@ -38,6 +38,7 @@ var SpanMapping = map[string]string{
 	hooks.EventModelEnd:         "gen_ai.api.response",
 	hooks.EventAgentStart:       "agent.turn.start",
 	hooks.EventAgentEnd:         "agent.turn.end",
+	hooks.EventAgentError:       "agent.turn.end",
 	hooks.EventNotification:     "agent.notification",
 	hooks.EventResponseComplete: "agent.response.complete",
 	hooks.EventPreStart:         "agent.lifecycle.pre_start",
@@ -208,6 +209,15 @@ func (h *TelemetryHandler) Handle(event *hooks.Event) error {
 		return nil
 	}
 
+	// An uncounted model-end (copilot's failed-call errorOccurred) is
+	// exported as a span and log record only: the harness reports no
+	// successful calls, so counting it would make the model-call counts,
+	// the gen_ai.api.calls metric and usage records count failures only.
+	if event.Name == hooks.EventModelEnd && event.Data.Uncounted {
+		h.singleSpan(event, spanName)
+		return nil
+	}
+
 	// Update the in-memory aggregator for Hub reporting.
 	h.updateAggregator(event)
 
@@ -223,7 +233,7 @@ func (h *TelemetryHandler) Handle(event *hooks.Event) error {
 		h.endSpan(event, spanName, hooks.EventModelStart)
 	case hooks.EventAgentStart:
 		h.startSpan(event, spanName)
-	case hooks.EventAgentEnd:
+	case hooks.EventAgentEnd, hooks.EventAgentError:
 		h.endSpan(event, spanName, hooks.EventAgentStart)
 	default:
 		// Single-shot events - create and immediately end span
@@ -296,7 +306,7 @@ func toolStatusLabel(outcome telemetry.ToolOutcome) string {
 func setEndSpanStatus(span trace.Span, event *hooks.Event) {
 	switch toolOutcome(event) {
 	case telemetry.ToolFailed:
-		desc := event.Data.Error
+		desc := telemetryErrorText(event.Data.Error)
 		if desc == "" {
 			desc = "failed"
 		}
@@ -406,8 +416,8 @@ func (h *TelemetryHandler) emitLogRecord(ctx context.Context, event *hooks.Event
 	if event.Data.Success {
 		attrs = append(attrs, slog.Bool("success", true))
 	}
-	if event.Data.Error != "" {
-		attrs = append(attrs, slog.String("error", event.Data.Error))
+	if errText := telemetryErrorText(event.Data.Error); errText != "" {
+		attrs = append(attrs, slog.String("error", errText))
 	}
 	if event.Data.Interrupted {
 		attrs = append(attrs, slog.Bool("interrupted", true))
@@ -496,8 +506,8 @@ func (h *TelemetryHandler) eventToEndAttributes(event *hooks.Event, startTime ti
 		attrs = append(attrs, attribute.Bool("success", true))
 	}
 
-	if event.Data.Error != "" {
-		attrs = append(attrs, attribute.String("error", event.Data.Error))
+	if errText := telemetryErrorText(event.Data.Error); errText != "" {
+		attrs = append(attrs, attribute.String("error", errText))
 	}
 	if event.Data.Interrupted {
 		attrs = append(attrs, attribute.Bool("interrupted", true))

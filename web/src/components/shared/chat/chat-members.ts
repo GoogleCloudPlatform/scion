@@ -68,6 +68,7 @@ const TERMINAL_STATUSES = new Set([
   'error',
   'waiting_for_input',
   'limits_exceeded',
+  'harness_error',
   'offline',
   'stopped',
   'suspended',

@@ -201,6 +201,7 @@ func TestSpanMapping(t *testing.T) {
 		hooks.EventModelEnd:         "gen_ai.api.response",
 		hooks.EventAgentStart:       "agent.turn.start",
 		hooks.EventAgentEnd:         "agent.turn.end",
+		hooks.EventAgentError:       "agent.turn.end",
 		hooks.EventNotification:     "agent.notification",
 		hooks.EventResponseComplete: "agent.response.complete",
 	}

@@ -78,7 +78,7 @@ func TestActivityIsValid(t *testing.T) {
 		activity Activity
 		want     bool
 	}{
-		// All 10 valid activities.
+		// All 12 valid activities.
 		{ActivityInitializing, true},
 		{ActivityWorking, true},
 		{ActivityThinking, true},
@@ -90,6 +90,7 @@ func TestActivityIsValid(t *testing.T) {
 		{ActivityStalled, true},
 		{ActivityOffline, true},
 		{ActivityCrashed, true},
+		{ActivityHarnessError, true},
 		// Empty is valid (omitempty / non-running phase).
 		{"", true},
 		// Legacy values that should NOT be valid.
@@ -143,6 +144,7 @@ func TestActivityIsSticky(t *testing.T) {
 		{ActivityCompleted, true},
 		{ActivityLimitsExceeded, true},
 		{ActivityCrashed, true},
+		{ActivityHarnessError, true},
 		{ActivityWorking, false},
 		{ActivityThinking, false},
 		{ActivityExecuting, false},
@@ -534,7 +536,7 @@ func TestPhaseIsActivePhase(t *testing.T) {
 
 func TestActivityImpliesRunning(t *testing.T) {
 	implies := []Activity{ActivityWorking, ActivityThinking, ActivityExecuting,
-		ActivityWaitingForInput, ActivityBlocked, ActivityCompleted}
+		ActivityWaitingForInput, ActivityBlocked, ActivityCompleted, ActivityHarnessError}
 	for _, a := range implies {
 		if !a.ImpliesRunning() {
 			t.Errorf("Activity(%q).ImpliesRunning() = false, want true", a)
@@ -551,8 +553,8 @@ func TestActivityImpliesRunning(t *testing.T) {
 
 func TestActivitiesEnumeration(t *testing.T) {
 	activities := Activities()
-	if len(activities) != 11 {
-		t.Fatalf("Activities() returned %d items, want 11", len(activities))
+	if len(activities) != 12 {
+		t.Fatalf("Activities() returned %d items, want 12", len(activities))
 	}
 
 	// Verify all returned activities are valid.
@@ -663,6 +665,34 @@ func TestInitializingDisplay(t *testing.T) {
 	}
 	if got := ActivityWorking.DisplayLabel(); got != "working" {
 		t.Errorf("DisplayLabel() = %q, want working", got)
+	}
+}
+
+func TestHarnessErrorClassification(t *testing.T) {
+	a := ActivityHarnessError
+	if !a.IsSticky() || !a.ImpliesRunning() {
+		t.Errorf("harness_error must be sticky and imply running")
+	}
+	if a.IsTerminal() || a.IsPlatformSet() {
+		t.Errorf("harness_error must be non-terminal and not platform-set")
+	}
+	if got := a.DisplayLabel(); got != "harness error" {
+		t.Errorf("DisplayLabel() = %q, want %q", got, "harness error")
+	}
+	running := AgentState{Phase: PhaseRunning, Activity: a}
+	if err := running.Validate(); err != nil {
+		t.Errorf("running/harness_error should validate: %v", err)
+	}
+	// The legacy status string is the raw activity, distinct from the
+	// "error" phase so subscribers can tell a live harness from a crash.
+	if got := running.DisplayStatus(); got != "harness_error" {
+		t.Errorf("DisplayStatus() = %q, want harness_error", got)
+	}
+	if !running.AcceptsInput() {
+		t.Error("a harness_error agent is alive at its prompt and accepts input")
+	}
+	if err := (AgentState{Phase: PhaseStopped, Activity: a}).Validate(); err == nil {
+		t.Error("stopped/harness_error should not validate")
 	}
 }
 

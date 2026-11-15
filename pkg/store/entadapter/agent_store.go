@@ -2891,7 +2891,10 @@ func (s *AgentStore) setAgentNativeCloudRunOnce(ctx context.Context, uid uuid.UU
 
 // stalledExcluded lists the activities that disqualify a running agent from
 // being marked "stalled" (terminal, already-stalled, or intentionally waiting).
-var stalledExcluded = []string{"completed", "limits_exceeded", "blocked", "stalled", "offline", "waiting_for_input"}
+// harness_error is excluded too: the harness already reported why it is not
+// making progress, and that reason must not be replaced by a stall. It is
+// not in staleOfflineExcluded: when heartbeats stop, offline is the truth.
+var stalledExcluded = []string{"completed", "limits_exceeded", "blocked", "stalled", "offline", "waiting_for_input", string(state.ActivityHarnessError)}
 
 // MarkStalledAgents marks running agents whose last activity event predates
 // activityThreshold but whose heartbeat is still recent (>= heartbeatRecency)

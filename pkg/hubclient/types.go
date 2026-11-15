@@ -76,6 +76,9 @@ type Agent struct {
 	// Launch describes the agent's current or most recent launch. It is
 	// absent when the Hub does not report launches or the agent has none.
 	Launch *AgentLaunch `json:"launch,omitempty"`
+	// StalledFromActivity is the activity the agent had when the Hub marked
+	// it stalled; empty when it is not stalled.
+	StalledFromActivity string `json:"stalledFromActivity,omitempty"`
 	// ProvisionedOnly is true when the agent was provisioned but not
 	// started (ptone/scion#2929). Absent from Hubs that predate it (decodes
 	// as false). No omitempty: re-encoding keeps an explicit false so a
@@ -94,25 +97,7 @@ type Agent struct {
 }
 
 // AgentLaunch is the Hub's view of an agent's current or most recent launch.
-type AgentLaunch struct {
-	ID        string `json:"id"`
-	State     string `json:"state"`  // "active" | "ended"
-	Active    bool   `json:"active"` // the launch is in flight
-	Kind      string `json:"kind"`   // create | start | restart
-	Step      string `json:"step,omitempty"`
-	Error     string `json:"error,omitempty"` // launch error code, e.g. image_pull_failed
-	Cause     string `json:"cause,omitempty"` // runtime cause code behind a runtime_error, e.g. runtime_forbidden
-	EndReason string `json:"endReason,omitempty"`
-	// ResumePhase is the resume memory of a failed start (ptone/scion#4669):
-	// the resting phase the agent is treated as being in for a later start or
-	// resume (store.EffectiveRestingPhase), set only when it differs from the
-	// agent's phase.
-	ResumePhase string `json:"resumePhase,omitempty"`
-	// Deadline and RemainingSeconds are present only while the launch is
-	// active. RemainingSeconds is never negative.
-	Deadline         *time.Time `json:"deadline,omitempty"`
-	RemainingSeconds *int       `json:"remainingSeconds,omitempty"`
-}
+type AgentLaunch = api.AgentLaunch
 
 // AgentConfig represents agent configuration.
 type AgentConfig struct {

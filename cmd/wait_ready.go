@@ -85,6 +85,9 @@ func (e *waitReadyTimeoutError) Unwrap() error {
 type readyProbe struct {
 	Phase    string
 	Activity string
+	// Message is the Hub's status message: the reason when the agent is
+	// in harness_error or in phase error.
+	Message string
 	// LegacyStatus is true when only the legacy Status string was
 	// available (a Hub without phase/activity fields); a running agent
 	// then counts as ready, since no activity can be observed.
@@ -103,7 +106,9 @@ type waitReadyOptions struct {
 
 // waitForAgentAcceptsInput polls until the agent accepts input. It returns
 // the last probe and nil when ready, a *waitReadyTimeoutError at the
-// timeout, or an error when the agent leaves the running phase. Fetch
+// timeout, or an error when the agent leaves the running phase or is in
+// harness_error (the harness is up but its model or API calls fail, so it
+// is not usefully ready); both errors carry the agent's reason. Fetch
 // errors are retried until the timeout.
 func waitForAgentAcceptsInput(ctx context.Context, opts waitReadyOptions) (readyProbe, error) {
 	timeout := opts.Timeout
@@ -120,12 +125,15 @@ func waitForAgentAcceptsInput(ctx context.Context, opts waitReadyOptions) (ready
 		if err == nil {
 			last = p
 			as := state.AgentState{Phase: state.Phase(p.Phase), Activity: state.Activity(p.Activity)}
+			if as.Phase == state.PhaseRunning && as.Activity == state.ActivityHarnessError {
+				return p, fmt.Errorf("agent '%s' has a harness error while waiting for it to accept input%s", opts.AgentName, waitReadyReason(p.Message))
+			}
 			if as.AcceptsInput() || (p.LegacyStatus && as.Phase == state.PhaseRunning) {
 				return p, nil
 			}
 			switch as.Phase {
 			case state.PhaseStopping, state.PhaseStopped, state.PhaseError, state.PhaseHalted, state.PhaseSuspended:
-				return p, fmt.Errorf("agent '%s' entered phase %s while waiting for it to accept input", opts.AgentName, p.Phase)
+				return p, fmt.Errorf("agent '%s' entered phase %s while waiting for it to accept input%s", opts.AgentName, p.Phase, waitReadyReason(p.Message))
 			}
 			if !announced && opts.Progress != nil {
 				status := state.Activity(p.Activity).DisplayLabel()
@@ -142,6 +150,16 @@ func waitForAgentAcceptsInput(ctx context.Context, opts waitReadyOptions) (ready
 		case <-time.After(waitReadyPollInterval):
 		}
 	}
+}
+
+// waitReadyReason renders an agent's status message as the ": <reason>"
+// suffix of a --wait-ready error, or "" when there is none. The message is
+// agent-controlled, so terminal control characters are replaced.
+func waitReadyReason(message string) string {
+	if message == "" {
+		return ""
+	}
+	return ": " + safeText(message)
 }
 
 // remainingWaitReadyTimeout returns the readiness budget: what is left of an
@@ -183,5 +201,5 @@ func hubReadyProbe(a *hubclient.Agent) readyProbe {
 		phase, activity := hubStatusToPhaseActivity(a.Status)
 		return readyProbe{Phase: phase, Activity: activity, LegacyStatus: true}
 	}
-	return readyProbe{Phase: a.Phase, Activity: a.Activity}
+	return readyProbe{Phase: a.Phase, Activity: a.Activity, Message: a.Message}
 }

@@ -33,7 +33,7 @@ func TestIsReadinessEvent(t *testing.T) {
 		{Name: EventSessionStart},
 		{Name: EventPromptSubmit}, {Name: EventAgentStart}, {Name: EventModelStart},
 		{Name: EventModelEnd}, {Name: EventToolStart}, {Name: EventToolEnd},
-		{Name: EventAgentEnd}, {Name: EventNotification}, {Name: EventResponseComplete},
+		{Name: EventAgentEnd}, {Name: EventAgentError}, {Name: EventNotification}, {Name: EventResponseComplete},
 	}
 	no := []*Event{
 		nil,

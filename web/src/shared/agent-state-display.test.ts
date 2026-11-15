@@ -19,6 +19,7 @@ import { render } from 'lit';
 import {
   ACTIVITY_DISPLAY,
   agentStatusBadge,
+  harnessErrorHint,
   isProvisionedOnly,
   stateLabel,
 } from './agent-state-display.js';
@@ -90,5 +91,46 @@ describe('provision-only status (ptone/scion#2929)', () => {
     expect(busy.getAttribute('label')).toBe('waiting on others');
     const custom = badge({ name: 'a', phase: 'running' }, { status: 'running', label: 'running' });
     expect(custom.getAttribute('label')).toBe('running');
+  });
+});
+
+describe('harness_error status (ptone/scion#7858)', () => {
+  const badge = (agent: Partial<Agent>): Element => {
+    const host = document.createElement('div');
+    render(agentStatusBadge(agent as Agent), host);
+    return host.querySelector('scion-status-badge')!;
+  };
+
+  it('is an error-coloured badge labelled harness error', () => {
+    expect(ACTIVITY_DISPLAY.harness_error.variant).toBe('danger');
+    expect(stateLabel('harness_error')).toBe('harness error');
+  });
+
+  it('shows the reason as the badge tooltip', () => {
+    const el = badge({
+      name: 'a',
+      phase: 'running',
+      activity: 'harness_error',
+      detail: { message: 'model API: API Error: 400 denied' },
+    });
+    expect(el.getAttribute('status')).toBe('harness_error');
+    expect(el.getAttribute('label')).toBe('harness error');
+    expect(el.getAttribute('title')).toBe('model API: API Error: 400 denied');
+  });
+
+  it('falls back to the top-level message, and has no tooltip without one', () => {
+    expect(harnessErrorHint({ message: 'model API: 401' }, 'harness_error')).toBe('model API: 401');
+    expect(harnessErrorHint({}, 'harness_error')).toBeUndefined();
+  });
+
+  it('adds no tooltip to other statuses', () => {
+    expect(harnessErrorHint({ detail: { message: 'Ready' } }, 'working')).toBeUndefined();
+    const el = badge({
+      name: 'a',
+      phase: 'running',
+      activity: 'working',
+      detail: { message: 'Ready' },
+    });
+    expect(el.hasAttribute('title')).toBe(false);
   });
 });

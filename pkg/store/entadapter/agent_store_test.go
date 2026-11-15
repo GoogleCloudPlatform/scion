@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
@@ -543,6 +544,39 @@ func TestAgentStore_MarkStalledAgents(t *testing.T) {
 
 	gotActive, _ := s.GetAgent(ctx, active.ID)
 	assert.Equal(t, "executing", gotActive.Activity)
+}
+
+// TestAgentStore_MarkStalledAgents_HarnessErrorExcluded pins that a
+// harness_error agent is never marked stalled (its reported reason must not
+// be replaced), but is still swept to offline when its heartbeats stop.
+func TestAgentStore_MarkStalledAgents_HarnessErrorExcluded(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	now := time.Now()
+	errored := makeAgent(projectID, "harness-error")
+	errored.Phase = "running"
+	errored.Activity = string(state.ActivityHarnessError)
+	errored.Message = "model API: APIError (status 400)"
+	errored.LastActivityEvent = now.Add(-30 * time.Minute)
+	errored.LastSeen = now
+	require.NoError(t, s.CreateAgent(ctx, errored))
+
+	updated, err := s.MarkStalledAgents(ctx, now.Add(-15*time.Minute), now.Add(-2*time.Minute))
+	require.NoError(t, err)
+	assert.Empty(t, updated)
+	got, err := s.GetAgent(ctx, errored.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.ActivityHarnessError), got.Activity)
+	assert.Equal(t, "model API: APIError (status 400)", got.Message)
+
+	// Heartbeats stop: offline is the truth.
+	got.LastSeen = now.Add(-10 * time.Minute)
+	require.NoError(t, s.UpdateAgent(ctx, got))
+	offline, err := s.MarkStaleAgentsOffline(ctx, now.Add(-5*time.Minute))
+	require.NoError(t, err)
+	require.Len(t, offline, 1)
+	assert.Equal(t, "offline", offline[0].Activity)
 }
 
 // TestCompositeStore_PurgeDeletedAgents_Cutoff pins the purge's eligibility

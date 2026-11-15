@@ -189,6 +189,9 @@ func TestMain(m *testing.M) {
 	envVarsToClear := append(testutil.HubEnvKeys(),
 		"SCION_HOST_UID", "SCION_HOST_GID", "SCION_KEEPID_UID",
 		initFirewallEnv,
+		// SCION_INITIAL_TASK arms the first-turn watchdog in RunInit, which
+		// would capture the real tmux pane 3 minutes in.
+		envInitialTask,
 		loglevel.EnvLogLevel, loglevel.EnvDebug)
 	for _, v := range envVarsToClear {
 		_ = os.Unsetenv(v)
@@ -235,6 +238,12 @@ func TestMain(m *testing.M) {
 	// readiness files under /tmp.
 	initRunFilePath = filepath.Join(tmpHome, "scion-init-run")
 	harnessReadyFilePath = filepath.Join(tmpHome, "scion-harness-ready")
+	turnEventsFilePath = filepath.Join(tmpHome, "scion-turn-events")
+	pendingHarnessErrorFilePath = filepath.Join(tmpHome, "scion-last-harness-error.json")
+	// Likewise the harness exit-code and pane-tail files RunInit removes
+	// before launch and reads at exit.
+	harnessExitCodePath = filepath.Join(tmpHome, "scion-harness-exit-code")
+	harnessTailPath = filepath.Join(tmpHome, "scion-harness-tail")
 
 	// hub.ReadTokenFile resolves its own home directory independently of
 	// $HOME: resolveTokenHome (pkg/sciontool/hub) prefers a real

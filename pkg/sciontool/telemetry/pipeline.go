@@ -74,10 +74,12 @@ type Pipeline struct {
 	analytics        analyticsState // agent.usage outbox + drainer (analytics_drainer.go)
 	health           healthEmitter  // telemetry.health events (health.go)
 	sessionUsageSink atomic.Pointer[SessionUsageSink]
-	intakeMu         sync.Mutex
-	intakeClosed     bool
-	intakeActive     int
-	intakeDone       chan struct{}
+	// apiOutcomeObserver receives model API outcomes (api_outcome.go).
+	apiOutcomeObserver atomic.Pointer[APIOutcomeObserver]
+	intakeMu           sync.Mutex
+	intakeClosed       bool
+	intakeActive       int
+	intakeDone         chan struct{}
 
 	metricsDropWarned        sync.Once
 	logsDropWarned           sync.Once
@@ -226,6 +228,7 @@ func (p *Pipeline) ActivateUsageSource(ctx context.Context, source string) (Usag
 		return "", fmt.Errorf("creating usage deriver: %w", err)
 	}
 	deriver.sessionUsage = p.forwardSessionUsage
+	deriver.apiOutcome = p.forwardAPIOutcome
 	deriver.analytics = p.analytics.native
 	if len(deriver.rules) == 0 {
 		return UsageActivationNoHarnessRule, nil
@@ -385,6 +388,7 @@ func (p *Pipeline) Start(ctx context.Context) error {
 		log.Error("Failed to create usage deriver: %v", err)
 	} else {
 		deriver.sessionUsage = p.forwardSessionUsage
+		deriver.apiOutcome = p.forwardAPIOutcome
 		deriver.analytics = p.analytics.native
 		p.usageDeriver.Store(deriver)
 	}

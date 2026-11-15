@@ -110,6 +110,7 @@ var readinessEvents = map[string]bool{
 	EventToolStart:        true,
 	EventToolEnd:          true,
 	EventAgentEnd:         true,
+	EventAgentError:       true,
 	EventNotification:     true,
 	EventResponseComplete: true,
 }

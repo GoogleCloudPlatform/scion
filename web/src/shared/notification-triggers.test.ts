@@ -36,6 +36,7 @@ describe('triggerLabel', () => {
       'Limits Exceeded',
       'Stalled',
       'Error',
+      'Harness Error',
       'Halted',
       'Deleted',
     ]);
@@ -57,6 +58,7 @@ describe('triggerLabel', () => {
       'LIMITS_EXCEEDED',
       'STALLED',
       'ERROR',
+      'HARNESS_ERROR',
       'HALTED',
     ]);
     expect(AGENT_CREATE_TRIGGERS).toEqual(DEFAULT_TRIGGERS);
@@ -66,7 +68,7 @@ describe('triggerLabel', () => {
 describe('defaultTriggersHint', () => {
   it('lists the default triggers by display label', () => {
     expect(defaultTriggersHint()).toBe(
-      'You will be notified when this agent reaches: Completed, Waiting on Parent, Limits Exceeded, Stalled, Error, or Halted.'
+      'You will be notified when this agent reaches: Completed, Waiting on Parent, Limits Exceeded, Stalled, Error, Harness Error, or Halted.'
     );
   });
 

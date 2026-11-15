@@ -791,7 +791,26 @@ mappings:
 
 Map into the normalized event vocabulary: `session-start`, `session-end`,
 `prompt-submit`, `tool-start`, `tool-end`, `model-start`, `model-end`,
-`agent-end`, `subagent-end`, `response-complete`, `notification`.
+`agent-end`, `agent-error` (a turn that ended on an error, from a dedicated
+failure hook), `subagent-end`, `response-complete`, `notification`.
+
+Two optional per-mapping keys cover events that only sometimes mean what
+their name says:
+
+```yaml
+  Notification:
+    event: notification
+    skip_when:            # ignore the event when any condition holds
+      - field: notificationType   # dotted path; missing or non-string reads as ""
+        equals: agent_error       # or not_equals: <value>
+  errorOccurred:
+    event: model-end
+    uncounted: true       # not counted by max_model_calls, API-call metrics or usage
+```
+
+Use `uncounted` for a model-end the tool sends for only some calls (for
+example only failed ones); counting it would make `max_model_calls` count
+failures.
 Extractable fields include `prompt`, `tool_name`, `tool_input`,
 `tool_output`, `message`, `session_id`, `success`, `error`, `file_path`,
 and the token fields `input_tokens` (→ `input`), `output_tokens`

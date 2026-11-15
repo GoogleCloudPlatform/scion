@@ -2568,6 +2568,9 @@ authDone:
 	if err != nil {
 		return nil, err
 	}
+	// Tell sciontool init whether this start has a task, for its
+	// first-turn watchdog. An inherited value is always replaced.
+	agentEnv = withInitialTaskEnv(agentEnv, task != "")
 
 	// The container-script provisioner reads the manifest inside the
 	// container, where the workspace is mounted at containerWorkspace, not at
@@ -4155,6 +4158,29 @@ func withLaunchIDEnv(env []string, runID string) []string {
 		}
 	}
 	return append(out, envLaunchID+"="+runID)
+}
+
+// envInitialTask is the container env variable set to "1" when the agent
+// starts with a task. sciontool init runs its first-turn watchdog only
+// then (ptone/scion#7858): a task-less or resumed start waits for input
+// and rightly sends no turn event.
+const envInitialTask = "SCION_INITIAL_TASK"
+
+// withInitialTaskEnv returns env with every SCION_INITIAL_TASK entry
+// removed and, when hasTask, SCION_INITIAL_TASK=1 appended. A value from
+// the request, a template or a stored env never reaches the container: the
+// variable describes this start only.
+func withInitialTaskEnv(env []string, hasTask bool) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, envInitialTask+"=") {
+			out = append(out, kv)
+		}
+	}
+	if hasTask {
+		out = append(out, envInitialTask+"=1")
+	}
+	return out
 }
 
 // resolveAuthEnvOverlay injects settings-declared env vars into opts.Env and
