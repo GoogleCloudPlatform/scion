@@ -37,6 +37,7 @@ import (
 	"time"
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/backoff"
@@ -275,9 +276,9 @@ func NewClient() *Client {
 		maxRetries:     DefaultMaxRetries,
 		retryBaseDelay: DefaultRetryBaseDelay,
 		retryMaxDelay:  DefaultRetryMaxDelay,
-		client: &http.Client{
+		client: apiclient.HubScopedHTTPClient(&http.Client{
 			Timeout: DefaultTimeout,
-		},
+		}, hubURL),
 	}
 	c.recordCredential(token)
 	c.configureOIDCTransport()
@@ -293,12 +294,19 @@ func NewClientWithConfig(hubURL, token, agentID string) *Client {
 		maxRetries:     DefaultMaxRetries,
 		retryBaseDelay: DefaultRetryBaseDelay,
 		retryMaxDelay:  DefaultRetryMaxDelay,
-		client: &http.Client{
+		client: apiclient.HubScopedHTTPClient(&http.Client{
 			Timeout: DefaultTimeout,
-		},
+		}, hubURL),
 	}
 	c.recordCredential(c.token)
 	return c
+}
+
+// do sends req with c.client scoped to c.hubURL so cross-origin redirect hops
+// never carry agent or transport credentials, even when a test or internal
+// caller constructs Client directly without NewClient.
+func (c *Client) do(req *http.Request) (*http.Response, error) {
+	return apiclient.HubScopedHTTPClient(c.client, c.hubURL).Do(req)
 }
 
 // IsConfigured returns true if the client is properly configured.
@@ -433,7 +441,7 @@ func (c *Client) postJSONWithRetryResult(ctx context.Context, endpoint string, b
 		req.Header.Set("Content-Type", "application/json")
 		c.setAgentAuth(req.Header, currentToken)
 
-		resp, err := c.client.Do(req)
+		resp, err := c.do(req)
 		if err != nil {
 			res.status, res.refusedBy = 0, RefusedByNone
 			// Check if context was cancelled - don't retry
@@ -598,7 +606,7 @@ func (c *Client) RegisterPort(ctx context.Context, req RegisterPortRequest) (*Ex
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	c.setAgentAuth(httpReq.Header, c.AuthToken())
-	resp, err := c.client.Do(httpReq)
+	resp, err := c.do(httpReq)
 	if err != nil {
 		return nil, err
 	}
@@ -625,7 +633,7 @@ func (c *Client) ListPorts(ctx context.Context) ([]ExposedPort, error) {
 		return nil, err
 	}
 	c.setAgentAuth(httpReq.Header, c.AuthToken())
-	resp, err := c.client.Do(httpReq)
+	resp, err := c.do(httpReq)
 	if err != nil {
 		return nil, err
 	}
@@ -654,7 +662,7 @@ func (c *Client) DeletePort(ctx context.Context, port int) error {
 		return err
 	}
 	c.setAgentAuth(httpReq.Header, c.AuthToken())
-	resp, err := c.client.Do(httpReq)
+	resp, err := c.do(httpReq)
 	if err != nil {
 		return err
 	}
@@ -741,7 +749,7 @@ func (c *Client) SetSecret(ctx context.Context, key, value, secretType, target, 
 	req.Header.Set("Content-Type", "application/json")
 	c.setAgentAuth(req.Header, currentToken)
 
-	resp, err := c.client.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
@@ -807,7 +815,7 @@ func (c *Client) GetSecret(ctx context.Context, key string) (*GetSecretResponse,
 
 	c.setAgentAuth(req.Header, currentToken)
 
-	resp, err := c.client.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
@@ -858,7 +866,7 @@ func (c *Client) ListSecrets(ctx context.Context) (*ListSecretsResponse, error) 
 
 	c.setAgentAuth(req.Header, currentToken)
 
-	resp, err := c.client.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
@@ -932,7 +940,7 @@ func (c *Client) RefreshToken(ctx context.Context) (string, time.Time, error) {
 
 	c.setAgentAuth(req.Header, currentToken)
 
-	resp, err := c.client.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("token refresh request failed: %w", err)
 	}
@@ -1102,7 +1110,7 @@ func (c *Client) ExchangeDelegation(ctx context.Context, grantID, audience strin
 	req.Header.Set("Content-Type", "application/json")
 	c.setAgentAuth(req.Header, c.AuthToken())
 
-	resp, err := c.client.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("delegation exchange request failed: %w", err)
 	}
@@ -1680,7 +1688,7 @@ func (c *Client) RefreshGitHubToken(ctx context.Context) (string, time.Time, err
 
 	c.setAgentAuth(req.Header, currentToken)
 
-	resp, err := c.client.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("GitHub token refresh request failed: %w", err)
 	}
@@ -2525,7 +2533,7 @@ func (c *Client) SendSelfMessage(ctx context.Context, msg *messages.StructuredMe
 	req.Header.Set("Content-Type", "application/json")
 	c.setAgentAuth(req.Header, currentToken)
 
-	resp, err := c.client.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return fmt.Errorf("failed to send self message: %w", err)
 	}
@@ -2620,7 +2628,7 @@ func (c *Client) FetchGCPToken(ctx context.Context, scopes []string) (*GCPAccess
 	req.Header.Set("Content-Type", "application/json")
 	c.setAgentAuth(req.Header, currentToken)
 
-	resp, err := c.client.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("hub request: %w", err)
 	}
@@ -2664,7 +2672,7 @@ func (c *Client) FetchGCPIdentityToken(ctx context.Context, audience string) (st
 	req.Header.Set("Content-Type", "application/json")
 	c.setAgentAuth(req.Header, currentToken)
 
-	resp, err := c.client.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return "", fmt.Errorf("hub request: %w", err)
 	}
@@ -2718,7 +2726,7 @@ func (c *Client) RequestIdentityToken(ctx context.Context, audience string) (*Id
 	req.Header.Set("Content-Type", "application/json")
 	c.setAgentAuth(req.Header, currentToken)
 
-	resp, err := c.client.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("hub request: %w", err)
 	}
@@ -2778,7 +2786,7 @@ func (c *Client) GetSelf(ctx context.Context) (*AgentSelf, error) {
 
 	c.setAgentAuth(req.Header, currentToken)
 
-	resp, err := c.client.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
@@ -2821,7 +2829,7 @@ func (c *Client) GetExperiments(ctx context.Context) ([]string, error) {
 	}
 	c.setAgentAuth(req.Header, currentToken)
 
-	resp, err := c.client.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
@@ -2913,7 +2921,7 @@ func (c *Client) FetchSecrets(ctx context.Context, keys []string) (*SecretFetchR
 	req.Header.Set("Content-Type", "application/json")
 	c.setAgentAuth(req.Header, currentToken)
 
-	resp, err := c.client.Do(req)
+	resp, err := c.do(req)
 	if err != nil {
 		return nil, fmt.Errorf("hub request: %w", err)
 	}
