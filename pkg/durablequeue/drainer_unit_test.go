@@ -22,6 +22,7 @@ import (
 	"io"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -44,6 +45,7 @@ type memQueueStore struct {
 	claims    int
 	renews    int
 	loseAt    int // when > 0, RenewDurableLease returns held=false starting on this renew call
+	renewHook func(ctx context.Context, call int) error
 	trimLimit int // when > 0, caps trimmed rows per TrimDurableQueue pass and sets More
 }
 
@@ -128,15 +130,26 @@ func (m *memQueueStore) ClaimDurableItems(_ context.Context, kind, owner string,
 	return out, nil
 }
 
-func (m *memQueueStore) RenewDurableLease(_ context.Context, seq int64, owner string, leaseUntil time.Time) (bool, error) {
+func (m *memQueueStore) RenewDurableLease(ctx context.Context, seq int64, owner string, leaseUntil time.Time) (bool, error) {
+	m.mu.Lock()
+	m.renews++
+	call := m.renews
+	hook := m.renewHook
+	m.mu.Unlock()
+
+	if hook != nil {
+		if err := hook(ctx, call); err != nil {
+			return false, err
+		}
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.renews++
 	r, ok := m.rows[seq]
 	if !ok || r.LeaseOwner != owner {
 		return false, nil
 	}
-	if m.loseAt > 0 && m.renews >= m.loseAt {
+	if m.loseAt > 0 && call >= m.loseAt {
 		r.LeaseOwner = "another-owner"
 		return false, nil
 	}
@@ -1250,4 +1263,213 @@ func TestPreHandleRenewSkipsReclaimedBatchTail(t *testing.T) {
 	assert.Equal(t, []string{"batch-1"}, d1Handled, "d1 must skip invoking Handler on batch-2 once its pre-handle lease renew fails")
 	assert.Equal(t, []string{"batch-2"}, d2Handled)
 	mu.Unlock()
+}
+
+type recordedLog struct {
+	level slog.Level
+	msg   string
+	attrs map[string]any
+}
+
+type recordingLogHandler struct {
+	mu      sync.Mutex
+	records []recordedLog
+}
+
+func (h *recordingLogHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *recordingLogHandler) Handle(_ context.Context, r slog.Record) error {
+	rec := recordedLog{
+		level: r.Level,
+		msg:   r.Message,
+		attrs: make(map[string]any, r.NumAttrs()),
+	}
+	r.Attrs(func(a slog.Attr) bool {
+		rec.attrs[a.Key] = a.Value.Resolve().Any()
+		return true
+	})
+	h.mu.Lock()
+	h.records = append(h.records, rec)
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *recordingLogHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *recordingLogHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *recordingLogHandler) snapshot() []recordedLog {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]recordedLog, len(h.records))
+	copy(out, h.records)
+	return out
+}
+
+func TestLeaseAutoRenewLogsErrorsWithoutCancelingAndSkipsContextErrors(t *testing.T) {
+	ctx := context.Background()
+	const secretToken = "do-not-log-secret-token-xyz"
+	secretPayload := []byte(`{"secret":"` + secretToken + `"}`)
+
+	t.Run("transient errors logged once per failure without canceling handler", func(t *testing.T) {
+		st := newMemQueueStore()
+		errReset := errors.New("db connection reset")
+		errTimeout := errors.New("db write timeout")
+		ticksDone := make(chan struct{})
+		st.renewHook = func(_ context.Context, call int) error {
+			switch call {
+			case 1:
+				return nil // pre-handle renew succeeds
+			case 2:
+				return errReset
+			case 3:
+				close(ticksDone)
+				return errTimeout
+			default:
+				return nil
+			}
+		}
+
+		q := durablequeue.NewQueue(st)
+		seq, err := q.Enqueue(ctx, nil, durablequeue.Item{
+			Kind:     "test.echo",
+			DedupKey: "renew-err-transient",
+			Payload:  secretPayload,
+		})
+		require.NoError(t, err)
+
+		lh := &recordingLogHandler{}
+		var handlerCtxErr error
+		// LeaseDuration=600ms -> auto-renew every 200ms; 2 ticks fire around 400ms (< 550ms HandlerTimeout).
+		d, err := durablequeue.NewDrainer(durablequeue.DrainerConfig{
+			Store:          st,
+			Kind:           "test.echo",
+			LeaseDuration:  600 * time.Millisecond,
+			HandlerTimeout: 550 * time.Millisecond,
+			Logger:         slog.New(lh),
+			Handler: func(hctx context.Context, _ durablequeue.Item, _ durablequeue.Lease) durablequeue.Result {
+				select {
+				case <-ticksDone:
+				case <-hctx.Done():
+				}
+				handlerCtxErr = hctx.Err()
+				return durablequeue.Result{Done: true}
+			},
+		})
+		require.NoError(t, err)
+
+		res, err := d.DrainOnce(ctx)
+		require.NoError(t, err)
+		assert.NoError(t, handlerCtxErr, "transient renew errors must not cancel the handler")
+		assert.Equal(t, 1, res.Done)
+
+		logs := lh.snapshot()
+		require.Len(t, logs, 2, "expected exactly one Warn log per transient renew failure")
+		assert.Equal(t, slog.LevelWarn, logs[0].level)
+		assert.Equal(t, "durable queue lease auto-renew failed", logs[0].msg)
+		assert.Equal(t, map[string]any{"kind": "test.echo", "seq": seq, "error": errReset}, logs[0].attrs)
+
+		assert.Equal(t, slog.LevelWarn, logs[1].level)
+		assert.Equal(t, "durable queue lease auto-renew failed", logs[1].msg)
+		assert.Equal(t, map[string]any{"kind": "test.echo", "seq": seq, "error": errTimeout}, logs[1].attrs)
+
+		assert.NotContains(t, fmt.Sprintf("%+v", logs), secretToken, "payload secrets must never appear in logs")
+	})
+
+	t.Run("context canceled and deadline exceeded renew errors are not logged", func(t *testing.T) {
+		st := newMemQueueStore()
+		ticksDone := make(chan struct{})
+		st.renewHook = func(_ context.Context, call int) error {
+			switch call {
+			case 1:
+				return nil
+			case 2:
+				return fmt.Errorf("driver: %w", context.Canceled)
+			case 3:
+				close(ticksDone)
+				return fmt.Errorf("driver: %w", context.DeadlineExceeded)
+			default:
+				return nil
+			}
+		}
+
+		q := durablequeue.NewQueue(st)
+		_, err := q.Enqueue(ctx, nil, durablequeue.Item{
+			Kind:     "test.echo",
+			DedupKey: "renew-err-ctx",
+			Payload:  secretPayload,
+		})
+		require.NoError(t, err)
+
+		lh := &recordingLogHandler{}
+		var handlerCtxErr error
+		d, err := durablequeue.NewDrainer(durablequeue.DrainerConfig{
+			Store:          st,
+			Kind:           "test.echo",
+			LeaseDuration:  600 * time.Millisecond,
+			HandlerTimeout: 550 * time.Millisecond,
+			Logger:         slog.New(lh),
+			Handler: func(hctx context.Context, _ durablequeue.Item, _ durablequeue.Lease) durablequeue.Result {
+				select {
+				case <-ticksDone:
+				case <-hctx.Done():
+				}
+				handlerCtxErr = hctx.Err()
+				return durablequeue.Result{Done: true}
+			},
+		})
+		require.NoError(t, err)
+
+		res, err := d.DrainOnce(ctx)
+		require.NoError(t, err)
+		assert.NoError(t, handlerCtxErr)
+		assert.Equal(t, 1, res.Done)
+		assert.Empty(t, lh.snapshot(), "context.Canceled and context.DeadlineExceeded renew errors must not be logged")
+	})
+
+	t.Run("in-flight renew canceled on handler return is not logged", func(t *testing.T) {
+		st := newMemQueueStore()
+		inRenew := make(chan struct{})
+		st.renewHook = func(rctx context.Context, call int) error {
+			if call == 2 {
+				close(inRenew)
+				<-rctx.Done()
+				return rctx.Err()
+			}
+			return nil
+		}
+
+		q := durablequeue.NewQueue(st)
+		_, err := q.Enqueue(ctx, nil, durablequeue.Item{
+			Kind:     "test.echo",
+			DedupKey: "renew-inflight-cancel",
+			Payload:  secretPayload,
+		})
+		require.NoError(t, err)
+
+		lh := &recordingLogHandler{}
+		var handlerCtxErr error
+		d, err := durablequeue.NewDrainer(durablequeue.DrainerConfig{
+			Store:          st,
+			Kind:           "test.echo",
+			LeaseDuration:  600 * time.Millisecond,
+			HandlerTimeout: 550 * time.Millisecond,
+			Logger:         slog.New(lh),
+			Handler: func(hctx context.Context, _ durablequeue.Item, _ durablequeue.Lease) durablequeue.Result {
+				select {
+				case <-inRenew:
+				case <-hctx.Done():
+				}
+				handlerCtxErr = hctx.Err()
+				return durablequeue.Result{Done: true}
+			},
+		})
+		require.NoError(t, err)
+
+		res, err := d.DrainOnce(ctx)
+		require.NoError(t, err)
+		assert.NoError(t, handlerCtxErr)
+		assert.Equal(t, 1, res.Done)
+		assert.True(t, !strings.Contains(fmt.Sprintf("%+v", lh.snapshot()), secretToken))
+		assert.Empty(t, lh.snapshot(), "in-flight renew aborted by stopRenew must not be logged")
+	})
 }

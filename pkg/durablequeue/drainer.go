@@ -480,7 +480,13 @@ func (d *Drainer) handleRow(ctx context.Context, row store.DurableQueueRow, clai
 				return
 			case <-ticker.C:
 				ok, rerr := lease.Renew(rctx)
-				if rerr == nil && !ok {
+				if rerr != nil {
+					if !errors.Is(rerr, context.Canceled) && !errors.Is(rerr, context.DeadlineExceeded) {
+						d.cfg.Logger.Warn("durable queue lease auto-renew failed", "kind", d.cfg.Kind, "seq", row.Seq, "error", rerr)
+					}
+					continue
+				}
+				if !ok {
 					// Lease was lost to another replica; cancel the handler context.
 					hcancel()
 					return
