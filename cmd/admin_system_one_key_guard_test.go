@@ -18,13 +18,20 @@ import (
 	"bytes"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+)
+
+const (
+	systemOneAllowedLiveKeyRelPath = "cmd/admin_system_one_live_test.go"
+	maxBootstrapKeyScanFileBytes   = 4 * 1024 * 1024
 )
 
 // TestSystemOneLiveBootstrapKeyVarOnlyInLiveTest enforces §8 L4: the bootstrap
@@ -32,12 +39,109 @@ import (
 // this guard file itself does not match) may appear ONLY in the manual
 // systemone_live test file and nowhere in product code, scripts, docs, or other
 // tests.
+//
+// Tracked files come from `git ls-files` so untracked or gitignored local
+// scratch notes do not cause false positives, falling back to a directory walk
+// when git or a repository checkout is unavailable.
 func TestSystemOneLiveBootstrapKeyVarOnlyInLiveTest(t *testing.T) {
 	needle := []byte("JEV" + "KEY")
-	const allowedRelPath = "cmd/admin_system_one_live_test.go"
-	const maxScanFileBytes = 4 * 1024 * 1024
 
 	repoRoot := findScionRepoRoot(t)
+	matches, _, err := scanRepoForBootstrapKey(repoRoot, needle)
+	require.NoError(t, err)
+	assert.Equal(t, []string{systemOneAllowedLiveKeyRelPath}, matches,
+		"the bootstrap live-probe env var literal must appear only in %s", systemOneAllowedLiveKeyRelPath)
+
+	t.Run("git_ls_files_skips_untracked_and_catches_tracked", func(t *testing.T) {
+		if _, err := exec.LookPath("git"); err != nil {
+			t.Skip("git not available in PATH")
+		}
+		tmpRepo := t.TempDir()
+		runGit := func(args ...string) {
+			t.Helper()
+			c := exec.Command("git", append(util.HostGitArgs(), append([]string{"-C", tmpRepo}, args...)...)...)
+			c.Env = envWithoutGit()
+			out, err := c.CombinedOutput()
+			require.NoError(t, err, "git %v: %s", args, string(out))
+		}
+
+		runGit("init", "-q")
+
+		livePath := filepath.Join(tmpRepo, filepath.FromSlash(systemOneAllowedLiveKeyRelPath))
+		require.NoError(t, os.MkdirAll(filepath.Dir(livePath), 0o755))
+		require.NoError(t, os.WriteFile(livePath, needle, 0o600))
+		runGit("add", systemOneAllowedLiveKeyRelPath)
+
+		// Untracked scratch files must not fail the guard when git ls-files works.
+		scratchPath := filepath.Join(tmpRepo, ".scratch", "notes.md")
+		require.NoError(t, os.MkdirAll(filepath.Dir(scratchPath), 0o755))
+		require.NoError(t, os.WriteFile(scratchPath, needle, 0o600))
+		require.NoError(t, os.WriteFile(filepath.Join(tmpRepo, "untracked.txt"), needle, 0o600))
+
+		got, usedGit, err := scanRepoForBootstrapKey(tmpRepo, needle)
+		require.NoError(t, err)
+		assert.True(t, usedGit, "expected git ls-files path")
+		assert.Equal(t, []string{systemOneAllowedLiveKeyRelPath}, got)
+
+		// Tracked files outside the live test must be caught.
+		leakPath := filepath.Join(tmpRepo, "pkg", "leaked.go")
+		require.NoError(t, os.MkdirAll(filepath.Dir(leakPath), 0o755))
+		require.NoError(t, os.WriteFile(leakPath, needle, 0o600))
+		runGit("add", "pkg/leaked.go")
+
+		got, usedGit, err = scanRepoForBootstrapKey(tmpRepo, needle)
+		require.NoError(t, err)
+		assert.True(t, usedGit)
+		assert.Equal(t, []string{systemOneAllowedLiveKeyRelPath, "pkg/leaked.go"}, got)
+	})
+
+	t.Run("walks_tree_when_git_unavailable", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		livePath := filepath.Join(tmpDir, filepath.FromSlash(systemOneAllowedLiveKeyRelPath))
+		require.NoError(t, os.MkdirAll(filepath.Dir(livePath), 0o755))
+		require.NoError(t, os.WriteFile(livePath, needle, 0o600))
+
+		leakPath := filepath.Join(tmpDir, "pkg", "leaked.go")
+		require.NoError(t, os.MkdirAll(filepath.Dir(leakPath), 0o755))
+		require.NoError(t, os.WriteFile(leakPath, needle, 0o600))
+
+		ignoredDirFile := filepath.Join(tmpDir, ".scion", "state.txt")
+		require.NoError(t, os.MkdirAll(filepath.Dir(ignoredDirFile), 0o755))
+		require.NoError(t, os.WriteFile(ignoredDirFile, needle, 0o600))
+
+		got, usedGit, err := scanRepoForBootstrapKey(tmpDir, needle)
+		require.NoError(t, err)
+		assert.False(t, usedGit, "expected fallback directory walk outside a git repository")
+		assert.Equal(t, []string{systemOneAllowedLiveKeyRelPath, "pkg/leaked.go"}, got)
+	})
+}
+
+func scanRepoForBootstrapKey(repoRoot string, needle []byte) ([]string, bool, error) {
+	if tracked, ok := gitTrackedFilesForKeyGuard(repoRoot); ok {
+		var matches []string
+		for _, rel := range tracked {
+			fullPath := filepath.Join(repoRoot, filepath.FromSlash(rel))
+			info, err := os.Lstat(fullPath)
+			if err != nil {
+				if os.IsNotExist(err) {
+					continue
+				}
+				return nil, true, err
+			}
+			if !info.Mode().IsRegular() || info.Size() > maxBootstrapKeyScanFileBytes {
+				continue
+			}
+			data, err := os.ReadFile(fullPath)
+			if err != nil {
+				return nil, true, err
+			}
+			if bytes.Contains(data, needle) {
+				matches = append(matches, rel)
+			}
+		}
+		sort.Strings(matches)
+		return matches, true, nil
+	}
 
 	skipDirs := map[string]bool{
 		".git":           true,
@@ -68,7 +172,7 @@ func TestSystemOneLiveBootstrapKeyVarOnlyInLiveTest(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if info.Size() > maxScanFileBytes {
+		if info.Size() > maxBootstrapKeyScanFileBytes {
 			return nil
 		}
 		data, err := os.ReadFile(path)
@@ -84,11 +188,33 @@ func TestSystemOneLiveBootstrapKeyVarOnlyInLiveTest(t *testing.T) {
 		}
 		return nil
 	})
-	require.NoError(t, err)
-
+	if err != nil {
+		return nil, false, err
+	}
 	sort.Strings(matches)
-	assert.Equal(t, []string{allowedRelPath}, matches,
-		"the bootstrap live-probe env var literal must appear only in %s", allowedRelPath)
+	return matches, false, nil
+}
+
+func gitTrackedFilesForKeyGuard(repoRoot string) ([]string, bool) {
+	if _, err := exec.LookPath("git"); err != nil {
+		return nil, false
+	}
+	cmd := exec.Command("git", append(util.HostGitArgs(), "-C", repoRoot, "ls-files", "-z")...)
+	cmd.Env = envWithoutGit()
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, false
+	}
+	var files []string
+	for _, entry := range strings.Split(string(out), "\x00") {
+		if entry != "" {
+			files = append(files, entry)
+		}
+	}
+	if len(files) == 0 {
+		return nil, false
+	}
+	return files, true
 }
 
 func findScionRepoRoot(t *testing.T) string {

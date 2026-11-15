@@ -36,12 +36,13 @@ var (
 // adminCmd is the top-level command group for administrative operations.
 var adminCmd = &cobra.Command{
 	Use:   "admin",
-	Short: "Administrative operations (break-glass recovery)",
-	Long: `Administrative operations for emergency recovery scenarios.
+	Short: "Administrative and break-glass Hub operations",
+	Long: `Administrative operations for managing a Scion Hub and emergency recovery.
 
-These commands connect directly to the database, bypassing the running server.
-They are intended for break-glass situations where normal admin access
-has been lost.`,
+Subcommands either call the running Hub's administrative API with a
+session-authenticated Hub admin identity (for example 'scion admin system-one')
+or, for break-glass recovery such as 'scion admin promote', connect directly to
+the database when normal admin access is unavailable.`,
 }
 
 // adminPromoteCmd promotes a user to admin role via direct database access.

@@ -72,22 +72,32 @@ func TestSystemOneLive_TypeSafeAdminProbe(t *testing.T) {
 			APIKey: apiKey,
 		},
 	})
-	require.NoError(t, err)
+	require.NoError(t, redactSecretFromError(err, apiKey))
 	t.Cleanup(func() {
 		_ = env.client.SystemOne().DeleteInstance(context.Background(), instanceName)
 	})
+	rawCreatedJSON, err := json.Marshal(created)
+	require.NoError(t, err)
+	if strings.Contains(string(rawCreatedJSON), apiKey) {
+		t.Fatal("live create instance response contains the API key")
+	}
 	require.NotEmpty(t, created.Auth.SecretName)
 
 	// Confirm the key landed in the Hub's internal secret store.
 	sv, err := env.secretStore.Get(ctx, created.Auth.SecretName, store.ScopeHub, inProcessSystemOneHubID)
-	require.NoError(t, err)
+	require.NoError(t, redactSecretFromError(err, apiKey))
 	assert.Equal(t, store.SecretTypeInternal, sv.SecretType)
 
 	// Step 1: models check (--models / {"models": true}).
 	modelsResp, err := env.client.SystemOne().ProbeInstance(ctx, instanceName, &hubclient.ProbeSystemOneInstanceRequest{
 		Models: true,
 	})
+	require.NoError(t, redactSecretFromError(err, apiKey))
+	rawModelsJSON, err := json.Marshal(modelsResp)
 	require.NoError(t, err)
+	if strings.Contains(string(rawModelsJSON), apiKey) {
+		t.Fatal("live models probe response contains the API key")
+	}
 	require.Equal(t, systemoneruntime.ClassSuccess, modelsResp.Class, "models probe failed with reason=%q", modelsResp.Reason)
 	require.NotEmpty(t, modelsResp.Models)
 	t.Logf("TypeSafe models (%d): %s", len(modelsResp.Models), strings.Join(modelsResp.Models, ", "))
@@ -99,16 +109,20 @@ func TestSystemOneLive_TypeSafeAdminProbe(t *testing.T) {
 		Spec:   specRaw,
 		Probe:  &hubclient.ProbeSystemOneInput{Text: syntheticSample},
 	})
-	require.NoError(t, err)
+	require.NoError(t, redactSecretFromError(err, apiKey))
 
 	var humanOut bytes.Buffer
 	renderAdminSystemOneProbeHuman(&humanOut, probeResp)
-	require.NotContains(t, humanOut.String(), apiKey)
+	if strings.Contains(humanOut.String(), apiKey) {
+		t.Fatal("live probe human output contains the API key")
+	}
 	t.Logf("Live probe summary:\n%s", humanOut.String())
 
 	rawRespJSON, err := json.Marshal(probeResp)
 	require.NoError(t, err)
-	require.NotContains(t, string(rawRespJSON), apiKey)
+	if strings.Contains(string(rawRespJSON), apiKey) {
+		t.Fatal("live probe JSON response contains the API key")
+	}
 
 	require.Equal(t, systemoneruntime.ClassSuccess, probeResp.Class, "spec probe returned class=%s reason=%q", probeResp.Class, probeResp.Reason)
 	eval := probeResp.Evaluation

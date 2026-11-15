@@ -505,6 +505,70 @@ func TestAdminSystemOneProbe(t *testing.T) {
 		assert.Contains(t, stdout, "instance=ts-prod adapter=typesafe outcome=success")
 	})
 
+	t.Run("non-zero exit when class is not success", func(t *testing.T) {
+		for _, tc := range []struct {
+			name   string
+			class  systemoneruntime.Class
+			reason string
+			format string
+		}{
+			{
+				name:   "failed human output",
+				class:  systemoneruntime.ClassFailed,
+				reason: "provider_http_5xx",
+				format: "",
+			},
+			{
+				name:   "uncertain human output",
+				class:  systemoneruntime.ClassUncertain,
+				reason: "low_confidence",
+				format: "",
+			},
+			{
+				name:   "failed json output",
+				class:  systemoneruntime.ClassFailed,
+				reason: "provider_auth_rejected",
+				format: "json",
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				resetAdminSystemOneFlags(t)
+				restoreAllSilenceUsage(t)
+				outputFormat = tc.format
+				useMockSystemOneServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(hubclient.ProbeSystemOneInstanceResponse{
+						Class:  tc.class,
+						Reason: tc.reason,
+					})
+				}))
+
+				stdout, _, err := executeAdminSystemOneSubcmd(t, []string{"probe", "ts-prod", "--models"}, nil)
+				require.Error(t, err)
+				assert.Equal(t, 1, exitCodeFor(err))
+				assert.Contains(t, err.Error(), string(tc.class))
+				assert.Contains(t, err.Error(), tc.reason)
+				if tc.format == "json" {
+					assert.True(t, isReportedInJSON(err), "JSON mode must suppress duplicate stderr banner")
+					var parsed hubclient.ProbeSystemOneInstanceResponse
+					require.NoError(t, json.Unmarshal([]byte(stdout), &parsed))
+					assert.Equal(t, tc.class, parsed.Class)
+					assert.Equal(t, tc.reason, parsed.Reason)
+				} else {
+					assert.False(t, isReportedInJSON(err))
+					assert.Contains(t, stdout, "Class: "+string(tc.class))
+					assert.Contains(t, stdout, "Reason: "+tc.reason)
+				}
+			})
+		}
+	})
+
+	t.Run("help omits unsupported judgment_score kind", func(t *testing.T) {
+		kindFlag := adminSystemOneInstanceProbeCmd.Flags().Lookup("kind")
+		require.NotNil(t, kindFlag)
+		assert.NotContains(t, kindFlag.Usage, "judgment_score")
+	})
+
 	t.Run("flag mutual exclusion", func(t *testing.T) {
 		dir := t.TempDir()
 		specPath := filepath.Join(dir, "spec.json")

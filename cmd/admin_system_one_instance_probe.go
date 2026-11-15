@@ -46,6 +46,10 @@ instance, either listing available provider models (--models) or evaluating an
 inline System One spec against synthetic probe text (--spec-file with --text or
 --text-file).
 
+Exits 0 when the probe completes with class "success", and non-zero when the
+evaluated outcome class is not "success" (for example "failed" or "uncertain")
+or the request fails. The probe result is still written to stdout before exiting.
+
 Examples:
   # List models reported by the provider instance
   scion admin system-one instance probe typesafe-main --models
@@ -64,7 +68,7 @@ func init() {
 	f.StringVar(&adminSystemOneProbeOpts.specFile, "spec-file", "", "Path to inline System One spec or rule envelope (JSON or YAML, or '-' for stdin)")
 	f.StringVar(&adminSystemOneProbeOpts.text, "text", "", "Synthetic text bound to probe.text")
 	f.StringVar(&adminSystemOneProbeOpts.textFile, "text-file", "", "Path to file containing synthetic text bound to probe.text")
-	f.StringVar(&adminSystemOneProbeOpts.kind, "kind", "", "Optional consumer projection kind (filter, route, judgment_bool, judgment_choice, judgment_score, judgments)")
+	f.StringVar(&adminSystemOneProbeOpts.kind, "kind", "", "Optional consumer projection kind (filter, route, judgment_bool, judgment_choice, judgments)")
 	f.StringVar(&adminSystemOneProbeOpts.ruleID, "rule-id", "", "Optional rule identifier recorded in evaluation provenance")
 	f.StringArrayVar(&adminSystemOneProbeOpts.params, "param", nil, "Optional rule parameter binding as KEY=VALUE (repeatable)")
 
@@ -93,12 +97,32 @@ func runAdminSystemOneInstanceProbe(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	failed := resp == nil || resp.Class != systemoneruntime.ClassSuccess
 	if isJSONOutput() {
-		return writeJSONTo(cmd.OutOrStdout(), resp)
+		if err := writeJSONTo(cmd.OutOrStdout(), resp); err != nil {
+			return err
+		}
+		if failed {
+			return &jsonReportedError{msg: formatAdminSystemOneProbeFailure(resp)}
+		}
+		return nil
 	}
 
 	renderAdminSystemOneProbeHuman(cmd.OutOrStdout(), resp)
+	if failed {
+		return errors.New(formatAdminSystemOneProbeFailure(resp))
+	}
 	return nil
+}
+
+func formatAdminSystemOneProbeFailure(resp *hubclient.ProbeSystemOneInstanceResponse) string {
+	if resp == nil {
+		return "probe returned an empty response"
+	}
+	if resp.Reason != "" {
+		return fmt.Sprintf("probe returned class %q (%s)", resp.Class, resp.Reason)
+	}
+	return fmt.Sprintf("probe returned class %q", resp.Class)
 }
 
 func buildAdminSystemOneProbeRequest(cmd *cobra.Command, opts adminSystemOneProbeFlags) (*hubclient.ProbeSystemOneInstanceRequest, error) {

@@ -133,7 +133,7 @@ func TestAdminSystemOne_InProcessHubRoundTrip(t *testing.T) {
 	resetAdminSystemOneFlags(t)
 	env := startInProcessSystemOneHub(t)
 
-	//Verify the AC-12 spec compiles cleanly offline too.
+	// Verify the AC-12 spec compiles cleanly offline too.
 	_ = buildSystemOneLiveProbeSpec(t)
 
 	systemOneAdminClientLoader = func() (hubclient.SystemOneService, error) {

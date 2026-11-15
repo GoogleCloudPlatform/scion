@@ -1725,7 +1725,7 @@ Manages Scion server components (Hub and Broker).
 
 ### `scion admin`
 
-Administrative operations for emergency recovery scenarios. These commands connect directly to the database, bypassing the running server. They are intended for break-glass situations where normal admin access has been lost.
+Administrative operations for managing a Scion Hub and emergency recovery. Subcommands either call the running Hub's administrative API with a session-authenticated Hub admin identity (for example `scion admin system-one`) or, for break-glass recovery (`scion admin promote`), connect directly to the database when normal admin access is unavailable. Not available in agent mode.
 
 ### `scion admin promote`
 
@@ -1756,6 +1756,60 @@ scion admin promote --email user@example.com --config /path/to/server.yaml
 :::caution[Break-glass only]
 This command modifies the database directly. Use it only when normal admin access through the Hub API or Web Dashboard is unavailable. Under normal operation, manage admin roles via the Web Dashboard Users list or the `admin_emails` server setting.
 :::
+
+### `scion admin system-one instance`
+
+Manage Hub-scoped System One provider instances through the running Hub's administrative API (`/api/v1/admin/system-one/instances`). Experimental: requires the `hub.system_one` [experiment](/scion/reference/experiments/) (`404` while it is off) and a session-authenticated Hub admin or super-admin identity (user access tokens and agent credentials are refused). Not available in agent mode; supported on Windows as a client-only Hub command.
+
+- **Subcommands:**
+    - `create <name>`: Register a System One provider instance (`POST /api/v1/admin/system-one/instances`). For security, the provider API key is read **only** from standard input (piped or `--key-stdin`) or from `--key-file <path|->`; passing the key via positional arguments, value-bearing command-line flags, or environment variables is refused. The key is stored in the Hub's internal secret backend (`systemone.instance.<id>`) and is never returned in output or API responses.
+        - `--adapter <name>`: Provider adapter name (default `typesafe`).
+        - `--model <id>`: Provider model identifier (required for `typesafe`, for example `jev-1.14.0`).
+        - `--endpoint <https-url>`: Provider base HTTPS URL (defaults to the adapter's default when omitted; loopback, private, link-local, metadata, and unspecified IP addresses are refused).
+        - `--location <string>`: Optional provider location or region.
+        - `--key-file <path|->`: Path to a file containing the provider API key, or `-` for standard input.
+        - `--key-stdin`: Read the provider API key from standard input.
+        - `--option <key=value>`: Non-secret adapter option (repeatable).
+        - `--max-in-flight <int>`: Maximum concurrent evaluations on this instance.
+        - `--rate-per-sec <float>`: Sustained evaluation rate limit per second.
+        - `--max-input-tokens <int>`: Maximum input token ceiling.
+        - `--call-timeout <duration>`: Per-call timeout ceiling as a Go duration (for example `5s`).
+        - `--enabled=<true|false>`: Enable the instance immediately upon creation (default `true`).
+    - `list`: List configured System One provider instances (`GET /api/v1/admin/system-one/instances`), printing credential-free metadata (`name`, `adapter`, `model`, `endpoint`, `auth.kind`, `auth.secretName`, `enabled`, `updatedAt`).
+        - `--adapter <name>`: Filter by provider adapter name.
+        - `--enabled=<true|false>`: Filter by enabled state.
+        - `--limit <1..500>`: Maximum instances to return.
+        - `--cursor <string>`: Pagination cursor from a previous list response.
+    - `delete <name>`: Delete a System One provider instance and remove its managed internal secret (`DELETE /api/v1/admin/system-one/instances/{name}`).
+    - `probe <name>`: Run an administrative diagnostic probe against an instance (`POST /api/v1/admin/system-one/instances/{name}/probe`), either listing models supported by the provider (`--models`) or evaluating an inline System One spec (JSON or YAML) against synthetic text (`--spec-file` with `--text` or `--text-file`), bounded by `server.hub.system_one.max_eval_time`. Exits `0` when the evaluated outcome `class` is `success`, and exits non-zero (`1`) when `class` is not `success` (for example `failed` or `uncertain`) or the request fails; the probe report is still written to stdout before exiting.
+        - `--models`: Query models supported by the provider instance (cannot be combined with spec/text flags).
+        - `--spec-file <path|->`: Path to an inline System One spec or rule envelope in JSON or YAML, or `-` for standard input.
+        - `--text <string>`: Synthetic text bound to `probe.text`.
+        - `--text-file <path|->`: Path to a file containing synthetic text bound to `probe.text`, or `-` for standard input (`--spec-file` and `--text-file` cannot both use `-`).
+        - `--kind <kind>`: Optional consumer projection kind (`filter`, `route`, `judgment_bool`, `judgment_choice`, or `judgments`).
+        - `--rule-id <string>`: Optional rule identifier recorded in evaluation provenance.
+        - `--param <key=value>`: Optional rule parameter binding (repeatable).
+
+All four subcommands honor `--format json`.
+
+**Examples:**
+
+```bash
+# Register a TypeSafe instance reading the API key from a file
+scion admin system-one instance create typesafe-main --adapter typesafe --model jev-1.14.0 --key-file /path/to/typesafe.key
+
+# List configured instances
+scion admin system-one instance list
+
+# List models reported by the provider instance
+scion admin system-one instance probe typesafe-main --models
+
+# Evaluate an inline spec against synthetic text
+scion admin system-one instance probe typesafe-main --spec-file ./probe-spec.json --text "Synthetic test sample."
+
+# Delete an instance and its managed internal secret
+scion admin system-one instance delete typesafe-main
+```
 
 ## Miscellaneous
 
