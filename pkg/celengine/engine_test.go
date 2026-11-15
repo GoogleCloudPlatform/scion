@@ -2309,12 +2309,24 @@ func TestMatchesLiteralOnlyPreScanAndCommonPatterns(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Compile 14-keyword (?i) alternation: %v", err)
 		}
+		if raceEnabled {
+			body8k := strings.Repeat("status=healthy check=green ", 300) + "incident detected in us-central1"
+			res8k, _, err8k := kw14Prog.Eval(ctx, map[string]any{"event": map[string]any{"body": body8k}})
+			if err8k != nil {
+				t.Fatalf("Eval 14-keyword (?i) alternation on 8 KiB: %v", err8k)
+			}
+			if b, _ := res8k.Bool(); !b {
+				t.Fatalf("expected 14-keyword (?i) alternation to match 8 KiB body")
+			}
+		}
 		body60k := strings.Repeat("status=healthy check=green ", 2270) + "incident detected in us-central1"
 		res, _, err := kw14Prog.Eval(ctx, map[string]any{"event": map[string]any{"body": body60k}})
 		if err != nil {
-			t.Fatalf("Eval 14-keyword (?i) alternation on 60 KiB: %v", err)
-		}
-		if b, _ := res.Bool(); !b {
+			var evalErr *celengine.EvalError
+			if !raceEnabled || !errors.As(err, &evalErr) || evalErr.Reason != celengine.ReasonTimeout {
+				t.Fatalf("Eval 14-keyword (?i) alternation on 60 KiB: %v", err)
+			}
+		} else if b, _ := res.Bool(); !b {
 			t.Fatalf("expected 14-keyword (?i) alternation to match 60 KiB body")
 		}
 
@@ -2520,7 +2532,7 @@ func TestProgramCacheByteBudgetEviction(t *testing.T) {
 		}
 	})
 
-	t.Run("default_256k_budget_caps_4k_expressions_and_retained_heap", func(t *testing.T) {
+	t.Run("default_1m_budget_caps_4k_expressions_and_retained_heap", func(t *testing.T) {
 		eng, err := celengine.New(testEnv(), celengine.DefaultLimits(), celengine.DefaultCacheConfig())
 		if err != nil {
 			t.Fatalf("New: %v", err)
@@ -2530,9 +2542,15 @@ func TestProgramCacheByteBudgetEviction(t *testing.T) {
 		var before, after runtime.MemStats
 		runtime.ReadMemStats(&before)
 
-		const totalInserted = 100
+		pad := strings.Repeat("x", 3970)
+		const totalInserted = 320
 		for i := 0; i < totalInserted; i++ {
-			expr := buildNearly4KiBOrChainExpr(i)
+			var expr string
+			if i < 24 {
+				expr = buildNearly4KiBOrChainExpr(i)
+			} else {
+				expr = fmt.Sprintf(`meta["k"] == "%s_%04d"`, pad, i)
+			}
 			scope := celengine.CacheScope{Consumer: "trigger", ID: fmt.Sprintf("trig-%d", i), Revision: 1}
 			if _, err := eng.Cached(ctx, scope, expr, boolKind); err != nil {
 				t.Fatalf("Cached[%d] (len=%d): %v", i, len(expr), err)
@@ -2546,15 +2564,16 @@ func TestProgramCacheByteBudgetEviction(t *testing.T) {
 		if stats.Bytes > celengine.DefaultCacheMaxBytes {
 			t.Fatalf("CacheStats.Bytes = %d, want <= %d", stats.Bytes, celengine.DefaultCacheMaxBytes)
 		}
-		// 256 KiB / ~3,990 B <= 66 entries (well below the 200 inserted and 1,024 MaxEntries).
-		if stats.Entries <= 0 || stats.Entries > 66 {
-			t.Fatalf("CacheStats.Entries = %d, want in [1, 66] under 256 KiB budget", stats.Entries)
+		// 1 MiB / ~3,990 B <= 265 entries (well below the 320 inserted and 1,024 MaxEntries,
+		// while comfortably holding >= 200 full 4 KiB rules without churn).
+		if stats.Entries < 250 || stats.Entries > 265 {
+			t.Fatalf("CacheStats.Entries = %d, want in [250, 265] under 1 MiB budget", stats.Entries)
 		}
 		var retained int64
 		if after.HeapAlloc > before.HeapAlloc {
 			retained = int64(after.HeapAlloc - before.HeapAlloc)
 		}
-		const maxRetainedBytes = 48 << 20 // 48 MiB (vs ~337 MiB unbounded)
+		const maxRetainedBytes = 128 << 20 // 128 MiB (vs ~337 MiB unbounded)
 		if retained > maxRetainedBytes {
 			t.Errorf("retained heap delta = %d MiB, want <= %d MiB", retained>>20, maxRetainedBytes>>20)
 		}

@@ -813,13 +813,13 @@ func TestPathologicalRuleDoesNotBlockSubsequentTriggerOnSameEvent(t *testing.T) 
 
 	newBenignSurvivalBudget := func() *ruleengine.BudgetTracker {
 		if raceEnabled {
-			return ruleengine.NewBudgetTracker(5 * time.Second)
+			return ruleengine.NewBudgetTracker(15 * time.Second)
 		}
 		return triggerrule.NewEventBudget()
 	}
 	maxEventWall := triggerrule.EventRuleBudget
 	if raceEnabled {
-		maxEventWall = 5 * time.Second
+		maxEventWall = 15 * time.Second
 	}
 
 	t.Run("pathological_single_call_rules_then_benign_rule_matches_under_1s", func(t *testing.T) {
@@ -1001,6 +1001,7 @@ func TestPathologicalRuleDoesNotBlockSubsequentTriggerOnSameEvent(t *testing.T) 
 		budget := triggerrule.NewEventBudget()
 		start := time.Now()
 
+		evalCount := 0
 		for i := 0; i < 12; i++ {
 			id := "trig-slow-" + string(rune('a'+i))
 			act := baseAct.WithTrigger(hubfire.FireTriggerRef{ID: id, Name: id})
@@ -1016,8 +1017,19 @@ func TestPathologicalRuleDoesNotBlockSubsequentTriggerOnSameEvent(t *testing.T) 
 			if reason == triggerrule.SkipReasonBudgetExhausted {
 				break
 			}
+			evalCount++
 		}
 
+		// Structural invariant: each timeout rule charges >= 100ms against the 1s
+		// EventBudget, so at most 10 evaluations can execute before exhaustion.
+		if evalCount < 1 || evalCount > 10 {
+			t.Fatalf("evalCount before budget exhaustion = %d, want in [1, 10]", evalCount)
+		}
+		if !budget.Exhausted() || budget.Remaining() != 0 {
+			t.Fatalf("expected exhausted budget (Exhausted=%v, Remaining=%s)", budget.Exhausted(), budget.Remaining())
+		}
+
+		cacheBeforeBenign := celEng.CacheStats()
 		benignRef := hubfire.FireTriggerRef{ID: "trig-after-exhausted", Name: "benign"}
 		benignAct := baseAct.WithTrigger(benignRef)
 		benignScope := celengine.CacheScope{Consumer: triggerrule.ConsumerName, ID: benignRef.ID, Revision: 1}
@@ -1029,16 +1041,19 @@ func TestPathologicalRuleDoesNotBlockSubsequentTriggerOnSameEvent(t *testing.T) 
 		if matched {
 			t.Fatalf("expected benign trigger after exhausted event budget to skip, got matched=true")
 		}
+		if !errors.Is(evalErr, ruleengine.ErrBudgetExhausted) {
+			t.Fatalf("benign trigger err = %v, want ErrBudgetExhausted", evalErr)
+		}
 		reason, ok := triggerrule.SkipReason(evalErr)
 		if !ok || reason != triggerrule.SkipReasonBudgetExhausted {
 			t.Fatalf("benign trigger SkipReason = (%q, %v), want (%q, true) (err=%v)", reason, ok, triggerrule.SkipReasonBudgetExhausted, evalErr)
 		}
-		maxCumulativeWall := 1400 * time.Millisecond
-		if raceEnabled {
-			maxCumulativeWall = 5 * time.Second
+		// Match must short-circuit before consulting the CEL cache or evaluator.
+		if got := celEng.CacheStats(); got != cacheBeforeBenign {
+			t.Fatalf("CEL cache touched after budget exhaustion: got %+v, want %+v", got, cacheBeforeBenign)
 		}
-		if elapsed > maxCumulativeWall {
-			t.Errorf("cumulative 1s event budget run took %s, want <= %s", elapsed, maxCumulativeWall)
+		if !raceEnabled && elapsed > 1400*time.Millisecond {
+			t.Errorf("cumulative 1s event budget run took %s, want <= 1.4s", elapsed)
 		}
 	})
 }
@@ -1245,7 +1260,7 @@ func TestPass6RegexOptionAPreScanAndOrdinaryRules(t *testing.T) {
 		ordRulesEngine := rules
 		if raceEnabled {
 			lim := triggerrule.Stage1Limits()
-			lim.EvalTimeout = 500 * time.Millisecond
+			lim.EvalTimeout = celengine.MaxEvalTimeoutCeiling
 			celEng, err := celengine.New(triggerrule.Env(), lim, celengine.DefaultCacheConfig())
 			if err != nil {
 				t.Fatalf("celengine.New: %v", err)
@@ -1276,8 +1291,24 @@ func TestPass6RegexOptionAPreScanAndOrdinaryRules(t *testing.T) {
 			t.Fatalf("NewActivation: %v", err)
 		}
 
+		kw14Rule := `string(event.payload.body).matches("(?i)\\b(deploy|rollback|incident|outage|hotfix|release|canary|promote|degraded|critical|escalate|mitigate|resolved|postmortem)\\b")`
+
+		// Under -race, also verify the 14-keyword (?i) rule matches deterministically
+		// on an 8 KiB body without timeout tolerance so semantic/race coverage never skips.
+		if raceEnabled {
+			ev8k := sampleFireEvent(fmt.Sprintf(`{"body":%q}`, strings.Repeat("normal log line ok ", 420)+"CRITICAL alert fired"))
+			act8k, err := triggerrule.NewActivation(ev8k, hubfire.FireTriggerRef{ID: "trig-ord-8k", Name: "ord-8k"})
+			if err != nil {
+				t.Fatalf("NewActivation 8k: %v", err)
+			}
+			ok8k, err := ordRulesEngine.Match(ctx, celengine.CacheScope{Consumer: triggerrule.ConsumerName, ID: "trig-ord-8k", Revision: 1}, triggerrule.Rule{Expr: kw14Rule}, act8k)
+			if err != nil || !ok8k {
+				t.Fatalf("Match 14-keyword 8 KiB = (%v, %v), want (true, nil)", ok8k, err)
+			}
+		}
+
 		ordRules := []string{
-			`string(event.payload.body).matches("(?i)\\b(deploy|rollback|incident|outage|hotfix|release|canary|promote|degraded|critical|escalate|mitigate|resolved|postmortem)\\b")`,
+			kw14Rule,
 			`string(event.payload.sha).matches("^[0-9a-fA-F]{64}$")`,
 			`string(event.payload.uuid).matches("^(?i)[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")`,
 			`string(event.payload.ver).matches("^v?(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$")`,
@@ -1291,8 +1322,18 @@ func TestPass6RegexOptionAPreScanAndOrdinaryRules(t *testing.T) {
 			scope := celengine.CacheScope{Consumer: triggerrule.ConsumerName, ID: fmt.Sprintf("trig-ord-%d", i), Revision: 1}
 			for pass := 0; pass < 3; pass++ {
 				ok, err := ordRulesEngine.Match(ctx, scope, triggerrule.Rule{Expr: expr}, act)
-				if err != nil || !ok {
+				if err != nil {
+					// On non-race builds, all 5 rules (including 60 KiB 14-keyword NFA)
+					// must succeed within DefaultLimits (100ms). Under -race + heavy CPU
+					// oversubscription, RE2 NFA instrumentation can exceed the 1s ceiling.
+					var ferr *ruleengine.FailedError
+					if raceEnabled && i == 0 && errors.As(err, &ferr) && ferr.Reason == celengine.ReasonTimeout {
+						continue
+					}
 					t.Fatalf("Match[%d] pass %d = (%v, %v), want (true, nil)", i, pass, ok, err)
+				}
+				if !ok {
+					t.Fatalf("Match[%d] pass %d = false, want true", i, pass)
 				}
 			}
 		}

@@ -27,10 +27,12 @@ import (
 const DefaultCacheMaxEntries = 1024
 
 // DefaultCacheMaxBytes is the default maximum cumulative expression source
-// byte budget retained across cached programs (256 KiB: holds all 1,024 entries
-// for ordinary <= 256 B rules while capping ~4 KiB expressions at ~64 entries
-// so worst-case retained AST+plan heap stays bounded).
-const DefaultCacheMaxBytes = 256 * 1024
+// byte budget retained across cached programs (1 MiB: holds all 1,024 entries
+// for <= 1 KiB rules and ~256 full 4 KiB rules — enough to keep an entire
+// project's 200-trigger cap warm without per-event recompilation churn — while
+// bounding worst-case retained AST+plan heap at ~93-98 MiB vs ~337 MiB
+// unbounded).
+const DefaultCacheMaxBytes = 1 << 20
 
 // CacheConfig configures an Engine's content-addressed compiled-program LRU cache.
 type CacheConfig struct {
@@ -40,7 +42,7 @@ type CacheConfig struct {
 }
 
 // DefaultCacheConfig returns a CacheConfig with DefaultCacheMaxEntries (1024)
-// and DefaultCacheMaxBytes (256 KiB).
+// and DefaultCacheMaxBytes (1 MiB).
 func DefaultCacheConfig() CacheConfig {
 	return CacheConfig{
 		MaxEntries: DefaultCacheMaxEntries,
