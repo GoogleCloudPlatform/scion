@@ -564,6 +564,61 @@ func TestProgramCacheContentIdentityAndInvalidation(t *testing.T) {
 	}
 }
 
+func TestProgramCacheMultiKindSameScope(t *testing.T) {
+	eng, err := celengine.New(testEnv(), celengine.DefaultLimits(), celengine.DefaultCacheConfig())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	filterKind := celengine.Kind{Name: "filter", Result: celengine.Bool()}
+	subjectKind := celengine.Kind{Name: "subject", Result: celengine.String()}
+	ctx := context.Background()
+
+	scope := celengine.CacheScope{Consumer: "trigger", ID: "trig-multi", Revision: 1}
+	for i := 0; i < 5; i++ {
+		if _, err := eng.Cached(ctx, scope, `active && count > 0`, filterKind); err != nil {
+			t.Fatalf("iter %d Cached filter: %v", i, err)
+		}
+		if _, err := eng.Cached(ctx, scope, `"subj:" + meta["label"]`, subjectKind); err != nil {
+			t.Fatalf("iter %d Cached subject: %v", i, err)
+		}
+	}
+
+	stats := eng.CacheStats()
+	if stats.Entries != 2 || stats.Misses != 2 || stats.Hits != 8 {
+		t.Fatalf("expected multi-kind scope retention (Entries=2, Misses=2, Hits=8), got %+v", stats)
+	}
+
+	// Bumping revision and compiling only filter retains the unchanged filter hit
+	// while evicting the unreferenced prior-revision subject entry.
+	scopeRev2 := celengine.CacheScope{Consumer: "trigger", ID: "trig-multi", Revision: 2}
+	if _, err := eng.Cached(ctx, scopeRev2, `active && count > 0`, filterKind); err != nil {
+		t.Fatalf("rev2 Cached filter: %v", err)
+	}
+	stats = eng.CacheStats()
+	if stats.Entries != 1 || stats.Hits != 9 || stats.Misses != 2 {
+		t.Fatalf("expected rev2 filter hit + stale subject eviction (Entries=1, Hits=9, Misses=2), got %+v", stats)
+	}
+
+	// Re-bind both kinds at rev2 and verify Invalidate drops all kinds for the scope.
+	if _, err := eng.Cached(ctx, scopeRev2, `"v2:" + meta["label"]`, subjectKind); err != nil {
+		t.Fatalf("rev2 Cached subject: %v", err)
+	}
+	if got := eng.CacheStats().Entries; got != 2 {
+		t.Fatalf("Entries with both rev2 kinds = %d, want 2", got)
+	}
+
+	// Stale rev1 invalidation is a no-op.
+	eng.Invalidate(scope)
+	if got := eng.CacheStats().Entries; got != 2 {
+		t.Fatalf("Entries after stale rev1 Invalidate = %d, want 2", got)
+	}
+
+	eng.Invalidate(scopeRev2)
+	if got := eng.CacheStats().Entries; got != 0 {
+		t.Fatalf("Entries after rev2 Invalidate = %d, want 0", got)
+	}
+}
+
 func TestFunctionsListAndMacrosNone(t *testing.T) {
 	eng := newTestEngine(t)
 	fns := eng.Functions()

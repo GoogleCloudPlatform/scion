@@ -102,16 +102,22 @@ type scopeKey struct {
 	id       string
 }
 
-type scopeBinding struct {
-	key      cacheIdentity
+type slotKey struct {
+	consumer string
+	id       string
+	kind     string
+}
+
+type scopeRecord struct {
 	revision int64
+	byKind   map[string]cacheIdentity
 }
 
 type cacheEntry struct {
 	key        cacheIdentity
 	prog       Program
 	elem       *list.Element
-	scopes     map[scopeKey]struct{}
+	slots      map[slotKey]struct{}
 	everScoped bool
 }
 
@@ -121,7 +127,7 @@ type programCache struct {
 	maxPerConsumer int
 	lru            *list.List // front = most recently used; Value = *cacheEntry
 	byKey          map[cacheIdentity]*cacheEntry
-	byScope        map[scopeKey]scopeBinding
+	byScope        map[scopeKey]*scopeRecord
 	hits           uint64
 	misses         uint64
 }
@@ -132,11 +138,11 @@ func newProgramCache(cfg CacheConfig) *programCache {
 		maxPerConsumer: cfg.MaxPerConsumer,
 		lru:            list.New(),
 		byKey:          make(map[cacheIdentity]*cacheEntry),
-		byScope:        make(map[scopeKey]scopeBinding),
+		byScope:        make(map[scopeKey]*scopeRecord),
 	}
 }
 
-func (c *programCache) get(id cacheIdentity, scope CacheScope) (Program, bool) {
+func (c *programCache) get(id cacheIdentity, kindName string, scope CacheScope) (Program, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -148,33 +154,33 @@ func (c *programCache) get(id cacheIdentity, scope CacheScope) (Program, bool) {
 	c.hits++
 	c.lru.MoveToFront(ent.elem)
 	if scope.hasID() {
-		c.bindScopeLocked(scope, ent)
+		c.bindScopeLocked(scope, kindName, ent)
 	}
 	return ent.prog, true
 }
 
-func (c *programCache) put(id cacheIdentity, prog Program, scope CacheScope) Program {
+func (c *programCache) put(id cacheIdentity, kindName string, prog Program, scope CacheScope) Program {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if ent, ok := c.byKey[id]; ok {
 		c.lru.MoveToFront(ent.elem)
 		if scope.hasID() {
-			c.bindScopeLocked(scope, ent)
+			c.bindScopeLocked(scope, kindName, ent)
 		}
 		return ent.prog
 	}
 
 	ent := &cacheEntry{
-		key:    id,
-		prog:   prog,
-		scopes: make(map[scopeKey]struct{}),
+		key:   id,
+		prog:  prog,
+		slots: make(map[slotKey]struct{}),
 	}
 	ent.elem = c.lru.PushFront(ent)
 	c.byKey[id] = ent
 
 	if scope.hasID() {
-		c.bindScopeLocked(scope, ent)
+		c.bindScopeLocked(scope, kindName, ent)
 	}
 
 	if c.maxPerConsumer > 0 && scope.Consumer != "" {
@@ -190,25 +196,60 @@ func (c *programCache) put(id cacheIdentity, prog Program, scope CacheScope) Pro
 	return prog
 }
 
-func (c *programCache) bindScopeLocked(scope CacheScope, target *cacheEntry) {
+func (c *programCache) bindScopeLocked(scope CacheScope, kindName string, target *cacheEntry) {
 	sk := scopeKey{consumer: scope.Consumer, id: scope.ID}
-	if prev, exists := c.byScope[sk]; exists {
-		if prev.key != target.key {
-			c.detachScopeFromEntryLocked(sk, prev.key)
+	slot := slotKey{consumer: scope.Consumer, id: scope.ID, kind: kindName}
+
+	rec, exists := c.byScope[sk]
+	if !exists {
+		c.byScope[sk] = &scopeRecord{
+			revision: scope.Revision,
+			byKind:   map[string]cacheIdentity{kindName: target.key},
 		}
+		target.slots[slot] = struct{}{}
+		target.everScoped = true
+		return
 	}
-	c.byScope[sk] = scopeBinding{key: target.key, revision: scope.Revision}
-	target.scopes[sk] = struct{}{}
+
+	// Do not allow an older revision to clobber bindings recorded for a newer revision.
+	if scope.Revision > 0 && rec.revision > scope.Revision {
+		return
+	}
+
+	// Attach target first so an unchanged expression across a revision bump is never
+	// transiently left with zero slots while detaching prior-revision kinds.
+	target.slots[slot] = struct{}{}
 	target.everScoped = true
+
+	if scope.Revision > 0 && rec.revision > 0 && scope.Revision > rec.revision {
+		for oldKind, oldID := range rec.byKind {
+			if oldKind == kindName && oldID == target.key {
+				continue
+			}
+			c.detachSlotFromEntryLocked(slotKey{consumer: sk.consumer, id: sk.id, kind: oldKind}, oldID)
+			delete(rec.byKind, oldKind)
+		}
+		rec.revision = scope.Revision
+		rec.byKind[kindName] = target.key
+		return
+	}
+
+	if prevID, hadKind := rec.byKind[kindName]; hadKind && prevID != target.key {
+		c.detachSlotFromEntryLocked(slot, prevID)
+	}
+	rec.byKind[kindName] = target.key
+	if scope.Revision > rec.revision {
+		rec.revision = scope.Revision
+	}
 }
 
-func (c *programCache) detachScopeFromEntryLocked(sk scopeKey, id cacheIdentity) {
+func (c *programCache) detachSlotFromEntryLocked(slot slotKey, id cacheIdentity) {
 	ent, ok := c.byKey[id]
 	if !ok {
 		return
 	}
-	delete(ent.scopes, sk)
-	if ent.everScoped && len(ent.scopes) == 0 {
+	delete(ent.slots, slot)
+	if ent.everScoped && len(ent.slots) == 0 {
 		c.removeEntryLocked(ent)
 	}
 }
@@ -229,15 +270,23 @@ func (c *programCache) enforceConsumerCapLocked(consumer string, keep *cacheEntr
 		if victim == nil {
 			break
 		}
-		// Detach all scopes belonging to this consumer from victim; if no other
+		// Detach all slots belonging to this consumer from victim; if no other
 		// consumer references victim, remove it.
-		for sk := range victim.scopes {
-			if sk.consumer == consumer {
-				delete(victim.scopes, sk)
-				delete(c.byScope, sk)
+		for sl := range victim.slots {
+			if sl.consumer == consumer {
+				delete(victim.slots, sl)
+				sk := scopeKey{consumer: sl.consumer, id: sl.id}
+				if rec, ok := c.byScope[sk]; ok {
+					if rec.byKind[sl.kind] == victim.key {
+						delete(rec.byKind, sl.kind)
+					}
+					if len(rec.byKind) == 0 {
+						delete(c.byScope, sk)
+					}
+				}
 			}
 		}
-		if len(victim.scopes) == 0 {
+		if len(victim.slots) == 0 {
 			c.removeEntryLocked(victim)
 		}
 	}
@@ -254,8 +303,8 @@ func (c *programCache) consumerEntryCountLocked(consumer string) int {
 }
 
 func entryHasConsumer(ent *cacheEntry, consumer string) bool {
-	for sk := range ent.scopes {
-		if sk.consumer == consumer {
+	for sl := range ent.slots {
+		if sl.consumer == consumer {
 			return true
 		}
 	}
@@ -268,9 +317,15 @@ func (c *programCache) removeEntryLocked(ent *cacheEntry) {
 		c.lru.Remove(ent.elem)
 		ent.elem = nil
 	}
-	for sk := range ent.scopes {
-		if b, ok := c.byScope[sk]; ok && b.key == ent.key {
-			delete(c.byScope, sk)
+	for sl := range ent.slots {
+		sk := scopeKey{consumer: sl.consumer, id: sl.id}
+		if rec, ok := c.byScope[sk]; ok {
+			if rec.byKind[sl.kind] == ent.key {
+				delete(rec.byKind, sl.kind)
+			}
+			if len(rec.byKind) == 0 {
+				delete(c.byScope, sk)
+			}
 		}
 	}
 }
@@ -283,24 +338,28 @@ func (c *programCache) invalidate(scope CacheScope) {
 		return
 	}
 	if scope.ID == "" {
-		for sk, b := range c.byScope {
+		for sk, rec := range c.byScope {
 			if sk.consumer == scope.Consumer {
 				delete(c.byScope, sk)
-				c.detachScopeFromEntryLocked(sk, b.key)
+				for k, id := range rec.byKind {
+					c.detachSlotFromEntryLocked(slotKey{consumer: sk.consumer, id: sk.id, kind: k}, id)
+				}
 			}
 		}
 		return
 	}
 	sk := scopeKey{consumer: scope.Consumer, id: scope.ID}
-	b, ok := c.byScope[sk]
+	rec, ok := c.byScope[sk]
 	if !ok {
 		return
 	}
-	if scope.Revision > 0 && b.revision > scope.Revision {
+	if scope.Revision > 0 && rec.revision > scope.Revision {
 		return
 	}
 	delete(c.byScope, sk)
-	c.detachScopeFromEntryLocked(sk, b.key)
+	for k, id := range rec.byKind {
+		c.detachSlotFromEntryLocked(slotKey{consumer: sk.consumer, id: sk.id, kind: k}, id)
+	}
 }
 
 func (c *programCache) stats() CacheStats {

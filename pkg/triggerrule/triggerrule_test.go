@@ -496,3 +496,54 @@ func TestTriggerEnvironmentFunctionAllowList(t *testing.T) {
 		t.Fatalf("trigger environment function list drifted!\ngot (%d):  %v\nwant (%d): %v", len(got), got, len(want), want)
 	}
 }
+
+func TestMatchAndSubjectShareCacheScopeWithoutEviction(t *testing.T) {
+	celEng, err := celengine.New(triggerrule.Env(), triggerrule.Stage1Limits(), celengine.DefaultCacheConfig())
+	if err != nil {
+		t.Fatalf("celengine.New: %v", err)
+	}
+	celDialect, err := ruleengine.NewCELDialect(celEng)
+	if err != nil {
+		t.Fatalf("NewCELDialect: %v", err)
+	}
+	re := ruleengine.NewEngine()
+	if err := re.Register(celDialect); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	re.AllowConsumerDialects(triggerrule.ConsumerName, ruleengine.DialectCEL)
+	rules, err := triggerrule.New(re)
+	if err != nil {
+		t.Fatalf("triggerrule.New: %v", err)
+	}
+
+	ctx := context.Background()
+	scope := celengine.CacheScope{Consumer: triggerrule.ConsumerName, ID: "trig-both", Revision: 1}
+	matchRule := triggerrule.Rule{Expr: `event.type == "webhook.deploy.finished"`}
+	subjRule := triggerrule.Rule{Expr: `"done:" + string(event.source.id)`}
+
+	for i := 0; i < 5; i++ {
+		ev := sampleFireEvent(`{"ok":true}`)
+		act, err := triggerrule.NewActivation(ev, hubfire.FireTriggerRef{ID: "trig-both", Name: "both"})
+		if err != nil {
+			t.Fatalf("NewActivation %d: %v", i, err)
+		}
+		ok, err := rules.Match(ctx, scope, matchRule, act)
+		if err != nil || !ok {
+			t.Fatalf("iter %d Match = (%v, %v), want (true, nil)", i, ok, err)
+		}
+		subj, err := rules.Subject(ctx, scope, subjRule, act)
+		if err != nil || subj != "done:ep-456" {
+			t.Fatalf("iter %d Subject = (%q, %v), want (\"done:ep-456\", nil)", i, subj, err)
+		}
+	}
+
+	stats := celEng.CacheStats()
+	if stats.Entries != 2 || stats.Misses != 2 || stats.Hits != 8 {
+		t.Fatalf("expected Match+Subject on shared scope to hit cache (Entries=2, Misses=2, Hits=8), got %+v", stats)
+	}
+
+	rules.Invalidate(ruleengine.DialectCEL, scope)
+	if got := celEng.CacheStats().Entries; got != 0 {
+		t.Fatalf("Entries after Invalidate = %d, want 0", got)
+	}
+}
