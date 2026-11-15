@@ -17,22 +17,19 @@
 # runtime.listAllNamespaces are BOTH true, and both halves are pinned below.
 #
 # 🛑 WHAT A GREEN RUN OF THIS FILE DOES NOT MEAN. READ THIS BEFORE CITING IT.
-# This change fixes C1: the TRUNCATION bucket. It does NOT fix C4 or C5, which
-# are two further cluster-scoped collisions, both live, both Critical, and both
-# PINNED AS PRESENT here - arm (o) and arm (q). Those arms are written to PASS
-# WHILE THE DEFECT EXISTS. They are fences, not regression tests.
+# This suite covers C1 (the truncation bucket) and C4 (the release-name suffix
+# collision in scion-hub.fullname, arm (o)). It does NOT fix C5, which remains a
+# live cluster-scoped collision, Critical, and PINNED AS PRESENT in arm (q). Arm
+# (q) is written to PASS WHILE THE DEFECT EXISTS. It is a fence, not a
+# regression test.
 #
-#   C1  needs a LONG release name - it fires only when the 63-byte cut lands
-#   C4  release R beside release R-scion-hub, one namespace, len(R) 1..43
+#   C1  needs a LONG release name - it fires only when the 63-byte cut lands (FIXED)
+#   C4  release R beside release R-scion-hub, one namespace, len(R) 1..43   (FIXED)
 #   C5  the "-" between fullname and namespace is legal inside both operands,
-#       so the joined string splits two ways. Renders at 33 bytes.
+#       so the joined string splits two ways. Renders at 33 bytes.          (OPEN)
 #
-# 🔴 C4 AND C5 DO NOT TRUNCATE, AND THIS FIX IS GATED ON TRUNCATION. THE GATE IS
-# KEYED ON THE ONE PROPERTY BOTH REMAINING CRITICALS LACK. So this PR closes the
-# class that needs long release names and declares residuals on the two classes
-# that fire on ordinary ones - `prod`, and a one-character release name. An
-# operator reading "fixes the RBAC name collision" gets the rarest of the three,
-# which is why the PR body says so explicitly and why this paragraph exists.
+# 🔴 C5 DOES NOT TRUNCATE, AND THE CLUSTER-ROLE DIGEST IS GATED ON TRUNCATION.
+# So C5 still fires on ordinary short inputs across namespaces (arm (q)).
 #
 # ------------------------------------------------------------------------
 # WHY THIS FILE ASSERTS EXACT NAME STRINGS AND NOT collide/distinct VERDICTS.
@@ -125,14 +122,14 @@
 #   E  orphan disclosure deleted            red  4
 #   F  symmetric "delete both" cleanup      red  2   the ClusterRole asymmetry
 #   G  gate on release-name length          red 10   fullnameOverride walks past it
-#   H  scion-hub.fullname made injective    red  5   arm (o), the C4 fence
+#   H  pre-C4 contains idiom restored       red      arm (o), the C4 regression pin
 #   I  digest arm made to end in "-agents"  red 15   collapses (p)'s two ranges
 #   J  separator "-" changed to ":"         red 30   arm (q), the C5 fence
 #
-# H AND J ARE THE TWO THAT ARE SUPPOSED TO HAPPEN ONE DAY. H is C4's fix and J is
-# C5's. When either lands, the matching fence arm must be RE-PINNED DELIBERATELY
-# rather than repaired, and the upgrade path checked, because both rename objects
-# that already exist in clusters.
+# J IS SUPPOSED TO HAPPEN ONE DAY (C5's fix). When it lands, arm (q) must be
+# RE-PINNED DELIBERATELY rather than repaired, and the upgrade path checked,
+# because it renames objects that already exist in clusters. Arm (o) was re-pinned
+# when C4 landed in scion-hub.fullname.
 #
 # WHAT J MEASURED THAT IS WORTH KEEPING EVEN THOUGH J IS NOT APPLIED:
 #   - it DOES close all three known C5 instances;
@@ -149,7 +146,7 @@
 # FAILS CLOSED, same contract as the other scripts here.
 set -u
 
-EXPECTED_TOTAL=46
+EXPECTED_TOTAL=48
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 BASE=(--set image.repository=r --set agents.imageRegistry=example.invalid/agents --set hub.hubId=h --set hub.baseUrl=https://test.example.com
@@ -593,51 +590,27 @@ else
   fail "(n) the disclosure's cleanup is wrong: deletes binding=${_says_binding}, deletes ClusterRole=${_says_role}. It must delete the binding and LEAVE the ClusterRole - the ClusterRole is byte-identical across every install in the bucket, so no command can tell the operator whether anyone still binds it, and the inspection command returns empty on it, which argues for deleting it."
 fi
 
-# (o) THE BOUNDARY OF THIS FIX: A SECOND, UNFIXED COLLISION CLASS.
+# (o) C4 REGRESSION: RELEASE R BESIDE RELEASE R-scion-hub IN ONE NAMESPACE.
 # --------------------------------------------------------------------------
-# THIS ARM PINS A DEFECT THAT IS STILL PRESENT. It is not a regression test for
-# the fix; it is a fence around it, so that nobody reads a green suite as
-# "cluster-scoped name collisions are solved".
+# Pre-fix, scion-hub.fullname branched on `contains $name .Release.Name`, so
+# release R ("prod") and release R + "-scion-hub" ("prod-scion-hub") mapped to
+# ONE fullname ("prod-scion-hub") and shared every namespaced and cluster-scoped
+# object in the chart.
 #
-# scion-hub.fullname branches on `contains $name .Release.Name`, so a release R
-# and a release R + "-scion-hub" map to ONE fullname (gd-p3-rev). Every name in
-# the chart is built from that fullname, so both releases render the SAME
-# ClusterRole, ClusterRoleBinding, ServiceAccount, Service and Deployment - in
-# the SAME namespace, at 30 bytes, with NOTHING TRUNCATED and a four-character
-# release name.
-#
-# WHY THIS FIX CANNOT COVER IT, MEASURED RATHER THAN ARGUED. The two inputs to
-# scion-hub.clusterRoleName are the fullname and the namespace, and both are
-# identical for this pair - the ONLY differing input is .Release.Name. So no
-# gate helps: gate on truncation and the digest never fires; hash
-# unconditionally and both sides hash the same string. And feeding
-# .Release.Name in would be worse than useless, because the ClusterRoleBinding's
-# SUBJECT is the ServiceAccount, whose name comes from the same collapsed
-# fullname and is also identical. Two distinct ClusterRoles would then bind ONE
-# ServiceAccount: the grant stays shared and the only visible symptom - the
-# duplicate name - disappears. THE RENAME WOULD HIDE THE COLLISION, NOT REMOVE
-# IT. The fix belongs in scion-hub.fullname, it renames every object in the
-# chart, and it is filed separately.
-#
-# gd-consumer rendered a second route into the same class (two fullnameOverride
-# values agreeing on 63 characters, one namespace, 5 of 5 namespaced kinds
-# identical) and graded it low as contrived. Same root cause, same fence: the
-# non-injective operation is in fullname, upstream of everything measured above.
-#
-# IF THIS ARM GOES RED, DO NOT "REPAIR" IT BY EDITING THE EXPECTATIONS. Red here
-# means scion-hub.fullname changed. That is the fix for the other defect and it
-# is good news - re-pin these strings deliberately, and check whether the
-# upgrade path for existing installs was handled, because that change renames
-# every object in the chart.
-pin "(o) release 'prod' in ns platform, nothing truncated" \
+# Post-fix, scion-hub.fullname keeps .Release.Name ONLY when it contains $name
+# AND does not end in "-<name>". Releases ending in "-<name>" still receive the
+# "-<name>" suffix, separating (R, R-<name>) into R-<name> and R-<name>-<name>
+# while keeping "scion-hub" and "scion-hub-*" unchanged.
+pin "(o) release 'prod' in ns platform renders unchanged" \
     prod-scion-hub-platform-agents prod platform
-pin "(o) release 'prod-scion-hub' in ns platform STILL COLLIDES with release 'prod' after this fix - the contains idiom in scion-hub.fullname collapses them upstream of the cluster-scoped helper, and no gate in that helper can separate inputs it never sees" \
-    prod-scion-hub-platform-agents prod-scion-hub platform
-pin "(o) NEGATIVE CONTROL: 'prod-scion' does not contain the chart name, so the suffix IS appended and the name stays distinct - the rig can say 'distinct' on a near miss and is not merely reporting equality" \
+pin "(o) release 'prod-scion-hub' in ns platform appends '-scion-hub' so it no longer collides with 'prod'" \
+    prod-scion-hub-scion-hub-platform-agents prod-scion-hub platform
+pin "(o) NEGATIVE CONTROL: 'prod-scion' does not contain the chart name, so the suffix is appended" \
     prod-scion-scion-hub-platform-agents prod-scion platform
 
-# The subject is the load-bearing half of the argument above: it is what makes a
-# per-release-name rename of the cluster-scoped objects cosmetic, not corrective.
+# Both the cluster-scoped object name AND its ServiceAccount subject must differ:
+# two distinct ClusterRoleBindings pointing at one ServiceAccount would leave the
+# grant shared.
 sa_subject() { # sa_subject <release> <namespace>
   "$HELM" template "$1" "$CHART" "${BASE[@]}" -n "$2" 2>&1 | awk '
     /^kind: ClusterRoleBinding$/ { k=1; next }
@@ -650,19 +623,34 @@ _o_sa_b="$(sa_subject prod-scion-hub platform)"
 if ! { [ -n "$_o_sa_a" ] && [ -n "$_o_sa_b" ]; }; then
   meta_failure "(o) could not read the ClusterRoleBinding subject for one or both releases (got '$_o_sa_a' and '$_o_sa_b'); an empty-vs-empty comparison would report 'identical' having measured nothing"
 fi
-if [ "$_o_sa_a" = prod-scion-hub ] && [ "$_o_sa_b" = prod-scion-hub ]; then
-  pass "(o) both releases bind the SAME ServiceAccount subject (prod-scion-hub), so renaming only the cluster-scoped objects would leave the grant shared"
+if [ "$_o_sa_a" = prod-scion-hub ] && [ "$_o_sa_b" = prod-scion-hub-scion-hub ]; then
+  pass "(o) 'prod' and 'prod-scion-hub' bind distinct ServiceAccount subjects ($_o_sa_a vs $_o_sa_b)"
 else
-  fail "(o) the ClusterRoleBinding subjects are now '$_o_sa_a' and '$_o_sa_b'. If they differ, scion-hub.fullname was fixed and this whole arm needs re-pinning; if they are unexpected strings, the subject wiring changed and the binding may no longer grant to the ServiceAccount the pod runs as."
+  fail "(o) unexpected ClusterRoleBinding subjects: prod='$_o_sa_a' (want 'prod-scion-hub'), prod-scion-hub='$_o_sa_b' (want 'prod-scion-hub-scion-hub')"
 fi
 
-# And the disclosure must stay SILENT here. Nothing was renamed for this pair,
-# so there is no orphan; claiming one would send an operator to delete a LIVE
-# object under a procedure written for a different failure.
-if [ "$(notes_has_disclosure prod-scion-hub platform)" = no ]; then
-  pass "(o) no orphan disclosure for the contains-idiom collision - nothing was renamed, and the disclosure must not be repurposed for a defect whose remediation is different"
+# Because scion-hub.clusterRoleNameLegacy uses scion-hub.fullnameLegacy, a
+# renamed '-scion-hub' release triggers the NOTES orphan disclosure naming its
+# exact pre-fix ClusterRoleBinding, while 'prod' and 'scion-hub' (whose names did
+# not change) stay silent.
+_o_notes_renamed="$("$HELM" template prod-scion-hub "$_probe" "${BASE[@]}" -n platform \
+                    --show-only templates/zz-notes-probe.yaml 2>&1)"
+if [ "$(notes_has_disclosure prod-scion-hub platform)" = yes ] \
+   && printf '%s' "$_o_notes_renamed" | grep -qF "kubectl delete clusterrolebinding prod-scion-hub-platform-agents" \
+   && ! printf '%s' "$_o_notes_renamed" | grep -qF "kubectl delete clusterrole prod-scion-hub-platform-agents"; then
+  pass "(o) renamed release 'prod-scion-hub' gets the NOTES orphan disclosure naming prod-scion-hub-platform-agents"
 else
-  fail "(o) the orphan disclosure fired for a release whose cluster-scoped name did not change. It would name a CURRENT, live object as a leftover and hand the operator a delete command for it."
+  fail "(o) renamed release 'prod-scion-hub' did not get a complete NOTES orphan disclosure for prod-scion-hub-platform-agents"
+fi
+if [ "$(notes_has_disclosure prod platform)" = no ]; then
+  pass "(o) unchanged release 'prod' gets no orphan disclosure"
+else
+  fail "(o) unchanged release 'prod' falsely triggered the orphan disclosure"
+fi
+if [ "$(notes_has_disclosure scion-hub platform)" = no ]; then
+  pass "(o) documented release 'scion-hub' keeps fullname 'scion-hub' and gets no orphan disclosure"
+else
+  fail "(o) documented release 'scion-hub' falsely triggered the orphan disclosure"
 fi
 
 # (q) C5: THE SEPARATOR IS AMBIGUOUS. THIS FIX DOES NOT CLOSE IT. IT COULD.
@@ -797,14 +785,11 @@ fi
 # than labelled as luck - a comment saying "accidental" invites removal, and a
 # failing assertion does not.
 #
-# THE THIRD CELL - "neither side truncated" - IS NOT ONE DEFECT. IT HOLDS TWO,
-# AND THEY HAVE OPPOSITE ANSWERS. Do not collapse them:
+# THE THIRD CELL - "neither side truncated" - USED TO HOLD TWO DEFECTS (C4 AND
+# C5). C4 (arm (o)) IS NOW CLOSED IN scion-hub.fullname; C5 (arm (q)) REMAINS:
 #
-#   C4, arm (o)   both inputs to this helper are IDENTICAL, and both installs
-#                 bind the SAME ServiceAccount. No gate here can separate inputs
-#                 it never sees, and a rename would remove the only symptom while
-#                 leaving the grant shared. NOT FIXABLE HERE, and fixing the name
-#                 would be worse than the defect.
+#   C4, arm (o)   scion-hub.fullname used to collapse (R, R-scion-hub) onto one
+#                 fullname and one ServiceAccount. Fixed upstream in fullname.
 #   C5, arm (q)   the inputs DIFFER and the two installs bind DIFFERENT
 #                 ServiceAccounts in DIFFERENT namespaces. The names collide only
 #                 because this helper joins fullname and namespace with "-", which
