@@ -39,6 +39,11 @@ import (
 // --wake, under lifecycle.idle_suspend; a user-suspended agent, a held agent
 // and the experiment off keep today's behaviour.
 
+// waitAutoWakeIdle waits until every background auto-wake has ended.
+func (s *Server) waitAutoWakeIdle() {
+	s.autoWakeWork.wg.Wait()
+}
+
 // setIdleSuspendExperiment turns lifecycle.idle_suspend on or off for srv.
 func setIdleSuspendExperiment(t *testing.T, srv *Server, on bool) {
 	t.Helper()

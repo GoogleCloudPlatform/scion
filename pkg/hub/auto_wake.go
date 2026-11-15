@@ -222,12 +222,6 @@ func (s *Server) autoWakeAgent(ctx context.Context, agent *store.Agent) (*store.
 	return fresh, nil
 }
 
-// waitAutoWakeIdle waits until every background auto-wake has ended.
-// Tests use it; shutdown uses stopAutoWakes.
-func (s *Server) waitAutoWakeIdle() {
-	s.autoWakeWork.wg.Wait()
-}
-
 // stopAutoWakes refuses new background auto-wakes and waits, up to
 // autoWakeStopGrace, for those in flight; any still running is cancelled.
 func (s *Server) stopAutoWakes(ctx context.Context) {
