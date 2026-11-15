@@ -3,7 +3,7 @@ title: Scheduling & Scheduled Events
 description: Schedule recurring or one-shot future events to deliver messages or run tasks within your Scion project.
 ---
 
-Scion includes a robust, project-scoped scheduling system that allows you to trigger future events. You can schedule a message to be delivered to an agent at a specific time (one-shot) or repeatedly on a calendar schedule (recurring).
+Scion includes a robust, project-scoped scheduling system that allows you to trigger future events. You can schedule a message to be delivered to an agent, or—when the `hub.exec_schedules` experiment is enabled—run a command directly in an agent's container without an LLM turn (`--type exec`), either at a specific time (one-shot) or repeatedly on a calendar schedule (recurring).
 
 All schedules are **project-scoped**. An agent can only create, list, and manage schedules within its own project.
 
@@ -71,12 +71,13 @@ For how Scion handles times and zones elsewhere (API timestamps, display zone, a
 
 ### Schedules paused by the Hub
 
-The Hub pauses a recurring schedule on its own in two cases, and records why in the schedule's status reason (`statusReason` in the API). `scion schedule list` shows it after the status, for example `paused (creator_deleted)`, `scion schedule get` prints it on a `Reason:` line, and the Web schedule list shows it under the status badge.
+The Hub pauses a recurring schedule on its own in three cases, and records why in the schedule's status reason (`statusReason` in the API). `scion schedule list` shows it after the status, for example `paused (creator_deleted)`, `scion schedule get` prints it on a `Reason:` line, and the Web schedule list shows it under the status badge.
 
 | Reason | Cause | To bring it back |
 | :--- | :--- | :--- |
 | `creator_deleted` | The agent or user the schedule runs under was deleted, or that user is being deleted, so no fire could be authorized. | Resume it. Resuming records your authority, and the schedule then runs as you. |
 | `cron_zone_unsupported` | The cron expression carries a `CRON_TZ=` or `TZ=` prefix. | Remove the prefix and set the schedule's time zone instead, then resume it. |
+| `target_deleted` | The target agent of a recurring `exec` schedule was deleted. | Point the schedule at a live agent (`PATCH` with a new payload) and resume it, or delete and recreate it. |
 
 A schedule you pause yourself has no status reason. Any pause, resume or status edit by a user clears the reason.
 
@@ -123,6 +124,94 @@ scion schedule create-recurring \
 - **Start already in progress**: if the agent is already starting, or another start of it (or a stop) is in progress, when the message fires, the fire does not start it again: it waits for that start to bring the agent up and then delivers. If the agent does not become ready, the fire fails with `target agent was already starting or stopping and did not become ready; message not delivered`.
 - **Status while running**: a wake fire shows status `firing` until its delivery outcome is written (`fired`, `expired` or `failed`). If the Hub stops before the outcome can be written, recovery marks the event `failed` with `hub stopped before the wake fire completed` (and counts the error on the parent recurring schedule).
 - [Scheduled chat messages](/scion/hosted/user/scheduled-send/) are separate from the project scheduler and have their own opt-in **Wake the agent if it is suspended** option for the primary recipient.
+
+---
+
+## Exec Schedules (Experimental)
+
+When a scheduled job only needs to run a deterministic command or script inside an agent's container—without waking an LLM or consuming a model turn—use `--type exec`. Scheduled exec dispatches the command (`argv`) over the target agent's Conduit session to `sciontool` inside the container.
+
+### Prerequisites
+
+- **Hub experiments**: Both `hub.conduit` and `hub.exec_schedules` must be enabled on the Hub (see [Experiments](/scion/reference/experiments/#server-experiments-with-notes)).
+- **Agents launched or restarted with the flag**: `sciontool` registers and advertises the `exec-start` and `exec-status` control routes only when the agent started with `hub.exec_schedules` enabled in its launch environment. Agents started before the experiment was enabled do not advertise those routes until restarted; fires targeting them record status `skipped` (`agent executor unavailable`).
+- **NTP-synchronised clocks**: `sciontool` enforces a fail-closed start deadline (`not_after` plus a 10-second clock tolerance). Agent hosts and containers must run NTP-synchronised clocks; clock skew beyond the 10-second tolerance causes starts to fail closed (`start expired (check agent clock)`) rather than run late.
+- **Supported runtimes**: Container runtimes with Conduit sessions are supported. Managed agent runtimes (`managed:*`) are refused with `422` at creation and `skipped` at fire time.
+
+### Creating Exec Events and Schedules
+
+Pass the command and its arguments after `--`. Everything after `--` is sent as an `argv` array (`1`–`64` arguments, non-empty `argv[0]`, no NUL bytes, at most `4,096` bytes per argument and `16,384` bytes total) and executed directly with `execve`—**no shell is invoked** unless you name one explicitly (for example `-- sh -c '...'`).
+
+```bash
+# One-shot exec event in 10 minutes (default 60s timeout)
+scion schedule create \
+  --type exec \
+  --agent "worker" \
+  --in 10m \
+  --timeout 60s \
+  -- /usr/local/bin/check-queue --strict
+
+# Recurring exec schedule with a 55-minute timeout
+scion schedule create-recurring \
+  --type exec \
+  --name "alt-image-pull" \
+  --cron "0 2,8,14,20 * * *" \
+  --time-zone UTC \
+  --agent "instance-investigator" \
+  --timeout 55m \
+  -- /scion-volumes/scratchpad/projects/alt-image-build/pull-alt-images.sh
+```
+
+:::note[Rollout status]
+One-shot exec events (`scion schedule create --type exec` and `POST /api/v1/projects/{projectId}/scheduled-events`) are available whenever `hub.conduit` and `hub.exec_schedules` are enabled. `scion schedule create-recurring --type exec` forwards the request to `POST /api/v1/projects/{projectId}/schedules`; if the Hub version does not yet accept recurring `exec` schedules, the Hub refuses the request.
+:::
+
+### Execution Environment and Output
+
+- **User and groups**: Runs as the container's Conduit PTY user (`scion`) with its supplementary groups, never with PID 1 credentials (if privilege drop cannot be established, the run fails closed).
+- **Working directory**: `/workspace` if it exists, otherwise the `scion` user's home directory.
+- **Environment**: The same environment `sciontool` gives the harness shell in the agent's tmux session at launch, so scheduled commands see the same `PATH`, workspace variables, and credentials as commands typed in the agent's shell.
+- **Standard streams and no stored output**: `stdin` is `/dev/null`. `stdout` and `stderr` are continuously drained and discarded inside the container—**no command output is stored or returned** in the database, API, CLI, or Hub/broker logs.
+- **Run summary (`execSummary`)**: `scion schedule get <event-id>` and `scion schedule history <schedule-id>` display the non-secret run summary (`outcome`, `exitCode`, `durationMs`, and `outputBytes` drained). Jobs that need readable logs or failure alerts should write their own log file (for example in `/workspace` or a shared volume) and, if needed, send alerts from the script with `scion message`.
+
+### Timeouts, Outcomes, and Concurrency
+
+- **Timeouts**: `--timeout` accepts whole-second durations from `1s` up to `60m` (`3600s`), defaulting to `60s` when omitted. Each command runs in its own process group. On timeout, `sciontool` sends `SIGTERM` to the process group and `SIGKILL` 5 seconds later, recording event status `failed` (`timed out after Ns`, `outcome: timeout`).
+- **Exit codes**: Exit code `0` records `fired` (`outcome: ok`). Any non-zero exit code records `failed` with `exit status N` (`outcome: nonzero`) and increments a recurring schedule's `errorCount`.
+- **Target state**: The target agent must be `running` when the event fires. Stopped, suspended, or reincarnating targets are **not** woken (`--wake` is not supported with `--type exec`); the fire records `skipped` (`target not running`) without incrementing `errorCount`. Fires delayed more than 10 minutes past their scheduled time also record `skipped` (`missed window`). A **held** target is refused as `failed` (`exec refused`).
+- **Overlap and quotas**: At most **1 live run per recurring schedule** (`skipped` with `previous run in progress` while the previous run's main process or lease is active) and at most **2 live scheduled exec runs per container** (`skipped` with `capacity`). Authoring quotas cap active/pending exec schedules and events at `20` per target agent and `200` per project (`429` when exceeded).
+
+### Long-Running Work and `flock` Mutual Exclusion
+
+Tracked runs support timeouts up to **60 minutes** (`--timeout 60m`), which is the preferred mode whenever a job fits within an hour because schedule history, exit codes, and main-process overlap guards track the real job directly.
+
+If a job can legitimately run longer than 60 minutes, have a short wrapper script launch the work detached in the background (`setsid ... </dev/null >>/workspace/job.log 2>&1 &`). When the main process exits normally, `sciontool` records the outcome immediately and does **not** kill backgrounded children.
+
+Because detached or daemonized descendants (`setsid`, double-fork) escape process-group tracking—both on timeout and for `sciontool`'s per-schedule overlap check—**guard detached jobs (and any script touching shared external resources) with `flock -n`**:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+exec 9>/tmp/nightly-sync.lock
+if ! flock -n 9; then
+  # Previous run still holds fd 9; exit cleanly without overlapping.
+  exit 0
+fi
+
+/usr/local/bin/nightly-sync >>/workspace/nightly-sync.log 2>&1
+```
+
+### Permissions and Command Redaction
+
+- **Live `agent.attach` authority**: Creating, updating, or resuming an `exec` event or schedule requires `scheduled_event` permission in the project **and** live `agent.attach` permission on the target agent (the same check as live `/exec`: the agent's owner, or an agent with the `full` role in the same delegation chain; user access tokens also require the `agent:attach` scope, and delegated agent tokens are refused). That authority is re-checked at every fire under the recorded authorization revision and ceiling; if revoked, the fire is refused (`failed` with `exec refused`). Deleting the target agent cancels pending one-shot exec events and pauses recurring exec schedules with `statusReason` `target_deleted`.
+- **Command (`argv`) redaction**: Every API and CLI response redacts `command` unless the reading caller's current credential holds live `agent.attach` on the target agent at read time—the schedule's creator is **not** exempt if they later lose attach permission or read with a token lacking `agent:attach`. Redacted responses omit `command` and return `commandRedacted: true`, `argc`, and `commandSha256` (a SHA-256 of the command (`argv`)), which `scion schedule get` displays as `<redacted, N args, sha256:...>`.
+
+### Documented Limitations
+
+- **No in-flight cancellation**: Pausing or deleting a schedule, revoking authority, or placing a hold on the target stops future fires from starting, but does not cancel an exec run already admitted in the container; that run continues until it exits or reaches its local timeout.
+- **Outcome recovery when `hub.conduit` is turned off**: Turning `hub.exec_schedules` off stops new starts while `exec-status` recovery for already-admitted runs continues. Turning `hub.conduit` off also refuses new or reconnecting agent Conduit sessions, so outcome recovery continues **only** over agent sessions that stay connected; if the session drops (or the Hub restarts while `hub.conduit` is off), the agent cannot reconnect and the run ends `abandoned` when its lease (`timeout + 120s`) expires.
+- **Alpha gating (`ptone/scion#8096`)**: Keep `hub.exec_schedules` restricted to alpha environments until the Phase 2 recovery-sweeper fairness fix (`ptone/scion#8096`, ensuring one sweep claim per run and persisted per-agent rotation across large multi-agent recovery backlogs) lands.
 
 ---
 
