@@ -831,3 +831,24 @@ func TestGitHubTriggersExperimentRegistered(t *testing.T) {
 		t.Fatalf("description must name the requirement on hub.triggers: %q", e.Description)
 	}
 }
+
+// TestTriggersExperimentRegistered pins hub.triggers (ptone/scion#7961):
+// default-off alpha experiment gating both server routes/workers and web UI.
+func TestTriggersExperimentRegistered(t *testing.T) {
+	e, ok := Default().Lookup(Triggers)
+	if !ok {
+		t.Fatalf("%s is not registered", Triggers)
+	}
+	if Triggers != "hub.triggers" {
+		t.Fatalf("frozen name changed: %q", Triggers)
+	}
+	if e.Default {
+		t.Fatal("hub.triggers must default to off")
+	}
+	if !e.HasLayer(LayerServer) || !e.HasLayer(LayerWeb) {
+		t.Fatalf("must have both LayerServer and LayerWeb, got %v", e.Layers)
+	}
+	if e.Issue != "ptone/scion#7961" || e.Stage != StageAlpha || e.Owner != "triggers" || e.ReviewBy != "2027-05-31" {
+		t.Fatalf("unexpected registration: %+v", e)
+	}
+}

@@ -102,12 +102,16 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testinframarker"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroup"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroupmember"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/trigger"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userdeletion"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userdeletionagent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userterminalworkspace"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/webhookendpoint"
 	"github.com/google/uuid"
 )
 
@@ -3341,6 +3345,185 @@ func init() {
 	threadgroupmemberDescID := threadgroupmemberFields[0].Descriptor()
 	// threadgroupmember.DefaultID holds the default value on creation for the id field.
 	threadgroupmember.DefaultID = threadgroupmemberDescID.Default.(func() uuid.UUID)
+	triggerMixin := schema.Trigger{}.Mixin()
+	triggerMixinFields1 := triggerMixin[1].Fields()
+	_ = triggerMixinFields1
+	triggerFields := schema.Trigger{}.Fields()
+	_ = triggerFields
+	// triggerDescAuthorityCeilingKind is the schema descriptor for authority_ceiling_kind field.
+	triggerDescAuthorityCeilingKind := triggerMixinFields1[0].Descriptor()
+	// trigger.DefaultAuthorityCeilingKind holds the default value on creation for the authority_ceiling_kind field.
+	trigger.DefaultAuthorityCeilingKind = triggerDescAuthorityCeilingKind.Default.(string)
+	// triggerDescAuthorityCeilingVersion is the schema descriptor for authority_ceiling_version field.
+	triggerDescAuthorityCeilingVersion := triggerMixinFields1[1].Descriptor()
+	// trigger.DefaultAuthorityCeilingVersion holds the default value on creation for the authority_ceiling_version field.
+	trigger.DefaultAuthorityCeilingVersion = triggerDescAuthorityCeilingVersion.Default.(int32)
+	// triggerDescAuthorityCeilingBoundaryKind is the schema descriptor for authority_ceiling_boundary_kind field.
+	triggerDescAuthorityCeilingBoundaryKind := triggerMixinFields1[3].Descriptor()
+	// trigger.DefaultAuthorityCeilingBoundaryKind holds the default value on creation for the authority_ceiling_boundary_kind field.
+	trigger.DefaultAuthorityCeilingBoundaryKind = triggerDescAuthorityCeilingBoundaryKind.Default.(string)
+	// triggerDescAuthorityCeilingBoundaryProjectID is the schema descriptor for authority_ceiling_boundary_project_id field.
+	triggerDescAuthorityCeilingBoundaryProjectID := triggerMixinFields1[4].Descriptor()
+	// trigger.DefaultAuthorityCeilingBoundaryProjectID holds the default value on creation for the authority_ceiling_boundary_project_id field.
+	trigger.DefaultAuthorityCeilingBoundaryProjectID = triggerDescAuthorityCeilingBoundaryProjectID.Default.(string)
+	// triggerDescName is the schema descriptor for name field.
+	triggerDescName := triggerFields[2].Descriptor()
+	// trigger.NameValidator is a validator for the "name" field. It is called by the builders before save.
+	trigger.NameValidator = triggerDescName.Validators[0].(func(string) error)
+	// triggerDescSourceKind is the schema descriptor for source_kind field.
+	triggerDescSourceKind := triggerFields[4].Descriptor()
+	// trigger.SourceKindValidator is a validator for the "source_kind" field. It is called by the builders before save.
+	trigger.SourceKindValidator = triggerDescSourceKind.Validators[0].(func(string) error)
+	// triggerDescSourceID is the schema descriptor for source_id field.
+	triggerDescSourceID := triggerFields[5].Descriptor()
+	// trigger.DefaultSourceID holds the default value on creation for the source_id field.
+	trigger.DefaultSourceID = triggerDescSourceID.Default.(string)
+	// triggerDescMatchTypes is the schema descriptor for match_types field.
+	triggerDescMatchTypes := triggerFields[6].Descriptor()
+	// trigger.MatchTypesValidator is a validator for the "match_types" field. It is called by the builders before save.
+	trigger.MatchTypesValidator = triggerDescMatchTypes.Validators[0].(func(string) error)
+	// triggerDescMatchDialect is the schema descriptor for match_dialect field.
+	triggerDescMatchDialect := triggerFields[7].Descriptor()
+	// trigger.DefaultMatchDialect holds the default value on creation for the match_dialect field.
+	trigger.DefaultMatchDialect = triggerDescMatchDialect.Default.(string)
+	// triggerDescMatchRule is the schema descriptor for match_rule field.
+	triggerDescMatchRule := triggerFields[8].Descriptor()
+	// trigger.DefaultMatchRule holds the default value on creation for the match_rule field.
+	trigger.DefaultMatchRule = triggerDescMatchRule.Default.(string)
+	// triggerDescActionType is the schema descriptor for action_type field.
+	triggerDescActionType := triggerFields[9].Descriptor()
+	// trigger.ActionTypeValidator is a validator for the "action_type" field. It is called by the builders before save.
+	trigger.ActionTypeValidator = triggerDescActionType.Validators[0].(func(string) error)
+	// triggerDescActionPayload is the schema descriptor for action_payload field.
+	triggerDescActionPayload := triggerFields[10].Descriptor()
+	// trigger.DefaultActionPayload holds the default value on creation for the action_payload field.
+	trigger.DefaultActionPayload = triggerDescActionPayload.Default.(string)
+	// triggerDescSubjectDialect is the schema descriptor for subject_dialect field.
+	triggerDescSubjectDialect := triggerFields[11].Descriptor()
+	// trigger.DefaultSubjectDialect holds the default value on creation for the subject_dialect field.
+	trigger.DefaultSubjectDialect = triggerDescSubjectDialect.Default.(string)
+	// triggerDescSubjectRule is the schema descriptor for subject_rule field.
+	triggerDescSubjectRule := triggerFields[12].Descriptor()
+	// trigger.DefaultSubjectRule holds the default value on creation for the subject_rule field.
+	trigger.DefaultSubjectRule = triggerDescSubjectRule.Default.(string)
+	// triggerDescSubjectMode is the schema descriptor for subject_mode field.
+	triggerDescSubjectMode := triggerFields[13].Descriptor()
+	// trigger.DefaultSubjectMode holds the default value on creation for the subject_mode field.
+	trigger.DefaultSubjectMode = triggerDescSubjectMode.Default.(string)
+	// triggerDescStatus is the schema descriptor for status field.
+	triggerDescStatus := triggerFields[14].Descriptor()
+	// trigger.DefaultStatus holds the default value on creation for the status field.
+	trigger.DefaultStatus = triggerDescStatus.Default.(string)
+	// triggerDescFireCount is the schema descriptor for fire_count field.
+	triggerDescFireCount := triggerFields[19].Descriptor()
+	// trigger.DefaultFireCount holds the default value on creation for the fire_count field.
+	trigger.DefaultFireCount = triggerDescFireCount.Default.(int)
+	// triggerDescErrorCount is the schema descriptor for error_count field.
+	triggerDescErrorCount := triggerFields[20].Descriptor()
+	// trigger.DefaultErrorCount holds the default value on creation for the error_count field.
+	trigger.DefaultErrorCount = triggerDescErrorCount.Default.(int)
+	// triggerDescCreated is the schema descriptor for created field.
+	triggerDescCreated := triggerFields[22].Descriptor()
+	// trigger.DefaultCreated holds the default value on creation for the created field.
+	trigger.DefaultCreated = triggerDescCreated.Default.(func() time.Time)
+	// triggerDescUpdated is the schema descriptor for updated field.
+	triggerDescUpdated := triggerFields[23].Descriptor()
+	// trigger.DefaultUpdated holds the default value on creation for the updated field.
+	trigger.DefaultUpdated = triggerDescUpdated.Default.(func() time.Time)
+	// trigger.UpdateDefaultUpdated holds the default value on update for the updated field.
+	trigger.UpdateDefaultUpdated = triggerDescUpdated.UpdateDefault.(func() time.Time)
+	// triggerDescID is the schema descriptor for id field.
+	triggerDescID := triggerFields[0].Descriptor()
+	// trigger.DefaultID holds the default value on creation for the id field.
+	trigger.DefaultID = triggerDescID.Default.(func() uuid.UUID)
+	triggereventFields := schema.TriggerEvent{}.Fields()
+	_ = triggereventFields
+	// triggereventDescSourceKind is the schema descriptor for source_kind field.
+	triggereventDescSourceKind := triggereventFields[2].Descriptor()
+	// triggerevent.SourceKindValidator is a validator for the "source_kind" field. It is called by the builders before save.
+	triggerevent.SourceKindValidator = triggereventDescSourceKind.Validators[0].(func(string) error)
+	// triggereventDescSourceID is the schema descriptor for source_id field.
+	triggereventDescSourceID := triggereventFields[3].Descriptor()
+	// triggerevent.SourceIDValidator is a validator for the "source_id" field. It is called by the builders before save.
+	triggerevent.SourceIDValidator = triggereventDescSourceID.Validators[0].(func(string) error)
+	// triggereventDescType is the schema descriptor for type field.
+	triggereventDescType := triggereventFields[4].Descriptor()
+	// triggerevent.TypeValidator is a validator for the "type" field. It is called by the builders before save.
+	triggerevent.TypeValidator = triggereventDescType.Validators[0].(func(string) error)
+	// triggereventDescSubject is the schema descriptor for subject field.
+	triggereventDescSubject := triggereventFields[5].Descriptor()
+	// triggerevent.SubjectValidator is a validator for the "subject" field. It is called by the builders before save.
+	triggerevent.SubjectValidator = triggereventDescSubject.Validators[0].(func(string) error)
+	// triggereventDescDedupKey is the schema descriptor for dedup_key field.
+	triggereventDescDedupKey := triggereventFields[6].Descriptor()
+	// triggerevent.DedupKeyValidator is a validator for the "dedup_key" field. It is called by the builders before save.
+	triggerevent.DedupKeyValidator = triggereventDescDedupKey.Validators[0].(func(string) error)
+	// triggereventDescAttributes is the schema descriptor for attributes field.
+	triggereventDescAttributes := triggereventFields[9].Descriptor()
+	// triggerevent.DefaultAttributes holds the default value on creation for the attributes field.
+	triggerevent.DefaultAttributes = triggereventDescAttributes.Default.(string)
+	// triggereventDescHeaders is the schema descriptor for headers field.
+	triggereventDescHeaders := triggereventFields[10].Descriptor()
+	// triggerevent.DefaultHeaders holds the default value on creation for the headers field.
+	triggerevent.DefaultHeaders = triggereventDescHeaders.Default.(string)
+	// triggereventDescPayload is the schema descriptor for payload field.
+	triggereventDescPayload := triggereventFields[11].Descriptor()
+	// triggerevent.DefaultPayload holds the default value on creation for the payload field.
+	triggerevent.DefaultPayload = triggereventDescPayload.Default.(string)
+	// triggereventDescPayloadBytes is the schema descriptor for payload_bytes field.
+	triggereventDescPayloadBytes := triggereventFields[12].Descriptor()
+	// triggerevent.DefaultPayloadBytes holds the default value on creation for the payload_bytes field.
+	triggerevent.DefaultPayloadBytes = triggereventDescPayloadBytes.Default.(int)
+	// triggereventDescStatus is the schema descriptor for status field.
+	triggereventDescStatus := triggereventFields[13].Descriptor()
+	// triggerevent.DefaultStatus holds the default value on creation for the status field.
+	triggerevent.DefaultStatus = triggereventDescStatus.Default.(string)
+	// triggereventDescMatchCount is the schema descriptor for match_count field.
+	triggereventDescMatchCount := triggereventFields[14].Descriptor()
+	// triggerevent.DefaultMatchCount holds the default value on creation for the match_count field.
+	triggerevent.DefaultMatchCount = triggereventDescMatchCount.Default.(int)
+	// triggereventDescFireCount is the schema descriptor for fire_count field.
+	triggereventDescFireCount := triggereventFields[15].Descriptor()
+	// triggerevent.DefaultFireCount holds the default value on creation for the fire_count field.
+	triggerevent.DefaultFireCount = triggereventDescFireCount.Default.(int)
+	// triggereventDescCreated is the schema descriptor for created field.
+	triggereventDescCreated := triggereventFields[18].Descriptor()
+	// triggerevent.DefaultCreated holds the default value on creation for the created field.
+	triggerevent.DefaultCreated = triggereventDescCreated.Default.(func() time.Time)
+	// triggereventDescID is the schema descriptor for id field.
+	triggereventDescID := triggereventFields[0].Descriptor()
+	// triggerevent.DefaultID holds the default value on creation for the id field.
+	triggerevent.DefaultID = triggereventDescID.Default.(func() uuid.UUID)
+	triggerfireFields := schema.TriggerFire{}.Fields()
+	_ = triggerfireFields
+	// triggerfireDescSubject is the schema descriptor for subject field.
+	triggerfireDescSubject := triggerfireFields[4].Descriptor()
+	// triggerfire.SubjectValidator is a validator for the "subject" field. It is called by the builders before save.
+	triggerfire.SubjectValidator = triggerfireDescSubject.Validators[0].(func(string) error)
+	// triggerfireDescActionType is the schema descriptor for action_type field.
+	triggerfireDescActionType := triggerfireFields[5].Descriptor()
+	// triggerfire.ActionTypeValidator is a validator for the "action_type" field. It is called by the builders before save.
+	triggerfire.ActionTypeValidator = triggerfireDescActionType.Validators[0].(func(string) error)
+	// triggerfireDescStatus is the schema descriptor for status field.
+	triggerfireDescStatus := triggerfireFields[6].Descriptor()
+	// triggerfire.DefaultStatus holds the default value on creation for the status field.
+	triggerfire.DefaultStatus = triggerfireDescStatus.Default.(string)
+	// triggerfireDescExecutorKind is the schema descriptor for executor_kind field.
+	triggerfireDescExecutorKind := triggerfireFields[9].Descriptor()
+	// triggerfire.DefaultExecutorKind holds the default value on creation for the executor_kind field.
+	triggerfire.DefaultExecutorKind = triggerfireDescExecutorKind.Default.(string)
+	// triggerfireDescExecutorID is the schema descriptor for executor_id field.
+	triggerfireDescExecutorID := triggerfireFields[10].Descriptor()
+	// triggerfire.DefaultExecutorID holds the default value on creation for the executor_id field.
+	triggerfire.DefaultExecutorID = triggerfireDescExecutorID.Default.(string)
+	// triggerfireDescCreated is the schema descriptor for created field.
+	triggerfireDescCreated := triggerfireFields[14].Descriptor()
+	// triggerfire.DefaultCreated holds the default value on creation for the created field.
+	triggerfire.DefaultCreated = triggerfireDescCreated.Default.(func() time.Time)
+	// triggerfireDescID is the schema descriptor for id field.
+	triggerfireDescID := triggerfireFields[0].Descriptor()
+	// triggerfire.DefaultID holds the default value on creation for the id field.
+	triggerfire.DefaultID = triggerfireDescID.Default.(func() uuid.UUID)
 	usagereservationFields := schema.UsageReservation{}.Fields()
 	_ = usagereservationFields
 	// usagereservationDescSubjectID is the schema descriptor for subject_id field.
@@ -3511,4 +3694,56 @@ func init() {
 	userterminalworkspaceDescID := userterminalworkspaceFields[0].Descriptor()
 	// userterminalworkspace.DefaultID holds the default value on creation for the id field.
 	userterminalworkspace.DefaultID = userterminalworkspaceDescID.Default.(func() uuid.UUID)
+	webhookendpointFields := schema.WebhookEndpoint{}.Fields()
+	_ = webhookendpointFields
+	// webhookendpointDescName is the schema descriptor for name field.
+	webhookendpointDescName := webhookendpointFields[2].Descriptor()
+	// webhookendpoint.NameValidator is a validator for the "name" field. It is called by the builders before save.
+	webhookendpoint.NameValidator = webhookendpointDescName.Validators[0].(func(string) error)
+	// webhookendpointDescOwnerPrincipalKind is the schema descriptor for owner_principal_kind field.
+	webhookendpointDescOwnerPrincipalKind := webhookendpointFields[4].Descriptor()
+	// webhookendpoint.OwnerPrincipalKindValidator is a validator for the "owner_principal_kind" field. It is called by the builders before save.
+	webhookendpoint.OwnerPrincipalKindValidator = webhookendpointDescOwnerPrincipalKind.Validators[0].(func(string) error)
+	// webhookendpointDescOwnerPrincipalID is the schema descriptor for owner_principal_id field.
+	webhookendpointDescOwnerPrincipalID := webhookendpointFields[5].Descriptor()
+	// webhookendpoint.OwnerPrincipalIDValidator is a validator for the "owner_principal_id" field. It is called by the builders before save.
+	webhookendpoint.OwnerPrincipalIDValidator = webhookendpointDescOwnerPrincipalID.Validators[0].(func(string) error)
+	// webhookendpointDescOwnerCredentialKind is the schema descriptor for owner_credential_kind field.
+	webhookendpointDescOwnerCredentialKind := webhookendpointFields[6].Descriptor()
+	// webhookendpoint.OwnerCredentialKindValidator is a validator for the "owner_credential_kind" field. It is called by the builders before save.
+	webhookendpoint.OwnerCredentialKindValidator = webhookendpointDescOwnerCredentialKind.Validators[0].(func(string) error)
+	// webhookendpointDescSecretVersion is the schema descriptor for secret_version field.
+	webhookendpointDescSecretVersion := webhookendpointFields[7].Descriptor()
+	// webhookendpoint.DefaultSecretVersion holds the default value on creation for the secret_version field.
+	webhookendpoint.DefaultSecretVersion = webhookendpointDescSecretVersion.Default.(int)
+	// webhookendpointDescSignatureMode is the schema descriptor for signature_mode field.
+	webhookendpointDescSignatureMode := webhookendpointFields[8].Descriptor()
+	// webhookendpoint.DefaultSignatureMode holds the default value on creation for the signature_mode field.
+	webhookendpoint.DefaultSignatureMode = webhookendpointDescSignatureMode.Default.(string)
+	// webhookendpointDescStatus is the schema descriptor for status field.
+	webhookendpointDescStatus := webhookendpointFields[9].Descriptor()
+	// webhookendpoint.DefaultStatus holds the default value on creation for the status field.
+	webhookendpoint.DefaultStatus = webhookendpointDescStatus.Default.(string)
+	// webhookendpointDescReceiveCount is the schema descriptor for receive_count field.
+	webhookendpointDescReceiveCount := webhookendpointFields[12].Descriptor()
+	// webhookendpoint.DefaultReceiveCount holds the default value on creation for the receive_count field.
+	webhookendpoint.DefaultReceiveCount = webhookendpointDescReceiveCount.Default.(int)
+	// webhookendpointDescRejectCount is the schema descriptor for reject_count field.
+	webhookendpointDescRejectCount := webhookendpointFields[13].Descriptor()
+	// webhookendpoint.DefaultRejectCount holds the default value on creation for the reject_count field.
+	webhookendpoint.DefaultRejectCount = webhookendpointDescRejectCount.Default.(int)
+	// webhookendpointDescCreated is the schema descriptor for created field.
+	webhookendpointDescCreated := webhookendpointFields[14].Descriptor()
+	// webhookendpoint.DefaultCreated holds the default value on creation for the created field.
+	webhookendpoint.DefaultCreated = webhookendpointDescCreated.Default.(func() time.Time)
+	// webhookendpointDescUpdated is the schema descriptor for updated field.
+	webhookendpointDescUpdated := webhookendpointFields[15].Descriptor()
+	// webhookendpoint.DefaultUpdated holds the default value on creation for the updated field.
+	webhookendpoint.DefaultUpdated = webhookendpointDescUpdated.Default.(func() time.Time)
+	// webhookendpoint.UpdateDefaultUpdated holds the default value on update for the updated field.
+	webhookendpoint.UpdateDefaultUpdated = webhookendpointDescUpdated.UpdateDefault.(func() time.Time)
+	// webhookendpointDescID is the schema descriptor for id field.
+	webhookendpointDescID := webhookendpointFields[0].Descriptor()
+	// webhookendpoint.DefaultID holds the default value on creation for the id field.
+	webhookendpoint.DefaultID = webhookendpointDescID.Default.(func() uuid.UUID)
 }

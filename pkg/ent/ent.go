@@ -108,12 +108,16 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testinframarker"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroup"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroupmember"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/trigger"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/triggerfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userdeletion"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userdeletionagent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userterminalworkspace"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/webhookendpoint"
 )
 
 // ent aliases to avoid import conflicts in user's code.
@@ -270,12 +274,16 @@ func checkColumn(t, c string) error {
 			testinframarker.Table:               testinframarker.ValidColumn,
 			threadgroup.Table:                   threadgroup.ValidColumn,
 			threadgroupmember.Table:             threadgroupmember.ValidColumn,
+			trigger.Table:                       trigger.ValidColumn,
+			triggerevent.Table:                  triggerevent.ValidColumn,
+			triggerfire.Table:                   triggerfire.ValidColumn,
 			usagereservation.Table:              usagereservation.ValidColumn,
 			user.Table:                          user.ValidColumn,
 			useraccesstoken.Table:               useraccesstoken.ValidColumn,
 			userdeletion.Table:                  userdeletion.ValidColumn,
 			userdeletionagent.Table:             userdeletionagent.ValidColumn,
 			userterminalworkspace.Table:         userterminalworkspace.ValidColumn,
+			webhookendpoint.Table:               webhookendpoint.ValidColumn,
 		})
 	})
 	return columnCheck(t, c)

@@ -111,11 +111,12 @@ func (m fixtureCensusMatch) enclosingFunc() string {
 // else can write it: the columns are Immutable). There is no CreateBulk or
 // MapCreateBulk for them anywhere.
 func TestFixtureProvenanceCensus_RawCreateBuilders(t *testing.T) {
-	re := regexp.MustCompile(`\.(Agent|Project|Schedule|Group)\.(Create|CreateBulk|MapCreateBulk)\(`)
+	re := regexp.MustCompile(`\.(Agent|Project|Schedule|Trigger|Group)\.(Create|CreateBulk|MapCreateBulk)\(`)
 	allowed := map[string]string{
 		"pkg/store/entadapter/agent_store.go":    "s.client.Agent.Create()",
 		"pkg/store/entadapter/project_store.go":  "s.client.Project.Create()",
 		"pkg/store/entadapter/schedule_store.go": "s.client.Schedule.Create()",
+		"pkg/store/entadapter/trigger_store.go":  "s.client.Trigger.Create()",
 		"pkg/store/entadapter/group_store.go":    "s.client.Group.Create()",
 	}
 	seen := map[string]int{}
@@ -251,6 +252,7 @@ func TestFixtureProvenanceCensus_StampWriters(t *testing.T) {
 		"pkg/store/entadapter/agent_store.go":    true, // read mapping
 		"pkg/store/entadapter/project_store.go":  true, // read mapping
 		"pkg/store/entadapter/schedule_store.go": true, // read mapping
+		"pkg/store/entadapter/trigger_store.go":  true, // read mapping
 		"pkg/store/entadapter/group_store.go":    true, // read mapping
 	}
 	for _, m := range fixtureCensusScan(t, re) {

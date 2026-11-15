@@ -294,6 +294,15 @@ type ThreadGroup func(*sql.Selector)
 // ThreadGroupMember is the predicate function for threadgroupmember builders.
 type ThreadGroupMember func(*sql.Selector)
 
+// Trigger is the predicate function for trigger builders.
+type Trigger func(*sql.Selector)
+
+// TriggerEvent is the predicate function for triggerevent builders.
+type TriggerEvent func(*sql.Selector)
+
+// TriggerFire is the predicate function for triggerfire builders.
+type TriggerFire func(*sql.Selector)
+
 // UsageReservation is the predicate function for usagereservation builders.
 type UsageReservation func(*sql.Selector)
 
@@ -311,3 +320,6 @@ type UserDeletionAgent func(*sql.Selector)
 
 // UserTerminalWorkspace is the predicate function for userterminalworkspace builders.
 type UserTerminalWorkspace func(*sql.Selector)
+
+// WebhookEndpoint is the predicate function for webhookendpoint builders.
+type WebhookEndpoint func(*sql.Selector)

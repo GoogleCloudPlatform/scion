@@ -484,6 +484,9 @@ type Store interface {
 	// Scheduled exec run operations (ptone/scion#7883)
 	ScheduledExecRunStore
 
+	// Trigger and webhook endpoint operations (ptone/scion#7961)
+	TriggerStore
+
 	// GCP Service Account operations (GCP Identity for Agents)
 	GCPServiceAccountStore
 

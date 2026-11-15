@@ -189,9 +189,9 @@ func TestFinalizeAgentDeletion_DeletedAtNotNullSparesLiveRow(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
-// The 3a deferred items: on agents, projects, schedules and groups a CHECK
-// refuses a row with only one of fixture_root_id and fixture_issuer_id set
-// (even through raw SQL that bypasses the store), and fixture_root_id and
+// The 3a deferred items: on agents, projects, schedules, triggers and groups a
+// CHECK refuses a row with only one of fixture_root_id and fixture_issuer_id
+// set (even through raw SQL that bypasses the store), and fixture_root_id and
 // fixture_issuer_id are indexed.
 func TestFixtureStamp_CheckConstraintAndIndexes(t *testing.T) {
 	cs := newFixtureTestStore(t)
@@ -202,10 +202,12 @@ func TestFixtureStamp_CheckConstraintAndIndexes(t *testing.T) {
 	require.NoError(t, cs.CreateAgent(ctx, &store.Agent{ID: agentID, Slug: "a-" + agentID[:8], Name: "a", ProjectID: proj.ID, Phase: "created", Fixture: stamp}))
 	sc := &store.Schedule{ID: uuid.NewString(), ProjectID: proj.ID, Name: "s", CronExpr: "0 * * * *", EventType: "message", Fixture: stamp}
 	require.NoError(t, cs.CreateSchedule(ctx, sc))
+	tr := &store.Trigger{ID: uuid.NewString(), ProjectID: proj.ID, Name: "t", SourceKind: store.TriggerSourceKindWebhook, SourceID: uuid.NewString(), MatchTypes: []string{"webhook.received"}, ActionType: store.TriggerActionMessage, ActionPayload: `{}`, Fixture: stamp}
+	require.NoError(t, cs.CreateTrigger(ctx, tr))
 	gid := uuid.NewString()
 	require.NoError(t, cs.CreateGroup(ctx, &store.Group{ID: gid, Name: "g", Slug: "g-" + gid[:8], Fixture: stamp}))
 
-	for table, id := range map[string]string{"agents": agentID, "projects": proj.ID, "schedules": sc.ID, "groups": gid} {
+	for table, id := range map[string]string{"agents": agentID, "projects": proj.ID, "schedules": sc.ID, "triggers": tr.ID, "groups": gid} {
 		for _, col := range []string{"fixture_issuer_id", "fixture_root_id"} {
 			_, err := cs.DB().ExecContext(ctx, rebind(cs, "UPDATE "+table+" SET "+col+" = NULL WHERE id = ?"), id)
 			require.Error(t, err, "%s: clearing %s alone must be refused", table, col)
