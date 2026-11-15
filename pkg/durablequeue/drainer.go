@@ -42,8 +42,9 @@ const (
 	DefaultShutdownBudget      = 5 * time.Second
 
 	backoffBase        = time.Second
-	backoffMax         = 5 * time.Minute
+	backoffMax         = time.Minute * 5
 	blockedLogInterval = time.Minute
+	maxOwnerPrefixLen  = 200
 )
 
 // Drop reasons reported to OnDrop and Metrics.Dropped.
@@ -134,9 +135,10 @@ type DrainResult struct {
 
 // Drainer claims and dispatches items of a single Kind from a DurableQueueStore.
 type Drainer struct {
-	cfg        DrainerConfig
-	wake       chan struct{}
-	unregister func()
+	cfg         DrainerConfig
+	ownerPrefix string
+	wake        chan struct{}
+	unregister  func()
 
 	mu             sync.Mutex
 	blocked        bool
@@ -194,8 +196,9 @@ func NewDrainer(cfg DrainerConfig) (*Drainer, error) {
 	}
 
 	d := &Drainer{
-		cfg:  cfg,
-		wake: make(chan struct{}, 1),
+		cfg:         cfg,
+		ownerPrefix: truncateOwnerPrefix(cfg.Owner),
+		wake:        make(chan struct{}, 1),
 	}
 	if reg, ok := cfg.Queue.(drainerRegistrar); ok {
 		d.unregister = reg.registerWake(cfg.Kind, d.Wake)
@@ -260,9 +263,14 @@ func (d *Drainer) Run(ctx context.Context) {
 
 // DrainOnce executes a single full pass (trim, claim + handle one batch, and
 // stats sampling). When Enabled is non-nil and returns false, DrainOnce is a
-// no-op.
+// no-op. DrainOnce must not be called concurrently with Run on the same
+// Drainer.
 func (d *Drainer) DrainOnce(ctx context.Context) (DrainResult, error) {
 	return d.drainPass(ctx, true)
+}
+
+func (d *Drainer) nextClaimOwner() string {
+	return d.ownerPrefix + ":" + uuid.NewString()
 }
 
 func (d *Drainer) drainPass(ctx context.Context, maintain bool) (DrainResult, error) {
@@ -287,7 +295,11 @@ func (d *Drainer) drainPass(ctx context.Context, maintain bool) (DrainResult, er
 		if probe {
 			batch = 1
 		}
-		rows, err := d.cfg.Store.ClaimDurableItems(ctx, d.cfg.Kind, d.cfg.Owner, now, now.Add(d.cfg.LeaseDuration), batch)
+		// Stamp each claim batch with a unique nonce suffix so lease CAS
+		// checks identify this specific claim rather than only the replica
+		// name (protecting against duplicate Owner strings or stale passes).
+		claimOwner := d.nextClaimOwner()
+		rows, err := d.cfg.Store.ClaimDurableItems(ctx, d.cfg.Kind, claimOwner, now, now.Add(d.cfg.LeaseDuration), batch)
 		if err != nil {
 			return res, fmt.Errorf("claim: %w", err)
 		}
@@ -297,10 +309,10 @@ func (d *Drainer) drainPass(ctx context.Context, maintain bool) (DrainResult, er
 		}
 		for i, row := range rows {
 			if ctx.Err() != nil {
-				d.releaseRows(rows[i:])
+				d.releaseRows(rows[i:], claimOwner)
 				break
 			}
-			out, poisoned := d.handleRow(ctx, row)
+			out, poisoned := d.handleRow(ctx, row, claimOwner)
 			if poisoned {
 				hitPoisonBound = true
 			}
@@ -313,7 +325,7 @@ func (d *Drainer) drainPass(ctx context.Context, maintain bool) (DrainResult, er
 				res.Permanent++
 			case rowOutcomeBlocked:
 				res.Blocked = true
-				d.releaseRows(rows[i+1:])
+				d.releaseRows(rows[i+1:], claimOwner)
 			case rowOutcomeSkipped:
 			}
 			if out == rowOutcomeBlocked {
@@ -362,8 +374,8 @@ const (
 	rowOutcomeBlocked
 )
 
-func (d *Drainer) handleRow(ctx context.Context, row store.DurableQueueRow) (outcome rowOutcome, hitPoisonBound bool) {
-	lease := &itemLease{d: d, seq: row.Seq}
+func (d *Drainer) handleRow(ctx context.Context, row store.DurableQueueRow, claimOwner string) (outcome rowOutcome, hitPoisonBound bool) {
+	lease := &itemLease{d: d, seq: row.Seq, owner: claimOwner}
 	held, err := lease.Renew(ctx)
 	if err != nil || !held {
 		return rowOutcomeSkipped, false
@@ -410,7 +422,7 @@ func (d *Drainer) handleRow(ctx context.Context, row store.DurableQueueRow) (out
 	}
 
 	if res.Done {
-		completed, cerr := d.cfg.Store.CompleteDurableItem(sctx, row.Seq, d.cfg.Owner)
+		completed, cerr := d.cfg.Store.CompleteDurableItem(sctx, row.Seq, claimOwner)
 		if cerr != nil {
 			d.cfg.Logger.Warn("durable queue item completed by handler but delete failed; will re-handle",
 				"kind", d.cfg.Kind, "seq", row.Seq, "error", cerr)
@@ -431,7 +443,7 @@ func (d *Drainer) handleRow(ctx context.Context, row store.DurableQueueRow) (out
 		if res.Err != nil {
 			lastErr = sanitizeError(res.Err)
 		}
-		if ferr := d.cfg.Store.FailDurableItem(sctx, row.Seq, d.cfg.Owner, store.DurableQueueFailure{
+		if _, ferr := d.cfg.Store.FailDurableItem(sctx, row.Seq, claimOwner, store.DurableQueueFailure{
 			CountAttempt:  false,
 			Permanent:     false,
 			NextAttemptAt: row.NextAttemptAt,
@@ -441,9 +453,6 @@ func (d *Drainer) handleRow(ctx context.Context, row store.DurableQueueRow) (out
 		}
 		return rowOutcomeBlocked, false
 	}
-
-	// Non-blocked outcome means the sink itself is reachable.
-	d.unblock()
 
 	now := d.cfg.Now().UTC()
 	retryAt := res.RetryAt.UTC()
@@ -458,15 +467,24 @@ func (d *Drainer) handleRow(ctx context.Context, row store.DurableQueueRow) (out
 		}
 	}
 
-	if ferr := d.cfg.Store.FailDurableItem(sctx, row.Seq, d.cfg.Owner, store.DurableQueueFailure{
+	failedHeld, ferr := d.cfg.Store.FailDurableItem(sctx, row.Seq, claimOwner, store.DurableQueueFailure{
 		CountAttempt:  true,
 		Permanent:     res.Permanent,
 		NextAttemptAt: retryAt,
 		LastError:     sanitizeError(res.Err),
-	}); ferr != nil {
+	})
+	if ferr != nil {
 		d.cfg.Logger.Warn("durable queue item failure not recorded", "kind", d.cfg.Kind, "seq", row.Seq, "error", ferr)
 		return rowOutcomeSkipped, false
 	}
+	if !failedHeld {
+		// Lease was lost while handling; skip Retried/Permanent metrics,
+		// unblock transition, and poison trim flag.
+		return rowOutcomeSkipped, false
+	}
+
+	// Non-blocked outcome on a still-held lease means the sink is reachable.
+	d.unblock()
 
 	if res.Permanent {
 		d.cfg.Metrics.Permanent(d.cfg.Kind)
@@ -489,10 +507,10 @@ func (d *Drainer) invokeHandler(ctx context.Context, item Item, lease Lease) (re
 	return d.cfg.Handler(ctx, item, lease)
 }
 
-func (d *Drainer) releaseRows(rows []store.DurableQueueRow) {
+func (d *Drainer) releaseRows(rows []store.DurableQueueRow, claimOwner string) {
 	for _, r := range rows {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		_ = d.cfg.Store.FailDurableItem(ctx, r.Seq, d.cfg.Owner, store.DurableQueueFailure{
+		_, _ = d.cfg.Store.FailDurableItem(ctx, r.Seq, claimOwner, store.DurableQueueFailure{
 			CountAttempt:  false,
 			NextAttemptAt: r.NextAttemptAt,
 			LastError:     r.LastError,
@@ -597,10 +615,11 @@ func (d *Drainer) invokeOnDrop(ctx context.Context, dropped []Item, reason strin
 }
 
 type itemLease struct {
-	d    *Drainer
-	seq  int64
-	mu   sync.Mutex
-	lost bool
+	d     *Drainer
+	seq   int64
+	owner string
+	mu    sync.Mutex
+	lost  bool
 }
 
 func (l *itemLease) Renew(ctx context.Context) (bool, error) {
@@ -610,11 +629,22 @@ func (l *itemLease) Renew(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	until := l.d.cfg.Now().UTC().Add(l.d.cfg.LeaseDuration)
-	held, err := l.d.cfg.Store.RenewDurableLease(ctx, l.seq, l.d.cfg.Owner, until)
+	held, err := l.d.cfg.Store.RenewDurableLease(ctx, l.seq, l.owner, until)
 	if err == nil && !held {
 		l.lost = true
 	}
 	return held, err
+}
+
+func truncateOwnerPrefix(s string) string {
+	if len(s) <= maxOwnerPrefixLen {
+		return s
+	}
+	s = s[:maxOwnerPrefixLen]
+	for len(s) > 0 && !utf8.ValidString(s) {
+		s = s[:len(s)-1]
+	}
+	return s
 }
 
 // Backoff returns the exponential retry delay for prior attempt count attempts:

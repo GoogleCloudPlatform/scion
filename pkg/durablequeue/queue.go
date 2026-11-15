@@ -42,12 +42,18 @@ var (
 )
 
 // Item is one durable queue message.
+//
+// Payload is opaque and immutable to the queue, and must be valid UTF-8 without
+// NUL (0x00) bytes (stored in a TEXT column across SQLite and PostgreSQL; JSON
+// and base64 satisfy this). Enqueue rejects invalid UTF-8 or NUL bytes with
+// store.ErrInvalidInput. Items reported to DrainerConfig.OnDrop carry metadata
+// only (Payload is nil).
 type Item struct {
 	Seq       int64
 	Kind      string
 	DedupKey  string    // "" -> Enqueue generates a UUID
 	ProjectID string    // optional
-	Payload   []byte    // opaque, immutable
+	Payload   []byte    // opaque, immutable; valid UTF-8 without NUL bytes
 	NotBefore time.Time // zero -> now
 	Attempts  int
 	CreatedAt time.Time

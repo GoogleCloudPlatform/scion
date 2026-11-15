@@ -40,60 +40,6 @@ type echoMessage struct {
 	Body string `json:"body"`
 }
 
-type recordingMetrics struct {
-	mu          sync.Mutex
-	claimed     int
-	done        int
-	retried     int
-	permanent   int
-	dropped     map[string]int
-	lastPending int64
-	lastLeased  int64
-	lastOldest  time.Duration
-}
-
-func newRecordingMetrics() *recordingMetrics {
-	return &recordingMetrics{dropped: make(map[string]int)}
-}
-
-func (m *recordingMetrics) Claimed(_ string, n int) {
-	m.mu.Lock()
-	m.claimed += n
-	m.mu.Unlock()
-}
-
-func (m *recordingMetrics) Done(_ string) {
-	m.mu.Lock()
-	m.done++
-	m.mu.Unlock()
-}
-
-func (m *recordingMetrics) Retried(_ string) {
-	m.mu.Lock()
-	m.retried++
-	m.mu.Unlock()
-}
-
-func (m *recordingMetrics) Permanent(_ string) {
-	m.mu.Lock()
-	m.permanent++
-	m.mu.Unlock()
-}
-
-func (m *recordingMetrics) Dropped(_ string, reason string, n int) {
-	m.mu.Lock()
-	m.dropped[reason] += n
-	m.mu.Unlock()
-}
-
-func (m *recordingMetrics) ObserveQueue(_ string, pending, leased int64, oldestAge time.Duration) {
-	m.mu.Lock()
-	m.lastPending = pending
-	m.lastLeased = leased
-	m.lastOldest = oldestAge
-	m.mu.Unlock()
-}
-
 func newEchoDBStore(t *testing.T) *entadapter.CompositeStore {
 	t.Helper()
 	return entadapter.NewCompositeStore(enttest.NewClient(t))

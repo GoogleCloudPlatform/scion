@@ -65,9 +65,12 @@ func ValidateDurableQueueKind(kind string) error {
 	return nil
 }
 
-// DurableQueueRow is one item in durable_queue_items. Payload is opaque and
-// immutable; rows carry no foreign keys and are deleted on completion or when
-// trimmed by age, overflow, or poison bounds.
+// DurableQueueRow is one item in durable_queue_items.
+//
+// Payload is opaque and immutable to the queue, and must be valid UTF-8 without
+// NUL (0x00) bytes (stored in a TEXT column on SQLite and PostgreSQL). Rows
+// carry no foreign keys and are deleted on completion or when trimmed by age,
+// overflow, or poison bounds. Rows returned by TrimDurableQueue omit Payload.
 type DurableQueueRow struct {
 	Seq               int64
 	Kind              string
@@ -123,8 +126,9 @@ type DurableQueueStats struct {
 // (like LifecycleOutboxStore) so store.Store fakes are unaffected.
 type DurableQueueStore interface {
 	// EnqueueDurableItem inserts row into durable_queue_items, running inside
-	// tx when tx is non-nil. Returns ErrDuplicate when (kind, dedup_key)
-	// already exists.
+	// tx when tx is non-nil. Attempt, failure, and lease fields on row are
+	// ignored on insert (new items always start unleased with zero attempts).
+	// Returns ErrDuplicate when (kind, dedup_key) already exists.
 	EnqueueDurableItem(ctx context.Context, tx Tx, row DurableQueueRow) (int64, error)
 	// ClaimDurableItems leases up to limit due rows of kind
 	// (next_attempt_at <= now && (lease_until IS NULL || lease_until < now))
@@ -138,8 +142,8 @@ type DurableQueueStore interface {
 	// returns false when the lease was lost.
 	CompleteDurableItem(ctx context.Context, seq int64, owner string) (bool, error)
 	// FailDurableItem records a failure or lease release on seq while leased
-	// by owner and clears the lease.
-	FailDurableItem(ctx context.Context, seq int64, owner string, f DurableQueueFailure) error
+	// by owner and clears the lease; returns held=false when the lease was lost.
+	FailDurableItem(ctx context.Context, seq int64, owner string, f DurableQueueFailure) (held bool, err error)
 	// TrimDurableQueue removes unleased rows of kind exceeding maxAge,
 	// maxPermanent, or maxRows (removing oldest items of the largest project
 	// first on overflow) and returns the dropped rows by reason.

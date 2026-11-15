@@ -36,13 +36,59 @@ func TestDurableQueueEnqueueAndTxAtomicity(t *testing.T) {
 	cs := newTestCompositeStore(t)
 	base := time.Date(2026, 11, 15, 3, 0, 0, 0, time.UTC)
 
-	// Passing a non-transactional store handle as tx must fail closed.
+	// Passing a non-transactional store handle or an unknown tx type must fail closed.
 	_, err := cs.EnqueueDurableItem(ctx, cs, store.DurableQueueRow{
 		Kind:     "test.echo",
 		DedupKey: "bad-tx",
 		Payload:  []byte(`{"msg":"bad"}`),
 	})
 	require.ErrorIs(t, err, store.ErrInvalidInput)
+
+	_, err = cs.EnqueueDurableItem(ctx, cs.DurableQueueStore, store.DurableQueueRow{
+		Kind:     "test.echo",
+		DedupKey: "bad-substore-tx",
+		Payload:  []byte(`{"msg":"bad"}`),
+	})
+	require.ErrorIs(t, err, store.ErrInvalidInput)
+
+	otherCS := newTestCompositeStore(t)
+	_, err = cs.EnqueueDurableItem(ctx, store.DurableQueueStore(otherCS.DurableQueueStore), store.DurableQueueRow{
+		Kind:     "test.echo",
+		DedupKey: "foreign-dqs-tx",
+		Payload:  []byte(`{"msg":"bad"}`),
+	})
+	require.ErrorIs(t, err, store.ErrInvalidInput)
+
+	_, err = cs.EnqueueDurableItem(ctx, struct{ x int }{x: 1}, store.DurableQueueRow{
+		Kind:     "test.echo",
+		DedupKey: "unknown-tx",
+		Payload:  []byte(`{"msg":"bad"}`),
+	})
+	require.ErrorIs(t, err, store.ErrInvalidInput)
+
+	// Presetting attempt, failure, or lease fields on insert must be ignored so
+	// producers cannot enqueue pre-leased or pre-failed items.
+	presetLease := base.Add(time.Hour)
+	seqPreset, err := cs.EnqueueDurableItem(ctx, nil, store.DurableQueueRow{
+		Kind:              "preset.check",
+		DedupKey:          "preset-1",
+		Payload:           []byte(`{"ok":true}`),
+		CreatedAt:         base,
+		NotBefore:         base,
+		Attempts:          9,
+		PermanentFailures: 4,
+		LeaseOwner:        "sneaky-owner",
+		LeaseUntil:        &presetLease,
+		LastError:         "preset error",
+	})
+	require.NoError(t, err)
+	presetClaimed, err := cs.ClaimDurableItems(ctx, "preset.check", "worker-1", base, base.Add(time.Minute), 1)
+	require.NoError(t, err)
+	require.Len(t, presetClaimed, 1)
+	assert.Equal(t, seqPreset, presetClaimed[0].Seq)
+	assert.Zero(t, presetClaimed[0].Attempts)
+	assert.Zero(t, presetClaimed[0].PermanentFailures)
+	assert.Empty(t, presetClaimed[0].LastError)
 
 	// Rollback inside WithTx leaves neither the project nor the queue row.
 	rollbackProjID := uuid.NewString()
@@ -231,12 +277,14 @@ func TestDurableQueueClaimOrderingAndLeaseLifecycle(t *testing.T) {
 
 	// Fail early-2 with multi-byte UTF-8 error > 256 bytes and schedule it after delayed.
 	longErr := strings.Repeat("é", 200) // 400 UTF-8 bytes
-	require.NoError(t, cs.FailDurableItem(ctx, seqEarly2, "owner-a", store.DurableQueueFailure{
+	failHeld, err := cs.FailDurableItem(ctx, seqEarly2, "owner-a", store.DurableQueueFailure{
 		CountAttempt:  true,
 		Permanent:     true,
 		NextAttemptAt: t0.Add(3 * time.Minute),
 		LastError:     longErr,
-	}))
+	})
+	require.NoError(t, err)
+	assert.True(t, failHeld)
 
 	// Complete early-1 as owner-a.
 	done, err := cs.CompleteDurableItem(ctx, seqEarly1, "owner-a")
@@ -244,9 +292,7 @@ func TestDurableQueueClaimOrderingAndLeaseLifecycle(t *testing.T) {
 	assert.True(t, done)
 
 	// At t0+4m both delayed (next_attempt_at=t0+2m) and early-2 (next_attempt_at=t0+3m)
-	// are due; ClaimDurableItems must return delayed first even though early-2 had a
-	// lower seq? Note seqDelayed < seqEarly2 here too; let's reschedule delayed AFTER
-	// early-2 to verify next_attempt_at beats seq!
+	// are due.
 	now4m := t0.Add(4 * time.Minute)
 	claimed, err = cs.ClaimDurableItems(ctx, "test.echo", "owner-b", now4m, now4m.Add(30*time.Second), 10)
 	require.NoError(t, err)
@@ -260,14 +306,18 @@ func TestDurableQueueClaimOrderingAndLeaseLifecycle(t *testing.T) {
 
 	// Reschedule seqDelayed (lower seq) to t0+6m and seqEarly2 (higher seq) to t0+5m
 	// without counting attempts, then verify next_attempt_at ordering beats seq!
-	require.NoError(t, cs.FailDurableItem(ctx, seqDelayed, "owner-b", store.DurableQueueFailure{
+	failHeld, err = cs.FailDurableItem(ctx, seqDelayed, "owner-b", store.DurableQueueFailure{
 		CountAttempt:  false,
 		NextAttemptAt: t0.Add(6 * time.Minute),
-	}))
-	require.NoError(t, cs.FailDurableItem(ctx, seqEarly2, "owner-b", store.DurableQueueFailure{
+	})
+	require.NoError(t, err)
+	assert.True(t, failHeld)
+	failHeld, err = cs.FailDurableItem(ctx, seqEarly2, "owner-b", store.DurableQueueFailure{
 		CountAttempt:  false,
 		NextAttemptAt: t0.Add(5 * time.Minute),
-	}))
+	})
+	require.NoError(t, err)
+	assert.True(t, failHeld)
 
 	now7m := t0.Add(7 * time.Minute)
 	claimed, err = cs.ClaimDurableItems(ctx, "test.echo", "owner-a", now7m, now7m.Add(30*time.Second), 10)
@@ -277,9 +327,11 @@ func TestDurableQueueClaimOrderingAndLeaseLifecycle(t *testing.T) {
 	assert.Equal(t, 1, claimed[0].Attempts, "CountAttempt=false must not increment attempts")
 
 	// Lost-lease re-claim: let owner-a's lease expire, owner-b re-claims seqEarly2,
-	// and stale owner-a can neither Complete nor Fail it.
+	// and stale owner-a can neither Complete nor Fail it (leaving owner-b's lease
+	// and the row's attempt/error fields completely intact).
 	expiredAt := now7m.Add(31 * time.Second)
-	reclaimed, err := cs.ClaimDurableItems(ctx, "test.echo", "owner-b", expiredAt, expiredAt.Add(30*time.Second), 1)
+	ownerBLeaseUntil := expiredAt.Add(30 * time.Second)
+	reclaimed, err := cs.ClaimDurableItems(ctx, "test.echo", "owner-b", expiredAt, ownerBLeaseUntil, 1)
 	require.NoError(t, err)
 	require.Len(t, reclaimed, 1)
 	assert.Equal(t, seqEarly2, reclaimed[0].Seq)
@@ -288,12 +340,26 @@ func TestDurableQueueClaimOrderingAndLeaseLifecycle(t *testing.T) {
 	staleDone, err := cs.CompleteDurableItem(ctx, seqEarly2, "owner-a")
 	require.NoError(t, err)
 	assert.False(t, staleDone)
-	require.NoError(t, cs.FailDurableItem(ctx, seqEarly2, "owner-a", store.DurableQueueFailure{
+
+	staleFailHeld, err := cs.FailDurableItem(ctx, seqEarly2, "owner-a", store.DurableQueueFailure{
 		CountAttempt:  true,
 		Permanent:     true,
 		NextAttemptAt: expiredAt.Add(time.Hour),
 		LastError:     "stale",
-	}))
+	})
+	require.NoError(t, err)
+	assert.False(t, staleFailHeld, "stale owner's FailDurableItem must report held=false")
+
+	// Verify owner-b's lease and the row's counters/last_error were untouched by stale owner-a.
+	storedRow, err := cs.client.DurableQueueItem.Get(ctx, seqEarly2)
+	require.NoError(t, err)
+	assert.Equal(t, "owner-b", storedRow.LeaseOwner)
+	require.NotNil(t, storedRow.LeaseUntil)
+	assert.True(t, storedRow.LeaseUntil.Equal(ownerBLeaseUntil))
+	assert.Equal(t, 1, storedRow.Attempts)
+	assert.Equal(t, 1, storedRow.PermanentFailures)
+	assert.Empty(t, storedRow.LastError)
+
 	ownerBDone, err := cs.CompleteDurableItem(ctx, seqEarly2, "owner-b")
 	require.NoError(t, err)
 	assert.True(t, ownerBDone)
@@ -306,22 +372,27 @@ func TestDurableQueueTrimBoundsAndLargestProjectFirst(t *testing.T) {
 
 	enq := func(kind, proj, key string, createdAt time.Time, perm int, leased bool) int64 {
 		t.Helper()
-		row := store.DurableQueueRow{
-			Kind:              kind,
-			DedupKey:          key,
-			ProjectID:         proj,
-			Payload:           []byte(`{"k":"` + key + `"}`),
-			CreatedAt:         createdAt,
-			NotBefore:         createdAt,
-			PermanentFailures: perm,
-		}
-		if leased {
-			lu := now.Add(time.Minute)
-			row.LeaseOwner = "live-worker"
-			row.LeaseUntil = &lu
-		}
-		seq, err := cs.EnqueueDurableItem(ctx, nil, row)
+		seq, err := cs.EnqueueDurableItem(ctx, nil, store.DurableQueueRow{
+			Kind:      kind,
+			DedupKey:  key,
+			ProjectID: proj,
+			Payload:   []byte(`{"k":"` + key + `"}`),
+			CreatedAt: createdAt,
+			NotBefore: createdAt,
+		})
 		require.NoError(t, err)
+		if perm > 0 || leased {
+			// Drive failure count and lease state through the store contract
+			// (EnqueueDurableItem ignores preset attempt/lease fields).
+			upd := cs.client.DurableQueueItem.UpdateOneID(seq)
+			if perm > 0 {
+				upd = upd.SetPermanentFailures(perm).SetAttempts(perm)
+			}
+			if leased {
+				upd = upd.SetLeaseOwner("live-worker").SetLeaseUntil(now.Add(time.Minute))
+			}
+			require.NoError(t, upd.Exec(ctx))
+		}
 		return seq
 	}
 
@@ -405,26 +476,30 @@ func TestDurableQueueStats(t *testing.T) {
 	expiredLease := now.Add(-time.Minute)
 
 	_, err = cs.EnqueueDurableItem(ctx, nil, store.DurableQueueRow{
-		Kind:       "test.echo",
-		DedupKey:   "p1-leased",
-		ProjectID:  "p1",
-		Payload:    []byte(`{}`),
-		CreatedAt:  tOldest,
-		LeaseOwner: "w1",
-		LeaseUntil: &activeLease,
+		Kind:      "test.echo",
+		DedupKey:  "p1-leased",
+		ProjectID: "p1",
+		Payload:   []byte(`{}`),
+		CreatedAt: tOldest,
+		NotBefore: tOldest,
 	})
 	require.NoError(t, err)
+	claimedActive, err := cs.ClaimDurableItems(ctx, "test.echo", "w1", tOldest, activeLease, 1)
+	require.NoError(t, err)
+	require.Len(t, claimedActive, 1)
 
 	_, err = cs.EnqueueDurableItem(ctx, nil, store.DurableQueueRow{
-		Kind:       "test.echo",
-		DedupKey:   "p1-expired-lease",
-		ProjectID:  "p1",
-		Payload:    []byte(`{}`),
-		CreatedAt:  tNewer,
-		LeaseOwner: "w2",
-		LeaseUntil: &expiredLease,
+		Kind:      "test.echo",
+		DedupKey:  "p1-expired-lease",
+		ProjectID: "p1",
+		Payload:   []byte(`{}`),
+		CreatedAt: tNewer,
+		NotBefore: tNewer,
 	})
 	require.NoError(t, err)
+	claimedExpired, err := cs.ClaimDurableItems(ctx, "test.echo", "w2", tNewer, expiredLease, 1)
+	require.NoError(t, err)
+	require.Len(t, claimedExpired, 1)
 
 	_, err = cs.EnqueueDurableItem(ctx, nil, store.DurableQueueRow{
 		Kind:      "test.echo",

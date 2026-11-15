@@ -85,50 +85,29 @@ func entDurableQueueItemToStore(r *ent.DurableQueueItem) store.DurableQueueRow {
 }
 
 // resolveEnqueueClient resolves the Ent client to write to for EnqueueDurableItem.
-// If tx is nil, s.client is used directly. If tx is non-nil, it must represent an
-// active transaction (or another DurableQueueStore to delegate to).
-func (s *DurableQueueStore) resolveEnqueueClient(tx store.Tx) (*ent.Client, store.DurableQueueStore, error) {
+// If tx is nil, s.client is used directly. If tx is non-nil, it must be an
+// active Ent-backed transaction handle (*CompositeStore with inTx, *DurableQueueStore
+// with inTx, or *ent.Tx); unknown or non-transactional handles fail closed so an
+// enqueue never silently auto-commits outside the caller's transaction.
+func (s *DurableQueueStore) resolveEnqueueClient(tx store.Tx) (*ent.Client, error) {
 	if tx == nil {
-		return s.client, nil, nil
+		return s.client, nil
 	}
-	cur := tx
-	for {
-		switch v := cur.(type) {
-		case *CompositeStore:
-			if !v.inTx {
-				return nil, nil, fmt.Errorf("%w: durable queue Enqueue tx is not an active transaction", store.ErrInvalidInput)
-			}
-			return v.client, nil, nil
-		case *DurableQueueStore:
-			if !v.inTx {
-				return nil, nil, fmt.Errorf("%w: durable queue Enqueue tx is not an active transaction", store.ErrInvalidInput)
-			}
-			return v.client, nil, nil
-		case *ent.Tx:
-			return v.Client(), nil, nil
-		case interface{ UnwrapStore() store.Store }:
-			next := v.UnwrapStore()
-			if next == nil || next == cur {
-				return nil, nil, fmt.Errorf("%w: unsupported durable queue transaction %T", store.ErrInvalidInput, tx)
-			}
-			cur = next
-		case interface{ Unwrap() store.Store }:
-			next := v.Unwrap()
-			if next == nil || next == cur {
-				return nil, nil, fmt.Errorf("%w: unsupported durable queue transaction %T", store.ErrInvalidInput, tx)
-			}
-			cur = next
-		case store.DurableQueueStore:
-			if v == store.DurableQueueStore(s) {
-				if !s.inTx {
-					return nil, nil, fmt.Errorf("%w: durable queue Enqueue tx is not an active transaction", store.ErrInvalidInput)
-				}
-				return s.client, nil, nil
-			}
-			return nil, v, nil
-		default:
-			return nil, nil, fmt.Errorf("%w: unsupported durable queue transaction %T", store.ErrInvalidInput, tx)
+	switch v := tx.(type) {
+	case *CompositeStore:
+		if !v.inTx {
+			return nil, fmt.Errorf("%w: durable queue Enqueue tx is not an active transaction", store.ErrInvalidInput)
 		}
+		return v.client, nil
+	case *DurableQueueStore:
+		if !v.inTx {
+			return nil, fmt.Errorf("%w: durable queue Enqueue tx is not an active transaction", store.ErrInvalidInput)
+		}
+		return v.client, nil
+	case *ent.Tx:
+		return v.Client(), nil
+	default:
+		return nil, fmt.Errorf("%w: unsupported durable queue transaction %T", store.ErrInvalidInput, tx)
 	}
 }
 
@@ -148,13 +127,9 @@ func (s *DurableQueueStore) EnqueueDurableItem(ctx context.Context, tx store.Tx,
 		return 0, fmt.Errorf("%w: durable queue payload must be valid UTF-8 without NUL bytes", store.ErrInvalidInput)
 	}
 
-	client, delegate, err := s.resolveEnqueueClient(tx)
+	client, err := s.resolveEnqueueClient(tx)
 	if err != nil {
 		return 0, err
-	}
-	if delegate != nil {
-		row.DedupKey = dedupKey
-		return delegate.EnqueueDurableItem(ctx, nil, row)
 	}
 
 	now := time.Now().UTC()
@@ -171,6 +146,8 @@ func (s *DurableQueueStore) EnqueueDurableItem(ctx context.Context, tx store.Tx,
 		nextAttemptAt = notBefore
 	}
 
+	// Attempt, failure, and lease fields on row are intentionally ignored so a
+	// producer cannot insert a pre-leased or pre-failed item.
 	create := client.DurableQueueItem.Create().
 		SetKind(row.Kind).
 		SetDedupKey(dedupKey).
@@ -178,27 +155,21 @@ func (s *DurableQueueStore) EnqueueDurableItem(ctx context.Context, tx store.Tx,
 		SetPayload(string(row.Payload)).
 		SetNotBefore(notBefore).
 		SetCreatedAt(createdAt).
-		SetAttempts(row.Attempts).
-		SetPermanentFailures(row.PermanentFailures).
-		SetNextAttemptAt(nextAttemptAt).
-		SetLeaseOwner(row.LeaseOwner).
-		SetLastError(truncateUTF8Bytes(row.LastError, store.MaxDurableQueueLastErrorBytes))
-	if row.LeaseUntil != nil {
-		create = create.SetLeaseUntil(row.LeaseUntil.UTC())
-	}
+		SetNextAttemptAt(nextAttemptAt)
 
 	// Single-row Create + OnConflictColumns + DoNothing emits
 	// INSERT ... ON CONFLICT (kind, dedup_key) DO NOTHING RETURNING seq:
 	// - When inserted, RETURNING yields seq in one statement.
-	// - When (kind, dedup_key) already exists, DO NOTHING avoids aborting an
-	//   enclosing PostgreSQL transaction (SQLSTATE 25P02) and RETURNING yields
-	//   sql.ErrNoRows, which we map to store.ErrDuplicate.
+	// - When (kind, dedup_key) already exists, DO NOTHING suppresses only that
+	//   unique conflict without aborting an enclosing PostgreSQL transaction
+	//   (SQLSTATE 25P02) and RETURNING yields sql.ErrNoRows, which maps to
+	//   store.ErrDuplicate. Other constraint errors surface through mapError.
 	seq, err := create.
 		OnConflictColumns(durablequeueitem.FieldKind, durablequeueitem.FieldDedupKey).
 		DoNothing().
 		ID(ctx)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) || ent.IsConstraintError(err) {
+		if errors.Is(err, sql.ErrNoRows) {
 			return 0, store.ErrDuplicate
 		}
 		return 0, markTransient(mapError(err))
@@ -312,9 +283,9 @@ func (s *DurableQueueStore) CompleteDurableItem(ctx context.Context, seq int64, 
 }
 
 // FailDurableItem implements store.DurableQueueStore.
-func (s *DurableQueueStore) FailDurableItem(ctx context.Context, seq int64, owner string, f store.DurableQueueFailure) error {
+func (s *DurableQueueStore) FailDurableItem(ctx context.Context, seq int64, owner string, f store.DurableQueueFailure) (bool, error) {
 	if owner == "" {
-		return fmt.Errorf("%w: durable queue lease owner is required", store.ErrInvalidInput)
+		return false, fmt.Errorf("%w: durable queue lease owner is required", store.ErrInvalidInput)
 	}
 	upd := s.client.DurableQueueItem.Update().
 		Where(
@@ -331,8 +302,11 @@ func (s *DurableQueueStore) FailDurableItem(ctx context.Context, seq int64, owne
 	if f.Permanent {
 		upd = upd.AddPermanentFailures(1)
 	}
-	_, err := upd.Save(ctx)
-	return markTransient(mapError(err))
+	n, err := upd.Save(ctx)
+	if err != nil {
+		return false, markTransient(mapError(err))
+	}
+	return n > 0, nil
 }
 
 func lockQueueTrimCandidates(client *ent.Client, q *ent.DurableQueueItemQuery) *ent.DurableQueueItemQuery {

@@ -67,6 +67,11 @@ func (m *memQueueStore) EnqueueDurableItem(_ context.Context, _ store.Tx, row st
 	cp := row
 	cp.Seq = m.nextSeq
 	cp.Payload = bytes.Clone(row.Payload)
+	cp.Attempts = 0
+	cp.PermanentFailures = 0
+	cp.LeaseOwner = ""
+	cp.LeaseUntil = nil
+	cp.LastError = ""
 	if cp.CreatedAt.IsZero() {
 		cp.CreatedAt = time.Now().UTC()
 	}
@@ -142,12 +147,12 @@ func (m *memQueueStore) CompleteDurableItem(_ context.Context, seq int64, owner 
 	return true, nil
 }
 
-func (m *memQueueStore) FailDurableItem(_ context.Context, seq int64, owner string, f store.DurableQueueFailure) error {
+func (m *memQueueStore) FailDurableItem(_ context.Context, seq int64, owner string, f store.DurableQueueFailure) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	r, ok := m.rows[seq]
 	if !ok || r.LeaseOwner != owner {
-		return nil
+		return false, nil
 	}
 	if f.CountAttempt {
 		r.Attempts++
@@ -159,7 +164,7 @@ func (m *memQueueStore) FailDurableItem(_ context.Context, seq int64, owner stri
 	r.LastError = f.LastError
 	r.LeaseOwner = ""
 	r.LeaseUntil = nil
-	return nil
+	return true, nil
 }
 
 func (m *memQueueStore) TrimDurableQueue(_ context.Context, kind string, now time.Time, maxAge time.Duration, maxRows, maxPermanent int) (store.DurableQueueTrim, error) {
@@ -214,6 +219,60 @@ func (m *memQueueStore) DurableQueueStats(_ context.Context, kind, projectID str
 
 func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+type recordingMetrics struct {
+	mu          sync.Mutex
+	claimed     int
+	done        int
+	retried     int
+	permanent   int
+	dropped     map[string]int
+	lastPending int64
+	lastLeased  int64
+	lastOldest  time.Duration
+}
+
+func newRecordingMetrics() *recordingMetrics {
+	return &recordingMetrics{dropped: make(map[string]int)}
+}
+
+func (m *recordingMetrics) Claimed(_ string, n int) {
+	m.mu.Lock()
+	m.claimed += n
+	m.mu.Unlock()
+}
+
+func (m *recordingMetrics) Done(_ string) {
+	m.mu.Lock()
+	m.done++
+	m.mu.Unlock()
+}
+
+func (m *recordingMetrics) Retried(_ string) {
+	m.mu.Lock()
+	m.retried++
+	m.mu.Unlock()
+}
+
+func (m *recordingMetrics) Permanent(_ string) {
+	m.mu.Lock()
+	m.permanent++
+	m.mu.Unlock()
+}
+
+func (m *recordingMetrics) Dropped(_ string, reason string, n int) {
+	m.mu.Lock()
+	m.dropped[reason] += n
+	m.mu.Unlock()
+}
+
+func (m *recordingMetrics) ObserveQueue(_ string, pending, leased int64, oldestAge time.Duration) {
+	m.mu.Lock()
+	m.lastPending = pending
+	m.lastLeased = leased
+	m.lastOldest = oldestAge
+	m.mu.Unlock()
 }
 
 func TestNewDrainerValidationAndDefaults(t *testing.T) {
@@ -390,6 +449,149 @@ func TestLeaseAutoRenewAndLostLeaseCancel(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, sawCtxCancel.Load())
 	assert.Zero(t, resLost.Done, "lost lease must not count as Done")
+}
+
+func TestLostLeaseOnFailureSkipsMetricsAndClaimNonceIsolatesSameOwner(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. O1: losing a lease before FailDurableItem skips Retried/Permanent metrics
+	// and must not trigger immediate poison trim.
+	st := newMemQueueStore()
+	st.loseAt = 2 // pre-handler Renew succeeds; background auto-renew loses lease
+	q := durablequeue.NewQueue(st)
+	_, err := q.Enqueue(ctx, nil, durablequeue.Item{Kind: "test.echo", DedupKey: "fail-lost", Payload: []byte(`{}`)})
+	require.NoError(t, err)
+
+	metrics := newRecordingMetrics()
+	var dropCalls int
+	dFailLost, err := durablequeue.NewDrainer(durablequeue.DrainerConfig{
+		Store:          st,
+		Kind:           "test.echo",
+		MaxPermanent:   1,
+		LeaseDuration:  60 * time.Millisecond,
+		HandlerTimeout: 55 * time.Millisecond,
+		Metrics:        metrics,
+		Logger:         quietLogger(),
+		OnDrop: func(_ context.Context, _ []durablequeue.Item, _ string) {
+			dropCalls++
+		},
+		Handler: func(hctx context.Context, _ durablequeue.Item, _ durablequeue.Lease) durablequeue.Result {
+			<-hctx.Done()
+			return durablequeue.Result{Permanent: true, Err: errors.New("lost lease permanent failure")}
+		},
+	})
+	require.NoError(t, err)
+
+	res, err := dFailLost.DrainOnce(ctx)
+	require.NoError(t, err)
+	assert.Zero(t, res.Permanent, "lost lease failure must not count as Permanent")
+	assert.Zero(t, res.Retried, "lost lease failure must not count as Retried")
+	assert.Zero(t, res.Dropped, "lost lease failure must not trigger poison trim")
+	assert.Zero(t, dropCalls)
+	metrics.mu.Lock()
+	assert.Zero(t, metrics.permanent)
+	assert.Zero(t, metrics.retried)
+	metrics.mu.Unlock()
+
+	// 2. C2: two drainers configured with the exact same Owner string use distinct
+	// per-claim lease nonces, so a stalled pass on d1 cannot release or overwrite
+	// a lease re-claimed by d2 while d2 is actively handling the item.
+	st2 := newMemQueueStore()
+	cur := time.Date(2026, 11, 15, 6, 30, 0, 0, time.UTC)
+	var clockMu sync.Mutex
+	nowFn := func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return cur
+	}
+	advance := func(d time.Duration) {
+		clockMu.Lock()
+		cur = cur.Add(d)
+		clockMu.Unlock()
+	}
+
+	q2 := durablequeue.NewQueue(st2, durablequeue.WithQueueClock(nowFn))
+	seq, err := q2.Enqueue(ctx, nil, durablequeue.Item{Kind: "test.echo", DedupKey: "same-owner", Payload: []byte(`{}`)})
+	require.NoError(t, err)
+
+	d1Entered := make(chan struct{})
+	releaseD1 := make(chan struct{})
+	d2Entered := make(chan struct{})
+	releaseD2 := make(chan struct{})
+
+	d1, err := durablequeue.NewDrainer(durablequeue.DrainerConfig{
+		Store:          st2,
+		Kind:           "test.echo",
+		Owner:          "shared-replica-id",
+		LeaseDuration:  5 * time.Second,
+		HandlerTimeout: 4 * time.Second,
+		Now:            nowFn,
+		Logger:         quietLogger(),
+		Handler: func(_ context.Context, _ durablequeue.Item, _ durablequeue.Lease) durablequeue.Result {
+			close(d1Entered)
+			<-releaseD1
+			return durablequeue.Result{Err: errors.New("stale failure from d1")}
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "shared-replica-id", d1.Owner())
+
+	d2, err := durablequeue.NewDrainer(durablequeue.DrainerConfig{
+		Store:          st2,
+		Kind:           "test.echo",
+		Owner:          "shared-replica-id",
+		LeaseDuration:  5 * time.Second,
+		HandlerTimeout: 4 * time.Second,
+		Now:            nowFn,
+		Logger:         quietLogger(),
+		Handler: func(_ context.Context, _ durablequeue.Item, _ durablequeue.Lease) durablequeue.Result {
+			close(d2Entered)
+			<-releaseD2
+			return durablequeue.Result{Done: true}
+		},
+	})
+	require.NoError(t, err)
+
+	var r1, r2 durablequeue.DrainResult
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		var derr error
+		r1, derr = d1.DrainOnce(ctx)
+		require.NoError(t, derr)
+	}()
+
+	<-d1Entered
+	// Advance fake clock past d1's 5s lease so d2 re-claims the item with the same configured Owner.
+	advance(6 * time.Second)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		var derr error
+		r2, derr = d2.DrainOnce(ctx)
+		require.NoError(t, derr)
+	}()
+
+	<-d2Entered
+	// Let stale d1 return a failure WHILE d2 holds the new lease: d1's FailDurableItem
+	// must be rejected (different claim nonce), leaving d2's lease intact so d2's Done succeeds!
+	close(releaseD1)
+	time.Sleep(15 * time.Millisecond)
+
+	st2.mu.Lock()
+	liveRow := st2.rows[seq]
+	require.NotNil(t, liveRow, "row must still exist while d2 is handling it")
+	assert.NotNil(t, liveRow.LeaseUntil, "stale d1 Fail must not clear d2's lease")
+	assert.Zero(t, liveRow.Attempts, "stale d1 Fail must not increment attempts")
+	st2.mu.Unlock()
+
+	close(releaseD2)
+	wg.Wait()
+
+	assert.Zero(t, r1.Retried)
+	assert.Equal(t, 1, r2.Done)
 }
 
 func TestBlockedSinkProbeBackoffAndUnblock(t *testing.T) {
