@@ -118,7 +118,7 @@ func findImport(root, from, target string, includeRootTests bool) ([]string, err
 			if ent.IsDir() || !strings.HasSuffix(ent.Name(), ".go") {
 				continue
 			}
-			if strings.HasSuffix(ent.Name(), "_test.go") && !(includeRootTests && cur.pkg == from) {
+			if strings.HasSuffix(ent.Name(), "_test.go") && (!includeRootTests || cur.pkg != from) {
 				continue
 			}
 			f, err := parser.ParseFile(fset, filepath.Join(dir, ent.Name()), nil, parser.ImportsOnly)

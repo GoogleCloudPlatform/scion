@@ -74,8 +74,9 @@ func TestFireTypesAndExecutorContextAlias(t *testing.T) {
 	}
 
 	// ExecutorContext must alias principal.ExecutorContext so pkg/hub and
-	// pkg/hub/trigger share it without conversion.
-	var execCtx principal.ExecutorContext = hubfire.ExecutorContext{
+	// pkg/hub/trigger share it without conversion (verified below by passing
+	// req.Executor directly to principal.ContextWithExecutor).
+	execCtx := hubfire.ExecutorContext{
 		Kind: "trigger_drainer",
 		ID:   "trigger_event:ev-1",
 	}
