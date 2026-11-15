@@ -186,6 +186,10 @@ const maxNotificationWaitAgents = 64
 
 // isStickyActivity returns true if the given activity is a "sticky" value that
 // should resist being overwritten by normal event-driven updates.
+// idle (agent-reported, `sciontool status idle`) is handled exactly like
+// blocked: wherever the comments in this file and hub.go list blocked as
+// kept or held, idle is too, and the same new-work events (isNewWorkEvent)
+// clear it.
 func isStickyActivity(activity string) bool {
 	return state.Activity(activity).IsSticky()
 }

@@ -1598,7 +1598,7 @@ Manages notifications and notification subscriptions.
     - Flags:
         - `--agent <name-or-id>`: Subscribe to specific agent.
         - `--project <name>`: Specify project (inferred from context if omitted).
-        - `--triggers <triggers>`: Trigger activities to subscribe to. This flag is **repeatable** and also accepts a **comma-separated list** of triggers (e.g., `--triggers COMPLETED,WAITING_FOR_INPUT --triggers LIMITS_EXCEEDED`). Default: `COMPLETED,WAITING_FOR_INPUT,LIMITS_EXCEEDED`. Strict empty-value validation is enforced.
+        - `--triggers <triggers>`: Trigger activities to subscribe to. This flag is **repeatable** and also accepts a **comma-separated list** of triggers (e.g., `--triggers COMPLETED,WAITING_FOR_INPUT --triggers LIMITS_EXCEEDED`). Default: `COMPLETED,IDLE,WAITING_FOR_INPUT,LIMITS_EXCEEDED`. Strict empty-value validation is enforced.
 - `scion notifications unsubscribe <id>`: Remove a subscription.
     - Flags: `--all` (remove all subscriptions in the project), `--project <name>`.
 - `scion notifications update <id>`: Update a subscription's trigger activities.

@@ -24,6 +24,7 @@ import (
 
 var heldQuestionHeldStates = []state.Activity{
 	state.ActivityBlocked,
+	state.ActivityIdle,
 	state.ActivityCompleted,
 	state.ActivityLimitsExceeded,
 	state.ActivityCrashed,

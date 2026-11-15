@@ -166,7 +166,7 @@ func TestParentNotificationTerminal_WorkingBecomesWaiting(t *testing.T) {
 // the question that asks the user, so the agent really is waiting again.
 func TestParentNotificationTerminal_BlockedCompletedStillWaiting(t *testing.T) {
 	for _, d := range parentNotificationDialects() {
-		for _, held := range []state.Activity{state.ActivityBlocked, state.ActivityCompleted} {
+		for _, held := range []state.Activity{state.ActivityBlocked, state.ActivityIdle, state.ActivityCompleted} {
 			t.Run(d.name+"/"+string(held), func(t *testing.T) {
 				event := d.notify(t)
 				requireParentNotification(t, event)
@@ -188,7 +188,7 @@ func TestParentNotificationTerminal_BlockedCompletedStillWaiting(t *testing.T) {
 // waiting_for_input and reports it.
 func TestParentNotificationTerminal_ParentQuestionMovesHeld(t *testing.T) {
 	for _, tool := range []string{"AskUserQuestion", "ExitPlanMode"} {
-		for _, held := range []state.Activity{state.ActivityBlocked, state.ActivityCompleted} {
+		for _, held := range []state.Activity{state.ActivityBlocked, state.ActivityIdle, state.ActivityCompleted} {
 			t.Run(tool+"/"+string(held), func(t *testing.T) {
 				event := parentHeldParent(t, "PreToolUse", tool)
 				require.True(t, isClaudeUserWaitTool(event), "a question event")

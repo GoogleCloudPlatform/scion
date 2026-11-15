@@ -236,8 +236,8 @@ test('default export registers exactly the expected pi events and starts nothing
 const bashStart = (command) => ({ toolName: 'bash', args: { command } });
 const statusCalls = (calls) => calls.filter((c) => c.argv[0] === 'status');
 
-test('settle does not overwrite an agent-set ask_user / blocked / limits_exceeded', () => {
-  for (const kind of ['ask_user', 'blocked', 'limits_exceeded']) {
+test('settle does not overwrite an agent-set ask_user / blocked / idle / limits_exceeded', () => {
+  for (const kind of ['ask_user', 'blocked', 'idle', 'limits_exceeded']) {
     const { calls, h } = harness();
     h.tool_execution_start(bashStart(`sciontool status ${kind} "need input"`));
     h.agent_end({ messages: [asst('waiting')] });
@@ -270,6 +270,7 @@ test('a status call in command position (plain or compound) suppresses the autom
     'sciontool status task_completed "Fixed the bug"',
     'make test && sciontool status task_completed "done"',
     'cd /workspace; sciontool status blocked "waiting on CI"',
+    'git push && sciontool status idle "nothing assigned"',
     'false || sciontool status ask_user "which branch?"',
     'go test ./... | tee log.txt & sciontool status limits_exceeded "x"',
     'make build\nsciontool status task_completed "built"',
@@ -390,6 +391,18 @@ test('real sciontool: blocked then settle stays blocked', { skip: !REAL }, () =>
     h.agent_end({ messages: [asst('blocked')] });
     h.agent_settled({ aborted: false });
     assert.equal(r.activity(), 'blocked');
+  } finally { r.done(); }
+});
+
+test('real sciontool: idle then settle stays idle', { skip: !REAL }, () => {
+  const r = realSciontool();
+  try {
+    const h = createHandlers({ run: r.run, env: {} });
+    h.tool_execution_start(bashStart('sciontool status idle "nothing assigned"'));
+    r.set('status', 'idle', 'nothing assigned');
+    h.agent_end({ messages: [asst('idle')] });
+    h.agent_settled({ aborted: false });
+    assert.equal(r.activity(), 'idle');
   } finally { r.done(); }
 });
 

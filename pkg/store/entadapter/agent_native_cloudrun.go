@@ -91,22 +91,26 @@ func marshalAppliedConfigNative(cfg *store.AgentAppliedConfig, native bool) stri
 // itself, and the predicate the write must add (appliedNativeCloudRunIs) so
 // it applies only while the row still holds it. A missing row reads as not
 // native; the write then matches no row and reports that.
-func appliedConfigForWrite(ctx context.Context, ac *ent.AgentClient, uid uuid.UUID, cfg *store.AgentAppliedConfig, lock bool) (raw string, native bool, keep predicate.Agent, err error) {
+//
+// prior is the same read's phase and activity (nil for a missing row), so a
+// whole-row write can maintain activity_since without a second read.
+func appliedConfigForWrite(ctx context.Context, ac *ent.AgentClient, uid uuid.UUID, cfg *store.AgentAppliedConfig, lock bool) (raw string, native bool, keep predicate.Agent, prior *ent.Agent, err error) {
 	q := ac.Query().Where(agent.IDEQ(uid))
 	if lock {
 		q = q.ForUpdate()
 	}
-	row, err := q.Select(agent.FieldAppliedConfig).Only(ctx)
+	row, err := q.Select(agent.FieldAppliedConfig, agent.FieldPhase, agent.FieldActivity).Only(ctx)
 	stored := ""
 	switch {
 	case err == nil:
 		stored = row.AppliedConfig
 		native = rowNativeCloudRun(stored)
+		prior = row
 	case ent.IsNotFound(err):
 	default:
-		return "", false, nil, mapError(err)
+		return "", false, nil, nil, mapError(err)
 	}
-	return marshalAppliedConfigNative(cfg, native), native, appliedConfigKeep(stored, native), nil
+	return marshalAppliedConfigNative(cfg, native), native, appliedConfigKeep(stored, native), prior, nil
 }
 
 // appliedConfigKeep is the predicate a whole-document write adds after

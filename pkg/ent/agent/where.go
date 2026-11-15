@@ -496,6 +496,11 @@ func SoftDeleteOpID(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldSoftDeleteOpID, v))
 }
 
+// ActivitySince applies equality check predicate on the "activity_since" field. It's identical to ActivitySinceEQ.
+func ActivitySince(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldActivitySince, v))
+}
+
 // FixtureRootIDEQ applies the EQ predicate on the "fixture_root_id" field.
 func FixtureRootIDEQ(v uuid.UUID) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldFixtureRootID, v))
@@ -5954,6 +5959,56 @@ func SoftDeleteOpIDEqualFold(v string) predicate.Agent {
 // SoftDeleteOpIDContainsFold applies the ContainsFold predicate on the "soft_delete_op_id" field.
 func SoftDeleteOpIDContainsFold(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldContainsFold(FieldSoftDeleteOpID, v))
+}
+
+// ActivitySinceEQ applies the EQ predicate on the "activity_since" field.
+func ActivitySinceEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldActivitySince, v))
+}
+
+// ActivitySinceNEQ applies the NEQ predicate on the "activity_since" field.
+func ActivitySinceNEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldActivitySince, v))
+}
+
+// ActivitySinceIn applies the In predicate on the "activity_since" field.
+func ActivitySinceIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldActivitySince, vs...))
+}
+
+// ActivitySinceNotIn applies the NotIn predicate on the "activity_since" field.
+func ActivitySinceNotIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldActivitySince, vs...))
+}
+
+// ActivitySinceGT applies the GT predicate on the "activity_since" field.
+func ActivitySinceGT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldActivitySince, v))
+}
+
+// ActivitySinceGTE applies the GTE predicate on the "activity_since" field.
+func ActivitySinceGTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldActivitySince, v))
+}
+
+// ActivitySinceLT applies the LT predicate on the "activity_since" field.
+func ActivitySinceLT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldActivitySince, v))
+}
+
+// ActivitySinceLTE applies the LTE predicate on the "activity_since" field.
+func ActivitySinceLTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldActivitySince, v))
+}
+
+// ActivitySinceIsNil applies the IsNil predicate on the "activity_since" field.
+func ActivitySinceIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldActivitySince))
+}
+
+// ActivitySinceNotNil applies the NotNil predicate on the "activity_since" field.
+func ActivitySinceNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldActivitySince))
 }
 
 // HasProject applies the HasEdge predicate on the "project" edge.

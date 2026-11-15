@@ -47,7 +47,7 @@ for a Scion project.
 
 Queries the Hub to report:
   - Agent counts across all lifecycle phases (created, provisioning, cloning, starting, running, stopping, stopped, error, suspended)
-  - Agent counts across all activity states (working, thinking, executing, waiting_for_input, blocked, completed, stalled, limits_exceeded, offline, crashed)
+  - Agent counts across all activity states (working, thinking, executing, waiting_for_input, blocked, idle, completed, stalled, limits_exceeded, offline, crashed)
   - Detailed agent matrix with template, harness, lifecycle phase, and activity state
   - Actionable troubleshooting hints for blocked, stalled, or errored agents
 
@@ -95,6 +95,7 @@ type ProjectHealthSummary struct {
 	Executing       int `json:"executing"`
 	WaitingForInput int `json:"waitingForInput"`
 	Blocked         int `json:"blocked"`
+	Idle            int `json:"idle"`
 	Completed       int `json:"completed"`
 	LimitsExceeded  int `json:"limitsExceeded"`
 	Stalled         int `json:"stalled"`
@@ -280,34 +281,7 @@ func runProjectHealth(cmd *cobra.Command, args []string) error {
 				report.Summary.OtherPhase++
 			}
 
-			switch state.Activity(a.Activity) {
-			case "":
-				// No activity set (e.g., when agent is not running)
-			case state.ActivityInitializing:
-				report.Summary.Initializing++
-			case state.ActivityWorking:
-				report.Summary.Working++
-			case state.ActivityThinking:
-				report.Summary.Thinking++
-			case state.ActivityExecuting:
-				report.Summary.Executing++
-			case state.ActivityWaitingForInput:
-				report.Summary.WaitingForInput++
-			case state.ActivityBlocked:
-				report.Summary.Blocked++
-			case state.ActivityCompleted:
-				report.Summary.Completed++
-			case state.ActivityLimitsExceeded:
-				report.Summary.LimitsExceeded++
-			case state.ActivityStalled:
-				report.Summary.Stalled++
-			case state.ActivityOffline:
-				report.Summary.Offline++
-			case state.ActivityCrashed:
-				report.Summary.Crashed++
-			default:
-				report.Summary.OtherActivity++
-			}
+			report.Summary.addActivity(a.Activity)
 		}
 		reports = append(reports, report)
 	}
@@ -349,6 +323,41 @@ func formatPhaseSummary(s ProjectHealthSummary) string {
 	return strings.Join(parts, " | ")
 }
 
+// addActivity counts one agent's activity. idle is a healthy state: it is
+// counted, never flagged.
+func (s *ProjectHealthSummary) addActivity(activity string) {
+	switch state.Activity(activity) {
+	case "":
+		// No activity set (e.g., when agent is not running)
+	case state.ActivityInitializing:
+		s.Initializing++
+	case state.ActivityWorking:
+		s.Working++
+	case state.ActivityThinking:
+		s.Thinking++
+	case state.ActivityExecuting:
+		s.Executing++
+	case state.ActivityWaitingForInput:
+		s.WaitingForInput++
+	case state.ActivityBlocked:
+		s.Blocked++
+	case state.ActivityIdle:
+		s.Idle++
+	case state.ActivityCompleted:
+		s.Completed++
+	case state.ActivityLimitsExceeded:
+		s.LimitsExceeded++
+	case state.ActivityStalled:
+		s.Stalled++
+	case state.ActivityOffline:
+		s.Offline++
+	case state.ActivityCrashed:
+		s.Crashed++
+	default:
+		s.OtherActivity++
+	}
+}
+
 func formatActivitySummary(s ProjectHealthSummary) string {
 	parts := []string{
 		fmt.Sprintf("Working=%d", s.Working),
@@ -363,6 +372,7 @@ func formatActivitySummary(s ProjectHealthSummary) string {
 		{"Starting", s.Initializing},
 		{"Executing", s.Executing},
 		{"WaitingForInput", s.WaitingForInput},
+		{"Idle", s.Idle},
 		{"Stalled", s.Stalled},
 		{"LimitsExceeded", s.LimitsExceeded},
 		{"Offline", s.Offline},

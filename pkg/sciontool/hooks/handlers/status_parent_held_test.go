@@ -146,6 +146,7 @@ func TestParentHeld_ToolStartHubMatchesLocal(t *testing.T) {
 			wantStatus string // "" means no Hub call
 		}{
 			{"blocked", "blocked", ""},
+			{"idle", "idle", ""},
 			{"crashed", "crashed", ""},
 			{"completed", "completed", ""},
 			{"limits_exceeded", "limits_exceeded", ""},
@@ -519,7 +520,7 @@ func TestParentHeld_CapturedClaudeSubagentReplay(t *testing.T) {
 	// rest of the turn.
 	turn := events[1:]
 
-	for _, held := range []string{"blocked", "crashed"} {
+	for _, held := range []string{"blocked", "idle", "crashed"} {
 		t.Run(held, func(t *testing.T) {
 			sh, hh, sent := claudeHubSetup(t)
 			parentHeldHold(t, sh, held)

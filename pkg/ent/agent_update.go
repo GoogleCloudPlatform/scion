@@ -1755,6 +1755,26 @@ func (_u *AgentUpdate) ClearSoftDeleteOpID() *AgentUpdate {
 	return _u
 }
 
+// SetActivitySince sets the "activity_since" field.
+func (_u *AgentUpdate) SetActivitySince(v time.Time) *AgentUpdate {
+	_u.mutation.SetActivitySince(v)
+	return _u
+}
+
+// SetNillableActivitySince sets the "activity_since" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableActivitySince(v *time.Time) *AgentUpdate {
+	if v != nil {
+		_u.SetActivitySince(*v)
+	}
+	return _u
+}
+
+// ClearActivitySince clears the value of the "activity_since" field.
+func (_u *AgentUpdate) ClearActivitySince() *AgentUpdate {
+	_u.mutation.ClearActivitySince()
+	return _u
+}
+
 // SetProject sets the "project" edge to the Project entity.
 func (_u *AgentUpdate) SetProject(v *Project) *AgentUpdate {
 	return _u.SetProjectID(v.ID)
@@ -2519,6 +2539,12 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.SoftDeleteOpIDCleared() {
 		_spec.ClearField(agent.FieldSoftDeleteOpID, field.TypeString)
+	}
+	if value, ok := _u.mutation.ActivitySince(); ok {
+		_spec.SetField(agent.FieldActivitySince, field.TypeTime, value)
+	}
+	if _u.mutation.ActivitySinceCleared() {
+		_spec.ClearField(agent.FieldActivitySince, field.TypeTime)
 	}
 	if _u.mutation.ProjectCleared() {
 		edge := &sqlgraph.EdgeSpec{
@@ -4468,6 +4494,26 @@ func (_u *AgentUpdateOne) ClearSoftDeleteOpID() *AgentUpdateOne {
 	return _u
 }
 
+// SetActivitySince sets the "activity_since" field.
+func (_u *AgentUpdateOne) SetActivitySince(v time.Time) *AgentUpdateOne {
+	_u.mutation.SetActivitySince(v)
+	return _u
+}
+
+// SetNillableActivitySince sets the "activity_since" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableActivitySince(v *time.Time) *AgentUpdateOne {
+	if v != nil {
+		_u.SetActivitySince(*v)
+	}
+	return _u
+}
+
+// ClearActivitySince clears the value of the "activity_since" field.
+func (_u *AgentUpdateOne) ClearActivitySince() *AgentUpdateOne {
+	_u.mutation.ClearActivitySince()
+	return _u
+}
+
 // SetProject sets the "project" edge to the Project entity.
 func (_u *AgentUpdateOne) SetProject(v *Project) *AgentUpdateOne {
 	return _u.SetProjectID(v.ID)
@@ -5262,6 +5308,12 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	}
 	if _u.mutation.SoftDeleteOpIDCleared() {
 		_spec.ClearField(agent.FieldSoftDeleteOpID, field.TypeString)
+	}
+	if value, ok := _u.mutation.ActivitySince(); ok {
+		_spec.SetField(agent.FieldActivitySince, field.TypeTime, value)
+	}
+	if _u.mutation.ActivitySinceCleared() {
+		_spec.ClearField(agent.FieldActivitySince, field.TypeTime)
 	}
 	if _u.mutation.ProjectCleared() {
 		edge := &sqlgraph.EdgeSpec{

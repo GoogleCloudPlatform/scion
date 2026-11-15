@@ -1296,6 +1296,20 @@ func (_c *AgentCreate) SetNillableSoftDeleteOpID(v *string) *AgentCreate {
 	return _c
 }
 
+// SetActivitySince sets the "activity_since" field.
+func (_c *AgentCreate) SetActivitySince(v time.Time) *AgentCreate {
+	_c.mutation.SetActivitySince(v)
+	return _c
+}
+
+// SetNillableActivitySince sets the "activity_since" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableActivitySince(v *time.Time) *AgentCreate {
+	if v != nil {
+		_c.SetActivitySince(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *AgentCreate) SetID(v uuid.UUID) *AgentCreate {
 	_c.mutation.SetID(v)
@@ -2066,6 +2080,10 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.SoftDeleteOpID(); ok {
 		_spec.SetField(agent.FieldSoftDeleteOpID, field.TypeString, value)
 		_node.SoftDeleteOpID = &value
+	}
+	if value, ok := _c.mutation.ActivitySince(); ok {
+		_spec.SetField(agent.FieldActivitySince, field.TypeTime, value)
+		_node.ActivitySince = &value
 	}
 	if nodes := _c.mutation.ProjectIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
@@ -3757,6 +3775,24 @@ func (u *AgentUpsert) UpdateSoftDeleteOpID() *AgentUpsert {
 // ClearSoftDeleteOpID clears the value of the "soft_delete_op_id" field.
 func (u *AgentUpsert) ClearSoftDeleteOpID() *AgentUpsert {
 	u.SetNull(agent.FieldSoftDeleteOpID)
+	return u
+}
+
+// SetActivitySince sets the "activity_since" field.
+func (u *AgentUpsert) SetActivitySince(v time.Time) *AgentUpsert {
+	u.Set(agent.FieldActivitySince, v)
+	return u
+}
+
+// UpdateActivitySince sets the "activity_since" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateActivitySince() *AgentUpsert {
+	u.SetExcluded(agent.FieldActivitySince)
+	return u
+}
+
+// ClearActivitySince clears the value of the "activity_since" field.
+func (u *AgentUpsert) ClearActivitySince() *AgentUpsert {
+	u.SetNull(agent.FieldActivitySince)
 	return u
 }
 
@@ -5640,6 +5676,27 @@ func (u *AgentUpsertOne) UpdateSoftDeleteOpID() *AgentUpsertOne {
 func (u *AgentUpsertOne) ClearSoftDeleteOpID() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearSoftDeleteOpID()
+	})
+}
+
+// SetActivitySince sets the "activity_since" field.
+func (u *AgentUpsertOne) SetActivitySince(v time.Time) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetActivitySince(v)
+	})
+}
+
+// UpdateActivitySince sets the "activity_since" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateActivitySince() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateActivitySince()
+	})
+}
+
+// ClearActivitySince clears the value of the "activity_since" field.
+func (u *AgentUpsertOne) ClearActivitySince() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearActivitySince()
 	})
 }
 
@@ -7690,6 +7747,27 @@ func (u *AgentUpsertBulk) UpdateSoftDeleteOpID() *AgentUpsertBulk {
 func (u *AgentUpsertBulk) ClearSoftDeleteOpID() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearSoftDeleteOpID()
+	})
+}
+
+// SetActivitySince sets the "activity_since" field.
+func (u *AgentUpsertBulk) SetActivitySince(v time.Time) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetActivitySince(v)
+	})
+}
+
+// UpdateActivitySince sets the "activity_since" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateActivitySince() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateActivitySince()
+	})
+}
+
+// ClearActivitySince clears the value of the "activity_since" field.
+func (u *AgentUpsertBulk) ClearActivitySince() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearActivitySince()
 	})
 }
 

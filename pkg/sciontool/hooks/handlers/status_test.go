@@ -1007,6 +1007,7 @@ func TestSessionStart_InPlaceKeepsSticky(t *testing.T) {
 	for _, source := range []string{"clear", "compact", "reload"} {
 		for _, held := range []state.Activity{
 			state.ActivityBlocked,
+			state.ActivityIdle,
 			state.ActivityCompleted,
 			state.ActivityLimitsExceeded,
 			state.ActivityCrashed,
@@ -1125,7 +1126,7 @@ func TestSessionStart_InPlaceKeepsParentQuestionInOwnerHeldWait(t *testing.T) {
 // started".
 func TestSessionStart_NewSourcesUnchanged(t *testing.T) {
 	for _, source := range []string{"startup", "resume", "new", "fork", "", "weird"} {
-		for _, held := range []string{"blocked", "completed", "limits_exceeded", "crashed", "waiting_for_input", "notification", "initializing", "thinking"} {
+		for _, held := range []string{"blocked", "idle", "completed", "limits_exceeded", "crashed", "waiting_for_input", "notification", "initializing", "thinking"} {
 			t.Run(source+"/"+held, func(t *testing.T) {
 				sh, hh, sent := hubRecorderSetup(t)
 				switch held {

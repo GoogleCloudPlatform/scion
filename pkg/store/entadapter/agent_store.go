@@ -209,6 +209,10 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 	if a.LastSeen != nil {
 		sa.LastSeen = *a.LastSeen
 	}
+	if a.ActivitySince != nil {
+		since := *a.ActivitySince
+		sa.ActivitySince = &since
+	}
 	if a.LastActivityEvent != nil {
 		sa.LastActivityEvent = *a.LastActivityEvent
 	}
@@ -369,6 +373,7 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) (err error
 		// BeginLaunch/MarkLaunchAccepted/EndLaunch(WithCode)/
 		// ApplyLaunchReport/RunLaunchReaperTick (§3.3).
 		SetLaunchAsyncOptIn(a.LaunchAsyncOptIn)
+	stampActivitySince(create.Mutation(), "", "", time.Now())
 
 	if a.MessageMode != "" {
 		create.SetMessageMode(agent.MessageMode(a.MessageMode))
@@ -912,7 +917,7 @@ func (s *AgentStore) updateAgentObserved(ctx context.Context, obs store.AgentWri
 // is updated to the row's value, so the caller's copy matches what is
 // written.
 func buildAgentUpdate(ctx context.Context, ac *ent.AgentClient, uid uuid.UUID, a *store.Agent, expectedVersion, newVersion int64, now time.Time, lock bool) (*ent.AgentUpdate, error) {
-	appliedRaw, native, keepNative, err := appliedConfigForWrite(ctx, ac, uid, a.AppliedConfig, lock)
+	appliedRaw, native, keepNative, prior, err := appliedConfigForWrite(ctx, ac, uid, a.AppliedConfig, lock)
 	if err != nil {
 		return nil, err
 	}
@@ -1004,6 +1009,15 @@ func buildAgentUpdate(ctx context.Context, ac *ent.AgentClient, uid uuid.UUID, a
 			return nil, err
 		}
 		update.SetOwnerID(ownerUID)
+	}
+
+	// activity_since follows the row's own activity, read with the applied
+	// config above, never the caller's copy (see stampActivitySince). A
+	// status report landing between that read and this CAS (which does not
+	// bump state_version) can leave it one change behind; the whole-row
+	// write overwrites that report's activity in the same way.
+	if prior != nil {
+		stampActivitySince(update.Mutation(), prior.Phase, prior.Activity, now)
 	}
 
 	// T1 async agent create (design §3.3, T3): a write of phase=running
@@ -1961,6 +1975,8 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		}
 	}
 
+	stampActivitySince(upd.Mutation(), current.Phase, current.Activity, now)
+
 	if err := upd.Exec(ctx); err != nil {
 		return mapError(err)
 	}
@@ -2212,7 +2228,7 @@ func (s *AgentStore) UpdateAgentConfig(ctx context.Context, agentID string, expe
 		// Preserves the recorded native Cloud Run decision: the document
 		// carries the row's value and the write applies only while the row
 		// still holds it (appliedConfigForWrite).
-		appliedRaw, native, keepNative, err := appliedConfigForWrite(ctx, ac, uid, applied, s.usesRowLocks())
+		appliedRaw, native, keepNative, _, err := appliedConfigForWrite(ctx, ac, uid, applied, s.usesRowLocks())
 		if err != nil {
 			return 0, err
 		}
@@ -2320,7 +2336,7 @@ func utcExposedPorts(ports []store.ExposedPort) []store.ExposedPort {
 
 // staleOfflineExcluded lists the terminal/sticky activities that must not be
 // overwritten when sweeping stale agents to "offline".
-var staleOfflineExcluded = []string{"completed", "limits_exceeded", "blocked", "offline"}
+var staleOfflineExcluded = []string{"completed", "limits_exceeded", "blocked", "idle", "offline"}
 
 // MarkStaleAgentsOffline marks running agents whose last heartbeat predates
 // threshold as offline, returning the updated records for event publishing.
@@ -2351,13 +2367,15 @@ func (s *AgentStore) MarkStaleAgentsOffline(ctx context.Context, threshold time.
 
 	updated := make([]store.Agent, 0, len(candidates))
 	for _, a := range candidates {
-		if err := tx.Agent.UpdateOneID(a.ID).
+		upd := tx.Agent.UpdateOneID(a.ID).
 			SetActivity("offline").
-			SetUpdated(now).
-			Exec(ctx); err != nil {
+			SetUpdated(now)
+		stampActivitySince(upd.Mutation(), a.Phase, a.Activity, now)
+		if err := upd.Exec(ctx); err != nil {
 			return nil, err
 		}
 		a.Activity = "offline"
+		a.ActivitySince = &now
 		a.Updated = now
 		updated = append(updated, *entAgentToStore(a))
 	}
@@ -2891,7 +2909,7 @@ func (s *AgentStore) setAgentNativeCloudRunOnce(ctx context.Context, uid uuid.UU
 
 // stalledExcluded lists the activities that disqualify a running agent from
 // being marked "stalled" (terminal, already-stalled, or intentionally waiting).
-var stalledExcluded = []string{"completed", "limits_exceeded", "blocked", "stalled", "offline", "waiting_for_input"}
+var stalledExcluded = []string{"completed", "limits_exceeded", "blocked", "idle", "stalled", "offline", "waiting_for_input"}
 
 // MarkStalledAgents marks running agents whose last activity event predates
 // activityThreshold but whose heartbeat is still recent (>= heartbeatRecency)
@@ -2926,15 +2944,17 @@ func (s *AgentStore) MarkStalledAgents(ctx context.Context, activityThreshold, h
 	updated := make([]store.Agent, 0, len(candidates))
 	for _, a := range candidates {
 		prevActivity := a.Activity
-		if err := tx.Agent.UpdateOneID(a.ID).
+		upd := tx.Agent.UpdateOneID(a.ID).
 			SetStalledFromActivity(prevActivity).
 			SetActivity("stalled").
-			SetUpdated(now).
-			Exec(ctx); err != nil {
+			SetUpdated(now)
+		stampActivitySince(upd.Mutation(), a.Phase, prevActivity, now)
+		if err := upd.Exec(ctx); err != nil {
 			return nil, err
 		}
 		a.StalledFromActivity = prevActivity
 		a.Activity = "stalled"
+		a.ActivitySince = &now
 		a.Updated = now
 		updated = append(updated, *entAgentToStore(a))
 	}

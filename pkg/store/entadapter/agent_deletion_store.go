@@ -192,6 +192,11 @@ func applyAgentDeletionFields(ctx context.Context, tx *ent.Tx, row *ent.Agent, s
 	if set.Activity != nil {
 		upd.SetActivity(*set.Activity)
 	}
+	if set.Phase != nil || set.Activity != nil {
+		// A failed delete's rollback restores running and the prior
+		// activity: activity_since follows the row (stampActivitySince).
+		stampActivitySince(upd.Mutation(), row.Phase, row.Activity, now)
+	}
 	if set.DeletedAt != nil {
 		upd.SetDeletedAt(*set.DeletedAt)
 	}
