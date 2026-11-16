@@ -556,7 +556,7 @@ export class ScionScheduleList extends LitElement {
     if (sched.eventType === 'exec') {
       const parsed = parseExecPayload(sched.payload);
       this.editReplaceExec = false;
-      if (parsed.commandRedacted) {
+      if (!execSchedulesEnabled() || parsed.commandRedacted) {
         this.editExecAgentId = '';
         this.editExecCommand = [''];
         this.editExecTimeout = '';
@@ -586,11 +586,13 @@ export class ScionScheduleList extends LitElement {
     e.preventDefault();
     const sched = this.editSchedule;
     if (!sched || this.editLoading) return;
+    if (sched.eventType === 'exec' && !execSchedulesEnabled()) return;
 
     let execFields: ScheduleEditExecFields | undefined;
     if (sched.eventType === 'exec') {
       const parsed = parseExecPayload(sched.payload);
-      if (!parsed.commandRedacted || this.editReplaceExec) {
+      const canReplaceRedacted = sched.statusReason === 'target_deleted' && this.editReplaceExec;
+      if (!parsed.commandRedacted || canReplaceRedacted) {
         const target = this.editExecAgentId.trim();
         const pickedById =
           target === parsed.agentId ||
@@ -1162,6 +1164,13 @@ export class ScionScheduleList extends LitElement {
 
   private renderEditExecSection(sched: Schedule): TemplateResult | typeof nothing {
     if (sched.eventType !== 'exec') return nothing;
+    if (!execSchedulesEnabled()) {
+      return html`
+        <div class="exec-no-output-note exec-edit-disabled-note">
+          Editing is unavailable while exec schedules are disabled.
+        </div>
+      `;
+    }
     const parsed = parseExecPayload(sched.payload);
 
     if (parsed.commandRedacted) {
@@ -1183,43 +1192,47 @@ export class ScionScheduleList extends LitElement {
           </div>
         </div>
 
-        <label class="checkbox-label">
-          <input
-            type="checkbox"
-            class="edit-replace-exec"
-            .checked=${this.editReplaceExec}
-            @change=${(e: Event): void => {
-              this.editReplaceExec = (e.target as HTMLInputElement).checked;
-              if (this.editReplaceExec) {
-                void this.ensureExecAgentsLoaded();
-              }
-            }}
-          />
-          <span class="checkbox-text">
-            <span>Replace target and command</span>
-            <span class="checkbox-description"
-              >Supply a live target agent and replacement argv command.</span
-            >
-          </span>
-        </label>
-
-        ${this.editReplaceExec
+        ${targetDeleted
           ? html`
-              ${renderExecAgentPicker({
-                agents: this.execAgents,
-                loading: this.execAgentsLoading,
-                loadError: this.execAgentsError,
-                value: this.editExecAgentId,
-                onChange: (v) => {
-                  this.editExecAgentId = v;
-                },
-              })}
-              ${renderExecArgvEditor(this.editExecCommand, (updater) => {
-                this.editExecCommand = updater(this.editExecCommand);
-              })}
-              ${renderExecTimeoutInput(this.editExecTimeout, (v) => {
-                this.editExecTimeout = v;
-              })}
+              <label class="checkbox-label">
+                <input
+                  type="checkbox"
+                  class="edit-replace-exec"
+                  .checked=${this.editReplaceExec}
+                  @change=${(e: Event): void => {
+                    this.editReplaceExec = (e.target as HTMLInputElement).checked;
+                    if (this.editReplaceExec) {
+                      void this.ensureExecAgentsLoaded();
+                    }
+                  }}
+                />
+                <span class="checkbox-text">
+                  <span>Replace target and command</span>
+                  <span class="checkbox-description"
+                    >Supply a live target agent and replacement argv command.</span
+                  >
+                </span>
+              </label>
+
+              ${this.editReplaceExec
+                ? html`
+                    ${renderExecAgentPicker({
+                      agents: this.execAgents,
+                      loading: this.execAgentsLoading,
+                      loadError: this.execAgentsError,
+                      value: this.editExecAgentId,
+                      onChange: (v) => {
+                        this.editExecAgentId = v;
+                      },
+                    })}
+                    ${renderExecArgvEditor(this.editExecCommand, (updater) => {
+                      this.editExecCommand = updater(this.editExecCommand);
+                    })}
+                    ${renderExecTimeoutInput(this.editExecTimeout, (v) => {
+                      this.editExecTimeout = v;
+                    })}
+                  `
+                : nothing}
             `
           : nothing}
       `;
@@ -1250,6 +1263,7 @@ export class ScionScheduleList extends LitElement {
   private renderEditDialog(): TemplateResult | typeof nothing {
     const sched = this.editSchedule;
     if (!sched) return nothing;
+    const execDisabled = sched.eventType === 'exec' && !execSchedulesEnabled();
     const prefixed = hasCronZonePrefix(this.editCron.trim());
     return html`
       <sl-dialog
@@ -1267,53 +1281,56 @@ export class ScionScheduleList extends LitElement {
           ${this.editError
             ? html`<div class="dialog-error" role="alert">${this.editError}</div>`
             : nothing}
+          ${execDisabled
+            ? this.renderEditExecSection(sched)
+            : html`
+                <sl-input
+                  label="Name"
+                  .value=${this.editName}
+                  @sl-input=${(e: Event): void => {
+                    this.editName = (e.target as HTMLInputElement).value;
+                  }}
+                  required
+                ></sl-input>
 
-          <sl-input
-            label="Name"
-            .value=${this.editName}
-            @sl-input=${(e: Event): void => {
-              this.editName = (e.target as HTMLInputElement).value;
-            }}
-            required
-          ></sl-input>
+                <sl-input
+                  label="Cron Expression"
+                  class="edit-cron"
+                  help-text=${prefixed
+                    ? 'Zone prefixes (CRON_TZ=, TZ=) are not supported: remove the prefix and set the time zone field.'
+                    : 'Standard 5-field cron: minute hour day month weekday, in the time zone below'}
+                  .value=${this.editCron}
+                  @sl-input=${(e: Event): void => {
+                    this.editCron = (e.target as HTMLInputElement).value;
+                  }}
+                  required
+                ></sl-input>
 
-          <sl-input
-            label="Cron Expression"
-            class="edit-cron"
-            help-text=${prefixed
-              ? 'Zone prefixes (CRON_TZ=, TZ=) are not supported: remove the prefix and set the time zone field.'
-              : 'Standard 5-field cron: minute hour day month weekday, in the time zone below'}
-            .value=${this.editCron}
-            @sl-input=${(e: Event): void => {
-              this.editCron = (e.target as HTMLInputElement).value;
-            }}
-            required
-          ></sl-input>
-
-          ${this.renderTimeZoneInput('edit-time-zone', this.editTimeZone, (v) => {
-            this.editTimeZone = v;
-          })}
-          ${this.renderEditExecSection(sched)}
-          ${sched.status === 'paused'
-            ? html`
-                <label class="checkbox-label">
-                  <input
-                    type="checkbox"
-                    class="edit-resume"
-                    .checked=${this.editResume}
-                    @change=${(e: Event): void => {
-                      this.editResume = (e.target as HTMLInputElement).checked;
-                    }}
-                  />
-                  <span class="checkbox-text">
-                    <span>Resume after saving</span>
-                    <span class="checkbox-description"
-                      >This schedule is paused. Resume it with the new settings.</span
-                    >
-                  </span>
-                </label>
-              `
-            : nothing}
+                ${this.renderTimeZoneInput('edit-time-zone', this.editTimeZone, (v) => {
+                  this.editTimeZone = v;
+                })}
+                ${this.renderEditExecSection(sched)}
+                ${sched.status === 'paused'
+                  ? html`
+                      <label class="checkbox-label">
+                        <input
+                          type="checkbox"
+                          class="edit-resume"
+                          .checked=${this.editResume}
+                          @change=${(e: Event): void => {
+                            this.editResume = (e.target as HTMLInputElement).checked;
+                          }}
+                        />
+                        <span class="checkbox-text">
+                          <span>Resume after saving</span>
+                          <span class="checkbox-description"
+                            >This schedule is paused. Resume it with the new settings.</span
+                          >
+                        </span>
+                      </label>
+                    `
+                  : nothing}
+              `}
         </form>
 
         <sl-button
@@ -1329,6 +1346,7 @@ export class ScionScheduleList extends LitElement {
           variant="primary"
           class="edit-save"
           ?loading=${this.editLoading}
+          ?disabled=${execDisabled}
           @click=${(e: Event): void => void this.handleEdit(e)}
           >Save</sl-button
         >

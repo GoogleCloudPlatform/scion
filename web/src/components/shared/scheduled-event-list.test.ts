@@ -418,6 +418,119 @@ describe('scion-scheduled-event-list pagination (nextCursor)', () => {
   });
 });
 
+// A slower, older load must not overwrite a newer one or keep walking pages (O2).
+describe('scion-scheduled-event-list overlapping loads', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  function jsonResponse(body: unknown, status = 200): Response {
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  function eventRow(id: string, agentName: string): Record<string, unknown> {
+    return {
+      id,
+      projectId: 'p1',
+      eventType: 'message',
+      fireAt: '2026-10-01T15:00:00Z',
+      payload: JSON.stringify({ agentName }),
+      status: 'pending',
+      createdAt: '2026-10-01T11:00:00Z',
+      createdBy: 'u1',
+    };
+  }
+
+  async function settle(el: { updateComplete: Promise<unknown> }): Promise<void> {
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 50));
+    await el.updateComplete;
+  }
+
+  function deferredFetch(): {
+    calls: { method: string; url: string; resolve: (r: Response) => void }[];
+  } {
+    const calls: { method: string; url: string; resolve: (r: Response) => void }[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        (input: RequestInfo | URL, init?: RequestInit) =>
+          new Promise<Response>((resolve) => {
+            const url =
+              typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+            calls.push({ method: init?.method ?? 'GET', url, resolve });
+          })
+      )
+    );
+    return { calls };
+  }
+
+  async function startTwoLoads(): Promise<{
+    el: AnyEl;
+    calls: ReturnType<typeof deferredFetch>['calls'];
+    loadB: Promise<void>;
+  }> {
+    await import('./scheduled-event-list.js');
+    const { calls } = deferredFetch();
+    const el = document.createElement('scion-scheduled-event-list') as AnyEl;
+    el.projectId = 'p1';
+    document.body.appendChild(el); // load A
+    await el.updateComplete;
+    const loadB = el.loadEvents() as Promise<void>;
+    await new Promise((r) => setTimeout(r, 0));
+    expect(calls).toHaveLength(2);
+    return { el, calls, loadB };
+  }
+
+  it('keeps the newer result when the older load resolves last', async () => {
+    const { el, calls, loadB } = await startTwoLoads();
+    calls[1]!.resolve(jsonResponse({ events: [eventRow('b', 'newer-event-agent')] }));
+    await loadB;
+    await settle(el);
+    calls[0]!.resolve(jsonResponse({ events: [eventRow('a', 'older-event-agent')] }));
+    await settle(el);
+
+    const text = el.shadowRoot!.textContent ?? '';
+    expect(text).toContain('newer-event-agent');
+    expect(text).not.toContain('older-event-agent');
+    expect(el.loading).toBe(false);
+  });
+
+  it('ignores an older load that fails after the newer one succeeded', async () => {
+    const { el, calls, loadB } = await startTwoLoads();
+    calls[1]!.resolve(jsonResponse({ events: [eventRow('b', 'newer-event-agent')] }));
+    await loadB;
+    await settle(el);
+    calls[0]!.resolve(jsonResponse({ error: { code: 'internal', message: 'boom' } }, 500));
+    await settle(el);
+
+    expect(el.shadowRoot!.textContent ?? '').toContain('newer-event-agent');
+    expect(el.shadowRoot!.querySelector('.error-details')).toBeNull();
+    expect(el.loading).toBe(false);
+  });
+
+  it('stops fetching further pages of a superseded multi-page load', async () => {
+    const { el, calls, loadB } = await startTwoLoads();
+    calls[1]!.resolve(jsonResponse({ events: [eventRow('b', 'newer-event-agent')] }));
+    await loadB;
+    await settle(el);
+    calls[0]!.resolve(
+      jsonResponse({ events: [eventRow('a', 'older-event-agent')], nextCursor: 'stale-page-2' })
+    );
+    await settle(el);
+
+    expect(calls).toHaveLength(2);
+    expect(el.shadowRoot!.textContent ?? '').toContain('newer-event-agent');
+    expect(el.shadowRoot!.textContent ?? '').not.toContain('older-event-agent');
+    expect(el.shadowRoot!.querySelector('.error-details')).toBeNull();
+  });
+});
+
 describe('scion-scheduled-event-list exec authoring and detail (ptone/scion#7886)', () => {
   afterEach(async () => {
     document.body.innerHTML = '';

@@ -1281,6 +1281,8 @@ describe('scion-schedule-list exec authoring, detail history, and PATCH (ptone/s
   });
 
   it('respects PATCH restrictions: never switches eventType, edits revealed exec fields, allows metadata rename when redacted, surfaces 403, and allows pause/resume/delete', async () => {
+    const { setFeatureFlag } = await import('../../utils/feature-flags.js');
+    setFeatureFlag('hub.exec_schedules', true);
     const calls: { method: string; url: string; body?: unknown }[] = [];
     let nextPatchStatus = 200;
     let nextPatchError = '';
@@ -1311,6 +1313,21 @@ describe('scion-schedule-list exec authoring, detail history, and PATCH (ptone/s
           commandRedacted: true,
           argc: 2,
           commandSha256: 'aa11bb22',
+        }),
+      }),
+      schedule({
+        id: 's-orphan',
+        name: 'exec-orphan',
+        eventType: 'exec',
+        status: 'paused',
+        statusReason: 'target_deleted',
+        payload: JSON.stringify({
+          agentId: 'a-deleted',
+          agentName: 'gone-runner',
+          timeoutSeconds: 60,
+          commandRedacted: true,
+          argc: 2,
+          commandSha256: 'cc33dd44',
         }),
       }),
     ];
@@ -1412,7 +1429,7 @@ describe('scion-schedule-list exec authoring, detail history, and PATCH (ptone/s
     });
     expect(revPatch?.body).not.toHaveProperty('eventType');
 
-    // 2. Edit redacted exec schedule: metadata-only rename succeeds without sending command/agentId
+    // 2. Edit redacted live-target exec schedule: rename-only (no Replace checkbox), succeeds without sending command/agentId
     (
       rowFor(el, 'exec-foreign').querySelector('sl-icon-button[label="Edit"]') as HTMLElement
     ).click();
@@ -1420,6 +1437,9 @@ describe('scion-schedule-list exec authoring, detail history, and PATCH (ptone/s
 
     editDialog = root.querySelector('sl-dialog[label^="Edit Schedule"]')!;
     expect(editDialog.querySelector('sl-select[label="Event Type"]')).toBeNull();
+    expect(editDialog.querySelector('input.edit-replace-exec')).toBeNull();
+    expect(editDialog.querySelector('sl-select.exec-agent-select')).toBeNull();
+    expect(editDialog.querySelector('sl-input.exec-argv-input')).toBeNull();
     const nameInput = editDialog.querySelector('sl-input[label="Name"]') as HTMLInputElement;
     nameInput.value = 'exec-foreign-renamed';
     nameInput.dispatchEvent(new Event('sl-input'));
@@ -1482,11 +1502,11 @@ describe('scion-schedule-list exec authoring, detail history, and PATCH (ptone/s
     (root.querySelector('.error-state sl-button') as HTMLElement).click();
     await settle(el);
 
-    // 5. Retargeting a redacted/paused exec schedule via edit-replace-exec + resume sends replacement agentId, command, and status
+    // 5. Retargeting a target_deleted redacted exec schedule via edit-replace-exec + resume sends replacement agentId, command, and status
     calls.length = 0;
     nextPatchStatus = 200;
     (
-      rowFor(el, 'exec-foreign').querySelector('sl-icon-button[label="Edit"]') as HTMLElement
+      rowFor(el, 'exec-orphan').querySelector('sl-icon-button[label="Edit"]') as HTMLElement
     ).click();
     await settle(el);
 
@@ -1518,12 +1538,177 @@ describe('scion-schedule-list exec authoring, detail history, and PATCH (ptone/s
     await settle(el);
 
     const retargetPatch = calls.find(
-      (c) => c.method === 'PATCH' && c.url.endsWith('/schedules/s-red')
+      (c) => c.method === 'PATCH' && c.url.endsWith('/schedules/s-orphan')
     );
     expect(retargetPatch?.body).toEqual({
       agentId: 'a-3',
       command: ['/usr/bin/true'],
       status: 'active',
     });
+  });
+
+  it('offers rename only (no Replace target and command) on a redacted live-target exec row (O1)', async () => {
+    const ff = await import('../../utils/feature-flags.js');
+    ff.setServerFlags({ 'hub.exec_schedules': true });
+
+    const calls: { method: string; url: string; body?: unknown }[] = [];
+    const liveRedacted = schedule({
+      id: 's-live-red',
+      name: 'live-foreign-exec',
+      eventType: 'exec',
+      status: 'active',
+      payload: JSON.stringify({
+        agentId: 'a-live',
+        agentName: 'live-runner',
+        timeoutSeconds: 60,
+        commandRedacted: true,
+        argc: 3,
+        commandSha256: '11223344',
+      }),
+    });
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const method = init?.method ?? 'GET';
+        const url = requestUrl(input);
+        const body = init?.body ? (JSON.parse(requestBodyText(init.body)) as unknown) : undefined;
+        calls.push({ method, url, body });
+        if (method === 'PATCH') {
+          return Promise.resolve(jsonResponse({ ...liveRedacted, ...(body as object) }));
+        }
+        return Promise.resolve(jsonResponse({ schedules: [liveRedacted] }));
+      })
+    );
+
+    const el = document.createElement('scion-schedule-list') as ListEl;
+    el.projectId = 'proj-1';
+    document.body.appendChild(el);
+    await settle(el);
+    const root = el.shadowRoot as ShadowRoot;
+
+    (
+      rowFor(el, 'live-foreign-exec').querySelector('sl-icon-button[label="Edit"]') as HTMLElement
+    ).click();
+    await settle(el);
+
+    const editDialog = root.querySelector('sl-dialog[label^="Edit Schedule"]')!;
+    expect(editDialog.textContent).toContain('Renaming is allowed');
+    expect(editDialog.querySelector('sl-input[label="Name"]')).not.toBeNull();
+    expect(editDialog.querySelector('input.edit-replace-exec')).toBeNull();
+    expect(editDialog.querySelector('sl-select.exec-agent-select')).toBeNull();
+    expect(editDialog.querySelector('sl-input.exec-argv-input')).toBeNull();
+    expect(editDialog.querySelector('sl-input.exec-timeout-input')).toBeNull();
+    expect(calls.some((c) => c.url.includes('/agents'))).toBe(false);
+  });
+
+  it('disables exec editing (including rename) while hub.exec_schedules is off, while keeping pause and delete working (O3)', async () => {
+    const ff = await import('../../utils/feature-flags.js');
+    ff.setServerFlags({ 'hub.exec_schedules': false });
+
+    const calls: { method: string; url: string; body?: unknown }[] = [];
+    const schedules = [
+      schedule({
+        id: 's-exec-off',
+        name: 'exec-while-off',
+        eventType: 'exec',
+        status: 'active',
+        payload: JSON.stringify({
+          agentId: 'a-1',
+          agentName: 'runner-1',
+          command: ['echo', 'hi'],
+          timeoutSeconds: 60,
+        }),
+      }),
+      schedule({
+        id: 's-exec-red-off',
+        name: 'exec-red-while-off',
+        eventType: 'exec',
+        status: 'paused',
+        statusReason: 'target_deleted',
+        payload: JSON.stringify({
+          agentId: 'a-dead',
+          agentName: 'dead-runner',
+          timeoutSeconds: 60,
+          commandRedacted: true,
+          argc: 1,
+          commandSha256: 'deadbeef',
+        }),
+      }),
+    ];
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const method = init?.method ?? 'GET';
+        const url = requestUrl(input);
+        const u = new URL(url, 'http://x');
+        const body = init?.body ? (JSON.parse(requestBodyText(init.body)) as unknown) : undefined;
+        calls.push({ method, url, body });
+        if (method === 'POST' && u.pathname.endsWith('/pause')) {
+          return Promise.resolve(jsonResponse({ status: 'paused' }));
+        }
+        if (method === 'DELETE') {
+          return Promise.resolve(new Response(null, { status: 204 }));
+        }
+        return Promise.resolve(jsonResponse({ schedules }));
+      })
+    );
+
+    const el = document.createElement('scion-schedule-list') as ListEl;
+    el.projectId = 'proj-1';
+    document.body.appendChild(el);
+    await settle(el);
+    const root = el.shadowRoot as ShadowRoot;
+
+    // Open Edit on both revealed and redacted exec rows with flag off
+    for (const rowName of ['exec-while-off', 'exec-red-while-off']) {
+      (rowFor(el, rowName).querySelector('sl-icon-button[label="Edit"]') as HTMLElement).click();
+      await settle(el);
+
+      const editDialog = root.querySelector('sl-dialog[label^="Edit Schedule"]')!;
+      expect(editDialog.querySelector('.exec-edit-disabled-note')?.textContent).toContain(
+        'Editing is unavailable while exec schedules are disabled.'
+      );
+      expect(editDialog.querySelector('sl-input[label="Name"]')).toBeNull();
+      expect(editDialog.querySelector('sl-input.edit-cron')).toBeNull();
+      expect(editDialog.querySelector('sl-input.edit-time-zone')).toBeNull();
+      expect(editDialog.querySelector('sl-select.exec-agent-select')).toBeNull();
+      expect(editDialog.querySelector('sl-input.exec-argv-input')).toBeNull();
+      expect(editDialog.querySelector('sl-input.exec-timeout-input')).toBeNull();
+      expect(editDialog.querySelector('input.edit-replace-exec')).toBeNull();
+      expect(editDialog.querySelector('input.edit-resume')).toBeNull();
+
+      const saveBtn = editDialog.querySelector('sl-button.edit-save') as HTMLElement;
+      expect(saveBtn.hasAttribute('disabled')).toBe(true);
+      editDialog
+        .querySelector('form.edit-form')!
+        .dispatchEvent(new Event('submit', { cancelable: true }));
+      await settle(el);
+      expect(calls.some((c) => c.method === 'PATCH')).toBe(false);
+      expect(calls.some((c) => c.url.includes('/agents'))).toBe(false);
+
+      (editDialog.querySelector('sl-button.edit-cancel') as HTMLElement).click();
+      await settle(el);
+    }
+
+    // Pause and Delete keep working on exec rows while flag is off
+    (
+      rowFor(el, 'exec-while-off').querySelector('sl-icon-button[label="Pause"]') as HTMLElement
+    ).click();
+    await settle(el);
+    expect(calls.some((c) => c.method === 'POST' && c.url.endsWith('/s-exec-off/pause'))).toBe(
+      true
+    );
+
+    (
+      rowFor(el, 'exec-red-while-off').querySelector(
+        'sl-icon-button[label="Delete"]'
+      ) as HTMLElement
+    ).click();
+    await settle(el);
+    expect(calls.some((c) => c.method === 'DELETE' && c.url.endsWith('/s-exec-red-off'))).toBe(
+      true
+    );
   });
 });
