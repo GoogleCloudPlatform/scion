@@ -308,6 +308,7 @@ func (m *mockProdHubClient) AgentDelegations() hubclient.AgentDelegationService 
 func (m *mockProdHubClient) Decisions() hubclient.DecisionService                     { return nil }
 func (m *mockProdHubClient) ProjectDecisions(string) hubclient.ProjectDecisionService { return nil }
 func (m *mockProdHubClient) MyDecisions() hubclient.MyDecisionService                 { return nil }
+func (m *mockProdHubClient) SystemOne() hubclient.SystemOneService                    { return nil }
 func (m *mockProdHubClient) Health(ctx context.Context) (*hubclient.HealthResponse, error) {
 	return &hubclient.HealthResponse{}, nil
 }
