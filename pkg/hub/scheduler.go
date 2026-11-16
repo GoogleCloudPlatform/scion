@@ -167,8 +167,10 @@ type Scheduler struct {
 	// srv is the owning Hub server when wired (nil in standalone scheduler tests).
 	srv *Server
 
-	// Fire-core actions for one-shot events
-	actions actionRegistry
+	// legacyHandlers backs standalone NewScheduler unit tests where srv is nil.
+	// When srv is wired, Server.actions is the single action registry.
+	// Removed in PR 2 (ptone/scion#8029).
+	legacyHandlers map[string]EventHandler
 
 	// Tick counter (monotonically increasing). Written by the ticker loop and
 	// read concurrently by handler goroutines and Status(), so it is atomic.
@@ -263,25 +265,20 @@ func NewScheduler(st store.Store, log *slog.Logger, opts ...SchedulerOption) *Sc
 	return s
 }
 
-// RegisterAction registers a FireAction for one-shot scheduled events.
-func (s *Scheduler) RegisterAction(a FireAction) {
-	s.actions.Register(a)
-}
-
-// LookupAction returns the FireAction registered on s for actionType.
-func (s *Scheduler) LookupAction(actionType string) (FireAction, bool) {
-	return s.actions.Lookup(actionType)
-}
-
 func (s *Scheduler) fireAction(ctx context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
-	action, ok := s.LookupAction(req.ActionType)
-	if !ok {
-		return hubfire.FireOutcome{
-			Status: hubfire.FireStatusFailed,
-			Error:  unknownActionTypeError(req.ActionType),
-		}
+	if s.srv != nil {
+		return s.srv.fireAction(ctx, req)
 	}
-	return s.srv.fireActionWith(ctx, req, action)
+	if h, ok := s.legacyHandlers[req.ActionType]; ok {
+		if req.Executor.Kind != "" || req.Executor.ID != "" {
+			ctx = ContextWithExecutor(ctx, req.Executor)
+		}
+		return (&legacyAction{actionType: req.ActionType, handler: h}).run(ctx, req)
+	}
+	return hubfire.FireOutcome{
+		Status: hubfire.FireStatusFailed,
+		Error:  unknownActionTypeError(req.ActionType),
+	}
 }
 
 // RegisterRecurring registers a recurring handler that runs every intervalMinutes
@@ -910,7 +907,15 @@ func (s *Scheduler) Status() SchedulerStatus {
 		}
 	}
 
-	eventHandlers := s.actions.Types()
+	var eventHandlers []string
+	if s.srv != nil {
+		eventHandlers = s.srv.actions.Types()
+	} else {
+		eventHandlers = make([]string, 0, len(s.legacyHandlers))
+		for k := range s.legacyHandlers {
+			eventHandlers = append(eventHandlers, k)
+		}
+	}
 
 	s.mu.Lock()
 	activeTimers := len(s.timers)

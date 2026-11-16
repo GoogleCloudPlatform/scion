@@ -7565,7 +7565,6 @@ func (s *Server) registerSchedulerHandlers() {
 	// applied live, and the handler skips the agent purge while it is 0.
 	// The scheduled-event purge inside it always runs.
 	s.scheduler.RegisterRecurringSingleton("soft-delete-purge", 60, store.LockSoftDeletePurge, s.purgeHandler())
-	s.registerSchedulerActions()
 	s.scheduler.RegisterRecurringSingleton("scheduled-exec-run-sweep", 1, store.LockScheduledExecRunSweep, s.scheduledExecRunSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("schedule-evaluator", 1, store.LockScheduleEvaluator, s.evaluateSchedulesHandler())
 	s.scheduler.RegisterRecurringSingleton("broker-heartbeat-timeout", 5, store.LockBrokerHeartbeatTimeout, s.brokerHeartbeatTimeoutHandler())

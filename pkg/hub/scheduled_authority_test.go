@@ -1026,18 +1026,18 @@ func (s userLookupErrStore) GetUser(context.Context, string) (*store.User, error
 	return nil, s.err
 }
 
-// resolveScheduledUser checks the principal through the shared account
-// check: a users-row lookup error comes back as checkUserAccount's lookup
-// fault (keeping the store error), not as a refusal of the principal.
+// resolveFireUser checks the principal through the shared account check: a
+// users-row lookup error comes back as checkUserAccount's lookup fault
+// (keeping the store error), not as a refusal of the principal.
 func TestSchedUserLookupFaultUsesAccountCheck(t *testing.T) {
 	storeErr := errors.New("users table unavailable")
 	srv := &Server{store: userLookupErrStore{err: storeErr}}
-	auth := &ScheduledAuthority{
+	auth := &FireAuthority{
 		PrincipalKind:  store.DelegationPrincipalUser,
 		PrincipalID:    "u1",
 		CredentialKind: store.InitiatorCredentialKindSession,
 	}
-	identity, err := srv.resolveScheduledUser(context.Background(), auth, "p1", "agent.create")
+	identity, err := srv.resolveFireUser(context.Background(), auth, "p1", "agent.create")
 	require.Error(t, err)
 	assert.Nil(t, identity)
 	assert.ErrorIs(t, err, storeErr)

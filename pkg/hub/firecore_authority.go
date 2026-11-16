@@ -53,6 +53,7 @@ type FireAuthority struct {
 	CredentialID   string
 	Ceiling        store.EffectCeiling
 	Revision       int
+	ProjectID      string
 	Recorded       hubfire.RecordedAuthority
 
 	// user is the principal's user row (user principals), loaded at fire
@@ -101,6 +102,7 @@ func (s *Server) resolveRecordedAuthority(ctx context.Context, rec hubfire.Recor
 		CredentialID:   initiator.CredentialID,
 		Ceiling:        rec.Ceiling,
 		Revision:       rec.Attribution.AuthorizationRevision,
+		ProjectID:      projectID,
 		Recorded:       rec,
 		historyCreator: fireHistoryCreatorFromContext(ctx),
 	}
@@ -275,8 +277,8 @@ func (s *Server) fireStanding(ctx context.Context, auth FireAuthority, target *s
 	refuse := func(cause string, err error) error {
 		slog.Warn("Scheduler: scheduled event refused at fire time",
 			"eventID", auth.Recorded.FireID, "definitionKind", auth.Recorded.DefinitionKind,
-			"definitionID", auth.Recorded.DefinitionID, "creator", auth.historyCreator,
-			"cause", cause, "error", err)
+			"definitionID", auth.Recorded.DefinitionID, "projectID", auth.ProjectID,
+			"creator", auth.historyCreator, "cause", cause, "error", err)
 		if target != nil {
 			return errScheduledMessageRefused
 		}

@@ -28,11 +28,19 @@ import (
 // Removed in PR 2 (ptone/scion#8029).
 type EventHandler func(ctx context.Context, evt store.ScheduledEvent) error
 
-// RegisterEventHandler registers a legacy EventHandler on s via legacyAction so
+// RegisterEventHandler registers a legacy EventHandler on Server.actions when
+// s is wired to a Server (or on s's standalone test map when s.srv is nil) so
 // existing scheduler test suites remain unchanged in Phase 1a.
 // Removed in PR 2 (ptone/scion#8029).
 func (s *Scheduler) RegisterEventHandler(eventType string, handler EventHandler) {
-	s.RegisterAction(newLegacyAction(eventType, handler))
+	if s.srv != nil {
+		s.srv.RegisterAction(newLegacyAction(eventType, handler))
+		return
+	}
+	if s.legacyHandlers == nil {
+		s.legacyHandlers = make(map[string]EventHandler)
+	}
+	s.legacyHandlers[eventType] = handler
 }
 
 type legacyScheduledEventKey struct{}
@@ -68,6 +76,7 @@ func scheduledRecordedAuthority(evt store.ScheduledEvent) hubfire.RecordedAuthor
 // Removed in PR 2 (ptone/scion#8029).
 func scheduledStandingAuthority(evt store.ScheduledEvent) FireAuthority {
 	return FireAuthority{
+		ProjectID:      evt.ProjectID,
 		Recorded:       scheduledRecordedAuthority(evt),
 		historyCreator: evt.CreatedBy,
 	}
@@ -187,13 +196,6 @@ func (s *Server) registerFireActions() {
 	s.RegisterAction(newLegacyAction("message", s.messageEventHandler()))
 	s.RegisterAction(newLegacyAction("dispatch_agent", s.dispatchAgentEventHandler()))
 	s.RegisterAction(newLegacyAction(scheduledEventTypeExec, s.execEventHandler()))
-}
-
-func (s *Server) registerSchedulerActions() {
-	s.scheduler.srv = s
-	s.scheduler.RegisterAction(newLegacyAction("message", s.messageEventHandler()))
-	s.scheduler.RegisterAction(newLegacyAction("dispatch_agent", s.dispatchAgentEventHandler()))
-	s.scheduler.RegisterAction(newLegacyAction(scheduledEventTypeExec, s.execEventHandler()))
 }
 
 func scheduledFireRequest(srv *Server, evt store.ScheduledEvent, exec ExecutorContext, run *wakeFireRun) hubfire.FireRequest {

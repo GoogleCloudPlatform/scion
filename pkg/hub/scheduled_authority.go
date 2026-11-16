@@ -153,12 +153,6 @@ func (s *Server) resolveScheduledAuthority(ctx context.Context, evt store.Schedu
 	return s.resolveRecordedAuthority(ctx, scheduledRecordedAuthority(evt), evt.ProjectID, scheduledEventPermissions[evt.EventType])
 }
 
-// revisionCeilingConsistent forwards to fireRevisionCeilingConsistent.
-// Removed in PR 2 (ptone/scion#8029).
-func revisionCeilingConsistent(credentialKind string, c store.EffectCeiling) error {
-	return fireRevisionCeilingConsistent(credentialKind, c)
-}
-
 // scheduledUserAccount applies the account-status rule (checkUserAccount)
 // to a scheduled revision's user principal and returns its active users
 // row. A lookup fault is returned as a fault (not errScheduledAuthorityDenied).
@@ -179,18 +173,6 @@ func scheduledUserAccount(ctx context.Context, users userRowReader, principalID 
 	default:
 		return nil, fmt.Errorf("%w: %s", errScheduledAuthorityDenied, reasonPrincipalInactive)
 	}
-}
-
-// resolveScheduledUser forwards to resolveFireUser.
-// Removed in PR 2 (ptone/scion#8029).
-func (s *Server) resolveScheduledUser(ctx context.Context, auth *ScheduledAuthority, projectID, permissionID string) (Identity, error) {
-	return s.resolveFireUser(ctx, auth, projectID, permissionID)
-}
-
-// resolveScheduledAgent forwards to resolveFireAgent.
-// Removed in PR 2 (ptone/scion#8029).
-func (s *Server) resolveScheduledAgent(ctx context.Context, auth *ScheduledAuthority, projectID string) (Identity, error) {
-	return s.resolveFireAgent(ctx, auth, projectID)
 }
 
 // scheduledEffectCeiling returns the ceiling and provenance to freeze for a

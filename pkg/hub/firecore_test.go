@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"go/ast"
@@ -449,7 +450,7 @@ func TestFireCoreTracker(t *testing.T) {
 	})
 }
 
-func TestFireCoreNeverCallsSourceEffectCeiling(t *testing.T) {
+func TestFireCoreContainment(t *testing.T) {
 	t.Parallel()
 
 	coreFiles := map[string][]string{
@@ -504,6 +505,191 @@ func TestFireCoreNeverCallsSourceEffectCeiling(t *testing.T) {
 	}
 }
 
+func TestScheduledFireError(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name         string
+		eventType    string
+		out          hubfire.FireOutcome
+		wantNil      bool
+		wantRecorded bool
+		wantSkip     bool
+		wantText     string
+	}{
+		{
+			name:         "Detached fired",
+			eventType:    "exec",
+			out:          hubfire.FireOutcome{Status: hubfire.FireStatusFired, Detached: true},
+			wantRecorded: true,
+		},
+		{
+			name:         "Detached skipped",
+			eventType:    "exec",
+			out:          hubfire.FireOutcome{Status: hubfire.FireStatusSkipped, Error: "capacity", Detached: true},
+			wantRecorded: true,
+			wantSkip:     true,
+			wantText:     "capacity",
+		},
+		{
+			name:         "Detached failed",
+			eventType:    "exec",
+			out:          hubfire.FireOutcome{Status: hubfire.FireStatusFailed, Error: "dispatch failed", Detached: true},
+			wantRecorded: true,
+			wantText:     "dispatch failed",
+		},
+		{
+			name:         "Detached refused",
+			eventType:    "exec",
+			out:          hubfire.FireOutcome{Status: hubfire.FireStatusRefused, Error: "exec refused", Detached: true},
+			wantRecorded: true,
+			wantText:     "exec refused",
+		},
+		{
+			name:      "not-Detached fired",
+			eventType: "message",
+			out:       hubfire.FireOutcome{Status: hubfire.FireStatusFired},
+			wantNil:   true,
+		},
+		{
+			name:      "not-Detached skipped",
+			eventType: "exec",
+			out:       hubfire.FireOutcome{Status: hubfire.FireStatusSkipped, Error: "not running"},
+			wantSkip:  true,
+			wantText:  "not running",
+		},
+		{
+			name:      "not-Detached failed",
+			eventType: "message",
+			out:       hubfire.FireOutcome{Status: hubfire.FireStatusFailed, Error: "boom"},
+			wantText:  "boom",
+		},
+		{
+			name:      "not-Detached refused",
+			eventType: "message",
+			out:       hubfire.FireOutcome{Status: hubfire.FireStatusRefused, Error: errScheduledMessageRefused.Error()},
+			wantText:  errScheduledMessageRefused.Error(),
+		},
+		{
+			name:      "not-Detached unknown action type maps to unknown event type",
+			eventType: "mystery",
+			out:       hubfire.FireOutcome{Status: hubfire.FireStatusFailed, Error: unknownActionTypeError("mystery")},
+			wantText:  "unknown event type: mystery",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := scheduledFireError(tc.eventType, tc.out)
+			if tc.wantNil {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			recErr, recorded := asOutcomeRecorded(err)
+			assert.Equal(t, tc.wantRecorded, recorded)
+			inner := err
+			if recorded {
+				if tc.wantText == "" && !tc.wantSkip {
+					assert.NoError(t, recErr)
+					return
+				}
+				require.Error(t, recErr)
+				inner = recErr
+			}
+			reason, skipped := asScheduledSkip(inner)
+			assert.Equal(t, tc.wantSkip, skipped)
+			if tc.wantSkip {
+				assert.Equal(t, tc.wantText, reason)
+			} else {
+				assert.Equal(t, tc.wantText, inner.Error())
+			}
+		})
+	}
+}
+
+type fireCoreLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *fireCoreLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *fireCoreLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+type heldAgentMockStore struct {
+	*mockScheduledEventStore
+	heldID string
+}
+
+func (s *heldAgentMockStore) HasActiveAgentHold(_ context.Context, agentID string) (bool, error) {
+	return agentID == s.heldID, nil
+}
+
+func TestFireCoreRefusalLogging(t *testing.T) {
+	// Not t.Parallel: captures process-default slog logger.
+	const projectID = "project-refusal-log"
+
+	logBuf := &fireCoreLogBuffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	ms := newMockStore()
+	hs := &heldAgentMockStore{mockScheduledEventStore: ms, heldID: "agent-held"}
+	srv := newEventHandlerTestServer(hs)
+	srv.RegisterAction(&fakeFireAction{
+		actionType: "custom_hook",
+		permission: "agent.create",
+	})
+
+	// 1. logFireAuthorityRefusal logs neutral "deferred fire authority denied"
+	// with actionType and permission fields.
+	out := srv.fireAction(context.Background(), hubfire.FireRequest{
+		ProjectID:  projectID,
+		Authority:  hubfire.RecordedAuthority{DefinitionKind: hubfire.DefinitionKindTrigger, DefinitionID: "trig-9", FireID: "fire-9"},
+		ActionType: "custom_hook",
+	})
+	assert.Equal(t, hubfire.FireStatusRefused, out.Status)
+	logs := logBuf.String()
+	assert.Contains(t, logs, "deferred fire authority denied")
+	assert.Contains(t, logs, "actionType=custom_hook")
+	assert.Contains(t, logs, "permission=agent.create")
+	assert.Contains(t, logs, "projectID="+projectID)
+
+	// 2. fireStanding preserves projectID in refusal logs on both the core
+	// FireAuthority path and the scheduledFireStanding shim path.
+	rec := newFireCoreTestAuthority(ms, projectID)
+	auth, _, err := srv.resolveRecordedAuthority(context.Background(), rec, projectID, scheduledMessagePermission)
+	require.NoError(t, err)
+	logBuf.mu.Lock()
+	logBuf.buf.Reset()
+	logBuf.mu.Unlock()
+
+	err = srv.fireStanding(context.Background(), auth, &store.Agent{ID: "agent-held", ProjectID: projectID})
+	require.ErrorIs(t, err, errScheduledMessageRefused)
+	assert.Contains(t, logBuf.String(), "projectID="+projectID)
+
+	logBuf.mu.Lock()
+	logBuf.buf.Reset()
+	logBuf.mu.Unlock()
+	err = srv.scheduledFireStanding(context.Background(), store.ScheduledEvent{
+		ID:        "evt-shim-1",
+		ProjectID: "project-shim-log",
+		EventType: "message",
+	}, &store.Agent{ID: "agent-held", ProjectID: "project-shim-log"})
+	require.ErrorIs(t, err, errScheduledMessageRefused)
+	assert.Contains(t, logBuf.String(), "projectID=project-shim-log")
+}
+
 type fireCoreScheduleStore struct {
 	*mockScheduledEventStore
 	afterRunCalls int
@@ -523,7 +709,7 @@ func TestFireCoreSchedulerAdapters(t *testing.T) {
 
 	const projectID = "project-sched-adapter"
 
-	t.Run("one-shot fireEvent dispatches FireAction outcomes AfterRecord and Detached", func(t *testing.T) {
+	t.Run("one-shot fireEvent dispatches Server.actions outcomes AfterRecord and Detached", func(t *testing.T) {
 		ms := newMockStore()
 		srv := newEventHandlerTestServer(ms)
 		sched := NewScheduler(ms, slog.Default())
@@ -541,7 +727,7 @@ func TestFireCoreSchedulerAdapters(t *testing.T) {
 		}
 
 		statusAtAfter := ""
-		sched.RegisterAction(&fakeFireAction{
+		srv.RegisterAction(&fakeFireAction{
 			actionType: "act_fired",
 			permission: scheduledMessagePermission,
 			fireFn: func(ctx context.Context, req hubfire.FireRequest, _ FireAuthorized) (hubfire.FireOutcome, error) {
@@ -557,22 +743,29 @@ func TestFireCoreSchedulerAdapters(t *testing.T) {
 				}, nil
 			},
 		})
-		sched.RegisterAction(&fakeFireAction{
+		srv.RegisterAction(&fakeFireAction{
 			actionType: "act_skipped",
 			permission: scheduledMessagePermission,
 			fireFn: func(context.Context, hubfire.FireRequest, FireAuthorized) (hubfire.FireOutcome, error) {
 				return hubfire.FireOutcome{Status: hubfire.FireStatusSkipped, Error: "window missed"}, nil
 			},
 		})
-		sched.RegisterAction(&fakeFireAction{
+		srv.RegisterAction(&fakeFireAction{
 			actionType: "act_detached",
 			permission: scheduledMessagePermission,
 			fireFn: func(context.Context, hubfire.FireRequest, FireAuthorized) (hubfire.FireOutcome, error) {
 				return hubfire.FireOutcome{Status: hubfire.FireStatusFired, Detached: true}, nil
 			},
 		})
+		srv.RegisterAction(&fakeFireAction{
+			actionType: "act_detached_skip",
+			permission: scheduledMessagePermission,
+			fireFn: func(context.Context, hubfire.FireRequest, FireAuthorized) (hubfire.FireOutcome, error) {
+				return hubfire.FireOutcome{Status: hubfire.FireStatusSkipped, Error: "cap", Detached: true}, nil
+			},
+		})
 
-		assert.ElementsMatch(t, []string{"act_fired", "act_skipped", "act_detached"}, sched.Status().EventHandlers)
+		assert.ElementsMatch(t, []string{"act_fired", "act_skipped", "act_detached", "act_detached_skip"}, sched.Status().EventHandlers)
 
 		firedEvt := baseEvt
 		firedEvt.ID = "evt-fired"
@@ -598,6 +791,17 @@ func TestFireCoreSchedulerAdapters(t *testing.T) {
 		sched.fireEvent(context.Background(), detEvt, false)
 		assert.Equal(t, store.ScheduledEventPending, ms.getEvent("evt-detached").Status, "Detached leaves recording to tracker")
 
+		detSkipEvt := baseEvt
+		detSkipEvt.ID = "evt-detached-skip"
+		detSkipEvt.EventType = "act_detached_skip"
+		detSkipEvt.Status = store.ScheduledEventFailed
+		detSkipEvt.Error = "sweeper recorded failure"
+		require.NoError(t, ms.CreateScheduledEvent(context.Background(), &detSkipEvt))
+		sched.fireEvent(context.Background(), detSkipEvt, false)
+		gotDetSkip := ms.getEvent("evt-detached-skip")
+		assert.Equal(t, store.ScheduledEventFailed, gotDetSkip.Status, "Detached skip must not overwrite handler/sweeper outcome")
+		assert.Equal(t, "sweeper recorded failure", gotDetSkip.Error)
+
 		unkEvt := baseEvt
 		unkEvt.ID = "evt-unknown"
 		unkEvt.EventType = "no_such_type"
@@ -606,6 +810,55 @@ func TestFireCoreSchedulerAdapters(t *testing.T) {
 		gotUnk := ms.getEvent("evt-unknown")
 		assert.Equal(t, store.ScheduledEventFailed, gotUnk.Status)
 		assert.Equal(t, "unknown event type: no_such_type", gotUnk.Error)
+	})
+
+	t.Run("single registry: Server.RegisterAction overrides default legacy registration for scheduler and evaluator", func(t *testing.T) {
+		ms := newMockStore()
+		fs := &fireCoreScheduleStore{mockScheduledEventStore: ms}
+		srv := newEventHandlerTestServer(fs)
+		srv.registerFireActions()
+		sched := NewScheduler(fs, slog.Default())
+		sched.srv = srv
+		srv.scheduler = sched
+		srv.registerSchedulerHandlers()
+
+		// Override "message" on Server ONLY; no scheduler registration can shadow it.
+		var serverActionCalls atomic.Int32
+		srv.RegisterAction(&fakeFireAction{
+			actionType: "message",
+			permission: scheduledMessagePermission,
+			fireFn: func(context.Context, hubfire.FireRequest, FireAuthorized) (hubfire.FireOutcome, error) {
+				serverActionCalls.Add(1)
+				return hubfire.FireOutcome{Status: hubfire.FireStatusFired}, nil
+			},
+		})
+
+		rec := newFireCoreTestAuthority(ms, projectID)
+		now := time.Now().UTC()
+		evt1 := store.ScheduledEvent{
+			ID:                   "single-reg-oneshot",
+			ProjectID:            projectID,
+			EventType:            "message",
+			FireAt:               now,
+			Payload:              `{"agentName":"worker","message":"hi"}`,
+			Status:               store.ScheduledEventPending,
+			InitiatorAttribution: rec.Attribution,
+			AuthorityCeiling:     rec.Ceiling,
+		}
+		require.NoError(t, ms.CreateScheduledEvent(context.Background(), &evt1))
+		sched.fireEvent(context.Background(), evt1, false)
+		assert.Equal(t, int32(1), serverActionCalls.Load(), "one-shot scheduler fired Server-registered action")
+		assert.Equal(t, store.ScheduledEventFired, ms.getEvent("single-reg-oneshot").Status)
+
+		evt2 := evt1
+		evt2.ID = "single-reg-recurring"
+		evt2.ScheduleID = "sched-single-reg"
+		require.NoError(t, ms.CreateScheduledEvent(context.Background(), &evt2))
+		srv.runScheduleFire(context.Background(), slog.Default(),
+			store.Schedule{ID: "sched-single-reg", ProjectID: projectID, EventType: "message"},
+			evt2, now, now.Add(time.Hour), nil)
+		assert.Equal(t, int32(2), serverActionCalls.Load(), "recurring evaluator fired Server-registered action")
+		assert.Equal(t, store.ScheduledEventFired, ms.getEvent("single-reg-recurring").Status)
 	})
 
 	t.Run("recurring runScheduleFire dispatches FireAction outcomes AfterRecord and Detached", func(t *testing.T) {

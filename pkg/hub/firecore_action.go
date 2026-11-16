@@ -58,13 +58,6 @@ type FirePayloadValidator interface {
 	ValidatePayload(req hubfire.FireRequest) error
 }
 
-// fireServerAction is implemented by server-owned FireActions so standalone
-// Scheduler unit tests without Scheduler.srv set still resolve authority and
-// shutdown tracking against the action's Server.
-type fireServerAction interface {
-	server() *Server
-}
-
 type actionRegistry struct {
 	mu      sync.RWMutex
 	actions map[string]FireAction
@@ -104,21 +97,10 @@ func (s *Server) RegisterAction(a FireAction) {
 	s.actions.Register(a)
 }
 
-// LookupAction returns the FireAction registered for actionType. When s has a
-// scheduler with an explicit action registration (including test overrides via
-// RegisterEventHandler), that registration takes precedence over the server
-// defaults.
+// LookupAction returns the FireAction registered on s for actionType.
 func (s *Server) LookupAction(actionType string) (FireAction, bool) {
 	if s == nil {
 		return nil, false
-	}
-	s.mu.RLock()
-	sched := s.scheduler
-	s.mu.RUnlock()
-	if sched != nil {
-		if a, ok := sched.LookupAction(actionType); ok {
-			return a, true
-		}
 	}
 	return s.actions.Lookup(actionType)
 }
@@ -137,12 +119,14 @@ func fireAuthorityRefusalText(actionType string, err error) string {
 	return actionType + " refused"
 }
 
-func (s *Server) logFireAuthorityRefusal(req hubfire.FireRequest, err error) {
+func (s *Server) logFireAuthorityRefusal(req hubfire.FireRequest, permissionID string, err error) {
 	var scheduleID string
 	if req.Authority.DefinitionKind == hubfire.DefinitionKindSchedule {
 		scheduleID = req.Authority.DefinitionID
 	}
-	slog.Warn("Scheduler: scheduled message authority denied at fire time",
+	slog.Warn("deferred fire authority denied",
+		"actionType", req.ActionType,
+		"permission", permissionID,
 		"eventID", req.Authority.FireID,
 		"scheduleID", scheduleID,
 		"definitionKind", req.Authority.DefinitionKind,
@@ -181,11 +165,6 @@ func (s *Server) fireActionWith(ctx context.Context, req hubfire.FireRequest, ac
 		}
 	}
 	if s == nil {
-		if sa, ok := action.(fireServerAction); ok {
-			s = sa.server()
-		}
-	}
-	if s == nil {
 		return hubfire.FireOutcome{
 			Status: hubfire.FireStatusFailed,
 			Error:  "fire action: server not configured",
@@ -196,9 +175,10 @@ func (s *Server) fireActionWith(ctx context.Context, req hubfire.FireRequest, ac
 	} else if st, ok := req.Tracked.(*scheduledFireTracker); ok && st.srv == nil {
 		st.srv = s
 	}
-	auth, identity, err := s.resolveRecordedAuthority(ctx, req.Authority, req.ProjectID, action.Permission())
+	permissionID := action.Permission()
+	auth, identity, err := s.resolveRecordedAuthority(ctx, req.Authority, req.ProjectID, permissionID)
 	if err != nil {
-		s.logFireAuthorityRefusal(req, err)
+		s.logFireAuthorityRefusal(req, permissionID, err)
 		return hubfire.FireOutcome{
 			Status: hubfire.FireStatusRefused,
 			Error:  fireAuthorityRefusalText(req.ActionType, err),
