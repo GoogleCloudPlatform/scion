@@ -136,6 +136,12 @@ func commandRequiresProject(cmd *cobra.Command) bool {
 	if isAllProjectsDecisionsList(cmd) {
 		return false
 	}
+	// 'notifications subscriptions' reads Hub subscriptions (optionally across
+	// all projects or for a --project Hub reference) and needs no local project
+	// (ptone/scion#8127).
+	if isNotificationsSubscriptionsCommand(cmd) {
+		return false
+	}
 	// design Amendment A26.2 O1: same reasoning as checkAgentContainerContext
 	// — --handoff-template never touches the project or the Hub.
 	if isReincarnateHandoffTemplateInvocation(cmd) {
@@ -183,6 +189,10 @@ func isAllProjectsDecisionsListArgs(target *cobra.Command, args []string) bool {
 
 func isDecisionsListCommand(cmd *cobra.Command) bool {
 	return cmd != nil && cmd.Name() == "list" && cmd.Parent() != nil && cmd.Parent().Name() == "decisions" && isTopLevel(cmd.Parent())
+}
+
+func isNotificationsSubscriptionsCommand(cmd *cobra.Command) bool {
+	return cmd != nil && cmd.Name() == "subscriptions" && cmd.Parent() != nil && cmd.Parent().Name() == "notifications" && isTopLevel(cmd.Parent())
 }
 
 // isGlobalTemplatesUpdate reports whether cmd is 'templates update' with

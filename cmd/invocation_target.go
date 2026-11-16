@@ -220,10 +220,11 @@ var contextReadOnlyCommands = map[string]bool{
 // commands do, although they need no local project. expose and unexpose
 // act as the calling agent and stay out.
 var contextProjectCommands = map[string]bool{
-	"scion tunnel":     true,
-	"scion ssh":        true,
-	"scion ssh-config": true,
-	"scion vscode":     true,
+	"scion tunnel":                      true,
+	"scion ssh":                         true,
+	"scion ssh-config":                  true,
+	"scion vscode":                      true,
+	"scion notifications subscriptions": true,
 }
 
 // importGlobalHubSettings turns on the one-time imports of hub settings

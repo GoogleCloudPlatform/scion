@@ -1606,8 +1606,8 @@ Manages notifications and notification subscriptions.
 - `scion notifications update <id>`: Update a subscription's trigger activities.
     - Flags:
         - `--triggers <triggers>`: Trigger activities to update (required). This flag is **repeatable** and also accepts a **comma-separated list** of triggers (e.g., `--triggers COMPLETED,WAITING_FOR_INPUT --triggers LIMITS_EXCEEDED`). Strict empty-value validation is enforced.
-- `scion notifications subscriptions`: List your active notification subscriptions.
-    - Flags: `--project <name>` (filter by project), `--json` (format output as JSON).
+- `scion notifications subscriptions` (alias `subs`): List your active notification subscriptions. Runs inside or outside a local `.scion` directory. By default, filters to the active Hub project resolved in standard CLI order: `--project`/`-g` (a linked local project path, or a Hub project ID, slug, name, or git URL) or `--global`, then the agent container environment (`SCION_PROJECT_ID`), then a linked directory project's Hub project ID, then the `scion use` context project (outside a local project directory), then `~/.scion` if linked to a Hub project. An unlinked directory checkout is never sent as a Hub project filter; instead, all accessible subscriptions are listed with a note on stderr in text mode. When a project filter returns no subscriptions, the output names the filtered project and suggests `--all`.
+    - Flags: `--all`, `-a` (list subscriptions across all projects; cannot be combined with `--project`/`-g` or `--global`), `--project`, `-g <project>` (filter by project), `--json` (format output as JSON).
 
 ## Infrastructure
 
