@@ -109,7 +109,7 @@ var scheduleCreateRecurringCmd = &cobra.Command{
 	Long: `Create a recurring schedule with a cron expression. Requires --name, --cron, and --agent.
 
 For message schedules (default --type message), pass --message (and optionally --interrupt or --wake).
-For exec schedules (--type exec), pass the command argv after '--' (and optionally --timeout, default 60s, max 60m); recurring exec is forwarded to the Hub and requires Hub recurring exec support (not yet available; use 'scion schedule create --type exec' for one-shot exec events).
+For exec schedules (--type exec), pass the command argv after '--' (and optionally --timeout, default 60s, max 60m).
 
 The cron expression is evaluated in the zone given by --time-zone, an IANA
 name such as America/Los_Angeles; without it the expression is evaluated in
@@ -124,7 +124,10 @@ Examples:
   scion schedule create-recurring --name standup --cron "0 14 * * 1-5" --agent lead --message "standup"
 
   # 07:00 Pacific time every day, across daylight saving changes
-  scion schedule create-recurring --name digest --cron "0 7 * * *" --time-zone America/Los_Angeles --agent lead --message "digest"`,
+  scion schedule create-recurring --name digest --cron "0 7 * * *" --time-zone America/Los_Angeles --agent lead --message "digest"
+
+  # Run a command directly in an agent container every 15 minutes
+  scion schedule create-recurring --name check-queue --cron "*/15 * * * *" --type exec --agent worker --timeout 60s -- /usr/local/bin/check-queue`,
 	RunE: runScheduleCreateRecurring,
 }
 
