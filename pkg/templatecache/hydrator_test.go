@@ -115,19 +115,23 @@ func (m *mockHubClient) Subscriptions() hubclient.SubscriptionService           
 func (m *mockHubClient) SubscriptionTemplates() hubclient.SubscriptionTemplateService     { return nil }
 func (m *mockHubClient) ScheduledEvents(projectID string) hubclient.ScheduledEventService { return nil }
 func (m *mockHubClient) Schedules(projectID string) hubclient.ScheduleService             { return nil }
-func (m *mockHubClient) GCPServiceAccounts() hubclient.GCPServiceAccountService           { return nil }
-func (m *mockHubClient) Messages() hubclient.MessageService                               { return nil }
-func (m *mockHubClient) Messaging() hubclient.MessagingService                            { return nil }
-func (m *mockHubClient) AdminSettings() hubclient.AdminSettingsService                    { return nil }
-func (m *mockHubClient) SystemOne() hubclient.SystemOneService                            { return nil }
-func (m *mockHubClient) GitHubApp() hubclient.GitHubAppService                            { return nil }
-func (m *mockHubClient) TriggerPresets() hubclient.TriggerPresetService                   { return nil }
-func (m *mockHubClient) Conversations() hubclient.ConversationService                     { return nil }
-func (m *mockHubClient) ThreadGroups() hubclient.ThreadGroupService                       { return nil }
-func (m *mockHubClient) AllowList() hubclient.AllowListService                            { return nil }
-func (m *mockHubClient) Invites() hubclient.InviteService                                 { return nil }
-func (m *mockHubClient) Skills() hubclient.SkillService                                   { return nil }
-func (m *mockHubClient) SkillRegistries() hubclient.SkillRegistryService                  { return nil }
+func (m *mockHubClient) WebhookEndpoints(projectID string) hubclient.WebhookEndpointService {
+	return nil
+}
+func (m *mockHubClient) Triggers(projectID string) hubclient.TriggerService     { return nil }
+func (m *mockHubClient) GCPServiceAccounts() hubclient.GCPServiceAccountService { return nil }
+func (m *mockHubClient) Messages() hubclient.MessageService                     { return nil }
+func (m *mockHubClient) Messaging() hubclient.MessagingService                  { return nil }
+func (m *mockHubClient) AdminSettings() hubclient.AdminSettingsService          { return nil }
+func (m *mockHubClient) SystemOne() hubclient.SystemOneService                  { return nil }
+func (m *mockHubClient) GitHubApp() hubclient.GitHubAppService                  { return nil }
+func (m *mockHubClient) TriggerPresets() hubclient.TriggerPresetService         { return nil }
+func (m *mockHubClient) Conversations() hubclient.ConversationService           { return nil }
+func (m *mockHubClient) ThreadGroups() hubclient.ThreadGroupService             { return nil }
+func (m *mockHubClient) AllowList() hubclient.AllowListService                  { return nil }
+func (m *mockHubClient) Invites() hubclient.InviteService                       { return nil }
+func (m *mockHubClient) Skills() hubclient.SkillService                         { return nil }
+func (m *mockHubClient) SkillRegistries() hubclient.SkillRegistryService        { return nil }
 func (m *mockHubClient) ProjectInjectedSkills(projectID string) hubclient.InjectedSkillsService {
 	return nil
 }

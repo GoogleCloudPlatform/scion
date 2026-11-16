@@ -81,6 +81,19 @@ var windowsAllowed = map[string]bool{
 	"decisions.show":   true,
 	"decisions.record": true,
 
+	// Event triggers and webhook endpoints (ptone/scion#8028): pure Hub API
+	// calls, no local writes.
+	"trigger":                true,
+	"trigger.create":         true,
+	"trigger.list":           true,
+	"trigger.delete":         true,
+	"trigger.pause":          true,
+	"trigger.resume":         true,
+	"trigger.webhook":        true,
+	"trigger.webhook.create": true,
+	"trigger.webhook.list":   true,
+	"trigger.webhook.delete": true,
+
 	// 'scion use' and its alias 'scion project use' run on Windows. Their
 	// local writes all go through the private-file primitives:
 	// ~/.scion/context.yaml with its directory and lock (Tree.MkdirAll
