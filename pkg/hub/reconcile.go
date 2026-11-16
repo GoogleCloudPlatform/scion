@@ -664,6 +664,9 @@ func (s *Server) execDispatchFinalizeEnv(ctx context.Context, d store.BrokerDisp
 			return "", fmt.Errorf("unmarshal finalize_env args: %w", err)
 		}
 		env = args.Env
+		if len(args.HomeFiles) > 0 {
+			ctx = WithCreateHomeFiles(ctx, args.HomeFiles)
+		}
 	}
 	ctx, warns := withDispatchWarnings(ctx)
 	// The requesting node keeps the agent when its wait for this
@@ -689,6 +692,15 @@ func (s *Server) execDispatchCreate(ctx context.Context, d store.BrokerDispatch)
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
 		return "", fmt.Errorf("no dispatcher available")
+	}
+	if d.Args != "" {
+		args, err := UnmarshalCreateArgs(d.Args)
+		if err != nil {
+			return "", fmt.Errorf("unmarshal create args: %w", err)
+		}
+		if len(args.HomeFiles) > 0 {
+			ctx = WithCreateHomeFiles(ctx, args.HomeFiles)
+		}
 	}
 	ctx, warns := withDispatchWarnings(ctx)
 	// The requesting node keeps the agent when its wait for this

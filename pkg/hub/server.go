@@ -1712,6 +1712,12 @@ type RemoteCreateAgentRequest struct {
 	// Persistence is the agent's stamped persistence (dispatchPersistence):
 	// ephemeral, or empty for a persistent agent.
 	Persistence api.Persistence `json:"persistence,omitempty"`
+	// HomeFiles asks the broker to write small create-only files under .scion/
+	// in the new agent's home directory before the harness starts (triggers
+	// Stage 2 §5.4, ptone/scion#8058). Validated on both Hub and Broker via
+	// api.ValidateHomeFiles; never set on start, resume, restart, or
+	// reprovision.
+	HomeFiles []api.HomeFile `json:"homeFiles,omitempty"`
 }
 
 // ResolvedSecret represents a secret resolved by the Hub for projection into an agent container.

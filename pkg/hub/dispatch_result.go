@@ -116,6 +116,7 @@ var dispatchHubSentinels = []struct {
 }{
 	{"delete_in_progress", store.ErrDeleteInProgress},
 	{"launch_invalid_phase", ErrLaunchInvalidPhase},
+	{"broker_lacks_home_files", ErrBrokerLacksHomeFiles},
 }
 
 // dispatchHubError is a failure the executing node returned with hub

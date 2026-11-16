@@ -17,6 +17,8 @@ package hub
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // StartDispatchArgs carries the parameters for a cross-node agent start.
@@ -131,14 +133,19 @@ type DeleteIntentPin struct {
 // dispatch row is sufficient for the owner to run the local check.
 type CheckPromptDispatchArgs struct{}
 
-// FinalizeEnvDispatchArgs carries the gathered env vars for cross-node finalize.
+// FinalizeEnvDispatchArgs carries the gathered env vars and any transient
+// create-only HomeFiles for cross-node finalize.
 type FinalizeEnvDispatchArgs struct {
-	Env map[string]string `json:"env,omitempty"`
+	Env       map[string]string `json:"env,omitempty"`
+	HomeFiles []api.HomeFile    `json:"homeFiles,omitempty"`
 }
 
-// CreateWithGatherDispatchArgs is intentionally empty — the owner rebuilds the
-// full RemoteCreateAgentRequest from the shared store (same pattern as start).
-type CreateWithGatherDispatchArgs struct{}
+// CreateWithGatherDispatchArgs carries transient create-only parameters (such
+// as HomeFiles) that are not stored on the agent record; the owner rebuilds the
+// rest of RemoteCreateAgentRequest from the shared store.
+type CreateWithGatherDispatchArgs struct {
+	HomeFiles []api.HomeFile `json:"homeFiles,omitempty"`
+}
 
 // CheckPromptResult is serialized into broker_dispatch.result by the owner.
 type CheckPromptResult struct {
@@ -250,6 +257,15 @@ func UnmarshalDeleteArgs(raw string) (*DeleteDispatchArgs, error) {
 // UnmarshalFinalizeEnvArgs deserializes finalize_env dispatch args.
 func UnmarshalFinalizeEnvArgs(raw string) (*FinalizeEnvDispatchArgs, error) {
 	var a FinalizeEnvDispatchArgs
+	if err := json.Unmarshal([]byte(raw), &a); err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
+
+// UnmarshalCreateArgs deserializes create dispatch args.
+func UnmarshalCreateArgs(raw string) (*CreateWithGatherDispatchArgs, error) {
+	var a CreateWithGatherDispatchArgs
 	if err := json.Unmarshal([]byte(raw), &a); err != nil {
 		return nil, err
 	}
