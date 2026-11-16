@@ -170,7 +170,7 @@ AssignableServiceAccounts []string // cloudrun only
 BlockServiceAccount       string   // cloudrun only
 ```
 
-Validation in `ValidateRuntimeBrokerInstances` (so the admin server-config PUT applies it). **De-duplication (C1 review follow-up):** I1 first extracts the CR2 service-account form rules into one shared function (e.g. `validateCloudRunServiceAccountForm(path, email, projectID) error`), used by `validateCloudRunTarget`, the converter's `checkProposedCloudRunTarget`, and the new allow-list/block checks below, with no behavior change for the existing callers (existing CR2 tests unchanged). both in `cloudRunOnlyFieldsSet`; every value passes CR2's `service_account` form rules (user-managed regex, project-default refusal, service-agent refusal — this closes ptone/scion#7466 for flat); lower-case, no duplicates, at most 64 entries; `block_service_account` not in `assignable_service_accounts`; `block_service_account` is **required** for `cloudrun` (missing → "server.broker.instances[<k>].runtime_target.block_service_account is required: agents with no GCP identity run as this no-role account") and differs from `service_account`. Listing `service_account` in the allow-list is allowed (assigning it is equivalent to passthrough). Schema mirrors. `NewFlatInstancePolicy` clones the slice. FC4-a rows: both **never**. Not in `ExecutionScope`.
+Validation in `ValidateRuntimeBrokerInstances` (so the admin server-config PUT applies it). **De-duplication (C1 review follow-up):** I1 first extracts the CR2 service-account form rules into one shared function (e.g. `validateCloudRunServiceAccountForm(path, email, projectID) error`), used by `validateCloudRunTarget`, the converter's `checkProposedCloudRunTarget`, and the new allow-list/block checks below, with no behavior change for the existing callers (existing CR2 tests unchanged). Both fields are in `cloudRunOnlyFieldsSet`; every value passes CR2's `service_account` form rules (user-managed regex, project-default refusal, service-agent refusal — this closes ptone/scion#7466 for flat); lower-case, no duplicates, at most 64 entries; `block_service_account` not in `assignable_service_accounts`; `block_service_account` is **required** for `cloudrun` (missing → "server.broker.instances[<k>].runtime_target.block_service_account is required: agents with no GCP identity run as this no-role account") and differs from `service_account`. Listing `service_account` in the allow-list is allowed (assigning it is equivalent to passthrough). Schema mirrors. `NewFlatInstancePolicy` clones the slice. FC4-a rows: both **never**. Not in `ExecutionScope`.
 
 Activation (`cmd/server_flat_cloudrun.go`): extend P9 (principal and impersonation source differ from every allow-list account and the block account) and P13 (none is the probed compute default). Same reason codes. Doctor: `cloudRunActAsCheck` uses the instance credentials and iterates all agent accounts (follow-up, I5).
 
@@ -202,7 +202,8 @@ switch mode:
 One shared predicate, using CR12's shared type matcher:
 
 ```go
-// flatCloudRunBroker: broker.IsFlat() && broker.RuntimeTarget != nil && RuntimeTarget.Type == cloudrun
+// flatCloudRunBroker: broker.IsFlat() && broker.RuntimeTarget != nil &&
+//   broker.RuntimeTarget.Type == config.RuntimeTargetTypeCloudRun (via the CR12 shared matcher)
 ```
 
 - `cloudRunNativeLive`: if `flatCloudRunBroker(broker)` → native = true regardless of `hub.cloudrun_native_identity` (gate argument ignored for flat). So `markCloudRunNative` stamps the marker and persists `NativeCloudRun` before dispatch; `agentCloudRunNativelyAssigned` withholds `ScopeAgentGCPToken` and refuses `/api/v1/agent/gcp-token`; stop/delete clearing is unchanged.
