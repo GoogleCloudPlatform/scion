@@ -28,6 +28,41 @@ import (
 // blocks delivery/auto-wake if a hub replica crashes mid-stop.
 const defaultIdleSuspendClaimTTL = 45 * time.Second
 
+const (
+	maxIdleSuspendTxRetries  = 32
+	idleSuspendRetryBaseWait = time.Millisecond
+	idleSuspendRetryMaxWait  = 15 * time.Millisecond
+)
+
+// withIdleSuspendLockedAgent wraps withLockedAgent with bounded retries on
+// transient database conflicts (SQLite SQLITE_BUSY / SQLITE_LOCKED when two
+// separate database handles upgrade a DEFERRED read transaction to a write on
+// the same file, or Postgres 40001 / 40P01). Exhausted transient errors are
+// marked with store.ErrTransient.
+func (s *AgentStore) withIdleSuspendLockedAgent(ctx context.Context, agentID string, fn lockedAgentFn) error {
+	wait := idleSuspendRetryBaseWait
+	for attempt := 0; ; attempt++ {
+		err := s.withLockedAgent(ctx, agentID, fn)
+		if err == nil {
+			return nil
+		}
+		if !isTransientDBError(err) || attempt >= maxIdleSuspendTxRetries {
+			return markTransient(err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(wait):
+		}
+		if wait < idleSuspendRetryMaxWait {
+			wait *= 2
+			if wait > idleSuspendRetryMaxWait {
+				wait = idleSuspendRetryMaxWait
+			}
+		}
+	}
+}
+
 // checkIdleSuspendRow evaluates cond against a locked ent.Agent row at
 // store-clock now for ClaimIdleSuspend. An already-active
 // idle_suspend_claim_until rejects so two sweeps never double-claim.
@@ -115,7 +150,10 @@ func (s *AgentStore) ClaimIdleSuspend(ctx context.Context, agentID string, cond 
 		at         time.Time
 		claimUntil time.Time
 	)
-	err := s.withLockedAgent(ctx, agentID, func(ctx context.Context, c *ent.Client, row *ent.Agent, now time.Time) (bool, error) {
+	err := s.withIdleSuspendLockedAgent(ctx, agentID, func(ctx context.Context, c *ent.Client, row *ent.Agent, now time.Time) (bool, error) {
+		prior = ""
+		at = time.Time{}
+		claimUntil = time.Time{}
 		if !checkIdleSuspendRow(row, cond, now) {
 			return false, store.ErrIdleSuspendPrecondition
 		}
@@ -143,7 +181,7 @@ func (s *AgentStore) ClaimIdleSuspend(ctx context.Context, agentID string, cond 
 
 // ClearIdleSuspendClaim implements store.AgentStore.ClearIdleSuspendClaim.
 func (s *AgentStore) ClearIdleSuspendClaim(ctx context.Context, agentID string) error {
-	return s.withLockedAgent(ctx, agentID, func(ctx context.Context, c *ent.Client, row *ent.Agent, _ time.Time) (bool, error) {
+	return s.withIdleSuspendLockedAgent(ctx, agentID, func(ctx context.Context, c *ent.Client, row *ent.Agent, _ time.Time) (bool, error) {
 		if row.IdleSuspendClaimUntil == nil {
 			return false, nil
 		}
@@ -163,7 +201,8 @@ func (s *AgentStore) MarkAgentDelivery(ctx context.Context, agentID string) (*st
 		out         *store.Agent
 		claimActive bool
 	)
-	err := s.withLockedAgent(ctx, agentID, func(ctx context.Context, c *ent.Client, row *ent.Agent, now time.Time) (bool, error) {
+	err := s.withIdleSuspendLockedAgent(ctx, agentID, func(ctx context.Context, c *ent.Client, row *ent.Agent, now time.Time) (bool, error) {
+		out = nil
 		claimActive = row.IdleSuspendClaimUntil != nil && now.Before(*row.IdleSuspendClaimUntil)
 		if !claimActive && (row.Phase == string(state.PhaseRunning) || row.Phase == string(state.PhaseStarting)) {
 			updated, err := c.Agent.UpdateOneID(row.ID).

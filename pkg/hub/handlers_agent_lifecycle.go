@@ -327,13 +327,12 @@ func statusUpdateTouchesGuardedFields(su store.AgentStatusUpdate) bool {
 // Every field counts, including the internal json:"-" ones a decoded status
 // POST never sets (ClearExit, ClearMessageIf, ClearTerminalRemnants):
 // erring towards "not empty" only means the store write runs.
-// The exceptions are the preconditions IfPhase, IfRunID, StartWrite,
-// GuardReincarnation, ReportSource, ReportRunID, ReportAgentToken and Restore, and the output
-// Result: they only condition the write (StartWrite selects the delete
-// guard; GuardReincarnation turns on the store's reincarnation guard;
-// ReportSource, ReportRunID and ReportAgentToken select the report rules; Restore only
-// qualifies a Phase) or report on it,
-// and persist nothing themselves, so they deliberately do not count.
+// The exceptions are the preconditions IfPhase, IfRunID, IfIdleSuspendCommit,
+// IfNoStartClaim, IfAutoWakeReason, StartWrite, GuardReincarnation,
+// ReportSource, ReportRunID, ReportAgentToken, Restore, SuspendReason and
+// RetainedActivity, and the output Result: they only condition or qualify a
+// Phase write or report on it, and persist nothing themselves, so they
+// deliberately do not count.
 // TestStatusUpdateIsEmpty_EveryFieldCounts catches a field missing here.
 func statusUpdateIsEmpty(su store.AgentStatusUpdate) bool {
 	return !statusUpdateTouchesGuardedFields(su) &&

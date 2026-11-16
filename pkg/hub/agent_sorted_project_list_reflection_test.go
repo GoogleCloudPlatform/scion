@@ -228,12 +228,14 @@ var reflectFillStoreAgentSkipFields = map[string]bool{
 	// Suspension is computed by the hub at response time from the agent's
 	// active holds (ptone/scion#3433); it is not stored.
 	"Suspension": true,
-	// Start claim columns are written only through the start-claim store
-	// methods (never by CreateAgent/UpdateAgent).
+	// Start claim and idle-suspend claim columns (and IdleSuspendClaimActive,
+	// derived at read time from IdleSuspendClaimUntil against the store clock)
+	// are written only through the claim store methods (never by
+	// CreateAgent/UpdateAgent). All are json:"-" and not authz inputs.
 	"StartClaimID": true, "StartClaimKind": true, "StartClaimState": true,
 	"StartClaimOwner": true, "StartClaimTarget": true, "StartClaimAt": true,
 	"StartClaimLeaseUntil": true, "StartClaimUnconfirmedAt": true,
-	"LastDeliveryAt": true, "IdleSuspendClaimUntil": true,
+	"LastDeliveryAt": true, "IdleSuspendClaimUntil": true, "IdleSuspendClaimActive": true,
 	"StartClaimHoldUntil": true, "StartClaimLaunchID": true,
 	// soft_delete_op_id is written only through SetAgentSoftDeleteOpID
 	// (never by CreateAgent/UpdateAgent) and is set only alongside
