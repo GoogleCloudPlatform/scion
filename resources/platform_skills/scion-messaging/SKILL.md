@@ -16,7 +16,7 @@ not messaging.
 | `conv:<id>` | An existing conversation, identified by the incoming message's `conversation.id` or the task brief |
 | `@<email>` | A separate direct message to a user |
 | `@<agent-name>` | A direct message to an agent |
-| `group[a,b,...]` | A separate exchange with a specified group of recipients |
+| `"group[a,b,...]"` | A separate exchange with a specified group of recipients (quote in the shell so `[...]` is not globbed) |
 
 ### Messages to users
 
@@ -215,8 +215,9 @@ EOF_MESSAGE
 
 Or write the body to a file and use
 `scion message "conv:<conversation-id>" --body-file /tmp/message.md`.
-A positional `-` or `--body-file -` reads stdin. Trailing CR/LF characters are trimmed;
-other body bytes are preserved.
+A positional `-` or `--body-file -` reads stdin (redirecting stdin without `-` or
+`--body-file -` fails because `scion message` does not read stdin implicitly). Trailing
+CR/LF characters are trimmed; other body bytes are preserved.
 
 For example, in the shell expression `` "Run `printf substituted`" ``, the shell
 runs `printf` and produces `Run substituted`. The same text inside a quoted heredoc
@@ -280,7 +281,9 @@ on `ask_user` status notifications to deliver the request.
 - `--body-file <path>` reads the message body from a file; `--body-file -` reads stdin.
 - `--attach <file>` attaches a file; repeat it for multiple files.
 - `--wake` resumes a suspended target before delivery.
-- `--interrupt` interrupts the target harness before delivery; use with caution.
+- `--interrupt` interrupts an active target turn before delivery (ordinary messages
+  queue until the current turn ends); use for mid-turn stop or scope-change corrections,
+  and omit on routine messages.
 <!-- scion:experiment web.chat_choices -->
 - `--choices-file <file>` sends a choice prompt (keyed decisions the user answers
   with a click); `--update` revises one. `scion decisions` lists your decisions and
