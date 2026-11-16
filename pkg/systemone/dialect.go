@@ -75,7 +75,6 @@ type Dialect struct {
 
 type compiledRule struct {
 	compiled *spec.Compiled
-	consumer string
 }
 
 // NewDialect constructs a System One ruleengine.Dialect from cfg.
@@ -154,10 +153,8 @@ func (d *Dialect) Compile(ctx context.Context, rule string, kind ruleengine.Kind
 		return ruleengine.Compiled{}, err
 	}
 
-	consumer := strings.TrimSpace(env.Consumer)
-	return ruleengine.NewCompiled(consumer, DialectName, kind, &compiledRule{
+	return ruleengine.NewCompiled(strings.TrimSpace(env.Consumer), DialectName, kind, &compiledRule{
 		compiled: compiled,
-		consumer: consumer,
 	}), nil
 }
 
@@ -177,23 +174,24 @@ func (d *Dialect) Evaluate(ctx context.Context, c ruleengine.Compiled, input rul
 	}
 
 	start := time.Now()
+	consumer := c.Consumer()
 	prog, ok := c.Rep().(*compiledRule)
 	if !ok || prog == nil || prog.compiled == nil {
-		return failedInternalDecision(nil, c.Kind(), start)
+		return failedInternalDecision(nil, consumer, c.Kind(), start)
 	}
 
 	soInput, ok := input.Payload.(Input)
 	if !ok {
-		return failedInternalDecision(prog, c.Kind(), start)
+		return failedInternalDecision(prog, consumer, c.Kind(), start)
 	}
 
 	rt := d.resolveRuntime()
 	if rt == nil {
-		return failedInternalDecision(prog, c.Kind(), start)
+		return failedInternalDecision(prog, consumer, c.Kind(), start)
 	}
 
 	dec, err := rt.Evaluate(ctx, prog.compiled, soInput, runtime.EvalOptions{
-		Consumer:          prog.consumer,
+		Consumer:          consumer,
 		EngineMaxEvalTime: budget.MaxEvalTime,
 	})
 	if err == nil {
@@ -207,7 +205,7 @@ func (d *Dialect) Evaluate(ctx context.Context, c ruleengine.Compiled, input rul
 
 	eval, hasEval := EvaluationFrom(err)
 	if !hasEval || eval == nil {
-		return failedInternalDecision(prog, c.Kind(), start)
+		return failedInternalDecision(prog, consumer, c.Kind(), start)
 	}
 	evalErr := &EvaluationError{Eval: eval}
 
@@ -247,16 +245,15 @@ func (d *Dialect) resolveRuntime() *runtime.Runtime {
 	return d.runtime
 }
 
-func failedInternalDecision(prog *compiledRule, kind ruleengine.Kind, start time.Time) (ruleengine.Decision, error) {
+func failedInternalDecision(prog *compiledRule, consumer string, kind ruleengine.Kind, start time.Time) (ruleengine.Decision, error) {
 	eval := &Evaluation{
 		EvalID:  newDialectEvalID(),
-		Rule:    RuleRef{Dialect: DialectName},
+		Rule:    RuleRef{Dialect: DialectName, Consumer: consumer},
 		Class:   ClassFailed,
 		Reason:  string(provider.FailInternal),
 		Elapsed: time.Since(start),
 	}
 	if prog != nil && prog.compiled != nil {
-		eval.Rule.Consumer = prog.consumer
 		eval.Rule.ContentHash = prog.compiled.ContentHash
 		eval.Rule.Native = prog.compiled.Spec.Form == spec.FormNative
 		eval.Requested = prog.compiled.Spec.Binding

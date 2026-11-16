@@ -771,3 +771,58 @@ func TestDialect_DenyByDefaultBlocksUnregisteredEmptyAndNonIOConsumersWithoutPro
 	assert.Equal(t, ruleengine.ReasonIONotAllowed, unsup.Reason)
 	assert.Zero(t, calls.Load(), "denied admission must make zero provider calls")
 }
+
+func TestDialect_ConsumerAttributionUsesCompiledHandleConsumer(t *testing.T) {
+	rt := newFakeAdapterRuntime(t, 3*time.Second, func(_ context.Context, _ provider.Transport, _ provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
+		dist, val, _, _ := provider.BinaryDistribution(0.90)
+		return provider.ModelResult{
+			ResolvedModel: "fake-model-1",
+			HTTPStatus:    200,
+			Answers: map[string]provider.Answer{
+				"q1": {
+					QuestionID:   "q1",
+					Primitive:    spec.PrimitiveBinary,
+					Status:       provider.AnswerStatusAnswered,
+					Bool:         val,
+					Distribution: dist,
+				},
+			},
+		}, nil
+	})
+
+	eng := ruleengine.NewEngine()
+	require.NoError(t, eng.Register(systemone.NewDialect(systemone.DialectConfig{Runtime: rt})))
+	require.NoError(t, eng.AllowConsumerDialects("consumer_a", ruleengine.GrantIO(systemone.DialectName)))
+	require.NoError(t, eng.AllowConsumerDialects("consumer_b", ruleengine.GrantIO(systemone.DialectName)))
+
+	const rawRule = `{
+	  "version": 1,
+	  "questions": [{"id": "q1", "type": "binary", "instructions": "Check."}],
+	  "output": {"question": "q1"}
+	}`
+	ctx := context.Background()
+
+	compiledA, err := eng.Compile(ctx, systemone.DialectName, rawRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
+		Consumer: "consumer_a",
+		Name:     spec.ProbeEnvironmentName,
+	})
+	require.NoError(t, err)
+
+	// Rebind compiledA's internal rep to consumer_b: evaluation attribution and internal-failure
+	// provenance must both reflect c.Consumer() ("consumer_b"), never a stale rep consumer.
+	reboundB := ruleengine.NewCompiled("consumer_b", systemone.DialectName, compiledA.Kind(), compiledA.Rep())
+
+	dec, err := eng.Evaluate(ctx, reboundB, ruleengine.Input{
+		Payload: systemone.ProbeInput("check attribution"),
+	}, ruleengine.Budget{})
+	require.NoError(t, err)
+	evalOK, ok := dec.Detail.(*systemone.Evaluation)
+	require.True(t, ok)
+	assert.Equal(t, "consumer_b", evalOK.Rule.Consumer)
+
+	_, err = eng.Evaluate(ctx, reboundB, ruleengine.Input{}, ruleengine.Budget{})
+	require.Error(t, err)
+	evalFail, ok := systemone.EvaluationFrom(err)
+	require.True(t, ok)
+	assert.Equal(t, "consumer_b", evalFail.Rule.Consumer)
+}
