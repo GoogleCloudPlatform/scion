@@ -39,14 +39,14 @@ func generateWebhookEndpointSecret() (string, error) {
 }
 
 func (s *Server) webhookSecretCipher() *secret.ValueCipher {
-	if s != nil && s.cipher != nil {
-		return s.cipher
+	if s == nil {
+		return nil
 	}
-	return secret.NewLegacyValueCipher("")
+	return s.cipher
 }
 
 // sealWebhookEndpointSecret encrypts plaintext with the Hub's shared
-// ValueCipher, falling back to plaintext only when Hub encryption is unmanaged.
+// ValueCipher; a nil cipher fails closed with secret.ErrCipherNotConfigured.
 func (s *Server) sealWebhookEndpointSecret(plaintext string) (string, error) {
 	return s.webhookSecretCipher().Encrypt(plaintext)
 }
