@@ -229,3 +229,33 @@ func TestGCPIdentityStartRefusalText(t *testing.T) {
 	assert.Equal(t, ErrCodeValidationError, code)
 	assert.Contains(t, msg, errGCPSANotAvailable.Error())
 }
+
+// --- broker 400 GCP identity error classification (reviews/i3-rev-2.md O1) ---
+
+func TestIsBrokerGCPIdentityError_TightenedMarkers(t *testing.T) {
+	positives := []string{
+		`agent "cr-agent": GCP identity mode "assign" on Cloud Run Instances: account not attachable on this broker`,
+		`agent "cr-agent": GCP identity mode "assign" on Cloud Run Instances: service_account is not attachable on flat Cloud Run instance "cr-east"; add it to server.broker.instances[cr-east].runtime_target.assignable_service_accounts`,
+		`agent "cr-agent": flat Cloud Run instance "cr-east" has no block service account; set server.broker.instances[cr-east].runtime_target.block_service_account`,
+		`agent "cr-agent": flat Cloud Run instance "cr-east" has no service account; set server.broker.instances[cr-east].runtime_target.service_account`,
+		`agent "cr-agent": the hub did not mark this dispatch for native Cloud Run identity`,
+		`agent "cr-agent": passthrough is not available on Cloud Run Instances; assign an account or use block`,
+		`agent "cr-agent": runtime entry "cr" of type cloudrun-instances does not support assigned identities (GCP identity mode "assign" with the hub.cloudrun_native_identity experiment on)`,
+		`agent "cr-agent": the init firewall (SCION_INIT_FIREWALL) is an unsupported combination with Cloud Run native identity (hub.cloudrun_native_identity); remove one of the two`,
+		`kubernetes_block_service_account: "Not_Valid" is not a valid Kubernetes ServiceAccount name: a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters`,
+		`kubernetes_service_account_mappings: "Bad@proj.iam.gserviceaccount.com" is not a well-formed, lowercase GCP service account email`,
+	}
+	for _, msg := range positives {
+		assert.True(t, isBrokerGCPIdentityError(msg), "expected GCP identity broker 400 to match: %s", msg)
+	}
+
+	negatives := []string{
+		`pod spec serviceAccount "foo" invalid`,
+		`template validation failed: service account "default" not found in namespace "agents"`,
+		`invalid Kubernetes ServiceAccountName "Not_Valid" in inline config`,
+		`invalid template configuration: unknown harness`,
+	}
+	for _, msg := range negatives {
+		assert.False(t, isBrokerGCPIdentityError(msg), "generic non-GCP serviceAccount/service account 400 must not match: %s", msg)
+	}
+}
