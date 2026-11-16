@@ -15,6 +15,7 @@
 package messaging
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -118,6 +119,8 @@ func mapSystemCategory(category string) *EventBody {
 	switch category {
 	case messages.SystemCategoryScheduler:
 		return &EventBody{Type: EventScheduleFired}
+	case messages.SystemCategoryTrigger:
+		return &EventBody{Type: EventTriggerFired}
 	case messages.SystemCategoryPortForward:
 		return &EventBody{Type: EventPortExposed}
 	case messages.SystemCategoryArtifactReview:
@@ -179,6 +182,15 @@ func MapLegacyEnvelope(old *messages.StructuredMessage, ident PersistedIdentity)
 	systemCategory := old.Metadata["system_category"]
 	kind, intent, event := MapLegacyType(old.Type, systemCategory, hasAddressee)
 
+	// When StructuredMessage.Event carries a valid serialized EventBody on an
+	// event-kind message (§8.3), use it verbatim instead of the category default.
+	if kind == KindEvent && len(old.Event) > 0 {
+		var parsed EventBody
+		if err := json.Unmarshal(old.Event, &parsed); err == nil && parsed.Validate() == nil {
+			event = &parsed
+		}
+	}
+
 	// Human-to-human replies should be inform, not request.
 	// MapLegacyType maps TypeReply to IntentRequest (correct for agent
 	// recipients), but human-to-human replies are informational.
@@ -189,11 +201,11 @@ func MapLegacyEnvelope(old *messages.StructuredMessage, ident PersistedIdentity)
 
 	// Enrich event body from old fields where possible.
 	if event != nil {
-		if old.Status != "" {
+		if old.Status != "" && event.Status == "" {
 			event.Status = old.Status
 		}
 		// For state-change, the sender is typically the subject.
-		if event.Type == EventAgentStateChanged && old.Sender != "" {
+		if event.Type == EventAgentStateChanged && old.Sender != "" && event.Subject == "" {
 			event.Subject = old.Sender
 		}
 	}
@@ -397,6 +409,11 @@ func NewEnvelopeToLegacy(msg *Message, addrs []Addressee) *messages.StructuredMe
 		if msg.Event.Status != "" {
 			old.Status = msg.Event.Status
 		}
+		if hasRichEventBody(msg.Event) {
+			if raw, err := json.Marshal(msg.Event); err == nil {
+				old.Event = raw
+			}
+		}
 	}
 
 	// Map first addressee to recipient.
@@ -451,7 +468,7 @@ func mapNewTypeToLegacy(msg *Message) string {
 			return messages.TypeStateChange
 		case EventAgentInputNeeded:
 			return messages.TypeInputNeeded
-		case EventScheduleFired, EventPortExposed, EventDeliveryFailed, EventArtifactReview:
+		case EventScheduleFired, EventPortExposed, EventDeliveryFailed, EventArtifactReview, EventWebhookReceived, EventTriggerFired:
 			return messages.TypeSystem
 		default:
 			return messages.TypeStateChange
@@ -475,6 +492,8 @@ func eventTypeToSystemCategory(body *EventBody) string {
 	switch body.Type {
 	case EventScheduleFired:
 		return messages.SystemCategoryScheduler
+	case EventWebhookReceived, EventTriggerFired:
+		return messages.SystemCategoryTrigger
 	case EventPortExposed:
 		return messages.SystemCategoryPortForward
 	case EventArtifactReview:
@@ -495,4 +514,18 @@ func ensureMetadata(m map[string]string) map[string]string {
 		return make(map[string]string)
 	}
 	return m
+}
+
+func hasRichEventBody(e *EventBody) bool {
+	if e == nil {
+		return false
+	}
+	return e.Type == EventWebhookReceived ||
+		e.EventID != "" ||
+		e.EventType != "" ||
+		e.Source != nil ||
+		e.Trigger != nil ||
+		e.Schedule != nil ||
+		len(e.Attributes) > 0 ||
+		e.External != nil
 }

@@ -15,6 +15,7 @@
 package messaging
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -863,6 +864,8 @@ func TestNewEnvelopeToLegacy_EventSystem(t *testing.T) {
 		// the round trip must recover SystemCategoryDeliveryDeferred, not
 		// collapse back to SystemCategoryDeliveryFailed.
 		{"delivery.failed/deferred", EventDeliveryFailed, "DELIVERY_DEFERRED", messages.SystemCategoryDeliveryDeferred, "DELIVERY_DEFERRED"},
+		{"webhook.received", EventWebhookReceived, "", messages.SystemCategoryTrigger, ""},
+		{"trigger.fired", EventTriggerFired, "", messages.SystemCategoryTrigger, ""},
 	}
 
 	for _, tc := range tests {
@@ -1341,6 +1344,60 @@ func TestMapLegacyEnvelope_ReplyToAgent_IntentRequest(t *testing.T) {
 	// Reply to agent should remain request.
 	if msg.Intent == nil || *msg.Intent != IntentRequest {
 		t.Errorf("intent: got %v, want request (reply to agent)", msg.Intent)
+	}
+}
+
+func TestMapLegacyEnvelope_TriggerStructuredEvent(t *testing.T) {
+	richBody := &EventBody{
+		Type:       EventWebhookReceived,
+		Subject:    "webhook:ep-1/prod",
+		EventID:    "evt-123",
+		Source:     &EventSource{Kind: "webhook", ID: "ep-1", Name: "deploys"},
+		Trigger:    &EventTriggerRef{ID: "tr-1", Name: "notify-lead"},
+		Attributes: map[string]string{"event": "received", "endpoint_name": "deploys"},
+		External:   NewExternalPayload("scion-v1", []byte(`{"ok":true}`)),
+	}
+	rawEvent, err := json.Marshal(richBody)
+	if err != nil {
+		t.Fatalf("marshal event body: %v", err)
+	}
+
+	old := messages.NewSystemMessage("trigger", "agent:lead", "Check deploy", messages.SystemCategoryTrigger)
+	old.SenderID = "TRIGGER"
+	old.Event = rawEvent
+
+	msg, _, err := MapLegacyEnvelope(old, PersistedIdentity{})
+	if err != nil {
+		t.Fatalf("MapLegacyEnvelope error: %v", err)
+	}
+	if msg.Kind != KindEvent || msg.Event == nil {
+		t.Fatalf("expected KindEvent with Event body, got kind=%q event=%v", msg.Kind, msg.Event)
+	}
+	if msg.Event.Type != EventWebhookReceived {
+		t.Fatalf("event.type = %q, want %q", msg.Event.Type, EventWebhookReceived)
+	}
+	if msg.Event.EventID != "evt-123" {
+		t.Fatalf("event.event_id = %q, want evt-123", msg.Event.EventID)
+	}
+	if msg.Event.Source == nil || msg.Event.Source.Name != "deploys" {
+		t.Fatalf("event.source = %+v, want deploys", msg.Event.Source)
+	}
+	if msg.Event.Trigger == nil || msg.Event.Trigger.Name != "notify-lead" {
+		t.Fatalf("event.trigger = %+v, want notify-lead", msg.Event.Trigger)
+	}
+	if msg.Event.External == nil || msg.Event.External.Verified != "scion-v1" {
+		t.Fatalf("event.external_payload = %+v, want scion-v1", msg.Event.External)
+	}
+
+	// Fallback when StructuredMessage.Event is absent or invalid: defaults to EventTriggerFired.
+	oldFallback := messages.NewSystemMessage("trigger", "agent:lead", "Check deploy", messages.SystemCategoryTrigger)
+	oldFallback.Event = []byte(`{"type":"not.a.real.type"}`)
+	fallbackMsg, _, err := MapLegacyEnvelope(oldFallback, PersistedIdentity{})
+	if err != nil {
+		t.Fatalf("MapLegacyEnvelope fallback error: %v", err)
+	}
+	if fallbackMsg.Event == nil || fallbackMsg.Event.Type != EventTriggerFired {
+		t.Fatalf("fallback event = %+v, want EventTriggerFired", fallbackMsg.Event)
 	}
 }
 

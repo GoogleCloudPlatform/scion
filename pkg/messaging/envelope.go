@@ -15,9 +15,11 @@
 package messaging
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
@@ -84,6 +86,8 @@ const (
 	EventScheduleFired     EventType = "schedule.fired"
 	EventPortExposed       EventType = "port.exposed"
 	EventArtifactReview    EventType = "artifact.review"
+	EventWebhookReceived   EventType = "webhook.received"
+	EventTriggerFired      EventType = "trigger.fired"
 )
 
 // validEventTypes enumerates all accepted EventType values.
@@ -94,12 +98,14 @@ var validEventTypes = map[EventType]bool{
 	EventScheduleFired:     true,
 	EventPortExposed:       true,
 	EventArtifactReview:    true,
+	EventWebhookReceived:   true,
+	EventTriggerFired:      true,
 }
 
 // ValidateEventType returns an error if t is not a recognised event type.
 func ValidateEventType(t EventType) error {
 	if !validEventTypes[t] {
-		return fmt.Errorf("invalid event type %q: must be one of: agent.state-changed, agent.input-needed, delivery.failed, schedule.fired, port.exposed, artifact.review", t)
+		return fmt.Errorf("invalid event type %q: must be one of: agent.state-changed, agent.input-needed, delivery.failed, schedule.fired, port.exposed, artifact.review, webhook.received, trigger.fired", t)
 	}
 	return nil
 }
@@ -218,6 +224,97 @@ func ValidateDeliveryState(s DeliveryState) error {
 
 // ---------- EventBody ----------
 
+// MaxExternalPayloadInlineBytes bounds inline external payload content carried
+// in the agent delivery envelope (16 KiB, §8.3). Larger payloads are truncated
+// to valid UTF-8 on a rune boundary with Truncated=true.
+const MaxExternalPayloadInlineBytes = 16 * 1024
+
+// EventSource identifies the source of an event in an EventBody (§8.3).
+type EventSource struct {
+	Kind string `json:"kind"`
+	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
+}
+
+// EventTriggerRef identifies the trigger definition that delivered an event (§8.3).
+type EventTriggerRef struct {
+	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
+}
+
+// EventScheduleRef identifies the schedule that delivered a schedule.fired event (§8.3, §8.4).
+type EventScheduleRef struct {
+	ID      string `json:"id,omitempty"`
+	Name    string `json:"name,omitempty"`
+	EventID string `json:"event_id,omitempty"`
+	FireAt  string `json:"fire_at,omitempty"`
+}
+
+// ExternalPayload carries integrity-verified external data inside an EventBody (§8.3).
+type ExternalPayload struct {
+	Verified  string          `json:"verified"`
+	Truncated bool            `json:"truncated,omitempty"`
+	Bytes     int             `json:"bytes"`
+	JSON      json.RawMessage `json:"json,omitempty"`
+	Text      string          `json:"text,omitempty"`
+}
+
+// NewExternalPayload constructs an ExternalPayload capped at
+// MaxExternalPayloadInlineBytes (16 KiB). Bodies <= 16 KiB that are valid JSON
+// are carried in JSON; bodies > 16 KiB set Truncated=true and carry the first
+// 16 KiB cut on a valid UTF-8 rune boundary in Text.
+func NewExternalPayload(verified string, body []byte) *ExternalPayload {
+	ext := &ExternalPayload{
+		Verified: verified,
+		Bytes:    len(body),
+	}
+	if len(body) == 0 {
+		return ext
+	}
+	if len(body) <= MaxExternalPayloadInlineBytes {
+		if json.Valid(body) {
+			cp := make(json.RawMessage, len(body))
+			copy(cp, body)
+			ext.JSON = cp
+			return ext
+		}
+		ext.Text = truncateUTF8Bytes(body, MaxExternalPayloadInlineBytes)
+		return ext
+	}
+	ext.Truncated = true
+	ext.Text = truncateUTF8Bytes(body, MaxExternalPayloadInlineBytes)
+	return ext
+}
+
+func truncateUTF8Bytes(b []byte, maxBytes int) string {
+	if maxBytes <= 0 || len(b) == 0 {
+		return ""
+	}
+	if len(b) <= maxBytes && utf8.Valid(b) {
+		return string(b)
+	}
+	limit := len(b)
+	if limit > maxBytes {
+		limit = maxBytes
+		start := limit - 1
+		for start > 0 && limit-start < utf8.UTFMax && !utf8.RuneStart(b[start]) {
+			start--
+		}
+		if r, width := utf8.DecodeRune(b[start:limit]); r == utf8.RuneError && width == 1 && b[start] >= utf8.RuneSelf {
+			limit = start
+		}
+	}
+	s := string(b[:limit])
+	if !utf8.ValidString(s) {
+		s = strings.ToValidUTF8(s, "\uFFFD")
+		for len(s) > maxBytes {
+			_, size := utf8.DecodeLastRuneInString(s)
+			s = s[:len(s)-size]
+		}
+	}
+	return s
+}
+
 // EventBody carries the payload for an event-kind message.
 type EventBody struct {
 	Type    EventType `json:"type"`
@@ -225,6 +322,15 @@ type EventBody struct {
 	Status  string    `json:"status,omitempty"`  // e.g. "COMPLETED"
 	Reason  string    `json:"reason,omitempty"`  // for delivery.failed
 	URL     string    `json:"url,omitempty"`     // for port.exposed
+
+	// Additive Stage 1 trigger and schedule event fields (§8.3):
+	EventID    string            `json:"event_id,omitempty"`
+	EventType  string            `json:"event_type,omitempty"`
+	Source     *EventSource      `json:"source,omitempty"`
+	Trigger    *EventTriggerRef  `json:"trigger,omitempty"`
+	Schedule   *EventScheduleRef `json:"schedule,omitempty"`
+	Attributes map[string]string `json:"attributes,omitempty"`
+	External   *ExternalPayload  `json:"external_payload,omitempty"`
 }
 
 // Validate checks that the EventBody has a valid Type.

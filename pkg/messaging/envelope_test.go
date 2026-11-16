@@ -514,6 +514,8 @@ func TestEventBodyValidate(t *testing.T) {
 		{"valid delivery.failed", EventBody{Type: EventDeliveryFailed, Reason: "timeout"}, false},
 		{"valid schedule.fired", EventBody{Type: EventScheduleFired}, false},
 		{"valid port.exposed", EventBody{Type: EventPortExposed, URL: "http://localhost:8080"}, false},
+		{"valid webhook.received", EventBody{Type: EventWebhookReceived, EventID: "evt-1"}, false},
+		{"valid trigger.fired", EventBody{Type: EventTriggerFired, EventType: "webhook.deploy.finished"}, false},
 		{"invalid type", EventBody{Type: "unknown"}, true},
 		{"empty type", EventBody{}, true},
 	}
@@ -525,4 +527,54 @@ func TestEventBodyValidate(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestNewExternalPayload_InlineAndTruncated(t *testing.T) {
+	t.Run("inline JSON within 16 KiB", func(t *testing.T) {
+		raw := []byte(`{"status":"ok","count":3}`)
+		ext := NewExternalPayload("scion-v1", raw)
+		if ext.Verified != "scion-v1" {
+			t.Fatalf("verified = %q, want scion-v1", ext.Verified)
+		}
+		if ext.Truncated {
+			t.Fatalf("truncated = true, want false")
+		}
+		if ext.Bytes != len(raw) {
+			t.Fatalf("bytes = %d, want %d", ext.Bytes, len(raw))
+		}
+		if string(ext.JSON) != string(raw) {
+			t.Fatalf("json = %s, want %s", string(ext.JSON), string(raw))
+		}
+		if ext.Text != "" {
+			t.Fatalf("text = %q, want empty", ext.Text)
+		}
+	})
+
+	t.Run("over 16 KiB truncates on UTF-8 rune boundary", func(t *testing.T) {
+		// Place a 4-byte emoji ("🎉") across the 16384-byte boundary:
+		// 16382 ASCII bytes before the emoji -> 2 of 4 emoji bytes fall inside [:16384].
+		prefixLen := MaxExternalPayloadInlineBytes - 12
+		buf := make([]byte, 0, MaxExternalPayloadInlineBytes+64)
+		buf = append(buf, `{"data":"`...) // 9 bytes
+		for len(buf) < MaxExternalPayloadInlineBytes-2 {
+			buf = append(buf, 'a')
+		}
+		_ = prefixLen
+		// Now len(buf) == 16382; append 4-byte UTF-8 emoji + closing JSON.
+		buf = append(buf, []byte("🎉more\"}")...)
+
+		ext := NewExternalPayload("scion-v1", buf)
+		if !ext.Truncated {
+			t.Fatalf("truncated = false, want true")
+		}
+		if ext.Bytes != len(buf) {
+			t.Fatalf("bytes = %d, want %d", ext.Bytes, len(buf))
+		}
+		if len(ext.JSON) != 0 {
+			t.Fatalf("json must be omitted when truncated, got %d bytes", len(ext.JSON))
+		}
+		if len(ext.Text) != MaxExternalPayloadInlineBytes-2 {
+			t.Fatalf("text byte length = %d, want %d (cut before split 4-byte rune)", len(ext.Text), MaxExternalPayloadInlineBytes-2)
+		}
+	})
 }
