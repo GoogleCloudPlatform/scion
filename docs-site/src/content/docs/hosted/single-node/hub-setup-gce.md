@@ -89,7 +89,7 @@ If your VM has no external IP, or TLS is terminated upstream by a load balancer,
 ./scripts/starter-hub/gce-start-hub.sh
 ```
 
-Without `--full`, `gce-start-hub.sh` only pulls the latest code on the VM, rebuilds, restarts the Hub, and checks its health. Add `--full` again when you change `hub.env` or the generated configuration.
+Without `--full`, `gce-start-hub.sh` only pulls the latest code on the VM, rebuilds, restarts the Hub, and checks its health. Add `--full` again when you change `hub.env` or the generated configuration. When `/home/scion/.scion/settings.yaml` already exists on the VM, `gce-start-hub.sh --full` merges its generated settings into the existing file (`scripts/starter-hub/merge-settings.py`), preserving operator-owned plugin and message-broker sections (`server.plugins`, `server.message_broker`, and top-level `plugins`) and aborting without overwriting if the existing file cannot be parsed as YAML.
 
 The final health check requests `https://<HUB_DOMAIN>/healthz` and verifies the TLS certificate, so it fails if the certificate is missing or not valid. For a self-signed or test certificate only, add `--insecure-health-check` (or set `HEALTH_CHECK_INSECURE=true`); the script then prints a warning that the certificate was not verified.
 

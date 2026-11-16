@@ -10,6 +10,17 @@ Scion release notes are published for each preview and stable release. Earlier n
 - [v0.3.0-preview.7](/scion/release-notes/v0-3-0-preview-7/)
 - [v0.3.0-preview.6](/scion/release-notes/v0-3-0-preview-6/)
 
+## Helm releases named `*-scion-hub` are renamed on upgrade unless `fullnameOverride` is set
+
+The `scion-hub` Helm chart (`deploy/helm/scion-hub`) no longer drops the `-scion-hub` suffix when a release name ends in `-scion-hub` (such as `prod-scion-hub`, excluding exact `scion-hub`). Earlier chart versions rendered `<prefix>-scion-hub` under the exact same object names as a sibling `<prefix>` release in the same namespace.
+
+- **Unchanged releases:** releases named `scion-hub`, `scion-hub-*`, infix names such as `my-scion-hub-1`, or names that do not contain `scion-hub` (such as `prod` or `myhub`) keep their existing object names unchanged.
+- **Action required before upgrading an existing `*-scion-hub` release:** without `fullnameOverride`, `helm upgrade` deletes and recreates the Deployment, Service, ServiceAccount, Secrets, ConfigMap, and RBAC objects under `<release>-scion-hub`, breaking GKE Workload Identity bindings (`roles/iam.workloadIdentityUser` bound to `ServiceAccount/<release>`), Ingress or Gateway backends targeting `Service/<release>`, and default conduit relay TLS SANs (`<release>-relay.<namespace>.svc`). When no sibling `<prefix>` release shares the namespace, add `fullnameOverride: <release>` to your values file **before** running `helm upgrade` (or rendering GitOps manifests) to keep every object name in place. See [Deploy via Helm — Upgrade impact](/scion/hosted/ha/helm/#upgrade-impact) for both upgrade paths and cluster-scoped RBAC cleanup.
+
+## Versioned documentation site
+
+The documentation site now publishes immutable snapshots for preview and stable release tags (`/scion/<tag>/`) alongside channel aliases (`/scion/stable/`, `/scion/preview/`, `/scion/nightly/`, and `/scion/main/`), with channel and version selectors in the header bar that preserve your current page path when switching versions (falling back to the target version's home page when a page does not exist there) and display a banner when viewing a non-stable version.
+
 ## Global catalog writes need the global permissions and the `core` skill scope is retired
 
 Writes on global (hub catalog) skills and templates are now decided only by new global permissions: `skill.create_global` (existing), `skill.update_global` and `skill.delete_global` for skills, and `template.create_global`, `template.update_global` and `template.delete_global` for templates, with matching token scopes (`skill:update_global` and so on, with a colon) on hub tokens only. The plain `skill.update`, `skill.delete` and `template.*` permissions no longer authorize any write on a global record, and owning a global record grants nothing. The `global-catalog-author` role (revision 3) now holds exactly these six permissions, so a non-admin user bound to it can create, publish, update and delete global skills and templates, including from CI with a hub token, without any authority over project- or user-scoped records. There is no transition period.

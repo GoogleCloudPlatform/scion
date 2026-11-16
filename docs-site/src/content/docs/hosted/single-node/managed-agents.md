@@ -58,10 +58,10 @@ metadata server is unreachable from inside gVisor. See the
 for details.
 :::
 
-The choice between a managed agent and a brokered agent is a **deployment-time decision
-controlled by a broker profile**, not a property of the agent template. The same template can run
-on a container runtime or on a managed service depending on the profile you select at
-`scion start` time.
+The choice between a managed agent and a brokered agent is a **deployment-time execution choice**,
+not a property of the agent template. The same template can run on a container runtime or on a
+managed service depending on whether you select managed execution (`--profile managed-agents` on
+the CLI, or `"managedAgent": true` on `POST /api/v1/agents`) at agent creation time.
 
 ## Enabling the backend (admin)
 
@@ -95,9 +95,13 @@ The execution mode is chosen with the `--profile` flag at agent creation. Use th
 scion start my-researcher --profile managed-agents "Summarize the latest RFCs on X"
 ```
 
-When the profile is `managed-agents`, the Hub bypasses broker dispatch entirely and manages the
-agent directly through the cloud API. The template is the same regardless of profile — swapping
-the profile is all it takes to move a task between a container and a managed service.
+When `--profile managed-agents` is passed on the CLI (or `"managedAgent": true` is sent on
+`POST /api/v1/agents`; `"profile": "managed-agents"` on the API is normalized to
+`managedAgent: true` at request entry rather than resolved as a Runtime Broker profile, and
+`managedAgent: true` is mutually exclusive with `runtimeBrokerId`, `expectedRuntimeTargetId`, and
+any Runtime Broker `profile`), the Hub bypasses Runtime Broker dispatch entirely and manages the
+agent directly through the cloud API. The template is the same regardless of execution path —
+switching that option is all it takes to move a task between a container and a managed service.
 
 The following commands work with managed agents:
 
@@ -128,9 +132,9 @@ agents and return a clear error:
 ## How it works
 
 Managed agents are a peer concept to the Runtime + Harness stack, not a replacement. The
-Hub is the branching point: requests using the `managed-agents` profile go directly to a
-managed backend, while container-based agents continue through a Runtime Broker. The CLI uses
-the same Hub agent APIs for both execution paths.
+Hub is the branching point: requests with `managedAgent: true` (selected on the CLI with
+`--profile managed-agents`) go directly to a managed backend, while container-based agents
+continue through a Runtime Broker. The CLI uses the same Hub agent APIs for both execution paths.
 
 The Hub Agent record stores the managed runtime plus the current interaction and environment
 identifiers. No broker-local state directory, container, or Runtime Broker is involved.

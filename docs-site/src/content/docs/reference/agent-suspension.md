@@ -74,7 +74,10 @@ field while an agent is held:
 ```
 
 The field carries no reason. The reason, root user, trigger and actor are in
-the audit log (`agent_hold_set` records).
+the audit log (`agent_hold_set` records). This membership-loss hold is separate
+from a normal lifecycle [`suspendReason`](/scion/local/agent-lifecycle/#suspending-an-agent)
+(`user`, `idle`, or `stalled`), and held agents are never auto-woken under the
+`lifecycle.idle_suspend` experiment.
 
 Starting, restarting, waking or reincarnating a held agent returns
 `409 conflict` with "This agent is suspended. A hub admin can lift the hold."

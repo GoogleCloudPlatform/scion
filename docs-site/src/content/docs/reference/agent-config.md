@@ -20,7 +20,7 @@ Previous versions of Scion used `scion-agent.json`. The new versioned settings s
 | :--- | :--- | :--- | :--- | :--- |
 | **Job keys** | `harness_config` / `default_harness_config`, `model`, `thinking_level`, `agent_instructions`, `system_prompt`, `skills`, `mcp_servers`, `command_args`, `task_flag`, `max_turns`, `max_model_calls`, `max_duration`, `services`, `secrets` (names only), `message_mode` | Set | Set; beats the project and the template | Project defaults, hub `agent_defaults`, broker settings, the harness-config |
 | **Template env** | `env` | A [fallback](#environment-variables-env) for the job's own tools | Request env, at its usual System A rank | Settings, hub env scopes, secrets, the runtime |
-| **Environment keys** | `image`, `resources`, `volumes`, `kubernetes`, `hub`, `telemetry` | **Ignored, with a warning** | Set for this agent (`telemetry`: on/off only) | The harness-config (`config.yaml`), broker settings and profiles, hub settings, project policy |
+| **Environment keys** | `image`, `resources`, `volumes`, `kubernetes`, `hub`, `telemetry`, `persistence` | **Ignored, with a warning** | Set for this agent (`telemetry`: on/off only; `persistence`: create only) | The harness-config (`config.yaml`), broker settings and profiles, hub settings, project policy |
 
 A template that sets an environment key still loads. The agent start prints `template <name> sets environment key(s) <keys>; ignored (environment comes from settings)`, the hub logs a warning naming the keys when the template is committed, and a hub admin can list every affected template with `GET /api/v1/admin/validate-resources` (`templateConfigFindings`, kind `environment_keys`). Remove the key from the template and set the value where the last column says. For the full precedence of every class, see [Settings Precedence](/scion/reference/settings-precedence/#the-model-a-template-describes-the-job-settings-describe-the-environment).
 
@@ -55,6 +55,7 @@ Scion automatically injects contextual platform skills into the agent's environm
 
 - **`git-sandbox`**: Injected if the agent is running in a Git-backed workspace. Provides operational context for git worktree and branch management.
 - **Platform Skills**: Core instructions (such as status signaling, messaging, and command operations) are dynamically injected to guide the agent in interacting with the system.
+- **Experiment gating**: Platform skills and their supporting `.md` files can gate experimental guidance on a registered [experiment](/scion/reference/experiments/) in two ways: setting `experiment: <id>` in YAML frontmatter (which omits the entire skill directory when on `SKILL.md`, or omits that supporting file), or wrapping a section in `<!-- scion:experiment <id> -->` … `<!-- scion:end-experiment -->` HTML comments (outside fenced code blocks). At provisioning and start, Scion evaluates these gates against the experiments dispatched by the Hub (`HubAgentDefaults.Experiments`) in Runtime Broker mode, or `local_experiments` from settings in solo CLI mode, failing closed (any experiment not explicitly enabled is omitted, for example `scion-artifacts` gated on `hub.artifacts` and the Choices reference in `scion-messaging` gated on `web.chat_choices`).
 
 These platform skills are managed by Scion and do not need to be manually included in your template definition.
 
@@ -98,6 +99,7 @@ The keys in this section are **ignored in templates**, with a warning. They take
 | `kubernetes` | object | Kubernetes runtime overrides (see below). | Settings runtimes and profiles |
 | `hub` | object | Hub endpoint override (see below). | Broker settings |
 | `telemetry` | object | Telemetry. Only `enabled` is honoured. | Settings `telemetry`; hub telemetry config; project telemetry policy |
+| `persistence` | string | Experimental ([`hub.cloudrun_ephemeral_agents`](/scion/reference/experiments/#server-experiments-with-notes)). `"persistent"` (default when omitted or empty) or `"ephemeral"`. Fixed at creation (`TX`); an `"ephemeral"` agent runs on a Cloud Run Runtime Broker that advertises `ephemeralPersistence` and receives a fresh memory-backed Agent home and workspace on every start, keeping nothing across stops. | Agent creation request only (`POST /api/v1/agents`) |
 
 ### Workspace Clone
 

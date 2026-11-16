@@ -53,6 +53,16 @@ does not (for example, the `generic` harness), the command is rejected with an
 error and you should use `scion stop` instead. When using `--all`, unsupported
 agents are skipped rather than failing the whole batch.
 
+**Suspend reasons and retained activities.** While an agent is in the `suspended` phase, the Hub records why it was suspended in `suspendReason` (cleared as soon as the agent leaves `suspended`):
+
+- `user` — suspended explicitly by a user or agent (`scion suspend` or `POST /api/v1/agents/:id/suspend`).
+- `idle` — suspended automatically by the Hub after going idle.
+- `stalled` — suspended automatically by the Hub after stalling (see [Auto-Suspend of Stalled Agents](#auto-suspend-of-stalled-agents)).
+
+Suspending an agent also preserves a terminal or error-bearing activity (`completed`, `idle`, or `harness_error`) across the suspend instead of clearing it, so you can still tell whether a suspended agent finished its task, went idle, or hit a model error before it was suspended. `scion list` displays both next to `suspended` in the **PHASE** column, for example `suspended (idle)` or `suspended · completed (stalled)` (`--activity` without `--phase` still matches active or terminal agents rather than suspended rows carrying a retained activity). For membership-loss holds (`suspension.held`), see [Agent Suspension When a Member Leaves a Project](/scion/reference/agent-suspension/).
+
+**Auto-wake on new work (`lifecycle.idle_suspend`).** When the [`lifecycle.idle_suspend`](/scion/reference/experiments/#server-experiments-with-notes) experiment is enabled (alpha, off by default), an agent the Hub suspended on its own (`suspendReason` `idle` or `stalled`) is resumed automatically whenever a direct message, web chat message, `@`-mention, notification, or scheduled message arrives for it — no `--wake` flag or `agent.lifecycle` permission is required on the sender (messaging permission is enough). Direct messages, primary web chat targets, and scheduled messages wait for the resume and then deliver; `@`-mentions, secondary web chat targets, and notifications are accepted immediately and delivered after a background resume. Agents suspended explicitly (`suspendReason` `user`), agents suspended before `suspendReason` was recorded, and held agents are never woken automatically.
+
 ### Resuming an agent
 
 ```bash
@@ -413,11 +423,15 @@ connection is flagged this way. CPU work is not capped. Either way, auto-suspend
 skips an agent whose container reported live work in the last 90 seconds, so a
 running tool call is never suspended.
 
-Auto-suspend uses the same machinery as a manual `scion suspend`, so the agent's
-phase becomes `suspended`, its harness session is preserved, and its Hub
-credentials and active delegation grants are revoked. The agent
-resumes, continuing where it left off, when someone sends it a message with wake
-(`scion message --wake`, or the web UI's wake prompt) or starts it.
+Auto-suspend uses the same machinery as a manual `scion suspend`, setting the
+agent's phase to `suspended` with `suspendReason: "stalled"`, preserving its
+harness session (and any `completed`, `idle`, or `harness_error` activity), and
+revoking its Hub credentials and active delegation grants. The agent resumes,
+continuing where it left off, when someone starts it or sends it a message with
+wake (`scion message --wake` or the web UI's wake prompt) — or automatically on
+any incoming message, mention, notification, or scheduled message when the
+[`lifecycle.idle_suspend`](/scion/reference/experiments/#server-experiments-with-notes)
+experiment is enabled.
 
 :::tip
 If your agent is *intentionally* idle — for example, waiting on a child agent or

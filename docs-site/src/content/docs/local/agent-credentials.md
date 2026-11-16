@@ -352,8 +352,8 @@ Broker cannot see (volumes, file secrets, a persistent home, pre-start hooks). A
 configs declare a no-auth fallback, so for them only an explicit auth type can fail this way.
 
 :::note[Git Credentials and GCP Service Accounts in No-Auth Fallback]
-* **Git Credentials Exemption**: During a no-auth fallback (when LLM credentials are not yet found or captured), Scion previously suppressed all secrets. Now, Git credentials (specifically `GITHUB_TOKEN`) are **exempt from suppression**. Scion will resolve `GITHUB_TOKEN` from project secrets (with a fallback to user-scoped secrets) so that repository cloning in `clone-per-agent` workspaces succeeds even when running in no-auth fallback mode.
-* **GCP Service Account Check**: To prevent false no-auth fallback triggers, Scion skips explicit environment variable checks for GCP-backed auth types when a verified Google Cloud Service Account (SA) is assigned to the agent.
+* **Strict Secret Suppression with Git Clone Exemption**: When an agent starts in `NoAuth` fallback mode (no LLM credentials resolved), the Hub withholds all Hub-resolved environment variables and secrets — including `always`-injected environment variables, `file` and `variable` secrets, and harness credentials — except `GITHUB_TOKEN` (resolved from project secrets, or from the owner's user-scoped `GITHUB_TOKEN` when the agent's delegation chain is recorded to the owner) so repository cloning in `clone-per-agent` and `worktree-per-agent` workspaces still succeeds without exposing other secrets to an unauthenticated shell.
+* **GCP Service Account Check**: To prevent false no-auth fallback triggers, Scion skips explicit environment variable checks for GCP-backed auth types when a verified Google Cloud Service Account (SA) is assigned to the agent (unless the agent's resolved GCP identity mode is explicitly `block`, in which case any project default service account is ignored).
 :::
 
 ## Capturing Credentials from a Running Agent
@@ -368,7 +368,7 @@ After logging in interactively inside the agent (via `scion attach` or the termi
 
 Credential capture supports scoping captured credentials to either the **project** (visible to all agents in the project) or the **user** (personal secrets visible only to your own agents).
 
-*   **In the Web UI**: Clicking the **Capture Auth** button triggers an interactive dialog allowing you to choose between **Project** scope and **User** scope before executing the capture script.
+*   **In the Web UI**: Clicking the **Capture Auth** button triggers an interactive dialog allowing you to choose between **Project** scope and **User** scope before executing the capture script. If `~/.scion/harness/capture_auth.py` is absent in the container (for example when [`server.broker.allow_container_script_harnesses`](/scion/reference/server-config/#broker-settings-serverbroker) is `false` on the Runtime Broker), the terminal page shows a warning toast instead of sending the command.
 *   **Via CLI/Script**: The `capture_auth.py` script defaults to `user` scope with progeny enabled. You can optionally override this with `--scope project` to make the credential available to all users in the project:
     ```bash
     # Capture credentials to the user scope (default)

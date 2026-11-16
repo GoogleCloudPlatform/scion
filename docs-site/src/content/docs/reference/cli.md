@@ -694,11 +694,15 @@ Shows an agent's current terminal output.
 
 **GCP identity header.** When the Hub has recorded a GCP identity for the agent, `scion look` first prints one line naming it: the metadata mode, the assigned service account and the agent's profile, for example `GCP identity: assign as "Build worker" (profile: gke)`. The account is shown by its registered display name, or by its email when it has no display name or you cannot read the project's service account registrations. `block` and `passthrough` show the mode only. The line goes to stderr, so stdout still carries only the terminal output for scripts that parse it. No line is printed when no identity is recorded or the agent cannot be read.
 
+**Authority notice and capture errors.** In human CLI mode, when the Hub reports the agent's authority state as `orphaned` or `revoked` (see [Orphaned and revoked agents](/scion/hosted/single-node/auth/#orphaned-and-revoked-agents)), `scion look` prints a notice naming the cause on stderr. If `tmux capture-pane` exits non-zero inside the container, `scion look` exits non-zero with the error on stderr instead of writing error text to stdout.
+
 ### `scion list` (or `ps`)
 
 Lists all agents and their status.
 
 **Usage:** `scion list [flags]`
+
+**Status display (`PHASE` column).** In human table output, a suspended agent shows its recorded `suspendReason` (`user`, `idle`, or `stalled`) and any retained terminal/idle activity (`completed`, `idle`, or `harness_error`) — for example `suspended (idle)` or `suspended · completed (stalled)` (see [Agent Lifecycle](/scion/local/agent-lifecycle/#suspending-an-agent)). When an agent's Hub authority state is `orphaned` or `revoked`, `scion list` requests `include=authority` and appends `(ORPHANED)` or `(REVOKED)` to its phase (for example `running (ORPHANED)`).
 
 **GCP identity.** With `--format json`, each agent carries a `gcpIdentity` object when the Hub has recorded one: `mode` (`block`, `passthrough` or `assign`) and, for `assign`, `serviceAccountId`, `serviceAccountEmail` and `displayName` (the registered display name, omitted when you cannot read the project's service account registrations). The table output has no identity column.
 
@@ -707,7 +711,7 @@ Lists all agents and their status.
 - **Flags:**
     - `-a, --all`: Show all agents (including stopped ones).
     - `-r, --running`: Filter for active (running) agents.
-    - `--phase <phase>`, `--activity <activity>`, `--template <name>`, `--label <key=value>` (repeatable): Filter by attribute. Combine with each other using AND.
+    - `--phase <phase>`, `--activity <activity>`, `--template <name>`, `--label <key=value>` (repeatable): Filter by attribute. Combine with each other using AND. Passing `--activity` without `--phase` matches active or terminal agents with that activity, not suspended rows carrying a retained activity; pass `--phase suspended` together with `--activity` to match suspended rows by retained activity.
     - `--owner <user>`: Filter by owner — a user ID, name, email, or the reserved value `me` (a user whose display name is literally "me" cannot be matched by name; use their ID or email). Owner is the direct creator (`createdBy`), which for an agent-created agent is another **agent**, not the human at the root of the tree — `--owner alice` does not include agents created by alice's agents, and `--owner me` when authenticated with an agent token means "agents I directly created."
     - `--broker <name|id>`: Filter by runtime broker name or ID.
     - `--harness <harness-config name>`: Filter by harness-config name.
@@ -1609,6 +1613,35 @@ Manages notifications and notification subscriptions.
 - `scion notifications subscriptions` (alias `subs`): List your active notification subscriptions. Runs inside or outside a local `.scion` directory. By default, filters to the active Hub project resolved in standard CLI order: `--project`/`-g` (a linked local project path, or a Hub project ID, slug, name, or git URL) or `--global`, then the agent container environment (`SCION_PROJECT_ID`), then a linked directory project's Hub project ID, then the `scion use` context project (outside a local project directory), then `~/.scion` if linked to a Hub project. An unlinked directory checkout is never sent as a Hub project filter; instead, all accessible subscriptions are listed with a note on stderr in text mode. When a project filter returns no subscriptions, the output names the filtered project and suggests `--all`.
     - Flags: `--all`, `-a` (list subscriptions across all projects; cannot be combined with `--project`/`-g` or `--global`), `--project`, `-g <project>` (filter by project), `--json` (format output as JSON).
 
+## Scheduling
+
+### `scion schedule`
+
+Manage one-shot scheduled events and recurring cron schedules on the Hub for the active project (requires Hub mode; available in both human and agent mode). See [Scheduling](/scion/hosted/user/scheduling/) for event types, time zones, and authority rules.
+
+- `scion schedule create`: Schedule a one-shot event. Requires either `--in <duration>` (for example `30m`, `2h`, `1d`) or `--at <RFC3339>`.
+    - Flags:
+        - `--in <duration>`, `--at <RFC3339>`: Relative delay or absolute fire timestamp (mutually exclusive; one required).
+        - `--type <message|dispatch_agent>`: Event type (default: `message`).
+        - `--name <name>`: Optional label for the one-shot event.
+        - `--agent <name>`: Target agent (`message` events) or newly dispatched agent name (`dispatch_agent` events).
+        - `--message <text>`: Message body (`message` events).
+        - `--wake`: Start or resume the target agent before delivering a `message` event if it is stopped or suspended.
+        - `--template <name>`, `--task <prompt>`, `--branch <git-branch>`: Agent launch parameters for `dispatch_agent` events (`--task` is required for `dispatch_agent`).
+- `scion schedule create-recurring`: Create a recurring cron schedule.
+    - Flags:
+        - `--name <name>` (required): Unique schedule name within the project.
+        - `--cron "<min> <hour> <dom> <mon> <dow>"` (required): Standard 5-field cron expression.
+        - `--time-zone <IANA-zone>`: Time zone in which `--cron` is evaluated (for example `America/Los_Angeles`; defaults to your Hub profile timezone when set, else `UTC`).
+        - `--type <message|dispatch_agent>`, `--agent <name>`, `--message <text>`, `--wake`, `--template <name>`, `--task <prompt>`, `--branch <git-branch>`: Same event parameters as `create`.
+- `scion schedule list`: List recurring schedules and one-shot events in the project (`--show all|events|recurring`, default `all`). When authenticated as an agent, the Hub returns only schedules and events whose recorded authority is that agent, and text mode prints `Note: showing only schedules and events held by this agent` on stderr.
+- `scion schedule get <id-or-name>`: Inspect a recurring schedule or one-shot event by full UUID, unique UUID prefix, or recurring schedule name.
+- `scion schedule cancel <id>`: Cancel a `pending` one-shot event (accepts full UUID or unique UUID prefix).
+- `scion schedule pause <id-or-name>`, `scion schedule resume <id-or-name>`, `scion schedule delete <id-or-name>`: Pause, resume, or delete a recurring schedule by UUID, unique UUID prefix, or name. Resuming a schedule transfers its recorded authority to the caller.
+- `scion schedule history <id-or-name>`: Show recent execution history for a recurring schedule (`--limit <n>`).
+
+When an agent caller receives `404` or `409` because a named schedule in the project is held by another principal (so it is hidden from or not mutable by the calling agent's token), the CLI appends a hint suggesting a user session or checking who created or last resumed the schedule.
+
 ## Infrastructure
 
 ### `scion runtime-broker`
@@ -1731,7 +1764,7 @@ Administrative operations for managing a Scion Hub and emergency recovery. Subco
 
 Promotes an existing user to the admin role by connecting directly to the database, bypassing the running Hub server. This is a break-glass recovery command for situations where all admin users have been removed or an organization has lost admin access.
 
-The target user must already exist in the database — this command does not create new users.
+The target user must already exist in the database as a signed-in user — this command does not create new users, and it refuses pre-sign-in `invited` users (whose Hub role is assigned at first sign-in) as well as Hub test identities.
 
 **Usage:** `scion admin promote [flags]`
 

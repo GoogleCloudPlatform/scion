@@ -276,7 +276,7 @@ Hub administrators can set a hub-wide default GCP identity in **Admin > Server C
 
 1. The GCP identity in the agent create request. Not applicable to an agent dispatched by a schedule, which carries no explicit identity.
 2. The project's per-profile default service account for the profile the agent runs under (see [Per-Profile Default Service Accounts](#per-profile-default-service-accounts)).
-3. The project's default GCP identity. An explicit project **Block** counts as set, so the hub default is not consulted.
+3. The project's default GCP identity. An explicit project **Block** counts as set, so the hub default is not consulted. (Whenever an agent's resolved GCP identity mode is explicitly **Block** — from the request, project default, or hub default — harness credential resolution also ignores any project default service account rather than treating it as an assigned GCP identity.)
 4. The hub default. An explicit hub default of **Block** counts as set too.
 5. Nothing configured at any rung: the Hub leaves the agent's GCP identity unset and sends no mode, so the Runtime Broker applies its runtime default: **Block** on every runtime except Kubernetes, **Passthrough** on Kubernetes.
 
