@@ -674,3 +674,143 @@ func TestAntigravityDockerfileContractDetectsViolations(t *testing.T) {
 		expectViolation(t, m.name, checkAntigravityDockerfileContract(t, m.src), m.want)
 	}
 }
+
+const expectedPlaywrightBrowsersPath = "/usr/local/share/ms-playwright"
+
+// checkBaseImagePlaywrightFfmpegContract verifies that a foundation Dockerfile
+// (core-base or thick-prep) sets ENV PLAYWRIGHT_BROWSERS_PATH outside /home/scion
+// (which is bind-mounted at container start) and runs install-core-toolchain.sh
+// playwright-ffmpeg after npm-tools and before verify-base-contract.sh.
+func checkBaseImagePlaywrightFfmpegContract(t *testing.T, name, content string) []string {
+	t.Helper()
+	stages := parseDockerfileStages(t, content)
+	if len(stages) == 0 {
+		return []string{name + ": no stages found"}
+	}
+	final := &stages[len(stages)-1]
+	var errs []string
+
+	if got, ok := envValue(final, "PLAYWRIGHT_BROWSERS_PATH"); !ok || got != expectedPlaywrightBrowsersPath {
+		errs = append(errs, name+": final stage must set ENV PLAYWRIGHT_BROWSERS_PATH="+expectedPlaywrightBrowsersPath+"; got "+got)
+	}
+
+	envStep, npmToolsStep, ffmpegStep, verifyStep := -1, -1, -1, -1
+	seq := 0
+	for _, in := range final.instrs {
+		switch in.cmd {
+		case "ENV":
+			for _, k := range envOrArgKeys(in.args) {
+				if k == "PLAYWRIGHT_BROWSERS_PATH" {
+					seq++
+					envStep = seq
+				}
+			}
+		case "RUN":
+			for _, andClause := range strings.Split(in.args, "&&") {
+				for _, clause := range strings.Split(andClause, ";") {
+					c := strings.Join(strings.Fields(clause), " ")
+					switch {
+					case strings.Contains(c, "install-core-toolchain.sh npm-tools"):
+						seq++
+						npmToolsStep = seq
+					case strings.Contains(c, "install-core-toolchain.sh playwright-ffmpeg"):
+						seq++
+						ffmpegStep = seq
+					case strings.Contains(c, "verify-base-contract.sh"):
+						seq++
+						verifyStep = seq
+					}
+				}
+			}
+		}
+	}
+
+	if ffmpegStep < 0 {
+		errs = append(errs, name+": final stage must run `install-core-toolchain.sh playwright-ffmpeg`")
+		return errs
+	}
+	if envStep >= 0 && envStep > ffmpegStep {
+		errs = append(errs, name+": ENV PLAYWRIGHT_BROWSERS_PATH must precede `install-core-toolchain.sh playwright-ffmpeg`")
+	}
+	if npmToolsStep >= 0 && ffmpegStep < npmToolsStep {
+		errs = append(errs, name+": `install-core-toolchain.sh playwright-ffmpeg` must run after `install-core-toolchain.sh npm-tools`")
+	}
+	if verifyStep >= 0 && ffmpegStep > verifyStep {
+		errs = append(errs, name+": `install-core-toolchain.sh playwright-ffmpeg` must run before `verify-base-contract.sh`")
+	}
+	return errs
+}
+
+func TestBaseImageDockerfilesConfigurePlaywrightFfmpeg(t *testing.T) {
+	for _, f := range []string{
+		"image-build/core-base/Dockerfile",
+		"image-build/thick-prep/Dockerfile",
+	} {
+		for _, e := range checkBaseImagePlaywrightFfmpegContract(t, f, readRepoFile(t, f)) {
+			t.Error(e)
+		}
+	}
+}
+
+func TestBaseImagePlaywrightFfmpegContractDetectsViolations(t *testing.T) {
+	good := "FROM node:24-trixie-slim\n" +
+		"ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global\n" +
+		"ENV PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/ms-playwright\n" +
+		"RUN /opt/scion-image-build/lib/install-core-toolchain.sh npm-tools \\\n" +
+		"    && /opt/scion-image-build/lib/install-core-toolchain.sh playwright-ffmpeg\n" +
+		"RUN /opt/scion-image-build/lib/verify-base-contract.sh\n"
+
+	if errs := checkBaseImagePlaywrightFfmpegContract(t, "test/Dockerfile", good); len(errs) != 0 {
+		t.Fatalf("valid Dockerfile reported violations: %q", errs)
+	}
+
+	mutations := []struct{ name, src, want string }{
+		{
+			"missing PLAYWRIGHT_BROWSERS_PATH",
+			mustReplace(t, good, "ENV PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/ms-playwright\n", ""),
+			"must set ENV PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/ms-playwright",
+		},
+		{
+			"path under /home/scion (shadowed by runtime bind mount)",
+			mustReplace(t, good, "/usr/local/share/ms-playwright", "/home/scion/.cache/ms-playwright"),
+			"must set ENV PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/ms-playwright",
+		},
+		{
+			"missing playwright-ffmpeg step",
+			mustReplace(t, good, " \\\n    && /opt/scion-image-build/lib/install-core-toolchain.sh playwright-ffmpeg", ""),
+			"must run `install-core-toolchain.sh playwright-ffmpeg`",
+		},
+		{
+			"ENV set after playwright-ffmpeg",
+			mustReplace(
+				t,
+				mustReplace(t, good, "ENV PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/ms-playwright\n", ""),
+				"RUN /opt/scion-image-build/lib/verify-base-contract.sh\n",
+				"ENV PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/ms-playwright\nRUN /opt/scion-image-build/lib/verify-base-contract.sh\n",
+			),
+			"ENV PLAYWRIGHT_BROWSERS_PATH must precede",
+		},
+		{
+			"playwright-ffmpeg before npm-tools",
+			"FROM node:24-trixie-slim\n" +
+				"ENV PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/ms-playwright\n" +
+				"RUN /opt/scion-image-build/lib/install-core-toolchain.sh playwright-ffmpeg\n" +
+				"RUN /opt/scion-image-build/lib/install-core-toolchain.sh npm-tools\n" +
+				"RUN /opt/scion-image-build/lib/verify-base-contract.sh\n",
+			"must run after `install-core-toolchain.sh npm-tools`",
+		},
+		{
+			"playwright-ffmpeg after verify-base-contract.sh",
+			mustReplace(
+				t,
+				mustReplace(t, good, " \\\n    && /opt/scion-image-build/lib/install-core-toolchain.sh playwright-ffmpeg", ""),
+				"RUN /opt/scion-image-build/lib/verify-base-contract.sh\n",
+				"RUN /opt/scion-image-build/lib/verify-base-contract.sh\nRUN /opt/scion-image-build/lib/install-core-toolchain.sh playwright-ffmpeg\n",
+			),
+			"must run before `verify-base-contract.sh`",
+		},
+	}
+	for _, m := range mutations {
+		expectViolation(t, m.name, checkBaseImagePlaywrightFfmpegContract(t, "test/Dockerfile", m.src), m.want)
+	}
+}

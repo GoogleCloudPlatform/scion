@@ -151,11 +151,18 @@ ensure_google_keyring() {
 # suites (libpython3.x-stdlib depends on it): a configured agent TZ only takes
 # effect if /usr/share/zoneinfo exists, and glibc silently treats an unknown
 # zone as UTC, so losing it to a dependency change would fail without a trace.
+#
+# ffmpeg backs Playwright video recording (VP8/VP9 WebM) and post-processing
+# (MP4/GIF/voice-over) without a runtime download (step_playwright_ffmpeg wires
+# Playwright's browser registry to it). Its codec graph largely overlaps
+# chromium and playwright-deps, so --no-install-recommends adds ~3 MiB on
+# core-base.
 COMMON_PACKAGES="
   tmux ca-certificates libexpat1 zlib1g python3 python3-venv make g++ man-db
   curl wget dnsutils less jq bc unzip rsync ripgrep procps psmisc lsof socat
   sudo fzf zsh gnupg2 iptables ipset iproute2 aggregate nano vim openssh-client
   lsb-release dbus-x11 gnome-keyring libsecret-1-0 libsecret-tools tzdata
+  ffmpeg
 "
 
 step_apt_common() {
@@ -559,6 +566,94 @@ step_npm_tools() {
   npm install -g chrome-devtools-mcp @playwright/cli@latest
 }
 
+# Baseline Playwright ffmpeg registry revisions: covers Playwright 1.40 (1009)
+# through 1.66 (1013), including web/package-lock.json (1.62 -> 1011) and
+# @playwright/cli (1.66 -> 1013). step_playwright_ffmpeg also inspects the
+# installed @playwright/cli browsers.json so a newer @playwright/cli@latest
+# revision is wired automatically at image-build time.
+PLAYWRIGHT_FFMPEG_REVISIONS="1009 1010 1011 1012 1013"
+
+# Wire Playwright's browser registry to the system ffmpeg binary.
+#
+# Playwright's VideoRecorder does not consult PATH or an ffmpeg-specific env
+# var; it resolves <PLAYWRIGHT_BROWSERS_PATH>/ffmpeg-<rev>/ffmpeg-linux on both
+# linux-x64 and linux-arm64. /home/scion cannot hold this cache because agent
+# home is bind-mounted over /home/scion at container start, so the Dockerfiles
+# export ENV PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/ms-playwright.
+#
+# Both the registry root and .links use mode 1777 (sticky world-writable) so
+# non-root agents — including workstation runs where sciontool init remaps the
+# scion UID — can acquire __dirlock and run `npx playwright install webkit`
+# while the root-owned ffmpeg-<rev> entries stay protected. Each revision also
+# gets INSTALLATION_COMPLETE, browsers.json, package.json (read by
+# `playwright install --list`) and a .links back-reference (no trailing
+# newline: Playwright's _traverseBrowserInstallations reads the link target
+# verbatim without trimming) so `playwright install` neither re-downloads
+# ffmpeg nor garbage-collects other seeded revisions as unused.
+step_playwright_ffmpeg() {
+  local ffmpeg_bin ffmpeg_ver
+  ffmpeg_bin="$(command -v ffmpeg 2>/dev/null || true)"
+  if [ -z "$ffmpeg_bin" ]; then
+    echo "FAIL: ffmpeg not found on PATH; run apt-common before playwright-ffmpeg." >&2
+    exit 1
+  fi
+  ffmpeg_ver="$(probe_version "$ffmpeg_bin" -version)"
+  if [ -z "$ffmpeg_ver" ]; then
+    echo "FAIL: ffmpeg at $ffmpeg_bin does not run ('ffmpeg -version' failed)." >&2
+    exit 1
+  fi
+
+  local browsers_dir="${PLAYWRIGHT_BROWSERS_PATH:-/usr/local/share/ms-playwright}"
+  local npm_prefix="${NPM_CONFIG_PREFIX:-/usr/local/share/npm-global}"
+  local cli_browsers="${npm_prefix}/lib/node_modules/@playwright/cli/node_modules/playwright-core/browsers.json"
+
+  local extra_revs=""
+  if [ -f "$cli_browsers" ]; then
+    if command -v jq >/dev/null 2>&1; then
+      extra_revs="$(jq -r '.browsers[]? | select(.name == "ffmpeg") | .revision // empty' "$cli_browsers" 2>/dev/null || true)"
+    elif command -v node >/dev/null 2>&1; then
+      extra_revs="$(node -e '
+        const b = require(process.argv[1]).browsers || [];
+        for (const x of b) if (x.name === "ffmpeg" && x.revision) console.log(x.revision);
+      ' "$cli_browsers" 2>/dev/null || true)"
+    fi
+  fi
+
+  local unique_revs="" rev
+  for rev in $PLAYWRIGHT_FFMPEG_REVISIONS $extra_revs; do
+    case "$rev" in
+    '' | *[!0-9]*) continue ;;
+    esac
+    case " $unique_revs " in
+    *" $rev "*) ;;
+    *) unique_revs="${unique_revs:+$unique_revs }$rev" ;;
+    esac
+  done
+
+  log "wiring Playwright ffmpeg (${ffmpeg_bin}, revisions: ${unique_revs}) in ${browsers_dir}"
+  mkdir -p "${browsers_dir}/.links"
+  chmod 1777 "${browsers_dir}" "${browsers_dir}/.links"
+
+  local rev_dir
+  for rev in $unique_revs; do
+    rev_dir="${browsers_dir}/ffmpeg-${rev}"
+    mkdir -p "$rev_dir"
+    chmod 0755 "$rev_dir"
+    ln -sf "$ffmpeg_bin" "${rev_dir}/ffmpeg-linux"
+    : >"${rev_dir}/INSTALLATION_COMPLETE"
+    : >"${rev_dir}/DEPENDENCIES_VALIDATED"
+    printf '{"browsers":[{"name":"ffmpeg","revision":"%s"}]}\n' "$rev" >"${rev_dir}/browsers.json"
+    printf '{"name":"scion-system-ffmpeg","version":"0.0.0"}\n' >"${rev_dir}/package.json"
+    printf '%s' "$rev_dir" >"${browsers_dir}/.links/scion-ffmpeg-${rev}"
+    chmod 0644 \
+      "${rev_dir}/INSTALLATION_COMPLETE" \
+      "${rev_dir}/DEPENDENCIES_VALIDATED" \
+      "${rev_dir}/browsers.json" \
+      "${rev_dir}/package.json" \
+      "${browsers_dir}/.links/scion-ffmpeg-${rev}"
+  done
+}
+
 # Free uid 1000 for the scion user that scion-base creates. Matched by uid
 # rather than by name: node:24 names it `node`, Cloud Workstations names it
 # `ubuntu`, and the next base will pick a third name.
@@ -625,10 +720,11 @@ main() {
   golangci-lint) step_golangci_lint "$@" ;;
   npm-global) step_npm_global "$@" ;;
   npm-tools) step_npm_tools "$@" ;;
+  playwright-ffmpeg) step_playwright_ffmpeg "$@" ;;
   free-uid-1000) step_free_uid_1000 "$@" ;;
   *)
     echo "unknown step: $step" >&2
-    echo "steps: apt-common chromium playwright-deps go gcsfuse gcloud kubectl gh helm golangci-lint npm-global npm-tools free-uid-1000" >&2
+    echo "steps: apt-common chromium playwright-deps go gcsfuse gcloud kubectl gh helm golangci-lint npm-global npm-tools playwright-ffmpeg free-uid-1000" >&2
     exit 2
     ;;
   esac

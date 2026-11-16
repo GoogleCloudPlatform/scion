@@ -120,6 +120,16 @@ own for the base's distro release; the script names the Playwright version it
 came from and how to regenerate it. Only Debian 13 (core-base) has a list, so
 thick-prep's Ubuntu 24.04 base does not get these libraries.
 
+Both foundations (`core-base` and `thick-prep`) also install the distro `ffmpeg`
+package (`--no-install-recommends` in `apt-common`), export
+`PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/ms-playwright`, and wire
+`ffmpeg-<rev>/ffmpeg-linux` symlinks to `/usr/bin/ffmpeg`
+(`install-core-toolchain.sh playwright-ffmpeg`). Keeping the registry outside
+`/home/scion` avoids the runtime agent-home bind mount, while sticky `1777`
+permissions on `/usr/local/share/ms-playwright` and `.links` still allow
+non-root agents to acquire Playwright's directory lock and install WebKit or
+Firefox at runtime without downloading `ffmpeg`.
+
 ### Builders
 
 `build-images.sh` selects an execution backend with `--builder <name>`. Three are bundled:

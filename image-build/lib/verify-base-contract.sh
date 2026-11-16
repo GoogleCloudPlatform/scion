@@ -470,6 +470,107 @@ debian13)
 esac
 
 # ---------------------------------------------------------------------------
+# ffmpeg and Playwright video-recording registry — Playwright's VideoRecorder
+# (recordVideo / `playwright-cli video-start`) encodes screencast frames to
+# WebM via libvpx (Playwright <=1.64, revision 1011) or libvpx-vp9 (1.65+,
+# revision 1013), and agents also run ffmpeg directly for MP4/GIF/voice-over
+# conversion. Playwright resolves <PLAYWRIGHT_BROWSERS_PATH>/ffmpeg-<rev>/
+# ffmpeg-linux rather than searching PATH, and /home/scion is shadowed at
+# container start by the agent-home bind mount, so the registry lives at
+# /usr/local/share/ms-playwright with sticky 1777 permissions so non-root
+# agents can still run `npx playwright install webkit firefox` alongside it.
+# ---------------------------------------------------------------------------
+if command -v ffmpeg >/dev/null 2>&1; then
+  ffmpeg_bin="$(command -v ffmpeg)"
+  ffmpeg_payload="$(readlink -f "$ffmpeg_bin")"
+
+  if is_elf "$ffmpeg_payload"; then
+    ffmpeg_arch="$(elf_arch "$ffmpeg_payload")"
+    if [ -z "$EXPECTED_ARCH" ] || [ "$ffmpeg_arch" = "$EXPECTED_ARCH" ]; then
+      ok "ffmpeg payload is $ffmpeg_arch ($ffmpeg_payload)"
+    else
+      fail "ffmpeg payload $ffmpeg_payload is $ffmpeg_arch but this image
+      targets $EXPECTED_ARCH"
+    fi
+    if command -v ldd >/dev/null 2>&1; then
+      ffmpeg_missing="$(ldd "$ffmpeg_payload" 2>/dev/null | grep 'not found' || true)"
+      if [ -z "$ffmpeg_missing" ]; then
+        ok "ffmpeg shared libraries all resolve"
+      else
+        fail "ffmpeg is missing shared libraries:
+${ffmpeg_missing}"
+      fi
+    fi
+  fi
+
+  if ffmpeg_ver="$(ffmpeg -version 2>&1)"; then
+    ok "ffmpeg executes (${ffmpeg_ver%%$'\n'*})"
+    ffmpeg_encoders="$(ffmpeg -hide_banner -encoders 2>/dev/null || true)"
+    for _enc in libvpx libvpx-vp9; do
+      if printf '%s\n' "$ffmpeg_encoders" | grep -Eq "[[:space:]]${_enc}([[:space:]]|\$)"; then
+        ok "ffmpeg encoder ${_enc} available"
+      else
+        fail "ffmpeg lacks the ${_enc} encoder — Playwright video recording
+      encodes WebM with libvpx (<=1.64) and libvpx-vp9 (1.65+)"
+      fi
+    done
+  else
+    fail "ffmpeg is on PATH but 'ffmpeg -version' failed:
+${ffmpeg_ver:-(no output)}"
+  fi
+else
+  fail "ffmpeg missing from PATH — required by Playwright video recording and
+      media post-processing (install via install-core-toolchain.sh apt-common)"
+fi
+
+PW_BROWSERS_EXPECTED=/usr/local/share/ms-playwright
+if [ "${PLAYWRIGHT_BROWSERS_PATH:-}" = "$PW_BROWSERS_EXPECTED" ]; then
+  ok "PLAYWRIGHT_BROWSERS_PATH=$PW_BROWSERS_EXPECTED"
+else
+  fail "PLAYWRIGHT_BROWSERS_PATH is '${PLAYWRIGHT_BROWSERS_PATH:-<unset>}', expected
+      $PW_BROWSERS_EXPECTED — /home/scion is bind-mounted at container start, so
+      Playwright's pre-seeded ffmpeg registry must live outside /home/scion"
+fi
+
+for _pw_dir in "$PW_BROWSERS_EXPECTED" "${PW_BROWSERS_EXPECTED}/.links"; do
+  if [ -d "$_pw_dir" ]; then
+    _pw_mode="$(stat -c '%a' "$_pw_dir" 2>/dev/null || true)"
+    if [ "$_pw_mode" = "1777" ]; then
+      ok "$_pw_dir present (mode 1777)"
+    else
+      fail "$_pw_dir has mode '${_pw_mode:-<unknown>}', expected 1777 — non-root
+      agents (including UID-remapped workstation containers) need write access
+      here for __dirlock and 'npx playwright install webkit firefox'"
+    fi
+  else
+    fail "$_pw_dir missing — run install-core-toolchain.sh playwright-ffmpeg"
+  fi
+done
+
+_pw_cli_browsers="${NPM_PREFIX_EXPECTED}/lib/node_modules/@playwright/cli/node_modules/playwright-core/browsers.json"
+_pw_cli_rev=""
+if [ -f "$_pw_cli_browsers" ] && command -v jq >/dev/null 2>&1; then
+  _pw_cli_rev="$(jq -r '.browsers[]? | select(.name == "ffmpeg") | .revision // empty' "$_pw_cli_browsers" 2>/dev/null || true)"
+fi
+_pw_checked_revs=""
+for _pw_rev in 1011 1013 $_pw_cli_rev; do
+  case "$_pw_rev" in '' | *[!0-9]*) continue ;; esac
+  case " $_pw_checked_revs " in *" $_pw_rev "*) continue ;; esac
+  _pw_checked_revs="${_pw_checked_revs} ${_pw_rev}"
+  _pw_bin="${PW_BROWSERS_EXPECTED}/ffmpeg-${_pw_rev}/ffmpeg-linux"
+  _pw_marker="${PW_BROWSERS_EXPECTED}/ffmpeg-${_pw_rev}/INSTALLATION_COMPLETE"
+  _pw_pkg="${PW_BROWSERS_EXPECTED}/ffmpeg-${_pw_rev}/package.json"
+  _pw_link="${PW_BROWSERS_EXPECTED}/.links/scion-ffmpeg-${_pw_rev}"
+  if [ -x "$_pw_bin" ] && [ -f "$_pw_marker" ] && [ -f "$_pw_pkg" ] && [ -f "$_pw_link" ] && "$_pw_bin" -version >/dev/null 2>&1; then
+    ok "Playwright ffmpeg-${_pw_rev}/ffmpeg-linux wired and runnable"
+  else
+    fail "Playwright ffmpeg-${_pw_rev} incomplete under $PW_BROWSERS_EXPECTED
+      (need runnable ffmpeg-linux, INSTALLATION_COMPLETE, package.json, and
+      .links entry; run install-core-toolchain.sh playwright-ffmpeg)"
+  fi
+done
+
+# ---------------------------------------------------------------------------
 # Timezone data — the agent TZ (defaulted to UTC by sciontool's harness
 # provisioning, cmd/sciontool/commands/harness.go) only takes effect if the
 # zone files exist. glibc treats an unknown zone as UTC without any error, so
