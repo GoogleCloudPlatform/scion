@@ -37,6 +37,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/spec"
 )
 
+const testSystemOneConsumer = "system_one_test"
+
 func setSystemOneExperimentLive(t *testing.T, srv *Server, enabled bool) {
 	t.Helper()
 	ops := srv.GetOperationalSettings()
@@ -115,20 +117,26 @@ func TestSystemOneRules_LiveExperimentToggleAndProbeParity(t *testing.T) {
 	re := srv.RuleEngine()
 	require.NotNil(t, re)
 	assert.Contains(t, re.Dialects(), systemone.DialectName)
+	require.NoError(t, re.AllowConsumerDialects(
+		testSystemOneConsumer,
+		ruleengine.GrantIO(systemone.DialectName),
+		ruleengine.Grant(ruleengine.DialectCEL),
+	))
 
-	// Phase 1: Initially OFF — Supports stays true, admin routes 404, Compile returns UnsupportedDialectError.
-	assert.True(t, re.Supports("trigger", systemone.DialectName))
+	// Phase 1: Initially OFF — Supports stays true for the test-granted consumer, admin routes 404, Compile returns UnsupportedDialectError.
+	assert.True(t, re.Supports(testSystemOneConsumer, systemone.DialectName))
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, srv, admin, http.MethodGet, systemOneAdminPath, nil).Code)
 	_, err = re.Compile(ctx, systemone.DialectName, rawSpec, ruleengine.Kind(spec.KindRoute), ruleengine.EnvironmentRef{
-		Consumer: "trigger",
+		Consumer: testSystemOneConsumer,
 		Name:     spec.ProbeEnvironmentName,
 	})
 	require.Error(t, err)
 	var unsupErr *ruleengine.UnsupportedDialectError
 	require.ErrorAs(t, err, &unsupErr)
 	assert.Equal(t, systemone.DialectName, unsupErr.Dialect)
-	assert.Equal(t, "trigger", unsupErr.Consumer)
-	assert.Equal(t, `unsupported dialect "system_one" for consumer "trigger"`, err.Error())
+	assert.Equal(t, testSystemOneConsumer, unsupErr.Consumer)
+	assert.Equal(t, ruleengine.ReasonUnknownDialect, unsupErr.Reason)
+	assert.Equal(t, `unsupported dialect "system_one" for consumer "system_one_test": unknown_dialect`, err.Error())
 
 	// Phase 2: Flip hub.system_one ON in the same Hub process without restart.
 	setSystemOneExperimentLive(t, srv, true)
@@ -164,7 +172,7 @@ func TestSystemOneRules_LiveExperimentToggleAndProbeParity(t *testing.T) {
 
 	// Compile and evaluate the identical spec via srv.RuleEngine().
 	compiledWhileOn, err := re.Compile(ctx, systemone.DialectName, rawSpec, ruleengine.Kind(spec.KindRoute), ruleengine.EnvironmentRef{
-		Consumer: "trigger",
+		Consumer: testSystemOneConsumer,
 		Name:     spec.ProbeEnvironmentName,
 	})
 	require.NoError(t, err)
@@ -191,20 +199,21 @@ func TestSystemOneRules_LiveExperimentToggleAndProbeParity(t *testing.T) {
 	// Phase 3: Flip hub.system_one OFF in the same Hub process without restart.
 	setSystemOneExperimentLive(t, srv, false)
 
-	assert.True(t, re.Supports("trigger", systemone.DialectName),
-		"Engine.Supports reports registration only and remains true when experiment is off")
+	assert.True(t, re.Supports(testSystemOneConsumer, systemone.DialectName),
+		"Engine.Supports reports registration and consumer grant only and remains true when experiment is off")
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, srv, admin, http.MethodGet, systemOneAdminPath, nil).Code)
 
 	_, err = re.Compile(ctx, systemone.DialectName, rawSpec, ruleengine.Kind(spec.KindRoute), ruleengine.EnvironmentRef{
-		Consumer: "trigger",
+		Consumer: testSystemOneConsumer,
 		Name:     spec.ProbeEnvironmentName,
 	})
 	require.Error(t, err)
 	var unsupOff *ruleengine.UnsupportedDialectError
 	require.ErrorAs(t, err, &unsupOff)
 	assert.Equal(t, systemone.DialectName, unsupOff.Dialect)
-	assert.Equal(t, "trigger", unsupOff.Consumer)
-	assert.Equal(t, `unsupported dialect "system_one" for consumer "trigger"`, err.Error())
+	assert.Equal(t, testSystemOneConsumer, unsupOff.Consumer)
+	assert.Equal(t, ruleengine.ReasonUnknownDialect, unsupOff.Reason)
+	assert.Equal(t, `unsupported dialect "system_one" for consumer "system_one_test": unknown_dialect`, err.Error())
 
 	_, err = re.Evaluate(ctx, compiledWhileOn, ruleengine.Input{
 		Payload: systemone.ProbeInput(syntheticText),
@@ -224,7 +233,7 @@ func TestSystemOneRules_LiveExperimentToggleAndProbeParity(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, doRequestAsUser(t, srv, admin, http.MethodGet, systemOneAdminPath, nil).Code)
 	_, err = re.Compile(ctx, systemone.DialectName, rawSpec, ruleengine.Kind(spec.KindRoute), ruleengine.EnvironmentRef{
-		Consumer: "trigger",
+		Consumer: testSystemOneConsumer,
 		Name:     spec.ProbeEnvironmentName,
 	})
 	require.NoError(t, err)
@@ -235,4 +244,120 @@ func TestSystemOneRules_LiveExperimentToggleAndProbeParity(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "auth", engDecAgain.String)
 	assert.Equal(t, int32(3), providerCalls.Load())
+}
+
+func TestSystemOneRules_DefaultDenyNoConsumerAdmitted(t *testing.T) {
+	ctx := context.Background()
+
+	// Start a Hub Server with hub.system_one ON and an enabled instance backed by
+	// an in-test TLS server, proving default-deny blocks admission with zero
+	// outbound provider calls even when the experiment is enabled.
+	srv, s, _ := newSystemOneTestServer(t, true)
+	admin, err := s.GetUser(ctx, hubConfigTokenUser(t, s, "s1-deny-admin", store.SystemRoleSuperAdmin))
+	require.NoError(t, err)
+
+	var providerCalls atomic.Int32
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		providerCalls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(tlsSrv.Close)
+
+	srv.setSystemOneRuntimeOptions(
+		systemoneruntime.WithEgressOptionsForTesting(
+			egress.WithLoopbackServerForTesting(tlsSrv.URL, tlsSrv.Client()),
+		),
+	)
+
+	createRec := doRequestAsUser(t, srv, admin, http.MethodPost, systemOneAdminPath, map[string]any{
+		"name":    "ts-default-deny",
+		"adapter": "typesafe",
+		"model":   "jev-1.14.0",
+		"auth":    map[string]any{"kind": "api_key", "apiKey": "sk-offline-default-deny-0001"},
+	})
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+
+	instRow, err := s.GetSystemOneInstanceByName(ctx, "ts-default-deny")
+	require.NoError(t, err)
+	instRow.Endpoint = tlsSrv.URL
+	require.NoError(t, s.UpdateSystemOneInstance(ctx, instRow))
+
+	const rawSpec = `{
+	  "version": 1,
+	  "questions": [{"id": "q1", "type": "binary", "instructions": "Does this report an outage?"}],
+	  "output": {"question": "q1"}
+	}`
+
+	re := srv.RuleEngine()
+	require.NotNil(t, re)
+	assert.Contains(t, re.Dialects(), systemone.DialectName)
+
+	// 1. Empty/whitespace consumer -> empty_consumer.
+	for _, emptyConsumer := range []string{"", "   "} {
+		assert.False(t, re.Supports(emptyConsumer, systemone.DialectName))
+		_, err := re.Compile(ctx, systemone.DialectName, rawSpec, ruleengine.KindFilter, ruleengine.EnvironmentRef{
+			Consumer: emptyConsumer,
+			Name:     spec.ProbeEnvironmentName,
+		})
+		var unsup *ruleengine.UnsupportedDialectError
+		require.ErrorAs(t, err, &unsup)
+		assert.Equal(t, ruleengine.ReasonEmptyConsumer, unsup.Reason)
+
+		forged := ruleengine.NewCompiled(emptyConsumer, systemone.DialectName, ruleengine.KindFilter, struct{}{})
+		_, err = re.Evaluate(ctx, forged, ruleengine.Input{Payload: systemone.ProbeInput("text")}, ruleengine.Budget{})
+		unsup = nil
+		require.ErrorAs(t, err, &unsup)
+		assert.Equal(t, ruleengine.ReasonEmptyConsumer, unsup.Reason)
+
+		h, err := re.DialectFor(emptyConsumer, systemone.DialectName)
+		assert.Nil(t, h)
+		unsup = nil
+		require.ErrorAs(t, err, &unsup)
+		assert.Equal(t, ruleengine.ReasonEmptyConsumer, unsup.Reason)
+	}
+
+	// 2. P1 registers no consumer allow-list: every named consumer is denied by default.
+	for _, consumer := range []string{"trigger", "message", "probe", "admin-probe", "system_one", testSystemOneConsumer} {
+		assert.False(t, re.Supports(consumer, systemone.DialectName), "consumer %q must not be admitted to system_one by default", consumer)
+		_, err := re.Compile(ctx, systemone.DialectName, rawSpec, ruleengine.KindFilter, ruleengine.EnvironmentRef{
+			Consumer: consumer,
+			Name:     spec.ProbeEnvironmentName,
+		})
+		var unsup *ruleengine.UnsupportedDialectError
+		require.ErrorAs(t, err, &unsup)
+		assert.Equal(t, systemone.DialectName, unsup.Dialect)
+		assert.Equal(t, consumer, unsup.Consumer)
+		assert.Equal(t, ruleengine.ReasonConsumerNotRegistered, unsup.Reason)
+
+		forged := ruleengine.NewCompiled(consumer, systemone.DialectName, ruleengine.KindFilter, struct{}{})
+		_, err = re.Evaluate(ctx, forged, ruleengine.Input{Payload: systemone.ProbeInput("text")}, ruleengine.Budget{})
+		unsup = nil
+		require.ErrorAs(t, err, &unsup)
+		assert.Equal(t, ruleengine.ReasonConsumerNotRegistered, unsup.Reason)
+
+		h, err := re.DialectFor(consumer, systemone.DialectName)
+		assert.Nil(t, h)
+		unsup = nil
+		require.ErrorAs(t, err, &unsup)
+		assert.Equal(t, ruleengine.ReasonConsumerNotRegistered, unsup.Reason)
+	}
+
+	// 3. Granting system_one without AllowIO is also denied with io_not_allowed.
+	require.NoError(t, re.AllowConsumerDialects("pure_only_test_consumer", ruleengine.Grant(systemone.DialectName)))
+	assert.False(t, re.Supports("pure_only_test_consumer", systemone.DialectName))
+	_, err = re.Compile(ctx, systemone.DialectName, rawSpec, ruleengine.KindFilter, ruleengine.EnvironmentRef{
+		Consumer: "pure_only_test_consumer",
+		Name:     spec.ProbeEnvironmentName,
+	})
+	var unsupIO *ruleengine.UnsupportedDialectError
+	require.ErrorAs(t, err, &unsupIO)
+	assert.Equal(t, ruleengine.ReasonIONotAllowed, unsupIO.Reason)
+
+	hIO, err := re.DialectFor("pure_only_test_consumer", systemone.DialectName)
+	assert.Nil(t, hIO)
+	unsupIO = nil
+	require.ErrorAs(t, err, &unsupIO)
+	assert.Equal(t, ruleengine.ReasonIONotAllowed, unsupIO.Reason)
+
+	assert.Zero(t, providerCalls.Load(), "denied default admission must never make a provider call")
 }

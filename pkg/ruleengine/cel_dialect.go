@@ -143,7 +143,7 @@ func (d *CELDialect) Compile(ctx context.Context, rule string, kind Kind, env En
 	if err != nil {
 		return Compiled{}, err
 	}
-	return NewCompiled(DialectCEL, kind, prog), nil
+	return NewCompiled(env.Consumer, DialectCEL, kind, prog), nil
 }
 
 // CachedCompile retrieves or compiles rule in the environment's content-addressed LRU cache.
@@ -160,7 +160,7 @@ func (d *CELDialect) CachedCompile(ctx context.Context, scope celengine.CacheSco
 	if err != nil {
 		return Compiled{}, err
 	}
-	return NewCompiled(DialectCEL, kind, prog), nil
+	return NewCompiled(env.Consumer, DialectCEL, kind, prog), nil
 }
 
 // Invalidate removes scope bindings in the named CEL environment's program cache.

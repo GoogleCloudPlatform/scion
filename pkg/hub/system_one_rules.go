@@ -22,7 +22,9 @@ import (
 )
 
 // registerSystemOneRules unconditionally registers the "system_one" dialect on
-// s.rules during Hub construction (AC-13 option (b)).
+// s.rules during Hub construction (AC-13 option (b)) and registers NO consumer
+// allow-list in P1 (Stage 1 §7.0a deny-by-default / least privilege: consumer
+// subsystems opt in explicitly via AllowConsumerDialects with GrantIO when wired).
 //
 // Registration performs no I/O and reads neither the database nor the
 // operational settings store: MaxEvalTime is resolved from the already-loaded

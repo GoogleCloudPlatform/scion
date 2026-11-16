@@ -114,14 +114,13 @@ func New(engine *ruleengine.Engine) (*Rules, error) {
 	if engine == nil {
 		return nil, errors.New("triggerrule: nil ruleengine.Engine")
 	}
-	if !engine.Supports(ConsumerName, ruleengine.DialectCEL) {
-		return nil, fmt.Errorf("triggerrule: engine does not support dialect %q for consumer %q", ruleengine.DialectCEL, ConsumerName)
+	d, err := engine.DialectFor(ConsumerName, ruleengine.DialectCEL)
+	if err != nil {
+		return nil, fmt.Errorf("triggerrule: engine does not support dialect %q for consumer %q: %w", ruleengine.DialectCEL, ConsumerName, err)
 	}
-	if d, ok := engine.Dialect(ruleengine.DialectCEL); ok {
-		if cd, isCEL := d.(*ruleengine.CELDialect); isCEL {
-			if _, hasEnv := cd.CELEngine(EnvironmentName); !hasEnv {
-				return nil, fmt.Errorf("triggerrule: CEL dialect is missing environment %q", EnvironmentName)
-			}
+	if cd, isCEL := d.(*ruleengine.CELDialect); isCEL {
+		if _, hasEnv := cd.CELEngine(EnvironmentName); !hasEnv {
+			return nil, fmt.Errorf("triggerrule: CEL dialect is missing environment %q", EnvironmentName)
 		}
 	}
 	return &Rules{engine: engine}, nil
@@ -142,7 +141,9 @@ func NewDefault() (*Rules, error) {
 	if err := re.Register(celDialect); err != nil {
 		return nil, err
 	}
-	re.AllowConsumerDialects(ConsumerName, ruleengine.DialectCEL)
+	if err := re.AllowConsumerDialects(ConsumerName, ruleengine.Grant(ruleengine.DialectCEL)); err != nil {
+		return nil, err
+	}
 	return New(re)
 }
 
