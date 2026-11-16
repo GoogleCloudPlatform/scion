@@ -69,7 +69,7 @@ After making changes, verify:
 3. **Tests pass:** `npm run test`
 4. **Client builds:** `npm run build` (run before `npm run check:orphans` or root `make web-budget`, both of which read `web/dist/client/.vite/manifest.json`)
 
-The full Vitest suite takes about 10 to 18 minutes in an agent container, more than a 10-minute foreground tool limit. Run the touched test files first (`npx vitest run <files>`) and start the full suite in the background; in cgroup-capped containers on high-`nproc` hosts, cap workers (`npx vitest run --maxWorkers=2`) to avoid worker starvation. Repo-scanning tests in `web/src/utils/*.test.ts` also run on Windows CI, so normalize `node:path` `relative()` paths to `/` (`.split(sep).join('/')`). Gitignored build output (`web/public/shoelace/`, `build/`) makes subsequent Go and web gates fail; see "Gitignored build output" in `docs-repo/agents/sandbox-go-toolchain.md`.
+The full Vitest suite takes about 10 to 18 minutes in an agent container, more than a 10-minute foreground tool limit. Fresh `clone-per-agent` checkouts start without `web/node_modules` (run `npm ci` in `web/` first), and scratch `git worktree` checkouts omit untracked `node_modules`. Run the touched test files first (`npx vitest run <files>`) and start the full suite in the background; in cgroup-capped containers on high-`nproc` hosts, cap workers (`npx vitest run --maxWorkers=2`) to avoid worker starvation. Repo-scanning tests in `web/src/utils/*.test.ts` also run on Windows CI, so normalize `node:path` `relative()` paths to `/` (`.split(sep).join('/')`). Gitignored build output (`web/public/shoelace/`, `build/`) makes subsequent Go and web gates fail; see "Gitignored build output" in `docs-repo/agents/sandbox-go-toolchain.md`.
 
 ## Project Structure
 
@@ -222,7 +222,7 @@ render() {
 }
 ```
 
-**ARIA state on an `sl-*` host is not exposed.** Shoelace sets the inner control's ARIA itself (for `sl-button`, only `role` and `aria-disabled`) and does not forward the host's, so `aria-pressed`, `aria-expanded` or `aria-checked` on the host reaches no screen reader. For toggle state use a native element, as `chat-space-rail.ts` does. Assert accessibility state through the accessibility tree (Playwright `getByRole('button', { pressed: true })`), not through the host attribute: a test that checks the attribute passes while the control exposes nothing.
+**ARIA state on an `sl-*` host is not exposed.** Shoelace sets the inner control's ARIA itself (for `sl-button`, only `role` and `aria-disabled`; `sl-radio-group` names its inner `<fieldset role="radiogroup">` from its `label` property via `aria-labelledby="label"`, so pass `label` and hide `::part(form-control-label)` visually as `profile-decisions.ts` does when no visible heading is wanted) and does not forward the host's, so `aria-pressed`, `aria-expanded`, `aria-checked` or `aria-label` on the host reaches no screen reader. For toggle state use a native element, as `chat-space-rail.ts` does. Assert accessibility state through the accessibility tree (Playwright `getByRole('button', { pressed: true })`, `getByRole('radiogroup', { name })`), not through the host attribute: a test that checks the attribute passes while the control exposes nothing.
 
 ### Theme Variables
 
