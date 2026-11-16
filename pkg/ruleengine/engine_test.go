@@ -182,12 +182,8 @@ type stubModelDialect struct {
 
 func (d *stubModelDialect) Name() string { return "stub_model" }
 func (d *stubModelDialect) Declares() ruleengine.Capabilities {
-	io := true
-	if !d.performsIO && d.mode == "dynamic_no_io" {
-		io = false
-	}
 	return ruleengine.Capabilities{
-		PerformsIO:  io,
+		PerformsIO:  d.performsIO || d.mode != "dynamic_no_io",
 		MaxEvalTime: 50 * time.Millisecond,
 		ResultKinds: []ruleengine.Kind{ruleengine.KindFilter},
 	}
