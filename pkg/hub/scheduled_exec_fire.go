@@ -65,6 +65,8 @@ var (
 	// scheduledExecStopGrace bounds how long shutdown waits for exec fires
 	// still at exec-start before it cancels them and the trackers.
 	scheduledExecStopGrace = 2 * time.Second
+	// scheduledExecCallTimeout bounds one exec-start or exec-status RPC.
+	scheduledExecCallTimeout = agentcontrol.HubExecCallTimeout
 )
 
 // scheduledExecAdmitWindow bounds how long after its claim an exec event
@@ -183,12 +185,6 @@ func (s *Server) execEventHandler() EventHandler {
 // that write records the run's outcome.
 func (s *Server) fireScheduledExec(ctx context.Context, evt store.ScheduledEvent) error {
 	log := slog.With("subsystem", "scheduler", "eventID", evt.ID, "projectID", evt.ProjectID)
-	if evt.ScheduleID != "" {
-		// Recurring exec schedules are Phase 2 (ptone/scion#7884) and
-		// cannot be authored; a stored one never runs.
-		log.Warn("Scheduler: recurring exec event refused", "scheduleID", evt.ScheduleID)
-		return errors.New(execReasonRecurring)
-	}
 
 	p, err := decodeScheduledExecPayload(evt.Payload)
 	if err == nil && p.AgentID == "" {
@@ -265,6 +261,7 @@ func (s *Server) fireScheduledExec(ctx context.Context, evt store.ScheduledEvent
 	run := store.ScheduledExecRun{
 		EventID:                 evt.ID,
 		ProjectID:               evt.ProjectID,
+		ScheduleID:              evt.ScheduleID,
 		TargetAgentID:           target.ID,
 		InitiatorPrincipalKind:  evt.InitiatorPrincipalKind,
 		InitiatorPrincipalID:    evt.InitiatorPrincipalID,
@@ -284,6 +281,9 @@ func (s *Server) fireScheduledExec(ctx context.Context, evt store.ScheduledEvent
 		LaunchID:                target.RunID,
 	}
 	if err := s.store.CreateScheduledExecRun(ctx, &run); err != nil {
+		if errors.Is(err, store.ErrScheduledExecOverlap) {
+			return skip(execReasonOverlap, "db_overlap_lease")
+		}
 		// Nothing was sent. An existing run means this event was admitted
 		// before: it is never started again.
 		log.Error("Scheduler: exec run record not written; nothing started", "error", err)
@@ -350,6 +350,7 @@ func (s *Server) fireScheduledExec(ctx context.Context, evt store.ScheduledEvent
 	stopStart := context.AfterFunc(workCtx, cancelStart)
 	res, startErr := s.StartAgentExecRun(startCtx, target.ID, target.RunID, agentcontrol.ExecStartRequest{
 		RunID:          evt.ID,
+		ScheduleID:     evt.ScheduleID,
 		Argv:           p.Command,
 		TimeoutS:       timeout,
 		NotAfterUnixMS: run.NotAfter.UnixMilli(),
@@ -652,26 +653,43 @@ func (s *Server) sweepScheduledExecRuns(ctx context.Context) {
 	}
 
 	// Live runs: claimed fairly across target agents, polled with at most
-	// inFlight calls at once. A slow poll holds only its own slot: the next
-	// claimed run starts as soon as any slot frees.
+	// inFlight calls at once, and at most once per run per sweep
+	// (ptone/scion#8096). Slots are acquired before claiming from the store
+	// so cancelling a sweep while all slots are busy never advances the
+	// persisted turn of runs this sweep never polled.
+	if inFlight <= 0 || budget <= 0 {
+		return
+	}
 	sem := make(chan struct{}, inFlight)
 	var wg sync.WaitGroup
 	defer wg.Wait()
+	var claimedThisSweep []string
 	for polled := 0; polled < budget && ctx.Err() == nil; {
-		runs, err := s.store.ClaimScheduledExecRunsForPoll(ctx, time.Now(), inFlight, s.execRuns.ownedIDs())
+		reserved := reserveSweepSlots(ctx, sem, min(inFlight, budget-polled))
+		if reserved == 0 {
+			return
+		}
+		owned := s.execRuns.ownedIDs()
+		exclude := make([]string, 0, len(owned)+len(claimedThisSweep))
+		exclude = append(exclude, owned...)
+		exclude = append(exclude, claimedThisSweep...)
+
+		runs, err := s.store.ClaimScheduledExecRunsForPoll(ctx, time.Now(), reserved, exclude)
 		if err != nil {
+			for i := 0; i < reserved; i++ {
+				<-sem
+			}
 			slog.Warn("Scheduler: exec run sweep: claim failed", "error", err)
 			return
+		}
+		for i := len(runs); i < reserved; i++ {
+			<-sem
 		}
 		if len(runs) == 0 {
 			return
 		}
 		for _, r := range runs {
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				return
-			}
+			claimedThisSweep = append(claimedThisSweep, r.EventID)
 			wg.Add(1)
 			go func(r store.ScheduledExecRun) {
 				defer wg.Done()
@@ -681,7 +699,7 @@ func (s *Server) sweepScheduledExecRuns(ctx context.Context) {
 			}(r)
 		}
 		polled += len(runs)
-		if len(runs) < inFlight {
+		if len(runs) < reserved {
 			return
 		}
 	}
@@ -724,11 +742,34 @@ func (s *Server) recoverUnadmittedExecEvents(ctx context.Context, batch, budget 
 			a.Reason = execReasonNotDispatched
 			s.auditScheduledExec(ctx, a)
 			slog.Warn("Scheduler: exec event claimed but never dispatched; recorded failed",
-				"eventID", evt.ID, "projectID", evt.ProjectID)
+				"eventID", evt.ID, "scheduleID", evt.ScheduleID, "projectID", evt.ProjectID)
 		}
 		done += len(events)
 		if len(events) < batch || !progressed {
 			return
 		}
 	}
+}
+
+// reserveSweepSlots blocks for one in-flight slot (or ctx cancellation), then
+// greedily acquires up to maxReserve-1 additional immediately-free slots.
+func reserveSweepSlots(ctx context.Context, sem chan struct{}, maxReserve int) int {
+	if maxReserve <= 0 {
+		return 0
+	}
+	select {
+	case sem <- struct{}{}:
+	case <-ctx.Done():
+		return 0
+	}
+	reserved := 1
+	for reserved < maxReserve {
+		select {
+		case sem <- struct{}{}:
+			reserved++
+		default:
+			return reserved
+		}
+	}
+	return reserved
 }

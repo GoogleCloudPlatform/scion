@@ -5505,6 +5505,12 @@ func (s *Server) cancelScheduledEventsForAgent(ctx context.Context, agent *store
 // agent, by ID or Slug only. Name is a mutable display field, not an
 // identifier, so it must not be used to select an agent's scheduled events.
 func eventTargetsAgent(evt store.ScheduledEvent, agent *store.Agent) bool {
+	if evt.EventType == scheduledEventTypeExec {
+		// Exec events match strictly by resolved agentId, never by agentName/slug
+		// (ptone/scion#7884, design D4).
+		targetID := execPayloadTarget(evt.Payload)
+		return targetID != "" && targetID == agent.ID
+	}
 	var payload struct {
 		AgentID   string `json:"agentId"`
 		AgentName string `json:"agentName"`

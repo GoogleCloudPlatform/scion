@@ -830,6 +830,14 @@ func (e *deletionEngine) run() deletionOutcome {
 		defer cancel()
 		s.ClearTopicDefaultAgent(ctx, agent.ID, agent.Slug, agent.ProjectID)
 	})
+	// Pause recurring exec schedules targeting this agent with target_deleted
+	// (ptone/scion#7884) before pausing schedules authored by this agent, so
+	// self-targeted exec schedules record target_deleted.
+	e.tailStep("pause targeted exec schedules", func() {
+		ctx, cancel := context.WithTimeout(e.base, deleteStepTimeout)
+		defer cancel()
+		s.pauseExecSchedulesTargetingAgent(ctx, agent)
+	})
 	// Pause the schedules whose authority is this agent, with status
 	// reason creator_deleted (ptone/scion#5403). Run only after the delete
 	// committed; the schedule evaluator pauses any it misses.

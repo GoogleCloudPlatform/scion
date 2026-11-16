@@ -174,6 +174,8 @@ type Tx struct {
 	Schedule *ScheduleClient
 	// ScheduledEvent is the client for interacting with the ScheduledEvent builders.
 	ScheduledEvent *ScheduledEventClient
+	// ScheduledExecPollCursor is the client for interacting with the ScheduledExecPollCursor builders.
+	ScheduledExecPollCursor *ScheduledExecPollCursorClient
 	// ScheduledExecRun is the client for interacting with the ScheduledExecRun builders.
 	ScheduledExecRun *ScheduledExecRunClient
 	// Secret is the client for interacting with the Secret builders.
@@ -426,6 +428,7 @@ func (tx *Tx) init() {
 	tx.RuntimeOrphan = NewRuntimeOrphanClient(tx.config)
 	tx.Schedule = NewScheduleClient(tx.config)
 	tx.ScheduledEvent = NewScheduledEventClient(tx.config)
+	tx.ScheduledExecPollCursor = NewScheduledExecPollCursorClient(tx.config)
 	tx.ScheduledExecRun = NewScheduledExecRunClient(tx.config)
 	tx.Secret = NewSecretClient(tx.config)
 	tx.Skill = NewSkillClient(tx.config)

@@ -3080,6 +3080,7 @@
 | Kind | Method | Pattern |
 |------|--------|---------|
 | scheduler_job | — | `executeSchedule:dispatch_agent` |
+| scheduler_job | — | `executeSchedule:exec` |
 | scheduler_job | — | `executeSchedule:message` |
 | scheduler_job | — | `fireEvent:dispatch_agent` |
 | scheduler_job | — | `fireEvent:message` |

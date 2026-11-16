@@ -86,6 +86,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimeorphan"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schedule"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecpollcursor"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schema"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/secret"
@@ -2880,6 +2881,16 @@ func init() {
 	scheduledeventDescID := scheduledeventFields[0].Descriptor()
 	// scheduledevent.DefaultID holds the default value on creation for the id field.
 	scheduledevent.DefaultID = scheduledeventDescID.Default.(func() uuid.UUID)
+	scheduledexecpollcursorFields := schema.ScheduledExecPollCursor{}.Fields()
+	_ = scheduledexecpollcursorFields
+	// scheduledexecpollcursorDescTurnSeq is the schema descriptor for turn_seq field.
+	scheduledexecpollcursorDescTurnSeq := scheduledexecpollcursorFields[2].Descriptor()
+	// scheduledexecpollcursor.DefaultTurnSeq holds the default value on creation for the turn_seq field.
+	scheduledexecpollcursor.DefaultTurnSeq = scheduledexecpollcursorDescTurnSeq.Default.(int64)
+	// scheduledexecpollcursorDescID is the schema descriptor for id field.
+	scheduledexecpollcursorDescID := scheduledexecpollcursorFields[0].Descriptor()
+	// scheduledexecpollcursor.DefaultID holds the default value on creation for the id field.
+	scheduledexecpollcursor.DefaultID = scheduledexecpollcursorDescID.Default.(func() uuid.UUID)
 	scheduledexecrunFields := schema.ScheduledExecRun{}.Fields()
 	_ = scheduledexecrunFields
 	// scheduledexecrunDescInitiatorPrincipalKind is the schema descriptor for initiator_principal_kind field.
@@ -2926,6 +2937,10 @@ func init() {
 	scheduledexecrunDescLaunchID := scheduledexecrunFields[24].Descriptor()
 	// scheduledexecrun.DefaultLaunchID holds the default value on creation for the launch_id field.
 	scheduledexecrun.DefaultLaunchID = scheduledexecrunDescLaunchID.Default.(string)
+	// scheduledexecrunDescPollSeq is the schema descriptor for poll_seq field.
+	scheduledexecrunDescPollSeq := scheduledexecrunFields[26].Descriptor()
+	// scheduledexecrun.DefaultPollSeq holds the default value on creation for the poll_seq field.
+	scheduledexecrun.DefaultPollSeq = scheduledexecrunDescPollSeq.Default.(int64)
 	// scheduledexecrunDescID is the schema descriptor for id field.
 	scheduledexecrunDescID := scheduledexecrunFields[0].Descriptor()
 	// scheduledexecrun.DefaultID holds the default value on creation for the id field.

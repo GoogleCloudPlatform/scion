@@ -97,6 +97,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimeorphan"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schedule"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecpollcursor"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skill"
@@ -286,6 +287,8 @@ type Client struct {
 	Schedule *ScheduleClient
 	// ScheduledEvent is the client for interacting with the ScheduledEvent builders.
 	ScheduledEvent *ScheduledEventClient
+	// ScheduledExecPollCursor is the client for interacting with the ScheduledExecPollCursor builders.
+	ScheduledExecPollCursor *ScheduledExecPollCursorClient
 	// ScheduledExecRun is the client for interacting with the ScheduledExecRun builders.
 	ScheduledExecRun *ScheduledExecRunClient
 	// Secret is the client for interacting with the Secret builders.
@@ -418,6 +421,7 @@ func (c *Client) init() {
 	c.RuntimeOrphan = NewRuntimeOrphanClient(c.config)
 	c.Schedule = NewScheduleClient(c.config)
 	c.ScheduledEvent = NewScheduledEventClient(c.config)
+	c.ScheduledExecPollCursor = NewScheduledExecPollCursorClient(c.config)
 	c.ScheduledExecRun = NewScheduledExecRunClient(c.config)
 	c.Secret = NewSecretClient(c.config)
 	c.Skill = NewSkillClient(c.config)
@@ -611,6 +615,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		RuntimeOrphan:                 NewRuntimeOrphanClient(cfg),
 		Schedule:                      NewScheduleClient(cfg),
 		ScheduledEvent:                NewScheduledEventClient(cfg),
+		ScheduledExecPollCursor:       NewScheduledExecPollCursorClient(cfg),
 		ScheduledExecRun:              NewScheduledExecRunClient(cfg),
 		Secret:                        NewSecretClient(cfg),
 		Skill:                         NewSkillClient(cfg),
@@ -731,6 +736,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		RuntimeOrphan:                 NewRuntimeOrphanClient(cfg),
 		Schedule:                      NewScheduleClient(cfg),
 		ScheduledEvent:                NewScheduledEventClient(cfg),
+		ScheduledExecPollCursor:       NewScheduledExecPollCursorClient(cfg),
 		ScheduledExecRun:              NewScheduledExecRunClient(cfg),
 		Secret:                        NewSecretClient(cfg),
 		Skill:                         NewSkillClient(cfg),
@@ -802,11 +808,12 @@ func (c *Client) Use(hooks ...Hook) {
 		c.ProjectContributor, c.ProjectPreStartHook, c.ProjectSyncState,
 		c.ProjectVisitorExclusion, c.ProjectVisitorRule, c.RelayInstance,
 		c.RoleBinding, c.RoleDefinition, c.RuntimeBroker, c.RuntimeOrphan, c.Schedule,
-		c.ScheduledEvent, c.ScheduledExecRun, c.Secret, c.Skill, c.SkillInjection,
-		c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate, c.SystemOneInstance,
-		c.Template, c.TestIdentityDelegation, c.TestIdentityLoginCode,
-		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.UsageReservation,
-		c.User, c.UserAccessToken, c.UserDeletion, c.UserDeletionAgent,
+		c.ScheduledEvent, c.ScheduledExecPollCursor, c.ScheduledExecRun, c.Secret,
+		c.Skill, c.SkillInjection, c.SkillRegistry, c.SkillVersion,
+		c.SubscriptionTemplate, c.SystemOneInstance, c.Template,
+		c.TestIdentityDelegation, c.TestIdentityLoginCode, c.TestInfraMarker,
+		c.ThreadGroup, c.ThreadGroupMember, c.UsageReservation, c.User,
+		c.UserAccessToken, c.UserDeletion, c.UserDeletionAgent,
 		c.UserTerminalWorkspace,
 	} {
 		n.Use(hooks...)
@@ -839,11 +846,12 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.ProjectContributor, c.ProjectPreStartHook, c.ProjectSyncState,
 		c.ProjectVisitorExclusion, c.ProjectVisitorRule, c.RelayInstance,
 		c.RoleBinding, c.RoleDefinition, c.RuntimeBroker, c.RuntimeOrphan, c.Schedule,
-		c.ScheduledEvent, c.ScheduledExecRun, c.Secret, c.Skill, c.SkillInjection,
-		c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate, c.SystemOneInstance,
-		c.Template, c.TestIdentityDelegation, c.TestIdentityLoginCode,
-		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.UsageReservation,
-		c.User, c.UserAccessToken, c.UserDeletion, c.UserDeletionAgent,
+		c.ScheduledEvent, c.ScheduledExecPollCursor, c.ScheduledExecRun, c.Secret,
+		c.Skill, c.SkillInjection, c.SkillRegistry, c.SkillVersion,
+		c.SubscriptionTemplate, c.SystemOneInstance, c.Template,
+		c.TestIdentityDelegation, c.TestIdentityLoginCode, c.TestInfraMarker,
+		c.ThreadGroup, c.ThreadGroupMember, c.UsageReservation, c.User,
+		c.UserAccessToken, c.UserDeletion, c.UserDeletionAgent,
 		c.UserTerminalWorkspace,
 	} {
 		n.Intercept(interceptors...)
@@ -1015,6 +1023,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.Schedule.mutate(ctx, m)
 	case *ScheduledEventMutation:
 		return c.ScheduledEvent.mutate(ctx, m)
+	case *ScheduledExecPollCursorMutation:
+		return c.ScheduledExecPollCursor.mutate(ctx, m)
 	case *ScheduledExecRunMutation:
 		return c.ScheduledExecRun.mutate(ctx, m)
 	case *SecretMutation:
@@ -12345,6 +12355,139 @@ func (c *ScheduledEventClient) mutate(ctx context.Context, m *ScheduledEventMuta
 	}
 }
 
+// ScheduledExecPollCursorClient is a client for the ScheduledExecPollCursor schema.
+type ScheduledExecPollCursorClient struct {
+	config
+}
+
+// NewScheduledExecPollCursorClient returns a client for the ScheduledExecPollCursor from the given config.
+func NewScheduledExecPollCursorClient(c config) *ScheduledExecPollCursorClient {
+	return &ScheduledExecPollCursorClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `scheduledexecpollcursor.Hooks(f(g(h())))`.
+func (c *ScheduledExecPollCursorClient) Use(hooks ...Hook) {
+	c.hooks.ScheduledExecPollCursor = append(c.hooks.ScheduledExecPollCursor, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `scheduledexecpollcursor.Intercept(f(g(h())))`.
+func (c *ScheduledExecPollCursorClient) Intercept(interceptors ...Interceptor) {
+	c.inters.ScheduledExecPollCursor = append(c.inters.ScheduledExecPollCursor, interceptors...)
+}
+
+// Create returns a builder for creating a ScheduledExecPollCursor entity.
+func (c *ScheduledExecPollCursorClient) Create() *ScheduledExecPollCursorCreate {
+	mutation := newScheduledExecPollCursorMutation(c.config, OpCreate)
+	return &ScheduledExecPollCursorCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of ScheduledExecPollCursor entities.
+func (c *ScheduledExecPollCursorClient) CreateBulk(builders ...*ScheduledExecPollCursorCreate) *ScheduledExecPollCursorCreateBulk {
+	return &ScheduledExecPollCursorCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *ScheduledExecPollCursorClient) MapCreateBulk(slice any, setFunc func(*ScheduledExecPollCursorCreate, int)) *ScheduledExecPollCursorCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &ScheduledExecPollCursorCreateBulk{err: fmt.Errorf("calling to ScheduledExecPollCursorClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*ScheduledExecPollCursorCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &ScheduledExecPollCursorCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for ScheduledExecPollCursor.
+func (c *ScheduledExecPollCursorClient) Update() *ScheduledExecPollCursorUpdate {
+	mutation := newScheduledExecPollCursorMutation(c.config, OpUpdate)
+	return &ScheduledExecPollCursorUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *ScheduledExecPollCursorClient) UpdateOne(_m *ScheduledExecPollCursor) *ScheduledExecPollCursorUpdateOne {
+	mutation := newScheduledExecPollCursorMutation(c.config, OpUpdateOne, withScheduledExecPollCursor(_m))
+	return &ScheduledExecPollCursorUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *ScheduledExecPollCursorClient) UpdateOneID(id uuid.UUID) *ScheduledExecPollCursorUpdateOne {
+	mutation := newScheduledExecPollCursorMutation(c.config, OpUpdateOne, withScheduledExecPollCursorID(id))
+	return &ScheduledExecPollCursorUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for ScheduledExecPollCursor.
+func (c *ScheduledExecPollCursorClient) Delete() *ScheduledExecPollCursorDelete {
+	mutation := newScheduledExecPollCursorMutation(c.config, OpDelete)
+	return &ScheduledExecPollCursorDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *ScheduledExecPollCursorClient) DeleteOne(_m *ScheduledExecPollCursor) *ScheduledExecPollCursorDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *ScheduledExecPollCursorClient) DeleteOneID(id uuid.UUID) *ScheduledExecPollCursorDeleteOne {
+	builder := c.Delete().Where(scheduledexecpollcursor.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &ScheduledExecPollCursorDeleteOne{builder}
+}
+
+// Query returns a query builder for ScheduledExecPollCursor.
+func (c *ScheduledExecPollCursorClient) Query() *ScheduledExecPollCursorQuery {
+	return &ScheduledExecPollCursorQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeScheduledExecPollCursor},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a ScheduledExecPollCursor entity by its id.
+func (c *ScheduledExecPollCursorClient) Get(ctx context.Context, id uuid.UUID) (*ScheduledExecPollCursor, error) {
+	return c.Query().Where(scheduledexecpollcursor.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *ScheduledExecPollCursorClient) GetX(ctx context.Context, id uuid.UUID) *ScheduledExecPollCursor {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *ScheduledExecPollCursorClient) Hooks() []Hook {
+	return c.hooks.ScheduledExecPollCursor
+}
+
+// Interceptors returns the client interceptors.
+func (c *ScheduledExecPollCursorClient) Interceptors() []Interceptor {
+	return c.inters.ScheduledExecPollCursor
+}
+
+func (c *ScheduledExecPollCursorClient) mutate(ctx context.Context, m *ScheduledExecPollCursorMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&ScheduledExecPollCursorCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&ScheduledExecPollCursorUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&ScheduledExecPollCursorUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&ScheduledExecPollCursorDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown ScheduledExecPollCursor mutation op: %q", m.Op())
+	}
+}
+
 // ScheduledExecRunClient is a client for the ScheduledExecRun schema.
 type ScheduledExecRunClient struct {
 	config
@@ -15220,11 +15363,11 @@ type (
 		ProjectContributor, ProjectPreStartHook, ProjectSyncState,
 		ProjectVisitorExclusion, ProjectVisitorRule, RelayInstance, RoleBinding,
 		RoleDefinition, RuntimeBroker, RuntimeOrphan, Schedule, ScheduledEvent,
-		ScheduledExecRun, Secret, Skill, SkillInjection, SkillRegistry, SkillVersion,
-		SubscriptionTemplate, SystemOneInstance, Template, TestIdentityDelegation,
-		TestIdentityLoginCode, TestInfraMarker, ThreadGroup, ThreadGroupMember,
-		UsageReservation, User, UserAccessToken, UserDeletion, UserDeletionAgent,
-		UserTerminalWorkspace []ent.Hook
+		ScheduledExecPollCursor, ScheduledExecRun, Secret, Skill, SkillInjection,
+		SkillRegistry, SkillVersion, SubscriptionTemplate, SystemOneInstance, Template,
+		TestIdentityDelegation, TestIdentityLoginCode, TestInfraMarker, ThreadGroup,
+		ThreadGroupMember, UsageReservation, User, UserAccessToken, UserDeletion,
+		UserDeletionAgent, UserTerminalWorkspace []ent.Hook
 	}
 	inters struct {
 		AccessConstraint, AccessConstraintHistory, AccessPolicy, Agent, AgentCredential,
@@ -15247,10 +15390,10 @@ type (
 		ProjectContributor, ProjectPreStartHook, ProjectSyncState,
 		ProjectVisitorExclusion, ProjectVisitorRule, RelayInstance, RoleBinding,
 		RoleDefinition, RuntimeBroker, RuntimeOrphan, Schedule, ScheduledEvent,
-		ScheduledExecRun, Secret, Skill, SkillInjection, SkillRegistry, SkillVersion,
-		SubscriptionTemplate, SystemOneInstance, Template, TestIdentityDelegation,
-		TestIdentityLoginCode, TestInfraMarker, ThreadGroup, ThreadGroupMember,
-		UsageReservation, User, UserAccessToken, UserDeletion, UserDeletionAgent,
-		UserTerminalWorkspace []ent.Interceptor
+		ScheduledExecPollCursor, ScheduledExecRun, Secret, Skill, SkillInjection,
+		SkillRegistry, SkillVersion, SubscriptionTemplate, SystemOneInstance, Template,
+		TestIdentityDelegation, TestIdentityLoginCode, TestInfraMarker, ThreadGroup,
+		ThreadGroupMember, UsageReservation, User, UserAccessToken, UserDeletion,
+		UserDeletionAgent, UserTerminalWorkspace []ent.Interceptor
 	}
 )

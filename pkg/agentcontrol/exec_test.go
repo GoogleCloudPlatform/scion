@@ -36,6 +36,13 @@ func TestExecArgvDigest(t *testing.T) {
 	if ExecArgvDigest(nil) != ExecArgvDigest([]string{}) {
 		t.Fatal("nil and empty argv must agree")
 	}
+
+	// HTML metacharacters (& < >) must be hashed as raw UTF-8 in canonical
+	// argv JSON, not Go's default \u0026/\u003c/\u003e escapes.
+	htmlCanon := sha256.Sum256([]byte(`["sh","-c","a & b < c > d"]`))
+	if got, want := ExecArgvDigest([]string{"sh", "-c", "a & b < c > d"}), hex.EncodeToString(htmlCanon[:]); got != want {
+		t.Fatalf("HTML metacharacter digest = %q, want %q (unescaped canonical JSON)", got, want)
+	}
 }
 
 func TestParseExecStartAnswer(t *testing.T) {

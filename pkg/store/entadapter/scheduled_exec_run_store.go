@@ -19,12 +19,15 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/schedule"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledevent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecpollcursor"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/scheduledexecrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
@@ -80,6 +83,9 @@ func finalExecOutcome(o string) bool {
 }
 
 // CreateScheduledExecRun inserts the run record of an admitted exec event.
+// When run.ScheduleID is set and run.FinishedAt is nil, the insert checks
+// inside a per-schedule locked transaction that no other unfinished run of
+// that schedule holds an unexpired DB lease (ptone/scion#7884).
 func (s *ScheduleStore) CreateScheduledExecRun(ctx context.Context, run *store.ScheduledExecRun) error {
 	if run == nil || run.EventID == "" || run.ProjectID == "" || run.TargetAgentID == "" || run.CommandSHA256 == "" {
 		return store.ErrInvalidInput
@@ -96,6 +102,14 @@ func (s *ScheduleStore) CreateScheduledExecRun(ctx context.Context, run *store.S
 	if err != nil {
 		return err
 	}
+	var sid *uuid.UUID
+	if run.ScheduleID != "" {
+		parsed, err := parseUUID(run.ScheduleID)
+		if err != nil {
+			return err
+		}
+		sid = &parsed
+	}
 	if run.Outcome == "" {
 		run.Outcome = store.ScheduledExecOutcomeStarting
 	}
@@ -105,44 +119,71 @@ func (s *ScheduleStore) CreateScheduledExecRun(ctx context.Context, run *store.S
 	if run.NotAfter.IsZero() {
 		run.NotAfter = run.StartedAt
 	}
-	create := s.client.ScheduledExecRun.Create().
-		SetEventID(eid).
-		SetLastPolledAt(run.StartedAt.UTC()).
-		SetProjectID(pid).
-		SetTargetAgentID(aid).
-		SetInitiatorPrincipalKind(run.InitiatorPrincipalKind).
-		SetInitiatorPrincipalID(run.InitiatorPrincipalID).
-		SetInitiatorCredentialKind(run.InitiatorCredentialKind).
-		SetInitiatorCredentialID(run.InitiatorCredentialID).
-		SetAuthorizationRevision(run.AuthorizationRevision).
-		SetExecutorKind(run.ExecutorKind).
-		SetExecutorID(run.ExecutorID).
-		SetCommandSha256(run.CommandSHA256).
-		SetArgc(run.Argc).
-		SetTimeoutSeconds(run.TimeoutSeconds).
-		SetStartedAt(run.StartedAt.UTC()).
-		SetNotAfter(run.NotAfter.UTC()).
-		SetLeaseUntil(run.LeaseUntil.UTC()).
-		SetOutcome(scheduledexecrun.Outcome(run.Outcome)).
-		SetRuntime(run.Runtime).
-		SetLaunchID(run.LaunchID).
-		SetNillableExitCode(run.ExitCode).
-		SetNillableDurationMs(run.DurationMS).
-		SetNillableOutputBytes(run.OutputBytes)
-	if run.ScheduleID != "" {
-		sid, err := parseUUID(run.ScheduleID)
-		if err != nil {
-			return err
+	insertOn := func(c *ent.Client) error {
+		create := c.ScheduledExecRun.Create().
+			SetEventID(eid).
+			SetLastPolledAt(run.StartedAt.UTC()).
+			SetProjectID(pid).
+			SetTargetAgentID(aid).
+			SetInitiatorPrincipalKind(run.InitiatorPrincipalKind).
+			SetInitiatorPrincipalID(run.InitiatorPrincipalID).
+			SetInitiatorCredentialKind(run.InitiatorCredentialKind).
+			SetInitiatorCredentialID(run.InitiatorCredentialID).
+			SetAuthorizationRevision(run.AuthorizationRevision).
+			SetExecutorKind(run.ExecutorKind).
+			SetExecutorID(run.ExecutorID).
+			SetCommandSha256(run.CommandSHA256).
+			SetArgc(run.Argc).
+			SetTimeoutSeconds(run.TimeoutSeconds).
+			SetStartedAt(run.StartedAt.UTC()).
+			SetNotAfter(run.NotAfter.UTC()).
+			SetLeaseUntil(run.LeaseUntil.UTC()).
+			SetOutcome(scheduledexecrun.Outcome(run.Outcome)).
+			SetRuntime(run.Runtime).
+			SetLaunchID(run.LaunchID).
+			SetNillableExitCode(run.ExitCode).
+			SetNillableDurationMs(run.DurationMS).
+			SetNillableOutputBytes(run.OutputBytes)
+		if sid != nil {
+			create.SetScheduleID(*sid)
 		}
-		create.SetScheduleID(sid)
+		if run.FinishedAt != nil {
+			create.SetFinishedAt(run.FinishedAt.UTC())
+		}
+		if _, err := create.Save(ctx); err != nil {
+			return mapError(err)
+		}
+		return nil
 	}
-	if run.FinishedAt != nil {
-		create.SetFinishedAt(run.FinishedAt.UTC())
+	if sid == nil {
+		return insertOn(s.client)
 	}
-	if _, err := create.Save(ctx); err != nil {
-		return mapError(err)
-	}
-	return nil
+	return runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
+		if isPostgres(c) {
+			var res sql.Result
+			if err := c.Driver().Exec(ctx, "SELECT pg_advisory_xact_lock($1, $2)",
+				[]any{int32(store.LockScheduledExecOverlap), store.StableProjectHash(run.ScheduleID)}, &res); err != nil {
+				return fmt.Errorf("lock scheduled exec overlap: %w", err)
+			}
+		}
+		if run.FinishedAt == nil {
+			overlaps, err := c.ScheduledExecRun.Query().
+				Where(
+					scheduledexecrun.ScheduleIDEQ(*sid),
+					scheduledexecrun.EventIDNEQ(eid),
+					scheduledexecrun.FinishedAtIsNil(),
+					scheduledexecrun.LeaseUntilGT(run.StartedAt.UTC()),
+				).
+				Exist(ctx)
+			if err != nil {
+				return mapError(err)
+			}
+			if overlaps {
+				return store.ErrScheduledExecOverlap
+			}
+		}
+		return insertOn(c)
+	})
 }
 
 // GetScheduledExecRun returns the run of an event.
@@ -208,8 +249,24 @@ func (s *ScheduleStore) MarkScheduledExecRunRunning(ctx context.Context, eventID
 	return n == 1, nil
 }
 
+func scheduleRunStatusForFinish(fin store.ScheduledExecRunFinish) string {
+	switch {
+	case fin.EventStatus == store.ScheduledEventSkipped || fin.Outcome == store.ScheduledExecOutcomeSkipped:
+		return store.ScheduleRunSkipped
+	case fin.EventStatus == store.ScheduledEventFailed ||
+		fin.Outcome == store.ScheduledExecOutcomeNonzero ||
+		fin.Outcome == store.ScheduledExecOutcomeTimeout ||
+		fin.Outcome == store.ScheduledExecOutcomeError ||
+		fin.Outcome == store.ScheduledExecOutcomeAbandoned:
+		return store.ScheduleRunError
+	default:
+		return store.ScheduleRunSuccess
+	}
+}
+
 // FinishScheduledExecRun records a run's final outcome, first writer wins,
-// and the event's status in the same transaction when asked.
+// the event's status (when asked), and for a recurring schedule its run
+// counters and last-run fields in the same transaction.
 func (s *ScheduleStore) FinishScheduledExecRun(ctx context.Context, fin store.ScheduledExecRunFinish) (bool, error) {
 	if !finalExecOutcome(fin.Outcome) {
 		return false, store.ErrInvalidInput
@@ -224,8 +281,17 @@ func (s *ScheduleStore) FinishScheduledExecRun(ctx context.Context, fin store.Sc
 	}
 	var won bool
 	err = runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
-		n, err := c.ScheduledExecRun.Update().
+		runRow, err := c.ScheduledExecRun.Query().
 			Where(scheduledexecrun.EventIDEQ(eid), scheduledexecrun.FinishedAtIsNil()).
+			Only(ctx)
+		if ent.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return mapError(err)
+		}
+		n, err := c.ScheduledExecRun.Update().
+			Where(scheduledexecrun.IDEQ(runRow.ID), scheduledexecrun.FinishedAtIsNil()).
 			SetFinishedAt(finishedAt.UTC()).
 			SetOutcome(scheduledexecrun.Outcome(fin.Outcome)).
 			SetNillableExitCode(fin.ExitCode).
@@ -239,22 +305,31 @@ func (s *ScheduleStore) FinishScheduledExecRun(ctx context.Context, fin store.Sc
 			return nil
 		}
 		won = true
-		if fin.EventStatus == "" {
-			return nil
+		if fin.EventStatus != "" {
+			upd := c.ScheduledEvent.Update().
+				Where(
+					scheduledevent.IDEQ(eid),
+					scheduledevent.StatusIn(store.ScheduledEventFired, store.ScheduledEventExpired),
+				).
+				SetStatus(fin.EventStatus)
+			if fin.EventError != "" {
+				upd.SetError(fin.EventError)
+			} else {
+				upd.ClearError()
+			}
+			if _, err := upd.Save(ctx); err != nil {
+				return mapError(err)
+			}
 		}
-		upd := c.ScheduledEvent.Update().
-			Where(
-				scheduledevent.IDEQ(eid),
-				scheduledevent.StatusIn(store.ScheduledEventFired, store.ScheduledEventExpired),
-			).
-			SetStatus(fin.EventStatus)
-		if fin.EventError != "" {
-			upd.SetError(fin.EventError)
-		} else {
-			upd.ClearError()
-		}
-		if _, err := upd.Save(ctx); err != nil {
-			return mapError(err)
+		if runRow.ScheduleID != nil {
+			ranAt := runRow.StartedAt
+			if evt, getErr := c.ScheduledEvent.Get(ctx, eid); getErr == nil && evt.FiredAt != nil {
+				ranAt = *evt.FiredAt
+			}
+			runStatus := scheduleRunStatusForFinish(fin)
+			if err := recordScheduleRunStatusOnClient(ctx, c, *runRow.ScheduleID, ranAt, runStatus, fin.EventError); err != nil && !errors.Is(err, store.ErrNotFound) {
+				return err
+			}
 		}
 		return nil
 	})
@@ -278,54 +353,206 @@ func (s *ScheduleStore) ListExpiredScheduledExecRuns(ctx context.Context, now ti
 	return entScheduledExecRunsToStore(rows), nil
 }
 
-// scheduledExecClaimWindow bounds the candidate rows one claim reads.
-const scheduledExecClaimWindow = 5000
-
 // ClaimScheduledExecRunsForPoll returns up to limit unfinished runs whose
 // lease has not ended, skipping excludeEventIDs, chosen round-robin across
-// target agents (ptone/scion#7883 P3-R2): agents are taken in the order of
-// their least recently polled run, one run (their least recently polled)
-// each, and a second run of an agent only after every eligible agent had
-// one. The chosen runs' last_polled_at is set to now in the same
-// transaction (rows locked FOR UPDATE SKIP LOCKED on Postgres), so the
-// rotation across agents and across runs persists between sweeps.
+// the full eligible set of target agents on their persisted per-agent turn
+// (ptone/scion#8096):
+//
+//  1. Distinct eligible target_agent_id values are queried across the full
+//     unfinished, in-lease set (never capped by a candidate-row window).
+//  2. Eligible targets are ordered by their persisted turn_seq in
+//     scheduled_exec_poll_cursors (0 when never claimed, ties broken by
+//     target_agent_id), never by run timestamps and never rewound when
+//     polled runs finish or are purged.
+//  3. One least-polled run (by poll_seq, last_polled_at, event_id; FOR
+//     UPDATE SKIP LOCKED on Postgres) is chosen per target per round until
+//     limit runs are claimed or all eligible runs are exhausted.
+//  4. Claimed runs update poll_seq and last_polled_at, and each claimed
+//     target's cursor row is upserted with its latest monotonic turn_seq.
 func (s *ScheduleStore) ClaimScheduledExecRunsForPoll(ctx context.Context, now time.Time, limit int, excludeEventIDs []string) ([]store.ScheduledExecRun, error) {
 	limit = clampLimit(limit)
-	var exclude []uuid.UUID
+	excludeSet := make(map[uuid.UUID]struct{}, len(excludeEventIDs))
+	var excludeSQL []uuid.UUID
 	for _, id := range excludeEventIDs {
 		if uid, err := uuid.Parse(id); err == nil {
-			exclude = append(exclude, uid)
+			if _, dup := excludeSet[uid]; !dup {
+				excludeSet[uid] = struct{}{}
+				excludeSQL = append(excludeSQL, uid)
+			}
 		}
 	}
+	nowUTC := now.UTC()
 	var out []store.ScheduledExecRun
 	err := runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
-		q := c.ScheduledExecRun.Query().
-			Where(scheduledexecrun.FinishedAtIsNil(), scheduledexecrun.LeaseUntilGTE(now.UTC()))
-		if len(exclude) > 0 {
-			q = q.Where(scheduledexecrun.EventIDNotIn(exclude...))
-		}
-		q = q.Order(scheduledexecrun.ByLastPolledAt(), scheduledexecrun.ByEventID()).Limit(scheduledExecClaimWindow)
 		if isPostgres(c) {
-			q = q.ForUpdate(entsql.WithLockAction(entsql.SkipLocked))
+			var res sql.Result
+			if err := c.Driver().Exec(ctx, "SELECT pg_advisory_xact_lock($1)",
+				[]any{int64(store.LockScheduledExecPollClaim)}, &res); err != nil {
+				return fmt.Errorf("lock scheduled exec poll claim: %w", err)
+			}
 		}
-		rows, err := q.All(ctx)
-		if err != nil {
+
+		basePreds := []predicate.ScheduledExecRun{
+			scheduledexecrun.FinishedAtIsNil(),
+			scheduledexecrun.LeaseUntilGTE(nowUTC),
+		}
+		if len(excludeSQL) > 0 {
+			basePreds = append(basePreds, scheduledexecrun.EventIDNotIn(excludeSQL...))
+		}
+
+		var targets []uuid.UUID
+		if err := c.ScheduledExecRun.Query().
+			Where(basePreds...).
+			GroupBy(scheduledexecrun.FieldTargetAgentID).
+			Scan(ctx, &targets); err != nil {
 			return mapError(err)
 		}
-		chosen := roundRobinRunsByTarget(rows, limit)
+		if len(targets) == 0 {
+			return nil
+		}
+
+		turnByTarget := make(map[uuid.UUID]int64, len(targets))
+		for start := 0; start < len(targets); start += scheduledExecRunsByEventChunk {
+			end := min(start+scheduledExecRunsByEventChunk, len(targets))
+			cursors, err := c.ScheduledExecPollCursor.Query().
+				Where(scheduledexecpollcursor.TargetAgentIDIn(targets[start:end]...)).
+				All(ctx)
+			if err != nil {
+				return mapError(err)
+			}
+			for _, cur := range cursors {
+				turnByTarget[cur.TargetAgentID] = cur.TurnSeq
+			}
+		}
+
+		var maxSeq int64
+		topCursor, err := c.ScheduledExecPollCursor.Query().
+			Order(scheduledexecpollcursor.ByTurnSeq(entsql.OrderDesc())).
+			First(ctx)
+		if err != nil && !ent.IsNotFound(err) {
+			return mapError(err)
+		}
+		if topCursor != nil {
+			maxSeq = topCursor.TurnSeq
+		}
+
+		slices.SortFunc(targets, func(a, b uuid.UUID) int {
+			ta, tb := turnByTarget[a], turnByTarget[b]
+			if ta < tb {
+				return -1
+			}
+			if ta > tb {
+				return 1
+			}
+			sa, sb := a.String(), b.String()
+			if sa < sb {
+				return -1
+			}
+			if sa > sb {
+				return 1
+			}
+			return 0
+		})
+
+		chosen := make([]*ent.ScheduledExecRun, 0, limit)
+		pickedRunIDs := make(map[uuid.UUID][]uuid.UUID, len(targets))
+		exhausted := make(map[uuid.UUID]bool, len(targets))
+
+		for len(chosen) < limit {
+			activeTargets := len(targets) - len(exhausted)
+			if activeTargets == 0 {
+				break
+			}
+			progressed := false
+			for _, target := range targets {
+				if len(chosen) == limit {
+					break
+				}
+				if exhausted[target] {
+					continue
+				}
+				need := 1
+				if activeTargets == 1 {
+					need = limit - len(chosen)
+				}
+				preds := make([]predicate.ScheduledExecRun, 0, len(basePreds)+2)
+				preds = append(preds, basePreds...)
+				preds = append(preds, scheduledexecrun.TargetAgentIDEQ(target))
+				if picked := pickedRunIDs[target]; len(picked) > 0 {
+					preds = append(preds, scheduledexecrun.IDNotIn(picked...))
+				}
+				q := c.ScheduledExecRun.Query().
+					Where(preds...).
+					Order(
+						scheduledexecrun.ByPollSeq(),
+						scheduledexecrun.ByLastPolledAt(),
+						scheduledexecrun.ByEventID(),
+					).
+					Limit(need)
+				if isPostgres(c) {
+					q = q.ForUpdate(entsql.WithLockAction(entsql.SkipLocked))
+				}
+				rows, err := q.All(ctx)
+				if err != nil {
+					return mapError(err)
+				}
+				for _, r := range rows {
+					chosen = append(chosen, r)
+					pickedRunIDs[target] = append(pickedRunIDs[target], r.ID)
+					progressed = true
+					if len(chosen) == limit {
+						break
+					}
+				}
+				if len(rows) < need || activeTargets == 1 {
+					exhausted[target] = true
+					activeTargets = len(targets) - len(exhausted)
+				}
+			}
+			if !progressed {
+				break
+			}
+		}
+
 		if len(chosen) == 0 {
 			return nil
 		}
-		ids := make([]uuid.UUID, 0, len(chosen))
-		for _, r := range chosen {
-			ids = append(ids, r.ID)
+
+		latestTurn := make(map[uuid.UUID]int64, len(chosen))
+		var touchedTargets []uuid.UUID
+		for i, r := range chosen {
+			seq := maxSeq + int64(i) + 1
+			if err := c.ScheduledExecRun.UpdateOneID(r.ID).
+				SetLastPolledAt(nowUTC).
+				SetPollSeq(seq).
+				Exec(ctx); err != nil {
+				return mapError(err)
+			}
+			r.LastPolledAt = nowUTC
+			r.PollSeq = seq
+			if _, seen := latestTurn[r.TargetAgentID]; !seen {
+				touchedTargets = append(touchedTargets, r.TargetAgentID)
+			}
+			latestTurn[r.TargetAgentID] = seq
 		}
-		if _, err := c.ScheduledExecRun.Update().
-			Where(scheduledexecrun.IDIn(ids...)).
-			SetLastPolledAt(now.UTC()).
-			Save(ctx); err != nil {
+
+		builders := make([]*ent.ScheduledExecPollCursorCreate, 0, len(touchedTargets))
+		for _, target := range touchedTargets {
+			builders = append(builders, c.ScheduledExecPollCursor.Create().
+				SetTargetAgentID(target).
+				SetTurnSeq(latestTurn[target]).
+				SetLastPolledAt(nowUTC))
+		}
+		if err := c.ScheduledExecPollCursor.CreateBulk(builders...).
+			OnConflictColumns(scheduledexecpollcursor.FieldTargetAgentID).
+			Update(func(u *ent.ScheduledExecPollCursorUpsert) {
+				u.UpdateTurnSeq()
+				u.UpdateLastPolledAt()
+			}).
+			Exec(ctx); err != nil {
 			return mapError(err)
 		}
+
 		out = entScheduledExecRunsToStore(chosen)
 		return nil
 	})
@@ -333,33 +560,6 @@ func (s *ScheduleStore) ClaimScheduledExecRunsForPoll(ctx context.Context, now t
 		return nil, err
 	}
 	return out, nil
-}
-
-// roundRobinRunsByTarget picks up to limit of rows (ordered least recently
-// polled first) one per target agent per round, agents in the order of
-// their first row.
-func roundRobinRunsByTarget(rows []*ent.ScheduledExecRun, limit int) []*ent.ScheduledExecRun {
-	var targets []uuid.UUID
-	byTarget := make(map[uuid.UUID][]*ent.ScheduledExecRun)
-	for _, r := range rows {
-		if _, ok := byTarget[r.TargetAgentID]; !ok {
-			targets = append(targets, r.TargetAgentID)
-		}
-		byTarget[r.TargetAgentID] = append(byTarget[r.TargetAgentID], r)
-	}
-	out := make([]*ent.ScheduledExecRun, 0, min(limit, len(rows)))
-	for len(out) < limit && len(out) < len(rows) {
-		for _, t := range targets {
-			if len(out) == limit {
-				break
-			}
-			if q := byTarget[t]; len(q) > 0 {
-				out = append(out, q[0])
-				byTarget[t] = q[1:]
-			}
-		}
-	}
-	return out
 }
 
 func entScheduledExecRunsToStore(rows []*ent.ScheduledExecRun) []store.ScheduledExecRun {
@@ -376,41 +576,190 @@ func entScheduledExecRunsToStore(rows []*ent.ScheduledExecRun) []store.Scheduled
 // per-project scheduled-event quota lock (store.LockScheduledEventQuota,
 // pg_advisory_xact_lock), so concurrent authors, on any replica, are
 // checked and inserted one at a time; SQLite serializes writers already.
-func (s *ScheduleStore) CreateScheduledEventChecked(ctx context.Context, event *store.ScheduledEvent, limit int, check func(pending []store.ScheduledEvent) error) error {
+func loadScheduledExecQuotaSnapshot(
+	ctx context.Context,
+	c *ent.Client,
+	projectID string,
+	pid uuid.UUID,
+	eventType string,
+	limit int,
+	excludeScheduleID *uuid.UUID,
+) (store.ScheduledExecQuotaSnapshot, error) {
+	if isPostgres(c) {
+		var res sql.Result
+		if err := c.Driver().Exec(ctx, "SELECT pg_advisory_xact_lock($1, $2)",
+			[]any{int32(store.LockScheduledEventQuota), store.StableProjectHash(projectID)}, &res); err != nil {
+			return store.ScheduledExecQuotaSnapshot{}, fmt.Errorf("lock scheduled event quota: %w", err)
+		}
+	}
+	eventRows, err := c.ScheduledEvent.Query().
+		Where(
+			scheduledevent.ProjectIDEQ(pid),
+			scheduledevent.EventTypeEQ(eventType),
+			scheduledevent.StatusEQ(store.ScheduledEventPending),
+		).
+		Order(scheduledevent.ByCreated(), scheduledevent.ByID()).
+		Limit(limit).
+		All(ctx)
+	if err != nil {
+		return store.ScheduledExecQuotaSnapshot{}, mapError(err)
+	}
+	pending := make([]store.ScheduledEvent, 0, len(eventRows))
+	for _, e := range eventRows {
+		pending = append(pending, *entScheduledEventToStore(e))
+	}
+
+	schedPreds := []predicate.Schedule{
+		schedule.ProjectIDEQ(pid),
+		schedule.EventTypeEQ(eventType),
+		schedule.StatusEQ(store.ScheduleStatusActive),
+	}
+	if excludeScheduleID != nil {
+		schedPreds = append(schedPreds, schedule.IDNEQ(*excludeScheduleID))
+	}
+	schedRows, err := c.Schedule.Query().
+		Where(schedPreds...).
+		Order(schedule.ByCreated(), schedule.ByID()).
+		Limit(limit).
+		All(ctx)
+	if err != nil {
+		return store.ScheduledExecQuotaSnapshot{}, mapError(err)
+	}
+	active := make([]store.Schedule, 0, len(schedRows))
+	for _, sc := range schedRows {
+		active = append(active, *entScheduleToStore(sc))
+	}
+	return store.ScheduledExecQuotaSnapshot{
+		PendingEvents:   pending,
+		ActiveSchedules: active,
+	}, nil
+}
+
+// CreateScheduledEventChecked inserts event after check accepts the active
+// exec items (pending events + active recurring schedules) of its project and
+// event type, read in the same transaction under store.LockScheduledEventQuota.
+func (s *ScheduleStore) CreateScheduledEventChecked(ctx context.Context, event *store.ScheduledEvent, limit int, check func(snap store.ScheduledExecQuotaSnapshot) error) error {
 	pid, err := parseUUID(event.ProjectID)
 	if err != nil {
 		return err
 	}
 	return runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
-		if isPostgres(c) {
-			var res sql.Result
-			if err := c.Driver().Exec(ctx, "SELECT pg_advisory_xact_lock($1, $2)",
-				[]any{int32(store.LockScheduledEventQuota), store.StableProjectHash(event.ProjectID)}, &res); err != nil {
-				return fmt.Errorf("lock scheduled event quota: %w", err)
-			}
-		}
-		rows, err := c.ScheduledEvent.Query().
-			Where(
-				scheduledevent.ProjectIDEQ(pid),
-				scheduledevent.EventTypeEQ(event.EventType),
-				scheduledevent.StatusEQ(store.ScheduledEventPending),
-			).
-			Order(scheduledevent.ByCreated(), scheduledevent.ByID()).
-			Limit(limit).
-			All(ctx)
+		snap, err := loadScheduledExecQuotaSnapshot(ctx, c, event.ProjectID, pid, event.EventType, limit, nil)
 		if err != nil {
-			return mapError(err)
+			return err
 		}
-		pending := make([]store.ScheduledEvent, 0, len(rows))
-		for _, e := range rows {
-			pending = append(pending, *entScheduledEventToStore(e))
-		}
-		if err := check(pending); err != nil {
+		if err := check(snap); err != nil {
 			return err
 		}
 		tx := &ScheduleStore{client: c, inTx: true}
 		return tx.CreateScheduledEvent(ctx, event)
 	})
+}
+
+// CreateScheduleChecked inserts sc after check accepts the active exec items
+// (pending events + active recurring schedules) of its project and event type,
+// read in the same transaction under store.LockScheduledEventQuota.
+func (s *ScheduleStore) CreateScheduleChecked(ctx context.Context, sc *store.Schedule, limit int, check func(snap store.ScheduledExecQuotaSnapshot) error) error {
+	pid, err := parseUUID(sc.ProjectID)
+	if err != nil {
+		return err
+	}
+	return runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
+		snap, err := loadScheduledExecQuotaSnapshot(ctx, c, sc.ProjectID, pid, sc.EventType, limit, nil)
+		if err != nil {
+			return err
+		}
+		if err := check(snap); err != nil {
+			return err
+		}
+		tx := &ScheduleStore{client: c, inTx: true}
+		return tx.CreateSchedule(ctx, sc)
+	})
+}
+
+// UpdateScheduleChecked updates sc after check accepts the other active exec
+// items (pending events + active recurring schedules excluding sc.ID) of its
+// project and event type, read in the same transaction under
+// store.LockScheduledEventQuota.
+func (s *ScheduleStore) UpdateScheduleChecked(
+	ctx context.Context, sc *store.Schedule, fields store.ScheduleFieldMask,
+	prevRevision int, prevRevisionKnown bool, attribution *store.InitiatorAttribution,
+	limit int, check func(snap store.ScheduledExecQuotaSnapshot) error,
+) error {
+	uid, err := parseUUID(sc.ID)
+	if err != nil {
+		return err
+	}
+	pid, err := parseUUID(sc.ProjectID)
+	if err != nil {
+		return err
+	}
+	return runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
+		snap, err := loadScheduledExecQuotaSnapshot(ctx, c, sc.ProjectID, pid, sc.EventType, limit, &uid)
+		if err != nil {
+			return err
+		}
+		if err := check(snap); err != nil {
+			return err
+		}
+		tx := &ScheduleStore{client: c, inTx: true}
+		return tx.UpdateSchedule(ctx, sc, fields, prevRevision, prevRevisionKnown, attribution)
+	})
+}
+
+// CompleteUnadmittedExecEvent atomically transitions an unadmitted exec event
+// (status fired or expired, with no ScheduledExecRun row) to status with
+// errMsg, and when scheduleID is non-empty records the corresponding run
+// status on that schedule in the same transaction.
+func (s *ScheduleStore) CompleteUnadmittedExecEvent(ctx context.Context, id string, status string, errMsg string, scheduleID string, ranAt time.Time) (bool, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return false, err
+	}
+	var schedUID uuid.UUID
+	if scheduleID != "" {
+		schedUID, err = parseUUID(scheduleID)
+		if err != nil {
+			return false, err
+		}
+	}
+	var updated bool
+	err = runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
+		upd := c.ScheduledEvent.Update().
+			Where(
+				scheduledevent.IDEQ(uid),
+				scheduledevent.StatusIn(store.ScheduledEventFired, store.ScheduledEventExpired),
+				scheduledevent.Not(scheduledevent.HasExecRun()),
+			).
+			SetStatus(status)
+		if errMsg != "" {
+			upd.SetError(errMsg)
+		} else {
+			upd.ClearError()
+		}
+		n, err := upd.Save(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		if n == 0 {
+			return nil
+		}
+		updated = true
+		if scheduleID != "" {
+			runStatus := store.ScheduleRunError
+			if status == store.ScheduledEventSkipped {
+				runStatus = store.ScheduleRunSkipped
+			}
+			if err := recordScheduleRunStatusOnClient(ctx, c, schedUID, ranAt, runStatus, errMsg); err != nil && !errors.Is(err, store.ErrNotFound) {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return updated, nil
 }
 
 // unadmittedPredicates select events of eventType claimed (fired or
@@ -485,7 +834,7 @@ func (s *ScheduleStore) FailUnadmittedScheduledEvent(ctx context.Context, id, ev
 			if evt.FiredAt != nil {
 				ranAt = *evt.FiredAt
 			}
-			if err := recordScheduleRunOnClient(ctx, c, schedUID, ranAt, errMsg); err != nil && !errors.Is(err, store.ErrNotFound) {
+			if err := recordScheduleRunStatusOnClient(ctx, c, schedUID, ranAt, store.ScheduleRunError, errMsg); err != nil && !errors.Is(err, store.ErrNotFound) {
 				return err
 			}
 		}

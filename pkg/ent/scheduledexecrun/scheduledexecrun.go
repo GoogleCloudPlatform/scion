@@ -66,6 +66,8 @@ const (
 	FieldLaunchID = "launch_id"
 	// FieldLastPolledAt holds the string denoting the last_polled_at field in the database.
 	FieldLastPolledAt = "last_polled_at"
+	// FieldPollSeq holds the string denoting the poll_seq field in the database.
+	FieldPollSeq = "poll_seq"
 	// EdgeEvent holds the string denoting the event edge name in mutations.
 	EdgeEvent = "event"
 	// Table holds the table name of the scheduledexecrun in the database.
@@ -107,6 +109,7 @@ var Columns = []string{
 	FieldRuntime,
 	FieldLaunchID,
 	FieldLastPolledAt,
+	FieldPollSeq,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -142,6 +145,8 @@ var (
 	DefaultRuntime string
 	// DefaultLaunchID holds the default value on creation for the "launch_id" field.
 	DefaultLaunchID string
+	// DefaultPollSeq holds the default value on creation for the "poll_seq" field.
+	DefaultPollSeq int64
 	// DefaultID holds the default value on creation for the "id" field.
 	DefaultID func() uuid.UUID
 )
@@ -309,6 +314,11 @@ func ByLaunchID(opts ...sql.OrderTermOption) OrderOption {
 // ByLastPolledAt orders the results by the last_polled_at field.
 func ByLastPolledAt(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldLastPolledAt, opts...).ToFunc()
+}
+
+// ByPollSeq orders the results by the poll_seq field.
+func ByPollSeq(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPollSeq, opts...).ToFunc()
 }
 
 // ByEventField orders the results by event field.

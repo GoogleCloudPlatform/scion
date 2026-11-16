@@ -303,6 +303,20 @@ func (_c *ScheduledExecRunCreate) SetLastPolledAt(v time.Time) *ScheduledExecRun
 	return _c
 }
 
+// SetPollSeq sets the "poll_seq" field.
+func (_c *ScheduledExecRunCreate) SetPollSeq(v int64) *ScheduledExecRunCreate {
+	_c.mutation.SetPollSeq(v)
+	return _c
+}
+
+// SetNillablePollSeq sets the "poll_seq" field if the given value is not nil.
+func (_c *ScheduledExecRunCreate) SetNillablePollSeq(v *int64) *ScheduledExecRunCreate {
+	if v != nil {
+		_c.SetPollSeq(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *ScheduledExecRunCreate) SetID(v uuid.UUID) *ScheduledExecRunCreate {
 	_c.mutation.SetID(v)
@@ -401,6 +415,10 @@ func (_c *ScheduledExecRunCreate) defaults() {
 		v := scheduledexecrun.DefaultLaunchID
 		_c.mutation.SetLaunchID(v)
 	}
+	if _, ok := _c.mutation.PollSeq(); !ok {
+		v := scheduledexecrun.DefaultPollSeq
+		_c.mutation.SetPollSeq(v)
+	}
 	if _, ok := _c.mutation.ID(); !ok {
 		v := scheduledexecrun.DefaultID()
 		_c.mutation.SetID(v)
@@ -478,6 +496,9 @@ func (_c *ScheduledExecRunCreate) check() error {
 	}
 	if _, ok := _c.mutation.LastPolledAt(); !ok {
 		return &ValidationError{Name: "last_polled_at", err: errors.New(`ent: missing required field "ScheduledExecRun.last_polled_at"`)}
+	}
+	if _, ok := _c.mutation.PollSeq(); !ok {
+		return &ValidationError{Name: "poll_seq", err: errors.New(`ent: missing required field "ScheduledExecRun.poll_seq"`)}
 	}
 	if len(_c.mutation.EventIDs()) == 0 {
 		return &ValidationError{Name: "event", err: errors.New(`ent: missing required edge "ScheduledExecRun.event"`)}
@@ -613,6 +634,10 @@ func (_c *ScheduledExecRunCreate) createSpec() (*ScheduledExecRun, *sqlgraph.Cre
 	if value, ok := _c.mutation.LastPolledAt(); ok {
 		_spec.SetField(scheduledexecrun.FieldLastPolledAt, field.TypeTime, value)
 		_node.LastPolledAt = value
+	}
+	if value, ok := _c.mutation.PollSeq(); ok {
+		_spec.SetField(scheduledexecrun.FieldPollSeq, field.TypeInt64, value)
+		_node.PollSeq = value
 	}
 	if nodes := _c.mutation.EventIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
@@ -794,6 +819,24 @@ func (u *ScheduledExecRunUpsert) SetLastPolledAt(v time.Time) *ScheduledExecRunU
 // UpdateLastPolledAt sets the "last_polled_at" field to the value that was provided on create.
 func (u *ScheduledExecRunUpsert) UpdateLastPolledAt() *ScheduledExecRunUpsert {
 	u.SetExcluded(scheduledexecrun.FieldLastPolledAt)
+	return u
+}
+
+// SetPollSeq sets the "poll_seq" field.
+func (u *ScheduledExecRunUpsert) SetPollSeq(v int64) *ScheduledExecRunUpsert {
+	u.Set(scheduledexecrun.FieldPollSeq, v)
+	return u
+}
+
+// UpdatePollSeq sets the "poll_seq" field to the value that was provided on create.
+func (u *ScheduledExecRunUpsert) UpdatePollSeq() *ScheduledExecRunUpsert {
+	u.SetExcluded(scheduledexecrun.FieldPollSeq)
+	return u
+}
+
+// AddPollSeq adds v to the "poll_seq" field.
+func (u *ScheduledExecRunUpsert) AddPollSeq(v int64) *ScheduledExecRunUpsert {
+	u.Add(scheduledexecrun.FieldPollSeq, v)
 	return u
 }
 
@@ -1032,6 +1075,27 @@ func (u *ScheduledExecRunUpsertOne) SetLastPolledAt(v time.Time) *ScheduledExecR
 func (u *ScheduledExecRunUpsertOne) UpdateLastPolledAt() *ScheduledExecRunUpsertOne {
 	return u.Update(func(s *ScheduledExecRunUpsert) {
 		s.UpdateLastPolledAt()
+	})
+}
+
+// SetPollSeq sets the "poll_seq" field.
+func (u *ScheduledExecRunUpsertOne) SetPollSeq(v int64) *ScheduledExecRunUpsertOne {
+	return u.Update(func(s *ScheduledExecRunUpsert) {
+		s.SetPollSeq(v)
+	})
+}
+
+// AddPollSeq adds v to the "poll_seq" field.
+func (u *ScheduledExecRunUpsertOne) AddPollSeq(v int64) *ScheduledExecRunUpsertOne {
+	return u.Update(func(s *ScheduledExecRunUpsert) {
+		s.AddPollSeq(v)
+	})
+}
+
+// UpdatePollSeq sets the "poll_seq" field to the value that was provided on create.
+func (u *ScheduledExecRunUpsertOne) UpdatePollSeq() *ScheduledExecRunUpsertOne {
+	return u.Update(func(s *ScheduledExecRunUpsert) {
+		s.UpdatePollSeq()
 	})
 }
 
@@ -1437,6 +1501,27 @@ func (u *ScheduledExecRunUpsertBulk) SetLastPolledAt(v time.Time) *ScheduledExec
 func (u *ScheduledExecRunUpsertBulk) UpdateLastPolledAt() *ScheduledExecRunUpsertBulk {
 	return u.Update(func(s *ScheduledExecRunUpsert) {
 		s.UpdateLastPolledAt()
+	})
+}
+
+// SetPollSeq sets the "poll_seq" field.
+func (u *ScheduledExecRunUpsertBulk) SetPollSeq(v int64) *ScheduledExecRunUpsertBulk {
+	return u.Update(func(s *ScheduledExecRunUpsert) {
+		s.SetPollSeq(v)
+	})
+}
+
+// AddPollSeq adds v to the "poll_seq" field.
+func (u *ScheduledExecRunUpsertBulk) AddPollSeq(v int64) *ScheduledExecRunUpsertBulk {
+	return u.Update(func(s *ScheduledExecRunUpsert) {
+		s.AddPollSeq(v)
+	})
+}
+
+// UpdatePollSeq sets the "poll_seq" field to the value that was provided on create.
+func (u *ScheduledExecRunUpsertBulk) UpdatePollSeq() *ScheduledExecRunUpsertBulk {
+	return u.Update(func(s *ScheduledExecRunUpsert) {
+		s.UpdatePollSeq()
 	})
 }
 

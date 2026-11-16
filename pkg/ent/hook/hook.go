@@ -981,6 +981,18 @@ func (f ScheduledEventFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Val
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.ScheduledEventMutation", m)
 }
 
+// The ScheduledExecPollCursorFunc type is an adapter to allow the use of ordinary
+// function as ScheduledExecPollCursor mutator.
+type ScheduledExecPollCursorFunc func(context.Context, *ent.ScheduledExecPollCursorMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f ScheduledExecPollCursorFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.ScheduledExecPollCursorMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.ScheduledExecPollCursorMutation", m)
+}
+
 // The ScheduledExecRunFunc type is an adapter to allow the use of ordinary
 // function as ScheduledExecRun mutator.
 type ScheduledExecRunFunc func(context.Context, *ent.ScheduledExecRunMutation) (ent.Value, error)

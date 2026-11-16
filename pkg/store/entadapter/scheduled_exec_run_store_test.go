@@ -322,8 +322,8 @@ func TestCreateScheduledEventChecked_LastSlot(t *testing.T) {
 				Payload: `{"agentId":"x","command":["true"]}`, Status: store.ScheduledEventPending,
 			}
 			for {
-				err := s.CreateScheduledEventChecked(ctx, evt, limit+1, func(pending []store.ScheduledEvent) error {
-					if len(pending) >= limit {
+				err := s.CreateScheduledEventChecked(ctx, evt, limit+1, func(snap store.ScheduledExecQuotaSnapshot) error {
+					if len(snap.PendingEvents)+len(snap.ActiveSchedules) >= limit {
 						return errFull
 					}
 					return nil
@@ -478,7 +478,28 @@ func TestUnadmittedScheduledEvents(t *testing.T) {
 	}
 	sc, err := s.GetSchedule(ctx, sched.ID)
 	require.NoError(t, err)
+	assert.Equal(t, 1, sc.RunCount, "the recurring event's schedule increments run_count")
 	assert.Equal(t, 1, sc.ErrorCount, "the recurring event's schedule records the failed run")
+	assert.Equal(t, store.ScheduleRunError, sc.LastRunStatus)
+	assert.Equal(t, "hub restarted before dispatch", sc.LastRunError)
+
+	// Even if errMsg is empty, FailUnadmittedScheduledEvent still records
+	// ScheduleRunError (error_count++ per D6).
+	laterAgo := longAgo.Add(time.Minute)
+	recurringEmptyErr := &store.ScheduledEvent{
+		ID: uuid.NewString(), ProjectID: project, EventType: "exec", FireAt: laterAgo,
+		Payload: `{"agentId":"x","command":["true"]}`, Status: store.ScheduledEventPending, ScheduleID: sched.ID,
+	}
+	require.NoError(t, s.CreateScheduledEvent(ctx, recurringEmptyErr))
+	require.NoError(t, s.UpdateScheduledEventStatus(ctx, recurringEmptyErr.ID, store.ScheduledEventFired, &laterAgo, ""))
+	changed, err := s.FailUnadmittedScheduledEvent(ctx, recurringEmptyErr.ID, "exec", cutoff, "")
+	require.NoError(t, err)
+	assert.True(t, changed)
+	sc, err = s.GetSchedule(ctx, sched.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, sc.RunCount)
+	assert.Equal(t, 2, sc.ErrorCount)
+	assert.Equal(t, store.ScheduleRunError, sc.LastRunStatus)
 }
 
 // TestClaimScheduledExecRunsForPoll_FairAcrossTargets (P3-R2): a target with
@@ -523,5 +544,553 @@ func TestClaimScheduledExecRunsForPoll_FairAcrossTargets(t *testing.T) {
 	require.Len(t, claimed, 2)
 	for _, r := range claimed {
 		assert.Equal(t, slow, r.TargetAgentID)
+	}
+}
+
+// TestClaimScheduledExecRunsForPoll_SeveralSlowTargetsFairness (ptone/scion#8096):
+// 2 slow targets x 20 older runs and 1 healthy target x 1 newer run with 2
+// slots must give the healthy target a slot within two claims (one sweep),
+// even when claims share the same timestamp or previously polled slow runs
+// finish and are purged.
+func TestClaimScheduledExecRunsForPoll_SeveralSlowTargetsFairness(t *testing.T) {
+	s := newTestScheduleStore(t)
+	ctx := context.Background()
+	project := uuid.NewString()
+	// Force UUID order slowA < slowB < healthy so the first claim of 2
+	// picks slowA and slowB before healthy.
+	slowA := "00000000-0000-4000-8000-000000000001"
+	slowB := "00000000-0000-4000-8000-000000000002"
+	healthy := "ffffffff-ffff-4fff-8fff-ffffffffffff"
+	now := time.Now().UTC().Truncate(time.Second)
+
+	add := func(target string, started time.Time) string {
+		evt := newExecEvent(t, s, project, store.ScheduledEventFired, started)
+		run := newExecRun(evt)
+		run.TargetAgentID = target
+		run.StartedAt = started
+		run.LeaseUntil = now.Add(time.Hour)
+		require.NoError(t, s.CreateScheduledExecRun(ctx, run))
+		return evt.ID
+	}
+
+	for i := 0; i < 20; i++ {
+		add(slowA, now.Add(-time.Hour+time.Duration(i)*time.Second))
+		add(slowB, now.Add(-time.Hour+time.Duration(i)*time.Second))
+	}
+	healthyID := add(healthy, now.Add(-time.Minute))
+
+	var excluded []string
+	claim1, err := s.ClaimScheduledExecRunsForPoll(ctx, now, 2, excluded)
+	require.NoError(t, err)
+	require.Len(t, claim1, 2)
+	for _, r := range claim1 {
+		excluded = append(excluded, r.EventID)
+	}
+
+	// Second claim at the exact same instant: healthy MUST get a slot
+	// rather than waiting behind slowA and slowB's remaining 19 older runs.
+	claim2, err := s.ClaimScheduledExecRunsForPoll(ctx, now, 2, excluded)
+	require.NoError(t, err)
+	require.Len(t, claim2, 2)
+	gotHealthy := false
+	for _, r := range claim2 {
+		if r.EventID == healthyID {
+			gotHealthy = true
+		}
+	}
+	require.True(t, gotHealthy, "healthy target must get a turn on claim 2, got %+v", claim2)
+
+	// Finishing and purging the already-polled slow runs must not reset
+	// slowA or slowB's persisted turn ahead of slowB's next turn.
+	for _, r := range claim1 {
+		_, err := s.FinishScheduledExecRun(ctx, store.ScheduledExecRunFinish{
+			EventID: r.EventID, Outcome: store.ScheduledExecOutcomeOK,
+		})
+		require.NoError(t, err)
+	}
+	// claim2 gave slots to healthy and slowA; therefore slowB must lead claim3.
+	for _, r := range claim2 {
+		excluded = append(excluded, r.EventID)
+	}
+	claim3, err := s.ClaimScheduledExecRunsForPoll(ctx, now, 1, excluded)
+	require.NoError(t, err)
+	require.Len(t, claim3, 1)
+	assert.Equal(t, slowB, claim3[0].TargetAgentID, "persisted per-agent turn survives finished runs")
+}
+
+// TestClaimScheduledExecRunsForPoll_CandidateWindowStress (ptone/scion#8096):
+// more than 5,000 older unfinished runs on a slow target must not hide a
+// healthy target's newer run outside a candidate-row window.
+func TestClaimScheduledExecRunsForPoll_CandidateWindowStress(t *testing.T) {
+	s := newTestScheduleStore(t)
+	ctx := context.Background()
+	project := uuid.NewString()
+	slow := "00000000-0000-4000-8000-000000000001"
+	healthy := "ffffffff-ffff-4fff-8fff-ffffffffffff"
+	now := time.Now().UTC().Truncate(time.Second)
+
+	const slowCount = 5200
+	txClient, err := s.client.Tx(ctx)
+	require.NoError(t, err)
+	txStore := &ScheduleStore{client: txClient.Client(), inTx: true}
+	for i := 0; i < slowCount; i++ {
+		started := now.Add(-time.Hour + time.Duration(i)*time.Millisecond)
+		evt := &store.ScheduledEvent{
+			ID: uuid.NewString(), ProjectID: project, EventType: "exec",
+			FireAt: started, FiredAt: &started, Payload: `{"agentId":"x","command":["true"]}`,
+			Status: store.ScheduledEventFired,
+		}
+		require.NoError(t, txStore.CreateScheduledEvent(ctx, evt))
+		run := newExecRun(evt)
+		run.TargetAgentID = slow
+		run.StartedAt = started
+		run.LeaseUntil = now.Add(time.Hour)
+		require.NoError(t, txStore.CreateScheduledExecRun(ctx, run))
+	}
+	require.NoError(t, txClient.Commit())
+
+	healthyEvt := newExecEvent(t, s, project, store.ScheduledEventFired, now.Add(-time.Minute))
+	healthyRun := newExecRun(healthyEvt)
+	healthyRun.TargetAgentID = healthy
+	healthyRun.StartedAt = now.Add(-time.Minute)
+	healthyRun.LeaseUntil = now.Add(time.Hour)
+	require.NoError(t, s.CreateScheduledExecRun(ctx, healthyRun))
+
+	claimed, err := s.ClaimScheduledExecRunsForPoll(ctx, now, 32, nil)
+	require.NoError(t, err)
+	require.Len(t, claimed, 32)
+	var foundHealthy bool
+	for _, r := range claimed {
+		if r.EventID == healthyEvt.ID {
+			foundHealthy = true
+		}
+	}
+	assert.True(t, foundHealthy, "healthy target must be claimed in the first batch even beyond 5,000 slow rows")
+}
+
+// TestClaimScheduledExecRunsForPoll_OncePerSweepWithExclusions (ptone/scion#8096):
+// passing the sweep's already-claimed IDs claims every eligible run at most once.
+func TestClaimScheduledExecRunsForPoll_OncePerSweepWithExclusions(t *testing.T) {
+	s := newTestScheduleStore(t)
+	ctx := context.Background()
+	project := uuid.NewString()
+	now := time.Now().UTC()
+	targets := []string{uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()}
+
+	const total = 40
+	for i := 0; i < total; i++ {
+		evt := newExecEvent(t, s, project, store.ScheduledEventFired, now)
+		run := newExecRun(evt)
+		run.TargetAgentID = targets[i%len(targets)]
+		run.StartedAt = now.Add(time.Duration(i) * time.Millisecond)
+		run.LeaseUntil = now.Add(time.Hour)
+		require.NoError(t, s.CreateScheduledExecRun(ctx, run))
+	}
+
+	seen := map[string]int{}
+	var excluded []string
+	for {
+		claimed, err := s.ClaimScheduledExecRunsForPoll(ctx, now, 12, excluded)
+		require.NoError(t, err)
+		if len(claimed) == 0 {
+			break
+		}
+		for _, r := range claimed {
+			seen[r.EventID]++
+			excluded = append(excluded, r.EventID)
+		}
+	}
+	assert.Len(t, seen, total)
+	for id, count := range seen {
+		assert.Equal(t, 1, count, "run %s claimed more than once", id)
+	}
+}
+
+func newTestExecSchedule(t *testing.T, s *ScheduleStore, project, name, status string) store.Schedule {
+	t.Helper()
+	next := time.Now().UTC().Add(time.Minute)
+	sc := store.Schedule{
+		ID:        uuid.NewString(),
+		ProjectID: project,
+		Name:      name,
+		CronExpr:  "* * * * *",
+		EventType: "exec",
+		Payload:   `{"agentId":"target-1","command":["echo","hi"]}`,
+		Status:    status,
+		NextRunAt: &next,
+	}
+	require.NoError(t, s.CreateSchedule(context.Background(), &sc))
+	return sc
+}
+
+func newRecurringExecEvent(t *testing.T, s *ScheduleStore, sc store.Schedule, firedAt time.Time) *store.ScheduledEvent {
+	t.Helper()
+	f := firedAt.UTC()
+	evt := &store.ScheduledEvent{
+		ID:         uuid.NewString(),
+		ProjectID:  sc.ProjectID,
+		ScheduleID: sc.ID,
+		EventType:  "exec",
+		FireAt:     f,
+		FiredAt:    &f,
+		Payload:    sc.Payload,
+		Status:     store.ScheduledEventFired,
+	}
+	require.NoError(t, s.CreateScheduledEvent(context.Background(), evt))
+	return evt
+}
+
+func TestCreateScheduledExecRun_RecurringOverlapLease(t *testing.T) {
+	s := newTestScheduleStore(t)
+	ctx := context.Background()
+	project := uuid.NewString()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	sc1 := newTestExecSchedule(t, s, project, "sched-1", store.ScheduleStatusActive)
+	sc2 := newTestExecSchedule(t, s, project, "sched-2", store.ScheduleStatusActive)
+
+	evt1 := newRecurringExecEvent(t, s, sc1, now)
+	run1 := newExecRun(evt1)
+	run1.ScheduleID = sc1.ID
+	run1.StartedAt = now
+	run1.LeaseUntil = now.Add(5 * time.Minute)
+	require.NoError(t, s.CreateScheduledExecRun(ctx, run1))
+
+	// Duplicate insert for the SAME event still returns ErrAlreadyExists.
+	assert.ErrorIs(t, s.CreateScheduledExecRun(ctx, run1), store.ErrAlreadyExists)
+
+	// Overlapping fire on the same schedule while run1's lease is live is refused.
+	evt2 := newRecurringExecEvent(t, s, sc1, now.Add(time.Minute))
+	run2 := newExecRun(evt2)
+	run2.ScheduleID = sc1.ID
+	run2.StartedAt = now.Add(time.Minute)
+	run2.LeaseUntil = now.Add(6 * time.Minute)
+	assert.ErrorIs(t, s.CreateScheduledExecRun(ctx, run2), store.ErrScheduledExecOverlap)
+	_, getErr := s.GetScheduledExecRun(ctx, evt2.ID)
+	assert.ErrorIs(t, getErr, store.ErrNotFound)
+
+	// Another schedule and a one-shot event on the same target are unaffected.
+	otherEvt := newRecurringExecEvent(t, s, sc2, now.Add(time.Minute))
+	otherRun := newExecRun(otherEvt)
+	otherRun.ScheduleID = sc2.ID
+	otherRun.TargetAgentID = run1.TargetAgentID
+	otherRun.StartedAt = now.Add(time.Minute)
+	otherRun.LeaseUntil = now.Add(6 * time.Minute)
+	require.NoError(t, s.CreateScheduledExecRun(ctx, otherRun))
+
+	oneShotEvt := newExecEvent(t, s, project, store.ScheduledEventFired, now)
+	oneShotRun := newExecRun(oneShotEvt)
+	oneShotRun.TargetAgentID = run1.TargetAgentID
+	require.NoError(t, s.CreateScheduledExecRun(ctx, oneShotRun))
+
+	// Once run1's lease has expired (StartedAt >= LeaseUntil), a new run for sc1 is admitted.
+	evt3 := newRecurringExecEvent(t, s, sc1, now.Add(6*time.Minute))
+	run3 := newExecRun(evt3)
+	run3.ScheduleID = sc1.ID
+	run3.StartedAt = now.Add(6 * time.Minute)
+	run3.LeaseUntil = now.Add(11 * time.Minute)
+	require.NoError(t, s.CreateScheduledExecRun(ctx, run3))
+
+	// Finishing run3 releases the DB overlap lease immediately even before LeaseUntil.
+	won, err := s.FinishScheduledExecRun(ctx, store.ScheduledExecRunFinish{
+		EventID:    evt3.ID,
+		FinishedAt: now.Add(7 * time.Minute),
+		Outcome:    store.ScheduledExecOutcomeOK,
+	})
+	require.NoError(t, err)
+	require.True(t, won)
+
+	evt4 := newRecurringExecEvent(t, s, sc1, now.Add(8*time.Minute))
+	run4 := newExecRun(evt4)
+	run4.ScheduleID = sc1.ID
+	run4.StartedAt = now.Add(8 * time.Minute)
+	run4.LeaseUntil = now.Add(13 * time.Minute)
+	require.NoError(t, s.CreateScheduledExecRun(ctx, run4))
+}
+
+func TestFinishScheduledExecRun_UpdatesScheduleAccountingAtomically(t *testing.T) {
+	s := newTestScheduleStore(t)
+	ctx := context.Background()
+	project := uuid.NewString()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	sc := newTestExecSchedule(t, s, project, "accounting", store.ScheduleStatusActive)
+
+	// 1. Exit 0 -> success; RunCount=1, ErrorCount=0.
+	e1 := newRecurringExecEvent(t, s, sc, base)
+	r1 := newExecRun(e1)
+	r1.ScheduleID = sc.ID
+	require.NoError(t, s.CreateScheduledExecRun(ctx, r1))
+	won, err := s.FinishScheduledExecRun(ctx, store.ScheduledExecRunFinish{
+		EventID:    e1.ID,
+		FinishedAt: base.Add(time.Second),
+		Outcome:    store.ScheduledExecOutcomeOK,
+	})
+	require.NoError(t, err)
+	require.True(t, won)
+
+	got, err := s.GetSchedule(ctx, sc.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, got.RunCount)
+	assert.Equal(t, 0, got.ErrorCount)
+	assert.Equal(t, store.ScheduleRunSuccess, got.LastRunStatus)
+	assert.Empty(t, got.LastRunError)
+
+	// 2. Skipped -> LastRunStatus=skipped; RunCount=2, ErrorCount still 0!
+	e2 := newRecurringExecEvent(t, s, sc, base.Add(time.Minute))
+	r2 := newExecRun(e2)
+	r2.ScheduleID = sc.ID
+	require.NoError(t, s.CreateScheduledExecRun(ctx, r2))
+	won, err = s.FinishScheduledExecRun(ctx, store.ScheduledExecRunFinish{
+		EventID:     e2.ID,
+		FinishedAt:  base.Add(time.Minute + time.Second),
+		Outcome:     store.ScheduledExecOutcomeSkipped,
+		EventStatus: store.ScheduledEventSkipped,
+		EventError:  "previous run in progress",
+	})
+	require.NoError(t, err)
+	require.True(t, won)
+
+	got, err = s.GetSchedule(ctx, sc.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, got.RunCount)
+	assert.Equal(t, 0, got.ErrorCount)
+	assert.Equal(t, store.ScheduleRunSkipped, got.LastRunStatus)
+	assert.Equal(t, "previous run in progress", got.LastRunError)
+
+	// 3. Nonzero -> LastRunStatus=error; RunCount=3, ErrorCount=1.
+	e3 := newRecurringExecEvent(t, s, sc, base.Add(2*time.Minute))
+	r3 := newExecRun(e3)
+	r3.ScheduleID = sc.ID
+	require.NoError(t, s.CreateScheduledExecRun(ctx, r3))
+	won, err = s.FinishScheduledExecRun(ctx, store.ScheduledExecRunFinish{
+		EventID:     e3.ID,
+		FinishedAt:  base.Add(2*time.Minute + time.Second),
+		Outcome:     store.ScheduledExecOutcomeNonzero,
+		EventStatus: store.ScheduledEventFailed,
+		EventError:  "command exited with status 2",
+	})
+	require.NoError(t, err)
+	require.True(t, won)
+
+	got, err = s.GetSchedule(ctx, sc.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 3, got.RunCount)
+	assert.Equal(t, 1, got.ErrorCount)
+	assert.Equal(t, store.ScheduleRunError, got.LastRunStatus)
+	assert.Equal(t, "command exited with status 2", got.LastRunError)
+
+	// 4. Concurrent CAS finishers on Run 4 count the run on the schedule ONCE.
+	e4 := newRecurringExecEvent(t, s, sc, base.Add(3*time.Minute))
+	r4 := newExecRun(e4)
+	r4.ScheduleID = sc.ID
+	require.NoError(t, s.CreateScheduledExecRun(ctx, r4))
+	var wg sync.WaitGroup
+	var wins atomic.Int32
+	for i := 0; i < 12; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			fin := store.ScheduledExecRunFinish{
+				EventID:    e4.ID,
+				FinishedAt: base.Add(3*time.Minute + time.Second),
+				Outcome:    store.ScheduledExecOutcomeOK,
+			}
+			if i%2 == 1 {
+				fin.Outcome = store.ScheduledExecOutcomeAbandoned
+				fin.EventStatus = store.ScheduledEventFailed
+				fin.EventError = "run outcome unknown after lease expiry"
+			}
+			for {
+				w, finErr := s.FinishScheduledExecRun(ctx, fin)
+				if finErr == nil {
+					if w {
+						wins.Add(1)
+					}
+					return
+				}
+				time.Sleep(time.Millisecond)
+			}
+		}(i)
+	}
+	wg.Wait()
+	assert.Equal(t, int32(1), wins.Load())
+	got, err = s.GetSchedule(ctx, sc.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 4, got.RunCount)
+}
+
+func TestCompleteUnadmittedExecEvent_SkippedAndFailedAndAdmittedGuard(t *testing.T) {
+	s := newTestScheduleStore(t)
+	ctx := context.Background()
+	project := uuid.NewString()
+	base := time.Now().UTC().Truncate(time.Second)
+
+	sc := newTestExecSchedule(t, s, project, "preadmit", store.ScheduleStatusActive)
+
+	// Pre-admission skip updates event to skipped and bumps RunCount without ErrorCount.
+	eSkip := newRecurringExecEvent(t, s, sc, base)
+	ok, err := s.CompleteUnadmittedExecEvent(ctx, eSkip.ID, store.ScheduledEventSkipped, "missed window", sc.ID, base)
+	require.NoError(t, err)
+	assert.True(t, ok)
+
+	gotEvt, err := s.GetScheduledEvent(ctx, eSkip.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ScheduledEventSkipped, gotEvt.Status)
+	assert.Equal(t, "missed window", gotEvt.Error)
+
+	gotSc, err := s.GetSchedule(ctx, sc.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, gotSc.RunCount)
+	assert.Equal(t, 0, gotSc.ErrorCount)
+	assert.Equal(t, store.ScheduleRunSkipped, gotSc.LastRunStatus)
+
+	// Pre-admission failure updates event to failed and bumps ErrorCount.
+	eFail := newRecurringExecEvent(t, s, sc, base.Add(time.Minute))
+	ok, err = s.CompleteUnadmittedExecEvent(ctx, eFail.ID, store.ScheduledEventFailed, "hub shutting down", sc.ID, base.Add(time.Minute))
+	require.NoError(t, err)
+	assert.True(t, ok)
+
+	gotSc, err = s.GetSchedule(ctx, sc.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, gotSc.RunCount)
+	assert.Equal(t, 1, gotSc.ErrorCount)
+	assert.Equal(t, store.ScheduleRunError, gotSc.LastRunStatus)
+
+	// Once admitted (ScheduledExecRun row exists), CompleteUnadmittedExecEvent MUST NOT clobber it!
+	eAdmitted := newRecurringExecEvent(t, s, sc, base.Add(2*time.Minute))
+	rAdmitted := newExecRun(eAdmitted)
+	rAdmitted.ScheduleID = sc.ID
+	require.NoError(t, s.CreateScheduledExecRun(ctx, rAdmitted))
+
+	ok, err = s.CompleteUnadmittedExecEvent(ctx, eAdmitted.ID, store.ScheduledEventFailed, "hub shutting down", sc.ID, base.Add(2*time.Minute))
+	require.NoError(t, err)
+	assert.False(t, ok)
+
+	gotEvt, err = s.GetScheduledEvent(ctx, eAdmitted.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.ScheduledEventFired, gotEvt.Status)
+	gotSc, err = s.GetSchedule(ctx, sc.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, gotSc.RunCount)
+}
+
+func TestCheckedExecQuota_CrossEventAndScheduleLastSlotAndSelfUpdate(t *testing.T) {
+	s := newTestScheduleStore(t)
+	ctx := context.Background()
+	project := uuid.NewString()
+	const limit = 3
+
+	// 1 pending exec event + 1 active exec schedule = 2 active items (1 slot left).
+	newExecEvent(t, s, project, store.ScheduledEventPending, time.Now())
+	active1 := newTestExecSchedule(t, s, project, "active-1", store.ScheduleStatusActive)
+
+	// Paused exec schedule and active message schedule must NOT count.
+	pausedToResume := newTestExecSchedule(t, s, project, "paused-resume", store.ScheduleStatusPaused)
+	msgSched := store.Schedule{
+		ID: uuid.NewString(), ProjectID: project, Name: "msg-1", CronExpr: "* * * * *",
+		EventType: "message", Payload: `{"message":"hi"}`, Status: store.ScheduleStatusActive,
+	}
+	require.NoError(t, s.CreateSchedule(ctx, &msgSched))
+
+	errFull := errors.New("quota full")
+	quotaCheck := func(snap store.ScheduledExecQuotaSnapshot) error {
+		if len(snap.PendingEvents)+len(snap.ActiveSchedules) >= limit {
+			return errFull
+		}
+		return nil
+	}
+
+	// Race 3 one-shot creates + 3 active schedule creates + 1 resume for the single remaining slot!
+	var wg sync.WaitGroup
+	var winners, refused atomic.Int32
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			evt := &store.ScheduledEvent{
+				ID: uuid.NewString(), ProjectID: project, EventType: "exec",
+				FireAt: time.Now().Add(time.Hour), Payload: `{"agentId":"x","command":["true"]}`,
+				Status: store.ScheduledEventPending,
+			}
+			for tries := 0; tries < 50; tries++ {
+				err := s.CreateScheduledEventChecked(ctx, evt, limit+1, quotaCheck)
+				switch {
+				case err == nil:
+					winners.Add(1)
+					return
+				case errors.Is(err, errFull):
+					refused.Add(1)
+					return
+				case errors.Is(err, store.ErrTransient):
+					time.Sleep(time.Millisecond)
+				default:
+					return
+				}
+			}
+		}()
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			next := time.Now().UTC().Add(time.Minute)
+			sc := &store.Schedule{
+				ID: uuid.NewString(), ProjectID: project, Name: uuid.NewString(),
+				CronExpr: "* * * * *", EventType: "exec",
+				Payload: `{"agentId":"x","command":["true"]}`, Status: store.ScheduleStatusActive,
+				NextRunAt: &next,
+			}
+			for tries := 0; tries < 50; tries++ {
+				err := s.CreateScheduleChecked(ctx, sc, limit+1, quotaCheck)
+				switch {
+				case err == nil:
+					winners.Add(1)
+					return
+				case errors.Is(err, errFull):
+					refused.Add(1)
+					return
+				case errors.Is(err, store.ErrTransient):
+					time.Sleep(time.Millisecond)
+				default:
+					return
+				}
+			}
+		}(i)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		upd := pausedToResume
+		upd.Status = store.ScheduleStatusActive
+		for tries := 0; tries < 50; tries++ {
+			err := s.UpdateScheduleChecked(ctx, &upd, store.ScheduleFieldMask{Status: true}, 0, false, nil, limit+1, quotaCheck)
+			switch {
+			case err == nil:
+				winners.Add(1)
+				return
+			case errors.Is(err, errFull):
+				refused.Add(1)
+				return
+			case errors.Is(err, store.ErrTransient):
+				time.Sleep(time.Millisecond)
+			default:
+				return
+			}
+		}
+	}()
+	wg.Wait()
+
+	assert.Equal(t, int32(1), winners.Load(), "exactly one concurrent author may claim the last slot")
+	assert.Equal(t, int32(6), refused.Load())
+
+	// Editing an ALREADY-active exec schedule at full quota must succeed because it excludes itself.
+	editActive := active1
+	editActive.Payload = `{"agentId":"target-1","command":["echo","edited"]}`
+	require.NoError(t, s.UpdateScheduleChecked(ctx, &editActive, store.ScheduleFieldMask{Payload: true}, 0, false, nil, limit+1, quotaCheck))
+
+	// ListSchedules filters by EventType.
+	execList, err := s.ListSchedules(ctx, store.ScheduleFilter{ProjectID: project, EventType: "exec"}, store.ListOptions{Limit: 50})
+	require.NoError(t, err)
+	for _, item := range execList.Items {
+		assert.Equal(t, "exec", item.EventType)
 	}
 }

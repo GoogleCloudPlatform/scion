@@ -3204,6 +3204,31 @@ var (
 			},
 		},
 	}
+	// ScheduledExecPollCursorsColumns holds the columns for the "scheduled_exec_poll_cursors" table.
+	ScheduledExecPollCursorsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "target_agent_id", Type: field.TypeUUID, Unique: true},
+		{Name: "turn_seq", Type: field.TypeInt64, Default: 0},
+		{Name: "last_polled_at", Type: field.TypeTime},
+	}
+	// ScheduledExecPollCursorsTable holds the schema information for the "scheduled_exec_poll_cursors" table.
+	ScheduledExecPollCursorsTable = &schema.Table{
+		Name:       "scheduled_exec_poll_cursors",
+		Columns:    ScheduledExecPollCursorsColumns,
+		PrimaryKey: []*schema.Column{ScheduledExecPollCursorsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "scheduledexecpollcursor_turn_seq_target_agent_id",
+				Unique:  false,
+				Columns: []*schema.Column{ScheduledExecPollCursorsColumns[2], ScheduledExecPollCursorsColumns[1]},
+			},
+			{
+				Name:    "scheduledexecpollcursor_last_polled_at",
+				Unique:  false,
+				Columns: []*schema.Column{ScheduledExecPollCursorsColumns[3]},
+			},
+		},
+	}
 	// ScheduledExecRunsColumns holds the columns for the "scheduled_exec_runs" table.
 	ScheduledExecRunsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -3231,6 +3256,7 @@ var (
 		{Name: "runtime", Type: field.TypeString, Default: ""},
 		{Name: "launch_id", Type: field.TypeString, Default: ""},
 		{Name: "last_polled_at", Type: field.TypeTime},
+		{Name: "poll_seq", Type: field.TypeInt64, Default: 0},
 		{Name: "event_id", Type: field.TypeUUID, Unique: true},
 	}
 	// ScheduledExecRunsTable holds the schema information for the "scheduled_exec_runs" table.
@@ -3241,7 +3267,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "scheduled_exec_runs_scheduled_events_exec_run",
-				Columns:    []*schema.Column{ScheduledExecRunsColumns[25]},
+				Columns:    []*schema.Column{ScheduledExecRunsColumns[26]},
 				RefColumns: []*schema.Column{ScheduledEventsColumns[0]},
 				OnDelete:   schema.Cascade,
 			},
@@ -3256,6 +3282,11 @@ var (
 				Name:    "scheduledexecrun_target_agent_id_finished_at",
 				Unique:  false,
 				Columns: []*schema.Column{ScheduledExecRunsColumns[3], ScheduledExecRunsColumns[17]},
+			},
+			{
+				Name:    "scheduledexecrun_target_agent_id_finished_at_poll_seq",
+				Unique:  false,
+				Columns: []*schema.Column{ScheduledExecRunsColumns[3], ScheduledExecRunsColumns[17], ScheduledExecRunsColumns[25]},
 			},
 			{
 				Name:    "scheduledexecrun_project_id",
@@ -4050,6 +4081,7 @@ var (
 		RuntimeOrphansTable,
 		SchedulesTable,
 		ScheduledEventsTable,
+		ScheduledExecPollCursorsTable,
 		ScheduledExecRunsTable,
 		SecretsTable,
 		SkillsTable,
@@ -4276,6 +4308,9 @@ func init() {
 	}
 	ScheduledEventsTable.Annotation = &entsql.Annotation{
 		Table: "scheduled_events",
+	}
+	ScheduledExecPollCursorsTable.Annotation = &entsql.Annotation{
+		Table: "scheduled_exec_poll_cursors",
 	}
 	ScheduledExecRunsTable.ForeignKeys[0].RefTable = ScheduledEventsTable
 	ScheduledExecRunsTable.Annotation = &entsql.Annotation{
