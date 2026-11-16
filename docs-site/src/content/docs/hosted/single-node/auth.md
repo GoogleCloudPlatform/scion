@@ -599,6 +599,33 @@ Projects can be linked to specific GitHub App installations when the association
 ### Webhook Secret
 GitHub App webhook deliveries must be signed. Set the webhook secret in the "GitHub App" tab of the Admin Server Config UI; the Hub stores it as a hub-scoped secret. Use the same value as the webhook secret in your GitHub App's settings. If no webhook secret is configured, the Hub rejects every webhook event with `503 Service Unavailable` instead of processing it unsigned.
 
+### Permissions and Events for GitHub Triggers
+
+When GitHub triggers are used (behind the [`hub.github_triggers`](/scion/reference/experiments/#server-experiments-with-notes) experiment), configure your GitHub App with the following baseline settings in addition to standard Git authentication:
+
+- **Webhooks**: Active webhook pointed at `https://<hub-public-url>/api/v1/webhooks/github` with a configured webhook secret and `webhooks_enabled: true` on the Hub.
+- **Repository permissions**:
+  - **Contents**: Read and write
+  - **Pull requests**: Read and write
+  - **Issues**: Read and write (required when triggers are used; `Issues` read access is required for GitHub to deliver `issue_comment` deliveries on both issues and pull request conversations, and write access is required for comment replies)
+  - **Metadata**: Read-only
+- **Subscribed events**:
+  - `installation` and `installation_repositories`
+  - `pull_request`, `issues`, `issue_comment`, `pull_request_review`, and `pull_request_review_comment` (plus `push` if push triggers are used)
+- **App mention identity (`github_app` settings)**: The Hub caches the App's `slug`, `bot_login`, subscribed `events`, and `permissions` from `GET /app` (refreshed on startup, during periodic health checks, via `POST /api/v1/github-app/sync-permissions`, and on `installation.new_permissions_accepted`). Administrators can optionally set `app_slug` (fallback override when `GET /app` is unavailable) and `command_mention_aliases` (additional `@<alias>` handles accepted alongside `@<app-slug>`) in the `github_app` operational settings section.
+- **Primary-project repository routing**: When multiple projects on the same Hub share an authorized installation and git remote (`owner/repo`), Hub administrators can inspect multi-project repositories and pin a primary project for trigger fan-out via `GET /api/v1/github-app/repo-routing` (with optional `?installation=<id>`), `PUT /api/v1/github-app/repo-routing/{owner}/{repo}` (`{"installation_id": <id>, "primary_project_id": "<project-id>"}`), and `DELETE /api/v1/github-app/repo-routing/{owner}/{repo}?installation=<id>`. If a configured primary project is no longer an active candidate, routing reports `stale_primary` and falls back to all candidate projects rather than dropping events; deleting a project automatically clears its primary-routing entries.
+
+### Upgrading an Existing App for Triggers
+
+To upgrade an existing GitHub App that was originally configured for Git authentication alone:
+
+1. **Enable webhooks** on the GitHub App (`https://<hub-public-url>/api/v1/webhooks/github`) and ensure `webhooks_enabled: true` and the matching webhook secret are configured on the Hub.
+2. **Edit Permissions & events** in your GitHub App settings on GitHub:
+   - Raise **Issues** repository permission to **Read and write** (keeping **Contents: Read and write**, **Pull requests: Read and write**, and **Metadata: Read-only**).
+   - Subscribe to **Pull requests**, **Issues**, **Issue comments**, **Pull request reviews**, and **Pull request review comments** (and **Push** if needed), keeping **Installation** and **Installation repositories** enabled, then save changes.
+3. **Have installation owners accept the new permissions**: Adding events covered by already-granted permissions takes effect immediately, whereas adding or raising a repository permission prompts each installation's organization or account owner on GitHub to accept the updated permissions. Until an installation's owner accepts, installation token mints requesting `issues: write` fail and GitHub withholds the newly added events for that installation. Once accepted, GitHub sends the `installation` webhook with `action: "new_permissions_accepted"`, which refreshes the Hub's cached App metadata and resets affected projects' GitHub App status from `degraded` (`permission_denied`) back to `unchecked`.
+4. **Verify readiness**: With `hub.github_triggers` enabled, run `POST /api/v1/github-app/sync-permissions` (if webhooks have not already refreshed it) and inspect `GET /api/v1/github-app` to confirm `triggers.ready` is `true` and `triggers.missing_events` and `triggers.missing_permissions` are empty (the `scion trigger github status` CLI command is forthcoming).
+
 
 ## Session Revocation
 

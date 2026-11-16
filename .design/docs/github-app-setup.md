@@ -23,12 +23,19 @@ This guide walks through configuring GitHub App authentication for your Scion Hu
      - Contents: **Read and write**
      - Metadata: **Read-only**
      - Pull requests: **Read and write**
-     - Issues: **Read and write** (optional)
+     - Issues: **Read and write** (required when GitHub triggers are used; optional for Git authentication alone)
      - Checks: **Read and write** (optional, for future CI status)
      - Actions: **Read-only** (optional, for workflow status)
 4. Subscribe to events:
    - Installation
    - Installation repositories
+   - When GitHub triggers (`hub.github_triggers`) are used, also subscribe to:
+     - Pull requests (`pull_request`)
+     - Issues (`issues`)
+     - Issue comments (`issue_comment`)
+     - Pull request reviews (`pull_request_review`)
+     - Pull request review comments (`pull_request_review_comment`)
+     - Push (`push`, optional — required only if push triggers are used)
 5. Set "Where can this GitHub App be installed?" to **Any account** (or restrict to your org).
 6. Click **Create GitHub App**.
 
@@ -98,6 +105,34 @@ curl https://<hub-url>/api/v1/groves/<grove-id>/github-status \
 ```
 
 The status should show `"state": "unchecked"` until the first agent runs, after which it will show `"state": "ok"`.
+
+## Upgrading an Existing App for Triggers
+
+If your GitHub App was registered for Git authentication only, upgrade its permissions and event subscriptions before using GitHub triggers (`hub.github_triggers`):
+
+1. **Ensure webhooks are enabled**:
+   - On GitHub (**GitHub App settings > General**), confirm **Webhook** is active, **Webhook URL** points to `https://<hub-public-url>/api/v1/webhooks/github`, and **Webhook secret** matches the secret configured on the Hub.
+   - In Hub configuration, ensure `webhooks_enabled: true` and the webhook secret is stored.
+2. **Update permissions and subscribed events on GitHub**:
+   - Go to **Permissions & events** in your GitHub App settings.
+   - Under **Repository permissions**, set **Issues** to **Read and write** (keep **Contents: Read and write**, **Pull requests: Read and write**, and **Metadata: Read-only**). `Issues: Read and write` is required both so GitHub delivers `issue_comment` events (including pull request conversation comments) and so trigger actions and agents can post comments.
+   - Under **Subscribe to events**, check **Pull requests**, **Issues**, **Issue comments**, **Pull request reviews**, and **Pull request review comments** (plus **Push** if push triggers are used), while keeping **Installation** and **Installation repositories** checked.
+   - Save changes.
+3. **Accept the updated permissions on each installation**:
+   - Subscribing to events for already-granted permissions takes effect immediately, but adding or raising a permission causes GitHub to ask each installation's organization or account owner to accept the update. Until accepted, installation token mints requesting `issues: write` fail and GitHub does not deliver the newly added events for that installation.
+   - Have each installation owner approve the prompt in **GitHub Settings > Applications** (or Organization **Settings > Third-party Access > GitHub Apps**). When accepted, GitHub delivers `installation` (`action: "new_permissions_accepted"`), and the Hub refreshes its cached App metadata and resets affected projects' GitHub App status from `degraded` (`permission_denied`) back to `unchecked` so the next token mint re-validates cleanly.
+4. **Verify trigger readiness on the Hub**:
+   - Refresh cached App metadata immediately if needed:
+     ```bash
+     curl -X POST https://<hub-url>/api/v1/github-app/sync-permissions \
+       -H "Authorization: Bearer <admin-token>"
+     ```
+   - With the `hub.github_triggers` experiment enabled, check readiness on `GET /api/v1/github-app`:
+     ```bash
+     curl https://<hub-url>/api/v1/github-app \
+       -H "Authorization: Bearer <admin-token>"
+     ```
+     Confirm `"triggers"` reports `"ready": true` with empty `missing_events` and `missing_permissions` (a forthcoming `scion trigger github status` CLI command will also display this status).
 
 ## Webhook Troubleshooting
 
