@@ -41,6 +41,8 @@ The `windows-latest` job runs only `.github/windows-test-packages.txt`: one pack
 
 ## Local check
 
+Only `./cmd/scion` and packages in its `GOOS=windows` import graph must build and vet on Windows: `./cmd/sciontool`, `./cmd/scion-broker-repl`, and container-only `pkg/sciontool` subpackages (`supervisor`, `services`, `homeprep`, `conduit/...`, `hooks/handlers`, `netcap`, `suppgroups`) are Unix-only (vet individual `./cmd/scion`-imported subpackages rather than `./pkg/sciontool/...`), and `GOOS=windows go test -c` applies only to packages in `.github/windows-test-packages.txt` or with `*_windows_test.go` (unlisted test binaries may import Unix-only container packages).
+
 ```bash
 GOOS=windows GOARCH=amd64 go build -buildvcs=false -o /dev/null ./cmd/scion
 GOOS=windows GOARCH=amd64 go vet -buildvcs=false ./pkg/util/privatefs/... ./pkg/util/pathcanon/... ./pkg/util/filelock/... ./pkg/tunnelclient/... ./pkg/<yours>/...   # for cmd/, pass ./cmd ./cmd/scion (not ./cmd/...; ./cmd/sciontool is unix-only)
