@@ -25,6 +25,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func projectPayload(raw []byte, maxBytes int) ([]byte, bool, error) {
+	root, err := decodeJSONObject(raw)
+	if err != nil {
+		return nil, false, err
+	}
+	return projectDecodedPayload(root, maxBytes)
+}
+
 func TestProjectPayload_StripsBloatAndReducesObjects(t *testing.T) {
 	raw := []byte(`{
 		"action": "opened",

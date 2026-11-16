@@ -59,16 +59,7 @@ func decodeJSONObject(raw []byte) (map[string]any, error) {
 	return obj, nil
 }
 
-// projectPayload builds the §5.8 bounded JSON projection from a decoded root object
-// (or use projectPayload from raw bytes in tests).
-func projectPayload(raw []byte, maxBytes int) ([]byte, bool, error) {
-	root, err := decodeJSONObject(raw)
-	if err != nil {
-		return nil, false, err
-	}
-	return projectDecodedPayload(root, maxBytes)
-}
-
+// projectDecodedPayload builds the §5.8 bounded JSON projection from a decoded root object.
 func projectDecodedPayload(root map[string]any, maxBytes int) ([]byte, bool, error) {
 	if maxBytes <= 0 {
 		maxBytes = DefaultMaxPayloadBytes
