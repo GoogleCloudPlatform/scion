@@ -280,10 +280,10 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 			Message: fmt.Sprintf("buildStartContext: Operation not set or unrecognized: %q", in.Operation),
 		}
 	}
-	// A flat cloudrun instance refuses a per-agent GCP identity request
-	// here, ahead of every side effect below: the ownership record, the
-	// project files and the identity resolution (E-10).
-	if sce := s.flatCloudRunGCPIdentityRefusal(in); sce != nil {
+	// A flat cloudrun instance checks its GCP identity decision here, ahead
+	// of every side effect below: the ownership record, the project files
+	// and the identity resolution (E-10, ptone/scion#8182).
+	if _, sce := s.flatCloudRunIdentityDecision(in); sce != nil {
 		return nil, sce
 	}
 	// A flat cloudrun instance likewise refuses worktree-per-agent ahead of

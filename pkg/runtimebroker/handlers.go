@@ -1319,12 +1319,13 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		if createSlug == "" {
 			createSlug = api.Slugify(req.Name)
 		}
-		ownEnabled := s.ownership != nil && s.flatCloudRunGCPIdentityRefusal(startContextInputs{
+		_, flatIdentityErr := s.flatCloudRunIdentityDecision(startContextInputs{
 			Name:        req.Name,
 			Operation:   opCreate,
 			Config:      req.Config,
 			ResolvedEnv: req.ResolvedEnv,
-		}) == nil
+		})
+		ownEnabled := s.ownership != nil && flatIdentityErr == nil
 		lockErr, checkErr, err := s.relinkSharedProjectIdentityCheckedWithOwnership(ctx, req.ProjectPath, req.ProjectSlug, req.ProjectID, req.Name, req.PreviousProjectIDs, s.unrecordedRelinkAllowed(ctx, r), relinkOwnership{
 			agentID: req.ID,
 			slug:    createSlug,
@@ -7855,7 +7856,7 @@ func (s *Server) existingAgentUsesPin(opts api.StartOptions, pin pinnedRuntime) 
 // resolveExistingAgentManager runs opts on the pin ("" when the pin records
 // none), or nil when it does not use the pin.
 func (s *Server) pinnedCloudRunEntry(opts api.StartOptions, pin pinnedRuntime) *string {
-	if !s.existingAgentUsesPin(opts, pin) {
+	if s.isFlat() || !s.existingAgentUsesPin(opts, pin) {
 		return nil
 	}
 	entry := ""

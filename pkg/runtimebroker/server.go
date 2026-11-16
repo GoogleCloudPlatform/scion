@@ -599,6 +599,10 @@ type Server struct {
 	// policy, snapshotted when the server is built (flat_k8s_identity.go).
 	flatK8sIdentity flatKubernetesIdentityPolicy
 
+	// flatCloudRunIdentity is a flat instance's own Cloud Run GCP identity
+	// policy, snapshotted when the server is built (flat_cloudrun_identity.go).
+	flatCloudRunIdentity flatCloudRunIdentityPolicy
+
 	// flatPolicy is a flat instance's settings policy (its runtime_target
 	// defaults), snapshotted when the server is built and attached to
 	// every request it serves (flat_instance.go).
@@ -755,6 +759,7 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime, rec config.Run
 	}
 	if fi := srv.flatInstance(); fi != nil {
 		srv.flatK8sIdentity = newFlatKubernetesIdentityPolicy(fi)
+		srv.flatCloudRunIdentity = newFlatCloudRunIdentityPolicy(fi)
 		srv.flatPolicy = config.NewFlatInstancePolicy(fi.Instance)
 	}
 	if fi := srv.flatInstance(); fi != nil {

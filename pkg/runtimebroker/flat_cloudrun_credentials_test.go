@@ -146,7 +146,11 @@ func TestFlatCloudRun_CredentialContentsNeverInAPI(t *testing.T) {
 	// The route table covers exactly the registered patterns.
 	requireRouteSetMatchesServer(t)
 	path, values := flatCredContents(t)
-	needles := append([]string{flatCredMarker, path, filepath.Dir(path)}, values...)
+	const (
+		flatCredBlockSA  = "no-role-block@example-project.iam.gserviceaccount.com"
+		flatCredAssignSA = "worker-assign@example-project.iam.gserviceaccount.com"
+	)
+	needles := append([]string{flatCredMarker, path, filepath.Dir(path), flatCredBlockSA, flatCredAssignSA}, values...)
 
 	// Control: the checker reports a body that carries the marker, so a
 	// body that held one would fail this test.
@@ -161,7 +165,8 @@ func TestFlatCloudRun_CredentialContentsNeverInAPI(t *testing.T) {
 			RuntimeTarget: api.RuntimeTargetDescriptor{ID: "target-1", Type: brokeridentity.TargetTypeCloudRun, DisplayName: "Cloud Run"}},
 		Instance: config.V1RuntimeBrokerInstanceConfig{Key: "cr-a", Name: "cr-a", RuntimeTarget: &config.V1RuntimeTargetConfig{
 			Type: config.RuntimeTargetTypeCloudRun, DisplayName: "Cloud Run", ProjectID: "example-project", Region: "us-central1",
-			ServiceAccount: "agents@example-project.iam.gserviceaccount.com", Subnetwork: "agents-subnet", CredentialsFile: path,
+			ServiceAccount: "agents@example-project.iam.gserviceaccount.com", BlockServiceAccount: flatCredBlockSA,
+			AssignableServiceAccounts: []string{flatCredAssignSA}, Subnetwork: "agents-subnet", CredentialsFile: path,
 		}},
 		HubInProcess: true,
 	}
