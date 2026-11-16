@@ -30,6 +30,24 @@ import { paginateAll, PaginationError } from '../../client/paginate-all.js';
 import { resourceStyles } from './resource-styles.js';
 import { browserTimeZone, formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import { FEATURE_FLAGS_CHANGED_EVENT, execSchedulesEnabled } from '../../utils/feature-flags.js';
+import {
+  EXEC_HISTORY_LIMIT,
+  type ExecAgentOption,
+  type ExecHistoryEvent,
+  argvEqual,
+  loadProjectExecAgents,
+  parseExecPayload,
+  parseExecTimeoutValue,
+  renderExecAgentPicker,
+  renderExecArgvEditor,
+  renderExecDetailPayload,
+  renderExecHistorySection,
+  renderExecTimeoutInput,
+  scheduleExecStyles,
+  validateExecArgv,
+  validateExecTarget,
+} from './schedule-exec.js';
 
 interface Schedule {
   id: string;
@@ -53,6 +71,10 @@ interface Schedule {
   createdBy?: string;
 }
 
+interface HistoryListResponse {
+  events?: ExecHistoryEvent[];
+}
+
 /**
  * Label shown on a schedule whose cron expression carries a zone prefix.
  * The hub rejects such expressions and pauses existing rows that use one;
@@ -68,6 +90,7 @@ const STATUS_REASON_LABELS: Record<string, string> = {
   creator_deleted: 'Creator deleted: resume to run it under your authority',
   cron_zone_unsupported:
     'Zone prefix not supported: remove it, set the time zone field, then resume',
+  target_deleted: 'Target agent deleted: edit to choose a live target and command, then resume',
 };
 
 /** Returns the text shown for a schedule's status reason, or '' when it has none. */
@@ -98,23 +121,36 @@ export function normalizeTimeZoneInput(value: string): string {
   return zone === 'UTC' ? '' : zone;
 }
 
+export interface ScheduleEditExecFields {
+  agentId: string;
+  agentPickedById?: boolean | undefined;
+  command: readonly string[];
+  timeoutInput: string;
+}
+
 /** The edit dialog's fields. */
 export interface ScheduleEditFields {
   name: string;
   cronExpr: string;
   /** The time zone field; omitted leaves the zone alone. */
-  timeZone?: string;
+  timeZone?: string | undefined;
   /** Resume a paused schedule in the same request. */
   resume: boolean;
+  /** Exec dispatch fields when editing a revealed exec schedule or replacing a redacted one. */
+  exec?: ScheduleEditExecFields | undefined;
 }
 
 /**
  * Builds the PATCH body for the edit dialog: only the fields that changed,
- * so an unchanged schedule sends nothing. Returns an error instead for input
- * the hub would reject (empty fields, a zone-prefixed expression).
+ * so an unchanged schedule sends nothing. Never emits `eventType` (the hub
+ * forbids changing `eventType` to or from `exec`). Returns an error instead
+ * for input the hub would reject.
  */
 export function buildScheduleEdit(
-  sched: Pick<Schedule, 'name' | 'cronExpr' | 'status' | 'timeZone'>,
+  sched: Pick<Schedule, 'name' | 'cronExpr' | 'status' | 'timeZone'> & {
+    eventType?: string | undefined;
+    payload?: string | undefined;
+  },
   fields: ScheduleEditFields
 ): { patch: Record<string, unknown> } | { error: string } {
   const name = fields.name.trim();
@@ -135,6 +171,45 @@ export function buildScheduleEdit(
     if (timeZone !== (sched.timeZone ?? '')) patch.timeZone = timeZone;
   }
   if (fields.resume && sched.status === 'paused') patch.status = 'active';
+
+  if (fields.exec !== undefined) {
+    const targetErr = validateExecTarget(fields.exec.agentId);
+    if (targetErr) return { error: targetErr };
+    const argvErr = validateExecArgv(fields.exec.command);
+    if (argvErr) return { error: argvErr };
+    const timeoutRes = parseExecTimeoutValue(fields.exec.timeoutInput);
+    if ('error' in timeoutRes) return { error: timeoutRes.error };
+
+    const nextTarget = fields.exec.agentId.trim();
+    const pickedById = fields.exec.agentPickedById !== false;
+    const orig = parseExecPayload(sched.payload ?? '');
+
+    if (orig.commandRedacted) {
+      if (pickedById) {
+        patch.agentId = nextTarget;
+      } else {
+        patch.agentName = nextTarget;
+      }
+      patch.command = [...fields.exec.command];
+      if (timeoutRes.value > 0) {
+        patch.timeoutSeconds = timeoutRes.value;
+      }
+    } else {
+      if (pickedById) {
+        if (nextTarget !== orig.agentId) patch.agentId = nextTarget;
+      } else if (nextTarget !== orig.agentName && nextTarget !== orig.agentId) {
+        patch.agentName = nextTarget;
+      }
+      if (!argvEqual(fields.exec.command, orig.command)) {
+        patch.command = [...fields.exec.command];
+      }
+      const origTimeout = orig.timeoutSeconds > 0 ? orig.timeoutSeconds : 0;
+      if (timeoutRes.value !== origTimeout) {
+        patch.timeoutSeconds = timeoutRes.value;
+      }
+    }
+  }
+
   return { patch };
 }
 
@@ -173,6 +248,9 @@ export class ScionScheduleList extends LitElement {
   @state() private dialogTemplate = '';
   @state() private dialogTask = '';
   @state() private dialogBranch = '';
+  @state() private dialogExecAgentId = '';
+  @state() private dialogExecCommand: string[] = [''];
+  @state() private dialogExecTimeout = '';
   @state() private dialogLoading = false;
   @state() private dialogError: string | null = null;
 
@@ -182,18 +260,41 @@ export class ScionScheduleList extends LitElement {
   @state() private editCron = '';
   @state() private editTimeZone = '';
   @state() private editResume = false;
+  @state() private editExecAgentId = '';
+  @state() private editExecCommand: string[] = [''];
+  @state() private editExecTimeout = '';
+  @state() private editReplaceExec = false;
   @state() private editLoading = false;
   @state() private editError: string | null = null;
+
+  // Project agents for exec picker (loaded lazily when exec is authored/edited)
+  @state() private execAgents: ExecAgentOption[] = [];
+  @state() private execAgentsLoading = false;
+  @state() private execAgentsError: string | null = null;
+  private execAgentsLoadedForProject = '';
+  private execAgentsGeneration = 0;
 
   // Action state
   @state() private actionId: string | null = null;
 
-  // Detail dialog
+  // Detail dialog + exec run history
   @state() private detailSchedule: Schedule | null = null;
   @state() private detailOpen = false;
+  @state() private detailHistory: ExecHistoryEvent[] = [];
+  @state() private detailHistoryLoading = false;
+  @state() private detailHistoryError: string | null = null;
+  private detailHistoryGeneration = 0;
+
+  private readonly boundOnFlagsChanged = (): void => {
+    if (!execSchedulesEnabled() && this.dialogEventType === 'exec') {
+      this.dialogEventType = 'message';
+    }
+    this.requestUpdate();
+  };
 
   static override styles = [
     resourceStyles,
+    scheduleExecStyles,
     css`
       .badge.zone-prefix {
         background: var(--sl-color-warning-100, #fef3c7);
@@ -225,7 +326,13 @@ export class ScionScheduleList extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFlagsChanged);
     void this.loadSchedules();
+  }
+
+  override disconnectedCallback(): void {
+    window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFlagsChanged);
+    super.disconnectedCallback();
   }
 
   /** Bumped on every load, so a slower, older walk never overwrites a newer result. */
@@ -268,6 +375,65 @@ export class ScionScheduleList extends LitElement {
     }
   }
 
+  private async ensureExecAgentsLoaded(): Promise<void> {
+    if (!this.projectId) return;
+    if (
+      this.execAgentsLoadedForProject === this.projectId &&
+      !this.execAgentsError &&
+      this.execAgents.length > 0
+    ) {
+      return;
+    }
+    const gen = ++this.execAgentsGeneration;
+    this.execAgentsLoading = true;
+    this.execAgentsError = null;
+    try {
+      const agents = await loadProjectExecAgents(
+        this.projectId,
+        () => gen === this.execAgentsGeneration
+      );
+      if (gen !== this.execAgentsGeneration) return;
+      this.execAgents = agents;
+      this.execAgentsLoadedForProject = this.projectId;
+    } catch (err) {
+      if (gen !== this.execAgentsGeneration) return;
+      this.execAgentsError =
+        err instanceof PaginationError && err.hubMessage
+          ? err.hubMessage
+          : err instanceof Error
+            ? err.message
+            : 'Failed to load agents';
+    } finally {
+      if (gen === this.execAgentsGeneration) this.execAgentsLoading = false;
+    }
+  }
+
+  private async loadScheduleHistory(scheduleId: string): Promise<void> {
+    if (!this.projectId) return;
+    const gen = ++this.detailHistoryGeneration;
+    this.detailHistory = [];
+    this.detailHistoryLoading = true;
+    this.detailHistoryError = null;
+
+    try {
+      const response = await apiFetch(
+        `/api/v1/projects/${encodeURIComponent(this.projectId)}/schedules/${encodeURIComponent(scheduleId)}/history?limit=${EXEC_HISTORY_LIMIT}`
+      );
+      if (gen !== this.detailHistoryGeneration) return;
+      if (!response.ok) {
+        throw new Error(await extractApiError(response, `HTTP ${response.status}`));
+      }
+      const data = (await response.json()) as HistoryListResponse;
+      if (gen !== this.detailHistoryGeneration) return;
+      this.detailHistory = data.events ?? [];
+    } catch (err) {
+      if (gen !== this.detailHistoryGeneration) return;
+      this.detailHistoryError = err instanceof Error ? err.message : 'Failed to load run history';
+    } finally {
+      if (gen === this.detailHistoryGeneration) this.detailHistoryLoading = false;
+    }
+  }
+
   private openCreateDialog(): void {
     this.dialogName = '';
     this.dialogCron = '';
@@ -280,6 +446,9 @@ export class ScionScheduleList extends LitElement {
     this.dialogTemplate = '';
     this.dialogTask = '';
     this.dialogBranch = '';
+    this.dialogExecAgentId = '';
+    this.dialogExecCommand = [''];
+    this.dialogExecTimeout = '';
     this.dialogError = null;
     this.dialogOpen = true;
   }
@@ -289,29 +458,67 @@ export class ScionScheduleList extends LitElement {
     this.dialogError = null;
   }
 
+  private handleCreateEventTypeChange(nextType: string): void {
+    this.dialogEventType = nextType;
+    this.dialogError = null;
+    if (nextType === 'exec') {
+      void this.ensureExecAgentsLoaded();
+    }
+  }
+
   private async handleCreate(e: Event): Promise<void> {
     e.preventDefault();
     this.dialogLoading = true;
     this.dialogError = null;
 
     try {
+      const isExec = execSchedulesEnabled() && this.dialogEventType === 'exec';
       const body: Record<string, unknown> = {
         name: this.dialogName,
         cronExpr: this.dialogCron,
-        eventType: this.dialogEventType,
-        agentName: this.dialogAgent,
+        eventType: isExec ? 'exec' : this.dialogEventType,
       };
       const timeZone = normalizeTimeZoneInput(this.dialogTimeZone);
       if (timeZone) body.timeZone = timeZone;
 
-      if (this.dialogEventType === 'message') {
-        body.message = this.dialogMessage;
-        body.interrupt = this.dialogInterrupt;
-        body.wake = this.dialogWake;
-      } else if (this.dialogEventType === 'dispatch_agent') {
-        if (this.dialogTemplate) body.template = this.dialogTemplate;
-        if (this.dialogTask) body.task = this.dialogTask;
-        if (this.dialogBranch) body.branch = this.dialogBranch;
+      if (isExec) {
+        const targetErr = validateExecTarget(this.dialogExecAgentId);
+        if (targetErr) {
+          this.dialogError = targetErr;
+          return;
+        }
+        const argvErr = validateExecArgv(this.dialogExecCommand);
+        if (argvErr) {
+          this.dialogError = argvErr;
+          return;
+        }
+        const timeoutRes = parseExecTimeoutValue(this.dialogExecTimeout);
+        if ('error' in timeoutRes) {
+          this.dialogError = timeoutRes.error;
+          return;
+        }
+        const target = this.dialogExecAgentId.trim();
+        const pickedById = this.execAgents.some((a) => a.id === target);
+        if (pickedById || !this.execAgentsError) {
+          body.agentId = target;
+        } else {
+          body.agentName = target;
+        }
+        body.command = [...this.dialogExecCommand];
+        if (timeoutRes.value > 0) {
+          body.timeoutSeconds = timeoutRes.value;
+        }
+      } else {
+        body.agentName = this.dialogAgent;
+        if (this.dialogEventType === 'message') {
+          body.message = this.dialogMessage;
+          body.interrupt = this.dialogInterrupt;
+          body.wake = this.dialogWake;
+        } else if (this.dialogEventType === 'dispatch_agent') {
+          if (this.dialogTemplate) body.template = this.dialogTemplate;
+          if (this.dialogTask) body.task = this.dialogTask;
+          if (this.dialogBranch) body.branch = this.dialogBranch;
+        }
       }
 
       const response = await apiFetch(
@@ -345,6 +552,26 @@ export class ScionScheduleList extends LitElement {
     this.editTimeZone = sched.timeZone ?? '';
     this.editResume = false;
     this.editError = null;
+
+    if (sched.eventType === 'exec') {
+      const parsed = parseExecPayload(sched.payload);
+      this.editReplaceExec = false;
+      if (parsed.commandRedacted) {
+        this.editExecAgentId = '';
+        this.editExecCommand = [''];
+        this.editExecTimeout = '';
+      } else {
+        this.editExecAgentId = parsed.agentId || parsed.agentName;
+        this.editExecCommand = parsed.command.length > 0 ? [...parsed.command] : [''];
+        this.editExecTimeout = parsed.timeoutSeconds > 0 ? String(parsed.timeoutSeconds) : '';
+        void this.ensureExecAgentsLoaded();
+      }
+    } else {
+      this.editReplaceExec = false;
+      this.editExecAgentId = '';
+      this.editExecCommand = [''];
+      this.editExecTimeout = '';
+    }
   }
 
   private closeEditDialog(): void {
@@ -359,11 +586,31 @@ export class ScionScheduleList extends LitElement {
     e.preventDefault();
     const sched = this.editSchedule;
     if (!sched || this.editLoading) return;
+
+    let execFields: ScheduleEditExecFields | undefined;
+    if (sched.eventType === 'exec') {
+      const parsed = parseExecPayload(sched.payload);
+      if (!parsed.commandRedacted || this.editReplaceExec) {
+        const target = this.editExecAgentId.trim();
+        const pickedById =
+          target === parsed.agentId ||
+          this.execAgents.some((a) => a.id === target) ||
+          !this.execAgentsError;
+        execFields = {
+          agentId: this.editExecAgentId,
+          agentPickedById: pickedById,
+          command: this.editExecCommand,
+          timeoutInput: this.editExecTimeout,
+        };
+      }
+    }
+
     const body = buildScheduleEdit(sched, {
       name: this.editName,
       cronExpr: this.editCron,
       timeZone: this.editTimeZone,
       resume: this.editResume,
+      exec: execFields,
     });
     if ('error' in body) {
       this.editError = body.error;
@@ -468,11 +715,23 @@ export class ScionScheduleList extends LitElement {
   private showDetail(sched: Schedule): void {
     this.detailSchedule = sched;
     this.detailOpen = true;
+    if (sched.eventType === 'exec') {
+      void this.loadScheduleHistory(sched.id);
+    } else {
+      this.detailHistoryGeneration++;
+      this.detailHistory = [];
+      this.detailHistoryLoading = false;
+      this.detailHistoryError = null;
+    }
   }
 
   private closeDetail(): void {
+    this.detailHistoryGeneration++;
     this.detailOpen = false;
     this.detailSchedule = null;
+    this.detailHistory = [];
+    this.detailHistoryLoading = false;
+    this.detailHistoryError = null;
   }
 
   private formatRelativeTime(dateString: string | undefined): string {
@@ -491,7 +750,7 @@ export class ScionScheduleList extends LitElement {
   private getPayloadAgent(payload: string): string {
     try {
       const p = JSON.parse(payload) as Record<string, unknown>;
-      return (p.agentName as string) || '-';
+      return (p.agentName as string) || (p.agentId as string) || '-';
     } catch {
       return '-';
     }
@@ -743,6 +1002,9 @@ export class ScionScheduleList extends LitElement {
   }
 
   private renderCreateDialog() {
+    const execFlagOn = execSchedulesEnabled();
+    const isExec = execFlagOn && this.dialogEventType === 'exec';
+
     return html`
       <sl-dialog
         label="Create Recurring Schedule"
@@ -775,92 +1037,114 @@ export class ScionScheduleList extends LitElement {
 
           <sl-select
             label="Event Type"
-            .value=${this.dialogEventType}
+            .value=${isExec ? 'exec' : this.dialogEventType}
             @sl-change=${(e: Event) =>
-              (this.dialogEventType = (e.target as HTMLSelectElement).value)}
+              this.handleCreateEventTypeChange((e.target as HTMLSelectElement).value)}
           >
             <sl-option value="message">Message</sl-option>
             <sl-option value="dispatch_agent">Dispatch Agent</sl-option>
+            ${execFlagOn ? html`<sl-option value="exec">Exec Command</sl-option>` : nothing}
           </sl-select>
 
-          <sl-input
-            label=${this.dialogEventType === 'dispatch_agent'
-              ? 'Agent Name (to create)'
-              : 'Target Agent'}
-            placeholder=${this.dialogEventType === 'dispatch_agent'
-              ? 'worker-1'
-              : 'agent-name or all'}
-            .value=${this.dialogAgent}
-            @sl-input=${(e: Event) => (this.dialogAgent = (e.target as HTMLInputElement).value)}
-            required
-          ></sl-input>
-
-          ${this.dialogEventType === 'message'
+          ${isExec
             ? html`
-                <sl-textarea
-                  label="Message"
-                  placeholder="Message to send"
-                  .value=${this.dialogMessage}
-                  @sl-input=${(e: Event) =>
-                    (this.dialogMessage = (e.target as HTMLTextAreaElement).value)}
-                  required
-                ></sl-textarea>
-
-                <label class="checkbox-label">
-                  <input
-                    type="checkbox"
-                    .checked=${this.dialogInterrupt}
-                    @change=${(e: Event) =>
-                      (this.dialogInterrupt = (e.target as HTMLInputElement).checked)}
-                  />
-                  <span class="checkbox-text">
-                    <span>Interrupt agent</span>
-                    <span class="checkbox-description"
-                      >Interrupt the agent's current task before delivering the message.</span
-                    >
-                  </span>
-                </label>
-
-                <label class="checkbox-label">
-                  <input
-                    type="checkbox"
-                    .checked=${this.dialogWake}
-                    @change=${(e: Event) =>
-                      (this.dialogWake = (e.target as HTMLInputElement).checked)}
-                  />
-                  <span class="checkbox-text">
-                    <span>Wake agent</span>
-                    <span class="checkbox-description"
-                      >Resume the agent if it is suspended when the message fires. Requires
-                      permission to start the agent.</span
-                    >
-                  </span>
-                </label>
+                ${renderExecAgentPicker({
+                  agents: this.execAgents,
+                  loading: this.execAgentsLoading,
+                  loadError: this.execAgentsError,
+                  value: this.dialogExecAgentId,
+                  onChange: (v) => {
+                    this.dialogExecAgentId = v;
+                  },
+                })}
+                ${renderExecArgvEditor(this.dialogExecCommand, (updater) => {
+                  this.dialogExecCommand = updater(this.dialogExecCommand);
+                })}
+                ${renderExecTimeoutInput(this.dialogExecTimeout, (v) => {
+                  this.dialogExecTimeout = v;
+                })}
               `
             : html`
                 <sl-input
-                  label="Template"
-                  placeholder="template-name (optional)"
-                  .value=${this.dialogTemplate}
+                  label=${this.dialogEventType === 'dispatch_agent'
+                    ? 'Agent Name (to create)'
+                    : 'Target Agent'}
+                  placeholder=${this.dialogEventType === 'dispatch_agent'
+                    ? 'worker-1'
+                    : 'agent-name or all'}
+                  .value=${this.dialogAgent}
                   @sl-input=${(e: Event) =>
-                    (this.dialogTemplate = (e.target as HTMLInputElement).value)}
+                    (this.dialogAgent = (e.target as HTMLInputElement).value)}
+                  required
                 ></sl-input>
 
-                <sl-textarea
-                  label="Task / Prompt"
-                  placeholder="Task for the agent (optional)"
-                  .value=${this.dialogTask}
-                  @sl-input=${(e: Event) =>
-                    (this.dialogTask = (e.target as HTMLTextAreaElement).value)}
-                ></sl-textarea>
+                ${this.dialogEventType === 'message'
+                  ? html`
+                      <sl-textarea
+                        label="Message"
+                        placeholder="Message to send"
+                        .value=${this.dialogMessage}
+                        @sl-input=${(e: Event) =>
+                          (this.dialogMessage = (e.target as HTMLTextAreaElement).value)}
+                        required
+                      ></sl-textarea>
 
-                <sl-input
-                  label="Branch"
-                  placeholder="feature-branch (optional)"
-                  .value=${this.dialogBranch}
-                  @sl-input=${(e: Event) =>
-                    (this.dialogBranch = (e.target as HTMLInputElement).value)}
-                ></sl-input>
+                      <label class="checkbox-label">
+                        <input
+                          type="checkbox"
+                          .checked=${this.dialogInterrupt}
+                          @change=${(e: Event) =>
+                            (this.dialogInterrupt = (e.target as HTMLInputElement).checked)}
+                        />
+                        <span class="checkbox-text">
+                          <span>Interrupt agent</span>
+                          <span class="checkbox-description"
+                            >Interrupt the agent's current task before delivering the message.</span
+                          >
+                        </span>
+                      </label>
+
+                      <label class="checkbox-label">
+                        <input
+                          type="checkbox"
+                          .checked=${this.dialogWake}
+                          @change=${(e: Event) =>
+                            (this.dialogWake = (e.target as HTMLInputElement).checked)}
+                        />
+                        <span class="checkbox-text">
+                          <span>Wake agent</span>
+                          <span class="checkbox-description"
+                            >Resume the agent if it is suspended when the message fires. Requires
+                            permission to start the agent.</span
+                          >
+                        </span>
+                      </label>
+                    `
+                  : html`
+                      <sl-input
+                        label="Template"
+                        placeholder="template-name (optional)"
+                        .value=${this.dialogTemplate}
+                        @sl-input=${(e: Event) =>
+                          (this.dialogTemplate = (e.target as HTMLInputElement).value)}
+                      ></sl-input>
+
+                      <sl-textarea
+                        label="Task / Prompt"
+                        placeholder="Task for the agent (optional)"
+                        .value=${this.dialogTask}
+                        @sl-input=${(e: Event) =>
+                          (this.dialogTask = (e.target as HTMLTextAreaElement).value)}
+                      ></sl-textarea>
+
+                      <sl-input
+                        label="Branch"
+                        placeholder="feature-branch (optional)"
+                        .value=${this.dialogBranch}
+                        @sl-input=${(e: Event) =>
+                          (this.dialogBranch = (e.target as HTMLInputElement).value)}
+                      ></sl-input>
+                    `}
               `}
         </form>
 
@@ -873,6 +1157,93 @@ export class ScionScheduleList extends LitElement {
           >Create</sl-button
         >
       </sl-dialog>
+    `;
+  }
+
+  private renderEditExecSection(sched: Schedule): TemplateResult | typeof nothing {
+    if (sched.eventType !== 'exec') return nothing;
+    const parsed = parseExecPayload(sched.payload);
+
+    if (parsed.commandRedacted) {
+      const targetDeleted = sched.statusReason === 'target_deleted';
+      return html`
+        <div class="exec-redacted-notice">
+          <div class="exec-redacted-header">
+            <sl-icon name="lock"></sl-icon>
+            <span>
+              ${targetDeleted
+                ? 'Target agent was deleted; stored command is hidden.'
+                : 'Stored command is hidden (requires attach permission on target agent).'}
+            </span>
+          </div>
+          <div>
+            ${targetDeleted
+              ? 'Check below to pick a live target agent and enter a replacement command, or save a new name only.'
+              : 'Renaming is allowed. Changing timing, target, command, or resuming requires attach permission on the target agent.'}
+          </div>
+        </div>
+
+        <label class="checkbox-label">
+          <input
+            type="checkbox"
+            class="edit-replace-exec"
+            .checked=${this.editReplaceExec}
+            @change=${(e: Event): void => {
+              this.editReplaceExec = (e.target as HTMLInputElement).checked;
+              if (this.editReplaceExec) {
+                void this.ensureExecAgentsLoaded();
+              }
+            }}
+          />
+          <span class="checkbox-text">
+            <span>Replace target and command</span>
+            <span class="checkbox-description"
+              >Supply a live target agent and replacement argv command.</span
+            >
+          </span>
+        </label>
+
+        ${this.editReplaceExec
+          ? html`
+              ${renderExecAgentPicker({
+                agents: this.execAgents,
+                loading: this.execAgentsLoading,
+                loadError: this.execAgentsError,
+                value: this.editExecAgentId,
+                onChange: (v) => {
+                  this.editExecAgentId = v;
+                },
+              })}
+              ${renderExecArgvEditor(this.editExecCommand, (updater) => {
+                this.editExecCommand = updater(this.editExecCommand);
+              })}
+              ${renderExecTimeoutInput(this.editExecTimeout, (v) => {
+                this.editExecTimeout = v;
+              })}
+            `
+          : nothing}
+      `;
+    }
+
+    return html`
+      ${renderExecAgentPicker({
+        agents: this.execAgents,
+        loading: this.execAgentsLoading,
+        loadError: this.execAgentsError,
+        value: this.editExecAgentId,
+        currentMissingAgent: parsed.agentId
+          ? { id: parsed.agentId, name: parsed.agentName }
+          : undefined,
+        onChange: (v) => {
+          this.editExecAgentId = v;
+        },
+      })}
+      ${renderExecArgvEditor(this.editExecCommand, (updater) => {
+        this.editExecCommand = updater(this.editExecCommand);
+      })}
+      ${renderExecTimeoutInput(this.editExecTimeout, (v) => {
+        this.editExecTimeout = v;
+      })}
     `;
   }
 
@@ -922,6 +1293,7 @@ export class ScionScheduleList extends LitElement {
           ${this.renderTimeZoneInput('edit-time-zone', this.editTimeZone, (v) => {
             this.editTimeZone = v;
           })}
+          ${this.renderEditExecSection(sched)}
           ${sched.status === 'paused'
             ? html`
                 <label class="checkbox-label">
@@ -968,15 +1340,22 @@ export class ScionScheduleList extends LitElement {
     const sched = this.detailSchedule;
     if (!sched) return nothing;
 
-    const agent = this.getPayloadAgent(sched.payload);
+    const isExec = sched.eventType === 'exec';
+    const execPayload = isExec ? parseExecPayload(sched.payload) : null;
+    const agent = execPayload
+      ? execPayload.agentName || execPayload.agentId || '-'
+      : this.getPayloadAgent(sched.payload);
+
     let payloadDetails: Record<string, unknown> = {};
-    try {
-      const parsed: unknown = JSON.parse(sched.payload);
-      if (parsed && typeof parsed === 'object') {
-        payloadDetails = parsed as Record<string, unknown>;
+    if (!isExec) {
+      try {
+        const parsed: unknown = JSON.parse(sched.payload);
+        if (parsed && typeof parsed === 'object') {
+          payloadDetails = parsed as Record<string, unknown>;
+        }
+      } catch {
+        // ignore
       }
-    } catch {
-      // ignore
     }
 
     return html`
@@ -1006,6 +1385,7 @@ export class ScionScheduleList extends LitElement {
           </div>
           <div class="detail-row"><strong>Event Type:</strong> ${sched.eventType}</div>
           <div class="detail-row"><strong>Target Agent:</strong> ${agent}</div>
+          ${isExec && execPayload ? renderExecDetailPayload(execPayload) : nothing}
           ${sched.eventType === 'message' && payloadDetails.message
             ? html`<div class="detail-row">
                 <strong>Message:</strong> ${payloadDetails.message}
@@ -1058,6 +1438,13 @@ export class ScionScheduleList extends LitElement {
               ? ` by ${sched.createdBy}`
               : ''}
           </div>
+          ${isExec
+            ? renderExecHistorySection({
+                loading: this.detailHistoryLoading,
+                error: this.detailHistoryError,
+                events: this.detailHistory,
+              })
+            : nothing}
         </div>
 
         <sl-button slot="footer" variant="default" @click=${(): void => this.openEditDialog(sched)}

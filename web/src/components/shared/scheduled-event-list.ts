@@ -26,6 +26,7 @@ import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { paginateAll, PaginationError } from '../../client/paginate-all.js';
 import { resourceStyles } from './resource-styles.js';
 import {
   effectiveTimeZone,
@@ -34,6 +35,22 @@ import {
   parseWallClock,
 } from '../../utils/time.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import { FEATURE_FLAGS_CHANGED_EVENT, execSchedulesEnabled } from '../../utils/feature-flags.js';
+import {
+  type ExecAgentOption,
+  type ExecRunSummary,
+  loadProjectExecAgents,
+  parseExecPayload,
+  parseExecTimeoutValue,
+  renderExecAgentPicker,
+  renderExecArgvEditor,
+  renderExecDetailPayload,
+  renderExecRunSummaryRows,
+  renderExecTimeoutInput,
+  scheduleExecStyles,
+  validateExecArgv,
+  validateExecTarget,
+} from './schedule-exec.js';
 
 interface ScheduledEvent {
   id: string;
@@ -46,13 +63,18 @@ interface ScheduledEvent {
   createdBy: string;
   firedAt?: string;
   error?: string;
+  execSummary?: ExecRunSummary;
 }
 
 interface ListResponse {
-  events: ScheduledEvent[];
+  events?: ScheduledEvent[];
+  nextCursor?: string;
   totalCount?: number;
   serverTime?: string;
 }
+
+/** Page size requested when loading scheduled events; every page is followed. */
+export const SCHEDULED_EVENT_PAGE_SIZE = 100;
 
 @customElement('scion-scheduled-event-list')
 export class ScionScheduledEventList extends LitElement {
@@ -76,6 +98,7 @@ export class ScionScheduledEventList extends LitElement {
 
   // Create dialog
   @state() private dialogOpen = false;
+  @state() private dialogEventType = 'message';
   @state() private dialogAgent = '';
   @state() private dialogMessage = '';
   @state() private dialogTimingMode: 'in' | 'at' = 'in';
@@ -83,8 +106,18 @@ export class ScionScheduledEventList extends LitElement {
   @state() private dialogDatetime = '';
   @state() private dialogInterrupt = false;
   @state() private dialogWake = false;
+  @state() private dialogExecAgentId = '';
+  @state() private dialogExecCommand: string[] = [''];
+  @state() private dialogExecTimeout = '';
   @state() private dialogLoading = false;
   @state() private dialogError: string | null = null;
+
+  // Project agents for exec picker (loaded lazily when exec is chosen)
+  @state() private execAgents: ExecAgentOption[] = [];
+  @state() private execAgentsLoading = false;
+  @state() private execAgentsError: string | null = null;
+  private execAgentsLoadedForProject = '';
+  private execAgentsGeneration = 0;
 
   // Cancel state
   @state() private cancellingId: string | null = null;
@@ -93,8 +126,19 @@ export class ScionScheduledEventList extends LitElement {
   @state() private detailEvent: ScheduledEvent | null = null;
   @state() private detailOpen = false;
 
+  /** Bumped on every load, so a slower, older walk never overwrites a newer result. */
+  private loadGeneration = 0;
+
+  private readonly boundOnFlagsChanged = (): void => {
+    if (!execSchedulesEnabled() && this.dialogEventType === 'exec') {
+      this.dialogEventType = 'message';
+    }
+    this.requestUpdate();
+  };
+
   static override styles = [
     resourceStyles,
+    scheduleExecStyles,
     css`
       .detail-row {
         padding: 0.375rem 0;
@@ -114,36 +158,83 @@ export class ScionScheduledEventList extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFlagsChanged);
     void this.loadEvents();
+  }
+
+  override disconnectedCallback(): void {
+    window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFlagsChanged);
+    super.disconnectedCallback();
   }
 
   private async loadEvents(): Promise<void> {
     if (!this.projectId) return;
+    const generation = ++this.loadGeneration;
     this.loading = true;
     this.error = null;
 
     try {
-      const response = await apiFetch(
-        `/api/v1/projects/${encodeURIComponent(this.projectId)}/scheduled-events`
-      );
-
-      if (!response.ok) {
-        throw new Error(
-          await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`)
-        );
-      }
-
-      const data = (await response.json()) as ListResponse;
-      this.events = data.events || [];
+      const events = await paginateAll<ScheduledEvent>({
+        path: `/api/v1/projects/${encodeURIComponent(this.projectId)}/scheduled-events`,
+        pageSize: SCHEDULED_EVENT_PAGE_SIZE,
+        label: 'scheduled events list',
+        parsePage: (body) => {
+          const data = body as ListResponse;
+          return { items: data.events ?? [], nextCursor: data.nextCursor ?? '' };
+        },
+        shouldContinue: () => generation === this.loadGeneration,
+      });
+      if (generation !== this.loadGeneration) return;
+      this.events = events;
     } catch (err) {
+      if (generation !== this.loadGeneration) return;
       console.error('Failed to load scheduled events:', err);
-      this.error = err instanceof Error ? err.message : 'Failed to load scheduled events';
+      this.error =
+        err instanceof PaginationError && err.hubMessage
+          ? err.hubMessage
+          : err instanceof Error
+            ? err.message
+            : 'Failed to load scheduled events';
     } finally {
-      this.loading = false;
+      if (generation === this.loadGeneration) this.loading = false;
+    }
+  }
+
+  private async ensureExecAgentsLoaded(): Promise<void> {
+    if (!this.projectId) return;
+    if (
+      this.execAgentsLoadedForProject === this.projectId &&
+      !this.execAgentsError &&
+      this.execAgents.length > 0
+    ) {
+      return;
+    }
+    const gen = ++this.execAgentsGeneration;
+    this.execAgentsLoading = true;
+    this.execAgentsError = null;
+    try {
+      const agents = await loadProjectExecAgents(
+        this.projectId,
+        () => gen === this.execAgentsGeneration
+      );
+      if (gen !== this.execAgentsGeneration) return;
+      this.execAgents = agents;
+      this.execAgentsLoadedForProject = this.projectId;
+    } catch (err) {
+      if (gen !== this.execAgentsGeneration) return;
+      this.execAgentsError =
+        err instanceof PaginationError && err.hubMessage
+          ? err.hubMessage
+          : err instanceof Error
+            ? err.message
+            : 'Failed to load agents';
+    } finally {
+      if (gen === this.execAgentsGeneration) this.execAgentsLoading = false;
     }
   }
 
   private openCreateDialog(): void {
+    this.dialogEventType = 'message';
     this.dialogAgent = '';
     this.dialogMessage = '';
     this.dialogTimingMode = 'in';
@@ -151,6 +242,9 @@ export class ScionScheduledEventList extends LitElement {
     this.dialogDatetime = '';
     this.dialogInterrupt = false;
     this.dialogWake = false;
+    this.dialogExecAgentId = '';
+    this.dialogExecCommand = [''];
+    this.dialogExecTimeout = '';
     this.dialogError = null;
     this.dialogOpen = true;
   }
@@ -160,19 +254,56 @@ export class ScionScheduledEventList extends LitElement {
     this.dialogError = null;
   }
 
+  private handleEventTypeChange(nextType: string): void {
+    this.dialogEventType = nextType;
+    this.dialogError = null;
+    if (nextType === 'exec') {
+      void this.ensureExecAgentsLoaded();
+    }
+  }
+
   private async handleCreate(e: Event): Promise<void> {
     e.preventDefault();
     this.dialogLoading = true;
     this.dialogError = null;
 
     try {
-      const body: Record<string, unknown> = {
-        eventType: 'message',
-        agentName: this.dialogAgent,
-        message: this.dialogMessage,
-        interrupt: this.dialogInterrupt,
-        wake: this.dialogWake,
-      };
+      const isExec = execSchedulesEnabled() && this.dialogEventType === 'exec';
+      let body: Record<string, unknown>;
+
+      if (isExec) {
+        const targetErr = validateExecTarget(this.dialogExecAgentId);
+        if (targetErr) {
+          this.dialogError = targetErr;
+          return;
+        }
+        const argvErr = validateExecArgv(this.dialogExecCommand);
+        if (argvErr) {
+          this.dialogError = argvErr;
+          return;
+        }
+        const timeoutRes = parseExecTimeoutValue(this.dialogExecTimeout);
+        if ('error' in timeoutRes) {
+          this.dialogError = timeoutRes.error;
+          return;
+        }
+        const target = this.dialogExecAgentId.trim();
+        const pickedById = this.execAgents.some((a) => a.id === target);
+        body = {
+          eventType: 'exec',
+          ...(pickedById || !this.execAgentsError ? { agentId: target } : { agentName: target }),
+          command: [...this.dialogExecCommand],
+          ...(timeoutRes.value > 0 ? { timeoutSeconds: timeoutRes.value } : {}),
+        };
+      } else {
+        body = {
+          eventType: 'message',
+          agentName: this.dialogAgent,
+          message: this.dialogMessage,
+          interrupt: this.dialogInterrupt,
+          wake: this.dialogWake,
+        };
+      }
 
       if (this.dialogTimingMode === 'in') {
         body.fireIn = this.dialogDuration;
@@ -419,10 +550,14 @@ export class ScionScheduledEventList extends LitElement {
     switch (status) {
       case 'pending':
         return 'inject-always';
+      case 'firing':
+        return 'sensitive';
       case 'fired':
         return 'variable';
+      case 'failed':
+        return 'secret';
+      case 'skipped':
       case 'cancelled':
-        return 'inject-as-needed';
       case 'expired':
         return 'inject-as-needed';
       default:
@@ -431,6 +566,9 @@ export class ScionScheduledEventList extends LitElement {
   }
 
   private renderDialog() {
+    const execFlagOn = execSchedulesEnabled();
+    const isExec = execFlagOn && this.dialogEventType === 'exec';
+
     return html`
       <sl-dialog
         label="Schedule Event"
@@ -439,23 +577,57 @@ export class ScionScheduledEventList extends LitElement {
       >
         <form class="dialog-form" @submit=${this.handleCreate}>
           ${this.dialogError ? html`<div class="dialog-error">${this.dialogError}</div>` : nothing}
+          ${execFlagOn
+            ? html`
+                <sl-select
+                  label="Event Type"
+                  class="event-type-select"
+                  .value=${this.dialogEventType}
+                  @sl-change=${(e: Event): void =>
+                    this.handleEventTypeChange((e.target as HTMLSelectElement).value)}
+                >
+                  <sl-option value="message">Message</sl-option>
+                  <sl-option value="exec">Exec Command</sl-option>
+                </sl-select>
+              `
+            : nothing}
+          ${isExec
+            ? html`
+                ${renderExecAgentPicker({
+                  agents: this.execAgents,
+                  loading: this.execAgentsLoading,
+                  loadError: this.execAgentsError,
+                  value: this.dialogExecAgentId,
+                  onChange: (v) => {
+                    this.dialogExecAgentId = v;
+                  },
+                })}
+                ${renderExecArgvEditor(this.dialogExecCommand, (updater) => {
+                  this.dialogExecCommand = updater(this.dialogExecCommand);
+                })}
+                ${renderExecTimeoutInput(this.dialogExecTimeout, (v) => {
+                  this.dialogExecTimeout = v;
+                })}
+              `
+            : html`
+                <sl-input
+                  label="Target Agent"
+                  placeholder="agent-name"
+                  .value=${this.dialogAgent}
+                  @sl-input=${(e: Event) =>
+                    (this.dialogAgent = (e.target as HTMLInputElement).value)}
+                  required
+                ></sl-input>
 
-          <sl-input
-            label="Target Agent"
-            placeholder="agent-name"
-            .value=${this.dialogAgent}
-            @sl-input=${(e: Event) => (this.dialogAgent = (e.target as HTMLInputElement).value)}
-            required
-          ></sl-input>
-
-          <sl-textarea
-            label="Message"
-            placeholder="Message to send"
-            .value=${this.dialogMessage}
-            @sl-input=${(e: Event) =>
-              (this.dialogMessage = (e.target as HTMLTextAreaElement).value)}
-            required
-          ></sl-textarea>
+                <sl-textarea
+                  label="Message"
+                  placeholder="Message to send"
+                  .value=${this.dialogMessage}
+                  @sl-input=${(e: Event) =>
+                    (this.dialogMessage = (e.target as HTMLTextAreaElement).value)}
+                  required
+                ></sl-textarea>
+              `}
 
           <div class="radio-field">
             <span class="radio-field-label">Timing</span>
@@ -491,36 +663,40 @@ export class ScionScheduledEventList extends LitElement {
                   required
                 ></sl-input>
               `}
+          ${isExec
+            ? nothing
+            : html`
+                <label class="checkbox-label">
+                  <input
+                    type="checkbox"
+                    .checked=${this.dialogInterrupt}
+                    @change=${(e: Event) =>
+                      (this.dialogInterrupt = (e.target as HTMLInputElement).checked)}
+                  />
+                  <span class="checkbox-text">
+                    <span>Interrupt agent</span>
+                    <span class="checkbox-description"
+                      >Interrupt the agent's current task before delivering the message.</span
+                    >
+                  </span>
+                </label>
 
-          <label class="checkbox-label">
-            <input
-              type="checkbox"
-              .checked=${this.dialogInterrupt}
-              @change=${(e: Event) =>
-                (this.dialogInterrupt = (e.target as HTMLInputElement).checked)}
-            />
-            <span class="checkbox-text">
-              <span>Interrupt agent</span>
-              <span class="checkbox-description"
-                >Interrupt the agent's current task before delivering the message.</span
-              >
-            </span>
-          </label>
-
-          <label class="checkbox-label">
-            <input
-              type="checkbox"
-              .checked=${this.dialogWake}
-              @change=${(e: Event) => (this.dialogWake = (e.target as HTMLInputElement).checked)}
-            />
-            <span class="checkbox-text">
-              <span>Wake agent</span>
-              <span class="checkbox-description"
-                >Resume the agent if it is suspended when the message fires. Requires permission to
-                start the agent.</span
-              >
-            </span>
-          </label>
+                <label class="checkbox-label">
+                  <input
+                    type="checkbox"
+                    .checked=${this.dialogWake}
+                    @change=${(e: Event) =>
+                      (this.dialogWake = (e.target as HTMLInputElement).checked)}
+                  />
+                  <span class="checkbox-text">
+                    <span>Wake agent</span>
+                    <span class="checkbox-description"
+                      >Resume the agent if it is suspended when the message fires. Requires
+                      permission to start the agent.</span
+                    >
+                  </span>
+                </label>
+              `}
         </form>
 
         <sl-button slot="footer" variant="default" @click=${this.closeDialog}>Cancel</sl-button>
@@ -539,15 +715,22 @@ export class ScionScheduledEventList extends LitElement {
     const evt = this.detailEvent;
     if (!evt) return nothing;
 
-    const agent = this.getPayloadAgent(evt.payload);
+    const isExec = evt.eventType === 'exec';
+    const execPayload = isExec ? parseExecPayload(evt.payload) : null;
+    const agent = execPayload
+      ? execPayload.agentName || execPayload.agentId || '-'
+      : this.getPayloadAgent(evt.payload);
+
     let payloadDetails: Record<string, unknown> = {};
-    try {
-      const parsed: unknown = JSON.parse(evt.payload);
-      if (parsed && typeof parsed === 'object') {
-        payloadDetails = parsed as Record<string, unknown>;
+    if (!isExec) {
+      try {
+        const parsed: unknown = JSON.parse(evt.payload);
+        if (parsed && typeof parsed === 'object') {
+          payloadDetails = parsed as Record<string, unknown>;
+        }
+      } catch {
+        // ignore
       }
-    } catch {
-      // ignore
     }
 
     const isPending = evt.status === 'pending';
@@ -581,6 +764,11 @@ export class ScionScheduledEventList extends LitElement {
               </div>`
             : nothing}
           <div class="detail-row"><strong>Target Agent:</strong> ${agent}</div>
+          ${isExec && execPayload
+            ? html`
+                ${renderExecRunSummaryRows(evt.execSummary)} ${renderExecDetailPayload(execPayload)}
+              `
+            : nothing}
           ${evt.eventType === 'message' && payloadDetails.message
             ? html`<div class="detail-row">
                 <strong>Message:</strong> ${payloadDetails.message}
