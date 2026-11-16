@@ -39,7 +39,8 @@ import (
 var _ store.DurableQueueStore = (*CompositeStore)(nil)
 var _ store.DurableQueueStore = (*DurableQueueStore)(nil)
 
-// durableQueueDeleteBatch bounds the IN lists of trim deletes.
+// durableQueueDeleteBatch bounds the IN lists of durable queue queries and
+// mutations (such as trim deletes and nudge updates).
 const durableQueueDeleteBatch = 500
 
 // durableQueueTrimPassLimit caps total trim candidates selected and deleted in
@@ -722,4 +723,52 @@ func (s *DurableQueueStore) DurableQueueStats(ctx context.Context, kind, project
 		st.Oldest = &oldest
 	}
 	return st, nil
+}
+
+// NudgeDurableItems implements store.DurableQueueStore.
+func (s *DurableQueueStore) NudgeDurableItems(ctx context.Context, kind string, dedupKeys []string, now time.Time) (int, error) {
+	if err := store.ValidateDurableQueueKind(kind); err != nil {
+		return 0, err
+	}
+	if len(dedupKeys) > store.MaxDurableQueueNudgeKeys {
+		return 0, fmt.Errorf("%w: durable queue nudge key count %d exceeds %d", store.ErrInvalidInput, len(dedupKeys), store.MaxDurableQueueNudgeKeys)
+	}
+	if len(dedupKeys) == 0 {
+		return 0, nil
+	}
+	unique := make([]string, 0, len(dedupKeys))
+	for _, k := range dedupKeys {
+		if store.IsNudgeableDedupKey(k) {
+			unique = append(unique, k)
+		}
+	}
+	if len(unique) == 0 {
+		return 0, nil
+	}
+	slices.Sort(unique)
+	unique = slices.Compact(unique)
+
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+	total := 0
+	for start := 0; start < len(unique); start += durableQueueDeleteBatch {
+		chunk := unique[start:min(len(unique), start+durableQueueDeleteBatch)]
+		n, err := s.client.DurableQueueItem.Update().
+			Where(
+				durablequeueitem.KindEQ(kind),
+				durablequeueitem.DedupKeyIn(chunk...),
+				queueItemUnleased(now),
+				durablequeueitem.NextAttemptAtGT(now),
+			).
+			SetNextAttemptAt(now).
+			Save(ctx)
+		if err != nil {
+			return total, markTransient(mapError(err))
+		}
+		total += n
+	}
+	return total, nil
 }

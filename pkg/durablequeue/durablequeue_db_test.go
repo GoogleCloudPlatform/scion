@@ -40,6 +40,17 @@ type echoMessage struct {
 	Body string `json:"body"`
 }
 
+type passSignalMetrics struct {
+	durablequeue.NopMetrics
+	onObserve func()
+}
+
+func (m *passSignalMetrics) ObserveQueue(string, int64, int64, time.Duration) {
+	if m.onObserve != nil {
+		m.onObserve()
+	}
+}
+
 func newEchoDBStore(t *testing.T) *entadapter.CompositeStore {
 	t.Helper()
 	return entadapter.NewCompositeStore(enttest.NewClient(t))
@@ -624,4 +635,174 @@ func TestEchoConsumer_TwoConcurrentDrainers(t *testing.T) {
 		assert.Equal(t, expectedCalls, invocations[id], "item %s (seq %d) invocation count", id, seqByID[id])
 		assert.Equal(t, "echo:"+id, bodies[id])
 	}
+}
+
+func TestEchoConsumer_NudgeUnleasedOnlyAndClaimOrder(t *testing.T) {
+	ctx := context.Background()
+	entClient := enttest.NewClient(t)
+	cs := entadapter.NewCompositeStore(entClient)
+	t0 := time.Date(2026, 11, 16, 15, 0, 0, 0, time.UTC)
+	cur := t0
+	var clockMu sync.Mutex
+	nowFn := func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return cur
+	}
+	setNow := func(ts time.Time) {
+		clockMu.Lock()
+		cur = ts
+		clockMu.Unlock()
+	}
+
+	q := durablequeue.NewQueue(cs, durablequeue.WithQueueClock(nowFn))
+
+	// Validation & empty-list behavior through StoreQueue.Nudge against the real DB store.
+	nudged, err := q.Nudge(ctx, "test.echo", nil)
+	require.NoError(t, err)
+	assert.Zero(t, nudged)
+
+	oversized := make([]string, store.MaxDurableQueueNudgeKeys+1)
+	for i := range oversized {
+		oversized[i] = fmt.Sprintf("k-%d", i)
+	}
+	_, err = q.Nudge(ctx, "test.echo", oversized)
+	require.ErrorIs(t, err, store.ErrInvalidInput)
+
+	enq := func(kind, id string, notBefore time.Time) int64 {
+		t.Helper()
+		payload, merr := json.Marshal(echoMessage{ID: id, Body: "body:" + id})
+		require.NoError(t, merr)
+		seq, eerr := q.Enqueue(ctx, nil, durablequeue.Item{
+			Kind:      kind,
+			DedupKey:  id,
+			ProjectID: "proj-nudge",
+			Payload:   payload,
+			NotBefore: notBefore,
+		})
+		require.NoError(t, eerr)
+		return seq
+	}
+
+	// 1. Leased item: claimed by another replica, lease active through t0 + 5m,
+	// with next_attempt_at pushed into the future so only queueItemUnleased(now)
+	// prevents NudgeDurableItems from updating it.
+	seqLeased := enq("test.echo", "leased-item", t0)
+	leasedClaimed, err := cs.ClaimDurableItems(ctx, "test.echo", "other-replica", t0, t0.Add(5*time.Minute), 1)
+	require.NoError(t, err)
+	require.Len(t, leasedClaimed, 1)
+	assert.Equal(t, seqLeased, leasedClaimed[0].Seq)
+	leasedFuture := t0.Add(10 * time.Minute)
+	require.NoError(t, entClient.DurableQueueItem.UpdateOneID(seqLeased).
+		SetNextAttemptAt(leasedFuture).
+		Exec(ctx))
+
+	// 2. Two future unleased items: nudge-1 has lower seq but later NotBefore (+10m) than nudge-2 (+4m).
+	// Nudging both to cur = t0 + 30s gives both next_attempt_at = cur, so (next_attempt_at, seq)
+	// claims nudge-1 before nudge-2.
+	enq("test.echo", "nudge-1", t0.Add(10*time.Minute))
+	enq("test.echo", "nudge-2", t0.Add(4*time.Minute))
+
+	// 3. Item already due at t0 + 10s (earlier than nudge time t0 + 30s):
+	// Nudge must NOT move its next_attempt_at forward to t0 + 30s, so it claims FIRST ahead of nudge-1/2.
+	enq("test.echo", "already-due", t0.Add(10*time.Second))
+
+	// 4. Other key of test.echo and same key on other.echo: both remain in the future.
+	enq("test.echo", "untouched-key", t0.Add(10*time.Minute))
+	enq("other.echo", "nudge-1", t0.Add(10*time.Minute))
+
+	// Advance clock to t0 + 30s and nudge via StoreQueue.Nudge while a drainer with a long
+	// PollInterval is running, proving both DB semantics and local Wake delivery.
+	var (
+		gotMu         sync.Mutex
+		got           []string
+		firstPassOnce sync.Once
+		firstPassDone = make(chan struct{})
+	)
+	passMetrics := &passSignalMetrics{onObserve: func() {
+		firstPassOnce.Do(func() { close(firstPassDone) })
+	}}
+	d, err := durablequeue.NewDrainer(durablequeue.DrainerConfig{
+		Store:        cs,
+		Queue:        q,
+		Kind:         "test.echo",
+		PollInterval: time.Hour,
+		Now:          nowFn,
+		Metrics:      passMetrics,
+		Logger:       quietLogger(),
+		Handler: func(_ context.Context, item durablequeue.Item, _ durablequeue.Lease) durablequeue.Result {
+			var msg echoMessage
+			if uerr := json.Unmarshal(item.Payload, &msg); uerr != nil {
+				return durablequeue.Result{Permanent: true, Err: uerr}
+			}
+			gotMu.Lock()
+			got = append(got, msg.ID)
+			gotMu.Unlock()
+			return durablequeue.Result{Done: true}
+		},
+	})
+	require.NoError(t, err)
+
+	// Start drainer Run loop; wait for its initial pass at t0 (where nothing unleased is due),
+	// then advance to t0+30s and Nudge so all three due items are claimed in the single woken pass.
+	runCtx, cancel := context.WithCancel(ctx)
+	doneCh := make(chan struct{})
+	go func() {
+		defer close(doneCh)
+		d.Run(runCtx)
+	}()
+	defer func() {
+		cancel()
+		<-doneCh
+	}()
+
+	select {
+	case <-firstPassDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for initial drainer pass")
+	}
+
+	setNow(t0.Add(30 * time.Second))
+	nudged, err = q.Nudge(ctx, "test.echo", []string{
+		"leased-item",
+		"nudge-2",
+		"nudge-1",
+		"already-due",
+		"unknown-1",
+		"unknown-2",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, nudged, "only unleased future items nudge-1 and nudge-2 are updated")
+
+	require.Eventually(t, func() bool {
+		gotMu.Lock()
+		defer gotMu.Unlock()
+		return len(got) == 3
+	}, 5*time.Second, 10*time.Millisecond)
+
+	cancel()
+	<-doneCh
+
+	gotMu.Lock()
+	assert.Equal(t, []string{"already-due", "nudge-1", "nudge-2"}, got)
+	gotMu.Unlock()
+
+	// Remaining in test.echo: leased-item (still leased) + untouched-key (still future).
+	stEcho, err := cs.DurableQueueStats(ctx, "test.echo", "", nowFn())
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), stEcho.Pending)
+	assert.Equal(t, int64(1), stEcho.Leased)
+
+	// Other kind untouched.
+	stOther, err := cs.DurableQueueStats(ctx, "other.echo", "", nowFn())
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), stOther.Pending)
+
+	// Original lease holder still owns leased-item exclusively with its future next_attempt_at intact.
+	leasedStored, err := entClient.DurableQueueItem.Get(ctx, seqLeased)
+	require.NoError(t, err)
+	assert.True(t, leasedStored.NextAttemptAt.Equal(leasedFuture), "nudge must not touch leased row next_attempt_at")
+	doneLeased, err := cs.CompleteDurableItem(ctx, seqLeased, "other-replica")
+	require.NoError(t, err)
+	assert.True(t, doneLeased)
 }

@@ -69,6 +69,14 @@ type Queue interface {
 	Wake(kind string)
 }
 
+// Nudger is implemented by queues (such as StoreQueue) that can make unleased
+// items with specific dedup keys eligible for immediate claiming and wake local
+// drainers of that kind. Kept separate from Queue so producer-only test doubles
+// need not implement it.
+type Nudger interface {
+	Nudge(ctx context.Context, kind string, dedupKeys []string) (int, error)
+}
+
 // QueueOption configures a StoreQueue.
 type QueueOption func(*StoreQueue)
 
@@ -100,6 +108,7 @@ type StoreQueue struct {
 }
 
 var _ Queue = (*StoreQueue)(nil)
+var _ Nudger = (*StoreQueue)(nil)
 var _ drainerRegistrar = (*StoreQueue)(nil)
 
 // NewQueue constructs a StoreQueue backed by s.
@@ -165,6 +174,29 @@ func (q *StoreQueue) Wake(kind string) {
 	for _, fn := range fns {
 		fn()
 	}
+}
+
+// Nudge makes unleased items of kind with the given dedup keys eligible for
+// immediate claiming (without delaying items already due earlier) using the
+// queue clock, and wakes local drainers of kind when any keys were supplied.
+func (q *StoreQueue) Nudge(ctx context.Context, kind string, dedupKeys []string) (int, error) {
+	if q == nil || q.store == nil {
+		return 0, errors.New("durablequeue: queue store is nil")
+	}
+	n, err := q.store.NudgeDurableItems(ctx, kind, dedupKeys, q.now().UTC())
+	if err != nil {
+		return 0, err
+	}
+	// Wake whenever a valid key was supplied: even if n == 0 (e.g. a peer
+	// replica's concurrent nudge just lowered next_attempt_at, or the items were
+	// already due), local drainers should poll promptly to share claiming due items.
+	for _, k := range dedupKeys {
+		if store.IsNudgeableDedupKey(k) {
+			q.Wake(kind)
+			break
+		}
+	}
+	return n, nil
 }
 
 // Register attaches d to q so q.Wake(d.Kind()) nudges d. The returned function

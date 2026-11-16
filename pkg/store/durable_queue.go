@@ -20,11 +20,12 @@ import (
 	"time"
 )
 
-// Durable queue column bounds (stage1-design §4.5).
+// Durable queue column and operation bounds (stage1-design §4.5, stage2-design §6.2).
 const (
 	MaxDurableQueueKindLen        = 64
 	MaxDurableQueueDedupKeyLen    = 256
 	MaxDurableQueueLastErrorBytes = 256
+	MaxDurableQueueNudgeKeys      = 1000
 )
 
 // ErrDuplicate is returned by EnqueueDurableItem (and durablequeue.Queue.Enqueue)
@@ -36,6 +37,14 @@ var ErrDuplicate = fmt.Errorf("%w: duplicate durable queue item", ErrAlreadyExis
 // (typically the store.Store yielded by Store.WithTx). Passing nil executes
 // the enqueue on the DurableQueueStore's own connection in auto-commit mode.
 type Tx any
+
+// IsNudgeableDedupKey reports whether k can match a stored durable_queue_items
+// dedup_key (non-empty and at most MaxDurableQueueDedupKeyLen bytes). Keys
+// outside these bounds cannot exist in the store and are ignored as unknown
+// keys by nudge operations.
+func IsNudgeableDedupKey(k string) bool {
+	return k != "" && len(k) <= MaxDurableQueueDedupKeyLen
+}
 
 // ValidateDurableQueueKind checks that kind matches ^[a-z0-9_]+(\.[a-z0-9_]+)*$
 // and is at most 64 bytes.
@@ -159,4 +168,14 @@ type DurableQueueStore interface {
 	// ClaimDurableItems and TrimDurableQueue) for kind. When projectID is "",
 	// all projects are sampled.
 	DurableQueueStats(ctx context.Context, kind, projectID string, now time.Time) (DurableQueueStats, error)
+	// NudgeDurableItems sets next_attempt_at = now for unleased items
+	// (lease_until IS NULL || lease_until < now) of kind matching dedupKeys
+	// whose current next_attempt_at is strictly after now, returning the
+	// number of rows updated. Items already due at or before now keep their
+	// earlier next_attempt_at so (next_attempt_at, seq) claim ordering never
+	// delays them; leased items and other kinds/keys are untouched; unknown
+	// keys are ignored; and an empty dedupKeys slice is a no-op. Zero now
+	// defaults to time.Now().UTC(). Returns ErrInvalidInput when kind is
+	// invalid or len(dedupKeys) > MaxDurableQueueNudgeKeys.
+	NudgeDurableItems(ctx context.Context, kind string, dedupKeys []string, now time.Time) (int, error)
 }
