@@ -304,18 +304,36 @@ func parseFlatCloudRunCredentials(data []byte) (flatCredentialInfo, error) {
 	}
 }
 
-// flatCheckPrincipalNotAgentSA is P9: the configured service_account must
-// differ from the instance principal and, for an impersonated credential,
-// from the account the impersonation starts from (either way the agent,
-// which holds its service account's token, could act as the instance).
-func flatCheckPrincipalNotAgentSA(info flatCredentialInfo, serviceAccount string) error {
-	if strings.EqualFold(info.principal, serviceAccount) {
-		return brokerhost.WithReason(reasonCloudRunPrincipalIsAgentSA,
-			errors.New("service_account must differ from the instance credential principal"))
+// flatCheckPrincipalNotAgentSA is P9: every agent service account configured
+// on t (service_account, block_service_account, and assignable_service_accounts)
+// must differ from the instance principal and, for an impersonated credential,
+// from the account the impersonation starts from (either way an agent holding
+// that service account's token could act as the instance).
+func flatCheckPrincipalNotAgentSA(info flatCredentialInfo, t *config.V1RuntimeTargetConfig) error {
+	check := func(field, sa string) error {
+		if sa == "" {
+			return nil
+		}
+		if strings.EqualFold(info.principal, sa) {
+			return brokerhost.WithReason(reasonCloudRunPrincipalIsAgentSA,
+				fmt.Errorf("%s must differ from the instance credential principal", field))
+		}
+		if info.source != "" && strings.EqualFold(info.source, sa) {
+			return brokerhost.WithReason(reasonCloudRunPrincipalIsAgentSA,
+				fmt.Errorf("%s must differ from the account the instance credential impersonates from", field))
+		}
+		return nil
 	}
-	if info.source != "" && strings.EqualFold(info.source, serviceAccount) {
-		return brokerhost.WithReason(reasonCloudRunPrincipalIsAgentSA,
-			errors.New("service_account must differ from the account the instance credential impersonates from"))
+	if err := check("service_account", t.ServiceAccount); err != nil {
+		return err
+	}
+	if err := check("block_service_account", t.BlockServiceAccount); err != nil {
+		return err
+	}
+	for i, sa := range t.AssignableServiceAccounts {
+		if err := check(fmt.Sprintf("assignable_service_accounts[%d]", i), sa); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -443,7 +461,7 @@ func (a *flatInstanceActivation) cloudRunRuntime(ctx context.Context, inst confi
 	if err != nil {
 		return nil, err
 	}
-	if err := flatCheckPrincipalNotAgentSA(info, t.ServiceAccount); err != nil { // P9
+	if err := flatCheckPrincipalNotAgentSA(info, t); err != nil { // P9
 		return nil, err
 	}
 	if err := a.claimPrincipal(inst.Key, info.principal); err != nil { // P10
@@ -633,9 +651,13 @@ func probeCloudRunExecutionScope(ctx context.Context, inst config.V1RuntimeBroke
 		return unidentified("listing Cloud Run instances in the configured region failed (Cloud Run unreachable or the request failed): %v", code)
 	}
 	// P13: the static check cannot know the number.
-	if sa := inst.RuntimeTarget.ServiceAccount; strings.EqualFold(sa, number+"-compute@developer.gserviceaccount.com") {
-		return brokeridentity.ExecutionScope{}, brokerhost.WithReason(reasonCloudRunDefaultSA,
-			errors.New("the project default service accounts are not allowed"))
+	computeDefault := number + "-compute@developer.gserviceaccount.com"
+	for _, sa := range append([]string{inst.RuntimeTarget.ServiceAccount, inst.RuntimeTarget.BlockServiceAccount},
+		inst.RuntimeTarget.AssignableServiceAccounts...) {
+		if sa != "" && strings.EqualFold(sa, computeDefault) {
+			return brokeridentity.ExecutionScope{}, brokerhost.WithReason(reasonCloudRunDefaultSA,
+				errors.New("the project default service accounts are not allowed"))
+		}
 	}
 	if err := rt.BindProjectNumber(number); err != nil {
 		return unidentified("binding the probed project failed: %v", err)

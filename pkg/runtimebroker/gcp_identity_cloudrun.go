@@ -131,48 +131,115 @@ func (s *Server) flatCloudRunTarget() bool {
 	return fi.Identity != nil && fi.Identity.RuntimeTarget.Type == brokeridentity.TargetTypeCloudRun
 }
 
-// perAgentGCPIdentityRequested reports whether a dispatch carries a GCP
-// identity request or a Hub default that applies to it, from request fields
-// only: the request's GCPIdentity in any mode; a hub-default passthrough
-// (hubDefaultPassthrough); or a GCP identity mode in the resolved env or the
-// config env. A dispatch with none of these is not a request.
-func perAgentGCPIdentityRequested(in startContextInputs) bool {
-	if in.Config != nil && in.Config.GCPIdentity != nil {
-		return true
+// flatCloudRunRequestedMode returns the GCP identity mode requested for a flat
+// Cloud Run dispatch and whether the dispatch left the mode unset. On create,
+// the request's GCPIdentity takes precedence over env; on start and restart,
+// only the resolved env is read (matching resolveCloudRunIdentity). An
+// elevated mode in env without SCION_METADATA_MODE_SOURCE=hub is downgraded to
+// block (matching effectiveGCPMetadataMode), never treated as unset.
+func flatCloudRunRequestedMode(in startContextInputs) (mode string, unset bool) {
+	if in.Operation == opCreate && in.Config != nil && in.Config.GCPIdentity != nil {
+		return in.Config.GCPIdentity.MetadataMode, false
 	}
-	if hubDefaultPassthrough(in) {
-		return true
+	var cfgForEnv *CreateAgentConfig
+	if in.Operation == opCreate {
+		cfgForEnv = in.Config
 	}
-	if in.ResolvedEnv["SCION_METADATA_MODE"] != "" {
-		return true
-	}
-	if in.Config != nil {
-		for _, e := range in.Config.Env {
-			if k, v, ok := strings.Cut(e, "="); ok && k == "SCION_METADATA_MODE" && v != "" {
-				return true
+	raw := in.ResolvedEnv["SCION_METADATA_MODE"]
+	source := in.ResolvedEnv["SCION_METADATA_MODE_SOURCE"]
+	if cfgForEnv != nil {
+		for _, e := range cfgForEnv.Env {
+			k, v, ok := strings.Cut(e, "=")
+			if !ok {
+				continue
+			}
+			switch k {
+			case "SCION_METADATA_MODE":
+				raw = v
+				source = ""
+			case "SCION_METADATA_MODE_SOURCE":
+				source = v
 			}
 		}
 	}
-	return false
+	if raw == "" {
+		if hubDefaultPassthrough(in) {
+			return store.GCPMetadataModeBlock, false
+		}
+		return "", true
+	}
+	if (raw == store.GCPMetadataModeAssign || raw == store.GCPMetadataModePassthrough) && source != "hub" {
+		return store.GCPMetadataModeBlock, false
+	}
+	return raw, false
 }
 
-// flatCloudRunGCPIdentityRefusal refuses a per-agent GCP identity request
-// on a flat cloudrun instance (amendment P5-CR, CR3 credentials: per-agent
-// GCP identity, E-10). The agent runs only as the instance's
-// runtime_target.service_account, so a request is refused in every mode
-// (assign, block, passthrough, and an unset mode resolving to the Hub-default
-// passthrough), with the experiment on or off. buildStartContext calls it
-// first, right after the operation check: before the run is recorded, before
-// any project file is written and before any identity work. The refusal
-// names the agent only, never an account, a project or any other identity
-// value, and nothing is logged.
-func (s *Server) flatCloudRunGCPIdentityRefusal(in startContextInputs) *startContextError {
-	if !s.flatCloudRunTarget() || !perAgentGCPIdentityRequested(in) {
-		return nil
+// flatCloudRunIdentityDecision resolves the service account a flat Cloud Run
+// instance runs an agent as (ptone/scion#8182, ptone/scion#7764), or refuses
+// the dispatch before any ownership, project-file or runtime side effect:
+//
+//   - unset: runs as the instance's block_service_account with
+//     SCION_METADATA_MODE=block; no native marker is required (skew-safe when
+//     no Hub GCP token is involved);
+//   - block, or a hub-default / confined project-default passthrough
+//     (RequireLocalRuntime, mapped to block for legacy parity): requires the
+//     Hub's native Cloud Run marker (cloudRunNativeMarked) and runs as the
+//     instance's block_service_account with SCION_METADATA_MODE=block;
+//   - assign and explicit (unconfined) passthrough: refused in phase I1 with
+//     flatCloudRunGCPIdentityRefusalText (implemented in phase I2).
+//
+// Non-flat servers and flat servers of other target types return the zero
+// value and nil. Refusals name the agent (and, if block_service_account is
+// absent on an unvalidated test server, the setting key), never an account or
+// project.
+func (s *Server) flatCloudRunIdentityDecision(in startContextInputs) (cloudRunIdentity, *startContextError) {
+	if !s.flatCloudRunTarget() {
+		return cloudRunIdentity{}, nil
 	}
-	return &startContextError{
-		Status:  http.StatusBadRequest,
-		Message: fmt.Sprintf("agent %q: %s", in.Name, flatCloudRunGCPIdentityRefusalText),
+	mode, unset := flatCloudRunRequestedMode(in)
+	if !unset && mode == store.GCPMetadataModePassthrough && hubDefaultPassthrough(in) {
+		mode = store.GCPMetadataModeBlock
+	}
+	instanceKey := ""
+	if fi := s.flatInstance(); fi != nil {
+		instanceKey = fi.Instance.Key
+	}
+	if unset {
+		blockSA, ok := s.flatCloudRunIdentity.blockAccount()
+		if !ok {
+			return cloudRunIdentity{}, flatCloudRunBlockUnsetRefusal(in.Name, instanceKey)
+		}
+		return cloudRunIdentity{
+			Identity:  &api.CloudRunIdentity{ServiceAccount: blockSA, Mode: store.GCPMetadataModeBlock},
+			Selection: s.flatDispatchSelection(),
+		}, nil
+	}
+	switch mode {
+	case store.GCPMetadataModeBlock:
+		if !cloudRunNativeMarked(in) {
+			return cloudRunIdentity{}, &startContextError{
+				Status:  http.StatusBadRequest,
+				Message: fmt.Sprintf("agent %q: the hub did not mark this dispatch for native Cloud Run identity", in.Name),
+			}
+		}
+		blockSA, ok := s.flatCloudRunIdentity.blockAccount()
+		if !ok {
+			return cloudRunIdentity{}, flatCloudRunBlockUnsetRefusal(in.Name, instanceKey)
+		}
+		return cloudRunIdentity{
+			Identity:  &api.CloudRunIdentity{ServiceAccount: blockSA, Mode: store.GCPMetadataModeBlock},
+			Selection: s.flatDispatchSelection(),
+		}, nil
+	case store.GCPMetadataModeAssign, store.GCPMetadataModePassthrough:
+		return cloudRunIdentity{}, &startContextError{
+			Status:  http.StatusBadRequest,
+			Message: fmt.Sprintf("agent %q: %s", in.Name, flatCloudRunGCPIdentityRefusalText),
+		}
+	default:
+		return cloudRunIdentity{}, &startContextError{
+			Status:  http.StatusBadRequest,
+			Message: fmt.Sprintf("agent %q: GCP identity mode %q is not valid on Cloud Run Instances", in.Name, mode),
+		}
 	}
 }
 
@@ -248,7 +315,13 @@ func hubDefaultPassthrough(in startContextInputs) bool {
 // hubDefault is hubDefaultPassthrough(in), computed once by the caller.
 func (s *Server) resolveCloudRunIdentity(ctx context.Context, in startContextInputs, dispatchRuntimeType, gcpMetadataMode, profile string, hubDefault bool) (cloudRunIdentity, *startContextError) {
 	s.cloudRunIdentityResolves.add()
-	if dispatchRuntimeType != cloudRunRuntimeType || !cloudRunNativeIdentityEnabled(ctx, in) {
+	if dispatchRuntimeType != cloudRunRuntimeType {
+		return cloudRunIdentity{}, nil
+	}
+	if s.flatCloudRunTarget() {
+		return s.flatCloudRunIdentityDecision(in)
+	}
+	if !cloudRunNativeIdentityEnabled(ctx, in) {
 		return cloudRunIdentity{}, nil
 	}
 	mode := gcpMetadataMode
@@ -260,9 +333,6 @@ func (s *Server) resolveCloudRunIdentity(ctx context.Context, in startContextInp
 	}
 	if mode == store.GCPMetadataModePassthrough && hubDefault {
 		mode = store.GCPMetadataModeBlock
-	}
-	if s.isFlat() && (mode == store.GCPMetadataModeAssign || mode == store.GCPMetadataModeBlock) {
-		return cloudRunIdentity{}, cloudRunFlatRefusal(in.Name, mode)
 	}
 
 	var saEmail, projectID string
@@ -331,9 +401,6 @@ func (s *Server) resolveCloudRunIdentity(ctx context.Context, in startContextInp
 			Message: fmt.Sprintf("agent %q: GCP identity mode %q on Cloud Run Instances: account not attachable on this broker",
 				in.Name, store.GCPMetadataModeAssign),
 		}
-	}
-	if sel.isFlat() {
-		return cloudRunIdentity{}, cloudRunFlatRefusal(in.Name, mode)
 	}
 	// No runtime entry (a broker default with no settings entry, or a
 	// selection that could not be resolved) has no settings to read: refused
@@ -416,16 +483,6 @@ func refuseCloudRunInitFirewall(agentName string, identity *api.CloudRunIdentity
 	return &startContextError{
 		Status:  http.StatusBadRequest,
 		Message: fmt.Sprintf("agent %q: %s", agentName, refusal),
-	}
-}
-
-// cloudRunFlatRefusal refuses assign or block (mode) on a flat Runtime
-// Broker instance, which has no allow-list or block account setting.
-func cloudRunFlatRefusal(agentName, mode string) *startContextError {
-	return &startContextError{
-		Status: http.StatusBadRequest,
-		Message: fmt.Sprintf("agent %q: flat Cloud Run instances do not support assigned identities yet (GCP identity mode %q with the %s experiment on)",
-			agentName, mode, experiments.CloudRunNativeIdentity),
 	}
 }
 
@@ -541,29 +598,47 @@ func cloudRunAccountAssignable(vs *config.VersionedSettings, sel dispatchProfile
 // Each is refused before any side effect. The message names the agent and
 // the runtime or selection change only, never an account.
 func rejectCloudRunIdentityRuntimeChange(ctx context.Context, opts api.StartOptions, early *dispatchProfileSelection, resolvedRuntimeType string, lateSelection func() dispatchProfileSelection, pinnedEntry *string) *startContextError {
-	lateGated := resolvedRuntimeType == cloudRunRuntimeType &&
-		api.HubAgentDefaultsFromContext(ctx).ExperimentEnabled(experiments.CloudRunNativeIdentity)
+	var late dispatchProfileSelection
+	lateLoaded := false
+	getLate := func() dispatchProfileSelection {
+		if !lateLoaded {
+			late = lateSelection()
+			lateLoaded = true
+		}
+		return late
+	}
+	lateNative := resolvedRuntimeType == cloudRunRuntimeType &&
+		(api.HubAgentDefaultsFromContext(ctx).ExperimentEnabled(experiments.CloudRunNativeIdentity) || getLate().isFlat())
 	var msg string
 	switch {
-	case opts.CloudRunIdentity != nil && !lateGated:
+	case opts.CloudRunIdentity != nil && !lateNative:
+		remedy := legacyIdentityChangeRemedy
+		if early != nil && early.isFlat() {
+			remedy = flatIdentityChangeRemedy
+		}
 		msg = fmt.Sprintf("agent %q: the GCP identity was resolved for Cloud Run Instances, but this dispatch now resolves to runtime %q; %s",
-			opts.Name, resolvedRuntimeType, legacyIdentityChangeRemedy)
-	case opts.CloudRunIdentity == nil && lateGated:
-		msg = fmt.Sprintf("agent %q: the GCP identity was resolved for a runtime other than Cloud Run Instances, but this dispatch now resolves to Cloud Run Instances with the %s experiment on; %s",
-			opts.Name, experiments.CloudRunNativeIdentity, legacyIdentityChangeRemedy)
+			opts.Name, resolvedRuntimeType, remedy)
+	case opts.CloudRunIdentity == nil && lateNative:
+		if getLate().isFlat() {
+			msg = fmt.Sprintf("agent %q: the GCP identity was resolved for a runtime other than Cloud Run Instances, but this dispatch now resolves to Cloud Run Instances on Runtime Broker instance %q; %s",
+				opts.Name, getLate().InstanceKey, flatIdentityChangeRemedy)
+		} else {
+			msg = fmt.Sprintf("agent %q: the GCP identity was resolved for a runtime other than Cloud Run Instances, but this dispatch now resolves to Cloud Run Instances with the %s experiment on; %s",
+				opts.Name, experiments.CloudRunNativeIdentity, legacyIdentityChangeRemedy)
+		}
 	case opts.CloudRunIdentity != nil:
 		var was dispatchProfileSelection
 		if early != nil {
 			was = *early
 		}
-		if late := lateSelection(); late != was {
-			wasText, lateText, remedy := identityChangeWording(was, late, " and ")
+		if gotLate := getLate(); gotLate != was {
+			wasText, lateText, remedy := identityChangeWording(was, gotLate, " and ")
 			msg = fmt.Sprintf("agent %q: the GCP identity on Cloud Run Instances was resolved for %s, but this dispatch now resolves to %s; %s",
 				opts.Name, wasText, lateText, remedy)
-		} else if pinnedEntry != nil && *pinnedEntry == "" {
+		} else if !was.isFlat() && pinnedEntry != nil && *pinnedEntry == "" {
 			msg = fmt.Sprintf("agent %q: the GCP identity on Cloud Run Instances was resolved for runtime entry %q, but the agent runs on the runtime its container was found on, which records no runtime entry; recreate the agent or restart it with its saved profile",
 				opts.Name, was.RuntimeEntryName)
-		} else if pinnedEntry != nil && *pinnedEntry != was.RuntimeEntryName {
+		} else if !was.isFlat() && pinnedEntry != nil && *pinnedEntry != was.RuntimeEntryName {
 			msg = fmt.Sprintf("agent %q: the GCP identity on Cloud Run Instances was resolved for runtime entry %q, but the agent runs on the runtime its container was found on, built from runtime entry %q; %s",
 				opts.Name, was.RuntimeEntryName, *pinnedEntry, legacyIdentityChangeRemedy)
 		}

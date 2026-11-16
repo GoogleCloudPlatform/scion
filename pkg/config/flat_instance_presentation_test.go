@@ -48,10 +48,12 @@ var fc4aRows = map[string]map[string]string{
 		"shared_dir_storage_backend": fc4AsIs, "shared_dir_storage_backends": fc4AsIs,
 		"home_storage_backend": fc4AsIs, "home_storage_leaf": fc4Never,
 		"node_selector": fc4AsIs, "tolerations": fc4AsIs, "runtime_class_name": fc4AsIs,
-		// Cloud Run (contract amendment P5-CR, CR8). region is published as
-		// is; project_id, service_account, network, subnetwork and
-		// credentials_file are never published.
+		// Cloud Run (contract amendment P5-CR, CR8; Identity Part B). region is
+		// published as is; project_id, service_account, block_service_account,
+		// assignable_service_accounts, network, subnetwork and credentials_file
+		// are never published.
 		"project_id": fc4Never, "region": fc4AsIs, "service_account": fc4Never,
+		"block_service_account": fc4Never, "assignable_service_accounts": fc4Never,
 		"network": fc4Never, "subnetwork": fc4Never, "credentials_file": fc4Never,
 	},
 	"agent_defaults": {
@@ -167,9 +169,16 @@ func fullyPopulatedInstance() V1RuntimeBrokerInstanceConfig {
 			SharedDirStorageClass: "standard-rwx", SharedDirSize: "40Gi", SafeToEvict: &evict,
 			SharedDirStorageBackend: "nfs", SharedDirStorageBackends: map[string]string{"data": "local"},
 			HomeStorageBackend: "nfs", HomeStorageLeaf: "NEVER-leaf",
-			NodeSelector:     map[string]string{"scion.dev/pool": "agents"},
-			Tolerations:      []api.K8sToleration{{Key: "scion.dev/pool", Operator: "Equal", Value: "agents", Effect: "NoSchedule"}},
-			RuntimeClassName: "gvisor",
+			NodeSelector:              map[string]string{"scion.dev/pool": "agents"},
+			Tolerations:               []api.K8sToleration{{Key: "scion.dev/pool", Operator: "Equal", Value: "agents", Effect: "NoSchedule"}},
+			RuntimeClassName:          "gvisor",
+			ProjectID:                 "NEVER-project-id",
+			ServiceAccount:            "NEVER-sa@example.iam.gserviceaccount.com",
+			BlockServiceAccount:       "NEVER-block-sa@example.iam.gserviceaccount.com",
+			AssignableServiceAccounts: []string{"NEVER-assign-sa@example.iam.gserviceaccount.com"},
+			Network:                   "NEVER-network",
+			Subnetwork:                "NEVER-subnetwork",
+			CredentialsFile:           "/NEVER-credentials.json",
 		},
 		AgentDefaults: &V1InstanceAgentDefaults{
 			DefaultHarnessConfig: "claude", ImageRegistry: "registry.example/team", CloneDepth: "full",
@@ -234,8 +243,8 @@ func TestPresentInstance_RedactsEveryFC4aRow(t *testing.T) {
 	// The source really holds every never-published value, so the check
 	// above is not vacuous.
 	src, _ := json.Marshal(inst)
-	if n := strings.Count(string(src), "NEVER-"); n != 21 {
-		t.Fatalf("the source holds %d never-published values, want 21: %s", n, src)
+	if n := strings.Count(string(src), "NEVER-"); n != 28 {
+		t.Fatalf("the source holds %d never-published values, want 28: %s", n, src)
 	}
 }
 
@@ -278,9 +287,10 @@ func TestPresentInstance_SharesNothingWithSource(t *testing.T) {
 	}
 }
 
-// TestPresentInstance_CloudRunRedaction verifies CR8: for a cloudrun target,
-// region is published as is (both in PresentInstance and on the wire via API),
-// while the five CR8 "never" fields (project_id, service_account,
+// TestPresentInstance_CloudRunRedaction verifies CR8 and Identity Part B: for a
+// cloudrun target, region is published as is (both in PresentInstance and on
+// the wire via API), while the seven "never" fields (project_id,
+// service_account, block_service_account, assignable_service_accounts,
 // credentials_file, network, subnetwork) are absent. For non-cloudrun targets,
 // region is never populated.
 func TestPresentInstance_CloudRunRedaction(t *testing.T) {
@@ -288,14 +298,16 @@ func TestPresentInstance_CloudRunRedaction(t *testing.T) {
 		Key:  "cr-us-central1",
 		Name: "cr us-central1",
 		RuntimeTarget: &V1RuntimeTargetConfig{
-			Type:            RuntimeTargetTypeCloudRun,
-			DisplayName:     "Cloud Run",
-			Region:          "us-central1",
-			ProjectID:       "NEVER-project-id",
-			ServiceAccount:  "NEVER-sa@example.iam.gserviceaccount.com",
-			Network:         "NEVER-network",
-			Subnetwork:      "NEVER-subnetwork",
-			CredentialsFile: "/NEVER-credentials.json",
+			Type:                      RuntimeTargetTypeCloudRun,
+			DisplayName:               "Cloud Run",
+			Region:                    "us-central1",
+			ProjectID:                 "NEVER-project-id",
+			ServiceAccount:            "NEVER-sa@example.iam.gserviceaccount.com",
+			BlockServiceAccount:       "NEVER-block-sa@example.iam.gserviceaccount.com",
+			AssignableServiceAccounts: []string{"NEVER-assign-sa@example.iam.gserviceaccount.com"},
+			Network:                   "NEVER-network",
+			Subnetwork:                "NEVER-subnetwork",
+			CredentialsFile:           "/NEVER-credentials.json",
 		},
 	}
 
@@ -339,6 +351,8 @@ func TestPresentInstance_CloudRunRedaction(t *testing.T) {
 		for _, k := range []string{
 			"project_id", "projectId",
 			"service_account", "serviceAccount",
+			"block_service_account", "blockServiceAccount",
+			"assignable_service_accounts", "assignableServiceAccounts",
 			"credentials_file", "credentialsFile",
 			"network", "subnetwork",
 		} {

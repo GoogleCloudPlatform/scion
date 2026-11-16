@@ -15,6 +15,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -24,18 +25,20 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
-// Cloud Run flat instance settings (contract amendment P5-CR, CR1 and CR2).
+// Cloud Run flat instance settings (contract amendment P5-CR, CR1 and CR2;
+// Identity Part B).
 
 // cloudRunTarget returns a valid cloudrun runtime_target.
 func cloudRunTarget() *V1RuntimeTargetConfig {
 	return &V1RuntimeTargetConfig{
-		Type:            RuntimeTargetTypeCloudRun,
-		DisplayName:     "Cloud Run us-central1",
-		ProjectID:       "example-project",
-		Region:          "us-central1",
-		ServiceAccount:  "agents@example-project.iam.gserviceaccount.com",
-		Subnetwork:      "projects/example-project/regions/us-central1/subnetworks/agents",
-		CredentialsFile: "/etc/scion/cr-us-central1.json",
+		Type:                RuntimeTargetTypeCloudRun,
+		DisplayName:         "Cloud Run us-central1",
+		ProjectID:           "example-project",
+		Region:              "us-central1",
+		ServiceAccount:      "agents@example-project.iam.gserviceaccount.com",
+		BlockServiceAccount: "no-role-block@example-project.iam.gserviceaccount.com",
+		Subnetwork:          "projects/example-project/regions/us-central1/subnetworks/agents",
+		CredentialsFile:     "/etc/scion/cr-us-central1.json",
 	}
 }
 
@@ -75,6 +78,15 @@ func TestRuntimeBrokerInstances_CloudRunAccepted(t *testing.T) {
 		},
 		"six-char project": func(t *V1RuntimeTargetConfig) { t.ProjectID = "abcdef" },
 		"region europe":    func(t *V1RuntimeTargetConfig) { t.Region = "europe-west4" },
+		"assignable list": func(t *V1RuntimeTargetConfig) {
+			t.AssignableServiceAccounts = []string{
+				"worker-one@example-project.iam.gserviceaccount.com",
+				"worker-two@other-project.iam.gserviceaccount.com",
+			}
+		},
+		"service_account in assignable list": func(t *V1RuntimeTargetConfig) {
+			t.AssignableServiceAccounts = []string{t.ServiceAccount}
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if errs := validateCloudRun(mutate); len(errs) != 0 {
@@ -100,6 +112,11 @@ func TestRuntimeBrokerInstances_CloudRunRequiresProjectRegionSA(t *testing.T) {
 		"region no number":      {func(t *V1RuntimeTargetConfig) { t.Region = "us-central" }, "region", "must be a Cloud Run region"},
 		"region upper case":     {func(t *V1RuntimeTargetConfig) { t.Region = "US-CENTRAL1" }, "region", "must be a Cloud Run region"},
 		"sa missing":            {func(t *V1RuntimeTargetConfig) { t.ServiceAccount = "" }, "service_account", "service_account is required"},
+		"block sa missing": {
+			func(t *V1RuntimeTargetConfig) { t.BlockServiceAccount = "" },
+			"block_service_account",
+			"server.broker.instances[0].runtime_target.block_service_account is required: agents with no GCP identity run as this no-role account",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			expectOneCloudRunError(t, validateCloudRun(tc.mutate), tc.field, tc.msg)
@@ -110,9 +127,9 @@ func TestRuntimeBrokerInstances_CloudRunRequiresProjectRegionSA(t *testing.T) {
 		*t = V1RuntimeTargetConfig{Type: RuntimeTargetTypeCloudRun}
 	})
 	expectValidationPaths(t, errs, "runtime_target.project_id", "runtime_target.region", "runtime_target.service_account",
-		"runtime_target.network", "runtime_target.credentials_file")
-	if len(errs) != 5 {
-		t.Fatalf("want five errors for an empty cloudrun target, got %v", errs)
+		"runtime_target.block_service_account", "runtime_target.network", "runtime_target.credentials_file")
+	if len(errs) != 6 {
+		t.Fatalf("want six errors for an empty cloudrun target, got %v", errs)
 	}
 }
 
@@ -266,12 +283,132 @@ func TestRuntimeBrokerInstances_CloudRunRejectsKubernetesFields(t *testing.T) {
 	expectValidationPaths(t, errs, "runtime_target.home_storage_backend")
 }
 
+func TestRuntimeBrokerInstances_CloudRunBlockServiceAccountRules(t *testing.T) {
+	// Missing on index 1 names server.broker.instances[1].runtime_target.block_service_account exactly.
+	second := cloudRunTarget()
+	second.BlockServiceAccount = ""
+	errs := ValidateRuntimeBrokerInstances([]V1RuntimeBrokerInstanceConfig{
+		{Key: "dock", Name: "dock", RuntimeTarget: &V1RuntimeTargetConfig{Type: RuntimeTargetTypeDocker}},
+		{Key: "cr-b", Name: "b", RuntimeTarget: second},
+	})
+	wantMissing := ValidationError{
+		Path:    "server.broker.instances[1].runtime_target.block_service_account",
+		Message: "server.broker.instances[1].runtime_target.block_service_account is required: agents with no GCP identity run as this no-role account",
+	}
+	if len(errs) != 1 || errs[0] != wantMissing {
+		t.Fatalf("missing block_service_account at index 1: got %#v, want [%#v]", errs, wantMissing)
+	}
+
+	expectOneCloudRunError(t, validateCloudRun(func(t *V1RuntimeTargetConfig) {
+		t.BlockServiceAccount = t.ServiceAccount
+	}), "block_service_account", "block_service_account must differ from service_account")
+
+	for name, sa := range map[string]string{
+		"compute default":    "123456789012-compute@developer.gserviceaccount.com",
+		"app engine default": "example-project@appspot.gserviceaccount.com",
+	} {
+		t.Run(name, func(t *testing.T) {
+			errs := validateCloudRun(func(t *V1RuntimeTargetConfig) { t.BlockServiceAccount = sa })
+			want := ValidationError{
+				Path:    "server.broker.instances[0].runtime_target.block_service_account",
+				Message: cloudRunDefaultSAMessage,
+			}
+			if len(errs) != 1 || errs[0] != want {
+				t.Fatalf("got %#v, want [%#v]", errs, want)
+			}
+		})
+	}
+
+	const wantUserManaged = "block_service_account must be a user-managed service account (name@project.iam.gserviceaccount.com)"
+	for name, sa := range map[string]string{
+		"not an email":    "no-role",
+		"upper case":      "No-Role@example-project.iam.gserviceaccount.com",
+		"service agent":   "service-123@serverless-robot-prod.iam.gserviceaccount.com",
+		"gcp-sa agent":    "robot-agent@gcp-sa-example1.iam.gserviceaccount.com",
+		"other appspot":   "other-project@appspot.gserviceaccount.com",
+		"developer non-d": "agents-x@developer.gserviceaccount.com",
+	} {
+		t.Run(name, func(t *testing.T) {
+			errs := validateCloudRun(func(t *V1RuntimeTargetConfig) { t.BlockServiceAccount = sa })
+			want := ValidationError{
+				Path:    "server.broker.instances[0].runtime_target.block_service_account",
+				Message: wantUserManaged,
+			}
+			if len(errs) != 1 || errs[0] != want {
+				t.Fatalf("got %#v, want [%#v]", errs, want)
+			}
+		})
+	}
+}
+
+func TestRuntimeBrokerInstances_CloudRunAssignableServiceAccountsRules(t *testing.T) {
+	// Maximum 64 entries: 64 accepted, 65 refused.
+	maxList := make([]string, 64)
+	for i := range maxList {
+		maxList[i] = fmt.Sprintf("worker-%02d@example-project.iam.gserviceaccount.com", i)
+	}
+	if errs := validateCloudRun(func(t *V1RuntimeTargetConfig) {
+		t.AssignableServiceAccounts = maxList
+	}); len(errs) != 0 {
+		t.Fatalf("64 assignable entries refused: %v", errs)
+	}
+	overMax := append(append([]string(nil), maxList...), "worker-64@example-project.iam.gserviceaccount.com")
+	expectOneCloudRunError(t, validateCloudRun(func(t *V1RuntimeTargetConfig) {
+		t.AssignableServiceAccounts = overMax
+	}), "assignable_service_accounts", "at most 64")
+
+	// Duplicate entry refused at the duplicate index.
+	expectOneCloudRunError(t, validateCloudRun(func(t *V1RuntimeTargetConfig) {
+		t.AssignableServiceAccounts = []string{
+			"worker-a@example-project.iam.gserviceaccount.com",
+			"worker-a@example-project.iam.gserviceaccount.com",
+		}
+	}), "assignable_service_accounts[1]", "duplicate service account")
+
+	// block_service_account must not appear in assignable_service_accounts.
+	expectOneCloudRunError(t, validateCloudRun(func(t *V1RuntimeTargetConfig) {
+		t.AssignableServiceAccounts = []string{
+			"worker-a@example-project.iam.gserviceaccount.com",
+			t.BlockServiceAccount,
+		}
+	}), "assignable_service_accounts[1]", "block_service_account must not appear in assignable_service_accounts")
+
+	// Default and non-user-managed entries refused at element index.
+	for name, tc := range map[string]struct {
+		sa, msg string
+	}{
+		"empty":           {"", "assignable_service_accounts[0] must be a user-managed service account (name@project.iam.gserviceaccount.com)"},
+		"upper case":      {"Worker@example-project.iam.gserviceaccount.com", "assignable_service_accounts[0] must be a user-managed service account (name@project.iam.gserviceaccount.com)"},
+		"service agent":   {"service-123@serverless-robot-prod.iam.gserviceaccount.com", "assignable_service_accounts[0] must be a user-managed service account (name@project.iam.gserviceaccount.com)"},
+		"gcp-sa agent":    {"robot-agent@gcp-sa-example1.iam.gserviceaccount.com", "assignable_service_accounts[0] must be a user-managed service account (name@project.iam.gserviceaccount.com)"},
+		"compute default": {"123456789012-compute@developer.gserviceaccount.com", cloudRunDefaultSAMessage},
+		"appspot default": {"example-project@appspot.gserviceaccount.com", cloudRunDefaultSAMessage},
+	} {
+		t.Run(name, func(t *testing.T) {
+			errs := validateCloudRun(func(t *V1RuntimeTargetConfig) {
+				t.AssignableServiceAccounts = []string{tc.sa}
+			})
+			want := ValidationError{
+				Path:    "server.broker.instances[0].runtime_target.assignable_service_accounts[0]",
+				Message: tc.msg,
+			}
+			if len(errs) != 1 || errs[0] != want {
+				t.Fatalf("got %#v, want [%#v]", errs, want)
+			}
+		})
+	}
+}
+
 func TestRuntimeBrokerInstances_DockerAndKubernetesRejectCloudRunFields(t *testing.T) {
-	fields := []string{"project_id", "region", "service_account", "network", "subnetwork", "credentials_file"}
+	fields := []string{
+		"project_id", "region", "service_account", "block_service_account",
+		"assignable_service_accounts", "network", "subnetwork", "credentials_file",
+	}
 	for _, typ := range []string{RuntimeTargetTypeDocker, RuntimeTargetTypeKubernetes} {
 		t.Run(typ, func(t *testing.T) {
 			target := cloudRunTarget()
 			target.Type, target.DisplayName, target.Network = typ, "", "agents-vpc"
+			target.AssignableServiceAccounts = []string{"worker-a@example-project.iam.gserviceaccount.com"}
 			errs := ValidateRuntimeBrokerInstances([]V1RuntimeBrokerInstanceConfig{{Key: "a", Name: "n", RuntimeTarget: target}})
 			if len(errs) != len(fields) {
 				t.Fatalf("want one error per Cloud Run field (%d), got %v", len(fields), errs)
@@ -290,7 +427,12 @@ func TestRuntimeBrokerInstances_DockerAndKubernetesRejectCloudRunFields(t *testi
 			// Each field alone is refused too.
 			for _, f := range fields {
 				one := &V1RuntimeTargetConfig{Type: typ}
-				reflect.ValueOf(one).Elem().FieldByName(cloudRunGoField[f]).SetString("x")
+				fv := reflect.ValueOf(one).Elem().FieldByName(cloudRunGoField[f])
+				if fv.Kind() == reflect.Slice {
+					fv.Set(reflect.ValueOf([]string{"worker-a@example-project.iam.gserviceaccount.com"}))
+				} else {
+					fv.SetString("x")
+				}
 				errs := ValidateRuntimeBrokerInstances([]V1RuntimeBrokerInstanceConfig{{Key: "a", Name: "n", RuntimeTarget: one}})
 				if len(errs) != 1 || errs[0].Path != "server.broker.instances[0].runtime_target."+f {
 					t.Errorf("%s alone on %s: got %v", f, typ, errs)
@@ -303,7 +445,9 @@ func TestRuntimeBrokerInstances_DockerAndKubernetesRejectCloudRunFields(t *testi
 // cloudRunGoField maps each Cloud Run settings key to its Go field.
 var cloudRunGoField = map[string]string{
 	"project_id": "ProjectID", "region": "Region", "service_account": "ServiceAccount",
-	"network": "Network", "subnetwork": "Subnetwork", "credentials_file": "CredentialsFile",
+	"block_service_account":       "BlockServiceAccount",
+	"assignable_service_accounts": "AssignableServiceAccounts",
+	"network":                     "Network", "subnetwork": "Subnetwork", "credentials_file": "CredentialsFile",
 }
 
 func TestRuntimeBrokerInstances_UnsupportedTypeMessage(t *testing.T) {
@@ -332,6 +476,10 @@ server:
           project_id: example-project
           region: us-central1
           service_account: agents@example-project.iam.gserviceaccount.com
+          block_service_account: no-role-block@example-project.iam.gserviceaccount.com
+          assignable_service_accounts:
+            - worker-one@example-project.iam.gserviceaccount.com
+            - worker-two@other-project.iam.gserviceaccount.com
           network: agents-vpc
           subnetwork: projects/example-project/regions/us-central1/subnetworks/agents
           credentials_file: /etc/scion/cr-us-central1.json
@@ -350,6 +498,10 @@ func TestRuntimeBrokerInstances_CloudRunRoundTrip(t *testing.T) {
 	}
 	want := cloudRunTarget()
 	want.Network = "agents-vpc"
+	want.AssignableServiceAccounts = []string{
+		"worker-one@example-project.iam.gserviceaccount.com",
+		"worker-two@other-project.iam.gserviceaccount.com",
+	}
 	if len(strict) != 1 || !reflect.DeepEqual(strict[0].RuntimeTarget, want) {
 		t.Fatalf("strict: got %+v, want %+v", strict, want)
 	}
@@ -363,6 +515,7 @@ func TestRuntimeBrokerInstances_CloudRunRoundTrip(t *testing.T) {
 	}
 	rt := got[0].RuntimeTarget
 	if rt.ProjectID != want.ProjectID || rt.Region != want.Region || rt.ServiceAccount != want.ServiceAccount ||
+		rt.BlockServiceAccount != want.BlockServiceAccount || !reflect.DeepEqual(rt.AssignableServiceAccounts, want.AssignableServiceAccounts) ||
 		rt.Network != want.Network || rt.Subnetwork != want.Subnetwork || rt.CredentialsFile != want.CredentialsFile {
 		t.Fatalf("server-config form lost a Cloud Run field: %+v", rt)
 	}
@@ -372,18 +525,31 @@ func TestRuntimeBrokerInstances_CloudRunRoundTrip(t *testing.T) {
 	if v1 := ConvertGlobalToV1ServerConfig(gc); !reflect.DeepEqual(v1.Broker.Instances, strict) {
 		t.Fatalf("back-conversion differs: %+v", v1.Broker.Instances)
 	}
-	if back := globalInstancesToV1(v1InstancesToGlobal(strict)); !reflect.DeepEqual(back, strict) {
+	globalCopy := v1InstancesToGlobal(strict)
+	strict[0].RuntimeTarget.AssignableServiceAccounts[0] = "mutated@example-project.iam.gserviceaccount.com"
+	if globalCopy[0].RuntimeTarget.AssignableServiceAccounts[0] != "worker-one@example-project.iam.gserviceaccount.com" {
+		t.Fatal("v1InstancesToGlobal shares AssignableServiceAccounts slice with caller")
+	}
+	strict[0].RuntimeTarget.AssignableServiceAccounts[0] = "worker-one@example-project.iam.gserviceaccount.com"
+	if back := globalInstancesToV1(globalCopy); !reflect.DeepEqual(back, strict) {
 		t.Fatalf("round trip = %+v", back[0].RuntimeTarget)
 	}
-	for _, f := range []string{"ProjectID", "Region", "ServiceAccount", "Network", "Subnetwork", "CredentialsFile"} {
+	for _, f := range []string{
+		"ProjectID", "Region", "ServiceAccount", "BlockServiceAccount",
+		"AssignableServiceAccounts", "Network", "Subnetwork", "CredentialsFile",
+	} {
 		a, okA := reflect.TypeOf(V1RuntimeTargetConfig{}).FieldByName(f)
 		b, okB := reflect.TypeOf(RuntimeTargetConfig{}).FieldByName(f)
 		if !okA || !okB || a.Type != b.Type {
 			t.Errorf("field %s differs between the settings and server-config forms", f)
 		}
 	}
-	for f, key := range map[string]string{"ProjectID": "projectId", "ServiceAccount": "serviceAccount", "CredentialsFile": "credentialsFile",
-		"Region": "region", "Network": "network", "Subnetwork": "subnetwork"} {
+	for f, key := range map[string]string{
+		"ProjectID": "projectId", "ServiceAccount": "serviceAccount",
+		"BlockServiceAccount": "blockServiceAccount", "AssignableServiceAccounts": "assignableServiceAccounts",
+		"CredentialsFile": "credentialsFile",
+		"Region":          "region", "Network": "network", "Subnetwork": "subnetwork",
+	} {
 		sf, _ := reflect.TypeOf(RuntimeTargetConfig{}).FieldByName(f)
 		if name, _, _ := strings.Cut(sf.Tag.Get("json"), ","); name != key {
 			t.Errorf("server-config key of %s = %q, want %q", f, name, key)
@@ -410,7 +576,9 @@ func TestRuntimeBrokerInstances_CloudRunRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	b2, _ := os.ReadFile(filepath.Join(out2, "settings.yaml"))
-	if string(b1) != string(b2) || !strings.Contains(string(b1), "credentials_file: /etc/scion/cr-us-central1.json") {
+	if string(b1) != string(b2) || !strings.Contains(string(b1), "credentials_file: /etc/scion/cr-us-central1.json") ||
+		!strings.Contains(string(b1), "block_service_account: no-role-block@example-project.iam.gserviceaccount.com") ||
+		!strings.Contains(string(b1), "worker-one@example-project.iam.gserviceaccount.com") {
 		t.Fatalf("round trip not byte-stable or lost a field:\n%s\n---\n%s", b1, b2)
 	}
 }
@@ -419,19 +587,28 @@ func TestRuntimeBrokerInstances_CloudRunRoundTrip(t *testing.T) {
 // refuses a non-string or null Cloud Run field, naming its path.
 func TestRuntimeBrokerInstances_CloudRunStrictLoaderRefusesNonStrings(t *testing.T) {
 	p := "server.broker.instances[0].runtime_target."
+	baseYAML := strings.Replace(fullCloudRunInstanceYAML,
+		"          assignable_service_accounts:\n            - worker-one@example-project.iam.gserviceaccount.com\n            - worker-two@other-project.iam.gserviceaccount.com\n",
+		"", 1)
 	for line, want := range map[string]string{
-		"project_id: 123":          p + "project_id must be a string",
-		"region: null":             p + "region must be a string",
-		"service_account: [a]":     p + "service_account must be a string",
-		"network: true":            p + "network must be a string",
-		"subnetwork: null":         p + "subnetwork must be a string",
-		"credentials_file: 7":      p + "credentials_file must be a string",
-		"credentials_files: /a/b":  p + "credentials_files: unknown key",
-		"impersonate_account: x@y": p + "impersonate_account: unknown key",
+		"project_id: 123":                     p + "project_id must be a string",
+		"region: null":                        p + "region must be a string",
+		"service_account: [a]":                p + "service_account must be a string",
+		"block_service_account: 9":            p + "block_service_account must be a string",
+		"block_service_account: null":         p + "block_service_account must be a string",
+		"assignable_service_accounts: x":      p + "assignable_service_accounts must be a list",
+		"assignable_service_accounts: null":   p + "assignable_service_accounts must be a list",
+		"assignable_service_accounts: [123]":  p + "assignable_service_accounts[0] must be a string",
+		"assignable_service_accounts: [null]": p + "assignable_service_accounts[0] must be a string",
+		"network: true":                       p + "network must be a string",
+		"subnetwork: null":                    p + "subnetwork must be a string",
+		"credentials_file: 7":                 p + "credentials_file must be a string",
+		"credentials_files: /a/b":             p + "credentials_files: unknown key",
+		"impersonate_account: x@y":            p + "impersonate_account: unknown key",
 	} {
 		t.Run(line, func(t *testing.T) {
 			global := flatTestHome(t)
-			writeFlatTestFile(t, filepath.Join(global, "settings.yaml"), withRuntimeTargetLine(t, fullCloudRunInstanceYAML, line))
+			writeFlatTestFile(t, filepath.Join(global, "settings.yaml"), withRuntimeTargetLine(t, baseYAML, line))
 			_, err := LoadRuntimeBrokerInstances("")
 			if err == nil || err.Error() != want {
 				t.Fatalf("got %v, want exactly %q", err, want)
@@ -473,7 +650,7 @@ func withRuntimeTargetLine(t *testing.T, doc, line string) string {
 // ValidateRuntimeBrokerInstances accept and refuse the same Cloud Run cases.
 func TestSettingsSchema_CloudRunParity(t *testing.T) {
 	full := "type: cloudrun, project_id: example-project, region: us-central1, service_account: agents@example-project.iam.gserviceaccount.com, " +
-		"subnetwork: agents-subnet, credentials_file: /etc/scion/cr.json"
+		"block_service_account: no-role-block@example-project.iam.gserviceaccount.com, subnetwork: agents-subnet, credentials_file: /etc/scion/cr.json"
 	entry := func(target string) string {
 		return instancesYAML("- {key: a, name: x, runtime_target: {" + target + "}}")
 	}
@@ -482,85 +659,111 @@ func TestSettingsSchema_CloudRunParity(t *testing.T) {
 		yaml  string
 		valid bool
 	}{
-		"full":                 {entry(full), true},
-		"network only":         {with("subnetwork: agents-subnet", "network: agents-vpc"), true},
-		"both networks":        {entry(full + ", network: agents-vpc"), true},
-		"display name":         {entry(full + ", display_name: CR"), true},
-		"full multi-line":      {fullCloudRunInstanceYAML, true},
-		"no project":           {with("project_id: example-project, ", ""), false},
-		"empty project":        {with("project_id: example-project", "project_id: \"\""), false},
-		"bad project":          {with("project_id: example-project", "project_id: Example"), false},
-		"short project":        {with("project_id: example-project", "project_id: abc"), false},
-		"domain project":       {with("project_id: example-project", "project_id: \"example.com:proj\""), false},
-		"no region":            {with("region: us-central1, ", ""), false},
-		"empty region":         {with("region: us-central1", "region: \"\""), false},
-		"zone region":          {with("region: us-central1", "region: us-central1-a"), false},
-		"no sa":                {with("service_account: agents@example-project.iam.gserviceaccount.com, ", ""), false},
-		"empty sa":             {with("service_account: agents@example-project.iam.gserviceaccount.com", "service_account: \"\""), false},
-		"user sa":              {with("agents@example-project.iam.gserviceaccount.com", "dev@example.com"), false},
-		"upper sa":             {with("agents@example-project.iam.gserviceaccount.com", "Agents@example-project.iam.gserviceaccount.com"), false},
-		"compute default":      {with("agents@example-project.iam.gserviceaccount.com", "123-compute@developer.gserviceaccount.com"), false},
-		"compute default case": {with("agents@example-project.iam.gserviceaccount.com", "123-Compute@developer.gserviceaccount.com"), false},
-		"appspot default":      {with("agents@example-project.iam.gserviceaccount.com", "example-project@appspot.gserviceaccount.com"), false},
-		"appspot default case": {with("agents@example-project.iam.gserviceaccount.com", "Example-Project@appspot.gserviceaccount.com"), false},
-		"compute-like sa":      {with("agents@example-project.iam.gserviceaccount.com", "agents-compute@example-project.iam.gserviceaccount.com"), true},
-		"bare-domain sa":       {with("agents@example-project.iam.gserviceaccount.com", "agents@gserviceaccount.com"), false},
-		"service agent sa":     {with("agents@example-project.iam.gserviceaccount.com", "service-123@serverless-robot-prod.iam.gserviceaccount.com"), false},
-		"gcp-sa agent sa":      {with("agents@example-project.iam.gserviceaccount.com", "robot-agent@gcp-sa-example1.iam.gserviceaccount.com"), false},
-		"developer sa":         {with("agents@example-project.iam.gserviceaccount.com", "agents-x@developer.gserviceaccount.com"), false},
-		"svc-account-1 sa":     {with("agents@example-project.iam.gserviceaccount.com", "service-account-1@example-project.iam.gserviceaccount.com"), true},
-		"gcp-sa svc agent sa":  {with("agents@example-project.iam.gserviceaccount.com", "service-123456789012@gcp-sa-run.iam.gserviceaccount.com"), false},
-		"other appspot sa":     {with("agents@example-project.iam.gserviceaccount.com", "other-project@appspot.gserviceaccount.com"), false},
-		"upper project sa":     {with("agents@example-project.iam.gserviceaccount.com", "agents@Example-Project.iam.gserviceaccount.com"), false},
-		"dotted-name sa":       {with("agents@example-project.iam.gserviceaccount.com", "a.gent@example-project.iam.gserviceaccount.com"), false},
-		"double-slash creds":   {with("/etc/scion/cr.json", "/etc//cr.json"), false},
-		"dotdot creds":         {with("/etc/scion/cr.json", "/etc/scion/../cr.json"), false},
-		"dot creds":            {with("/etc/scion/cr.json", "/etc/./cr.json"), false},
-		"trailing-slash creds": {with("/etc/scion/cr.json", "/etc/scion/"), false},
-		"trailing-dot creds":   {with("/etc/scion/cr.json", "/etc/scion/."), false},
-		"dotted-file creds":    {with("/etc/scion/cr.json", "/etc/scion/.cr.json"), true},
-		"no network":           {with(", subnetwork: agents-subnet", ""), false},
-		"empty networks":       {with("subnetwork: agents-subnet", "subnetwork: \"\", network: \"\""), false},
-		"no credentials":       {with(", credentials_file: /etc/scion/cr.json", ""), false},
-		"empty credentials":    {with("credentials_file: /etc/scion/cr.json", "credentials_file: \"\""), false},
-		"relative credentials": {with("/etc/scion/cr.json", "cr.json"), false},
-		"tilde credentials":    {with("/etc/scion/cr.json", "~/cr.json"), false},
-		"env credentials":      {with("/etc/scion/cr.json", "/etc/$DIR/cr.json"), false},
-		"list credentials":     {with("/etc/scion/cr.json", "\"/a.json:/b.json\""), false},
-		"root credentials":     {with("/etc/scion/cr.json", "/"), false},
-		"cloudrun context":     {entry(full + ", context: c"), false},
-		"cloudrun namespace":   {entry(full + ", namespace: ns"), false},
-		"cloudrun kubeconfig":  {entry(full + ", kubeconfig: /etc/kc"), false},
-		"cloudrun gke":         {entry(full + ", gke: true"), false},
-		"cloudrun gke false":   {entry(full + ", gke: false"), true},
-		"cloudrun evict":       {entry(full + ", safe_to_evict: false"), false},
-		"cloudrun selector":    {entry(full + ", node_selector: {a: b}"), false},
-		"cloudrun tolerations": {entry(full + ", tolerations: [{key: k, operator: Exists}]"), false},
-		"cloudrun rt class":    {entry(full + ", runtime_class_name: gvisor"), false},
-		"cloudrun priority":    {entry(full + ", priority_class_name: high"), false},
-		"cloudrun block sa":    {entry(full + ", kubernetes_block_service_account: zero-priv"), false},
-		"cloudrun sd class":    {entry(full + ", shared_dir_storage_class: rwx"), false},
-		"cloudrun home":        {entry(full + ", home_storage_backend: nfs"), false},
-		"cloudrun empty ctx":   {entry(full + ", context: \"\""), true},
-		"cloudrun num region":  {with("region: us-central1", "region: 5"), false},
-		"cloudrun null sa":     {with("service_account: agents@example-project.iam.gserviceaccount.com", "service_account: null"), false},
-		"docker project":       {entry("type: docker, project_id: example-project"), false},
-		"docker region":        {entry("type: docker, region: us-central1"), false},
-		"docker sa":            {entry("type: docker, service_account: agents@example-project.iam.gserviceaccount.com"), false},
-		"docker network":       {entry("type: docker, network: agents-vpc"), false},
-		"docker subnetwork":    {entry("type: docker, subnetwork: agents-subnet"), false},
-		"docker credentials":   {entry("type: docker, credentials_file: /etc/scion/cr.json"), false},
-		"docker empty project": {entry("type: docker, project_id: \"\""), true},
-		"k8s project":          {entry("type: kubernetes, project_id: example-project"), false},
-		"k8s region":           {entry("type: kubernetes, region: us-central1"), false},
-		"k8s sa":               {entry("type: kubernetes, service_account: agents@example-project.iam.gserviceaccount.com"), false},
-		"k8s network":          {entry("type: kubernetes, network: agents-vpc"), false},
-		"k8s subnetwork":       {entry("type: kubernetes, subnetwork: agents-subnet"), false},
-		"k8s credentials":      {entry("type: kubernetes, credentials_file: /etc/scion/cr.json"), false},
-		"k8s empty network":    {entry("type: kubernetes, network: \"\""), true},
-		"unsupported type":     {entry("type: cloudrun-instances"), false},
-		"mixed-case type":      {entry(strings.Replace(full, "type: cloudrun", "type: CloudRun", 1)), false},
-		"upper-case type":      {entry(strings.Replace(full, "type: cloudrun", "type: CLOUDRUN", 1)), false},
+		"full":                       {entry(full), true},
+		"network only":               {with("subnetwork: agents-subnet", "network: agents-vpc"), true},
+		"both networks":              {entry(full + ", network: agents-vpc"), true},
+		"display name":               {entry(full + ", display_name: CR"), true},
+		"full multi-line":            {fullCloudRunInstanceYAML, true},
+		"assignable list":            {entry(full + ", assignable_service_accounts: [worker-one@example-project.iam.gserviceaccount.com]"), true},
+		"assignable empty":           {entry(full + ", assignable_service_accounts: []"), true},
+		"assignable includes sa":     {entry(full + ", assignable_service_accounts: [agents@example-project.iam.gserviceaccount.com]"), true},
+		"assignable includes block":  {entry(full + ", assignable_service_accounts: [no-role-block@example-project.iam.gserviceaccount.com]"), false},
+		"assignable duplicate":       {entry(full + ", assignable_service_accounts: [worker-one@example-project.iam.gserviceaccount.com, worker-one@example-project.iam.gserviceaccount.com]"), false},
+		"assignable upper":           {entry(full + ", assignable_service_accounts: [Worker@example-project.iam.gserviceaccount.com]"), false},
+		"assignable compute default": {entry(full + ", assignable_service_accounts: [123-compute@developer.gserviceaccount.com]"), false},
+		"assignable service agent":   {entry(full + ", assignable_service_accounts: [service-123@serverless-robot-prod.iam.gserviceaccount.com]"), false},
+		"assignable non-list":        {entry(full + ", assignable_service_accounts: worker-one@example-project.iam.gserviceaccount.com"), false},
+		"assignable null":            {entry(full + ", assignable_service_accounts: null"), false},
+		"assignable non-string elem": {entry(full + ", assignable_service_accounts: [123]"), false},
+		"no block sa":                {with("block_service_account: no-role-block@example-project.iam.gserviceaccount.com, ", ""), false},
+		"empty block sa":             {with("block_service_account: no-role-block@example-project.iam.gserviceaccount.com", "block_service_account: \"\""), false},
+		"null block sa":              {with("block_service_account: no-role-block@example-project.iam.gserviceaccount.com", "block_service_account: null"), false},
+		"block sa equals sa":         {with("no-role-block@example-project.iam.gserviceaccount.com", "agents@example-project.iam.gserviceaccount.com"), false},
+		"block sa upper":             {with("no-role-block@example-project.iam.gserviceaccount.com", "No-Role@example-project.iam.gserviceaccount.com"), false},
+		"block sa compute default":   {with("no-role-block@example-project.iam.gserviceaccount.com", "123-compute@developer.gserviceaccount.com"), false},
+		"block sa appspot default":   {with("no-role-block@example-project.iam.gserviceaccount.com", "example-project@appspot.gserviceaccount.com"), false},
+		"block sa service agent":     {with("no-role-block@example-project.iam.gserviceaccount.com", "service-123@serverless-robot-prod.iam.gserviceaccount.com"), false},
+		"no project":                 {with("project_id: example-project, ", ""), false},
+		"empty project":              {with("project_id: example-project", "project_id: \"\""), false},
+		"bad project":                {with("project_id: example-project", "project_id: Example"), false},
+		"short project":              {with("project_id: example-project", "project_id: abc"), false},
+		"domain project":             {with("project_id: example-project", "project_id: \"example.com:proj\""), false},
+		"no region":                  {with("region: us-central1, ", ""), false},
+		"empty region":               {with("region: us-central1", "region: \"\""), false},
+		"zone region":                {with("region: us-central1", "region: us-central1-a"), false},
+		"no sa":                      {with("service_account: agents@example-project.iam.gserviceaccount.com, ", ""), false},
+		"empty sa":                   {with("service_account: agents@example-project.iam.gserviceaccount.com", "service_account: \"\""), false},
+		"user sa":                    {with("agents@example-project.iam.gserviceaccount.com", "dev@example.com"), false},
+		"upper sa":                   {with("agents@example-project.iam.gserviceaccount.com", "Agents@example-project.iam.gserviceaccount.com"), false},
+		"compute default":            {with("agents@example-project.iam.gserviceaccount.com", "123-compute@developer.gserviceaccount.com"), false},
+		"compute default case":       {with("agents@example-project.iam.gserviceaccount.com", "123-Compute@developer.gserviceaccount.com"), false},
+		"appspot default":            {with("agents@example-project.iam.gserviceaccount.com", "example-project@appspot.gserviceaccount.com"), false},
+		"appspot default case":       {with("agents@example-project.iam.gserviceaccount.com", "Example-Project@appspot.gserviceaccount.com"), false},
+		"compute-like sa":            {with("agents@example-project.iam.gserviceaccount.com", "agents-compute@example-project.iam.gserviceaccount.com"), true},
+		"bare-domain sa":             {with("agents@example-project.iam.gserviceaccount.com", "agents@gserviceaccount.com"), false},
+		"service agent sa":           {with("agents@example-project.iam.gserviceaccount.com", "service-123@serverless-robot-prod.iam.gserviceaccount.com"), false},
+		"gcp-sa agent sa":            {with("agents@example-project.iam.gserviceaccount.com", "robot-agent@gcp-sa-example1.iam.gserviceaccount.com"), false},
+		"developer sa":               {with("agents@example-project.iam.gserviceaccount.com", "agents-x@developer.gserviceaccount.com"), false},
+		"svc-account-1 sa":           {with("agents@example-project.iam.gserviceaccount.com", "service-account-1@example-project.iam.gserviceaccount.com"), true},
+		"gcp-sa svc agent sa":        {with("agents@example-project.iam.gserviceaccount.com", "service-123456789012@gcp-sa-run.iam.gserviceaccount.com"), false},
+		"other appspot sa":           {with("agents@example-project.iam.gserviceaccount.com", "other-project@appspot.gserviceaccount.com"), false},
+		"upper project sa":           {with("agents@example-project.iam.gserviceaccount.com", "agents@Example-Project.iam.gserviceaccount.com"), false},
+		"dotted-name sa":             {with("agents@example-project.iam.gserviceaccount.com", "a.gent@example-project.iam.gserviceaccount.com"), false},
+		"double-slash creds":         {with("/etc/scion/cr.json", "/etc//cr.json"), false},
+		"dotdot creds":               {with("/etc/scion/cr.json", "/etc/scion/../cr.json"), false},
+		"dot creds":                  {with("/etc/scion/cr.json", "/etc/./cr.json"), false},
+		"trailing-slash creds":       {with("/etc/scion/cr.json", "/etc/scion/"), false},
+		"trailing-dot creds":         {with("/etc/scion/cr.json", "/etc/scion/."), false},
+		"dotted-file creds":          {with("/etc/scion/cr.json", "/etc/scion/.cr.json"), true},
+		"no network":                 {with(", subnetwork: agents-subnet", ""), false},
+		"empty networks":             {with("subnetwork: agents-subnet", "subnetwork: \"\", network: \"\""), false},
+		"no credentials":             {with(", credentials_file: /etc/scion/cr.json", ""), false},
+		"empty credentials":          {with("credentials_file: /etc/scion/cr.json", "credentials_file: \"\""), false},
+		"relative credentials":       {with("/etc/scion/cr.json", "cr.json"), false},
+		"tilde credentials":          {with("/etc/scion/cr.json", "~/cr.json"), false},
+		"env credentials":            {with("/etc/scion/cr.json", "/etc/$DIR/cr.json"), false},
+		"list credentials":           {with("/etc/scion/cr.json", "\"/a.json:/b.json\""), false},
+		"root credentials":           {with("/etc/scion/cr.json", "/"), false},
+		"cloudrun context":           {entry(full + ", context: c"), false},
+		"cloudrun namespace":         {entry(full + ", namespace: ns"), false},
+		"cloudrun kubeconfig":        {entry(full + ", kubeconfig: /etc/kc"), false},
+		"cloudrun gke":               {entry(full + ", gke: true"), false},
+		"cloudrun gke false":         {entry(full + ", gke: false"), true},
+		"cloudrun evict":             {entry(full + ", safe_to_evict: false"), false},
+		"cloudrun selector":          {entry(full + ", node_selector: {a: b}"), false},
+		"cloudrun tolerations":       {entry(full + ", tolerations: [{key: k, operator: Exists}]"), false},
+		"cloudrun rt class":          {entry(full + ", runtime_class_name: gvisor"), false},
+		"cloudrun priority":          {entry(full + ", priority_class_name: high"), false},
+		"cloudrun block sa":          {entry(full + ", kubernetes_block_service_account: zero-priv"), false},
+		"cloudrun sd class":          {entry(full + ", shared_dir_storage_class: rwx"), false},
+		"cloudrun home":              {entry(full + ", home_storage_backend: nfs"), false},
+		"cloudrun empty ctx":         {entry(full + ", context: \"\""), true},
+		"cloudrun num region":        {with("region: us-central1", "region: 5"), false},
+		"cloudrun null sa":           {with("service_account: agents@example-project.iam.gserviceaccount.com", "service_account: null"), false},
+		"docker project":             {entry("type: docker, project_id: example-project"), false},
+		"docker region":              {entry("type: docker, region: us-central1"), false},
+		"docker sa":                  {entry("type: docker, service_account: agents@example-project.iam.gserviceaccount.com"), false},
+		"docker block sa":            {entry("type: docker, block_service_account: no-role-block@example-project.iam.gserviceaccount.com"), false},
+		"docker empty block sa":      {entry("type: docker, block_service_account: \"\""), true},
+		"docker assignable":          {entry("type: docker, assignable_service_accounts: [worker-one@example-project.iam.gserviceaccount.com]"), false},
+		"docker empty assignable":    {entry("type: docker, assignable_service_accounts: []"), true},
+		"docker network":             {entry("type: docker, network: agents-vpc"), false},
+		"docker subnetwork":          {entry("type: docker, subnetwork: agents-subnet"), false},
+		"docker credentials":         {entry("type: docker, credentials_file: /etc/scion/cr.json"), false},
+		"docker empty project":       {entry("type: docker, project_id: \"\""), true},
+		"k8s project":                {entry("type: kubernetes, project_id: example-project"), false},
+		"k8s region":                 {entry("type: kubernetes, region: us-central1"), false},
+		"k8s sa":                     {entry("type: kubernetes, service_account: agents@example-project.iam.gserviceaccount.com"), false},
+		"k8s block sa":               {entry("type: kubernetes, block_service_account: no-role-block@example-project.iam.gserviceaccount.com"), false},
+		"k8s assignable":             {entry("type: kubernetes, assignable_service_accounts: [worker-one@example-project.iam.gserviceaccount.com]"), false},
+		"k8s empty assignable":       {entry("type: kubernetes, assignable_service_accounts: []"), true},
+		"k8s network":                {entry("type: kubernetes, network: agents-vpc"), false},
+		"k8s subnetwork":             {entry("type: kubernetes, subnetwork: agents-subnet"), false},
+		"k8s credentials":            {entry("type: kubernetes, credentials_file: /etc/scion/cr.json"), false},
+		"k8s empty network":          {entry("type: kubernetes, network: \"\""), true},
+		"unsupported type":           {entry("type: cloudrun-instances"), false},
+		"mixed-case type":            {entry(strings.Replace(full, "type: cloudrun", "type: CloudRun", 1)), false},
+		"upper-case type":            {entry(strings.Replace(full, "type: cloudrun", "type: CLOUDRUN", 1)), false},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {

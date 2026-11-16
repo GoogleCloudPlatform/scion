@@ -449,9 +449,11 @@ func isCloudRunProfileType(t string) bool {
 // A passthrough granted by the hub default or by a confined project default
 // (RequireLocalRuntime) is run as block on Cloud Run by the broker, so it is
 // decided as block. An assign with no account is left to the broker and the
-// start gate.
+// start gate. Flat Cloud Run brokers publish no per-profile service account
+// report, so they skip this profile-report check and decide fail-closed at
+// the broker.
 func cloudRunIdentityRefusal(broker *store.RuntimeBroker, profileName, agentName string, gcpID *store.GCPIdentityConfig, now time.Time) *identityNotMappedPrecheck {
-	if broker == nil {
+	if broker == nil || flatCloudRunBroker(broker) {
 		return nil
 	}
 	mode := ""

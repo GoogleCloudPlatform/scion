@@ -31,6 +31,7 @@ func cloudRunPutTarget(override map[string]string) string {
 		{"project_id", "example-project"},
 		{"region", "us-central1"},
 		{"service_account", "agents@example-project.iam.gserviceaccount.com"},
+		{"block_service_account", "no-role-block@example-project.iam.gserviceaccount.com"},
 		{"subnetwork", "agents-subnet"},
 		{"credentials_file", "/etc/scion/cr.json"},
 	}
@@ -44,6 +45,9 @@ func cloudRunPutTarget(override map[string]string) string {
 			continue
 		}
 		parts = append(parts, `"`+f.k+`":"`+v+`"`)
+	}
+	if rawList, ok := override["assignable_service_accounts_raw"]; ok && rawList != "" {
+		parts = append(parts, `"assignable_service_accounts":`+rawList)
 	}
 	return `{` + strings.Join(parts, ",") + `}`
 }
@@ -63,14 +67,22 @@ func TestAdminServerConfigPut_CloudRunValidation(t *testing.T) {
 		override map[string]string
 		field    string
 	}{
-		"no credentials_file":       {map[string]string{"credentials_file": ""}, "runtime_target.credentials_file"},
-		"relative credentials_file": {map[string]string{"credentials_file": "cr.json"}, "runtime_target.credentials_file"},
-		"tilde credentials_file":    {map[string]string{"credentials_file": "~/cr.json"}, "runtime_target.credentials_file"},
-		"compute default sa":        {map[string]string{"service_account": "123456789012-compute@developer.gserviceaccount.com"}, "runtime_target.service_account"},
-		"compute default mixed":     {map[string]string{"service_account": "123456789012-Compute@developer.gserviceaccount.com"}, "runtime_target.service_account"},
-		"app engine default sa":     {map[string]string{"service_account": "example-project@appspot.gserviceaccount.com"}, "runtime_target.service_account"},
-		"domain-scoped project":     {map[string]string{"project_id": "example.com:proj"}, "runtime_target.project_id"},
-		"no network":                {map[string]string{"subnetwork": ""}, "runtime_target.network"},
+		"no credentials_file":          {map[string]string{"credentials_file": ""}, "runtime_target.credentials_file"},
+		"relative credentials_file":    {map[string]string{"credentials_file": "cr.json"}, "runtime_target.credentials_file"},
+		"tilde credentials_file":       {map[string]string{"credentials_file": "~/cr.json"}, "runtime_target.credentials_file"},
+		"compute default sa":           {map[string]string{"service_account": "123456789012-compute@developer.gserviceaccount.com"}, "runtime_target.service_account"},
+		"compute default mixed":        {map[string]string{"service_account": "123456789012-Compute@developer.gserviceaccount.com"}, "runtime_target.service_account"},
+		"app engine default sa":        {map[string]string{"service_account": "example-project@appspot.gserviceaccount.com"}, "runtime_target.service_account"},
+		"no block_service_account":     {map[string]string{"block_service_account": ""}, "runtime_target.block_service_account"},
+		"block equals service_account": {map[string]string{"block_service_account": "agents@example-project.iam.gserviceaccount.com"}, "runtime_target.block_service_account"},
+		"block compute default sa":     {map[string]string{"block_service_account": "123456789012-compute@developer.gserviceaccount.com"}, "runtime_target.block_service_account"},
+		"assignable compute default":   {map[string]string{"assignable_service_accounts_raw": `["123456789012-compute@developer.gserviceaccount.com"]`}, "runtime_target.assignable_service_accounts[0]"},
+		"assignable service agent":     {map[string]string{"assignable_service_accounts_raw": `["service-123456789012@serverless-robot-prod.iam.gserviceaccount.com"]`}, "runtime_target.assignable_service_accounts[0]"},
+		"assignable duplicate":         {map[string]string{"assignable_service_accounts_raw": `["worker-a@example-project.iam.gserviceaccount.com","worker-a@example-project.iam.gserviceaccount.com"]`}, "runtime_target.assignable_service_accounts[1]"},
+		"assignable equals block":      {map[string]string{"assignable_service_accounts_raw": `["no-role-block@example-project.iam.gserviceaccount.com"]`}, "runtime_target.assignable_service_accounts[0]"},
+		"docker rejects block_sa":      {map[string]string{"type": "docker", "project_id": "", "region": "", "service_account": "", "subnetwork": "", "credentials_file": ""}, "runtime_target.block_service_account"},
+		"domain-scoped project":        {map[string]string{"project_id": "example.com:proj"}, "runtime_target.project_id"},
+		"no network":                   {map[string]string{"subnetwork": ""}, "runtime_target.network"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := flatSettingsHome(t, flatInstanceSettingsYAML)
@@ -106,13 +118,18 @@ func TestAdminServerConfigPut_CloudRunValidation(t *testing.T) {
 
 	t.Run("valid entry is applied", func(t *testing.T) {
 		flatSettingsHome(t, flatInstanceSettingsYAML)
-		rr := putFlatFileModeServerConfig(t, cloudRunPutBody(cloudRunPutTarget(nil)))
+		rr := putFlatFileModeServerConfig(t, cloudRunPutBody(cloudRunPutTarget(map[string]string{
+			"assignable_service_accounts_raw": `["agents@example-project.iam.gserviceaccount.com","worker-a@example-project.iam.gserviceaccount.com"]`,
+		})))
 		if rr.Code != http.StatusOK {
 			t.Fatalf("want 200, got %d %s", rr.Code, rr.Body.String())
 		}
 		got := storedInstances(t)
 		if len(got) != 1 || got[0].Key != "cr-a" || got[0].RuntimeTarget == nil ||
-			got[0].RuntimeTarget.CredentialsFile != "/etc/scion/cr.json" || got[0].RuntimeTarget.Region != "us-central1" {
+			got[0].RuntimeTarget.CredentialsFile != "/etc/scion/cr.json" ||
+			got[0].RuntimeTarget.Region != "us-central1" ||
+			got[0].RuntimeTarget.BlockServiceAccount != "no-role-block@example-project.iam.gserviceaccount.com" ||
+			len(got[0].RuntimeTarget.AssignableServiceAccounts) != 2 {
 			t.Fatalf("stored instances: %+v", got)
 		}
 	})

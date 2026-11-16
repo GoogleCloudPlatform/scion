@@ -77,7 +77,12 @@ func TestLoadOrCreate_CloudRunMintAndReload(t *testing.T) {
 			t.Fatalf("executionScope.cloudrun.%s = %q, want %q", k, cr[k], v)
 		}
 	}
-	for _, absent := range []string{"serviceAccount", "service_account", "network", "subnetwork", "credentials"} {
+	for _, absent := range []string{
+		"serviceAccount", "service_account",
+		"blockServiceAccount", "block_service_account",
+		"assignableServiceAccounts", "assignable_service_accounts",
+		"network", "subnetwork", "credentials",
+	} {
 		if strings.Contains(string(data), absent) {
 			t.Fatalf("identity file records %q: %s", absent, data)
 		}

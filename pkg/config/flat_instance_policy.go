@@ -50,6 +50,7 @@ func NewFlatInstancePolicy(inst V1RuntimeBrokerInstanceConfig) *FlatInstancePoli
 		p.Target.SafeToEvict = copyBoolPtr(inst.RuntimeTarget.SafeToEvict)
 		p.Target.NodeSelector = copyStringMap(inst.RuntimeTarget.NodeSelector)
 		p.Target.Tolerations = slices.Clone(inst.RuntimeTarget.Tolerations)
+		p.Target.AssignableServiceAccounts = slices.Clone(inst.RuntimeTarget.AssignableServiceAccounts)
 	}
 	if d := copyInstanceAgentDefaults(inst.AgentDefaults); d != nil {
 		p.Defaults = *d

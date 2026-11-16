@@ -911,9 +911,10 @@ func TestDispatch_CloudRunNativeRecordFailureRefuses(t *testing.T) {
 	}
 }
 
-// A broker read that fails refuses the native decision (the precheck
-// before it leaves an unreadable broker to the dispatch); with the
-// experiment off nothing is read.
+// A broker read that fails refuses the native decision whether the
+// hub.cloudrun_native_identity experiment is on or off (since a flat Cloud Run
+// broker is native regardless of the experiment); when the read succeeds with
+// the experiment off, a profile-based broker is not native.
 func TestMarkCloudRunNative_BrokerReadFailureRefuses(t *testing.T) {
 	ctx := context.Background()
 	injected := errors.New("injected store fault")
@@ -926,11 +927,15 @@ func TestMarkCloudRunNative_BrokerReadFailureRefuses(t *testing.T) {
 	assert.False(t, cloudRunNativeFrom(got))
 
 	d.SetDispatchExperimentsProvider(func() []string { return nil })
-	fs.brokerReads = 0
+	got, err = d.markCloudRunNative(ctx, a)
+	require.ErrorIs(t, err, injected)
+	assert.ErrorIs(t, err, errStartRequestNotSent)
+	assert.False(t, cloudRunNativeFrom(got))
+
+	fs.brokerErr = nil
 	got, err = d.markCloudRunNative(ctx, a)
 	require.NoError(t, err)
 	assert.False(t, cloudRunNativeFrom(got))
-	assert.Zero(t, fs.brokerReads, "experiment off: the broker is not read")
 }
 
 // The record is removed only by a confirmed stop or delete; a failed stop
@@ -1087,39 +1092,43 @@ func (s *crMintFaultStore) GetRuntimeBroker(ctx context.Context, id string) (*st
 
 // A broker lookup error with the experiment on fails the grant with
 // errMintLookup and answers both mint endpoints 500 with no GCP token
-// generated; with the experiment off nothing reads the broker.
+// A broker lookup failure refuses both token authorization and mint, with no
+// GCP token generated, whether hub.cloudrun_native_identity is on or off
+// (since flat Cloud Run brokers are native regardless of the experiment);
+// when the lookup succeeds with the experiment off, a profile-based broker is
+// allowed to mint.
 func TestAgentGCPToken_CloudRunLookupErrorRefuses(t *testing.T) {
 	srv, s := testServer(t)
-	wrapped, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *crMintFaultStore {
+	_, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *crMintFaultStore {
 		return &crMintFaultStore{Store: inner, fault: f}
 	})
 	f := newGCPMintFixtureOn(t, "crlookup", srv, s)
 	f.attachCRBroker(t, crProfile(time.Now()))
-	gen := &countingGCPTokenGenerator{}
-
-	setCloudRunNativeIdentity(t, srv, true)
-	fault.Arm()
-	_, err := srv.AuthorizeAgentToken(context.Background(), f.getAgent(t))
-	require.ErrorIs(t, err, errMintLookup)
-	srv.SetGCPTokenGenerator(gen)
-	for _, tc := range []struct {
-		path string
-		body interface{}
-	}{
-		{"/api/v1/agent/gcp-token", nil},
-		{"/api/v1/agent/gcp-identity-token", map[string]string{"audience": "https://example.com"}},
-	} {
-		rec := doRequestWithAgentToken(t, srv, http.MethodPost, tc.path, tc.body, f.Token)
-		assert.Equal(t, http.StatusInternalServerError, rec.Code, tc.path)
-	}
-	assert.Zero(t, gen.calls, "no GCP token generated")
 
 	setCloudRunNativeIdentity(t, srv, false)
-	wrapped.reads = 0
 	srv.SetGCPTokenGenerator(&mockGCPTokenGenerator{email: "hub-sa@test-hub-project.iam.gserviceaccount.com"})
 	assert.True(t, grantHasGCPScope(t, f))
 	assertMintAllowed(t, f)
-	assert.Zero(t, wrapped.reads, "experiment off: the broker is not read")
+
+	gen := &countingGCPTokenGenerator{}
+	srv.SetGCPTokenGenerator(gen)
+	fault.Arm()
+	for _, on := range []bool{true, false} {
+		setCloudRunNativeIdentity(t, srv, on)
+		_, err := srv.AuthorizeAgentToken(context.Background(), f.getAgent(t))
+		require.ErrorIs(t, err, errMintLookup)
+		for _, tc := range []struct {
+			path string
+			body interface{}
+		}{
+			{"/api/v1/agent/gcp-token", nil},
+			{"/api/v1/agent/gcp-identity-token", map[string]string{"audience": "https://example.com"}},
+		} {
+			rec := doRequestWithAgentToken(t, srv, http.MethodPost, tc.path, tc.body, f.Token)
+			assert.Equal(t, http.StatusInternalServerError, rec.Code, tc.path)
+		}
+	}
+	assert.Zero(t, gen.calls, "no GCP token generated")
 }
 
 // The gs:// link fetch resolves no account for a natively assigned agent

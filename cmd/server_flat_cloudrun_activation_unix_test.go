@@ -57,6 +57,8 @@ import (
 const (
 	crNumber     = "123456789012"
 	crAgentSA    = "agents@example-project.iam.gserviceaccount.com"
+	crBlockSA    = "no-role-block@example-project.iam.gserviceaccount.com"
+	crAssignSA   = "worker-assign@example-project.iam.gserviceaccount.com"
 	crPrincipalA = "broker-a@example-project.iam.gserviceaccount.com"
 	crPrincipalB = "broker-b@example-project.iam.gserviceaccount.com"
 	crHubURL     = "https://hub.example.com"
@@ -583,39 +585,68 @@ func TestFlatCloudRunPrincipal_Unresolvable(t *testing.T) {
 	}
 }
 
-// TestFlatCloudRunPrincipal_EqualsServiceAccount: P9 (CR3 step 2) refuses a
-// configured service_account equal to the instance principal (a key of that
-// account, or an impersonation targeting it: no self-impersonation), in any
-// letter case, and equal to the account an impersonated credential starts
-// from; a distinct account passes.
+// TestFlatCloudRunPrincipal_EqualsServiceAccount: P9 (CR3 step 2; Identity
+// Part B) refuses a configured service_account, block_service_account, or
+// assignable_service_accounts entry equal to the instance principal (a key of
+// that account, or an impersonation targeting it: no self-impersonation), in
+// any letter case, and equal to the account an impersonated credential starts
+// from; distinct accounts pass, and a valid sibling instance still activates.
 func TestFlatCloudRunPrincipal_EqualsServiceAccount(t *testing.T) {
-	for name, body := range map[string][]byte{
-		"key of the agent account":            crSAKeyJSON(t, crAgentSA),
-		"key of the agent account, any case":  crSAKeyJSON(t, strings.ToUpper(crAgentSA)),
-		"impersonating the agent account":     crImpersonatedJSON(t, crAgentSA, crSAKey(t, crPrincipalA)),
-		"agent account impersonating another": crImpersonatedJSON(t, crPrincipalB, crSAKey(t, crAgentSA)),
-		"agent account impersonating itself":  crImpersonatedJSON(t, crAgentSA, crSAKey(t, crAgentSA)),
+	baseTarget := func() *config.V1RuntimeTargetConfig {
+		tg := flatCRTarget("us-central1")
+		tg.AssignableServiceAccounts = []string{"other-worker@example-project.iam.gserviceaccount.com", crAssignSA}
+		return tg
+	}
+	for fieldLabel, overlapSA := range map[string]string{
+		"service_account":                crAgentSA,
+		"block_service_account":          crBlockSA,
+		"assignable_service_accounts[1]": crAssignSA,
 	} {
-		t.Run(name, func(t *testing.T) {
-			info, err := parseFlatCloudRunCredentials(body)
-			require.NoError(t, err)
-			err = flatCheckPrincipalNotAgentSA(info, crAgentSA)
-			require.Error(t, err)
-			assert.Equal(t, reasonCloudRunPrincipalIsAgentSA, brokerhost.ReasonCode(err))
+		t.Run(fieldLabel, func(t *testing.T) {
+			for name, body := range map[string][]byte{
+				"key of the agent account":            crSAKeyJSON(t, overlapSA),
+				"key of the agent account, any case":  crSAKeyJSON(t, strings.ToUpper(overlapSA)),
+				"impersonating the agent account":     crImpersonatedJSON(t, overlapSA, crSAKey(t, crPrincipalA)),
+				"agent account impersonating another": crImpersonatedJSON(t, crPrincipalB, crSAKey(t, overlapSA)),
+				"agent account impersonating itself":  crImpersonatedJSON(t, overlapSA, crSAKey(t, overlapSA)),
+			} {
+				t.Run(name, func(t *testing.T) {
+					info, err := parseFlatCloudRunCredentials(body)
+					require.NoError(t, err)
+					err = flatCheckPrincipalNotAgentSA(info, baseTarget())
+					require.Error(t, err)
+					assert.Equal(t, reasonCloudRunPrincipalIsAgentSA, brokerhost.ReasonCode(err))
+					assert.Contains(t, err.Error(), fieldLabel)
+				})
+			}
 		})
 	}
 	info, err := parseFlatCloudRunCredentials(crImpersonatedJSON(t, crPrincipalB, crSAKey(t, crPrincipalA)))
 	require.NoError(t, err)
-	require.NoError(t, flatCheckPrincipalNotAgentSA(info, crAgentSA))
+	require.NoError(t, flatCheckPrincipalNotAgentSA(info, baseTarget()))
 
-	// Through a host: refused before any cloud call; the sibling activates.
-	dir := t.TempDir()
-	r := newCRRig(t, crHostFacts())
-	st := r.prepare(crDocker, crInst("cr-a", "us-central1", crWriteFile(t, dir, "cr.json", crSAKeyJSON(t, crAgentSA), 0o600)))
-	assert.Equal(t, reasonCloudRunPrincipalIsAgentSA, st["cr-a"].Reason)
-	assert.Zero(t, r.projectCalls)
-	assert.Empty(t, r.built)
-	assert.True(t, r.activated("docker-a"))
+	// Through a host: refused before any cloud call for service_account,
+	// block_service_account, and assignable_service_accounts; valid siblings activate.
+	for name, overlapSA := range map[string]string{
+		"service_account":       crAgentSA,
+		"block_service_account": crBlockSA,
+		"assignable":            crAssignSA,
+	} {
+		t.Run("host_"+name, func(t *testing.T) {
+			dir := t.TempDir()
+			r := newCRRig(t, crHostFacts())
+			bad := crInst("cr-bad", "us-central1", crWriteFile(t, dir, "bad.json", crSAKeyJSON(t, overlapSA), 0o600))
+			bad.RuntimeTarget.AssignableServiceAccounts = []string{crAssignSA}
+			good := crInst("cr-good", "europe-west4", crWriteFile(t, dir, "good.json", crSAKeyJSON(t, crPrincipalA), 0o600))
+			st := r.prepare(crDocker, bad, good)
+			assert.Equal(t, reasonCloudRunPrincipalIsAgentSA, st["cr-bad"].Reason)
+			assert.False(t, r.activated("cr-bad"))
+			assert.True(t, r.activated("docker-a"))
+			assert.True(t, r.activated("cr-good"))
+			assert.Equal(t, 1, r.projectCalls, "only the valid Cloud Run sibling probed Resource Manager")
+			assert.Len(t, r.built, 1, "only the valid Cloud Run sibling built credentials")
+		})
+	}
 }
 
 // TestFlatCloudRunPrincipal_SharedByTwoInstances: two instances with the
@@ -666,16 +697,27 @@ func TestFlatCloudRunPrincipal_HubMetadataTimeoutSkipsOnly(t *testing.T) {
 }
 
 // TestFlatCloudRunPrincipal_ProbedComputeDefault: P13 refuses the probed
-// project's default compute account, in any letter case.
+// project's default compute account on service_account, block_service_account,
+// or assignable_service_accounts, in any letter case.
 func TestFlatCloudRunPrincipal_ProbedComputeDefault(t *testing.T) {
 	for _, sa := range []string{crNumber + "-compute@developer.gserviceaccount.com", crNumber + "-COMPUTE@Developer.GServiceAccount.com"} {
-		rt := crProbeRuntime(t, &resourcemanagerpb.Project{Name: "projects/" + crNumber, State: resourcemanagerpb.Project_ACTIVE}, nil, nil)
-		inst := crInst("cr-a", "us-central1", "/etc/scion/cr.json")
-		inst.RuntimeTarget.ServiceAccount = sa
-		_, err := probeCloudRunExecutionScope(context.Background(), inst, rt)
-		require.Error(t, err, sa)
-		assert.Equal(t, reasonCloudRunDefaultSA, brokerhost.ReasonCode(err))
-		assert.Equal(t, "the project default service accounts are not allowed", errors.Unwrap(err).Error())
+		for name, mutate := range map[string]func(*config.V1RuntimeTargetConfig){
+			"service_account":       func(tg *config.V1RuntimeTargetConfig) { tg.ServiceAccount = sa },
+			"block_service_account": func(tg *config.V1RuntimeTargetConfig) { tg.BlockServiceAccount = sa },
+			"assignable_service_accounts": func(tg *config.V1RuntimeTargetConfig) {
+				tg.AssignableServiceAccounts = []string{"worker-ok@example-project.iam.gserviceaccount.com", sa}
+			},
+		} {
+			t.Run(name+"_"+sa, func(t *testing.T) {
+				rt := crProbeRuntime(t, &resourcemanagerpb.Project{Name: "projects/" + crNumber, State: resourcemanagerpb.Project_ACTIVE}, nil, nil)
+				inst := crInst("cr-a", "us-central1", "/etc/scion/cr.json")
+				mutate(inst.RuntimeTarget)
+				_, err := probeCloudRunExecutionScope(context.Background(), inst, rt)
+				require.Error(t, err, sa)
+				assert.Equal(t, reasonCloudRunDefaultSA, brokerhost.ReasonCode(err))
+				assert.Equal(t, "the project default service accounts are not allowed", errors.Unwrap(err).Error())
+			})
+		}
 	}
 }
 
@@ -838,7 +880,8 @@ func TestRegisterInstance_CloudRunRefusedByPrecheck(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(
 		"schema_version: \"1\"\nserver:\n  broker:\n    enabled: true\n    instances:\n      - key: cr-a\n        name: cr-a\n        runtime_target:\n"+
 			"          type: cloudrun\n          project_id: example-project\n          region: us-central1\n"+
-			"          service_account: "+crAgentSA+"\n          subnetwork: agents-subnet\n          credentials_file: /etc/scion/cr-a.json\n"), 0o644))
+			"          service_account: "+crAgentSA+"\n          block_service_account: "+crBlockSA+"\n"+
+			"          subnetwork: agents-subnet\n          credentials_file: /etc/scion/cr-a.json\n"), 0o644))
 	crExpectRegisterRefused(t, globalDir, "cr-a", "cloudrun targets require a colocated host")
 }
 
@@ -888,6 +931,7 @@ func crActivatedIdentity(t *testing.T) (identity, health []byte, inst config.V1R
 	key = crSAKeyJSON(t, crPrincipalA)
 	inst = crInst("cr-a", "us-central1", crWriteFile(t, dir, "a.json", key, 0o600))
 	inst.RuntimeTarget.Network = "agents-net"
+	inst.RuntimeTarget.AssignableServiceAccounts = []string{crAssignSA}
 	r := newCRRig(t, crHostFacts())
 	globalDir := t.TempDir()
 	h, err := brokerhost.New(brokerhost.Config{
@@ -916,7 +960,10 @@ func crActivatedIdentity(t *testing.T) (identity, health []byte, inst config.V1R
 func TestFlatCloudRun_NoLocalDetailReachesHub(t *testing.T) {
 	identity, health, inst, _ := crActivatedIdentity(t)
 	tg := inst.RuntimeTarget
-	secretish := []string{tg.ServiceAccount, tg.Network, tg.Subnetwork, tg.CredentialsFile, filepath.Dir(tg.CredentialsFile), crPrincipalA}
+	secretish := []string{
+		tg.ServiceAccount, tg.BlockServiceAccount, crAssignSA,
+		tg.Network, tg.Subnetwork, tg.CredentialsFile, filepath.Dir(tg.CredentialsFile), crPrincipalA,
+	}
 
 	assert.Equal(t, []string{"ID", "Type", "DisplayName"}, reflectFields(api.RuntimeTargetDescriptor{}),
 		"the descriptor carries only id, type and display name")

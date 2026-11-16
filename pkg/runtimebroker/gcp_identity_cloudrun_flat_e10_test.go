@@ -57,9 +57,12 @@ type e10Mode struct {
 	name string
 	gcp  *GCPIdentityConfig
 	env  map[string]string
+	want string
 }
 
-func e10Modes() []e10Mode {
+func e10RefusedModes() []e10Mode {
+	e10Want := fmt.Sprintf("agent %q: %s", e10Agent, flatCloudRunGCPIdentityRefusalText)
+	unmarkedWant := fmt.Sprintf("agent %q: the hub did not mark this dispatch for native Cloud Run identity", e10Agent)
 	return []e10Mode{
 		{
 			name: "assign",
@@ -71,25 +74,39 @@ func e10Modes() []e10Mode {
 				"SCION_METADATA_PROJECT_ID":  crProjectID,
 				cloudRunNativeMarkerEnv:      "1",
 			},
+			want: e10Want,
 		},
 		{
-			name: "block",
+			name: "block without native marker (skew)",
 			gcp:  &GCPIdentityConfig{MetadataMode: "block"},
 			env:  map[string]string{"SCION_METADATA_MODE": "block", "SCION_METADATA_MODE_SOURCE": "hub"},
+			want: unmarkedWant,
 		},
 		{
-			name: "passthrough",
+			name: "explicit passthrough without marker",
 			gcp:  &GCPIdentityConfig{MetadataMode: "passthrough"},
 			env:  map[string]string{"SCION_METADATA_MODE": "passthrough", "SCION_METADATA_MODE_SOURCE": "hub"},
+			want: e10Want,
 		},
 		{
-			name: "unset resolving to the hub-default passthrough",
+			name: "explicit passthrough with marker",
+			gcp:  &GCPIdentityConfig{MetadataMode: "passthrough", NativeCloudRun: true},
+			env: map[string]string{
+				"SCION_METADATA_MODE":        "passthrough",
+				"SCION_METADATA_MODE_SOURCE": "hub",
+				cloudRunNativeMarkerEnv:      "1",
+			},
+			want: e10Want,
+		},
+		{
+			name: "confined passthrough without native marker (skew)",
 			gcp:  &GCPIdentityConfig{MetadataMode: "passthrough", RequireLocalRuntime: true},
 			env: map[string]string{
 				"SCION_METADATA_MODE":                  "passthrough",
 				"SCION_METADATA_MODE_SOURCE":           "hub",
 				"SCION_METADATA_REQUIRE_LOCAL_RUNTIME": "true",
 			},
+			want: unmarkedWant,
 		},
 	}
 }
@@ -211,10 +228,12 @@ func e10Inputs(op startOperation, gcp *GCPIdentityConfig, env map[string]string,
 		AgentID:     e10AgentID,
 		ProjectID:   e10ProjectID,
 		ProjectSlug: e10ProjectSlug,
+		HubEndpoint: "https://hub.example.com",
 		HTTPRequest: httptest.NewRequest(http.MethodPost, path, nil),
 		Operation:   op,
 	}
 	if op == opCreate {
+		in.WorkspaceMode = "shared"
 		in.Config = &CreateAgentConfig{GCPIdentity: gcp}
 		if gateOn {
 			in.Config.HubAgentDefaults = crGateDefaults()
@@ -240,13 +259,13 @@ func TestFlatCloudRunGCPIdentityRefusal_Text(t *testing.T) {
 	}
 }
 
-// Every mode, on create, start and restart, gate on and off: refused first,
-// with no side effect of any kind.
+// Every refused mode in I1 (assign, explicit passthrough, and unmarked block /
+// unmarked confined passthrough), on create, start and restart, gate on and
+// off: refused first, with no side effect of any kind.
 func TestBuildStartContext_FlatCloudRunGCPIdentityRefusedFirst(t *testing.T) {
-	want := fmt.Sprintf("agent %q: %s", e10Agent, flatCloudRunGCPIdentityRefusalText)
 	for _, gateOn := range []bool{false, true} {
 		for _, op := range e10Ops {
-			for _, mode := range e10Modes() {
+			for _, mode := range e10RefusedModes() {
 				t.Run(fmt.Sprintf("gate=%t/%s/%s", gateOn, op, mode.name), func(t *testing.T) {
 					e := newE10Server(t)
 					if op != opCreate {
@@ -267,8 +286,8 @@ func TestBuildStartContext_FlatCloudRunGCPIdentityRefusedFirst(t *testing.T) {
 					if sce.Status != http.StatusBadRequest {
 						t.Errorf("status = %d, want %d", sce.Status, http.StatusBadRequest)
 					}
-					if sce.Message != want {
-						t.Errorf("message = %q, want %q", sce.Message, want)
+					if sce.Message != mode.want {
+						t.Errorf("message = %q, want %q", sce.Message, mode.want)
 					}
 					if got := e.records(t); !reflect.DeepEqual(got, recordsBefore) {
 						t.Errorf("ownership records changed:\nbefore %+v\nafter  %+v", recordsBefore, got)
@@ -297,40 +316,84 @@ func TestBuildStartContext_FlatCloudRunGCPIdentityRefusedFirst(t *testing.T) {
 	}
 }
 
-// The control rows: no GCP identity request and no hub default, gate off.
-// The dispatch is not refused, and the observations the refusal rows hold at
-// zero move: the identity resolution runs once, the run is recorded, and
-// the fresh project's files are written.
+// The allowed default-path rows in I1: unset (no marker needed), marked block,
+// and marked confined passthrough, with gate off and on. The dispatch is not
+// refused, resolves CloudRunIdentity to block_service_account with
+// SCION_METADATA_MODE=block, and the observations the refusal rows hold at
+// zero move: the identity resolution runs once, the run is recorded, and the
+// fresh project's files are written.
 func TestBuildStartContext_FlatCloudRunNoGCPIdentityRequestNotRefused(t *testing.T) {
-	for _, op := range e10Ops {
-		t.Run(string(op), func(t *testing.T) {
-			e := newE10Server(t)
-			if op != opCreate {
-				e.seedLiveRecord(t)
-			}
-			recordsBefore := e.records(t)
-			homeBefore := e10TreeSnapshot(t, e.home)
+	allowed := []struct {
+		name string
+		gcp  *GCPIdentityConfig
+		env  map[string]string
+	}{
+		{name: "unset without marker"},
+		{
+			name: "unset with sealed hub marker",
+			env: map[string]string{
+				"SCION_METADATA_MODE_SOURCE": "hub",
+				cloudRunNativeMarkerEnv:      "1",
+			},
+		},
+		{
+			name: "marked block",
+			gcp:  &GCPIdentityConfig{MetadataMode: "block", NativeCloudRun: true},
+			env: map[string]string{
+				"SCION_METADATA_MODE":        "block",
+				"SCION_METADATA_MODE_SOURCE": "hub",
+				cloudRunNativeMarkerEnv:      "1",
+			},
+		},
+		{
+			name: "marked confined passthrough",
+			gcp:  &GCPIdentityConfig{MetadataMode: "passthrough", RequireLocalRuntime: true, NativeCloudRun: true},
+			env: map[string]string{
+				"SCION_METADATA_MODE":                  "passthrough",
+				"SCION_METADATA_MODE_SOURCE":           "hub",
+				"SCION_METADATA_REQUIRE_LOCAL_RUNTIME": "true",
+				cloudRunNativeMarkerEnv:                "1",
+			},
+		},
+	}
+	for _, gateOn := range []bool{false, true} {
+		for _, op := range e10Ops {
+			for _, tc := range allowed {
+				t.Run(fmt.Sprintf("gate=%t/%s/%s", gateOn, op, tc.name), func(t *testing.T) {
+					e := newE10Server(t)
+					if op != opCreate {
+						e.seedLiveRecord(t)
+					}
+					recordsBefore := e.records(t)
+					homeBefore := e10TreeSnapshot(t, e.home)
 
-			// Whatever a later step returns, the steps checked here have
-			// run by then.
-			_, err := e.srv.buildStartContext(context.Background(), e10Inputs(op, nil, nil, false))
+					sc, err := e.srv.buildStartContext(e10Ctx(gateOn), e10Inputs(op, tc.gcp, tc.env, gateOn))
 
-			if err != nil && strings.Contains(err.Error(), flatCloudRunGCPIdentityRefusalText) {
-				t.Fatalf("a dispatch with no request was refused: %v", err)
+					if err != nil {
+						t.Fatalf("allowed default-path dispatch failed: %v", err)
+					}
+					if sc.Opts.CloudRunIdentity == nil || sc.Opts.CloudRunIdentity.ServiceAccount != crBlockSA || sc.Opts.CloudRunIdentity.Mode != "block" {
+						t.Fatalf("CloudRunIdentity = %+v, want {%s block}", sc.Opts.CloudRunIdentity, crBlockSA)
+					}
+					if sc.Opts.Env["SCION_METADATA_MODE"] != "block" || sc.Opts.Env["GCE_METADATA_HOST"] != "localhost:18380" {
+						t.Errorf("expected block emulator env, got SCION_METADATA_MODE=%q GCE_METADATA_HOST=%q",
+							sc.Opts.Env["SCION_METADATA_MODE"], sc.Opts.Env["GCE_METADATA_HOST"])
+					}
+					if n := e.srv.cloudRunIdentityResolves.count(); n != 1 {
+						t.Errorf("resolveCloudRunIdentity calls = %d, want 1", n)
+					}
+					if got := e.records(t); reflect.DeepEqual(got, recordsBefore) {
+						t.Errorf("the run was not recorded: records %+v", got)
+					}
+					if got := e10TreeSnapshot(t, e.home); maps.Equal(got, homeBefore) {
+						t.Error("no project file was written")
+					}
+					if _, err := os.Lstat(e.projectPath()); err != nil {
+						t.Errorf("the fresh project path was not created: %v", err)
+					}
+				})
 			}
-			if n := e.srv.cloudRunIdentityResolves.count(); n != 1 {
-				t.Errorf("resolveCloudRunIdentity calls = %d, want 1", n)
-			}
-			if got := e.records(t); reflect.DeepEqual(got, recordsBefore) {
-				t.Errorf("the run was not recorded: records %+v", got)
-			}
-			if got := e10TreeSnapshot(t, e.home); maps.Equal(got, homeBefore) {
-				t.Error("no project file was written")
-			}
-			if _, err := os.Lstat(e.projectPath()); err != nil {
-				t.Errorf("the fresh project path was not created: %v", err)
-			}
-		})
+		}
 	}
 }
 
@@ -342,7 +405,7 @@ func accountCount(s string) int { return strings.Count(s, crAssignedSA) }
 // and restart (the resolved env). Positive, per operation: the same count
 // over the row's own error and log with the account forced in once is 1.
 func TestBuildStartContext_FlatCloudRunGCPIdentityRefusalNamesAgentOnly(t *testing.T) {
-	assign := e10Modes()[0]
+	assign := e10RefusedModes()[0]
 	for _, op := range e10Ops {
 		t.Run(string(op), func(t *testing.T) {
 			e := newE10Server(t)
@@ -407,24 +470,29 @@ func TestFlatCloudRunGCPIdentityRefusal_Predicates(t *testing.T) {
 	}
 
 	requests := []struct {
-		name string
-		in   startContextInputs
-		want bool
+		name      string
+		in        startContextInputs
+		wantMode  string
+		wantUnset bool
 	}{
-		{name: "create, no request", in: startContextInputs{Operation: opCreate, Config: &CreateAgentConfig{}}, want: false},
-		{name: "create, nil config", in: startContextInputs{Operation: opCreate}, want: false},
-		{name: "start, no request", in: startContextInputs{Operation: opHTTPStart, ResolvedEnv: map[string]string{"SCION_AGENT_ID": e10AgentID}}, want: false},
-		{name: "create, GCPIdentity block", in: startContextInputs{Operation: opCreate, Config: &CreateAgentConfig{GCPIdentity: &GCPIdentityConfig{MetadataMode: "block"}}}, want: true},
-		{name: "create, mode in config env", in: startContextInputs{Operation: opCreate, Config: &CreateAgentConfig{Env: []string{"SCION_METADATA_MODE=assign"}}}, want: true},
-		{name: "create, hub default in config env", in: startContextInputs{Operation: opCreate, Config: &CreateAgentConfig{Env: []string{"SCION_METADATA_REQUIRE_LOCAL_RUNTIME=true"}}}, want: true},
-		{name: "start, mode in resolved env", in: startContextInputs{Operation: opHTTPStart, ResolvedEnv: map[string]string{"SCION_METADATA_MODE": "block"}}, want: true},
-		{name: "restart, mode in resolved env", in: startContextInputs{Operation: opHTTPRestart, ResolvedEnv: map[string]string{"SCION_METADATA_MODE": "block"}}, want: true},
-		{name: "start, hub default in resolved env", in: startContextInputs{Operation: opHTTPStart, ResolvedEnv: map[string]string{"SCION_METADATA_REQUIRE_LOCAL_RUNTIME": "true"}}, want: true},
+		{name: "create, no request", in: startContextInputs{Operation: opCreate, Config: &CreateAgentConfig{}}, wantUnset: true},
+		{name: "create, nil config", in: startContextInputs{Operation: opCreate}, wantUnset: true},
+		{name: "start, no request", in: startContextInputs{Operation: opHTTPStart, ResolvedEnv: map[string]string{"SCION_AGENT_ID": e10AgentID}}, wantUnset: true},
+		{name: "start, sealed unset with native marker", in: startContextInputs{Operation: opHTTPStart, ResolvedEnv: map[string]string{"SCION_METADATA_MODE_SOURCE": "hub", cloudRunNativeMarkerEnv: "1"}}, wantUnset: true},
+		{name: "create, GCPIdentity block", in: startContextInputs{Operation: opCreate, Config: &CreateAgentConfig{GCPIdentity: &GCPIdentityConfig{MetadataMode: "block"}}}, wantMode: "block"},
+		{name: "create, unsourced assign in config env downgraded to block", in: startContextInputs{Operation: opCreate, Config: &CreateAgentConfig{Env: []string{"SCION_METADATA_MODE=assign"}}}, wantMode: "block"},
+		{name: "create, hub default in config env", in: startContextInputs{Operation: opCreate, Config: &CreateAgentConfig{Env: []string{"SCION_METADATA_REQUIRE_LOCAL_RUNTIME=true"}}}, wantMode: "block"},
+		{name: "start, mode in resolved env", in: startContextInputs{Operation: opHTTPStart, ResolvedEnv: map[string]string{"SCION_METADATA_MODE": "block"}}, wantMode: "block"},
+		{name: "restart, mode in resolved env", in: startContextInputs{Operation: opHTTPRestart, ResolvedEnv: map[string]string{"SCION_METADATA_MODE": "block"}}, wantMode: "block"},
+		{name: "start, hub default in resolved env", in: startContextInputs{Operation: opHTTPStart, ResolvedEnv: map[string]string{"SCION_METADATA_REQUIRE_LOCAL_RUNTIME": "true"}}, wantMode: "block"},
+		{name: "start, hub-sourced assign", in: startContextInputs{Operation: opHTTPStart, ResolvedEnv: map[string]string{"SCION_METADATA_MODE": "assign", "SCION_METADATA_MODE_SOURCE": "hub"}}, wantMode: "assign"},
+		{name: "start, hub-sourced passthrough", in: startContextInputs{Operation: opHTTPStart, ResolvedEnv: map[string]string{"SCION_METADATA_MODE": "passthrough", "SCION_METADATA_MODE_SOURCE": "hub"}}, wantMode: "passthrough"},
 	}
 	for _, tc := range requests {
 		t.Run("request/"+tc.name, func(t *testing.T) {
-			if got := perAgentGCPIdentityRequested(tc.in); got != tc.want {
-				t.Errorf("perAgentGCPIdentityRequested() = %t, want %t", got, tc.want)
+			gotMode, gotUnset := flatCloudRunRequestedMode(tc.in)
+			if gotMode != tc.wantMode || gotUnset != tc.wantUnset {
+				t.Errorf("flatCloudRunRequestedMode() = (%q, %t), want (%q, %t)", gotMode, gotUnset, tc.wantMode, tc.wantUnset)
 			}
 		})
 	}

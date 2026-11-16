@@ -180,6 +180,19 @@ func NewCloudRunRuntimeForTest(cfg *config.CloudRunConfig, newClient func(ctx co
 	return rt, nil
 }
 
+// StubNFSProvisionForTest replaces the kernel NFS mount check on r with a
+// fixed test export so unit tests outside pkg/runtime can drive Run against a
+// fake InstancesAPI without a mounted Filestore share.
+func (r *CloudRunRuntime) StubNFSProvisionForTest(server, export string) {
+	r.provisionNFS = func(_ context.Context, cfg RunConfig, agentID string, _, _ int) (*cloudRunNFSProvisionPaths, error) {
+		return &cloudRunNFSProvisionPaths{
+			server:              server,
+			workspaceExportPath: export + "/projects/" + cfg.ProjectID + "/workspace",
+			homeExportPath:      export + "/projects/" + cfg.ProjectID + "/agents/" + agentID + "/home",
+		}, nil
+	}
+}
+
 // resolveConfig ensures that ProjectID and Location are populated. When both
 // are empty (auto-detected Cloud Run environment with no explicit settings),
 // this method discovers them from the GCE metadata server. The resolution is

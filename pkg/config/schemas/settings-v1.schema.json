@@ -2091,7 +2091,24 @@
               "type": "string",
               "pattern": "^(|[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\\.iam\\.gserviceaccount\\.com)$",
               "not": { "pattern": "^[0-9]+-compute@developer\\.gserviceaccount\\.com$|@appspot\\.gserviceaccount\\.com$|^service-[0-9]+@|@gcp-sa-" },
-              "description": "Cloud Run only, required. The user-managed service account (<name>@<project_id>.iam.gserviceaccount.com) agent instances run as. The project default service accounts (compute and App Engine) and Google-managed service agents are not allowed, and it must differ from the instance's credential principal. Agents can obtain its token, so it should hold no permissions in the project. Local operator policy: never sent to the Hub."
+              "description": "Cloud Run only, required. The user-managed service account (<name>@<project_id>.iam.gserviceaccount.com) agent instances run as when GCP identity mode is passthrough. The project default service accounts (compute and App Engine) and Google-managed service agents are not allowed, and it must differ from block_service_account and the instance's credential principal. Local operator policy: never sent to the Hub."
+            },
+            "block_service_account": {
+              "type": "string",
+              "pattern": "^(|[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\\.iam\\.gserviceaccount\\.com)$",
+              "not": { "pattern": "^[0-9]+-compute@developer\\.gserviceaccount\\.com$|@appspot\\.gserviceaccount\\.com$|^service-[0-9]+@|@gcp-sa-" },
+              "description": "Cloud Run only, required. The no-role user-managed service account (<name>@<project_id>.iam.gserviceaccount.com) agents with no GCP identity (unset or block) run as. Must differ from service_account, must not appear in assignable_service_accounts, and must differ from the instance's credential principal. Local operator policy: never sent to the Hub."
+            },
+            "assignable_service_accounts": {
+              "type": "array",
+              "maxItems": 64,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\\.iam\\.gserviceaccount\\.com$",
+                "not": { "pattern": "^[0-9]+-compute@developer\\.gserviceaccount\\.com$|@appspot\\.gserviceaccount\\.com$|^service-[0-9]+@|@gcp-sa-" }
+              },
+              "description": "Cloud Run only. Optional allow-list of user-managed service accounts (<name>@<project_id>.iam.gserviceaccount.com) agents may be assigned on this instance (at most 64 unique lower-case entries, excluding block_service_account and the instance's credential principal). Local operator policy: never sent to the Hub."
             },
             "network": {
               "type": "string",
@@ -2131,11 +2148,12 @@
             {
               "if": { "properties": { "type": { "const": "cloudrun" } } },
               "then": {
-                "required": ["project_id", "region", "service_account", "credentials_file"],
+                "required": ["project_id", "region", "service_account", "block_service_account", "credentials_file"],
                 "properties": {
                   "project_id": { "minLength": 1 },
                   "region": { "minLength": 1 },
                   "service_account": { "minLength": 1 },
+                  "block_service_account": { "minLength": 1 },
                   "credentials_file": { "minLength": 1 }
                 },
                 "anyOf": [
@@ -2168,11 +2186,13 @@
       ]
     },
     "runtimeTargetCloudRunFieldsSet": {
-      "description": "Matches a runtime_target that sets any Cloud-Run-only field to a non-empty string.",
+      "description": "Matches a runtime_target that sets any Cloud-Run-only field to a non-empty string or list.",
       "anyOf": [
         { "required": ["project_id"], "properties": { "project_id": { "minLength": 1 } } },
         { "required": ["region"], "properties": { "region": { "minLength": 1 } } },
         { "required": ["service_account"], "properties": { "service_account": { "minLength": 1 } } },
+        { "required": ["block_service_account"], "properties": { "block_service_account": { "minLength": 1 } } },
+        { "required": ["assignable_service_accounts"], "properties": { "assignable_service_accounts": { "minItems": 1 } } },
         { "required": ["network"], "properties": { "network": { "minLength": 1 } } },
         { "required": ["subnetwork"], "properties": { "subnetwork": { "minLength": 1 } } },
         { "required": ["credentials_file"], "properties": { "credentials_file": { "minLength": 1 } } }

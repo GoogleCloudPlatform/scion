@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
 	"net/http"
@@ -549,8 +550,11 @@ func TestBuildStartContext_CloudRunProjectAllowListIgnored(t *testing.T) {
 
 func TestRejectCloudRunIdentityRuntimeChange(t *testing.T) {
 	id := &api.CloudRunIdentity{ServiceAccount: crAssignedSA, Mode: "assign"}
+	blockID := &api.CloudRunIdentity{ServiceAccount: crBlockSA, Mode: "block"}
 	entryA := dispatchProfileSelection{ProfileName: "local", RuntimeEntryName: "cloudrun"}
 	entryB := dispatchProfileSelection{ProfileName: "local", RuntimeEntryName: "cr-team"}
+	flatA := dispatchProfileSelection{InstanceKey: "cr-a", RuntimeTargetID: "flat-cr-target-a"}
+	flatB := dispatchProfileSelection{InstanceKey: "cr-a", RuntimeTargetID: "flat-cr-target-b"}
 	pinnedA, pinnedB, pinnedNone := "cloudrun", "cr-team", ""
 	tests := []struct {
 		name       string
@@ -561,6 +565,7 @@ func TestRejectCloudRunIdentityRuntimeChange(t *testing.T) {
 		runtime    string
 		gate       bool
 		wantReject bool
+		wantSubstr string
 	}{
 		{name: "identity, same Cloud Run entry", id: id, early: &entryA, late: entryA, runtime: cloudRunRuntimeType, gate: true},
 		{name: "no identity, not Cloud Run", runtime: "docker", gate: true},
@@ -574,6 +579,11 @@ func TestRejectCloudRunIdentityRuntimeChange(t *testing.T) {
 		{name: "identity, pinned runtime of another entry", id: id, early: &entryA, late: entryA, pinned: &pinnedB, runtime: cloudRunRuntimeType, gate: true, wantReject: true},
 		{name: "identity, pinned runtime with no recorded entry", id: id, early: &entryA, late: entryA, pinned: &pinnedNone, runtime: cloudRunRuntimeType, gate: true, wantReject: true},
 		{name: "no identity, gate off, pinned runtime of another entry", early: &entryA, late: entryA, pinned: &pinnedB, runtime: cloudRunRuntimeType},
+		{name: "flat identity, same target, gate off", id: blockID, early: &flatA, late: flatA, runtime: cloudRunRuntimeType, gate: false},
+		{name: "flat identity, same target, gate on", id: blockID, early: &flatA, late: flatA, runtime: cloudRunRuntimeType, gate: true},
+		{name: "flat identity, now docker, gate off", id: blockID, early: &flatA, late: flatA, runtime: "docker", gate: false, wantReject: true, wantSubstr: flatIdentityChangeRemedy},
+		{name: "no identity, now flat Cloud Run, gate off", late: flatA, runtime: cloudRunRuntimeType, gate: false, wantReject: true, wantSubstr: flatIdentityChangeRemedy},
+		{name: "flat identity, different target ID, gate off", id: blockID, early: &flatA, late: flatB, runtime: cloudRunRuntimeType, gate: false, wantReject: true, wantSubstr: flatIdentityChangeRemedy},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -595,8 +605,11 @@ func TestRejectCloudRunIdentityRuntimeChange(t *testing.T) {
 			if sce.Status != http.StatusConflict {
 				t.Errorf("status = %d, want %d", sce.Status, http.StatusConflict)
 			}
-			if !strings.Contains(sce.Message, "agent-cr-late") || strings.Contains(sce.Message, crAssignedSA) {
+			if !strings.Contains(sce.Message, "agent-cr-late") || strings.Contains(sce.Message, crAssignedSA) || strings.Contains(sce.Message, crBlockSA) {
 				t.Errorf("message %q must name the agent and no account", sce.Message)
+			}
+			if tc.wantSubstr != "" && !strings.Contains(sce.Message, tc.wantSubstr) {
+				t.Errorf("message %q must contain %q", sce.Message, tc.wantSubstr)
 			}
 			if tc.pinned != nil && *tc.pinned == "" && !strings.Contains(sce.Message, "recreate the agent or restart it with its saved profile") {
 				t.Errorf("message %q must give the remedy for a pin with no recorded entry", sce.Message)
@@ -842,8 +855,13 @@ func newFlatCloudRunStartServer(t *testing.T) *Server {
 	t.Helper()
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
+	cfg.ContainerHubEndpoint = "https://hub.example.com"
 	srv := newTestServerForStartContextRuntime(t, cfg, cloudRunRuntimeType)
-	target := config.V1RuntimeTargetConfig{Type: cloudRunRuntimeType}
+	target := config.V1RuntimeTargetConfig{
+		Type:                cloudRunRuntimeType,
+		ServiceAccount:      "instance-sa@example-project.iam.gserviceaccount.com",
+		BlockServiceAccount: crBlockSA,
+	}
 	srv.config.FlatInstance = &FlatInstanceConfig{
 		Identity: &brokeridentity.Identity{
 			InstanceKey:     "cr-a",
@@ -854,25 +872,31 @@ func newFlatCloudRunStartServer(t *testing.T) *Server {
 		Instance: config.V1RuntimeBrokerInstanceConfig{Key: "cr-a", Name: "cr-a", RuntimeTarget: &target},
 	}
 	srv.flatK8sIdentity = newFlatKubernetesIdentityPolicy(srv.config.FlatInstance)
+	srv.flatCloudRunIdentity = newFlatCloudRunIdentityPolicy(srv.config.FlatInstance)
 	return srv
 }
 
-// A flat Cloud Run instance has no allow-list or block account setting, so
-// with the gate on assign and block are refused there, even though the
-// broker's global settings list the account under a runtime entry. No
-// start context is built, and the refusal returns before the agent token
-// step (the token probe). The assertions stay off the full message text,
-// which a later change adding flat support will reword.
+// Phase I1 on a flat Cloud Run instance: assign and unmarked block are
+// refused before the agent token step, while unset and marked block run as
+// the instance's block_service_account regardless of hub.cloudrun_native_identity.
 func TestBuildStartContext_CloudRunFlatInstanceRefused(t *testing.T) {
-	tests := []struct {
+	refused := []struct {
 		name string
 		gcp  *GCPIdentityConfig
+		want string
 	}{
-		{name: "assign", gcp: &GCPIdentityConfig{MetadataMode: "assign", NativeCloudRun: true, SAEmail: crAssignedSA, ProjectID: crProjectID}},
-		{name: "block", gcp: &GCPIdentityConfig{MetadataMode: "block"}},
-		{name: "unset is block"},
+		{
+			name: "assign refused in I1",
+			gcp:  &GCPIdentityConfig{MetadataMode: "assign", NativeCloudRun: true, SAEmail: crAssignedSA, ProjectID: crProjectID},
+			want: flatCloudRunGCPIdentityRefusalText,
+		},
+		{
+			name: "block without native marker refused",
+			gcp:  &GCPIdentityConfig{MetadataMode: "block"},
+			want: "did not mark this dispatch for native Cloud Run identity",
+		},
 	}
-	for _, tc := range tests {
+	for _, tc := range refused {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := newFlatCloudRunStartServer(t)
 			logs := probeFlatTokenStep(srv)
@@ -881,33 +905,83 @@ func TestBuildStartContext_CloudRunFlatInstanceRefused(t *testing.T) {
 			in := startContextInputs{
 				Name:        "agent-cr-f1",
 				ProjectPath: projectDir,
+				Config:      &CreateAgentConfig{GCPIdentity: tc.gcp},
 				HTTPRequest: httptest.NewRequest("POST", "/api/v1/agents", nil),
 				Operation:   opCreate,
-			}
-			if tc.gcp != nil {
-				in.Config = &CreateAgentConfig{GCPIdentity: tc.gcp}
 			}
 			sc, err := srv.buildStartContext(crGateCtx(), withFlatTokenProbe(in))
 			if sc != nil {
 				t.Fatalf("expected a refusal, got CloudRunIdentity %+v", sc.Opts.CloudRunIdentity)
 			}
 			sce := requireStartContextError(t, err)
-			if sce.Status < 400 || sce.Status > 499 {
-				t.Errorf("status = %d, want a 4xx", sce.Status)
+			if sce.Status != http.StatusBadRequest {
+				t.Errorf("status = %d, want %d", sce.Status, http.StatusBadRequest)
 			}
-			if !strings.Contains(sce.Message, "agent-cr-f1") || !strings.Contains(sce.Message, "flat Cloud Run") {
-				t.Errorf("message %q must name the agent and the flat cause", sce.Message)
+			if !strings.Contains(sce.Message, "agent-cr-f1") || !strings.Contains(sce.Message, tc.want) {
+				t.Errorf("message %q must name the agent and %q", sce.Message, tc.want)
 			}
 			for _, other := range []string{crBlockUnset, cloudRunPassthroughRefusal, "not attachable"} {
 				if strings.Contains(sce.Message, other) {
-					t.Errorf("message %q is another refusal (%q), not the flat one", sce.Message, other)
+					t.Errorf("message %q is a legacy refusal (%q), not the flat one", sce.Message, other)
 				}
 			}
-			if strings.Contains(sce.Message, crAssignedSA) || strings.Contains(strings.ToLower(sce.Message), "assigned-sa") {
+			if strings.Contains(sce.Message, crAssignedSA) || strings.Contains(strings.ToLower(sce.Message), "assigned-sa") || strings.Contains(sce.Message, crBlockSA) {
 				t.Errorf("message %q names an account", sce.Message)
 			}
 			requireNoFlatTokenStep(t, logs)
 		})
+	}
+
+	allowed := []struct {
+		name string
+		gcp  *GCPIdentityConfig
+	}{
+		{name: "unset runs as block_service_account"},
+		{name: "marked block runs as block_service_account", gcp: &GCPIdentityConfig{MetadataMode: "block", NativeCloudRun: true}},
+		{name: "marked confined passthrough runs as block_service_account", gcp: &GCPIdentityConfig{MetadataMode: "passthrough", RequireLocalRuntime: true, NativeCloudRun: true}},
+	}
+	for _, gateOn := range []bool{false, true} {
+		for _, tc := range allowed {
+			t.Run(fmt.Sprintf("gate=%t/%s", gateOn, tc.name), func(t *testing.T) {
+				srv := newFlatCloudRunStartServer(t)
+				// Global settings set a different block account; the flat
+				// instance must use only its own snapshot.
+				newTestGlobalSettings(t, `schema_version: "1"
+runtimes:
+    cloudrun:
+        cloudrun:
+            block_service_account: wrong-global-block@example-project.iam.gserviceaccount.com
+`)
+				projectDir := newTestProjectSettings(t, testCloudRunProjectSettingsYAML)
+				in := startContextInputs{
+					Name:        "agent-cr-f1",
+					ProjectPath: projectDir,
+					HubEndpoint: "https://hub.example.com",
+					Config:      &CreateAgentConfig{GCPIdentity: tc.gcp},
+					HTTPRequest: httptest.NewRequest("POST", "/api/v1/agents", nil),
+					Operation:   opCreate,
+				}
+				ctx := context.Background()
+				if gateOn {
+					ctx = crGateCtx()
+					in.Config.HubAgentDefaults = crGateDefaults()
+				}
+				sc, err := srv.buildStartContext(ctx, in)
+				if err != nil {
+					t.Fatalf("buildStartContext: %v", err)
+				}
+				if sc.Opts.CloudRunIdentity == nil || sc.Opts.CloudRunIdentity.ServiceAccount != crBlockSA || sc.Opts.CloudRunIdentity.Mode != "block" {
+					t.Fatalf("CloudRunIdentity = %+v, want {%s block}", sc.Opts.CloudRunIdentity, crBlockSA)
+				}
+				wantSel := srv.flatDispatchSelection()
+				if sc.CloudRunSelection == nil || *sc.CloudRunSelection != wantSel {
+					t.Errorf("CloudRunSelection = %+v, want %+v", sc.CloudRunSelection, wantSel)
+				}
+				if sc.Opts.Env["SCION_METADATA_MODE"] != "block" || sc.Opts.Env["GCE_METADATA_HOST"] != "localhost:18380" {
+					t.Errorf("expected emulator block mode env, got %v", metadataEnv(sc.Opts.Env))
+				}
+			})
+		}
 	}
 }
 

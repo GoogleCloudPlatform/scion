@@ -2226,21 +2226,26 @@ type V1RuntimeTargetConfig struct {
 	SharedDirStorageBackends map[string]string `json:"shared_dir_storage_backends,omitempty" yaml:"shared_dir_storage_backends,omitempty" koanf:"shared_dir_storage_backends"`
 	HomeStorageBackend       string            `json:"home_storage_backend,omitempty" yaml:"home_storage_backend,omitempty" koanf:"home_storage_backend"`
 	HomeStorageLeaf          string            `json:"home_storage_leaf,omitempty" yaml:"home_storage_leaf,omitempty" koanf:"home_storage_leaf"`
-	// ProjectID, Region, ServiceAccount, Network, Subnetwork and
-	// CredentialsFile are a Cloud Run instance's target (contract amendment
-	// P5-CR, CR1). ProjectID selects the GCP project, whose probed project
-	// number plus Region is the target's identity. ServiceAccount (the
-	// identity agent instances run as), Network and Subnetwork (the VPC
-	// agents reach the NFS share over) are local operator policy.
-	// CredentialsFile is the absolute path of this instance's own GCP
-	// credentials file, its only credential source. None of them is sent to
-	// the Hub. Cloud Run only.
-	ProjectID       string `json:"project_id,omitempty" yaml:"project_id,omitempty" koanf:"project_id"`
-	Region          string `json:"region,omitempty" yaml:"region,omitempty" koanf:"region"`
-	ServiceAccount  string `json:"service_account,omitempty" yaml:"service_account,omitempty" koanf:"service_account"`
-	Network         string `json:"network,omitempty" yaml:"network,omitempty" koanf:"network"`
-	Subnetwork      string `json:"subnetwork,omitempty" yaml:"subnetwork,omitempty" koanf:"subnetwork"`
-	CredentialsFile string `json:"credentials_file,omitempty" yaml:"credentials_file,omitempty" koanf:"credentials_file"`
+	// ProjectID, Region, ServiceAccount, BlockServiceAccount,
+	// AssignableServiceAccounts, Network, Subnetwork and CredentialsFile are a
+	// Cloud Run instance's target (contract amendment P5-CR, CR1; Identity Part
+	// B). ProjectID selects the GCP project, whose probed project number plus
+	// Region is the target's identity. ServiceAccount (the default passthrough
+	// identity), BlockServiceAccount (the required no-role identity agents with
+	// no GCP identity run as), AssignableServiceAccounts (the allow-list of
+	// user-managed service accounts agents may be assigned), Network and
+	// Subnetwork (the VPC agents reach the NFS share over) are local operator
+	// policy. CredentialsFile is the absolute path of this instance's own GCP
+	// credentials file, its only credential source. None of them (except Region)
+	// is sent to the Hub. Cloud Run only.
+	ProjectID                 string   `json:"project_id,omitempty" yaml:"project_id,omitempty" koanf:"project_id"`
+	Region                    string   `json:"region,omitempty" yaml:"region,omitempty" koanf:"region"`
+	ServiceAccount            string   `json:"service_account,omitempty" yaml:"service_account,omitempty" koanf:"service_account"`
+	BlockServiceAccount       string   `json:"block_service_account,omitempty" yaml:"block_service_account,omitempty" koanf:"block_service_account"`
+	AssignableServiceAccounts []string `json:"assignable_service_accounts,omitempty" yaml:"assignable_service_accounts,omitempty" koanf:"assignable_service_accounts"`
+	Network                   string   `json:"network,omitempty" yaml:"network,omitempty" koanf:"network"`
+	Subnetwork                string   `json:"subnetwork,omitempty" yaml:"subnetwork,omitempty" koanf:"subnetwork"`
+	CredentialsFile           string   `json:"credentials_file,omitempty" yaml:"credentials_file,omitempty" koanf:"credentials_file"`
 }
 
 // KubernetesRuntimeConfig returns the runtime entry form of a Kubernetes
