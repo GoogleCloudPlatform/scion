@@ -200,6 +200,7 @@ func ValidateSettings(data []byte, schemaVersion string) ([]ValidationError, err
 		errs = append(errs, ValidatePlacement(vs.Runtimes, vs.Profiles, LiteralSiblingGroups(vs.Runtimes))...)
 		errs = append(errs, RuntimeBrokerInstanceDuplicateKeys(vs.Server.Broker.Instances)...)
 		errs = append(errs, RuntimeBrokerInstanceSharedDirSizes(vs.Server.Broker.Instances)...)
+		errs = append(errs, RuntimeBrokerInstanceCloudRunServiceAccounts(vs.Server.Broker.Instances)...)
 	}
 	return errs, nil
 }

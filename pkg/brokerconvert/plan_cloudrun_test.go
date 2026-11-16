@@ -49,14 +49,19 @@ profiles:
 		p, err := BuildLocal(Input{Settings: vs, RawSettings: []byte(rawYAML)})
 		require.NoError(t, err)
 
-		// Only finding is flat_target_operator_input_required (notice).
-		require.Len(t, p.Findings, 1)
-		f := p.Findings[0]
-		assert.Equal(t, config.ConversionFlatTargetOperatorInputRequired, f.Code)
-		assert.Equal(t, config.ConversionSeverityNotice, f.Severity)
-		assert.Equal(t, "server.broker.instances[0].runtime_target.credentials_file", f.Path)
-		assert.Equal(t, []string{"prod"}, f.Profiles)
-		assert.NotEqual(t, "see the conversion rules for this finding code", f.Text)
+		// Only findings are flat_target_operator_input_required (notice) for block_service_account and credentials_file.
+		wantPaths := []string{
+			"server.broker.instances[0].runtime_target.block_service_account",
+			"server.broker.instances[0].runtime_target.credentials_file",
+		}
+		require.Len(t, p.Findings, len(wantPaths))
+		for i, wantPath := range wantPaths {
+			assert.Equal(t, config.ConversionFlatTargetOperatorInputRequired, p.Findings[i].Code)
+			assert.Equal(t, config.ConversionSeverityNotice, p.Findings[i].Severity)
+			assert.Equal(t, wantPath, p.Findings[i].Path)
+			assert.Equal(t, []string{"prod"}, p.Findings[i].Profiles)
+			assert.NotEqual(t, "see the conversion rules for this finding code", p.Findings[i].Text)
+		}
 
 		// Profile keeps its ProfileMap entry, DecisionRequired triggers ExitBlocked (3).
 		require.Len(t, p.ProfileMap, 1)
@@ -65,18 +70,20 @@ profiles:
 			Instance: "cloudrun-us-central1",
 		}, p.ProfileMap[0])
 		assert.Equal(t, 0, p.Summary.BlockingFindings)
-		assert.Equal(t, 1, p.Summary.NoticeFindings)
+		assert.Equal(t, 2, p.Summary.NoticeFindings)
 		assert.Equal(t, 1, p.Summary.MappedProfiles)
 		assert.True(t, p.Summary.DecisionRequired)
 		assert.Equal(t, ResultDecisionsRequired, p.Summary.Result)
 		assert.Equal(t, ExitBlocked, p.ExitCode())
 
-		// Human output names the required operator-input field in Summary.
+		// Human output names the required operator-input fields in Summary.
 		human, js := render(t, p)
 		summaryIdx := strings.Index(string(human), "\nSummary\n")
 		require.True(t, summaryIdx >= 0, "Summary section present in human output")
 		summarySection := string(human)[summaryIdx:]
-		assert.Contains(t, summarySection, "operator input required: server.broker.instances[0].runtime_target.credentials_file")
+		for _, wantPath := range wantPaths {
+			assert.Contains(t, summarySection, "operator input required: "+wantPath)
+		}
 
 		// JSON output keeps schemaVersion 1 and frozen top-level keys, and omits CR8 never-published values.
 		var doc map[string]json.RawMessage
@@ -155,13 +162,14 @@ profiles:
 			Instance: "cloudrun-us-central1",
 		}, p.ProfileMap[0])
 		assert.Equal(t, 0, p.Summary.BlockingFindings)
-		assert.Equal(t, 3, p.Summary.NoticeFindings)
+		assert.Equal(t, 4, p.Summary.NoticeFindings)
 		assert.Equal(t, 1, p.Summary.MappedProfiles)
 		assert.True(t, p.Summary.DecisionRequired)
 		assert.Equal(t, ResultDecisionsRequired, p.Summary.Result)
 		assert.Equal(t, ExitBlocked, p.ExitCode())
 
 		wantPaths := []string{
+			"server.broker.instances[0].runtime_target.block_service_account",
 			"server.broker.instances[0].runtime_target.credentials_file",
 			"server.broker.instances[0].runtime_target.network",
 			"server.broker.instances[0].runtime_target.service_account",
@@ -209,7 +217,7 @@ profiles:
 	require.NoError(t, err)
 
 	assert.Equal(t, 2, p.Summary.BlockingFindings)
-	assert.Equal(t, 3, p.Summary.NoticeFindings)
+	assert.Equal(t, 4, p.Summary.NoticeFindings)
 	assert.Equal(t, 0, p.Summary.MappedProfiles)
 	assert.True(t, p.Summary.DecisionRequired)
 	assert.Equal(t, ResultBlockingFindings, p.Summary.Result)

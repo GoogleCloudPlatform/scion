@@ -174,10 +174,20 @@ func kubernetesOnlyFieldsSet(t *V1RuntimeTargetConfig) []string {
 // runtime_target fields t sets, in a fixed order.
 func cloudRunOnlyFieldsSet(t *V1RuntimeTargetConfig) []string {
 	var set []string
-	for _, f := range []struct{ field, v string }{{"project_id", t.ProjectID}, {"region", t.Region},
-		{"service_account", t.ServiceAccount}, {"network", t.Network}, {"subnetwork", t.Subnetwork},
-		{"credentials_file", t.CredentialsFile}} {
-		if f.v != "" {
+	for _, f := range []struct {
+		field string
+		set   bool
+	}{
+		{"project_id", t.ProjectID != ""},
+		{"region", t.Region != ""},
+		{"service_account", t.ServiceAccount != ""},
+		{"block_service_account", t.BlockServiceAccount != ""},
+		{"assignable_service_accounts", len(t.AssignableServiceAccounts) > 0},
+		{"network", t.Network != ""},
+		{"subnetwork", t.Subnetwork != ""},
+		{"credentials_file", t.CredentialsFile != ""},
+	} {
+		if f.set {
 			set = append(set, f.field)
 		}
 	}
@@ -229,6 +239,25 @@ func cloudRunDefaultServiceAccount(sa, projectID string) bool {
 		(projectID != "" && lower == strings.ToLower(projectID)+cloudRunAppEngineDefaultSADomain)
 }
 
+const maxCloudRunAssignableServiceAccounts = 64
+
+// validateCloudRunServiceAccountForm checks one Cloud Run service account
+// address against contract amendment P5-CR, CR2: neither project default
+// service account is allowed, and only a lower-case user-managed service
+// account (<name>@<project_id>.iam.gserviceaccount.com, excluding Google
+// service agents) is accepted. Callers check emptiness first because each
+// field has its own required message.
+func validateCloudRunServiceAccountForm(fieldLabel, sa, projectID string) error {
+	switch {
+	case cloudRunDefaultServiceAccount(sa, projectID):
+		return errors.New("the project default service accounts are not allowed")
+	case !cloudRunServiceAccountRe.MatchString(sa) || cloudRunServiceAgentRe.MatchString(sa):
+		return fmt.Errorf("%s must be a user-managed service account (name@project.iam.gserviceaccount.com)", fieldLabel)
+	default:
+		return nil
+	}
+}
+
 // validateCloudRunTarget checks the Cloud Run fields of a cloudrun
 // runtime_target at path (server.broker.instances[<i>].runtime_target).
 // Only the form is checked here; the credentials file itself (existence,
@@ -253,13 +282,46 @@ func validateCloudRunTarget(path string, t *V1RuntimeTargetConfig) []ValidationE
 	case !cloudRunRegionRe.MatchString(t.Region):
 		add("region", fmt.Sprintf("region must be a Cloud Run region (e.g. us-central1): %q", t.Region))
 	}
-	switch {
-	case t.ServiceAccount == "":
+	if t.ServiceAccount == "" {
 		add("service_account", "service_account is required for runtime target type cloudrun; the platform default compute identity is never implied")
-	case cloudRunDefaultServiceAccount(t.ServiceAccount, t.ProjectID):
-		add("service_account", "the project default service accounts are not allowed")
-	case !cloudRunServiceAccountRe.MatchString(t.ServiceAccount) || cloudRunServiceAgentRe.MatchString(t.ServiceAccount):
-		add("service_account", "service_account must be a user-managed service account (name@project.iam.gserviceaccount.com)")
+	} else if err := validateCloudRunServiceAccountForm("service_account", t.ServiceAccount, t.ProjectID); err != nil {
+		add("service_account", err.Error())
+	}
+	blockValid := false
+	if t.BlockServiceAccount == "" {
+		add("block_service_account", path+".block_service_account is required: agents with no GCP identity run as this no-role account")
+	} else if err := validateCloudRunServiceAccountForm("block_service_account", t.BlockServiceAccount, t.ProjectID); err != nil {
+		add("block_service_account", err.Error())
+	} else {
+		blockValid = true
+		if t.ServiceAccount != "" && strings.EqualFold(t.BlockServiceAccount, t.ServiceAccount) {
+			add("block_service_account", "block_service_account must differ from service_account: agents with no GCP identity run as this no-role account")
+		}
+	}
+	if len(t.AssignableServiceAccounts) > maxCloudRunAssignableServiceAccounts {
+		add("assignable_service_accounts", fmt.Sprintf("assignable_service_accounts accepts at most %d entries (got %d)", maxCloudRunAssignableServiceAccounts, len(t.AssignableServiceAccounts)))
+	} else {
+		seen := make(map[string]int, len(t.AssignableServiceAccounts))
+		for i, sa := range t.AssignableServiceAccounts {
+			elemField := fmt.Sprintf("assignable_service_accounts[%d]", i)
+			if sa == "" {
+				add(elemField, elemField+" must be a user-managed service account (name@project.iam.gserviceaccount.com)")
+				continue
+			}
+			if err := validateCloudRunServiceAccountForm(elemField, sa, t.ProjectID); err != nil {
+				add(elemField, err.Error())
+				continue
+			}
+			lower := strings.ToLower(sa)
+			if prev, dup := seen[lower]; dup {
+				add(elemField, fmt.Sprintf("duplicate service account %q in assignable_service_accounts (also at index %d)", sa, prev))
+				continue
+			}
+			seen[lower] = i
+			if blockValid && strings.EqualFold(sa, t.BlockServiceAccount) {
+				add(elemField, "block_service_account must not appear in assignable_service_accounts")
+			}
+		}
 	}
 	if t.Network == "" && t.Subnetwork == "" {
 		add("network", "a VPC network or subnetwork is required: Cloud Run agents mount the NFS share over the VPC")
@@ -269,6 +331,36 @@ func validateCloudRunTarget(path string, t *V1RuntimeTargetConfig) []ValidationE
 		add("credentials_file", "credentials_file is required for runtime target type cloudrun")
 	case !validInstanceCredentialsFilePath(t.CredentialsFile):
 		add("credentials_file", fmt.Sprintf("credentials_file must be one clean absolute local file path (no ~, environment variables, path list, \"//\", \".\" or \"..\" element or trailing \"/\"): %q", t.CredentialsFile))
+	}
+	return errs
+}
+
+// RuntimeBrokerInstanceCloudRunServiceAccounts reports cross-field Cloud Run
+// service-account errors that the JSON schema cannot express (block account
+// equal to service_account or listed in assignable_service_accounts), so
+// ValidateSettings and LoadRuntimeBrokerInstances stay in parity.
+func RuntimeBrokerInstanceCloudRunServiceAccounts(instances []V1RuntimeBrokerInstanceConfig) []ValidationError {
+	var errs []ValidationError
+	for i, inst := range instances {
+		t := inst.RuntimeTarget
+		if t == nil || t.Type != RuntimeTargetTypeCloudRun || t.BlockServiceAccount == "" {
+			continue
+		}
+		path := fmt.Sprintf("server.broker.instances[%d].runtime_target", i)
+		if t.ServiceAccount != "" && strings.EqualFold(t.BlockServiceAccount, t.ServiceAccount) {
+			errs = append(errs, ValidationError{
+				Path:    path + ".block_service_account",
+				Message: "block_service_account must differ from service_account: agents with no GCP identity run as this no-role account",
+			})
+		}
+		for j, sa := range t.AssignableServiceAccounts {
+			if strings.EqualFold(sa, t.BlockServiceAccount) {
+				errs = append(errs, ValidationError{
+					Path:    fmt.Sprintf("%s.assignable_service_accounts[%d]", path, j),
+					Message: "block_service_account must not appear in assignable_service_accounts",
+				})
+			}
+		}
 	}
 	return errs
 }
@@ -474,8 +566,19 @@ func checkInstanceScalarsAreStrings(instRaw interface{}) error {
 				"kubernetes_block_service_account",
 				"shared_dir_storage_class", "shared_dir_size", "priority_class_name", "runtime_class_name",
 				"shared_dir_storage_backend", "home_storage_backend", "home_storage_leaf",
-				"project_id", "region", "service_account", "network", "subnetwork", "credentials_file"); err != nil {
+				"project_id", "region", "service_account", "block_service_account", "network", "subnetwork", "credentials_file"); err != nil {
 				return err
+			}
+			if v, present := tm["assignable_service_accounts"]; present {
+				items, isList := v.([]interface{})
+				if !isList {
+					return fmt.Errorf("%s.runtime_target.assignable_service_accounts must be a list", p)
+				}
+				for j, elem := range items {
+					if _, isString := elem.(string); !isString {
+						return fmt.Errorf("%s.runtime_target.assignable_service_accounts[%d] must be a string", p, j)
+					}
+				}
 			}
 			// The YAML decoder would turn a string such as "yes" into a
 			// bool, so only a YAML boolean is accepted, as in the schema:
@@ -938,6 +1041,8 @@ func v1InstancesToGlobal(in []V1RuntimeBrokerInstanceConfig) []RuntimeBrokerInst
 				ProjectID:                        i.RuntimeTarget.ProjectID,
 				Region:                           i.RuntimeTarget.Region,
 				ServiceAccount:                   i.RuntimeTarget.ServiceAccount,
+				BlockServiceAccount:              i.RuntimeTarget.BlockServiceAccount,
+				AssignableServiceAccounts:        slices.Clone(i.RuntimeTarget.AssignableServiceAccounts),
 				Network:                          i.RuntimeTarget.Network,
 				Subnetwork:                       i.RuntimeTarget.Subnetwork,
 				CredentialsFile:                  i.RuntimeTarget.CredentialsFile,
@@ -991,6 +1096,8 @@ func globalInstancesToV1(in []RuntimeBrokerInstanceConfig) []V1RuntimeBrokerInst
 				ProjectID:                        i.RuntimeTarget.ProjectID,
 				Region:                           i.RuntimeTarget.Region,
 				ServiceAccount:                   i.RuntimeTarget.ServiceAccount,
+				BlockServiceAccount:              i.RuntimeTarget.BlockServiceAccount,
+				AssignableServiceAccounts:        slices.Clone(i.RuntimeTarget.AssignableServiceAccounts),
 				Network:                          i.RuntimeTarget.Network,
 				Subnetwork:                       i.RuntimeTarget.Subnetwork,
 				CredentialsFile:                  i.RuntimeTarget.CredentialsFile,

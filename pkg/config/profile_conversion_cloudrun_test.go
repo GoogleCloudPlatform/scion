@@ -99,8 +99,14 @@ func TestProfileConversion_CloudRunMapped(t *testing.T) {
 	if wantMap := map[string]string{"prod": "cloudrun-us-central1"}; !reflect.DeepEqual(got.ProfileMap, wantMap) {
 		t.Fatalf("profile map = %v, want %v (findings: %+v)", got.ProfileMap, wantMap, got.Findings)
 	}
-	if len(got.Findings) != 1 {
-		t.Fatalf("findings = %+v, want only credentials_file operator-input notice", got.Findings)
+	if len(got.Findings) != 2 {
+		t.Fatalf("findings = %+v, want credentials_file and block_service_account operator-input notices", got.Findings)
+	}
+	for _, field := range []string{"credentials_file", "block_service_account"} {
+		path := "server.broker.instances[0].runtime_target." + field
+		if f := findFinding(got.Findings, ConversionFlatTargetOperatorInputRequired, path); f == nil || f.Severity != ConversionSeverityNotice {
+			t.Fatalf("missing operator-input notice at %s: %+v", path, got.Findings)
+		}
 	}
 	assertFlatEquivalent(t, vs, "prod", inst)
 }
@@ -181,6 +187,7 @@ func TestProfileConversion_CloudRunInstancesFieldRequired(t *testing.T) {
 			}
 		}
 		for _, path := range []string{
+			"server.broker.instances[0].runtime_target.block_service_account",
 			"server.broker.instances[0].runtime_target.credentials_file",
 			"server.broker.instances[0].runtime_target.service_account",
 			"server.broker.instances[0].runtime_target.network",
@@ -705,14 +712,18 @@ func TestProfileConversion_CloudRunCredentialsFileNotice(t *testing.T) {
 		t.Fatalf("profile map = %v, want %v", got.ProfileMap, wantMap)
 	}
 	for i, prof := range []string{"p-east", "p-west"} {
-		path := fmt.Sprintf("server.broker.instances[%d].runtime_target.credentials_file", i)
-		f := findFinding(got.Findings, ConversionFlatTargetOperatorInputRequired, path)
-		if f == nil || f.Severity != ConversionSeverityNotice || !reflect.DeepEqual(f.Profiles, []string{prof}) {
-			t.Fatalf("want notice flat_target_operator_input_required at %s for %s, got %+v", path, prof, got.Findings)
+		for _, field := range []string{"credentials_file", "block_service_account"} {
+			path := fmt.Sprintf("server.broker.instances[%d].runtime_target.%s", i, field)
+			f := findFinding(got.Findings, ConversionFlatTargetOperatorInputRequired, path)
+			if f == nil || f.Severity != ConversionSeverityNotice || !reflect.DeepEqual(f.Profiles, []string{prof}) {
+				t.Fatalf("want notice flat_target_operator_input_required at %s for %s, got %+v", path, prof, got.Findings)
+			}
 		}
 	}
-	if f := findFinding(got.Findings, ConversionFlatTargetOperatorInputRequired, "server.broker.instances[2].runtime_target.credentials_file"); f != nil {
-		t.Fatalf("docker instance must not get credentials_file notice: %+v", f)
+	for _, field := range []string{"credentials_file", "block_service_account"} {
+		if f := findFinding(got.Findings, ConversionFlatTargetOperatorInputRequired, "server.broker.instances[2].runtime_target."+field); f != nil {
+			t.Fatalf("docker instance must not get %s notice: %+v", field, f)
+		}
 	}
 }
 
@@ -907,15 +918,18 @@ profiles:
 		t.Fatalf("instances = %+v, want 1", got.Instances)
 	}
 
-	// Without credentials_file, static validation flags credentials_file as required.
-	if errs := ValidateRuntimeBrokerInstances(got.Instances); len(errs) != 1 || errs[0].Path != "server.broker.instances[0].runtime_target.credentials_file" {
-		t.Fatalf("unfilled validation errors = %+v, want credentials_file required", errs)
+	// Without operator input, static validation flags block_service_account and credentials_file as required.
+	errs := ValidateRuntimeBrokerInstances(got.Instances)
+	expectValidationPaths(t, errs, "runtime_target.block_service_account", "runtime_target.credentials_file")
+	if len(errs) != 2 {
+		t.Fatalf("unfilled validation errors = %+v, want block_service_account and credentials_file required", errs)
 	}
 
-	// Once the operator fills credentials_file in the proposed YAML, both
+	// Once the operator fills block_service_account and credentials_file in the proposed YAML, both
 	// ValidateRuntimeBrokerInstances and strict LoadRuntimeBrokerInstances succeed.
 	filled := append([]V1RuntimeBrokerInstanceConfig(nil), got.Instances...)
 	rtCopy := *filled[0].RuntimeTarget
+	rtCopy.BlockServiceAccount = "no-role-block@my-project.iam.gserviceaccount.com"
 	rtCopy.CredentialsFile = "/etc/scion/cloudrun-credentials.json"
 	filled[0].RuntimeTarget = &rtCopy
 

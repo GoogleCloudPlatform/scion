@@ -663,8 +663,8 @@ func cloudRunIdentityKeyRefusal(path string) string {
 // Cloud Run instance: fields with legacy sources emit blocking
 // flat_target_field_required at each affected profile's legacy path when
 // missing or invalid, while required fields with no legacy source
-// (credentials_file on all Cloud Run entries, plus service_account and
-// network/subnetwork on cloudrun-instances) emit notice
+// (credentials_file and block_service_account on all Cloud Run entries, plus
+// service_account and network/subnetwork on cloudrun-instances) emit notice
 // flat_target_operator_input_required at the proposed instance path.
 func checkProposedCloudRunTarget(st *convState, index int, key string, t *V1RuntimeTargetConfig, part *convGroup) {
 	if part == nil {
@@ -674,6 +674,10 @@ func checkProposedCloudRunTarget(st *convState, index int, key string, t *V1Runt
 	credPath := targetPrefix + "credentials_file"
 	st.add(ConversionFlatTargetOperatorInputRequired, ConversionSeverityNotice, credPath,
 		fmt.Sprintf("%s (%s) has no legacy settings source and is required for runtime target type cloudrun; set it to an absolute local service-account or impersonated-service-account JSON file path before starting the instance", credPath, key),
+		groupProfileNames(part)...)
+	blockPath := targetPrefix + "block_service_account"
+	st.add(ConversionFlatTargetOperatorInputRequired, ConversionSeverityNotice, blockPath,
+		fmt.Sprintf("%s (%s) has no legacy settings source yet and is required for runtime target type cloudrun: agents with no GCP identity run as this no-role account; set it to a user-managed service account (name@project.iam.gserviceaccount.com) before starting the instance", blockPath, key),
 		groupProfileNames(part)...)
 
 	for _, p := range part.profiles {
@@ -717,16 +721,12 @@ func checkProposedCloudRunTarget(st *convState, index int, key string, t *V1Runt
 		}
 
 		saPath, netPath := rp+"cloudrun.service_account", rp+"cloudrun.network"
-		switch {
-		case t.ServiceAccount == "":
+		if t.ServiceAccount == "" {
 			st.add(ConversionFlatTargetFieldRequired, ConversionSeverityBlocking, saPath,
 				fmt.Sprintf("%s is required for runtime target type cloudrun; the platform default compute identity is never implied", saPath), p.name)
-		case cloudRunDefaultServiceAccount(t.ServiceAccount, t.ProjectID):
+		} else if err := validateCloudRunServiceAccountForm("service_account", t.ServiceAccount, t.ProjectID); err != nil {
 			st.add(ConversionFlatTargetFieldRequired, ConversionSeverityBlocking, saPath,
-				fmt.Sprintf("%s cannot be used on a flat cloudrun instance: the project default service accounts are not allowed", saPath), p.name)
-		case !cloudRunServiceAccountRe.MatchString(t.ServiceAccount) || cloudRunServiceAgentRe.MatchString(t.ServiceAccount):
-			st.add(ConversionFlatTargetFieldRequired, ConversionSeverityBlocking, saPath,
-				fmt.Sprintf("%s cannot be used on a flat cloudrun instance: service_account must be a user-managed service account (name@project.iam.gserviceaccount.com)", saPath), p.name)
+				fmt.Sprintf("%s cannot be used on a flat cloudrun instance: %s", saPath, err.Error()), p.name)
 		}
 
 		if t.Network == "" && t.Subnetwork == "" {

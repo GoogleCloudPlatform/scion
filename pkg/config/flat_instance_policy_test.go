@@ -107,10 +107,14 @@ func TestNewFlatInstancePolicy_CopiesEveryReferenceField(t *testing.T) {
 			b := true
 			f.Set(reflect.ValueOf(&b))
 		case reflect.Slice:
-			if f.Type().Elem() != reflect.TypeOf(api.K8sToleration{}) {
+			switch f.Type().Elem() {
+			case reflect.TypeOf(api.K8sToleration{}):
+				f.Set(reflect.ValueOf([]api.K8sToleration{{Key: "k"}}))
+			case reflect.TypeFor[string]():
+				f.Set(reflect.ValueOf([]string{"k"}))
+			default:
 				t.Fatalf("field %s: unsupported slice type %s; extend this test", name, f.Type())
 			}
-			f.Set(reflect.ValueOf([]api.K8sToleration{{Key: "k"}}))
 		case reflect.Interface, reflect.Chan, reflect.Func,
 			reflect.Struct, reflect.Array, reflect.UnsafePointer:
 			// A struct or array can hold a map or pointer of its own.
@@ -136,9 +140,17 @@ func TestNewFlatInstancePolicy_CopiesEveryReferenceField(t *testing.T) {
 				t.Errorf("field %s is shared between the policy and the entry", name)
 			}
 		case reflect.Slice:
-			f.Index(0).FieldByName("Key").SetString("changed")
-			if got := pv.FieldByName(name); got.Len() != 1 || got.Index(0).FieldByName("Key").String() != "k" {
-				t.Errorf("field %s is shared between the policy and the entry", name)
+			switch f.Type().Elem() {
+			case reflect.TypeOf(api.K8sToleration{}):
+				f.Index(0).FieldByName("Key").SetString("changed")
+				if got := pv.FieldByName(name); got.Len() != 1 || got.Index(0).FieldByName("Key").String() != "k" {
+					t.Errorf("field %s is shared between the policy and the entry", name)
+				}
+			case reflect.TypeFor[string]():
+				f.Index(0).SetString("changed")
+				if got := pv.FieldByName(name); got.Len() != 1 || got.Index(0).String() != "k" {
+					t.Errorf("field %s is shared between the policy and the entry", name)
+				}
 			}
 		}
 	}
@@ -146,7 +158,7 @@ func TestNewFlatInstancePolicy_CopiesEveryReferenceField(t *testing.T) {
 		t.Fatal("V1RuntimeTargetConfig has no reference field; the test checks nothing")
 	}
 	// Not vacuous for the known reference fields.
-	for _, want := range []string{"KubernetesServiceAccountMappings", "SafeToEvict", "SharedDirStorageBackends", "NodeSelector", "Tolerations"} {
+	for _, want := range []string{"KubernetesServiceAccountMappings", "SafeToEvict", "SharedDirStorageBackends", "NodeSelector", "Tolerations", "AssignableServiceAccounts"} {
 		if !slices.Contains(refFields, want) {
 			t.Fatalf("reference field %s was not checked (checked: %v)", want, refFields)
 		}
