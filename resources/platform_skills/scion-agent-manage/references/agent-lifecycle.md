@@ -1,6 +1,6 @@
 # Agent Lifecycle
 
-When to delete an agent, when to stop one, and who may authorize it.
+When to delete, suspend, or stop an agent, and who may authorize it.
 
 ## Upgrading in place instead of replacing
 
@@ -17,7 +17,9 @@ account after a hub upgrade) has a delegation chain without recorded provenance.
 authorized user to reincarnate it, or to recreate it directly: a user's reincarnation
 re-records the agent's delegation with that user as delegator, even without a role
 change. Reincarnating it yourself, or from another agent, keeps the chain and does not
-clear the denial.
+clear the denial. Because reincarnation returns before the replacement container finishes
+starting, verify that the agent reaches `running` (rather than `error`) and confirm a
+resumed-work receipt.
 
 ### Moving to another Runtime Broker
 
@@ -59,9 +61,15 @@ keeping its identity and its workspace (uncommitted work included). Check first 
 default disposition for a completed agent.** Add `--preserve-branch` to keep the branch
 for later review — but the flag does not push; confirm the branch is on the remote first.
 
-`scion stop` is justified only when you need the agent's terminal state within the
-current work phase — for example, to inspect logs before deciding whether output was
-accepted. Time-box it; do not leave agents stopped indefinitely.
+When an agent must remain available for follow-up — such as an unanswered human question,
+open PR review, or an idle lead between assignments — and its harness supports session
+resume, ensure its state and handoff are durable and use `scion suspend <name>` (under the
+same creator/supervisor authority) to stop the container while keeping the harness session
+resumable. Suspension releases the active broker and project capacity slot without closing
+open human questions; human silence is not closure. `scion stop` ends the session (the next
+`start` begins a fresh session) and is justified only for short, time-boxed terminal or
+incident inspection when resume is unsupported or unwanted; do not leave agents stopped
+indefinitely.
 
 > **Deleting an agent is safe because its deliverable is an artifact** — commits pushed
 > to the remote, files written to a shared volume the container's deletion cannot reach,
@@ -100,8 +108,10 @@ can delete it directly or explicit human instruction is required.
    task is done, not that the agent should be deleted. The user may want follow-up work.
 
 2. **An agent with an unanswered question to a human is not complete.** "Design complete"
-   does not mean "conversation complete." Before deleting any agent, ask: *has this agent
-   raised open questions to the user?* If yes, do not delete.
+   does not mean "conversation complete," and silence on a pending question is not closure.
+   Before deleting any agent, ask: *has this agent raised open questions to the user?* If
+   yes, do not delete (suspending an idle resume-capable agent after durable state is
+   written is fine while waiting, and still keeps the question open).
 
 3. **An agent's own readiness signal is not permission.** An agent saying it is ready for
    cleanup does not constitute user permission to delete it. Only a human can authorize
@@ -130,9 +140,12 @@ can delete it directly or explicit human instruction is required.
   or apply the role-based rules above.
 - **Interpreting "clean up" as permission to delete leads.** It never is, unless the
   human names the specific workstream being closed.
-- **Leaving agents stopped indefinitely as an audit trail.** Terminal logs have value
-  during an active workstream, but stopped agents consume system resources and count
-  against the 50-agent ceiling. Time-box it: GC stopped agents at milestone boundaries
-  and commit durable findings to files.
+- **Leaving agents stopped indefinitely as an audit trail.** Stopped and suspended agents
+  release active broker and project capacity slots, but stopped agents still retain
+  workspaces, clutter project listings, and lose their active session (restarting them
+  begins a fresh session and requires an available capacity slot). Time-box operational
+  stops: write durable findings (including any required retrospective) while the agent is
+  still running, then delete completed workers (or `scion suspend` resume-capable agents
+  that legitimately await follow-up).
 - **Deleting an agent with unpushed work.** Always verify work is pushed to the
   remote (not just committed locally) or written to a shared volume before deletion.
