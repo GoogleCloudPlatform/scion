@@ -76,6 +76,16 @@ func flatTargetTypeCheck(targetType string) (experiment string, canonical bool) 
 	return "", true
 }
 
+// flatCloudRunBroker reports whether broker is a flat Runtime Broker bound to
+// a canonical Cloud Run runtime target, via flatTargetTypeCheck.
+func flatCloudRunBroker(broker *store.RuntimeBroker) bool {
+	if broker == nil || !broker.IsFlat() || broker.RuntimeTarget == nil {
+		return false
+	}
+	exp, canonical := flatTargetTypeCheck(broker.RuntimeTarget.Type)
+	return exp == experiments.FlatCloudRunTarget && canonical
+}
+
 // maxEchoedRuntimeTargetType bounds the runtime target type a refusal echoes:
 // the value is untrusted Runtime Broker input.
 const maxEchoedRuntimeTargetType = 64
