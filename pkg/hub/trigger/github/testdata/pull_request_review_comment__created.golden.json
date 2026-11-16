@@ -57,7 +57,7 @@
     "side": "RIGHT",
     "state": "open",
     "title": "Add retry backoff to webhook dispatcher",
-    "updated_at": "2026-05-01T11:25:00Z"
+    "updated_at": "2026-05-01T11:25:02Z"
   },
   "lists": {
     "assignees": [
@@ -90,7 +90,7 @@
       "path": "pkg/hub/dispatcher/backoff.go",
       "pull_request_review_id": 800202,
       "side": "RIGHT",
-      "updated_at": "2026-05-01T11:25:00Z",
+      "updated_at": "2026-05-01T11:25:02Z",
       "user": {
         "html_url": "https://github.com/octocat",
         "id": 202,

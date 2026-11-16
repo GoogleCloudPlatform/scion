@@ -653,3 +653,64 @@ func TestNormalize_LastResortAttributeCeilingDeletesInsteadOfCorrupting(t *testi
 	require.NoError(t, err)
 	assert.LessOrEqual(t, len(attrBytes), DefaultMaxAttributesBytes)
 }
+
+func TestNormalize_CommentOccurredAtCreatedVsEdited(t *testing.T) {
+	createdTS := "2026-05-01T10:00:00Z"
+	updatedTS := "2026-05-01T10:09:00Z"
+	wantCreated := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	wantUpdated := time.Date(2026, 5, 1, 10, 9, 0, 0, time.UTC)
+
+	issueCommentPayload := func(action string) []byte {
+		return []byte(fmt.Sprintf(`{
+			"action": %q,
+			"installation": {"id": 10},
+			"repository": {"id": 1, "name": "r", "full_name": "o/r", "private": false, "owner": {"login": "o", "id": 1, "type": "User"}},
+			"sender": {"login": "u", "id": 2, "type": "User"},
+			"issue": {"number": 5, "state": "open", "title": "T", "html_url": "https://github.com/o/r/issues/5"},
+			"comment": {
+				"id": 99, "body": "note",
+				"html_url": "https://github.com/o/r/issues/5#issuecomment-99",
+				"created_at": %q,
+				"updated_at": %q
+			}
+		}`, action, createdTS, updatedTS))
+	}
+
+	resICCreated, err := Normalize(EventIssueComment, "d-ic-c", issueCommentPayload("created"), Options{AppSlug: "scion"})
+	require.NoError(t, err)
+	assert.Equal(t, wantCreated, resICCreated.OccurredAt, "issue_comment.created must prefer comment.created_at over comment.updated_at")
+	assert.Equal(t, createdTS, resICCreated.Attributes["created_at"])
+	assert.Equal(t, updatedTS, resICCreated.Attributes["updated_at"])
+
+	resICEdited, err := Normalize(EventIssueComment, "d-ic-e", issueCommentPayload("edited"), Options{AppSlug: "scion"})
+	require.NoError(t, err)
+	assert.Equal(t, wantUpdated, resICEdited.OccurredAt, "issue_comment.edited must prefer comment.updated_at over comment.created_at")
+
+	reviewCommentPayload := func(action string) []byte {
+		return []byte(fmt.Sprintf(`{
+			"action": %q,
+			"installation": {"id": 10},
+			"repository": {"id": 1, "name": "r", "full_name": "o/r", "private": false, "owner": {"login": "o", "id": 1, "type": "User"}},
+			"sender": {"login": "u", "id": 2, "type": "User"},
+			"pull_request": {
+				"number": 5, "state": "open", "title": "T", "html_url": "https://github.com/o/r/pull/5",
+				"base": {"ref": "main", "sha": "111", "repo": {"id": 1, "full_name": "o/r", "name": "r", "private": false}},
+				"head": {"ref": "feat", "sha": "222", "repo": {"id": 1, "full_name": "o/r", "name": "r", "private": false}}
+			},
+			"comment": {
+				"id": 199, "body": "inline note", "path": "a.go", "line": 3, "side": "RIGHT",
+				"html_url": "https://github.com/o/r/pull/5#discussion_r199",
+				"created_at": %q,
+				"updated_at": %q
+			}
+		}`, action, createdTS, updatedTS))
+	}
+
+	resPRCCreated, err := Normalize(EventPullRequestReviewComment, "d-prc-c", reviewCommentPayload("created"), Options{AppSlug: "scion"})
+	require.NoError(t, err)
+	assert.Equal(t, wantCreated, resPRCCreated.OccurredAt, "pull_request_review_comment.created must prefer comment.created_at over comment.updated_at")
+
+	resPRCEdited, err := Normalize(EventPullRequestReviewComment, "d-prc-e", reviewCommentPayload("edited"), Options{AppSlug: "scion"})
+	require.NoError(t, err)
+	assert.Equal(t, wantUpdated, resPRCEdited.OccurredAt, "pull_request_review_comment.edited must prefer comment.updated_at over comment.created_at")
+}

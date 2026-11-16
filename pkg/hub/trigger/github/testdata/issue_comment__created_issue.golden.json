@@ -46,7 +46,7 @@
     "sender_type": "User",
     "state": "open",
     "title": "Webhook delivery retries should preserve idempotency",
-    "updated_at": "2026-05-01T11:00:00Z"
+    "updated_at": "2026-05-01T11:00:02Z"
   },
   "lists": {
     "assignees": [
@@ -66,7 +66,7 @@
       "html_url": "https://github.com/octo-org/octo-repo/issues/19#issuecomment-700101",
       "id": 700101,
       "node_id": "IC_kwDOA12345",
-      "updated_at": "2026-05-01T11:00:00Z",
+      "updated_at": "2026-05-01T11:00:02Z",
       "user": {
         "html_url": "https://github.com/hubot",
         "id": 203,
