@@ -14,7 +14,22 @@
 
 name: Build and Deploy Documentation
 
-on:
+# SAFETY: `workflow_run` is required here because GoogleCloudPlatform/scion's
+# `github-pages` environment enforces branch protection allowing deployments
+# ONLY from `refs/heads/main` (tag-triggered release workflows cannot deploy to
+# Pages directly, and default `GITHUB_TOKEN` events cannot chain
+# `workflow_dispatch`). This trigger is safe here because:
+# 1. `check-trigger` rejects `pull_request`-originated runs and cross-repo/fork
+#    heads (`workflow_run.event != 'pull_request'` and both `repository` and
+#    `head_repository` equal `GoogleCloudPlatform/scion`).
+# 2. `build-docs` checks out ONLY the default branch (`refs/heads/main` with
+#    `persist-credentials: false`) -- it never checks out
+#    `workflow_run.head_sha`, never downloads workflow artifacts, and never
+#    interpolates untrusted event metadata into `run:` scripts.
+# 3. `assemble-pages.mjs` reads only published GitHub Release tarballs from
+#    `GoogleCloudPlatform/scion`, verifying `.sha256` digests and rejecting
+#    non-regular files, absolute paths, and `..` traversal before extraction.
+on: # zizmor: ignore[dangerous-triggers] -- checks out main only, never workflow_run head or artifacts; see SAFETY note above
   push:
     branches: [ main ]
     paths:
@@ -46,7 +61,7 @@ permissions:
 # and schedule every job runs only in GoogleCloudPlatform/scion; forks stage PRs.
 jobs:
   check-trigger:
-    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (github.event_name != 'workflow_run' || (github.repository == 'GoogleCloudPlatform/scion' && github.event.workflow_run.repository.full_name == 'GoogleCloudPlatform/scion')) }}
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (github.event_name != 'workflow_run' || (github.repository == 'GoogleCloudPlatform/scion' && github.event.workflow_run.repository.full_name == 'GoogleCloudPlatform/scion' && github.event.workflow_run.head_repository.full_name == 'GoogleCloudPlatform/scion' && github.event.workflow_run.event != 'pull_request')) }}
     runs-on: ubuntu-latest
     permissions:
       actions: read

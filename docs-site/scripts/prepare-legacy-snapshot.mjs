@@ -70,9 +70,10 @@ export function patchLegacyAstroConfig(source) {
 	out = out.replace(baseRe, 'base: buildVersion.base,');
 
 	// Rewrite `redirects: { '/from': '/to', ... },` so targets carry `${buildVersion.base}` and trailing `/`.
-	const redirectsRe = /\bredirects:\s*\{([\s\S]*?)\n\t\},/;
+	const redirectsRe = /\bredirects:\s*\{([\s\S]*?)\n([ \t]*)\},/;
 	const redirectsMatch = redirectsRe.exec(out);
 	if (redirectsMatch) {
+		const indent = redirectsMatch[2];
 		const rawEntries = redirectsMatch[1].replace(
 			/(:\s*)'(\/[^']+)'/g,
 			(_m, colon, target) => {
@@ -80,7 +81,7 @@ export function patchLegacyAstroConfig(source) {
 				return `${colon}\`\${buildVersion.base}${withSlash}\``;
 			},
 		);
-		out = out.replace(redirectsRe, `redirects: {${rawEntries}\n\t},`);
+		out = out.replace(redirectsRe, `redirects: {${rawEntries}\n${indent}},`);
 	}
 
 	const integrationsRe = /integrations:\s*\[\s*\n(\s*)d2\(\),/;

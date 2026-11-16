@@ -194,12 +194,51 @@ describe('verifyTarListingSafe and extractVerifiedSnapshotTarball', () => {
 		assert.throws(
 			() =>
 				verifyTarListingSafe('-rw-r--r-- root/root 12 2026-11-15 22:00 /etc/passwd'),
-			/Absolute tar entry path/,
+			/Absolute or backslash tar entry path/,
 		);
 		assert.throws(
 			() =>
 				verifyTarListingSafe(
 					'-rw-r--r-- root/root 12 2026-11-15 22:00 ./overview/../../escape.html',
+				),
+			/Path traversal/,
+		);
+
+		// BSD/macOS tar formats (`Mon DD HH:MM` and `Mon DD  YYYY`), including spaced filenames:
+		verifyTarListingSafe(
+			[
+				'drwxr-xr-x  0 root   wheel       0 Nov 15 22:00 ./',
+				'-rw-r--r--  0 root   wheel    1024 Nov  5  2026 ./overview/my page.html',
+			].join('\n'),
+		);
+		assert.throws(
+			() =>
+				verifyTarListingSafe(
+					'-rw-r--r--  0 root   wheel      12 Nov 15 22:00 ./foo/../bar/file name.txt',
+				),
+			/Path traversal/,
+		);
+
+		// Unparseable verbose lines must fail closed instead of splitting on whitespace:
+		assert.throws(
+			() => verifyTarListingSafe('-rw-r--r-- malformed-line ./foo/../bar/file name.txt'),
+			/Could not parse tar entry path/,
+		);
+
+		// Non-greedy timestamp anchor + plain `tar -tzf` cross-check both catch traversal
+		// even if a filename itself embeds a fake timestamp string:
+		assert.throws(
+			() =>
+				verifyTarListingSafe(
+					'-rw-r--r-- root/root 12 2026-11-15 22:00 ./../evil 2026-11-15 22:00 innocent.txt',
+				),
+			/Path traversal/,
+		);
+		assert.throws(
+			() =>
+				verifyTarListingSafe(
+					'-rw-r--r-- root/root 12 2026-11-15 22:00 ./innocent.txt',
+					'./../evil.txt\n',
 				),
 			/Path traversal/,
 		);
@@ -345,5 +384,31 @@ describe('patchLegacyAstroConfig and prepareLegacySnapshotDir', () => {
 		const mainDocsDir = path.resolve(import.meta.dirname, '..');
 		const res = await prepareLegacySnapshotDir(mainDocsDir, mainDocsDir);
 		assert.deepEqual(res, { backfilled: false });
+	});
+
+	it('rewrites space-indented redirects blocks accurately in patchLegacyAstroConfig', () => {
+		const spaceIndented = [
+			"import { defineConfig } from 'astro/config';",
+			"import starlight from '@astrojs/starlight';",
+			"import starlightLinksValidator from 'starlight-links-validator';",
+			"import d2 from 'astro-d2';",
+			'export default defineConfig({',
+			"  site: 'https://googlecloudplatform.github.io',",
+			"  base: '/scion',",
+			'  redirects: {',
+			"    '/old-route': '/new-route',",
+			'  },',
+			'  integrations: [',
+			'    d2(),',
+			'    starlight({',
+			"      title: 'Scion',",
+			'    }),',
+			'  ],',
+			'});',
+		].join('\n');
+
+		const patched = patchLegacyAstroConfig(spaceIndented);
+		assert.match(patched, /'\/old-route': `\$\{buildVersion\.base\}\/new-route\/`/);
+		assert.match(patched, /\n {2}\},\n {2}integrations:/);
 	});
 });

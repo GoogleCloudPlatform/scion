@@ -274,13 +274,40 @@ export function renderRedirectHtml(targetPath, channelLabel) {
 	].join('\n');
 }
 
+const TAR_VERBOSE_PATH_RE =
+	/^[d-].*?(?:\s[0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-9]{2}(?::[0-9]{2})?|\s[A-Za-z]{3}\s+[0-9]{1,2}\s+(?:[0-9]{2}:[0-9]{2}|[0-9]{4}))\s(.+)$/;
+
 /**
- * Validate `tar -tvzf` listing lines to block path traversal (`..`), absolute paths,
- * and symbolic/hard links (`l`, `h`, block/char devices) before extracting an archive.
+ * Validate a single tar entry path, rejecting empty paths, absolute paths, Windows backslashes,
+ * and `..` traversal segments.
+ *
+ * @param {string} rawEntryPath
+ */
+function verifyTarEntryPathSafe(rawEntryPath) {
+	const entryPath = rawEntryPath.replace(/\r$/, '');
+	if (!entryPath.trim()) {
+		throw new Error('Empty tar entry path rejected.');
+	}
+	if (entryPath.startsWith('/') || entryPath.includes('\\')) {
+		throw new Error(`Absolute or backslash tar entry path rejected: ${entryPath}`);
+	}
+	const cleaned = entryPath.replace(/^\.\//, '');
+	const segments = cleaned.split('/').filter(Boolean);
+	if (segments.some((seg) => seg === '..')) {
+		throw new Error(`Path traversal tar entry rejected: ${entryPath}`);
+	}
+}
+
+/**
+ * Validate `tar -tvzf` listing lines (and optional `tar -tzf` plain path lines) to block path
+ * traversal (`..`), absolute paths, backslashes, and symbolic/hard links (`l`, `h`, block/char
+ * devices) before extracting an archive. Supports both GNU tar (`YYYY-MM-DD HH:MM`) and BSD/macOS
+ * tar (`Mon DD HH:MM` / `Mon DD  YYYY`) verbose listings and fails closed on unparseable lines.
  *
  * @param {string} verboseListing
+ * @param {string} [plainListing]
  */
-export function verifyTarListingSafe(verboseListing) {
+export function verifyTarListingSafe(verboseListing, plainListing) {
 	const lines = verboseListing.split('\n').filter((line) => line.trim().length > 0);
 	if (lines.length === 0) {
 		throw new Error('Archive is empty.');
@@ -290,21 +317,25 @@ export function verifyTarListingSafe(verboseListing) {
 		if (typeChar !== '-' && typeChar !== 'd') {
 			throw new Error(`Unsafe tar entry type "${typeChar}" in archive line: ${line}`);
 		}
-		// Extract path after timestamp column in `tar -tvf` output (`perms owner size YYYY-MM-DD HH:MM path`).
-		const match = /\s[0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-9]{2}(?::[0-9]{2})?\s+(.+)$/.exec(
-			line,
-		);
-		const entryPath = (match ? match[1] : line.split(/\s+/).at(-1) || '').trim();
-		if (!entryPath) {
+		const match = TAR_VERBOSE_PATH_RE.exec(line);
+		if (!match) {
 			throw new Error(`Could not parse tar entry path from line: ${line}`);
 		}
-		if (entryPath.startsWith('/') || entryPath.startsWith('\\')) {
-			throw new Error(`Absolute tar entry path rejected: ${entryPath}`);
+		verifyTarEntryPathSafe(match[1]);
+	}
+
+	if (plainListing !== undefined) {
+		const plainLines = plainListing
+			.split('\n')
+			.map((l) => l.replace(/\r$/, ''))
+			.filter((l) => l.length > 0);
+		if (plainLines.length !== lines.length) {
+			throw new Error(
+				`Tar listing mismatch: verbose had ${lines.length} entries, plain had ${plainLines.length}.`,
+			);
 		}
-		const cleaned = entryPath.replace(/^\.\//, '');
-		const segments = cleaned.split('/').filter(Boolean);
-		if (segments.some((seg) => seg === '..')) {
-			throw new Error(`Path traversal tar entry rejected: ${entryPath}`);
+		for (const rawPath of plainLines) {
+			verifyTarEntryPathSafe(rawPath);
 		}
 	}
 }
@@ -336,13 +367,20 @@ export async function extractVerifiedSnapshotTarball({ tarPath, shaPath, pagesRo
 		);
 	}
 
-	const listing = execFileSync('tar', ['-tvzf', tarPath], { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 });
-	verifyTarListingSafe(listing);
+	const listing = execFileSync('tar', ['-tvzf', tarPath], {
+		encoding: 'utf8',
+		maxBuffer: 32 * 1024 * 1024,
+	});
+	const plainListing = execFileSync('tar', ['-tzf', tarPath], {
+		encoding: 'utf8',
+		maxBuffer: 32 * 1024 * 1024,
+	});
+	verifyTarListingSafe(listing, plainListing);
 
 	const destDir = path.join(pagesRoot, tag);
 	await fs.rm(destDir, { recursive: true, force: true });
 	await fs.mkdir(destDir, { recursive: true });
-	execFileSync('tar', ['-xzf', tarPath, '-C', destDir]);
+	execFileSync('tar', ['--no-same-owner', '--no-same-permissions', '-xzf', tarPath, '-C', destDir]);
 }
 
 /**

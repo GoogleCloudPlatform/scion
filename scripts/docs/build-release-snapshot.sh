@@ -143,7 +143,14 @@ TAR_PATH="${OUT_DIR}/${TAR_NAME}"
 tar -czf "$TAR_PATH" -C "${WORK_DOCS}/dist" .
 (
   cd "$OUT_DIR"
-  sha256sum -- "$TAR_NAME" > "${WORK_DIR}/${SHA_NAME}"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum -- "$TAR_NAME" > "${WORK_DIR}/${SHA_NAME}"
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 -- "$TAR_NAME" > "${WORK_DIR}/${SHA_NAME}"
+  else
+    echo "error: neither sha256sum nor shasum found on PATH." >&2
+    exit 1
+  fi
   mv -- "${WORK_DIR}/${SHA_NAME}" "${OUT_DIR}/${SHA_NAME}"
 )
 
