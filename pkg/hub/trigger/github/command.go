@@ -220,6 +220,11 @@ func isWordRune(r rune) bool {
 	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '-'
 }
 
+// Mention token boundary helpers below (mentionStartBoundary,
+// mentionEndBoundary, mentionTrailingPunctOrSpace) mirror ExtractProseMentions,
+// proseMentionEndBoundary, and proseMentionPunctOrSpace in
+// pkg/messages/mentions.go so package github stays a stdlib-only leaf. Mirror
+// CommonMark / mention-boundary fixes across both files.
 func mentionStartBoundary(runes []rune, atIdx int) (leadingUnderscores int, ok bool) {
 	if atIdx == 0 {
 		return 0, true
@@ -284,8 +289,12 @@ func mentionTrailingPunctOrSpace(runes []rune, idx int) bool {
 		next == '*' || next == '~' || next == '>'
 }
 
-// proseLines reports, for each line, whether it is prose (outside CommonMark
-// fenced code blocks and '>' blockquote lines), matching pkg/messages.
+// CommonMark prose and inline-code helpers below (proseLines, fenceIndentWidth,
+// openingFence, closesFence, byteRunLength, inlineCodeSpans, findBacktickRun)
+// are copied from pkg/messages/mentions.go (proseLines, fenceIndentWidth,
+// openingFence, closesFence, runLength, inlineCodeSpans, findBacktickRun) to
+// preserve this package's stdlib-only leaf invariant. Mirror CommonMark fixes
+// between pkg/messages/mentions.go and this file.
 func proseLines(lines []string) []bool {
 	prose := make([]bool, len(lines))
 	var fenceChar byte
