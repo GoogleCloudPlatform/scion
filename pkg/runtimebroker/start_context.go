@@ -679,7 +679,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	}
 	if crIdentity.Identity != nil {
 		switch crIdentity.Identity.Mode {
-		case store.GCPMetadataModeAssign:
+		case store.GCPMetadataModeAssign, store.GCPMetadataModePassthrough:
 			gcpMetadataMode = store.GCPMetadataModePassthrough
 		case store.GCPMetadataModeBlock:
 			gcpMetadataMode = store.GCPMetadataModeBlock

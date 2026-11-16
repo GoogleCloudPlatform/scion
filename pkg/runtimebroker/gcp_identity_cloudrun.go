@@ -112,10 +112,6 @@ type callCounter struct{ n atomic.Int64 }
 func (c *callCounter) add()         { c.n.Add(1) }
 func (c *callCounter) count() int64 { return c.n.Load() }
 
-// flatCloudRunGCPIdentityRefusalText is the refusal of a per-agent GCP
-// identity on a flat cloudrun instance, after the agent's name.
-const flatCloudRunGCPIdentityRefusalText = "flat Cloud Run instances do not support per-agent GCP identities"
-
 // flatCloudRunTarget reports whether this server hosts a flat Runtime
 // Broker instance whose runtime target type is cloudrun. It reads only the
 // instance configuration (s.config.FlatInstance): the configured target
@@ -175,8 +171,9 @@ func flatCloudRunRequestedMode(in startContextInputs) (mode string, unset bool) 
 }
 
 // flatCloudRunIdentityDecision resolves the service account a flat Cloud Run
-// instance runs an agent as (ptone/scion#8182, ptone/scion#7764), or refuses
-// the dispatch before any ownership, project-file or runtime side effect:
+// instance runs an agent as (ptone/scion#8183, ptone/scion#8182,
+// ptone/scion#7764), or refuses the dispatch before any ownership, project-file
+// or runtime side effect:
 //
 //   - unset: runs as the instance's block_service_account with
 //     SCION_METADATA_MODE=block; no native marker is required (skew-safe when
@@ -185,14 +182,31 @@ func flatCloudRunRequestedMode(in startContextInputs) (mode string, unset bool) 
 //     (RequireLocalRuntime, mapped to block for legacy parity): requires the
 //     Hub's native Cloud Run marker (cloudRunNativeMarked) and runs as the
 //     instance's block_service_account with SCION_METADATA_MODE=block;
-//   - assign and explicit (unconfined) passthrough: refused in phase I1 with
-//     flatCloudRunGCPIdentityRefusalText (implemented in phase I2).
+//   - assign: requires the Hub's native Cloud Run marker, a non-empty service
+//     account email (from GCPIdentity on create, or hub-sourced resolved env on
+//     start/restart), allow-list membership in the instance's snapshotted
+//     runtime_target.assignable_service_accounts, and absence of
+//     SCION_INIT_FIREWALL; runs as the assigned account with
+//     SCION_METADATA_MODE=passthrough and informational SA/project env;
+//   - explicit (unconfined) passthrough: requires no native marker and runs as
+//     the instance's snapshotted runtime_target.service_account with
+//     SCION_METADATA_MODE=passthrough.
 //
 // Non-flat servers and flat servers of other target types return the zero
-// value and nil. Refusals name the agent (and, if block_service_account is
-// absent on an unvalidated test server, the setting key), never an account or
-// project.
+// value and nil. Refusals and warnings name the agent and instance setting path
+// only, never a service account email or project.
 func (s *Server) flatCloudRunIdentityDecision(in startContextInputs) (cloudRunIdentity, *startContextError) {
+	return s.flatCloudRunIdentityDecisionWithLog(in, true)
+}
+
+// flatCloudRunIdentityCheck evaluates flatCloudRunIdentityDecision without
+// emitting server-side warnings, for callers that pre-probe whether the request
+// will pass before buildStartContext runs flatCloudRunIdentityDecision.
+func (s *Server) flatCloudRunIdentityCheck(in startContextInputs) (cloudRunIdentity, *startContextError) {
+	return s.flatCloudRunIdentityDecisionWithLog(in, false)
+}
+
+func (s *Server) flatCloudRunIdentityDecisionWithLog(in startContextInputs, logWarn bool) (cloudRunIdentity, *startContextError) {
 	if !s.flatCloudRunTarget() {
 		return cloudRunIdentity{}, nil
 	}
@@ -230,17 +244,86 @@ func (s *Server) flatCloudRunIdentityDecision(in startContextInputs) (cloudRunId
 			Identity:  &api.CloudRunIdentity{ServiceAccount: blockSA, Mode: store.GCPMetadataModeBlock},
 			Selection: s.flatDispatchSelection(),
 		}, nil
-	case store.GCPMetadataModeAssign, store.GCPMetadataModePassthrough:
-		return cloudRunIdentity{}, &startContextError{
-			Status:  http.StatusBadRequest,
-			Message: fmt.Sprintf("agent %q: %s", in.Name, flatCloudRunGCPIdentityRefusalText),
+	case store.GCPMetadataModePassthrough:
+		instSA, ok := s.flatCloudRunIdentity.instanceAccount()
+		if !ok {
+			return cloudRunIdentity{}, flatCloudRunServiceAccountUnsetRefusal(in.Name, instanceKey)
 		}
+		return cloudRunIdentity{
+			Identity:  &api.CloudRunIdentity{ServiceAccount: instSA, Mode: store.GCPMetadataModePassthrough},
+			Selection: s.flatDispatchSelection(),
+		}, nil
+	case store.GCPMetadataModeAssign:
+		if !cloudRunNativeMarked(in) {
+			return cloudRunIdentity{}, &startContextError{
+				Status:  http.StatusBadRequest,
+				Message: fmt.Sprintf("agent %q: the hub did not mark this dispatch for native Cloud Run identity", in.Name),
+			}
+		}
+		var saEmail, projectID string
+		if in.Operation == opCreate {
+			if in.Config != nil && in.Config.GCPIdentity != nil {
+				saEmail = in.Config.GCPIdentity.SAEmail
+				projectID = in.Config.GCPIdentity.ProjectID
+			}
+		} else if in.ResolvedEnv["SCION_METADATA_MODE_SOURCE"] == "hub" && in.ResolvedEnv["SCION_METADATA_MODE"] == store.GCPMetadataModeAssign {
+			saEmail = in.ResolvedEnv["SCION_METADATA_SA_EMAIL"]
+			projectID = in.ResolvedEnv["SCION_METADATA_PROJECT_ID"]
+		}
+		saEmail = strings.ToLower(strings.TrimSpace(saEmail))
+		if saEmail == "" {
+			return cloudRunIdentity{}, &startContextError{
+				Status:  http.StatusBadRequest,
+				Message: fmt.Sprintf("agent %q: GCP identity mode %q requires a service account email, and none was provided", in.Name, store.GCPMetadataModeAssign),
+			}
+		}
+		if !s.flatCloudRunIdentity.accountAssignable(saEmail) {
+			if logWarn {
+				s.agentLifecycleLog.Warn(
+					"GCP identity mode assign on flat Cloud Run Instances: the assigned account is not in runtime_target.assignable_service_accounts",
+					"agent", in.Name, "instance", instanceKey)
+			}
+			return cloudRunIdentity{}, flatCloudRunNotAttachableRefusal(in.Name, instanceKey)
+		}
+		id := &api.CloudRunIdentity{ServiceAccount: saEmail, Mode: store.GCPMetadataModeAssign}
+		if refusal := refuseCloudRunInitFirewall(in.Name, id, flatCloudRunInitFirewallEnv(in)); refusal != nil {
+			return cloudRunIdentity{}, refusal
+		}
+		return cloudRunIdentity{
+			Identity:  id,
+			SAEmail:   saEmail,
+			ProjectID: projectID,
+			Selection: s.flatDispatchSelection(),
+		}, nil
 	default:
 		return cloudRunIdentity{}, &startContextError{
 			Status:  http.StatusBadRequest,
 			Message: fmt.Sprintf("agent %q: GCP identity mode %q is not valid on Cloud Run Instances", in.Name, mode),
 		}
 	}
+}
+
+// flatCloudRunInitFirewallEnv extracts SCION_INIT_FIREWALL using the same
+// ResolvedEnv + Config.Env precedence and NoAuth secret-fetchable stripping as
+// buildStartContext so flatCloudRunIdentityDecision refuses assign + init
+// firewall before any ownership or project-file side effect.
+func flatCloudRunInitFirewallEnv(in startContextInputs) map[string]string {
+	val, ok := in.ResolvedEnv[cloudRunInitFirewallEnv]
+	if ok && in.NoAuth && in.EnvClassifications != nil && in.EnvClassifications[cloudRunInitFirewallEnv] == api.EnvKindSecretFetchable {
+		val, ok = "", false
+	}
+	if in.Config != nil {
+		for _, e := range in.Config.Env {
+			k, v, found := strings.Cut(e, "=")
+			if found && k == cloudRunInitFirewallEnv {
+				val, ok = v, true
+			}
+		}
+	}
+	if !ok {
+		return nil
+	}
+	return map[string]string{cloudRunInitFirewallEnv: val}
 }
 
 // hubDefaultPassthrough reports whether a passthrough mode came from the
@@ -319,7 +402,7 @@ func (s *Server) resolveCloudRunIdentity(ctx context.Context, in startContextInp
 		return cloudRunIdentity{}, nil
 	}
 	if s.flatCloudRunTarget() {
-		return s.flatCloudRunIdentityDecision(in)
+		return s.flatCloudRunIdentityCheck(in)
 	}
 	if !cloudRunNativeIdentityEnabled(ctx, in) {
 		return cloudRunIdentity{}, nil

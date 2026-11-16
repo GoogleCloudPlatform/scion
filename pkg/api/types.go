@@ -1679,10 +1679,10 @@ type KubernetesBlockIdentity struct {
 // refuses it (fail closed). See StartOptions.CloudRunIdentity.
 type CloudRunIdentity struct {
 	// ServiceAccount is the account the instance runs as (the assigned
-	// account, or the block account).
+	// account, the block account, or a flat instance's configured account).
 	ServiceAccount string
 	// Mode is the GCP identity mode as resolved, before the metadata env
-	// rewrite: "assign" or "block".
+	// rewrite: "assign", "block" or "passthrough".
 	Mode string
 }
 

@@ -82,10 +82,9 @@ func requireNoFlatTokenStep(t *testing.T, logs *bytes.Buffer) {
 }
 
 // The probe's control: with the experiment off, a flat Cloud Run dispatch
-// with no GCP identity request (any request is refused first, E-10) passes
-// the identity resolution and reaches the agent token step, which writes
-// both probe lines, so their absence in the refusal tests shows a return
-// before that step.
+// with no GCP identity request passes the identity resolution and reaches the
+// agent token step, which writes both probe lines, so their absence in the
+// refusal tests shows a return before that step.
 func TestBuildStartContext_CloudRunFlatTokenProbeControl(t *testing.T) {
 	srv := newFlatCloudRunStartServer(t)
 	logs := probeFlatTokenStep(srv)
@@ -113,23 +112,21 @@ func TestBuildStartContext_CloudRunFlatTokenProbeControl(t *testing.T) {
 	}
 }
 
-// With the hub.cloudrun_native_identity experiment on, a flat Cloud Run
-// instance refuses every passthrough form of GCP identity at dispatch, as
-// TestBuildStartContext_CloudRunFlatInstanceRefused does for assign, block
-// and an unset mode: no start context is built (so the handler makes no
-// runtime call), and the refusal returns before the agent token step (the
-// token probe). The assertions stay off the full message wording, which
-// differs by mode; they check a 4xx naming the agent and Cloud Run, no
-// account, and none of the refusals of a non-flat dispatch.
-func TestBuildStartContext_CloudRunFlatInstanceRefusesPassthroughForms(t *testing.T) {
-	tests := []struct {
+// On a flat Cloud Run instance, confined passthrough (RequireLocalRuntime /
+// hub-default passthrough) downgrades to block and therefore still requires the
+// hub's native marker (refusing unmarked dispatches before the agent token
+// step), whereas unconfined passthrough (explicit passthrough on create or
+// hub-resolved passthrough on start) runs as runtime_target.service_account
+// with SCION_METADATA_MODE=passthrough and requires no native marker.
+func TestBuildStartContext_CloudRunFlatInstancePassthroughForms(t *testing.T) {
+	refusedConfined := []struct {
 		name string
 		in   func(projectDir string) startContextInputs
 	}{
 		{
 			// An unset mode the hub resolved to its hub-default passthrough
-			// grant (marked RequireLocalRuntime).
-			name: "hub-default passthrough",
+			// grant (marked RequireLocalRuntime) without native marker.
+			name: "unmarked hub-default passthrough on create",
 			in: func(projectDir string) startContextInputs {
 				return startContextInputs{
 					Name:        "agent-cr-flat-pt",
@@ -144,42 +141,10 @@ func TestBuildStartContext_CloudRunFlatInstanceRefusesPassthroughForms(t *testin
 			},
 		},
 		{
-			name: "explicit passthrough",
-			in: func(projectDir string) startContextInputs {
-				return startContextInputs{
-					Name:        "agent-cr-flat-pt",
-					ProjectPath: projectDir,
-					Config: &CreateAgentConfig{
-						GCPIdentity:      &GCPIdentityConfig{MetadataMode: "passthrough"},
-						HubAgentDefaults: crGateDefaults(),
-					},
-					HTTPRequest: httptest.NewRequest("POST", "/api/v1/agents", nil),
-					Operation:   opCreate,
-				}
-			},
-		},
-		{
-			// A project-default passthrough reaches a start as the hub's
-			// resolved mode with SCION_METADATA_MODE_SOURCE=hub.
-			name: "project-default passthrough",
-			in: func(projectDir string) startContextInputs {
-				return startContextInputs{
-					Name:        "agent-cr-flat-pt",
-					ProjectPath: projectDir,
-					ResolvedEnv: map[string]string{
-						"SCION_METADATA_MODE":        "passthrough",
-						"SCION_METADATA_MODE_SOURCE": "hub",
-					},
-					HTTPRequest: httptest.NewRequest("POST", "/api/v1/agents/x/start", nil),
-					Operation:   opHTTPStart,
-				}
-			},
-		},
-		{
 			// The hub-default passthrough grant reaches a start as the
 			// hub's resolved mode with SCION_METADATA_MODE_SOURCE=hub and
-			// SCION_METADATA_REQUIRE_LOCAL_RUNTIME=true.
-			name: "hub-default passthrough on start",
+			// SCION_METADATA_REQUIRE_LOCAL_RUNTIME=true without native marker.
+			name: "unmarked hub-default passthrough on start",
 			in: func(projectDir string) startContextInputs {
 				return startContextInputs{
 					Name:        "agent-cr-flat-pt",
@@ -195,7 +160,7 @@ func TestBuildStartContext_CloudRunFlatInstanceRefusesPassthroughForms(t *testin
 			},
 		},
 	}
-	for _, tc := range tests {
+	for _, tc := range refusedConfined {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := newFlatCloudRunStartServer(t)
 			logs := probeFlatTokenStep(srv)
@@ -212,15 +177,63 @@ func TestBuildStartContext_CloudRunFlatInstanceRefusesPassthroughForms(t *testin
 			if !strings.Contains(sce.Message, "agent-cr-flat-pt") || !strings.Contains(sce.Message, "Cloud Run") {
 				t.Errorf("message %q must name the agent and Cloud Run", sce.Message)
 			}
-			for _, other := range []string{"not attachable", "block_service_account", "requires a service account email"} {
-				if strings.Contains(sce.Message, other) {
-					t.Errorf("message %q is a refusal of a non-flat dispatch (%q)", sce.Message, other)
-				}
-			}
 			if strings.Contains(sce.Message, crAssignedSA) || strings.Contains(sce.Message, "@") {
 				t.Errorf("message %q names an account", sce.Message)
 			}
 			requireNoFlatTokenStep(t, logs)
+		})
+	}
+
+	allowedUnconfined := []struct {
+		name string
+		in   func(projectDir string) startContextInputs
+	}{
+		{
+			name: "explicit passthrough on create without marker",
+			in: func(projectDir string) startContextInputs {
+				return startContextInputs{
+					Name:        "agent-cr-flat-pt",
+					ProjectPath: projectDir,
+					Config: &CreateAgentConfig{
+						GCPIdentity:      &GCPIdentityConfig{MetadataMode: "passthrough"},
+						HubAgentDefaults: crGateDefaults(),
+					},
+					HTTPRequest: httptest.NewRequest("POST", "/api/v1/agents", nil),
+					Operation:   opCreate,
+				}
+			},
+		},
+		{
+			name: "project-default passthrough on start without marker",
+			in: func(projectDir string) startContextInputs {
+				return startContextInputs{
+					Name:        "agent-cr-flat-pt",
+					ProjectPath: projectDir,
+					ResolvedEnv: map[string]string{
+						"SCION_METADATA_MODE":        "passthrough",
+						"SCION_METADATA_MODE_SOURCE": "hub",
+					},
+					HTTPRequest: httptest.NewRequest("POST", "/api/v1/agents/x/start", nil),
+					Operation:   opHTTPStart,
+				}
+			},
+		},
+	}
+	for _, tc := range allowedUnconfined {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newFlatCloudRunStartServer(t)
+			newTestGlobalSettings(t, testCloudRunAllowListGlobalSettingsYAML)
+			projectDir := newTestProjectSettings(t, testCloudRunProjectSettingsYAML)
+			sc, err := srv.buildStartContext(crGateCtx(), tc.in(projectDir))
+			if err != nil {
+				t.Fatalf("buildStartContext: %v", err)
+			}
+			if sc.Opts.CloudRunIdentity == nil || sc.Opts.CloudRunIdentity.ServiceAccount != flatCRTestInstanceSA || sc.Opts.CloudRunIdentity.Mode != "passthrough" {
+				t.Fatalf("CloudRunIdentity = %+v, want {%q passthrough}", sc.Opts.CloudRunIdentity, flatCRTestInstanceSA)
+			}
+			if got := sc.Opts.Env["SCION_METADATA_MODE"]; got != "passthrough" {
+				t.Errorf("SCION_METADATA_MODE = %q, want passthrough", got)
+			}
 		})
 	}
 }
