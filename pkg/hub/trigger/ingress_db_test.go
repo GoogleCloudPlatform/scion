@@ -1,0 +1,293 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !no_sqlite
+
+package trigger_test
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/durablequeue"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
+)
+
+type wakeRecordingQueue struct {
+	durablequeue.Queue
+	wakes atomic.Int64
+}
+
+func (w *wakeRecordingQueue) Wake(kind string) {
+	if kind == trigger.EventQueueKind {
+		w.wakes.Add(1)
+	}
+	w.Queue.Wake(kind)
+}
+
+type memAuditSink struct {
+	receipts []trigger.ReceiptAuditRecord
+	failures []trigger.SignatureFailureAuditRecord
+}
+
+func (m *memAuditSink) RecordReceipt(_ context.Context, rec trigger.ReceiptAuditRecord) {
+	m.receipts = append(m.receipts, rec)
+}
+
+func (m *memAuditSink) RecordSignatureFailure(_ context.Context, rec trigger.SignatureFailureAuditRecord) {
+	m.failures = append(m.failures, rec)
+}
+
+func TestIngress_EndToEndStoreAndQueue(t *testing.T) {
+	ctx := context.Background()
+	cs := entadapter.NewCompositeStore(enttest.NewClient(t))
+	now := time.Date(2026, 11, 16, 19, 0, 0, 0, time.UTC)
+
+	baseQ := durablequeue.NewQueue(cs, durablequeue.WithQueueClock(func() time.Time { return now }))
+	q := &wakeRecordingQueue{Queue: baseQ}
+	audit := &memAuditSink{}
+
+	projID := uuid.NewString()
+	require.NoError(t, cs.CreateProject(ctx, &store.Project{
+		ID:   projID,
+		Name: "ingress-proj",
+		Slug: "ingress-" + projID[:8],
+	}))
+
+	activeEp := &store.WebhookEndpoint{
+		ID:                  uuid.NewString(),
+		ProjectID:           projID,
+		Name:                "deploy-ep",
+		OwnerPrincipalKind:  store.DelegationPrincipalUser,
+		OwnerPrincipalID:    uuid.NewString(),
+		OwnerCredentialKind: "session",
+		SecretVersion:       1,
+		SignatureMode:       store.WebhookSignatureModeScionV1,
+		Status:              store.WebhookEndpointStatusActive,
+		CreatedBy:           "user-1",
+	}
+	require.NoError(t, cs.CreateWebhookEndpoint(ctx, activeEp))
+
+	disabledEp := &store.WebhookEndpoint{
+		ID:                  uuid.NewString(),
+		ProjectID:           projID,
+		Name:                "disabled-ep",
+		OwnerPrincipalKind:  store.DelegationPrincipalUser,
+		OwnerPrincipalID:    uuid.NewString(),
+		OwnerCredentialKind: "session",
+		SecretVersion:       1,
+		SignatureMode:       store.WebhookSignatureModeScionV1,
+		Status:              store.WebhookEndpointStatusDisabled,
+		CreatedBy:           "user-1",
+	}
+	require.NoError(t, cs.CreateWebhookEndpoint(ctx, disabledEp))
+
+	const epSecret = "dGVzdC13ZWJob29rLXNlY3JldC1zY2lvbi12MS0zMmJ5dGVz"
+	var secretErr error
+	ing := trigger.NewIngress(trigger.IngressConfig{
+		Store:      cs,
+		QueueStore: cs,
+		Queue:      q,
+		LoadSecret: func(_ context.Context, pID, eID string, ver int) (string, error) {
+			if secretErr != nil {
+				return "", secretErr
+			}
+			if pID == projID && eID == activeEp.ID && ver == 1 {
+				return epSecret, nil
+			}
+			return "", errors.New("secret not found")
+		},
+		ClientIP: func(r *http.Request) string { return "198.51.100.42" },
+		Enabled:  func() bool { return true },
+		Audit:    audit,
+		Now:      func() time.Time { return now },
+	})
+
+	sendSigned := func(epID, delivery, eventHdr, subjectHdr, contentType string, rawBody []byte) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+epID, bytes.NewReader(rawBody))
+		if contentType != "" {
+			req.Header.Set("Content-Type", contentType)
+		}
+		if delivery != "" {
+			req.Header.Set(trigger.HeaderDelivery, delivery)
+		}
+		if eventHdr != "" {
+			req.Header.Set(trigger.HeaderEvent, eventHdr)
+		}
+		if subjectHdr != "" {
+			req.Header.Set(trigger.HeaderSubject, subjectHdr)
+		}
+		req.Header.Set("User-Agent", "ScionSender/1.0")
+		req.Header.Set("Authorization", "Bearer should-never-be-stored")
+		req.Header.Set(trigger.HeaderSignature, trigger.SignScionV1(epSecret, now.Unix(), delivery, eventHdr, subjectHdr, rawBody))
+		rec := httptest.NewRecorder()
+		ing.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// 1. Happy path with X-Scion-Delivery, X-Scion-Event, and X-Scion-Subject.
+	payload := []byte(`{"service":"payments","sha":"deadbeef"}`)
+	rec := sendSigned(activeEp.ID, "deliv-100", "deploy.finished", "prod/payments", "application/json; charset=utf-8", payload)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	var resp trigger.IngressAcceptedResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, trigger.IngressStatusQueued, resp.Status)
+	require.NotEmpty(t, resp.EventID)
+	assert.Equal(t, int64(1), q.wakes.Load())
+
+	ev, err := cs.GetTriggerEvent(ctx, resp.EventID)
+	require.NoError(t, err)
+	assert.Equal(t, projID, ev.ProjectID)
+	assert.Equal(t, store.TriggerSourceKindWebhook, ev.SourceKind)
+	assert.Equal(t, activeEp.ID, ev.SourceID)
+	assert.Equal(t, "webhook.deploy.finished", ev.Type)
+	assert.Equal(t, "webhook:"+activeEp.ID+"/prod/payments", ev.Subject)
+	assert.Equal(t, "deliv-100", ev.DedupKey)
+	assert.Equal(t, string(payload), ev.Payload)
+	assert.Equal(t, len(payload), ev.PayloadBytes)
+	assert.Equal(t, store.TriggerEventStatusPending, ev.Status)
+	assert.Equal(t, map[string]string{
+		"endpoint_name":  "deploy-ep",
+		"event":          "deploy.finished",
+		"delivery":       "deliv-100",
+		"subject":        "prod/payments",
+		"signature_mode": "scion_v1",
+		"content_type":   "application/json; charset=utf-8",
+		"payload_bytes":  strconv.Itoa(len(payload)),
+		"remote_ip":      "198.51.100.42",
+	}, ev.Attributes)
+	assert.Equal(t, map[string]string{
+		"Content-Type":     "application/json; charset=utf-8",
+		"User-Agent":       "ScionSender/1.0",
+		"X-Scion-Event":    "deploy.finished",
+		"X-Scion-Delivery": "deliv-100",
+		"X-Scion-Subject":  "prod/payments",
+	}, ev.Headers)
+	assert.NotContains(t, ev.Headers, trigger.HeaderSignature)
+	assert.NotContains(t, ev.Headers, "Authorization")
+
+	// 2. Duplicate X-Scion-Delivery returns 202 {"status":"duplicate"} with same eventId and no second row or queue item.
+	dupRec := sendSigned(activeEp.ID, "deliv-100", "deploy.finished", "prod/payments", "application/json", payload)
+	require.Equal(t, http.StatusAccepted, dupRec.Code, dupRec.Body.String())
+	var dupResp trigger.IngressAcceptedResponse
+	require.NoError(t, json.Unmarshal(dupRec.Body.Bytes(), &dupResp))
+	assert.Equal(t, resp.EventID, dupResp.EventID)
+	assert.Equal(t, trigger.IngressStatusDuplicate, dupResp.Status)
+	assert.Equal(t, int64(1), q.wakes.Load(), "duplicate delivery must not wake queue again")
+
+	evs, err := cs.ListTriggerEvents(ctx, store.TriggerEventFilter{ProjectID: projID}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, evs.Items, 1)
+	qStats, err := cs.DurableQueueStats(ctx, trigger.EventQueueKind, projID, now)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), qStats.Pending)
+
+	// 3. Without X-Scion-Delivery, two identical signed bodies create two distinct events.
+	noDeliv1 := sendSigned(activeEp.ID, "", "", "", "application/json", []byte(`{"ping":1}`))
+	noDeliv2 := sendSigned(activeEp.ID, "", "", "", "application/json", []byte(`{"ping":1}`))
+	require.Equal(t, http.StatusAccepted, noDeliv1.Code)
+	require.Equal(t, http.StatusAccepted, noDeliv2.Code)
+	var r1, r2 trigger.IngressAcceptedResponse
+	require.NoError(t, json.Unmarshal(noDeliv1.Body.Bytes(), &r1))
+	require.NoError(t, json.Unmarshal(noDeliv2.Body.Bytes(), &r2))
+	assert.NotEqual(t, r1.EventID, r2.EventID)
+	evDefault, err := cs.GetTriggerEvent(ctx, r1.EventID)
+	require.NoError(t, err)
+	assert.Equal(t, "webhook.received", evDefault.Type)
+	assert.Equal(t, "webhook:"+activeEp.ID, evDefault.Subject)
+	assert.Equal(t, "received", evDefault.Attributes["event"])
+
+	// 4. Exact 64 KiB JSON body succeeds; 64 KiB + 1 returns 413 without row writes.
+	padLen := trigger.MaxPayloadBytes - len(`{"pad":""}`)
+	exact64KiB := []byte(`{"pad":"` + strings.Repeat("x", padLen) + `"}`)
+	require.Len(t, exact64KiB, trigger.MaxPayloadBytes)
+	rec64 := sendSigned(activeEp.ID, "deliv-64k", "", "", "application/json", exact64KiB)
+	require.Equal(t, http.StatusAccepted, rec64.Code, rec64.Body.String())
+
+	over64KiB := []byte(`{"pad":"` + strings.Repeat("x", padLen+1) + `"}`)
+	require.Len(t, over64KiB, trigger.MaxPayloadBytes+1)
+	rec413 := sendSigned(activeEp.ID, "deliv-64k-plus-1", "", "", "application/json", over64KiB)
+	assert.Equal(t, http.StatusRequestEntityTooLarge, rec413.Code)
+
+	// 5. Refusal ordering & no-row-write invariant across 404 (unknown/disabled), 415, 400, 401, 503.
+	beforeEvents, err := cs.ListTriggerEvents(ctx, store.TriggerEventFilter{ProjectID: projID}, store.ListOptions{})
+	require.NoError(t, err)
+	beforeCount := beforeEvents.TotalCount
+
+	// Unknown vs disabled endpoint -> identical 404 JSON body.
+	unknownRec := sendSigned(uuid.NewString(), "", "", "", "application/json", payload)
+	disabledRec := sendSigned(disabledEp.ID, "", "", "", "application/json", payload)
+	assert.Equal(t, http.StatusNotFound, unknownRec.Code)
+	assert.Equal(t, http.StatusNotFound, disabledRec.Code)
+	assert.JSONEq(t, unknownRec.Body.String(), disabledRec.Body.String())
+
+	// Non-JSON Content-Type -> 415; invalid JSON -> 400.
+	rec415 := sendSigned(activeEp.ID, "", "", "", "text/plain", payload)
+	assert.Equal(t, http.StatusUnsupportedMediaType, rec415.Code)
+	recBadJSON := sendSigned(activeEp.ID, "", "", "", "application/json", []byte(`{not-json`))
+	assert.Equal(t, http.StatusBadRequest, recBadJSON.Code)
+
+	// Unsigned request with invalid X-Scion-Event -> 401 (never 400 to unsigned caller);
+	// validly signed request with invalid X-Scion-Event -> 400 (§8.1 step 7).
+	unsignedBadHdr := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+activeEp.ID, bytes.NewReader(payload))
+	unsignedBadHdr.Header.Set("Content-Type", "application/json")
+	unsignedBadHdr.Header.Set(trigger.HeaderEvent, "INVALID EVENT!!")
+	recUnsignedBadHdr := httptest.NewRecorder()
+	ing.ServeHTTP(recUnsignedBadHdr, unsignedBadHdr)
+	assert.Equal(t, http.StatusUnauthorized, recUnsignedBadHdr.Code)
+
+	recSignedBadHdr := sendSigned(activeEp.ID, "", "INVALID EVENT!!", "", "application/json", payload)
+	assert.Equal(t, http.StatusBadRequest, recSignedBadHdr.Code)
+
+	// Secret unseal failure (after cache invalidation) -> fail-closed 503.
+	ing.InvalidateEndpoint(activeEp.ID)
+	secretErr = errors.New("kms unseal error")
+	rec503 := sendSigned(activeEp.ID, "", "", "", "application/json", payload)
+	assert.Equal(t, http.StatusServiceUnavailable, rec503.Code)
+	secretErr = nil
+
+	afterEvents, err := cs.ListTriggerEvents(ctx, store.TriggerEventFilter{ProjectID: projID}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, beforeCount, afterEvents.TotalCount, "refusals must write zero trigger_events rows")
+
+	// Endpoint receive_count / reject_count are still 0 in DB before FlushCounters, then match after FlushCounters!
+	epBeforeFlush, err := cs.GetWebhookEndpoint(ctx, activeEp.ID)
+	require.NoError(t, err)
+	assert.Zero(t, epBeforeFlush.ReceiveCount, "counters must accumulate in memory before periodic/explicit flush")
+	assert.Zero(t, epBeforeFlush.RejectCount)
+
+	require.NoError(t, ing.FlushCounters(ctx))
+	epAfterFlush, err := cs.GetWebhookEndpoint(ctx, activeEp.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 4, epAfterFlush.ReceiveCount) // 1 initial + 2 no-delivery + 1 exact-64KiB
+	assert.Equal(t, 5, epAfterFlush.RejectCount)  // 413 + 415 + bad-JSON 400 + unsigned 401 + bad-header 400
+	require.NotNil(t, epAfterFlush.LastReceivedAt)
+}
