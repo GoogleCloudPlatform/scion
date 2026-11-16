@@ -77,13 +77,12 @@ func projectDecodedPayload(root map[string]any, maxBytes int) ([]byte, bool, err
 		if !ok || val == nil {
 			continue
 		}
-		sanitized := sanitizeValue(val)
 		if key == "pull_request" {
-			if prMap, isMap := sanitized.(map[string]any); isMap {
-				reducePRBranchRepos(root, prMap)
+			if prMap, isMap := val.(map[string]any); isMap {
+				val = reducePRBranchRepos(prMap)
 			}
 		}
-		proj[key] = sanitized
+		proj[key] = sanitizeValue(val)
 	}
 	if repoMap, ok := root["repository"].(map[string]any); ok {
 		proj["repository"] = reduceRepository(repoMap)
@@ -113,25 +112,37 @@ func projectDecodedPayload(root map[string]any, maxBytes int) ([]byte, bool, err
 	return encoded, true, nil
 }
 
-func reducePRBranchRepos(rawRoot, sanitizedPR map[string]any) {
-	rawPR, _ := rawRoot["pull_request"].(map[string]any)
+// reducePRBranchRepos returns a shallow copy of rawPR with head.repo and
+// base.repo replaced by reduced repository maps before sanitizeValue runs,
+// avoiding deep-copying large raw repository objects without mutating rawPR.
+func reducePRBranchRepos(rawPR map[string]any) map[string]any {
+	var prCopy map[string]any
 	for _, branchKey := range []string{"head", "base"} {
-		branchMap, ok := sanitizedPR[branchKey].(map[string]any)
+		rawBranch, ok := rawPR[branchKey].(map[string]any)
 		if !ok {
 			continue
 		}
-		if rawPR != nil {
-			if rawBranch, ok := rawPR[branchKey].(map[string]any); ok {
-				if rawRepo, exists := rawBranch["repo"]; exists {
-					if rawRepo == nil {
-						branchMap["repo"] = nil
-					} else if rawRepoMap, ok := rawRepo.(map[string]any); ok {
-						branchMap["repo"] = reduceRepository(rawRepoMap)
-					}
-				}
+		rawRepoMap, ok := rawBranch["repo"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if prCopy == nil {
+			prCopy = make(map[string]any, len(rawPR))
+			for k, v := range rawPR {
+				prCopy[k] = v
 			}
 		}
+		branchCopy := make(map[string]any, len(rawBranch))
+		for k, v := range rawBranch {
+			branchCopy[k] = v
+		}
+		branchCopy["repo"] = reduceRepository(rawRepoMap)
+		prCopy[branchKey] = branchCopy
 	}
+	if prCopy == nil {
+		return rawPR
+	}
+	return prCopy
 }
 
 func reduceRepository(repo map[string]any) map[string]any {

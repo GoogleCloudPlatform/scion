@@ -17,6 +17,7 @@ package github
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -344,4 +345,99 @@ func TestProjectPayload_OversizeDiffHunkKeepsTail(t *testing.T) {
 	gotHunk := decoded["comment"].(map[string]any)["diff_hunk"].(string)
 	assert.True(t, strings.HasSuffix(gotHunk, "+\tfinalCommentedDiffLine()"), "projected diff_hunk should preserve commented tail, got: %q", gotHunk)
 	assert.True(t, utf8.ValidString(gotHunk))
+}
+
+func TestProjectDecodedPayload_ReducesPRBranchReposBeforeSanitizeWithoutMutatingInput(t *testing.T) {
+	buildRoot := func(bloatEntries int) map[string]any {
+		makeRepo := func(fullName string, id int) map[string]any {
+			repo := map[string]any{
+				"id":             json.Number(fmt.Sprintf("%d", id)),
+				"full_name":      fullName,
+				"name":           "octo-repo",
+				"private":        false,
+				"default_branch": "main",
+				"html_url":       "https://github.com/" + fullName,
+				"owner": map[string]any{
+					"login":      "octo-org",
+					"id":         json.Number("99"),
+					"type":       "Organization",
+					"avatar_url": "https://avatars.githubusercontent.com/u/99",
+				},
+			}
+			for i := 0; i < bloatEntries; i++ {
+				// Slice values force per-entry heap allocations if sanitizeValue
+				// deep-copies the raw repo map before reduction.
+				repo[fmt.Sprintf("bloat_%04d", i)] = []any{"a", "b", "c"}
+			}
+			return repo
+		}
+
+		return map[string]any{
+			"action":       "opened",
+			"number":       json.Number("42"),
+			"installation": map[string]any{"id": json.Number("10")},
+			"sender":       map[string]any{"login": "octocat", "id": json.Number("1"), "type": "User"},
+			"repository":   makeRepo("octo-org/octo-repo", 100),
+			"pull_request": map[string]any{
+				"id":       json.Number("1001"),
+				"number":   json.Number("42"),
+				"title":    "PR title",
+				"body":     "PR body",
+				"html_url": "https://github.com/octo-org/octo-repo/pull/42",
+				"url":      "https://api.github.com/repos/octo-org/octo-repo/pulls/42",
+				"head": map[string]any{
+					"ref":  "feat/branch",
+					"sha":  "1111111111111111111111111111111111111111",
+					"user": map[string]any{"login": "fork-user", "avatar_url": "https://avatars.githubusercontent.com/u/7"},
+					"repo": makeRepo("fork-user/octo-repo", 200),
+				},
+				"base": map[string]any{
+					"ref":  "main",
+					"sha":  "2222222222222222222222222222222222222222",
+					"user": map[string]any{"login": "octo-org", "avatar_url": "https://avatars.githubusercontent.com/u/99"},
+					"repo": makeRepo("octo-org/octo-repo", 100),
+				},
+			},
+		}
+	}
+
+	minimalRoot := buildRoot(0)
+	bloatedRoot := buildRoot(1500)
+
+	minAllocs := testing.AllocsPerRun(10, func() {
+		_, _, err := projectDecodedPayload(minimalRoot, DefaultMaxPayloadBytes)
+		require.NoError(t, err)
+	})
+	bloatedAllocs := testing.AllocsPerRun(10, func() {
+		_, _, err := projectDecodedPayload(bloatedRoot, DefaultMaxPayloadBytes)
+		require.NoError(t, err)
+	})
+
+	// Because head.repo and base.repo are reduced before sanitizeValue runs,
+	// 3,000 extra nested slice fields in the raw branch repo objects must add
+	// zero extra allocations during projection.
+	assert.Equal(t, minAllocs, bloatedAllocs, "raw head.repo/base.repo bloat must not be deep-copied by sanitizeValue")
+
+	// Verify caller's decoded input was not mutated in-place.
+	rawPR := bloatedRoot["pull_request"].(map[string]any)
+	assert.Equal(t, "https://api.github.com/repos/octo-org/octo-repo/pulls/42", rawPR["url"], "caller pull_request map must remain unmutated")
+	rawHead := rawPR["head"].(map[string]any)
+	assert.Contains(t, rawHead["user"].(map[string]any), "avatar_url", "caller head.user map must remain unmutated")
+	rawHeadRepo := rawHead["repo"].(map[string]any)
+	assert.Contains(t, rawHeadRepo, "bloat_0000", "caller head.repo map must retain all raw fields")
+	assert.Contains(t, rawHeadRepo, "bloat_1499", "caller head.repo map must retain all raw fields")
+	rawBaseRepo := rawPR["base"].(map[string]any)["repo"].(map[string]any)
+	assert.Contains(t, rawBaseRepo, "bloat_1499", "caller base.repo map must retain all raw fields")
+
+	// Output must be identical between minimal and bloated raw branch repos, and across repeated calls.
+	outMin, truncMin, err := projectDecodedPayload(minimalRoot, DefaultMaxPayloadBytes)
+	require.NoError(t, err)
+	assert.False(t, truncMin)
+	outBloat1, truncBloat1, err := projectDecodedPayload(bloatedRoot, DefaultMaxPayloadBytes)
+	require.NoError(t, err)
+	assert.False(t, truncBloat1)
+	outBloat2, _, err := projectDecodedPayload(bloatedRoot, DefaultMaxPayloadBytes)
+	require.NoError(t, err)
+	assert.Equal(t, string(outMin), string(outBloat1))
+	assert.Equal(t, string(outBloat1), string(outBloat2))
 }
