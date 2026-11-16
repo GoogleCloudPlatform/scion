@@ -398,8 +398,7 @@ func TestFireCorePayloadValidatedBeforeAuthority(t *testing.T) {
 }
 
 func TestFireCoreTracker(t *testing.T) {
-	t.Parallel()
-
+	// Not t.Parallel: subtest captures process-default slog logger.
 	t.Run("Detach survives caller cancel and observes fire abort", func(t *testing.T) {
 		srv := newEventHandlerTestServer(newMockStore())
 		tracker := newScheduledFireTracker(srv, "evt-detach", nil)
@@ -436,9 +435,29 @@ func TestFireCoreTracker(t *testing.T) {
 		assert.False(t, ok)
 	})
 
-	t.Run("Record executes write at most once", func(t *testing.T) {
+	t.Run("Record refuses and logs without Admit or injected run", func(t *testing.T) {
+		logBuf := &fireCoreLogBuffer{}
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		t.Cleanup(func() { slog.SetDefault(prev) })
+
+		srv := newEventHandlerTestServer(newMockStore())
+		tracker := newScheduledFireTracker(srv, "evt-unadmitted", nil)
+
+		called := false
+		assert.False(t, tracker.Record(func() { called = true }))
+		assert.False(t, called)
+		assert.Empty(t, srv.runningWakeFires.snapshot())
+		assert.Contains(t, logBuf.String(), "fire tracker Record called without an admitted or injected run")
+		assert.Contains(t, logBuf.String(), "evt-unadmitted")
+	})
+
+	t.Run("Record executes write at most once after Admit or with injected run", func(t *testing.T) {
 		srv := newEventHandlerTestServer(newMockStore())
 		tracker := newScheduledFireTracker(srv, "evt-record", nil)
+		_, done, ok := tracker.Admit(context.Background())
+		require.True(t, ok)
+		defer done()
 
 		var calls atomic.Int32
 		var wg sync.WaitGroup
@@ -455,6 +474,13 @@ func TestFireCoreTracker(t *testing.T) {
 		wg.Wait()
 		assert.Equal(t, int32(1), wins.Load())
 		assert.Equal(t, int32(1), calls.Load())
+
+		injectedRun := &wakeFireRun{eventID: "evt-injected", ranAt: time.Now()}
+		injectedTracker := newScheduledFireTracker(srv, "evt-injected", injectedRun)
+		var injectedCalls int
+		assert.True(t, injectedTracker.Record(func() { injectedCalls++ }))
+		assert.False(t, injectedTracker.Record(func() { injectedCalls++ }))
+		assert.Equal(t, 1, injectedCalls)
 	})
 }
 
@@ -1014,10 +1040,10 @@ func TestFireCoreLegacyActionDetaches(t *testing.T) {
 		}), "dispatch_agent never detaches (%s)", defKind)
 	}
 
-	assert.True(t, execAction.Detaches(hubfire.FireRequest{
+	assert.False(t, execAction.Detaches(hubfire.FireRequest{
 		Authority: hubfire.RecordedAuthority{DefinitionKind: hubfire.DefinitionKindSchedule},
 		Payload:   `{"agentId":"a1","command":["true"]}`,
-	}), "recurring exec detaches")
+	}), "recurring exec stays non-detaching in 1a until PR 2 / exec-schedules Phase 2")
 	assert.False(t, execAction.Detaches(hubfire.FireRequest{
 		Authority: hubfire.RecordedAuthority{DefinitionKind: hubfire.DefinitionKindScheduledEvent},
 		Payload:   `{"agentId":"a1","command":["true"]}`,
@@ -1025,9 +1051,10 @@ func TestFireCoreLegacyActionDetaches(t *testing.T) {
 }
 
 // TestFireCoreAdapterDetachesMatrix covers all seven cells of design §5.1a
-// (rev 8.11): recurring x {detaches, !detaches} x {Detached, !Detached}
-// (including the mismatch cell !detaches && Detached) and one-shot x
-// {Detached, detaches && !Detached, !detaches && !Detached}.
+// (rev 8.11 / 8.12): recurring x {detaches, !detaches} x {Detached, !Detached}
+// (including the mismatch cell !detaches && Detached), one-shot x
+// {Detached, detaches && !Detached, !detaches && !Detached}, and stored
+// recurring exec's synchronous refusal parity with base in 1a.
 func TestFireCoreAdapterDetachesMatrix(t *testing.T) {
 	// Not t.Parallel: captures process-default slog logger for mismatch check.
 	const projectID = "project-detaches-matrix"
@@ -1232,4 +1259,53 @@ func TestFireCoreAdapterDetachesMatrix(t *testing.T) {
 			assert.Equal(t, tc.wantEvtStatus, ms.getEvent("evt-cell").Status)
 		})
 	}
+
+	t.Run("8. stored recurring exec schedule refuses synchronously without detaching in 1a", func(t *testing.T) {
+		ms := newMockStore()
+		ms.schedules = make(map[string]*store.Schedule)
+		fs := &fireCoreScheduleStore{mockScheduledEventStore: ms}
+		srv := newEventHandlerTestServer(fs)
+		srv.registerFireActions()
+		sched := NewScheduler(fs, slog.Default())
+		sched.srv = srv
+		srv.scheduler = sched
+
+		rec := newFireCoreTestAuthority(ms, projectID)
+		dueAt := now.Add(-time.Minute)
+		scRow := &store.Schedule{
+			ID:                   "sched-rec-exec",
+			ProjectID:            projectID,
+			Name:                 "rec-exec",
+			CronExpr:             "0 * * * *",
+			EventType:            scheduledEventTypeExec,
+			Payload:              `{"agentId":"a1","command":["true"]}`,
+			Status:               store.ScheduleStatusActive,
+			NextRunAt:            &dueAt,
+			InitiatorAttribution: rec.Attribution,
+			AuthorityCeiling:     rec.Ceiling,
+		}
+		ms.schedules[scRow.ID] = scRow
+
+		srv.executeSchedule(context.Background(), *scRow, now)
+
+		fs.mu.Lock()
+		assert.Equal(t, 0, fs.advanceCalls, "AdvanceScheduleNextRun must not run for exec in 1a")
+		assert.Equal(t, 1, fs.afterRunCalls, "UpdateScheduleAfterRun runs synchronously as on base")
+		assert.Equal(t, 0, fs.completeCalls, "CompleteFiringScheduledEvent must not run")
+		require.Len(t, ms.events, 1)
+		var gotEvt *store.ScheduledEvent
+		for _, ev := range ms.events {
+			gotEvt = ev
+		}
+		gotSched := *ms.schedules[scRow.ID]
+		fs.mu.Unlock()
+
+		assert.Equal(t, store.ScheduledEventFailed, gotEvt.Status)
+		assert.Equal(t, execReasonRecurring, gotEvt.Error)
+		assert.Equal(t, 1, gotSched.RunCount)
+		assert.Equal(t, store.ScheduleRunError, gotSched.LastRunStatus)
+		assert.Equal(t, execReasonRecurring, gotSched.LastRunError)
+		require.NotNil(t, gotSched.NextRunAt)
+		assert.True(t, gotSched.NextRunAt.Equal(wantNextRun))
+	})
 }

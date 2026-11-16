@@ -29,8 +29,10 @@ import (
 type EventHandler func(ctx context.Context, evt store.ScheduledEvent) error
 
 // RegisterEventHandler registers a legacy EventHandler on Server.actions when
-// s is wired to a Server (or on s's standalone test map when s.srv is nil) so
-// existing scheduler test suites remain unchanged in Phase 1a.
+// s.srv is set, or on s.legacyHandlers only when s.srv is nil (standalone
+// NewScheduler unit tests). Server.runScheduleFire always reads Server.actions,
+// so tests that attach a Scheduler to a Server must wire s.srv before calling
+// RegisterEventHandler.
 // Removed in PR 2 (ptone/scion#8029).
 func (s *Scheduler) RegisterEventHandler(eventType string, handler EventHandler) {
 	if s.srv != nil {
@@ -115,7 +117,11 @@ func (a *legacyAction) Detaches(req hubfire.FireRequest) bool {
 	case "message":
 		return scheduledPayloadWakes(req.Payload)
 	case scheduledEventTypeExec:
-		return req.Authority.DefinitionKind == hubfire.DefinitionKindSchedule
+		// Enabled with recurring exec in PR 2 / exec-schedules Phase 2
+		// (req.Authority.DefinitionKind == hubfire.DefinitionKindSchedule);
+		// false in 1a so a stored recurring exec row keeps base's synchronous
+		// refusal path (design rev 8.12 §5.1).
+		return false
 	default:
 		return false
 	}

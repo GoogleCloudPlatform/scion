@@ -7531,11 +7531,11 @@ func (s *Server) runScheduleFire(ctx context.Context, log *slog.Logger, sched st
 	})
 }
 
-// registerSchedulerHandlers registers every periodic scheduler task, plus the
-// "message" and "dispatch_agent" event handlers, on s.scheduler, which must
-// already be initialized (StartBackgroundServices does this before calling
-// in). Factored out of StartBackgroundServices so tests can inspect
-// registration metadata (interval, singleton mode) without starting the
+// registerSchedulerHandlers registers every periodic scheduler task on
+// s.scheduler, which must already be initialized (StartBackgroundServices does
+// this before calling in; deferred fire actions are registered in New via
+// registerFireActions). Factored out of StartBackgroundServices so tests can
+// inspect registration metadata (interval, singleton mode) without starting the
 // scheduler's ticker or any other background service.
 //
 // Most recurring sweeps are cluster-wide-once work: under multi-replica

@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -83,13 +84,19 @@ func (t *scheduledFireTracker) Admit(ctx context.Context) (context.Context, func
 	}, true
 }
 
+// Record executes write at most once against the wakeFireRun injected into
+// newScheduledFireTracker or registered with runningWakeFires by Admit. When
+// neither happened, Record refuses (logs an error and returns false) rather
+// than creating a private wakeFireRun outside shutdown/abandon coordination.
 func (t *scheduledFireTracker) Record(write func()) bool {
 	t.mu.Lock()
 	run := t.run
-	if run == nil {
-		run = &wakeFireRun{eventID: t.fireID, ranAt: time.Now()}
-		t.run = run
-	}
 	t.mu.Unlock()
+	if run == nil {
+		slog.Error("fire tracker Record called without an admitted or injected run",
+			"fireID", t.fireID,
+		)
+		return false
+	}
 	return run.tryRecord(write)
 }
