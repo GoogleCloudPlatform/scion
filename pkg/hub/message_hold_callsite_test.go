@@ -26,7 +26,8 @@ import (
 
 // TestHoldOrDispatchCallSites (ptone/scion#7881, AC A2-3) scans every non-test
 // .go file in pkg/hub (and guardScanSubdirs) and verifies that every call to
-// dispatchWithBrokerRetry or DispatchAgentMessage is either:
+// dispatchWithBrokerRetry, dispatchMarkedAgentMessage, or DispatchAgentMessage
+// is either:
 //  1. Structurally enclosed inside a call to holdOrDispatch / holdOrDispatchMessage
 //     (so persisted messages queue behind an active awaiting_session hold in
 //     creation order instead of racing ahead of held messages),
@@ -35,14 +36,15 @@ import (
 //     dispatches a persisted store.Message row.
 func TestHoldOrDispatchCallSites(t *testing.T) {
 	nonRowDispatchExemptions := map[string]string{
-		"broker_routing.go:dispatchWithBrokerRetry:DispatchAgentMessage":                  "primitive retry wrapper around DispatchAgentMessage",
-		"handlers_agent_messaging.go:publishBroadcastDeliveryFailed:DispatchAgentMessage": "ephemeral delivery-failure notice to sender; no store.Message row",
-		"messagebroker.go:publishDeliveryFailed:DispatchAgentMessage":                     "ephemeral delivery-failure notice to sender; no store.Message row",
-		"messagebroker.go:publishDeliveryDeferred:DispatchAgentMessage":                   "ephemeral delivery-deferred notice to sender; no store.Message row",
-		"artifacts_review.go:deliverArtifactReview:dispatchWithBrokerRetry":               "ephemeral artifact review system notice; no store.Message row",
-		"notifications.go:dispatchToAgent:dispatchWithBrokerRetry":                        "status/inbox notification fan-out (has its own notification_sweep retry); no store.Message row",
-		"notification_sweep.go:retryDispatch:dispatchWithBrokerRetry":                     "notification fan-out retry; no store.Message row",
-		"reconcile.go:deliverMessage:DispatchAgentMessage":                                "dead code seam (ptone/scion#7949); never invoked in production",
+		"broker_routing.go:dispatchMarkedAgentMessage:DispatchAgentMessage":                     "marked delivery choke point around DispatchAgentMessage",
+		"broker_routing.go:dispatchWithBrokerRetry:dispatchMarkedAgentMessage":                  "primitive retry wrapper around dispatchMarkedAgentMessage",
+		"handlers_agent_messaging.go:publishBroadcastDeliveryFailed:dispatchMarkedAgentMessage": "ephemeral delivery-failure notice to sender; no store.Message row",
+		"messagebroker.go:publishDeliveryFailed:dispatchMarkedAgentMessage":                     "ephemeral delivery-failure notice to sender; no store.Message row",
+		"messagebroker.go:publishDeliveryDeferred:dispatchMarkedAgentMessage":                   "ephemeral delivery-deferred notice to sender; no store.Message row",
+		"artifacts_review.go:deliverArtifactReview:dispatchWithBrokerRetry":                     "ephemeral artifact review system notice; no store.Message row",
+		"notifications.go:dispatchToAgent:dispatchWithBrokerRetry":                              "status/inbox notification fan-out (has its own notification_sweep retry); no store.Message row",
+		"notification_sweep.go:retryDispatch:dispatchWithBrokerRetry":                           "notification fan-out retry; no store.Message row",
+		"reconcile.go:deliverMessage:dispatchMarkedAgentMessage":                                "dead code seam (ptone/scion#7949); never invoked in production",
 	}
 
 	hubDir := findHubDir(t)
@@ -82,7 +84,7 @@ func TestHoldOrDispatchCallSites(t *testing.T) {
 				return true
 			}
 			sym := extractCallSymbol(call)
-			if sym != "dispatchWithBrokerRetry" && sym != "DispatchAgentMessage" {
+			if sym != "dispatchWithBrokerRetry" && sym != "dispatchMarkedAgentMessage" && sym != "DispatchAgentMessage" {
 				return true
 			}
 

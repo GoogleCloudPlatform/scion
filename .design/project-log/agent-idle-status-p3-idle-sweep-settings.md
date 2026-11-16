@@ -69,6 +69,15 @@
     `handleBrokerInbound`, `dispatchRoutedRecipient`, `reconcile.deliverMessage`,
     `deliverArtifactReview`, choice responses, `delegatedSender` DM, `group[]`, and delivery
     notices) refuse, park, or mark failed just as they do for a suspended target.
+  - Integrated with Conduit `awaiting_session` hold and re-drive (`GoogleCloudPlatform/scion#4935`):
+    `dispatchClaimedHeldMessage` in `message_hold_redrive.go` routes through `dispatchWithBrokerRetry`
+    with `s.deliveryMarker()`, treating an active idle-suspend claim or pre-dispatch
+    `errAgentIdleSuspending` / `errDeliveryMarkFailed` as deferrable (keeping or returning rows to
+    `awaiting_session` for a later re-drive without waking); `holdOrDispatch` passes pre-dispatch
+    `errAgentIdleSuspending` and `errDeliveryMarkFailed` straight through without creating or
+    joining a session hold and refreshes `hold_launch_id` after synchronous auto-wake; and both
+    `TestMessageDispatchCallsMarkAgentDelivery` and `TestHoldOrDispatchCallSites` enforce that
+    persisted dispatches pass through both gates.
 - **Phase 2b review follow-ups folded into phase 3:**
   - **Hub-to-user suspension conversion (`convertHubSuspendToUser`):** gated on
     `lifecycle.idle_suspend`, `POST /api/v1/agents/{id}/suspend` on an `idle`- or

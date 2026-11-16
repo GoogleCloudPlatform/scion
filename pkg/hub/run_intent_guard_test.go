@@ -529,6 +529,17 @@ func TestMessageDispatchCallsMarkAgentDelivery(t *testing.T) {
 		t.Fatalf("scanner self-check failed: found zero calls to dispatchMarkedAgentMessage / dispatchWithBrokerRetry")
 	}
 
+	// Cross-check integration with hold-until-session re-drive (GoogleCloudPlatform/scion#4935):
+	// held-message re-drive must dispatch through the marked delivery helper, and
+	// holdOrDispatch must pre-check markAgentForDispatch before joining an active
+	// session hold so errAgentIdleSuspending and errDeliveryMarkFailed pass straight through.
+	if !funcBodyCallsIdentOrSel(t, "Server.dispatchClaimedHeldMessage", "dispatchWithBrokerRetry") {
+		t.Fatalf("Server.dispatchClaimedHeldMessage must route held-message re-drive through dispatchWithBrokerRetry")
+	}
+	if !funcBodyCallsIdentOrSel(t, "Server.holdOrDispatch", "markAgentForDispatch") {
+		t.Fatalf("Server.holdOrDispatch must check markAgentForDispatch before joining an active session hold")
+	}
+
 	t.Run("catches method-value and package-var bypasses", func(t *testing.T) {
 		const src = `package hub
 func sneakyFunc(d AgentDispatcher) {
@@ -539,6 +550,9 @@ var sneakyPkgVar = AgentDispatcher.DispatchAgentMessage
 func nilMarkerBypass() {
 	_ = dispatchMarkedAgentMessage(nil, nil, nil, nil, nil, nil, "", false, nil)
 }
+func nilRetryMarkerBypass() {
+	_ = dispatchWithBrokerRetry(nil, nil, nil, nil, nil, "", false, nil)
+}
 `
 		synthFset := token.NewFileSet()
 		sf, err := parser.ParseFile(synthFset, "sneaky.go", src, parser.SkipObjectResolution)
@@ -546,10 +560,62 @@ func nilMarkerBypass() {
 			t.Fatalf("parse synthetic file: %v", err)
 		}
 		violations, _, _ := inspectMessageDispatchFile(synthFset, sf)
-		if len(violations) != 3 {
-			t.Fatalf("expected 3 violations on synthetic bypass file, got %d: %v", len(violations), violations)
+		if len(violations) != 4 {
+			t.Fatalf("expected 4 violations on synthetic bypass file, got %d: %v", len(violations), violations)
 		}
 	})
+}
+
+func funcBodyCallsIdentOrSel(t *testing.T, targetFunc, calleeName string) bool {
+	t.Helper()
+	fset := token.NewFileSet()
+	files, err := globGuardScanDirs(".", "*.go")
+	if err != nil {
+		t.Fatalf("list package files: %v", err)
+	}
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		rel := filepath.Dir(name)
+		if f.Name.Name != guardScanPackage(rel) {
+			continue
+		}
+		prefix := ""
+		if rel != "." {
+			prefix = filepath.ToSlash(rel) + "/"
+		}
+		for _, decl := range f.Decls {
+			fd, ok := decl.(*ast.FuncDecl)
+			if !ok || fd.Body == nil || prefix+funcDeclKey(fd) != targetFunc {
+				continue
+			}
+			found := false
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				switch fun := call.Fun.(type) {
+				case *ast.Ident:
+					if fun.Name == calleeName {
+						found = true
+					}
+				case *ast.SelectorExpr:
+					if fun.Sel.Name == calleeName {
+						found = true
+					}
+				}
+				return !found
+			})
+			return found
+		}
+	}
+	return false
 }
 
 func inspectMessageDispatchFile(fset *token.FileSet, f *ast.File) (violations []string, foundMarkedHelperCall bool, chokeCalls int) {

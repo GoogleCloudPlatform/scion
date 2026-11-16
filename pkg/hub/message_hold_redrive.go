@@ -309,6 +309,9 @@ func (s *Server) maybeScheduleHeldMessageRedriveIfConnected(agentID string) {
 		}
 		switch st {
 		case agentDeliverSessionReady:
+			if s.idleSuspendDeliveryGateActive() && agent.IdleSuspendClaimActive {
+				return
+			}
 			s.scheduleHeldMessageRedrive(agentID)
 		case agentDeliverSessionUnsupported:
 			s.expireHeldMessagesForAgent(ctx, agentID, holdFailReasonCannotReceiveConduit)
@@ -503,6 +506,9 @@ func (s *Server) sweepHeldMessages(parentCtx context.Context) {
 		}
 		switch sessState {
 		case agentDeliverSessionReady:
+			if s.idleSuspendDeliveryGateActive() && agent.IdleSuspendClaimActive {
+				continue
+			}
 			s.scheduleHeldMessageRedrive(agentID)
 		case agentDeliverSessionUnsupported:
 			s.expireHeldMessagesForAgent(ctx, agentID, holdFailReasonCannotReceiveConduit)
@@ -654,6 +660,9 @@ func (s *Server) redriveAgentHeldMessagesOnce(parentCtx context.Context, agentID
 	}
 	if !eligible {
 		s.expireHeldMessagesForAgent(ctx, agentID, holdFailReasonAgentStopped)
+		return
+	}
+	if s.idleSuspendDeliveryGateActive() && agent.IdleSuspendClaimActive {
 		return
 	}
 
@@ -928,6 +937,16 @@ func (s *Server) processClaimedHeldRow(
 	}
 
 	if err := s.dispatchClaimedHeldMessage(dctx, dispatcher, target, sm); err != nil {
+		var (
+			idleErr *errAgentIdleSuspending
+			markErr *errDeliveryMarkFailed
+		)
+		if errors.As(err, &idleErr) || errors.As(err, &markErr) {
+			slog.Warn("message-hold: delivery gate deferred claimed row before broker dispatch; re-holding row",
+				"agent_id", agentID, "message_id", row.ID, "error", err)
+			s.reholdOrFailClaimedRow(ctx, agentID, row)
+			return claimedRowReheldTransient
+		}
 		s.failClaimedHeldMessage(ctx, target, row, holdFailReasonBrokerDeliveryFailed)
 		return claimedRowFailed
 	}
@@ -1260,8 +1279,10 @@ func (s *Server) failClaimedHeldMessage(ctx context.Context, target *store.Agent
 }
 
 // dispatchClaimedHeldMessage hands a re-validated held row to the runtime broker
-// through the shared dispatchWithBrokerRetry helper with interrupt=false.
-// Callers must run revalidateClaimedHeldMessage immediately before calling this.
+// through the shared dispatchWithBrokerRetry helper with s.deliveryMarker() and
+// interrupt=false (and no auto-wake hook: re-drive never wakes a stopping or
+// suspended target). Callers must run revalidateClaimedHeldMessage immediately
+// before calling this.
 func (s *Server) dispatchClaimedHeldMessage(
 	dctx context.Context,
 	dispatcher AgentDispatcher,
@@ -1274,7 +1295,7 @@ func (s *Server) dispatchClaimedHeldMessage(
 	}
 	callCtx, cancel := context.WithTimeout(baseCtx, 30*time.Second)
 	defer cancel()
-	return dispatchWithBrokerRetry(callCtx, s.recordLog(), dispatcher, target, sm.Msg, false, sm)
+	return dispatchWithBrokerRetry(callCtx, s.deliveryMarker(), s.recordLog(), dispatcher, target, sm.Msg, false, sm)
 }
 
 // waitForBatchBoundOrSettled waits until every row in messageIDs has left
@@ -1388,6 +1409,9 @@ func (s *Server) revalidateClaimedHeldMessage(
 	}
 	if !eligible {
 		return target, holdFailReasonAgentStopped, nil
+	}
+	if s.idleSuspendDeliveryGateActive() && target.IdleSuspendClaimActive {
+		return nil, "", errors.New("target agent has an active idle-suspend claim")
 	}
 
 	// Launch incarnation match (A2-S4, R2): empty hold_launch_id or empty

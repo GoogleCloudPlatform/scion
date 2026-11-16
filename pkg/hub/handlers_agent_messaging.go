@@ -3325,6 +3325,10 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 						return nil, nil, err
 					}
 					newCtx, newCancel := context.WithTimeout(dispatchCtx, 30*time.Second)
+					if err := s.refreshHoldLaunchAfterWake(newCtx, target, persistedMsgID, nil); err != nil {
+						newCancel()
+						return nil, nil, err
+					}
 					return newCtx, newCancel, nil
 				}))
 			}

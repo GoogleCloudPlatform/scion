@@ -2307,6 +2307,10 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 						return nil, nil, &errAutoWakeRefused{dmErr: startInProgressDMError(target, awaitErr), awaitErr: awaitErr}
 					}
 					newCtx, newCancel := context.WithTimeout(withDispatchMessageID(baseCtx, storeMsg.ID), 30*time.Second)
+					if err := s.refreshHoldLaunchAfterWake(newCtx, target, storeMsg.ID, storeMsg); err != nil {
+						newCancel()
+						return nil, nil, err
+					}
 					return newCtx, newCancel, nil
 				}),
 				withAdjustUrgentAfterWake(func(target *store.Agent, _ bool) bool {

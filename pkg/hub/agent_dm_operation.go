@@ -777,7 +777,12 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 					return nil, nil, err
 				}
 				freshCtx, freshCancel := dispatchContext(ctx, agentDMDispatchTimeout)
-				return withDispatchMessageID(freshCtx, msgID), freshCancel, nil
+				freshCtx = withDispatchMessageID(freshCtx, msgID)
+				if err := s.refreshHoldLaunchAfterWake(freshCtx, target, msgID, storeMsg); err != nil {
+					freshCancel()
+					return nil, nil, err
+				}
+				return freshCtx, freshCancel, nil
 			}))
 		}
 		held, dispatchErr = s.holdOrDispatch(dctx, input.TargetAgent, msgID, storeMsg, func() error {
