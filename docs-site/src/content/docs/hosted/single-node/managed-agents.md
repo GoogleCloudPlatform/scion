@@ -61,7 +61,7 @@ for details.
 The choice between a managed agent and a brokered agent is a **deployment-time execution choice**,
 not a property of the agent template. The same template can run on a container runtime or on a
 managed service depending on whether you select managed execution (`--profile managed-agents` on
-the CLI, or `"managedAgent": true` on `POST /api/v1/agents`) at `scion start` time.
+the CLI, or `"managedAgent": true` on `POST /api/v1/agents`) at agent creation time.
 
 ## Enabling the backend (admin)
 
@@ -101,7 +101,7 @@ When `--profile managed-agents` is passed on the CLI (or `"managedAgent": true` 
 `managedAgent: true` is mutually exclusive with `runtimeBrokerId`, `expectedRuntimeTargetId`, and
 any Runtime Broker `profile`), the Hub bypasses Runtime Broker dispatch entirely and manages the
 agent directly through the cloud API. The template is the same regardless of execution path —
-switching that flag is all it takes to move a task between a container and a managed service.
+switching that option is all it takes to move a task between a container and a managed service.
 
 The following commands work with managed agents:
 
