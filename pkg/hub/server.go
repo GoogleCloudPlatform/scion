@@ -7448,20 +7448,17 @@ func (s *Server) runScheduleFire(ctx context.Context, log *slog.Logger, sched st
 			}()
 			return handler(handlerCtx, evt)
 		}()
-		switch {
-		case handlerErr == nil:
+		if handlerErr == nil {
 			log.Info("schedule-evaluator: schedule fired successfully")
-		default:
-			if outcome, ok := asOutcomeRecorded(handlerErr); ok {
-				recorded = true
-				log.Info("schedule-evaluator: event outcome recorded by its handler", "outcome", outcome)
-			} else if reason, ok := asScheduledSkip(handlerErr); ok {
-				skipped, errMsg = true, reason
-				log.Info("schedule-evaluator: schedule fire skipped", "reason", reason)
-			} else {
-				errMsg = handlerErr.Error()
-				log.Warn("schedule-evaluator: event handler failed", "error", handlerErr)
-			}
+		} else if outcome, ok := asOutcomeRecorded(handlerErr); ok {
+			recorded = true
+			log.Info("schedule-evaluator: event outcome recorded by its handler", "outcome", outcome)
+		} else if reason, ok := asScheduledSkip(handlerErr); ok {
+			skipped, errMsg = true, reason
+			log.Info("schedule-evaluator: schedule fire skipped", "reason", reason)
+		} else {
+			errMsg = handlerErr.Error()
+			log.Warn("schedule-evaluator: event handler failed", "error", handlerErr)
 		}
 		cancel()
 	}
