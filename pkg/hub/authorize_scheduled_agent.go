@@ -18,13 +18,14 @@ import (
 	"net/http"
 )
 
-// deferredAuthoringCredentialRefusedMessage is the message of the refusal
-// written by authorizeDeferredAuthoringCredential.
-const deferredAuthoringCredentialRefusedMessage = "this credential kind cannot create, update or resume scheduled events, schedules or triggers"
+// scheduleAuthoringCredentialRefusedMessage is the message of the refusal
+// written by authorizeScheduleAuthoringCredential.
+const scheduleAuthoringCredentialRefusedMessage = "this credential kind cannot create, update or resume scheduled events or schedules"
 
-// scheduleAuthoringCredentialRefusedMessage aliases
-// deferredAuthoringCredentialRefusedMessage for schedule call sites and tests.
-const scheduleAuthoringCredentialRefusedMessage = deferredAuthoringCredentialRefusedMessage
+// triggerAuthoringCredentialRefusedMessage is the message of the refusal
+// written by authorizeDeferredAuthoringCredential on trigger and webhook
+// endpoint authoring routes.
+const triggerAuthoringCredentialRefusedMessage = "this credential kind cannot create, update or resume triggers or webhook endpoints"
 
 // deferredAuthoringCredentialAllowed reports whether the request's
 // credential may author deferred work: create a scheduled event, recurring
@@ -90,7 +91,7 @@ func authorizeDeferredAuthoringCredential(w http.ResponseWriter, r *http.Request
 		return false
 	}
 	if !deferredAuthoringCredentialAllowed(r) {
-		writeForbidden(w, deferredAuthoringCredentialRefusedMessage)
+		writeForbidden(w, triggerAuthoringCredentialRefusedMessage)
 		return false
 	}
 	return true

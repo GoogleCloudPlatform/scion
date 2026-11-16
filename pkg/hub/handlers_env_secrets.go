@@ -1080,10 +1080,6 @@ func (s *Server) getSecret(w http.ResponseWriter, r *http.Request, key string) {
 		// The same response as a key that does not exist.
 		err = store.ErrNotFound
 	}
-	if errors.Is(err, store.ErrNotFound) {
-		// Also hide hub-store internal secrets when secretBackend is remote.
-		err = store.ErrNotFound
-	}
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return

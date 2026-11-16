@@ -878,7 +878,7 @@ func TestTriggersAuthzMatrix(t *testing.T) {
 			rec := httptest.NewRecorder()
 			route.call(rec, req)
 			require.Equal(t, http.StatusForbidden, rec.Code, "%s: %s", route.name, rec.Body.String())
-			assert.Contains(t, rec.Body.String(), deferredAuthoringCredentialRefusedMessage)
+			assert.Contains(t, rec.Body.String(), triggerAuthoringCredentialRefusedMessage)
 		}
 	})
 }
