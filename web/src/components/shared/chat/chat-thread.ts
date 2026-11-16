@@ -119,7 +119,11 @@ import {
   type WakeOffer,
 } from './chat-wake.js';
 import './chat-message.js';
-import type { ReplyPreviewInfo } from './chat-message.js';
+import {
+  buildKnownUsersByEmail,
+  knownUsersByEmailKey,
+  type ReplyPreviewInfo,
+} from './chat-message.js';
 import './chat-system-line.js';
 import './chat-composer.js';
 import { resolveReplyAllTargets, type Participant } from './prose-mentions.js';
@@ -289,6 +293,7 @@ const ARTIFACT_REFRESH_MAX = 20;
 const EMPTY_ATTACHMENTS: NonNullable<Message['attachments']> = [];
 const EMPTY_ATTACHMENT_REFS: import('./chat-message.js').AttachmentRefInfo[] = [];
 const EMPTY_ARTIFACT_REFS: MessageArtifactRef[] = [];
+const EMPTY_KNOWN_USERS_BY_EMAIL: ReadonlyMap<string, string> = new Map();
 
 /** Threshold in pixels from top to trigger upward scroll loading. */
 const SCROLL_TOP_THRESHOLD = 100;
@@ -906,6 +911,17 @@ export class ScionChatThread extends LitElement {
       this._memberIndex = null;
       this._senderCache = new WeakMap();
     }
+    // Memoize the human email -> mention-slug map on its contents so agent-only
+    // roster snapshots (e.g. `_rebuildHubRoster()` in hub-view DMs) keep the
+    // same Map identity and do not re-render every bubble's markdown.
+    if (changedProperties.has('members') || changedProperties.has('currentUserId')) {
+      const next = buildKnownUsersByEmail(this.members, this.currentUserId);
+      const nextKey = knownUsersByEmailKey(next);
+      if (nextKey !== this._knownUsersByEmailKey) {
+        this._knownUsersByEmail = next.size === 0 ? EMPTY_KNOWN_USERS_BY_EMAIL : next;
+        this._knownUsersByEmailKey = nextKey;
+      }
+    }
   }
 
   /**
@@ -921,6 +937,9 @@ export class ScionChatThread extends LitElement {
   private _senderCache = new WeakMap<Message, SenderInfo>();
   /** `members` indexed by id and by email; null until first needed. */
   private _memberIndex: MemberIndex | null = null;
+  /** Memoized lowercase-email -> canonical-mention-slug map passed to bubbles. */
+  private _knownUsersByEmail: ReadonlyMap<string, string> = EMPTY_KNOWN_USERS_BY_EMAIL;
+  private _knownUsersByEmailKey = '';
   /** Mention results keyed by message ID (for "also notified" footer per message). */
   @state() private mentionResultsByMessageId = new Map<string, MentionResult[]>();
 
@@ -7782,6 +7801,7 @@ export class ScionChatThread extends LitElement {
             .attachmentRefs=${this.getMessageAttachmentRefs(msg.id)}
             .artifactRefs=${this.getMessageArtifactRefs(msg.id)}
             .currentUserId=${this.currentUserId}
+            .knownUsersByEmail=${this._knownUsersByEmail}
             routedTo=${msgRoutedTo}
             .replyPreview=${replyPreview}
             editedAt=${ext?.editedAt || ''}

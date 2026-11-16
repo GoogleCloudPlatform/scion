@@ -14,7 +14,11 @@
 
 package hub
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+)
 
 // translateMentionsOutbound translates human-readable @firstname-lastname
 // mentions into @email format for agent consumption. This is called when a
@@ -37,10 +41,10 @@ func translateMentionsOutbound(content string, members []chatMemberEntry) string
 	return content
 }
 
-// translateMentionsInbound translates @email mentions from agent messages into
-// human-readable @firstname-lastname format. This is called when an agent
-// sends a message to a human thread, so the stored message renders correctly
-// in the native chat UI.
+// translateMentionsInbound translates @email mentions into human-readable
+// @firstname-lastname format for known project human members, skipping inline
+// code spans, fenced code blocks, and '>' blockquote lines so only prose
+// mentions are rewritten for human-facing display.
 func translateMentionsInbound(content string, members []chatMemberEntry) string {
 	if !strings.Contains(content, "@") {
 		return content
@@ -53,7 +57,7 @@ func translateMentionsInbound(content string, members []chatMemberEntry) string 
 		if slug == "" {
 			continue
 		}
-		content = replaceMention(content, m.Email, slug)
+		content = messages.ReplaceProseMention(content, m.Email, slug)
 	}
 	return content
 }

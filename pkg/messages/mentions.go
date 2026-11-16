@@ -628,6 +628,116 @@ func trimPossessiveSuffix(name string) string {
 	return name
 }
 
+// ReplaceProseMention replaces standalone @oldName mention tokens with @newName
+// across prose lines in text, matching case-insensitively while leaving fenced
+// code blocks, inline backtick code spans, and '>' blockquote lines unchanged.
+func ReplaceProseMention(text, oldName, newName string) string {
+	if oldName == "" {
+		return text
+	}
+	needleLower := "@" + strings.ToLower(oldName)
+	if !strings.Contains(strings.ToLower(text), needleLower) {
+		return text
+	}
+	targetRunes := []rune(strings.ToLower(oldName))
+	replacementRunes := []rune("@" + newName)
+
+	lines := strings.Split(text, "\n")
+	prose := proseLines(lines)
+	for i, line := range lines {
+		if prose[i] && strings.Contains(strings.ToLower(line), needleLower) {
+			lines[i] = replaceProseMentionInLine(line, targetRunes, replacementRunes)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func replaceProseMentionInLine(line string, targetLower, replacement []rune) string {
+	runes := []rune(line)
+	inCode := make([]bool, len(runes))
+	for _, span := range inlineCodeSpans(runes) {
+		for k := span[0]; k < span[1]; k++ {
+			inCode[k] = true
+		}
+	}
+
+	out := make([]rune, 0, len(runes))
+	for i := 0; i < len(runes); {
+		if runes[i] != '@' || inCode[i] {
+			out = append(out, runes[i])
+			i++
+			continue
+		}
+		end := i + 1 + len(targetLower)
+		if end > len(runes) || !proseMentionMatchAt(runes, i, targetLower, inCode) {
+			out = append(out, runes[i])
+			i++
+			continue
+		}
+		out = append(out, replacement...)
+		i = end
+	}
+	return string(out)
+}
+
+func proseMentionMatchAt(runes []rune, atIdx int, targetLower []rune, inCode []bool) bool {
+	leadingUnderscores, ok := wrappedMentionStart(runes, atIdx)
+	if !ok {
+		return false
+	}
+	preIdx := atIdx - 1 - leadingUnderscores
+	if preIdx >= 0 && (runes[preIdx] == '.' || runes[preIdx] == '+' || runes[preIdx] == '/') {
+		return false
+	}
+	for k, want := range targetLower {
+		idx := atIdx + 1 + k
+		if inCode[idx] || unicode.ToLower(runes[idx]) != want {
+			return false
+		}
+	}
+	return proseMentionEndBoundary(runes, atIdx+1+len(targetLower), leadingUnderscores, inCode)
+}
+
+func proseMentionEndBoundary(runes []rune, end, leadingUnderscores int, inCode []bool) bool {
+	if end >= len(runes) {
+		return true
+	}
+	if inCode[end] {
+		return false
+	}
+	next := runes[end]
+	if next == '_' {
+		if leadingUnderscores <= 0 {
+			return false
+		}
+		closeEnd := end
+		for closeEnd < len(runes) && closeEnd-end < leadingUnderscores && runes[closeEnd] == '_' {
+			closeEnd++
+		}
+		if closeEnd >= len(runes) {
+			return true
+		}
+		after := runes[closeEnd]
+		if isWrappedWordRune(after) || after == '@' {
+			return false
+		}
+		return proseMentionPunctOrSpace(runes, closeEnd)
+	}
+	return proseMentionPunctOrSpace(runes, end)
+}
+
+func proseMentionPunctOrSpace(runes []rune, idx int) bool {
+	next := runes[idx]
+	if (next == '.' || next == '+') && idx+1 < len(runes) && isWrappedWordRune(runes[idx+1]) {
+		return false
+	}
+	return unicode.IsSpace(next) ||
+		next == ',' || next == '.' || next == '!' || next == '?' ||
+		next == ')' || next == '(' || next == ':' || next == ';' ||
+		next == '"' || next == '\'' || next == ']' || next == '[' ||
+		next == '*' || next == '~' || next == '>'
+}
+
 // RewriteAgentMentions rewrites every @-mention written in recipient syntax
 // ("@agent:<slug>") to the conventional "@<slug>" form, so the body renders
 // by convention and ExtractProseMentions on the result yields "<slug>".

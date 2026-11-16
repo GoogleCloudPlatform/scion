@@ -1917,7 +1917,13 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		}
 	}
 
-	// Persist the message.
+	// Persist the message (translating any @<email> matching a human member of
+	// the project into @<display-slug> for human-facing display while keeping
+	// agentContent untouched for agent dispatch — ptone/scion#8133).
+	displayContent := content
+	if len(humanMembers) > 0 {
+		displayContent = translateMentionsInbound(content, humanMembers)
+	}
 	storeMsg := &store.Message{
 		ID:            api.NewUUID(),
 		ProjectID:     projectID,
@@ -1925,7 +1931,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		SenderID:      msg.SenderID,
 		Recipient:     msg.Recipient,
 		RecipientID:   msg.RecipientID,
-		Msg:           content,
+		Msg:           displayContent,
 		Type:          msgType,
 		AgentID:       primaryAgent.ID,
 		Channel:       "web",
@@ -2531,7 +2537,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 
 	resp := chatMessageResponse{
 		ID:                  storeMsg.ID,
-		Content:             content,
+		Content:             displayContent,
 		Sender:              storeMsg.Sender,
 		SenderID:            storeMsg.SenderID,
 		Type:                storeMsg.Type,
@@ -2649,6 +2655,15 @@ func (s *Server) sendHumanToHuman(ctx context.Context, key, projectID string, us
 		msgType = messages.TypeReply
 	}
 
+	var humanMembers []chatMemberEntry
+	if projectID != "" && (len(mentionNames) > 0 || strings.Contains(content, "@")) {
+		humanMembers = s.resolveProjectHumanMembers(ctx, projectID)
+	}
+	displayContent := content
+	if len(humanMembers) > 0 {
+		displayContent = translateMentionsInbound(content, humanMembers)
+	}
+
 	storeMsg := &store.Message{
 		ID:            api.NewUUID(),
 		ProjectID:     msgProjectID,
@@ -2656,7 +2671,7 @@ func (s *Server) sendHumanToHuman(ctx context.Context, key, projectID string, us
 		SenderID:      user.ID(),
 		Recipient:     recipient,
 		RecipientID:   recipientID,
-		Msg:           content,
+		Msg:           displayContent,
 		Type:          msgType,
 		Channel:       "web",
 		ThreadID:      key,
@@ -2767,7 +2782,7 @@ func (s *Server) sendHumanToHuman(ctx context.Context, key, projectID string, us
 	// mention dots) on this event. Thread membership reuses the result.
 	var mentionedHumans []string
 	if len(mentionNames) > 0 && projectID != "" {
-		mentionedHumans = mentionedHumanIDs(s.resolveProjectHumanMembers(ctx, projectID), mentionNames, user.ID())
+		mentionedHumans = mentionedHumanIDs(humanMembers, mentionNames, user.ID())
 		s.recordHumanMentions(ctx, key, storeMsg.ID, mentionedHumans)
 	}
 
@@ -2802,7 +2817,7 @@ func (s *Server) sendHumanToHuman(ctx context.Context, key, projectID string, us
 
 	resp := chatMessageResponse{
 		ID:          storeMsg.ID,
-		Content:     content,
+		Content:     displayContent,
 		Sender:      storeMsg.Sender,
 		SenderID:    storeMsg.SenderID,
 		Type:        storeMsg.Type,
@@ -2911,10 +2926,15 @@ func (s *Server) handleMessageEdit(w http.ResponseWriter, r *http.Request, key, 
 		return
 	}
 
-	// Resolve projectID for event publishing.
+	// Resolve projectID for event publishing and mention translation.
 	projectID := msg.ProjectID
 	if projectID == uuid.Nil.String() {
 		projectID = ""
+	}
+	if projectID != "" && strings.Contains(content, "@") {
+		if editHumanMembers := s.resolveProjectHumanMembers(ctx, projectID); len(editHumanMembers) > 0 {
+			content = translateMentionsInbound(content, editHumanMembers)
+		}
 	}
 
 	// Update message content and mark as edited.

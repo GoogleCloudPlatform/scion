@@ -9798,3 +9798,120 @@ describe('scion-chat-thread null conversation key', () => {
     expect(el.shadowRoot).not.toBeNull();
   });
 });
+
+describe('scion-chat-thread email mention highlighting (ptone/scion#8133)', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('passes thread members to bubbles so only known Scion user @<email> tokens render as mentions', async () => {
+    apiFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          items: [
+            {
+              id: 'm-email-1',
+              msg: 'Ping @alice@example.com, skip @unknown@example.com, mail user@example.com.',
+              sender: 'agent:coder',
+              senderId: 'agent-1',
+              type: 'assistant-reply',
+              createdAt: '2026-01-01T00:00:00Z',
+            },
+          ],
+        }),
+    } as unknown as Response);
+
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = 'topic:test-email-mentions';
+    el.members = [{ id: 'u-alice', name: 'Alice Smith', email: 'alice@example.com', kind: 'user' }];
+    document.body.appendChild(el);
+
+    await vi.waitFor(() => {
+      const bubble = el.shadowRoot?.querySelector('scion-chat-message');
+      const md = bubble?.shadowRoot?.querySelector('.md-content');
+      expect(md).toBeTruthy();
+      const spans = Array.from(md!.querySelectorAll('.mention'));
+      expect(spans.map((s) => s.getAttribute('data-mention'))).toEqual(['alice-smith']);
+      expect(md!.textContent?.trim()).toBe(
+        'Ping @alice-smith, skip @unknown@example.com, mail user@example.com.'
+      );
+    });
+  });
+
+  it('memoizes knownUsersByEmail across agent-only member snapshots without re-rendering bubble markdown', async () => {
+    apiFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          items: [
+            {
+              id: 'm-memo-1',
+              msg: 'Ping @alice@example.com and @bob@example.com.',
+              sender: 'agent:coder',
+              senderId: 'agent-1',
+              type: 'assistant-reply',
+              createdAt: '2026-01-01T00:00:00Z',
+            },
+          ],
+        }),
+    } as unknown as Response);
+
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = 'dm:agent:agent-1:user:u-alice';
+    el.isDM = true;
+    el.members = [
+      { id: 'u-alice', name: 'Alice Smith', email: 'alice@example.com', kind: 'user' },
+      { id: 'agent-1', name: 'Coder', email: '', slug: 'coder', kind: 'agent' },
+    ];
+    document.body.appendChild(el);
+
+    let bubble!: HTMLElement & { knownUsersByEmail: ReadonlyMap<string, string> | null };
+    let mdBefore!: Element;
+    await vi.waitFor(() => {
+      bubble = el.shadowRoot?.querySelector('scion-chat-message') as typeof bubble;
+      const md = bubble?.shadowRoot?.querySelector('.md-content');
+      expect(md).toBeTruthy();
+      mdBefore = md!;
+      const spans = Array.from(mdBefore.querySelectorAll('.mention'));
+      expect(spans.map((s) => s.getAttribute('data-mention'))).toEqual(['alice-smith']);
+    });
+    const mapBefore = bubble.knownUsersByEmail;
+    expect(mapBefore).not.toBeNull();
+
+    // Simulate a hub-view agent snapshot replacing `members` with new agent entries
+    // while the human roster's email -> slug pairs are unchanged.
+    el.members = [
+      { id: 'u-alice', name: 'Alice Smith', email: 'alice@example.com', kind: 'user' },
+      { id: 'agent-1', name: 'Coder (busy)', email: '', slug: 'coder', kind: 'agent' },
+      { id: 'agent-2', name: 'Helper', email: '', slug: 'helper', kind: 'agent' },
+    ];
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 30));
+
+    expect(bubble.knownUsersByEmail).toBe(mapBefore);
+    expect(bubble.shadowRoot?.querySelector('.md-content')).toBe(mdBefore);
+
+    // When a new human member arrives, the map updates and `@bob@example.com` upgrades.
+    el.members = [
+      ...el.members,
+      { id: 'u-bob', name: 'Bob Jones', email: 'bob@example.com', kind: 'user' },
+    ];
+    await vi.waitFor(() => {
+      const mdAfter = bubble.shadowRoot?.querySelector('.md-content');
+      expect(mdAfter).toBeTruthy();
+      expect(mdAfter).not.toBe(mdBefore);
+      const spans = Array.from(mdAfter!.querySelectorAll('.mention'));
+      expect(spans.map((s) => s.getAttribute('data-mention'))).toEqual([
+        'alice-smith',
+        'bob-jones',
+      ]);
+    });
+  });
+});
