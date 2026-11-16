@@ -3,7 +3,7 @@ title: Scheduling & Scheduled Events
 description: Schedule recurring or one-shot future events to deliver messages or run tasks within your Scion project.
 ---
 
-Scion includes a robust, project-scoped scheduling system that allows you to trigger future events. You can schedule a message to be delivered to an agent at a specific time (one-shot) or repeatedly on a calendar schedule (recurring).
+Scion includes a robust, project-scoped scheduling system that allows you to trigger future events. You can schedule a message to be delivered to an agent—either at a specific time (one-shot) or repeatedly on a calendar schedule (recurring)—or, when the `hub.exec_schedules` experiment is enabled, schedule a one-shot command to run directly in an agent's container without an LLM turn (`--type exec`).
 
 All schedules are **project-scoped**. An agent can only create, list, and manage schedules within its own project.
 
@@ -36,7 +36,6 @@ One-shot events fire exactly once and are then cleaned up. You can specify the t
 
 ```bash
 scion schedule create \
-  --name "one-shot-check" \
   --type message \
   --agent "deploy-agent" \
   --message "Recheck system health" \
@@ -126,6 +125,84 @@ scion schedule create-recurring \
 - **Status while running**: a wake fire shows status `firing` until its delivery outcome is written (`fired`, `expired` or `failed`). If the Hub stops before the outcome can be written, recovery marks the event `failed` with `hub stopped before the wake fire completed` (and counts the error on the parent recurring schedule).
 - **Auto-wake under `lifecycle.idle_suspend`**: when the [`lifecycle.idle_suspend`](/scion/reference/experiments/#server-experiments-with-notes) experiment is enabled, a scheduled message to an agent the Hub suspended (`suspendReason` `idle` or `stalled`) resumes it automatically even without `--wake` and without requiring `agent.lifecycle` on the schedule's authority. `--wake` is still required to wake an agent a user suspended (`suspendReason` `user`) or while `lifecycle.idle_suspend` is disabled.
 - [Scheduled chat messages](/scion/hosted/user/scheduled-send/) are separate from the project scheduler and have their own opt-in **Wake the agent if it is suspended** option for the primary recipient.
+
+---
+
+## Exec Schedules (Experimental)
+
+When a one-shot scheduled event only needs to run a deterministic command or script inside an agent's container—without waking an LLM or consuming a model turn—use `--type exec`. Scheduled exec dispatches the command (`argv`) over the target agent's Conduit session to `sciontool` inside the container.
+
+### Prerequisites
+
+- **Hub experiments**: Both `hub.conduit` and `hub.exec_schedules` must be enabled on the Hub (see [Experiments](/scion/reference/experiments/#server-experiments-with-notes)).
+- **Agents launched or restarted with the flag**: `sciontool` registers and advertises the `exec-start` and `exec-status` control routes only when the agent started with `hub.exec_schedules` enabled in its launch environment. Agents started before the experiment was enabled do not advertise those routes until restarted; fires targeting them record status `skipped` (`agent executor unavailable`).
+- **NTP-synchronised clocks**: `sciontool` enforces a fail-closed start deadline (`not_after` plus a 10-second clock tolerance). Agent hosts and containers must run NTP-synchronised clocks; clock skew beyond the 10-second tolerance causes starts to fail closed (`start expired (check agent clock)`) rather than run late.
+- **Supported runtimes**: Container runtimes with Conduit sessions are supported. Managed agent runtimes (`managed:*`) are refused with `422` at creation and `skipped` at fire time.
+
+### Creating One-Shot Exec Events
+
+Pass the command and its arguments after `--`. Everything after `--` is sent as an `argv` array (`1`–`64` arguments, non-empty `argv[0]`, no NUL bytes, at most `4,096` bytes per argument and `16,384` bytes total) and executed directly with `execve`—**no shell is invoked** unless you name one explicitly (for example `-- sh -c '...'`).
+
+```bash
+# One-shot exec event in 10 minutes (default 60s timeout)
+scion schedule create \
+  --type exec \
+  --agent "worker" \
+  --in 10m \
+  --timeout 60s \
+  -- /usr/local/bin/check-queue --strict
+```
+
+:::note[Rollout status]
+Only **one-shot** exec events (`scion schedule create --type exec` and `POST /api/v1/projects/{projectId}/scheduled-events`) are available today. **Recurring exec schedules are not yet available** (Phase 2, ptone/scion#7884): `scion schedule create-recurring --type exec` forwards to `POST /api/v1/projects/{projectId}/schedules`, which currently refuses `exec` with `unsupported event type`. Phase 2 will also add per-schedule overlap leases, recurring `errorCount` tracking, the `target_deleted` pause reason, and Web form support.
+:::
+
+### Execution Environment and Output
+
+- **User and groups**: Runs as the container's Conduit PTY user (`scion`) with its supplementary groups, never with PID 1 credentials (if privilege drop cannot be established, the run fails closed).
+- **Working directory**: `/workspace` if it exists, otherwise the `scion` user's home directory.
+- **Environment**: The same environment `sciontool` gives the harness shell in the agent's tmux session at launch, so scheduled commands see the same `PATH`, workspace variables, and credentials as commands typed in the agent's shell.
+- **Standard streams and no stored output**: `stdin` is `/dev/null`. `stdout` and `stderr` are continuously drained and discarded inside the container—**no command output is stored or returned** in the database, API, CLI, or Hub/broker logs.
+- **Run summary (`execSummary`)**: `scion schedule get <event-id>` displays the non-secret run summary (`outcome`, `exitCode`, `durationMs`, and `outputBytes` drained; `scion schedule history` uses the same summary columns once recurring exec schedules land). Jobs that need readable logs or failure alerts should write their own log file (for example in `/workspace` or a shared volume) and, if needed, send alerts from the script with `scion message`.
+
+### Timeouts, Outcomes, and Concurrency
+
+- **Timeouts**: `--timeout` accepts whole-second durations from `1s` up to `60m` (`3600s`), defaulting to `60s` when omitted. Each command runs in its own process group. On timeout, `sciontool` sends `SIGTERM` to the process group and `SIGKILL` 5 seconds later, recording event status `failed` (`timed out after Ns`, `outcome: timeout`).
+- **Exit codes**: Exit code `0` records `fired` (`outcome: ok`). Any non-zero exit code records `failed` with `exit status N` (`outcome: nonzero`).
+- **Target state**: The target agent must be `running` when the event fires. Stopped, suspended, or reincarnating targets are **not** woken (`--wake` is not supported with `--type exec`); the fire records `skipped` (`target not running`). Fires delayed more than 10 minutes past their scheduled time also record `skipped` (`missed window`). A **held** target is refused as `failed` (`exec refused`).
+- **Concurrency and quotas**: At most **2 live scheduled exec runs per container** (`skipped` with `capacity`). Authoring quotas cap pending exec events at `20` per target agent and `200` per project (`429` when exceeded).
+
+### Long-Running Work and `flock` Mutual Exclusion
+
+Tracked runs support timeouts up to **60 minutes** (`--timeout 60m`), which is the preferred mode whenever a job fits within an hour because event status and exit codes track the real job directly.
+
+If a job can legitimately run longer than 60 minutes, have a short wrapper script launch the work detached in the background (`setsid ... </dev/null >>/workspace/job.log 2>&1 &`). When the main process exits normally, `sciontool` records the outcome immediately and does **not** kill backgrounded children.
+
+Because detached or daemonized descendants (`setsid`, double-fork) escape process-group tracking on timeout—and can overlap if another exec event runs the same script while the background job is still active—**guard detached jobs (and any script touching shared external resources) with `flock -n`**:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+exec 9>/tmp/nightly-sync.lock
+if ! flock -n 9; then
+  # Previous run still holds fd 9; exit cleanly without overlapping.
+  exit 0
+fi
+
+/usr/local/bin/nightly-sync >>/workspace/nightly-sync.log 2>&1
+```
+
+### Permissions and Command Redaction
+
+- **Live `agent.attach` authority**: Creating an `exec` event requires `scheduled_event.create` permission in the project **and** a user or agent that may attach to the agent (`agent.attach`—for example its owner or an ancestor, a role that grants `agent.attach`, or an agent with the `full` role in the same delegation chain; user access tokens also require the `agent:attach` scope, and delegated agent tokens are refused). That authority is re-checked when the event fires under the recorded authorization revision and ceiling; if revoked, the fire is refused (`failed` with `exec refused`). Deleting the target agent cancels its pending one-shot exec events.
+- **Command (`argv`) redaction**: Every API and CLI response redacts `command` unless the reading caller's current credential holds live `agent.attach` on the target agent at read time—the event's creator is **not** exempt if they later lose attach permission or read with a token lacking `agent:attach`. Redacted responses omit `command` and return `commandRedacted: true`, `argc`, and `commandSha256` (a SHA-256 of the command (`argv`)), which `scion schedule get` displays as `<redacted, N args, sha256:...>`.
+
+### Documented Limitations
+
+- **No in-flight cancellation**: Cancelling an event, revoking authority, or placing a hold on the target stops future fires from starting, but does not cancel an exec run already admitted in the container; that run continues until it exits or reaches its local timeout.
+- **Outcome recovery when `hub.conduit` is turned off**: Turning `hub.exec_schedules` off stops new starts while `exec-status` recovery for already-admitted runs continues. Turning `hub.conduit` off also refuses new or reconnecting agent Conduit sessions, so outcome recovery continues **only** over agent sessions that stay connected; if the session drops (or the Hub restarts while `hub.conduit` is off), the agent cannot reconnect and the run ends `abandoned` when its lease (`timeout + 120s`) expires.
+- **Alpha gating (ptone/scion#8096)**: Keep `hub.exec_schedules` restricted to alpha environments until the Phase 2 recovery-sweeper fairness fix (ptone/scion#8096, ensuring one sweep claim per run and persisted per-agent rotation across large multi-agent recovery backlogs) lands.
 
 ---
 
