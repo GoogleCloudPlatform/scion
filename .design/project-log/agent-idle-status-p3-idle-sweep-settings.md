@@ -23,12 +23,13 @@
   - Added two additive nullable columns on `agents`: `last_delivery_at` and
     `idle_suspend_claim_until` (`json:"-"`; no `DowngradeFloor` bump).
   - Allocated singleton advisory lock `LockAgentIdleSuspend` (`0x5C10001D`) and added
-    `ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, limit)`, selecting
-    non-deleted `running` agents with a suspend-eligible activity, non-null
+    `ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, after, limit)`,
+    selecting non-deleted `running` agents with a suspend-eligible activity, non-null
     `activity_since < cutoff`, non-null `last_seen >= heartbeatRecency`, and
     `last_live_process_at IS NULL OR last_live_process_at < liveWorkCutoff`, ordered oldest-idle
-    first (`ORDER BY activity_since ASC, id ASC`) and bounded by `limit`
-    (`autoSuspendQueueLimit = 1000`).
+    first (`ORDER BY activity_since ASC, id ASC`) with an optional keyset cursor `after` so the
+    idle sweep advances past non-resumable or already-queued rows, and reserves half of
+    `autoSuspendQueueLimit` (`1000`) for stalled hand-offs.
   - Added `ClaimIdleSuspend` as the single commit point before `DispatchAgentStop`: under the row
     lock and store clock (`storeNow`), it swaps `run_intent` to `stopped` and sets
     `idle_suspend_claim_until` only while `phase=running`, `run_id`, `activity`, and
@@ -36,15 +37,16 @@
     `!HasRecentLiveWork`, no start/delete/reincarnation/idle-suspend claim is held, and no delivery
     landed at or after `activity_since`. Once `ClaimIdleSuspend` commits and `DispatchAgentStop`
     succeeds, the stop is irreversible: `UpdateAgentStatus` with `IfIdleSuspendCommit` accepts a row
-    in `running`, `stopping`, or `stopped` (handling `sciontool init`'s SIGTERM shutdown reports)
-    conditioned on the same `run_id`, the held `claimUntil` lease, no delete/reincarnation/foreign
-    start claim, and no user lifecycle action (every user stop, stop-all, suspend, start/stop claim,
-    reincarnation, or deletion clears `idle_suspend_claim_until`, and `stopped` is accepted only for
-    the container's own clean shutdown report), restoring `RetainedActivity` (`idle`, `completed`,
+    in `running`, `stopping`, `stopped`, or `error` (including non-zero exits and multi-replica
+    post-stop broker heartbeats) conditioned on the same `run_id`, the exact unexpired `claimUntil`
+    lease, `run_intent=stopped` (never `stop-queued`), and no delete/reincarnation/foreign start
+    claim (every user stop, stop-all, suspend, start/stop claim, reincarnation, or deletion clears
+    `idle_suspend_claim_until` in the same write), restoring `RetainedActivity` (`idle`, `completed`,
     or `harness_error`) alongside `suspend_reason=idle` and never reverting `run_intent` to
     `running`. Post-stop commit failure, hub crash, and stop-timeout recovery are deferred to
-    `ptone/scion#8204` (noted in `pkg/experiments/registry.go`, `docs-site/src/content/docs/reference/experiments.md`,
-    and the `autoSuspendAgent` commit point).
+    `ptone/scion#8204` (do not set `server.hub.auto_suspend_idle` with `lifecycle.idle_suspend` on
+    in production until `ptone/scion#8204` lands; noted in `pkg/experiments/registry.go`,
+    `docs-site/src/content/docs/reference/experiments.md`, and the `autoSuspendAgent` commit point).
   - Standardized claim-expiry checks on the store clock (`GetAgent`, `GetAgentBySlug`, and
     `MarkAgentDelivery` populating `agent.IdleSuspendClaimActive` from the store clock, plus
     `entTxStoreNow` inside `UpdateAgentStatus`).

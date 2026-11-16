@@ -474,9 +474,8 @@ func TestRecorderLinkErrors(t *testing.T) {
 //
 // Note: Server.managedAgentMessage (hub-managed runtimes with no runtime broker
 // container) delivers in-process without calling DispatchAgentMessage or
-// MarkAgentDelivery. That is safe while managed agents cannot be idle-suspend
-// candidates (ListIdleSuspendCandidates requires a non-empty runtime_broker_id
-// and managed runtimes do not support suspend/resume).
+// MarkAgentDelivery. That is safe while managed runtimes do not support
+// suspend/resume and cannot be idle-suspended.
 func TestMessageDispatchCallsMarkAgentDelivery(t *testing.T) {
 	funcs := parseHubFuncs(t)
 

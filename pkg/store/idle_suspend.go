@@ -25,6 +25,13 @@ import (
 // longer eligible to record the idle suspension).
 var ErrIdleSuspendPrecondition = fmt.Errorf("agent no longer eligible for idle suspend: %w", ErrVersionConflict)
 
+// IdleSuspendCursor positions a keyset page strictly after (ActivitySince, ID)
+// in ListIdleSuspendCandidates's (activity_since ASC, id ASC) ordering.
+type IdleSuspendCursor struct {
+	ActivitySince time.Time
+	ID            string
+}
+
 // IdleSuspendCondition captures the snapshot and staleness preconditions that
 // must still hold on the locked agent row for ClaimIdleSuspend to commit.
 type IdleSuspendCondition struct {

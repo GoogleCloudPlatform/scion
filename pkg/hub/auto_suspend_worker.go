@@ -76,12 +76,81 @@ type autoSuspendWorker struct {
 	// queued holds the IDs of the pending agents and of the agents in the
 	// batch being processed.
 	queued map[string]bool
+	// nonResumableLogged records agentID -> runID for non-resumable agents the
+	// idle sweep has already logged at INFO, so later sweeps of the same run
+	// log at DEBUG instead of flooding INFO on every tick.
+	nonResumableLogged map[string]string
 	// running is set while the worker goroutine runs.
 	running bool
 	// stopped is set by stopAutoSuspendWorker; later hand-offs are dropped.
 	stopped bool
 	// wg tracks the worker goroutine.
 	wg sync.WaitGroup
+}
+
+const maxNonResumableLoggedEntries = 4096
+
+// idleAutoSuspendQueueCap returns the maximum queue occupancy usable by the
+// idle auto-suspend sweep, reserving half of autoSuspendQueueLimit (at least 1
+// slot whenever autoSuspendQueueLimit > 1) for stalled hand-offs, which
+// MarkStalledAgents offers only once.
+func idleAutoSuspendQueueCap() int {
+	if autoSuspendQueueLimit <= 1 {
+		return autoSuspendQueueLimit
+	}
+	return autoSuspendQueueLimit / 2
+}
+
+// idleAutoSuspendAvailableSlots returns how many idle candidates may currently
+// be added without intruding into the stalled hand-off reserve.
+func (s *Server) idleAutoSuspendAvailableSlots() int {
+	w := &s.autoSuspend
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.stopped {
+		return 0
+	}
+	avail := idleAutoSuspendQueueCap() - len(w.queued)
+	if avail < 0 {
+		return 0
+	}
+	return avail
+}
+
+func (s *Server) isAutoSuspendQueued(agentID string) bool {
+	w := &s.autoSuspend
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.queued[agentID]
+}
+
+func (s *Server) logIdleSuspendNonResumable(agent *store.Agent, harnessType, skipReason string) {
+	if agent == nil {
+		return
+	}
+	harnessConfig := ""
+	if agent.AppliedConfig != nil {
+		harnessConfig = agent.AppliedConfig.HarnessConfig
+	}
+	w := &s.autoSuspend
+	w.mu.Lock()
+	alreadyLogged := w.nonResumableLogged != nil && w.nonResumableLogged[agent.ID] == agent.RunID
+	if !alreadyLogged {
+		if w.nonResumableLogged == nil || len(w.nonResumableLogged) >= maxNonResumableLoggedEntries {
+			w.nonResumableLogged = map[string]string{}
+		}
+		w.nonResumableLogged[agent.ID] = agent.RunID
+	}
+	w.mu.Unlock()
+	if alreadyLogged {
+		slog.Debug("Scheduler: skipping auto-suspend; harness does not support resume",
+			"agent_id", agent.ID, "agent_name", agent.Name,
+			"harness_config", harnessConfig, "harness", harnessType, "reason", skipReason)
+		return
+	}
+	slog.Info("Scheduler: skipping auto-suspend; harness does not support resume",
+		"agent_id", agent.ID, "agent_name", agent.Name,
+		"harness_config", harnessConfig, "harness", harnessType, "reason", skipReason)
 }
 
 // lifetimeCtx returns the server-lifetime context, cancelled on shutdown,
@@ -115,13 +184,17 @@ func (s *Server) enqueueAutoSuspendWithReason(agents []store.Agent, reason state
 	if w.queued == nil {
 		w.queued = map[string]bool{}
 	}
+	limit := autoSuspendQueueLimit
+	if reason == state.SuspendReasonIdle {
+		limit = idleAutoSuspendQueueCap()
+	}
 	added, duplicates, dropped := 0, 0, 0
 	for i := range agents {
 		id := agents[i].ID
 		switch {
 		case w.queued[id]:
 			duplicates++
-		case len(w.queued) >= autoSuspendQueueLimit:
+		case len(w.queued) >= limit:
 			dropped++
 		default:
 			w.queued[id] = true
@@ -135,7 +208,7 @@ func (s *Server) enqueueAutoSuspendWithReason(agents []store.Agent, reason state
 	}
 	if dropped > 0 {
 		slog.Warn("Scheduler: auto-suspend queue full; agents left running",
-			"dropped", dropped, "limit", autoSuspendQueueLimit, "reason", reason)
+			"dropped", dropped, "limit", limit, "reason", reason)
 	}
 	if added > 0 && !w.running {
 		w.running = true

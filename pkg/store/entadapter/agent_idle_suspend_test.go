@@ -62,7 +62,7 @@ func TestAgentStore_ListIdleSuspendCandidates_Activities(t *testing.T) {
 	}
 	require.Len(t, wantIDs, 3, "expected idle, completed, and harness_error to be eligible")
 
-	got, err := s.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, 0)
+	got, err := s.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, nil, 0)
 	require.NoError(t, err)
 
 	gotIDs := map[string]string{}
@@ -166,7 +166,7 @@ func TestAgentStore_ListIdleSuspendCandidates_Predicates(t *testing.T) {
 		Save(ctx)
 	require.NoError(t, err)
 
-	got, err := s.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, 0)
+	got, err := s.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, nil, 0)
 	require.NoError(t, err)
 	gotIDs := []string{}
 	for _, a := range got {
@@ -174,11 +174,34 @@ func TestAgentStore_ListIdleSuspendCandidates_Predicates(t *testing.T) {
 	}
 	assert.Equal(t, []string{eligible.ID, staleLiveWork.ID}, gotIDs, "candidates must be ordered by activity_since ASC")
 
-	// 10. Positive limit bounds the returned slice, picking the oldest activity_since first.
-	limited, err := s.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, 1)
+	// 10. Positive limit bounds the returned slice, picking the oldest activity_since first,
+	// and a keyset cursor advances strictly past (activity_since, id), including equal timestamps.
+	tieA := makeIdle("tie-a", now.Add(-30*time.Second))
+	setSince(tieA.ID, &past)
+
+	allOrdered, err := s.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, nil, 0)
+	require.NoError(t, err)
+	require.Len(t, allOrdered, 3)
+	assert.Equal(t, eligible.ID, allOrdered[0].ID)
+
+	limited, err := s.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, nil, 1)
 	require.NoError(t, err)
 	require.Len(t, limited, 1)
 	assert.Equal(t, eligible.ID, limited[0].ID)
+
+	var pagedIDs []string
+	var cursor *store.IdleSuspendCursor
+	for {
+		page, perr := s.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, cursor, 1)
+		require.NoError(t, perr)
+		if len(page) == 0 {
+			break
+		}
+		pagedIDs = append(pagedIDs, page[0].ID)
+		cursor = &store.IdleSuspendCursor{ActivitySince: *page[0].ActivitySince, ID: page[0].ID}
+	}
+	wantOrdered := []string{allOrdered[0].ID, allOrdered[1].ID, allOrdered[2].ID}
+	assert.Equal(t, wantOrdered, pagedIDs, "keyset cursor must walk every candidate in exact (activity_since, id) order")
 }
 
 func TestAgentStore_ClaimIdleSuspend_AndDeliveryHandshake(t *testing.T) {
@@ -449,7 +472,7 @@ func TestAgentStore_ClaimIdleSuspend_AndDeliveryHandshake(t *testing.T) {
 			assert.ErrorIs(t, err, store.ErrIdleSuspendPrecondition)
 		})
 
-		t.Run("expired claim lease and container limits_exceeded or non-zero exit stop are rejected", func(t *testing.T) {
+		t.Run("expired claim lease is rejected while runtime error or non-zero stopped reports commit cleanly", func(t *testing.T) {
 			aExp, condExp := makeEligible("expired-claim")
 			condExp.ClaimTTL = 2 * time.Millisecond
 			_, _, cuExp, err := s.ClaimIdleSuspend(ctx, aExp.ID, condExp)
@@ -463,43 +486,67 @@ func TestAgentStore_ClaimIdleSuspend_AndDeliveryHandshake(t *testing.T) {
 			})
 			assert.ErrorIs(t, err, store.ErrIdleSuspendPrecondition)
 
-			aLim, condLim := makeEligible("limits-stop")
-			_, _, cuLim, err := s.ClaimIdleSuspend(ctx, aLim.ID, condLim)
+			// Multi-replica post-stop broker heartbeat promoting Exited (137) to phase=error:
+			// claim remains held because ReportSource is runtime, so IfIdleSuspendCommit
+			// must commit suspended(idle) and restore RetainedActivity while keeping exit metadata.
+			aErr, condErr := makeEligible("heartbeat-error-137")
+			_, _, cuErr, err := s.ClaimIdleSuspend(ctx, aErr.ID, condErr)
 			require.NoError(t, err)
-			require.NoError(t, s.UpdateAgentStatus(ctx, aLim.ID, store.AgentStatusUpdate{
-				Phase:              string(state.PhaseStopped),
-				Activity:           string(state.ActivityLimitsExceeded),
-				ReportSource:       store.StatusReportSourceAgent,
-				ReportRunID:        aLim.RunID,
-				ReportAgentToken:   true,
+			exit137 := 137
+			require.NoError(t, s.UpdateAgentStatus(ctx, aErr.ID, store.AgentStatusUpdate{
+				Phase:              string(state.PhaseError),
+				ContainerStatus:    "Exited (137)",
+				ExitCode:           &exit137,
+				ExitReason:         string(state.ExitReasonCrashed),
+				Heartbeat:          true,
+				Message:            "Agent crashed with exit code 137",
+				ReportSource:       store.StatusReportSourceRuntime,
+				ReportRunID:        aErr.RunID,
 				GuardReincarnation: true,
 			}))
-			err = s.UpdateAgentStatus(ctx, aLim.ID, store.AgentStatusUpdate{
+			require.NoError(t, s.UpdateAgentStatus(ctx, aErr.ID, store.AgentStatusUpdate{
 				Phase:               string(state.PhaseSuspended),
+				ContainerStatus:     "stopped",
+				RetainedActivity:    string(state.ActivityIdle),
 				SuspendReason:       string(state.SuspendReasonIdle),
-				IfRunID:             aLim.RunID,
-				IfIdleSuspendCommit: &cuLim,
-			})
-			assert.ErrorIs(t, err, store.ErrIdleSuspendPrecondition)
+				IfRunID:             aErr.RunID,
+				IfIdleSuspendCommit: &cuErr,
+			}))
+			afterErr, err := s.GetAgent(ctx, aErr.ID)
+			require.NoError(t, err)
+			assert.Equal(t, string(state.PhaseSuspended), afterErr.Phase)
+			assert.Equal(t, string(state.SuspendReasonIdle), afterErr.SuspendReason)
+			assert.Equal(t, string(state.ActivityIdle), afterErr.Activity)
+			require.NotNil(t, afterErr.ExitCode)
+			assert.Equal(t, 137, *afterErr.ExitCode)
 
+			// Container/runtime stopped report with non-zero exit code or terminal activity
+			// during shutdown also commits suspended(idle) while the exact claim is held.
 			aExit, condExit := makeEligible("nonzero-exit-stop")
 			_, _, cuExit, err := s.ClaimIdleSuspend(ctx, aExit.ID, condExit)
 			require.NoError(t, err)
 			exitOne := 1
 			require.NoError(t, s.UpdateAgentStatus(ctx, aExit.ID, store.AgentStatusUpdate{
 				Phase:              string(state.PhaseStopped),
+				Activity:           string(state.ActivityCrashed),
 				ExitCode:           &exitOne,
 				ReportSource:       store.StatusReportSourceRuntime,
 				ReportRunID:        aExit.RunID,
 				GuardReincarnation: true,
 			}))
-			err = s.UpdateAgentStatus(ctx, aExit.ID, store.AgentStatusUpdate{
+			require.NoError(t, s.UpdateAgentStatus(ctx, aExit.ID, store.AgentStatusUpdate{
 				Phase:               string(state.PhaseSuspended),
+				ContainerStatus:     "stopped",
+				RetainedActivity:    string(state.ActivityIdle),
 				SuspendReason:       string(state.SuspendReasonIdle),
 				IfRunID:             aExit.RunID,
 				IfIdleSuspendCommit: &cuExit,
-			})
-			assert.ErrorIs(t, err, store.ErrIdleSuspendPrecondition)
+			}))
+			afterExit, err := s.GetAgent(ctx, aExit.ID)
+			require.NoError(t, err)
+			assert.Equal(t, string(state.PhaseSuspended), afterExit.Phase)
+			assert.Equal(t, string(state.SuspendReasonIdle), afterExit.SuspendReason)
+			assert.Equal(t, string(state.ActivityIdle), afterExit.Activity)
 		})
 	})
 

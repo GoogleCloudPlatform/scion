@@ -114,13 +114,14 @@ func checkIdleSuspendRow(row *ent.Agent, cond store.IdleSuspendCondition, now ti
 
 // checkIdleSuspendCommit evaluates AgentStatusUpdate.IfIdleSuspendCommit on the
 // locked row at store-clock now after ClaimIdleSuspend committed and
-// DispatchAgentStop succeeded. It requires this exact claim lease to still be
-// held at now (any user/hub lifecycle write such as stop, stop-all, suspend,
-// restart, hold, start, reincarnation, or delete invalidates
-// idle_suspend_claim_until in the same write) and run_intent to remain stopped.
-// Phase running and stopping are accepted directly; phase stopped is accepted
-// only when it came from a clean container/runtime shutdown report for our own
-// stop dispatch (non-terminal activity, not stop_queued, zero/unset exit code).
+// DispatchAgentStop succeeded. It requires this exact unexpired claim lease to
+// still be held at now (any user or hub-authored lifecycle write — stop,
+// stop-all, suspend, restart, hold, start, reincarnation, or delete — clears
+// idle_suspend_claim_until in the same write) and run_intent to remain stopped
+// (never stop-queued). While that claim is held, running, stopping, stopped,
+// and error (including non-zero exits or forced post-stop broker heartbeats on
+// another replica) are all container/runtime outcomes of our own stop dispatch
+// and are accepted.
 func checkIdleSuspendCommit(row *ent.Agent, claimUntil, now time.Time) bool {
 	if row == nil {
 		return false
@@ -137,16 +138,11 @@ func checkIdleSuspendCommit(row *ent.Agent, claimUntil, now time.Time) bool {
 	if row.RunIntent == nil || *row.RunIntent != string(store.RunIntentStopped) {
 		return false
 	}
+	if row.ContainerStatus == store.ContainerStatusStopQueued {
+		return false
+	}
 	switch state.Phase(row.Phase) {
-	case state.PhaseRunning, state.PhaseStopping:
-		return true
-	case state.PhaseStopped:
-		if isTerminalActivity(row.Activity) || row.ContainerStatus == store.ContainerStatusStopQueued {
-			return false
-		}
-		if row.ExitCode != nil && *row.ExitCode != 0 {
-			return false
-		}
+	case state.PhaseRunning, state.PhaseStopping, state.PhaseStopped, state.PhaseError:
 		return true
 	default:
 		return false

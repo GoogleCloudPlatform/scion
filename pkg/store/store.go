@@ -878,10 +878,12 @@ type AgentStore interface {
 	// activity_since is non-NULL and predates cutoff, whose heartbeat
 	// (last_seen) is at or after heartbeatRecency, and whose
 	// last_live_process_at is NULL or predates liveWorkCutoff, ordered by
-	// activity_since ascending (and id ascending as tiebreaker). Offline agents
-	// and rows with a NULL activity_since are never returned. A positive limit
-	// bounds the number of rows returned.
-	ListIdleSuspendCandidates(ctx context.Context, cutoff, heartbeatRecency, liveWorkCutoff time.Time, limit int) ([]Agent, error)
+	// activity_since ascending (and id ascending as tiebreaker). When after is
+	// non-nil, only rows strictly after (after.ActivitySince, after.ID) are
+	// returned so sweeps can advance past non-resumable or already-queued rows.
+	// Offline agents and rows with a NULL activity_since are never returned. A
+	// positive limit bounds the number of rows returned.
+	ListIdleSuspendCandidates(ctx context.Context, cutoff, heartbeatRecency, liveWorkCutoff time.Time, after *IdleSuspendCursor, limit int) ([]Agent, error)
 
 	// ClaimIdleSuspend atomically checks that agentID still satisfies cond on
 	// the locked row (phase=running, matching run_id/activity/activity_since
@@ -1609,17 +1611,19 @@ type AgentStatusUpdate struct {
 	// IfIdleSuspendCommit, when non-nil, guards the post-stop status write of
 	// an idle auto-suspend whose ClaimIdleSuspend already committed: the locked
 	// row must not be soft-deleted, held by a deletion or reincarnation, or
-	// claimed by a start, must be in phase running, stopping or stopped, and
-	// must still hold the idle_suspend_claim_until timestamp recorded by
-	// ClaimIdleSuspend; otherwise UpdateAgentStatus returns
-	// ErrIdleSuspendPrecondition and writes nothing. Internal to the hub —
-	// json:"-".
+	// claimed by a start, must still hold the exact unexpired
+	// idle_suspend_claim_until timestamp recorded by ClaimIdleSuspend with
+	// run_intent=stopped (not stop-queued), and must be in phase running,
+	// stopping, stopped, or error (from container/runtime reports for the same
+	// run); otherwise UpdateAgentStatus returns ErrIdleSuspendPrecondition and
+	// writes nothing. Internal to the hub — json:"-".
 	IfIdleSuspendCommit *time.Time `json:"-"`
 	// RetainedActivity, when non-empty on a Phase=suspended update, supplies
 	// the pre-stop retained activity (idle, completed or harness_error) to
-	// preserve if the container's own shutdown report already transitioned the
-	// row to stopped and cleared current.Activity before the hub's post-stop
-	// status write ran. Internal to the hub — json:"-".
+	// preserve if a container or runtime shutdown report already transitioned
+	// the row to stopped or error and cleared or replaced current.Activity
+	// before the hub's post-stop status write ran. Internal to the hub —
+	// json:"-".
 	RetainedActivity string `json:"-"`
 	// IfNoStartClaim, when true, makes the update conditional on no start
 	// claim being held on the locked row; otherwise UpdateAgentStatus returns

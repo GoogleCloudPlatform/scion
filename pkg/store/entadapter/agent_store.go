@@ -1935,15 +1935,18 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	} else if strings.EqualFold(su.Phase, string(state.PhaseSuspended)) {
 		// Transitioning to suspended: preserve retained activities (completed,
 		// idle, harness_error; computed from stalled_from_activity when stalled)
-		// and clear any other activity, stall marker, and tool name. If the
-		// container's own shutdown report already moved the row to stopped and
-		// cleared current.Activity before the hub's post-stop suspend write ran,
-		// restore su.RetainedActivity.
+		// and clear any other activity, stall marker, and tool name. If a
+		// container or runtime shutdown report already moved the row to stopped
+		// or error and cleared or replaced current.Activity before the hub's
+		// post-stop suspend write ran, restore su.RetainedActivity.
 		retained := string(state.RetainedSuspendActivity(
 			state.Activity(current.Activity),
 			state.Activity(current.StalledFromActivity),
 		))
-		if retained == "" && current.Phase == string(state.PhaseStopped) && current.Activity == "" && su.RetainedActivity != "" {
+		if retained == "" &&
+			(current.Phase == string(state.PhaseStopped) || current.Phase == string(state.PhaseError)) &&
+			(current.Activity == "" || isTerminalActivity(current.Activity)) &&
+			su.RetainedActivity != "" {
 			retained = string(state.RetainedSuspendActivity(state.Activity(su.RetainedActivity), ""))
 		}
 		upd.SetActivity(retained)
@@ -3163,7 +3166,7 @@ func entTxStoreNow(ctx context.Context, tx *ent.Tx, isPostgres bool) (time.Time,
 }
 
 // ListIdleSuspendCandidates implements store.AgentStore.
-func (s *AgentStore) ListIdleSuspendCandidates(ctx context.Context, cutoff, heartbeatRecency, liveWorkCutoff time.Time, limit int) ([]store.Agent, error) {
+func (s *AgentStore) ListIdleSuspendCandidates(ctx context.Context, cutoff, heartbeatRecency, liveWorkCutoff time.Time, after *store.IdleSuspendCursor, limit int) ([]store.Agent, error) {
 	q := s.client.Agent.Query().Where(
 		agent.DeletedAtIsNil(),
 		agent.PhaseEQ(string(state.PhaseRunning)),
@@ -3176,7 +3179,22 @@ func (s *AgentStore) ListIdleSuspendCandidates(ctx context.Context, cutoff, hear
 			agent.LastLiveProcessAtIsNil(),
 			agent.LastLiveProcessAtLT(liveWorkCutoff.UTC()),
 		),
-	).Order(
+	)
+	if after != nil {
+		afterUID, err := parseUUID(after.ID)
+		if err != nil {
+			return nil, err
+		}
+		ts := after.ActivitySince.UTC()
+		q = q.Where(agent.Or(
+			agent.ActivitySinceGT(ts),
+			agent.And(
+				agent.ActivitySinceEQ(ts),
+				agent.IDGT(afterUID),
+			),
+		))
+	}
+	q = q.Order(
 		ent.Asc(agent.FieldActivitySince),
 		ent.Asc(agent.FieldID),
 	)

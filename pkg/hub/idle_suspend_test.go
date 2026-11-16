@@ -1757,9 +1757,9 @@ type countingIdleCandidatesStore struct {
 	listCalls atomic.Int32
 }
 
-func (w *countingIdleCandidatesStore) ListIdleSuspendCandidates(ctx context.Context, cutoff, heartbeatRecency, liveWorkCutoff time.Time, limit int) ([]store.Agent, error) {
+func (w *countingIdleCandidatesStore) ListIdleSuspendCandidates(ctx context.Context, cutoff, heartbeatRecency, liveWorkCutoff time.Time, after *store.IdleSuspendCursor, limit int) ([]store.Agent, error) {
 	w.listCalls.Add(1)
-	return w.Store.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, limit)
+	return w.Store.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, after, limit)
 }
 
 type claimBeforeMarkStore struct {
@@ -2069,6 +2069,341 @@ func TestIdleSuspend_SettleTimeoutErrorWording(t *testing.T) {
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "is suspending and did not finish stopping in time")
 	assert.NotContains(t, rec.Body.String(), "was already starting")
-	assert.Equal(t, "agent is suspending", deferredReason(claimed))
+	assert.Equal(t, "agent is suspending", srv.deferredReason(claimed))
+
+	staleClaim := *claimed
+	staleClaim.IdleSuspendClaimActive = false
+	assert.Equal(t, "agent is already starting", srv.deferredReason(&staleClaim),
+		"expired idle-suspend claim must not report 'agent is suspending'")
+
+	srv.mu.Lock()
+	srv.config.AutoSuspendIdle = false
+	srv.mu.Unlock()
+	assert.Equal(t, "agent is already starting", srv.deferredReason(claimed),
+		"deferredReason must ignore IdleSuspendClaimActive while the idle-suspend gate is off")
 	assert.Empty(t, disp.getCalls())
+}
+
+type postStopHeartbeatDispatcher struct {
+	runIntentDispatcher
+	t      *testing.T
+	store  store.Store
+	onStop func(ctx context.Context, agent *store.Agent)
+}
+
+func (d *postStopHeartbeatDispatcher) DispatchAgentStop(ctx context.Context, agent *store.Agent) error {
+	d.stops.Add(1)
+	if d.onStop != nil {
+		d.onStop(ctx, agent)
+	}
+	return nil
+}
+
+// TestIdleSuspend_CrossReplicaPostStopHeartbeatAndCrashReport reproduces pass-4
+// R1: when a post-stop broker heartbeat on another replica (where in-process
+// lifecycleOps is not held) promotes Exited (137) to phase=error, or a
+// container/runtime shutdown report records non-zero stopped, IfIdleSuspendCommit
+// still commits phase=suspended, suspend_reason=idle (with RetainedActivity)
+// while the exact claim is held, whereas a concurrent user stop still clears
+// the claim and wins.
+func TestIdleSuspend_CrossReplicaPostStopHeartbeatAndCrashReport(t *testing.T) {
+	t.Run("cross-replica Exited 137 broker heartbeat moving row to error commits suspended(idle)", func(t *testing.T) {
+		ctx := context.Background()
+		srv, s := testServer(t)
+		enableIdleSweepForTest(t, srv, 15*time.Minute)
+
+		var afterHeartbeat *store.Agent
+		disp := &postStopHeartbeatDispatcher{
+			t:     t,
+			store: s,
+			onStop: func(ctx context.Context, agent *store.Agent) {
+				code := 137
+				require.NoError(t, s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+					Phase:              string(state.PhaseError),
+					ContainerStatus:    fmt.Sprintf("Exited (%d)", code),
+					ExitCode:           &code,
+					ExitReason:         string(state.ExitReasonCrashed),
+					Heartbeat:          true,
+					Message:            fmt.Sprintf("Agent crashed with exit code %d", code),
+					ReportSource:       store.StatusReportSourceRuntime,
+					ReportRunID:        agent.RunID,
+					GuardReincarnation: true,
+				}))
+				var err error
+				afterHeartbeat, err = s.GetAgent(ctx, agent.ID)
+				require.NoError(t, err)
+			},
+		}
+		srv.SetDispatcher(disp)
+
+		now := time.Now().UTC()
+		pastGrace := now.Add(-20 * time.Minute)
+		target := newIdleCandidateBrokerAgent(t, s, "r1-other-replica-137", string(state.ActivityIdle), &pastGrace, now.Add(-15*time.Second))
+		db := s.(*entadapter.CompositeStore).DB()
+		_, err := db.ExecContext(ctx,
+			"UPDATE agents SET run_id = ?, activity_since = ?, last_seen = ? WHERE id = ?",
+			"run-rev4-137", pastGrace, now.Add(-15*time.Second), target.ID,
+		)
+		require.NoError(t, err)
+
+		srv.agentIdleSuspendHandler()(ctx)
+		srv.waitAutoSuspendIdle()
+
+		require.NotNil(t, afterHeartbeat)
+		assert.Equal(t, string(state.PhaseError), afterHeartbeat.Phase, "precondition: replica B heartbeat moved row to error")
+
+		final, err := s.GetAgent(ctx, target.ID)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseSuspended), final.Phase)
+		assert.Equal(t, string(state.SuspendReasonIdle), final.SuspendReason)
+		assert.Equal(t, string(state.ActivityIdle), final.Activity)
+		assert.True(t, srv.shouldAutoWake(final), "idle-suspended agent must remain auto-wakable after Exited 137 heartbeat")
+		assert.Nil(t, final.IdleSuspendClaimUntil)
+	})
+
+	t.Run("container non-zero stopped report during shutdown commits suspended(idle)", func(t *testing.T) {
+		ctx := context.Background()
+		srv, s := testServer(t)
+		enableIdleSweepForTest(t, srv, 15*time.Minute)
+
+		disp := &postStopHeartbeatDispatcher{
+			t:     t,
+			store: s,
+			onStop: func(ctx context.Context, agent *store.Agent) {
+				code := 143
+				require.NoError(t, s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+					Phase:              string(state.PhaseStopped),
+					Activity:           string(state.ActivityCrashed),
+					ContainerStatus:    "Exited (143)",
+					ExitCode:           &code,
+					ReportSource:       store.StatusReportSourceAgent,
+					ReportRunID:        agent.RunID,
+					ReportAgentToken:   true,
+					GuardReincarnation: true,
+				}))
+			},
+		}
+		srv.SetDispatcher(disp)
+
+		now := time.Now().UTC()
+		pastGrace := now.Add(-20 * time.Minute)
+		target := newIdleCandidateBrokerAgent(t, s, "r1-agent-143", string(state.ActivityCompleted), &pastGrace, now.Add(-15*time.Second))
+		db := s.(*entadapter.CompositeStore).DB()
+		_, err := db.ExecContext(ctx,
+			"UPDATE agents SET run_id = ?, activity_since = ?, last_seen = ? WHERE id = ?",
+			"run-rev4-143", pastGrace, now.Add(-15*time.Second), target.ID,
+		)
+		require.NoError(t, err)
+
+		srv.agentIdleSuspendHandler()(ctx)
+		srv.waitAutoSuspendIdle()
+
+		final, err := s.GetAgent(ctx, target.ID)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseSuspended), final.Phase)
+		assert.Equal(t, string(state.SuspendReasonIdle), final.SuspendReason)
+		assert.Equal(t, string(state.ActivityCompleted), final.Activity)
+		assert.True(t, srv.shouldAutoWake(final))
+	})
+
+	t.Run("user stop landing alongside runtime heartbeat still clears claim and wins", func(t *testing.T) {
+		ctx := context.Background()
+		srv, s := testServer(t)
+		enableIdleSweepForTest(t, srv, 15*time.Minute)
+
+		disp := &postStopHeartbeatDispatcher{
+			t:     t,
+			store: s,
+			onStop: func(ctx context.Context, agent *store.Agent) {
+				code := 137
+				require.NoError(t, s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+					Phase:              string(state.PhaseError),
+					ContainerStatus:    "Exited (137)",
+					ExitCode:           &code,
+					ExitReason:         string(state.ExitReasonCrashed),
+					Heartbeat:          true,
+					ReportSource:       store.StatusReportSourceRuntime,
+					ReportRunID:        agent.RunID,
+					GuardReincarnation: true,
+				}))
+				// User stop arrives on another replica and records hub-authored stopped.
+				_, _, err := s.SwapRunIntent(ctx, agent.ID, store.RunIntentStopped)
+				require.NoError(t, err)
+				require.NoError(t, s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+					Phase:           string(state.PhaseStopped),
+					ContainerStatus: "stopped",
+					IfRunID:         agent.RunID,
+				}))
+			},
+		}
+		srv.SetDispatcher(disp)
+
+		now := time.Now().UTC()
+		pastGrace := now.Add(-20 * time.Minute)
+		target := newIdleCandidateBrokerAgent(t, s, "r1-user-stop-wins", string(state.ActivityIdle), &pastGrace, now.Add(-15*time.Second))
+		db := s.(*entadapter.CompositeStore).DB()
+		_, err := db.ExecContext(ctx,
+			"UPDATE agents SET run_id = ?, activity_since = ?, last_seen = ? WHERE id = ?",
+			"run-rev4-user-stop", pastGrace, now.Add(-15*time.Second), target.ID,
+		)
+		require.NoError(t, err)
+
+		srv.agentIdleSuspendHandler()(ctx)
+		srv.waitAutoSuspendIdle()
+
+		final, err := s.GetAgent(ctx, target.ID)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseStopped), final.Phase)
+		assert.Empty(t, final.SuspendReason)
+		assert.False(t, srv.shouldAutoWake(final))
+	})
+}
+
+// TestIdleSuspend_QueueReserveAcceptsStalledHandoffAndAdvancesPastNonResumable
+// covers pass-4 O2:
+//  1. The idle sweep caps its queue usage at half of autoSuspendQueueLimit so a
+//     stalled hand-off arriving while an idle batch is queued/running is still
+//     accepted and suspended.
+//  2. Non-resumable agents sitting at the head of ORDER BY activity_since ASC
+//     are skipped via keyset pagination rather than starving resumable agents
+//     behind them.
+func TestIdleSuspend_QueueReserveAcceptsStalledHandoffAndAdvancesPastNonResumable(t *testing.T) {
+	t.Run("stalled hand-off accepted while idle batch fills its queue budget", func(t *testing.T) {
+		ctx := context.Background()
+		srv, s := testServer(t)
+		enableIdleSweepForTest(t, srv, 15*time.Minute)
+
+		prevLimit := autoSuspendQueueLimit
+		autoSuspendQueueLimit = 4
+		t.Cleanup(func() { autoSuspendQueueLimit = prevLimit })
+
+		firstStopEntered := make(chan struct{})
+		releaseFirstStop := make(chan struct{})
+		var enteredOnce, releaseOnce sync.Once
+		t.Cleanup(func() { releaseOnce.Do(func() { close(releaseFirstStop) }) })
+
+		disp := &postStopHeartbeatDispatcher{
+			t:     t,
+			store: s,
+			onStop: func(_ context.Context, _ *store.Agent) {
+				entered := false
+				enteredOnce.Do(func() {
+					entered = true
+					close(firstStopEntered)
+				})
+				if entered {
+					<-releaseFirstStop
+				}
+			},
+		}
+		srv.SetDispatcher(disp)
+
+		now := time.Now().UTC()
+		var idleIDs []string
+		for i := 0; i < 4; i++ {
+			since := now.Add(-time.Duration(30-i) * time.Minute)
+			a := newIdleCandidateBrokerAgent(t, s, fmt.Sprintf("o2-idle-%d", i), string(state.ActivityIdle), &since, now.Add(-15*time.Second))
+			idleIDs = append(idleIDs, a.ID)
+		}
+
+		stalledSince := now.Add(-25 * time.Minute)
+		stalledAgent := newIdleCandidateBrokerAgent(t, s, "o2-stalled", string(state.ActivityStalled), &stalledSince, now.Add(-15*time.Second))
+
+		// Run the idle sweep: with autoSuspendQueueLimit=4, at most 2 idle agents
+		// may enter the queue, leaving 2 reserved slots for stalled hand-offs.
+		srv.agentIdleSuspendHandler()(ctx)
+		<-firstStopEntered
+
+		srv.autoSuspend.mu.Lock()
+		queuedIdle := len(srv.autoSuspend.queued)
+		srv.autoSuspend.mu.Unlock()
+		assert.Equal(t, 2, queuedIdle, "idle sweep must leave half the queue reserved for stalled hand-offs")
+
+		// Stalled hand-off arrives while the idle batch is still running.
+		freshStalled, err := s.GetAgent(ctx, stalledAgent.ID)
+		require.NoError(t, err)
+		srv.enqueueAutoSuspend([]store.Agent{*freshStalled})
+
+		srv.autoSuspend.mu.Lock()
+		stalledQueued := srv.autoSuspend.queued[stalledAgent.ID]
+		srv.autoSuspend.mu.Unlock()
+		assert.True(t, stalledQueued, "stalled hand-off must be accepted while idle batch holds its half of the queue")
+
+		releaseOnce.Do(func() { close(releaseFirstStop) })
+		srv.waitAutoSuspendIdle()
+
+		gotStalled, err := s.GetAgent(ctx, stalledAgent.ID)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseSuspended), gotStalled.Phase)
+		assert.Equal(t, string(state.SuspendReasonStalled), gotStalled.SuspendReason)
+
+		for _, id := range idleIDs[:2] {
+			gotIdle, err := s.GetAgent(ctx, id)
+			require.NoError(t, err)
+			assert.Equal(t, string(state.PhaseSuspended), gotIdle.Phase)
+			assert.Equal(t, string(state.SuspendReasonIdle), gotIdle.SuspendReason)
+		}
+	})
+
+	t.Run("non-resumable harnesses at head of ORDER BY do not starve resumable agents", func(t *testing.T) {
+		ctx := context.Background()
+		srv, s := testServer(t)
+		disp := &runIntentDispatcher{}
+		srv.SetDispatcher(disp)
+		enableIdleSweepForTest(t, srv, 15*time.Minute)
+
+		prevLimit := autoSuspendQueueLimit
+		autoSuspendQueueLimit = 4 // idle budget = 2
+		t.Cleanup(func() { autoSuspendQueueLimit = prevLimit })
+
+		require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{
+			ID: tid("hc-o2-generic"), Name: "o2-shell", Slug: "o2-shell", Harness: "generic",
+			Scope: store.HarnessConfigScopeGlobal, Status: store.HarnessConfigStatusActive,
+			Config: &store.HarnessConfigData{Harness: "generic"},
+		}))
+		require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{
+			ID: tid("hc-o2-claude"), Name: "o2-claude", Slug: "o2-claude", Harness: "claude",
+			Scope: store.HarnessConfigScopeGlobal, Status: store.HarnessConfigStatusActive,
+			Config: &store.HarnessConfigData{Harness: "claude"},
+		}))
+
+		now := time.Now().UTC()
+		var nonResumableIDs []string
+		for i := 0; i < 5; i++ {
+			since := now.Add(-time.Duration(60-i) * time.Minute)
+			a := newIdleCandidateBrokerAgent(t, s, fmt.Sprintf("o2-generic-%d", i), string(state.ActivityIdle), &since, now.Add(-15*time.Second))
+			a.AppliedConfig = &store.AgentAppliedConfig{HarnessConfig: "o2-shell"}
+			require.NoError(t, s.UpdateAgent(ctx, a))
+			// Restore activity_since after UpdateAgent.
+			_, err := s.(*entadapter.CompositeStore).DB().ExecContext(ctx, "UPDATE agents SET activity_since = ? WHERE id = ?", since, a.ID)
+			require.NoError(t, err)
+			nonResumableIDs = append(nonResumableIDs, a.ID)
+		}
+
+		var resumableIDs []string
+		for i := 0; i < 2; i++ {
+			since := now.Add(-time.Duration(25-i) * time.Minute)
+			a := newIdleCandidateBrokerAgent(t, s, fmt.Sprintf("o2-claude-%d", i), string(state.ActivityIdle), &since, now.Add(-15*time.Second))
+			a.AppliedConfig = &store.AgentAppliedConfig{HarnessConfig: "o2-claude"}
+			require.NoError(t, s.UpdateAgent(ctx, a))
+			_, err := s.(*entadapter.CompositeStore).DB().ExecContext(ctx, "UPDATE agents SET activity_since = ? WHERE id = ?", since, a.ID)
+			require.NoError(t, err)
+			resumableIDs = append(resumableIDs, a.ID)
+		}
+
+		srv.agentIdleSuspendHandler()(ctx)
+		srv.waitAutoSuspendIdle()
+
+		for _, id := range nonResumableIDs {
+			got, err := s.GetAgent(ctx, id)
+			require.NoError(t, err)
+			assert.Equal(t, string(state.PhaseRunning), got.Phase)
+		}
+		for _, id := range resumableIDs {
+			got, err := s.GetAgent(ctx, id)
+			require.NoError(t, err)
+			assert.Equal(t, string(state.PhaseSuspended), got.Phase, "resumable agent behind non-resumable head must be suspended")
+			assert.Equal(t, string(state.SuspendReasonIdle), got.SuspendReason)
+		}
+	})
 }

@@ -5902,6 +5902,11 @@ func (s *Server) agentIdleSuspendHandler() func(ctx context.Context) {
 			return
 		}
 
+		budget := s.idleAutoSuspendAvailableSlots()
+		if budget <= 0 {
+			return
+		}
+
 		tickCtx, cancel := context.WithTimeout(ctx, stalledDetectionTimeout)
 		defer cancel()
 
@@ -5910,15 +5915,50 @@ func (s *Server) agentIdleSuspendHandler() func(ctx context.Context) {
 		heartbeatRecency := now.Add(-agentHeartbeatRecency)
 		liveWorkCutoff := now.Add(-store.LiveWorkFreshness)
 
-		candidates, err := s.store.ListIdleSuspendCandidates(tickCtx, cutoff, heartbeatRecency, liveWorkCutoff, autoSuspendQueueLimit)
-		if err != nil {
-			slog.Error("Scheduler: idle auto-suspend check failed", "error", err)
-			return
+		pageSize := budget
+		if pageSize < 64 {
+			pageSize = 64
 		}
-		if len(candidates) > 0 {
+		memo := newHarnessTypeMemo()
+		var (
+			selected []store.Agent
+			cursor   *store.IdleSuspendCursor
+		)
+		for len(selected) < budget && tickCtx.Err() == nil {
+			page, err := s.store.ListIdleSuspendCandidates(tickCtx, cutoff, heartbeatRecency, liveWorkCutoff, cursor, pageSize)
+			if err != nil {
+				slog.Error("Scheduler: idle auto-suspend check failed", "error", err)
+				return
+			}
+			if len(page) == 0 {
+				break
+			}
+			prevCursor := cursor
+			for i := range page {
+				c := page[i]
+				if c.ActivitySince != nil {
+					cursor = &store.IdleSuspendCursor{ActivitySince: *c.ActivitySince, ID: c.ID}
+				}
+				if s.isAutoSuspendQueued(c.ID) {
+					continue
+				}
+				if ok, harnessType, skipReason := s.harnessSupportsResumeMemo(tickCtx, &c, memo); !ok {
+					s.logIdleSuspendNonResumable(&c, harnessType, skipReason)
+					continue
+				}
+				selected = append(selected, c)
+				if len(selected) >= budget {
+					break
+				}
+			}
+			if len(page) < pageSize || cursor == prevCursor {
+				break
+			}
+		}
+		if len(selected) > 0 {
 			slog.Info("Scheduler: selected idle auto-suspend candidates",
-				"count", len(candidates), "idle_suspend_after", after)
-			s.enqueueAutoSuspendWithReason(candidates, state.SuspendReasonIdle)
+				"count", len(selected), "idle_suspend_after", after)
+			s.enqueueAutoSuspendWithReason(selected, state.SuspendReasonIdle)
 		}
 	}
 }

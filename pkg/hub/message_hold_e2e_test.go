@@ -3196,3 +3196,67 @@ func TestHold_IdleSuspend_OffStateParity(t *testing.T) {
 		})
 	}
 }
+
+// TestHold_IdleSuspend_StaleClaimSnapshotFallsThroughToSessionHold verifies O1:
+// when a caller's agent snapshot has IdleSuspendClaimActive=true, but the
+// idle-suspend claim cleared before holdOrDispatch ran (for example a stop
+// failure or user action cleared it), markAgentForDispatch succeeds and
+// holdOrDispatch falls through to applyPrepareOrHold rather than bypassing the
+// #4935 session-hold gate.
+func TestHold_IdleSuspend_StaleClaimSnapshotFallsThroughToSessionHold(t *testing.T) {
+	f := newHoldE2EFixture(t)
+	ctx := context.Background()
+	configureHoldIdleSuspendGate(t, f, true, true)
+
+	// Seed an initial no_session hold marker via m1.
+	fresh1, err := f.store.GetAgent(ctx, f.launched.ID)
+	require.NoError(t, err)
+	res1, dmErr := f.srv.ExecuteAgentDM(ctx, &AgentDMInput{
+		SenderAgent:    f.agent,
+		SenderIdentity: &storedAgentIdentity{agent: f.agent},
+		TargetAgent:    fresh1,
+		ProjectID:      fresh1.ProjectID,
+		Msg:            "o1-seed-hold",
+		Type:           messages.TypeInstruction,
+	})
+	require.Nil(t, dmErr)
+	f.waitMessageState(t, res1.MessageID, store.MessageDispatchAwaitingSession)
+
+	hasHold, err := f.store.HasAgentDeliveryHold(ctx, f.launched.ID)
+	require.NoError(t, err)
+	require.True(t, hasHold)
+
+	// Take and then clear an idle-suspend claim so a snapshot read before the
+	// clear still carries IdleSuspendClaimActive=true while the DB row has none.
+	claimHoldTargetIdleForTest(t, f.store, f.launched)
+	staleSnapshot, err := f.store.GetAgent(ctx, f.launched.ID)
+	require.NoError(t, err)
+	require.True(t, staleSnapshot.IdleSuspendClaimActive, "snapshot read while claim was held")
+
+	// Clear the claim and revert run_intent before holdOrDispatch runs.
+	require.NoError(t, f.store.ClearIdleSuspendClaim(ctx, f.launched.ID))
+	_, err = f.store.SetRunIntent(ctx, f.launched.ID, store.RunIntentRunning)
+	require.NoError(t, err)
+
+	deliveriesBefore := len(f.disp.deliveries())
+	res2, dmErr := f.srv.ExecuteAgentDM(ctx, &AgentDMInput{
+		SenderAgent:    f.agent,
+		SenderIdentity: &storedAgentIdentity{agent: f.agent},
+		TargetAgent:    staleSnapshot,
+		ProjectID:      staleSnapshot.ProjectID,
+		Msg:            "o1-stale-claim-held",
+		Type:           messages.TypeInstruction,
+	})
+	require.Nil(t, dmErr)
+	f.waitMessageState(t, res2.MessageID, store.MessageDispatchAwaitingSession)
+	assert.Equal(t, deliveriesBefore, len(f.disp.deliveries()),
+		"stale IdleSuspendClaimActive snapshot must fall through to applyPrepareOrHold without unheld broker dispatch")
+
+	// Connect session -> both m1 and m2 deliver in order.
+	ca := f.connectDeliverSession(t, f.public.URL, true, nil)
+	f.waitMessageState(t, res1.MessageID, store.MessageDispatchDelivered)
+	f.waitMessageState(t, res2.MessageID, store.MessageDispatchDelivered)
+	pasted := strings.Join(ca.tmux.pastedTexts(), "\n")
+	assert.Contains(t, pasted, "o1-seed-hold")
+	assert.Contains(t, pasted, "o1-stale-claim-held")
+}

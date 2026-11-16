@@ -79,22 +79,19 @@ func (s *Server) holdOrDispatch(
 	}
 
 	if s.idleSuspendDeliveryGateActive() {
-		if agent.IdleSuspendClaimActive {
-			err := dispatchFn()
-			if errors.Is(err, errHeldAfterAutoWake) {
-				return true, nil
+		precheckMark := agent.IdleSuspendClaimActive
+		if !precheckMark {
+			finCtx, finCancel := finalizationContext(ctx)
+			hasHold, hErr := s.store.HasAgentDeliveryHold(finCtx, agent.ID)
+			finCancel()
+			if hErr != nil {
+				slog.Error("message-hold: check delivery hold failed",
+					"agent_id", agent.ID, "message_id", messageID, "error", hErr)
+				return false, errHoldPrepareFailed
 			}
-			return false, err
+			precheckMark = hasHold
 		}
-		finCtx, finCancel := finalizationContext(ctx)
-		hasHold, hErr := s.store.HasAgentDeliveryHold(finCtx, agent.ID)
-		finCancel()
-		if hErr != nil {
-			slog.Error("message-hold: check delivery hold failed",
-				"agent_id", agent.ID, "message_id", messageID, "error", hErr)
-			return false, errHoldPrepareFailed
-		}
-		if hasHold {
+		if precheckMark {
 			if err := markAgentForDispatch(ctx, s.deliveryMarker(), agent); err != nil {
 				var markErr *errDeliveryMarkFailed
 				if errors.As(err, &markErr) {

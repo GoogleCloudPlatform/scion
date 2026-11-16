@@ -2073,7 +2073,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 			return nil, &chatSendError{
 				Status:      http.StatusServiceUnavailable,
 				Code:        ErrCodeUnavailable,
-				Message:     fmt.Sprintf("Failed to wake agent: %s; retry shortly", deferredReason(primaryAgent)),
+				Message:     fmt.Sprintf("Failed to wake agent: %s; retry shortly", s.deferredReason(primaryAgent)),
 				RetryAfter:  5 * time.Second,
 				wakeFailure: wakeFailureFailed,
 			}

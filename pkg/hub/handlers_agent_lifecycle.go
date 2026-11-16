@@ -568,7 +568,12 @@ func (e *errHarnessNoResume) Error() string {
 // SupportYes; ptone/scion#7922, ptone/scion#8227) so GET, full-view list,
 // manual suspend, auto-suspend and membership-loss suspend always agree.
 func (s *Server) harnessSupportsResume(ctx context.Context, agent *store.Agent) (supported bool, harnessType, reason string) {
-	harnessType, caps := s.resolveAgentHarnessCapabilities(ctx, agent)
+	return s.harnessSupportsResumeMemo(ctx, agent, nil)
+}
+
+func (s *Server) harnessSupportsResumeMemo(ctx context.Context, agent *store.Agent, memo *harnessTypeMemo) (supported bool, harnessType, reason string) {
+	harnessType = s.effectiveAgentHarnessTypeMemo(ctx, agent, memo)
+	caps := agentHarnessCapabilities(agent, harnessType)
 	if caps.Resume.Support == api.SupportNo {
 		return false, harnessType, caps.Resume.Reason
 	}

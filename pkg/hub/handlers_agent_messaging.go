@@ -3114,7 +3114,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			case AgentDMDeferred:
 				deliveryStatus = "deferred"
 				httpStatus = http.StatusAccepted
-				deferredNote = deferredReason(agent)
+				deferredNote = s.deferredReason(agent)
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(httpStatus)
@@ -3475,7 +3475,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			Agent:           agent.Slug,
 			AgentPhase:      agent.Phase,
 			MentionResults:  mentionResults,
-			Deferred:        deferredReason(agent),
+			Deferred:        s.deferredReason(agent),
 			ArtifactWarning: artifactWarning,
 			ConversationID:  persistedConversationID,
 			ConversationKey: visitorConvKey,

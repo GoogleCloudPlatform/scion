@@ -603,14 +603,14 @@ func validateAgentDeliverable(agent *store.Agent) *AgentDMError {
 
 // deferredReason is the note a deferred delivery reports: a migrating
 // recipient, or another start of the recipient already in progress.
-func deferredReason(agent *store.Agent) string {
+func (s *Server) deferredReason(agent *store.Agent) string {
 	if reincarnationInFlight(agent) {
 		return "agent is reincarnating"
 	}
-	if agent != nil && (agent.IdleSuspendClaimActive || agent.IdleSuspendClaimUntil != nil) {
+	if agent != nil && agent.IdleSuspendClaimActive && s != nil && s.idleSuspendDeliveryGateActive() {
 		return "agent is suspending"
 	}
-	if agent.StartClaimKind == store.StartClaimStop {
+	if agent != nil && agent.StartClaimKind == store.StartClaimStop {
 		return "a stop is in progress for the agent"
 	}
 	return "agent is already starting"
