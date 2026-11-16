@@ -389,6 +389,11 @@ const (
 	// cap.
 	ErrCodeLimitExceeded = "limit_exceeded"
 
+	// ErrCodeInvalidRule is returned (400) when a trigger or consumer rule
+	// fails dialect admission or authoring-time compilation (Stage 1 §7.2).
+	// Details carry structured CompileError or UnsupportedDialectError fields.
+	ErrCodeInvalidRule = "invalid_rule"
+
 	// ErrCodeInvalidRoleSet is returned by PUT …/members/principals/{type}/{id}
 	// when the desired role set contains an unknown role definition ID, a
 	// non-project-scoped role, or more than one built-in membership role

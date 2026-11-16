@@ -904,3 +904,165 @@ func TestTriggerHistoryCLI_NameAndUUIDResolutionFlagsAndFormats(t *testing.T) {
 	})
 	assert.Contains(t, emptyOut, "No fire history found.")
 }
+
+func TestTriggerCreateHelp_RegexAndCELAuthorGuidance(t *testing.T) {
+	help := triggerCreateCmd.Long
+	assert.Contains(t, help, "--where")
+	assert.Contains(t, help, "--subject")
+	assert.Contains(t, help, "literal RE2 patterns only")
+	assert.Contains(t, help, "event.attributes.<k>")
+	assert.Contains(t, help, "event.payload.<field>")
+	assert.Contains(t, help, "not on the whole payload")
+	assert.Contains(t, help, "64 KiB")
+	assert.Contains(t, help, `skipped ("rule evaluation failed")`)
+
+	whereFlag := triggerCreateCmd.Flags().Lookup("where")
+	require.NotNil(t, whereFlag)
+	assert.Contains(t, whereFlag.Usage, "event.attributes.<k>")
+	assert.Contains(t, whereFlag.Usage, "event.payload.<field>")
+
+	subjectFlag := triggerCreateCmd.Flags().Lookup("subject")
+	require.NotNil(t, subjectFlag)
+	assert.Contains(t, subjectFlag.Usage, "1024B")
+}
+
+func TestTriggerCLI_WhereSubjectCreateAndPositionBearingErrors(t *testing.T) {
+	fixedNow := time.Date(2026, 11, 16, 6, 0, 0, 0, time.UTC)
+	t.Cleanup(clitime.SetNow(func() time.Time { return fixedNow }))
+
+	origFormat := outputFormat
+	origName, origWebhook, origAgent, origMsg := triggerName, triggerWebhookRef, triggerAgent, triggerMessage
+	origWhere, origSubject := triggerWhereExpr, triggerSubjectExpr
+	t.Cleanup(func() {
+		outputFormat = origFormat
+		triggerName, triggerWebhookRef, triggerAgent, triggerMessage = origName, origWebhook, origAgent, origMsg
+		triggerWhereExpr, triggerSubjectExpr = origWhere, origSubject
+	})
+
+	const (
+		epID = "bbbbbbbb-1111-4222-8333-444444444444"
+		trID = "dddddddd-1111-4222-8333-444444444444"
+	)
+
+	var lastReq hubclient.CreateTriggerRequest
+	mode := "ok"
+
+	withMockTriggerHub(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/projects/proj-1/triggers" {
+			http.NotFound(w, r)
+			return
+		}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&lastReq))
+		switch mode {
+		case "ok":
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(hubclient.Trigger{
+				ID:        trID,
+				ProjectID: "proj-1",
+				Name:      lastReq.Name,
+				Status:    "active",
+				Source:    hubclient.TriggerSourceSpec{Kind: "webhook", ID: epID},
+				Match: hubclient.TriggerMatchSpec{
+					Types:   []string{"webhook.received"},
+					Dialect: "cel",
+					Expr:    lastReq.Match.Expr,
+				},
+				Subject: hubclient.TriggerSubjectSpec{
+					Dialect: "cel",
+					Expr:    lastReq.Subject.Expr,
+					Mode:    "new",
+				},
+				Action:    lastReq.Action,
+				CreatedAt: fixedNow,
+				UpdatedAt: fixedNow,
+			})
+		case "compile_err_details_only":
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{
+					"code":    "invalid_rule",
+					"message": "undeclared reference to 'unknown_var' (in container '')",
+					"details": map[string]any{
+						"field":    "match",
+						"kind":     "filter",
+						"category": "unknown_variable",
+						"message":  "undeclared reference to 'unknown_var' (in container '')",
+						"line":     2,
+						"column":   7,
+					},
+				},
+			})
+		case "compile_err_full_hub":
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{
+					"code":    "invalid_rule",
+					"message": "invalid subject rule at line 1, column 1 (result_type): expression evaluates to bool, want string",
+					"details": map[string]any{
+						"field":    "subject",
+						"kind":     "subject",
+						"category": "result_type",
+						"message":  "expression evaluates to bool, want string",
+						"line":     1,
+						"column":   1,
+					},
+				},
+			})
+		case "dialect_err":
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{
+					"code":    "invalid_rule",
+					"message": `unsupported match dialect "system_one"`,
+					"details": map[string]any{
+						"field":    "match",
+						"dialect":  "system_one",
+						"consumer": "trigger",
+						"reason":   "dialect_not_allowed",
+					},
+				},
+			})
+		}
+	}, hubsync.CredentialKindOAuth)
+
+	outputFormat = ""
+	triggerName = "cel-trigger"
+	triggerWebhookRef = "deploys"
+	triggerAgent = "lead"
+	triggerMessage = "check deploy"
+	triggerWhereExpr = `has(event.payload) && event.payload.env == "prod"`
+	triggerSubjectExpr = `string(event.payload.service)`
+
+	out := captureStdout(t, func() {
+		require.NoError(t, runTriggerCreate(triggerCreateCmd, nil))
+	})
+	require.NotNil(t, lastReq.Match)
+	assert.Equal(t, `has(event.payload) && event.payload.env == "prod"`, lastReq.Match.Expr)
+	require.NotNil(t, lastReq.Subject)
+	assert.Equal(t, `string(event.payload.service)`, lastReq.Subject.Expr)
+	assert.Contains(t, out, "Where:   has(event.payload) && event.payload.env == \"prod\"")
+	assert.Contains(t, out, "Subject: string(event.payload.service)")
+
+	// Position-bearing compile error formatted from details when message lacks line/column.
+	mode = "compile_err_details_only"
+	err := runTriggerCreate(triggerCreateCmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid_rule")
+	assert.Contains(t, err.Error(), "line 2, column 7")
+	assert.Contains(t, err.Error(), "unknown_variable")
+	assert.Contains(t, err.Error(), "unknown_var")
+
+	// Position-bearing compile error from Hub message preserved without duplicating position.
+	mode = "compile_err_full_hub"
+	err = runTriggerCreate(triggerCreateCmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid subject rule at line 1, column 1 (result_type)")
+	assert.Equal(t, 1, bytes.Count([]byte(err.Error()), []byte("line 1, column 1")))
+
+	// Unsupported dialect error surfaces UnsupportedDialectError.Reason clearly.
+	mode = "dialect_err"
+	err = runTriggerCreate(triggerCreateCmd, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "dialect_not_allowed")
+}

@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone"
+	"github.com/GoogleCloudPlatform/scion/pkg/triggerrule"
 )
 
 const (
@@ -73,11 +74,28 @@ func TestRuleEngine_NewRuleEngineAndPureRegistration(t *testing.T) {
 
 	assert.Same(t, eng, srv.RuleEngine())
 	assert.Same(t, cel, srv.CELDialect())
+	require.NotNil(t, srv.TriggerRules())
 	assert.Equal(t, []string{ruleengine.DialectCEL, systemone.DialectName}, eng.Dialects())
 
-	// Deny-by-default: P1 registers no consumer grants on the shared engine,
-	// and DialectFor refuses to hand out raw handles to ungranted consumers.
-	for _, consumer := range []string{"", "trigger", "message", "probe"} {
+	// Consumer "trigger" is registered once on the shared engine with pure Grant("cel")
+	// and its Stage 1 CEL environment, while denied "system_one" (dialect_not_allowed).
+	trigCEL, hasTrigEnv := cel.CELEngine(triggerrule.EnvironmentName)
+	require.True(t, hasTrigEnv)
+	require.NotNil(t, trigCEL)
+	assert.True(t, eng.Supports(triggerrule.ConsumerName, ruleengine.DialectCEL))
+	assert.False(t, eng.Supports(triggerrule.ConsumerName, systemone.DialectName))
+	{
+		d, dErr := eng.DialectFor(triggerrule.ConsumerName, systemone.DialectName)
+		assert.Nil(t, d)
+		var unsup *ruleengine.UnsupportedDialectError
+		require.ErrorAs(t, dErr, &unsup)
+		assert.Equal(t, ruleengine.ReasonDialectNotAllowed, unsup.Reason)
+	}
+	// Duplicate trigger registration is rejected (single registration on Server).
+	assert.Error(t, srv.registerTriggerRules())
+
+	// Deny-by-default: ungranted consumers are refused across all dialects.
+	for _, consumer := range []string{"", "message", "probe"} {
 		assert.False(t, eng.Supports(consumer, ruleengine.DialectCEL), "consumer %q must not be admitted to cel without explicit grant", consumer)
 		assert.False(t, eng.Supports(consumer, systemone.DialectName), "consumer %q must not be admitted to system_one by default", consumer)
 

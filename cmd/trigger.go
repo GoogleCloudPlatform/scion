@@ -65,12 +65,31 @@ var triggerCreateCmd = &cobra.Command{
 	Short: "Create an event trigger",
 	Long: `Create an event trigger attached to a webhook endpoint. Requires --name, --webhook, --agent, and --message.
 
+CEL Rules & Regex Guidance:
+  --where (bool, <= 4096 bytes) and --subject (string, <= 1024 bytes) are CEL
+  expressions compiled at authoring time against event.{id,type,source,subject,
+  time,attributes,payload} and trigger.{id,name}.
+
+  matches() accepts literal RE2 patterns only (dynamic patterns fail compilation
+  at authoring time). Run matches() on event.attributes.<k> or one
+  event.payload.<field>, not on the whole payload: against a full 64 KiB string
+  the regex work bound passes up to ~14 case-insensitive keywords (16+ refuses)
+  and an anchored ^[a-z0-9-]{1,63}$ refuses on 64 KiB input (passes on 16 KiB).
+  Runtime evaluation refusals record skipped ("rule evaluation failed") in
+  trigger history.
+
 Examples:
   # Deliver a message to agent "lead" whenever webhook endpoint "deploys" receives an event
   scion trigger create --name deploy-finished --webhook deploys --agent lead --message "Check incoming deploy event" --wake
 
   # Match specific event types
-  scion trigger create --name prod-deploy --webhook deploys --type webhook.deploy.finished --agent lead --message "Production deploy finished"`,
+  scion trigger create --name prod-deploy --webhook deploys --type webhook.deploy.finished --agent lead --message "Production deploy finished"
+
+  # Filter with a CEL predicate and derive a concurrency subject from a single field
+  scion trigger create --name prod-service-deploy --webhook deploys \
+    --where 'has(event.payload) && event.payload.env == "prod" && event.attributes["branch"].matches("^release/")' \
+    --subject 'string(event.payload.service)' \
+    --agent lead --message "Inspect production release event"`,
 	RunE: runTriggerCreate,
 }
 
@@ -135,6 +154,63 @@ func isCallerScopedTriggerView(hubCtx *HubContext, scope string) bool {
 		return true
 	}
 	return hubCtx != nil && hubCtx.CredentialKind == hubsync.CredentialKindAgentToken
+}
+
+func triggerDetailInt(details map[string]any, key string) (int, bool) {
+	v, ok := details[key]
+	if !ok {
+		return 0, false
+	}
+	switch n := v.(type) {
+	case float64:
+		return int(n), true
+	case int:
+		return n, true
+	default:
+		return 0, false
+	}
+}
+
+func triggerDetailString(details map[string]any, key string) string {
+	v, _ := details[key].(string)
+	return v
+}
+
+func formatTriggerRuleError(err error) error {
+	var apiErr *apiclient.APIError
+	if !errors.As(err, &apiErr) || apiErr.Code != "invalid_rule" || len(apiErr.Details) == 0 {
+		return err
+	}
+	slot := triggerDetailString(apiErr.Details, "field")
+	if slot == "" {
+		slot = "trigger"
+	}
+	if line, hasLine := triggerDetailInt(apiErr.Details, "line"); hasLine {
+		col, _ := triggerDetailInt(apiErr.Details, "column")
+		posNeedle := fmt.Sprintf("line %d, column %d", line, col)
+		shortNeedle := fmt.Sprintf("%d:%d", line, col)
+		if !strings.Contains(apiErr.Message, posNeedle) && !strings.Contains(apiErr.Message, shortNeedle) {
+			cat := triggerDetailString(apiErr.Details, "category")
+			detailMsg := triggerDetailString(apiErr.Details, "message")
+			if detailMsg == "" {
+				detailMsg = apiErr.Message
+			}
+			cp := *apiErr
+			if cat != "" {
+				cp.Message = fmt.Sprintf("invalid %s rule at line %d, column %d (%s): %s", slot, line, col, cat, detailMsg)
+			} else {
+				cp.Message = fmt.Sprintf("invalid %s rule at line %d, column %d: %s", slot, line, col, detailMsg)
+			}
+			return &cp
+		}
+		return err
+	}
+	if reason := triggerDetailString(apiErr.Details, "reason"); reason != "" && !strings.Contains(apiErr.Message, reason) {
+		cp := *apiErr
+		cp.Message = apiErr.Message + " (reason: " + reason + ")"
+		return &cp
+	}
+	return err
 }
 
 func wrapTriggerHubError(hubCtx *HubContext, err error) error {
@@ -315,7 +391,7 @@ func runTriggerCreate(cmd *cobra.Command, args []string) error {
 
 	created, err := hubCtx.Client.Triggers(projectID).Create(ctx, req)
 	if err != nil {
-		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to create trigger: %w", err))
+		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to create trigger: %w", formatTriggerRuleError(err)))
 	}
 
 	if isJSONOutput() {
@@ -330,6 +406,12 @@ func runTriggerCreate(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Name:    %s\n", created.Name)
 	fmt.Printf("  Source:  %s:%s\n", created.Source.Kind, created.Source.ID)
 	fmt.Printf("  Types:   %s\n", strings.Join(created.Match.Types, ", "))
+	if created.Match.Expr != "" {
+		fmt.Printf("  Where:   %s\n", created.Match.Expr)
+	}
+	if created.Subject.Expr != "" {
+		fmt.Printf("  Subject: %s\n", created.Subject.Expr)
+	}
 	fmt.Printf("  Agent:   %s\n", agentLabel)
 	fmt.Printf("  Status:  %s\n", triggerStatusLabel(created.Status, created.StatusReason))
 	return nil
@@ -481,7 +563,7 @@ func runTriggerResume(cmd *cobra.Command, args []string) error {
 	}
 
 	if _, err := hubCtx.Client.Triggers(projectID).Resume(ctx, fullID); err != nil {
-		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to resume trigger: %w", err))
+		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to resume trigger: %w", formatTriggerRuleError(err)))
 	}
 
 	return outputActionResult(ActionResult{
@@ -595,13 +677,13 @@ func init() {
 	triggerCreateCmd.Flags().StringVar(&triggerDescription, "description", "", "Optional trigger description")
 	triggerCreateCmd.Flags().StringVar(&triggerWebhookRef, "webhook", "", "Webhook endpoint ID or name (required)")
 	triggerCreateCmd.Flags().StringSliceVar(&triggerMatchTypes, "type", nil, "Event type pattern to match (repeatable; default webhook.received)")
-	triggerCreateCmd.Flags().StringVar(&triggerWhereExpr, "where", "", "Optional CEL filter predicate")
+	triggerCreateCmd.Flags().StringVar(&triggerWhereExpr, "where", "", "Optional CEL filter predicate (bool, <= 4096B; run matches() on event.attributes.<k> or one event.payload.<field>, not whole payload)")
 	triggerCreateCmd.Flags().StringVar(&triggerAgent, "agent", "", "Target agent name or ID (required)")
 	triggerCreateCmd.Flags().StringVar(&triggerMessage, "message", "", "Message delivered to the target agent (required)")
 	triggerCreateCmd.Flags().BoolVar(&triggerInterrupt, "interrupt", false, "Interrupt the target agent")
 	triggerCreateCmd.Flags().BoolVar(&triggerWake, "wake", false, "Resume the target agent if suspended when the trigger fires")
 	triggerCreateCmd.Flags().BoolVar(&triggerPlain, "plain", false, "Deliver message text without sender prefix")
-	triggerCreateCmd.Flags().StringVar(&triggerSubjectExpr, "subject", "", "Optional CEL expression deriving the concurrency subject")
+	triggerCreateCmd.Flags().StringVar(&triggerSubjectExpr, "subject", "", "Optional CEL expression deriving the concurrency subject (string, <= 1024B)")
 	triggerCreateCmd.Flags().StringVar(&triggerOnSubject, "on-subject", "", "Subject concurrency policy (new or skip; default new)")
 
 	triggerListCmd.Flags().StringVar(&triggerListSource, "source", "", "Filter by source kind (e.g. webhook)")

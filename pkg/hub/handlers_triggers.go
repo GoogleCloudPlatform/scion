@@ -27,9 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
-	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/triggerrule"
 )
 
 const (
@@ -248,63 +246,6 @@ func validateTriggerName(raw string) (string, error) {
 	return validateTriggerResourceName(raw, maxTriggerNameLen)
 }
 
-func validateStage1b1Match(spec *TriggerMatchSpec) ([]string, string, string, error) {
-	var types []string
-	dialect := ruleengine.DialectCEL
-	expr := ""
-	if spec != nil {
-		types = spec.Types
-		if d := strings.TrimSpace(spec.Dialect); d != "" {
-			dialect = d
-		}
-		expr = strings.TrimSpace(spec.Expr)
-	}
-	if len(types) == 0 {
-		types = []string{defaultWebhookMatchType}
-	}
-	if dialect != ruleengine.DialectCEL {
-		return nil, "", "", fmt.Errorf("unsupported match dialect %q (supported: %s)", dialect, ruleengine.DialectCEL)
-	}
-	if expr != "" {
-		return nil, "", "", errors.New("match_rule is not yet supported")
-	}
-	if err := triggerrule.ValidateMatchTypes(types); err != nil {
-		return nil, "", "", err
-	}
-	copied := make([]string, len(types))
-	copy(copied, types)
-	return copied, dialect, "", nil
-}
-
-func validateStage1b1Subject(spec *TriggerSubjectSpec) (string, string, string, error) {
-	dialect := ruleengine.DialectCEL
-	expr := ""
-	mode := store.TriggerSubjectModeNew
-	if spec != nil {
-		if d := strings.TrimSpace(spec.Dialect); d != "" {
-			dialect = d
-		}
-		expr = strings.TrimSpace(spec.Expr)
-		if m := strings.TrimSpace(spec.Mode); m != "" {
-			mode = m
-		}
-	}
-	if dialect != ruleengine.DialectCEL {
-		return "", "", "", fmt.Errorf("unsupported subject dialect %q (supported: %s)", dialect, ruleengine.DialectCEL)
-	}
-	if expr != "" {
-		return "", "", "", errors.New("subject_rule is not yet supported")
-	}
-	switch mode {
-	case store.TriggerSubjectModeNew:
-		return dialect, "", mode, nil
-	case store.TriggerSubjectModeSkip:
-		return "", "", "", errors.New(`subject_mode "skip" is not yet supported`)
-	default:
-		return "", "", "", fmt.Errorf("unsupported subject mode %q", mode)
-	}
-}
-
 func setTriggerETag(w http.ResponseWriter, rev int) {
 	w.Header().Set("ETag", fmt.Sprintf("%q", fmt.Sprintf("%d", rev)))
 }
@@ -352,14 +293,14 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 		return
 	}
 
-	matchTypes, matchDialect, matchRule, err := validateStage1b1Match(req.Match)
-	if err != nil {
-		ValidationError(w, err.Error(), nil)
+	explicitMatchDialect := req.Match != nil && strings.TrimSpace(req.Match.Dialect) != ""
+	matchTypes, matchDialect, matchRule, ok := s.writeAndValidateTriggerMatch(w, ctx, req.Match, true, explicitMatchDialect)
+	if !ok {
 		return
 	}
-	subjectDialect, subjectRule, subjectMode, err := validateStage1b1Subject(req.Subject)
-	if err != nil {
-		ValidationError(w, err.Error(), nil)
+	explicitSubjectDialect := req.Subject != nil && strings.TrimSpace(req.Subject.Dialect) != ""
+	subjectDialect, subjectRule, subjectMode, ok := s.writeAndValidateTriggerSubject(w, ctx, req.Subject, explicitSubjectDialect)
+	if !ok {
 		return
 	}
 
@@ -632,9 +573,9 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 			merged.Expr = *req.Match.Expr
 			fields.MatchRule = true
 		}
-		matchTypes, matchDialect, matchRule, err := validateStage1b1Match(&merged)
-		if err != nil {
-			ValidationError(w, err.Error(), nil)
+		explicitMatchDialect := req.Match.Dialect != nil && strings.TrimSpace(*req.Match.Dialect) != ""
+		matchTypes, matchDialect, matchRule, ok := s.writeAndValidateTriggerMatch(w, ctx, &merged, false, explicitMatchDialect)
+		if !ok {
 			return
 		}
 		tr.MatchTypes = matchTypes
@@ -662,9 +603,9 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 			merged.Mode = *req.Subject.Mode
 			fields.SubjectMode = true
 		}
-		subjectDialect, subjectRule, subjectMode, err := validateStage1b1Subject(&merged)
-		if err != nil {
-			ValidationError(w, err.Error(), nil)
+		explicitSubjectDialect := req.Subject.Dialect != nil && strings.TrimSpace(*req.Subject.Dialect) != ""
+		subjectDialect, subjectRule, subjectMode, ok := s.writeAndValidateTriggerSubject(w, ctx, &merged, explicitSubjectDialect)
+		if !ok {
 			return
 		}
 		tr.SubjectDialect = subjectDialect
@@ -694,9 +635,28 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 	var newAttr *store.InitiatorAttribution
 	if changesFutureDispatch {
 		// Re-authorizing future dispatch requires the editor to hold access to
-		// both the source and the target action of the resulting trigger.
+		// both the source and the target action of the resulting trigger, and
+		// re-validates stored match/subject rules not already compiled above.
 		if req.Source == nil {
 			if _, ok := s.resolveTriggerWebhookSource(w, r, projectID, tr.SourceID); !ok {
+				return
+			}
+		}
+		if req.Match == nil {
+			if _, _, _, ok := s.writeAndValidateTriggerMatch(w, ctx, &TriggerMatchSpec{
+				Types:   tr.MatchTypes,
+				Dialect: tr.MatchDialect,
+				Expr:    tr.MatchRule,
+			}, false, false); !ok {
+				return
+			}
+		}
+		if req.Subject == nil {
+			if _, _, _, ok := s.writeAndValidateTriggerSubject(w, ctx, &TriggerSubjectSpec{
+				Dialect: tr.SubjectDialect,
+				Expr:    tr.SubjectRule,
+				Mode:    tr.SubjectMode,
+			}, false); !ok {
 				return
 			}
 		}
@@ -824,6 +784,20 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 		return
 	}
 	if _, ok := s.resolveTriggerWebhookSource(w, r, projectID, tr.SourceID); !ok {
+		return
+	}
+	if _, _, _, ok := s.writeAndValidateTriggerMatch(w, ctx, &TriggerMatchSpec{
+		Types:   tr.MatchTypes,
+		Dialect: tr.MatchDialect,
+		Expr:    tr.MatchRule,
+	}, false, false); !ok {
+		return
+	}
+	if _, _, _, ok := s.writeAndValidateTriggerSubject(w, ctx, &TriggerSubjectSpec{
+		Dialect: tr.SubjectDialect,
+		Expr:    tr.SubjectRule,
+		Mode:    tr.SubjectMode,
+	}, false); !ok {
 		return
 	}
 	normalizedPayload, ok := s.authorizeStoredTriggerAction(w, r, projectID, tr.ActionType, tr.ActionPayload)

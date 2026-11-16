@@ -77,6 +77,7 @@ import (
 	systemoneprovider "github.com/GoogleCloudPlatform/scion/pkg/systemone/provider"
 	systemoneruntime "github.com/GoogleCloudPlatform/scion/pkg/systemone/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
+	"github.com/GoogleCloudPlatform/scion/pkg/triggerrule"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/asyncwrite"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/GoogleCloudPlatform/scion/resources"
@@ -3009,8 +3010,9 @@ type Server struct {
 	systemOneRuntimeOpts []systemoneruntime.Option
 
 	// Shared process-wide rule engine and CEL dialect (rule_engine.go; Stage 1 §7.0).
-	rules      *ruleengine.Engine
-	celDialect *ruleengine.CELDialect
+	rules        *ruleengine.Engine
+	celDialect   *ruleengine.CELDialect
+	triggerRules *triggerrule.Rules
 
 	// Message policy outbound gate, bounded shadow worker pool, decision trim
 	// loop, and metrics (message_policy_gate.go, message_policy_trim.go).
