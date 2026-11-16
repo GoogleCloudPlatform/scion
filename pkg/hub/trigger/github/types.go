@@ -15,10 +15,18 @@
 package github
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 	"time"
 )
+
+// ErrAttributesCeilingExceeded is returned by Normalize when protected
+// identifier attributes alone exceed the 8 KiB serialized ceiling after all
+// prose fields have been truncated and all unprotected keys have been deleted.
+// Callers (such as webhook ingress, §4.1 step 8) can inspect it with errors.Is
+// to map unshrinkable deliveries to a refused or ignored event.
+var ErrAttributesCeilingExceeded = errors.New("github trigger: normalised attributes exceed ceiling")
 
 // Source and provenance constants (§4.3, §5.8).
 const (

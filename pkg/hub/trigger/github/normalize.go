@@ -36,6 +36,9 @@ const (
 //
 // Event families outside the Stage 3 table return Result{Handled: false}, nil.
 // Malformed JSON or missing/invalid required fields return a descriptive error.
+// If protected attributes alone exceed the 8 KiB serialized ceiling after prose
+// truncation and unprotected-key removal, Normalize returns an error wrapping
+// ErrAttributesCeilingExceeded.
 func Normalize(eventName, deliveryID string, payload []byte, opts Options) (Result, error) {
 	if !IsSupportedEvent(eventName) {
 		return Result{Handled: false}, nil
@@ -840,10 +843,15 @@ func enforceAttributesCeiling(attrs map[string]string, maxBytes int) error {
 		"is_pull_request": true, "is_fork": true, "draft": true, "merged": true,
 		"stale": true, "payload_truncated": true, "lists_truncated": true,
 		"mention_detection": true, "mention": true, "command": true,
+		"head_ref": true, "head_sha": true, "base_ref": true, "base_sha": true,
+		"comment_id": true, "review_id": true, "line": true, "path": true,
+		"html_url": true, "comment_url": true, "issue_url": true, "pull_request_url": true,
 	}
-	// Last-resort fallback: delete the largest unprotected key rather than
-	// truncating identifier-like values (refs, SHAs, labels, paths, URLs,
-	// timestamps) into plausible-looking wrong prefixes.
+	// Last-resort fallback: delete the largest unprotected key (such as labels,
+	// milestones, assignees, or timestamps) rather than truncating identifier-like
+	// values into plausible-looking wrong prefixes. Critical git refs/SHAs,
+	// tracking IDs/locations, and primary URLs are protected above; if protected
+	// keys alone still exceed maxBytes, fail closed with ErrAttributesCeilingExceeded.
 	for len(encoded) > maxBytes {
 		longestKey := ""
 		longestLen := -1
@@ -867,7 +875,7 @@ func enforceAttributesCeiling(attrs map[string]string, maxBytes int) error {
 		}
 	}
 	if len(encoded) > maxBytes {
-		return fmt.Errorf("github trigger: normalised attributes (%d bytes) exceed %d-byte bound", len(encoded), maxBytes)
+		return fmt.Errorf("%w (%d bytes > %d-byte bound)", ErrAttributesCeilingExceeded, len(encoded), maxBytes)
 	}
 	return nil
 }

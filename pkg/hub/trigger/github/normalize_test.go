@@ -615,43 +615,126 @@ func TestNormalize_DiffHunkKeepsTailAfterNewline(t *testing.T) {
 }
 
 func TestNormalize_LastResortAttributeCeilingDeletesInsteadOfCorrupting(t *testing.T) {
-	// Pathological payload with empty prose fields but huge identifier attributes
-	// (6 KiB head_ref + 3 KiB label > 8 KiB). Last-resort shrinking must delete the
-	// oversize unprotected key rather than leaving a silently truncated ref/label prefix.
-	hugeHeadRef := "feat/" + strings.Repeat("a", 6000)
-	bigLabel := "lbl-" + strings.Repeat("b", 3000)
+	t.Run("deletes oversize unprotected key while preserving protected refs and remaining unprotected keys", func(t *testing.T) {
+		// Pathological payload with empty prose fields, a protected 4.5 KiB head_ref,
+		// a 4 KiB unprotected milestone, and a 1 KiB unprotected label (> 8 KiB total).
+		// Last-resort shrinking must never truncate or delete protected head_ref even
+		// though it is longer than milestone; instead milestone (largest unprotected)
+		// is deleted and label (which now fits) stays whole.
+		bigHeadRef := "feat/" + strings.Repeat("a", 4500)
+		bigMilestone := "ms-" + strings.Repeat("m", 4000)
+		fitLabel := "lbl-" + strings.Repeat("b", 1000)
 
-	raw, err := json.Marshal(map[string]any{
-		"action":       "labeled",
-		"installation": map[string]any{"id": 10},
-		"repository": map[string]any{
-			"id": 1, "name": "r", "full_name": "o/r", "private": false,
-			"owner": map[string]any{"login": "o", "id": 1, "type": "User"},
-		},
-		"sender": map[string]any{"login": "u", "id": 2, "type": "User"},
-		"label":  map[string]any{"name": bigLabel},
-		"pull_request": map[string]any{
-			"number": 7, "state": "open", "title": "", "body": "",
-			"html_url": "https://github.com/o/r/pull/7", "author_association": "MEMBER",
-			"draft": false, "merged": false,
-			"created_at": "2026-05-01T12:00:00Z", "updated_at": "2026-05-01T12:00:00Z",
-			"user": map[string]any{"login": "u", "id": 2, "type": "User"},
-			"base": map[string]any{"ref": "main", "sha": "111", "repo": map[string]any{"id": 1, "full_name": "o/r", "name": "r", "private": false}},
-			"head": map[string]any{"ref": hugeHeadRef, "sha": "222", "repo": map[string]any{"id": 1, "full_name": "o/r", "name": "r", "private": false}},
-		},
+		raw, err := json.Marshal(map[string]any{
+			"action":       "labeled",
+			"installation": map[string]any{"id": 10},
+			"repository": map[string]any{
+				"id": 1, "name": "r", "full_name": "o/r", "private": false,
+				"owner": map[string]any{"login": "o", "id": 1, "type": "User"},
+			},
+			"sender": map[string]any{"login": "u", "id": 2, "type": "User"},
+			"label":  map[string]any{"name": fitLabel},
+			"pull_request": map[string]any{
+				"number": 7, "state": "open", "title": "", "body": "",
+				"html_url": "https://github.com/o/r/pull/7", "author_association": "MEMBER",
+				"draft": false, "merged": false,
+				"milestone":  map[string]any{"title": bigMilestone},
+				"created_at": "2026-05-01T12:00:00Z", "updated_at": "2026-05-01T12:00:00Z",
+				"user": map[string]any{"login": "u", "id": 2, "type": "User"},
+				"base": map[string]any{"ref": "main", "sha": "1111111111111111111111111111111111111111", "repo": map[string]any{"id": 1, "full_name": "o/r", "name": "r", "private": false}},
+				"head": map[string]any{"ref": bigHeadRef, "sha": "2222222222222222222222222222222222222222", "repo": map[string]any{"id": 1, "full_name": "o/r", "name": "r", "private": false}},
+			},
+		})
+		require.NoError(t, err)
+
+		res, err := Normalize(EventPullRequest, "d-ceil-del", raw, Options{AppSlug: "scion"})
+		require.NoError(t, err)
+
+		assert.Equal(t, bigHeadRef, res.Attributes["head_ref"], "protected head_ref must neither be truncated nor deleted")
+		assert.Equal(t, "2222222222222222222222222222222222222222", res.Attributes["head_sha"])
+		assert.Equal(t, "main", res.Attributes["base_ref"])
+		assert.Equal(t, "1111111111111111111111111111111111111111", res.Attributes["base_sha"])
+		assert.Equal(t, "https://github.com/o/r/pull/7", res.Attributes["html_url"])
+		_, hasMilestone := res.Attributes["milestone"]
+		assert.False(t, hasMilestone, "largest unprotected key must be deleted rather than truncated")
+		assert.Equal(t, fitLabel, res.Attributes["label"], "remaining unprotected key that fits must stay whole")
+
+		attrBytes, err := encodeCompactJSON(res.Attributes)
+		require.NoError(t, err)
+		assert.LessOrEqual(t, len(attrBytes), DefaultMaxAttributesBytes)
 	})
-	require.NoError(t, err)
 
-	res, err := Normalize(EventPullRequest, "d-ceil-del", raw, Options{AppSlug: "scion"})
-	require.NoError(t, err)
+	t.Run("preserves every newly protected identifier, location, and URL key over shorter unprotected keys", func(t *testing.T) {
+		protectedIdentifierKeys := []string{
+			"head_ref", "head_sha", "base_ref", "base_sha",
+			"comment_id", "review_id", "line", "path",
+			"html_url", "comment_url", "issue_url", "pull_request_url",
+		}
+		for _, protKey := range protectedIdentifierKeys {
+			t.Run(protKey, func(t *testing.T) {
+				// protKey (5 KiB) is larger than unprotected milestone (3.5 KiB);
+				// together (~8.6 KiB) they exceed 8 KiB, while protKey alone fits.
+				protVal := protKey + "-" + strings.Repeat("p", 5000)
+				unprotVal := "ms-" + strings.Repeat("u", 3500)
+				attrs := map[string]string{
+					"provider":  SourceKind,
+					"repo":      "octo-org/octo-repo",
+					"event":     EventPullRequestReviewComment,
+					"action":    "created",
+					"number":    "42",
+					protKey:     protVal,
+					"milestone": unprotVal,
+				}
 
-	_, hasHeadRef := res.Attributes["head_ref"]
-	assert.False(t, hasHeadRef, "oversize identifier key must be deleted rather than truncated to a wrong ref prefix")
-	assert.Equal(t, bigLabel, res.Attributes["label"], "remaining identifier key that fits must stay whole")
+				err := enforceAttributesCeiling(attrs, DefaultMaxAttributesBytes)
+				require.NoError(t, err)
 
-	attrBytes, err := encodeCompactJSON(res.Attributes)
-	require.NoError(t, err)
-	assert.LessOrEqual(t, len(attrBytes), DefaultMaxAttributesBytes)
+				assert.Equal(t, protVal, attrs[protKey], "protected key %q must neither be truncated nor deleted", protKey)
+				_, hasMilestone := attrs["milestone"]
+				assert.False(t, hasMilestone, "shorter unprotected milestone must be deleted instead of protected %q", protKey)
+
+				encoded, err := encodeCompactJSON(attrs)
+				require.NoError(t, err)
+				assert.LessOrEqual(t, len(encoded), DefaultMaxAttributesBytes)
+			})
+		}
+	})
+
+	t.Run("returns ErrAttributesCeilingExceeded when protected keys alone exceed 8 KiB ceiling", func(t *testing.T) {
+		// Pathological delivery where protected keys alone (5 KiB head_ref + 4 KiB path)
+		// exceed the 8 KiB attributes ceiling even after prose truncation and deleting
+		// every unprotected attribute.
+		hugeHeadRef := "feat/" + strings.Repeat("r", 5000)
+		hugePath := "dir/" + strings.Repeat("p", 4000) + ".go"
+
+		raw, err := json.Marshal(map[string]any{
+			"action":       "created",
+			"installation": map[string]any{"id": 10},
+			"repository": map[string]any{
+				"id": 1, "name": "r", "full_name": "o/r", "private": false,
+				"owner": map[string]any{"login": "o", "id": 1, "type": "User"},
+			},
+			"sender": map[string]any{"login": "u", "id": 2, "type": "User"},
+			"pull_request": map[string]any{
+				"number": 7, "state": "open", "title": "some title", "body": "some body",
+				"html_url": "https://github.com/o/r/pull/7", "author_association": "MEMBER",
+				"base": map[string]any{"ref": "main", "sha": "111", "repo": map[string]any{"id": 1, "full_name": "o/r", "name": "r", "private": false}},
+				"head": map[string]any{"ref": hugeHeadRef, "sha": "222", "repo": map[string]any{"id": 1, "full_name": "o/r", "name": "r", "private": false}},
+			},
+			"comment": map[string]any{
+				"id": 55, "body": "inline note", "path": hugePath, "line": 12, "side": "RIGHT",
+				"html_url":   "https://github.com/o/r/pull/7#discussion_r55",
+				"created_at": "2026-05-01T12:00:00Z", "updated_at": "2026-05-01T12:00:00Z",
+			},
+		})
+		require.NoError(t, err)
+
+		res, err := Normalize(EventPullRequestReviewComment, "d-ceil-prot", raw, Options{AppSlug: "scion"})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrAttributesCeilingExceeded)
+		assert.False(t, res.Handled)
+		assert.Empty(t, res.Attributes)
+	})
 }
 
 func TestNormalize_CommentOccurredAtCreatedVsEdited(t *testing.T) {
