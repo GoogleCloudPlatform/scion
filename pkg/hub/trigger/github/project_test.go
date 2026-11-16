@@ -256,3 +256,50 @@ func TestProjectPayload_OversizeChangesFromBodyFallback(t *testing.T) {
 	assert.LessOrEqual(t, len(out), DefaultMaxPayloadBytes)
 	assert.True(t, json.Valid(out))
 }
+
+func TestProjectPayload_OversizeEditedTruncatesChangesFromBeforeCurrentBody(t *testing.T) {
+	// Both current issue.body (40 KiB) and pre-edit changes.body.from (40 KiB) are large;
+	// together (~80 KiB) they exceed the 64 KiB cap, while current issue.body alone fits.
+	// Pre-edit changes.body.from must be truncated first so the agent sees the current body intact.
+	currentBody := strings.Repeat("current-prose-🚀-", 2400) // ~45,600 bytes (< 64 KiB)
+	oldBody := strings.Repeat("previous-prose-🔥-", 2400)    // ~48,000 bytes
+
+	rawMap := map[string]any{
+		"action":       "edited",
+		"installation": map[string]any{"id": 1234},
+		"sender":       map[string]any{"login": "octocat", "id": 1, "type": "User"},
+		"repository": map[string]any{
+			"id":        10,
+			"full_name": "octo-org/octo-repo",
+			"name":      "octo-repo",
+			"owner":     map[string]any{"login": "octo-org", "id": 2, "type": "Organization"},
+		},
+		"issue": map[string]any{
+			"number": 8,
+			"title":  "Edited large issue",
+			"body":   currentBody,
+		},
+		"changes": map[string]any{
+			"body": map[string]any{
+				"from": oldBody,
+			},
+		},
+	}
+	raw, err := json.Marshal(rawMap)
+	require.NoError(t, err)
+	require.Greater(t, len(raw), DefaultMaxPayloadBytes)
+
+	out, truncated, err := projectPayload(raw, DefaultMaxPayloadBytes)
+	require.NoError(t, err)
+	assert.True(t, truncated)
+	assert.LessOrEqual(t, len(out), DefaultMaxPayloadBytes)
+
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(out, &decoded))
+
+	gotCurrent := decoded["issue"].(map[string]any)["body"].(string)
+	gotOld := decoded["changes"].(map[string]any)["body"].(map[string]any)["from"].(string)
+	assert.Equal(t, currentBody, gotCurrent, "current body should stay intact when shrinking pre-edit changes.body.from suffices")
+	assert.Less(t, len(gotOld), len(oldBody), "pre-edit changes.body.from should be truncated first")
+	assert.True(t, utf8.ValidString(gotOld))
+}

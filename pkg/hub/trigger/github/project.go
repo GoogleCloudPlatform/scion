@@ -238,24 +238,36 @@ func (r stringFieldRef) set(s string) {
 }
 
 func shrinkProjectedToFit(proj map[string]any, encoded []byte, maxBytes int) ([]byte, error) {
-	// Tier 1 (§5.8): truncate "body" fields (longest first).
 	var err error
-	encoded, err = shrinkFieldsLongestFirst(proj, encoded, maxBytes, func(key string) bool {
+
+	// Tier 1: truncate pre-edit previous values in "changes" ("from", longest first)
+	// before touching current "body" text so edited deliveries keep the latest body intact.
+	if changesMap, ok := proj["changes"].(map[string]any); ok {
+		encoded, err = shrinkSubtreeFieldsLongestFirst(proj, changesMap, encoded, maxBytes, func(key string) bool {
+			return key == "from"
+		}, truncateUTF8)
+		if err != nil || len(encoded) <= maxBytes {
+			return encoded, err
+		}
+	}
+
+	// Tier 2 (§5.8): truncate current "body" fields (longest first).
+	encoded, err = shrinkSubtreeFieldsLongestFirst(proj, proj, encoded, maxBytes, func(key string) bool {
 		return key == "body"
-	})
+	}, truncateUTF8)
 	if err != nil || len(encoded) <= maxBytes {
 		return encoded, err
 	}
 
-	// Tier 2: truncate previous values in "changes" ("from") and "diff_hunk" (longest first).
-	encoded, err = shrinkFieldsLongestFirst(proj, encoded, maxBytes, func(key string) bool {
-		return key == "from" || key == "diff_hunk"
-	})
+	// Tier 3: truncate "diff_hunk" fields (longest first).
+	encoded, err = shrinkSubtreeFieldsLongestFirst(proj, proj, encoded, maxBytes, func(key string) bool {
+		return key == "diff_hunk"
+	}, truncateUTF8)
 	if err != nil || len(encoded) <= maxBytes {
 		return encoded, err
 	}
 
-	// Tier 3: drop "changes" and cap oversize nested arrays inside primary objects.
+	// Tier 4: drop "changes" and cap oversize nested arrays inside primary objects.
 	delete(proj, "changes")
 	capNestedArrays(proj, 20)
 	encoded, err = encodeCompactJSON(proj)
@@ -266,14 +278,14 @@ func shrinkProjectedToFit(proj map[string]any, encoded []byte, maxBytes int) ([]
 		return encoded, nil
 	}
 
-	// Tier 4: truncate any remaining large non-identity strings inside primary objects.
+	// Tier 5: truncate any remaining large non-identity strings inside primary objects.
 	protected := map[string]bool{
 		"action": true, "full_name": true, "name": true, "login": true,
 		"type": true, "ref": true, "sha": true, "state": true,
 	}
-	encoded, err = shrinkFieldsLongestFirst(proj, encoded, maxBytes, func(key string) bool {
+	encoded, err = shrinkSubtreeFieldsLongestFirst(proj, proj, encoded, maxBytes, func(key string) bool {
 		return !protected[key]
-	})
+	}, truncateUTF8)
 	if err != nil {
 		return nil, err
 	}
@@ -283,9 +295,16 @@ func shrinkProjectedToFit(proj map[string]any, encoded []byte, maxBytes int) ([]
 	return encoded, nil
 }
 
-func shrinkFieldsLongestFirst(proj map[string]any, encoded []byte, maxBytes int, matchKey func(string) bool) ([]byte, error) {
+func shrinkSubtreeFieldsLongestFirst(
+	root map[string]any,
+	subtree any,
+	encoded []byte,
+	maxBytes int,
+	matchKey func(string) bool,
+	cutFn func(string, int) string,
+) ([]byte, error) {
 	for len(encoded) > maxBytes {
-		refs := collectStringFieldRefs(proj, matchKey)
+		refs := collectStringFieldRefs(subtree, matchKey)
 		var longest *stringFieldRef
 		maxLen := 0
 		for i := range refs {
@@ -315,14 +334,14 @@ func shrinkFieldsLongestFirst(proj map[string]any, encoded []byte, maxBytes int,
 				target = 0
 			}
 		}
-		next := truncateUTF8(cur, target)
+		next := cutFn(cur, target)
 		if len(next) == len(cur) && target > 0 {
-			next = truncateUTF8(cur, target-1)
+			next = cutFn(cur, target-1)
 		}
 		longest.set(next)
 
 		var err error
-		encoded, err = encodeCompactJSON(proj)
+		encoded, err = encodeCompactJSON(root)
 		if err != nil {
 			return nil, err
 		}
