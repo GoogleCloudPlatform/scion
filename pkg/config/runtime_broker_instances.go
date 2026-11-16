@@ -287,16 +287,10 @@ func validateCloudRunTarget(path string, t *V1RuntimeTargetConfig) []ValidationE
 	} else if err := validateCloudRunServiceAccountForm("service_account", t.ServiceAccount, t.ProjectID); err != nil {
 		add("service_account", err.Error())
 	}
-	blockValid := false
 	if t.BlockServiceAccount == "" {
 		add("block_service_account", path+".block_service_account is required: agents with no GCP identity run as this no-role account")
 	} else if err := validateCloudRunServiceAccountForm("block_service_account", t.BlockServiceAccount, t.ProjectID); err != nil {
 		add("block_service_account", err.Error())
-	} else {
-		blockValid = true
-		if t.ServiceAccount != "" && strings.EqualFold(t.BlockServiceAccount, t.ServiceAccount) {
-			add("block_service_account", "block_service_account must differ from service_account: agents with no GCP identity run as this no-role account")
-		}
 	}
 	if len(t.AssignableServiceAccounts) > maxCloudRunAssignableServiceAccounts {
 		add("assignable_service_accounts", fmt.Sprintf("assignable_service_accounts accepts at most %d entries (got %d)", maxCloudRunAssignableServiceAccounts, len(t.AssignableServiceAccounts)))
@@ -318,11 +312,9 @@ func validateCloudRunTarget(path string, t *V1RuntimeTargetConfig) []ValidationE
 				continue
 			}
 			seen[lower] = i
-			if blockValid && strings.EqualFold(sa, t.BlockServiceAccount) {
-				add(elemField, "block_service_account must not appear in assignable_service_accounts")
-			}
 		}
 	}
+	errs = append(errs, cloudRunServiceAccountOverlapErrors(path, t)...)
 	if t.Network == "" && t.Subnetwork == "" {
 		add("network", "a VPC network or subnetwork is required: Cloud Run agents mount the NFS share over the VPC")
 	}
@@ -335,6 +327,47 @@ func validateCloudRunTarget(path string, t *V1RuntimeTargetConfig) []ValidationE
 	return errs
 }
 
+// cloudRunServiceAccountOverlapErrors reports cross-field Cloud Run
+// service-account errors that the JSON schema cannot express: a form-valid
+// block_service_account must differ from service_account and must not appear
+// among unique, form-valid assignable_service_accounts entries.
+func cloudRunServiceAccountOverlapErrors(path string, t *V1RuntimeTargetConfig) []ValidationError {
+	if t == nil || t.Type != RuntimeTargetTypeCloudRun || t.BlockServiceAccount == "" {
+		return nil
+	}
+	if validateCloudRunServiceAccountForm("block_service_account", t.BlockServiceAccount, t.ProjectID) != nil {
+		return nil
+	}
+	var errs []ValidationError
+	if t.ServiceAccount != "" && strings.EqualFold(t.BlockServiceAccount, t.ServiceAccount) {
+		errs = append(errs, ValidationError{
+			Path:    path + ".block_service_account",
+			Message: "block_service_account must differ from service_account: agents with no GCP identity run as this no-role account",
+		})
+	}
+	if len(t.AssignableServiceAccounts) <= maxCloudRunAssignableServiceAccounts {
+		seen := make(map[string]struct{}, len(t.AssignableServiceAccounts))
+		for i, sa := range t.AssignableServiceAccounts {
+			elemField := fmt.Sprintf("assignable_service_accounts[%d]", i)
+			if sa == "" || validateCloudRunServiceAccountForm(elemField, sa, t.ProjectID) != nil {
+				continue
+			}
+			lower := strings.ToLower(sa)
+			if _, dup := seen[lower]; dup {
+				continue
+			}
+			seen[lower] = struct{}{}
+			if strings.EqualFold(sa, t.BlockServiceAccount) {
+				errs = append(errs, ValidationError{
+					Path:    path + "." + elemField,
+					Message: "block_service_account must not appear in assignable_service_accounts",
+				})
+			}
+		}
+	}
+	return errs
+}
+
 // RuntimeBrokerInstanceCloudRunServiceAccounts reports cross-field Cloud Run
 // service-account errors that the JSON schema cannot express (block account
 // equal to service_account or listed in assignable_service_accounts), so
@@ -342,25 +375,10 @@ func validateCloudRunTarget(path string, t *V1RuntimeTargetConfig) []ValidationE
 func RuntimeBrokerInstanceCloudRunServiceAccounts(instances []V1RuntimeBrokerInstanceConfig) []ValidationError {
 	var errs []ValidationError
 	for i, inst := range instances {
-		t := inst.RuntimeTarget
-		if t == nil || t.Type != RuntimeTargetTypeCloudRun || t.BlockServiceAccount == "" {
-			continue
-		}
-		path := fmt.Sprintf("server.broker.instances[%d].runtime_target", i)
-		if t.ServiceAccount != "" && strings.EqualFold(t.BlockServiceAccount, t.ServiceAccount) {
-			errs = append(errs, ValidationError{
-				Path:    path + ".block_service_account",
-				Message: "block_service_account must differ from service_account: agents with no GCP identity run as this no-role account",
-			})
-		}
-		for j, sa := range t.AssignableServiceAccounts {
-			if strings.EqualFold(sa, t.BlockServiceAccount) {
-				errs = append(errs, ValidationError{
-					Path:    fmt.Sprintf("%s.assignable_service_accounts[%d]", path, j),
-					Message: "block_service_account must not appear in assignable_service_accounts",
-				})
-			}
-		}
+		errs = append(errs, cloudRunServiceAccountOverlapErrors(
+			fmt.Sprintf("server.broker.instances[%d].runtime_target", i),
+			inst.RuntimeTarget,
+		)...)
 	}
 	return errs
 }
