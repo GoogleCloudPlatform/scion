@@ -3423,6 +3423,55 @@ var (
 			},
 		},
 	}
+	// SystemOneInstancesColumns holds the columns for the "system_one_instances" table.
+	SystemOneInstancesColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "name", Type: field.TypeString, Size: 63},
+		{Name: "adapter", Type: field.TypeString},
+		{Name: "model", Type: field.TypeString, Default: ""},
+		{Name: "endpoint", Type: field.TypeString},
+		{Name: "location", Type: field.TypeString, Default: ""},
+		{Name: "auth_kind", Type: field.TypeEnum, Enums: []string{"none", "api_key", "google_access_token", "google_id_token", "azure_entra"}, Default: "api_key"},
+		{Name: "auth_secret_name", Type: field.TypeString, Default: ""},
+		{Name: "auth_header_name", Type: field.TypeString, Default: ""},
+		{Name: "auth_scopes", Type: field.TypeJSON, Nullable: true},
+		{Name: "auth_audience", Type: field.TypeString, Default: ""},
+		{Name: "options", Type: field.TypeJSON, Nullable: true},
+		{Name: "max_in_flight", Type: field.TypeInt, Default: 0},
+		{Name: "rate_per_sec", Type: field.TypeFloat64, Default: 0},
+		{Name: "max_input_tokens", Type: field.TypeInt, Default: 0},
+		{Name: "call_timeout_ns", Type: field.TypeInt64, Default: 0},
+		{Name: "allow_private_network", Type: field.TypeBool, Default: false},
+		{Name: "enabled", Type: field.TypeBool, Default: true},
+		{Name: "revision", Type: field.TypeInt64, Default: 1},
+		{Name: "created_by", Type: field.TypeString, Default: ""},
+		{Name: "updated_by", Type: field.TypeString, Default: ""},
+		{Name: "created_at", Type: field.TypeTime},
+		{Name: "updated_at", Type: field.TypeTime},
+	}
+	// SystemOneInstancesTable holds the schema information for the "system_one_instances" table.
+	SystemOneInstancesTable = &schema.Table{
+		Name:       "system_one_instances",
+		Columns:    SystemOneInstancesColumns,
+		PrimaryKey: []*schema.Column{SystemOneInstancesColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "systemoneinstance_name",
+				Unique:  true,
+				Columns: []*schema.Column{SystemOneInstancesColumns[1]},
+			},
+			{
+				Name:    "systemoneinstance_adapter",
+				Unique:  false,
+				Columns: []*schema.Column{SystemOneInstancesColumns[2]},
+			},
+			{
+				Name:    "systemoneinstance_enabled",
+				Unique:  false,
+				Columns: []*schema.Column{SystemOneInstancesColumns[17]},
+			},
+		},
+	}
 	// TemplatesColumns holds the columns for the "templates" table.
 	TemplatesColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -3958,6 +4007,7 @@ var (
 		SkillRegistriesTable,
 		SkillVersionsTable,
 		SubscriptionTemplatesTable,
+		SystemOneInstancesTable,
 		TemplatesTable,
 		TestIdentityDelegationsTable,
 		TestIdentityLoginCodesTable,

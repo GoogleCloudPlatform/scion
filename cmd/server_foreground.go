@@ -1815,6 +1815,9 @@ func validateServerPreflight(cfg *config.GlobalConfig) error {
 	if err := cfg.Hub.PortProxy.Validate(); err != nil {
 		return err
 	}
+	if err := cfg.Hub.SystemOne.Validate(); err != nil {
+		return err
+	}
 	if err := validateLongLivedRequestSettings(cfg); err != nil {
 		return err
 	}

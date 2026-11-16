@@ -17,9 +17,14 @@ package runtime_test
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"math"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -1120,6 +1125,283 @@ func TestRuntime_ListModels(t *testing.T) {
 		require.True(t, ok)
 		assert.Equal(t, provider.FailInternal, pe.Reason)
 	})
+
+	t.Run("sanitizes_and_caps_listed_model_names", func(t *testing.T) {
+		raw := []string{
+			"  jev-1.14.0  ",
+			"",
+			"   ",
+			"bad\ninjected-log",
+			"bad\x1b[31mterminal-escape",
+			"bad internal space",
+			"語-non-ascii",
+			strings.Repeat("m", runtime.MaxProviderIdentifierBytes+1),
+			strings.Repeat("k", runtime.MaxProviderIdentifierBytes),
+		}
+		for i := 0; i < 300; i++ {
+			raw = append(raw, fmt.Sprintf("jev-extra-%03d", i))
+		}
+
+		base := newFakeAdapter(nil)
+		ml := &fakeModelListerAdapter{
+			fakeAdapter: base,
+			modelsFn: func(_ context.Context, _ provider.Transport, _ provider.InstanceView) ([]string, error) {
+				return raw, nil
+			},
+		}
+		reg := provider.NewRegistry()
+		reg.MustRegister(ml)
+		rt := runtime.New(runtime.Config{
+			Registry:    reg,
+			Credentials: runtime.StaticCredential("sk-test"),
+		})
+
+		models, err := rt.ListModels(context.Background(), defaultTestInstance())
+		require.NoError(t, err)
+		require.Len(t, models, runtime.MaxListedModels)
+		assert.Equal(t, "jev-1.14.0", models[0])
+		assert.Equal(t, strings.Repeat("k", runtime.MaxProviderIdentifierBytes), models[1])
+		assert.Equal(t, "jev-extra-000", models[2])
+		for _, m := range models {
+			assert.NotContains(t, m, "\n")
+			assert.NotContains(t, m, "\x1b")
+			assert.NotContains(t, m, " ")
+			assert.LessOrEqual(t, len(m), runtime.MaxProviderIdentifierBytes)
+		}
+	})
+}
+
+type staticPublicResolver struct{}
+
+func (staticPublicResolver) LookupIPAddr(context.Context, string) ([]net.IPAddr, error) {
+	return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
+}
+
+type hostRoutingDialer struct {
+	targets map[string]string
+}
+
+func (d hostRoutingDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	target, ok := d.targets[port]
+	if !ok {
+		return nil, fmt.Errorf("unexpected port %s", port)
+	}
+	var nd net.Dialer
+	return nd.DialContext(ctx, network, target)
+}
+
+func TestRuntime_TransportCacheKeyIsolatesEndpointAndAuth(t *testing.T) {
+	var mu sync.Mutex
+	var authHeadersA, authHeadersB []string
+
+	srvA := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		authHeadersA = append(authHeadersA, r.Header.Get("Authorization"))
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srvA.Close()
+
+	srvB := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		authHeadersB = append(authHeadersB, r.Header.Get("Authorization"))
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srvB.Close()
+
+	_, portA, err := net.SplitHostPort(srvA.Listener.Addr().String())
+	require.NoError(t, err)
+	_, portB, err := net.SplitHostPort(srvB.Listener.Addr().String())
+	require.NoError(t, err)
+
+	base := newFakeAdapter(nil)
+	ml := &fakeModelListerAdapter{
+		fakeAdapter: base,
+		modelsFn: func(ctx context.Context, tr provider.Transport, inst provider.InstanceView) ([]string, error) {
+			req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, inst.Endpoint+"/v1/models", nil)
+			if reqErr != nil {
+				return nil, reqErr
+			}
+			resp, doErr := tr.Do(req)
+			if doErr != nil {
+				return nil, doErr
+			}
+			_ = resp.Body.Close()
+			return []string{"jev-1.14.0"}, nil
+		},
+	}
+	reg := provider.NewRegistry()
+	reg.MustRegister(ml)
+
+	rt := runtime.New(
+		runtime.Config{
+			Registry: reg,
+			Credentials: func(_ context.Context, inst runtime.Instance) (string, error) {
+				return fmt.Sprintf("key[%s|%s|%s|%s|%s]",
+					inst.Auth.SecretName,
+					inst.Endpoint,
+					inst.Auth.HeaderName,
+					inst.Auth.Audience,
+					strings.Join(inst.Auth.Scopes, ","),
+				), nil
+			},
+		},
+		runtime.WithEgressOptionsForTesting(
+			egress.WithDialerForTesting(staticPublicResolver{}, hostRoutingDialer{
+				targets: map[string]string{
+					portA: srvA.Listener.Addr().String(),
+					portB: srvB.Listener.Addr().String(),
+				},
+			}),
+			egress.WithTLSConfigForTesting(&tls.Config{InsecureSkipVerify: true}), //nolint:gosec // offline test TLS server
+		),
+	)
+	defer rt.CloseIdleConnections()
+
+	endpointA := "https://provider-a.example.test:" + portA
+	endpointB := "https://provider-b.example.test:" + portB
+
+	// Case 1: Identical (ID, Name, Revision, Endpoint), different SecretName.
+	instSecretA := runtime.Instance{
+		ID:       "same-id",
+		Name:     "same-name",
+		Revision: 1,
+		Adapter:  "fake-typesafe",
+		Endpoint: endpointA,
+		Enabled:  true,
+		Auth:     runtime.InstanceAuth{Kind: "api_key", SecretName: "secret-A"},
+	}
+	instSecretB := instSecretA
+	instSecretB.Auth.SecretName = "secret-B"
+
+	_, err = rt.ListModels(context.Background(), instSecretA)
+	require.NoError(t, err)
+	_, err = rt.ListModels(context.Background(), instSecretB)
+	require.NoError(t, err)
+
+	// Case 2: Identical (ID, Name, Revision, Auth), different Endpoint.
+	instEndB := instSecretA
+	instEndB.Endpoint = endpointB
+	_, err = rt.ListModels(context.Background(), instEndB)
+	require.NoError(t, err)
+
+	// Case 3: Identical (ID, Name, Revision, Endpoint, SecretName), different Audience / Scopes.
+	instAud := instSecretA
+	instAud.Auth.Audience = "aud-2"
+	instAud.Auth.Scopes = []string{"scope-x"}
+	_, err = rt.ListModels(context.Background(), instAud)
+	require.NoError(t, err)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, []string{
+		fmt.Sprintf("Bearer key[secret-A|%s|||]", endpointA),
+		fmt.Sprintf("Bearer key[secret-B|%s|||]", endpointA),
+		fmt.Sprintf("Bearer key[secret-A|%s||aud-2|scope-x]", endpointA),
+	}, authHeadersA, "instances with identical (id, name, revision) must never share bearer credentials")
+	require.Equal(t, []string{
+		fmt.Sprintf("Bearer key[secret-A|%s|||]", endpointB),
+	}, authHeadersB, "different endpoint must never reuse credential bound to previous endpoint")
+}
+
+func TestRuntime_ForgetInstanceEvictsAllKeysForID(t *testing.T) {
+	var mu sync.Mutex
+	var seenTransports []provider.Transport
+
+	base := newFakeAdapter(nil)
+	ml := &fakeModelListerAdapter{
+		fakeAdapter: base,
+		modelsFn: func(_ context.Context, tr provider.Transport, _ provider.InstanceView) ([]string, error) {
+			mu.Lock()
+			seenTransports = append(seenTransports, tr)
+			mu.Unlock()
+			return []string{"jev-1.14.0"}, nil
+		},
+	}
+	reg := provider.NewRegistry()
+	reg.MustRegister(ml)
+
+	rt := runtime.New(runtime.Config{
+		Registry: reg,
+		Credentials: func(_ context.Context, inst runtime.Instance) (string, error) {
+			return "tok-" + inst.Auth.SecretName, nil
+		},
+	})
+	defer rt.CloseIdleConnections()
+
+	lastTransport := func() provider.Transport {
+		mu.Lock()
+		defer mu.Unlock()
+		return seenTransports[len(seenTransports)-1]
+	}
+
+	targetA := runtime.Instance{
+		ID:       "inst-target",
+		Name:     "target",
+		Revision: 1,
+		Adapter:  "fake-typesafe",
+		Endpoint: "https://provider-a.example.test",
+		Enabled:  true,
+		Auth:     runtime.InstanceAuth{Kind: "api_key", SecretName: "secret-a"},
+	}
+	// Same ID + Revision, different Endpoint and SecretName (distinct transportKey).
+	targetB := targetA
+	targetB.Endpoint = "https://provider-b.example.test"
+	targetB.Auth.SecretName = "secret-b"
+
+	other := runtime.Instance{
+		ID:       "inst-other",
+		Name:     "other",
+		Revision: 1,
+		Adapter:  "fake-typesafe",
+		Endpoint: "https://provider-other.example.test",
+		Enabled:  true,
+		Auth:     runtime.InstanceAuth{Kind: "api_key", SecretName: "secret-other"},
+	}
+
+	_, err := rt.ListModels(context.Background(), targetA)
+	require.NoError(t, err)
+	trTargetA1 := lastTransport()
+
+	_, err = rt.ListModels(context.Background(), targetA)
+	require.NoError(t, err)
+	trTargetA2 := lastTransport()
+	require.Same(t, trTargetA1, trTargetA2, "transport for targetA should be cached before ForgetInstance")
+
+	_, err = rt.ListModels(context.Background(), targetB)
+	require.NoError(t, err)
+	trTargetB1 := lastTransport()
+	require.NotSame(t, trTargetA1, trTargetB1)
+
+	_, err = rt.ListModels(context.Background(), other)
+	require.NoError(t, err)
+	trOther1 := lastTransport()
+
+	// Blank ID is a no-op.
+	rt.ForgetInstance("   ")
+	_, err = rt.ListModels(context.Background(), targetA)
+	require.NoError(t, err)
+	require.Same(t, trTargetA1, lastTransport(), "blank ForgetInstance must not evict cached entries")
+
+	// Evict all keys belonging to inst-target regardless of endpoint/auth fields.
+	rt.ForgetInstance("inst-target")
+
+	_, err = rt.ListModels(context.Background(), targetA)
+	require.NoError(t, err)
+	require.NotSame(t, trTargetA1, lastTransport(), "targetA transport must be evicted after ForgetInstance")
+
+	_, err = rt.ListModels(context.Background(), targetB)
+	require.NoError(t, err)
+	require.NotSame(t, trTargetB1, lastTransport(), "targetB transport with same ID must also be evicted")
+
+	_, err = rt.ListModels(context.Background(), other)
+	require.NoError(t, err)
+	require.Same(t, trOther1, lastTransport(), "unrelated instance transport must remain cached")
 }
 
 type wrappedAdapterError struct {

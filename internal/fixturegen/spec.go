@@ -1187,5 +1187,20 @@ func Spec() []TableFixture {
 				"lease_owner":     "", "lease_until": nil, "last_error": "unavailable: fixture",
 			},
 		}},
+
+		// ---- System One provider instances (ptone/scion#8044) ----
+		{Table: "system_one_instances", Rows: []row{
+			{
+				"id": "50100000-0000-0000-0000-000000000001", "name": "typesafe-prod",
+				"adapter": "typesafe", "model": "", "endpoint": "https://provider.example.com/v1",
+				"location": "", "auth_kind": "api_key", "auth_secret_name": "TYPESAFE_API_KEY",
+				"auth_header_name": "", "auth_scopes": nil, "auth_audience": "",
+				"options":       `{"mode":"strict"}`,
+				"max_in_flight": 8, "rate_per_sec": 0.0, "max_input_tokens": 0, "call_timeout_ns": int64(5 * time.Second),
+				"allow_private_network": false, "enabled": true, "revision": int64(1),
+				"created_by": userID, "updated_by": userID,
+				"created_at": baseTime, "updated_at": baseTime,
+			},
+		}},
 	}
 }

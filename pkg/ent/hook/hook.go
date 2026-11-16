@@ -1053,6 +1053,18 @@ func (f SubscriptionTemplateFunc) Mutate(ctx context.Context, m ent.Mutation) (e
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.SubscriptionTemplateMutation", m)
 }
 
+// The SystemOneInstanceFunc type is an adapter to allow the use of ordinary
+// function as SystemOneInstance mutator.
+type SystemOneInstanceFunc func(context.Context, *ent.SystemOneInstanceMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f SystemOneInstanceFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.SystemOneInstanceMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.SystemOneInstanceMutation", m)
+}
+
 // The TemplateFunc type is an adapter to allow the use of ordinary
 // function as Template mutator.
 type TemplateFunc func(context.Context, *ent.TemplateMutation) (ent.Value, error)

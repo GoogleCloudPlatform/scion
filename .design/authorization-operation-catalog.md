@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 397
+**Operations:** 401
 
 ## Table of Contents
 
@@ -304,6 +304,10 @@
 - [hub.conduitgrantkeys.read](#hubconduitgrantkeysread) — Read the conduit grant verification keys (public halves only). Any signed-in identity reads them, and any token reads them; 404 while the hub.conduit experiment is off
 - [hub.prestarthooks.read](#hubprestarthooksread) — Read hub pre-start hooks. Any signed-in user reads them; the script body is returned only to a holder of hub.lifecycle_hooks.read on an interactive session or dev credential; every other credential, a user access token included, gets it redacted
 - [hub.policies.removed](#hubpoliciesremoved) — Removed policy API; every method and sub-path answers 410 Gone and points callers to role bindings
+- [systemone.instance.read](#systemoneinstanceread) — List and read hub-scoped System One provider instances (redacted; stored API keys are never returned); interactive session only
+- [systemone.instance.create](#systemoneinstancecreate) — Create a hub-scoped System One provider instance and store its API key as an internal hub secret; interactive session only
+- [systemone.instance.delete](#systemoneinstancedelete) — Delete a hub-scoped System One provider instance and remove its internal secret; interactive session only
+- [systemone.instance.execute](#systemoneinstanceexecute) — Probe a hub-scoped System One provider instance with a model list query or a stateless inline portable spec evaluation; interactive session only
 - [skill.list](#skilllist) — List skills; each row is filtered by skill read. A user access token needs skill:list on either boundary; its page, total and cursor count only the rows it may read. An agent delegated credential lists project-scoped skills only: its scope is the authorizing user's skill list scope within the grant boundary, and each item is also decided for skill.read
 - [skill.read](#skillread) — Read a skill, its versions, its download URLs, its resolved version and its files. A record the caller may not read answers as not found
 - [skill.create](#skillcreate) — Create a skill in a project named by the request body. A user access token needs skill:create on a boundary that contains the project
@@ -11466,6 +11470,163 @@
 ### Exemptions
 
 - **authentication_only:** The handler answers 410 Gone for every caller and reads or changes nothing; no resource permission applies (scope: removed policy API) — waives: `base_permission`, `denial_codes`
+
+---
+
+## systemone.instance.read
+
+**Domain:** systemone.instance
+
+**Description:** List and read hub-scoped System One provider instances (redacted; stored API keys are never returned); interactive session only
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/admin/system-one/instances` |
+| http_route | GET | `/api/v1/admin/system-one/instances/{name}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Base Permission:** `system_one_instance.read`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestSystemOneInstances_AuthzAndGating`
+- `pkg/hub:TestSystemOneInstances_CRUDAndProbe`
+
+---
+
+## systemone.instance.create
+
+**Domain:** systemone.instance
+
+**Description:** Create a hub-scoped System One provider instance and store its API key as an internal hub secret; interactive session only
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/admin/system-one/instances` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Base Permission:** `system_one_instance.create`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestSystemOneInstances_AuthzAndGating`
+- `pkg/hub:TestSystemOneInstances_CRUDAndProbe`
+
+---
+
+## systemone.instance.delete
+
+**Domain:** systemone.instance
+
+**Description:** Delete a hub-scoped System One provider instance and remove its internal secret; interactive session only
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/admin/system-one/instances/{name}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Base Permission:** `system_one_instance.delete`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `delete-resource`
+
+### Audit
+
+- **Event Type:** `systemone.instance.delete`
+- **Context Fields:** actor_id
+- **Before Fields:** instance_id, instance_name
+- **Atomic:** No
+- **Non-Atomic Justification:** Instance row deletion in the store and internal secret removal in the secret backend span two stores; structured audit log is emitted on completion
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestSystemOneInstances_AuthzAndGating`
+- `pkg/hub:TestSystemOneInstances_CredentialSeparationAndSecretIsolation`
+
+---
+
+## systemone.instance.execute
+
+**Domain:** systemone.instance
+
+**Description:** Probe a hub-scoped System One provider instance with a model list query or a stateless inline portable spec evaluation; interactive session only
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/admin/system-one/instances/{name}/probe` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Base Permission:** `system_one_instance.execute`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `emit-external-effect`
+
+### Audit
+
+- **Event Type:** `systemone.instance.probe`
+- **Context Fields:** actor_id
+- **After Fields:** instance_name, result_class
+- **Atomic:** No
+- **Non-Atomic Justification:** Stateless outbound provider probe mutates no hub database state; structured provenance log is emitted by the runtime
+
+### External Effect Policy
+
+- **Delivery:** `at_least_once`
+- **Failure Mode:** `fail_operation`
+- **Idempotency:** ephemeral probe invocation (stateless evaluation)
+- **Retry:** single bounded attempt within max_eval_time (no automatic retries in P1)
+- **Auth Before Emit:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestSystemOneInstances_AuthzAndGating`
+- `pkg/hub:TestSystemOneInstances_CRUDAndProbe`
 
 ---
 

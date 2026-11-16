@@ -251,7 +251,7 @@ func TestSeedReconcile_GlobalCatalogAuthorR3AppliesOnUpgrade(t *testing.T) {
 	assert.NotContains(t, afterAdmin.Permissions, "template.create")
 	assert.NotContains(t, afterAdmin.Permissions, "template.update")
 	assert.NotContains(t, afterAdmin.Permissions, "template.delete")
-	assert.Equal(t, 12, getAppliedBuiltInRoleMarker(ctx, s, store.SystemRoleHubAdmin).Revision)
+	assert.Equal(t, builtInRoleByName(t, store.SystemRoleHubAdmin).Revision, getAppliedBuiltInRoleMarker(ctx, s, store.SystemRoleHubAdmin).Revision)
 }
 
 // TestTemplateAuthz_GlobalCRUD_CatalogAuthorAllowed verifies that

@@ -158,6 +158,13 @@ var ProjectTargetApplicability = map[string]bool{
 	"test_identity.issue":       false,
 	"test_identity.issue_admin": false, "test_identity.issue_super_admin": false,
 
+	// system_one_instance.* — hub-scoped System One provider instances
+	// (ptone/scion#8044); never project-scoped.
+	"system_one_instance.read":    false,
+	"system_one_instance.create":  false,
+	"system_one_instance.delete":  false,
+	"system_one_instance.execute": false,
+
 	// quota.* — every live check (the quota route guard, handlers_quota.go
 	// and broker_settings_handlers.go) authorizes against the hub-scoped
 	// quota target hubScopedResource("quota", "hub"), matching this family's

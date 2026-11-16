@@ -71,6 +71,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	systemoneprovider "github.com/GoogleCloudPlatform/scion/pkg/systemone/provider"
+	systemoneruntime "github.com/GoogleCloudPlatform/scion/pkg/systemone/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/asyncwrite"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -637,6 +639,11 @@ type ServerConfig struct {
 	// which falls back to experiments.Default(). Tests that need a
 	// server-layer experiment inject their own registry here (ptone/scion#2217).
 	Experiments *experiments.Registry
+
+	// SystemOneMaxEvalTime optionally overrides server.hub.system_one.max_eval_time
+	// when positive. When zero, New resolves it from StartupServerSettings
+	// (falling back to config.SystemOneDefaultMaxEvalTime = 3s).
+	SystemOneMaxEvalTime time.Duration
 }
 
 // MaintenanceConfig holds configuration for routine maintenance operation executors.
@@ -2894,6 +2901,12 @@ type Server struct {
 	updateCatalog     maintenance.CatalogSource
 	updateDaterOnce   sync.Once
 	updateDater       maintenance.ReleaseSource
+
+	// System One runtime and optional test overrides (system_one_wiring.go;
+	// gated on experiments.SystemOne). Guarded by mu.
+	systemOneRuntime     *systemoneruntime.Runtime
+	systemOneRegistry    *systemoneprovider.Registry
+	systemOneRuntimeOpts []systemoneruntime.Option
 }
 
 // groupsLogger returns the groups subsystem logger, falling back to
@@ -3929,6 +3942,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	}
 
 	srv.experiments = cfg.Experiments
+	srv.initSystemOneRuntime()
 
 	srv.oidcHandlers = NewOIDCHandlers(oidcDeps{srv})
 
@@ -8000,6 +8014,12 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		if s.cspReports != nil {
 			s.cspReports.Close()
 		}
+		s.mu.RLock()
+		soRuntime := s.systemOneRuntime
+		s.mu.RUnlock()
+		if soRuntime != nil {
+			soRuntime.CloseIdleConnections()
+		}
 	})
 	return nil
 }
@@ -8349,6 +8369,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/gcp-quota", s.guarded("/api/v1/admin/gcp-quota", s.handleAdminGCPQuota))
 	s.mux.HandleFunc("/api/v1/admin/lifecycle-hooks", s.guarded("/api/v1/admin/lifecycle-hooks", s.handleAdminLifecycleHooks))
 	s.mux.HandleFunc("/api/v1/admin/lifecycle-hooks/", s.guarded("/api/v1/admin/lifecycle-hooks/", s.handleAdminLifecycleHookByID))
+	// System One provider instance administration (hub.system_one; 404 while off).
+	// Checked per request inside the handlers rather than with requireExperiment
+	// at registration so servers built over a synthetic test registry still boot.
+	s.mux.HandleFunc("/api/v1/admin/system-one/instances", s.guarded("/api/v1/admin/system-one/instances", s.handleAdminSystemOneInstances))
+	s.mux.HandleFunc("/api/v1/admin/system-one/instances/", s.guarded("/api/v1/admin/system-one/instances/", s.handleAdminSystemOneInstanceByName))
 	s.mux.HandleFunc("/api/v1/admin/validate-resources", s.guarded("/api/v1/admin/validate-resources", s.handleAdminValidateResources))
 	s.mux.HandleFunc("/api/v1/admin/integrations", s.guarded("/api/v1/admin/integrations", s.handleAdminIntegrations))
 	s.mux.HandleFunc("/api/v1/admin/integrations/teams/manifest", s.guarded("/api/v1/admin/integrations/teams/manifest", s.handleTeamsManifestDownload))

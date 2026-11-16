@@ -186,6 +186,11 @@ var specialBlockedPrefixes = func() []netip.Prefix {
 	for _, s := range []string{
 		"0.0.0.0/8",       // "this network" (RFC 1122; routes to loopback on Linux)
 		"100.64.0.0/10",   // shared address space / carrier-grade NAT (RFC 6598)
+		"192.0.0.0/24",    // IETF protocol assignments (RFC 6890)
+		"192.0.2.0/24",    // TEST-NET-1 documentation (RFC 5737)
+		"198.18.0.0/15",   // benchmarking / internal fabric (RFC 2544)
+		"198.51.100.0/24", // TEST-NET-2 documentation (RFC 5737)
+		"203.0.113.0/24",  // TEST-NET-3 documentation (RFC 5737)
 		"240.0.0.0/4",     // reserved for future use + limited broadcast
 		"::/96",           // deprecated IPv4-compatible IPv6
 		"::ffff:0:0:0/96", // IPv4-translated (SIIT)
@@ -193,6 +198,7 @@ var specialBlockedPrefixes = func() []netip.Prefix {
 		"64:ff9b:1::/48",  // NAT64 local-use prefix
 		"100::/64",        // discard-only prefix
 		"2001::/32",       // Teredo tunneling
+		"2001:db8::/32",   // IPv6 documentation (RFC 3849)
 		"2002::/16",       // 6to4 tunneling
 		"fec0::/10",       // deprecated site-local
 	} {

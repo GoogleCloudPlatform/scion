@@ -450,3 +450,16 @@ func TestPathEscape_Workspace(t *testing.T) {
 			func(ctx context.Context, c Client, id string) { _, _ = c.Workspace().GetStatus(ctx, id) }},
 	})
 }
+
+func TestPathEscape_SystemOne(t *testing.T) {
+	runPathEscapeCases(t, []pathEscapeCase{
+		{"GetInstance", "/api/v1/admin/system-one/instances/{id}",
+			func(ctx context.Context, c Client, id string) { _, _ = c.SystemOne().GetInstance(ctx, id) }},
+		{"DeleteInstance", "/api/v1/admin/system-one/instances/{id}",
+			func(ctx context.Context, c Client, id string) { _ = c.SystemOne().DeleteInstance(ctx, id) }},
+		{"ProbeInstance", "/api/v1/admin/system-one/instances/{id}/probe",
+			func(ctx context.Context, c Client, id string) {
+				_, _ = c.SystemOne().ProbeInstance(ctx, id, &ProbeSystemOneInstanceRequest{Models: true})
+			}},
+	})
+}

@@ -500,6 +500,14 @@ const WelcomeProject = "hub.welcome_project"
 // it is off.
 const ProjectDecisions = "web.project_decisions"
 
+// SystemOne gates Hub-scoped System One provider instance administration and
+// probing (ptone/scion#8044): /api/v1/admin/system-one/instances[/{name}[/probe]]
+// and scion admin system-one instance create|list|delete|probe, with runtime
+// probe evaluations bounded by server.hub.system_one.max_eval_time. While it is
+// off, the System One admin routes answer 404 and stored provider instances are
+// kept. The design names it "hub.system-one"; NamePattern allows no hyphen.
+const SystemOne = "hub.system_one"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
@@ -992,6 +1000,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#7826",
 		Owner:       "lifecycle",
 		ReviewBy:    "2027-03-31",
+	},
+	{
+		Name:        SystemOne,
+		Title:       "System One message guardrails",
+		Description: "Enables Hub-scoped System One provider instance administration and probing (/api/v1/admin/system-one/instances[/{name}[/probe]] and scion admin system-one instance create|list|delete|probe), with runtime probe evaluations bounded by server.hub.system_one.max_eval_time. While off, the System One admin routes answer 404 and stored provider instances are kept.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#8044",
+		Owner:       "system-one",
+		ReviewBy:    "2027-02-15",
 	},
 }
 

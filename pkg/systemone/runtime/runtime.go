@@ -26,6 +26,7 @@ import (
 	"net"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -45,9 +46,12 @@ var errRuntimeDeadline = errors.New("systemone runtime: evaluation deadline exce
 
 // CredentialSource resolves the raw bearer API key (without the "Bearer "
 // prefix) for inst at request time. Implementations (such as Hub secret-store
-// wiring) must never log or echo secret values. Runtime passes a bound
-// egress.BearerSource to egress.NewClient and never exposes credentials to
-// Adapter methods or ModelRequest (runtime-design §4.3, AC-2).
+// wiring) must never log or echo secret values. A missing, deleted, or rejected
+// secret, or an empty/invalid token, must return or wrap egress.ErrAuth
+// (classified as auth); any other backend fault must return or wrap
+// egress.ErrCredentialUnavailable (classified as unavailable). Runtime passes a
+// bound egress.BearerSource to egress.NewClient and never exposes credentials
+// to Adapter methods or ModelRequest (runtime-design §4.3, AC-2).
 type CredentialSource func(ctx context.Context, inst Instance) (string, error)
 
 // StaticCredential returns a CredentialSource that yields key on every call.
@@ -153,9 +157,15 @@ type EvalOptions struct {
 }
 
 type transportKey struct {
-	id       string
-	name     string
-	revision int64
+	id         string
+	name       string
+	revision   int64
+	endpoint   string
+	authKind   string
+	secretName string
+	headerName string
+	audience   string
+	scopes     string
 }
 
 // Runtime executes compiled System One rules under bounded deadlines and
@@ -218,6 +228,24 @@ func (r *Runtime) CloseIdleConnections() {
 	defer r.transportMu.Unlock()
 	for _, tr := range r.transports {
 		tr.CloseIdleConnections()
+	}
+}
+
+// ForgetInstance evicts any cached egress transports for the given instance ID
+// regardless of revision, endpoint, or credential metadata, closing their idle
+// HTTP connections. A blank id is a no-op.
+func (r *Runtime) ForgetInstance(id string) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return
+	}
+	r.transportMu.Lock()
+	defer r.transportMu.Unlock()
+	for key, tr := range r.transports {
+		if key.id == id {
+			tr.CloseIdleConnections()
+			delete(r.transports, key)
+		}
 	}
 }
 
@@ -508,7 +536,16 @@ func (r *Runtime) ListModels(ctx context.Context, inst Instance) ([]string, erro
 		}
 		return nil, provider.NewProviderError(reason, retryable, retryAfter, httpStatus, msg)
 	}
-	return models, nil
+	clean := make([]string, 0, min(len(models), MaxListedModels))
+	for _, m := range models {
+		if s, ok := sanitizeProviderIdentifier(m); ok {
+			clean = append(clean, s)
+			if len(clean) == MaxListedModels {
+				break
+			}
+		}
+	}
+	return clean, nil
 }
 
 func (r *Runtime) effectiveOwnDuration(ruleTimeout time.Duration, opts EvalOptions, callTimeout time.Duration) time.Duration {
@@ -648,11 +685,31 @@ func (r *Runtime) resolveBinding(
 	return inst, adapter, caps, ""
 }
 
+func canonicalScopesKey(scopes []string) string {
+	if len(scopes) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, s := range scopes {
+		b.WriteString(strconv.Itoa(len(s)))
+		b.WriteByte(':')
+		b.WriteString(s)
+		b.WriteByte(';')
+	}
+	return b.String()
+}
+
 func (r *Runtime) transportForInstance(inst Instance) provider.Transport {
 	key := transportKey{
-		id:       inst.ID,
-		name:     inst.Name,
-		revision: inst.Revision,
+		id:         inst.ID,
+		name:       inst.Name,
+		revision:   inst.Revision,
+		endpoint:   inst.Endpoint,
+		authKind:   inst.Auth.Kind,
+		secretName: inst.Auth.SecretName,
+		headerName: inst.Auth.HeaderName,
+		audience:   inst.Auth.Audience,
+		scopes:     canonicalScopesKey(inst.Auth.Scopes),
 	}
 	r.transportMu.Lock()
 	defer r.transportMu.Unlock()

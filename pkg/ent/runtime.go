@@ -93,6 +93,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillregistry"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillversion"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/subscriptiontemplate"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/systemoneinstance"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/template"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testidentitydelegation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testidentitylogincode"
@@ -3048,6 +3049,104 @@ func init() {
 	subscriptiontemplateDescID := subscriptiontemplateFields[0].Descriptor()
 	// subscriptiontemplate.DefaultID holds the default value on creation for the id field.
 	subscriptiontemplate.DefaultID = subscriptiontemplateDescID.Default.(func() uuid.UUID)
+	systemoneinstanceFields := schema.SystemOneInstance{}.Fields()
+	_ = systemoneinstanceFields
+	// systemoneinstanceDescName is the schema descriptor for name field.
+	systemoneinstanceDescName := systemoneinstanceFields[1].Descriptor()
+	// systemoneinstance.NameValidator is a validator for the "name" field. It is called by the builders before save.
+	systemoneinstance.NameValidator = func() func(string) error {
+		validators := systemoneinstanceDescName.Validators
+		fns := [...]func(string) error{
+			validators[0].(func(string) error),
+			validators[1].(func(string) error),
+		}
+		return func(name string) error {
+			for _, fn := range fns {
+				if err := fn(name); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	// systemoneinstanceDescAdapter is the schema descriptor for adapter field.
+	systemoneinstanceDescAdapter := systemoneinstanceFields[2].Descriptor()
+	// systemoneinstance.AdapterValidator is a validator for the "adapter" field. It is called by the builders before save.
+	systemoneinstance.AdapterValidator = systemoneinstanceDescAdapter.Validators[0].(func(string) error)
+	// systemoneinstanceDescModel is the schema descriptor for model field.
+	systemoneinstanceDescModel := systemoneinstanceFields[3].Descriptor()
+	// systemoneinstance.DefaultModel holds the default value on creation for the model field.
+	systemoneinstance.DefaultModel = systemoneinstanceDescModel.Default.(string)
+	// systemoneinstanceDescEndpoint is the schema descriptor for endpoint field.
+	systemoneinstanceDescEndpoint := systemoneinstanceFields[4].Descriptor()
+	// systemoneinstance.EndpointValidator is a validator for the "endpoint" field. It is called by the builders before save.
+	systemoneinstance.EndpointValidator = systemoneinstanceDescEndpoint.Validators[0].(func(string) error)
+	// systemoneinstanceDescLocation is the schema descriptor for location field.
+	systemoneinstanceDescLocation := systemoneinstanceFields[5].Descriptor()
+	// systemoneinstance.DefaultLocation holds the default value on creation for the location field.
+	systemoneinstance.DefaultLocation = systemoneinstanceDescLocation.Default.(string)
+	// systemoneinstanceDescAuthSecretName is the schema descriptor for auth_secret_name field.
+	systemoneinstanceDescAuthSecretName := systemoneinstanceFields[7].Descriptor()
+	// systemoneinstance.DefaultAuthSecretName holds the default value on creation for the auth_secret_name field.
+	systemoneinstance.DefaultAuthSecretName = systemoneinstanceDescAuthSecretName.Default.(string)
+	// systemoneinstanceDescAuthHeaderName is the schema descriptor for auth_header_name field.
+	systemoneinstanceDescAuthHeaderName := systemoneinstanceFields[8].Descriptor()
+	// systemoneinstance.DefaultAuthHeaderName holds the default value on creation for the auth_header_name field.
+	systemoneinstance.DefaultAuthHeaderName = systemoneinstanceDescAuthHeaderName.Default.(string)
+	// systemoneinstanceDescAuthAudience is the schema descriptor for auth_audience field.
+	systemoneinstanceDescAuthAudience := systemoneinstanceFields[10].Descriptor()
+	// systemoneinstance.DefaultAuthAudience holds the default value on creation for the auth_audience field.
+	systemoneinstance.DefaultAuthAudience = systemoneinstanceDescAuthAudience.Default.(string)
+	// systemoneinstanceDescMaxInFlight is the schema descriptor for max_in_flight field.
+	systemoneinstanceDescMaxInFlight := systemoneinstanceFields[12].Descriptor()
+	// systemoneinstance.DefaultMaxInFlight holds the default value on creation for the max_in_flight field.
+	systemoneinstance.DefaultMaxInFlight = systemoneinstanceDescMaxInFlight.Default.(int)
+	// systemoneinstanceDescRatePerSec is the schema descriptor for rate_per_sec field.
+	systemoneinstanceDescRatePerSec := systemoneinstanceFields[13].Descriptor()
+	// systemoneinstance.DefaultRatePerSec holds the default value on creation for the rate_per_sec field.
+	systemoneinstance.DefaultRatePerSec = systemoneinstanceDescRatePerSec.Default.(float64)
+	// systemoneinstanceDescMaxInputTokens is the schema descriptor for max_input_tokens field.
+	systemoneinstanceDescMaxInputTokens := systemoneinstanceFields[14].Descriptor()
+	// systemoneinstance.DefaultMaxInputTokens holds the default value on creation for the max_input_tokens field.
+	systemoneinstance.DefaultMaxInputTokens = systemoneinstanceDescMaxInputTokens.Default.(int)
+	// systemoneinstanceDescCallTimeoutNs is the schema descriptor for call_timeout_ns field.
+	systemoneinstanceDescCallTimeoutNs := systemoneinstanceFields[15].Descriptor()
+	// systemoneinstance.DefaultCallTimeoutNs holds the default value on creation for the call_timeout_ns field.
+	systemoneinstance.DefaultCallTimeoutNs = systemoneinstanceDescCallTimeoutNs.Default.(int64)
+	// systemoneinstanceDescAllowPrivateNetwork is the schema descriptor for allow_private_network field.
+	systemoneinstanceDescAllowPrivateNetwork := systemoneinstanceFields[16].Descriptor()
+	// systemoneinstance.DefaultAllowPrivateNetwork holds the default value on creation for the allow_private_network field.
+	systemoneinstance.DefaultAllowPrivateNetwork = systemoneinstanceDescAllowPrivateNetwork.Default.(bool)
+	// systemoneinstanceDescEnabled is the schema descriptor for enabled field.
+	systemoneinstanceDescEnabled := systemoneinstanceFields[17].Descriptor()
+	// systemoneinstance.DefaultEnabled holds the default value on creation for the enabled field.
+	systemoneinstance.DefaultEnabled = systemoneinstanceDescEnabled.Default.(bool)
+	// systemoneinstanceDescRevision is the schema descriptor for revision field.
+	systemoneinstanceDescRevision := systemoneinstanceFields[18].Descriptor()
+	// systemoneinstance.DefaultRevision holds the default value on creation for the revision field.
+	systemoneinstance.DefaultRevision = systemoneinstanceDescRevision.Default.(int64)
+	// systemoneinstanceDescCreatedBy is the schema descriptor for created_by field.
+	systemoneinstanceDescCreatedBy := systemoneinstanceFields[19].Descriptor()
+	// systemoneinstance.DefaultCreatedBy holds the default value on creation for the created_by field.
+	systemoneinstance.DefaultCreatedBy = systemoneinstanceDescCreatedBy.Default.(string)
+	// systemoneinstanceDescUpdatedBy is the schema descriptor for updated_by field.
+	systemoneinstanceDescUpdatedBy := systemoneinstanceFields[20].Descriptor()
+	// systemoneinstance.DefaultUpdatedBy holds the default value on creation for the updated_by field.
+	systemoneinstance.DefaultUpdatedBy = systemoneinstanceDescUpdatedBy.Default.(string)
+	// systemoneinstanceDescCreatedAt is the schema descriptor for created_at field.
+	systemoneinstanceDescCreatedAt := systemoneinstanceFields[21].Descriptor()
+	// systemoneinstance.DefaultCreatedAt holds the default value on creation for the created_at field.
+	systemoneinstance.DefaultCreatedAt = systemoneinstanceDescCreatedAt.Default.(func() time.Time)
+	// systemoneinstanceDescUpdatedAt is the schema descriptor for updated_at field.
+	systemoneinstanceDescUpdatedAt := systemoneinstanceFields[22].Descriptor()
+	// systemoneinstance.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	systemoneinstance.DefaultUpdatedAt = systemoneinstanceDescUpdatedAt.Default.(func() time.Time)
+	// systemoneinstance.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	systemoneinstance.UpdateDefaultUpdatedAt = systemoneinstanceDescUpdatedAt.UpdateDefault.(func() time.Time)
+	// systemoneinstanceDescID is the schema descriptor for id field.
+	systemoneinstanceDescID := systemoneinstanceFields[0].Descriptor()
+	// systemoneinstance.DefaultID holds the default value on creation for the id field.
+	systemoneinstance.DefaultID = systemoneinstanceDescID.Default.(func() uuid.UUID)
 	templateFields := schema.Template{}.Fields()
 	_ = templateFields
 	// templateDescName is the schema descriptor for name field.

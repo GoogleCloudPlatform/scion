@@ -33,7 +33,7 @@ import (
 // expectedTableCount is the number of domain tables in the hub schema
 // (excluding the schema_migrations bookkeeping table). The fixture must cover
 // every one of them.
-const expectedTableCount = 100
+const expectedTableCount = 101
 
 // TestFixtureCoverage is the CI coverage gate: it generates the fixture and
 // fails if any domain table has zero rows.
@@ -179,6 +179,14 @@ func TestFixtureLoadable(t *testing.T) {
 	assert.Equal(t, int64(1), dqStats.Pending)
 	require.NotNil(t, dqStats.Oldest)
 	assert.True(t, dqStats.Oldest.Equal(baseTime))
+
+	soInst, err := composite.GetSystemOneInstanceByName(ctx, "typesafe-prod")
+	require.NoError(t, err, "system_one_instances fixture row must be readable via CompositeStore")
+	assert.Equal(t, "50100000-0000-0000-0000-000000000001", soInst.ID)
+	assert.Equal(t, "typesafe", soInst.Adapter)
+	assert.Equal(t, store.SystemOneAuthKindAPIKey, soInst.Auth.Kind)
+	assert.Equal(t, "TYPESAFE_API_KEY", soInst.Auth.SecretName)
+	assert.Equal(t, 5*time.Second, soInst.Limits.CallTimeout)
 }
 
 // TestFixtureDeterministic verifies the spec produces a stable set of row

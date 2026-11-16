@@ -103,6 +103,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillregistry"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillversion"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/subscriptiontemplate"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/systemoneinstance"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/template"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testidentitydelegation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testidentitylogincode"
@@ -296,6 +297,8 @@ type Client struct {
 	SkillVersion *SkillVersionClient
 	// SubscriptionTemplate is the client for interacting with the SubscriptionTemplate builders.
 	SubscriptionTemplate *SubscriptionTemplateClient
+	// SystemOneInstance is the client for interacting with the SystemOneInstance builders.
+	SystemOneInstance *SystemOneInstanceClient
 	// Template is the client for interacting with the Template builders.
 	Template *TemplateClient
 	// TestIdentityDelegation is the client for interacting with the TestIdentityDelegation builders.
@@ -418,6 +421,7 @@ func (c *Client) init() {
 	c.SkillRegistry = NewSkillRegistryClient(c.config)
 	c.SkillVersion = NewSkillVersionClient(c.config)
 	c.SubscriptionTemplate = NewSubscriptionTemplateClient(c.config)
+	c.SystemOneInstance = NewSystemOneInstanceClient(c.config)
 	c.Template = NewTemplateClient(c.config)
 	c.TestIdentityDelegation = NewTestIdentityDelegationClient(c.config)
 	c.TestIdentityLoginCode = NewTestIdentityLoginCodeClient(c.config)
@@ -609,6 +613,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		SkillRegistry:                 NewSkillRegistryClient(cfg),
 		SkillVersion:                  NewSkillVersionClient(cfg),
 		SubscriptionTemplate:          NewSubscriptionTemplateClient(cfg),
+		SystemOneInstance:             NewSystemOneInstanceClient(cfg),
 		Template:                      NewTemplateClient(cfg),
 		TestIdentityDelegation:        NewTestIdentityDelegationClient(cfg),
 		TestIdentityLoginCode:         NewTestIdentityLoginCodeClient(cfg),
@@ -727,6 +732,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		SkillRegistry:                 NewSkillRegistryClient(cfg),
 		SkillVersion:                  NewSkillVersionClient(cfg),
 		SubscriptionTemplate:          NewSubscriptionTemplateClient(cfg),
+		SystemOneInstance:             NewSystemOneInstanceClient(cfg),
 		Template:                      NewTemplateClient(cfg),
 		TestIdentityDelegation:        NewTestIdentityDelegationClient(cfg),
 		TestIdentityLoginCode:         NewTestIdentityLoginCodeClient(cfg),
@@ -791,10 +797,10 @@ func (c *Client) Use(hooks ...Hook) {
 		c.ProjectVisitorExclusion, c.ProjectVisitorRule, c.RelayInstance,
 		c.RoleBinding, c.RoleDefinition, c.RuntimeBroker, c.RuntimeOrphan, c.Schedule,
 		c.ScheduledEvent, c.ScheduledExecRun, c.Secret, c.Skill, c.SkillInjection,
-		c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate, c.Template,
-		c.TestIdentityDelegation, c.TestIdentityLoginCode, c.TestInfraMarker,
-		c.ThreadGroup, c.ThreadGroupMember, c.UsageReservation, c.User,
-		c.UserAccessToken, c.UserDeletion, c.UserDeletionAgent,
+		c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate, c.SystemOneInstance,
+		c.Template, c.TestIdentityDelegation, c.TestIdentityLoginCode,
+		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.UsageReservation,
+		c.User, c.UserAccessToken, c.UserDeletion, c.UserDeletionAgent,
 		c.UserTerminalWorkspace,
 	} {
 		n.Use(hooks...)
@@ -828,10 +834,10 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.ProjectVisitorExclusion, c.ProjectVisitorRule, c.RelayInstance,
 		c.RoleBinding, c.RoleDefinition, c.RuntimeBroker, c.RuntimeOrphan, c.Schedule,
 		c.ScheduledEvent, c.ScheduledExecRun, c.Secret, c.Skill, c.SkillInjection,
-		c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate, c.Template,
-		c.TestIdentityDelegation, c.TestIdentityLoginCode, c.TestInfraMarker,
-		c.ThreadGroup, c.ThreadGroupMember, c.UsageReservation, c.User,
-		c.UserAccessToken, c.UserDeletion, c.UserDeletionAgent,
+		c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate, c.SystemOneInstance,
+		c.Template, c.TestIdentityDelegation, c.TestIdentityLoginCode,
+		c.TestInfraMarker, c.ThreadGroup, c.ThreadGroupMember, c.UsageReservation,
+		c.User, c.UserAccessToken, c.UserDeletion, c.UserDeletionAgent,
 		c.UserTerminalWorkspace,
 	} {
 		n.Intercept(interceptors...)
@@ -1015,6 +1021,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.SkillVersion.mutate(ctx, m)
 	case *SubscriptionTemplateMutation:
 		return c.SubscriptionTemplate.mutate(ctx, m)
+	case *SystemOneInstanceMutation:
+		return c.SystemOneInstance.mutate(ctx, m)
 	case *TemplateMutation:
 		return c.Template.mutate(ctx, m)
 	case *TestIdentityDelegationMutation:
@@ -13143,6 +13151,139 @@ func (c *SubscriptionTemplateClient) mutate(ctx context.Context, m *Subscription
 	}
 }
 
+// SystemOneInstanceClient is a client for the SystemOneInstance schema.
+type SystemOneInstanceClient struct {
+	config
+}
+
+// NewSystemOneInstanceClient returns a client for the SystemOneInstance from the given config.
+func NewSystemOneInstanceClient(c config) *SystemOneInstanceClient {
+	return &SystemOneInstanceClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `systemoneinstance.Hooks(f(g(h())))`.
+func (c *SystemOneInstanceClient) Use(hooks ...Hook) {
+	c.hooks.SystemOneInstance = append(c.hooks.SystemOneInstance, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `systemoneinstance.Intercept(f(g(h())))`.
+func (c *SystemOneInstanceClient) Intercept(interceptors ...Interceptor) {
+	c.inters.SystemOneInstance = append(c.inters.SystemOneInstance, interceptors...)
+}
+
+// Create returns a builder for creating a SystemOneInstance entity.
+func (c *SystemOneInstanceClient) Create() *SystemOneInstanceCreate {
+	mutation := newSystemOneInstanceMutation(c.config, OpCreate)
+	return &SystemOneInstanceCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of SystemOneInstance entities.
+func (c *SystemOneInstanceClient) CreateBulk(builders ...*SystemOneInstanceCreate) *SystemOneInstanceCreateBulk {
+	return &SystemOneInstanceCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *SystemOneInstanceClient) MapCreateBulk(slice any, setFunc func(*SystemOneInstanceCreate, int)) *SystemOneInstanceCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &SystemOneInstanceCreateBulk{err: fmt.Errorf("calling to SystemOneInstanceClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*SystemOneInstanceCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &SystemOneInstanceCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for SystemOneInstance.
+func (c *SystemOneInstanceClient) Update() *SystemOneInstanceUpdate {
+	mutation := newSystemOneInstanceMutation(c.config, OpUpdate)
+	return &SystemOneInstanceUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *SystemOneInstanceClient) UpdateOne(_m *SystemOneInstance) *SystemOneInstanceUpdateOne {
+	mutation := newSystemOneInstanceMutation(c.config, OpUpdateOne, withSystemOneInstance(_m))
+	return &SystemOneInstanceUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *SystemOneInstanceClient) UpdateOneID(id uuid.UUID) *SystemOneInstanceUpdateOne {
+	mutation := newSystemOneInstanceMutation(c.config, OpUpdateOne, withSystemOneInstanceID(id))
+	return &SystemOneInstanceUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for SystemOneInstance.
+func (c *SystemOneInstanceClient) Delete() *SystemOneInstanceDelete {
+	mutation := newSystemOneInstanceMutation(c.config, OpDelete)
+	return &SystemOneInstanceDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *SystemOneInstanceClient) DeleteOne(_m *SystemOneInstance) *SystemOneInstanceDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *SystemOneInstanceClient) DeleteOneID(id uuid.UUID) *SystemOneInstanceDeleteOne {
+	builder := c.Delete().Where(systemoneinstance.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &SystemOneInstanceDeleteOne{builder}
+}
+
+// Query returns a query builder for SystemOneInstance.
+func (c *SystemOneInstanceClient) Query() *SystemOneInstanceQuery {
+	return &SystemOneInstanceQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeSystemOneInstance},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a SystemOneInstance entity by its id.
+func (c *SystemOneInstanceClient) Get(ctx context.Context, id uuid.UUID) (*SystemOneInstance, error) {
+	return c.Query().Where(systemoneinstance.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *SystemOneInstanceClient) GetX(ctx context.Context, id uuid.UUID) *SystemOneInstance {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *SystemOneInstanceClient) Hooks() []Hook {
+	return c.hooks.SystemOneInstance
+}
+
+// Interceptors returns the client interceptors.
+func (c *SystemOneInstanceClient) Interceptors() []Interceptor {
+	return c.inters.SystemOneInstance
+}
+
+func (c *SystemOneInstanceClient) mutate(ctx context.Context, m *SystemOneInstanceMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&SystemOneInstanceCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&SystemOneInstanceUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&SystemOneInstanceUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&SystemOneInstanceDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown SystemOneInstance mutation op: %q", m.Op())
+	}
+}
+
 // TemplateClient is a client for the Template schema.
 type TemplateClient struct {
 	config
@@ -14938,10 +15079,10 @@ type (
 		ProjectSyncState, ProjectVisitorExclusion, ProjectVisitorRule, RelayInstance,
 		RoleBinding, RoleDefinition, RuntimeBroker, RuntimeOrphan, Schedule,
 		ScheduledEvent, ScheduledExecRun, Secret, Skill, SkillInjection, SkillRegistry,
-		SkillVersion, SubscriptionTemplate, Template, TestIdentityDelegation,
-		TestIdentityLoginCode, TestInfraMarker, ThreadGroup, ThreadGroupMember,
-		UsageReservation, User, UserAccessToken, UserDeletion, UserDeletionAgent,
-		UserTerminalWorkspace []ent.Hook
+		SkillVersion, SubscriptionTemplate, SystemOneInstance, Template,
+		TestIdentityDelegation, TestIdentityLoginCode, TestInfraMarker, ThreadGroup,
+		ThreadGroupMember, UsageReservation, User, UserAccessToken, UserDeletion,
+		UserDeletionAgent, UserTerminalWorkspace []ent.Hook
 	}
 	inters struct {
 		AccessConstraint, AccessConstraintHistory, AccessPolicy, Agent, AgentCredential,
@@ -14964,9 +15105,9 @@ type (
 		ProjectSyncState, ProjectVisitorExclusion, ProjectVisitorRule, RelayInstance,
 		RoleBinding, RoleDefinition, RuntimeBroker, RuntimeOrphan, Schedule,
 		ScheduledEvent, ScheduledExecRun, Secret, Skill, SkillInjection, SkillRegistry,
-		SkillVersion, SubscriptionTemplate, Template, TestIdentityDelegation,
-		TestIdentityLoginCode, TestInfraMarker, ThreadGroup, ThreadGroupMember,
-		UsageReservation, User, UserAccessToken, UserDeletion, UserDeletionAgent,
-		UserTerminalWorkspace []ent.Interceptor
+		SkillVersion, SubscriptionTemplate, SystemOneInstance, Template,
+		TestIdentityDelegation, TestIdentityLoginCode, TestInfraMarker, ThreadGroup,
+		ThreadGroupMember, UsageReservation, User, UserAccessToken, UserDeletion,
+		UserDeletionAgent, UserTerminalWorkspace []ent.Interceptor
 	}
 )

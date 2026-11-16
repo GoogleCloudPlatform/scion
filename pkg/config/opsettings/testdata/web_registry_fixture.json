@@ -182,6 +182,7 @@
     "server.hub.sse",
     "server.hub.platform_request_timeout",
     "server.hub.chat",
+    "server.hub.system_one",
     "server.relay"
   ],
   "file_keys": [

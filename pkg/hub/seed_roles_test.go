@@ -205,7 +205,8 @@ func TestBuiltInRoles_HubAdminConstraintPermissions(t *testing.T) {
 }
 
 // TestBuiltInRoles_HubAdminRevision pins the hub-admin revision and its
-// latest additions: revision 12 adds template.create_global,
+// latest additions: revision 13 adds system_one_instance.{read,create,delete,execute}
+// (ptone/scion#8044), revision 12 adds template.create_global,
 // template.update_global, and template.delete_global while keeping plain
 // template.* out (ptone/scion#1713), revision 11 adds skill.update_global and
 // skill.delete_global (ptone/scion#1713), revision 10 adds
@@ -214,7 +215,11 @@ func TestBuiltInRoles_HubAdminConstraintPermissions(t *testing.T) {
 // (ptone/scion#4603).
 func TestBuiltInRoles_HubAdminRevision(t *testing.T) {
 	admin := builtInRoleByName(t, store.SystemRoleHubAdmin)
-	assert.Equal(t, 12, admin.Revision)
+	assert.Equal(t, 13, admin.Revision)
+	assert.Contains(t, admin.Permissions, "system_one_instance.read")
+	assert.Contains(t, admin.Permissions, "system_one_instance.create")
+	assert.Contains(t, admin.Permissions, "system_one_instance.delete")
+	assert.Contains(t, admin.Permissions, "system_one_instance.execute")
 	assert.Contains(t, admin.Permissions, "template.create_global")
 	assert.Contains(t, admin.Permissions, "template.update_global")
 	assert.Contains(t, admin.Permissions, "template.delete_global")

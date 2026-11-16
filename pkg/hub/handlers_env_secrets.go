@@ -427,7 +427,7 @@ func (s *Server) getEnvVar(w http.ResponseWriter, r *http.Request, key string) {
 
 	envVar, err := s.store.GetEnvVar(ctx, key, scope, scopeID)
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) && s.secretBackend != nil {
+		if errors.Is(err, store.ErrNotFound) && s.secretBackend != nil && !isSystemOneReservedSecretKey(key) {
 			// Fallback: check if this key exists as an environment secret
 			meta, metaErr := s.secretBackend.GetMeta(ctx, key, scope, scopeID)
 			if metaErr == nil && meta.SecretType == "environment" && !agentHiddenHubSecret(ctx, scope, *meta) {
@@ -476,6 +476,9 @@ func (s *Server) setEnvVar(w http.ResponseWriter, r *http.Request, key string) {
 
 	scopeID, ok := s.resolveEnvSecretAccess(w, r, scope, req.ScopeID, true)
 	if !ok {
+		return
+	}
+	if rejectSystemOneReservedSecretWrite(w, key) {
 		return
 	}
 
@@ -611,6 +614,10 @@ func (s *Server) deleteEnvVar(w http.ResponseWriter, r *http.Request, key string
 	if !ok {
 		return
 	}
+	if isSystemOneReservedSecretKey(key) {
+		writeErrorFromErr(w, store.ErrNotFound, "")
+		return
+	}
 
 	if err := s.store.DeleteEnvVar(ctx, key, scope, scopeID); err != nil {
 		if errors.Is(err, store.ErrNotFound) && s.secretBackend != nil {
@@ -724,7 +731,22 @@ func (s *Server) mergeEnvironmentSecrets(ctx context.Context, envVars []store.En
 		s.envSecretLog.Warn(warning, "error", err)
 		return envVars
 	}
-	return mergeEnvironmentSecretMetadata(envVars, withoutAgentHiddenHubSecrets(ctx, filter.Scope, metas))
+	return mergeEnvironmentSecretMetadata(envVars, withoutSystemOneReservedSecrets(withoutAgentHiddenHubSecrets(ctx, filter.Scope, metas)))
+}
+
+// rejectSystemOneReservedSecretWrite rejects writes to the reserved
+// "systemone.instance." secret namespace through generic secret and env
+// endpoints so provider credentials are managed exclusively through the System
+// One instance admin endpoints.
+func rejectSystemOneReservedSecretWrite(w http.ResponseWriter, key string) bool {
+	if !isSystemOneReservedSecretKey(key) {
+		return false
+	}
+	ValidationError(w, "secret key prefix \"systemone.instance.\" is reserved for System One provider credentials", map[string]interface{}{
+		"field": "key",
+		"value": key,
+	})
+	return true
 }
 
 // agentHiddenHubSecret reports whether a hub-scope secret is hidden from the
@@ -815,7 +837,7 @@ func (s *Server) listSecrets(w http.ResponseWriter, r *http.Request) {
 		writeErrorFromErr(w, err, "")
 		return
 	}
-	metas = withoutAgentHiddenHubSecrets(ctx, scope, metas)
+	metas = withoutSystemOneReservedSecrets(withoutAgentHiddenHubSecrets(ctx, scope, metas))
 	// Convert to store.Secret for response compatibility
 	secrets := make([]store.Secret, len(metas))
 	for i, m := range metas {
@@ -866,6 +888,10 @@ func (s *Server) getSecret(w http.ResponseWriter, r *http.Request, key string) {
 
 	scopeID, ok := s.resolveEnvSecretAccess(w, r, scope, query.Get("scopeId"), false)
 	if !ok {
+		return
+	}
+	if isSystemOneReservedSecretKey(key) {
+		writeErrorFromErr(w, store.ErrNotFound, "")
 		return
 	}
 
@@ -995,6 +1021,9 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 	if !ok {
 		return
 	}
+	if rejectSystemOneReservedSecretWrite(w, key) {
+		return
+	}
 
 	// allowProgeny is only valid on user-scoped secrets.
 	// Unlike env vars, secrets do NOT require injectionMode=always when
@@ -1046,6 +1075,9 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 // handlers. It decodes and validates the PatchSecretRequest, applies the
 // metadata update, and writes the response.
 func (s *Server) patchSecretValidateAndUpdate(w http.ResponseWriter, r *http.Request, key, scope, scopeID string) {
+	if rejectSystemOneReservedSecretWrite(w, key) {
+		return
+	}
 	ctx := r.Context()
 
 	r.Body = http.MaxBytesReader(w, r.Body, 128*1024)
@@ -1190,6 +1222,10 @@ func (s *Server) deleteSecret(w http.ResponseWriter, r *http.Request, key string
 	if !ok {
 		return
 	}
+	if isSystemOneReservedSecretKey(key) {
+		writeErrorFromErr(w, store.ErrNotFound, "")
+		return
+	}
 
 	if err := s.secretBackend.Delete(ctx, key, scope, scopeID); err != nil {
 		writeErrorFromErr(w, err, "")
@@ -1283,6 +1319,9 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 			"field": "key",
 			"value": key,
 		})
+		return
+	}
+	if rejectSystemOneReservedSecretWrite(w, key) {
 		return
 	}
 
@@ -1840,7 +1879,7 @@ func (s *Server) handleScopedEnvVarByKey(w http.ResponseWriter, r *http.Request,
 	case http.MethodGet:
 		envVar, err := s.store.GetEnvVar(ctx, key, scope, scopeID)
 		if err != nil {
-			if errors.Is(err, store.ErrNotFound) && s.secretBackend != nil {
+			if errors.Is(err, store.ErrNotFound) && s.secretBackend != nil && !isSystemOneReservedSecretKey(key) {
 				meta, metaErr := s.secretBackend.GetMeta(ctx, key, scope, scopeID)
 				// Defence in depth: this handler serves project and broker
 				// scopes, but the hub-scope agent rule is applied here too.
@@ -1871,6 +1910,9 @@ func (s *Server) handleScopedEnvVarByKey(w http.ResponseWriter, r *http.Request,
 
 		// See setEnvVar: the key is itself the container-env name.
 		if !validateEnvSecretTarget(w, store.SecretTypeEnvironment, key) {
+			return
+		}
+		if rejectSystemOneReservedSecretWrite(w, key) {
 			return
 		}
 
@@ -1945,6 +1987,10 @@ func (s *Server) handleScopedEnvVarByKey(w http.ResponseWriter, r *http.Request,
 		writeJSON(w, http.StatusOK, SetEnvVarResponse{EnvVar: envVar, Created: created})
 
 	case http.MethodDelete:
+		if isSystemOneReservedSecretKey(key) {
+			writeErrorFromErr(w, store.ErrNotFound, "")
+			return
+		}
 		if err := s.store.DeleteEnvVar(ctx, key, scope, scopeID); err != nil {
 			if errors.Is(err, store.ErrNotFound) && s.secretBackend != nil {
 				if secErr := s.secretBackend.Delete(ctx, key, scope, scopeID); secErr == nil {
@@ -2078,6 +2124,7 @@ func (s *Server) handleProjectSecrets(w http.ResponseWriter, r *http.Request, pr
 			writeErrorFromErr(w, err, "")
 			return
 		}
+		metas = withoutSystemOneReservedSecrets(metas)
 		secrets := make([]store.Secret, len(metas))
 		for i, m := range metas {
 			secrets[i] = metaToStoreSecret(m)
@@ -2099,6 +2146,10 @@ func (s *Server) handleScopedSecretByKey(w http.ResponseWriter, r *http.Request,
 
 	switch r.Method {
 	case http.MethodGet:
+		if isSystemOneReservedSecretKey(key) {
+			writeErrorFromErr(w, store.ErrNotFound, "")
+			return
+		}
 		meta, err := s.secretBackend.GetMeta(ctx, key, scope, scopeID)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
@@ -2107,6 +2158,9 @@ func (s *Server) handleScopedSecretByKey(w http.ResponseWriter, r *http.Request,
 		writeJSON(w, http.StatusOK, metaToStoreSecret(*meta))
 
 	case http.MethodPut:
+		if rejectSystemOneReservedSecretWrite(w, key) {
+			return
+		}
 		r.Body = http.MaxBytesReader(w, r.Body, 128*1024)
 		var req SetSecretRequest
 		if err := readJSON(r, &req); err != nil {
@@ -2195,6 +2249,10 @@ func (s *Server) handleScopedSecretByKey(w http.ResponseWriter, r *http.Request,
 		s.patchSecretValidateAndUpdate(w, r, key, scope, scopeID)
 
 	case http.MethodDelete:
+		if isSystemOneReservedSecretKey(key) {
+			writeErrorFromErr(w, store.ErrNotFound, "")
+			return
+		}
 		if err := s.secretBackend.Delete(ctx, key, scope, scopeID); err != nil {
 			writeErrorFromErr(w, err, "")
 			return
@@ -2880,6 +2938,7 @@ func (s *Server) handleBrokerSecrets(w http.ResponseWriter, r *http.Request, bro
 			writeErrorFromErr(w, err, "")
 			return
 		}
+		metas = withoutSystemOneReservedSecrets(metas)
 		secrets := make([]store.Secret, len(metas))
 		for i, m := range metas {
 			secrets[i] = metaToStoreSecret(m)

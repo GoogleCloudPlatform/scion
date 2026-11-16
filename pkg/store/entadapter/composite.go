@@ -129,6 +129,7 @@ type CompositeStore struct {
 	*TestIdentityDelegationStore
 	*UserDeletionStore
 	*DurableQueueStore
+	*SystemOneInstanceStore
 
 	client *ent.Client
 	inTx   bool // true when this CompositeStore wraps a transaction
@@ -274,6 +275,7 @@ func newTxCompositeStore(tx *ent.Tx) *CompositeStore {
 	txStore.PendingSecretStore.inTx = true
 	txStore.PendingSecretStore.txFencedWrite = &txStore.SecretStore.txFencedWrite
 	txStore.DurableQueueStore.inTx = true
+	txStore.SystemOneInstanceStore.inTx = true
 	return txStore
 }
 
@@ -327,6 +329,7 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		TestIdentityDelegationStore: NewTestIdentityDelegationStore(client),
 		UserDeletionStore:           NewUserDeletionStore(client),
 		DurableQueueStore:           NewDurableQueueStore(client),
+		SystemOneInstanceStore:      NewSystemOneInstanceStore(client),
 		client:                      client,
 	}
 }

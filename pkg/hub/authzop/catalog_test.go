@@ -1347,6 +1347,7 @@ var domainResourceCompatibility = map[string][]string{
 	"inbox":               {"ResourceInbox"},
 	"user.skillinjection": {"ResourceUserSkillInjection"},
 	"testidentity":        {"ResourceTestIdentity"},
+	"systemone.instance":  {"ResourceSystemOneInstance"},
 }
 
 // TestCatalogBasePermissionSemanticsAssertive validates that each operation's

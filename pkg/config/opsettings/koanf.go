@@ -118,6 +118,9 @@ var layer0Prefixes = []string{
 	// Web chat search limits (timeout, hub-wide cap) — read into
 	// ServerConfig at startup (ptone/scion#7586).
 	"server.hub.chat",
+	// System One rule evaluation ceiling (max_eval_time) — read into
+	// ServerConfig at startup (ptone/scion#8044).
+	"server.hub.system_one",
 	// Separate relay process settings (scion server --role relay) — read
 	// at startup.
 	"server.relay",

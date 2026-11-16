@@ -1877,6 +1877,19 @@
               "x-since": "1"
             }
           }
+        },
+        "system_one": {
+          "type": "object",
+          "description": "System One message rule evaluation settings (hub.system_one experiment).",
+          "additionalProperties": false,
+          "properties": {
+            "max_eval_time": {
+              "type": "string",
+              "description": "Wall-clock budget for evaluating System One rules on a single message (e.g. '3s'; default '3s', must be > 0 and <= '30s').",
+              "x-env-var": "SCION_SERVER_HUB_SYSTEMONE_MAXEVALTIME",
+              "x-since": "1"
+            }
+          }
         }
       }
     },

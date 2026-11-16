@@ -99,6 +99,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillregistry"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillversion"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/subscriptiontemplate"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/systemoneinstance"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/template"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testidentitydelegation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testidentitylogincode"
@@ -258,6 +259,7 @@ func checkColumn(t, c string) error {
 			skillregistry.Table:                 skillregistry.ValidColumn,
 			skillversion.Table:                  skillversion.ValidColumn,
 			subscriptiontemplate.Table:          subscriptiontemplate.ValidColumn,
+			systemoneinstance.Table:             systemoneinstance.ValidColumn,
 			template.Table:                      template.ValidColumn,
 			testidentitydelegation.Table:        testidentitydelegation.ValidColumn,
 			testidentitylogincode.Table:         testidentitylogincode.ValidColumn,

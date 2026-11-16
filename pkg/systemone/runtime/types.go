@@ -58,6 +58,9 @@ const (
 	// (ResolvedModel, ReportedModel, ProviderRequestID) before they enter
 	// content-free Evaluation provenance or logs (runtime-design §8.1).
 	MaxProviderIdentifierBytes = 128
+	// MaxListedModels bounds the number of model identifiers returned by
+	// Runtime.ListModels.
+	MaxListedModels = 256
 )
 
 // Class is the top-level evaluation outcome class (runtime-design §6.1).
