@@ -150,7 +150,7 @@ var errStartInProgressNotReady = errors.New("target agent was already starting a
 // Nothing is started by the wait; the caller's delivery authorization
 // covers delivering to the run another start brought up.
 func (s *Server) wakeOrAwaitStart(ctx context.Context, agent *store.Agent) (dmErr *AgentDMError, awaitErr error) {
-	if agent != nil && agent.HasActiveIdleSuspendClaim(time.Now()) {
+	if agent != nil && (agent.IdleSuspendClaimActive || agent.IdleSuspendClaimUntil != nil) {
 		if err := s.waitForIdleSuspendToSettle(ctx, agent); err != nil {
 			return nil, err
 		}
@@ -177,12 +177,13 @@ func (s *Server) wakeOrAwaitStart(ctx context.Context, agent *store.Agent) (dmEr
 }
 
 // waitForIdleSuspendToSettle waits, up to wakeReadyTimeout, for an active
-// idle-suspend claim on agent to clear, refreshing *agent to the settled row.
+// idle-suspend claim on agent to clear (evaluated against the store clock via
+// MarkAgentDelivery), refreshing *agent to the settled row.
 func (s *Server) waitForIdleSuspendToSettle(ctx context.Context, agent *store.Agent) error {
 	ctx, cancel := context.WithTimeout(ctx, wakeReadyTimeout)
 	defer cancel()
 	for {
-		fresh, err := s.store.GetAgent(ctx, agent.ID)
+		fresh, claimActive, err := s.store.MarkAgentDelivery(ctx, agent.ID)
 		if err != nil {
 			return fmt.Errorf("failed to check agent status during idle suspend: %w", err)
 		}
@@ -190,7 +191,7 @@ func (s *Server) waitForIdleSuspendToSettle(ctx context.Context, agent *store.Ag
 			return store.ErrNotFound
 		}
 		*agent = *fresh
-		if !fresh.HasActiveIdleSuspendClaim(time.Now()) {
+		if !claimActive {
 			return nil
 		}
 		select {

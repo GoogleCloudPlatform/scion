@@ -179,44 +179,103 @@ func (d *retryMockDispatcher) DispatchAgentMessage(_ context.Context, agent *sto
 	return nil
 }
 
+type testDeliveryMarker struct {
+	agent       *store.Agent
+	claimActive bool
+	err         error
+	calls       atomic.Int32
+}
+
+func (m *testDeliveryMarker) MarkAgentDelivery(_ context.Context, _ string) (*store.Agent, bool, error) {
+	m.calls.Add(1)
+	if m.err != nil {
+		return nil, false, m.err
+	}
+	cp := *m.agent
+	cp.IdleSuspendClaimActive = m.claimActive
+	return &cp, m.claimActive, nil
+}
+
+func noopMarker(agent *store.Agent) *testDeliveryMarker {
+	return &testDeliveryMarker{agent: agent}
+}
+
 func TestDispatchWithBrokerRetry_ImmediateSuccess(t *testing.T) {
 	d := &retryMockDispatcher{}
-	agent := &store.Agent{ID: "a1", Slug: "test"}
+	agent := &store.Agent{ID: "a1", Slug: "test", Phase: "running"}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err := dispatchWithBrokerRetry(ctx, nil, d, agent, "hello", false, nil)
+	err := dispatchWithBrokerRetry(ctx, noopMarker(agent), nil, d, agent, "hello", false, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, int32(1), d.calls.Load())
 }
 
 func TestDispatchWithBrokerRetry_RetryThenSuccess(t *testing.T) {
 	d := &retryMockDispatcher{deferCount: 3}
-	agent := &store.Agent{ID: "a1", Slug: "test"}
+	agent := &store.Agent{ID: "a1", Slug: "test", Phase: "running"}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err := dispatchWithBrokerRetry(ctx, nil, d, agent, "hello", false, nil)
+	m := noopMarker(agent)
+	err := dispatchWithBrokerRetry(ctx, m, nil, d, agent, "hello", false, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, int32(4), d.calls.Load())
+	assert.Equal(t, int32(4), m.calls.Load(), "each retry attempt re-checks the idle-suspend claim")
 }
 
 func TestDispatchWithBrokerRetry_Timeout(t *testing.T) {
 	d := &retryMockDispatcher{deferCount: 1000}
-	agent := &store.Agent{ID: "a1", Slug: "test"}
+	agent := &store.Agent{ID: "a1", Slug: "test", Phase: "running"}
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	err := dispatchWithBrokerRetry(ctx, nil, d, agent, "hello", false, nil)
+	err := dispatchWithBrokerRetry(ctx, noopMarker(agent), nil, d, agent, "hello", false, nil)
 	assert.ErrorIs(t, err, ErrBrokerTimeout)
 }
 
 func TestDispatchWithBrokerRetry_NonTransientError(t *testing.T) {
 	nonTransient := errors.New("connection refused")
 	d := &retryMockDispatcher{failErr: nonTransient}
-	agent := &store.Agent{ID: "a1", Slug: "test"}
+	agent := &store.Agent{ID: "a1", Slug: "test", Phase: "running"}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err := dispatchWithBrokerRetry(ctx, nil, d, agent, "hello", false, nil)
+	err := dispatchWithBrokerRetry(ctx, noopMarker(agent), nil, d, agent, "hello", false, nil)
 	assert.ErrorIs(t, err, nonTransient)
 	assert.Equal(t, int32(1), d.calls.Load())
+}
+
+func TestDispatchMarkedAgentMessage_FailsClosedOnClaimOrStoreError(t *testing.T) {
+	t.Run("active idle-suspend claim blocks DispatchAgentMessage", func(t *testing.T) {
+		d := &retryMockDispatcher{}
+		agent := &store.Agent{ID: "a1", Slug: "test", Phase: "running"}
+		m := &testDeliveryMarker{agent: agent, claimActive: true}
+		err := dispatchMarkedAgentMessage(context.Background(), m, nil, nil, d, agent, "hello", false, nil)
+		var idleErr *errAgentIdleSuspending
+		require.ErrorAs(t, err, &idleErr)
+		assert.True(t, idleErr.claimActive)
+		assert.True(t, agent.IdleSuspendClaimActive)
+		assert.Equal(t, int32(0), d.calls.Load(), "DispatchAgentMessage must never run when claimActive is true")
+	})
+
+	t.Run("store error in MarkAgentDelivery fails closed", func(t *testing.T) {
+		d := &retryMockDispatcher{}
+		agent := &store.Agent{ID: "a1", Slug: "test", Phase: "running"}
+		boom := errors.New("db unavailable")
+		m := &testDeliveryMarker{agent: agent, err: boom}
+		err := dispatchMarkedAgentMessage(context.Background(), m, nil, nil, d, agent, "hello", false, nil)
+		var markErr *errDeliveryMarkFailed
+		require.ErrorAs(t, err, &markErr)
+		assert.ErrorIs(t, err, boom)
+		assert.False(t, isAmbiguousDispatchError(err), "pre-dispatch mark failure is definite, never ambiguous")
+		assert.Equal(t, int32(0), d.calls.Load(), "DispatchAgentMessage must never run when MarkAgentDelivery fails")
+	})
+
+	t.Run("nil marker fails closed", func(t *testing.T) {
+		d := &retryMockDispatcher{}
+		agent := &store.Agent{ID: "a1", Slug: "test", Phase: "running"}
+		err := dispatchMarkedAgentMessage(context.Background(), nil, nil, nil, d, agent, "hello", false, nil)
+		var markErr *errDeliveryMarkFailed
+		require.ErrorAs(t, err, &markErr)
+		assert.Equal(t, int32(0), d.calls.Load())
+	})
 }
 
 // urgentRecordingDispatcher records the urgent flag of each dispatch.
@@ -259,7 +318,7 @@ func TestDispatchWithBrokerRetry_InterruptDowngrade(t *testing.T) {
 			agent := &store.Agent{ID: "a1", Slug: "test", Phase: tt.phase, Activity: tt.activity}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			require.NoError(t, dispatchWithBrokerRetry(ctx, nil, d, agent, "hello", tt.urgent, nil))
+			require.NoError(t, dispatchWithBrokerRetry(ctx, noopMarker(agent), nil, d, agent, "hello", tt.urgent, nil))
 			require.Len(t, d.urgent, 1, "the message must still be delivered")
 			assert.Equal(t, tt.want, d.urgent[0])
 		})

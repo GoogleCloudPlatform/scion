@@ -214,8 +214,10 @@ func TestAgentStore_ClaimIdleSuspend_AndDeliveryHandshake(t *testing.T) {
 
 	t.Run("delivery before claim blocks ClaimIdleSuspend", func(t *testing.T) {
 		a, cond := makeEligible("delivery-first")
-		marked, err := s.MarkAgentDelivery(ctx, a.ID)
+		marked, claimActive, err := s.MarkAgentDelivery(ctx, a.ID)
 		require.NoError(t, err)
+		assert.False(t, claimActive)
+		assert.False(t, marked.IdleSuspendClaimActive)
 		require.NotNil(t, marked.LastDeliveryAt)
 		assert.False(t, marked.HasActiveIdleSuspendClaim(time.Now()))
 
@@ -231,8 +233,10 @@ func TestAgentStore_ClaimIdleSuspend_AndDeliveryHandshake(t *testing.T) {
 		assert.False(t, at.IsZero())
 		assert.False(t, claimUntil.IsZero())
 
-		marked, err := s.MarkAgentDelivery(ctx, a.ID)
+		marked, claimActive, err := s.MarkAgentDelivery(ctx, a.ID)
 		require.NoError(t, err)
+		assert.True(t, claimActive, "delivery after claim must observe active claim via store clock")
+		assert.True(t, marked.IdleSuspendClaimActive)
 		assert.True(t, marked.HasActiveIdleSuspendClaim(time.Now()), "delivery after claim must observe active claim")
 		assert.Nil(t, marked.LastDeliveryAt, "delivery while claimed must not stamp last_delivery_at")
 
@@ -322,5 +326,39 @@ func TestAgentStore_ClaimIdleSuspend_AndDeliveryHandshake(t *testing.T) {
 		after, err := s.GetAgent(ctx, a.ID)
 		require.NoError(t, err)
 		assert.Equal(t, string(state.SuspendReasonIdle), after.SuspendReason)
+	})
+
+	t.Run("concurrent ClaimIdleSuspend vs MarkAgentDelivery serializes cleanly", func(t *testing.T) {
+		for round := 0; round < 20; round++ {
+			a, cond := makeEligible(fmt.Sprintf("race-round-%d", round))
+			start := make(chan struct{})
+			var claimErr, markErr error
+			var claimActive bool
+			done := make(chan struct{}, 2)
+
+			go func() {
+				<-start
+				_, _, _, claimErr = s.ClaimIdleSuspend(ctx, a.ID, cond)
+				done <- struct{}{}
+			}()
+			go func() {
+				<-start
+				_, claimActive, markErr = s.MarkAgentDelivery(ctx, a.ID)
+				done <- struct{}{}
+			}()
+			close(start)
+			<-done
+			<-done
+
+			require.NoError(t, markErr)
+			if claimErr == nil {
+				// ClaimIdleSuspend ran first -> MarkAgentDelivery MUST have seen claimActive=true.
+				assert.True(t, claimActive, "round %d: when ClaimIdleSuspend wins, MarkAgentDelivery must observe claimActive", round)
+			} else {
+				// MarkAgentDelivery ran first -> ClaimIdleSuspend MUST have failed with ErrIdleSuspendPrecondition.
+				assert.ErrorIs(t, claimErr, store.ErrIdleSuspendPrecondition, "round %d", round)
+				assert.False(t, claimActive, "round %d: when MarkAgentDelivery wins, claimActive must be false", round)
+			}
+		}
 	})
 }

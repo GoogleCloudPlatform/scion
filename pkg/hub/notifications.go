@@ -521,11 +521,7 @@ func (nd *NotificationDispatcher) dispatchToAgent(ctx context.Context, sub *stor
 		return
 	}
 
-	if fresh, merr := nd.store.MarkAgentDelivery(ctx, subscriber.ID); merr == nil && fresh != nil {
-		subscriber = fresh
-	}
-
-	if subscriberSuspended(subscriber) || subscriber.HasActiveIdleSuspendClaim(time.Now()) {
+	if subscriberSuspended(subscriber) {
 		// No running agent to deliver to: leave the notification pending
 		// with no attempt counted. The dispatch sweep leaves it out while
 		// the subscriber is suspended, delivers it after a resume, and
@@ -594,8 +590,29 @@ func (nd *NotificationDispatcher) dispatchToAgent(ctx context.Context, sub *stor
 	retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer retryCancel()
 
-	nd.recordAttempt(ctx, notif.ID)
-	if err := dispatchWithBrokerRetry(retryCtx, nd.messageLog, dispatcher, subscriber, notif.Message, false, structuredMsg); err != nil {
+	err = dispatchWithBrokerRetry(
+		retryCtx,
+		nd.store,
+		nd.messageLog,
+		dispatcher,
+		subscriber,
+		notif.Message,
+		false,
+		structuredMsg,
+		withBeforeBrokerAttempt(func() { nd.recordAttempt(ctx, notif.ID) }),
+	)
+	if err != nil {
+		var idleErr *errAgentIdleSuspending
+		if errors.As(err, &idleErr) {
+			if nd.offerAutoWake(subscriber) {
+				nd.log.Info("Subscriber agent is suspending or suspended; notification parked while it is woken",
+					"subscriberID", sub.SubscriberID, "notificationID", notif.ID)
+				return
+			}
+			nd.log.Info("Subscriber agent is suspending or suspended; notification parked until it resumes",
+				"subscriberID", sub.SubscriberID, "notificationID", notif.ID)
+			return
+		}
 		nd.log.Error("Failed to dispatch notification to agent; notification NOT dispatched",
 			"subscriberID", sub.SubscriberID, "notificationID", notif.ID, "error", err)
 		// Do NOT mark as dispatched: the notification was not delivered.

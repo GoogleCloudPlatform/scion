@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -75,7 +76,7 @@ func (s *Server) autoWakeModeOf(agent *store.Agent) autoWakeMode {
 	if agent == nil {
 		return autoWakeNone
 	}
-	if agent.HasActiveIdleSuspendClaim(time.Now()) {
+	if agent.IdleSuspendClaimActive {
 		if !s.experimentEnabled(experiments.IdleSuspend) {
 			return autoWakeNone
 		}
@@ -118,37 +119,27 @@ func (s *Server) shouldQueueAutoWake(agent *store.Agent) bool {
 	if s.shouldAutoWake(agent) {
 		return true
 	}
-	return agent != nil && agent.HasActiveIdleSuspendClaim(time.Now()) && s.experimentEnabled(experiments.IdleSuspend)
+	return agent != nil && agent.IdleSuspendClaimActive && s.experimentEnabled(experiments.IdleSuspend)
 }
 
-// ensureDeliverableBeforeDispatch stamps last_delivery_at under the row lock
-// right before dispatching an item to agent. If an idle auto-suspend claimed
-// (or completed suspending) the agent since the caller's initial read, it
-// awaits settlement and resumes the agent via wakeOrAwaitStart, then marks
-// delivery on the woken run.
-func (s *Server) ensureDeliverableBeforeDispatch(ctx context.Context, agent *store.Agent) (*AgentDMError, error) {
-	if agent == nil || s.store == nil {
-		return nil, nil
-	}
-	fresh, err := s.store.MarkAgentDelivery(ctx, agent.ID)
-	if err != nil || fresh == nil {
-		return nil, nil
-	}
-	*agent = *fresh
+// syncAutoWakeForDM waits for an in-flight idle auto-suspend to settle and
+// resumes a hub-suspended target when dispatchMarkedAgentMessage observes
+// *errAgentIdleSuspending on a synchronous DM path.
+func (s *Server) syncAutoWakeForDM(wakeCtx context.Context, agent *store.Agent) error {
 	if s.autoWakeModeOf(agent) == autoWakeNone {
-		return nil, nil
+		return &errAutoWakeRefused{dmErr: validateAgentDeliverable(agent)}
 	}
-	if dmErr := s.heldTargetRefusal(ctx, agent); dmErr != nil {
-		return dmErr, nil
+	if dmErr := s.heldTargetRefusal(wakeCtx, agent); dmErr != nil {
+		return &errAutoWakeRefused{dmErr: dmErr}
 	}
-	dmErr, awaitErr := s.wakeOrAwaitStart(ctx, agent)
-	if dmErr != nil || awaitErr != nil {
-		return dmErr, awaitErr
+	dmErr, awaitErr := s.wakeOrAwaitStart(wakeCtx, agent)
+	if dmErr != nil {
+		return &errAutoWakeRefused{dmErr: dmErr}
 	}
-	if marked, merr := s.store.MarkAgentDelivery(ctx, agent.ID); merr == nil && marked != nil {
-		*agent = *marked
+	if awaitErr != nil {
+		return &errAutoWakeRefused{dmErr: startInProgressDMError(agent, awaitErr), awaitErr: awaitErr}
 	}
-	return nil, nil
+	return nil
 }
 
 // agentHeldOrUnknown reports whether agentID is held, or its hold could not
@@ -282,6 +273,11 @@ func (s *Server) autoWakeAgent(ctx context.Context, agent *store.Agent) (*store.
 	if err != nil || current == nil {
 		return nil, &AgentDMError{Code: ErrCodeAgentNotRunning, Message: "agent could not be read for auto-wake", HTTPStatus: http.StatusConflict}
 	}
+	if current.IdleSuspendClaimUntil != nil {
+		if err := s.waitForIdleSuspendToSettle(ctx, current); err != nil {
+			return nil, startInProgressDMError(current, err)
+		}
+	}
 	if dmErr := s.heldTargetRefusal(ctx, current); dmErr != nil {
 		return nil, dmErr
 	}
@@ -291,7 +287,9 @@ func (s *Server) autoWakeAgent(ctx context.Context, agent *store.Agent) (*store.
 	// clears the reason, and that agent is not auto-woken again. A running
 	// target needs nothing; a starting one is only waited on.
 	switch state.Phase(current.Phase) {
-	case state.PhaseRunning, state.PhaseStarting:
+	case state.PhaseRunning:
+		return current, nil
+	case state.PhaseStarting:
 	default:
 		if s.autoWakeModeOf(current) == autoWakeNone {
 			return nil, validateAgentDeliverable(current)
@@ -329,6 +327,10 @@ func (s *Server) stopAutoWakes(ctx context.Context) {
 // stored copy messageID (non-interrupt, as for any secondary) and settle the
 // attachment addressee; a failed dispatch or wake marks the copy failed.
 func (s *Server) chatSecondaryAutoWakeItem(messageID, addressee, content string, msg *messages.StructuredMessage) autoWakeItem {
+	return s.chatSecondaryAutoWakeItemWithLog(messageID, addressee, content, msg, nil)
+}
+
+func (s *Server) chatSecondaryAutoWakeItemWithLog(messageID, addressee, content string, msg *messages.StructuredMessage, recordLog *slog.Logger) autoWakeItem {
 	return autoWakeItem{
 		deliver: func(ctx context.Context, woken *store.Agent) {
 			var err error
@@ -336,11 +338,8 @@ func (s *Server) chatSecondaryAutoWakeItem(messageID, addressee, content string,
 				err = errors.New("dispatch not available")
 			} else {
 				dctx, cancel := context.WithTimeout(withDispatchMessageID(ctx, messageID), chatWakeDeliveryBudget)
-				if marked, merr := s.store.MarkAgentDelivery(dctx, woken.ID); merr == nil && marked != nil {
-					woken = marked
-				}
 				_, err = s.holdOrDispatch(dctx, woken, messageID, nil, func() error {
-					return dispatchWithBrokerRetry(dctx, nil, dispatcher, woken, content, false, msg)
+					return dispatchWithBrokerRetry(dctx, s.store, recordLog, dispatcher, woken, content, false, msg)
 				})
 				cancel()
 			}
@@ -431,7 +430,7 @@ func (s *Server) convertHubSuspendToUser(ctx context.Context, w http.ResponseWri
 		reincarnationInFlight(agent) {
 		return false
 	}
-	if agent.StartClaimID != "" || agent.HasActiveIdleSuspendClaim(time.Now()) || s.lifecycleOps.active(agent.ID) {
+	if agent.StartClaimID != "" || s.lifecycleOps.active(agent.ID) {
 		writeError(w, http.StatusConflict, ErrCodeConflict,
 			"Agent has a lifecycle operation in progress; retry once it settles.", nil)
 		return true

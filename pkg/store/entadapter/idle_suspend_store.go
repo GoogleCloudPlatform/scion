@@ -158,10 +158,13 @@ func (s *AgentStore) ClearIdleSuspendClaim(ctx context.Context, agentID string) 
 }
 
 // MarkAgentDelivery implements store.AgentStore.MarkAgentDelivery.
-func (s *AgentStore) MarkAgentDelivery(ctx context.Context, agentID string) (*store.Agent, error) {
-	var out *store.Agent
+func (s *AgentStore) MarkAgentDelivery(ctx context.Context, agentID string) (*store.Agent, bool, error) {
+	var (
+		out         *store.Agent
+		claimActive bool
+	)
 	err := s.withLockedAgent(ctx, agentID, func(ctx context.Context, c *ent.Client, row *ent.Agent, now time.Time) (bool, error) {
-		claimActive := row.IdleSuspendClaimUntil != nil && now.Before(*row.IdleSuspendClaimUntil)
+		claimActive = row.IdleSuspendClaimUntil != nil && now.Before(*row.IdleSuspendClaimUntil)
 		if !claimActive && (row.Phase == string(state.PhaseRunning) || row.Phase == string(state.PhaseStarting)) {
 			updated, err := c.Agent.UpdateOneID(row.ID).
 				SetUpdated(row.Updated).
@@ -171,13 +174,15 @@ func (s *AgentStore) MarkAgentDelivery(ctx context.Context, agentID string) (*st
 				return false, mapError(err)
 			}
 			out = entAgentToStore(updated)
+			out.IdleSuspendClaimActive = false
 			return true, nil
 		}
 		out = entAgentToStore(row)
+		out.IdleSuspendClaimActive = claimActive
 		return false, nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return out, nil
+	return out, claimActive, nil
 }

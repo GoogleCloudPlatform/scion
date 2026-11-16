@@ -454,7 +454,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			mode = s.autoWakeModeOf(input.TargetAgent)
 		}
 		isFanoutMention := input.SkipPhaseGate && input.Type == messages.TypeMention
-		autoWake = mode == autoWakeResume || (mode == autoWakeAwait && (!isFanoutMention || input.TargetAgent.HasActiveIdleSuspendClaim(time.Now())))
+		autoWake = mode == autoWakeResume || (mode == autoWakeAwait && (!isFanoutMention || input.TargetAgent.IdleSuspendClaimActive))
 		switch {
 		case holdErr != nil:
 			return nil, heldLookupFaultDMError()
@@ -731,14 +731,6 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// shutting down cannot start the wake; the mention then takes the
 	// dispatch below, as it would without auto-wake.
 	isFanoutMention := input.SkipPhaseGate && input.Type == messages.TypeMention
-	if !wakeQueued && isFanoutMention {
-		if fresh, merr := s.store.MarkAgentDelivery(ctx, input.TargetAgent.ID); merr == nil && fresh != nil {
-			*input.TargetAgent = *fresh
-			if s.shouldQueueAutoWake(input.TargetAgent) && !s.agentHeldOrUnknown(ctx, input.TargetAgent.ID) {
-				wakeQueued = true
-			}
-		}
-	}
 	if wakeQueued && s.queueAutoWake(input.TargetAgent, s.agentDMAutoWakeItem(input, storeMsg, structuredMsg, dispatchMsg)) {
 		return &AgentDMResult{
 			Outcome:            AgentDMWakeQueued,
@@ -765,18 +757,6 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// the dispatch, so only a deadline can leave a row ambiguous.
 	dctx, dcancel := dispatchContext(ctx, agentDMDispatchTimeout)
 	defer dcancel()
-	if !isFanoutMention {
-		dmErr, awaitErr := s.ensureDeliverableBeforeDispatch(dctx, input.TargetAgent)
-		if awaitErr != nil {
-			dmErr = startInProgressDMError(input.TargetAgent, awaitErr)
-		}
-		if dmErr != nil {
-			s.finishAttachmentAddressee(dctx, input.AttachmentAddressee, errors.New(dmErr.Message))
-			_ = s.markFailed(dctx, msgID, dmErr.Message)
-			LogDMDispatchOutcome(input.SenderAgent, input.TargetAgent, msgID, DispatchFailed, errors.New(dmErr.Message))
-			return nil, dmErr
-		}
-	}
 	var dispatchErr error
 	var held bool
 	if isManagedAgentRuntime(input.TargetAgent.Runtime) {
@@ -784,13 +764,51 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		// have the scion CLI to fetch with. Unchanged: input.Msg, full body.
 		dispatchErr = s.managedAgentMessage(dctx, input.TargetAgent, input.Msg, input.Urgent || input.Interrupt)
 	} else if dispatcher := s.GetDispatcher(); dispatcher != nil && input.TargetAgent.RuntimeBrokerID != "" {
+		var retryOpts []dispatchRetryOption
+		if !isFanoutMention {
+			retryOpts = append(retryOpts, withSyncAutoWakeHook(func(_ context.Context, target *store.Agent) (context.Context, context.CancelFunc, error) {
+				if input.BeforeWake != nil {
+					input.BeforeWake()
+				}
+				wctx, wcancel := dispatchContext(ctx, scheduledWakeBudget)
+				defer wcancel()
+				if err := s.syncAutoWakeForDM(wctx, target); err != nil {
+					return nil, nil, err
+				}
+				freshCtx, freshCancel := dispatchContext(ctx, agentDMDispatchTimeout)
+				return withDispatchMessageID(freshCtx, msgID), freshCancel, nil
+			}))
+		}
 		held, dispatchErr = s.holdOrDispatch(dctx, input.TargetAgent, msgID, storeMsg, func() error {
-			return dispatchWithBrokerRetry(withDispatchMessageID(dctx, msgID), nil, dispatcher, input.TargetAgent, dispatchMsg.Msg, input.Urgent || input.Interrupt, dispatchMsg)
+			return dispatchWithBrokerRetry(withDispatchMessageID(dctx, msgID), s.store, nil, dispatcher, input.TargetAgent, dispatchMsg.Msg, input.Urgent || input.Interrupt, dispatchMsg, retryOpts...)
 		})
 	}
 
 	// 12. Finalize dispatch state (#1689).
 	if dispatchErr != nil {
+		var idleErr *errAgentIdleSuspending
+		if isFanoutMention && errors.As(dispatchErr, &idleErr) &&
+			s.shouldQueueAutoWake(input.TargetAgent) &&
+			!s.agentHeldOrUnknown(ctx, input.TargetAgent.ID) &&
+			s.queueAutoWake(input.TargetAgent, s.agentDMAutoWakeItem(input, storeMsg, structuredMsg, dispatchMsg)) {
+			return &AgentDMResult{
+				Outcome:            AgentDMWakeQueued,
+				MessageID:          msgID,
+				Recipient:          storeMsg.Recipient,
+				RecipientID:        storeMsg.RecipientID,
+				ConversationID:     storeMsg.ConversationID,
+				AttachmentWarnings: attachmentWarnings,
+				ArtifactWarning:    artifactWarning,
+				BoundAttachments:   boundAttachments,
+			}, nil
+		}
+		var wakeRefused *errAutoWakeRefused
+		if errors.As(dispatchErr, &wakeRefused) && wakeRefused.dmErr != nil {
+			s.finishAttachmentAddressee(dctx, input.AttachmentAddressee, errors.New(wakeRefused.dmErr.Message))
+			_ = s.markFailed(dctx, msgID, wakeRefused.dmErr.Message)
+			LogDMDispatchOutcome(input.SenderAgent, input.TargetAgent, msgID, DispatchFailed, errors.New(wakeRefused.dmErr.Message))
+			return nil, wakeRefused.dmErr
+		}
 		if isAmbiguousDispatchError(dispatchErr) {
 			// Ambiguous: dispatch may have succeeded but confirmation was
 			// lost (a dispatch deadline expired mid-flight; the caller's
@@ -942,16 +960,13 @@ func (s *Server) agentDMAutoWakeItem(input *AgentDMInput, storeMsg *store.Messag
 		deliver: func(ctx context.Context, woken *store.Agent) {
 			dctx, cancel := context.WithTimeout(ctx, agentDMDispatchTimeout)
 			defer cancel()
-			if marked, merr := s.store.MarkAgentDelivery(dctx, woken.ID); merr == nil && marked != nil {
-				woken = marked
-			}
 			var err error
 			var held bool
 			if isManagedAgentRuntime(woken.Runtime) {
 				err = s.managedAgentMessage(dctx, woken, input.Msg, input.Urgent || input.Interrupt)
 			} else if dispatcher := s.GetDispatcher(); dispatcher != nil && woken.RuntimeBrokerID != "" {
 				held, err = s.holdOrDispatch(dctx, woken, msgID, nil, func() error {
-					return dispatchWithBrokerRetry(withDispatchMessageID(dctx, msgID), nil, dispatcher, woken, dispatchMsg.Msg, input.Urgent || input.Interrupt, dispatchMsg)
+					return dispatchWithBrokerRetry(withDispatchMessageID(dctx, msgID), s.store, nil, dispatcher, woken, dispatchMsg.Msg, input.Urgent || input.Interrupt, dispatchMsg)
 				})
 			} else {
 				// No pre-check ran this late (the sync path's

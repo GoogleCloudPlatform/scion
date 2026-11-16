@@ -539,9 +539,16 @@ func agentTargetLabel(agent *store.Agent) string {
 // the agent is running, or a typed error describing why delivery is not
 // possible.
 func validateAgentDeliverable(agent *store.Agent) *AgentDMError {
+	label := agentTargetLabel(agent)
+	if agent != nil && agent.IdleSuspendClaimActive {
+		return &AgentDMError{
+			Code:       ErrCodeAgentNotRunning,
+			Message:    fmt.Sprintf("agent %q is suspended; use --wake to resume and deliver", label),
+			HTTPStatus: http.StatusConflict,
+		}
+	}
 	rest := store.EffectiveRestingPhase(agent)
 	phase := state.Phase(rest)
-	label := agentTargetLabel(agent)
 	switch phase {
 	case state.PhaseRunning:
 		return nil

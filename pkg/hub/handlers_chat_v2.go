@@ -1604,6 +1604,9 @@ func isAgentUnreachable(agent *store.Agent) (bool, string) {
 	if unreachablePhases[agent.Phase] {
 		return true, agent.Phase
 	}
+	if agent.IdleSuspendClaimActive {
+		return true, string(state.PhaseSuspended)
+	}
 	return false, ""
 }
 
@@ -2241,29 +2244,6 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	primaryDispatchOK := true
 	if primaryReincarnating || primaryUnreachable {
 		primaryDispatchOK = false
-	} else if dispatcher != nil {
-		if fresh, merr := s.store.MarkAgentDelivery(ctx, primaryAgent.ID); merr == nil && fresh != nil {
-			*primaryAgent = *fresh
-			if s.shouldQueueAutoWake(primaryAgent) && !s.agentHeldOrUnknown(ctx, primaryAgent.ID) {
-				wakeCtx, cancelWake := context.WithTimeout(ctx, chatWakeResumeBudget)
-				dmErr, awaitErr := s.wakeOrAwaitStart(wakeCtx, primaryAgent)
-				cancelWake()
-				if dmErr != nil || awaitErr != nil {
-					failReason := "auto-wake failed"
-					if dmErr != nil {
-						failReason = dmErr.Message
-					} else if awaitErr != nil {
-						failReason = awaitErr.Error()
-					}
-					_ = s.markFailed(ctx, storeMsg.ID, failReason)
-					storeMsg.DispatchState = store.MessageDispatchFailed
-					storeMsg.DispatchFailureReason = &failReason
-					primaryDispatchOK = false
-				} else if marked, mmerr := s.store.MarkAgentDelivery(ctx, primaryAgent.ID); mmerr == nil && marked != nil {
-					*primaryAgent = *marked
-				}
-			}
-		}
 	}
 	if primaryDispatchOK && !primaryReincarnating && !primaryUnreachable && dispatcher != nil {
 		// withDispatchMessageID carries the hub message ID to the broker so a
@@ -2290,7 +2270,42 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		// that decides it.
 		primaryInterrupt := interrupt && state.Phase(primaryAgent.Phase) == state.PhaseRunning
 		if _, err := s.holdOrDispatch(retryCtx, primaryAgent, storeMsg.ID, storeMsg, func() error {
-			return dispatchWithBrokerRetry(retryCtx, nil, dispatcher, primaryAgent, agentContent, primaryInterrupt, msg)
+			return dispatchWithBrokerRetry(
+				retryCtx,
+				s.store,
+				nil,
+				dispatcher,
+				primaryAgent,
+				agentContent,
+				primaryInterrupt,
+				msg,
+				withSyncAutoWakeHook(func(_ context.Context, target *store.Agent) (context.Context, context.CancelFunc, error) {
+					if !s.shouldQueueAutoWake(target) || s.agentHeldOrUnknown(ctx, target.ID) {
+						return nil, nil, &errAgentIdleSuspending{agent: target, claimActive: target.IdleSuspendClaimActive}
+					}
+					if opts.BeforeWake != nil {
+						opts.BeforeWake(len(agents))
+					}
+					baseCtx := ctx
+					if opts.DetachWake {
+						baseCtx = context.WithoutCancel(ctx)
+					}
+					wakeCtx, cancelWake := context.WithTimeout(baseCtx, chatWakeResumeBudget)
+					dmErr, awaitErr := s.wakeOrAwaitStart(wakeCtx, target)
+					cancelWake()
+					if dmErr != nil {
+						return nil, nil, &errAutoWakeRefused{dmErr: dmErr}
+					}
+					if awaitErr != nil {
+						return nil, nil, &errAutoWakeRefused{dmErr: startInProgressDMError(target, awaitErr), awaitErr: awaitErr}
+					}
+					newCtx, newCancel := context.WithTimeout(withDispatchMessageID(baseCtx, storeMsg.ID), 30*time.Second)
+					return newCtx, newCancel, nil
+				}),
+				withAdjustUrgentAfterWake(func(target *store.Agent, _ bool) bool {
+					return interrupt && state.Phase(target.Phase) == state.PhaseRunning
+				}),
+			)
 		}); err != nil {
 			s.messageLog.Error("Failed to dispatch to agent", "agent", primaryAgent.Slug, "error", err)
 			_ = s.markFailed(ctx, storeMsg.ID, err.Error())
@@ -2510,9 +2525,6 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 			// lineage or branch mode can reply into the group. On purpose
 			// before delivery: a participant is a listing index, not an
 			// ACL, so one whose wake then fails stays listed harmlessly.
-			if fresh, merr := s.store.MarkAgentDelivery(ctx, mentionAgent.ID); merr == nil && fresh != nil {
-				*mentionAgent = *fresh
-			}
 			if mentionPersisted && dispatcher != nil && s.shouldQueueAutoWake(mentionAgent) &&
 				!s.agentHeldOrUnknown(ctx, mentionAgent.ID) &&
 				s.queueAutoWake(mentionAgent, s.chatSecondaryAutoWakeItem(mentionStoreMsg.ID, mentionAddressee, agentContent, mentionMsg)) {
@@ -2536,8 +2548,16 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 					mentionPtr = mentionStoreMsg
 				}
 				if _, err := s.holdOrDispatch(retryCtx, mentionAgent, mentionID, mentionPtr, func() error {
-					return dispatchWithBrokerRetry(retryCtx, nil, dispatcher, mentionAgent, agentContent, mentionInterrupt, mentionMsg)
+					return dispatchWithBrokerRetry(retryCtx, s.store, nil, dispatcher, mentionAgent, agentContent, mentionInterrupt, mentionMsg)
 				}); err != nil {
+					var idleErr *errAgentIdleSuspending
+					if errors.As(err, &idleErr) && mentionPersisted &&
+						s.shouldQueueAutoWake(mentionAgent) && !s.agentHeldOrUnknown(ctx, mentionAgent.ID) &&
+						s.queueAutoWake(mentionAgent, s.chatSecondaryAutoWakeItem(mentionStoreMsg.ID, mentionAddressee, agentContent, mentionMsg)) {
+						cancel()
+						dispatchedAgents = append(dispatchedAgents, mentionAgent)
+						continue
+					}
 					s.messageLog.Error("Failed to dispatch mention", "slug", mentionAgent.Slug, "error", err)
 					s.finishAttachmentAddressee(context.WithoutCancel(ctx), mentionAddressee, err)
 					mentionDispatchOK = false

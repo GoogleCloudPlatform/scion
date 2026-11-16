@@ -462,3 +462,91 @@ func TestRecorderLinkErrors(t *testing.T) {
 		}
 	}
 }
+
+// TestMessageDispatchCallsMarkAgentDelivery enforces that every non-test
+// AgentDispatcher.DispatchAgentMessage call in pkg/hub (and its scanned
+// subpackages) routes through dispatchMarkedAgentMessage, that
+// dispatchMarkedAgentMessage stamps/checks MarkAgentDelivery via
+// markAgentForDispatch, and that no production caller passes nil for the
+// agentDeliveryMarker parameter of dispatchMarkedAgentMessage or
+// dispatchWithBrokerRetry.
+func TestMessageDispatchCallsMarkAgentDelivery(t *testing.T) {
+	funcs := parseHubFuncs(t)
+
+	var directCallers []string
+	for name, calls := range funcs {
+		if calls["DispatchAgentMessage"] > 0 {
+			directCallers = append(directCallers, name)
+		}
+	}
+	sort.Strings(directCallers)
+	if len(directCallers) != 1 || directCallers[0] != "dispatchMarkedAgentMessage" {
+		t.Fatalf("DispatchAgentMessage non-test callers = %v, want only [dispatchMarkedAgentMessage]; route every message dispatch through dispatchMarkedAgentMessage or dispatchWithBrokerRetry", directCallers)
+	}
+	if funcs["markAgentForDispatch"]["MarkAgentDelivery"] == 0 {
+		t.Fatalf("markAgentForDispatch does not call MarkAgentDelivery")
+	}
+
+	fset := token.NewFileSet()
+	files, err := globGuardScanDirs(".", "*.go")
+	if err != nil {
+		t.Fatalf("list package files: %v", err)
+	}
+	foundMarkedHelperCall := false
+	chokeCalls := 0
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		rel := filepath.Dir(name)
+		if f.Name.Name != guardScanPackage(rel) {
+			continue
+		}
+		for _, decl := range f.Decls {
+			fd, ok := decl.(*ast.FuncDecl)
+			if !ok || fd.Body == nil {
+				continue
+			}
+			fnName := funcDeclKey(fd)
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				var callee string
+				switch fun := call.Fun.(type) {
+				case *ast.Ident:
+					callee = fun.Name
+				case *ast.SelectorExpr:
+					callee = fun.Sel.Name
+				}
+				if fnName == "dispatchMarkedAgentMessage" && callee == "markAgentForDispatch" {
+					foundMarkedHelperCall = true
+				}
+				if callee == "dispatchMarkedAgentMessage" || callee == "dispatchWithBrokerRetry" {
+					chokeCalls++
+					if len(call.Args) < 2 {
+						pos := fset.Position(call.Pos())
+						t.Errorf("%s:%d (%s): %s called with fewer than 2 arguments", pos.Filename, pos.Line, fnName, callee)
+						return true
+					}
+					if id, isIdent := call.Args[1].(*ast.Ident); isIdent && id.Name == "nil" {
+						pos := fset.Position(call.Pos())
+						t.Errorf("%s:%d (%s): %s passes nil for agentDeliveryMarker; pass the store so MarkAgentDelivery runs fail-closed", pos.Filename, pos.Line, fnName, callee)
+					}
+				}
+				return true
+			})
+		}
+	}
+	if !foundMarkedHelperCall {
+		t.Fatalf("dispatchMarkedAgentMessage must call markAgentForDispatch before DispatchAgentMessage")
+	}
+	if chokeCalls == 0 {
+		t.Fatalf("scanner self-check failed: found zero calls to dispatchMarkedAgentMessage / dispatchWithBrokerRetry")
+	}
+}

@@ -896,11 +896,11 @@ type AgentStore interface {
 	ClearIdleSuspendClaim(ctx context.Context, agentID string) error
 
 	// MarkAgentDelivery records last_delivery_at on agentID under the row lock
-	// when no active idle-suspend claim is held and the agent is running or
-	// starting, and returns the fresh Agent snapshot (including any active
-	// idle_suspend_claim_until or phase transition) for delivery/auto-wake
-	// classification.
-	MarkAgentDelivery(ctx context.Context, agentID string) (*Agent, error)
+	// when no active idle-suspend claim is held (evaluated against the store
+	// clock) and the agent is running or starting, and returns the fresh Agent
+	// snapshot (with IdleSuspendClaimActive populated from the store clock) and
+	// claimActive for delivery/auto-wake classification.
+	MarkAgentDelivery(ctx context.Context, agentID string) (agent *Agent, claimActive bool, err error)
 
 	// MarkAgentContainerMissing moves a running (or stopping) agent whose
 	// container its runtime broker no longer reports to phase=error with exit reason

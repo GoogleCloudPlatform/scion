@@ -208,5 +208,8 @@ func agentNotRunningDispatchError(msgID string) *AgentDMError {
 // These errors should result in an ambiguous outcome rather than a
 // definite failure.
 func isAmbiguousDispatchError(err error) bool {
+	if isPreDispatchDeliveryError(err) {
+		return false
+	}
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }

@@ -26,9 +26,12 @@ import (
 var effectCallSiteClassifications = []effectCallSiteEntry{
 	// ---- dispatchWithBrokerRetry ----
 
-	// broker_routing.go: the primitive itself — calls DispatchAgentMessage
-	// in its retry loop. This is the wrapper, not a call site.
-	{file: "broker_routing.go", function: "dispatchWithBrokerRetry", symbol: "DispatchAgentMessage",
+	// broker_routing.go: dispatchMarkedAgentMessage is the single choke point
+	// calling MarkAgentDelivery and DispatchAgentMessage; dispatchWithBrokerRetry
+	// wraps it with transient broker retries. Both are primitives, not call sites.
+	{file: "broker_routing.go", function: "dispatchMarkedAgentMessage", symbol: "DispatchAgentMessage",
+		class: "exempt", reason: "primitive wrapper: single message-dispatch choke point calling MarkAgentDelivery then DispatchAgentMessage"},
+	{file: "broker_routing.go", function: "dispatchWithBrokerRetry", symbol: "dispatchMarkedAgentMessage",
 		class: "exempt", reason: "primitive wrapper: the retry loop implementation itself"},
 
 	// handlers_agent_messaging.go: handleAgentMessage — guarded by routers
@@ -49,12 +52,12 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	{file: "agent_dm_operation.go", function: "agentDMAutoWakeItem", symbol: "dispatchWithBrokerRetry",
 		class: "guarded", reason: "built only inside ExecuteAgentDM after authorizeAgentMessage admitted the send (ptone/scion#7826)"},
 
-	// auto_wake.go: chatSecondaryAutoWakeItem — the dispatch of a web chat
-	// secondary's copy queued behind a background auto-wake. It is built
-	// only in sendAgentRouted's secondary loop, after that secondary's
-	// authorizeAgentMessage.
-	{file: "auto_wake.go", function: "chatSecondaryAutoWakeItem", symbol: "dispatchWithBrokerRetry",
-		class: "guarded", reason: "built only in sendAgentRouted after the secondary's authorizeAgentMessage (ptone/scion#7826)"},
+	// auto_wake.go: chatSecondaryAutoWakeItemWithLog — the dispatch of a
+	// mention secondary's copy queued behind a background auto-wake. It is
+	// built only in sendAgentRouted's secondary loop and processMentions,
+	// after each secondary's authorizeAgentMessage.
+	{file: "auto_wake.go", function: "chatSecondaryAutoWakeItemWithLog", symbol: "dispatchWithBrokerRetry",
+		class: "guarded", reason: "built only in sendAgentRouted / processMentions after the secondary's authorizeAgentMessage (ptone/scion#7826)"},
 
 	// handlers_agent_messaging.go: handleGroupMessage — guarded at :1286.
 	{file: "handlers_agent_messaging.go", function: "handleGroupMessage", symbol: "dispatchWithBrokerRetry",
@@ -83,7 +86,7 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 
 	// handlers_agent_messaging.go: publishBroadcastDeliveryFailed — derivative
 	// notice back to the original sender agent.
-	{file: "handlers_agent_messaging.go", function: "publishBroadcastDeliveryFailed", symbol: "DispatchAgentMessage",
+	{file: "handlers_agent_messaging.go", function: "publishBroadcastDeliveryFailed", symbol: "dispatchMarkedAgentMessage",
 		class: "exempt", reason: "derivative: delivery-failure notice to original sender, not attacker-chosen target"},
 
 	// handlers_agent_messaging.go: processMentions — guarded at :1852.
@@ -109,14 +112,14 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 		class: "exempt", reason: "UNGUARDED internal surface (F-RS6-07); no external reach identified; deferred to RS6/AH"},
 
 	// messagebroker.go: publishDeliveryFailed — derivative notice.
-	{file: "messagebroker.go", function: "publishDeliveryFailed", symbol: "DispatchAgentMessage",
+	{file: "messagebroker.go", function: "publishDeliveryFailed", symbol: "dispatchMarkedAgentMessage",
 		class: "exempt", reason: "derivative: delivery-failure notice to original sender"},
 
 	// messagebroker.go: publishDeliveryDeferred — derivative notice (design
 	// agent-reincarnate §3.7, O2 p2a-r1 review). Same shape as
 	// publishDeliveryFailed above: tells the original sender their message
 	// was deferred, not dropped, while the recipient is mid-migration.
-	{file: "messagebroker.go", function: "publishDeliveryDeferred", symbol: "DispatchAgentMessage",
+	{file: "messagebroker.go", function: "publishDeliveryDeferred", symbol: "dispatchMarkedAgentMessage",
 		class: "exempt", reason: "derivative: delivery-deferred notice to original sender"},
 
 	// artifacts_review.go: deliverArtifactReview — derivative notice
@@ -150,7 +153,7 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 
 	// reconcile.go: deliverMessage — dead code. The seam is assigned but
 	// never invoked in production.
-	{file: "reconcile.go", function: "deliverMessage", symbol: "DispatchAgentMessage",
+	{file: "reconcile.go", function: "deliverMessage", symbol: "dispatchMarkedAgentMessage",
 		class: "exempt", reason: "dead code: seam assigned at server.go but never invoked (F-RS6-18)"},
 
 	// reconcile.go: execDispatchStart — durable-intent replay. Replays

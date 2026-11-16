@@ -1319,7 +1319,7 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 	// The 30s brokerCallbackTimeout is shared with pre-dispatch work above
 	// (agent lookup, persistence), so retries get slightly less than 30s.
 	if _, err := p.holdOrDispatchMessage(ctx, agent, storeMsg, func() error {
-		return dispatchWithBrokerRetry(withDispatchMessageID(ctx, storeMsg.ID), nil, dispatcher, agent, msg.Msg, msg.Urgent, msg)
+		return dispatchWithBrokerRetry(withDispatchMessageID(ctx, storeMsg.ID), p.store, nil, dispatcher, agent, msg.Msg, msg.Urgent, msg)
 	}); err != nil {
 		p.log.Error("Failed to dispatch broker message to agent",
 			"agentSlug", agentSlug, "error", err)
@@ -1490,8 +1490,7 @@ func (p *MessageBrokerProxy) publishDeliveryFailed(ctx context.Context, projectI
 	if dispatcher == nil {
 		return
 	}
-	logMessageRecord(p.messageLog, senderAgent, structuredMsg)
-	if err := dispatcher.DispatchAgentMessage(ctx, senderAgent, failMsg, false, structuredMsg); err != nil {
+	if err := dispatchMarkedAgentMessage(ctx, p.store, p.messageLog, nil, dispatcher, senderAgent, failMsg, false, structuredMsg); err != nil {
 		p.log.Warn("Failed to dispatch DELIVERY_FAILED notification",
 			"senderID", msg.SenderID, "error", err)
 	}
@@ -1540,8 +1539,7 @@ func (p *MessageBrokerProxy) publishDeliveryDeferred(ctx context.Context, agentS
 	if dispatcher == nil {
 		return
 	}
-	logMessageRecord(p.messageLog, senderAgent, structuredMsg)
-	if err := dispatcher.DispatchAgentMessage(ctx, senderAgent, deferredMsg, false, structuredMsg); err != nil {
+	if err := dispatchMarkedAgentMessage(ctx, p.store, p.messageLog, nil, dispatcher, senderAgent, deferredMsg, false, structuredMsg); err != nil {
 		p.log.Warn("Failed to dispatch DELIVERY_DEFERRED notification",
 			"senderID", msg.SenderID, "error", err)
 	}

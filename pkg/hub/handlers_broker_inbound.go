@@ -248,7 +248,13 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Reject messages to non-running agents.
+	// Reject messages to non-running agents (including running rows with an
+	// active idle-suspend claim, treated as suspended).
+	if agent.IdleSuspendClaimActive {
+		writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
+			fmt.Sprintf("Agent %q is suspended.", agent.Slug), nil)
+		return
+	}
 	if phase := state.Phase(agent.Phase); phase != state.PhaseRunning {
 		var msg string
 		switch phase {
@@ -620,7 +626,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		defer retryCancel()
 
 		if _, err := s.holdOrDispatch(retryCtx, agent, inboundMsgID, inboundStorePtr, func() error {
-			return dispatchWithBrokerRetry(retryCtx, nil, dispatcher, agent, req.Message.Msg, req.Message.Urgent, req.Message)
+			return dispatchWithBrokerRetry(retryCtx, s.store, nil, dispatcher, agent, req.Message.Msg, req.Message.Urgent, req.Message)
 		}); errors.Is(err, ErrBrokerTimeout) {
 			if persisted {
 				s.markInboundFailed(r.Context(), storeMsg.ID, err)
@@ -628,6 +634,30 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			GatewayTimeout(w, "Broker unreachable after 30s deadline")
 			return
 		} else if err != nil {
+			var idleErr *errAgentIdleSuspending
+			if errors.As(err, &idleErr) {
+				susp := idleErr.asSuspendedAgent()
+				refusal := fmt.Sprintf("Agent %q is suspended.", agent.Slug)
+				if susp != nil {
+					switch state.Phase(susp.Phase) {
+					case state.PhaseSuspended:
+						refusal = fmt.Sprintf("Agent %q is suspended.", susp.Slug)
+					case state.PhaseStopped:
+						refusal = fmt.Sprintf("Agent %q is stopped.", susp.Slug)
+					case state.PhaseHalted:
+						refusal = fmt.Sprintf("Agent %q is halted.", susp.Slug)
+					case state.PhaseError:
+						refusal = fmt.Sprintf("Agent %q is in error state.", susp.Slug)
+					default:
+						refusal = fmt.Sprintf("Agent %q is not yet running (phase: %s).", susp.Slug, susp.Phase)
+					}
+				}
+				if persisted {
+					s.markInboundFailed(r.Context(), storeMsg.ID, errors.New(refusal))
+				}
+				writeError(w, http.StatusConflict, ErrCodeAgentNotRunning, refusal, nil)
+				return
+			}
 			if persisted {
 				s.markInboundFailed(r.Context(), storeMsg.ID, err)
 			}

@@ -671,7 +671,7 @@ func (s *Server) deliverDecisionResponse(ctx context.Context, asker *store.Agent
 	dctx, cancel := context.WithTimeout(withDispatchMessageID(context.WithoutCancel(ctx), m.ID), 30*time.Second)
 	defer cancel()
 	if _, err := s.holdOrDispatch(dctx, asker, m.ID, m, func() error {
-		return dispatchWithBrokerRetry(dctx, s.recordLog(), dispatcher, asker, line, false, sm)
+		return dispatchWithBrokerRetry(dctx, s.store, s.recordLog(), dispatcher, asker, line, false, sm)
 	}); err != nil {
 		s.messageLog.Error("decisions: failed to deliver decision-response", "agent", asker.Slug, "message_id", m.ID, "error", err)
 		_ = s.markFailed(context.WithoutCancel(ctx), m.ID, err.Error())

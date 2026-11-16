@@ -398,6 +398,11 @@ func (s *Server) dispatchRoutedRecipient(
 	}
 
 	// --- Phase check ---
+	if agent.IdleSuspendClaimActive {
+		result.Status = "not_running"
+		result.Error = "agent is suspended"
+		return result
+	}
 	if phase := state.Phase(agent.Phase); phase != state.PhaseRunning {
 		result.Status = "not_running"
 		result.Error = fmt.Sprintf("agent is %s", agent.Phase)
@@ -646,7 +651,7 @@ func (s *Server) dispatchRoutedRecipient(
 	}
 	logMessageRecord(s.recordLog(), agent, &recordMsg)
 	if _, err := s.holdOrDispatch(retryCtx, agent, routedMsgID, routedStorePtr, func() error {
-		return dispatchWithBrokerRetry(retryCtx, nil, dispatcher, agent, msg.Msg, msg.Urgent, msg)
+		return dispatchWithBrokerRetry(retryCtx, s.store, nil, dispatcher, agent, msg.Msg, msg.Urgent, msg)
 	}); errors.Is(err, ErrBrokerTimeout) {
 		if persisted {
 			_ = s.markFailed(ctx, msgID, err.Error())
@@ -655,6 +660,21 @@ func (s *Server) dispatchRoutedRecipient(
 		result.Error = "broker unreachable after 30s deadline"
 		return result
 	} else if err != nil {
+		var idleErr *errAgentIdleSuspending
+		if errors.As(err, &idleErr) {
+			susp := idleErr.asSuspendedAgent()
+			phase := "suspended"
+			if susp != nil && susp.Phase != "" {
+				phase = susp.Phase
+			}
+			refusal := fmt.Sprintf("agent is %s", phase)
+			if persisted {
+				_ = s.markFailed(ctx, msgID, refusal)
+			}
+			result.Status = "not_running"
+			result.Error = refusal
+			return result
+		}
 		if persisted {
 			_ = s.markFailed(ctx, msgID, err.Error())
 		}

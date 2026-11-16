@@ -17,11 +17,14 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -29,6 +32,8 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
@@ -1280,6 +1285,7 @@ func TestIdleSuspend_ContainerStoppingAndStoppedReports(t *testing.T) {
 				srv.SetDispatcher(disp)
 				t.Cleanup(srv.waitAutoWakeIdle)
 				enableIdleSweepForTest(t, srv, 15*time.Minute)
+				awReadyOnStart(t, s, target.ID)
 
 				_, err := s.SetRunIntent(ctx, target.ID, store.RunIntentRunning)
 				require.NoError(t, err)
@@ -1310,7 +1316,6 @@ func TestIdleSuspend_ContainerStoppingAndStoppedReports(t *testing.T) {
 				res, dmErr := srv.ExecuteAgentDM(ctx, awAgentDMInput(sender, suspended, "wake after container shutdown report"))
 				require.Nil(t, dmErr)
 				require.Equal(t, AgentDMAccepted, res.Outcome)
-				require.True(t, res.Woke)
 
 				require.Len(t, disp.getStartCalls(), 1)
 				assert.True(t, disp.getStartCalls()[0].Continue)
@@ -1326,4 +1331,369 @@ func TestIdleSuspend_ContainerStoppingAndStoppedReports(t *testing.T) {
 			})
 		}
 	}
+}
+
+func claimIdleForTest(t *testing.T, s store.Store, target *store.Agent, runID string) (*store.Agent, store.IdleSuspendCondition) {
+	t.Helper()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	idleSince := now.Add(-20 * time.Minute).Truncate(time.Microsecond)
+	db := s.(*entadapter.CompositeStore).DB()
+	_, err := db.ExecContext(ctx,
+		"UPDATE agents SET phase = ?, activity = ?, run_id = ?, activity_since = ?, last_seen = ?, last_delivery_at = NULL, idle_suspend_claim_until = NULL WHERE id = ?",
+		string(state.PhaseRunning), string(state.ActivityIdle), runID, idleSince, now.Add(-15*time.Second), target.ID,
+	)
+	require.NoError(t, err)
+	fresh, err := s.GetAgent(ctx, target.ID)
+	require.NoError(t, err)
+	return fresh, store.IdleSuspendCondition{
+		RunID:            fresh.RunID,
+		Activity:         fresh.Activity,
+		ActivitySince:    *fresh.ActivitySince,
+		IdleSuspendAfter: 15 * time.Minute,
+		HeartbeatRecency: 2 * time.Minute,
+		ClaimTTL:         30 * time.Second,
+	}
+}
+
+func TestIdleSuspend_DelegatedSenderDMWithActiveClaim(t *testing.T) {
+	ctx := context.Background()
+	srv, s, sender, target := createWakeDMFixtures(t, string(state.PhaseRunning))
+	disp := &recordingDispatcher{}
+	srv.SetDispatcher(disp)
+	enableIdleSweepForTest(t, srv, 15*time.Minute)
+
+	target, cond := claimIdleForTest(t, s, target, "run-delegated-claim")
+	_, _, _, err := s.ClaimIdleSuspend(ctx, target.ID, cond)
+	require.NoError(t, err)
+
+	bodyBytes, err := json.Marshal(map[string]any{"message": "delegated dm during claim"})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+target.ID+"/message", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	delegated := &DelegatedAgentIdentity{
+		agentID:           sender.ID,
+		agentProjectID:    sender.ProjectID,
+		authorizingUserID: DevUserID,
+		grantID:           tid("delegated-claim-grant"),
+	}
+	req = req.WithContext(contextWithIdentity(req.Context(), delegated))
+	rec := httptest.NewRecorder()
+	srv.handleAgentMessage(rec, req, target.ID)
+
+	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), ErrCodeAgentNotRunning)
+	assert.Empty(t, disp.getCalls(), "delegatedSender DM must never dispatch into dying container while claim is active")
+
+	msgs, err := s.ListMessages(ctx, store.MessageFilter{RecipientID: target.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, msgs.Items, 1)
+	assert.Equal(t, store.MessageDispatchFailed, msgs.Items[0].DispatchState)
+}
+
+func TestIdleSuspend_NonAutoWakePathsWithActiveClaimAndPreClaimMark(t *testing.T) {
+	paths := []struct {
+		name string
+		run  func(t *testing.T, srv *Server, s store.Store, u *store.User, sender, target *store.Agent)
+	}{
+		{
+			name: "message_broker_proxy",
+			run: func(t *testing.T, srv *Server, s store.Store, _ *store.User, sender, target *store.Agent) {
+				bus := eventbus.NewInProcessEventBus(slog.Default())
+				t.Cleanup(func() { _ = bus.Close() })
+				proxy := NewMessageBrokerProxy(bus, s, srv.events, srv.GetDispatcher, slog.Default())
+				sm := &messages.StructuredMessage{
+					Version:     messages.Version,
+					Timestamp:   time.Now().UTC().Format(time.RFC3339),
+					Sender:      "agent:" + sender.Slug,
+					SenderID:    sender.ID,
+					Recipient:   "agent:" + target.Slug,
+					RecipientID: target.ID,
+					Msg:         "broker proxy msg",
+					Type:        messages.TypeInstruction,
+				}
+				proxy.deliverToAgent(context.Background(), target.ProjectID, target.Slug, sm)
+			},
+		},
+		{
+			name: "broadcast_direct",
+			run: func(t *testing.T, srv *Server, _ store.Store, u *store.User, _ *store.Agent, target *store.Agent) {
+				req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+target.ProjectID+"/broadcast", nil)
+				req = req.WithContext(contextWithIdentity(req.Context(), authUser(u)))
+				rec := httptest.NewRecorder()
+				sm := &messages.StructuredMessage{
+					Version:   messages.Version,
+					Timestamp: time.Now().UTC().Format(time.RFC3339),
+					Sender:    "user:" + u.ID,
+					SenderID:  u.ID,
+					Recipient: "broadcast",
+					Msg:       "broadcast msg",
+					Type:      messages.TypeInstruction,
+				}
+				srv.broadcastDirect(rec, req, target.ProjectID, sm, false, []store.Agent{*target})
+			},
+		},
+		{
+			name: "broker_inbound",
+			run: func(t *testing.T, srv *Server, _ store.Store, u *store.User, _ *store.Agent, target *store.Agent) {
+				bodyBytes, err := json.Marshal(inboundMessageRequest{
+					Topic: "scion.project." + target.ProjectID + ".agent." + target.Slug + ".messages",
+					Message: &messages.StructuredMessage{
+						Version:   messages.Version,
+						Timestamp: time.Now().UTC().Format(time.RFC3339),
+						Sender:    "user:" + u.Email,
+						SenderID:  u.ID,
+						Recipient: "agent:" + target.Slug,
+						Msg:       "inbound msg",
+						Type:      messages.TypeInstruction,
+						Channel:   "slack",
+					},
+				})
+				require.NoError(t, err)
+				req := httptest.NewRequest(http.MethodPost, "/api/v1/broker/inbound", bytes.NewReader(bodyBytes))
+				req.Header.Set("Content-Type", "application/json")
+				req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity(target.RuntimeBrokerID)))
+				rec := httptest.NewRecorder()
+				srv.handleBrokerInbound(rec, req)
+			},
+		},
+		{
+			name: "routed_inbound",
+			run: func(t *testing.T, srv *Server, _ store.Store, u *store.User, _ *store.Agent, target *store.Agent) {
+				reqPayload := &routedInboundRequest{
+					ProjectID: target.ProjectID,
+					Message: &messages.StructuredMessage{
+						Version:   messages.Version,
+						Timestamp: time.Now().UTC().Format(time.RFC3339),
+						Sender:    "user:" + u.ID,
+						SenderID:  u.ID,
+						Recipient: "agent:" + target.Slug,
+						Msg:       "routed inbound msg",
+						Type:      messages.TypeInstruction,
+						Channel:   "slack",
+					},
+				}
+				_ = srv.dispatchRoutedRecipient(context.Background(), dispatchRoutedParams{
+					agent:            target,
+					isPrimary:        true,
+					sender:           authUser(u),
+					req:              reqPayload,
+					now:              time.Now().UTC(),
+					primaryRecipient: "agent:" + target.Slug,
+				})
+			},
+		},
+		{
+			name: "reconcile_deliver_message",
+			run: func(t *testing.T, srv *Server, _ store.Store, _ *store.User, _ *store.Agent, target *store.Agent) {
+				_ = srv.deliverMessage(context.Background(), &store.Message{
+					ID:      tid("reconcile-msg-" + target.ID),
+					AgentID: target.ID,
+					Msg:     "reconcile msg",
+				})
+			},
+		},
+		{
+			name: "artifact_review",
+			run: func(t *testing.T, srv *Server, _ store.Store, _ *store.User, _ *store.Agent, target *store.Agent) {
+				_ = srv.deliverArtifactReview(context.Background(), artifacts.ReviewNotice{
+					ArtifactID:   tid("art-" + target.ID),
+					Seq:          2,
+					OwnerRef:     target.ID,
+					ReviewerKind: artifacts.PrincipalKindUser,
+				})
+			},
+		},
+		{
+			name: "choice_response",
+			run: func(t *testing.T, srv *Server, s store.Store, u *store.User, _ *store.Agent, target *store.Agent) {
+				convID := tid("choice-conv-" + target.ID)
+				require.NoError(t, s.CreateConversation(context.Background(), &store.Conversation{
+					ID:        convID,
+					Kind:      "group",
+					Surface:   "native",
+					ProjectID: &target.ProjectID,
+					CreatedAt: time.Now().UTC(),
+				}))
+				msgID := tid("choice-msg-" + target.ID)
+				m := &store.Message{
+					ID:             msgID,
+					ProjectID:      target.ProjectID,
+					Sender:         "user:" + u.ID,
+					SenderID:       u.ID,
+					Recipient:      "agent:" + target.Slug,
+					RecipientID:    target.ID,
+					AgentID:        target.ID,
+					Msg:            "answer A",
+					Type:           messages.TypeChoiceResponse,
+					ConversationID: convID,
+					DispatchState:  store.MessageDispatchDispatched,
+					CreatedAt:      time.Now().UTC(),
+				}
+				require.NoError(t, s.CreateMessage(context.Background(), m))
+				srv.deliverChoiceResponse(context.Background(), target, m, &store.DecisionAnswer{
+					ChoiceID:   tid("choice-id"),
+					Key:        "A",
+					Version:    1,
+					Provenance: "selected",
+				}, nil)
+			},
+		},
+		{
+			name: "choice_set_response",
+			run: func(t *testing.T, srv *Server, s store.Store, u *store.User, _ *store.Agent, target *store.Agent) {
+				convID := tid("choiceset-conv-" + target.ID)
+				require.NoError(t, s.CreateConversation(context.Background(), &store.Conversation{
+					ID:        convID,
+					Kind:      "group",
+					Surface:   "native",
+					ProjectID: &target.ProjectID,
+					CreatedAt: time.Now().UTC(),
+				}))
+				msgID := tid("choiceset-msg-" + target.ID)
+				m := &store.Message{
+					ID:             msgID,
+					ProjectID:      target.ProjectID,
+					Sender:         "user:" + u.ID,
+					SenderID:       u.ID,
+					Recipient:      "agent:" + target.Slug,
+					RecipientID:    target.ID,
+					AgentID:        target.ID,
+					Msg:            "batch answers",
+					Type:           messages.TypeChoiceResponse,
+					ConversationID: convID,
+					DispatchState:  store.MessageDispatchDispatched,
+					CreatedAt:      time.Now().UTC(),
+				}
+				require.NoError(t, s.CreateMessage(context.Background(), m))
+				srv.deliverChoiceSetResponse(context.Background(), target, m, tid("prompt-id"), &store.AnswerSetResult{
+					BatchID: tid("batch-id"),
+				}, nil)
+			},
+		},
+	}
+
+	for _, tc := range paths {
+		t.Run(tc.name+"/active_claim_blocks_dispatch", func(t *testing.T) {
+			ctx := context.Background()
+			srv, s, sender, target := createWakeDMFixtures(t, string(state.PhaseRunning))
+			disp := &recordingDispatcher{}
+			srv.SetDispatcher(disp)
+			enableIdleSweepForTest(t, srv, 15*time.Minute)
+			u := wakeLifecycleUser(t, s, "nonwake-claim-"+tc.name, target.ProjectID, "agent.message", "agent.read")
+
+			target, cond := claimIdleForTest(t, s, target, "run-nonwake-claim-"+tc.name)
+			_, _, _, err := s.ClaimIdleSuspend(ctx, target.ID, cond)
+			require.NoError(t, err)
+
+			tc.run(t, srv, s, u, sender, target)
+			var targetCalls int
+			for _, c := range disp.getCalls() {
+				if c.Agent != nil && c.Agent.ID == target.ID {
+					targetCalls++
+				}
+			}
+			assert.Zero(t, targetCalls, "%s must never dispatch into dying container while idle-suspend claim is active", tc.name)
+		})
+
+		t.Run(tc.name+"/pre_claim_delivery_stamps_last_delivery_at", func(t *testing.T) {
+			ctx := context.Background()
+			srv, s, sender, target := createWakeDMFixtures(t, string(state.PhaseRunning))
+			disp := &recordingDispatcher{}
+			srv.SetDispatcher(disp)
+			enableIdleSweepForTest(t, srv, 15*time.Minute)
+			u := wakeLifecycleUser(t, s, "nonwake-mark-"+tc.name, target.ProjectID, "agent.message", "agent.read")
+
+			target, cond := claimIdleForTest(t, s, target, "run-nonwake-mark-"+tc.name)
+			tc.run(t, srv, s, u, sender, target)
+			var targetCalls int
+			for _, c := range disp.getCalls() {
+				if c.Agent != nil && c.Agent.ID == target.ID {
+					targetCalls++
+				}
+			}
+			require.Equal(t, 1, targetCalls, "%s must dispatch when running with no claim", tc.name)
+
+			after, err := s.GetAgent(ctx, target.ID)
+			require.NoError(t, err)
+			require.NotNil(t, after.LastDeliveryAt, "%s must stamp last_delivery_at via dispatchMarkedAgentMessage", tc.name)
+
+			_, _, _, err = s.ClaimIdleSuspend(ctx, target.ID, cond)
+			assert.ErrorIs(t, err, store.ErrIdleSuspendPrecondition, "%s delivery mark must block racing ClaimIdleSuspend", tc.name)
+		})
+	}
+}
+
+type failingMarkDeliveryStore struct {
+	store.Store
+	fault *storeFaultSwitch
+	err   error
+}
+
+func (w *failingMarkDeliveryStore) MarkAgentDelivery(ctx context.Context, agentID string) (*store.Agent, bool, error) {
+	if w.fault.Active() {
+		return nil, false, w.err
+	}
+	return w.Store.MarkAgentDelivery(ctx, agentID)
+}
+
+func TestIdleSuspend_MarkAgentDeliveryStoreErrorFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	boom := errors.New("simulated MarkAgentDelivery store failure")
+	srv, rawStore, _, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *failingMarkDeliveryStore {
+		return &failingMarkDeliveryStore{Store: inner, fault: f, err: boom}
+	})
+	disp := &recordingDispatcher{}
+	srv.SetDispatcher(disp)
+	enableIdleSweepForTest(t, srv, 15*time.Minute)
+
+	now := time.Now().UTC()
+	pastGrace := now.Add(-20 * time.Minute)
+	target := newIdleCandidateBrokerAgent(t, rawStore, "fail-closed-target", string(state.ActivityIdle), &pastGrace, now.Add(-15*time.Second))
+	sender := newIdleCandidateBrokerAgent(t, rawStore, "fail-closed-sender", string(state.ActivityIdle), &pastGrace, now.Add(-15*time.Second))
+	sender.ProjectID = target.ProjectID
+	_, err := rawStore.(*entadapter.CompositeStore).DB().ExecContext(ctx,
+		"UPDATE agents SET project_id = ? WHERE id = ?", target.ProjectID, sender.ID)
+	require.NoError(t, err)
+
+	fault.Arm()
+
+	t.Run("ExecuteAgentDM fails closed and marks message failed not ambiguous", func(t *testing.T) {
+		res, dmErr := srv.ExecuteAgentDM(ctx, awAgentDMInput(sender, target, "dm when MarkAgentDelivery fails"))
+		assert.Nil(t, res, "definite pre-dispatch mark failure must not return AgentDMAmbiguous")
+		require.NotNil(t, dmErr)
+		assert.Equal(t, http.StatusBadGateway, dmErr.HTTPStatus)
+		assert.Empty(t, disp.getCalls(), "DispatchAgentMessage must never run when MarkAgentDelivery errors")
+
+		msgs, err := rawStore.ListMessages(ctx, store.MessageFilter{RecipientID: target.ID}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		require.Len(t, msgs.Items, 1)
+		assert.Equal(t, store.MessageDispatchFailed, msgs.Items[0].DispatchState)
+	})
+
+	t.Run("handleAgentMessage fails closed with zero dispatches", func(t *testing.T) {
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+target.ID+"/message", map[string]any{
+			"message": "user dm when MarkAgentDelivery fails",
+		})
+		assert.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+		assert.Empty(t, disp.getCalls(), "DispatchAgentMessage must never run when MarkAgentDelivery errors")
+	})
+
+	t.Run("non-DM helpers fail closed with zero dispatches", func(t *testing.T) {
+		err := srv.deliverArtifactReview(ctx, artifacts.ReviewNotice{
+			ArtifactID:   tid("fail-closed-art"),
+			Seq:          1,
+			OwnerRef:     target.ID,
+			ReviewerKind: artifacts.PrincipalKindUser,
+		})
+		require.ErrorIs(t, err, boom)
+
+		err = srv.deliverMessage(ctx, &store.Message{
+			ID:      tid("fail-closed-reconcile"),
+			AgentID: target.ID,
+			Msg:     "reconcile fail closed",
+		})
+		require.ErrorIs(t, err, boom)
+		assert.Empty(t, disp.getCalls())
+	})
 }

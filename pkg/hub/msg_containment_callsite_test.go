@@ -42,6 +42,7 @@ import (
 // external-effect emit primitives.
 var targetSymbols = map[string]bool{
 	"dispatchWithBrokerRetry":       true,
+	"dispatchMarkedAgentMessage":    true,
 	"DispatchAgentMessage":          true,
 	"DispatchAgentCreate":           true,
 	"DispatchAgentStart":            true,
