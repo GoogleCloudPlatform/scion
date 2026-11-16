@@ -56,7 +56,12 @@
 // is empty, command parsing on creation actions is skipped and
 // attributes["mention_detection"] = "unavailable" is set (§10.2).
 //
-// # Deferred PR Comment Enrichment
+// # Replay Freshness and Deferred PR Comment Enrichment
+//
+// When Options.ReceivedAt is non-zero and more than StaleThreshold (24h) after
+// the object's OccurredAt timestamp, Normalize sets attributes["stale"] = "true"
+// so the dispatcher can refuse agent-creating or GitHub-commenting actions on
+// replayed old deliveries (§4.4).
 //
 // issue_comment deliveries on pull requests carry issue.pull_request (setting
 // is_pull_request = "true" and pull_request_url) without head/base branch facts.

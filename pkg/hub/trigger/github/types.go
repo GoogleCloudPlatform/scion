@@ -48,6 +48,11 @@ const (
 	MaxCommandNameRunes = 32
 	MaxCommandArgsBytes = 1024
 	MaxCommandLineBytes = 1024
+
+	// StaleThreshold is the §4.4 replay-protection freshness window: when
+	// Options.ReceivedAt - Result.OccurredAt exceeds 24h, Normalize sets
+	// attributes["stale"] = "true".
+	StaleThreshold = 24 * time.Hour
 )
 
 // Enrichment attribute key reserved for the §5.5 drainer-side hook (unset by Normalize).
