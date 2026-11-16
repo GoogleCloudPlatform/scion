@@ -438,7 +438,7 @@ var findingTexts = map[string]string{
 	config.ConversionLegacyFieldRemoved:              "this setting was removed and is not converted",
 	config.ConversionUnknownSettingsKey:              "this key, profile or operator choice is not recognised or cannot be applied, so it is not converted",
 	config.ConversionFieldNotValidForTargetType:      "this field is not valid for the instance's target type and is not converted",
-	config.ConversionFlatTargetFieldRequired:         "this setting is required for the flat Runtime Broker instance's target type and is missing or invalid in the legacy settings; set a valid value before converting these profiles",
+	config.ConversionFlatTargetFieldRequired:         "this flat-target setting is missing or invalid in the legacy settings; set a valid value before converting these profiles",
 	config.ConversionFlatTargetOperatorInputRequired: "this field has no legacy settings source and is required on the flat Runtime Broker instance; set it in settings.yaml before starting the instance",
 }
 

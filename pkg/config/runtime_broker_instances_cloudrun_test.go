@@ -399,6 +399,33 @@ func TestRuntimeBrokerInstances_CloudRunAssignableServiceAccountsRules(t *testin
 	}
 }
 
+func TestRuntimeBrokerInstanceCloudRunServiceAccounts_SharedOverlapGuards(t *testing.T) {
+	// Malformed block_service_account does not cascade into extra overlap errors.
+	badBlock := cloudRunTarget()
+	badBlock.BlockServiceAccount = "No-Role@example-project.iam.gserviceaccount.com"
+	badBlock.ServiceAccount = badBlock.BlockServiceAccount
+	badBlock.AssignableServiceAccounts = []string{badBlock.BlockServiceAccount}
+	if errs := RuntimeBrokerInstanceCloudRunServiceAccounts([]V1RuntimeBrokerInstanceConfig{
+		{Key: "cr", Name: "cr", RuntimeTarget: badBlock},
+	}); len(errs) != 0 {
+		t.Fatalf("malformed block_service_account emitted overlap errors: %#v", errs)
+	}
+
+	// Duplicate block_service_account in assignable_service_accounts reports overlap once at first index.
+	dupBlock := cloudRunTarget()
+	dupBlock.AssignableServiceAccounts = []string{dupBlock.BlockServiceAccount, dupBlock.BlockServiceAccount}
+	errs := RuntimeBrokerInstanceCloudRunServiceAccounts([]V1RuntimeBrokerInstanceConfig{
+		{Key: "cr", Name: "cr", RuntimeTarget: dupBlock},
+	})
+	want := ValidationError{
+		Path:    "server.broker.instances[0].runtime_target.assignable_service_accounts[0]",
+		Message: "block_service_account must not appear in assignable_service_accounts",
+	}
+	if len(errs) != 1 || errs[0] != want {
+		t.Fatalf("got %#v, want [%#v]", errs, want)
+	}
+}
+
 func TestRuntimeBrokerInstances_DockerAndKubernetesRejectCloudRunFields(t *testing.T) {
 	fields := []string{
 		"project_id", "region", "service_account", "block_service_account",

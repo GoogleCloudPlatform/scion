@@ -101,7 +101,10 @@ describe('conversion plan helpers', () => {
       'plan_truncated',
     ]) {
       expect(findingText(code)).not.toContain('scion runtime-broker convert --plan');
+      expect(findingText(code)).not.toContain('7764');
     }
+    expect(findingText('field_not_valid_for_target_type')).toContain("instance's target type");
+    expect(findingText('flat_target_field_required')).toContain('missing or invalid');
     expect(findingText('something_new')).toContain('scion runtime-broker convert --plan');
   });
 

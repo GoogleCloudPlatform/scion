@@ -441,14 +441,6 @@ func foldProfile(st *convState, vs *VersionedSettings, configured func(string) b
 					st.add(ConversionLegacyFieldNoEffect, ConversionSeverityNotice, rp+"cloudrun.nfs_export",
 						fmt.Sprintf("%scloudrun.nfs_export has no effect on a flat cloudrun Runtime Broker instance (Cloud Run agents mount server.project_storage.nfs); it is not converted", rp), name)
 				}
-				if len(rt.CloudRun.AssignableServiceAccounts) > 0 {
-					p := rp + "cloudrun.assignable_service_accounts"
-					st.add(ConversionFieldNotValidForTargetType, ConversionSeverityBlocking, p, cloudRunIdentityKeyRefusal(p), name)
-				}
-				if rt.CloudRun.BlockServiceAccount != "" {
-					p := rp + "cloudrun.block_service_account"
-					st.add(ConversionFieldNotValidForTargetType, ConversionSeverityBlocking, p, cloudRunIdentityKeyRefusal(p), name)
-				}
 			}
 			if rt.CloudRunInstances != nil {
 				st.add(ConversionFieldNotValidForTargetType, ConversionSeverityNotice, rp+"cloudrun_instances",
@@ -526,6 +518,16 @@ func foldProfile(st *convState, vs *VersionedSettings, configured func(string) b
 	if typ == RuntimeTargetTypeCloudRun && legacyType != "cloudrun-instances" && rt.CloudRun != nil {
 		if sa := strings.TrimSpace(rt.CloudRun.ServiceAccount); sa != "" {
 			set("service_account", sa, rp+"cloudrun.service_account")
+		}
+		if blockSA := strings.TrimSpace(rt.CloudRun.BlockServiceAccount); blockSA != "" {
+			set("block_service_account", blockSA, rp+"cloudrun.block_service_account")
+		}
+		if len(rt.CloudRun.AssignableServiceAccounts) > 0 {
+			assignable := make([]string, len(rt.CloudRun.AssignableServiceAccounts))
+			for i, sa := range rt.CloudRun.AssignableServiceAccounts {
+				assignable[i] = strings.TrimSpace(sa)
+			}
+			set("assignable_service_accounts", assignable, rp+"cloudrun.assignable_service_accounts")
 		}
 		if net := strings.TrimSpace(rt.CloudRun.Network); net != "" {
 			set("network", net, rp+"cloudrun.network")
@@ -655,17 +657,13 @@ func reportNotValidCloudRunBlocks(st *convState, typ, name, rtKey string, rt V1R
 	}
 }
 
-func cloudRunIdentityKeyRefusal(path string) string {
-	return fmt.Sprintf("%s cannot be carried to a flat cloudrun instance yet (ptone/scion#7764); remove it from the legacy entry or wait for flat identity support", path)
-}
-
-// checkProposedCloudRunTarget checks the CR2-required fields on a proposed
-// Cloud Run instance: fields with legacy sources emit blocking
+// checkProposedCloudRunTarget checks the CR2-required and identity fields on a
+// proposed Cloud Run instance: fields with legacy sources emit blocking
 // flat_target_field_required at each affected profile's legacy path when
 // missing or invalid, while required fields with no legacy source
-// (credentials_file and block_service_account on all Cloud Run entries, plus
-// service_account and network/subnetwork on cloudrun-instances) emit notice
-// flat_target_operator_input_required at the proposed instance path.
+// (credentials_file on all Cloud Run entries, plus service_account,
+// block_service_account and network/subnetwork on cloudrun-instances) emit
+// notice flat_target_operator_input_required at the proposed instance path.
 func checkProposedCloudRunTarget(st *convState, index int, key string, t *V1RuntimeTargetConfig, part *convGroup) {
 	if part == nil {
 		return
@@ -674,10 +672,6 @@ func checkProposedCloudRunTarget(st *convState, index int, key string, t *V1Runt
 	credPath := targetPrefix + "credentials_file"
 	st.add(ConversionFlatTargetOperatorInputRequired, ConversionSeverityNotice, credPath,
 		fmt.Sprintf("%s (%s) has no legacy settings source and is required for runtime target type cloudrun; set it to an absolute local service-account or impersonated-service-account JSON file path before starting the instance", credPath, key),
-		groupProfileNames(part)...)
-	blockPath := targetPrefix + "block_service_account"
-	st.add(ConversionFlatTargetOperatorInputRequired, ConversionSeverityNotice, blockPath,
-		fmt.Sprintf("%s (%s) has no legacy settings source yet and is required for runtime target type cloudrun: agents with no GCP identity run as this no-role account; set it to a user-managed service account (name@project.iam.gserviceaccount.com) before starting the instance", blockPath, key),
 		groupProfileNames(part)...)
 
 	for _, p := range part.profiles {
@@ -713,6 +707,10 @@ func checkProposedCloudRunTarget(st *convState, index int, key string, t *V1Runt
 			st.add(ConversionFlatTargetOperatorInputRequired, ConversionSeverityNotice, saTargetPath,
 				fmt.Sprintf("%s (%s) has no legacy settings source on runtime type cloudrun-instances and is required for runtime target type cloudrun; set it to a user-managed service account (name@project.iam.gserviceaccount.com) before starting the instance", saTargetPath, key),
 				p.name)
+			blockTargetPath := targetPrefix + "block_service_account"
+			st.add(ConversionFlatTargetOperatorInputRequired, ConversionSeverityNotice, blockTargetPath,
+				fmt.Sprintf("%s (%s) has no legacy settings source on runtime type cloudrun-instances and is required for runtime target type cloudrun: agents with no GCP identity run as this no-role account; set it to a user-managed service account (name@project.iam.gserviceaccount.com) before starting the instance", blockTargetPath, key),
+				p.name)
 			netTargetPath := targetPrefix + "network"
 			st.add(ConversionFlatTargetOperatorInputRequired, ConversionSeverityNotice, netTargetPath,
 				fmt.Sprintf("%s or subnetwork (%s) has no legacy settings source on runtime type cloudrun-instances and is required for runtime target type cloudrun; set network or subnetwork before starting the instance", netTargetPath, key),
@@ -720,13 +718,61 @@ func checkProposedCloudRunTarget(st *convState, index int, key string, t *V1Runt
 			continue
 		}
 
-		saPath, netPath := rp+"cloudrun.service_account", rp+"cloudrun.network"
+		saPath, blockPath, assignablePath, netPath := rp+"cloudrun.service_account", rp+"cloudrun.block_service_account", rp+"cloudrun.assignable_service_accounts", rp+"cloudrun.network"
 		if t.ServiceAccount == "" {
 			st.add(ConversionFlatTargetFieldRequired, ConversionSeverityBlocking, saPath,
 				fmt.Sprintf("%s is required for runtime target type cloudrun; the platform default compute identity is never implied", saPath), p.name)
 		} else if err := validateCloudRunServiceAccountForm("service_account", t.ServiceAccount, t.ProjectID); err != nil {
 			st.add(ConversionFlatTargetFieldRequired, ConversionSeverityBlocking, saPath,
 				fmt.Sprintf("%s cannot be used on a flat cloudrun instance: %s", saPath, err.Error()), p.name)
+		}
+
+		if t.BlockServiceAccount == "" {
+			st.add(ConversionFlatTargetFieldRequired, ConversionSeverityBlocking, blockPath,
+				fmt.Sprintf("%s is required for runtime target type cloudrun: agents with no GCP identity run as this no-role account", blockPath), p.name)
+		} else if err := validateCloudRunServiceAccountForm("block_service_account", t.BlockServiceAccount, t.ProjectID); err != nil {
+			st.add(ConversionFlatTargetFieldRequired, ConversionSeverityBlocking, blockPath,
+				fmt.Sprintf("%s cannot be used on a flat cloudrun instance: %s", blockPath, err.Error()), p.name)
+		}
+
+		if len(t.AssignableServiceAccounts) > maxCloudRunAssignableServiceAccounts {
+			st.add(ConversionFlatTargetFieldRequired, ConversionSeverityBlocking, assignablePath,
+				fmt.Sprintf("%s cannot be used on a flat cloudrun instance: assignable_service_accounts accepts at most %d entries (got %d)", assignablePath, maxCloudRunAssignableServiceAccounts, len(t.AssignableServiceAccounts)), p.name)
+		} else {
+			seen := make(map[string]int, len(t.AssignableServiceAccounts))
+			for i, sa := range t.AssignableServiceAccounts {
+				elemField := fmt.Sprintf("assignable_service_accounts[%d]", i)
+				elemPath := fmt.Sprintf("%s[%d]", assignablePath, i)
+				if sa == "" {
+					st.add(ConversionFlatTargetFieldRequired, ConversionSeverityBlocking, elemPath,
+						fmt.Sprintf("%s cannot be used on a flat cloudrun instance: %s must be a user-managed service account (name@project.iam.gserviceaccount.com)", elemPath, elemField), p.name)
+					continue
+				}
+				if err := validateCloudRunServiceAccountForm(elemField, sa, t.ProjectID); err != nil {
+					st.add(ConversionFlatTargetFieldRequired, ConversionSeverityBlocking, elemPath,
+						fmt.Sprintf("%s cannot be used on a flat cloudrun instance: %s", elemPath, err.Error()), p.name)
+					continue
+				}
+				lower := strings.ToLower(sa)
+				if prev, dup := seen[lower]; dup {
+					st.add(ConversionFlatTargetFieldRequired, ConversionSeverityBlocking, elemPath,
+						fmt.Sprintf("%s cannot be used on a flat cloudrun instance: duplicate service account in assignable_service_accounts (also at index %d)", elemPath, prev), p.name)
+					continue
+				}
+				seen[lower] = i
+			}
+		}
+
+		for _, overlap := range cloudRunServiceAccountOverlapErrors("cloudrun", t) {
+			switch {
+			case overlap.Path == "cloudrun.block_service_account":
+				st.add(ConversionFlatTargetFieldRequired, ConversionSeverityBlocking, blockPath,
+					fmt.Sprintf("%s cannot be used on a flat cloudrun instance: %s", blockPath, overlap.Message), p.name)
+			case strings.HasPrefix(overlap.Path, "cloudrun.assignable_service_accounts"):
+				elemPath := assignablePath + strings.TrimPrefix(overlap.Path, "cloudrun.assignable_service_accounts")
+				st.add(ConversionFlatTargetFieldRequired, ConversionSeverityBlocking, elemPath,
+					fmt.Sprintf("%s cannot be used on a flat cloudrun instance: %s", elemPath, overlap.Message), p.name)
+			}
 		}
 
 		if t.Network == "" && t.Subnetwork == "" {
@@ -1279,9 +1325,9 @@ func buildSplitInstances(st *convState, sp *convSplit, choices map[string]*field
 
 // conversionValuesEqual is rule 3's deep equality. A missing value (nil)
 // differs from every set one, so false and unset safe_to_evict differ.
-// Lists are order-sensitive, except secret declarations, which compare as
-// a set keyed by key, and tolerations, which compare as a set of (key,
-// operator with "" as Equal, value, effect).
+// Lists are order-sensitive, except secret declarations (keyed by key),
+// tolerations (key, operator with "" as Equal, value, effect), and Cloud Run
+// assignable_service_accounts (an unordered allow-list).
 func conversionValuesEqual(field string, a, b interface{}) bool {
 	if field == "tolerations" {
 		at, aok := a.([]api.K8sToleration)
@@ -1293,7 +1339,18 @@ func conversionValuesEqual(field string, a, b interface{}) bool {
 		bs, _ := b.([]api.RequiredSecret)
 		return reflect.DeepEqual(sortedSecrets(as), sortedSecrets(bs))
 	}
+	if field == "assignable_service_accounts" {
+		as, aok := a.([]string)
+		bs, bok := b.([]string)
+		return aok == bok && reflect.DeepEqual(sortedStrings(as), sortedStrings(bs))
+	}
 	return reflect.DeepEqual(a, b)
+}
+
+func sortedStrings(s []string) []string {
+	out := append([]string(nil), s...)
+	sort.Strings(out)
+	return out
 }
 
 func sortedSecrets(s []api.RequiredSecret) []api.RequiredSecret {
@@ -1364,6 +1421,10 @@ func setInstanceField(t *V1RuntimeTargetConfig, d *V1InstanceAgentDefaults, fiel
 		t.RuntimeClassName = v.(string)
 	case "service_account":
 		t.ServiceAccount = v.(string)
+	case "block_service_account":
+		t.BlockServiceAccount = v.(string)
+	case "assignable_service_accounts":
+		t.AssignableServiceAccounts = append([]string(nil), v.([]string)...)
 	case "network":
 		t.Network = v.(string)
 	case "subnetwork":
@@ -1520,32 +1581,6 @@ func checkRawConversionKeys(st *convState, vs *VersionedSettings, raw []byte, na
 			case k == "env":
 				st.add(ConversionLegacyFieldRemoved, ConversionSeverityNotice, pp+".env",
 					fmt.Sprintf("%s.env was removed from the settings and has no effect; it is not converted (use harness_configs.<name>.env)", pp), name)
-			case k == "cloudrun":
-				crm, isCRMap := pm["cloudrun"].(map[string]interface{})
-				if !isCRMap || len(crm) == 0 {
-					unknown(pp+".cloudrun", name)
-					continue
-				}
-				for _, ck := range rawMapKeys(crm) {
-					switch ck {
-					case "assignable_service_accounts":
-						if list, ok := crm[ck].([]interface{}); ok && len(list) > 0 {
-							p := pp + ".cloudrun.assignable_service_accounts"
-							st.add(ConversionFieldNotValidForTargetType, ConversionSeverityBlocking, p, cloudRunIdentityKeyRefusal(p), name)
-						} else {
-							unknown(pp+".cloudrun."+ck, name)
-						}
-					case "block_service_account":
-						if s, ok := crm[ck].(string); ok && s != "" {
-							p := pp + ".cloudrun.block_service_account"
-							st.add(ConversionFieldNotValidForTargetType, ConversionSeverityBlocking, p, cloudRunIdentityKeyRefusal(p), name)
-						} else {
-							unknown(pp+".cloudrun."+ck, name)
-						}
-					default:
-						unknown(pp+".cloudrun."+ck, name)
-					}
-				}
 			case !knownProfileKeys[k]:
 				unknown(pp+"."+k, name)
 			}
