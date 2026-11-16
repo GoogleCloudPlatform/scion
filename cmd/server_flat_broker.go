@@ -185,6 +185,7 @@ func storeBrokerCapabilities(c *hubclient.BrokerCapabilities) *store.BrokerCapab
 		ClearedResourceSubfields:     c.ClearedResourceSubfields,
 		StartsInFlight:               c.StartsInFlight,
 		AttachmentDelivery:           c.AttachmentDelivery,
+		HomeFiles:                    c.HomeFiles,
 		NodeImageRegistry:            c.NodeImageRegistry,
 	}
 }

@@ -71,6 +71,9 @@ func StaticCapabilities(rt scionrt.Runtime, nodeImageRegistry string) *hubclient
 		// This broker redeems attachment delivery capabilities and writes
 		// the files into the agent's home (ptone/scion#4596).
 		AttachmentDelivery: true,
+		// This broker writes create-time HomeFiles entries into the newly
+		// provisioned agent's home directory (ptone/scion#8058).
+		HomeFiles: true,
 	}
 }
 
@@ -144,6 +147,7 @@ func StaticCapabilityNames(rt scionrt.Runtime) []string {
 	add(c.UnlimitedCountLimits, "unlimitedCountLimits")
 	add(c.ClearedResourceSubfields, "clearedResourceSubfields")
 	add(c.AttachmentDelivery, "attachmentDelivery")
+	add(c.HomeFiles, "homeFiles")
 	return names
 }
 

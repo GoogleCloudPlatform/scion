@@ -463,6 +463,8 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			// Hub telemetry defaults and policy are separate tiers
 			// (ptone/scion#4218).
 			TemplateTiers: true,
+			// Create-time HomeFiles provisioning (ptone/scion#8058).
+			HomeFiles: true,
 		},
 		Profiles:         s.buildInfoProfiles(runtimeType),
 		WorkspaceStorage: s.workspaceStorageDescriptor(),

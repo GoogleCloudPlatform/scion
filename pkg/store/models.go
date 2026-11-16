@@ -1477,6 +1477,11 @@ type BrokerCapabilities struct {
 	// delivering the text (ptone/scion#4596). The hub issues capabilities
 	// only to brokers that report it.
 	AttachmentDelivery bool `json:"attachmentDelivery"`
+	// HomeFiles indicates the broker writes create-time HomeFiles entries into
+	// the newly provisioned agent's home directory under .scion/ before
+	// starting the harness (ptone/scion#8058). The hub refuses to dispatch a
+	// create carrying non-empty HomeFiles to a broker without it.
+	HomeFiles bool `json:"homeFiles,omitempty"`
 	// ReprovisionEmptyPerAgent indicates the broker's reprovision reuses an
 	// empty-per-agent agent's private workspace in place (same-broker
 	// `scion reincarnate`, miller79/scion#167). The hub refuses same-broker
