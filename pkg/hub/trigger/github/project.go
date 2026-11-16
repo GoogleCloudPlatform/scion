@@ -285,6 +285,7 @@ func shrinkProjectedToFit(proj map[string]any, encoded []byte, maxBytes int) ([]
 	protected := map[string]bool{
 		"action": true, "full_name": true, "name": true, "login": true,
 		"type": true, "ref": true, "sha": true, "state": true,
+		"html_url": true, "path": true,
 	}
 	encoded, err = shrinkSubtreeFieldsLongestFirst(proj, proj, encoded, maxBytes, func(key string) bool {
 		return !protected[key]

@@ -441,3 +441,120 @@ func TestProjectDecodedPayload_ReducesPRBranchReposBeforeSanitizeWithoutMutating
 	assert.Equal(t, string(outMin), string(outBloat1))
 	assert.Equal(t, string(outBloat1), string(outBloat2))
 }
+
+func TestProjectPayload_Tier5ProtectsHTMLURLAndPath(t *testing.T) {
+	t.Run("preserves html_url and path while shrinking unprotected strings in Tier 5", func(t *testing.T) {
+		// Make comment.html_url (~515 bytes) and comment.path (~470 bytes) strictly
+		// longer than unprotected issue.title (~425 bytes) so an unprotected Tier 5
+		// pass would pick html_url/path first before touching title.
+		longPath := "pkg/hub/trigger/github/" + strings.Repeat("subdir/", 62) + "target_file.go"
+		longURL := "https://github.com/octo-org/octo-repo/pull/42/" + strings.Repeat("seg/", 110) + "#discussion_r55"
+		bigTitle := strings.Repeat("prose-title-🚀-", 25)
+		require.Greater(t, len(longURL), len(longPath))
+		require.Greater(t, len(longPath), len(bigTitle))
+
+		rawMap := map[string]any{
+			"action":       "created",
+			"installation": map[string]any{"id": 12},
+			"sender":       map[string]any{"login": "u", "id": 1, "type": "User"},
+			"repository": map[string]any{
+				"id":        1,
+				"full_name": "o/r",
+				"name":      "r",
+				"html_url":  "https://github.com/o/r",
+				"owner":     map[string]any{"login": "o", "id": 1, "type": "User"},
+			},
+			"issue": map[string]any{
+				"number":   42,
+				"title":    bigTitle,
+				"body":     "",
+				"html_url": "https://github.com/o/r/pull/42",
+			},
+			"comment": map[string]any{
+				"id":       55,
+				"body":     "",
+				"path":     longPath,
+				"html_url": longURL,
+			},
+		}
+		raw, err := json.Marshal(rawMap)
+		require.NoError(t, err)
+
+		const budget = 1500
+		out, truncated, err := projectPayload(raw, budget)
+		require.NoError(t, err)
+		assert.True(t, truncated)
+		assert.LessOrEqual(t, len(out), budget)
+
+		var decoded map[string]any
+		require.NoError(t, json.Unmarshal(out, &decoded))
+
+		comment := decoded["comment"].(map[string]any)
+		assert.Equal(t, longPath, comment["path"], "Tier 5 must never truncate protected path")
+		assert.Equal(t, longURL, comment["html_url"], "Tier 5 must never truncate protected html_url")
+
+		issue := decoded["issue"].(map[string]any)
+		assert.Equal(t, "https://github.com/o/r/pull/42", issue["html_url"], "Tier 5 must never truncate issue html_url")
+		gotTitle := issue["title"].(string)
+		assert.Less(t, len(gotTitle), len(bigTitle), "unprotected title should absorb the Tier 5 shrinkage")
+		assert.True(t, utf8.ValidString(gotTitle))
+	})
+
+	t.Run("final fallback returns error when only protected html_url and path are large", func(t *testing.T) {
+		// Protected html_url (~750 bytes) + protected path (~750 bytes) alone
+		// exceed the 1200-byte payload budget, while unprotected prose fields are
+		// tiny/empty. Tier 5 leaves html_url and path untouched and falls through
+		// to the explicit final error fallback (Normalize returns Handled=false, err!=nil).
+		hugePath := "pkg/hub/trigger/" + strings.Repeat("deep_module/", 65) + "handler.go"
+		hugeURL := "https://github.com/octo-org/octo-repo/pull/42/" + strings.Repeat("segment/", 90) + "#discussion_r77"
+
+		raw, err := json.Marshal(map[string]any{
+			"action":       "created",
+			"installation": map[string]any{"id": 12},
+			"sender":       map[string]any{"login": "u", "id": 1, "type": "User"},
+			"repository": map[string]any{
+				"id":        1,
+				"full_name": "o/r",
+				"name":      "r",
+				"private":   false,
+				"html_url":  "https://github.com/o/r",
+				"owner":     map[string]any{"login": "o", "id": 1, "type": "User"},
+			},
+			"pull_request": map[string]any{
+				"number":   42,
+				"state":    "open",
+				"title":    "t",
+				"body":     "",
+				"html_url": "https://github.com/o/r/pull/42",
+				"base":     map[string]any{"ref": "main", "sha": "111", "repo": map[string]any{"id": 1, "full_name": "o/r", "name": "r", "private": false}},
+				"head":     map[string]any{"ref": "feat", "sha": "222", "repo": map[string]any{"id": 1, "full_name": "o/r", "name": "r", "private": false}},
+			},
+			"comment": map[string]any{
+				"id":         77,
+				"body":       "",
+				"path":       hugePath,
+				"line":       10,
+				"side":       "RIGHT",
+				"html_url":   hugeURL,
+				"created_at": "2026-05-01T12:00:00Z",
+				"updated_at": "2026-05-01T12:00:00Z",
+			},
+		})
+		require.NoError(t, err)
+
+		out, truncated, projErr := projectPayload(raw, 1200)
+		require.Error(t, projErr)
+		assert.Contains(t, projErr.Error(), "exceeds MaxPayloadBytes")
+		assert.Nil(t, out)
+		assert.False(t, truncated)
+
+		res, normErr := Normalize(EventPullRequestReviewComment, "d-prot-pay", raw, Options{
+			AppSlug:         "scion",
+			MaxPayloadBytes: 1200,
+		})
+		require.Error(t, normErr)
+		assert.Contains(t, normErr.Error(), "exceeds MaxPayloadBytes")
+		assert.False(t, res.Handled)
+		assert.Nil(t, res.Payload)
+	})
+}
