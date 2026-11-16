@@ -586,3 +586,87 @@ func TestLockTriggerQuota_ConcurrentLastSlot(t *testing.T) {
 		assert.Equal(t, limit, cnt)
 	})
 }
+
+func TestTriggerEvents_SinceTerminalCASAndOrphanReconcile(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	projID := uuid.NewString()
+	epID := uuid.NewString()
+	base := time.Now().UTC().Truncate(time.Second).Add(-96 * time.Hour)
+
+	mkEvt := func(name string, receivedAt time.Time) *store.TriggerEvent {
+		ev := &store.TriggerEvent{
+			ID:         uuid.NewString(),
+			ProjectID:  projID,
+			SourceKind: store.TriggerSourceKindWebhook,
+			SourceID:   epID,
+			Type:       "webhook.received",
+			Subject:    "webhook:" + epID,
+			DedupKey:   name,
+			ReceivedAt: receivedAt,
+			Payload:    `{"ok":true}`,
+		}
+		require.NoError(t, cs.CreateTriggerEvent(ctx, ev))
+		return ev
+	}
+
+	evOrphanOld := mkEvt("orphan-old", base)
+	evQueuedOld := mkEvt("queued-old", base.Add(time.Hour))
+	evOrphanRecent := mkEvt("orphan-recent", base.Add(80*time.Hour))
+	evProcessed := mkEvt("processed-evt", base.Add(82*time.Hour))
+
+	// Queue only evQueuedOld in durable_queue_items.
+	require.NoError(t, cs.WithTx(ctx, func(tx store.Store) error {
+		_, qErr := cs.EnqueueDurableItem(ctx, tx, store.DurableQueueRow{
+			Kind:      "trigger.event",
+			DedupKey:  evQueuedOld.ID,
+			ProjectID: projID,
+			Payload:   []byte(`{"v":1,"event_id":"` + evQueuedOld.ID + `"}`),
+			CreatedAt: base.Add(time.Hour),
+		})
+		return qErr
+	}))
+
+	// Since filter returns only events received at or after cutoff.
+	sinceCutoff := base.Add(80 * time.Hour)
+	sinceRes, err := cs.ListTriggerEvents(ctx, store.TriggerEventFilter{
+		ProjectID: projID,
+		Since:     &sinceCutoff,
+	}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	assert.Equal(t, 2, sinceRes.TotalCount)
+
+	// Mark evProcessed processed; subsequent MarkTriggerEventFailed must not clobber terminal status.
+	require.NoError(t, cs.MarkTriggerEventProcessed(ctx, evProcessed.ID, base.Add(83*time.Hour), 2, 1))
+	require.NoError(t, cs.MarkTriggerEventFailed(ctx, evProcessed.ID, base.Add(84*time.Hour), "dropped by queue limits"))
+	gotProc, err := cs.GetTriggerEvent(ctx, evProcessed.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerEventStatusProcessed, gotProc.Status)
+	assert.Equal(t, 2, gotProc.MatchCount)
+	assert.Equal(t, 1, gotProc.FireCount)
+	assert.Empty(t, gotProc.Error)
+
+	// Missing event returns ErrNotFound.
+	require.ErrorIs(t, cs.MarkTriggerEventFailed(ctx, uuid.NewString(), base.Add(84*time.Hour), "x"), store.ErrNotFound)
+
+	// Reconcile orphaned pending events older than 72h: only evOrphanOld transitions to failed.
+	now := base.Add(96 * time.Hour)
+	reconciled, err := cs.ReconcileOrphanedPendingTriggerEvents(
+		ctx, "trigger.event", now.Add(-72*time.Hour), now, "dropped by queue limits", 100,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 1, reconciled)
+
+	gotOrphanOld, err := cs.GetTriggerEvent(ctx, evOrphanOld.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerEventStatusFailed, gotOrphanOld.Status)
+	assert.Equal(t, "dropped by queue limits", gotOrphanOld.Error)
+
+	gotQueuedOld, err := cs.GetTriggerEvent(ctx, evQueuedOld.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerEventStatusPending, gotQueuedOld.Status)
+
+	gotOrphanRecent, err := cs.GetTriggerEvent(ctx, evOrphanRecent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerEventStatusPending, gotOrphanRecent.Status)
+}

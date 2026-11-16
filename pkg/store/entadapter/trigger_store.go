@@ -25,6 +25,7 @@ import (
 
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/durablequeueitem"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/trigger"
@@ -1210,6 +1211,9 @@ func (s *TriggerStore) ListTriggerEvents(ctx context.Context, filter store.Trigg
 	if filter.Status != "" {
 		query.Where(triggerevent.StatusEQ(filter.Status))
 	}
+	if filter.Since != nil && !filter.Since.IsZero() {
+		query.Where(triggerevent.ReceivedAtGTE(filter.Since.UTC()))
+	}
 	if filter.VisibleToAgentID != "" {
 		epQ := s.client.WebhookEndpoint.Query().Where(
 			webhookendpoint.OwnerPrincipalKindEQ(store.DelegationPrincipalAgent),
@@ -1339,13 +1343,27 @@ func (s *TriggerStore) MarkTriggerEventProcessed(ctx context.Context, id string,
 	if err != nil {
 		return err
 	}
-	return mapError(s.client.TriggerEvent.UpdateOneID(uid).
+	affected, err := s.client.TriggerEvent.Update().
+		Where(triggerevent.IDEQ(uid), triggerevent.StatusEQ(store.TriggerEventStatusPending)).
 		SetStatus(store.TriggerEventStatusProcessed).
 		SetProcessedAt(processedAt.UTC()).
 		SetMatchCount(matchCount).
 		SetFireCount(fireCount).
 		ClearError().
-		Exec(ctx))
+		Save(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if affected == 0 {
+		exists, exErr := s.client.TriggerEvent.Query().Where(triggerevent.IDEQ(uid)).Exist(ctx)
+		if exErr != nil {
+			return mapError(exErr)
+		}
+		if !exists {
+			return store.ErrNotFound
+		}
+	}
+	return nil
 }
 
 func (s *TriggerStore) MarkTriggerEventFailed(ctx context.Context, id string, processedAt time.Time, errMsg string) error {
@@ -1353,7 +1371,8 @@ func (s *TriggerStore) MarkTriggerEventFailed(ctx context.Context, id string, pr
 	if err != nil {
 		return err
 	}
-	u := s.client.TriggerEvent.UpdateOneID(uid).
+	u := s.client.TriggerEvent.Update().
+		Where(triggerevent.IDEQ(uid), triggerevent.StatusEQ(store.TriggerEventStatusPending)).
 		SetStatus(store.TriggerEventStatusFailed).
 		SetProcessedAt(processedAt.UTC())
 	if errMsg != "" {
@@ -1361,7 +1380,118 @@ func (s *TriggerStore) MarkTriggerEventFailed(ctx context.Context, id string, pr
 	} else {
 		u.ClearError()
 	}
-	return mapError(u.Exec(ctx))
+	affected, err := u.Save(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if affected == 0 {
+		exists, exErr := s.client.TriggerEvent.Query().Where(triggerevent.IDEQ(uid)).Exist(ctx)
+		if exErr != nil {
+			return mapError(exErr)
+		}
+		if !exists {
+			return store.ErrNotFound
+		}
+	}
+	return nil
+}
+
+func (s *TriggerStore) ReconcileOrphanedPendingTriggerEvents(ctx context.Context, queueKind string, olderThan, now time.Time, errMsg string, limit int) (int, error) {
+	if queueKind == "" {
+		return 0, store.ErrInvalidInput
+	}
+	olderThan = olderThan.UTC()
+	now = now.UTC()
+
+	const scanBatch = 200
+	var (
+		hasCursor      bool
+		cursorReceived time.Time
+		cursorID       uuid.UUID
+		reconciled     int
+	)
+
+	for {
+		q := s.client.TriggerEvent.Query().
+			Where(
+				triggerevent.StatusEQ(store.TriggerEventStatusPending),
+				triggerevent.ReceivedAtLTE(olderThan),
+			)
+		if hasCursor {
+			q.Where(triggerevent.Or(
+				triggerevent.ReceivedAtGT(cursorReceived),
+				triggerevent.And(
+					triggerevent.ReceivedAtEQ(cursorReceived),
+					triggerevent.IDGT(cursorID),
+				),
+			))
+		}
+		candidates, err := q.
+			Order(triggerevent.ByReceivedAt()).
+			Order(triggerevent.ByID()).
+			Limit(scanBatch).
+			Select(triggerevent.FieldID, triggerevent.FieldReceivedAt).
+			All(ctx)
+		if err != nil {
+			return reconciled, mapError(err)
+		}
+		if len(candidates) == 0 {
+			break
+		}
+
+		idStrs := make([]string, len(candidates))
+		for i, c := range candidates {
+			idStrs[i] = c.ID.String()
+		}
+		queuedRows, err := s.client.DurableQueueItem.Query().
+			Where(
+				durablequeueitem.KindEQ(queueKind),
+				durablequeueitem.DedupKeyIn(idStrs...),
+			).
+			Select(durablequeueitem.FieldDedupKey).
+			All(ctx)
+		if err != nil {
+			return reconciled, mapError(err)
+		}
+		queued := make(map[string]struct{}, len(queuedRows))
+		for _, r := range queuedRows {
+			queued[r.DedupKey] = struct{}{}
+		}
+
+		for _, c := range candidates {
+			if _, ok := queued[c.ID.String()]; ok {
+				continue
+			}
+			u := s.client.TriggerEvent.Update().
+				Where(triggerevent.IDEQ(c.ID), triggerevent.StatusEQ(store.TriggerEventStatusPending)).
+				SetStatus(store.TriggerEventStatusFailed).
+				SetProcessedAt(now)
+			if errMsg != "" {
+				u.SetError(errMsg)
+			} else {
+				u.ClearError()
+			}
+			affected, uErr := u.Save(ctx)
+			if uErr != nil {
+				return reconciled, mapError(uErr)
+			}
+			if affected > 0 {
+				reconciled++
+				if limit > 0 && reconciled >= limit {
+					return reconciled, nil
+				}
+			}
+		}
+
+		last := candidates[len(candidates)-1]
+		hasCursor = true
+		cursorReceived = last.ReceivedAt.UTC()
+		cursorID = last.ID
+		if len(candidates) < scanBatch {
+			break
+		}
+	}
+	return reconciled, nil
 }
 
 // ============================================================================
