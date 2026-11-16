@@ -49,7 +49,8 @@
 // Mentions inside fenced code blocks, inline backtick code spans, and '>'
 // blockquote lines are ignored using the CommonMark prose rules shared with chat
 // mentions. Commands ARE parsed for non-self Bot senders on those five creation
-// actions so rules and presets opting into allow_bots (§5.7, §9.2) can match
+// actions (confirmed with maintainer, 2026-11-16 20:43Z, conv 8dc0db63) so rules
+// and presets opting into allow_bots (§5.7, §9.2) can match
 // event.attributes.command; the App's own bot events (<slug>[bot]) are dropped
 // at webhook ingress before row creation (see Result.IsOwnApp) and third-party
 // bots remain gated by sender_type != 'Bot' in rules by default. When Options.AppSlug
