@@ -71,7 +71,9 @@ type SetEnvVarResponse struct {
 // For project scope: verifies the project exists, then checks authorization. Users
 // must pass CheckAccess (with owner bypass). Agents get read-only access to
 // their own project only; project-scoped secret metadata endpoints additionally
-// require ScopeProjectSecretRead (checkAgentProjectSecretReadScope).
+// require ScopeProjectSecretRead (checkAgentProjectSecretReadScope), and
+// project-scoped env read endpoints omit environment-secret metadata unless the
+// agent holds ScopeProjectSecretRead (agentLacksProjectSecretReadScope).
 //
 // For broker scope: verifies the broker exists. Brokers get self-access via
 // BrokerIdentity. Users must pass CheckAccess.
@@ -367,8 +369,12 @@ func (s *Server) listEnvVars(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if includeSecretMeta {
-		envVars = s.mergeEnvironmentSecrets(ctx, envVars, filter,
+		var ok bool
+		envVars, ok = s.applyEnvironmentSecretsToEnvVarList(w, ctx, envVars, filter,
 			"failed to list environment secrets for env var merge")
+		if !ok {
+			return
+		}
 	} else {
 		envVars = withoutSecretEnvVars(envVars)
 	}
@@ -426,12 +432,20 @@ func (s *Server) getEnvVar(w http.ResponseWriter, r *http.Request, key string) {
 		return
 	}
 
+	s.serveEnvVarByKey(w, ctx, key, scope, scopeID)
+}
+
+func (s *Server) serveEnvVarByKey(w http.ResponseWriter, ctx context.Context, key, scope, scopeID string) {
+	hideProjectSecretMeta := agentLacksProjectSecretReadScope(ctx, scope)
+
 	envVar, err := s.store.GetEnvVar(ctx, key, scope, scopeID)
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) && s.secretBackend != nil && !isSystemOneReservedSecretKey(key) {
-			// Fallback: check if this key exists as an environment secret
+		if !hideProjectSecretMeta && errors.Is(err, store.ErrNotFound) && s.secretBackend != nil && !isSystemOneReservedSecretKey(key) {
+			// Fallback: check if this key exists as an environment secret.
+			// Defence in depth: agentHiddenHubSecret is checked regardless of
+			// which route reached this helper.
 			meta, metaErr := s.secretBackend.GetMeta(ctx, key, scope, scopeID)
-			if metaErr == nil && meta.SecretType == "environment" && !agentHiddenHubSecret(ctx, scope, *meta) {
+			if metaErr == nil && meta.SecretType == store.SecretTypeEnvironment && !agentHiddenHubSecret(ctx, scope, *meta) {
 				ev := secretMetaToEnvVar(*meta)
 				writeJSON(w, http.StatusOK, &ev)
 				return
@@ -439,6 +453,25 @@ func (s *Server) getEnvVar(w http.ResponseWriter, r *http.Request, key string) {
 		}
 		writeErrorFromErr(w, err, "")
 		return
+	}
+
+	if hideProjectSecretMeta {
+		if envVar.Secret {
+			writeErrorFromErr(w, store.ErrNotFound, "")
+			return
+		}
+		if s.secretBackend != nil && !isSystemOneReservedSecretKey(key) {
+			meta, metaErr := s.secretBackend.GetMeta(ctx, key, scope, scopeID)
+			if metaErr != nil && !errors.Is(metaErr, store.ErrNotFound) {
+				s.envSecretLog.Warn("failed to check environment secret shadow for env var read", "key", key, "error", metaErr)
+				writeErrorFromErr(w, metaErr, "")
+				return
+			}
+			if metaErr == nil && meta.SecretType == store.SecretTypeEnvironment {
+				writeErrorFromErr(w, store.ErrNotFound, "")
+				return
+			}
+		}
 	}
 
 	// Mask sensitive values
@@ -778,8 +811,40 @@ func withoutAgentHiddenHubSecrets(ctx context.Context, scope string, metas []sec
 	return out
 }
 
-func mergeEnvironmentSecretMetadata(envVars []store.EnvVar, metas []secret.SecretMeta) []store.EnvVar {
-	if len(metas) == 0 {
+// applyEnvironmentSecretsToEnvVarList merges environment-type secret metadata
+// into envVars for callers authorized to read secret metadata, or strips
+// secret-flagged and secret-shadowed rows when an agent caller lacks
+// ScopeProjectSecretRead (ptone/scion#8211). Returns false after writing an
+// error response if shadow-check lookup fails closed.
+func (s *Server) applyEnvironmentSecretsToEnvVarList(w http.ResponseWriter, ctx context.Context, envVars []store.EnvVar, filter store.EnvVarFilter, warning string) ([]store.EnvVar, bool) {
+	if !agentLacksProjectSecretReadScope(ctx, filter.Scope) {
+		return s.mergeEnvironmentSecrets(ctx, envVars, filter, warning), true
+	}
+
+	envVars = withoutSecretEnvVars(envVars)
+	if len(envVars) == 0 || s.secretBackend == nil {
+		return envVars, true
+	}
+
+	metas, err := s.secretBackend.List(ctx, secret.Filter{
+		Scope:   filter.Scope,
+		ScopeID: filter.ScopeID,
+		Type:    store.SecretTypeEnvironment,
+		Name:    filter.Key,
+	})
+	if err != nil {
+		s.envSecretLog.Warn(warning, "error", err)
+		writeErrorFromErr(w, err, "")
+		return nil, false
+	}
+	return suppressShadowedEnvVars(envVars, withoutSystemOneReservedSecrets(metas)), true
+}
+
+// suppressShadowedEnvVars drops env vars whose key matches an environment-type
+// secret without appending secret metadata, so callers without
+// ScopeProjectSecretRead see neither secret metadata nor shadowed plain values.
+func suppressShadowedEnvVars(envVars []store.EnvVar, metas []secret.SecretMeta) []store.EnvVar {
+	if len(envVars) == 0 || len(metas) == 0 {
 		return envVars
 	}
 
@@ -788,13 +853,24 @@ func mergeEnvironmentSecretMetadata(envVars []store.EnvVar, metas []secret.Secre
 		secretKeys[meta.Name] = struct{}{}
 	}
 
-	merged := make([]store.EnvVar, 0, len(envVars)+len(metas))
+	filtered := make([]store.EnvVar, 0, len(envVars))
 	for _, envVar := range envVars {
 		if _, shadowed := secretKeys[envVar.Key]; shadowed {
 			continue
 		}
-		merged = append(merged, envVar)
+		filtered = append(filtered, envVar)
 	}
+	return filtered
+}
+
+func mergeEnvironmentSecretMetadata(envVars []store.EnvVar, metas []secret.SecretMeta) []store.EnvVar {
+	if len(metas) == 0 {
+		return envVars
+	}
+
+	filtered := suppressShadowedEnvVars(envVars, metas)
+	merged := make([]store.EnvVar, 0, len(filtered)+len(metas))
+	merged = append(merged, filtered...)
 	for _, meta := range metas {
 		merged = append(merged, secretMetaToEnvVar(meta))
 	}
@@ -810,14 +886,23 @@ func (s *Server) handleSecrets(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// agentLacksProjectSecretReadScope reports whether the caller is an agent
+// reading project-scoped material without ScopeProjectSecretRead
+// (ptone/scion#8211). Non-project scopes (e.g. scope=hub) and user callers
+// return false.
+func agentLacksProjectSecretReadScope(ctx context.Context, scope string) bool {
+	if scope != store.ScopeProject {
+		return false
+	}
+	agentIdent := GetAgentIdentityFromContext(ctx)
+	return agentIdent != nil && !agentIdent.HasScope(ScopeProjectSecretRead)
+}
+
 // checkAgentProjectSecretReadScope verifies that agent callers reading
 // project-scoped secret metadata hold ScopeProjectSecretRead (ptone/scion#1331).
 // Non-project scopes (e.g. scope=hub) and user callers are unaffected.
 func checkAgentProjectSecretReadScope(w http.ResponseWriter, r *http.Request, scope string) bool {
-	if scope != store.ScopeProject {
-		return true
-	}
-	if agentIdent := GetAgentIdentityFromContext(r.Context()); agentIdent != nil && !agentIdent.HasScope(ScopeProjectSecretRead) {
+	if agentLacksProjectSecretReadScope(r.Context(), scope) {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden,
 			"Missing required scope: "+string(ScopeProjectSecretRead), nil)
 		return false
@@ -1874,8 +1959,12 @@ func (s *Server) handleProjectEnvVars(w http.ResponseWriter, r *http.Request, pr
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		envVars = s.mergeEnvironmentSecrets(ctx, envVars, filter,
+		var ok bool
+		envVars, ok = s.applyEnvironmentSecretsToEnvVarList(w, ctx, envVars, filter,
 			"failed to list environment secrets for project env var merge")
+		if !ok {
+			return
+		}
 		// Mask sensitive values
 		for i := range envVars {
 			if envVars[i].Sensitive {
@@ -1899,25 +1988,7 @@ func (s *Server) handleScopedEnvVarByKey(w http.ResponseWriter, r *http.Request,
 
 	switch r.Method {
 	case http.MethodGet:
-		envVar, err := s.store.GetEnvVar(ctx, key, scope, scopeID)
-		if err != nil {
-			if errors.Is(err, store.ErrNotFound) && s.secretBackend != nil && !isSystemOneReservedSecretKey(key) {
-				meta, metaErr := s.secretBackend.GetMeta(ctx, key, scope, scopeID)
-				// Defence in depth: this handler serves project and broker
-				// scopes, but the hub-scope agent rule is applied here too.
-				if metaErr == nil && meta.SecretType == "environment" && !agentHiddenHubSecret(ctx, scope, *meta) {
-					ev := secretMetaToEnvVar(*meta)
-					writeJSON(w, http.StatusOK, &ev)
-					return
-				}
-			}
-			writeErrorFromErr(w, err, "")
-			return
-		}
-		if envVar.Sensitive {
-			envVar.Value = "********"
-		}
-		writeJSON(w, http.StatusOK, envVar)
+		s.serveEnvVarByKey(w, ctx, key, scope, scopeID)
 
 	case http.MethodPut:
 		var req SetEnvVarRequest

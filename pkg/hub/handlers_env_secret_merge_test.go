@@ -52,3 +52,27 @@ func TestMergeEnvironmentSecretMetadataWithoutSecrets(t *testing.T) {
 		t.Fatalf("mergeEnvironmentSecretMetadata() = %#v, want %#v", got, envVars)
 	}
 }
+
+func TestSuppressShadowedEnvVars(t *testing.T) {
+	envVars := []store.EnvVar{
+		{ID: "plain-shadowed", Key: "SHARED", Value: "stale"},
+		{ID: "plain-kept", Key: "PLAIN", Value: "visible"},
+	}
+	metas := []secret.SecretMeta{
+		{ID: "secret-new", Name: "SHARED", Scope: store.ScopeProject, ScopeID: "project-1"},
+		{ID: "secret-other", Name: "SECRET", Scope: store.ScopeProject, ScopeID: "project-1"},
+	}
+
+	got := suppressShadowedEnvVars(envVars, metas)
+	want := []store.EnvVar{envVars[1]}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("suppressShadowedEnvVars() = %#v, want %#v", got, want)
+	}
+
+	if gotNoSecrets := suppressShadowedEnvVars(envVars, nil); !reflect.DeepEqual(gotNoSecrets, envVars) {
+		t.Fatalf("suppressShadowedEnvVars(no secrets) = %#v, want %#v", gotNoSecrets, envVars)
+	}
+	if gotEmpty := suppressShadowedEnvVars(nil, metas); gotEmpty != nil {
+		t.Fatalf("suppressShadowedEnvVars(nil envVars) = %#v, want nil", gotEmpty)
+	}
+}
