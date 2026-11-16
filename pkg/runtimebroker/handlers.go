@@ -1051,6 +1051,16 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		ValidationError(w, "resetHome needs a resetHomeId of 1 to 64 characters of A-Z, a-z, 0-9 and '-'", nil)
 		return
 	}
+	if len(req.HomeFiles) > 0 {
+		if req.Reprovision {
+			ValidationError(w, "homeFiles is not valid on a reprovision request", nil)
+			return
+		}
+		if err := api.ValidateHomeFiles(req.HomeFiles); err != nil {
+			ValidationError(w, err.Error(), nil)
+			return
+		}
+	}
 	// No volume in the request may reach a Runtime Broker control path;
 	// refused before beginCreateAttempt, so the refusal has no side effect.
 	{
@@ -1806,6 +1816,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		RunID:              req.RunID,
 		PreviousProjectIDs: req.PreviousProjectIDs,
 		Persistence:        req.Persistence,
+		HomeFiles:          req.HomeFiles,
 		HTTPRequest:        r,
 		Operation:          opCreate,
 		OwnedAbandon:       ownedAbandon,
@@ -1844,6 +1855,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// buildStartContext computed for opCreate.
 	if req.Reprovision {
 		opts.FreshProvision = false
+		opts.HomeFiles = nil
 	}
 	s.agentLifecycleLog.Info("Agent dispatch: buildStartContext complete",
 		"agent_id", req.ID, "name", req.Name, "elapsed", time.Since(buildCtxStart).String())

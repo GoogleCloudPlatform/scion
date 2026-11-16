@@ -245,6 +245,10 @@ type startContextInputs struct {
 	// reserved, so a failure response can release it. Nil for start and
 	// restart, whose runs are never released this way.
 	OwnedAbandon *ownedCreateAbandon
+
+	// HomeFiles are create-only files written under .scion/ in the agent home
+	// directory during fresh provisioning.
+	HomeFiles []api.HomeFile
 }
 
 // prehydratedBundle records hub hydration already performed for a dispatch.
@@ -1057,6 +1061,9 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		// never on start or restart (GoogleCloudPlatform/scion#1931).
 		FreshProvision: in.Operation == opCreate,
 		RunID:          in.RunID,
+	}
+	if in.Operation == opCreate && len(in.HomeFiles) > 0 {
+		opts.HomeFiles = api.CloneHomeFiles(in.HomeFiles)
 	}
 
 	if in.Attach {

@@ -165,6 +165,11 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		hubDispatchedAgentID = opts.Env["SCION_AGENT_ID"]
 	}
 
+	if opts.FreshProvision && !opts.Resume && len(opts.HomeFiles) > 0 {
+		if err := api.ValidateHomeFiles(opts.HomeFiles); err != nil {
+			return nil, fmt.Errorf("invalid home files: %w", err)
+		}
+	}
 	// A plain project's explicit path must hold its .scion entry: create,
 	// start and restart are refused before any side effect
 	// (checkExplicitProjectPath).
@@ -1260,6 +1265,15 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// staged by an earlier occupant of this agent home.
 	if err := writeAgentHome(ctx, func() error { return harness.WriteProjectPreStartHook(agentHome, opts.ProjectPreStartHookScript) }); err != nil {
 		return nil, fmt.Errorf("re-stage project pre-start hook: %w", err)
+	}
+
+	// Stage create-only HomeFiles under .scion/ after the home exists and
+	// before the harness/container starts. Never rewritten on resume, start,
+	// or restart (opts.FreshProvision is false on all non-create paths).
+	if opts.FreshProvision && !opts.Resume && len(opts.HomeFiles) > 0 {
+		if err := writeAgentHome(ctx, func() error { return writeProvisionHomeFiles(agentHome, opts.HomeFiles) }); err != nil {
+			return nil, fmt.Errorf("stage create home files: %w", err)
+		}
 	}
 
 	// Resolve auth metadata for the config-driven env var pipeline.

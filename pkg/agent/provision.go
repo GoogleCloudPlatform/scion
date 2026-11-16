@@ -979,6 +979,15 @@ func (m *AgentManager) finishProvision(opts api.StartOptions, agentDir, agentHom
 		return fmt.Errorf("stage project pre-start hook: %w", err)
 	}
 
+	// Stage create-only HomeFiles under .scion/ in the newly provisioned agent
+	// home. Never written on resume or reprovision (opts.FreshProvision is
+	// false on both).
+	if opts.FreshProvision && !opts.Resume && len(opts.HomeFiles) > 0 {
+		if err := writeProvisionHomeFiles(agentHome, opts.HomeFiles); err != nil {
+			return fmt.Errorf("stage create home files: %w", err)
+		}
+	}
+
 	// Persist harness auth override to the on-disk config (for sciontool).
 	// The auth type was already applied via inlineConfig in
 	// buildProvisionContext, but we re-write to ensure the final file
@@ -1376,6 +1385,11 @@ func reprovisionEmptyPerAgentPreflight(ctx context.Context, projectDir, agentNam
 }
 
 func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
+	if opts.FreshProvision && !opts.Resume && len(opts.HomeFiles) > 0 {
+		if err := api.ValidateHomeFiles(opts.HomeFiles); err != nil {
+			return nil, fmt.Errorf("invalid home files: %w", err)
+		}
+	}
 	// A create over a legacy agent directory no agent owns is refused
 	// before anything runs. A project dir that does not resolve fails here
 	// too (fail closed), as GetAgent would.
