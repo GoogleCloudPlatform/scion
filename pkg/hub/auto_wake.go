@@ -77,7 +77,7 @@ func (s *Server) autoWakeModeOf(agent *store.Agent) autoWakeMode {
 		return autoWakeNone
 	}
 	if agent.IdleSuspendClaimActive {
-		if !s.experimentEnabled(experiments.IdleSuspend) {
+		if !s.idleSuspendDeliveryGateActive() {
 			return autoWakeNone
 		}
 		return autoWakeAwait
@@ -119,7 +119,7 @@ func (s *Server) shouldQueueAutoWake(agent *store.Agent) bool {
 	if s.shouldAutoWake(agent) {
 		return true
 	}
-	return agent != nil && agent.IdleSuspendClaimActive && s.experimentEnabled(experiments.IdleSuspend)
+	return agent != nil && agent.IdleSuspendClaimActive && s.idleSuspendDeliveryGateActive()
 }
 
 // syncAutoWakeForDM waits for an in-flight idle auto-suspend to settle and
@@ -127,7 +127,7 @@ func (s *Server) shouldQueueAutoWake(agent *store.Agent) bool {
 // *errAgentIdleSuspending on a synchronous DM path.
 func (s *Server) syncAutoWakeForDM(wakeCtx context.Context, agent *store.Agent) error {
 	if s.autoWakeModeOf(agent) == autoWakeNone {
-		return &errAutoWakeRefused{dmErr: validateAgentDeliverable(agent)}
+		return &errAutoWakeRefused{dmErr: s.validateAgentDeliverable(agent)}
 	}
 	if dmErr := s.heldTargetRefusal(wakeCtx, agent); dmErr != nil {
 		return &errAutoWakeRefused{dmErr: dmErr}
@@ -266,18 +266,19 @@ func (s *Server) runAutoWake(ctx context.Context, agent *store.Agent, run *autoW
 // running needs nothing. A start already in progress (the row reads
 // starting, or WakeDeferred) is waited for, as a scheduled wake does.
 func (s *Server) autoWakeAgent(ctx context.Context, agent *store.Agent) (*store.Agent, *AgentDMError) {
-	ctx, cancel := context.WithTimeout(ctx, autoWakeBudget)
-	defer cancel()
-
-	current, err := s.store.GetAgent(ctx, agent.ID)
+	readCtx, cancelRead := context.WithTimeout(ctx, autoWakeBudget)
+	current, err := s.store.GetAgent(readCtx, agent.ID)
+	cancelRead()
 	if err != nil || current == nil {
 		return nil, &AgentDMError{Code: ErrCodeAgentNotRunning, Message: "agent could not be read for auto-wake", HTTPStatus: http.StatusConflict}
 	}
-	if current.IdleSuspendClaimUntil != nil {
+	if s.idleSuspendDeliveryGateActive() && current.IdleSuspendClaimUntil != nil {
 		if err := s.waitForIdleSuspendToSettle(ctx, current); err != nil {
 			return nil, startInProgressDMError(current, err)
 		}
 	}
+	ctx, cancel := context.WithTimeout(ctx, autoWakeBudget)
+	defer cancel()
 	if dmErr := s.heldTargetRefusal(ctx, current); dmErr != nil {
 		return nil, dmErr
 	}
@@ -292,7 +293,7 @@ func (s *Server) autoWakeAgent(ctx context.Context, agent *store.Agent) (*store.
 	case state.PhaseStarting:
 	default:
 		if s.autoWakeModeOf(current) == autoWakeNone {
-			return nil, validateAgentDeliverable(current)
+			return nil, s.validateAgentDeliverable(current)
 		}
 	}
 
@@ -339,7 +340,7 @@ func (s *Server) chatSecondaryAutoWakeItemWithLog(messageID, addressee, content 
 			} else {
 				dctx, cancel := context.WithTimeout(withDispatchMessageID(ctx, messageID), chatWakeDeliveryBudget)
 				_, err = s.holdOrDispatch(dctx, woken, messageID, nil, func() error {
-					return dispatchWithBrokerRetry(dctx, s.store, recordLog, dispatcher, woken, content, false, msg)
+					return dispatchWithBrokerRetry(dctx, s.deliveryMarker(), recordLog, dispatcher, woken, content, false, msg)
 				})
 				cancel()
 			}

@@ -150,6 +150,31 @@ type agentDeliveryMarker interface {
 	MarkAgentDelivery(ctx context.Context, agentID string) (*store.Agent, bool, error)
 }
 
+// idleSuspendGateChecker is an optional predicate on agentDeliveryMarker
+// reporting whether both lifecycle.idle_suspend and server.hub.auto_suspend_idle
+// are currently enabled. When false, markAgentForDispatch skips the row-locked
+// write and claim check altogether so off-state behavior is identical to base
+// (AC 8).
+type idleSuspendGateChecker interface {
+	IdleSuspendGateActive() bool
+}
+
+type gatedDeliveryMarker struct {
+	store agentDeliveryMarker
+	gate  func() bool
+}
+
+func (m gatedDeliveryMarker) IdleSuspendGateActive() bool {
+	return m.gate != nil && m.gate()
+}
+
+func (m gatedDeliveryMarker) MarkAgentDelivery(ctx context.Context, agentID string) (*store.Agent, bool, error) {
+	if m.store == nil {
+		return nil, false, errors.New("delivery marker store is nil")
+	}
+	return m.store.MarkAgentDelivery(ctx, agentID)
+}
+
 // errDeliveryMarkFailed wraps a MarkAgentDelivery error (or nil marker/agent)
 // so every message dispatch path fails closed instead of sending unmarked when
 // the store cannot check or record the delivery handshake.
@@ -229,12 +254,14 @@ func isPreDispatchDeliveryError(err error) bool {
 	return errors.As(err, &markErr) || errors.As(err, &idleErr) || errors.As(err, &wakeErr)
 }
 
-// markAgentForDispatch runs MarkAgentDelivery under the row lock, updates
+// markAgentForDispatch runs MarkAgentDelivery under the row lock when both
+// lifecycle.idle_suspend and server.hub.auto_suspend_idle are enabled, updates
 // *agent with the fresh store snapshot (including store-clock
 // IdleSuspendClaimActive), fails closed on any store error, and rejects
-// dispatch with *errAgentIdleSuspending if an idle-suspend claim is active,
-// the row is hub-suspended, or a previously running/starting target moved out
-// of running/starting since the caller's read.
+// dispatch with *errAgentIdleSuspending if an idle-suspend claim is active or
+// a previously running/starting target moved out of running/starting since the
+// caller's read. When either gate is off, it returns nil immediately without
+// touching the store.
 func markAgentForDispatch(ctx context.Context, marker agentDeliveryMarker, agent *store.Agent) error {
 	if marker == nil {
 		return &errDeliveryMarkFailed{err: errors.New("delivery marker store is nil")}
@@ -242,7 +269,11 @@ func markAgentForDispatch(ctx context.Context, marker agentDeliveryMarker, agent
 	if agent == nil || agent.ID == "" {
 		return &errDeliveryMarkFailed{err: errors.New("target agent is nil")}
 	}
+	if gate, ok := marker.(idleSuspendGateChecker); ok && !gate.IdleSuspendGateActive() {
+		return nil
+	}
 	wasDeliverable := state.Phase(agent.Phase) == state.PhaseRunning || state.Phase(agent.Phase) == state.PhaseStarting
+	wasRunning := state.Phase(agent.Phase) == state.PhaseRunning
 	fresh, claimActive, err := marker.MarkAgentDelivery(ctx, agent.ID)
 	if err != nil {
 		return &errDeliveryMarkFailed{err: err}
@@ -252,8 +283,8 @@ func markAgentForDispatch(ctx context.Context, marker agentDeliveryMarker, agent
 	}
 	*agent = *fresh
 	freshDeliverable := state.Phase(fresh.Phase) == state.PhaseRunning || state.Phase(fresh.Phase) == state.PhaseStarting
-	hubSuspended := state.Phase(fresh.Phase) == state.PhaseSuspended && state.SuspendReason(fresh.SuspendReason).AutoWakes()
-	if claimActive || hubSuspended || (wasDeliverable && !freshDeliverable) {
+	justIdleSuspended := wasRunning && state.Phase(fresh.Phase) == state.PhaseSuspended && state.SuspendReason(fresh.SuspendReason) == state.SuspendReasonIdle
+	if claimActive || justIdleSuspended || (wasDeliverable && !freshDeliverable) {
 		return &errAgentIdleSuspending{agent: fresh, claimActive: claimActive}
 	}
 	return nil

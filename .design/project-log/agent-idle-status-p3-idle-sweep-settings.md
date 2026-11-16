@@ -37,11 +37,16 @@
     landed at or after `activity_since`. Once `ClaimIdleSuspend` commits and `DispatchAgentStop`
     succeeds, the stop is irreversible: `UpdateAgentStatus` with `IfIdleSuspendCommit` accepts a row
     in `running`, `stopping`, or `stopped` (handling `sciontool init`'s SIGTERM shutdown reports)
-    conditioned only on the same `run_id`, the held `claimUntil` lease, and no delete,
-    reincarnation, or foreign start claim, restoring `RetainedActivity` (`idle`, `completed`, or
-    `harness_error`) alongside `suspend_reason=idle` and never reverting `run_intent` to `running`.
-  - Standardized claim-expiry checks on the store clock (`MarkAgentDelivery` returning
-    `(agent, claimActive, err)` and setting `agent.IdleSuspendClaimActive` from `storeNow`, plus
+    conditioned on the same `run_id`, the held `claimUntil` lease, no delete/reincarnation/foreign
+    start claim, and no user lifecycle action (every user stop, stop-all, suspend, start/stop claim,
+    reincarnation, or deletion clears `idle_suspend_claim_until`, and `stopped` is accepted only for
+    the container's own clean shutdown report), restoring `RetainedActivity` (`idle`, `completed`,
+    or `harness_error`) alongside `suspend_reason=idle` and never reverting `run_intent` to
+    `running`. Post-stop commit failure, hub crash, and stop-timeout recovery are deferred to
+    `ptone/scion#8204` (noted in `pkg/experiments/registry.go`, `docs-site/src/content/docs/reference/experiments.md`,
+    and the `autoSuspendAgent` commit point).
+  - Standardized claim-expiry checks on the store clock (`GetAgent`, `GetAgentBySlug`, and
+    `MarkAgentDelivery` populating `agent.IdleSuspendClaimActive` from the store clock, plus
     `entTxStoreNow` inside `UpdateAgentStatus`).
 - **Idle sweep, generalized auto-suspend worker, and unified delivery gate (`pkg/hub`):**
   - Registered recurring singleton `agent-idle-suspend` (every 5 ticks, bounded by
@@ -52,16 +57,18 @@
     `syncAgentAfterStopRecord` and emitting `SUSPENDED`-only notifications. Both `idle` and
     `stalled` worker items now also skip soft-deleted rows, rows with active deletion or
     reincarnation, and rows with an in-flight lifecycle operation (`tryBeginLifecycleOp`).
-  - Routed every `AgentDispatcher.DispatchAgentMessage` caller in `pkg/hub` through one fail-closed
+  - Routed every `AgentDispatcher.DispatchAgentMessage` reference in `pkg/hub` through one
     choke point (`dispatchMarkedAgentMessage`, enforced by AST guard
-    `TestMessageDispatchCallsMarkAgentDelivery`) that calls `MarkAgentDelivery` before any broker
-    dispatch. Auto-waking paths (DMs, mentions, web chat, notifications, scheduled messages) wait
-    for an active idle-suspend claim to settle via `wakeOrAwaitStart` / `queueAutoWake` and then
-    auto-wake and deliver; non-auto-waking paths (`MessageBrokerProxy`, `broadcastDirect`,
+    `TestMessageDispatchCallsMarkAgentDelivery` including method-value bypasses). When both
+    `lifecycle.idle_suspend` and `server.hub.auto_suspend_idle` are enabled, `markAgentForDispatch`
+    runs `MarkAgentDelivery` fail-closed before any broker dispatch; when either flag is off, the
+    delivery mark and claim check are skipped completely so DB work and mention behavior match base
+    (AC 8). Auto-waking paths wait up to the full idle-suspend claim lease (`idleSuspendClaimLease`)
+    for an active claim to settle via `wakeOrAwaitStart` / `queueAutoWake` and report `"is suspending"`
+    on timeout; non-auto-waking paths (`MessageBrokerProxy`, `broadcastDirect`,
     `handleBrokerInbound`, `dispatchRoutedRecipient`, `reconcile.deliverMessage`,
     `deliverArtifactReview`, choice responses, `delegatedSender` DM, `group[]`, and delivery
-    notices) refuse, park, or mark failed just as they do for a suspended target, and store errors
-    in `MarkAgentDelivery` fail closed without dispatching.
+    notices) refuse, park, or mark failed just as they do for a suspended target.
 - **Phase 2b review follow-ups folded into phase 3:**
   - **Hub-to-user suspension conversion (`convertHubSuspendToUser`):** gated on
     `lifecycle.idle_suspend`, `POST /api/v1/agents/{id}/suspend` on an `idle`- or

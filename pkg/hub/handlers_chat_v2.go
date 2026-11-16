@@ -1604,7 +1604,14 @@ func isAgentUnreachable(agent *store.Agent) (bool, string) {
 	if unreachablePhases[agent.Phase] {
 		return true, agent.Phase
 	}
-	if agent.IdleSuspendClaimActive {
+	return false, ""
+}
+
+func (s *Server) isAgentUnreachable(agent *store.Agent) (bool, string) {
+	if unreachable, why := isAgentUnreachable(agent); unreachable {
+		return true, why
+	}
+	if s != nil && s.idleSuspendDeliveryGateActive() && agent != nil && agent.IdleSuspendClaimActive {
 		return true, string(state.PhaseSuspended)
 	}
 	return false, ""
@@ -1844,7 +1851,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	// are unaffected: dispatch proceeds normally because buffered messages
 	// land once the agent comes up. Modeled on the phase check in
 	// dispatchRoutedRecipient (handlers_broker_inbound_routed.go).
-	primaryUnreachable, primaryUnreachableReason := isAgentUnreachable(primaryAgent)
+	primaryUnreachable, primaryUnreachableReason := s.isAgentUnreachable(primaryAgent)
 	// A held primary (ptone/scion#3433) is unreachable whatever its phase:
 	// the row is kept, never dispatched. A lookup fault is treated the same.
 	if !primaryUnreachable && primaryAgent != nil {
@@ -2073,7 +2080,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		}
 		// wakeAgentForDM moved the agent to running in place: the row is
 		// no longer born failed.
-		primaryUnreachable, _ = isAgentUnreachable(primaryAgent)
+		primaryUnreachable, _ = s.isAgentUnreachable(primaryAgent)
 		if !primaryUnreachable {
 			storeMsg.DispatchState = store.MessageDispatchDispatched
 			storeMsg.DispatchFailureReason = nil
@@ -2272,7 +2279,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		if _, err := s.holdOrDispatch(retryCtx, primaryAgent, storeMsg.ID, storeMsg, func() error {
 			return dispatchWithBrokerRetry(
 				retryCtx,
-				s.store,
+				s.deliveryMarker(),
 				nil,
 				dispatcher,
 				primaryAgent,
@@ -2548,7 +2555,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 					mentionPtr = mentionStoreMsg
 				}
 				if _, err := s.holdOrDispatch(retryCtx, mentionAgent, mentionID, mentionPtr, func() error {
-					return dispatchWithBrokerRetry(retryCtx, s.store, nil, dispatcher, mentionAgent, agentContent, mentionInterrupt, mentionMsg)
+					return dispatchWithBrokerRetry(retryCtx, s.deliveryMarker(), nil, dispatcher, mentionAgent, agentContent, mentionInterrupt, mentionMsg)
 				}); err != nil {
 					var idleErr *errAgentIdleSuspending
 					if errors.As(err, &idleErr) && mentionPersisted &&

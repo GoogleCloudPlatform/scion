@@ -276,6 +276,17 @@ func TestDispatchMarkedAgentMessage_FailsClosedOnClaimOrStoreError(t *testing.T)
 		require.ErrorAs(t, err, &markErr)
 		assert.Equal(t, int32(0), d.calls.Load())
 	})
+
+	t.Run("gate off skips MarkAgentDelivery and ignores store error", func(t *testing.T) {
+		d := &retryMockDispatcher{}
+		agent := &store.Agent{ID: "a1", Slug: "test", Phase: "suspended", SuspendReason: "stalled"}
+		inner := &testDeliveryMarker{agent: agent, err: errors.New("db unavailable")}
+		gated := gatedDeliveryMarker{store: inner, gate: func() bool { return false }}
+		err := dispatchMarkedAgentMessage(context.Background(), gated, nil, nil, d, agent, "hello", false, nil)
+		require.NoError(t, err)
+		assert.Zero(t, inner.calls.Load(), "MarkAgentDelivery must not be called when gate is off")
+		assert.Equal(t, int32(1), d.calls.Load(), "DispatchAgentMessage must run unchanged when gate is off")
+	})
 }
 
 // urgentRecordingDispatcher records the urgent flag of each dispatch.

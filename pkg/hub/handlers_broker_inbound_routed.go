@@ -398,7 +398,7 @@ func (s *Server) dispatchRoutedRecipient(
 	}
 
 	// --- Phase check ---
-	if agent.IdleSuspendClaimActive {
+	if s.idleSuspendDeliveryGateActive() && agent.IdleSuspendClaimActive {
 		result.Status = "not_running"
 		result.Error = "agent is suspended"
 		return result
@@ -651,7 +651,7 @@ func (s *Server) dispatchRoutedRecipient(
 	}
 	logMessageRecord(s.recordLog(), agent, &recordMsg)
 	if _, err := s.holdOrDispatch(retryCtx, agent, routedMsgID, routedStorePtr, func() error {
-		return dispatchWithBrokerRetry(retryCtx, s.store, nil, dispatcher, agent, msg.Msg, msg.Urgent, msg)
+		return dispatchWithBrokerRetry(retryCtx, s.deliveryMarker(), nil, dispatcher, agent, msg.Msg, msg.Urgent, msg)
 	}); errors.Is(err, ErrBrokerTimeout) {
 		if persisted {
 			_ = s.markFailed(ctx, msgID, err.Error())

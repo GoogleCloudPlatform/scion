@@ -22,6 +22,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+
+	"entgo.io/ent/dialect"
+	entsql "entgo.io/ent/dialect/sql"
 )
 
 // defaultIdleSuspendClaimTTL bounds how long an un-cleared idle-suspend claim
@@ -111,9 +114,13 @@ func checkIdleSuspendRow(row *ent.Agent, cond store.IdleSuspendCondition, now ti
 
 // checkIdleSuspendCommit evaluates AgentStatusUpdate.IfIdleSuspendCommit on the
 // locked row at store-clock now after ClaimIdleSuspend committed and
-// DispatchAgentStop succeeded. Phase may be running, stopping or stopped
-// (because the container reports its own shutdown before DispatchAgentStop
-// returns), and activity, live-work, or delivery timestamps are not re-checked.
+// DispatchAgentStop succeeded. It requires this exact claim lease to still be
+// held at now (any user/hub lifecycle write such as stop, stop-all, suspend,
+// restart, hold, start, reincarnation, or delete invalidates
+// idle_suspend_claim_until in the same write) and run_intent to remain stopped.
+// Phase running and stopping are accepted directly; phase stopped is accepted
+// only when it came from a clean container/runtime shutdown report for our own
+// stop dispatch (non-terminal activity, not stop_queued, zero/unset exit code).
 func checkIdleSuspendCommit(row *ent.Agent, claimUntil, now time.Time) bool {
 	if row == nil {
 		return false
@@ -124,15 +131,63 @@ func checkIdleSuspendCommit(row *ent.Agent, claimUntil, now time.Time) bool {
 	if !claimEligible(row) || heldClaimError(row) != nil {
 		return false
 	}
-	if row.IdleSuspendClaimUntil == nil || !claimTime(*row.IdleSuspendClaimUntil).Equal(claimTime(claimUntil)) {
+	if row.IdleSuspendClaimUntil == nil || !claimTime(*row.IdleSuspendClaimUntil).Equal(claimTime(claimUntil)) || !now.Before(*row.IdleSuspendClaimUntil) {
+		return false
+	}
+	if row.RunIntent == nil || *row.RunIntent != string(store.RunIntentStopped) {
 		return false
 	}
 	switch state.Phase(row.Phase) {
-	case state.PhaseRunning, state.PhaseStopping, state.PhaseStopped:
+	case state.PhaseRunning, state.PhaseStopping:
+		return true
+	case state.PhaseStopped:
+		if isTerminalActivity(row.Activity) || row.ContainerStatus == store.ContainerStatusStopQueued {
+			return false
+		}
+		if row.ExitCode != nil && *row.ExitCode != 0 {
+			return false
+		}
 		return true
 	default:
 		return false
 	}
+}
+
+// populateIdleSuspendClaimActive sets sa.IdleSuspendClaimActive against the
+// store clock when sa.IdleSuspendClaimUntil is non-nil. Rows without a claim
+// timestamp incur zero additional database queries.
+func (s *AgentStore) populateIdleSuspendClaimActive(ctx context.Context, sa *store.Agent) error {
+	if sa == nil || sa.IdleSuspendClaimUntil == nil {
+		return nil
+	}
+	now, err := s.driverStoreNow(ctx)
+	if err != nil {
+		return err
+	}
+	sa.IdleSuspendClaimActive = now.Before(*sa.IdleSuspendClaimUntil)
+	return nil
+}
+
+func (s *AgentStore) driverStoreNow(ctx context.Context) (time.Time, error) {
+	if s.dialect() != dialect.Postgres {
+		return time.Now(), nil
+	}
+	var rows entsql.Rows
+	if err := s.client.Driver().Query(ctx, "SELECT now()", []any{}, &rows); err != nil {
+		return time.Time{}, fmt.Errorf("agent store: SELECT now(): %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return time.Time{}, fmt.Errorf("agent store: SELECT now(): %w", err)
+		}
+		return time.Time{}, fmt.Errorf("agent store: SELECT now(): no row")
+	}
+	var now time.Time
+	if err := rows.Scan(&now); err != nil {
+		return time.Time{}, fmt.Errorf("agent store: scan now(): %w", err)
+	}
+	return now, nil
 }
 
 // ClaimIdleSuspend implements store.AgentStore.ClaimIdleSuspend.

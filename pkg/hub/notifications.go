@@ -62,6 +62,14 @@ type NotificationDispatcher struct {
 	// and is delivered by the drain that follows a successful wake. The
 	// Server sets it (autoWakeNotificationSubscriber); nil = no auto-wake.
 	autoWakeFn func(subscriber *store.Agent) bool
+
+	// idleSuspendGateFn reports whether both lifecycle.idle_suspend and
+	// server.hub.auto_suspend_idle are enabled; nil means off (AC 8).
+	idleSuspendGateFn func() bool
+}
+
+func (nd *NotificationDispatcher) deliveryMarker() agentDeliveryMarker {
+	return gatedDeliveryMarker{store: nd.store, gate: nd.idleSuspendGateFn}
 }
 
 // offerAutoWake offers a suspended subscriber to autoWakeFn.
@@ -592,7 +600,7 @@ func (nd *NotificationDispatcher) dispatchToAgent(ctx context.Context, sub *stor
 
 	err = dispatchWithBrokerRetry(
 		retryCtx,
-		nd.store,
+		nd.deliveryMarker(),
 		nd.messageLog,
 		dispatcher,
 		subscriber,

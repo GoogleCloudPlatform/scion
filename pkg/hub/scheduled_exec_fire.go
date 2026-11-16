@@ -229,7 +229,7 @@ func (s *Server) fireScheduledExec(ctx context.Context, evt store.ScheduledEvent
 	if isManagedAgentRuntime(target.Runtime) {
 		return skip(execReasonTargetNotRunning, "managed_runtime")
 	}
-	if phaseErr := validateAgentDeliverable(target); phaseErr != nil {
+	if phaseErr := s.validateAgentDeliverable(target); phaseErr != nil {
 		return skip(execReasonTargetNotRunning, "phase_"+store.EffectiveRestingPhase(target))
 	}
 	if reincarnationInFlight(target) {

@@ -1316,3 +1316,26 @@ func TestSuspend_ShutdownReportsKeepSuspendedAndAutoWakeable(t *testing.T) {
 	assert.Equal(t, string(state.PhaseRunning), woken.Phase)
 	assert.Empty(t, woken.SuspendReason, "resume clears suspend_reason")
 }
+
+// TestAutoWake_MentionStalledSuspendedWithExperimentOffMatchesBase verifies R3
+// (AC 8): with lifecycle.idle_suspend off, a mention to a stalled-suspended
+// agent preserves base behaviour (accepted, persisted as dispatched, handed to
+// DispatchAgentMessage with zero auto-wake starts and zero MarkAgentDelivery
+// queries).
+func TestAutoWake_MentionStalledSuspendedWithExperimentOffMatchesBase(t *testing.T) {
+	ctx := context.Background()
+	srv, s, sender, target, disp := autoWakeFixture(t, state.SuspendReasonStalled)
+	setIdleSuspendExperiment(t, srv, false)
+
+	res, dmErr := srv.ExecuteAgentDM(ctx, awMentionInput(sender, target, "@target"))
+	require.Nil(t, dmErr)
+	require.NotNil(t, res)
+	assert.Equal(t, AgentDMAccepted, res.Outcome)
+	assert.Empty(t, disp.getStartCalls())
+	require.Len(t, disp.getMessageCalls(), 1)
+
+	msgs, err := s.ListMessages(ctx, store.MessageFilter{RecipientID: target.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, msgs.Items, 1)
+	assert.Equal(t, store.MessageDispatchDispatched, msgs.Items[0].DispatchState)
+}

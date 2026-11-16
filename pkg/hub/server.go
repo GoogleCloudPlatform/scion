@@ -779,6 +779,26 @@ func (s *Server) idleSuspendSettings() (bool, time.Duration) {
 	return enabled, after
 }
 
+func (s *Server) autoSuspendIdleEnabled() bool {
+	if s == nil {
+		return false
+	}
+	enabled, _ := s.idleSuspendSettings()
+	return enabled
+}
+
+// idleSuspendDeliveryGateActive reports whether both the lifecycle.idle_suspend
+// experiment and server.hub.auto_suspend_idle are enabled. When either is off,
+// message delivery skips MarkAgentDelivery and idle-suspend claim checks so
+// behavior and DB work match base (AC 8).
+func (s *Server) idleSuspendDeliveryGateActive() bool {
+	return s != nil && s.experimentEnabled(experiments.IdleSuspend) && s.autoSuspendIdleEnabled()
+}
+
+func (s *Server) deliveryMarker() agentDeliveryMarker {
+	return gatedDeliveryMarker{store: s.store, gate: s.idleSuspendDeliveryGateActive}
+}
+
 // brokerQuotasEnforced reports whether the per-broker agent quota cap
 // (max_agents_per_broker) is enforced on create. Fail-safe default: an
 // absent (nil) switch means enforced (design P1-D4/P1-D5).
@@ -4923,6 +4943,9 @@ func (s *Server) SetMessageBrokerProxy(p *MessageBrokerProxy) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if p != nil {
+		p.SetIdleSuspendGate(s.idleSuspendDeliveryGateActive)
+	}
 	s.messageBrokerProxy = p
 }
 
@@ -5516,6 +5539,7 @@ func (s *Server) StartNotificationDispatcher() {
 	nd.messageLog = s.dedicatedMessageLog
 	nd.channelRegistryFn = s.currentChannelRegistry
 	nd.autoWakeFn = s.autoWakeNotificationSubscriber
+	nd.idleSuspendGateFn = s.idleSuspendDeliveryGateActive
 	nd.writeDenyEnabled = func() bool {
 		ops := s.GetOperationalSettings()
 		return ops != nil && ops.ConversationEnvelopeSwitch()
@@ -5611,6 +5635,7 @@ func (s *Server) StartMessageBroker(b eventbus.EventBus) {
 	proxy.recordArtifactRefs = s.recordMessageArtifacts
 	proxy.recordHumanMentions = s.recordHumanMentions
 	proxy.holdOrDispatch = s.holdOrDispatch
+	proxy.SetIdleSuspendGate(s.idleSuspendDeliveryGateActive)
 	s.messageBrokerProxy = proxy
 	proxy.Start()
 
@@ -6012,7 +6037,7 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 			ActivitySince:    *agent.ActivitySince,
 			IdleSuspendAfter: after,
 			HeartbeatRecency: agentHeartbeatRecency,
-			ClaimTTL:         stopWriteBudget() + 10*time.Second,
+			ClaimTTL:         idleSuspendClaimLease(),
 		}
 	default:
 		if agent.Phase != string(state.PhaseRunning) || agent.Activity != string(state.ActivityStalled) || agent.RunID != snapshot.RunID {
@@ -6171,8 +6196,11 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 	}
 	// ClaimIdleSuspend is the single commit point for idle auto-suspend: once
 	// DispatchAgentStop succeeds, the stop is irreversible and run_intent is
-	// never reverted to running. Only a run change, delete/reincarnation, or
-	// foreign start claim skips recording phase=suspended.
+	// never reverted to running. Only a run change, delete/reincarnation,
+	// foreign start claim, or concurrent user lifecycle action (which clears
+	// idle_suspend_claim_until) skips recording phase=suspended.
+	// Post-stop commit failure, hub crash, and stop-dispatch timeout recovery
+	// are tracked in ptone/scion#8204.
 	recorded, err := s.recordStopStatus(ctx, agent.ID, stopRunID, "auto-suspend", statusUpdate)
 	// The op covers the dispatch and the status write only: it ends here,
 	// before the claim and quota releases and the publish below.

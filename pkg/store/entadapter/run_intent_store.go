@@ -99,6 +99,7 @@ func (s *AgentStore) SwapRunIntent(ctx context.Context, agentID string, intent s
 		SetRunIntent(string(intent)).
 		SetRunIntentAt(at).
 		SetRunIntentMarkedAt(at).
+		ClearIdleSuspendClaimUntil().
 		Save(ctx); err != nil {
 		return "", time.Time{}, mapError(err)
 	}

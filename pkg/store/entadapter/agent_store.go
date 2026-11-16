@@ -485,7 +485,11 @@ func (s *AgentStore) GetAgent(ctx context.Context, id string) (*store.Agent, err
 	if err != nil {
 		return nil, mapError(err)
 	}
-	return entAgentToStore(a), nil
+	sa := entAgentToStore(a)
+	if err := s.populateIdleSuspendClaimActive(ctx, sa); err != nil {
+		return nil, err
+	}
+	return sa, nil
 }
 
 // GetAgentRunState implements store.AgentStore.GetAgentRunState: one
@@ -521,7 +525,11 @@ func (s *AgentStore) GetAgentBySlug(ctx context.Context, projectID, slug string)
 	if err != nil {
 		return nil, mapError(err)
 	}
-	return entAgentToStore(a), nil
+	sa := entAgentToStore(a)
+	if err := s.populateIdleSuspendClaimActive(ctx, sa); err != nil {
+		return nil, err
+	}
+	return sa, nil
 }
 
 // GetAgentsByIDs retrieves agents by a list of IDs.
@@ -1549,7 +1557,11 @@ func agentFilterPredicates(filter store.AgentFilter) ([]predicate.Agent, error) 
 	}
 	switch {
 	case filter.Phase != "" && filter.OrRunIntent != "":
-		preds = append(preds, agent.Or(agent.PhaseEQ(filter.Phase), agent.RunIntentEQ(filter.OrRunIntent)))
+		preds = append(preds, agent.Or(
+			agent.PhaseEQ(filter.Phase),
+			agent.RunIntentEQ(filter.OrRunIntent),
+			agent.IdleSuspendClaimUntilNotNil(),
+		))
 	case filter.Phase != "":
 		preds = append(preds, agent.PhaseEQ(filter.Phase))
 	case filter.OrRunIntent != "":
@@ -2056,7 +2068,15 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 			upd.SetLaunchEndReason(store.LaunchEndReasonRunningObserved)
 		}
 	}
-	if su.Phase == string(state.PhaseStarting) || (su.Phase == string(state.PhaseRunning) && su.StartWrite) {
+	// Any hub-authored lifecycle write (stop, stop-all, suspend, restart, hold,
+	// queued stop, limits stop, start) other than the idle-suspend commit
+	// itself invalidates an in-flight idle-suspend claim so a concurrent idle
+	// worker can never overwrite a user or hub lifecycle action with
+	// suspended(idle). Container and runtime reports (isAgentReport) preserve
+	// the claim unless transitioning to starting.
+	if (!isAgentReport(su) && su.IfIdleSuspendCommit == nil &&
+		(su.Phase != "" || su.ContainerStatus == store.ContainerStatusStopQueued || su.SuspendReason != "")) ||
+		su.Phase == string(state.PhaseStarting) {
 		upd.ClearIdleSuspendClaimUntil()
 	}
 

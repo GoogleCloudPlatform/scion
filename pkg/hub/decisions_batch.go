@@ -326,7 +326,7 @@ func (s *Server) handleDecisionSetAnswer(w http.ResponseWriter, r *http.Request,
 			return
 		}
 	}
-	responseMsg := decisionSetResponseStoreMessage(user, ds, chatKey, requested, choices, asker, askerGone)
+	responseMsg := s.decisionSetResponseStoreMessage(user, ds, chatKey, requested, choices, asker, askerGone)
 
 	// Steps 5 to 7 in one transaction.
 	res, err := s.store.RecordAnswerSet(ctx, &store.RecordAnswerSetInput{
@@ -432,7 +432,7 @@ func sameSetAnswers(prior []*store.DecisionAnswer, userID string, choices map[st
 // position order. A gone asker (askerGone; asker is then unused) or one
 // that cannot take a message gets the row born failed, as for a one-click
 // answer.
-func decisionSetResponseStoreMessage(user UserIdentity, ds []*store.Decision, chatKey string, requested map[string]bool, choices map[string]messages.Choice, asker *store.Agent, askerGone bool) *store.Message {
+func (s *Server) decisionSetResponseStoreMessage(user UserIdentity, ds []*store.Decision, chatKey string, requested map[string]bool, choices map[string]messages.Choice, asker *store.Agent, askerGone bool) *store.Message {
 	var parts []string
 	for _, d := range ds {
 		if requested[d.ID] {
@@ -465,7 +465,7 @@ func decisionSetResponseStoreMessage(user UserIdentity, ds []*store.Decision, ch
 		m.DispatchFailureReason = &reason
 	} else {
 		m.Recipient = "agent:" + asker.Slug
-		if unreachable, why := isAgentUnreachable(asker); unreachable {
+		if unreachable, why := s.isAgentUnreachable(asker); unreachable {
 			reason := agentUnreachableReason(why)
 			m.DispatchState = store.MessageDispatchFailed
 			m.DispatchFailureReason = &reason
@@ -589,7 +589,7 @@ func (s *Server) deliverDecisionSetResponse(ctx context.Context, asker *store.Ag
 	dctx, cancel := context.WithTimeout(withDispatchMessageID(context.WithoutCancel(ctx), m.ID), 30*time.Second)
 	defer cancel()
 	if _, err := s.holdOrDispatch(dctx, asker, m.ID, m, func() error {
-		return dispatchWithBrokerRetry(dctx, s.store, s.recordLog(), dispatcher, asker, text, false, sm)
+		return dispatchWithBrokerRetry(dctx, s.deliveryMarker(), s.recordLog(), dispatcher, asker, text, false, sm)
 	}); err != nil {
 		s.messageLog.Error("decisions: failed to deliver set decision-response", "agent", asker.Slug, "message_id", m.ID, "error", err)
 		_ = s.markFailed(context.WithoutCancel(ctx), m.ID, err.Error())

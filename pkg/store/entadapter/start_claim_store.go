@@ -237,6 +237,7 @@ func (s *AgentStore) ClaimAgentStart(ctx context.Context, agentID, owner string,
 			SetRunIntent(string(store.RunIntentRunning)).
 			SetRunIntentAt(intentAt).
 			SetRunIntentMarkedAt(intentAt).
+			ClearIdleSuspendClaimUntil().
 			Save(ctx); err != nil {
 			return false, mapError(err)
 		}
@@ -283,6 +284,7 @@ func (s *AgentStore) ClaimAgentStop(ctx context.Context, agentID, owner string, 
 			ClearStartClaimUnconfirmedAt().
 			ClearStartClaimHoldUntil().
 			SetStartClaimLaunchID("").
+			ClearIdleSuspendClaimUntil().
 			Save(ctx); err != nil {
 			return false, mapError(err)
 		}
@@ -459,6 +461,7 @@ func (s *AgentStore) ConvertUnconfirmedToStop(ctx context.Context, agentID, clai
 			ClearStartClaimUnconfirmedAt().
 			ClearStartClaimHoldUntil().
 			SetStartClaimLaunchID("").
+			ClearIdleSuspendClaimUntil().
 			Save(ctx); err != nil {
 			return false, mapError(err)
 		}
@@ -601,6 +604,7 @@ func (s *AgentStore) ClaimAgentReincarnation(ctx context.Context, agentID string
 			).
 			SetReincarnationState(store.ReincarnationStatePending).
 			SetReincarnationUpdatedAt(at).
+			ClearIdleSuspendClaimUntil().
 			SetStateVersion(newVersion).
 			SetUpdated(time.Now()).
 			Save(ctx)

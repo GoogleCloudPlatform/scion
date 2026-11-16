@@ -464,12 +464,19 @@ func TestRecorderLinkErrors(t *testing.T) {
 }
 
 // TestMessageDispatchCallsMarkAgentDelivery enforces that every non-test
-// AgentDispatcher.DispatchAgentMessage call in pkg/hub (and its scanned
-// subpackages) routes through dispatchMarkedAgentMessage, that
-// dispatchMarkedAgentMessage stamps/checks MarkAgentDelivery via
-// markAgentForDispatch, and that no production caller passes nil for the
-// agentDeliveryMarker parameter of dispatchMarkedAgentMessage or
-// dispatchWithBrokerRetry.
+// AgentDispatcher.DispatchAgentMessage reference in pkg/hub (and its scanned
+// subpackages) lives inside dispatchMarkedAgentMessage — catching both direct
+// calls and method-value / method-expression bypasses such as
+// `send := d.DispatchAgentMessage` — that dispatchMarkedAgentMessage stamps
+// and checks MarkAgentDelivery via markAgentForDispatch, and that no
+// production caller passes nil for the agentDeliveryMarker parameter of
+// dispatchMarkedAgentMessage or dispatchWithBrokerRetry.
+//
+// Note: Server.managedAgentMessage (hub-managed runtimes with no runtime broker
+// container) delivers in-process without calling DispatchAgentMessage or
+// MarkAgentDelivery. That is safe while managed agents cannot be idle-suspend
+// candidates (ListIdleSuspendCandidates requires a non-empty runtime_broker_id
+// and managed runtimes do not support suspend/resume).
 func TestMessageDispatchCallsMarkAgentDelivery(t *testing.T) {
 	funcs := parseHubFuncs(t)
 
@@ -506,42 +513,14 @@ func TestMessageDispatchCallsMarkAgentDelivery(t *testing.T) {
 		if f.Name.Name != guardScanPackage(rel) {
 			continue
 		}
-		for _, decl := range f.Decls {
-			fd, ok := decl.(*ast.FuncDecl)
-			if !ok || fd.Body == nil {
-				continue
-			}
-			fnName := funcDeclKey(fd)
-			ast.Inspect(fd.Body, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				var callee string
-				switch fun := call.Fun.(type) {
-				case *ast.Ident:
-					callee = fun.Name
-				case *ast.SelectorExpr:
-					callee = fun.Sel.Name
-				}
-				if fnName == "dispatchMarkedAgentMessage" && callee == "markAgentForDispatch" {
-					foundMarkedHelperCall = true
-				}
-				if callee == "dispatchMarkedAgentMessage" || callee == "dispatchWithBrokerRetry" {
-					chokeCalls++
-					if len(call.Args) < 2 {
-						pos := fset.Position(call.Pos())
-						t.Errorf("%s:%d (%s): %s called with fewer than 2 arguments", pos.Filename, pos.Line, fnName, callee)
-						return true
-					}
-					if id, isIdent := call.Args[1].(*ast.Ident); isIdent && id.Name == "nil" {
-						pos := fset.Position(call.Pos())
-						t.Errorf("%s:%d (%s): %s passes nil for agentDeliveryMarker; pass the store so MarkAgentDelivery runs fail-closed", pos.Filename, pos.Line, fnName, callee)
-					}
-				}
-				return true
-			})
+		violations, markedHelper, calls := inspectMessageDispatchFile(fset, f)
+		for _, v := range violations {
+			t.Error(v)
 		}
+		if markedHelper {
+			foundMarkedHelperCall = true
+		}
+		chokeCalls += calls
 	}
 	if !foundMarkedHelperCall {
 		t.Fatalf("dispatchMarkedAgentMessage must call markAgentForDispatch before DispatchAgentMessage")
@@ -549,4 +528,74 @@ func TestMessageDispatchCallsMarkAgentDelivery(t *testing.T) {
 	if chokeCalls == 0 {
 		t.Fatalf("scanner self-check failed: found zero calls to dispatchMarkedAgentMessage / dispatchWithBrokerRetry")
 	}
+
+	t.Run("catches method-value and package-var bypasses", func(t *testing.T) {
+		const src = `package hub
+func sneakyFunc(d AgentDispatcher) {
+	send := d.DispatchAgentMessage
+	_ = send
+}
+var sneakyPkgVar = AgentDispatcher.DispatchAgentMessage
+func nilMarkerBypass() {
+	_ = dispatchMarkedAgentMessage(nil, nil, nil, nil, nil, nil, "", false, nil)
+}
+`
+		synthFset := token.NewFileSet()
+		sf, err := parser.ParseFile(synthFset, "sneaky.go", src, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse synthetic file: %v", err)
+		}
+		violations, _, _ := inspectMessageDispatchFile(synthFset, sf)
+		if len(violations) != 3 {
+			t.Fatalf("expected 3 violations on synthetic bypass file, got %d: %v", len(violations), violations)
+		}
+	})
+}
+
+func inspectMessageDispatchFile(fset *token.FileSet, f *ast.File) (violations []string, foundMarkedHelperCall bool, chokeCalls int) {
+	for _, decl := range f.Decls {
+		fnName := "<package>"
+		var root ast.Node = decl
+		if fd, ok := decl.(*ast.FuncDecl); ok {
+			if fd.Body == nil {
+				continue
+			}
+			fnName = funcDeclKey(fd)
+			root = fd.Body
+		}
+		ast.Inspect(root, func(n ast.Node) bool {
+			if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == "DispatchAgentMessage" && fnName != "dispatchMarkedAgentMessage" {
+				pos := fset.Position(sel.Pos())
+				violations = append(violations, fmt.Sprintf("%s:%d (%s): DispatchAgentMessage referenced outside dispatchMarkedAgentMessage; route every message dispatch through dispatchMarkedAgentMessage or dispatchWithBrokerRetry", pos.Filename, pos.Line, fnName))
+			}
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			var callee string
+			switch fun := call.Fun.(type) {
+			case *ast.Ident:
+				callee = fun.Name
+			case *ast.SelectorExpr:
+				callee = fun.Sel.Name
+			}
+			if fnName == "dispatchMarkedAgentMessage" && callee == "markAgentForDispatch" {
+				foundMarkedHelperCall = true
+			}
+			if callee == "dispatchMarkedAgentMessage" || callee == "dispatchWithBrokerRetry" {
+				chokeCalls++
+				if len(call.Args) < 2 {
+					pos := fset.Position(call.Pos())
+					violations = append(violations, fmt.Sprintf("%s:%d (%s): %s called with fewer than 2 arguments", pos.Filename, pos.Line, fnName, callee))
+					return true
+				}
+				if id, isIdent := call.Args[1].(*ast.Ident); isIdent && id.Name == "nil" {
+					pos := fset.Position(call.Pos())
+					violations = append(violations, fmt.Sprintf("%s:%d (%s): %s passes nil for agentDeliveryMarker; pass s.deliveryMarker() so MarkAgentDelivery runs fail-closed when enabled", pos.Filename, pos.Line, fnName, callee))
+				}
+			}
+			return true
+		})
+	}
+	return violations, foundMarkedHelperCall, chokeCalls
 }

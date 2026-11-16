@@ -454,7 +454,8 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			mode = s.autoWakeModeOf(input.TargetAgent)
 		}
 		isFanoutMention := input.SkipPhaseGate && input.Type == messages.TypeMention
-		autoWake = mode == autoWakeResume || (mode == autoWakeAwait && (!isFanoutMention || input.TargetAgent.IdleSuspendClaimActive))
+		claimActive := s.idleSuspendDeliveryGateActive() && input.TargetAgent.IdleSuspendClaimActive
+		autoWake = mode == autoWakeResume || (mode == autoWakeAwait && (!isFanoutMention || claimActive))
 		switch {
 		case holdErr != nil:
 			return nil, heldLookupFaultDMError()
@@ -500,7 +501,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			// SkipPhaseGate applies only to mention deliveries — a non-mention
 			// send always gets the phase gate, regardless of the flag, so a
 			// caller cannot use it to bypass phase checks for a primary send.
-			if phaseErr := validateAgentDeliverable(input.TargetAgent); phaseErr != nil {
+			if phaseErr := s.validateAgentDeliverable(input.TargetAgent); phaseErr != nil {
 				return nil, phaseErr
 			}
 		}
@@ -780,7 +781,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			}))
 		}
 		held, dispatchErr = s.holdOrDispatch(dctx, input.TargetAgent, msgID, storeMsg, func() error {
-			return dispatchWithBrokerRetry(withDispatchMessageID(dctx, msgID), s.store, nil, dispatcher, input.TargetAgent, dispatchMsg.Msg, input.Urgent || input.Interrupt, dispatchMsg, retryOpts...)
+			return dispatchWithBrokerRetry(withDispatchMessageID(dctx, msgID), s.deliveryMarker(), nil, dispatcher, input.TargetAgent, dispatchMsg.Msg, input.Urgent || input.Interrupt, dispatchMsg, retryOpts...)
 		})
 	}
 
@@ -966,7 +967,7 @@ func (s *Server) agentDMAutoWakeItem(input *AgentDMInput, storeMsg *store.Messag
 				err = s.managedAgentMessage(dctx, woken, input.Msg, input.Urgent || input.Interrupt)
 			} else if dispatcher := s.GetDispatcher(); dispatcher != nil && woken.RuntimeBrokerID != "" {
 				held, err = s.holdOrDispatch(dctx, woken, msgID, nil, func() error {
-					return dispatchWithBrokerRetry(withDispatchMessageID(dctx, msgID), s.store, nil, dispatcher, woken, dispatchMsg.Msg, input.Urgent || input.Interrupt, dispatchMsg)
+					return dispatchWithBrokerRetry(withDispatchMessageID(dctx, msgID), s.deliveryMarker(), nil, dispatcher, woken, dispatchMsg.Msg, input.Urgent || input.Interrupt, dispatchMsg)
 				})
 			} else {
 				// No pre-check ran this late (the sync path's

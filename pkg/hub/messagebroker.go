@@ -88,6 +88,10 @@ type MessageBrokerProxy struct {
 	// gate before dispatching a persisted broker message (ptone/scion#7881).
 	holdOrDispatch func(ctx context.Context, agent *store.Agent, messageID string, storeMsg *store.Message, dispatchFn func() error) (bool, error)
 
+	// idleSuspendGate, when non-nil, reports whether both lifecycle.idle_suspend
+	// and server.hub.auto_suspend_idle are enabled. Nil means off (AC 8).
+	idleSuspendGate func() bool
+
 	mu                  sync.Mutex
 	subscriptions       map[string][]eventbus.Subscription // projectID -> active subscriptions
 	pluginSubscriptions map[string]eventbus.Subscription   // pattern -> plugin-initiated subscription
@@ -1149,7 +1153,7 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 	// the recipient's phase. Skipped for a migrating agent — the migration
 	// gate above already decided this message is deferred, not dropped.
 	if !deferred {
-		if phaseErr := validateAgentDeliverable(agent); phaseErr != nil {
+		if phaseErr := p.validateAgentDeliverable(agent); phaseErr != nil {
 			p.log.Warn("Rejecting broker message to non-running agent",
 				"agentSlug", agentSlug, "projectID", projectID, "phase", agent.Phase)
 			p.publishDeliveryFailed(ctx, projectID, agentSlug, msg, errors.New(phaseErr.Message))
@@ -1319,7 +1323,7 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 	// The 30s brokerCallbackTimeout is shared with pre-dispatch work above
 	// (agent lookup, persistence), so retries get slightly less than 30s.
 	if _, err := p.holdOrDispatchMessage(ctx, agent, storeMsg, func() error {
-		return dispatchWithBrokerRetry(withDispatchMessageID(ctx, storeMsg.ID), p.store, nil, dispatcher, agent, msg.Msg, msg.Urgent, msg)
+		return dispatchWithBrokerRetry(withDispatchMessageID(ctx, storeMsg.ID), p.deliveryMarker(), nil, dispatcher, agent, msg.Msg, msg.Urgent, msg)
 	}); err != nil {
 		p.log.Error("Failed to dispatch broker message to agent",
 			"agentSlug", agentSlug, "error", err)
@@ -1490,7 +1494,7 @@ func (p *MessageBrokerProxy) publishDeliveryFailed(ctx context.Context, projectI
 	if dispatcher == nil {
 		return
 	}
-	if err := dispatchMarkedAgentMessage(ctx, p.store, p.messageLog, nil, dispatcher, senderAgent, failMsg, false, structuredMsg); err != nil {
+	if err := dispatchMarkedAgentMessage(ctx, p.deliveryMarker(), p.messageLog, nil, dispatcher, senderAgent, failMsg, false, structuredMsg); err != nil {
 		p.log.Warn("Failed to dispatch DELIVERY_FAILED notification",
 			"senderID", msg.SenderID, "error", err)
 	}
@@ -1539,10 +1543,41 @@ func (p *MessageBrokerProxy) publishDeliveryDeferred(ctx context.Context, agentS
 	if dispatcher == nil {
 		return
 	}
-	if err := dispatchMarkedAgentMessage(ctx, p.store, p.messageLog, nil, dispatcher, senderAgent, deferredMsg, false, structuredMsg); err != nil {
+	if err := dispatchMarkedAgentMessage(ctx, p.deliveryMarker(), p.messageLog, nil, dispatcher, senderAgent, deferredMsg, false, structuredMsg); err != nil {
 		p.log.Warn("Failed to dispatch DELIVERY_DEFERRED notification",
 			"senderID", msg.SenderID, "error", err)
 	}
+}
+
+// SetIdleSuspendGate sets the callback reporting whether the idle-suspend
+// delivery gate is active (both lifecycle.idle_suspend and auto_suspend_idle on).
+func (p *MessageBrokerProxy) SetIdleSuspendGate(fn func() bool) {
+	p.mu.Lock()
+	p.idleSuspendGate = fn
+	p.mu.Unlock()
+}
+
+func (p *MessageBrokerProxy) idleSuspendGateActive() bool {
+	if p == nil {
+		return false
+	}
+	p.mu.Lock()
+	fn := p.idleSuspendGate
+	p.mu.Unlock()
+	return fn != nil && fn()
+}
+
+func (p *MessageBrokerProxy) deliveryMarker() agentDeliveryMarker {
+	return gatedDeliveryMarker{store: p.store, gate: p.idleSuspendGateActive}
+}
+
+func (p *MessageBrokerProxy) validateAgentDeliverable(agent *store.Agent) *AgentDMError {
+	if agent != nil && agent.IdleSuspendClaimActive && !p.idleSuspendGateActive() {
+		cp := *agent
+		cp.IdleSuspendClaimActive = false
+		agent = &cp
+	}
+	return validateAgentDeliverable(agent)
 }
 
 // containsSuffix checks if a dot-separated subject string ends with the given suffix.

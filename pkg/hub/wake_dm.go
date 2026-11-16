@@ -514,11 +514,27 @@ func validateGroupMemberDeliverable(agent *store.Agent) *AgentDMError {
 // enabled and suspend_reason is idle or stalled), a direct message wakes the
 // agent automatically without --wake, so the hint omits "--wake".
 func (s *Server) groupMemberDeliverableError(agent *store.Agent) *AgentDMError {
-	err := validateGroupMemberDeliverable(agent)
-	if err != nil && s.shouldAutoWake(agent) {
+	err := s.validateAgentDeliverable(agent)
+	claimSuspending := s != nil && s.idleSuspendDeliveryGateActive() && agent != nil && agent.IdleSuspendClaimActive
+	if err != nil && (state.Phase(store.EffectiveRestingPhase(agent)) == state.PhaseSuspended || claimSuspending) {
+		err.Message = fmt.Sprintf("agent %q is suspended; group messages do not wake agents — message it directly with --wake", agent.Slug)
+	}
+	if err != nil && (s.shouldAutoWake(agent) || claimSuspending) {
 		err.Message = fmt.Sprintf("agent %q is suspended; group messages do not wake agents — message it directly to wake and deliver", agent.Slug)
 	}
 	return err
+}
+
+// validateAgentDeliverable checks target deliverability while ignoring any
+// in-memory IdleSuspendClaimActive flag when the idle-suspend delivery gate is
+// off (AC 8).
+func (s *Server) validateAgentDeliverable(agent *store.Agent) *AgentDMError {
+	if agent != nil && agent.IdleSuspendClaimActive && (s == nil || !s.idleSuspendDeliveryGateActive()) {
+		cp := *agent
+		cp.IdleSuspendClaimActive = false
+		agent = &cp
+	}
+	return validateAgentDeliverable(agent)
 }
 
 func agentTargetLabel(agent *store.Agent) string {
@@ -590,6 +606,9 @@ func validateAgentDeliverable(agent *store.Agent) *AgentDMError {
 func deferredReason(agent *store.Agent) string {
 	if reincarnationInFlight(agent) {
 		return "agent is reincarnating"
+	}
+	if agent != nil && (agent.IdleSuspendClaimActive || agent.IdleSuspendClaimUntil != nil) {
+		return "agent is suspending"
 	}
 	if agent.StartClaimKind == store.StartClaimStop {
 		return "a stop is in progress for the agent"

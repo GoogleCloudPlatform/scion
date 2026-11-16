@@ -303,6 +303,236 @@ func TestAgentStore_ClaimIdleSuspend_AndDeliveryHandshake(t *testing.T) {
 		assert.ErrorIs(t, err, store.ErrIdleSuspendPrecondition)
 	})
 
+	t.Run("R1: user stop and other lifecycle actions invalidate idle claim and reject commit", func(t *testing.T) {
+		t.Run("reviewer reproducer: user stop UpdateAgentStatus is never overwritten by idle commit", func(t *testing.T) {
+			a, cond := makeEligible("user-stop-repro")
+			got, err := s.GetAgent(ctx, a.ID)
+			require.NoError(t, err)
+
+			_, _, claimUntil, err := s.ClaimIdleSuspend(ctx, a.ID, cond)
+			require.NoError(t, err)
+			require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+				Phase:           string(state.PhaseStopped),
+				ContainerStatus: "stopped",
+				IfRunID:         got.RunID,
+			}))
+			err = s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+				Phase:               string(state.PhaseSuspended),
+				RetainedActivity:    string(state.ActivityIdle),
+				SuspendReason:       string(state.SuspendReasonIdle),
+				IfRunID:             got.RunID,
+				IfIdleSuspendCommit: &claimUntil,
+			})
+			require.ErrorIs(t, err, store.ErrIdleSuspendPrecondition)
+
+			after, err := s.GetAgent(ctx, a.ID)
+			require.NoError(t, err)
+			assert.Equal(t, string(state.PhaseStopped), after.Phase)
+			assert.Empty(t, after.SuspendReason)
+			assert.Nil(t, after.IdleSuspendClaimUntil)
+			assert.False(t, after.IdleSuspendClaimActive)
+		})
+
+		t.Run("SwapRunIntent invalidates claim before user stop status write lands", func(t *testing.T) {
+			a, cond := makeEligible("swap-intent-invalidates")
+			_, _, claimUntil, err := s.ClaimIdleSuspend(ctx, a.ID, cond)
+			require.NoError(t, err)
+
+			_, _, err = s.SwapRunIntent(ctx, a.ID, store.RunIntentStopped)
+			require.NoError(t, err)
+
+			mid, err := s.GetAgent(ctx, a.ID)
+			require.NoError(t, err)
+			assert.Nil(t, mid.IdleSuspendClaimUntil)
+			assert.False(t, mid.IdleSuspendClaimActive)
+
+			err = s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+				Phase:               string(state.PhaseSuspended),
+				RetainedActivity:    string(state.ActivityIdle),
+				SuspendReason:       string(state.SuspendReasonIdle),
+				IfRunID:             a.RunID,
+				IfIdleSuspendCommit: &claimUntil,
+			})
+			require.ErrorIs(t, err, store.ErrIdleSuspendPrecondition)
+		})
+
+		t.Run("user suspend invalidates claim and keeps suspend_reason user", func(t *testing.T) {
+			a, cond := makeEligible("user-suspend-invalidates")
+			_, _, claimUntil, err := s.ClaimIdleSuspend(ctx, a.ID, cond)
+			require.NoError(t, err)
+
+			require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+				Phase:            string(state.PhaseSuspended),
+				ContainerStatus:  "stopped",
+				RetainedActivity: string(state.ActivityIdle),
+				SuspendReason:    string(state.SuspendReasonUser),
+				IfRunID:          a.RunID,
+			}))
+
+			err = s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+				Phase:               string(state.PhaseSuspended),
+				RetainedActivity:    string(state.ActivityIdle),
+				SuspendReason:       string(state.SuspendReasonIdle),
+				IfRunID:             a.RunID,
+				IfIdleSuspendCommit: &claimUntil,
+			})
+			require.ErrorIs(t, err, store.ErrIdleSuspendPrecondition)
+
+			after, err := s.GetAgent(ctx, a.ID)
+			require.NoError(t, err)
+			assert.Equal(t, string(state.PhaseSuspended), after.Phase)
+			assert.Equal(t, string(state.SuspendReasonUser), after.SuspendReason)
+		})
+
+		t.Run("ClaimAgentStart, ClaimAgentStop, ClaimAgentReincarnation, and UpdateAgentDeletion invalidate claim", func(t *testing.T) {
+			// ClaimAgentStart
+			aStart, condStart := makeEligible("claim-start-invalidates")
+			_, _, cuStart, err := s.ClaimIdleSuspend(ctx, aStart.ID, condStart)
+			require.NoError(t, err)
+			_, err = s.ClaimAgentStart(ctx, aStart.ID, "hub-1", store.StartClaimUser, "", 30*time.Second)
+			require.NoError(t, err)
+			err = s.UpdateAgentStatus(ctx, aStart.ID, store.AgentStatusUpdate{
+				Phase:               string(state.PhaseSuspended),
+				SuspendReason:       string(state.SuspendReasonIdle),
+				IfIdleSuspendCommit: &cuStart,
+			})
+			assert.ErrorIs(t, err, store.ErrIdleSuspendPrecondition)
+
+			// ClaimAgentStop
+			aStop, condStop := makeEligible("claim-stop-invalidates")
+			_, intentAt, cuStop, err := s.ClaimIdleSuspend(ctx, aStop.ID, condStop)
+			require.NoError(t, err)
+			_, err = s.ClaimAgentStop(ctx, aStop.ID, "hub-1", intentAt, 30*time.Second)
+			require.NoError(t, err)
+			err = s.UpdateAgentStatus(ctx, aStop.ID, store.AgentStatusUpdate{
+				Phase:               string(state.PhaseSuspended),
+				SuspendReason:       string(state.SuspendReasonIdle),
+				IfIdleSuspendCommit: &cuStop,
+			})
+			assert.ErrorIs(t, err, store.ErrIdleSuspendPrecondition)
+
+			// ClaimAgentReincarnation
+			aReinc, condReinc := makeEligible("claim-reinc-invalidates")
+			_, _, cuReinc, err := s.ClaimIdleSuspend(ctx, aReinc.ID, condReinc)
+			require.NoError(t, err)
+			curReinc, err := s.GetAgent(ctx, aReinc.ID)
+			require.NoError(t, err)
+			_, err = s.ClaimAgentReincarnation(ctx, aReinc.ID, curReinc.StateVersion, time.Now())
+			require.NoError(t, err)
+			afterReinc, err := s.GetAgent(ctx, aReinc.ID)
+			require.NoError(t, err)
+			assert.Nil(t, afterReinc.IdleSuspendClaimUntil)
+			err = s.UpdateAgentStatus(ctx, aReinc.ID, store.AgentStatusUpdate{
+				Phase:               string(state.PhaseSuspended),
+				SuspendReason:       string(state.SuspendReasonIdle),
+				IfIdleSuspendCommit: &cuReinc,
+			})
+			assert.ErrorIs(t, err, store.ErrIdleSuspendPrecondition)
+
+			// UpdateAgentDeletion
+			aDel, condDel := makeEligible("del-invalidates")
+			_, _, cuDel, err := s.ClaimIdleSuspend(ctx, aDel.ID, condDel)
+			require.NoError(t, err)
+			delState := store.DeletionStateDeleting
+			lease := time.Now().Add(time.Minute)
+			n, err := s.UpdateAgentDeletion(ctx, aDel.ID, store.DeletionPredicate{}, store.DeletionFields{
+				State:   &delState,
+				LeaseAt: &lease,
+			})
+			require.NoError(t, err)
+			require.Equal(t, 1, n)
+			err = s.UpdateAgentStatus(ctx, aDel.ID, store.AgentStatusUpdate{
+				Phase:               string(state.PhaseSuspended),
+				SuspendReason:       string(state.SuspendReasonIdle),
+				IfIdleSuspendCommit: &cuDel,
+			})
+			assert.ErrorIs(t, err, store.ErrIdleSuspendPrecondition)
+		})
+
+		t.Run("expired claim lease and container limits_exceeded or non-zero exit stop are rejected", func(t *testing.T) {
+			aExp, condExp := makeEligible("expired-claim")
+			condExp.ClaimTTL = 2 * time.Millisecond
+			_, _, cuExp, err := s.ClaimIdleSuspend(ctx, aExp.ID, condExp)
+			require.NoError(t, err)
+			time.Sleep(10 * time.Millisecond)
+			err = s.UpdateAgentStatus(ctx, aExp.ID, store.AgentStatusUpdate{
+				Phase:               string(state.PhaseSuspended),
+				SuspendReason:       string(state.SuspendReasonIdle),
+				IfRunID:             aExp.RunID,
+				IfIdleSuspendCommit: &cuExp,
+			})
+			assert.ErrorIs(t, err, store.ErrIdleSuspendPrecondition)
+
+			aLim, condLim := makeEligible("limits-stop")
+			_, _, cuLim, err := s.ClaimIdleSuspend(ctx, aLim.ID, condLim)
+			require.NoError(t, err)
+			require.NoError(t, s.UpdateAgentStatus(ctx, aLim.ID, store.AgentStatusUpdate{
+				Phase:              string(state.PhaseStopped),
+				Activity:           string(state.ActivityLimitsExceeded),
+				ReportSource:       store.StatusReportSourceAgent,
+				ReportRunID:        aLim.RunID,
+				ReportAgentToken:   true,
+				GuardReincarnation: true,
+			}))
+			err = s.UpdateAgentStatus(ctx, aLim.ID, store.AgentStatusUpdate{
+				Phase:               string(state.PhaseSuspended),
+				SuspendReason:       string(state.SuspendReasonIdle),
+				IfRunID:             aLim.RunID,
+				IfIdleSuspendCommit: &cuLim,
+			})
+			assert.ErrorIs(t, err, store.ErrIdleSuspendPrecondition)
+
+			aExit, condExit := makeEligible("nonzero-exit-stop")
+			_, _, cuExit, err := s.ClaimIdleSuspend(ctx, aExit.ID, condExit)
+			require.NoError(t, err)
+			exitOne := 1
+			require.NoError(t, s.UpdateAgentStatus(ctx, aExit.ID, store.AgentStatusUpdate{
+				Phase:              string(state.PhaseStopped),
+				ExitCode:           &exitOne,
+				ReportSource:       store.StatusReportSourceRuntime,
+				ReportRunID:        aExit.RunID,
+				GuardReincarnation: true,
+			}))
+			err = s.UpdateAgentStatus(ctx, aExit.ID, store.AgentStatusUpdate{
+				Phase:               string(state.PhaseSuspended),
+				SuspendReason:       string(state.SuspendReasonIdle),
+				IfRunID:             aExit.RunID,
+				IfIdleSuspendCommit: &cuExit,
+			})
+			assert.ErrorIs(t, err, store.ErrIdleSuspendPrecondition)
+		})
+	})
+
+	t.Run("O1: GetAgent and GetAgentBySlug populate IdleSuspendClaimActive", func(t *testing.T) {
+		a, cond := makeEligible("get-claim-active")
+
+		beforeByID, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.False(t, beforeByID.IdleSuspendClaimActive)
+		beforeBySlug, err := s.GetAgentBySlug(ctx, a.ProjectID, a.Slug)
+		require.NoError(t, err)
+		assert.False(t, beforeBySlug.IdleSuspendClaimActive)
+
+		cond.ClaimTTL = 25 * time.Millisecond
+		_, _, _, err = s.ClaimIdleSuspend(ctx, a.ID, cond)
+		require.NoError(t, err)
+
+		duringByID, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.True(t, duringByID.IdleSuspendClaimActive)
+		duringBySlug, err := s.GetAgentBySlug(ctx, a.ProjectID, a.Slug)
+		require.NoError(t, err)
+		assert.True(t, duringBySlug.IdleSuspendClaimActive)
+
+		time.Sleep(35 * time.Millisecond)
+		expiredByID, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.False(t, expiredByID.IdleSuspendClaimActive)
+		expiredBySlug, err := s.GetAgentBySlug(ctx, a.ProjectID, a.Slug)
+		require.NoError(t, err)
+		assert.False(t, expiredBySlug.IdleSuspendClaimActive)
+	})
+
 	t.Run("IfNoStartClaim and IfAutoWakeReason guard conversion CAS", func(t *testing.T) {
 		a, _ := makeEligible("convert-cas")
 		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{

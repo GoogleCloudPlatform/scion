@@ -250,7 +250,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 
 	// Reject messages to non-running agents (including running rows with an
 	// active idle-suspend claim, treated as suspended).
-	if agent.IdleSuspendClaimActive {
+	if s.idleSuspendDeliveryGateActive() && agent.IdleSuspendClaimActive {
 		writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
 			fmt.Sprintf("Agent %q is suspended.", agent.Slug), nil)
 		return
@@ -626,7 +626,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		defer retryCancel()
 
 		if _, err := s.holdOrDispatch(retryCtx, agent, inboundMsgID, inboundStorePtr, func() error {
-			return dispatchWithBrokerRetry(retryCtx, s.store, nil, dispatcher, agent, req.Message.Msg, req.Message.Urgent, req.Message)
+			return dispatchWithBrokerRetry(retryCtx, s.deliveryMarker(), nil, dispatcher, agent, req.Message.Msg, req.Message.Urgent, req.Message)
 		}); errors.Is(err, ErrBrokerTimeout) {
 			if persisted {
 				s.markInboundFailed(r.Context(), storeMsg.ID, err)

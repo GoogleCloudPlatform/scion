@@ -1004,10 +1004,11 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			defer s.releaseSupersededClaim(ctx, agent.ID, stopSupersedes, stopIntentAt)
 		}
 	case api.AgentActionSuspend:
-		// Only running agents can be suspended via the HTTP lifecycle handler.
-		// (The auto-suspend scheduler does not come through here: it runs its
-		// own inline suspend and restricts itself to running+stalled agents.)
-		if agent.Phase != string(state.PhaseRunning) {
+		// Only running agents (or an agent currently stopping under an active
+		// idle auto-suspend claim, which a user suspend converts into a user
+		// suspension) can be suspended via the HTTP lifecycle handler.
+		idleSuspending := s.idleSuspendDeliveryGateActive() && agent.IdleSuspendClaimActive
+		if agent.Phase != string(state.PhaseRunning) && !idleSuspending {
 			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
 				fmt.Sprintf("Cannot suspend agent in phase %q. Only running agents can be suspended.", agent.Phase), nil)
 			return
@@ -1879,6 +1880,7 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 			}
 
 			supersedes := agent.StartClaimID
+			wasIdleSuspending := s.idleSuspendDeliveryGateActive() && agent.IdleSuspendClaimActive
 			intentAt, err := s.recordRunIntent(ctx, agent, store.RunIntentStopped)
 			if err != nil {
 				res.Status = "error"
@@ -1893,8 +1895,11 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 			// agent whose start is still in flight, the start is not
 			// interrupted: the agent may still come up running, with
 			// intent stopped (as after a user stop whose dispatch failed).
-			// It is reported as stop_recorded rather than stopped.
-			if agent.Phase != string(state.PhaseRunning) {
+			// It is reported as stop_recorded rather than stopped. An agent
+			// mid-idle-suspend whose container already posted stopping/stopped
+			// still runs DispatchAgentStop and recordStopStatus so the user's
+			// stop wins over the idle suspension.
+			if agent.Phase != string(state.PhaseRunning) && !wasIdleSuspending {
 				res.Status = "stopped"
 				if startInFlightPhase(agent.Phase) {
 					res.Status = stopAllStatusStopRecorded

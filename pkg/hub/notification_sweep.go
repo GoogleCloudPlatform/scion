@@ -498,7 +498,7 @@ func (nd *NotificationDispatcher) retryDispatch(ctx context.Context, notif *stor
 	brokerID = subscriber.RuntimeBrokerID
 	err = dispatchWithBrokerRetry(
 		attemptCtx,
-		nd.store,
+		nd.deliveryMarker(),
 		nd.messageLog,
 		dispatcher,
 		subscriber,

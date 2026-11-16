@@ -3330,7 +3330,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			}
 
 			if _, err := s.holdOrDispatch(retryCtx, agent, persistedMsgID, nil, func() error {
-				return dispatchWithBrokerRetry(retryCtx, s.store, nil, dispatcher, agent, dispatchMsg.Msg, req.Interrupt, dispatchMsg, retryOpts...)
+				return dispatchWithBrokerRetry(retryCtx, s.deliveryMarker(), nil, dispatcher, agent, dispatchMsg.Msg, req.Interrupt, dispatchMsg, retryOpts...)
 			}); err != nil {
 				var wakeRefused *errAutoWakeRefused
 				if errors.As(err, &wakeRefused) && wakeRefused.dmErr != nil {
@@ -3848,7 +3848,7 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				groupStoreMsg = storeMsg
 			}
 			if _, err := s.holdOrDispatch(retryCtx, agent, groupMsgID, groupStoreMsg, func() error {
-				return dispatchWithBrokerRetry(retryCtx, s.store, nil, dispatcher, agent, plainMessage, interrupt, &agentMsg)
+				return dispatchWithBrokerRetry(retryCtx, s.deliveryMarker(), nil, dispatcher, agent, plainMessage, interrupt, &agentMsg)
 			}); err != nil {
 				retryCancel()
 				reason := err.Error()
@@ -4431,7 +4431,7 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 			broadcastStoreMsg = storeMsg
 		}
 		_, dispatchErr := s.holdOrDispatch(retryCtx, &agent, broadcastMsgID, broadcastStoreMsg, func() error {
-			return dispatchWithBrokerRetry(retryCtx, s.store, s.recordLog(), dispatcher, &agent, agentMsg.Msg, interrupt, &agentMsg)
+			return dispatchWithBrokerRetry(retryCtx, s.deliveryMarker(), s.recordLog(), dispatcher, &agent, agentMsg.Msg, interrupt, &agentMsg)
 		})
 		retryCancel()
 
@@ -4499,7 +4499,7 @@ func (s *Server) publishBroadcastDeliveryFailed(ctx context.Context, targetAgent
 	if dispatcher == nil {
 		return
 	}
-	if err := dispatchMarkedAgentMessage(ctx, s.store, s.recordLog(), nil, dispatcher, senderAgent, failMsg, false, structuredMsg); err != nil {
+	if err := dispatchMarkedAgentMessage(ctx, s.deliveryMarker(), s.recordLog(), nil, dispatcher, senderAgent, failMsg, false, structuredMsg); err != nil {
 		s.messageLog.Error("Failed to dispatch broadcast DELIVERY_FAILED notification",
 			"sender_id", msg.SenderID, "target_agent", targetAgent.Slug, "error", err)
 	}
@@ -4799,7 +4799,7 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 			mentionStorePtr = storeMsg
 		}
 		if _, dispatchErr := s.holdOrDispatch(dispatchCtx, mentionAgent, mentionMsgID, mentionStorePtr, func() error {
-			return dispatchWithBrokerRetry(dispatchCtx, s.store, s.recordLog(), dispatcher, mentionAgent, mentionMsg.Msg, false, mentionMsg)
+			return dispatchWithBrokerRetry(dispatchCtx, s.deliveryMarker(), s.recordLog(), dispatcher, mentionAgent, mentionMsg.Msg, false, mentionMsg)
 		}); dispatchErr != nil {
 			cancel()
 			var idleErr *errAgentIdleSuspending

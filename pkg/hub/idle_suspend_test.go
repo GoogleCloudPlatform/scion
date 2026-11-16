@@ -327,7 +327,9 @@ func TestIdleSuspend_GatesAndGrace(t *testing.T) {
 
 	t.Run("experiment off does nothing even with setting on", func(t *testing.T) {
 		ctx := context.Background()
-		srv, s := testServer(t)
+		srv, s, counter, _ := testServerWithStoreFault(t, func(inner store.Store, _ *storeFaultSwitch) *countingIdleCandidatesStore {
+			return &countingIdleCandidatesStore{Store: inner}
+		})
 		disp := &runIntentDispatcher{}
 		srv.SetDispatcher(disp)
 		enableIdleSweepForTest(t, srv, 15*time.Minute)
@@ -340,6 +342,7 @@ func TestIdleSuspend_GatesAndGrace(t *testing.T) {
 		srv.agentIdleSuspendHandler()(ctx)
 		srv.waitAutoSuspendIdle()
 
+		assert.Zero(t, counter.listCalls.Load(), "ListIdleSuspendCandidates must not be queried when experiment is off")
 		assert.Zero(t, disp.stops.Load())
 		got, err := s.GetAgent(ctx, agent.ID)
 		require.NoError(t, err)
@@ -348,7 +351,9 @@ func TestIdleSuspend_GatesAndGrace(t *testing.T) {
 
 	t.Run("setting off does nothing even with experiment on", func(t *testing.T) {
 		ctx := context.Background()
-		srv, s := testServer(t)
+		srv, s, counter, _ := testServerWithStoreFault(t, func(inner store.Store, _ *storeFaultSwitch) *countingIdleCandidatesStore {
+			return &countingIdleCandidatesStore{Store: inner}
+		})
 		disp := &runIntentDispatcher{}
 		srv.SetDispatcher(disp)
 		setIdleSuspendExperiment(t, srv, true)
@@ -362,6 +367,7 @@ func TestIdleSuspend_GatesAndGrace(t *testing.T) {
 		srv.agentIdleSuspendHandler()(ctx)
 		srv.waitAutoSuspendIdle()
 
+		assert.Zero(t, counter.listCalls.Load(), "ListIdleSuspendCandidates must not be queried when auto_suspend_idle is off")
 		assert.Zero(t, disp.stops.Load())
 		got, err := s.GetAgent(ctx, agent.ID)
 		require.NoError(t, err)
@@ -1155,6 +1161,7 @@ func TestIdleSuspend_RetainedActivityDisplayAndSuspendedOnlyNotification(t *test
 
 			notifDisp := &recordingDispatcher{}
 			nd := NewNotificationDispatcher(s, srv.events, func() AgentDispatcher { return notifDisp }, slog.Default())
+			nd.idleSuspendGateFn = srv.idleSuspendDeliveryGateActive
 			nd.Start()
 			defer nd.Stop()
 
@@ -1357,38 +1364,84 @@ func claimIdleForTest(t *testing.T, s store.Store, target *store.Agent, runID st
 }
 
 func TestIdleSuspend_DelegatedSenderDMWithActiveClaim(t *testing.T) {
-	ctx := context.Background()
-	srv, s, sender, target := createWakeDMFixtures(t, string(state.PhaseRunning))
-	disp := &recordingDispatcher{}
-	srv.SetDispatcher(disp)
-	enableIdleSweepForTest(t, srv, 15*time.Minute)
+	t.Run("preflight claim populated by GetAgent rejects before persistence", func(t *testing.T) {
+		ctx := context.Background()
+		srv, s, sender, target := createWakeDMFixtures(t, string(state.PhaseRunning))
+		disp := &recordingDispatcher{}
+		srv.SetDispatcher(disp)
+		enableIdleSweepForTest(t, srv, 15*time.Minute)
 
-	target, cond := claimIdleForTest(t, s, target, "run-delegated-claim")
-	_, _, _, err := s.ClaimIdleSuspend(ctx, target.ID, cond)
-	require.NoError(t, err)
+		target, cond := claimIdleForTest(t, s, target, "run-delegated-claim")
+		_, _, _, err := s.ClaimIdleSuspend(ctx, target.ID, cond)
+		require.NoError(t, err)
+		assert.True(t, func() bool {
+			fresh, gerr := s.GetAgent(ctx, target.ID)
+			require.NoError(t, gerr)
+			return fresh.IdleSuspendClaimActive
+		}(), "GetAgent must populate IdleSuspendClaimActive against the store clock")
 
-	bodyBytes, err := json.Marshal(map[string]any{"message": "delegated dm during claim"})
-	require.NoError(t, err)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+target.ID+"/message", bytes.NewReader(bodyBytes))
-	req.Header.Set("Content-Type", "application/json")
-	delegated := &DelegatedAgentIdentity{
-		agentID:           sender.ID,
-		agentProjectID:    sender.ProjectID,
-		authorizingUserID: DevUserID,
-		grantID:           tid("delegated-claim-grant"),
-	}
-	req = req.WithContext(contextWithIdentity(req.Context(), delegated))
-	rec := httptest.NewRecorder()
-	srv.handleAgentMessage(rec, req, target.ID)
+		bodyBytes, err := json.Marshal(map[string]any{"message": "delegated dm during claim"})
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+target.ID+"/message", bytes.NewReader(bodyBytes))
+		req.Header.Set("Content-Type", "application/json")
+		delegated := &DelegatedAgentIdentity{
+			agentID:           sender.ID,
+			agentProjectID:    sender.ProjectID,
+			authorizingUserID: DevUserID,
+			grantID:           tid("delegated-claim-grant"),
+		}
+		req = req.WithContext(contextWithIdentity(req.Context(), delegated))
+		rec := httptest.NewRecorder()
+		srv.handleAgentMessage(rec, req, target.ID)
 
-	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), ErrCodeAgentNotRunning)
-	assert.Empty(t, disp.getCalls(), "delegatedSender DM must never dispatch into dying container while claim is active")
+		assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), ErrCodeAgentNotRunning)
+		assert.Empty(t, disp.getCalls(), "delegatedSender DM must never dispatch into dying container while claim is active")
 
-	msgs, err := s.ListMessages(ctx, store.MessageFilter{RecipientID: target.ID}, store.ListOptions{Limit: 10})
-	require.NoError(t, err)
-	require.Len(t, msgs.Items, 1)
-	assert.Equal(t, store.MessageDispatchFailed, msgs.Items[0].DispatchState)
+		msgs, err := s.ListMessages(ctx, store.MessageFilter{RecipientID: target.ID}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		assert.Empty(t, msgs.Items, "preflight refusal must not persist a message")
+	})
+
+	t.Run("claim acquired after preflight read rejects at dispatch gate and marks row failed", func(t *testing.T) {
+		ctx := context.Background()
+		srv, s, sender, target := createWakeDMFixtures(t, string(state.PhaseRunning))
+		disp := &recordingDispatcher{}
+		srv.SetDispatcher(disp)
+		enableIdleSweepForTest(t, srv, 15*time.Minute)
+
+		target, cond := claimIdleForTest(t, s, target, "run-delegated-race-claim")
+		installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *claimBeforeMarkStore {
+			return &claimBeforeMarkStore{
+				Store:       inner,
+				targetID:    target.ID,
+				claimBefore: func() { _, _, _, _ = s.ClaimIdleSuspend(ctx, target.ID, cond) },
+			}
+		})
+
+		bodyBytes, err := json.Marshal(map[string]any{"message": "delegated dm racing claim"})
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+target.ID+"/message", bytes.NewReader(bodyBytes))
+		req.Header.Set("Content-Type", "application/json")
+		delegated := &DelegatedAgentIdentity{
+			agentID:           sender.ID,
+			agentProjectID:    sender.ProjectID,
+			authorizingUserID: DevUserID,
+			grantID:           tid("delegated-race-claim-grant"),
+		}
+		req = req.WithContext(contextWithIdentity(req.Context(), delegated))
+		rec := httptest.NewRecorder()
+		srv.handleAgentMessage(rec, req, target.ID)
+
+		assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), ErrCodeAgentNotRunning)
+		assert.Empty(t, disp.getCalls(), "delegatedSender DM must never dispatch into dying container when claim wins before MarkAgentDelivery")
+
+		msgs, err := s.ListMessages(ctx, store.MessageFilter{RecipientID: target.ID}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		require.Len(t, msgs.Items, 1)
+		assert.Equal(t, store.MessageDispatchFailed, msgs.Items[0].DispatchState)
+	})
 }
 
 func TestIdleSuspend_NonAutoWakePathsWithActiveClaimAndPreClaimMark(t *testing.T) {
@@ -1402,6 +1455,7 @@ func TestIdleSuspend_NonAutoWakePathsWithActiveClaimAndPreClaimMark(t *testing.T
 				bus := eventbus.NewInProcessEventBus(slog.Default())
 				t.Cleanup(func() { _ = bus.Close() })
 				proxy := NewMessageBrokerProxy(bus, s, srv.events, srv.GetDispatcher, slog.Default())
+				proxy.SetIdleSuspendGate(srv.idleSuspendDeliveryGateActive)
 				sm := &messages.StructuredMessage{
 					Version:     messages.Version,
 					Timestamp:   time.Now().UTC().Format(time.RFC3339),
@@ -1696,4 +1750,325 @@ func TestIdleSuspend_MarkAgentDeliveryStoreErrorFailsClosed(t *testing.T) {
 		require.ErrorIs(t, err, boom)
 		assert.Empty(t, disp.getCalls())
 	})
+}
+
+type countingIdleCandidatesStore struct {
+	store.Store
+	listCalls atomic.Int32
+}
+
+func (w *countingIdleCandidatesStore) ListIdleSuspendCandidates(ctx context.Context, cutoff, heartbeatRecency, liveWorkCutoff time.Time, limit int) ([]store.Agent, error) {
+	w.listCalls.Add(1)
+	return w.Store.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, limit)
+}
+
+type claimBeforeMarkStore struct {
+	store.Store
+	targetID    string
+	fired       atomic.Bool
+	claimBefore func()
+}
+
+func (w *claimBeforeMarkStore) MarkAgentDelivery(ctx context.Context, agentID string) (*store.Agent, bool, error) {
+	if agentID == w.targetID && w.fired.CompareAndSwap(false, true) && w.claimBefore != nil {
+		w.claimBefore()
+	}
+	return w.Store.MarkAgentDelivery(ctx, agentID)
+}
+
+type countingAndFailingMarkDeliveryStore struct {
+	store.Store
+	fault     *storeFaultSwitch
+	markCalls atomic.Int32
+	err       error
+}
+
+func (w *countingAndFailingMarkDeliveryStore) MarkAgentDelivery(ctx context.Context, agentID string) (*store.Agent, bool, error) {
+	w.markCalls.Add(1)
+	if w.fault.Active() {
+		return nil, false, w.err
+	}
+	return w.Store.MarkAgentDelivery(ctx, agentID)
+}
+
+type firstStopBlockingDispatcher struct {
+	wakeTrackingDispatcher
+	stopCalls        atomic.Int32
+	postStopping     bool
+	store            store.Store
+	t                *testing.T
+	firstStopEntered chan struct{}
+	releaseFirstStop chan struct{}
+}
+
+func (d *firstStopBlockingDispatcher) DispatchAgentStop(ctx context.Context, a *store.Agent) error {
+	if d.stopCalls.Add(1) == 1 {
+		if d.postStopping {
+			require.NoError(d.t, d.store.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+				Phase:              string(state.PhaseStopping),
+				Message:            "Agent shutting down",
+				ReportSource:       store.StatusReportSourceAgent,
+				ReportRunID:        a.RunID,
+				ReportAgentToken:   true,
+				GuardReincarnation: true,
+			}))
+		}
+		close(d.firstStopEntered)
+		select {
+		case <-d.releaseFirstStop:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
+// TestIdleSuspend_UserLifecycleDuringClaimWins verifies R1: when a user stop,
+// stop-all, or user suspend lands while an idle-suspend claim is in flight
+// (both while the row is still running and after the container posted
+// stopping), the user action invalidates the idle claim, the idle worker's
+// commit is rejected, and subsequent messages do NOT auto-wake the agent.
+func TestIdleSuspend_UserLifecycleDuringClaimWins(t *testing.T) {
+	actions := []struct {
+		name          string
+		runUserAction func(t *testing.T, srv *Server, u *store.User, target *store.Agent)
+		wantPhase     string
+		wantReason    string
+	}{
+		{
+			name: "user_stop",
+			runUserAction: func(t *testing.T, srv *Server, u *store.User, target *store.Agent) {
+				rec := requestAsIdentity(t, srv, authUser(u), http.MethodPost, "/api/v1/agents/"+target.ID+"/stop", nil)
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			},
+			wantPhase:  string(state.PhaseStopped),
+			wantReason: "",
+		},
+		{
+			name: "user_stop_all",
+			runUserAction: func(t *testing.T, srv *Server, _ *store.User, target *store.Agent) {
+				rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+target.ProjectID+"/agents/stop-all", nil)
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			},
+			wantPhase:  string(state.PhaseStopped),
+			wantReason: "",
+		},
+		{
+			name: "user_suspend",
+			runUserAction: func(t *testing.T, srv *Server, u *store.User, target *store.Agent) {
+				rec := requestAsIdentity(t, srv, authUser(u), http.MethodPost, "/api/v1/agents/"+target.ID+"/suspend", nil)
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			},
+			wantPhase:  string(state.PhaseSuspended),
+			wantReason: string(state.SuspendReasonUser),
+		},
+	}
+
+	for _, postStopping := range []bool{false, true} {
+		stateLabel := "while_running"
+		if postStopping {
+			stateLabel = "after_container_stopping"
+		}
+		for _, tc := range actions {
+			t.Run(tc.name+"/"+stateLabel, func(t *testing.T) {
+				ctx := context.Background()
+				srv, s, sender, target := createWakeDMFixtures(t, string(state.PhaseRunning))
+				disp := &firstStopBlockingDispatcher{
+					postStopping:     postStopping,
+					store:            s,
+					t:                t,
+					firstStopEntered: make(chan struct{}),
+					releaseFirstStop: make(chan struct{}),
+				}
+				srv.SetDispatcher(disp)
+				t.Cleanup(srv.waitAutoWakeIdle)
+				enableIdleSweepForTest(t, srv, 15*time.Minute)
+
+				_, err := s.SetRunIntent(ctx, target.ID, store.RunIntentRunning)
+				require.NoError(t, err)
+				require.NoError(t, s.UpdateAgentStatus(ctx, target.ID, store.AgentStatusUpdate{
+					Phase:    string(state.PhaseRunning),
+					Activity: string(state.ActivityIdle),
+				}))
+				now := time.Now().UTC()
+				db := s.(*entadapter.CompositeStore).DB()
+				_, err = db.ExecContext(ctx,
+					"UPDATE agents SET run_id = ?, activity_since = ?, last_seen = ? WHERE id = ?",
+					"run-r1-"+tc.name+"-"+stateLabel, now.Add(-20*time.Minute), now.Add(-15*time.Second), target.ID,
+				)
+				require.NoError(t, err)
+				u := wakeLifecycleUser(t, s, "r1-"+tc.name+"-"+stateLabel, target.ProjectID,
+					"agent.lifecycle", "agent.message", "agent.read", "project.agent.stop_all")
+
+				sweepDone := make(chan struct{})
+				var releaseOnce sync.Once
+				releaseFirstStop := func() {
+					releaseOnce.Do(func() { close(disp.releaseFirstStop) })
+				}
+				t.Cleanup(func() {
+					releaseFirstStop()
+					<-sweepDone
+				})
+				go func() {
+					defer close(sweepDone)
+					srv.agentIdleSuspendHandler()(ctx)
+					srv.waitAutoSuspendIdle()
+				}()
+
+				<-disp.firstStopEntered
+				midClaim, err := s.GetAgent(ctx, target.ID)
+				require.NoError(t, err)
+				require.True(t, midClaim.IdleSuspendClaimActive, "idle claim must be active when user action arrives")
+
+				// User lifecycle action executes while the idle worker's stop is in flight.
+				tc.runUserAction(t, srv, u, target)
+
+				afterUser, err := s.GetAgent(ctx, target.ID)
+				require.NoError(t, err)
+				assert.Equal(t, tc.wantPhase, afterUser.Phase)
+				assert.Equal(t, tc.wantReason, afterUser.SuspendReason)
+				assert.False(t, afterUser.IdleSuspendClaimActive, "user lifecycle action must clear idle-suspend claim")
+				assert.Nil(t, afterUser.IdleSuspendClaimUntil)
+
+				// Release the idle worker's DispatchAgentStop; its commit must NOT overwrite the user's state.
+				releaseFirstStop()
+				<-sweepDone
+
+				final, err := s.GetAgent(ctx, target.ID)
+				require.NoError(t, err)
+				assert.Equal(t, tc.wantPhase, final.Phase, "idle worker commit must not overwrite %s", tc.name)
+				assert.Equal(t, tc.wantReason, final.SuspendReason)
+				assert.Nil(t, final.IdleSuspendClaimUntil)
+
+				// Subsequent DM without --wake must be refused, NEVER auto-woken.
+				res, dmErr := srv.ExecuteAgentDM(ctx, awAgentDMInput(sender, final, "must not auto-wake"))
+				assert.Nil(t, res)
+				require.NotNil(t, dmErr)
+				assert.Equal(t, http.StatusConflict, dmErr.HTTPStatus)
+				assert.Equal(t, ErrCodeAgentNotRunning, dmErr.Code)
+				assert.Empty(t, disp.getStartCalls(), "agent stopped/suspended by user must never auto-wake")
+				assert.Empty(t, disp.getMessageCalls())
+			})
+		}
+	}
+}
+
+// TestIdleSuspend_GateOffSkipsMarkAgentDeliveryEntirely verifies R3 (AC 8):
+// when either lifecycle.idle_suspend or server.hub.auto_suspend_idle is off,
+// message delivery performs zero MarkAgentDelivery row-locked writes and cannot
+// fail on an injected MarkAgentDelivery store error.
+func TestIdleSuspend_GateOffSkipsMarkAgentDeliveryEntirely(t *testing.T) {
+	modes := []struct {
+		name      string
+		expOn     bool
+		settingOn bool
+	}{
+		{name: "experiment_off_setting_on", expOn: false, settingOn: true},
+		{name: "experiment_on_setting_off", expOn: true, settingOn: false},
+		{name: "both_off", expOn: false, settingOn: false},
+	}
+
+	for _, m := range modes {
+		t.Run(m.name, func(t *testing.T) {
+			ctx := context.Background()
+			boom := errors.New("MarkAgentDelivery must not be called when gate is off")
+			srv, rawStore, wrapper, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *countingAndFailingMarkDeliveryStore {
+				return &countingAndFailingMarkDeliveryStore{Store: inner, fault: f, err: boom}
+			})
+			disp := &recordingDispatcher{}
+			srv.SetDispatcher(disp)
+			setIdleSuspendExperiment(t, srv, m.expOn)
+			srv.mu.Lock()
+			srv.config.AutoSuspendIdle = m.settingOn
+			srv.config.IdleSuspendAfter = 15 * time.Minute
+			srv.mu.Unlock()
+
+			now := time.Now().UTC()
+			pastGrace := now.Add(-20 * time.Minute)
+			target := newIdleCandidateBrokerAgent(t, rawStore, "r3-target-"+m.name, string(state.ActivityIdle), &pastGrace, now.Add(-15*time.Second))
+			sender := newIdleCandidateBrokerAgent(t, rawStore, "r3-sender-"+m.name, string(state.ActivityIdle), &pastGrace, now.Add(-15*time.Second))
+			sender.ProjectID = target.ProjectID
+			_, err := rawStore.(*entadapter.CompositeStore).DB().ExecContext(ctx,
+				"UPDATE agents SET project_id = ? WHERE id = ?", target.ProjectID, sender.ID)
+			require.NoError(t, err)
+
+			fault.Arm()
+
+			res, dmErr := srv.ExecuteAgentDM(ctx, awAgentDMInput(sender, target, "agent dm with gate off"))
+			require.Nil(t, dmErr)
+			require.NotNil(t, res)
+			assert.Equal(t, AgentDMAccepted, res.Outcome)
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+target.ID+"/message", map[string]any{
+				"message": "user dm with gate off",
+			})
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+			require.NoError(t, srv.deliverArtifactReview(ctx, artifacts.ReviewNotice{
+				ArtifactID:   tid("r3-art-" + m.name),
+				Seq:          1,
+				OwnerRef:     target.ID,
+				ReviewerKind: artifacts.PrincipalKindUser,
+			}))
+			require.NoError(t, srv.deliverMessage(ctx, &store.Message{
+				ID:      tid("r3-rec-" + m.name),
+				AgentID: target.ID,
+				Msg:     "reconcile with gate off",
+			}))
+
+			assert.Zero(t, wrapper.markCalls.Load(), "MarkAgentDelivery must never be called when %s", m.name)
+			assert.Len(t, disp.getCalls(), 4)
+		})
+	}
+}
+
+// TestIdleSuspend_SettleTimeoutErrorWording verifies O3: the default settle
+// wait covers the full idle-suspend claim lease (bounded by the caller/wake
+// budget), and an unsettled claim reports "is suspending" rather than "was
+// already starting".
+func TestIdleSuspend_SettleTimeoutErrorWording(t *testing.T) {
+	assert.Equal(t, idleSuspendClaimLease(), idleSuspendSettleBudget())
+	assert.GreaterOrEqual(t, idleSuspendSettleBudget(), stopWriteBudget()+10*time.Second)
+
+	ctx := context.Background()
+	srv, s, sender, target := createWakeDMFixtures(t, string(state.PhaseRunning))
+	disp := &recordingDispatcher{}
+	srv.SetDispatcher(disp)
+	enableIdleSweepForTest(t, srv, 15*time.Minute)
+
+	target, cond := claimIdleForTest(t, s, target, "run-o3-settle")
+	_, _, _, err := s.ClaimIdleSuspend(ctx, target.ID, cond)
+	require.NoError(t, err)
+	claimed, err := s.GetAgent(ctx, target.ID)
+	require.NoError(t, err)
+	require.True(t, claimed.IdleSuspendClaimActive)
+
+	// Even with the default 3m46s claim-lease settle budget, a tighter caller
+	// request budget bounds waitForIdleSuspendToSettle cleanly.
+	shortCtx, cancelShort := context.WithTimeout(ctx, 25*time.Millisecond)
+	defer cancelShort()
+	cp := *claimed
+	err = srv.waitForIdleSuspendToSettle(shortCtx, &cp)
+	require.ErrorIs(t, err, errIdleSuspendInProgressNotSettled)
+
+	prevOverride := idleSuspendSettleTimeoutOverride
+	idleSuspendSettleTimeoutOverride = 25 * time.Millisecond
+	t.Cleanup(func() { idleSuspendSettleTimeoutOverride = prevOverride })
+
+	res, dmErr := srv.ExecuteAgentDM(ctx, awAgentDMInput(sender, claimed, "dm hitting settle timeout"))
+	assert.Nil(t, res)
+	require.NotNil(t, dmErr)
+	assert.Equal(t, http.StatusServiceUnavailable, dmErr.HTTPStatus)
+	assert.Contains(t, dmErr.Message, "is suspending and did not finish stopping in time")
+	assert.NotContains(t, dmErr.Message, "was already starting")
+
+	u := wakeLifecycleUser(t, s, "o3-user", target.ProjectID, "agent.message", "agent.read")
+	rec := requestAsIdentity(t, srv, authUser(u), http.MethodPost, "/api/v1/agents/"+claimed.ID+"/message", map[string]any{
+		"message": "user dm hitting settle timeout",
+	})
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "is suspending and did not finish stopping in time")
+	assert.NotContains(t, rec.Body.String(), "was already starting")
+	assert.Equal(t, "agent is suspending", deferredReason(claimed))
+	assert.Empty(t, disp.getCalls())
 }
