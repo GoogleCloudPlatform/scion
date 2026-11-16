@@ -852,8 +852,8 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 	default:
 		if r.revalidate(ctx, e) {
 			r.admittedAgent(e)
+			r.admittedBroker(e)
 		}
-		r.admittedBroker(e)
 	}
 
 	<-ls.Done()

@@ -122,4 +122,57 @@ func TestOnAgentSessionAdmitted(t *testing.T) {
 			t.Fatalf("unexpected OnAgentSessionAdmitted calls: %v", seen)
 		}
 	})
+
+	t.Run("broker session rejected by Revalidate does not supersede live incarnation", func(t *testing.T) {
+		var mu sync.Mutex
+		rejectBroker := false
+		superseded := 0
+		flaps := 0
+
+		w := relaytest.NewWorld(t)
+		n := w.StartNode("relay-a", func(c *relay.Config) {
+			c.Revalidate = func(_ context.Context, p relay.Principal) error {
+				mu.Lock()
+				reject := rejectBroker && p.Kind == registry.PrincipalBroker
+				mu.Unlock()
+				if reject {
+					return errors.New("broker credential revoked")
+				}
+				return nil
+			}
+			c.OnBrokerSessionsSuperseded = func(_ string, count int) {
+				mu.Lock()
+				superseded += count
+				mu.Unlock()
+			}
+			c.OnBrokerIncarnationFlap = func(_, _ string) {
+				mu.Lock()
+				flaps++
+				mu.Unlock()
+			}
+		})
+
+		w.SetPrincipal("broker-tok", relay.Principal{Kind: registry.PrincipalBroker, ID: "broker-1"})
+		admitted := admissions(n)
+		live, w1 := n.MustDial("broker-tok", relaytest.BrokerHello("broker-1", "inc-1"), conduit.Config{})
+		waitAdmission(t, admitted, w1.GetSessionId())
+
+		// Reject the next broker session in Revalidate with a newer incarnation:
+		// admittedBroker must not run, so live stays open and no supersession is recorded.
+		mu.Lock()
+		rejectBroker = true
+		mu.Unlock()
+
+		rejected, _, err := n.Dial(context.Background(), "broker-tok", relaytest.BrokerHello("broker-1", "inc-2"), conduit.Config{})
+		if err == nil && rejected != nil {
+			requireClosedWith(t, rejected, conduit.CloseUnauthenticated, "broker session rejected by Revalidate")
+		}
+
+		requireOpen(t, live, "existing broker session after rejected newer incarnation")
+		mu.Lock()
+		defer mu.Unlock()
+		if superseded != 0 || flaps != 0 {
+			t.Fatalf("superseded=%d flaps=%d, want 0 and 0", superseded, flaps)
+		}
+	})
 }
