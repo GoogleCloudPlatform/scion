@@ -117,9 +117,9 @@ const FINDING_TEXTS: Record<string, string> = {
   unknown_settings_key:
     'This settings key is not recognized, or an operator choice cannot be applied. Review it on the host.',
   field_not_valid_for_target_type:
-    'This setting does not apply to the runtime type and is not carried over.',
+    "This setting is not valid for the instance's target type and is not carried over.",
   flat_target_field_required:
-    'A required flat-target setting is missing or invalid in the legacy configuration, so these profiles cannot move until it is set.',
+    'A flat-target setting is missing or invalid in the legacy configuration, so these profiles cannot move until it is set.',
   flat_target_operator_input_required:
     'This required flat-target setting has no legacy source (such as credentials_file on Cloud Run); supply it in settings.yaml before activating the instance.',
   [PLAN_TRUNCATED_CODE]:
