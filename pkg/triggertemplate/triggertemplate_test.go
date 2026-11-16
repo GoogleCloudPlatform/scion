@@ -24,7 +24,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/hub/rebuildpreflight"
+	"github.com/GoogleCloudPlatform/scion/pkg/gitref"
 	"github.com/GoogleCloudPlatform/scion/pkg/triggertemplate"
 )
 
@@ -450,7 +450,7 @@ func TestSlot_Branch(t *testing.T) {
 			got, _, err := tmpl.Render(triggertemplate.MapVars{"event.attributes.ref": tc.val}, []string{"event.attributes.ref"})
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, got)
-			require.NoError(t, rebuildpreflight.ValidBranch(got))
+			require.NoError(t, gitref.ValidBranch(got))
 		})
 	}
 
@@ -470,6 +470,7 @@ func TestSlot_Branch(t *testing.T) {
 		{"x.lock", "${event.attributes.ref}", "x.lock"},
 		{"component .lock", "${event.attributes.ref}", "x.lock/y"},
 		{"leading dash", "${event.attributes.ref}", "-feature"},
+		{"non-leading value dash", "feat/${event.attributes.ref}", "-x"},
 		{"leading dot", "${event.attributes.ref}", ".feature"},
 		{"hidden component", "feat/${event.attributes.ref}", "a/.hidden"},
 		{"double slash", "feat/${event.attributes.ref}", "/sub"},

@@ -18,11 +18,13 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -32,6 +34,7 @@ const (
 	hubPath             = scionModulePath + "/pkg/hub"
 	storePath           = scionModulePath + "/pkg/store"
 	messagingPath       = scionModulePath + "/pkg/messaging"
+	celGoPath           = "github.com/google/cel-go"
 )
 
 // TestImportGuard enforces stage2-design §3 / §16.14:
@@ -75,7 +78,7 @@ func TestImportGuard(t *testing.T) {
 			if imp == messagingPath || strings.HasPrefix(imp, messagingPath+"/") {
 				t.Errorf("%s directly imports forbidden messaging package %q", name, imp)
 			}
-			if strings.HasPrefix(imp, "github.com/google/cel-go") {
+			if imp == celGoPath || strings.HasPrefix(imp, celGoPath+"/") {
 				t.Errorf("%s directly imports forbidden cel-go package %q", name, imp)
 			}
 			if imp == scionModulePath || strings.HasPrefix(imp, scionModulePath+"/") {
@@ -89,7 +92,8 @@ func TestImportGuard(t *testing.T) {
 	}
 	require.Positive(t, prodFiles, "expected production .go files in pkg/triggertemplate")
 
-	for _, forbiddenPrefix := range []string{hubPath, storePath, messagingPath} {
+	forbiddenPrefixes := []string{hubPath, storePath, messagingPath, celGoPath}
+	for _, forbiddenPrefix := range forbiddenPrefixes {
 		chain, cerr := findTransitiveImportPrefix(root, triggerTemplatePath, forbiddenPrefix)
 		require.NoError(t, cerr)
 		if chain != nil {
@@ -97,6 +101,49 @@ func TestImportGuard(t *testing.T) {
 				triggerTemplatePath, forbiddenPrefix, strings.Join(chain, " -> "))
 		}
 	}
+
+	// Also verify the full resolved Go dependency closure (including external
+	// modules reached through allowed in-module dependencies).
+	cmd := exec.Command("go", "list", "-buildvcs=false", "-deps", triggerTemplatePath)
+	cmd.Dir = root
+	out, lerr := cmd.CombinedOutput()
+	require.NoErrorf(t, lerr, "go list -deps failed: %s", string(out))
+	for _, dep := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		dep = strings.TrimSpace(dep)
+		for _, forbiddenPrefix := range forbiddenPrefixes {
+			if dep == forbiddenPrefix || strings.HasPrefix(dep, forbiddenPrefix+"/") {
+				t.Errorf("%s transitively depends on forbidden package %q (via go list -deps)",
+					triggerTemplatePath, dep)
+			}
+		}
+	}
+}
+
+func TestImportGuard_CatchesTransitiveCelGo(t *testing.T) {
+	tmp := t.TempDir()
+	pkgADir := filepath.Join(tmp, "pkg", "a")
+	pkgBDir := filepath.Join(tmp, "pkg", "b")
+	require.NoError(t, os.MkdirAll(pkgADir, 0o755))
+	require.NoError(t, os.MkdirAll(pkgBDir, 0o755))
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(pkgADir, "a.go"),
+		[]byte("package a\nimport _ \""+scionModulePath+"/pkg/b\"\n"),
+		0o644,
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(pkgBDir, "b.go"),
+		[]byte("package b\nimport _ \"github.com/google/cel-go/cel\"\n"),
+		0o644,
+	))
+
+	chain, err := findTransitiveImportPrefix(tmp, scionModulePath+"/pkg/a", celGoPath)
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		scionModulePath + "/pkg/a",
+		scionModulePath + "/pkg/b",
+		"github.com/google/cel-go/cel",
+	}, chain)
 }
 
 func findModuleRoot(t *testing.T) string {
@@ -119,7 +166,7 @@ func findTransitiveImportPrefix(root, from, forbiddenPrefix string) ([]string, e
 	for len(queue) > 0 {
 		pkg := queue[0]
 		queue = queue[1:]
-		imps, err := readInModuleImports(root, pkg)
+		imps, err := readPackageImports(root, pkg)
 		if err != nil {
 			return nil, err
 		}
@@ -135,13 +182,15 @@ func findTransitiveImportPrefix(root, from, forbiddenPrefix string) ([]string, e
 				}
 				return chain, nil
 			}
-			queue = append(queue, imp)
+			if imp == scionModulePath || strings.HasPrefix(imp, scionModulePath+"/") {
+				queue = append(queue, imp)
+			}
 		}
 	}
 	return nil, nil
 }
 
-func readInModuleImports(root, pkg string) ([]string, error) {
+func readPackageImports(root, pkg string) ([]string, error) {
 	dir := root
 	if pkg != scionModulePath {
 		dir = filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(pkg, scionModulePath+"/")))
@@ -165,9 +214,7 @@ func readInModuleImports(root, pkg string) ([]string, error) {
 			if err != nil {
 				return nil, err
 			}
-			if ip == scionModulePath || strings.HasPrefix(ip, scionModulePath+"/") {
-				out = append(out, ip)
-			}
+			out = append(out, ip)
 		}
 	}
 	return out, nil

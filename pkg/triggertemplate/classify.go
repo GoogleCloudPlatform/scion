@@ -199,11 +199,8 @@ func parseArrayIndex(s string, start int) (int, int, error) {
 			return 0, 0, errors.New("array index must be a non-negative integer")
 		}
 	}
-	if len(digits) > 3 {
-		return 0, 0, fmt.Errorf("array index exceeds maximum %d", MaxArrayIndex)
-	}
 	n, err := strconv.Atoi(digits)
-	if err != nil || n < 0 || n > MaxArrayIndex {
+	if err != nil || n > MaxArrayIndex {
 		return 0, 0, fmt.Errorf("array index must be between 0 and %d", MaxArrayIndex)
 	}
 	next := closeIdx + 1
