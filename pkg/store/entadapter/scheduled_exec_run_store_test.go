@@ -478,7 +478,28 @@ func TestUnadmittedScheduledEvents(t *testing.T) {
 	}
 	sc, err := s.GetSchedule(ctx, sched.ID)
 	require.NoError(t, err)
+	assert.Equal(t, 1, sc.RunCount, "the recurring event's schedule increments run_count")
 	assert.Equal(t, 1, sc.ErrorCount, "the recurring event's schedule records the failed run")
+	assert.Equal(t, store.ScheduleRunError, sc.LastRunStatus)
+	assert.Equal(t, "hub restarted before dispatch", sc.LastRunError)
+
+	// Even if errMsg is empty, FailUnadmittedScheduledEvent still records
+	// ScheduleRunError (error_count++ per D6).
+	laterAgo := longAgo.Add(time.Minute)
+	recurringEmptyErr := &store.ScheduledEvent{
+		ID: uuid.NewString(), ProjectID: project, EventType: "exec", FireAt: laterAgo,
+		Payload: `{"agentId":"x","command":["true"]}`, Status: store.ScheduledEventPending, ScheduleID: sched.ID,
+	}
+	require.NoError(t, s.CreateScheduledEvent(ctx, recurringEmptyErr))
+	require.NoError(t, s.UpdateScheduledEventStatus(ctx, recurringEmptyErr.ID, store.ScheduledEventFired, &laterAgo, ""))
+	changed, err := s.FailUnadmittedScheduledEvent(ctx, recurringEmptyErr.ID, "exec", cutoff, "")
+	require.NoError(t, err)
+	assert.True(t, changed)
+	sc, err = s.GetSchedule(ctx, sched.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, sc.RunCount)
+	assert.Equal(t, 2, sc.ErrorCount)
+	assert.Equal(t, store.ScheduleRunError, sc.LastRunStatus)
 }
 
 // TestClaimScheduledExecRunsForPoll_FairAcrossTargets (P3-R2): a target with

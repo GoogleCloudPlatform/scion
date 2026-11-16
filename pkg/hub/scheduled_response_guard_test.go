@@ -560,7 +560,7 @@ func TestScheduledExecR1_EventTypeSwitchAndRetargetNeverLeakArgv(t *testing.T) {
 			ID: api.NewUUID(), ProjectID: f.proj.ID, Name: "msg-to-exec",
 			CronExpr: "0 * * * *", EventType: "message",
 			Payload: `{"agentId":"` + f.sibling.ID + `","message":"hello"}`,
-			Status: store.ScheduleStatusActive, NextRunAt: &next, CreatedBy: f.owner.ID,
+			Status:  store.ScheduleStatusActive, NextRunAt: &next, CreatedBy: f.owner.ID,
 			InitiatorAttribution: store.InitiatorAttribution{
 				InitiatorPrincipalKind: store.DelegationPrincipalUser, InitiatorPrincipalID: f.owner.ID,
 				InitiatorCredentialKind: store.InitiatorCredentialKindSession, AttributionVersion: 1, AuthorizationRevision: 1,

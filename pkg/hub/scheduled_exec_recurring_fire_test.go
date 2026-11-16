@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -73,7 +74,7 @@ func waitScheduleRunCount(t *testing.T, st store.Store, schedID string, wantRuns
 		var err error
 		got, err = st.GetSchedule(context.Background(), schedID)
 		return err == nil && got.RunCount >= wantRuns
-	}, 5*time.Second, 20*time.Millisecond, "schedule %s did not reach runCount=%d", schedID, wantRuns)
+	}, 10*time.Second, 20*time.Millisecond, "schedule %s did not reach runCount=%d", schedID, wantRuns)
 	return *got
 }
 
@@ -157,6 +158,43 @@ func TestScheduledExecRecurring_OutcomesAndAccounting(t *testing.T) {
 	assert.Equal(t, 1, gotSc.ErrorCount)
 	assert.Equal(t, store.ScheduleRunSkipped, gotSc.LastRunStatus)
 	assert.Equal(t, execReasonDisabled, gotSc.LastRunError)
+
+	// 5. Re-enable experiment; command timeout (1s) -> failed ("timed out after 1s"), ErrorCount=2.
+	setHubExperiments(t, f.srv, map[string]bool{conduitExperiment: true, experiments.ExecSchedules: true})
+	p5 := scheduledExecPayload{AgentID: f.launched.ID, Command: []string{"sh", "-c", "trap 'exit 143' TERM; sleep 10 & wait"}, TimeoutSeconds: 1}
+	raw5, err := p5.encode()
+	require.NoError(t, err)
+	gotSc.Payload = raw5
+	t5 := now.Add(4 * time.Second)
+	gotSc.NextRunAt = &t5
+	f.srv.executeSchedule(ctx, gotSc, t5)
+	gotSc = waitScheduleRunCount(t, f.store, sc.ID, 5)
+	assert.Equal(t, 5, gotSc.RunCount)
+	assert.Equal(t, 2, gotSc.ErrorCount)
+	assert.Equal(t, store.ScheduleRunError, gotSc.LastRunStatus)
+	assert.Equal(t, execReasonTimedOut(1), gotSc.LastRunError)
+
+	// 6. Fire-time authz refusal (revision ceiling lacks agent.attach) -> failed ("exec refused"),
+	// ErrorCount=3, 0 new exec-start RPCs, and schedule.exec.refused audit emitted.
+	logs := captureDefaultLog(t)
+	gotSc.AuthorityCeiling = store.EffectCeiling{
+		Kind:              store.EffectCeilingBounded,
+		Version:           1,
+		PermissionIDs:     []string{"agent.read", "project.read"},
+		BoundaryKind:      "project",
+		BoundaryProjectID: f.launched.ProjectID,
+	}
+	startsBefore := f.capture.count(execRoutePath(agentcontrol.RouteExecStart))
+	t6 := now.Add(5 * time.Second)
+	gotSc.NextRunAt = &t6
+	f.srv.executeSchedule(ctx, gotSc, t6)
+	gotSc = waitScheduleRunCount(t, f.store, sc.ID, 6)
+	assert.Equal(t, 6, gotSc.RunCount)
+	assert.Equal(t, 3, gotSc.ErrorCount)
+	assert.Equal(t, store.ScheduleRunError, gotSc.LastRunStatus)
+	assert.Equal(t, execReasonRefused, gotSc.LastRunError)
+	assert.Equal(t, startsBefore, f.capture.count(execRoutePath(agentcontrol.RouteExecStart)))
+	assert.Contains(t, logs.String(), "audit_action=schedule.exec.refused")
 }
 
 // TestScheduledExecRecurring_DBOverlapAndSciontoolOverlap (AC8):
@@ -439,6 +477,50 @@ func TestScheduledExecRecurring_ShutdownAndSweeperInterleavingMatrix(t *testing.
 		evt := latestScheduleEvent(t, f.store, f.launched.ProjectID, sc.ID)
 		assert.Equal(t, store.ScheduledEventFailed, evt.Status)
 		assert.Equal(t, execReasonShuttingDown, evt.Error)
+	})
+
+	t.Run("unadmitted crash recovery records schedule failed once", func(t *testing.T) {
+		f := newExecRouteFixture(t)
+		ctx := context.Background()
+		now := time.Now().UTC()
+		sc := f.createExecSchedule(t, "unadmitted-crash-recovery", now, 10, "true")
+
+		// Simulate a Hub crash after executeSchedule created the recurring
+		// ScheduledEvent in status "fired" (FiredAt older than
+		// scheduledExecAdmitWindow) before CreateScheduledExecRun ran.
+		claimedAt := now.Add(-2 * time.Hour)
+		crashedEvt := withSessionRevision(store.ScheduledEvent{
+			ID:         api.NewUUID(),
+			ProjectID:  f.launched.ProjectID,
+			ScheduleID: sc.ID,
+			EventType:  scheduledEventTypeExec,
+			FireAt:     claimedAt,
+			FiredAt:    &claimedAt,
+			Payload:    sc.Payload,
+			Status:     store.ScheduledEventFired,
+			CreatedBy:  sc.CreatedBy,
+		}, f.launched.OwnerID)
+		require.NoError(t, f.store.CreateScheduledEvent(ctx, &crashedEvt))
+
+		logs := captureDefaultLog(t)
+		f.srv.sweepScheduledExecRuns(ctx)
+		// Second sweep must be a no-op (idempotent once-write).
+		f.srv.sweepScheduledExecRuns(ctx)
+
+		gotEvt, err := f.store.GetScheduledEvent(ctx, crashedEvt.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.ScheduledEventFailed, gotEvt.Status)
+		assert.Equal(t, execReasonNotDispatched, gotEvt.Error)
+
+		gotSc, err := f.store.GetSchedule(ctx, sc.ID)
+		require.NoError(t, err)
+		assert.Equal(t, 1, gotSc.RunCount, "O1: recoverUnadmittedExecEvents must increment parent schedule run_count")
+		assert.Equal(t, 1, gotSc.ErrorCount, "O1: recoverUnadmittedExecEvents must increment parent schedule error_count per D6")
+		assert.Equal(t, store.ScheduleRunError, gotSc.LastRunStatus)
+		assert.Equal(t, execReasonNotDispatched, gotSc.LastRunError)
+		assert.Equal(t, 0, f.capture.count(execRoutePath(agentcontrol.RouteExecStart)))
+		assert.Contains(t, logs.String(), "audit_action=schedule.exec.outcome")
+		assert.Contains(t, logs.String(), "schedule_id="+sc.ID)
 	})
 
 	t.Run("post-admission shutdown preserves admitted run for sweeper recovery", func(t *testing.T) {

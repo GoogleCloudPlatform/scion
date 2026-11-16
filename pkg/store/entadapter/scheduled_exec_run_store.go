@@ -353,10 +353,6 @@ func (s *ScheduleStore) ListExpiredScheduledExecRuns(ctx context.Context, now ti
 	return entScheduledExecRunsToStore(rows), nil
 }
 
-// scheduledExecExcludeSQLCap bounds the SQL NOT IN list when excluding
-// already-claimed event IDs; any overflow is filtered in Go.
-const scheduledExecExcludeSQLCap = 10000
-
 // ClaimScheduledExecRunsForPoll returns up to limit unfinished runs whose
 // lease has not ended, skipping excludeEventIDs, chosen round-robin across
 // the full eligible set of target agents on their persisted per-agent turn
@@ -381,9 +377,7 @@ func (s *ScheduleStore) ClaimScheduledExecRunsForPoll(ctx context.Context, now t
 		if uid, err := uuid.Parse(id); err == nil {
 			if _, dup := excludeSet[uid]; !dup {
 				excludeSet[uid] = struct{}{}
-				if len(excludeSQL) < scheduledExecExcludeSQLCap {
-					excludeSQL = append(excludeSQL, uid)
-				}
+				excludeSQL = append(excludeSQL, uid)
 			}
 		}
 	}
@@ -463,7 +457,6 @@ func (s *ScheduleStore) ClaimScheduledExecRunsForPoll(ctx context.Context, now t
 		chosen := make([]*ent.ScheduledExecRun, 0, limit)
 		pickedRunIDs := make(map[uuid.UUID][]uuid.UUID, len(targets))
 		exhausted := make(map[uuid.UUID]bool, len(targets))
-		overflowExclude := len(excludeSet) > len(excludeSQL)
 
 		for len(chosen) < limit {
 			activeTargets := len(targets) - len(exhausted)
@@ -488,10 +481,6 @@ func (s *ScheduleStore) ClaimScheduledExecRunsForPoll(ctx context.Context, now t
 				if picked := pickedRunIDs[target]; len(picked) > 0 {
 					preds = append(preds, scheduledexecrun.IDNotIn(picked...))
 				}
-				fetchLimit := need
-				if overflowExclude {
-					fetchLimit = min(maxListLimit, need+16)
-				}
 				q := c.ScheduledExecRun.Query().
 					Where(preds...).
 					Order(
@@ -499,7 +488,7 @@ func (s *ScheduleStore) ClaimScheduledExecRunsForPoll(ctx context.Context, now t
 						scheduledexecrun.ByLastPolledAt(),
 						scheduledexecrun.ByEventID(),
 					).
-					Limit(fetchLimit)
+					Limit(need)
 				if isPostgres(c) {
 					q = q.ForUpdate(entsql.WithLockAction(entsql.SkipLocked))
 				}
@@ -507,23 +496,15 @@ func (s *ScheduleStore) ClaimScheduledExecRunsForPoll(ctx context.Context, now t
 				if err != nil {
 					return mapError(err)
 				}
-				addedForTarget := 0
 				for _, r := range rows {
-					if overflowExclude {
-						if _, skip := excludeSet[r.EventID]; skip {
-							pickedRunIDs[target] = append(pickedRunIDs[target], r.ID)
-							continue
-						}
-					}
 					chosen = append(chosen, r)
 					pickedRunIDs[target] = append(pickedRunIDs[target], r.ID)
-					addedForTarget++
 					progressed = true
-					if addedForTarget == need || len(chosen) == limit {
+					if len(chosen) == limit {
 						break
 					}
 				}
-				if len(rows) < fetchLimit || activeTargets == 1 {
+				if len(rows) < need || activeTargets == 1 {
 					exhausted[target] = true
 					activeTargets = len(targets) - len(exhausted)
 				}
@@ -853,7 +834,7 @@ func (s *ScheduleStore) FailUnadmittedScheduledEvent(ctx context.Context, id, ev
 			if evt.FiredAt != nil {
 				ranAt = *evt.FiredAt
 			}
-			if err := recordScheduleRunOnClient(ctx, c, schedUID, ranAt, errMsg); err != nil && !errors.Is(err, store.ErrNotFound) {
+			if err := recordScheduleRunStatusOnClient(ctx, c, schedUID, ranAt, store.ScheduleRunError, errMsg); err != nil && !errors.Is(err, store.ErrNotFound) {
 				return err
 			}
 		}

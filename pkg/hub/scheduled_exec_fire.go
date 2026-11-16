@@ -665,22 +665,10 @@ func (s *Server) sweepScheduledExecRuns(ctx context.Context) {
 	defer wg.Wait()
 	var claimedThisSweep []string
 	for polled := 0; polled < budget && ctx.Err() == nil; {
-		select {
-		case sem <- struct{}{}:
-		case <-ctx.Done():
+		reserved := reserveSweepSlots(ctx, sem, min(inFlight, budget-polled))
+		if reserved == 0 {
 			return
 		}
-		reserved := 1
-		maxReserve := min(inFlight, budget-polled)
-		for reserved < maxReserve {
-			select {
-			case sem <- struct{}{}:
-				reserved++
-			default:
-				goto haveSlots
-			}
-		}
-	haveSlots:
 		owned := s.execRuns.ownedIDs()
 		exclude := make([]string, 0, len(owned)+len(claimedThisSweep))
 		exclude = append(exclude, owned...)
@@ -754,11 +742,34 @@ func (s *Server) recoverUnadmittedExecEvents(ctx context.Context, batch, budget 
 			a.Reason = execReasonNotDispatched
 			s.auditScheduledExec(ctx, a)
 			slog.Warn("Scheduler: exec event claimed but never dispatched; recorded failed",
-				"eventID", evt.ID, "projectID", evt.ProjectID)
+				"eventID", evt.ID, "scheduleID", evt.ScheduleID, "projectID", evt.ProjectID)
 		}
 		done += len(events)
 		if len(events) < batch || !progressed {
 			return
 		}
 	}
+}
+
+// reserveSweepSlots blocks for one in-flight slot (or ctx cancellation), then
+// greedily acquires up to maxReserve-1 additional immediately-free slots.
+func reserveSweepSlots(ctx context.Context, sem chan struct{}, maxReserve int) int {
+	if maxReserve <= 0 {
+		return 0
+	}
+	select {
+	case sem <- struct{}{}:
+	case <-ctx.Done():
+		return 0
+	}
+	reserved := 1
+	for reserved < maxReserve {
+		select {
+		case sem <- struct{}{}:
+			reserved++
+		default:
+			return reserved
+		}
+	}
+	return reserved
 }
