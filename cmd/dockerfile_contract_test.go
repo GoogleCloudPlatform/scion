@@ -674,3 +674,160 @@ func TestAntigravityDockerfileContractDetectsViolations(t *testing.T) {
 		expectViolation(t, m.name, checkAntigravityDockerfileContract(t, m.src), m.want)
 	}
 }
+
+// checkNoImagePlaywrightBrowsersPath returns a violation for each ENV or ARG
+// PLAYWRIGHT_BROWSERS_PATH in an agent image Dockerfile. Setting an image-wide
+// PLAYWRIGHT_BROWSERS_PATH relocates runtime browser downloads (`npx playwright
+// install webkit firefox`) out of the persistent agent home (~/.cache/ms-playwright)
+// into the ephemeral container layer and orphans existing home caches; system
+// ffmpeg is seeded into the persistent home registry by sciontool init instead.
+func checkNoImagePlaywrightBrowsersPath(t *testing.T, name, content string) []string {
+	t.Helper()
+	var errs []string
+	for _, st := range parseDockerfileStages(t, content) {
+		for _, in := range st.instrs {
+			if in.cmd != "ENV" && in.cmd != "ARG" {
+				continue
+			}
+			for _, k := range envOrArgKeys(in.args) {
+				if k == "PLAYWRIGHT_BROWSERS_PATH" {
+					errs = append(errs, name+": "+in.cmd+" "+in.args+": agent images must not set PLAYWRIGHT_BROWSERS_PATH; keep Playwright's persistent ~/.cache/ms-playwright registry")
+				}
+			}
+		}
+	}
+	return errs
+}
+
+func TestAgentImageDockerfilesDoNotSetPlaywrightBrowsersPath(t *testing.T) {
+	for _, f := range agentImageDockerfiles(t) {
+		for _, e := range checkNoImagePlaywrightBrowsersPath(t, f, readRepoFile(t, f)) {
+			t.Error(e)
+		}
+	}
+}
+
+func TestNoImagePlaywrightBrowsersPathCheckDetectsViolations(t *testing.T) {
+	base := "ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\nRUN true\n"
+	for name, src := range map[string]string{
+		"ARG PLAYWRIGHT_BROWSERS_PATH":         base + "ARG PLAYWRIGHT_BROWSERS_PATH\n",
+		"ENV PLAYWRIGHT_BROWSERS_PATH":         base + "ENV PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/ms-playwright\n",
+		"ENV PLAYWRIGHT_BROWSERS_PATH legacy":  base + "ENV PLAYWRIGHT_BROWSERS_PATH /usr/local/share/ms-playwright\n",
+		"ENV PLAYWRIGHT_BROWSERS_PATH in list": base + "ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global PLAYWRIGHT_BROWSERS_PATH=/opt/pw\n",
+	} {
+		expectViolation(t, name, checkNoImagePlaywrightBrowsersPath(t, "x/Dockerfile", src), "must not set PLAYWRIGHT_BROWSERS_PATH")
+	}
+	if errs := checkNoImagePlaywrightBrowsersPath(t, "x/Dockerfile", base+"ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1\n"); len(errs) != 0 {
+		t.Errorf("other PLAYWRIGHT_* env vars reported as PLAYWRIGHT_BROWSERS_PATH: %q", errs)
+	}
+}
+
+// checkBaseImagePlaywrightFfmpegContract verifies that a foundation Dockerfile
+// (core-base or thick-prep) leaves PLAYWRIGHT_BROWSERS_PATH unset and runs
+// install-core-toolchain.sh playwright-ffmpeg after npm-tools and before
+// verify-base-contract.sh.
+func checkBaseImagePlaywrightFfmpegContract(t *testing.T, name, content string) []string {
+	t.Helper()
+	errs := checkNoImagePlaywrightBrowsersPath(t, name, content)
+	stages := parseDockerfileStages(t, content)
+	if len(stages) == 0 {
+		return append(errs, name+": no stages found")
+	}
+	final := &stages[len(stages)-1]
+
+	npmToolsStep, ffmpegStep, verifyStep := -1, -1, -1
+	seq := 0
+	for _, in := range final.instrs {
+		if in.cmd != "RUN" {
+			continue
+		}
+		for _, andClause := range strings.Split(in.args, "&&") {
+			for _, clause := range strings.Split(andClause, ";") {
+				c := strings.Join(strings.Fields(clause), " ")
+				switch {
+				case strings.Contains(c, "install-core-toolchain.sh npm-tools"):
+					seq++
+					npmToolsStep = seq
+				case strings.Contains(c, "install-core-toolchain.sh playwright-ffmpeg"):
+					seq++
+					ffmpegStep = seq
+				case strings.Contains(c, "verify-base-contract.sh"):
+					seq++
+					verifyStep = seq
+				}
+			}
+		}
+	}
+
+	if ffmpegStep < 0 {
+		errs = append(errs, name+": final stage must run `install-core-toolchain.sh playwright-ffmpeg`")
+		return errs
+	}
+	if npmToolsStep >= 0 && ffmpegStep < npmToolsStep {
+		errs = append(errs, name+": `install-core-toolchain.sh playwright-ffmpeg` must run after `install-core-toolchain.sh npm-tools`")
+	}
+	if verifyStep >= 0 && ffmpegStep > verifyStep {
+		errs = append(errs, name+": `install-core-toolchain.sh playwright-ffmpeg` must run before `verify-base-contract.sh`")
+	}
+	return errs
+}
+
+func TestBaseImageDockerfilesConfigurePlaywrightFfmpeg(t *testing.T) {
+	for _, f := range []string{
+		"image-build/core-base/Dockerfile",
+		"image-build/thick-prep/Dockerfile",
+	} {
+		for _, e := range checkBaseImagePlaywrightFfmpegContract(t, f, readRepoFile(t, f)) {
+			t.Error(e)
+		}
+	}
+}
+
+func TestBaseImagePlaywrightFfmpegContractDetectsViolations(t *testing.T) {
+	good := "FROM node:24-trixie-slim\n" +
+		"ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global\n" +
+		"RUN /opt/scion-image-build/lib/install-core-toolchain.sh npm-tools \\\n" +
+		"    && /opt/scion-image-build/lib/install-core-toolchain.sh playwright-ffmpeg\n" +
+		"RUN /opt/scion-image-build/lib/verify-base-contract.sh\n"
+
+	if errs := checkBaseImagePlaywrightFfmpegContract(t, "test/Dockerfile", good); len(errs) != 0 {
+		t.Fatalf("valid Dockerfile reported violations: %q", errs)
+	}
+
+	mutations := []struct{ name, src, want string }{
+		{
+			"sets PLAYWRIGHT_BROWSERS_PATH",
+			mustReplace(t, good,
+				"ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global\n",
+				"ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global\nENV PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/ms-playwright\n",
+			),
+			"must not set PLAYWRIGHT_BROWSERS_PATH",
+		},
+		{
+			"missing playwright-ffmpeg step",
+			mustReplace(t, good, " \\\n    && /opt/scion-image-build/lib/install-core-toolchain.sh playwright-ffmpeg", ""),
+			"must run `install-core-toolchain.sh playwright-ffmpeg`",
+		},
+		{
+			"playwright-ffmpeg before npm-tools",
+			"FROM node:24-trixie-slim\n" +
+				"RUN /opt/scion-image-build/lib/install-core-toolchain.sh playwright-ffmpeg\n" +
+				"RUN /opt/scion-image-build/lib/install-core-toolchain.sh npm-tools\n" +
+				"RUN /opt/scion-image-build/lib/verify-base-contract.sh\n",
+			"must run after `install-core-toolchain.sh npm-tools`",
+		},
+		{
+			"playwright-ffmpeg after verify-base-contract.sh",
+			mustReplace(
+				t,
+				mustReplace(t, good, " \\\n    && /opt/scion-image-build/lib/install-core-toolchain.sh playwright-ffmpeg", ""),
+				"RUN /opt/scion-image-build/lib/verify-base-contract.sh\n",
+				"RUN /opt/scion-image-build/lib/verify-base-contract.sh\nRUN /opt/scion-image-build/lib/install-core-toolchain.sh playwright-ffmpeg\n",
+			),
+			"must run before `verify-base-contract.sh`",
+		},
+	}
+	for _, m := range mutations {
+		expectViolation(t, m.name, checkBaseImagePlaywrightFfmpegContract(t, "test/Dockerfile", m.src), m.want)
+	}
+}

@@ -186,9 +186,11 @@ ENV LC_ALL=C.UTF-8
 ENV EDITOR=nano
 ENV VISUAL=nano
 
-# Chrome DevTools MCP server and the playwright CLI, installed globally.
+# Chrome DevTools MCP server and the playwright CLI, installed globally, plus
+# Playwright's ffmpeg registry symlinks to system /usr/bin/ffmpeg.
 RUN --mount=type=secret,id=npmrc,target=/root/.npmrc,required=false \
-    /opt/scion-image-build/lib/install-core-toolchain.sh npm-tools
+    /opt/scion-image-build/lib/install-core-toolchain.sh npm-tools \
+    && /opt/scion-image-build/lib/install-core-toolchain.sh playwright-ffmpeg
 
 # Fail the build, not the agent, when this image does not satisfy what
 # scion-base needs from the layer beneath it. thick-prep ends with the exact

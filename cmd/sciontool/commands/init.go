@@ -1109,6 +1109,11 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// can recover the full SCION environment. The file is sourced by .bashrc/.zshrc.
 	writeEnvFile(agentHome, targetUID, targetGID)
 
+	// Seed system ffmpeg symlinks from the base image into Playwright's default
+	// persistent home registry (~/.cache/ms-playwright) when the seed directory
+	// is present, keeping runtime browser downloads persistent across restarts.
+	runSeedPlaywrightFfmpegCache(agentHome, playwrightFfmpegSeedDir, targetUID, targetGID)
+
 	// Read and start sidecar services
 	var svcManager *services.Manager
 	// Workaround: Claude Code creates a dangling symlink at

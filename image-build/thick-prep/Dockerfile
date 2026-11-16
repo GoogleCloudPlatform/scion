@@ -173,7 +173,8 @@ ARG PIP_INDEX_URL=https://pypi.org/simple
 ENV PIP_INDEX_URL=${PIP_INDEX_URL}
 
 RUN --mount=type=secret,id=npmrc,target=/root/.npmrc,required=false \
-    /opt/scion-image-build/lib/install-core-toolchain.sh npm-tools
+    /opt/scion-image-build/lib/install-core-toolchain.sh npm-tools \
+    && /opt/scion-image-build/lib/install-core-toolchain.sh playwright-ffmpeg
 
 # Identical closing line to core-base. That is the whole point: whichever base
 # scion-base is built on, it has passed the same assertion.
