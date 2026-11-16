@@ -84,6 +84,21 @@ interface UpdateRelocationNotice {
   to: string | null;
 }
 
+/**
+ * Matches the duplicate relocation entry handleUpdateIntegration appends to
+ * `warnings` alongside `relocated_from` so a relocated Update renders one
+ * non-alarming relocation notice while still surfacing any other warnings.
+ */
+function isServerRelocationWarning(
+  warning: string,
+  relocatedFrom: string,
+  binaryPath: string | null
+): boolean {
+  if (!warning.includes(relocatedFrom)) return false;
+  if (binaryPath && !warning.includes(binaryPath)) return false;
+  return warning.includes('could not be overwritten; installed updated binary to');
+}
+
 interface PlatformFieldDef {
   key: string;
   label: string;
@@ -1123,7 +1138,10 @@ export class ScionPageAdminIntegrations extends LitElement {
       }
       if (Array.isArray(data.warnings)) {
         this.updateWarnings = data.warnings.filter(
-          (w): w is string => typeof w === 'string' && w.trim() !== ''
+          (w): w is string =>
+            typeof w === 'string' &&
+            w.trim() !== '' &&
+            !(relocatedFrom && isServerRelocationWarning(w, relocatedFrom, binaryPath))
         );
       }
       this.successMessage = 'Integration updated successfully';
@@ -1361,9 +1379,9 @@ export class ScionPageAdminIntegrations extends LitElement {
               <sl-icon slot="icon" name="info-circle"></sl-icon>
               ${relocation.to
                 ? html`<strong>Plugin binary relocated:</strong> <code>${relocation.from}</code> →
-                    <code>${relocation.to}</code>`
+                    <code>${relocation.to}</code> (previous copy left untouched)`
                 : html`<strong>Plugin binary relocated from</strong>
-                    <code>${relocation.from}</code>`}
+                    <code>${relocation.from}</code> (previous copy left untouched)`}
             </sl-alert>
           `
         : nothing}
