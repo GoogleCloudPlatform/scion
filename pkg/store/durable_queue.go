@@ -38,6 +38,14 @@ var ErrDuplicate = fmt.Errorf("%w: duplicate durable queue item", ErrAlreadyExis
 // the enqueue on the DurableQueueStore's own connection in auto-commit mode.
 type Tx any
 
+// IsNudgeableDedupKey reports whether k can match a stored durable_queue_items
+// dedup_key (non-empty and at most MaxDurableQueueDedupKeyLen bytes). Keys
+// outside these bounds cannot exist in the store and are ignored as unknown
+// keys by nudge operations.
+func IsNudgeableDedupKey(k string) bool {
+	return k != "" && len(k) <= MaxDurableQueueDedupKeyLen
+}
+
 // ValidateDurableQueueKind checks that kind matches ^[a-z0-9_]+(\.[a-z0-9_]+)*$
 // and is at most 64 bytes.
 func ValidateDurableQueueKind(kind string) error {

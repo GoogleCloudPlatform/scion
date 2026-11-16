@@ -737,7 +737,7 @@ func (s *DurableQueueStore) NudgeDurableItems(ctx context.Context, kind string, 
 	}
 	unique := make([]string, 0, len(dedupKeys))
 	for _, k := range dedupKeys {
-		if k != "" && len(k) <= store.MaxDurableQueueDedupKeyLen {
+		if store.IsNudgeableDedupKey(k) {
 			unique = append(unique, k)
 		}
 	}

@@ -639,7 +639,8 @@ func TestEchoConsumer_TwoConcurrentDrainers(t *testing.T) {
 
 func TestEchoConsumer_NudgeUnleasedOnlyAndClaimOrder(t *testing.T) {
 	ctx := context.Background()
-	cs := newEchoDBStore(t)
+	entClient := enttest.NewClient(t)
+	cs := entadapter.NewCompositeStore(entClient)
 	t0 := time.Date(2026, 11, 16, 15, 0, 0, 0, time.UTC)
 	cur := t0
 	var clockMu sync.Mutex
@@ -683,12 +684,18 @@ func TestEchoConsumer_NudgeUnleasedOnlyAndClaimOrder(t *testing.T) {
 		return seq
 	}
 
-	// 1. Leased item: claimed by another replica, lease active through t0 + 5m.
+	// 1. Leased item: claimed by another replica, lease active through t0 + 5m,
+	// with next_attempt_at pushed into the future so only queueItemUnleased(now)
+	// prevents NudgeDurableItems from updating it.
 	seqLeased := enq("test.echo", "leased-item", t0)
 	leasedClaimed, err := cs.ClaimDurableItems(ctx, "test.echo", "other-replica", t0, t0.Add(5*time.Minute), 1)
 	require.NoError(t, err)
 	require.Len(t, leasedClaimed, 1)
 	assert.Equal(t, seqLeased, leasedClaimed[0].Seq)
+	leasedFuture := t0.Add(10 * time.Minute)
+	require.NoError(t, entClient.DurableQueueItem.UpdateOneID(seqLeased).
+		SetNextAttemptAt(leasedFuture).
+		Exec(ctx))
 
 	// 2. Two future unleased items: nudge-1 has lower seq but later NotBefore (+10m) than nudge-2 (+4m).
 	// Nudging both to cur = t0 + 30s gives both next_attempt_at = cur, so (next_attempt_at, seq)
@@ -791,7 +798,10 @@ func TestEchoConsumer_NudgeUnleasedOnlyAndClaimOrder(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), stOther.Pending)
 
-	// Original lease holder still owns leased-item exclusively.
+	// Original lease holder still owns leased-item exclusively with its future next_attempt_at intact.
+	leasedStored, err := entClient.DurableQueueItem.Get(ctx, seqLeased)
+	require.NoError(t, err)
+	assert.True(t, leasedStored.NextAttemptAt.Equal(leasedFuture), "nudge must not touch leased row next_attempt_at")
 	doneLeased, err := cs.CompleteDurableItem(ctx, seqLeased, "other-replica")
 	require.NoError(t, err)
 	assert.True(t, doneLeased)

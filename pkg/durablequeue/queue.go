@@ -191,7 +191,7 @@ func (q *StoreQueue) Nudge(ctx context.Context, kind string, dedupKeys []string)
 	// replica's concurrent nudge just lowered next_attempt_at, or the items were
 	// already due), local drainers should poll promptly to share claiming due items.
 	for _, k := range dedupKeys {
-		if k != "" && len(k) <= store.MaxDurableQueueDedupKeyLen {
+		if store.IsNudgeableDedupKey(k) {
 			q.Wake(kind)
 			break
 		}

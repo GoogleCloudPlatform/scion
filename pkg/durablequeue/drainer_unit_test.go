@@ -285,7 +285,7 @@ func (m *memQueueStore) NudgeDurableItems(_ context.Context, kind string, dedupK
 	}
 	wanted := make(map[string]struct{}, len(dedupKeys))
 	for _, k := range dedupKeys {
-		if k != "" && len(k) <= store.MaxDurableQueueDedupKeyLen {
+		if store.IsNudgeableDedupKey(k) {
 			wanted[k] = struct{}{}
 		}
 	}
@@ -1547,18 +1547,6 @@ func TestQueueNudge_SemanticsAndLocalWake(t *testing.T) {
 	}
 
 	q := durablequeue.NewQueue(st, durablequeue.WithQueueClock(nowFn))
-
-	dProbe, err := durablequeue.NewDrainer(durablequeue.DrainerConfig{
-		Store:  st,
-		Kind:   "test.echo",
-		Logger: quietLogger(),
-		Handler: func(context.Context, durablequeue.Item, durablequeue.Lease) durablequeue.Result {
-			return durablequeue.Result{Done: true}
-		},
-	})
-	require.NoError(t, err)
-	unregProbe := q.Register(dProbe)
-	unregProbe() // exercise unregister; use a live running drainer below to observe Wake promptly
 
 	// Validation: bad kind and oversized list fail with store.ErrInvalidInput.
 	_, err = q.Nudge(ctx, "Bad-Kind", []string{"k1"})

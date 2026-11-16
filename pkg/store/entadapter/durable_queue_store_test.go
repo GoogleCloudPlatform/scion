@@ -799,6 +799,11 @@ func TestDurableQueueNudge(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, n)
 
+	assert.False(t, store.IsNudgeableDedupKey(""))
+	assert.True(t, store.IsNudgeableDedupKey("a"))
+	assert.True(t, store.IsNudgeableDedupKey(strings.Repeat("x", store.MaxDurableQueueDedupKeyLen)))
+	assert.False(t, store.IsNudgeableDedupKey(strings.Repeat("x", store.MaxDurableQueueDedupKeyLen+1)))
+
 	n, err = cs.NudgeDurableItems(ctx, "test.echo", []string{"unknown-a", "", strings.Repeat("x", store.MaxDurableQueueDedupKeyLen+1)}, now)
 	require.NoError(t, err)
 	assert.Zero(t, n)
@@ -973,8 +978,11 @@ func TestDurableQueueNudgeMaxKeysAndConcurrentClaim(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, claimedMax, store.MaxDurableQueueNudgeKeys)
 
-	// 2. Concurrent replicas nudging overlapping keys while two drainers claim:
-	// every replica may nudge, and claims remain strictly disjoint.
+	// 2. Interleaved nudges and claims across concurrent replicas:
+	// two replicas nudge overlapping slices of keys in opposite orders while two
+	// drainers concurrently poll and claim due items. NextAttemptAtGT(now) ensures
+	// each of the itemCount future rows is nudged exactly once across both
+	// nudgers (n1+n2 == itemCount), and claims partition all rows disjointly.
 	const itemCount = 40
 	raceKeys := make([]string, itemCount)
 	for i := 0; i < itemCount; i++ {
@@ -994,46 +1002,88 @@ func TestDurableQueueNudgeMaxKeysAndConcurrentClaim(t *testing.T) {
 		reversedKeys[i] = raceKeys[itemCount-1-i]
 	}
 
+	nudgeOverlappingSlices := func(allKeys []string) (int, error) {
+		total := 0
+		const window, step = 12, 8
+		for startIdx := 0; startIdx < len(allKeys); startIdx += step {
+			endIdx := min(len(allKeys), startIdx+window)
+			n, nerr := cs.NudgeDurableItems(ctx, "test.race_nudge", allKeys[startIdx:endIdx], now)
+			if nerr != nil {
+				return total, nerr
+			}
+			total += n
+			time.Sleep(time.Millisecond)
+		}
+		return total, nil
+	}
+
 	start := make(chan struct{})
+	nudgersDone := make(chan struct{})
 	var (
 		n1, n2       int
 		nerr1, nerr2 error
 		c1, c2       []store.DurableQueueRow
 		cerr1, cerr2 error
+		nudgerWG     sync.WaitGroup
 		wg           sync.WaitGroup
 	)
-	wg.Add(2)
+	claimInterleaved := func(owner string) ([]store.DurableQueueRow, error) {
+		var out []store.DurableQueueRow
+		for {
+			nudgersFinished := false
+			select {
+			case <-nudgersDone:
+				nudgersFinished = true
+			default:
+			}
+			batch, cerr := cs.ClaimDurableItems(ctx, "test.race_nudge", owner, now, now.Add(time.Minute), 7)
+			if cerr != nil {
+				return out, cerr
+			}
+			out = append(out, batch...)
+			if len(batch) == 0 {
+				if nudgersFinished {
+					return out, nil
+				}
+				time.Sleep(time.Millisecond)
+			}
+		}
+	}
+
+	nudgerWG.Add(2)
+	wg.Add(4)
 	go func() {
 		defer wg.Done()
+		defer nudgerWG.Done()
 		<-start
-		n1, nerr1 = cs.NudgeDurableItems(ctx, "test.race_nudge", raceKeys, now)
+		n1, nerr1 = nudgeOverlappingSlices(raceKeys)
+	}()
+	go func() {
+		defer wg.Done()
+		defer nudgerWG.Done()
+		<-start
+		n2, nerr2 = nudgeOverlappingSlices(reversedKeys)
+	}()
+	go func() {
+		nudgerWG.Wait()
+		close(nudgersDone)
 	}()
 	go func() {
 		defer wg.Done()
 		<-start
-		n2, nerr2 = cs.NudgeDurableItems(ctx, "test.race_nudge", reversedKeys, now)
+		c1, cerr1 = claimInterleaved("replica-1")
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		c2, cerr2 = claimInterleaved("replica-2")
 	}()
 	close(start)
 	wg.Wait()
 
 	require.NoError(t, nerr1)
 	require.NoError(t, nerr2)
-	assert.GreaterOrEqual(t, n1+n2, itemCount)
-
-	claimStart := make(chan struct{})
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		<-claimStart
-		c1, cerr1 = cs.ClaimDurableItems(ctx, "test.race_nudge", "replica-1", now, now.Add(time.Minute), 25)
-	}()
-	go func() {
-		defer wg.Done()
-		<-claimStart
-		c2, cerr2 = cs.ClaimDurableItems(ctx, "test.race_nudge", "replica-2", now, now.Add(time.Minute), 25)
-	}()
-	close(claimStart)
-	wg.Wait()
+	assert.Equal(t, itemCount, n1+n2)
 
 	require.NoError(t, cerr1)
 	require.NoError(t, cerr2)
@@ -1043,4 +1093,64 @@ func TestDurableQueueNudgeMaxKeysAndConcurrentClaim(t *testing.T) {
 		assert.False(t, seen[r.Seq], "seq %d claimed twice", r.Seq)
 		seen[r.Seq] = true
 	}
+
+	// 3. Direct race on already-claimable rows (NotBefore == now) between
+	// ClaimDurableItems(..., now, ...) and NudgeDurableItems(..., earlierNow):
+	// any row leased before the nudge commits must keep NextAttemptAt == now.
+	earlierNow := now.Add(-10 * time.Second)
+	for i := 0; i < itemCount; i++ {
+		_, err := cs.EnqueueDurableItem(ctx, nil, store.DurableQueueRow{
+			Kind:      "test.race_claim_lease",
+			DedupKey:  raceKeys[i],
+			Payload:   []byte(`{}`),
+			CreatedAt: t0,
+			NotBefore: now,
+		})
+		require.NoError(t, err)
+	}
+
+	raceStart := make(chan struct{})
+	var (
+		nLease         int
+		nLeaseErr      error
+		lc1, lc2       []store.DurableQueueRow
+		lcerr1, lcerr2 error
+		leaseRaceWG    sync.WaitGroup
+	)
+	leaseRaceWG.Add(3)
+	go func() {
+		defer leaseRaceWG.Done()
+		<-raceStart
+		nLease, nLeaseErr = cs.NudgeDurableItems(ctx, "test.race_claim_lease", raceKeys, earlierNow)
+	}()
+	go func() {
+		defer leaseRaceWG.Done()
+		<-raceStart
+		lc1, lcerr1 = cs.ClaimDurableItems(ctx, "test.race_claim_lease", "replica-1", now, now.Add(time.Minute), 25)
+	}()
+	go func() {
+		defer leaseRaceWG.Done()
+		<-raceStart
+		lc2, lcerr2 = cs.ClaimDurableItems(ctx, "test.race_claim_lease", "replica-2", now, now.Add(time.Minute), 25)
+	}()
+	close(raceStart)
+	leaseRaceWG.Wait()
+
+	require.NoError(t, nLeaseErr)
+	require.NoError(t, lcerr1)
+	require.NoError(t, lcerr2)
+	assert.Equal(t, itemCount, len(lc1)+len(lc2))
+	loweredInDB := 0
+	seenLease := make(map[int64]bool, itemCount)
+	for _, r := range append(lc1, lc2...) {
+		assert.False(t, seenLease[r.Seq], "seq %d claimed twice", r.Seq)
+		seenLease[r.Seq] = true
+		stored, gerr := cs.client.DurableQueueItem.Get(ctx, r.Seq)
+		require.NoError(t, gerr)
+		assert.True(t, stored.NextAttemptAt.Equal(r.NextAttemptAt), "leased row %d must not have next_attempt_at modified after claim", r.Seq)
+		if stored.NextAttemptAt.Equal(earlierNow) {
+			loweredInDB++
+		}
+	}
+	assert.Equal(t, nLease, loweredInDB)
 }
