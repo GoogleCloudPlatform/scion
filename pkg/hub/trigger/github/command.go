@@ -214,10 +214,13 @@ func isWordRune(r rune) bool {
 }
 
 // Mention token boundary helpers below (mentionStartBoundary,
-// mentionEndBoundary, mentionTrailingPunctOrSpace) mirror ExtractProseMentions,
+// mentionEndBoundary, mentionTrailingPunctOrSpace) mirror wrappedMentionStart,
 // proseMentionEndBoundary, and proseMentionPunctOrSpace in
 // pkg/messages/mentions.go so package github stays a stdlib-only leaf. Mirror
-// CommonMark / mention-boundary fixes across both files.
+// CommonMark / mention-boundary fixes across both files. Deliberate divergence:
+// mentionEndBoundary requires closing underscores to match leadingUnderscores
+// in count, so mismatched underscores (e.g. __@scion_) are rejected here even
+// though pkg/messages proseMentionEndBoundary still accepts them.
 func mentionStartBoundary(runes []rune, atIdx int) (leadingUnderscores int, ok bool) {
 	if atIdx == 0 {
 		return 0, true
