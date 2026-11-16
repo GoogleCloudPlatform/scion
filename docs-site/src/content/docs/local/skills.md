@@ -49,6 +49,7 @@ Frontmatter fields:
 | :--- | :--- | :--- |
 | `name` | Yes | Skill name in **kebab-case** (lowercase alphanumeric with hyphens, 1–64 chars, no leading/trailing hyphen). |
 | `description` | Yes | A short, human-readable summary shown in listings. |
+| `experiment` | No | Built-in platform skills only: gates the whole skill (`SKILL.md`) or a supporting `.md` file on a registered [experiment](/scion/reference/experiments/) (sections inside Markdown files can also be wrapped in `<!-- scion:experiment <id> -->` … `<!-- scion:end-experiment -->`; see [Platform and Workspace Skills](/scion/reference/agent-config/#platform-and-workspace-skills)). |
 
 ### Scaffolding a new skill
 

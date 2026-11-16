@@ -43,6 +43,8 @@ scion schedule create \
   --in 15m
 ```
 
+Behind the `hub.exec_schedules` and `hub.conduit` [experiments](/scion/reference/experiments/#server-experiments-with-notes) (both off by default), one-shot events created through the API (`POST /api/v1/projects/{projectId}/scheduled-events` with `eventType: "exec"`, `agentId` or `agentName`, `command`, and optional `timeoutSeconds`) can also run a non-interactive command inside an agent's container over Conduit without sending a message or starting an LLM turn (requiring `agent.attach` on the target agent at creation and at fire time).
+
 ---
 
 ## Recurring Schedules
@@ -122,6 +124,7 @@ scion schedule create-recurring \
 - **Refusals**: a held agent is never woken (the fire is refused), and an agent that is migrating (`scion reincarnate`) fails as without `--wake`. A stopped, errored or halted agent is not resumed: the fire fails with `failed to wake agent <name>: ...`, the same reason `scion message --wake` gives. Any refusal of the start itself (a delete in progress, capacity, broker placement) fails the fire the same way, and nothing is delivered.
 - **Start already in progress**: if the agent is already starting, or another start of it (or a stop) is in progress, when the message fires, the fire does not start it again: it waits for that start to bring the agent up and then delivers. If the agent does not become ready, the fire fails with `target agent was already starting or stopping and did not become ready; message not delivered`.
 - **Status while running**: a wake fire shows status `firing` until its delivery outcome is written (`fired`, `expired` or `failed`). If the Hub stops before the outcome can be written, recovery marks the event `failed` with `hub stopped before the wake fire completed` (and counts the error on the parent recurring schedule).
+- **Auto-wake under `lifecycle.idle_suspend`**: when the [`lifecycle.idle_suspend`](/scion/reference/experiments/#server-experiments-with-notes) experiment is on, a scheduled message to an agent the Hub suspended (`suspendReason` `idle` or `stalled`) resumes it automatically even without `--wake` and without requiring `agent.lifecycle` on the schedule's authority. `--wake` is still required to wake an agent a user suspended (`suspendReason` `user`) or while `lifecycle.idle_suspend` is off.
 - [Scheduled chat messages](/scion/hosted/user/scheduled-send/) are separate from the project scheduler and have their own opt-in **Wake the agent if it is suspended** option for the primary recipient.
 
 ---
