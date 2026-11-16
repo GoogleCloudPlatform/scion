@@ -8,7 +8,10 @@
     "build": "astro build",
     "preview": "astro preview",
     "astro": "astro",
-    "check-d2": "./check-d2.sh"
+    "check": "astro check",
+    "check-d2": "./check-d2.sh",
+    "test": "node --test test/*.test.mjs",
+    "verify-snapshot": "node scripts/verify-snapshot-links.mjs"
   },
   "dependencies": {
     "@astrojs/check": "^0.9.6",

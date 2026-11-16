@@ -1,0 +1,301 @@
+---
+/**
+ * Copyright 2026 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+import { Icon } from '@astrojs/starlight/components';
+import {
+	CHANNEL_DEFINITIONS,
+	getBuildVersionConfig,
+	MAIN_VERSION_LABEL,
+	MANIFEST_PATH,
+} from '../lib/versioning.mjs';
+
+const { base, channel, version } = getBuildVersionConfig();
+const initialVersionLabel = channel === 'main' ? MAIN_VERSION_LABEL : version;
+---
+
+<scion-version-select
+	class="scion-version-select"
+	data-current-channel={channel}
+	data-current-version={version}
+	data-current-base={base}
+	data-manifest-url={MANIFEST_PATH}
+>
+	<label class="scion-select-field scion-channel-field">
+		<span class="sr-only">Release channel</span>
+		<Icon name="code-branch" class="icon label-icon" />
+		<select data-role="channel" aria-label="Release channel" autocomplete="off">
+			{
+				CHANNEL_DEFINITIONS.map((def) => (
+					<option value={def.id} selected={def.id === channel}>
+						{def.label}
+					</option>
+				))
+			}
+		</select>
+		<Icon name="down-caret" class="icon caret" />
+	</label>
+	<span class="scion-select-divider" aria-hidden="true">/</span>
+	<label class="scion-select-field scion-version-field">
+		<span class="sr-only">Documentation version</span>
+		<select
+			data-role="version"
+			aria-label="Documentation version"
+			autocomplete="off"
+			disabled={channel === 'main'}
+		>
+			<option value={base} data-version={version} selected>
+				{initialVersionLabel}
+			</option>
+		</select>
+		<Icon name="down-caret" class="icon caret" />
+	</label>
+</scion-version-select>
+
+<script>
+	import { loadVersionsManifest, navigateToVersionBase } from '../lib/manifest-client.mjs';
+	import type { ChannelId, VersionsManifest } from '../lib/versioning.mjs';
+
+	class ScionVersionSelect extends HTMLElement {
+		private channelSelect: HTMLSelectElement | null = null;
+		private versionSelect: HTMLSelectElement | null = null;
+		private manifest: VersionsManifest | null = null;
+		private abortController: AbortController | null = null;
+
+		connectedCallback() {
+			this.abortController?.abort();
+			this.abortController = new AbortController();
+			const { signal } = this.abortController;
+
+			this.channelSelect = this.querySelector<HTMLSelectElement>('select[data-role="channel"]');
+			this.versionSelect = this.querySelector<HTMLSelectElement>('select[data-role="version"]');
+			if (!this.channelSelect || !this.versionSelect) return;
+
+			const current = this.getCurrentBuild();
+			const manifestUrl = this.dataset.manifestUrl || '/scion/versions.json';
+
+			this.channelSelect.addEventListener(
+				'change',
+				() => {
+					if (!this.channelSelect) return;
+					if (!this.manifest) {
+						this.channelSelect.value = current.channel;
+						return;
+					}
+					const chosenChannelId = this.channelSelect.value as ChannelId;
+					const channelEntry = this.manifest.channels.find((c) => c.id === chosenChannelId);
+					if (!channelEntry || channelEntry.versions.length === 0) {
+						this.syncControls();
+						return;
+					}
+					const target =
+						channelEntry.versions.find((v) => v.version === channelEntry.latest) ||
+						channelEntry.versions[0];
+					this.populateVersions(chosenChannelId, target.version);
+					if (chosenChannelId === current.channel && target.version === current.version) {
+						return;
+					}
+					void navigateToVersionBase(target.path, current.base);
+				},
+				{ signal },
+			);
+
+			this.versionSelect.addEventListener(
+				'change',
+				() => {
+					if (!this.versionSelect) return;
+					const selectedOption = this.versionSelect.selectedOptions[0];
+					const targetPath = this.versionSelect.value;
+					const chosenVer = selectedOption?.dataset.version || '';
+					if (!targetPath || chosenVer === current.version) return;
+					void navigateToVersionBase(targetPath, current.base);
+				},
+				{ signal },
+			);
+
+			window.addEventListener(
+				'pageshow',
+				(event) => {
+					if (event.persisted) {
+						this.syncControls();
+					}
+				},
+				{ signal },
+			);
+
+			void loadVersionsManifest(current, manifestUrl).then((manifest) => {
+				if (signal.aborted) return;
+				this.manifest = manifest;
+				this.syncControls();
+			});
+		}
+
+		disconnectedCallback() {
+			this.abortController?.abort();
+			this.abortController = null;
+		}
+
+		private getCurrentBuild(): { channel: ChannelId; version: string; base: string } {
+			const channel = (this.dataset.currentChannel || 'main') as ChannelId;
+			const version = this.dataset.currentVersion || 'main';
+			const base = this.dataset.currentBase || '/scion';
+			return { channel, version, base };
+		}
+
+		private syncControls() {
+			if (!this.channelSelect || !this.versionSelect || !this.manifest) return;
+			const current = this.getCurrentBuild();
+
+			this.channelSelect.replaceChildren();
+			for (const ch of this.manifest.channels) {
+				const opt = document.createElement('option');
+				opt.value = ch.id;
+				const empty = ch.versions.length === 0;
+				opt.disabled = empty;
+				opt.textContent = empty ? `${ch.label} (no snapshots)` : ch.label;
+				opt.selected = ch.id === current.channel;
+				this.channelSelect.appendChild(opt);
+			}
+
+			this.populateVersions(current.channel, current.version);
+		}
+
+		private populateVersions(channelId: ChannelId, selectedVersion: string) {
+			if (!this.versionSelect || !this.manifest) return;
+			const ch = this.manifest.channels.find((c) => c.id === channelId);
+			this.versionSelect.replaceChildren();
+
+			if (!ch || ch.versions.length === 0) {
+				const opt = document.createElement('option');
+				opt.value = '';
+				opt.textContent = 'Unavailable';
+				opt.selected = true;
+				this.versionSelect.appendChild(opt);
+				this.versionSelect.disabled = true;
+				return;
+			}
+
+			for (const v of ch.versions) {
+				const opt = document.createElement('option');
+				opt.value = v.path;
+				opt.dataset.version = v.version;
+				opt.textContent = v.label;
+				opt.selected = v.version === selectedVersion;
+				this.versionSelect.appendChild(opt);
+			}
+
+			// `main` is a single rolling HEAD snapshot; tagged channels allow version inspection/switching.
+			this.versionSelect.disabled = channelId === 'main';
+		}
+	}
+
+	if (!customElements.get('scion-version-select')) {
+		customElements.define('scion-version-select', ScionVersionSelect);
+	}
+</script>
+
+<style>
+	@layer starlight.components {
+		.scion-version-select {
+			display: inline-flex;
+			align-items: center;
+			gap: 0.125rem;
+			border: 1px solid var(--sl-color-gray-5);
+			border-radius: 0.375rem;
+			padding-inline: 0.375rem;
+			background-color: var(--sl-color-bg-nav);
+		}
+
+		.scion-select-divider {
+			color: var(--sl-color-gray-4);
+			font-size: var(--sl-text-xs);
+			user-select: none;
+		}
+
+		.scion-select-field {
+			--sl-label-icon-size: 0.875rem;
+			--sl-caret-size: 1rem;
+			position: relative;
+			display: inline-flex;
+			align-items: center;
+			color: var(--sl-color-gray-2);
+		}
+
+		.scion-select-field:hover {
+			color: var(--sl-color-white);
+		}
+
+		.scion-select-field .icon {
+			position: absolute;
+			top: 50%;
+			transform: translateY(-50%);
+			pointer-events: none;
+		}
+
+		.scion-select-field .label-icon {
+			font-size: var(--sl-label-icon-size);
+			inset-inline-start: 0.125rem;
+		}
+
+		.scion-select-field .caret {
+			font-size: var(--sl-caret-size);
+			inset-inline-end: 0.125rem;
+		}
+
+		.scion-select-field select {
+			border: 0;
+			padding-block: 0.35rem;
+			background-color: transparent;
+			color: inherit;
+			font-size: var(--sl-text-xs);
+			line-height: 1.25;
+			cursor: pointer;
+			appearance: none;
+			text-overflow: ellipsis;
+		}
+
+		.scion-channel-field select {
+			padding-inline: calc(var(--sl-label-icon-size) + 0.45rem) calc(var(--sl-caret-size) + 0.35rem);
+			max-width: 7.5rem;
+		}
+
+		.scion-version-field select {
+			padding-inline: 0.35rem calc(var(--sl-caret-size) + 0.35rem);
+			max-width: 11.5rem;
+		}
+
+		.scion-version-field select:disabled {
+			cursor: default;
+			opacity: 0.85;
+			padding-inline-end: 0.35rem;
+		}
+
+		.scion-version-field select:disabled + .caret {
+			display: none;
+		}
+
+		.scion-select-field option {
+			background-color: var(--sl-color-bg-nav);
+			color: var(--sl-color-gray-1);
+		}
+
+		@media (min-width: 50rem) {
+			.scion-select-field select {
+				font-size: var(--sl-text-sm);
+			}
+		}
+	}
+</style>
