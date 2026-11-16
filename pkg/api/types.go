@@ -1539,6 +1539,11 @@ type StartOptions struct {
 	// before the agent container starts.
 	ProjectPreStartHookScript string
 
+	// HomeFiles are create-only files written under .scion/ in the agent home
+	// directory during fresh provisioning before the harness starts. Ignored on
+	// resume, start, restart, and reprovision.
+	HomeFiles []HomeFile
+
 	// Checkpoint, when set, is called by the runtime immediately before each
 	// resource-creating call (an async launch's pre-create gate, design
 	// t1-async-create-v11.md §3.8.3). A non-nil error stops the launch
