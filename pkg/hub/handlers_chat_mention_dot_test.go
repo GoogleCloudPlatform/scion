@@ -999,4 +999,42 @@ func TestEmailMentionResolution_KnownUsersOnly(t *testing.T) {
 	if dmResp.Content != dmBody {
 		t.Errorf("user DM response content = %q; want unchanged %q", dmResp.Content, dmBody)
 	}
+
+	// 6. Project human-to-human topic send (no default agent, no agent mention):
+	// project member @<email> translates to @<display-slug>; non-member Hub user
+	// @<email>, unknown @<email>, plain prose email, and code stay unchanged.
+	h2hTopicID := tid("email-mention-h2h-topic")
+	if err := wcs.CreateTopic(ctx, WebChatTopic{
+		ID: h2hTopicID, ProjectID: proj.ID, Name: "email-mentions-h2h",
+		CreatedBy: "dev", CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	setTopicConversationID(t, db, s, h2hTopicID, proj.ID)
+
+	h2hBody := "Team update for @alice.smith@test.com and **@alice.smith@test.com**; " +
+		"non-member @hub.peer@test.com, unknown @unknown@example.com, prose user@example.com, " +
+		"code `@alice.smith@test.com`."
+	h2hRec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+h2hTopicID+"/messages",
+		map[string]string{"content": h2hBody})
+	if h2hRec.Code != http.StatusCreated {
+		t.Fatalf("project h2h send: %d %s", h2hRec.Code, h2hRec.Body.String())
+	}
+	var h2hResp chatMessageResponse
+	if err := json.Unmarshal(h2hRec.Body.Bytes(), &h2hResp); err != nil {
+		t.Fatal(err)
+	}
+	wantH2HDisplay := "Team update for @alice-smith and **@alice-smith**; " +
+		"non-member @hub.peer@test.com, unknown @unknown@example.com, prose user@example.com, " +
+		"code `@alice.smith@test.com`."
+	if h2hResp.Content != wantH2HDisplay {
+		t.Errorf("project h2h response content =\n%s\nwant:\n%s", h2hResp.Content, wantH2HDisplay)
+	}
+	storedH2H, err := s.GetMessage(ctx, h2hResp.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedH2H.Msg != wantH2HDisplay {
+		t.Errorf("stored project h2h msg =\n%s\nwant:\n%s", storedH2H.Msg, wantH2HDisplay)
+	}
 }

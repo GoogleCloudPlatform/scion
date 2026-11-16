@@ -789,7 +789,7 @@ function unwrapLeadingAtMailtoLinks(root: DocumentFragment): void {
 }
 
 /** Build a lowercase-email -> canonical-mention-slug map for known Scion users. */
-function buildKnownUsersByEmail(
+export function buildKnownUsersByEmail(
   members: readonly ChatMessageMember[],
   currentUserId: string
 ): ReadonlyMap<string, string> {
@@ -814,6 +814,15 @@ function buildKnownUsersByEmail(
     }
   }
   return map;
+}
+
+/** Deterministic content key for a `knownUsersByEmail` map so unchanged human rosters skip markdown re-renders. */
+export function knownUsersByEmailKey(map: ReadonlyMap<string, string>): string {
+  if (map.size === 0) return '';
+  return [...map.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([email, slug]) => `${email}\0${slug}`)
+    .join('\n');
 }
 
 /**
@@ -1156,6 +1165,15 @@ export class ScionChatMessage extends LitElement {
    */
   @property({ type: Array })
   members: readonly ChatMessageMember[] = [];
+
+  /**
+   * Pre-computed lowercase-email -> canonical-mention-slug map supplied by
+   * `<scion-chat-thread>` (memoized on human entries so agent-only roster
+   * snapshots do not re-render every bubble's markdown). When null, derived
+   * from `members` and `currentUserId`.
+   */
+  @property({ attribute: false })
+  knownUsersByEmail: ReadonlyMap<string, string> | null = null;
 
   /**
    * The rendered body: a `.md-content` element holding the markdown
@@ -2315,6 +2333,8 @@ export class ScionChatMessage extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    this.renderedCardMode = this.showsChoiceCard;
+    this.renderedKnownUsersKey = knownUsersByEmailKey(this.effectiveKnownUsersByEmail());
     void this.renderContent();
   }
 
@@ -2361,14 +2381,16 @@ export class ScionChatMessage extends LitElement {
 
   override updated(changed: Map<string, unknown>): void {
     const cardMode = this.showsChoiceCard;
+    const knownUsersKey = knownUsersByEmailKey(this.effectiveKnownUsersByEmail());
     if (
       changed.has('body') ||
       changed.has('plain') ||
       changed.has('choiceIntro') ||
-      changed.has('members') ||
+      knownUsersKey !== this.renderedKnownUsersKey ||
       cardMode !== this.renderedCardMode
     ) {
       this.renderedCardMode = cardMode;
+      this.renderedKnownUsersKey = knownUsersKey;
       void this.renderContent();
     }
     if (changed.has('renderedContent')) {
@@ -2673,6 +2695,13 @@ export class ScionChatMessage extends LitElement {
   /** The card mode the rendered body was built for. */
   private renderedCardMode = false;
 
+  /** Content key of the `knownUsersByEmail` map the rendered body was built for. */
+  private renderedKnownUsersKey = '';
+
+  private effectiveKnownUsersByEmail(): ReadonlyMap<string, string> {
+    return this.knownUsersByEmail ?? buildKnownUsersByEmail(this.members, this.currentUserId);
+  }
+
   /**
    * Whether this message renders as a choice card (design §4.1): a
    * choice-prompt with decisions, and the browser flag on. The hub omits
@@ -2705,7 +2734,7 @@ export class ScionChatMessage extends LitElement {
       linkifyRenderedFragment(fragment, {
         artifacts: isFeatureEnabled(ARTIFACTS_FLAG),
         gcs: this.senderIsAgent && isFeatureEnabled('web.gcs_links'),
-        knownUsersByEmail: buildKnownUsersByEmail(this.members, this.currentUserId),
+        knownUsersByEmail: this.effectiveKnownUsersByEmail(),
       });
       this.renderedContent = fragment.hasChildNodes() ? this.contentElement(fragment) : null;
     } catch {
