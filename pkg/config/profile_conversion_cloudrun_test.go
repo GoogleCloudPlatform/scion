@@ -30,11 +30,12 @@ import (
 
 func validCloudRunConfig() *CloudRunConfig {
 	return &CloudRunConfig{
-		ProjectID:      "my-project",
-		Location:       "us-central1",
-		ServiceAccount: "agent-sa@my-project.iam.gserviceaccount.com",
-		Network:        "projects/my-project/global/networks/agents-vpc",
-		Subnetwork:     "projects/my-project/regions/us-central1/subnetworks/agents-subnet",
+		ProjectID:           "my-project",
+		Location:            "us-central1",
+		ServiceAccount:      "agent-sa@my-project.iam.gserviceaccount.com",
+		BlockServiceAccount: "no-role-block@my-project.iam.gserviceaccount.com",
+		Network:             "projects/my-project/global/networks/agents-vpc",
+		Subnetwork:          "projects/my-project/regions/us-central1/subnetworks/agents-subnet",
 	}
 }
 
@@ -48,11 +49,16 @@ func findFinding(findings []ConversionFinding, code, path string) *ConversionFin
 }
 
 func TestProfileConversion_CloudRunMapped(t *testing.T) {
+	crCfg := validCloudRunConfig()
+	crCfg.AssignableServiceAccounts = []string{
+		"worker-one@my-project.iam.gserviceaccount.com",
+		"worker-two@my-project.iam.gserviceaccount.com",
+	}
 	vs := &VersionedSettings{
 		Runtimes: map[string]V1RuntimeConfig{
 			"cr": {
 				Type:     "cloudrun",
-				CloudRun: validCloudRunConfig(),
+				CloudRun: crCfg,
 			},
 		},
 		Profiles: map[string]V1ProfileConfig{
@@ -81,15 +87,23 @@ func TestProfileConversion_CloudRunMapped(t *testing.T) {
 		t.Fatalf("instance key/name = %q/%q, want cloudrun-us-central1", inst.Key, inst.Name)
 	}
 	wantTarget := &V1RuntimeTargetConfig{
-		Type:           RuntimeTargetTypeCloudRun,
-		ProjectID:      "my-project",
-		Region:         "us-central1",
-		ServiceAccount: "agent-sa@my-project.iam.gserviceaccount.com",
-		Network:        "projects/my-project/global/networks/agents-vpc",
-		Subnetwork:     "projects/my-project/regions/us-central1/subnetworks/agents-subnet",
+		Type:                RuntimeTargetTypeCloudRun,
+		ProjectID:           "my-project",
+		Region:              "us-central1",
+		ServiceAccount:      "agent-sa@my-project.iam.gserviceaccount.com",
+		BlockServiceAccount: "no-role-block@my-project.iam.gserviceaccount.com",
+		AssignableServiceAccounts: []string{
+			"worker-one@my-project.iam.gserviceaccount.com",
+			"worker-two@my-project.iam.gserviceaccount.com",
+		},
+		Network:    "projects/my-project/global/networks/agents-vpc",
+		Subnetwork: "projects/my-project/regions/us-central1/subnetworks/agents-subnet",
 	}
 	if !reflect.DeepEqual(inst.RuntimeTarget, wantTarget) {
 		t.Fatalf("runtime_target = %+v, want %+v", inst.RuntimeTarget, wantTarget)
+	}
+	if &inst.RuntimeTarget.AssignableServiceAccounts[0] == &crCfg.AssignableServiceAccounts[0] {
+		t.Fatal("assignable_service_accounts shares memory with legacy CloudRunConfig")
 	}
 	if inst.AgentDefaults == nil || inst.AgentDefaults.DefaultHarnessConfig != "gemini" ||
 		inst.AgentDefaults.ImageRegistry != "us-central1-docker.pkg.dev/my-project/scion" ||
@@ -99,14 +113,12 @@ func TestProfileConversion_CloudRunMapped(t *testing.T) {
 	if wantMap := map[string]string{"prod": "cloudrun-us-central1"}; !reflect.DeepEqual(got.ProfileMap, wantMap) {
 		t.Fatalf("profile map = %v, want %v (findings: %+v)", got.ProfileMap, wantMap, got.Findings)
 	}
-	if len(got.Findings) != 2 {
-		t.Fatalf("findings = %+v, want credentials_file and block_service_account operator-input notices", got.Findings)
+	if len(got.Findings) != 1 {
+		t.Fatalf("findings = %+v, want only credentials_file operator-input notice", got.Findings)
 	}
-	for _, field := range []string{"credentials_file", "block_service_account"} {
-		path := "server.broker.instances[0].runtime_target." + field
-		if f := findFinding(got.Findings, ConversionFlatTargetOperatorInputRequired, path); f == nil || f.Severity != ConversionSeverityNotice {
-			t.Fatalf("missing operator-input notice at %s: %+v", path, got.Findings)
-		}
+	credPath := "server.broker.instances[0].runtime_target.credentials_file"
+	if f := findFinding(got.Findings, ConversionFlatTargetOperatorInputRequired, credPath); f == nil || f.Severity != ConversionSeverityNotice {
+		t.Fatalf("missing operator-input notice at %s: %+v", credPath, got.Findings)
 	}
 	assertFlatEquivalent(t, vs, "prod", inst)
 }
@@ -160,7 +172,11 @@ func TestProfileConversion_CloudRunInstancesFieldRequired(t *testing.T) {
 						Region:    "us-west1",
 					},
 					// A stray cloudrun block on cloudrun-instances stays a non-folded notice.
-					CloudRun: validCloudRunConfig(),
+					CloudRun: func() *CloudRunConfig {
+						c := validCloudRunConfig()
+						c.AssignableServiceAccounts = []string{"worker-one@my-project.iam.gserviceaccount.com"}
+						return c
+					}(),
 				},
 			},
 			Profiles: map[string]V1ProfileConfig{
@@ -175,7 +191,8 @@ func TestProfileConversion_CloudRunInstancesFieldRequired(t *testing.T) {
 		if inst.Key != "cloudrun-us-west1" || inst.RuntimeTarget.ProjectID != "my-project" || inst.RuntimeTarget.Region != "us-west1" {
 			t.Fatalf("proposed instance = %+v", inst)
 		}
-		if inst.RuntimeTarget.ServiceAccount != "" || inst.RuntimeTarget.Network != "" || inst.RuntimeTarget.Subnetwork != "" {
+		if inst.RuntimeTarget.ServiceAccount != "" || inst.RuntimeTarget.BlockServiceAccount != "" ||
+			len(inst.RuntimeTarget.AssignableServiceAccounts) != 0 || inst.RuntimeTarget.Network != "" || inst.RuntimeTarget.Subnetwork != "" {
 			t.Fatalf("cloudrun-instances must not fold runtimes.cri.cloudrun fields: %+v", inst.RuntimeTarget)
 		}
 		if wantMap := map[string]string{"p": "cloudrun-us-west1"}; !reflect.DeepEqual(got.ProfileMap, wantMap) {
@@ -316,6 +333,10 @@ func TestProfileConversion_CloudRunInstancesFieldRequired(t *testing.T) {
 				mutate:   func(c *CloudRunConfig) { c.ServiceAccount = "" },
 				wantPath: "runtimes.cr.cloudrun.service_account",
 			},
+			"missing block_service_account": {
+				mutate:   func(c *CloudRunConfig) { c.BlockServiceAccount = "" },
+				wantPath: "runtimes.cr.cloudrun.block_service_account",
+			},
 			"missing network and subnetwork": {
 				mutate:   func(c *CloudRunConfig) { c.Network = ""; c.Subnetwork = "" },
 				wantPath: "runtimes.cr.cloudrun.network",
@@ -417,6 +438,73 @@ func TestProfileConversion_CloudRunDefaultSARequired(t *testing.T) {
 			mutate:   func(c *CloudRunConfig) { c.Location = "INVALID_REGION" },
 			wantPath: "runtimes.cr.cloudrun.location",
 			wantText: "region must be a Cloud Run region",
+		},
+		{
+			name:     "block_service_account compute default",
+			mutate:   func(c *CloudRunConfig) { c.BlockServiceAccount = "123456789012-compute@developer.gserviceaccount.com" },
+			wantPath: "runtimes.cr.cloudrun.block_service_account",
+			wantText: "the project default service accounts are not allowed",
+		},
+		{
+			name:     "block_service_account upper case",
+			mutate:   func(c *CloudRunConfig) { c.BlockServiceAccount = "No-Role@my-project.iam.gserviceaccount.com" },
+			wantPath: "runtimes.cr.cloudrun.block_service_account",
+			wantText: "block_service_account must be a user-managed service account",
+		},
+		{
+			name:     "block_service_account equals service_account",
+			mutate:   func(c *CloudRunConfig) { c.BlockServiceAccount = c.ServiceAccount },
+			wantPath: "runtimes.cr.cloudrun.block_service_account",
+			wantText: "block_service_account must differ from service_account",
+		},
+		{
+			name: "assignable_service_accounts contains block_service_account",
+			mutate: func(c *CloudRunConfig) {
+				c.AssignableServiceAccounts = []string{
+					"worker-one@my-project.iam.gserviceaccount.com",
+					c.BlockServiceAccount,
+				}
+			},
+			wantPath: "runtimes.cr.cloudrun.assignable_service_accounts[1]",
+			wantText: "block_service_account must not appear in assignable_service_accounts",
+		},
+		{
+			name: "assignable_service_accounts duplicate",
+			mutate: func(c *CloudRunConfig) {
+				c.AssignableServiceAccounts = []string{
+					"worker-one@my-project.iam.gserviceaccount.com",
+					"worker-one@my-project.iam.gserviceaccount.com",
+				}
+			},
+			wantPath: "runtimes.cr.cloudrun.assignable_service_accounts[1]",
+			wantText: "duplicate service account in assignable_service_accounts",
+		},
+		{
+			name: "assignable_service_accounts compute default",
+			mutate: func(c *CloudRunConfig) {
+				c.AssignableServiceAccounts = []string{"123456789012-compute@developer.gserviceaccount.com"}
+			},
+			wantPath: "runtimes.cr.cloudrun.assignable_service_accounts[0]",
+			wantText: "the project default service accounts are not allowed",
+		},
+		{
+			name: "assignable_service_accounts empty entry",
+			mutate: func(c *CloudRunConfig) {
+				c.AssignableServiceAccounts = []string{""}
+			},
+			wantPath: "runtimes.cr.cloudrun.assignable_service_accounts[0]",
+			wantText: "assignable_service_accounts[0] must be a user-managed service account",
+		},
+		{
+			name: "assignable_service_accounts exceeds 64 cap",
+			mutate: func(c *CloudRunConfig) {
+				c.AssignableServiceAccounts = make([]string, 65)
+				for i := range c.AssignableServiceAccounts {
+					c.AssignableServiceAccounts[i] = fmt.Sprintf("worker-%02d@my-project.iam.gserviceaccount.com", i)
+				}
+			},
+			wantPath: "runtimes.cr.cloudrun.assignable_service_accounts",
+			wantText: "assignable_service_accounts accepts at most 64 entries",
 		},
 	}
 
@@ -599,6 +687,16 @@ func TestProfileConversion_CloudRunSplitBySA(t *testing.T) {
 			mutateB:   func(c *CloudRunConfig) { c.ServiceAccount = "other-sa@my-project.iam.gserviceaccount.com" },
 			wantField: "service_account",
 		},
+		"differing block_service_account": {
+			mutateB:   func(c *CloudRunConfig) { c.BlockServiceAccount = "other-block@my-project.iam.gserviceaccount.com" },
+			wantField: "block_service_account",
+		},
+		"differing assignable_service_accounts": {
+			mutateB: func(c *CloudRunConfig) {
+				c.AssignableServiceAccounts = []string{"worker-b@my-project.iam.gserviceaccount.com"}
+			},
+			wantField: "assignable_service_accounts",
+		},
 		"differing network": {
 			mutateB:   func(c *CloudRunConfig) { c.Network = "projects/my-project/global/networks/other-vpc" },
 			wantField: "network",
@@ -612,7 +710,9 @@ func TestProfileConversion_CloudRunSplitBySA(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfgA := validCloudRunConfig()
+			cfgA.AssignableServiceAccounts = []string{"worker-a@my-project.iam.gserviceaccount.com"}
 			cfgB := validCloudRunConfig()
+			cfgB.AssignableServiceAccounts = []string{"worker-a@my-project.iam.gserviceaccount.com"}
 			tc.mutateB(cfgB)
 
 			vs := &VersionedSettings{
@@ -672,6 +772,36 @@ func TestProfileConversion_CloudRunSplitBySA(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("same assignable_service_accounts in different order agrees without splitting", func(t *testing.T) {
+		cfgA := validCloudRunConfig()
+		cfgA.AssignableServiceAccounts = []string{
+			"worker-two@my-project.iam.gserviceaccount.com",
+			"worker-one@my-project.iam.gserviceaccount.com",
+		}
+		cfgB := validCloudRunConfig()
+		cfgB.AssignableServiceAccounts = []string{
+			"worker-one@my-project.iam.gserviceaccount.com",
+			"worker-two@my-project.iam.gserviceaccount.com",
+		}
+		vs := &VersionedSettings{
+			Runtimes: map[string]V1RuntimeConfig{
+				"cr-a": {Type: "cloudrun", CloudRun: cfgA},
+				"cr-b": {Type: "cloudrun", CloudRun: cfgB},
+			},
+			Profiles: map[string]V1ProfileConfig{
+				"alpha": {Runtime: "cr-a"},
+				"beta":  {Runtime: "cr-b"},
+			},
+		}
+		got := ConvertProfilesToInstances(ProfileConversionInput{Settings: vs})
+		if len(got.Instances) != 1 || got.Instances[0].Key != "cloudrun-us-central1" {
+			t.Fatalf("instances = %+v, want 1 merged instance", got.Instances)
+		}
+		if !reflect.DeepEqual(got.ProfileMap, map[string]string{"alpha": "cloudrun-us-central1", "beta": "cloudrun-us-central1"}) {
+			t.Fatalf("profile map = %v", got.ProfileMap)
+		}
+	})
 }
 
 func TestProfileConversion_CloudRunCredentialsFileNotice(t *testing.T) {
@@ -712,12 +842,14 @@ func TestProfileConversion_CloudRunCredentialsFileNotice(t *testing.T) {
 		t.Fatalf("profile map = %v, want %v", got.ProfileMap, wantMap)
 	}
 	for i, prof := range []string{"p-east", "p-west"} {
-		for _, field := range []string{"credentials_file", "block_service_account"} {
-			path := fmt.Sprintf("server.broker.instances[%d].runtime_target.%s", i, field)
-			f := findFinding(got.Findings, ConversionFlatTargetOperatorInputRequired, path)
-			if f == nil || f.Severity != ConversionSeverityNotice || !reflect.DeepEqual(f.Profiles, []string{prof}) {
-				t.Fatalf("want notice flat_target_operator_input_required at %s for %s, got %+v", path, prof, got.Findings)
-			}
+		path := fmt.Sprintf("server.broker.instances[%d].runtime_target.credentials_file", i)
+		f := findFinding(got.Findings, ConversionFlatTargetOperatorInputRequired, path)
+		if f == nil || f.Severity != ConversionSeverityNotice || !reflect.DeepEqual(f.Profiles, []string{prof}) {
+			t.Fatalf("want notice flat_target_operator_input_required at %s for %s, got %+v", path, prof, got.Findings)
+		}
+		blockPath := fmt.Sprintf("server.broker.instances[%d].runtime_target.block_service_account", i)
+		if f := findFinding(got.Findings, ConversionFlatTargetOperatorInputRequired, blockPath); f != nil {
+			t.Fatalf("cloudrun instance must not get operator-input notice for block_service_account: %+v", f)
 		}
 	}
 	for _, field := range []string{"credentials_file", "block_service_account"} {
@@ -729,16 +861,20 @@ func TestProfileConversion_CloudRunCredentialsFileNotice(t *testing.T) {
 
 func TestProfileConversion_CloudRunKeyOmitsProjectID(t *testing.T) {
 	cfgAlpha := &CloudRunConfig{
-		ProjectID:      "proj-alpha",
-		Location:       "us-central1",
-		ServiceAccount: "agent-sa@proj-alpha.iam.gserviceaccount.com",
-		Network:        "projects/proj-alpha/global/networks/agents-vpc",
+		ProjectID:                 "proj-alpha",
+		Location:                  "us-central1",
+		ServiceAccount:            "agent-sa@proj-alpha.iam.gserviceaccount.com",
+		BlockServiceAccount:       "no-role-alpha@proj-alpha.iam.gserviceaccount.com",
+		AssignableServiceAccounts: []string{"worker-alpha@proj-alpha.iam.gserviceaccount.com"},
+		Network:                   "projects/proj-alpha/global/networks/agents-vpc",
 	}
 	cfgBeta := &CloudRunConfig{
-		ProjectID:      "proj-beta",
-		Location:       "us-central1",
-		ServiceAccount: "agent-sa@proj-beta.iam.gserviceaccount.com",
-		Network:        "projects/proj-beta/global/networks/agents-vpc",
+		ProjectID:                 "proj-beta",
+		Location:                  "us-central1",
+		ServiceAccount:            "agent-sa@proj-beta.iam.gserviceaccount.com",
+		BlockServiceAccount:       "no-role-beta@proj-beta.iam.gserviceaccount.com",
+		AssignableServiceAccounts: []string{"worker-beta@proj-beta.iam.gserviceaccount.com"},
+		Network:                   "projects/proj-beta/global/networks/agents-vpc",
 	}
 
 	vs := &VersionedSettings{
@@ -761,22 +897,26 @@ func TestProfileConversion_CloudRunKeyOmitsProjectID(t *testing.T) {
 		t.Fatalf("two projects in us-central1 got duplicate key %q", keyA)
 	}
 	suffixedRe := regexp.MustCompile(`^cloudrun-us-central1-[0-9a-f]{8}$`)
+	secretTokens := []string{
+		"proj-alpha", "proj-beta",
+		"agent-sa@", "no-role-alpha", "no-role-beta", "worker-alpha", "worker-beta",
+	}
 	for _, inst := range got.Instances {
 		if !suffixedRe.MatchString(inst.Key) {
 			t.Fatalf("key %q does not match FC6 hashed cloudrun-us-central1-<8hex> pattern", inst.Key)
 		}
-		for _, proj := range []string{"proj-alpha", "proj-beta"} {
-			if strings.Contains(inst.Key, proj) || strings.Contains(inst.Name, proj) {
-				t.Fatalf("instance key/name %q/%q leaks project ID %q", inst.Key, inst.Name, proj)
+		for _, tok := range secretTokens {
+			if strings.Contains(inst.Key, tok) || strings.Contains(inst.Name, tok) {
+				t.Fatalf("instance key/name %q/%q leaks %q", inst.Key, inst.Name, tok)
 			}
 		}
 		presBytes, err := json.Marshal(PresentInstance(inst).API())
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, proj := range []string{"proj-alpha", "proj-beta"} {
-			if strings.Contains(string(presBytes), proj) {
-				t.Fatalf("presented instance JSON %s leaks project ID %q", presBytes, proj)
+		for _, tok := range secretTokens {
+			if strings.Contains(string(presBytes), tok) {
+				t.Fatalf("presented instance JSON %s leaks %q", presBytes, tok)
 			}
 		}
 	}
@@ -785,56 +925,44 @@ func TestProfileConversion_CloudRunKeyOmitsProjectID(t *testing.T) {
 	}
 }
 
-func TestProfileConversion_CloudRunIdentityKeysBlocking(t *testing.T) {
-	t.Run("runtime entry assignable_service_accounts", func(t *testing.T) {
+func TestProfileConversion_CloudRunIdentityKeysFoldAndProfileUnknown(t *testing.T) {
+	t.Run("folds block_service_account and assignable_service_accounts including service_account in allow-list", func(t *testing.T) {
 		cfg := validCloudRunConfig()
-		cfg.AssignableServiceAccounts = []string{"worker-sa@my-project.iam.gserviceaccount.com"}
+		cfg.BlockServiceAccount = "  no-role-block@my-project.iam.gserviceaccount.com  "
+		cfg.AssignableServiceAccounts = []string{
+			"  agent-sa@my-project.iam.gserviceaccount.com  ",
+			"  worker-sa@my-project.iam.gserviceaccount.com  ",
+		}
 		vs := &VersionedSettings{
 			Runtimes: map[string]V1RuntimeConfig{"cr": {Type: "cloudrun", CloudRun: cfg}},
 			Profiles: map[string]V1ProfileConfig{"p": {Runtime: "cr"}},
 		}
 		got := ConvertProfilesToInstances(ProfileConversionInput{Settings: vs})
-		if len(got.ProfileMap) != 0 {
-			t.Fatalf("profile map = %v, want empty", got.ProfileMap)
+		if got.ProfileMap["p"] != "cloudrun-us-central1" {
+			t.Fatalf("profile map = %v, findings = %+v", got.ProfileMap, got.Findings)
 		}
-		const wantPath = "runtimes.cr.cloudrun.assignable_service_accounts"
-		const wantMsg = "runtimes.cr.cloudrun.assignable_service_accounts cannot be carried to a flat cloudrun instance yet (ptone/scion#7764); remove it from the legacy entry or wait for flat identity support"
-		f := findFinding(got.Findings, ConversionFieldNotValidForTargetType, wantPath)
-		if f == nil || f.Severity != ConversionSeverityBlocking || f.Message != wantMsg {
-			t.Fatalf("got finding %+v, want blocking %q at %s (all findings: %+v)", f, wantMsg, wantPath, got.Findings)
+		rt := got.Instances[0].RuntimeTarget
+		if rt.BlockServiceAccount != "no-role-block@my-project.iam.gserviceaccount.com" {
+			t.Fatalf("block_service_account = %q", rt.BlockServiceAccount)
 		}
-	})
-
-	t.Run("runtime entry block_service_account", func(t *testing.T) {
-		cfg := validCloudRunConfig()
-		cfg.BlockServiceAccount = "block-sa@my-project.iam.gserviceaccount.com"
-		vs := &VersionedSettings{
-			Runtimes: map[string]V1RuntimeConfig{"cr": {Type: "cloudrun", CloudRun: cfg}},
-			Profiles: map[string]V1ProfileConfig{"p": {Runtime: "cr"}},
+		wantAssignable := []string{
+			"agent-sa@my-project.iam.gserviceaccount.com",
+			"worker-sa@my-project.iam.gserviceaccount.com",
 		}
-		got := ConvertProfilesToInstances(ProfileConversionInput{Settings: vs})
-		if len(got.ProfileMap) != 0 {
-			t.Fatalf("profile map = %v, want empty", got.ProfileMap)
+		if !reflect.DeepEqual(rt.AssignableServiceAccounts, wantAssignable) {
+			t.Fatalf("assignable_service_accounts = %v, want %v", rt.AssignableServiceAccounts, wantAssignable)
 		}
-		const wantPath = "runtimes.cr.cloudrun.block_service_account"
-		const wantMsg = "runtimes.cr.cloudrun.block_service_account cannot be carried to a flat cloudrun instance yet (ptone/scion#7764); remove it from the legacy entry or wait for flat identity support"
-		f := findFinding(got.Findings, ConversionFieldNotValidForTargetType, wantPath)
-		if f == nil || f.Severity != ConversionSeverityBlocking || f.Message != wantMsg {
-			t.Fatalf("got finding %+v, want blocking %q at %s (all findings: %+v)", f, wantMsg, wantPath, got.Findings)
+		for _, f := range got.Findings {
+			if f.Code == ConversionFieldNotValidForTargetType || f.Severity == ConversionSeverityBlocking {
+				t.Fatalf("unexpected finding after folding Cloud Run identity keys: %+v", f)
+			}
 		}
 	})
 
-	// V1ProfileConfig has no CloudRun block; if a profile in raw settings sets
-	// cloudrun.assignable_service_accounts or cloudrun.block_service_account,
-	// conversion still blocks with the profile path named and omits the ProfileMap entry.
-	for name, tc := range map[string]struct {
-		yaml     string
-		wantCode string
-		wantPath string
-		wantMsg  string
-	}{
-		"profile cloudrun.assignable_service_accounts": {
-			yaml: `schema_version: "1"
+	// V1ProfileConfig has no CloudRun block; setting cloudrun under profiles.<p>
+	// in raw settings is an unknown_settings_key blocking finding.
+	t.Run("raw profile cloudrun block is unknown_settings_key", func(t *testing.T) {
+		const rawYAML = `schema_version: "1"
 runtimes:
   cr:
     type: cloudrun
@@ -842,54 +970,27 @@ runtimes:
       project_id: my-project
       location: us-central1
       service_account: agent-sa@my-project.iam.gserviceaccount.com
+      block_service_account: no-role-block@my-project.iam.gserviceaccount.com
       network: projects/my-project/global/networks/agents-vpc
 profiles:
   p:
     runtime: cr
     cloudrun:
-      assignable_service_accounts:
-        - worker-sa@my-project.iam.gserviceaccount.com
-`,
-			wantCode: ConversionFieldNotValidForTargetType,
-			wantPath: "profiles.p.cloudrun.assignable_service_accounts",
-			wantMsg:  "profiles.p.cloudrun.assignable_service_accounts cannot be carried to a flat cloudrun instance yet (ptone/scion#7764); remove it from the legacy entry or wait for flat identity support",
-		},
-		"profile cloudrun.block_service_account": {
-			yaml: `schema_version: "1"
-runtimes:
-  cr:
-    type: cloudrun
-    cloudrun:
-      project_id: my-project
-      location: us-central1
-      service_account: agent-sa@my-project.iam.gserviceaccount.com
-      network: projects/my-project/global/networks/agents-vpc
-profiles:
-  p:
-    runtime: cr
-    cloudrun:
-      block_service_account: block-sa@my-project.iam.gserviceaccount.com
-`,
-			wantCode: ConversionFieldNotValidForTargetType,
-			wantPath: "profiles.p.cloudrun.block_service_account",
-			wantMsg:  "profiles.p.cloudrun.block_service_account cannot be carried to a flat cloudrun instance yet (ptone/scion#7764); remove it from the legacy entry or wait for flat identity support",
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			vs := &VersionedSettings{}
-			if err := yamlv3.Unmarshal([]byte(tc.yaml), vs); err != nil {
-				t.Fatal(err)
-			}
-			got := ConvertProfilesToInstances(ProfileConversionInput{Settings: vs, RawSettings: []byte(tc.yaml)})
-			if len(got.ProfileMap) != 0 {
-				t.Fatalf("profile map = %v, want empty", got.ProfileMap)
-			}
-			f := findFinding(got.Findings, tc.wantCode, tc.wantPath)
-			if f == nil || f.Severity != ConversionSeverityBlocking || f.Message != tc.wantMsg {
-				t.Fatalf("got finding %+v, want blocking %s %q at %s (all findings: %+v)", f, tc.wantCode, tc.wantMsg, tc.wantPath, got.Findings)
-			}
-		})
-	}
+      block_service_account: other-block@my-project.iam.gserviceaccount.com
+`
+		vs := &VersionedSettings{}
+		if err := yamlv3.Unmarshal([]byte(rawYAML), vs); err != nil {
+			t.Fatal(err)
+		}
+		got := ConvertProfilesToInstances(ProfileConversionInput{Settings: vs, RawSettings: []byte(rawYAML)})
+		if len(got.ProfileMap) != 0 {
+			t.Fatalf("profile map = %v, want empty", got.ProfileMap)
+		}
+		f := findFinding(got.Findings, ConversionUnknownSettingsKey, "profiles.p.cloudrun")
+		if f == nil || f.Severity != ConversionSeverityBlocking {
+			t.Fatalf("want blocking unknown_settings_key at profiles.p.cloudrun, got %+v", got.Findings)
+		}
+	})
 }
 
 func TestProfileConversion_CloudRunRoundTripWithCredentialsFile(t *testing.T) {
@@ -901,6 +1002,10 @@ runtimes:
       project_id: my-project
       location: us-central1
       service_account: agent-sa@my-project.iam.gserviceaccount.com
+      block_service_account: no-role-block@my-project.iam.gserviceaccount.com
+      assignable_service_accounts:
+        - worker-one@my-project.iam.gserviceaccount.com
+        - worker-two@my-project.iam.gserviceaccount.com
       network: projects/my-project/global/networks/agents-vpc
       subnetwork: projects/my-project/regions/us-central1/subnetworks/agents-subnet
 profiles:
@@ -917,19 +1022,21 @@ profiles:
 	if len(got.Instances) != 1 {
 		t.Fatalf("instances = %+v, want 1", got.Instances)
 	}
-
-	// Without operator input, static validation flags block_service_account and credentials_file as required.
-	errs := ValidateRuntimeBrokerInstances(got.Instances)
-	expectValidationPaths(t, errs, "runtime_target.block_service_account", "runtime_target.credentials_file")
-	if len(errs) != 2 {
-		t.Fatalf("unfilled validation errors = %+v, want block_service_account and credentials_file required", errs)
+	if wantMap := map[string]string{"prod": "cloudrun-us-central1"}; !reflect.DeepEqual(got.ProfileMap, wantMap) {
+		t.Fatalf("profile map = %v, want %v (findings: %+v)", got.ProfileMap, wantMap, got.Findings)
 	}
 
-	// Once the operator fills block_service_account and credentials_file in the proposed YAML, both
+	// Without operator input, static validation flags only credentials_file as required.
+	errs := ValidateRuntimeBrokerInstances(got.Instances)
+	expectValidationPaths(t, errs, "runtime_target.credentials_file")
+	if len(errs) != 1 {
+		t.Fatalf("unfilled validation errors = %+v, want only credentials_file required", errs)
+	}
+
+	// Once the operator fills credentials_file in the proposed YAML, both
 	// ValidateRuntimeBrokerInstances and strict LoadRuntimeBrokerInstances succeed.
 	filled := append([]V1RuntimeBrokerInstanceConfig(nil), got.Instances...)
 	rtCopy := *filled[0].RuntimeTarget
-	rtCopy.BlockServiceAccount = "no-role-block@my-project.iam.gserviceaccount.com"
 	rtCopy.CredentialsFile = "/etc/scion/cloudrun-credentials.json"
 	filled[0].RuntimeTarget = &rtCopy
 

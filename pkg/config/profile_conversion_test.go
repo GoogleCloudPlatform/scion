@@ -331,6 +331,18 @@ func assertFlatEquivalent(t *testing.T, vs *VersionedSettings, p string, inst V1
 	fd, _ := flat.TierDefaultHarnessConfig("")
 	check("tier default harness config", ld, fd)
 
+	if inst.RuntimeTarget.Type == RuntimeTargetTypeCloudRun {
+		if rt.CloudRun != nil {
+			check("cloudrun project_id", strings.TrimSpace(rt.CloudRun.ProjectID), inst.RuntimeTarget.ProjectID)
+			check("cloudrun region", strings.TrimSpace(rt.CloudRun.Location), inst.RuntimeTarget.Region)
+			check("cloudrun service_account", strings.TrimSpace(rt.CloudRun.ServiceAccount), inst.RuntimeTarget.ServiceAccount)
+			check("cloudrun block_service_account", strings.TrimSpace(rt.CloudRun.BlockServiceAccount), inst.RuntimeTarget.BlockServiceAccount)
+			check("cloudrun assignable_service_accounts", sortedStrings(rt.CloudRun.AssignableServiceAccounts), sortedStrings(inst.RuntimeTarget.AssignableServiceAccounts))
+			check("cloudrun network", strings.TrimSpace(rt.CloudRun.Network), inst.RuntimeTarget.Network)
+			check("cloudrun subnetwork", strings.TrimSpace(rt.CloudRun.Subnetwork), inst.RuntimeTarget.Subnetwork)
+		}
+		return
+	}
 	if inst.RuntimeTarget.Type != RuntimeTargetTypeKubernetes {
 		return
 	}
