@@ -166,16 +166,14 @@ func subjectEnvRef() ruleengine.EnvironmentRef {
 // CompileMatch validates rule for the trigger match slot (<= 4096 bytes, bool).
 // An empty Expr with a supported dialect is valid (unconditional match).
 func (r *Rules) CompileMatch(ctx context.Context, rule Rule) error {
-	if !r.engine.Supports(ConsumerName, rule.normalizedDialect()) {
-		return &ruleengine.UnsupportedDialectError{
-			Dialect:  rule.normalizedDialect(),
-			Consumer: ConsumerName,
-		}
+	dialect := rule.normalizedDialect()
+	if _, err := r.engine.DialectFor(ConsumerName, dialect); err != nil {
+		return err
 	}
 	if rule.Expr == "" {
 		return nil
 	}
-	_, err := r.engine.Compile(ctx, rule.normalizedDialect(), rule.Expr, ruleengine.KindFilter, matchEnvRef())
+	_, err := r.engine.Compile(ctx, dialect, rule.Expr, ruleengine.KindFilter, matchEnvRef())
 	return err
 }
 
@@ -183,16 +181,14 @@ func (r *Rules) CompileMatch(ctx context.Context, rule Rule) error {
 // An empty Expr with a supported dialect is valid (Subject returns ("", nil) and
 // DeriveSubject substitutes the fallback event.subject).
 func (r *Rules) CompileSubject(ctx context.Context, rule Rule) error {
-	if !r.engine.Supports(ConsumerName, rule.normalizedDialect()) {
-		return &ruleengine.UnsupportedDialectError{
-			Dialect:  rule.normalizedDialect(),
-			Consumer: ConsumerName,
-		}
+	dialect := rule.normalizedDialect()
+	if _, err := r.engine.DialectFor(ConsumerName, dialect); err != nil {
+		return err
 	}
 	if rule.Expr == "" {
 		return nil
 	}
-	_, err := r.engine.Compile(ctx, rule.normalizedDialect(), rule.Expr, ruleengine.KindSubject, subjectEnvRef())
+	_, err := r.engine.Compile(ctx, dialect, rule.Expr, ruleengine.KindSubject, subjectEnvRef())
 	return err
 }
 
@@ -381,8 +377,8 @@ func (r *Rules) Match(ctx context.Context, scope celengine.CacheScope, rule Rule
 		return false, ruleengine.ErrBudgetExhausted
 	}
 	dialect := rule.normalizedDialect()
-	if !r.engine.Supports(ConsumerName, dialect) {
-		return false, &ruleengine.UnsupportedDialectError{Dialect: dialect, Consumer: ConsumerName}
+	if _, err := r.engine.DialectFor(ConsumerName, dialect); err != nil {
+		return false, err
 	}
 	if rule.Expr == "" {
 		return true, nil
@@ -423,8 +419,8 @@ func (r *Rules) Subject(ctx context.Context, scope celengine.CacheScope, rule Ru
 		return "", ruleengine.ErrBudgetExhausted
 	}
 	dialect := rule.normalizedDialect()
-	if !r.engine.Supports(ConsumerName, dialect) {
-		return "", &ruleengine.UnsupportedDialectError{Dialect: dialect, Consumer: ConsumerName}
+	if _, err := r.engine.DialectFor(ConsumerName, dialect); err != nil {
+		return "", err
 	}
 	if rule.Expr == "" {
 		return "", nil

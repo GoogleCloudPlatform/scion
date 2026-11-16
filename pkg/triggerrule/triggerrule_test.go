@@ -1458,3 +1458,112 @@ func TestNewEnforcesDialectForAdmissionAndEnvironmentCheck(t *testing.T) {
 		t.Fatalf("triggerrule.New unexpectedly clobbered sibling consumer grant")
 	}
 }
+
+func TestDialectAdmissionReasonsAcrossCompileAndEval(t *testing.T) {
+	ctx := context.Background()
+	celEng, err := celengine.New(triggerrule.Env(), triggerrule.Stage1Limits(), celengine.DefaultCacheConfig())
+	if err != nil {
+		t.Fatalf("celengine.New: %v", err)
+	}
+	celDialect, err := ruleengine.NewCELDialect(celEng)
+	if err != nil {
+		t.Fatalf("NewCELDialect: %v", err)
+	}
+	re := ruleengine.NewEngine()
+	if err := re.Register(celDialect); err != nil {
+		t.Fatalf("Register cel: %v", err)
+	}
+	ioStub := &wrappingStubDialect{}
+	if err := re.Register(ioStub); err != nil {
+		t.Fatalf("Register ioStub: %v", err)
+	}
+
+	// ReasonConsumerNotRegistered: New refuses an engine where "trigger" has not been registered.
+	if _, err := triggerrule.New(re); err == nil {
+		t.Fatalf("triggerrule.New without grant succeeded, want consumer_not_registered")
+	} else {
+		var unsup *ruleengine.UnsupportedDialectError
+		if !errors.As(err, &unsup) || unsup.Reason != ruleengine.ReasonConsumerNotRegistered {
+			t.Fatalf("New without grant = %T (%v), want Reason=%q", err, err, ruleengine.ReasonConsumerNotRegistered)
+		}
+	}
+
+	// Grant:
+	// - "cel" (admitted pure dialect)
+	// - "ghost_dialect" (granted, not registered -> ReasonUnknownDialect)
+	// - ioStub.Name() via pure Grant without AllowIO (registered PerformsIO=true -> ReasonIONotAllowed)
+	// Leaving "rego" ungranted (-> ReasonDialectNotAllowed).
+	if err := re.AllowConsumerDialects(
+		triggerrule.ConsumerName,
+		ruleengine.Grant(ruleengine.DialectCEL),
+		ruleengine.Grant("ghost_dialect"),
+		ruleengine.Grant(ioStub.Name()),
+	); err != nil {
+		t.Fatalf("AllowConsumerDialects: %v", err)
+	}
+
+	rules, err := triggerrule.New(re)
+	if err != nil {
+		t.Fatalf("triggerrule.New: %v", err)
+	}
+
+	ev := sampleFireEvent(`{"ok":true}`)
+	tr := hubfire.FireTriggerRef{ID: "trig-reasons", Name: "reasons"}
+	act, err := triggerrule.NewActivation(ev, tr)
+	if err != nil {
+		t.Fatalf("NewActivation: %v", err)
+	}
+	scope := celengine.CacheScope{Consumer: triggerrule.ConsumerName, ID: tr.ID, Revision: 1}
+
+	// Verify empty Expr short-circuit on admitted "cel" (both "" and "cel").
+	for _, d := range []string{"", ruleengine.DialectCEL} {
+		emptyRule := triggerrule.Rule{Dialect: d, Expr: ""}
+		if err := rules.CompileMatch(ctx, emptyRule); err != nil {
+			t.Fatalf("CompileMatch empty (%q) = %v, want nil", d, err)
+		}
+		if err := rules.CompileSubject(ctx, emptyRule); err != nil {
+			t.Fatalf("CompileSubject empty (%q) = %v, want nil", d, err)
+		}
+		if ok, err := rules.Match(ctx, scope, emptyRule, act); err != nil || !ok {
+			t.Fatalf("Match empty (%q) = (%v, %v), want (true, nil)", d, ok, err)
+		}
+		if s, err := rules.Subject(ctx, scope, emptyRule, act); err != nil || s != "" {
+			t.Fatalf("Subject empty (%q) = (%q, %v), want (\"\", nil)", d, s, err)
+		}
+	}
+
+	assertReason := func(op string, got error, wantDialect, wantReason string) {
+		t.Helper()
+		var unsup *ruleengine.UnsupportedDialectError
+		if !errors.As(got, &unsup) {
+			t.Fatalf("%s(%q): got %T (%v), want *UnsupportedDialectError", op, wantDialect, got, got)
+		}
+		if unsup.Dialect != wantDialect || unsup.Consumer != triggerrule.ConsumerName || unsup.Reason != wantReason {
+			t.Fatalf("%s(%q): got %+v, want Dialect=%q Consumer=%q Reason=%q",
+				op, wantDialect, unsup, wantDialect, triggerrule.ConsumerName, wantReason)
+		}
+	}
+
+	cases := []struct {
+		dialect    string
+		wantReason string
+	}{
+		{dialect: "rego", wantReason: ruleengine.ReasonDialectNotAllowed},
+		{dialect: "ghost_dialect", wantReason: ruleengine.ReasonUnknownDialect},
+		{dialect: ioStub.Name(), wantReason: ruleengine.ReasonIONotAllowed},
+	}
+
+	for _, tc := range cases {
+		for _, expr := range []string{"", "true"} {
+			r := triggerrule.Rule{Dialect: tc.dialect, Expr: expr}
+			assertReason("CompileMatch", rules.CompileMatch(ctx, r), tc.dialect, tc.wantReason)
+			assertReason("CompileSubject", rules.CompileSubject(ctx, r), tc.dialect, tc.wantReason)
+
+			_, mErr := rules.Match(ctx, scope, r, act)
+			assertReason("Match", mErr, tc.dialect, tc.wantReason)
+
+			_, sErr := rules.Subject(ctx, scope, r, act)
+			assertReason("Subject", sErr, tc.dialect, tc.wantReason)
+		}
+	}
+}
