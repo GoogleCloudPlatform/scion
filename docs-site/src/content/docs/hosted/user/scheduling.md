@@ -153,8 +153,10 @@ scion schedule create \
   -- /usr/local/bin/check-queue --strict
 ```
 
+In the Web UI, the project's **Recurring Schedules** and **Scheduled Events** forms also offer the `exec` event type while `hub.exec_schedules` is enabled, with an attachable-agent picker, per-argument `argv` inputs, optional timeout, and run-summary detail and history views.
+
 :::note[Rollout status]
-Only **one-shot** exec events (`scion schedule create --type exec` and `POST /api/v1/projects/{projectId}/scheduled-events`) are available today. **Recurring exec schedules are not yet available** (Phase 2, ptone/scion#7884): `scion schedule create-recurring --type exec` forwards to `POST /api/v1/projects/{projectId}/schedules`, which currently refuses `exec` with `unsupported event type`. Phase 2 will also add per-schedule overlap leases, recurring `errorCount` tracking, the `target_deleted` pause reason, and Web form support.
+Only **one-shot** exec events (`scion schedule create --type exec` and `POST /api/v1/projects/{projectId}/scheduled-events`) are available today. **Recurring exec schedules are not yet available** (Phase 2, ptone/scion#7884): `scion schedule create-recurring --type exec` forwards to `POST /api/v1/projects/{projectId}/schedules`, which currently refuses `exec` with `unsupported event type`. Phase 2 will also add per-schedule overlap leases, recurring `errorCount` tracking, and the `target_deleted` pause reason.
 :::
 
 ### Execution Environment and Output
