@@ -19,6 +19,8 @@ import (
 	"errors"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -535,12 +537,14 @@ func TestEvaluateWrapsDialectErrorAcrossTimeoutBudgetAndCancel(t *testing.T) {
 }
 
 type countingCachedDialect struct {
-	name          string
-	performsIO    bool
-	compileCnt    int
-	cachedCompCnt int
-	invalidateCnt int
-	evalCnt       int
+	name            string
+	performsIO      bool
+	compileCnt      int
+	cachedCompCnt   int
+	invalidateCnt   int
+	evalCnt         int
+	lastCachedScope celengine.CacheScope
+	lastInvalScope  celengine.CacheScope
 }
 
 func (d *countingCachedDialect) Name() string { return d.name }
@@ -555,12 +559,14 @@ func (d *countingCachedDialect) Compile(_ context.Context, rule string, kind rul
 	d.compileCnt++
 	return ruleengine.NewCompiled(env.Consumer, d.Name(), kind, rule), nil
 }
-func (d *countingCachedDialect) CachedCompile(_ context.Context, _ celengine.CacheScope, rule string, kind ruleengine.Kind, env ruleengine.EnvironmentRef) (ruleengine.Compiled, error) {
+func (d *countingCachedDialect) CachedCompile(_ context.Context, scope celengine.CacheScope, rule string, kind ruleengine.Kind, env ruleengine.EnvironmentRef) (ruleengine.Compiled, error) {
 	d.cachedCompCnt++
+	d.lastCachedScope = scope
 	return ruleengine.NewCompiled(env.Consumer, d.Name(), kind, rule), nil
 }
-func (d *countingCachedDialect) Invalidate(_ string, _ celengine.CacheScope) {
+func (d *countingCachedDialect) Invalidate(_ string, scope celengine.CacheScope) {
 	d.invalidateCnt++
+	d.lastInvalScope = scope
 }
 func (d *countingCachedDialect) Evaluate(_ context.Context, c ruleengine.Compiled, _ ruleengine.Input, _ ruleengine.Budget) (ruleengine.Decision, error) {
 	d.evalCnt++
@@ -1011,4 +1017,311 @@ func TestDenyByDefault_EvaluateEnforcesAdmissionBeforeCtxAndBudget(t *testing.T)
 	_, err = engB.Evaluate(ctx, forgedEmptyConsumer, ruleengine.Input{}, ruleengine.Budget{})
 	assertUnsupportedReason(t, err, "cel", "", ruleengine.ReasonEmptyConsumer,
 		`unsupported dialect "cel": empty_consumer`)
+}
+
+func TestDenyByDefault_CachedCompileScopeConsumerBoundary(t *testing.T) {
+	celEng := newTestCELEngine(t, "shared_env")
+	celDialect, err := ruleengine.NewCELDialect(celEng)
+	if err != nil {
+		t.Fatalf("NewCELDialect: %v", err)
+	}
+	cachedPure := &countingCachedDialect{name: "cached_pure", performsIO: false}
+
+	eng := ruleengine.NewEngine()
+	if err := eng.Register(celDialect); err != nil {
+		t.Fatalf("Register CEL: %v", err)
+	}
+	if err := eng.Register(cachedPure); err != nil {
+		t.Fatalf("Register cached_pure: %v", err)
+	}
+	if err := eng.AllowConsumerDialects("consumer_a", ruleengine.Grant("cel"), ruleengine.Grant("cached_pure")); err != nil {
+		t.Fatalf("AllowConsumerDialects consumer_a: %v", err)
+	}
+	if err := eng.AllowConsumerDialects("consumer_b", ruleengine.Grant("cel")); err != nil {
+		t.Fatalf("AllowConsumerDialects consumer_b: %v", err)
+	}
+
+	ctx := context.Background()
+
+	// 1. Mismatched non-empty scope.Consumer (both registered and unregistered) is rejected
+	// after admission with UnsupportedDialectError{Dialect, Consumer: env.Consumer, Reason: dialect_not_allowed}
+	// without touching the cache or invoking CachedDialect.
+	for _, otherScopeConsumer := range []string{"consumer_b", "unregistered_other"} {
+		_, err := eng.CachedCompile(ctx, "",
+			celengine.CacheScope{Consumer: otherScopeConsumer, ID: "id-1", Revision: 1},
+			`event.type == "push"`, ruleengine.KindFilter,
+			ruleengine.EnvironmentRef{Consumer: " consumer_a ", Name: "shared_env"},
+		)
+		assertUnsupportedReason(t, err, "cel", "consumer_a", ruleengine.ReasonDialectNotAllowed,
+			`unsupported dialect "cel" for consumer "consumer_a": dialect_not_allowed`)
+
+		_, err = eng.CachedCompile(ctx, "cached_pure",
+			celengine.CacheScope{Consumer: otherScopeConsumer, ID: "id-1", Revision: 1},
+			"rule", ruleengine.KindFilter,
+			ruleengine.EnvironmentRef{Consumer: "consumer_a", Name: "shared_env"},
+		)
+		assertUnsupportedReason(t, err, "cached_pure", "consumer_a", ruleengine.ReasonDialectNotAllowed,
+			`unsupported dialect "cached_pure" for consumer "consumer_a": dialect_not_allowed`)
+	}
+	if celEng.CacheStats().Entries != 0 || cachedPure.cachedCompCnt != 0 {
+		t.Fatalf("mismatched scope.Consumer touched cache: cel=%+v cachedPure=%+v", celEng.CacheStats(), cachedPure)
+	}
+
+	// 2. Empty (or whitespace) scope.Consumer defaults to normalized env.Consumer.
+	compCEL, err := eng.CachedCompile(ctx, "cel",
+		celengine.CacheScope{Consumer: "", ID: "id-default", Revision: 1},
+		`event.type == "push"`, ruleengine.KindFilter,
+		ruleengine.EnvironmentRef{Consumer: " consumer_a ", Name: "shared_env"},
+	)
+	if err != nil {
+		t.Fatalf("CachedCompile empty scope.Consumer on CEL: %v", err)
+	}
+	if compCEL.Consumer() != "consumer_a" {
+		t.Fatalf("compCEL.Consumer() = %q, want consumer_a", compCEL.Consumer())
+	}
+	if celEng.CacheStats().Entries != 1 {
+		t.Fatalf("Entries = %d, want 1", celEng.CacheStats().Entries)
+	}
+	// Proves celEng bound the entry under consumer_a: invalidating consumer_a evicts it.
+	eng.Invalidate("cel", "shared_env", celengine.CacheScope{Consumer: " consumer_a ", ID: "id-default", Revision: 1})
+	if celEng.CacheStats().Entries != 0 {
+		t.Fatalf("Entries after Invalidate(consumer_a) = %d, want 0", celEng.CacheStats().Entries)
+	}
+
+	compCustom, err := eng.CachedCompile(ctx, "cached_pure",
+		celengine.CacheScope{Consumer: "   ", ID: "id-ws", Revision: 2},
+		"rule", ruleengine.KindFilter,
+		ruleengine.EnvironmentRef{Consumer: "consumer_a", Name: "shared_env"},
+	)
+	if err != nil {
+		t.Fatalf("CachedCompile whitespace scope.Consumer on cached_pure: %v", err)
+	}
+	if compCustom.Consumer() != "consumer_a" || cachedPure.lastCachedScope.Consumer != "consumer_a" {
+		t.Fatalf("got compiled.Consumer=%q scope.Consumer=%q, want consumer_a", compCustom.Consumer(), cachedPure.lastCachedScope.Consumer)
+	}
+}
+
+type concurrentIODialect struct {
+	compiles atomic.Int64
+	evals    atomic.Int64
+}
+
+func (d *concurrentIODialect) Name() string { return "concurrent_io" }
+func (d *concurrentIODialect) Declares() ruleengine.Capabilities {
+	return ruleengine.Capabilities{
+		PerformsIO:  true,
+		MaxEvalTime: 100 * time.Millisecond,
+		ResultKinds: []ruleengine.Kind{ruleengine.KindFilter},
+	}
+}
+func (d *concurrentIODialect) Compile(_ context.Context, rule string, kind ruleengine.Kind, env ruleengine.EnvironmentRef) (ruleengine.Compiled, error) {
+	d.compiles.Add(1)
+	return ruleengine.NewCompiled(env.Consumer, d.Name(), kind, rule), nil
+}
+func (d *concurrentIODialect) Evaluate(_ context.Context, c ruleengine.Compiled, _ ruleengine.Input, _ ruleengine.Budget) (ruleengine.Decision, error) {
+	d.evals.Add(1)
+	return ruleengine.Decision{Kind: c.Kind(), Bool: true}, nil
+}
+
+func TestDenyByDefault_ConcurrentAllowListReplacementRace(t *testing.T) {
+	celEng := newTestCELEngine(t, "race_env")
+	celDialect, err := ruleengine.NewCELDialect(celEng)
+	if err != nil {
+		t.Fatalf("NewCELDialect: %v", err)
+	}
+	ioDialect := &concurrentIODialect{}
+
+	eng := ruleengine.NewEngine()
+	if err := eng.Register(celDialect); err != nil {
+		t.Fatalf("Register CEL: %v", err)
+	}
+	if err := eng.Register(ioDialect); err != nil {
+		t.Fatalf("Register concurrent_io: %v", err)
+	}
+
+	if err := eng.AllowConsumerDialects("stable", ruleengine.Grant("cel")); err != nil {
+		t.Fatalf("AllowConsumerDialects stable: %v", err)
+	}
+	if err := eng.AllowConsumerDialects("flapping", ruleengine.Grant("cel"), ruleengine.GrantIO("concurrent_io")); err != nil {
+		t.Fatalf("AllowConsumerDialects flapping: %v", err)
+	}
+
+	ctx := context.Background()
+	const expr = `event.type == "push"`
+	actInput := ruleengine.Input{
+		Activation: map[string]any{"event": map[string]any{"type": "push"}},
+	}
+
+	compStable, err := eng.Compile(ctx, "cel", expr, ruleengine.KindFilter, ruleengine.EnvironmentRef{
+		Consumer: "stable",
+		Name:     "race_env",
+	})
+	if err != nil {
+		t.Fatalf("Compile stable: %v", err)
+	}
+	compFlapCEL, err := eng.Compile(ctx, "cel", expr, ruleengine.KindFilter, ruleengine.EnvironmentRef{
+		Consumer: "flapping",
+		Name:     "race_env",
+	})
+	if err != nil {
+		t.Fatalf("Compile flapping CEL: %v", err)
+	}
+	compFlapIO, err := eng.Compile(ctx, "concurrent_io", "check", ruleengine.KindFilter, ruleengine.EnvironmentRef{
+		Consumer: "flapping",
+		Name:     "race_env",
+	})
+	if err != nil {
+		t.Fatalf("Compile flapping IO: %v", err)
+	}
+
+	checkFlappingErr := func(err error, wantDialect string) {
+		if err == nil {
+			return
+		}
+		var unsup *ruleengine.UnsupportedDialectError
+		if !errors.As(err, &unsup) {
+			t.Errorf("unexpected non-UnsupportedDialectError for %s: %T (%v)", wantDialect, err, err)
+			return
+		}
+		var ferr *ruleengine.FailedError
+		if errors.As(err, &ferr) {
+			t.Errorf("admission failure wrapped in FailedError: %v", err)
+			return
+		}
+		if unsup.Consumer != "flapping" || unsup.Dialect != wantDialect {
+			t.Errorf("UnsupportedDialectError = %+v, want Consumer=flapping Dialect=%s", unsup, wantDialect)
+		}
+		switch unsup.Reason {
+		case ruleengine.ReasonDialectNotAllowed:
+		case ruleengine.ReasonIONotAllowed:
+			if wantDialect != "concurrent_io" {
+				t.Errorf("unexpected io_not_allowed for pure dialect %s", wantDialect)
+			}
+		default:
+			t.Errorf("unexpected UnsupportedDialectError.Reason = %q for %s", unsup.Reason, wantDialect)
+		}
+	}
+
+	const iterations = 250
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+
+	// 2 writer goroutines toggling flapping's allow-list between granted, pure-only, and empty.
+	for w := range 2 {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			<-start
+			for i := range iterations {
+				var err error
+				switch (i + worker) % 3 {
+				case 0:
+					err = eng.AllowConsumerDialects("flapping", ruleengine.Grant("cel"), ruleengine.GrantIO("concurrent_io"))
+				case 1:
+					err = eng.AllowConsumerDialects("flapping")
+				case 2:
+					err = eng.AllowConsumerDialects("flapping", ruleengine.Grant("concurrent_io"))
+				}
+				if err != nil {
+					t.Errorf("AllowConsumerDialects: %v", err)
+					return
+				}
+			}
+		}(w)
+	}
+
+	// Concurrent Supports readers.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		for range iterations {
+			_ = eng.Supports("flapping", "cel")
+			_ = eng.Supports("flapping", "concurrent_io")
+			if !eng.Supports("stable", "cel") {
+				t.Errorf("stable consumer unexpectedly lost cel grant")
+				return
+			}
+		}
+	}()
+
+	// Concurrent Compile / CachedCompile / Invalidate readers.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := range iterations {
+			c, err := eng.Compile(ctx, "cel", expr, ruleengine.KindFilter, ruleengine.EnvironmentRef{
+				Consumer: "flapping",
+				Name:     "race_env",
+			})
+			if err != nil {
+				checkFlappingErr(err, "cel")
+			} else if c.Consumer() != "flapping" {
+				t.Errorf("Compiled.Consumer() = %q, want flapping", c.Consumer())
+			}
+
+			cc, err := eng.CachedCompile(ctx, "cel",
+				celengine.CacheScope{ID: "race-slot", Revision: int64(i + 1)},
+				expr, ruleengine.KindFilter,
+				ruleengine.EnvironmentRef{Consumer: "flapping", Name: "race_env"},
+			)
+			if err != nil {
+				checkFlappingErr(err, "cel")
+			} else if cc.Consumer() != "flapping" {
+				t.Errorf("CachedCompile Compiled.Consumer() = %q, want flapping", cc.Consumer())
+			}
+
+			ci, err := eng.Compile(ctx, "concurrent_io", "check", ruleengine.KindFilter, ruleengine.EnvironmentRef{
+				Consumer: "flapping",
+				Name:     "race_env",
+			})
+			if err != nil {
+				checkFlappingErr(err, "concurrent_io")
+			} else if ci.Consumer() != "flapping" {
+				t.Errorf("IO Compiled.Consumer() = %q, want flapping", ci.Consumer())
+			}
+
+			eng.Invalidate("cel", "race_env", celengine.CacheScope{Consumer: "flapping", ID: "race-slot", Revision: int64(i + 1)})
+		}
+	}()
+
+	// Concurrent Evaluate readers (2 goroutines).
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for range iterations {
+				decCEL, err := eng.Evaluate(ctx, compFlapCEL, actInput, ruleengine.Budget{})
+				if err != nil {
+					if decCEL != (ruleengine.Decision{}) {
+						t.Errorf("non-zero Decision on denied CEL Evaluate: %+v", decCEL)
+					}
+					checkFlappingErr(err, "cel")
+				} else if !decCEL.Bool {
+					t.Errorf("admitted CEL Evaluate returned Bool=false")
+				}
+
+				decIO, err := eng.Evaluate(ctx, compFlapIO, actInput, ruleengine.Budget{})
+				if err != nil {
+					if decIO != (ruleengine.Decision{}) {
+						t.Errorf("non-zero Decision on denied IO Evaluate: %+v", decIO)
+					}
+					checkFlappingErr(err, "concurrent_io")
+				} else if !decIO.Bool {
+					t.Errorf("admitted IO Evaluate returned Bool=false")
+				}
+
+				decStable, err := eng.Evaluate(ctx, compStable, actInput, ruleengine.Budget{})
+				if err != nil || !decStable.Bool {
+					t.Errorf("stable Evaluate = (%+v, %v), want Bool=true, nil", decStable, err)
+					return
+				}
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
 }

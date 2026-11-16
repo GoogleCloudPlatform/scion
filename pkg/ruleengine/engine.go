@@ -429,7 +429,9 @@ func (e *Engine) Compile(ctx context.Context, dialect, rule string, kind Kind, e
 }
 
 // CachedCompile retrieves or compiles rule using the dialect's program cache
-// when supported, falling back to Compile otherwise.
+// when supported, falling back to Compile otherwise. An empty scope.Consumer
+// defaults to env.Consumer; a non-empty scope.Consumer that differs from
+// env.Consumer is rejected after admission.
 func (e *Engine) CachedCompile(ctx context.Context, dialect string, scope celengine.CacheScope, rule string, kind Kind, env EnvironmentRef) (Compiled, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -439,6 +441,14 @@ func (e *Engine) CachedCompile(ctx context.Context, dialect string, scope celeng
 		return Compiled{}, err
 	}
 	env.Consumer = strings.TrimSpace(env.Consumer)
+	if s := strings.TrimSpace(scope.Consumer); s != "" && s != env.Consumer {
+		return Compiled{}, &UnsupportedDialectError{
+			Dialect:  normalizeDialect(dialect),
+			Consumer: env.Consumer,
+			Reason:   ReasonDialectNotAllowed,
+		}
+	}
+	scope.Consumer = env.Consumer
 	if cd, ok := d.(CachedDialect); ok {
 		return cd.CachedCompile(ctx, scope, rule, kind, env)
 	}
@@ -452,6 +462,7 @@ func (e *Engine) Invalidate(dialect, envName string, scope celengine.CacheScope)
 	if err != nil {
 		return
 	}
+	scope.Consumer = strings.TrimSpace(scope.Consumer)
 	if cd, ok := d.(CachedDialect); ok {
 		cd.Invalidate(envName, scope)
 	}
