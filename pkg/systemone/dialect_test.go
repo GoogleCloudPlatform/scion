@@ -37,6 +37,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/systemone/spec"
 )
 
+const testSystemOneConsumer = "system_one_test"
+
 func newTestTypeSafeRuntime(t *testing.T, srv *httptest.Server, maxEval time.Duration) *runtime.Runtime {
 	t.Helper()
 	inst := runtime.Instance{
@@ -146,6 +148,9 @@ func TestDialect_DeclaresAndCompileEnvironmentSelection(t *testing.T) {
 
 	eng := ruleengine.NewEngine()
 	require.NoError(t, eng.Register(dDefault))
+	require.NoError(t, eng.AllowConsumerDialects("admin-probe", ruleengine.GrantIO(systemone.DialectName)))
+	require.NoError(t, eng.AllowConsumerDialects("probe", ruleengine.GrantIO(systemone.DialectName)))
+	require.NoError(t, eng.AllowConsumerDialects(testSystemOneConsumer, ruleengine.GrantIO(systemone.DialectName)))
 
 	rule := `{
 	  "version": 1,
@@ -161,6 +166,7 @@ func TestDialect_DeclaresAndCompileEnvironmentSelection(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.False(t, compiled.IsZero())
+	assert.Equal(t, "admin-probe", compiled.Consumer())
 	assert.Equal(t, systemone.DialectName, compiled.Dialect())
 	assert.Equal(t, ruleengine.KindFilter, compiled.Kind())
 
@@ -178,6 +184,7 @@ func TestDialect_DeclaresAndCompileEnvironmentSelection(t *testing.T) {
 
 	// MaxRuleBytes is enforced when positive.
 	_, err = eng.Compile(context.Background(), systemone.DialectName, rule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
+		Consumer:     testSystemOneConsumer,
 		Name:         spec.ProbeEnvironmentName,
 		MaxRuleBytes: 16,
 	})
@@ -253,6 +260,9 @@ func TestDialect_EngineSuccessAndUncertainMatchProbeShape(t *testing.T) {
 		Runtime:     rt,
 		MaxEvalTime: 3 * time.Second,
 	})))
+	for _, cons := range []string{"trigger", "probe", "message"} {
+		require.NoError(t, eng.AllowConsumerDialects(cons, ruleengine.GrantIO(systemone.DialectName), ruleengine.Grant(ruleengine.DialectCEL)))
+	}
 
 	t.Run("binary_filter_success", func(t *testing.T) {
 		rawRule := `{
@@ -390,6 +400,7 @@ func TestDialect_MissingOrWrongPayloadReturnsFailedInternalWithoutProviderCall(t
 
 	eng := ruleengine.NewEngine()
 	require.NoError(t, eng.Register(systemone.NewDialect(systemone.DialectConfig{Runtime: rt})))
+	require.NoError(t, eng.AllowConsumerDialects(testSystemOneConsumer, ruleengine.GrantIO(systemone.DialectName)))
 
 	rawRule := `{
 	  "version": 1,
@@ -397,7 +408,8 @@ func TestDialect_MissingOrWrongPayloadReturnsFailedInternalWithoutProviderCall(t
 	  "output": {"question": "q1"}
 	}`
 	c, err := eng.Compile(context.Background(), systemone.DialectName, rawRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
-		Name: spec.ProbeEnvironmentName,
+		Consumer: testSystemOneConsumer,
+		Name:     spec.ProbeEnvironmentName,
 	})
 	require.NoError(t, err)
 
@@ -458,6 +470,7 @@ func TestDialect_ExperimentGateToggleWithoutRestart(t *testing.T) {
 		Runtime: rt,
 		Enabled: enabled.Load,
 	})))
+	require.NoError(t, eng.AllowConsumerDialects(testSystemOneConsumer, ruleengine.GrantIO(systemone.DialectName), ruleengine.Grant(ruleengine.DialectCEL)))
 
 	rawRule := `{
 	  "version": 1,
@@ -466,9 +479,9 @@ func TestDialect_ExperimentGateToggleWithoutRestart(t *testing.T) {
 	}`
 
 	// 1. Enabled = true: Supports is true, Compile and Evaluate succeed.
-	assert.True(t, eng.Supports("trigger", systemone.DialectName))
+	assert.True(t, eng.Supports(testSystemOneConsumer, systemone.DialectName))
 	compiledWhileOn, err := eng.Compile(context.Background(), systemone.DialectName, rawRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
-		Consumer: "trigger",
+		Consumer: testSystemOneConsumer,
 		Name:     spec.ProbeEnvironmentName,
 	})
 	require.NoError(t, err)
@@ -482,22 +495,26 @@ func TestDialect_ExperimentGateToggleWithoutRestart(t *testing.T) {
 
 	// 2. Flip Enabled -> false in the same Engine without re-registering.
 	enabled.Store(false)
-	assert.True(t, eng.Supports("trigger", systemone.DialectName),
-		"Engine.Supports reports registration only and stays true when disabled")
+	assert.True(t, eng.Supports(testSystemOneConsumer, systemone.DialectName),
+		"Engine.Supports reports registration and consumer grant only and stays true when disabled")
 
 	_, err = eng.Compile(context.Background(), systemone.DialectName, rawRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
-		Consumer: " trigger ",
+		Consumer: " " + testSystemOneConsumer + " ",
 		Name:     spec.ProbeEnvironmentName,
 	})
 	require.Error(t, err)
 	var unsupCompile *ruleengine.UnsupportedDialectError
 	require.ErrorAs(t, err, &unsupCompile)
 	assert.Equal(t, systemone.DialectName, unsupCompile.Dialect)
-	assert.Equal(t, "trigger", unsupCompile.Consumer)
+	assert.Equal(t, testSystemOneConsumer, unsupCompile.Consumer)
+	assert.Equal(t, ruleengine.ReasonUnknownDialect, unsupCompile.Reason)
 
-	// Disabled Compile error message must match an unregistered dialect byte-for-byte.
-	_, unregErr := ruleengine.NewEngine().Compile(context.Background(), systemone.DialectName, rawRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
-		Consumer: "trigger",
+	// Disabled Compile error message must match an unregistered dialect byte-for-byte
+	// for an identically granted consumer.
+	unregEng := ruleengine.NewEngine()
+	require.NoError(t, unregEng.AllowConsumerDialects(testSystemOneConsumer, ruleengine.GrantIO(systemone.DialectName)))
+	_, unregErr := unregEng.Compile(context.Background(), systemone.DialectName, rawRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
+		Consumer: testSystemOneConsumer,
 		Name:     spec.ProbeEnvironmentName,
 	})
 	require.Error(t, unregErr)
@@ -518,7 +535,7 @@ func TestDialect_ExperimentGateToggleWithoutRestart(t *testing.T) {
 	// 3. Flip Enabled -> true again: Compile and previously compiled rule both work.
 	enabled.Store(true)
 	_, err = eng.Compile(context.Background(), systemone.DialectName, rawRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
-		Consumer: "trigger",
+		Consumer: testSystemOneConsumer,
 		Name:     spec.ProbeEnvironmentName,
 	})
 	require.NoError(t, err)
@@ -548,8 +565,10 @@ func TestDialect_EngineWrapShapesPreserveEvaluationProvenance(t *testing.T) {
 			Runtime:     rt,
 			MaxEvalTime: 3 * time.Second,
 		})))
+		require.NoError(t, eng.AllowConsumerDialects(testSystemOneConsumer, ruleengine.GrantIO(systemone.DialectName)))
 		c, err := eng.Compile(context.Background(), systemone.DialectName, rawRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
-			Name: spec.ProbeEnvironmentName,
+			Consumer: testSystemOneConsumer,
+			Name:     spec.ProbeEnvironmentName,
 		})
 		require.NoError(t, err)
 
@@ -580,8 +599,10 @@ func TestDialect_EngineWrapShapesPreserveEvaluationProvenance(t *testing.T) {
 			Runtime:     rt,
 			MaxEvalTime: 3 * time.Second,
 		})))
+		require.NoError(t, eng.AllowConsumerDialects(testSystemOneConsumer, ruleengine.GrantIO(systemone.DialectName)))
 		c, err := eng.Compile(context.Background(), systemone.DialectName, rawRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
-			Name: spec.ProbeEnvironmentName,
+			Consumer: testSystemOneConsumer,
+			Name:     spec.ProbeEnvironmentName,
 		})
 		require.NoError(t, err)
 
@@ -624,8 +645,10 @@ func TestDialect_EngineWrapShapesPreserveEvaluationProvenance(t *testing.T) {
 			Runtime:     rt,
 			MaxEvalTime: 60 * time.Millisecond,
 		})))
+		require.NoError(t, eng.AllowConsumerDialects(testSystemOneConsumer, ruleengine.GrantIO(systemone.DialectName)))
 		c, err := eng.Compile(context.Background(), systemone.DialectName, rawRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
-			Name: spec.ProbeEnvironmentName,
+			Consumer: testSystemOneConsumer,
+			Name:     spec.ProbeEnvironmentName,
 		})
 		require.NoError(t, err)
 
@@ -659,8 +682,10 @@ func TestDialect_EngineWrapShapesPreserveEvaluationProvenance(t *testing.T) {
 			Runtime:     rt,
 			MaxEvalTime: 3 * time.Second,
 		})))
+		require.NoError(t, eng.AllowConsumerDialects(testSystemOneConsumer, ruleengine.GrantIO(systemone.DialectName)))
 		c, err := eng.Compile(context.Background(), systemone.DialectName, rawRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
-			Name: spec.ProbeEnvironmentName,
+			Consumer: testSystemOneConsumer,
+			Name:     spec.ProbeEnvironmentName,
 		})
 		require.NoError(t, err)
 
@@ -676,4 +701,73 @@ func TestDialect_EngineWrapShapesPreserveEvaluationProvenance(t *testing.T) {
 		assert.Equal(t, systemone.ClassFailed, eval.Class)
 		assert.Equal(t, string(provider.FailTimeout), eval.Reason)
 	})
+}
+
+func TestDialect_DenyByDefaultBlocksUnregisteredEmptyAndNonIOConsumersWithoutProviderCall(t *testing.T) {
+	var calls atomic.Int32
+	rt := newFakeAdapterRuntime(t, 3*time.Second, func(_ context.Context, _ provider.Transport, _ provider.InstanceView, _ provider.ModelRequest) (provider.ModelResult, error) {
+		calls.Add(1)
+		return provider.ModelResult{}, errors.New("unexpected provider call")
+	})
+
+	eng := ruleengine.NewEngine()
+	require.NoError(t, eng.Register(systemone.NewDialect(systemone.DialectConfig{
+		Runtime: rt,
+		Enabled: func() bool { return true },
+	})))
+
+	const rawRule = `{
+	  "version": 1,
+	  "questions": [{"id": "q1", "type": "binary", "instructions": "Check."}],
+	  "output": {"question": "q1"}
+	}`
+	ctx := context.Background()
+
+	// 1. Empty consumer rejected with empty_consumer.
+	assert.False(t, eng.Supports("", systemone.DialectName))
+	_, err := eng.Compile(ctx, systemone.DialectName, rawRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
+		Consumer: "",
+		Name:     spec.ProbeEnvironmentName,
+	})
+	var unsup *ruleengine.UnsupportedDialectError
+	require.ErrorAs(t, err, &unsup)
+	assert.Equal(t, ruleengine.ReasonEmptyConsumer, unsup.Reason)
+
+	// 2. Unregistered consumer rejected with consumer_not_registered.
+	assert.False(t, eng.Supports("unregistered_consumer", systemone.DialectName))
+	_, err = eng.Compile(ctx, systemone.DialectName, rawRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
+		Consumer: "unregistered_consumer",
+		Name:     spec.ProbeEnvironmentName,
+	})
+	unsup = nil
+	require.ErrorAs(t, err, &unsup)
+	assert.Equal(t, ruleengine.ReasonConsumerNotRegistered, unsup.Reason)
+
+	// 3. Pure Grant without AllowIO rejected with io_not_allowed.
+	require.NoError(t, eng.AllowConsumerDialects("pure_only_consumer", ruleengine.Grant(systemone.DialectName)))
+	assert.False(t, eng.Supports("pure_only_consumer", systemone.DialectName))
+	_, err = eng.Compile(ctx, systemone.DialectName, rawRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
+		Consumer: "pure_only_consumer",
+		Name:     spec.ProbeEnvironmentName,
+	})
+	unsup = nil
+	require.ErrorAs(t, err, &unsup)
+	assert.Equal(t, ruleengine.ReasonIONotAllowed, unsup.Reason)
+
+	// 4. Compiled under GrantIO, then downgraded to pure Grant -> Evaluate fails with io_not_allowed (zero provider calls).
+	require.NoError(t, eng.AllowConsumerDialects(testSystemOneConsumer, ruleengine.GrantIO(systemone.DialectName)))
+	compiled, err := eng.Compile(ctx, systemone.DialectName, rawRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
+		Consumer: testSystemOneConsumer,
+		Name:     spec.ProbeEnvironmentName,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, eng.AllowConsumerDialects(testSystemOneConsumer, ruleengine.Grant(systemone.DialectName)))
+	_, err = eng.Evaluate(ctx, compiled, ruleengine.Input{
+		Payload: systemone.ProbeInput("must not reach provider"),
+	}, ruleengine.Budget{})
+	unsup = nil
+	require.ErrorAs(t, err, &unsup)
+	assert.Equal(t, ruleengine.ReasonIONotAllowed, unsup.Reason)
+	assert.Zero(t, calls.Load(), "denied admission must make zero provider calls")
 }

@@ -17,6 +17,7 @@ package ruleengine_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -61,7 +62,9 @@ func TestCELDialectCompileEvaluateAndCapabilities(t *testing.T) {
 	if err := eng.Register(dialect); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	eng.AllowConsumerDialects("trigger", ruleengine.DialectCEL)
+	if err := eng.AllowConsumerDialects("trigger", ruleengine.Grant(ruleengine.DialectCEL)); err != nil {
+		t.Fatalf("AllowConsumerDialects: %v", err)
+	}
 
 	ctx := context.Background()
 	envRef := ruleengine.EnvironmentRef{Consumer: "trigger", Name: "trigger"}
@@ -132,46 +135,69 @@ func TestUnsupportedAndDisallowedDialects(t *testing.T) {
 		t.Fatalf("expected error registering duplicate dialect")
 	}
 
+	// Unregistered consumer gets consumer_not_registered even for registered "cel".
 	envRef := ruleengine.EnvironmentRef{Consumer: "trigger", Name: "trigger"}
 	ctx := context.Background()
-
-	// Unregistered dialect (e.g. "system_one" in Stage 1) -> unsupported dialect error.
-	_, err = eng.Compile(ctx, "system_one", "urgent issue", ruleengine.KindFilter, envRef)
+	_, err = eng.Compile(ctx, "cel", "true", ruleengine.KindFilter, envRef)
 	var unsupported *ruleengine.UnsupportedDialectError
-	if !errors.As(err, &unsupported) {
-		t.Fatalf("expected *UnsupportedDialectError, got %T: %v", err, err)
-	}
-	if !strings.Contains(err.Error(), "unsupported dialect") {
-		t.Fatalf("error %q must contain 'unsupported dialect'", err.Error())
+	if !errors.As(err, &unsupported) || unsupported.Reason != ruleengine.ReasonConsumerNotRegistered {
+		t.Fatalf("expected *UnsupportedDialectError(consumer_not_registered), got %T: %v", err, err)
 	}
 
-	// Consumer dialect allow-list: if consumer restricts to an empty/different set, CEL is rejected too.
-	eng.AllowConsumerDialects("restricted_consumer", "other_dialect")
+	// Register consumer for both "cel" and a future dialect "system_one" (not yet registered on eng).
+	if err := eng.AllowConsumerDialects("trigger", ruleengine.Grant(ruleengine.DialectCEL), ruleengine.GrantIO("system_one")); err != nil {
+		t.Fatalf("AllowConsumerDialects: %v", err)
+	}
+
+	// Unregistered dialect that the consumer did grant -> unknown_dialect.
+	_, err = eng.Compile(ctx, "system_one", "urgent issue", ruleengine.KindFilter, envRef)
+	unsupported = nil
+	if !errors.As(err, &unsupported) || unsupported.Reason != ruleengine.ReasonUnknownDialect {
+		t.Fatalf("expected *UnsupportedDialectError(unknown_dialect), got %T: %v", err, err)
+	}
+	if !strings.Contains(err.Error(), "unsupported dialect") || !strings.HasSuffix(err.Error(), ": unknown_dialect") {
+		t.Fatalf("error %q must contain 'unsupported dialect' and end with ': unknown_dialect'", err.Error())
+	}
+
+	// Consumer dialect allow-list: if consumer restricts to an empty/different set, CEL is rejected with dialect_not_allowed.
+	if err := eng.AllowConsumerDialects("restricted_consumer", ruleengine.Grant("other_dialect")); err != nil {
+		t.Fatalf("AllowConsumerDialects restricted: %v", err)
+	}
 	_, err = eng.Compile(ctx, "cel", "true", ruleengine.KindFilter, ruleengine.EnvironmentRef{
 		Consumer: "restricted_consumer",
 		Name:     "trigger",
 	})
-	if !errors.As(err, &unsupported) {
-		t.Fatalf("expected *UnsupportedDialectError for disallowed consumer dialect, got %T: %v", err, err)
+	unsupported = nil
+	if !errors.As(err, &unsupported) || unsupported.Reason != ruleengine.ReasonDialectNotAllowed {
+		t.Fatalf("expected *UnsupportedDialectError(dialect_not_allowed) for disallowed consumer dialect, got %T: %v", err, err)
 	}
 }
 
 type stubModelDialect struct {
-	mode string
+	mode       string
+	performsIO bool
+	compileCnt int
+	evalCnt    int
 }
 
 func (d *stubModelDialect) Name() string { return "stub_model" }
 func (d *stubModelDialect) Declares() ruleengine.Capabilities {
+	io := true
+	if !d.performsIO && d.mode == "dynamic_no_io" {
+		io = false
+	}
 	return ruleengine.Capabilities{
-		PerformsIO:  true,
+		PerformsIO:  io,
 		MaxEvalTime: 50 * time.Millisecond,
 		ResultKinds: []ruleengine.Kind{ruleengine.KindFilter},
 	}
 }
-func (d *stubModelDialect) Compile(_ context.Context, rule string, kind ruleengine.Kind, _ ruleengine.EnvironmentRef) (ruleengine.Compiled, error) {
-	return ruleengine.NewCompiled(d.Name(), kind, rule), nil
+func (d *stubModelDialect) Compile(_ context.Context, rule string, kind ruleengine.Kind, env ruleengine.EnvironmentRef) (ruleengine.Compiled, error) {
+	d.compileCnt++
+	return ruleengine.NewCompiled(env.Consumer, d.Name(), kind, rule), nil
 }
 func (d *stubModelDialect) Evaluate(ctx context.Context, c ruleengine.Compiled, _ ruleengine.Input, _ ruleengine.Budget) (ruleengine.Decision, error) {
+	d.evalCnt++
 	switch d.mode {
 	case "uncertain":
 		return ruleengine.Decision{}, &ruleengine.UncertainError{Reason: "low_confidence"}
@@ -187,9 +213,12 @@ func (d *stubModelDialect) Evaluate(ctx context.Context, c ruleengine.Compiled, 
 
 func TestUncertainVsFailedErrorsAndBudgetTracker(t *testing.T) {
 	eng := ruleengine.NewEngine()
-	stub := &stubModelDialect{}
+	stub := &stubModelDialect{performsIO: true}
 	if err := eng.Register(stub); err != nil {
 		t.Fatalf("Register stub: %v", err)
+	}
+	if err := eng.AllowConsumerDialects("test", ruleengine.GrantIO("stub_model")); err != nil {
+		t.Fatalf("AllowConsumerDialects: %v", err)
 	}
 	ctx := context.Background()
 	envRef := ruleengine.EnvironmentRef{Consumer: "test", Name: "test"}
@@ -274,6 +303,9 @@ func TestEvaluateTimeoutVsCallerCancellationAndTrackerRemainder(t *testing.T) {
 	if err := eng.Register(celDialect); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
+	if err := eng.AllowConsumerDialects("trigger", ruleengine.Grant(ruleengine.DialectCEL)); err != nil {
+		t.Fatalf("AllowConsumerDialects: %v", err)
+	}
 
 	compiled, err := eng.Compile(
 		context.Background(),
@@ -343,8 +375,8 @@ func (d *payloadCapturingDialect) Declares() ruleengine.Capabilities {
 		ResultKinds: []ruleengine.Kind{ruleengine.KindFilter},
 	}
 }
-func (d *payloadCapturingDialect) Compile(_ context.Context, rule string, kind ruleengine.Kind, _ ruleengine.EnvironmentRef) (ruleengine.Compiled, error) {
-	return ruleengine.NewCompiled(d.Name(), kind, rule), nil
+func (d *payloadCapturingDialect) Compile(_ context.Context, rule string, kind ruleengine.Kind, env ruleengine.EnvironmentRef) (ruleengine.Compiled, error) {
+	return ruleengine.NewCompiled(env.Consumer, d.Name(), kind, rule), nil
 }
 func (d *payloadCapturingDialect) Evaluate(ctx context.Context, c ruleengine.Compiled, input ruleengine.Input, _ ruleengine.Budget) (ruleengine.Decision, error) {
 	d.gotPayload = input.Payload
@@ -372,6 +404,12 @@ func TestInputPayloadPassedToDialectAndIgnoredByCEL(t *testing.T) {
 	}
 	if err := eng.Register(typed); err != nil {
 		t.Fatalf("Register typed: %v", err)
+	}
+	if err := eng.AllowConsumerDialects("system_one", ruleengine.GrantIO("typed_dialect")); err != nil {
+		t.Fatalf("AllowConsumerDialects system_one: %v", err)
+	}
+	if err := eng.AllowConsumerDialects("trigger", ruleengine.Grant(ruleengine.DialectCEL)); err != nil {
+		t.Fatalf("AllowConsumerDialects trigger: %v", err)
 	}
 
 	ctx := context.Background()
@@ -420,6 +458,9 @@ func TestEvaluateWrapsDialectErrorAcrossTimeoutBudgetAndCancel(t *testing.T) {
 	dialect := &payloadCapturingDialect{}
 	if err := eng.Register(dialect); err != nil {
 		t.Fatalf("Register: %v", err)
+	}
+	if err := eng.AllowConsumerDialects("system_one", ruleengine.GrantIO("typed_dialect")); err != nil {
+		t.Fatalf("AllowConsumerDialects: %v", err)
 	}
 	comp, err := eng.Compile(context.Background(), "typed_dialect", "rule", ruleengine.KindFilter, ruleengine.EnvironmentRef{
 		Consumer: "system_one",
@@ -495,4 +536,483 @@ func TestEvaluateWrapsDialectErrorAcrossTimeoutBudgetAndCancel(t *testing.T) {
 	if !errors.Is(err, errProviderRootCause) {
 		t.Fatalf("errors.Is(errProviderRootCause) = false on wrapped caller-cancel error: %v", err)
 	}
+}
+
+type countingCachedDialect struct {
+	name          string
+	performsIO    bool
+	compileCnt    int
+	cachedCompCnt int
+	invalidateCnt int
+	evalCnt       int
+}
+
+func (d *countingCachedDialect) Name() string { return d.name }
+func (d *countingCachedDialect) Declares() ruleengine.Capabilities {
+	return ruleengine.Capabilities{
+		PerformsIO:  d.performsIO,
+		MaxEvalTime: 50 * time.Millisecond,
+		ResultKinds: []ruleengine.Kind{ruleengine.KindFilter},
+	}
+}
+func (d *countingCachedDialect) Compile(_ context.Context, rule string, kind ruleengine.Kind, env ruleengine.EnvironmentRef) (ruleengine.Compiled, error) {
+	d.compileCnt++
+	return ruleengine.NewCompiled(env.Consumer, d.Name(), kind, rule), nil
+}
+func (d *countingCachedDialect) CachedCompile(_ context.Context, _ celengine.CacheScope, rule string, kind ruleengine.Kind, env ruleengine.EnvironmentRef) (ruleengine.Compiled, error) {
+	d.cachedCompCnt++
+	return ruleengine.NewCompiled(env.Consumer, d.Name(), kind, rule), nil
+}
+func (d *countingCachedDialect) Invalidate(_ string, _ celengine.CacheScope) {
+	d.invalidateCnt++
+}
+func (d *countingCachedDialect) Evaluate(_ context.Context, c ruleengine.Compiled, _ ruleengine.Input, _ ruleengine.Budget) (ruleengine.Decision, error) {
+	d.evalCnt++
+	return ruleengine.Decision{Kind: c.Kind(), Bool: true}, nil
+}
+
+func assertUnsupportedReason(t *testing.T, err error, wantDialect, wantConsumer, wantReason, wantMsg string) {
+	t.Helper()
+	var unsup *ruleengine.UnsupportedDialectError
+	if !errors.As(err, &unsup) {
+		t.Fatalf("expected *UnsupportedDialectError, got %T: %v", err, err)
+	}
+	var ferr *ruleengine.FailedError
+	if errors.As(err, &ferr) {
+		t.Fatalf("denied admission must never wrap or return *FailedError, got: %v", err)
+	}
+	if unsup.Dialect != wantDialect || unsup.Consumer != wantConsumer || unsup.Reason != wantReason {
+		t.Fatalf("UnsupportedDialectError = %+v, want Dialect=%q Consumer=%q Reason=%q", unsup, wantDialect, wantConsumer, wantReason)
+	}
+	if err.Error() != wantMsg {
+		t.Fatalf("Error() = %q, want %q", err.Error(), wantMsg)
+	}
+}
+
+func TestDenyByDefault_FiveAdmissionReasonsInOrder(t *testing.T) {
+	celEng := newTestCELEngine(t, "trigger")
+	celDialect, err := ruleengine.NewCELDialect(celEng)
+	if err != nil {
+		t.Fatalf("NewCELDialect: %v", err)
+	}
+	ioDialect := &countingCachedDialect{name: "io_model", performsIO: true}
+
+	eng := ruleengine.NewEngine()
+	if err := eng.Register(celDialect); err != nil {
+		t.Fatalf("Register CEL: %v", err)
+	}
+	if err := eng.Register(ioDialect); err != nil {
+		t.Fatalf("Register io_model: %v", err)
+	}
+
+	ctx := context.Background()
+	scope := celengine.CacheScope{Consumer: "placeholder", ID: "r1", Revision: 1}
+
+	// Additive Reason: zero Reason preserves exact base Error() text.
+	plainWithConsumer := (&ruleengine.UnsupportedDialectError{Dialect: "cel", Consumer: "trigger"}).Error()
+	if plainWithConsumer != `unsupported dialect "cel" for consumer "trigger"` {
+		t.Fatalf("plain Error() with consumer = %q", plainWithConsumer)
+	}
+	plainNoConsumer := (&ruleengine.UnsupportedDialectError{Dialect: "cel"}).Error()
+	if plainNoConsumer != `unsupported dialect "cel"` {
+		t.Fatalf("plain Error() without consumer = %q", plainNoConsumer)
+	}
+
+	// (1) empty_consumer wins first (even when dialect is also unregistered).
+	for _, emptyCons := range []string{"", "   \t\n "} {
+		if eng.Supports(emptyCons, "unregistered_dialect") {
+			t.Fatalf("Supports(%q, ...) = true, want false", emptyCons)
+		}
+		_, err := eng.Compile(ctx, "unregistered_dialect", "x", ruleengine.KindFilter, ruleengine.EnvironmentRef{
+			Consumer: emptyCons,
+			Name:     "trigger",
+		})
+		assertUnsupportedReason(t, err, "unregistered_dialect", "", ruleengine.ReasonEmptyConsumer,
+			`unsupported dialect "unregistered_dialect": empty_consumer`)
+
+		_, err = eng.CachedCompile(ctx, "", scope, "true", ruleengine.KindFilter, ruleengine.EnvironmentRef{
+			Consumer: emptyCons,
+			Name:     "trigger",
+		})
+		assertUnsupportedReason(t, err, "cel", "", ruleengine.ReasonEmptyConsumer,
+			`unsupported dialect "cel": empty_consumer`)
+	}
+
+	// (2) consumer_not_registered (deny-by-default, even for registered "cel", and before unknown_dialect).
+	if eng.Supports("unregistered_consumer", "cel") {
+		t.Fatalf("Supports must be false for consumer with no allow-list")
+	}
+	_, err = eng.Compile(ctx, "cel", "true", ruleengine.KindFilter, ruleengine.EnvironmentRef{
+		Consumer: "unregistered_consumer",
+		Name:     "trigger",
+	})
+	assertUnsupportedReason(t, err, "cel", "unregistered_consumer", ruleengine.ReasonConsumerNotRegistered,
+		`unsupported dialect "cel" for consumer "unregistered_consumer": consumer_not_registered`)
+
+	_, err = eng.CachedCompile(ctx, "missing_dialect", scope, "true", ruleengine.KindFilter, ruleengine.EnvironmentRef{
+		Consumer: " unregistered_consumer ",
+		Name:     "trigger",
+	})
+	assertUnsupportedReason(t, err, "missing_dialect", "unregistered_consumer", ruleengine.ReasonConsumerNotRegistered,
+		`unsupported dialect "missing_dialect" for consumer "unregistered_consumer": consumer_not_registered`)
+
+	// (3) dialect_not_allowed (consumer registered, dialect not in grants; wins before unknown_dialect).
+	if err := eng.AllowConsumerDialects("cel_only", ruleengine.Grant("cel")); err != nil {
+		t.Fatalf("AllowConsumerDialects cel_only: %v", err)
+	}
+	if eng.Supports("cel_only", "io_model") || eng.Supports("cel_only", "missing_dialect") {
+		t.Fatalf("Supports must be false for ungranted dialects")
+	}
+	_, err = eng.Compile(ctx, "io_model", "check", ruleengine.KindFilter, ruleengine.EnvironmentRef{
+		Consumer: "cel_only",
+		Name:     "trigger",
+	})
+	assertUnsupportedReason(t, err, "io_model", "cel_only", ruleengine.ReasonDialectNotAllowed,
+		`unsupported dialect "io_model" for consumer "cel_only": dialect_not_allowed`)
+
+	_, err = eng.CachedCompile(ctx, "missing_dialect", scope, "check", ruleengine.KindFilter, ruleengine.EnvironmentRef{
+		Consumer: "cel_only",
+		Name:     "trigger",
+	})
+	assertUnsupportedReason(t, err, "missing_dialect", "cel_only", ruleengine.ReasonDialectNotAllowed,
+		`unsupported dialect "missing_dialect" for consumer "cel_only": dialect_not_allowed`)
+
+	// (4) unknown_dialect (grant registered ahead of dialect registration; admitted once registered).
+	if err := eng.AllowConsumerDialects("forward_consumer", ruleengine.Grant("future_pure")); err != nil {
+		t.Fatalf("AllowConsumerDialects forward_consumer: %v", err)
+	}
+	if eng.Supports("forward_consumer", "future_pure") {
+		t.Fatalf("Supports must be false before future_pure dialect is registered")
+	}
+	_, err = eng.Compile(ctx, "future_pure", "rule", ruleengine.KindFilter, ruleengine.EnvironmentRef{
+		Consumer: "forward_consumer",
+		Name:     "forward",
+	})
+	assertUnsupportedReason(t, err, "future_pure", "forward_consumer", ruleengine.ReasonUnknownDialect,
+		`unsupported dialect "future_pure" for consumer "forward_consumer": unknown_dialect`)
+
+	futureDialect := &countingCachedDialect{name: "future_pure", performsIO: false}
+	if err := eng.Register(futureDialect); err != nil {
+		t.Fatalf("Register future_pure: %v", err)
+	}
+	if !eng.Supports("forward_consumer", "future_pure") {
+		t.Fatalf("Supports must become true once pre-granted pure dialect is registered")
+	}
+	compFuture, err := eng.Compile(ctx, "future_pure", "rule", ruleengine.KindFilter, ruleengine.EnvironmentRef{
+		Consumer: "forward_consumer",
+		Name:     "forward",
+	})
+	if err != nil {
+		t.Fatalf("Compile future_pure after Register: %v", err)
+	}
+	if compFuture.Consumer() != "forward_consumer" {
+		t.Fatalf("Compiled.Consumer() = %q, want %q", compFuture.Consumer(), "forward_consumer")
+	}
+
+	// (5) io_not_allowed (PerformsIO dialect granted via Grant without AllowIO -> denied; GrantIO -> admitted).
+	if err := eng.AllowConsumerDialects("no_io_opt_in", ruleengine.Grant("io_model")); err != nil {
+		t.Fatalf("AllowConsumerDialects no_io_opt_in: %v", err)
+	}
+	if eng.Supports("no_io_opt_in", "io_model") {
+		t.Fatalf("Supports must be false when PerformsIO dialect lacks AllowIO")
+	}
+	_, err = eng.Compile(ctx, "io_model", "rule", ruleengine.KindFilter, ruleengine.EnvironmentRef{
+		Consumer: "no_io_opt_in",
+		Name:     "io",
+	})
+	assertUnsupportedReason(t, err, "io_model", "no_io_opt_in", ruleengine.ReasonIONotAllowed,
+		`unsupported dialect "io_model" for consumer "no_io_opt_in": io_not_allowed`)
+	_, err = eng.CachedCompile(ctx, "io_model", scope, "rule", ruleengine.KindFilter, ruleengine.EnvironmentRef{
+		Consumer: "no_io_opt_in",
+		Name:     "io",
+	})
+	assertUnsupportedReason(t, err, "io_model", "no_io_opt_in", ruleengine.ReasonIONotAllowed,
+		`unsupported dialect "io_model" for consumer "no_io_opt_in": io_not_allowed`)
+	if ioDialect.compileCnt != 0 || ioDialect.cachedCompCnt != 0 || ioDialect.evalCnt != 0 {
+		t.Fatalf("denied PerformsIO dialect must never be invoked: %+v", ioDialect)
+	}
+
+	// Admitted once GrantIO is granted.
+	if err := eng.AllowConsumerDialects("with_io_opt_in", ruleengine.GrantIO("io_model")); err != nil {
+		t.Fatalf("AllowConsumerDialects with_io_opt_in: %v", err)
+	}
+	if !eng.Supports("with_io_opt_in", "io_model") {
+		t.Fatalf("Supports must be true when PerformsIO dialect has GrantIO")
+	}
+	compIO, err := eng.Compile(ctx, "io_model", "rule", ruleengine.KindFilter, ruleengine.EnvironmentRef{
+		Consumer: "with_io_opt_in",
+		Name:     "io",
+	})
+	if err != nil {
+		t.Fatalf("Compile with GrantIO: %v", err)
+	}
+	decIO, err := eng.Evaluate(ctx, compIO, ruleengine.Input{}, ruleengine.Budget{})
+	if err != nil || !decIO.Bool {
+		t.Fatalf("Evaluate with GrantIO = (%+v, %v), want Bool=true, nil", decIO, err)
+	}
+}
+
+func TestDenyByDefault_EmptyConsumerRejectedAtRegistrationAndBlankGrantIgnored(t *testing.T) {
+	celEng := newTestCELEngine(t, "trigger")
+	celDialect, err := ruleengine.NewCELDialect(celEng)
+	if err != nil {
+		t.Fatalf("NewCELDialect: %v", err)
+	}
+	eng := ruleengine.NewEngine()
+	if err := eng.Register(celDialect); err != nil {
+		t.Fatalf("Register CEL: %v", err)
+	}
+
+	for _, badConsumer := range []string{"", " ", "\t\n"} {
+		err := eng.AllowConsumerDialects(badConsumer, ruleengine.Grant("cel"))
+		if !errors.Is(err, ruleengine.ErrEmptyConsumer) {
+			t.Fatalf("AllowConsumerDialects(%q) = %v, want ErrEmptyConsumer", badConsumer, err)
+		}
+	}
+
+	// Blank dialect name inside DialectGrant must not implicitly grant "cel".
+	if err := eng.AllowConsumerDialects("blank_grant_consumer", ruleengine.Grant(""), ruleengine.Grant("   ")); err != nil {
+		t.Fatalf("AllowConsumerDialects blank_grant_consumer: %v", err)
+	}
+	if eng.Supports("blank_grant_consumer", "cel") {
+		t.Fatalf("Grant(\"\") must not grant default CEL dialect")
+	}
+	_, err = eng.Compile(context.Background(), "", "true", ruleengine.KindFilter, ruleengine.EnvironmentRef{
+		Consumer: "blank_grant_consumer",
+		Name:     "trigger",
+	})
+	assertUnsupportedReason(t, err, "cel", "blank_grant_consumer", ruleengine.ReasonDialectNotAllowed,
+		`unsupported dialect "cel" for consumer "blank_grant_consumer": dialect_not_allowed`)
+}
+
+func TestDenyByDefault_ReregistrationReplacesAndIntrospectionUnchanged(t *testing.T) {
+	celEng := newTestCELEngine(t, "trigger")
+	celDialect, err := ruleengine.NewCELDialect(celEng)
+	if err != nil {
+		t.Fatalf("NewCELDialect: %v", err)
+	}
+	ioDialect := &countingCachedDialect{name: "system_one", performsIO: true}
+
+	eng := ruleengine.NewEngine()
+	if err := eng.Register(celDialect); err != nil {
+		t.Fatalf("Register CEL: %v", err)
+	}
+	if err := eng.Register(ioDialect); err != nil {
+		t.Fatalf("Register system_one: %v", err)
+	}
+
+	// Introspection works identically before and after consumer registrations.
+	if got := eng.Dialects(); !slices.Equal(got, []string{"cel", "system_one"}) {
+		t.Fatalf("Dialects() before grants = %v, want [cel system_one]", got)
+	}
+	if d, ok := eng.Dialect("cel"); !ok || d != celDialect {
+		t.Fatalf("Dialect(cel) = (%v, %v), want celDialect", d, ok)
+	}
+	if d, ok := eng.Dialect(""); !ok || d != celDialect {
+		t.Fatalf("Dialect(\"\") = (%v, %v), want celDialect", d, ok)
+	}
+	if d, ok := eng.Dialect("system_one"); !ok || d != ioDialect {
+		t.Fatalf("Dialect(system_one) = (%v, %v), want ioDialect", d, ok)
+	}
+	if _, ok := eng.Dialect("missing"); ok {
+		t.Fatalf("Dialect(missing) = true, want false")
+	}
+
+	// Initial grant allows both "cel" and "system_one".
+	if err := eng.AllowConsumerDialects("trigger", ruleengine.Grant("cel"), ruleengine.GrantIO("system_one")); err != nil {
+		t.Fatalf("AllowConsumerDialects initial: %v", err)
+	}
+	// Idempotent repeat.
+	if err := eng.AllowConsumerDialects(" trigger ", ruleengine.Grant(" cel "), ruleengine.GrantIO(" system_one ")); err != nil {
+		t.Fatalf("AllowConsumerDialects idempotent: %v", err)
+	}
+	if !eng.Supports("trigger", "cel") || !eng.Supports("trigger", "system_one") {
+		t.Fatalf("expected both cel and system_one supported after initial grant")
+	}
+
+	// Re-registration REPLACES (does not union): drop system_one.
+	if err := eng.AllowConsumerDialects("trigger", ruleengine.Grant("cel")); err != nil {
+		t.Fatalf("AllowConsumerDialects replace: %v", err)
+	}
+	if !eng.Supports("trigger", "cel") {
+		t.Fatalf("expected cel still supported after replacement")
+	}
+	if eng.Supports("trigger", "system_one") {
+		t.Fatalf("expected system_one revoked after replacement")
+	}
+	_, err = eng.Compile(context.Background(), "system_one", "r", ruleengine.KindFilter, ruleengine.EnvironmentRef{
+		Consumer: "trigger",
+		Name:     "trigger",
+	})
+	assertUnsupportedReason(t, err, "system_one", "trigger", ruleengine.ReasonDialectNotAllowed,
+		`unsupported dialect "system_one" for consumer "trigger": dialect_not_allowed`)
+
+	// Introspection remains unchanged.
+	if got := eng.Dialects(); !slices.Equal(got, []string{"cel", "system_one"}) {
+		t.Fatalf("Dialects() after replacement = %v, want [cel system_one]", got)
+	}
+}
+
+func TestDenyByDefault_CachedCompileCarriesConsumerAndInvalidateEnforced(t *testing.T) {
+	celEng := newTestCELEngine(t, "shared_env")
+	celDialect, err := ruleengine.NewCELDialect(celEng)
+	if err != nil {
+		t.Fatalf("NewCELDialect: %v", err)
+	}
+	cachedIO := &countingCachedDialect{name: "cached_io", performsIO: true}
+
+	eng := ruleengine.NewEngine()
+	if err := eng.Register(celDialect); err != nil {
+		t.Fatalf("Register CEL: %v", err)
+	}
+	if err := eng.Register(cachedIO); err != nil {
+		t.Fatalf("Register cached_io: %v", err)
+	}
+	if err := eng.AllowConsumerDialects("consumer_a", ruleengine.Grant("cel")); err != nil {
+		t.Fatalf("AllowConsumerDialects consumer_a: %v", err)
+	}
+	if err := eng.AllowConsumerDialects("consumer_b", ruleengine.Grant("cel"), ruleengine.Grant("cached_io")); err != nil {
+		t.Fatalf("AllowConsumerDialects consumer_b: %v", err)
+	}
+
+	ctx := context.Background()
+	const sharedExpr = `event.type == "push"`
+	compA, err := eng.CachedCompile(ctx, "cel",
+		celengine.CacheScope{Consumer: "consumer_a", ID: "id-a", Revision: 1},
+		sharedExpr, ruleengine.KindFilter,
+		ruleengine.EnvironmentRef{Consumer: "consumer_a", Name: "shared_env"},
+	)
+	if err != nil {
+		t.Fatalf("CachedCompile consumer_a: %v", err)
+	}
+	compB, err := eng.CachedCompile(ctx, "cel",
+		celengine.CacheScope{Consumer: "consumer_b", ID: "id-b", Revision: 1},
+		sharedExpr, ruleengine.KindFilter,
+		ruleengine.EnvironmentRef{Consumer: "consumer_b", Name: "shared_env"},
+	)
+	if err != nil {
+		t.Fatalf("CachedCompile consumer_b: %v", err)
+	}
+	if celEng.CacheStats().Hits != 1 {
+		t.Fatalf("expected shared CEL program cache hit, got %+v", celEng.CacheStats())
+	}
+	if compA.Consumer() != "consumer_a" || compB.Consumer() != "consumer_b" {
+		t.Fatalf("cached Compiled handles leaked consumer identity: A=%q B=%q", compA.Consumer(), compB.Consumer())
+	}
+
+	// Invalidate denied for empty consumer, unregistered consumer, ungranted dialect, and io_not_allowed.
+	eng.Invalidate("cached_io", "shared_env", celengine.CacheScope{Consumer: "", ID: "x", Revision: 1})
+	eng.Invalidate("cached_io", "shared_env", celengine.CacheScope{Consumer: "unregistered", ID: "x", Revision: 1})
+	eng.Invalidate("cached_io", "shared_env", celengine.CacheScope{Consumer: "consumer_a", ID: "x", Revision: 1})
+	eng.Invalidate("cached_io", "shared_env", celengine.CacheScope{Consumer: "consumer_b", ID: "x", Revision: 1})
+	if cachedIO.invalidateCnt != 0 {
+		t.Fatalf("Invalidate forwarded despite denied admission: invalidateCnt=%d", cachedIO.invalidateCnt)
+	}
+
+	// GrantIO to consumer_b -> Invalidate now forwards.
+	if err := eng.AllowConsumerDialects("consumer_b", ruleengine.Grant("cel"), ruleengine.GrantIO("cached_io")); err != nil {
+		t.Fatalf("AllowConsumerDialects GrantIO: %v", err)
+	}
+	eng.Invalidate("cached_io", "shared_env", celengine.CacheScope{Consumer: "consumer_b", ID: "x", Revision: 1})
+	if cachedIO.invalidateCnt != 1 {
+		t.Fatalf("Invalidate after GrantIO: invalidateCnt=%d, want 1", cachedIO.invalidateCnt)
+	}
+}
+
+func TestDenyByDefault_EvaluateEnforcesAdmissionBeforeCtxAndBudget(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Zero Compiled{} still returns FailedError{Reason: "uninitialized_program"}.
+	emptyEng := ruleengine.NewEngine()
+	_, err := emptyEng.Evaluate(ctx, ruleengine.Compiled{}, ruleengine.Input{}, ruleengine.Budget{})
+	var ferr *ruleengine.FailedError
+	if !errors.As(err, &ferr) || ferr.Reason != "uninitialized_program" {
+		t.Fatalf("zero Compiled{} Evaluate = %T (%v), want *FailedError{uninitialized_program}", err, err)
+	}
+
+	// 2. Compiled from consumer A evaluated on an engine that only admits consumer B is denied.
+	celEngA := newTestCELEngine(t, "env_shared")
+	celDialectA, err := ruleengine.NewCELDialect(celEngA)
+	if err != nil {
+		t.Fatalf("NewCELDialect A: %v", err)
+	}
+	engA := ruleengine.NewEngine()
+	if err := engA.Register(celDialectA); err != nil {
+		t.Fatalf("Register A: %v", err)
+	}
+	if err := engA.AllowConsumerDialects("consumer_a", ruleengine.Grant("cel")); err != nil {
+		t.Fatalf("AllowConsumerDialects A: %v", err)
+	}
+	compFromA, err := engA.Compile(ctx, "cel", "true", ruleengine.KindFilter, ruleengine.EnvironmentRef{
+		Consumer: "consumer_a",
+		Name:     "env_shared",
+	})
+	if err != nil {
+		t.Fatalf("Compile on engA: %v", err)
+	}
+	if compFromA.Consumer() != "consumer_a" {
+		t.Fatalf("compFromA.Consumer() = %q, want consumer_a", compFromA.Consumer())
+	}
+
+	celEngB := newTestCELEngine(t, "env_shared")
+	celDialectB, err := ruleengine.NewCELDialect(celEngB)
+	if err != nil {
+		t.Fatalf("NewCELDialect B: %v", err)
+	}
+	engB := ruleengine.NewEngine()
+	if err := engB.Register(celDialectB); err != nil {
+		t.Fatalf("Register B: %v", err)
+	}
+	if err := engB.AllowConsumerDialects("consumer_b", ruleengine.Grant("cel")); err != nil {
+		t.Fatalf("AllowConsumerDialects B: %v", err)
+	}
+	_, err = engB.Evaluate(ctx, compFromA, ruleengine.Input{}, ruleengine.Budget{})
+	assertUnsupportedReason(t, err, "cel", "consumer_a", ruleengine.ReasonConsumerNotRegistered,
+		`unsupported dialect "cel" for consumer "consumer_a": consumer_not_registered`)
+
+	// 3. Revoking consumer_a on engA causes Evaluate(compFromA) to fail with *UnsupportedDialectError
+	// (never *FailedError), even when caller ctx is pre-canceled and BudgetTracker is exhausted.
+	if err := engA.AllowConsumerDialects("consumer_a"); err != nil {
+		t.Fatalf("revoke consumer_a: %v", err)
+	}
+	canceledCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	exhausted := ruleengine.NewBudgetTracker(time.Nanosecond)
+	exhausted.Charge(time.Second)
+
+	_, err = engA.Evaluate(canceledCtx, compFromA, ruleengine.Input{}, ruleengine.Budget{Tracker: exhausted})
+	assertUnsupportedReason(t, err, "cel", "consumer_a", ruleengine.ReasonDialectNotAllowed,
+		`unsupported dialect "cel" for consumer "consumer_a": dialect_not_allowed`)
+
+	// 4. Mirror: Compiled while PerformsIO was false (with pure Grant), then dialect's PerformsIO
+	// is true at Evaluate without AllowIO -> io_not_allowed and zero dialect Evaluate calls.
+	dynStub := &stubModelDialect{mode: "dynamic_no_io", performsIO: false}
+	engDyn := ruleengine.NewEngine()
+	if err := engDyn.Register(dynStub); err != nil {
+		t.Fatalf("Register dynStub: %v", err)
+	}
+	if err := engDyn.AllowConsumerDialects("consumer_a", ruleengine.Grant("stub_model")); err != nil {
+		t.Fatalf("AllowConsumerDialects dyn: %v", err)
+	}
+	compDyn, err := engDyn.Compile(ctx, "stub_model", "rule", ruleengine.KindFilter, ruleengine.EnvironmentRef{
+		Consumer: "consumer_a",
+		Name:     "dyn",
+	})
+	if err != nil {
+		t.Fatalf("Compile dyn: %v", err)
+	}
+	dynStub.performsIO = true
+	dynStub.mode = "ok"
+	_, err = engDyn.Evaluate(ctx, compDyn, ruleengine.Input{}, ruleengine.Budget{})
+	assertUnsupportedReason(t, err, "stub_model", "consumer_a", ruleengine.ReasonIONotAllowed,
+		`unsupported dialect "stub_model" for consumer "consumer_a": io_not_allowed`)
+	if dynStub.evalCnt != 0 {
+		t.Fatalf("d.Evaluate invoked %d times despite io_not_allowed", dynStub.evalCnt)
+	}
+
+	// 5. Hand-built Compiled with empty consumer (NewCompiled("", ...)) is denied with empty_consumer.
+	forgedEmptyConsumer := ruleengine.NewCompiled("", "cel", ruleengine.KindFilter, compFromA.Rep())
+	_, err = engB.Evaluate(ctx, forgedEmptyConsumer, ruleengine.Input{}, ruleengine.Budget{})
+	assertUnsupportedReason(t, err, "cel", "", ruleengine.ReasonEmptyConsumer,
+		`unsupported dialect "cel": empty_consumer`)
 }

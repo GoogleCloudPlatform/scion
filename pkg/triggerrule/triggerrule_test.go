@@ -353,7 +353,9 @@ func TestCacheInvalidationOnTriggerRevisionBump(t *testing.T) {
 	if err := re.Register(celDialect); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	re.AllowConsumerDialects(triggerrule.ConsumerName, ruleengine.DialectCEL)
+	if err := re.AllowConsumerDialects(triggerrule.ConsumerName, ruleengine.Grant(ruleengine.DialectCEL)); err != nil {
+		t.Fatalf("AllowConsumerDialects: %v", err)
+	}
 
 	rules, err := triggerrule.New(re)
 	if err != nil {
@@ -550,7 +552,9 @@ func TestMatchAndSubjectShareCacheScopeWithoutEviction(t *testing.T) {
 	if err := re.Register(celDialect); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	re.AllowConsumerDialects(triggerrule.ConsumerName, ruleengine.DialectCEL)
+	if err := re.AllowConsumerDialects(triggerrule.ConsumerName, ruleengine.Grant(ruleengine.DialectCEL)); err != nil {
+		t.Fatalf("AllowConsumerDialects: %v", err)
+	}
 	rules, err := triggerrule.New(re)
 	if err != nil {
 		t.Fatalf("triggerrule.New: %v", err)
@@ -606,7 +610,9 @@ func TestMatchTimeoutAndCallerCancellationSkipReason(t *testing.T) {
 	if err := re.Register(celDialect); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	re.AllowConsumerDialects(triggerrule.ConsumerName, ruleengine.DialectCEL)
+	if err := re.AllowConsumerDialects(triggerrule.ConsumerName, ruleengine.Grant(ruleengine.DialectCEL)); err != nil {
+		t.Fatalf("AllowConsumerDialects: %v", err)
+	}
 	rules, err := triggerrule.New(re)
 	if err != nil {
 		t.Fatalf("triggerrule.New: %v", err)
@@ -973,7 +979,9 @@ func TestPathologicalRuleDoesNotBlockSubsequentTriggerOnSameEvent(t *testing.T) 
 		if err := re.Register(celDialect); err != nil {
 			t.Fatalf("Register: %v", err)
 		}
-		re.AllowConsumerDialects(triggerrule.ConsumerName, ruleengine.DialectCEL)
+		if err := re.AllowConsumerDialects(triggerrule.ConsumerName, ruleengine.Grant(ruleengine.DialectCEL)); err != nil {
+			t.Fatalf("AllowConsumerDialects: %v", err)
+		}
 		rules, err := triggerrule.New(re)
 		if err != nil {
 			t.Fatalf("triggerrule.New: %v", err)
@@ -1070,8 +1078,8 @@ func (d *wrappingStubDialect) Declares() ruleengine.Capabilities {
 		ResultKinds: []ruleengine.Kind{ruleengine.KindFilter},
 	}
 }
-func (d *wrappingStubDialect) Compile(_ context.Context, rule string, kind ruleengine.Kind, _ ruleengine.EnvironmentRef) (ruleengine.Compiled, error) {
-	return ruleengine.NewCompiled(d.Name(), kind, rule), nil
+func (d *wrappingStubDialect) Compile(_ context.Context, rule string, kind ruleengine.Kind, env ruleengine.EnvironmentRef) (ruleengine.Compiled, error) {
+	return ruleengine.NewCompiled(env.Consumer, d.Name(), kind, rule), nil
 }
 func (d *wrappingStubDialect) Evaluate(ctx context.Context, _ ruleengine.Compiled, _ ruleengine.Input, _ ruleengine.Budget) (ruleengine.Decision, error) {
 	return ruleengine.Decision{}, d.evalFn(ctx)
@@ -1094,7 +1102,9 @@ func TestSkipReasonPreservedWhenEngineWrapsDialectErrors(t *testing.T) {
 	if err := re.Register(stub); err != nil {
 		t.Fatalf("Register stub: %v", err)
 	}
-	re.AllowConsumerDialects(triggerrule.ConsumerName, ruleengine.DialectCEL, "wrap_stub")
+	if err := re.AllowConsumerDialects(triggerrule.ConsumerName, ruleengine.Grant(ruleengine.DialectCEL), ruleengine.GrantIO("wrap_stub")); err != nil {
+		t.Fatalf("AllowConsumerDialects: %v", err)
+	}
 
 	rules, err := triggerrule.New(re)
 	if err != nil {
@@ -1302,7 +1312,9 @@ func TestPass6RegexOptionAPreScanAndOrdinaryRules(t *testing.T) {
 			if err := re.Register(celDialect); err != nil {
 				t.Fatalf("Register: %v", err)
 			}
-			re.AllowConsumerDialects(triggerrule.ConsumerName, ruleengine.DialectCEL)
+			if err := re.AllowConsumerDialects(triggerrule.ConsumerName, ruleengine.Grant(ruleengine.DialectCEL)); err != nil {
+				t.Fatalf("AllowConsumerDialects: %v", err)
+			}
 			ordRulesEngine, err = triggerrule.New(re)
 			if err != nil {
 				t.Fatalf("triggerrule.New: %v", err)

@@ -58,13 +58,14 @@ type DialectConfig struct {
 // Dialect is registered unconditionally at Hub construction so feature gating
 // can toggle without a Hub restart (AC-13 option (b)):
 //   - Engine.Supports(consumer, "system_one") reports registration and consumer
-//     allow-list membership only and stays true when Enabled returns false;
-//     authoring callers must check availability via Engine.Compile.
+//     allow-list membership (with AllowIO) only and stays true when Enabled
+//     returns false; authoring callers must check availability via Engine.Compile.
 //   - When Enabled returns false, Compile returns
-//     *ruleengine.UnsupportedDialectError{Dialect: "system_one"}, and Evaluate
-//     returns *ruleengine.FailedError{Reason: "dialect_disabled", Cause:
-//     *ruleengine.UnsupportedDialectError{Dialect: "system_one"}} without
-//     making any provider call.
+//     *ruleengine.UnsupportedDialectError{Dialect: "system_one", Consumer: consumer,
+//     Reason: ruleengine.ReasonUnknownDialect}, and Evaluate returns
+//     *ruleengine.FailedError{Reason: "dialect_disabled", Cause:
+//     *ruleengine.UnsupportedDialectError{Dialect: "system_one", Consumer: consumer,
+//     Reason: ruleengine.ReasonUnknownDialect}} without making any provider call.
 type Dialect struct {
 	runtime     *runtime.Runtime
 	runtimeFunc func() *runtime.Runtime
@@ -122,6 +123,7 @@ func (d *Dialect) Compile(ctx context.Context, rule string, kind ruleengine.Kind
 		return ruleengine.Compiled{}, &ruleengine.UnsupportedDialectError{
 			Dialect:  DialectName,
 			Consumer: strings.TrimSpace(env.Consumer),
+			Reason:   ruleengine.ReasonUnknownDialect,
 		}
 	}
 	if ctx != nil {
@@ -152,9 +154,10 @@ func (d *Dialect) Compile(ctx context.Context, rule string, kind ruleengine.Kind
 		return ruleengine.Compiled{}, err
 	}
 
-	return ruleengine.NewCompiled(DialectName, kind, &compiledRule{
+	consumer := strings.TrimSpace(env.Consumer)
+	return ruleengine.NewCompiled(consumer, DialectName, kind, &compiledRule{
 		compiled: compiled,
-		consumer: strings.TrimSpace(env.Consumer),
+		consumer: consumer,
 	}), nil
 }
 
@@ -165,7 +168,11 @@ func (d *Dialect) Evaluate(ctx context.Context, c ruleengine.Compiled, input rul
 	if !d.isEnabled() {
 		return ruleengine.Decision{}, &ruleengine.FailedError{
 			Reason: ReasonDialectDisabled,
-			Cause:  &ruleengine.UnsupportedDialectError{Dialect: DialectName},
+			Cause: &ruleengine.UnsupportedDialectError{
+				Dialect:  DialectName,
+				Consumer: c.Consumer(),
+				Reason:   ruleengine.ReasonUnknownDialect,
+			},
 		}
 	}
 

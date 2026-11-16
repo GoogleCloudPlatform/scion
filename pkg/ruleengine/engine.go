@@ -174,31 +174,77 @@ func (e *FailedError) Error() string {
 
 func (e *FailedError) Unwrap() error { return e.Cause }
 
+// ErrEmptyConsumer is returned by AllowConsumerDialects when consumer is empty or whitespace.
+var ErrEmptyConsumer = errors.New("ruleengine: empty consumer")
+
+// DialectGrant authorizes a consumer to compile and evaluate rules in Dialect.
+// AllowIO is required when the Dialect's Capabilities.PerformsIO is true.
+type DialectGrant struct {
+	Dialect string // normalized name ("cel", "system_one")
+	AllowIO bool   // required for a dialect whose Capabilities.PerformsIO is true
+}
+
+// Grant constructs a DialectGrant for a pure (non-I/O) dialect.
+func Grant(dialect string) DialectGrant {
+	return DialectGrant{Dialect: dialect}
+}
+
+// GrantIO constructs a DialectGrant that also authorizes Capabilities.PerformsIO.
+func GrantIO(dialect string) DialectGrant {
+	return DialectGrant{Dialect: dialect, AllowIO: true}
+}
+
+// UnsupportedDialectError.Reason values returned by deny-by-default dialect admission.
+const (
+	ReasonEmptyConsumer         = "empty_consumer"
+	ReasonConsumerNotRegistered = "consumer_not_registered"
+	ReasonDialectNotAllowed     = "dialect_not_allowed"
+	ReasonIONotAllowed          = "io_not_allowed"
+	ReasonUnknownDialect        = "unknown_dialect"
+)
+
 // UnsupportedDialectError is returned when a dialect is unknown or disallowed
 // for the requesting consumer.
 type UnsupportedDialectError struct {
 	Dialect  string
 	Consumer string
+	Reason   string // "empty_consumer" | "consumer_not_registered" | "dialect_not_allowed" | "io_not_allowed" | "unknown_dialect"
 }
 
 func (e *UnsupportedDialectError) Error() string {
+	var base string
 	if e.Consumer != "" {
-		return fmt.Sprintf("unsupported dialect %q for consumer %q", e.Dialect, e.Consumer)
+		base = fmt.Sprintf("unsupported dialect %q for consumer %q", e.Dialect, e.Consumer)
+	} else {
+		base = fmt.Sprintf("unsupported dialect %q", e.Dialect)
 	}
-	return fmt.Sprintf("unsupported dialect %q", e.Dialect)
+	if e.Reason != "" {
+		return base + ": " + e.Reason
+	}
+	return base
 }
 
-// Compiled wraps a dialect-owned compiled rule representation.
+// Compiled wraps a dialect-owned compiled rule representation bound to the
+// consumer it was compiled for.
 type Compiled struct {
-	dialect string
-	kind    Kind
-	rep     any
+	consumer string
+	dialect  string
+	kind     Kind
+	rep      any
 }
 
 // NewCompiled constructs a Compiled handle for Dialect implementations.
-func NewCompiled(dialect string, kind Kind, rep any) Compiled {
-	return Compiled{dialect: dialect, kind: kind, rep: rep}
+func NewCompiled(consumer, dialect string, kind Kind, rep any) Compiled {
+	return Compiled{
+		consumer: strings.TrimSpace(consumer),
+		dialect:  strings.TrimSpace(dialect),
+		kind:     kind,
+		rep:      rep,
+	}
 }
+
+// Consumer returns the consumer name c was compiled for.
+func (c Compiled) Consumer() string { return c.consumer }
 
 // Dialect returns the dialect name that produced c.
 func (c Compiled) Dialect() string { return c.dialect }
@@ -229,18 +275,18 @@ type CachedDialect interface {
 }
 
 // Engine dispatches rule compilation and evaluation by dialect, enforces
-// per-consumer dialect allow-lists, and bounds evaluation time and budgets.
+// deny-by-default per-consumer dialect grants, and bounds evaluation time and budgets.
 type Engine struct {
 	mu       sync.RWMutex
 	dialects map[string]Dialect
-	allowed  map[string]map[string]bool // consumer -> set of allowed dialects; absent = any registered
+	allowed  map[string]map[string]DialectGrant // consumer -> dialect -> grant; absent = deny-by-default
 }
 
 // NewEngine creates an empty rule Engine registry.
 func NewEngine() *Engine {
 	return &Engine{
 		dialects: make(map[string]Dialect),
-		allowed:  make(map[string]map[string]bool),
+		allowed:  make(map[string]map[string]DialectGrant),
 	}
 }
 
@@ -283,20 +329,27 @@ func (e *Engine) Dialects() []string {
 	return out
 }
 
-// AllowConsumerDialects restricts consumer to the given dialect names.
-func (e *Engine) AllowConsumerDialects(consumer string, dialects ...string) {
-	if consumer == "" {
-		return
+// AllowConsumerDialects replaces consumer's dialect allow-list (idempotent).
+// An empty or whitespace-only consumer returns ErrEmptyConsumer. Grants may
+// name dialects registered later; admission is checked at use.
+func (e *Engine) AllowConsumerDialects(consumer string, grants ...DialectGrant) error {
+	c := strings.TrimSpace(consumer)
+	if c == "" {
+		return ErrEmptyConsumer
 	}
-	set := make(map[string]bool, len(dialects))
-	for _, d := range dialects {
-		if n := strings.TrimSpace(d); n != "" {
-			set[n] = true
+	grantMap := make(map[string]DialectGrant, len(grants))
+	for _, g := range grants {
+		if n := strings.TrimSpace(g.Dialect); n != "" {
+			grantMap[n] = DialectGrant{
+				Dialect: n,
+				AllowIO: g.AllowIO,
+			}
 		}
 	}
 	e.mu.Lock()
-	e.allowed[consumer] = set
+	e.allowed[c] = grantMap
 	e.mu.Unlock()
+	return nil
 }
 
 // Supports reports whether dialect is registered and permitted for consumer.
@@ -315,14 +368,48 @@ func normalizeDialect(dialect string) string {
 
 func (e *Engine) resolveDialect(consumer, dialect string) (Dialect, error) {
 	name := normalizeDialect(dialect)
+	c := strings.TrimSpace(consumer)
+	if c == "" {
+		return nil, &UnsupportedDialectError{
+			Dialect: name,
+			Reason:  ReasonEmptyConsumer,
+		}
+	}
+
 	e.mu.RLock()
-	defer e.mu.RUnlock()
-	if allowSet, restricted := e.allowed[consumer]; restricted && !allowSet[name] {
-		return nil, &UnsupportedDialectError{Dialect: name, Consumer: consumer}
+	grants, registered := e.allowed[c]
+	if !registered {
+		e.mu.RUnlock()
+		return nil, &UnsupportedDialectError{
+			Dialect:  name,
+			Consumer: c,
+			Reason:   ReasonConsumerNotRegistered,
+		}
+	}
+	grant, allowed := grants[name]
+	if !allowed {
+		e.mu.RUnlock()
+		return nil, &UnsupportedDialectError{
+			Dialect:  name,
+			Consumer: c,
+			Reason:   ReasonDialectNotAllowed,
+		}
 	}
 	d, ok := e.dialects[name]
+	e.mu.RUnlock()
 	if !ok {
-		return nil, &UnsupportedDialectError{Dialect: name, Consumer: consumer}
+		return nil, &UnsupportedDialectError{
+			Dialect:  name,
+			Consumer: c,
+			Reason:   ReasonUnknownDialect,
+		}
+	}
+	if d.Declares().PerformsIO && !grant.AllowIO {
+		return nil, &UnsupportedDialectError{
+			Dialect:  name,
+			Consumer: c,
+			Reason:   ReasonIONotAllowed,
+		}
 	}
 	return d, nil
 }
@@ -337,6 +424,7 @@ func (e *Engine) Compile(ctx context.Context, dialect, rule string, kind Kind, e
 	if err != nil {
 		return Compiled{}, err
 	}
+	env.Consumer = strings.TrimSpace(env.Consumer)
 	return d.Compile(ctx, rule, kind, env)
 }
 
@@ -350,16 +438,18 @@ func (e *Engine) CachedCompile(ctx context.Context, dialect string, scope celeng
 	if err != nil {
 		return Compiled{}, err
 	}
+	env.Consumer = strings.TrimSpace(env.Consumer)
 	if cd, ok := d.(CachedDialect); ok {
 		return cd.CachedCompile(ctx, scope, rule, kind, env)
 	}
 	return d.Compile(ctx, rule, kind, env)
 }
 
-// Invalidate forwards scoped cache invalidation to a CachedDialect if registered.
+// Invalidate forwards scoped cache invalidation to a CachedDialect when
+// scope.Consumer is admitted to dialect.
 func (e *Engine) Invalidate(dialect, envName string, scope celengine.CacheScope) {
-	d, ok := e.Dialect(dialect)
-	if !ok {
+	d, err := e.resolveDialect(scope.Consumer, dialect)
+	if err != nil {
 		return
 	}
 	if cd, ok := d.(CachedDialect); ok {
@@ -378,6 +468,10 @@ func (e *Engine) Evaluate(ctx context.Context, c Compiled, input Input, budget B
 	if c.IsZero() {
 		return Decision{}, &FailedError{Reason: "uninitialized_program"}
 	}
+	d, err := e.resolveDialect(c.Consumer(), c.Dialect())
+	if err != nil {
+		return Decision{}, err
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -386,13 +480,6 @@ func (e *Engine) Evaluate(ctx context.Context, c Compiled, input Input, budget B
 	}
 	if budget.Tracker != nil && budget.Tracker.Exhausted() {
 		return Decision{}, ErrBudgetExhausted
-	}
-
-	e.mu.RLock()
-	d, ok := e.dialects[c.Dialect()]
-	e.mu.RUnlock()
-	if !ok {
-		return Decision{}, &UnsupportedDialectError{Dialect: c.Dialect()}
 	}
 
 	evalTimeout := d.Declares().MaxEvalTime

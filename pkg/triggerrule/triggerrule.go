@@ -142,7 +142,9 @@ func NewDefault() (*Rules, error) {
 	if err := re.Register(celDialect); err != nil {
 		return nil, err
 	}
-	re.AllowConsumerDialects(ConsumerName, ruleengine.DialectCEL)
+	if err := re.AllowConsumerDialects(ConsumerName, ruleengine.Grant(ruleengine.DialectCEL)); err != nil {
+		return nil, err
+	}
 	return New(re)
 }
 

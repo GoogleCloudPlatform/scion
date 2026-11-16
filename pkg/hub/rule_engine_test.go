@@ -82,6 +82,12 @@ func TestRuleEngine_NewRuleEngineAndPureRegistration(t *testing.T) {
 	require.True(t, ok)
 	assert.True(t, soDialect.Declares().PerformsIO)
 	assert.Equal(t, 6*time.Second, soDialect.Declares().MaxEvalTime)
+
+	// Deny-by-default: P1 registers no consumer grants on the shared engine.
+	for _, consumer := range []string{"", "trigger", "message", "probe"} {
+		assert.False(t, eng.Supports(consumer, ruleengine.DialectCEL), "consumer %q must not be admitted to cel without explicit grant", consumer)
+		assert.False(t, eng.Supports(consumer, systemone.DialectName), "consumer %q must not be admitted to system_one by default", consumer)
+	}
 }
 
 func TestRuleEngine_SingleConstructionPointGuard(t *testing.T) {
