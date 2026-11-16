@@ -56,7 +56,7 @@ const envNativeCloudRun = "SCION_METADATA_NATIVE_CLOUDRUN"
 
 // msgGCPMintNativeIdentity is the refusal of a GCP token request from a
 // natively assigned agent. It names no account.
-const msgGCPMintNativeIdentity = "the hub does not issue GCP tokens for agents on this Cloud Run Instances profile; use the instance's metadata server"
+const msgGCPMintNativeIdentity = "the hub does not issue GCP tokens for agents on Cloud Run Instances; use the instance's metadata server"
 
 // cloudRunProfileReportsNativeIdentity reports whether p is a Cloud Run
 // profile (Type cloudrun) whose broker reported, at report version

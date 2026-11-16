@@ -23,6 +23,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -233,12 +236,87 @@ func TestFlatCloudRunNativeIdentity_DispatchAndLifecycle(t *testing.T) {
 		})
 	}
 
-	t.Run("block_mode_reports_no_gcp_credentials_available", func(t *testing.T) {
-		srv, _ := testServer(t)
-		_, _, a := flatCloudRunDispatcher(t, crMode(store.GCPMetadataModeBlock), false)
-		avail, err := srv.agentGCPCredentialsAvailable(ctx, a)
+	t.Run("gcp_credentials_available_matrix_with_verified_project_sa", func(t *testing.T) {
+		srv, st := testServer(t)
+		projID := tid("project-flat-cr-creds")
+		require.NoError(t, st.CreateProject(ctx, &store.Project{
+			ID: projID, Name: "flat-cr-creds", Slug: "flat-cr-creds", Created: time.Now(), Updated: time.Now(),
+		}))
+		require.NoError(t, st.CreateGCPServiceAccount(ctx, &store.GCPServiceAccount{
+			ID: tid("sa-flat-cr-creds"), Scope: store.ScopeProject, ScopeID: projID,
+			Email: crListedGSA, ProjectID: "example-project",
+			Verified: true, VerifiedAt: time.Now(), VerificationStatus: store.GCPVerificationVerified,
+			CreatedAt: time.Now(),
+		}))
+		flatBrokerID := tid("flat-cr-creds-broker")
+		flatTargetID := tid("flat-cr-creds-target")
+		require.NoError(t, st.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+			ID:            flatBrokerID,
+			Name:          "flat-cr-creds",
+			Slug:          "flat-cr-creds",
+			Endpoint:      "http://localhost:9800",
+			Status:        store.BrokerStatusOnline,
+			RuntimeTarget: &api.RuntimeTargetDescriptor{ID: flatTargetID, Type: "cloudrun", DisplayName: "Flat Cloud Run"},
+		}))
+		legacyBrokerID := tid("legacy-docker-creds-broker")
+		require.NoError(t, st.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+			ID:       legacyBrokerID,
+			Name:     "legacy-docker-creds",
+			Slug:     "legacy-docker-creds",
+			Endpoint: "http://localhost:9801",
+			Status:   store.BrokerStatusOnline,
+			Profiles: []store.BrokerProfile{{Name: "local", Type: "docker", Available: true}},
+		}))
+
+		cases := []struct {
+			name  string
+			gcpID *store.GCPIdentityConfig
+			want  bool
+		}{
+			{"assign", crAssign(crListedGSA), true},
+			{"explicit_passthrough", crMode(store.GCPMetadataModePassthrough), true},
+			{"confined_passthrough", &store.GCPIdentityConfig{MetadataMode: store.GCPMetadataModePassthrough, RequireLocalRuntime: true}, false},
+			{"block", crMode(store.GCPMetadataModeBlock), false},
+			{"unset_nil", nil, false},
+			{"unset_empty_mode", &store.GCPIdentityConfig{}, false},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				// Test both unpinned (broker lookup) and pinned flat Cloud Run agent shapes.
+				for _, pinned := range []bool{false, true} {
+					a := &store.Agent{
+						ID:              tid("agent-creds-" + tc.name),
+						Name:            "agent-" + tc.name,
+						Slug:            "agent-" + tc.name,
+						ProjectID:       projID,
+						RuntimeBrokerID: flatBrokerID,
+						AppliedConfig:   &store.AgentAppliedConfig{GCPIdentity: tc.gcpID},
+					}
+					if pinned {
+						a.PinnedRuntimeBrokerID = flatBrokerID
+						a.PinnedRuntimeTargetID = flatTargetID
+						a.PinnedRuntimeTargetType = "cloudrun"
+					}
+					avail, err := srv.agentGCPCredentialsAvailable(ctx, a)
+					require.NoError(t, err)
+					assert.Equal(t, tc.want, avail, "pinned=%t mode=%s", pinned, tc.name)
+				}
+			})
+		}
+
+		// Positive control: a non-flat-Cloud-Run agent in the same project still
+		// counts the verified project SA when GCPIdentity is nil.
+		legacyAgent := &store.Agent{
+			ID:              tid("agent-creds-legacy"),
+			Name:            "agent-legacy",
+			Slug:            "agent-legacy",
+			ProjectID:       projID,
+			RuntimeBrokerID: legacyBrokerID,
+			AppliedConfig:   &store.AgentAppliedConfig{},
+		}
+		avail, err := srv.agentGCPCredentialsAvailable(ctx, legacyAgent)
 		require.NoError(t, err)
-		assert.False(t, avail, "block mode on flat Cloud Run must not report ambient GCP credentials")
+		assert.True(t, avail, "non-flat-Cloud-Run agent with nil GCPIdentity counts verified project SA")
 	})
 }
 
@@ -302,7 +380,8 @@ func TestFlatCloudRunNativeIdentity_TokensWithheldAndMintRefused(t *testing.T) {
 				} {
 					rec := doRequestWithAgentToken(t, f.Server, http.MethodPost, tc.path, tc.body, f.Token)
 					require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-					assert.Contains(t, rec.Body.String(), "metadata server", tc.path)
+					assert.Contains(t, rec.Body.String(), "the hub does not issue GCP tokens for agents on Cloud Run Instances; use the instance's metadata server", tc.path)
+					assert.NotContains(t, rec.Body.String(), "profile", tc.path)
 					assert.NotContains(t, rec.Body.String(), f.SA.Email, tc.path)
 					assert.NotContains(t, rec.Body.String(), "iam.gserviceaccount.com", tc.path)
 				}
@@ -422,5 +501,299 @@ func TestFlat_CloudRunHubRecordsOmitCloudFields(t *testing.T) {
 		for _, bad := range forbiddenSubstrings {
 			assert.NotContains(t, body, bad, "%s response must not contain %q", path, bad)
 		}
+	}
+}
+
+// TestFlatCloudRunNativeIdentity_EndToEndHubHTTPAssignPassthroughAndRefusal
+// exercises Hub HTTP create/start/restart/stop end-to-end against an HTTP flat
+// Cloud Run broker server with hub.cloudrun_native_identity OFF and ON:
+//   - allow-listed assign -> 201 Created, NativeCloudRun persisted, native
+//     marker sent on create/start/restart, ScopeAgentGCPToken withheld on the
+//     minted agent JWT, /api/v1/agent/gcp-token refused with 403;
+//   - unlisted assign -> broker 400 validation_error naming
+//     server.broker.instances[<key>].runtime_target.assignable_service_accounts
+//     relayed cleanly without Kubernetes mapping prose, without SA email leak,
+//     and without leaving a stranded agent or NativeCloudRun state;
+//   - explicit passthrough -> 201 Created, NativeCloudRun persisted, native
+//     marker sent, ScopeAgentGCPToken withheld, /api/v1/agent/gcp-token 403.
+func TestFlatCloudRunNativeIdentity_EndToEndHubHTTPAssignPassthroughAndRefusal(t *testing.T) {
+	ctx := context.Background()
+
+	type capturedBrokerCall struct {
+		method string
+		path   string
+		body   map[string]any
+	}
+
+	newFlatCRBrokerHTTP := func(t *testing.T, instanceKey, expectedTargetID string, assignable []string) (*httptest.Server, func() []capturedBrokerCall) {
+		t.Helper()
+		allow := map[string]bool{}
+		for _, sa := range assignable {
+			allow[strings.ToLower(strings.TrimSpace(sa))] = true
+		}
+		var mu sync.Mutex
+		var calls []capturedBrokerCall
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var body map[string]any
+			if r.Body != nil {
+				_ = json.NewDecoder(r.Body).Decode(&body)
+			}
+			mu.Lock()
+			calls = append(calls, capturedBrokerCall{method: r.Method, path: r.URL.Path, body: body})
+			mu.Unlock()
+
+			w.Header().Set("Content-Type", "application/json")
+			switch {
+			case r.Method == http.MethodPost && r.URL.Path == "/api/v1/agents":
+				name, _ := body["name"].(string)
+				if gotTarget, _ := body["expectedRuntimeTargetId"].(string); gotTarget != expectedTargetID {
+					w.WriteHeader(http.StatusConflict)
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"error": map[string]any{"code": ErrCodeRuntimeTargetMismatch, "message": "target mismatch"},
+					})
+					return
+				}
+				cfg, _ := body["config"].(map[string]any)
+				gcp, _ := cfg["gcpIdentity"].(map[string]any)
+				mode, _ := gcp["metadata_mode"].(string)
+				nativeMarked, _ := gcp["native_cloud_run"].(bool)
+				if mode == store.GCPMetadataModeAssign {
+					if !nativeMarked {
+						w.WriteHeader(http.StatusBadRequest)
+						_ = json.NewEncoder(w).Encode(map[string]any{
+							"error": map[string]any{
+								"code":    ErrCodeValidationError,
+								"message": fmt.Sprintf("agent %q: the hub did not mark this dispatch for native Cloud Run identity", name),
+							},
+						})
+						return
+					}
+					saEmail, _ := gcp["sa_email"].(string)
+					if !allow[strings.ToLower(strings.TrimSpace(saEmail))] {
+						w.WriteHeader(http.StatusBadRequest)
+						_ = json.NewEncoder(w).Encode(map[string]any{
+							"error": map[string]any{
+								"code": ErrCodeValidationError,
+								"message": fmt.Sprintf(
+									"agent %q: GCP identity mode %q on Cloud Run Instances: service_account is not attachable on flat Cloud Run instance %q; add it to server.broker.instances[%s].runtime_target.assignable_service_accounts",
+									name, store.GCPMetadataModeAssign, instanceKey, instanceKey),
+							},
+						})
+						return
+					}
+				}
+				w.WriteHeader(http.StatusCreated)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"agent": map[string]any{
+						"id": body["id"], "name": name, "slug": name, "phase": "running", "status": "running",
+					},
+				})
+			case r.Method == http.MethodPost && (strings.HasSuffix(r.URL.Path, "/start") || strings.HasSuffix(r.URL.Path, "/restart")):
+				w.WriteHeader(http.StatusAccepted)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"agent": map[string]any{"phase": "running", "status": "running"},
+				})
+			case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/stop"):
+				w.WriteHeader(http.StatusAccepted)
+				_ = json.NewEncoder(w).Encode(map[string]any{"status": "stopped"})
+			case r.Method == http.MethodDelete:
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode(map[string]any{"deleted": true})
+			default:
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		return srv, func() []capturedBrokerCall {
+			mu.Lock()
+			defer mu.Unlock()
+			out := make([]capturedBrokerCall, len(calls))
+			copy(out, calls)
+			return out
+		}
+	}
+
+	for _, nativeExpOn := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cloudrun_native_identity=%t", nativeExpOn), func(t *testing.T) {
+			f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+			cr := f.addFlatCloudRunBroker(t, "cloudrun")
+			brokerSrv, getCalls := newFlatCRBrokerHTTP(t, "cr-a", cr.RuntimeTarget.ID, []string{crListedGSA})
+			cr.Endpoint = brokerSrv.URL
+			require.NoError(t, f.s.UpdateRuntimeBroker(ctx, cr))
+
+			dispatcher := NewHTTPAgentDispatcher(f.s, false, slog.Default())
+			dispatcher.SetTokenGenerator(f.srv)
+			dispatcher.SetDispatchExperimentsProvider(f.srv.dispatchExperiments)
+			f.srv.SetDispatcher(dispatcher)
+			f.srv.SetGCPTokenGenerator(&countingGCPTokenGenerator{})
+
+			setExperimentOverrides(t, f.srv, map[string]bool{
+				experiments.FlatRuntimeBrokers:     true,
+				experiments.FlatCloudRunTarget:     true,
+				experiments.CloudRunNativeIdentity: nativeExpOn,
+			})
+
+			listedSA := &store.GCPServiceAccount{
+				ID: tid(fmt.Sprintf("sa-listed-%t", nativeExpOn)), Scope: store.ScopeProject, ScopeID: f.project.ID,
+				Email: crListedGSA, ProjectID: "example-project",
+				Verified: true, VerifiedAt: time.Now(), VerificationStatus: store.GCPVerificationVerified,
+				CreatedAt: time.Now(),
+			}
+			require.NoError(t, f.s.CreateGCPServiceAccount(ctx, listedSA))
+
+			unlistedSA := &store.GCPServiceAccount{
+				ID: tid(fmt.Sprintf("sa-unlisted-%t", nativeExpOn)), Scope: store.ScopeProject, ScopeID: f.project.ID,
+				Email: crUnlistedGSA, ProjectID: "example-project",
+				Verified: true, VerifiedAt: time.Now(), VerificationStatus: store.GCPVerificationVerified,
+				CreatedAt: time.Now(),
+			}
+			require.NoError(t, f.s.CreateGCPServiceAccount(ctx, unlistedSA))
+
+			// 1. Unlisted assign SA -> broker 400 validation_error naming
+			// server.broker.instances[cr-a].runtime_target.assignable_service_accounts
+			// relayed verbatim without Kubernetes prose, SA leak, or stranded row.
+			recUnlisted := f.create(t, map[string]any{
+				"name":            "cr-assign-unlisted",
+				"runtimeBrokerId": cr.ID,
+				"task":            "t",
+				"noAuth":          true,
+				"gcp_identity": map[string]any{
+					"metadata_mode":      store.GCPMetadataModeAssign,
+					"service_account_id": unlistedSA.ID,
+				},
+			})
+			requireAPIError(t, recUnlisted, http.StatusBadRequest, ErrCodeValidationError)
+			assert.Contains(t, recUnlisted.Body.String(), "server.broker.instances[cr-a].runtime_target.assignable_service_accounts")
+			assert.NotContains(t, recUnlisted.Body.String(), "kubernetes_service_account_mappings")
+			assert.NotContains(t, recUnlisted.Body.String(), "@")
+			f.noAgentWritten(t, "cr-assign-unlisted")
+
+			// 2. Allow-listed assign SA -> 201 Created + stop/start/restart + 403 mint refusal.
+			recAssign := f.create(t, map[string]any{
+				"name":            "cr-assign-ok",
+				"runtimeBrokerId": cr.ID,
+				"task":            "t",
+				"noAuth":          true,
+				"gcp_identity": map[string]any{
+					"metadata_mode":      store.GCPMetadataModeAssign,
+					"service_account_id": listedSA.ID,
+				},
+			})
+			require.Equal(t, http.StatusCreated, recAssign.Code, recAssign.Body.String())
+			assignAgent := f.agentBySlug(t, "cr-assign-ok")
+			require.NotNil(t, assignAgent)
+			assert.True(t, crRecorded(t, f.s, assignAgent.ID), "NativeCloudRun persisted on allow-listed assign")
+
+			calls := getCalls()
+			var createCall *capturedBrokerCall
+			for i := range calls {
+				if calls[i].method == http.MethodPost && calls[i].path == "/api/v1/agents" {
+					if name, _ := calls[i].body["name"].(string); name == "cr-assign-ok" {
+						createCall = &calls[i]
+					}
+				}
+			}
+			require.NotNil(t, createCall)
+			cfgMap, _ := createCall.body["config"].(map[string]any)
+			gcpMap, _ := cfgMap["gcpIdentity"].(map[string]any)
+			assert.Equal(t, store.GCPMetadataModeAssign, gcpMap["metadata_mode"])
+			assert.Equal(t, crListedGSA, gcpMap["sa_email"])
+			assert.Equal(t, true, gcpMap["native_cloud_run"])
+			resEnv, _ := createCall.body["resolvedEnv"].(map[string]any)
+			assert.Equal(t, "1", resEnv[envNativeCloudRun])
+			mintedToken, _ := createCall.body["agentToken"].(string)
+			require.NotEmpty(t, mintedToken)
+
+			mintRec := doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/agent/gcp-token", nil, mintedToken)
+			require.Equal(t, http.StatusForbidden, mintRec.Code, mintRec.Body.String())
+			assert.Contains(t, mintRec.Body.String(), "the hub does not issue GCP tokens for agents on Cloud Run Instances; use the instance's metadata server")
+			assert.NotContains(t, mintRec.Body.String(), "profile")
+			assert.NotContains(t, mintRec.Body.String(), "@")
+
+			// Stop clears NativeCloudRun; Start and Restart re-record and send SCION_METADATA_NATIVE_CLOUDRUN=1.
+			stopRec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+assignAgent.ID+"/stop", nil)
+			require.Contains(t, []int{http.StatusOK, http.StatusAccepted}, stopRec.Code, stopRec.Body.String())
+			assert.False(t, crRecorded(t, f.s, assignAgent.ID))
+
+			startRec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+assignAgent.ID+"/start", map[string]any{})
+			require.Contains(t, []int{http.StatusOK, http.StatusAccepted}, startRec.Code, startRec.Body.String())
+			assert.True(t, crRecorded(t, f.s, assignAgent.ID))
+
+			restartRec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+assignAgent.ID+"/restart", map[string]any{})
+			require.Contains(t, []int{http.StatusOK, http.StatusAccepted}, restartRec.Code, restartRec.Body.String())
+			assert.True(t, crRecorded(t, f.s, assignAgent.ID))
+
+			// Both lifecycle /start and lifecycle /restart (implemented as stop + start
+			// in handleAgentLifecycle) dispatch /start to the broker with the native marker.
+			var startCalls []capturedBrokerCall
+			for _, c := range getCalls() {
+				if c.method == http.MethodPost && strings.HasSuffix(c.path, "/cr-assign-ok/start") {
+					startCalls = append(startCalls, c)
+				}
+			}
+			require.Len(t, startCalls, 2, "expected broker /start calls for both lifecycle start and lifecycle restart")
+			for idx, sc := range startCalls {
+				re, _ := sc.body["resolvedEnv"].(map[string]any)
+				assert.Equal(t, "1", re[envNativeCloudRun], "start call %d", idx)
+				assert.Equal(t, store.GCPMetadataModeAssign, re["SCION_METADATA_MODE"], "start call %d", idx)
+				assert.Equal(t, crListedGSA, re["SCION_METADATA_SA_EMAIL"], "start call %d", idx)
+			}
+
+			// 3. Explicit passthrough:
+			//    3a. Without GCPHostServiceAccountEmail registered on the broker row,
+			//        existing Hub passthrough rules (authorizePassthroughIdentity) deny
+			//        with 403 Forbidden.
+			recPTNoHostSA := f.create(t, map[string]any{
+				"name":            "cr-passthrough-no-host-sa",
+				"runtimeBrokerId": cr.ID,
+				"task":            "t",
+				"noAuth":          true,
+				"gcp_identity": map[string]any{
+					"metadata_mode": store.GCPMetadataModePassthrough,
+				},
+			})
+			require.Equal(t, http.StatusForbidden, recPTNoHostSA.Code, recPTNoHostSA.Body.String())
+			f.noAgentWritten(t, "cr-passthrough-no-host-sa")
+
+			//    3b. With GCPHostServiceAccountEmail registered on the broker row ->
+			//        201 Created, NativeCloudRun persisted, ScopeAgentGCPToken withheld,
+			//        /api/v1/agent/gcp-token 403.
+			_, err := f.s.SetRuntimeBrokerGCPHost(ctx, cr.ID, "cr-instance@example-project.iam.gserviceaccount.com", "example-project")
+			require.NoError(t, err)
+
+			recPT := f.create(t, map[string]any{
+				"name":            "cr-passthrough-ok",
+				"runtimeBrokerId": cr.ID,
+				"task":            "t",
+				"noAuth":          true,
+				"gcp_identity": map[string]any{
+					"metadata_mode": store.GCPMetadataModePassthrough,
+				},
+			})
+			require.Equal(t, http.StatusCreated, recPT.Code, recPT.Body.String())
+			ptAgent := f.agentBySlug(t, "cr-passthrough-ok")
+			require.NotNil(t, ptAgent)
+			assert.True(t, crRecorded(t, f.s, ptAgent.ID), "NativeCloudRun persisted on explicit passthrough")
+
+			var ptCall *capturedBrokerCall
+			for i := range getCalls() {
+				c := getCalls()[i]
+				if c.method == http.MethodPost && c.path == "/api/v1/agents" {
+					if name, _ := c.body["name"].(string); name == "cr-passthrough-ok" {
+						ptCall = &c
+					}
+				}
+			}
+			require.NotNil(t, ptCall)
+			ptCfg, _ := ptCall.body["config"].(map[string]any)
+			ptGCP, _ := ptCfg["gcpIdentity"].(map[string]any)
+			assert.Equal(t, store.GCPMetadataModePassthrough, ptGCP["metadata_mode"])
+			assert.Equal(t, true, ptGCP["native_cloud_run"])
+			ptToken, _ := ptCall.body["agentToken"].(string)
+			require.NotEmpty(t, ptToken)
+			ptMintRec := doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/agent/gcp-token", nil, ptToken)
+			require.Equal(t, http.StatusForbidden, ptMintRec.Code, ptMintRec.Body.String())
+		})
 	}
 }

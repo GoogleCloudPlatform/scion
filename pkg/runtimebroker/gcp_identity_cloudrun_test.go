@@ -876,19 +876,33 @@ func newFlatCloudRunStartServer(t *testing.T) *Server {
 	return srv
 }
 
-// Phase I1 on a flat Cloud Run instance: assign and unmarked block are
-// refused before the agent token step, while unset and marked block run as
-// the instance's block_service_account regardless of hub.cloudrun_native_identity.
+// Flat Cloud Run instance identity policy: unlisted assign, unmarked assign,
+// unmarked block, and assign + init firewall are refused before the agent token
+// step (never consulting global/project cloudrun settings), while unset, marked
+// block, allow-listed assign, and explicit passthrough (with or without marker)
+// resolve from the instance's own snapshot regardless of hub.cloudrun_native_identity.
 func TestBuildStartContext_CloudRunFlatInstanceRefused(t *testing.T) {
 	refused := []struct {
-		name string
-		gcp  *GCPIdentityConfig
-		want string
+		name     string
+		gcp      *GCPIdentityConfig
+		env      []string
+		want     string
+		wantCode string
 	}{
 		{
-			name: "assign refused in I1",
+			name: "assign with empty instance allow-list ignores global allow-list",
 			gcp:  &GCPIdentityConfig{MetadataMode: "assign", NativeCloudRun: true, SAEmail: crAssignedSA, ProjectID: crProjectID},
-			want: flatCloudRunGCPIdentityRefusalText,
+			want: "server.broker.instances[cr-a].runtime_target.assignable_service_accounts",
+		},
+		{
+			name: "assign without native marker refused",
+			gcp:  &GCPIdentityConfig{MetadataMode: "assign", SAEmail: crAssignedSA, ProjectID: crProjectID},
+			want: "did not mark this dispatch for native Cloud Run identity",
+		},
+		{
+			name: "assign without SA email refused",
+			gcp:  &GCPIdentityConfig{MetadataMode: "assign", NativeCloudRun: true},
+			want: "requires a service account email",
 		},
 		{
 			name: "block without native marker refused",
@@ -905,7 +919,7 @@ func TestBuildStartContext_CloudRunFlatInstanceRefused(t *testing.T) {
 			in := startContextInputs{
 				Name:        "agent-cr-f1",
 				ProjectPath: projectDir,
-				Config:      &CreateAgentConfig{GCPIdentity: tc.gcp},
+				Config:      &CreateAgentConfig{GCPIdentity: tc.gcp, Env: tc.env},
 				HTTPRequest: httptest.NewRequest("POST", "/api/v1/agents", nil),
 				Operation:   opCreate,
 			}
@@ -917,10 +931,13 @@ func TestBuildStartContext_CloudRunFlatInstanceRefused(t *testing.T) {
 			if sce.Status != http.StatusBadRequest {
 				t.Errorf("status = %d, want %d", sce.Status, http.StatusBadRequest)
 			}
+			if sce.Code != tc.wantCode {
+				t.Errorf("code = %q, want %q", sce.Code, tc.wantCode)
+			}
 			if !strings.Contains(sce.Message, "agent-cr-f1") || !strings.Contains(sce.Message, tc.want) {
 				t.Errorf("message %q must name the agent and %q", sce.Message, tc.want)
 			}
-			for _, other := range []string{crBlockUnset, cloudRunPassthroughRefusal, "not attachable"} {
+			for _, other := range []string{crBlockUnset, cloudRunPassthroughRefusal, "cloudrun.assignable_service_accounts", "not attachable on this broker"} {
 				if strings.Contains(sce.Message, other) {
 					t.Errorf("message %q is a legacy refusal (%q), not the flat one", sce.Message, other)
 				}
@@ -932,20 +949,70 @@ func TestBuildStartContext_CloudRunFlatInstanceRefused(t *testing.T) {
 		})
 	}
 
+	const flatInstanceSA = "instance-sa@example-project.iam.gserviceaccount.com"
 	allowed := []struct {
-		name string
-		gcp  *GCPIdentityConfig
+		name        string
+		assignable  []string
+		gcp         *GCPIdentityConfig
+		wantSA      string
+		wantIDMode  string
+		wantEnvMode string
+		wantEnvSA   string
 	}{
-		{name: "unset runs as block_service_account"},
-		{name: "marked block runs as block_service_account", gcp: &GCPIdentityConfig{MetadataMode: "block", NativeCloudRun: true}},
-		{name: "marked confined passthrough runs as block_service_account", gcp: &GCPIdentityConfig{MetadataMode: "passthrough", RequireLocalRuntime: true, NativeCloudRun: true}},
+		{
+			name:        "unset runs as block_service_account",
+			wantSA:      crBlockSA,
+			wantIDMode:  "block",
+			wantEnvMode: "block",
+		},
+		{
+			name:        "marked block runs as block_service_account",
+			gcp:         &GCPIdentityConfig{MetadataMode: "block", NativeCloudRun: true},
+			wantSA:      crBlockSA,
+			wantIDMode:  "block",
+			wantEnvMode: "block",
+		},
+		{
+			name:        "marked confined passthrough runs as block_service_account",
+			gcp:         &GCPIdentityConfig{MetadataMode: "passthrough", RequireLocalRuntime: true, NativeCloudRun: true},
+			wantSA:      crBlockSA,
+			wantIDMode:  "block",
+			wantEnvMode: "block",
+		},
+		{
+			name:        "marked assign with allow-listed SA runs as assigned SA",
+			assignable:  []string{crAssignedSA},
+			gcp:         &GCPIdentityConfig{MetadataMode: "assign", NativeCloudRun: true, SAEmail: "  " + strings.ToUpper(crAssignedSA) + "  ", ProjectID: crProjectID},
+			wantSA:      crAssignedSA,
+			wantIDMode:  "assign",
+			wantEnvMode: "passthrough",
+			wantEnvSA:   crAssignedSA,
+		},
+		{
+			name:        "explicit passthrough without marker runs as runtime_target.service_account",
+			gcp:         &GCPIdentityConfig{MetadataMode: "passthrough"},
+			wantSA:      flatInstanceSA,
+			wantIDMode:  "passthrough",
+			wantEnvMode: "passthrough",
+		},
+		{
+			name:        "explicit passthrough with marker runs as runtime_target.service_account",
+			gcp:         &GCPIdentityConfig{MetadataMode: "passthrough", NativeCloudRun: true},
+			wantSA:      flatInstanceSA,
+			wantIDMode:  "passthrough",
+			wantEnvMode: "passthrough",
+		},
 	}
 	for _, gateOn := range []bool{false, true} {
 		for _, tc := range allowed {
 			t.Run(fmt.Sprintf("gate=%t/%s", gateOn, tc.name), func(t *testing.T) {
 				srv := newFlatCloudRunStartServer(t)
-				// Global settings set a different block account; the flat
-				// instance must use only its own snapshot.
+				if len(tc.assignable) > 0 {
+					srv.config.FlatInstance.Instance.RuntimeTarget.AssignableServiceAccounts = tc.assignable
+					srv.flatCloudRunIdentity = newFlatCloudRunIdentityPolicy(srv.config.FlatInstance)
+				}
+				// Global settings set different accounts; the flat instance
+				// must use only its own snapshot.
 				newTestGlobalSettings(t, `schema_version: "1"
 runtimes:
     cloudrun:
@@ -970,15 +1037,27 @@ runtimes:
 				if err != nil {
 					t.Fatalf("buildStartContext: %v", err)
 				}
-				if sc.Opts.CloudRunIdentity == nil || sc.Opts.CloudRunIdentity.ServiceAccount != crBlockSA || sc.Opts.CloudRunIdentity.Mode != "block" {
-					t.Fatalf("CloudRunIdentity = %+v, want {%s block}", sc.Opts.CloudRunIdentity, crBlockSA)
+				if sc.Opts.CloudRunIdentity == nil || sc.Opts.CloudRunIdentity.ServiceAccount != tc.wantSA || sc.Opts.CloudRunIdentity.Mode != tc.wantIDMode {
+					t.Fatalf("CloudRunIdentity = %+v, want {%s %s}", sc.Opts.CloudRunIdentity, tc.wantSA, tc.wantIDMode)
 				}
 				wantSel := srv.flatDispatchSelection()
 				if sc.CloudRunSelection == nil || *sc.CloudRunSelection != wantSel {
 					t.Errorf("CloudRunSelection = %+v, want %+v", sc.CloudRunSelection, wantSel)
 				}
-				if sc.Opts.Env["SCION_METADATA_MODE"] != "block" || sc.Opts.Env["GCE_METADATA_HOST"] != "localhost:18380" {
-					t.Errorf("expected emulator block mode env, got %v", metadataEnv(sc.Opts.Env))
+				if tc.wantEnvMode == "block" {
+					if sc.Opts.Env["SCION_METADATA_MODE"] != "block" || sc.Opts.Env["GCE_METADATA_HOST"] != "localhost:18380" {
+						t.Errorf("expected emulator block mode env, got %v", metadataEnv(sc.Opts.Env))
+					}
+				} else {
+					if sc.Opts.Env["SCION_METADATA_MODE"] != "passthrough" {
+						t.Errorf("SCION_METADATA_MODE = %q, want passthrough", sc.Opts.Env["SCION_METADATA_MODE"])
+					}
+					if _, ok := sc.Opts.Env["GCE_METADATA_HOST"]; ok {
+						t.Errorf("GCE_METADATA_HOST = %q, want unset", sc.Opts.Env["GCE_METADATA_HOST"])
+					}
+					if got := sc.Opts.Env["SCION_METADATA_SA_EMAIL"]; got != tc.wantEnvSA {
+						t.Errorf("SCION_METADATA_SA_EMAIL = %q, want %q", got, tc.wantEnvSA)
+					}
 				}
 			})
 		}

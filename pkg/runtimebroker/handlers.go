@@ -1319,7 +1319,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		if createSlug == "" {
 			createSlug = api.Slugify(req.Name)
 		}
-		_, flatIdentityErr := s.flatCloudRunIdentityDecision(startContextInputs{
+		_, flatIdentityErr := s.flatCloudRunIdentityCheck(startContextInputs{
 			Name:        req.Name,
 			Operation:   opCreate,
 			Config:      req.Config,

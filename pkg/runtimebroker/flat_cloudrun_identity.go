@@ -18,6 +18,8 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // flatCloudRunIdentityPolicy is a flat Cloud Run instance's own GCP identity
@@ -61,6 +63,27 @@ func (p flatCloudRunIdentityPolicy) blockAccount() (string, bool) {
 	return p.blockServiceAccount, p.blockServiceAccount != ""
 }
 
+// instanceAccount returns the instance's normalized runtime_target.service_account
+// and whether one is configured.
+func (p flatCloudRunIdentityPolicy) instanceAccount() (string, bool) {
+	return p.serviceAccount, p.serviceAccount != ""
+}
+
+// accountAssignable reports whether saEmail is listed in the instance's
+// runtime_target.assignable_service_accounts allow-list. An empty or absent
+// allow-list allows no account (fail closed).
+func (p flatCloudRunIdentityPolicy) accountAssignable(saEmail string) bool {
+	if len(p.assignable) == 0 {
+		return false
+	}
+	norm := strings.ToLower(strings.TrimSpace(saEmail))
+	if norm == "" {
+		return false
+	}
+	_, ok := p.assignable[norm]
+	return ok
+}
+
 // flatCloudRunBlockUnsetRefusal refuses a flat Cloud Run dispatch when the
 // instance's snapshot holds no block_service_account (defense in depth behind
 // static instance validation). It names the agent and the setting path only,
@@ -73,5 +96,40 @@ func flatCloudRunBlockUnsetRefusal(agentName, instanceKey string) *startContextE
 		Status: http.StatusBadRequest,
 		Message: fmt.Sprintf("agent %q: flat Cloud Run instance %q has no block service account; set server.broker.instances[%s].runtime_target.block_service_account",
 			agentName, instanceKey, instanceKey),
+	}
+}
+
+// flatCloudRunServiceAccountUnsetRefusal refuses an explicit passthrough
+// dispatch on a flat Cloud Run instance whose snapshot holds no
+// runtime_target.service_account (defense in depth behind static instance
+// validation). It names the agent and the setting path only, never an account.
+func flatCloudRunServiceAccountUnsetRefusal(agentName, instanceKey string) *startContextError {
+	if instanceKey == "" {
+		instanceKey = "<key>"
+	}
+	return &startContextError{
+		Status: http.StatusBadRequest,
+		Message: fmt.Sprintf("agent %q: flat Cloud Run instance %q has no service account; set server.broker.instances[%s].runtime_target.service_account",
+			agentName, instanceKey, instanceKey),
+	}
+}
+
+// flatCloudRunNotAttachableRefusal refuses an assign dispatch whose service
+// account is not listed in the flat Cloud Run instance's
+// runtime_target.assignable_service_accounts allow-list. Status is 400 with
+// default validation_error code (matching legacy Cloud Run so Hub
+// relayBrokerRefusal forwards the setting path verbatim without Kubernetes
+// mapping prose; unification onto identity_not_mapped is tracked for I5,
+// ptone/scion#8187). The message never carries the service account email or
+// project.
+func flatCloudRunNotAttachableRefusal(agentName, instanceKey string) *startContextError {
+	if instanceKey == "" {
+		instanceKey = "<key>"
+	}
+	return &startContextError{
+		Status: http.StatusBadRequest,
+		Message: fmt.Sprintf(
+			"agent %q: GCP identity mode %q on Cloud Run Instances: service_account is not attachable on flat Cloud Run instance %q; add it to server.broker.instances[%s].runtime_target.assignable_service_accounts",
+			agentName, store.GCPMetadataModeAssign, instanceKey, instanceKey),
 	}
 }

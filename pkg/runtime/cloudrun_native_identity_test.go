@@ -117,6 +117,8 @@ func TestBuildCloudRunInstance_CloudRunIdentity(t *testing.T) {
 			wantSA: nativeIDAssignedSA, wantLabel: cloudRunIdentityHash(nativeIDAssignedSA)},
 		{name: "block", id: &api.CloudRunIdentity{ServiceAccount: nativeIDBlockSA, Mode: "block"},
 			wantSA: nativeIDBlockSA, wantLabel: cloudRunIdentityHash(nativeIDBlockSA)},
+		{name: "passthrough", id: &api.CloudRunIdentity{ServiceAccount: nativeIDInstanceSA, Mode: "passthrough"},
+			wantSA: nativeIDInstanceSA, wantLabel: cloudRunIdentityHash(nativeIDInstanceSA)},
 		{name: "caller scion-identity label does not shadow the identity", id: &api.CloudRunIdentity{ServiceAccount: nativeIDAssignedSA, Mode: "assign"},
 			wantSA: nativeIDAssignedSA, wantLabel: cloudRunIdentityHash(nativeIDAssignedSA), callerLabel: "scion-identity"},
 		{name: "caller Scion-Identity label does not shadow the identity", id: &api.CloudRunIdentity{ServiceAccount: nativeIDAssignedSA, Mode: "assign"},
@@ -269,6 +271,7 @@ func TestCloudRunRun_IdentityCreate(t *testing.T) {
 func TestCloudRunRun_IdentityReplacesSameRunInstance(t *testing.T) {
 	assigned := &api.CloudRunIdentity{ServiceAccount: nativeIDAssignedSA, Mode: "assign"}
 	block := &api.CloudRunIdentity{ServiceAccount: nativeIDBlockSA, Mode: "block"}
+	passthrough := &api.CloudRunIdentity{ServiceAccount: nativeIDInstanceSA, Mode: "passthrough"}
 	tests := []struct {
 		name     string
 		id       *api.CloudRunIdentity
@@ -288,6 +291,7 @@ func TestCloudRunRun_IdentityReplacesSameRunInstance(t *testing.T) {
 		{name: "stopped instance, start or restart", id: assigned, label: cloudRunIdentityHash(nativeIDAssignedSA), state: recordedStopped()},
 		{name: "stopped instance, resume", id: assigned, label: cloudRunIdentityHash(nativeIDAssignedSA), state: recordedStopped(), resume: true},
 		{name: "revoked assignment, restart as block", id: block, label: cloudRunIdentityHash(nativeIDAssignedSA), state: recordedStopped()},
+		{name: "switch from assign to explicit passthrough", id: passthrough, label: cloudRunIdentityHash(nativeIDAssignedSA), state: recordedStopped()},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

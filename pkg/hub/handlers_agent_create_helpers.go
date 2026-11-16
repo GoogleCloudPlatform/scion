@@ -2710,19 +2710,65 @@ func agentHasGCPIdentityAssigned(agent *store.Agent) bool {
 // An agent whose GCPIdentity is explicitly block gets no metadata server, so
 // the project's verified service accounts do not count (ptone/scion#7733):
 // the broker auto-detects a non-GCP auth type for it, and the hub must agree
-// or it skips the no-auth fallback. Otherwise a verified project-scope service
-// account or the agent's own assign/passthrough identity counts. A nil
-// GCPIdentity still counts the project SA, since the hub cannot see whether
-// the broker will default it to block or passthrough (see
-// agentHasGCPIdentityAssigned).
+// or it skips the no-auth fallback. On a flat Cloud Run Runtime Broker, unset
+// and confined passthrough dispatches downgrade to block_service_account with
+// SCION_METADATA_MODE=block, so only assign or unconfined passthrough gives
+// the container metadata credentials. Otherwise a verified project-scope
+// service account or the agent's own assign/passthrough identity counts. A nil
+// GCPIdentity on a non-flat-Cloud-Run target still counts the project SA,
+// since the hub cannot see whether the broker will default it to block or
+// passthrough (see agentHasGCPIdentityAssigned).
 func (s *Server) agentGCPCredentialsAvailable(ctx context.Context, agent *store.Agent) (bool, error) {
 	if agentGCPIdentityBlocked(agent) {
+		return false, nil
+	}
+	flatCR, err := s.agentTargetsFlatCloudRun(ctx, agent)
+	if err != nil {
+		return false, err
+	}
+	if flatCR {
+		if agent == nil || agent.AppliedConfig == nil || agent.AppliedConfig.GCPIdentity == nil {
+			return false, nil
+		}
+		gcp := agent.AppliedConfig.GCPIdentity
+		if gcp.MetadataMode == store.GCPMetadataModeAssign {
+			return true, nil
+		}
+		if gcp.MetadataMode == store.GCPMetadataModePassthrough && !gcp.RequireLocalRuntime {
+			return true, nil
+		}
 		return false, nil
 	}
 	if agentHasGCPIdentityAssigned(agent) {
 		return true, nil
 	}
 	return s.projectHasVerifiedGCPSA(ctx, agent.ProjectID)
+}
+
+// agentTargetsFlatCloudRun reports whether agent is pinned or assigned to a
+// flat Cloud Run Runtime Broker.
+func (s *Server) agentTargetsFlatCloudRun(ctx context.Context, agent *store.Agent) (bool, error) {
+	if agent == nil {
+		return false, nil
+	}
+	if agent.PinnedRuntimeTargetType == flatCloudRunTargetType {
+		return true, nil
+	}
+	brokerID := agent.RuntimeBrokerID
+	if brokerID == "" {
+		brokerID = agent.PinnedRuntimeBrokerID
+	}
+	if brokerID == "" || s.store == nil {
+		return false, nil
+	}
+	broker, err := s.store.GetRuntimeBroker(ctx, brokerID)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return flatCloudRunBroker(broker), nil
 }
 
 // agentGCPIdentityBlocked returns true when the agent's own GCPIdentity
