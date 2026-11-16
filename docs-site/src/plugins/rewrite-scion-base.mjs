@@ -229,13 +229,11 @@ export function scionRewriteBaseIntegration(options = {}) {
 					processor.createRenderer = async (/** @type {any} */ shared) => {
 						const renderer = await origCreateRenderer(shared);
 						const origRender = renderer.render.bind(renderer);
-						return {
-							...renderer,
-							async render(/** @type {string} */ content, /** @type {any} */ renderOpts) {
-								rewriteFrontmatterLinks(renderOpts?.frontmatter, targetBase);
-								return origRender(content, renderOpts);
-							},
+						renderer.render = async (/** @type {string} */ content, /** @type {any} */ renderOpts) => {
+							rewriteFrontmatterLinks(renderOpts?.frontmatter, targetBase);
+							return origRender(content, renderOpts);
 						};
+						return renderer;
 					};
 				} else {
 					throw new Error(

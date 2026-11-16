@@ -73,8 +73,13 @@ const initialVersionLabel = channel === 'main' ? MAIN_VERSION_LABEL : version;
 		private channelSelect: HTMLSelectElement | null = null;
 		private versionSelect: HTMLSelectElement | null = null;
 		private manifest: VersionsManifest | null = null;
+		private abortController: AbortController | null = null;
 
 		connectedCallback() {
+			this.abortController?.abort();
+			this.abortController = new AbortController();
+			const { signal } = this.abortController;
+
 			this.channelSelect = this.querySelector<HTMLSelectElement>('select[data-role="channel"]');
 			this.versionSelect = this.querySelector<HTMLSelectElement>('select[data-role="version"]');
 			if (!this.channelSelect || !this.versionSelect) return;
@@ -82,47 +87,65 @@ const initialVersionLabel = channel === 'main' ? MAIN_VERSION_LABEL : version;
 			const current = this.getCurrentBuild();
 			const manifestUrl = this.dataset.manifestUrl || '/scion/versions.json';
 
-			this.channelSelect.addEventListener('change', () => {
-				if (!this.channelSelect) return;
-				if (!this.manifest) {
-					this.channelSelect.value = current.channel;
-					return;
-				}
-				const chosenChannelId = this.channelSelect.value as ChannelId;
-				const channelEntry = this.manifest.channels.find((c) => c.id === chosenChannelId);
-				if (!channelEntry || channelEntry.versions.length === 0) {
-					this.syncControls();
-					return;
-				}
-				const target =
-					channelEntry.versions.find((v) => v.version === channelEntry.latest) ||
-					channelEntry.versions[0];
-				this.populateVersions(chosenChannelId, target.version);
-				if (chosenChannelId === current.channel && target.version === current.version) {
-					return;
-				}
-				void navigateToVersionBase(target.path, current.base);
-			});
+			this.channelSelect.addEventListener(
+				'change',
+				() => {
+					if (!this.channelSelect) return;
+					if (!this.manifest) {
+						this.channelSelect.value = current.channel;
+						return;
+					}
+					const chosenChannelId = this.channelSelect.value as ChannelId;
+					const channelEntry = this.manifest.channels.find((c) => c.id === chosenChannelId);
+					if (!channelEntry || channelEntry.versions.length === 0) {
+						this.syncControls();
+						return;
+					}
+					const target =
+						channelEntry.versions.find((v) => v.version === channelEntry.latest) ||
+						channelEntry.versions[0];
+					this.populateVersions(chosenChannelId, target.version);
+					if (chosenChannelId === current.channel && target.version === current.version) {
+						return;
+					}
+					void navigateToVersionBase(target.path, current.base);
+				},
+				{ signal },
+			);
 
-			this.versionSelect.addEventListener('change', () => {
-				if (!this.versionSelect) return;
-				const selectedOption = this.versionSelect.selectedOptions[0];
-				const targetPath = this.versionSelect.value;
-				const chosenVer = selectedOption?.dataset.version || '';
-				if (!targetPath || chosenVer === current.version) return;
-				void navigateToVersionBase(targetPath, current.base);
-			});
+			this.versionSelect.addEventListener(
+				'change',
+				() => {
+					if (!this.versionSelect) return;
+					const selectedOption = this.versionSelect.selectedOptions[0];
+					const targetPath = this.versionSelect.value;
+					const chosenVer = selectedOption?.dataset.version || '';
+					if (!targetPath || chosenVer === current.version) return;
+					void navigateToVersionBase(targetPath, current.base);
+				},
+				{ signal },
+			);
 
-			window.addEventListener('pageshow', (event) => {
-				if (event.persisted) {
-					this.syncControls();
-				}
-			});
+			window.addEventListener(
+				'pageshow',
+				(event) => {
+					if (event.persisted) {
+						this.syncControls();
+					}
+				},
+				{ signal },
+			);
 
 			void loadVersionsManifest(current, manifestUrl).then((manifest) => {
+				if (signal.aborted) return;
 				this.manifest = manifest;
 				this.syncControls();
 			});
+		}
+
+		disconnectedCallback() {
+			this.abortController?.abort();
+			this.abortController = null;
 		}
 
 		private getCurrentBuild(): { channel: ChannelId; version: string; base: string } {

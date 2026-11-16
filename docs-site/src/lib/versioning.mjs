@@ -129,7 +129,7 @@ export function classifyTagChannel(refName) {
  * @param {Record<string, string | undefined>} [env]
  * @returns {{ base: string, channel: ChannelId, version: string }}
  */
-export function getBuildVersionConfig(env = process.env) {
+export function getBuildVersionConfig(env = typeof process !== 'undefined' ? process.env : {}) {
 	const base = normalizeBase(env.DOCS_BASE);
 	const rawChannel = (env.DOCS_CHANNEL || '').trim().toLowerCase();
 	if (rawChannel && !VALID_CHANNELS.has(/** @type {ChannelId} */ (rawChannel))) {

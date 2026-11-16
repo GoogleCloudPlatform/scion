@@ -70,7 +70,13 @@ const channelLabel = channelLabelMap[channel] || channel;
 	import { findNewerChannelRelease, type ChannelId } from '../lib/versioning.mjs';
 
 	class ScionVersionBanner extends HTMLElement {
+		private abortController: AbortController | null = null;
+
 		connectedCallback() {
+			this.abortController?.abort();
+			this.abortController = new AbortController();
+			const { signal } = this.abortController;
+
 			const channel = (this.dataset.currentChannel || 'main') as ChannelId;
 			const version = this.dataset.currentVersion || 'main';
 			const base = this.dataset.currentBase || '/scion';
@@ -78,13 +84,18 @@ const channelLabel = channelLabelMap[channel] || channel;
 
 			const mainLink = this.querySelector<HTMLAnchorElement>('a[data-role="main-link"]');
 			if (mainLink) {
-				mainLink.addEventListener('click', (e) => {
-					e.preventDefault();
-					void navigateToVersionBase('/scion', base);
-				});
+				mainLink.addEventListener(
+					'click',
+					(e) => {
+						e.preventDefault();
+						void navigateToVersionBase('/scion', base);
+					},
+					{ signal },
+				);
 			}
 
 			void loadVersionsManifest({ channel, version, base }, manifestUrl).then((manifest) => {
+				if (signal.aborted) return;
 				const newer = findNewerChannelRelease(manifest, { channel, version });
 				if (!newer) return;
 				const { channelLabel, latestEntry } = newer;
@@ -107,13 +118,22 @@ const channelLabel = channelLabelMap[channel] || channel;
 				if (wrap && link) {
 					link.href = `${latestEntry.path}/overview/`;
 					link.textContent = `Switch to ${channelLabel} ${latestEntry.version}`;
-					link.addEventListener('click', (e) => {
-						e.preventDefault();
-						void navigateToVersionBase(latestEntry.path, base);
-					});
+					link.addEventListener(
+						'click',
+						(e) => {
+							e.preventDefault();
+							void navigateToVersionBase(latestEntry.path, base);
+						},
+						{ signal },
+					);
 					wrap.hidden = false;
 				}
 			});
+		}
+
+		disconnectedCallback() {
+			this.abortController?.abort();
+			this.abortController = null;
 		}
 	}
 

@@ -45,6 +45,7 @@ import {
 	createSatteriMdastRewritePlugin,
 	rewriteFrontmatterLinks,
 	rewriteHtmlSnippet,
+	scionRewriteBaseIntegration,
 } from '../src/plugins/rewrite-scion-base.mjs';
 
 describe('normalizeBase & isSafeDocsBasePath', () => {
@@ -304,6 +305,71 @@ describe('Satteri Markdown & MDX base-path rewriter', () => {
 			rewriteHtmlSnippet('<img src="/scion/hero.png" />', '/scion/v0.3.0'),
 			'<img src="/scion/v0.3.0/hero.png" />',
 		);
+	});
+
+	it('preserves renderer prototype chain when wrapping processor.createRenderer', async () => {
+		class FakeRenderer {
+			helperMethod() {
+				return 'prototype-preserved';
+			}
+			/** @param {string} content @param {any} opts */
+			async render(content, opts) {
+				return { html: content, metadata: { frontmatter: opts?.frontmatter } };
+			}
+		}
+
+		const fakeProcessor = {
+			name: 'satteri',
+			options: { mdastPlugins: [], hastPlugins: [] },
+			async createRenderer() {
+				return new FakeRenderer();
+			},
+		};
+
+		const tmpCache = await fs.mkdtemp(path.join(os.tmpdir(), 'scion-astro-cache-'));
+		try {
+			const integration = scionRewriteBaseIntegration({ base: '/scion/v0.3.0' });
+			const setupHook = integration.hooks['astro:config:setup'];
+			assert.ok(setupHook);
+			await setupHook(
+				/** @type {any} */ ({
+					command: 'build',
+					config: {
+						cacheDir: new URL(`file://${tmpCache}/`),
+						markdown: { processor: fakeProcessor },
+					},
+				}),
+			);
+
+			const wrapped = await fakeProcessor.createRenderer();
+			assert.ok(wrapped instanceof FakeRenderer);
+			assert.equal(wrapped.helperMethod(), 'prototype-preserved');
+
+			const fm = { prev: { link: '/scion/overview/' } };
+			await wrapped.render('# Title', { frontmatter: fm });
+			assert.equal(fm.prev.link, '/scion/v0.3.0/overview/');
+		} finally {
+			await fs.rm(tmpCache, { recursive: true, force: true });
+		}
+	});
+
+	it('handles missing global process in getBuildVersionConfig default parameter', () => {
+		const desc = Object.getOwnPropertyDescriptor(globalThis, 'process');
+		assert.ok(desc);
+		try {
+			Object.defineProperty(globalThis, 'process', {
+				value: undefined,
+				configurable: true,
+				writable: true,
+			});
+			assert.deepEqual(getBuildVersionConfig(), {
+				base: '/scion',
+				channel: 'main',
+				version: 'main',
+			});
+		} finally {
+			Object.defineProperty(globalThis, 'process', desc);
+		}
 	});
 });
 
