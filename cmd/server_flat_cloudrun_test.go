@@ -119,9 +119,15 @@ func flatCRInstance(region, instanceID, owner, agentID, slug, runID string) *run
 
 // flatCRTarget is a valid cloudrun runtime_target in region.
 func flatCRTarget(region string) *config.V1RuntimeTargetConfig {
-	return &config.V1RuntimeTargetConfig{Type: config.RuntimeTargetTypeCloudRun, ProjectID: flatCRProject, Region: region,
-		ServiceAccount: "agents@example-project.iam.gserviceaccount.com", Subnetwork: "agents-subnet",
-		CredentialsFile: "/etc/scion/cr-" + region + ".json"}
+	return &config.V1RuntimeTargetConfig{
+		Type:                config.RuntimeTargetTypeCloudRun,
+		ProjectID:           flatCRProject,
+		Region:              region,
+		ServiceAccount:      "agents@example-project.iam.gserviceaccount.com",
+		BlockServiceAccount: "no-role-block@example-project.iam.gserviceaccount.com",
+		Subnetwork:          "agents-subnet",
+		CredentialsFile:     "/etc/scion/cr-" + region + ".json",
+	}
 }
 
 // TestFlatOwnershipPreflight_CloudRunSanitizedLabels: on a Cloud Run scope,
