@@ -1,5 +1,5 @@
 ---
-experiment: web.chat_choices
+experiment: web.decisions
 ---
 
 # Asking users to decide: choice prompts
@@ -170,8 +170,8 @@ scion decisions record --from <message-id> <key>=<choice-id> <key>=<choice-id>
 
 ## When choices are off
 
-Choice prompts need the `web.chat_choices` experiment on the Hub. If a send is
+Choice prompts need the `web.decisions` experiment on the Hub. If a send is
 refused with `experiment_disabled`, or `scion decisions` reports that decisions
-need the `web.chat_choices` experiment, send the question as ordinary Markdown
+need the `web.decisions` experiment, send the question as ordinary Markdown
 instead: options in a list with their trade-offs, your recommendation, and the
 question on its own line.

@@ -50,7 +50,7 @@ type decisionsSearchFixture struct {
 func newDecisionsSearchFixture(t *testing.T) *decisionsSearchFixture {
 	t.Helper()
 	f := newChoicesFixture(t)
-	setProjectDecisionsExperiments(t, f.srv, true, true)
+	setChoicesExperiment(t, f.srv, true)
 	ctx := context.Background()
 
 	dmAgent := &store.Agent{
@@ -423,7 +423,7 @@ func TestProjectDecisions_SearchDeadlineWithNonContextErrorIsTimeout(t *testing.
 		return &interruptingDecisionStore{Store: inner}
 	})
 	f := newChoicesFixtureOn(t, srv, rawStore, alice, bob, project)
-	setProjectDecisionsExperiments(t, f.srv, true, true)
+	setChoicesExperiment(t, f.srv, true)
 	f.topicPrompt(t, `[{"id":"ship-now","question":"Deploy?","choices":["yes","no"]}]`, false)
 	f.srv.config.ChatSearchTimeout = 50 * time.Millisecond
 

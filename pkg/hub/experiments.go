@@ -151,7 +151,7 @@ var dispatchExperimentNames = []string{
 	experiments.AgentPlugins,
 	experiments.CloudRunNativeIdentity,
 	experiments.CloudRunEphemeralAgents,
-	experiments.ChatChoices,
+	experiments.Decisions,
 	experiments.Artifacts,
 }
 

@@ -380,7 +380,7 @@ func TestDecisionsListHuman_ExperimentOffAndOldHub(t *testing.T) {
 	h.errBody = `{"error":{"code":"not_found","message":"route not found"}}`
 	_, err := runDecisionsTestCmd(t, "decisions", "list")
 	require.Error(t, err)
-	assert.Equal(t, "Decisions are not enabled on this hub (experiment web.project_decisions)", err.Error())
+	assert.Equal(t, "decisions need the web.decisions experiment", err.Error())
 
 	h.errBody = `{"error":{"code":"not_found","message":"Project not found"}}`
 	_, err = runDecisionsTestCmd(t, "decisions", "list")
@@ -745,7 +745,7 @@ func TestDecisionsListHuman_AllProjectsProjectResolutionAndAmbiguity(t *testing.
 	h.errBody = `{"error":{"code":"not_found","message":"route not found"}}`
 	_, err = runDecisionsTestCmd(t, "decisions", "list", "--all-projects")
 	require.Error(t, err)
-	assert.Equal(t, "Decisions are not enabled on this hub (experiment web.project_decisions)", err.Error())
+	assert.Equal(t, "decisions need the web.decisions experiment", err.Error())
 }
 
 func TestDecisionsListHuman_AllProjectsTableAndJSONGolden(t *testing.T) {

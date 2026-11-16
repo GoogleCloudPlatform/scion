@@ -285,13 +285,13 @@ func TestSendOutboundChoices_ExperimentDisabledSkipsAskUser(t *testing.T) {
 	asked := choicesState(t, "asker")
 	msgChoicesPayload = json.RawMessage(choicesTwoDecisions)
 	hubCtx := newChoicesHub(t, http.StatusBadRequest, map[string]interface{}{
-		"error": map[string]interface{}{"code": "experiment_disabled", "message": "experiment_disabled: web.chat_choices is off"},
+		"error": map[string]interface{}{"code": "experiment_disabled", "message": "experiment_disabled: web.decisions is off"},
 	}, nil)
 
 	var err error
 	_ = captureStdout(t, func() { err = sendOutboundMessageViaHub(hubCtx, "user:alice@example.com", "", false) })
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "web.chat_choices")
+	assert.Contains(t, err.Error(), "web.decisions")
 	assert.Empty(t, *asked)
 }
 

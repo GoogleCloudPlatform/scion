@@ -24,7 +24,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const errMsgChoicesExperimentRequired = "decisions need the web.chat_choices experiment"
+const errMsgDecisionsExperimentRequired = "decisions need the web.decisions experiment"
 
 var decisionsClientFactory = func() (hubclient.Client, error) {
 	_, client, err := requireHubClient()
@@ -122,7 +122,7 @@ func formatDecisionAPIError(err error) error {
 		return err
 	}
 	if apiErr.Code == "experiment_disabled" || (apiErr.StatusCode == http.StatusNotFound && apiErr.Code != "decision_not_found") {
-		return errors.New(errMsgChoicesExperimentRequired)
+		return errors.New(errMsgDecisionsExperimentRequired)
 	}
 	if rawList, ok := apiErr.Details["errors"].([]interface{}); ok && len(rawList) > 0 {
 		var lines []string

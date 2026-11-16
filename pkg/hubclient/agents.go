@@ -1064,7 +1064,7 @@ type OutboundMessageRequest struct {
 	AttachmentIDs []string `json:"attachment_ids,omitempty"`
 	// Choices makes the message a choice prompt: the decisions as the JSON
 	// array scion message --choices takes. The hub validates them (the
-	// web.chat_choices experiment); Msg is then the optional intro.
+	// web.decisions experiment); Msg is then the optional intro.
 	Choices json.RawMessage `json:"choices,omitempty"`
 	// ChoicesUpdate lets Choices replace decisions whose keys exist.
 	ChoicesUpdate bool `json:"choices_update,omitempty"`

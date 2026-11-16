@@ -195,18 +195,16 @@ func decodeProfileDecisionCursor(token string, pq projectDecisionsQuery) (profil
 }
 
 // handleUserMeDecisions serves GET /api/v1/users/me/decisions.
-// Unsupported methods return 405 before the dual experiment gate, which
-// returns 404 unless both web.project_decisions and web.chat_choices are on.
+// Unsupported methods return 405 before the experiment gate, which returns 404
+// while web.decisions is off.
 func (s *Server) handleUserMeDecisions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
-	s.requireExperiment(experiments.ProjectDecisions,
-		s.requireExperiment(experiments.ChatChoices, func(w http.ResponseWriter, r *http.Request) {
-			s.listUserMeDecisions(w, r)
-		}),
-	)(w, r)
+	s.requireExperiment(experiments.Decisions, func(w http.ResponseWriter, r *http.Request) {
+		s.listUserMeDecisions(w, r)
+	})(w, r)
 }
 
 func profileDecisionsCaller(w http.ResponseWriter, r *http.Request) (UserIdentity, *ScopedUserIdentity, bool) {

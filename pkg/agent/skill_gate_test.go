@@ -35,7 +35,7 @@ import (
 // from the registry-backed gate (skillExperimentGate); the evaluator itself
 // names none.
 const (
-	gateTestOn  = "web.chat_choices"
+	gateTestOn  = "web.decisions"
 	gateTestOff = "hub.artifacts"
 )
 
@@ -440,7 +440,7 @@ func TestInjectPlatformSkills_EmbeddedUngatedSkillsByteIdentical(t *testing.T) {
 }
 
 // TestInjectPlatformSkills_EmbeddedScionMessagingChoices installs the shipped
-// scion-messaging skill with web.chat_choices off and on (ptone/scion#7830
+// scion-messaging skill with web.decisions off and on (ptone/scion#7830
 // acceptance criterion 1): off, no Choices reference and no marker text;
 // on, the reference and the pointer lines, with the markers stripped.
 func TestInjectPlatformSkills_EmbeddedScionMessagingChoices(t *testing.T) {

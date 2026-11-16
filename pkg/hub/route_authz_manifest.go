@@ -309,8 +309,8 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/agent/gcp-token":          "agent-token", // Agent GCP access token
 	"/api/v1/agent/gcp-identity-token": "agent-token", // Agent GCP identity token
 	"POST /api/v1/agent/secrets":       "agent-token", // Agent secret fetch
-	"/api/v1/agent/decisions":          "agent-token", // Agent decision list (self-scoped; 404 when web.chat_choices is off)
-	"/api/v1/agent/decisions/":         "agent-token", // Agent decision show and interpreted answers (self-scoped; 404 when web.chat_choices is off)
+	"/api/v1/agent/decisions":          "agent-token", // Agent decision list (self-scoped; 404 when web.decisions is off)
+	"/api/v1/agent/decisions/":         "agent-token", // Agent decision show and interpreted answers (self-scoped; 404 when web.decisions is off)
 
 	// ── Public settings ────────────────────────────────────────────────
 	"/api/v1/settings/public":       "authenticated", // Public settings — requires session despite name

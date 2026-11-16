@@ -371,7 +371,7 @@ type UserMessageEvent struct {
 	// Decisions and ChoiceIntro are set on a choice-prompt row, and
 	// ChoiceResponse on a choice-response row, on the chat subjects only
 	// (design choices v4, 4.4); see withChatChoicePayload. Only the
-	// handlers of the web.chat_choices experiment set them.
+	// handlers of the web.decisions experiment set them.
 	Decisions      []DecisionView      `json:"decisions,omitempty"`
 	ChoiceIntro    string              `json:"choiceIntro,omitempty"`
 	ChoiceResponse *ChoiceResponseView `json:"choiceResponse,omitempty"`

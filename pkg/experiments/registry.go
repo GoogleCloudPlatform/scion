@@ -199,14 +199,16 @@ const AttachmentArtifacts = "hub.attachment_artifacts"
 // the delivery sweeper, which holds pending messages while it is off.
 const ChatScheduledSend = "web.chat_scheduled_send"
 
-// ChatChoices gates agent choice prompts in native web chat (design
-// native-chat choices v4): agent sends carrying decisions, which the hub
-// refuses with experiment_disabled while it is off, the hub's decision and
-// answer routes (404 while off), the decisions and choiceResponse fields of
-// chat history, and the decision cards in the web UI. Stored decisions and
-// answers are kept while it is off, and the markdown fallback in each
-// choice prompt's text stays readable.
-const ChatChoices = "web.chat_choices"
+// Decisions gates agent decision prompts, cards, routes, pages, CLI listing
+// and coalesced bell notifications (ptone/scion#7514, ptone/scion#8223):
+// agent sends carrying decisions (refused with experiment_disabled while off),
+// the hub's decision, answer, agent, project and profile decision routes (404
+// while off), the decision fields of chat history, the coalesced
+// decisions_waiting bell notification, and the decision cards, Decisions pages
+// and preference card in the web UI. Stored decisions and answers are kept
+// while it is off, and the markdown fallback in each prompt's text stays
+// readable.
+const Decisions = "web.decisions"
 
 // ChatStarredMessages gates starred messages in native web chat: the
 // message Star/Unstar action, the private starred indicator, the
@@ -493,13 +495,6 @@ const ProjectSelfLeave = "hub.project_self_leave"
 // step in the setup wizard.
 const WelcomeProject = "hub.welcome_project"
 
-// ProjectDecisions gates the project Decisions page (ptone/scion#7753):
-// GET /api/v1/projects/{id}/decisions (404 unless both web.project_decisions
-// and web.chat_choices are on) and the project-detail Decisions button and
-// /projects/:id/decisions page. Stored decisions and answers are kept while
-// it is off.
-const ProjectDecisions = "web.project_decisions"
-
 // SystemOne gates Hub-scoped System One provider instance administration and
 // probing (ptone/scion#8044): /api/v1/admin/system-one/instances[/{name}[/probe]]
 // and scion admin system-one instance create|list|delete|probe, with runtime
@@ -747,24 +742,13 @@ var compiled = []Experiment{
 		ReviewBy:    "2027-01-31",
 	},
 	{
-		Name:        ChatChoices,
-		Title:       "Choices in chat",
-		Description: "Lets an agent ask a user to decide between a few options: a choice prompt carries one or more keyed decisions, which web chat shows as cards with one button per choice; a click records the answer and sends it back to the agent. Gates sending choices, which the hub refuses while it is off, the hub's decision and answer routes, which answer 404 while it is off, and the decision fields of chat history (LayerServer), and the cards (LayerWeb). Every choice prompt also carries a markdown copy of its decisions, so other surfaces and clients with it off still show them. Stored decisions and answers are kept while it is off.",
+		Name:        Decisions,
+		Title:       "Decisions",
+		Description: "Lets an agent ask a user to decide between concrete choices: a prompt carries one or more keyed decisions, which web chat shows as cards with one button per choice; clicking records the answer and sends it back to the agent, and each project and profile gets a Decisions page showing open prompts waiting on the viewer and the append-only log of decisions made, even after chat retention purges the originating messages, plus a coalesced Decisions waiting bell notification. Gates sending decisions (400 experiment_disabled while off), the hub's decision, answer, agent, project and profile decision routes (404 while off), the decision fields of chat history, and the bell notification (LayerServer), and the chat cards, project and profile Decisions pages, header/sidebar badges and Profile Settings card (LayerWeb). Every prompt also carries a markdown copy of its decisions, so other surfaces and clients with it off still show them. Stored decisions and answers are kept while it is off.",
 		Default:     false,
 		Layers:      []Layer{LayerWeb, LayerServer},
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#7514",
-		Owner:       "native-chat",
-		ReviewBy:    "2027-02-05",
-	},
-	{
-		Name:        ProjectDecisions,
-		Title:       "Project decisions page",
-		Description: "Adds a Decisions page to each project showing open choices waiting on the viewer across readable conversations and the append-only log of decisions made, even after chat retention purges the originating messages. Requires web.chat_choices. Gates GET /api/v1/projects/{id}/decisions (LayerServer, answers 404 unless both web.project_decisions and web.chat_choices are on) and the project header entry and /projects/:id/decisions page (LayerWeb). Stored decisions and answers are kept while it is off.",
-		Default:     false,
-		Layers:      []Layer{LayerWeb, LayerServer},
-		Stage:       StageAlpha,
-		Issue:       "ptone/scion#7753",
 		Owner:       "native-chat",
 		ReviewBy:    "2027-02-13",
 	},
@@ -1027,6 +1011,9 @@ var compiledRetired = []string{
 	"web.terminal_workspace",
 	// Graduated: project thread groups are always on (ptone/scion#5546).
 	"hub.chat_thread_groups",
+	// Replaced by web.decisions (ptone/scion#8223).
+	"web.chat_choices",
+	"web.project_decisions",
 }
 
 // Registry is an immutable, validated set of experiments. It is the only way

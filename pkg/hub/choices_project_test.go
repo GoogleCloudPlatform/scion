@@ -36,17 +36,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func setProjectDecisionsExperiments(t *testing.T, srv *Server, chatChoices, projectDecisions bool) {
-	t.Helper()
-	setExperimentOverrides(t, srv, map[string]bool{
-		experiments.ChatScheduledSend: true,
-		experiments.ChatChoices:       chatChoices,
-		experiments.ProjectDecisions:  projectDecisions,
-	})
-	require.Equal(t, chatChoices, srv.experimentEnabled(experiments.ChatChoices))
-	require.Equal(t, projectDecisions, srv.experimentEnabled(experiments.ProjectDecisions))
-}
-
 func decodePendingDecisions(t *testing.T, rr *httptest.ResponseRecorder) ProjectPendingDecisionsResponse {
 	t.Helper()
 	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
@@ -90,22 +79,14 @@ func TestProjectDecisions_ExperimentMatrixAndMethods(t *testing.T) {
 	f := newChoicesFixture(t)
 	path := "/api/v1/projects/" + f.project.ID + "/decisions"
 
-	// Both off -> GET 404, non-GET 405, nested suffix 404.
-	setProjectDecisionsExperiments(t, f.srv, false, false)
+	// web.decisions off -> GET 404, non-GET 405, nested suffix 404.
+	setChoicesExperiment(t, f.srv, false)
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, path, nil).Code)
 	assert.Equal(t, http.StatusMethodNotAllowed, doRequestAsUser(t, f.srv, f.bob, http.MethodPost, path, nil).Code)
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, path+"/extra", nil).Code)
 
-	// Only web.chat_choices on -> GET 404.
-	setProjectDecisionsExperiments(t, f.srv, true, false)
-	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, path, nil).Code)
-
-	// Only web.project_decisions on -> GET 404.
-	setProjectDecisionsExperiments(t, f.srv, false, true)
-	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, path, nil).Code)
-
-	// Both on -> GET 200, unsupported methods 405, nested suffix 404.
-	setProjectDecisionsExperiments(t, f.srv, true, true)
+	// web.decisions on -> GET 200, unsupported methods 405, nested suffix 404.
+	setChoicesExperiment(t, f.srv, true)
 	resp := decodePendingDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, path, nil))
 	assert.Equal(t, ProjectDecisionCounts{}, resp.Counts)
 	assert.NotNil(t, resp.Prompts)
@@ -121,7 +102,7 @@ func TestProjectDecisions_ExperimentMatrixAndMethods(t *testing.T) {
 // unauthenticated callers, agents, visitors, federated users, and non-members.
 func TestProjectDecisions_TokenAndCallerAuthz(t *testing.T) {
 	f := newChatFixture(t)
-	setProjectDecisionsExperiments(t, f.srv, true, true)
+	setChoicesExperiment(t, f.srv, true)
 	ctx := context.Background()
 
 	// Set f.member as owner/ancestor of f.agentA so f.member's pending prompts
@@ -232,7 +213,7 @@ func TestProjectDecisions_TokenAndCallerAuthz(t *testing.T) {
 // or a Hub super-admin in tab=pending, tab=made, counts, or filter facets.
 func TestProjectDecisions_DMPrivacyAcrossTabsCountsAndFacets(t *testing.T) {
 	f := newChoicesFixture(t)
-	setProjectDecisionsExperiments(t, f.srv, true, true)
+	setChoicesExperiment(t, f.srv, true)
 	ctx := context.Background()
 
 	// Create a second agent exclusively used in Bob's private DM so we can also
@@ -318,7 +299,7 @@ func TestProjectDecisions_DMPrivacyAcrossTabsCountsAndFacets(t *testing.T) {
 
 func TestProjectDecisions_WaitingClassificationPaginationAndValidation(t *testing.T) {
 	f := newChoicesFixture(t)
-	setProjectDecisionsExperiments(t, f.srv, true, true)
+	setChoicesExperiment(t, f.srv, true)
 	ctx := context.Background()
 	basePath := "/api/v1/projects/" + f.project.ID + "/decisions"
 
@@ -464,7 +445,7 @@ func TestProjectDecisions_WaitingClassificationPaginationAndValidation(t *testin
 
 func TestProjectDecisions_PurgedPromptsAndAnswerSurface(t *testing.T) {
 	f := newChoicesFixture(t)
-	setProjectDecisionsExperiments(t, f.srv, true, true)
+	setChoicesExperiment(t, f.srv, true)
 	ctx := context.Background()
 	basePath := "/api/v1/projects/" + f.project.ID + "/decisions"
 
@@ -588,7 +569,7 @@ func TestProjectDecisions_PurgedPromptsAndAnswerSurface(t *testing.T) {
 
 func TestProjectDecisions_MadeLogFiltersPaginationAndDeletedPrincipals(t *testing.T) {
 	f := newChoicesFixture(t)
-	setProjectDecisionsExperiments(t, f.srv, true, true)
+	setChoicesExperiment(t, f.srv, true)
 	ctx := context.Background()
 	basePath := "/api/v1/projects/" + f.project.ID + "/decisions"
 
@@ -789,7 +770,7 @@ func TestProjectDecisions_MadeLogFiltersPaginationAndDeletedPrincipals(t *testin
 
 func TestProjectDecisions_LimitZeroSkipsFacetsAndPreservesCounts(t *testing.T) {
 	f := newChoicesFixture(t)
-	setProjectDecisionsExperiments(t, f.srv, true, true)
+	setChoicesExperiment(t, f.srv, true)
 	basePath := "/api/v1/projects/" + f.project.ID + "/decisions"
 
 	_, openRes := f.topicPrompt(t, `[{"id":"lz-open","question":"Open?","choices":["yes","no"]}]`, false)
@@ -824,7 +805,7 @@ func TestProjectDecisions_LimitZeroSkipsFacetsAndPreservesCounts(t *testing.T) {
 
 func TestProjectDecisions_DeletedTopicPreservesAuditLog(t *testing.T) {
 	f := newChoicesFixture(t)
-	setProjectDecisionsExperiments(t, f.srv, true, true)
+	setChoicesExperiment(t, f.srv, true)
 	ctx := context.Background()
 	basePath := "/api/v1/projects/" + f.project.ID + "/decisions"
 
@@ -912,7 +893,7 @@ func TestProjectDecisions_DeletedTopicPreservesAuditLog(t *testing.T) {
 
 func TestProjectDecisions_LiveDMAgentAuthzAndSoftDeletedAsker(t *testing.T) {
 	f := newChoicesFixture(t)
-	setProjectDecisionsExperiments(t, f.srv, true, true)
+	setChoicesExperiment(t, f.srv, true)
 	ctx := context.Background()
 	basePath := "/api/v1/projects/" + f.project.ID + "/decisions"
 
@@ -1046,7 +1027,7 @@ func TestProjectDecisions_LiveDMAgentAuthzAndSoftDeletedAsker(t *testing.T) {
 
 func TestProjectDecisions_NullChatKeyFallbackToPromptThread(t *testing.T) {
 	f := newChoicesFixture(t)
-	setProjectDecisionsExperiments(t, f.srv, true, true)
+	setChoicesExperiment(t, f.srv, true)
 	ctx := context.Background()
 
 	_, topicRes := f.topicPrompt(t, `[{"id":"null-topic-1","question":"Fallback topic?","choices":["yes","no"]}]`, false)
@@ -1084,7 +1065,7 @@ func TestProjectDecisions_NullChatKeyFallbackToPromptThread(t *testing.T) {
 
 func TestProjectDecisions_EqualTimestampCursorTieBreak(t *testing.T) {
 	f := newChoicesFixture(t)
-	setProjectDecisionsExperiments(t, f.srv, true, true)
+	setChoicesExperiment(t, f.srv, true)
 	ctx := context.Background()
 	basePath := "/api/v1/projects/" + f.project.ID + "/decisions"
 
@@ -1184,7 +1165,7 @@ func TestProjectDecisions_BatchAgentLookupsNoNPlusOne(t *testing.T) {
 		return &agentLookupCountingStore{Store: inner}
 	})
 	f := newChoicesFixtureOn(t, srv, rawStore, alice, bob, project)
-	setProjectDecisionsExperiments(t, f.srv, true, true)
+	setChoicesExperiment(t, f.srv, true)
 	ctx := context.Background()
 	basePath := "/api/v1/projects/" + f.project.ID + "/decisions"
 
@@ -1307,4 +1288,132 @@ func TestProjectDecisions_BatchAgentLookupsNoNPlusOne(t *testing.T) {
 	require.Len(t, madeResp.Entries, 1)
 	assert.Equal(t, interpOnlyBot.ID, madeResp.Entries[0].InterpretedByAgentID)
 	assert.Equal(t, "Interpreter Only Bot", madeResp.Entries[0].InterpretedByAgentName)
+}
+
+// TestDecisions_SingleGateMatrixAndRetiredOverrides verifies S1 (ptone/scion#8223):
+//   - Stored retired overrides ("web.chat_choices": true, "web.project_decisions": true)
+//     resolve web.decisions to OFF, do not appear in GET /api/v1/experiments or
+//     GET /api/v1/admin/experiments unknown_overrides, and cannot be written via PUT (400).
+//   - While web.decisions is OFF, chat choice sends fail with EXPERIMENT_DISABLED,
+//     chat history omits decisions, agent/decision/set-answer/project/profile routes
+//     all return 404, and the bell writer is a no-op.
+//   - Enabling web.decisions via PUT /api/v1/admin/experiments prunes the retired
+//     overrides from hub_settings and turns every surface ON.
+func TestDecisions_SingleGateMatrixAndRetiredOverrides(t *testing.T) {
+	f := newChoicesFixture(t)
+	setFastDecisionBell(t, f.srv, 15*time.Millisecond)
+	ctx := context.Background()
+
+	// Seed a single-decision and a multi-decision prompt directly in the store so
+	// read/answer/history/bell surfaces have rows to inspect in both states.
+	_, oneRes := f.topicPrompt(t, `[{"id":"D100","question":"Approve single?","choices":["yes","no"],"default":"yes"}]`, false)
+	require.Len(t, oneRes.Decisions, 1)
+	rowID := oneRes.Decisions[0].RowID
+	twoMsg, twoRes := f.topicPrompt(t, twoDecisions, false)
+	require.Len(t, twoRes.Decisions, 2)
+
+	// Wire OperationalSettings to the real SQLite store pre-seeded with both retired
+	// experiment overrides set to true (simulating an upgraded hub before enablement).
+	seedRaw := json.RawMessage(`{"overrides":{"web.chat_choices":true,"web.project_decisions":true,"web.chat_scheduled_send":true}}`)
+	_, err := f.store.UpsertHubSetting(ctx, "experiments", seedRaw, "seed@example.com", 0, "managed")
+	require.NoError(t, err)
+	ops := NewOperationalSettings(f.store, emptyKoanf(), emptyKoanf())
+	_, err = ops.Refresh(ctx)
+	require.NoError(t, err)
+	f.srv.SetOperationalSettings(ops)
+
+	// 1. Registry & resolution with retired overrides present -> web.decisions is OFF.
+	require.False(t, f.srv.experimentEnabled(experiments.Decisions), "retired overrides must not enable web.decisions")
+
+	pubRec := doRequest(t, f.srv, http.MethodGet, "/api/v1/experiments", nil)
+	require.Equal(t, http.StatusOK, pubRec.Code, pubRec.Body.String())
+	var pubBody experimentsResponse
+	require.NoError(t, json.Unmarshal(pubRec.Body.Bytes(), &pubBody))
+	assert.False(t, pubBody.Experiments[experiments.Decisions])
+	assert.NotContains(t, pubBody.Experiments, "web.chat_choices")
+	assert.NotContains(t, pubBody.Experiments, "web.project_decisions")
+
+	adminGetRec := doRequest(t, f.srv, http.MethodGet, "/api/v1/admin/experiments", nil)
+	require.Equal(t, http.StatusOK, adminGetRec.Code, adminGetRec.Body.String())
+	var adminGet adminExperimentsResponse
+	require.NoError(t, json.Unmarshal(adminGetRec.Body.Bytes(), &adminGet))
+	assert.False(t, adminGet.Malformed)
+	assert.Empty(t, adminGet.UnknownOverrides)
+	assert.Nil(t, findEntry(adminGet, "web.chat_choices"))
+	assert.Nil(t, findEntry(adminGet, "web.project_decisions"))
+	decEntry := findEntry(adminGet, experiments.Decisions)
+	require.NotNil(t, decEntry)
+	assert.False(t, decEntry.Enabled)
+	assert.Nil(t, decEntry.Override)
+
+	// Attempting to write either retired name returns 400.
+	for _, retiredName := range []string{"web.chat_choices", "web.project_decisions"} {
+		badPut := doRequest(t, f.srv, http.MethodPut, "/api/v1/admin/experiments", map[string]interface{}{
+			"overrides":         map[string]interface{}{retiredName: true},
+			"expected_revision": adminGet.Revision,
+		})
+		assert.Equal(t, http.StatusBadRequest, badPut.Code, "retired name %s must be rejected: %s", retiredName, badPut.Body.String())
+	}
+
+	// 2. Every surface is OFF when web.decisions is OFF.
+	sendOff := f.sendAsAgent(t, OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Choices: decisionInputs(t, oneDecision)})
+	assert.Equal(t, http.StatusBadRequest, sendOff.Code)
+	assert.Equal(t, ErrCodeExperimentDisabled, errorCode(t, sendOff))
+	assert.Contains(t, sendOff.Body.String(), "web.decisions")
+
+	histOff := chatHistoryResponse{Messages: []store.Message{*twoMsg}}
+	f.srv.addChoiceHistoryViews(ctx, &histOff)
+	assert.Empty(t, histOff.MessageDecisions, "chat history must omit decisions when web.decisions is off")
+
+	assert.Equal(t, http.StatusNotFound, f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions", nil).Code)
+	assert.Equal(t, http.StatusNotFound, f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions/D234", nil).Code)
+	assert.Equal(t, http.StatusNotFound, f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", map[string]interface{}{}).Code)
+
+	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/decisions/"+rowID, nil).Code)
+	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decisions/"+rowID+"/answer", map[string]interface{}{"choice_id": "1"}).Code)
+	assert.Equal(t, http.StatusNotFound, f.submitSet(t, f.bob, twoMsg.ID, "", twoRes.Decisions[0].RowID, "1", twoRes.Decisions[1].RowID, "a").Code)
+
+	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/projects/"+f.project.ID+"/decisions", nil).Code)
+	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/users/me/decisions", nil).Code)
+
+	require.NoError(t, f.srv.recomputeDecisionBellUser(ctx, f.bob.ID))
+	waitDecisionBellIdle(t, f.srv)
+	notifsOff, err := f.store.GetNotifications(ctx, store.SubscriberTypeUser, f.bob.ID, false)
+	require.NoError(t, err)
+	assert.Empty(t, notifsOff, "bell must write nothing when web.decisions is off")
+
+	// 3. Admin PUT enables web.decisions -> retired keys are pruned and every surface turns ON.
+	putRec := doRequest(t, f.srv, http.MethodPut, "/api/v1/admin/experiments", map[string]interface{}{
+		"overrides":         map[string]interface{}{experiments.Decisions: true},
+		"expected_revision": adminGet.Revision,
+	})
+	require.Equal(t, http.StatusOK, putRec.Code, putRec.Body.String())
+
+	storedAfterPut, err := f.store.GetHubSetting(ctx, "experiments")
+	require.NoError(t, err)
+	assert.NotContains(t, string(storedAfterPut.Value), "web.chat_choices", "admin PUT must prune web.chat_choices")
+	assert.NotContains(t, string(storedAfterPut.Value), "web.project_decisions", "admin PUT must prune web.project_decisions")
+	assert.Contains(t, string(storedAfterPut.Value), `"web.decisions":true`)
+	require.True(t, f.srv.experimentEnabled(experiments.Decisions))
+
+	histOn := chatHistoryResponse{Messages: []store.Message{*twoMsg}}
+	f.srv.addChoiceHistoryViews(ctx, &histOn)
+	assert.NotEmpty(t, histOn.MessageDecisions, "chat history must attach decisions when web.decisions is on")
+	assert.Equal(t, http.StatusOK, f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions", nil).Code)
+	assert.Equal(t, http.StatusOK, f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions/D234", nil).Code)
+	assert.Equal(t, http.StatusOK, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/decisions/"+rowID, nil).Code)
+	assert.Equal(t, http.StatusOK, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/projects/"+f.project.ID+"/decisions", nil).Code)
+	assert.Equal(t, http.StatusOK, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/users/me/decisions", nil).Code)
+
+	require.NoError(t, f.srv.recomputeDecisionBellUser(ctx, f.bob.ID))
+	waitDecisionBellIdle(t, f.srv)
+	bobBell, err := f.store.GetNotification(ctx, decisionsWaitingNotificationID(f.bob.ID))
+	require.NoError(t, err)
+	assert.False(t, bobBell.Acknowledged)
+
+	sendOn := f.sendAsAgent(t, OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Choices: decisionInputs(t, `[{"id":"D999","question":"Go?","choices":["yes","no"]}]`)})
+	assert.Equal(t, http.StatusOK, sendOn.Code, sendOn.Body.String())
+
+	assert.Equal(t, http.StatusOK, doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decisions/"+rowID+"/answer", map[string]interface{}{"choice_id": "1"}).Code)
+	assert.Equal(t, http.StatusOK, f.submitSet(t, f.bob, twoMsg.ID, "", twoRes.Decisions[0].RowID, "1", twoRes.Decisions[1].RowID, "a").Code)
 }

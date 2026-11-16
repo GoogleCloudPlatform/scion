@@ -93,7 +93,7 @@ user-facing format. Agent-only messages do not require it.
   abbreviations or internal labels that the user needs to understand.
 - **Make decisions easy to read.** Put options in a list with their trade-offs and
   your recommendation. Put the actual question on its own line.
-<!-- scion:experiment web.chat_choices -->
+<!-- scion:experiment web.decisions -->
 - **Ask with choices.** For a decision the user should answer by picking an option,
   send it with `scion message --choices-file <file>` instead of prose, so the user
   can answer with a click. See `references/choices.md`.
@@ -284,7 +284,7 @@ on `ask_user` status notifications to deliver the request.
 - `--interrupt` interrupts an active target turn before delivery (ordinary messages
   queue until the current turn ends); use for mid-turn stop or scope-change corrections,
   and omit on routine messages.
-<!-- scion:experiment web.chat_choices -->
+<!-- scion:experiment web.decisions -->
 - `--choices-file <file>` sends a choice prompt (keyed decisions the user answers
   with a click); `--update` revises one. `scion decisions` lists your decisions and
   records answers given in words. See `references/choices.md`.

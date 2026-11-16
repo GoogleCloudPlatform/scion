@@ -2354,7 +2354,7 @@ func TestHoldA2_Round1_OPT1_ChoiceResponsePreservesAgentLineAndMetadata(t *testi
 	setHoldTestSettings(t, f.srv, map[string]bool{
 		conduitExperiment:             true,
 		experiments.ConduitDeliver:    true,
-		experiments.ChatChoices:       true,
+		experiments.Decisions:         true,
 		experiments.ChatScheduledSend: true,
 	})
 

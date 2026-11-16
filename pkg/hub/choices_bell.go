@@ -72,13 +72,12 @@ func formatDecisionsWaitingMessage(total, projects int) string {
 	return fmt.Sprintf("%s in %d projects", head, projects)
 }
 
-// decisionsBellEnabled reports whether both web.project_decisions and
-// web.chat_choices are enabled (design C3).
+// decisionsBellEnabled reports whether web.decisions is enabled.
 func (s *Server) decisionsBellEnabled() bool {
 	if s == nil {
 		return false
 	}
-	return s.experimentEnabled(experiments.ProjectDecisions) && s.experimentEnabled(experiments.ChatChoices)
+	return s.experimentEnabled(experiments.Decisions)
 }
 
 type decisionBellTopicKey struct {
