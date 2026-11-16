@@ -756,3 +756,164 @@ describe('integrationSettingsPayload (ptone/scion#3913)', () => {
     expect(integrationSettingsPayload({ extra: 'w' }, {}, fields)).toEqual({ extra: 'w' });
   });
 });
+
+describe('scion-page-admin-integrations — plugin Update relocation notice and warnings (ptone/scion#8126)', () => {
+  let element: HTMLElement | null = null;
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+  });
+
+  async function renderWithUpdateQueue(
+    updateResponses: Array<Record<string, unknown>>
+  ): Promise<ScionPageAdminIntegrations> {
+    const base = createFetchHandler(makeDiscordDetail());
+    let callIdx = 0;
+
+    const handler = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+      if (init?.method === 'POST' && path.endsWith('/api/v1/admin/integrations/discord/update')) {
+        const payload = updateResponses[Math.min(callIdx, updateResponses.length - 1)] ?? {
+          status: 'ok',
+        };
+        callIdx++;
+        return Promise.resolve(
+          new Response(JSON.stringify(payload), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        );
+      }
+      return base(url, init);
+    };
+
+    await import('./admin-integrations.js');
+    const el = await createComponent(handler);
+    element = el;
+    return el;
+  }
+
+  async function clickUpdate(el: ScionPageAdminIntegrations): Promise<void> {
+    const updateBtn = queryAll(el, 'sl-button').find((b) => b.textContent?.trim() === 'Update') as
+      | HTMLElement
+      | undefined;
+    expect(updateBtn, 'Update button').toBeDefined();
+    updateBtn!.click();
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    await el.updateComplete;
+  }
+
+  it('shows a non-alarming relocation notice with old and new paths when relocated_from is returned', async () => {
+    const oldPath = '/usr/local/bin/scion-plugin-discord';
+    const newPath = '/var/lib/scion/.scion/plugins/broker/scion-plugin-discord';
+    const el = await renderWithUpdateQueue([
+      {
+        status: 'ok',
+        relocated_from: oldPath,
+        binary_path: newPath,
+      },
+    ]);
+
+    await clickUpdate(el);
+
+    expect(shadowText(el)).toContain('Integration updated successfully');
+    const relocationAlerts = queryAll(el, 'sl-alert.update-relocation-notice');
+    expect(relocationAlerts).toHaveLength(1);
+    expect(relocationAlerts[0].getAttribute('variant')).toBe('primary');
+    const noticeText = relocationAlerts[0].textContent ?? '';
+    expect(noticeText).toContain(oldPath);
+    expect(noticeText).toContain(newPath);
+    expect(queryAll(el, 'sl-alert.update-warnings-notice')).toHaveLength(0);
+  });
+
+  it('surfaces warnings when Update returns warnings without relocation', async () => {
+    const warningMsg =
+      'plugin "discord" updated, but its message routing was not fully restored: broker offline';
+    const el = await renderWithUpdateQueue([
+      {
+        status: 'ok',
+        warnings: [warningMsg],
+      },
+    ]);
+
+    await clickUpdate(el);
+
+    expect(shadowText(el)).toContain('Integration updated successfully');
+    expect(queryAll(el, 'sl-alert.update-relocation-notice')).toHaveLength(0);
+    const warningAlerts = queryAll(el, 'sl-alert.update-warnings-notice');
+    expect(warningAlerts).toHaveLength(1);
+    expect(warningAlerts[0].getAttribute('variant')).toBe('warning');
+    expect(warningAlerts[0].textContent ?? '').toContain(warningMsg);
+  });
+
+  it('shows both relocation notice and multiple warnings when both are returned', async () => {
+    const oldPath = '/usr/local/bin/scion-plugin-discord';
+    const newPath = '/var/lib/scion/.scion/plugins/broker/scion-plugin-discord';
+    const warn1 = `plugin "discord" binary in /usr/local/bin could not be overwritten; installed updated binary to ${newPath} (stale copy at ${oldPath} was left untouched)`;
+    const warn2 =
+      'plugin "discord" updated, but its message routing was not fully restored: timeout';
+    const el = await renderWithUpdateQueue([
+      {
+        status: 'ok',
+        relocated_from: oldPath,
+        binary_path: newPath,
+        warnings: [warn1, warn2],
+      },
+    ]);
+
+    await clickUpdate(el);
+
+    const relocationAlerts = queryAll(el, 'sl-alert.update-relocation-notice');
+    expect(relocationAlerts).toHaveLength(1);
+    expect(relocationAlerts[0].textContent ?? '').toContain(oldPath);
+    expect(relocationAlerts[0].textContent ?? '').toContain(newPath);
+
+    const warningAlerts = queryAll(el, 'sl-alert.update-warnings-notice');
+    expect(warningAlerts).toHaveLength(1);
+    const warningsText = warningAlerts[0].textContent ?? '';
+    expect(warningsText).toContain(warn1);
+    expect(warningsText).toContain(warn2);
+  });
+
+  it('shows no relocation notice or warning alert when neither relocated_from nor warnings is returned', async () => {
+    const el = await renderWithUpdateQueue([
+      {
+        status: 'ok',
+        binary_path: '/var/lib/scion/.scion/plugins/broker/scion-plugin-discord',
+      },
+    ]);
+
+    await clickUpdate(el);
+
+    expect(shadowText(el)).toContain('Integration updated successfully');
+    expect(queryAll(el, 'sl-alert.update-relocation-notice')).toHaveLength(0);
+    expect(queryAll(el, 'sl-alert.update-warnings-notice')).toHaveLength(0);
+  });
+
+  it('clears prior relocation notice and warnings on a subsequent in-place Update', async () => {
+    const oldPath = '/usr/local/bin/scion-plugin-discord';
+    const newPath = '/var/lib/scion/.scion/plugins/broker/scion-plugin-discord';
+    const el = await renderWithUpdateQueue([
+      {
+        status: 'ok',
+        relocated_from: oldPath,
+        binary_path: newPath,
+        warnings: ['stale copy left untouched'],
+      },
+      {
+        status: 'ok',
+        binary_path: newPath,
+      },
+    ]);
+
+    await clickUpdate(el);
+    expect(queryAll(el, 'sl-alert.update-relocation-notice')).toHaveLength(1);
+    expect(queryAll(el, 'sl-alert.update-warnings-notice')).toHaveLength(1);
+
+    await clickUpdate(el);
+    expect(queryAll(el, 'sl-alert.update-relocation-notice')).toHaveLength(0);
+    expect(queryAll(el, 'sl-alert.update-warnings-notice')).toHaveLength(0);
+  });
+});

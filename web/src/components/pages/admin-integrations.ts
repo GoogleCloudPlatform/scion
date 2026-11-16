@@ -71,6 +71,19 @@ interface AvailableIntegration {
   platform: string;
 }
 
+interface IntegrationUpdateResponse {
+  status?: string;
+  relocated_from?: string;
+  binary_path?: string;
+  warnings?: string[];
+  notes?: string;
+}
+
+interface UpdateRelocationNotice {
+  from: string;
+  to: string | null;
+}
+
 interface PlatformFieldDef {
   key: string;
   label: string;
@@ -502,6 +515,8 @@ export class ScionPageAdminIntegrations extends LitElement {
   @state() private saving = false;
   @state() private restarting = false;
   @state() private updating = false;
+  @state() private updateRelocation: UpdateRelocationNotice | null = null;
+  @state() private updateWarnings: string[] = [];
 
   // HA async update state
   @state() private updateState: string | null = null;
@@ -622,6 +637,28 @@ export class ScionPageAdminIntegrations extends LitElement {
       background: var(--scion-error-bg, #fef2f2);
       color: var(--scion-error-text, #991b1b);
       border: 1px solid var(--scion-error-border, #fca5a5);
+    }
+
+    .update-relocation-notice,
+    .update-warnings-notice {
+      display: block;
+      margin-bottom: 1rem;
+    }
+
+    .update-relocation-notice code,
+    .update-warnings-notice code {
+      font-family: var(--sl-font-mono, monospace);
+      font-size: 0.8125rem;
+      word-break: break-all;
+    }
+
+    .update-warnings-list {
+      margin: 0.25rem 0 0 0;
+      padding-left: 1.25rem;
+    }
+
+    .update-warnings-list li + li {
+      margin-top: 0.25rem;
     }
 
     sl-input::part(base),
@@ -923,9 +960,15 @@ export class ScionPageAdminIntegrations extends LitElement {
     }
   }
 
+  private clearUpdateNotices(): void {
+    this.updateRelocation = null;
+    this.updateWarnings = [];
+  }
+
   private async loadList(): Promise<void> {
     this.loading = true;
     this.error = null;
+    this.clearUpdateNotices();
     try {
       const [listRes, availRes] = await Promise.all([
         apiFetch('/api/v1/admin/integrations'),
@@ -947,6 +990,9 @@ export class ScionPageAdminIntegrations extends LitElement {
   }
 
   private async loadDetail(name: string): Promise<void> {
+    if (this.detail && this.detail.name !== name) {
+      this.clearUpdateNotices();
+    }
     this.loading = true;
     this.error = null;
     this.saveError = null;
@@ -992,6 +1038,7 @@ export class ScionPageAdminIntegrations extends LitElement {
     this.error = null;
     this.saveError = null;
     this.successMessage = null;
+    this.clearUpdateNotices();
     try {
       const body: {
         settings: Record<string, string | null>;
@@ -1044,6 +1091,7 @@ export class ScionPageAdminIntegrations extends LitElement {
     this.updating = true;
     this.error = null;
     this.successMessage = null;
+    this.clearUpdateNotices();
     try {
       const res = await apiFetch(
         `/api/v1/admin/integrations/${encodeURIComponent(this.detail.name)}/update`,
@@ -1052,6 +1100,31 @@ export class ScionPageAdminIntegrations extends LitElement {
       if (!res.ok) {
         this.error = await extractApiError(res, 'Failed to update integration');
         return;
+      }
+      let data: IntegrationUpdateResponse = {};
+      try {
+        const parsed: unknown = await res.json();
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          data = parsed;
+        }
+      } catch {
+        // Empty or non-JSON body — treat as plain success with no extra fields.
+      }
+      const relocatedFrom =
+        typeof data.relocated_from === 'string' && data.relocated_from.trim() !== ''
+          ? data.relocated_from.trim()
+          : null;
+      const binaryPath =
+        typeof data.binary_path === 'string' && data.binary_path.trim() !== ''
+          ? data.binary_path.trim()
+          : null;
+      if (relocatedFrom) {
+        this.updateRelocation = { from: relocatedFrom, to: binaryPath };
+      }
+      if (Array.isArray(data.warnings)) {
+        this.updateWarnings = data.warnings.filter(
+          (w): w is string => typeof w === 'string' && w.trim() !== ''
+        );
       }
       this.successMessage = 'Integration updated successfully';
       await this.loadDetail(this.detail.name);
@@ -1067,6 +1140,7 @@ export class ScionPageAdminIntegrations extends LitElement {
     this.updating = true;
     this.error = null;
     this.successMessage = null;
+    this.clearUpdateNotices();
     this.updateState = null;
     this.updateDetail = null;
     this.updateNewVersion = null;
@@ -1146,6 +1220,7 @@ export class ScionPageAdminIntegrations extends LitElement {
     this.installingName = name;
     this.error = null;
     this.successMessage = null;
+    this.clearUpdateNotices();
     try {
       const res = await apiFetch(`/api/v1/admin/integrations/${encodeURIComponent(name)}/install`, {
         method: 'POST',
@@ -1168,6 +1243,7 @@ export class ScionPageAdminIntegrations extends LitElement {
     this.restarting = true;
     this.error = null;
     this.successMessage = null;
+    this.clearUpdateNotices();
     try {
       const res = await apiFetch(
         `/api/v1/admin/integrations/${encodeURIComponent(this.detail.name)}/restart`,
@@ -1251,6 +1327,7 @@ export class ScionPageAdminIntegrations extends LitElement {
     this.saveError = null;
     this.error = null;
     this.successMessage = null;
+    this.clearUpdateNotices();
     if (this.detail) void this.loadDetail(this.detail.name);
   }
 
@@ -1262,6 +1339,62 @@ export class ScionPageAdminIntegrations extends LitElement {
     return nothing;
   }
 
+  private renderUpdateNotices(): TemplateResult | typeof nothing {
+    const relocation = this.updateRelocation;
+    const warnings = this.updateWarnings;
+    if (!relocation && warnings.length === 0) return nothing;
+
+    return html`
+      ${relocation
+        ? html`
+            <sl-alert
+              variant="primary"
+              open
+              closable
+              class="update-relocation-notice"
+              @sl-after-hide=${(): void => {
+                if (this.updateRelocation === relocation) {
+                  this.updateRelocation = null;
+                }
+              }}
+            >
+              <sl-icon slot="icon" name="info-circle"></sl-icon>
+              ${relocation.to
+                ? html`<strong>Plugin binary relocated:</strong> <code>${relocation.from}</code> →
+                    <code>${relocation.to}</code>`
+                : html`<strong>Plugin binary relocated from</strong>
+                    <code>${relocation.from}</code>`}
+            </sl-alert>
+          `
+        : nothing}
+      ${warnings.length > 0
+        ? html`
+            <sl-alert
+              variant="warning"
+              open
+              closable
+              class="update-warnings-notice"
+              @sl-after-hide=${(): void => {
+                if (this.updateWarnings === warnings) {
+                  this.updateWarnings = [];
+                }
+              }}
+            >
+              <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+              ${warnings.length === 1
+                ? html`<span>${warnings[0]}</span>`
+                : html`
+                    <strong>Update warnings:</strong>
+                    <ul class="update-warnings-list">
+                      ${warnings.map((w) => html`<li>${w}</li>`)}
+                    </ul>
+                  `}
+            </sl-alert>
+          `
+        : nothing}
+    `;
+  }
+
   override render() {
     const isDetail = this.currentName !== null;
 
@@ -1271,6 +1404,7 @@ export class ScionPageAdminIntegrations extends LitElement {
       ${this.successMessage
         ? html`<div class="status-message success">${this.successMessage}</div>`
         : nothing}
+      ${isDetail ? this.renderUpdateNotices() : nothing}
       ${this.loading
         ? html`<div class="loading-container"><sl-spinner></sl-spinner></div>`
         : isDetail
