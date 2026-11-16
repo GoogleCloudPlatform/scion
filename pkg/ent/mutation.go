@@ -74,6 +74,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/membershiplosscheck"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/message"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/messageaddressee"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/messagepolicy"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/messagepolicydecision"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/mutationaudit"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/noncecache"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/notification"
@@ -196,6 +198,8 @@ const (
 	TypeMembershipLossCheck           = "MembershipLossCheck"
 	TypeMessage                       = "Message"
 	TypeMessageAddressee              = "MessageAddressee"
+	TypeMessagePolicy                 = "MessagePolicy"
+	TypeMessagePolicyDecision         = "MessagePolicyDecision"
 	TypeMutationAudit                 = "MutationAudit"
 	TypeNonceCache                    = "NonceCache"
 	TypeNotification                  = "Notification"
@@ -71025,6 +71029,2745 @@ func (m *MessageAddresseeMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *MessageAddresseeMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown MessageAddressee edge %s", name)
+}
+
+// MessagePolicyMutation represents an operation that mutates the MessagePolicy nodes in the graph.
+type MessagePolicyMutation struct {
+	config
+	op                    Op
+	typ                   string
+	id                    *uuid.UUID
+	project_id            *uuid.UUID
+	name                  *string
+	description           *string
+	enabled               *bool
+	mode                  *messagepolicy.Mode
+	scope                 *store.MessagePolicyScope
+	violation_rule        *string
+	system_one_rule       *string
+	system_one_refs       *[]string
+	appendsystem_one_refs []string
+	on_uncertain          *string
+	on_failed             *messagepolicy.OnFailed
+	on_failed_reasons     *map[string]string
+	reject_reason         *string
+	reject_remediation    *string
+	revision              *int64
+	addrevision           *int64
+	created_by            *string
+	updated_by            *string
+	created_at            *time.Time
+	updated_at            *time.Time
+	clearedFields         map[string]struct{}
+	done                  bool
+	oldValue              func(context.Context) (*MessagePolicy, error)
+	predicates            []predicate.MessagePolicy
+}
+
+var _ ent.Mutation = (*MessagePolicyMutation)(nil)
+
+// messagepolicyOption allows management of the mutation configuration using functional options.
+type messagepolicyOption func(*MessagePolicyMutation)
+
+// newMessagePolicyMutation creates new mutation for the MessagePolicy entity.
+func newMessagePolicyMutation(c config, op Op, opts ...messagepolicyOption) *MessagePolicyMutation {
+	m := &MessagePolicyMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeMessagePolicy,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withMessagePolicyID sets the ID field of the mutation.
+func withMessagePolicyID(id uuid.UUID) messagepolicyOption {
+	return func(m *MessagePolicyMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *MessagePolicy
+		)
+		m.oldValue = func(ctx context.Context) (*MessagePolicy, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().MessagePolicy.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withMessagePolicy sets the old MessagePolicy of the mutation.
+func withMessagePolicy(node *MessagePolicy) messagepolicyOption {
+	return func(m *MessagePolicyMutation) {
+		m.oldValue = func(context.Context) (*MessagePolicy, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m MessagePolicyMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m MessagePolicyMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of MessagePolicy entities.
+func (m *MessagePolicyMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *MessagePolicyMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *MessagePolicyMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().MessagePolicy.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetProjectID sets the "project_id" field.
+func (m *MessagePolicyMutation) SetProjectID(u uuid.UUID) {
+	m.project_id = &u
+}
+
+// ProjectID returns the value of the "project_id" field in the mutation.
+func (m *MessagePolicyMutation) ProjectID() (r uuid.UUID, exists bool) {
+	v := m.project_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldProjectID returns the old "project_id" field's value of the MessagePolicy entity.
+// If the MessagePolicy object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyMutation) OldProjectID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldProjectID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldProjectID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldProjectID: %w", err)
+	}
+	return oldValue.ProjectID, nil
+}
+
+// ResetProjectID resets all changes to the "project_id" field.
+func (m *MessagePolicyMutation) ResetProjectID() {
+	m.project_id = nil
+}
+
+// SetName sets the "name" field.
+func (m *MessagePolicyMutation) SetName(s string) {
+	m.name = &s
+}
+
+// Name returns the value of the "name" field in the mutation.
+func (m *MessagePolicyMutation) Name() (r string, exists bool) {
+	v := m.name
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldName returns the old "name" field's value of the MessagePolicy entity.
+// If the MessagePolicy object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyMutation) OldName(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldName is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldName requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldName: %w", err)
+	}
+	return oldValue.Name, nil
+}
+
+// ResetName resets all changes to the "name" field.
+func (m *MessagePolicyMutation) ResetName() {
+	m.name = nil
+}
+
+// SetDescription sets the "description" field.
+func (m *MessagePolicyMutation) SetDescription(s string) {
+	m.description = &s
+}
+
+// Description returns the value of the "description" field in the mutation.
+func (m *MessagePolicyMutation) Description() (r string, exists bool) {
+	v := m.description
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDescription returns the old "description" field's value of the MessagePolicy entity.
+// If the MessagePolicy object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyMutation) OldDescription(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDescription is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDescription requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDescription: %w", err)
+	}
+	return oldValue.Description, nil
+}
+
+// ResetDescription resets all changes to the "description" field.
+func (m *MessagePolicyMutation) ResetDescription() {
+	m.description = nil
+}
+
+// SetEnabled sets the "enabled" field.
+func (m *MessagePolicyMutation) SetEnabled(b bool) {
+	m.enabled = &b
+}
+
+// Enabled returns the value of the "enabled" field in the mutation.
+func (m *MessagePolicyMutation) Enabled() (r bool, exists bool) {
+	v := m.enabled
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldEnabled returns the old "enabled" field's value of the MessagePolicy entity.
+// If the MessagePolicy object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyMutation) OldEnabled(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldEnabled is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldEnabled requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldEnabled: %w", err)
+	}
+	return oldValue.Enabled, nil
+}
+
+// ResetEnabled resets all changes to the "enabled" field.
+func (m *MessagePolicyMutation) ResetEnabled() {
+	m.enabled = nil
+}
+
+// SetMode sets the "mode" field.
+func (m *MessagePolicyMutation) SetMode(value messagepolicy.Mode) {
+	m.mode = &value
+}
+
+// Mode returns the value of the "mode" field in the mutation.
+func (m *MessagePolicyMutation) Mode() (r messagepolicy.Mode, exists bool) {
+	v := m.mode
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldMode returns the old "mode" field's value of the MessagePolicy entity.
+// If the MessagePolicy object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyMutation) OldMode(ctx context.Context) (v messagepolicy.Mode, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldMode is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldMode requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldMode: %w", err)
+	}
+	return oldValue.Mode, nil
+}
+
+// ResetMode resets all changes to the "mode" field.
+func (m *MessagePolicyMutation) ResetMode() {
+	m.mode = nil
+}
+
+// SetScope sets the "scope" field.
+func (m *MessagePolicyMutation) SetScope(sps store.MessagePolicyScope) {
+	m.scope = &sps
+}
+
+// Scope returns the value of the "scope" field in the mutation.
+func (m *MessagePolicyMutation) Scope() (r store.MessagePolicyScope, exists bool) {
+	v := m.scope
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldScope returns the old "scope" field's value of the MessagePolicy entity.
+// If the MessagePolicy object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyMutation) OldScope(ctx context.Context) (v store.MessagePolicyScope, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldScope is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldScope requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldScope: %w", err)
+	}
+	return oldValue.Scope, nil
+}
+
+// ResetScope resets all changes to the "scope" field.
+func (m *MessagePolicyMutation) ResetScope() {
+	m.scope = nil
+}
+
+// SetViolationRule sets the "violation_rule" field.
+func (m *MessagePolicyMutation) SetViolationRule(s string) {
+	m.violation_rule = &s
+}
+
+// ViolationRule returns the value of the "violation_rule" field in the mutation.
+func (m *MessagePolicyMutation) ViolationRule() (r string, exists bool) {
+	v := m.violation_rule
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldViolationRule returns the old "violation_rule" field's value of the MessagePolicy entity.
+// If the MessagePolicy object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyMutation) OldViolationRule(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldViolationRule is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldViolationRule requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldViolationRule: %w", err)
+	}
+	return oldValue.ViolationRule, nil
+}
+
+// ResetViolationRule resets all changes to the "violation_rule" field.
+func (m *MessagePolicyMutation) ResetViolationRule() {
+	m.violation_rule = nil
+}
+
+// SetSystemOneRule sets the "system_one_rule" field.
+func (m *MessagePolicyMutation) SetSystemOneRule(s string) {
+	m.system_one_rule = &s
+}
+
+// SystemOneRule returns the value of the "system_one_rule" field in the mutation.
+func (m *MessagePolicyMutation) SystemOneRule() (r string, exists bool) {
+	v := m.system_one_rule
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSystemOneRule returns the old "system_one_rule" field's value of the MessagePolicy entity.
+// If the MessagePolicy object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyMutation) OldSystemOneRule(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSystemOneRule is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSystemOneRule requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSystemOneRule: %w", err)
+	}
+	return oldValue.SystemOneRule, nil
+}
+
+// ResetSystemOneRule resets all changes to the "system_one_rule" field.
+func (m *MessagePolicyMutation) ResetSystemOneRule() {
+	m.system_one_rule = nil
+}
+
+// SetSystemOneRefs sets the "system_one_refs" field.
+func (m *MessagePolicyMutation) SetSystemOneRefs(s []string) {
+	m.system_one_refs = &s
+	m.appendsystem_one_refs = nil
+}
+
+// SystemOneRefs returns the value of the "system_one_refs" field in the mutation.
+func (m *MessagePolicyMutation) SystemOneRefs() (r []string, exists bool) {
+	v := m.system_one_refs
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSystemOneRefs returns the old "system_one_refs" field's value of the MessagePolicy entity.
+// If the MessagePolicy object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyMutation) OldSystemOneRefs(ctx context.Context) (v []string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSystemOneRefs is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSystemOneRefs requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSystemOneRefs: %w", err)
+	}
+	return oldValue.SystemOneRefs, nil
+}
+
+// AppendSystemOneRefs adds s to the "system_one_refs" field.
+func (m *MessagePolicyMutation) AppendSystemOneRefs(s []string) {
+	m.appendsystem_one_refs = append(m.appendsystem_one_refs, s...)
+}
+
+// AppendedSystemOneRefs returns the list of values that were appended to the "system_one_refs" field in this mutation.
+func (m *MessagePolicyMutation) AppendedSystemOneRefs() ([]string, bool) {
+	if len(m.appendsystem_one_refs) == 0 {
+		return nil, false
+	}
+	return m.appendsystem_one_refs, true
+}
+
+// ClearSystemOneRefs clears the value of the "system_one_refs" field.
+func (m *MessagePolicyMutation) ClearSystemOneRefs() {
+	m.system_one_refs = nil
+	m.appendsystem_one_refs = nil
+	m.clearedFields[messagepolicy.FieldSystemOneRefs] = struct{}{}
+}
+
+// SystemOneRefsCleared returns if the "system_one_refs" field was cleared in this mutation.
+func (m *MessagePolicyMutation) SystemOneRefsCleared() bool {
+	_, ok := m.clearedFields[messagepolicy.FieldSystemOneRefs]
+	return ok
+}
+
+// ResetSystemOneRefs resets all changes to the "system_one_refs" field.
+func (m *MessagePolicyMutation) ResetSystemOneRefs() {
+	m.system_one_refs = nil
+	m.appendsystem_one_refs = nil
+	delete(m.clearedFields, messagepolicy.FieldSystemOneRefs)
+}
+
+// SetOnUncertain sets the "on_uncertain" field.
+func (m *MessagePolicyMutation) SetOnUncertain(s string) {
+	m.on_uncertain = &s
+}
+
+// OnUncertain returns the value of the "on_uncertain" field in the mutation.
+func (m *MessagePolicyMutation) OnUncertain() (r string, exists bool) {
+	v := m.on_uncertain
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOnUncertain returns the old "on_uncertain" field's value of the MessagePolicy entity.
+// If the MessagePolicy object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyMutation) OldOnUncertain(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOnUncertain is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOnUncertain requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOnUncertain: %w", err)
+	}
+	return oldValue.OnUncertain, nil
+}
+
+// ResetOnUncertain resets all changes to the "on_uncertain" field.
+func (m *MessagePolicyMutation) ResetOnUncertain() {
+	m.on_uncertain = nil
+}
+
+// SetOnFailed sets the "on_failed" field.
+func (m *MessagePolicyMutation) SetOnFailed(mf messagepolicy.OnFailed) {
+	m.on_failed = &mf
+}
+
+// OnFailed returns the value of the "on_failed" field in the mutation.
+func (m *MessagePolicyMutation) OnFailed() (r messagepolicy.OnFailed, exists bool) {
+	v := m.on_failed
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOnFailed returns the old "on_failed" field's value of the MessagePolicy entity.
+// If the MessagePolicy object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyMutation) OldOnFailed(ctx context.Context) (v messagepolicy.OnFailed, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOnFailed is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOnFailed requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOnFailed: %w", err)
+	}
+	return oldValue.OnFailed, nil
+}
+
+// ResetOnFailed resets all changes to the "on_failed" field.
+func (m *MessagePolicyMutation) ResetOnFailed() {
+	m.on_failed = nil
+}
+
+// SetOnFailedReasons sets the "on_failed_reasons" field.
+func (m *MessagePolicyMutation) SetOnFailedReasons(value map[string]string) {
+	m.on_failed_reasons = &value
+}
+
+// OnFailedReasons returns the value of the "on_failed_reasons" field in the mutation.
+func (m *MessagePolicyMutation) OnFailedReasons() (r map[string]string, exists bool) {
+	v := m.on_failed_reasons
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOnFailedReasons returns the old "on_failed_reasons" field's value of the MessagePolicy entity.
+// If the MessagePolicy object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyMutation) OldOnFailedReasons(ctx context.Context) (v map[string]string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOnFailedReasons is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOnFailedReasons requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOnFailedReasons: %w", err)
+	}
+	return oldValue.OnFailedReasons, nil
+}
+
+// ClearOnFailedReasons clears the value of the "on_failed_reasons" field.
+func (m *MessagePolicyMutation) ClearOnFailedReasons() {
+	m.on_failed_reasons = nil
+	m.clearedFields[messagepolicy.FieldOnFailedReasons] = struct{}{}
+}
+
+// OnFailedReasonsCleared returns if the "on_failed_reasons" field was cleared in this mutation.
+func (m *MessagePolicyMutation) OnFailedReasonsCleared() bool {
+	_, ok := m.clearedFields[messagepolicy.FieldOnFailedReasons]
+	return ok
+}
+
+// ResetOnFailedReasons resets all changes to the "on_failed_reasons" field.
+func (m *MessagePolicyMutation) ResetOnFailedReasons() {
+	m.on_failed_reasons = nil
+	delete(m.clearedFields, messagepolicy.FieldOnFailedReasons)
+}
+
+// SetRejectReason sets the "reject_reason" field.
+func (m *MessagePolicyMutation) SetRejectReason(s string) {
+	m.reject_reason = &s
+}
+
+// RejectReason returns the value of the "reject_reason" field in the mutation.
+func (m *MessagePolicyMutation) RejectReason() (r string, exists bool) {
+	v := m.reject_reason
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRejectReason returns the old "reject_reason" field's value of the MessagePolicy entity.
+// If the MessagePolicy object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyMutation) OldRejectReason(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRejectReason is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRejectReason requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRejectReason: %w", err)
+	}
+	return oldValue.RejectReason, nil
+}
+
+// ResetRejectReason resets all changes to the "reject_reason" field.
+func (m *MessagePolicyMutation) ResetRejectReason() {
+	m.reject_reason = nil
+}
+
+// SetRejectRemediation sets the "reject_remediation" field.
+func (m *MessagePolicyMutation) SetRejectRemediation(s string) {
+	m.reject_remediation = &s
+}
+
+// RejectRemediation returns the value of the "reject_remediation" field in the mutation.
+func (m *MessagePolicyMutation) RejectRemediation() (r string, exists bool) {
+	v := m.reject_remediation
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRejectRemediation returns the old "reject_remediation" field's value of the MessagePolicy entity.
+// If the MessagePolicy object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyMutation) OldRejectRemediation(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRejectRemediation is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRejectRemediation requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRejectRemediation: %w", err)
+	}
+	return oldValue.RejectRemediation, nil
+}
+
+// ResetRejectRemediation resets all changes to the "reject_remediation" field.
+func (m *MessagePolicyMutation) ResetRejectRemediation() {
+	m.reject_remediation = nil
+}
+
+// SetRevision sets the "revision" field.
+func (m *MessagePolicyMutation) SetRevision(i int64) {
+	m.revision = &i
+	m.addrevision = nil
+}
+
+// Revision returns the value of the "revision" field in the mutation.
+func (m *MessagePolicyMutation) Revision() (r int64, exists bool) {
+	v := m.revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRevision returns the old "revision" field's value of the MessagePolicy entity.
+// If the MessagePolicy object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyMutation) OldRevision(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRevision is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRevision requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRevision: %w", err)
+	}
+	return oldValue.Revision, nil
+}
+
+// AddRevision adds i to the "revision" field.
+func (m *MessagePolicyMutation) AddRevision(i int64) {
+	if m.addrevision != nil {
+		*m.addrevision += i
+	} else {
+		m.addrevision = &i
+	}
+}
+
+// AddedRevision returns the value that was added to the "revision" field in this mutation.
+func (m *MessagePolicyMutation) AddedRevision() (r int64, exists bool) {
+	v := m.addrevision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetRevision resets all changes to the "revision" field.
+func (m *MessagePolicyMutation) ResetRevision() {
+	m.revision = nil
+	m.addrevision = nil
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (m *MessagePolicyMutation) SetCreatedBy(s string) {
+	m.created_by = &s
+}
+
+// CreatedBy returns the value of the "created_by" field in the mutation.
+func (m *MessagePolicyMutation) CreatedBy() (r string, exists bool) {
+	v := m.created_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedBy returns the old "created_by" field's value of the MessagePolicy entity.
+// If the MessagePolicy object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyMutation) OldCreatedBy(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedBy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedBy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedBy: %w", err)
+	}
+	return oldValue.CreatedBy, nil
+}
+
+// ResetCreatedBy resets all changes to the "created_by" field.
+func (m *MessagePolicyMutation) ResetCreatedBy() {
+	m.created_by = nil
+}
+
+// SetUpdatedBy sets the "updated_by" field.
+func (m *MessagePolicyMutation) SetUpdatedBy(s string) {
+	m.updated_by = &s
+}
+
+// UpdatedBy returns the value of the "updated_by" field in the mutation.
+func (m *MessagePolicyMutation) UpdatedBy() (r string, exists bool) {
+	v := m.updated_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdatedBy returns the old "updated_by" field's value of the MessagePolicy entity.
+// If the MessagePolicy object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyMutation) OldUpdatedBy(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdatedBy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdatedBy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdatedBy: %w", err)
+	}
+	return oldValue.UpdatedBy, nil
+}
+
+// ResetUpdatedBy resets all changes to the "updated_by" field.
+func (m *MessagePolicyMutation) ResetUpdatedBy() {
+	m.updated_by = nil
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *MessagePolicyMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *MessagePolicyMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the MessagePolicy entity.
+// If the MessagePolicy object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *MessagePolicyMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// SetUpdatedAt sets the "updated_at" field.
+func (m *MessagePolicyMutation) SetUpdatedAt(t time.Time) {
+	m.updated_at = &t
+}
+
+// UpdatedAt returns the value of the "updated_at" field in the mutation.
+func (m *MessagePolicyMutation) UpdatedAt() (r time.Time, exists bool) {
+	v := m.updated_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdatedAt returns the old "updated_at" field's value of the MessagePolicy entity.
+// If the MessagePolicy object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyMutation) OldUpdatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdatedAt: %w", err)
+	}
+	return oldValue.UpdatedAt, nil
+}
+
+// ResetUpdatedAt resets all changes to the "updated_at" field.
+func (m *MessagePolicyMutation) ResetUpdatedAt() {
+	m.updated_at = nil
+}
+
+// Where appends a list predicates to the MessagePolicyMutation builder.
+func (m *MessagePolicyMutation) Where(ps ...predicate.MessagePolicy) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the MessagePolicyMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *MessagePolicyMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.MessagePolicy, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *MessagePolicyMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *MessagePolicyMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (MessagePolicy).
+func (m *MessagePolicyMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *MessagePolicyMutation) Fields() []string {
+	fields := make([]string, 0, 19)
+	if m.project_id != nil {
+		fields = append(fields, messagepolicy.FieldProjectID)
+	}
+	if m.name != nil {
+		fields = append(fields, messagepolicy.FieldName)
+	}
+	if m.description != nil {
+		fields = append(fields, messagepolicy.FieldDescription)
+	}
+	if m.enabled != nil {
+		fields = append(fields, messagepolicy.FieldEnabled)
+	}
+	if m.mode != nil {
+		fields = append(fields, messagepolicy.FieldMode)
+	}
+	if m.scope != nil {
+		fields = append(fields, messagepolicy.FieldScope)
+	}
+	if m.violation_rule != nil {
+		fields = append(fields, messagepolicy.FieldViolationRule)
+	}
+	if m.system_one_rule != nil {
+		fields = append(fields, messagepolicy.FieldSystemOneRule)
+	}
+	if m.system_one_refs != nil {
+		fields = append(fields, messagepolicy.FieldSystemOneRefs)
+	}
+	if m.on_uncertain != nil {
+		fields = append(fields, messagepolicy.FieldOnUncertain)
+	}
+	if m.on_failed != nil {
+		fields = append(fields, messagepolicy.FieldOnFailed)
+	}
+	if m.on_failed_reasons != nil {
+		fields = append(fields, messagepolicy.FieldOnFailedReasons)
+	}
+	if m.reject_reason != nil {
+		fields = append(fields, messagepolicy.FieldRejectReason)
+	}
+	if m.reject_remediation != nil {
+		fields = append(fields, messagepolicy.FieldRejectRemediation)
+	}
+	if m.revision != nil {
+		fields = append(fields, messagepolicy.FieldRevision)
+	}
+	if m.created_by != nil {
+		fields = append(fields, messagepolicy.FieldCreatedBy)
+	}
+	if m.updated_by != nil {
+		fields = append(fields, messagepolicy.FieldUpdatedBy)
+	}
+	if m.created_at != nil {
+		fields = append(fields, messagepolicy.FieldCreatedAt)
+	}
+	if m.updated_at != nil {
+		fields = append(fields, messagepolicy.FieldUpdatedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *MessagePolicyMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case messagepolicy.FieldProjectID:
+		return m.ProjectID()
+	case messagepolicy.FieldName:
+		return m.Name()
+	case messagepolicy.FieldDescription:
+		return m.Description()
+	case messagepolicy.FieldEnabled:
+		return m.Enabled()
+	case messagepolicy.FieldMode:
+		return m.Mode()
+	case messagepolicy.FieldScope:
+		return m.Scope()
+	case messagepolicy.FieldViolationRule:
+		return m.ViolationRule()
+	case messagepolicy.FieldSystemOneRule:
+		return m.SystemOneRule()
+	case messagepolicy.FieldSystemOneRefs:
+		return m.SystemOneRefs()
+	case messagepolicy.FieldOnUncertain:
+		return m.OnUncertain()
+	case messagepolicy.FieldOnFailed:
+		return m.OnFailed()
+	case messagepolicy.FieldOnFailedReasons:
+		return m.OnFailedReasons()
+	case messagepolicy.FieldRejectReason:
+		return m.RejectReason()
+	case messagepolicy.FieldRejectRemediation:
+		return m.RejectRemediation()
+	case messagepolicy.FieldRevision:
+		return m.Revision()
+	case messagepolicy.FieldCreatedBy:
+		return m.CreatedBy()
+	case messagepolicy.FieldUpdatedBy:
+		return m.UpdatedBy()
+	case messagepolicy.FieldCreatedAt:
+		return m.CreatedAt()
+	case messagepolicy.FieldUpdatedAt:
+		return m.UpdatedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *MessagePolicyMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case messagepolicy.FieldProjectID:
+		return m.OldProjectID(ctx)
+	case messagepolicy.FieldName:
+		return m.OldName(ctx)
+	case messagepolicy.FieldDescription:
+		return m.OldDescription(ctx)
+	case messagepolicy.FieldEnabled:
+		return m.OldEnabled(ctx)
+	case messagepolicy.FieldMode:
+		return m.OldMode(ctx)
+	case messagepolicy.FieldScope:
+		return m.OldScope(ctx)
+	case messagepolicy.FieldViolationRule:
+		return m.OldViolationRule(ctx)
+	case messagepolicy.FieldSystemOneRule:
+		return m.OldSystemOneRule(ctx)
+	case messagepolicy.FieldSystemOneRefs:
+		return m.OldSystemOneRefs(ctx)
+	case messagepolicy.FieldOnUncertain:
+		return m.OldOnUncertain(ctx)
+	case messagepolicy.FieldOnFailed:
+		return m.OldOnFailed(ctx)
+	case messagepolicy.FieldOnFailedReasons:
+		return m.OldOnFailedReasons(ctx)
+	case messagepolicy.FieldRejectReason:
+		return m.OldRejectReason(ctx)
+	case messagepolicy.FieldRejectRemediation:
+		return m.OldRejectRemediation(ctx)
+	case messagepolicy.FieldRevision:
+		return m.OldRevision(ctx)
+	case messagepolicy.FieldCreatedBy:
+		return m.OldCreatedBy(ctx)
+	case messagepolicy.FieldUpdatedBy:
+		return m.OldUpdatedBy(ctx)
+	case messagepolicy.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	case messagepolicy.FieldUpdatedAt:
+		return m.OldUpdatedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown MessagePolicy field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *MessagePolicyMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case messagepolicy.FieldProjectID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetProjectID(v)
+		return nil
+	case messagepolicy.FieldName:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetName(v)
+		return nil
+	case messagepolicy.FieldDescription:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDescription(v)
+		return nil
+	case messagepolicy.FieldEnabled:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetEnabled(v)
+		return nil
+	case messagepolicy.FieldMode:
+		v, ok := value.(messagepolicy.Mode)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetMode(v)
+		return nil
+	case messagepolicy.FieldScope:
+		v, ok := value.(store.MessagePolicyScope)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetScope(v)
+		return nil
+	case messagepolicy.FieldViolationRule:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetViolationRule(v)
+		return nil
+	case messagepolicy.FieldSystemOneRule:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSystemOneRule(v)
+		return nil
+	case messagepolicy.FieldSystemOneRefs:
+		v, ok := value.([]string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSystemOneRefs(v)
+		return nil
+	case messagepolicy.FieldOnUncertain:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOnUncertain(v)
+		return nil
+	case messagepolicy.FieldOnFailed:
+		v, ok := value.(messagepolicy.OnFailed)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOnFailed(v)
+		return nil
+	case messagepolicy.FieldOnFailedReasons:
+		v, ok := value.(map[string]string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOnFailedReasons(v)
+		return nil
+	case messagepolicy.FieldRejectReason:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRejectReason(v)
+		return nil
+	case messagepolicy.FieldRejectRemediation:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRejectRemediation(v)
+		return nil
+	case messagepolicy.FieldRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRevision(v)
+		return nil
+	case messagepolicy.FieldCreatedBy:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedBy(v)
+		return nil
+	case messagepolicy.FieldUpdatedBy:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdatedBy(v)
+		return nil
+	case messagepolicy.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	case messagepolicy.FieldUpdatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdatedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown MessagePolicy field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *MessagePolicyMutation) AddedFields() []string {
+	var fields []string
+	if m.addrevision != nil {
+		fields = append(fields, messagepolicy.FieldRevision)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *MessagePolicyMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case messagepolicy.FieldRevision:
+		return m.AddedRevision()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *MessagePolicyMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case messagepolicy.FieldRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddRevision(v)
+		return nil
+	}
+	return fmt.Errorf("unknown MessagePolicy numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *MessagePolicyMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(messagepolicy.FieldSystemOneRefs) {
+		fields = append(fields, messagepolicy.FieldSystemOneRefs)
+	}
+	if m.FieldCleared(messagepolicy.FieldOnFailedReasons) {
+		fields = append(fields, messagepolicy.FieldOnFailedReasons)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *MessagePolicyMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *MessagePolicyMutation) ClearField(name string) error {
+	switch name {
+	case messagepolicy.FieldSystemOneRefs:
+		m.ClearSystemOneRefs()
+		return nil
+	case messagepolicy.FieldOnFailedReasons:
+		m.ClearOnFailedReasons()
+		return nil
+	}
+	return fmt.Errorf("unknown MessagePolicy nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *MessagePolicyMutation) ResetField(name string) error {
+	switch name {
+	case messagepolicy.FieldProjectID:
+		m.ResetProjectID()
+		return nil
+	case messagepolicy.FieldName:
+		m.ResetName()
+		return nil
+	case messagepolicy.FieldDescription:
+		m.ResetDescription()
+		return nil
+	case messagepolicy.FieldEnabled:
+		m.ResetEnabled()
+		return nil
+	case messagepolicy.FieldMode:
+		m.ResetMode()
+		return nil
+	case messagepolicy.FieldScope:
+		m.ResetScope()
+		return nil
+	case messagepolicy.FieldViolationRule:
+		m.ResetViolationRule()
+		return nil
+	case messagepolicy.FieldSystemOneRule:
+		m.ResetSystemOneRule()
+		return nil
+	case messagepolicy.FieldSystemOneRefs:
+		m.ResetSystemOneRefs()
+		return nil
+	case messagepolicy.FieldOnUncertain:
+		m.ResetOnUncertain()
+		return nil
+	case messagepolicy.FieldOnFailed:
+		m.ResetOnFailed()
+		return nil
+	case messagepolicy.FieldOnFailedReasons:
+		m.ResetOnFailedReasons()
+		return nil
+	case messagepolicy.FieldRejectReason:
+		m.ResetRejectReason()
+		return nil
+	case messagepolicy.FieldRejectRemediation:
+		m.ResetRejectRemediation()
+		return nil
+	case messagepolicy.FieldRevision:
+		m.ResetRevision()
+		return nil
+	case messagepolicy.FieldCreatedBy:
+		m.ResetCreatedBy()
+		return nil
+	case messagepolicy.FieldUpdatedBy:
+		m.ResetUpdatedBy()
+		return nil
+	case messagepolicy.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	case messagepolicy.FieldUpdatedAt:
+		m.ResetUpdatedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown MessagePolicy field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *MessagePolicyMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *MessagePolicyMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *MessagePolicyMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *MessagePolicyMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *MessagePolicyMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *MessagePolicyMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *MessagePolicyMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown MessagePolicy unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *MessagePolicyMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown MessagePolicy edge %s", name)
+}
+
+// MessagePolicyDecisionMutation represents an operation that mutates the MessagePolicyDecision nodes in the graph.
+type MessagePolicyDecisionMutation struct {
+	config
+	op                 Op
+	typ                string
+	id                 *uuid.UUID
+	project_id         *uuid.UUID
+	policy_id          *uuid.UUID
+	policy_name        *string
+	policy_revision    *int64
+	addpolicy_revision *int64
+	mode               *messagepolicydecision.Mode
+	surface            *string
+	sender_kind        *string
+	sender_id          *string
+	recipient_kind     *string
+	recipient_id       *string
+	message_id         *uuid.UUID
+	class              *messagepolicydecision.Class
+	action             *messagepolicydecision.Action
+	reason             *string
+	cel_error_reason   *string
+	evaluation         *string
+	elapsed_ms         *int64
+	addelapsed_ms      *int64
+	created_at         *time.Time
+	clearedFields      map[string]struct{}
+	done               bool
+	oldValue           func(context.Context) (*MessagePolicyDecision, error)
+	predicates         []predicate.MessagePolicyDecision
+}
+
+var _ ent.Mutation = (*MessagePolicyDecisionMutation)(nil)
+
+// messagepolicydecisionOption allows management of the mutation configuration using functional options.
+type messagepolicydecisionOption func(*MessagePolicyDecisionMutation)
+
+// newMessagePolicyDecisionMutation creates new mutation for the MessagePolicyDecision entity.
+func newMessagePolicyDecisionMutation(c config, op Op, opts ...messagepolicydecisionOption) *MessagePolicyDecisionMutation {
+	m := &MessagePolicyDecisionMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeMessagePolicyDecision,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withMessagePolicyDecisionID sets the ID field of the mutation.
+func withMessagePolicyDecisionID(id uuid.UUID) messagepolicydecisionOption {
+	return func(m *MessagePolicyDecisionMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *MessagePolicyDecision
+		)
+		m.oldValue = func(ctx context.Context) (*MessagePolicyDecision, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().MessagePolicyDecision.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withMessagePolicyDecision sets the old MessagePolicyDecision of the mutation.
+func withMessagePolicyDecision(node *MessagePolicyDecision) messagepolicydecisionOption {
+	return func(m *MessagePolicyDecisionMutation) {
+		m.oldValue = func(context.Context) (*MessagePolicyDecision, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m MessagePolicyDecisionMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m MessagePolicyDecisionMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of MessagePolicyDecision entities.
+func (m *MessagePolicyDecisionMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *MessagePolicyDecisionMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *MessagePolicyDecisionMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().MessagePolicyDecision.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetProjectID sets the "project_id" field.
+func (m *MessagePolicyDecisionMutation) SetProjectID(u uuid.UUID) {
+	m.project_id = &u
+}
+
+// ProjectID returns the value of the "project_id" field in the mutation.
+func (m *MessagePolicyDecisionMutation) ProjectID() (r uuid.UUID, exists bool) {
+	v := m.project_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldProjectID returns the old "project_id" field's value of the MessagePolicyDecision entity.
+// If the MessagePolicyDecision object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyDecisionMutation) OldProjectID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldProjectID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldProjectID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldProjectID: %w", err)
+	}
+	return oldValue.ProjectID, nil
+}
+
+// ResetProjectID resets all changes to the "project_id" field.
+func (m *MessagePolicyDecisionMutation) ResetProjectID() {
+	m.project_id = nil
+}
+
+// SetPolicyID sets the "policy_id" field.
+func (m *MessagePolicyDecisionMutation) SetPolicyID(u uuid.UUID) {
+	m.policy_id = &u
+}
+
+// PolicyID returns the value of the "policy_id" field in the mutation.
+func (m *MessagePolicyDecisionMutation) PolicyID() (r uuid.UUID, exists bool) {
+	v := m.policy_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPolicyID returns the old "policy_id" field's value of the MessagePolicyDecision entity.
+// If the MessagePolicyDecision object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyDecisionMutation) OldPolicyID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPolicyID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPolicyID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPolicyID: %w", err)
+	}
+	return oldValue.PolicyID, nil
+}
+
+// ResetPolicyID resets all changes to the "policy_id" field.
+func (m *MessagePolicyDecisionMutation) ResetPolicyID() {
+	m.policy_id = nil
+}
+
+// SetPolicyName sets the "policy_name" field.
+func (m *MessagePolicyDecisionMutation) SetPolicyName(s string) {
+	m.policy_name = &s
+}
+
+// PolicyName returns the value of the "policy_name" field in the mutation.
+func (m *MessagePolicyDecisionMutation) PolicyName() (r string, exists bool) {
+	v := m.policy_name
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPolicyName returns the old "policy_name" field's value of the MessagePolicyDecision entity.
+// If the MessagePolicyDecision object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyDecisionMutation) OldPolicyName(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPolicyName is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPolicyName requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPolicyName: %w", err)
+	}
+	return oldValue.PolicyName, nil
+}
+
+// ResetPolicyName resets all changes to the "policy_name" field.
+func (m *MessagePolicyDecisionMutation) ResetPolicyName() {
+	m.policy_name = nil
+}
+
+// SetPolicyRevision sets the "policy_revision" field.
+func (m *MessagePolicyDecisionMutation) SetPolicyRevision(i int64) {
+	m.policy_revision = &i
+	m.addpolicy_revision = nil
+}
+
+// PolicyRevision returns the value of the "policy_revision" field in the mutation.
+func (m *MessagePolicyDecisionMutation) PolicyRevision() (r int64, exists bool) {
+	v := m.policy_revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPolicyRevision returns the old "policy_revision" field's value of the MessagePolicyDecision entity.
+// If the MessagePolicyDecision object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyDecisionMutation) OldPolicyRevision(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPolicyRevision is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPolicyRevision requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPolicyRevision: %w", err)
+	}
+	return oldValue.PolicyRevision, nil
+}
+
+// AddPolicyRevision adds i to the "policy_revision" field.
+func (m *MessagePolicyDecisionMutation) AddPolicyRevision(i int64) {
+	if m.addpolicy_revision != nil {
+		*m.addpolicy_revision += i
+	} else {
+		m.addpolicy_revision = &i
+	}
+}
+
+// AddedPolicyRevision returns the value that was added to the "policy_revision" field in this mutation.
+func (m *MessagePolicyDecisionMutation) AddedPolicyRevision() (r int64, exists bool) {
+	v := m.addpolicy_revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetPolicyRevision resets all changes to the "policy_revision" field.
+func (m *MessagePolicyDecisionMutation) ResetPolicyRevision() {
+	m.policy_revision = nil
+	m.addpolicy_revision = nil
+}
+
+// SetMode sets the "mode" field.
+func (m *MessagePolicyDecisionMutation) SetMode(value messagepolicydecision.Mode) {
+	m.mode = &value
+}
+
+// Mode returns the value of the "mode" field in the mutation.
+func (m *MessagePolicyDecisionMutation) Mode() (r messagepolicydecision.Mode, exists bool) {
+	v := m.mode
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldMode returns the old "mode" field's value of the MessagePolicyDecision entity.
+// If the MessagePolicyDecision object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyDecisionMutation) OldMode(ctx context.Context) (v messagepolicydecision.Mode, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldMode is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldMode requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldMode: %w", err)
+	}
+	return oldValue.Mode, nil
+}
+
+// ResetMode resets all changes to the "mode" field.
+func (m *MessagePolicyDecisionMutation) ResetMode() {
+	m.mode = nil
+}
+
+// SetSurface sets the "surface" field.
+func (m *MessagePolicyDecisionMutation) SetSurface(s string) {
+	m.surface = &s
+}
+
+// Surface returns the value of the "surface" field in the mutation.
+func (m *MessagePolicyDecisionMutation) Surface() (r string, exists bool) {
+	v := m.surface
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSurface returns the old "surface" field's value of the MessagePolicyDecision entity.
+// If the MessagePolicyDecision object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyDecisionMutation) OldSurface(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSurface is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSurface requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSurface: %w", err)
+	}
+	return oldValue.Surface, nil
+}
+
+// ResetSurface resets all changes to the "surface" field.
+func (m *MessagePolicyDecisionMutation) ResetSurface() {
+	m.surface = nil
+}
+
+// SetSenderKind sets the "sender_kind" field.
+func (m *MessagePolicyDecisionMutation) SetSenderKind(s string) {
+	m.sender_kind = &s
+}
+
+// SenderKind returns the value of the "sender_kind" field in the mutation.
+func (m *MessagePolicyDecisionMutation) SenderKind() (r string, exists bool) {
+	v := m.sender_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSenderKind returns the old "sender_kind" field's value of the MessagePolicyDecision entity.
+// If the MessagePolicyDecision object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyDecisionMutation) OldSenderKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSenderKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSenderKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSenderKind: %w", err)
+	}
+	return oldValue.SenderKind, nil
+}
+
+// ResetSenderKind resets all changes to the "sender_kind" field.
+func (m *MessagePolicyDecisionMutation) ResetSenderKind() {
+	m.sender_kind = nil
+}
+
+// SetSenderID sets the "sender_id" field.
+func (m *MessagePolicyDecisionMutation) SetSenderID(s string) {
+	m.sender_id = &s
+}
+
+// SenderID returns the value of the "sender_id" field in the mutation.
+func (m *MessagePolicyDecisionMutation) SenderID() (r string, exists bool) {
+	v := m.sender_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSenderID returns the old "sender_id" field's value of the MessagePolicyDecision entity.
+// If the MessagePolicyDecision object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyDecisionMutation) OldSenderID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSenderID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSenderID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSenderID: %w", err)
+	}
+	return oldValue.SenderID, nil
+}
+
+// ResetSenderID resets all changes to the "sender_id" field.
+func (m *MessagePolicyDecisionMutation) ResetSenderID() {
+	m.sender_id = nil
+}
+
+// SetRecipientKind sets the "recipient_kind" field.
+func (m *MessagePolicyDecisionMutation) SetRecipientKind(s string) {
+	m.recipient_kind = &s
+}
+
+// RecipientKind returns the value of the "recipient_kind" field in the mutation.
+func (m *MessagePolicyDecisionMutation) RecipientKind() (r string, exists bool) {
+	v := m.recipient_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRecipientKind returns the old "recipient_kind" field's value of the MessagePolicyDecision entity.
+// If the MessagePolicyDecision object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyDecisionMutation) OldRecipientKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRecipientKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRecipientKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRecipientKind: %w", err)
+	}
+	return oldValue.RecipientKind, nil
+}
+
+// ResetRecipientKind resets all changes to the "recipient_kind" field.
+func (m *MessagePolicyDecisionMutation) ResetRecipientKind() {
+	m.recipient_kind = nil
+}
+
+// SetRecipientID sets the "recipient_id" field.
+func (m *MessagePolicyDecisionMutation) SetRecipientID(s string) {
+	m.recipient_id = &s
+}
+
+// RecipientID returns the value of the "recipient_id" field in the mutation.
+func (m *MessagePolicyDecisionMutation) RecipientID() (r string, exists bool) {
+	v := m.recipient_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRecipientID returns the old "recipient_id" field's value of the MessagePolicyDecision entity.
+// If the MessagePolicyDecision object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyDecisionMutation) OldRecipientID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRecipientID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRecipientID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRecipientID: %w", err)
+	}
+	return oldValue.RecipientID, nil
+}
+
+// ResetRecipientID resets all changes to the "recipient_id" field.
+func (m *MessagePolicyDecisionMutation) ResetRecipientID() {
+	m.recipient_id = nil
+}
+
+// SetMessageID sets the "message_id" field.
+func (m *MessagePolicyDecisionMutation) SetMessageID(u uuid.UUID) {
+	m.message_id = &u
+}
+
+// MessageID returns the value of the "message_id" field in the mutation.
+func (m *MessagePolicyDecisionMutation) MessageID() (r uuid.UUID, exists bool) {
+	v := m.message_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldMessageID returns the old "message_id" field's value of the MessagePolicyDecision entity.
+// If the MessagePolicyDecision object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyDecisionMutation) OldMessageID(ctx context.Context) (v *uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldMessageID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldMessageID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldMessageID: %w", err)
+	}
+	return oldValue.MessageID, nil
+}
+
+// ClearMessageID clears the value of the "message_id" field.
+func (m *MessagePolicyDecisionMutation) ClearMessageID() {
+	m.message_id = nil
+	m.clearedFields[messagepolicydecision.FieldMessageID] = struct{}{}
+}
+
+// MessageIDCleared returns if the "message_id" field was cleared in this mutation.
+func (m *MessagePolicyDecisionMutation) MessageIDCleared() bool {
+	_, ok := m.clearedFields[messagepolicydecision.FieldMessageID]
+	return ok
+}
+
+// ResetMessageID resets all changes to the "message_id" field.
+func (m *MessagePolicyDecisionMutation) ResetMessageID() {
+	m.message_id = nil
+	delete(m.clearedFields, messagepolicydecision.FieldMessageID)
+}
+
+// SetClass sets the "class" field.
+func (m *MessagePolicyDecisionMutation) SetClass(value messagepolicydecision.Class) {
+	m.class = &value
+}
+
+// Class returns the value of the "class" field in the mutation.
+func (m *MessagePolicyDecisionMutation) Class() (r messagepolicydecision.Class, exists bool) {
+	v := m.class
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldClass returns the old "class" field's value of the MessagePolicyDecision entity.
+// If the MessagePolicyDecision object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyDecisionMutation) OldClass(ctx context.Context) (v messagepolicydecision.Class, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldClass is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldClass requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldClass: %w", err)
+	}
+	return oldValue.Class, nil
+}
+
+// ResetClass resets all changes to the "class" field.
+func (m *MessagePolicyDecisionMutation) ResetClass() {
+	m.class = nil
+}
+
+// SetAction sets the "action" field.
+func (m *MessagePolicyDecisionMutation) SetAction(value messagepolicydecision.Action) {
+	m.action = &value
+}
+
+// Action returns the value of the "action" field in the mutation.
+func (m *MessagePolicyDecisionMutation) Action() (r messagepolicydecision.Action, exists bool) {
+	v := m.action
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAction returns the old "action" field's value of the MessagePolicyDecision entity.
+// If the MessagePolicyDecision object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyDecisionMutation) OldAction(ctx context.Context) (v messagepolicydecision.Action, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAction is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAction requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAction: %w", err)
+	}
+	return oldValue.Action, nil
+}
+
+// ResetAction resets all changes to the "action" field.
+func (m *MessagePolicyDecisionMutation) ResetAction() {
+	m.action = nil
+}
+
+// SetReason sets the "reason" field.
+func (m *MessagePolicyDecisionMutation) SetReason(s string) {
+	m.reason = &s
+}
+
+// Reason returns the value of the "reason" field in the mutation.
+func (m *MessagePolicyDecisionMutation) Reason() (r string, exists bool) {
+	v := m.reason
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldReason returns the old "reason" field's value of the MessagePolicyDecision entity.
+// If the MessagePolicyDecision object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyDecisionMutation) OldReason(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldReason is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldReason requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldReason: %w", err)
+	}
+	return oldValue.Reason, nil
+}
+
+// ResetReason resets all changes to the "reason" field.
+func (m *MessagePolicyDecisionMutation) ResetReason() {
+	m.reason = nil
+}
+
+// SetCelErrorReason sets the "cel_error_reason" field.
+func (m *MessagePolicyDecisionMutation) SetCelErrorReason(s string) {
+	m.cel_error_reason = &s
+}
+
+// CelErrorReason returns the value of the "cel_error_reason" field in the mutation.
+func (m *MessagePolicyDecisionMutation) CelErrorReason() (r string, exists bool) {
+	v := m.cel_error_reason
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCelErrorReason returns the old "cel_error_reason" field's value of the MessagePolicyDecision entity.
+// If the MessagePolicyDecision object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyDecisionMutation) OldCelErrorReason(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCelErrorReason is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCelErrorReason requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCelErrorReason: %w", err)
+	}
+	return oldValue.CelErrorReason, nil
+}
+
+// ResetCelErrorReason resets all changes to the "cel_error_reason" field.
+func (m *MessagePolicyDecisionMutation) ResetCelErrorReason() {
+	m.cel_error_reason = nil
+}
+
+// SetEvaluation sets the "evaluation" field.
+func (m *MessagePolicyDecisionMutation) SetEvaluation(s string) {
+	m.evaluation = &s
+}
+
+// Evaluation returns the value of the "evaluation" field in the mutation.
+func (m *MessagePolicyDecisionMutation) Evaluation() (r string, exists bool) {
+	v := m.evaluation
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldEvaluation returns the old "evaluation" field's value of the MessagePolicyDecision entity.
+// If the MessagePolicyDecision object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyDecisionMutation) OldEvaluation(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldEvaluation is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldEvaluation requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldEvaluation: %w", err)
+	}
+	return oldValue.Evaluation, nil
+}
+
+// ResetEvaluation resets all changes to the "evaluation" field.
+func (m *MessagePolicyDecisionMutation) ResetEvaluation() {
+	m.evaluation = nil
+}
+
+// SetElapsedMs sets the "elapsed_ms" field.
+func (m *MessagePolicyDecisionMutation) SetElapsedMs(i int64) {
+	m.elapsed_ms = &i
+	m.addelapsed_ms = nil
+}
+
+// ElapsedMs returns the value of the "elapsed_ms" field in the mutation.
+func (m *MessagePolicyDecisionMutation) ElapsedMs() (r int64, exists bool) {
+	v := m.elapsed_ms
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldElapsedMs returns the old "elapsed_ms" field's value of the MessagePolicyDecision entity.
+// If the MessagePolicyDecision object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyDecisionMutation) OldElapsedMs(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldElapsedMs is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldElapsedMs requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldElapsedMs: %w", err)
+	}
+	return oldValue.ElapsedMs, nil
+}
+
+// AddElapsedMs adds i to the "elapsed_ms" field.
+func (m *MessagePolicyDecisionMutation) AddElapsedMs(i int64) {
+	if m.addelapsed_ms != nil {
+		*m.addelapsed_ms += i
+	} else {
+		m.addelapsed_ms = &i
+	}
+}
+
+// AddedElapsedMs returns the value that was added to the "elapsed_ms" field in this mutation.
+func (m *MessagePolicyDecisionMutation) AddedElapsedMs() (r int64, exists bool) {
+	v := m.addelapsed_ms
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetElapsedMs resets all changes to the "elapsed_ms" field.
+func (m *MessagePolicyDecisionMutation) ResetElapsedMs() {
+	m.elapsed_ms = nil
+	m.addelapsed_ms = nil
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *MessagePolicyDecisionMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *MessagePolicyDecisionMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the MessagePolicyDecision entity.
+// If the MessagePolicyDecision object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessagePolicyDecisionMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *MessagePolicyDecisionMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// Where appends a list predicates to the MessagePolicyDecisionMutation builder.
+func (m *MessagePolicyDecisionMutation) Where(ps ...predicate.MessagePolicyDecision) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the MessagePolicyDecisionMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *MessagePolicyDecisionMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.MessagePolicyDecision, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *MessagePolicyDecisionMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *MessagePolicyDecisionMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (MessagePolicyDecision).
+func (m *MessagePolicyDecisionMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *MessagePolicyDecisionMutation) Fields() []string {
+	fields := make([]string, 0, 18)
+	if m.project_id != nil {
+		fields = append(fields, messagepolicydecision.FieldProjectID)
+	}
+	if m.policy_id != nil {
+		fields = append(fields, messagepolicydecision.FieldPolicyID)
+	}
+	if m.policy_name != nil {
+		fields = append(fields, messagepolicydecision.FieldPolicyName)
+	}
+	if m.policy_revision != nil {
+		fields = append(fields, messagepolicydecision.FieldPolicyRevision)
+	}
+	if m.mode != nil {
+		fields = append(fields, messagepolicydecision.FieldMode)
+	}
+	if m.surface != nil {
+		fields = append(fields, messagepolicydecision.FieldSurface)
+	}
+	if m.sender_kind != nil {
+		fields = append(fields, messagepolicydecision.FieldSenderKind)
+	}
+	if m.sender_id != nil {
+		fields = append(fields, messagepolicydecision.FieldSenderID)
+	}
+	if m.recipient_kind != nil {
+		fields = append(fields, messagepolicydecision.FieldRecipientKind)
+	}
+	if m.recipient_id != nil {
+		fields = append(fields, messagepolicydecision.FieldRecipientID)
+	}
+	if m.message_id != nil {
+		fields = append(fields, messagepolicydecision.FieldMessageID)
+	}
+	if m.class != nil {
+		fields = append(fields, messagepolicydecision.FieldClass)
+	}
+	if m.action != nil {
+		fields = append(fields, messagepolicydecision.FieldAction)
+	}
+	if m.reason != nil {
+		fields = append(fields, messagepolicydecision.FieldReason)
+	}
+	if m.cel_error_reason != nil {
+		fields = append(fields, messagepolicydecision.FieldCelErrorReason)
+	}
+	if m.evaluation != nil {
+		fields = append(fields, messagepolicydecision.FieldEvaluation)
+	}
+	if m.elapsed_ms != nil {
+		fields = append(fields, messagepolicydecision.FieldElapsedMs)
+	}
+	if m.created_at != nil {
+		fields = append(fields, messagepolicydecision.FieldCreatedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *MessagePolicyDecisionMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case messagepolicydecision.FieldProjectID:
+		return m.ProjectID()
+	case messagepolicydecision.FieldPolicyID:
+		return m.PolicyID()
+	case messagepolicydecision.FieldPolicyName:
+		return m.PolicyName()
+	case messagepolicydecision.FieldPolicyRevision:
+		return m.PolicyRevision()
+	case messagepolicydecision.FieldMode:
+		return m.Mode()
+	case messagepolicydecision.FieldSurface:
+		return m.Surface()
+	case messagepolicydecision.FieldSenderKind:
+		return m.SenderKind()
+	case messagepolicydecision.FieldSenderID:
+		return m.SenderID()
+	case messagepolicydecision.FieldRecipientKind:
+		return m.RecipientKind()
+	case messagepolicydecision.FieldRecipientID:
+		return m.RecipientID()
+	case messagepolicydecision.FieldMessageID:
+		return m.MessageID()
+	case messagepolicydecision.FieldClass:
+		return m.Class()
+	case messagepolicydecision.FieldAction:
+		return m.Action()
+	case messagepolicydecision.FieldReason:
+		return m.Reason()
+	case messagepolicydecision.FieldCelErrorReason:
+		return m.CelErrorReason()
+	case messagepolicydecision.FieldEvaluation:
+		return m.Evaluation()
+	case messagepolicydecision.FieldElapsedMs:
+		return m.ElapsedMs()
+	case messagepolicydecision.FieldCreatedAt:
+		return m.CreatedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *MessagePolicyDecisionMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case messagepolicydecision.FieldProjectID:
+		return m.OldProjectID(ctx)
+	case messagepolicydecision.FieldPolicyID:
+		return m.OldPolicyID(ctx)
+	case messagepolicydecision.FieldPolicyName:
+		return m.OldPolicyName(ctx)
+	case messagepolicydecision.FieldPolicyRevision:
+		return m.OldPolicyRevision(ctx)
+	case messagepolicydecision.FieldMode:
+		return m.OldMode(ctx)
+	case messagepolicydecision.FieldSurface:
+		return m.OldSurface(ctx)
+	case messagepolicydecision.FieldSenderKind:
+		return m.OldSenderKind(ctx)
+	case messagepolicydecision.FieldSenderID:
+		return m.OldSenderID(ctx)
+	case messagepolicydecision.FieldRecipientKind:
+		return m.OldRecipientKind(ctx)
+	case messagepolicydecision.FieldRecipientID:
+		return m.OldRecipientID(ctx)
+	case messagepolicydecision.FieldMessageID:
+		return m.OldMessageID(ctx)
+	case messagepolicydecision.FieldClass:
+		return m.OldClass(ctx)
+	case messagepolicydecision.FieldAction:
+		return m.OldAction(ctx)
+	case messagepolicydecision.FieldReason:
+		return m.OldReason(ctx)
+	case messagepolicydecision.FieldCelErrorReason:
+		return m.OldCelErrorReason(ctx)
+	case messagepolicydecision.FieldEvaluation:
+		return m.OldEvaluation(ctx)
+	case messagepolicydecision.FieldElapsedMs:
+		return m.OldElapsedMs(ctx)
+	case messagepolicydecision.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown MessagePolicyDecision field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *MessagePolicyDecisionMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case messagepolicydecision.FieldProjectID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetProjectID(v)
+		return nil
+	case messagepolicydecision.FieldPolicyID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPolicyID(v)
+		return nil
+	case messagepolicydecision.FieldPolicyName:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPolicyName(v)
+		return nil
+	case messagepolicydecision.FieldPolicyRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPolicyRevision(v)
+		return nil
+	case messagepolicydecision.FieldMode:
+		v, ok := value.(messagepolicydecision.Mode)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetMode(v)
+		return nil
+	case messagepolicydecision.FieldSurface:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSurface(v)
+		return nil
+	case messagepolicydecision.FieldSenderKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSenderKind(v)
+		return nil
+	case messagepolicydecision.FieldSenderID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSenderID(v)
+		return nil
+	case messagepolicydecision.FieldRecipientKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRecipientKind(v)
+		return nil
+	case messagepolicydecision.FieldRecipientID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRecipientID(v)
+		return nil
+	case messagepolicydecision.FieldMessageID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetMessageID(v)
+		return nil
+	case messagepolicydecision.FieldClass:
+		v, ok := value.(messagepolicydecision.Class)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetClass(v)
+		return nil
+	case messagepolicydecision.FieldAction:
+		v, ok := value.(messagepolicydecision.Action)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAction(v)
+		return nil
+	case messagepolicydecision.FieldReason:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetReason(v)
+		return nil
+	case messagepolicydecision.FieldCelErrorReason:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCelErrorReason(v)
+		return nil
+	case messagepolicydecision.FieldEvaluation:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetEvaluation(v)
+		return nil
+	case messagepolicydecision.FieldElapsedMs:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetElapsedMs(v)
+		return nil
+	case messagepolicydecision.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown MessagePolicyDecision field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *MessagePolicyDecisionMutation) AddedFields() []string {
+	var fields []string
+	if m.addpolicy_revision != nil {
+		fields = append(fields, messagepolicydecision.FieldPolicyRevision)
+	}
+	if m.addelapsed_ms != nil {
+		fields = append(fields, messagepolicydecision.FieldElapsedMs)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *MessagePolicyDecisionMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case messagepolicydecision.FieldPolicyRevision:
+		return m.AddedPolicyRevision()
+	case messagepolicydecision.FieldElapsedMs:
+		return m.AddedElapsedMs()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *MessagePolicyDecisionMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case messagepolicydecision.FieldPolicyRevision:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddPolicyRevision(v)
+		return nil
+	case messagepolicydecision.FieldElapsedMs:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddElapsedMs(v)
+		return nil
+	}
+	return fmt.Errorf("unknown MessagePolicyDecision numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *MessagePolicyDecisionMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(messagepolicydecision.FieldMessageID) {
+		fields = append(fields, messagepolicydecision.FieldMessageID)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *MessagePolicyDecisionMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *MessagePolicyDecisionMutation) ClearField(name string) error {
+	switch name {
+	case messagepolicydecision.FieldMessageID:
+		m.ClearMessageID()
+		return nil
+	}
+	return fmt.Errorf("unknown MessagePolicyDecision nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *MessagePolicyDecisionMutation) ResetField(name string) error {
+	switch name {
+	case messagepolicydecision.FieldProjectID:
+		m.ResetProjectID()
+		return nil
+	case messagepolicydecision.FieldPolicyID:
+		m.ResetPolicyID()
+		return nil
+	case messagepolicydecision.FieldPolicyName:
+		m.ResetPolicyName()
+		return nil
+	case messagepolicydecision.FieldPolicyRevision:
+		m.ResetPolicyRevision()
+		return nil
+	case messagepolicydecision.FieldMode:
+		m.ResetMode()
+		return nil
+	case messagepolicydecision.FieldSurface:
+		m.ResetSurface()
+		return nil
+	case messagepolicydecision.FieldSenderKind:
+		m.ResetSenderKind()
+		return nil
+	case messagepolicydecision.FieldSenderID:
+		m.ResetSenderID()
+		return nil
+	case messagepolicydecision.FieldRecipientKind:
+		m.ResetRecipientKind()
+		return nil
+	case messagepolicydecision.FieldRecipientID:
+		m.ResetRecipientID()
+		return nil
+	case messagepolicydecision.FieldMessageID:
+		m.ResetMessageID()
+		return nil
+	case messagepolicydecision.FieldClass:
+		m.ResetClass()
+		return nil
+	case messagepolicydecision.FieldAction:
+		m.ResetAction()
+		return nil
+	case messagepolicydecision.FieldReason:
+		m.ResetReason()
+		return nil
+	case messagepolicydecision.FieldCelErrorReason:
+		m.ResetCelErrorReason()
+		return nil
+	case messagepolicydecision.FieldEvaluation:
+		m.ResetEvaluation()
+		return nil
+	case messagepolicydecision.FieldElapsedMs:
+		m.ResetElapsedMs()
+		return nil
+	case messagepolicydecision.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown MessagePolicyDecision field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *MessagePolicyDecisionMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *MessagePolicyDecisionMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *MessagePolicyDecisionMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *MessagePolicyDecisionMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *MessagePolicyDecisionMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *MessagePolicyDecisionMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *MessagePolicyDecisionMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown MessagePolicyDecision unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *MessagePolicyDecisionMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown MessagePolicyDecision edge %s", name)
 }
 
 // MutationAuditMutation represents an operation that mutates the MutationAudit nodes in the graph.

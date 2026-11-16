@@ -642,6 +642,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.SystemOne:                    testAdminPolicyDeny,
 	experiments.GitHubTriggers:               testAdminPolicyDeny,
 	experiments.Triggers:                     testAdminPolicyDeny,
+	experiments.MessagePolicies:              testAdminPolicyDeny,
 }
 
 // testAdminPolicyInputs are the vocabularies the classification must cover.

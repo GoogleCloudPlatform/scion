@@ -74,6 +74,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/membershiplosscheck"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/message"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/messageaddressee"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/messagepolicy"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/messagepolicydecision"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/mutationaudit"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/noncecache"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/notification"
@@ -240,6 +242,8 @@ func checkColumn(t, c string) error {
 			membershiplosscheck.Table:           membershiplosscheck.ValidColumn,
 			message.Table:                       message.ValidColumn,
 			messageaddressee.Table:              messageaddressee.ValidColumn,
+			messagepolicy.Table:                 messagepolicy.ValidColumn,
+			messagepolicydecision.Table:         messagepolicydecision.ValidColumn,
 			mutationaudit.Table:                 mutationaudit.ValidColumn,
 			noncecache.Table:                    noncecache.ValidColumn,
 			notification.Table:                  notification.ValidColumn,

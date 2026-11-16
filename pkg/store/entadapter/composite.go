@@ -132,6 +132,7 @@ type CompositeStore struct {
 	*DurableQueueStore
 	*SystemOneInstanceStore
 	*TriggerStore
+	*MessagePolicyStore
 
 	client *ent.Client
 	inTx   bool // true when this CompositeStore wraps a transaction
@@ -281,6 +282,7 @@ func newTxCompositeStore(tx *ent.Tx) *CompositeStore {
 	txStore.SystemOneInstanceStore.inTx = true
 	txStore.ExternalStore.inTx = true
 	txStore.TriggerStore.inTx = true
+	txStore.MessagePolicyStore.inTx = true
 	return txStore
 }
 
@@ -336,6 +338,7 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		DurableQueueStore:           NewDurableQueueStore(client),
 		SystemOneInstanceStore:      NewSystemOneInstanceStore(client),
 		TriggerStore:                NewTriggerStore(client),
+		MessagePolicyStore:          NewMessagePolicyStore(client),
 		client:                      client,
 	}
 }
@@ -581,6 +584,11 @@ func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 	// carry project IDs inside JSON with no DB-level FK; scrub them when the
 	// project is deleted (§8.4).
 	if _, err := c.DeleteGitHubTriggerRoutesByProject(ctx, id); err != nil {
+		return err
+	}
+	// Message policies and their decision records carry project_id with no
+	// DB-level FK edge; cascade them explicitly in the same transaction.
+	if err := deleteProjectMessagePolicies(ctx, c.client, uid); err != nil {
 		return err
 	}
 	return c.ProjectStore.DeleteProject(ctx, id)

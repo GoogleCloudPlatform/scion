@@ -753,6 +753,30 @@ func (f MessageAddresseeFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.V
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.MessageAddresseeMutation", m)
 }
 
+// The MessagePolicyFunc type is an adapter to allow the use of ordinary
+// function as MessagePolicy mutator.
+type MessagePolicyFunc func(context.Context, *ent.MessagePolicyMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f MessagePolicyFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.MessagePolicyMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.MessagePolicyMutation", m)
+}
+
+// The MessagePolicyDecisionFunc type is an adapter to allow the use of ordinary
+// function as MessagePolicyDecision mutator.
+type MessagePolicyDecisionFunc func(context.Context, *ent.MessagePolicyDecisionMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f MessagePolicyDecisionFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.MessagePolicyDecisionMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.MessagePolicyDecisionMutation", m)
+}
+
 // The MutationAuditFunc type is an adapter to allow the use of ordinary
 // function as MutationAudit mutator.
 type MutationAuditFunc func(context.Context, *ent.MutationAuditMutation) (ent.Value, error)

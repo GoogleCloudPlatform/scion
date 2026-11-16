@@ -590,6 +590,9 @@ type Store interface {
 
 	// System One provider instances (ptone/scion#8044)
 	SystemOneInstanceStore
+
+	// Project-scoped message admission policies and decisions (ptone/scion#8047)
+	MessagePolicyStore
 }
 
 // AgentStore defines agent-related persistence operations.

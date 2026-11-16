@@ -78,6 +78,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/membershiplosscheck"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/message"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/messageaddressee"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/messagepolicy"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/messagepolicydecision"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/mutationaudit"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/noncecache"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/notification"
@@ -253,6 +255,10 @@ type Client struct {
 	Message *MessageClient
 	// MessageAddressee is the client for interacting with the MessageAddressee builders.
 	MessageAddressee *MessageAddresseeClient
+	// MessagePolicy is the client for interacting with the MessagePolicy builders.
+	MessagePolicy *MessagePolicyClient
+	// MessagePolicyDecision is the client for interacting with the MessagePolicyDecision builders.
+	MessagePolicyDecision *MessagePolicyDecisionClient
 	// MutationAudit is the client for interacting with the MutationAudit builders.
 	MutationAudit *MutationAuditClient
 	// NonceCache is the client for interacting with the NonceCache builders.
@@ -414,6 +420,8 @@ func (c *Client) init() {
 	c.MembershipLossCheck = NewMembershipLossCheckClient(c.config)
 	c.Message = NewMessageClient(c.config)
 	c.MessageAddressee = NewMessageAddresseeClient(c.config)
+	c.MessagePolicy = NewMessagePolicyClient(c.config)
+	c.MessagePolicyDecision = NewMessagePolicyDecisionClient(c.config)
 	c.MutationAudit = NewMutationAuditClient(c.config)
 	c.NonceCache = NewNonceCacheClient(c.config)
 	c.Notification = NewNotificationClient(c.config)
@@ -612,6 +620,8 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		MembershipLossCheck:           NewMembershipLossCheckClient(cfg),
 		Message:                       NewMessageClient(cfg),
 		MessageAddressee:              NewMessageAddresseeClient(cfg),
+		MessagePolicy:                 NewMessagePolicyClient(cfg),
+		MessagePolicyDecision:         NewMessagePolicyDecisionClient(cfg),
 		MutationAudit:                 NewMutationAuditClient(cfg),
 		NonceCache:                    NewNonceCacheClient(cfg),
 		Notification:                  NewNotificationClient(cfg),
@@ -737,6 +747,8 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		MembershipLossCheck:           NewMembershipLossCheckClient(cfg),
 		Message:                       NewMessageClient(cfg),
 		MessageAddressee:              NewMessageAddresseeClient(cfg),
+		MessagePolicy:                 NewMessagePolicyClient(cfg),
+		MessagePolicyDecision:         NewMessagePolicyDecisionClient(cfg),
 		MutationAudit:                 NewMutationAuditClient(cfg),
 		NonceCache:                    NewNonceCacheClient(cfg),
 		Notification:                  NewNotificationClient(cfg),
@@ -827,14 +839,14 @@ func (c *Client) Use(hooks ...Hook) {
 		c.IntegrationUpdate, c.InviteCode, c.LaunchReaperState, c.LifecycleHook,
 		c.LifecycleHookAgentPhase, c.LimitDefinition, c.MaintenanceOperation,
 		c.MaintenanceOperationRun, c.MembershipLossCheck, c.Message,
-		c.MessageAddressee, c.MutationAudit, c.NonceCache, c.Notification,
-		c.NotificationSubscription, c.PendingSecret, c.PolicyBinding, c.Project,
-		c.ProjectContributor, c.ProjectPreStartHook, c.ProjectSyncState,
-		c.ProjectVisitorExclusion, c.ProjectVisitorRule, c.RelayInstance,
-		c.RoleBinding, c.RoleDefinition, c.RuntimeBroker, c.RuntimeOrphan, c.Schedule,
-		c.ScheduledEvent, c.ScheduledExecPollCursor, c.ScheduledExecRun, c.Secret,
-		c.Skill, c.SkillInjection, c.SkillRegistry, c.SkillVersion,
-		c.SubscriptionTemplate, c.SystemOneInstance, c.Template,
+		c.MessageAddressee, c.MessagePolicy, c.MessagePolicyDecision, c.MutationAudit,
+		c.NonceCache, c.Notification, c.NotificationSubscription, c.PendingSecret,
+		c.PolicyBinding, c.Project, c.ProjectContributor, c.ProjectPreStartHook,
+		c.ProjectSyncState, c.ProjectVisitorExclusion, c.ProjectVisitorRule,
+		c.RelayInstance, c.RoleBinding, c.RoleDefinition, c.RuntimeBroker,
+		c.RuntimeOrphan, c.Schedule, c.ScheduledEvent, c.ScheduledExecPollCursor,
+		c.ScheduledExecRun, c.Secret, c.Skill, c.SkillInjection, c.SkillRegistry,
+		c.SkillVersion, c.SubscriptionTemplate, c.SystemOneInstance, c.Template,
 		c.TestIdentityDelegation, c.TestIdentityLoginCode, c.TestInfraMarker,
 		c.ThreadGroup, c.ThreadGroupMember, c.Trigger, c.TriggerEvent, c.TriggerFire,
 		c.UsageReservation, c.User, c.UserAccessToken, c.UserDeletion,
@@ -865,14 +877,14 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.IntegrationUpdate, c.InviteCode, c.LaunchReaperState, c.LifecycleHook,
 		c.LifecycleHookAgentPhase, c.LimitDefinition, c.MaintenanceOperation,
 		c.MaintenanceOperationRun, c.MembershipLossCheck, c.Message,
-		c.MessageAddressee, c.MutationAudit, c.NonceCache, c.Notification,
-		c.NotificationSubscription, c.PendingSecret, c.PolicyBinding, c.Project,
-		c.ProjectContributor, c.ProjectPreStartHook, c.ProjectSyncState,
-		c.ProjectVisitorExclusion, c.ProjectVisitorRule, c.RelayInstance,
-		c.RoleBinding, c.RoleDefinition, c.RuntimeBroker, c.RuntimeOrphan, c.Schedule,
-		c.ScheduledEvent, c.ScheduledExecPollCursor, c.ScheduledExecRun, c.Secret,
-		c.Skill, c.SkillInjection, c.SkillRegistry, c.SkillVersion,
-		c.SubscriptionTemplate, c.SystemOneInstance, c.Template,
+		c.MessageAddressee, c.MessagePolicy, c.MessagePolicyDecision, c.MutationAudit,
+		c.NonceCache, c.Notification, c.NotificationSubscription, c.PendingSecret,
+		c.PolicyBinding, c.Project, c.ProjectContributor, c.ProjectPreStartHook,
+		c.ProjectSyncState, c.ProjectVisitorExclusion, c.ProjectVisitorRule,
+		c.RelayInstance, c.RoleBinding, c.RoleDefinition, c.RuntimeBroker,
+		c.RuntimeOrphan, c.Schedule, c.ScheduledEvent, c.ScheduledExecPollCursor,
+		c.ScheduledExecRun, c.Secret, c.Skill, c.SkillInjection, c.SkillRegistry,
+		c.SkillVersion, c.SubscriptionTemplate, c.SystemOneInstance, c.Template,
 		c.TestIdentityDelegation, c.TestIdentityLoginCode, c.TestInfraMarker,
 		c.ThreadGroup, c.ThreadGroupMember, c.Trigger, c.TriggerEvent, c.TriggerFire,
 		c.UsageReservation, c.User, c.UserAccessToken, c.UserDeletion,
@@ -1009,6 +1021,10 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.Message.mutate(ctx, m)
 	case *MessageAddresseeMutation:
 		return c.MessageAddressee.mutate(ctx, m)
+	case *MessagePolicyMutation:
+		return c.MessagePolicy.mutate(ctx, m)
+	case *MessagePolicyDecisionMutation:
+		return c.MessagePolicyDecision.mutate(ctx, m)
 	case *MutationAuditMutation:
 		return c.MutationAudit.mutate(ctx, m)
 	case *NonceCacheMutation:
@@ -9716,6 +9732,272 @@ func (c *MessageAddresseeClient) mutate(ctx context.Context, m *MessageAddressee
 	}
 }
 
+// MessagePolicyClient is a client for the MessagePolicy schema.
+type MessagePolicyClient struct {
+	config
+}
+
+// NewMessagePolicyClient returns a client for the MessagePolicy from the given config.
+func NewMessagePolicyClient(c config) *MessagePolicyClient {
+	return &MessagePolicyClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `messagepolicy.Hooks(f(g(h())))`.
+func (c *MessagePolicyClient) Use(hooks ...Hook) {
+	c.hooks.MessagePolicy = append(c.hooks.MessagePolicy, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `messagepolicy.Intercept(f(g(h())))`.
+func (c *MessagePolicyClient) Intercept(interceptors ...Interceptor) {
+	c.inters.MessagePolicy = append(c.inters.MessagePolicy, interceptors...)
+}
+
+// Create returns a builder for creating a MessagePolicy entity.
+func (c *MessagePolicyClient) Create() *MessagePolicyCreate {
+	mutation := newMessagePolicyMutation(c.config, OpCreate)
+	return &MessagePolicyCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of MessagePolicy entities.
+func (c *MessagePolicyClient) CreateBulk(builders ...*MessagePolicyCreate) *MessagePolicyCreateBulk {
+	return &MessagePolicyCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *MessagePolicyClient) MapCreateBulk(slice any, setFunc func(*MessagePolicyCreate, int)) *MessagePolicyCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &MessagePolicyCreateBulk{err: fmt.Errorf("calling to MessagePolicyClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*MessagePolicyCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &MessagePolicyCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for MessagePolicy.
+func (c *MessagePolicyClient) Update() *MessagePolicyUpdate {
+	mutation := newMessagePolicyMutation(c.config, OpUpdate)
+	return &MessagePolicyUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *MessagePolicyClient) UpdateOne(_m *MessagePolicy) *MessagePolicyUpdateOne {
+	mutation := newMessagePolicyMutation(c.config, OpUpdateOne, withMessagePolicy(_m))
+	return &MessagePolicyUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *MessagePolicyClient) UpdateOneID(id uuid.UUID) *MessagePolicyUpdateOne {
+	mutation := newMessagePolicyMutation(c.config, OpUpdateOne, withMessagePolicyID(id))
+	return &MessagePolicyUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for MessagePolicy.
+func (c *MessagePolicyClient) Delete() *MessagePolicyDelete {
+	mutation := newMessagePolicyMutation(c.config, OpDelete)
+	return &MessagePolicyDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *MessagePolicyClient) DeleteOne(_m *MessagePolicy) *MessagePolicyDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *MessagePolicyClient) DeleteOneID(id uuid.UUID) *MessagePolicyDeleteOne {
+	builder := c.Delete().Where(messagepolicy.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &MessagePolicyDeleteOne{builder}
+}
+
+// Query returns a query builder for MessagePolicy.
+func (c *MessagePolicyClient) Query() *MessagePolicyQuery {
+	return &MessagePolicyQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeMessagePolicy},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a MessagePolicy entity by its id.
+func (c *MessagePolicyClient) Get(ctx context.Context, id uuid.UUID) (*MessagePolicy, error) {
+	return c.Query().Where(messagepolicy.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *MessagePolicyClient) GetX(ctx context.Context, id uuid.UUID) *MessagePolicy {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *MessagePolicyClient) Hooks() []Hook {
+	return c.hooks.MessagePolicy
+}
+
+// Interceptors returns the client interceptors.
+func (c *MessagePolicyClient) Interceptors() []Interceptor {
+	return c.inters.MessagePolicy
+}
+
+func (c *MessagePolicyClient) mutate(ctx context.Context, m *MessagePolicyMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&MessagePolicyCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&MessagePolicyUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&MessagePolicyUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&MessagePolicyDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown MessagePolicy mutation op: %q", m.Op())
+	}
+}
+
+// MessagePolicyDecisionClient is a client for the MessagePolicyDecision schema.
+type MessagePolicyDecisionClient struct {
+	config
+}
+
+// NewMessagePolicyDecisionClient returns a client for the MessagePolicyDecision from the given config.
+func NewMessagePolicyDecisionClient(c config) *MessagePolicyDecisionClient {
+	return &MessagePolicyDecisionClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `messagepolicydecision.Hooks(f(g(h())))`.
+func (c *MessagePolicyDecisionClient) Use(hooks ...Hook) {
+	c.hooks.MessagePolicyDecision = append(c.hooks.MessagePolicyDecision, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `messagepolicydecision.Intercept(f(g(h())))`.
+func (c *MessagePolicyDecisionClient) Intercept(interceptors ...Interceptor) {
+	c.inters.MessagePolicyDecision = append(c.inters.MessagePolicyDecision, interceptors...)
+}
+
+// Create returns a builder for creating a MessagePolicyDecision entity.
+func (c *MessagePolicyDecisionClient) Create() *MessagePolicyDecisionCreate {
+	mutation := newMessagePolicyDecisionMutation(c.config, OpCreate)
+	return &MessagePolicyDecisionCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of MessagePolicyDecision entities.
+func (c *MessagePolicyDecisionClient) CreateBulk(builders ...*MessagePolicyDecisionCreate) *MessagePolicyDecisionCreateBulk {
+	return &MessagePolicyDecisionCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *MessagePolicyDecisionClient) MapCreateBulk(slice any, setFunc func(*MessagePolicyDecisionCreate, int)) *MessagePolicyDecisionCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &MessagePolicyDecisionCreateBulk{err: fmt.Errorf("calling to MessagePolicyDecisionClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*MessagePolicyDecisionCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &MessagePolicyDecisionCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for MessagePolicyDecision.
+func (c *MessagePolicyDecisionClient) Update() *MessagePolicyDecisionUpdate {
+	mutation := newMessagePolicyDecisionMutation(c.config, OpUpdate)
+	return &MessagePolicyDecisionUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *MessagePolicyDecisionClient) UpdateOne(_m *MessagePolicyDecision) *MessagePolicyDecisionUpdateOne {
+	mutation := newMessagePolicyDecisionMutation(c.config, OpUpdateOne, withMessagePolicyDecision(_m))
+	return &MessagePolicyDecisionUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *MessagePolicyDecisionClient) UpdateOneID(id uuid.UUID) *MessagePolicyDecisionUpdateOne {
+	mutation := newMessagePolicyDecisionMutation(c.config, OpUpdateOne, withMessagePolicyDecisionID(id))
+	return &MessagePolicyDecisionUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for MessagePolicyDecision.
+func (c *MessagePolicyDecisionClient) Delete() *MessagePolicyDecisionDelete {
+	mutation := newMessagePolicyDecisionMutation(c.config, OpDelete)
+	return &MessagePolicyDecisionDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *MessagePolicyDecisionClient) DeleteOne(_m *MessagePolicyDecision) *MessagePolicyDecisionDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *MessagePolicyDecisionClient) DeleteOneID(id uuid.UUID) *MessagePolicyDecisionDeleteOne {
+	builder := c.Delete().Where(messagepolicydecision.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &MessagePolicyDecisionDeleteOne{builder}
+}
+
+// Query returns a query builder for MessagePolicyDecision.
+func (c *MessagePolicyDecisionClient) Query() *MessagePolicyDecisionQuery {
+	return &MessagePolicyDecisionQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeMessagePolicyDecision},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a MessagePolicyDecision entity by its id.
+func (c *MessagePolicyDecisionClient) Get(ctx context.Context, id uuid.UUID) (*MessagePolicyDecision, error) {
+	return c.Query().Where(messagepolicydecision.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *MessagePolicyDecisionClient) GetX(ctx context.Context, id uuid.UUID) *MessagePolicyDecision {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *MessagePolicyDecisionClient) Hooks() []Hook {
+	return c.hooks.MessagePolicyDecision
+}
+
+// Interceptors returns the client interceptors.
+func (c *MessagePolicyDecisionClient) Interceptors() []Interceptor {
+	return c.inters.MessagePolicyDecision
+}
+
+func (c *MessagePolicyDecisionClient) mutate(ctx context.Context, m *MessagePolicyDecisionMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&MessagePolicyDecisionCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&MessagePolicyDecisionUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&MessagePolicyDecisionUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&MessagePolicyDecisionDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown MessagePolicyDecision mutation op: %q", m.Op())
+	}
+}
+
 // MutationAuditClient is a client for the MutationAudit schema.
 type MutationAuditClient struct {
 	config
@@ -15922,17 +16204,17 @@ type (
 		HubSetting, IntegrationConfig, IntegrationUpdate, InviteCode,
 		LaunchReaperState, LifecycleHook, LifecycleHookAgentPhase, LimitDefinition,
 		MaintenanceOperation, MaintenanceOperationRun, MembershipLossCheck, Message,
-		MessageAddressee, MutationAudit, NonceCache, Notification,
-		NotificationSubscription, PendingSecret, PolicyBinding, Project,
-		ProjectContributor, ProjectPreStartHook, ProjectSyncState,
-		ProjectVisitorExclusion, ProjectVisitorRule, RelayInstance, RoleBinding,
-		RoleDefinition, RuntimeBroker, RuntimeOrphan, Schedule, ScheduledEvent,
-		ScheduledExecPollCursor, ScheduledExecRun, Secret, Skill, SkillInjection,
-		SkillRegistry, SkillVersion, SubscriptionTemplate, SystemOneInstance, Template,
-		TestIdentityDelegation, TestIdentityLoginCode, TestInfraMarker, ThreadGroup,
-		ThreadGroupMember, Trigger, TriggerEvent, TriggerFire, UsageReservation, User,
-		UserAccessToken, UserDeletion, UserDeletionAgent, UserTerminalWorkspace,
-		WebhookEndpoint []ent.Hook
+		MessageAddressee, MessagePolicy, MessagePolicyDecision, MutationAudit,
+		NonceCache, Notification, NotificationSubscription, PendingSecret,
+		PolicyBinding, Project, ProjectContributor, ProjectPreStartHook,
+		ProjectSyncState, ProjectVisitorExclusion, ProjectVisitorRule, RelayInstance,
+		RoleBinding, RoleDefinition, RuntimeBroker, RuntimeOrphan, Schedule,
+		ScheduledEvent, ScheduledExecPollCursor, ScheduledExecRun, Secret, Skill,
+		SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate,
+		SystemOneInstance, Template, TestIdentityDelegation, TestIdentityLoginCode,
+		TestInfraMarker, ThreadGroup, ThreadGroupMember, Trigger, TriggerEvent,
+		TriggerFire, UsageReservation, User, UserAccessToken, UserDeletion,
+		UserDeletionAgent, UserTerminalWorkspace, WebhookEndpoint []ent.Hook
 	}
 	inters struct {
 		AccessConstraint, AccessConstraintHistory, AccessPolicy, Agent, AgentCredential,
@@ -15950,16 +16232,16 @@ type (
 		HubSetting, IntegrationConfig, IntegrationUpdate, InviteCode,
 		LaunchReaperState, LifecycleHook, LifecycleHookAgentPhase, LimitDefinition,
 		MaintenanceOperation, MaintenanceOperationRun, MembershipLossCheck, Message,
-		MessageAddressee, MutationAudit, NonceCache, Notification,
-		NotificationSubscription, PendingSecret, PolicyBinding, Project,
-		ProjectContributor, ProjectPreStartHook, ProjectSyncState,
-		ProjectVisitorExclusion, ProjectVisitorRule, RelayInstance, RoleBinding,
-		RoleDefinition, RuntimeBroker, RuntimeOrphan, Schedule, ScheduledEvent,
-		ScheduledExecPollCursor, ScheduledExecRun, Secret, Skill, SkillInjection,
-		SkillRegistry, SkillVersion, SubscriptionTemplate, SystemOneInstance, Template,
-		TestIdentityDelegation, TestIdentityLoginCode, TestInfraMarker, ThreadGroup,
-		ThreadGroupMember, Trigger, TriggerEvent, TriggerFire, UsageReservation, User,
-		UserAccessToken, UserDeletion, UserDeletionAgent, UserTerminalWorkspace,
-		WebhookEndpoint []ent.Interceptor
+		MessageAddressee, MessagePolicy, MessagePolicyDecision, MutationAudit,
+		NonceCache, Notification, NotificationSubscription, PendingSecret,
+		PolicyBinding, Project, ProjectContributor, ProjectPreStartHook,
+		ProjectSyncState, ProjectVisitorExclusion, ProjectVisitorRule, RelayInstance,
+		RoleBinding, RoleDefinition, RuntimeBroker, RuntimeOrphan, Schedule,
+		ScheduledEvent, ScheduledExecPollCursor, ScheduledExecRun, Secret, Skill,
+		SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate,
+		SystemOneInstance, Template, TestIdentityDelegation, TestIdentityLoginCode,
+		TestInfraMarker, ThreadGroup, ThreadGroupMember, Trigger, TriggerEvent,
+		TriggerFire, UsageReservation, User, UserAccessToken, UserDeletion,
+		UserDeletionAgent, UserTerminalWorkspace, WebhookEndpoint []ent.Interceptor
 	}
 )
