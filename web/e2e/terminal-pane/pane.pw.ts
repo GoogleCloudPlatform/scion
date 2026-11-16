@@ -243,12 +243,10 @@ test('capture-auth scope/conflict retry and upload use the pane identity after r
     .toBe(2);
   const execs = peer.requests.filter((request) => request.url.endsWith('/exec'));
   expect(execs.every((request) => request.url.endsWith(`/agents/${agentId}/exec`))).toBe(true);
-  expect((JSON.parse(execs[0].body!) as { command: string[] }).command).toEqual([
-    'python3',
-    '/home/scion/.scion/harness/capture_auth.py',
-    '--scope',
-    'user',
-  ]);
+  const firstCommand = (JSON.parse(execs[0].body!) as { command: string[] }).command;
+  expect(firstCommand.slice(0, 2)).toEqual(['python3', '-c']);
+  expect(firstCommand[2]).toContain('/home/scion/.scion/harness/capture_auth.py');
+  expect(firstCommand.slice(3)).toEqual(['--scope', 'user']);
   expect((JSON.parse(execs[1].body!) as { command: string[] }).command.at(-1)).toBe('--force');
   await page.locator('.terminal-wrapper').evaluate((element) => {
     const transfer = new DataTransfer();

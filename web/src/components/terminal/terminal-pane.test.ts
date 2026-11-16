@@ -1184,6 +1184,110 @@ describe('Capture Auth scope dialog (design ptone/scion#2291 §7)', () => {
     expect(conflicts).toBeNull();
   });
 
+  // ptone/scion#8121: when container-script harnesses are disallowed, fallback
+  // capture_auth.py is not staged (ptone/scion#622). Running python3 directly
+  // on a missing script path exits 2 (colliding with _CA_EXIT_NO_CREDS = 2),
+  // so /exec prechecks file existence and exits 127 when the script is absent.
+  it('missing capture_auth.py (exit 127): prechecks script existence and shows unavailable toast instead of no-credentials or generic failure', async () => {
+    await makeCaptureEligible();
+    let execBody: { command: string[] } | null = null;
+    fetcher.mockImplementation((url, init) => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+      if (path.includes('/api/v1/settings/public')) {
+        return Promise.resolve(json({ agentSecretsUserScopeOnly: false }));
+      }
+      if (path.includes('/exec')) {
+        execBody = JSON.parse(init!.body as string) as { command: string[] };
+        return Promise.resolve(json({ output: '', exitCode: 127 }));
+      }
+      return Promise.resolve(json(noAuthAgent));
+    });
+
+    await openDialog();
+    clickCapture();
+
+    await vi.waitFor(() => expect(showToast).toHaveBeenCalled());
+    expect(execBody).not.toBeNull();
+    expect(execBody!.command.slice(0, 2)).toEqual(['python3', '-c']);
+    expect(execBody!.command[2]).toContain('/home/scion/.scion/harness/capture_auth.py');
+    expect(execBody!.command[2]).toContain('os.path.isfile');
+    expect(execBody!.command[2]).toContain('127');
+    expect(execBody!.command.slice(3)).toEqual(['--scope', 'project']);
+
+    expect(showToast).toHaveBeenCalledWith(
+      'Capture Auth is unavailable for this agent: no capture script is installed (container-script harnesses may be disabled on its broker).',
+      'warning'
+    );
+    expect(showToast.mock.calls[0][0]).not.toContain('No credentials found yet');
+    expect(showToast.mock.calls[0][0]).not.toContain('Capture failed');
+    const conflicts = (page as unknown as { captureAuthConflicts: string[] | null })
+      .captureAuthConflicts;
+    expect(conflicts).toBeNull();
+  });
+
+  it('exit 0: shows success toast when credentials are captured', async () => {
+    await makeCaptureEligible();
+    fetcher.mockImplementation((url) => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+      if (path.includes('/api/v1/settings/public')) {
+        return Promise.resolve(json({ agentSecretsUserScopeOnly: false }));
+      }
+      if (path.includes('/exec')) {
+        return Promise.resolve(json({ output: '', exitCode: 0 }));
+      }
+      return Promise.resolve(json(noAuthAgent));
+    });
+
+    await openDialog();
+    clickCapture();
+    await vi.waitFor(() =>
+      expect(showToast).toHaveBeenCalledWith('Credentials captured successfully.', 'success')
+    );
+  });
+
+  it('exit 2: shows no-credentials toast when capture_auth.py finds no credentials', async () => {
+    await makeCaptureEligible();
+    fetcher.mockImplementation((url) => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+      if (path.includes('/api/v1/settings/public')) {
+        return Promise.resolve(json({ agentSecretsUserScopeOnly: false }));
+      }
+      if (path.includes('/exec')) {
+        return Promise.resolve(
+          json({ output: 'capture-auth: no credentials found to capture', exitCode: 2 })
+        );
+      }
+      return Promise.resolve(json(noAuthAgent));
+    });
+
+    await openDialog();
+    clickCapture();
+    await vi.waitFor(() =>
+      expect(showToast).toHaveBeenCalledWith(
+        'No credentials found yet. Authenticate first, then try again.',
+        'neutral'
+      )
+    );
+  });
+
+  it('other non-zero exit codes: shows generic capture failed toast', async () => {
+    await makeCaptureEligible();
+    fetcher.mockImplementation((url) => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+      if (path.includes('/api/v1/settings/public')) {
+        return Promise.resolve(json({ agentSecretsUserScopeOnly: false }));
+      }
+      if (path.includes('/exec')) {
+        return Promise.resolve(json({ output: 'unexpected error', exitCode: 1 }));
+      }
+      return Promise.resolve(json(noAuthAgent));
+    });
+
+    await openDialog();
+    clickCapture();
+    await vi.waitFor(() => expect(showToast).toHaveBeenCalledWith('Capture failed (exit 1).'));
+  });
+
   // ptone/scion#5311 keeps §7's fresh read: the dialog bypasses the shared
   // per-page cache on every open, so a policy an admin turned off in another
   // tab re-enables Project on the next open, and the fresh result refreshes

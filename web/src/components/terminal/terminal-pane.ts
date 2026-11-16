@@ -1825,6 +1825,16 @@ export class ScionTerminalPane extends LitElement {
     return isNoAuth && !!agent.resolvedHarness;
   }
 
+  private static readonly CAPTURE_AUTH_SCRIPT_PATH = '/home/scion/.scion/harness/capture_auth.py';
+
+  /**
+   * Exit code returned by the python3 precheck when capture_auth.py is not
+   * staged in the container (for example when container-script harnesses are
+   * disallowed on the broker, ptone/scion#8121). Invoking python3 directly on
+   * a missing file exits 2, colliding with capture_auth.py's no-creds exit 2.
+   */
+  private static readonly CAPTURE_AUTH_MISSING_EXIT_CODE = 127;
+
   private static readonly SECRET_CONFLICT_RE = /secret "([^"]+)" already exists/g;
 
   /** Matches the 403 error code the hub returns when agent_secrets.user_scope_only
@@ -1882,7 +1892,15 @@ export class ScionTerminalPane extends LitElement {
     this.captureAuthLoading = true;
     this.captureAuthConflicts = null;
     try {
-      const command = ['python3', '/home/scion/.scion/harness/capture_auth.py', '--scope', scope];
+      const script = ScionTerminalPane.CAPTURE_AUTH_SCRIPT_PATH;
+      const missingRc = ScionTerminalPane.CAPTURE_AUTH_MISSING_EXIT_CODE;
+      const command = [
+        'python3',
+        '-c',
+        `import os, sys; p = ${JSON.stringify(script)}; os.path.isfile(p) or sys.exit(${missingRc}); os.execv(sys.executable, [sys.executable, p, *sys.argv[1:]])`,
+        '--scope',
+        scope,
+      ];
       if (force) command.push('--force');
 
       const response = await apiFetch(`/api/v1/agents/${this.agent.id}/exec`, {
@@ -1905,6 +1923,12 @@ export class ScionTerminalPane extends LitElement {
         await this.refreshAgentData();
       } else if (result.exitCode === 2) {
         showToast('No credentials found yet. Authenticate first, then try again.', 'neutral');
+        if (result.output) console.log('Capture auth output:', result.output);
+      } else if (result.exitCode === ScionTerminalPane.CAPTURE_AUTH_MISSING_EXIT_CODE) {
+        showToast(
+          'Capture Auth is unavailable for this agent: no capture script is installed (container-script harnesses may be disabled on its broker).',
+          'warning'
+        );
         if (result.output) console.log('Capture auth output:', result.output);
       } else if (ScionTerminalPane.SECRET_SCOPE_RESTRICTED_RE.test(result.output)) {
         // Checked before the conflict regex (design §7): a policy rejection
