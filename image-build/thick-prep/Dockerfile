@@ -162,7 +162,6 @@ RUN /opt/scion-image-build/lib/install-core-toolchain.sh npm-global
 # with NPM_CONFIG_PREFIX unset, `npm install -g` targets /usr/lib/node_modules
 # and fails on permissions for the scion user.
 ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global
-ENV PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/ms-playwright
 ENV PATH=/usr/local/share/npm-global/bin:/usr/local/go/bin:$PATH
 
 # Same corporate-mirror escape hatches core-base offers; see that file. Having

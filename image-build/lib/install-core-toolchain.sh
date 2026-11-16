@@ -573,23 +573,18 @@ step_npm_tools() {
 # revision is wired automatically at image-build time.
 PLAYWRIGHT_FFMPEG_REVISIONS="1009 1010 1011 1012 1013"
 
-# Wire Playwright's browser registry to the system ffmpeg binary.
+# Seed an immutable 0755 root:root Playwright ffmpeg tree at
+# /usr/local/share/scion-playwright-ffmpeg.
 #
 # Playwright's VideoRecorder does not consult PATH or an ffmpeg-specific env
-# var; it resolves <PLAYWRIGHT_BROWSERS_PATH>/ffmpeg-<rev>/ffmpeg-linux on both
-# linux-x64 and linux-arm64. /home/scion cannot hold this cache because agent
-# home is bind-mounted over /home/scion at container start, so the Dockerfiles
-# export ENV PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/ms-playwright.
-#
-# Both the registry root and .links use mode 1777 (sticky world-writable) so
-# non-root agents — including workstation runs where sciontool init remaps the
-# scion UID — can acquire __dirlock and run `npx playwright install webkit`
-# while the root-owned ffmpeg-<rev> entries stay protected. Each revision also
-# gets INSTALLATION_COMPLETE, browsers.json, package.json (read by
-# `playwright install --list`) and a .links back-reference (no trailing
-# newline: Playwright's _traverseBrowserInstallations reads the link target
-# verbatim without trimming) so `playwright install` neither re-downloads
-# ffmpeg nor garbage-collects other seeded revisions as unused.
+# var; it resolves <registry>/ffmpeg-<rev>/ffmpeg-linux on both linux-x64 and
+# linux-arm64. Agent images intentionally leave PLAYWRIGHT_BROWSERS_PATH unset
+# so runtime browser downloads (`npx playwright install webkit firefox`) land in
+# the persistent agent home (~/.cache/ms-playwright) rather than the ephemeral
+# container layer. Because /home/scion is bind-mounted at container start, the
+# image bakes the read-only ffmpeg-<rev> directories here and `sciontool init`
+# symlinks them (plus .links/scion-ffmpeg-<rev> GC back-references) into the
+# persistent home registry on every container start and resume.
 step_playwright_ffmpeg() {
   local ffmpeg_bin ffmpeg_ver
   ffmpeg_bin="$(command -v ffmpeg 2>/dev/null || true)"
@@ -603,7 +598,7 @@ step_playwright_ffmpeg() {
     exit 1
   fi
 
-  local browsers_dir="${PLAYWRIGHT_BROWSERS_PATH:-/usr/local/share/ms-playwright}"
+  local seed_dir="${SCION_PLAYWRIGHT_FFMPEG_SEED_DIR:-/usr/local/share/scion-playwright-ffmpeg}"
   local npm_prefix="${NPM_CONFIG_PREFIX:-/usr/local/share/npm-global}"
   local cli_browsers="${npm_prefix}/lib/node_modules/@playwright/cli/node_modules/playwright-core/browsers.json"
 
@@ -630,13 +625,13 @@ step_playwright_ffmpeg() {
     esac
   done
 
-  log "wiring Playwright ffmpeg (${ffmpeg_bin}, revisions: ${unique_revs}) in ${browsers_dir}"
-  mkdir -p "${browsers_dir}/.links"
-  chmod 1777 "${browsers_dir}" "${browsers_dir}/.links"
+  log "seeding Playwright ffmpeg (${ffmpeg_bin}, revisions: ${unique_revs}) in ${seed_dir}"
+  mkdir -p "${seed_dir}"
+  chmod 0755 "${seed_dir}"
 
   local rev_dir
   for rev in $unique_revs; do
-    rev_dir="${browsers_dir}/ffmpeg-${rev}"
+    rev_dir="${seed_dir}/ffmpeg-${rev}"
     mkdir -p "$rev_dir"
     chmod 0755 "$rev_dir"
     ln -sf "$ffmpeg_bin" "${rev_dir}/ffmpeg-linux"
@@ -644,13 +639,11 @@ step_playwright_ffmpeg() {
     : >"${rev_dir}/DEPENDENCIES_VALIDATED"
     printf '{"browsers":[{"name":"ffmpeg","revision":"%s"}]}\n' "$rev" >"${rev_dir}/browsers.json"
     printf '{"name":"scion-system-ffmpeg","version":"0.0.0"}\n' >"${rev_dir}/package.json"
-    printf '%s' "$rev_dir" >"${browsers_dir}/.links/scion-ffmpeg-${rev}"
     chmod 0644 \
       "${rev_dir}/INSTALLATION_COMPLETE" \
       "${rev_dir}/DEPENDENCIES_VALIDATED" \
       "${rev_dir}/browsers.json" \
-      "${rev_dir}/package.json" \
-      "${browsers_dir}/.links/scion-ffmpeg-${rev}"
+      "${rev_dir}/package.json"
   done
 }
 

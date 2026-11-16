@@ -291,18 +291,19 @@ apt_cleanup() { echo "APT-CLEANUP"; }
 		"APT-CLEANUP")
 }
 
-// TestToolchainPlaywrightFfmpeg verifies step_playwright_ffmpeg populates a
-// sticky world-writable PLAYWRIGHT_BROWSERS_PATH registry with symlinks to the
-// system ffmpeg binary, installation markers, and GC-preserving .links entries
-// (with no trailing newline, matching Playwright's _traverseBrowserInstallations
-// reader) across known Playwright ffmpeg revisions plus any revision declared
-// by the globally installed @playwright/cli package.
+// TestToolchainPlaywrightFfmpeg verifies step_playwright_ffmpeg populates an
+// immutable 0755 root:root seed tree (/usr/local/share/scion-playwright-ffmpeg,
+// overridable via SCION_PLAYWRIGHT_FFMPEG_SEED_DIR in tests) with symlinks to
+// the system ffmpeg binary, installation markers, browsers.json, and
+// package.json across known Playwright ffmpeg revisions plus any revision
+// declared by the globally installed @playwright/cli package, without creating
+// a world-writable PLAYWRIGHT_BROWSERS_PATH registry.
 func TestToolchainPlaywrightFfmpeg(t *testing.T) {
 	t.Run("seeds baseline and dynamic cli revisions", func(t *testing.T) {
 		e := newToolchainEnv(t)
 		ffmpegBin := e.fake(e.bin, "ffmpeg", `if [ "${1:-}" = "-version" ]; then echo "ffmpeg version 7.1.5"; exit 0; fi; exit 0`)
 
-		browsersDir := filepath.Join(t.TempDir(), "ms-playwright")
+		seedDir := filepath.Join(t.TempDir(), "scion-playwright-ffmpeg")
 		npmPrefix := filepath.Join(t.TempDir(), "npm-global")
 		cliCoreDir := filepath.Join(npmPrefix, "lib", "node_modules", "@playwright", "cli", "node_modules", "playwright-core")
 		if err := os.MkdirAll(cliCoreDir, 0o755); err != nil {
@@ -313,25 +314,32 @@ func TestToolchainPlaywrightFfmpeg(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		snippet := `export PLAYWRIGHT_BROWSERS_PATH="` + browsersDir + `"
+		snippet := `export SCION_PLAYWRIGHT_FFMPEG_SEED_DIR="` + seedDir + `"
 export NPM_CONFIG_PREFIX="` + npmPrefix + `"
 step_playwright_ffmpeg`
 		out, code := e.run(systemPath, snippet)
-		expectOutput(t, "playwright-ffmpeg", out, code, 0, "wiring Playwright ffmpeg")
+		expectOutput(t, "playwright-ffmpeg", out, code, 0, "seeding Playwright ffmpeg")
 
-		for _, dir := range []string{browsersDir, filepath.Join(browsersDir, ".links")} {
-			fi, err := os.Stat(dir)
-			if err != nil {
-				t.Fatalf("stat %s: %v", dir, err)
-			}
-			wantMode := os.ModeSticky | os.FileMode(0o777)
-			if got := fi.Mode() & (os.ModeSticky | os.ModePerm); got != wantMode {
-				t.Errorf("%s mode = %v, want sticky 1777 (%v)", dir, got, wantMode)
-			}
+		fi, err := os.Stat(seedDir)
+		if err != nil {
+			t.Fatalf("stat %s: %v", seedDir, err)
+		}
+		if got := fi.Mode() & (os.ModeSticky | os.ModePerm); got != 0o755 {
+			t.Errorf("%s mode = %v, want 0755", seedDir, got)
+		}
+		if _, err := os.Lstat(filepath.Join(seedDir, ".links")); !os.IsNotExist(err) {
+			t.Errorf("seed dir should not contain .links (found err=%v); .links are seeded into the persistent home registry by sciontool init", err)
 		}
 
 		for _, rev := range []string{"1009", "1010", "1011", "1012", "1013", "1099"} {
-			revDir := filepath.Join(browsersDir, "ffmpeg-"+rev)
+			revDir := filepath.Join(seedDir, "ffmpeg-"+rev)
+			rfi, err := os.Stat(revDir)
+			if err != nil {
+				t.Fatalf("stat %s: %v", revDir, err)
+			}
+			if got := rfi.Mode() & (os.ModeSticky | os.ModePerm); got != 0o755 {
+				t.Errorf("%s mode = %v, want 0755", revDir, got)
+			}
 			target, err := os.Readlink(filepath.Join(revDir, "ffmpeg-linux"))
 			if err != nil {
 				t.Fatalf("readlink ffmpeg-%s/ffmpeg-linux: %v", rev, err)
@@ -360,30 +368,21 @@ step_playwright_ffmpeg`
 			if !strings.Contains(string(pkgBytes), `"version":"0.0.0"`) {
 				t.Errorf("ffmpeg-%s/package.json = %q, want semver version field", rev, pkgBytes)
 			}
-			// Playwright's _traverseBrowserInstallations reads .links/* without
-			// trimming trailing whitespace before path.join(linkTarget, "browsers.json").
-			linkBytes, err := os.ReadFile(filepath.Join(browsersDir, ".links", "scion-ffmpeg-"+rev))
-			if err != nil {
-				t.Fatalf("read .links/scion-ffmpeg-%s: %v", rev, err)
-			}
-			if string(linkBytes) != revDir {
-				t.Errorf(".links/scion-ffmpeg-%s = %q, want exact %q (no trailing newline)", rev, string(linkBytes), revDir)
-			}
 		}
 	})
 
 	t.Run("works when @playwright/cli browsers.json is absent", func(t *testing.T) {
 		e := newToolchainEnv(t)
 		e.fake(e.bin, "ffmpeg", `echo "ffmpeg version 7.1.5"`)
-		browsersDir := filepath.Join(t.TempDir(), "ms-playwright")
+		seedDir := filepath.Join(t.TempDir(), "scion-playwright-ffmpeg")
 		npmPrefix := filepath.Join(t.TempDir(), "empty-npm")
 
-		out, code := e.run(systemPath, `export PLAYWRIGHT_BROWSERS_PATH="`+browsersDir+`"
+		out, code := e.run(systemPath, `export SCION_PLAYWRIGHT_FFMPEG_SEED_DIR="`+seedDir+`"
 export NPM_CONFIG_PREFIX="`+npmPrefix+`"
 step_playwright_ffmpeg`)
-		expectOutput(t, "without cli browsers.json", out, code, 0, "wiring Playwright ffmpeg")
+		expectOutput(t, "without cli browsers.json", out, code, 0, "seeding Playwright ffmpeg")
 		for _, rev := range []string{"1011", "1013"} {
-			if _, err := os.Stat(filepath.Join(browsersDir, "ffmpeg-"+rev, "ffmpeg-linux")); err != nil {
+			if _, err := os.Stat(filepath.Join(seedDir, "ffmpeg-"+rev, "ffmpeg-linux")); err != nil {
 				t.Errorf("ffmpeg-%s/ffmpeg-linux missing: %v", rev, err)
 			}
 		}
@@ -391,7 +390,7 @@ step_playwright_ffmpeg`)
 
 	t.Run("fails when ffmpeg is missing or broken", func(t *testing.T) {
 		e := newToolchainEnv(t)
-		browsersDir := filepath.Join(t.TempDir(), "ms-playwright")
+		seedDir := filepath.Join(t.TempDir(), "scion-playwright-ffmpeg")
 		// Restrict PATH to fake bin + basic coreutils without /usr/bin/ffmpeg:
 		// place symlinks to needed utilities in a clean dir so host ffmpeg is hidden.
 		cleanSys := filepath.Join(t.TempDir(), "sys")
@@ -404,22 +403,22 @@ step_playwright_ffmpeg`)
 			}
 		}
 
-		out, code := e.run(":"+cleanSys, `export PLAYWRIGHT_BROWSERS_PATH="`+browsersDir+`"; step_playwright_ffmpeg`)
+		out, code := e.run(":"+cleanSys, `export SCION_PLAYWRIGHT_FFMPEG_SEED_DIR="`+seedDir+`"; step_playwright_ffmpeg`)
 		expectOutput(t, "missing ffmpeg", out, code, 1, "FAIL: ffmpeg not found")
 
 		e.fake(e.bin, "ffmpeg", broken)
-		out, code = e.run(":"+cleanSys, `export PLAYWRIGHT_BROWSERS_PATH="`+browsersDir+`"; step_playwright_ffmpeg`)
+		out, code = e.run(":"+cleanSys, `export SCION_PLAYWRIGHT_FFMPEG_SEED_DIR="`+seedDir+`"; step_playwright_ffmpeg`)
 		expectOutput(t, "broken ffmpeg", out, code, 1, "FAIL: ffmpeg")
 	})
 
 	t.Run("dispatches via main", func(t *testing.T) {
 		e := newToolchainEnv(t)
 		e.fake(e.bin, "ffmpeg", `echo "ffmpeg version 7.1.5"`)
-		browsersDir := filepath.Join(t.TempDir(), "ms-playwright")
+		seedDir := filepath.Join(t.TempDir(), "scion-playwright-ffmpeg")
 		cmd := exec.Command("bash", e.script, "playwright-ffmpeg")
 		cmd.Env = []string{
 			"PATH=" + e.bin + systemPath,
-			"PLAYWRIGHT_BROWSERS_PATH=" + browsersDir,
+			"SCION_PLAYWRIGHT_FFMPEG_SEED_DIR=" + seedDir,
 			"NPM_CONFIG_PREFIX=" + filepath.Join(t.TempDir(), "empty-npm"),
 			"LC_ALL=C",
 		}
@@ -427,7 +426,7 @@ step_playwright_ffmpeg`)
 		if err != nil {
 			t.Fatalf("bash %s playwright-ffmpeg failed: %v\n%s", e.script, err, out)
 		}
-		if _, err := os.Stat(filepath.Join(browsersDir, "ffmpeg-1013", "ffmpeg-linux")); err != nil {
+		if _, err := os.Stat(filepath.Join(seedDir, "ffmpeg-1013", "ffmpeg-linux")); err != nil {
 			t.Errorf("dispatched run did not create ffmpeg-1013/ffmpeg-linux: %v", err)
 		}
 	})

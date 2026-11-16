@@ -470,15 +470,15 @@ debian13)
 esac
 
 # ---------------------------------------------------------------------------
-# ffmpeg and Playwright video-recording registry — Playwright's VideoRecorder
+# ffmpeg and Playwright video-recording seed tree — Playwright's VideoRecorder
 # (recordVideo / `playwright-cli video-start`) encodes screencast frames to
 # WebM via libvpx (Playwright <=1.64, revision 1011) or libvpx-vp9 (1.65+,
 # revision 1013), and agents also run ffmpeg directly for MP4/GIF/voice-over
-# conversion. Playwright resolves <PLAYWRIGHT_BROWSERS_PATH>/ffmpeg-<rev>/
-# ffmpeg-linux rather than searching PATH, and /home/scion is shadowed at
-# container start by the agent-home bind mount, so the registry lives at
-# /usr/local/share/ms-playwright with sticky 1777 permissions so non-root
-# agents can still run `npx playwright install webkit firefox` alongside it.
+# conversion. PLAYWRIGHT_BROWSERS_PATH stays unset in the image so runtime
+# browser downloads (`npx playwright install webkit firefox`) persist in
+# ~/.cache/ms-playwright across restarts; the base image bakes an immutable
+# 0755 seed tree at /usr/local/share/scion-playwright-ffmpeg that `sciontool
+# init` symlinks into ~/.cache/ms-playwright at container start.
 # ---------------------------------------------------------------------------
 if command -v ffmpeg >/dev/null 2>&1; then
   ffmpeg_bin="$(command -v ffmpeg)"
@@ -523,51 +523,65 @@ else
       media post-processing (install via install-core-toolchain.sh apt-common)"
 fi
 
-PW_BROWSERS_EXPECTED=/usr/local/share/ms-playwright
-if [ "${PLAYWRIGHT_BROWSERS_PATH:-}" = "$PW_BROWSERS_EXPECTED" ]; then
-  ok "PLAYWRIGHT_BROWSERS_PATH=$PW_BROWSERS_EXPECTED"
+if [ -z "${PLAYWRIGHT_BROWSERS_PATH+set}" ]; then
+  ok "PLAYWRIGHT_BROWSERS_PATH unset in the image environment"
+elif [ -n "$BUILD_ARCH" ]; then
+  fail "PLAYWRIGHT_BROWSERS_PATH is set to '${PLAYWRIGHT_BROWSERS_PATH}' during
+      the image build — remove ENV PLAYWRIGHT_BROWSERS_PATH so runtime browser
+      downloads stay in persistent ~/.cache/ms-playwright"
 else
-  fail "PLAYWRIGHT_BROWSERS_PATH is '${PLAYWRIGHT_BROWSERS_PATH:-<unset>}', expected
-      $PW_BROWSERS_EXPECTED — /home/scion is bind-mounted at container start, so
-      Playwright's pre-seeded ffmpeg registry must live outside /home/scion"
+  note "PLAYWRIGHT_BROWSERS_PATH is set to '${PLAYWRIGHT_BROWSERS_PATH}'; not a
+      build (BUILDARCH unset), so this is taken to be a running container's env"
 fi
 
-for _pw_dir in "$PW_BROWSERS_EXPECTED" "${PW_BROWSERS_EXPECTED}/.links"; do
-  if [ -d "$_pw_dir" ]; then
-    _pw_mode="$(stat -c '%a' "$_pw_dir" 2>/dev/null || true)"
-    if [ "$_pw_mode" = "1777" ]; then
-      ok "$_pw_dir present (mode 1777)"
-    else
-      fail "$_pw_dir has mode '${_pw_mode:-<unknown>}', expected 1777 — non-root
-      agents (including UID-remapped workstation containers) need write access
-      here for __dirlock and 'npx playwright install webkit firefox'"
-    fi
+PW_SEED_EXPECTED="${SCION_PLAYWRIGHT_FFMPEG_SEED_DIR:-/usr/local/share/scion-playwright-ffmpeg}"
+if [ -d "$PW_SEED_EXPECTED" ]; then
+  _pw_mode="$(stat -c '%a' "$PW_SEED_EXPECTED" 2>/dev/null || true)"
+  if [ "$_pw_mode" = "755" ]; then
+    ok "$PW_SEED_EXPECTED present (mode 755)"
   else
-    fail "$_pw_dir missing — run install-core-toolchain.sh playwright-ffmpeg"
+    fail "$PW_SEED_EXPECTED has mode '${_pw_mode:-<unknown>}', expected 755"
   fi
-done
+else
+  fail "$PW_SEED_EXPECTED missing — run install-core-toolchain.sh playwright-ffmpeg"
+fi
 
 _pw_cli_browsers="${NPM_PREFIX_EXPECTED}/lib/node_modules/@playwright/cli/node_modules/playwright-core/browsers.json"
 _pw_cli_rev=""
 if [ -f "$_pw_cli_browsers" ] && command -v jq >/dev/null 2>&1; then
   _pw_cli_rev="$(jq -r '.browsers[]? | select(.name == "ffmpeg") | .revision // empty' "$_pw_cli_browsers" 2>/dev/null || true)"
 fi
-_pw_checked_revs=""
-for _pw_rev in 1011 1013 $_pw_cli_rev; do
+
+_pw_seeded_revs=""
+for _pw_entry in "${PW_SEED_EXPECTED}"/ffmpeg-*; do
+  [ -d "$_pw_entry" ] || continue
+  _pw_rev="${_pw_entry##*/ffmpeg-}"
   case "$_pw_rev" in '' | *[!0-9]*) continue ;; esac
-  case " $_pw_checked_revs " in *" $_pw_rev "*) continue ;; esac
-  _pw_checked_revs="${_pw_checked_revs} ${_pw_rev}"
-  _pw_bin="${PW_BROWSERS_EXPECTED}/ffmpeg-${_pw_rev}/ffmpeg-linux"
-  _pw_marker="${PW_BROWSERS_EXPECTED}/ffmpeg-${_pw_rev}/INSTALLATION_COMPLETE"
-  _pw_pkg="${PW_BROWSERS_EXPECTED}/ffmpeg-${_pw_rev}/package.json"
-  _pw_link="${PW_BROWSERS_EXPECTED}/.links/scion-ffmpeg-${_pw_rev}"
-  if [ -x "$_pw_bin" ] && [ -f "$_pw_marker" ] && [ -f "$_pw_pkg" ] && [ -f "$_pw_link" ] && "$_pw_bin" -version >/dev/null 2>&1; then
-    ok "Playwright ffmpeg-${_pw_rev}/ffmpeg-linux wired and runnable"
+  _pw_seeded_revs="${_pw_seeded_revs} ${_pw_rev}"
+  _pw_entry_mode="$(stat -c '%a' "$_pw_entry" 2>/dev/null || true)"
+  _pw_bin="${_pw_entry}/ffmpeg-linux"
+  _pw_marker="${_pw_entry}/INSTALLATION_COMPLETE"
+  _pw_deps="${_pw_entry}/DEPENDENCIES_VALIDATED"
+  _pw_desc="${_pw_entry}/browsers.json"
+  _pw_pkg="${_pw_entry}/package.json"
+  if [ "$_pw_entry_mode" = "755" ] && [ -x "$_pw_bin" ] && [ -f "$_pw_marker" ] && [ -f "$_pw_deps" ] && [ -f "$_pw_desc" ] && [ -f "$_pw_pkg" ] && "$_pw_bin" -version >/dev/null 2>&1; then
+    ok "Playwright seed ffmpeg-${_pw_rev}/ffmpeg-linux wired and runnable"
   else
-    fail "Playwright ffmpeg-${_pw_rev} incomplete under $PW_BROWSERS_EXPECTED
-      (need runnable ffmpeg-linux, INSTALLATION_COMPLETE, package.json, and
-      .links entry; run install-core-toolchain.sh playwright-ffmpeg)"
+    fail "Playwright seed ffmpeg-${_pw_rev} incomplete under $PW_SEED_EXPECTED
+      (need mode 755, runnable ffmpeg-linux, INSTALLATION_COMPLETE,
+      DEPENDENCIES_VALIDATED, browsers.json, and package.json)"
   fi
+done
+
+for _pw_req in 1011 1013 $_pw_cli_rev; do
+  case "$_pw_req" in '' | *[!0-9]*) continue ;; esac
+  case " $_pw_seeded_revs " in
+  *" $_pw_req "*) ;;
+  *)
+    fail "Playwright seed under $PW_SEED_EXPECTED is missing required revision
+      ffmpeg-${_pw_req} (run install-core-toolchain.sh playwright-ffmpeg)"
+    ;;
+  esac
 done
 
 # ---------------------------------------------------------------------------

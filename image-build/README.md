@@ -121,14 +121,19 @@ came from and how to regenerate it. Only Debian 13 (core-base) has a list, so
 thick-prep's Ubuntu 24.04 base does not get these libraries.
 
 Both foundations (`core-base` and `thick-prep`) also install the distro `ffmpeg`
-package (`--no-install-recommends` in `apt-common`), export
-`PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/ms-playwright`, and wire
-`ffmpeg-<rev>/ffmpeg-linux` symlinks to `/usr/bin/ffmpeg`
-(`install-core-toolchain.sh playwright-ffmpeg`). Keeping the registry outside
-`/home/scion` avoids the runtime agent-home bind mount, while sticky `1777`
-permissions on `/usr/local/share/ms-playwright` and `.links` still allow
-non-root agents to acquire Playwright's directory lock and install WebKit or
-Firefox at runtime without downloading `ffmpeg`.
+package (`--no-install-recommends` in `apt-common`) and bake an immutable
+`0755` seed tree at `/usr/local/share/scion-playwright-ffmpeg/ffmpeg-<rev>/`
+(`install-core-toolchain.sh playwright-ffmpeg`, covering baseline revisions
+`1009`–`1013` plus the `ffmpeg` revision declared by `@playwright/cli`).
+`PLAYWRIGHT_BROWSERS_PATH` is intentionally left unset so runtime browser
+downloads (`npx playwright install webkit firefox`) persist in the agent home
+(`~/.cache/ms-playwright`) across container restarts and suspend/resume; on
+every start, `sciontool init` idempotently symlinks the seeded `ffmpeg-<rev>`
+entries (and `.links` back-references) into `~/.cache/ms-playwright` while
+leaving any user-downloaded directories untouched. If a project bumps Playwright
+to a newer `ffmpeg` revision not yet in `PLAYWRIGHT_FFMPEG_REVISIONS`,
+Playwright falls back cleanly to downloading that revision into
+`~/.cache/ms-playwright` until the list is extended.
 
 ### Builders
 

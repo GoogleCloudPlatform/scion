@@ -224,6 +224,7 @@ func TestMain(m *testing.M) {
 	}
 	sandboxHomeDir = tmpHome
 	conduitHostKeyDir = filepath.Join(tmpHome, "conduit-hostkey")
+	playwrightFfmpegSeedDir = filepath.Join(tmpHome, "scion-playwright-ffmpeg")
 	_ = os.Setenv("HOME", tmpHome)
 	_ = os.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpHome, ".config"))
 	if err := disableGoTelemetry(filepath.Join(tmpHome, ".config")); err != nil {

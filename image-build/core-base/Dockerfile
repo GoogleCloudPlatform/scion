@@ -165,9 +165,6 @@ COPY --from=bun-source /usr/local/bin/bun /usr/local/bin/bun
 
 RUN /opt/scion-image-build/lib/install-core-toolchain.sh npm-global
 ENV NPM_CONFIG_PREFIX=/usr/local/share/npm-global
-# Playwright browser/ffmpeg registry outside /home/scion (agent home is
-# bind-mounted at container start, hiding files baked under /home/scion).
-ENV PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/ms-playwright
 
 # Optional npm mirror. Corporate networks commonly block registry.npmjs.org;
 # point this at an internal proxy (Artifactory, Nexus, Verdaccio) to build
