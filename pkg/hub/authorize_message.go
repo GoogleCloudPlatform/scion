@@ -54,7 +54,7 @@ const (
 	MessageDenialAttachmentNotFound              MessageDenialCode = "attachment_not_found"
 	MessageDenialAttachmentUnauthorized          MessageDenialCode = "attachment_unauthorized"
 	MessageDenialDeliveryDuplicate               MessageDenialCode = "delivery_duplicate" // reserved: delivery deduplication guard
-
+	MessageDenialPolicyRejected                  MessageDenialCode = "message_policy_rejected"
 )
 
 // MessageDecision captures the outcome of an agent message authorization
@@ -64,6 +64,8 @@ type MessageDecision struct {
 	Allowed               bool              `json:"allowed"`
 	Code                  MessageDenialCode `json:"code,omitempty"`
 	Reason                string            `json:"reason,omitempty"`
+	Policy                string            `json:"policy,omitempty"`
+	Class                 string            `json:"class,omitempty"`
 	CrossProject          bool              `json:"crossProject,omitempty"`
 	HubPolicyRevision     int64             `json:"hubPolicyRevision,omitempty"`
 	ProjectPolicyRevision int64             `json:"projectPolicyRevision,omitempty"`

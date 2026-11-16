@@ -2994,6 +2994,13 @@ type Server struct {
 	// Shared process-wide rule engine and CEL dialect (rule_engine.go; Stage 1 §7.0).
 	rules      *ruleengine.Engine
 	celDialect *ruleengine.CELDialect
+
+	// Message policy outbound gate, bounded shadow worker pool, and metrics
+	// (message_policy_gate.go; gated on experiments.MessagePolicies).
+	messagePolicyGate            messagePolicyGateRuntime
+	messagePolicyMetrics         atomic.Pointer[OTelMessagePolicyMetrics]
+	messagePolicyShadowDrops     atomic.Int64
+	messagePolicyAdmissionErrors atomic.Int64
 }
 
 // groupsLogger returns the groups subsystem logger, falling back to
@@ -4046,6 +4053,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	srv.celDialect = celDialect
 	if err := registerRuleConsumers(srv); err != nil {
 		return nil, fmt.Errorf("rule engine consumers: %w", err)
+	}
+	if err := srv.initMessagePolicyGate(); err != nil {
+		return nil, fmt.Errorf("message policy gate: %w", err)
 	}
 
 	srv.oidcHandlers = NewOIDCHandlers(oidcDeps{srv})
@@ -8094,6 +8104,10 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 
 		// Likewise for a starred-message upkeep pass (bounded at 5 s).
 		s.stopMessageStarUpkeep()
+
+		// Drain and join the bounded message-policy shadow worker pool while
+		// the store is still open.
+		s.stopMessagePolicyGate(ctx)
 
 		// Stop the stored-timestamp check and its run at start, and wait for
 		// it (bounded by its own grace) so that a snapshot being copied is

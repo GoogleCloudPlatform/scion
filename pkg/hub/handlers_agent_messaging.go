@@ -1345,19 +1345,40 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// H2 outbound message policy gate (ptone/scion#8047): runs after the
+	// rate-limit charge (which stands on rejection) and before any message
+	// persistence, DM participant registration, attachment ingestion, thread
+	// membership write, mention fan-out, default-agent wake, or channel
+	// dispatch. No-op when hub.message_policies is off.
+	outboundMessageID := api.NewUUID()
+	h2PolicyRes, h2Allowed := s.evaluateH2MessagePolicies(ctx, w, &h2PolicyInput{
+		agent:               agent,
+		req:                 &req,
+		routing:             result,
+		hasChoices:          decisionSend != nil,
+		artifactAttachments: len(artifactAttachments),
+		messageID:           outboundMessageID,
+	})
+	if !h2Allowed {
+		return
+	}
+
 	// Agent-authored @mention fan-out extracts mentions from the ORIGINAL
 	// body, before translateMentionsInbound rewrites @email tokens to
 	// @firstname-lastname for human-facing display below.
 	originalMsgForMentions := req.Msg
 
 	// Translate @email mentions to @firstname-lastname for user-facing
-	// messages. Resolved once here and handed to fan-out below too — both
-	// need the same project human-member list, and it costs one member-list
-	// query plus one GetUser per member, so resolving it twice on the same
-	// request would double that cost for no benefit.
-	var humanMembers []chatMemberEntry
+	// messages. Resolved once here (reusing H2's lookup when H2 already loaded
+	// it) and handed to fan-out below too — both need the same project
+	// human-member list, and it costs one member-list query plus one GetUser
+	// per member, so resolving it twice on the same request would double that
+	// cost for no benefit.
+	humanMembers := h2PolicyRes.humanMembers
 	if agent.ProjectID != "" {
-		humanMembers = s.resolveProjectHumanMembers(ctx, agent.ProjectID)
+		if !h2PolicyRes.humanMembersLoaded {
+			humanMembers = s.resolveProjectHumanMembers(ctx, agent.ProjectID)
+		}
 		if len(humanMembers) > 0 {
 			req.Msg = translateMentionsInbound(req.Msg, humanMembers)
 		}
@@ -1368,7 +1389,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// Ent defaults dispatch_state to "pending" if left unset (nc-promote-busy).
 	// A no-op on the deliveryUserBroker path, which persists its own row.
 	storeMsg := &store.Message{
-		ID:             api.NewUUID(),
+		ID:             outboundMessageID,
 		ProjectID:      agent.ProjectID,
 		Sender:         "agent:" + agent.Slug,
 		SenderID:       agent.ID,
