@@ -73,8 +73,7 @@ Example (curl + openssl):
   EVENT="deploy.finished"
   SUBJECT="service/api"
   BODY='{"status":"ok","commit":"abc1234"}'
-  SIGNED="$(printf 'v1\n%s\n%s\n%s\n%s\n%s' "$TS" "$DELIVERY" "$EVENT" "$SUBJECT" "$BODY")"
-  SIG="$(printf '%s' "$SIGNED" | openssl dgst -sha256 -hmac "$SECRET" -r | awk '{print $1}')"
+  SIG="$(printf 'v1\n%s\n%s\n%s\n%s\n%s' "$TS" "$DELIVERY" "$EVENT" "$SUBJECT" "$BODY" | openssl dgst -sha256 -hmac "$SECRET" -r | awk '{print $1}')"
   curl -fsS -X POST "$HOOK_URL" \
     -H "Content-Type: application/json" \
     -H "X-Scion-Signature: t=${TS},v1=${SIG}" \
