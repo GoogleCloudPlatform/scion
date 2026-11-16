@@ -111,6 +111,7 @@ func TestIngress_EndToEndStoreAndQueue(t *testing.T) {
 
 	const epSecret = "dGVzdC13ZWJob29rLXNlY3JldC1zY2lvbi12MS0zMmJ5dGVz"
 	var secretErr error
+	var forcedEventID string
 	ing := trigger.NewIngress(trigger.IngressConfig{
 		Store:      cs,
 		QueueStore: cs,
@@ -124,10 +125,11 @@ func TestIngress_EndToEndStoreAndQueue(t *testing.T) {
 			}
 			return "", errors.New("secret not found")
 		},
-		ClientIP: func(r *http.Request) string { return "198.51.100.42" },
-		Enabled:  func() bool { return true },
-		Audit:    audit,
-		Now:      func() time.Time { return now },
+		ClientIP:   func(r *http.Request) string { return "198.51.100.42" },
+		Enabled:    func() bool { return true },
+		Audit:      audit,
+		Now:        func() time.Time { return now },
+		NewEventID: func() string { return forcedEventID },
 	})
 
 	sendSigned := func(epID, delivery, eventHdr, subjectHdr, contentType string, rawBody []byte) *httptest.ResponseRecorder {
@@ -194,7 +196,8 @@ func TestIngress_EndToEndStoreAndQueue(t *testing.T) {
 	assert.NotContains(t, ev.Headers, trigger.HeaderSignature)
 	assert.NotContains(t, ev.Headers, "Authorization")
 
-	// 2. Duplicate X-Scion-Delivery returns 202 {"status":"duplicate"} with same eventId and no second row or queue item.
+	// 2a. Duplicate (source_kind, source_id, dedup_key) via X-Scion-Delivery returns 202 {"status":"duplicate"}
+	// with same eventId and no second row or queue item.
 	dupRec := sendSigned(activeEp.ID, "deliv-100", "deploy.finished", "prod/payments", "application/json", payload)
 	require.Equal(t, http.StatusAccepted, dupRec.Code, dupRec.Body.String())
 	var dupResp trigger.IngressAcceptedResponse
@@ -209,6 +212,28 @@ func TestIngress_EndToEndStoreAndQueue(t *testing.T) {
 	qStats, err := cs.DurableQueueStats(ctx, trigger.EventQueueKind, projID, now)
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), qStats.Pending)
+
+	// 2b. Duplicate durable_queue_items (kind, dedup_key) conflict (durablequeue.ErrDuplicate
+	// wrapping store.ErrAlreadyExists) rolls back the trigger_events insert and maps to 202 "duplicate".
+	preQueuedID := uuid.NewString()
+	_, err = q.Enqueue(ctx, nil, durablequeue.Item{
+		Kind:      trigger.EventQueueKind,
+		DedupKey:  preQueuedID,
+		ProjectID: projID,
+		Payload:   []byte(`{"v":1,"event_id":"` + preQueuedID + `"}`),
+	})
+	require.NoError(t, err)
+	forcedEventID = preQueuedID
+	qDupRec := sendSigned(activeEp.ID, "deliv-queue-dup", "deploy.finished", "prod/payments", "application/json", payload)
+	forcedEventID = ""
+	require.Equal(t, http.StatusAccepted, qDupRec.Code, qDupRec.Body.String())
+	var qDupResp trigger.IngressAcceptedResponse
+	require.NoError(t, json.Unmarshal(qDupRec.Body.Bytes(), &qDupResp))
+	assert.Equal(t, preQueuedID, qDupResp.EventID)
+	assert.Equal(t, trigger.IngressStatusDuplicate, qDupResp.Status)
+	assert.Equal(t, int64(1), q.wakes.Load(), "queue-duplicate path must not wake queue")
+	_, err = cs.GetTriggerEvent(ctx, preQueuedID)
+	require.ErrorIs(t, err, store.ErrNotFound, "event row must roll back when queue Enqueue returns ErrDuplicate")
 
 	// 3. Without X-Scion-Delivery, two identical signed bodies create two distinct events.
 	noDeliv1 := sendSigned(activeEp.ID, "", "", "", "application/json", []byte(`{"ping":1}`))

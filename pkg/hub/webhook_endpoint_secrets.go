@@ -15,8 +15,10 @@
 package hub
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -94,6 +96,34 @@ func (s *Server) webhookSecretCipher() *secret.ValueCipher {
 // ValueCipher; a nil cipher fails closed with secret.ErrCipherNotConfigured.
 func (s *Server) sealWebhookEndpointSecret(plaintext string) (string, error) {
 	return s.webhookSecretCipher().Encrypt(plaintext)
+}
+
+// unsealWebhookEndpointSecret decrypts a stored webhook endpoint secret row
+// with the Hub's shared ValueCipher; a nil cipher fails closed.
+func (s *Server) unsealWebhookEndpointSecret(encrypted string) (string, error) {
+	return s.webhookSecretCipher().Decrypt(encrypted)
+}
+
+// loadWebhookEndpointSecret loads and unseals the hub-scoped SecretTypeInternal
+// signing secret row for (projectID, endpointID, version) (§4.1, §8.1 step 6).
+func (s *Server) loadWebhookEndpointSecret(ctx context.Context, projectID, endpointID string, version int) (string, error) {
+	if s == nil || s.store == nil {
+		return "", errors.New("hub store is not configured")
+	}
+	hubID := s.HubID()
+	key := store.WebhookEndpointSecretKey(projectID, endpointID, version)
+	meta, err := s.store.GetSecret(ctx, key, store.ScopeHub, hubID)
+	if err != nil {
+		return "", err
+	}
+	if meta.SecretType != store.SecretTypeInternal {
+		return "", fmt.Errorf("webhook endpoint secret row has unexpected type %q", meta.SecretType)
+	}
+	encrypted, err := s.store.GetSecretValue(ctx, key, store.ScopeHub, hubID)
+	if err != nil {
+		return "", err
+	}
+	return s.unsealWebhookEndpointSecret(encrypted)
 }
 
 // newWebhookEndpointSecretRow constructs the hub-scoped SecretTypeInternal row

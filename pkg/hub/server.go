@@ -51,6 +51,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/cronzone"
 	"github.com/GoogleCloudPlatform/scion/pkg/cspreport"
+	"github.com/GoogleCloudPlatform/scion/pkg/durablequeue"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
@@ -60,6 +61,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/keymaterial"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/portview"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/maintenance"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
 	"github.com/GoogleCloudPlatform/scion/pkg/lifecyclehooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -2880,6 +2882,12 @@ type Server struct {
 	cspReports       *cspreport.Handler
 	cspReportLimiter *cspReportLimiter
 
+	// durableQueue is the shared durable work queue (pkg/durablequeue) over
+	// s.store when s.store implements store.DurableQueueStore. webhookIngress
+	// handles unauthenticated POST /api/v1/hooks/{id} (handlers_hooks_ingress.go).
+	durableQueue   *durablequeue.StoreQueue
+	webhookIngress *trigger.Ingress
+
 	// transportTrustedNets is ServerConfig.TransportTrustedProxies,
 	// resolved once in New (config.TransportTrustedProxies) for
 	// config.ConfidentialArrival.
@@ -3958,6 +3966,10 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	srv.cspReports = newCSPReportHandler(srv.cspReportLimiter, cfg.CSPReportRawSamples)
 	if cfg.CSPReportRawSamples {
 		slog.Warn("Browser policy report samples are logged (server.hub.csp_report_raw_samples); samples can hold page content")
+	}
+	if dqs, ok := s.(store.DurableQueueStore); ok {
+		srv.durableQueue = durablequeue.NewQueue(dqs)
+		srv.webhookIngress = newWebhookIngress(srv, cfg.TrustedProxies)
 	}
 
 	// Initialize GE Google credential exchange service, sharing the validator
@@ -7528,6 +7540,9 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	if s.cspReportLimiter != nil {
 		s.cspReportLimiter.StartCleanup(ctx)
 	}
+	if s.webhookIngress != nil {
+		s.webhookIngress.StartBackground(ctx)
+	}
 
 	// Start OIDC key cleanup loop to remove expired rotated keys from JWKS.
 	if s.oidcKeyManager != nil {
@@ -7709,6 +7724,9 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 func (s *Server) CloseAuditWriter(ctx context.Context) error {
 	if s.cspReports != nil {
 		s.cspReports.Close()
+	}
+	if s.webhookIngress != nil {
+		s.webhookIngress.Close(ctx)
 	}
 	if cancelled, remaining := s.mutationAuditWork.stop(ctx, auditWriteTimeout, auditCancelDrainGrace); remaining > 0 {
 		slog.Warn("Mutation audit writes still running after cancellation grace; proceeding with shutdown",
@@ -7892,6 +7910,9 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		// refusals still pending.
 		if s.cspReports != nil {
 			s.cspReports.Close()
+		}
+		if s.webhookIngress != nil {
+			s.webhookIngress.Close(ctx)
 		}
 		s.mu.RLock()
 		soRuntime := s.systemOneRuntime
@@ -8442,6 +8463,9 @@ func (s *Server) registerRoutes() {
 	// GitHub App webhook and setup callback (unauthenticated — uses webhook signature)
 	s.mux.HandleFunc("/api/v1/webhooks/github", s.guarded("/api/v1/webhooks/github", s.handleGitHubWebhook))
 	s.mux.HandleFunc("/github-app/setup", s.guarded("/github-app/setup", s.handleGitHubAppSetup))
+
+	// Generic signed webhook ingress (unauthenticated — scion_v1 HMAC signature, experiment-gated)
+	s.mux.HandleFunc("/api/v1/hooks/{id}", s.guarded("/api/v1/hooks/{id}", s.requireExperiment(experiments.Triggers, s.handleWebhookIngress)))
 
 	// Workstation-only system endpoints: declarative guard enforces workstation token.
 	s.mux.HandleFunc("/api/v1/system/identity", s.guarded("/api/v1/system/identity", s.handleSystemIdentity))

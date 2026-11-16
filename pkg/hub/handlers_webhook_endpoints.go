@@ -351,5 +351,8 @@ func (s *Server) deleteWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		return
 	}
 
+	if s.webhookIngress != nil {
+		s.webhookIngress.InvalidateEndpoint(ep.ID)
+	}
 	w.WriteHeader(http.StatusNoContent)
 }

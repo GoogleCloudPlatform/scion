@@ -237,6 +237,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/resources/discover":                            "policy:resource-import",
 	"/api/v1/skills/discover-directory":                     "policy:skill",
 	"/api/v1/webhooks/github":                               "webhook-signature:github",
+	"/api/v1/hooks/{id}":                                    "webhook-signature:hooks",
 	"/github-app/setup":                                     "public:github-app",
 	"/api/v1/system/identity":                               "workstation:system",
 	"/api/v1/system/status":                                 "workstation:system",

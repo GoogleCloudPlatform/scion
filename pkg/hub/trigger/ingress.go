@@ -100,7 +100,7 @@ func isCanonicalLowerUUID(s string) bool {
 				return false
 			}
 		default:
-			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 				return false
 			}
 		}
@@ -185,6 +185,7 @@ type IngressConfig struct {
 	Audit      AuditSink
 	Logger     *slog.Logger
 	Now        func() time.Time
+	NewEventID func() string
 }
 
 // Ingress handles unauthenticated POST /api/v1/hooks/{id} requests per Stage 1
@@ -202,6 +203,7 @@ type Ingress struct {
 	audit      AuditSink
 	logger     *slog.Logger
 	now        func() time.Time
+	newEventID func() string
 
 	accepted          atomic.Int64
 	duplicate         atomic.Int64
@@ -248,6 +250,10 @@ func NewIngress(cfg IngressConfig) *Ingress {
 	if clientIP == nil {
 		clientIP = defaultClientIP
 	}
+	newEventID := cfg.NewEventID
+	if newEventID == nil {
+		newEventID = uuid.NewString
+	}
 	return &Ingress{
 		store:      cfg.Store,
 		queueStore: cfg.QueueStore,
@@ -261,6 +267,7 @@ func NewIngress(cfg IngressConfig) *Ingress {
 		audit:      audit,
 		logger:     logger,
 		now:        nowFn,
+		newEventID: newEventID,
 	}
 }
 
@@ -505,7 +512,7 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Step 9: construct TriggerEvent (§8.2) and insert + enqueue in one transaction (§6.2).
-	ev, eventAttr, attrOK := buildWebhookTriggerEvent(ep, r.Header, delivery, eventHdr, subjectHdr, clientIP, body, now)
+	ev, eventAttr, attrOK := buildWebhookTriggerEvent(ep, r.Header, delivery, eventHdr, subjectHdr, clientIP, body, now, h.newEventID)
 	if !attrOK {
 		h.rejectedBadHeader.Add(1)
 		h.counters.RecordRejected(ep.ID)
@@ -538,30 +545,38 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeRateLimited(w, "30", "queue full")
 			return
 		}
-		if errors.Is(txErr, store.ErrAlreadyExists) && delivery != "" {
-			existing, gErr := h.store.GetTriggerEventByDedupKey(ctx, store.TriggerSourceKindWebhook, ep.ID, ev.DedupKey)
-			if gErr != nil {
-				h.failedStore.Add(1)
-				h.logger.Error("Failed to load duplicate webhook trigger event",
-					"endpoint_id", ep.ID,
-					"project_id", ep.ProjectID,
-					"error", gErr,
-				)
-				apierr.WriteError(w, http.StatusInternalServerError, apierr.ErrCodeInternalError, "failed to persist webhook event", nil)
-				return
+		// Map both trigger_events (source_kind, source_id, dedup_key) conflicts
+		// (store.ErrAlreadyExists) and durable_queue_items (kind, dedup_key)
+		// conflicts (durablequeue.ErrDuplicate, which wraps store.ErrAlreadyExists)
+		// to 202 "duplicate".
+		if errors.Is(txErr, store.ErrAlreadyExists) {
+			dupEventID := ev.ID
+			if !errors.Is(txErr, durablequeue.ErrDuplicate) && delivery != "" {
+				existing, gErr := h.store.GetTriggerEventByDedupKey(ctx, store.TriggerSourceKindWebhook, ep.ID, ev.DedupKey)
+				if gErr != nil {
+					h.failedStore.Add(1)
+					h.logger.Error("Failed to load duplicate webhook trigger event",
+						"endpoint_id", ep.ID,
+						"project_id", ep.ProjectID,
+						"error", gErr,
+					)
+					apierr.WriteError(w, http.StatusInternalServerError, apierr.ErrCodeInternalError, "failed to persist webhook event", nil)
+					return
+				}
+				dupEventID = existing.ID
 			}
 			h.duplicate.Add(1)
 			h.audit.RecordReceipt(ctx, ReceiptAuditRecord{
 				ProjectID:    ep.ProjectID,
 				EndpointID:   ep.ID,
-				EventID:      existing.ID,
+				EventID:      dupEventID,
 				WebhookEvent: eventAttr,
 				PayloadBytes: len(body),
 				Result:       IngressStatusDuplicate,
 				RemoteIP:     clientIP,
 			})
 			apierr.WriteJSON(w, http.StatusAccepted, IngressAcceptedResponse{
-				EventID: existing.ID,
+				EventID: dupEventID,
 				Status:  IngressStatusDuplicate,
 			})
 			return
@@ -646,6 +661,7 @@ func buildWebhookTriggerEvent(
 	delivery, eventHdr, subjectHdr, clientIP string,
 	body []byte,
 	now time.Time,
+	newEventID func() string,
 ) (store.TriggerEvent, string, bool) {
 	eventType := "webhook.received"
 	eventAttr := "received"
@@ -696,8 +712,16 @@ func buildWebhookTriggerEvent(
 		storedHeaders[name] = sanitizeHeaderForStorage(v, maxLen)
 	}
 
+	eventID := ""
+	if newEventID != nil {
+		eventID = newEventID()
+	}
+	if eventID == "" {
+		eventID = uuid.NewString()
+	}
+
 	return store.TriggerEvent{
-		ID:           uuid.NewString(),
+		ID:           eventID,
 		ProjectID:    ep.ProjectID,
 		SourceKind:   store.TriggerSourceKindWebhook,
 		SourceID:     ep.ID,
