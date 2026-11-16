@@ -136,13 +136,14 @@ func scanProseLine(runes []rune, inCode []bool, handles [][]rune) (mentioned boo
 			if !matchHandleAt(runes, i+1, h, inCode) {
 				continue
 			}
-			if !mentionEndBoundary(runes, end, leadingUnderscores, inCode) {
+			afterMention, boundaryOK := mentionEndBoundary(runes, end, leadingUnderscores, inCode)
+			if !boundaryOK {
 				continue
 			}
 			mentioned = true
 
 			if !hasCmd {
-				if parsedCmd, parsedArgs, cmdOK := parseCommandAfterMention(runes, end, inCode); cmdOK {
+				if parsedCmd, parsedArgs, cmdOK := parseCommandAfterMention(runes, afterMention, inCode); cmdOK {
 					hasCmd = true
 					cmd = parsedCmd
 					args = parsedArgs
@@ -238,35 +239,44 @@ func mentionStartBoundary(runes []rune, atIdx int) (leadingUnderscores int, ok b
 	return 0, true
 }
 
-func mentionEndBoundary(runes []rune, end, leadingUnderscores int, inCode []bool) bool {
+func mentionEndBoundary(runes []rune, end, leadingUnderscores int, inCode []bool) (afterMention int, ok bool) {
 	if end >= len(runes) {
-		return true
+		return end, true
 	}
 	if inCode[end] {
-		return false
+		return 0, false
 	}
 	next := runes[end]
 	if next == '_' {
 		if leadingUnderscores <= 0 {
-			return false
+			return 0, false
 		}
 		closeEnd := end
-		for closeEnd < len(runes) && closeEnd-end < leadingUnderscores && runes[closeEnd] == '_' {
+		for closeEnd < len(runes) && closeEnd-end < leadingUnderscores && !inCode[closeEnd] && runes[closeEnd] == '_' {
 			closeEnd++
 		}
+		if closeEnd-end != leadingUnderscores {
+			return 0, false
+		}
 		if closeEnd >= len(runes) {
-			return true
+			return closeEnd, true
 		}
 		after := runes[closeEnd]
 		if isWordRune(after) || after == '@' {
-			return false
+			return 0, false
 		}
-		return mentionTrailingPunctOrSpace(runes, closeEnd)
+		if !mentionTrailingPunctOrSpace(runes, closeEnd) {
+			return 0, false
+		}
+		return closeEnd, true
 	}
 	if isWordRune(next) || next == '@' {
-		return false
+		return 0, false
 	}
-	return mentionTrailingPunctOrSpace(runes, end)
+	if !mentionTrailingPunctOrSpace(runes, end) {
+		return 0, false
+	}
+	return end, true
 }
 
 func mentionTrailingPunctOrSpace(runes []rune, idx int) bool {

@@ -270,6 +270,30 @@ func TestParseCommand_Grammar(t *testing.T) {
 				CommandLine: "@scion /validate quick",
 			},
 		},
+		{
+			name: "underscore-wrapped italic and bold mentions parse command consistently",
+			body: "_@scion_ /review check edge cases",
+			slug: "scion",
+			want: CommandMatch{
+				Mentioned:   true,
+				HasCommand:  true,
+				Command:     "review",
+				CommandArgs: "check edge cases",
+				CommandLine: "_@scion_ /review check edge cases",
+			},
+		},
+		{
+			name: "double-underscore wrapped mention parses command consistently",
+			body: "Please __@scion__ /plan phase 1",
+			slug: "scion",
+			want: CommandMatch{
+				Mentioned:   true,
+				HasCommand:  true,
+				Command:     "plan",
+				CommandArgs: "phase 1",
+				CommandLine: "Please __@scion__ /plan phase 1",
+			},
+		},
 	}
 
 	for _, tc := range tests {
