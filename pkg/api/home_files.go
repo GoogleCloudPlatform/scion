@@ -31,6 +31,9 @@ const (
 	// HomeFiles in a single create request (64 KiB).
 	MaxHomeFilesTotalBytes = 64 << 10
 
+	// MaxHomeFilePathBytes is the maximum byte length of a single HomeFile.Path.
+	MaxHomeFilePathBytes = 256
+
 	homeFilesRequiredPrefix = ".scion/"
 )
 
@@ -96,6 +99,9 @@ func ValidateHomeFiles(files []HomeFile) error {
 func validateHomeFilePath(p string) error {
 	if p == "" {
 		return fmt.Errorf("path must not be empty")
+	}
+	if len(p) > MaxHomeFilePathBytes {
+		return fmt.Errorf("path length %d exceeds %d bytes", len(p), MaxHomeFilePathBytes)
 	}
 	if strings.IndexByte(p, 0) >= 0 {
 		return fmt.Errorf("path must not contain NUL byte")

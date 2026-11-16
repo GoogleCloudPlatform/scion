@@ -278,6 +278,19 @@ func TestValidateHomeFiles(t *testing.T) {
 			},
 			wantErr: "duplicate",
 		},
+		{
+			name: "path exact 256 bytes ok",
+			files: []HomeFile{
+				{Path: ".scion/" + strings.Repeat("a", MaxHomeFilePathBytes-len(".scion/")), Mode: 0o600, Content: canaryBytes},
+			},
+		},
+		{
+			name: "path 257 bytes refused",
+			files: []HomeFile{
+				{Path: ".scion/" + strings.Repeat("a", MaxHomeFilePathBytes+1-len(".scion/")), Mode: 0o600, Content: canaryBytes},
+			},
+			wantErr: "exceeds",
+		},
 	}
 
 	for _, tc := range tests {
