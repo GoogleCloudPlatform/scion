@@ -9,9 +9,10 @@ description: >-
 
 # Scion Scheduler
 
-Schedule future events that deliver messages to agents or (when enabled) run
-commands directly inside an agent's container — either one-shot (fire once at
-a specific time) or recurring (fire on a cron schedule).
+Schedule future events that deliver messages to agents — either one-shot (fire
+once at a specific time) or recurring (fire on a cron schedule) — or, when
+enabled, schedule one-shot commands to run directly inside an agent's
+container (`--type exec`).
 All schedules are **project-scoped** — an agent can only create and manage
 schedules within its own project.
 
@@ -83,32 +84,31 @@ schedule keeps its local time across daylight saving changes. Without
 `--time-zone` the expression is evaluated in UTC. Each recurring schedule
 has a name, can be paused and resumed, and maintains execution history.
 
-## Exec schedules (`--type exec`, experimental)
+## Exec events (`--type exec`, experimental, one-shot only)
 
-When a scheduled task only needs to run a deterministic command or script in a
-running agent's container — with no message and no LLM turn — use
-`--type exec` and pass `argv` after `--`:
+When a one-shot scheduled task only needs to run a deterministic command or
+script in a running agent's container — with no message and no LLM turn — use
+`scion schedule create --type exec` and pass `argv` after `--`:
 
 ```bash
 # One-shot exec event
 scion schedule create --non-interactive --type exec \
   --agent "$(scion whoami --non-interactive --format json | jq -r .name)" \
   --in 10m --timeout 60s -- /usr/local/bin/check-queue
-
-# Recurring exec schedule (forwarded to Hub; requires Hub recurring exec support)
-scion schedule create-recurring --non-interactive --type exec \
-  --name hourly-probe --cron "0 * * * *" \
-  --agent "$(scion whoami --non-interactive --format json | jq -r .name)" \
-  --timeout 60s -- /usr/local/bin/probe
 ```
 
+- **One-shot only today:** recurring exec schedules are **not yet available**
+  (Phase 2, ptone/scion#7884). `scion schedule create-recurring --type exec`
+  forwards to the Hub and is refused with `422 unsupported event type`; do not
+  use `create-recurring --type exec` until Hub support lands.
 - **Prerequisites:** `hub.conduit` and `hub.exec_schedules` must be enabled on
   the Hub (check `scion whoami --full`), the target agent must have been
   launched or restarted with `hub.exec_schedules` on (otherwise fires record
   `skipped: agent executor unavailable`), agent clocks must be
-  NTP-synchronised, and you need `agent.attach` permission on the target
-  (for an agent caller, the `full` role in the same delegation chain;
-  `baseline` and `readonly` are refused).
+  NTP-synchronised, and the caller must be a user or agent that may attach to
+  the agent (`agent.attach`; for an agent caller, a role that grants
+  `agent.attach` such as `full` in the same delegation chain — `baseline` and
+  `readonly` are refused).
 - **Execution environment:** runs directly via `execve` (no implicit shell —
   pass `-- sh -c '...'` if shell syntax is needed) as user `scion`, with cwd
   `/workspace` (else home), the harness shell's launch environment, and
@@ -119,11 +119,12 @@ scion schedule create-recurring --non-interactive --type exec \
   (`SIGTERM`, then `SIGKILL` after 5s). Non-running targets are `skipped`
   (`--wake` is not supported for `exec`).
 - **No output stored:** stdout and stderr are drained and discarded in the
-  container. `scion schedule get` and `scion schedule history` show
-  `execSummary` (`outcome`, `exitCode`, `durationMs`, `outputBytes`) and
-  redact `argv` (`<redacted, N args, sha256:...>`, a SHA-256 of the command
-  (`argv`)) unless the reader holds live `agent.attach`. Write logs to a file
-  or send failure alerts with `scion message` from your script.
+  container. `scion schedule get <event-id>` shows `execSummary` (`outcome`,
+  `exitCode`, `durationMs`, `outputBytes`; `scion schedule history` uses the
+  same summary columns once recurring exec lands) and redacts `argv`
+  (`<redacted, N args, sha256:...>`, a SHA-256 of the command (`argv`)) unless
+  the reader holds live `agent.attach`. Write logs to a file or send failure
+  alerts with `scion message` from your script.
 - **Long-running work (>60m) and `flock`:** run jobs up to 60m directly under
   `--timeout`. For work exceeding 60m, detach with `setsid` and guard mutual
   exclusion with `flock -n /tmp/<job>.lock` because detached descendants

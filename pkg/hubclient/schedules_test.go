@@ -65,7 +65,6 @@ func TestScheduleService_ExecRoundTrip(t *testing.T) {
 	finishedAt := time.Date(2026, 11, 15, 9, 0, 1, 0, time.UTC)
 
 	var gotCreateBody map[string]any
-	var gotUpdateBody map[string]any
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -82,19 +81,6 @@ func TestScheduleService_ExecRoundTrip(t *testing.T) {
 				EventType: "exec",
 				Status:    "active",
 				Payload:   `{"agentId":"a-1","agentName":"worker","command":["/usr/local/bin/gc","--dry-run"],"timeoutSeconds":300}`,
-			})
-		case r.Method == http.MethodPatch && r.URL.Path == "/api/v1/projects/proj-1/schedules/sch-1":
-			if err := json.NewDecoder(r.Body).Decode(&gotUpdateBody); err != nil {
-				t.Fatalf("decode update body: %v", err)
-			}
-			_ = json.NewEncoder(w).Encode(Schedule{
-				ID:        "sch-1",
-				ProjectID: "proj-1",
-				Name:      "nightly-gc",
-				CronExpr:  "0 3 * * *",
-				EventType: "exec",
-				Status:    "active",
-				Payload:   `{"agentId":"a-1","agentName":"worker","command":["/usr/local/bin/gc"],"timeoutSeconds":600}`,
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/schedules/sch-1/history":
 			_ = json.NewEncoder(w).Encode(ListScheduledEventsResponse{
@@ -150,24 +136,6 @@ func TestScheduleService_ExecRoundTrip(t *testing.T) {
 	}
 	if gotCreateBody["timeoutSeconds"] != float64(300) {
 		t.Errorf("create timeoutSeconds = %v, want 300", gotCreateBody["timeoutSeconds"])
-	}
-
-	updated, err := svc.Update(context.Background(), "sch-1", &UpdateScheduleRequest{
-		Command:        []string{"/usr/local/bin/gc"},
-		TimeoutSeconds: 600,
-	})
-	if err != nil {
-		t.Fatalf("Update failed: %v", err)
-	}
-	if updated.ID != "sch-1" {
-		t.Errorf("unexpected updated schedule: %+v", updated)
-	}
-	wantUpdateCmd := []any{"/usr/local/bin/gc"}
-	if !reflect.DeepEqual(gotUpdateBody["command"], wantUpdateCmd) {
-		t.Errorf("update command = %v, want %v", gotUpdateBody["command"], wantUpdateCmd)
-	}
-	if gotUpdateBody["timeoutSeconds"] != float64(600) {
-		t.Errorf("update timeoutSeconds = %v, want 600", gotUpdateBody["timeoutSeconds"])
 	}
 
 	hist, err := svc.History(context.Background(), "sch-1", nil)

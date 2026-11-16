@@ -24,6 +24,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -32,13 +33,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const (
-	defaultExecTimeoutSeconds = 60
-	maxExecTimeoutSeconds     = 3600
-	maxExecArgc               = 64
-	maxExecArgBytes           = 4096
-	maxExecTotalBytes         = 16384
-)
+const defaultExecTimeoutSeconds = 60
 
 // Schedule command flags
 var (
@@ -114,7 +109,7 @@ var scheduleCreateRecurringCmd = &cobra.Command{
 	Long: `Create a recurring schedule with a cron expression. Requires --name, --cron, and --agent.
 
 For message schedules (default --type message), pass --message (and optionally --interrupt or --wake).
-For exec schedules (--type exec), pass the command argv after '--' (and optionally --timeout, default 60s, max 60m).
+For exec schedules (--type exec), pass the command argv after '--' (and optionally --timeout, default 60s, max 60m); recurring exec is forwarded to the Hub and requires Hub recurring exec support (not yet available; use 'scion schedule create --type exec' for one-shot exec events).
 
 The cron expression is evaluated in the zone given by --time-zone, an IANA
 name such as America/Los_Angeles; without it the expression is evaluated in
@@ -129,10 +124,7 @@ Examples:
   scion schedule create-recurring --name standup --cron "0 14 * * 1-5" --agent lead --message "standup"
 
   # 07:00 Pacific time every day, across daylight saving changes
-  scion schedule create-recurring --name digest --cron "0 7 * * *" --time-zone America/Los_Angeles --agent lead --message "digest"
-
-  # Run an exec probe every hour without starting an LLM turn
-  scion schedule create-recurring --type exec --name hourly-probe --cron "0 * * * *" --agent worker --timeout 60s -- /usr/local/bin/probe`,
+  scion schedule create-recurring --name digest --cron "0 7 * * *" --time-zone America/Los_Angeles --agent lead --message "digest"`,
 	RunE: runScheduleCreateRecurring,
 }
 
@@ -462,7 +454,7 @@ func scheduleGetViaHub(ctx context.Context, hubCtx *HubContext, projectID, resou
 		if isJSONOutput() {
 			return outputJSON(sched)
 		}
-		printScheduleDetailWithExec(sched, fetchLatestScheduleExecSummary(ctx, hubCtx, projectID, sched))
+		printScheduleDetail(sched, fetchLatestScheduleExecSummary(ctx, hubCtx, projectID, sched))
 		return nil
 	}
 
@@ -482,7 +474,7 @@ func scheduleGetViaHub(ctx context.Context, hubCtx *HubContext, projectID, resou
 		if isJSONOutput() {
 			return outputJSON(sched)
 		}
-		printScheduleDetailWithExec(sched, fetchLatestScheduleExecSummary(ctx, hubCtx, projectID, sched))
+		printScheduleDetail(sched, fetchLatestScheduleExecSummary(ctx, hubCtx, projectID, sched))
 		return nil
 	}
 
@@ -547,11 +539,7 @@ func printEventExecSummary(s *hubclient.ExecSummary) {
 	}
 }
 
-func printScheduleDetail(sched *hubclient.Schedule) {
-	printScheduleDetailWithExec(sched, nil)
-}
-
-func printScheduleDetailWithExec(sched *hubclient.Schedule, lastExec *hubclient.ExecSummary) {
+func printScheduleDetail(sched *hubclient.Schedule, lastExec *hubclient.ExecSummary) {
 	fmt.Printf("Recurring Schedule: %s\n", sched.ID)
 	fmt.Printf("  Name:       %s\n", sched.Name)
 	fmt.Printf("  Status:     %s\n", sched.Status)
@@ -712,14 +700,14 @@ func parseExecTimeoutSeconds(raw string) (int, error) {
 		return 0, fmt.Errorf("invalid --timeout %q: must be a duration such as 60s or 5m", raw)
 	}
 	if d <= 0 {
-		return 0, fmt.Errorf("--timeout must be positive (between 1s and %ds)", maxExecTimeoutSeconds)
+		return 0, fmt.Errorf("--timeout must be positive (between 1s and %ds)", agentcontrol.MaxExecTimeoutSec)
 	}
 	if d%time.Second != 0 {
 		return 0, fmt.Errorf("--timeout must be whole seconds (got %s)", raw)
 	}
 	secs := int(d / time.Second)
-	if secs < 1 || secs > maxExecTimeoutSeconds {
-		return 0, fmt.Errorf("--timeout must be between 1s and %ds (60m)", maxExecTimeoutSeconds)
+	if secs < 1 || secs > agentcontrol.MaxExecTimeoutSec {
+		return 0, fmt.Errorf("--timeout must be between 1s and %ds (60m)", agentcontrol.MaxExecTimeoutSec)
 	}
 	return secs, nil
 }
@@ -738,29 +726,36 @@ func extractExecCommandArgs(cmd *cobra.Command, args []string) ([]string, error)
 		}
 		args = args[dash:]
 	}
-	if len(args) == 0 {
-		return nil, fmt.Errorf("command is required after '--' for exec")
+	if err := agentcontrol.ValidateExecArgv(args); err != nil {
+		return nil, describeExecArgvError(args, err)
 	}
-	if len(args) > maxExecArgc {
-		return nil, fmt.Errorf("exec command exceeds maximum of %d arguments", maxExecArgc)
+	return args, nil
+}
+
+func describeExecArgvError(args []string, fallback error) error {
+	if len(args) == 0 {
+		return fmt.Errorf("command is required after '--' for exec")
+	}
+	if len(args) > agentcontrol.MaxExecArgc {
+		return fmt.Errorf("exec command exceeds maximum of %d arguments", agentcontrol.MaxExecArgc)
 	}
 	if args[0] == "" {
-		return nil, fmt.Errorf("exec command argv[0] must not be empty")
+		return fmt.Errorf("exec command argv[0] must not be empty")
 	}
 	total := 0
 	for i, arg := range args {
 		if strings.IndexByte(arg, 0) >= 0 {
-			return nil, fmt.Errorf("exec command argument %d contains a NUL byte", i)
+			return fmt.Errorf("exec command argument %d contains a NUL byte", i)
 		}
-		if len(arg) > maxExecArgBytes {
-			return nil, fmt.Errorf("exec command argument %d exceeds %d bytes", i, maxExecArgBytes)
+		if len(arg) > agentcontrol.MaxExecArgBytes {
+			return fmt.Errorf("exec command argument %d exceeds %d bytes", i, agentcontrol.MaxExecArgBytes)
 		}
 		total += len(arg)
 	}
-	if total > maxExecTotalBytes {
-		return nil, fmt.Errorf("exec command exceeds total limit of %d bytes", maxExecTotalBytes)
+	if total > agentcontrol.MaxExecArgvBytes {
+		return fmt.Errorf("exec command exceeds total limit of %d bytes", agentcontrol.MaxExecArgvBytes)
 	}
-	return args, nil
+	return fmt.Errorf("invalid exec command: %w", fallback)
 }
 
 func validateScheduleTypeFlags(cmd *cobra.Command, args []string, resourcePlural string) error {

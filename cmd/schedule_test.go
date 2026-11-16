@@ -19,9 +19,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
@@ -164,12 +166,12 @@ func TestPrintScheduleDetail_StatusReason(t *testing.T) {
 	), &sched))
 	assert.Equal(t, "creator_deleted", sched.StatusReason)
 
-	out := captureStdout(t, func() { printScheduleDetail(&sched) })
+	out := captureStdout(t, func() { printScheduleDetail(&sched, nil) })
 	assert.Contains(t, out, "  Status:     paused\n")
 	assert.Contains(t, out, "  Reason:     creator_deleted\n")
 
 	sched.StatusReason = ""
-	out = captureStdout(t, func() { printScheduleDetail(&sched) })
+	out = captureStdout(t, func() { printScheduleDetail(&sched, nil) })
 	assert.NotContains(t, out, "Reason:")
 }
 
@@ -215,10 +217,10 @@ func TestScheduleZoneLabels(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(
 		`{"id":"s1","name":"nightly","cronExpr":"0 3 * * *","timeZone":"Asia/Tokyo","eventType":"message","status":"active"}`,
 	), &sched))
-	out := captureStdout(t, func() { printScheduleDetail(&sched) })
+	out := captureStdout(t, func() { printScheduleDetail(&sched, nil) })
 	assert.Contains(t, out, "  Zone:       Asia/Tokyo\n")
 	sched.TimeZone = ""
-	out = captureStdout(t, func() { printScheduleDetail(&sched) })
+	out = captureStdout(t, func() { printScheduleDetail(&sched, nil) })
 	assert.Contains(t, out, "  Zone:       UTC\n")
 }
 
@@ -320,7 +322,7 @@ func TestPrintScheduleDetail_WakeAndInterrupt(t *testing.T) {
 			ProjectID: "proj-1",
 			Payload:   `{"agentName":"watcher","message":"check builds","wake":true}`,
 		}
-		out := captureStdout(t, func() { printScheduleDetail(sched) })
+		out := captureStdout(t, func() { printScheduleDetail(sched, nil) })
 		assert.Contains(t, out, "  Agent:      watcher\n")
 		assert.Contains(t, out, "  Message:    \"check builds\"\n")
 		assert.Contains(t, out, "  Wake:       true\n")
@@ -337,7 +339,7 @@ func TestPrintScheduleDetail_WakeAndInterrupt(t *testing.T) {
 			ProjectID: "proj-1",
 			Payload:   `{"agentName":"watcher","message":"urgent","interrupt":true}`,
 		}
-		out := captureStdout(t, func() { printScheduleDetail(sched) })
+		out := captureStdout(t, func() { printScheduleDetail(sched, nil) })
 		assert.Contains(t, out, "  Wake:       false\n")
 		assert.Contains(t, out, "  Interrupt:  true\n")
 	})
@@ -352,7 +354,7 @@ func TestPrintScheduleDetail_WakeAndInterrupt(t *testing.T) {
 			ProjectID: "proj-1",
 			Payload:   `{"agentName":"worker","template":"default","task":"nightly"}`,
 		}
-		out := captureStdout(t, func() { printScheduleDetail(sched) })
+		out := captureStdout(t, func() { printScheduleDetail(sched, nil) })
 		assert.Contains(t, out, "  Template:   default\n")
 		assert.NotContains(t, out, "Wake:")
 		assert.NotContains(t, out, "Interrupt:")
@@ -821,8 +823,8 @@ func TestScheduleCreateExecValidation_CobraParsing(t *testing.T) {
 		})
 	}
 
-	t.Run("exec rejects >64 args and NUL byte", func(t *testing.T) {
-		many := make([]string, 65)
+	t.Run("exec rejects agentcontrol bounds and NUL byte", func(t *testing.T) {
+		many := make([]string, agentcontrol.MaxExecArgc+1)
 		for i := range many {
 			many[i] = "x"
 		}
@@ -833,6 +835,19 @@ func TestScheduleCreateExecValidation_CobraParsing(t *testing.T) {
 		_, err = parseAndValidateCreate(t, []string{"--type", "exec", "--agent", "worker", "--in", "5m", "--", "/bin/echo", "bad\x00arg"})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "NUL")
+
+		oversizedArg := strings.Repeat("a", agentcontrol.MaxExecArgBytes+1)
+		_, err = parseAndValidateCreate(t, []string{"--type", "exec", "--agent", "worker", "--in", "5m", "--", "/bin/echo", oversizedArg})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "4096")
+
+		chunk := strings.Repeat("b", agentcontrol.MaxExecArgBytes)
+		_, err = parseAndValidateCreate(t, []string{
+			"--type", "exec", "--agent", "worker", "--in", "5m", "--",
+			"/bin/echo", chunk, chunk, chunk, chunk,
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "16384")
 	})
 }
 
@@ -944,7 +959,7 @@ func TestPrintDetail_ExecPayloadAndRedaction(t *testing.T) {
 			ProjectID: "proj-1",
 			Payload:   `{"agentId":"a-1","agentName":"worker","timeoutSeconds":300,"commandRedacted":true,"argc":3,"commandSha256":"deadbeefcafebabe"}`,
 		}
-		out := captureStdout(t, func() { printScheduleDetail(sched) })
+		out := captureStdout(t, func() { printScheduleDetail(sched, nil) })
 		assert.Contains(t, out, "  Agent:      worker\n")
 		assert.Contains(t, out, "  Command:    <redacted, 3 args, sha256:deadbeefcafebabe>\n")
 		assert.Contains(t, out, "  Timeout:    300s\n")
