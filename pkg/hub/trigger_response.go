@@ -235,18 +235,3 @@ func buildTriggerResponses(triggers []store.Trigger) []TriggerResponse {
 	}
 	return out
 }
-
-func buildTriggerFireResponse(tf store.TriggerFire) TriggerFireResponse {
-	return TriggerFireResponse{
-		ID:         tf.ID,
-		TriggerID:  tf.TriggerID,
-		EventID:    tf.EventID,
-		ProjectID:  tf.ProjectID,
-		Subject:    tf.Subject,
-		Status:     tf.Status,
-		ResultRef:  tf.ResultRef,
-		Error:      tf.Error,
-		StartedAt:  tf.StartedAt,
-		FinishedAt: tf.FinishedAt,
-	}
-}

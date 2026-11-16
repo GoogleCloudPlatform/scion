@@ -51,11 +51,6 @@ func (s *Server) sealWebhookEndpointSecret(plaintext string) (string, error) {
 	return s.webhookSecretCipher().Encrypt(plaintext)
 }
 
-// unsealWebhookEndpointSecret decrypts a stored webhook endpoint secret row.
-func (s *Server) unsealWebhookEndpointSecret(encrypted string) (string, error) {
-	return s.webhookSecretCipher().Decrypt(encrypted)
-}
-
 // newWebhookEndpointSecretRow constructs the hub-scoped SecretTypeInternal row
 // stored in the secrets table for a webhook endpoint signing secret version.
 func (s *Server) newWebhookEndpointSecretRow(projectID, endpointID string, version int, plaintext, createdBy string) (*store.Secret, error) {

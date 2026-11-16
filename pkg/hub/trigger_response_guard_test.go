@@ -131,6 +131,23 @@ func TestTriggerResponseGuard_StructFields(t *testing.T) {
 	}
 }
 
+// buildTriggerFireResponse maps store.TriggerFire to TriggerFireResponse (moved
+// to trigger_response.go in 1b-3 when GET /triggers/{id}/history calls it).
+func buildTriggerFireResponse(tf store.TriggerFire) TriggerFireResponse {
+	return TriggerFireResponse{
+		ID:         tf.ID,
+		TriggerID:  tf.TriggerID,
+		EventID:    tf.EventID,
+		ProjectID:  tf.ProjectID,
+		Subject:    tf.Subject,
+		Status:     tf.Status,
+		ResultRef:  tf.ResultRef,
+		Error:      tf.Error,
+		StartedAt:  tf.StartedAt,
+		FinishedAt: tf.FinishedAt,
+	}
+}
+
 func TestWebhookEndpointResponses_NoSecretAfterCreate(t *testing.T) {
 	f := setupTriggersTestFixture(t)
 	ctx := context.Background()

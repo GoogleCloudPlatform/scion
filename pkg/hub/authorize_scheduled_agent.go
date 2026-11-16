@@ -96,10 +96,18 @@ func authorizeDeferredAuthoringCredential(w http.ResponseWriter, r *http.Request
 	return true
 }
 
-// authorizeScheduleAuthoringCredential aliases
-// authorizeDeferredAuthoringCredential for scheduled event and schedule routes.
+// authorizeScheduleAuthoringCredential enforces the authoring credential
+// allowlist for scheduled event and schedule routes.
 func authorizeScheduleAuthoringCredential(w http.ResponseWriter, r *http.Request) bool {
-	return authorizeDeferredAuthoringCredential(w, r)
+	if GetIdentityFromContext(r.Context()) == nil {
+		Unauthorized(w)
+		return false
+	}
+	if !scheduleAuthoringCredentialAllowed(r) {
+		writeForbidden(w, scheduleAuthoringCredentialRefusedMessage)
+		return false
+	}
+	return true
 }
 
 // authorizeScheduledDispatchAgentAuthoring is the authoring precondition of
