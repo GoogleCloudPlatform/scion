@@ -85,7 +85,8 @@ func TestRuleEngine_NewRuleEngineAndPureRegistration(t *testing.T) {
 }
 
 func TestRuleEngine_SingleConstructionPointGuard(t *testing.T) {
-	root := findGoModuleRoot(t)
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	require.NoError(t, err)
 	violations, hubCallCount, err := scanRuleEngineConstructionSites(root)
 	require.NoError(t, err)
 	assert.Empty(t, violations,
@@ -117,34 +118,28 @@ func TestRuleEngine_SingleConstructionPointGuard(t *testing.T) {
 	assert.Len(t, badV, 3, "expected all 3 planted construction violations, got: %v", badV)
 }
 
-func findGoModuleRoot(t *testing.T) string {
-	t.Helper()
-	dir, err := os.Getwd()
-	require.NoError(t, err)
-	for {
-		if _, statErr := os.Stat(filepath.Join(dir, "go.mod")); statErr == nil {
-			return dir
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			t.Fatal("go.mod not found above working directory")
-		}
-		dir = parent
-	}
-}
-
 func scanRuleEngineConstructionSites(root string) ([]string, int, error) {
+	skipDirs := map[string]bool{
+		".git": true, "node_modules": true, "web": true, "docs-site": true,
+		"extras": true, "vendor": true, ".scion": true,
+	}
 	fset := token.NewFileSet()
 	var violations []string
 	hubCallCount := 0
 
+	// pkgmove:scan-covers pkg/hub/...
+	// recursive walk of the whole module from its root: SkipDir only for module-level directories (.git, node_modules, web, docs-site, extras, vendor, .scion), none under pkg/hub, so it covers every package directory below pkg/hub.
 	err := filepath.WalkDir(root, func(p string, d os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
+		rel, relErr := filepath.Rel(root, p)
+		if relErr != nil {
+			return relErr
+		}
+		relSlash := filepath.ToSlash(rel)
 		if d.IsDir() {
-			name := d.Name()
-			if p != root && (name == "vendor" || name == "testdata" || name == "node_modules" || name == "extras" || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_")) {
+			if skipDirs[relSlash] {
 				return filepath.SkipDir
 			}
 			return nil
@@ -152,12 +147,6 @@ func scanRuleEngineConstructionSites(root string) ([]string, int, error) {
 		if !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
 			return nil
 		}
-
-		relSlash, relErr := filepath.Rel(root, p)
-		if relErr != nil {
-			return relErr
-		}
-		relSlash = filepath.ToSlash(relSlash)
 
 		f, parseErr := parser.ParseFile(fset, p, nil, 0)
 		if parseErr != nil {
