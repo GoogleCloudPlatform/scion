@@ -414,9 +414,10 @@ func TestProjectDecodedPayload_ReducesPRBranchReposBeforeSanitizeWithoutMutating
 	})
 
 	// Because head.repo and base.repo are reduced before sanitizeValue runs,
-	// 3,000 extra nested slice fields in the raw branch repo objects must add
-	// zero extra allocations during projection.
-	assert.Equal(t, minAllocs, bloatedAllocs, "raw head.repo/base.repo bloat must not be deep-copied by sanitizeValue")
+	// 3,000 extra nested slice fields in the raw branch repo objects (~15,000
+	// allocations if deep-copied) must not be copied during projection. Allow a
+	// small delta for race-detector/GC shadow allocations across runs.
+	assert.InDelta(t, minAllocs, bloatedAllocs, 50, "raw head.repo/base.repo bloat must not be deep-copied by sanitizeValue")
 
 	// Verify caller's decoded input was not mutated in-place.
 	rawPR := bloatedRoot["pull_request"].(map[string]any)
