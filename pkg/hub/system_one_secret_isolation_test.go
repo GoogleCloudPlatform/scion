@@ -21,6 +21,7 @@ import (
 	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -78,26 +79,29 @@ func TestSystemOneSecretLifecycleAndGenericIsolation(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, proj))
 
 	reservedForms := []string{
-		secretKey,                      // canonical dotted: systemone.instance.<id>
-		"systemone-instance-" + instID, // GCP SM sanitized dashed form
-		"SystemOne_Instance_" + instID, // mixed-case / underscore form
+		secretKey,                                // canonical dotted: systemone.instance.<id>
+		"systemone-instance-" + instID,           // GCP SM sanitized dashed form
+		"SystemOne_Instance_" + instID,           // mixed-case / underscore form
+		"systemone\u0130instance\u0130" + instID, // U+0130 (İ) separator collision on GCP SM
+		"systemone\u212ainstance." + instID,      // U+212A (K) separator collision on GCP SM
 	}
 	newDesc := "tamper"
 	for _, candidateKey := range reservedForms {
-		assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, srv, admin, http.MethodGet, "/api/v1/secrets/"+candidateKey+"?scope=hub", nil).Code, "GET secret %q", candidateKey)
-		assert.Equal(t, http.StatusBadRequest, doRequestAsUser(t, srv, admin, http.MethodPut, "/api/v1/secrets/"+candidateKey+"?scope=hub", SetSecretRequest{
+		esc := url.PathEscape(candidateKey)
+		assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, srv, admin, http.MethodGet, "/api/v1/secrets/"+esc+"?scope=hub", nil).Code, "GET secret %q", candidateKey)
+		assert.Equal(t, http.StatusBadRequest, doRequestAsUser(t, srv, admin, http.MethodPut, "/api/v1/secrets/"+esc+"?scope=hub", SetSecretRequest{
 			Value: base64.StdEncoding.EncodeToString([]byte("OVERWRITE_ATTEMPT")),
 		}).Code, "PUT secret %q", candidateKey)
-		assert.Equal(t, http.StatusBadRequest, doRequestAsUser(t, srv, admin, http.MethodPatch, "/api/v1/secrets/"+candidateKey+"?scope=hub", PatchSecretRequest{
+		assert.Equal(t, http.StatusBadRequest, doRequestAsUser(t, srv, admin, http.MethodPatch, "/api/v1/secrets/"+esc+"?scope=hub", PatchSecretRequest{
 			Description: &newDesc,
 		}).Code, "PATCH secret %q", candidateKey)
-		assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, srv, admin, http.MethodDelete, "/api/v1/secrets/"+candidateKey+"?scope=hub", nil).Code, "DELETE secret %q", candidateKey)
+		assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, srv, admin, http.MethodDelete, "/api/v1/secrets/"+esc+"?scope=hub", nil).Code, "DELETE secret %q", candidateKey)
 
-		assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, srv, admin, http.MethodGet, "/api/v1/env/"+candidateKey+"?scope=hub", nil).Code, "GET env %q", candidateKey)
-		assert.Equal(t, http.StatusBadRequest, doRequestAsUser(t, srv, admin, http.MethodPut, "/api/v1/env/"+candidateKey+"?scope=hub", map[string]any{"value": "x"}).Code, "PUT env %q", candidateKey)
-		assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, srv, admin, http.MethodDelete, "/api/v1/env/"+candidateKey+"?scope=hub", nil).Code, "DELETE env %q", candidateKey)
+		assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, srv, admin, http.MethodGet, "/api/v1/env/"+esc+"?scope=hub", nil).Code, "GET env %q", candidateKey)
+		assert.Equal(t, http.StatusBadRequest, doRequestAsUser(t, srv, admin, http.MethodPut, "/api/v1/env/"+esc+"?scope=hub", map[string]any{"value": "x"}).Code, "PUT env %q", candidateKey)
+		assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, srv, admin, http.MethodDelete, "/api/v1/env/"+esc+"?scope=hub", nil).Code, "DELETE env %q", candidateKey)
 
-		assert.Equal(t, http.StatusBadRequest, doRequestAsUser(t, srv, admin, http.MethodPut, "/api/v1/projects/"+proj.ID+"/secrets/"+candidateKey, SetSecretRequest{
+		assert.Equal(t, http.StatusBadRequest, doRequestAsUser(t, srv, admin, http.MethodPut, "/api/v1/projects/"+proj.ID+"/secrets/"+esc, SetSecretRequest{
 			Value: base64.StdEncoding.EncodeToString([]byte("PROJ_OVERWRITE")),
 		}).Code, "PUT project secret %q", candidateKey)
 	}

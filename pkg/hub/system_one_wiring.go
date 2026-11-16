@@ -55,7 +55,14 @@ const (
 	systemOneInstancesListPageSize = 200
 )
 
-var systemOneKeySeparatorRE = regexp.MustCompile(`[^a-z0-9]`)
+// systemOneKeyNonIDChars matches pkg/secret's invalidSecretIDChars
+// ([^a-zA-Z0-9_-] in pkg/secret/gcpbackend.go) so every rune outside GCP
+// Secret Manager's secret-ID alphabet—including non-ASCII letters such as
+// U+212A (KELVIN SIGN) and U+0130 (LATIN CAPITAL LETTER I WITH DOT ABOVE) that
+// strings.ToLower folds to ASCII letters—is replaced with "-" BEFORE case
+// folding. Parity with GCPBackend's real secret-ID computation is enforced in
+// TestIsSystemOneReservedSecretKey_SanitizedForms.
+var systemOneKeyNonIDChars = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
 
 // systemOneInstanceSecretName returns the hub-scoped internal secret name for
 // the System One provider instance with the given immutable UUID.
@@ -63,14 +70,25 @@ func systemOneInstanceSecretName(instanceID string) string {
 	return systemOneSecretPrefix + strings.TrimSpace(instanceID)
 }
 
+func hasSystemOneSanitizedPrefix(s string) bool {
+	k := systemOneKeyNonIDChars.ReplaceAllString(s, "-")
+	k = strings.ReplaceAll(strings.ToLower(k), "_", "-")
+	return strings.HasPrefix(k, systemOneSanitizedSecretPrefix)
+}
+
 // isSystemOneReservedSecretKey reports whether key falls under the reserved
-// System One provider-credential secret namespace, comparing names in their
-// lowercase backend-sanitized form so generic secret and env endpoints refuse
-// both "systemone.instance.<id>" and colliding forms such as
-// "systemone-instance-<id>" or "SystemOne_Instance_<id>".
+// System One provider-credential secret namespace, applying GCP Secret
+// Manager's character sanitization first and case/separator folding second so
+// generic secret and env endpoints refuse both "systemone.instance.<id>" and
+// any colliding form (such as "systemone-instance-<id>",
+// "SystemOne_Instance_<id>", or Unicode separator collisions like
+// "systemone\u0130instance\u0130<id>" and "systemone\u212ainstance.<id>").
 func isSystemOneReservedSecretKey(key string) bool {
-	sanitized := systemOneKeySeparatorRE.ReplaceAllString(strings.ToLower(strings.TrimSpace(key)), "-")
-	return strings.HasPrefix(sanitized, systemOneSanitizedSecretPrefix)
+	if hasSystemOneSanitizedPrefix(key) {
+		return true
+	}
+	trimmed := strings.TrimSpace(key)
+	return trimmed != key && hasSystemOneSanitizedPrefix(trimmed)
 }
 
 // withoutSystemOneReservedSecrets filters out secrets under the reserved
