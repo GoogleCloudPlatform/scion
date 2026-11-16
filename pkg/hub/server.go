@@ -2717,6 +2717,10 @@ type Server struct {
 
 	// Cached rate limit info from the most recent GitHub App API call
 	githubAppRateLimit *githubapp.RateLimitInfo
+	// githubAppIdentity caches GET /app metadata, subscribed events, and
+	// permissions for GitHub App trigger readiness and mention detection
+	// (github_app_identity.go).
+	githubAppIdentity githubAppIdentityState
 
 	// githubAccessCache caches GitHub-side repository access checks made
 	// with a project creator's own token (github_app_association_authz.go).
@@ -7715,6 +7719,7 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	s.scheduler = sched
 	s.mu.Unlock()
 	s.registerSchedulerHandlers()
+	s.initGitHubAppIdentity(ctx)
 
 	// Check stored timestamps (SQLite) and, when some are not canonical UTC,
 	// run utc-timestamp-normalize once, after a snapshot. It runs in the

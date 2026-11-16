@@ -84,7 +84,8 @@ func githubAppPublicFrom(c GitHubAppServerConfig) githubAppPublicConfig {
 // setGitHubAppPublicLocked writes the non-secret GitHub App fields into
 // s.config. It reports whether anything changed. Callers hold s.mu.
 func (s *Server) setGitHubAppPublicLocked(g githubAppPublicConfig) bool {
-	if githubAppPublicFrom(s.config.GitHubAppConfig).equal(g) {
+	prev := githubAppPublicFrom(s.config.GitHubAppConfig)
+	if prev.equal(g) {
 		return false
 	}
 	s.config.GitHubAppConfig.AppID = g.AppID
@@ -94,6 +95,9 @@ func (s *Server) setGitHubAppPublicLocked(g githubAppPublicConfig) bool {
 	s.config.GitHubAppConfig.PrivateKeyPath = g.PrivateKeyPath
 	s.config.GitHubAppConfig.AppSlug = g.AppSlug
 	s.config.GitHubAppConfig.CommandMentionAliases = slices.Clone(g.CommandMentionAliases)
+	if prev.AppID != g.AppID || prev.APIBaseURL != g.APIBaseURL || prev.PrivateKeyPath != g.PrivateKeyPath {
+		s.githubAppIdentity.reset()
+	}
 	return true
 }
 

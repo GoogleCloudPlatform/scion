@@ -594,3 +594,54 @@ func TestTrackRateLimit_UpdatesOnAPIResponse(t *testing.T) {
 		t.Errorf("Used: got %d, want 1", rl.Used)
 	}
 }
+
+func TestParseAppIdentity(t *testing.T) {
+	fetchedAt := time.Date(2026, 11, 16, 19, 30, 0, 0, time.UTC)
+	var raw map[string]interface{}
+	if err := json.Unmarshal([]byte(`{
+		"id": 98765,
+		"slug": "scion-app",
+		"events": ["pull_request", "issue_comment", "issues", "pull_request"],
+		"permissions": {
+			"contents": "write",
+			"issues": "read",
+			"metadata": "read",
+			"pull_requests": "write"
+		}
+	}`), &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	id := ParseAppIdentity(raw, fetchedAt)
+	if id.AppID != 98765 {
+		t.Errorf("AppID = %d, want 98765", id.AppID)
+	}
+	if id.Slug != "scion-app" {
+		t.Errorf("Slug = %q, want scion-app", id.Slug)
+	}
+	if id.BotLogin != "scion-app[bot]" {
+		t.Errorf("BotLogin = %q, want scion-app[bot]", id.BotLogin)
+	}
+	wantEvents := []string{"issue_comment", "issues", "pull_request"}
+	if len(id.Events) != len(wantEvents) {
+		t.Fatalf("Events = %v, want %v", id.Events, wantEvents)
+	}
+	for i, ev := range wantEvents {
+		if id.Events[i] != ev {
+			t.Errorf("Events[%d] = %q, want %q", i, id.Events[i], ev)
+		}
+	}
+	if id.Permissions["issues"] != "read" || id.Permissions["contents"] != "write" {
+		t.Errorf("Permissions = %v", id.Permissions)
+	}
+	if !id.FetchedAt.Equal(fetchedAt) {
+		t.Errorf("FetchedAt = %v, want %v", id.FetchedAt, fetchedAt)
+	}
+
+	clone := id.Clone()
+	clone.Events[0] = "mutated"
+	clone.Permissions["issues"] = "write"
+	if id.Events[0] != "issue_comment" || id.Permissions["issues"] != "read" {
+		t.Error("Clone shared backing slice or map with original")
+	}
+}
