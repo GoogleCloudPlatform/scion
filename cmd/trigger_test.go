@@ -18,8 +18,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -436,4 +438,195 @@ func TestTriggerCLI_CreateListPauseResumeDelete(t *testing.T) {
 		"resume:" + trID,
 		"delete:" + trID,
 	}, seenActions)
+}
+
+func TestTriggerCLI_PaginationAndResolutionBeyondFirstPage(t *testing.T) {
+	fixedNow := time.Date(2026, 11, 16, 6, 0, 0, 0, time.UTC)
+	t.Cleanup(clitime.SetNow(func() time.Time { return fixedNow }))
+
+	origFormat := outputFormat
+	origListSource, origListWebhook, origListStatus := triggerListSource, triggerListWebhook, triggerListStatus
+	origWebhookListStatus := triggerWebhookListStatus
+	t.Cleanup(func() {
+		outputFormat = origFormat
+		triggerListSource, triggerListWebhook, triggerListStatus = origListSource, origListWebhook, origListStatus
+		triggerWebhookListStatus = origWebhookListStatus
+	})
+
+	// Seed 120 triggers (served in 50-row pages regardless of requested limit to
+	// simulate server-capped pagination) and 15 webhook endpoints (served in
+	// 5-row pages).
+	const totalTriggers = 120
+	triggers := make([]hubclient.Trigger, totalTriggers)
+	for i := 0; i < totalTriggers; i++ {
+		triggers[i] = hubclient.Trigger{
+			ID:        fmt.Sprintf("%08x-1111-4222-8333-444444444444", 0x10000000+i),
+			ProjectID: "proj-1",
+			Name:      fmt.Sprintf("trig-%03d", i),
+			Status:    "active",
+			Source:    hubclient.TriggerSourceSpec{Kind: "webhook", ID: "ep-main"},
+			Match:     hubclient.TriggerMatchSpec{Types: []string{"webhook.received"}},
+			Action:    hubclient.TriggerActionSpec{Type: "message", AgentName: "lead", Message: "hi"},
+			CreatedAt: fixedNow,
+			UpdatedAt: fixedNow,
+		}
+	}
+	const totalEndpoints = 15
+	endpoints := make([]hubclient.WebhookEndpoint, totalEndpoints)
+	for i := 0; i < totalEndpoints; i++ {
+		endpoints[i] = hubclient.WebhookEndpoint{
+			ID:            fmt.Sprintf("%08x-9999-4222-8333-555555555555", 0x20000000+i),
+			ProjectID:     "proj-1",
+			Name:          fmt.Sprintf("wh-%02d", i),
+			URL:           fmt.Sprintf("https://hub.example.com/api/v1/hooks/%02d", i),
+			Status:        "active",
+			SignatureMode: "scion_v1",
+			CreatedAt:     fixedNow,
+			UpdatedAt:     fixedNow,
+		}
+	}
+
+	var triggerGetQueries []string
+	var seenMutations []string
+
+	withMockTriggerHub(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/triggers":
+			triggerGetQueries = append(triggerGetQueries, r.URL.RawQuery)
+			if name := r.URL.Query().Get("name"); name != "" {
+				var matched []hubclient.Trigger
+				for _, tr := range triggers {
+					if tr.Name == name {
+						matched = append(matched, tr)
+					}
+				}
+				_ = json.NewEncoder(w).Encode(hubclient.ListTriggersResponse{
+					Triggers:   matched,
+					TotalCount: len(matched),
+				})
+				return
+			}
+			offset := 0
+			if c := r.URL.Query().Get("cursor"); c != "" {
+				var err error
+				offset, err = strconv.Atoi(c)
+				require.NoError(t, err)
+			}
+			end := offset + 50
+			next := ""
+			if end < len(triggers) {
+				next = strconv.Itoa(end)
+			} else {
+				end = len(triggers)
+			}
+			_ = json.NewEncoder(w).Encode(hubclient.ListTriggersResponse{
+				Triggers:   triggers[offset:end],
+				NextCursor: next,
+				TotalCount: len(triggers),
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/webhook-endpoints":
+			if name := r.URL.Query().Get("name"); name != "" {
+				var matched []hubclient.WebhookEndpoint
+				for _, ep := range endpoints {
+					if ep.Name == name {
+						matched = append(matched, ep)
+					}
+				}
+				_ = json.NewEncoder(w).Encode(hubclient.ListWebhookEndpointsResponse{
+					Endpoints:  matched,
+					TotalCount: len(matched),
+				})
+				return
+			}
+			offset := 0
+			if c := r.URL.Query().Get("cursor"); c != "" {
+				var err error
+				offset, err = strconv.Atoi(c)
+				require.NoError(t, err)
+			}
+			end := offset + 5
+			next := ""
+			if end < len(endpoints) {
+				next = strconv.Itoa(end)
+			} else {
+				end = len(endpoints)
+			}
+			_ = json.NewEncoder(w).Encode(hubclient.ListWebhookEndpointsResponse{
+				Endpoints:  endpoints[offset:end],
+				NextCursor: next,
+				TotalCount: len(endpoints),
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/proj-1/triggers/"+triggers[115].ID+"/pause":
+			seenMutations = append(seenMutations, "pause:"+triggers[115].ID)
+			_ = json.NewEncoder(w).Encode(triggers[115])
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/proj-1/triggers/"+triggers[118].ID+"/resume":
+			seenMutations = append(seenMutations, "resume:"+triggers[118].ID)
+			_ = json.NewEncoder(w).Encode(triggers[118])
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/projects/proj-1/webhook-endpoints/"+endpoints[13].ID:
+			seenMutations = append(seenMutations, "delete-ep:"+endpoints[13].ID)
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/projects/proj-1/webhook-endpoints/"+endpoints[14].ID:
+			seenMutations = append(seenMutations, "delete-ep:"+endpoints[14].ID)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}, hubsync.CredentialKindOAuth)
+
+	// 1. `scion trigger list` walks all 3 pages and prints row 119 (beyond page 1's 50).
+	outputFormat = ""
+	triggerListSource, triggerListWebhook, triggerListStatus = "", "", ""
+	listOut := captureStdout(t, func() {
+		require.NoError(t, runTriggerList(triggerListCmd, nil))
+	})
+	assert.Contains(t, listOut, "trig-000")
+	assert.Contains(t, listOut, "trig-065")
+	assert.Contains(t, listOut, "trig-119")
+
+	// JSON output returns all 120 items with nextCursor cleared.
+	outputFormat = "json"
+	jsonOut := captureStdout(t, func() {
+		require.NoError(t, runTriggerList(triggerListCmd, nil))
+	})
+	var parsed hubclient.ListTriggersResponse
+	require.NoError(t, json.Unmarshal([]byte(jsonOut), &parsed))
+	assert.Len(t, parsed.Triggers, totalTriggers)
+	assert.Empty(t, parsed.NextCursor)
+
+	// 2. Exact name resolution on page 3 (`trig-115`) uses `?name=trig-115` in a single GET!
+	outputFormat = ""
+	triggerGetQueries = nil
+	_ = captureStdout(t, func() {
+		require.NoError(t, runTriggerPause(triggerPauseCmd, []string{"trig-115"}))
+	})
+	require.Len(t, triggerGetQueries, 1, "exact name match should resolve via ?name= without full-page scan")
+	assert.Contains(t, triggerGetQueries[0], "name=trig-115")
+
+	// 3. Unique ID prefix on page 3 (`10000076`) paginates across all 3 pages after ?name= misses!
+	triggerGetQueries = nil
+	_ = captureStdout(t, func() {
+		require.NoError(t, runTriggerResume(triggerResumeCmd, []string{triggers[118].ID[:8]}))
+	})
+	assert.Len(t, triggerGetQueries, 4, "1 exact-name probe + 3 cursor pages")
+
+	// 4. `scion trigger webhook list` and `scion trigger webhook delete` paginate beyond page 1.
+	triggerWebhookListStatus = ""
+	epListOut := captureStdout(t, func() {
+		require.NoError(t, runTriggerWebhookList(triggerWebhookListCmd, nil))
+	})
+	assert.Contains(t, epListOut, "wh-00")
+	assert.Contains(t, epListOut, "wh-14")
+
+	_ = captureStdout(t, func() {
+		require.NoError(t, runTriggerWebhookDelete(triggerWebhookDeleteCmd, []string{"wh-13"}))
+		require.NoError(t, runTriggerWebhookDelete(triggerWebhookDeleteCmd, []string{endpoints[14].ID[:8]}))
+	})
+
+	assert.Equal(t, []string{
+		"pause:" + triggers[115].ID,
+		"resume:" + triggers[118].ID,
+		"delete-ep:" + endpoints[13].ID,
+		"delete-ep:" + endpoints[14].ID,
+	}, seenMutations)
 }

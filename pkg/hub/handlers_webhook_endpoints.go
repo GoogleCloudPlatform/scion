@@ -255,6 +255,7 @@ func (s *Server) listWebhookEndpoints(w http.ResponseWriter, r *http.Request, pr
 	query := r.URL.Query()
 	filter := store.WebhookEndpointFilter{
 		ProjectID: projectID,
+		Name:      strings.TrimSpace(query.Get("name")),
 		Status:    strings.TrimSpace(query.Get("status")),
 	}
 	scope := ""

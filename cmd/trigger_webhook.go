@@ -21,6 +21,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/google/uuid"
@@ -98,6 +99,39 @@ var triggerWebhookDeleteCmd = &cobra.Command{
 	RunE:  runTriggerWebhookDelete,
 }
 
+// listAllWebhookEndpoints drains every cursor page matching baseOpts and
+// returns a single aggregated response with NextCursor cleared.
+func listAllWebhookEndpoints(ctx context.Context, svc hubclient.WebhookEndpointService, baseOpts *hubclient.ListWebhookEndpointsOptions) (*hubclient.ListWebhookEndpointsResponse, error) {
+	var opts hubclient.ListWebhookEndpointsOptions
+	if baseOpts != nil {
+		opts = *baseOpts
+	}
+	if opts.Page.Limit <= 0 {
+		opts.Page.Limit = triggerCLIMaxPageLimit
+	}
+	var agg *hubclient.ListWebhookEndpointsResponse
+	seenCursors := map[string]bool{}
+	for {
+		page, err := svc.List(ctx, &opts)
+		if err != nil {
+			return nil, err
+		}
+		if agg == nil {
+			cp := *page
+			cp.Endpoints = append([]hubclient.WebhookEndpoint(nil), page.Endpoints...)
+			agg = &cp
+		} else {
+			agg.Endpoints = append(agg.Endpoints, page.Endpoints...)
+		}
+		if page.NextCursor == "" || seenCursors[page.NextCursor] {
+			agg.NextCursor = ""
+			return agg, nil
+		}
+		seenCursors[page.NextCursor] = true
+		opts.Page.Cursor = page.NextCursor
+	}
+}
+
 // resolveWebhookEndpointIDOrName resolves an endpoint UUID, exact name, or unique ID prefix to a full UUID.
 func resolveWebhookEndpointIDOrName(ctx context.Context, hubCtx *HubContext, projectID, ref string) (string, error) {
 	ref = strings.TrimSpace(ref)
@@ -108,7 +142,21 @@ func resolveWebhookEndpointIDOrName(ctx context.Context, hubCtx *HubContext, pro
 		return ref, nil
 	}
 
-	resp, err := hubCtx.Client.WebhookEndpoints(projectID).List(ctx, nil)
+	svc := hubCtx.Client.WebhookEndpoints(projectID)
+	nameResp, err := svc.List(ctx, &hubclient.ListWebhookEndpointsOptions{
+		Name: ref,
+		Page: apiclient.PageOptions{Limit: 1},
+	})
+	if err != nil {
+		return "", wrapTriggerHubError(hubCtx, fmt.Errorf("failed to list webhook endpoints for resolution: %w", err))
+	}
+	for _, ep := range nameResp.Endpoints {
+		if ep.Name == ref {
+			return ep.ID, nil
+		}
+	}
+
+	resp, err := listAllWebhookEndpoints(ctx, svc, nil)
 	if err != nil {
 		return "", wrapTriggerHubError(hubCtx, fmt.Errorf("failed to list webhook endpoints for resolution: %w", err))
 	}
@@ -184,7 +232,7 @@ func runTriggerWebhookList(cmd *cobra.Command, args []string) error {
 	opts := &hubclient.ListWebhookEndpointsOptions{
 		Status: strings.TrimSpace(triggerWebhookListStatus),
 	}
-	resp, err := hubCtx.Client.WebhookEndpoints(projectID).List(ctx, opts)
+	resp, err := listAllWebhookEndpoints(ctx, hubCtx.Client.WebhookEndpoints(projectID), opts)
 	if err != nil {
 		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to list webhook endpoints: %w", err))
 	}

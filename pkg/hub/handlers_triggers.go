@@ -407,6 +407,7 @@ func (s *Server) listTriggers(w http.ResponseWriter, r *http.Request, projectID 
 	}
 	filter := store.TriggerFilter{
 		ProjectID:  projectID,
+		Name:       strings.TrimSpace(query.Get("name")),
 		SourceKind: sourceKind,
 		SourceID:   strings.TrimSpace(query.Get("sourceId")),
 		Status:     strings.TrimSpace(query.Get("status")),

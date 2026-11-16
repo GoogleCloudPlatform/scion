@@ -1256,3 +1256,57 @@ func TestTriggers_ConcurrentCaps_Postgres(t *testing.T) {
 	f := setupTriggersTestFixtureOnServer(t, srv, s)
 	runTriggersConcurrentCapsAtLastSlot(t, f)
 }
+
+func TestTriggersAndWebhookEndpoints_ListByNameFilter(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+
+	epOwnerRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "owner-only-ep"})
+	require.Equal(t, http.StatusCreated, epOwnerRec.Code, epOwnerRec.Body.String())
+	var epOwner WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epOwnerRec.Body.Bytes(), &epOwner))
+
+	epAgentRec := f.doWebhookEndpoint(t, f.agentAAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "agent-a-ep"})
+	require.Equal(t, http.StatusCreated, epAgentRec.Code, epAgentRec.Body.String())
+	var epAgent WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epAgentRec.Body.Bytes(), &epAgent))
+
+	trOwnerRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "owner-only-tr",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: epOwner.ID},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusCreated, trOwnerRec.Code, trOwnerRec.Body.String())
+
+	trAgentRec := f.doTrigger(t, f.agentAAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "agent-a-tr",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: epAgent.ID},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusCreated, trAgentRec.Code, trAgentRec.Body.String())
+
+	// Exact ?name= filters endpoints and triggers for human owner.
+	listEpRec := f.doWebhookEndpoint(t, f.ownerAuth, "?name=agent-a-ep", http.MethodGet, nil)
+	require.Equal(t, http.StatusOK, listEpRec.Code, listEpRec.Body.String())
+	var epList ListWebhookEndpointsResponse
+	require.NoError(t, json.Unmarshal(listEpRec.Body.Bytes(), &epList))
+	require.Len(t, epList.Endpoints, 1)
+	assert.Equal(t, "agent-a-ep", epList.Endpoints[0].Name)
+
+	listTrRec := f.doTrigger(t, f.ownerAuth, "?name=agent-a-tr", http.MethodGet, nil)
+	require.Equal(t, http.StatusOK, listTrRec.Code, listTrRec.Body.String())
+	var trList ListTriggersResponse
+	require.NoError(t, json.Unmarshal(listTrRec.Body.Bytes(), &trList))
+	require.Len(t, trList.Triggers, 1)
+	assert.Equal(t, "agent-a-tr", trList.Triggers[0].Name)
+
+	// Caller-scoped agent filtering still hides another principal's rows even when queried by exact ?name=!
+	agentProbeOwnerEp := f.doWebhookEndpoint(t, f.agentAAuth, "?name=owner-only-ep", http.MethodGet, nil)
+	require.Equal(t, http.StatusOK, agentProbeOwnerEp.Code)
+	require.NoError(t, json.Unmarshal(agentProbeOwnerEp.Body.Bytes(), &epList))
+	assert.Empty(t, epList.Endpoints)
+
+	agentProbeOwnerTr := f.doTrigger(t, f.agentAAuth, "?name=owner-only-tr", http.MethodGet, nil)
+	require.Equal(t, http.StatusOK, agentProbeOwnerTr.Code)
+	require.NoError(t, json.Unmarshal(agentProbeOwnerTr.Body.Bytes(), &trList))
+	assert.Empty(t, trList.Triggers)
+}

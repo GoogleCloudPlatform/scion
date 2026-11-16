@@ -137,6 +137,41 @@ func wrapTriggerHubError(hubCtx *HubContext, err error) error {
 	return wrapHubError(err)
 }
 
+const triggerCLIMaxPageLimit = 200
+
+// listAllTriggers drains every cursor page matching baseOpts and returns a
+// single aggregated response with NextCursor cleared.
+func listAllTriggers(ctx context.Context, svc hubclient.TriggerService, baseOpts *hubclient.ListTriggersOptions) (*hubclient.ListTriggersResponse, error) {
+	var opts hubclient.ListTriggersOptions
+	if baseOpts != nil {
+		opts = *baseOpts
+	}
+	if opts.Page.Limit <= 0 {
+		opts.Page.Limit = triggerCLIMaxPageLimit
+	}
+	var agg *hubclient.ListTriggersResponse
+	seenCursors := map[string]bool{}
+	for {
+		page, err := svc.List(ctx, &opts)
+		if err != nil {
+			return nil, err
+		}
+		if agg == nil {
+			cp := *page
+			cp.Triggers = append([]hubclient.Trigger(nil), page.Triggers...)
+			agg = &cp
+		} else {
+			agg.Triggers = append(agg.Triggers, page.Triggers...)
+		}
+		if page.NextCursor == "" || seenCursors[page.NextCursor] {
+			agg.NextCursor = ""
+			return agg, nil
+		}
+		seenCursors[page.NextCursor] = true
+		opts.Page.Cursor = page.NextCursor
+	}
+}
+
 // resolveTriggerIDOrName resolves a trigger UUID, exact name, or unique ID prefix to a full UUID.
 func resolveTriggerIDOrName(ctx context.Context, hubCtx *HubContext, projectID, ref string) (string, error) {
 	ref = strings.TrimSpace(ref)
@@ -147,7 +182,21 @@ func resolveTriggerIDOrName(ctx context.Context, hubCtx *HubContext, projectID, 
 		return ref, nil
 	}
 
-	resp, err := hubCtx.Client.Triggers(projectID).List(ctx, nil)
+	svc := hubCtx.Client.Triggers(projectID)
+	nameResp, err := svc.List(ctx, &hubclient.ListTriggersOptions{
+		Name: ref,
+		Page: apiclient.PageOptions{Limit: 1},
+	})
+	if err != nil {
+		return "", wrapTriggerHubError(hubCtx, fmt.Errorf("failed to list triggers for resolution: %w", err))
+	}
+	for _, tr := range nameResp.Triggers {
+		if tr.Name == ref {
+			return tr.ID, nil
+		}
+	}
+
+	resp, err := listAllTriggers(ctx, svc, nil)
 	if err != nil {
 		return "", wrapTriggerHubError(hubCtx, fmt.Errorf("failed to list triggers for resolution: %w", err))
 	}
@@ -290,7 +339,7 @@ func runTriggerList(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	resp, err := hubCtx.Client.Triggers(projectID).List(ctx, opts)
+	resp, err := listAllTriggers(ctx, hubCtx.Client.Triggers(projectID), opts)
 	if err != nil {
 		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to list triggers: %w", err))
 	}

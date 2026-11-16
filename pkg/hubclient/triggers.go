@@ -118,6 +118,7 @@ type WebhookEndpointCreated struct {
 
 // ListWebhookEndpointsOptions configures webhook endpoint listing.
 type ListWebhookEndpointsOptions struct {
+	Name   string
 	Status string
 	Page   apiclient.PageOptions
 }
@@ -223,6 +224,7 @@ type UpdateTriggerRequest struct {
 
 // ListTriggersOptions configures trigger listing.
 type ListTriggersOptions struct {
+	Name     string
 	Source   string
 	SourceID string
 	Status   string
@@ -257,6 +259,9 @@ func (s *webhookEndpointService) Get(ctx context.Context, id string) (*WebhookEn
 func (s *webhookEndpointService) List(ctx context.Context, opts *ListWebhookEndpointsOptions) (*ListWebhookEndpointsResponse, error) {
 	query := url.Values{}
 	if opts != nil {
+		if opts.Name != "" {
+			query.Set("name", opts.Name)
+		}
 		if opts.Status != "" {
 			query.Set("status", opts.Status)
 		}
@@ -296,6 +301,9 @@ func (s *triggerService) Get(ctx context.Context, id string) (*Trigger, error) {
 func (s *triggerService) List(ctx context.Context, opts *ListTriggersOptions) (*ListTriggersResponse, error) {
 	query := url.Values{}
 	if opts != nil {
+		if opts.Name != "" {
+			query.Set("name", opts.Name)
+		}
 		if opts.Source != "" {
 			query.Set("source", opts.Source)
 		}

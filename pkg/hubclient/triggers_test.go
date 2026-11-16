@@ -55,6 +55,7 @@ func TestWebhookEndpointService(t *testing.T) {
 				Secret: "one-time-secret",
 			})
 		case http.MethodGet:
+			assert.Equal(t, "ci-hook", r.URL.Query().Get("name"))
 			assert.Equal(t, "active", r.URL.Query().Get("status"))
 			assert.Equal(t, "10", r.URL.Query().Get("limit"))
 			w.Header().Set("Content-Type", "application/json")
@@ -118,6 +119,7 @@ func TestWebhookEndpointService(t *testing.T) {
 	assert.Equal(t, "ci-hook", got.Name)
 
 	listed, err := svc.List(ctx, &ListWebhookEndpointsOptions{
+		Name:   "ci-hook",
 		Status: "active",
 		Page:   apiclient.PageOptions{Limit: 10},
 	})
@@ -159,6 +161,7 @@ func TestTriggerService(t *testing.T) {
 			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(sampleTrigger("active", 1))
 		case http.MethodGet:
+			assert.Equal(t, "deploy-notify", r.URL.Query().Get("name"))
 			assert.Equal(t, "webhook", r.URL.Query().Get("source"))
 			assert.Equal(t, "ep-123", r.URL.Query().Get("sourceId"))
 			assert.Equal(t, "active", r.URL.Query().Get("status"))
@@ -219,6 +222,7 @@ func TestTriggerService(t *testing.T) {
 	assert.Equal(t, 1, got.AuthorizationRevision)
 
 	listed, err := svc.List(ctx, &ListTriggersOptions{
+		Name:     "deploy-notify",
 		Source:   "webhook",
 		SourceID: "ep-123",
 		Status:   "active",
