@@ -63,6 +63,11 @@ import { GCPServiceAccountsLoader } from '../../client/gcp-sa-accounts-loader.js
 import { apiFetch, apiFetchAllPages, parseApiError } from '../../client/api.js';
 import { showPendingSecretsStartHint } from '../../client/pending-secrets.js';
 import { getPublicSettings } from '../../client/server-feature-flags.js';
+import {
+  FEATURE_FLAGS_CHANGED_EVENT,
+  FLAT_BROKERS_FLAG,
+  isFeatureEnabled,
+} from '../../utils/feature-flags.js';
 import { navigateTo } from '../../client/navigation.js';
 import { showToast } from '../../utils/toast.js';
 import { showResponseWarnings, showResponseBodyWarnings } from '../../client/response-warnings.js';
@@ -176,11 +181,41 @@ export class ScionPageAgentCreate extends LitElement {
 
   /** Inherited values for the form's unset fields, from what this page fetched. */
   private get placeholders(): Record<string, AgentConfigPlaceholder> {
+    const broker = this.selectedBroker;
     return resolveInheritedPlaceholders({
       template: this.selectedTemplate,
       projectSettings: this.projectSettings,
       hubSettings: this.hubSettings,
+      broker: broker
+        ? { id: broker.id, name: broker.name || broker.id, flat: isFlatBroker(broker) }
+        : null,
+      profile: this.effectiveProfile,
+      flatBrokersEnabled: isFeatureEnabled(FLAT_BROKERS_FLAG),
+      gcpServiceAccounts: this.gcp.gcpServiceAccounts,
     });
+  }
+
+  private unsubscribeGcp: (() => void) | null = null;
+
+  private readonly boundOnFeatureFlagsChanged = (): void => {
+    this.syncGcpTarget();
+    this.requestUpdate();
+  };
+
+  private syncGcpTarget(): void {
+    const broker = this.selectedBroker;
+    const flat = !!broker && isFlatBroker(broker);
+    this.gcp.setTarget(
+      this.targetRuntimeIsKubernetesOnly,
+      this.effectiveProfile,
+      flat
+        ? {
+            brokerId: broker.id,
+            brokerLabel: broker.name || broker.id,
+            flatBrokersEnabled: isFeatureEnabled(FLAT_BROKERS_FLAG),
+          }
+        : null
+    );
   }
 
   private get form(): ScionAgentConfigForm | null {
@@ -391,7 +426,10 @@ export class ScionPageAgentCreate extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
 
+    this.unsubscribeGcp = this.gcp.subscribe(() => this.requestUpdate());
+
     if (typeof window !== 'undefined') {
+      window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
       const params = new URLSearchParams(window.location.search);
 
       const projectParam = params.get('projectId');
@@ -408,18 +446,28 @@ export class ScionPageAgentCreate extends LitElement {
     void this.loadFormData();
   }
 
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this.unsubscribeGcp?.();
+    this.unsubscribeGcp = null;
+    if (typeof window !== 'undefined') {
+      window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
+    }
+  }
+
   override willUpdate(changedProperties: Map<string, unknown>): void {
     super.willUpdate(changedProperties);
     // Hand the GCP identity state the current target whenever the
     // broker/profile selection or the broker list changes: its hint
-    // describes Block on a Kubernetes target. Whether an explicit identity
-    // is sent is gated separately by gcpIdentityUserSet.
+    // describes Block on a Kubernetes target and per-broker defaults on flat
+    // Runtime Brokers. Whether an explicit identity is sent is gated
+    // separately by gcpIdentityUserSet.
     if (
       changedProperties.has('brokerId') ||
       changedProperties.has('profile') ||
       changedProperties.has('brokers')
     ) {
-      this.gcp.setTarget(this.targetRuntimeIsKubernetesOnly, this.effectiveProfile);
+      this.syncGcpTarget();
       // The accounts' mapping state is for one target: ask again when it
       // changes (ptone/scion#4391). Not before the first load has started.
       void this.gcpAccounts.targetChanged();
@@ -830,8 +878,7 @@ export class ScionPageAgentCreate extends LitElement {
     // The submit-time guards read the live target, even if no update has
     // handed it to the identity state yet.
     const profile = this.effectiveProfile;
-    this.gcp.targetKubernetesOnly = this.targetRuntimeIsKubernetesOnly;
-    this.gcp.profile = profile;
+    this.syncGcpTarget();
 
     // The form's validation includes the GCP identity rules. The form is
     // rendered once the page has loaded; the identity state is checked

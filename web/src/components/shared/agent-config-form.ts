@@ -2020,6 +2020,10 @@ export class ScionAgentConfigForm extends LitElement {
   ): TemplateResult {
     const g = this.gcpIdentity!;
     void this.gcpVersion;
+    const placeholder =
+      this.mode === 'create' && this.placeholders?.[f.key]
+        ? this.placeholderFor(f)
+        : 'Choose an identity...';
     return html`
       <div
         class="field form-field"
@@ -2030,7 +2034,7 @@ export class ScionAgentConfigForm extends LitElement {
         ${this.renderLabel(f, st, 'input-gcp_identity')}
         <sl-select
           id="input-gcp_identity"
-          placeholder="Choose an identity..."
+          placeholder=${placeholder}
           .value=${g.pickerBlank ? '' : g.gcpMetadataMode}
           ?disabled=${off}
           @sl-change=${(e: Event) => {

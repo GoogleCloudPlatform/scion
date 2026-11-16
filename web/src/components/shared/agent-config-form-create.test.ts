@@ -634,3 +634,26 @@ describe('create mode: the auto-expose control wins over a custom env entry', ()
     expect(el.collectConfigPatch()).toEqual({ env: { SCION_AUTO_EXPOSE_PORTS: 'true' } });
   });
 });
+
+describe('create mode: GCP identity inherited placeholder', () => {
+  it('displays gcp_identity placeholder when picker is blank, and defaults to Choose an identity...', async () => {
+    const plain = await mount();
+    expect(control(plain, 'gcp_identity', 'sl-select').getAttribute('placeholder')).toBe(
+      'Choose an identity...'
+    );
+
+    const withBroker = await mount({
+      placeholders: {
+        gcp_identity: {
+          value: 'Assign broker-sa@example.iam.gserviceaccount.com',
+          source: 'inherited from project default for Runtime Broker "Cloud Run US"',
+        },
+      },
+    });
+    const select = control(withBroker, 'gcp_identity', 'sl-select');
+    expect(select.value).toBe('');
+    expect(select.getAttribute('placeholder')).toBe(
+      'Assign broker-sa@example.iam.gserviceaccount.com (inherited from project default for Runtime Broker "Cloud Run US")'
+    );
+  });
+});
