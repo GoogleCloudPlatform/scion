@@ -120,4 +120,73 @@ describe('GcpIdentityState', () => {
     g.pickMode('block');
     expect(n).toBe(1);
   });
+
+  it('outranks an applied project default when a flat broker has a per-broker default and flag is on', () => {
+    const g = new GcpIdentityState();
+    g.setAccounts([
+      {
+        id: 'sa-proj',
+        scope: 'project',
+        scopeId: 'p1',
+        email: 'proj@example.iam.gserviceaccount.com',
+        projectId: 'gcp',
+        displayName: '',
+        defaultScopes: [],
+        verified: true,
+        createdBy: 'u1',
+        createdAt: '2026-01-01T00:00:00Z',
+      },
+      {
+        id: 'sa-broker',
+        scope: 'project',
+        scopeId: 'p1',
+        email: 'broker@example.iam.gserviceaccount.com',
+        projectId: 'gcp',
+        displayName: '',
+        defaultScopes: [],
+        verified: true,
+        createdBy: 'u1',
+        createdAt: '2026-01-01T00:00:00Z',
+      },
+    ]);
+    g.applyProjectDefaults({
+      defaultGCPIdentityMode: 'assign',
+      defaultGCPIdentityServiceAccountID: 'sa-proj',
+      defaultGCPIdentityServiceAccountIDByBroker: { 'flat-1': 'sa-broker' },
+      defaultGCPIdentityServiceAccountIDByProfile: { large: 'sa-proj' },
+    });
+
+    // With flat_runtime_brokers off, project default stays applied.
+    g.setTarget(false, '', {
+      brokerId: 'flat-1',
+      brokerLabel: 'Cloud Run US',
+      flatBrokersEnabled: false,
+    });
+    expect(g.pickerBlank).toBe(false);
+    expect(g.gcpMetadataMode).toBe('assign');
+    expect(g.gcpServiceAccountId).toBe('sa-proj');
+
+    // With flat_runtime_brokers on and flat-1 selected, per-broker default outranks project default.
+    g.setTarget(false, '', {
+      brokerId: 'flat-1',
+      brokerLabel: 'Cloud Run US',
+      flatBrokersEnabled: true,
+    });
+    expect(g.pickerBlank).toBe(true);
+    expect(g.toRequest()).toBeUndefined();
+    expect(g.hint).toContain('broker@example.iam.gserviceaccount.com');
+    expect(g.hint).toContain('Runtime Broker "Cloud Run US"');
+    // Per-profile precedence hint must never appear for a flat broker.
+    expect(g.hint).not.toContain('per-profile default');
+
+    // Selecting another flat broker without a per-broker entry falls back to project default,
+    // still without per-profile precedence hint.
+    g.setTarget(false, '', {
+      brokerId: 'flat-2',
+      brokerLabel: 'Docker Flat',
+      flatBrokersEnabled: true,
+    });
+    expect(g.pickerBlank).toBe(false);
+    expect(g.hint).not.toContain('per-profile default');
+  });
 });

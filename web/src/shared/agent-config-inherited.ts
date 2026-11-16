@@ -69,6 +69,7 @@ export interface ProjectCreateDefaults {
   defaultGCPIdentityMode?: string;
   defaultGCPIdentityServiceAccountID?: string;
   defaultGCPIdentityServiceAccountIDByProfile?: Record<string, string>;
+  defaultGCPIdentityServiceAccountIDByBroker?: Record<string, string>;
 }
 
 /** The hub public settings fields the create form reads (GET /api/v1/settings/public). */
@@ -81,6 +82,20 @@ export interface HubPublicDefaults {
   defaultModel?: string;
 }
 
+/** Selected Runtime Broker context for inherited GCP identity resolution. */
+export interface InheritedGCPBrokerTarget {
+  id: string;
+  name?: string | undefined;
+  flat?: boolean | undefined;
+}
+
+/** A service account summary used to format inherited GCP identity labels. */
+export interface InheritedGCPServiceAccount {
+  id: string;
+  email: string;
+  displayName?: string | undefined;
+}
+
 /** What the overlay reads: only values the page fetched. */
 export interface InheritedSources {
   /** The chosen template, as the template list returns it. */
@@ -90,12 +105,140 @@ export interface InheritedSources {
     | undefined;
   projectSettings?: ProjectCreateDefaults | null | undefined;
   hubSettings?: HubPublicDefaults | null | undefined;
+  /** Selected Runtime Broker on the create form, if any. */
+  broker?: InheritedGCPBrokerTarget | null | undefined;
+  /** Selected runtime profile on a legacy broker, if any. */
+  profile?: string | undefined;
+  /** Whether hub.flat_runtime_brokers is enabled in the browser session. */
+  flatBrokersEnabled?: boolean | undefined;
+  /** Project/hub GCP service accounts loaded on the form, to format SA labels. */
+  gcpServiceAccounts?: readonly InheritedGCPServiceAccount[] | undefined;
+  /** Resolved hub-wide GCP identity default, when known. */
+  hubGCPIdentity?:
+    | { mode?: string | undefined; serviceAccountId?: string | undefined }
+    | null
+    | undefined;
 }
 
 export const FROM_TEMPLATE = 'inherited from the template';
 export const FROM_PROJECT = 'inherited from project settings';
 export const FROM_HUB = 'inherited from hub defaults';
 export const PROJECT_OVERRIDE = 'project setting; overrides any value set here';
+
+export function fromBrokerDefault(brokerLabel: string): string {
+  return `inherited from project default for Runtime Broker "${brokerLabel}"`;
+}
+
+export function fromProfileDefault(profile: string): string {
+  return `inherited from project default for profile "${profile}"`;
+}
+
+export type InheritedGCPIdentityRung = 'broker' | 'profile' | 'project' | 'hub';
+
+export interface InheritedGCPIdentity {
+  rung: InheritedGCPIdentityRung;
+  mode: 'block' | 'passthrough' | 'assign';
+  serviceAccountId?: string | undefined;
+  value: string;
+  source: string;
+}
+
+function formatServiceAccountLabel(
+  id: string,
+  accounts: readonly InheritedGCPServiceAccount[] | undefined
+): string {
+  const sa = accounts?.find((a) => a.id === id);
+  if (!sa) return id;
+  return sa.displayName ? `${sa.displayName} (${sa.email})` : sa.email;
+}
+
+function formatTierIdentity(
+  rung: 'project' | 'hub',
+  mode: string | undefined,
+  serviceAccountId: string | undefined,
+  source: string,
+  accounts: readonly InheritedGCPServiceAccount[] | undefined
+): InheritedGCPIdentity | undefined {
+  if (!mode) return undefined;
+  if (mode === 'assign') {
+    if (!serviceAccountId) {
+      return { rung, mode: 'block', value: 'Block', source };
+    }
+    return {
+      rung,
+      mode: 'assign',
+      serviceAccountId,
+      value: `Assign ${formatServiceAccountLabel(serviceAccountId, accounts)}`,
+      source,
+    };
+  }
+  if (mode === 'passthrough') {
+    return { rung, mode: 'passthrough', value: 'Passthrough', source };
+  }
+  if (mode === 'block') {
+    return { rung, mode: 'block', value: 'Block', source };
+  }
+  return undefined;
+}
+
+/**
+ * Resolves the inherited GCP identity ladder for an untouched create form
+ * (ptone/scion#8185, pkg/hub/handlers_agents_core.go):
+ * 1. Per-broker project default (only when hub.flat_runtime_brokers is on and
+ *    the selected Runtime Broker is flat).
+ * 2. Per-profile project default (legacy profile-based brokers only).
+ * 3. Project-wide default (defaultGCPIdentityMode / defaultGCPIdentityServiceAccountID).
+ * 4. Hub default (when known).
+ */
+export function resolveInheritedGCPIdentity(
+  sources: InheritedSources
+): InheritedGCPIdentity | undefined {
+  const ps = sources.projectSettings ?? {};
+  const accounts = sources.gcpServiceAccounts;
+
+  if (sources.flatBrokersEnabled && sources.broker?.flat && sources.broker.id) {
+    const brokerSAId = ps.defaultGCPIdentityServiceAccountIDByBroker?.[sources.broker.id];
+    if (brokerSAId) {
+      return {
+        rung: 'broker',
+        mode: 'assign',
+        serviceAccountId: brokerSAId,
+        value: `Assign ${formatServiceAccountLabel(brokerSAId, accounts)}`,
+        source: fromBrokerDefault(sources.broker.name || sources.broker.id),
+      };
+    }
+  }
+
+  if (!sources.broker?.flat && sources.profile) {
+    const profileSAId = ps.defaultGCPIdentityServiceAccountIDByProfile?.[sources.profile];
+    if (profileSAId) {
+      return {
+        rung: 'profile',
+        mode: 'assign',
+        serviceAccountId: profileSAId,
+        value: `Assign ${formatServiceAccountLabel(profileSAId, accounts)}`,
+        source: fromProfileDefault(sources.profile),
+      };
+    }
+  }
+
+  const projectTier = formatTierIdentity(
+    'project',
+    ps.defaultGCPIdentityMode,
+    ps.defaultGCPIdentityServiceAccountID,
+    FROM_PROJECT,
+    accounts
+  );
+  if (projectTier) return projectTier;
+
+  return formatTierIdentity(
+    'hub',
+    sources.hubGCPIdentity?.mode,
+    sources.hubGCPIdentity?.serviceAccountId,
+    FROM_HUB,
+    accounts
+  );
+}
 
 const RESOURCE_KEYS: ReadonlyArray<{
   key: string;
@@ -209,6 +352,13 @@ export function resolveInheritedPlaceholders(
       value: String(hub.autoExposePortsEnabled),
       source: `${FROM_HUB}, unless the harness config sets it`,
     };
+  }
+
+  if (sources.flatBrokersEnabled && sources.broker?.flat) {
+    const gcp = resolveInheritedGCPIdentity(sources);
+    if (gcp?.rung === 'broker') {
+      out.gcp_identity = { value: gcp.value, source: gcp.source };
+    }
   }
 
   return out;

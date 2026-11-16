@@ -33,6 +33,7 @@ const GCP_FIELDS = new Set<string>([
   'projectGCPIdentityDefaultMode',
   'projectGCPIdentityDefaultApplied',
   'projectGCPIdentityProfileDefaults',
+  'projectGCPIdentityBrokerDefaults',
 ]);
 
 /**

@@ -26,6 +26,7 @@ import { requestUrl } from '../../client/__fixtures__/request-url.js';
 import { createInternals, formField, formRoot } from './__fixtures__/agent-create-internals.js';
 import { KUBERNETES_BLOCK_HINT } from '../../shared/gcp-identity-state.js';
 import { invalidatePublicSettings } from '../../client/server-feature-flags.js';
+import { FEATURE_FLAGS_CHANGED_EVENT, FLAT_BROKERS_FLAG } from '../../utils/feature-flags.js';
 
 interface ProfileFixture {
   name: string;
@@ -38,6 +39,7 @@ interface BrokerFixture {
   name: string;
   status: string;
   profiles?: ProfileFixture[];
+  runtimeTarget?: { type: string; region?: string; namespace?: string };
 }
 
 interface CreatePrivate extends HTMLElement {
@@ -59,6 +61,8 @@ let projectDefaultMode = '';
 let projectDefaultAccount = 'sa-a';
 /** The project's per-profile defaults (profile name to account ID). */
 let projectProfileDefaults: Record<string, string> = {};
+/** The project's per-broker defaults (flat broker ID to account ID). */
+let projectBrokerDefaults: Record<string, string> = {};
 let hubTelemetry = false;
 /** Extra project settings fields (limits, model) for the placeholder tests. */
 let projectExtraSettings: Record<string, unknown> = {};
@@ -114,6 +118,9 @@ function stubFetch(): void {
         if (Object.keys(projectProfileDefaults).length > 0) {
           settings.defaultGCPIdentityServiceAccountIDByProfile = projectProfileDefaults;
         }
+        if (Object.keys(projectBrokerDefaults).length > 0) {
+          settings.defaultGCPIdentityServiceAccountIDByBroker = projectBrokerDefaults;
+        }
         body = settings;
       } else if (url.includes('/gcp-service-accounts')) {
         body = { items: serviceAccounts };
@@ -139,6 +146,8 @@ afterEach(() => {
   projectDefaultMode = '';
   projectDefaultAccount = 'sa-a';
   projectProfileDefaults = {};
+  projectBrokerDefaults = {};
+  delete window.__SCION_FEATURES__;
   serviceAccounts = [verifiedServiceAccount];
   hubTelemetry = false;
   projectExtraSettings = {};
@@ -681,5 +690,94 @@ describe('Create Agent: hub defaults show as placeholders', () => {
     expect(formField(c, 'Model')?.querySelector('sl-input')?.getAttribute('placeholder')).toBe(
       'project-model (inherited from project settings)'
     );
+  });
+});
+
+describe('Create Agent: flat broker per-broker default GCP identity (ptone/scion#8185)', () => {
+  const brokerServiceAccount = {
+    ...verifiedServiceAccount,
+    id: 'sa-broker',
+    email: 'sa-broker@example.iam.gserviceaccount.com',
+  };
+
+  const flatCloudRunTarget: TargetFixture = {
+    label: 'a flat Cloud Run broker',
+    brokers: [
+      {
+        id: 'flat-cr-1',
+        name: 'Cloud Run US',
+        status: 'online',
+        runtimeTarget: { type: 'cloudrun', region: 'us-central1' },
+      },
+    ],
+    brokerId: 'flat-cr-1',
+    profile: '',
+    kubernetesOnly: false,
+  };
+
+  function setFlatBrokers(on: boolean): void {
+    window.__SCION_FEATURES__ = {
+      ...(window.__SCION_FEATURES__ ?? {}),
+      [FLAT_BROKERS_FLAG]: on,
+    };
+    window.dispatchEvent(new Event(FEATURE_FLAGS_CHANGED_EVENT));
+  }
+
+  for (const projMode of ['', 'block', 'passthrough', 'assign']) {
+    it(`shows per-broker SA and origin label, beats project "${projMode || 'unset'}" default, and omits gcp_identity when untouched`, async () => {
+      setFlatBrokers(true);
+      serviceAccounts = [verifiedServiceAccount, brokerServiceAccount];
+      projectDefaultMode = projMode;
+      projectBrokerDefaults = { 'flat-cr-1': 'sa-broker' };
+
+      const c = await mount();
+      await selectTarget(c, flatCloudRunTarget);
+
+      expect(gcpIdentitySelect(c).value).toBe('');
+      expect(gcpIdentitySelect(c).getAttribute('placeholder')).toBe(
+        'Assign sa-broker@example.iam.gserviceaccount.com (inherited from project default for Runtime Broker "Cloud Run US")'
+      );
+      expect(gcpIdentityHint(c)).toBe(
+        'No mode chosen: inherits Assign sa-broker@example.iam.gserviceaccount.com from this project\'s default for Runtime Broker "Cloud Run US".'
+      );
+      expect(accountSelect(c)).toBeNull();
+
+      // Untouched create omits gcp_identity so Hub evaluates the ladder authoritatively.
+      const untouchedBody = await submit(c);
+      expect(untouchedBody).not.toHaveProperty('gcp_identity');
+
+      // Explicit pick overrides the inherited per-broker default.
+      await chooseIdentity(c, 'block');
+      const explicitBody = await submit(c);
+      expect(explicitBody.gcp_identity).toEqual({ metadata_mode: 'block' });
+    });
+  }
+
+  it('ignores per-broker default when hub.flat_runtime_brokers is off', async () => {
+    setFlatBrokers(false);
+    serviceAccounts = [verifiedServiceAccount, brokerServiceAccount];
+    projectDefaultMode = 'block';
+    projectBrokerDefaults = { 'flat-cr-1': 'sa-broker' };
+
+    const c = await mount();
+    await selectTarget(c, flatCloudRunTarget);
+
+    expect(gcpIdentitySelect(c).value).toBe('block');
+    expect(gcpIdentityHint(c)).not.toContain('sa-broker@example.iam.gserviceaccount.com');
+    expect(await submit(c)).not.toHaveProperty('gcp_identity');
+  });
+
+  it('ignores per-broker default on a legacy profile-based broker even when hub.flat_runtime_brokers is on', async () => {
+    setFlatBrokers(true);
+    serviceAccounts = [verifiedServiceAccount, brokerServiceAccount];
+    projectDefaultMode = 'passthrough';
+    projectBrokerDefaults = { 'broker-docker': 'sa-broker' };
+
+    const c = await mount();
+    await selectTarget(c, dockerTarget);
+
+    expect(gcpIdentitySelect(c).value).toBe('passthrough');
+    expect(gcpIdentityHint(c)).not.toContain('sa-broker@example.iam.gserviceaccount.com');
+    expect(await submit(c)).not.toHaveProperty('gcp_identity');
   });
 });
