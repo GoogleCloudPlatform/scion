@@ -642,8 +642,9 @@ func TestMessageHoldStore_ExpiryAndSweepsIgnoreAwaitingSession(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, sweptDelivering)
 
-	// Verify partial indexes exist with expected key columns on both SQLite and Postgres,
-	// and check dialect-specific partial predicate / query plan output.
+	// Verify partial indexes exist with expected key columns on both SQLite and Postgres;
+	// check the partial WHERE predicate in pg_indexes on Postgres and EXPLAIN QUERY PLAN
+	// index usage on SQLite.
 	assert.Equal(t, []string{"recipient_id", "created", "id"},
 		messageIndexColumns(t, f.client, "message_awaiting_session_recipient_created_id"))
 	assert.Equal(t, []string{"created", "id"},
@@ -660,17 +661,11 @@ func TestMessageHoldStore_ExpiryAndSweepsIgnoreAwaitingSession(t *testing.T) {
 			defs = append(defs, def)
 		}
 		require.NoError(t, rows.Err())
-		_ = rows.Close()
+		require.NoError(t, rows.Close())
 		require.Len(t, defs, 2)
 		for _, def := range defs {
-			assert.Contains(t, def, "awaiting_session", "expected partial WHERE predicate on Postgres index, got: %s", def)
+			assert.Regexp(t, `WHERE .*dispatch_state.*'awaiting_session'`, def, "expected partial WHERE predicate on Postgres index, got: %s", def)
 		}
-
-		var explainRows entsql.Rows
-		require.NoError(t, f.client.Driver().Query(ctx,
-			"EXPLAIN SELECT id FROM messages WHERE dispatch_state = 'awaiting_session' AND recipient_id = $1 ORDER BY created, id LIMIT 64",
-			[]any{f.agentID}, &explainRows))
-		_ = explainRows.Close()
 	} else {
 		var rows entsql.Rows
 		require.NoError(t, f.client.Driver().Query(ctx,
@@ -683,7 +678,8 @@ func TestMessageHoldStore_ExpiryAndSweepsIgnoreAwaitingSession(t *testing.T) {
 			require.NoError(t, rows.Scan(&id, &parent, &notused, &detail))
 			plans = append(plans, detail)
 		}
-		_ = rows.Close()
+		require.NoError(t, rows.Err())
+		require.NoError(t, rows.Close())
 		assert.True(t, strings.Contains(strings.Join(plans, " "), "message_awaiting_session"),
 			"expected partial index in query plan, got: %v", plans)
 	}
