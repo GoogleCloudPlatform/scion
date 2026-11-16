@@ -324,8 +324,8 @@ func shrinkSubtreeFieldsLongestFirst(
 		if excess >= len(cur) {
 			target = 0
 		} else {
-			// Cut at least 1 byte (or 25% of excess when JSON escaping expands bytes)
-			// so the loop makes strictly monotonic progress and converges in a few passes.
+			// Cut by excess bytes (at least 1 byte, plus 1 more below if target
+			// lands mid-rune) so the loop makes strictly monotonic progress.
 			step := excess
 			if step < 1 {
 				step = 1
