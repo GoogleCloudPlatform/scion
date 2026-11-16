@@ -165,6 +165,52 @@ func (s *Server) authorizeScheduledExecAuthoringOpts(
 	return target, true
 }
 
+// authorizeStoredExecTargetForUpdate verifies that the caller holds live
+// agent.attach on an existing exec schedule's stored target before any PATCH
+// can modify its dispatch or re-target it to another agent (Phase 2 R1).
+// When the stored target has been deleted (for example recovering a schedule
+// paused with target_deleted), prevLive is false and ok is true so the caller
+// may re-target only by supplying an explicit replacement command/payload.
+func (s *Server) authorizeStoredExecTargetForUpdate(
+	w http.ResponseWriter,
+	r *http.Request,
+	projectID string,
+	prevTargetID string,
+) (prevLive bool, ok bool) {
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return false, false
+	}
+	if prevTargetID == "" {
+		return false, true
+	}
+	prevTarget, err := s.store.GetAgent(ctx, prevTargetID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		slog.ErrorContext(ctx, "exec schedule authoring: stored target lookup failed", "project_id", projectID, "error", err)
+		InternalError(w)
+		return false, false
+	}
+	if err != nil || prevTarget == nil || prevTarget.ProjectID != projectID || !prevTarget.DeletedAt.IsZero() {
+		return false, true
+	}
+	if denial := s.authorizeAgentTargetAction(ctx, identity, prevTarget, ActionAttach); denial != nil {
+		if denial.status == http.StatusUnauthorized {
+			Unauthorized(w)
+			return false, false
+		}
+		if !s.scheduledTargetReadable(ctx, identity, prevTarget) {
+			logAuthzDenial(r, identity, agentResource(prevTarget), ActionAttach, "exec schedule authoring: "+denial.reason)
+			NotFound(w, "Agent")
+			return false, false
+		}
+		writeAgentTargetDenial(w, r, identity, prevTarget, ActionAttach, denial)
+		return false, false
+	}
+	return true, true
+}
+
 // errScheduledExecQuota is the error of an authoring over the exec limits.
 var errScheduledExecQuota = errors.New("exec schedule quota exceeded")
 

@@ -262,6 +262,7 @@ func TestScheduledExecRecurringAuthoring_ManagedStoppedAndTargetDeletedRecovery(
 	assert.Equal(t, ErrCodeUnsupportedCapability, decodeTargetAPIError(t, rec).Code)
 
 	// Stopped agent -> 201 Created at authoring.
+	sentinel := "STOPPEDSENTINEL-" + uuid.NewString()
 	stopped := &store.Agent{
 		ID: tid("exec-rec-stopped"), Slug: tid("exec-rec-stopped"), Name: "exec-rec-stopped", ProjectID: f.proj.ID,
 		Phase: "stopped", CreatedBy: f.owner.ID, OwnerID: f.owner.ID, Ancestry: []string{f.owner.ID},
@@ -269,7 +270,7 @@ func TestScheduledExecRecurringAuthoring_ManagedStoppedAndTargetDeletedRecovery(
 	}
 	require.NoError(t, f.store.CreateAgent(ctx, stopped))
 	rec = requestAsIdentity(t, f.srv, authUser(f.owner), http.MethodPost, execRecurringSchedulesPath(f),
-		execRecurringCreateBody("stopped-ok", stopped.ID, "true"))
+		execRecurringCreateBody("stopped-ok", stopped.ID, "echo", sentinel))
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	scID, _ := decodeEventResponse(t, rec)["id"].(string)
 
@@ -290,10 +291,20 @@ func TestScheduledExecRecurringAuthoring_ManagedStoppedAndTargetDeletedRecovery(
 	rec = requestAsIdentity(t, f.srv, authUser(f.owner), http.MethodPost, execRecurringSchedulesPath(f)+"/"+scID+"/resume", nil)
 	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 
-	// PATCH while paused to point at live f.sibling, then POST /resume clears target_deleted and activates.
+	// R1 sibling: once the previous target is deleted, live agent.attach on it
+	// can no longer be verified, so retargeting WITHOUT supplying a replacement
+	// command/payload must be refused without leaking the stored sentinel!
 	rec = requestAsIdentity(t, f.srv, authUser(f.owner), http.MethodPatch, execRecurringSchedulesPath(f)+"/"+scID,
 		map[string]any{"agentId": f.sibling.ID})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.NotContains(t, rec.Body.String(), sentinel)
+
+	// PATCH while paused with explicit replacement command to live f.sibling,
+	// then POST /resume clears target_deleted and activates.
+	rec = requestAsIdentity(t, f.srv, authUser(f.owner), http.MethodPatch, execRecurringSchedulesPath(f)+"/"+scID,
+		map[string]any{"agentId": f.sibling.ID, "command": []string{"true"}})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NotContains(t, rec.Body.String(), sentinel)
 
 	rec = requestAsIdentity(t, f.srv, authUser(f.owner), http.MethodPost, execRecurringSchedulesPath(f)+"/"+scID+"/resume", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -331,6 +342,12 @@ func TestScheduledExecRecurringAuthoring_FlagOffAndFlagFlip(t *testing.T) {
 
 		rec = requestAsIdentity(t, f.srv, authUser(f.owner), http.MethodPatch, execRecurringSchedulesPath(f)+"/"+active.ID,
 			map[string]any{"command": []string{"echo", "nope"}})
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "unsupported event type: exec")
+
+		// R1 + AC1: changing eventType away from exec while the flag is off is also rejected!
+		rec = requestAsIdentity(t, f.srv, authUser(f.owner), http.MethodPatch, execRecurringSchedulesPath(f)+"/"+active.ID,
+			map[string]any{"eventType": "message"})
 		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 		assert.Contains(t, rec.Body.String(), "unsupported event type: exec")
 

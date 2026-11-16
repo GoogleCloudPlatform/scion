@@ -282,6 +282,15 @@ func (s *Server) prepareExecScheduleUpdate(
 	req *UpdateScheduleRequest,
 	hasExecFields bool,
 ) (*scheduledExecPayload, string, bool) {
+	prevLive, ok := s.authorizeStoredExecTargetForUpdate(w, r, projectID, execPayloadTarget(originalPayload))
+	if !ok {
+		return nil, "", false
+	}
+	if !prevLive && req.Payload == "" && req.Command == nil && (req.AgentID != "" || req.AgentName != "") {
+		ValidationError(w, "retargeting an exec schedule whose previous target was deleted requires command or payload", nil)
+		return nil, "", false
+	}
+
 	var p *scheduledExecPayload
 	switch {
 	case req.Payload != "":
@@ -297,7 +306,7 @@ func (s *Server) prepareExecScheduleUpdate(
 		p = decoded
 	case hasExecFields:
 		var base scheduledExecPayload
-		if originalEventType == scheduledEventTypeExec && originalPayload != "" {
+		if prevLive && (originalEventType == scheduledEventTypeExec || payloadHasExecContent(originalPayload)) && originalPayload != "" {
 			if prev, err := decodeScheduledExecPayload(originalPayload); err == nil {
 				base = *prev
 				if base.AgentID != "" {

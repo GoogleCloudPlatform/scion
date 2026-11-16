@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
@@ -140,9 +141,34 @@ func (r *execRevealer) reveals(agentID string) bool {
 	return reveal
 }
 
+// payloadHasExecContent reports whether raw carries exec payload fields
+// ("command" or "timeoutSeconds", matched case-insensitively like
+// encoding/json), even on a row whose claimed eventType is not "exec".
+// Truncated/malformed JSON containing either key also matches so redaction
+// fails closed.
+func payloadHasExecContent(raw string) bool {
+	if raw == "" {
+		return false
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &obj); err == nil {
+		for k := range obj {
+			if strings.EqualFold(k, "command") || strings.EqualFold(k, "timeoutSeconds") {
+				return true
+			}
+		}
+		return false
+	}
+	lower := strings.ToLower(raw)
+	return strings.Contains(lower, `"command"`) || strings.Contains(lower, `"timeoutseconds"`)
+}
+
 // payloadFor returns the payload of a row of eventType a caller sees.
+// Any row whose eventType is exec OR whose stored payload carries exec
+// content is redacted fail-closed unless the caller holds live agent.attach
+// on the stored target.
 func (r *execRevealer) payloadFor(eventType, raw string) string {
-	if eventType != scheduledEventTypeExec {
+	if eventType != scheduledEventTypeExec && !payloadHasExecContent(raw) {
 		return raw
 	}
 	if r.reveals(execPayloadTarget(raw)) {
@@ -157,7 +183,7 @@ func (r *execRevealer) payloadFor(eventType, raw string) string {
 func (s *Server) scheduledEventResponses(ctx context.Context, rev *execRevealer, events []store.ScheduledEvent) []ScheduledEventResponse {
 	var execIDs []string
 	for i := range events {
-		if events[i].EventType == scheduledEventTypeExec {
+		if events[i].EventType == scheduledEventTypeExec || payloadHasExecContent(events[i].Payload) {
 			execIDs = append(execIDs, events[i].ID)
 		}
 	}

@@ -533,8 +533,13 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 		effectiveEventType = req.EventType
 	}
 	hasExecFields := req.AgentID != "" || req.AgentName != "" || req.Command != nil || req.TimeoutSeconds != nil
-	if effectiveEventType == scheduledEventTypeExec && !s.execSchedulesEnabled() {
+	isExecRow := originalEventType == scheduledEventTypeExec || effectiveEventType == scheduledEventTypeExec || payloadHasExecContent(originalPayload)
+	if isExecRow && !s.execSchedulesEnabled() {
 		ValidationError(w, fmt.Sprintf("unsupported event type: %s (supported: %s)", scheduledEventTypeExec, s.supportedScheduledEventTypes()), nil)
+		return
+	}
+	if req.EventType != "" && req.EventType != originalEventType && isExecRow {
+		ValidationError(w, "eventType cannot be changed to or from exec", nil)
 		return
 	}
 	if effectiveEventType != scheduledEventTypeExec && hasExecFields {
@@ -699,7 +704,7 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 	// rate limit, and active quota) before comparing encoded payload to
 	// originalPayload, so callers without attach get no argv-guessing oracle.
 	var execPayload *scheduledExecPayload
-	if effectiveEventType == scheduledEventTypeExec && (req.Payload != "" || hasExecFields || changesFutureDispatch) {
+	if isExecRow && (req.Payload != "" || hasExecFields || changesFutureDispatch) {
 		var encoded string
 		var ok bool
 		execPayload, encoded, ok = s.prepareExecScheduleUpdate(w, r, projectID, schedule, originalEventType, originalPayload, &req, hasExecFields)

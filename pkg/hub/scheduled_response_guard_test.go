@@ -218,10 +218,16 @@ func TestScheduledResponses_RouteEnumerationGuard(t *testing.T) {
 		{"scheduler reader without attach", func(t *testing.T, f *bypassAgentsFixture) Identity {
 			return setupNonAdminUser(t, f.store, scheduledPerms)
 		}},
+		{"project-admin without attach", func(t *testing.T, f *bypassAgentsFixture) Identity {
+			id := tid("guard-proj-admin")
+			createTestUserWithProjectRole(t, f.store, id, "guard-proj-admin@test", f.proj.ID, store.ProjectRoleAdmin)
+			ensureHubMembership(context.Background(), f.store, id)
+			return NewAuthenticatedUser(id, "guard-proj-admin@test", "PA", store.UserRoleMember, "api")
+		}},
 		{"creator with a UAT without agent:attach", func(t *testing.T, f *bypassAgentsFixture) Identity {
 			return NewScopedUserIdentity(authUser(f.owner), f.proj.ID, []string{
 				"scheduled_event:read", "scheduled_event:list", "scheduled_event:create",
-				"scheduled_event:update", "scheduled_event:delete", store.UATScopeAgentRead, store.UATScopeProjectRead,
+				"scheduled_event:update", "scheduled_event:delete", store.UATScopeAgentManage, store.UATScopeAgentRead, store.UATScopeProjectRead,
 			})
 		}},
 		{"creator after attach is lost", func(t *testing.T, f *bypassAgentsFixture) Identity {
@@ -267,6 +273,73 @@ func TestScheduledResponses_RouteEnumerationGuard(t *testing.T) {
 				t.Logf("%s -> %d", key, rec.Code)
 			}
 			assert.Positive(t, successes, "the caller must reach at least some routes for the guard to mean anything")
+
+			// R1 transition & reclassification guard cases: reclassifying or
+			// re-targeting an exec row (including to an agent the caller DOES
+			// own) must never leak argv or carry it forward, and stored exec
+			// content must redact fail-closed regardless of claimed eventType.
+			ctx := context.Background()
+			ownAgent := &store.Agent{
+				ID: tid("guard-own-" + uuid.NewString()[:8]), Slug: "guard-own-" + uuid.NewString()[:8],
+				Name: "guard-own", ProjectID: f.proj.ID, Phase: "running",
+				CreatedBy: identity.ID(), OwnerID: identity.ID(), Ancestry: []string{identity.ID()}, Runtime: "docker",
+			}
+			require.NoError(t, f.store.CreateAgent(ctx, ownAgent))
+
+			transitions := []struct {
+				name string
+				body map[string]any
+			}{
+				{"switch-to-message-no-payload", map[string]any{"eventType": "message"}},
+				{"switch-to-dispatch-no-payload", map[string]any{"eventType": "dispatch_agent"}},
+				{"switch-to-message-with-payload", map[string]any{"eventType": "message", "payload": `{"agentId":"` + f.sibling.ID + `","message":"hi"}`}},
+				{"retarget-own-agent-no-command", map[string]any{"agentId": ownAgent.ID}},
+				{"retarget-own-agent-with-command", map[string]any{"agentId": ownAgent.ID, "command": []string{"true"}}},
+				{"retarget-own-agent-via-payload", map[string]any{"payload": `{"agentId":"` + ownAgent.ID + `","command":["true"]}`}},
+				{"patch-timeout", map[string]any{"timeoutSeconds": 120}},
+			}
+			basePath := "/api/v1/projects/" + f.proj.ID + "/schedules"
+			for _, tr := range transitions {
+				f.srv.scheduledExecLimiter()
+				f.srv.scheduledExecAuthoringLimiter = newKeysRateLimiter(scheduledExecAuthoringRate, scheduledExecAuthoringBurst)
+				trRows := seedGuardRows(t, f, sentinel)
+				schedURL := basePath + "/" + trRows.activeSchedule
+				rec := requestAsIdentity(t, f.srv, identity, http.MethodPatch, schedURL, tr.body)
+				assert.GreaterOrEqual(t, rec.Code, http.StatusBadRequest, "transition %s must be refused (%d: %s)", tr.name, rec.Code, rec.Body.String())
+				assert.NotContains(t, rec.Body.String(), sentinel, "PATCH %s leaked exec argv", tr.name)
+				recGet := requestAsIdentity(t, f.srv, identity, http.MethodGet, schedURL, nil)
+				assert.NotContains(t, recGet.Body.String(), sentinel, "GET after %s leaked exec argv", tr.name)
+				stored, err := f.store.GetSchedule(ctx, trRows.activeSchedule)
+				require.NoError(t, err)
+				assert.Equal(t, scheduledEventTypeExec, stored.EventType, "transition %s changed stored eventType", tr.name)
+				assert.Equal(t, 1, stored.AuthorizationRevision, "transition %s bumped revision", tr.name)
+			}
+
+			// Fail-closed serializer check: even if a stored row carries
+			// EventType != "exec" while its stored payload has exec content,
+			// every read/write/admin route still redacts argv.
+			execRaw, err := (&scheduledExecPayload{
+				AgentID: f.sibling.ID, AgentName: f.sibling.Slug, Command: []string{"sh", "-c", "curl -H " + sentinel},
+			}).encode()
+			require.NoError(t, err)
+			next := time.Now().Add(time.Hour).UTC()
+			mislabeled := &store.Schedule{
+				ID: api.NewUUID(), ProjectID: f.proj.ID, Name: "exec-mislabeled-" + uuid.NewString()[:8],
+				CronExpr: "0 * * * *", EventType: "message", Payload: execRaw, Status: store.ScheduleStatusActive,
+				NextRunAt: &next, CreatedBy: f.owner.ID,
+				InitiatorAttribution: store.InitiatorAttribution{
+					InitiatorPrincipalKind: store.DelegationPrincipalUser, InitiatorPrincipalID: f.owner.ID,
+					InitiatorCredentialKind: store.InitiatorCredentialKindSession, AttributionVersion: 1, AuthorizationRevision: 1,
+				},
+				AuthorityCeiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+			}
+			require.NoError(t, f.store.CreateSchedule(ctx, mislabeled))
+			for _, p := range []string{basePath + "/" + mislabeled.ID, basePath, "/api/v1/admin/scheduler"} {
+				rec := requestAsIdentity(t, f.srv, identity, http.MethodGet, p, nil)
+				assert.NotContains(t, rec.Body.String(), sentinel, "GET %s leaked mislabeled exec payload", p)
+			}
+			recRename := requestAsIdentity(t, f.srv, identity, http.MethodPatch, basePath+"/"+mislabeled.ID, map[string]any{"name": "mislabeled-renamed-" + uuid.NewString()[:8]})
+			assert.NotContains(t, recRename.Body.String(), sentinel, "PATCH rename leaked mislabeled exec payload")
 		})
 	}
 }
@@ -323,12 +396,18 @@ func TestScheduledResponses_RevealAndRedactShape(t *testing.T) {
 }
 
 // TestScheduledResponses_UndecodableExecPayloadRedactsToMarker: nothing of
-// a stored exec payload that does not decode is shown.
+// a stored exec payload that does not decode is shown, and stored exec
+// payload content is redacted fail-closed regardless of claimed eventType.
 func TestScheduledResponses_UndecodableExecPayloadRedactsToMarker(t *testing.T) {
 	assert.Equal(t, `{"commandRedacted":true}`, redactExecPayload(`not json EXECSENTINEL`))
 	rev := &execRevealer{never: true}
 	assert.Equal(t, `{"commandRedacted":true}`, rev.payloadFor(scheduledEventTypeExec, `{"command":`))
-	assert.Equal(t, `{"agentId":"m"}`, rev.payloadFor("message", `{"agentId":"m"}`), "non-exec payloads are unchanged")
+	assert.Equal(t, `{"commandRedacted":true}`, rev.payloadFor("message", `{"command":["EXECSENTINEL"`), "truncated exec payload under non-exec type still redacts")
+	assert.NotContains(t, rev.payloadFor("message", `{"agentId":"a","command":["sh","-c","EXECSENTINEL"]}`), "EXECSENTINEL")
+	assert.NotContains(t, rev.payloadFor("dispatch_agent", `{"agentId":"a","Command":["sh","-c","EXECSENTINEL"]}`), "EXECSENTINEL")
+	assert.NotContains(t, rev.payloadFor("message", `{"agentId":"a","timeoutSeconds":30}`), `"timeoutSeconds":0`)
+	assert.Contains(t, rev.payloadFor("message", `{"agentId":"a","timeoutSeconds":30}`), `"commandRedacted":true`)
+	assert.Equal(t, `{"agentId":"m","message":"run command later"}`, rev.payloadFor("message", `{"agentId":"m","message":"run command later"}`), "non-exec payloads without exec keys are unchanged")
 }
 
 // TestScheduledResponses_RecurringAuthoringAndCanonicalDigest (AC7, AC16, Nit N1):
@@ -395,4 +474,143 @@ func TestScheduledResponses_RecurringAuthoringAndCanonicalDigest(t *testing.T) {
 	rec = requestAsIdentity(t, f.srv, uatNoAttach, http.MethodGet, schedURL, nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.NotContains(t, rec.Body.String(), sentinel)
+}
+
+// TestScheduledExecR1_EventTypeSwitchAndRetargetNeverLeakArgv reproduces the
+// Phase 2 Pass 1 R1 probe (exec-schedules-2-rev) and its siblings:
+//   - PATCH switching eventType away from exec (to message or dispatch_agent,
+//     with or without a replacement payload) is refused and never leaks argv;
+//   - PATCH switching eventType from message/dispatch_agent to exec is refused;
+//   - PATCH retargeting an exec schedule to an agent the caller DOES own (so
+//     the caller holds agent.attach on the new target, but NOT on the stored
+//     target) is refused and never carries argv forward or reveals it.
+func TestScheduledExecR1_EventTypeSwitchAndRetargetNeverLeakArgv(t *testing.T) {
+	ctx := context.Background()
+	seedExec := func(t *testing.T, f *bypassAgentsFixture, sentinel string) *store.Schedule {
+		t.Helper()
+		p := scheduledExecPayload{AgentID: f.sibling.ID, AgentName: f.sibling.Slug, Command: []string{"sh", "-c", "curl -H " + sentinel}}
+		raw, err := p.encode()
+		require.NoError(t, err)
+		next := time.Now().Add(time.Hour).UTC()
+		sc := &store.Schedule{
+			ID: api.NewUUID(), ProjectID: f.proj.ID, Name: "r1-" + uuid.NewString()[:8],
+			CronExpr: "0 * * * *", EventType: scheduledEventTypeExec, Payload: raw, Status: store.ScheduleStatusActive,
+			NextRunAt: &next, CreatedBy: f.owner.ID,
+			InitiatorAttribution: store.InitiatorAttribution{
+				InitiatorPrincipalKind: store.DelegationPrincipalUser, InitiatorPrincipalID: f.owner.ID,
+				InitiatorCredentialKind: store.InitiatorCredentialKindSession, AttributionVersion: 1, AuthorizationRevision: 1,
+			},
+			AuthorityCeiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+		}
+		require.NoError(t, f.store.CreateSchedule(ctx, sc))
+		return sc
+	}
+
+	callers := []struct {
+		name  string
+		setup func(t *testing.T, f *bypassAgentsFixture) Identity
+	}{
+		{"project-admin", func(t *testing.T, f *bypassAgentsFixture) Identity {
+			id := tid("r1-proj-admin")
+			createTestUserWithProjectRole(t, f.store, id, "r1-proj-admin@test", f.proj.ID, store.ProjectRoleAdmin)
+			ensureHubMembership(ctx, f.store, id)
+			return NewAuthenticatedUser(id, "r1-proj-admin@test", "PA", store.UserRoleMember, "api")
+		}},
+		{"owner UAT agent:manage (no agent:attach)", func(t *testing.T, f *bypassAgentsFixture) Identity {
+			return NewScopedUserIdentity(authUser(f.owner), f.proj.ID,
+				append([]string{store.UATScopeAgentManage, store.UATScopeAgentRead}, scheduledEventUATScopes...))
+		}},
+	}
+
+	for _, newType := range []string{"message", "dispatch_agent"} {
+		for _, c := range callers {
+			t.Run("switch/"+newType+"/"+c.name, func(t *testing.T) {
+				f := execAuthoringFixture(t)
+				sentinel := "REVSENTINEL-" + uuid.NewString()
+				sc := seedExec(t, f, sentinel)
+				id := c.setup(t, f)
+				target, err := f.store.GetAgent(ctx, f.sibling.ID)
+				require.NoError(t, err)
+				require.NotNil(t, f.srv.authorizeAgentTargetAction(ctx, id, target, ActionAttach),
+					"precondition: caller must not hold agent.attach on stored target")
+
+				path := "/api/v1/projects/" + f.proj.ID + "/schedules/" + sc.ID
+				recBefore := requestAsIdentity(t, f.srv, id, http.MethodGet, path, nil)
+				require.NotContains(t, recBefore.Body.String(), sentinel)
+
+				rec := requestAsIdentity(t, f.srv, id, http.MethodPatch, path, map[string]any{"eventType": newType})
+				require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+				require.NotContains(t, rec.Body.String(), sentinel, "PATCH leaked exec argv to a caller without attach")
+
+				recGet := requestAsIdentity(t, f.srv, id, http.MethodGet, path, nil)
+				require.NotContains(t, recGet.Body.String(), sentinel, "GET leaked exec argv after eventType switch attempt")
+
+				after, err := f.store.GetSchedule(ctx, sc.ID)
+				require.NoError(t, err)
+				require.Equal(t, scheduledEventTypeExec, after.EventType)
+				require.Equal(t, 1, after.AuthorizationRevision)
+			})
+		}
+	}
+
+	t.Run("switch non-exec schedule to exec is refused", func(t *testing.T) {
+		f := execAuthoringFixture(t)
+		next := time.Now().Add(time.Hour).UTC()
+		msgSc := &store.Schedule{
+			ID: api.NewUUID(), ProjectID: f.proj.ID, Name: "msg-to-exec",
+			CronExpr: "0 * * * *", EventType: "message",
+			Payload: `{"agentId":"` + f.sibling.ID + `","message":"hello"}`,
+			Status: store.ScheduleStatusActive, NextRunAt: &next, CreatedBy: f.owner.ID,
+			InitiatorAttribution: store.InitiatorAttribution{
+				InitiatorPrincipalKind: store.DelegationPrincipalUser, InitiatorPrincipalID: f.owner.ID,
+				InitiatorCredentialKind: store.InitiatorCredentialKindSession, AttributionVersion: 1, AuthorizationRevision: 1,
+			},
+			AuthorityCeiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+		}
+		require.NoError(t, f.store.CreateSchedule(ctx, msgSc))
+		path := "/api/v1/projects/" + f.proj.ID + "/schedules/" + msgSc.ID
+		rec := requestAsIdentity(t, f.srv, authUser(f.owner), http.MethodPatch, path, map[string]any{
+			"eventType": "exec", "agentId": f.sibling.ID, "command": []string{"true"},
+		})
+		require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+		after, err := f.store.GetSchedule(ctx, msgSc.ID)
+		require.NoError(t, err)
+		require.Equal(t, "message", after.EventType)
+	})
+
+	t.Run("retarget to caller-owned agent without attach on stored target is refused", func(t *testing.T) {
+		f := execAuthoringFixture(t)
+		sentinel := "RETARGETSENTINEL-" + uuid.NewString()
+		sc := seedExec(t, f, sentinel)
+
+		paID := tid("r1-retarget-pa")
+		createTestUserWithProjectRole(t, f.store, paID, "r1-retarget-pa@test", f.proj.ID, store.ProjectRoleAdmin)
+		ensureHubMembership(ctx, f.store, paID)
+		pa := NewAuthenticatedUser(paID, "r1-retarget-pa@test", "PA", store.UserRoleMember, "api")
+
+		paAgent := &store.Agent{
+			ID: tid("r1-pa-own-agent"), Slug: "r1-pa-own-agent", Name: "r1-pa-own-agent", ProjectID: f.proj.ID,
+			Phase: "running", CreatedBy: paID, OwnerID: paID, Ancestry: []string{paID}, Runtime: "docker",
+		}
+		require.NoError(t, f.store.CreateAgent(ctx, paAgent))
+		require.Nil(t, f.srv.authorizeAgentTargetAction(ctx, pa, paAgent, ActionAttach),
+			"precondition: project-admin holds live attach on their own agent")
+
+		path := "/api/v1/projects/" + f.proj.ID + "/schedules/" + sc.ID
+		for _, body := range []map[string]any{
+			{"agentId": paAgent.ID},
+			{"agentName": paAgent.Slug},
+			{"agentId": paAgent.ID, "command": []string{"true"}},
+			{"payload": `{"agentId":"` + paAgent.ID + `","command":["true"]}`},
+		} {
+			rec := requestAsIdentity(t, f.srv, pa, http.MethodPatch, path, body)
+			require.Contains(t, []int{http.StatusForbidden, http.StatusNotFound}, rec.Code, rec.Body.String())
+			require.NotContains(t, rec.Body.String(), sentinel)
+			after, err := f.store.GetSchedule(ctx, sc.ID)
+			require.NoError(t, err)
+			p, err := decodeScheduledExecPayload(after.Payload)
+			require.NoError(t, err)
+			require.Equal(t, f.sibling.ID, p.AgentID)
+		}
+	})
 }
