@@ -159,8 +159,11 @@ var nonRouteCallSites = map[string][]permissionCallSite{
 	},
 	"project.clone":       {{"project_clone.go", "Server.handleProjectClone"}},
 	"agent.status_update": {{"handlers_agent_lifecycle.go", "Server.updateAgentStatus"}},
-	"project.secret_read": {{"material_runtime.go", "Server.materialRuntimePrecheck"}},
-	"agent.notify":        {{"handlers_notifications.go", "checkAgentNotifyScope"}},
+	"project.secret_read": {
+		{"material_runtime.go", "Server.materialRuntimePrecheck"},
+		{"handlers_env_secrets.go", "checkAgentProjectSecretReadScope"},
+	},
+	"agent.notify": {{"handlers_notifications.go", "checkAgentNotifyScope"}},
 	"agent.token_refresh": {
 		{"handlers_agents_core.go", "Server.handleAgentTokenRefresh"},
 		{"handlers_agent_messaging.go", "Server.handleAgentGitHubTokenRefresh"},

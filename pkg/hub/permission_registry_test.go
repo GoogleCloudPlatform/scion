@@ -68,7 +68,9 @@ func TestPermissionRegistryEntriesDeclareCurrentUse(t *testing.T) {
 // nothing checks, and one
 // that is both makes it unclear whether the check exists. Nothing may grant
 // a reserved permission: no agent scope bundle, no built-in role, no manage
-// alias and no scope picker list may carry it.
+// alias and no scope picker list may carry it. Every scope granted by an
+// agent role bundle (ScopesForRole, DefaultFederationScopes) must map only to
+// enforced permissions in the registry (ptone/scion#1331).
 func TestPermissionRegistryRowsEnforcedOrReserved(t *testing.T) {
 	content, err := os.ReadFile(webTokenListPath)
 	if err != nil {
@@ -79,8 +81,9 @@ func TestPermissionRegistryRowsEnforcedOrReserved(t *testing.T) {
 		aliases[alias] = permissions.UATManageScopesFor(resource)
 	}
 	surfaces := grantSurfaces{
-		Roles:   BuiltInRoles(),
-		Aliases: aliases,
+		Roles:      BuiltInRoles(),
+		AgentRoles: stockAgentRoleBundles(t),
+		Aliases:    aliases,
 		Pickers: map[string][]string{
 			"UATScopeOptions":                     registryUATScopes(true),
 			webTokenListPath + " FALLBACK_SCOPES": extractWebTokenScopes(t, webTokenListPath, string(content)),
@@ -94,23 +97,31 @@ func TestPermissionRegistryRowsEnforcedOrReserved(t *testing.T) {
 const webTokenListPath = "../../web/src/components/shared/token-list.ts"
 
 // grantSurfaces are the places a permission can be granted or offered:
-// built-in roles (permission IDs), manage aliases (alias to UAT scopes) and
-// scope picker lists (surface name to UAT scopes).
+// built-in roles (permission IDs), agent role scope bundles (role or bundle
+// name to AgentTokenScopes), manage aliases (alias to UAT scopes) and scope
+// picker lists (surface name to UAT scopes).
 type grantSurfaces struct {
-	Roles   []BuiltInRole
-	Aliases map[string][]string
-	Pickers map[string][]string
+	Roles      []BuiltInRole
+	AgentRoles map[string][]AgentTokenScope
+	Aliases    map[string][]string
+	Pickers    map[string][]string
 }
 
 func checkRowsEnforcedOrReserved(registry []permissions.Permission, s grantSurfaces, ev nonRouteEvidence) error {
 	var problems []string
 	reserved := map[string]bool{}
-	reservedScope := map[string]string{} // UAT scope -> reserved permission ID
+	enforced := map[string]bool{}
+	agentScopeRows := map[string][]string{} // AgentTokenScope -> permission IDs
+	reservedScope := map[string]string{}    // UAT scope -> reserved permission ID
 	inRegistry := map[string]bool{}
 	for _, p := range registry {
 		inRegistry[p.ID] = true
 		used := len(p.Enforcement) > 0 || ev.Verified[p.ID]
 		reason, pending := ev.Pending[p.ID]
+		enforced[p.ID] = used && !p.IsReserved() && !pending
+		for _, scope := range p.AgentScopes {
+			agentScopeRows[scope] = append(agentScopeRows[scope], p.ID)
+		}
 		switch {
 		case p.Reserved != "" && !p.IsReserved():
 			problems = append(problems, p.ID+": Reserved is blank; give the reason")
@@ -143,6 +154,28 @@ func checkRowsEnforcedOrReserved(registry []permissions.Permission, s grantSurfa
 		for _, id := range role.Permissions {
 			if reserved[id] {
 				problems = append(problems, fmt.Sprintf("role %s holds reserved permission %s", role.Name, id))
+			}
+		}
+	}
+	for _, role := range sortedAgentRoleKeys(s.AgentRoles) {
+		seen := map[AgentTokenScope]bool{}
+		for _, scope := range s.AgentRoles[role] {
+			if seen[scope] {
+				problems = append(problems, fmt.Sprintf("agent role %s grants duplicate scope %s", role, scope))
+				continue
+			}
+			seen[scope] = true
+			ids := agentScopeRows[string(scope)]
+			if len(ids) == 0 {
+				problems = append(problems, fmt.Sprintf("agent role %s grants scope %s with no permission in registry", role, scope))
+				continue
+			}
+			for _, id := range ids {
+				if reserved[id] {
+					problems = append(problems, fmt.Sprintf("agent role %s grants scope %s (reserved permission %s)", role, scope, id))
+				} else if !enforced[id] {
+					problems = append(problems, fmt.Sprintf("agent role %s grants scope %s (unenforced permission %s)", role, scope, id))
+				}
 			}
 		}
 	}
@@ -195,10 +228,67 @@ func sortedSurfaceKeys(m map[string][]string) []string {
 	return keys
 }
 
+func sortedAgentRoleKeys(m map[string][]AgentTokenScope) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// stockAgentRoleBundles returns ScopesForRole for every AgentRole constant
+// declared in agentrole.go (plus DefaultFederationScopes), failing if an
+// AgentRole constant is missing from ValidAgentRole.
+func stockAgentRoleBundles(t *testing.T) map[string][]AgentTokenScope {
+	t.Helper()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "agentrole.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse agentrole.go: %v", err)
+	}
+	bundles := map[string][]AgentTokenScope{
+		"DefaultFederationScopes": DefaultFederationScopes,
+	}
+	found := 0
+	for _, decl := range f.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		if !ok || gd.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gd.Specs {
+			vs := spec.(*ast.ValueSpec)
+			ident, ok := vs.Type.(*ast.Ident)
+			if !ok || ident.Name != "AgentRole" {
+				continue
+			}
+			for i, name := range vs.Names {
+				if i >= len(vs.Values) {
+					continue
+				}
+				val, ok := stringLit(vs.Values[i])
+				if !ok {
+					t.Fatalf("agentrole.go constant %s is not a string literal", name.Name)
+				}
+				role := AgentRole(val)
+				if !ValidAgentRole(role) {
+					t.Fatalf("agentrole.go constant %s (%q) is rejected by ValidAgentRole", name.Name, role)
+				}
+				bundles[val] = ScopesForRole(role)
+				found++
+			}
+		}
+	}
+	if found < 4 {
+		t.Fatalf("expected at least 4 AgentRole constants in agentrole.go, found %d", found)
+	}
+	return bundles
+}
+
 // TestCheckRowsEnforcedOrReserved_RejectsBadRows pins the checker against
 // the mutations it exists to catch, one per rule and grant surface.
 func TestCheckRowsEnforcedOrReserved_RejectsBadRows(t *testing.T) {
-	enforced := permissions.Permission{ID: "x.read", UATScope: "x:read", Enforcement: []string{"pkg/hub/x.go"}}
+	enforced := permissions.Permission{ID: "x.read", UATScope: "x:read", AgentScopes: []string{"project:x:read"}, Enforcement: []string{"pkg/hub/x.go"}}
 	reserved := permissions.Permission{ID: "x.delete", UATScope: "x:delete", Reserved: "nothing checks it yet"}
 	rows := []permissions.Permission{enforced, reserved}
 	role := func(scope string, ids ...string) BuiltInRole {
@@ -216,6 +306,10 @@ func TestCheckRowsEnforcedOrReserved_RejectsBadRows(t *testing.T) {
 		{"blank reserved reason on used row", []permissions.Permission{{ID: "x.read", Enforcement: []string{"pkg/hub/x.go"}, Reserved: " "}}, grantSurfaces{}, "x.read: Reserved is blank"},
 		{"both", []permissions.Permission{{ID: "x.read", Enforcement: []string{"pkg/hub/x.go"}, Reserved: "r"}}, grantSurfaces{}, "x.read: Reserved but also"},
 		{"agent scope bundle", []permissions.Permission{enforced, {ID: "x.delete", Reserved: "r", AgentScopes: []string{"project:x:write"}}}, grantSurfaces{}, "x.delete: reserved permission is in agent scope bundle"},
+		{"agent role unmapped scope", rows, grantSurfaces{AgentRoles: map[string][]AgentTokenScope{"full": {ScopeAgentLogAppend}}}, "agent role full grants scope agent:log:append with no permission in registry"},
+		{"agent role reserved permission", []permissions.Permission{enforced, {ID: "x.delete", Reserved: "r", AgentScopes: []string{"project:x:write"}}}, grantSurfaces{AgentRoles: map[string][]AgentTokenScope{"full": {"project:x:write"}}}, "agent role full grants scope project:x:write (reserved permission x.delete)"},
+		{"agent role unenforced permission", []permissions.Permission{{ID: "x.read", AgentScopes: []string{"project:x:read"}}}, grantSurfaces{AgentRoles: map[string][]AgentTokenScope{"readonly": {"project:x:read"}}}, "agent role readonly grants scope project:x:read (unenforced permission x.read)"},
+		{"agent role duplicate scope", rows, grantSurfaces{AgentRoles: map[string][]AgentTokenScope{"baseline": {"project:x:read", "project:x:read"}}}, "agent role baseline grants duplicate scope project:x:read"},
 		{"project role", rows, grantSurfaces{Roles: []BuiltInRole{role(store.RoleScopeProject, "x.read", "x.delete")}}, "role role-project holds reserved permission x.delete"},
 		{"system role", rows, grantSurfaces{Roles: []BuiltInRole{role(store.RoleScopeSystem, "x.delete")}}, "role role-system holds reserved permission x.delete"},
 		{"manage alias", rows, grantSurfaces{Aliases: map[string][]string{"x:manage": {"x:read", "x:delete"}}}, "manage alias x:manage expands to x:delete"},
@@ -230,9 +324,10 @@ func TestCheckRowsEnforcedOrReserved_RejectsBadRows(t *testing.T) {
 		})
 	}
 	ok := grantSurfaces{
-		Roles:   []BuiltInRole{role(store.RoleScopeProject, "x.read"), role(store.RoleScopeSystem, "x.read")},
-		Aliases: map[string][]string{"x:manage": {"x:read"}},
-		Pickers: map[string][]string{"web": {"x:read"}},
+		Roles:      []BuiltInRole{role(store.RoleScopeProject, "x.read"), role(store.RoleScopeSystem, "x.read")},
+		AgentRoles: map[string][]AgentTokenScope{"readonly": {"project:x:read"}},
+		Aliases:    map[string][]string{"x:manage": {"x:read"}},
+		Pickers:    map[string][]string{"web": {"x:read"}},
 	}
 	if err := checkRowsEnforcedOrReserved(rows, ok, nonRouteEvidence{}); err != nil {
 		t.Fatalf("valid rows rejected: %v", err)
@@ -251,22 +346,40 @@ func TestCheckRowsEnforcedOrReserved_NonRouteUseIsNotEvidence(t *testing.T) {
 	bad := []struct {
 		name string
 		rows []permissions.Permission
+		s    grantSurfaces
 		ev   nonRouteEvidence
 		want string
 	}{
-		{"free text only", []permissions.Permission{text}, nonRouteEvidence{}, "x.read: declared through NonRouteUse only"},
-		{"pending row gains a call site", []permissions.Permission{text}, nonRouteEvidence{Verified: verified, Pending: pending}, "x.read: in pendingNonRouteRows but now has"},
-		{"pending row gains Enforcement", []permissions.Permission{{ID: "x.read", NonRouteUse: []string{"h"}, Enforcement: []string{"pkg/hub/x.go"}}}, nonRouteEvidence{Pending: pending}, "x.read: in pendingNonRouteRows but now has"},
-		{"pending row marked Reserved", []permissions.Permission{{ID: "x.read", Reserved: "r"}}, nonRouteEvidence{Pending: pending}, "x.read: in pendingNonRouteRows but now has"},
-		{"pending row without NonRouteUse", []permissions.Permission{{ID: "x.read"}}, nonRouteEvidence{Pending: pending}, "x.read: in pendingNonRouteRows but declares no NonRouteUse"},
-		{"pending entry without issue", []permissions.Permission{text}, nonRouteEvidence{Pending: map[string]string{"x.read": "later"}}, "x.read: pending entry needs a reason"},
-		{"pending entry for unknown row", []permissions.Permission{{ID: "x.read", Enforcement: []string{"pkg/hub/x.go"}}}, nonRouteEvidence{Pending: map[string]string{"x.gone": issue}}, "x.gone: in pendingNonRouteRows but not in the registry"},
-		{"reserved with free text", []permissions.Permission{{ID: "x.read", NonRouteUse: []string{"h"}, Reserved: "r"}}, nonRouteEvidence{}, "x.read: Reserved but also"},
-		{"reserved with call site", []permissions.Permission{{ID: "x.read", Reserved: "r"}}, nonRouteEvidence{Verified: verified}, "x.read: Reserved but also"},
+		{"free text only", []permissions.Permission{text}, grantSurfaces{}, nonRouteEvidence{}, "x.read: declared through NonRouteUse only"},
+		{"pending row gains a call site", []permissions.Permission{text}, grantSurfaces{}, nonRouteEvidence{Verified: verified, Pending: pending}, "x.read: in pendingNonRouteRows but now has"},
+		{"pending row gains Enforcement", []permissions.Permission{{ID: "x.read", NonRouteUse: []string{"h"}, Enforcement: []string{"pkg/hub/x.go"}}}, grantSurfaces{}, nonRouteEvidence{Pending: pending}, "x.read: in pendingNonRouteRows but now has"},
+		{"pending row marked Reserved", []permissions.Permission{{ID: "x.read", Reserved: "r"}}, grantSurfaces{}, nonRouteEvidence{Pending: pending}, "x.read: in pendingNonRouteRows but now has"},
+		{"pending row without NonRouteUse", []permissions.Permission{{ID: "x.read"}}, grantSurfaces{}, nonRouteEvidence{Pending: pending}, "x.read: in pendingNonRouteRows but declares no NonRouteUse"},
+		{"pending entry without issue", []permissions.Permission{text}, grantSurfaces{}, nonRouteEvidence{Pending: map[string]string{"x.read": "later"}}, "x.read: pending entry needs a reason"},
+		{"pending entry for unknown row", []permissions.Permission{{ID: "x.read", Enforcement: []string{"pkg/hub/x.go"}}}, grantSurfaces{}, nonRouteEvidence{Pending: map[string]string{"x.gone": issue}}, "x.gone: in pendingNonRouteRows but not in the registry"},
+		{"reserved with free text", []permissions.Permission{{ID: "x.read", NonRouteUse: []string{"h"}, Reserved: "r"}}, grantSurfaces{}, nonRouteEvidence{}, "x.read: Reserved but also"},
+		{"reserved with call site", []permissions.Permission{{ID: "x.read", Reserved: "r"}}, grantSurfaces{}, nonRouteEvidence{Verified: verified}, "x.read: Reserved but also"},
+		{
+			"agent role grants pending non-route permission",
+			[]permissions.Permission{{ID: "x.read", NonRouteUse: []string{"some handler"}, AgentScopes: []string{"project:x:read"}}},
+			grantSurfaces{AgentRoles: map[string][]AgentTokenScope{"full": {"project:x:read"}}},
+			nonRouteEvidence{Pending: pending},
+			"agent role full grants scope project:x:read (unenforced permission x.read)",
+		},
+		{
+			"agent role grants scope shared with pending permission",
+			[]permissions.Permission{
+				{ID: "x.use", AgentScopes: []string{"project:x:read"}, Enforcement: []string{"pkg/hub/x.go"}},
+				{ID: "x.read", NonRouteUse: []string{"some handler"}, AgentScopes: []string{"project:x:read"}},
+			},
+			grantSurfaces{AgentRoles: map[string][]AgentTokenScope{"full": {"project:x:read"}}},
+			nonRouteEvidence{Pending: pending},
+			"agent role full grants scope project:x:read (unenforced permission x.read)",
+		},
 	}
 	for _, tc := range bad {
 		t.Run(tc.name, func(t *testing.T) {
-			err := checkRowsEnforcedOrReserved(tc.rows, grantSurfaces{}, tc.ev)
+			err := checkRowsEnforcedOrReserved(tc.rows, tc.s, tc.ev)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("got %v, want an error containing %q", err, tc.want)
 			}
@@ -279,6 +392,10 @@ func TestCheckRowsEnforcedOrReserved_NonRouteUseIsNotEvidence(t *testing.T) {
 		if err := checkRowsEnforcedOrReserved([]permissions.Permission{text}, grantSurfaces{}, ev); err != nil {
 			t.Errorf("%s: valid row rejected: %v", name, err)
 		}
+	}
+	verifiedAgentRow := []permissions.Permission{{ID: "x.read", NonRouteUse: []string{"some handler"}, AgentScopes: []string{"project:x:read"}}}
+	if err := checkRowsEnforcedOrReserved(verifiedAgentRow, grantSurfaces{AgentRoles: map[string][]AgentTokenScope{"full": {"project:x:read"}}}, nonRouteEvidence{Verified: verified}); err != nil {
+		t.Errorf("verified call site with agent role: valid row rejected: %v", err)
 	}
 }
 
