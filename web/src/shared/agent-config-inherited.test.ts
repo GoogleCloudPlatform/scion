@@ -210,3 +210,130 @@ describe('project count limits', () => {
     expect(p['config.max_model_calls']).toBeUndefined();
   });
 });
+
+describe('resolveInheritedGCPIdentity ladder (ptone/scion#8185)', () => {
+  const accounts = [
+    { id: 'sa-broker', email: 'broker-sa@example.iam.gserviceaccount.com', displayName: '' },
+    { id: 'sa-profile', email: 'profile-sa@example.iam.gserviceaccount.com', displayName: '' },
+    {
+      id: 'sa-project',
+      email: 'project-sa@example.iam.gserviceaccount.com',
+      displayName: 'Proj SA',
+    },
+    { id: 'sa-hub', email: 'hub-sa@example.iam.gserviceaccount.com', displayName: '' },
+  ];
+
+  it('resolves per-broker default for a flat broker when hub.flat_runtime_brokers is on, beating project block/assign and hub defaults', async () => {
+    const { resolveInheritedGCPIdentity } = await import('./agent-config-inherited.js');
+    for (const projectMode of ['block', 'passthrough', 'assign']) {
+      const Sources = {
+        flatBrokersEnabled: true,
+        broker: { id: 'flat-cr-1', name: 'Cloud Run US', flat: true },
+        gcpServiceAccounts: accounts,
+        projectSettings: {
+          defaultGCPIdentityMode: projectMode,
+          defaultGCPIdentityServiceAccountID: 'sa-project',
+          defaultGCPIdentityServiceAccountIDByBroker: { 'flat-cr-1': 'sa-broker' },
+          defaultGCPIdentityServiceAccountIDByProfile: { default: 'sa-profile' },
+        },
+        hubGCPIdentity: { mode: 'assign', serviceAccountId: 'sa-hub' },
+      };
+      const resolved = resolveInheritedGCPIdentity(Sources);
+      expect(resolved).toEqual({
+        rung: 'broker',
+        mode: 'assign',
+        serviceAccountId: 'sa-broker',
+        value: 'Assign broker-sa@example.iam.gserviceaccount.com',
+        source: 'inherited from project default for Runtime Broker "Cloud Run US"',
+      });
+      const placeholders = resolveInheritedPlaceholders(Sources);
+      expect(placeholders.gcp_identity).toEqual({
+        value: 'Assign broker-sa@example.iam.gserviceaccount.com',
+        source: 'inherited from project default for Runtime Broker "Cloud Run US"',
+      });
+    }
+  });
+
+  it('ignores per-broker default when hub.flat_runtime_brokers is off', async () => {
+    const { resolveInheritedGCPIdentity } = await import('./agent-config-inherited.js');
+    const sources = {
+      flatBrokersEnabled: false,
+      broker: { id: 'flat-cr-1', name: 'Cloud Run US', flat: true },
+      gcpServiceAccounts: accounts,
+      projectSettings: {
+        defaultGCPIdentityMode: 'block',
+        defaultGCPIdentityServiceAccountIDByBroker: { 'flat-cr-1': 'sa-broker' },
+      },
+    };
+    expect(resolveInheritedGCPIdentity(sources)).toEqual({
+      rung: 'project',
+      mode: 'block',
+      value: 'Block',
+      source: FROM_PROJECT,
+    });
+    expect(resolveInheritedPlaceholders(sources).gcp_identity).toBeUndefined();
+  });
+
+  it('ignores per-broker default on a legacy profile-based broker and uses per-profile default instead', async () => {
+    const { resolveInheritedGCPIdentity } = await import('./agent-config-inherited.js');
+    const sources = {
+      flatBrokersEnabled: true,
+      broker: { id: 'legacy-1', name: 'Legacy Broker', flat: false },
+      profile: 'k8s-prod',
+      gcpServiceAccounts: accounts,
+      projectSettings: {
+        defaultGCPIdentityMode: 'block',
+        defaultGCPIdentityServiceAccountIDByBroker: { 'legacy-1': 'sa-broker' },
+        defaultGCPIdentityServiceAccountIDByProfile: { 'k8s-prod': 'sa-profile' },
+      },
+    };
+    expect(resolveInheritedGCPIdentity(sources)).toEqual({
+      rung: 'profile',
+      mode: 'assign',
+      serviceAccountId: 'sa-profile',
+      value: 'Assign profile-sa@example.iam.gserviceaccount.com',
+      source: 'inherited from project default for profile "k8s-prod"',
+    });
+  });
+
+  it('falls through to project default then hub default when flat broker has no per-broker entry', async () => {
+    const { resolveInheritedGCPIdentity } = await import('./agent-config-inherited.js');
+    expect(
+      resolveInheritedGCPIdentity({
+        flatBrokersEnabled: true,
+        broker: { id: 'flat-other', name: 'Other Flat', flat: true },
+        gcpServiceAccounts: accounts,
+        projectSettings: {
+          defaultGCPIdentityMode: 'assign',
+          defaultGCPIdentityServiceAccountID: 'sa-project',
+          defaultGCPIdentityServiceAccountIDByBroker: { 'flat-cr-1': 'sa-broker' },
+        },
+        hubGCPIdentity: { mode: 'block' },
+      })
+    ).toEqual({
+      rung: 'project',
+      mode: 'assign',
+      serviceAccountId: 'sa-project',
+      value: 'Assign Proj SA (project-sa@example.iam.gserviceaccount.com)',
+      source: FROM_PROJECT,
+    });
+
+    expect(
+      resolveInheritedGCPIdentity({
+        flatBrokersEnabled: true,
+        broker: { id: 'flat-other', name: 'Other Flat', flat: true },
+        gcpServiceAccounts: accounts,
+        projectSettings: {
+          defaultGCPIdentityServiceAccountIDByBroker: { 'flat-cr-1': 'sa-broker' },
+        },
+        hubGCPIdentity: { mode: 'assign', serviceAccountId: 'sa-hub' },
+      })
+    ).toEqual({
+      rung: 'hub',
+      mode: 'assign',
+      serviceAccountId: 'sa-hub',
+      value: 'Assign hub-sa@example.iam.gserviceaccount.com',
+      source: FROM_HUB,
+    });
+  });
+});

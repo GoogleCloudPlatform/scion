@@ -64,6 +64,14 @@ export interface GcpProjectDefaults {
   defaultGCPIdentityMode?: string;
   defaultGCPIdentityServiceAccountID?: string;
   defaultGCPIdentityServiceAccountIDByProfile?: Record<string, string>;
+  defaultGCPIdentityServiceAccountIDByBroker?: Record<string, string>;
+}
+
+/** Optional flat Runtime Broker context passed to setTarget. */
+export interface GcpFlatBrokerTarget {
+  brokerId: string;
+  brokerLabel?: string | undefined;
+  flatBrokersEnabled: boolean;
 }
 
 /**
@@ -98,6 +106,8 @@ export class GcpIdentityState {
   projectGCPIdentityDefaultApplied = false;
   /** The project's per-profile defaults (profile name to account ID). */
   projectGCPIdentityProfileDefaults: Record<string, string> = {};
+  /** The project's per-broker defaults (flat broker ID to account ID). */
+  projectGCPIdentityBrokerDefaults: Record<string, string> = {};
 
   /**
    * The mode shown is the agent's stored identity (edit mode, applyStored),
@@ -109,6 +119,12 @@ export class GcpIdentityState {
   targetKubernetesOnly = false;
   /** The explicitly selected runtime profile; set by the page. */
   profile = '';
+  /** The selected flat Runtime Broker ID ('' when none or legacy broker); set by the page. */
+  flatBrokerId = '';
+  /** Display label for the selected flat Runtime Broker; set by the page. */
+  flatBrokerLabel = '';
+  /** Whether hub.flat_runtime_brokers is enabled in the browser session; set by the page. */
+  flatBrokersEnabled = false;
 
   private readonly listeners = new Set<() => void>();
 
@@ -145,10 +161,28 @@ export class GcpIdentityState {
    * Applies the target. Every mode, Block included, is valid on every
    * target, so the displayed mode is not touched.
    */
-  setTarget(targetKubernetesOnly: boolean, profile: string): void {
-    if (this.targetKubernetesOnly === targetKubernetesOnly && this.profile === profile) return;
+  setTarget(
+    targetKubernetesOnly: boolean,
+    profile: string,
+    flatTarget?: GcpFlatBrokerTarget | null
+  ): void {
+    const flatBrokerId = flatTarget?.brokerId ?? '';
+    const flatBrokerLabel = flatTarget?.brokerLabel ?? '';
+    const flatBrokersEnabled = flatTarget?.flatBrokersEnabled ?? false;
+    if (
+      this.targetKubernetesOnly === targetKubernetesOnly &&
+      this.profile === profile &&
+      this.flatBrokerId === flatBrokerId &&
+      this.flatBrokerLabel === flatBrokerLabel &&
+      this.flatBrokersEnabled === flatBrokersEnabled
+    ) {
+      return;
+    }
     this.targetKubernetesOnly = targetKubernetesOnly;
     this.profile = profile;
+    this.flatBrokerId = flatBrokerId;
+    this.flatBrokerLabel = flatBrokerLabel;
+    this.flatBrokersEnabled = flatBrokersEnabled;
     this.notify();
   }
 
@@ -182,6 +216,7 @@ export class GcpIdentityState {
     this.projectGCPIdentityDefaultMode = '';
     this.projectGCPIdentityDefaultApplied = false;
     this.projectGCPIdentityProfileDefaults = {};
+    this.projectGCPIdentityBrokerDefaults = {};
     this.normalize();
     this.notify();
   }
@@ -204,6 +239,8 @@ export class GcpIdentityState {
   applyProjectDefaults(settings: GcpProjectDefaults | null): void {
     this.projectGCPIdentityProfileDefaults =
       settings?.defaultGCPIdentityServiceAccountIDByProfile ?? {};
+    this.projectGCPIdentityBrokerDefaults =
+      settings?.defaultGCPIdentityServiceAccountIDByBroker ?? {};
     if (settings?.defaultGCPIdentityMode) {
       this.projectGCPIdentityDefaultMode = settings.defaultGCPIdentityMode;
       const mode = settings.defaultGCPIdentityMode as GcpMetadataMode;
@@ -270,9 +307,24 @@ export class GcpIdentityState {
     return !!this.profile && !!this.projectGCPIdentityProfileDefaults[this.profile];
   }
 
+  /** Service account ID configured for the selected flat broker when hub.flat_runtime_brokers is on. */
+  get selectedBrokerDefaultServiceAccountId(): string {
+    if (!this.flatBrokersEnabled || !this.flatBrokerId) return '';
+    return this.projectGCPIdentityBrokerDefaults[this.flatBrokerId] ?? '';
+  }
+
+  /** The selected flat broker has a per-broker default, which outranks the project default. */
+  get selectedBrokerHasPerBrokerDefault(): boolean {
+    return !!this.selectedBrokerDefaultServiceAccountId;
+  }
+
   /** The applied project default is what the server resolves for an untouched picker. */
   get projectDefaultIsOutcome(): boolean {
-    return this.projectGCPIdentityDefaultApplied && !this.selectedProfileHasPerProfileDefault;
+    return (
+      this.projectGCPIdentityDefaultApplied &&
+      !this.selectedProfileHasPerProfileDefault &&
+      !this.selectedBrokerHasPerBrokerDefault
+    );
   }
 
   /**
@@ -294,9 +346,19 @@ export class GcpIdentityState {
     return (
       !this.gcpIdentityUserSet &&
       this.projectDefaultIsOutcome &&
+      !this.flatBrokerId &&
       !this.profile &&
       Object.keys(this.projectGCPIdentityProfileDefaults).length > 0
     );
+  }
+
+  private get selectedBrokerDefaultHint(): string {
+    const saId = this.selectedBrokerDefaultServiceAccountId;
+    if (!saId) return NO_IDENTITY_MODE_HINT;
+    const sa = this.gcpServiceAccounts.find((s) => s.id === saId);
+    const saLabel = sa ? (sa.displayName ? `${sa.displayName} (${sa.email})` : sa.email) : saId;
+    const brokerLabel = this.flatBrokerLabel || this.flatBrokerId;
+    return `No mode chosen: inherits Assign ${saLabel} from this project's default for Runtime Broker "${brokerLabel}".`;
   }
 
   /** The picker's hint text. */
@@ -306,7 +368,9 @@ export class GcpIdentityState {
     const kubernetesBlock =
       this.targetKubernetesOnly && !this.noIdentityModeChosen && this.gcpMetadataMode === 'block';
     const base = this.noIdentityModeChosen
-      ? NO_IDENTITY_MODE_HINT
+      ? this.selectedBrokerHasPerBrokerDefault
+        ? this.selectedBrokerDefaultHint
+        : NO_IDENTITY_MODE_HINT
       : kubernetesBlock
         ? KUBERNETES_BLOCK_HINT
         : this.gcpMetadataMode === 'block'
