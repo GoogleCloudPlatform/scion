@@ -347,6 +347,9 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 
 	fp := fixturePrincipalFromContext(ctx)
 	err = s.store.WithTx(ctx, func(tx store.Store) error {
+		if lErr := tx.LockTriggerQuota(ctx, projectID); lErr != nil {
+			return lErr
+		}
 		if sErr := stampTrigger(ctx, tx, &trigger, fp); sErr != nil {
 			return sErr
 		}
@@ -658,6 +661,9 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 	err := s.store.WithTx(ctx, func(tx store.Store) error {
 		if tr.Status == store.TriggerStatusActive &&
 			(tr.SourceID != oldSourceID || tr.SourceKind != oldSourceKind) {
+			if lErr := tx.LockTriggerQuota(ctx, projectID); lErr != nil {
+				return lErr
+			}
 			srcCount, cErr := tx.CountTriggers(ctx, store.TriggerFilter{
 				ProjectID:  projectID,
 				SourceKind: tr.SourceKind,
@@ -774,6 +780,9 @@ func (s *Server) resumeTrigger(w http.ResponseWriter, r *http.Request, projectID
 
 	fields := store.TriggerFieldMask{Status: true, ActionPayload: true}
 	err := s.store.WithTx(ctx, func(tx store.Store) error {
+		if lErr := tx.LockTriggerQuota(ctx, projectID); lErr != nil {
+			return lErr
+		}
 		srcCount, cErr := tx.CountTriggers(ctx, store.TriggerFilter{
 			ProjectID:  projectID,
 			SourceKind: tr.SourceKind,

@@ -16,6 +16,7 @@ package entadapter
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,6 +46,28 @@ var _ store.TriggerStore = (*TriggerStore)(nil)
 // NewTriggerStore creates a new Ent-backed TriggerStore.
 func NewTriggerStore(client *ent.Client) *TriggerStore {
 	return &TriggerStore{client: client}
+}
+
+// LockTriggerQuota takes the transaction-scoped per-project trigger and
+// webhook-endpoint quota advisory lock on PostgreSQL (store.LockTriggerQuota,
+// pg_advisory_xact_lock). SQLite serializes write transactions, so once inside
+// WithTx it is a no-op there.
+func (s *TriggerStore) LockTriggerQuota(ctx context.Context, projectID string) error {
+	if !s.inTx {
+		return fmt.Errorf("%w: LockTriggerQuota must be called inside WithTx", store.ErrInvalidInput)
+	}
+	if _, err := parseUUID(projectID); err != nil {
+		return err
+	}
+	if !isPostgres(s.client) {
+		return nil
+	}
+	var res sql.Result
+	if err := s.client.Driver().Exec(ctx, "SELECT pg_advisory_xact_lock($1, $2)",
+		[]any{int32(store.LockTriggerQuota), store.StableProjectHash(projectID)}, &res); err != nil {
+		return fmt.Errorf("lock trigger quota: %w", err)
+	}
+	return nil
 }
 
 func (s *TriggerStore) withClientTx(ctx context.Context, fn func(client *ent.Client) error) error {

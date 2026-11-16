@@ -325,6 +325,16 @@ const (
 	// StableProjectHash(schedule ID), taken by CreateScheduledExecRun so two
 	// replicas cannot insert concurrent active-lease runs for one schedule.
 	LockScheduledExecOverlap AdvisoryLockKey = 0x5C101006
+
+	// LockTriggerQuota is the CLASS ID for the per-project trigger and
+	// webhook-endpoint quota lock: a transaction-scoped
+	// pg_advisory_xact_lock(classid, objid) with objid
+	// StableProjectHash(project ID), taken inside WithTx via
+	// LockTriggerQuota before counting and inserting/updating webhook
+	// endpoints and triggers so the per-project and per-source active caps
+	// (ptone/scion#8028) hold across concurrent writers on PostgreSQL.
+	// In the per-object range; not taken through AdvisoryLocker.
+	LockTriggerQuota AdvisoryLockKey = 0x5C101007
 )
 
 // AdvisoryLocker is implemented by backends that can take a cluster-wide

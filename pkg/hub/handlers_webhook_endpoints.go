@@ -211,6 +211,9 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 	audit.AfterSummary = string(afterBytes)
 
 	err = s.store.WithTx(ctx, func(tx store.Store) error {
+		if lErr := tx.LockTriggerQuota(ctx, projectID); lErr != nil {
+			return lErr
+		}
 		count, cErr := tx.CountWebhookEndpoints(ctx, projectID)
 		if cErr != nil {
 			return cErr

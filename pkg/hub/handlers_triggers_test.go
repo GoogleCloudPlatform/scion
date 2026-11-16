@@ -25,6 +25,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,6 +35,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -77,6 +81,11 @@ func enableTriggersExperimentForTest(t *testing.T, srv *Server, enabled bool) {
 func setupTriggersTestFixture(t *testing.T) *triggersTestFixture {
 	t.Helper()
 	srv, s := testServer(t)
+	return setupTriggersTestFixtureOnServer(t, srv, s)
+}
+
+func setupTriggersTestFixtureOnServer(t *testing.T, srv *Server, s store.Store) *triggersTestFixture {
+	t.Helper()
 	srv.SetHubID("test-hub-triggers")
 	srv.SetSecretBackend(secret.NewLocalBackendWithCipher(s, srv.hubID, srv.cipher))
 	srv.config.HubEndpoint = "https://hub-public.example.com"
@@ -881,4 +890,369 @@ func TestTriggersAuthzMatrix(t *testing.T) {
 			assert.Contains(t, rec.Body.String(), triggerAuthoringCredentialRefusedMessage)
 		}
 	})
+}
+
+type triggerQuotaLockOrderStore struct {
+	store.Store
+	fault          *storeFaultSwitch
+	lockCalls      atomic.Int32
+	unlockedCounts atomic.Int32
+	lockedCounts   atomic.Int32
+	lastLockedProj atomic.Value
+}
+
+type triggerQuotaLockOrderTxStore struct {
+	store.Store
+	parent *triggerQuotaLockOrderStore
+	locked bool
+}
+
+func (s *triggerQuotaLockOrderStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	if !s.fault.Active() {
+		return s.Store.WithTx(ctx, fn)
+	}
+	return s.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&triggerQuotaLockOrderTxStore{Store: tx, parent: s})
+	})
+}
+
+func (s *triggerQuotaLockOrderTxStore) LockTriggerQuota(ctx context.Context, projectID string) error {
+	if err := s.Store.LockTriggerQuota(ctx, projectID); err != nil {
+		return err
+	}
+	s.locked = true
+	s.parent.lockCalls.Add(1)
+	s.parent.lastLockedProj.Store(projectID)
+	return nil
+}
+
+func (s *triggerQuotaLockOrderTxStore) CountWebhookEndpoints(ctx context.Context, projectID string) (int, error) {
+	if s.locked {
+		s.parent.lockedCounts.Add(1)
+	} else {
+		s.parent.unlockedCounts.Add(1)
+	}
+	return s.Store.CountWebhookEndpoints(ctx, projectID)
+}
+
+func (s *triggerQuotaLockOrderTxStore) CountTriggers(ctx context.Context, filter store.TriggerFilter) (int, error) {
+	if s.locked {
+		s.parent.lockedCounts.Add(1)
+	} else {
+		s.parent.unlockedCounts.Add(1)
+	}
+	return s.Store.CountTriggers(ctx, filter)
+}
+
+// TestTriggers_QuotaLockBeforeCountInTx verifies in-process (even on SQLite)
+// that every cap-enforcing handler path — endpoint creation, trigger creation,
+// trigger PATCH re-sourcing, and trigger resume — acquires tx.LockTriggerQuota
+// inside WithTx before reading CountWebhookEndpoints or CountTriggers.
+func TestTriggers_QuotaLockBeforeCountInTx(t *testing.T) {
+	srv, s, spy, fault := testServerWithStoreFault(t, func(inner store.Store, sw *storeFaultSwitch) *triggerQuotaLockOrderStore {
+		return &triggerQuotaLockOrderStore{Store: inner, fault: sw}
+	})
+	f := setupTriggersTestFixtureOnServer(t, srv, s)
+	fault.Arm()
+
+	// 1. POST /webhook-endpoints
+	ep1Rec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "lock-ep-1"})
+	require.Equal(t, http.StatusCreated, ep1Rec.Code, ep1Rec.Body.String())
+	var ep1 WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(ep1Rec.Body.Bytes(), &ep1))
+	assert.Equal(t, int32(1), spy.lockCalls.Load())
+	assert.Equal(t, int32(0), spy.unlockedCounts.Load())
+
+	ep2Rec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "lock-ep-2"})
+	require.Equal(t, http.StatusCreated, ep2Rec.Code, ep2Rec.Body.String())
+	var ep2 WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(ep2Rec.Body.Bytes(), &ep2))
+	assert.Equal(t, int32(2), spy.lockCalls.Load())
+	assert.Equal(t, int32(0), spy.unlockedCounts.Load())
+
+	// 2. POST /triggers (counts both project triggers and active per-source triggers under one lock)
+	trRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "lock-tr-1",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep1.ID},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusCreated, trRec.Code, trRec.Body.String())
+	var tr TriggerResponse
+	require.NoError(t, json.Unmarshal(trRec.Body.Bytes(), &tr))
+	assert.Equal(t, int32(3), spy.lockCalls.Load())
+	assert.Equal(t, int32(0), spy.unlockedCounts.Load())
+
+	// 3. PATCH /triggers/{id} re-sourcing an active trigger
+	patchRec := f.doTrigger(t, f.ownerAuth, tr.ID, http.MethodPatch, UpdateTriggerRequest{
+		Source: &TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep2.ID},
+	})
+	require.Equal(t, http.StatusOK, patchRec.Code, patchRec.Body.String())
+	assert.Equal(t, int32(4), spy.lockCalls.Load())
+	assert.Equal(t, int32(0), spy.unlockedCounts.Load())
+
+	// 4. POST /triggers/{id}/pause followed by POST /triggers/{id}/resume
+	pauseRec := f.doTrigger(t, f.ownerAuth, tr.ID+"/pause", http.MethodPost, nil)
+	require.Equal(t, http.StatusOK, pauseRec.Code, pauseRec.Body.String())
+
+	resumeRec := f.doTrigger(t, f.ownerAuth, tr.ID+"/resume", http.MethodPost, nil)
+	require.Equal(t, http.StatusOK, resumeRec.Code, resumeRec.Body.String())
+	assert.Equal(t, int32(5), spy.lockCalls.Load())
+	assert.Equal(t, int32(0), spy.unlockedCounts.Load(), "every quota count inside WithTx must follow LockTriggerQuota")
+	assert.GreaterOrEqual(t, spy.lockedCounts.Load(), int32(6))
+	assert.Equal(t, f.projectID, spy.lastLockedProj.Load())
+}
+
+func runTriggersConcurrentCapsAtLastSlot(t *testing.T, f *triggersTestFixture) {
+	t.Helper()
+	ctx := context.Background()
+	const contenders = 6
+
+	// 1. Concurrent webhook endpoint creation at MaxWebhookEndpointsPerProject - 1 (19 -> 20).
+	var epIDs []string
+	for i := 0; i < store.MaxWebhookEndpointsPerProject-1; i++ {
+		rec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{
+			Name: fmt.Sprintf("race-seed-ep-%02d", i),
+		})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		var ep WebhookEndpointCreatedResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &ep))
+		epIDs = append(epIDs, ep.ID)
+	}
+	{
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		codes := make([]int, contenders)
+		for i := 0; i < contenders; i++ {
+			i := i
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				rec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{
+					Name: fmt.Sprintf("race-win-ep-%02d", i),
+				})
+				codes[i] = rec.Code
+			}()
+		}
+		close(start)
+		wg.Wait()
+		created, conflicts := 0, 0
+		for _, c := range codes {
+			switch c {
+			case http.StatusCreated:
+				created++
+			case http.StatusConflict:
+				conflicts++
+			default:
+				t.Fatalf("unexpected endpoint race status %d (codes=%v)", c, codes)
+			}
+		}
+		assert.Equal(t, 1, created, "exactly one concurrent endpoint create at cap-1 may win")
+		assert.Equal(t, contenders-1, conflicts)
+		cnt, err := f.store.CountWebhookEndpoints(ctx, f.projectID)
+		require.NoError(t, err)
+		assert.Equal(t, store.MaxWebhookEndpointsPerProject, cnt)
+	}
+
+	// 2. Concurrent trigger creation at MaxActiveTriggersPerSource - 1 (49 -> 50) on epIDs[0].
+	var firstActiveOnEp0 string
+	for i := 0; i < store.MaxActiveTriggersPerSource-1; i++ {
+		rec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+			Name:   fmt.Sprintf("race-src-seed-%03d", i),
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: epIDs[0]},
+			Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "ping"},
+		})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		if i == 0 {
+			var tr TriggerResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &tr))
+			firstActiveOnEp0 = tr.ID
+		}
+	}
+	{
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		codes := make([]int, contenders)
+		for i := 0; i < contenders; i++ {
+			i := i
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				rec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+					Name:   fmt.Sprintf("race-src-win-%03d", i),
+					Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: epIDs[0]},
+					Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "ping"},
+				})
+				codes[i] = rec.Code
+			}()
+		}
+		close(start)
+		wg.Wait()
+		created, conflicts := 0, 0
+		for _, c := range codes {
+			switch c {
+			case http.StatusCreated:
+				created++
+			case http.StatusConflict:
+				conflicts++
+			default:
+				t.Fatalf("unexpected active-source create race status %d (codes=%v)", c, codes)
+			}
+		}
+		assert.Equal(t, 1, created, "exactly one concurrent trigger create at source cap-1 may win")
+		assert.Equal(t, contenders-1, conflicts)
+		srcCnt, err := f.store.CountTriggers(ctx, store.TriggerFilter{
+			ProjectID:  f.projectID,
+			SourceKind: store.TriggerSourceKindWebhook,
+			SourceID:   epIDs[0],
+			Status:     store.TriggerStatusActive,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, store.MaxActiveTriggersPerSource, srcCnt)
+	}
+
+	// 3. Concurrent resume at MaxActiveTriggersPerSource - 1 on epIDs[0]:
+	// create contenders paused triggers on epIDs[0] (by temporarily pausing existing ones,
+	// creating, and restoring so we have contenders distinct paused triggers and 49 active).
+	var pausedIDs []string
+	// Pause contenders triggers on epIDs[0] so active drops to 50 - contenders,
+	// create contenders new triggers and pause them, then resume contenders - 1 of the
+	// originals so active == 49 with contenders paused triggers ready to race!
+	listRes, err := f.store.ListTriggers(ctx, store.TriggerFilter{
+		ProjectID:  f.projectID,
+		SourceKind: store.TriggerSourceKindWebhook,
+		SourceID:   epIDs[0],
+		Status:     store.TriggerStatusActive,
+	}, store.ListOptions{Limit: contenders})
+	require.NoError(t, err)
+	require.Len(t, listRes.Items, contenders)
+	for _, it := range listRes.Items {
+		rec := f.doTrigger(t, f.ownerAuth, it.ID+"/pause", http.MethodPost, nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		pausedIDs = append(pausedIDs, it.ID)
+	}
+	// Create contenders-1 fresh active triggers on epIDs[0] to bring active count back to 49,
+	// leaving len(pausedIDs) == contenders paused triggers on epIDs[0]!
+	for i := 0; i < contenders-1; i++ {
+		rec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+			Name:   fmt.Sprintf("race-resume-fill-%02d", i),
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: epIDs[0]},
+			Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "ping"},
+		})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	}
+	_ = firstActiveOnEp0
+	{
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		codes := make([]int, contenders)
+		for i, id := range pausedIDs {
+			i, id := i, id
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				rec := f.doTrigger(t, f.ownerAuth, id+"/resume", http.MethodPost, nil)
+				codes[i] = rec.Code
+			}()
+		}
+		close(start)
+		wg.Wait()
+		resumed, conflicts := 0, 0
+		for _, c := range codes {
+			switch c {
+			case http.StatusOK:
+				resumed++
+			case http.StatusConflict:
+				conflicts++
+			default:
+				t.Fatalf("unexpected resume race status %d (codes=%v)", c, codes)
+			}
+		}
+		assert.Equal(t, 1, resumed, "exactly one concurrent resume at source cap-1 may win")
+		assert.Equal(t, contenders-1, conflicts)
+		srcCnt, err := f.store.CountTriggers(ctx, store.TriggerFilter{
+			ProjectID:  f.projectID,
+			SourceKind: store.TriggerSourceKindWebhook,
+			SourceID:   epIDs[0],
+			Status:     store.TriggerStatusActive,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, store.MaxActiveTriggersPerSource, srcCnt)
+	}
+
+	// 4. Fill remaining project triggers up to MaxTriggersPerProject - 1 (199 -> 200) across epIDs[1..4],
+	// then race contenders concurrent trigger creates on epIDs[5].
+	curTotal, err := f.store.CountTriggers(ctx, store.TriggerFilter{ProjectID: f.projectID})
+	require.NoError(t, err)
+	for i := curTotal; i < store.MaxTriggersPerProject-1; i++ {
+		epIdx := 1 + ((i - curTotal) / store.MaxActiveTriggersPerSource)
+		rec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+			Name:   fmt.Sprintf("race-proj-seed-%03d", i),
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: epIDs[epIdx]},
+			Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "ping"},
+		})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	}
+	{
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		codes := make([]int, contenders)
+		for i := 0; i < contenders; i++ {
+			i := i
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				rec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+					Name:   fmt.Sprintf("race-proj-win-%03d", i),
+					Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: epIDs[6]},
+					Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "ping"},
+				})
+				codes[i] = rec.Code
+			}()
+		}
+		close(start)
+		wg.Wait()
+		created, conflicts := 0, 0
+		for _, c := range codes {
+			switch c {
+			case http.StatusCreated:
+				created++
+			case http.StatusConflict:
+				conflicts++
+			default:
+				t.Fatalf("unexpected project-cap create race status %d (codes=%v)", c, codes)
+			}
+		}
+		assert.Equal(t, 1, created, "exactly one concurrent trigger create at project cap-1 may win")
+		assert.Equal(t, contenders-1, conflicts)
+		projCnt, err := f.store.CountTriggers(ctx, store.TriggerFilter{ProjectID: f.projectID})
+		require.NoError(t, err)
+		assert.Equal(t, store.MaxTriggersPerProject, projCnt)
+	}
+}
+
+// TestTriggers_ConcurrentCaps_LastSlot runs the concurrent cap races on SQLite
+// (where single-writer pool serialization applies; see
+// TestTriggers_QuotaLockBeforeCountInTx for lock-order verification and
+// TestTriggers_ConcurrentCaps_Postgres for multi-connection PostgreSQL READ
+// COMMITTED).
+func TestTriggers_ConcurrentCaps_LastSlot(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	runTriggersConcurrentCapsAtLastSlot(t, f)
+}
+
+// TestTriggers_ConcurrentCaps_Postgres runs the same concurrent cap races under
+// PostgreSQL READ COMMITTED (wired into HUB_INTEGRATION_POSTGRES_TESTS), where
+// pg_advisory_xact_lock(LockTriggerQuota, StableProjectHash(projectID))
+// prevents concurrent writers at cap-1 from exceeding the cap (ptone/scion#8028).
+func TestTriggers_ConcurrentCaps_Postgres(t *testing.T) {
+	if !enttest.Active() {
+		t.Skip("requires -tags integration and SCION_TEST_POSTGRES_URL")
+	}
+	srv, s := testServerWithStore(t, entadapter.NewCompositeStore(enttest.NewClient(t)))
+	f := setupTriggersTestFixtureOnServer(t, srv, s)
+	runTriggersConcurrentCapsAtLastSlot(t, f)
 }

@@ -251,6 +251,12 @@ type TriggerFireFilter struct {
 // TriggerStore manages webhook endpoints, triggers, trigger events, and
 // trigger fires (ptone/scion#7961).
 type TriggerStore interface {
+	// LockTriggerQuota acquires the transaction-scoped per-project trigger and
+	// webhook-endpoint quota lock (LockTriggerQuota) on PostgreSQL. Must be
+	// called inside WithTx before reading endpoint or trigger counts for cap
+	// enforcement; no-op on SQLite where write transactions already serialize.
+	LockTriggerQuota(ctx context.Context, projectID string) error
+
 	// Webhook endpoints
 	CreateWebhookEndpoint(ctx context.Context, ep *WebhookEndpoint) error
 	GetWebhookEndpoint(ctx context.Context, id string) (*WebhookEndpoint, error)

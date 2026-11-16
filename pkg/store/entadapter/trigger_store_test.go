@@ -18,6 +18,10 @@ package entadapter
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -397,4 +401,188 @@ func TestTriggerStore_EventsFiresVisibilityAndReaper(t *testing.T) {
 	finished, err := cs.FinishTriggerFire(ctx, fire.ID, store.TriggerFireStatusFired, "", "", now.Add(12*time.Minute))
 	require.NoError(t, err)
 	assert.False(t, finished)
+}
+
+func TestLockTriggerQuota_RequiresWithTx(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	projID := uuid.NewString()
+
+	require.ErrorIs(t, cs.LockTriggerQuota(ctx, projID), store.ErrInvalidInput)
+
+	require.NoError(t, cs.WithTx(ctx, func(tx store.Store) error {
+		require.ErrorIs(t, tx.LockTriggerQuota(ctx, "not-a-uuid"), store.ErrInvalidInput)
+		return tx.LockTriggerQuota(ctx, projID)
+	}))
+}
+
+// TestLockTriggerQuota_ConcurrentLastSlot verifies that concurrent transactions
+// racing for the last webhook-endpoint or trigger quota slot insert/activate at
+// most one row and refuse the rest. On PostgreSQL (run in CI via
+// test-store-postgres-entadapter with -tags integration and
+// SCION_TEST_POSTGRES_URL) pg_advisory_xact_lock(LockTriggerQuota,
+// StableProjectHash(projectID)) is what prevents write skew under READ
+// COMMITTED; SQLite serializes writers natively.
+func TestLockTriggerQuota_ConcurrentLastSlot(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	userID := uuid.NewString()
+	errFull := errors.New("quota full")
+
+	t.Run("webhook_endpoints", func(t *testing.T) {
+		projID := uuid.NewString()
+		const limit = 4
+		for i := 0; i < limit-1; i++ {
+			require.NoError(t, cs.CreateWebhookEndpoint(ctx, &store.WebhookEndpoint{
+				ID:                  uuid.NewString(),
+				ProjectID:           projID,
+				Name:                fmt.Sprintf("seed-ep-%d", i),
+				OwnerPrincipalKind:  store.DelegationPrincipalUser,
+				OwnerPrincipalID:    userID,
+				OwnerCredentialKind: store.InitiatorCredentialKindSession,
+			}))
+		}
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		var inserted, refused atomic.Int32
+		for i := 0; i < 8; i++ {
+			i := i
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				for {
+					ep := &store.WebhookEndpoint{
+						ID:                  uuid.NewString(),
+						ProjectID:           projID,
+						Name:                fmt.Sprintf("race-ep-%d", i),
+						OwnerPrincipalKind:  store.DelegationPrincipalUser,
+						OwnerPrincipalID:    userID,
+						OwnerCredentialKind: store.InitiatorCredentialKindSession,
+					}
+					err := cs.WithTx(ctx, func(tx store.Store) error {
+						if lErr := tx.LockTriggerQuota(ctx, projID); lErr != nil {
+							return lErr
+						}
+						cnt, cErr := tx.CountWebhookEndpoints(ctx, projID)
+						if cErr != nil {
+							return cErr
+						}
+						if cnt >= limit {
+							return errFull
+						}
+						return tx.CreateWebhookEndpoint(ctx, ep)
+					})
+					switch {
+					case err == nil:
+						inserted.Add(1)
+						return
+					case errors.Is(err, errFull):
+						refused.Add(1)
+						return
+					case errors.Is(err, store.ErrTransient):
+						time.Sleep(time.Millisecond)
+					default:
+						assert.NoError(t, err)
+						return
+					}
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+		assert.Equal(t, int32(1), inserted.Load())
+		assert.Equal(t, int32(7), refused.Load())
+		cnt, err := cs.CountWebhookEndpoints(ctx, projID)
+		require.NoError(t, err)
+		assert.Equal(t, limit, cnt)
+	})
+
+	t.Run("active_triggers_per_source", func(t *testing.T) {
+		projID := uuid.NewString()
+		sourceID := uuid.NewString()
+		const limit = 4
+		for i := 0; i < limit-1; i++ {
+			require.NoError(t, cs.CreateTrigger(ctx, &store.Trigger{
+				ID:            uuid.NewString(),
+				ProjectID:     projID,
+				Name:          fmt.Sprintf("seed-tr-%d", i),
+				SourceKind:    store.TriggerSourceKindWebhook,
+				SourceID:      sourceID,
+				MatchTypes:    []string{"webhook.received"},
+				ActionType:    store.TriggerActionMessage,
+				ActionPayload: `{"agentId":"a1","message":"hi"}`,
+				Status:        store.TriggerStatusActive,
+			}))
+		}
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		var inserted, refused atomic.Int32
+		for i := 0; i < 8; i++ {
+			i := i
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				for {
+					tr := &store.Trigger{
+						ID:            uuid.NewString(),
+						ProjectID:     projID,
+						Name:          fmt.Sprintf("race-tr-%d", i),
+						SourceKind:    store.TriggerSourceKindWebhook,
+						SourceID:      sourceID,
+						MatchTypes:    []string{"webhook.received"},
+						ActionType:    store.TriggerActionMessage,
+						ActionPayload: `{"agentId":"a1","message":"hi"}`,
+						Status:        store.TriggerStatusActive,
+					}
+					err := cs.WithTx(ctx, func(tx store.Store) error {
+						if lErr := tx.LockTriggerQuota(ctx, projID); lErr != nil {
+							return lErr
+						}
+						cnt, cErr := tx.CountTriggers(ctx, store.TriggerFilter{
+							ProjectID:  projID,
+							SourceKind: store.TriggerSourceKindWebhook,
+							SourceID:   sourceID,
+							Status:     store.TriggerStatusActive,
+						})
+						if cErr != nil {
+							return cErr
+						}
+						if cnt >= limit {
+							return errFull
+						}
+						return tx.CreateTrigger(ctx, tr)
+					})
+					switch {
+					case err == nil:
+						inserted.Add(1)
+						return
+					case errors.Is(err, errFull):
+						refused.Add(1)
+						return
+					case errors.Is(err, store.ErrTransient):
+						time.Sleep(time.Millisecond)
+					default:
+						assert.NoError(t, err)
+						return
+					}
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+		assert.Equal(t, int32(1), inserted.Load())
+		assert.Equal(t, int32(7), refused.Load())
+		cnt, err := cs.CountTriggers(ctx, store.TriggerFilter{
+			ProjectID:  projID,
+			SourceKind: store.TriggerSourceKindWebhook,
+			SourceID:   sourceID,
+			Status:     store.TriggerStatusActive,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, limit, cnt)
+	})
 }
