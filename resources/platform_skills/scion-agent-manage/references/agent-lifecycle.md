@@ -144,8 +144,8 @@ can delete it directly or explicit human instruction is required.
   release active broker and project capacity slots, but stopped agents still retain
   workspaces, clutter project listings, and lose their active session (restarting them
   begins a fresh session and requires an available capacity slot). Time-box operational
-  stops: write durable findings (including any required retrospective) while the agent is
-  still running, then delete completed workers (or `scion suspend` resume-capable agents
-  that legitimately await follow-up).
+  stops: write durable findings and handoffs while the agent is still running, then delete
+  completed workers (or `scion suspend` resume-capable agents that legitimately await
+  follow-up).
 - **Deleting an agent with unpushed work.** Always verify work is pushed to the
   remote (not just committed locally) or written to a shared volume before deletion.
