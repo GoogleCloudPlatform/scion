@@ -288,6 +288,7 @@ type wakeFireRun struct {
 	eventID    string
 	scheduleID string
 	ranAt      time.Time
+	isExec     bool
 
 	mu      sync.Mutex
 	claimed bool
@@ -513,6 +514,15 @@ func (s *Server) recordAbandonedWakeFires(ctx context.Context) {
 			continue
 		}
 		if !r.recordOrWait(recordCtx, func() {
+			if r.isExec {
+				if _, err := s.store.CompleteUnadmittedExecEvent(
+					recordCtx, r.eventID, store.ScheduledEventFailed, execReasonShuttingDown, r.scheduleID, r.ranAt,
+				); err != nil {
+					slog.Warn("Scheduled exec fire outcome write failed during shutdown",
+						"event_id", r.eventID, "schedule_id", r.scheduleID, "error", err)
+				}
+				return
+			}
 			msg := errScheduledWakeShutdown.Error()
 			if _, err := s.store.CompleteFiringScheduledEvent(
 				recordCtx, r.eventID, store.ScheduledEventFailed, time.Now(), msg, r.scheduleID, r.ranAt,

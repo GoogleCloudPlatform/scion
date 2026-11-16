@@ -185,12 +185,6 @@ func (s *Server) execEventHandler() EventHandler {
 // that write records the run's outcome.
 func (s *Server) fireScheduledExec(ctx context.Context, evt store.ScheduledEvent) error {
 	log := slog.With("subsystem", "scheduler", "eventID", evt.ID, "projectID", evt.ProjectID)
-	if evt.ScheduleID != "" {
-		// Recurring exec schedules are Phase 2 (ptone/scion#7884) and
-		// cannot be authored; a stored one never runs.
-		log.Warn("Scheduler: recurring exec event refused", "scheduleID", evt.ScheduleID)
-		return errors.New(execReasonRecurring)
-	}
 
 	p, err := decodeScheduledExecPayload(evt.Payload)
 	if err == nil && p.AgentID == "" {
@@ -267,6 +261,7 @@ func (s *Server) fireScheduledExec(ctx context.Context, evt store.ScheduledEvent
 	run := store.ScheduledExecRun{
 		EventID:                 evt.ID,
 		ProjectID:               evt.ProjectID,
+		ScheduleID:              evt.ScheduleID,
 		TargetAgentID:           target.ID,
 		InitiatorPrincipalKind:  evt.InitiatorPrincipalKind,
 		InitiatorPrincipalID:    evt.InitiatorPrincipalID,
@@ -286,6 +281,9 @@ func (s *Server) fireScheduledExec(ctx context.Context, evt store.ScheduledEvent
 		LaunchID:                target.RunID,
 	}
 	if err := s.store.CreateScheduledExecRun(ctx, &run); err != nil {
+		if errors.Is(err, store.ErrScheduledExecOverlap) {
+			return skip(execReasonOverlap, "db_overlap_lease")
+		}
 		// Nothing was sent. An existing run means this event was admitted
 		// before: it is never started again.
 		log.Error("Scheduler: exec run record not written; nothing started", "error", err)
@@ -352,6 +350,7 @@ func (s *Server) fireScheduledExec(ctx context.Context, evt store.ScheduledEvent
 	stopStart := context.AfterFunc(workCtx, cancelStart)
 	res, startErr := s.StartAgentExecRun(startCtx, target.ID, target.RunID, agentcontrol.ExecStartRequest{
 		RunID:          evt.ID,
+		ScheduleID:     evt.ScheduleID,
 		Argv:           p.Command,
 		TimeoutS:       timeout,
 		NotAfterUnixMS: run.NotAfter.UnixMilli(),

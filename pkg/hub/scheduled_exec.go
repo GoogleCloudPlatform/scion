@@ -29,11 +29,11 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 )
 
-// Exec schedules (ptone/scion#7818, Phase 1 ptone/scion#7883): an "exec"
-// scheduled event runs an argv in the target agent's container over the
-// agent's Conduit session (the exec-start and exec-status control routes,
-// .design/conduit/exec-control-routes.md). Phase 1 covers one-shot events
-// only; recurring exec schedules are rejected at authoring.
+// Exec schedules (ptone/scion#7818, Phase 1 ptone/scion#7883, Phase 2
+// ptone/scion#7884): an "exec" scheduled event or recurring schedule runs an
+// argv in the target agent's container over the agent's Conduit session (the
+// exec-start and exec-status control routes,
+// .design/conduit/exec-control-routes.md).
 
 // scheduledEventTypeExec is the event type of an exec event.
 const scheduledEventTypeExec = "exec"
@@ -51,8 +51,8 @@ const (
 	scheduledExecDefaultTimeout = 60
 	// scheduledExecMaxPayloadBytes bounds the stored payload.
 	scheduledExecMaxPayloadBytes = 32 * 1024
-	// scheduledExecMaxWindow is how late a fire may run: a one-shot exec
-	// event found due more than this after its fire time is skipped
+	// scheduledExecMaxWindow is how late a fire may run: an exec event
+	// found due more than this after its scheduled due time is skipped
 	// (missed window), never run.
 	scheduledExecMaxWindow = 10 * time.Minute
 )
@@ -218,7 +218,6 @@ const (
 	execReasonOutcomeUnknown   = "run outcome unknown"
 	execReasonShuttingDown     = "hub shutting down"
 	execReasonNotDispatched    = "hub restarted before dispatch"
-	execReasonRecurring        = "recurring exec schedules are not supported"
 )
 
 // execReasonExitStatus is the text of a non-zero exit (D6).

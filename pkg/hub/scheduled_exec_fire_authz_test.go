@@ -375,12 +375,13 @@ func TestScheduledExecFire_Preflight(t *testing.T) {
 		assert.Equal(t, execReasonCapacity, reason)
 	})
 
-	t.Run("recurring exec never runs in phase 1", func(t *testing.T) {
+	t.Run("recurring exec passes preflight in phase 2", func(t *testing.T) {
 		f := newSchedExec(t, "sexec-recurring")
 		evt := withSessionRevision(f.execEvent(f.target, "true"), f.creator.ID)
 		evt.ScheduleID = api.NewUUID()
-		err := f.srv.fireScheduledExec(ctx, evt)
-		require.Error(t, err)
-		assert.Equal(t, execReasonRecurring, err.Error())
+		evt.FireAt = time.Now().Add(-15 * time.Minute)
+		reason, ok := asScheduledSkip(f.srv.fireScheduledExec(ctx, evt))
+		require.True(t, ok)
+		assert.Equal(t, execReasonMissedWindow, reason)
 	})
 }

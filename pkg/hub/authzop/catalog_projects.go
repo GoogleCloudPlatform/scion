@@ -1001,6 +1001,7 @@ var projectOperations = []OperationSpec{
 		Description: "Fire a scheduled message, dispatch_agent or exec event, one-shot or materialized from a recurring schedule, under the authority its revision recorded. An exec fire (ptone/scion#7883) re-checks agent.attach on the target under the revision's ceiling before its one exec-start; exec-start and exec-status are reached only from the scheduler's exec fire, run tracker and sweeper, never from a request",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointSchedulerJob, Pattern: "executeSchedule:dispatch_agent"},
+			{Kind: EntryPointSchedulerJob, Pattern: "executeSchedule:exec"},
 			{Kind: EntryPointSchedulerJob, Pattern: "executeSchedule:message"},
 			{Kind: EntryPointSchedulerJob, Pattern: "fireEvent:dispatch_agent"},
 			{Kind: EntryPointSchedulerJob, Pattern: "fireEvent:message"},
