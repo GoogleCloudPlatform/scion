@@ -1350,8 +1350,10 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	var humanMembers []chatMemberEntry
 	if agent.ProjectID != "" {
 		humanMembers = s.resolveProjectHumanMembers(ctx, agent.ProjectID)
+		if len(humanMembers) > 0 {
+			req.Msg = translateMentionsInbound(req.Msg, humanMembers)
+		}
 	}
-	req.Msg = s.translateKnownEmailMentionsInbound(ctx, req.Msg, humanMembers)
 
 	// Build storeMsg and structuredMsg from the routing result.
 	// deliveryUserDirect below persists this row as the dispatch itself;

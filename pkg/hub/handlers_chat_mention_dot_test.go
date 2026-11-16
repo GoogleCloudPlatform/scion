@@ -826,13 +826,15 @@ func TestRecordMentions_BatchSkipsEmptyAndDuplicates(t *testing.T) {
 }
 
 // TestEmailMentionResolution_KnownUsersOnly verifies ptone/scion#8133 on the hub:
-//   - @<email> matching a known Scion user (either a project member or another
-//     Hub user) is translated to that user's @<display-slug> in stored/returned
-//     chat messages on both agent outbound and human chat send paths.
-//   - Dispatched agent messages preserve @<email> identifiers and agent
-//     @mention routing is unchanged.
-//   - Unknown @<email>, plain user@example.com in prose, and inline/fenced code
-//     are left unchanged.
+//   - @<email> matching a human member of the message's project is translated
+//     to that member's @<display-slug> in stored/returned chat messages on
+//     agent outbound, human chat send, and message edit paths.
+//   - Non-member Hub users' @<email> tokens stay plain text (no hub-wide
+//     GetUserByEmail oracle), as do unknown @<email>, plain user@example.com
+//     in prose, inline/fenced code, and '>' blockquotes.
+//   - Dispatched agent messages are byte-for-byte unchanged (including
+//     outbound @<slug> -> @<email> behaviour on blockquotes, **wrapped**
+//     mentions, and boundaries) and agent @mention routing is unchanged.
 func TestEmailMentionResolution_KnownUsersOnly(t *testing.T) {
 	srv, s, wcs, proj, db := setupMentionDotTest(t)
 	d := &brokerMockDispatcher{}
@@ -841,7 +843,8 @@ func TestEmailMentionResolution_KnownUsersOnly(t *testing.T) {
 
 	_ = addHumanMember(t, s, proj.ID, "alice.smith@test.com", "Alice Smith")
 
-	// Known Scion user on the Hub who is NOT an explicit member of proj.
+	// Known Scion user on the Hub who is NOT a member of proj — must NOT
+	// resolve in proj's chat messages (no hub-wide user oracle).
 	hubPeer := &store.User{
 		ID:          tid("email-mention-hub-peer"),
 		Email:       "hub.peer@test.com",
@@ -881,7 +884,7 @@ func TestEmailMentionResolution_KnownUsersOnly(t *testing.T) {
 	// 1. Human -> agent-routed chat send (with secondary @em-reviewer mention).
 	humanBody := "@em-builder ask @em-reviewer, cc @alice.smith@test.com and @hub.peer@test.com; " +
 		"leave @unknown@example.com, alice.smith@test.com, user@example.com, and `@alice.smith@test.com`:\n" +
-		"```\n@hub.peer@test.com\n```"
+		"```\n@alice.smith@test.com\n```"
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages",
 		map[string]string{"content": humanBody})
 	if rec.Code != http.StatusCreated {
@@ -891,9 +894,9 @@ func TestEmailMentionResolution_KnownUsersOnly(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &sendResp); err != nil {
 		t.Fatal(err)
 	}
-	wantHumanDisplay := "@em-builder ask @em-reviewer, cc @alice-smith and @hub-peer; " +
+	wantHumanDisplay := "@em-builder ask @em-reviewer, cc @alice-smith and @hub.peer@test.com; " +
 		"leave @unknown@example.com, alice.smith@test.com, user@example.com, and `@alice.smith@test.com`:\n" +
-		"```\n@hub.peer@test.com\n```"
+		"```\n@alice.smith@test.com\n```"
 	if sendResp.Content != wantHumanDisplay {
 		t.Errorf("human send response content =\n%s\nwant:\n%s", sendResp.Content, wantHumanDisplay)
 	}
@@ -917,9 +920,46 @@ func TestEmailMentionResolution_KnownUsersOnly(t *testing.T) {
 		}
 	}
 
-	// 2. Agent outbound message to the conversation.
-	agentBody := "Done @alice.smith@test.com and **@hub.peer@test.com**; unknown @unknown@example.com, " +
-		"prose user@example.com, code `@hub.peer@test.com`."
+	// 2. Message edit before any agent reply: member @<email> resolves,
+	// non-member Hub user @<email> stays plain text.
+	editedRaw := "Updated: cc **@alice.smith@test.com**, non-member @hub.peer@test.com, unknown @unknown@example.com, code `@alice.smith@test.com`."
+	editRec := doRequest(t, srv, http.MethodPut, "/api/v1/chat/conversations/"+topicID+"/messages/"+sendResp.ID,
+		map[string]string{"content": editedRaw})
+	if editRec.Code != http.StatusOK {
+		t.Fatalf("message edit: %d %s", editRec.Code, editRec.Body.String())
+	}
+	wantEdited := "Updated: cc **@alice-smith**, non-member @hub.peer@test.com, unknown @unknown@example.com, code `@alice.smith@test.com`."
+	storedAfterEdit, err := s.GetMessage(ctx, sendResp.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedAfterEdit.Msg != wantEdited {
+		t.Errorf("edited msg =\n%s\nwant:\n%s", storedAfterEdit.Msg, wantEdited)
+	}
+
+	// 3. Pin outbound @<slug> -> @<email> dispatched text byte-for-byte for
+	// blockquotes, **wrapped** mentions, and boundaries (R1).
+	outboundProbe := "@em-builder check @em-reviewer:\n> @alice-smith said hi\nPing **@alice-smith**, x.@alice-smith, and café@alice-smith"
+	wantDispatchedOutbound := "@em-builder check @em-reviewer:\n> @alice.smith@test.com said hi\nPing **@alice-smith**, x.@alice.smith@test.com, and café@alice.smith@test.com"
+	rec2 := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages",
+		map[string]string{"content": outboundProbe})
+	if rec2.Code != http.StatusCreated {
+		t.Fatalf("outbound probe send: %d %s", rec2.Code, rec2.Body.String())
+	}
+	allDispatched := d.getMessages()
+	if len(allDispatched) != 4 {
+		t.Fatalf("total dispatched count = %d; want 4", len(allDispatched))
+	}
+	for _, dm := range allDispatched[2:] {
+		if dm.msg != wantDispatchedOutbound {
+			t.Errorf("agent %s outbound probe received =\n%s\nwant:\n%s", dm.agentSlug, dm.msg, wantDispatchedOutbound)
+		}
+	}
+
+	// 4. Agent outbound message to the conversation: project member @<email>
+	// translates; non-member Hub user @<email> stays plain text.
+	agentBody := "Done @alice.smith@test.com and **@alice.smith@test.com**; non-member @hub.peer@test.com, " +
+		"unknown @unknown@example.com, prose user@example.com, code `@alice.smith@test.com`."
 	rr := postOutboundConvRef(t, srv, proj.ID, primary.ID, agentBody, "conv:"+convID)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("agent outbound: %d %s", rr.Code, rr.Body.String())
@@ -934,9 +974,29 @@ func TestEmailMentionResolution_KnownUsersOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantAgentDisplay := "Done @alice-smith and **@hub-peer**; unknown @unknown@example.com, " +
-		"prose user@example.com, code `@hub.peer@test.com`."
+	wantAgentDisplay := "Done @alice-smith and **@alice-smith**; non-member @hub.peer@test.com, " +
+		"unknown @unknown@example.com, prose user@example.com, code `@alice.smith@test.com`."
 	if storedAgent.Msg != wantAgentDisplay {
 		t.Errorf("stored agent msg =\n%s\nwant:\n%s", storedAgent.Msg, wantAgentDisplay)
+	}
+
+	// 5. User-to-user DM (no project scope): Hub user emails stay plain text so
+	// a DM sender learns nothing about Hub users from display translation.
+	dmKey, err := messages.DMConversationKey("user", DevUserID, "user", hubPeer.ID)
+	if err != nil {
+		t.Fatalf("DMConversationKey: %v", err)
+	}
+	dmBody := "Hi @hub.peer@test.com and @alice.smith@test.com"
+	dmRec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+dmKey+"/messages",
+		map[string]string{"content": dmBody})
+	if dmRec.Code != http.StatusCreated {
+		t.Fatalf("user DM send: %d %s", dmRec.Code, dmRec.Body.String())
+	}
+	var dmResp chatMessageResponse
+	if err := json.Unmarshal(dmRec.Body.Bytes(), &dmResp); err != nil {
+		t.Fatal(err)
+	}
+	if dmResp.Content != dmBody {
+		t.Errorf("user DM response content = %q; want unchanged %q", dmResp.Content, dmBody)
 	}
 }

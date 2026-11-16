@@ -1917,10 +1917,13 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 		}
 	}
 
-	// Persist the message (translating any @<email> matching a known Scion
-	// user into @<display-slug> for human-facing display while keeping
+	// Persist the message (translating any @<email> matching a human member of
+	// the project into @<display-slug> for human-facing display while keeping
 	// agentContent untouched for agent dispatch — ptone/scion#8133).
-	displayContent := s.translateKnownEmailMentionsInbound(ctx, content, humanMembers)
+	displayContent := content
+	if len(humanMembers) > 0 {
+		displayContent = translateMentionsInbound(content, humanMembers)
+	}
 	storeMsg := &store.Message{
 		ID:            api.NewUUID(),
 		ProjectID:     projectID,
@@ -2656,7 +2659,10 @@ func (s *Server) sendHumanToHuman(ctx context.Context, key, projectID string, us
 	if projectID != "" && (len(mentionNames) > 0 || strings.Contains(content, "@")) {
 		humanMembers = s.resolveProjectHumanMembers(ctx, projectID)
 	}
-	displayContent := s.translateKnownEmailMentionsInbound(ctx, content, humanMembers)
+	displayContent := content
+	if len(humanMembers) > 0 {
+		displayContent = translateMentionsInbound(content, humanMembers)
+	}
 
 	storeMsg := &store.Message{
 		ID:            api.NewUUID(),
@@ -2925,11 +2931,11 @@ func (s *Server) handleMessageEdit(w http.ResponseWriter, r *http.Request, key, 
 	if projectID == uuid.Nil.String() {
 		projectID = ""
 	}
-	var editHumanMembers []chatMemberEntry
 	if projectID != "" && strings.Contains(content, "@") {
-		editHumanMembers = s.resolveProjectHumanMembers(ctx, projectID)
+		if editHumanMembers := s.resolveProjectHumanMembers(ctx, projectID); len(editHumanMembers) > 0 {
+			content = translateMentionsInbound(content, editHumanMembers)
+		}
 	}
-	content = s.translateKnownEmailMentionsInbound(ctx, content, editHumanMembers)
 
 	// Update message content and mark as edited.
 	//
