@@ -362,3 +362,17 @@ describe('feature-flags: change event', () => {
     }
   });
 });
+
+describe('execSchedulesEnabled (hub.exec_schedules)', () => {
+  it('defaults to false and follows server/explicit flags', async () => {
+    const { EXEC_SCHEDULES_FLAG, execSchedulesEnabled } = await import('./feature-flags.js');
+    expect(EXEC_SCHEDULES_FLAG).toBe('hub.exec_schedules');
+    expect(execSchedulesEnabled()).toBe(false);
+
+    setServerFlags({ 'hub.exec_schedules': true });
+    expect(execSchedulesEnabled()).toBe(true);
+
+    setFeatureFlag('hub.exec_schedules', false);
+    expect(execSchedulesEnabled()).toBe(false);
+  });
+});

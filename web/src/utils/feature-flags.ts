@@ -282,3 +282,17 @@ export const PROJECT_DECISIONS_FLAG = 'web.project_decisions';
 export function projectDecisionsEnabled(): boolean {
   return isFeatureEnabled(PROJECT_DECISIONS_FLAG) && isFeatureEnabled(CHAT_CHOICES_FLAG);
 }
+
+/**
+ * Scheduled command execution (hub.exec_schedules, ptone/scion#7886):
+ * offers the `exec` event type in the recurring schedule and one-shot
+ * scheduled event create dialogs. Presentation only: the hub checks
+ * `hub.exec_schedules` (and conduit exec control) on create, PATCH, and
+ * resume. Default OFF.
+ */
+export const EXEC_SCHEDULES_FLAG = 'hub.exec_schedules';
+
+/** Whether authoring `exec` schedules and events is offered in this session. */
+export function execSchedulesEnabled(): boolean {
+  return isFeatureEnabled(EXEC_SCHEDULES_FLAG);
+}
