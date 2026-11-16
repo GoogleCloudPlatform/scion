@@ -303,3 +303,37 @@ func TestProjectPayload_OversizeEditedTruncatesChangesFromBeforeCurrentBody(t *t
 	assert.Less(t, len(gotOld), len(oldBody), "pre-edit changes.body.from should be truncated first")
 	assert.True(t, utf8.ValidString(gotOld))
 }
+
+func TestProjectPayload_OversizeDiffHunkKeepsTail(t *testing.T) {
+	var lines []string
+	for i := 0; i < 40; i++ {
+		lines = append(lines, " \tearlierDiffLine-🚀-"+strings.Repeat("x", 40))
+	}
+	lines = append(lines, "+\tfinalCommentedDiffLine()")
+	bigHunk := strings.Join(lines, "\n")
+
+	rawMap := map[string]any{
+		"action":       "created",
+		"installation": map[string]any{"id": 12},
+		"sender":       map[string]any{"login": "u", "id": 1, "type": "User"},
+		"repository":   map[string]any{"id": 1, "full_name": "o/r", "name": "r", "owner": map[string]any{"login": "o", "id": 1, "type": "User"}},
+		"comment": map[string]any{
+			"id":        55,
+			"body":      "",
+			"diff_hunk": bigHunk,
+		},
+	}
+	raw, err := json.Marshal(rawMap)
+	require.NoError(t, err)
+
+	out, truncated, err := projectPayload(raw, 1200)
+	require.NoError(t, err)
+	assert.True(t, truncated)
+	assert.LessOrEqual(t, len(out), 1200)
+
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(out, &decoded))
+	gotHunk := decoded["comment"].(map[string]any)["diff_hunk"].(string)
+	assert.True(t, strings.HasSuffix(gotHunk, "+\tfinalCommentedDiffLine()"), "projected diff_hunk should preserve commented tail, got: %q", gotHunk)
+	assert.True(t, utf8.ValidString(gotHunk))
+}

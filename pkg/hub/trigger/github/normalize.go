@@ -590,7 +590,7 @@ func normalizePullRequestReviewComment(
 		attrs["side"] = side
 	}
 	if hunk := optCleanString(commentMap, "diff_hunk"); hunk != "" {
-		attrs["diff_hunk"] = truncateUTF8(hunk, opts.maxDiffHunkBytes())
+		attrs["diff_hunk"] = truncateUTF8Tail(hunk, opts.maxDiffHunkBytes())
 	}
 
 	rawBody := optCleanString(commentMap, "body")
@@ -804,9 +804,13 @@ func enforceAttributesCeiling(attrs map[string]string, maxBytes int) error {
 			if target < 0 {
 				target = 0
 			}
-			next := truncateUTF8(cur, target)
+			cutFn := truncateUTF8
+			if key == "diff_hunk" {
+				cutFn = truncateUTF8Tail
+			}
+			next := cutFn(cur, target)
 			if len(next) == len(cur) && target > 0 {
-				next = truncateUTF8(cur, target-1)
+				next = cutFn(cur, target-1)
 			}
 			attrs[key] = next
 			if key == "issue_title" {

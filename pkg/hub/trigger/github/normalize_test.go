@@ -544,3 +544,69 @@ func TestNormalize_OccurredAtStaleAndHelpers(t *testing.T) {
 		"User-Agent":        "GitHub-Hookshot/abc",
 	}, filtered)
 }
+
+func TestNormalize_DiffHunkKeepsTailAfterNewline(t *testing.T) {
+	buildReviewComment := func(hunk string) []byte {
+		raw, err := json.Marshal(map[string]any{
+			"action":       "created",
+			"installation": map[string]any{"id": 10},
+			"repository": map[string]any{
+				"id": 1, "name": "r", "full_name": "o/r", "private": false,
+				"owner": map[string]any{"login": "o", "id": 1, "type": "User"},
+			},
+			"sender": map[string]any{"login": "u", "id": 2, "type": "User"},
+			"pull_request": map[string]any{
+				"number": 7, "state": "open", "title": "PR", "body": "",
+				"html_url": "https://github.com/o/r/pull/7", "author_association": "MEMBER",
+				"draft": false, "merged": false,
+				"created_at": "2026-05-01T12:00:00Z", "updated_at": "2026-05-01T12:00:00Z",
+				"user": map[string]any{"login": "u", "id": 2, "type": "User"},
+				"base": map[string]any{"ref": "main", "sha": "111", "repo": map[string]any{"id": 1, "full_name": "o/r", "name": "r", "private": false}},
+				"head": map[string]any{"ref": "feat", "sha": "222", "repo": map[string]any{"id": 1, "full_name": "o/r", "name": "r", "private": false}},
+			},
+			"comment": map[string]any{
+				"id": 500, "body": "Check nil here", "diff_hunk": hunk,
+				"path": "pkg/foo.go", "line": 99, "side": "RIGHT",
+				"html_url":           "https://github.com/o/r/pull/7#discussion_r500",
+				"author_association": "MEMBER",
+				"created_at":         "2026-05-01T12:01:00Z", "updated_at": "2026-05-01T12:01:00Z",
+			},
+		})
+		require.NoError(t, err)
+		return raw
+	}
+
+	t.Run("multi-line hunk cuts cleanly after newline and preserves commented tail", func(t *testing.T) {
+		var lines []string
+		lines = append(lines, "@@ -10,40 +10,45 @@ func hugeContext() {")
+		for i := 0; i < 30; i++ {
+			lines = append(lines, fmt.Sprintf(" \tearlierContextLine(%02d, %q)", i, "🚀-padding-context"))
+		}
+		targetLine := "+\treturn commentedTargetLine(ctx) // <--- review comment refers to this line"
+		lines = append(lines, targetLine)
+		hunk := strings.Join(lines, "\n")
+		require.Greater(t, len(hunk), MaxDiffHunkBytes)
+
+		res, err := Normalize(EventPullRequestReviewComment, "d-hunk-1", buildReviewComment(hunk), Options{AppSlug: "scion"})
+		require.NoError(t, err)
+		got := res.Attributes["diff_hunk"]
+		assert.LessOrEqual(t, len(got), MaxDiffHunkBytes)
+		assert.True(t, utf8.ValidString(got))
+		assert.True(t, strings.HasSuffix(got, targetLine), "tail with commented line must be preserved, got: %q", got)
+		assert.True(t, strings.HasPrefix(got, " \tearlierContextLine(") || strings.HasPrefix(got, targetLine),
+			"tail should start cleanly at a line boundary after newline, got: %q", got)
+	})
+
+	t.Run("single giant line with trailing newline still keeps rune-safe tail", func(t *testing.T) {
+		singleLine := "+" + strings.Repeat("🚀", 300) + "END_MARKER\n"
+		require.Greater(t, len(singleLine), MaxDiffHunkBytes)
+
+		res, err := Normalize(EventPullRequestReviewComment, "d-hunk-2", buildReviewComment(singleLine), Options{AppSlug: "scion"})
+		require.NoError(t, err)
+		got := res.Attributes["diff_hunk"]
+		assert.NotEmpty(t, got)
+		assert.LessOrEqual(t, len(got), MaxDiffHunkBytes)
+		assert.True(t, utf8.ValidString(got))
+		assert.True(t, strings.HasSuffix(got, "END_MARKER\n"))
+	})
+}

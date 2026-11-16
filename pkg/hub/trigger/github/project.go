@@ -259,10 +259,11 @@ func shrinkProjectedToFit(proj map[string]any, encoded []byte, maxBytes int) ([]
 		return encoded, err
 	}
 
-	// Tier 3: truncate "diff_hunk" fields (longest first).
+	// Tier 3: truncate "diff_hunk" fields (longest first), keeping the tail where
+	// the commented diff line sits.
 	encoded, err = shrinkSubtreeFieldsLongestFirst(proj, proj, encoded, maxBytes, func(key string) bool {
 		return key == "diff_hunk"
-	}, truncateUTF8)
+	}, truncateUTF8Tail)
 	if err != nil || len(encoded) <= maxBytes {
 		return encoded, err
 	}
