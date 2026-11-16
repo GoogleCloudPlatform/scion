@@ -1,7 +1,9 @@
 # Workspace Boundaries
 
 Container isolation does not imply filesystem isolation. At task start, check
-`pwd`, `SCION_WORKSPACE_MODE`, `SCION_WORKSPACE_GIT`, and `SCION_GIT_DEPTH`.
+`pwd` and read `SCION_WORKSPACE_MODE`, `SCION_WORKSPACE_GIT`, and
+`SCION_GIT_DEPTH` individually by name (do not dump `env`/`printenv` or `grep`
+the environment, which can expose secret variables in transcripts).
 The Git flag is `true` for Git workspaces and otherwise unset. The mode
 describes the primary workspace; named shared mounts have their own sharing
 boundary. If the mode is missing or the facts contradict each other, report the
