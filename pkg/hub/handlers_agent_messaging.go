@@ -1506,6 +1506,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		if choiceSend != nil {
 			// Open cards of the versions this send replaced (--update).
 			s.publishReplacedDecisions(storeCtx, choiceSend.result)
+			s.enqueueDecisionBellEvent(storeMsg.ProjectID, storeMsg.ThreadID, "")
 		}
 		return nil
 	}

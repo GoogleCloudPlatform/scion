@@ -958,3 +958,118 @@ func TestNotificationStore_UpdateNotificationContent(t *testing.T) {
 
 	assert.ErrorIs(t, s.UpdateNotificationContent(ctx, uuid.NewString(), "x", "y"), store.ErrNotFound)
 }
+
+func TestNotificationStore_UpdateNotificationState(t *testing.T) {
+	s := newTestNotificationStore(t)
+	ctx := context.Background()
+	created := time.Now().UTC().Add(-10 * time.Minute).Truncate(time.Second)
+	n := &store.Notification{
+		ID:             uuid.NewString(),
+		SubscriptionID: store.CreatorFallbackSubscriptionID,
+		AgentID:        uuid.Nil.String(),
+		ProjectID:      uuid.Nil.String(),
+		SubscriberType: store.SubscriberTypeUser,
+		SubscriberID:   "user-1",
+		Status:         store.NotificationStatusDecisionsWaiting,
+		Message:        "3 decisions are waiting on you in 1 project",
+		CreatedAt:      created,
+		Kind:           store.NotificationKindDecisionsWaiting,
+		ResourceType:   store.NotificationResourceDecisions,
+		ResourceID:     "3",
+	}
+	require.NoError(t, s.CreateNotification(ctx, n))
+	require.NoError(t, s.AcknowledgeNotification(ctx, n.ID))
+
+	// Conditional keep-state update fails with ErrVersionConflict when observed state mismatches.
+	assert.ErrorIs(t,
+		s.UpdateNotificationStateIfAcknowledged(ctx, n.ID, "2 decisions are waiting on you in 1 project", "2", false),
+		store.ErrVersionConflict,
+	)
+
+	// Conditional keep-state update while acknowledged keeps acknowledged=true and CreatedAt unchanged.
+	require.NoError(t, s.UpdateNotificationStateIfAcknowledged(ctx, n.ID, "2 decisions are waiting on you in 1 project", "2", true))
+	got, err := s.GetNotification(ctx, n.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "2 decisions are waiting on you in 1 project", got.Message)
+	assert.Equal(t, "2", got.ResourceID)
+	assert.True(t, got.Acknowledged, "acknowledged state is preserved when requested")
+	assert.True(t, got.CreatedAt.Equal(created), "keep path leaves CreatedAt unchanged")
+	assert.Equal(t, store.NotificationKindDecisionsWaiting, got.Kind)
+	assert.Equal(t, store.NotificationResourceDecisions, got.ResourceType)
+
+	// Increase (acknowledged=false) resurfaces and refreshes CreatedAt to now.
+	beforeReset := time.Now().UTC().Add(-time.Second)
+	require.NoError(t, s.UpdateNotificationState(ctx, n.ID, "4 decisions are waiting on you in 2 projects", "4", false))
+	got, err = s.GetNotification(ctx, n.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "4 decisions are waiting on you in 2 projects", got.Message)
+	assert.Equal(t, "4", got.ResourceID)
+	assert.False(t, got.Acknowledged, "acknowledged=false resurfaces the notification")
+	assert.True(t, got.CreatedAt.After(created), "reset-to-unacknowledged refreshes CreatedAt")
+	assert.False(t, got.CreatedAt.Before(beforeReset))
+	resurfacedAt := got.CreatedAt
+
+	// Keep-state update while unacknowledged keeps acknowledged=false and CreatedAt unchanged.
+	require.NoError(t, s.UpdateNotificationStateIfAcknowledged(ctx, n.ID, "3 decisions are waiting on you in 1 project", "3", false))
+	got, err = s.GetNotification(ctx, n.ID)
+	require.NoError(t, err)
+	assert.False(t, got.Acknowledged)
+	assert.Equal(t, "3", got.ResourceID)
+	assert.True(t, got.CreatedAt.Equal(resurfacedAt), "keep path leaves CreatedAt unchanged when unacknowledged")
+
+	// Clear path (acknowledged=true) sets acknowledged=true and keeps CreatedAt unchanged.
+	require.NoError(t, s.UpdateNotificationState(ctx, n.ID, "No decisions are waiting on you", "0", true))
+	got, err = s.GetNotification(ctx, n.ID)
+	require.NoError(t, err)
+	assert.True(t, got.Acknowledged)
+	assert.Equal(t, "0", got.ResourceID)
+	assert.True(t, got.CreatedAt.Equal(resurfacedAt))
+
+	// UpdateNotificationContent keeps its always-unacknowledge + preserve-CreatedAt contract.
+	require.NoError(t, s.UpdateNotificationContent(ctx, n.ID, "5 decisions are waiting on you in 2 projects", "5"))
+	got, err = s.GetNotification(ctx, n.ID)
+	require.NoError(t, err)
+	assert.False(t, got.Acknowledged)
+	assert.True(t, got.CreatedAt.Equal(resurfacedAt))
+
+	assert.ErrorIs(t, s.UpdateNotificationState(ctx, uuid.NewString(), "x", "1", true), store.ErrNotFound)
+	assert.ErrorIs(t, s.UpdateNotificationState(ctx, uuid.NewString(), "x", "1", false), store.ErrNotFound)
+	assert.ErrorIs(t, s.UpdateNotificationStateIfAcknowledged(ctx, uuid.NewString(), "x", "1", false), store.ErrNotFound)
+}
+
+func TestPurgeOrphanedNotifications_PreservesActiveDecisionsWaiting(t *testing.T) {
+	s := newTestNotificationStore(t)
+	ctx := context.Background()
+	n := &store.Notification{
+		ID:             uuid.NewString(),
+		SubscriptionID: store.CreatorFallbackSubscriptionID,
+		AgentID:        uuid.Nil.String(),
+		ProjectID:      uuid.Nil.String(),
+		SubscriberType: store.SubscriberTypeUser,
+		SubscriberID:   "user-1",
+		Status:         store.NotificationStatusDecisionsWaiting,
+		Message:        "3 decisions are waiting on you in 1 project",
+		Acknowledged:   true,
+		Kind:           store.NotificationKindDecisionsWaiting,
+		ResourceType:   store.NotificationResourceDecisions,
+		ResourceID:     "3",
+	}
+	require.NoError(t, s.CreateNotification(ctx, n))
+
+	// Acknowledged while N > 0 ("Mark read") must survive orphan GC so P=3 is not forgotten.
+	purged, err := s.PurgeOrphanedNotifications(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 0, purged)
+	got, err := s.GetNotification(ctx, n.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "3", got.ResourceID)
+	assert.True(t, got.Acknowledged)
+
+	// Once cleared (N = 0 -> resource_id = "0", acknowledged = true), orphan GC purges it.
+	require.NoError(t, s.UpdateNotificationState(ctx, n.ID, "No decisions are waiting on you", "0", true))
+	purged, err = s.PurgeOrphanedNotifications(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, purged)
+	_, err = s.GetNotification(ctx, n.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}

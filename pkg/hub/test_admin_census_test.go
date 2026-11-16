@@ -220,6 +220,7 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"invited_hub_role_guard.go:groupClosureCarriesBuiltInHubRole:GetParentGroups":               "guard: refuses built-in hub role or hub-members membership for invited users; can only refuse, never grant",
 	"invited_hub_role_guard.go:groupClosureCarriesBuiltInHubRole:ListRoleBindingsForPrincipals": "guard: refuses built-in hub role or hub-members membership for invited users; can only refuse, never grant",
 	"chat_v2_no_recipient.go:projectHumanMembersStrict:ListProjectMembers":                      "routing: chat recipients of a project; grants nothing",
+	"choices_bell.go:decisionBellProjectMemberIDs:ListRoleBindingsForScope":                     "routing: candidate project members for decisions bell recompute; grants nothing (each user's recompute re-evaluates clamped membership and permissions)",
 	"handlers_chat_v2.go:resolveProjectHumanMembers:ListProjectMembers":                         "routing: chat recipients of a project; grants nothing",
 
 	// Display: returns stored records to an authorized caller; grants nothing.

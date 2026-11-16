@@ -42,7 +42,8 @@ const userNoticeWriteTimeout = 5 * time.Second
 // writer accepts. A new hub-authored notice adds its pkg/store constants
 // here; no request field ever reaches these columns.
 var userNoticeKinds = map[string]string{
-	store.NotificationKindArtifactGrant: store.NotificationResourceArtifact,
+	store.NotificationKindArtifactGrant:    store.NotificationResourceArtifact,
+	store.NotificationKindDecisionsWaiting: store.NotificationResourceDecisions,
 }
 
 // userNotice is a hub-authored notification to one user. Kind, ResourceType

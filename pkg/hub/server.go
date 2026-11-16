@@ -2005,6 +2005,10 @@ type Server struct {
 	// uses the defaults (chat_member_fanout.go).
 	chatMemberFanout chatMemberFanoutLimits
 
+	// decisionBell coalesces and reconciles per-user Decisions bell
+	// notifications (choices_bell.go).
+	decisionBell decisionBellState
+
 	// Conduit stream grant key ring cache (conduit_grants.go); created on
 	// first use behind the hub.conduit experiment.
 	conduitGrantsOnce sync.Once
@@ -7942,10 +7946,11 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		if s.previewService != nil {
 			s.previewService.Close()
 		}
-		// Stop presence manager before closing event publisher
+		// Stop presence manager and decisions bell workers before closing event publisher
 		if presenceManager != nil {
 			presenceManager.Stop()
 		}
+		s.stopDecisionBell()
 		if events != nil {
 			events.Close()
 		}
@@ -8248,7 +8253,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/users/me/terminal-workspace", s.guarded("/api/v1/users/me/terminal-workspace", s.handleUserMeTerminalWorkspace))
 
 	// Profile decisions roll-up across member projects (/users/me/decisions)
-	s.mux.HandleFunc("/api/v1/users/me/decisions", s.guarded("/api/v1/users/me/decisions", s.handleUserMeDecisions))
+	s.mux.HandleFunc("/api/v1/users/me/decisions", s.guarded("/api/v1/users/me/decisions", s.withDecisionsBellReconcile(s.handleUserMeDecisions)))
 
 	// User-scoped template endpoints (/users/me/templates)
 	s.mux.HandleFunc("/api/v1/users/me/templates", s.guarded("/api/v1/users/me/templates", s.handleUserMeTemplates))

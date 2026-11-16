@@ -420,6 +420,11 @@ type UserNotificationEvent struct {
 	// (store.Notification.Excerpt), on this event only for the same
 	// reason; empty and omitted for every kind but the review summary.
 	Excerpt string `json:"excerpt,omitempty"`
+	// Acknowledged is true when an in-place hub notice transitions to
+	// acknowledged (for example decisions_waiting clearing at N = 0 or
+	// updating quietly after Mark read). Omitted when false so existing
+	// unacknowledged event payloads stay byte-for-byte identical.
+	Acknowledged bool `json:"acknowledged,omitempty"`
 }
 
 // AllowListChangedEvent is published when the allow list is modified.
@@ -874,6 +879,7 @@ func (p *eventBuilder) PublishUserNotification(_ context.Context, notif *store.N
 		ResourceType: notif.ResourceType,
 		ResourceID:   notif.ResourceID,
 		Excerpt:      notif.Excerpt,
+		Acknowledged: notif.Acknowledged,
 	}
 	p.sink("user."+notif.SubscriberID+".notification", evt)
 }

@@ -21,6 +21,8 @@ import (
 	"time"
 
 	entsql "entgo.io/ent/dialect/sql"
+	"entgo.io/ent/dialect/sql/sqlgraph"
+	"entgo.io/ent/schema/field"
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
@@ -524,6 +526,80 @@ func (s *NotificationStore) UpdateNotificationContent(ctx context.Context, id, m
 	return nil
 }
 
+// UpdateNotificationState implements store.NotificationStore.
+func (s *NotificationStore) UpdateNotificationState(ctx context.Context, id, message, resourceID string, acknowledged bool) error {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	if acknowledged {
+		_, err = s.client.Notification.UpdateOneID(uid).
+			SetMessage(message).
+			SetResourceID(resourceID).
+			SetAcknowledged(true).
+			Save(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		return nil
+	}
+	if err := notification.MessageValidator(message); err != nil {
+		return fmt.Errorf("%w: %v", store.ErrInvalidInput, err)
+	}
+	// Raw sqlgraph update bypasses Ent's Immutable() `created` field (which omits
+	// SetCreated on NotificationUpdateOne) and skips Ent mutation hooks; this is
+	// intentional so `created` reflects the latest resurfacing timestamp after
+	// running notification.MessageValidator explicitly above.
+	spec := sqlgraph.NewUpdateSpec(notification.Table, notification.Columns, sqlgraph.NewFieldSpec(notification.FieldID, field.TypeUUID))
+	spec.Predicate = func(selector *entsql.Selector) {
+		notification.IDEQ(uid)(selector)
+	}
+	spec.SetField(notification.FieldMessage, field.TypeString, message)
+	spec.SetField(notification.FieldResourceID, field.TypeString, resourceID)
+	spec.SetField(notification.FieldAcknowledged, field.TypeBool, false)
+	spec.SetField(notification.FieldCreated, field.TypeTime, time.Now().UTC())
+	affected, err := sqlgraph.UpdateNodes(ctx, s.client.Driver(), spec)
+	if err != nil {
+		return mapError(err)
+	}
+	if affected == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+// UpdateNotificationStateIfAcknowledged implements store.NotificationStore.
+func (s *NotificationStore) UpdateNotificationStateIfAcknowledged(ctx context.Context, id, message, resourceID string, observedAcknowledged bool) error {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return err
+	}
+	affected, err := s.client.Notification.Update().
+		Where(
+			notification.IDEQ(uid),
+			notification.AcknowledgedEQ(observedAcknowledged),
+		).
+		SetMessage(message).
+		SetResourceID(resourceID).
+		Save(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if affected > 0 {
+		return nil
+	}
+	exists, err := s.client.Notification.Query().
+		Where(notification.IDEQ(uid)).
+		Exist(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if !exists {
+		return store.ErrNotFound
+	}
+	return store.ErrVersionConflict
+}
+
 // AcknowledgeAllNotifications marks all notifications for a subscriber as acknowledged.
 // No error on zero rows affected.
 func (s *NotificationStore) AcknowledgeAllNotifications(ctx context.Context, subscriberType, subscriberID string) error {
@@ -786,6 +862,14 @@ func (s *NotificationStore) PurgeOrphanedNotifications(ctx context.Context) (int
 		ids, err := s.client.Notification.Query().
 			Where(
 				notification.AcknowledgedEQ(true),
+				// An acknowledged decisions_waiting row whose resource_id is
+				// non-zero holds the user's "Mark read" high-water count P so
+				// subsequent decreases (0 < N <= P) stay hidden (B2); only
+				// cleared rows (resource_id "" or "0") are eligible for GC.
+				notification.Or(
+					notification.KindNEQ(store.NotificationKindDecisionsWaiting),
+					notification.ResourceIDIn("", "0"),
+				),
 				func(sel *entsql.Selector) {
 					sel.Where(entsql.And(
 						noRowWithID(sel, agent.Table, agent.FieldID, notification.FieldAgentID),

@@ -2729,6 +2729,12 @@ const (
 	// most once per owner, agent and key per hour. It never carries a
 	// value.
 	NotificationKindSecretPending = "secret_pending"
+	// NotificationKindDecisionsWaiting: one coalesced per-user bell item
+	// summarizing open decisions waiting on the subscriber across member
+	// projects. AgentID and ProjectID are nil UUIDs; ResourceType is
+	// NotificationResourceDecisions and ResourceID stores the previous
+	// waiting count P as a decimal string ("0" when cleared).
+	NotificationKindDecisionsWaiting = "decisions_waiting"
 )
 
 // Notification.ResourceType values.
@@ -2737,6 +2743,9 @@ const (
 	NotificationResourceArtifact = "artifact"
 	// NotificationResourcePendingSecret: ResourceID is a pending secret id.
 	NotificationResourcePendingSecret = "pending_secret"
+	// NotificationResourceDecisions: ResourceID is the coalesced waiting
+	// decision count string for NotificationKindDecisionsWaiting.
+	NotificationResourceDecisions = "decisions"
 )
 
 // Notification.Status values of NotificationKindArtifactGrant rows.
@@ -2757,6 +2766,10 @@ const NotificationStatusArtifactReviewSubmitted = "ARTIFACT_REVIEW_SUBMITTED"
 // NotificationStatusSecretPending is the Status of a
 // NotificationKindSecretPending row.
 const NotificationStatusSecretPending = "SECRET_PENDING"
+
+// NotificationStatusDecisionsWaiting is the Status of a
+// NotificationKindDecisionsWaiting row.
+const NotificationStatusDecisionsWaiting = "DECISIONS_WAITING"
 
 // MatchesActivity returns true if the given activity matches any of the subscription's
 // trigger activities. Comparison is case-insensitive.
