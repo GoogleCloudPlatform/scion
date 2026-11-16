@@ -110,6 +110,17 @@ func (a *legacyAction) Fire(_ context.Context, _ hubfire.FireRequest, _ FireAuth
 	return hubfire.FireOutcome{}, fmt.Errorf("legacyAction %q executes through run", a.actionType)
 }
 
+func (a *legacyAction) Detaches(req hubfire.FireRequest) bool {
+	switch a.actionType {
+	case "message":
+		return scheduledPayloadWakes(req.Payload)
+	case scheduledEventTypeExec:
+		return req.Authority.DefinitionKind == hubfire.DefinitionKindSchedule
+	default:
+		return false
+	}
+}
+
 func (a *legacyAction) run(ctx context.Context, req hubfire.FireRequest) hubfire.FireOutcome {
 	if a.handler == nil {
 		return hubfire.FireOutcome{
@@ -196,6 +207,27 @@ func (s *Server) registerFireActions() {
 	s.RegisterAction(newLegacyAction("message", s.messageEventHandler()))
 	s.RegisterAction(newLegacyAction("dispatch_agent", s.dispatchAgentEventHandler()))
 	s.RegisterAction(newLegacyAction(scheduledEventTypeExec, s.execEventHandler()))
+}
+
+func (s *Server) scheduleFireDetaches(sched store.Schedule, evt store.ScheduledEvent) bool {
+	req := scheduledFireRequest(s, evt, ExecutorContext{Kind: "schedule_evaluator", ID: "schedule:" + sched.ID}, nil)
+	if req.ActionType == "" {
+		req.ActionType = sched.EventType
+	}
+	action, ok := s.LookupAction(req.ActionType)
+	return ok && action.Detaches(req)
+}
+
+func (s *Scheduler) eventFireDetaches(evt store.ScheduledEvent) bool {
+	req := scheduledFireRequest(s.srv, evt, ExecutorContext{Kind: "scheduler", ID: "scheduled_event:" + evt.ID}, nil)
+	if s.srv != nil {
+		action, ok := s.srv.LookupAction(req.ActionType)
+		return ok && action.Detaches(req)
+	}
+	if _, ok := s.legacyHandlers[req.ActionType]; ok {
+		return (&legacyAction{actionType: req.ActionType}).Detaches(req)
+	}
+	return false
 }
 
 func scheduledFireRequest(srv *Server, evt store.ScheduledEvent, exec ExecutorContext, run *wakeFireRun) hubfire.FireRequest {

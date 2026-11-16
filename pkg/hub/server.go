@@ -7326,25 +7326,26 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 	// loadPersistedTimers if the hub restarted or another replica started
 	// meanwhile, whereas creating it as "fired" would leave an unrecorded
 	// shutdown abandonment indistinguishable from a completed delivery.
-	wakeFire := sched.EventType == "message" && scheduledPayloadWakes(sched.Payload)
+	detachedFire := s.scheduleFireDetaches(sched, evt)
 	execFire := sched.EventType == scheduledEventTypeExec
-	detachedFire := wakeFire || execFire
-	if wakeFire {
-		evt.Status = store.ScheduledEventFiring
-		firedAt := now
-		evt.FiredAt = &firedAt
-	} else if execFire {
-		// For recurring exec (ptone/scion#7884), FireAt is the missed due time
-		// so runs >10m late skip with "missed window", and Status is "fired" so
-		// loadPersistedTimers never replays it while FinishScheduledExecRun,
-		// CompleteUnadmittedExecEvent and recoverUnadmittedExecEvents own its
-		// outcome lifecycle.
-		if sched.NextRunAt != nil && !sched.NextRunAt.IsZero() {
-			evt.FireAt = *sched.NextRunAt
+	if detachedFire {
+		if execFire {
+			// For recurring exec (ptone/scion#7884), FireAt is the missed due time
+			// so runs >10m late skip with "missed window", and Status is "fired" so
+			// loadPersistedTimers never replays it while FinishScheduledExecRun,
+			// CompleteUnadmittedExecEvent and recoverUnadmittedExecEvents own its
+			// outcome lifecycle.
+			if sched.NextRunAt != nil && !sched.NextRunAt.IsZero() {
+				evt.FireAt = *sched.NextRunAt
+			}
+			evt.Status = store.ScheduledEventFired
+			firedAt := time.Now().UTC()
+			evt.FiredAt = &firedAt
+		} else {
+			evt.Status = store.ScheduledEventFiring
+			firedAt := now
+			evt.FiredAt = &firedAt
 		}
-		evt.Status = store.ScheduledEventFired
-		firedAt := time.Now().UTC()
-		evt.FiredAt = &firedAt
 	}
 
 	if err := s.store.CreateScheduledEvent(ctx, &evt); err != nil {
@@ -7460,9 +7461,13 @@ func (s *Server) runScheduleFire(ctx context.Context, log *slog.Logger, sched st
 	afterFn = out.AfterRecord
 	if !panicked {
 		switch {
-		case out.Detached:
+		case out.Detached && detachedFire:
 			recorded = true
 			log.Info("schedule-evaluator: event outcome recorded by its handler", "status", out.Status)
+		case out.Detached && !detachedFire:
+			errMsg = "detached fire outcome without pre-fire Detaches declaration"
+			log.Error("schedule-evaluator: detached fire outcome without pre-fire Detaches declaration",
+				"event_type", req.ActionType, "schedule_id", sched.ID)
 		case out.Error == unknownActionTypeError(req.ActionType):
 			errMsg = fmt.Sprintf("unknown event type: %s", req.ActionType)
 			log.Error("schedule-evaluator: unknown event type", "event_type", req.ActionType)

@@ -49,6 +49,12 @@ type FireAction interface {
 	Authorize(ctx context.Context, req hubfire.FireRequest, auth FireAuthority, identity Identity) (FireAuthorized, *FireRefusal, error)
 	// Fire executes the authorized action.
 	Fire(ctx context.Context, req hubfire.FireRequest, a FireAuthorized) (hubfire.FireOutcome, error)
+	// Detaches reports, before the fire, whether the schedule adapter must
+	// detach: recurring -> firing status + AdvanceScheduleNextRun + tracked
+	// run; one-shot -> oneShotFireScope + firing claim. It says nothing about
+	// who persists the outcome, which is reported independently by
+	// FireOutcome.Detached.
+	Detaches(req hubfire.FireRequest) bool
 }
 
 // FirePayloadValidator is an optional capability implemented by FireActions

@@ -685,7 +685,7 @@ func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, was
 	// Hooks run after the final status write below, on every return path
 	// after the claim; a lost claim registers none.
 	defer afterRecord.run()
-	wakeFire := evt.EventType == "message" && scheduledPayloadWakes(evt.Payload)
+	wakeFire := s.eventFireDetaches(evt)
 	var scope *oneShotFireScope
 	if wakeFire {
 		// Registered before handlerCtx and before final persistence so

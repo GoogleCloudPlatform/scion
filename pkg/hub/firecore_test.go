@@ -36,6 +36,7 @@ import (
 type fakeFireAction struct {
 	actionType  string
 	permission  string
+	detachesFn  func(req hubfire.FireRequest) bool
 	validateFn  func(req hubfire.FireRequest) error
 	authorizeFn func(ctx context.Context, req hubfire.FireRequest, auth FireAuthority, identity Identity) (FireAuthorized, *FireRefusal, error)
 	fireFn      func(ctx context.Context, req hubfire.FireRequest, a FireAuthorized) (hubfire.FireOutcome, error)
@@ -46,6 +47,13 @@ func (a *fakeFireAction) Permission() string { return a.permission }
 
 func (a *fakeFireAction) Validate(_ context.Context, _ Identity, _ string, payload string) (string, error) {
 	return payload, nil
+}
+
+func (a *fakeFireAction) Detaches(req hubfire.FireRequest) bool {
+	if a.detachesFn != nil {
+		return a.detachesFn(req)
+	}
+	return false
 }
 
 func (a *fakeFireAction) ValidatePayload(req hubfire.FireRequest) error {
@@ -692,16 +700,54 @@ func TestFireCoreRefusalLogging(t *testing.T) {
 
 type fireCoreScheduleStore struct {
 	*mockScheduledEventStore
+	advanceCalls  int
 	afterRunCalls int
+	completeCalls int
 	lastRunErr    string
 }
 
-func (s *fireCoreScheduleStore) UpdateScheduleAfterRun(_ context.Context, _ string, _ time.Time, _ time.Time, errMsg string) error {
+func (s *fireCoreScheduleStore) AdvanceScheduleNextRun(_ context.Context, id string, nextRunAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.advanceCalls++
+	if s.schedules == nil {
+		s.schedules = make(map[string]*store.Schedule)
+	}
+	if sc, ok := s.schedules[id]; ok {
+		cp := nextRunAt
+		sc.NextRunAt = &cp
+	}
+	return nil
+}
+
+func (s *fireCoreScheduleStore) UpdateScheduleAfterRun(_ context.Context, id string, ranAt time.Time, nextRunAt time.Time, errMsg string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.afterRunCalls++
 	s.lastRunErr = errMsg
+	if sc, ok := s.schedules[id]; ok {
+		cpRan := ranAt
+		cpNext := nextRunAt
+		sc.LastRunAt = &cpRan
+		sc.NextRunAt = &cpNext
+		sc.RunCount++
+		if errMsg != "" {
+			sc.ErrorCount++
+			sc.LastRunStatus = store.ScheduleRunError
+			sc.LastRunError = errMsg
+		} else {
+			sc.LastRunStatus = store.ScheduleRunSuccess
+			sc.LastRunError = ""
+		}
+	}
 	return nil
+}
+
+func (s *fireCoreScheduleStore) CompleteFiringScheduledEvent(ctx context.Context, id string, status string, firedAt time.Time, errMsg string, scheduleID string, ranAt time.Time) (bool, error) {
+	s.mu.Lock()
+	s.completeCalls++
+	s.mu.Unlock()
+	return s.mockScheduledEventStore.CompleteFiringScheduledEvent(ctx, id, status, firedAt, errMsg, scheduleID, ranAt)
 }
 
 func TestFireCoreSchedulerAdapters(t *testing.T) {
@@ -921,10 +967,12 @@ func TestFireCoreSchedulerAdapters(t *testing.T) {
 		detEvt.ID = "rec-evt-2"
 		detEvt.ScheduleID = "sched-2"
 		detEvt.EventType = "rec_detached"
+		detEvt.Status = store.ScheduledEventFiring
 		require.NoError(t, ms.CreateScheduledEvent(context.Background(), &detEvt))
-		srv.runScheduleFire(context.Background(), slog.Default(), detSched, detEvt, now, next, nil)
-		assert.Equal(t, store.ScheduledEventPending, ms.getEvent("rec-evt-2").Status, "Detached leaves recording to tracker")
-		assert.Equal(t, 1, fs.afterRunCalls, "UpdateScheduleAfterRun skipped when Detached is true")
+		srv.runScheduleFire(context.Background(), slog.Default(), detSched, detEvt, now, next,
+			&wakeFireRun{eventID: "rec-evt-2", scheduleID: "sched-2", ranAt: now})
+		assert.Equal(t, store.ScheduledEventFiring, ms.getEvent("rec-evt-2").Status, "pre-detached + Detached leaves recording to tracker")
+		assert.Equal(t, 1, fs.afterRunCalls, "UpdateScheduleAfterRun skipped when pre-detached and Detached are true")
 
 		unkSched := store.Schedule{ID: "sched-3", ProjectID: projectID, EventType: "missing_rec"}
 		unkEvt := evt
@@ -938,4 +986,250 @@ func TestFireCoreSchedulerAdapters(t *testing.T) {
 		assert.Equal(t, 2, fs.afterRunCalls)
 		assert.Equal(t, "unknown event type: missing_rec", fs.lastRunErr)
 	})
+}
+
+func TestFireCoreLegacyActionDetaches(t *testing.T) {
+	t.Parallel()
+
+	msgAction := newLegacyAction("message", nil)
+	execAction := newLegacyAction(scheduledEventTypeExec, nil)
+	dispAction := newLegacyAction("dispatch_agent", nil)
+
+	for _, defKind := range []string{hubfire.DefinitionKindScheduledEvent, hubfire.DefinitionKindSchedule} {
+		assert.True(t, msgAction.Detaches(hubfire.FireRequest{
+			Authority: hubfire.RecordedAuthority{DefinitionKind: defKind},
+			Payload:   `{"agentName":"worker","message":"hi","wake":true}`,
+		}), "message wake=true detaches (%s)", defKind)
+		assert.False(t, msgAction.Detaches(hubfire.FireRequest{
+			Authority: hubfire.RecordedAuthority{DefinitionKind: defKind},
+			Payload:   `{"agentName":"worker","message":"hi","wake":false}`,
+		}), "message wake=false does not detach (%s)", defKind)
+		assert.False(t, msgAction.Detaches(hubfire.FireRequest{
+			Authority: hubfire.RecordedAuthority{DefinitionKind: defKind},
+			Payload:   `{"agentName":"worker","message":"hi"}`,
+		}), "message wake omitted does not detach (%s)", defKind)
+		assert.False(t, dispAction.Detaches(hubfire.FireRequest{
+			Authority: hubfire.RecordedAuthority{DefinitionKind: defKind},
+			Payload:   `{"agentName":"worker"}`,
+		}), "dispatch_agent never detaches (%s)", defKind)
+	}
+
+	assert.True(t, execAction.Detaches(hubfire.FireRequest{
+		Authority: hubfire.RecordedAuthority{DefinitionKind: hubfire.DefinitionKindSchedule},
+		Payload:   `{"agentId":"a1","command":["true"]}`,
+	}), "recurring exec detaches")
+	assert.False(t, execAction.Detaches(hubfire.FireRequest{
+		Authority: hubfire.RecordedAuthority{DefinitionKind: hubfire.DefinitionKindScheduledEvent},
+		Payload:   `{"agentId":"a1","command":["true"]}`,
+	}), "one-shot exec keeps non-detaching path")
+}
+
+// TestFireCoreAdapterDetachesMatrix covers all seven cells of design §5.1a
+// (rev 8.11): recurring x {detaches, !detaches} x {Detached, !Detached}
+// (including the mismatch cell !detaches && Detached) and one-shot x
+// {Detached, detaches && !Detached, !detaches && !Detached}.
+func TestFireCoreAdapterDetachesMatrix(t *testing.T) {
+	// Not t.Parallel: captures process-default slog logger for mismatch check.
+	const projectID = "project-detaches-matrix"
+	now := time.Date(2026, 11, 16, 2, 0, 0, 0, time.UTC)
+	wantNextRun := time.Date(2026, 11, 16, 3, 0, 0, 0, time.UTC)
+
+	cells := []struct {
+		name           string
+		recurring      bool
+		detaches       bool
+		outDetached    bool
+		wantEvtStatus  string
+		wantEvtErrSub  string
+		wantAdvance    int
+		wantAfterRun   int
+		wantComplete   int
+		wantRunCount   int
+		wantNextRunSet bool
+		wantLogSub     string
+	}{
+		{
+			name:           "1. recurring detaches=true Detached=true leaves write to tracker after pre-advancing next_run_at",
+			recurring:      true,
+			detaches:       true,
+			outDetached:    true,
+			wantEvtStatus:  store.ScheduledEventFiring,
+			wantAdvance:    1,
+			wantAfterRun:   0,
+			wantComplete:   0,
+			wantRunCount:   0,
+			wantNextRunSet: true,
+		},
+		{
+			name:           "2. recurring detaches=true Detached=false records via once-write without touching next_run_at",
+			recurring:      true,
+			detaches:       true,
+			outDetached:    false,
+			wantEvtStatus:  store.ScheduledEventFired,
+			wantAdvance:    1,
+			wantAfterRun:   0,
+			wantComplete:   1,
+			wantRunCount:   1,
+			wantNextRunSet: true,
+		},
+		{
+			name:           "3. recurring detaches=false Detached=false uses synchronous UpdateScheduledEventStatus and UpdateScheduleAfterRun",
+			recurring:      true,
+			detaches:       false,
+			outDetached:    false,
+			wantEvtStatus:  store.ScheduledEventFired,
+			wantAdvance:    0,
+			wantAfterRun:   1,
+			wantComplete:   0,
+			wantRunCount:   1,
+			wantNextRunSet: true,
+		},
+		{
+			name:           "4. recurring detaches=false Detached=true mismatch logs records failed and advances next_run_at",
+			recurring:      true,
+			detaches:       false,
+			outDetached:    true,
+			wantEvtStatus:  store.ScheduledEventFailed,
+			wantEvtErrSub:  "detached fire outcome without pre-fire Detaches declaration",
+			wantAdvance:    0,
+			wantAfterRun:   1,
+			wantComplete:   0,
+			wantRunCount:   1,
+			wantNextRunSet: true,
+			wantLogSub:     "detached fire outcome without pre-fire Detaches declaration",
+		},
+		{
+			name:          "5. one-shot Detached=true maps to outcomeRecorded without overwriting event row",
+			recurring:     false,
+			detaches:      false,
+			outDetached:   true,
+			wantEvtStatus: store.ScheduledEventPending,
+			wantComplete:  0,
+		},
+		{
+			name:          "6. one-shot detaches=true Detached=false claims firing and records via once-write",
+			recurring:     false,
+			detaches:      true,
+			outDetached:   false,
+			wantEvtStatus: store.ScheduledEventFired,
+			wantComplete:  1,
+		},
+		{
+			name:          "7. one-shot detaches=false Detached=false updates event status synchronously",
+			recurring:     false,
+			detaches:      false,
+			outDetached:   false,
+			wantEvtStatus: store.ScheduledEventFired,
+			wantComplete:  0,
+		},
+	}
+
+	for _, tc := range cells {
+		t.Run(tc.name, func(t *testing.T) {
+			logBuf := &fireCoreLogBuffer{}
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+			t.Cleanup(func() { slog.SetDefault(prev) })
+
+			ms := newMockStore()
+			ms.schedules = make(map[string]*store.Schedule)
+			fs := &fireCoreScheduleStore{mockScheduledEventStore: ms}
+			srv := newEventHandlerTestServer(fs)
+			sched := NewScheduler(fs, slog.Default())
+			sched.srv = srv
+			srv.scheduler = sched
+
+			rec := newFireCoreTestAuthority(ms, projectID)
+			srv.RegisterAction(&fakeFireAction{
+				actionType: "matrix_act",
+				permission: scheduledMessagePermission,
+				detachesFn: func(hubfire.FireRequest) bool { return tc.detaches },
+				fireFn: func(ctx context.Context, req hubfire.FireRequest, _ FireAuthorized) (hubfire.FireOutcome, error) {
+					if !tc.recurring && tc.detaches {
+						_, done, ok := req.Tracked.Admit(ctx)
+						require.True(t, ok)
+						defer done()
+						assert.Equal(t, store.ScheduledEventFiring, ms.getEvent(req.Authority.FireID).Status)
+					}
+					if tc.recurring && tc.detaches {
+						fs.mu.Lock()
+						adv := fs.advanceCalls
+						fs.mu.Unlock()
+						assert.Equal(t, 1, adv, "AdvanceScheduleNextRun ran before Fire")
+					}
+					return hubfire.FireOutcome{
+						Status:   hubfire.FireStatusFired,
+						Detached: tc.outDetached,
+					}, nil
+				},
+			})
+
+			if tc.recurring {
+				dueAt := now.Add(-time.Minute)
+				scRow := &store.Schedule{
+					ID:                   "sched-cell",
+					ProjectID:            projectID,
+					Name:                 "matrix-sched",
+					CronExpr:             "0 * * * *",
+					EventType:            "matrix_act",
+					Payload:              `{"ok":true}`,
+					Status:               store.ScheduleStatusActive,
+					NextRunAt:            &dueAt,
+					InitiatorAttribution: rec.Attribution,
+					AuthorityCeiling:     rec.Ceiling,
+				}
+				ms.schedules[scRow.ID] = scRow
+
+				srv.executeSchedule(context.Background(), *scRow, now)
+				srv.scheduledWakeFires.wg.Wait()
+
+				fs.mu.Lock()
+				assert.Equal(t, tc.wantAdvance, fs.advanceCalls, "AdvanceScheduleNextRun calls")
+				assert.Equal(t, tc.wantAfterRun, fs.afterRunCalls, "UpdateScheduleAfterRun calls")
+				assert.Equal(t, tc.wantComplete, fs.completeCalls, "CompleteFiringScheduledEvent calls")
+				require.Len(t, ms.events, 1)
+				var gotEvt *store.ScheduledEvent
+				for _, ev := range ms.events {
+					gotEvt = ev
+				}
+				gotSched := *ms.schedules[scRow.ID]
+				fs.mu.Unlock()
+
+				assert.Equal(t, tc.wantEvtStatus, gotEvt.Status)
+				if tc.wantEvtErrSub != "" {
+					assert.Contains(t, gotEvt.Error, tc.wantEvtErrSub)
+					assert.Equal(t, store.ScheduleRunError, gotSched.LastRunStatus)
+					assert.Contains(t, gotSched.LastRunError, tc.wantEvtErrSub)
+				}
+				assert.Equal(t, tc.wantRunCount, gotSched.RunCount)
+				if tc.wantNextRunSet {
+					require.NotNil(t, gotSched.NextRunAt)
+					assert.True(t, gotSched.NextRunAt.Equal(wantNextRun), "next_run_at=%v want=%v", gotSched.NextRunAt, wantNextRun)
+				}
+				if tc.wantLogSub != "" {
+					assert.Contains(t, logBuf.String(), tc.wantLogSub)
+				}
+				return
+			}
+
+			evt := store.ScheduledEvent{
+				ID:                   "evt-cell",
+				ProjectID:            projectID,
+				EventType:            "matrix_act",
+				FireAt:               now,
+				Payload:              `{"ok":true}`,
+				Status:               store.ScheduledEventPending,
+				InitiatorAttribution: rec.Attribution,
+				AuthorityCeiling:     rec.Ceiling,
+			}
+			require.NoError(t, ms.CreateScheduledEvent(context.Background(), &evt))
+			sched.fireEvent(context.Background(), evt, false)
+
+			fs.mu.Lock()
+			gotComplete := fs.completeCalls
+			fs.mu.Unlock()
+			assert.Equal(t, tc.wantComplete, gotComplete, "CompleteFiringScheduledEvent calls")
+			assert.Equal(t, tc.wantEvtStatus, ms.getEvent("evt-cell").Status)
+		})
+	}
 }
