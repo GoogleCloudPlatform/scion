@@ -528,6 +528,19 @@ test-store-postgres-tail: test-store-postgres-env-check
 		exit 1; \
 	fi
 	@go test -tags integration -count=1 -timeout 10m -v \
+		./pkg/hub/trigger/... > /tmp/test-launch-store-postgres-trigger.log 2>&1; \
+	status=$$?; \
+	cat /tmp/test-launch-store-postgres-trigger.log; \
+	if [ $$status -ne 0 ]; then exit $$status; fi; \
+	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-launch-store-postgres-trigger.log; then \
+		echo "ERROR: one or more pkg/hub/trigger Postgres tests were skipped -- see '--- SKIP' lines above." >&2; \
+		exit 1; \
+	fi; \
+	if ! grep -qE '^--- PASS: TestDispatcher_TwoConcurrentDrainers_UniqueTriggerFire ' /tmp/test-launch-store-postgres-trigger.log; then \
+		echo "ERROR: the pkg/hub/trigger two-drainer uniqueness Postgres test did not run." >&2; \
+		exit 1; \
+	fi
+	@go test -tags integration -count=1 -timeout 10m -v \
 		-run '^TestCompositeStore_CRUDParity$$/^group$$/^MembershipCleanup$$' \
 		./pkg/store/storetest/... > /tmp/test-launch-store-postgres-storetest.log 2>&1; \
 	status=$$?; \
