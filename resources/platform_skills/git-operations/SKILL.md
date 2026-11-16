@@ -23,8 +23,8 @@ In-container per-agent clones (`SCION_GIT_DEPTH` set — `clone-per-agent`, or a
 - `git log -S`, `git blame`, and tag comparisons cannot see commits past the shallow boundary; `git merge`/`git pull` fail with `refusing to merge unrelated histories`, and `git rebase` replays the grafted root commit and conflicts.
 
 **How to handle history and range operations (when remote access permits):**
-- **Reach a merge base quickly:** `git fetch --deepen=50 origin main` (increase `<N>` until `git merge-base` succeeds).
-- **Inspect deeper commit/tree history without downloading all blobs:** `git fetch --filter=blob:none --deepen=200 <remote> <branch>`.
+- **Reach a merge base quickly:** `git fetch --deepen=50 origin main` (increase `<N>` until `git merge-base` succeeds). Use `--deepen=<N>` while shallow and plain `git fetch` once unshallowed — running `git fetch --depth=<N>` on an unshallowed checkout writes a new `.git/shallow` graft and re-shallows it.
+- **Inspect deeper commit/tree history without downloading all blobs:** `git fetch --filter=blob:none --deepen=200 <remote> <branch>` (`git show --stat` and `--name-only` still fetch historic trees on demand; use `git log -1 --no-patch <sha>` to read commit metadata locally).
 - **Fetch complete history (for full `git log -S`, `blame`, or `rebase`):** `git fetch --unshallow`.
 - **Diff against an explicit base commit:** when your brief names the base SHA and only a diff is needed, fetch that commit if missing and run `git diff <base-sha> HEAD`.
 
