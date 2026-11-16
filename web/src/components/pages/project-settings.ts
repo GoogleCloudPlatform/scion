@@ -43,6 +43,26 @@ import { isBrokerKubernetesOnly } from '../../shared/runtime-kind.js';
 import { KUBERNETES_BLOCK_HINT } from '../../shared/gcp-identity-state.js';
 import { projectServiceAccountListUrl } from '../../shared/gcp-sa-assign-status.js';
 import {
+  BROKER_DEFAULTS_FIELD,
+  brokerCollectionProblem,
+  brokerErrorsFromBody,
+  brokerMapFromRows,
+  brokerOptionsForRow,
+  brokerRowProblem,
+  brokerRowsFromMap,
+  brokersMissingDefault,
+  effectiveIdentityForBroker,
+  isBrokerDefaultMessage,
+  knownFlatBrokers,
+  sameBrokerMap,
+  serviceAccountOptionsForBroker,
+  splitBrokerWarnings,
+  type BrokerDefaultRow,
+  type BrokerEffectiveIdentity,
+  type BrokerMessages,
+  type KnownFlatBroker,
+} from '../../shared/gcp-broker-defaults.js';
+import {
   PROFILE_DEFAULTS_FIELD,
   effectiveIdentityForProfile,
   knownProfiles,
@@ -60,6 +80,11 @@ import {
   type ProfileDefaultRow,
   type ProfileMessages,
 } from '../../shared/gcp-profile-defaults.js';
+import {
+  FEATURE_FLAGS_CHANGED_EVENT,
+  FLAT_BROKERS_FLAG,
+  isFeatureEnabled,
+} from '../../utils/feature-flags.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import type { AccessBoundarySummary } from '../../shared/access-boundaries.js';
@@ -119,6 +144,7 @@ interface ProjectSettings {
   defaultGCPIdentityMode?: string | undefined;
   defaultGCPIdentityServiceAccountID?: string | undefined;
   defaultGCPIdentityServiceAccountIDByProfile?: Record<string, string> | undefined;
+  defaultGCPIdentityServiceAccountIDByBroker?: Record<string, string> | undefined;
   defaultModel?: string | undefined;
   defaultThinkingLevel?: number | null | undefined;
   maxAgentRole?: string | undefined;
@@ -363,6 +389,30 @@ export class ScionPageProjectSettings extends LitElement {
   /** Warnings from the last successful save, by profile and the rest. */
   @state()
   private profileDefaultWarnings: ProfileMessages = { byProfile: {}, general: [] };
+
+  /**
+   * Per-broker default service account rows for flat Runtime Brokers
+   * (defaultGCPIdentityServiceAccountIDByBroker, ptone/scion#8185).
+   */
+  @state()
+  private brokerDefaultRows: BrokerDefaultRow[] = [];
+
+  /** The stored per-broker map the rows were loaded from, to tell whether they changed. */
+  private brokerDefaultsStored: Record<string, string> = {};
+
+  private brokerDefaultRowKey = 0;
+
+  /** Inline errors from the last failed save, by broker ID and for the map. */
+  @state()
+  private brokerDefaultErrors: BrokerMessages = { byBroker: {}, general: [] };
+
+  /** Warnings from the last successful save, by broker ID and for the map. */
+  @state()
+  private brokerDefaultWarnings: BrokerMessages = { byBroker: {}, general: [] };
+
+  private readonly boundOnFeatureFlagsChanged = (): void => {
+    this.requestUpdate();
+  };
 
   // Agent authorization
   @state()
@@ -774,44 +824,52 @@ export class ScionPageProjectSettings extends LitElement {
       cursor: help;
     }
 
-    .profile-default-rows {
+    .profile-default-rows,
+    .broker-default-rows {
       display: flex;
       flex-direction: column;
       gap: 0.75rem;
     }
 
-    .profile-default-row {
+    .profile-default-row,
+    .broker-default-row {
       display: flex;
       flex-direction: column;
       gap: 0.25rem;
     }
 
-    .profile-default-inputs {
+    .profile-default-inputs,
+    .broker-default-inputs {
       display: grid;
       grid-template-columns: minmax(8rem, 1fr) minmax(12rem, 2fr) auto;
       gap: 0.5rem;
       align-items: end;
     }
 
-    .profile-effective {
+    .profile-effective,
+    .broker-effective {
       display: flex;
       flex-direction: column;
       gap: 0.25rem;
       margin-top: 0.5rem;
     }
 
-    .profile-effective-title {
+    .profile-effective-title,
+    .broker-effective-title {
       font-size: 0.8125rem;
       font-weight: 600;
     }
 
-    .profile-effective-table {
+    .profile-effective-table,
+    .broker-effective-table {
       border-collapse: collapse;
       font-size: 0.8125rem;
     }
 
     .profile-effective-table th,
-    .profile-effective-table td {
+    .profile-effective-table td,
+    .broker-effective-table th,
+    .broker-effective-table td {
       text-align: left;
       padding: 0.25rem 0.5rem;
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
@@ -1044,6 +1102,7 @@ export class ScionPageProjectSettings extends LitElement {
     // Deep-link a specific Resources tab via ?tab= (e.g. ?tab=templates), used by
     // the resource detail pages' "back" links.
     if (typeof window !== 'undefined') {
+      window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
       const params = new URLSearchParams(window.location.search);
       const tab = params.get('tab');
       if (tab) {
@@ -1070,6 +1129,9 @@ export class ScionPageProjectSettings extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
+    if (typeof window !== 'undefined') {
+      window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFeatureFlagsChanged);
+    }
     this.stopBrokerRelativeTimeTick?.();
     this.stopBrokerRelativeTimeTick = null;
   }
@@ -1546,6 +1608,7 @@ export class ScionPageProjectSettings extends LitElement {
       this.configDefaultGCPIdentityMode = this.settings.defaultGCPIdentityMode || '';
       this.configDefaultGCPIdentitySAID = this.settings.defaultGCPIdentityServiceAccountID || '';
       this.loadProfileDefaultRows(this.settings.defaultGCPIdentityServiceAccountIDByProfile);
+      this.loadBrokerDefaultRows(this.settings.defaultGCPIdentityServiceAccountIDByBroker);
       this.configMaxAgentRole = this.settings.maxAgentRole || '';
       this.configDefaultAgentRole = this.settings.defaultAgentRole || '';
       if (this.settings.defaultModel) {
@@ -1877,7 +1940,10 @@ export class ScionPageProjectSettings extends LitElement {
     };
   }
 
-  private describeEffectiveIdentity(e: EffectiveIdentity, kubernetes: boolean): string {
+  private describeEffectiveIdentity(
+    e: EffectiveIdentity | BrokerEffectiveIdentity,
+    kubernetes: boolean
+  ): string {
     const what =
       e.mode === 'assign'
         ? `Assign ${this.serviceAccountLabel(e.serviceAccountId)}`
@@ -1889,6 +1955,8 @@ export class ScionPageProjectSettings extends LitElement {
               ? 'No identity set (the Kubernetes runtime applies its default)'
               : 'No identity set (the runtime applies its default)';
     switch (e.source) {
+      case 'broker':
+        return `${what} (this broker's default)`;
       case 'profile':
         return `${what} (this profile's default)`;
       case 'project':
@@ -1898,6 +1966,273 @@ export class ScionPageProjectSettings extends LitElement {
       default:
         return what;
     }
+  }
+
+  private loadBrokerDefaultRows(map: Record<string, string> | null | undefined): void {
+    this.brokerDefaultsStored = { ...(map ?? {}) };
+    this.brokerDefaultRows = brokerRowsFromMap(map, () => ++this.brokerDefaultRowKey);
+  }
+
+  /** Whether the per-broker rows differ from the stored map. */
+  private get brokerDefaultsDirty(): boolean {
+    const rows = this.brokerDefaultRows;
+    const complete = brokerMapFromRows(rows);
+    if (Object.keys(complete).length !== rows.length) return true;
+    return !sameBrokerMap(complete, this.brokerDefaultsStored);
+  }
+
+  /** The flat Runtime Brokers linked to / providing to this project. */
+  private get knownFlatProjectBrokers(): KnownFlatBroker[] {
+    return knownFlatBrokers(this.brokers);
+  }
+
+  private updateBrokerDefaultRow(key: number, patch: Partial<BrokerDefaultRow>): void {
+    this.brokerDefaultRows = this.brokerDefaultRows.map((row) =>
+      row.key === key ? { ...row, ...patch } : row
+    );
+  }
+
+  private addBrokerDefaultRow(): void {
+    const free = brokerOptionsForRow(
+      { key: -1, brokerId: '', serviceAccountId: '' },
+      this.brokerDefaultRows,
+      this.knownFlatProjectBrokers
+    );
+    this.brokerDefaultRows = [
+      ...this.brokerDefaultRows,
+      {
+        key: ++this.brokerDefaultRowKey,
+        brokerId: free.length === 1 ? (free[0]?.id ?? '') : '',
+        serviceAccountId: '',
+      },
+    ];
+  }
+
+  private removeBrokerDefaultRow(key: number): void {
+    this.brokerDefaultRows = this.brokerDefaultRows.filter((row) => row.key !== key);
+  }
+
+  private renderBrokerDefaultMessages(
+    messages: readonly string[],
+    kind: 'error' | 'warning'
+  ): TemplateResult[] {
+    return messages.map((m) =>
+      kind === 'error'
+        ? html`<span class="field-help field-help-error broker-default-error" role="alert"
+            >${m}</span
+          >`
+        : html`<sl-alert class="broker-default-warning" variant="warning" open>
+            <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+            ${m}
+          </sl-alert>`
+    );
+  }
+
+  /**
+   * The per-broker default service account editor for flat Runtime Brokers,
+   * shown only when `hub.flat_runtime_brokers` is enabled (ptone/scion#8185).
+   */
+  private renderBrokerDefaults(canEdit: boolean): TemplateResult | typeof nothing {
+    if (!isFeatureEnabled(FLAT_BROKERS_FLAG)) return nothing;
+
+    const rows = this.brokerDefaultRows;
+    const known = this.knownFlatProjectBrokers;
+    const knownIds = new Set(known.map((b) => b.id));
+    const errors = this.brokerDefaultErrors;
+    const warnings = this.brokerDefaultWarnings;
+    const missing = brokersMissingDefault(rows, known);
+    const dirty = this.brokerDefaultsDirty;
+    const canAdd =
+      canEdit &&
+      rows.length < 64 &&
+      brokerOptionsForRow({ key: -1, brokerId: '', serviceAccountId: '' }, rows, known).length > 0;
+    const project = {
+      mode: this.configDefaultGCPIdentityMode,
+      serviceAccountId:
+        this.configDefaultGCPIdentityMode === 'assign' ? this.configDefaultGCPIdentitySAID : '',
+    };
+    const hub = this.hubGCPIdentityDefault;
+    const currentMap = brokerMapFromRows(rows);
+    const effectiveBrokers: KnownFlatBroker[] = [
+      ...known,
+      ...rows
+        .filter((r) => r.brokerId && !knownIds.has(r.brokerId))
+        .map((r) => ({ id: r.brokerId, name: r.brokerId, targetLabel: '', kubernetes: false })),
+    ];
+
+    return html`
+      <div class="config-field broker-defaults" data-field=${BROKER_DEFAULTS_FIELD}>
+        <label id="broker-defaults-label">Per Runtime Broker default service accounts</label>
+        <span class="field-help"
+          >A default for one flat Runtime Broker wins over the project default above for agents
+          placed on that broker when no identity is explicitly chosen. Legacy profile-based brokers
+          use per-profile defaults below. Only verified service accounts are offered.</span
+        >
+        ${rows.length > 0
+          ? html`
+              <div class="broker-default-rows" role="group" aria-labelledby="broker-defaults-label">
+                ${rows.map((row) => this.renderBrokerDefaultRow(row, canEdit, dirty))}
+              </div>
+            `
+          : html`<span class="field-help broker-defaults-empty"
+              >No per-broker defaults. Every flat Runtime Broker uses the project default.</span
+            >`}
+        ${this.renderBrokerDefaultMessages(errors.general, 'error')}
+        ${this.renderBrokerDefaultMessages(warnings.general, 'warning')}
+        ${missing.length > 0
+          ? html`<sl-alert class="broker-default-sibling-warning" variant="warning" open>
+              <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+              ${missing.length === 1
+                ? html`Kubernetes Runtime Broker "${missing[0].name}" has no per-broker default
+                  while another flat broker has one, so its agents use the project default. That
+                  identity may not be mapped on that broker's cluster.`
+                : html`Kubernetes Runtime Brokers ${missing.map((b) => `"${b.name}"`).join(', ')}
+                  have no per-broker default while another flat broker has one, so their agents use
+                  the project default. That identity may not be mapped on those clusters.`}
+            </sl-alert>`
+          : nothing}
+        <div>
+          <sl-button
+            class="broker-default-add"
+            size="small"
+            ?disabled=${!canAdd}
+            @click=${() => this.addBrokerDefaultRow()}
+          >
+            <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+            Add Runtime Broker default
+          </sl-button>
+        </div>
+        ${effectiveBrokers.length > 0
+          ? html`
+              <div class="broker-effective">
+                <span class="broker-effective-title"
+                  >Effective default identity per flat Runtime Broker</span
+                >
+                <table class="broker-effective-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">Runtime Broker</th>
+                      <th scope="col">New agents get</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${effectiveBrokers.map(
+                      (b) => html`
+                        <tr data-broker=${b.id}>
+                          <td>${b.name}</td>
+                          <td>
+                            ${this.describeEffectiveIdentity(
+                              effectiveIdentityForBroker(b.id, currentMap, project, hub),
+                              b.kubernetes
+                            )}
+                          </td>
+                        </tr>
+                      `
+                    )}
+                  </tbody>
+                </table>
+                <span class="field-help"
+                  >For agents on flat Runtime Brokers that choose no identity. Unsaved edits are
+                  included.</span
+                >
+              </div>
+            `
+          : nothing}
+      </div>
+    `;
+  }
+
+  private renderBrokerDefaultRow(
+    row: BrokerDefaultRow,
+    canEdit: boolean,
+    dirty: boolean
+  ): TemplateResult {
+    const rows = this.brokerDefaultRows;
+    const known = this.knownFlatProjectBrokers;
+    const problem = brokerRowProblem(row, rows);
+    const rowErrors = row.brokerId ? (this.brokerDefaultErrors.byBroker[row.brokerId] ?? []) : [];
+    const rowWarnings = row.brokerId
+      ? (this.brokerDefaultWarnings.byBroker[row.brokerId] ?? [])
+      : [];
+    const options = brokerOptionsForRow(row, rows, known);
+    const saOptions = serviceAccountOptionsForBroker(this.gcpServiceAccounts, row.brokerId);
+    const savedSAMissing =
+      row.serviceAccountId !== '' && !saOptions.some((sa) => sa.id === row.serviceAccountId);
+    const linked = known.some((b) => b.id === row.brokerId);
+    const selectedLabel = known.find((b) => b.id === row.brokerId)?.name || row.brokerId;
+    return html`
+      <div class="broker-default-row" data-broker=${row.brokerId}>
+        <div class="broker-default-inputs">
+          <sl-select
+            class="broker-default-broker"
+            label="Runtime Broker"
+            placeholder="Select a flat Runtime Broker"
+            value=${row.brokerId}
+            ?disabled=${!canEdit}
+            @sl-change=${(e: Event) => {
+              this.updateBrokerDefaultRow(row.key, {
+                brokerId: (e.target as HTMLSelectElement).value,
+              });
+            }}
+          >
+            ${options.map((opt) => {
+              const note = opt.stale
+                ? html` <small>(not linked to this project)</small>`
+                : opt.targetLabel
+                  ? html` <small>(${opt.targetLabel})</small>`
+                  : nothing;
+              return html`<sl-option value=${opt.id}>${opt.name}${note}</sl-option>`;
+            })}
+          </sl-select>
+          <sl-select
+            class="broker-default-sa"
+            label="Service account"
+            placeholder="Select a verified service account"
+            value=${row.serviceAccountId}
+            ?disabled=${!canEdit}
+            @sl-change=${(e: Event) => {
+              this.updateBrokerDefaultRow(row.key, {
+                serviceAccountId: (e.target as HTMLSelectElement).value,
+              });
+            }}
+          >
+            ${saOptions.map(
+              (sa) => html`
+                <sl-option value=${sa.id}>
+                  ${sa.displayName || sa.email}
+                  <small>(${sa.email})</small>${sa.scope === 'hub' ? ' (Hub)' : ''}
+                </sl-option>
+              `
+            )}
+            ${savedSAMissing
+              ? html`<sl-option value=${row.serviceAccountId}
+                  >${row.serviceAccountId}
+                  <small>(not a verified account in this project)</small></sl-option
+                >`
+              : nothing}
+          </sl-select>
+          <sl-icon-button
+            class="broker-default-remove"
+            name="trash"
+            label=${row.brokerId
+              ? `Remove the default for Runtime Broker ${selectedLabel}`
+              : 'Remove this row'}
+            ?disabled=${!canEdit}
+            @click=${() => this.removeBrokerDefaultRow(row.key)}
+          ></sl-icon-button>
+        </div>
+        ${row.brokerId && !linked
+          ? html`<span class="field-help"
+              >Runtime Broker "${row.brokerId}" is no longer linked to this project.</span
+            >`
+          : nothing}
+        ${problem && dirty
+          ? html`<span class="field-help field-help-error broker-default-problem">${problem}</span>`
+          : nothing}
+        ${this.renderBrokerDefaultMessages(rowErrors, 'error')}
+        ${this.renderBrokerDefaultMessages(rowWarnings, 'warning')}
+      </div>
+    `;
   }
 
   private renderProfileDefaultMessages(
@@ -2198,6 +2533,8 @@ export class ScionPageProjectSettings extends LitElement {
     this.settingsSuccess = null;
     this.profileDefaultErrors = { byProfile: {}, general: [] };
     this.profileDefaultWarnings = { byProfile: {}, general: [] };
+    this.brokerDefaultErrors = { byBroker: {}, general: [] };
+    this.brokerDefaultWarnings = { byBroker: {}, general: [] };
 
     this.countLimitWarnings = [];
     if (Object.keys(this.countLimitErrors).length > 0) {
@@ -2213,6 +2550,22 @@ export class ScionPageProjectSettings extends LitElement {
     ) {
       this.settingsError = 'Complete or remove the incomplete per-profile default rows.';
       return;
+    }
+
+    // Preserve contract: when hub.flat_runtime_brokers is off, never send
+    // defaultGCPIdentityServiceAccountIDByBroker so stored entries stay intact
+    // and the Hub's 412 experiment_disabled write check is never triggered.
+    const brokerDefaultsDirty = isFeatureEnabled(FLAT_BROKERS_FLAG) && this.brokerDefaultsDirty;
+    if (brokerDefaultsDirty) {
+      if (this.brokerDefaultRows.some((row) => brokerRowProblem(row, this.brokerDefaultRows))) {
+        this.settingsError = 'Complete or remove the incomplete per-broker default rows.';
+        return;
+      }
+      const collectionErr = brokerCollectionProblem(this.brokerDefaultRows);
+      if (collectionErr) {
+        this.settingsError = collectionErr;
+        return;
+      }
     }
 
     this.settingsSaving = true;
@@ -2286,6 +2639,9 @@ export class ScionPageProjectSettings extends LitElement {
       if (profileDefaultsDirty) {
         body.defaultGCPIdentityServiceAccountIDByProfile = mapFromRows(this.profileDefaultRows);
       }
+      if (brokerDefaultsDirty) {
+        body.defaultGCPIdentityServiceAccountIDByBroker = brokerMapFromRows(this.brokerDefaultRows);
+      }
 
       const response = await apiFetch(`/api/v1/projects/${this.projectId}/settings`, {
         method: 'PUT',
@@ -2294,9 +2650,18 @@ export class ScionPageProjectSettings extends LitElement {
       });
 
       if (!response.ok) {
-        if (profileDefaultsDirty) {
+        if (profileDefaultsDirty || brokerDefaultsDirty) {
           try {
-            this.profileDefaultErrors = profileErrorsFromBody(await response.clone().json());
+            const errBody: unknown = await response.clone().json();
+            if (profileDefaultsDirty) {
+              this.profileDefaultErrors = profileErrorsFromBody(errBody);
+            }
+            if (brokerDefaultsDirty) {
+              this.brokerDefaultErrors = brokerErrorsFromBody(
+                errBody,
+                this.knownFlatProjectBrokers
+              );
+            }
           } catch {
             // Not JSON: the page-level message below still reports it.
           }
@@ -2308,6 +2673,7 @@ export class ScionPageProjectSettings extends LitElement {
       const { warnings, ...savedSettings } = saved;
       this.settings = savedSettings;
       this.loadProfileDefaultRows(savedSettings.defaultGCPIdentityServiceAccountIDByProfile);
+      this.loadBrokerDefaultRows(savedSettings.defaultGCPIdentityServiceAccountIDByBroker);
       // The saved values are the new baseline, so the next save compares
       // against them and sends only what changes after this one.
       this.configDefaultMaxTurns = countLimitOrNull(savedSettings.defaultMaxTurns);
@@ -2319,8 +2685,16 @@ export class ScionPageProjectSettings extends LitElement {
       const otherWarnings = allWarnings.filter(
         (w): w is string => typeof w === 'string' && !isCountLimitWarning(w)
       );
-      this.profileDefaultWarnings = splitProfileWarnings(otherWarnings);
+      const brokerWarnings = otherWarnings.filter(isBrokerDefaultMessage);
+      const profileAndGeneralWarnings = otherWarnings.filter((w) => !isBrokerDefaultMessage(w));
+      this.brokerDefaultWarnings = splitBrokerWarnings(
+        brokerWarnings,
+        this.knownFlatProjectBrokers
+      );
+      this.profileDefaultWarnings = splitProfileWarnings(profileAndGeneralWarnings);
       const warningCount =
+        Object.values(this.brokerDefaultWarnings.byBroker).flat().length +
+        this.brokerDefaultWarnings.general.length +
         Object.values(this.profileDefaultWarnings.byProfile).flat().length +
         this.profileDefaultWarnings.general.length +
         this.countLimitWarnings.length;
@@ -3268,7 +3642,7 @@ export class ScionPageProjectSettings extends LitElement {
                     </div>
                   `
                 : ''}
-              ${this.renderProfileDefaults(canEdit)}
+              ${this.renderBrokerDefaults(canEdit)} ${this.renderProfileDefaults(canEdit)}
             </div>
           </sl-tab-panel>
 
