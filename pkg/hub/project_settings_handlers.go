@@ -31,6 +31,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -59,6 +60,8 @@ const (
 	projectSettingDefaultGCPIdentitySAID = "scion.io/default-gcp-identity-service-account-id"
 	// JSON object: broker profile name -> registered SA ID.
 	projectSettingDefaultGCPIdentitySAIDByProfile = "scion.io/default-gcp-identity-service-account-id-by-profile"
+	// JSON object: flat Runtime Broker ID -> registered SA ID.
+	projectSettingDefaultGCPIdentitySAIDByBroker = "scion.io/default-gcp-identity-service-account-id-by-broker"
 
 	// Default resource spec (flat keys)
 	projectSettingDefaultResourcesCPUReq = "scion.io/default-resources-cpu-request"
@@ -154,6 +157,7 @@ var projectSettingKeys = []string{
 	projectSettingDefaultGCPIdentityMode,
 	projectSettingDefaultGCPIdentitySAID,
 	projectSettingDefaultGCPIdentitySAIDByProfile,
+	projectSettingDefaultGCPIdentitySAIDByBroker,
 
 	// Default resource spec (flat keys)
 	projectSettingDefaultResourcesCPUReq,
@@ -348,6 +352,14 @@ func (s *Server) validateDefaultGCPIdentity(w http.ResponseWriter, ctx context.C
 	if present[projectSettingsFieldGCPIdentitySAIDByProfile] {
 		changedProfileDefaults, ok = s.validateProfileDefaultSAIDs(w, ctx, project, merged.DefaultGCPIdentityServiceAccountIDByProfile)
 		if !ok {
+			return nil, false
+		}
+	}
+
+	// The per-broker map is likewise validated only when the request
+	// replaces it. Writes are gated on hub.flat_runtime_brokers.
+	if present[projectSettingsFieldGCPIdentitySAIDByBroker] {
+		if !s.validateBrokerDefaultSAIDs(w, ctx, project, merged.DefaultGCPIdentityServiceAccountIDByBroker) {
 			return nil, false
 		}
 	}
@@ -617,6 +629,111 @@ func setProfileDefaultSAIDsAnnotation(annotations map[string]string, m map[strin
 	annotations[projectSettingDefaultGCPIdentitySAIDByProfile] = string(b)
 }
 
+const maxBrokerDefaultSAEntries = maxProfileDefaultSAEntries
+
+func defaultBrokerLabel(broker *store.RuntimeBroker) string {
+	if broker == nil {
+		return ""
+	}
+	if name := strings.TrimSpace(broker.Name); name != "" {
+		return name
+	}
+	return broker.ID
+}
+
+// validateBrokerDefaultSAIDs checks the per-broker default service account map
+// a request sets against the stored one. Writes that set or modify the map are
+// gated on experiments.FlatRuntimeBrokers (412 experiment_disabled). Added or
+// changed entries must name an existing flat Runtime Broker and a verified
+// service account reachable from the project; unchanged and removed entries
+// (including stale entries for since-deleted brokers) are always allowed.
+func (s *Server) validateBrokerDefaultSAIDs(w http.ResponseWriter, ctx context.Context, project *store.Project, byBroker map[string]string) bool {
+	stored := brokerDefaultSAIDsFromAnnotations(project.Annotations)
+	if !s.experimentEnabled(experiments.FlatRuntimeBrokers) {
+		if !maps.Equal(stored, byBroker) {
+			writeRuntimeTargetRefusal(w, experimentDisabledRefusal(experiments.FlatRuntimeBrokers))
+			return false
+		}
+		return true
+	}
+	if len(byBroker) > maxBrokerDefaultSAEntries && !profileKeysSubset(byBroker, stored) {
+		BadRequest(w, fmt.Sprintf("defaultGCPIdentityServiceAccountIDByBroker: at most %d entries are allowed", maxBrokerDefaultSAEntries))
+		return false
+	}
+	changed := changedProfileDefaultSAIDs(stored, byBroker)
+	for _, brokerID := range slices.Sorted(maps.Keys(changed)) {
+		saID := strings.TrimSpace(changed[brokerID])
+		trimmedID := strings.TrimSpace(brokerID)
+		if trimmedID == "" || trimmedID != brokerID {
+			BadRequest(w, fmt.Sprintf("defaultGCPIdentityServiceAccountIDByBroker: Runtime Broker ID %q is invalid", brokerID))
+			return false
+		}
+		if saID == "" {
+			BadRequest(w, fmt.Sprintf("defaultGCPIdentityServiceAccountIDByBroker[%s]: a service account ID is required; remove the entry to clear it", brokerID))
+			return false
+		}
+		broker, err := s.store.GetRuntimeBroker(ctx, brokerID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				BadRequest(w, fmt.Sprintf("defaultGCPIdentityServiceAccountIDByBroker[%s]: Runtime Broker %q not found", brokerID, brokerID))
+				return false
+			}
+			writeErrorFromErr(w, err, "")
+			return false
+		}
+		if broker == nil {
+			BadRequest(w, fmt.Sprintf("defaultGCPIdentityServiceAccountIDByBroker[%s]: Runtime Broker %q not found", brokerID, brokerID))
+			return false
+		}
+		if !broker.IsFlat() {
+			BadRequest(w, fmt.Sprintf("defaultGCPIdentityServiceAccountIDByBroker[%s]: Runtime Broker %q is a profile-based Runtime Broker; per-broker defaults apply only to flat Runtime Brokers (use defaultGCPIdentityServiceAccountIDByProfile for profile-based brokers)", brokerID, defaultBrokerLabel(broker)))
+			return false
+		}
+		if !s.validateProjectDefaultSAID(w, ctx, project, saID, fmt.Sprintf("the default for Runtime Broker %q", defaultBrokerLabel(broker))) {
+			return false
+		}
+		// Normalize any whitespace around saID before persisting.
+		byBroker[brokerID] = saID
+	}
+	return true
+}
+
+// brokerDefaultSAIDsFromAnnotations decodes the per-broker default service
+// account annotation. A missing, empty or malformed value yields nil.
+func brokerDefaultSAIDsFromAnnotations(annotations map[string]string) map[string]string {
+	raw := annotations[projectSettingDefaultGCPIdentitySAIDByBroker]
+	if raw == "" {
+		return nil
+	}
+	var m map[string]string
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		slog.Warn("ignoring malformed per-broker default GCP service account annotation",
+			"annotation", projectSettingDefaultGCPIdentitySAIDByBroker, "error", err)
+		return nil
+	}
+	if len(m) == 0 {
+		return nil
+	}
+	return m
+}
+
+// setBrokerDefaultSAIDsAnnotation stores m as the per-broker default service
+// account annotation, or deletes the annotation when m is empty.
+func setBrokerDefaultSAIDsAnnotation(annotations map[string]string, m map[string]string) {
+	if annotations == nil {
+		return
+	}
+	if len(m) == 0 {
+		delete(annotations, projectSettingDefaultGCPIdentitySAIDByBroker)
+		return
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return
+	}
+	annotations[projectSettingDefaultGCPIdentitySAIDByBroker] = string(b)
+}
+
 // isKubernetesRuntimeType reports whether a BrokerProfile.Type names the
 // Kubernetes runtime, under any spelling the runtime factory accepts
 // (pkg/runtime/factory.go): "kubernetes" itself, the "k8s" alias, and
@@ -659,6 +776,7 @@ const (
 	projectSettingsFieldGCPIdentityMode          = "defaultGCPIdentityMode"
 	projectSettingsFieldGCPIdentitySAID          = "defaultGCPIdentityServiceAccountID"
 	projectSettingsFieldGCPIdentitySAIDByProfile = "defaultGCPIdentityServiceAccountIDByProfile"
+	projectSettingsFieldGCPIdentitySAIDByBroker  = "defaultGCPIdentityServiceAccountIDByBroker"
 	projectSettingsFieldActiveProfile            = "activeProfile"
 )
 
@@ -878,6 +996,7 @@ func projectSettingsFromAnnotations(project *store.Project) *hubclient.ProjectSe
 	settings.DefaultGCPIdentityMode = project.Annotations[projectSettingDefaultGCPIdentityMode]
 	settings.DefaultGCPIdentityServiceAccountID = project.Annotations[projectSettingDefaultGCPIdentitySAID]
 	settings.DefaultGCPIdentityServiceAccountIDByProfile = profileDefaultSAIDsFromAnnotations(project.Annotations)
+	settings.DefaultGCPIdentityServiceAccountIDByBroker = brokerDefaultSAIDsFromAnnotations(project.Annotations)
 
 	// Default resources (flat annotation keys)
 	res := projectResourcesFromAnnotations(project.Annotations)
@@ -956,10 +1075,14 @@ func applyProjectSettingsToAnnotations(project *store.Project, settings *hubclie
 	// Default GCP identity
 	setOrDelete(project.Annotations, projectSettingDefaultGCPIdentityMode, settings.DefaultGCPIdentityMode)
 	setOrDelete(project.Annotations, projectSettingDefaultGCPIdentitySAID, settings.DefaultGCPIdentityServiceAccountID)
-	// The per-profile map is kept when nil: the web settings page does not
-	// send it, and a save there must not wipe it. An empty object clears it.
+	// The per-profile and per-broker maps are kept when nil: partial PUTs do
+	// not send them, and a save there must not wipe them. An empty object
+	// clears the corresponding map.
 	if settings.DefaultGCPIdentityServiceAccountIDByProfile != nil {
 		setProfileDefaultSAIDsAnnotation(project.Annotations, settings.DefaultGCPIdentityServiceAccountIDByProfile)
+	}
+	if settings.DefaultGCPIdentityServiceAccountIDByBroker != nil {
+		setBrokerDefaultSAIDsAnnotation(project.Annotations, settings.DefaultGCPIdentityServiceAccountIDByBroker)
 	}
 
 	// Default agent limits

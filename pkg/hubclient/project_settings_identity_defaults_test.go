@@ -44,6 +44,15 @@ func TestProjectGCPIdentityDefaultsUpdate_Marshalling(t *testing.T) {
 	b, err = json.Marshal(ProjectGCPIdentityDefaultsUpdate{ServiceAccountIDByProfile: &empty})
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"defaultGCPIdentityServiceAccountIDByProfile":{}}`, string(b))
+
+	b, err = json.Marshal(ProjectGCPIdentityDefaultsUpdate{ServiceAccountIDByBroker: &empty})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"defaultGCPIdentityServiceAccountIDByBroker":{}}`, string(b))
+
+	byBroker := map[string]string{"broker-1": "sa-1"}
+	b, err = json.Marshal(ProjectGCPIdentityDefaultsUpdate{ServiceAccountIDByBroker: &byBroker})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"defaultGCPIdentityServiceAccountIDByBroker":{"broker-1":"sa-1"}}`, string(b))
 }
 
 func TestProjectService_IdentityDefaultsRoutes(t *testing.T) {

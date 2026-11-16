@@ -133,6 +133,7 @@ constants at the top of `pkg/hub/project_settings_handlers.go`:
 | `scion.io/default-gcp-identity-mode` | `defaultGCPIdentityMode` |
 | `scion.io/default-gcp-identity-service-account-id` | `defaultGCPIdentityServiceAccountID` |
 | `scion.io/default-gcp-identity-service-account-id-by-profile` | `defaultGCPIdentityServiceAccountIDByProfile` (JSON object, profile name to SA ID; kept on PUT when absent, cleared by `{}`) |
+| `scion.io/default-gcp-identity-service-account-id-by-broker` | `defaultGCPIdentityServiceAccountIDByBroker` (JSON object, flat Runtime Broker ID to SA ID; kept on PUT when absent, cleared by `{}`) |
 | `scion.io/default-resources-cpu-request` | `defaultResources.cpuRequest` |
 | `scion.io/default-resources-memory-request` | `defaultResources.memoryRequest` |
 | `scion.io/default-resources-cpu-limit` | `defaultResources.cpuLimit` |

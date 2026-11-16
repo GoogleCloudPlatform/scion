@@ -4912,11 +4912,13 @@ type SAAssignmentOrigin string
 
 const (
 	SAAssignmentOriginCreateExplicit                 SAAssignmentOrigin = "create_explicit"
+	SAAssignmentOriginCreateProjectBrokerDefault     SAAssignmentOrigin = "create_project_broker_default"
 	SAAssignmentOriginCreateProjectProfileDefault    SAAssignmentOrigin = "create_project_profile_default"
 	SAAssignmentOriginCreateProjectDefault           SAAssignmentOrigin = "create_project_default"
 	SAAssignmentOriginCreateHubDefault               SAAssignmentOrigin = "create_hub_default"
 	SAAssignmentOriginUpdate                         SAAssignmentOrigin = "update"
 	SAAssignmentOriginReincarnate                    SAAssignmentOrigin = "reincarnate"
+	SAAssignmentOriginScheduledProjectBrokerDefault  SAAssignmentOrigin = "scheduled_project_broker_default"
 	SAAssignmentOriginScheduledProjectProfileDefault SAAssignmentOrigin = "scheduled_project_profile_default"
 	SAAssignmentOriginScheduledProjectDefault        SAAssignmentOrigin = "scheduled_project_default"
 	SAAssignmentOriginScheduledHubDefault            SAAssignmentOrigin = "scheduled_hub_default"

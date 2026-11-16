@@ -20,7 +20,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -34,28 +36,34 @@ import (
 // Fake-hub tests for `scion project identity default` (ptone/scion#4020).
 
 const (
-	idDefProject = "proj-1"
-	idDefSAOne   = "11111111-1111-4111-8111-111111111111"
-	idDefSATwo   = "22222222-2222-4222-8222-222222222222"
+	idDefProject   = "proj-1"
+	idDefSAOne     = "11111111-1111-4111-8111-111111111111"
+	idDefSATwo     = "22222222-2222-4222-8222-222222222222"
+	idDefBrokerOne = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	idDefBrokerTwo = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 )
 
 var identityDefaultFields = []string{
 	"defaultGCPIdentityMode",
 	"defaultGCPIdentityServiceAccountID",
+	"defaultGCPIdentityServiceAccountIDByBroker",
 	"defaultGCPIdentityServiceAccountIDByProfile",
 }
 
 // idDefFakeHub is a fake Hub that stores project settings as a JSON object
 // and merges a PUT key by key, as the real settings endpoint does.
 type idDefFakeHub struct {
-	mu        sync.Mutex
-	stored    map[string]any
-	resolved  map[string]any // the "settings" part of /settings/resolved
-	putBodies []map[string]any
-	statusRef []string
-	gets      int    // GETs of /settings
-	putStatus int    // when non-zero, PUT fails with this status
-	putError  string // error body for a failing PUT
+	mu                sync.Mutex
+	stored            map[string]any
+	resolved          map[string]any // the "settings" part of /settings/resolved
+	brokers           []hubclient.RuntimeBroker
+	brokerPageSize    int // when >0, paginates /api/v1/runtime-brokers via nextCursor
+	brokerListQueries []url.Values
+	putBodies         []map[string]any
+	statusRef         []string
+	gets              int    // GETs of /settings
+	putStatus         int    // when non-zero, PUT fails with this status
+	putError          string // error body for a failing PUT
 }
 
 func (f *idDefFakeHub) handler(t *testing.T) http.HandlerFunc {
@@ -105,6 +113,50 @@ func (f *idDefFakeHub) handler(t *testing.T) http.HandlerFunc {
 			}
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/gcp-service-accounts":
 			_, _ = w.Write([]byte(`{"items":[{"id":"` + idDefSAOne + `","scope":"project","displayName":"Worker SA"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/runtime-brokers":
+			q := r.URL.Query()
+			f.brokerListQueries = append(f.brokerListQueries, q)
+			filtered := make([]hubclient.RuntimeBroker, 0, len(f.brokers))
+			wantName := q.Get("name")
+			for _, b := range f.brokers {
+				if wantName != "" && !strings.EqualFold(b.Name, wantName) {
+					continue
+				}
+				filtered = append(filtered, b)
+			}
+			nextCursor := ""
+			if f.brokerPageSize > 0 {
+				start := 0
+				if c := q.Get("cursor"); c != "" {
+					parsed, err := strconv.Atoi(c)
+					require.NoError(t, err)
+					start = parsed
+				}
+				if start > len(filtered) {
+					start = len(filtered)
+				}
+				end := start + f.brokerPageSize
+				if end < len(filtered) {
+					nextCursor = strconv.Itoa(end)
+				} else {
+					end = len(filtered)
+				}
+				filtered = filtered[start:end]
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"brokers":    filtered,
+				"nextCursor": nextCursor,
+			})
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/runtime-brokers/"):
+			wantID := strings.TrimPrefix(r.URL.Path, "/api/v1/runtime-brokers/")
+			for _, b := range f.brokers {
+				if b.ID == wantID {
+					_ = json.NewEncoder(w).Encode(b)
+					return
+				}
+			}
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"Runtime Broker not found"}}`))
 		default:
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
@@ -129,18 +181,22 @@ func newIdDefFakeHub(t *testing.T) *idDefFakeHub {
 			"defaultGCPIdentityServiceAccountIDByProfile": map[string]any{"other": idDefSATwo},
 		},
 		resolved: map[string]any{},
+		brokers: []hubclient.RuntimeBroker{
+			{ID: idDefBrokerOne, Name: "CR East", Slug: "cr-east"},
+			{ID: idDefBrokerTwo, Name: "Docker West", Slug: "docker-west"},
+		},
 	}
 	srv := httptest.NewServer(f.handler(t))
 	t.Cleanup(srv.Close)
 	client, err := hubclient.New(srv.URL)
 	require.NoError(t, err)
 
-	prevResolve, prevFormat, prevJSON, prevProfile := resolveProjectForIdentityDefault, outputFormat, identityDefaultJSON, identityDefaultProfile
+	prevResolve, prevFormat, prevJSON, prevProfile, prevBroker := resolveProjectForIdentityDefault, outputFormat, identityDefaultJSON, identityDefaultProfile, identityDefaultBroker
 	t.Cleanup(func() {
-		resolveProjectForIdentityDefault, outputFormat, identityDefaultJSON, identityDefaultProfile = prevResolve, prevFormat, prevJSON, prevProfile
+		resolveProjectForIdentityDefault, outputFormat, identityDefaultJSON, identityDefaultProfile, identityDefaultBroker = prevResolve, prevFormat, prevJSON, prevProfile, prevBroker
 	})
 	resolveProjectForIdentityDefault = func() (hubclient.Client, string, error) { return client, idDefProject, nil }
-	outputFormat, identityDefaultJSON, identityDefaultProfile = "", false, ""
+	outputFormat, identityDefaultJSON, identityDefaultProfile, identityDefaultBroker = "", false, "", ""
 	return f
 }
 
@@ -348,6 +404,7 @@ func TestIdentityDefaultUnset_MissingProfileWritesNothing(t *testing.T) {
 
 func TestIdentityDefaultShow_LadderWithSources(t *testing.T) {
 	f := newIdDefFakeHub(t)
+	f.stored["defaultGCPIdentityServiceAccountIDByBroker"] = map[string]any{idDefBrokerOne: idDefSAOne}
 	f.stored["defaultGCPIdentityServiceAccountIDByProfile"] = map[string]any{"gke": idDefSAOne}
 	f.stored["defaultGCPIdentityMode"] = "passthrough"
 	f.resolved = map[string]any{
@@ -362,14 +419,15 @@ func TestIdentityDefaultShow_LadderWithSources(t *testing.T) {
 
 	for _, want := range []string{
 		"1. request",
-		`2. per-profile "gke"`,
+		`2. per-broker "CR East" (` + idDefBrokerOne + `)`,
+		`3. per-profile "gke"`,
 		"assign " + idDefSAOne + " (Worker SA)",
-		"3. project",
+		"4. project",
 		"passthrough",
-		"4. hub",
+		"5. hub",
 		"assign " + idDefSATwo,
 		"not reached while the project default is set",
-		"5. runtime",
+		"6. runtime",
 		"source: hub setting agent_defaults.default_gcp_identity_mode",
 	} {
 		assert.Contains(t, stdout, want)
@@ -378,6 +436,7 @@ func TestIdentityDefaultShow_LadderWithSources(t *testing.T) {
 
 func TestIdentityDefaultShow_JSON(t *testing.T) {
 	f := newIdDefFakeHub(t)
+	f.stored["defaultGCPIdentityServiceAccountIDByBroker"] = map[string]any{}
 	f.stored["defaultGCPIdentityServiceAccountIDByProfile"] = map[string]any{}
 	f.resolved = map[string]any{
 		identityDefaultModeKey: map[string]any{"projectSet": false, "projectValue": nil, "hubDefault": "unknown", "hubValue": nil},
@@ -398,7 +457,8 @@ func TestIdentityDefaultShow_JSON(t *testing.T) {
 		states[r.Rung] = r.State
 		assert.NotEmpty(t, r.Source, "every rung names its source")
 	}
-	assert.Equal(t, []string{"request", "per-profile", "project", "hub", "runtime"}, rungs)
+	assert.Equal(t, []string{"request", "per-broker", "per-profile", "project", "hub", "runtime"}, rungs)
+	assert.Equal(t, "not_set", states["per-broker"])
 	assert.Equal(t, "not_set", states["per-profile"])
 	assert.Equal(t, "not_set", states["project"])
 	assert.Equal(t, "unknown", states["hub"], "an unknown hub default is not reported as absent")
@@ -465,4 +525,210 @@ func TestIdentityDefault_NilAccountStatusIsAnError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "returned no id")
 	assert.Contains(t, err.Error(), "nothing was changed")
+}
+
+func TestIdentityDefaultSet_BrokerByNameSlugAndIDStoresCanonicalID(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ref  string
+	}{
+		{name: "by name", ref: "CR East"},
+		{name: "by slug", ref: "cr-east"},
+		{name: "by id", ref: idDefBrokerOne},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newIdDefFakeHub(t)
+			f.stored["defaultGCPIdentityServiceAccountIDByBroker"] = map[string]any{idDefBrokerTwo: idDefSATwo}
+			identityDefaultBroker = tc.ref
+
+			var runErr error
+			stdout, _ := captureStdoutStderr(t, func() { runErr = runIdentityDefaultSet(idDefCmd(t), []string{"Worker SA"}) })
+			require.NoError(t, runErr)
+
+			require.Len(t, f.putBodies, 1)
+			assert.Equal(t, map[string]any{
+				"defaultGCPIdentityServiceAccountIDByBroker": map[string]any{
+					idDefBrokerOne: idDefSAOne,
+					idDefBrokerTwo: idDefSATwo,
+				},
+			}, f.putBodies[0], "only the per-broker map is sent, keyed by canonical broker UUID, preserving other brokers")
+			assertOnlyIdentityFieldsSent(t, f)
+			assert.Contains(t, stdout, idDefBrokerOne+": "+idDefSAOne)
+			assert.Contains(t, stdout, idDefBrokerTwo+": "+idDefSATwo)
+		})
+	}
+}
+
+func TestIdentityDefaultSet_BrokerRejectsModeAndProfileConflict(t *testing.T) {
+	f := newIdDefFakeHub(t)
+	identityDefaultBroker = "cr-east"
+	err := runIdentityDefaultSet(idDefCmd(t), []string{"passthrough"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "per-broker default is an account")
+	assert.Empty(t, f.putBodies)
+
+	identityDefaultProfile = "gke"
+	err = runIdentityDefaultSet(idDefCmd(t), []string{"Worker SA"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--broker and --profile cannot be used together")
+	assert.Empty(t, f.putBodies)
+
+	err = runIdentityDefaultUnset(idDefCmd(t), nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--broker and --profile cannot be used together")
+	assert.Empty(t, f.putBodies)
+}
+
+func TestIdentityDefaultSet_UnknownAndAmbiguousBrokerNotWritten(t *testing.T) {
+	f := newIdDefFakeHub(t)
+	identityDefaultBroker = "no-such-broker"
+	err := runIdentityDefaultSet(idDefCmd(t), []string{"Worker SA"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `no Runtime Broker "no-such-broker" was found`)
+	assert.Empty(t, f.putBodies)
+
+	f.brokers = append(f.brokers, hubclient.RuntimeBroker{ID: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", Name: "CR East", Slug: "cr-east-2"})
+	identityDefaultBroker = "CR East"
+	err = runIdentityDefaultSet(idDefCmd(t), []string{"Worker SA"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "matches 2 brokers")
+	assert.Contains(t, err.Error(), idDefBrokerOne)
+	assert.Empty(t, f.putBodies)
+}
+
+func TestIdentityDefaultUnset_BrokerByNameAndStaleDeletedID(t *testing.T) {
+	const deletedBrokerID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+	f := newIdDefFakeHub(t)
+	f.stored["defaultGCPIdentityServiceAccountIDByBroker"] = map[string]any{
+		idDefBrokerOne:  idDefSAOne,
+		deletedBrokerID: idDefSATwo,
+	}
+
+	// Unset live broker by slug keeps the other entry.
+	identityDefaultBroker = "cr-east"
+	var runErr error
+	_, _ = captureStdoutStderr(t, func() { runErr = runIdentityDefaultUnset(idDefCmd(t), nil) })
+	require.NoError(t, runErr)
+	require.Len(t, f.putBodies, 1)
+	assert.Equal(t, map[string]any{
+		"defaultGCPIdentityServiceAccountIDByBroker": map[string]any{deletedBrokerID: idDefSATwo},
+	}, f.putBodies[0])
+
+	// Unset since-deleted broker directly by stored UUID key sends {} to clear the map.
+	identityDefaultBroker = deletedBrokerID
+	_, _ = captureStdoutStderr(t, func() { runErr = runIdentityDefaultUnset(idDefCmd(t), nil) })
+	require.NoError(t, runErr)
+	require.Len(t, f.putBodies, 2)
+	assert.Equal(t, map[string]any{
+		"defaultGCPIdentityServiceAccountIDByBroker": map[string]any{},
+	}, f.putBodies[1])
+
+	// Unset an existing broker with no entry writes nothing.
+	identityDefaultBroker = "docker-west"
+	_, _ = captureStdoutStderr(t, func() { runErr = runIdentityDefaultUnset(idDefCmd(t), nil) })
+	require.NoError(t, runErr)
+	assert.Len(t, f.putBodies, 2)
+}
+
+func TestIdentityDefaultSet_BrokerUsesServerNameFilterAndIgnoresPlugins(t *testing.T) {
+	const (
+		brokerPage3ID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+		pluginID      = "ffffffff-ffff-4fff-8fff-ffffffffffff"
+	)
+	f := newIdDefFakeHub(t)
+	f.brokerPageSize = 1
+	f.brokers = []hubclient.RuntimeBroker{
+		{ID: idDefBrokerOne, Name: "CR East", Slug: "cr-east"},
+		{ID: idDefBrokerTwo, Name: "Docker West", Slug: "docker-west"},
+		{ID: brokerPage3ID, Name: "CR Page 3", Slug: "cr-page-3"},
+		{ID: pluginID, Name: "Telegram Plugin", Slug: "telegram-plugin", Labels: map[string]string{pluginBrokerLabelKey: "telegram"}},
+	}
+
+	// Resolving by Name passes server-side ?name=CR+Page+3 and succeeds in a single filtered page.
+	identityDefaultBroker = "CR Page 3"
+	var runErr error
+	_, _ = captureStdoutStderr(t, func() { runErr = runIdentityDefaultSet(idDefCmd(t), []string{"Worker SA"}) })
+	require.NoError(t, runErr)
+	require.Len(t, f.brokerListQueries, 1, "server-side Name filter must resolve without scanning unfiltered pages")
+	assert.Equal(t, "CR Page 3", f.brokerListQueries[0].Get("name"))
+	require.Len(t, f.putBodies, 1)
+	assert.Equal(t, map[string]any{
+		"defaultGCPIdentityServiceAccountIDByBroker": map[string]any{brokerPage3ID: idDefSAOne},
+	}, f.putBodies[0])
+
+	// Message-broker plugin records are excluded on ID Get, Name List, and Slug List.
+	for _, pluginRef := range []string{pluginID, "Telegram Plugin", "telegram-plugin"} {
+		identityDefaultBroker = pluginRef
+		err := runIdentityDefaultSet(idDefCmd(t), []string{"Worker SA"})
+		require.Error(t, err, "plugin ref %q must not resolve as a Runtime Broker", pluginRef)
+		assert.Contains(t, err.Error(), "no Runtime Broker")
+		assert.Len(t, f.putBodies, 1, "nothing written for plugin ref %q", pluginRef)
+	}
+}
+
+func TestIdentityDefault_BrokerPaginatedSlugAndShow(t *testing.T) {
+	const brokerPage3ID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+	f := newIdDefFakeHub(t)
+	f.brokerPageSize = 1
+	f.brokers = []hubclient.RuntimeBroker{
+		{ID: idDefBrokerOne, Name: "CR East", Slug: "cr-east"},
+		{ID: idDefBrokerTwo, Name: "Docker West", Slug: "docker-west"},
+		{ID: brokerPage3ID, Name: "CR Page 3", Slug: "cr-page-3"},
+	}
+
+	// Slug fallback pages through NextCursor across all 3 pages to find cr-page-3.
+	identityDefaultBroker = "cr-page-3"
+	var runErr error
+	_, _ = captureStdoutStderr(t, func() { runErr = runIdentityDefaultSet(idDefCmd(t), []string{"Worker SA"}) })
+	require.NoError(t, runErr)
+	require.Len(t, f.putBodies, 1)
+	assert.Equal(t, map[string]any{
+		"defaultGCPIdentityServiceAccountIDByBroker": map[string]any{brokerPage3ID: idDefSAOne},
+	}, f.putBodies[0])
+	// First query is server-side ?name=cr-page-3 (0 results), followed by 3 paginated unfiltered slug queries.
+	require.Len(t, f.brokerListQueries, 4)
+	assert.Equal(t, "cr-page-3", f.brokerListQueries[0].Get("name"))
+	assert.Equal(t, "", f.brokerListQueries[1].Get("cursor"))
+	assert.Equal(t, "1", f.brokerListQueries[2].Get("cursor"))
+	assert.Equal(t, "2", f.brokerListQueries[3].Get("cursor"))
+
+	// `show` pages through NextCursor to decorate CR Page 3's display name on page 3.
+	f.brokerListQueries = nil
+	stdout, _ := captureStdoutStderr(t, func() { runErr = runIdentityDefaultShow(idDefCmd(t), nil) })
+	require.NoError(t, runErr)
+	assert.Contains(t, stdout, `per-broker "CR Page 3" (`+brokerPage3ID+`) assign `+idDefSAOne+` (Worker SA)`)
+	assert.Len(t, f.brokerListQueries, 3, "show must page through NextCursor until all stored broker IDs are decorated")
+}
+
+func TestIdentityDefaultSet_BrokerCrossPageAmbiguityRejected(t *testing.T) {
+	const (
+		dupTwo   = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+		dupThree = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+	)
+	f := newIdDefFakeHub(t)
+	f.brokerPageSize = 1
+	f.brokers = []hubclient.RuntimeBroker{
+		{ID: idDefBrokerOne, Name: "CR Shared", Slug: "cr-shared-slug"},
+		{ID: idDefBrokerTwo, Name: "Docker Middle", Slug: "docker-middle"},
+		{ID: dupTwo, Name: "CR Shared", Slug: "cr-other-slug"},
+		{ID: dupThree, Name: "Other Name", Slug: "cr-shared-slug"},
+	}
+
+	// Cross-page duplicate Name (brokerPageSize=1 splits the two "CR Shared" matches across pages 1 and 2).
+	identityDefaultBroker = "CR Shared"
+	err := runIdentityDefaultSet(idDefCmd(t), []string{"Worker SA"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "matches 2 brokers")
+	assert.Contains(t, err.Error(), idDefBrokerOne)
+	assert.Contains(t, err.Error(), dupTwo)
+	assert.Empty(t, f.putBodies)
+
+	// Cross-page duplicate Slug across pages 1 and 4.
+	identityDefaultBroker = "cr-shared-slug"
+	err = runIdentityDefaultSet(idDefCmd(t), []string{"Worker SA"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "matches 2 brokers")
+	assert.Contains(t, err.Error(), idDefBrokerOne)
+	assert.Contains(t, err.Error(), dupThree)
+	assert.Empty(t, f.putBodies)
 }

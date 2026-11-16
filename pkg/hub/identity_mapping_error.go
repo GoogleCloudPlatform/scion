@@ -190,11 +190,19 @@ func identityMappingScopeText(profile, runtimeEntry, broker string) string {
 // hub's message, instead of the generic 502 runtime_error, and reports
 // whether it did. For any other error it writes nothing and returns false.
 func relayIdentityMappingError(w http.ResponseWriter, err error) bool {
+	return relayIdentityMappingErrorWithDefaultTier(w, err, nil, "")
+}
+
+func relayIdentityMappingErrorWithDefaultTier(w http.ResponseWriter, err error, tier *defaultTier, mode string) bool {
 	ime, ok := identityMappingDispatchError(err)
 	if !ok {
 		return false
 	}
-	writeError(w, http.StatusBadRequest, ime.Code, ime.Message, ime.Details)
+	msg := ime.Message
+	if tier != nil {
+		msg += tier.brokerRejectionSuffix(mode)
+	}
+	writeError(w, http.StatusBadRequest, ime.Code, msg, ime.Details)
 	return true
 }
 
@@ -225,6 +233,10 @@ func identityMappingFailureText(err error) (string, bool) {
 // nothing is replaced and the result is err.Error(), which is body-free
 // because brokerStatusError.Error() is.
 func dispatchFailureText(err error) string {
+	return dispatchFailureTextWithDefaultTier(err, nil, "")
+}
+
+func dispatchFailureTextWithDefaultTier(err error, tier *defaultTier, mode string) string {
 	if err == nil {
 		return ""
 	}
@@ -235,6 +247,9 @@ func dispatchFailureText(err error) string {
 		return ""
 	}
 	if text, ok := identityMappingFailureText(err); ok {
+		if tier != nil {
+			text += tier.brokerRejectionSuffix(mode)
+		}
 		return text
 	}
 	if _, code, msg, ok := brokerProjectStorageRefusal(err); ok {
@@ -248,7 +263,11 @@ func dispatchFailureText(err error) string {
 	// A broker HTTP error answer: its code, filtered message and allowlisted
 	// current run, never its body. Text the hub wrapped around it is kept.
 	if se != nil {
-		return strings.Replace(err.Error(), se.Error(), brokerRecordText(se), 1)
+		out := strings.Replace(err.Error(), se.Error(), brokerRecordText(se), 1)
+		if tier != nil && se.StatusCode == http.StatusBadRequest && isBrokerGCPIdentityError(se.brokerErrorMessage()) {
+			out += tier.brokerRejectionSuffix(mode)
+		}
+		return out
 	}
 	return err.Error()
 }

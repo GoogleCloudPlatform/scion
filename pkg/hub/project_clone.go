@@ -833,6 +833,26 @@ func (s *Server) cloneProjectGCPServiceAccounts(ctx context.Context, srcProjectI
 		}
 	}
 
+	// Remap the per-broker default SA map's entries that reference a source SA.
+	if byBroker := brokerDefaultSAIDsFromAnnotations(clone.Annotations); len(byBroker) > 0 {
+		changed := false
+		for brokerID, saID := range byBroker {
+			for i, srcSA := range accounts {
+				if srcSA.ID == saID {
+					byBroker[brokerID] = clonedIDs[i]
+					changed = true
+					break
+				}
+			}
+		}
+		if changed {
+			setBrokerDefaultSAIDsAnnotation(clone.Annotations, byBroker)
+			if err := s.store.UpdateProject(ctx, clone); err != nil {
+				return fmt.Errorf("remap per-broker default SA annotation: %w", err)
+			}
+		}
+	}
+
 	// Remap default SA annotation if it references a source SA.
 	defaultSAID, ok := clone.Annotations[projectSettingDefaultGCPIdentitySAID]
 	if ok && defaultSAID != "" {

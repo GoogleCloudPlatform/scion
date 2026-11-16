@@ -255,6 +255,13 @@ type ProjectSettings struct {
 	// keeps the stored map and an empty object clears it. No omitempty: a
 	// nil map marshals to null (keep) and an empty map to {} (clear).
 	DefaultGCPIdentityServiceAccountIDByProfile map[string]string `json:"defaultGCPIdentityServiceAccountIDByProfile"`
+	// DefaultGCPIdentityServiceAccountIDByBroker maps a flat Runtime Broker ID
+	// to a registered GCP service account ID. When an agent is created with
+	// no explicit GCP identity on that flat Runtime Broker, its entry assigns
+	// that service account ahead of DefaultGCPIdentityMode and
+	// DefaultGCPIdentityServiceAccountID. Same PUT semantics as ByProfile:
+	// nil marshals to null (keep) and an empty map to {} (clear).
+	DefaultGCPIdentityServiceAccountIDByBroker map[string]string `json:"defaultGCPIdentityServiceAccountIDByBroker"`
 
 	// Agent authorization
 	MaxAgentRole     string `json:"maxAgentRole,omitempty"`
@@ -271,6 +278,7 @@ type ProjectGCPIdentityDefaultsUpdate struct {
 	Mode                      *string            `json:"defaultGCPIdentityMode,omitempty"`
 	ServiceAccountID          *string            `json:"defaultGCPIdentityServiceAccountID,omitempty"`
 	ServiceAccountIDByProfile *map[string]string `json:"defaultGCPIdentityServiceAccountIDByProfile,omitempty"`
+	ServiceAccountIDByBroker  *map[string]string `json:"defaultGCPIdentityServiceAccountIDByBroker,omitempty"`
 }
 
 // ResolvedHubDefault reports whether a hub-level default exists for a project

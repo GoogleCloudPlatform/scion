@@ -119,6 +119,7 @@ func TestIdentityDefaultInvalid_NamesTheDefault(t *testing.T) {
 		want []string
 	}{
 		{defaultTierProject, []string{"project default GCP service account", "a project admin", "defaultGCPIdentityServiceAccountID in the project settings"}},
+		{brokerDefaultTier("b-1", "cr-east"), []string{`project default for Runtime Broker "cr-east"`, "a project admin", `the "b-1" (cr-east) entry of defaultGCPIdentityServiceAccountIDByBroker`, "scion project identity default set|unset --broker b-1"}},
 		{profileDefaultTier("remote"), []string{`project default for profile "remote"`, "a project admin", `the "remote" entry of defaultGCPIdentityServiceAccountIDByProfile`}},
 		{defaultTierHub, []string{"hub default GCP service account", "a hub admin", "agent_defaults.default_gcp_identity_service_account_id"}},
 	}
