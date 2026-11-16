@@ -49,6 +49,8 @@ type memQueueStore struct {
 	trimLimit int // when > 0, caps trimmed rows per TrimDurableQueue pass and sets More
 }
 
+var _ store.DurableQueueStore = (*memQueueStore)(nil)
+
 func newMemQueueStore() *memQueueStore {
 	return &memQueueStore{rows: make(map[int64]*store.DurableQueueRow)}
 }
@@ -269,6 +271,52 @@ func (m *memQueueStore) DurableQueueStats(_ context.Context, kind, projectID str
 		}
 	}
 	return st, nil
+}
+
+func (m *memQueueStore) NudgeDurableItems(_ context.Context, kind string, dedupKeys []string, now time.Time) (int, error) {
+	if err := store.ValidateDurableQueueKind(kind); err != nil {
+		return 0, err
+	}
+	if len(dedupKeys) > store.MaxDurableQueueNudgeKeys {
+		return 0, fmt.Errorf("%w: durable queue nudge key count %d exceeds %d", store.ErrInvalidInput, len(dedupKeys), store.MaxDurableQueueNudgeKeys)
+	}
+	if len(dedupKeys) == 0 {
+		return 0, nil
+	}
+	wanted := make(map[string]struct{}, len(dedupKeys))
+	for _, k := range dedupKeys {
+		if k != "" && len(k) <= store.MaxDurableQueueDedupKeyLen {
+			wanted[k] = struct{}{}
+		}
+	}
+	if len(wanted) == 0 {
+		return 0, nil
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	nudged := 0
+	for _, r := range m.rows {
+		if r.Kind != kind {
+			continue
+		}
+		if _, ok := wanted[r.DedupKey]; !ok {
+			continue
+		}
+		if r.LeaseUntil != nil && !r.LeaseUntil.Before(now) {
+			continue
+		}
+		if r.NextAttemptAt.After(now) {
+			r.NextAttemptAt = now
+			nudged++
+		}
+	}
+	return nudged, nil
 }
 
 func quietLogger() *slog.Logger {
@@ -1472,4 +1520,201 @@ func TestLeaseAutoRenewLogsErrorsWithoutCancelingAndSkipsContextErrors(t *testin
 		assert.True(t, !strings.Contains(fmt.Sprintf("%+v", lh.snapshot()), secretToken))
 		assert.Empty(t, lh.snapshot(), "in-flight renew aborted by stopRenew must not be logged")
 	})
+}
+
+func TestQueueNudge_SemanticsAndLocalWake(t *testing.T) {
+	ctx := context.Background()
+
+	// Nil receiver / nil store guards.
+	var nilQueue *durablequeue.StoreQueue
+	_, err := nilQueue.Nudge(ctx, "test.echo", []string{"k1"})
+	require.Error(t, err)
+	_, err = durablequeue.NewQueue(nil).Nudge(ctx, "test.echo", []string{"k1"})
+	require.Error(t, err)
+
+	st := newMemQueueStore()
+	cur := time.Date(2026, 11, 16, 14, 0, 0, 0, time.UTC)
+	var clockMu sync.Mutex
+	nowFn := func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return cur
+	}
+	setNow := func(ts time.Time) {
+		clockMu.Lock()
+		cur = ts
+		clockMu.Unlock()
+	}
+
+	q := durablequeue.NewQueue(st, durablequeue.WithQueueClock(nowFn))
+
+	dProbe, err := durablequeue.NewDrainer(durablequeue.DrainerConfig{
+		Store:  st,
+		Kind:   "test.echo",
+		Logger: quietLogger(),
+		Handler: func(context.Context, durablequeue.Item, durablequeue.Lease) durablequeue.Result {
+			return durablequeue.Result{Done: true}
+		},
+	})
+	require.NoError(t, err)
+	unregProbe := q.Register(dProbe)
+	unregProbe() // exercise unregister; use a live running drainer below to observe Wake promptly
+
+	// Validation: bad kind and oversized list fail with store.ErrInvalidInput.
+	_, err = q.Nudge(ctx, "Bad-Kind", []string{"k1"})
+	require.ErrorIs(t, err, store.ErrInvalidInput)
+
+	tooMany := make([]string, store.MaxDurableQueueNudgeKeys+1)
+	for i := range tooMany {
+		tooMany[i] = fmt.Sprintf("k-%d", i)
+	}
+	_, err = q.Nudge(ctx, "test.echo", tooMany)
+	require.ErrorIs(t, err, store.ErrInvalidInput)
+
+	// Empty key list is a no-op.
+	n, err := q.Nudge(ctx, "test.echo", nil)
+	require.NoError(t, err)
+	assert.Zero(t, n)
+
+	// Seed:
+	// - leased item of test.echo (must stay untouched)
+	// - two future items of test.echo (nudge-a seq lower @ +10m, nudge-b seq higher @ +5m)
+	// - one already-due-earlier item of test.echo (@ +10s when nudged at +20s -> must stay ahead of nudge-a/b)
+	// - one unselected key of test.echo (@ +10m -> untouched)
+	// - one item of other.echo with key "nudge-a" (@ +10m -> untouched)
+	_, err = q.Enqueue(ctx, nil, durablequeue.Item{
+		Kind:      "test.echo",
+		DedupKey:  "leased",
+		Payload:   []byte("leased"),
+		NotBefore: cur,
+	})
+	require.NoError(t, err)
+	leasedRows, err := st.ClaimDurableItems(ctx, "test.echo", "holder", cur, cur.Add(time.Hour), 1)
+	require.NoError(t, err)
+	require.Len(t, leasedRows, 1)
+
+	_, err = q.Enqueue(ctx, nil, durablequeue.Item{
+		Kind:      "test.echo",
+		DedupKey:  "nudge-a",
+		Payload:   []byte("nudge-a"),
+		NotBefore: cur.Add(10 * time.Minute),
+	})
+	require.NoError(t, err)
+	_, err = q.Enqueue(ctx, nil, durablequeue.Item{
+		Kind:      "test.echo",
+		DedupKey:  "nudge-b",
+		Payload:   []byte("nudge-b"),
+		NotBefore: cur.Add(5 * time.Minute),
+	})
+	require.NoError(t, err)
+	_, err = q.Enqueue(ctx, nil, durablequeue.Item{
+		Kind:      "test.echo",
+		DedupKey:  "already-due",
+		Payload:   []byte("already-due"),
+		NotBefore: cur.Add(10 * time.Second),
+	})
+	require.NoError(t, err)
+	_, err = q.Enqueue(ctx, nil, durablequeue.Item{
+		Kind:      "test.echo",
+		DedupKey:  "other-key",
+		Payload:   []byte("other-key"),
+		NotBefore: cur.Add(10 * time.Minute),
+	})
+	require.NoError(t, err)
+	_, err = q.Enqueue(ctx, nil, durablequeue.Item{
+		Kind:      "other.echo",
+		DedupKey:  "nudge-a",
+		Payload:   []byte("other-kind"),
+		NotBefore: cur.Add(10 * time.Minute),
+	})
+	require.NoError(t, err)
+
+	// Start a live drainer with a 1-hour PollInterval so only Wake from q.Nudge
+	// can trigger a poll after the initial startup pass (at t=cur, where nothing unleased is due).
+	initialClaims := st.claimCount()
+	var (
+		handledMu sync.Mutex
+		handled   []string
+	)
+	d, err := durablequeue.NewDrainer(durablequeue.DrainerConfig{
+		Store:        st,
+		Queue:        q,
+		Kind:         "test.echo",
+		PollInterval: time.Hour,
+		Now:          nowFn,
+		Logger:       quietLogger(),
+		Handler: func(_ context.Context, item durablequeue.Item, _ durablequeue.Lease) durablequeue.Result {
+			handledMu.Lock()
+			handled = append(handled, item.DedupKey)
+			handledMu.Unlock()
+			return durablequeue.Result{Done: true}
+		},
+	})
+	require.NoError(t, err)
+
+	runCtx, cancel := context.WithCancel(ctx)
+	doneCh := make(chan struct{})
+	go func() {
+		defer close(doneCh)
+		d.Run(runCtx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-doneCh
+	})
+
+	// Wait for initial pass at t=cur (claims nothing because leased is held and others are > cur).
+	require.Eventually(t, func() bool {
+		return st.claimCount() > initialClaims
+	}, 2*time.Second, 5*time.Millisecond)
+	handledMu.Lock()
+	assert.Empty(t, handled)
+	handledMu.Unlock()
+
+	// Advance clock to cur + 20s ("already-due" @ +10s is now past due; nudge-a/b are still +10m/+5m).
+	// Call q.Nudge: must update only nudge-a and nudge-b (n=2), leave already-due at +10s, ignore
+	// leased and unknown keys, and Wake the local drainer so all 3 drain immediately in
+	// (next_attempt_at, seq) order: already-due, nudge-a, nudge-b!
+	setNow(cur.Add(20 * time.Second))
+	nudged, err := q.Nudge(ctx, "test.echo", []string{"leased", "nudge-b", "nudge-a", "already-due", "unknown-key"})
+	require.NoError(t, err)
+	assert.Equal(t, 2, nudged)
+
+	require.Eventually(t, func() bool {
+		handledMu.Lock()
+		defer handledMu.Unlock()
+		return len(handled) == 3
+	}, 2*time.Second, 5*time.Millisecond)
+
+	handledMu.Lock()
+	assert.Equal(t, []string{"already-due", "nudge-a", "nudge-b"}, handled)
+	handledMu.Unlock()
+
+	// Peer-replica wake check: when another replica already lowered next_attempt_at <= now
+	// (so NudgeDurableItems returns n=0), q.Nudge with non-empty keys still wakes the local drainer!
+	_, err = st.NudgeDurableItems(ctx, "test.echo", []string{"other-key"}, nowFn())
+	require.NoError(t, err)
+	nudgedZero, err := q.Nudge(ctx, "test.echo", []string{"other-key"})
+	require.NoError(t, err)
+	assert.Zero(t, nudgedZero)
+
+	require.Eventually(t, func() bool {
+		handledMu.Lock()
+		defer handledMu.Unlock()
+		return len(handled) == 4
+	}, 2*time.Second, 5*time.Millisecond)
+
+	handledMu.Lock()
+	assert.Equal(t, []string{"already-due", "nudge-a", "nudge-b", "other-key"}, handled)
+	handledMu.Unlock()
+
+	// Verify other.echo item and leased item were untouched.
+	otherStats, err := st.DurableQueueStats(ctx, "other.echo", "", nowFn())
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), otherStats.Pending)
+
+	echoStats, err := st.DurableQueueStats(ctx, "test.echo", "", nowFn())
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), echoStats.Pending)
+	assert.Equal(t, int64(1), echoStats.Leased)
 }

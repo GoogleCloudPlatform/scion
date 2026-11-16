@@ -770,3 +770,277 @@ func TestDurableQueueConcurrentOverflowTrimExactExcess(t *testing.T) {
 		assert.Equal(t, int64(7), stats.Pending, "round %d: remaining rows must equal maxRows=7", round)
 	}
 }
+
+func TestDurableQueueNudge(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	t0 := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	now := t0.Add(30 * time.Second)
+
+	// 1. Input validation: invalid kinds (even with empty key list) and oversized key lists.
+	for _, badKind := range []string{"", "Upper.case", ".leading", "trailing.", "a..b", "bad-dash", strings.Repeat("a", 65)} {
+		_, err := cs.NudgeDurableItems(ctx, badKind, nil, now)
+		require.ErrorIs(t, err, store.ErrInvalidInput, "kind=%q", badKind)
+	}
+
+	oversized := make([]string, store.MaxDurableQueueNudgeKeys+1)
+	for i := range oversized {
+		oversized[i] = "same-dup-key" // pre-dedup length must still enforce the bound
+	}
+	_, err := cs.NudgeDurableItems(ctx, "test.echo", oversized, now)
+	require.ErrorIs(t, err, store.ErrInvalidInput)
+
+	// 2. Empty key list and unknown keys are no-ops.
+	n, err := cs.NudgeDurableItems(ctx, "test.echo", nil, now)
+	require.NoError(t, err)
+	assert.Zero(t, n)
+
+	n, err = cs.NudgeDurableItems(ctx, "test.echo", []string{}, now)
+	require.NoError(t, err)
+	assert.Zero(t, n)
+
+	n, err = cs.NudgeDurableItems(ctx, "test.echo", []string{"unknown-a", "", strings.Repeat("x", store.MaxDurableQueueDedupKeyLen+1)}, now)
+	require.NoError(t, err)
+	assert.Zero(t, n)
+
+	// 3. Seed items covering every lease, kind, key, and next_attempt_at case.
+	enq := func(kind, key string, notBefore time.Time) int64 {
+		t.Helper()
+		seq, eerr := cs.EnqueueDurableItem(ctx, nil, store.DurableQueueRow{
+			Kind:      kind,
+			DedupKey:  key,
+			ProjectID: "proj-1",
+			Payload:   []byte(`{"k":"` + key + `"}`),
+			CreatedAt: t0,
+			NotBefore: notBefore,
+		})
+		require.NoError(t, eerr)
+		return seq
+	}
+
+	// Leased items: one with lease_until > now, one at exact boundary lease_until == now.
+	seqLeasedActive := enq("test.echo", "leased-active", t0)
+	seqLeasedBoundary := enq("test.echo", "leased-boundary", t0)
+	claimedActive, err := cs.ClaimDurableItems(ctx, "test.echo", "worker-live", t0, now.Add(time.Minute), 1)
+	require.NoError(t, err)
+	require.Len(t, claimedActive, 1)
+	assert.Equal(t, seqLeasedActive, claimedActive[0].Seq)
+	claimedBoundary, err := cs.ClaimDurableItems(ctx, "test.echo", "worker-boundary", t0, now, 1)
+	require.NoError(t, err)
+	require.Len(t, claimedBoundary, 1)
+	assert.Equal(t, seqLeasedBoundary, claimedBoundary[0].Seq)
+	// Push both leased rows' next_attempt_at into the future while keeping their active leases,
+	// proving NudgeDurableItems checks lease state rather than merely next_attempt_at <= now.
+	futureAttempt := now.Add(10 * time.Minute)
+	require.NoError(t, cs.client.DurableQueueItem.UpdateOneID(seqLeasedActive).SetNextAttemptAt(futureAttempt).Exec(ctx))
+	require.NoError(t, cs.client.DurableQueueItem.UpdateOneID(seqLeasedBoundary).SetNextAttemptAt(futureAttempt).Exec(ctx))
+
+	// Expired-lease future item (lease_until < now): unleased per queueItemUnleased(now), must be nudged.
+	seqExpiredLease := enq("test.echo", "expired-lease", futureAttempt)
+	require.NoError(t, cs.client.DurableQueueItem.UpdateOneID(seqExpiredLease).
+		SetLeaseOwner("worker-stale").
+		SetLeaseUntil(now.Add(-time.Millisecond)).
+		Exec(ctx))
+
+	// Unleased future items to nudge (inserted in order nudge-1 then nudge-2, with reversed NotBefore).
+	seqNudge1 := enq("test.echo", "nudge-1", now.Add(5*time.Minute))
+	seqNudge2 := enq("test.echo", "nudge-2", now.Add(2*time.Minute))
+
+	// Already-due-earlier item (next_attempt_at < now) and due-at-exact-now item:
+	// nudge must NEVER move next_attempt_at later than it already is.
+	earlierDue := now.Add(-10 * time.Second)
+	seqAlreadyEarly := enq("test.echo", "already-early", earlierDue)
+	seqAlreadyAtNow := enq("test.echo", "already-at-now", now)
+
+	// Unselected key of same kind, and same key ("nudge-1") on a different kind: both untouched.
+	seqOtherKey := enq("test.echo", "untouched-key", now.Add(4*time.Minute))
+	seqOtherKind := enq("other.kind", "nudge-1", now.Add(4*time.Minute))
+
+	// Act: nudge a mix of eligible, leased, already-due, duplicate, and unknown keys.
+	nudged, err := cs.NudgeDurableItems(ctx, "test.echo", []string{
+		"leased-active",
+		"leased-boundary",
+		"expired-lease",
+		"nudge-2",
+		"nudge-1",
+		"nudge-1", // duplicate key in input slice
+		"already-early",
+		"already-at-now",
+		"does-not-exist",
+	}, now)
+	require.NoError(t, err)
+	assert.Equal(t, 3, nudged, "only expired-lease, nudge-1, and nudge-2 should be updated")
+
+	// Idempotency: repeating the exact same nudge at the same now updates 0 rows.
+	nudgedAgain, err := cs.NudgeDurableItems(ctx, "test.echo", []string{"expired-lease", "nudge-1", "nudge-2"}, now)
+	require.NoError(t, err)
+	assert.Zero(t, nudgedAgain)
+
+	// Verify leased rows were completely untouched.
+	rowActive, err := cs.client.DurableQueueItem.Get(ctx, seqLeasedActive)
+	require.NoError(t, err)
+	assert.Equal(t, "worker-live", rowActive.LeaseOwner)
+	assert.True(t, rowActive.NextAttemptAt.Equal(futureAttempt))
+
+	rowBoundary, err := cs.client.DurableQueueItem.Get(ctx, seqLeasedBoundary)
+	require.NoError(t, err)
+	assert.Equal(t, "worker-boundary", rowBoundary.LeaseOwner)
+	assert.True(t, rowBoundary.NextAttemptAt.Equal(futureAttempt))
+
+	// Verify already-early kept its strictly earlier next_attempt_at.
+	rowEarly, err := cs.client.DurableQueueItem.Get(ctx, seqAlreadyEarly)
+	require.NoError(t, err)
+	assert.True(t, rowEarly.NextAttemptAt.Equal(earlierDue), "nudge must not delay an item already due earlier")
+
+	// Verify untouched key and other kind kept their future next_attempt_at.
+	rowOtherKey, err := cs.client.DurableQueueItem.Get(ctx, seqOtherKey)
+	require.NoError(t, err)
+	assert.True(t, rowOtherKey.NextAttemptAt.Equal(now.Add(4*time.Minute)))
+
+	rowOtherKind, err := cs.client.DurableQueueItem.Get(ctx, seqOtherKind)
+	require.NoError(t, err)
+	assert.True(t, rowOtherKind.NextAttemptAt.Equal(now.Add(4*time.Minute)))
+
+	// Verify ClaimDurableItems at now claims the due unleased items in exact (next_attempt_at, seq) order:
+	// 1. seqAlreadyEarly (next_attempt_at = now - 10s)
+	// 2. seqExpiredLease, seqNudge1, seqNudge2, seqAlreadyAtNow (all next_attempt_at == now, ordered by seq ASC)
+	claimed, err := cs.ClaimDurableItems(ctx, "test.echo", "drainer-1", now, now.Add(time.Minute), 20)
+	require.NoError(t, err)
+	gotSeqs := make([]int64, len(claimed))
+	for i, r := range claimed {
+		gotSeqs[i] = r.Seq
+	}
+	assert.Equal(t, []int64{
+		seqAlreadyEarly,
+		seqExpiredLease,
+		seqNudge1,
+		seqNudge2,
+		seqAlreadyAtNow,
+	}, gotSeqs)
+
+	// Zero now defaults to time.Now().UTC(), and NudgeDurableItems inside a rolled-back WithTx leaves rows unchanged.
+	farFuture := time.Now().UTC().Add(time.Hour).Truncate(time.Millisecond)
+	seqTx := enq("test.tx_nudge", "tx-item", farFuture)
+	rbErr := errors.New("rollback nudge")
+	err = cs.WithTx(ctx, func(tx store.Store) error {
+		dqs, ok := tx.(store.DurableQueueStore)
+		require.True(t, ok)
+		txNudged, nerr := dqs.NudgeDurableItems(ctx, "test.tx_nudge", []string{"tx-item"}, time.Time{})
+		if nerr != nil {
+			return nerr
+		}
+		assert.Equal(t, 1, txNudged)
+		return rbErr
+	})
+	require.ErrorIs(t, err, rbErr)
+	rowTxAfterRollback, err := cs.client.DurableQueueItem.Get(ctx, seqTx)
+	require.NoError(t, err)
+	assert.True(t, rowTxAfterRollback.NextAttemptAt.Equal(farFuture), "rolled-back tx nudge must not persist")
+
+	zeroNowNudged, err := cs.NudgeDurableItems(ctx, "test.tx_nudge", []string{"tx-item"}, time.Time{})
+	require.NoError(t, err)
+	assert.Equal(t, 1, zeroNowNudged)
+	claimedZeroNow, err := cs.ClaimDurableItems(ctx, "test.tx_nudge", "drainer-zero", time.Now().UTC().Add(time.Second), time.Now().UTC().Add(time.Minute), 1)
+	require.NoError(t, err)
+	require.Len(t, claimedZeroNow, 1)
+	assert.Equal(t, seqTx, claimedZeroNow[0].Seq)
+}
+
+func TestDurableQueueNudgeMaxKeysAndConcurrentClaim(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	t0 := time.Date(2026, 11, 16, 13, 0, 0, 0, time.UTC)
+	now := t0.Add(time.Minute)
+
+	// 1. Exact MaxDurableQueueNudgeKeys (1000) succeeds on both SQLite and Postgres.
+	keys := make([]string, store.MaxDurableQueueNudgeKeys)
+	for i := range keys {
+		keys[i] = fmt.Sprintf("max-key-%04d", i)
+		_, err := cs.EnqueueDurableItem(ctx, nil, store.DurableQueueRow{
+			Kind:      "test.max_nudge",
+			DedupKey:  keys[i],
+			Payload:   []byte(`{}`),
+			CreatedAt: t0,
+			NotBefore: t0.Add(time.Hour),
+		})
+		require.NoError(t, err)
+	}
+	nudged, err := cs.NudgeDurableItems(ctx, "test.max_nudge", keys, now)
+	require.NoError(t, err)
+	assert.Equal(t, store.MaxDurableQueueNudgeKeys, nudged)
+
+	claimedMax, err := cs.ClaimDurableItems(ctx, "test.max_nudge", "claimer", now, now.Add(time.Minute), store.MaxDurableQueueNudgeKeys+10)
+	require.NoError(t, err)
+	assert.Len(t, claimedMax, store.MaxDurableQueueNudgeKeys)
+
+	// 2. Concurrent replicas nudging overlapping keys while two drainers claim:
+	// every replica may nudge, and claims remain strictly disjoint.
+	const itemCount = 40
+	raceKeys := make([]string, itemCount)
+	for i := 0; i < itemCount; i++ {
+		raceKeys[i] = fmt.Sprintf("race-%02d", i)
+		_, err := cs.EnqueueDurableItem(ctx, nil, store.DurableQueueRow{
+			Kind:      "test.race_nudge",
+			DedupKey:  raceKeys[i],
+			Payload:   []byte(`{}`),
+			CreatedAt: t0,
+			NotBefore: t0.Add(time.Hour),
+		})
+		require.NoError(t, err)
+	}
+
+	reversedKeys := make([]string, itemCount)
+	for i := range raceKeys {
+		reversedKeys[i] = raceKeys[itemCount-1-i]
+	}
+
+	start := make(chan struct{})
+	var (
+		n1, n2       int
+		nerr1, nerr2 error
+		c1, c2       []store.DurableQueueRow
+		cerr1, cerr2 error
+		wg           sync.WaitGroup
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		n1, nerr1 = cs.NudgeDurableItems(ctx, "test.race_nudge", raceKeys, now)
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		n2, nerr2 = cs.NudgeDurableItems(ctx, "test.race_nudge", reversedKeys, now)
+	}()
+	close(start)
+	wg.Wait()
+
+	require.NoError(t, nerr1)
+	require.NoError(t, nerr2)
+	assert.GreaterOrEqual(t, n1+n2, itemCount)
+
+	claimStart := make(chan struct{})
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-claimStart
+		c1, cerr1 = cs.ClaimDurableItems(ctx, "test.race_nudge", "replica-1", now, now.Add(time.Minute), 25)
+	}()
+	go func() {
+		defer wg.Done()
+		<-claimStart
+		c2, cerr2 = cs.ClaimDurableItems(ctx, "test.race_nudge", "replica-2", now, now.Add(time.Minute), 25)
+	}()
+	close(claimStart)
+	wg.Wait()
+
+	require.NoError(t, cerr1)
+	require.NoError(t, cerr2)
+	assert.Equal(t, itemCount, len(c1)+len(c2))
+	seen := make(map[int64]bool, itemCount)
+	for _, r := range append(c1, c2...) {
+		assert.False(t, seen[r.Seq], "seq %d claimed twice", r.Seq)
+		seen[r.Seq] = true
+	}
+}

@@ -723,3 +723,46 @@ func (s *DurableQueueStore) DurableQueueStats(ctx context.Context, kind, project
 	}
 	return st, nil
 }
+
+// NudgeDurableItems implements store.DurableQueueStore.
+func (s *DurableQueueStore) NudgeDurableItems(ctx context.Context, kind string, dedupKeys []string, now time.Time) (int, error) {
+	if err := store.ValidateDurableQueueKind(kind); err != nil {
+		return 0, err
+	}
+	if len(dedupKeys) > store.MaxDurableQueueNudgeKeys {
+		return 0, fmt.Errorf("%w: durable queue nudge key count %d exceeds %d", store.ErrInvalidInput, len(dedupKeys), store.MaxDurableQueueNudgeKeys)
+	}
+	if len(dedupKeys) == 0 {
+		return 0, nil
+	}
+	unique := make([]string, 0, len(dedupKeys))
+	for _, k := range dedupKeys {
+		if k != "" && len(k) <= store.MaxDurableQueueDedupKeyLen {
+			unique = append(unique, k)
+		}
+	}
+	if len(unique) == 0 {
+		return 0, nil
+	}
+	slices.Sort(unique)
+	unique = slices.Compact(unique)
+
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+	n, err := s.client.DurableQueueItem.Update().
+		Where(
+			durablequeueitem.KindEQ(kind),
+			durablequeueitem.DedupKeyIn(unique...),
+			queueItemUnleased(now),
+			durablequeueitem.NextAttemptAtGT(now),
+		).
+		SetNextAttemptAt(now).
+		Save(ctx)
+	if err != nil {
+		return 0, markTransient(mapError(err))
+	}
+	return n, nil
+}

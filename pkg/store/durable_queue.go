@@ -20,11 +20,12 @@ import (
 	"time"
 )
 
-// Durable queue column bounds (stage1-design §4.5).
+// Durable queue column and operation bounds (stage1-design §4.5, stage2-design §6.2).
 const (
 	MaxDurableQueueKindLen        = 64
 	MaxDurableQueueDedupKeyLen    = 256
 	MaxDurableQueueLastErrorBytes = 256
+	MaxDurableQueueNudgeKeys      = 1000
 )
 
 // ErrDuplicate is returned by EnqueueDurableItem (and durablequeue.Queue.Enqueue)
@@ -159,4 +160,14 @@ type DurableQueueStore interface {
 	// ClaimDurableItems and TrimDurableQueue) for kind. When projectID is "",
 	// all projects are sampled.
 	DurableQueueStats(ctx context.Context, kind, projectID string, now time.Time) (DurableQueueStats, error)
+	// NudgeDurableItems sets next_attempt_at = now for unleased items
+	// (lease_until IS NULL || lease_until < now) of kind matching dedupKeys
+	// whose current next_attempt_at is strictly after now, returning the
+	// number of rows updated. Items already due at or before now keep their
+	// earlier next_attempt_at so (next_attempt_at, seq) claim ordering never
+	// delays them; leased items and other kinds/keys are untouched; unknown
+	// keys are ignored; and an empty dedupKeys slice is a no-op. Zero now
+	// defaults to time.Now().UTC(). Returns ErrInvalidInput when kind is
+	// invalid or len(dedupKeys) > MaxDurableQueueNudgeKeys.
+	NudgeDurableItems(ctx context.Context, kind string, dedupKeys []string, now time.Time) (int, error)
 }
