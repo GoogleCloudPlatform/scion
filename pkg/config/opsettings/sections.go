@@ -112,11 +112,13 @@ type EndpointsSettings struct {
 // GitHubAppSettings holds the Layer-1 GitHub App configuration.
 // Secret material (private_key, webhook_secret) is excluded — stays in secret backend.
 type GitHubAppSettings struct {
-	AppID           int64  `json:"app_id,omitempty"`
-	APIBaseURL      string `json:"api_base_url,omitempty"`
-	WebhooksEnabled *bool  `json:"webhooks_enabled,omitempty"`
-	InstallationURL string `json:"installation_url,omitempty"`
-	PrivateKeyPath  string `json:"private_key_path,omitempty"`
+	AppID                 int64    `json:"app_id,omitempty"`
+	APIBaseURL            string   `json:"api_base_url,omitempty"`
+	WebhooksEnabled       *bool    `json:"webhooks_enabled,omitempty"`
+	InstallationURL       string   `json:"installation_url,omitempty"`
+	PrivateKeyPath        string   `json:"private_key_path,omitempty"`
+	AppSlug               string   `json:"app_slug,omitempty"`
+	CommandMentionAliases []string `json:"command_mention_aliases,omitempty"`
 }
 
 // NotificationsSettings holds the Layer-1 notification channel configuration.

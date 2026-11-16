@@ -1568,13 +1568,15 @@ type V1ServerConfig struct {
 
 // V1GitHubAppConfig holds the GitHub App configuration in settings.yaml format.
 type V1GitHubAppConfig struct {
-	AppID           int64  `json:"app_id,omitempty" yaml:"app_id,omitempty" koanf:"app_id"`
-	PrivateKeyPath  string `json:"private_key_path,omitempty" yaml:"private_key_path,omitempty" koanf:"private_key_path"`
-	PrivateKey      string `json:"private_key,omitempty" yaml:"private_key,omitempty" koanf:"private_key"`
-	WebhookSecret   string `json:"webhook_secret,omitempty" yaml:"webhook_secret,omitempty" koanf:"webhook_secret"`
-	APIBaseURL      string `json:"api_base_url,omitempty" yaml:"api_base_url,omitempty" koanf:"api_base_url"`
-	WebhooksEnabled bool   `json:"webhooks_enabled,omitempty" yaml:"webhooks_enabled,omitempty" koanf:"webhooks_enabled"`
-	InstallationURL string `json:"installation_url,omitempty" yaml:"installation_url,omitempty" koanf:"installation_url"`
+	AppID                 int64    `json:"app_id,omitempty" yaml:"app_id,omitempty" koanf:"app_id"`
+	PrivateKeyPath        string   `json:"private_key_path,omitempty" yaml:"private_key_path,omitempty" koanf:"private_key_path"`
+	PrivateKey            string   `json:"private_key,omitempty" yaml:"private_key,omitempty" koanf:"private_key"`
+	WebhookSecret         string   `json:"webhook_secret,omitempty" yaml:"webhook_secret,omitempty" koanf:"webhook_secret"`
+	APIBaseURL            string   `json:"api_base_url,omitempty" yaml:"api_base_url,omitempty" koanf:"api_base_url"`
+	WebhooksEnabled       bool     `json:"webhooks_enabled,omitempty" yaml:"webhooks_enabled,omitempty" koanf:"webhooks_enabled"`
+	InstallationURL       string   `json:"installation_url,omitempty" yaml:"installation_url,omitempty" koanf:"installation_url"`
+	AppSlug               string   `json:"app_slug,omitempty" yaml:"app_slug,omitempty" koanf:"app_slug"`
+	CommandMentionAliases []string `json:"command_mention_aliases,omitempty" yaml:"command_mention_aliases,omitempty" koanf:"command_mention_aliases"`
 }
 
 // V1SchedulerConfig holds configuration for the Hub background task scheduler.
@@ -4939,6 +4941,8 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		gc.GitHubApp.APIBaseURL = v1.GitHubApp.APIBaseURL
 		gc.GitHubApp.WebhooksEnabled = v1.GitHubApp.WebhooksEnabled
 		gc.GitHubApp.InstallationURL = v1.GitHubApp.InstallationURL
+		gc.GitHubApp.AppSlug = v1.GitHubApp.AppSlug
+		gc.GitHubApp.CommandMentionAliases = append([]string(nil), v1.GitHubApp.CommandMentionAliases...)
 	}
 
 	// Scheduler
@@ -5285,15 +5289,17 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 
 	// GitHub App config
-	if gc.GitHubApp.AppID != 0 {
+	if gc.GitHubApp.AppID != 0 || gc.GitHubApp.AppSlug != "" || len(gc.GitHubApp.CommandMentionAliases) > 0 {
 		v1.GitHubApp = &V1GitHubAppConfig{
-			AppID:           gc.GitHubApp.AppID,
-			PrivateKeyPath:  gc.GitHubApp.PrivateKeyPath,
-			PrivateKey:      gc.GitHubApp.PrivateKey,
-			WebhookSecret:   gc.GitHubApp.WebhookSecret,
-			APIBaseURL:      gc.GitHubApp.APIBaseURL,
-			WebhooksEnabled: gc.GitHubApp.WebhooksEnabled,
-			InstallationURL: gc.GitHubApp.InstallationURL,
+			AppID:                 gc.GitHubApp.AppID,
+			PrivateKeyPath:        gc.GitHubApp.PrivateKeyPath,
+			PrivateKey:            gc.GitHubApp.PrivateKey,
+			WebhookSecret:         gc.GitHubApp.WebhookSecret,
+			APIBaseURL:            gc.GitHubApp.APIBaseURL,
+			WebhooksEnabled:       gc.GitHubApp.WebhooksEnabled,
+			InstallationURL:       gc.GitHubApp.InstallationURL,
+			AppSlug:               gc.GitHubApp.AppSlug,
+			CommandMentionAliases: append([]string(nil), gc.GitHubApp.CommandMentionAliases...),
 		}
 	}
 

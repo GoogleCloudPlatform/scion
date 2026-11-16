@@ -266,11 +266,13 @@ func layer1LiveProbes(t *testing.T) map[string]layer1LiveProbe {
 			observe: func(s *Server, _ *OperationalSettings) any { return s.contentURLAllowSameSiteLiveValue() }},
 
 		// github_app
-		"server.github_app":                  {section: "github_app", base: ghBase + `}`, doc: ghBase + `,"api_base_url":"https://ghe.example.com/api/v3"}`, observe: observeGitHubApp},
-		"server.github_app.api_base_url":     {section: "github_app", base: ghBase + `}`, doc: ghBase + `,"api_base_url":"https://ghe.example.com/api/v3"}`, observe: observeGitHubApp},
-		"server.github_app.webhooks_enabled": {section: "github_app", base: ghBase + `}`, doc: ghBase + `,"webhooks_enabled":true}`, observe: observeGitHubApp},
-		"server.github_app.installation_url": {section: "github_app", base: ghBase + `}`, doc: ghBase + `,"installation_url":"https://github.com/apps/probe/installations/new"}`, observe: observeGitHubApp},
-		"server.github_app.private_key_path": {section: "github_app", base: ghBase + `}`, doc: ghBase + `,"private_key_path":"/etc/probe.pem"}`, observe: observeGitHubApp},
+		"server.github_app":                         {section: "github_app", base: ghBase + `}`, doc: ghBase + `,"api_base_url":"https://ghe.example.com/api/v3"}`, observe: observeGitHubApp},
+		"server.github_app.api_base_url":            {section: "github_app", base: ghBase + `}`, doc: ghBase + `,"api_base_url":"https://ghe.example.com/api/v3"}`, observe: observeGitHubApp},
+		"server.github_app.webhooks_enabled":        {section: "github_app", base: ghBase + `}`, doc: ghBase + `,"webhooks_enabled":true}`, observe: observeGitHubApp},
+		"server.github_app.installation_url":        {section: "github_app", base: ghBase + `}`, doc: ghBase + `,"installation_url":"https://github.com/apps/probe/installations/new"}`, observe: observeGitHubApp},
+		"server.github_app.private_key_path":        {section: "github_app", base: ghBase + `}`, doc: ghBase + `,"private_key_path":"/etc/probe.pem"}`, observe: observeGitHubApp},
+		"server.github_app.app_slug":                {section: "github_app", base: ghBase + `}`, doc: ghBase + `,"app_slug":"scion-probe"}`, observe: observeGitHubApp},
+		"server.github_app.command_mention_aliases": {section: "github_app", base: ghBase + `}`, doc: ghBase + `,"command_mention_aliases":["scion","scion-probe"]}`, observe: observeGitHubApp},
 
 		// notifications
 		"server.notification_channels": {section: "notifications",

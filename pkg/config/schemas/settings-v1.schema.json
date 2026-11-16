@@ -3039,7 +3039,9 @@
         "webhook_secret": { "type": "string", "x-sensitive": true },
         "api_base_url": { "type": "string" },
         "webhooks_enabled": { "type": "boolean" },
-        "installation_url": { "type": "string" }
+        "installation_url": { "type": "string" },
+        "app_slug": { "type": "string", "description": "Optional override for the GitHub App slug used in @mention command detection when GET /app is unavailable." },
+        "command_mention_aliases": { "type": "array", "items": { "type": "string" }, "description": "Additional @mention handles (without leading @) accepted alongside the GitHub App slug for slash-command detection." }
       },
       "additionalProperties": false
     },

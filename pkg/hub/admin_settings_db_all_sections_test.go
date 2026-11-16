@@ -125,11 +125,13 @@ var layer1RoundTripSamples = map[string]string{
 	"image_registry":                         `"registry.example.com/scion"`,
 	"server.hub.monitoring_dashboard_url":    `"https://dash.example.com/d/hub"`,
 	// github_app
-	"server.github_app.app_id":           `12345`,
-	"server.github_app.api_base_url":     `"https://api.github.com"`,
-	"server.github_app.webhooks_enabled": `true`,
-	"server.github_app.installation_url": `"https://github.com/apps/scion/installations/new"`,
-	"server.github_app.private_key_path": `"/etc/scion/gh.pem"`,
+	"server.github_app.app_id":                  `12345`,
+	"server.github_app.api_base_url":            `"https://api.github.com"`,
+	"server.github_app.webhooks_enabled":        `true`,
+	"server.github_app.installation_url":        `"https://github.com/apps/scion/installations/new"`,
+	"server.github_app.private_key_path":        `"/etc/scion/gh.pem"`,
+	"server.github_app.app_slug":                `"scion-enterprise"`,
+	"server.github_app.command_mention_aliases": `["scion","scion-bot"]`,
 	// notifications
 	"server.notification_channels": `[{"type":"slack","params":{"channel":"#ops"}}]`,
 	// project_defaults (PUT /api/v1/admin/project-defaults)

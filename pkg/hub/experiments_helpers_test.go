@@ -44,7 +44,7 @@ func testExperiment(name string, def bool, layers ...experiments.Layer) experime
 func routeRegistrationExperiments(t *testing.T) []experiments.Experiment {
 	t.Helper()
 	var out []experiments.Experiment
-	for _, name := range []string{experiments.FederationProjectVisitors, experiments.SecretRotation, experiments.WelcomeProject} {
+	for _, name := range []string{experiments.FederationProjectVisitors, experiments.SecretRotation, experiments.WelcomeProject, experiments.GitHubTriggers} {
 		exp, ok := experiments.Default().Lookup(name)
 		if !ok {
 			t.Fatalf("experiment %q is not in the production registry", name)

@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -246,17 +247,28 @@ func (s *Server) persistGitHubAppConfigToDB(ctx context.Context, ops *Operationa
 	// who pre-staged the path in settings.yaml before creating the App would
 	// otherwise have it overwritten with "" by this first write. Fall back to
 	// the merged snapshot, which sees the path regardless of app_id.
+	snap := ops.Snapshot()
 	privateKeyPath := cfg.PrivateKeyPath
 	if privateKeyPath == "" {
-		privateKeyPath = ops.Snapshot().GitHubPrivateKeyPath
+		privateKeyPath = snap.GitHubPrivateKeyPath
+	}
+	appSlug := cfg.AppSlug
+	if appSlug == "" {
+		appSlug = snap.GitHubAppSlug
+	}
+	aliases := slices.Clone(cfg.CommandMentionAliases)
+	if len(aliases) == 0 {
+		aliases = slices.Clone(snap.GitHubCommandMentionAliases)
 	}
 
 	doc := &opsettings.GitHubAppSettings{
-		AppID:           cfg.AppID,
-		APIBaseURL:      cfg.APIBaseURL,
-		WebhooksEnabled: &webhooksEnabled,
-		InstallationURL: cfg.InstallationURL,
-		PrivateKeyPath:  privateKeyPath,
+		AppID:                 cfg.AppID,
+		APIBaseURL:            cfg.APIBaseURL,
+		WebhooksEnabled:       &webhooksEnabled,
+		InstallationURL:       cfg.InstallationURL,
+		PrivateKeyPath:        privateKeyPath,
+		AppSlug:               appSlug,
+		CommandMentionAliases: aliases,
 	}
 
 	docBytes, err := json.Marshal(doc)
@@ -318,6 +330,12 @@ func (s *Server) persistGitHubAppConfig(cfg GitHubAppServerConfig) error {
 	}
 	if cfg.InstallationURL != "" {
 		ghApp["installation_url"] = cfg.InstallationURL
+	}
+	if cfg.AppSlug != "" {
+		ghApp["app_slug"] = cfg.AppSlug
+	}
+	if len(cfg.CommandMentionAliases) > 0 {
+		ghApp["command_mention_aliases"] = slices.Clone(cfg.CommandMentionAliases)
 	}
 
 	if len(ghApp) > 0 {

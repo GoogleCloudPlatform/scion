@@ -50,27 +50,41 @@ type startupLayer1Values struct {
 // githubAppPublicConfig is the part of GitHubAppServerConfig that the
 // github_app settings section owns.
 type githubAppPublicConfig struct {
-	AppID           int64
-	APIBaseURL      string
-	WebhooksEnabled bool
-	InstallationURL string
-	PrivateKeyPath  string
+	AppID                 int64
+	APIBaseURL            string
+	WebhooksEnabled       bool
+	InstallationURL       string
+	PrivateKeyPath        string
+	AppSlug               string
+	CommandMentionAliases []string
+}
+
+func (a githubAppPublicConfig) equal(b githubAppPublicConfig) bool {
+	return a.AppID == b.AppID &&
+		a.APIBaseURL == b.APIBaseURL &&
+		a.WebhooksEnabled == b.WebhooksEnabled &&
+		a.InstallationURL == b.InstallationURL &&
+		a.PrivateKeyPath == b.PrivateKeyPath &&
+		a.AppSlug == b.AppSlug &&
+		slices.Equal(a.CommandMentionAliases, b.CommandMentionAliases)
 }
 
 func githubAppPublicFrom(c GitHubAppServerConfig) githubAppPublicConfig {
 	return githubAppPublicConfig{
-		AppID:           c.AppID,
-		APIBaseURL:      c.APIBaseURL,
-		WebhooksEnabled: c.WebhooksEnabled,
-		InstallationURL: c.InstallationURL,
-		PrivateKeyPath:  c.PrivateKeyPath,
+		AppID:                 c.AppID,
+		APIBaseURL:            c.APIBaseURL,
+		WebhooksEnabled:       c.WebhooksEnabled,
+		InstallationURL:       c.InstallationURL,
+		PrivateKeyPath:        c.PrivateKeyPath,
+		AppSlug:               c.AppSlug,
+		CommandMentionAliases: slices.Clone(c.CommandMentionAliases),
 	}
 }
 
 // setGitHubAppPublicLocked writes the non-secret GitHub App fields into
 // s.config. It reports whether anything changed. Callers hold s.mu.
 func (s *Server) setGitHubAppPublicLocked(g githubAppPublicConfig) bool {
-	if githubAppPublicFrom(s.config.GitHubAppConfig) == g {
+	if githubAppPublicFrom(s.config.GitHubAppConfig).equal(g) {
 		return false
 	}
 	s.config.GitHubAppConfig.AppID = g.AppID
@@ -78,6 +92,8 @@ func (s *Server) setGitHubAppPublicLocked(g githubAppPublicConfig) bool {
 	s.config.GitHubAppConfig.WebhooksEnabled = g.WebhooksEnabled
 	s.config.GitHubAppConfig.InstallationURL = g.InstallationURL
 	s.config.GitHubAppConfig.PrivateKeyPath = g.PrivateKeyPath
+	s.config.GitHubAppConfig.AppSlug = g.AppSlug
+	s.config.GitHubAppConfig.CommandMentionAliases = slices.Clone(g.CommandMentionAliases)
 	return true
 }
 
