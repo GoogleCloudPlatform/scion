@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -211,28 +212,36 @@ func setupTriggersTestFixtureOnServer(t *testing.T, srv *Server, s store.Store) 
 
 func (f *triggersTestFixture) doWebhookEndpoint(t *testing.T, identity Identity, subPath, method string, body any) *httptest.ResponseRecorder {
 	t.Helper()
+	routeSubPath, query, hasQuery := strings.Cut(subPath, "?")
 	path := "/api/v1/projects/" + f.projectID + "/webhook-endpoints"
-	if subPath != "" {
-		path += "/" + subPath
+	if routeSubPath != "" {
+		path += "/" + routeSubPath
+	}
+	if hasQuery {
+		path += "?" + query
 	}
 	req := authoredRequest(t, identity, method, path, body)
 	rec := httptest.NewRecorder()
-	f.srv.handleWebhookEndpoints(rec, req, f.projectID, subPath)
+	f.srv.handleWebhookEndpoints(rec, req, f.projectID, routeSubPath)
 	return rec
 }
 
 func (f *triggersTestFixture) doTriggerWithHeaders(t *testing.T, identity Identity, subPath, method string, body any, headers map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
+	routeSubPath, query, hasQuery := strings.Cut(subPath, "?")
 	path := "/api/v1/projects/" + f.projectID + "/triggers"
-	if subPath != "" {
-		path += "/" + subPath
+	if routeSubPath != "" {
+		path += "/" + routeSubPath
+	}
+	if hasQuery {
+		path += "?" + query
 	}
 	req := authoredRequest(t, identity, method, path, body)
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
 	rec := httptest.NewRecorder()
-	f.srv.handleTriggers(rec, req, f.projectID, subPath)
+	f.srv.handleTriggers(rec, req, f.projectID, routeSubPath)
 	return rec
 }
 
