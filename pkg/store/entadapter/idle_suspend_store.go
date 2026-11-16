@@ -28,10 +28,10 @@ import (
 // blocks delivery/auto-wake if a hub replica crashes mid-stop.
 const defaultIdleSuspendClaimTTL = 45 * time.Second
 
-// checkIdleSuspendRow evaluates cond against a locked ent.Agent row at now.
-// When allowClaimed is false (ClaimIdleSuspend), an already-active
-// idle_suspend_claim_until also rejects so two sweeps never double-claim.
-func checkIdleSuspendRow(row *ent.Agent, cond store.IdleSuspendCondition, now time.Time, allowClaimed bool) bool {
+// checkIdleSuspendRow evaluates cond against a locked ent.Agent row at
+// store-clock now for ClaimIdleSuspend. An already-active
+// idle_suspend_claim_until rejects so two sweeps never double-claim.
+func checkIdleSuspendRow(row *ent.Agent, cond store.IdleSuspendCondition, now time.Time) bool {
 	if row == nil {
 		return false
 	}
@@ -41,7 +41,7 @@ func checkIdleSuspendRow(row *ent.Agent, cond store.IdleSuspendCondition, now ti
 	if !claimEligible(row) || heldClaimError(row) != nil {
 		return false
 	}
-	if !allowClaimed && row.IdleSuspendClaimUntil != nil && now.Before(*row.IdleSuspendClaimUntil) {
+	if row.IdleSuspendClaimUntil != nil && now.Before(*row.IdleSuspendClaimUntil) {
 		return false
 	}
 	if row.Phase != string(state.PhaseRunning) {
@@ -74,10 +74,36 @@ func checkIdleSuspendRow(row *ent.Agent, cond store.IdleSuspendCondition, now ti
 	return true
 }
 
+// checkIdleSuspendCommit evaluates AgentStatusUpdate.IfIdleSuspendCommit on the
+// locked row at store-clock now after ClaimIdleSuspend committed and
+// DispatchAgentStop succeeded. Phase may be running, stopping or stopped
+// (because the container reports its own shutdown before DispatchAgentStop
+// returns), and activity, live-work, or delivery timestamps are not re-checked.
+func checkIdleSuspendCommit(row *ent.Agent, claimUntil, now time.Time) bool {
+	if row == nil {
+		return false
+	}
+	if row.DeletedAt != nil || store.DeletionHoldsRow(row.DeletionState, row.DeletionLeaseAt, now) {
+		return false
+	}
+	if !claimEligible(row) || heldClaimError(row) != nil {
+		return false
+	}
+	if row.IdleSuspendClaimUntil == nil || !claimTime(*row.IdleSuspendClaimUntil).Equal(claimTime(claimUntil)) {
+		return false
+	}
+	switch state.Phase(row.Phase) {
+	case state.PhaseRunning, state.PhaseStopping, state.PhaseStopped:
+		return true
+	default:
+		return false
+	}
+}
+
 // ClaimIdleSuspend implements store.AgentStore.ClaimIdleSuspend.
-func (s *AgentStore) ClaimIdleSuspend(ctx context.Context, agentID string, cond store.IdleSuspendCondition) (store.RunIntent, time.Time, error) {
+func (s *AgentStore) ClaimIdleSuspend(ctx context.Context, agentID string, cond store.IdleSuspendCondition) (store.RunIntent, time.Time, time.Time, error) {
 	if cond.Activity == "" || cond.ActivitySince.IsZero() {
-		return "", time.Time{}, fmt.Errorf("%w: incomplete idle-suspend condition", store.ErrInvalidInput)
+		return "", time.Time{}, time.Time{}, fmt.Errorf("%w: incomplete idle-suspend condition", store.ErrInvalidInput)
 	}
 	ttl := cond.ClaimTTL
 	if ttl <= 0 {
@@ -85,32 +111,34 @@ func (s *AgentStore) ClaimIdleSuspend(ctx context.Context, agentID string, cond 
 	}
 
 	var (
-		prior store.RunIntent
-		at    time.Time
+		prior      store.RunIntent
+		at         time.Time
+		claimUntil time.Time
 	)
 	err := s.withLockedAgent(ctx, agentID, func(ctx context.Context, c *ent.Client, row *ent.Agent, now time.Time) (bool, error) {
-		if !checkIdleSuspendRow(row, cond, now, false) {
+		if !checkIdleSuspendRow(row, cond, now) {
 			return false, store.ErrIdleSuspendPrecondition
 		}
 		if row.RunIntent != nil {
 			prior = store.RunIntent(*row.RunIntent)
 		}
 		at = nextRunIntentAt(now, row.RunIntentAt)
+		claimUntil = now.Add(ttl)
 		if _, err := c.Agent.UpdateOneID(row.ID).
 			SetUpdated(row.Updated).
 			SetRunIntent(string(store.RunIntentStopped)).
 			SetRunIntentAt(at).
 			SetRunIntentMarkedAt(at).
-			SetIdleSuspendClaimUntil(now.Add(ttl)).
+			SetIdleSuspendClaimUntil(claimUntil).
 			Save(ctx); err != nil {
 			return false, mapError(err)
 		}
 		return true, nil
 	})
 	if err != nil {
-		return "", time.Time{}, err
+		return "", time.Time{}, time.Time{}, err
 	}
-	return prior, at, nil
+	return prior, at, claimUntil, nil
 }
 
 // ClearIdleSuspendClaim implements store.AgentStore.ClearIdleSuspendClaim.

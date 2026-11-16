@@ -972,9 +972,9 @@ func TestIdleSuspend_PostReadTOCTOU(t *testing.T) {
 
 			got, err := s.GetAgent(ctx, snapshot.ID)
 			require.NoError(t, err)
-			assert.Equal(t, string(state.PhaseRunning), got.Phase, "recordStopStatus IfIdleSuspend must reject when %s lands during stop", tc.name)
-			assert.Empty(t, got.SuspendReason)
-			assert.Equal(t, store.RunIntentRunning, got.RunIntent)
+			assert.Equal(t, string(state.PhaseSuspended), got.Phase, "once ClaimIdleSuspend commits and DispatchAgentStop succeeds, %s during stop must still record suspended(idle)", tc.name)
+			assert.Equal(t, string(state.SuspendReasonIdle), got.SuspendReason)
+			assert.Equal(t, store.RunIntentStopped, got.RunIntent, "run_intent must never revert to running after a successful DispatchAgentStop")
 			assert.False(t, got.HasActiveIdleSuspendClaim(time.Now()))
 		})
 	}
@@ -1224,5 +1224,106 @@ func TestIdleSuspend_RetainedActivityDisplayAndSuspendedOnlyNotification(t *test
 			require.Len(t, notifs, 1)
 			assert.Equal(t, "SUSPENDED", notifs[0].Status)
 		})
+	}
+}
+
+// containerShutdownReportDispatcher simulates sciontool init's graceful
+// SIGTERM shutdown reports landing while DispatchAgentStop waits for the
+// container to exit, and also supports subsequent wake starts and DM dispatches.
+type containerShutdownReportDispatcher struct {
+	wakeTrackingDispatcher
+	postStopped bool
+	store       store.Store
+	t           *testing.T
+}
+
+func (d *containerShutdownReportDispatcher) DispatchAgentStop(ctx context.Context, agent *store.Agent) error {
+	// 1. reportStoppingToHub (cmd/sciontool/commands/init.go:2017).
+	require.NoError(d.t, d.store.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+		Phase:              string(state.PhaseStopping),
+		Message:            "Agent shutting down",
+		ReportSource:       store.StatusReportSourceAgent,
+		ReportRunID:        agent.RunID,
+		ReportAgentToken:   true,
+		GuardReincarnation: true,
+	}))
+	if d.postStopped {
+		// 2. finalStatusUpdate(exitOutcome{signaled: true}) (init.go:2222).
+		require.NoError(d.t, d.store.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+			Phase:              string(state.PhaseStopped),
+			Message:            "Agent stopped",
+			ExitReason:         string(state.ExitReasonSignaled),
+			ReportSource:       store.StatusReportSourceAgent,
+			ReportRunID:        agent.RunID,
+			ReportAgentToken:   true,
+			GuardReincarnation: true,
+		}))
+	}
+	return nil
+}
+
+func TestIdleSuspend_ContainerStoppingAndStoppedReports(t *testing.T) {
+	for _, postStopped := range []bool{false, true} {
+		mode := "stopping_only"
+		if postStopped {
+			mode = "stopping_then_stopped"
+		}
+		for _, act := range []state.Activity{state.ActivityIdle, state.ActivityCompleted, state.ActivityHarnessError} {
+			t.Run(mode+"/"+string(act), func(t *testing.T) {
+				ctx := context.Background()
+				srv, s, sender, target := createWakeDMFixtures(t, string(state.PhaseRunning))
+				disp := &containerShutdownReportDispatcher{
+					postStopped: postStopped,
+					store:       s,
+					t:           t,
+				}
+				srv.SetDispatcher(disp)
+				t.Cleanup(srv.waitAutoWakeIdle)
+				enableIdleSweepForTest(t, srv, 15*time.Minute)
+
+				_, err := s.SetRunIntent(ctx, target.ID, store.RunIntentRunning)
+				require.NoError(t, err)
+				require.NoError(t, s.UpdateAgentStatus(ctx, target.ID, store.AgentStatusUpdate{
+					Phase:    string(state.PhaseRunning),
+					Activity: string(act),
+				}))
+				now := time.Now().UTC()
+				db := s.(*entadapter.CompositeStore).DB()
+				_, err = db.ExecContext(ctx,
+					"UPDATE agents SET run_id = ?, activity_since = ?, last_seen = ? WHERE id = ?",
+					"run-shutdown-"+mode+"-"+string(act), now.Add(-20*time.Minute), now.Add(-15*time.Second), target.ID,
+				)
+				require.NoError(t, err)
+
+				srv.agentIdleSuspendHandler()(ctx)
+				srv.waitAutoSuspendIdle()
+
+				suspended, err := s.GetAgent(ctx, target.ID)
+				require.NoError(t, err)
+				assert.Equal(t, string(state.PhaseSuspended), suspended.Phase)
+				assert.Equal(t, string(act), suspended.Activity, "retained pre-suspend activity must survive %s shutdown reports", mode)
+				assert.Equal(t, string(state.SuspendReasonIdle), suspended.SuspendReason)
+				assert.Equal(t, store.RunIntentStopped, suspended.RunIntent)
+				assert.False(t, suspended.HasActiveIdleSuspendClaim(time.Now()))
+
+				// Later DM without --wake must auto-wake and deliver.
+				res, dmErr := srv.ExecuteAgentDM(ctx, awAgentDMInput(sender, suspended, "wake after container shutdown report"))
+				require.Nil(t, dmErr)
+				require.Equal(t, AgentDMAccepted, res.Outcome)
+				require.True(t, res.Woke)
+
+				require.Len(t, disp.getStartCalls(), 1)
+				assert.True(t, disp.getStartCalls()[0].Continue)
+				msgs := disp.getMessageCalls()
+				require.Len(t, msgs, 1)
+				assert.Equal(t, "wake after container shutdown report", msgs[0].Message)
+
+				woken, err := s.GetAgent(ctx, target.ID)
+				require.NoError(t, err)
+				assert.Equal(t, string(state.PhaseRunning), woken.Phase)
+				assert.Empty(t, woken.SuspendReason)
+				assert.Equal(t, store.RunIntentRunning, woken.RunIntent)
+			})
+		}
 	}
 }

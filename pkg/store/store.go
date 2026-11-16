@@ -877,7 +877,8 @@ type AgentStore interface {
 	// suspend-eligible activity (state.SuspendEligibleActivities) whose
 	// activity_since is non-NULL and predates cutoff, whose heartbeat
 	// (last_seen) is at or after heartbeatRecency, and whose
-	// last_live_process_at is NULL or predates liveWorkCutoff. Offline agents
+	// last_live_process_at is NULL or predates liveWorkCutoff, ordered by
+	// activity_since ascending (and id ascending as tiebreaker). Offline agents
 	// and rows with a NULL activity_since are never returned. A positive limit
 	// bounds the number of rows returned.
 	ListIdleSuspendCandidates(ctx context.Context, cutoff, heartbeatRecency, liveWorkCutoff time.Time, limit int) ([]Agent, error)
@@ -887,9 +888,9 @@ type AgentStore interface {
 	// past grace, recent heartbeat when HeartbeatRecency > 0, stale live work,
 	// no start/delete/reincarnation claim, and no delivery since
 	// activity_since), swaps run_intent to stopped, and sets
-	// idle_suspend_claim_until to now+cond.ClaimTTL. Returns
-	// ErrIdleSuspendPrecondition when any guard fails.
-	ClaimIdleSuspend(ctx context.Context, agentID string, cond IdleSuspendCondition) (prior RunIntent, at time.Time, err error)
+	// idle_suspend_claim_until to storeNow+cond.ClaimTTL (returned as
+	// claimUntil). Returns ErrIdleSuspendPrecondition when any guard fails.
+	ClaimIdleSuspend(ctx context.Context, agentID string, cond IdleSuspendCondition) (prior RunIntent, at time.Time, claimUntil time.Time, err error)
 
 	// ClearIdleSuspendClaim clears idle_suspend_claim_until on agentID.
 	ClearIdleSuspendClaim(ctx context.Context, agentID string) error
@@ -1605,13 +1606,21 @@ type AgentStatusUpdate struct {
 	// stop dispatched for run X sets it to X, so the stop never marks a
 	// newer run stopped. Internal to the hub — json:"-".
 	IfRunID string `json:"-"`
-	// IfIdleSuspend, when non-nil, makes the update conditional on the locked
-	// row still satisfying the idle-suspend guards (phase=running, matching
-	// run_id/activity/activity_since, stale live work, no delivery since
-	// activity_since, and no start/delete/reincarnation claim); otherwise
-	// UpdateAgentStatus returns ErrIdleSuspendPrecondition and writes nothing.
-	// Internal to the hub — json:"-".
-	IfIdleSuspend *IdleSuspendCondition `json:"-"`
+	// IfIdleSuspendCommit, when non-nil, guards the post-stop status write of
+	// an idle auto-suspend whose ClaimIdleSuspend already committed: the locked
+	// row must not be soft-deleted, held by a deletion or reincarnation, or
+	// claimed by a start, must be in phase running, stopping or stopped, and
+	// must still hold the idle_suspend_claim_until timestamp recorded by
+	// ClaimIdleSuspend; otherwise UpdateAgentStatus returns
+	// ErrIdleSuspendPrecondition and writes nothing. Internal to the hub —
+	// json:"-".
+	IfIdleSuspendCommit *time.Time `json:"-"`
+	// RetainedActivity, when non-empty on a Phase=suspended update, supplies
+	// the pre-stop retained activity (idle, completed or harness_error) to
+	// preserve if the container's own shutdown report already transitioned the
+	// row to stopped and cleared current.Activity before the hub's post-stop
+	// status write ran. Internal to the hub — json:"-".
+	RetainedActivity string `json:"-"`
 	// IfNoStartClaim, when true, makes the update conditional on no start
 	// claim being held on the locked row; otherwise UpdateAgentStatus returns
 	// ErrClaimPredicate and writes nothing. Internal to the hub — json:"-".

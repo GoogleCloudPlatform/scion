@@ -19,14 +19,14 @@ import (
 	"time"
 )
 
-// ErrIdleSuspendPrecondition is returned by ClaimIdleSuspend and
-// UpdateAgentStatus (when IfIdleSuspend is set) when the agent no longer
-// satisfies the idle-suspend guards on the locked row.
+// ErrIdleSuspendPrecondition is returned by ClaimIdleSuspend (when the agent
+// no longer satisfies the idle-suspend guards on the locked row) and by
+// UpdateAgentStatus (when IfIdleSuspendCommit is set and the claimed run is no
+// longer eligible to record the idle suspension).
 var ErrIdleSuspendPrecondition = fmt.Errorf("agent no longer eligible for idle suspend: %w", ErrVersionConflict)
 
 // IdleSuspendCondition captures the snapshot and staleness preconditions that
-// must still hold on the locked agent row for an idle auto-suspend to claim or
-// commit.
+// must still hold on the locked agent row for ClaimIdleSuspend to commit.
 type IdleSuspendCondition struct {
 	RunID            string
 	Activity         string

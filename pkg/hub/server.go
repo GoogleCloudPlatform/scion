@@ -1515,7 +1515,7 @@ func (s *Server) recordStopStatus(ctx context.Context, agentID, runID, action st
 		return false, nil
 	}
 	if errors.Is(err, store.ErrIdleSuspendPrecondition) {
-		s.agentLifecycleLog.Info("Agent "+action+": idle-suspend precondition no longer held after stop dispatch; not recording the "+action,
+		s.agentLifecycleLog.Info("Agent "+action+": idle-suspend commit guard rejected after stop dispatch; not recording the "+action,
 			"agent_id", agentID, "stopped_run_id", runID)
 		return false, nil
 	}
@@ -6083,13 +6083,18 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 		s.checkEphemeralWorkspaceBeforeStop(ctx, dispatcher, agent, false)
 	}
 	supersedes := agent.StartClaimID
+	preStopRetained := string(state.RetainedSuspendActivity(
+		state.Activity(agent.Activity),
+		state.Activity(agent.StalledFromActivity),
+	))
 	var (
 		priorIntent store.RunIntent
 		intentAt    time.Time
+		claimUntil  time.Time
 		claimedIdle bool
 	)
 	if reason == state.SuspendReasonIdle {
-		priorIntent, intentAt, err = s.claimIdleSuspend(ctx, agent, idleCond)
+		priorIntent, intentAt, claimUntil, err = s.claimIdleSuspend(ctx, agent, idleCond)
 		if errors.Is(err, store.ErrIdleSuspendPrecondition) {
 			s.clearWorkspaceAtStop(ctx, agent)
 			slog.Info("Scheduler: skipping idle auto-suspend; precondition lost before stop",
@@ -6155,19 +6160,19 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 	}
 
 	statusUpdate := store.AgentStatusUpdate{
-		Phase:           string(state.PhaseSuspended),
-		ContainerStatus: "stopped",
-		Activity:        "",
-		SuspendReason:   string(reason),
+		Phase:            string(state.PhaseSuspended),
+		ContainerStatus:  "stopped",
+		Activity:         "",
+		RetainedActivity: preStopRetained,
+		SuspendReason:    string(reason),
 	}
 	if reason == state.SuspendReasonIdle {
-		stopCond := idleCond
-		stopCond.HeartbeatRecency = 0
-		statusUpdate.IfIdleSuspend = &stopCond
+		statusUpdate.IfIdleSuspendCommit = &claimUntil
 	}
-	// Only while the row still holds the run the stop was dispatched
-	// for (ptone/scion#2550) and, for idle auto-suspend, still satisfies
-	// the idle-suspend guards.
+	// ClaimIdleSuspend is the single commit point for idle auto-suspend: once
+	// DispatchAgentStop succeeds, the stop is irreversible and run_intent is
+	// never reverted to running. Only a run change, delete/reincarnation, or
+	// foreign start claim skips recording phase=suspended.
 	recorded, err := s.recordStopStatus(ctx, agent.ID, stopRunID, "auto-suspend", statusUpdate)
 	// The op covers the dispatch and the status write only: it ends here,
 	// before the claim and quota releases and the publish below.
@@ -6185,12 +6190,6 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 		return false
 	}
 	if !recorded {
-		if reason == state.SuspendReasonIdle && priorIntent == store.RunIntentRunning {
-			if _, rerr := s.store.RevertRunIntent(ctx, agent.ID, store.RunIntentStopped, intentAt, store.RunIntentRunning); rerr != nil {
-				slog.Error("Scheduler: auto-suspend intent revert failed",
-					"agent_id", agent.ID, "agent_name", agent.Name, "error", rerr)
-			}
-		}
 		releaseClaim()
 		return false
 	}
@@ -6210,6 +6209,9 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 	s.revokeSuspendedRunDelegationGrantsBestEffort(ctx, agent.ID, stopRunID)
 
 	s.syncAgentAfterStopRecord(ctx, agent, string(state.PhaseSuspended), string(reason))
+	if fresh, gerr := s.store.GetAgent(ctx, agent.ID); gerr == nil && fresh != nil {
+		agent.Activity = fresh.Activity
+	}
 	// A suspended agent has no running container: release its
 	// max_agents_per_broker reservation (ptone/scion#1963) and its
 	// max_agents_per_project one (ptone/scion#6033), mirroring

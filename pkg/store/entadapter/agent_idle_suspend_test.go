@@ -102,14 +102,15 @@ func TestAgentStore_ListIdleSuspendCandidates_Predicates(t *testing.T) {
 		require.NoError(t, err)
 	}
 
+	oldestPast := now.Add(-30 * time.Minute)
 	past := now.Add(-20 * time.Minute)
 	recent := now.Add(-5 * time.Minute)
 
-	// 1. Eligible baseline (NULL last_live_process_at).
+	// 1. Eligible baseline (oldest activity_since, NULL last_live_process_at).
 	eligible := makeIdle("eligible", now.Add(-30*time.Second))
-	setSince(eligible.ID, &past)
+	setSince(eligible.ID, &oldestPast)
 
-	// 1b. Eligible with stale last_live_process_at (< liveWorkCutoff).
+	// 1b. Eligible with stale last_live_process_at (< liveWorkCutoff), newer activity_since.
 	staleLiveWork := makeIdle("stale-live-work", now.Add(-30*time.Second))
 	_, err := s.client.Agent.UpdateOneID(uuid.MustParse(staleLiveWork.ID)).
 		SetActivitySince(past).
@@ -171,12 +172,13 @@ func TestAgentStore_ListIdleSuspendCandidates_Predicates(t *testing.T) {
 	for _, a := range got {
 		gotIDs = append(gotIDs, a.ID)
 	}
-	assert.ElementsMatch(t, []string{eligible.ID, staleLiveWork.ID}, gotIDs)
+	assert.Equal(t, []string{eligible.ID, staleLiveWork.ID}, gotIDs, "candidates must be ordered by activity_since ASC")
 
-	// 10. Positive limit bounds the returned slice.
+	// 10. Positive limit bounds the returned slice, picking the oldest activity_since first.
 	limited, err := s.ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, 1)
 	require.NoError(t, err)
 	require.Len(t, limited, 1)
+	assert.Equal(t, eligible.ID, limited[0].ID)
 }
 
 func TestAgentStore_ClaimIdleSuspend_AndDeliveryHandshake(t *testing.T) {
@@ -217,38 +219,84 @@ func TestAgentStore_ClaimIdleSuspend_AndDeliveryHandshake(t *testing.T) {
 		require.NotNil(t, marked.LastDeliveryAt)
 		assert.False(t, marked.HasActiveIdleSuspendClaim(time.Now()))
 
-		_, _, err = s.ClaimIdleSuspend(ctx, a.ID, cond)
+		_, _, _, err = s.ClaimIdleSuspend(ctx, a.ID, cond)
 		assert.ErrorIs(t, err, store.ErrIdleSuspendPrecondition)
 	})
 
-	t.Run("claim before delivery leaves claim visible and preserves final UpdateAgentStatus CAS", func(t *testing.T) {
+	t.Run("claim before delivery leaves claim visible and commits across stopping and stopped reports", func(t *testing.T) {
 		a, cond := makeEligible("claim-first")
-		prior, at, err := s.ClaimIdleSuspend(ctx, a.ID, cond)
+		prior, at, claimUntil, err := s.ClaimIdleSuspend(ctx, a.ID, cond)
 		require.NoError(t, err)
 		assert.Equal(t, store.RunIntentRunning, prior)
 		assert.False(t, at.IsZero())
+		assert.False(t, claimUntil.IsZero())
 
 		marked, err := s.MarkAgentDelivery(ctx, a.ID)
 		require.NoError(t, err)
 		assert.True(t, marked.HasActiveIdleSuspendClaim(time.Now()), "delivery after claim must observe active claim")
-		assert.Nil(t, marked.LastDeliveryAt, "delivery while claimed must not poison final stop CAS")
+		assert.Nil(t, marked.LastDeliveryAt, "delivery while claimed must not stamp last_delivery_at")
 
-		stopCond := cond
-		stopCond.HeartbeatRecency = 0
+		// Simulate container's stopping + stopped reports arriving before recordStopStatus.
 		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
-			Phase:         string(state.PhaseSuspended),
-			SuspendReason: string(state.SuspendReasonIdle),
-			IfIdleSuspend: &stopCond,
+			Phase:              string(state.PhaseStopping),
+			Message:            "Agent shutting down",
+			ReportSource:       store.StatusReportSourceAgent,
+			ReportRunID:        a.RunID,
+			ReportAgentToken:   true,
+			GuardReincarnation: true,
+		}))
+		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+			Phase:              string(state.PhaseStopped),
+			Message:            "Agent stopped",
+			ExitReason:         string(state.ExitReasonSignaled),
+			ReportSource:       store.StatusReportSourceAgent,
+			ReportRunID:        a.RunID,
+			ReportAgentToken:   true,
+			GuardReincarnation: true,
+		}))
+
+		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+			Phase:               string(state.PhaseSuspended),
+			RetainedActivity:    string(state.ActivityIdle),
+			SuspendReason:       string(state.SuspendReasonIdle),
+			IfRunID:             a.RunID,
+			IfIdleSuspendCommit: &claimUntil,
 		}))
 		require.NoError(t, s.ClearIdleSuspendClaim(ctx, a.ID))
 
 		after, err := s.GetAgent(ctx, a.ID)
 		require.NoError(t, err)
 		assert.Equal(t, string(state.PhaseSuspended), after.Phase)
-		assert.Equal(t, string(state.ActivityIdle), after.Activity, "idle-suspend write must retain pre-suspend activity")
+		assert.Equal(t, string(state.ActivityIdle), after.Activity, "idle-suspend write must restore retained pre-suspend activity after container stopped report")
 		assert.Equal(t, string(state.SuspendReasonIdle), after.SuspendReason)
 		assert.Nil(t, after.ActivitySince)
 		assert.False(t, after.HasActiveIdleSuspendClaim(time.Now()))
+	})
+
+	t.Run("IfIdleSuspendCommit rejects mismatched claim, error phase, and foreign start claim", func(t *testing.T) {
+		a, cond := makeEligible("commit-guards")
+		_, _, claimUntil, err := s.ClaimIdleSuspend(ctx, a.ID, cond)
+		require.NoError(t, err)
+
+		wrongClaim := claimUntil.Add(time.Second)
+		err = s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+			Phase:               string(state.PhaseSuspended),
+			SuspendReason:       string(state.SuspendReasonIdle),
+			IfIdleSuspendCommit: &wrongClaim,
+		})
+		assert.ErrorIs(t, err, store.ErrIdleSuspendPrecondition)
+
+		// Move row to phase=error: IfIdleSuspendCommit must not overwrite a crash.
+		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+			Phase:   string(state.PhaseError),
+			Message: "Agent crashed",
+		}))
+		err = s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+			Phase:               string(state.PhaseSuspended),
+			SuspendReason:       string(state.SuspendReasonIdle),
+			IfIdleSuspendCommit: &claimUntil,
+		})
+		assert.ErrorIs(t, err, store.ErrIdleSuspendPrecondition)
 	})
 
 	t.Run("IfNoStartClaim and IfAutoWakeReason guard conversion CAS", func(t *testing.T) {

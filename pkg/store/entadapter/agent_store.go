@@ -1705,14 +1705,20 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	if su.IfRunID != "" && current.RunID != su.IfRunID {
 		return store.ErrRunChanged
 	}
-	if su.IfNoStartClaim && (heldClaimError(current) != nil || (current.IdleSuspendClaimUntil != nil && time.Now().Before(*current.IdleSuspendClaimUntil))) {
-		return store.ErrClaimPredicate
-	}
 	if su.IfAutoWakeReason && (current.SuspendReason == nil || !state.SuspendReason(*current.SuspendReason).AutoWakes()) {
 		return store.ErrPhaseMismatch
 	}
-	if su.IfIdleSuspend != nil && !checkIdleSuspendRow(current, *su.IfIdleSuspend, time.Now(), true) {
-		return store.ErrIdleSuspendPrecondition
+	if su.IfNoStartClaim || su.IfIdleSuspendCommit != nil {
+		storeClock, err := entTxStoreNow(ctx, tx, s.dialect() == dialect.Postgres)
+		if err != nil {
+			return err
+		}
+		if su.IfNoStartClaim && (heldClaimError(current) != nil || (current.IdleSuspendClaimUntil != nil && storeClock.Before(*current.IdleSuspendClaimUntil))) {
+			return store.ErrClaimPredicate
+		}
+		if su.IfIdleSuspendCommit != nil && !checkIdleSuspendCommit(current, *su.IfIdleSuspendCommit, storeClock) {
+			return store.ErrIdleSuspendPrecondition
+		}
 	}
 
 	// The exit reason is a closed set: a value outside it is dropped here,
@@ -1917,11 +1923,17 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	} else if strings.EqualFold(su.Phase, string(state.PhaseSuspended)) {
 		// Transitioning to suspended: preserve retained activities (completed,
 		// idle, harness_error; computed from stalled_from_activity when stalled)
-		// and clear any other activity, stall marker, and tool name.
+		// and clear any other activity, stall marker, and tool name. If the
+		// container's own shutdown report already moved the row to stopped and
+		// cleared current.Activity before the hub's post-stop suspend write ran,
+		// restore su.RetainedActivity.
 		retained := string(state.RetainedSuspendActivity(
 			state.Activity(current.Activity),
 			state.Activity(current.StalledFromActivity),
 		))
+		if retained == "" && current.Phase == string(state.PhaseStopped) && current.Activity == "" && su.RetainedActivity != "" {
+			retained = string(state.RetainedSuspendActivity(state.Activity(su.RetainedActivity), ""))
+		}
 		upd.SetActivity(retained)
 		upd.SetStalledFromActivity("")
 		upd.SetToolName("")
@@ -3104,6 +3116,32 @@ func (s *AgentStore) MarkStalledAgents(ctx context.Context, activityThreshold, h
 	return updated, nil
 }
 
+// entTxStoreNow reads the store clock inside an *ent.Tx, following storeNow
+// (launch_store.go): Postgres executes "SELECT now()" on tx's connection so
+// preconditions compare against the database transaction's clock; SQLite
+// (single-process) uses time.Now().
+func entTxStoreNow(ctx context.Context, tx *ent.Tx, isPostgres bool) (time.Time, error) {
+	if !isPostgres {
+		return time.Now(), nil
+	}
+	var rows entsql.Rows
+	if err := tx.Client().Driver().Query(ctx, "SELECT now()", []any{}, &rows); err != nil {
+		return time.Time{}, fmt.Errorf("agent store: SELECT now(): %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return time.Time{}, fmt.Errorf("agent store: SELECT now(): %w", err)
+		}
+		return time.Time{}, fmt.Errorf("agent store: SELECT now(): no row")
+	}
+	var now time.Time
+	if err := rows.Scan(&now); err != nil {
+		return time.Time{}, fmt.Errorf("agent store: SELECT now(): %w", err)
+	}
+	return now, nil
+}
+
 // ListIdleSuspendCandidates implements store.AgentStore.
 func (s *AgentStore) ListIdleSuspendCandidates(ctx context.Context, cutoff, heartbeatRecency, liveWorkCutoff time.Time, limit int) ([]store.Agent, error) {
 	q := s.client.Agent.Query().Where(
@@ -3118,6 +3156,9 @@ func (s *AgentStore) ListIdleSuspendCandidates(ctx context.Context, cutoff, hear
 			agent.LastLiveProcessAtIsNil(),
 			agent.LastLiveProcessAtLT(liveWorkCutoff.UTC()),
 		),
+	).Order(
+		ent.Asc(agent.FieldActivitySince),
+		ent.Asc(agent.FieldID),
 	)
 	if limit > 0 {
 		q = q.Limit(limit)

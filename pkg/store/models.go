@@ -290,6 +290,11 @@ type Agent struct {
 	// the start_claim_* columns; UpdateAgent and CreateAgent never write them.
 	LastDeliveryAt        *time.Time `json:"-"`
 	IdleSuspendClaimUntil *time.Time `json:"-"`
+	// IdleSuspendClaimActive is true when MarkAgentDelivery observed an
+	// unexpired IdleSuspendClaimUntil against the store clock (storeNow) on
+	// this snapshot. Populated by MarkAgentDelivery so hub callers do not
+	// compare store-clock leases against replica wall clocks.
+	IdleSuspendClaimActive bool `json:"-"`
 
 	// Launch is the computed, client-facing view of the launch_* columns
 	// above (design §3.2; see launch_view.go). It is nil unless a

@@ -603,6 +603,10 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 
 	dispatcher := s.GetDispatcher()
 	stopRunID := agent.RunID
+	preStopRetained := string(state.RetainedSuspendActivity(
+		state.Activity(agent.Activity),
+		state.Activity(agent.StalledFromActivity),
+	))
 	if dispatcher != nil && agent.RuntimeBrokerID != "" {
 		// As for stop: warn about, and record, work in an ephemeral
 		// workspace that the suspend discards (ptone/scion#3819).
@@ -627,10 +631,11 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	// reservation (ptone/scion#2550).
 	newPhase := string(state.PhaseSuspended)
 	recorded, err := s.recordStopStatus(ctx, agent.ID, stopRunID, "suspend", store.AgentStatusUpdate{
-		Phase:           newPhase,
-		ContainerStatus: "stopped",
-		Activity:        "",
-		SuspendReason:   string(state.SuspendReasonUser),
+		Phase:            newPhase,
+		ContainerStatus:  "stopped",
+		Activity:         "",
+		RetainedActivity: preStopRetained,
+		SuspendReason:    string(state.SuspendReasonUser),
 	})
 	if err != nil {
 		// The container is stopped but the write failed. Revoke the
@@ -654,6 +659,9 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	s.revokeSuspendedRunDelegationGrantsBestEffort(ctx, agent.ID, stopRunID)
 
 	s.syncAgentAfterStopRecord(ctx, agent, newPhase, string(state.SuspendReasonUser))
+	if fresh, gerr := s.store.GetAgent(ctx, agent.ID); gerr == nil && fresh != nil {
+		agent.Activity = fresh.Activity
+	}
 	// A suspended agent has no running container: release its
 	// max_agents_per_broker reservation so it stops consuming broker
 	// capacity until it is resumed (ptone/scion#1963), and its
@@ -714,15 +722,15 @@ func (s *Server) swapRunIntent(ctx context.Context, agent *store.Agent, intent s
 // claimIdleSuspend atomically checks the idle-suspend guards on the locked
 // agent row, swaps run_intent to stopped, and records an idle-suspend claim
 // lease before DispatchAgentStop runs.
-func (s *Server) claimIdleSuspend(ctx context.Context, agent *store.Agent, cond store.IdleSuspendCondition) (store.RunIntent, time.Time, error) {
-	prior, at, err := s.store.ClaimIdleSuspend(ctx, agent.ID, cond)
+func (s *Server) claimIdleSuspend(ctx context.Context, agent *store.Agent, cond store.IdleSuspendCondition) (store.RunIntent, time.Time, time.Time, error) {
+	prior, at, claimUntil, err := s.store.ClaimIdleSuspend(ctx, agent.ID, cond)
 	if err != nil {
-		return "", time.Time{}, err
+		return "", time.Time{}, time.Time{}, err
 	}
 	agent.RunIntent = store.RunIntentStopped
 	stored := at
 	agent.RunIntentAt = &stored
-	return prior, at, nil
+	return prior, at, claimUntil, nil
 }
 
 // AgentLifecycleStartRequest is the optional JSON body for the "start"
