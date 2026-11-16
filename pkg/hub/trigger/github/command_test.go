@@ -228,6 +228,48 @@ func TestParseCommand_Grammar(t *testing.T) {
 				HasCommand: false,
 			},
 		},
+		{
+			name: "single-line HTML comment is ignored",
+			body: "<!-- @scion /review -->",
+			slug: "scion",
+			want: CommandMatch{
+				Mentioned:  false,
+				HasCommand: false,
+			},
+		},
+		{
+			name: "PR template multi-line HTML comments ignored when left untouched",
+			body: "## Summary\n<!--\nDescribe what changed and why.\nTo request an automated pass, write:\n@scion /review\nor @scion /plan\n-->\n\n## Testing\n<!-- @scion /validate --all -->\nRan unit tests locally.",
+			slug: "scion",
+			want: CommandMatch{
+				Mentioned:  false,
+				HasCommand: false,
+			},
+		},
+		{
+			name: "PR template multi-line HTML comments ignored while real command below matches",
+			body: "<!--\nTemplate instructions:\n@scion /plan should be ignored inside this comment\n-->\nImplements webhook normaliser.\n\n<!-- inline hint: @scion /fix --> @scion /review focus on parser",
+			slug: "scion",
+			want: CommandMatch{
+				Mentioned:   true,
+				HasCommand:  true,
+				Command:     "review",
+				CommandArgs: "focus on parser",
+				CommandLine: "<!-- inline hint: @scion /fix --> @scion /review focus on parser",
+			},
+		},
+		{
+			name: "unclosed HTML comment ignores through EOF while inline-code arrow does not open comment",
+			body: "Note: write `<!--` to start an HTML comment.\n@scion /validate quick\n<!-- unclosed comment\n@scion /review ignored",
+			slug: "scion",
+			want: CommandMatch{
+				Mentioned:   true,
+				HasCommand:  true,
+				Command:     "validate",
+				CommandArgs: "quick",
+				CommandLine: "@scion /validate quick",
+			},
+		},
 	}
 
 	for _, tc := range tests {

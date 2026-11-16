@@ -77,9 +77,9 @@ func buildHandleRunes(slug string, aliases []string) [][]rune {
 }
 
 // ParseCommand parses an app-mention command out of body using slug and aliases (§5.6).
-// Fenced code blocks, inline backtick code spans, and '>' blockquote lines are
-// skipped using CommonMark prose rules. The first matching command in reading
-// order wins.
+// Fenced code blocks, inline backtick code spans, '>' blockquote lines, and
+// '<!-- ... -->' HTML comments are skipped. The first matching command in
+// reading order wins.
 func ParseCommand(body, slug string, aliases []string, maxArgsBytes, maxLineBytes int) CommandMatch {
 	if maxArgsBytes <= 0 {
 		maxArgsBytes = MaxCommandArgsBytes
@@ -94,14 +94,14 @@ func ParseCommand(body, slug string, aliases []string, maxArgsBytes, maxLineByte
 
 	text := normalizeNewlines(body)
 	lines := strings.Split(text, "\n")
-	prose := proseLines(lines)
+	scans := buildProseLineScans(lines)
 
 	var out CommandMatch
 	for i, line := range lines {
-		if !prose[i] || !strings.ContainsRune(line, '@') {
+		if scans[i].runes == nil || !strings.ContainsRune(line, '@') {
 			continue
 		}
-		mentioned, cmd, args, hasCmd := scanProseLine(line, handles)
+		mentioned, cmd, args, hasCmd := scanProseLine(scans[i].runes, scans[i].nonProse, handles)
 		if mentioned {
 			out.Mentioned = true
 		}
@@ -118,15 +118,7 @@ func ParseCommand(body, slug string, aliases []string, maxArgsBytes, maxLineByte
 	return out
 }
 
-func scanProseLine(line string, handles [][]rune) (mentioned bool, cmd, args string, hasCmd bool) {
-	runes := []rune(line)
-	inCode := make([]bool, len(runes))
-	for _, span := range inlineCodeSpans(runes) {
-		for k := span[0]; k < span[1]; k++ {
-			inCode[k] = true
-		}
-	}
-
+func scanProseLine(runes []rune, inCode []bool, handles [][]rune) (mentioned bool, cmd, args string, hasCmd bool) {
 	for i := 0; i < len(runes); i++ {
 		if runes[i] != '@' || inCode[i] {
 			continue
@@ -289,16 +281,25 @@ func mentionTrailingPunctOrSpace(runes []rune, idx int) bool {
 		next == '*' || next == '~' || next == '>'
 }
 
-// CommonMark prose and inline-code helpers below (proseLines, fenceIndentWidth,
-// openingFence, closesFence, byteRunLength, inlineCodeSpans, findBacktickRun)
-// are copied from pkg/messages/mentions.go (proseLines, fenceIndentWidth,
-// openingFence, closesFence, runLength, inlineCodeSpans, findBacktickRun) to
-// preserve this package's stdlib-only leaf invariant. Mirror CommonMark fixes
-// between pkg/messages/mentions.go and this file.
-func proseLines(lines []string) []bool {
-	prose := make([]bool, len(lines))
+// CommonMark prose and inline-code helpers below (fenceIndentWidth,
+// openingFence, closesFence, byteRunLength, findBacktickRun) are copied from
+// pkg/messages/mentions.go (proseLines, fenceIndentWidth, openingFence,
+// closesFence, runLength, inlineCodeSpans, findBacktickRun) to preserve this
+// package's stdlib-only leaf invariant, extended in buildProseLineScans to
+// mask '<!-- ... -->' HTML comments used in GitHub PR and issue templates.
+// Mirror CommonMark fixes between pkg/messages/mentions.go and this file.
+
+type proseLineScan struct {
+	runes    []rune
+	nonProse []bool
+}
+
+func buildProseLineScans(lines []string) []proseLineScan {
+	out := make([]proseLineScan, len(lines))
 	var fenceChar byte
 	var fenceLen int
+	var inHTMLComment bool
+
 	for i, line := range lines {
 		trimmed := strings.TrimLeft(line, " \t")
 		if fenceChar != 0 {
@@ -308,17 +309,104 @@ func proseLines(lines []string) []bool {
 			}
 			continue
 		}
-		if ch, length, ok := openingFence(trimmed); ok && fenceIndentWidth(line) <= 3 {
-			fenceChar = ch
-			fenceLen = length
-			continue
+
+		runes := []rune(line)
+		nonProse := make([]bool, len(runes))
+		pos := 0
+
+		if inHTMLComment {
+			closeEnd := findHTMLCommentClose(runes, 0)
+			if closeEnd == -1 {
+				continue
+			}
+			for k := 0; k < closeEnd; k++ {
+				nonProse[k] = true
+			}
+			inHTMLComment = false
+			pos = closeEnd
+		} else {
+			if ch, length, ok := openingFence(trimmed); ok && fenceIndentWidth(line) <= 3 {
+				fenceChar = ch
+				fenceLen = length
+				continue
+			}
+			if strings.HasPrefix(trimmed, ">") {
+				continue
+			}
 		}
-		if strings.HasPrefix(trimmed, ">") {
-			continue
+
+		for pos < len(runes) {
+			if runes[pos] == '`' {
+				openStart := pos
+				openLen := 0
+				for pos < len(runes) && runes[pos] == '`' {
+					openLen++
+					pos++
+				}
+				_, closeEnd := findBacktickRun(runes, pos, openLen)
+				if closeEnd != -1 {
+					for k := openStart; k < closeEnd; k++ {
+						nonProse[k] = true
+					}
+					pos = closeEnd
+				}
+				continue
+			}
+			if hasHTMLCommentOpen(runes, pos) {
+				// Handle self-closing degenerate HTML5 comments (<!--> and <!--->)
+				// so they do not leave inHTMLComment open across subsequent lines.
+				if pos+5 <= len(runes) && runes[pos+4] == '>' {
+					for k := pos; k < pos+5; k++ {
+						nonProse[k] = true
+					}
+					pos += 5
+					continue
+				}
+				if pos+6 <= len(runes) && runes[pos+4] == '-' && runes[pos+5] == '>' {
+					for k := pos; k < pos+6; k++ {
+						nonProse[k] = true
+					}
+					pos += 6
+					continue
+				}
+				closeEnd := findHTMLCommentClose(runes, pos+4)
+				if closeEnd != -1 {
+					for k := pos; k < closeEnd; k++ {
+						nonProse[k] = true
+					}
+					pos = closeEnd
+				} else {
+					for k := pos; k < len(runes); k++ {
+						nonProse[k] = true
+					}
+					inHTMLComment = true
+					pos = len(runes)
+				}
+				continue
+			}
+			pos++
 		}
-		prose[i] = true
+
+		out[i] = proseLineScan{runes: runes, nonProse: nonProse}
 	}
-	return prose
+	return out
+}
+
+func hasHTMLCommentOpen(runes []rune, pos int) bool {
+	return pos+4 <= len(runes) &&
+		runes[pos] == '<' &&
+		runes[pos+1] == '!' &&
+		runes[pos+2] == '-' &&
+		runes[pos+3] == '-'
+}
+
+func findHTMLCommentClose(runes []rune, from int) int {
+	for i := from; i+3 <= len(runes); i++ {
+		if runes[i] == '-' && runes[i+1] == '-' && runes[i+2] == '>' {
+			return i + 3
+		}
+	}
+	return -1
 }
 
 func fenceIndentWidth(line string) int {
@@ -371,30 +459,6 @@ func byteRunLength(s string, c byte) int {
 		n++
 	}
 	return n
-}
-
-func inlineCodeSpans(runes []rune) [][2]int {
-	var spans [][2]int
-	i := 0
-	for i < len(runes) {
-		if runes[i] != '`' {
-			i++
-			continue
-		}
-		openStart := i
-		openLen := 0
-		for i < len(runes) && runes[i] == '`' {
-			openLen++
-			i++
-		}
-		closeStart, closeEnd := findBacktickRun(runes, i, openLen)
-		if closeStart == -1 {
-			continue
-		}
-		spans = append(spans, [2]int{openStart, closeEnd})
-		i = closeEnd
-	}
-	return spans
 }
 
 func findBacktickRun(runes []rune, from, want int) (start, end int) {
