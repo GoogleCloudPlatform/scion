@@ -379,6 +379,16 @@ const (
 	// or per owner. Nothing is stored.
 	ErrCodeSecretPendingCap = "secret_pending_cap"
 
+	// ErrCodeInternalSecret is returned (409) when a caller attempts to
+	// overwrite, patch, or delete a SecretTypeInternal row through the
+	// user-facing secrets API.
+	ErrCodeInternalSecret = "internal_secret"
+
+	// ErrCodeLimitExceeded is returned (409) when creating, enabling, or
+	// resuming a resource would exceed a configured per-project or per-source
+	// cap.
+	ErrCodeLimitExceeded = "limit_exceeded"
+
 	// ErrCodeInvalidRoleSet is returned by PUT …/members/principals/{type}/{id}
 	// when the desired role set contains an unknown role definition ID, a
 	// non-project-scoped role, or more than one built-in membership role

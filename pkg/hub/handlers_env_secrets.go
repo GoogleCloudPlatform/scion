@@ -556,6 +556,9 @@ func (s *Server) setEnvVar(w http.ResponseWriter, r *http.Request, key string) {
 			})
 			return
 		}
+		if s.refuseInternalSecretMutation(w, ctx, key, scope, scopeID) {
+			return
+		}
 
 		input := &secret.SetSecretInput{
 			Name:          key,
@@ -619,9 +622,12 @@ func (s *Server) setEnvVar(w http.ResponseWriter, r *http.Request, key string) {
 		return
 	}
 
-	// Clean up any existing secret with same key (demotion from secret to plain)
+	// Clean up any existing secret with same key (demotion from secret to plain),
+	// except internal secrets which are never managed through env/secrets APIs.
 	if s.secretBackend != nil {
-		_ = s.secretBackend.Delete(ctx, key, scope, scopeID)
+		if isInternal, err := s.isStoredSecretInternal(ctx, key, scope, scopeID); err == nil && !isInternal {
+			_ = s.secretBackend.Delete(ctx, key, scope, scopeID)
+		}
 	}
 
 	// Mask sensitive values in response
@@ -655,19 +661,23 @@ func (s *Server) deleteEnvVar(w http.ResponseWriter, r *http.Request, key string
 
 	if err := s.store.DeleteEnvVar(ctx, key, scope, scopeID); err != nil {
 		if errors.Is(err, store.ErrNotFound) && s.secretBackend != nil {
-			// Fallback: try deleting from the secret backend
-			if secErr := s.secretBackend.Delete(ctx, key, scope, scopeID); secErr == nil {
-				w.WriteHeader(http.StatusNoContent)
-				return
+			if isInternal, intErr := s.isStoredSecretInternal(ctx, key, scope, scopeID); intErr == nil && !isInternal {
+				// Fallback: try deleting from the secret backend
+				if secErr := s.secretBackend.Delete(ctx, key, scope, scopeID); secErr == nil {
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
 			}
 		}
 		writeErrorFromErr(w, err, "")
 		return
 	}
 
-	// Also clean up any secret with the same key
+	// Also clean up any non-internal secret with the same key
 	if s.secretBackend != nil {
-		_ = s.secretBackend.Delete(ctx, key, scope, scopeID)
+		if isInternal, err := s.isStoredSecretInternal(ctx, key, scope, scopeID); err == nil && !isInternal {
+			_ = s.secretBackend.Delete(ctx, key, scope, scopeID)
+		}
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -797,6 +807,69 @@ func agentHiddenHubSecret(ctx context.Context, scope string, m secret.SecretMeta
 	}
 	m.Scope = store.ScopeHub
 	return !secret.HubSecretAgentVisible(m)
+}
+
+// withoutInternalSecrets drops rows whose SecretType is SecretTypeInternal.
+// Internal secrets (such as conduit grant signing keys and webhook endpoint
+// HMAC secrets) are never visible through user- or agent-facing secrets APIs
+// at any scope.
+func withoutInternalSecrets(metas []secret.SecretMeta) []secret.SecretMeta {
+	out := make([]secret.SecretMeta, 0, len(metas))
+	for _, m := range metas {
+		if m.SecretType == store.SecretTypeInternal {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// isStoredSecretInternal reports whether an existing secret at (key, scope,
+// scopeID) has SecretType == store.SecretTypeInternal. Both the Hub store and
+// the configured secret backend are consulted so hub-resident internal secrets
+// are guarded regardless of backend mode.
+func (s *Server) isStoredSecretInternal(ctx context.Context, key, scope, scopeID string) (bool, error) {
+	if s.store != nil {
+		sec, err := s.store.GetSecret(ctx, key, scope, scopeID)
+		switch {
+		case err == nil:
+			if sec.SecretType == store.SecretTypeInternal {
+				return true, nil
+			}
+		case errors.Is(err, store.ErrNotFound):
+		default:
+			return false, err
+		}
+	}
+	if s.secretBackend != nil {
+		meta, err := s.secretBackend.GetMeta(ctx, key, scope, scopeID)
+		switch {
+		case err == nil:
+			if meta.SecretType == store.SecretTypeInternal {
+				return true, nil
+			}
+		case errors.Is(err, store.ErrNotFound):
+		default:
+			return false, err
+		}
+	}
+	return false, nil
+}
+
+// refuseInternalSecretMutation writes a 409 internal_secret error and returns
+// true when an existing secret at (key, scope, scopeID) has SecretTypeInternal.
+func (s *Server) refuseInternalSecretMutation(w http.ResponseWriter, ctx context.Context, key, scope, scopeID string) bool {
+	isInternal, err := s.isStoredSecretInternal(ctx, key, scope, scopeID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return true
+	}
+	if isInternal {
+		writeError(w, http.StatusConflict, ErrCodeInternalSecret,
+			"internal secrets cannot be modified or deleted through the secrets API", nil)
+		return true
+	}
+	return false
 }
 
 // withoutAgentHiddenHubSecrets drops the secrets agentHiddenHubSecret hides.
@@ -941,7 +1014,7 @@ func (s *Server) listSecrets(w http.ResponseWriter, r *http.Request) {
 		writeErrorFromErr(w, err, "")
 		return
 	}
-	metas = withoutSystemOneReservedSecrets(withoutAgentHiddenHubSecrets(ctx, scope, metas))
+	metas = withoutInternalSecrets(withoutSystemOneReservedSecrets(withoutAgentHiddenHubSecrets(ctx, scope, metas)))
 	// Convert to store.Secret for response compatibility
 	secrets := make([]store.Secret, len(metas))
 	for i, m := range metas {
@@ -1003,8 +1076,12 @@ func (s *Server) getSecret(w http.ResponseWriter, r *http.Request, key string) {
 	}
 
 	meta, err := s.secretBackend.GetMeta(ctx, key, scope, scopeID)
-	if err == nil && agentHiddenHubSecret(ctx, scope, *meta) {
+	if err == nil && (meta.SecretType == store.SecretTypeInternal || agentHiddenHubSecret(ctx, scope, *meta)) {
 		// The same response as a key that does not exist.
+		err = store.ErrNotFound
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		// Also hide hub-store internal secrets when secretBackend is remote.
 		err = store.ErrNotFound
 	}
 	if err != nil {
@@ -1131,6 +1208,9 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 	if rejectSystemOneReservedSecretWrite(w, key) {
 		return
 	}
+	if s.refuseInternalSecretMutation(w, ctx, key, scope, scopeID) {
+		return
+	}
 
 	// allowProgeny is only valid on user-scoped secrets.
 	// Unlike env vars, secrets do NOT require injectionMode=always when
@@ -1222,6 +1302,10 @@ func (s *Server) patchSecretValidateAndUpdate(w http.ResponseWriter, r *http.Req
 			})
 			return
 		}
+	}
+
+	if s.refuseInternalSecretMutation(w, ctx, key, scope, scopeID) {
+		return
 	}
 
 	// Determine the effective secret type for target validation
@@ -1331,6 +1415,9 @@ func (s *Server) deleteSecret(w http.ResponseWriter, r *http.Request, key string
 	}
 	if isSystemOneReservedSecretKey(key) {
 		writeErrorFromErr(w, store.ErrNotFound, "")
+		return
+	}
+	if s.refuseInternalSecretMutation(w, ctx, key, scope, scopeID) {
 		return
 	}
 
@@ -1600,6 +1687,10 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 	if scope == store.ScopeUser {
 		allowProgeny := req.AllowProgeny != nil && *req.AllowProgeny
 		s.agentWritePendingUserSecret(w, r, agentID, projectID, scopeID, key, decoded, secretType, target, allowProgeny)
+		return
+	}
+
+	if s.refuseInternalSecretMutation(w, ctx, key, scope, scopeID) {
 		return
 	}
 
@@ -2021,6 +2112,9 @@ func (s *Server) handleScopedEnvVarByKey(w http.ResponseWriter, r *http.Request,
 				})
 				return
 			}
+			if s.refuseInternalSecretMutation(w, ctx, key, scope, scopeID) {
+				return
+			}
 			input := &secret.SetSecretInput{
 				Name:          key,
 				Value:         req.Value,
@@ -2072,7 +2166,9 @@ func (s *Server) handleScopedEnvVarByKey(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		if s.secretBackend != nil {
-			_ = s.secretBackend.Delete(ctx, key, scope, scopeID)
+			if isInternal, err := s.isStoredSecretInternal(ctx, key, scope, scopeID); err == nil && !isInternal {
+				_ = s.secretBackend.Delete(ctx, key, scope, scopeID)
+			}
 		}
 		if envVar.Sensitive {
 			envVar.Value = "********"
@@ -2086,16 +2182,20 @@ func (s *Server) handleScopedEnvVarByKey(w http.ResponseWriter, r *http.Request,
 		}
 		if err := s.store.DeleteEnvVar(ctx, key, scope, scopeID); err != nil {
 			if errors.Is(err, store.ErrNotFound) && s.secretBackend != nil {
-				if secErr := s.secretBackend.Delete(ctx, key, scope, scopeID); secErr == nil {
-					w.WriteHeader(http.StatusNoContent)
-					return
+				if isInternal, intErr := s.isStoredSecretInternal(ctx, key, scope, scopeID); intErr == nil && !isInternal {
+					if secErr := s.secretBackend.Delete(ctx, key, scope, scopeID); secErr == nil {
+						w.WriteHeader(http.StatusNoContent)
+						return
+					}
 				}
 			}
 			writeErrorFromErr(w, err, "")
 			return
 		}
 		if s.secretBackend != nil {
-			_ = s.secretBackend.Delete(ctx, key, scope, scopeID)
+			if isInternal, err := s.isStoredSecretInternal(ctx, key, scope, scopeID); err == nil && !isInternal {
+				_ = s.secretBackend.Delete(ctx, key, scope, scopeID)
+			}
 		}
 		w.WriteHeader(http.StatusNoContent)
 
@@ -2220,7 +2320,7 @@ func (s *Server) handleProjectSecrets(w http.ResponseWriter, r *http.Request, pr
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		metas = withoutSystemOneReservedSecrets(metas)
+		metas = withoutInternalSecrets(withoutSystemOneReservedSecrets(metas))
 		secrets := make([]store.Secret, len(metas))
 		for i, m := range metas {
 			secrets[i] = metaToStoreSecret(m)
@@ -2247,6 +2347,9 @@ func (s *Server) handleScopedSecretByKey(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		meta, err := s.secretBackend.GetMeta(ctx, key, scope, scopeID)
+		if err == nil && meta.SecretType == store.SecretTypeInternal {
+			err = store.ErrNotFound
+		}
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
@@ -2319,6 +2422,9 @@ func (s *Server) handleScopedSecretByKey(w http.ResponseWriter, r *http.Request,
 				return
 			}
 		}
+		if s.refuseInternalSecretMutation(w, ctx, key, scope, scopeID) {
+			return
+		}
 		input := &secret.SetSecretInput{
 			Name:          key,
 			Value:         string(decoded),
@@ -2347,6 +2453,9 @@ func (s *Server) handleScopedSecretByKey(w http.ResponseWriter, r *http.Request,
 	case http.MethodDelete:
 		if isSystemOneReservedSecretKey(key) {
 			writeErrorFromErr(w, store.ErrNotFound, "")
+			return
+		}
+		if s.refuseInternalSecretMutation(w, ctx, key, scope, scopeID) {
 			return
 		}
 		if err := s.secretBackend.Delete(ctx, key, scope, scopeID); err != nil {
@@ -3037,7 +3146,7 @@ func (s *Server) handleBrokerSecrets(w http.ResponseWriter, r *http.Request, bro
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		metas = withoutSystemOneReservedSecrets(metas)
+		metas = withoutInternalSecrets(withoutSystemOneReservedSecrets(metas))
 		secrets := make([]store.Secret, len(metas))
 		for i, m := range metas {
 			secrets[i] = metaToStoreSecret(m)

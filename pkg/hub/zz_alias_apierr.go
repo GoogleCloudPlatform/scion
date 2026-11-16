@@ -105,6 +105,8 @@ const (
 	ErrCodeSecretPendingHeldByOtherAgent    = apierr.ErrCodeSecretPendingHeldByOtherAgent
 	ErrCodeSecretPendingCap                 = apierr.ErrCodeSecretPendingCap
 	ErrCodeSecretScopeRestricted            = apierr.ErrCodeSecretScopeRestricted
+	ErrCodeInternalSecret                   = apierr.ErrCodeInternalSecret
+	ErrCodeLimitExceeded                    = apierr.ErrCodeLimitExceeded
 	ErrCodeSecurityReviewRequired           = apierr.ErrCodeSecurityReviewRequired
 	ErrCodeSendInProgress                   = apierr.ErrCodeSendInProgress
 	ErrCodeStaleAuthorizationPreview        = apierr.ErrCodeStaleAuthorizationPreview
