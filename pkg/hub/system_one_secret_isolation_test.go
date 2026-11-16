@@ -21,6 +21,7 @@ import (
 	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -59,25 +60,13 @@ func TestSystemOneSecretLifecycleAndGenericIsolation(t *testing.T) {
 	assert.Equal(t, sentinelSecret, sv.Value)
 
 	// Generic /api/v1/secrets and /api/v1/env endpoints must neither list nor
-	// read, overwrite, patch, or delete systemone.instance.<id>.
+	// read, overwrite, patch, or delete systemone.instance.<id> OR any
+	// backend-sanitized collision form (e.g. systemone-instance-<id> or
+	// SystemOne_Instance_<id> on GCP Secret Manager).
 	listRec := doRequestAsUser(t, srv, admin, http.MethodGet, "/api/v1/secrets?scope=hub", nil)
 	require.Equal(t, http.StatusOK, listRec.Code, listRec.Body.String())
 	assert.NotContains(t, listRec.Body.String(), secretKey)
 	assert.NotContains(t, listRec.Body.String(), sentinelSecret)
-
-	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, srv, admin, http.MethodGet, "/api/v1/secrets/"+secretKey+"?scope=hub", nil).Code)
-	assert.Equal(t, http.StatusBadRequest, doRequestAsUser(t, srv, admin, http.MethodPut, "/api/v1/secrets/"+secretKey+"?scope=hub", SetSecretRequest{
-		Value: base64.StdEncoding.EncodeToString([]byte("OVERWRITE_ATTEMPT")),
-	}).Code)
-	newDesc := "tamper"
-	assert.Equal(t, http.StatusBadRequest, doRequestAsUser(t, srv, admin, http.MethodPatch, "/api/v1/secrets/"+secretKey+"?scope=hub", PatchSecretRequest{
-		Description: &newDesc,
-	}).Code)
-	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, srv, admin, http.MethodDelete, "/api/v1/secrets/"+secretKey+"?scope=hub", nil).Code)
-
-	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, srv, admin, http.MethodGet, "/api/v1/env/"+secretKey+"?scope=hub", nil).Code)
-	assert.Equal(t, http.StatusBadRequest, doRequestAsUser(t, srv, admin, http.MethodPut, "/api/v1/env/"+secretKey+"?scope=hub", map[string]any{"value": "x"}).Code)
-	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, srv, admin, http.MethodDelete, "/api/v1/env/"+secretKey+"?scope=hub", nil).Code)
 
 	proj := &store.Project{
 		ID:      tid("s1-wire-proj"),
@@ -88,9 +77,34 @@ func TestSystemOneSecretLifecycleAndGenericIsolation(t *testing.T) {
 		Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, proj))
-	assert.Equal(t, http.StatusBadRequest, doRequestAsUser(t, srv, admin, http.MethodPut, "/api/v1/projects/"+proj.ID+"/secrets/"+secretKey, SetSecretRequest{
-		Value: base64.StdEncoding.EncodeToString([]byte("PROJ_OVERWRITE")),
-	}).Code)
+
+	reservedForms := []string{
+		secretKey,                                // canonical dotted: systemone.instance.<id>
+		"systemone-instance-" + instID,           // GCP SM sanitized dashed form
+		"SystemOne_Instance_" + instID,           // mixed-case / underscore form
+		"systemone\u0130instance\u0130" + instID, // U+0130 (İ) separator collision on GCP SM
+		"systemone\u212ainstance." + instID,      // U+212A (K) separator collision on GCP SM
+	}
+	newDesc := "tamper"
+	for _, candidateKey := range reservedForms {
+		esc := url.PathEscape(candidateKey)
+		assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, srv, admin, http.MethodGet, "/api/v1/secrets/"+esc+"?scope=hub", nil).Code, "GET secret %q", candidateKey)
+		assert.Equal(t, http.StatusBadRequest, doRequestAsUser(t, srv, admin, http.MethodPut, "/api/v1/secrets/"+esc+"?scope=hub", SetSecretRequest{
+			Value: base64.StdEncoding.EncodeToString([]byte("OVERWRITE_ATTEMPT")),
+		}).Code, "PUT secret %q", candidateKey)
+		assert.Equal(t, http.StatusBadRequest, doRequestAsUser(t, srv, admin, http.MethodPatch, "/api/v1/secrets/"+esc+"?scope=hub", PatchSecretRequest{
+			Description: &newDesc,
+		}).Code, "PATCH secret %q", candidateKey)
+		assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, srv, admin, http.MethodDelete, "/api/v1/secrets/"+esc+"?scope=hub", nil).Code, "DELETE secret %q", candidateKey)
+
+		assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, srv, admin, http.MethodGet, "/api/v1/env/"+esc+"?scope=hub", nil).Code, "GET env %q", candidateKey)
+		assert.Equal(t, http.StatusBadRequest, doRequestAsUser(t, srv, admin, http.MethodPut, "/api/v1/env/"+esc+"?scope=hub", map[string]any{"value": "x"}).Code, "PUT env %q", candidateKey)
+		assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, srv, admin, http.MethodDelete, "/api/v1/env/"+esc+"?scope=hub", nil).Code, "DELETE env %q", candidateKey)
+
+		assert.Equal(t, http.StatusBadRequest, doRequestAsUser(t, srv, admin, http.MethodPut, "/api/v1/projects/"+proj.ID+"/secrets/"+esc, SetSecretRequest{
+			Value: base64.StdEncoding.EncodeToString([]byte("PROJ_OVERWRITE")),
+		}).Code, "PUT project secret %q", candidateKey)
+	}
 
 	// Stored internal secret remains intact.
 	svAfter, err := localBackend.Get(ctx, secretKey, store.ScopeHub, srv.hubID)

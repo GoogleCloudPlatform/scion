@@ -68,6 +68,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubexport"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/reapermetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/ssemetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -2907,6 +2908,10 @@ type Server struct {
 	systemOneRuntime     *systemoneruntime.Runtime
 	systemOneRegistry    *systemoneprovider.Registry
 	systemOneRuntimeOpts []systemoneruntime.Option
+
+	// Shared process-wide rule engine and CEL dialect (rule_engine.go; Stage 1 §7.0).
+	rules      *ruleengine.Engine
+	celDialect *ruleengine.CELDialect
 }
 
 // groupsLogger returns the groups subsystem logger, falling back to
@@ -3943,6 +3948,16 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 
 	srv.experiments = cfg.Experiments
 	srv.initSystemOneRuntime()
+
+	rulesEngine, celDialect, err := newRuleEngine()
+	if err != nil {
+		return nil, fmt.Errorf("rule engine: %w", err)
+	}
+	srv.rules = rulesEngine
+	srv.celDialect = celDialect
+	if err := registerRuleConsumers(srv); err != nil {
+		return nil, fmt.Errorf("rule engine consumers: %w", err)
+	}
 
 	srv.oidcHandlers = NewOIDCHandlers(oidcDeps{srv})
 

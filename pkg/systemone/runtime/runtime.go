@@ -154,6 +154,12 @@ type EvalOptions struct {
 	// set; callers tracking an aggregate budget must enforce exhaustion before
 	// calling Evaluate and must never call Evaluate with an exhausted budget.
 	Budget time.Duration
+	// EngineMaxEvalTime optionally carries ruleengine.Budget.MaxEvalTime when
+	// Evaluate is invoked through the ruleengine Dialect (P1 brief §5). When
+	// positive, Runtime folds EngineMaxEvalTime - min(10ms, 5%) into its own
+	// deadline so errRuntimeDeadline fires before ruleengine's context deadline
+	// and passes through unchanged as FailTimeout.
+	EngineMaxEvalTime time.Duration
 }
 
 type transportKey struct {
@@ -290,18 +296,46 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 		Requested: compiled.Spec.Binding,
 	}
 
-	// Compose initial runtime-owned deadline (rule timeout, MaxEvalTime, Budget)
-	// before instance resolution; CallTimeout tightens it once inst is resolved.
+	// A pre-canceled caller context always ends immediately as FailCanceled
+	// without computing field fingerprints or performing network I/O.
+	if err := ctx.Err(); err != nil {
+		return r.finishFailed(ctx, compiled.Kind, start, eval, provider.FailCanceled)
+	}
+
+	// Compose initial runtime-owned deadline (rule timeout, MaxEvalTime, Budget,
+	// and EngineMaxEvalTime minus min(10ms, 5%)) before instance resolution;
+	// CallTimeout tightens it once inst is resolved. Latch errRuntimeDeadline
+	// across stages so once the runtime's own deadline fires, the outcome stays
+	// FailTimeout even if the parent/engine context also expires afterwards.
 	baseOwnDur := r.effectiveOwnDuration(compiled.Timeout, opts, 0)
 	ownDeadline := start.Add(baseOwnDur)
+	runCtx, runCancel := context.WithDeadlineCause(ctx, ownDeadline, errRuntimeDeadline)
+	defer runCancel()
 
-	initCtx, initCancel := context.WithDeadlineCause(ctx, ownDeadline, errRuntimeDeadline)
-	initErr := initCtx.Err()
-	initCause := context.Cause(initCtx)
-	parentErr := ctx.Err()
-	initCancel()
-	if initErr != nil || parentErr != nil {
-		return r.finishFailed(ctx, compiled.Kind, start, eval, classifyContextCause(parentErr, initCause))
+	runtimeTimedOut := false
+	latchCause := func(extraCauses ...error) error {
+		if runtimeTimedOut {
+			return errRuntimeDeadline
+		}
+		for _, c := range extraCauses {
+			if errors.Is(c, errRuntimeDeadline) {
+				runtimeTimedOut = true
+				return errRuntimeDeadline
+			}
+		}
+		rc := context.Cause(runCtx)
+		if errors.Is(rc, errRuntimeDeadline) {
+			runtimeTimedOut = true
+			return errRuntimeDeadline
+		}
+		if len(extraCauses) > 0 && extraCauses[0] != nil {
+			return extraCauses[0]
+		}
+		return rc
+	}
+
+	if runCtx.Err() != nil || ctx.Err() != nil {
+		return r.finishFailed(ctx, compiled.Kind, start, eval, classifyContextCause(ctx.Err(), latchCause()))
 	}
 
 	// Step 1: Select and validate bounded probe environment fields (AC-2, AC-3).
@@ -312,12 +346,14 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 	}
 
 	// Step 2: Resolve eligible instance and adapter (runtime-design §4.5).
-	resolveCtx, resolveCancel := context.WithDeadlineCause(ctx, ownDeadline, errRuntimeDeadline)
-	inst, adapter, caps, resolveReason := r.resolveBinding(resolveCtx, ctx, compiled, opts)
-	resolveCancel()
+	inst, adapter, caps, resolveReason := r.resolveBinding(runCtx, ctx, compiled, opts)
 	if resolveReason != "" {
+		if resolveReason == provider.FailCanceled && latchCause() == errRuntimeDeadline {
+			resolveReason = provider.FailTimeout
+		}
 		return r.finishFailed(ctx, compiled.Kind, start, eval, resolveReason)
 	}
+	_ = latchCause()
 
 	eval.ConfiguredModel = inst.Model
 
@@ -337,13 +373,12 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 	// Step 5: Tighten runtime-owned deadline with per-instance CallTimeout ceiling (§7.1).
 	attemptOwnDur := r.effectiveOwnDuration(compiled.Timeout, opts, inst.Limits.CallTimeout)
 	ownDeadline = start.Add(attemptOwnDur)
-	checkCtx, checkCancel := context.WithDeadlineCause(ctx, ownDeadline, errRuntimeDeadline)
-	checkErr := checkCtx.Err()
-	checkCause := context.Cause(checkCtx)
-	parentErr = ctx.Err()
-	checkCancel()
-	if checkErr != nil || parentErr != nil {
-		return r.finishFailed(ctx, compiled.Kind, start, eval, classifyContextCause(parentErr, checkCause))
+	attemptCtx, attemptCancel := context.WithDeadlineCause(runCtx, ownDeadline, errRuntimeDeadline)
+	defer attemptCancel()
+
+	if runtimeTimedOut || attemptCtx.Err() != nil || ctx.Err() != nil {
+		cause := latchCause(context.Cause(attemptCtx))
+		return r.finishFailed(ctx, compiled.Kind, start, eval, classifyContextCause(ctx.Err(), cause))
 	}
 
 	// Step 6: Build credential-free ModelRequest from compiled spec + selected fields only (AC-2).
@@ -352,12 +387,11 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 	transport := r.transportForInstance(inst)
 
 	attemptStart := time.Now().UTC()
-	attemptCtx, attemptCancel := context.WithDeadlineCause(ctx, ownDeadline, errRuntimeDeadline)
 	res, invokeErr, panicked := invokeSafely(attemptCtx, adapter, transport, instView, req)
 	attemptDuration := time.Since(attemptStart)
 	callerErr := ctx.Err()
 	attemptErr := attemptCtx.Err()
-	attemptCause := context.Cause(attemptCtx)
+	attemptCause := latchCause(context.Cause(attemptCtx))
 	attemptCancel()
 
 	var cleanResolvedModel string
@@ -419,7 +453,7 @@ func (r *Runtime) Evaluate(ctx context.Context, compiled *spec.Compiled, input I
 
 	// Even if Adapter.Invoke returned nil error, enforce deadline/cancel if the
 	// context expired concurrently before Invoke returned.
-	if callerErr != nil || attemptErr != nil {
+	if runtimeTimedOut || callerErr != nil || attemptErr != nil {
 		reason := classifyContextCause(callerErr, attemptCause)
 		attempt.Outcome = AttemptFailed
 		attempt.Reason = string(reason)
@@ -578,7 +612,26 @@ func (r *Runtime) effectiveOwnDuration(ruleTimeout time.Duration, opts EvalOptio
 	if opts.Budget > 0 && opts.Budget < d {
 		d = opts.Budget
 	}
+	if opts.EngineMaxEvalTime > 0 {
+		engDur := engineDeadlineWithMargin(opts.EngineMaxEvalTime)
+		if engDur < d {
+			d = engDur
+		}
+	}
 	return d
+}
+
+const maxEngineDeadlineMargin = 10 * time.Millisecond
+
+func engineDeadlineWithMargin(engineMax time.Duration) time.Duration {
+	margin := min(maxEngineDeadlineMargin, engineMax/20)
+	if margin <= 0 && engineMax > 0 {
+		margin = 1
+	}
+	if engineMax <= margin {
+		return 0
+	}
+	return engineMax - margin
 }
 
 func (r *Runtime) resolveBinding(

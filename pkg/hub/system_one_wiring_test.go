@@ -18,9 +18,11 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	smpb "cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -237,4 +239,141 @@ func TestSystemOneStartupCheckedFileBlock(t *testing.T) {
 		require.ErrorAs(t, err, &fieldErr)
 		assert.Equal(t, "server.hub.system_one.max_eval_time", fieldErr.field)
 	}
+}
+
+// smNameCaptureClient captures the exact GCP Secret Manager secret resource
+// name computed by secret.GCPBackend without making any network or store calls.
+type smNameCaptureClient struct {
+	lastDeletedName string
+}
+
+func (c *smNameCaptureClient) CreateSecret(_ context.Context, _ *smpb.CreateSecretRequest) (*smpb.Secret, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (c *smNameCaptureClient) AddSecretVersion(_ context.Context, _ *smpb.AddSecretVersionRequest) (*smpb.SecretVersion, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (c *smNameCaptureClient) AccessSecretVersion(_ context.Context, _ *smpb.AccessSecretVersionRequest) (*smpb.AccessSecretVersionResponse, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (c *smNameCaptureClient) DeleteSecret(_ context.Context, req *smpb.DeleteSecretRequest) error {
+	c.lastDeletedName = req.GetName()
+	return errors.New("stop-after-name-capture")
+}
+
+func (c *smNameCaptureClient) GetSecret(_ context.Context, _ *smpb.GetSecretRequest) (*smpb.Secret, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (c *smNameCaptureClient) Close() error { return nil }
+
+func realGCPComputedSecretID(t *testing.T, gcp *secret.GCPBackend, capture *smNameCaptureClient, key string) string {
+	t.Helper()
+	capture.lastDeletedName = ""
+	_ = gcp.Delete(context.Background(), key, store.ScopeHub, gcp.HubID())
+	const resourcePrefix = "projects/test-proj/secrets/"
+	require.True(t, strings.HasPrefix(capture.lastDeletedName, resourcePrefix),
+		"unexpected SM resource path %q for key %q", capture.lastDeletedName, key)
+	return strings.TrimPrefix(capture.lastDeletedName, resourcePrefix)
+}
+
+func TestIsSystemOneReservedSecretKey_SanitizedForms(t *testing.T) {
+	const instID = "22222222-2222-2222-2222-222222222222"
+	canonicalKey := "systemone.instance." + instID
+
+	reserved := []string{
+		canonicalKey,
+		"systemone-instance-" + instID,
+		"SystemOne_Instance_" + instID,
+		// R1: U+0130 (İ) and U+212A (K Kelvin sign) fold to ASCII 'i'/'k' under
+		// strings.ToLower, whereas GCP Secret Manager maps them to "-".
+		"systemone\u0130instance\u0130" + instID,
+		"systemone\u212ainstance." + instID,
+		"systemone\u212ainstance\u212a" + instID,
+		// Other non-ASCII letters (U+017F long s 'ſ', accented Latin 'é', Greek 'ο', Cyrillic 'о') in separator positions.
+		"systemone\u017finstance\u00e9" + instID,
+		"systemone\u03bfinstance\u043e" + instID,
+		"  SYSTEMONE/INSTANCE/abc-123  ",
+		"systemone:instance:abc-123",
+		"systemone.instance.",
+		"systemone-instance-",
+		"systemone.instance ",
+		"systemone.instance." + strings.Repeat("x", 300),
+	}
+	for _, k := range reserved {
+		assert.True(t, isSystemOneReservedSecretKey(k), "expected reserved for %q", k)
+	}
+
+	allowed := []string{
+		"",
+		"OPENAI_API_KEY",
+		"SYSTEMONE_API_KEY",
+		"systemone",
+		"systemone.instances.other",
+		"my_systemone_instance_key",
+		// Non-ASCII letters inside the word stem map to "-" on GCP SM and therefore do not collide.
+		"\u212aELVIN_API_KEY",
+		"\u0130STANBUL_API_KEY",
+		"system\u212ane.instance." + instID,
+		"sy\u017ftemone.instance." + instID,
+		"system\u00f6ne.instance." + instID,
+	}
+	for _, k := range allowed {
+		assert.False(t, isSystemOneReservedSecretKey(k), "expected non-reserved for %q", k)
+	}
+
+	// Parity check against pkg/secret's real GCPBackend secret-ID computation:
+	// 1. Unicode separator collisions (U+0130, U+212A, U+017F/U+00E9, Greek/Cyrillic)
+	//    produce the EXACT same GCP SM secret ID as canonical "systemone.instance.<id>"
+	//    and MUST all be flagged as reserved.
+	// 2. Across all reserved and allowed test vectors, any key whose real GCP SM
+	//    secret ID falls under the reserved prefix (case-insensitively, or with
+	//    "_" folded to "-") MUST be flagged as reserved (zero false negatives).
+	capture := &smNameCaptureClient{}
+	gcp := secret.NewGCPBackendWithClient(nil, capture, "test-proj", "test-hub")
+	canonicalSMID := realGCPComputedSecretID(t, gcp, capture, canonicalKey)
+	reservedSMPrefix := strings.TrimSuffix(
+		realGCPComputedSecretID(t, gcp, capture, "systemone.instance.SENTINEL"),
+		"SENTINEL",
+	)
+	require.NotEmpty(t, reservedSMPrefix)
+
+	exactCollisionInputs := []string{
+		"systemone-instance-" + instID,
+		"systemone\u0130instance\u0130" + instID,
+		"systemone\u212ainstance." + instID,
+		"systemone\u017finstance\u00e9" + instID,
+		"systemone\u03bfinstance\u043e" + instID,
+	}
+	for _, k := range exactCollisionInputs {
+		gotSMID := realGCPComputedSecretID(t, gcp, capture, k)
+		assert.Equal(t, canonicalSMID, gotSMID, "expected exact GCP SM collision for %q", k)
+		assert.True(t, isSystemOneReservedSecretKey(k), "colliding key %q must be reserved", k)
+	}
+
+	for _, k := range slices.Concat(reserved, allowed) {
+		gotSMID := realGCPComputedSecretID(t, gcp, capture, k)
+		foldedSMID := strings.ReplaceAll(strings.ToLower(gotSMID), "_", "-")
+		if strings.HasPrefix(foldedSMID, reservedSMPrefix) {
+			assert.True(t, isSystemOneReservedSecretKey(k),
+				"key %q produced GCP SM ID %q under reserved prefix %q but was not rejected",
+				k, gotSMID, reservedSMPrefix)
+		}
+	}
+
+	filtered := withoutSystemOneReservedSecrets([]secret.SecretMeta{
+		{Name: "OPENAI_API_KEY"},
+		{Name: "systemone.instance.1111"},
+		{Name: "systemone-instance-2222"},
+		{Name: "SystemOne_Instance_3333"},
+		{Name: "systemone\u0130instance\u01304444"},
+		{Name: "systemone\u212ainstance.5555"},
+		{Name: "SYSTEMONE_API_KEY"},
+	})
+	require.Len(t, filtered, 2)
+	assert.Equal(t, "OPENAI_API_KEY", filtered[0].Name)
+	assert.Equal(t, "SYSTEMONE_API_KEY", filtered[1].Name)
 }

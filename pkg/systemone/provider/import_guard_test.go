@@ -36,12 +36,17 @@ const (
 	systemOnePkg    = scionModulePath + "/pkg/systemone"
 	providerPkg     = systemOnePkg + "/provider"
 	egressPkg       = systemOnePkg + "/egress"
+	ruleEnginePkg   = scionModulePath + "/pkg/ruleengine"
+	celEnginePkg    = scionModulePath + "/pkg/celengine"
 )
 
-// TestImportGuards_SystemOneBoundaries enforces the P1 brief §4 / AC-2 package
-// dependency boundaries across the entire pkg/systemone/... tree:
-//  1. pkg/systemone/... must not import pkg/hub, pkg/messaging, pkg/store, any
-//     trigger package, or (in P1a) pkg/ruleengine / pkg/celengine.
+// TestImportGuards_SystemOneBoundaries enforces the P1 brief §§4–5 / AC-2
+// package dependency boundaries across the entire pkg/systemone/... tree:
+//  1. pkg/systemone/... must not import pkg/hub, pkg/messaging, pkg/store, or
+//     any trigger package. Only the root pkg/systemone package (the dialect
+//     bridge) may import pkg/ruleengine; subpackages (including
+//     pkg/systemone/runtime) must not import pkg/systemone, pkg/ruleengine, or
+//     pkg/celengine, and pkg/systemone must not import pkg/celengine directly.
 //  2. pkg/systemone/provider/... must not import pkg/secret, pkg/store, or
 //     pkg/systemone/runtime, and non-test files under pkg/systemone/provider/...
 //     must not reference egress.NewClient, egress.StaticBearer, or egress.With*.
@@ -56,25 +61,42 @@ func TestImportGuards_SystemOneBoundaries(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, pkgs)
 
-	systemOneForbidden := func(imp string) (string, bool) {
-		prefixes := []string{
+	systemOneForbiddenFor := func(origin string) func(importer, imp string) (string, bool) {
+		alwaysForbidden := []string{
 			scionModulePath + "/pkg/hub",
 			scionModulePath + "/pkg/messaging",
 			scionModulePath + "/pkg/store",
 			scionModulePath + "/pkg/triggers",
 			scionModulePath + "/pkg/trigger",
-			scionModulePath + "/pkg/ruleengine",
-			scionModulePath + "/pkg/celengine",
 		}
-		for _, p := range prefixes {
-			if imp == p || strings.HasPrefix(imp, p+"/") {
-				return p, true
+		return func(importer, imp string) (string, bool) {
+			for _, p := range alwaysForbidden {
+				if imp == p || strings.HasPrefix(imp, p+"/") {
+					return p, true
+				}
 			}
+			if origin != systemOnePkg {
+				if imp == systemOnePkg {
+					return systemOnePkg, true
+				}
+				for _, p := range []string{ruleEnginePkg, celEnginePkg} {
+					if imp == p || strings.HasPrefix(imp, p+"/") {
+						return p, true
+					}
+				}
+				return "", false
+			}
+			// Root pkg/systemone may import pkg/ruleengine (which itself imports
+			// pkg/celengine), but must not import pkg/celengine directly.
+			if (imp == celEnginePkg || strings.HasPrefix(imp, celEnginePkg+"/")) &&
+				importer != ruleEnginePkg && !strings.HasPrefix(importer, ruleEnginePkg+"/") {
+				return celEnginePkg, true
+			}
+			return "", false
 		}
-		return "", false
 	}
 
-	providerForbidden := func(imp string) (string, bool) {
+	providerForbidden := func(_, imp string) (string, bool) {
 		prefixes := []string{
 			scionModulePath + "/pkg/secret",
 			scionModulePath + "/pkg/store",
@@ -89,7 +111,7 @@ func TestImportGuards_SystemOneBoundaries(t *testing.T) {
 	}
 
 	for _, pkg := range pkgs {
-		chain, err := findForbiddenImportChain(root, pkg, systemOneForbidden)
+		chain, err := findForbiddenImportChain(root, pkg, systemOneForbiddenFor(pkg))
 		require.NoError(t, err)
 		if len(chain) > 0 {
 			t.Errorf("%s imports forbidden package via:\n  %s", pkg, strings.Join(chain, "\n  -> "))
@@ -127,7 +149,7 @@ func TestImportGuards_SelfTestDetectsViolations(t *testing.T) {
 	write("pkg/mid/m.go", "package mid\nimport _ \""+scionModulePath+"/pkg/secret\"\n")
 	write("pkg/secret/s.go", "package secret\n")
 
-	chain, err := findForbiddenImportChain(tmp, providerPkg+"/fake", func(imp string) (string, bool) {
+	chain, err := findForbiddenImportChain(tmp, providerPkg+"/fake", func(_, imp string) (string, bool) {
 		if imp == scionModulePath+"/pkg/secret" {
 			return imp, true
 		}
@@ -139,6 +161,37 @@ func TestImportGuards_SelfTestDetectsViolations(t *testing.T) {
 		scionModulePath + "/pkg/mid",
 		scionModulePath + "/pkg/secret",
 	}, chain)
+
+	// Root pkg/systemone -> pkg/ruleengine -> pkg/celengine is permitted, while
+	// direct pkg/systemone -> pkg/celengine and subpackage -> pkg/ruleengine are rejected.
+	write("pkg/systemone/d.go", "package systemone\nimport _ \""+ruleEnginePkg+"\"\n")
+	write("pkg/ruleengine/r.go", "package ruleengine\nimport _ \""+celEnginePkg+"\"\n")
+	write("pkg/celengine/c.go", "package celengine\n")
+	write("pkg/systemone/runtime/bad_re.go", "package runtime\nimport _ \""+ruleEnginePkg+"\"\n")
+
+	edgeGuard := func(origin string) func(importer, imp string) (string, bool) {
+		return func(importer, imp string) (string, bool) {
+			if origin != systemOnePkg && (imp == ruleEnginePkg || imp == celEnginePkg || imp == systemOnePkg) {
+				return imp, true
+			}
+			if origin == systemOnePkg && imp == celEnginePkg && importer != ruleEnginePkg {
+				return imp, true
+			}
+			return "", false
+		}
+	}
+	rootChain, err := findForbiddenImportChain(tmp, systemOnePkg, edgeGuard(systemOnePkg))
+	require.NoError(t, err)
+	assert.Empty(t, rootChain)
+
+	subChain, err := findForbiddenImportChain(tmp, systemOnePkg+"/runtime", edgeGuard(systemOnePkg+"/runtime"))
+	require.NoError(t, err)
+	assert.Equal(t, []string{systemOnePkg + "/runtime", ruleEnginePkg}, subChain)
+
+	write("pkg/systemone/direct_cel.go", "package systemone\nimport _ \""+celEnginePkg+"\"\n")
+	directCelChain, err := findForbiddenImportChain(tmp, systemOnePkg, edgeGuard(systemOnePkg))
+	require.NoError(t, err)
+	assert.Equal(t, []string{systemOnePkg, celEnginePkg}, directCelChain)
 
 	// HTTP client AST scanner allows pkg/systemone/egress, _test.go, pointer var specs,
 	// runtime egress.NewClient, and provider egress error/constant sentinels, while flagging
@@ -238,7 +291,7 @@ func discoverSubpackages(root, baseDir string) ([]string, error) {
 	return out, nil
 }
 
-func findForbiddenImportChain(root, from string, isForbidden func(string) (string, bool)) ([]string, error) {
+func findForbiddenImportChain(root, from string, isForbidden func(importer, imp string) (string, bool)) ([]string, error) {
 	prev := map[string]string{from: ""}
 	queue := []string{from}
 	for len(queue) > 0 {
@@ -253,7 +306,7 @@ func findForbiddenImportChain(root, from string, isForbidden func(string) (strin
 				continue
 			}
 			prev[imp] = curr
-			if _, bad := isForbidden(imp); bad {
+			if _, bad := isForbidden(curr, imp); bad {
 				var chain []string
 				for p := imp; p != ""; p = prev[p] {
 					chain = append([]string{p}, chain...)
