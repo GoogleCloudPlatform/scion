@@ -48,6 +48,9 @@ var (
 	triggerListSource  string
 	triggerListWebhook string
 	triggerListStatus  string
+
+	triggerHistoryLimit  int
+	triggerHistoryCursor string
 )
 
 // triggerCmd is the top-level command group for trigger and webhook endpoint management.
@@ -97,6 +100,14 @@ var triggerResumeCmd = &cobra.Command{
 	Short: "Resume a paused event trigger",
 	Args:  cobra.ExactArgs(1),
 	RunE:  runTriggerResume,
+}
+
+var triggerHistoryCmd = &cobra.Command{
+	Use:   "history <id|name>",
+	Short: "Show fire history for an event trigger",
+	Long:  `List fire history records for an event trigger, ordered newest first.`,
+	Args:  cobra.ExactArgs(1),
+	RunE:  runTriggerHistory,
 }
 
 var triggerHubContextFn = triggerHubContext
@@ -480,6 +491,88 @@ func runTriggerResume(cmd *cobra.Command, args []string) error {
 	})
 }
 
+func runTriggerHistory(cmd *cobra.Command, args []string) error {
+	if triggerHistoryLimit < 0 {
+		return newUsageError("--limit must be non-negative")
+	}
+
+	hubCtx, projectID, ctx, cancel, err := triggerHubContextFn()
+	if err != nil {
+		return err
+	}
+	defer cancel()
+
+	fullID, err := resolveTriggerIDOrName(ctx, hubCtx, projectID, args[0])
+	if err != nil {
+		return err
+	}
+
+	var opts *hubclient.ListTriggerFiresOptions
+	if triggerHistoryLimit > 0 || strings.TrimSpace(triggerHistoryCursor) != "" {
+		opts = &hubclient.ListTriggerFiresOptions{
+			Page: apiclient.PageOptions{
+				Limit:  triggerHistoryLimit,
+				Cursor: strings.TrimSpace(triggerHistoryCursor),
+			},
+		}
+	}
+
+	resp, err := hubCtx.Client.Triggers(projectID).History(ctx, fullID, opts)
+	if err != nil {
+		return wrapTriggerHubError(hubCtx, fmt.Errorf("failed to get trigger history: %w", err))
+	}
+
+	if isJSONOutput() {
+		return outputJSON(resp)
+	}
+
+	if len(resp.Fires) == 0 {
+		fmt.Println("No fire history found.")
+		return nil
+	}
+
+	fmt.Printf("FIRE HISTORY (%d of %d fires)\n", len(resp.Fires), resp.TotalCount)
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	_, _ = fmt.Fprintln(w, "ID\tEVENT\tSTATUS\tSUBJECT\tSTARTED\tFINISHED\tERROR")
+	for _, fire := range resp.Fires {
+		shortID := fire.ID
+		if len(shortID) > 8 {
+			shortID = shortID[:8]
+		}
+		shortEvent := fire.EventID
+		if len(shortEvent) > 8 {
+			shortEvent = shortEvent[:8]
+		}
+		subj := fire.Subject
+		if subj == "" {
+			subj = "-"
+		}
+		started := clitime.Ago(fire.StartedAt)
+		finished := "-"
+		if fire.FinishedAt != nil {
+			finished = clitime.Ago(*fire.FinishedAt)
+		}
+		errMsg := fire.Error
+		if errMsg == "" {
+			errMsg = "-"
+		}
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			shortID,
+			shortEvent,
+			fire.Status,
+			subj,
+			started,
+			finished,
+			errMsg,
+		)
+	}
+	_ = w.Flush()
+	if resp.NextCursor != "" {
+		fmt.Printf("\nNext cursor: %s\n", resp.NextCursor)
+	}
+	return nil
+}
+
 func triggerStatusLabel(status, reason string) string {
 	if reason == "" {
 		return status
@@ -495,6 +588,7 @@ func init() {
 	triggerCmd.AddCommand(triggerDeleteCmd)
 	triggerCmd.AddCommand(triggerPauseCmd)
 	triggerCmd.AddCommand(triggerResumeCmd)
+	triggerCmd.AddCommand(triggerHistoryCmd)
 	triggerCmd.AddCommand(triggerWebhookCmd)
 
 	triggerCreateCmd.Flags().StringVar(&triggerName, "name", "", "Trigger name (required)")
@@ -513,4 +607,7 @@ func init() {
 	triggerListCmd.Flags().StringVar(&triggerListSource, "source", "", "Filter by source kind (e.g. webhook)")
 	triggerListCmd.Flags().StringVar(&triggerListWebhook, "webhook", "", "Filter by webhook endpoint ID or name")
 	triggerListCmd.Flags().StringVar(&triggerListStatus, "status", "", "Filter by status (active or paused)")
+
+	triggerHistoryCmd.Flags().IntVar(&triggerHistoryLimit, "limit", 0, "Maximum number of fire records to return")
+	triggerHistoryCmd.Flags().StringVar(&triggerHistoryCursor, "cursor", "", "Pagination cursor from a previous history response")
 }

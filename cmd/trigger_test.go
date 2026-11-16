@@ -45,6 +45,7 @@ func TestTriggerCLIModesAndWindowsGate(t *testing.T) {
 		"trigger.delete",
 		"trigger.pause",
 		"trigger.resume",
+		"trigger.history",
 		"trigger.webhook",
 		"trigger.webhook.create",
 		"trigger.webhook.list",
@@ -78,6 +79,7 @@ func TestTriggerCLIModesAndWindowsGate(t *testing.T) {
 		{"trigger", "delete", "t1"},
 		{"trigger", "pause", "t1"},
 		{"trigger", "resume", "t1"},
+		{"trigger", "history", "t1"},
 		{"trigger", "webhook", "list"},
 		{"trigger", "webhook", "create", "--name", "wh1"},
 		{"trigger", "webhook", "delete", "wh1"},
@@ -793,4 +795,112 @@ func TestTriggerWebhookCreateHelp_SenderContractAndLimits(t *testing.T) {
 	sigHeader := fmt.Sprintf("t=%s,v1=%s", ts, hex.EncodeToString(mac.Sum(nil)))
 
 	assert.True(t, trigger.VerifyScionV1Signature(secret, now, sigHeader, delivery, event, subject, body))
+}
+
+func TestTriggerHistoryCLI_NameAndUUIDResolutionFlagsAndFormats(t *testing.T) {
+	fixedNow := time.Date(2026, 11, 16, 8, 0, 0, 0, time.UTC)
+	t.Cleanup(clitime.SetNow(func() time.Time { return fixedNow }))
+
+	origFormat := outputFormat
+	origLimit, origCursor := triggerHistoryLimit, triggerHistoryCursor
+	t.Cleanup(func() {
+		outputFormat = origFormat
+		triggerHistoryLimit, triggerHistoryCursor = origLimit, origCursor
+	})
+
+	trID := "11111111-2222-4333-8444-555555555555"
+	emptyID := "22222222-2222-4333-8444-555555555555"
+	started := fixedNow.Add(-2 * time.Minute)
+	finished := fixedNow.Add(-90 * time.Second)
+	var seenHistoryQuery string
+
+	withMockTriggerHub(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/triggers":
+			_ = json.NewEncoder(w).Encode(hubclient.ListTriggersResponse{
+				Triggers: []hubclient.Trigger{
+					{
+						ID:        trID,
+						ProjectID: "proj-1",
+						Name:      "deploy-hook",
+						Status:    "active",
+					},
+				},
+				TotalCount: 1,
+				ServerTime: fixedNow,
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/triggers/"+trID+"/history":
+			seenHistoryQuery = r.URL.RawQuery
+			_ = json.NewEncoder(w).Encode(hubclient.ListTriggerFiresResponse{
+				Fires: []hubclient.TriggerFire{
+					{
+						ID:         "33333333-4444-4555-8666-777777777777",
+						TriggerID:  trID,
+						EventID:    "44444444-5555-4666-8777-888888888888",
+						ProjectID:  "proj-1",
+						Subject:    "webhook:ep-1/payments",
+						Status:     "fired",
+						StartedAt:  started,
+						FinishedAt: &finished,
+					},
+				},
+				NextCursor: "cursor-next-1",
+				TotalCount: 3,
+				ServerTime: fixedNow,
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/proj-1/triggers/"+emptyID+"/history":
+			_ = json.NewEncoder(w).Encode(hubclient.ListTriggerFiresResponse{
+				Fires:      []hubclient.TriggerFire{},
+				TotalCount: 0,
+				ServerTime: fixedNow,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}, hubsync.CredentialKindAgentToken)
+
+	// 1. Negative --limit -> usage error.
+	triggerHistoryLimit = -1
+	triggerHistoryCursor = ""
+	err := runTriggerHistory(triggerHistoryCmd, []string{trID})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--limit must be non-negative")
+
+	// 2. Resolve by name + --limit/--cursor + human table output.
+	outputFormat = ""
+	triggerHistoryLimit = 1
+	triggerHistoryCursor = "cursor-prev-0"
+	tableOut := captureStdout(t, func() {
+		require.NoError(t, runTriggerHistory(triggerHistoryCmd, []string{"deploy-hook"}))
+	})
+	assert.Contains(t, seenHistoryQuery, "limit=1")
+	assert.Contains(t, seenHistoryQuery, "cursor=cursor-prev-0")
+	assert.Contains(t, tableOut, "FIRE HISTORY (1 of 3 fires)")
+	assert.Contains(t, tableOut, "33333333")
+	assert.Contains(t, tableOut, "44444444")
+	assert.Contains(t, tableOut, "fired")
+	assert.Contains(t, tableOut, "webhook:ep-1/payments")
+	assert.Contains(t, tableOut, "Next cursor: cursor-next-1")
+
+	// 3. JSON output by UUID.
+	outputFormat = "json"
+	triggerHistoryLimit = 0
+	triggerHistoryCursor = ""
+	jsonOut := captureStdout(t, func() {
+		require.NoError(t, runTriggerHistory(triggerHistoryCmd, []string{trID}))
+	})
+	var parsed hubclient.ListTriggerFiresResponse
+	require.NoError(t, json.Unmarshal([]byte(jsonOut), &parsed))
+	assert.Equal(t, 3, parsed.TotalCount)
+	assert.Equal(t, "cursor-next-1", parsed.NextCursor)
+	require.Len(t, parsed.Fires, 1)
+	assert.Equal(t, "fired", parsed.Fires[0].Status)
+
+	// 4. Empty history message.
+	outputFormat = ""
+	emptyOut := captureStdout(t, func() {
+		require.NoError(t, runTriggerHistory(triggerHistoryCmd, []string{emptyID}))
+	})
+	assert.Contains(t, emptyOut, "No fire history found.")
 }
