@@ -70,7 +70,8 @@ type SetEnvVarResponse struct {
 //
 // For project scope: verifies the project exists, then checks authorization. Users
 // must pass CheckAccess (with owner bypass). Agents get read-only access to
-// their own project only.
+// their own project only; project-scoped secret metadata endpoints additionally
+// require ScopeProjectSecretRead (checkAgentProjectSecretReadScope).
 //
 // For broker scope: verifies the broker exists. Brokers get self-access via
 // BrokerIdentity. Users must pass CheckAccess.
@@ -809,6 +810,21 @@ func (s *Server) handleSecrets(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// checkAgentProjectSecretReadScope verifies that agent callers reading
+// project-scoped secret metadata hold ScopeProjectSecretRead (ptone/scion#1331).
+// Non-project scopes (e.g. scope=hub) and user callers are unaffected.
+func checkAgentProjectSecretReadScope(w http.ResponseWriter, r *http.Request, scope string) bool {
+	if scope != store.ScopeProject {
+		return true
+	}
+	if agentIdent := GetAgentIdentityFromContext(r.Context()); agentIdent != nil && !agentIdent.HasScope(ScopeProjectSecretRead) {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden,
+			"Missing required scope: "+string(ScopeProjectSecretRead), nil)
+		return false
+	}
+	return true
+}
+
 func (s *Server) listSecrets(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	query := r.URL.Query()
@@ -824,6 +840,9 @@ func (s *Server) listSecrets(w http.ResponseWriter, r *http.Request) {
 
 	scopeID, ok := s.resolveEnvSecretAccess(w, r, scope, query.Get("scopeId"), false)
 	if !ok {
+		return
+	}
+	if !checkAgentProjectSecretReadScope(w, r, scope) {
 		return
 	}
 
@@ -888,6 +907,9 @@ func (s *Server) getSecret(w http.ResponseWriter, r *http.Request, key string) {
 
 	scopeID, ok := s.resolveEnvSecretAccess(w, r, scope, query.Get("scopeId"), false)
 	if !ok {
+		return
+	}
+	if !checkAgentProjectSecretReadScope(w, r, scope) {
 		return
 	}
 	if isSystemOneReservedSecretKey(key) {
@@ -2098,6 +2120,9 @@ func (s *Server) handleProjectSecrets(w http.ResponseWriter, r *http.Request, pr
 		if s.agentStandingForbidden(ctx, w, agentIdent.ID()) {
 			return
 		}
+		if !checkAgentProjectSecretReadScope(w, r, store.ScopeProject) {
+			return
+		}
 		// Agents only get read access
 	} else if userIdent, ok := identity.(UserIdentity); ok {
 		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{
@@ -2295,6 +2320,9 @@ func (s *Server) handleProjectSecretByKey(w http.ResponseWriter, r *http.Request
 			return
 		}
 		if s.agentStandingForbidden(ctx, w, agentIdent.ID()) {
+			return
+		}
+		if !checkAgentProjectSecretReadScope(w, r, store.ScopeProject) {
 			return
 		}
 	} else if userIdent, ok := identity.(UserIdentity); ok {

@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -649,14 +650,89 @@ func TestSecret_ProjectScope_AgentReadOwnProject(t *testing.T) {
 		t.Fatalf("failed to create agent: %v", err)
 	}
 
-	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, nil, nil)
+	putRec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/secrets/PROJ_SEC_KEY", SetSecretRequest{Value: "c3VwZXItc2VjcmV0"})
+	if putRec.Code != http.StatusOK {
+		t.Fatalf("failed to seed project secret: %d: %s", putRec.Code, putRec.Body.String())
+	}
+
+	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, ScopesForRole(AgentRoleFull), nil)
 	if err != nil {
 		t.Fatalf("failed to generate agent token: %v", err)
 	}
 
-	rec := doRequestWithAgentToken(t, srv, http.MethodGet, "/api/v1/projects/"+project.ID+"/secrets", nil, agentToken)
-	if rec.Code != http.StatusOK {
-		t.Errorf("expected 200 for agent reading own project secrets, got %d: %s", rec.Code, rec.Body.String())
+	for _, path := range []string{
+		"/api/v1/projects/" + project.ID + "/secrets",
+		"/api/v1/projects/" + project.ID + "/secrets/PROJ_SEC_KEY",
+		"/api/v1/secrets?scope=project&scopeId=" + project.ID,
+		"/api/v1/secrets/PROJ_SEC_KEY?scope=project&scopeId=" + project.ID,
+	} {
+		rec := doRequestWithAgentToken(t, srv, http.MethodGet, path, nil, agentToken)
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s: expected 200 for full-role agent reading own project secrets, got %d: %s", path, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestSecret_ProjectScope_AgentRequiresSecretReadScope(t *testing.T) {
+	srv, s := testServer(t)
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID: tid("project_agent_sec_scope"), Name: "Agent Secret Scope Project", Slug: "agent-secret-scope-project",
+		Created: time.Now(), Updated: time.Now(),
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	agent := &store.Agent{
+		ID: tid("agent_sec_scope_test"), Slug: "sec-scope-test-agent", Name: "Secret Scope Test Agent",
+		ProjectID: project.ID, Phase: string(state.PhaseRunning), StateVersion: 1,
+		Created: time.Now(), Updated: time.Now(),
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("failed to create agent: %v", err)
+	}
+
+	putRec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/secrets/PROJ_SEC_KEY", SetSecretRequest{Value: "c3VwZXItc2VjcmV0"})
+	if putRec.Code != http.StatusOK {
+		t.Fatalf("failed to seed project secret: %d: %s", putRec.Code, putRec.Body.String())
+	}
+
+	paths := []string{
+		"/api/v1/projects/" + project.ID + "/secrets",
+		"/api/v1/projects/" + project.ID + "/secrets/PROJ_SEC_KEY",
+		"/api/v1/secrets?scope=project&scopeId=" + project.ID,
+		"/api/v1/secrets/PROJ_SEC_KEY?scope=project&scopeId=" + project.ID,
+	}
+
+	deniedBundles := []struct {
+		name   string
+		scopes []AgentTokenScope
+	}{
+		{"status_only_default", nil},
+		{"readonly_role", ScopesForRole(AgentRoleReadOnly)},
+		{"baseline_role", ScopesForRole(AgentRoleBaseline)},
+	}
+
+	for _, bundle := range deniedBundles {
+		t.Run(bundle.name, func(t *testing.T) {
+			tok, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, bundle.scopes, nil)
+			if err != nil {
+				t.Fatalf("failed to generate agent token: %v", err)
+			}
+			for _, path := range paths {
+				rec := doRequestWithAgentToken(t, srv, http.MethodGet, path, nil, tok)
+				if rec.Code != http.StatusForbidden {
+					t.Errorf("%s (%s): expected 403 without %s, got %d: %s",
+						path, bundle.name, ScopeProjectSecretRead, rec.Code, rec.Body.String())
+				} else if !strings.Contains(rec.Body.String(), string(ScopeProjectSecretRead)) {
+					t.Errorf("%s (%s): expected error mentioning %s, got: %s",
+						path, bundle.name, ScopeProjectSecretRead, rec.Body.String())
+				}
+			}
+		})
 	}
 }
 
