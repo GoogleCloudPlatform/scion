@@ -1,0 +1,40 @@
+# Exec schedules Phase 2: recurring exec schedules + sweeper claim fairness
+
+**Date:** 2026-11-16
+**Branch:** scion/exec-schedules-2
+**Issues:** ptone/scion#7884 (Phase 2 of ptone/scion#7818), ptone/scion#8096 (recovery sweeper per-sweep de-duplication and per-agent turn rotation)
+**Design of record:** scratchpad `projects/exec-schedules/design/design.md` (AGREED, D1-D11), "Implementation Phases" -> Phase 2.
+
+## What this branch adds
+
+- **Canonical `commandSha256` (`pkg/agentcontrol/exec.go`, Phase 1 e2e Nit N1):** `agentcontrol.ExecArgvDigest` now encodes `argv` with `json.NewEncoder` and `SetEscapeHTML(false)` (stripping the trailing newline) rather than `json.Marshal`. Commands containing `&`, `<`, or `>` hash as canonical UTF-8 JSON (e.g. `["sh","-c","a & b < c > d"]`) without `\u0026`/`\u003c`/`\u003e` escaping, across both Hub redaction/run/audit digests and `sciontool` `run_id` replay binding.
+- **Recovery sweeper claim rewrite (`ptone/scion#8096`, `scheduled_exec_poll_cursors`, `ClaimScheduledExecRunsForPoll`, `sweepScheduledExecRuns`):**
+  - Additive Ent table `scheduled_exec_poll_cursors` (`target_agent_id` unique UUID, `last_polled_at` timestamp, `last_event_id`) persists each target agent's recovery turn independently of run creation, completion, or purge (`internal/fixturegen` updated).
+  - `ClaimScheduledExecRunsForPoll` queries the full eligible set of distinct `target_agent_id`s (`WHERE finished_at IS NULL AND lease_until >= now`, never capped by a 5,000-row run candidate window), orders eligible targets by their persisted cursor `(last_polled_at ASC NULLS FIRST, target_agent_id ASC)`, and walks targets round-robin claiming at most one least-recently-polled unfinished run per target per round (`FOR UPDATE SKIP LOCKED` on Postgres) while advancing both `scheduled_exec_runs.last_polled_at` and `scheduled_exec_poll_cursors.last_polled_at`.
+  - `sweepScheduledExecRuns` accumulates `claimedThisSweep` across batch claims within a single sweep and passes `union(ownedIDs(), claimedThisSweep)` to `ClaimScheduledExecRunsForPoll`, guaranteeing at most one claim and one `exec-status` call per run per sweep while keeping the semaphore pipeline, fixed leases, CAS completion, and frozen `not_after` start deadline (`P3-R1`) intact.
+- **Store overlap lease, recurring run accounting, and cross-schedule quota locks (`pkg/store`, `pkg/store/entadapter`):**
+  - `ScheduleStatusReasonTargetDeleted` (`target_deleted`, wired into `health_summary_schedules.go`) and `ScheduleRunSkipped` (`skipped`, increments `run_count` and updates `last_run_status`/`last_run_error` monotonically without incrementing `error_count`).
+  - `CreateScheduledExecRun` atomically enforces the DB overlap lease (`store.ErrScheduledExecOverlap`) when an unfinished run for the same `schedule_id` still has `lease_until > now`.
+  - `FinishScheduledExecRun` and `CompleteUnadmittedExecEvent` atomically record the parent schedule's run outcome (`success`, `skipped`, or `error` with `error_count++` on non-zero/timeout/refused/error per D6) in the same transaction as the run/event CAS.
+  - `CreateScheduledEventChecked`, `CreateScheduleChecked`, and `UpdateScheduleChecked` share `LockScheduledEventQuota` (`pg_advisory_xact_lock` per project on Postgres; serialized writer tx on SQLite) and inspect `ScheduledExecQuotaSnapshot` (pending one-shot `exec` events + active recurring `exec` schedules), enforcing the 20-per-target and 200-per-project caps atomically across one-shot create, recurring create, PATCH enable/retarget, and resume.
+- **Detached recurring `exec` fire, staleness, overlap, and `target_deleted` pause (`server.go`, `scheduled_exec_fire.go`, `scheduled_message_wake.go`, `schedule_creator_pause.go`, `agent_delete_engine.go`, `handlers_agents_core.go`):**
+  - `executeSchedule` and `runScheduleFire` (signatures unchanged) route recurring `exec` schedules through the detached `wakeFireRun` mechanism (`isExec: true`): `next_run_at` advances before launching the detached goroutine so slow `exec-start` or long-running jobs never delay other schedules in the same evaluator tick (AC 9).
+  - Recurring `ScheduledEvent` rows are inserted as `fired` with `FireAt` set to the due `sched.NextRunAt` (preserving the 10-minute missed-window staleness check on catch-up ticks while avoiding replay by `loadPersistedTimers`; crashes before run admission are recovered by `recoverUnadmittedExecEvents`).
+  - Once `CreateScheduledExecRun` succeeds, `wakeFireRun` delegates terminal outcome recording to the run store (`outcomeRecorded`), preserving `ptone/scion#7791`'s once-write and shutdown-teardown guarantees without overwriting admitted runs.
+  - `ScheduleID` is passed on `ExecStartRequest` so `sciontool`'s process-level overlap guard complements the Hub DB overlap lease (both map to `skipped` `previous run in progress`).
+  - `eventTargetsAgent` matches `exec` strictly by stored `agentId` (never `agentName`); agent deletion (`agent_delete_engine.go`) pages all active `exec` schedules in the project via `pauseExecSchedulesTargetingAgent` (before `creator_deleted` so self-targeted exec schedules record `target_deleted`), complemented by `pauseScheduleIfTargetGone` at fire time.
+  - `authzop` catalog `schedule.event.fire` gains `executeSchedule:exec`.
+- **Recurring authoring, audits, and redaction (`handlers_schedules.go`, `handlers_scheduled_exec.go`, `authorize_scheduled_exec.go`, `scheduled_exec_audit.go`):**
+  - `POST /schedules`, `PATCH /schedules/{id}`, and `POST /schedules/{id}/resume` accept `eventType: "exec"` (with convenience fields `agentId`, `agentName`, `command`, `timeoutSeconds` or raw `payload`) when `hub.exec_schedules` and `hub.conduit` are both enabled, rejecting `exec` like an unknown type when either flag is off while keeping `POST /pause` and `DELETE` operable after a flag flip.
+  - Any `PATCH` supplying `payload`/exec fields or changing future dispatch runs full `authorizeScheduledExecAuthoringOpts` before comparing encoded payload to stored bytes (preventing any argv-guessing oracle for callers without `agent.attach`), replaces initiator attribution, bumps `authorization_revision`, and enforces active quotas atomically (excluding `schedule.ID` so editing an active schedule at 20/20 succeeds).
+  - Content-free `schedule.exec.create`, `update`, `resume`, `pause`, and `delete` audit events record `schedule_id`, `authorization_revision`, `target_agent_id`, `command_sha256`, `argc`, sanitized `argv0` basename, `shell_form`, and `timeout_seconds`.
+  - Every `/schedules`, `/scheduled-events`, and `/admin/scheduler` response continues through `scheduleResponse`/`scheduledEventResponse` (`execRevealer`).
+
+## Note for Phase 4 Documentation
+
+- **`commandSha256` definition:** `commandSha256` is the lowercase hex-encoded SHA-256 digest of the canonical UTF-8 JSON array encoding of `command` (`argv`), serialized with compact separators (no whitespace) and unescaped HTML characters (`SetEscapeHTML(false)` — `&`, `<`, and `>` appear literally, never as `\u0026`, `\u003c`, or `\u003e`).
+
+## Constraints Verified
+
+- `scheduled_authority.go`, `authorize_scheduled_message.go`, `agent_standing.go` (`scheduledFireStanding`), and `messageEventHandler` are untouched; `executeSchedule` and `runScheduleFire` signatures are unchanged.
+- Additive schema changes only (`scheduled_exec_poll_cursors`); no `DowngradeFloor` bump.
