@@ -250,6 +250,12 @@ type EventScheduleRef struct {
 	FireAt  string `json:"fire_at,omitempty"`
 }
 
+// Canonical integrity-verification labels for ExternalPayload.Verified (§8.1a, §8.3).
+const (
+	ExternalVerifiedScionV1        = "scion-v1"
+	ExternalVerifiedHMACSHA256Body = "hmac-sha256-body"
+)
+
 // ExternalPayload carries integrity-verified external data inside an EventBody (§8.3).
 type ExternalPayload struct {
 	Verified  string          `json:"verified"`

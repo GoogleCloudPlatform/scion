@@ -77,6 +77,7 @@ func enableTriggersExperimentForTest(t *testing.T, srv *Server, enabled bool) {
 	reg, err := experiments.NewRegistry(active, nil)
 	require.NoError(t, err)
 	srv.experiments = reg
+	srv.reconcileTriggerDrainer(context.Background())
 }
 
 func setupTriggersTestFixture(t *testing.T) *triggersTestFixture {
