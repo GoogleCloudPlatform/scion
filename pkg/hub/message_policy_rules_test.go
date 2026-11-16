@@ -101,7 +101,9 @@ func TestMessagePolicyRules_AdmissionGuard_Target9a(t *testing.T) {
 	re := srv.RuleEngine()
 	require.NotNil(t, re)
 	require.NotNil(t, srv.CELDialect())
-	require.NotNil(t, srv.CELDialect().CELEngine(messagepolicy.EnvironmentName))
+	celEnvEng, ok := srv.CELDialect().CELEngine(messagepolicy.EnvironmentName)
+	require.True(t, ok)
+	require.NotNil(t, celEnvEng)
 
 	// 1. message_policy is admitted to "cel" and evaluates through messagepolicy.New(re).
 	assert.True(t, re.Supports(messagepolicy.ConsumerName, ruleengine.DialectCEL))
@@ -113,11 +115,10 @@ func TestMessagePolicyRules_AdmissionGuard_Target9a(t *testing.T) {
 	ev, err := messagepolicy.New(re)
 	require.NoError(t, err)
 	res := ev.EvaluateViolation(ctx, "pol-hub-1", 1, `recipient.kind != "agent" && !message.has_choices`, messagepolicy.NewActivation(messagepolicy.Facts{
-		Surface:       messagepolicy.SurfaceAgentToUser,
-		SenderKind:    "agent",
-		RecipientKind: "user",
-		MessageType:   "instruction",
-		Body:          "Pick option A or B",
+		Surface:   messagepolicy.SurfaceAgentToUser,
+		Sender:    messagepolicy.SenderFacts{Kind: "agent"},
+		Recipient: messagepolicy.RecipientFacts{Kind: "user"},
+		Message:   messagepolicy.MessageFacts{Type: "instruction", Body: "Pick option A or B"},
 	}))
 	assert.Equal(t, messagepolicy.ClassViolation, res.Class)
 
@@ -188,12 +189,12 @@ func TestMessagePolicyRules_AdmissionGuard_Target9a(t *testing.T) {
 	require.Error(t, srv.registerMessagePolicyRules(), "duplicate environment registration must fail closed")
 
 	// 7. Evaluation-time admission failure maps to ClassFailed (never pass/admit by default).
-	compiledCEL, err := ev.Compile(ctx, `true`)
+	compiledCEL, err := re.Compile(ctx, ruleengine.DialectCEL, `true`, messagepolicy.KindViolation, messagepolicy.ViolationEnvironmentRef())
 	require.NoError(t, err)
 	require.NoError(t, re.AllowConsumerDialects(messagepolicy.ConsumerName)) // revoke all dialect grants
 
 	_, evalErr := re.Evaluate(ctx, compiledCEL, ruleengine.Input{
-		Activation: messagepolicy.NewActivation(messagepolicy.Facts{Surface: messagepolicy.SurfaceAgentToUser}),
+		Activation: messagepolicy.NewActivation(messagepolicy.Facts{Surface: messagepolicy.SurfaceAgentToUser}).Map(),
 	}, ruleengine.Budget{})
 	require.Error(t, evalErr)
 	classified := messagepolicy.ClassifyError(evalErr)
