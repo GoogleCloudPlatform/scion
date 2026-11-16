@@ -89,6 +89,18 @@ func latestScheduleEvent(t *testing.T, st store.Store, projectID, schedID string
 	return res.Items[0]
 }
 
+// nextRealScheduleTick returns the current UTC wall-clock time, waiting briefly
+// if needed so it is strictly after after (e.g. a schedule's LastRunAt) without
+// ever jumping ahead of real wall-clock time.Now().
+func nextRealScheduleTick(after *time.Time) time.Time {
+	t := time.Now().UTC()
+	for after != nil && !t.After(*after) {
+		time.Sleep(time.Millisecond)
+		t = time.Now().UTC()
+	}
+	return t
+}
+
 // TestScheduledExecRecurring_OutcomesAndAccounting verifies recurring exec
 // fires through executeSchedule: exit 0, non-zero exit, >10m missed window,
 // and experiment-off skip, plus run_count / error_count / last_run_status
@@ -97,18 +109,18 @@ func TestScheduledExecRecurring_OutcomesAndAccounting(t *testing.T) {
 	f := newExecRouteFixture(t)
 	f.startAgent(t)
 	ctx := context.Background()
-	now := time.Now().UTC()
+	t1 := nextRealScheduleTick(nil)
 
 	// 1. Exit 0 -> event fired, run ok, RunCount=1, ErrorCount=0, LastRunStatus=success.
-	sc := f.createExecSchedule(t, "rec-outcomes", now.Add(-time.Second), 10, "true")
-	f.srv.executeSchedule(ctx, sc, now)
+	sc := f.createExecSchedule(t, "rec-outcomes", t1.Add(-time.Second), 10, "true")
+	f.srv.executeSchedule(ctx, sc, t1)
 	gotSc := waitScheduleRunCount(t, f.store, sc.ID, 1)
 	assert.Equal(t, 1, gotSc.RunCount)
 	assert.Equal(t, 0, gotSc.ErrorCount)
 	assert.Equal(t, store.ScheduleRunSuccess, gotSc.LastRunStatus)
 	assert.Empty(t, gotSc.LastRunError)
 	require.NotNil(t, gotSc.NextRunAt)
-	assert.True(t, gotSc.NextRunAt.After(now))
+	assert.True(t, gotSc.NextRunAt.After(t1))
 
 	evt1 := latestScheduleEvent(t, f.store, f.launched.ProjectID, sc.ID)
 	assert.Equal(t, store.ScheduledEventFired, evt1.Status)
@@ -122,8 +134,9 @@ func TestScheduledExecRecurring_OutcomesAndAccounting(t *testing.T) {
 	raw2, err := p2.encode()
 	require.NoError(t, err)
 	gotSc.Payload = raw2
-	t2 := now.Add(time.Second)
-	gotSc.NextRunAt = &t2
+	t2 := nextRealScheduleTick(gotSc.LastRunAt)
+	due2 := t2.Add(-time.Second)
+	gotSc.NextRunAt = &due2
 	f.srv.executeSchedule(ctx, gotSc, t2)
 	gotSc = waitScheduleRunCount(t, f.store, sc.ID, 2)
 	assert.Equal(t, 2, gotSc.RunCount)
@@ -132,7 +145,7 @@ func TestScheduledExecRecurring_OutcomesAndAccounting(t *testing.T) {
 	assert.Equal(t, execReasonExitStatus(7), gotSc.LastRunError)
 
 	// 3. Missed window (>10m late) -> skipped ("missed window"), no run row, ErrorCount unchanged!
-	t3 := now.Add(2 * time.Second)
+	t3 := nextRealScheduleTick(gotSc.LastRunAt)
 	staleDue := t3.Add(-15 * time.Minute)
 	gotSc.NextRunAt = &staleDue
 	f.srv.executeSchedule(ctx, gotSc, t3)
@@ -150,8 +163,9 @@ func TestScheduledExecRecurring_OutcomesAndAccounting(t *testing.T) {
 
 	// 4. Experiment turned off -> skipped ("exec schedules disabled"), ErrorCount still 1.
 	setHubExperiments(t, f.srv, map[string]bool{conduitExperiment: true, experiments.ExecSchedules: false})
-	t4 := now.Add(3 * time.Second)
-	gotSc.NextRunAt = &t4
+	t4 := nextRealScheduleTick(gotSc.LastRunAt)
+	due4 := t4.Add(-time.Second)
+	gotSc.NextRunAt = &due4
 	f.srv.executeSchedule(ctx, gotSc, t4)
 	gotSc = waitScheduleRunCount(t, f.store, sc.ID, 4)
 	assert.Equal(t, 4, gotSc.RunCount)
@@ -165,8 +179,9 @@ func TestScheduledExecRecurring_OutcomesAndAccounting(t *testing.T) {
 	raw5, err := p5.encode()
 	require.NoError(t, err)
 	gotSc.Payload = raw5
-	t5 := now.Add(4 * time.Second)
-	gotSc.NextRunAt = &t5
+	t5 := nextRealScheduleTick(gotSc.LastRunAt)
+	due5 := t5.Add(-time.Second)
+	gotSc.NextRunAt = &due5
 	f.srv.executeSchedule(ctx, gotSc, t5)
 	gotSc = waitScheduleRunCount(t, f.store, sc.ID, 5)
 	assert.Equal(t, 5, gotSc.RunCount)
@@ -185,8 +200,9 @@ func TestScheduledExecRecurring_OutcomesAndAccounting(t *testing.T) {
 		BoundaryProjectID: f.launched.ProjectID,
 	}
 	startsBefore := f.capture.count(execRoutePath(agentcontrol.RouteExecStart))
-	t6 := now.Add(5 * time.Second)
-	gotSc.NextRunAt = &t6
+	t6 := nextRealScheduleTick(gotSc.LastRunAt)
+	due6 := t6.Add(-time.Second)
+	gotSc.NextRunAt = &due6
 	f.srv.executeSchedule(ctx, gotSc, t6)
 	gotSc = waitScheduleRunCount(t, f.store, sc.ID, 6)
 	assert.Equal(t, 6, gotSc.RunCount)
@@ -235,9 +251,9 @@ func TestScheduledExecRecurring_DBOverlapAndSciontoolOverlap(t *testing.T) {
 	require.Equal(t, 1, startsBefore)
 
 	// Fire 2 while DB lease is live -> skipped via DB overlap lease without calling exec-start!
-	t2 := time.Now().UTC()
 	sc2, err := f.store.GetSchedule(ctx, sc.ID)
 	require.NoError(t, err)
+	t2 := nextRealScheduleTick(sc2.LastRunAt)
 	sc2.NextRunAt = &t2
 	f.srv.executeSchedule(ctx, *sc2, t2)
 
@@ -252,7 +268,7 @@ func TestScheduledExecRecurring_DBOverlapAndSciontoolOverlap(t *testing.T) {
 	// sciontool, then fire again -> sciontool returns 409 overlap!
 	won, err := f.store.FinishScheduledExecRun(ctx, store.ScheduledExecRunFinish{
 		EventID:     firstEvt.ID,
-		FinishedAt:  time.Now().UTC(),
+		FinishedAt:  nextRealScheduleTick(gotSc.LastRunAt),
 		Outcome:     store.ScheduledExecOutcomeAbandoned,
 		EventStatus: store.ScheduledEventFailed,
 		EventError:  execReasonOutcomeUnknown,
@@ -262,9 +278,9 @@ func TestScheduledExecRecurring_DBOverlapAndSciontoolOverlap(t *testing.T) {
 	gotSc = waitScheduleRunCount(t, f.store, sc.ID, 2)
 	assert.Equal(t, 1, gotSc.ErrorCount)
 
-	t3 := time.Now().UTC()
 	sc3, err := f.store.GetSchedule(ctx, sc.ID)
 	require.NoError(t, err)
+	t3 := nextRealScheduleTick(sc3.LastRunAt)
 	sc3.NextRunAt = &t3
 	f.srv.executeSchedule(ctx, *sc3, t3)
 
