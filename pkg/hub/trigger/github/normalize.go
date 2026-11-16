@@ -206,10 +206,14 @@ func Normalize(eventName, deliveryID string, payload []byte, opts Options) (Resu
 		attrs["payload_truncated"] = "true"
 	}
 
-	if err := enforceAttributesCeiling(attrs, DefaultMaxAttributesBytes); err != nil {
+	listsTruncated, err := enforceListsCeiling(lists, DefaultMaxListsBytes)
+	if err != nil {
 		return Result{}, err
 	}
-	if err := enforceListsCeiling(lists, DefaultMaxListsBytes); err != nil {
+	if listsTruncated {
+		attrs["lists_truncated"] = "true"
+	}
+	if err := enforceAttributesCeiling(attrs, DefaultMaxAttributesBytes); err != nil {
 		return Result{}, err
 	}
 
@@ -834,8 +838,8 @@ func enforceAttributesCeiling(attrs map[string]string, maxBytes int) error {
 		"event": true, "action": true, "sender": true, "sender_id": true,
 		"sender_type": true, "author_association": true, "number": true,
 		"is_pull_request": true, "is_fork": true, "draft": true, "merged": true,
-		"stale": true, "payload_truncated": true, "mention_detection": true,
-		"mention": true, "command": true,
+		"stale": true, "payload_truncated": true, "lists_truncated": true,
+		"mention_detection": true, "mention": true, "command": true,
 	}
 	// Last-resort fallback: delete the largest unprotected key rather than
 	// truncating identifier-like values (refs, SHAs, labels, paths, URLs,
@@ -868,17 +872,19 @@ func enforceAttributesCeiling(attrs map[string]string, maxBytes int) error {
 	return nil
 }
 
-// enforceListsCeiling bounds serialized JSON of lists to maxBytes (§4.3, §5.5).
-func enforceListsCeiling(lists map[string][]string, maxBytes int) error {
+// enforceListsCeiling bounds serialized JSON of lists to maxBytes (§4.3, §5.5),
+// reporting whether any entries were dropped.
+func enforceListsCeiling(lists map[string][]string, maxBytes int) (bool, error) {
 	encoded, err := encodeCompactJSON(lists)
 	if err != nil {
-		return err
+		return false, err
 	}
+	truncated := false
 	for len(encoded) > maxBytes {
 		longestKey := ""
 		longestCount := 0
 		for k, items := range lists {
-			if len(items) > longestCount {
+			if len(items) > longestCount || (len(items) == longestCount && len(items) > 0 && k > longestKey) {
 				longestCount = len(items)
 				longestKey = k
 			}
@@ -892,15 +898,16 @@ func enforceListsCeiling(lists map[string][]string, maxBytes int) error {
 			drop = longestCount / 4
 		}
 		lists[longestKey] = items[:longestCount-drop]
+		truncated = true
 		encoded, err = encodeCompactJSON(lists)
 		if err != nil {
-			return err
+			return false, err
 		}
 	}
 	if len(encoded) > maxBytes {
-		return fmt.Errorf("github trigger: normalised lists (%d bytes) exceed %d-byte bound", len(encoded), maxBytes)
+		return false, fmt.Errorf("github trigger: normalised lists (%d bytes) exceed %d-byte bound", len(encoded), maxBytes)
 	}
-	return nil
+	return truncated, nil
 }
 
 func reqMap(m map[string]any, key, label string) (map[string]any, error) {

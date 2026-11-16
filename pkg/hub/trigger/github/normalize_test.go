@@ -108,6 +108,8 @@ func TestNormalize_UnlistedActionOnKnownFamily(t *testing.T) {
 	assert.False(t, hasBody, "body must be absent on pull_request actions other than opened/edited")
 	_, hasBranch := res.Attributes["branch"]
 	assert.False(t, hasBranch, "branch attribute must never exist")
+	_, hasListsTrunc := res.Attributes["lists_truncated"]
+	assert.False(t, hasListsTrunc, "lists_truncated must be absent when lists fit within 8 KiB")
 	assert.Equal(t, []string{"area:widgets"}, res.Lists["labels"])
 }
 
@@ -483,6 +485,7 @@ func TestNormalize_FieldBoundsAndCeilings(t *testing.T) {
 	listBytes, err := encodeCompactJSON(res.Lists)
 	require.NoError(t, err)
 	assert.LessOrEqual(t, len(listBytes), DefaultMaxListsBytes)
+	assert.Equal(t, "true", res.Attributes["lists_truncated"], "dropping list entries to fit 8 KiB must flag lists_truncated=true")
 }
 
 func TestNormalize_OccurredAtStaleAndHelpers(t *testing.T) {
