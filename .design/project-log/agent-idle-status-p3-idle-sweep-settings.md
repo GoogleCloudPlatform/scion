@@ -22,7 +22,7 @@
 - **Store schema, candidate query, and claim/delivery handshake (`pkg/ent`, `pkg/store`, `pkg/store/entadapter`):**
   - Added two additive nullable columns on `agents`: `last_delivery_at` and
     `idle_suspend_claim_until` (`json:"-"`; no `DowngradeFloor` bump).
-  - Allocated singleton advisory lock `LockAgentIdleSuspend` (`0x5C10001C`) and added
+  - Allocated singleton advisory lock `LockAgentIdleSuspend` (`0x5C10001D`) and added
     `ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, limit)`, selecting
     non-deleted `running` agents with a suspend-eligible activity, non-null
     `activity_since < cutoff`, non-null `last_seen >= heartbeatRecency`, and
@@ -39,10 +39,11 @@
   - Registered recurring singleton `agent-idle-suspend` (every 5 ticks, bounded by
     `stalledDetectionTimeout`) next to `agent-stalled-detection`, sharing `agentHeartbeatRecency`
     (`2m`).
-  - Generalized `autoSuspendWorker` items to carry a `state.SuspendReason` (`idle` or `stalled`).
-    Both `idle` and `stalled` worker items now also skip soft-deleted rows, rows with active
-    deletion or reincarnation, and rows with an in-flight lifecycle operation
-    (`tryBeginLifecycleOp`).
+  - Generalized `autoSuspendWorker` items to carry a `state.SuspendReason` (`idle` or `stalled`),
+    preserving retained pre-suspend activities (`idle`, `completed`, `harness_error`) via
+    `syncAgentAfterStopRecord` and emitting `SUSPENDED`-only notifications. Both `idle` and
+    `stalled` worker items now also skip soft-deleted rows, rows with active deletion or
+    reincarnation, and rows with an in-flight lifecycle operation (`tryBeginLifecycleOp`).
   - Every inbound delivery path to a running agent (user DM, agent DM, mention fan-out, web chat
     primary and secondaries, live/retry notification dispatch, scheduled message fire, and
     `group[]`) calls `MarkAgentDelivery` before dispatching; when an idle-suspend claim is in

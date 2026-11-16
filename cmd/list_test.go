@@ -2731,6 +2731,32 @@ func TestDisplayAgents_SuspendedRetainedActivity(t *testing.T) {
 			ContainerStatus:   "stopped",
 			LastActivityEvent: now,
 		},
+		{
+			ID:                "id-7",
+			Name:              "susp-idle-idle-reason",
+			Template:          "developer",
+			Runtime:           "docker",
+			Project:           "proj",
+			RuntimeBrokerName: "broker",
+			Phase:             "suspended",
+			Activity:          "idle",
+			SuspendReason:     "idle",
+			ContainerStatus:   "stopped",
+			LastActivityEvent: now,
+		},
+		{
+			ID:                "id-8",
+			Name:              "susp-harness-error-idle-reason",
+			Template:          "developer",
+			Runtime:           "docker",
+			Project:           "proj",
+			RuntimeBrokerName: "broker",
+			Phase:             "suspended",
+			Activity:          "harness_error",
+			SuspendReason:     "idle",
+			ContainerStatus:   "stopped",
+			LastActivityEvent: now,
+		},
 	}
 
 	var err error
@@ -2738,7 +2764,7 @@ func TestDisplayAgents_SuspendedRetainedActivity(t *testing.T) {
 	require.NoError(t, err)
 
 	lines := strings.Split(strings.TrimSpace(out), "\n")
-	require.Len(t, lines, 8)
+	require.Len(t, lines, 10)
 	assert.Contains(t, lines[1], "suspended · completed")
 	assert.Contains(t, lines[2], "suspended · idle")
 	assert.Contains(t, lines[3], "suspended · harness error")
@@ -2749,6 +2775,8 @@ func TestDisplayAgents_SuspendedRetainedActivity(t *testing.T) {
 	assert.NotContains(t, lines[5], "suspended ·")
 	assert.Contains(t, lines[6], "suspended · completed (idle)")
 	assert.Contains(t, lines[7], "suspended · idle (stalled)")
+	assert.Contains(t, lines[8], "suspended · idle (idle)")
+	assert.Contains(t, lines[9], "suspended · harness error (idle)")
 	assert.NotContains(t, lines[5], "waiting on others", "non-retained activity on suspended row must not surface in table")
 
 	outputFormat = "json"

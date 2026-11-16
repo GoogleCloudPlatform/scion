@@ -20,7 +20,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -35,7 +37,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func enableIdleSuspendForTest(t *testing.T, srv *Server, after time.Duration) {
+func enableIdleSweepForTest(t *testing.T, srv *Server, after time.Duration) {
 	t.Helper()
 	setIdleSuspendExperiment(t, srv, true)
 	srv.mu.Lock()
@@ -182,7 +184,7 @@ func TestIdleSuspend_EveryActivityTable(t *testing.T) {
 			srv, s := testServer(t)
 			disp := &runIntentDispatcher{}
 			srv.SetDispatcher(disp)
-			enableIdleSuspendForTest(t, srv, 15*time.Minute)
+			enableIdleSweepForTest(t, srv, 15*time.Minute)
 
 			now := time.Now().UTC()
 			pastGrace := now.Add(-20 * time.Minute)
@@ -197,7 +199,9 @@ func TestIdleSuspend_EveryActivityTable(t *testing.T) {
 			if eligible[act] {
 				assert.Equal(t, int32(1), disp.stops.Load(), "activity %q must be stopped", act)
 				assert.Equal(t, string(state.PhaseSuspended), got.Phase, "activity %q must transition to suspended", act)
+				assert.Equal(t, act, got.Activity, "activity %q must be retained across idle suspend", act)
 				assert.Equal(t, string(state.SuspendReasonIdle), got.SuspendReason, "activity %q must record suspend_reason=idle", act)
+				assert.Nil(t, got.ActivitySince, "activity_since must clear when leaving running")
 			} else {
 				assert.Zero(t, disp.stops.Load(), "activity %q must never be stopped by idle sweep", act)
 				assert.Equal(t, string(state.PhaseRunning), got.Phase, "activity %q must remain running", act)
@@ -233,7 +237,7 @@ func TestIdleSuspend_LiveWorkGuardTable(t *testing.T) {
 				srv, s := testServer(t)
 				disp := &runIntentDispatcher{}
 				srv.SetDispatcher(disp)
-				enableIdleSuspendForTest(t, srv, 15*time.Minute)
+				enableIdleSweepForTest(t, srv, 15*time.Minute)
 
 				now := time.Now().UTC()
 				pastGrace := now.Add(-20 * time.Minute)
@@ -278,7 +282,7 @@ func TestIdleSuspend_GatesAndGrace(t *testing.T) {
 		srv, s := testServer(t)
 		disp := &runIntentDispatcher{}
 		srv.SetDispatcher(disp)
-		enableIdleSuspendForTest(t, srv, 15*time.Minute)
+		enableIdleSweepForTest(t, srv, 15*time.Minute)
 
 		now := time.Now().UTC()
 		withinGrace := now.Add(-14 * time.Minute)
@@ -298,7 +302,7 @@ func TestIdleSuspend_GatesAndGrace(t *testing.T) {
 		srv, s := testServer(t)
 		disp := &runIntentDispatcher{}
 		srv.SetDispatcher(disp)
-		enableIdleSuspendForTest(t, srv, 15*time.Minute)
+		enableIdleSweepForTest(t, srv, 15*time.Minute)
 
 		now := time.Now().UTC()
 		pastGrace := now.Add(-30 * time.Minute)
@@ -321,7 +325,7 @@ func TestIdleSuspend_GatesAndGrace(t *testing.T) {
 		srv, s := testServer(t)
 		disp := &runIntentDispatcher{}
 		srv.SetDispatcher(disp)
-		enableIdleSuspendForTest(t, srv, 15*time.Minute)
+		enableIdleSweepForTest(t, srv, 15*time.Minute)
 		setIdleSuspendExperiment(t, srv, false)
 
 		now := time.Now().UTC()
@@ -364,7 +368,7 @@ func TestIdleSuspend_GatesAndGrace(t *testing.T) {
 		srv, s := testServer(t)
 		disp := &runIntentDispatcher{}
 		srv.SetDispatcher(disp)
-		enableIdleSuspendForTest(t, srv, 15*time.Minute)
+		enableIdleSweepForTest(t, srv, 15*time.Minute)
 
 		now := time.Now().UTC()
 		pastGrace := now.Add(-30 * time.Minute)
@@ -468,7 +472,7 @@ func TestIdleSuspend_FreshRereadSkipsChangedState(t *testing.T) {
 			srv, s := testServer(t)
 			disp := &runIntentDispatcher{}
 			srv.SetDispatcher(disp)
-			enableIdleSuspendForTest(t, srv, 15*time.Minute)
+			enableIdleSweepForTest(t, srv, 15*time.Minute)
 
 			now := time.Now().UTC()
 			pastGrace := now.Add(-20 * time.Minute)
@@ -499,7 +503,7 @@ func TestIdleSuspend_LifecycleOpInFlightSkipped(t *testing.T) {
 			srv, s := testServer(t)
 			disp := &runIntentDispatcher{}
 			srv.SetDispatcher(disp)
-			enableIdleSuspendForTest(t, srv, 15*time.Minute)
+			enableIdleSweepForTest(t, srv, 15*time.Minute)
 
 			now := time.Now().UTC()
 			pastGrace := now.Add(-20 * time.Minute)
@@ -535,7 +539,7 @@ func TestIdleSuspend_HarnessResumeSupport(t *testing.T) {
 		srv, s := testServer(t)
 		disp := &runIntentDispatcher{}
 		srv.SetDispatcher(disp)
-		enableIdleSuspendForTest(t, srv, 15*time.Minute)
+		enableIdleSweepForTest(t, srv, 15*time.Minute)
 
 		require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{
 			ID: tid("hc-idle-generic"), Name: "team-shell", Slug: "team-shell", Harness: "generic",
@@ -564,7 +568,7 @@ func TestIdleSuspend_HarnessResumeSupport(t *testing.T) {
 		srv, s := testServer(t)
 		disp := &runIntentDispatcher{}
 		srv.SetDispatcher(disp)
-		enableIdleSuspendForTest(t, srv, 15*time.Minute)
+		enableIdleSweepForTest(t, srv, 15*time.Minute)
 
 		require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{
 			ID: tid("hc-idle-claude"), Name: "team-claude", Slug: "team-claude", Harness: "claude",
@@ -602,7 +606,7 @@ func TestIdleSuspend_EndToEnd_SweepSuspendsAndDMWakesWithoutFlag(t *testing.T) {
 			disp := &wakeTrackingDispatcher{}
 			srv.SetDispatcher(disp)
 			t.Cleanup(srv.waitAutoWakeIdle)
-			enableIdleSuspendForTest(t, srv, 15*time.Minute)
+			enableIdleSweepForTest(t, srv, 15*time.Minute)
 
 			_, err := s.SetRunIntent(ctx, target.ID, store.RunIntentRunning)
 			require.NoError(t, err)
@@ -628,6 +632,7 @@ func TestIdleSuspend_EndToEnd_SweepSuspendsAndDMWakesWithoutFlag(t *testing.T) {
 			suspended, err := s.GetAgent(ctx, target.ID)
 			require.NoError(t, err)
 			require.Equal(t, string(state.PhaseSuspended), suspended.Phase)
+			require.Equal(t, string(state.ActivityIdle), suspended.Activity, "idle sweep retains pre-suspend activity")
 			require.Equal(t, string(state.SuspendReasonIdle), suspended.SuspendReason)
 
 			// Sending a DM without --wake auto-resumes the agent and delivers.
@@ -662,6 +667,8 @@ func TestSuspendConversion_HubSuspendedToUser(t *testing.T) {
 		t.Run("converts "+string(reason)+" to user without broker action and stops auto-wake", func(t *testing.T) {
 			ctx := context.Background()
 			srv, s, sender, target, disp := autoWakeFixture(t, reason)
+			target.Activity = string(state.ActivityCompleted)
+			require.NoError(t, s.UpdateAgent(ctx, target))
 
 			// Mark the broker offline to prove conversion performs no runtime dispatch.
 			broker, err := s.GetRuntimeBroker(ctx, target.RuntimeBrokerID)
@@ -676,6 +683,7 @@ func TestSuspendConversion_HubSuspendedToUser(t *testing.T) {
 			got, err := s.GetAgent(ctx, target.ID)
 			require.NoError(t, err)
 			assert.Equal(t, string(state.PhaseSuspended), got.Phase)
+			assert.Equal(t, string(state.ActivityCompleted), got.Activity, "conversion to user suspend must preserve retained activity")
 			assert.Equal(t, string(state.SuspendReasonUser), got.SuspendReason)
 
 			// Bring broker back online and verify future DMs without --wake no longer auto-wake.
@@ -914,7 +922,7 @@ func TestIdleSuspend_PostReadTOCTOU(t *testing.T) {
 			})
 			disp := &runIntentDispatcher{}
 			srv.SetDispatcher(disp)
-			enableIdleSuspendForTest(t, srv, 15*time.Minute)
+			enableIdleSweepForTest(t, srv, 15*time.Minute)
 
 			now := time.Now().UTC()
 			pastGrace := now.Add(-20 * time.Minute)
@@ -954,7 +962,7 @@ func TestIdleSuspend_PostReadTOCTOU(t *testing.T) {
 				},
 			}
 			srv.SetDispatcher(disp)
-			enableIdleSuspendForTest(t, srv, 15*time.Minute)
+			enableIdleSweepForTest(t, srv, 15*time.Minute)
 
 			now := time.Now().UTC()
 			pastGrace := now.Add(-20 * time.Minute)
@@ -980,7 +988,7 @@ func TestIdleSuspend_PostReadTOCTOU(t *testing.T) {
 			})
 			disp := &wakeTrackingDispatcher{}
 			srv.SetDispatcher(disp)
-			enableIdleSuspendForTest(t, srv, 15*time.Minute)
+			enableIdleSweepForTest(t, srv, 15*time.Minute)
 
 			_, err := rawStore.SetRunIntent(ctx, target.ID, store.RunIntentRunning)
 			require.NoError(t, err)
@@ -1036,13 +1044,13 @@ func TestIdleSuspend_PostReadTOCTOU(t *testing.T) {
 			}
 			srv.SetDispatcher(disp)
 			t.Cleanup(srv.waitAutoWakeIdle)
-			enableIdleSuspendForTest(t, srv, 15*time.Minute)
+			enableIdleSweepForTest(t, srv, 15*time.Minute)
 
 			_, err := s.SetRunIntent(ctx, target.ID, store.RunIntentRunning)
 			require.NoError(t, err)
 			require.NoError(t, s.UpdateAgentStatus(ctx, target.ID, store.AgentStatusUpdate{
 				Phase:    string(state.PhaseRunning),
-				Activity: string(state.ActivityIdle),
+				Activity: string(state.ActivityCompleted),
 			}))
 			now := time.Now().UTC()
 			db := s.(*entadapter.CompositeStore).DB()
@@ -1112,8 +1120,109 @@ func TestIdleSuspend_PostReadTOCTOU(t *testing.T) {
 			after, err := s.GetAgent(ctx, target.ID)
 			require.NoError(t, err)
 			assert.Equal(t, string(state.PhaseRunning), after.Phase)
+			assert.Equal(t, string(state.ActivityIdle), after.Activity, "retained completed activity must clear on resume and adopt woken activity")
 			assert.Empty(t, after.SuspendReason)
 			assert.False(t, after.HasActiveIdleSuspendClaim(time.Now()))
+		})
+	}
+}
+
+func TestIdleSuspend_RetainedActivityDisplayAndSuspendedOnlyNotification(t *testing.T) {
+	cases := []struct {
+		act       state.Activity
+		wantLabel string
+	}{
+		{act: state.ActivityIdle, wantLabel: "suspended · idle (idle)"},
+		{act: state.ActivityCompleted, wantLabel: "suspended · completed (idle)"},
+		{act: state.ActivityHarnessError, wantLabel: "suspended · harness error (idle)"},
+	}
+
+	for _, tc := range cases {
+		t.Run(string(tc.act), func(t *testing.T) {
+			ctx := context.Background()
+			srv, s, _, _ := engineTestServer(t)
+			stopDisp := &runIntentDispatcher{}
+			srv.SetDispatcher(stopDisp)
+			enableIdleSweepForTest(t, srv, 15*time.Minute)
+
+			statusCh, unsub := srv.events.Subscribe("project.>.agent.status")
+			defer unsub()
+
+			notifDisp := &recordingDispatcher{}
+			nd := NewNotificationDispatcher(s, srv.events, func() AgentDispatcher { return notifDisp }, slog.Default())
+			nd.Start()
+			defer nd.Stop()
+
+			now := time.Now().UTC()
+			pastGrace := now.Add(-20 * time.Minute)
+			freshSeen := now.Add(-20 * time.Second)
+			agent := newIdleCandidateBrokerAgent(t, s, "ret-notif-"+string(tc.act), string(tc.act), &pastGrace, freshSeen)
+
+			subscriber := &store.Agent{
+				ID:              tid("idle-notif-sub-" + string(tc.act)),
+				Name:            "idle-notif-sub-" + string(tc.act),
+				Slug:            "idle-notif-sub-" + string(tc.act),
+				ProjectID:       agent.ProjectID,
+				RuntimeBrokerID: agent.RuntimeBrokerID,
+				Phase:           string(state.PhaseRunning),
+			}
+			require.NoError(t, s.CreateAgent(ctx, subscriber))
+
+			sub := &store.NotificationSubscription{
+				ID:                tid("idle-notif-subrec-" + string(tc.act)),
+				Scope:             store.SubscriptionScopeAgent,
+				AgentID:           agent.ID,
+				ProjectID:         agent.ProjectID,
+				SubscriberType:    store.SubscriberTypeAgent,
+				SubscriberID:      subscriber.Slug,
+				TriggerActivities: []string{"COMPLETED", "IDLE", "HARNESS_ERROR", "STALLED", "SUSPENDED"},
+				CreatedAt:         now,
+				CreatedBy:         "test",
+			}
+			require.NoError(t, s.CreateNotificationSubscription(ctx, sub))
+
+			srv.agentIdleSuspendHandler()(ctx)
+			srv.waitAutoSuspendIdle()
+
+			persisted, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, string(state.PhaseSuspended), persisted.Phase)
+			assert.Equal(t, string(tc.act), persisted.Activity)
+			assert.Equal(t, string(state.SuspendReasonIdle), persisted.SuspendReason)
+			assert.Nil(t, persisted.ActivitySince)
+
+			// Verify API response fields used to render "suspended · <activity> (idle)".
+			rec := doRequest(t, srv, http.MethodGet, "/api/v1/agents/"+agent.ID, nil)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			var apiAgent store.Agent
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &apiAgent))
+			assert.Equal(t, string(state.PhaseSuspended), apiAgent.Phase)
+			assert.Equal(t, string(tc.act), apiAgent.Activity)
+			assert.Equal(t, string(state.SuspendReasonIdle), apiAgent.SuspendReason)
+			renderedPhase := apiAgent.Phase + " · " + state.Activity(apiAgent.Activity).DisplayLabel() + " (" + apiAgent.SuspendReason + ")"
+			assert.Equal(t, tc.wantLabel, renderedPhase)
+
+			// Verify SSE status event carries both suspended phase and retained activity.
+			evt, raw := waitAgentStatusEvent(t, statusCh, agent.ID)
+			assert.Equal(t, string(state.PhaseSuspended), evt.Phase)
+			assert.Equal(t, string(tc.act), evt.Activity)
+			assert.Equal(t, string(tc.act), raw["activity"])
+
+			// Verify NotificationDispatcher fires SUSPENDED only (never the retained activity).
+			require.Eventually(t, func() bool {
+				return len(notifDisp.getCalls()) >= 1
+			}, 2*time.Second, 20*time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
+
+			calls := notifDisp.getCalls()
+			require.Len(t, calls, 1, "idle sweep suspend of %s must fire SUSPENDED only", tc.act)
+			assert.Contains(t, calls[0].Message, "SUSPENDED")
+			assert.NotContains(t, calls[0].Message, strings.ToUpper(string(tc.act)))
+
+			notifs, err := s.GetNotifications(ctx, store.SubscriberTypeAgent, subscriber.Slug, false)
+			require.NoError(t, err)
+			require.Len(t, notifs, 1)
+			assert.Equal(t, "SUSPENDED", notifs[0].Status)
 		})
 	}
 }

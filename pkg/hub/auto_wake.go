@@ -458,7 +458,7 @@ func (s *Server) convertHubSuspendToUser(ctx context.Context, w http.ResponseWri
 		writeErrorFromErr(w, err, "")
 		return true
 	}
-	agent.SuspendReason = string(state.SuspendReasonUser)
+	s.syncAgentAfterStopRecord(ctx, agent, string(state.PhaseSuspended), string(state.SuspendReasonUser))
 	s.events.PublishAgentStatus(ctx, agent)
 	respAgent := *agent
 	respAgent.AppliedConfig, respAgent.PendingConfig = s.redactAgentConfigsForResponse(

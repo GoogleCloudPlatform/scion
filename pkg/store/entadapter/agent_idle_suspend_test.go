@@ -245,7 +245,9 @@ func TestAgentStore_ClaimIdleSuspend_AndDeliveryHandshake(t *testing.T) {
 		after, err := s.GetAgent(ctx, a.ID)
 		require.NoError(t, err)
 		assert.Equal(t, string(state.PhaseSuspended), after.Phase)
+		assert.Equal(t, string(state.ActivityIdle), after.Activity, "idle-suspend write must retain pre-suspend activity")
 		assert.Equal(t, string(state.SuspendReasonIdle), after.SuspendReason)
+		assert.Nil(t, after.ActivitySince)
 		assert.False(t, after.HasActiveIdleSuspendClaim(time.Now()))
 	})
 
