@@ -1056,7 +1056,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			ValidationError(w, "homeFiles is not valid on a reprovision request", nil)
 			return
 		}
-		if err := api.ValidateHomeFiles(req.HomeFiles); err != nil {
+		if err := agent.ValidateHomeFiles(req.HomeFiles); err != nil {
 			ValidationError(w, err.Error(), nil)
 			return
 		}

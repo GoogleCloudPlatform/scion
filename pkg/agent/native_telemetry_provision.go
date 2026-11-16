@@ -11,6 +11,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
+const telemetryGCPCredentialsFileName = "telemetry-gcp-credentials.json"
+
 // Only enabled Claude selects a native metrics exporter by receiver backend.
 // Other provisioners and disabled Claude keep the original staged environment.
 func nativeTelemetryProvisionEnvForHarness(name, home string, telemetry *api.TelemetryConfig, env map[string]string, secrets []api.ResolvedSecret) (map[string]string, error) {
@@ -26,7 +28,7 @@ func nativeTelemetryProvisionEnvForHarness(name, home string, telemetry *api.Tel
 // accidentally enabling metrics against a GCP receiver.
 func nativeTelemetryProvisionEnv(home string, telemetry *api.TelemetryConfig, env map[string]string, secrets []api.ResolvedSecret) (map[string]string, error) {
 	for _, secret := range secrets {
-		if secret.Type == "file" && strings.HasSuffix(filepath.Clean(secret.Target), filepath.Join(".scion", "telemetry-gcp-credentials.json")) && secret.Name != "scion-telemetry-gcp-credentials" {
+		if secret.Type == "file" && strings.HasSuffix(filepath.Clean(secret.Target), filepath.Join(".scion", telemetryGCPCredentialsFileName)) && secret.Name != "scion-telemetry-gcp-credentials" {
 			// A differently named file secret can materialize the receiver's
 			// well-known credential path after provisioner execution.
 			return nil, fmt.Errorf("late telemetry credential file target")
@@ -66,7 +68,7 @@ func nativeTelemetryProvisionEnv(home string, telemetry *api.TelemetryConfig, en
 			return staged, nil
 		}
 	}
-	_, credentialErr := os.Stat(filepath.Join(home, ".scion", "telemetry-gcp-credentials.json"))
+	_, credentialErr := os.Stat(filepath.Join(home, ".scion", telemetryGCPCredentialsFileName))
 	if credentialErr != nil && !os.IsNotExist(credentialErr) {
 		return nil, fmt.Errorf("cannot inspect telemetry credential indicator: %w", credentialErr)
 	}

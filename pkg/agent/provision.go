@@ -1385,11 +1385,6 @@ func reprovisionEmptyPerAgentPreflight(ctx context.Context, projectDir, agentNam
 }
 
 func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
-	if opts.FreshProvision && !opts.Resume && len(opts.HomeFiles) > 0 {
-		if err := api.ValidateHomeFiles(opts.HomeFiles); err != nil {
-			return nil, fmt.Errorf("invalid home files: %w", err)
-		}
-	}
 	// A create over a legacy agent directory no agent owns is refused
 	// before anything runs. A project dir that does not resolve fails here
 	// too (fail closed), as GetAgent would.

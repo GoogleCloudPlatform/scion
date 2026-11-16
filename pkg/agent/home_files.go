@@ -17,9 +17,58 @@ package agent
 import (
 	"fmt"
 	"os"
+	"path"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/harness"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
+
+// reservedHomeFilePaths lists every file and directory under .scion/ in an
+// agent home that pkg/agent, pkg/harness, or broker credential rotation owns.
+// Derived from the authoritative package constants so the collision gate has
+// one source of truth.
+var reservedHomeFilePaths = []string{
+	path.Join(".scion", agentConfigFileName),
+	path.Join(".scion", agentInfoFileName),
+	path.Join(".scion", servicesFileName),
+	path.Join(".scion", resolvedSkillsInputName),
+	TaskFileRel,
+	agentTokenFileRel,
+	agentTokenTmpFileRel,
+	path.Join(".scion", transportauth.TransportTokenFileName),
+	path.Join(".scion", transportauth.TransportTokenFileName+".tmp"),
+	path.Join(".scion", telemetryGCPCredentialsFileName),
+	harness.GenericSystemPromptRel,
+	harness.StagedBundleRel,
+	harness.PreStartHookDirRel,
+	harness.GenericSkillsDir,
+}
+
+// ValidateHomeFiles enforces shared HomeFiles shape/size invariants and refuses
+// any path that collides with a broker- or harness-owned file or subtree under
+// .scion/. Error messages never include file Content.
+func ValidateHomeFiles(files []api.HomeFile) error {
+	if err := api.ValidateHomeFiles(files); err != nil {
+		return err
+	}
+	for i, f := range files {
+		if reserved, collides := collidesWithReservedHomePath(f.Path); collides {
+			return fmt.Errorf("homeFiles[%d]: path %q collides with reserved broker path %q", i, f.Path, reserved)
+		}
+	}
+	return nil
+}
+
+func collidesWithReservedHomePath(p string) (string, bool) {
+	for _, r := range reservedHomeFilePaths {
+		if p == r || strings.HasPrefix(p, r+"/") || strings.HasPrefix(r, p+"/") {
+			return r, true
+		}
+	}
+	return "", false
+}
 
 // writeProvisionHomeFiles writes create-time HomeFiles into agentHome under
 // .scion/, confined to agentHome via writeHomeFile. Re-validates files as
@@ -28,7 +77,7 @@ func writeProvisionHomeFiles(agentHome string, files []api.HomeFile) error {
 	if len(files) == 0 {
 		return nil
 	}
-	if err := api.ValidateHomeFiles(files); err != nil {
+	if err := ValidateHomeFiles(files); err != nil {
 		return fmt.Errorf("invalid home files: %w", err)
 	}
 	for _, f := range files {

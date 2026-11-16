@@ -21,6 +21,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -347,6 +348,30 @@ func TestHomeFiles_NotRewrittenOnResumeOrReprovision(t *testing.T) {
 		t.Errorf("after resume: content = %q, want %q", gotAfterResume, "persisted-in-home")
 	}
 
+	// 2b. Plain non-resume start/restart (FreshProvision: false, Resume: false)
+	// must ALSO NOT write HomeFiles (catches dropping opts.FreshProvision &&).
+	plainStartOpts := api.StartOptions{
+		Name:           agentName,
+		ProjectPath:    fx.projectScionDir,
+		NoAuth:         true,
+		Resume:         false,
+		FreshProvision: false,
+		GitClone:       gitClone,
+		HomeFiles: []api.HomeFile{
+			{Path: ".scion/trigger-event.json", Mode: 0o600, Content: []byte("plain-start-overwrite")},
+		},
+	}
+	if _, err := fx.mgr.Start(context.Background(), plainStartOpts); err != nil {
+		t.Fatalf("plain non-resume Start() failed: %v", err)
+	}
+	gotAfterPlainStart, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotAfterPlainStart) != "persisted-in-home" {
+		t.Errorf("after plain non-resume start: content = %q, want %q", gotAfterPlainStart, "persisted-in-home")
+	}
+
 	// 3. Reprovision without ResetHome preserves home and must NOT rewrite HomeFiles.
 	reprovOpts := api.StartOptions{
 		Name:           agentName,
@@ -379,4 +404,77 @@ func TestHomeFiles_NotRewrittenOnResumeOrReprovision(t *testing.T) {
 	if _, err := os.Stat(targetPath); !os.IsNotExist(err) {
 		t.Errorf("after ResetHome Reprovision: expected trigger-event.json to be absent, got err=%v", err)
 	}
+}
+
+func TestHomeFiles_ReservedPathsRefused(t *testing.T) {
+	const canary = "RESERVED_PATH_SECRET_CANARY_4242"
+
+	reservedCases := []string{
+		".scion/scion-agent.json",
+		".scion/agent-info.json",
+		".scion/scion-services.yaml",
+		".scion/resolved-skills.json",
+		".scion/task.md",
+		".scion/scion-token",
+		".scion/scion-token.tmp",
+		".scion/transport-token",
+		".scion/transport-token.tmp",
+		".scion/telemetry-gcp-credentials.json",
+		".scion/system_prompt.md",
+		".scion/hooks/pre-start.d/30-project-custom",
+		".scion/hooks/pre-start.d/20-harness-provision",
+		".scion/hooks/pre-start.d/99-custom",
+		".scion/hooks/pre-start.d",
+		".scion/hooks",
+		".scion/harness",
+		".scion/harness/manifest.json",
+		".scion/harness/secrets/API_KEY",
+		".scion/harness/inputs/plugins.json",
+		".scion/skills",
+		".scion/skills/my-skill/SKILL.md",
+	}
+
+	for _, rel := range reservedCases {
+		t.Run(rel, func(t *testing.T) {
+			files := []api.HomeFile{
+				{Path: rel, Mode: 0o600, Content: []byte(canary)},
+			}
+			err := ValidateHomeFiles(files)
+			if err == nil {
+				t.Fatalf("ValidateHomeFiles(%q) = nil, want reserved-path refusal", rel)
+			}
+			if !strings.Contains(err.Error(), "reserved") {
+				t.Errorf("ValidateHomeFiles(%q) error = %q, want substring 'reserved'", rel, err.Error())
+			}
+			if strings.Contains(err.Error(), canary) {
+				t.Errorf("ValidateHomeFiles(%q) leaked content: %q", rel, err.Error())
+			}
+
+			home := t.TempDir()
+			if werr := writeProvisionHomeFiles(home, files); werr == nil {
+				t.Fatalf("writeProvisionHomeFiles(%q) = nil, want reserved-path refusal", rel)
+			}
+		})
+	}
+
+	t.Run("Start refuses reserved path without launching container", func(t *testing.T) {
+		fx := newHomeFilesTestFixture(t)
+		opts := api.StartOptions{
+			Name:           "reserved-start-agent",
+			ProjectPath:    fx.projectScionDir,
+			NoAuth:         true,
+			FreshProvision: true,
+			GitClone:       &api.GitCloneConfig{URL: "https://github.com/example/repo.git", Branch: "main"},
+			HomeFiles: []api.HomeFile{
+				{Path: ".scion/scion-agent.json", Mode: 0o600, Content: []byte(canary)},
+			},
+		}
+		_, err := fx.mgr.Start(context.Background(), opts)
+		if err == nil {
+			t.Fatal("expected Start() to refuse reserved .scion/scion-agent.json")
+		}
+		if fx.runCalls != 0 {
+			t.Errorf("expected 0 container Run calls, got %d", fx.runCalls)
+		}
+	})
 }

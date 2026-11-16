@@ -104,6 +104,48 @@ func TestCreateAgent_HomeFilesValidationAndThreading(t *testing.T) {
 				},
 				repro: true,
 			},
+			{
+				name: "reserved scion-agent.json refused",
+				files: []api.HomeFile{
+					{Path: ".scion/scion-agent.json", Mode: 0o600, Content: []byte(canary)},
+				},
+			},
+			{
+				name: "reserved agent-info.json refused",
+				files: []api.HomeFile{
+					{Path: ".scion/agent-info.json", Mode: 0o600, Content: []byte(canary)},
+				},
+			},
+			{
+				name: "reserved pre-start hook refused",
+				files: []api.HomeFile{
+					{Path: ".scion/hooks/pre-start.d/30-project-custom", Mode: 0o600, Content: []byte(canary)},
+				},
+			},
+			{
+				name: "reserved harness bundle path refused",
+				files: []api.HomeFile{
+					{Path: ".scion/harness/secrets/KEY", Mode: 0o600, Content: []byte(canary)},
+				},
+			},
+			{
+				name: "reserved scion-token refused",
+				files: []api.HomeFile{
+					{Path: ".scion/scion-token", Mode: 0o600, Content: []byte(canary)},
+				},
+			},
+			{
+				name: "reserved task.md refused",
+				files: []api.HomeFile{
+					{Path: ".scion/task.md", Mode: 0o600, Content: []byte(canary)},
+				},
+			},
+			{
+				name: "reserved skills subtree refused",
+				files: []api.HomeFile{
+					{Path: ".scion/skills/foo/SKILL.md", Mode: 0o600, Content: []byte(canary)},
+				},
+			},
 		}
 
 		for _, tc := range cases {

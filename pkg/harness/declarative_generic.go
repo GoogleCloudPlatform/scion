@@ -226,7 +226,7 @@ func (d *DeclarativeGenericHarness) InjectSystemPrompt(agentHome string, content
 		// "native" or empty → write to declared file or fall back.
 		target := d.entry.SystemPromptFile
 		if target == "" {
-			target = filepath.Join(".scion", "system_prompt.md")
+			target = filepath.FromSlash(GenericSystemPromptRel)
 		}
 		home, rel, err := openHomeTarget(agentHome, target, "system_prompt_file")
 		if err != nil {
