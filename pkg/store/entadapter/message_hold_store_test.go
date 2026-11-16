@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -641,21 +642,51 @@ func TestMessageHoldStore_ExpiryAndSweepsIgnoreAwaitingSession(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, sweptDelivering)
 
-	// Verify SQLite partial index usage on awaiting_session query.
-	var rows entsql.Rows
-	require.NoError(t, f.client.Driver().Query(ctx,
-		"EXPLAIN QUERY PLAN SELECT id FROM messages WHERE dispatch_state = 'awaiting_session' AND recipient_id = ? ORDER BY created, id LIMIT 64",
-		[]any{f.agentID}, &rows))
-	var plans []string
-	for rows.Next() {
-		var id, parent, notused int
-		var detail string
-		require.NoError(t, rows.Scan(&id, &parent, &notused, &detail))
-		plans = append(plans, detail)
+	// Verify partial indexes exist with expected key columns on both SQLite and Postgres,
+	// and check dialect-specific partial predicate / query plan output.
+	assert.Equal(t, []string{"recipient_id", "created", "id"},
+		messageIndexColumns(t, f.client, "message_awaiting_session_recipient_created_id"))
+	assert.Equal(t, []string{"created", "id"},
+		messageIndexColumns(t, f.client, "message_awaiting_session_created_id"))
+	if f.client.Driver().Dialect() == dialect.Postgres {
+		var rows entsql.Rows
+		require.NoError(t, f.client.Driver().Query(ctx,
+			`SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() AND tablename = 'messages' AND indexname IN ('message_awaiting_session_recipient_created_id', 'message_awaiting_session_created_id') ORDER BY indexname`,
+			[]any{}, &rows))
+		var defs []string
+		for rows.Next() {
+			var def string
+			require.NoError(t, rows.Scan(&def))
+			defs = append(defs, def)
+		}
+		require.NoError(t, rows.Err())
+		_ = rows.Close()
+		require.Len(t, defs, 2)
+		for _, def := range defs {
+			assert.Contains(t, def, "awaiting_session", "expected partial WHERE predicate on Postgres index, got: %s", def)
+		}
+
+		var explainRows entsql.Rows
+		require.NoError(t, f.client.Driver().Query(ctx,
+			"EXPLAIN SELECT id FROM messages WHERE dispatch_state = 'awaiting_session' AND recipient_id = $1 ORDER BY created, id LIMIT 64",
+			[]any{f.agentID}, &explainRows))
+		_ = explainRows.Close()
+	} else {
+		var rows entsql.Rows
+		require.NoError(t, f.client.Driver().Query(ctx,
+			"EXPLAIN QUERY PLAN SELECT id FROM messages WHERE dispatch_state = 'awaiting_session' AND recipient_id = ? ORDER BY created, id LIMIT 64",
+			[]any{f.agentID}, &rows))
+		var plans []string
+		for rows.Next() {
+			var id, parent, notused int
+			var detail string
+			require.NoError(t, rows.Scan(&id, &parent, &notused, &detail))
+			plans = append(plans, detail)
+		}
+		_ = rows.Close()
+		assert.True(t, strings.Contains(strings.Join(plans, " "), "message_awaiting_session"),
+			"expected partial index in query plan, got: %v", plans)
 	}
-	_ = rows.Close()
-	assert.True(t, strings.Contains(strings.Join(plans, " "), "message_awaiting_session"),
-		"expected partial index in query plan, got: %v", plans)
 
 	// M-10: ExpireHeldMessagesForAgent fails held rows, deletes marker, leaves delivering row untouched.
 	expired, err := f.cs.ExpireHeldMessagesForAgent(ctx, f.agentID, "agent stopped")
@@ -957,4 +988,64 @@ func TestMessageHoldStore_LaterEpisodeExtendsMarkerHoldUntil(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, claimed, 2)
 	assert.Equal(t, []string{m2.ID, m3.ID}, []string{claimed[0].ID, claimed[1].ID})
+}
+
+func TestMessageHoldStore_HoldTimestampsNormalizedToUTC(t *testing.T) {
+	// 1. Direct mapper check: pgx scans PostgreSQL timestamptz columns in
+	// time.Local (non-UTC Location). Verify entMessageToStore normalizes
+	// HoldUntil and NotReachedAt to time.UTC even when running on SQLite.
+	nonUTC := time.FixedZone("pgx-local", -7*3600)
+	localHold := time.Date(2026, 11, 15, 0, 10, 0, 0, time.UTC).In(nonUTC)
+	localProof := time.Date(2026, 11, 15, 0, 0, 30, 0, time.UTC).In(nonUTC)
+	mapped := entMessageToStore(&ent.Message{
+		ID:           uuid.New(),
+		ProjectID:    uuid.New(),
+		HoldUntil:    &localHold,
+		NotReachedAt: &localProof,
+	})
+	require.NotNil(t, mapped.HoldUntil)
+	require.NotNil(t, mapped.NotReachedAt)
+	assert.Equal(t, time.UTC, mapped.HoldUntil.Location(), "HoldUntil must normalize to time.UTC")
+	assert.Equal(t, time.Date(2026, 11, 15, 0, 10, 0, 0, time.UTC), *mapped.HoldUntil)
+	assert.Equal(t, time.UTC, mapped.NotReachedAt.Location(), "NotReachedAt must normalize to time.UTC")
+	assert.Equal(t, time.Date(2026, 11, 15, 0, 0, 30, 0, time.UTC), *mapped.NotReachedAt)
+
+	// 2. Round-trip store check across HoldMessageAwaitingSession,
+	// PrepareOrHoldMessage, GetMessage, and ClaimHeldMessages.
+	ctx := context.Background()
+	f := newHoldStoreFixture(t)
+	wantHoldUntil := f.currentTime().Add(10 * time.Minute)
+
+	m1 := f.createDispatchedMsg(t, "utc-1", 0)
+	_, err := f.cs.PrepareOrHoldMessage(ctx, f.agentID, m1.ID, 100)
+	require.NoError(t, err)
+	f.stampNoSession(t, m1.ID)
+
+	gotProof, err := f.cs.GetMessage(ctx, m1.ID)
+	require.NoError(t, err)
+	require.NotNil(t, gotProof.NotReachedAt)
+	assert.Equal(t, time.UTC, gotProof.NotReachedAt.Location())
+
+	held, err := f.cs.HoldMessageAwaitingSession(ctx, store.HoldMessageParams{
+		MessageID: m1.ID, AgentID: f.agentID, MaxProofAge: 2 * time.Minute, HoldTTL: 10 * time.Minute, MaxHeld: 100,
+	})
+	require.NoError(t, err)
+	require.True(t, held)
+
+	m2 := f.createDispatchedMsg(t, "utc-2", time.Millisecond)
+	prep2, err := f.cs.PrepareOrHoldMessage(ctx, f.agentID, m2.ID, 100)
+	require.NoError(t, err)
+	require.True(t, prep2.Held)
+	require.NotNil(t, prep2.HoldUntil)
+	assert.Equal(t, time.UTC, prep2.HoldUntil.Location())
+	assert.Equal(t, wantHoldUntil, *prep2.HoldUntil)
+
+	claimed, err := f.cs.ClaimHeldMessages(ctx, f.agentID, 64)
+	require.NoError(t, err)
+	require.Len(t, claimed, 2)
+	for _, cm := range claimed {
+		require.NotNil(t, cm.HoldUntil)
+		assert.Equal(t, time.UTC, cm.HoldUntil.Location())
+		assert.Equal(t, wantHoldUntil, *cm.HoldUntil)
+	}
 }

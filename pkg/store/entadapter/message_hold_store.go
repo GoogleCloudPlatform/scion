@@ -403,7 +403,7 @@ func (s *BrokerDispatchStore) PrepareOrHoldMessage(ctx context.Context, agentID,
 							Exec(ctx); err != nil {
 							return mapError(err)
 						}
-						hu := holdUntil
+						hu := holdUntil.UTC()
 						out.Held = true
 						out.HoldUntil = &hu
 						return nil

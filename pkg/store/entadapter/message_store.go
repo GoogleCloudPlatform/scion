@@ -108,12 +108,23 @@ func entMessageToStore(e *ent.Message) *store.Message {
 		DispatchState:         e.DispatchState,
 		DispatchedAt:          e.DispatchedAt,
 		DispatchFailureReason: e.DispatchFailureReason,
-		HoldUntil:             e.HoldUntil,
+		HoldUntil:             timePtrUTC(e.HoldUntil),
 		HoldLaunchID:          derefString(e.HoldLaunchID),
 		NotReached:            derefString(e.NotReached),
-		NotReachedAt:          e.NotReachedAt,
+		NotReachedAt:          timePtrUTC(e.NotReachedAt),
 		ScheduledEventID:      derefString(e.ScheduledEventID),
 	}
+}
+
+// timePtrUTC normalizes a nullable timestamp to UTC so callers observe
+// consistent time.UTC values across SQLite and PostgreSQL (pgx scans
+// timestamptz columns in time.Local).
+func timePtrUTC(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	u := t.UTC()
+	return &u
 }
 
 // uuidPtrToStringPtr converts a nullable UUID column to the nullable string
