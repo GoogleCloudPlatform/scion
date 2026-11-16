@@ -238,10 +238,23 @@ func (s *Server) agentUsesConduitDelivery(ctx context.Context, agent *store.Agen
 	}
 	if rt == "" && agent.RuntimeBrokerID != "" && s.store != nil {
 		if b, err := s.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID); err == nil && b != nil {
+			if flatCloudRunBroker(b) {
+				return true
+			}
 			if resolved := resolveAgentRuntime(agent, b); resolved != "" {
 				rt = strings.ToLower(strings.TrimSpace(resolved))
-			} else if b.RuntimeTarget.Type != "" {
-				rt = strings.ToLower(strings.TrimSpace(b.RuntimeTarget.Type))
+			} else {
+				profileName := ""
+				if agent.AppliedConfig != nil {
+					profileName = agent.AppliedConfig.Profile
+				}
+				if _, profType, ok := resolveAgentRuntimeProfileType(b, profileName); ok {
+					rt = strings.ToLower(strings.TrimSpace(profType))
+				} else if b.RuntimeTarget != nil {
+					if _, canonical := flatTargetTypeCheck(b.RuntimeTarget.Type); canonical && b.RuntimeTarget.Type != "" {
+						rt = strings.ToLower(strings.TrimSpace(b.RuntimeTarget.Type))
+					}
+				}
 			}
 		}
 	}
