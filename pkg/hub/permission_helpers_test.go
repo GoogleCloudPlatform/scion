@@ -162,6 +162,7 @@ var nonRouteCallSites = map[string][]permissionCallSite{
 	"project.secret_read": {
 		{"material_runtime.go", "Server.materialRuntimePrecheck"},
 		{"handlers_env_secrets.go", "checkAgentProjectSecretReadScope"},
+		{"handlers_env_secrets.go", "agentLacksProjectSecretReadScope"},
 	},
 	"agent.notify": {{"handlers_notifications.go", "checkAgentNotifyScope"}},
 	"agent.token_refresh": {

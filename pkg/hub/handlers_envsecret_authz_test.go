@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -733,6 +734,451 @@ func TestSecret_ProjectScope_AgentRequiresSecretReadScope(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestEnvVar_ProjectScope_AgentRequiresSecretReadScopeForSecretMetadata(t *testing.T) {
+	srv, s := testServer(t)
+	backend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
+	srv.SetSecretBackend(backend)
+	ctx := context.Background()
+
+	owner := &store.User{
+		ID: tid("env-sec-meta-owner"), Email: "envsecmetaowner@example.com", DisplayName: "Env Sec Meta Owner",
+		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	}
+	if err := s.CreateUser(ctx, owner); err != nil {
+		t.Fatalf("failed to create owner user: %v", err)
+	}
+
+	project := &store.Project{
+		ID: tid("project_env_sec_meta"), Name: "Env Secret Meta Project", Slug: "env-secret-meta-project",
+		OwnerID: owner.ID, Created: time.Now(), Updated: time.Now(),
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+	if err := srv.createProjectOwnerRoleBinding(ctx, project.ID, owner.ID); err != nil {
+		t.Fatalf("failed to create owner binding: %v", err)
+	}
+
+	agent := &store.Agent{
+		ID: tid("agent_env_sec_meta"), Slug: "env-sec-meta-agent", Name: "Env Secret Meta Agent",
+		ProjectID: project.ID, Phase: string(state.PhaseRunning), StateVersion: 1,
+		Created: time.Now(), Updated: time.Now(),
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("failed to create agent: %v", err)
+	}
+
+	// 1. Plain project env var.
+	if rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/env/PLAIN_KEY", SetEnvVarRequest{
+		Value:       "plain-value",
+		Description: "plain env description",
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("seed PLAIN_KEY: got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 2. Sensitive (non-secret) plain project env var.
+	if rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/env/SENSITIVE_PLAIN_KEY", SetEnvVarRequest{
+		Value:       "sensitive-plain-value",
+		Description: "sensitive plain description",
+		Sensitive:   true,
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("seed SENSITIVE_PLAIN_KEY: got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 3. Environment-type secret with no backing store.EnvVar row.
+	if rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/secrets/SECRET_ONLY_KEY", SetSecretRequest{
+		Value:       "c2VjcmV0LW9ubHk=",
+		Description: "secret-only metadata description",
+		Type:        store.SecretTypeEnvironment,
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("seed SECRET_ONLY_KEY: got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 4. Shadowed key: plain store.EnvVar row created first, then shadowed by an
+	// environment-type secret written via /secrets (which leaves the plain row in store).
+	if rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/env/SHADOWED_KEY", SetEnvVarRequest{
+		Value:       "shadowed-plain-value",
+		Description: "stale plain description",
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("seed plain SHADOWED_KEY: got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/secrets/SHADOWED_KEY", SetSecretRequest{
+		Value:       "c2hhZG93ZWQtc2VjcmV0",
+		Description: "shadowing secret metadata description",
+		Type:        store.SecretTypeEnvironment,
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("seed secret SHADOWED_KEY: got %d: %s", rec.Code, rec.Body.String())
+	}
+	if storedPlain, err := s.GetEnvVar(ctx, "SHADOWED_KEY", store.ScopeProject, project.ID); err != nil || storedPlain.Value != "shadowed-plain-value" {
+		t.Fatalf("expected underlying plain store.EnvVar for SHADOWED_KEY to remain shadowed in store, got %+v, err=%v", storedPlain, err)
+	}
+
+	// 5. Non-environment secret ("variable") sharing a name with a plain EnvVar:
+	// non-environment secrets do not project into /env and must NOT shadow plain env vars.
+	if rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/env/VAR_SHARED_KEY", SetEnvVarRequest{
+		Value: "var-shared-plain-value",
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("seed plain VAR_SHARED_KEY: got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/secrets/VAR_SHARED_KEY", SetSecretRequest{
+		Value: "dmFyLXNlY3JldA==",
+		Type:  store.SecretTypeVariable,
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("seed variable secret VAR_SHARED_KEY: got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 6. Legacy store.EnvVar row flagged Secret=true (defense-in-depth).
+	if _, err := s.UpsertEnvVar(ctx, &store.EnvVar{
+		ID:          tid("legacy_secret_env_row"),
+		Key:         "LEGACY_SECRET_ROW",
+		Value:       "legacy-secret-value",
+		Scope:       store.ScopeProject,
+		ScopeID:     project.ID,
+		Description: "legacy secret row description",
+		Sensitive:   true,
+		Secret:      true,
+	}); err != nil {
+		t.Fatalf("seed LEGACY_SECRET_ROW: %v", err)
+	}
+
+	assertForbiddenLeaks := func(t *testing.T, label, body string) {
+		t.Helper()
+		for _, forbidden := range []string{
+			"SECRET_ONLY_KEY",
+			"secret-only metadata description",
+			"SHADOWED_KEY",
+			"shadowing secret metadata description",
+			"shadowed-plain-value",
+			"stale plain description",
+			"LEGACY_SECRET_ROW",
+			"legacy-secret-value",
+			"legacy secret row description",
+		} {
+			if strings.Contains(body, forbidden) {
+				t.Errorf("%s: response body leaked %q: %s", label, forbidden, body)
+			}
+		}
+	}
+
+	assertRestrictedList := func(t *testing.T, tok, path string) {
+		t.Helper()
+		rec := doRequestWithAgentToken(t, srv, http.MethodGet, path, nil, tok)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: expected 200 OK, got %d: %s", path, rec.Code, rec.Body.String())
+		}
+		assertForbiddenLeaks(t, path, rec.Body.String())
+
+		var resp ListEnvVarsResponse
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatalf("%s: decode ListEnvVarsResponse: %v", path, err)
+		}
+		gotByKey := make(map[string]store.EnvVar, len(resp.EnvVars))
+		for _, ev := range resp.EnvVars {
+			if ev.Secret {
+				t.Errorf("%s: unexpected secret-flagged env var %q: %+v", path, ev.Key, ev)
+			}
+			gotByKey[ev.Key] = ev
+		}
+		if len(gotByKey) != 3 {
+			t.Errorf("%s: expected 3 plain env vars (PLAIN_KEY, SENSITIVE_PLAIN_KEY, VAR_SHARED_KEY), got %d: %+v", path, len(gotByKey), resp.EnvVars)
+		}
+		if ev, ok := gotByKey["PLAIN_KEY"]; !ok || ev.Value != "plain-value" {
+			t.Errorf("%s: expected PLAIN_KEY=plain-value, got %+v (present=%v)", path, ev, ok)
+		}
+		if ev, ok := gotByKey["SENSITIVE_PLAIN_KEY"]; !ok || ev.Value != "********" {
+			t.Errorf("%s: expected masked SENSITIVE_PLAIN_KEY, got %+v (present=%v)", path, ev, ok)
+		}
+		if ev, ok := gotByKey["VAR_SHARED_KEY"]; !ok || ev.Value != "var-shared-plain-value" {
+			t.Errorf("%s: expected VAR_SHARED_KEY=var-shared-plain-value, got %+v (present=%v)", path, ev, ok)
+		}
+	}
+
+	assertRestrictedGetByKey := func(t *testing.T, tok string, buildPath func(key string) string) {
+		t.Helper()
+		// Baseline response for a genuinely non-existent key: hidden secret keys and
+		// shadowed keys must match status code and body so there is no existence oracle.
+		missingPath := buildPath("NO_SUCH_KEY")
+		missingRec := doRequestWithAgentToken(t, srv, http.MethodGet, missingPath, nil, tok)
+		if missingRec.Code != http.StatusNotFound {
+			t.Fatalf("%s: expected 404 for missing key baseline, got %d: %s", missingPath, missingRec.Code, missingRec.Body.String())
+		}
+		wantMissingBody := missingRec.Body.String()
+
+		for _, plainCase := range []struct {
+			key       string
+			wantValue string
+		}{
+			{"PLAIN_KEY", "plain-value"},
+			{"SENSITIVE_PLAIN_KEY", "********"},
+			{"VAR_SHARED_KEY", "var-shared-plain-value"},
+		} {
+			p := buildPath(plainCase.key)
+			rec := doRequestWithAgentToken(t, srv, http.MethodGet, p, nil, tok)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("%s: expected 200 OK for plain env var, got %d: %s", p, rec.Code, rec.Body.String())
+			}
+			var ev store.EnvVar
+			if err := json.NewDecoder(rec.Body).Decode(&ev); err != nil {
+				t.Fatalf("%s: decode EnvVar: %v", p, err)
+			}
+			if ev.Secret || ev.Value != plainCase.wantValue {
+				t.Errorf("%s: got Secret=%v Value=%q, want Secret=false Value=%q", p, ev.Secret, ev.Value, plainCase.wantValue)
+			}
+		}
+
+		for _, hiddenKey := range []string{"SECRET_ONLY_KEY", "SHADOWED_KEY", "LEGACY_SECRET_ROW"} {
+			p := buildPath(hiddenKey)
+			rec := doRequestWithAgentToken(t, srv, http.MethodGet, p, nil, tok)
+			if rec.Code != http.StatusNotFound {
+				t.Errorf("%s: expected 404 Not Found without %s, got %d: %s", p, ScopeProjectSecretRead, rec.Code, rec.Body.String())
+			}
+			assertForbiddenLeaks(t, p, rec.Body.String())
+			if rec.Body.String() != wantMissingBody {
+				t.Errorf("%s: response body %q differs from missing-key baseline %q (potential oracle)", p, rec.Body.String(), wantMissingBody)
+			}
+		}
+	}
+
+	assertRestrictedFilteredList := func(t *testing.T, tok string) {
+		t.Helper()
+		plainFiltered := "/api/v1/env?scope=project&scopeId=" + project.ID + "&key=PLAIN_KEY"
+		rec := doRequestWithAgentToken(t, srv, http.MethodGet, plainFiltered, nil, tok)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: expected 200 OK, got %d: %s", plainFiltered, rec.Code, rec.Body.String())
+		}
+		var plainResp ListEnvVarsResponse
+		if err := json.NewDecoder(rec.Body).Decode(&plainResp); err != nil {
+			t.Fatalf("%s: decode: %v", plainFiltered, err)
+		}
+		if len(plainResp.EnvVars) != 1 || plainResp.EnvVars[0].Key != "PLAIN_KEY" || plainResp.EnvVars[0].Value != "plain-value" {
+			t.Errorf("%s: unexpected filtered plain response: %+v", plainFiltered, plainResp.EnvVars)
+		}
+
+		for _, hiddenKey := range []string{"SECRET_ONLY_KEY", "SHADOWED_KEY", "LEGACY_SECRET_ROW", "NO_SUCH_KEY"} {
+			p := "/api/v1/env?scope=project&scopeId=" + project.ID + "&key=" + hiddenKey
+			hRec := doRequestWithAgentToken(t, srv, http.MethodGet, p, nil, tok)
+			if hRec.Code != http.StatusOK {
+				t.Fatalf("%s: expected 200 OK with empty list, got %d: %s", p, hRec.Code, hRec.Body.String())
+			}
+			assertForbiddenLeaks(t, p, hRec.Body.String())
+			var hResp ListEnvVarsResponse
+			if err := json.NewDecoder(hRec.Body).Decode(&hResp); err != nil {
+				t.Fatalf("%s: decode: %v", p, err)
+			}
+			if len(hResp.EnvVars) != 0 {
+				t.Errorf("%s: expected empty EnvVars without %s, got %+v", p, ScopeProjectSecretRead, hResp.EnvVars)
+			}
+		}
+	}
+
+	// Agents with project:read but without project:secret:read (readonly, baseline)
+	// reach all 4 project /env read routes and must receive plain env vars only.
+	for _, bundle := range []struct {
+		name   string
+		scopes []AgentTokenScope
+	}{
+		{"readonly_role", ScopesForRole(AgentRoleReadOnly)},
+		{"baseline_role", ScopesForRole(AgentRoleBaseline)},
+	} {
+		t.Run(bundle.name, func(t *testing.T) {
+			tok, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, bundle.scopes, nil)
+			if err != nil {
+				t.Fatalf("generate %s token: %v", bundle.name, err)
+			}
+			assertRestrictedList(t, tok, "/api/v1/projects/"+project.ID+"/env")
+			assertRestrictedList(t, tok, "/api/v1/env?scope=project&scopeId="+project.ID)
+			assertRestrictedFilteredList(t, tok)
+			assertRestrictedGetByKey(t, tok, func(key string) string {
+				return "/api/v1/projects/" + project.ID + "/env/" + key
+			})
+			assertRestrictedGetByKey(t, tok, func(key string) string {
+				return "/api/v1/env/" + key + "?scope=project&scopeId=" + project.ID
+			})
+		})
+	}
+
+	// status_only_default lacks project:read (so /api/v1/projects/{id}/env* stays 403),
+	// and also lacks project:secret:read on /api/v1/env?scope=project&scopeId={id}.
+	t.Run("status_only_default", func(t *testing.T) {
+		tok, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, nil, nil)
+		if err != nil {
+			t.Fatalf("generate status_only_default token: %v", err)
+		}
+		for _, projRoute := range []string{
+			"/api/v1/projects/" + project.ID + "/env",
+			"/api/v1/projects/" + project.ID + "/env/PLAIN_KEY",
+			"/api/v1/projects/" + project.ID + "/env/SECRET_ONLY_KEY",
+		} {
+			rec := doRequestWithAgentToken(t, srv, http.MethodGet, projRoute, nil, tok)
+			if rec.Code != http.StatusForbidden {
+				t.Errorf("%s: expected 403 without %s, got %d: %s", projRoute, ScopeProjectRead, rec.Code, rec.Body.String())
+			}
+		}
+		assertRestrictedList(t, tok, "/api/v1/env?scope=project&scopeId="+project.ID)
+		assertRestrictedFilteredList(t, tok)
+		assertRestrictedGetByKey(t, tok, func(key string) string {
+			return "/api/v1/env/" + key + "?scope=project&scopeId=" + project.ID
+		})
+	})
+
+	// Control: full-role agent (holding project:secret:read) and project owner user
+	// remain completely unchanged and continue seeing merged environment-secret metadata.
+	assertFullSecretMetadataAccess := func(t *testing.T, label string, doGet func(path string) *http.Response) {
+		t.Helper()
+		for _, listPath := range []string{
+			"/api/v1/projects/" + project.ID + "/env",
+			"/api/v1/env?scope=project&scopeId=" + project.ID,
+		} {
+			resp := doGet(listPath)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("%s %s: expected 200 OK, got %d", label, listPath, resp.StatusCode)
+			}
+			var list ListEnvVarsResponse
+			if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+				t.Fatalf("%s %s: decode: %v", label, listPath, err)
+			}
+			byKey := make(map[string]store.EnvVar, len(list.EnvVars))
+			for _, ev := range list.EnvVars {
+				byKey[ev.Key] = ev
+			}
+			if ev, ok := byKey["PLAIN_KEY"]; !ok || ev.Secret || ev.Value != "plain-value" {
+				t.Errorf("%s %s: expected plain PLAIN_KEY, got %+v (ok=%v)", label, listPath, ev, ok)
+			}
+			if ev, ok := byKey["SECRET_ONLY_KEY"]; !ok || !ev.Secret || ev.Value != "********" || ev.Description != "secret-only metadata description" {
+				t.Errorf("%s %s: expected secret metadata for SECRET_ONLY_KEY, got %+v (ok=%v)", label, listPath, ev, ok)
+			}
+			if ev, ok := byKey["SHADOWED_KEY"]; !ok || !ev.Secret || ev.Value != "********" || ev.Description != "shadowing secret metadata description" {
+				t.Errorf("%s %s: expected merged secret metadata for SHADOWED_KEY (suppressing plain value), got %+v (ok=%v)", label, listPath, ev, ok)
+			}
+		}
+		for _, getPath := range []string{
+			"/api/v1/projects/" + project.ID + "/env/SECRET_ONLY_KEY",
+			"/api/v1/env/SECRET_ONLY_KEY?scope=project&scopeId=" + project.ID,
+		} {
+			resp := doGet(getPath)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("%s %s: expected 200 OK for SECRET_ONLY_KEY, got %d", label, getPath, resp.StatusCode)
+			}
+			var ev store.EnvVar
+			if err := json.NewDecoder(resp.Body).Decode(&ev); err != nil {
+				t.Fatalf("%s %s: decode: %v", label, getPath, err)
+			}
+			if !ev.Secret || ev.Value != "********" || ev.Description != "secret-only metadata description" {
+				t.Errorf("%s %s: unexpected SECRET_ONLY_KEY EnvVar: %+v", label, getPath, ev)
+			}
+		}
+	}
+
+	t.Run("full_role_agent_unchanged", func(t *testing.T) {
+		fullTok, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, ScopesForRole(AgentRoleFull), nil)
+		if err != nil {
+			t.Fatalf("generate full token: %v", err)
+		}
+		assertFullSecretMetadataAccess(t, "full_role", func(path string) *http.Response {
+			return doRequestWithAgentToken(t, srv, http.MethodGet, path, nil, fullTok).Result()
+		})
+	})
+
+	t.Run("project_owner_user_unchanged", func(t *testing.T) {
+		assertFullSecretMetadataAccess(t, "project_owner", func(path string) *http.Response {
+			return doRequestAsUser(t, srv, owner, http.MethodGet, path, nil).Result()
+		})
+	})
+}
+
+type envSecretFaultBackend struct {
+	secret.SecretBackend
+	listErr    error
+	getMetaErr error
+}
+
+func (b *envSecretFaultBackend) List(ctx context.Context, filter secret.Filter) ([]secret.SecretMeta, error) {
+	if b.listErr != nil {
+		return nil, b.listErr
+	}
+	return b.SecretBackend.List(ctx, filter)
+}
+
+func (b *envSecretFaultBackend) GetMeta(ctx context.Context, name, scope, scopeID string) (*secret.SecretMeta, error) {
+	if b.getMetaErr != nil {
+		return nil, b.getMetaErr
+	}
+	return b.SecretBackend.GetMeta(ctx, name, scope, scopeID)
+}
+
+func TestEnvVar_ProjectScope_RestrictedAgentFailsClosedOnSecretBackendError(t *testing.T) {
+	srv, s := testServer(t)
+	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
+	srv.SetSecretBackend(localBackend)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID: tid("project_env_failclosed"), Name: "Env Fail Closed Project", Slug: "env-failclosed-project",
+		Created: time.Now(), Updated: time.Now(),
+	}
+	if err := s.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	agent := &store.Agent{
+		ID: tid("agent_env_failclosed"), Slug: "env-failclosed-agent", Name: "Env Fail Closed Agent",
+		ProjectID: project.ID, Phase: string(state.PhaseRunning), StateVersion: 1,
+		Created: time.Now(), Updated: time.Now(),
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("failed to create agent: %v", err)
+	}
+
+	tok, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, ScopesForRole(AgentRoleBaseline), nil)
+	if err != nil {
+		t.Fatalf("generate baseline token: %v", err)
+	}
+
+	// When no plain env vars exist at all, listing as a restricted agent needs no
+	// shadow check and succeeds with an empty list even if secretBackend fails.
+	fault := &envSecretFaultBackend{
+		SecretBackend: localBackend,
+		listErr:       errors.New("simulated secret backend list failure"),
+		getMetaErr:    errors.New("simulated secret backend getMeta failure"),
+	}
+	srv.SetSecretBackend(fault)
+	emptyRec := doRequestWithAgentToken(t, srv, http.MethodGet, "/api/v1/projects/"+project.ID+"/env", nil, tok)
+	if emptyRec.Code != http.StatusOK {
+		t.Fatalf("empty project list with failing secret backend: expected 200 OK, got %d: %s", emptyRec.Code, emptyRec.Body.String())
+	}
+
+	// Seed a shadowed plain env var, then inject backend errors: neither list nor
+	// get-by-key may fail open and leak the shadowed plain value.
+	srv.SetSecretBackend(localBackend)
+	if rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/env/SHADOWED_KEY", SetEnvVarRequest{
+		Value: "shadowed-plain-secret-leak",
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("seed plain SHADOWED_KEY: got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/secrets/SHADOWED_KEY", SetSecretRequest{
+		Value: "c2hhZG93ZWQ=",
+		Type:  store.SecretTypeEnvironment,
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("seed secret SHADOWED_KEY: got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	srv.SetSecretBackend(fault)
+	for _, path := range []string{
+		"/api/v1/projects/" + project.ID + "/env",
+		"/api/v1/env?scope=project&scopeId=" + project.ID,
+		"/api/v1/projects/" + project.ID + "/env/SHADOWED_KEY",
+		"/api/v1/env/SHADOWED_KEY?scope=project&scopeId=" + project.ID,
+	} {
+		rec := doRequestWithAgentToken(t, srv, http.MethodGet, path, nil, tok)
+		if rec.Code != http.StatusInternalServerError {
+			t.Errorf("%s: expected 500 fail-closed on secret backend error, got %d: %s", path, rec.Code, rec.Body.String())
+		}
+		if strings.Contains(rec.Body.String(), "shadowed-plain-secret-leak") {
+			t.Errorf("%s: leaked shadowed plain value on backend error: %s", path, rec.Body.String())
+		}
 	}
 }
 
