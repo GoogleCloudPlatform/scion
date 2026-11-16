@@ -7340,7 +7340,7 @@ func (s *Server) executeSchedule(ctx context.Context, sched store.Schedule, now 
 			evt.FireAt = *sched.NextRunAt
 		}
 		evt.Status = store.ScheduledEventFired
-		firedAt := now
+		firedAt := time.Now().UTC()
 		evt.FiredAt = &firedAt
 	}
 

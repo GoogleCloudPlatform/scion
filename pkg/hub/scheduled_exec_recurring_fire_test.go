@@ -588,3 +588,65 @@ func TestScheduledExecRecurring_ShutdownAndSweeperInterleavingMatrix(t *testing.
 		_ = sync.Mutex{}
 	})
 }
+
+type p2o1BlockAdmitStore struct {
+	store.Store
+	fault *storeFaultSwitch
+	gate  chan struct{}
+}
+
+func (s *p2o1BlockAdmitStore) CreateScheduledExecRun(ctx context.Context, run *store.ScheduledExecRun) error {
+	if s.fault.Active() && run.ScheduleID != "" {
+		select {
+		case <-s.gate:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return s.Store.CreateScheduledExecRun(ctx, run)
+}
+
+// TestScheduledExecP2O1_RecurringFiredAtUsesCreationTime verifies Phase 2 Pass 2
+// P2-O1: executeSchedule stamps a recurring exec event's FiredAt at event
+// creation time (time.Now()), not the evaluator tick start passed in `now`, so
+// a slow tick does not shrink the unadmitted-recovery clock-skew margin.
+func TestScheduledExecP2O1_RecurringFiredAtUsesCreationTime(t *testing.T) {
+	gate := make(chan struct{})
+	var fault *storeFaultSwitch
+	f := newExecRouteFixtureWith(t, func(srv *Server) {
+		_, fault = installStoreFault(t, srv, func(inner store.Store, sw *storeFaultSwitch) *p2o1BlockAdmitStore {
+			return &p2o1BlockAdmitStore{Store: inner, fault: sw, gate: gate}
+		})
+	})
+	f.startAgent(t)
+	fault.Arm()
+
+	ctx := context.Background()
+	callStart := time.Now().UTC()
+	staleTickStart := callStart.Add(-45 * time.Second)
+	dueAt := staleTickStart.Add(-5 * time.Second)
+
+	sc := f.createExecSchedule(t, "p2o1-fired-at", dueAt, 10, "true")
+	f.srv.executeSchedule(ctx, sc, staleTickStart)
+	callEnd := time.Now().UTC()
+
+	evt := latestScheduleEvent(t, f.store, f.launched.ProjectID, sc.ID)
+	require.NotNil(t, evt.FiredAt)
+	assert.False(t, evt.FiredAt.Before(callStart),
+		"recurring exec FiredAt (%s) must not be earlier than executeSchedule start (%s); stale tickStart was %s",
+		evt.FiredAt.UTC(), callStart, staleTickStart)
+	assert.False(t, evt.FiredAt.After(callEnd.Add(time.Second)),
+		"recurring exec FiredAt (%s) must be near event creation time (%s)", evt.FiredAt.UTC(), callEnd)
+	assert.Equal(t, dueAt.UnixNano(), evt.FireAt.UnixNano(), "FireAt preserves scheduled NextRunAt for missed-window check")
+
+	// With FiredAt stamped at creation time rather than staleTickStart (-45s),
+	// an unadmitted sweep running 60s after callStart (cutoff = callStart + 60s - 100s = callStart - 40s)
+	// must NOT prematurely claim the still-admitting event.
+	cutoff := callStart.Add(60 * time.Second).Add(-scheduledExecAdmitWindow)
+	unadmitted, err := f.store.ListUnadmittedScheduledEvents(ctx, scheduledEventTypeExec, cutoff, 10)
+	require.NoError(t, err)
+	assert.Empty(t, unadmitted, "unadmitted recovery within 60s skew margin must not claim recurring event")
+
+	close(gate)
+	waitScheduleRunCount(t, f.store, sc.ID, 1)
+}
