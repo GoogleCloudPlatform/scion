@@ -922,10 +922,13 @@ func (s *Server) agentDMAutoWakeItem(input *AgentDMInput, storeMsg *store.Messag
 			dctx, cancel := context.WithTimeout(ctx, agentDMDispatchTimeout)
 			defer cancel()
 			var err error
+			var held bool
 			if isManagedAgentRuntime(woken.Runtime) {
 				err = s.managedAgentMessage(dctx, woken, input.Msg, input.Urgent || input.Interrupt)
 			} else if dispatcher := s.GetDispatcher(); dispatcher != nil && woken.RuntimeBrokerID != "" {
-				err = dispatchWithBrokerRetry(withDispatchMessageID(dctx, msgID), nil, dispatcher, woken, dispatchMsg.Msg, input.Urgent || input.Interrupt, dispatchMsg)
+				held, err = s.holdOrDispatch(dctx, woken, msgID, nil, func() error {
+					return dispatchWithBrokerRetry(withDispatchMessageID(dctx, msgID), nil, dispatcher, woken, dispatchMsg.Msg, input.Urgent || input.Interrupt, dispatchMsg)
+				})
 			} else {
 				// No pre-check ran this late (the sync path's
 				// checkDispatchAvailability did, before the wake): nothing
@@ -954,9 +957,11 @@ func (s *Server) agentDMAutoWakeItem(input *AgentDMInput, storeMsg *store.Messag
 				}
 				return
 			}
-			if _, casErr := s.markDispatched(fctx, msgID); casErr != nil {
-				s.messageLog.Error("agent DM: MarkMessageDispatched store error (message dispatched)",
-					"message_id", msgID, "error", casErr)
+			if !held {
+				if _, casErr := s.markDispatched(fctx, msgID); casErr != nil {
+					s.messageLog.Error("agent DM: MarkMessageDispatched store error (message dispatched)",
+						"message_id", msgID, "error", casErr)
+				}
 			}
 			LogDMDispatchOutcome(input.SenderAgent, woken, msgID, DispatchSucceeded, nil)
 			s.publishAgentDMObserver(fctx, input, structuredMsg)
