@@ -23,6 +23,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentcredential"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentdelegatedcredential"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentdelegationgrant"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentdeliveryhold"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agenthold"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentidentitykey"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentlifecyclecursor"
@@ -137,6 +138,8 @@ type Client struct {
 	AgentDelegatedCredential *AgentDelegatedCredentialClient
 	// AgentDelegationGrant is the client for interacting with the AgentDelegationGrant builders.
 	AgentDelegationGrant *AgentDelegationGrantClient
+	// AgentDeliveryHold is the client for interacting with the AgentDeliveryHold builders.
+	AgentDeliveryHold *AgentDeliveryHoldClient
 	// AgentHold is the client for interacting with the AgentHold builders.
 	AgentHold *AgentHoldClient
 	// AgentIdentityKey is the client for interacting with the AgentIdentityKey builders.
@@ -341,6 +344,7 @@ func (c *Client) init() {
 	c.AgentCredential = NewAgentCredentialClient(c.config)
 	c.AgentDelegatedCredential = NewAgentDelegatedCredentialClient(c.config)
 	c.AgentDelegationGrant = NewAgentDelegationGrantClient(c.config)
+	c.AgentDeliveryHold = NewAgentDeliveryHoldClient(c.config)
 	c.AgentHold = NewAgentHoldClient(c.config)
 	c.AgentIdentityKey = NewAgentIdentityKeyClient(c.config)
 	c.AgentLifecycleCursor = NewAgentLifecycleCursorClient(c.config)
@@ -533,6 +537,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		AgentCredential:               NewAgentCredentialClient(cfg),
 		AgentDelegatedCredential:      NewAgentDelegatedCredentialClient(cfg),
 		AgentDelegationGrant:          NewAgentDelegationGrantClient(cfg),
+		AgentDeliveryHold:             NewAgentDeliveryHoldClient(cfg),
 		AgentHold:                     NewAgentHoldClient(cfg),
 		AgentIdentityKey:              NewAgentIdentityKeyClient(cfg),
 		AgentLifecycleCursor:          NewAgentLifecycleCursorClient(cfg),
@@ -652,6 +657,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		AgentCredential:               NewAgentCredentialClient(cfg),
 		AgentDelegatedCredential:      NewAgentDelegatedCredentialClient(cfg),
 		AgentDelegationGrant:          NewAgentDelegationGrantClient(cfg),
+		AgentDeliveryHold:             NewAgentDeliveryHoldClient(cfg),
 		AgentHold:                     NewAgentHoldClient(cfg),
 		AgentIdentityKey:              NewAgentIdentityKeyClient(cfg),
 		AgentLifecycleCursor:          NewAgentLifecycleCursorClient(cfg),
@@ -776,7 +782,7 @@ func (c *Client) Use(hooks ...Hook) {
 	for _, n := range []interface{ Use(...Hook) }{
 		c.AccessConstraint, c.AccessConstraintHistory, c.AccessPolicy, c.Agent,
 		c.AgentCredential, c.AgentDelegatedCredential, c.AgentDelegationGrant,
-		c.AgentHold, c.AgentIdentityKey, c.AgentLifecycleCursor,
+		c.AgentDeliveryHold, c.AgentHold, c.AgentIdentityKey, c.AgentLifecycleCursor,
 		c.AgentLifecycleOutbox, c.AgentRecovery, c.AgentReincarnation,
 		c.AgentServiceAccountAssignment, c.AgentSessionMetrics, c.AllowListEntry,
 		c.ApiKey, c.BrokerDispatch, c.BrokerJoinToken, c.BrokerReportedRun,
@@ -813,7 +819,7 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 	for _, n := range []interface{ Intercept(...Interceptor) }{
 		c.AccessConstraint, c.AccessConstraintHistory, c.AccessPolicy, c.Agent,
 		c.AgentCredential, c.AgentDelegatedCredential, c.AgentDelegationGrant,
-		c.AgentHold, c.AgentIdentityKey, c.AgentLifecycleCursor,
+		c.AgentDeliveryHold, c.AgentHold, c.AgentIdentityKey, c.AgentLifecycleCursor,
 		c.AgentLifecycleOutbox, c.AgentRecovery, c.AgentReincarnation,
 		c.AgentServiceAccountAssignment, c.AgentSessionMetrics, c.AllowListEntry,
 		c.ApiKey, c.BrokerDispatch, c.BrokerJoinToken, c.BrokerReportedRun,
@@ -861,6 +867,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.AgentDelegatedCredential.mutate(ctx, m)
 	case *AgentDelegationGrantMutation:
 		return c.AgentDelegationGrant.mutate(ctx, m)
+	case *AgentDeliveryHoldMutation:
+		return c.AgentDeliveryHold.mutate(ctx, m)
 	case *AgentHoldMutation:
 		return c.AgentHold.mutate(ctx, m)
 	case *AgentIdentityKeyMutation:
@@ -2108,6 +2116,139 @@ func (c *AgentDelegationGrantClient) mutate(ctx context.Context, m *AgentDelegat
 		return (&AgentDelegationGrantDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown AgentDelegationGrant mutation op: %q", m.Op())
+	}
+}
+
+// AgentDeliveryHoldClient is a client for the AgentDeliveryHold schema.
+type AgentDeliveryHoldClient struct {
+	config
+}
+
+// NewAgentDeliveryHoldClient returns a client for the AgentDeliveryHold from the given config.
+func NewAgentDeliveryHoldClient(c config) *AgentDeliveryHoldClient {
+	return &AgentDeliveryHoldClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `agentdeliveryhold.Hooks(f(g(h())))`.
+func (c *AgentDeliveryHoldClient) Use(hooks ...Hook) {
+	c.hooks.AgentDeliveryHold = append(c.hooks.AgentDeliveryHold, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `agentdeliveryhold.Intercept(f(g(h())))`.
+func (c *AgentDeliveryHoldClient) Intercept(interceptors ...Interceptor) {
+	c.inters.AgentDeliveryHold = append(c.inters.AgentDeliveryHold, interceptors...)
+}
+
+// Create returns a builder for creating a AgentDeliveryHold entity.
+func (c *AgentDeliveryHoldClient) Create() *AgentDeliveryHoldCreate {
+	mutation := newAgentDeliveryHoldMutation(c.config, OpCreate)
+	return &AgentDeliveryHoldCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of AgentDeliveryHold entities.
+func (c *AgentDeliveryHoldClient) CreateBulk(builders ...*AgentDeliveryHoldCreate) *AgentDeliveryHoldCreateBulk {
+	return &AgentDeliveryHoldCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *AgentDeliveryHoldClient) MapCreateBulk(slice any, setFunc func(*AgentDeliveryHoldCreate, int)) *AgentDeliveryHoldCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &AgentDeliveryHoldCreateBulk{err: fmt.Errorf("calling to AgentDeliveryHoldClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*AgentDeliveryHoldCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &AgentDeliveryHoldCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for AgentDeliveryHold.
+func (c *AgentDeliveryHoldClient) Update() *AgentDeliveryHoldUpdate {
+	mutation := newAgentDeliveryHoldMutation(c.config, OpUpdate)
+	return &AgentDeliveryHoldUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *AgentDeliveryHoldClient) UpdateOne(_m *AgentDeliveryHold) *AgentDeliveryHoldUpdateOne {
+	mutation := newAgentDeliveryHoldMutation(c.config, OpUpdateOne, withAgentDeliveryHold(_m))
+	return &AgentDeliveryHoldUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *AgentDeliveryHoldClient) UpdateOneID(id string) *AgentDeliveryHoldUpdateOne {
+	mutation := newAgentDeliveryHoldMutation(c.config, OpUpdateOne, withAgentDeliveryHoldID(id))
+	return &AgentDeliveryHoldUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for AgentDeliveryHold.
+func (c *AgentDeliveryHoldClient) Delete() *AgentDeliveryHoldDelete {
+	mutation := newAgentDeliveryHoldMutation(c.config, OpDelete)
+	return &AgentDeliveryHoldDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *AgentDeliveryHoldClient) DeleteOne(_m *AgentDeliveryHold) *AgentDeliveryHoldDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *AgentDeliveryHoldClient) DeleteOneID(id string) *AgentDeliveryHoldDeleteOne {
+	builder := c.Delete().Where(agentdeliveryhold.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &AgentDeliveryHoldDeleteOne{builder}
+}
+
+// Query returns a query builder for AgentDeliveryHold.
+func (c *AgentDeliveryHoldClient) Query() *AgentDeliveryHoldQuery {
+	return &AgentDeliveryHoldQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeAgentDeliveryHold},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a AgentDeliveryHold entity by its id.
+func (c *AgentDeliveryHoldClient) Get(ctx context.Context, id string) (*AgentDeliveryHold, error) {
+	return c.Query().Where(agentdeliveryhold.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *AgentDeliveryHoldClient) GetX(ctx context.Context, id string) *AgentDeliveryHold {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *AgentDeliveryHoldClient) Hooks() []Hook {
+	return c.hooks.AgentDeliveryHold
+}
+
+// Interceptors returns the client interceptors.
+func (c *AgentDeliveryHoldClient) Interceptors() []Interceptor {
+	return c.inters.AgentDeliveryHold
+}
+
+func (c *AgentDeliveryHoldClient) mutate(ctx context.Context, m *AgentDeliveryHoldMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&AgentDeliveryHoldCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&AgentDeliveryHoldUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&AgentDeliveryHoldUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&AgentDeliveryHoldDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown AgentDeliveryHold mutation op: %q", m.Op())
 	}
 }
 
@@ -15060,54 +15201,56 @@ func (c *UserTerminalWorkspaceClient) mutate(ctx context.Context, m *UserTermina
 type (
 	hooks struct {
 		AccessConstraint, AccessConstraintHistory, AccessPolicy, Agent, AgentCredential,
-		AgentDelegatedCredential, AgentDelegationGrant, AgentHold, AgentIdentityKey,
-		AgentLifecycleCursor, AgentLifecycleOutbox, AgentRecovery, AgentReincarnation,
-		AgentServiceAccountAssignment, AgentSessionMetrics, AllowListEntry, ApiKey,
-		BrokerDispatch, BrokerJoinToken, BrokerReportedRun, BrokerSecret,
-		BrokerSetting, BrokerTargetInventory, ChatLinkCode, ChatRetentionCursor,
-		ChatRetentionRun, ConduitPrincipalEpoch, ConduitSession, Conversation,
-		ConversationParticipant, Decision, DecisionAnswer, DecisionKeyCounter,
-		DelegationAdoption, DelegationEdge, DurableQueueItem, EntitlementBinding,
-		EnvVar, ExternalIdentity, GCPServiceAccount, GitHubResolutionCache,
-		GithubInstallation, Group, GroupMembership, HarnessConfig,
-		HubEncryptionMigration, HubEncryptionPolicy, HubInstance, HubSetting,
-		IntegrationConfig, IntegrationUpdate, InviteCode, LaunchReaperState,
-		LifecycleHook, LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
-		MaintenanceOperationRun, MembershipLossCheck, Message, MessageAddressee,
-		MutationAudit, NonceCache, Notification, NotificationSubscription,
-		PendingSecret, PolicyBinding, Project, ProjectContributor, ProjectPreStartHook,
-		ProjectSyncState, ProjectVisitorExclusion, ProjectVisitorRule, RelayInstance,
-		RoleBinding, RoleDefinition, RuntimeBroker, RuntimeOrphan, Schedule,
-		ScheduledEvent, ScheduledExecRun, Secret, Skill, SkillInjection, SkillRegistry,
-		SkillVersion, SubscriptionTemplate, SystemOneInstance, Template,
-		TestIdentityDelegation, TestIdentityLoginCode, TestInfraMarker, ThreadGroup,
-		ThreadGroupMember, UsageReservation, User, UserAccessToken, UserDeletion,
-		UserDeletionAgent, UserTerminalWorkspace []ent.Hook
+		AgentDelegatedCredential, AgentDelegationGrant, AgentDeliveryHold, AgentHold,
+		AgentIdentityKey, AgentLifecycleCursor, AgentLifecycleOutbox, AgentRecovery,
+		AgentReincarnation, AgentServiceAccountAssignment, AgentSessionMetrics,
+		AllowListEntry, ApiKey, BrokerDispatch, BrokerJoinToken, BrokerReportedRun,
+		BrokerSecret, BrokerSetting, BrokerTargetInventory, ChatLinkCode,
+		ChatRetentionCursor, ChatRetentionRun, ConduitPrincipalEpoch, ConduitSession,
+		Conversation, ConversationParticipant, Decision, DecisionAnswer,
+		DecisionKeyCounter, DelegationAdoption, DelegationEdge, DurableQueueItem,
+		EntitlementBinding, EnvVar, ExternalIdentity, GCPServiceAccount,
+		GitHubResolutionCache, GithubInstallation, Group, GroupMembership,
+		HarnessConfig, HubEncryptionMigration, HubEncryptionPolicy, HubInstance,
+		HubSetting, IntegrationConfig, IntegrationUpdate, InviteCode,
+		LaunchReaperState, LifecycleHook, LifecycleHookAgentPhase, LimitDefinition,
+		MaintenanceOperation, MaintenanceOperationRun, MembershipLossCheck, Message,
+		MessageAddressee, MutationAudit, NonceCache, Notification,
+		NotificationSubscription, PendingSecret, PolicyBinding, Project,
+		ProjectContributor, ProjectPreStartHook, ProjectSyncState,
+		ProjectVisitorExclusion, ProjectVisitorRule, RelayInstance, RoleBinding,
+		RoleDefinition, RuntimeBroker, RuntimeOrphan, Schedule, ScheduledEvent,
+		ScheduledExecRun, Secret, Skill, SkillInjection, SkillRegistry, SkillVersion,
+		SubscriptionTemplate, SystemOneInstance, Template, TestIdentityDelegation,
+		TestIdentityLoginCode, TestInfraMarker, ThreadGroup, ThreadGroupMember,
+		UsageReservation, User, UserAccessToken, UserDeletion, UserDeletionAgent,
+		UserTerminalWorkspace []ent.Hook
 	}
 	inters struct {
 		AccessConstraint, AccessConstraintHistory, AccessPolicy, Agent, AgentCredential,
-		AgentDelegatedCredential, AgentDelegationGrant, AgentHold, AgentIdentityKey,
-		AgentLifecycleCursor, AgentLifecycleOutbox, AgentRecovery, AgentReincarnation,
-		AgentServiceAccountAssignment, AgentSessionMetrics, AllowListEntry, ApiKey,
-		BrokerDispatch, BrokerJoinToken, BrokerReportedRun, BrokerSecret,
-		BrokerSetting, BrokerTargetInventory, ChatLinkCode, ChatRetentionCursor,
-		ChatRetentionRun, ConduitPrincipalEpoch, ConduitSession, Conversation,
-		ConversationParticipant, Decision, DecisionAnswer, DecisionKeyCounter,
-		DelegationAdoption, DelegationEdge, DurableQueueItem, EntitlementBinding,
-		EnvVar, ExternalIdentity, GCPServiceAccount, GitHubResolutionCache,
-		GithubInstallation, Group, GroupMembership, HarnessConfig,
-		HubEncryptionMigration, HubEncryptionPolicy, HubInstance, HubSetting,
-		IntegrationConfig, IntegrationUpdate, InviteCode, LaunchReaperState,
-		LifecycleHook, LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
-		MaintenanceOperationRun, MembershipLossCheck, Message, MessageAddressee,
-		MutationAudit, NonceCache, Notification, NotificationSubscription,
-		PendingSecret, PolicyBinding, Project, ProjectContributor, ProjectPreStartHook,
-		ProjectSyncState, ProjectVisitorExclusion, ProjectVisitorRule, RelayInstance,
-		RoleBinding, RoleDefinition, RuntimeBroker, RuntimeOrphan, Schedule,
-		ScheduledEvent, ScheduledExecRun, Secret, Skill, SkillInjection, SkillRegistry,
-		SkillVersion, SubscriptionTemplate, SystemOneInstance, Template,
-		TestIdentityDelegation, TestIdentityLoginCode, TestInfraMarker, ThreadGroup,
-		ThreadGroupMember, UsageReservation, User, UserAccessToken, UserDeletion,
-		UserDeletionAgent, UserTerminalWorkspace []ent.Interceptor
+		AgentDelegatedCredential, AgentDelegationGrant, AgentDeliveryHold, AgentHold,
+		AgentIdentityKey, AgentLifecycleCursor, AgentLifecycleOutbox, AgentRecovery,
+		AgentReincarnation, AgentServiceAccountAssignment, AgentSessionMetrics,
+		AllowListEntry, ApiKey, BrokerDispatch, BrokerJoinToken, BrokerReportedRun,
+		BrokerSecret, BrokerSetting, BrokerTargetInventory, ChatLinkCode,
+		ChatRetentionCursor, ChatRetentionRun, ConduitPrincipalEpoch, ConduitSession,
+		Conversation, ConversationParticipant, Decision, DecisionAnswer,
+		DecisionKeyCounter, DelegationAdoption, DelegationEdge, DurableQueueItem,
+		EntitlementBinding, EnvVar, ExternalIdentity, GCPServiceAccount,
+		GitHubResolutionCache, GithubInstallation, Group, GroupMembership,
+		HarnessConfig, HubEncryptionMigration, HubEncryptionPolicy, HubInstance,
+		HubSetting, IntegrationConfig, IntegrationUpdate, InviteCode,
+		LaunchReaperState, LifecycleHook, LifecycleHookAgentPhase, LimitDefinition,
+		MaintenanceOperation, MaintenanceOperationRun, MembershipLossCheck, Message,
+		MessageAddressee, MutationAudit, NonceCache, Notification,
+		NotificationSubscription, PendingSecret, PolicyBinding, Project,
+		ProjectContributor, ProjectPreStartHook, ProjectSyncState,
+		ProjectVisitorExclusion, ProjectVisitorRule, RelayInstance, RoleBinding,
+		RoleDefinition, RuntimeBroker, RuntimeOrphan, Schedule, ScheduledEvent,
+		ScheduledExecRun, Secret, Skill, SkillInjection, SkillRegistry, SkillVersion,
+		SubscriptionTemplate, SystemOneInstance, Template, TestIdentityDelegation,
+		TestIdentityLoginCode, TestInfraMarker, ThreadGroup, ThreadGroupMember,
+		UsageReservation, User, UserAccessToken, UserDeletion, UserDeletionAgent,
+		UserTerminalWorkspace []ent.Interceptor
 	}
 )

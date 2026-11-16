@@ -56,6 +56,7 @@ type mockScheduledEventStore struct {
 	audits          []*store.MutationAuditRecord
 	schedules       map[string]*store.Schedule
 	notifications   []*store.Notification
+	messages        map[string]*store.Message
 	getUserErr      error  // when set, GetUser fails with it
 	getUserErrID    string // when set, getUserErr applies to this ID only
 	// saAssignments holds the active service-account assignment rows by agent ID.
@@ -69,6 +70,7 @@ func newMockStore() *mockScheduledEventStore {
 		projects:        make(map[string]*store.Project),
 		users:           make(map[string]*store.User),
 		roleDefinitions: make(map[string]*store.RoleDefinition),
+		messages:        make(map[string]*store.Message),
 	}
 }
 
@@ -129,6 +131,51 @@ func (m *mockScheduledEventStore) getNotifications() []*store.Notification {
 
 // HasActiveAgentHold reports no holds: the mock records none.
 func (m *mockScheduledEventStore) HasActiveAgentHold(_ context.Context, _ string) (bool, error) {
+	return false, nil
+}
+
+func (m *mockScheduledEventStore) CreateMessage(_ context.Context, msg *store.Message) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.messages == nil {
+		m.messages = make(map[string]*store.Message)
+	}
+	cp := *msg
+	m.messages[msg.ID] = &cp
+	return nil
+}
+
+func (m *mockScheduledEventStore) GetMessage(_ context.Context, id string) (*store.Message, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if msg, ok := m.messages[id]; ok {
+		cp := *msg
+		return &cp, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func (m *mockScheduledEventStore) MarkMessageFailed(_ context.Context, id, reason string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if msg, ok := m.messages[id]; ok {
+		msg.DispatchState = store.MessageDispatchFailed
+		msg.DispatchFailureReason = &reason
+	}
+	return nil
+}
+
+func (m *mockScheduledEventStore) PrepareOrHoldMessage(_ context.Context, agentID, _ string, _ int) (store.PrepareOrHoldResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var runID string
+	if a, ok := m.agents[agentID]; ok && a != nil {
+		runID = a.RunID
+	}
+	return store.PrepareOrHoldResult{HoldLaunchID: runID}, nil
+}
+
+func (m *mockScheduledEventStore) HasAgentDeliveryHold(_ context.Context, _ string) (bool, error) {
 	return false, nil
 }
 

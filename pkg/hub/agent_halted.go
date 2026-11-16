@@ -67,6 +67,7 @@ func (s *Server) onAgentHalted(ctx context.Context, agent *store.Agent, haltedFr
 		close(done)
 		return done
 	}
+	s.expireHeldMessagesForAgent(ctx, agent.ID, holdFailReasonAgentStopped)
 	s.agentLifecycleLog.Warn("agent halted by the platform",
 		"agent_id", agent.ID, "agent", agent.Slug, "project_id", agent.ProjectID,
 		"exit_reason", agent.ExitReason, "halted_from", haltedFrom)

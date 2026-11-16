@@ -639,6 +639,7 @@ func (s *Server) reconcileMissingAgents(ctx context.Context, brokerID string, pr
 			"exit_reason", updated.ExitReason)
 		s.reconcileBrokerQuotaOnPhaseChange(ctx, updated, a.Phase, updated.Phase)
 		s.reconcileProjectQuotaOnPhaseChange(ctx, updated, a.Phase, updated.Phase)
+		s.expireHeldMessagesForAgent(ctx, updated.ID, holdFailReasonAgentStopped)
 		s.events.PublishAgentStatus(ctx, updated)
 		if updated.Phase == string(state.PhaseHalted) {
 			// This write halted the agent; the CAS would otherwise have
@@ -721,5 +722,6 @@ func (s *Server) reconcileExecAgentNotFound(ctx context.Context, observed *store
 		"exit_reason", updated.ExitReason)
 	s.reconcileBrokerQuotaOnPhaseChange(ctx, updated, string(state.PhaseRunning), updated.Phase)
 	s.reconcileProjectQuotaOnPhaseChange(ctx, updated, string(state.PhaseRunning), updated.Phase)
+	s.expireHeldMessagesForAgent(ctx, updated.ID, holdFailReasonAgentStopped)
 	s.events.PublishAgentStatus(ctx, updated)
 }

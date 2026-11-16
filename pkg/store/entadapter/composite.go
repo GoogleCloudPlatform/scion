@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentdeliveryhold"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentidentitykey"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentrecovery"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationedge"
@@ -265,6 +266,7 @@ func newTxCompositeStore(tx *ent.Tx) *CompositeStore {
 	txStore.inTx = true
 	txStore.AgentStore.inTx = true
 	txStore.GroupStore.inTx = true
+	txStore.BrokerDispatchStore.inTx = true
 	txStore.AccessConstraintStore.inTx = true
 	txStore.MembershipLossCheckStore.inTx = true
 	txStore.AgentHoldStore.inTx = true
@@ -431,9 +433,14 @@ func (c *CompositeStore) deleteAgentDependents(ctx context.Context, id string) e
 	if err := c.DeleteAgentIdentityKeys(ctx, id); err != nil {
 		return err
 	}
-	// agent_recovery is keyed by the agent ID with no FK; cascade explicitly.
+	// agent_recovery and agent_delivery_holds are keyed by the agent ID with no
+	// FK; cascade explicitly.
 	if _, err := c.client.AgentRecovery.Delete().
 		Where(agentrecovery.IDEQ(uid.String())).Exec(ctx); err != nil {
+		return err
+	}
+	if _, err := c.client.AgentDeliveryHold.Delete().
+		Where(agentdeliveryhold.IDEQ(uid.String())).Exec(ctx); err != nil {
 		return err
 	}
 	return nil
@@ -518,6 +525,10 @@ func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 		}
 		if _, err := c.client.AgentRecovery.Delete().
 			Where(agentrecovery.IDIn(ids...)).Exec(ctx); err != nil {
+			return err
+		}
+		if _, err := c.client.AgentDeliveryHold.Delete().
+			Where(agentdeliveryhold.IDIn(ids...)).Exec(ctx); err != nil {
 			return err
 		}
 		// Before the agent rows go (agent_id is ON DELETE SET NULL; see
@@ -797,6 +808,10 @@ func (c *CompositeStore) purgeDeletedAgents(ctx context.Context, cutoff time.Tim
 			}
 			if _, err := tx.AgentRecovery.Delete().
 				Where(agentrecovery.IDIn(removed...)).Exec(ctx); err != nil {
+				return 0, err
+			}
+			if _, err := tx.AgentDeliveryHold.Delete().
+				Where(agentdeliveryhold.IDIn(removed...)).Exec(ctx); err != nil {
 				return 0, err
 			}
 			if err := deactivatePurgedAgentAuthority(ctx, txStore, removed, deactivation); err != nil {

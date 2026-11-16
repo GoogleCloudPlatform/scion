@@ -114,15 +114,6 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 		// processMentions: publish inside if persisted block.
 		"handlers_agent_messaging.go:processMentions": "Publish inside if persisted block",
 
-		// applyBrokerMessageFailure (ptone/scion#1866): unlike every other
-		// guarded site, this function never calls CreateMessage — it acts on
-		// a row a prior request already persisted. The row's existence is
-		// confirmed by the GetMessage lookup earlier in the function
-		// (returns false on ErrNotFound/lookup error), and the publish is
-		// reached only after s.markFailed has already written
-		// dispatch_state=failed for that row (also returns false on error).
-		// The publish mirrors that committed write onto the in-memory copy;
-		// it is not gating persistence, persistence already happened.
 		// publishChoiceResponse: called by handleDecisionAnswer only after
 		// RecordAnswer stored the choice-response row in the answer's
 		// transaction; any RecordAnswer error returns before it.
@@ -134,7 +125,7 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 		// before it, and a replay returns before it too.
 		"choices_batch.go:publishChoiceResponseSet": "Called only after RecordAnswerSet stored the response row; a RecordAnswerSet error or a replay returns before it",
 
-		"message_delivery_failures.go:applyBrokerMessageFailure": "Acts on an already-persisted row (confirmed via GetMessage) after markFailed has already committed; publish mirrors the committed write, not a pending one",
+		"message_delivery_failures.go:notifyStoredMessageSenderFailed": "Acts only on already-persisted rows after FailUndeliveredMessage / ExpireHeldMessages has committed dispatch_state=failed; publish mirrors the committed write",
 	}
 
 	// -------------------------------------------------------------------

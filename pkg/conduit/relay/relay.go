@@ -263,6 +263,10 @@ type Config struct {
 	// local sessions of a broker closed with 4409 superseded_incarnation
 	// because a newer incarnation of the broker was admitted here.
 	OnBrokerSessionsSuperseded func(brokerID string, closed int)
+	// OnAgentSessionAdmitted, when set, is called after an agent session is
+	// registered locally and passes Revalidate, with the agent ID and a copy
+	// of the session's advertised RPC routes (ptone/scion#7881).
+	OnAgentSessionAdmitted func(agentID string, rpcRoutes []string)
 	// Logger defaults to slog.Default().
 	Logger *slog.Logger
 }
@@ -846,8 +850,10 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 		r.stopLifetime(e)
 		r.goAway(e, r.drainOptions(e))
 	default:
-		r.revalidate(ctx, e)
-		r.admittedBroker(e)
+		if r.revalidate(ctx, e) {
+			r.admittedAgent(e)
+			r.admittedBroker(e)
+		}
 	}
 
 	<-ls.Done()
@@ -869,10 +875,11 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 }
 
 // revalidate runs Config.Revalidate for a newly registered session and
-// closes it with CloseUnauthenticated when the check fails.
-func (r *Relay) revalidate(ctx context.Context, e *entry) {
+// closes it with CloseUnauthenticated when the check fails. Returns true
+// when the session passed revalidation and remains admitted.
+func (r *Relay) revalidate(ctx context.Context, e *entry) bool {
 	if r.cfg.Revalidate == nil {
-		return
+		return true
 	}
 	rctx, cancel := context.WithTimeout(ctx, r.cfg.RPCTimeout)
 	defer cancel()
@@ -880,7 +887,28 @@ func (r *Relay) revalidate(ctx context.Context, e *entry) {
 		r.log.Info("conduit relay: session closed after admission: principal no longer valid",
 			"session_id", e.rec.SessionID, "principal_kind", e.principal.Kind, "principal_id", e.principal.ID, "error", err)
 		_ = e.sess.CloseWithCode(conduit.CloseUnauthenticated, ReasonUnauthenticated)
+		return false
 	}
+	return true
+}
+
+// admittedAgent notifies Config.OnAgentSessionAdmitted once an agent session
+// is registered locally and still open after revalidation (ptone/scion#7881).
+func (r *Relay) admittedAgent(e *entry) {
+	cb := r.cfg.OnAgentSessionAdmitted
+	if cb == nil {
+		return
+	}
+	rec := e.rec
+	if rec.PrincipalKind != registry.PrincipalAgent || rec.PrincipalID == "" {
+		return
+	}
+	select {
+	case <-e.sess.Done():
+		return
+	default:
+	}
+	cb(rec.PrincipalID, slices.Clone(rec.Capabilities.RPC))
 }
 
 // trackServe registers a Serve call with serves unless the relay has

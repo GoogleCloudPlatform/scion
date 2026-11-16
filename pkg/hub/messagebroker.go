@@ -84,6 +84,10 @@ type MessageBrokerProxy struct {
 	// stored, before its SSE event is published.
 	recordHumanMentions func(ctx context.Context, conversationKey, messageID string, userIDs []string)
 
+	// holdOrDispatch, when non-nil, runs the server's awaiting_session hold
+	// gate before dispatching a persisted broker message (ptone/scion#7881).
+	holdOrDispatch func(ctx context.Context, agent *store.Agent, messageID string, storeMsg *store.Message, dispatchFn func() error) (bool, error)
+
 	mu                  sync.Mutex
 	subscriptions       map[string][]eventbus.Subscription // projectID -> active subscriptions
 	pluginSubscriptions map[string]eventbus.Subscription   // pattern -> plugin-initiated subscription
@@ -1314,7 +1318,9 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 
 	// The 30s brokerCallbackTimeout is shared with pre-dispatch work above
 	// (agent lookup, persistence), so retries get slightly less than 30s.
-	if err := dispatchWithBrokerRetry(withDispatchMessageID(ctx, storeMsg.ID), nil, dispatcher, agent, msg.Msg, msg.Urgent, msg); err != nil {
+	if _, err := p.holdOrDispatchMessage(ctx, agent, storeMsg, func() error {
+		return dispatchWithBrokerRetry(withDispatchMessageID(ctx, storeMsg.ID), nil, dispatcher, agent, msg.Msg, msg.Urgent, msg)
+	}); err != nil {
 		p.log.Error("Failed to dispatch broker message to agent",
 			"agentSlug", agentSlug, "error", err)
 		if markErr := markMessageFailed(ctx, p.store, storeMsg.ID, err.Error()); markErr != nil {
@@ -1339,6 +1345,15 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 		logAttrs = append(logAttrs, msg.LogAttrs()...)
 		p.messageLog.Info("broker message delivered", logAttrs...)
 	}
+}
+
+// holdOrDispatchMessage routes a persisted message-broker delivery through
+// Server.holdOrDispatch when wired, or invokes dispatchFn directly in tests.
+func (p *MessageBrokerProxy) holdOrDispatchMessage(ctx context.Context, agent *store.Agent, storeMsg *store.Message, dispatchFn func() error) (bool, error) {
+	if p != nil && p.holdOrDispatch != nil && storeMsg != nil {
+		return p.holdOrDispatch(ctx, agent, storeMsg.ID, storeMsg, dispatchFn)
+	}
+	return false, dispatchFn()
 }
 
 // fanOutToProject dispatches a broadcast message to all running agents in a project.

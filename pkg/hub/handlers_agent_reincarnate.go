@@ -675,6 +675,7 @@ func (s *Server) startReincarnation(w http.ResponseWriter, r *http.Request, agen
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	s.expireHeldMessagesForAgent(ctx, agent.ID, holdFailReasonAgentStopped)
 	// A reincarnation starts the agent (also one that was stopped): record
 	// that the agent is meant to run, now, before the worker's start, so a
 	// stop the user records during the reincarnation is newer and wins.

@@ -439,3 +439,75 @@ func TestBrokerHTTPTransport_MessageAgentCarriesMessageID(t *testing.T) {
 	assert.False(t, has, "message_id must be omitted without a dispatch message ID")
 	assert.Equal(t, "msg-123", bodies[1]["message_id"])
 }
+
+func TestAgentUsesConduitDelivery_BrokerResolution(t *testing.T) {
+	srv, s, _, _, _, _, _ := deliverySetup(t)
+	ctx := context.Background()
+
+	t.Run("nil RuntimeTarget on profile broker with empty or unmatched profiles does not panic", func(t *testing.T) {
+		emptyBrokerID := tid("conduit-rt-empty-broker")
+		require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+			ID:     emptyBrokerID,
+			Name:   "empty-broker",
+			Slug:   "empty-broker",
+			Status: store.BrokerStatusOnline,
+		}))
+		assert.False(t, srv.agentUsesConduitDelivery(ctx, &store.Agent{
+			ID:              tid("conduit-rt-empty-agent"),
+			RuntimeBrokerID: emptyBrokerID,
+		}))
+	})
+
+	t.Run("flat Cloud Run broker uses canonical flatCloudRunBroker check", func(t *testing.T) {
+		flatCRID := tid("conduit-rt-flat-cr")
+		require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+			ID:     flatCRID,
+			Name:   "flat-cr",
+			Slug:   "flat-cr",
+			Status: store.BrokerStatusOnline,
+			RuntimeTarget: &api.RuntimeTargetDescriptor{
+				ID:   tid("t-flat-cr"),
+				Type: "cloudrun",
+			},
+		}))
+		assert.True(t, srv.agentUsesConduitDelivery(ctx, &store.Agent{
+			ID:              tid("conduit-rt-flat-cr-agent"),
+			RuntimeBrokerID: flatCRID,
+		}))
+
+		nonCanonicalID := tid("conduit-rt-flat-noncanon")
+		require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+			ID:     nonCanonicalID,
+			Name:   "flat-noncanon",
+			Slug:   "flat-noncanon",
+			Status: store.BrokerStatusOnline,
+			RuntimeTarget: &api.RuntimeTargetDescriptor{
+				ID:   tid("t-flat-noncanon"),
+				Type: "CloudRun",
+			},
+		}))
+		assert.False(t, srv.agentUsesConduitDelivery(ctx, &store.Agent{
+			ID:              tid("conduit-rt-flat-noncanon-agent"),
+			RuntimeBrokerID: nonCanonicalID,
+		}))
+	})
+
+	t.Run("mixed-profile broker falls back to DefaultProfile", func(t *testing.T) {
+		mixedID := tid("conduit-rt-mixed-broker")
+		require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+			ID:             mixedID,
+			Name:           "mixed-broker",
+			Slug:           "mixed-broker",
+			Status:         store.BrokerStatusOnline,
+			DefaultProfile: "cr-default",
+			Profiles: []store.BrokerProfile{
+				{Name: "docker-local", Type: "docker", Available: true},
+				{Name: "cr-default", Type: "cloudrun", Available: true},
+			},
+		}))
+		assert.True(t, srv.agentUsesConduitDelivery(ctx, &store.Agent{
+			ID:              tid("conduit-rt-mixed-agent"),
+			RuntimeBrokerID: mixedID,
+		}))
+	})
+}

@@ -1484,6 +1484,9 @@ func (s *Server) recordStopStatus(ctx context.Context, agentID, runID, action st
 	if err != nil {
 		return false, err
 	}
+	if upd.Phase != "" && !heldMessageTargetPhaseEligible(upd.Phase) {
+		s.expireHeldMessagesForAgent(ctx, agentID, holdFailReasonAgentStopped)
+	}
 	return true, nil
 }
 
@@ -2578,6 +2581,9 @@ type Server struct {
 
 	// Message broker proxy for pub/sub message routing (nil = disabled)
 	messageBrokerProxy *MessageBrokerProxy
+
+	// messageHold coordinates awaiting_session re-drive workers and 30s sweep (ptone/scion#7881).
+	messageHold *messageHoldRuntime
 
 	// User last-seen activity tracker (nil = disabled)
 	userActivity *UserActivityTracker
@@ -4844,6 +4850,9 @@ func (s *Server) SetChannelRegistry(r *ChannelRegistry) {
 // SetMessageBrokerProxy sets the message broker proxy for pub/sub message routing.
 // When set, messages can be routed through the broker instead of direct dispatch.
 func (s *Server) SetMessageBrokerProxy(p *MessageBrokerProxy) {
+	if p != nil && p.holdOrDispatch == nil {
+		p.holdOrDispatch = s.holdOrDispatch
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.messageBrokerProxy = p
@@ -5529,6 +5538,7 @@ func (s *Server) StartMessageBroker(b eventbus.EventBus) {
 	}
 	proxy.recordArtifactRefs = s.recordMessageArtifacts
 	proxy.recordHumanMentions = s.recordHumanMentions
+	proxy.holdOrDispatch = s.holdOrDispatch
 	s.messageBrokerProxy = proxy
 	proxy.Start()
 
@@ -6264,24 +6274,9 @@ func (s *Server) messageEventHandler() EventHandler {
 		structuredMsg.Plain = payload.Plain
 		structuredMsg.Urgent = payload.Interrupt
 
-		// Phase 9f: render delivery envelope for scheduler messages.
-		// No persisted row and no conversation exist for scheduled
-		// deliveries, so MessageID and ConvResult are honestly absent.
-		if s.writeDenyEnabled() {
-			var ts time.Time
-			if t, err := time.Parse(time.RFC3339, structuredMsg.Timestamp); err == nil {
-				ts = t
-			}
-			structuredMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
-				ConvResult: nil,
-				Msg:        structuredMsg,
-				CreatedAt:  ts,
-			})
-		}
-
 		// A wake fire may have spent the handler's deadline on the resume
-		// (wakeScheduledTarget runs on its own budget); its dispatch gets
-		// a fresh bound, keeping the handler's values.
+		// (wakeScheduledTarget runs on its own budget); its persist and
+		// dispatch get a fresh bound, keeping the handler's values.
 		dispatchBase := ctx
 		if wake {
 			detached, cancelDetached := detachKeepFireAbort(ctx)
@@ -6291,7 +6286,42 @@ func (s *Server) messageEventHandler() EventHandler {
 		retryCtx, retryCancel := context.WithTimeout(dispatchBase, scheduledMessageDispatchTimeout)
 		defer retryCancel()
 
-		if err := dispatchWithBrokerRetry(retryCtx, s.recordLog(), dispatcher, agent, payload.Message, payload.Interrupt, structuredMsg); err != nil {
+		// When hub.conduit_deliver is enabled, persist a store.Message row
+		// before dispatch so Conduit row binding and awaiting_session
+		// hold/re-drive cover scheduled messages including wake fires
+		// (ptone/scion#7881, Q5=a, REQ-4). When hub.conduit_deliver is off,
+		// preserve exact Phase A no-row / omitted-message_id behavior.
+		var storeMsg *store.Message
+		holdMsgID := ""
+		renderMessageID := ""
+		renderCreatedAt := time.Now().UTC()
+		dispatchCtx := retryCtx
+		if s.conduitDeliverEnabled() {
+			var persistErr error
+			storeMsg, persistErr = s.persistScheduledMessageEvent(retryCtx, evt, agent, payload, structuredMsg)
+			if persistErr != nil {
+				return persistErr
+			}
+			holdMsgID = storeMsg.ID
+			renderMessageID = storeMsg.ID
+			renderCreatedAt = storeMsg.CreatedAt
+			dispatchCtx = withDispatchMessageID(retryCtx, storeMsg.ID)
+		}
+		if s.writeDenyEnabled() {
+			structuredMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+				MessageID:  renderMessageID,
+				ConvResult: nil,
+				Msg:        structuredMsg,
+				CreatedAt:  renderCreatedAt,
+			})
+		}
+
+		if _, err := s.holdOrDispatch(dispatchCtx, agent, holdMsgID, storeMsg, func() error {
+			return dispatchWithBrokerRetry(dispatchCtx, s.recordLog(), dispatcher, agent, payload.Message, payload.Interrupt, structuredMsg)
+		}); err != nil {
+			if storeMsg != nil {
+				_ = s.markFailed(retryCtx, storeMsg.ID, err.Error())
+			}
 			if wake && scheduledFireAborted(ctx) {
 				return errScheduledWakeShutdown
 			}
@@ -7699,6 +7729,9 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// Start the scheduled chat message sweeper (exits when ctx is cancelled).
 	s.startScheduledSendSweeper(ctx)
 
+	// Start the held-message backstop sweeper for Conduit deliver-message (ptone/scion#7881).
+	s.startMessageHoldSweeper(ctx)
+
 	// Starred messages need a chat store with the star capability; report
 	// a misconfiguration at startup (requests answer 503 meanwhile).
 	s.validateMessageStarStore()
@@ -7957,6 +7990,9 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		// Let a scheduled chat message being delivered finish (bounded)
 		// while the stores and event publisher are still open.
 		s.stopScheduledSendSweeper(ctx)
+
+		// Stop the Conduit held-message sweeper and wait (bounded) for in-flight re-drives.
+		s.stopMessageHoldSweeper(ctx)
 
 		// Wait for a thread group migration pass in progress; the cancelled
 		// ctx above makes its store calls return.

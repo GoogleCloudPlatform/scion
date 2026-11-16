@@ -34,7 +34,15 @@ import (
 // execution across nodes is enforced by conditional (compare-and-swap) updates
 // on the state column — no SELECT ... FOR UPDATE, correct on SQLite + Postgres.
 type BrokerDispatchStore struct {
-	client *ent.Client
+	client    *ent.Client
+	inTx      bool
+	holdClock func() time.Time
+}
+
+// SetMessageHoldClockForTest overrides the clock used by MessageHoldStore
+// methods on SQLite (and in unit tests). Nil restores the database / wall clock.
+func (s *BrokerDispatchStore) SetMessageHoldClockForTest(fn func() time.Time) {
+	s.holdClock = fn
 }
 
 // NewBrokerDispatchStore creates a new Ent-backed BrokerDispatchStore.
@@ -336,6 +344,8 @@ func (s *BrokerDispatchStore) failMessage(ctx context.Context, id, reason string
 			SetDispatchState(store.MessageDispatchFailed).
 			SetNillableDispatchFailureReason(&reason).
 			SetDeliveryOutcome(store.DeliveryOutcomeUnknownPartial).
+			ClearNotReached().
+			ClearNotReachedAt().
 			Save(ctx)
 		if err != nil {
 			return false, mapError(err)
@@ -352,9 +362,14 @@ func (s *BrokerDispatchStore) failMessage(ctx context.Context, id, reason string
 	}
 	n, err := q.SetDispatchState(store.MessageDispatchFailed).
 		SetNillableDispatchFailureReason(&reason).
+		ClearNotReached().
+		ClearNotReachedAt().
 		Save(ctx)
 	if err != nil {
 		return false, mapError(err)
+	}
+	if n > 0 && from == nil {
+		s.syncHoldMarkerAfterDirectFail(ctx, uid)
 	}
 	return n > 0, nil
 }

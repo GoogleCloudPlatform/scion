@@ -333,6 +333,12 @@ const (
 	OutcomeBound = "bound"
 )
 
+// Reasons in a hub 503 not_reached answer (ptone/scion#7881).
+const (
+	ReasonNoSession     = "no_session"
+	ReasonNotAdvertised = "not_advertised"
+)
+
 // Stages, diagnostic only (design v2.22 §1.3, r3.1).
 const (
 	StageTarget      = "target"
@@ -346,6 +352,7 @@ const (
 // DeliverResponse is every deliver-message answer body.
 type DeliverResponse struct {
 	Outcome  string `json:"outcome"`
+	Reason   string `json:"reason,omitempty"`
 	Stage    string `json:"stage,omitempty"`
 	Field    string `json:"field,omitempty"`
 	Replayed bool   `json:"replayed,omitempty"`

@@ -514,6 +514,9 @@ func (s *Server) membershipLossRound(ctx context.Context, c *store.MembershipLos
 	if txErr != nil {
 		return membershipLossPairOutcome{}, nil, txErr
 	}
+	for _, heldID := range outcome.held {
+		s.expireHeldMessagesForAgent(ctx, heldID, holdFailReasonAgentStopped)
+	}
 	slog.Info("membership loss: processed",
 		"check_id", c.ID, "user_id", userID, "project_id", projectID,
 		"admitted", outcome.admitted, "held", len(outcome.held), "walk_incomplete", walkErr != nil)

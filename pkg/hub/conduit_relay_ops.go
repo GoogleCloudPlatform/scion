@@ -398,6 +398,9 @@ func (s *Server) hubRelaySessionRecheck(w http.ResponseWriter, r *http.Request, 
 				break
 			}
 			res.OK = true
+			if c.Kind == registry.PrincipalAgent {
+				s.maybeScheduleHeldMessageRedriveIfConnected(c.ID)
+			}
 			// Re-issued only while the credential itself is valid.
 			if admissionHalfLifeLeft(c, now) && (c.CredentialExpiry == 0 || now.Unix() < c.CredentialExpiry) {
 				if tok, err := s.reissueAdmissionToken(c, time.Time{}, now); err == nil {

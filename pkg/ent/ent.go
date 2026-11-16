@@ -19,6 +19,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentcredential"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentdelegatedcredential"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentdelegationgrant"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentdeliveryhold"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agenthold"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentidentitykey"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentlifecyclecursor"
@@ -179,6 +180,7 @@ func checkColumn(t, c string) error {
 			agentcredential.Table:               agentcredential.ValidColumn,
 			agentdelegatedcredential.Table:      agentdelegatedcredential.ValidColumn,
 			agentdelegationgrant.Table:          agentdelegationgrant.ValidColumn,
+			agentdeliveryhold.Table:             agentdeliveryhold.ValidColumn,
 			agenthold.Table:                     agenthold.ValidColumn,
 			agentidentitykey.Table:              agentidentitykey.ValidColumn,
 			agentlifecyclecursor.Table:          agentlifecyclecursor.ValidColumn,

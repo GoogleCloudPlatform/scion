@@ -5768,6 +5768,9 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 		connName := r.Header.Get("X-Scion-Hub-Connection")
 		msgCtx = agent.WithDeliveryFailureHandler(msgCtx, func(deliveryErr error) {
 			f := failure
+			if errors.Is(deliveryErr, agent.ErrAwaitingSession) {
+				f.Code = hubclient.MessageFailureCodeAwaitingSession
+			}
 			f.Reason = "broker delivery failed: " + deliveryErr.Error()
 			go s.reportMessageFailure(connName, f)
 		})
@@ -5782,6 +5785,23 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 	if err := mgr.Message(msgCtx, id, projectID, deliveryText, req.Interrupt); err != nil {
 		if inbox != nil {
 			inbox.Discard()
+		}
+		if req.Interrupt && req.MessageID != "" && errors.Is(err, agent.ErrAwaitingSession) {
+			connName := r.Header.Get("X-Scion-Hub-Connection")
+			projID := projectID
+			if projID == "" {
+				projID = req.ProjectID
+			}
+			if _, held := s.reportMessageFailureSync(connName, hubclient.MessageFailure{
+				MessageID: req.MessageID,
+				AgentID:   id,
+				ProjectID: projID,
+				Code:      hubclient.MessageFailureCodeAwaitingSession,
+				Reason:    "broker delivery failed: " + err.Error(),
+			}); held {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
 		}
 		if strings.Contains(err.Error(), "not found") {
 			span.SetStatus(codes.Error, err.Error())

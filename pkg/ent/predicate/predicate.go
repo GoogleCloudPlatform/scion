@@ -27,6 +27,9 @@ type AgentDelegatedCredential func(*sql.Selector)
 // AgentDelegationGrant is the predicate function for agentdelegationgrant builders.
 type AgentDelegationGrant func(*sql.Selector)
 
+// AgentDeliveryHold is the predicate function for agentdeliveryhold builders.
+type AgentDeliveryHold func(*sql.Selector)
+
 // AgentHold is the predicate function for agenthold builders.
 type AgentHold func(*sql.Selector)
 

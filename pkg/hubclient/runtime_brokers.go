@@ -61,9 +61,11 @@ type RuntimeBrokerService interface {
 	Heartbeat(ctx context.Context, brokerID string, status *BrokerHeartbeat) (*BrokerHeartbeatResponse, error)
 
 	// ReportMessageFailures reports hub messages that the broker accepted
-	// into its delivery buffer but failed to deliver, so the hub can mark
-	// them failed instead of leaving them "dispatched".
-	ReportMessageFailures(ctx context.Context, brokerID string, req *MessageFailuresReport) error
+	// into its delivery buffer (or failed synchronously on interrupt) so the
+	// hub can mark them failed or hold them in awaiting_session. The response
+	// counts how many reported failures were marked, held, or ignored (zeroed
+	// when an older Hub replies with an empty 200 body).
+	ReportMessageFailures(ctx context.Context, brokerID string, req *MessageFailuresReport) (*MessageFailuresResponse, error)
 
 	// DeliverMessage asks the hub to run one deliver-message flush on the
 	// agent over its conduit session (design v2.22 §2.1). It returns the
@@ -205,11 +207,17 @@ const (
 	AgentLaunchReportReasonOtherOwner  = "other_owner"
 )
 
+// MessageFailureCodeAwaitingSession is the enum code a broker sends on a
+// MessageFailure when its final deliver-message attempt received a hub 503
+// with reason=no_session and exec is unavailable (ptone/scion#7881).
+const MessageFailureCodeAwaitingSession = "awaiting_session"
+
 // MessageFailure is one buffered delivery that failed on the broker.
 type MessageFailure struct {
 	MessageID string `json:"messageId"`
 	AgentID   string `json:"agentId,omitempty"`
 	ProjectID string `json:"projectId,omitempty"`
+	Code      string `json:"code,omitempty"`
 	Reason    string `json:"reason,omitempty"`
 }
 
@@ -231,6 +239,14 @@ type MessageFailuresReport struct {
 	// (ptone/scion#4596). The hub logs and counts them; they never change a
 	// message's state.
 	AttachmentOutcomes []AttachmentOutcome `json:"attachmentOutcomes,omitempty"`
+}
+
+// MessageFailuresResponse is the decoded body of a 200 answer from
+// POST /api/v1/runtime-brokers/{id}/message-failures.
+type MessageFailuresResponse struct {
+	Marked  int `json:"marked,omitempty"`
+	Held    int `json:"held,omitempty"`
+	Ignored int `json:"ignored,omitempty"`
 }
 
 // runtimeBrokerService is the implementation of RuntimeBrokerService.
@@ -662,12 +678,24 @@ func (s *runtimeBrokerService) Heartbeat(ctx context.Context, brokerID string, s
 }
 
 // ReportMessageFailures reports buffered deliveries that failed on the broker.
-func (s *runtimeBrokerService) ReportMessageFailures(ctx context.Context, brokerID string, req *MessageFailuresReport) error {
+func (s *runtimeBrokerService) ReportMessageFailures(ctx context.Context, brokerID string, req *MessageFailuresReport) (*MessageFailuresResponse, error) {
 	resp, err := s.c.post(ctx, "/api/v1/runtime-brokers/"+url.PathEscape(brokerID)+"/message-failures", req, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return apiclient.CheckResponse(resp)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode >= 400 {
+		return nil, apiclient.ParseErrorResponse(resp)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err != nil || len(bytes.TrimSpace(body)) == 0 {
+		return &MessageFailuresResponse{}, nil
+	}
+	var out MessageFailuresResponse
+	if err := json.Unmarshal(body, &out); err != nil {
+		return &MessageFailuresResponse{}, nil
+	}
+	return &out, nil
 }
 
 // DeliverMessage posts one deliver-message flush to the hub. See the

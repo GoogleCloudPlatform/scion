@@ -204,10 +204,22 @@ func (s *Server) handleBrokerAgentDeliver(w http.ResponseWriter, r *http.Request
 	status, respBody, err := s.callAgentControlJSON(ctx, agent.ID, agentcontrol.RouteDeliverMessage, payload, hubDeliverTimeout)
 	latency := time.Since(sent)
 	if err != nil {
-		if errors.Is(err, router.ErrNoSession) || errors.Is(err, ErrAgentControlNotAdvertised) {
+		if errors.Is(err, router.ErrNoSession) {
+			s.unbindDeliveryWithProof(r, req, store.MessageNotReachedNoSession)
+			log.Info("message delivery not reached", "latency_ms", latency.Milliseconds(), "advertised", true, "reason", agentcontrol.ReasonNoSession)
+			writeDeliverAnswer(w, http.StatusServiceUnavailable, agentcontrol.DeliverResponse{
+				Outcome: deliverOutcomeNotReached,
+				Reason:  agentcontrol.ReasonNoSession,
+			})
+			return
+		}
+		if errors.Is(err, ErrAgentControlNotAdvertised) {
 			s.unbindDelivery(r, req)
-			log.Info("message delivery not reached", "latency_ms", latency.Milliseconds(), "advertised", !errors.Is(err, ErrAgentControlNotAdvertised))
-			writeDeliverAnswer(w, http.StatusServiceUnavailable, agentcontrol.DeliverResponse{Outcome: deliverOutcomeNotReached})
+			log.Info("message delivery not reached", "latency_ms", latency.Milliseconds(), "advertised", false, "reason", agentcontrol.ReasonNotAdvertised)
+			writeDeliverAnswer(w, http.StatusServiceUnavailable, agentcontrol.DeliverResponse{
+				Outcome: deliverOutcomeNotReached,
+				Reason:  agentcontrol.ReasonNotAdvertised,
+			})
 			return
 		}
 		// A timeout or a drop after send: the paste may have happened.
@@ -217,6 +229,9 @@ func (s *Server) handleBrokerAgentDeliver(w http.ResponseWriter, r *http.Request
 		return
 	}
 	resp, derr := agentcontrol.DecodeDeliverResponse(respBody)
+	// Reason is hub-owned (no_session / not_advertised); strip any agent-sent
+	// value so an agent 503 passed through can never spoof no_session (A2-S6).
+	resp.Reason = ""
 	switch {
 	case status == http.StatusOK && derr == nil && resp.Outcome == agentcontrol.OutcomeDelivered:
 		s.finishDelivery(r, req, store.MessageDispatchDelivered, storedOutcome(resp))
@@ -264,9 +279,15 @@ func storedOutcome(resp agentcontrol.DeliverResponse) string {
 // unbindDelivery returns the rows to dispatched after the hub's call proved
 // nothing was pasted, on a context detached from the request.
 func (s *Server) unbindDelivery(r *http.Request, req *agentcontrol.DeliverRequest) {
+	s.unbindDeliveryWithProof(r, req, "")
+}
+
+// unbindDeliveryWithProof returns the rows to dispatched and, when notReached
+// is non-empty, stamps the hub's not-reached proof on them in the same CAS.
+func (s *Server) unbindDeliveryWithProof(r *http.Request, req *agentcontrol.DeliverRequest, notReached string) {
 	ctx, cancel := finalizationContext(r.Context())
 	defer cancel()
-	if err := s.store.UnbindMessageDelivery(ctx, req.DeliveryID, req.MessageIDs); err != nil {
+	if err := s.store.UnbindMessageDeliveryWithProof(ctx, req.DeliveryID, req.MessageIDs, notReached); err != nil {
 		s.messageLog.Error("message delivery: unbind failed", "delivery_id", req.DeliveryID, "error", err)
 	}
 }

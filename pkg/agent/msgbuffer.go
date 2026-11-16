@@ -195,6 +195,10 @@ type deliveryPart struct {
 type splitDeliveryError struct {
 	failedFrom int
 	err        error
+	// tailFrom, when > failedFrom and tailErr != nil, reports tailErr (without
+	// ErrAwaitingSession) for messages in sub-flushes that were never sent.
+	tailFrom int
+	tailErr  error
 }
 
 func (e *splitDeliveryError) Error() string { return e.err.Error() }
@@ -458,7 +462,23 @@ func (mb *MessageBuffer) flush(agentID, key string, waitForReady bool) {
 		var final *finalDeliveryError
 		var split *splitDeliveryError
 		if errors.As(err, &split) {
-			// Earlier sub-flushes were delivered: report only the rest.
+			// Earlier sub-flushes were delivered: report only the rest. When
+			// the stopping sub-flush proved no_session, unsent later
+			// sub-flushes get tailErr so awaiting_session is never reported
+			// for a message whose /deliver was not attempted.
+			if split.tailErr != nil && split.tailFrom > split.failedFrom {
+				for idx := split.failedFrom; idx < len(handlers); idx++ {
+					if handlers[idx] == nil {
+						continue
+					}
+					if idx < split.tailFrom {
+						handlers[idx](split.err)
+					} else {
+						handlers[idx](split.tailErr)
+					}
+				}
+				return
+			}
 			if split.failedFrom < len(handlers) {
 				handlers = handlers[split.failedFrom:]
 			} else {

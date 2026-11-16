@@ -50,6 +50,14 @@ const (
 	FieldDeliveringAt = "delivering_at"
 	// FieldDeliveryOutcome holds the string denoting the delivery_outcome field in the database.
 	FieldDeliveryOutcome = "delivery_outcome"
+	// FieldHoldUntil holds the string denoting the hold_until field in the database.
+	FieldHoldUntil = "hold_until"
+	// FieldHoldLaunchID holds the string denoting the hold_launch_id field in the database.
+	FieldHoldLaunchID = "hold_launch_id"
+	// FieldNotReached holds the string denoting the not_reached field in the database.
+	FieldNotReached = "not_reached"
+	// FieldNotReachedAt holds the string denoting the not_reached_at field in the database.
+	FieldNotReachedAt = "not_reached_at"
 	// FieldChannel holds the string denoting the channel field in the database.
 	FieldChannel = "channel"
 	// FieldThreadID holds the string denoting the thread_id field in the database.
@@ -64,6 +72,8 @@ const (
 	FieldAuthorizingUserID = "authorizing_user_id"
 	// FieldDelegationGrantID holds the string denoting the delegation_grant_id field in the database.
 	FieldDelegationGrantID = "delegation_grant_id"
+	// FieldScheduledEventID holds the string denoting the scheduled_event_id field in the database.
+	FieldScheduledEventID = "scheduled_event_id"
 	// FieldCreated holds the string denoting the created field in the database.
 	FieldCreated = "created"
 	// Table holds the table name of the message in the database.
@@ -91,6 +101,10 @@ var Columns = []string{
 	FieldDeliveryID,
 	FieldDeliveringAt,
 	FieldDeliveryOutcome,
+	FieldHoldUntil,
+	FieldHoldLaunchID,
+	FieldNotReached,
+	FieldNotReachedAt,
 	FieldChannel,
 	FieldThreadID,
 	FieldConversationID,
@@ -98,6 +112,7 @@ var Columns = []string{
 	FieldRecipientProjectID,
 	FieldAuthorizingUserID,
 	FieldDelegationGrantID,
+	FieldScheduledEventID,
 	FieldCreated,
 }
 
@@ -130,10 +145,16 @@ var (
 	DeliveryIDValidator func(string) error
 	// DeliveryOutcomeValidator is a validator for the "delivery_outcome" field. It is called by the builders before save.
 	DeliveryOutcomeValidator func(string) error
+	// HoldLaunchIDValidator is a validator for the "hold_launch_id" field. It is called by the builders before save.
+	HoldLaunchIDValidator func(string) error
+	// NotReachedValidator is a validator for the "not_reached" field. It is called by the builders before save.
+	NotReachedValidator func(string) error
 	// ChannelValidator is a validator for the "channel" field. It is called by the builders before save.
 	ChannelValidator func(string) error
 	// ThreadIDValidator is a validator for the "thread_id" field. It is called by the builders before save.
 	ThreadIDValidator func(string) error
+	// ScheduledEventIDValidator is a validator for the "scheduled_event_id" field. It is called by the builders before save.
+	ScheduledEventIDValidator func(string) error
 	// DefaultCreated holds the default value on creation for the "created" field.
 	DefaultCreated func() time.Time
 	// DefaultID holds the default value on creation for the "id" field.
@@ -238,6 +259,26 @@ func ByDeliveryOutcome(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldDeliveryOutcome, opts...).ToFunc()
 }
 
+// ByHoldUntil orders the results by the hold_until field.
+func ByHoldUntil(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldHoldUntil, opts...).ToFunc()
+}
+
+// ByHoldLaunchID orders the results by the hold_launch_id field.
+func ByHoldLaunchID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldHoldLaunchID, opts...).ToFunc()
+}
+
+// ByNotReached orders the results by the not_reached field.
+func ByNotReached(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldNotReached, opts...).ToFunc()
+}
+
+// ByNotReachedAt orders the results by the not_reached_at field.
+func ByNotReachedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldNotReachedAt, opts...).ToFunc()
+}
+
 // ByChannel orders the results by the channel field.
 func ByChannel(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldChannel, opts...).ToFunc()
@@ -271,6 +312,11 @@ func ByAuthorizingUserID(opts ...sql.OrderTermOption) OrderOption {
 // ByDelegationGrantID orders the results by the delegation_grant_id field.
 func ByDelegationGrantID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldDelegationGrantID, opts...).ToFunc()
+}
+
+// ByScheduledEventID orders the results by the scheduled_event_id field.
+func ByScheduledEventID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldScheduledEventID, opts...).ToFunc()
 }
 
 // ByCreated orders the results by the created field.

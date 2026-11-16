@@ -206,8 +206,8 @@ func TestMessageID3881_ChatReply(t *testing.T) {
 	assert.Equal(t, origMsgID, raw["reply_to"], "reply_to keeps naming the replied-to message")
 }
 
-// Scheduled message deliveries store no message row, so the envelope omits
-// message_id rather than inventing one.
+// With hub.conduit_deliver off (default), scheduled message deliveries preserve
+// Phase A's no-row behavior and omit message_id from the rendered envelope (REQ-4).
 func TestMessageID3881_SchedulerOmitsMessageID(t *testing.T) {
 	srv, s := testServer(t)
 	projectID := seed3881AgentProject(t, s, "msgid3881-sched", "msgid3881-sched-a")
@@ -225,7 +225,39 @@ func TestMessageID3881_SchedulerOmitsMessageID(t *testing.T) {
 	calls := dispatcher.getCalls()
 	require.Len(t, calls, 1)
 	_, ok := envelopeMessageID3881(t, calls[0].StructuredMessage.DeliveryText)
-	assert.False(t, ok, "a delivery with no stored message must omit message_id")
+	assert.False(t, ok, "with hub.conduit_deliver off, scheduled message stores no row and omits message_id")
+	rows, err := s.ListMessages(context.Background(), store.MessageFilter{AgentID: tid("msgid3881-sched-a")}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, rows.Items)
+}
+
+// With hub.conduit_deliver enabled on a serving Conduit relay, scheduled
+// message deliveries persist a store.Message row (with ScheduledEventID
+// provenance) before dispatch (ptone/scion#7881, Q5=a), so the rendered
+// envelope carries that stored message_id for Conduit row binding and
+// awaiting_session hold/re-drive.
+func TestMessageID3881_SchedulerCarriesStoredMessageIDWithConduitDeliver(t *testing.T) {
+	f := newHoldE2EFixture(t)
+	ctx := context.Background()
+	dispatcher := &recordingDispatcher{}
+	f.srv.SetDispatcher(dispatcher)
+
+	payload, _ := json.Marshal(MessageEventPayload{AgentName: f.launched.Slug, Message: "scheduled-on"})
+	evt := withAgentRevision(t, f.srv, store.ScheduledEvent{
+		ID: api.NewUUID(), ProjectID: f.launched.ProjectID, EventType: "message", Payload: string(payload),
+		Status: store.ScheduledEventPending, CreatedBy: f.agent.ID,
+	}, f.agent.ID)
+	require.NoError(t, f.store.CreateScheduledEvent(ctx, &evt))
+	require.NoError(t, f.srv.messageEventHandler()(ctx, evt))
+
+	calls := dispatcher.getCalls()
+	require.Len(t, calls, 1)
+	id, ok := envelopeMessageID3881(t, calls[0].StructuredMessage.DeliveryText)
+	require.True(t, ok, "scheduled message envelope with conduit_deliver on must carry the persisted message_id")
+	row, err := f.store.GetMessage(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, f.launched.ID, row.AgentID)
+	assert.Equal(t, evt.ID, row.ScheduledEventID)
 }
 
 // Status notifications store no message row either.

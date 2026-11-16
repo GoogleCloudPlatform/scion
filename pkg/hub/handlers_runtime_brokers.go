@@ -2063,6 +2063,9 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				// runtime (ptone/scion#7928).
 				s.stopRunOnLimitsExceeded(ctx, agent, statusUpdate)
 				if updated, err := s.store.GetAgent(ctx, agent.ID); err == nil && updated.DeletedAt.IsZero() {
+					if !heldMessageTargetPhaseEligible(updated.Phase) {
+						s.expireHeldMessagesForAgent(ctx, updated.ID, holdFailReasonAgentStopped)
+					}
 					if agentStatusVisiblyChanged(agent, updated) {
 						s.events.PublishAgentStatus(ctx, updated)
 					}

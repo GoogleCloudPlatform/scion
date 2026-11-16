@@ -41,6 +41,7 @@ var stripExemptions = map[stripSiteKey]string{
 	{"artifacts_review.go", "deliverArtifactReview"}:                  "hub-built review notice to the artifact's owner; messages.NewSystemMessage carries no client metadata",
 	{"notifications.go", "dispatchToAgent"}:                           "hub-built notification fan-out; no client metadata",
 	{"server.go", "messageEventHandler"}:                              "scheduled message; messages.NewSystemMessage carries no client metadata",
+	{"message_hold_redrive.go", "dispatchClaimedHeldMessage"}:         "re-drives stored row via storedMessageDispatch, which rebuilds StructuredMessage from store.Message columns only and carries no client metadata",
 	{"reconcile.go", "deliverMessage"}:                                "dead code: assigned at server.go but never invoked in production (msg_containment_callsite_test.go)",
 	{"notification_sweep.go", "retryDispatch"}:                        "hub-built notification fan-out retry; no client metadata",
 	{"agent_dm_operation.go", "agentDMAutoWakeItem"}:                  "dispatches the message ExecuteAgentDM already stripped (step 7b) before queuing it behind the auto-wake",

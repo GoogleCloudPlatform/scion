@@ -108,7 +108,23 @@ func entMessageToStore(e *ent.Message) *store.Message {
 		DispatchState:         e.DispatchState,
 		DispatchedAt:          e.DispatchedAt,
 		DispatchFailureReason: e.DispatchFailureReason,
+		HoldUntil:             timePtrUTC(e.HoldUntil),
+		HoldLaunchID:          derefString(e.HoldLaunchID),
+		NotReached:            derefString(e.NotReached),
+		NotReachedAt:          timePtrUTC(e.NotReachedAt),
+		ScheduledEventID:      derefString(e.ScheduledEventID),
 	}
+}
+
+// timePtrUTC normalizes a nullable timestamp to UTC so callers observe
+// consistent time.UTC values across SQLite and PostgreSQL (pgx scans
+// timestamptz columns in time.Local).
+func timePtrUTC(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	u := t.UTC()
+	return &u
 }
 
 // uuidPtrToStringPtr converts a nullable UUID column to the nullable string
@@ -205,6 +221,21 @@ func (s *MessageStore) CreateMessage(ctx context.Context, msg *store.Message) er
 	// deliverable), so its reason must persist with the same write.
 	if msg.DispatchFailureReason != nil {
 		create.SetDispatchFailureReason(*msg.DispatchFailureReason)
+	}
+	if msg.HoldUntil != nil {
+		create.SetHoldUntil(*msg.HoldUntil)
+	}
+	if msg.HoldLaunchID != "" {
+		create.SetHoldLaunchID(msg.HoldLaunchID)
+	}
+	if msg.NotReached != "" {
+		create.SetNotReached(msg.NotReached)
+	}
+	if msg.NotReachedAt != nil {
+		create.SetNotReachedAt(*msg.NotReachedAt)
+	}
+	if msg.ScheduledEventID != "" {
+		create.SetScheduledEventID(msg.ScheduledEventID)
 	}
 	if !msg.CreatedAt.IsZero() {
 		create.SetCreated(msg.CreatedAt)

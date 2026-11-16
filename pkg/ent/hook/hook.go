@@ -93,6 +93,18 @@ func (f AgentDelegationGrantFunc) Mutate(ctx context.Context, m ent.Mutation) (e
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.AgentDelegationGrantMutation", m)
 }
 
+// The AgentDeliveryHoldFunc type is an adapter to allow the use of ordinary
+// function as AgentDeliveryHold mutator.
+type AgentDeliveryHoldFunc func(context.Context, *ent.AgentDeliveryHoldMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f AgentDeliveryHoldFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.AgentDeliveryHoldMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.AgentDeliveryHoldMutation", m)
+}
+
 // The AgentHoldFunc type is an adapter to allow the use of ordinary
 // function as AgentHold mutator.
 type AgentHoldFunc func(context.Context, *ent.AgentHoldMutation) (ent.Value, error)

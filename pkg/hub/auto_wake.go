@@ -284,7 +284,9 @@ func (s *Server) chatSecondaryAutoWakeItem(messageID, addressee, content string,
 				err = errors.New("dispatch not available")
 			} else {
 				dctx, cancel := context.WithTimeout(withDispatchMessageID(ctx, messageID), chatWakeDeliveryBudget)
-				err = dispatchWithBrokerRetry(dctx, nil, dispatcher, woken, content, false, msg)
+				_, err = s.holdOrDispatch(dctx, woken, messageID, nil, func() error {
+					return dispatchWithBrokerRetry(dctx, nil, dispatcher, woken, content, false, msg)
+				})
 				cancel()
 			}
 			// The settle writes run on a short detached context, so a wake

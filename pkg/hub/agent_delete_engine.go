@@ -393,6 +393,7 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 			s.agentLifecycleLog.Warn("delete claim: finalizing row has no stored request; using the current retention setting",
 				"agent_id", agentID, "claim", claim)
 		}
+		s.expireHeldMessagesForAgent(ctx, agentID, holdFailReasonAgentStopped)
 		return &agentDeletionPlan{
 			claim:        claim,
 			snapshot:     row,

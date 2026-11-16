@@ -13,6 +13,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentcredential"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentdelegatedcredential"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentdelegationgrant"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentdeliveryhold"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agenthold"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentidentitykey"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentlifecyclecursor"
@@ -491,6 +492,32 @@ func init() {
 	agentdelegationgrantDescID := agentdelegationgrantFields[0].Descriptor()
 	// agentdelegationgrant.DefaultID holds the default value on creation for the id field.
 	agentdelegationgrant.DefaultID = agentdelegationgrantDescID.Default.(func() uuid.UUID)
+	agentdeliveryholdFields := schema.AgentDeliveryHold{}.Fields()
+	_ = agentdeliveryholdFields
+	// agentdeliveryholdDescLaunchID is the schema descriptor for launch_id field.
+	agentdeliveryholdDescLaunchID := agentdeliveryholdFields[2].Descriptor()
+	// agentdeliveryhold.DefaultLaunchID holds the default value on creation for the launch_id field.
+	agentdeliveryhold.DefaultLaunchID = agentdeliveryholdDescLaunchID.Default.(string)
+	// agentdeliveryhold.LaunchIDValidator is a validator for the "launch_id" field. It is called by the builders before save.
+	agentdeliveryhold.LaunchIDValidator = agentdeliveryholdDescLaunchID.Validators[0].(func(string) error)
+	// agentdeliveryholdDescHeldCount is the schema descriptor for held_count field.
+	agentdeliveryholdDescHeldCount := agentdeliveryholdFields[3].Descriptor()
+	// agentdeliveryhold.DefaultHeldCount holds the default value on creation for the held_count field.
+	agentdeliveryhold.DefaultHeldCount = agentdeliveryholdDescHeldCount.Default.(int)
+	// agentdeliveryholdDescClaimOwner is the schema descriptor for claim_owner field.
+	agentdeliveryholdDescClaimOwner := agentdeliveryholdFields[4].Descriptor()
+	// agentdeliveryhold.DefaultClaimOwner holds the default value on creation for the claim_owner field.
+	agentdeliveryhold.DefaultClaimOwner = agentdeliveryholdDescClaimOwner.Default.(string)
+	// agentdeliveryhold.ClaimOwnerValidator is a validator for the "claim_owner" field. It is called by the builders before save.
+	agentdeliveryhold.ClaimOwnerValidator = agentdeliveryholdDescClaimOwner.Validators[0].(func(string) error)
+	// agentdeliveryholdDescCreated is the schema descriptor for created field.
+	agentdeliveryholdDescCreated := agentdeliveryholdFields[6].Descriptor()
+	// agentdeliveryhold.DefaultCreated holds the default value on creation for the created field.
+	agentdeliveryhold.DefaultCreated = agentdeliveryholdDescCreated.Default.(func() time.Time)
+	// agentdeliveryholdDescID is the schema descriptor for id field.
+	agentdeliveryholdDescID := agentdeliveryholdFields[0].Descriptor()
+	// agentdeliveryhold.IDValidator is a validator for the "id" field. It is called by the builders before save.
+	agentdeliveryhold.IDValidator = agentdeliveryholdDescID.Validators[0].(func(string) error)
 	agentholdFields := schema.AgentHold{}.Fields()
 	_ = agentholdFields
 	// agentholdDescRootPrincipalType is the schema descriptor for root_principal_type field.
@@ -2211,16 +2238,28 @@ func init() {
 	messageDescDeliveryOutcome := messageFields[18].Descriptor()
 	// message.DeliveryOutcomeValidator is a validator for the "delivery_outcome" field. It is called by the builders before save.
 	message.DeliveryOutcomeValidator = messageDescDeliveryOutcome.Validators[0].(func(string) error)
+	// messageDescHoldLaunchID is the schema descriptor for hold_launch_id field.
+	messageDescHoldLaunchID := messageFields[20].Descriptor()
+	// message.HoldLaunchIDValidator is a validator for the "hold_launch_id" field. It is called by the builders before save.
+	message.HoldLaunchIDValidator = messageDescHoldLaunchID.Validators[0].(func(string) error)
+	// messageDescNotReached is the schema descriptor for not_reached field.
+	messageDescNotReached := messageFields[21].Descriptor()
+	// message.NotReachedValidator is a validator for the "not_reached" field. It is called by the builders before save.
+	message.NotReachedValidator = messageDescNotReached.Validators[0].(func(string) error)
 	// messageDescChannel is the schema descriptor for channel field.
-	messageDescChannel := messageFields[19].Descriptor()
+	messageDescChannel := messageFields[23].Descriptor()
 	// message.ChannelValidator is a validator for the "channel" field. It is called by the builders before save.
 	message.ChannelValidator = messageDescChannel.Validators[0].(func(string) error)
 	// messageDescThreadID is the schema descriptor for thread_id field.
-	messageDescThreadID := messageFields[20].Descriptor()
+	messageDescThreadID := messageFields[24].Descriptor()
 	// message.ThreadIDValidator is a validator for the "thread_id" field. It is called by the builders before save.
 	message.ThreadIDValidator = messageDescThreadID.Validators[0].(func(string) error)
+	// messageDescScheduledEventID is the schema descriptor for scheduled_event_id field.
+	messageDescScheduledEventID := messageFields[30].Descriptor()
+	// message.ScheduledEventIDValidator is a validator for the "scheduled_event_id" field. It is called by the builders before save.
+	message.ScheduledEventIDValidator = messageDescScheduledEventID.Validators[0].(func(string) error)
 	// messageDescCreated is the schema descriptor for created field.
-	messageDescCreated := messageFields[26].Descriptor()
+	messageDescCreated := messageFields[31].Descriptor()
 	// message.DefaultCreated holds the default value on creation for the created field.
 	message.DefaultCreated = messageDescCreated.Default.(func() time.Time)
 	// messageDescID is the schema descriptor for id field.

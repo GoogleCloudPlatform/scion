@@ -425,6 +425,9 @@ type Store interface {
 	// BrokerDispatch operations (multi-node command dispatch)
 	BrokerDispatchStore
 
+	// Hold-until-session re-drive operations (ptone/scion#7881)
+	MessageHoldStore
+
 	// Template operations
 	TemplateStore
 
@@ -2105,6 +2108,122 @@ type BrokerDispatchStore interface {
 	// an agent recipient is ever legitimately in either state. Returns the
 	// number repaired.
 	BackfillNonAgentDispatchState(ctx context.Context, expiredReason string) (int, error)
+}
+
+// MessageHoldStore defines persistence operations for hold-until-session
+// re-drive of conduit-delivered messages (ptone/scion#7881). Kept as its own
+// sub-interface (implemented by BrokerDispatchStore) so test doubles of
+// BrokerDispatchStore alone do not need to stub hold methods.
+type MessageHoldStore interface {
+	// UnbindMessageDeliveryWithProof moves rows still delivering under
+	// deliveryID back to dispatched (compare-and-set on delivering and
+	// deliveryID). When notReached is non-empty (store.MessageNotReachedNoSession),
+	// it stamps not_reached and not_reached_at (on the database clock) in the
+	// same conditional write.
+	UnbindMessageDeliveryWithProof(ctx context.Context, deliveryID string, messageIDs []string, notReached string) error
+
+	// PrepareOrHoldMessage runs before broker dispatch for conduit-delivered
+	// agents: in one transaction under the target agent's row lock it captures
+	// the agent's current run_id into hold_launch_id on messageID, and if the
+	// agent currently has a hold marker (agent_delivery_holds), is eligible
+	// for holding, and is under maxHeld, transitions the row to
+	// awaiting_session with hold_until = COALESCE(hold_until, marker.hold_until)
+	// and updates held_count.
+	PrepareOrHoldMessage(ctx context.Context, agentID, messageID string, maxHeld int) (PrepareOrHoldResult, error)
+
+	// HoldMessageAwaitingSession atomically evaluates the hold preconditions
+	// for a broker awaiting_session report and, when all hold, consumes and
+	// clears the single-use no_session proof stamp, moves the row from
+	// dispatched to awaiting_session with hold_until = COALESCE(hold_until,
+	// now + HoldTTL) (database clock), and creates or updates the agent's hold
+	// marker in the same transaction.
+	HoldMessageAwaitingSession(ctx context.Context, p HoldMessageParams) (bool, error)
+
+	// ClaimHeldMessages atomically claims up to limit unexpired rows in
+	// awaiting_session for agentID, ordered by (created, id), transitioning
+	// each claimed row to dispatched (keeping hold_until and hold_launch_id;
+	// the single-use proof stamp was already consumed on entry to
+	// awaiting_session) and syncing or deleting the agent's hold marker in the
+	// same transaction. When an active re-drive lease is held on agentID's
+	// marker, only the lease owner (passed via WithRedriveLeaseOwner) may
+	// claim rows.
+	ClaimHeldMessages(ctx context.Context, agentID string, limit int) ([]Message, error)
+
+	// AcquireAgentRedriveLease acquires or re-enters an exclusive cross-replica
+	// re-drive lease (claim_owner, claim_until) on agentID's agent_delivery_holds
+	// marker for ttl on the database clock. Returns (false, nil) when no hold
+	// marker exists or another owner holds an unexpired lease.
+	AcquireAgentRedriveLease(ctx context.Context, agentID, ownerID string, ttl time.Duration) (bool, error)
+
+	// RenewAgentRedriveLease extends an active re-drive lease owned by ownerID
+	// for ttl on the database clock. Returns (false, nil) when the marker no
+	// longer exists or claim_owner no longer matches ownerID.
+	RenewAgentRedriveLease(ctx context.Context, agentID, ownerID string, ttl time.Duration) (bool, error)
+
+	// ReleaseAgentRedriveLease clears claim_owner and claim_until when owned by
+	// ownerID and deletes the agent_delivery_holds marker in the same
+	// transaction if zero awaiting_session rows remain.
+	ReleaseAgentRedriveLease(ctx context.Context, agentID, ownerID string) error
+
+	// ReholdClaimedMessage returns a claimed dispatched row back to
+	// awaiting_session under its original hold_until when re-validation hits
+	// a transient store or authz error or the re-drive pass times out before
+	// dispatch (R3), syncing the hold marker in the same transaction.
+	//
+	// Caller invariant: ReholdClaimedMessage does not require a not_reached
+	// proof stamp because it may ONLY be called on rows claimed in the current
+	// re-drive pass that were NEVER handed to the runtime broker. Never call
+	// ReholdClaimedMessage on a row after broker dispatch has been attempted,
+	// as a live broker flush could race with the re-held state.
+	ReholdClaimedMessage(ctx context.Context, agentID, messageID string, maxHeld int) (bool, error)
+
+	// HasAgentDeliveryHold reports whether agentID currently has an
+	// agent_delivery_holds marker row.
+	HasAgentDeliveryHold(ctx context.Context, agentID string) (bool, error)
+
+	// ListAgentDeliveryHoldAgentIDs returns the agent IDs that currently have
+	// an agent_delivery_holds marker row, ordered by marker creation time.
+	ListAgentDeliveryHoldAgentIDs(ctx context.Context) ([]string, error)
+
+	// ExpireHeldMessagesForAgent atomically fails all awaiting_session rows
+	// for agentID with reason, removes the agent's hold marker in the same
+	// transaction, and returns the rows that transitioned so callers can send
+	// sender failure notices.
+	ExpireHeldMessagesForAgent(ctx context.Context, agentID, reason string) ([]Message, error)
+
+	// ExpireHeldMessagesPastDeadline atomically fails up to limit
+	// awaiting_session rows whose hold_until <= database now with reason,
+	// syncs or removes affected agents' hold markers in the same transaction,
+	// and returns the rows that transitioned.
+	ExpireHeldMessagesPastDeadline(ctx context.Context, reason string, limit int) ([]Message, error)
+
+	// ExpireHeldMessagesPastDeadlineForAgent atomically fails all
+	// awaiting_session rows for agentID whose hold_until <= database now with
+	// reason, syncs or removes agentID's hold marker in the same transaction,
+	// and returns the rows that transitioned (RV3-R1).
+	ExpireHeldMessagesPastDeadlineForAgent(ctx context.Context, agentID, reason string) ([]Message, error)
+}
+
+type redriveLeaseOwnerKey struct{}
+
+// WithRedriveLeaseOwner attaches the active re-drive pass's lease owner token
+// to ctx so ClaimHeldMessages fences row claims against cross-replica lease
+// ownership inside the same database transaction.
+func WithRedriveLeaseOwner(ctx context.Context, ownerID string) context.Context {
+	if ownerID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, redriveLeaseOwnerKey{}, ownerID)
+}
+
+// RedriveLeaseOwnerFromContext returns the re-drive lease owner token attached
+// by WithRedriveLeaseOwner, or "" if none is set.
+func RedriveLeaseOwnerFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	v, _ := ctx.Value(redriveLeaseOwnerKey{}).(string)
+	return v
 }
 
 // TemplateStore defines template persistence operations.
