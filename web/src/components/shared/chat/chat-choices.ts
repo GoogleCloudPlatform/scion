@@ -16,7 +16,7 @@
 
 /**
  * `<scion-chat-choices>`: the card a choice-prompt message renders under
- * web.chat_choices (ptone/scion#7673, design §4.1–§4.3).
+ * web.decisions (ptone/scion#7673, design §4.1–§4.3).
  *
  * Single mode: one click records the answer through
  * `POST /api/v1/decisions/{rowId}/answer`; Enter on the focused card picks

@@ -16,7 +16,7 @@
  * Real-hub end-to-end Playwright suite for interactive chat choices
  * (ptone/scion#7776, epic ptone/scion#7514).
  *
- * Runs against the real Go `scion` hub binary with `web.chat_choices` enabled
+ * Runs against the real Go `scion` hub binary with `web.decisions` enabled
  * and a containerless test agent (`../harness/agent.ts`) backed by the
  * co-located runtime broker — no Docker daemon or live agent container needed.
  */
@@ -195,7 +195,7 @@ async function assertNoPageReload(page: Page, expectedBootId: string): Promise<v
   expect(current).toBe(expectedBootId);
 }
 
-test.describe('Interactive chat choices on real hub (web.chat_choices)', () => {
+test.describe('Interactive chat choices on real hub (web.decisions)', () => {
   let hub!: HubState;
   let projectId = '';
   let userA!: AuthSession;

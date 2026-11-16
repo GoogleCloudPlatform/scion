@@ -44,7 +44,7 @@ import {
 } from '../../client/view-mode-shortcuts.js';
 import { isMacPlatform } from '../../utils/platform.js';
 import { setPreferredTimeZone, browserTimeZone } from '../../utils/time.js';
-import { chatChoicesEnabled } from '../../client/chat-choices.js';
+import { decisionsEnabled } from '../../utils/feature-flags.js';
 import { setPreselectRecommendedChoices } from '../../client/choice-preferences.js';
 import '../shared/subscription-manager.js';
 import '../shared/timezone-picker.js';
@@ -99,7 +99,7 @@ export class ScionPageProfileSettings extends LitElement {
   /**
    * `preferences.preselectRecommendedChoices` (ptone/scion#7842): whether
    * multi-decision choices cards start with recommended choices selected.
-   * Shown only while web.chat_choices is on.
+   * Shown only while web.decisions is on.
    */
   @state()
   private _preselectRecommended = false;
@@ -650,12 +650,12 @@ export class ScionPageProfileSettings extends LitElement {
         </div>
       </div>
 
-      ${chatChoicesEnabled()
+      ${decisionsEnabled()
         ? html`
             <div class="settings-card">
               <h2 class="section-title">
                 <sl-icon name="list-check"></sl-icon>
-                Choices
+                Decisions
               </h2>
 
               <div class="setting-row">

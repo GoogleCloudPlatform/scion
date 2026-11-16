@@ -24,6 +24,8 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
+  DECISIONS_FLAG,
+  decisionsEnabled,
   isFeatureEnabled,
   setFeatureFlag,
   setServerFlags,
@@ -41,6 +43,10 @@ import { NATIVE_CHAT_PALETTE_FLAG } from './feature-flags.js';
 import { NATIVE_CHAT_V2_FLAG } from './feature-flags.js';
 // @ts-expect-error TERMINAL_WORKSPACE_FLAG was removed (the terminal workspace is always on)
 import { TERMINAL_WORKSPACE_FLAG } from './feature-flags.js';
+// @ts-expect-error CHAT_CHOICES_FLAG was retired into DECISIONS_FLAG
+import { CHAT_CHOICES_FLAG } from './feature-flags.js';
+// @ts-expect-error PROJECT_DECISIONS_FLAG was retired into DECISIONS_FLAG
+import { PROJECT_DECISIONS_FLAG } from './feature-flags.js';
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -166,6 +172,32 @@ describe('feature-flags: project thread groups flag removed', () => {
   // (see the experiment-removal checklist).
   it('the retired name resolves OFF by default (not in DEFAULT_ON_FLAGS)', () => {
     expect(isFeatureEnabled('hub.chat_thread_groups')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Consolidated Decisions flag (ptone/scion#8223)
+// ---------------------------------------------------------------------------
+
+describe('feature-flags: web.decisions consolidation', () => {
+  it('does not export CHAT_CHOICES_FLAG or PROJECT_DECISIONS_FLAG', () => {
+    expect(CHAT_CHOICES_FLAG).toBeUndefined();
+    expect(PROJECT_DECISIONS_FLAG).toBeUndefined();
+  });
+
+  // The one allowed reference to each retired name outside compiledRetired
+  // (see the experiment-removal checklist).
+  it('retired names resolve OFF by default and do not turn on web.decisions', () => {
+    expect(isFeatureEnabled('web.chat_choices')).toBe(false);
+    expect(isFeatureEnabled('web.project_decisions')).toBe(false);
+    expect(decisionsEnabled()).toBe(false);
+  });
+
+  it('DECISIONS_FLAG is web.decisions, defaults OFF, and toggles decisionsEnabled()', () => {
+    expect(DECISIONS_FLAG).toBe('web.decisions');
+    expect(decisionsEnabled()).toBe(false);
+    setFeatureFlag(DECISIONS_FLAG, true);
+    expect(decisionsEnabled()).toBe(true);
   });
 });
 

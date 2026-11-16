@@ -17,8 +17,8 @@
 /**
  * Profile Decisions page (`/profile/decisions`, ptone/scion#7996, Design §4.3 R1–R7, D5, D10, D13, D14, §5.1, §5.3, §7).
  *
- * Gated on both `web.project_decisions` and `web.chat_choices` (and falls back
- * to `<scion-page-404>` when the Hub returns 404 on `/api/v1/users/me/decisions`).
+ * Gated on `web.decisions` (and falls back to `<scion-page-404>` when the Hub
+ * returns 404 on `/api/v1/users/me/decisions`).
  *
  * Shares its load/paging controller, format helpers, styles, and row/card/state
  * renderers with `<scion-page-project-decisions>` (`scope="profile"` vs `scope="project"`).

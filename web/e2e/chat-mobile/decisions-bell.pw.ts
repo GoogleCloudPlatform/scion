@@ -114,8 +114,7 @@ async function setupBellMocks(page: Page, theme: Theme): Promise<MockBellControl
     window.__SCION_FEATURES__ = {
       ...window.__SCION_FEATURES__,
       'web.native_chat': true,
-      'web.chat_choices': true,
-      'web.project_decisions': true,
+      'web.decisions': true,
     };
   }, theme);
 

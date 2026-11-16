@@ -20,7 +20,7 @@
  *     so containerless agents can be provisioned without Docker,
  *   - `testLogin: true` so multi-user browser sessions and deterministic
  *     `X-Scion-Agent-Token` signing keys are available, and
- *   - `experiments: ['web.chat_choices']` enabled via the admin API.
+ *   - `experiments: ['web.decisions']` enabled via the admin API.
  */
 
 import { startHub } from '../harness/hub.js';
@@ -36,7 +36,7 @@ async function globalSetup(): Promise<void> {
     env: {
       SCION_IMAGE_REGISTRY: 'registry.invalid/scion-e2e',
     },
-    experiments: ['web.chat_choices', 'web.project_decisions'],
+    experiments: ['web.decisions'],
   });
   console.info(`[setup] Chat-choices real hub ${String(state.hubId)} at ${state.baseURL}`);
 }

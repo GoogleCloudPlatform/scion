@@ -17,9 +17,8 @@
 /**
  * Project Decisions page (`/projects/:id/decisions`, ptone/scion#7800, R7 shared tree ptone/scion#7996).
  *
- * Gated on both `web.project_decisions` and `web.chat_choices` (Plan B7):
- * renders `<scion-page-404>` and makes zero `/decisions` requests when either
- * flag is off.
+ * Gated on `web.decisions`: renders `<scion-page-404>` and makes zero
+ * `/decisions` requests when the flag is off.
  *
  * Shares its load/paging controller, format helpers, styles, and row/card/state
  * renderers with `<scion-page-profile-decisions>` (`scope="project"` vs `scope="profile"`).

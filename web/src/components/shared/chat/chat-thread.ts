@@ -55,7 +55,6 @@ import {
   ANSWERABLE,
   applyChoiceHistoryMaps,
   carryChoiceFields,
-  chatChoicesEnabled,
   fetchAskerAnswerability,
   patchDecisions,
   readOnlyAnswerability,
@@ -88,7 +87,11 @@ import {
   type StarItem,
 } from '../../../client/chat-stars.js';
 import type { ChatMessageFilter } from '../../../client/chat-routes.js';
-import { CHAT_RETENTION_FLAG, isFeatureEnabled } from '../../../utils/feature-flags.js';
+import {
+  CHAT_RETENTION_FLAG,
+  decisionsEnabled,
+  isFeatureEnabled,
+} from '../../../utils/feature-flags.js';
 import {
   ARTIFACTS_FLAG,
   ARTIFACTS_METADATA_KEY,
@@ -2842,7 +2845,7 @@ export class ScionChatThread extends LitElement {
       attachments?: import('./chat-message.js').AttachmentRefInfo[];
       /** metadata.artifacts: the message's artifact refs, ids and versions only. */
       metadata?: { artifacts?: string };
-      // Choice fields (web.chat_choices; absent while off).
+      // Choice fields (web.decisions; absent while off).
       decisions?: DecisionView[];
       choiceIntro?: string;
       answerMode?: ChoiceAnswerMode;
@@ -4225,7 +4228,7 @@ export class ScionChatThread extends LitElement {
    * thread: every card is blocked there anyway.
    */
   private lookupChoiceAskers(): void {
-    if (!chatChoicesEnabled()) return;
+    if (!decisionsEnabled()) return;
     if (!this.isDM && !this.canPost) return;
     for (const msg of this.messages) {
       const d = msg.decisions?.[0];

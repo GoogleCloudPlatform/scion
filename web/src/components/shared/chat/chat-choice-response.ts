@@ -16,7 +16,7 @@
 
 /**
  * `<scion-chat-choice-response>`: the compact line a choice-response
- * message renders under web.chat_choices instead of a bubble
+ * message renders under web.decisions instead of a bubble
  * (ptone/scion#7673, design §4.6).
  *
  * Single: "**alice** chose **yes** for **D234** *question* · time · Jump".

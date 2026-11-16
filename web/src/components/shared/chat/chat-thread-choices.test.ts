@@ -16,15 +16,14 @@
 
 /**
  * Choice prompts in the thread (ptone/scion#7673, design §4.1, §4.4): the
- * double gate (hub fields and the web.chat_choices browser flag), the
+ * double gate (hub fields and the web.decisions browser flag), the
  * history side maps and live chat.message fields, and the version-guarded
  * patch from `choice-updated` (another tab's answer over SSE) and from the
  * card's own `choice-answered`.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { setFeatureFlag } from '../../../utils/feature-flags.js';
-import { CHAT_CHOICES_EXPERIMENT } from '../../../client/chat-choices.js';
+import { DECISIONS_FLAG, setFeatureFlag } from '../../../utils/feature-flags.js';
 import type { DecisionView } from '../../../shared/types.js';
 
 const stateManager = vi.hoisted(() =>
@@ -171,7 +170,7 @@ function choiceUpdated(data: Record<string, unknown>): void {
 }
 
 beforeEach(() => {
-  setFeatureFlag(CHAT_CHOICES_EXPERIMENT, true);
+  setFeatureFlag(DECISIONS_FLAG, true);
   history = {
     messages: [prompt()],
     messageDecisions: { p1: [decision()] },
@@ -187,7 +186,7 @@ beforeEach(() => {
 
 afterEach(() => {
   document.body.innerHTML = '';
-  setFeatureFlag(CHAT_CHOICES_EXPERIMENT, false);
+  setFeatureFlag(DECISIONS_FLAG, false);
 });
 
 describe('choice prompt rendering', () => {
@@ -205,7 +204,7 @@ describe('choice prompt rendering', () => {
   });
 
   it('renders the fallback markdown as today with the browser flag off', async () => {
-    setFeatureFlag(CHAT_CHOICES_EXPERIMENT, false);
+    setFeatureFlag(DECISIONS_FLAG, false);
     const thread = await open();
     const el = await messageEl(thread);
 

@@ -385,7 +385,7 @@ _Avoid_: group (bare), folder, channel, conversation group, thread folder
 _See also_: Group (hub users, not threads), Message Group (recipients of one send, not threads), Native Web Chat
 
 **Decision** (choices):
-One thing an agent needs a human to decide, posted in a choice prompt. It has a per-agent **key** (one the agent picks, such as `D234`, which has at least one non-digit, or a number the Hub assigns from a per-agent counter, such as `17`), **versions** (reposting the key with `--update` adds one), and a **status**: `pending`, `decided` or `replaced`. It is named across versions by `<asker-agent-uuid>/<key>`, and one version by `<asker-agent-uuid>/<key>@<version>`. The feature as a whole is called **choices** (the `web.chat_choices` experiment).
+One thing an agent needs a human to decide, posted in a choice prompt. It has a per-agent **key** (one the agent picks, such as `D234`, which has at least one non-digit, or a number the Hub assigns from a per-agent counter, such as `17`), **versions** (reposting the key with `--update` adds one), and a **status**: `pending`, `decided` or `replaced`. It is named across versions by `<asker-agent-uuid>/<key>`, and one version by `<asker-agent-uuid>/<key>@<version>`. The feature as a whole is called **Decisions** (the `web.decisions` experiment).
 _Avoid_: prompt (for the decision), poll, ticket, request
 _See also_: Question, Choice, Answer, Choice prompt
 

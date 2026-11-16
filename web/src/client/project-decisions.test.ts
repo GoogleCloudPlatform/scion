@@ -16,9 +16,8 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
-  CHAT_CHOICES_FLAG,
-  PROJECT_DECISIONS_FLAG,
-  projectDecisionsEnabled,
+  DECISIONS_FLAG,
+  decisionsEnabled,
   resetServerFlagStateForTests,
   setFeatureFlag,
 } from '../utils/feature-flags.js';
@@ -51,7 +50,7 @@ function res(status: number, body: unknown): Response {
   } as unknown as Response;
 }
 
-describe('projectDecisionsEnabled (dual flag gate)', () => {
+describe('decisionsEnabled (single flag gate)', () => {
   beforeEach(() => {
     delete window.__SCION_FEATURES__;
     resetServerFlagStateForTests();
@@ -62,20 +61,14 @@ describe('projectDecisionsEnabled (dual flag gate)', () => {
     resetServerFlagStateForTests();
   });
 
-  it('requires both web.project_decisions and web.chat_choices to be enabled', () => {
-    expect(projectDecisionsEnabled()).toBe(false);
+  it('follows web.decisions alone', () => {
+    expect(decisionsEnabled()).toBe(false);
 
-    setFeatureFlag(PROJECT_DECISIONS_FLAG, true);
-    setFeatureFlag(CHAT_CHOICES_FLAG, false);
-    expect(projectDecisionsEnabled()).toBe(false);
+    setFeatureFlag(DECISIONS_FLAG, true);
+    expect(decisionsEnabled()).toBe(true);
 
-    setFeatureFlag(PROJECT_DECISIONS_FLAG, false);
-    setFeatureFlag(CHAT_CHOICES_FLAG, true);
-    expect(projectDecisionsEnabled()).toBe(false);
-
-    setFeatureFlag(PROJECT_DECISIONS_FLAG, true);
-    setFeatureFlag(CHAT_CHOICES_FLAG, true);
-    expect(projectDecisionsEnabled()).toBe(true);
+    setFeatureFlag(DECISIONS_FLAG, false);
+    expect(decisionsEnabled()).toBe(false);
   });
 });
 

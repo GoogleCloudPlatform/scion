@@ -23,8 +23,7 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { setFeatureFlag } from '../../../utils/feature-flags.js';
-import { CHAT_CHOICES_EXPERIMENT } from '../../../client/chat-choices.js';
+import { DECISIONS_FLAG, setFeatureFlag } from '../../../utils/feature-flags.js';
 import type {
   ChoiceResponseSetAnswer,
   ChoiceResponseSetView,
@@ -118,7 +117,7 @@ function jumps(el: HTMLElement): string[] {
 
 afterEach(() => {
   document.body.innerHTML = '';
-  setFeatureFlag(CHAT_CHOICES_EXPERIMENT, false);
+  setFeatureFlag(DECISIONS_FLAG, false);
 });
 
 describe('single', () => {
@@ -378,7 +377,7 @@ describe('set', () => {
 
 describe('scion-chat-message attribution by answeredByUserId', () => {
   async function mountMsg(props: Partial<ScionChatMessage>): Promise<ScionChatMessage> {
-    setFeatureFlag(CHAT_CHOICES_EXPERIMENT, true);
+    setFeatureFlag(DECISIONS_FLAG, true);
     const msg = document.createElement('scion-chat-message');
     msg.messageId = 'm1';
     msg.messageType = 'choice-response';

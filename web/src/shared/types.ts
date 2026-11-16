@@ -1711,7 +1711,7 @@ export interface Message {
   delegationGrantId?: string;
   /**
    * Choice prompt decisions (messageType "choice-prompt"). Present only while
-   * the web.chat_choices experiment is on: from the history side map
+   * the web.decisions experiment is on: from the history side map
    * messageDecisions or inline on the live chat.message event.
    */
   decisions?: DecisionView[];

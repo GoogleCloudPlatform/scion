@@ -15,14 +15,12 @@
  */
 
 /**
- * Choices web cards (ptone/scion#7673): the experiment gate, the answer
- * endpoint, and the merge rules that keep a card's decision views current
- * across history pages, live chat messages and `chat.choice.updated`
- * events.
+ * Choices web cards (ptone/scion#7673): the answer endpoint and the merge
+ * rules that keep a card's decision views current across history pages, live
+ * chat messages and `chat.choice.updated` events.
  */
 
 import { apiFetch, apiErrorMessageFromBody } from './api.js';
-import { CHAT_CHOICES_FLAG, isFeatureEnabled } from '../utils/feature-flags.js';
 import { getDenialMessage } from '../shared/message-mode.js';
 import type {
   Agent,
@@ -33,16 +31,8 @@ import type {
   Message,
 } from '../shared/types.js';
 
-/** The experiment gating choice cards (web and hub). */
-export const CHAT_CHOICES_EXPERIMENT = CHAT_CHOICES_FLAG;
-
 /** Web surface submitting a decision answer (`native` in chat, `decisions_page` on `/projects/:id/decisions`). */
 export type ChoiceAnswerSurface = 'native' | 'decisions_page';
-
-/** Whether choice cards are shown in this browser session. */
-export function chatChoicesEnabled(): boolean {
-  return isFeatureEnabled(CHAT_CHOICES_EXPERIMENT);
-}
 
 /** A decision whose state can no longer change back to pending. */
 export function isTerminalDecision(view: DecisionView): boolean {
@@ -133,7 +123,7 @@ export interface ChoiceHistoryMaps {
 
 /**
  * Copies the choice side maps of a history response onto its messages.
- * The hub omits the maps while web.chat_choices is off, which leaves the
+ * The hub omits the maps while web.decisions is off, which leaves the
  * messages untouched.
  */
 export function applyChoiceHistoryMaps(items: Message[], data: ChoiceHistoryMaps): void {

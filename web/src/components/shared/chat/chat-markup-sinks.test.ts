@@ -267,7 +267,7 @@ describe('chat message markup boundary', () => {
   afterEach(() => {
     document.body.replaceChildren();
     // The choice card case turns the flag on; reset it even if that test failed.
-    delete window.__SCION_FEATURES__?.['web.chat_choices'];
+    delete window.__SCION_FEATURES__?.['web.decisions'];
   });
 
   it('renders a message with no plain-string markup parsing', async () => {
@@ -370,7 +370,7 @@ describe('chat message markup boundary', () => {
     // Choice cards (ptone/scion#7673, v4 #12): the question is full markdown
     // and a choice description inline markdown, both through the shared
     // renderer and DOMPurify, never a plain-string markup sink.
-    window.__SCION_FEATURES__ = { ...window.__SCION_FEATURES__, 'web.chat_choices': true };
+    window.__SCION_FEATURES__ = { ...window.__SCION_FEATURES__, 'web.decisions': true };
     const el = document.createElement('scion-chat-message') as ScionChatMessage;
     el.senderIsAgent = true;
     el.fromAgent = true;

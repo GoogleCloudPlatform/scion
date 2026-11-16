@@ -37,7 +37,7 @@ import {
 } from '../../client/push-preference.js';
 import type { User, Notification } from '../../shared/types.js';
 import { formatRelative } from '../../utils/time.js';
-import { FEATURE_FLAGS_CHANGED_EVENT, projectDecisionsEnabled } from '../../utils/feature-flags.js';
+import { FEATURE_FLAGS_CHANGED_EVENT, decisionsEnabled } from '../../utils/feature-flags.js';
 import { navigateTo } from '../../client/navigation.js';
 import { coalescedRefresh, type CoalescedRefresh } from '../../client/coalesced-refresh.js';
 import { visibleInterval } from '../../client/visible-interval.js';
@@ -258,7 +258,7 @@ export class ScionNotificationTray extends LitElement {
   /** Last observed count for decisions_waiting; governs browser push on increases. */
   private lastDecisionsCount = 0;
 
-  /** Mirrors projectDecisionsEnabled() so async flag loading at boot triggers reconcile + refresh. */
+  /** Mirrors decisionsEnabled() so async flag loading at boot triggers reconcile + refresh. */
   private decisionsFlagEnabled = false;
 
   /** Suppresses browser push for the initial fetch so existing notifications don't fire. */
@@ -308,7 +308,7 @@ export class ScionNotificationTray extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
-    this.decisionsFlagEnabled = projectDecisionsEnabled();
+    this.decisionsFlagEnabled = decisionsEnabled();
     this.syncPushState();
     // Keep in step with the profile settings page, which writes the same
     // preference. Two toggles disagreeing about one setting is worse than one.
@@ -355,7 +355,7 @@ export class ScionNotificationTray extends LitElement {
       // Loading stops on disconnect and restarts in connectedCallback.
       if (!this.isConnected) return;
       this.activeUserId = id;
-      this.decisionsFlagEnabled = projectDecisionsEnabled();
+      this.decisionsFlagEnabled = decisionsEnabled();
       void this.fetchNotifications();
       this.reconcileDecisionsBell();
       this.startPolling();
@@ -369,7 +369,7 @@ export class ScionNotificationTray extends LitElement {
   }
 
   private onFeatureFlagsChanged(): void {
-    const enabled = projectDecisionsEnabled();
+    const enabled = decisionsEnabled();
     if (enabled === this.decisionsFlagEnabled) return;
     this.decisionsFlagEnabled = enabled;
     if (!this.activeUserId) return;
@@ -388,7 +388,7 @@ export class ScionNotificationTray extends LitElement {
    * responding; any healed row arrives via `user.{id}.notification`.
    */
   private reconcileDecisionsBell(): void {
-    if (!projectDecisionsEnabled() || !this.user?.id) return;
+    if (!decisionsEnabled() || !this.user?.id) return;
     void apiFetch('/api/v1/users/me/decisions?tab=pending&limit=0').catch(() => {});
   }
 
@@ -538,7 +538,7 @@ export class ScionNotificationTray extends LitElement {
     // Chat rows no longer belong in the bell (see fetchNotifications).
     if (RETIRED_CHAT_STATUSES.has(n.status)) return;
     if (isDecisionsWaiting(n)) {
-      if (!projectDecisionsEnabled()) return;
+      if (!decisionsEnabled()) return;
       const nextCount = parseDecisionsCount(n);
       const currentlyShown = this.notifications.some((x) => x.id === n.id);
       if (!currentlyShown || nextCount > this.lastDecisionsCount) {
@@ -574,7 +574,7 @@ export class ScionNotificationTray extends LitElement {
       // A newer request's answer is already shown: this one is older.
       if (seq < this.appliedSeq) return;
       this.appliedSeq = seq;
-      const decisionsOn = projectDecisionsEnabled();
+      const decisionsOn = decisionsEnabled();
       // Older chat rows can still be unacknowledged; chat no longer belongs
       // in the bell, so they are neither listed, counted nor popped.
       const incoming = (data ?? []).filter(

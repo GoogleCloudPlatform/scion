@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { getPreferredTimeZone, setPreferredTimeZone } from '../../utils/time.js';
-import { setFeatureFlag } from '../../utils/feature-flags.js';
+import { DECISIONS_FLAG, setFeatureFlag } from '../../utils/feature-flags.js';
 import {
   preselectRecommendedChoices,
   setPreselectRecommendedChoices,
@@ -605,7 +605,7 @@ describe('scion-page-profile-settings — preselect recommended choices (ptone/s
     element?.remove();
     element = null;
     const features = { ...window.__SCION_FEATURES__ };
-    delete features['web.chat_choices'];
+    delete features[DECISIONS_FLAG];
     window.__SCION_FEATURES__ = features;
     setPreselectRecommendedChoices(false);
     vi.restoreAllMocks();
@@ -621,16 +621,21 @@ describe('scion-page-profile-settings — preselect recommended choices (ptone/s
     },
   });
 
-  it('is hidden while web.chat_choices is off', async () => {
-    setFeatureFlag('web.chat_choices', false);
+  it('is hidden while web.decisions is off', async () => {
+    setFeatureFlag(DECISIONS_FLAG, false);
     element = await createComponent(createFetchHandler({}, undefined, authMe(true)));
     expect(preselectSwitch(element)).toBeNull();
     expect(shadowText(element)).not.toContain('Preselect recommended choices');
   });
 
-  it('is off by default and shows the stored preference', async () => {
-    setFeatureFlag('web.chat_choices', true);
+  it('is off by default, renders the Decisions card heading, and shows the stored preference', async () => {
+    setFeatureFlag(DECISIONS_FLAG, true);
     element = await createComponent(createFetchHandler({}, undefined, authMe()));
+    const titles = Array.from(element.shadowRoot?.querySelectorAll('h2.section-title') ?? []).map(
+      (h) => (h as HTMLElement).textContent?.trim() ?? ''
+    );
+    expect(titles).toContain('Decisions');
+    expect(titles).not.toContain('Choices');
     expect(preselectSwitch(element)?.hasAttribute('checked')).toBe(false);
     element.remove();
 
@@ -639,7 +644,7 @@ describe('scion-page-profile-settings — preselect recommended choices (ptone/s
   });
 
   it('saves with a per-key preferences PATCH and applies it to open cards', async () => {
-    setFeatureFlag('web.chat_choices', true);
+    setFeatureFlag(DECISIONS_FLAG, true);
     let sent: Record<string, unknown> | null = null;
     element = await createComponent(
       createFetchHandler({}, undefined, authMe(), (body) => {
@@ -659,7 +664,7 @@ describe('scion-page-profile-settings — preselect recommended choices (ptone/s
   });
 
   it('reverts the switch and shows the error when the PATCH fails', async () => {
-    setFeatureFlag('web.chat_choices', true);
+    setFeatureFlag(DECISIONS_FLAG, true);
     element = await createComponent(
       createFetchHandler({}, undefined, authMe(), () => ({
         status: 500,

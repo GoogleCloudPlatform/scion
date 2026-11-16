@@ -63,7 +63,7 @@ import {
   type ProfileSharedDecisionsFilter,
 } from '../../client/profile-decisions.js';
 import { stateManager } from '../../client/state.js';
-import { FEATURE_FLAGS_CHANGED_EVENT, projectDecisionsEnabled } from '../../utils/feature-flags.js';
+import { FEATURE_FLAGS_CHANGED_EVENT, decisionsEnabled } from '../../utils/feature-flags.js';
 import { DISPLAY_TIMEZONE_CHANGED_EVENT } from '../../utils/time.js';
 import { deepActiveElement } from './deep-active-element.js';
 import type {
@@ -217,7 +217,7 @@ export class DecisionsPageController implements ReactiveController {
   }
 
   private readonly boundOnFlagsChanged = (): void => {
-    const next = projectDecisionsEnabled();
+    const next = decisionsEnabled();
     if (next === this.enabled) return;
     this.enabled = next;
     this.notify();
@@ -296,7 +296,7 @@ export class DecisionsPageController implements ReactiveController {
 
   hostConnected(): void {
     this.extractRouteState();
-    this.enabled = projectDecisionsEnabled();
+    this.enabled = decisionsEnabled();
     this.notify();
     window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFlagsChanged);
     window.addEventListener(DISPLAY_TIMEZONE_CHANGED_EVENT, this.boundOnTimezoneChanged);

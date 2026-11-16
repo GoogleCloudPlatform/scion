@@ -15,7 +15,7 @@
 /**
  * Choice prompt fixtures for choices.pw.ts (ptone/scion#7673): the states of
  * the approved mocks as hub history rows, with the choice side maps the hub
- * sends while web.chat_choices is on.
+ * sends while web.decisions is on.
  */
 
 import type { Page, Route } from '@playwright/test';

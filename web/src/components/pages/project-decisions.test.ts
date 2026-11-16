@@ -30,9 +30,8 @@ import { PAGE_TITLE_EVENT } from '../../client/page-title.js';
 import type { PageTitleDetail } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
 import {
-  CHAT_CHOICES_FLAG,
+  DECISIONS_FLAG,
   FEATURE_FLAGS_CHANGED_EVENT,
-  PROJECT_DECISIONS_FLAG,
   resetServerFlagStateForTests,
   setFeatureFlag,
 } from '../../utils/feature-flags.js';
@@ -295,9 +294,8 @@ describe('<scion-page-project-decisions>', () => {
     vi.stubGlobal('EventSource', FakeEventSource);
   });
 
-  function enableBothFlags(): void {
-    setFeatureFlag(PROJECT_DECISIONS_FLAG, true);
-    setFeatureFlag(CHAT_CHOICES_FLAG, true);
+  function enableDecisionsFlag(): void {
+    setFeatureFlag(DECISIONS_FLAG, true);
   }
 
   async function mount(pageData?: Partial<PageData>): Promise<ScionPageProjectDecisions> {
@@ -313,31 +311,14 @@ describe('<scion-page-project-decisions>', () => {
     return el;
   }
 
-  it('renders 404 and makes zero API calls unless both experiments are enabled', async () => {
-    // Both off
-    let el = await mount();
-    expect(el.shadowRoot?.querySelector('scion-page-404')).not.toBeNull();
-    expect(requests).toEqual([]);
-    el.remove();
-
-    // Only project_decisions on
-    setFeatureFlag(PROJECT_DECISIONS_FLAG, true);
-    setFeatureFlag(CHAT_CHOICES_FLAG, false);
-    el = await mount();
-    expect(el.shadowRoot?.querySelector('scion-page-404')).not.toBeNull();
-    expect(requests).toEqual([]);
-    el.remove();
-
-    // Only chat_choices on
-    setFeatureFlag(PROJECT_DECISIONS_FLAG, false);
-    setFeatureFlag(CHAT_CHOICES_FLAG, true);
-    el = await mount();
+  it('renders 404 and makes zero API calls when web.decisions is disabled', async () => {
+    const el = await mount();
     expect(el.shadowRoot?.querySelector('scion-page-404')).not.toBeNull();
     expect(requests).toEqual([]);
   });
 
   it('renders Waiting on you live and purged cards, forwards surface="decisions_page", and renders collapsed Waiting on others', async () => {
-    enableBothFlags();
+    enableDecisionsFlag();
     const liveTopicPrompt = makePrompt({
       promptMessageId: 'm-topic',
       promptAvailable: true,
@@ -513,7 +494,7 @@ describe('<scion-page-project-decisions>', () => {
   });
 
   it('shows empty Waiting on you state and switches to Made when clicking "See decisions made"', async () => {
-    enableBothFlags();
+    enableDecisionsFlag();
     pendingResponses = [
       {
         counts: { waitingOnYou: 0, waitingOnOthers: 0 },
@@ -549,7 +530,7 @@ describe('<scion-page-project-decisions>', () => {
   });
 
   it('renders Made log rows (deleted user, unavailable conversation, reply link gating, surfaces), filters, and Load more', async () => {
-    enableBothFlags();
+    enableDecisionsFlag();
     const rowOverride = makeLogEntry({
       answerId: 'ans-over',
       outcome: 'override',
@@ -711,7 +692,7 @@ describe('<scion-page-project-decisions>', () => {
   });
 
   it('removes a prompt settled in another tab live on choice-updated and updates counts without reload', async () => {
-    enableBothFlags();
+    enableDecisionsFlag();
     pendingResponses = [
       {
         counts: { waitingOnYou: 1, waitingOnOthers: 0 },
@@ -804,7 +785,7 @@ describe('<scion-page-project-decisions>', () => {
   });
 
   it('preserves Made Load more pages and cursor on live choice-updated, and never aborts an in-flight Load more', async () => {
-    enableBothFlags();
+    enableDecisionsFlag();
     const rowP1 = makeLogEntry({ answerId: 'ans-p1', label: 'Page 1 original' });
     const rowP2 = makeLogEntry({ answerId: 'ans-p2', label: 'Page 2 older' });
     const rowNew = makeLogEntry({ answerId: 'ans-new', label: 'Prepended live answer' });
@@ -895,7 +876,7 @@ describe('<scion-page-project-decisions>', () => {
   });
 
   it('does not fetch Made while Pending tab is active, then prepends when switching back to Made', async () => {
-    enableBothFlags();
+    enableDecisionsFlag();
     const rowInitial = makeLogEntry({ answerId: 'ans-initial', label: 'Initial' });
     const rowAfterSse = makeLogEntry({ answerId: 'ans-after-sse', label: 'Added while hidden' });
 
@@ -948,7 +929,7 @@ describe('<scion-page-project-decisions>', () => {
   });
 
   it('preserves Pending prompts beyond page 1 (>50) across live choice-updated without aborting Load more', async () => {
-    enableBothFlags();
+    enableDecisionsFlag();
     const page1Prompts = Array.from({ length: 50 }, (_, i) =>
       makePrompt({
         promptMessageId: `m-p1-${i}`,
@@ -1037,7 +1018,7 @@ describe('<scion-page-project-decisions>', () => {
   });
 
   it('converts Made From/To dates in effectiveTimeZone() and blocks From > To with inline validation', async () => {
-    enableBothFlags();
+    enableDecisionsFlag();
     setPreferredTimeZone('America/Los_Angeles');
 
     const el = await mount({ path: '/projects/p-1/decisions?tab=made' });
@@ -1083,7 +1064,7 @@ describe('<scion-page-project-decisions>', () => {
   });
 
   it('drives all Made UI filter controls into a combined query and resets all on Clear filters', async () => {
-    enableBothFlags();
+    enableDecisionsFlag();
     setPreferredTimeZone('UTC');
 
     const el = await mount({ path: '/projects/p-1/decisions?tab=made' });
@@ -1135,7 +1116,7 @@ describe('<scion-page-project-decisions>', () => {
   });
 
   it('preserves the exact <scion-chat-choices> DOM element for surviving cards via keyed repeat()', async () => {
-    enableBothFlags();
+    enableDecisionsFlag();
     const card1 = makePrompt({
       promptMessageId: 'p-1',
       decisions: [makeDecision({ rowId: 'r-card-1', messageId: 'p-1', question: 'First?' })],
@@ -1237,8 +1218,7 @@ describe('<scion-page-project-decisions>', () => {
     ];
 
     window.__SCION_FEATURES__ = {
-      [PROJECT_DECISIONS_FLAG]: true,
-      [CHAT_CHOICES_FLAG]: true,
+      [DECISIONS_FLAG]: true,
     };
     window.dispatchEvent(new Event(FEATURE_FLAGS_CHANGED_EVENT));
     await settle(el, 35);
@@ -1276,13 +1256,13 @@ describe('<scion-page-project-decisions>', () => {
     expect(root.querySelector('[data-waiting-badge]')?.textContent?.trim()).toBe('2');
 
     // Dynamically disable flag -> tears down and renders 404
-    setFeatureFlag(CHAT_CHOICES_FLAG, false);
+    setFeatureFlag(DECISIONS_FLAG, false);
     await settle(el, 20);
     expect(root.querySelector('scion-page-404')).not.toBeNull();
   });
 
   it('renders error states on initial 500 for Pending and Made tabs and recovers on Retry', async () => {
-    enableBothFlags();
+    enableDecisionsFlag();
     let failPending = true;
     pendingHandler = () => {
       if (failPending) {
@@ -1336,7 +1316,7 @@ describe('<scion-page-project-decisions>', () => {
   });
 
   it('renders message_denied and safe fallback Waiting on others badges, handles malformed URLs, and sets ARIA attributes', async () => {
-    enableBothFlags();
+    enableDecisionsFlag();
     pendingResponses = [
       {
         counts: { waitingOnYou: 1, waitingOnOthers: 2 },
@@ -1401,7 +1381,7 @@ describe('<scion-page-project-decisions>', () => {
   });
 
   it('defers Made live refresh while a filter reset is in flight so old-filter rows never leak into new-filter results', async () => {
-    enableBothFlags();
+    enableDecisionsFlag();
     const rowOld = makeLogEntry({ answerId: 'ans-old', surface: 'other', label: 'Unfiltered row' });
     const rowFiltered = makeLogEntry({ answerId: 'ans-filtered', label: 'Filtered agent row' });
     const rowLiveNew = makeLogEntry({ answerId: 'ans-live-new', label: 'New matching row' });
@@ -1505,7 +1485,7 @@ describe('<scion-page-project-decisions>', () => {
   });
 
   it('defers Pending live refresh during initial boot reset so boot errors are never swallowed', async () => {
-    enableBothFlags();
+    enableDecisionsFlag();
     let pendingCall = 0;
     let bootResetAborted = false;
     let resolveBootPending!: (res: Response) => void;
@@ -1558,7 +1538,7 @@ describe('<scion-page-project-decisions>', () => {
   });
 
   it('falls back to projectId title without entering error state when project summary JSON is null', async () => {
-    enableBothFlags();
+    enableDecisionsFlag();
     projectHandler = () =>
       new Promise<Response>((resolve) => {
         setTimeout(() => void jsonResponse(null).then(resolve), 5);
@@ -1585,7 +1565,7 @@ describe('<scion-page-project-decisions>', () => {
   });
 
   it('skips redundant history.replaceState on active-tab clicks and synchronous sl-tab-show re-entry', async () => {
-    enableBothFlags();
+    enableDecisionsFlag();
     const el = await mount();
     const root = el.shadowRoot!;
 
@@ -1617,7 +1597,7 @@ describe('<scion-page-project-decisions>', () => {
   });
 
   it('round-trips valid URL filters on load and silently drops invalid parameters via replaceState without pushState', async () => {
-    enableBothFlags();
+    enableDecisionsFlag();
     const agentUuid = '3f9c0a11-2222-4333-8444-555555555555';
     madeResponses = [
       {
@@ -1684,7 +1664,7 @@ describe('<scion-page-project-decisions>', () => {
   });
 
   it('debounces search q by 300ms, ignores 1-char typing, and aborts superseded in-flight search requests', async () => {
-    enableBothFlags();
+    enableDecisionsFlag();
     let callNum = 0;
     let firstSearchAborted = false;
     let resolveFirstSearch!: (res: Response) => void;
@@ -1767,7 +1747,7 @@ describe('<scion-page-project-decisions>', () => {
   });
 
   it('preserves shared filters across Pending <-> Made tab switches, drops Made-only filters on Pending, and clears all on Clear', async () => {
-    enableBothFlags();
+    enableDecisionsFlag();
     const agentUuid = '3f9c0a11-2222-4333-8444-555555555555';
     pendingResponses = [
       {
@@ -1863,7 +1843,7 @@ describe('<scion-page-project-decisions>', () => {
   });
 
   it('renders filtered "n of m" counts, distinct F-5 no-match state, D9 SEARCH_TIMEOUT alert, capability check, "/" shortcut, and C4 Decisions copy', async () => {
-    enableBothFlags();
+    enableDecisionsFlag();
     const agentUuid = '3f9c0a11-2222-4333-8444-555555555555';
 
     // 1. Pre-P1 Hub without `conversations` facet keeps panel mounted with supportsSearch=false,
@@ -1993,7 +1973,7 @@ describe('<scion-page-project-decisions>', () => {
   });
 
   it('keeps Made Phase 3 filters, tags, and Clear working against an older Hub without conversations facet', async () => {
-    enableBothFlags();
+    enableDecisionsFlag();
     const agentUuid = '3f9c0a11-2222-4333-8444-555555555555';
 
     pendingHandler = (): Promise<Response> =>
@@ -2055,7 +2035,7 @@ describe('<scion-page-project-decisions>', () => {
   });
 
   it('renders filter panel, tags, Clear, and "/" shortcut on a first-load SEARCH_TIMEOUT on both Pending and Made tabs (D9, D10)', async () => {
-    enableBothFlags();
+    enableDecisionsFlag();
     const timeoutResponse = (): Promise<Response> =>
       Promise.resolve(
         new Response(
@@ -2225,7 +2205,7 @@ describe('<scion-page-project-decisions>', () => {
   });
 
   it('aborts superseded in-flight Made and Pending loads across tab round-trips and re-issues fresh requests (D10, AC 4)', async () => {
-    enableBothFlags();
+    enableDecisionsFlag();
     const agentUuid = '3f9c0a11-2222-4333-8444-555555555555';
 
     // 1. Reviewer pass-2 sequence (plus shared-filter variant):
@@ -2479,7 +2459,7 @@ describe('<scion-page-project-decisions>', () => {
   });
 
   it('does not merge old-filter >200 Pending tail rows on live SSE refresh when pendingNeedsReset is set', async () => {
-    enableBothFlags();
+    enableDecisionsFlag();
     const agentUuid = '3f9c0a11-2222-4333-8444-555555555555';
     const page1Prompts = Array.from({ length: 200 }, (_, i) =>
       makePrompt({

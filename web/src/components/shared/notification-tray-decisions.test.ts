@@ -18,7 +18,7 @@
  * Coalesced Decisions bell notification (`decisions_waiting`, ptone/scion#7997):
  * pinning at top of tray, link to `/profile/decisions?tab=pending`, live SSE
  * count updates and `acknowledged: true` clearing, browser push on new/increased
- * count only, B6 reconcile probe on login + tray open, and `projectDecisionsEnabled()`
+ * count only, B6 reconcile probe on login + tray open, and `decisionsEnabled()`
  * feature gating.
  */
 
@@ -29,8 +29,7 @@ import { apiFetch } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
 import { setPushOptIn } from '../../client/push-preference.js';
 import {
-  CHAT_CHOICES_FLAG,
-  PROJECT_DECISIONS_FLAG,
+  DECISIONS_FLAG,
   resetServerFlagStateForTests,
   setFeatureFlag,
 } from '../../utils/feature-flags.js';
@@ -119,10 +118,9 @@ function emitUserNotification(data: Record<string, unknown>): void {
 
 const flush = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
-function enableDecisionsFlags(choices = true, projectDecisions = true): void {
+function enableDecisionsFlags(enabled = true): void {
   window.__SCION_FEATURES__ = {
-    [CHAT_CHOICES_FLAG]: choices,
-    [PROJECT_DECISIONS_FLAG]: projectDecisions,
+    [DECISIONS_FLAG]: enabled,
   };
 }
 
@@ -240,7 +238,7 @@ describe('notification tray: decisions_waiting', () => {
   });
 
   it('pins decisions_waiting at index 0 above newer agent notifications on load and SSE arrivals', async () => {
-    enableDecisionsFlags(true, true);
+    enableDecisionsFlags(true);
     mockedFetch.mockImplementation((input) => {
       if (String(input).startsWith('/api/v1/notifications')) {
         return Promise.resolve(jsonResponse([agentRow('newer-agent'), decisionsRow(2, 1)]));
@@ -274,7 +272,7 @@ describe('notification tray: decisions_waiting', () => {
   });
 
   it('updates live on SSE count changes, clears immediately on acknowledged: true without refetching, and follows B7 push rules', async () => {
-    enableDecisionsFlags(true, true);
+    enableDecisionsFlags(true);
     mockedFetch.mockImplementation(() => Promise.resolve(jsonResponse([])));
 
     const tray = new ScionNotificationTray();
@@ -332,7 +330,7 @@ describe('notification tray: decisions_waiting', () => {
   });
 
   it('suppresses push on initial load and fires push again when resurfacing after Mark read', async () => {
-    enableDecisionsFlags(true, true);
+    enableDecisionsFlags(true);
     mockedFetch.mockImplementation((input) => {
       const url = String(input);
       if (url.startsWith('/api/v1/notifications?acknowledged=false')) {
@@ -362,9 +360,9 @@ describe('notification tray: decisions_waiting', () => {
     expect(createdPushCalls).toHaveLength(1);
   });
 
-  it('probes /api/v1/users/me/decisions?tab=pending&limit=0 on login and tray open only when projectDecisionsEnabled() is true', async () => {
-    // Flags off initially -> no reconcile probe, and any stale decisions_waiting row is hidden.
-    enableDecisionsFlags(true, false);
+  it('probes /api/v1/users/me/decisions?tab=pending&limit=0 on login and tray open only when decisionsEnabled() is true', async () => {
+    // Flag off initially -> no reconcile probe, and any stale decisions_waiting row is hidden.
+    enableDecisionsFlags(false);
     mockedFetch.mockImplementation(() =>
       Promise.resolve(jsonResponse([decisionsRow(1, 1), agentRow('a-1')]))
     );
@@ -380,9 +378,9 @@ describe('notification tray: decisions_waiting', () => {
     ]);
     expect((tray as any).notifications.map((n: Notification) => n.id)).toEqual(['a-1']);
 
-    // Server flags arrive enabling web.project_decisions -> triggers reconcile probe + refresh!
+    // Server flags arrive enabling web.decisions -> triggers reconcile probe + refresh!
     mockedFetch.mockClear();
-    setFeatureFlag(PROJECT_DECISIONS_FLAG, true);
+    setFeatureFlag(DECISIONS_FLAG, true);
     await flush();
     await tray.updateComplete;
 
@@ -405,7 +403,7 @@ describe('notification tray: decisions_waiting', () => {
   });
 
   it('preserves newer SSE in-place updates and acknowledgements when an older fetchNotifications resolves late', async () => {
-    enableDecisionsFlags(true, true);
+    enableDecisionsFlags(true);
     let resolveInFlight!: (res: Response) => void;
     let callCount = 0;
     mockedFetch.mockImplementation((input) => {

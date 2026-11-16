@@ -22,9 +22,8 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite
 import { stateManager } from '../../client/state.js';
 import { resetHubProjectCapabilitiesCache } from '../../client/hub-capabilities.js';
 import {
-  CHAT_CHOICES_FLAG,
+  DECISIONS_FLAG,
   FEATURE_FLAGS_CHANGED_EVENT,
-  PROJECT_DECISIONS_FLAG,
   resetServerFlagStateForTests,
   setFeatureFlag,
 } from '../../utils/feature-flags.js';
@@ -145,32 +144,14 @@ describe('<scion-page-project-detail> Decisions button & badge (Mock P3-1)', () 
     return el;
   }
 
-  it('hides Decisions button and makes zero /decisions requests unless both flags are enabled', async () => {
-    // Both off
-    let el = await mount();
-    expect(el.shadowRoot?.querySelector('[data-decisions-button]')).toBeNull();
-    expect(decisionsUrls).toEqual([]);
-    el.remove();
-
-    // Only web.project_decisions on
-    setFeatureFlag(PROJECT_DECISIONS_FLAG, true);
-    setFeatureFlag(CHAT_CHOICES_FLAG, false);
-    el = await mount();
-    expect(el.shadowRoot?.querySelector('[data-decisions-button]')).toBeNull();
-    expect(decisionsUrls).toEqual([]);
-    el.remove();
-
-    // Only web.chat_choices on
-    setFeatureFlag(PROJECT_DECISIONS_FLAG, false);
-    setFeatureFlag(CHAT_CHOICES_FLAG, true);
-    el = await mount();
+  it('hides Decisions button and makes zero /decisions requests when web.decisions is disabled', async () => {
+    const el = await mount();
     expect(el.shadowRoot?.querySelector('[data-decisions-button]')).toBeNull();
     expect(decisionsUrls).toEqual([]);
   });
 
   it('renders Decisions button, fetches limit=0 count, hides badge at 0, and updates live on choice-updated', async () => {
-    setFeatureFlag(PROJECT_DECISIONS_FLAG, true);
-    setFeatureFlag(CHAT_CHOICES_FLAG, true);
+    setFeatureFlag(DECISIONS_FLAG, true);
     waitingOnYouCount = 3;
 
     const el = await mount();
@@ -216,8 +197,7 @@ describe('<scion-page-project-detail> Decisions button & badge (Mock P3-1)', () 
   });
 
   it('refreshes badge on chat-message-received for choice-prompt only, and ignores plain messages or other projects', async () => {
-    setFeatureFlag(PROJECT_DECISIONS_FLAG, true);
-    setFeatureFlag(CHAT_CHOICES_FLAG, true);
+    setFeatureFlag(DECISIONS_FLAG, true);
     waitingOnYouCount = 1;
 
     const el = await mount();
@@ -265,10 +245,9 @@ describe('<scion-page-project-detail> Decisions button & badge (Mock P3-1)', () 
     expect(el.shadowRoot?.querySelector('[data-decisions-button]')).toBeNull();
     expect(decisionsUrls).toEqual([]);
 
-    // Enable both flags dynamically and verify button + badge appear
+    // Enable web.decisions dynamically and verify button + badge appear
     window.__SCION_FEATURES__ = {
-      [PROJECT_DECISIONS_FLAG]: true,
-      [CHAT_CHOICES_FLAG]: true,
+      [DECISIONS_FLAG]: true,
     };
     window.dispatchEvent(new Event(FEATURE_FLAGS_CHANGED_EVENT));
     await settle(el, 30);
@@ -278,8 +257,8 @@ describe('<scion-page-project-detail> Decisions button & badge (Mock P3-1)', () 
     expect(decisionsUrls).toEqual(['/api/v1/projects/p-1/decisions?tab=pending&limit=0']);
     expect(btn?.querySelector('sl-badge.decisions-badge')?.textContent?.trim()).toBe('2');
 
-    // Disable project_decisions dynamically -> button and badge disappear
-    setFeatureFlag(PROJECT_DECISIONS_FLAG, false);
+    // Disable web.decisions dynamically -> button and badge disappear
+    setFeatureFlag(DECISIONS_FLAG, false);
     await settle(el, 20);
     expect(el.shadowRoot?.querySelector('[data-decisions-button]')).toBeNull();
   });

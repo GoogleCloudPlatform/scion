@@ -22,8 +22,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { setFeatureFlag } from '../../../utils/feature-flags.js';
-import { CHAT_CHOICES_EXPERIMENT } from '../../../client/chat-choices.js';
+import { DECISIONS_FLAG, setFeatureFlag } from '../../../utils/feature-flags.js';
 import type { DecisionView } from '../../../shared/types.js';
 
 const stateManager = vi.hoisted(() =>
@@ -171,7 +170,7 @@ const agentReads = (): number =>
   apiFetch.mock.calls.filter(([path]) => path.startsWith('/api/v1/agents/')).length;
 
 beforeEach(() => {
-  setFeatureFlag(CHAT_CHOICES_EXPERIMENT, true);
+  setFeatureFlag(DECISIONS_FLAG, true);
   history = {
     messages: [prompt('p1', 41), prompt('p2', 42)],
     messageDecisions: { p1: [decision('p1')], p2: [decision('p2')] },
@@ -190,7 +189,7 @@ beforeEach(() => {
 
 afterEach(() => {
   document.body.innerHTML = '';
-  setFeatureFlag(CHAT_CHOICES_EXPERIMENT, false);
+  setFeatureFlag(DECISIONS_FLAG, false);
 });
 
 describe('asker answerability', () => {
@@ -482,7 +481,7 @@ describe('choice-response lines', () => {
   });
 
   it('keeps the bubble with the browser flag off', async () => {
-    setFeatureFlag(CHAT_CHOICES_EXPERIMENT, false);
+    setFeatureFlag(DECISIONS_FLAG, false);
     const thread = await open();
     const el = await messageEl(thread, 'c1');
     expect(lineOf(el)).toBeNull();

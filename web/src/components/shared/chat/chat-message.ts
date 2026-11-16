@@ -54,7 +54,7 @@ import {
   ARTIFACT_REF_PATTERN,
   buildArtifactLinkElement,
 } from '../../../utils/chat-file-links.js';
-import { isFeatureEnabled } from '../../../utils/feature-flags.js';
+import { decisionsEnabled, isFeatureEnabled } from '../../../utils/feature-flags.js';
 import {
   ARTIFACTS_FLAG,
   orderArtifactRefs,
@@ -67,7 +67,7 @@ import '../markdown-preview.js';
 import { userMentionSlug } from './prose-mentions.js';
 import './chat-choices.js';
 import './chat-choice-response.js';
-import { ANSWERABLE, chatChoicesEnabled } from '../../../client/chat-choices.js';
+import { ANSWERABLE } from '../../../client/chat-choices.js';
 import type { AskerAnswerability } from '../../../client/chat-choices.js';
 import type {
   ChoiceAnswerMode,
@@ -1057,7 +1057,7 @@ export class ScionChatMessage extends LitElement {
   @property()
   dispatchState = '';
 
-  /** A choice prompt's decisions (web.chat_choices; absent while off). */
+  /** A choice prompt's decisions (web.decisions; absent while off). */
   @property({ type: Array })
   decisions: DecisionView[] | undefined = undefined;
 
@@ -1073,11 +1073,11 @@ export class ScionChatMessage extends LitElement {
   @property({ attribute: false })
   answerability: AskerAnswerability | undefined = undefined;
 
-  /** A choice-response's one-click answer (web.chat_choices; absent while off). */
+  /** A choice-response's one-click answer (web.decisions; absent while off). */
   @property({ attribute: false })
   choiceResponse: ChoiceResponseView | undefined = undefined;
 
-  /** A choice-response's set submit (web.chat_choices; absent while off). */
+  /** A choice-response's set submit (web.decisions; absent while off). */
   @property({ attribute: false })
   choiceResponseSet: ChoiceResponseSetView | undefined = undefined;
 
@@ -2709,7 +2709,7 @@ export class ScionChatMessage extends LitElement {
    */
   private get showsChoiceCard(): boolean {
     const d = this.decisions;
-    return this.messageType === 'choice-prompt' && !!d && d.length > 0 && chatChoicesEnabled();
+    return this.messageType === 'choice-prompt' && !!d && d.length > 0 && decisionsEnabled();
   }
 
   /** The text the bubble renders: the intro alone under a choice card. */
@@ -3212,7 +3212,7 @@ export class ScionChatMessage extends LitElement {
     return (
       this.messageType === 'choice-response' &&
       !!(this.choiceResponse || this.choiceResponseSet) &&
-      chatChoicesEnabled()
+      decisionsEnabled()
     );
   }
 
