@@ -120,8 +120,7 @@ func seedPlaywrightFfmpegIntoRegistry(regFile *os.File, registryPath, cleanSeed 
 		log.Debug("Playwright ffmpeg seed: skipping %s: %v", linksPath, err)
 		return
 	}
-	linksFile := os.NewFile(uintptr(linksFd), linksPath)
-	defer func() { _ = linksFile.Close() }()
+	defer func() { _ = dirfd.Close(linksFd) }()
 
 	// Prune retired seed symlinks left by an older base image (only when the
 	// entry is a symlink provably targeting cleanSeed and no longer present in
@@ -150,8 +149,8 @@ func seedPlaywrightFfmpegIntoRegistry(regFile *os.File, registryPath, cleanSeed 
 				continue
 			}
 			linkName := "scion-" + name
-			if raw, rerr := dirfd.ReadAtNoFollow(int(linksFile.Fd()), linkName, 4096); rerr == nil && isOwnedSeedTarget(string(raw), cleanSeed) {
-				_ = dirfd.UnlinkAt(int(linksFile.Fd()), linkName)
+			if raw, rerr := dirfd.ReadAtNoFollow(linksFd, linkName, 4096); rerr == nil && isOwnedSeedTarget(string(raw), cleanSeed) {
+				_ = dirfd.UnlinkAt(linksFd, linkName)
 			}
 		}
 	}
@@ -173,7 +172,7 @@ func seedPlaywrightFfmpegIntoRegistry(regFile *os.File, registryPath, cleanSeed 
 					log.Debug("Playwright ffmpeg seed: lchown %s: %v", revName, cerr)
 				}
 			}
-			ensurePlaywrightLinkFile(int(linksFile.Fd()), linksPath, linkName, []byte(wantTarget), uid, gid)
+			ensurePlaywrightLinkFile(linksFd, linksPath, linkName, []byte(wantTarget), uid, gid)
 
 		case err != nil:
 			log.Debug("Playwright ffmpeg seed: stat %s: %v", revName, err)
@@ -194,7 +193,7 @@ func seedPlaywrightFfmpegIntoRegistry(regFile *os.File, registryPath, cleanSeed 
 					continue
 				}
 			}
-			ensurePlaywrightLinkFile(int(linksFile.Fd()), linksPath, linkName, []byte(wantTarget), uid, gid)
+			ensurePlaywrightLinkFile(linksFd, linksPath, linkName, []byte(wantTarget), uid, gid)
 
 		default:
 			// Existing real directory (e.g. previously downloaded ffmpeg-<rev>)
