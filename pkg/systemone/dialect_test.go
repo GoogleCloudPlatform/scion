@@ -486,14 +486,22 @@ func TestDialect_ExperimentGateToggleWithoutRestart(t *testing.T) {
 		"Engine.Supports reports registration only and stays true when disabled")
 
 	_, err = eng.Compile(context.Background(), systemone.DialectName, rawRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
-		Consumer: "trigger",
+		Consumer: " trigger ",
 		Name:     spec.ProbeEnvironmentName,
 	})
 	require.Error(t, err)
 	var unsupCompile *ruleengine.UnsupportedDialectError
 	require.ErrorAs(t, err, &unsupCompile)
 	assert.Equal(t, systemone.DialectName, unsupCompile.Dialect)
-	assert.Empty(t, unsupCompile.Consumer)
+	assert.Equal(t, "trigger", unsupCompile.Consumer)
+
+	// Disabled Compile error message must match an unregistered dialect byte-for-byte.
+	_, unregErr := ruleengine.NewEngine().Compile(context.Background(), systemone.DialectName, rawRule, ruleengine.KindFilter, ruleengine.EnvironmentRef{
+		Consumer: "trigger",
+		Name:     spec.ProbeEnvironmentName,
+	})
+	require.Error(t, unregErr)
+	assert.Equal(t, unregErr.Error(), err.Error())
 
 	_, err = eng.Evaluate(context.Background(), compiledWhileOn, ruleengine.Input{
 		Payload: systemone.ProbeInput("must not reach provider"),

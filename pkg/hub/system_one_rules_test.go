@@ -127,6 +127,8 @@ func TestSystemOneRules_LiveExperimentToggleAndProbeParity(t *testing.T) {
 	var unsupErr *ruleengine.UnsupportedDialectError
 	require.ErrorAs(t, err, &unsupErr)
 	assert.Equal(t, systemone.DialectName, unsupErr.Dialect)
+	assert.Equal(t, "trigger", unsupErr.Consumer)
+	assert.Equal(t, `unsupported dialect "system_one" for consumer "trigger"`, err.Error())
 
 	// Phase 2: Flip hub.system_one ON in the same Hub process without restart.
 	setSystemOneExperimentLive(t, srv, true)
@@ -201,6 +203,8 @@ func TestSystemOneRules_LiveExperimentToggleAndProbeParity(t *testing.T) {
 	var unsupOff *ruleengine.UnsupportedDialectError
 	require.ErrorAs(t, err, &unsupOff)
 	assert.Equal(t, systemone.DialectName, unsupOff.Dialect)
+	assert.Equal(t, "trigger", unsupOff.Consumer)
+	assert.Equal(t, `unsupported dialect "system_one" for consumer "trigger"`, err.Error())
 
 	_, err = re.Evaluate(ctx, compiledWhileOn, ruleengine.Input{
 		Payload: systemone.ProbeInput(syntheticText),

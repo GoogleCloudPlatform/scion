@@ -119,7 +119,10 @@ func (d *Dialect) Declares() ruleengine.Capabilities {
 // EnvironmentRef.ResultType is ignored.
 func (d *Dialect) Compile(ctx context.Context, rule string, kind ruleengine.Kind, env ruleengine.EnvironmentRef) (ruleengine.Compiled, error) {
 	if !d.isEnabled() {
-		return ruleengine.Compiled{}, &ruleengine.UnsupportedDialectError{Dialect: DialectName}
+		return ruleengine.Compiled{}, &ruleengine.UnsupportedDialectError{
+			Dialect:  DialectName,
+			Consumer: strings.TrimSpace(env.Consumer),
+		}
 	}
 	if ctx != nil {
 		if err := ctx.Err(); err != nil {
