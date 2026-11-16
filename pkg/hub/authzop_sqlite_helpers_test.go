@@ -83,6 +83,7 @@ type idFixtures struct {
 	trigger                 string
 	triggerPaused           string
 	triggerDel              string
+	triggerEvent            string
 	limit                   string
 	limitUD                 string
 	entitlement             string
@@ -363,6 +364,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 		trigger:              tid("li-trigger"),
 		triggerPaused:        tid("li-trigger-paused"),
 		triggerDel:           tid("li-trigger-del"),
+		triggerEvent:         tid("li-trigger-event"),
 		limit:                tid("li-limit"),
 		limitUD:              tid("li-limit-ud"),
 		entitlement:          tid("li-entitlement"),
@@ -540,6 +542,23 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 			UpdatedAt: now,
 		}))
 	}
+	require.NoError(t, s.CreateTriggerEvent(ctx, &store.TriggerEvent{
+		ID:           f.triggerEvent,
+		ProjectID:    f.project,
+		SourceKind:   store.TriggerSourceKindWebhook,
+		SourceID:     f.webhookEndpoint,
+		Type:         "webhook.received",
+		Subject:      "webhook:" + f.webhookEndpoint,
+		DedupKey:     "li-trigger-event-dedup",
+		OccurredAt:   now,
+		ReceivedAt:   now,
+		Attributes:   map[string]string{"endpoint_name": "li-webhook-ep"},
+		Headers:      map[string]string{"Content-Type": "application/json"},
+		Payload:      `{"ok":true}`,
+		PayloadBytes: 11,
+		Status:       store.TriggerEventStatusProcessed,
+		CreatedAt:    now,
+	}))
 
 	limitDef, err := s.CreateLimitDefinition(ctx, &store.LimitDefinition{ID: f.limit, Name: "li-limit", ResourceType: "agent", Unit: "count", DefaultValue: 10, CreatedAt: now, UpdatedAt: now})
 	require.NoError(t, err)
@@ -1279,8 +1298,11 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{projectId}/webhook-endpoints/{id}": {"projectId": f.project, "id": f.webhookEndpoint},
 		"/api/v1/projects/{projectId}/triggers":               {"projectId": f.project},
 		"/api/v1/projects/{projectId}/triggers/{id}":          {"projectId": f.project, "id": f.trigger},
+		"/api/v1/projects/{projectId}/triggers/{id}/history":  {"projectId": f.project, "id": f.trigger},
 		"/api/v1/projects/{projectId}/triggers/{id}/pause":    {"projectId": f.project, "id": f.trigger},
 		"/api/v1/projects/{projectId}/triggers/{id}/resume":   {"projectId": f.project, "id": f.triggerPaused},
+		"/api/v1/projects/{projectId}/trigger-events":         {"projectId": f.project},
+		"/api/v1/projects/{projectId}/trigger-events/{id}":    {"projectId": f.project, "id": f.triggerEvent},
 
 		// --- quota family (read defaults; quota.update/.delete are
 		// re-pointed at the disposable UD instances by opPatternOverrides) ---

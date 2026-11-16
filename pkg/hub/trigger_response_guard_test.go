@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -129,22 +130,30 @@ func TestTriggerResponseGuard_StructFields(t *testing.T) {
 	for _, forbidden := range []string{"leaseUntil", "lease_until", "executorKind", "executorId"} {
 		assert.NotContains(t, fireMap, forbidden, "TriggerFireResponse must not expose %q", forbidden)
 	}
-}
 
-// buildTriggerFireResponse maps store.TriggerFire to TriggerFireResponse (moved
-// to trigger_response.go in 1b-3 when GET /triggers/{id}/history calls it).
-func buildTriggerFireResponse(tf store.TriggerFire) TriggerFireResponse {
-	return TriggerFireResponse{
-		ID:         tf.ID,
-		TriggerID:  tf.TriggerID,
-		EventID:    tf.EventID,
-		ProjectID:  tf.ProjectID,
-		Subject:    tf.Subject,
-		Status:     tf.Status,
-		ResultRef:  tf.ResultRef,
-		Error:      tf.Error,
-		StartedAt:  tf.StartedAt,
-		FinishedAt: tf.FinishedAt,
+	evtSummary := buildTriggerEventSummaryResponse(store.TriggerEvent{
+		ID:           "evt-1",
+		ProjectID:    "proj-1",
+		SourceKind:   store.TriggerSourceKindWebhook,
+		SourceID:     "ep-1",
+		Type:         "webhook.received",
+		Subject:      "webhook:ep-1",
+		DedupKey:     "d-1",
+		OccurredAt:   now,
+		ReceivedAt:   now,
+		Attributes:   map[string]string{"endpoint_name": "deploy-hook"},
+		Headers:      map[string]string{"Content-Type": "application/json"},
+		Payload:      `{"secret_body":true}`,
+		PayloadBytes: 20,
+		Status:       store.TriggerEventStatusProcessed,
+		CreatedAt:    now,
+	})
+	evtSummaryRaw, err := json.Marshal(evtSummary)
+	require.NoError(t, err)
+	var evtSummaryMap map[string]any
+	require.NoError(t, json.Unmarshal(evtSummaryRaw, &evtSummaryMap))
+	for _, forbidden := range []string{"payload", "headers"} {
+		assert.NotContains(t, evtSummaryMap, forbidden, "TriggerEventSummaryResponse must not expose %q", forbidden)
 	}
 }
 
@@ -174,7 +183,43 @@ func TestWebhookEndpointResponses_NoSecretAfterCreate(t *testing.T) {
 	var tr TriggerResponse
 	require.NoError(t, json.Unmarshal(trCreateRec.Body.Bytes(), &tr))
 
-	// Exercise every other 1b-1 route and verify sentinel never appears.
+	now := time.Now().UTC()
+	evt := &store.TriggerEvent{
+		ID:           api.NewUUID(),
+		ProjectID:    f.projectID,
+		SourceKind:   store.TriggerSourceKindWebhook,
+		SourceID:     created.ID,
+		Type:         "webhook.received",
+		Subject:      "webhook:" + created.ID,
+		DedupKey:     "guard-deliv",
+		OccurredAt:   now,
+		ReceivedAt:   now,
+		Attributes:   map[string]string{"endpoint_name": created.Name},
+		Headers:      map[string]string{"Content-Type": "application/json"},
+		Payload:      `{"ok":true}`,
+		PayloadBytes: 11,
+		Status:       store.TriggerEventStatusProcessed,
+		CreatedAt:    now,
+	}
+	require.NoError(t, f.store.CreateTriggerEvent(ctx, evt))
+	claimed, _, err := f.store.ClaimTriggerFire(ctx, &store.TriggerFire{
+		ID:           api.NewUUID(),
+		ProjectID:    f.projectID,
+		TriggerID:    tr.ID,
+		EventID:      evt.ID,
+		Subject:      evt.Subject,
+		ActionType:   store.TriggerActionMessage,
+		Status:       store.TriggerFireStatusFiring,
+		ExecutorKind: "trigger_drainer",
+		ExecutorID:   "trigger_event:" + evt.ID,
+		LeaseUntil:   now.Add(10 * time.Minute),
+		StartedAt:    now,
+		CreatedAt:    now,
+	})
+	require.NoError(t, err)
+	require.True(t, claimed)
+
+	// Exercise every 1b-1 and 1b-3 route and verify sentinel never appears.
 	checks := []struct {
 		name string
 		call func() string
@@ -240,6 +285,30 @@ func TestWebhookEndpointResponses_NoSecretAfterCreate(t *testing.T) {
 			name: "POST /triggers/{id}/resume",
 			call: func() string {
 				rec := f.doTrigger(t, f.ownerAuth, tr.ID+"/resume", http.MethodPost, nil)
+				require.Equal(t, http.StatusOK, rec.Code)
+				return rec.Body.String()
+			},
+		},
+		{
+			name: "GET /triggers/{id}/history",
+			call: func() string {
+				rec := f.doTrigger(t, f.ownerAuth, tr.ID+"/history", http.MethodGet, nil)
+				require.Equal(t, http.StatusOK, rec.Code)
+				return rec.Body.String()
+			},
+		},
+		{
+			name: "GET /trigger-events",
+			call: func() string {
+				rec := f.doTriggerEvents(t, f.ownerAuth, "", http.MethodGet, nil)
+				require.Equal(t, http.StatusOK, rec.Code)
+				return rec.Body.String()
+			},
+		},
+		{
+			name: "GET /trigger-events/{id}",
+			call: func() string {
+				rec := f.doTriggerEvents(t, f.ownerAuth, evt.ID, http.MethodGet, nil)
 				require.Equal(t, http.StatusOK, rec.Code)
 				return rec.Body.String()
 			},

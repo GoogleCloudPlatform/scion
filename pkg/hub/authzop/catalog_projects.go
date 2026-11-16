@@ -1141,9 +1141,10 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "trigger.list",
 		Domain:      "trigger",
-		Description: "List triggers in a project. Agent callers see only triggers they hold (scope=caller)",
+		Description: "List triggers or trigger events in a project. Agent callers see only triggers they hold and events received on endpoints they own or fired by triggers they hold (scope=caller)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/triggers", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/trigger-events", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
@@ -1155,6 +1156,7 @@ var projectOperations = []OperationSpec{
 		DenialCodes:      []DenialCode{DenialForbidden},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestTriggersAuthzMatrix"},
+			{Package: "pkg/hub", Function: "TestTriggerEventsAndHistory_AuthzMatrix"},
 			{Package: "pkg/hub", Function: "TestBearerDispositionMatrix_CatalogEntryPoints"},
 		},
 		Bearer: AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
@@ -1162,9 +1164,11 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "trigger.read",
 		Domain:      "trigger",
-		Description: "Read a trigger definition in a project",
+		Description: "Read a trigger definition, a trigger's fire history, or a trigger event in a project. An agent caller reading an event it neither received on its own endpoint nor fired through a trigger it holds receives the same 404 as not-found",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/triggers/{id}", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/triggers/{id}/history", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/projects/{projectId}/trigger-events/{id}", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
@@ -1173,9 +1177,10 @@ var projectOperations = []OperationSpec{
 		Effects:          []SecurityEffect{EffectReadOne},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
-		DenialCodes:      []DenialCode{DenialForbidden},
+		DenialCodes:      []DenialCode{DenialForbidden, DenialResourceNotFound},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestTriggersAuthzMatrix"},
+			{Package: "pkg/hub", Function: "TestTriggerEventsAndHistory_AuthzMatrix"},
 			{Package: "pkg/hub", Function: "TestBearerDispositionMatrix_CatalogEntryPoints"},
 		},
 		Bearer: AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
@@ -1280,6 +1285,34 @@ var projectOperations = []OperationSpec{
 			{Package: "pkg/hub", Function: "TestBearerDispositionMatrix_CatalogEntryPoints"},
 		},
 		Bearer: AdmitOn(BearerTargetProjectPath, BearerBoundaryProject, BearerBoundaryHub),
+	},
+	{
+		ID:          "trigger.fire",
+		Domain:      "trigger",
+		Description: "Fire a matched event trigger's message action through the shared fire core under the authority recorded by the trigger's current revision",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointSchedulerJob, Pattern: "triggerDrainer:message"},
+		},
+		Principals:       []PrincipalKind{PrincipalSystem},
+		Credentials:      []CredentialKind{CredentialSystemInternal},
+		ResourceResolver: "event-project",
+		Effects:          []SecurityEffect{EffectCreateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestScheduledFire_UsesRecordedTokenCeiling"},
+			{Package: "pkg/hub", Function: "TestTriggerEventsAndHistory_AuthzMatrix"},
+		},
+		Exemptions: []Exemption{{
+			Kind: ExemptionInternalOnly,
+			Reason: "The trigger.event durable queue drainer fires matched triggers with no request credential. " +
+				"fireAction resolves the trigger revision's recorded principal and credential via resolveRecordedAuthority, " +
+				"and every fire is bounded by the revision's recorded ceiling, boundary, and live standing",
+			Scope:  "trigger drainer fire",
+			Waives: []WaivedObligation{WaiveBasePermission},
+		}},
+		Bearer: BearerDisposition{Kind: BearerNonUser, Pin: "TestScheduledFire_UsesRecordedTokenCeiling"},
 	},
 
 	// =====================================================================
