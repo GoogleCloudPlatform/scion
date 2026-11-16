@@ -1300,6 +1300,21 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RouteHubAdmin,
 		Permission:     "hub.github_app.update", Resource: "hub", Action: "update",
 	},
+	"GET /api/v1/github-app/repo-routing": {
+		Pattern: "GET /api/v1/github-app/repo-routing", RouteID: "githubApp.repoRouting.list",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.github_app.read", Resource: "hub", Action: "read",
+	},
+	"PUT /api/v1/github-app/repo-routing/{owner}/{repo}": {
+		Pattern: "PUT /api/v1/github-app/repo-routing/{owner}/{repo}", RouteID: "githubApp.repoRouting.set",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.github_app.update", Resource: "hub", Action: "update",
+	},
+	"DELETE /api/v1/github-app/repo-routing/{owner}/{repo}": {
+		Pattern: "DELETE /api/v1/github-app/repo-routing/{owner}/{repo}", RouteID: "githubApp.repoRouting.delete",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.github_app.update", Resource: "hub", Action: "update",
+	},
 
 	// -------------------------------------------------------------------------
 	// Hub test identities (ptone/scion#4240): test_identity.issue at hub

@@ -120,6 +120,7 @@ func (m *mockHubClient) Messages() hubclient.MessageService                     
 func (m *mockHubClient) Messaging() hubclient.MessagingService                            { return nil }
 func (m *mockHubClient) AdminSettings() hubclient.AdminSettingsService                    { return nil }
 func (m *mockHubClient) SystemOne() hubclient.SystemOneService                            { return nil }
+func (m *mockHubClient) GitHubApp() hubclient.GitHubAppService                            { return nil }
 func (m *mockHubClient) Conversations() hubclient.ConversationService                     { return nil }
 func (m *mockHubClient) ThreadGroups() hubclient.ThreadGroupService                       { return nil }
 func (m *mockHubClient) AllowList() hubclient.AllowListService                            { return nil }

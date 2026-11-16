@@ -522,15 +522,16 @@ const githubAssociationReportPath = "association-report"
 
 // githubAssociationReportEntry is one associated project in the report.
 type githubAssociationReportEntry struct {
-	ProjectID      string `json:"project_id"`
-	ProjectName    string `json:"project_name"`
-	GitRemote      string `json:"git_remote"`
-	InstallationID int64  `json:"installation_id"`
-	Authorized     bool   `json:"authorized"`
-	Basis          string `json:"basis,omitempty"`
-	WriteAllowed   bool   `json:"write_allowed"`
-	ErrorCode      string `json:"error_code,omitempty"`
-	Reason         string `json:"reason,omitempty"`
+	ProjectID          string `json:"project_id"`
+	ProjectName        string `json:"project_name"`
+	GitRemote          string `json:"git_remote"`
+	InstallationID     int64  `json:"installation_id"`
+	Authorized         bool   `json:"authorized"`
+	Basis              string `json:"basis,omitempty"`
+	WriteAllowed       bool   `json:"write_allowed"`
+	ErrorCode          string `json:"error_code,omitempty"`
+	Reason             string `json:"reason,omitempty"`
+	AppStatusErrorCode string `json:"-"`
 }
 
 // Admin association report bounds. A full build enumerates every project
@@ -608,6 +609,15 @@ func (c *githubAssociationReportCache) invalidate(projectID string) {
 	c.dirty[projectID] = c.seq
 }
 
+// invalidateAll marks the entire association report cache invalid and clears
+// lastFullBuild so the next read rebuilds without hitting the rate limit.
+func (c *githubAssociationReportCache) invalidateAll() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.valid = false
+	c.lastFullBuild = time.Time{}
+}
+
 // invalidateGitHubAssociation drops every cached association outcome for
 // projectID: the mint path's access checks and the admin report's entry.
 // Every association change goes through here.
@@ -624,6 +634,9 @@ func (s *Server) githubAssociationReportEntryFor(ctx context.Context, p *store.P
 		ProjectName:    p.Name,
 		GitRemote:      p.GitRemote,
 		InstallationID: *p.GitHubInstallationID,
+	}
+	if p.GitHubAppStatus != nil {
+		e.AppStatusErrorCode = p.GitHubAppStatus.ErrorCode
 	}
 	grant, authzErr := s.authorizeGitHubAppAssociation(ctx, p, *p.GitHubInstallationID)
 	if authzErr != nil {

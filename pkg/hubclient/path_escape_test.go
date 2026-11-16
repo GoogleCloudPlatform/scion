@@ -463,3 +463,19 @@ func TestPathEscape_SystemOne(t *testing.T) {
 			}},
 	})
 }
+
+func TestPathEscape_GitHubApp(t *testing.T) {
+	runPathEscapeCases(t, []pathEscapeCase{
+		{"SetRepoPrimary", "/api/v1/github-app/repo-routing/{id}/{id}",
+			func(ctx context.Context, c Client, id string) {
+				_, _ = c.GitHubApp().SetRepoPrimary(ctx, id, id, &SetGitHubRepoPrimaryRequest{
+					InstallationID:   1,
+					PrimaryProjectID: "proj-1",
+				})
+			}},
+		{"DeleteRepoPrimary", "/api/v1/github-app/repo-routing/{id}/{id}",
+			func(ctx context.Context, c Client, id string) {
+				_ = c.GitHubApp().DeleteRepoPrimary(ctx, id, id, nil)
+			}},
+	})
+}

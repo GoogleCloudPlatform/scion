@@ -1775,16 +1775,20 @@ func init() {
 	githubinstallationDescRepositories := githubinstallationFields[4].Descriptor()
 	// githubinstallation.DefaultRepositories holds the default value on creation for the repositories field.
 	githubinstallation.DefaultRepositories = githubinstallationDescRepositories.Default.(string)
+	// githubinstallationDescTriggerRouting is the schema descriptor for trigger_routing field.
+	githubinstallationDescTriggerRouting := githubinstallationFields[5].Descriptor()
+	// githubinstallation.DefaultTriggerRouting holds the default value on creation for the trigger_routing field.
+	githubinstallation.DefaultTriggerRouting = githubinstallationDescTriggerRouting.Default.(string)
 	// githubinstallationDescStatus is the schema descriptor for status field.
-	githubinstallationDescStatus := githubinstallationFields[5].Descriptor()
+	githubinstallationDescStatus := githubinstallationFields[6].Descriptor()
 	// githubinstallation.DefaultStatus holds the default value on creation for the status field.
 	githubinstallation.DefaultStatus = githubinstallationDescStatus.Default.(string)
 	// githubinstallationDescCreated is the schema descriptor for created field.
-	githubinstallationDescCreated := githubinstallationFields[6].Descriptor()
+	githubinstallationDescCreated := githubinstallationFields[7].Descriptor()
 	// githubinstallation.DefaultCreated holds the default value on creation for the created field.
 	githubinstallation.DefaultCreated = githubinstallationDescCreated.Default.(func() time.Time)
 	// githubinstallationDescUpdated is the schema descriptor for updated field.
-	githubinstallationDescUpdated := githubinstallationFields[7].Descriptor()
+	githubinstallationDescUpdated := githubinstallationFields[8].Descriptor()
 	// githubinstallation.DefaultUpdated holds the default value on creation for the updated field.
 	githubinstallation.DefaultUpdated = githubinstallationDescUpdated.Default.(func() time.Time)
 	// githubinstallation.UpdateDefaultUpdated holds the default value on update for the updated field.

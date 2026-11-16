@@ -51,6 +51,18 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the route answers 404 while the hub.flat_runtime_brokers experiment is off, as in this fixture, and for a Runtime Broker that never reported a conversion plan, so the admitting token cannot reach a target here. The dedicated test enables the experiment, stores a plan from the broker's heartbeat and drives the route with a broker:read token and a token without it",
 		Pin:    "TestConversionPlanGet_ScopedTokens",
 	},
+	{OperationID: "hub.githubapp.read", Method: "GET", Pattern: "/api/v1/github-app/repo-routing"}: {
+		Reason: "the route answers 404 while the hub.github_triggers experiment is off, as in this fixture, so the admitting token cannot reach the handler here. The dedicated test enables the experiment and drives GET, PUT and DELETE with hub- and project-boundary tokens carrying and lacking hub_github_app:read and hub_github_app:update",
+		Pin:    "TestGitHubAppRepoRouting_ScopedTokens",
+	},
+	{OperationID: "hub.githubapp.update", Method: "PUT", Pattern: "/api/v1/github-app/repo-routing/{owner}/{repo}"}: {
+		Reason: "the route answers 404 while the hub.github_triggers experiment is off, as in this fixture, so the admitting token cannot reach the handler here. The dedicated test enables the experiment and drives GET, PUT and DELETE with hub- and project-boundary tokens carrying and lacking hub_github_app:read and hub_github_app:update",
+		Pin:    "TestGitHubAppRepoRouting_ScopedTokens",
+	},
+	{OperationID: "hub.githubapp.update", Method: "DELETE", Pattern: "/api/v1/github-app/repo-routing/{owner}/{repo}"}: {
+		Reason: "the route answers 404 while the hub.github_triggers experiment is off, as in this fixture, so the admitting token cannot reach the handler here. The dedicated test enables the experiment and drives GET, PUT and DELETE with hub- and project-boundary tokens carrying and lacking hub_github_app:read and hub_github_app:update",
+		Pin:    "TestGitHubAppRepoRouting_ScopedTokens",
+	},
 	{OperationID: "project.membership.add", Method: "POST", Pattern: "/api/v1/projects/{id}/members"}: {
 		Reason: "a token acts on membership only through its holder's project role, and the fixture super-admin holds no role in the fixture project; a grant also needs selectors for every permission of the granted role (CanDelegate). The dedicated test drives the route with real tokens on both boundaries and with the holder's session",
 		Pin:    "TestMembershipToken_SelectorAndBoundaryPerRoute",

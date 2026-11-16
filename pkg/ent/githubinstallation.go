@@ -25,6 +25,8 @@ type GithubInstallation struct {
 	AppID int64 `json:"app_id,omitempty"`
 	// Repositories holds the value of the "repositories" field.
 	Repositories string `json:"repositories,omitempty"`
+	// TriggerRouting holds the value of the "trigger_routing" field.
+	TriggerRouting string `json:"trigger_routing,omitempty"`
 	// Status holds the value of the "status" field.
 	Status string `json:"status,omitempty"`
 	// Created holds the value of the "created" field.
@@ -41,7 +43,7 @@ func (*GithubInstallation) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case githubinstallation.FieldID, githubinstallation.FieldAppID:
 			values[i] = new(sql.NullInt64)
-		case githubinstallation.FieldAccountLogin, githubinstallation.FieldAccountType, githubinstallation.FieldRepositories, githubinstallation.FieldStatus:
+		case githubinstallation.FieldAccountLogin, githubinstallation.FieldAccountType, githubinstallation.FieldRepositories, githubinstallation.FieldTriggerRouting, githubinstallation.FieldStatus:
 			values[i] = new(sql.NullString)
 		case githubinstallation.FieldCreated, githubinstallation.FieldUpdated:
 			values[i] = new(sql.NullTime)
@@ -89,6 +91,12 @@ func (_m *GithubInstallation) assignValues(columns []string, values []any) error
 				return fmt.Errorf("unexpected type %T for field repositories", values[i])
 			} else if value.Valid {
 				_m.Repositories = value.String
+			}
+		case githubinstallation.FieldTriggerRouting:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field trigger_routing", values[i])
+			} else if value.Valid {
+				_m.TriggerRouting = value.String
 			}
 		case githubinstallation.FieldStatus:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -155,6 +163,9 @@ func (_m *GithubInstallation) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("repositories=")
 	builder.WriteString(_m.Repositories)
+	builder.WriteString(", ")
+	builder.WriteString("trigger_routing=")
+	builder.WriteString(_m.TriggerRouting)
 	builder.WriteString(", ")
 	builder.WriteString("status=")
 	builder.WriteString(_m.Status)

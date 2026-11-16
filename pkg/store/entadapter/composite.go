@@ -278,6 +278,7 @@ func newTxCompositeStore(tx *ent.Tx) *CompositeStore {
 	txStore.PendingSecretStore.txFencedWrite = &txStore.SecretStore.txFencedWrite
 	txStore.DurableQueueStore.inTx = true
 	txStore.SystemOneInstanceStore.inTx = true
+	txStore.ExternalStore.inTx = true
 	return txStore
 }
 
@@ -571,6 +572,12 @@ func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 	// Choice prompt decisions, answers and the deleted agents' key counters
 	// go with the project (they have no DB-level FK either).
 	if err := deleteProjectDecisions(ctx, c.client, uid, agentIDs); err != nil {
+		return err
+	}
+	// Primary-project trigger routing entries in github_installations.trigger_routing
+	// carry project IDs inside JSON with no DB-level FK; scrub them when the
+	// project is deleted (§8.4).
+	if _, err := c.DeleteGitHubTriggerRoutesByProject(ctx, id); err != nil {
 		return err
 	}
 	return c.ProjectStore.DeleteProject(ctx, id)

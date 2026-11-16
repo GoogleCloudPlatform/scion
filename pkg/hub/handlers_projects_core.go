@@ -3768,6 +3768,7 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	s.invalidateGitHubAssociation(project.ID)
 
 	// If the slug changed, update associated group slugs and filesystem paths.
 	if project.Slug != oldSlug {
@@ -3962,6 +3963,7 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 	// All effects are best-effort (fire_and_forget, log_and_continue).
 	// Authorization is complete — the service has committed the deletion.
 	deletedProject := result.Project
+	s.invalidateGitHubAssociation(id)
 	// Release the held values of the project's deleted pending secrets.
 	s.dropPendingValues(ctx, result.PendingSecretValueRefs)
 	kept := s.executePostDeletionEffects(ctx, id, deletedProject, effectInputs)

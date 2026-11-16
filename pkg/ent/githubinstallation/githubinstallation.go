@@ -21,6 +21,8 @@ const (
 	FieldAppID = "app_id"
 	// FieldRepositories holds the string denoting the repositories field in the database.
 	FieldRepositories = "repositories"
+	// FieldTriggerRouting holds the string denoting the trigger_routing field in the database.
+	FieldTriggerRouting = "trigger_routing"
 	// FieldStatus holds the string denoting the status field in the database.
 	FieldStatus = "status"
 	// FieldCreated holds the string denoting the created field in the database.
@@ -38,6 +40,7 @@ var Columns = []string{
 	FieldAccountType,
 	FieldAppID,
 	FieldRepositories,
+	FieldTriggerRouting,
 	FieldStatus,
 	FieldCreated,
 	FieldUpdated,
@@ -60,6 +63,8 @@ var (
 	DefaultAccountType string
 	// DefaultRepositories holds the default value on creation for the "repositories" field.
 	DefaultRepositories string
+	// DefaultTriggerRouting holds the default value on creation for the "trigger_routing" field.
+	DefaultTriggerRouting string
 	// DefaultStatus holds the default value on creation for the "status" field.
 	DefaultStatus string
 	// DefaultCreated holds the default value on creation for the "created" field.
@@ -96,6 +101,11 @@ func ByAppID(opts ...sql.OrderTermOption) OrderOption {
 // ByRepositories orders the results by the repositories field.
 func ByRepositories(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldRepositories, opts...).ToFunc()
+}
+
+// ByTriggerRouting orders the results by the trigger_routing field.
+func ByTriggerRouting(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldTriggerRouting, opts...).ToFunc()
 }
 
 // ByStatus orders the results by the status field.

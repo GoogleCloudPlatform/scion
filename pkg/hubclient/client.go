@@ -123,6 +123,9 @@ type Client interface {
 	// operations interface (/api/v1/admin/system-one/instances).
 	SystemOne() SystemOneService
 
+	// GitHubApp returns the administrative GitHub App operations interface.
+	GitHubApp() GitHubAppService
+
 	// ProjectInjectedSkills returns an InjectedSkillsService scoped to a project.
 	ProjectInjectedSkills(projectID string) InjectedSkillsService
 
@@ -205,6 +208,7 @@ type client struct {
 	messaging             *messagingService
 	adminSettings         *adminSettingsService
 	systemOne             *systemOneService
+	githubApp             *githubAppService
 	artifacts             *artifactService
 	testIdentities        *testIdentityService
 	testIdentityDelegs    *testIdentityDelegationService
@@ -272,6 +276,7 @@ func New(baseURL string, opts ...Option) (Client, error) {
 	c.messaging = &messagingService{c: c}
 	c.adminSettings = &adminSettingsService{c: c}
 	c.systemOne = &systemOneService{c: c}
+	c.githubApp = &githubAppService{c: c}
 	c.artifacts = &artifactService{c: c}
 	c.testIdentities = &testIdentityService{c: c}
 	c.testIdentityDelegs = &testIdentityDelegationService{c: c}
@@ -420,6 +425,11 @@ func (c *client) AdminSettings() AdminSettingsService {
 // SystemOne returns the administrative System One provider instance operations interface.
 func (c *client) SystemOne() SystemOneService {
 	return c.systemOne
+}
+
+// GitHubApp returns the administrative GitHub App operations interface.
+func (c *client) GitHubApp() GitHubAppService {
+	return c.githubApp
 }
 
 // Messaging returns the cross-project messaging operations interface.

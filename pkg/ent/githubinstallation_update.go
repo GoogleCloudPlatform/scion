@@ -91,6 +91,20 @@ func (_u *GithubInstallationUpdate) SetNillableRepositories(v *string) *GithubIn
 	return _u
 }
 
+// SetTriggerRouting sets the "trigger_routing" field.
+func (_u *GithubInstallationUpdate) SetTriggerRouting(v string) *GithubInstallationUpdate {
+	_u.mutation.SetTriggerRouting(v)
+	return _u
+}
+
+// SetNillableTriggerRouting sets the "trigger_routing" field if the given value is not nil.
+func (_u *GithubInstallationUpdate) SetNillableTriggerRouting(v *string) *GithubInstallationUpdate {
+	if v != nil {
+		_u.SetTriggerRouting(*v)
+	}
+	return _u
+}
+
 // SetStatus sets the "status" field.
 func (_u *GithubInstallationUpdate) SetStatus(v string) *GithubInstallationUpdate {
 	_u.mutation.SetStatus(v)
@@ -189,6 +203,9 @@ func (_u *GithubInstallationUpdate) sqlSave(ctx context.Context) (_node int, err
 	if value, ok := _u.mutation.Repositories(); ok {
 		_spec.SetField(githubinstallation.FieldRepositories, field.TypeString, value)
 	}
+	if value, ok := _u.mutation.TriggerRouting(); ok {
+		_spec.SetField(githubinstallation.FieldTriggerRouting, field.TypeString, value)
+	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(githubinstallation.FieldStatus, field.TypeString, value)
 	}
@@ -274,6 +291,20 @@ func (_u *GithubInstallationUpdateOne) SetRepositories(v string) *GithubInstalla
 func (_u *GithubInstallationUpdateOne) SetNillableRepositories(v *string) *GithubInstallationUpdateOne {
 	if v != nil {
 		_u.SetRepositories(*v)
+	}
+	return _u
+}
+
+// SetTriggerRouting sets the "trigger_routing" field.
+func (_u *GithubInstallationUpdateOne) SetTriggerRouting(v string) *GithubInstallationUpdateOne {
+	_u.mutation.SetTriggerRouting(v)
+	return _u
+}
+
+// SetNillableTriggerRouting sets the "trigger_routing" field if the given value is not nil.
+func (_u *GithubInstallationUpdateOne) SetNillableTriggerRouting(v *string) *GithubInstallationUpdateOne {
+	if v != nil {
+		_u.SetTriggerRouting(*v)
 	}
 	return _u
 }
@@ -405,6 +436,9 @@ func (_u *GithubInstallationUpdateOne) sqlSave(ctx context.Context) (_node *Gith
 	}
 	if value, ok := _u.mutation.Repositories(); ok {
 		_spec.SetField(githubinstallation.FieldRepositories, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.TriggerRouting(); ok {
+		_spec.SetField(githubinstallation.FieldTriggerRouting, field.TypeString, value)
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(githubinstallation.FieldStatus, field.TypeString, value)

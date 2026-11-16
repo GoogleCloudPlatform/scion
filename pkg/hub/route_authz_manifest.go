@@ -320,15 +320,18 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/profiling":             "authenticated", // Profiling switches the web client acts on — any signed-in identity
 
 	// ── GitHub App integration (method-scoped) ────────────────────────
-	"GET /api/v1/github-app":                         "authenticated", // Get GitHub App config
-	"PUT /api/v1/github-app":                         "authenticated", // Update GitHub App config
-	"GET /api/v1/github-app/installations":           "authenticated", // List GitHub App installations
-	"POST /api/v1/github-app/installations":          "authenticated", // Create GitHub App installation
-	"GET /api/v1/github-app/installations/":          "authenticated", // Get GitHub App installation by ID
-	"PUT /api/v1/github-app/installations/":          "authenticated", // Update GitHub App installation by ID
-	"DELETE /api/v1/github-app/installations/":       "authenticated", // Delete GitHub App installation by ID
-	"POST /api/v1/github-app/installations/discover": "authenticated", // GitHub App discovery
-	"POST /api/v1/github-app/sync-permissions":       "authenticated", // GitHub App permission sync
+	"GET /api/v1/github-app":                                "authenticated", // Get GitHub App config
+	"PUT /api/v1/github-app":                                "authenticated", // Update GitHub App config
+	"GET /api/v1/github-app/installations":                  "authenticated", // List GitHub App installations
+	"POST /api/v1/github-app/installations":                 "authenticated", // Create GitHub App installation
+	"GET /api/v1/github-app/installations/":                 "authenticated", // Get GitHub App installation by ID
+	"PUT /api/v1/github-app/installations/":                 "authenticated", // Update GitHub App installation by ID
+	"DELETE /api/v1/github-app/installations/":              "authenticated", // Delete GitHub App installation by ID
+	"POST /api/v1/github-app/installations/discover":        "authenticated", // GitHub App discovery
+	"POST /api/v1/github-app/sync-permissions":              "authenticated", // GitHub App permission sync
+	"GET /api/v1/github-app/repo-routing":                   "authenticated", // List GitHub App trigger repo routing
+	"PUT /api/v1/github-app/repo-routing/{owner}/{repo}":    "authenticated", // Set GitHub App trigger repo primary project
+	"DELETE /api/v1/github-app/repo-routing/{owner}/{repo}": "authenticated", // Delete GitHub App trigger repo primary project
 
 	// ── Hub test identities (test_identity.issue; 404 unless enabled) ──
 	"POST /api/v1/test-identities":                     "authenticated", // Issue a test identity

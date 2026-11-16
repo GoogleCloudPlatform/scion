@@ -10965,6 +10965,7 @@
 | http_route | GET | `/api/v1/github-app` |
 | http_route | GET | `/api/v1/github-app/installations` |
 | http_route | GET | `/api/v1/github-app/installations/{id}` |
+| http_route | GET | `/api/v1/github-app/repo-routing` |
 
 **Principals:** `user`
 
@@ -11001,6 +11002,8 @@
 | http_route | DELETE | `/api/v1/github-app/installations/{id}` |
 | http_route | POST | `/api/v1/github-app/installations/discover` |
 | http_route | POST | `/api/v1/github-app/sync-permissions` |
+| http_route | PUT | `/api/v1/github-app/repo-routing/{owner}/{repo}` |
+| http_route | DELETE | `/api/v1/github-app/repo-routing/{owner}/{repo}` |
 
 **Principals:** `user`
 

@@ -3718,6 +3718,22 @@ type GitHubInstallationStore interface {
 	// that covers the given repository (owner/repo format).
 	// Returns ErrNotFound if no matching active installation exists.
 	GetInstallationForRepository(ctx context.Context, repoFullName string) (*GitHubInstallation, error)
+
+	// SetGitHubInstallationTriggerRoute sets or replaces the primary-project
+	// trigger routing entry for repoFullName (stored under its lowercased key)
+	// on installationID. Returns ErrNotFound if the installation does not exist.
+	SetGitHubInstallationTriggerRoute(ctx context.Context, installationID int64, repoFullName string, route GitHubTriggerRoute) error
+
+	// DeleteGitHubInstallationTriggerRoute removes the primary-project trigger
+	// routing entry for repoFullName (case-insensitive) on installationID.
+	// Returns (true, nil) if an entry was removed, (false, nil) if none was
+	// present, or ErrNotFound if the installation does not exist.
+	DeleteGitHubInstallationTriggerRoute(ctx context.Context, installationID int64, repoFullName string) (bool, error)
+
+	// DeleteGitHubTriggerRoutesByProject removes every trigger_routing entry
+	// whose primary_project_id equals projectID across all installations,
+	// returning the number of removed entries.
+	DeleteGitHubTriggerRoutesByProject(ctx context.Context, projectID string) (int, error)
 }
 
 // GitHubInstallationFilter defines criteria for filtering GitHub App installations.

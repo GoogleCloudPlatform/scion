@@ -678,6 +678,7 @@ func (s *Server) checkProjectsForRemovedRepos(ctx context.Context, installationI
 			slog.Error("Failed to update project after repo removal",
 				"project_id", project.ID, "error", err)
 		} else {
+			s.invalidateGitHubAssociation(project.ID)
 			s.events.PublishProjectUpdated(ctx, &project)
 		}
 	}

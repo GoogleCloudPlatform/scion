@@ -46,6 +46,8 @@ func (GithubInstallation) Fields() []ent.Field {
 		field.Int64("app_id"),
 		field.String("repositories").
 			Default("[]"),
+		field.String("trigger_routing").
+			Default("{}"),
 		field.String("status").
 			Default("active"),
 		field.Time("created").
