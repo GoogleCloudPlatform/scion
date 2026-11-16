@@ -39,7 +39,8 @@ import (
 var _ store.DurableQueueStore = (*CompositeStore)(nil)
 var _ store.DurableQueueStore = (*DurableQueueStore)(nil)
 
-// durableQueueDeleteBatch bounds the IN lists of trim deletes.
+// durableQueueDeleteBatch bounds the IN lists of durable queue queries and
+// mutations (such as trim deletes and nudge updates).
 const durableQueueDeleteBatch = 500
 
 // durableQueueTrimPassLimit caps total trim candidates selected and deleted in
@@ -752,17 +753,22 @@ func (s *DurableQueueStore) NudgeDurableItems(ctx context.Context, kind string, 
 	} else {
 		now = now.UTC()
 	}
-	n, err := s.client.DurableQueueItem.Update().
-		Where(
-			durablequeueitem.KindEQ(kind),
-			durablequeueitem.DedupKeyIn(unique...),
-			queueItemUnleased(now),
-			durablequeueitem.NextAttemptAtGT(now),
-		).
-		SetNextAttemptAt(now).
-		Save(ctx)
-	if err != nil {
-		return 0, markTransient(mapError(err))
+	total := 0
+	for start := 0; start < len(unique); start += durableQueueDeleteBatch {
+		chunk := unique[start:min(len(unique), start+durableQueueDeleteBatch)]
+		n, err := s.client.DurableQueueItem.Update().
+			Where(
+				durablequeueitem.KindEQ(kind),
+				durablequeueitem.DedupKeyIn(chunk...),
+				queueItemUnleased(now),
+				durablequeueitem.NextAttemptAtGT(now),
+			).
+			SetNextAttemptAt(now).
+			Save(ctx)
+		if err != nil {
+			return total, markTransient(mapError(err))
+		}
+		total += n
 	}
-	return n, nil
+	return total, nil
 }

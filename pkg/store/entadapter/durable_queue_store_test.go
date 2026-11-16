@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -30,6 +31,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -957,7 +959,21 @@ func TestDurableQueueNudgeMaxKeysAndConcurrentClaim(t *testing.T) {
 	t0 := time.Date(2026, 11, 16, 13, 0, 0, 0, time.UTC)
 	now := t0.Add(time.Minute)
 
-	// 1. Exact MaxDurableQueueNudgeKeys (1000) succeeds on both SQLite and Postgres.
+	// 1. Exact MaxDurableQueueNudgeKeys (1000) succeeds on both SQLite and Postgres
+	// and executes in durableQueueDeleteBatch-sized UPDATE chunks.
+	var (
+		countMaxUpdates atomic.Bool
+		maxUpdateCalls  atomic.Int32
+	)
+	cs.client.DurableQueueItem.Use(func(next ent.Mutator) ent.Mutator {
+		return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+			if countMaxUpdates.Load() && m.Op().Is(ent.OpUpdate) {
+				maxUpdateCalls.Add(1)
+			}
+			return next.Mutate(ctx, m)
+		})
+	})
+
 	keys := make([]string, store.MaxDurableQueueNudgeKeys)
 	for i := range keys {
 		keys[i] = fmt.Sprintf("max-key-%04d", i)
@@ -970,9 +986,13 @@ func TestDurableQueueNudgeMaxKeysAndConcurrentClaim(t *testing.T) {
 		})
 		require.NoError(t, err)
 	}
+	countMaxUpdates.Store(true)
 	nudged, err := cs.NudgeDurableItems(ctx, "test.max_nudge", keys, now)
+	countMaxUpdates.Store(false)
 	require.NoError(t, err)
 	assert.Equal(t, store.MaxDurableQueueNudgeKeys, nudged)
+	expectedChunks := (store.MaxDurableQueueNudgeKeys + durableQueueDeleteBatch - 1) / durableQueueDeleteBatch
+	assert.Equal(t, int32(expectedChunks), maxUpdateCalls.Load())
 
 	claimedMax, err := cs.ClaimDurableItems(ctx, "test.max_nudge", "claimer", now, now.Add(time.Minute), store.MaxDurableQueueNudgeKeys+10)
 	require.NoError(t, err)
@@ -1153,4 +1173,100 @@ func TestDurableQueueNudgeMaxKeysAndConcurrentClaim(t *testing.T) {
 		}
 	}
 	assert.Equal(t, nLease, loweredInDB)
+}
+
+func TestDurableQueueNudgeChunking(t *testing.T) {
+	ctx := context.Background()
+	cs := newTestCompositeStore(t)
+	t0 := time.Date(2026, 11, 16, 14, 0, 0, 0, time.UTC)
+	t1 := t0.Add(10 * time.Minute)
+	t2 := t0.Add(5 * time.Minute)
+
+	const totalKeys = durableQueueDeleteBatch + 35 // 535 distinct keys -> chunks of 500 and 35
+	var (
+		chunk1Eligible int
+		chunk2Eligible int
+		alreadyDue     int
+	)
+	distinctKeys := make([]string, totalKeys)
+	for i := 0; i < totalKeys; i++ {
+		key := fmt.Sprintf("chunk-key-%04d", i)
+		distinctKeys[i] = key
+		notBefore := t0.Add(2 * time.Hour)
+		if i%25 == 0 {
+			notBefore = t0 // already due before both t2 and t1
+			alreadyDue++
+		} else if i < durableQueueDeleteBatch {
+			chunk1Eligible++
+		} else {
+			chunk2Eligible++
+		}
+		_, err := cs.EnqueueDurableItem(ctx, nil, store.DurableQueueRow{
+			Kind:      "test.chunk_nudge",
+			DedupKey:  key,
+			Payload:   []byte(`{}`),
+			CreatedAt: t0,
+			NotBefore: notBefore,
+		})
+		require.NoError(t, err)
+	}
+	totalEligible := chunk1Eligible + chunk2Eligible
+
+	// Build an unsorted input slice with duplicates and an unknown key (within MaxDurableQueueNudgeKeys).
+	inputKeys := make([]string, 0, totalKeys+20)
+	for i := totalKeys - 1; i >= 0; i-- {
+		inputKeys = append(inputKeys, distinctKeys[i])
+	}
+	inputKeys = append(inputKeys, distinctKeys[:15]...)
+	inputKeys = append(inputKeys, "z-chunk-key-missing") // sorts after chunk-key-*, into chunk 2
+	require.LessOrEqual(t, len(inputKeys), store.MaxDurableQueueNudgeKeys)
+
+	var (
+		trackUpdates     bool
+		updateCalls      int
+		failOnUpdateCall int
+	)
+	injectedErr := &sqliteFakeErr{code: sqliteBusy}
+	cs.client.DurableQueueItem.Use(func(next ent.Mutator) ent.Mutator {
+		return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+			if trackUpdates && m.Op().Is(ent.OpUpdate) {
+				updateCalls++
+				if failOnUpdateCall > 0 && updateCalls == failOnUpdateCall {
+					return nil, injectedErr
+				}
+			}
+			return next.Mutate(ctx, m)
+		})
+	})
+
+	// 1. Multi-chunk pass nudges all eligible rows across both chunks and sums the count.
+	trackUpdates = true
+	updateCalls = 0
+	nudged, err := cs.NudgeDurableItems(ctx, "test.chunk_nudge", inputKeys, t1)
+	require.NoError(t, err)
+	assert.Equal(t, 2, updateCalls, "536 unique keys must execute in 2 UPDATE batches")
+	assert.Equal(t, totalEligible, nudged)
+
+	// 2. Mid-loop error on the second chunk returns chunk 1's running total and maps the error as transient.
+	updateCalls = 0
+	failOnUpdateCall = 2
+	partial, err := cs.NudgeDurableItems(ctx, "test.chunk_nudge", inputKeys, t2)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, injectedErr)
+	assert.ErrorIs(t, err, store.ErrTransient, "chunk update busy failure should wrap store.ErrTransient")
+	assert.Equal(t, 2, updateCalls)
+	assert.Equal(t, chunk1Eligible, partial, "partial count must reflect completed chunks before the error")
+
+	// 3. Retrying at t2 after clearing the fault nudges only the remaining second-chunk rows.
+	updateCalls = 0
+	failOnUpdateCall = 0
+	rem, err := cs.NudgeDurableItems(ctx, "test.chunk_nudge", inputKeys, t2)
+	trackUpdates = false
+	require.NoError(t, err)
+	assert.Equal(t, 2, updateCalls)
+	assert.Equal(t, chunk2Eligible, rem)
+
+	claimed, err := cs.ClaimDurableItems(ctx, "test.chunk_nudge", "claimer", t2, t2.Add(time.Minute), totalKeys+10)
+	require.NoError(t, err)
+	assert.Len(t, claimed, alreadyDue+totalEligible)
 }
