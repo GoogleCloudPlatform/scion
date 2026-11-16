@@ -837,32 +837,26 @@ func enforceAttributesCeiling(attrs map[string]string, maxBytes int) error {
 		"stale": true, "payload_truncated": true, "mention_detection": true,
 		"mention": true, "command": true,
 	}
+	// Last-resort fallback: delete the largest unprotected key rather than
+	// truncating identifier-like values (refs, SHAs, labels, paths, URLs,
+	// timestamps) into plausible-looking wrong prefixes.
 	for len(encoded) > maxBytes {
 		longestKey := ""
-		longestLen := 0
+		longestLen := -1
 		for k, v := range attrs {
 			if protected[k] {
 				continue
 			}
-			if len(v) > longestLen {
-				longestLen = len(v)
+			weight := len(k) + len(v)
+			if weight > longestLen || (weight == longestLen && k > longestKey) {
+				longestLen = weight
 				longestKey = k
 			}
 		}
-		if longestKey == "" || longestLen == 0 {
+		if longestKey == "" {
 			break
 		}
-		cur := attrs[longestKey]
-		excess := len(encoded) - maxBytes
-		target := len(cur) - excess
-		if target < 0 {
-			target = 0
-		}
-		next := truncateUTF8(cur, target)
-		if len(next) == len(cur) && target > 0 {
-			next = truncateUTF8(cur, target-1)
-		}
-		attrs[longestKey] = next
+		delete(attrs, longestKey)
 		encoded, err = encodeCompactJSON(attrs)
 		if err != nil {
 			return err

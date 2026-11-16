@@ -610,3 +610,43 @@ func TestNormalize_DiffHunkKeepsTailAfterNewline(t *testing.T) {
 		assert.True(t, strings.HasSuffix(got, "END_MARKER\n"))
 	})
 }
+
+func TestNormalize_LastResortAttributeCeilingDeletesInsteadOfCorrupting(t *testing.T) {
+	// Pathological payload with empty prose fields but huge identifier attributes
+	// (6 KiB head_ref + 3 KiB label > 8 KiB). Last-resort shrinking must delete the
+	// oversize unprotected key rather than leaving a silently truncated ref/label prefix.
+	hugeHeadRef := "feat/" + strings.Repeat("a", 6000)
+	bigLabel := "lbl-" + strings.Repeat("b", 3000)
+
+	raw, err := json.Marshal(map[string]any{
+		"action":       "labeled",
+		"installation": map[string]any{"id": 10},
+		"repository": map[string]any{
+			"id": 1, "name": "r", "full_name": "o/r", "private": false,
+			"owner": map[string]any{"login": "o", "id": 1, "type": "User"},
+		},
+		"sender": map[string]any{"login": "u", "id": 2, "type": "User"},
+		"label":  map[string]any{"name": bigLabel},
+		"pull_request": map[string]any{
+			"number": 7, "state": "open", "title": "", "body": "",
+			"html_url": "https://github.com/o/r/pull/7", "author_association": "MEMBER",
+			"draft": false, "merged": false,
+			"created_at": "2026-05-01T12:00:00Z", "updated_at": "2026-05-01T12:00:00Z",
+			"user": map[string]any{"login": "u", "id": 2, "type": "User"},
+			"base": map[string]any{"ref": "main", "sha": "111", "repo": map[string]any{"id": 1, "full_name": "o/r", "name": "r", "private": false}},
+			"head": map[string]any{"ref": hugeHeadRef, "sha": "222", "repo": map[string]any{"id": 1, "full_name": "o/r", "name": "r", "private": false}},
+		},
+	})
+	require.NoError(t, err)
+
+	res, err := Normalize(EventPullRequest, "d-ceil-del", raw, Options{AppSlug: "scion"})
+	require.NoError(t, err)
+
+	_, hasHeadRef := res.Attributes["head_ref"]
+	assert.False(t, hasHeadRef, "oversize identifier key must be deleted rather than truncated to a wrong ref prefix")
+	assert.Equal(t, bigLabel, res.Attributes["label"], "remaining identifier key that fits must stay whole")
+
+	attrBytes, err := encodeCompactJSON(res.Attributes)
+	require.NoError(t, err)
+	assert.LessOrEqual(t, len(attrBytes), DefaultMaxAttributesBytes)
+}
