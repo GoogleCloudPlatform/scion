@@ -238,3 +238,41 @@ func TestSystemOneStartupCheckedFileBlock(t *testing.T) {
 		assert.Equal(t, "server.hub.system_one.max_eval_time", fieldErr.field)
 	}
 }
+
+func TestIsSystemOneReservedSecretKey_SanitizedForms(t *testing.T) {
+	reserved := []string{
+		"systemone.instance.22222222-2222-2222-2222-222222222222",
+		"systemone-instance-22222222-2222-2222-2222-222222222222",
+		"SystemOne_Instance_22222222-2222-2222-2222-222222222222",
+		"  SYSTEMONE/INSTANCE/abc-123  ",
+		"systemone:instance:abc-123",
+		"systemone.instance.",
+		"systemone-instance-",
+	}
+	for _, k := range reserved {
+		assert.True(t, isSystemOneReservedSecretKey(k), "expected reserved for %q", k)
+	}
+
+	allowed := []string{
+		"",
+		"OPENAI_API_KEY",
+		"SYSTEMONE_API_KEY",
+		"systemone",
+		"systemone.instances.other",
+		"my_systemone_instance_key",
+	}
+	for _, k := range allowed {
+		assert.False(t, isSystemOneReservedSecretKey(k), "expected non-reserved for %q", k)
+	}
+
+	filtered := withoutSystemOneReservedSecrets([]secret.SecretMeta{
+		{Name: "OPENAI_API_KEY"},
+		{Name: "systemone.instance.1111"},
+		{Name: "systemone-instance-2222"},
+		{Name: "SystemOne_Instance_3333"},
+		{Name: "SYSTEMONE_API_KEY"},
+	})
+	require.Len(t, filtered, 2)
+	assert.Equal(t, "OPENAI_API_KEY", filtered[0].Name)
+	assert.Equal(t, "SYSTEMONE_API_KEY", filtered[1].Name)
+}
