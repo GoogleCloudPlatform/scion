@@ -3145,6 +3145,10 @@ type NotificationStore interface {
 	// for a given subscription. Returns ("", nil) if no notifications exist.
 	GetLastNotificationStatus(ctx context.Context, subscriptionID string) (string, error)
 
+	// GetLastNotification returns the most recent notification for a given
+	// subscription, or (nil, nil) if no notifications exist.
+	GetLastNotification(ctx context.Context, subscriptionID string) (*Notification, error)
+
 	// ClaimNotificationForDispatch atomically transitions a notification from
 	// dispatched=false to dispatched=true, returning claimed=true if this caller
 	// won the CAS race. This is the retry-path concurrency primitive: exactly

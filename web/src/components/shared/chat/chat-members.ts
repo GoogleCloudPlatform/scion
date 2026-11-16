@@ -31,7 +31,12 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import type { PropertyValues, TemplateResult } from 'lit';
-import { ACTIVITY_DISPLAY, stateLabel } from '../../../shared/agent-state-display.js';
+import {
+  ACTIVITY_DISPLAY,
+  stateLabel,
+  suspendedActivityLabel,
+} from '../../../shared/agent-state-display.js';
+import { isTerminalActivity } from '../../../shared/types.js';
 import { apiFetch } from '../../../client/api.js';
 import { navigateTo } from '../../../client/main.js';
 import { openTerminal, terminalHref, agentGraphHref } from '../../../client/open-terminal.js';
@@ -64,6 +69,7 @@ const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const TERMINAL_STATUSES = new Set([
   'blocked',
   'completed',
+  'idle',
   'stalled',
   'error',
   'waiting_for_input',
@@ -711,7 +717,10 @@ export class ScionChatMembers extends LitElement {
       const prevState = this._prevAgentStates.get(a.id);
 
       if (prevState !== undefined && prevState !== currentState) {
-        if (TERMINAL_STATUSES.has(this.resolveAgentStatus(a))) {
+        const lowerAct = (a.activity || '').toLowerCase();
+        const settledStatus =
+          a.phase === 'running' && lowerAct === 'idle' ? 'idle' : this.resolveAgentStatus(a);
+        if (TERMINAL_STATUSES.has(settledStatus)) {
           this.stopWobble(a.id);
         } else {
           this.startWobble(a.id);
@@ -1124,9 +1133,14 @@ export class ScionChatMembers extends LitElement {
     // detail message is the same text the agent detail page shows, and
     // "Updated" is the last state change — matching the agent list's column,
     // not the `lastSeen` heartbeat.
+    const lowerActivity = a.activity ? a.activity.toLowerCase() : undefined;
+    const showActivity =
+      lowerActivity &&
+      (a.phase === 'running' || (a.phase === 'stopped' && isTerminalActivity(lowerActivity)));
     const detailText =
       a.detailMessage ||
-      (a.activity ? stateLabel(a.activity.toLowerCase()) : '') ||
+      (showActivity ? stateLabel(lowerActivity) : '') ||
+      suspendedActivityLabel({ phase: a.phase, activity: lowerActivity }) ||
       a.phase ||
       'unknown';
     const updated = a.lastActivityEvent ? this.formatRelativeTime(a.lastActivityEvent) : '';

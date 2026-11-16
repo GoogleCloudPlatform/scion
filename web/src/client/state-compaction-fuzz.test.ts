@@ -103,6 +103,7 @@ function makeGenerators(rand: () => number) {
     'thinking',
     'waiting_for_input',
     'completed',
+    'idle',
     'limits_exceeded',
     null,
     undefined,
@@ -131,12 +132,13 @@ function makeGenerators(rand: () => number) {
     set(o, '_capabilities', pick(CAPS));
     set(o, 'message', pick(MESSAGES));
     set(o, 'detail', pick(DETAILS));
-    if (rand() < 0.3) o.phase = pick(['running', 'error', 'stopped']);
+    if (rand() < 0.3) o.phase = pick(['running', 'suspended', 'starting', 'error', 'stopped']);
     return o;
   }
 
   function genRest(id: string): Agent {
     const o: Record<string, unknown> = { id, name: id };
+    if (rand() < 0.5) o.phase = pick(['running', 'suspended', 'stopped']);
     const a = pick(ACTIVITIES);
     if (a !== MISSING && a !== null && a !== undefined) o.activity = a;
     const c = pick([MISSING, { r: 1 }]);

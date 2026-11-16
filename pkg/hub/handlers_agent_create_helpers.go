@@ -1554,6 +1554,8 @@ func (s *Server) handleExistingAgent(
 			// The row read starting during the dispatch (beginStartDispatch),
 			// so clear the rest of the prior generation's remnants here, as
 			// ClearTerminalRemnants does for a status write.
+			existingAgent.Activity = ""
+			existingAgent.ToolName = ""
 			existingAgent.Message = ""
 			existingAgent.StalledFromActivity = ""
 			if err := s.store.UpdateAgent(ctx, existingAgent); err != nil {
@@ -1714,6 +1716,8 @@ func (s *Server) handleExistingAgent(
 				// (beginStartDispatch), so clear the rest of the prior
 				// generation's remnants here, as ClearTerminalRemnants does
 				// for a status write.
+				existingAgent.Activity = ""
+				existingAgent.ToolName = ""
 				existingAgent.Message = ""
 				existingAgent.StalledFromActivity = ""
 				if err := s.updateAgentAfterDispatch(ctx, existingAgent); err != nil {

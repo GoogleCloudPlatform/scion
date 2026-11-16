@@ -750,9 +750,7 @@ func (s *Server) stopHeldAgent(ctx context.Context, agentID string, attempt int)
 	if !recorded {
 		return nil
 	}
-	agent.Phase = newPhase
-	agent.ContainerStatus = "stopped"
-	agent.Activity = ""
+	s.syncAgentAfterStopRecord(ctx, agent, newPhase, "")
 	s.releaseBrokerQuota(ctx, agent)
 	s.releaseProjectQuota(ctx, agent)
 	if s.events != nil {

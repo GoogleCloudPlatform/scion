@@ -161,6 +161,37 @@ describe('scion-chat-members agent tooltip', () => {
     ]);
     expect(tooltipContent(el)).toBe('Running tests');
   });
+
+  it('shows suspended · <activity> for retained suspend activities and plain phase otherwise', async () => {
+    const suspDone = await mount([agent({ phase: 'suspended', activity: 'completed' })]);
+    expect(tooltipContent(suspDone)).toBe('suspended · completed');
+    expect(badgeStatus(suspDone)).toBe('suspended');
+    document.body.innerHTML = '';
+
+    const suspIdle = await mount([agent({ phase: 'suspended', activity: 'idle' })]);
+    expect(tooltipContent(suspIdle)).toBe('suspended · idle');
+    document.body.innerHTML = '';
+
+    const suspHarnessErr = await mount([agent({ phase: 'suspended', activity: 'harness_error' })]);
+    expect(tooltipContent(suspHarnessErr)).toBe('suspended · harness error');
+    expect(badgeStatus(suspHarnessErr)).toBe('suspended');
+    document.body.innerHTML = '';
+
+    const suspStaleBlocked = await mount([agent({ phase: 'suspended', activity: 'blocked' })]);
+    expect(tooltipContent(suspStaleBlocked)).toBe('suspended');
+    document.body.innerHTML = '';
+
+    const stoppedStaleWork = await mount([agent({ phase: 'stopped', activity: 'working' })]);
+    expect(tooltipContent(stoppedStaleWork)).toBe('stopped');
+    document.body.innerHTML = '';
+
+    const stoppedCrashed = await mount([agent({ phase: 'stopped', activity: 'crashed' as never })]);
+    expect(tooltipContent(stoppedCrashed)).toBe('crashed');
+    document.body.innerHTML = '';
+
+    const stoppedLimits = await mount([agent({ phase: 'stopped', activity: 'limits_exceeded' })]);
+    expect(tooltipContent(stoppedLimits)).toBe('limits exceeded');
+  });
 });
 
 describe('scion-chat-members thread default', () => {
@@ -315,6 +346,12 @@ describe('scion-chat-members wobble', () => {
     await el.updateComplete;
 
     expect(isWobbling(el)).toBe(true);
+
+    // Settling into idle stops the wobble just like completed/blocked.
+    el.agents = [agent({ activity: 'idle' })];
+    await el.updateComplete;
+    await el.updateComplete;
+    expect(isWobbling(el)).toBe(false);
   });
 
   it('re-renders without the wobble class once the 3s timer elapses', async () => {

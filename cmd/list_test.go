@@ -507,6 +507,12 @@ func TestSuspendedPhaseLabel(t *testing.T) {
 	assert.Equal(t, "suspended (idle)", suspendedPhaseLabel("suspended", "idle"))
 	assert.Equal(t, "suspended (stalled)", suspendedPhaseLabel("suspended", "stalled"))
 	assert.Equal(t, "suspended (user)", suspendedPhaseLabel("suspended", "user"))
+	assert.Equal(t, "suspended · completed (idle)", suspendedPhaseLabel("suspended · completed", "idle"))
+	assert.Equal(t, "suspended · idle (idle)", suspendedPhaseLabel("suspended · idle", "idle"))
+	assert.Equal(t, "suspended · completed (stalled)", suspendedPhaseLabel("suspended · completed", "stalled"))
+	assert.Equal(t, "suspended · harness error (user)", suspendedPhaseLabel("suspended · harness error", "user"))
+	assert.Equal(t, "suspended · completed", suspendedPhaseLabel("suspended · completed", ""), "retained activity with no reason")
+	assert.Equal(t, "suspended · completed", suspendedPhaseLabel("suspended · completed", "evil\x1b[2J"), "retained activity ignores unknown reason")
 	assert.Equal(t, "suspended", suspendedPhaseLabel("suspended", ""), "no reason recorded")
 	assert.Equal(t, "suspended", suspendedPhaseLabel("suspended", "evil\x1b[2J"), "only known reasons are shown")
 	assert.Equal(t, "running", suspendedPhaseLabel("running", "idle"), "only suspended shows its reason")
@@ -2625,4 +2631,187 @@ func TestHubclientAgent_DecodesStalledFromActivity(t *testing.T) {
 	var a hubclient.Agent
 	require.NoError(t, json.Unmarshal([]byte(`{"slug":"a","activity":"stalled","stalledFromActivity":"working"}`), &a))
 	assert.Equal(t, "working", a.StalledFromActivity)
+}
+
+func TestDisplayAgents_SuspendedRetainedActivity(t *testing.T) {
+	oldFormat, oldPhase, oldAct, oldTmpl, oldRunning := outputFormat, filterPhase, filterActivity, filterTemplate, listRunning
+	defer func() {
+		outputFormat, filterPhase, filterActivity, filterTemplate, listRunning = oldFormat, oldPhase, oldAct, oldTmpl, oldRunning
+	}()
+	outputFormat, filterPhase, filterActivity, filterTemplate = "", "", "", ""
+	listRunning = false
+
+	now := time.Now().Add(-5 * time.Minute)
+	agents := []api.AgentInfo{
+		{
+			ID:                "id-1",
+			Name:              "susp-completed",
+			Template:          "developer",
+			Runtime:           "docker",
+			Project:           "proj",
+			RuntimeBrokerName: "broker",
+			Phase:             "suspended",
+			Activity:          "completed",
+			ContainerStatus:   "stopped",
+			LastActivityEvent: now,
+		},
+		{
+			ID:                "id-2",
+			Name:              "susp-idle",
+			Template:          "developer",
+			Runtime:           "docker",
+			Project:           "proj",
+			RuntimeBrokerName: "broker",
+			Phase:             "suspended",
+			Activity:          "idle",
+			ContainerStatus:   "stopped",
+			LastActivityEvent: now,
+		},
+		{
+			ID:                "id-2b",
+			Name:              "susp-harness-error",
+			Template:          "developer",
+			Runtime:           "docker",
+			Project:           "proj",
+			RuntimeBrokerName: "broker",
+			Phase:             "suspended",
+			Activity:          "harness_error",
+			Detail:            &api.AgentDetail{Message: "model API: APIError (status 400)"},
+			ContainerStatus:   "stopped",
+			LastActivityEvent: now,
+		},
+		{
+			ID:                "id-3",
+			Name:              "susp-plain",
+			Template:          "developer",
+			Runtime:           "docker",
+			Project:           "proj",
+			RuntimeBrokerName: "broker",
+			Phase:             "suspended",
+			Activity:          "",
+			ContainerStatus:   "stopped",
+			LastActivityEvent: now,
+		},
+		{
+			ID:                "id-4",
+			Name:              "susp-stale-blocked",
+			Template:          "developer",
+			Runtime:           "docker",
+			Project:           "proj",
+			RuntimeBrokerName: "broker",
+			Phase:             "suspended",
+			Activity:          "blocked",
+			SuspendReason:     "user",
+			ContainerStatus:   "stopped",
+			LastActivityEvent: now,
+		},
+		{
+			ID:                "id-5",
+			Name:              "susp-completed-idle-reason",
+			Template:          "developer",
+			Runtime:           "docker",
+			Project:           "proj",
+			RuntimeBrokerName: "broker",
+			Phase:             "suspended",
+			Activity:          "completed",
+			SuspendReason:     "idle",
+			ContainerStatus:   "stopped",
+			LastActivityEvent: now,
+		},
+		{
+			ID:                "id-6",
+			Name:              "susp-idle-stalled-reason",
+			Template:          "developer",
+			Runtime:           "docker",
+			Project:           "proj",
+			RuntimeBrokerName: "broker",
+			Phase:             "suspended",
+			Activity:          "idle",
+			SuspendReason:     "stalled",
+			ContainerStatus:   "stopped",
+			LastActivityEvent: now,
+		},
+	}
+
+	var err error
+	out := captureStdout(t, func() { err = displayAgents(agents, false) })
+	require.NoError(t, err)
+
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	require.Len(t, lines, 8)
+	assert.Contains(t, lines[1], "suspended · completed")
+	assert.Contains(t, lines[2], "suspended · idle")
+	assert.Contains(t, lines[3], "suspended · harness error")
+	assert.Contains(t, lines[3], "harness error: model API: APIError (status 400)")
+	assert.Contains(t, lines[4], "suspended")
+	assert.NotContains(t, lines[4], "suspended ·")
+	assert.Contains(t, lines[5], "suspended (user)")
+	assert.NotContains(t, lines[5], "suspended ·")
+	assert.Contains(t, lines[6], "suspended · completed (idle)")
+	assert.Contains(t, lines[7], "suspended · idle (stalled)")
+	assert.NotContains(t, lines[5], "waiting on others", "non-retained activity on suspended row must not surface in table")
+
+	outputFormat = "json"
+	jsonOut := captureStdout(t, func() { err = displayAgents(agents[:2], false) })
+	require.NoError(t, err)
+	var decoded []api.AgentInfo
+	require.NoError(t, json.Unmarshal([]byte(jsonOut), &decoded))
+	require.Len(t, decoded, 2)
+	assert.Equal(t, "suspended", decoded[0].Phase)
+	assert.Equal(t, "completed", decoded[0].Activity)
+	assert.Equal(t, "suspended", decoded[1].Phase)
+	assert.Equal(t, "idle", decoded[1].Activity)
+}
+
+func TestFilterAgentsByFlags_ActivityExcludesSuspendedUnlessPhaseGiven(t *testing.T) {
+	oldPhase, oldAct, oldTmpl := filterPhase, filterActivity, filterTemplate
+	defer func() {
+		filterPhase, filterActivity, filterTemplate = oldPhase, oldAct, oldTmpl
+	}()
+
+	agents := []api.AgentInfo{
+		{Name: "run-done", Phase: "running", Activity: "completed"},
+		{Name: "susp-done", Phase: "suspended", Activity: "completed"},
+		{Name: "run-idle", Phase: "running", Activity: "idle"},
+		{Name: "susp-idle", Phase: "suspended", Activity: "idle"},
+		{Name: "stop-crash", Phase: "stopped", Activity: "crashed"},
+	}
+
+	filterPhase, filterActivity, filterTemplate = "", "completed", ""
+	got := filterAgentsByFlags(agents)
+	require.Len(t, got, 1)
+	assert.Equal(t, "run-done", got[0].Name)
+
+	filterPhase, filterActivity, filterTemplate = "", "idle", ""
+	got = filterAgentsByFlags(agents)
+	require.Len(t, got, 1)
+	assert.Equal(t, "run-idle", got[0].Name)
+
+	filterPhase, filterActivity, filterTemplate = "suspended", "completed", ""
+	got = filterAgentsByFlags(agents)
+	require.Len(t, got, 1)
+	assert.Equal(t, "susp-done", got[0].Name)
+
+	filterPhase, filterActivity, filterTemplate = "", "crashed", ""
+	got = filterAgentsByFlags(agents)
+	require.Len(t, got, 1)
+	assert.Equal(t, "stop-crash", got[0].Name)
+}
+
+func TestHubStatusToPhaseActivity_SuspendedAndRetainedActivities(t *testing.T) {
+	phase, act := hubStatusToPhaseActivity("suspended")
+	assert.Equal(t, "suspended", phase)
+	assert.Empty(t, act)
+
+	phase, act = hubStatusToPhaseActivity("completed")
+	assert.Equal(t, "running", phase)
+	assert.Equal(t, "completed", act)
+
+	phase, act = hubStatusToPhaseActivity("idle")
+	assert.Equal(t, "running", phase)
+	assert.Equal(t, "idle", act)
+
+	phase, act = hubAgentPhaseActivity("suspended", "completed", "suspended")
+	assert.Equal(t, "suspended", phase)
+	assert.Equal(t, "completed", act)
 }

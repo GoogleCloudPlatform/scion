@@ -585,9 +585,10 @@ func (s *Server) harnessSupportsResume(ctx context.Context, agent *store.Agent) 
 // handler (the auto-suspend scheduler runs its own inline copy of these
 // steps): it validates harness resume support, syncs the workspace on
 // stop, dispatches the container stop to the runtime broker, persists
-// phase=suspended (container_status=stopped, activity cleared), and
-// publishes the resulting status event. It returns *errHarnessNoResume
-// when the harness cannot resume so callers can decline to suspend.
+// phase=suspended (container_status=stopped, retained activity preserved
+// or non-retained activity cleared), and publishes the resulting status
+// event. It returns *errHarnessNoResume when the harness cannot resume so
+// callers can decline to suspend.
 // The run intent is set to stopped before the dispatch. The handler passes
 // a ctx detached from the client (detachStopFromClient).
 func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
@@ -657,10 +658,7 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	// status write keeps its own grants (ptone/scion#6403).
 	s.revokeSuspendedRunDelegationGrantsBestEffort(ctx, agent.ID, stopRunID)
 
-	agent.Phase = newPhase
-	agent.ContainerStatus = "stopped"
-	agent.Activity = ""
-	agent.SuspendReason = string(state.SuspendReasonUser)
+	s.syncAgentAfterStopRecord(ctx, agent, newPhase, string(state.SuspendReasonUser))
 	// A suspended agent has no running container: release its
 	// max_agents_per_broker reservation so it stops consuming broker
 	// capacity until it is resumed (ptone/scion#1963), and its

@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"time"
 
 	"entgo.io/ent/dialect"
@@ -1838,7 +1839,7 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 
 	if su.Phase != "" {
 		upd.SetPhase(su.Phase)
-		if su.Phase == string(state.PhaseSuspended) && su.SuspendReason != "" {
+		if strings.EqualFold(su.Phase, string(state.PhaseSuspended)) && su.SuspendReason != "" {
 			upd.SetSuspendReason(su.SuspendReason)
 		}
 	}
@@ -1855,10 +1856,24 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 			upd.SetActivity(su.Activity)
 		}
 		// A fresh activity report clears any stalled marker and refreshes the
-		// activity timestamp; tool_name tracks the new activity verbatim.
+		// activity timestamp; tool_name tracks the new activity verbatim. A
+		// failed-start rollback restoring priorActivity keeps LastActivityEvent.
 		upd.SetStalledFromActivity("")
-		upd.SetLastActivityEvent(now)
+		if !su.Restore {
+			upd.SetLastActivityEvent(now)
+		}
 		upd.SetToolName(su.ToolName)
+	} else if strings.EqualFold(su.Phase, string(state.PhaseSuspended)) {
+		// Transitioning to suspended: preserve retained activities (completed,
+		// idle, harness_error; computed from stalled_from_activity when stalled)
+		// and clear any other activity, stall marker, and tool name.
+		retained := string(state.RetainedSuspendActivity(
+			state.Activity(current.Activity),
+			state.Activity(current.StalledFromActivity),
+		))
+		upd.SetActivity(retained)
+		upd.SetStalledFromActivity("")
+		upd.SetToolName("")
 	} else if store.IsTerminalPhase(su.Phase) {
 		// Transitioning to a terminal phase without an explicit activity: clear
 		// any leftover live activity (e.g. a lingering "stalled" set by the
@@ -1885,7 +1900,6 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		upd.SetLastActivityEvent(now)
 		unstalled = true
 	}
-
 	// A halt clears the activity outright, a terminal one included: the
 	// exit reason says how the run ended.
 	if halting {
@@ -1911,6 +1925,19 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 			upd.ClearExitCode()
 		}
 		upd.SetExitReason("")
+	}
+	// Leaving suspended for starting or running clears any retained pre-suspend
+	// activity before the new container runs, without disturbing exit fields
+	// (pinned by TestUpdateAgentStatus_ExitFieldsKeptOutsidePreRunningToRunning)
+	// or a new container's activity posted during dispatch before
+	// ClearTerminalRemnants runs.
+	if current.Phase == string(state.PhaseSuspended) &&
+		(su.Phase == string(state.PhaseStarting) || su.Phase == string(state.PhaseRunning)) {
+		if !activityProvided {
+			upd.SetActivity("")
+			upd.SetToolName("")
+		}
+		upd.SetStalledFromActivity("")
 	}
 
 	// ClearExit covers the case the phase-transition clear above does not:
@@ -3015,7 +3042,7 @@ func (s *AgentStore) MarkStalledAgents(ctx context.Context, activityThreshold, h
 // isTerminalActivity reports whether the activity is a terminal/sticky state
 // that a non-terminal status report must not overwrite on a stopped agent.
 func isTerminalActivity(activity string) bool {
-	return activity == "crashed" || activity == "limits_exceeded"
+	return strings.EqualFold(activity, "crashed") || strings.EqualFold(activity, "limits_exceeded")
 }
 
 // marshalAppliedConfig serializes the applied-config document to JSON text,

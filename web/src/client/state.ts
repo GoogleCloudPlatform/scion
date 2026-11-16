@@ -31,7 +31,6 @@ import { shouldApplyAcceptedDeletion } from '../shared/agent-deletion.js';
 import { resetReadinessMarks } from './readiness-marks.js';
 import type {
   Agent,
-  AgentActivity,
   AgentDetail,
   DeletionInfo,
   ExposedPort,
@@ -39,11 +38,22 @@ import type {
   RuntimeBroker,
 } from '../shared/types.js';
 
-/** Activities that should not be overwritten by working/empty transitions */
+/** Activities that should not be overwritten by working/empty transitions while running */
 // harness_error is not in this set: the Hub already keeps it against
 // end-of-turn working, so a working delta for it is the Hub's real clear
 // (for example OpenCode's follow-up model step) and must apply.
 const STICKY_ACTIVITIES = new Set(['waiting_for_input', 'completed', 'limits_exceeded']);
+
+/**
+ * Sticky-activity suppression applies only while both the prior state and the
+ * incoming state stay in the running phase (or an untyped test fixture without
+ * a phase). Leaving `running` (e.g. `running` -> `suspended` with `activity: ''`)
+ * or resuming from `suspended` (`suspended` -> `starting`/`running` with
+ * `activity: ''` or `'working'`) must clear or replace the prior activity.
+ */
+function phaseAllowsSticky(phase: string | undefined): boolean {
+  return phase === undefined || phase === 'running';
+}
 
 /**
  * Two agent objects are shallow-equal iff every field matches by reference,
@@ -205,12 +215,19 @@ function mergeAgentDelta(
 ): Agent {
   let delta: Partial<Agent> = { ...rawDelta };
 
-  // Preserve sticky activities: if the incoming activity is working/empty
-  // but the existing activity is sticky, keep the existing value.
+  // Preserve sticky activities while staying in the running phase: if the
+  // incoming activity is working/empty and both base and target phases allow
+  // stickiness, keep the existing value. Leaving or entering a non-running
+  // phase (such as suspend or resume) lets '' / 'working' clear it.
   const incomingActivity = delta.activity as string | undefined;
+  const effectiveNextPhase = Object.prototype.hasOwnProperty.call(delta, 'phase')
+    ? delta.phase
+    : base.phase;
   if (
     incomingActivity !== undefined &&
     (incomingActivity === 'working' || incomingActivity === '') &&
+    phaseAllowsSticky(base.phase) &&
+    phaseAllowsSticky(effectiveNextPhase) &&
     base.activity &&
     STICKY_ACTIVITIES.has(base.activity)
   ) {
@@ -276,15 +293,34 @@ function mergeAgentDelta(
  * `value` itself (not `base.activity`) as the thing a `working`/`''` delta
  * might be suppressed by.
  */
+interface StickyStateEntry {
+  phaseAllows: boolean;
+  activity: { fromBase: true } | { fromBase: false; value: unknown };
+}
+
+type StickyStateTable = [StickyStateEntry, StickyStateEntry, StickyStateEntry, StickyStateEntry];
+
 interface CompactedDelta {
   fields: Partial<Agent>;
-  activity:
-    | { locked: false; pending: string | undefined }
-    | { locked: true; value: string | undefined };
+  /**
+   * 4-entry transition table indexed by `(phaseAllowsSticky(base.phase) ? 2 : 0) |
+   * (baseActSticky ? 1 : 0)`, making `CompactedDelta` an exact monoid for
+   * phase-aware sticky-activity suppression under both forward folding and
+   * associative composition (`composeCompactedDeltas`).
+   */
+  table: StickyStateTable;
 }
 
 function emptyCompactedDelta(): CompactedDelta {
-  return { fields: {}, activity: { locked: false, pending: undefined } };
+  return {
+    fields: {},
+    table: [
+      { phaseAllows: false, activity: { fromBase: true } },
+      { phaseAllows: false, activity: { fromBase: true } },
+      { phaseAllows: true, activity: { fromBase: true } },
+      { phaseAllows: true, activity: { fromBase: true } },
+    ],
+  };
 }
 
 /**
@@ -302,31 +338,33 @@ function inheritFalsyCapabilities(fields: Partial<Agent>, prevFields: Partial<Ag
 /** Fold one more raw delta, in arrival order, into a compacted accumulator (§7, §8). */
 function foldCompactedDelta(acc: CompactedDelta, rawDelta: Partial<Agent>): CompactedDelta {
   const promoted = promoteDetailFields(rawDelta);
+  const hasPhase = Object.prototype.hasOwnProperty.call(promoted, 'phase');
   const hasActivity = Object.prototype.hasOwnProperty.call(promoted, 'activity');
-  const incoming = promoted.activity as string | undefined;
+  const incoming = (promoted as Record<string, unknown>).activity;
   const rest: Partial<Agent> = { ...promoted };
   delete rest.activity;
   const fields = { ...acc.fields, ...rest };
   inheritFalsyCapabilities(fields, acc.fields);
 
-  let activity = acc.activity;
-  if (hasActivity) {
-    if (incoming === 'working' || incoming === '') {
-      if (activity.locked) {
-        const stillSticky = activity.value !== undefined && STICKY_ACTIVITIES.has(activity.value);
-        activity = stillSticky ? activity : { locked: true, value: incoming };
-      } else {
-        activity = { locked: false, pending: incoming };
-      }
-    } else {
-      // A concrete non-working/empty activity, or an explicit `undefined`:
-      // mergeAgentDelta never suppresses either (suppression requires the
-      // incoming value to be working/''), so the result is this value,
-      // period, regardless of whatever the base turns out to be.
-      activity = { locked: true, value: incoming };
+  const nextTable = acc.table.map((st, idx): StickyStateEntry => {
+    const baseActSticky = Boolean(idx & 1);
+    const nextPhaseAllows = hasPhase ? phaseAllowsSticky(promoted.phase) : st.phaseAllows;
+    let nextActivity = st.activity;
+    if (hasActivity) {
+      const curActSticky = st.activity.fromBase
+        ? baseActSticky
+        : typeof st.activity.value === 'string' && STICKY_ACTIVITIES.has(st.activity.value);
+      const suppress =
+        (incoming === 'working' || incoming === '') &&
+        st.phaseAllows &&
+        nextPhaseAllows &&
+        curActSticky;
+      nextActivity = suppress ? st.activity : { fromBase: false, value: incoming };
     }
-  }
-  return { fields, activity };
+    return { phaseAllows: nextPhaseAllows, activity: nextActivity };
+  }) as StickyStateTable;
+
+  return { fields, table: nextTable };
 }
 
 /**
@@ -341,45 +379,37 @@ function composeCompactedDeltas(a: CompactedDelta, b: CompactedDelta): Compacted
   const fields = { ...a.fields, ...b.fields };
   inheritFalsyCapabilities(fields, a.fields);
 
-  let activity: CompactedDelta['activity'];
-  if (b.activity.locked) {
-    activity = b.activity;
-  } else if (a.activity.locked) {
-    const v = a.activity.value;
-    const stillSticky = v !== undefined && STICKY_ACTIVITIES.has(v);
-    activity = { locked: true, value: stillSticky ? v : (b.activity.pending ?? v) };
-  } else {
-    activity = { locked: false, pending: b.activity.pending ?? a.activity.pending };
-  }
-  return { fields, activity };
+  const nextTable = a.table.map((afterA, idx): StickyStateEntry => {
+    const baseActSticky = Boolean(idx & 1);
+    const actStickyAfterA = afterA.activity.fromBase
+      ? baseActSticky
+      : typeof afterA.activity.value === 'string' && STICKY_ACTIVITIES.has(afterA.activity.value);
+    const midIdx = ((afterA.phaseAllows ? 2 : 0) | (actStickyAfterA ? 1 : 0)) as 0 | 1 | 2 | 3;
+    const afterB = b.table[midIdx];
+    return {
+      phaseAllows: afterB.phaseAllows,
+      activity: afterB.activity.fromBase ? afterA.activity : afterB.activity,
+    };
+  }) as StickyStateTable;
+
+  return { fields, table: nextTable };
 }
 
 /** Apply a compacted accumulator to a real base, through `mergeAgentDelta` (§7, §8). */
 function applyCompactedDelta(base: Agent, acc: CompactedDelta, agentId: string): Agent {
-  const delta: Partial<Agent> = { ...acc.fields };
-  if (!acc.activity.locked && acc.activity.pending !== undefined) {
-    delta.activity = acc.activity.pending as AgentActivity;
-  }
+  const idx = ((phaseAllowsSticky(base.phase) ? 2 : 0) |
+    (base.activity && STICKY_ACTIVITIES.has(base.activity) ? 1 : 0)) as 0 | 1 | 2 | 3;
+  const resolved = acc.table[idx];
   // `fields` was already promoted per delta as it was folded in (see
   // CompactedDelta's doc comment) — promoting again here from the last raw
   // `detail` object would overwrite an already-correct later top-level
   // field with a stale one.
-  const updated = mergeAgentDelta(base, delta, agentId, { skipPromote: true });
-  if (acc.activity.locked) {
-    // Resolved independently of `base` (see `CompactedDelta`'s doc comment);
-    // `delta` omitted `activity` above, so `mergeAgentDelta` just passed
-    // `base.activity` through untouched. Overwrite it with the already-
-    // resolved value instead of letting `base` reassert itself here. A
-    // resolved `undefined` (an explicit `activity: undefined` delta
-    // unlocked to it) must still become an *own key* set to `undefined` —
-    // the same shape `{...base, ...delta}` produces live when `delta` has
-    // its own `activity: undefined` — not an absent key: `agentsShallowEqual`'s
-    // hasOwnProperty check tells those two apart, so `delete` here would
-    // make an otherwise-identical compacted and live result compare
-    // unequal. `Agent` declares `activity?: AgentActivity`, so
-    // exactOptionalPropertyTypes forbids a direct `=== undefined`
-    // assignment; go through an untyped reference instead.
-    (updated as unknown as Record<string, unknown>).activity = acc.activity.value;
+  const updated = mergeAgentDelta(base, acc.fields, agentId, { skipPromote: true });
+  if (!resolved.activity.fromBase) {
+    // A resolved `undefined` (an explicit `activity: undefined` delta) must
+    // still become an *own key* set to `undefined` — the same shape
+    // `{...base, ...delta}` produces live — for `agentsShallowEqual`.
+    (updated as unknown as Record<string, unknown>).activity = resolved.activity.value;
   }
   return updated;
 }

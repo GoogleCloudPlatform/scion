@@ -1479,6 +1479,39 @@ func (s *Server) recordStopStatus(ctx context.Context, agentID, runID, action st
 	return true, nil
 }
 
+// syncAgentAfterStopRecord aligns the caller's in-memory agent struct with the
+// phase, suspend reason, and retained/cleared activity persisted by
+// recordStopStatus so HTTP responses and published AgentStatusEvents match the
+// stored row.
+func (s *Server) syncAgentAfterStopRecord(ctx context.Context, agent *store.Agent, newPhase, suspendReason string) {
+	agent.Phase = newPhase
+	agent.ContainerStatus = "stopped"
+	if newPhase == string(state.PhaseSuspended) {
+		agent.Activity = string(state.RetainedSuspendActivity(
+			state.Activity(agent.Activity),
+			state.Activity(agent.StalledFromActivity),
+		))
+		if suspendReason != "" {
+			agent.SuspendReason = suspendReason
+		}
+	} else {
+		if !state.Activity(agent.Activity).IsTerminal() {
+			agent.Activity = ""
+		}
+		agent.SuspendReason = ""
+	}
+	agent.StalledFromActivity = ""
+	agent.ToolName = ""
+	agent.ActivitySince = nil
+	if fresh, err := s.store.GetAgent(ctx, agent.ID); err == nil && fresh != nil && fresh.Phase == newPhase {
+		agent.Activity = fresh.Activity
+		agent.SuspendReason = fresh.SuspendReason
+		agent.StalledFromActivity = fresh.StalledFromActivity
+		agent.ToolName = fresh.ToolName
+		agent.ActivitySince = fresh.ActivitySince
+	}
+}
+
 // stopRunStillCurrent reports whether the row still holds runID, for a
 // caller that has no status to write after a stop dispatched for runID but
 // must not release a newer run's reservation (ptone/scion#2550). It logs a
@@ -5919,10 +5952,7 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 	// keeps the grants keyed to it (ptone/scion#6403).
 	s.revokeSuspendedRunDelegationGrantsBestEffort(ctx, agent.ID, stopRunID)
 
-	agent.Phase = string(state.PhaseSuspended)
-	agent.ContainerStatus = "stopped"
-	agent.Activity = ""
-	agent.SuspendReason = string(state.SuspendReasonStalled)
+	s.syncAgentAfterStopRecord(ctx, agent, string(state.PhaseSuspended), string(state.SuspendReasonStalled))
 	// A suspended agent has no running container: release its
 	// max_agents_per_broker reservation (ptone/scion#1963) and its
 	// max_agents_per_project one (ptone/scion#6033), mirroring

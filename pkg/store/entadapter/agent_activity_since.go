@@ -15,6 +15,7 @@
 package entadapter
 
 import (
+	"strings"
 	"time"
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -54,7 +55,7 @@ func stampActivitySince(m *ent.AgentMutation, prevPhase, prevActivity string, no
 	switch {
 	case phase != running || activity == "":
 		m.ClearActivitySince()
-	case activity != prevActivity || prevPhase != running:
+	case !strings.EqualFold(activity, prevActivity) || prevPhase != running:
 		m.SetActivitySince(now)
 	}
 }

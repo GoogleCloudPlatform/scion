@@ -22,6 +22,7 @@ import {
   harnessErrorHint,
   isProvisionedOnly,
   stateLabel,
+  suspendedActivityLabel,
 } from './agent-state-display.js';
 import type { Agent } from './types.js';
 
@@ -91,6 +92,50 @@ describe('provision-only status (ptone/scion#2929)', () => {
     expect(busy.getAttribute('label')).toBe('waiting on others');
     const custom = badge({ name: 'a', phase: 'running' }, { status: 'running', label: 'running' });
     expect(custom.getAttribute('label')).toBe('running');
+  });
+
+  it('renders suspended · <activity> label for retained suspend activities while keeping status=suspended', () => {
+    expect(suspendedActivityLabel({ phase: 'suspended', activity: 'completed' })).toBe(
+      'suspended · completed'
+    );
+    expect(suspendedActivityLabel({ phase: 'suspended', activity: 'idle' })).toBe(
+      'suspended · idle'
+    );
+    expect(suspendedActivityLabel({ phase: 'suspended', activity: 'harness_error' })).toBe(
+      'suspended · harness error'
+    );
+    expect(suspendedActivityLabel({ phase: 'suspended', activity: 'HARNESS_ERROR' })).toBe(
+      'suspended · harness error'
+    );
+    expect(suspendedActivityLabel({ phase: 'suspended', activity: '' })).toBeUndefined();
+    expect(suspendedActivityLabel({ phase: 'suspended', activity: 'blocked' })).toBeUndefined();
+    expect(suspendedActivityLabel({ phase: 'running', activity: 'completed' })).toBeUndefined();
+
+    const done = badge({ name: 'a', phase: 'suspended', activity: 'completed' });
+    expect(done.getAttribute('status')).toBe('suspended');
+    expect(done.getAttribute('label')).toBe('suspended · completed');
+
+    const idle = badge({
+      name: 'a',
+      phase: 'suspended',
+      activity: 'idle' as Agent['activity'],
+    });
+    expect(idle.getAttribute('status')).toBe('suspended');
+    expect(idle.getAttribute('label')).toBe('suspended · idle');
+
+    const suspHarnessErr = badge({
+      name: 'a',
+      phase: 'suspended',
+      activity: 'harness_error',
+      detail: { message: 'model API: API Error: 400 denied' },
+    });
+    expect(suspHarnessErr.getAttribute('status')).toBe('suspended');
+    expect(suspHarnessErr.getAttribute('label')).toBe('suspended · harness error');
+    expect(suspHarnessErr.getAttribute('title')).toBe('model API: API Error: 400 denied');
+
+    const plain = badge({ name: 'a', phase: 'suspended' });
+    expect(plain.getAttribute('status')).toBe('suspended');
+    expect(plain.getAttribute('label')).toBe('suspended');
   });
 });
 

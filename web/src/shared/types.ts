@@ -461,6 +461,25 @@ export function isTerminalAvailable(agent: {
 }
 
 /**
+ * Whether an activity is retained across a transition to `phase === 'suspended'`
+ * so UI surfaces can display e.g. `"suspended · completed"`. Mirrors Go
+ * `state.Activity.IsRetainedOnSuspend`.
+ */
+export function isRetainedSuspendActivity(activity: string | undefined): boolean {
+  const lower = activity?.toLowerCase();
+  return lower === 'idle' || lower === 'completed' || lower === 'harness_error';
+}
+
+/**
+ * Whether an activity represents a terminal stop outcome that remains valid on
+ * `phase === 'stopped'`. Mirrors Go `state.Activity.IsTerminal`.
+ */
+export function isTerminalActivity(activity: string | undefined): boolean {
+  const lower = activity?.toLowerCase();
+  return lower === 'crashed' || lower === 'limits_exceeded';
+}
+
+/**
  * Returns the display status string for an agent.
  * When the agent is running, shows the activity (e.g. 'thinking');
  * otherwise shows the lifecycle phase.

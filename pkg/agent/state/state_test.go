@@ -277,6 +277,16 @@ func TestDisplayStatus(t *testing.T) {
 			want:  "suspended",
 		},
 		{
+			name:  "suspended with completed still returns suspended",
+			state: AgentState{Phase: PhaseSuspended, Activity: ActivityCompleted},
+			want:  "suspended",
+		},
+		{
+			name:  "suspended with idle still returns suspended",
+			state: AgentState{Phase: PhaseSuspended, Activity: ActivityIdle},
+			want:  "suspended",
+		},
+		{
 			name:  "stopped returns phase",
 			state: AgentState{Phase: PhaseStopped},
 			want:  "stopped",
@@ -344,8 +354,38 @@ func TestAgentStateValidate(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name:    "valid: completed retained with suspended phase",
+			state:   AgentState{Phase: PhaseSuspended, Activity: ActivityCompleted},
+			wantErr: false,
+		},
+		{
+			name:    "valid: idle retained with suspended phase",
+			state:   AgentState{Phase: PhaseSuspended, Activity: ActivityIdle},
+			wantErr: false,
+		},
+		{
 			name:    "invalid: activity with suspended phase",
 			state:   AgentState{Phase: PhaseSuspended, Activity: ActivityWorking},
+			wantErr: true,
+		},
+		{
+			name:    "invalid: blocked activity with suspended phase",
+			state:   AgentState{Phase: PhaseSuspended, Activity: ActivityBlocked},
+			wantErr: true,
+		},
+		{
+			name:    "invalid: waiting_for_input activity with suspended phase",
+			state:   AgentState{Phase: PhaseSuspended, Activity: ActivityWaitingForInput},
+			wantErr: true,
+		},
+		{
+			name:    "invalid: crashed activity with suspended phase",
+			state:   AgentState{Phase: PhaseSuspended, Activity: ActivityCrashed},
+			wantErr: true,
+		},
+		{
+			name:    "invalid: stalled activity with suspended phase",
+			state:   AgentState{Phase: PhaseSuspended, Activity: ActivityStalled},
 			wantErr: true,
 		},
 		{
@@ -712,6 +752,9 @@ func TestHarnessErrorClassification(t *testing.T) {
 	if err := (AgentState{Phase: PhaseStopped, Activity: a}).Validate(); err == nil {
 		t.Error("stopped/harness_error should not validate")
 	}
+	if err := (AgentState{Phase: PhaseSuspended, Activity: a}).Validate(); err != nil {
+		t.Errorf("suspended/harness_error should validate as a retained suspend activity: %v", err)
+	}
 }
 
 func TestReadyTiming(t *testing.T) {
@@ -736,5 +779,64 @@ func TestExitReasonLabel(t *testing.T) {
 		if got := r.Label(); got != want {
 			t.Errorf("ExitReason(%q).Label() = %q, want %q", r, got, want)
 		}
+	}
+}
+
+func TestActivityIsRetainedOnSuspend(t *testing.T) {
+	wantRetained := map[Activity]bool{
+		ActivityIdle:         true,
+		ActivityCompleted:    true,
+		ActivityHarnessError: true,
+	}
+	for _, a := range append(Activities(), Activity("")) {
+		want := wantRetained[a]
+		if got := a.IsRetainedOnSuspend(); got != want {
+			t.Errorf("Activity(%q).IsRetainedOnSuspend() = %v, want %v", a, got, want)
+		}
+	}
+	for _, upper := range []Activity{"IDLE", "COMPLETED", "HARNESS_ERROR", "Idle", "Completed", "Harness_Error"} {
+		if !upper.IsRetainedOnSuspend() {
+			t.Errorf("Activity(%q).IsRetainedOnSuspend() = false, want true", upper)
+		}
+	}
+	for _, nonRetained := range []Activity{"WORKING", "STALLED", "CRASHED"} {
+		if nonRetained.IsRetainedOnSuspend() {
+			t.Errorf("Activity(%q).IsRetainedOnSuspend() = true, want false", nonRetained)
+		}
+	}
+}
+
+func TestRetainedSuspendActivity(t *testing.T) {
+	tests := []struct {
+		name        string
+		activity    Activity
+		stalledFrom Activity
+		want        Activity
+	}{
+		{"completed kept", ActivityCompleted, "", ActivityCompleted},
+		{"idle kept", ActivityIdle, "", ActivityIdle},
+		{"harness_error kept", ActivityHarnessError, "", ActivityHarnessError},
+		{"uppercase COMPLETED normalized", "COMPLETED", "", ActivityCompleted},
+		{"uppercase IDLE normalized", "IDLE", "", ActivityIdle},
+		{"uppercase HARNESS_ERROR normalized", "HARNESS_ERROR", "", ActivityHarnessError},
+		{"working cleared", ActivityWorking, "", ""},
+		{"blocked cleared", ActivityBlocked, "", ""},
+		{"waiting_for_input cleared", ActivityWaitingForInput, "", ""},
+		{"crashed cleared", ActivityCrashed, "", ""},
+		{"empty stays empty", "", "", ""},
+		{"stalled from completed restores completed", ActivityStalled, ActivityCompleted, ActivityCompleted},
+		{"stalled from idle restores idle", ActivityStalled, ActivityIdle, ActivityIdle},
+		{"stalled from harness_error restores harness_error", ActivityStalled, ActivityHarnessError, ActivityHarnessError},
+		{"uppercase STALLED from IDLE restores idle", "STALLED", "IDLE", ActivityIdle},
+		{"stalled from working cleared", ActivityStalled, ActivityWorking, ""},
+		{"stalled from blocked cleared", ActivityStalled, ActivityBlocked, ""},
+		{"stalled with empty stalledFrom cleared", ActivityStalled, "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := RetainedSuspendActivity(tt.activity, tt.stalledFrom); got != tt.want {
+				t.Errorf("RetainedSuspendActivity(%q, %q) = %q, want %q", tt.activity, tt.stalledFrom, got, tt.want)
+			}
+		})
 	}
 }

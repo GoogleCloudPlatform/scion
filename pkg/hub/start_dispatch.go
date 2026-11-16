@@ -36,6 +36,10 @@ type startDispatch struct {
 	agent *store.Agent
 	// priorPhase is the agent's phase when beginStartDispatch was called.
 	priorPhase string
+	// priorActivity is the agent's stored activity when beginStartDispatch
+	// was called, so rollback restores a retained suspend activity cleared by
+	// the PhaseStarting write.
+	priorActivity string
 	// priorRestingPhase is the agent's effective resting phase
 	// (store.EffectiveRestingPhase) when beginStartDispatch was called: the
 	// remembered phase for an error row that remembers the phase a failed
@@ -166,6 +170,7 @@ func (s *Server) beginStartDispatch(ctx context.Context, agent *store.Agent) (*s
 		s:                 s,
 		agent:             agent,
 		priorPhase:        agent.Phase,
+		priorActivity:     agent.Activity,
 		priorRestingPhase: store.EffectiveRestingPhase(agent),
 		reserved:          reserved,
 		projectReserved:   projectReserved,
@@ -245,12 +250,17 @@ func (d *startDispatch) rollback(ctx context.Context) {
 			rctx = lifecycleStartUnconfirmed(ctx) // WP1 r4 N3: no event, counted
 		}
 		// Restore lets the prior phase be halted, which no other write
-		// may store directly (ptone/scion#4853).
-		err := d.s.store.UpdateAgentStatus(rctx, d.agent.ID, store.AgentStatusUpdate{
+		// may store directly (ptone/scion#4853), and restores any retained
+		// suspend activity that the PhaseStarting write cleared.
+		su := store.AgentStatusUpdate{
 			Phase:   d.priorPhase,
 			IfPhase: string(state.PhaseStarting),
 			Restore: true,
-		})
+		}
+		if d.priorPhase == string(state.PhaseSuspended) && state.Activity(d.priorActivity).IsRetainedOnSuspend() {
+			su.Activity = d.priorActivity
+		}
+		err := d.s.store.UpdateAgentStatus(rctx, d.agent.ID, su)
 		if err != nil && !errors.Is(err, store.ErrPhaseMismatch) {
 			d.s.agentLifecycleLog.Warn("start dispatch: failed to restore prior phase after failed dispatch",
 				"agent_id", d.agent.ID, "prior_phase", d.priorPhase, "error", err)
@@ -321,6 +331,7 @@ func (d *startDispatch) keepForUnknownOutcome() {
 	d.unconfirmed = true
 	if d.marked {
 		d.priorPhase = string(state.PhaseStopped)
+		d.priorActivity = ""
 	}
 }
 

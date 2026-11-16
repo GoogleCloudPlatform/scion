@@ -96,15 +96,18 @@ func (nd *NotificationDispatcher) SetBrokerProxy(p *MessageBrokerProxy) {
 // delete engine resolves them before the row changes and delivers them after
 // (ResolveDeletedNotifications, design ptone/scion#2483 §2.3).
 func (nd *NotificationDispatcher) Start() {
-	statusCh, unsubStatus := nd.events.Subscribe("project.>.agent.status")
+	// Use "*" (single-token wildcard) rather than ">" so "project.*.agent.status"
+	// does not cross-match non-status project subjects (such as ".agent.ports" or
+	// ".agent.deleted").
+	ch, unsubscribe := nd.events.Subscribe("project.*.agent.status")
 
 	nd.wg.Add(1)
 	go func() {
 		defer nd.wg.Done()
-		defer unsubStatus()
+		defer unsubscribe()
 		for {
 			select {
-			case evt, ok := <-statusCh:
+			case evt, ok := <-ch:
 				if !ok {
 					return
 				}
@@ -130,15 +133,18 @@ func (nd *NotificationDispatcher) Stop() {
 
 // handleEvent processes a single agent status event.
 func (nd *NotificationDispatcher) handleEvent(evt Event) {
+	if !strings.HasSuffix(evt.Subject, ".agent.status") {
+		return
+	}
 	var statusEvt AgentStatusEvent
 	if err := json.Unmarshal(evt.Data, &statusEvt); err != nil {
 		nd.log.Error("Failed to unmarshal agent status event", "error", err)
 		return
 	}
 
-	// Skip events with no agent ID — can happen for system events fired during
-	// project creation before any agents exist.
-	if statusEvt.AgentID == "" {
+	// Skip events with no agent ID or no status fields — can happen for system
+	// events fired during project creation before any agents exist.
+	if statusEvt.AgentID == "" || (statusEvt.Phase == "" && statusEvt.Activity == "") {
 		return
 	}
 	// A halt is notified once, in-process, by the hub instance whose write
@@ -178,12 +184,14 @@ func (nd *NotificationDispatcher) handleEvent(evt Event) {
 		return
 	}
 
-	// Use activity for matching (notifications trigger on activity changes).
-	// Fall back to phase when activity is empty (e.g. phase "error" has no activity).
-	matchStatus := statusEvt.Activity
-	if matchStatus == "" {
-		matchStatus = statusEvt.Phase
-	}
+	// Suspended agents match on phase ("suspended"), never on a retained
+	// pre-suspend activity such as completed, idle, or harness_error.
+	// Running/stopped agents match on activity and fall back to phase when
+	// activity is empty.
+	matchStatus := notificationEventStatus(statusEvt)
+
+	var watchedAgent *store.Agent
+	var watchedLoaded bool
 
 	// Deduplicate: one notification per (subscriber_type, subscriber_id).
 	// Agent-scoped subscriptions are checked first since they are more specific.
@@ -201,21 +209,64 @@ func (nd *NotificationDispatcher) handleEvent(evt Event) {
 			continue
 		}
 
-		// Dedup: check if the last notification for this subscription already has this status
-		lastStatus, err := nd.store.GetLastNotificationStatus(ctx, sub.ID)
+		// Deduplicate repeated notifications:
+		//   - For IDLE and COMPLETED, the stored agent row is authoritative:
+		//     a new period notifies only when the current row is running, its
+		//     activity matches matchStatus, and its activity_since is strictly
+		//     after the subscription's last notification. Heartbeats and stale
+		//     same-period re-reports (even if delivered after an intermediate
+		//     working event or a Hub restart) remain deduplicated.
+		//   - Every other trigger (WAITING_FOR_INPUT, STALLED, HARNESS_ERROR,
+		//     LIMITS_EXCEEDED, ERROR, SUSPENDED, STOPPED, ...) keeps status-based
+		//     deduplication against the subscription's previous notification.
+		lastNotif, err := nd.store.GetLastNotification(ctx, sub.ID)
 		if err != nil {
-			nd.log.Error("Failed to get last notification status",
+			nd.log.Error("Failed to get last notification",
 				"subscriptionID", sub.ID, "error", err)
 			continue
 		}
-		if strings.EqualFold(lastStatus, matchStatus) {
-			seen[dedupeKey] = true
-			continue
+		if lastNotif != nil && strings.EqualFold(lastNotif.Status, matchStatus) {
+			if !isPerPeriodNotificationStatus(matchStatus) ||
+				!nd.activityEnteredAfter(ctx, statusEvt.AgentID, matchStatus, lastNotif.CreatedAt, &watchedAgent, &watchedLoaded) {
+				seen[dedupeKey] = true
+				continue
+			}
 		}
 
 		seen[dedupeKey] = true
 		nd.storeAndDispatch(ctx, sub, statusEvt)
 	}
+}
+
+func isPerPeriodNotificationStatus(status string) bool {
+	return strings.EqualFold(status, string(state.ActivityIdle)) ||
+		strings.EqualFold(status, string(state.ActivityCompleted))
+}
+
+func (nd *NotificationDispatcher) activityEnteredAfter(
+	ctx context.Context,
+	agentID string,
+	matchStatus string,
+	notifCreatedAt time.Time,
+	cached **store.Agent,
+	loaded *bool,
+) bool {
+	if !*loaded {
+		*loaded = true
+		a, err := nd.store.GetAgent(ctx, agentID)
+		if err != nil {
+			nd.log.Warn("Failed to get agent for per-period notification check",
+				"agent_id", agentID, "error", err)
+		} else {
+			*cached = a
+		}
+	}
+	a := *cached
+	return a != nil &&
+		strings.EqualFold(a.Phase, string(state.PhaseRunning)) &&
+		strings.EqualFold(a.Activity, matchStatus) &&
+		a.ActivitySince != nil &&
+		a.ActivitySince.After(notifCreatedAt)
 }
 
 // pendingDeletedNotification is one DELETED notification resolved before an
@@ -361,9 +412,13 @@ func (nd *NotificationDispatcher) storeAndDispatchForAgent(ctx context.Context, 
 	nd.storeAndDispatchMessage(ctx, sub, evt, agent, formatNotificationMessage(agent, notificationEventStatus(evt)))
 }
 
-// notificationEventStatus is the status a notification for evt carries: its
-// activity, or its phase when the activity is empty.
+// notificationEventStatus is the status a notification for evt carries: for a
+// suspended agent it is always the phase ("suspended"), never a retained
+// activity; otherwise its activity, or its phase when the activity is empty.
 func notificationEventStatus(evt AgentStatusEvent) string {
+	if evt.Phase == string(state.PhaseSuspended) {
+		return evt.Phase
+	}
 	if evt.Activity != "" {
 		return evt.Activity
 	}

@@ -256,6 +256,7 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 				return nil
 			}
 			agent.Phase = string(state.PhaseStarting)
+			agent.Activity = ""
 			// The dispatch leg is over. End the lifecycle op so the
 			// readiness wait sees a heartbeat-reported exit. Residual (as
 			// before ptone/scion#2014): a heartbeat gathered before the
@@ -309,6 +310,7 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			}
 			agent.Phase = string(state.PhaseRunning)
 			agent.Activity = string(readyActivity)
+			agent.SuspendReason = ""
 			return nil
 		}})
 		if err != nil {

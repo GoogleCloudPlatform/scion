@@ -27,7 +27,7 @@ import { html } from 'lit';
 import type { TemplateResult } from 'lit';
 import { ifDefined } from 'lit/directives/if-defined.js';
 
-import { getAgentDisplayStatus } from './types.js';
+import { getAgentDisplayStatus, isRetainedSuspendActivity } from './types.js';
 import type { Agent, AgentPhase, AgentActivity } from './types.js';
 
 /**
@@ -172,14 +172,18 @@ export function isProvisionedOnly(agent: Pick<Agent, 'phase' | 'provisionedOnly'
 }
 
 /**
- * The badge tooltip for a harness_error status: the reason the harness
- * reported (detail.message), or undefined for any other status.
+ * The badge tooltip for a harness_error status (including when retained on a
+ * suspended agent): the reason the harness reported (detail.message), or
+ * undefined for any other status.
  */
 export function harnessErrorHint(
-  agent: Pick<Agent, 'detail' | 'message'>,
+  agent: Pick<Agent, 'activity' | 'detail' | 'message'>,
   status: string
 ): string | undefined {
-  if (status !== 'harness_error') {
+  const isHarnessError =
+    status === 'harness_error' ||
+    (status === 'suspended' && agent.activity?.toLowerCase() === 'harness_error');
+  if (!isHarnessError) {
     return undefined;
   }
   return agent.detail?.message || agent.message || undefined;
@@ -196,8 +200,24 @@ interface AgentStatusBadgeOptions {
 }
 
 /**
+ * Compound label (`"suspended · completed"`, `"suspended · idle"`,
+ * `"suspended · harness error"`) for a suspended agent carrying a retained
+ * pre-suspend activity, or `undefined` when no retained activity applies.
+ */
+export function suspendedActivityLabel(agent: {
+  phase?: string | undefined;
+  activity?: string | undefined;
+}): string | undefined {
+  if (agent.phase === 'suspended' && isRetainedSuspendActivity(agent.activity)) {
+    return `${stateLabel('suspended')} · ${stateLabel(agent.activity!.toLowerCase())}`;
+  }
+  return undefined;
+}
+
+/**
  * An agent status badge. Use it for every agent status badge: it shows a
- * provision-only agent as "created (not started)" with a start hint.
+ * provision-only agent as "created (not started)" with a start hint, and a
+ * suspended agent with a retained activity as "suspended · <activity>".
  */
 export function agentStatusBadge(
   agent: Agent,
@@ -207,9 +227,13 @@ export function agentStatusBadge(
   const hint = po
     ? `Not started yet. Use Start, or run: scion start ${agent.name}`
     : harnessErrorHint(agent, status);
+  const defaultLabel =
+    status === getAgentDisplayStatus(agent)
+      ? (suspendedActivityLabel(agent) ?? stateLabel(status))
+      : stateLabel(status);
   return html`<scion-status-badge
     status=${status}
-    label=${po ? PROVISIONED_ONLY_LABEL : (label ?? stateLabel(status))}
+    label=${po ? PROVISIONED_ONLY_LABEL : (label ?? defaultLabel)}
     title=${ifDefined(hint)}
     size=${ifDefined(size)}
     data-testid=${ifDefined(testId)}
