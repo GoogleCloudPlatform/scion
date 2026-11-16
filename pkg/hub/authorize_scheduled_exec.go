@@ -78,6 +78,20 @@ func (s *Server) scheduledExecLimiter() *keysRateLimiter {
 // The target need not be running or connected: those are fire-time
 // conditions that skip a run.
 func (s *Server) authorizeScheduledExecAuthoring(w http.ResponseWriter, r *http.Request, projectID string, p *scheduledExecPayload) (*store.Agent, bool) {
+	return s.authorizeScheduledExecAuthoringOpts(w, r, projectID, p, "", true)
+}
+
+// authorizeScheduledExecAuthoringOpts runs the exec authoring decision with an
+// optional excludeScheduleID (when updating or resuming an existing schedule)
+// and checkQuota toggle (false when editing a schedule that remains paused).
+func (s *Server) authorizeScheduledExecAuthoringOpts(
+	w http.ResponseWriter,
+	r *http.Request,
+	projectID string,
+	p *scheduledExecPayload,
+	excludeScheduleID string,
+	checkQuota bool,
+) (*store.Agent, bool) {
 	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
@@ -134,14 +148,16 @@ func (s *Server) authorizeScheduledExecAuthoring(w http.ResponseWriter, r *http.
 		return nil, false
 	}
 
-	if err := s.checkScheduledExecQuota(ctx, projectID, target.ID, ""); err != nil {
-		if errors.Is(err, errScheduledExecQuota) {
-			writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded, err.Error(), nil)
+	if checkQuota {
+		if err := s.checkScheduledExecQuota(ctx, projectID, target.ID, excludeScheduleID); err != nil {
+			if errors.Is(err, errScheduledExecQuota) {
+				writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded, err.Error(), nil)
+				return nil, false
+			}
+			slog.ErrorContext(ctx, "exec schedule authoring: quota check failed", "project_id", projectID, "error", err)
+			InternalError(w)
 			return nil, false
 		}
-		slog.ErrorContext(ctx, "exec schedule authoring: quota check failed", "project_id", projectID, "error", err)
-		InternalError(w)
-		return nil, false
 	}
 
 	p.AgentID = target.ID

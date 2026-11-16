@@ -34,6 +34,9 @@ import (
 // "schedule.exec.<action>").
 const (
 	ScheduledExecAuditCreate  = "create"
+	ScheduledExecAuditUpdate  = "update"
+	ScheduledExecAuditResume  = "resume"
+	ScheduledExecAuditPause   = "pause"
 	ScheduledExecAuditDelete  = "delete"
 	ScheduledExecAuditRefused = "refused"
 	ScheduledExecAuditSkipped = "skipped"
@@ -169,8 +172,8 @@ func (e *ScheduledExecEvent) withCommand(argv []string, timeoutSeconds int) *Sch
 	return e
 }
 
-// newScheduledExecAuthoringAudit returns the record of an authoring action
-// by the request in ctx.
+// newScheduledExecAuthoringAudit returns the record of a one-shot event
+// authoring action by the request in ctx.
 func newScheduledExecAuthoringAudit(ctx context.Context, action, projectID, eventID string, p *scheduledExecPayload) *ScheduledExecEvent {
 	e := &ScheduledExecEvent{
 		Action:        action,
@@ -186,6 +189,44 @@ func newScheduledExecAuthoringAudit(ctx context.Context, action, projectID, even
 	cred := GetCredentialContextFromContext(ctx)
 	e.ActorCredentialKind, e.ActorCredentialID = string(cred.Kind), cred.ID
 	return e.withCommand(p.Command, p.timeout())
+}
+
+// newScheduleExecAuthoringAudit returns the record of a recurring schedule
+// authoring action (create, update, resume, pause, delete) by the request in
+// ctx (ptone/scion#7884). p may be nil when auditing a stored row whose payload
+// no longer decodes.
+func newScheduleExecAuthoringAudit(ctx context.Context, action string, sc store.Schedule, p *scheduledExecPayload) *ScheduledExecEvent {
+	e := &ScheduledExecEvent{
+		Action:                action,
+		ProjectID:             sc.ProjectID,
+		ScheduleID:            sc.ID,
+		AuthorizationRevision: sc.AuthorizationRevision,
+		RequestID:             logging.RequestIDFromContext(ctx),
+		Timestamp:             time.Now().UTC(),
+	}
+	if identity := GetIdentityFromContext(ctx); identity != nil {
+		e.ActorKind, e.ActorID = identity.Type(), identity.ID()
+	}
+	cred := GetCredentialContextFromContext(ctx)
+	e.ActorCredentialKind, e.ActorCredentialID = string(cred.Kind), cred.ID
+	if p != nil {
+		e.TargetAgentID = p.AgentID
+		e.withCommand(p.Command, p.timeout())
+	} else {
+		e.TargetAgentID = execPayloadTarget(sc.Payload)
+	}
+	return e
+}
+
+// auditScheduleExecMutation records a mutation (update, pause, delete) of a
+// recurring exec schedule. A stored payload that no longer decodes is audited
+// without its command fields.
+func (s *Server) auditScheduleExecMutation(ctx context.Context, action string, sc store.Schedule) {
+	p, err := decodeScheduledExecPayload(sc.Payload)
+	if err != nil {
+		p = nil
+	}
+	s.auditScheduledExec(ctx, newScheduleExecAuthoringAudit(ctx, action, sc, p))
 }
 
 // newScheduledExecFireAudit returns the record of a fire action on evt,

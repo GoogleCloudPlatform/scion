@@ -330,3 +330,69 @@ func TestScheduledResponses_UndecodableExecPayloadRedactsToMarker(t *testing.T) 
 	assert.Equal(t, `{"commandRedacted":true}`, rev.payloadFor(scheduledEventTypeExec, `{"command":`))
 	assert.Equal(t, `{"agentId":"m"}`, rev.payloadFor("message", `{"agentId":"m"}`), "non-exec payloads are unchanged")
 }
+
+// TestScheduledResponses_RecurringAuthoringAndCanonicalDigest (AC7, AC16, Nit N1):
+// real HTTP recurring /schedules authoring reveals argv only to live attach
+// holders, redacts for non-attach readers (including the creator after attach
+// loss or via UAT without agent:attach), and emits canonical unescaped UTF-8
+// JSON commandSha256 for commands containing &, <, and >.
+func TestScheduledResponses_RecurringAuthoringAndCanonicalDigest(t *testing.T) {
+	f := execAuthoringFixture(t)
+	sentinel := "EXECRECURRING-" + uuid.NewString()
+	argv := []string{"sh", "-c", "echo a&b <in >out " + sentinel}
+	schedulesPath := "/api/v1/projects/" + f.proj.ID + "/schedules"
+
+	rec := requestAsIdentity(t, f.srv, authUser(f.owner), http.MethodPost, schedulesPath, map[string]any{
+		"name":           "canonical-digest-guard",
+		"cronExpr":       "0 * * * *",
+		"eventType":      "exec",
+		"agentId":        f.sibling.ID,
+		"command":        argv,
+		"timeoutSeconds": 45,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), sentinel, "owner holds live attach on create response")
+
+	var created struct {
+		ID      string `json:"id"`
+		Payload string `json:"payload"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+	require.NotEmpty(t, created.ID)
+
+	reader := setupNonAdminUser(t, f.store, []string{
+		"scheduled_event.read", "scheduled_event.list", "scheduled_event.update", "hub.scheduler.read",
+	})
+	schedURL := schedulesPath + "/" + created.ID
+
+	// GET /schedules/{id} as non-attach reader -> redacted with canonical unescaped sha256.
+	rec = requestAsIdentity(t, f.srv, reader, http.MethodGet, schedURL, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NotContains(t, rec.Body.String(), sentinel)
+	var got struct {
+		Payload string `json:"payload"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	var red redactedExecPayload
+	require.NoError(t, json.Unmarshal([]byte(got.Payload), &red))
+	assert.True(t, red.CommandRedacted)
+	assert.Equal(t, 3, red.Argc)
+	assert.Equal(t, agentcontrol.ExecArgvDigest(argv), red.CommandSHA256)
+
+	// Verify pause and metadata-only PATCH responses are also redacted for non-attach callers.
+	rec = requestAsIdentity(t, f.srv, reader, http.MethodPatch, schedURL, map[string]any{"name": "canonical-digest-guard-2"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), sentinel)
+
+	rec = requestAsIdentity(t, f.srv, reader, http.MethodPost, schedURL+"/pause", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), sentinel)
+
+	// SEC-P5: creator using a UAT without agent:attach does NOT get argv revealed.
+	uatNoAttach := NewScopedUserIdentity(authUser(f.owner), f.proj.ID, []string{
+		"scheduled_event:read", "scheduled_event:list", store.UATScopeAgentRead, store.UATScopeProjectRead,
+	})
+	rec = requestAsIdentity(t, f.srv, uatNoAttach, http.MethodGet, schedURL, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), sentinel)
+}
