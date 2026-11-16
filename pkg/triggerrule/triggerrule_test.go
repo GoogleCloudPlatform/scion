@@ -1380,3 +1380,81 @@ func TestPass6RegexOptionAPreScanAndOrdinaryRules(t *testing.T) {
 		}
 	})
 }
+
+func TestNewEnforcesDialectForAdmissionAndEnvironmentCheck(t *testing.T) {
+	if _, err := triggerrule.New(nil); err == nil {
+		t.Fatalf("triggerrule.New(nil) = nil, expected error")
+	}
+
+	celEng, err := celengine.New(triggerrule.Env(), triggerrule.Stage1Limits(), celengine.DefaultCacheConfig())
+	if err != nil {
+		t.Fatalf("celengine.New: %v", err)
+	}
+	celDialect, err := ruleengine.NewCELDialect(celEng)
+	if err != nil {
+		t.Fatalf("NewCELDialect: %v", err)
+	}
+
+	// 1. Engine with CEL registered but no grant for "trigger" fails with wrapped
+	// *UnsupportedDialectError{Reason: consumer_not_registered}.
+	reNoGrant := ruleengine.NewEngine()
+	if err := reNoGrant.Register(celDialect); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	_, err = triggerrule.New(reNoGrant)
+	var unsup *ruleengine.UnsupportedDialectError
+	if !errors.As(err, &unsup) {
+		t.Fatalf("triggerrule.New without grant = %T (%v), want wrapped *UnsupportedDialectError", err, err)
+	}
+	if unsup.Dialect != ruleengine.DialectCEL || unsup.Consumer != triggerrule.ConsumerName || unsup.Reason != ruleengine.ReasonConsumerNotRegistered {
+		t.Fatalf("UnsupportedDialectError = %+v, want Dialect=%q Consumer=%q Reason=%q",
+			unsup, ruleengine.DialectCEL, triggerrule.ConsumerName, ruleengine.ReasonConsumerNotRegistered)
+	}
+
+	// 2. Engine where "trigger" is granted another dialect but not "cel" fails with dialect_not_allowed.
+	if err := reNoGrant.AllowConsumerDialects(triggerrule.ConsumerName, ruleengine.Grant("other")); err != nil {
+		t.Fatalf("AllowConsumerDialects other: %v", err)
+	}
+	_, err = triggerrule.New(reNoGrant)
+	unsup = nil
+	if !errors.As(err, &unsup) || unsup.Reason != ruleengine.ReasonDialectNotAllowed {
+		t.Fatalf("triggerrule.New with ungranted cel = %T (%v), want Reason=%q", err, err, ruleengine.ReasonDialectNotAllowed)
+	}
+
+	// 3. Admitted "trigger" -> "cel" whose CELDialect lacks the "trigger" environment is rejected.
+	otherEnv := triggerrule.Env()
+	otherEnv.Name = "other_env"
+	otherCELEng, err := celengine.New(otherEnv, triggerrule.Stage1Limits(), celengine.DefaultCacheConfig())
+	if err != nil {
+		t.Fatalf("celengine.New other_env: %v", err)
+	}
+	otherCELDialect, err := ruleengine.NewCELDialect(otherCELEng)
+	if err != nil {
+		t.Fatalf("NewCELDialect other_env: %v", err)
+	}
+	reMissingEnv := ruleengine.NewEngine()
+	if err := reMissingEnv.Register(otherCELDialect); err != nil {
+		t.Fatalf("Register otherCELDialect: %v", err)
+	}
+	if err := reMissingEnv.AllowConsumerDialects(triggerrule.ConsumerName, ruleengine.Grant(ruleengine.DialectCEL)); err != nil {
+		t.Fatalf("AllowConsumerDialects reMissingEnv: %v", err)
+	}
+	if _, err := triggerrule.New(reMissingEnv); err == nil || !strings.Contains(err.Error(), "missing environment") {
+		t.Fatalf("triggerrule.New with missing trigger env = %v, expected missing environment error", err)
+	}
+
+	// 4. Admitted "trigger" -> "cel" with "trigger" environment succeeds without clobbering sibling grants.
+	extraStub := &wrappingStubDialect{}
+	if err := reNoGrant.Register(extraStub); err != nil {
+		t.Fatalf("Register extraStub: %v", err)
+	}
+	if err := reNoGrant.AllowConsumerDialects(triggerrule.ConsumerName, ruleengine.Grant(ruleengine.DialectCEL), ruleengine.GrantIO(extraStub.Name())); err != nil {
+		t.Fatalf("AllowConsumerDialects cel+extra: %v", err)
+	}
+	if _, err := triggerrule.New(reNoGrant); err != nil {
+		t.Fatalf("triggerrule.New admitted: %v", err)
+	}
+	if !reNoGrant.Supports(triggerrule.ConsumerName, extraStub.Name()) {
+		t.Fatalf("triggerrule.New unexpectedly clobbered sibling consumer grant")
+	}
+}

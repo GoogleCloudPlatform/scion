@@ -308,6 +308,12 @@ func TestSystemOneRules_DefaultDenyNoConsumerAdmitted(t *testing.T) {
 		unsup = nil
 		require.ErrorAs(t, err, &unsup)
 		assert.Equal(t, ruleengine.ReasonEmptyConsumer, unsup.Reason)
+
+		h, err := re.DialectFor(emptyConsumer, systemone.DialectName)
+		assert.Nil(t, h)
+		unsup = nil
+		require.ErrorAs(t, err, &unsup)
+		assert.Equal(t, ruleengine.ReasonEmptyConsumer, unsup.Reason)
 	}
 
 	// 2. P1 registers no consumer allow-list: every named consumer is denied by default.
@@ -328,6 +334,12 @@ func TestSystemOneRules_DefaultDenyNoConsumerAdmitted(t *testing.T) {
 		unsup = nil
 		require.ErrorAs(t, err, &unsup)
 		assert.Equal(t, ruleengine.ReasonConsumerNotRegistered, unsup.Reason)
+
+		h, err := re.DialectFor(consumer, systemone.DialectName)
+		assert.Nil(t, h)
+		unsup = nil
+		require.ErrorAs(t, err, &unsup)
+		assert.Equal(t, ruleengine.ReasonConsumerNotRegistered, unsup.Reason)
 	}
 
 	// 3. Granting system_one without AllowIO is also denied with io_not_allowed.
@@ -338,6 +350,12 @@ func TestSystemOneRules_DefaultDenyNoConsumerAdmitted(t *testing.T) {
 		Name:     spec.ProbeEnvironmentName,
 	})
 	var unsupIO *ruleengine.UnsupportedDialectError
+	require.ErrorAs(t, err, &unsupIO)
+	assert.Equal(t, ruleengine.ReasonIONotAllowed, unsupIO.Reason)
+
+	hIO, err := re.DialectFor("pure_only_test_consumer", systemone.DialectName)
+	assert.Nil(t, hIO)
+	unsupIO = nil
 	require.ErrorAs(t, err, &unsupIO)
 	assert.Equal(t, ruleengine.ReasonIONotAllowed, unsupIO.Reason)
 

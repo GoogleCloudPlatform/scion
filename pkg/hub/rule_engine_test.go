@@ -50,10 +50,7 @@ func TestRuleEngine_NewRuleEngineAndPureRegistration(t *testing.T) {
 	require.NotNil(t, eng)
 	require.NotNil(t, cel)
 	assert.Equal(t, []string{ruleengine.DialectCEL}, eng.Dialects())
-
-	celReg, ok := eng.Dialect(ruleengine.DialectCEL)
-	require.True(t, ok)
-	assert.False(t, celReg.Declares().PerformsIO)
+	assert.False(t, cel.Declares().PerformsIO)
 
 	// Registration must perform registration only: nil store and nil secretBackend
 	// prove neither database nor settings-store reads occur during registration,
@@ -78,16 +75,45 @@ func TestRuleEngine_NewRuleEngineAndPureRegistration(t *testing.T) {
 	assert.Same(t, cel, srv.CELDialect())
 	assert.Equal(t, []string{ruleengine.DialectCEL, systemone.DialectName}, eng.Dialects())
 
-	soDialect, ok := eng.Dialect(systemone.DialectName)
-	require.True(t, ok)
-	assert.True(t, soDialect.Declares().PerformsIO)
-	assert.Equal(t, 6*time.Second, soDialect.Declares().MaxEvalTime)
-
-	// Deny-by-default: P1 registers no consumer grants on the shared engine.
+	// Deny-by-default: P1 registers no consumer grants on the shared engine,
+	// and DialectFor refuses to hand out raw handles to ungranted consumers.
 	for _, consumer := range []string{"", "trigger", "message", "probe"} {
 		assert.False(t, eng.Supports(consumer, ruleengine.DialectCEL), "consumer %q must not be admitted to cel without explicit grant", consumer)
 		assert.False(t, eng.Supports(consumer, systemone.DialectName), "consumer %q must not be admitted to system_one by default", consumer)
+
+		wantReason := ruleengine.ReasonConsumerNotRegistered
+		if consumer == "" {
+			wantReason = ruleengine.ReasonEmptyConsumer
+		}
+		for _, dialectName := range []string{ruleengine.DialectCEL, systemone.DialectName} {
+			d, dErr := eng.DialectFor(consumer, dialectName)
+			assert.Nil(t, d)
+			var unsup *ruleengine.UnsupportedDialectError
+			require.ErrorAs(t, dErr, &unsup)
+			assert.Equal(t, wantReason, unsup.Reason)
+		}
 	}
+
+	// Pure Grant without AllowIO cannot obtain the system_one handle via DialectFor;
+	// GrantIO admits and reveals the configured 6s MaxEvalTime and PerformsIO=true.
+	const testConsumer = "hub_reg_test"
+	require.NoError(t, eng.AllowConsumerDialects(testConsumer, ruleengine.Grant(ruleengine.DialectCEL), ruleengine.Grant(systemone.DialectName)))
+	celReg, err := eng.DialectFor(testConsumer, ruleengine.DialectCEL)
+	require.NoError(t, err)
+	assert.Same(t, cel, celReg)
+	assert.False(t, celReg.Declares().PerformsIO)
+
+	deniedSO, err := eng.DialectFor(testConsumer, systemone.DialectName)
+	assert.Nil(t, deniedSO)
+	var ioUnsup *ruleengine.UnsupportedDialectError
+	require.ErrorAs(t, err, &ioUnsup)
+	assert.Equal(t, ruleengine.ReasonIONotAllowed, ioUnsup.Reason)
+
+	require.NoError(t, eng.AllowConsumerDialects(testConsumer, ruleengine.GrantIO(systemone.DialectName)))
+	soDialect, err := eng.DialectFor(testConsumer, systemone.DialectName)
+	require.NoError(t, err)
+	assert.True(t, soDialect.Declares().PerformsIO)
+	assert.Equal(t, 6*time.Second, soDialect.Declares().MaxEvalTime)
 }
 
 func TestRuleEngine_SingleConstructionPointGuard(t *testing.T) {

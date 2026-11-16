@@ -803,21 +803,13 @@ func TestDenyByDefault_ReregistrationReplacesAndIntrospectionUnchanged(t *testin
 		t.Fatalf("Register system_one: %v", err)
 	}
 
-	// Introspection works identically before and after consumer registrations.
+	// Names-only introspection works identically before and after consumer registrations,
+	// whereas DialectFor enforces deny-by-default admission before any grants.
 	if got := eng.Dialects(); !slices.Equal(got, []string{"cel", "system_one"}) {
 		t.Fatalf("Dialects() before grants = %v, want [cel system_one]", got)
 	}
-	if d, ok := eng.Dialect("cel"); !ok || d != celDialect {
-		t.Fatalf("Dialect(cel) = (%v, %v), want celDialect", d, ok)
-	}
-	if d, ok := eng.Dialect(""); !ok || d != celDialect {
-		t.Fatalf("Dialect(\"\") = (%v, %v), want celDialect", d, ok)
-	}
-	if d, ok := eng.Dialect("system_one"); !ok || d != ioDialect {
-		t.Fatalf("Dialect(system_one) = (%v, %v), want ioDialect", d, ok)
-	}
-	if _, ok := eng.Dialect("missing"); ok {
-		t.Fatalf("Dialect(missing) = true, want false")
+	if d, err := eng.DialectFor("trigger", "cel"); d != nil || err == nil {
+		t.Fatalf("DialectFor before grants = (%v, %v), want nil, consumer_not_registered", d, err)
 	}
 
 	// Initial grant allows both "cel" and "system_one".
@@ -831,6 +823,15 @@ func TestDenyByDefault_ReregistrationReplacesAndIntrospectionUnchanged(t *testin
 	if !eng.Supports("trigger", "cel") || !eng.Supports("trigger", "system_one") {
 		t.Fatalf("expected both cel and system_one supported after initial grant")
 	}
+	if d, err := eng.DialectFor("trigger", "cel"); err != nil || d != celDialect {
+		t.Fatalf("DialectFor(trigger, cel) = (%v, %v), want celDialect, nil", d, err)
+	}
+	if d, err := eng.DialectFor(" trigger ", ""); err != nil || d != celDialect {
+		t.Fatalf("DialectFor(trigger, \"\") = (%v, %v), want celDialect, nil", d, err)
+	}
+	if d, err := eng.DialectFor("trigger", "system_one"); err != nil || d != ioDialect {
+		t.Fatalf("DialectFor(trigger, system_one) = (%v, %v), want ioDialect, nil", d, err)
+	}
 
 	// Re-registration REPLACES (does not union): drop system_one.
 	if err := eng.AllowConsumerDialects("trigger", ruleengine.Grant("cel")); err != nil {
@@ -842,6 +843,12 @@ func TestDenyByDefault_ReregistrationReplacesAndIntrospectionUnchanged(t *testin
 	if eng.Supports("trigger", "system_one") {
 		t.Fatalf("expected system_one revoked after replacement")
 	}
+	if d, err := eng.DialectFor("trigger", "system_one"); d != nil {
+		t.Fatalf("DialectFor after revoke returned non-nil handle: %v", d)
+	} else {
+		assertUnsupportedReason(t, err, "system_one", "trigger", ruleengine.ReasonDialectNotAllowed,
+			`unsupported dialect "system_one" for consumer "trigger": dialect_not_allowed`)
+	}
 	_, err = eng.Compile(context.Background(), "system_one", "r", ruleengine.KindFilter, ruleengine.EnvironmentRef{
 		Consumer: "trigger",
 		Name:     "trigger",
@@ -849,7 +856,7 @@ func TestDenyByDefault_ReregistrationReplacesAndIntrospectionUnchanged(t *testin
 	assertUnsupportedReason(t, err, "system_one", "trigger", ruleengine.ReasonDialectNotAllowed,
 		`unsupported dialect "system_one" for consumer "trigger": dialect_not_allowed`)
 
-	// Introspection remains unchanged.
+	// Names-only introspection remains unchanged.
 	if got := eng.Dialects(); !slices.Equal(got, []string{"cel", "system_one"}) {
 		t.Fatalf("Dialects() after replacement = %v, want [cel system_one]", got)
 	}
@@ -1230,7 +1237,7 @@ func TestDenyByDefault_ConcurrentAllowListReplacementRace(t *testing.T) {
 		}(w)
 	}
 
-	// Concurrent Supports readers.
+	// Concurrent Supports / DialectFor readers.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -1238,8 +1245,28 @@ func TestDenyByDefault_ConcurrentAllowListReplacementRace(t *testing.T) {
 		for range iterations {
 			_ = eng.Supports("flapping", "cel")
 			_ = eng.Supports("flapping", "concurrent_io")
+			if d, err := eng.DialectFor("flapping", "cel"); err != nil {
+				if d != nil {
+					t.Errorf("non-nil Dialect handle on denied CEL DialectFor: %v", d)
+				}
+				checkFlappingErr(err, "cel")
+			} else if d != celDialect {
+				t.Errorf("DialectFor(flapping, cel) = %v, want celDialect", d)
+			}
+			if d, err := eng.DialectFor("flapping", "concurrent_io"); err != nil {
+				if d != nil {
+					t.Errorf("non-nil Dialect handle on denied IO DialectFor: %v", d)
+				}
+				checkFlappingErr(err, "concurrent_io")
+			} else if d != ioDialect {
+				t.Errorf("DialectFor(flapping, concurrent_io) = %v, want ioDialect", d)
+			}
 			if !eng.Supports("stable", "cel") {
 				t.Errorf("stable consumer unexpectedly lost cel grant")
+				return
+			}
+			if d, err := eng.DialectFor("stable", "cel"); err != nil || d != celDialect {
+				t.Errorf("stable DialectFor = (%v, %v), want celDialect, nil", d, err)
 				return
 			}
 		}
@@ -1324,4 +1351,90 @@ func TestDenyByDefault_ConcurrentAllowListReplacementRace(t *testing.T) {
 
 	close(start)
 	wg.Wait()
+}
+
+func TestDenyByDefault_DialectForEnforcesAllFiveReasons(t *testing.T) {
+	celEng := newTestCELEngine(t, "trigger")
+	celDialect, err := ruleengine.NewCELDialect(celEng)
+	if err != nil {
+		t.Fatalf("NewCELDialect: %v", err)
+	}
+	ioDialect := &countingCachedDialect{name: "io_model", performsIO: true}
+
+	eng := ruleengine.NewEngine()
+	if err := eng.Register(celDialect); err != nil {
+		t.Fatalf("Register CEL: %v", err)
+	}
+	if err := eng.Register(ioDialect); err != nil {
+		t.Fatalf("Register io_model: %v", err)
+	}
+
+	// (1) empty_consumer (empty or whitespace; empty name normalizes to "cel").
+	for _, emptyCons := range []string{"", " \t\n "} {
+		d, err := eng.DialectFor(emptyCons, "")
+		if d != nil {
+			t.Fatalf("DialectFor(%q, \"\") returned non-nil handle %v", emptyCons, d)
+		}
+		assertUnsupportedReason(t, err, "cel", "", ruleengine.ReasonEmptyConsumer,
+			`unsupported dialect "cel": empty_consumer`)
+	}
+
+	// (2) consumer_not_registered.
+	if d, err := eng.DialectFor("unregistered", "io_model"); d != nil {
+		t.Fatalf("DialectFor unregistered returned handle %v", d)
+	} else {
+		assertUnsupportedReason(t, err, "io_model", "unregistered", ruleengine.ReasonConsumerNotRegistered,
+			`unsupported dialect "io_model" for consumer "unregistered": consumer_not_registered`)
+	}
+
+	// (3) dialect_not_allowed (wins ahead of unknown_dialect).
+	if err := eng.AllowConsumerDialects("cel_only", ruleengine.Grant("cel")); err != nil {
+		t.Fatalf("AllowConsumerDialects cel_only: %v", err)
+	}
+	if d, err := eng.DialectFor("cel_only", "io_model"); d != nil {
+		t.Fatalf("DialectFor ungranted io_model returned handle %v", d)
+	} else {
+		assertUnsupportedReason(t, err, "io_model", "cel_only", ruleengine.ReasonDialectNotAllowed,
+			`unsupported dialect "io_model" for consumer "cel_only": dialect_not_allowed`)
+	}
+	if d, err := eng.DialectFor("cel_only", "missing_dialect"); d != nil {
+		t.Fatalf("DialectFor ungranted missing_dialect returned handle %v", d)
+	} else {
+		assertUnsupportedReason(t, err, "missing_dialect", "cel_only", ruleengine.ReasonDialectNotAllowed,
+			`unsupported dialect "missing_dialect" for consumer "cel_only": dialect_not_allowed`)
+	}
+
+	// (4) unknown_dialect (granted, not yet registered).
+	if err := eng.AllowConsumerDialects("forward_consumer", ruleengine.Grant("future_pure")); err != nil {
+		t.Fatalf("AllowConsumerDialects forward_consumer: %v", err)
+	}
+	if d, err := eng.DialectFor("forward_consumer", "future_pure"); d != nil {
+		t.Fatalf("DialectFor unregistered future_pure returned handle %v", d)
+	} else {
+		assertUnsupportedReason(t, err, "future_pure", "forward_consumer", ruleengine.ReasonUnknownDialect,
+			`unsupported dialect "future_pure" for consumer "forward_consumer": unknown_dialect`)
+	}
+
+	// (5) io_not_allowed (pure Grant on PerformsIO dialect -> denied; GrantIO -> returns handle).
+	if err := eng.AllowConsumerDialects("pure_grant_consumer", ruleengine.Grant("io_model")); err != nil {
+		t.Fatalf("AllowConsumerDialects pure_grant_consumer: %v", err)
+	}
+	if d, err := eng.DialectFor("pure_grant_consumer", "io_model"); d != nil {
+		t.Fatalf("DialectFor io_model without AllowIO returned handle %v", d)
+	} else {
+		assertUnsupportedReason(t, err, "io_model", "pure_grant_consumer", ruleengine.ReasonIONotAllowed,
+			`unsupported dialect "io_model" for consumer "pure_grant_consumer": io_not_allowed`)
+	}
+
+	if err := eng.AllowConsumerDialects("io_grant_consumer", ruleengine.Grant("cel"), ruleengine.GrantIO("io_model")); err != nil {
+		t.Fatalf("AllowConsumerDialects io_grant_consumer: %v", err)
+	}
+	gotCEL, err := eng.DialectFor(" io_grant_consumer ", "")
+	if err != nil || gotCEL != celDialect {
+		t.Fatalf("DialectFor admitted CEL = (%v, %v), want celDialect, nil", gotCEL, err)
+	}
+	gotIO, err := eng.DialectFor("io_grant_consumer", "io_model")
+	if err != nil || gotIO != ioDialect {
+		t.Fatalf("DialectFor admitted io_model = (%v, %v), want ioDialect, nil", gotIO, err)
+	}
 }

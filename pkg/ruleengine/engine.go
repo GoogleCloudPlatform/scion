@@ -309,12 +309,10 @@ func (e *Engine) Register(d Dialect) error {
 	return nil
 }
 
-// Dialect returns the registered Dialect with name, if present.
-func (e *Engine) Dialect(name string) (Dialect, bool) {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	d, ok := e.dialects[normalizeDialect(name)]
-	return d, ok
+// DialectFor returns the registered Dialect with name when consumer is
+// admitted to it, or *UnsupportedDialectError otherwise.
+func (e *Engine) DialectFor(consumer, name string) (Dialect, error) {
+	return e.resolveDialect(consumer, name)
 }
 
 // Dialects returns the sorted names of all registered dialects.
