@@ -26,16 +26,24 @@
     `ListIdleSuspendCandidates(ctx, cutoff, heartbeatRecency, liveWorkCutoff, limit)`, selecting
     non-deleted `running` agents with a suspend-eligible activity, non-null
     `activity_since < cutoff`, non-null `last_seen >= heartbeatRecency`, and
-    `last_live_process_at IS NULL OR last_live_process_at < liveWorkCutoff`, bounded by `limit`
-    (`autoSuspendQueueLimit`).
-  - Added `ClaimIdleSuspend` (conditional CAS under the row lock before `DispatchAgentStop` that
-    swaps `run_intent` to `stopped` and sets `idle_suspend_claim_until` only while `phase=running`,
-    `run_id`, `activity`, and `activity_since` are unchanged and past grace, `last_seen` is within
-    `agentHeartbeatRecency`, `!HasRecentLiveWork`, no start/delete/reincarnation claim is held, and
-    no delivery landed at or after `activity_since`), `ClearIdleSuspendClaim`, `MarkAgentDelivery`,
-    and `IfIdleSuspend` on `UpdateAgentStatus` so the post-stop status write enforces the same
-    state preconditions.
-- **Idle sweep, generalized auto-suspend worker, and delivery-side handshake (`pkg/hub`):**
+    `last_live_process_at IS NULL OR last_live_process_at < liveWorkCutoff`, ordered oldest-idle
+    first (`ORDER BY activity_since ASC, id ASC`) and bounded by `limit`
+    (`autoSuspendQueueLimit = 1000`).
+  - Added `ClaimIdleSuspend` as the single commit point before `DispatchAgentStop`: under the row
+    lock and store clock (`storeNow`), it swaps `run_intent` to `stopped` and sets
+    `idle_suspend_claim_until` only while `phase=running`, `run_id`, `activity`, and
+    `activity_since` are unchanged and past grace, `last_seen` is within `agentHeartbeatRecency`,
+    `!HasRecentLiveWork`, no start/delete/reincarnation/idle-suspend claim is held, and no delivery
+    landed at or after `activity_since`. Once `ClaimIdleSuspend` commits and `DispatchAgentStop`
+    succeeds, the stop is irreversible: `UpdateAgentStatus` with `IfIdleSuspendCommit` accepts a row
+    in `running`, `stopping`, or `stopped` (handling `sciontool init`'s SIGTERM shutdown reports)
+    conditioned only on the same `run_id`, the held `claimUntil` lease, and no delete,
+    reincarnation, or foreign start claim, restoring `RetainedActivity` (`idle`, `completed`, or
+    `harness_error`) alongside `suspend_reason=idle` and never reverting `run_intent` to `running`.
+  - Standardized claim-expiry checks on the store clock (`MarkAgentDelivery` returning
+    `(agent, claimActive, err)` and setting `agent.IdleSuspendClaimActive` from `storeNow`, plus
+    `entTxStoreNow` inside `UpdateAgentStatus`).
+- **Idle sweep, generalized auto-suspend worker, and unified delivery gate (`pkg/hub`):**
   - Registered recurring singleton `agent-idle-suspend` (every 5 ticks, bounded by
     `stalledDetectionTimeout`) next to `agent-stalled-detection`, sharing `agentHeartbeatRecency`
     (`2m`).
@@ -44,12 +52,16 @@
     `syncAgentAfterStopRecord` and emitting `SUSPENDED`-only notifications. Both `idle` and
     `stalled` worker items now also skip soft-deleted rows, rows with active deletion or
     reincarnation, and rows with an in-flight lifecycle operation (`tryBeginLifecycleOp`).
-  - Every inbound delivery path to a running agent (user DM, agent DM, mention fan-out, web chat
-    primary and secondaries, live/retry notification dispatch, scheduled message fire, and
-    `group[]`) calls `MarkAgentDelivery` before dispatching; when an idle-suspend claim is in
-    flight, `autoWakeModeOf` / `shouldQueueAutoWake` routes the item onto the existing
-    `wakeOrAwaitStart` / `queueAutoWake` path to wait until suspension settles, then wake and
-    deliver.
+  - Routed every `AgentDispatcher.DispatchAgentMessage` caller in `pkg/hub` through one fail-closed
+    choke point (`dispatchMarkedAgentMessage`, enforced by AST guard
+    `TestMessageDispatchCallsMarkAgentDelivery`) that calls `MarkAgentDelivery` before any broker
+    dispatch. Auto-waking paths (DMs, mentions, web chat, notifications, scheduled messages) wait
+    for an active idle-suspend claim to settle via `wakeOrAwaitStart` / `queueAutoWake` and then
+    auto-wake and deliver; non-auto-waking paths (`MessageBrokerProxy`, `broadcastDirect`,
+    `handleBrokerInbound`, `dispatchRoutedRecipient`, `reconcile.deliverMessage`,
+    `deliverArtifactReview`, choice responses, `delegatedSender` DM, `group[]`, and delivery
+    notices) refuse, park, or mark failed just as they do for a suspended target, and store errors
+    in `MarkAgentDelivery` fail closed without dispatching.
 - **Phase 2b review follow-ups folded into phase 3:**
   - **Hub-to-user suspension conversion (`convertHubSuspendToUser`):** gated on
     `lifecycle.idle_suspend`, `POST /api/v1/agents/{id}/suspend` on an `idle`- or
