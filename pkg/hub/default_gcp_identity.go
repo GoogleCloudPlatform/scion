@@ -20,22 +20,28 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // Default-tier labels for the agent-creation GCP identity ladder (explicit
-// request -> per-profile default -> project default -> hub default -> unset,
-// the broker applies its runtime default). They name the tier in log lines and in the user-facing
-// error text, so an operator can tell which setting to fix.
+// request -> per-broker default -> per-profile default -> project default ->
+// hub default -> unset, the broker applies its runtime default). They name the
+// tier in log lines and in the user-facing error text, so an operator can tell
+// which setting to fix.
 //
-// A defaultTier is a struct rather than a string so the per-profile rung can
-// name the profile its entry belongs to in the user-facing error text.
+// A defaultTier is a struct rather than a string so the per-broker and
+// per-profile rungs can name the broker or profile their entry belongs to in
+// the user-facing error text.
 type defaultTier struct {
-	// name labels the tier in log lines ("project", "hub", "project profile").
+	// name labels the tier in log lines ("project", "hub", "project profile", "project broker").
 	name string
 	// profile is the broker profile of a per-profile default, "" otherwise.
 	profile string
+	// brokerID and brokerName identify the flat Runtime Broker of a per-broker default.
+	brokerID   string
+	brokerName string
 }
 
 var (
@@ -48,21 +54,41 @@ func profileDefaultTier(profile string) defaultTier {
 	return defaultTier{name: "project profile", profile: profile}
 }
 
-// subject names the setting at fault in an error, e.g. "project default" or
-// `project default for profile "remote"`.
-func (t defaultTier) subject() string {
-	if t.profile != "" {
-		return fmt.Sprintf("project default for profile %q", t.profile)
+// brokerDefaultTier is the tier of the per-broker default for a flat Runtime Broker.
+func brokerDefaultTier(brokerID, brokerName string) defaultTier {
+	return defaultTier{name: "project broker", brokerID: brokerID, brokerName: brokerName}
+}
+
+func (t defaultTier) brokerLabel() string {
+	if t.brokerName != "" {
+		return t.brokerName
 	}
-	return t.name + " default"
+	return t.brokerID
+}
+
+// subject names the setting at fault in an error, e.g. "project default",
+// `project default for Runtime Broker "cr-east"`, or `project default for profile "remote"`.
+func (t defaultTier) subject() string {
+	switch {
+	case t.brokerID != "" || t.brokerName != "":
+		return fmt.Sprintf("project default for Runtime Broker %q", t.brokerLabel())
+	case t.profile != "":
+		return fmt.Sprintf("project default for profile %q", t.profile)
+	default:
+		return t.name + " default"
+	}
 }
 
 // setting names what the operator should update.
 func (t defaultTier) setting() string {
-	if t.profile != "" {
+	switch {
+	case t.brokerID != "" || t.brokerName != "":
+		return fmt.Sprintf("the project's per-broker default service account for Runtime Broker %q", t.brokerLabel())
+	case t.profile != "":
 		return fmt.Sprintf("the project's per-profile default service account for profile %q", t.profile)
+	default:
+		return "the " + t.name + "'s default GCP identity setting"
 	}
-	return "the " + t.name + "'s default GCP identity setting"
 }
 
 // fixer and fix name who changes the default and where (ptone/scion#4019):
@@ -76,6 +102,19 @@ func (t defaultTier) fixer() string {
 
 func (t defaultTier) fix() string {
 	switch {
+	case t.brokerID != "" || t.brokerName != "":
+		if t.brokerName != "" && t.brokerID != "" && t.brokerName != t.brokerID {
+			return fmt.Sprintf("the %q (%s) entry of defaultGCPIdentityServiceAccountIDByBroker in the project settings "+
+				"(PUT /api/v1/projects/<project>/settings, or scion project identity default set|unset --broker %s)",
+				t.brokerID, t.brokerName, t.brokerID)
+		}
+		id := t.brokerID
+		if id == "" {
+			id = t.brokerName
+		}
+		return fmt.Sprintf("the %q entry of defaultGCPIdentityServiceAccountIDByBroker in the project settings "+
+			"(PUT /api/v1/projects/<project>/settings, or scion project identity default set|unset --broker %s)",
+			id, id)
 	case t.profile != "":
 		return fmt.Sprintf("the %q entry of defaultGCPIdentityServiceAccountIDByProfile in the project settings "+
 			"(PUT /api/v1/projects/<project>/settings, or the project's settings page)", t.profile)
@@ -86,6 +125,49 @@ func (t defaultTier) fix() string {
 		return "defaultGCPIdentityServiceAccountID in the project settings " +
 			"(PUT /api/v1/projects/<project>/settings, or the project's settings page)"
 	}
+}
+
+func (t defaultTier) fixForMode(mode string) string {
+	if mode != "" && mode != store.GCPMetadataModeAssign {
+		switch t {
+		case defaultTierHub:
+			return "agent_defaults.default_gcp_identity_mode in the hub's server config " +
+				"(PUT /api/v1/admin/server-config, or the admin server-config page)"
+		case defaultTierProject:
+			return "defaultGCPIdentityMode in the project settings " +
+				"(PUT /api/v1/projects/<project>/settings, or scion project identity default set|unset)"
+		}
+	}
+	return t.fix()
+}
+
+// brokerRejectionSuffix formats the attribution appended when a Runtime Broker
+// 400 rejects a GCP identity on agent create that came from this default rung
+// rather than an explicit request GCP identity.
+func (t defaultTier) brokerRejectionSuffix(mode string) string {
+	return fmt.Sprintf(" (GCP identity was set by the %s; %s can change or clear %s, or pass an explicit GCP identity on the request)",
+		t.subject(), t.fixer(), t.fixForMode(mode))
+}
+
+// isBrokerGCPIdentityError reports whether a Runtime Broker 400 validation
+// error message rejects an agent's GCP identity configuration.
+func isBrokerGCPIdentityError(msg string) bool {
+	lower := strings.ToLower(msg)
+	for _, marker := range []string{
+		"gcp identit",
+		"service account",
+		"serviceaccount",
+		"service_account",
+		"passthrough",
+		"assigned identit",
+		"cloud run identity",
+		"not attachable",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // projectProfileDefaultSA returns the per-profile default GCP service

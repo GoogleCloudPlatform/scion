@@ -297,6 +297,10 @@ var resolvedSettingDescriptors = map[string]resolvedSettingDescriptor{
 	projectSettingDefaultGCPIdentitySAIDByProfile: {
 		source: hubSourceNone,
 	},
+	// No hub-level per-broker default exists either.
+	projectSettingDefaultGCPIdentitySAIDByBroker: {
+		source: hubSourceNone,
+	},
 
 	// Default resource spec. The registry's five flat annotation keys face a
 	// single agent_defaults "default_resources" object, so the mapping is 5:1

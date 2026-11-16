@@ -74,6 +74,7 @@ const gcpSAImpactPageSize = 500
 const (
 	GCPSADefaultTierProject = "project"
 	GCPSADefaultTierProfile = "profile"
+	GCPSADefaultTierBroker  = "broker"
 	GCPSADefaultTierHub     = "hub"
 )
 
@@ -94,10 +95,11 @@ type GCPServiceAccountImpactDefault struct {
 	Tier      string `json:"tier"`
 	ProjectID string `json:"projectId,omitempty"`
 	Profile   string `json:"profile,omitempty"`
+	BrokerID  string `json:"brokerId,omitempty"`
 	// Clearable reports whether ?force=true, sent by this caller, clears
-	// this default: true for a project or per-profile default in a project
-	// the caller may update, false otherwise and always false for the hub
-	// default.
+	// this default: true for a project, per-profile or per-broker default in
+	// a project the caller may update, false otherwise and always false for
+	// the hub default.
 	Clearable bool `json:"clearable"`
 	Redacted  bool `json:"redacted,omitempty"`
 
@@ -260,6 +262,8 @@ func gcpSAInUseMessage(impact GCPServiceAccountImpact, force bool) string {
 			// Counted below, never named.
 		case d.Tier == GCPSADefaultTierProfile:
 			parts = append(parts, fmt.Sprintf("the default for profile %q in project %s", d.Profile, d.ProjectID))
+		case d.Tier == GCPSADefaultTierBroker:
+			parts = append(parts, fmt.Sprintf("the default for Runtime Broker %q in project %s", d.BrokerID, d.ProjectID))
 		default:
 			parts = append(parts, fmt.Sprintf("the default of project %s", d.ProjectID))
 		}
@@ -521,6 +525,19 @@ func projectDefaultsReferencing(project *store.Project, saID string) []GCPServic
 			Tier: GCPSADefaultTierProfile, ProjectID: project.ID, Profile: profile, project: project.ID,
 		})
 	}
+	byBroker := brokerDefaultSAIDsFromAnnotations(project.Annotations)
+	brokerIDs := make([]string, 0, len(byBroker))
+	for brokerID, id := range byBroker {
+		if id == saID {
+			brokerIDs = append(brokerIDs, brokerID)
+		}
+	}
+	sort.Strings(brokerIDs)
+	for _, brokerID := range brokerIDs {
+		out = append(out, GCPServiceAccountImpactDefault{
+			Tier: GCPSADefaultTierBroker, ProjectID: project.ID, BrokerID: brokerID, project: project.ID,
+		})
+	}
 	return out
 }
 
@@ -563,6 +580,7 @@ func (s *Server) applyCallerViewToDefaults(ctx context.Context, defaults []GCPSe
 		if !a.read {
 			d.ProjectID = ""
 			d.Profile = ""
+			d.BrokerID = ""
 			d.Redacted = true
 			hidden++
 		}
@@ -643,6 +661,17 @@ func clearProjectDefaultsReferencing(project *store.Project, saID string) {
 		}
 		if len(kept) != len(byProfile) {
 			setProfileDefaultSAIDsAnnotation(project.Annotations, kept)
+		}
+	}
+	if byBroker := brokerDefaultSAIDsFromAnnotations(project.Annotations); byBroker != nil {
+		kept := make(map[string]string, len(byBroker))
+		for brokerID, id := range byBroker {
+			if id != saID {
+				kept[brokerID] = id
+			}
+		}
+		if len(kept) != len(byBroker) {
+			setBrokerDefaultSAIDsAnnotation(project.Annotations, kept)
 		}
 	}
 }

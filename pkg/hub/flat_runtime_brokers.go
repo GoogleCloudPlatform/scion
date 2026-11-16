@@ -1114,3 +1114,55 @@ func (s *Server) MarkEmbeddedFlatRuntimeBrokerOffline(ctx context.Context, broke
 	}
 	return nil
 }
+
+// brokerDefaultSA returns the project's per-broker default GCP service account
+// ID (ProjectSettings.DefaultGCPIdentityServiceAccountIDByBroker) for an agent
+// targeting runtimeBrokerID. It applies only when experiments.FlatRuntimeBrokers
+// is enabled, the agent is not a hub-direct managed agent, and the target
+// Runtime Broker exists and is flat. Stale entries for deleted (ErrNotFound) or
+// non-flat brokers are ignored at read ("", nil); transient store errors are
+// returned so callers fail closed rather than falling through to a broader default.
+func (s *Server) brokerDefaultSA(ctx context.Context, agent *store.Agent, runtimeBrokerID string, project *store.Project) (string, error) {
+	if agent == nil || project == nil || runtimeBrokerID == "" {
+		return "", nil
+	}
+	if !s.experimentEnabled(experiments.FlatRuntimeBrokers) {
+		return "", nil
+	}
+	if managedAgentCreateFrom(ctx) || isManagedAgentRuntime(agent.Runtime) {
+		return "", nil
+	}
+	byBroker := projectSettingsFromAnnotations(project).DefaultGCPIdentityServiceAccountIDByBroker
+	if len(byBroker) == 0 {
+		return "", nil
+	}
+	saID := strings.TrimSpace(byBroker[runtimeBrokerID])
+	if saID == "" {
+		return "", nil
+	}
+	broker, err := s.store.GetRuntimeBroker(ctx, runtimeBrokerID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return "", nil
+		}
+		return "", err
+	}
+	if broker == nil || !broker.IsFlat() {
+		return "", nil
+	}
+	return saID, nil
+}
+
+// brokerDefaultTierFor builds the defaultTier for runtimeBrokerID, using
+// knownBroker's Name when already loaded and otherwise reading it best-effort.
+func (s *Server) brokerDefaultTierFor(ctx context.Context, runtimeBrokerID string, knownBroker *store.RuntimeBroker) defaultTier {
+	if knownBroker != nil && knownBroker.ID == runtimeBrokerID {
+		return brokerDefaultTier(runtimeBrokerID, strings.TrimSpace(knownBroker.Name))
+	}
+	if runtimeBrokerID != "" {
+		if b, err := s.store.GetRuntimeBroker(ctx, runtimeBrokerID); err == nil && b != nil {
+			return brokerDefaultTier(runtimeBrokerID, strings.TrimSpace(b.Name))
+		}
+	}
+	return brokerDefaultTier(runtimeBrokerID, "")
+}

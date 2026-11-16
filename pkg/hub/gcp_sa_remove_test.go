@@ -103,6 +103,7 @@ func TestGCPSARemove_RefusedWhileProjectDefaultsReferenceIt(t *testing.T) {
 	setSARemoveProjectAnnotations(t, s, project.ID, map[string]string{
 		projectSettingDefaultGCPIdentityMode:          store.GCPMetadataModeAssign,
 		projectSettingDefaultGCPIdentitySAID:          sa.ID,
+		projectSettingDefaultGCPIdentitySAIDByBroker:  fmt.Sprintf(`{"broker-1":%q}`, sa.ID),
 		projectSettingDefaultGCPIdentitySAIDByProfile: fmt.Sprintf(`{"k8s":%q}`, sa.ID),
 	})
 
@@ -116,6 +117,7 @@ func TestGCPSARemove_RefusedWhileProjectDefaultsReferenceIt(t *testing.T) {
 	assert.Equal(t, []GCPServiceAccountImpactDefault{
 		{Tier: GCPSADefaultTierProject, ProjectID: project.ID, Clearable: true},
 		{Tier: GCPSADefaultTierProfile, ProjectID: project.ID, Profile: "k8s", Clearable: true},
+		{Tier: GCPSADefaultTierBroker, ProjectID: project.ID, BrokerID: "broker-1", Clearable: true},
 	}, impact.Defaults)
 	assert.NotEmpty(t, impact.ManualCleanup)
 
@@ -136,6 +138,7 @@ func TestGCPSARemove_ForceClearsDefaultsThenDeletes(t *testing.T) {
 	setSARemoveProjectAnnotations(t, s, project.ID, map[string]string{
 		projectSettingDefaultGCPIdentityMode:          store.GCPMetadataModeAssign,
 		projectSettingDefaultGCPIdentitySAID:          sa.ID,
+		projectSettingDefaultGCPIdentitySAIDByBroker:  fmt.Sprintf(`{"broker-1":%q,"broker-2":%q}`, sa.ID, other.ID),
 		projectSettingDefaultGCPIdentitySAIDByProfile: fmt.Sprintf(`{"k8s":%q,"gke":%q}`, sa.ID, other.ID),
 		projectSettingDefaultTemplate:                 "unrelated-template",
 	})
@@ -148,7 +151,7 @@ func TestGCPSARemove_ForceClearsDefaultsThenDeletes(t *testing.T) {
 	var resp DeleteGCPServiceAccountResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.True(t, resp.Deleted)
-	assert.Len(t, resp.ClearedDefaults, 2)
+	assert.Len(t, resp.ClearedDefaults, 3)
 	assert.NotEmpty(t, resp.Impact.ManualCleanup)
 
 	assert.False(t, saExists(t, s, sa.ID))
@@ -159,6 +162,8 @@ func TestGCPSARemove_ForceClearsDefaultsThenDeletes(t *testing.T) {
 	assert.False(t, hasSA, "the project default must no longer name the account")
 	assert.Equal(t, store.GCPMetadataModeBlock, p.Annotations[projectSettingDefaultGCPIdentityMode],
 		"a cleared assign default becomes block, never unset (which could fall through to a broader default)")
+	assert.Equal(t, map[string]string{"broker-2": other.ID}, brokerDefaultSAIDsFromAnnotations(p.Annotations),
+		"only the per-broker entries naming the account are removed")
 	assert.Equal(t, map[string]string{"gke": other.ID}, profileDefaultSAIDsFromAnnotations(p.Annotations),
 		"only the per-profile entries naming the account are removed")
 	assert.Equal(t, "unrelated-template", p.Annotations[projectSettingDefaultTemplate],
@@ -169,7 +174,7 @@ func TestGCPSARemove_ForceClearsDefaultsThenDeletes(t *testing.T) {
 	require.Len(t, events, 1)
 	assert.True(t, events[0].Success)
 	assert.Equal(t, "true", events[0].Details["force"])
-	assert.Equal(t, "2", events[0].Details["defaults_cleared"])
+	assert.Equal(t, "3", events[0].Details["defaults_cleared"])
 }
 
 func TestGCPSARemove_AgentsDoNotBlock(t *testing.T) {

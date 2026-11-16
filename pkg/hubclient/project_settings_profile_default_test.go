@@ -37,3 +37,19 @@ func TestProjectSettings_ProfileDefaultSAMapMarshalling(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(b), `"defaultGCPIdentityServiceAccountIDByProfile":{"k8s":"sa"}`)
 }
+
+// The per-broker default map matches the per-profile map's PUT semantics: an
+// empty map clears ({}), a nil map keeps (null).
+func TestProjectSettings_BrokerDefaultSAMapMarshalling(t *testing.T) {
+	b, err := json.Marshal(ProjectSettings{DefaultGCPIdentityServiceAccountIDByBroker: map[string]string{}})
+	require.NoError(t, err)
+	assert.Contains(t, string(b), `"defaultGCPIdentityServiceAccountIDByBroker":{}`, "an empty map must reach the hub to clear the setting")
+
+	b, err = json.Marshal(ProjectSettings{})
+	require.NoError(t, err)
+	assert.Contains(t, string(b), `"defaultGCPIdentityServiceAccountIDByBroker":null`, "a nil map keeps the stored setting")
+
+	b, err = json.Marshal(ProjectSettings{DefaultGCPIdentityServiceAccountIDByBroker: map[string]string{"broker-1": "sa"}})
+	require.NoError(t, err)
+	assert.Contains(t, string(b), `"defaultGCPIdentityServiceAccountIDByBroker":{"broker-1":"sa"}`)
+}

@@ -54,6 +54,7 @@ func mergeTestStoredSettings() map[string]string {
 		DefaultGCPIdentityMode:                      store.GCPMetadataModeAssign,
 		DefaultGCPIdentityServiceAccountID:          "sa-a",
 		DefaultGCPIdentityServiceAccountIDByProfile: map[string]string{"p1": "sa-p1"},
+		DefaultGCPIdentityServiceAccountIDByBroker:  map[string]string{"b1": "sa-b1"},
 		MaxAgentRole:     "full",
 		DefaultAgentRole: "baseline",
 	})
@@ -140,6 +141,7 @@ var putMergeFields = []putMergeField{
 	{name: projectSettingsFieldGCPIdentityMode, setJSON: `"passthrough"`, setWant: map[string]string{projectSettingDefaultGCPIdentityMode: "passthrough"}, clearJSON: `""`, keys: []string{projectSettingDefaultGCPIdentityMode}},
 	{name: projectSettingsFieldGCPIdentitySAID, setJSON: `"sa-b"`, setWant: map[string]string{projectSettingDefaultGCPIdentitySAID: "sa-b"}, clearJSON: `""`, keys: []string{projectSettingDefaultGCPIdentitySAID}},
 	{name: projectSettingsFieldGCPIdentitySAIDByProfile, setJSON: `{"p2":"sa-p2"}`, setWant: map[string]string{projectSettingDefaultGCPIdentitySAIDByProfile: `{"p2":"sa-p2"}`}, clearJSON: `{}`, keys: []string{projectSettingDefaultGCPIdentitySAIDByProfile}},
+	{name: projectSettingsFieldGCPIdentitySAIDByBroker, setJSON: `{"b2":"sa-b2"}`, setWant: map[string]string{projectSettingDefaultGCPIdentitySAIDByBroker: `{"b2":"sa-b2"}`}, clearJSON: `{}`, keys: []string{projectSettingDefaultGCPIdentitySAIDByBroker}},
 	{name: projectSettingsFieldMaxAgentRole, setJSON: `"readonly"`, setWant: map[string]string{projectSettingMaxAgentRole: "readonly"}, clearJSON: `""`, keys: []string{projectSettingMaxAgentRole}},
 	{name: projectSettingsFieldDefaultAgentRole, setJSON: `"readonly"`, setWant: map[string]string{projectSettingDefaultAgentRole: "readonly"}, clearJSON: `""`, keys: []string{projectSettingDefaultAgentRole}},
 }

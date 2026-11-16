@@ -6404,7 +6404,8 @@ func (s *Server) scheduledCreatorIdentity(ctx context.Context, evt store.Schedul
 // applyScheduledProjectDefaultGCPIdentity is the scheduler-path twin of the
 // project-default/hub-default GCP identity ladder in createAgentInProject
 // (handlers_agents_core.go). A scheduled dispatch carries no explicit
-// gcp_identity, so the ladder here starts one rung down: the per-profile
+// gcp_identity, so the ladder here starts one rung down: the per-broker
+// default for the flat Runtime Broker the agent targets, then the per-profile
 // default for the profile the agent runs under, then the project default,
 // then — when the project has no default at all — the hub default, then
 // block (#1927). The same checks run in the same order at each assign rung
@@ -6441,6 +6442,24 @@ func (s *Server) scheduledCreatorIdentity(ctx context.Context, evt store.Schedul
 func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, agent *store.Agent, project *store.Project) (origin store.SAAssignmentOrigin, err error) {
 	if agent.AppliedConfig == nil {
 		agent.AppliedConfig = &store.AgentAppliedConfig{}
+	}
+	// A per-broker default for the flat Runtime Broker this agent targets wins
+	// over the project-wide default, as on the create path.
+	brokerSAID, err := s.brokerDefaultSA(ctx, agent, agent.RuntimeBrokerID, project)
+	if err != nil {
+		return "", err
+	}
+	if brokerSAID != "" {
+		tier := s.brokerDefaultTierFor(ctx, agent.RuntimeBrokerID, nil)
+		cfg, err := s.resolveDefaultSAAssignmentCore(ctx, nil, agent.ProjectID,
+			brokerSAID, SurfaceProjectDefault, tier)
+		if err != nil {
+			return "", err
+		}
+		agent.AppliedConfig.GCPIdentity = cfg
+		slog.Debug("GCP identity chosen by default", "source", "project-broker-default",
+			"project_id", agent.ProjectID, "agent", agent.Name, "broker_id", agent.RuntimeBrokerID, "broker", tier.brokerLabel(), "sa_id", cfg.ServiceAccountID)
+		return store.SAAssignmentOriginScheduledProjectBrokerDefault, nil
 	}
 	// A per-profile default for the profile this agent runs under wins over
 	// the project-wide default, as on the create path.

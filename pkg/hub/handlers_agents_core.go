@@ -2261,6 +2261,8 @@ func (s *Server) createAgentInProject(
 	// assignment's source is this request's principal, never the
 	// administrator who configured a default.
 	var saOrigin store.SAAssignmentOrigin
+	var defaultIdentityTier *defaultTier
+	var defaultIdentityMode string
 	if req.GCPIdentity != nil {
 		switch req.GCPIdentity.MetadataMode {
 		case store.GCPMetadataModeAssign:
@@ -2292,18 +2294,40 @@ func (s *Server) createAgentInProject(
 			InternalError(w)
 			return
 		}
+	} else if brokerSAID, brokerLookupErr := s.brokerDefaultSA(ctx, agent, runtimeBrokerID, project); brokerLookupErr != nil || brokerSAID != "" {
+		if brokerLookupErr != nil {
+			writeErrorFromErr(w, brokerLookupErr, "")
+			return
+		}
+		// No explicit GCP identity, and the project sets a default service
+		// account for the flat Runtime Broker this agent targets. It wins over
+		// the project-wide and hub defaults below.
+		tier := s.brokerDefaultTierFor(ctx, runtimeBrokerID, resolvedBroker)
+		cfg, ok := s.resolveDefaultSAAssignment(ctx, w, r, projectID, brokerSAID, SurfaceProjectDefault, tier)
+		if !ok {
+			return
+		}
+		agent.AppliedConfig.GCPIdentity = cfg
+		saOrigin = store.SAAssignmentOriginCreateProjectBrokerDefault
+		defaultIdentityTier = &tier
+		defaultIdentityMode = cfg.MetadataMode
+		slog.Debug("GCP identity chosen by default", "source", "project-broker-default",
+			"project_id", projectID, "agent", agent.Name, "broker_id", runtimeBrokerID, "broker", tier.brokerLabel(), "sa_id", cfg.ServiceAccountID)
 	} else if profileName, profileSAID := s.profileDefaultSAUnlessPinned(ctx, agent, runtimeBrokerID, project); profileSAID != "" {
 		// No explicit GCP identity, and the project sets a default service
 		// account for the profile this agent runs under. It is more specific
 		// than the project-wide default below and wins over it, including an
 		// explicit project "block" (block is not offered on Kubernetes,
 		// ptone/scion#2328, where per-profile defaults matter most).
-		cfg, ok := s.resolveDefaultSAAssignment(ctx, w, r, projectID, profileSAID, SurfaceProjectDefault, profileDefaultTier(profileName))
+		tier := profileDefaultTier(profileName)
+		cfg, ok := s.resolveDefaultSAAssignment(ctx, w, r, projectID, profileSAID, SurfaceProjectDefault, tier)
 		if !ok {
 			return
 		}
 		agent.AppliedConfig.GCPIdentity = cfg
 		saOrigin = store.SAAssignmentOriginCreateProjectProfileDefault
+		defaultIdentityTier = &tier
+		defaultIdentityMode = cfg.MetadataMode
 		pinResolvedProfile(agent.AppliedConfig, profileName)
 		slog.Debug("GCP identity chosen by default", "source", "project-profile-default",
 			"project_id", projectID, "agent", agent.Name, "profile", profileName, "sa_id", cfg.ServiceAccountID)
@@ -2331,6 +2355,9 @@ func (s *Server) createAgentInProject(
 					MetadataMode:        store.GCPMetadataModePassthrough,
 					RequireLocalRuntime: true,
 				}
+				tier := defaultTierProject
+				defaultIdentityTier = &tier
+				defaultIdentityMode = store.GCPMetadataModePassthrough
 			}
 		case store.GCPMetadataModeAssign:
 			if projectSettings.DefaultGCPIdentityServiceAccountID != "" {
@@ -2341,12 +2368,18 @@ func (s *Server) createAgentInProject(
 				}
 				agent.AppliedConfig.GCPIdentity = cfg
 				saOrigin = store.SAAssignmentOriginCreateProjectDefault
+				tier := defaultTierProject
+				defaultIdentityTier = &tier
+				defaultIdentityMode = cfg.MetadataMode
 				slog.Debug("GCP identity chosen by default", "source", "project-default",
 					"project_id", projectID, "agent", agent.Name, "sa_id", cfg.ServiceAccountID)
 			} else {
 				agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
 					MetadataMode: store.GCPMetadataModeBlock,
 				}
+				tier := defaultTierProject
+				defaultIdentityTier = &tier
+				defaultIdentityMode = store.GCPMetadataModeBlock
 			}
 		case store.GCPMetadataModeBlock:
 			// Project explicitly set "block" — that is the operator's decision
@@ -2357,6 +2390,9 @@ func (s *Server) createAgentInProject(
 			agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
 				MetadataMode: store.GCPMetadataModeBlock,
 			}
+			tier := defaultTierProject
+			defaultIdentityTier = &tier
+			defaultIdentityMode = store.GCPMetadataModeBlock
 		default:
 			// No project default configured (empty string) — fall back to the
 			// hub-level operational default, then to unset (the broker
@@ -2427,6 +2463,9 @@ func (s *Server) createAgentInProject(
 						// arm above sets it the same way.
 						RequireLocalRuntime: true,
 					}
+					tier := defaultTierHub
+					defaultIdentityTier = &tier
+					defaultIdentityMode = store.GCPMetadataModePassthrough
 				}
 			case store.GCPMetadataModeAssign:
 				if hubDefaults.DefaultGCPIdentityServiceAccountID != "" {
@@ -2437,12 +2476,18 @@ func (s *Server) createAgentInProject(
 					}
 					agent.AppliedConfig.GCPIdentity = cfg
 					saOrigin = store.SAAssignmentOriginCreateHubDefault
+					tier := defaultTierHub
+					defaultIdentityTier = &tier
+					defaultIdentityMode = cfg.MetadataMode
 					slog.Debug("GCP identity chosen by default", "source", "hub-default",
 						"project_id", projectID, "agent", agent.Name, "sa_id", cfg.ServiceAccountID)
 				} else {
 					agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
 						MetadataMode: store.GCPMetadataModeBlock,
 					}
+					tier := defaultTierHub
+					defaultIdentityTier = &tier
+					defaultIdentityMode = store.GCPMetadataModeBlock
 				}
 			case store.GCPMetadataModeBlock:
 				// Hub explicitly configured "block" as its own default — an
@@ -2453,6 +2498,9 @@ func (s *Server) createAgentInProject(
 				agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
 					MetadataMode: store.GCPMetadataModeBlock,
 				}
+				tier := defaultTierHub
+				defaultIdentityTier = &tier
+				defaultIdentityMode = store.GCPMetadataModeBlock
 			default:
 				// No hub default configured at all (empty) — leave
 				// AppliedConfig.GCPIdentity unset rather than writing an
@@ -2960,7 +3008,7 @@ func (s *Server) createAgentInProject(
 					// it minted on this error return.
 					failCreate(createRollback{Stage: createStageDispatchEnvGather, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() {
 						if !s.relayProjectPathRefusal(ctx, w, agent, err) {
-							dispatchCreateErrorResponse(w, err, agent.ID)
+							dispatchCreateErrorResponseWithDefaultTier(w, err, agent.ID, defaultIdentityTier, defaultIdentityMode)
 						}
 					})
 					return
@@ -3055,7 +3103,7 @@ func (s *Server) createAgentInProject(
 					// it minted on this error return.
 					failCreate(createRollback{Stage: createStageDispatch, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() {
 						if !s.relayProjectPathRefusal(ctx, w, agent, err) {
-							dispatchCreateErrorResponse(w, err, agent.ID)
+							dispatchCreateErrorResponseWithDefaultTier(w, err, agent.ID, defaultIdentityTier, defaultIdentityMode)
 						}
 					})
 					return
@@ -3099,7 +3147,9 @@ func (s *Server) createAgentInProject(
 					// as a full create does.
 					s.agentLifecycleLog.Warn("Provision-only create failed: agent token not issued",
 						"agent_id", agent.ID, "agent", agent.Name, "broker", agent.RuntimeBrokerID, "error", err)
-					failCreate(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
+					failCreate(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() {
+						dispatchCreateErrorResponseWithDefaultTier(w, err, agent.ID, defaultIdentityTier, defaultIdentityMode)
+					})
 					return
 				}
 				if isSkillResolutionDispatchError(err) {
@@ -3112,13 +3162,15 @@ func (s *Server) createAgentInProject(
 					// provision failures stay warnings.
 					s.agentLifecycleLog.Warn("Provision-only create failed: required skill could not be resolved",
 						"agent_id", agent.ID, "agent", agent.Name, "broker", agent.RuntimeBrokerID, "error", err)
-					failCreate(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() { dispatchCreateErrorResponse(w, err, agent.ID) })
+					failCreate(createRollback{Stage: createStageProvision, Cause: err, DeleteRuntime: dispatchDeleteFailedCreate(s.store, dispatcher, agent)}, func() {
+						dispatchCreateErrorResponseWithDefaultTier(w, err, agent.ID, defaultIdentityTier, defaultIdentityMode)
+					})
 					return
 				}
 				// A Kubernetes identity mapping refusal reads as the
 				// hub's coded message, not the raw broker body
 				// (ptone/scion#4024).
-				warnings = append(warnings, api.ProvisionFailedWarningPrefix+dispatchFailureText(err))
+				warnings = append(warnings, api.ProvisionFailedWarningPrefix+dispatchFailureTextWithDefaultTier(err, defaultIdentityTier, defaultIdentityMode))
 			} else {
 				agent.Phase = string(state.PhaseCreated)
 				if err := s.updateAgentAfterDispatch(ctx, agent); err != nil {
@@ -6103,6 +6155,10 @@ const projectStorageUnavailableErrorCode = api.BrokerErrCodeProjectStorageUnavai
 // dispatch's run-ID write (store.ErrDeleteInProgress); that answers 409
 // delete_in_progress, as start does (ptone/scion#2550).
 func dispatchCreateErrorResponse(w http.ResponseWriter, err error, agentID string) {
+	dispatchCreateErrorResponseWithDefaultTier(w, err, agentID, nil, "")
+}
+
+func dispatchCreateErrorResponseWithDefaultTier(w http.ResponseWriter, err error, agentID string, tier *defaultTier, mode string) {
 	if writeAgentTokenRecordError(w, err) {
 		return
 	}
@@ -6127,9 +6183,9 @@ func dispatchCreateErrorResponse(w http.ResponseWriter, err error, agentID strin
 		// Response already written.
 	case relayWorkspaceStorageUnconfigured(w, err):
 		// Response already written.
-	case relayBrokerRefusal(w, err):
+	case relayBrokerRefusalWithDefaultTier(w, err, tier, mode):
 		// Response already written.
-	case relayIdentityMappingError(w, err):
+	case relayIdentityMappingErrorWithDefaultTier(w, err, tier, mode):
 		// Response already written.
 	case isBrokerStatus(err, http.StatusNotFound):
 		message := err.Error()
@@ -6228,6 +6284,10 @@ func relayWorkspaceStorageUnconfigured(w http.ResponseWriter, err error) bool {
 // as well, so the status and code are keyed on, never the message text
 // (ptone/scion#3501).
 func relayBrokerRefusal(w http.ResponseWriter, err error) bool {
+	return relayBrokerRefusalWithDefaultTier(w, err, nil, "")
+}
+
+func relayBrokerRefusalWithDefaultTier(w http.ResponseWriter, err error, tier *defaultTier, mode string) bool {
 	var se *brokerStatusError
 	if !errors.As(err, &se) {
 		return false
@@ -6264,7 +6324,11 @@ func relayBrokerRefusal(w http.ResponseWriter, err error) bool {
 	default:
 		return false
 	}
-	writeError(w, se.StatusCode, code, se.brokerErrorMessage(), nil)
+	msg := se.brokerErrorMessage()
+	if tier != nil && se.StatusCode == http.StatusBadRequest && code == ErrCodeValidationError && isBrokerGCPIdentityError(msg) {
+		msg += tier.brokerRejectionSuffix(mode)
+	}
+	writeError(w, se.StatusCode, code, msg, nil)
 	return true
 }
 
