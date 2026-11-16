@@ -130,7 +130,13 @@ func (s *Server) logFireAuthorityRefusal(req hubfire.FireRequest, permissionID s
 	if req.Authority.DefinitionKind == hubfire.DefinitionKindSchedule {
 		scheduleID = req.Authority.DefinitionID
 	}
-	slog.Warn("deferred fire authority denied",
+	msg := "deferred fire authority denied"
+	if req.ActionType == "message" &&
+		(req.Authority.DefinitionKind == hubfire.DefinitionKindSchedule ||
+			req.Authority.DefinitionKind == hubfire.DefinitionKindScheduledEvent) {
+		msg = "Scheduler: scheduled message authority denied at fire time"
+	}
+	slog.Warn(msg,
 		"actionType", req.ActionType,
 		"permission", permissionID,
 		"eventID", req.Authority.FireID,
@@ -156,25 +162,35 @@ func (s *Server) fireAction(ctx context.Context, req hubfire.FireRequest) hubfir
 }
 
 func (s *Server) fireActionWith(ctx context.Context, req hubfire.FireRequest, action FireAction) hubfire.FireOutcome {
+	out, _ := s.fireActionWithRawError(ctx, req, action)
+	return out
+}
+
+func (s *Server) fireActionWithRawError(ctx context.Context, req hubfire.FireRequest, action FireAction) (hubfire.FireOutcome, error) {
 	if req.Executor.Kind != "" || req.Executor.ID != "" {
 		ctx = ContextWithExecutor(ctx, req.Executor)
 	}
 	if legacy, ok := action.(*legacyAction); ok {
-		return legacy.run(ctx, req)
+		out := legacy.run(ctx, req)
+		if out.Status == hubfire.FireStatusFired {
+			return out, nil
+		}
+		return out, scheduledKnownError(out.Error)
 	}
 	if pv, ok := action.(FirePayloadValidator); ok {
 		if err := pv.ValidatePayload(req); err != nil {
 			return hubfire.FireOutcome{
 				Status: hubfire.FireStatusFailed,
 				Error:  err.Error(),
-			}
+			}, err
 		}
 	}
 	if s == nil {
+		err := errors.New("fire action: server not configured")
 		return hubfire.FireOutcome{
 			Status: hubfire.FireStatusFailed,
-			Error:  "fire action: server not configured",
-		}
+			Error:  err.Error(),
+		}, err
 	}
 	if req.Tracked == nil {
 		req.Tracked = newScheduledFireTracker(s, req.Authority.FireID, nil)
@@ -185,23 +201,24 @@ func (s *Server) fireActionWith(ctx context.Context, req hubfire.FireRequest, ac
 	auth, identity, err := s.resolveRecordedAuthority(ctx, req.Authority, req.ProjectID, permissionID)
 	if err != nil {
 		s.logFireAuthorityRefusal(req, permissionID, err)
+		refusalText := fireAuthorityRefusalText(req.ActionType, err)
 		return hubfire.FireOutcome{
 			Status: hubfire.FireStatusRefused,
-			Error:  fireAuthorityRefusalText(req.ActionType, err),
-		}
+			Error:  refusalText,
+		}, scheduledKnownError(refusalText)
 	}
 	authorized, refusal, err := action.Authorize(ctx, req, auth, identity)
 	if err != nil {
 		return hubfire.FireOutcome{
 			Status: hubfire.FireStatusFailed,
 			Error:  err.Error(),
-		}
+		}, err
 	}
 	if refusal != nil {
 		return hubfire.FireOutcome{
 			Status: hubfire.FireStatusRefused,
 			Error:  refusal.Reason,
-		}
+		}, scheduledKnownError(refusal.Reason)
 	}
 	out, err := action.Fire(ctx, req, authorized)
 	if err != nil {
@@ -211,17 +228,17 @@ func (s *Server) fireActionWith(ctx context.Context, req hubfire.FireRequest, ac
 				Error:       reason,
 				AfterRecord: out.AfterRecord,
 				Detached:    out.Detached,
-			}
+			}, err
 		}
 		return hubfire.FireOutcome{
 			Status:      hubfire.FireStatusFailed,
 			Error:       err.Error(),
 			AfterRecord: out.AfterRecord,
 			Detached:    out.Detached,
-		}
+		}, err
 	}
 	if out.Status == "" {
 		out.Status = hubfire.FireStatusFired
 	}
-	return out
+	return out, nil
 }

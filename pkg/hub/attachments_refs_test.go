@@ -350,7 +350,7 @@ var renderNeverCarries = map[string]string{
 	"messagebroker.go:deliverToAgent":                           "artifact attachments never travel on the bus",
 	"handlers_broker_inbound_routed.go:dispatchRoutedRecipient": "chat plugins move attachments in a later phase",
 	"notifications.go:dispatchToAgent":                          "notifications carry no attachments",
-	"server.go:messageEventHandler":                             "event notices carry no attachments",
+	"action_message.go:deliverMessageAction":                    "event notices carry no attachments",
 	"artifacts_review.go:deliverArtifactReview":                 "artifact review notices carry no attachments",
 	"message_hold_redrive.go:processClaimedHeldRow":             "held message re-drive excludes attachments (ptone/scion#7939)",
 }

@@ -22,6 +22,7 @@ import (
 	"go/parser"
 	"go/token"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -365,36 +366,110 @@ func TestFireCoreOutcomeMapping(t *testing.T) {
 func TestFireCorePayloadValidatedBeforeAuthority(t *testing.T) {
 	t.Parallel()
 
-	ms := newMockStore()
-	srv := newEventHandlerTestServer(ms)
+	t.Run("fake FirePayloadValidator short-circuits before authority", func(t *testing.T) {
+		ms := newMockStore()
+		srv := newEventHandlerTestServer(ms)
 
-	authorizeCalled := false
-	srv.RegisterAction(&fakeFireAction{
-		actionType: "message",
-		permission: scheduledMessagePermission,
-		validateFn: func(req hubfire.FireRequest) error {
-			if req.Payload != `{"valid":true}` {
-				return errors.New("invalid message payload: bad json")
-			}
-			return nil
-		},
-		authorizeFn: func(context.Context, hubfire.FireRequest, FireAuthority, Identity) (FireAuthorized, *FireRefusal, error) {
-			authorizeCalled = true
-			return nil, nil, nil
-		},
+		authorizeCalled := false
+		srv.RegisterAction(&fakeFireAction{
+			actionType: "message",
+			permission: scheduledMessagePermission,
+			validateFn: func(req hubfire.FireRequest) error {
+				if req.Payload != `{"valid":true}` {
+					return errors.New("invalid message payload: bad json")
+				}
+				return nil
+			},
+			authorizeFn: func(context.Context, hubfire.FireRequest, FireAuthority, Identity) (FireAuthorized, *FireRefusal, error) {
+				authorizeCalled = true
+				return nil, nil, nil
+			},
+		})
+
+		// Unrecorded authority + invalid payload: payload validation runs first and
+		// returns failed rather than errScheduledAuthorityUnrecorded.
+		out := srv.fireAction(context.Background(), hubfire.FireRequest{
+			ProjectID:  "project-order",
+			Authority:  hubfire.RecordedAuthority{DefinitionKind: hubfire.DefinitionKindScheduledEvent, FireID: "evt-bad"},
+			ActionType: "message",
+			Payload:    `{not-json`,
+		})
+		assert.Equal(t, hubfire.FireStatusFailed, out.Status)
+		assert.Equal(t, "invalid message payload: bad json", out.Error)
+		assert.False(t, authorizeCalled)
 	})
 
-	// Unrecorded authority + invalid payload: payload validation runs first and
-	// returns failed rather than errScheduledAuthorityUnrecorded.
-	out := srv.fireAction(context.Background(), hubfire.FireRequest{
-		ProjectID:  "project-order",
-		Authority:  hubfire.RecordedAuthority{DefinitionKind: hubfire.DefinitionKindScheduledEvent, FireID: "evt-bad"},
-		ActionType: "message",
-		Payload:    `{not-json`,
+	t.Run("real messageAction validates payload before unrecorded authority refusal", func(t *testing.T) {
+		ms := newMockStore()
+		srv := newEventHandlerTestServer(ms)
+		srv.registerFireActions()
+
+		unrecorded := hubfire.RecordedAuthority{
+			DefinitionKind: hubfire.DefinitionKindScheduledEvent,
+			DefinitionID:   "evt-unrec",
+			FireID:         "evt-unrec",
+		}
+
+		cases := []struct {
+			name       string
+			projectID  string
+			payload    string
+			wantStatus hubfire.FireStatus
+			wantErrSub string
+		}{
+			{
+				name:       "malformed JSON fails before authority",
+				projectID:  "project-order",
+				payload:    `{not-json`,
+				wantStatus: hubfire.FireStatusFailed,
+				wantErrSub: "invalid message payload:",
+			},
+			{
+				name:       "empty message fails before authority",
+				projectID:  "project-order",
+				payload:    `{"agentName":"worker","message":""}`,
+				wantStatus: hubfire.FireStatusFailed,
+				wantErrSub: "message payload is empty",
+			},
+			{
+				name:       "missing target fails before authority",
+				projectID:  "project-order",
+				payload:    `{"message":"hello"}`,
+				wantStatus: hubfire.FireStatusFailed,
+				wantErrSub: "message payload must include agentId or agentName",
+			},
+			{
+				name:       "agentName without projectID fails before authority",
+				projectID:  "",
+				payload:    `{"agentName":"worker","message":"hello"}`,
+				wantStatus: hubfire.FireStatusFailed,
+				wantErrSub: "message payload must include agentId or agentName",
+			},
+			{
+				name:       "valid payload reaches authority resolution and refuses on unrecorded authority",
+				projectID:  "project-order",
+				payload:    `{"agentName":"worker","message":"hello"}`,
+				wantStatus: hubfire.FireStatusRefused,
+				wantErrSub: errScheduledAuthorityUnrecorded.Error(),
+			},
+		}
+
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				out := srv.fireAction(context.Background(), hubfire.FireRequest{
+					ProjectID:  tc.projectID,
+					Authority:  unrecorded,
+					ActionType: "message",
+					Payload:    tc.payload,
+				})
+				assert.Equal(t, tc.wantStatus, out.Status)
+				assert.Contains(t, out.Error, tc.wantErrSub)
+				if tc.wantStatus == hubfire.FireStatusFailed {
+					assert.NotContains(t, out.Error, errScheduledAuthorityUnrecorded.Error())
+				}
+			})
+		}
 	})
-	assert.Equal(t, hubfire.FireStatusFailed, out.Status)
-	assert.Equal(t, "invalid message payload: bad json", out.Error)
-	assert.False(t, authorizeCalled)
 }
 
 func TestFireCoreTracker(t *testing.T) {
@@ -502,6 +577,14 @@ func TestFireCoreContainment(t *testing.T) {
 			"RegisterAction",
 			"LookupAction",
 			"fireAction",
+		},
+		"action_message.go": {
+			"Validate",
+			"ValidatePayload",
+			"Authorize",
+			"Fire",
+			"Detaches",
+			"deliverMessageAction",
 		},
 	}
 	forbiddenStoreTypes := map[string]bool{
@@ -698,6 +781,20 @@ func TestFireCoreRefusalLogging(t *testing.T) {
 	assert.Contains(t, logs, "actionType=custom_hook")
 	assert.Contains(t, logs, "permission=agent.create")
 	assert.Contains(t, logs, "projectID="+projectID)
+
+	// 1b. Scheduled message authority denial preserves the scheduler log message.
+	logBuf.mu.Lock()
+	logBuf.buf.Reset()
+	logBuf.mu.Unlock()
+	srv.RegisterAction(&messageAction{srv: srv})
+	schedMsgOut := srv.fireAction(context.Background(), hubfire.FireRequest{
+		ProjectID:  projectID,
+		Authority:  hubfire.RecordedAuthority{DefinitionKind: hubfire.DefinitionKindScheduledEvent, DefinitionID: "evt-9", FireID: "evt-9"},
+		ActionType: "message",
+		Payload:    `{"agentName":"worker","message":"hi"}`,
+	})
+	assert.Equal(t, hubfire.FireStatusRefused, schedMsgOut.Status)
+	assert.Contains(t, logBuf.String(), "scheduled message authority denied at fire time")
 
 	// 2. fireStanding preserves projectID in refusal logs on both the core
 	// FireAuthority path and the scheduledFireStanding shim path.
@@ -1017,23 +1114,36 @@ func TestFireCoreSchedulerAdapters(t *testing.T) {
 func TestFireCoreLegacyActionDetaches(t *testing.T) {
 	t.Parallel()
 
-	msgAction := newLegacyAction("message", nil)
+	realMsgAction := &messageAction{}
+	legacyMsgAction := newLegacyAction("message", nil)
 	execAction := newLegacyAction(scheduledEventTypeExec, nil)
 	dispAction := newLegacyAction("dispatch_agent", nil)
 
-	for _, defKind := range []string{hubfire.DefinitionKindScheduledEvent, hubfire.DefinitionKindSchedule} {
-		assert.True(t, msgAction.Detaches(hubfire.FireRequest{
-			Authority: hubfire.RecordedAuthority{DefinitionKind: defKind},
-			Payload:   `{"agentName":"worker","message":"hi","wake":true}`,
-		}), "message wake=true detaches (%s)", defKind)
-		assert.False(t, msgAction.Detaches(hubfire.FireRequest{
-			Authority: hubfire.RecordedAuthority{DefinitionKind: defKind},
-			Payload:   `{"agentName":"worker","message":"hi","wake":false}`,
-		}), "message wake=false does not detach (%s)", defKind)
-		assert.False(t, msgAction.Detaches(hubfire.FireRequest{
-			Authority: hubfire.RecordedAuthority{DefinitionKind: defKind},
-			Payload:   `{"agentName":"worker","message":"hi"}`,
-		}), "message wake omitted does not detach (%s)", defKind)
+	for _, defKind := range []string{
+		hubfire.DefinitionKindScheduledEvent,
+		hubfire.DefinitionKindSchedule,
+	} {
+		for name, act := range map[string]FireAction{
+			"messageAction": realMsgAction,
+			"legacyAction":  legacyMsgAction,
+		} {
+			assert.True(t, act.Detaches(hubfire.FireRequest{
+				Authority: hubfire.RecordedAuthority{DefinitionKind: defKind},
+				Payload:   `{"agentName":"worker","message":"hi","wake":true}`,
+			}), "%s wake=true detaches (%s)", name, defKind)
+			assert.False(t, act.Detaches(hubfire.FireRequest{
+				Authority: hubfire.RecordedAuthority{DefinitionKind: defKind},
+				Payload:   `{"agentName":"worker","message":"hi","wake":false}`,
+			}), "%s wake=false does not detach (%s)", name, defKind)
+			assert.False(t, act.Detaches(hubfire.FireRequest{
+				Authority: hubfire.RecordedAuthority{DefinitionKind: defKind},
+				Payload:   `{"agentName":"worker","message":"hi"}`,
+			}), "%s wake omitted does not detach (%s)", name, defKind)
+			assert.False(t, act.Detaches(hubfire.FireRequest{
+				Authority: hubfire.RecordedAuthority{DefinitionKind: defKind},
+				Payload:   `{bad-json`,
+			}), "%s malformed payload does not detach (%s)", name, defKind)
+		}
 		assert.False(t, dispAction.Detaches(hubfire.FireRequest{
 			Authority: hubfire.RecordedAuthority{DefinitionKind: defKind},
 			Payload:   `{"agentName":"worker"}`,
@@ -1048,6 +1158,66 @@ func TestFireCoreLegacyActionDetaches(t *testing.T) {
 		Authority: hubfire.RecordedAuthority{DefinitionKind: hubfire.DefinitionKindScheduledEvent},
 		Payload:   `{"agentId":"a1","command":["true"]}`,
 	}), "one-shot exec keeps non-detaching path")
+}
+
+func TestFireCoreMessageActionValidate(t *testing.T) {
+	t.Parallel()
+
+	const projectID = "project-msg-validate"
+	ms := newMockStore()
+	srv := newEventHandlerTestServer(ms)
+	userID := seedEventHandlerMessageUser(ms, projectID)
+	user, err := ms.GetUser(context.Background(), userID)
+	require.NoError(t, err)
+	caller := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "session")
+
+	target := &store.Agent{
+		ID:          "agent-target-1",
+		Slug:        "worker-one",
+		Name:        "Worker One",
+		ProjectID:   projectID,
+		OwnerID:     userID,
+		MessageMode: store.MessageModeProject,
+	}
+	require.NoError(t, ms.CreateAgent(context.Background(), target))
+	noneTarget := &store.Agent{
+		ID:          "agent-target-none",
+		Slug:        "worker-none",
+		Name:        "Worker None",
+		ProjectID:   projectID,
+		MessageMode: store.MessageModeNone,
+	}
+	require.NoError(t, ms.CreateAgent(context.Background(), noneTarget))
+	otherProjTarget := &store.Agent{
+		ID:          "agent-target-other",
+		Slug:        "worker-other",
+		Name:        "Worker Other",
+		ProjectID:   "other-project",
+		OwnerID:     userID,
+		MessageMode: store.MessageModeProject,
+	}
+	require.NoError(t, ms.CreateAgent(context.Background(), otherProjTarget))
+
+	act := &messageAction{srv: srv}
+
+	normalized, err := act.Validate(context.Background(), caller, projectID, `{"agentName":"worker-one","message":"hello","wake":true}`)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"agentId":"agent-target-1","agentName":"worker-one","message":"hello","wake":true}`, normalized)
+
+	_, err = act.Validate(context.Background(), caller, projectID, `{"agentName":"worker-none","message":"hello"}`)
+	require.ErrorContains(t, err, "not authorized to message agent")
+
+	_, err = act.Validate(context.Background(), caller, projectID, `{"agentName":"worker-one","message":"   "}`)
+	require.ErrorContains(t, err, "message payload is empty")
+
+	_, err = act.Validate(context.Background(), caller, projectID, `{"agentName":"worker-one","message":"`+strings.Repeat("x", maxMessageActionPayloadBytes+1)+`"}`)
+	require.ErrorContains(t, err, "exceeds maximum length")
+
+	_, err = act.Validate(context.Background(), caller, projectID, `{"message":"hello"}`)
+	require.ErrorContains(t, err, "must include agentId or agentName")
+
+	_, err = act.Validate(context.Background(), caller, projectID, `{"agentId":"agent-target-other","message":"hello"}`)
+	require.ErrorContains(t, err, "cross-project messages require cross-project messaging to be enabled")
 }
 
 // TestFireCoreAdapterDetachesMatrix covers all seven cells of design §5.1a

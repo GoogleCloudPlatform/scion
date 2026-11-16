@@ -100,15 +100,15 @@ func (s *Server) authorizeScheduledWake(ctx context.Context, auth ScheduledAutho
 	return nil
 }
 
-// wakeScheduledTarget runs the wake of a scheduled message fire whose
-// authorization, standing and wake permission have passed. It returns nil
-// when the target is ready for delivery (resumed, already running, or
-// brought up by a start that was already in progress), or the error the
-// event records. On an error nothing is dispatched.
+// wakeFireTarget runs the wake of a deferred message fire whose authorization,
+// standing, and wake permission have passed. It returns nil when the target is
+// ready for delivery (resumed, already running, or brought up by a start that
+// was already in progress), or the error the fire records. On an error nothing
+// is dispatched.
 //
 // The wake runs on a budget of its own (scheduledWakeBudget), detached from
 // the fire handler's deadline but keeping its values.
-func (s *Server) wakeScheduledTarget(ctx context.Context, evt store.ScheduledEvent, agent *store.Agent) error {
+func (s *Server) wakeFireTarget(ctx context.Context, fireID, scheduleID string, agent *store.Agent) error {
 	detached, cancelDetached := detachKeepFireAbort(ctx)
 	defer cancelDetached()
 	wakeCtx, cancel := context.WithTimeout(detached, scheduledWakeBudget)
@@ -116,18 +116,18 @@ func (s *Server) wakeScheduledTarget(ctx context.Context, evt store.ScheduledEve
 
 	if state.Phase(agent.Phase) == state.PhaseStarting {
 		slog.Info("Scheduler: scheduled message target is already starting; waiting for it to become ready",
-			"eventID", evt.ID, "agent_id", agent.ID)
+			"eventID", fireID, "agent_id", agent.ID)
 	}
 	dmErr, awaitErr := s.wakeOrAwaitStart(wakeCtx, agent)
 	if dmErr != nil {
 		slog.Warn("Scheduler: scheduled message wake failed",
-			"eventID", evt.ID, "scheduleID", evt.ScheduleID, "agent_id", agent.ID,
+			"eventID", fireID, "scheduleID", scheduleID, "agent_id", agent.ID,
 			"code", dmErr.Code, "error", dmErr.Message)
 		return fmt.Errorf("failed to wake agent %s: %s: %s", agent.Slug, dmErr.Code, dmErr.Message)
 	}
 	if awaitErr != nil {
 		slog.Warn("Scheduler: scheduled message target did not become ready after a start in progress",
-			"eventID", evt.ID, "agent_id", agent.ID, "error", awaitErr)
+			"eventID", fireID, "agent_id", agent.ID, "error", awaitErr)
 		if errors.Is(awaitErr, errStartInProgressNotReady) {
 			return errScheduledWakeNotReady
 		}

@@ -114,13 +114,14 @@ func (s *Server) holdOrDispatch(
 // re-evaluates the scheduled event's authority and fire-time authorization.
 func (s *Server) persistScheduledMessageEvent(
 	ctx context.Context,
-	evt store.ScheduledEvent,
+	projectID string,
+	scheduledEventID string,
 	agent *store.Agent,
 	payload MessageEventPayload,
 	structuredMsg *messages.StructuredMessage,
 ) (*store.Message, error) {
 	createdAt := time.Now().UTC()
-	senderProjID := evt.ProjectID
+	senderProjID := projectID
 	recipProjID := agent.ProjectID
 	storeMsg := &store.Message{
 		ID:                 api.NewUUID(),
@@ -136,8 +137,8 @@ func (s *Server) persistScheduledMessageEvent(
 		Urgent:             payload.Interrupt,
 		AgentID:            agent.ID,
 		Channel:            reservedSchedulerChannel,
-		ThreadID:           evt.ID,
-		ScheduledEventID:   evt.ID,
+		ThreadID:           scheduledEventID,
+		ScheduledEventID:   scheduledEventID,
 		DispatchState:      store.MessageDispatchDispatched,
 		CreatedAt:          createdAt,
 	}

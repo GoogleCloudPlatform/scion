@@ -210,7 +210,7 @@ func (a *legacyAction) run(ctx context.Context, req hubfire.FireRequest) hubfire
 }
 
 func (s *Server) registerFireActions() {
-	s.RegisterAction(newLegacyAction("message", s.messageEventHandler()))
+	s.RegisterAction(&messageAction{srv: s})
 	s.RegisterAction(newLegacyAction("dispatch_agent", s.dispatchAgentEventHandler()))
 	s.RegisterAction(newLegacyAction(scheduledEventTypeExec, s.execEventHandler()))
 }
@@ -248,13 +248,34 @@ func scheduledFireRequest(srv *Server, evt store.ScheduledEvent, exec ExecutorCo
 	}
 }
 
+func scheduledKnownError(msg string) error {
+	switch msg {
+	case errScheduledAuthorityUnrecorded.Error():
+		return errScheduledAuthorityUnrecorded
+	case errScheduledMessageRefused.Error():
+		return errScheduledMessageRefused
+	case errScheduledWakeNotReady.Error():
+		return errScheduledWakeNotReady
+	case errScheduledWakeShuttingDown.Error():
+		return errScheduledWakeShuttingDown
+	case errScheduledWakeShutdown.Error():
+		return errScheduledWakeShutdown
+	case errScheduledWakeAbandoned.Error():
+		return errScheduledWakeAbandoned
+	case errHoldPrepareFailed.Error():
+		return errHoldPrepareFailed
+	default:
+		return errors.New(msg)
+	}
+}
+
 func scheduledFireError(eventType string, out hubfire.FireOutcome) error {
 	if out.Detached {
 		switch out.Status {
 		case hubfire.FireStatusSkipped:
 			return outcomeRecorded(skipScheduledFire(out.Error))
 		case hubfire.FireStatusFailed, hubfire.FireStatusRefused:
-			return outcomeRecorded(errors.New(out.Error))
+			return outcomeRecorded(scheduledKnownError(out.Error))
 		default:
 			return outcomeRecorded(nil)
 		}
@@ -268,6 +289,6 @@ func scheduledFireError(eventType string, out hubfire.FireOutcome) error {
 		if out.Error == unknownActionTypeError(eventType) {
 			return fmt.Errorf("unknown event type: %s", eventType)
 		}
-		return errors.New(out.Error)
+		return scheduledKnownError(out.Error)
 	}
 }
