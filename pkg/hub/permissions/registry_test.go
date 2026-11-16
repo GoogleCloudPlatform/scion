@@ -153,6 +153,17 @@ var expectedSelectorRegistry = map[string][]string{
 	"github_trigger:comment":   {"github_trigger.comment"},
 	"github_trigger:configure": {"github_trigger.configure"},
 
+	// trigger and webhook_endpoint selectors (ptone/scion#7961).
+	"trigger:delete":          {"trigger.delete"},
+	"trigger:list":            {"trigger.list"},
+	"trigger:read":            {"trigger.read"},
+	"trigger:update":          {"trigger.update"},
+	"trigger:create":          {"trigger.create"},
+	"webhook_endpoint:delete": {"webhook_endpoint.delete"},
+	"webhook_endpoint:list":   {"webhook_endpoint.list"},
+	"webhook_endpoint:read":   {"webhook_endpoint.read"},
+	"webhook_endpoint:create": {"webhook_endpoint.create"},
+
 	// Identity governance reads and hub audit (hub boundary only).
 	"role:read":              {"role.read"},
 	"role_binding:read":      {"role_binding.read"},

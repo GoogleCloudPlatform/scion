@@ -142,6 +142,11 @@ var compressBypassedUntagged = map[string]string{
 	"POST /api/v1/admin/invites/{id}/revoke": "invites prefix",
 	"DELETE /api/v1/admin/invites/{id}":      "invites prefix",
 
+	// Webhook endpoints collection: /api/v1/projects/{projectId}/webhook-endpoints
+	// is bypassed as a path so POST's one-time signing secret is never compressed;
+	// GET on the same path returns metadata only.
+	"GET /api/v1/projects/{projectId}/webhook-endpoints": "webhook endpoints collection: POST returns secret",
+
 	// Test identity routes: /api/v1/test-identities is bypassed as a whole. Only
 	// create, token, web login code and admin create return a credential.
 	"GET /api/v1/test-identities":                    "test identities prefix",

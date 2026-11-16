@@ -33,7 +33,7 @@ import (
 // expectedTableCount is the number of domain tables in the hub schema
 // (excluding the schema_migrations bookkeeping table). The fixture must cover
 // every one of them.
-const expectedTableCount = 103
+const expectedTableCount = 107
 
 // TestFixtureCoverage is the CI coverage gate: it generates the fixture and
 // fails if any domain table has zero rows.
@@ -198,6 +198,23 @@ func TestFixtureLoadable(t *testing.T) {
 	assert.Equal(t, store.MessageDispatchAwaitingSession, heldMsg.DispatchState)
 	require.NotNil(t, heldMsg.HoldUntil)
 	assert.Equal(t, "55555555-5555-5555-5555-5555555555aa", heldMsg.HoldLaunchID)
+
+	ep, err := composite.GetWebhookEndpoint(ctx, webhookEndpointID)
+	require.NoError(t, err, "webhook_endpoints fixture row must be readable via TriggerStore")
+	assert.Equal(t, "fixture-webhook", ep.Name)
+
+	tr, err := composite.GetTrigger(ctx, triggerID)
+	require.NoError(t, err, "triggers fixture row must be readable via TriggerStore")
+	assert.Equal(t, "fixture-trigger", tr.Name)
+	assert.Equal(t, []string{"webhook.received"}, tr.MatchTypes)
+
+	trEvt, err := composite.GetTriggerEvent(ctx, triggerEventID)
+	require.NoError(t, err, "trigger_events fixture row must be readable via TriggerStore")
+	assert.Equal(t, "webhook.received", trEvt.Type)
+
+	trFire, err := composite.GetTriggerFire(ctx, triggerFireID)
+	require.NoError(t, err, "trigger_fires fixture row must be readable via TriggerStore")
+	assert.Equal(t, store.TriggerFireStatusFired, trFire.Status)
 }
 
 // TestFixtureDeterministic verifies the spec produces a stable set of row

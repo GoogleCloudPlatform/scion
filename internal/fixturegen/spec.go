@@ -61,6 +61,11 @@ const (
 	// visitorDomain a normalized visitor rule domain (lower case, exact).
 	visitorIssuer = "https://issuer.fixture.example"
 	visitorDomain = "partner.example"
+
+	webhookEndpointID = "e0100000-0000-0000-0000-000000000001"
+	triggerID         = "e0200000-0000-0000-0000-000000000001"
+	triggerEventID    = "e0300000-0000-0000-0000-000000000001"
+	triggerFireID     = "e0400000-0000-0000-0000-000000000001"
 )
 
 // baseTime is a fixed timestamp so the generated fixture is byte-reproducible
@@ -1226,6 +1231,68 @@ func Spec() []TableFixture {
 				"allow_private_network": false, "enabled": true, "revision": int64(1),
 				"created_by": userID, "updated_by": userID,
 				"created_at": baseTime, "updated_at": baseTime,
+			},
+		}},
+
+		// ---- Triggers & webhook endpoints (ptone/scion#8028) ----
+		{Table: "webhook_endpoints", Rows: []row{
+			{
+				"id": webhookEndpointID, "project_id": projectID,
+				"name": "fixture-webhook", "description": "Fixture webhook endpoint",
+				"owner_principal_kind": "user", "owner_principal_id": userID, "owner_credential_kind": "session",
+				"secret_version": 1, "signature_mode": "scion_v1", "status": "active",
+				"created_by": userID, "last_received_at": baseTime,
+				"receive_count": 1, "reject_count": 0,
+				"created": baseTime, "updated": baseTime,
+			},
+		}},
+		{Table: "triggers", Rows: []row{
+			{
+				"id": triggerID, "project_id": projectID,
+				"name": "fixture-trigger", "description": "Fixture webhook trigger",
+				"source_kind": "webhook", "source_id": webhookEndpointID,
+				"match_types": `["webhook.received"]`, "match_dialect": "cel", "match_rule": "",
+				"action_type": "message", "action_payload": `{"agentId":"` + agentID + `","agentName":"fixture-agent","message":"hi","wake":true}`,
+				"subject_dialect": "cel", "subject_rule": "", "subject_mode": "new",
+				"status": "active", "status_reason": "",
+				"last_fire_at": baseTime, "last_fire_status": "fired", "last_fire_error": "",
+				"fire_count": 1, "error_count": 0,
+				"initiator_principal_kind": "user", "initiator_principal_id": userID,
+				"initiator_credential_kind": "session", "initiator_credential_id": "",
+				"initiator_credential_snapshot": "", "attribution_version": 1, "authorization_revision": 1,
+				"authority_ceiling_kind": "principal", "authority_ceiling_version": 0,
+				"authority_ceiling_permission_ids": `[]`, "authority_ceiling_boundary_kind": "",
+				"authority_ceiling_boundary_project_id": "", "authority_ceiling_source_expires_at": nil,
+				"fixture_root_id": "", "fixture_issuer_id": "",
+				"created_by": userID, "created": baseTime, "updated": baseTime,
+			},
+		}},
+		{Table: "trigger_events", Rows: []row{
+			{
+				"id": triggerEventID, "project_id": projectID,
+				"source_kind": "webhook", "source_id": webhookEndpointID,
+				"type": "webhook.received", "subject": "webhook:" + webhookEndpointID,
+				"dedup_key":   "deliv-fixture-001",
+				"occurred_at": baseTime, "received_at": baseTime,
+				"attributes": `{"endpoint_name":"fixture-webhook","event":"received"}`,
+				"headers":    `{"content-type":"application/json"}`,
+				"payload":    unicodeJSON, "payload_bytes": len(unicodeJSON),
+				"status": "processed", "match_count": 1, "fire_count": 1,
+				"error": "", "processed_at": baseTime.Add(time.Second), "created": baseTime,
+			},
+		}},
+		{Table: "trigger_fires", Rows: []row{
+			{
+				"id": triggerFireID, "project_id": projectID,
+				"trigger_id": triggerID, "event_id": triggerEventID,
+				"subject": "webhook:" + webhookEndpointID, "action_type": "message",
+				"status": "fired", "error": "", "result_ref": messageID,
+				"executor_kind": "trigger", "executor_id": "trigger:" + triggerID,
+				"initiator_principal_kind": "user", "initiator_principal_id": userID,
+				"initiator_credential_kind": "session", "initiator_credential_id": "",
+				"initiator_credential_snapshot": "", "attribution_version": 1, "authorization_revision": 1,
+				"lease_until": baseTime.Add(time.Minute), "started_at": baseTime,
+				"finished_at": baseTime.Add(time.Second), "created": baseTime,
 			},
 		}},
 	}

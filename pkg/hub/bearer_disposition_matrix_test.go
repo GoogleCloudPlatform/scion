@@ -590,6 +590,8 @@ var bearerMatrixCompanionSelectors = map[authzop.OperationID][]string{
 	"chat.star.remove":                       {"project:read"},
 	"chat.star.conversations":                {"project:read"},
 	"quota.brokersettings.update":            {"broker:read"},
+	"trigger.create":                         {"agent:message", "webhook_endpoint:read"},
+	"trigger.update":                         {"agent:message", "webhook_endpoint:read"},
 }
 
 // bearerMatrixNotFoundRefusals lists the non-GET admit rows whose route

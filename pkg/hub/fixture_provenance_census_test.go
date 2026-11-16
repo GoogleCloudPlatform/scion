@@ -171,6 +171,8 @@ var fixtureCreateSites = []fixtureCreateSite{
 		"exec schedule API create; stampSchedule from the request principal"},
 	{"pkg/store/entadapter/scheduled_exec_run_store.go", "return tx.CreateSchedule(ctx, sc)", false,
 		"CreateScheduleChecked: store quota-checked wrapper delegating to tx.CreateSchedule; every non-test caller is classified in fixtureCreateSites and stamps sc"},
+	{"pkg/hub/handlers_triggers.go", "tx.CreateTrigger(ctx, &trigger)", true,
+		"trigger API create; stampTrigger from the request principal, in the create transaction"},
 
 	// ── System paths: no principal, so never fixture-rooted ───────────
 	{"pkg/hub/flat_runtime_brokers.go", "s.store.CreateProject(ctx, p)", false,
@@ -206,8 +208,8 @@ var fixtureCreateSites = []fixtureCreateSite{
 // classified. pkg/store/storetest is the store conformance suite (test
 // support code writing a raw store) and is not a hub path.
 func TestFixtureProvenanceCensus_CreateCallSites(t *testing.T) {
-	re := regexp.MustCompile(`\.(CreateAgent|CreateProject|CreateGroup|CreateSchedule|CreateScheduleChecked)\(`)
-	stampCall := regexp.MustCompile(`\bstamp(Agent|Project|Group|ProjectGroup|Schedule)\(`)
+	re := regexp.MustCompile(`\.(CreateAgent|CreateProject|CreateGroup|CreateSchedule|CreateScheduleChecked|CreateTrigger)\(`)
+	stampCall := regexp.MustCompile(`\bstamp(Agent|Project|Group|ProjectGroup|Schedule|Trigger)\(`)
 	used := make([]bool, len(fixtureCreateSites))
 	for _, m := range fixtureCensusScan(t, re) {
 		if strings.HasPrefix(m.file, "pkg/store/storetest/") {

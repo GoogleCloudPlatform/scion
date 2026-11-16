@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 405
+**Operations:** 415
 
 ## Table of Contents
 
@@ -71,6 +71,16 @@
 - [schedule.event.pause](#scheduleeventpause) — Pause a recurring schedule. Pausing only stops future runs, so a token with scheduled_event:update is admitted
 - [schedule.event.delete](#scheduleeventdelete) — Cancel a scheduled event or delete a recurring schedule
 - [schedule.event.fire](#scheduleeventfire) — Fire a scheduled message, dispatch_agent or exec event, one-shot or materialized from a recurring schedule, under the authority its revision recorded. An exec fire (ptone/scion#7883) re-checks agent.attach on the target under the revision's ceiling before its one exec-start; exec-start and exec-status are reached only from the scheduler's exec fire, run tracker and sweeper, never from a request
+- [webhookendpoint.list](#webhookendpointlist) — List webhook endpoints in a project. Agent callers see only webhook endpoints they own (scope=caller)
+- [webhookendpoint.read](#webhookendpointread) — Read a webhook endpoint in a project (never returns the signing secret). An agent caller reading another principal's endpoint receives the same 404 as not-found
+- [webhookendpoint.create](#webhookendpointcreate) — Create a webhook endpoint in a project, minting its one-time HMAC signing secret into a hub-scoped internal secret row
+- [webhookendpoint.delete](#webhookendpointdelete) — Delete a webhook endpoint, removing its hub-scoped internal signing secret rows and pausing dependent triggers with status_reason=source_deleted. An agent caller targeting another principal's endpoint receives the same 404 as not-found
+- [trigger.list](#triggerlist) — List triggers in a project. Agent callers see only triggers they hold (scope=caller)
+- [trigger.read](#triggerread) — Read a trigger definition in a project
+- [trigger.create](#triggercreate) — Create an event trigger in a project. Resolves the source webhook endpoint through webhookEndpointAccessDecision(read) and passes the action's target checks; a user access token needs trigger:create plus the source and target selectors
+- [trigger.update](#triggerupdate) — Update or resume a trigger in a project. Agents cannot PATCH triggers; resume and dispatch-affecting updates re-validate the source endpoint and action target and record the caller's attribution and frozen ceiling
+- [trigger.pause](#triggerpause) — Pause an event trigger. Pausing only stops future fires, so a user access token with trigger:update is admitted
+- [trigger.delete](#triggerdelete) — Delete an event trigger in a project
 - [artifact.read](#artifactread) — Read an artifact's metadata or file bytes, one by one or as a zip of a version (owner, home-project readers via the scope grant, or principal grants); unreadable artifacts answer 404
 - [artifact.list](#artifactlist) — List the artifacts the caller owns, holds a grant on, or that are shared to a project it is a member of (?mine=1); each row passes the artifact.read check, so an artifact the caller cannot read is omitted, never denied
 - [artifact.create](#artifactcreate) — Create an artifact homed in a project (the caller's own, or ?scope=): a single file published at once (?name=), or a manifest that starts a pending first version (JSON body), whose files are then uploaded and finalized through the artifact.version.upload and artifact.version.finalize routes
@@ -3114,6 +3124,377 @@
 ### Exemptions
 
 - **internal_only:** The scheduler fires the event with no request credential. resolveScheduledAuthority resolves the revision's recorded principal and credential, and the fire is bounded by the revision's recorded ceiling and boundary. The exec control routes are internal-only call sites of the exec fire: exec-start follows the full fire-time authorization; exec-status only recovers the outcome of a run already admitted, on its recorded launch (scope: scheduler fire) — waives: `base_permission`
+
+---
+
+## webhookendpoint.list
+
+**Domain:** webhookendpoint
+
+**Description:** List webhook endpoints in a project. Agent callers see only webhook endpoints they own (scope=caller)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/projects/{projectId}/webhook-endpoints` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `webhook_endpoint.list`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestTriggersAuthzMatrix`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## webhookendpoint.read
+
+**Domain:** webhookendpoint
+
+**Description:** Read a webhook endpoint in a project (never returns the signing secret). An agent caller reading another principal's endpoint receives the same 404 as not-found
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/projects/{projectId}/webhook-endpoints/{id}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `webhook_endpoint.read`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestTriggersAuthzMatrix`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## webhookendpoint.create
+
+**Domain:** webhookendpoint
+
+**Description:** Create a webhook endpoint in a project, minting its one-time HMAC signing secret into a hub-scoped internal secret row
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/projects/{projectId}/webhook-endpoints` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `webhook_endpoint.create`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `create-resource`
+
+### Audit
+
+- **Event Type:** `webhook_endpoint_create`
+- **Context Fields:** actor_id, project_id
+- **After Fields:** endpoint_id
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestTriggersAuthzMatrix`
+- `pkg/hub:TestWebhookEndpointCRUD_SecretLifecycleAndCascadePause`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## webhookendpoint.delete
+
+**Domain:** webhookendpoint
+
+**Description:** Delete a webhook endpoint, removing its hub-scoped internal signing secret rows and pausing dependent triggers with status_reason=source_deleted. An agent caller targeting another principal's endpoint receives the same 404 as not-found
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/projects/{projectId}/webhook-endpoints/{id}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `webhook_endpoint.delete`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `delete-resource`
+
+### Audit
+
+- **Event Type:** `webhook_endpoint_delete`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** endpoint_id
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestTriggersAuthzMatrix`
+- `pkg/hub:TestWebhookEndpointCRUD_SecretLifecycleAndCascadePause`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## trigger.list
+
+**Domain:** trigger
+
+**Description:** List triggers in a project. Agent callers see only triggers they hold (scope=caller)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/projects/{projectId}/triggers` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `trigger.list`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestTriggersAuthzMatrix`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## trigger.read
+
+**Domain:** trigger
+
+**Description:** Read a trigger definition in a project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/projects/{projectId}/triggers/{id}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `trigger.read`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestTriggersAuthzMatrix`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## trigger.create
+
+**Domain:** trigger
+
+**Description:** Create an event trigger in a project. Resolves the source webhook endpoint through webhookEndpointAccessDecision(read) and passes the action's target checks; a user access token needs trigger:create plus the source and target selectors
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/projects/{projectId}/triggers` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `trigger.create`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `create-resource`
+
+### Delegation
+
+- **Kind:** `non_amplification`
+- Authoring a trigger records the author's initiator attribution and frozen effect ceiling (triggerRevisionAuthorityCeiling) on the trigger row. In Stage 1 only the message action is supported, which grants no authority; fire-time delivery remains bounded by the recorded principal's current authority and frozen ceiling
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestTriggersAuthzMatrix`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## trigger.update
+
+**Domain:** trigger
+
+**Description:** Update or resume a trigger in a project. Agents cannot PATCH triggers; resume and dispatch-affecting updates re-validate the source endpoint and action target and record the caller's attribution and frozen ceiling
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PATCH | `/api/v1/projects/{projectId}/triggers/{id}` |
+| http_route | POST | `/api/v1/projects/{projectId}/triggers/{id}/resume` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `trigger.update`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `update-resource`
+
+### Delegation
+
+- **Kind:** `non_amplification`
+- A resume, and an update that changes the source, match rules, action, subject rules or status, records the caller's initiator attribution and frozen effect ceiling (triggerRevisionAuthorityCeiling) in place of the stored ones; a metadata-only update changes neither. In Stage 1 only the message action is supported, which grants no authority
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestTriggersAuthzMatrix`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## trigger.pause
+
+**Domain:** trigger
+
+**Description:** Pause an event trigger. Pausing only stops future fires, so a user access token with trigger:update is admitted
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/projects/{projectId}/triggers/{id}/pause` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `trigger.update`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `update-resource`
+
+### Audit
+
+- **Event Type:** `trigger_pause`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** trigger_id
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestTriggersAuthzMatrix`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## trigger.delete
+
+**Domain:** trigger
+
+**Description:** Delete an event trigger in a project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/projects/{projectId}/triggers/{id}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `trigger.delete`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `delete-resource`
+
+### Audit
+
+- **Event Type:** `trigger_delete`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** trigger_id
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestTriggersAuthzMatrix`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
 
 ---
 

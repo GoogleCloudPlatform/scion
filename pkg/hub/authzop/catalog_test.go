@@ -1345,6 +1345,8 @@ var domainResourceCompatibility = map[string][]string{
 	"broker":              {"ResourceBroker"},
 	"quota":               {"ResourceQuota"},
 	"schedule":            {"ResourceScheduledEvent"},
+	"trigger":             {"ResourceTrigger"},
+	"webhookendpoint":     {"ResourceWebhookEndpoint"},
 	"chat":                {"ResourceProject", "ResourceInbox", "ResourceAgent"},
 	"env":                 {"ResourceProject", "ResourceHub"},
 	"artifact":            {"ResourceArtifact"},

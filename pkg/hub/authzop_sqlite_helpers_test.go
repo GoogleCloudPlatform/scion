@@ -78,6 +78,11 @@ type idFixtures struct {
 	harnessConfigDel        string
 	schedule                string
 	scheduledEvent          string
+	webhookEndpoint         string
+	webhookEndpointDel      string
+	trigger                 string
+	triggerPaused           string
+	triggerDel              string
 	limit                   string
 	limitUD                 string
 	entitlement             string
@@ -353,6 +358,11 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 		harnessConfigDel:     tid("li-hc-del"),
 		schedule:             tid("li-schedule"),
 		scheduledEvent:       tid("li-sched-event"),
+		webhookEndpoint:      tid("li-webhook-ep"),
+		webhookEndpointDel:   tid("li-webhook-ep-del"),
+		trigger:              tid("li-trigger"),
+		triggerPaused:        tid("li-trigger-paused"),
+		triggerDel:           tid("li-trigger-del"),
 		limit:                tid("li-limit"),
 		limitUD:              tid("li-limit-ud"),
 		entitlement:          tid("li-entitlement"),
@@ -468,6 +478,68 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 
 	require.NoError(t, s.CreateSchedule(ctx, &store.Schedule{ID: f.schedule, ProjectID: f.project, Name: "li-schedule", CronExpr: "0 0 * * *", EventType: "message", Payload: "{}", Status: store.ScheduleStatusActive, CreatedAt: now, UpdatedAt: now}))
 	require.NoError(t, s.CreateScheduledEvent(ctx, &store.ScheduledEvent{ID: f.scheduledEvent, ProjectID: f.project, EventType: "message", FireAt: now.Add(time.Hour), Payload: "{}", Status: store.ScheduledEventPending, CreatedAt: now}))
+
+	for _, epSeed := range []struct {
+		id   string
+		name string
+	}{
+		{f.webhookEndpoint, "li-webhook-ep"},
+		{f.webhookEndpointDel, "li-webhook-ep-del"},
+	} {
+		require.NoError(t, s.CreateWebhookEndpoint(ctx, &store.WebhookEndpoint{
+			ID:                  epSeed.id,
+			ProjectID:           f.project,
+			Name:                epSeed.name,
+			Status:              store.WebhookEndpointStatusActive,
+			SignatureMode:       store.WebhookSignatureModeScionV1,
+			SecretVersion:       1,
+			OwnerPrincipalKind:  "user",
+			OwnerPrincipalID:    DevUserID,
+			OwnerCredentialKind: store.InitiatorCredentialKindSession,
+			CreatedBy:           DevUserID,
+			CreatedAt:           now,
+			UpdatedAt:           now,
+		}))
+		secretRow, sErr := srv.newWebhookEndpointSecretRow(f.project, epSeed.id, 1, "li-webhook-secret-"+epSeed.name, DevUserID)
+		require.NoError(t, sErr)
+		require.NoError(t, s.CreateSecret(ctx, secretRow))
+	}
+	liTriggerPayload := `{"agentId":"` + f.agent + `","agentName":"li-agent","message":"li-trigger-msg","wake":true}`
+	for _, trSeed := range []struct {
+		id     string
+		name   string
+		status string
+	}{
+		{f.trigger, "li-trigger", store.TriggerStatusActive},
+		{f.triggerPaused, "li-trigger-paused", store.TriggerStatusPaused},
+		{f.triggerDel, "li-trigger-del", store.TriggerStatusActive},
+	} {
+		require.NoError(t, s.CreateTrigger(ctx, &store.Trigger{
+			ID:             trSeed.id,
+			ProjectID:      f.project,
+			Name:           trSeed.name,
+			Status:         trSeed.status,
+			StatusReason:   store.TriggerStatusReasonNone,
+			SourceKind:     store.TriggerSourceKindWebhook,
+			SourceID:       f.webhookEndpoint,
+			MatchTypes:     []string{"webhook.received"},
+			MatchDialect:   "cel",
+			ActionType:     "message",
+			ActionPayload:  liTriggerPayload,
+			SubjectDialect: "cel",
+			SubjectMode:    store.TriggerSubjectModeNew,
+			CreatedBy:      DevUserID,
+			InitiatorAttribution: store.InitiatorAttribution{
+				InitiatorPrincipalKind:  "user",
+				InitiatorPrincipalID:    DevUserID,
+				InitiatorCredentialKind: store.InitiatorCredentialKindSession,
+				AttributionVersion:      1,
+				AuthorizationRevision:   1,
+			},
+			CreatedAt: now,
+			UpdatedAt: now,
+		}))
+	}
 
 	limitDef, err := s.CreateLimitDefinition(ctx, &store.LimitDefinition{ID: f.limit, Name: "li-limit", ResourceType: "agent", Unit: "count", DefaultValue: 10, CreatedAt: now, UpdatedAt: now})
 	require.NoError(t, err)
@@ -734,7 +806,8 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 			e.Name == experiments.ChatStarredMessages || e.Name == experiments.AgentEditHeld ||
 			e.Name == experiments.UserDeleteForceCascade || e.Name == experiments.ArtifactArchive ||
 			e.Name == experiments.ArtifactsOpenReviewCheck ||
-			e.Name == experiments.ProjectSelfLeave || e.Name == experiments.RuntimeOrphanReconcile {
+			e.Name == experiments.ProjectSelfLeave || e.Name == experiments.RuntimeOrphanReconcile ||
+			e.Name == experiments.Triggers {
 			e.Default = true
 		}
 		active = append(active, e)
@@ -753,6 +826,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.True(t, srv.experimentEnabled(experiments.ArtifactsOpenReviewCheck))
 	require.True(t, srv.experimentEnabled(experiments.ProjectSelfLeave))
 	require.True(t, srv.experimentEnabled(experiments.RuntimeOrphanReconcile))
+	require.True(t, srv.experimentEnabled(experiments.Triggers))
 	// POST /api/v1/auth/federation-token also answers 404 while the OIDC
 	// provider is off: install a test key manager and allow the audience
 	// that bodyOverrides sends, so the route reaches its caller checks.
@@ -975,6 +1049,10 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 		// The project-scoped role-binding DELETE removes its own project
 		// binding; the hub-path DELETE keeps the system-scoped fixture.
 		{"project.membership.rolebinding.delete", "/api/v1/admin/role-bindings/{id}"}: {"id": f.roleBindingProjectDel},
+
+		// Webhook endpoint and trigger deletes use disposable twins.
+		{"webhookendpoint.delete", "/api/v1/projects/{projectId}/webhook-endpoints/{id}"}: {"projectId": f.project, "id": f.webhookEndpointDel},
+		{"trigger.delete", "/api/v1/projects/{projectId}/triggers/{id}"}:                  {"projectId": f.project, "id": f.triggerDel},
 	}
 }
 
@@ -1195,6 +1273,14 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{projectId}/schedules/{id}/history": {"projectId": f.project, "id": f.schedule},
 		"/api/v1/projects/{projectId}/schedules/{id}/pause":   {"projectId": f.project, "id": f.schedule},
 		"/api/v1/projects/{projectId}/schedules/{id}/resume":  {"projectId": f.project, "id": f.schedule},
+
+		// --- webhook endpoint & trigger families ---
+		"/api/v1/projects/{projectId}/webhook-endpoints":      {"projectId": f.project},
+		"/api/v1/projects/{projectId}/webhook-endpoints/{id}": {"projectId": f.project, "id": f.webhookEndpoint},
+		"/api/v1/projects/{projectId}/triggers":               {"projectId": f.project},
+		"/api/v1/projects/{projectId}/triggers/{id}":          {"projectId": f.project, "id": f.trigger},
+		"/api/v1/projects/{projectId}/triggers/{id}/pause":    {"projectId": f.project, "id": f.trigger},
+		"/api/v1/projects/{projectId}/triggers/{id}/resume":   {"projectId": f.project, "id": f.triggerPaused},
 
 		// --- quota family (read defaults; quota.update/.delete are
 		// re-pointed at the disposable UD instances by opPatternOverrides) ---
@@ -1441,6 +1527,15 @@ func bodyOverrides(f idFixtures) map[overrideKey]map[string]interface{} {
 		{"skill.resolve.local", "/api/v1/skills/resolve"}:               {"skills": []map[string]string{{"uri": "skill://li-skill-files"}}},
 		{"skill.resolve.github.project", "/api/v1/skills/resolve"}:      {"projectId": f.project, "skills": []map[string]string{{"uri": "gh://li-invalid"}}},
 		{"skill.resolve.github.public", "/api/v1/skills/resolve"}:       {"skills": []map[string]string{{"uri": "gh://li-invalid"}}},
+		// Webhook endpoint and trigger authoring writes: valid bodies so the
+		// positive probes exercise real creates and updates (201 / 200).
+		{"webhookendpoint.create", "/api/v1/projects/{projectId}/webhook-endpoints"}: {"name": "li-webhook-created"},
+		{"trigger.create", "/api/v1/projects/{projectId}/triggers"}: {
+			"name":   "li-trigger-created",
+			"source": map[string]interface{}{"kind": "webhook", "id": f.webhookEndpoint},
+			"action": map[string]interface{}{"type": "message", "agentId": f.agent, "message": "li-msg"},
+		},
+		{"trigger.update", "/api/v1/projects/{projectId}/triggers/{id}"}: {"description": "li-trigger-updated"},
 	}
 }
 

@@ -205,7 +205,8 @@ func TestBuiltInRoles_HubAdminConstraintPermissions(t *testing.T) {
 }
 
 // TestBuiltInRoles_HubAdminRevision pins the hub-admin revision and its
-// latest additions: revision 13 adds system_one_instance.{read,create,delete,execute}
+// latest additions: revision 14 adds trigger.* and webhook_endpoint.*
+// (ptone/scion#8028), revision 13 adds system_one_instance.{read,create,delete,execute}
 // (ptone/scion#8044), revision 12 adds template.create_global,
 // template.update_global, and template.delete_global while keeping plain
 // template.* out (ptone/scion#1713), revision 11 adds skill.update_global and
@@ -215,7 +216,16 @@ func TestBuiltInRoles_HubAdminConstraintPermissions(t *testing.T) {
 // (ptone/scion#4603).
 func TestBuiltInRoles_HubAdminRevision(t *testing.T) {
 	admin := builtInRoleByName(t, store.SystemRoleHubAdmin)
-	assert.Equal(t, 13, admin.Revision)
+	assert.Equal(t, 14, admin.Revision)
+	assert.Contains(t, admin.Permissions, "trigger.read")
+	assert.Contains(t, admin.Permissions, "trigger.list")
+	assert.Contains(t, admin.Permissions, "trigger.create")
+	assert.Contains(t, admin.Permissions, "trigger.delete")
+	assert.Contains(t, admin.Permissions, "trigger.update")
+	assert.Contains(t, admin.Permissions, "webhook_endpoint.read")
+	assert.Contains(t, admin.Permissions, "webhook_endpoint.list")
+	assert.Contains(t, admin.Permissions, "webhook_endpoint.create")
+	assert.Contains(t, admin.Permissions, "webhook_endpoint.delete")
 	assert.Contains(t, admin.Permissions, "system_one_instance.read")
 	assert.Contains(t, admin.Permissions, "system_one_instance.create")
 	assert.Contains(t, admin.Permissions, "system_one_instance.delete")
@@ -1086,6 +1096,10 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 				"skill.register", "skill.update",
 				"template.create", "template.delete", "template.list",
 				"template.read", "template.update",
+				"trigger.create", "trigger.delete", "trigger.list",
+				"trigger.read", "trigger.update",
+				"webhook_endpoint.create", "webhook_endpoint.delete",
+				"webhook_endpoint.list", "webhook_endpoint.read",
 			},
 		},
 		{
@@ -1110,6 +1124,8 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 				"skill.register", "skill.update",
 				"template.create", "template.list",
 				"template.read", "template.update",
+				"trigger.create", "trigger.list", "trigger.read", "trigger.update",
+				"webhook_endpoint.create", "webhook_endpoint.list", "webhook_endpoint.read",
 			},
 		},
 		{
@@ -1125,6 +1141,8 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 				"scheduled_event.create", "scheduled_event.list", "scheduled_event.read",
 				"skill.list", "skill.read",
 				"template.create", "template.list", "template.read",
+				"trigger.create", "trigger.list", "trigger.read",
+				"webhook_endpoint.create", "webhook_endpoint.list", "webhook_endpoint.read",
 			},
 		},
 		{
@@ -1151,9 +1169,9 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 // TestProjectRoleRevisions verifies the current revision of each project role.
 func TestProjectRoleRevisions(t *testing.T) {
 	wantRevisions := map[string]int{
-		store.ProjectRoleOwner:   12,
-		store.ProjectRoleAdmin:   10,
-		store.ProjectRoleMember:  7,
+		store.ProjectRoleOwner:   13,
+		store.ProjectRoleAdmin:   11,
+		store.ProjectRoleMember:  8,
 		store.ProjectRoleVisitor: 1,
 		store.ProjectRoleViewer:  1,
 	}
@@ -1178,9 +1196,9 @@ func TestProjectRoleReconciliationConverges(t *testing.T) {
 		revision    int
 		permissions func() []string
 	}{
-		{store.ProjectRoleOwner, 12, projectOwnerPermissionIDs},
-		{store.ProjectRoleAdmin, 10, projectAdminPermissionIDs},
-		{store.ProjectRoleMember, 7, projectMemberCuratedPermissionIDs},
+		{store.ProjectRoleOwner, 13, projectOwnerPermissionIDs},
+		{store.ProjectRoleAdmin, 11, projectAdminPermissionIDs},
+		{store.ProjectRoleMember, 8, projectMemberCuratedPermissionIDs},
 		{store.ProjectRoleVisitor, 1, projectVisitorPermissionIDs},
 		{store.ProjectRoleViewer, 1, projectViewerPermissionIDs},
 	}

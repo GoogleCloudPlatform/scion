@@ -161,6 +161,7 @@ func TestHubEndpointUses(t *testing.T) {
 		HubEndpointForTransportAudience,
 		HubEndpointForConduitCheck,
 		HubEndpointForAgentLinks,
+		HubEndpointForWebhooks,
 	}
 	if len(uses) != len(hubEndpointUses) {
 		t.Errorf("hubEndpointUses has %d entries, this test lists %d uses", len(hubEndpointUses), len(uses))

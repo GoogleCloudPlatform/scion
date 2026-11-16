@@ -33,6 +33,7 @@ const (
 	projectSubRouteMessageLogs       projectSubRouteKind = "message-logs"
 	projectSubRouteBroadcast         projectSubRouteKind = "broadcast"
 	projectSubRouteSchedules         projectSubRouteKind = "schedules"
+	projectSubRouteTriggers          projectSubRouteKind = "triggers"
 	projectSubRouteMetrics           projectSubRouteKind = "metrics"
 	projectSubRoutePreStartHooks     projectSubRouteKind = "pre-start-hooks"
 	projectSubRouteSettings          projectSubRouteKind = "settings"
@@ -67,6 +68,8 @@ var projectSubRouteTable = map[string]projectSubRouteKind{
 	"broadcast":                projectSubRouteBroadcast,
 	"scheduled-events":         projectSubRouteSchedules,
 	"schedules":                projectSubRouteSchedules,
+	"triggers":                 projectSubRouteTriggers,
+	"webhook-endpoints":        projectSubRouteTriggers,
 	"metrics-summary":          projectSubRouteMetrics,
 	"metrics":                  projectSubRouteMetrics,
 	"pre-start-hooks":          projectSubRoutePreStartHooks,

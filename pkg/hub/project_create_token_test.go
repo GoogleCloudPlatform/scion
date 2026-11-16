@@ -465,20 +465,29 @@ func TestProjectRegisterToken_EmbeddedBrokerFormIsSessionOnly(t *testing.T) {
 }
 
 // TestBuiltInRoles_SuperAdminRevision pins the super-admin revision and its
-// latest changes: revision 12 adds template.create_global,
+// latest changes: revision 15 adds trigger.* and webhook_endpoint.*
+// (ptone/scion#8028), revision 14 adds github_trigger.{comment,configure}
+// (ptone/scion#8090), revision 13 adds system_one_instance.{read,create,delete,execute}
+// (ptone/scion#8044), revision 12 adds template.create_global,
 // template.update_global, and template.delete_global (ptone/scion#1713),
-// revision 13 adds system_one_instance.{read,create,delete,execute} (ptone/scion#8044),
-// revision 12 adds template.create_global, template.update_global, and
-// template.delete_global (ptone/scion#1713), revision 11 adds skill.update_global and
-// skill.delete_global (ptone/scion#1713), revision 10 adds
-// agent.delegation.revoke_all (ptone/scion#2132), revision 9
-// project.chat_post (ptone/scion#5518), revision 8 drops project.register, a
-// reserved row.
+// revision 11 adds skill.update_global and skill.delete_global
+// (ptone/scion#1713), revision 10 adds agent.delegation.revoke_all
+// (ptone/scion#2132), revision 9 project.chat_post (ptone/scion#5518),
+// revision 8 drops project.register, a reserved row.
 func TestBuiltInRoles_SuperAdminRevision(t *testing.T) {
 	admin := builtInRoleByName(t, store.SystemRoleSuperAdmin)
-	assert.Equal(t, 14, admin.Revision)
+	assert.Equal(t, 15, admin.Revision)
 	assert.Contains(t, admin.Permissions, "github_trigger.comment")
 	assert.Contains(t, admin.Permissions, "github_trigger.configure")
+	assert.Contains(t, admin.Permissions, "trigger.read")
+	assert.Contains(t, admin.Permissions, "trigger.list")
+	assert.Contains(t, admin.Permissions, "trigger.create")
+	assert.Contains(t, admin.Permissions, "trigger.delete")
+	assert.Contains(t, admin.Permissions, "trigger.update")
+	assert.Contains(t, admin.Permissions, "webhook_endpoint.read")
+	assert.Contains(t, admin.Permissions, "webhook_endpoint.list")
+	assert.Contains(t, admin.Permissions, "webhook_endpoint.create")
+	assert.Contains(t, admin.Permissions, "webhook_endpoint.delete")
 	assert.Contains(t, admin.Permissions, "system_one_instance.read")
 	assert.Contains(t, admin.Permissions, "system_one_instance.create")
 	assert.Contains(t, admin.Permissions, "system_one_instance.delete")
