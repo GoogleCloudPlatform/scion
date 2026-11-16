@@ -44,6 +44,7 @@ const (
 var (
 	projSettingsResolved bool
 	projSettingsProfile  string
+	projSettingsBroker   string
 )
 
 // resolveProjectForSettings returns the Hub client and the linked project.
@@ -119,7 +120,8 @@ YAML or JSON object, or one of its keys (defaultResources.limits.cpu 2).
 
 The default GCP identity is set with the key defaultGCPIdentity, as
 'scion project identity default set' does: an account id, email or name,
-or passthrough or block; --profile sets a broker profile's default account.
+or passthrough or block; --broker sets a flat Runtime Broker's default
+account and --profile sets a broker profile's default account.
 
 Examples:
   scion project settings set defaultTemplate claude
@@ -143,7 +145,8 @@ the built-in one) instead.
 
 A key below defaultResources (defaultResources.limits.cpu) removes that part
 and keeps the rest. defaultGCPIdentity clears the project default identity
-(mode and account), or with --profile that profile's default account.`,
+(mode and account), or with --broker or --profile that broker's or
+profile's default account.`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		changes := make([]settingsChange, 0, len(args))
@@ -158,13 +161,16 @@ and keeps the rest. defaultGCPIdentity clears the project default identity
 // through the 'project identity default' code, everything else in one
 // settings save.
 func runProjectSettingsCommand(cmd *cobra.Command, changes []settingsChange) error {
-	if err := checkProjectSettingsIdentityUse(changes, projSettingsProfile); err != nil {
+	if err := checkProjectSettingsIdentityUse(changes, projSettingsProfile, projSettingsBroker); err != nil {
 		return err
 	}
 	if len(changes) == 1 && isProjectSettingsIdentityKey(changes[0].Key) {
-		prev := identityDefaultProfile
-		identityDefaultProfile = projSettingsProfile
-		defer func() { identityDefaultProfile = prev }()
+		prevProfile, prevBroker := identityDefaultProfile, identityDefaultBroker
+		identityDefaultProfile, identityDefaultBroker = projSettingsProfile, projSettingsBroker
+		defer func() {
+			identityDefaultProfile = prevProfile
+			identityDefaultBroker = prevBroker
+		}()
 		if changes[0].Unset {
 			return runIdentityDefaultUnset(cmd, nil)
 		}
@@ -180,13 +186,13 @@ func runProjectSettingsCommand(cmd *cobra.Command, changes []settingsChange) err
 }
 
 // checkProjectSettingsIdentityUse keeps the identity key on its own: it is
-// saved by its own request, and --profile applies only to it.
-func checkProjectSettingsIdentityUse(changes []settingsChange, profile string) error {
+// saved by its own request, and --profile and --broker apply only to it.
+func checkProjectSettingsIdentityUse(changes []settingsChange, profile, broker string) error {
 	identity := 0
 	for _, ch := range changes {
 		if isProjectSettingsIdentityKey(ch.Key) {
 			if strings.Contains(ch.Key, ".") {
-				return fmt.Errorf("%s has no keys below it (use --profile for a broker profile's account)", projSettingsIdentityKey)
+				return fmt.Errorf("%s has no keys below it (use --broker for a flat Runtime Broker's account or --profile for a broker profile's account)", projSettingsIdentityKey)
 			}
 			identity++
 		}
@@ -194,8 +200,14 @@ func checkProjectSettingsIdentityUse(changes []settingsChange, profile string) e
 	if identity > 0 && len(changes) > 1 {
 		return fmt.Errorf("change %s in a command of its own", projSettingsIdentityKey)
 	}
+	if strings.TrimSpace(broker) != "" && profile != "" {
+		return errors.New("--broker and --profile cannot be used together")
+	}
 	if profile != "" && identity == 0 {
 		return fmt.Errorf("--profile applies only to %s", projSettingsIdentityKey)
+	}
+	if strings.TrimSpace(broker) != "" && identity == 0 {
+		return fmt.Errorf("--broker applies only to %s", projSettingsIdentityKey)
 	}
 	return nil
 }
@@ -244,10 +256,11 @@ var projectSettingsClearForms = map[string]projectSettingClear{
 	"maxAgentRole":           clearEmptyString,
 	"defaultAgentRole":       clearEmptyString,
 	// The default GCP identity is changed through its own command code:
-	// mode and account change together, and the per-profile map is
-	// validated entry by entry.
+	// mode and account change together, and the per-broker and per-profile
+	// maps are validated entry by entry.
 	"defaultGCPIdentityMode":                      clearByIdentity,
 	"defaultGCPIdentityServiceAccountID":          clearByIdentity,
+	"defaultGCPIdentityServiceAccountIDByBroker":  clearByIdentity,
 	"defaultGCPIdentityServiceAccountIDByProfile": clearByIdentity,
 }
 
@@ -324,7 +337,7 @@ func resolveProjectSettingKey(key string) (projectSettingField, []string, error)
 			continue
 		}
 		if f.Kind == kindIdentity {
-			return projectSettingField{}, nil, fmt.Errorf("%q is part of the default GCP identity; use the key %s (with --profile for a broker profile's account)", key, projSettingsIdentityKey)
+			return projectSettingField{}, nil, fmt.Errorf("%q is part of the default GCP identity; use the key %s (with --broker for a flat Runtime Broker's account or --profile for a broker profile's account)", key, projSettingsIdentityKey)
 		}
 		if len(parts) > 1 && f.Kind != kindResources {
 			return projectSettingField{}, nil, fmt.Errorf("%q has no keys below it", f.Name)
@@ -896,6 +909,10 @@ func writeStructuredOrText(out io.Writer, format string, v interface{}) error {
 }
 
 func identityDefaultsView(s *hubclient.ProjectSettings) map[string]interface{} {
+	byBroker := s.DefaultGCPIdentityServiceAccountIDByBroker
+	if byBroker == nil {
+		byBroker = map[string]string{}
+	}
 	byProfile := s.DefaultGCPIdentityServiceAccountIDByProfile
 	if byProfile == nil {
 		byProfile = map[string]string{}
@@ -903,6 +920,7 @@ func identityDefaultsView(s *hubclient.ProjectSettings) map[string]interface{} {
 	return map[string]interface{}{
 		"defaultGCPIdentityMode":                      s.DefaultGCPIdentityMode,
 		"defaultGCPIdentityServiceAccountID":          s.DefaultGCPIdentityServiceAccountID,
+		"defaultGCPIdentityServiceAccountIDByBroker":  byBroker,
 		"defaultGCPIdentityServiceAccountIDByProfile": byProfile,
 	}
 }
@@ -922,6 +940,7 @@ func init() {
 	projectSettingsCmd.AddCommand(projectSettingsGetCmd, projectSettingsSetCmd, projectSettingsUnsetCmd)
 	projectSettingsGetCmd.Flags().BoolVar(&projSettingsResolved, "resolved", false, "Also show whether the project sets each setting and whether the Hub has a default for it")
 	for _, c := range []*cobra.Command{projectSettingsSetCmd, projectSettingsUnsetCmd} {
+		c.Flags().StringVar(&projSettingsBroker, "broker", "", "With defaultGCPIdentity: the flat Runtime Broker whose default account to change")
 		c.Flags().StringVar(&projSettingsProfile, "profile", "", "With defaultGCPIdentity: the broker profile whose default account to change")
 	}
 }

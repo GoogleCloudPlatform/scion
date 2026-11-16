@@ -553,6 +553,42 @@ func TestProjectSettings_IdentityProfileUnsetDelegates(t *testing.T) {
 	assert.False(t, modeSent, "a per-profile unset leaves the project default alone")
 }
 
+func TestProjectSettings_IdentityBrokerUnsetAndValidation(t *testing.T) {
+	withTextOutput(t)
+	f, c := newFakeProjectSettingsHub(t)
+	f.settings = `{"defaultGCPIdentityServiceAccountIDByBroker":{"broker-stale":"sa-1","broker-keep":"sa-2"}}`
+	useFakeProject(t, c)
+	prevProfile, prevBroker := projSettingsProfile, projSettingsBroker
+	t.Cleanup(func() {
+		projSettingsProfile = prevProfile
+		projSettingsBroker = prevBroker
+	})
+	for _, cmd := range []*cobra.Command{projectSettingsSetCmd, projectSettingsUnsetCmd} {
+		prevCtx := cmd.Context()
+		cmd.SetContext(context.Background())
+		t.Cleanup(func() { cmd.SetContext(prevCtx) })
+	}
+
+	projSettingsProfile = ""
+	projSettingsBroker = "broker-stale"
+	require.NoError(t, runProjectSettingsCommand(projectSettingsUnsetCmd, []settingsChange{{Key: "defaultGCPIdentity", Unset: true}}))
+	require.Len(t, f.puts, 1)
+	assert.JSONEq(t, `{"broker-keep":"sa-2"}`, string(f.puts[0]["defaultGCPIdentityServiceAccountIDByBroker"]))
+	_, modeSent := f.puts[0]["defaultGCPIdentityMode"]
+	assert.False(t, modeSent, "a per-broker unset leaves the project default alone")
+
+	// --broker rejects non-identity keys and cannot be combined with --profile.
+	err := runProjectSettingsCommand(projectSettingsSetCmd, []settingsChange{{Key: "defaultModel", Value: "m"}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--broker applies only to defaultGCPIdentity")
+
+	projSettingsProfile = "small"
+	err = runProjectSettingsCommand(projectSettingsUnsetCmd, []settingsChange{{Key: "defaultGCPIdentity", Unset: true}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--broker and --profile cannot be used together")
+	assert.Len(t, f.puts, 1)
+}
+
 // TestParseProjectSettingValue_ResourceNumbersAreText pins that an unquoted
 // number in a defaultResources object is sent as text, as the API expects.
 func TestParseProjectSettingValue_ResourceNumbersAreText(t *testing.T) {
