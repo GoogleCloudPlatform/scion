@@ -533,7 +533,7 @@ func (s *Server) updateSchedule(w http.ResponseWriter, r *http.Request, projectI
 		effectiveEventType = req.EventType
 	}
 	hasExecFields := req.AgentID != "" || req.AgentName != "" || req.Command != nil || req.TimeoutSeconds != nil
-	isExecRow := originalEventType == scheduledEventTypeExec || effectiveEventType == scheduledEventTypeExec || payloadHasExecContent(originalPayload)
+	isExecRow := originalEventType == scheduledEventTypeExec || effectiveEventType == scheduledEventTypeExec
 	if isExecRow && !s.execSchedulesEnabled() {
 		ValidationError(w, fmt.Sprintf("unsupported event type: %s (supported: %s)", scheduledEventTypeExec, s.supportedScheduledEventTypes()), nil)
 		return

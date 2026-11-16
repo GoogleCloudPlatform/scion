@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
@@ -613,4 +614,161 @@ func TestScheduledExecR1_EventTypeSwitchAndRetargetNeverLeakArgv(t *testing.T) {
 			require.Equal(t, f.sibling.ID, p.AgentID)
 		}
 	})
+}
+
+// TestRev2Probe_MessageScheduleWithStrayExecKey reproduces Phase 2 Pass 2 P2-R1
+// (reviewer exec-schedules-2-rev-2): a message schedule whose raw payload
+// carries a stray top-level timeoutSeconds/command key must remain editable
+// whether hub.exec_schedules is enabled or disabled.
+func TestRev2Probe_MessageScheduleWithStrayExecKey(t *testing.T) {
+	for _, execOn := range []bool{true, false} {
+		name := "exec flag on"
+		if !execOn {
+			name = "exec flag off"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := execAuthoringFixture(t)
+			if !execOn {
+				setHubExperiments(t, f.srv, map[string]bool{conduitExperiment: true, experiments.ExecSchedules: false})
+			}
+			base := "/api/v1/projects/" + f.proj.ID + "/schedules"
+			rec := requestAsIdentity(t, f.srv, authUser(f.owner), http.MethodPost, base, map[string]any{
+				"name": "msg-" + uuid.NewString()[:8], "cronExpr": "0 * * * *", "eventType": "message",
+				"payload": `{"agentName":"` + f.sibling.Slug + `","message":"hello","timeoutSeconds":5}`,
+			})
+			require.Equal(t, http.StatusCreated, rec.Code, "message schedule with a stray key is accepted at create: %s", rec.Body.String())
+			id, _ := decodeEventResponse(t, rec)["id"].(string)
+			rename := requestAsIdentity(t, f.srv, authUser(f.owner), http.MethodPatch, base+"/"+id, map[string]any{"name": "renamed-" + uuid.NewString()[:8]})
+			cron := requestAsIdentity(t, f.srv, authUser(f.owner), http.MethodPatch, base+"/"+id, map[string]any{"cronExpr": "5 * * * *"})
+			assert.Equal(t, http.StatusOK, rename.Code, "metadata-only PATCH of a message schedule: %s", rename.Body.String())
+			assert.Equal(t, http.StatusOK, cron.Code, "cron PATCH of a message schedule: %s", cron.Body.String())
+		})
+	}
+}
+
+// TestScheduledExecP2R1_StrayExecKeyNonExecSchedulesMatrix verifies P2-R1 / FV1-O1
+// across both message and dispatch_agent schedules carrying stray exec keys
+// ("command" and "timeoutSeconds"), with hub.exec_schedules both off and on:
+//   - rename, cron change, status pause/active, pause/resume, message<->dispatch_agent
+//     switching, and delete all succeed;
+//   - switching such a row TO exec remains refused (400);
+//   - every response returned to a caller without live agent.attach (project-admin)
+//     redacts the stored payload fail-closed and never exposes the sentinel.
+func TestScheduledExecP2R1_StrayExecKeyNonExecSchedulesMatrix(t *testing.T) {
+	ctx := context.Background()
+	for _, execOn := range []bool{false, true} {
+		flagLabel := "flag_off"
+		if execOn {
+			flagLabel = "flag_on"
+		}
+		for _, startType := range []string{"message", "dispatch_agent"} {
+			t.Run(flagLabel+"/"+startType, func(t *testing.T) {
+				f := execAuthoringFixture(t)
+				if !execOn {
+					setHubExperiments(t, f.srv, map[string]bool{conduitExperiment: true, experiments.ExecSchedules: false})
+				}
+
+				paID := tid("p2r1-pa-" + flagLabel + "-" + startType)
+				createTestUserWithProjectRole(t, f.store, paID, paID+"@test", f.proj.ID, store.ProjectRoleAdmin)
+				ensureHubMembership(ctx, f.store, paID)
+				bindPermsToUser(t, f.store, paID, []string{"scheduled_event.delete", "hub.scheduler.read"})
+				pa := NewAuthenticatedUser(paID, paID+"@test", "PA", store.UserRoleMember, "api")
+
+				target, err := f.store.GetAgent(ctx, f.sibling.ID)
+				require.NoError(t, err)
+				require.NotNil(t, f.srv.authorizeAgentTargetAction(ctx, pa, target, ActionAttach),
+					"precondition: project-admin must not hold agent.attach on sibling target")
+
+				sentinel := "P2R1SENTINEL-" + uuid.NewString()
+				rawPayload := `{"agentId":"` + f.sibling.ID + `","agentName":"` + f.sibling.Slug + `","message":"hello","prompt":"hello","command":["sh","-c","echo ` + sentinel + `"],"timeoutSeconds":5}`
+
+				base := "/api/v1/projects/" + f.proj.ID + "/schedules"
+				recCreate := requestAsIdentity(t, f.srv, pa, http.MethodPost, base, map[string]any{
+					"name":      "stray-" + uuid.NewString()[:8],
+					"cronExpr":  "0 * * * *",
+					"eventType": startType,
+					"payload":   rawPayload,
+				})
+				require.Equal(t, http.StatusCreated, recCreate.Code, recCreate.Body.String())
+				assert.NotContains(t, recCreate.Body.String(), sentinel, "POST create leaked sentinel to non-attach caller")
+				id, _ := decodeEventResponse(t, recCreate)["id"].(string)
+				schedPath := base + "/" + id
+
+				assertRedactedScheduleResp := func(step string, code int, body string) {
+					t.Helper()
+					require.Equal(t, http.StatusOK, code, "%s failed: %s", step, body)
+					assert.NotContains(t, body, sentinel, "%s leaked sentinel to non-attach caller", step)
+					var outer map[string]any
+					require.NoError(t, json.Unmarshal([]byte(body), &outer), step)
+					payloadStr, _ := outer["payload"].(string)
+					var inner map[string]any
+					require.NoError(t, json.Unmarshal([]byte(payloadStr), &inner), "%s inner payload: %s", step, payloadStr)
+					assert.Equal(t, true, inner["commandRedacted"], "%s did not fail-closed redact payload: %s", step, payloadStr)
+				}
+
+				// 1. GET as project-admin -> 200, redacted.
+				recGet := requestAsIdentity(t, f.srv, pa, http.MethodGet, schedPath, nil)
+				assertRedactedScheduleResp("GET", recGet.Code, recGet.Body.String())
+
+				// 2. Rename as project-admin -> 200, redacted.
+				recRename := requestAsIdentity(t, f.srv, pa, http.MethodPatch, schedPath, map[string]any{
+					"name": "renamed-" + uuid.NewString()[:8],
+				})
+				assertRedactedScheduleResp("PATCH rename", recRename.Code, recRename.Body.String())
+
+				// 3. Cron change as project-admin -> 200, redacted.
+				recCron := requestAsIdentity(t, f.srv, pa, http.MethodPatch, schedPath, map[string]any{
+					"cronExpr": "15 * * * *",
+				})
+				assertRedactedScheduleResp("PATCH cronExpr", recCron.Code, recCron.Body.String())
+
+				// 4. Switch message <-> dispatch_agent (and back) -> 200, redacted.
+				otherType := "dispatch_agent"
+				if startType == "dispatch_agent" {
+					otherType = "message"
+				}
+				recSwitch := requestAsIdentity(t, f.srv, pa, http.MethodPatch, schedPath, map[string]any{
+					"eventType": otherType,
+				})
+				assertRedactedScheduleResp("PATCH switch "+startType+"->"+otherType, recSwitch.Code, recSwitch.Body.String())
+
+				recSwitchBack := requestAsIdentity(t, f.srv, pa, http.MethodPatch, schedPath, map[string]any{
+					"eventType": startType,
+				})
+				assertRedactedScheduleResp("PATCH switch back "+otherType+"->"+startType, recSwitchBack.Code, recSwitchBack.Body.String())
+
+				// 5. Switching such a row TO exec remains refused (400), both as pa and as owner.
+				for _, caller := range []Identity{pa, authUser(f.owner)} {
+					recToExec := requestAsIdentity(t, f.srv, caller, http.MethodPatch, schedPath, map[string]any{
+						"eventType": "exec",
+					})
+					require.Equal(t, http.StatusBadRequest, recToExec.Code, recToExec.Body.String())
+					assert.NotContains(t, recToExec.Body.String(), sentinel)
+					stored, gerr := f.store.GetSchedule(ctx, id)
+					require.NoError(t, gerr)
+					require.Equal(t, startType, stored.EventType)
+				}
+
+				// 6. Sibling paths: PATCH status pause/active, POST pause, POST resume, admin scheduler, DELETE.
+				recStatusPause := requestAsIdentity(t, f.srv, pa, http.MethodPatch, schedPath, map[string]any{"status": store.ScheduleStatusPaused})
+				assertRedactedScheduleResp("PATCH status=paused", recStatusPause.Code, recStatusPause.Body.String())
+
+				recStatusActive := requestAsIdentity(t, f.srv, pa, http.MethodPatch, schedPath, map[string]any{"status": store.ScheduleStatusActive})
+				assertRedactedScheduleResp("PATCH status=active", recStatusActive.Code, recStatusActive.Body.String())
+
+				recPause := requestAsIdentity(t, f.srv, pa, http.MethodPost, schedPath+"/pause", nil)
+				assertRedactedScheduleResp("POST pause", recPause.Code, recPause.Body.String())
+
+				recResume := requestAsIdentity(t, f.srv, pa, http.MethodPost, schedPath+"/resume", nil)
+				assertRedactedScheduleResp("POST resume", recResume.Code, recResume.Body.String())
+
+				recAdmin := requestAsIdentity(t, f.srv, pa, http.MethodGet, "/api/v1/admin/scheduler", nil)
+				require.Equal(t, http.StatusOK, recAdmin.Code, recAdmin.Body.String())
+				assert.NotContains(t, recAdmin.Body.String(), sentinel, "GET /api/v1/admin/scheduler leaked sentinel")
+
+				recDel := requestAsIdentity(t, f.srv, pa, http.MethodDelete, schedPath, nil)
+				require.Equal(t, http.StatusNoContent, recDel.Code, recDel.Body.String())
+			})
+		}
+	}
 }

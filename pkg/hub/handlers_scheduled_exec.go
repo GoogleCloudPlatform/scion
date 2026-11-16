@@ -306,7 +306,7 @@ func (s *Server) prepareExecScheduleUpdate(
 		p = decoded
 	case hasExecFields:
 		var base scheduledExecPayload
-		if prevLive && (originalEventType == scheduledEventTypeExec || payloadHasExecContent(originalPayload)) && originalPayload != "" {
+		if prevLive && originalEventType == scheduledEventTypeExec && originalPayload != "" {
 			if prev, err := decodeScheduledExecPayload(originalPayload); err == nil {
 				base = *prev
 				if base.AgentID != "" {
