@@ -140,7 +140,7 @@ func TestHubTestIdentityCleanup_Golden(t *testing.T) {
 	h := &tiCleanupHub{cleanupBody: tiCleanupRealBody}
 	var out bytes.Buffer
 	require.NoError(t, cleanupTestIdentities(context.Background(), &out, h.client(t).TestIdentities(), testIdentityCleanupOptions{}))
-	assert.Equal(t, "Cleanup (issuer scope, run run-1): removed 1 agents, 1 schedules, 0 groups, 1 projects and 1 test identities.\n"+
+	assert.Equal(t, "Cleanup (issuer scope, run run-1): removed 1 agents, 1 schedules, 0 triggers, 0 groups, 1 projects and 1 test identities.\n"+
 		"  test identity fx-1 (expired)\n"+
 		"  test identity fx-2 (absent)\n"+
 		"    deleted agent a-1\n"+
@@ -349,7 +349,7 @@ func TestHubTestIdentityProvenance_Golden(t *testing.T) {
 		_, err := parseProvenanceResource(bad)
 		require.Error(t, err, bad)
 	}
-	for _, good := range []string{"agent:a-1", " schedule:s-1 ", "group:g", "project:p"} {
+	for _, good := range []string{"agent:a-1", " schedule:s-1 ", "trigger:t-1", "group:g", "project:p"} {
 		got, err := parseProvenanceResource(good)
 		require.NoError(t, err, good)
 		assert.Equal(t, strings.TrimSpace(good), got)

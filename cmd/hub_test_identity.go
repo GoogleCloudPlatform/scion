@@ -476,8 +476,8 @@ func purgeTestIdentity(ctx context.Context, out, errOut io.Writer, svc hubclient
 
 func printTestIdentityPurgeReport(out io.Writer, r *hubclient.TestIdentityPurgeReport) {
 	d := r.Deleted
-	_, _ = fmt.Fprintf(out, "Purge of test identity %s: removed %d agents, %d schedules, %d groups, %d projects.\n",
-		r.IdentityID, d.Agents, d.Schedules, d.Groups, d.Projects)
+	_, _ = fmt.Fprintf(out, "Purge of test identity %s: removed %d agents, %d schedules, %d triggers, %d groups, %d projects.\n",
+		r.IdentityID, d.Agents, d.Schedules, d.Triggers, d.Groups, d.Projects)
 	if r.IdentityDeleted {
 		_, _ = fmt.Fprintf(out, "Deleted test identity %s.\n", r.IdentityID)
 	} else if r.IdentityKeptReason != "" {

@@ -68,6 +68,7 @@ const testAdminResidueAuditLimit = 1000
 type TestAdminResidueResources struct {
 	Agents    []string `json:"agents"`
 	Schedules []string `json:"schedules"`
+	Triggers  []string `json:"triggers"`
 	Groups    []string `json:"groups"`
 	Projects  []string `json:"projects"`
 }
@@ -112,7 +113,7 @@ func (s *Server) testAdminResidue(ctx context.Context, identityID, issuanceID st
 	rep := &TestAdminResidueReport{
 		IdentityID: identityID, IssuanceID: issuanceID,
 		StampedGrants:    []store.IssuanceStampedGrant{},
-		StampedResources: TestAdminResidueResources{Agents: []string{}, Schedules: []string{}, Groups: []string{}, Projects: []string{}},
+		StampedResources: TestAdminResidueResources{Agents: []string{}, Schedules: []string{}, Triggers: []string{}, Groups: []string{}, Projects: []string{}},
 		UnstampedChanges: []TestAdminResidueChange{},
 		KeptRoles:        []store.IssuanceStampedGrant{},
 		Limit:            testAdminResidueLimitText,
@@ -147,6 +148,10 @@ func (s *Server) testAdminResidue(ctx context.Context, identityID, issuanceID st
 		for _, sc := range set.Schedules {
 			rep.StampedResources.Schedules = append(rep.StampedResources.Schedules, sc.ID)
 			stamped[sc.ID] = true
+		}
+		for _, tr := range set.Triggers {
+			rep.StampedResources.Triggers = append(rep.StampedResources.Triggers, tr.ID)
+			stamped[tr.ID] = true
 		}
 		for _, g := range set.Groups {
 			rep.StampedResources.Groups = append(rep.StampedResources.Groups, g.ID)

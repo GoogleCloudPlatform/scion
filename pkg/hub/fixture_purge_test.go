@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
@@ -1324,4 +1325,147 @@ func TestFixturePurgeFilesRetained_Reasons(t *testing.T) {
 			assert.Equal(t, TestIdentityPurgeItem{Type: "agent", ID: "agent-1", ProjectID: "project-1", Status: "removed", Reason: tc.want}, *got)
 		})
 	}
+}
+
+// Triggers (ptone/scion#8028): stamped triggers are deleted by test-identity
+// purge and issuer cleanup with provenance_basis audit rows, explainable via
+// GET /api/v1/test-identities/provenance before and after deletion, while an
+// unstamped trigger created by a human member survives and keeps the stamped
+// project with reason other_resources.
+func TestFixturePurge_PurgesStampedTriggersAndPreservesUnstamped(t *testing.T) {
+	e := newFPEnv(t, "fpp-triggers")
+	e.srv.config.HubEndpoint = "https://hub-public.example.com"
+	var active []experiments.Experiment
+	for _, exp := range e.srv.experimentRegistry().All() {
+		if exp.Name == experiments.Triggers {
+			exp.Default = true
+		}
+		active = append(active, exp)
+	}
+	reg, err := experiments.NewRegistry(active, nil)
+	require.NoError(t, err)
+	e.srv.experiments = reg
+
+	ctx := context.Background()
+	fxID := e.fx.Identity.ID
+
+	// Add the human as a project admin (non-owner, holds agent.message) so both
+	// F and the human can author webhook endpoints and triggers in F's project.
+	// Target an F-stamped agent so after step 1 purges that agent, only the
+	// human's unstamped trigger remains to keep F's project in step 4.
+	require.Equal(t, http.StatusCreated, fpAddProjectRole(t, e.srv, e.store, e.fx.AccessToken, e.project, store.ProjectRoleAdmin, e.human.ID))
+	fxTargetAgent := fpCreateAgent(t, e.srv, e.fx.AccessToken, e.project, "fx-trig-target")
+
+	createTriggerViaAPI := func(token, projectID, targetAgentID, prefix string) string {
+		t.Helper()
+		epRec := doRequestWithToken(t, e.srv, token, http.MethodPost, "/api/v1/projects/"+projectID+"/webhook-endpoints",
+			CreateWebhookEndpointRequest{Name: prefix + "-ep"})
+		require.Equal(t, http.StatusCreated, epRec.Code, epRec.Body.String())
+		var epResp WebhookEndpointCreatedResponse
+		require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &epResp))
+
+		trRec := doRequestWithToken(t, e.srv, token, http.MethodPost, "/api/v1/projects/"+projectID+"/triggers",
+			CreateTriggerRequest{
+				Name:   prefix + "-tr",
+				Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: epResp.ID},
+				Action: TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: targetAgentID, Message: "ping"},
+			})
+		require.Equal(t, http.StatusCreated, trRec.Code, trRec.Body.String())
+		var trResp TriggerResponse
+		require.NoError(t, json.Unmarshal(trRec.Body.Bytes(), &trResp))
+		return trResp.ID
+	}
+
+	fxTrigID := createTriggerViaAPI(e.fx.AccessToken, e.project, fxTargetAgent, "fx-trig")
+	humanTrigID := createTriggerViaAPI(e.humanTok, e.project, fxTargetAgent, "human-trig")
+
+	fxTrigRow, err := e.store.GetTrigger(ctx, fxTrigID)
+	require.NoError(t, err)
+	assert.Equal(t, e.stamp(), fxTrigRow.Fixture)
+	humanTrigRow, err := e.store.GetTrigger(ctx, humanTrigID)
+	require.NoError(t, err)
+	assert.True(t, humanTrigRow.Fixture.IsZero())
+
+	// Provenance before purge: stamped trigger is proven; human trigger is not.
+	provRec := doRequestWithToken(t, e.srv, e.issuerTok, http.MethodGet, "/api/v1/test-identities/provenance?resource=trigger:"+fxTrigID, nil)
+	require.Equal(t, http.StatusOK, provRec.Code, provRec.Body.String())
+	var prov TestIdentityProvenance
+	require.NoError(t, json.Unmarshal(provRec.Body.Bytes(), &prov))
+	assert.True(t, prov.Proven)
+	assert.False(t, prov.Deleted)
+	assert.Equal(t, fxID, prov.FixtureRootID)
+
+	humanProvRec := doRequestWithToken(t, e.srv, e.issuerTok, http.MethodGet, "/api/v1/test-identities/provenance?resource=trigger:"+humanTrigID, nil)
+	require.Equal(t, http.StatusOK, humanProvRec.Code, humanProvRec.Body.String())
+	var humanProv TestIdentityProvenance
+	require.NoError(t, json.Unmarshal(humanProvRec.Body.Bytes(), &humanProv))
+	assert.False(t, humanProv.Proven)
+
+	// Purge F: F's stamped agent and stamped trigger are deleted; the human's
+	// unstamped trigger survives and alone keeps F's project as other_resources.
+	rec := tiPurge(t, e.srv, e.issuerTok, fxID, "", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	r := fpPurgeReport(t, rec)
+	assert.True(t, r.Complete)
+	assert.True(t, r.IdentityDeleted)
+	assert.Equal(t, TestIdentityPurgeCounts{Agents: 1, Triggers: 1}, r.Deleted)
+	require.Len(t, r.KeptProjects, 1)
+	assert.Equal(t, TestIdentityPurgeKeptProject{
+		ID:              e.project,
+		Reason:          fixtureProjectKeptOtherResources,
+		BindingsRemoved: 1,
+		Ownerless:       true,
+	}, r.KeptProjects[0])
+
+	_, err = e.store.GetTrigger(ctx, fxTrigID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	_, err = e.store.GetTrigger(ctx, humanTrigID)
+	assert.NoError(t, err, "unstamped human trigger must survive")
+	assert.True(t, fpProjectExists(t, e.store, e.project))
+
+	basis := fpRequireBasis(t, e.store, mutationTypeTriggerDelete, fxTrigID, fxID, e.issuerID)
+
+	// Provenance after purge proves deletion via the trigger_delete audit row.
+	afterProvRec := doRequestWithToken(t, e.srv, e.issuerTok, http.MethodGet, "/api/v1/test-identities/provenance?resource=trigger:"+fxTrigID, nil)
+	require.Equal(t, http.StatusOK, afterProvRec.Code, afterProvRec.Body.String())
+	var afterProv TestIdentityProvenance
+	require.NoError(t, json.Unmarshal(afterProvRec.Body.Bytes(), &afterProv))
+	assert.True(t, afterProv.Proven)
+	assert.True(t, afterProv.Deleted)
+	assert.Equal(t, basis.RunID, afterProv.DeletionRecord)
+
+	// Leftover stamped trigger after its fixture user row is already gone:
+	// ListFixtureRoots + fixtureLeftoverIssuer + cleanup dry-run and live run
+	// discover and delete it.
+	humanProj := tiCreateProject(t, e.srv, e.humanTok, "fpp-triggers-human-proj")
+	tiAddProvider(t, e.store, humanProj)
+	humanTargetAgent := fpCreateAgent(t, e.srv, e.humanTok, humanProj, "human-trig-target")
+	fx2 := tiIssue(t, e.srv, e.issuerTok, map[string]any{"role": "member", "lifetimeSeconds": 60})
+	fx2ID := fx2.Identity.ID
+	require.Equal(t, http.StatusCreated, fpAddProjectRole(t, e.srv, e.store, e.humanTok, humanProj, store.ProjectRoleAdmin, fx2ID))
+	leftoverTrigID := createTriggerViaAPI(fx2.AccessToken, humanProj, humanTargetAgent, "fx2-leftover")
+	require.NoError(t, e.store.DeleteUser(ctx, fx2ID))
+
+	dryRec := doRequestWithToken(t, e.srv, e.issuerTok, http.MethodPost, "/api/v1/test-identities/cleanup?dryRun=true", nil)
+	require.Equal(t, http.StatusOK, dryRec.Code, dryRec.Body.String())
+	var dryReport TestIdentityCleanupReport
+	require.NoError(t, json.Unmarshal(dryRec.Body.Bytes(), &dryReport))
+	assert.Contains(t, dryReport.Targets, TestIdentityCleanupTarget{
+		Type:          fixtureResourceTrigger,
+		ID:            leftoverTrigID,
+		FixtureRootID: fx2ID,
+		ProjectID:     humanProj,
+		Status:        "target",
+	})
+	_, err = e.store.GetTrigger(ctx, leftoverTrigID)
+	require.NoError(t, err, "dry-run must not delete the trigger")
+
+	cleanRec := doRequestWithToken(t, e.srv, e.issuerTok, http.MethodPost, "/api/v1/test-identities/cleanup", nil)
+	require.Equal(t, http.StatusOK, cleanRec.Code, cleanRec.Body.String())
+	var cleanReport TestIdentityCleanupReport
+	require.NoError(t, json.Unmarshal(cleanRec.Body.Bytes(), &cleanReport))
+	assert.Equal(t, 1, cleanReport.Deleted.Triggers)
+	_, err = e.store.GetTrigger(ctx, leftoverTrigID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	fpRequireBasis(t, e.store, mutationTypeTriggerDelete, leftoverTrigID, fx2ID, e.issuerID)
 }

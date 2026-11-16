@@ -120,6 +120,7 @@ const (
 const (
 	fixtureResourceAgent        = "agent"
 	fixtureResourceSchedule     = "schedule"
+	fixtureResourceTrigger      = "trigger"
 	fixtureResourceGroup        = "group"
 	fixtureResourceProject      = "project"
 	fixtureResourceTestIdentity = "test_identity"
@@ -369,6 +370,11 @@ func (s *Server) fixtureCleanupTargets(ctx context.Context, rootID string, u *st
 			add(fixtureResourceSchedule, sc.ID, sc.ProjectID)
 		}
 	}
+	for i := range set.Triggers {
+		if tr := &set.Triggers[i]; tr.Fixture.RootID == rootID {
+			add(fixtureResourceTrigger, tr.ID, tr.ProjectID)
+		}
+	}
 	for i := range set.Groups {
 		if g := &set.Groups[i]; g.Fixture.RootID == rootID && !isProjectImplicitGroup(g) {
 			add(fixtureResourceGroup, g.ID, g.ProjectID)
@@ -494,6 +500,7 @@ func (s *Server) runTestIdentityCleanup(ctx context.Context, caller UserIdentity
 			entry.Report = pr
 			report.Deleted.Agents += pr.Deleted.Agents
 			report.Deleted.Schedules += pr.Deleted.Schedules
+			report.Deleted.Triggers += pr.Deleted.Triggers
 			report.Deleted.Groups += pr.Deleted.Groups
 			report.Deleted.Projects += pr.Deleted.Projects
 			report.Deleted.Grants += pr.Deleted.Grants
@@ -529,6 +536,8 @@ func (s *Server) settleCleanupTarget(ctx context.Context, t *TestIdentityCleanup
 		_, err = s.store.GetAgent(ctx, t.ID)
 	case fixtureResourceSchedule:
 		_, err = s.store.GetSchedule(ctx, t.ID)
+	case fixtureResourceTrigger:
+		_, err = s.store.GetTrigger(ctx, t.ID)
 	case fixtureResourceGroup:
 		_, err = s.store.GetGroup(ctx, t.ID)
 	case fixtureResourceProject:
@@ -637,6 +646,7 @@ func (s *Server) writeTestIdentityCleanupAudit(ctx context.Context, scope fixtur
 var fixtureDeleteMutations = map[string]string{
 	fixtureResourceAgent:    mutationTypeAgentHardDelete,
 	fixtureResourceSchedule: mutationTypeScheduleDelete,
+	fixtureResourceTrigger:  mutationTypeTriggerDelete,
 	fixtureResourceGroup:    fixturePurgeGroupDeleteMutation,
 	fixtureResourceProject:  "project_delete",
 }
@@ -673,17 +683,17 @@ func (s *Server) handleTestIdentityProvenance(w http.ResponseWriter, r *http.Req
 		}
 	}
 	if len(q["resource"]) != 1 {
-		BadRequest(w, "resource is required: <type>:<id>, type one of agent, project, schedule, group")
+		BadRequest(w, "resource is required: <type>:<id>, type one of agent, project, schedule, trigger, group")
 		return
 	}
 	resource := q.Get("resource")
 	typ, id, found := strings.Cut(resource, ":")
 	if !found || id == "" || !validPathID(id) {
-		BadRequest(w, "invalid resource: must be <type>:<id>, type one of agent, project, schedule, group")
+		BadRequest(w, "invalid resource: must be <type>:<id>, type one of agent, project, schedule, trigger, group")
 		return
 	}
 	if _, known := fixtureDeleteMutations[typ]; !known {
-		BadRequest(w, "invalid resource type: must be one of agent, project, schedule, group")
+		BadRequest(w, "invalid resource type: must be one of agent, project, schedule, trigger, group")
 		return
 	}
 	scope, ok := s.cleanupScopeFor(ctx, caller)
@@ -723,6 +733,11 @@ func (s *Server) fixtureProvenance(ctx context.Context, caller UserIdentity, sco
 		var sc *store.Schedule
 		if sc, err = s.store.GetSchedule(ctx, id); err == nil && sc != nil {
 			stamp = sc.Fixture
+		}
+	case fixtureResourceTrigger:
+		var tr *store.Trigger
+		if tr, err = s.store.GetTrigger(ctx, id); err == nil && tr != nil {
+			stamp = tr.Fixture
 		}
 	case fixtureResourceGroup:
 		var g *store.Group

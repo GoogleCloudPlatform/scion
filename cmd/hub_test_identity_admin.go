@@ -447,12 +447,12 @@ func printTestAdminResidue(ctx context.Context, out io.Writer, svc hubclient.Tes
 		_, _ = fmt.Fprintf(out, "  %s\n", describeResidueGrant(g))
 	}
 	r := rep.StampedResources
-	_, _ = fmt.Fprintf(out, "Stamped resources (removed by a purge): %d agents, %d schedules, %d groups, %d projects\n",
-		len(r.Agents), len(r.Schedules), len(r.Groups), len(r.Projects))
+	_, _ = fmt.Fprintf(out, "Stamped resources (removed by a purge): %d agents, %d schedules, %d triggers, %d groups, %d projects\n",
+		len(r.Agents), len(r.Schedules), len(r.Triggers), len(r.Groups), len(r.Projects))
 	for _, list := range []struct {
 		name string
 		ids  []string
-	}{{"agent", r.Agents}, {"schedule", r.Schedules}, {"group", r.Groups}, {"project", r.Projects}} {
+	}{{"agent", r.Agents}, {"schedule", r.Schedules}, {"trigger", r.Triggers}, {"group", r.Groups}, {"project", r.Projects}} {
 		for _, rid := range list.ids {
 			_, _ = fmt.Fprintf(out, "  %s %s\n", list.name, rid)
 		}

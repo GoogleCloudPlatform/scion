@@ -104,6 +104,7 @@ type TestAdminResidueGrant struct {
 type TestAdminResidueResources struct {
 	Agents    []string `json:"agents"`
 	Schedules []string `json:"schedules"`
+	Triggers  []string `json:"triggers"`
 	Groups    []string `json:"groups"`
 	Projects  []string `json:"projects"`
 }

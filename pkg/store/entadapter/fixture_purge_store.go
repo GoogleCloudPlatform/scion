@@ -25,6 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/group"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/schedule"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -74,6 +75,18 @@ func (c *CompositeStore) ListFixtureRootedResources(ctx context.Context, rootID 
 	}
 	for _, sc := range schedules[:trim(len(schedules))] {
 		out.Schedules = append(out.Schedules, *entScheduleToStore(sc))
+	}
+
+	tq := c.client.Trigger.Query().Where(trigger.FixtureRootIDEQ(root)).Order(trigger.ByID())
+	if fetch > 0 {
+		tq = tq.Limit(fetch)
+	}
+	triggers, err := tq.All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	for _, tr := range triggers[:trim(len(triggers))] {
+		out.Triggers = append(out.Triggers, *entTriggerToStore(tr))
 	}
 
 	gq := c.client.Group.Query().Where(group.FixtureRootIDEQ(root)).Order(group.ByID())
@@ -212,6 +225,25 @@ func (c *CompositeStore) ListFixtureRoots(ctx context.Context, issuerID, afterRo
 	}
 	for _, sc := range schedules {
 		add(sc.FixtureRootID, sc.FixtureIssuerID)
+	}
+
+	tq := c.client.Trigger.Query().Where(trigger.FixtureRootIDNotNil(), trigger.FixtureIssuerIDNotNil())
+	if issuer != nil {
+		tq = tq.Where(trigger.FixtureIssuerIDEQ(*issuer))
+	}
+	if after != nil {
+		tq = tq.Where(trigger.FixtureRootIDGT(*after))
+	}
+	tq = tq.Unique(true).Order(trigger.ByFixtureRootID())
+	if fetch > 0 {
+		tq = tq.Limit(fetch)
+	}
+	triggers, err := tq.Select(trigger.FieldFixtureRootID, trigger.FieldFixtureIssuerID).All(ctx)
+	if err != nil {
+		return nil, false, mapError(err)
+	}
+	for _, tr := range triggers {
+		add(tr.FixtureRootID, tr.FixtureIssuerID)
 	}
 
 	gq := c.client.Group.Query().Where(group.FixtureRootIDNotNil(), group.FixtureIssuerIDNotNil())

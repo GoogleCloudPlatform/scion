@@ -161,6 +161,7 @@ func fixturePurgeBasisFor(ctx context.Context, stamp store.FixtureProvenance) *f
 type TestIdentityPurgeCounts struct {
 	Agents    int `json:"agents"`
 	Schedules int `json:"schedules"`
+	Triggers  int `json:"triggers"`
 	Groups    int `json:"groups"`
 	Projects  int `json:"projects"`
 	// Grants counts the grant rows removed by their issuance stamp
@@ -366,6 +367,20 @@ func (s *Server) purgeTestIdentityRun(ctx context.Context, run fixturePurgeRun) 
 		}
 		if deleted {
 			report.Deleted.Schedules++
+		}
+	}
+
+	// 2b. Triggers.
+	for i := range set.Triggers {
+		tr := &set.Triggers[i]
+		deleted, err := s.purgeFixtureTrigger(ctx, tr, basis)
+		if err != nil {
+			slog.ErrorContext(ctx, "test identity purge: trigger delete failed", "trigger_id", tr.ID, "error", err)
+			report.NotDone = append(report.NotDone, TestIdentityPurgeItem{Type: "trigger", ID: tr.ID, ProjectID: tr.ProjectID, Status: "failed", Reason: "store_error"})
+			continue
+		}
+		if deleted {
+			report.Deleted.Triggers++
 		}
 	}
 
@@ -616,6 +631,30 @@ func (s *Server) purgeFixtureSchedule(ctx context.Context, sc *store.Schedule, b
 	record.CorrelationID = basis.RunID
 	err := s.store.WithTx(ctx, func(tx store.Store) error {
 		if err := tx.DeleteSchedule(ctx, sc.ID); err != nil {
+			return err
+		}
+		return writeFixturePurgeAuditTx(ctx, tx, record, *b)
+	})
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// purgeFixtureTrigger removes one stamped trigger with its audit row.
+func (s *Server) purgeFixtureTrigger(ctx context.Context, tr *store.Trigger, basis fixturePurgeBasis) (bool, error) {
+	b := fixturePurgeBasisFor(ctx, tr.Fixture)
+	if b == nil {
+		return false, nil
+	}
+	record := newTriggerAudit(ctx, mutationTypeTriggerDelete, tr.ID)
+	record.AfterSummary = fixturePurgeSummary(map[string]any{"project_id": tr.ProjectID, "name": tr.Name}, *b)
+	record.CorrelationID = basis.RunID
+	err := s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := tx.DeleteTrigger(ctx, tr.ID); err != nil {
 			return err
 		}
 		return writeFixturePurgeAuditTx(ctx, tx, record, *b)

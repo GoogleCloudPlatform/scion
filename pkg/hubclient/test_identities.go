@@ -97,6 +97,7 @@ type TestIdentityService interface {
 type TestIdentityPurgeCounts struct {
 	Agents    int `json:"agents"`
 	Schedules int `json:"schedules"`
+	Triggers  int `json:"triggers"`
 	Groups    int `json:"groups"`
 	Projects  int `json:"projects"`
 }
