@@ -285,6 +285,12 @@ var testAdminPermissionPolicy = map[string]testAdminPolicy{
 	"scheduled_event.delete":  testAdminPolicyAllow,
 	"scheduled_event.update":  testAdminPolicyAllow,
 
+	// GitHub App triggers (ptone/scion#8090): posting comments as the App
+	// and configuring project GitHub trigger source settings are denied to
+	// admin test identities.
+	"github_trigger.comment":   testAdminPolicyDeny,
+	"github_trigger.configure": testAdminPolicyDeny,
+
 	// Material delivery and runtime retrieval of secret values.
 	"secret.deliver":          testAdminPolicyDeny,
 	"env_var.deliver":         testAdminPolicyDeny,
@@ -317,6 +323,8 @@ var testAdminGrantableAtProjectScope = map[string]bool{
 	"agent.delegation.list":              true,
 	"agent.delegation.read":              true,
 	"project.manage_visitors":            true,
+	"github_trigger.comment":             true,
+	"github_trigger.configure":           true,
 }
 
 // testAdminGrantRefuses reports whether an admin-kind test identity is

@@ -257,6 +257,11 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	"scheduled_event.create": {TargetClassKindProjectScoped}, "scheduled_event.delete": {},
 	"scheduled_event.update": {},
 
+	// github_trigger.* — comment is CapabilityScope (authoring/firing a
+	// github.comment trigger action within a project); configure authorizes
+	// against the existing project's github_trigger settings instance.
+	"github_trigger.comment": {TargetClassKindProjectScoped}, "github_trigger.configure": {},
+
 	// project.secret_read — agent self-service, no CapabilityKind, always
 	// an existing project's secret.
 	"project.secret_read": {},

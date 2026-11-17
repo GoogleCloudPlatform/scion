@@ -58,6 +58,9 @@ const (
 	// ResourceSystemOneInstance is the hub-scoped System One provider
 	// instance registry (/api/v1/admin/system-one/instances).
 	ResourceSystemOneInstance = "system_one_instance"
+	// ResourceGitHubTrigger covers project-scoped GitHub App trigger
+	// actions and source settings (ptone/scion#836, ptone/scion#8090).
+	ResourceGitHubTrigger = "github_trigger"
 
 	// ResourceInbox and ResourceUserSkillInjection are self-scoped resource
 	// types: their records belong to one user and carry no project or hub
@@ -129,6 +132,11 @@ const (
 	// ActionDelegationRevokeAll is the bulk agent delegation grant
 	// revocation action (.design/agent-delegation.md §7).
 	ActionDelegationRevokeAll = "delegation_revoke_all"
+	// ActionComment and ActionConfigure are the GitHub trigger action
+	// authoring/execution and project source settings actions
+	// (ptone/scion#836, ptone/scion#8090).
+	ActionComment   = "comment"
+	ActionConfigure = "configure"
 
 	// PermissionGCPServiceAccountUse is the gcp_service_account.use
 	// permission ID. Named so pkg/hub/authz.go's agent-scope handling for
@@ -407,6 +415,9 @@ var Registry = []Permission{
 	{ID: "scheduled_event.create", Resource: ResourceScheduledEvent, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "scheduled_event:create", Description: "Create a scheduled event", Enforcement: []string{"pkg/hub/handlers_scheduled_events.go", "pkg/hub/handlers_schedules.go"}},
 	{ID: "scheduled_event.delete", Resource: ResourceScheduledEvent, Action: ActionDelete, CapabilityKind: CapabilityResource, UATScope: "scheduled_event:delete", Description: "Cancel a scheduled event or delete a schedule", Enforcement: []string{"pkg/hub/handlers_scheduled_events.go", "pkg/hub/handlers_schedules.go"}},
 	{ID: "scheduled_event.update", Resource: ResourceScheduledEvent, Action: ActionUpdate, CapabilityKind: CapabilityResource, UATScope: "scheduled_event:update", Description: "Update, pause or resume a recurring schedule", Enforcement: []string{"pkg/hub/handlers_schedules.go"}},
+
+	{ID: "github_trigger.comment", Resource: ResourceGitHubTrigger, Action: ActionComment, CapabilityKind: CapabilityScope, UATScope: "github_trigger:comment", Description: "Post comments on GitHub as the GitHub App through project triggers", NonRouteUse: []string{"Stage 3 github.comment trigger action author and execution check (ptone/scion#836)"}},
+	{ID: "github_trigger.configure", Resource: ResourceGitHubTrigger, Action: ActionConfigure, CapabilityKind: CapabilityResource, UATScope: "github_trigger:configure", Description: "Configure GitHub trigger source settings for a project", Enforcement: []string{"pkg/hub/handlers_github_trigger_settings.go:handlePutProjectGitHubTriggerSettings"}},
 
 	// Extensions to existing resource types (Phase 2 D4 resolution)
 	{ID: "user.invite", Resource: ResourceUser, Action: ActionInvite, CapabilityKind: CapabilityScope, UATScope: "user:invite", Description: "Invite users", Enforcement: []string{"pkg/hub/route_metadata.go:admin.users.invite", "pkg/hub/route_metadata.go:admin.users.invite.bulk", "pkg/hub/route_metadata.go:admin.invites", "pkg/hub/route_metadata.go:admin.invites.byId", "pkg/hub/handlers_users_provision.go:handleProvisionUser"}},

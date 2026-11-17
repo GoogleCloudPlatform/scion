@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -2940,6 +2941,11 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if subPath == "trigger-sources" || strings.HasPrefix(subPath, "trigger-sources/") {
+		s.handleProjectTriggerSourcesRoutes(w, r, projectID, subPath)
+		return
+	}
+
 	// Otherwise handle as project resource
 	s.handleProjectByIDInternal(w, r, projectID, subPath)
 }
@@ -3679,12 +3685,26 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 		Name                   string            `json:"name,omitempty"`
 		Slug                   string            `json:"slug,omitempty"`
 		Labels                 map[string]string `json:"labels,omitempty"`
+		Annotations            json.RawMessage   `json:"annotations,omitempty"`
 		DefaultRuntimeBrokerID string            `json:"defaultRuntimeBrokerId,omitempty"`
 	}
 
 	if err := readJSON(r, &updates); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
+	}
+
+	if len(updates.Annotations) > 0 {
+		var patchedAnnotations map[string]string
+		if err := json.Unmarshal(updates.Annotations, &patchedAnnotations); err != nil {
+			BadRequest(w, "Invalid request body: "+err.Error())
+			return
+		}
+		if changesGitHubTriggerAnnotations(project.Annotations, patchedAnnotations) {
+			writeError(w, http.StatusConflict, ErrCodeProtectedAnnotation,
+				"project annotations under scion.dev/github-triggers. are managed via /trigger-sources/github and cannot be modified by project PATCH", nil)
+			return
+		}
 	}
 
 	// A default runtime broker must already be associated with the project

@@ -339,6 +339,10 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		// base permission. The agent GCP token
 		// mint (gcp.identity.mint) decides gcp_service_account.use instead.
 		"gcp_service_account.mint": "Creation of Hub-minted service accounts: inline policy check in the mint handler, not a catalog base permission",
+		// GitHub trigger comment permission — checked by the github.comment
+		// trigger action at rule save/update and fire time (Stage 3 G3-action,
+		// ptone/scion#8090), NonRouteUse only.
+		"github_trigger.comment": "Checked by the github.comment trigger action at rule save/update and fire time (Stage 3 G3-action, ptone/scion#8090), NonRouteUse only",
 	}
 
 	var unconsumed []string
@@ -1328,7 +1332,7 @@ var domainResourceCompatibility = map[string][]string{
 	"federation":          {"ResourceFederationToken"},
 	"gcp.identity":        {"ResourceGCPServiceAccount"},
 	"agent":               {"ResourceAgent"},
-	"project":             {"ResourceProject"},
+	"project":             {"ResourceProject", "ResourceGitHubTrigger"},
 	"agent.message":       {"ResourceAgent"},
 	"user.admin":          {"ResourceUser"},
 	"secret":              {"ResourceProject"},

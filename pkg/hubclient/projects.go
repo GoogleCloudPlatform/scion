@@ -17,9 +17,11 @@ package hubclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
@@ -105,6 +107,15 @@ type ProjectService interface {
 
 	// Clone creates a new project seeded from an existing project's configuration.
 	Clone(ctx context.Context, sourceID string, req CloneProjectRequest) (*Project, error)
+
+	// GetGitHubTriggerSettings retrieves the project's GitHub trigger source
+	// settings, readiness, and repository routing status
+	// (GET /api/v1/projects/{id}/trigger-sources/github).
+	GetGitHubTriggerSettings(ctx context.Context, projectID string) (*ProjectGitHubTriggerSettings, error)
+
+	// UpdateGitHubTriggerSettings updates the project's GitHub trigger source
+	// settings (PUT /api/v1/projects/{id}/trigger-sources/github).
+	UpdateGitHubTriggerSettings(ctx context.Context, projectID string, req *UpdateProjectGitHubTriggerSettingsRequest) (*ProjectGitHubTriggerSettings, error)
 }
 
 // projectService is the implementation of ProjectService.
@@ -632,4 +643,80 @@ func (s *projectService) AssignableRoles(ctx context.Context, projectID string) 
 		return nil, err
 	}
 	return out.Items, nil
+}
+
+// GitHubTriggersProjectReadiness is the project-scoped GitHub App readiness
+// summary returned on trigger source settings.
+type GitHubTriggersProjectReadiness struct {
+	Ready              bool      `json:"ready"`
+	MissingEvents      []string  `json:"missing_events"`
+	MissingPermissions []string  `json:"missing_permissions"`
+	AppSlug            string    `json:"app_slug,omitempty"`
+	CheckedAt          time.Time `json:"checked_at,omitempty"`
+	Error              string    `json:"error,omitempty"`
+}
+
+// ProjectGitHubTriggerPrimaryRef identifies the active primary project for a
+// shared repository.
+type ProjectGitHubTriggerPrimaryRef struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// ProjectGitHubTriggerRoutingView is the project-scoped repository routing
+// status returned on trigger source settings.
+type ProjectGitHubTriggerRoutingView struct {
+	PrimaryProject *ProjectGitHubTriggerPrimaryRef `json:"primary_project"`
+	IsPrimary      bool                            `json:"is_primary"`
+	OtherProjects  []string                        `json:"other_projects"`
+}
+
+// ProjectGitHubTriggerSettings is the response payload of
+// GET/PUT /api/v1/projects/{id}/trigger-sources/github.
+type ProjectGitHubTriggerSettings struct {
+	UnmatchedCommandReply bool                            `json:"unmatched_command_reply"`
+	UnmatchedCommandText  string                          `json:"unmatched_command_text"`
+	Readiness             GitHubTriggersProjectReadiness  `json:"readiness"`
+	Routing               ProjectGitHubTriggerRoutingView `json:"routing"`
+	Warnings              []string                        `json:"warnings,omitempty"`
+}
+
+// UpdateProjectGitHubTriggerSettingsRequest is the request body for
+// PUT /api/v1/projects/{id}/trigger-sources/github.
+type UpdateProjectGitHubTriggerSettingsRequest struct {
+	UnmatchedCommandReply bool   `json:"unmatched_command_reply"`
+	UnmatchedCommandText  string `json:"unmatched_command_text"`
+}
+
+func projectGitHubTriggerSettingsPath(projectID string) string {
+	return "/api/v1/projects/" + url.PathEscape(projectID) + "/trigger-sources/github"
+}
+
+// GetGitHubTriggerSettings retrieves the project's GitHub trigger source
+// settings, readiness, and repository routing status.
+func (s *projectService) GetGitHubTriggerSettings(ctx context.Context, projectID string) (*ProjectGitHubTriggerSettings, error) {
+	if projectID == "" {
+		return nil, errors.New("project ID is required")
+	}
+	resp, err := s.c.get(ctx, projectGitHubTriggerSettingsPath(projectID), nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ProjectGitHubTriggerSettings](resp)
+}
+
+// UpdateGitHubTriggerSettings updates the project's GitHub trigger source
+// settings.
+func (s *projectService) UpdateGitHubTriggerSettings(ctx context.Context, projectID string, req *UpdateProjectGitHubTriggerSettingsRequest) (*ProjectGitHubTriggerSettings, error) {
+	if projectID == "" {
+		return nil, errors.New("project ID is required")
+	}
+	if req == nil {
+		return nil, errors.New("github trigger settings update request is required")
+	}
+	resp, err := s.c.put(ctx, projectGitHubTriggerSettingsPath(projectID), req, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ProjectGitHubTriggerSettings](resp)
 }

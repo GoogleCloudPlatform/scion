@@ -105,7 +105,7 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleSuperAdmin,
 			Description: "Full platform administrator with all permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    13, // R13: system_one_instance.{read,create,delete,execute} (ptone/scion#8044); R12: template.create_global, template.update_global, template.delete_global (ptone/scion#1713); R11: skill.update_global, skill.delete_global (ptone/scion#1713); R10: agent.delegation.revoke_all (ptone/scion#2132); R9: project.chat_post (ptone/scion#5518); R8: drop Reserved project.register (ptone/scion#2124); R7: add user.list, which the user list checks (ptone/scion#2124); R6: artifact.steward (ptone/scion#5144); R5: drop Reserved agent.log_append (ptone/scion#4230); R4: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R3: drop Reserved permissions (ptone/scion#3652); R2: add broker.auto_provide (ptone/scion#2104)
+			Revision:    14, // R14: github_trigger.{comment,configure} (ptone/scion#8090); R13: system_one_instance.{read,create,delete,execute} (ptone/scion#8044); R12: template.create_global, template.update_global, template.delete_global (ptone/scion#1713); R11: skill.update_global, skill.delete_global (ptone/scion#1713); R10: agent.delegation.revoke_all (ptone/scion#2132); R9: project.chat_post (ptone/scion#5518); R8: drop Reserved project.register (ptone/scion#2124); R7: add user.list, which the user list checks (ptone/scion#2124); R6: artifact.steward (ptone/scion#5144); R5: drop Reserved agent.log_append (ptone/scion#4230); R4: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R3: drop Reserved permissions (ptone/scion#3652); R2: add broker.auto_provide (ptone/scion#2104)
 			Permissions: allPermissionIDs(),
 		},
 		{
@@ -155,21 +155,21 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.ProjectRoleOwner,
 			Description: "Project owner with full project permissions",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    11, // R11: project.chat_post (ptone/scion#5518); R10: artifact.steward (ptone/scion#5144); R9: project.manage_visitors; R8: agent delegation grant management for project-bounded grants; R7: project.set_messaging_policy; R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
+			Revision:    12, // R12: github_trigger.{comment,configure} (ptone/scion#8090); R11: project.chat_post (ptone/scion#5518); R10: artifact.steward (ptone/scion#5144); R9: project.manage_visitors; R8: agent delegation grant management for project-bounded grants; R7: project.set_messaging_policy; R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectOwnerPermissionIDs(),
 		},
 		{
 			Name:        store.ProjectRoleAdmin,
 			Description: "Project admin with most project permissions (no delete, no set_message_mode)",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    9, // R9: project.chat_post (ptone/scion#5518); R8: project.manage_visitors; R7: agent delegation grant management for project-bounded grants; R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
+			Revision:    10, // R10: github_trigger.{comment,configure} (ptone/scion#8090); R9: project.chat_post (ptone/scion#5518); R8: project.manage_visitors; R7: agent delegation grant management for project-bounded grants; R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectAdminPermissionIDs(),
 		},
 		{
 			Name:        store.ProjectRoleMember,
 			Description: "Project member with basic project permissions",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    6, // R6: project.chat_post (ptone/scion#5518); R5: artifact.read, artifact.create; R4: add gcp_service_account.assign (ptone/scion#2147)
+			Revision:    7, // R7: github_trigger.comment (ptone/scion#8090); R6: project.chat_post (ptone/scion#5518); R5: artifact.read, artifact.create; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectMemberCuratedPermissionIDs(),
 		},
 		{
@@ -376,6 +376,9 @@ func projectOwnerPermissionIDs() []string {
 		// checked; in the default off mode this permission alone authorizes
 		// assignment of project-scoped service accounts.
 		"gcp_service_account.assign",
+		// GitHub App triggers (comment action and project source settings; ptone/scion#8090)
+		"github_trigger.comment",
+		"github_trigger.configure",
 		// Harness config management
 		"harness_config.create",
 		"harness_config.delete",
@@ -471,6 +474,9 @@ func projectAdminPermissionIDs() []string {
 		// checked; in the default off mode this permission alone authorizes
 		// assignment of project-scoped service accounts.
 		"gcp_service_account.assign",
+		// GitHub App triggers (comment action and project source settings; ptone/scion#8090)
+		"github_trigger.comment",
+		"github_trigger.configure",
 		// Harness config management (no delete)
 		"harness_config.create",
 		"harness_config.list",
@@ -535,6 +541,8 @@ func projectMemberCuratedPermissionIDs() []string {
 		// checked; in the default off mode this permission alone authorizes
 		// assignment of project-scoped service accounts.
 		"gcp_service_account.assign",
+		// GitHub App triggers (comment action only; configure is owner/admin; ptone/scion#8090)
+		"github_trigger.comment",
 		// Harness config (create, read, list)
 		"harness_config.create",
 		"harness_config.list",

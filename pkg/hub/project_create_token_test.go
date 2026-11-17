@@ -476,7 +476,9 @@ func TestProjectRegisterToken_EmbeddedBrokerFormIsSessionOnly(t *testing.T) {
 // reserved row.
 func TestBuiltInRoles_SuperAdminRevision(t *testing.T) {
 	admin := builtInRoleByName(t, store.SystemRoleSuperAdmin)
-	assert.Equal(t, 13, admin.Revision)
+	assert.Equal(t, 14, admin.Revision)
+	assert.Contains(t, admin.Permissions, "github_trigger.comment")
+	assert.Contains(t, admin.Permissions, "github_trigger.configure")
 	assert.Contains(t, admin.Permissions, "system_one_instance.read")
 	assert.Contains(t, admin.Permissions, "system_one_instance.create")
 	assert.Contains(t, admin.Permissions, "system_one_instance.delete")
