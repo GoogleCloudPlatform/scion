@@ -3227,31 +3227,30 @@ describe('chat page — startup after the page is removed', () => {
     async function connectedPageWithUnread(): Promise<{
       el: any;
       rail: { reload: MockInstance; refresh: MockInstance };
+      setDMs: (dms: Array<Record<string, unknown>>) => void;
+      setSpaces: (spaces: Array<Record<string, unknown>>) => void;
     }> {
       await loadLazyModules();
+      let currentDMs: Array<Record<string, unknown>> = [
+        {
+          conversationKey: DM_KEY,
+          peerId: 'user-1',
+          peerKind: 'user',
+          hasUnread: true,
+          lastMessageId: 'm1',
+        },
+      ];
+      let currentSpaces: Array<Record<string, unknown>> = [{ unreadCount: 1 }];
       vi.mocked(apiFetch).mockImplementation((path) => {
         const url = String(path);
         if (url === '/api/v1/chat/dms') {
           return Promise.resolve(
-            new Response(
-              JSON.stringify({
-                dms: [
-                  {
-                    conversationKey: DM_KEY,
-                    peerId: 'user-1',
-                    peerKind: 'user',
-                    hasUnread: true,
-                    lastMessageId: 'm1',
-                  },
-                ],
-              }),
-              { status: 200 }
-            )
+            new Response(JSON.stringify({ dms: currentDMs }), { status: 200 })
           );
         }
         if (url === '/api/v1/chat/spaces') {
           return Promise.resolve(
-            new Response(JSON.stringify({ spaces: [{ unreadCount: 1 }] }), { status: 200 })
+            new Response(JSON.stringify({ spaces: currentSpaces }), { status: 200 })
           );
         }
         return Promise.resolve(new Response('{}', { status: 200 }));
@@ -3290,8 +3289,18 @@ describe('chat page — startup after the page is removed', () => {
       await startups.settled();
       // Settle the initial badge refresh before clearing request counters.
       await chatUnread.refresh();
+      expect(chatUnread.count).toBe(2);
       vi.mocked(apiFetch).mockClear();
-      return { el, rail };
+      return {
+        el,
+        rail,
+        setDMs: (dms) => {
+          currentDMs = dms;
+        },
+        setSpaces: (spaces) => {
+          currentSpaces = spaces;
+        },
+      };
     }
 
     afterEach(() => {
@@ -3303,8 +3312,9 @@ describe('chat page — startup after the page is removed', () => {
 
     it('space-thread message bursts with chatUnread running produce 0 /chat/dms fetches and refresh /chat/spaces', async () => {
       vi.useFakeTimers();
-      const { el } = await connectedPageWithUnread();
+      const { el, setSpaces } = await connectedPageWithUnread();
       try {
+        setSpaces([{ unreadCount: 4 }]);
         for (let i = 0; i < 6; i++) {
           dispatchSSE('chat-message-received', {
             state: {},
@@ -3316,6 +3326,7 @@ describe('chat page — startup after the page is removed', () => {
 
         expect(dmListLoads()).toBe(0);
         expect(spacesListLoads()).toBeGreaterThanOrEqual(1);
+        expect(chatUnread.count).toBe(5);
       } finally {
         el.remove();
       }
@@ -3323,15 +3334,78 @@ describe('chat page — startup after the page is removed', () => {
 
     it('a DM message with chatUnread running produces exactly 1 /chat/dms fetch', async () => {
       vi.useFakeTimers();
-      const { el } = await connectedPageWithUnread();
+      const { el, setDMs } = await connectedPageWithUnread();
       try {
+        setDMs([
+          {
+            conversationKey: DM_KEY,
+            peerId: 'user-1',
+            peerKind: 'user',
+            hasUnread: true,
+            lastMessageId: 'm1',
+          },
+          {
+            conversationKey: OTHER_DM_KEY,
+            peerId: 'user-2',
+            peerKind: 'user',
+            hasUnread: true,
+            lastMessageId: 'm2',
+          },
+        ]);
         dispatchSSE('chat-message-received', {
           state: {},
-          data: { threadId: DM_KEY, id: 'dm-1' },
+          data: { threadId: OTHER_DM_KEY, id: 'dm-1' },
         });
         await vi.advanceTimersByTimeAsync(5_000);
 
         expect(dmListLoads()).toBe(1);
+        expect(chatUnread.count).toBe(3);
+      } finally {
+        el.remove();
+      }
+    });
+
+    it('a poll tick during a DM message burst does not pin the badge to the pre-burst DM list', async () => {
+      vi.useFakeTimers();
+      const { el, setDMs } = await connectedPageWithUnread();
+      try {
+        // Event 1 at t=0: leading _dmDotsRefresh starts L1 (1 unread DM).
+        dispatchSSE('chat-message-received', {
+          state: {},
+          data: { threadId: DM_KEY, id: 'dm-1' },
+        });
+        await vi.advanceTimersByTimeAsync(300);
+
+        // Event 2 at t=300 ms (inside the 500 ms coalescing window): server now has 2 unread DMs.
+        setDMs([
+          {
+            conversationKey: DM_KEY,
+            peerId: 'user-1',
+            peerKind: 'user',
+            hasUnread: true,
+            lastMessageId: 'm1',
+          },
+          {
+            conversationKey: OTHER_DM_KEY,
+            peerId: 'user-2',
+            peerKind: 'user',
+            hasUnread: true,
+            lastMessageId: 'm2',
+          },
+        ]);
+        dispatchSSE('chat-message-received', {
+          state: {},
+          data: { threadId: OTHER_DM_KEY, id: 'dm-2' },
+        });
+        await vi.advanceTimersByTimeAsync(100);
+
+        // Fallback poll tick at t=400 ms joins L1 via maxAgeMs; must NOT mark L1 fresh for event 2.
+        await el.loadUnreadDMPeers({ maxAgeMs: 59_000 });
+        await vi.advanceTimersByTimeAsync(10_000);
+
+        expect(dmListLoads()).toBe(2);
+        expect(el.v2UnreadFromIds).toEqual(['user-1', 'user-2']);
+        expect(chatUnread.count).toBe(3);
       } finally {
         el.remove();
       }
@@ -3339,8 +3413,17 @@ describe('chat page — startup after the page is removed', () => {
 
     it('a local DM read plus its own SSE echo produces 1 /chat/dms fetch, while other-tab reads and mutes still reload', async () => {
       vi.useFakeTimers();
-      const { el } = await connectedPageWithUnread();
+      const { el, setDMs } = await connectedPageWithUnread();
       try {
+        setDMs([
+          {
+            conversationKey: DM_KEY,
+            peerId: 'user-1',
+            peerKind: 'user',
+            hasUnread: false,
+            lastMessageId: 'm1',
+          },
+        ]);
         el.dispatchEvent(
           new CustomEvent('read-state-updated', {
             detail: { conversationKey: DM_KEY, messageId: 'm1' },
@@ -3352,6 +3435,7 @@ describe('chat page — startup after the page is removed', () => {
         });
         await vi.advanceTimersByTimeAsync(5_000);
         expect(dmListLoads()).toBe(1);
+        expect(chatUnread.count).toBe(1);
 
         // Reading a different DM in another tab still reloads.
         dispatchSSE('chat-read-state-updated', {
@@ -3418,19 +3502,36 @@ describe('chat page — startup after the page is removed', () => {
         hidden ? 'hidden' : 'visible'
       );
       vi.useFakeTimers();
-      const { el, rail } = await connectedPageWithUnread();
+      const { el, rail, setDMs } = await connectedPageWithUnread();
       try {
         hidden = true;
         document.dispatchEvent(new Event('visibilitychange'));
         await vi.advanceTimersByTimeAsync(90_000);
         expect(dmListLoads()).toBe(0);
 
+        setDMs([
+          {
+            conversationKey: DM_KEY,
+            peerId: 'user-1',
+            peerKind: 'user',
+            hasUnread: true,
+            lastMessageId: 'm1',
+          },
+          {
+            conversationKey: OTHER_DM_KEY,
+            peerId: 'user-2',
+            peerKind: 'user',
+            hasUnread: true,
+            lastMessageId: 'm2',
+          },
+        ]);
         hidden = false;
         document.dispatchEvent(new Event('visibilitychange'));
         await vi.advanceTimersByTimeAsync(5_000);
 
         expect(rail.refresh).toHaveBeenCalledTimes(1);
         expect(dmListLoads()).toBe(1);
+        expect(chatUnread.count).toBe(3);
       } finally {
         el.remove();
       }

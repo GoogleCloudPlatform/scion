@@ -2345,10 +2345,18 @@ export class ScionPageChat extends LitElement {
    */
   private _handleRailRefresh(e: Event): void {
     const detail = (e as CustomEvent<RailRefreshDetail>).detail;
-    this._noteDMListChange();
-    detail?.waitUntil(
-      this.loadUnreadDMPeers(this._inCatchUpRailRefresh ? { maxAgeMs: RESUME_DM_MAX_AGE_MS } : {})
-    );
+    if (this._inCatchUpRailRefresh) {
+      this._noteDMListChange(chatLoadClock() - RESUME_DM_MAX_AGE_MS);
+      detail?.waitUntil(
+        this.loadUnreadDMPeers({
+          maxAgeMs: RESUME_DM_MAX_AGE_MS,
+          startedAfter: this._dmListChangedAt,
+        })
+      );
+    } else {
+      this._noteDMListChange();
+      detail?.waitUntil(this.loadUnreadDMPeers());
+    }
     chatUnread.scheduleRefresh();
   }
 
@@ -4105,13 +4113,25 @@ export class ScionPageChat extends LitElement {
       ) {
         chatDMsLoad.invalidate();
       }
+      const beforeAt = chatDMsLoad.startedAt();
       const load = chatDMsLoad.load(options);
       const startedAt = chatDMsLoad.startedAt() ?? chatLoadClock();
       if (startedAt !== this._dmLoadEntryStartedAt) {
         this._dmLoadEntryStartedAt = startedAt;
         this._dmLoadEntryWallAt = wallNow;
       }
-      this._freshDMsLoad = { promise: load, startedAt };
+      // Record `_freshDMsLoad` only when `chatDMsLoad` started a new request
+      // right now (same-tick post-change load) or joined an entry strictly
+      // newer than `_dmListChangedAt`. A `maxAgeMs` poll joining an older
+      // entry must not pin `_unreadCountSource` to pre-change data.
+      const startedNow =
+        beforeAt === undefined ||
+        (options.maxAgeMs === undefined && options.startedAfter === undefined) ||
+        (options.startedAfter !== undefined && beforeAt <= options.startedAfter) ||
+        startedAt !== beforeAt;
+      if (startedNow || startedAt > this._dmListChangedAt) {
+        this._freshDMsLoad = { promise: load, startedAt };
+      }
       const body = await load;
       if (!body) {
         if (this._freshDMsLoad?.promise === load) this._freshDMsLoad = null;
