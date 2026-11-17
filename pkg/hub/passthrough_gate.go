@@ -79,13 +79,21 @@ func isValidServiceAccountEmail(email string) bool {
 
 const passthroughCheck1DeniedMsg = "GCP identity passthrough requires broker ownership, Hub admin, or the broker being provided to this project by its owner."
 
-// hostIdentityIsHubOwn reports whether broker's GCP host pair represents the
-// Hub process's own metadata identity (the legacy embedded broker and
-// co-located non-Cloud-Run flat instances). Co-located flat Cloud Run rows
-// bind runtime_target.service_account instead, so they participate in the
+// hostIdentityIsHubOwn reports whether broker's GCP host pair represents a Hub
+// process's own metadata identity (the legacy embedded broker and co-located
+// non-Cloud-Run flat instances, whether registered in this Hub process or
+// persisted by another Hub replica with CreatedBy=="" and
+// scion.io/broker-role=embedded). Co-located flat Cloud Run rows bind
+// runtime_target.service_account instead, so they participate in the
 // provider-grant path while Hub-host brokers keep the admin-only rule.
 func (s *Server) hostIdentityIsHubOwn(broker *store.RuntimeBroker) bool {
-	return broker != nil && s.isEmbeddedBroker(broker.ID) && !flatCloudRunBroker(broker)
+	if broker == nil || flatCloudRunBroker(broker) {
+		return false
+	}
+	if s.isEmbeddedBroker(broker.ID) {
+		return true
+	}
+	return broker.CreatedBy == "" && broker.Labels[store.BrokerRoleLabel] == store.BrokerRoleEmbedded
 }
 
 // authorizePassthroughIdentity gates passthrough mode for a caller against a

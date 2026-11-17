@@ -361,6 +361,13 @@ func TestPassthroughGate_EvaluateMatrixAndAuthPathPrecedence(t *testing.T) {
 	require.NotNil(t, d, "legacy embedded broker must stay admin-only")
 	w.srv.SetEmbeddedBrokerID("")
 
+	// Persisted embedded row from another Hub replica (isEmbeddedBroker==false, CreatedBy=="", broker-role=embedded)
+	// also represents a Hub host's identity and must NOT leak via CreatedBy=="" provider consent!
+	legacyEmbedded.Labels = map[string]string{store.BrokerRoleLabel: store.BrokerRoleEmbedded}
+	require.NoError(t, w.s.UpdateRuntimeBroker(ctx, legacyEmbedded))
+	d = w.srv.evaluatePassthroughIdentity(ctxFor(w.projectMember), nil, legacyEmbedded, w.projectA.ID, SurfacePassthroughCreate)
+	require.NotNil(t, d, "persisted embedded Hub-host broker row on another replica must stay admin-only")
+
 	// Co-located flat Docker: also shares Hub host metadata identity -> stays admin-only.
 	embDockerRow, err := w.srv.RegisterEmbeddedFlatRuntimeBroker(ctx, &brokeridentity.Identity{
 		SchemaVersion:   brokeridentity.SchemaVersion,
