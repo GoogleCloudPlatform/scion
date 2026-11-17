@@ -27,7 +27,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
@@ -349,10 +348,6 @@ type HTTPAgentDispatcher struct {
 	gitHubWebHost func() string
 	// conduitPolicyProvider returns the agent conduit policy value, "" for none.
 	conduitPolicyProvider func() string
-	// homeFilesAgents records agent IDs whose create carried non-empty HomeFiles
-	// so a standalone fresh-ctx DispatchFinalizeEnv cannot replay their create
-	// without HomeFiles.
-	homeFilesAgents sync.Map
 }
 
 // NewHTTPAgentDispatcher creates a new HTTP-based agent dispatcher.
@@ -2431,7 +2426,7 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 			return &homeFilesEnvGatherDeferredError{needs: finalNeeds.Needs}
 		}
 		if finalResp == nil {
-			return fmt.Errorf("%s: broker returned no confirmation for homeFiles provision (%w)", callerName, errStartRequestNotSent)
+			return fmt.Errorf("%s: broker returned no confirmation for homeFiles provision (%w)", callerName, ErrHomeFilesEnvGatherDeferred)
 		}
 	}
 	// Record gathered as_needed names for the reincarnation start that
@@ -2702,12 +2697,6 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 	env = d.withoutCallerTZ(ctx, agent, env)
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return nil, err
-	}
-	if len(createHomeFilesFromContext(ctx)) == 0 && agent != nil && agent.ID != "" {
-		if _, mustCarry := d.homeFilesAgents.Load(agent.ID); mustCarry {
-			return nil, fmt.Errorf("DispatchFinalizeEnv: agent %s requires create homeFiles which are absent from context (%w)",
-				agent.ID, &homeFilesEnvGatherDeferredError{})
-		}
 	}
 
 	endpoint, err := d.getProvisioningBrokerEndpoint(ctx, agent)
@@ -4602,9 +4591,6 @@ func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *st
 			return err
 		}
 		d.clearCloudRunNative(ctx, agent)
-		if !softDelete && agent != nil && agent.ID != "" {
-			d.homeFilesAgents.Delete(agent.ID)
-		}
 		return nil
 	}
 	if err != nil {
@@ -4621,9 +4607,6 @@ func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *st
 	// A confirmed delete of every run: the recorded native decision is
 	// removed.
 	d.clearCloudRunNative(ctx, agent)
-	if !softDelete && agent != nil && agent.ID != "" {
-		d.homeFilesAgents.Delete(agent.ID)
-	}
 	return nil
 }
 

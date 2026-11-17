@@ -118,6 +118,7 @@ var dispatchHubSentinels = []struct {
 	{"launch_invalid_phase", ErrLaunchInvalidPhase},
 	{"broker_lacks_home_files", ErrBrokerLacksHomeFiles},
 	{"home_files_env_gather_deferred", ErrHomeFilesEnvGatherDeferred},
+	{"home_files_create_not_deferrable", ErrHomeFilesCreateNotDeferrable},
 }
 
 // dispatchHubError is a failure the executing node returned with hub

@@ -2165,7 +2165,7 @@ func (s *Server) createAgentInProject(
 	}
 
 	if req.ManagedAgent && len(createHomeFilesFromContext(ctx)) > 0 {
-		ValidationError(w, "homeFiles are not supported for hub-direct managed agents", nil)
+		writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, "homeFiles are not supported for hub-direct managed agents", nil)
 		return
 	}
 
@@ -2753,8 +2753,8 @@ func (s *Server) createAgentInProject(
 
 		if !hasLocalPath && !s.isEmbeddedBroker(runtimeBrokerID) {
 			if len(createHomeFilesFromContext(ctx)) > 0 {
-				failCreate(createRollback{Stage: createStageStorage, Cause: ErrHomeFilesEnvGatherDeferred}, func() {
-					ValidationError(w, "homeFiles create cannot defer to workspace bootstrap upload", nil)
+				failCreate(createRollback{Stage: createStageStorage, Cause: ErrHomeFilesCreateNotDeferrable}, func() {
+					writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, "homeFiles create cannot defer to workspace bootstrap upload", nil)
 				})
 				return
 			}

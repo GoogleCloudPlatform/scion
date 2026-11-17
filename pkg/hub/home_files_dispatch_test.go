@@ -19,16 +19,21 @@ package hub
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -338,6 +343,7 @@ func TestHomeFilesDispatch_CreateWithGatherFailsClosedOnUnresolvedEnvNeeds(t *te
 		require.Error(t, err)
 		assert.Nil(t, res)
 		assert.ErrorIs(t, err, ErrHomeFilesEnvGatherDeferred)
+		assert.NotErrorIs(t, err, errStartRequestNotSent, "request was sent; must not wrap errStartRequestNotSent")
 		assert.True(t, isConfirmedStartNotActedOnError(err), "must be classified confirmed not-acted-on")
 		assert.False(t, isUnknownDispatchOutcome(err), "must be a definite failure so create rolls back")
 
@@ -347,14 +353,6 @@ func TestHomeFilesDispatch_CreateWithGatherFailsClosedOnUnresolvedEnvNeeds(t *te
 		require.Len(t, gen.jtis, 1)
 		cred := getTestAgentCredential(t, s, gen.lastJTI())
 		require.NotNil(t, cred.RevokedAt, "credential minted before 202 refusal must be revoked")
-
-		// Even if a caller subsequently invokes DispatchFinalizeEnv on a fresh
-		// context.Background(), no create request with empty HomeFiles is sent.
-		_, finErr := d.DispatchFinalizeEnv(context.Background(), a, map[string]string{"CLI_ONLY_SECRET": "late-val"})
-		require.Error(t, finErr)
-		assert.ErrorIs(t, finErr, ErrHomeFilesEnvGatherDeferred)
-		assert.True(t, isConfirmedStartNotActedOnError(finErr))
-		require.Len(t, seen, 1, "subsequent fresh-ctx DispatchFinalizeEnv must not contact the broker without HomeFiles")
 	})
 
 	t.Run("partial as_needed match (ErrEnvStillMissing) fails closed and revokes all minted credentials", func(t *testing.T) {
@@ -379,6 +377,7 @@ func TestHomeFilesDispatch_CreateWithGatherFailsClosedOnUnresolvedEnvNeeds(t *te
 		require.Error(t, err)
 		assert.Nil(t, res)
 		assert.ErrorIs(t, err, ErrHomeFilesEnvGatherDeferred)
+		assert.NotErrorIs(t, err, errStartRequestNotSent)
 		assert.True(t, isConfirmedStartNotActedOnError(err))
 		assert.False(t, isUnknownDispatchOutcome(err))
 
@@ -405,6 +404,7 @@ func TestHomeFilesDispatch_CreateWithGatherFailsClosedOnUnresolvedEnvNeeds(t *te
 		err := d.DispatchAgentProvision(WithCreateHomeFiles(context.Background(), want), a)
 		require.Error(t, err)
 		assert.ErrorIs(t, err, ErrHomeFilesEnvGatherDeferred)
+		assert.NotErrorIs(t, err, errStartRequestNotSent)
 		assert.True(t, isConfirmedStartNotActedOnError(err))
 		require.Len(t, gen.jtis, 1)
 		assert.NotNil(t, getTestAgentCredential(t, s, gen.lastJTI()).RevokedAt)
@@ -603,11 +603,125 @@ func TestHomeFilesDispatch_CrossNodeDeferredCarriesHomeFiles(t *testing.T) {
 		require.NoError(t, <-ownerDone)
 
 		assert.ErrorIs(t, err, ErrHomeFilesEnvGatherDeferred)
+		assert.NotErrorIs(t, err, errStartRequestNotSent)
 		assert.True(t, isConfirmedStartNotActedOnError(err))
 		assert.False(t, isUnknownDispatchOutcome(err))
 		require.Len(t, reqGen.jtis, 1)
 		require.Len(t, ownerGen.jtis, 1)
 		assert.NotNil(t, getTestAgentCredential(t, s, reqGen.lastJTI()).RevokedAt)
 		assert.NotNil(t, getTestAgentCredential(t, s, ownerGen.lastJTI()).RevokedAt)
+	})
+}
+
+type homeFilesFailSignStorage struct {
+	*mockStorage
+	signCalls int
+}
+
+func (f *homeFilesFailSignStorage) GenerateSignedURL(context.Context, string, storage.SignedURLOptions) (*storage.SignedURL, error) {
+	f.signCalls++
+	return nil, errors.New("unexpected signed URL call")
+}
+
+// Must not run in parallel: swaps the package-level managed-agent backend.
+func TestHomeFilesCreateHandler_RefusesManagedAgentAndWorkspaceBootstrapUpload(t *testing.T) {
+	want := []api.HomeFile{
+		{Path: ".scion/trigger-event.json", Mode: 0o600, Content: []byte(`{"id":"evt-handler"}`)},
+	}
+
+	postCreateWithHomeFiles := func(t *testing.T, srv *Server, reqBody CreateAgentRequest) *httptest.ResponseRecorder {
+		t.Helper()
+		raw, err := json.Marshal(reqBody)
+		require.NoError(t, err)
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/agents", bytes.NewReader(raw))
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Authorization", "Bearer "+testDevToken)
+		r = r.WithContext(WithCreateHomeFiles(r.Context(), want))
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, r)
+		return rec
+	}
+
+	t.Run("managed agent refused with 422 before any store write or backend call", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			req  CreateAgentRequest
+		}{
+			{"managedAgent flag", CreateAgentRequest{Name: "mgd-hf-flag", ManagedAgent: true, Task: "do work"}},
+			{"legacy managed-agents profile", CreateAgentRequest{Name: "mgd-hf-prof", Profile: ManagedAgentsProfile, Task: "do work"}},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				disp := &createAgentDispatcher{}
+				srv, s, project := setupCreateAgentServer(t, disp)
+				managedCalled := false
+				useManagedBackend(t, &recordingManagedBackend{
+					s:         s,
+					projectID: project.ID,
+					hook:      func(string) { managedCalled = true },
+				})
+
+				reqBody := tc.req
+				reqBody.ProjectID = project.ID
+				rec := postCreateWithHomeFiles(t, srv, reqBody)
+
+				require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
+				var errResp ErrorResponse
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+				assert.Equal(t, ErrCodeValidationError, errResp.Error.Code)
+				assert.Contains(t, errResp.Error.Message, "homeFiles")
+
+				assert.False(t, managedCalled, "managed backend must not be invoked")
+				assert.Nil(t, disp.capturedAgent, "dispatcher must not be invoked")
+				assert.False(t, disp.deleteCalled, "runtime delete must not be invoked")
+
+				agents, err := s.ListAgents(context.Background(), store.AgentFilter{ProjectID: project.ID}, store.ListOptions{})
+				require.NoError(t, err)
+				assert.Empty(t, agents.Items, "no agent row may be persisted")
+				assert.Empty(t, activeReservationResources(t, s, "max_agents_per_project", "project", project.ID),
+					"no quota reservation may remain active")
+			})
+		}
+	})
+
+	t.Run("remote workspace bootstrap upload refused with 422, neutral sentinel, and no side effects", func(t *testing.T) {
+		disp := &createAgentDispatcher{}
+		srv, s, project := setupCreateAgentServer(t, disp)
+		clearCreateAgentProviderPath(t, s, project)
+		stor := &homeFilesFailSignStorage{mockStorage: newMockStorage("test-bucket")}
+		srv.SetStorage(stor)
+
+		rec := postCreateWithHomeFiles(t, srv, CreateAgentRequest{
+			Name:           "ws-upload-hf",
+			ProjectID:      project.ID,
+			Task:           "do work",
+			WorkspaceFiles: []transfer.FileInfo{{Path: "main.go", Size: 64, Hash: "sha256:abc123"}},
+		})
+
+		require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
+		var errResp ErrorResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+		assert.Equal(t, ErrCodeValidationError, errResp.Error.Code)
+		assert.Contains(t, errResp.Error.Message, "workspace bootstrap upload")
+
+		assert.Equal(t, 0, stor.signCalls, "upload signed URLs must not be generated")
+		assert.Nil(t, disp.capturedAgent, "dispatcher must not be invoked")
+		assert.False(t, disp.deleteCalled, "runtime delete must not be invoked")
+
+		agents, err := s.ListAgents(context.Background(), store.AgentFilter{ProjectID: project.ID}, store.ListOptions{})
+		require.NoError(t, err)
+		assert.Empty(t, agents.Items, "created agent row must be rolled back")
+		assert.Empty(t, activeReservationResources(t, s, "max_agents_per_project", "project", project.ID),
+			"project agent quota reservation must be released on rollback")
+
+		failed, _, err := s.ListMutationAudits(context.Background(), store.MutationAuditFilter{
+			TargetType:   "agent",
+			MutationType: mutationTypeAgentCreateDispatchFailed,
+		})
+		require.NoError(t, err)
+		require.Len(t, failed, 1)
+		sum := assertCompensated(t, s, failed[0].TargetID)
+		assert.Equal(t, createStageStorage, sum.Stage)
+		assert.Equal(t, ErrHomeFilesCreateNotDeferrable.Error(), sum.Error,
+			"rollback audit must record neutral ErrHomeFilesCreateNotDeferrable, not env-gather sentinel")
 	})
 }

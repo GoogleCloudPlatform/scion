@@ -31,9 +31,16 @@ var ErrBrokerLacksHomeFiles = errors.New("broker does not support home files")
 // ErrHomeFilesEnvGatherDeferred is returned when a create or provision carrying
 // non-empty HomeFiles cannot complete in a single dispatch because required
 // environment keys remain unresolved after as_needed resolution. HomeFiles
-// exist only on the single dispatch's ctx and are never persisted, so deferring
-// to a separate HTTP env submission would drop them.
+// exist only on the single dispatch's ctx and are never persisted on the agent
+// record (cross-node hops serialize them only into broker_dispatch.args), so
+// deferring to a separate HTTP env submission would drop them.
 var ErrHomeFilesEnvGatherDeferred = errors.New("homeFiles create cannot defer to a later env submission")
+
+// ErrHomeFilesCreateNotDeferrable is returned when a create carrying non-empty
+// HomeFiles hits a Hub create path that would defer execution to a separate
+// follow-up request (such as workspace bootstrap upload finalize), where the
+// request-scoped HomeFiles are no longer present.
+var ErrHomeFilesCreateNotDeferrable = errors.New("homeFiles create cannot be deferred")
 
 type brokerLacksHomeFilesError struct {
 	broker string
@@ -61,8 +68,8 @@ func (e *homeFilesEnvGatherDeferredError) Error() string {
 	return fmt.Sprintf("%s: missing env %v", ErrHomeFilesEnvGatherDeferred.Error(), e.needs)
 }
 
-func (e *homeFilesEnvGatherDeferredError) Unwrap() []error {
-	return []error{ErrHomeFilesEnvGatherDeferred, errStartRequestNotSent}
+func (e *homeFilesEnvGatherDeferredError) Unwrap() error {
+	return ErrHomeFilesEnvGatherDeferred
 }
 
 type createHomeFilesCtxKey struct{}
@@ -72,8 +79,10 @@ type createHomeFilesCtxKey struct{}
 // as_needed-satisfied DispatchAgentCreateWithGather, DispatchAgentProvision,
 // and cross-node durable create/finalize_env hops derived from them).
 // HomeFiles exist only within that one dispatch's ctx and are never persisted
-// on the agent store record across a separate HTTP POST .../env or workspace
-// finalize request; the slice and file byte contents are defensively cloned.
+// on the agent record (cross-node durable hops serialize them into
+// broker_dispatch.args); a separate HTTP POST .../env or workspace finalize
+// request has no access to them. The slice and file byte contents are
+// defensively cloned.
 func WithCreateHomeFiles(ctx context.Context, files []api.HomeFile) context.Context {
 	if len(files) == 0 {
 		return context.WithValue(ctx, createHomeFilesCtxKey{}, ([]api.HomeFile)(nil))
@@ -128,14 +137,9 @@ func (d *HTTPAgentDispatcher) gateCreateHomeFiles(ctx context.Context, agent *st
 	return checkBrokerHomeFilesCapability(broker)
 }
 
-// createHomeFilesPrecheck extracts any create-only HomeFiles attached to ctx,
-// records that the agent's create requires HomeFiles, and runs
-// gateCreateHomeFiles before any agent token is authorized/signed, run
+// createHomeFilesPrecheck extracts any create-only HomeFiles attached to ctx
+// and runs gateCreateHomeFiles before any agent token is authorized/signed, run
 // recorded, or broker request sent.
 func (d *HTTPAgentDispatcher) createHomeFilesPrecheck(ctx context.Context, agent *store.Agent, reprovision bool) error {
-	files := createHomeFilesFromContext(ctx)
-	if !reprovision && len(files) > 0 && agent != nil && agent.ID != "" {
-		d.homeFilesAgents.Store(agent.ID, struct{}{})
-	}
-	return d.gateCreateHomeFiles(ctx, agent, files, reprovision)
+	return d.gateCreateHomeFiles(ctx, agent, createHomeFilesFromContext(ctx), reprovision)
 }

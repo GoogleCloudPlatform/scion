@@ -141,14 +141,24 @@ func TestDispatchArgs_HomeFilesRoundTrip(t *testing.T) {
 
 func TestDispatchFailureResult_HomeFilesSentinelsRoundTrip(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		err      error
-		sentinel error
+		name           string
+		err            error
+		sentinel       error
+		requestNotSent bool
 	}{
-		{"lacks capability", &brokerLacksHomeFilesError{broker: "b-1"}, ErrBrokerLacksHomeFiles},
-		{"env gather deferred", &homeFilesEnvGatherDeferredError{needs: []string{"SECRET_A"}}, ErrHomeFilesEnvGatherDeferred},
+		{"lacks capability", &brokerLacksHomeFilesError{broker: "b-1"}, ErrBrokerLacksHomeFiles, true},
+		{"env gather deferred", &homeFilesEnvGatherDeferredError{needs: []string{"SECRET_A"}}, ErrHomeFilesEnvGatherDeferred, false},
+		{"create not deferrable", ErrHomeFilesCreateNotDeferrable, ErrHomeFilesCreateNotDeferrable, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.requestNotSent {
+				assert.ErrorIs(t, tc.err, errStartRequestNotSent)
+			} else {
+				assert.NotErrorIs(t, tc.err, errStartRequestNotSent, "deferral sentinel must not masquerade as errStartRequestNotSent")
+			}
+			assert.True(t, isConfirmedStartNotActedOnError(tc.err))
+			assert.False(t, isUnknownDispatchOutcome(tc.err))
+
 			res := dispatchFailureResult(tc.err)
 			require.NotEmpty(t, res)
 			rebuilt := dispatchFailureError(&store.BrokerDispatch{
@@ -158,7 +168,9 @@ func TestDispatchFailureResult_HomeFilesSentinelsRoundTrip(t *testing.T) {
 				Result: res,
 			})
 			assert.ErrorIs(t, rebuilt, tc.sentinel)
+			assert.NotErrorIs(t, rebuilt, errStartRequestNotSent)
 			assert.True(t, isConfirmedStartNotActedOnError(rebuilt), "rebuilt cross-node error must remain confirmed not-acted-on")
+			assert.False(t, isUnknownDispatchOutcome(rebuilt))
 		})
 	}
 }
