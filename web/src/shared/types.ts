@@ -1669,6 +1669,8 @@ export interface Message {
   recipient: string;
   recipientId: string;
   msg: string;
+  /** True when `msg` is a server-truncated preview (e.g. `/interagent` list mode). */
+  msgTruncated?: boolean;
   type: string;
   urgent?: boolean;
   broadcasted?: boolean;

@@ -7650,6 +7650,7 @@ export class ScionChatThread extends LitElement {
               ?global-expanded=${this.interagentExpandAll}
               ?hidden=${!this.interagentVisible}
               current-project-id=${this.projectId}
+              conversation-key=${this.conversationKey}
             ></scion-chat-interagent-marker>
           `,
         });

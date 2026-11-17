@@ -3547,9 +3547,16 @@ func (s *Server) handleConversationInteragent(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	q := r.URL.Query()
+	messageID := q.Get("messageId")
+
 	// Only agent DMs are supported.
 	if !strings.HasPrefix(key, "dm:agent:") {
-		writeJSON(w, http.StatusOK, interagentResponse{Messages: []store.Message{}})
+		if messageID != "" {
+			NotFound(w, "Message")
+			return
+		}
+		writeJSON(w, http.StatusOK, interagentResponse{Messages: []interagentEntry{}})
 		return
 	}
 	if !validDMKey(key) {
@@ -3564,7 +3571,11 @@ func (s *Server) handleConversationInteragent(w http.ResponseWriter, r *http.Req
 	// Extract the agent UUID from the DM key.
 	agentID := parseAgentDMKey(key)
 	if agentID == "" {
-		writeJSON(w, http.StatusOK, interagentResponse{Messages: []store.Message{}})
+		if messageID != "" {
+			NotFound(w, "Message")
+			return
+		}
+		writeJSON(w, http.StatusOK, interagentResponse{Messages: []interagentEntry{}})
 		return
 	}
 
@@ -3575,7 +3586,15 @@ func (s *Server) handleConversationInteragent(w http.ResponseWriter, r *http.Req
 	// field like "agent:<slug>" was set).
 	agent, err := s.store.GetAgent(ctx, agentID)
 	if err != nil || agent == nil {
-		writeJSON(w, http.StatusOK, interagentResponse{Messages: []store.Message{}})
+		if messageID != "" {
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
+				writeErrorFromErr(w, err, "Agent")
+				return
+			}
+			NotFound(w, "Message")
+			return
+		}
+		writeJSON(w, http.StatusOK, interagentResponse{Messages: []interagentEntry{}})
 		return
 	}
 
@@ -3590,7 +3609,20 @@ func (s *Server) handleConversationInteragent(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	q := r.URL.Query()
+	if messageID != "" {
+		msg, err := s.store.GetMessage(ctx, messageID)
+		if err != nil {
+			writeErrorFromErr(w, err, "Message")
+			return
+		}
+		if !interagentMessageInvolvesAgent(msg, agent) {
+			NotFound(w, "Message")
+			return
+		}
+		entry := s.toInteragentEntry(ctx, user.ID(), msg, false, nil)
+		writeJSON(w, http.StatusOK, interagentResponse{Messages: []interagentEntry{entry}})
+		return
+	}
 
 	// Parse optional time-range bounds.
 	var after, before time.Time
@@ -3663,40 +3695,88 @@ func (s *Server) handleConversationInteragent(w http.ResponseWriter, r *http.Req
 	// A row whose provenance stamps name different projects but which has
 	// no conversation ID cannot be checked, so its body is stripped too.
 	seen := make(map[string]bool, len(result.Items))
-	filtered := make([]store.Message, 0, len(result.Items)+len(senderResult.Items))
-	viewerID := user.ID()
-	allowedByConv := make(map[string]bool)
-	addMsg := func(m store.Message) {
-		if !strings.HasPrefix(m.Sender, "agent:") || !strings.HasPrefix(m.Recipient, "agent:") {
+	candidates := make([]store.Message, 0, len(result.Items)+len(senderResult.Items))
+	addCandidate := func(m store.Message) {
+		if !interagentMessageInvolvesAgent(&m, agent) {
 			return
 		}
 		if seen[m.ID] {
 			return
 		}
 		seen[m.ID] = true
-		if !s.interagentBodyVisible(ctx, viewerID, &m, allowedByConv) {
-			m.Msg = ""
-		}
-		filtered = append(filtered, m)
+		candidates = append(candidates, m)
 	}
 	for _, m := range result.Items {
-		addMsg(m)
+		addCandidate(m)
 	}
 	for _, m := range senderResult.Items {
-		addMsg(m)
+		addCandidate(m)
 	}
 
-	slices.SortFunc(filtered, func(a, b store.Message) int {
+	slices.SortFunc(candidates, func(a, b store.Message) int {
 		if c := b.CreatedAt.Compare(a.CreatedAt); c != 0 {
 			return c
 		}
 		return strings.Compare(b.ID, a.ID)
 	})
-	if len(filtered) > limit {
-		filtered = filtered[:limit]
+	if len(candidates) > limit {
+		candidates = candidates[:limit]
 	}
 
-	writeJSON(w, http.StatusOK, interagentResponse{Messages: filtered})
+	viewerID := user.ID()
+	allowedByConv := make(map[string]bool)
+	entries := make([]interagentEntry, len(candidates))
+	for i := range candidates {
+		entries[i] = s.toInteragentEntry(ctx, viewerID, &candidates[i], true, allowedByConv)
+	}
+
+	writeJSON(w, http.StatusOK, interagentResponse{Messages: entries})
+}
+
+const interagentPreviewRunes = 300
+
+// interagentMessageInvolvesAgent reports whether m is an agent-to-agent
+// message involving agent (either via canonical SenderID/RecipientID or via
+// pre-SenderID legacy slug matching within the agent's project).
+func interagentMessageInvolvesAgent(m *store.Message, agent *store.Agent) bool {
+	if m == nil || agent == nil {
+		return false
+	}
+	if !strings.HasPrefix(m.Sender, "agent:") || !strings.HasPrefix(m.Recipient, "agent:") {
+		return false
+	}
+	if m.SenderID == agent.ID || m.RecipientID == agent.ID {
+		return true
+	}
+	return m.SenderID == "" && m.Sender == "agent:"+agent.Slug && m.ProjectID == agent.ProjectID
+}
+
+func (s *Server) toInteragentEntry(
+	ctx context.Context,
+	viewerID string,
+	m *store.Message,
+	truncate bool,
+	allowedByConv map[string]bool,
+) interagentEntry {
+	body := ""
+	msgTruncated := false
+	if s.interagentBodyVisible(ctx, viewerID, m, allowedByConv) {
+		body = m.Msg
+		if truncate && utf8.RuneCountInString(body) > interagentPreviewRunes {
+			body = truncatePreview(body, interagentPreviewRunes)
+			msgTruncated = true
+		}
+	}
+	return interagentEntry{
+		ID:                 m.ID,
+		Sender:             m.Sender,
+		Recipient:          m.Recipient,
+		Msg:                body,
+		MsgTruncated:       msgTruncated,
+		CreatedAt:          m.CreatedAt,
+		SenderProjectID:    m.SenderProjectID,
+		RecipientProjectID: m.RecipientProjectID,
+	}
 }
 
 // interagentBodyVisible reports whether viewerID may see the body of an
@@ -3731,7 +3811,18 @@ func (s *Server) interagentBodyVisible(
 
 // interagentResponse is the response for the interagent endpoint.
 type interagentResponse struct {
-	Messages []store.Message `json:"messages"`
+	Messages []interagentEntry `json:"messages"`
+}
+
+type interagentEntry struct {
+	ID                 string    `json:"id"`
+	Sender             string    `json:"sender"`
+	Recipient          string    `json:"recipient"`
+	Msg                string    `json:"msg"`
+	MsgTruncated       bool      `json:"msgTruncated,omitempty"`
+	CreatedAt          time.Time `json:"createdAt"`
+	SenderProjectID    *string   `json:"senderProjectId,omitempty"`
+	RecipientProjectID *string   `json:"recipientProjectId,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

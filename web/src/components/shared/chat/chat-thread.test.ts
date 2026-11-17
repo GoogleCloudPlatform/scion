@@ -5510,6 +5510,7 @@ describe('scion-chat-thread inter-agent day-split markers', () => {
 
     const marker = el.shadowRoot!.querySelector('scion-chat-interagent-marker');
     expect((marker as unknown as { messageCount: number }).messageCount).toBe(2);
+    expect(marker?.getAttribute('conversation-key')).toBe('dm:agent:coder');
   });
 
   /**
