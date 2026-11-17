@@ -71,11 +71,21 @@ type TriggerSourceSpec struct {
 	ID   string `json:"id"`
 }
 
-// TriggerMatchSpec holds the event-type filter and optional match expression.
+// TriggerMatchRuleSpec is one dialect-tagged rule element in a trigger's ordered match list.
+type TriggerMatchRuleSpec struct {
+	Dialect string `json:"dialect"`
+	Expr    string `json:"expr"`
+}
+
+// TriggerMatchSpec holds the event-type filter and ordered match rule list.
+// On requests, scalar Dialect/Expr is sugar for a single-element Rules list;
+// on responses, Rules is always populated ([] when empty) and Dialect/Expr are
+// mirrored only when len(Rules) == 1 (mixed-rule-arrays §2.2).
 type TriggerMatchSpec struct {
-	Types   []string `json:"types,omitempty"`
-	Dialect string   `json:"dialect,omitempty"`
-	Expr    string   `json:"expr,omitempty"`
+	Types   []string               `json:"types,omitempty"`
+	Dialect string                 `json:"dialect,omitempty"`
+	Expr    string                 `json:"expr,omitempty"`
+	Rules   []TriggerMatchRuleSpec `json:"rules"`
 }
 
 // TriggerActionSpec holds the action executed when a trigger matches.
@@ -241,6 +251,22 @@ func buildTriggerActionSpec(actionType, rawPayload string) TriggerActionSpec {
 func buildTriggerResponse(tr store.Trigger) TriggerResponse {
 	types := make([]string, len(tr.MatchTypes))
 	copy(types, tr.MatchTypes)
+	normRules := triggerMatchRules(tr)
+	respRules := make([]TriggerMatchRuleSpec, len(normRules))
+	for i, r := range normRules {
+		respRules[i] = TriggerMatchRuleSpec{
+			Dialect: r.Dialect,
+			Expr:    r.Expr,
+		}
+	}
+	matchSpec := TriggerMatchSpec{
+		Types: types,
+		Rules: respRules,
+	}
+	if len(respRules) == 1 {
+		matchSpec.Dialect = respRules[0].Dialect
+		matchSpec.Expr = respRules[0].Expr
+	}
 	return TriggerResponse{
 		ID:          tr.ID,
 		ProjectID:   tr.ProjectID,
@@ -250,11 +276,7 @@ func buildTriggerResponse(tr store.Trigger) TriggerResponse {
 			Kind: tr.SourceKind,
 			ID:   tr.SourceID,
 		},
-		Match: TriggerMatchSpec{
-			Types:   types,
-			Dialect: tr.MatchDialect,
-			Expr:    tr.MatchRule,
-		},
+		Match:  matchSpec,
 		Action: buildTriggerActionSpec(tr.ActionType, tr.ActionPayload),
 		Subject: TriggerSubjectSpec{
 			Dialect: tr.SubjectDialect,

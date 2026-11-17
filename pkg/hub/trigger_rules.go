@@ -16,9 +16,11 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 
@@ -28,7 +30,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/triggerrule"
 )
 
-var errTriggerRuleEngineNotInitialized = errors.New("trigger rule engine is not initialized")
+var (
+	errTriggerRuleEngineNotInitialized = errors.New("trigger rule engine is not initialized")
+	ruleDialectNameRE                  = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
+)
 
 // Trigger rule registration, authoring validation, and engine seam
 // (Stage 1 §7.0, §7.0a, §7.1, §7.2; ptone/scion#8030).
@@ -132,48 +137,398 @@ func validateTriggerRuleExpr(field, expr string) error {
 	return nil
 }
 
+func validateTriggerDialectName(dialect string) error {
+	if len(dialect) > triggerrule.MaxRuleDialectBytes || !ruleDialectNameRE.MatchString(dialect) {
+		return fmt.Errorf("invalid dialect name (must match ^[a-z][a-z0-9_]*$ and be at most %d bytes)", triggerrule.MaxRuleDialectBytes)
+	}
+	return nil
+}
+
+// triggerMatchRules normalizes a stored Trigger's match rules on read
+// (mixed-rule-arrays §2.1): non-empty MatchRules wins; else a defensive
+// non-empty scalar MatchRule normalizes to a one-element slice with
+// MatchDialect (defaulting to "cel"); else nil (Types-only match).
+func triggerMatchRules(tr store.Trigger) []triggerrule.Rule {
+	if len(tr.MatchRules) > 0 {
+		out := make([]triggerrule.Rule, len(tr.MatchRules))
+		for i, r := range tr.MatchRules {
+			d := strings.TrimSpace(r.Dialect)
+			if d == "" {
+				d = ruleengine.DialectCEL
+			}
+			out[i] = triggerrule.Rule{
+				Dialect: d,
+				Expr:    r.Expr,
+			}
+		}
+		return out
+	}
+	if tr.MatchRule != "" {
+		d := strings.TrimSpace(tr.MatchDialect)
+		if d == "" {
+			d = ruleengine.DialectCEL
+		}
+		return []triggerrule.Rule{{
+			Dialect: d,
+			Expr:    tr.MatchRule,
+		}}
+	}
+	return nil
+}
+
+func triggerRulesToSpecs(rules []triggerrule.Rule) []TriggerMatchRuleSpec {
+	out := make([]TriggerMatchRuleSpec, len(rules))
+	for i, r := range rules {
+		out[i] = TriggerMatchRuleSpec{
+			Dialect: r.Dialect,
+			Expr:    r.Expr,
+		}
+	}
+	return out
+}
+
+func writeAmbiguousTriggerMatchError(w http.ResponseWriter) {
+	writeError(
+		w,
+		http.StatusBadRequest,
+		ErrCodeInvalidRule,
+		"match cannot specify both rules and scalar dialect/expr",
+		map[string]any{
+			"field":    "match",
+			"category": "ambiguous_match",
+		},
+	)
+}
+
+type triggerElementFailure struct {
+	entry    map[string]any
+	summary  string
+	kind     ruleengine.Kind
+	consumer string
+}
+
+func writeTriggerMatchElementErrors(w http.ResponseWriter, failures []triggerElementFailure) {
+	elements := make([]map[string]any, len(failures))
+	summaries := make([]string, len(failures))
+	for i, f := range failures {
+		elements[i] = f.entry
+		summaries[i] = f.summary
+	}
+	first := failures[0]
+	details := map[string]any{
+		"field":    "match",
+		"elements": elements,
+	}
+	if cat, hasCat := first.entry["category"]; hasCat {
+		if first.kind != "" {
+			details["kind"] = first.kind
+		}
+		details["category"] = cat
+		details["message"] = first.entry["message"]
+		details["line"] = first.entry["line"]
+		details["column"] = first.entry["column"]
+	} else if dialect, hasDialect := first.entry["dialect"]; hasDialect {
+		details["dialect"] = dialect
+		if first.consumer != "" {
+			details["consumer"] = first.consumer
+		}
+		if reason, ok := first.entry["reason"]; ok && reason != "" {
+			details["reason"] = reason
+		}
+	}
+	writeError(w, http.StatusBadRequest, ErrCodeInvalidRule, strings.Join(summaries, "; "), details)
+}
+
 // writeAndValidateTriggerMatch normalizes and compiles a trigger's match block
-// at authoring time (create, PATCH, or resume). When defaultTypes is true and
-// spec omits types, types defaults to ["webhook.received"]. When
-// explicitDialect is true, an empty expr is refused as a malformed request
-// (a non-empty dialect requires a rule expression).
-func (s *Server) writeAndValidateTriggerMatch(w http.ResponseWriter, ctx context.Context, spec *TriggerMatchSpec, defaultTypes, explicitDialect bool) ([]string, string, string, bool) {
+// at authoring time (create, PATCH, or resume; mixed-rule-arrays §2, §4).
+// Scalar dialect/expr is accepted as sugar for a one-element list; mixing both
+// rules and scalar dialect/expr returns 400 invalid_rule (ambiguous_match).
+// Every element is validated and compiled, and ALL failing elements are
+// reported together in details.elements[].
+func (s *Server) writeAndValidateTriggerMatch(
+	w http.ResponseWriter,
+	ctx context.Context,
+	spec *TriggerMatchSpec,
+	defaultTypes, explicitScalarDialect bool,
+) ([]string, []store.TriggerMatchRule, bool) {
 	var types []string
-	dialect := ruleengine.DialectCEL
-	expr := ""
 	if spec != nil {
 		types = spec.Types
-		if d := strings.TrimSpace(spec.Dialect); d != "" {
-			dialect = d
-		}
-		expr = spec.Expr
 	}
 	if len(types) == 0 {
 		if !defaultTypes {
 			ValidationError(w, "match.types must contain at least 1 entry", nil)
-			return nil, "", "", false
+			return nil, nil, false
 		}
 		types = []string{defaultWebhookMatchType}
 	}
 	if err := triggerrule.ValidateMatchTypes(types); err != nil {
 		ValidationError(w, err.Error(), nil)
-		return nil, "", "", false
+		return nil, nil, false
 	}
-	if err := validateTriggerRuleExpr("match.expr", expr); err != nil {
-		ValidationError(w, err.Error(), nil)
-		return nil, "", "", false
+
+	if spec != nil && spec.Rules != nil && (spec.Expr != "" || strings.TrimSpace(spec.Dialect) != "") {
+		writeAmbiguousTriggerMatchError(w)
+		return nil, nil, false
 	}
-	if err := s.compileTriggerMatchRule(ctx, dialect, expr); err != nil {
-		writeTriggerRuleError(w, "match", err)
-		return nil, "", "", false
+
+	var rawRules []TriggerMatchRuleSpec
+	switch {
+	case spec == nil:
+		rawRules = nil
+	case spec.Rules != nil:
+		rawRules = spec.Rules
+	default:
+		scalarDialect := strings.TrimSpace(spec.Dialect)
+		if spec.Expr == "" {
+			if explicitScalarDialect {
+				if err := validateTriggerDialectName(scalarDialect); err != nil {
+					writeTriggerMatchElementErrors(w, []triggerElementFailure{{
+						entry: map[string]any{
+							"element":  0,
+							"category": "dialect",
+							"message":  err.Error(),
+							"line":     1,
+							"column":   1,
+						},
+						summary: fmt.Sprintf("invalid match rule [element 0]: %s", err.Error()),
+						kind:    ruleengine.KindFilter,
+					}})
+					return nil, nil, false
+				}
+				if err := s.compileTriggerMatchRule(ctx, scalarDialect, ""); err != nil {
+					var unsup *ruleengine.UnsupportedDialectError
+					if errors.As(err, &unsup) {
+						msg := fmt.Sprintf("unsupported match dialect %q", unsup.Dialect)
+						if unsup.Reason != "" {
+							msg += ": " + unsup.Reason
+						}
+						writeTriggerMatchElementErrors(w, []triggerElementFailure{{
+							entry: map[string]any{
+								"element": 0,
+								"dialect": unsup.Dialect,
+								"reason":  unsup.Reason,
+							},
+							summary:  msg,
+							consumer: unsup.Consumer,
+						}})
+						return nil, nil, false
+					}
+					writeTriggerRuleError(w, "match", err)
+					return nil, nil, false
+				}
+				ValidationError(w, "match.dialect requires a non-empty match.expr", nil)
+				return nil, nil, false
+			}
+			rawRules = nil
+		} else {
+			rawRules = []TriggerMatchRuleSpec{{
+				Dialect: spec.Dialect,
+				Expr:    spec.Expr,
+			}}
+		}
 	}
-	if explicitDialect && expr == "" {
-		ValidationError(w, "match.dialect requires a non-empty match.expr", nil)
-		return nil, "", "", false
+
+	copiedTypes := make([]string, len(types))
+	copy(copiedTypes, types)
+
+	if len(rawRules) == 0 {
+		// Verify the trigger rule engine is initialized and consumer "trigger" is admitted.
+		if err := s.compileTriggerMatchRule(ctx, ruleengine.DialectCEL, ""); err != nil {
+			writeTriggerRuleError(w, "match", err)
+			return nil, nil, false
+		}
+		return copiedTypes, nil, true
 	}
-	copied := make([]string, len(types))
-	copy(copied, types)
-	return copied, dialect, expr, true
+
+	if len(rawRules) > triggerrule.MaxMatchRules {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			ErrCodeInvalidRule,
+			fmt.Sprintf("match.rules exceeds maximum of %d elements (got %d)", triggerrule.MaxMatchRules, len(rawRules)),
+			map[string]any{
+				"field":        "match",
+				"category":     "size",
+				"max_elements": triggerrule.MaxMatchRules,
+				"count":        len(rawRules),
+			},
+		)
+		return nil, nil, false
+	}
+
+	normalized := make([]store.TriggerMatchRule, 0, len(rawRules))
+	var failures []triggerElementFailure
+
+	for i, elem := range rawRules {
+		d := strings.TrimSpace(elem.Dialect)
+		if d == "" {
+			d = ruleengine.DialectCEL
+		}
+		if err := validateTriggerDialectName(d); err != nil {
+			failures = append(failures, triggerElementFailure{
+				entry: map[string]any{
+					"element":  i,
+					"category": "dialect",
+					"message":  err.Error(),
+					"line":     1,
+					"column":   1,
+				},
+				summary: fmt.Sprintf("invalid match rule [element %d]: %s", i, err.Error()),
+				kind:    ruleengine.KindFilter,
+			})
+			continue
+		}
+		if err := validateTriggerRuleExpr("match.expr", elem.Expr); err != nil {
+			failures = append(failures, triggerElementFailure{
+				entry: map[string]any{
+					"element":  i,
+					"category": "control_characters",
+					"message":  err.Error(),
+					"line":     1,
+					"column":   1,
+				},
+				summary: fmt.Sprintf("invalid match rule [element %d]: %s", i, err.Error()),
+				kind:    ruleengine.KindFilter,
+			})
+			continue
+		}
+
+		// Check dialect admission and engine initialization first so ungranted
+		// dialects surface dialect_not_allowed even when expr is empty or oversize,
+		// and an uninitialized engine returns HTTP 500 without leaking details.
+		if err := s.compileTriggerMatchRule(ctx, d, ""); err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				writeErrorFromErr(w, err, "")
+				return nil, nil, false
+			}
+			var unsup *ruleengine.UnsupportedDialectError
+			if errors.As(err, &unsup) {
+				msg := fmt.Sprintf("unsupported match dialect %q [element %d]", unsup.Dialect, i)
+				if unsup.Reason != "" {
+					msg += ": " + unsup.Reason
+				}
+				failures = append(failures, triggerElementFailure{
+					entry: map[string]any{
+						"element": i,
+						"dialect": unsup.Dialect,
+						"reason":  unsup.Reason,
+					},
+					summary:  msg,
+					consumer: unsup.Consumer,
+				})
+				continue
+			}
+			writeErrorFromErr(w, err, "")
+			return nil, nil, false
+		}
+
+		if elem.Expr == "" {
+			msg := "match rule expression must not be empty"
+			failures = append(failures, triggerElementFailure{
+				entry: map[string]any{
+					"element":  i,
+					"category": "empty",
+					"message":  msg,
+					"line":     1,
+					"column":   1,
+				},
+				summary: fmt.Sprintf("invalid match rule [element %d]: %s", i, msg),
+				kind:    ruleengine.KindFilter,
+			})
+			continue
+		}
+		if len(elem.Expr) > triggerrule.MaxMatchRuleBytes {
+			msg := fmt.Sprintf("rule length %d exceeds maximum of %d bytes", len(elem.Expr), triggerrule.MaxMatchRuleBytes)
+			failures = append(failures, triggerElementFailure{
+				entry: map[string]any{
+					"element":  i,
+					"category": "size",
+					"message":  msg,
+					"line":     1,
+					"column":   1,
+				},
+				summary: fmt.Sprintf("invalid match rule [element %d] at line 1, column 1 (size): %s", i, msg),
+				kind:    ruleengine.KindFilter,
+			})
+			continue
+		}
+
+		if err := s.compileTriggerMatchRule(ctx, d, elem.Expr); err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				writeErrorFromErr(w, err, "")
+				return nil, nil, false
+			}
+			var ce *celengine.CompileError
+			if errors.As(err, &ce) {
+				failures = append(failures, triggerElementFailure{
+					entry: map[string]any{
+						"element":  i,
+						"category": ce.Category,
+						"message":  ce.Message,
+						"line":     ce.Line,
+						"column":   ce.Column,
+					},
+					summary: fmt.Sprintf("invalid match rule [element %d] at line %d, column %d (%s): %s",
+						i, ce.Line, ce.Column, ce.Category, ce.Message),
+					kind: ruleengine.Kind(ce.Kind),
+				})
+				continue
+			}
+			var unsup *ruleengine.UnsupportedDialectError
+			if errors.As(err, &unsup) {
+				msg := fmt.Sprintf("unsupported match dialect %q [element %d]", unsup.Dialect, i)
+				if unsup.Reason != "" {
+					msg += ": " + unsup.Reason
+				}
+				failures = append(failures, triggerElementFailure{
+					entry: map[string]any{
+						"element": i,
+						"dialect": unsup.Dialect,
+						"reason":  unsup.Reason,
+					},
+					summary:  msg,
+					consumer: unsup.Consumer,
+				})
+				continue
+			}
+			writeErrorFromErr(w, err, "")
+			return nil, nil, false
+		}
+
+		normalized = append(normalized, store.TriggerMatchRule{
+			Dialect: d,
+			Expr:    elem.Expr,
+		})
+	}
+
+	if len(failures) > 0 {
+		writeTriggerMatchElementErrors(w, failures)
+		return nil, nil, false
+	}
+
+	encoded, err := json.Marshal(normalized)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return nil, nil, false
+	}
+	if len(encoded) > triggerrule.MaxMatchRulesJSONBytes {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			ErrCodeInvalidRule,
+			fmt.Sprintf("encoded match.rules length %d exceeds maximum of %d bytes", len(encoded), triggerrule.MaxMatchRulesJSONBytes),
+			map[string]any{
+				"field":     "match",
+				"category":  "size",
+				"max_bytes": triggerrule.MaxMatchRulesJSONBytes,
+				"bytes":     len(encoded),
+			},
+		)
+		return nil, nil, false
+	}
+
+	return copiedTypes, normalized, true
 }
 
 // writeAndValidateTriggerSubject normalizes and compiles a trigger's subject
@@ -199,6 +554,16 @@ func (s *Server) writeAndValidateTriggerSubject(w http.ResponseWriter, ctx conte
 		return "", "", "", false
 	default:
 		ValidationError(w, fmt.Sprintf("unsupported subject mode %q", mode), nil)
+		return "", "", "", false
+	}
+	if err := validateTriggerDialectName(dialect); err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRule, "invalid subject dialect: "+err.Error(), map[string]any{
+			"field":    "subject",
+			"category": "dialect",
+			"message":  err.Error(),
+			"line":     1,
+			"column":   1,
+		})
 		return "", "", "", false
 	}
 	if err := validateTriggerRuleExpr("subject.expr", expr); err != nil {
