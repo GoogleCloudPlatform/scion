@@ -645,6 +645,24 @@ func TestDurableQueueStats(t *testing.T) {
 	assert.Zero(t, p2Stats.Leased)
 	require.NotNil(t, p2Stats.Oldest)
 	assert.True(t, p2Stats.Oldest.Equal(now))
+
+	pendingAll, err := cs.CountDurableQueuePending(ctx, "test.echo", "")
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), pendingAll)
+	pendingP1, err := cs.CountDurableQueuePending(ctx, "test.echo", "p1")
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), pendingP1)
+	pendingP2, err := cs.CountDurableQueuePending(ctx, "test.echo", "p2")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), pendingP2)
+	require.NoError(t, cs.WithTx(ctx, func(tx store.Store) error {
+		txCounter, ok := tx.(store.DurableQueuePendingCounter)
+		require.True(t, ok, "transaction store must implement DurableQueuePendingCounter")
+		n, txErr := txCounter.CountDurableQueuePending(ctx, "test.echo", "p1")
+		require.NoError(t, txErr)
+		assert.Equal(t, int64(2), n)
+		return nil
+	}))
 }
 
 func TestDurableQueueConcurrentClaimDisjointSets(t *testing.T) {

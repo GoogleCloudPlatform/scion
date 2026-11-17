@@ -179,3 +179,11 @@ type DurableQueueStore interface {
 	// invalid or len(dedupKeys) > MaxDurableQueueNudgeKeys.
 	NudgeDurableItems(ctx context.Context, kind string, dedupKeys []string, now time.Time) (int, error)
 }
+
+// DurableQueuePendingCounter counts incomplete durable_queue_items for kind
+// (optionally scoped to projectID, or all projects when projectID is "") in a
+// single COUNT query without sampling active leases or oldest created_at.
+// Implemented by entadapter.CompositeStore and entadapter.DurableQueueStore.
+type DurableQueuePendingCounter interface {
+	CountDurableQueuePending(ctx context.Context, kind, projectID string) (int64, error)
+}

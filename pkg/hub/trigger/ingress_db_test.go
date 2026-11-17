@@ -213,8 +213,9 @@ func TestIngress_EndToEndStoreAndQueue(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), qStats.Pending)
 
-	// 2b. Duplicate durable_queue_items (kind, dedup_key) conflict (durablequeue.ErrDuplicate
-	// wrapping store.ErrAlreadyExists) rolls back the trigger_events insert and maps to 202 "duplicate".
+	// 2b. An event-ID collision in durable_queue_items (durablequeue.ErrDuplicate)
+	// rolls back the trigger_events insert and returns 500 (never 202 "duplicate")
+	// so the sender retries.
 	preQueuedID := uuid.NewString()
 	_, err = q.Enqueue(ctx, nil, durablequeue.Item{
 		Kind:      trigger.EventQueueKind,
@@ -226,14 +227,26 @@ func TestIngress_EndToEndStoreAndQueue(t *testing.T) {
 	forcedEventID = preQueuedID
 	qDupRec := sendSigned(activeEp.ID, "deliv-queue-dup", "deploy.finished", "prod/payments", "application/json", payload)
 	forcedEventID = ""
-	require.Equal(t, http.StatusAccepted, qDupRec.Code, qDupRec.Body.String())
-	var qDupResp trigger.IngressAcceptedResponse
-	require.NoError(t, json.Unmarshal(qDupRec.Body.Bytes(), &qDupResp))
-	assert.Equal(t, preQueuedID, qDupResp.EventID)
-	assert.Equal(t, trigger.IngressStatusDuplicate, qDupResp.Status)
-	assert.Equal(t, int64(1), q.wakes.Load(), "queue-duplicate path must not wake queue")
+	require.Equal(t, http.StatusInternalServerError, qDupRec.Code, qDupRec.Body.String())
+	assert.Equal(t, int64(1), q.wakes.Load(), "queue-duplicate error path must not wake queue")
 	_, err = cs.GetTriggerEvent(ctx, preQueuedID)
 	require.ErrorIs(t, err, store.ErrNotFound, "event row must roll back when queue Enqueue returns ErrDuplicate")
+
+	// 2c. Event-ID collision on trigger_events.id with NO X-Scion-Delivery header
+	// returns 500 (never 202 "duplicate") so the sender retries.
+	forcedEventID = resp.EventID
+	idCollisionNoDeliv := sendSigned(activeEp.ID, "", "deploy.finished", "prod/payments", "application/json", payload)
+	forcedEventID = ""
+	require.Equal(t, http.StatusInternalServerError, idCollisionNoDeliv.Code, idCollisionNoDeliv.Body.String())
+	assert.Equal(t, int64(1), q.wakes.Load())
+
+	// 2d. Event-ID collision on trigger_events.id even WITH a fresh X-Scion-Delivery
+	// header (where no event exists for that delivery key) returns 500, never 202.
+	forcedEventID = resp.EventID
+	idCollisionNewDeliv := sendSigned(activeEp.ID, "deliv-fresh-never-stored", "deploy.finished", "prod/payments", "application/json", payload)
+	forcedEventID = ""
+	require.Equal(t, http.StatusInternalServerError, idCollisionNewDeliv.Code, idCollisionNewDeliv.Body.String())
+	assert.Equal(t, int64(1), q.wakes.Load())
 
 	// 3. Without X-Scion-Delivery, two identical signed bodies create two distinct events.
 	noDeliv1 := sendSigned(activeEp.ID, "", "", "", "application/json", []byte(`{"ping":1}`))

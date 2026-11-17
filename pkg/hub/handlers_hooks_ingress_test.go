@@ -508,8 +508,9 @@ func TestWebhookIngress_HappyPathDuplicateAuditAndNoSecretLeak(t *testing.T) {
 	assert.Equal(t, accepted1.EventID, acceptedDup.EventID)
 	assert.Equal(t, trigger.IngressStatusDuplicate, acceptedDup.Status)
 
-	// 2b. Duplicate durable_queue_items (kind, dedup_key) conflict (durablequeue.ErrDuplicate wrapping store.ErrAlreadyExists)
-	// rolls back the trigger_events insert and returns 202 {"status":"duplicate"} with the colliding eventId.
+	// 2b. An event-ID collision in durable_queue_items (durablequeue.ErrDuplicate)
+	// rolls back the trigger_events insert and returns 500 (never 202 "duplicate")
+	// so the sender retries.
 	preQueuedID := uuid.NewString()
 	_, err := f.srv.durableQueue.Enqueue(ctx, nil, durablequeue.Item{
 		Kind:      trigger.EventQueueKind,
@@ -521,11 +522,7 @@ func TestWebhookIngress_HappyPathDuplicateAuditAndNoSecretLeak(t *testing.T) {
 	forcedEventID = preQueuedID
 	recQueueDup := sendSignedHookHTTP(f.srv, ep.ID, ep.Secret, now.Unix(), "gh-deliv-queue-dup", "push.completed", "repo/scion", "application/json", "198.51.100.77:5555", nil, payload)
 	forcedEventID = ""
-	require.Equal(t, http.StatusAccepted, recQueueDup.Code, recQueueDup.Body.String())
-	var acceptedQueueDup trigger.IngressAcceptedResponse
-	require.NoError(t, json.Unmarshal(recQueueDup.Body.Bytes(), &acceptedQueueDup))
-	assert.Equal(t, preQueuedID, acceptedQueueDup.EventID)
-	assert.Equal(t, trigger.IngressStatusDuplicate, acceptedQueueDup.Status)
+	require.Equal(t, http.StatusInternalServerError, recQueueDup.Code, recQueueDup.Body.String())
 	_, err = f.store.GetTriggerEvent(ctx, preQueuedID)
 	require.ErrorIs(t, err, store.ErrNotFound, "event row must roll back when queue Enqueue returns ErrDuplicate")
 
@@ -610,20 +607,37 @@ func TestWebhookIngress_PendingCap429AndCrossProjectIsolation(t *testing.T) {
 	epProj1 := createTestWebhookEndpointViaAPI(t, f, f.projectID, "cap-proj1")
 	epProj2 := createTestWebhookEndpointViaAPI(t, f, f.otherProjID, "cap-proj2")
 
-	seedPendingQueueItems(t, f.store, f.projectID, trigger.MaxPendingEventsPerProject)
-
 	now := time.Now().Unix()
 	payload := []byte(`{"event":"at-cap"}`)
 
-	// Project 1 at 5,000 pending items returns 429 "queue full" with Retry-After: 30 and writes zero rows.
+	// Accept one delivery first, then seed MaxPendingEventsPerProject - 1 more
+	// queue items so Project 1 stands at Pending == MaxPendingEventsPerProject (5,000).
+	recInitial := sendSignedHookHTTP(f.srv, epProj1.ID, epProj1.Secret, now, "deliv-before-cap", "", "", "application/json", "", nil, payload)
+	require.Equal(t, http.StatusAccepted, recInitial.Code, recInitial.Body.String())
+	var initialAccepted trigger.IngressAcceptedResponse
+	require.NoError(t, json.Unmarshal(recInitial.Body.Bytes(), &initialAccepted))
+	assert.Equal(t, trigger.IngressStatusQueued, initialAccepted.Status)
+
+	seedPendingQueueItems(t, f.store, f.projectID, trigger.MaxPendingEventsPerProject-1)
+
+	// Project 1 at 5,000 pending items rejects a NEW delivery with 429 "queue full" (Retry-After: 30) and writes zero rows.
 	recFull := sendSignedHookHTTP(f.srv, epProj1.ID, epProj1.Secret, now, "deliv-cap-overflow", "", "", "application/json", "", nil, payload)
 	assert.Equal(t, http.StatusTooManyRequests, recFull.Code)
 	assert.Equal(t, "30", recFull.Header().Get("Retry-After"))
 	assert.Contains(t, recFull.Body.String(), "queue full")
 
+	// §6.2: a duplicate redelivery of an already-accepted X-Scion-Delivery at the
+	// pending cap MUST still answer 202 {"status":"duplicate"} (never 429).
+	recDupAtCap := sendSignedHookHTTP(f.srv, epProj1.ID, epProj1.Secret, now, "deliv-before-cap", "", "", "application/json", "", nil, payload)
+	require.Equal(t, http.StatusAccepted, recDupAtCap.Code, recDupAtCap.Body.String())
+	var dupAtCap trigger.IngressAcceptedResponse
+	require.NoError(t, json.Unmarshal(recDupAtCap.Body.Bytes(), &dupAtCap))
+	assert.Equal(t, initialAccepted.EventID, dupAtCap.EventID)
+	assert.Equal(t, trigger.IngressStatusDuplicate, dupAtCap.Status)
+
 	evsProj1, err := f.store.ListTriggerEvents(context.Background(), store.TriggerEventFilter{ProjectID: f.projectID}, store.ListOptions{})
 	require.NoError(t, err)
-	assert.Zero(t, evsProj1.TotalCount)
+	assert.Equal(t, 1, evsProj1.TotalCount, "neither 429 overflow nor 202 duplicate at cap may insert a second event row")
 
 	// Project 2 on the same hub is completely unaffected!
 	recProj2 := sendSignedHookHTTP(f.srv, epProj2.ID, epProj2.Secret, now, "deliv-proj2-ok", "", "", "application/json", "", nil, payload)
@@ -633,6 +647,7 @@ func TestWebhookIngress_PendingCap429AndCrossProjectIsolation(t *testing.T) {
 type ingressLockOrderStore struct {
 	store.Store
 	store.DurableQueueStore
+	store.DurableQueuePendingCounter
 	mu     sync.Mutex
 	opsLog []string
 }
@@ -647,13 +662,20 @@ func (w *ingressLockOrderStore) WithTx(ctx context.Context, fn func(tx store.Sto
 	w.record("WithTx:begin")
 	return w.Store.WithTx(ctx, func(tx store.Store) error {
 		txDQS, _ := tx.(store.DurableQueueStore)
+		txCounter, _ := tx.(store.DurableQueuePendingCounter)
 		txWrap := &ingressLockOrderTxStore{
-			Store:             tx,
-			DurableQueueStore: txDQS,
-			parent:            w,
+			Store:                      tx,
+			DurableQueueStore:          txDQS,
+			DurableQueuePendingCounter: txCounter,
+			parent:                     w,
 		}
 		return fn(txWrap)
 	})
+}
+
+func (w *ingressLockOrderStore) CountDurableQueuePending(ctx context.Context, kind, projectID string) (int64, error) {
+	w.record("outer.CountDurableQueuePending")
+	return w.DurableQueuePendingCounter.CountDurableQueuePending(ctx, kind, projectID)
 }
 
 func (w *ingressLockOrderStore) DurableQueueStats(ctx context.Context, kind, projectID string, now time.Time) (store.DurableQueueStats, error) {
@@ -672,12 +694,23 @@ func (w *ingressLockOrderStore) EnqueueDurableItem(ctx context.Context, tx store
 type ingressLockOrderTxStore struct {
 	store.Store
 	store.DurableQueueStore
+	store.DurableQueuePendingCounter
 	parent *ingressLockOrderStore
 }
 
 func (t *ingressLockOrderTxStore) LockTriggerQuota(ctx context.Context, projectID string) error {
 	t.parent.record("tx.LockTriggerQuota")
 	return t.Store.LockTriggerQuota(ctx, projectID)
+}
+
+func (t *ingressLockOrderTxStore) GetTriggerEventByDedupKey(ctx context.Context, sourceKind, sourceID, dedupKey string) (*store.TriggerEvent, error) {
+	t.parent.record("tx.GetTriggerEventByDedupKey")
+	return t.Store.GetTriggerEventByDedupKey(ctx, sourceKind, sourceID, dedupKey)
+}
+
+func (t *ingressLockOrderTxStore) CountDurableQueuePending(ctx context.Context, kind, projectID string) (int64, error) {
+	t.parent.record("tx.CountDurableQueuePending")
+	return t.DurableQueuePendingCounter.CountDurableQueuePending(ctx, kind, projectID)
 }
 
 func (t *ingressLockOrderTxStore) DurableQueueStats(ctx context.Context, kind, projectID string, now time.Time) (store.DurableQueueStats, error) {
@@ -701,8 +734,9 @@ func TestWebhookIngress_QuotaLockBeforeQueueStatsInTx(t *testing.T) {
 	ep := createTestWebhookEndpointViaAPI(t, f, f.projectID, "lock-order-hook")
 
 	wrapped := &ingressLockOrderStore{
-		Store:             f.store,
-		DurableQueueStore: f.store.(store.DurableQueueStore),
+		Store:                      f.store,
+		DurableQueueStore:          f.store.(store.DurableQueueStore),
+		DurableQueuePendingCounter: f.store.(store.DurableQueuePendingCounter),
 	}
 	f.srv.webhookIngress = trigger.NewIngress(trigger.IngressConfig{
 		Store:      wrapped,
@@ -721,10 +755,11 @@ func TestWebhookIngress_QuotaLockBeforeQueueStatsInTx(t *testing.T) {
 	assert.Equal(t, []string{
 		"WithTx:begin",
 		"tx.LockTriggerQuota",
-		"tx.DurableQueueStats",
+		"tx.GetTriggerEventByDedupKey",
+		"tx.CountDurableQueuePending",
 		"tx.CreateTriggerEvent",
 		"tx.EnqueueDurableItem",
-	}, ops, "ingress transaction must acquire LockTriggerQuota before checking DurableQueueStats and inserting event/queue rows")
+	}, ops, "ingress transaction must acquire LockTriggerQuota, check dedup key, and run single-query CountDurableQueuePending before inserting event/queue rows")
 }
 
 func runWebhookIngressConcurrentPendingCapAtLastSlot(t *testing.T, f *triggersTestFixture) {

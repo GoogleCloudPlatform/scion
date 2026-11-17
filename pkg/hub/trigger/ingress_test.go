@@ -27,6 +27,8 @@ import (
 	"go/parser"
 	"go/token"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -807,4 +809,82 @@ func BenchmarkBoundedEviction_FullTable(b *testing.B) {
 			_, _ = cache.LookupEndpoint(ctx, st, strconv.Itoa(trigger.MaxNegativeCacheEntries+i))
 		}
 	})
+}
+
+type noCounterTxStore struct {
+	store.Store // deliberately does NOT implement store.DurableQueuePendingCounter
+}
+
+func (s *noCounterTxStore) LockTriggerQuota(_ context.Context, _ string) error { return nil }
+
+func (s *noCounterTxStore) GetTriggerEventByDedupKey(_ context.Context, _, _, _ string) (*store.TriggerEvent, error) {
+	return nil, store.ErrNotFound
+}
+
+type outerStoreWithQueueFallbackTrap struct {
+	store.TriggerStore
+	store.DurableQueueStore
+	ep              *store.WebhookEndpoint
+	outerCountCalls int
+}
+
+func (s *outerStoreWithQueueFallbackTrap) GetWebhookEndpoint(_ context.Context, id string) (*store.WebhookEndpoint, error) {
+	if s.ep != nil && s.ep.ID == id {
+		cp := *s.ep
+		return &cp, nil
+	}
+	return nil, store.ErrNotFound
+}
+
+func (s *outerStoreWithQueueFallbackTrap) CountDurableQueuePending(_ context.Context, _, _ string) (int64, error) {
+	s.outerCountCalls++
+	return 0, nil
+}
+
+func (s *outerStoreWithQueueFallbackTrap) DurableQueueStats(_ context.Context, _, _ string, _ time.Time) (store.DurableQueueStats, error) {
+	s.outerCountCalls++
+	return store.DurableQueueStats{}, nil
+}
+
+func (s *outerStoreWithQueueFallbackTrap) WithTx(_ context.Context, fn func(tx store.Store) error) error {
+	return fn(&noCounterTxStore{})
+}
+
+func TestIngress_TxWithoutQueuePendingCounterFailsClosed500(t *testing.T) {
+	now := time.Date(2026, 11, 17, 11, 0, 0, 0, time.UTC)
+	epID := uuid.NewString()
+	const secret = "dHgtbm8tZmFsbGJhY2stdGVzdC1zZWNyZXQtMzJieXRlcyE"
+	outer := &outerStoreWithQueueFallbackTrap{
+		ep: &store.WebhookEndpoint{
+			ID:            epID,
+			ProjectID:     uuid.NewString(),
+			Name:          "no-fallback-ep",
+			SecretVersion: 1,
+			SignatureMode: store.WebhookSignatureModeScionV1,
+			Status:        store.WebhookEndpointStatusActive,
+		},
+	}
+	q := &fakeEnqueueQueue{}
+	ing := trigger.NewIngress(trigger.IngressConfig{
+		Store:      outer,
+		QueueStore: outer,
+		Queue:      q,
+		LoadSecret: func(_ context.Context, _, _ string, _ int) (string, error) { return secret, nil },
+		Enabled:    func() bool { return true },
+		Now:        func() time.Time { return now },
+	})
+
+	payload := []byte(`{"test":1}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+epID, bytes.NewReader(payload))
+	req.RemoteAddr = "198.51.100.10:4000"
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(trigger.HeaderDelivery, "deliv-no-fallback")
+	req.Header.Set(trigger.HeaderSignature, trigger.SignScionV1(secret, now.Unix(), "deliv-no-fallback", "", "", payload))
+	rec := httptest.NewRecorder()
+	ing.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	assert.Zero(t, outer.outerCountCalls, "ingress must never fall back to non-transactional QueueStore")
+	assert.Empty(t, q.enqueued)
+	assert.Empty(t, q.wakes)
 }

@@ -77,7 +77,9 @@ var (
 		HeaderSubject,
 	}
 
-	errQueueFull = errors.New("trigger event queue full for project")
+	errQueueFull                    = errors.New("trigger event queue full for project")
+	errDuplicateDelivery            = errors.New("duplicate webhook delivery")
+	errTxMissingQueuePendingCounter = errors.New("transaction store does not implement DurableQueuePendingCounter")
 )
 
 // IsHooksRequestPath reports whether path matches ^/api/v1/hooks/[0-9a-f-]{36}$
@@ -500,7 +502,8 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Step 9: construct TriggerEvent (§8.2) and check pending cap + insert + enqueue in one transaction (§6.2).
+	// Step 9: construct TriggerEvent (§8.2) and execute delivery-dedup check,
+	// pending-only cap check, and event + queue insert in one locked transaction (§6.2).
 	ev, eventAttr, attrOK := buildWebhookTriggerEvent(ep, r.Header, delivery, eventHdr, subjectHdr, clientIP, body, now, h.newEventID)
 	if !attrOK {
 		h.rejectedBadHeader.Add(1)
@@ -509,19 +512,33 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var dupEventID string
 	txErr := h.store.WithTx(ctx, func(tx store.Store) error {
 		if lErr := tx.LockTriggerQuota(ctx, ep.ProjectID); lErr != nil {
 			return lErr
 		}
-		statsReader := h.queueStore
-		if txQS, ok := tx.(store.DurableQueueStore); ok {
-			statsReader = txQS
+		// §6.2: duplicate redeliveries (when X-Scion-Delivery is present) are
+		// acknowledged with 202 "duplicate" BEFORE the pending-cap check so a
+		// redelivery at the cap never returns 429.
+		if delivery != "" {
+			existing, gErr := tx.GetTriggerEventByDedupKey(ctx, store.TriggerSourceKindWebhook, ep.ID, ev.DedupKey)
+			if gErr == nil && existing != nil {
+				dupEventID = existing.ID
+				return errDuplicateDelivery
+			}
+			if gErr != nil && !errors.Is(gErr, store.ErrNotFound) {
+				return gErr
+			}
 		}
-		curStats, sErr := statsReader.DurableQueueStats(ctx, EventQueueKind, ep.ProjectID, now)
+		txCounter, ok := tx.(store.DurableQueuePendingCounter)
+		if !ok {
+			return errTxMissingQueuePendingCounter
+		}
+		pending, sErr := txCounter.CountDurableQueuePending(ctx, EventQueueKind, ep.ProjectID)
 		if sErr != nil {
 			return sErr
 		}
-		if curStats.Pending >= MaxPendingEventsPerProject {
+		if pending >= MaxPendingEventsPerProject {
 			return errQueueFull
 		}
 		_, enqErr := EnqueueEvent(ctx, tx, tx, h.queue, &ev)
@@ -534,20 +551,24 @@ func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeRateLimited(w, "30", "queue full")
 			return
 		}
-		// Map both trigger_events (source_kind, source_id, dedup_key) conflicts
-		// (store.ErrAlreadyExists) and durable_queue_items (kind, dedup_key)
-		// conflicts (durablequeue.ErrDuplicate, which wraps store.ErrAlreadyExists)
-		// to 202 "duplicate".
-		if errors.Is(txErr, store.ErrAlreadyExists) {
-			dupEventID := ev.ID
-			if !errors.Is(txErr, durablequeue.ErrDuplicate) && delivery != "" {
+		// Answer 202 "duplicate" strictly for X-Scion-Delivery deduplication:
+		// either found up-front in tx before the pending-cap check
+		// (errDuplicateDelivery), or on a concurrent (source_kind, source_id,
+		// dedup_key) conflict when X-Scion-Delivery was supplied. Event-ID
+		// collisions (durablequeue.ErrDuplicate, or store.ErrAlreadyExists
+		// without a matching delivery-dedup row) fall through to 500 so the
+		// sender retries.
+		if errors.Is(txErr, errDuplicateDelivery) ||
+			(delivery != "" && !errors.Is(txErr, durablequeue.ErrDuplicate) && errors.Is(txErr, store.ErrAlreadyExists)) {
+			if dupEventID == "" {
 				existing, gErr := h.store.GetTriggerEventByDedupKey(ctx, store.TriggerSourceKindWebhook, ep.ID, ev.DedupKey)
-				if gErr != nil {
+				if gErr != nil || existing == nil {
 					h.failedStore.Add(1)
-					h.logger.Error("Failed to load duplicate webhook trigger event",
+					h.logger.Error("Failed to resolve webhook trigger event after unique conflict",
 						"endpoint_id", ep.ID,
 						"project_id", ep.ProjectID,
-						"error", gErr,
+						"error", txErr,
+						"lookup_error", gErr,
 					)
 					apierr.WriteError(w, http.StatusInternalServerError, apierr.ErrCodeInternalError, "failed to persist webhook event", nil)
 					return
