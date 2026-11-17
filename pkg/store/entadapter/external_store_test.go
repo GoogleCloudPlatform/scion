@@ -647,14 +647,21 @@ func TestExternalStore_GitHubInstallationTriggerRouting(t *testing.T) {
 	ctx := context.Background()
 	s := newTestExternalStore(t)
 
+	// CreateGitHubInstallation ignores TriggerRouting on input (single-writer).
 	inst := &store.GitHubInstallation{
 		InstallationID: 777,
 		AccountLogin:   "acme",
 		AccountType:    "Organization",
 		AppID:          42,
 		Repositories:   []string{"Acme/Widgets", "Acme/Other"},
+		TriggerRouting: map[string]store.GitHubTriggerRoute{
+			"acme/widgets": {PrimaryProjectID: "ignored-on-create"},
+		},
 	}
 	require.NoError(t, s.CreateGitHubInstallation(ctx, inst))
+	created, err := s.GetGitHubInstallation(ctx, 777)
+	require.NoError(t, err)
+	assert.Empty(t, created.TriggerRouting, "CreateGitHubInstallation must never write trigger_routing")
 
 	setAt := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
 	require.NoError(t, s.SetGitHubInstallationTriggerRoute(ctx, 777, "Acme/Widgets", store.GitHubTriggerRoute{
@@ -664,7 +671,7 @@ func TestExternalStore_GitHubInstallationTriggerRouting(t *testing.T) {
 	}))
 
 	// Missing installation returns ErrNotFound.
-	err := s.SetGitHubInstallationTriggerRoute(ctx, 999999, "Acme/Widgets", store.GitHubTriggerRoute{
+	err = s.SetGitHubInstallationTriggerRoute(ctx, 999999, "Acme/Widgets", store.GitHubTriggerRoute{
 		PrimaryProjectID: "proj-1",
 	})
 	assert.ErrorIs(t, err, store.ErrNotFound)
@@ -677,18 +684,32 @@ func TestExternalStore_GitHubInstallationTriggerRouting(t *testing.T) {
 	assert.Equal(t, "admin-1", got.TriggerRouting["acme/widgets"].SetBy)
 	assert.True(t, setAt.Equal(got.TriggerRouting["acme/widgets"].SetAt))
 
-	// UpdateGitHubInstallation with nil TriggerRouting preserves stored routes.
-	require.NoError(t, s.UpdateGitHubInstallation(ctx, &store.GitHubInstallation{
-		InstallationID: 777,
-		AccountLogin:   "acme",
-		AccountType:    "Organization",
-		AppID:          42,
-		Repositories:   []string{"Acme/Widgets"},
-		Status:         store.GitHubInstallationStatusActive,
-	}))
-	got, err = s.GetGitHubInstallation(ctx, 777)
-	require.NoError(t, err)
-	require.Contains(t, got.TriggerRouting, "acme/widgets")
+	// UpdateGitHubInstallation always preserves stored routes regardless of TriggerRouting field value.
+	for _, tc := range []struct {
+		name    string
+		routing map[string]store.GitHubTriggerRoute
+	}{
+		{name: "nil map", routing: nil},
+		{name: "empty non-nil map", routing: map[string]store.GitHubTriggerRoute{}},
+		{name: "conflicting map", routing: map[string]store.GitHubTriggerRoute{
+			"acme/widgets": {PrimaryProjectID: "clobbered-proj", SetBy: "attacker"},
+		}},
+	} {
+		require.NoError(t, s.UpdateGitHubInstallation(ctx, &store.GitHubInstallation{
+			InstallationID: 777,
+			AccountLogin:   "acme",
+			AccountType:    "Organization",
+			AppID:          42,
+			Repositories:   []string{"Acme/Widgets"},
+			TriggerRouting: tc.routing,
+			Status:         store.GitHubInstallationStatusActive,
+		}), tc.name)
+		got, err = s.GetGitHubInstallation(ctx, 777)
+		require.NoError(t, err, tc.name)
+		require.Contains(t, got.TriggerRouting, "acme/widgets", tc.name)
+		assert.Equal(t, "proj-1", got.TriggerRouting["acme/widgets"].PrimaryProjectID, tc.name)
+		assert.Equal(t, "admin-1", got.TriggerRouting["acme/widgets"].SetBy, tc.name)
+	}
 
 	// DeleteGitHubInstallationTriggerRoute is case-insensitive and reports whether an entry existed.
 	removed, err := s.DeleteGitHubInstallationTriggerRoute(ctx, 777, "ACME/WIDGETS")

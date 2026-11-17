@@ -464,3 +464,160 @@ func TestGitHubAppRepoRouting_ScopedTokens(t *testing.T) {
 	rec = doRequestWithToken(t, srv, updateTok, http.MethodDelete, "/api/v1/github-app/repo-routing/acme/widgets", nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
 }
+
+// TestGitHubAppInstallations_TriggerRoutingSingleWriter verifies that the
+// generic GitHub App installation endpoints (POST/PUT/GET /api/v1/github-app/installations[/{id}])
+// neither accept nor echo trigger_routing, and that status-only updates (such as
+// webhook suspend/unsuspend or stale read-modify-write snapshots) preserve
+// routes set in between.
+func TestGitHubAppInstallations_TriggerRoutingSingleWriter(t *testing.T) {
+	srv, s := webhookTestServer(t)
+	ctx := context.Background()
+
+	adminID := tid("inst-sw-admin")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: adminID, Email: "inst-sw-admin@example.com", DisplayName: "Admin",
+		Role: store.UserRoleAdmin, Status: store.UserStatusActive, Created: time.Now(),
+	}))
+	hubAdminRD, err := s.GetRoleDefinitionByName(ctx, "hub-admin", store.RoleScopeSystem)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: hubAdminRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      adminID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        adminID,
+	})
+	require.NoError(t, err)
+	admin := NewAuthenticatedUser(adminID, "inst-sw-admin@example.com", "Admin", store.UserRoleAdmin, "api")
+
+	doRawAsAdmin := func(method, path, rawJSON string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, bytes.NewBufferString(rawJSON))
+		req.Header.Set("Content-Type", "application/json")
+		rctx := contextWithCredentialContext(
+			contextWithIdentity(req.Context(), admin),
+			CredentialContext{Kind: CredentialKindInteractive},
+		)
+		rr := httptest.NewRecorder()
+		srv.mux.ServeHTTP(rr, req.WithContext(rctx))
+		return rr
+	}
+
+	const instID = int64(7101)
+	projA := tid("inst-sw-proj-a")
+	projB := tid("inst-sw-proj-b")
+
+	// 1. POST /api/v1/github-app/installations with trigger_routing in body (even with experiment off)
+	// ignores trigger_routing and does not echo it.
+	rr := doRawAsAdmin(http.MethodPost, "/api/v1/github-app/installations", `{
+		"installation_id": 7101,
+		"account_login": "Acme",
+		"account_type": "Organization",
+		"app_id": 42,
+		"repositories": ["Acme/Widgets"],
+		"status": "active",
+		"trigger_routing": {"acme/widgets": {"primary_project_id": "injected-on-create", "set_by": "spoofed"}}
+	}`)
+	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
+	assert.NotContains(t, rr.Body.String(), "trigger_routing")
+
+	stored, err := s.GetGitHubInstallation(ctx, instID)
+	require.NoError(t, err)
+	assert.Empty(t, stored.TriggerRouting)
+
+	instRef := instID
+	for _, p := range []*store.Project{
+		{ID: projA, Name: "alpha", Slug: "alpha", GitRemote: "https://github.com/Acme/Widgets.git", GitHubInstallationID: &instRef, Created: time.Now(), Updated: time.Now()},
+		{ID: projB, Name: "bravo", Slug: "bravo", GitRemote: "https://github.com/Acme/Widgets.git", GitHubInstallationID: &instRef, Created: time.Now(), Updated: time.Now()},
+	} {
+		require.NoError(t, s.CreateProject(ctx, p))
+	}
+
+	// Set a legitimate route via the repo-routing API.
+	setGitHubTriggersExperimentForRouting(t, srv, true)
+	rr = doRepoRoutingAsUser(t, srv, admin, http.MethodPut, "/api/v1/github-app/repo-routing/Acme/Widgets", GitHubRepoRoutingPutRequest{
+		InstallationID:   instID,
+		PrimaryProjectID: projA,
+	})
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	// 2. GET /api/v1/github-app/installations and GET .../{id} never echo trigger_routing.
+	rr = doRepoRoutingAsUser(t, srv, admin, http.MethodGet, "/api/v1/github-app/installations", nil)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	assert.NotContains(t, rr.Body.String(), "trigger_routing")
+
+	rr = doRepoRoutingAsUser(t, srv, admin, http.MethodGet, "/api/v1/github-app/installations/7101", nil)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	assert.NotContains(t, rr.Body.String(), "trigger_routing")
+
+	// 3. PUT /api/v1/github-app/installations/{id} with a conflicting trigger_routing map or empty {}
+	// leaves stored routing untouched and writes no routing audit record.
+	for _, body := range []string{
+		`{"account_login":"Acme","account_type":"Organization","app_id":42,"repositories":["Acme/Widgets"],"status":"active","trigger_routing":{"acme/widgets":{"primary_project_id":"unauthorized-override","set_by":"spoofed"}}}`,
+		`{"account_login":"Acme","account_type":"Organization","app_id":42,"repositories":["Acme/Widgets"],"status":"active","trigger_routing":{}}`,
+	} {
+		rr = doRawAsAdmin(http.MethodPut, "/api/v1/github-app/installations/7101", body)
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		assert.NotContains(t, rr.Body.String(), "trigger_routing")
+
+		stored, err = s.GetGitHubInstallation(ctx, instID)
+		require.NoError(t, err)
+		require.Contains(t, stored.TriggerRouting, "acme/widgets")
+		assert.Equal(t, projA, stored.TriggerRouting["acme/widgets"].PrimaryProjectID)
+		assert.Equal(t, adminID, stored.TriggerRouting["acme/widgets"].SetBy)
+	}
+	_, auditCount, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{MutationType: githubRepoRoutingAuditMutation})
+	require.NoError(t, err)
+	assert.Equal(t, 1, auditCount, "generic installation PUT must not write repo_routing audit records")
+
+	// 4. Stale read-modify-write snapshot (health-check style) + webhook status-only update
+	// after a route change in between both preserve the new route.
+	staleSnapshot, err := s.GetGitHubInstallation(ctx, instID)
+	require.NoError(t, err)
+	require.Equal(t, projA, staleSnapshot.TriggerRouting["acme/widgets"].PrimaryProjectID)
+
+	// Route changes to projB while staleSnapshot is in memory.
+	rr = doRepoRoutingAsUser(t, srv, admin, http.MethodPut, "/api/v1/github-app/repo-routing/Acme/Widgets", GitHubRepoRoutingPutRequest{
+		InstallationID:   instID,
+		PrimaryProjectID: projB,
+	})
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	// Health-check / background caller writes back staleSnapshot with a status update.
+	staleSnapshot.Status = store.GitHubInstallationStatusSuspended
+	require.NoError(t, s.UpdateGitHubInstallation(ctx, staleSnapshot))
+
+	stored, err = s.GetGitHubInstallation(ctx, instID)
+	require.NoError(t, err)
+	assert.Equal(t, store.GitHubInstallationStatusSuspended, stored.Status)
+	require.Contains(t, stored.TriggerRouting, "acme/widgets")
+	assert.Equal(t, projB, stored.TriggerRouting["acme/widgets"].PrimaryProjectID,
+		"stale read-modify-write snapshot must not revert a route set in between")
+
+	// Webhook status-only update (unsuspend) also preserves the route.
+	whPayload := mustJSON(t, map[string]any{
+		"action": "unsuspend",
+		"installation": map[string]any{
+			"id":     instID,
+			"app_id": 42,
+			"account": map[string]any{
+				"login": "Acme",
+				"type":  "Organization",
+			},
+		},
+	})
+	whReq := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", bytes.NewReader(whPayload))
+	whReq.Header.Set("X-GitHub-Event", "installation")
+	whReq.Header.Set("X-GitHub-Delivery", "delivery-unsuspend-sw")
+	whReq.Header.Set("X-Hub-Signature-256", signWebhookPayload(whPayload, "test-webhook-secret"))
+	whRec := httptest.NewRecorder()
+	srv.handleGitHubWebhook(whRec, whReq)
+	require.Equal(t, http.StatusOK, whRec.Code, whRec.Body.String())
+
+	stored, err = s.GetGitHubInstallation(ctx, instID)
+	require.NoError(t, err)
+	assert.Equal(t, store.GitHubInstallationStatusActive, stored.Status)
+	require.Contains(t, stored.TriggerRouting, "acme/widgets")
+	assert.Equal(t, projB, stored.TriggerRouting["acme/widgets"].PrimaryProjectID,
+		"installation webhook status update must preserve trigger_routing")
+}

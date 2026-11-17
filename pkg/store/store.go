@@ -3697,6 +3697,7 @@ type GCPServiceAccountFilter struct {
 type GitHubInstallationStore interface {
 	// CreateGitHubInstallation creates a new GitHub App installation record.
 	// Uses installation_id as the natural key — creating an existing one is idempotent (no-op).
+	// Ignores installation.TriggerRouting; use SetGitHubInstallationTriggerRoute to manage trigger routing.
 	CreateGitHubInstallation(ctx context.Context, installation *GitHubInstallation) error
 
 	// GetGitHubInstallation retrieves a GitHub App installation by installation ID.
@@ -3704,6 +3705,8 @@ type GitHubInstallationStore interface {
 	GetGitHubInstallation(ctx context.Context, installationID int64) (*GitHubInstallation, error)
 
 	// UpdateGitHubInstallation updates an existing GitHub App installation.
+	// Never modifies trigger_routing; only SetGitHubInstallationTriggerRoute,
+	// DeleteGitHubInstallationTriggerRoute, and DeleteGitHubTriggerRoutesByProject do.
 	// Returns ErrNotFound if the installation doesn't exist.
 	UpdateGitHubInstallation(ctx context.Context, installation *GitHubInstallation) error
 

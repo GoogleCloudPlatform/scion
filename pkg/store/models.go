@@ -4251,7 +4251,7 @@ type GitHubInstallation struct {
 	AccountType    string                        `json:"account_type"` // "Organization" or "User"
 	AppID          int64                         `json:"app_id"`
 	Repositories   []string                      `json:"repositories,omitempty"`
-	TriggerRouting map[string]GitHubTriggerRoute `json:"trigger_routing,omitempty"`
+	TriggerRouting map[string]GitHubTriggerRoute `json:"-"`
 	Status         string                        `json:"status"` // "active", "suspended", "deleted"
 	CreatedAt      time.Time                     `json:"created_at"`
 	UpdatedAt      time.Time                     `json:"updated_at"`

@@ -494,7 +494,7 @@ func (s *ExternalStore) CreateGitHubInstallation(ctx context.Context, installati
 			SetAccountType(accountType).
 			SetAppID(installation.AppID).
 			SetRepositories(marshalRepos(installation.Repositories)).
-			SetTriggerRouting(marshalTriggerRouting(installation.TriggerRouting)).
+			SetTriggerRouting("{}").
 			SetStatus(installation.Status).
 			SetCreated(installation.CreatedAt).
 			SetUpdated(installation.UpdatedAt),
@@ -518,24 +518,21 @@ func (s *ExternalStore) GetGitHubInstallation(ctx context.Context, installationI
 }
 
 // UpdateGitHubInstallation updates an existing GitHub App installation.
-// When installation.TriggerRouting is nil, the stored trigger_routing map is
-// left unchanged so callers updating repositories or status do not clobber
-// primary-project routing; pass an empty non-nil map or use the dedicated
-// trigger-route methods to clear entries.
+// It never writes trigger_routing; only SetGitHubInstallationTriggerRoute,
+// DeleteGitHubInstallationTriggerRoute, and DeleteGitHubTriggerRoutesByProject
+// modify trigger_routing so generic installation updates cannot bypass routing
+// controls or overwrite concurrent route changes.
 func (s *ExternalStore) UpdateGitHubInstallation(ctx context.Context, installation *store.GitHubInstallation) error {
 	installation.UpdatedAt = time.Now()
 
-	upd := s.client.GithubInstallation.UpdateOneID(installation.InstallationID).
+	_, err := s.client.GithubInstallation.UpdateOneID(installation.InstallationID).
 		SetAccountLogin(installation.AccountLogin).
 		SetAccountType(installation.AccountType).
 		SetAppID(installation.AppID).
 		SetRepositories(marshalRepos(installation.Repositories)).
 		SetStatus(installation.Status).
-		SetUpdated(installation.UpdatedAt)
-	if installation.TriggerRouting != nil {
-		upd.SetTriggerRouting(marshalTriggerRouting(installation.TriggerRouting))
-	}
-	_, err := upd.Save(ctx)
+		SetUpdated(installation.UpdatedAt).
+		Save(ctx)
 	if err != nil {
 		return mapError(err)
 	}
