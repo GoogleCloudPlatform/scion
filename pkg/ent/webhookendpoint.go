@@ -18,6 +18,10 @@ type WebhookEndpoint struct {
 	config `json:"-"`
 	// ID of the ent.
 	ID uuid.UUID `json:"id,omitempty"`
+	// Test identity at the root of the creating principal chain; set once at create
+	FixtureRootID *uuid.UUID `json:"fixture_root_id,omitempty"`
+	// issued_by of the root test identity; set once at create
+	FixtureIssuerID *uuid.UUID `json:"fixture_issuer_id,omitempty"`
 	// ProjectID holds the value of the "project_id" field.
 	ProjectID uuid.UUID `json:"project_id,omitempty"`
 	// Name holds the value of the "name" field.
@@ -56,6 +60,8 @@ func (*WebhookEndpoint) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
+		case webhookendpoint.FieldFixtureRootID, webhookendpoint.FieldFixtureIssuerID:
+			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
 		case webhookendpoint.FieldSecretVersion, webhookendpoint.FieldReceiveCount, webhookendpoint.FieldRejectCount:
 			values[i] = new(sql.NullInt64)
 		case webhookendpoint.FieldName, webhookendpoint.FieldDescription, webhookendpoint.FieldOwnerPrincipalKind, webhookendpoint.FieldOwnerPrincipalID, webhookendpoint.FieldOwnerCredentialKind, webhookendpoint.FieldSignatureMode, webhookendpoint.FieldStatus, webhookendpoint.FieldCreatedBy:
@@ -84,6 +90,20 @@ func (_m *WebhookEndpoint) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field id", values[i])
 			} else if value != nil {
 				_m.ID = *value
+			}
+		case webhookendpoint.FieldFixtureRootID:
+			if value, ok := values[i].(*sql.NullScanner); !ok {
+				return fmt.Errorf("unexpected type %T for field fixture_root_id", values[i])
+			} else if value.Valid {
+				_m.FixtureRootID = new(uuid.UUID)
+				*_m.FixtureRootID = *value.S.(*uuid.UUID)
+			}
+		case webhookendpoint.FieldFixtureIssuerID:
+			if value, ok := values[i].(*sql.NullScanner); !ok {
+				return fmt.Errorf("unexpected type %T for field fixture_issuer_id", values[i])
+			} else if value.Valid {
+				_m.FixtureIssuerID = new(uuid.UUID)
+				*_m.FixtureIssuerID = *value.S.(*uuid.UUID)
 			}
 		case webhookendpoint.FieldProjectID:
 			if value, ok := values[i].(*uuid.UUID); !ok {
@@ -212,6 +232,16 @@ func (_m *WebhookEndpoint) String() string {
 	var builder strings.Builder
 	builder.WriteString("WebhookEndpoint(")
 	builder.WriteString(fmt.Sprintf("id=%v, ", _m.ID))
+	if v := _m.FixtureRootID; v != nil {
+		builder.WriteString("fixture_root_id=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
+	if v := _m.FixtureIssuerID; v != nil {
+		builder.WriteString("fixture_issuer_id=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
 	builder.WriteString("project_id=")
 	builder.WriteString(fmt.Sprintf("%v", _m.ProjectID))
 	builder.WriteString(", ")

@@ -33,6 +33,14 @@ type WebhookEndpoint struct {
 	ent.Schema
 }
 
+// Mixin of the WebhookEndpoint. FixtureProvenanceMixin holds the creation-time
+// test-identity provenance stamp (ptone/scion#4240, Phase 3a; ptone/scion#8028).
+func (WebhookEndpoint) Mixin() []ent.Mixin {
+	return []ent.Mixin{
+		FixtureProvenanceMixin{},
+	}
+}
+
 // Fields of the WebhookEndpoint.
 func (WebhookEndpoint) Fields() []ent.Field {
 	return []ent.Field{
@@ -89,6 +97,6 @@ func (WebhookEndpoint) Indexes() []ent.Index {
 // Annotations of the WebhookEndpoint.
 func (WebhookEndpoint) Annotations() []schema.Annotation {
 	return []schema.Annotation{
-		entsql.Annotation{Table: "webhook_endpoints"},
+		entsql.Annotation{Table: "webhook_endpoints", Checks: fixtureStampCheck("webhook_endpoints")},
 	}
 }

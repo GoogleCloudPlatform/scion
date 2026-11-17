@@ -1992,17 +1992,18 @@ type ExpiredTestFixtureQuery struct {
 // one fixture root: every resource whose stamp names it.
 type FixtureRootedResources struct {
 	// Agents includes soft-deleted agents.
-	Agents    []Agent
-	Schedules []Schedule
-	Triggers  []Trigger
-	Groups    []Group
-	Projects  []Project
+	Agents           []Agent
+	Schedules        []Schedule
+	Triggers         []Trigger
+	WebhookEndpoints []WebhookEndpoint
+	Groups           []Group
+	Projects         []Project
 	// Truncated is true when a kind had more rows than the limit.
 	Truncated bool
 }
 
 // FixtureProvenance is the creation-time test-identity provenance stamp of
-// an agent, project, schedule, trigger or group: the hub test identity at the root
+// an agent, project, schedule, trigger, webhook endpoint or group: the hub test identity at the root
 // of the principal chain that created the row (RootID) and that identity's
 // issued_by user (IssuerID). The zero value means the row was not created
 // under a test identity, or predates the stamp.

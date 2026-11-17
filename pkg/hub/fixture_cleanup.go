@@ -118,12 +118,13 @@ const (
 
 // Provenance resource types.
 const (
-	fixtureResourceAgent        = "agent"
-	fixtureResourceSchedule     = "schedule"
-	fixtureResourceTrigger      = "trigger"
-	fixtureResourceGroup        = "group"
-	fixtureResourceProject      = "project"
-	fixtureResourceTestIdentity = "test_identity"
+	fixtureResourceAgent           = "agent"
+	fixtureResourceSchedule        = "schedule"
+	fixtureResourceTrigger         = "trigger"
+	fixtureResourceWebhookEndpoint = "webhook_endpoint"
+	fixtureResourceGroup           = "group"
+	fixtureResourceProject         = "project"
+	fixtureResourceTestIdentity    = "test_identity"
 )
 
 // TestIdentityCleanupTarget is one resource a cleanup run selected.
@@ -375,6 +376,11 @@ func (s *Server) fixtureCleanupTargets(ctx context.Context, rootID string, u *st
 			add(fixtureResourceTrigger, tr.ID, tr.ProjectID)
 		}
 	}
+	for i := range set.WebhookEndpoints {
+		if ep := &set.WebhookEndpoints[i]; ep.Fixture.RootID == rootID {
+			add(fixtureResourceWebhookEndpoint, ep.ID, ep.ProjectID)
+		}
+	}
 	for i := range set.Groups {
 		if g := &set.Groups[i]; g.Fixture.RootID == rootID && !isProjectImplicitGroup(g) {
 			add(fixtureResourceGroup, g.ID, g.ProjectID)
@@ -501,6 +507,7 @@ func (s *Server) runTestIdentityCleanup(ctx context.Context, caller UserIdentity
 			report.Deleted.Agents += pr.Deleted.Agents
 			report.Deleted.Schedules += pr.Deleted.Schedules
 			report.Deleted.Triggers += pr.Deleted.Triggers
+			report.Deleted.WebhookEndpoints += pr.Deleted.WebhookEndpoints
 			report.Deleted.Groups += pr.Deleted.Groups
 			report.Deleted.Projects += pr.Deleted.Projects
 			report.Deleted.Grants += pr.Deleted.Grants
@@ -538,6 +545,8 @@ func (s *Server) settleCleanupTarget(ctx context.Context, t *TestIdentityCleanup
 		_, err = s.store.GetSchedule(ctx, t.ID)
 	case fixtureResourceTrigger:
 		_, err = s.store.GetTrigger(ctx, t.ID)
+	case fixtureResourceWebhookEndpoint:
+		_, err = s.store.GetWebhookEndpoint(ctx, t.ID)
 	case fixtureResourceGroup:
 		_, err = s.store.GetGroup(ctx, t.ID)
 	case fixtureResourceProject:
@@ -644,11 +653,12 @@ func (s *Server) writeTestIdentityCleanupAudit(ctx context.Context, scope fixtur
 // type of its removal by the purge, the reaper or the cleanup; those rows
 // carry provenance_basis.
 var fixtureDeleteMutations = map[string]string{
-	fixtureResourceAgent:    mutationTypeAgentHardDelete,
-	fixtureResourceSchedule: mutationTypeScheduleDelete,
-	fixtureResourceTrigger:  mutationTypeTriggerDelete,
-	fixtureResourceGroup:    fixturePurgeGroupDeleteMutation,
-	fixtureResourceProject:  "project_delete",
+	fixtureResourceAgent:           mutationTypeAgentHardDelete,
+	fixtureResourceSchedule:        mutationTypeScheduleDelete,
+	fixtureResourceTrigger:         mutationTypeTriggerDelete,
+	fixtureResourceWebhookEndpoint: mutationTypeWebhookEndpointDelete,
+	fixtureResourceGroup:           fixturePurgeGroupDeleteMutation,
+	fixtureResourceProject:         "project_delete",
 }
 
 // fixtureProvenanceDeleted is the reason of a proven answer for a resource
@@ -683,17 +693,17 @@ func (s *Server) handleTestIdentityProvenance(w http.ResponseWriter, r *http.Req
 		}
 	}
 	if len(q["resource"]) != 1 {
-		BadRequest(w, "resource is required: <type>:<id>, type one of agent, project, schedule, trigger, group")
+		BadRequest(w, "resource is required: <type>:<id>, type one of agent, project, schedule, trigger, webhook_endpoint, group")
 		return
 	}
 	resource := q.Get("resource")
 	typ, id, found := strings.Cut(resource, ":")
 	if !found || id == "" || !validPathID(id) {
-		BadRequest(w, "invalid resource: must be <type>:<id>, type one of agent, project, schedule, trigger, group")
+		BadRequest(w, "invalid resource: must be <type>:<id>, type one of agent, project, schedule, trigger, webhook_endpoint, group")
 		return
 	}
 	if _, known := fixtureDeleteMutations[typ]; !known {
-		BadRequest(w, "invalid resource type: must be one of agent, project, schedule, trigger, group")
+		BadRequest(w, "invalid resource type: must be one of agent, project, schedule, trigger, webhook_endpoint, group")
 		return
 	}
 	scope, ok := s.cleanupScopeFor(ctx, caller)
@@ -738,6 +748,11 @@ func (s *Server) fixtureProvenance(ctx context.Context, caller UserIdentity, sco
 		var tr *store.Trigger
 		if tr, err = s.store.GetTrigger(ctx, id); err == nil && tr != nil {
 			stamp = tr.Fixture
+		}
+	case fixtureResourceWebhookEndpoint:
+		var ep *store.WebhookEndpoint
+		if ep, err = s.store.GetWebhookEndpoint(ctx, id); err == nil && ep != nil {
+			stamp = ep.Fixture
 		}
 	case fixtureResourceGroup:
 		var g *store.Group

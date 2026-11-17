@@ -122,6 +122,7 @@ func entWebhookEndpointToStore(e *ent.WebhookEndpoint) *store.WebhookEndpoint {
 		RejectCount:         e.RejectCount,
 		CreatedAt:           e.Created,
 		UpdatedAt:           e.Updated,
+		Fixture:             fixtureProvenanceFromColumns(e.FixtureRootID, e.FixtureIssuerID),
 	}
 }
 
@@ -135,6 +136,10 @@ func (s *TriggerStore) CreateWebhookEndpoint(ctx context.Context, ep *store.Webh
 		return err
 	}
 	pid, err := parseUUID(ep.ProjectID)
+	if err != nil {
+		return err
+	}
+	fixtureRoot, fixtureIssuer, err := fixtureStampColumns(ep.Fixture)
 	if err != nil {
 		return err
 	}
@@ -162,6 +167,8 @@ func (s *TriggerStore) CreateWebhookEndpoint(ctx context.Context, ep *store.Webh
 
 	create := s.client.WebhookEndpoint.Create().
 		SetID(uid).
+		SetNillableFixtureRootID(fixtureRoot).
+		SetNillableFixtureIssuerID(fixtureIssuer).
 		SetProjectID(pid).
 		SetName(ep.Name).
 		SetOwnerPrincipalKind(ep.OwnerPrincipalKind).

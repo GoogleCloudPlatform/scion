@@ -95,11 +95,12 @@ type TestIdentityService interface {
 
 // TestIdentityPurgeCounts counts what a purge removed.
 type TestIdentityPurgeCounts struct {
-	Agents    int `json:"agents"`
-	Schedules int `json:"schedules"`
-	Triggers  int `json:"triggers"`
-	Groups    int `json:"groups"`
-	Projects  int `json:"projects"`
+	Agents           int `json:"agents"`
+	Schedules        int `json:"schedules"`
+	Triggers         int `json:"triggers"`
+	WebhookEndpoints int `json:"webhookEndpoints"`
+	Groups           int `json:"groups"`
+	Projects         int `json:"projects"`
 }
 
 // TestIdentityPurgeItem is a resource a purge did not remove.

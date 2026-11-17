@@ -277,6 +277,12 @@ func (_u *WebhookEndpointUpdate) sqlSave(ctx context.Context) (_node int, err er
 			}
 		}
 	}
+	if _u.mutation.FixtureRootIDCleared() {
+		_spec.ClearField(webhookendpoint.FieldFixtureRootID, field.TypeUUID)
+	}
+	if _u.mutation.FixtureIssuerIDCleared() {
+		_spec.ClearField(webhookendpoint.FieldFixtureIssuerID, field.TypeUUID)
+	}
 	if value, ok := _u.mutation.ProjectID(); ok {
 		_spec.SetField(webhookendpoint.FieldProjectID, field.TypeUUID, value)
 	}
@@ -625,6 +631,12 @@ func (_u *WebhookEndpointUpdateOne) sqlSave(ctx context.Context) (_node *Webhook
 				ps[i](selector)
 			}
 		}
+	}
+	if _u.mutation.FixtureRootIDCleared() {
+		_spec.ClearField(webhookendpoint.FieldFixtureRootID, field.TypeUUID)
+	}
+	if _u.mutation.FixtureIssuerIDCleared() {
+		_spec.ClearField(webhookendpoint.FieldFixtureIssuerID, field.TypeUUID)
 	}
 	if value, ok := _u.mutation.ProjectID(); ok {
 		_spec.SetField(webhookendpoint.FieldProjectID, field.TypeUUID, value)

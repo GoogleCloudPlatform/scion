@@ -66,11 +66,12 @@ const testAdminResidueAuditLimit = 1000
 // TestAdminResidueResources lists the IDs of resources stamped with the
 // identity as their provenance root.
 type TestAdminResidueResources struct {
-	Agents    []string `json:"agents"`
-	Schedules []string `json:"schedules"`
-	Triggers  []string `json:"triggers"`
-	Groups    []string `json:"groups"`
-	Projects  []string `json:"projects"`
+	Agents           []string `json:"agents"`
+	Schedules        []string `json:"schedules"`
+	Triggers         []string `json:"triggers"`
+	WebhookEndpoints []string `json:"webhookEndpoints"`
+	Groups           []string `json:"groups"`
+	Projects         []string `json:"projects"`
 }
 
 // TestAdminResidueChange is one mutation the identity (or an agent rooted
@@ -113,7 +114,7 @@ func (s *Server) testAdminResidue(ctx context.Context, identityID, issuanceID st
 	rep := &TestAdminResidueReport{
 		IdentityID: identityID, IssuanceID: issuanceID,
 		StampedGrants:    []store.IssuanceStampedGrant{},
-		StampedResources: TestAdminResidueResources{Agents: []string{}, Schedules: []string{}, Triggers: []string{}, Groups: []string{}, Projects: []string{}},
+		StampedResources: TestAdminResidueResources{Agents: []string{}, Schedules: []string{}, Triggers: []string{}, WebhookEndpoints: []string{}, Groups: []string{}, Projects: []string{}},
 		UnstampedChanges: []TestAdminResidueChange{},
 		KeptRoles:        []store.IssuanceStampedGrant{},
 		Limit:            testAdminResidueLimitText,
@@ -152,6 +153,10 @@ func (s *Server) testAdminResidue(ctx context.Context, identityID, issuanceID st
 		for _, tr := range set.Triggers {
 			rep.StampedResources.Triggers = append(rep.StampedResources.Triggers, tr.ID)
 			stamped[tr.ID] = true
+		}
+		for _, ep := range set.WebhookEndpoints {
+			rep.StampedResources.WebhookEndpoints = append(rep.StampedResources.WebhookEndpoints, ep.ID)
+			stamped[ep.ID] = true
 		}
 		for _, g := range set.Groups {
 			rep.StampedResources.Groups = append(rep.StampedResources.Groups, g.ID)

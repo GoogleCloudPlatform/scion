@@ -97,22 +97,23 @@ func WebhookEndpointProjectSecretKeyPrefix(projectID string) string {
 // Its signing secret is stored out of band as a hub-scoped SecretTypeInternal
 // row in secrets, never on this struct.
 type WebhookEndpoint struct {
-	ID                  string     `json:"id"`
-	ProjectID           string     `json:"projectId"`
-	Name                string     `json:"name"`
-	Description         string     `json:"description,omitempty"`
-	OwnerPrincipalKind  string     `json:"ownerPrincipalKind"`
-	OwnerPrincipalID    string     `json:"ownerPrincipalId"`
-	OwnerCredentialKind string     `json:"ownerCredentialKind"`
-	SecretVersion       int        `json:"secretVersion"`
-	SignatureMode       string     `json:"signatureMode"`
-	Status              string     `json:"status"`
-	CreatedBy           string     `json:"createdBy,omitempty"`
-	LastReceivedAt      *time.Time `json:"lastReceivedAt,omitempty"`
-	ReceiveCount        int        `json:"receiveCount"`
-	RejectCount         int        `json:"rejectCount"`
-	CreatedAt           time.Time  `json:"createdAt"`
-	UpdatedAt           time.Time  `json:"updatedAt"`
+	ID                  string            `json:"id"`
+	ProjectID           string            `json:"projectId"`
+	Name                string            `json:"name"`
+	Description         string            `json:"description,omitempty"`
+	OwnerPrincipalKind  string            `json:"ownerPrincipalKind"`
+	OwnerPrincipalID    string            `json:"ownerPrincipalId"`
+	OwnerCredentialKind string            `json:"ownerCredentialKind"`
+	SecretVersion       int               `json:"secretVersion"`
+	SignatureMode       string            `json:"signatureMode"`
+	Status              string            `json:"status"`
+	CreatedBy           string            `json:"createdBy,omitempty"`
+	LastReceivedAt      *time.Time        `json:"lastReceivedAt,omitempty"`
+	ReceiveCount        int               `json:"receiveCount"`
+	RejectCount         int               `json:"rejectCount"`
+	CreatedAt           time.Time         `json:"createdAt"`
+	UpdatedAt           time.Time         `json:"updatedAt"`
+	Fixture             FixtureProvenance `json:"-"`
 }
 
 // WebhookEndpointFilter selects webhook endpoints in ListWebhookEndpoints.

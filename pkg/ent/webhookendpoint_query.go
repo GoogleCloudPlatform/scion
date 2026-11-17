@@ -265,12 +265,12 @@ func (_q *WebhookEndpointQuery) Clone() *WebhookEndpointQuery {
 // Example:
 //
 //	var v []struct {
-//		ProjectID uuid.UUID `json:"project_id,omitempty"`
+//		FixtureRootID uuid.UUID `json:"fixture_root_id,omitempty"`
 //		Count int `json:"count,omitempty"`
 //	}
 //
 //	client.WebhookEndpoint.Query().
-//		GroupBy(webhookendpoint.FieldProjectID).
+//		GroupBy(webhookendpoint.FieldFixtureRootID).
 //		Aggregate(ent.Count()).
 //		Scan(ctx, &v)
 func (_q *WebhookEndpointQuery) GroupBy(field string, fields ...string) *WebhookEndpointGroupBy {
@@ -288,11 +288,11 @@ func (_q *WebhookEndpointQuery) GroupBy(field string, fields ...string) *Webhook
 // Example:
 //
 //	var v []struct {
-//		ProjectID uuid.UUID `json:"project_id,omitempty"`
+//		FixtureRootID uuid.UUID `json:"fixture_root_id,omitempty"`
 //	}
 //
 //	client.WebhookEndpoint.Query().
-//		Select(webhookendpoint.FieldProjectID).
+//		Select(webhookendpoint.FieldFixtureRootID).
 //		Scan(ctx, &v)
 func (_q *WebhookEndpointQuery) Select(fields ...string) *WebhookEndpointSelect {
 	_q.ctx.Fields = append(_q.ctx.Fields, fields...)

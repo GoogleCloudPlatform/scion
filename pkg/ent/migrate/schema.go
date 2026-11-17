@@ -4151,6 +4151,8 @@ var (
 	// WebhookEndpointsColumns holds the columns for the "webhook_endpoints" table.
 	WebhookEndpointsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
+		{Name: "fixture_root_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "fixture_issuer_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "project_id", Type: field.TypeUUID},
 		{Name: "name", Type: field.TypeString},
 		{Name: "description", Type: field.TypeString, Nullable: true},
@@ -4174,14 +4176,24 @@ var (
 		PrimaryKey: []*schema.Column{WebhookEndpointsColumns[0]},
 		Indexes: []*schema.Index{
 			{
+				Name:    "webhookendpoint_fixture_root_id",
+				Unique:  false,
+				Columns: []*schema.Column{WebhookEndpointsColumns[1]},
+			},
+			{
+				Name:    "webhookendpoint_fixture_issuer_id",
+				Unique:  false,
+				Columns: []*schema.Column{WebhookEndpointsColumns[2]},
+			},
+			{
 				Name:    "webhookendpoint_project_id_name",
 				Unique:  true,
-				Columns: []*schema.Column{WebhookEndpointsColumns[1], WebhookEndpointsColumns[2]},
+				Columns: []*schema.Column{WebhookEndpointsColumns[3], WebhookEndpointsColumns[4]},
 			},
 			{
 				Name:    "webhookendpoint_project_id",
 				Unique:  false,
-				Columns: []*schema.Column{WebhookEndpointsColumns[1]},
+				Columns: []*schema.Column{WebhookEndpointsColumns[3]},
 			},
 		},
 	}
@@ -4606,6 +4618,9 @@ func init() {
 	}
 	WebhookEndpointsTable.Annotation = &entsql.Annotation{
 		Table: "webhook_endpoints",
+	}
+	WebhookEndpointsTable.Annotation.Checks = map[string]string{
+		"webhook_endpoints_fixture_stamp_check": "((fixture_root_id IS NULL AND fixture_issuer_id IS NULL) OR (fixture_root_id IS NOT NULL AND fixture_issuer_id IS NOT NULL))",
 	}
 	GroupChildGroupsTable.ForeignKeys[0].RefTable = GroupsTable
 	GroupChildGroupsTable.ForeignKeys[1].RefTable = GroupsTable

@@ -24,6 +24,34 @@ type WebhookEndpointCreate struct {
 	conflict []sql.ConflictOption
 }
 
+// SetFixtureRootID sets the "fixture_root_id" field.
+func (_c *WebhookEndpointCreate) SetFixtureRootID(v uuid.UUID) *WebhookEndpointCreate {
+	_c.mutation.SetFixtureRootID(v)
+	return _c
+}
+
+// SetNillableFixtureRootID sets the "fixture_root_id" field if the given value is not nil.
+func (_c *WebhookEndpointCreate) SetNillableFixtureRootID(v *uuid.UUID) *WebhookEndpointCreate {
+	if v != nil {
+		_c.SetFixtureRootID(*v)
+	}
+	return _c
+}
+
+// SetFixtureIssuerID sets the "fixture_issuer_id" field.
+func (_c *WebhookEndpointCreate) SetFixtureIssuerID(v uuid.UUID) *WebhookEndpointCreate {
+	_c.mutation.SetFixtureIssuerID(v)
+	return _c
+}
+
+// SetNillableFixtureIssuerID sets the "fixture_issuer_id" field if the given value is not nil.
+func (_c *WebhookEndpointCreate) SetNillableFixtureIssuerID(v *uuid.UUID) *WebhookEndpointCreate {
+	if v != nil {
+		_c.SetFixtureIssuerID(*v)
+	}
+	return _c
+}
+
 // SetProjectID sets the "project_id" field.
 func (_c *WebhookEndpointCreate) SetProjectID(v uuid.UUID) *WebhookEndpointCreate {
 	_c.mutation.SetProjectID(v)
@@ -371,6 +399,14 @@ func (_c *WebhookEndpointCreate) createSpec() (*WebhookEndpoint, *sqlgraph.Creat
 		_node.ID = id
 		_spec.ID.Value = &id
 	}
+	if value, ok := _c.mutation.FixtureRootID(); ok {
+		_spec.SetField(webhookendpoint.FieldFixtureRootID, field.TypeUUID, value)
+		_node.FixtureRootID = &value
+	}
+	if value, ok := _c.mutation.FixtureIssuerID(); ok {
+		_spec.SetField(webhookendpoint.FieldFixtureIssuerID, field.TypeUUID, value)
+		_node.FixtureIssuerID = &value
+	}
 	if value, ok := _c.mutation.ProjectID(); ok {
 		_spec.SetField(webhookendpoint.FieldProjectID, field.TypeUUID, value)
 		_node.ProjectID = value
@@ -438,7 +474,7 @@ func (_c *WebhookEndpointCreate) createSpec() (*WebhookEndpoint, *sqlgraph.Creat
 // of the `INSERT` statement. For example:
 //
 //	client.WebhookEndpoint.Create().
-//		SetProjectID(v).
+//		SetFixtureRootID(v).
 //		OnConflict(
 //			// Update the row with the new values
 //			// the was proposed for insertion.
@@ -447,7 +483,7 @@ func (_c *WebhookEndpointCreate) createSpec() (*WebhookEndpoint, *sqlgraph.Creat
 //		// Override some of the fields with custom
 //		// update values.
 //		Update(func(u *ent.WebhookEndpointUpsert) {
-//			SetProjectID(v+v).
+//			SetFixtureRootID(v+v).
 //		}).
 //		Exec(ctx)
 func (_c *WebhookEndpointCreate) OnConflict(opts ...sql.ConflictOption) *WebhookEndpointUpsertOne {
@@ -667,6 +703,12 @@ func (u *WebhookEndpointUpsertOne) UpdateNewValues() *WebhookEndpointUpsertOne {
 	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
 		if _, exists := u.create.mutation.ID(); exists {
 			s.SetIgnore(webhookendpoint.FieldID)
+		}
+		if _, exists := u.create.mutation.FixtureRootID(); exists {
+			s.SetIgnore(webhookendpoint.FieldFixtureRootID)
+		}
+		if _, exists := u.create.mutation.FixtureIssuerID(); exists {
+			s.SetIgnore(webhookendpoint.FieldFixtureIssuerID)
 		}
 		if _, exists := u.create.mutation.OwnerPrincipalKind(); exists {
 			s.SetIgnore(webhookendpoint.FieldOwnerPrincipalKind)
@@ -1043,7 +1085,7 @@ func (_c *WebhookEndpointCreateBulk) ExecX(ctx context.Context) {
 //		// Override some of the fields with custom
 //		// update values.
 //		Update(func(u *ent.WebhookEndpointUpsert) {
-//			SetProjectID(v+v).
+//			SetFixtureRootID(v+v).
 //		}).
 //		Exec(ctx)
 func (_c *WebhookEndpointCreateBulk) OnConflict(opts ...sql.ConflictOption) *WebhookEndpointUpsertBulk {
@@ -1089,6 +1131,12 @@ func (u *WebhookEndpointUpsertBulk) UpdateNewValues() *WebhookEndpointUpsertBulk
 		for _, b := range u.create.builders {
 			if _, exists := b.mutation.ID(); exists {
 				s.SetIgnore(webhookendpoint.FieldID)
+			}
+			if _, exists := b.mutation.FixtureRootID(); exists {
+				s.SetIgnore(webhookendpoint.FieldFixtureRootID)
+			}
+			if _, exists := b.mutation.FixtureIssuerID(); exists {
+				s.SetIgnore(webhookendpoint.FieldFixtureIssuerID)
 			}
 			if _, exists := b.mutation.OwnerPrincipalKind(); exists {
 				s.SetIgnore(webhookendpoint.FieldOwnerPrincipalKind)

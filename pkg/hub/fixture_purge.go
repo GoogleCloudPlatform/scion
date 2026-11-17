@@ -159,11 +159,12 @@ func fixturePurgeBasisFor(ctx context.Context, stamp store.FixtureProvenance) *f
 
 // TestIdentityPurgeCounts counts what one purge run removed.
 type TestIdentityPurgeCounts struct {
-	Agents    int `json:"agents"`
-	Schedules int `json:"schedules"`
-	Triggers  int `json:"triggers"`
-	Groups    int `json:"groups"`
-	Projects  int `json:"projects"`
+	Agents           int `json:"agents"`
+	Schedules        int `json:"schedules"`
+	Triggers         int `json:"triggers"`
+	WebhookEndpoints int `json:"webhookEndpoints"`
+	Groups           int `json:"groups"`
+	Projects         int `json:"projects"`
 	// Grants counts the grant rows removed by their issuance stamp
 	// (admin kinds only).
 	Grants int `json:"grants,omitempty"`
@@ -381,6 +382,23 @@ func (s *Server) purgeTestIdentityRun(ctx context.Context, run fixturePurgeRun) 
 		}
 		if deleted {
 			report.Deleted.Triggers++
+		}
+	}
+
+	// 2c. Webhook endpoints, after stamped triggers so stamped triggers are
+	// already deleted and any remaining unstamped triggers attached to a
+	// stamped endpoint are paused as source_deleted while the endpoint's
+	// hub-scoped SecretTypeInternal rows are removed atomically.
+	for i := range set.WebhookEndpoints {
+		ep := &set.WebhookEndpoints[i]
+		deleted, err := s.purgeFixtureWebhookEndpoint(ctx, ep, basis)
+		if err != nil {
+			slog.ErrorContext(ctx, "test identity purge: webhook endpoint delete failed", "endpoint_id", ep.ID, "error", err)
+			report.NotDone = append(report.NotDone, TestIdentityPurgeItem{Type: "webhook_endpoint", ID: ep.ID, ProjectID: ep.ProjectID, Status: "failed", Reason: "store_error"})
+			continue
+		}
+		if deleted {
+			report.Deleted.WebhookEndpoints++
 		}
 	}
 
@@ -657,6 +675,42 @@ func (s *Server) purgeFixtureTrigger(ctx context.Context, tr *store.Trigger, bas
 		if err := tx.DeleteTrigger(ctx, tr.ID); err != nil {
 			return err
 		}
+		return writeFixturePurgeAuditTx(ctx, tx, record, *b)
+	})
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// purgeFixtureWebhookEndpoint removes one stamped webhook endpoint along with
+// its hub-scoped SecretTypeInternal HMAC secret rows, pausing any unstamped
+// dependent triggers as source_deleted, and writes the provenance_basis audit
+// row in the same transaction.
+func (s *Server) purgeFixtureWebhookEndpoint(ctx context.Context, ep *store.WebhookEndpoint, basis fixturePurgeBasis) (bool, error) {
+	b := fixturePurgeBasisFor(ctx, ep.Fixture)
+	if b == nil {
+		return false, nil
+	}
+	record := newWebhookEndpointAudit(ctx, mutationTypeWebhookEndpointDelete, ep.ID)
+	record.CorrelationID = basis.RunID
+	err := s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := tx.LockTriggerQuota(ctx, ep.ProjectID); err != nil {
+			return err
+		}
+		pausedTriggerIDs, deletedSecretKeys, err := tx.DeleteWebhookEndpoint(ctx, ep.ProjectID, ep.ID)
+		if err != nil {
+			return err
+		}
+		record.AfterSummary = fixturePurgeSummary(map[string]any{
+			"project_id":           ep.ProjectID,
+			"name":                 ep.Name,
+			"paused_trigger_count": len(pausedTriggerIDs),
+			"deleted_secret_count": len(deletedSecretKeys),
+		}, *b)
 		return writeFixturePurgeAuditTx(ctx, tx, record, *b)
 	})
 	if errors.Is(err, store.ErrNotFound) {

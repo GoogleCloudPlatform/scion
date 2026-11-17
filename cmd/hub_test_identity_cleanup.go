@@ -171,7 +171,7 @@ func runHubTestIdentityProvenance(cmd *cobra.Command, args []string) error {
 
 // provenanceResourceTypes are the resource types the hub records
 // provenance for.
-var provenanceResourceTypes = map[string]bool{"agent": true, "project": true, "schedule": true, "trigger": true, "group": true}
+var provenanceResourceTypes = map[string]bool{"agent": true, "project": true, "schedule": true, "trigger": true, "webhook_endpoint": true, "group": true}
 
 // parseProvenanceResource checks a "<type>:<id>" reference and returns it
 // trimmed.
@@ -179,10 +179,10 @@ func parseProvenanceResource(s string) (string, error) {
 	s = strings.TrimSpace(s)
 	typ, id, ok := strings.Cut(s, ":")
 	if !ok || id == "" || strings.ContainsAny(id, "/: \t") {
-		return "", fmt.Errorf("invalid resource %q: want <type>:<id>, type one of agent, project, schedule, trigger, group", s)
+		return "", fmt.Errorf("invalid resource %q: want <type>:<id>, type one of agent, project, schedule, trigger, webhook_endpoint, group", s)
 	}
 	if !provenanceResourceTypes[typ] {
-		return "", fmt.Errorf("invalid resource type %q in %q: want agent, project, schedule, trigger or group", typ, s)
+		return "", fmt.Errorf("invalid resource type %q in %q: want agent, project, schedule, trigger, webhook_endpoint or group", typ, s)
 	}
 	return s, nil
 }
@@ -372,8 +372,8 @@ func printTestIdentityCleanupReport(out io.Writer, r *hubclient.TestIdentityClea
 	if r.DryRun {
 		_, _ = fmt.Fprintf(out, "Cleanup dry run (%s scope): %d test identities, %d targets; nothing was changed.\n", r.Scope, len(r.Identities), len(r.Targets))
 	} else {
-		_, _ = fmt.Fprintf(out, "Cleanup (%s scope, run %s): removed %d agents, %d schedules, %d triggers, %d groups, %d projects and %d test identities.\n",
-			r.Scope, r.RunID, d.Agents, d.Schedules, d.Triggers, d.Groups, d.Projects, r.IdentitiesDeleted)
+		_, _ = fmt.Fprintf(out, "Cleanup (%s scope, run %s): removed %d agents, %d schedules, %d triggers, %d webhook endpoints, %d groups, %d projects and %d test identities.\n",
+			r.Scope, r.RunID, d.Agents, d.Schedules, d.Triggers, d.WebhookEndpoints, d.Groups, d.Projects, r.IdentitiesDeleted)
 	}
 	for _, id := range r.Identities {
 		line := fmt.Sprintf("  test identity %s (%s)", id.ID, id.State)

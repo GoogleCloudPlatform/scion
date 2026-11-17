@@ -200,9 +200,13 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 	})
 	audit.AfterSummary = string(afterBytes)
 
+	fp := fixturePrincipalFromContext(ctx)
 	err = s.store.WithTx(ctx, func(tx store.Store) error {
 		if lErr := tx.LockTriggerQuota(ctx, projectID); lErr != nil {
 			return lErr
+		}
+		if sErr := stampWebhookEndpoint(ctx, tx, &ep, fp); sErr != nil {
+			return sErr
 		}
 		count, cErr := tx.CountWebhookEndpoints(ctx, projectID)
 		if cErr != nil {
@@ -220,6 +224,9 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		return tx.CreateMutationAudit(ctx, audit)
 	})
 	if err != nil {
+		if writeFixtureRootError(w, err) {
+			return
+		}
 		if errors.Is(err, errWebhookEndpointLimitExceeded) {
 			writeError(w, http.StatusConflict, ErrCodeLimitExceeded,
 				fmt.Sprintf("project has reached the maximum of %d webhook endpoints", store.MaxWebhookEndpointsPerProject), nil)

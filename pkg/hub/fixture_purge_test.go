@@ -1408,7 +1408,7 @@ func TestFixturePurge_PurgesStampedTriggersAndPreservesUnstamped(t *testing.T) {
 	r := fpPurgeReport(t, rec)
 	assert.True(t, r.Complete)
 	assert.True(t, r.IdentityDeleted)
-	assert.Equal(t, TestIdentityPurgeCounts{Agents: 1, Triggers: 1}, r.Deleted)
+	assert.Equal(t, TestIdentityPurgeCounts{Agents: 1, Triggers: 1, WebhookEndpoints: 1}, r.Deleted)
 	require.Len(t, r.KeptProjects, 1)
 	assert.Equal(t, TestIdentityPurgeKeptProject{
 		ID:              e.project,
@@ -1465,7 +1465,178 @@ func TestFixturePurge_PurgesStampedTriggersAndPreservesUnstamped(t *testing.T) {
 	var cleanReport TestIdentityCleanupReport
 	require.NoError(t, json.Unmarshal(cleanRec.Body.Bytes(), &cleanReport))
 	assert.Equal(t, 1, cleanReport.Deleted.Triggers)
+	assert.Equal(t, 1, cleanReport.Deleted.WebhookEndpoints)
 	_, err = e.store.GetTrigger(ctx, leftoverTrigID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 	fpRequireBasis(t, e.store, mutationTypeTriggerDelete, leftoverTrigID, fx2ID, e.issuerID)
+}
+
+// WebhookEndpoints (ptone/scion#8028, O2): stamped webhook endpoints are
+// deleted by test-identity purge and issuer cleanup along with their
+// hub-scoped SecretTypeInternal HMAC secret rows, pausing any unstamped
+// dependent trigger as source_deleted, while an unstamped webhook endpoint
+// (and its secret row) survives and keeps a stamped project as other_resources.
+func TestFixturePurge_PurgesStampedWebhookEndpointsAndSecrets(t *testing.T) {
+	e := newFPEnv(t, "fpp-webhooks")
+	e.srv.config.HubEndpoint = "https://hub-public.example.com"
+	var active []experiments.Experiment
+	for _, exp := range e.srv.experimentRegistry().All() {
+		if exp.Name == experiments.Triggers {
+			exp.Default = true
+		}
+		active = append(active, exp)
+	}
+	reg, err := experiments.NewRegistry(active, nil)
+	require.NoError(t, err)
+	e.srv.experiments = reg
+
+	ctx := context.Background()
+	fxID := e.fx.Identity.ID
+
+	// Add the human as a project admin (non-owner, holds agent.message +
+	// webhook_endpoint.create + trigger.create) on F's project.
+	require.Equal(t, http.StatusCreated, fpAddProjectRole(t, e.srv, e.store, e.fx.AccessToken, e.project, store.ProjectRoleAdmin, e.human.ID))
+	humanTargetAgent := fpCreateAgent(t, e.srv, e.humanTok, e.project, "human-ep-target")
+
+	createEndpoint := func(token, projectID, name string) string {
+		t.Helper()
+		rec := doRequestWithToken(t, e.srv, token, http.MethodPost, "/api/v1/projects/"+projectID+"/webhook-endpoints",
+			CreateWebhookEndpointRequest{Name: name})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		var resp WebhookEndpointCreatedResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		return resp.ID
+	}
+
+	fxEpID := createEndpoint(e.fx.AccessToken, e.project, "fx-only-ep")
+	humanEpID := createEndpoint(e.humanTok, e.project, "human-only-ep")
+
+	// Also create a second F-owned project that holds ONLY an unstamped human
+	// webhook endpoint (no unstamped agents/schedules/triggers/groups) to prove
+	// fixtureProjectContents scans webhook endpoints too.
+	projOnlyEp := tiCreateProject(t, e.srv, e.fx.AccessToken, "fpp-webhooks-only-ep")
+	require.Equal(t, http.StatusCreated, fpAddProjectRole(t, e.srv, e.store, e.fx.AccessToken, projOnlyEp, store.ProjectRoleAdmin, e.human.ID))
+	onlyHumanEpID := createEndpoint(e.humanTok, projOnlyEp, "sole-human-ep")
+
+	// Human creates an unstamped trigger in e.project attached to F's stamped
+	// endpoint fxEpID; purging F must pause this unstamped trigger as source_deleted.
+	trRec := doRequestWithToken(t, e.srv, e.humanTok, http.MethodPost, "/api/v1/projects/"+e.project+"/triggers",
+		CreateTriggerRequest{
+			Name:   "human-tr-on-fx-ep",
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: fxEpID},
+			Action: TriggerActionSpec{Type: store.TriggerActionMessage, AgentID: humanTargetAgent, Message: "ping"},
+		})
+	require.Equal(t, http.StatusCreated, trRec.Code, trRec.Body.String())
+	var humanTrigResp TriggerResponse
+	require.NoError(t, json.Unmarshal(trRec.Body.Bytes(), &humanTrigResp))
+
+	// Stamps & hub-scoped SecretTypeInternal rows exist before purge.
+	fxEpRow, err := e.store.GetWebhookEndpoint(ctx, fxEpID)
+	require.NoError(t, err)
+	assert.Equal(t, e.stamp(), fxEpRow.Fixture)
+	humanEpRow, err := e.store.GetWebhookEndpoint(ctx, humanEpID)
+	require.NoError(t, err)
+	assert.True(t, humanEpRow.Fixture.IsZero())
+
+	fxSecretKey := store.WebhookEndpointSecretKey(e.project, fxEpID, 1)
+	humanSecretKey := store.WebhookEndpointSecretKey(e.project, humanEpID, 1)
+	onlyHumanSecretKey := store.WebhookEndpointSecretKey(projOnlyEp, onlyHumanEpID, 1)
+	_, err = e.store.GetSecret(ctx, fxSecretKey, store.ScopeHub, e.srv.hubID)
+	require.NoError(t, err, "stamped endpoint internal secret must exist before purge")
+	_, err = e.store.GetSecret(ctx, humanSecretKey, store.ScopeHub, e.srv.hubID)
+	require.NoError(t, err)
+
+	// Provenance before purge.
+	provRec := doRequestWithToken(t, e.srv, e.issuerTok, http.MethodGet, "/api/v1/test-identities/provenance?resource=webhook_endpoint:"+fxEpID, nil)
+	require.Equal(t, http.StatusOK, provRec.Code, provRec.Body.String())
+	var prov TestIdentityProvenance
+	require.NoError(t, json.Unmarshal(provRec.Body.Bytes(), &prov))
+	assert.True(t, prov.Proven)
+	assert.False(t, prov.Deleted)
+	assert.Equal(t, fxID, prov.FixtureRootID)
+
+	humanProvRec := doRequestWithToken(t, e.srv, e.issuerTok, http.MethodGet, "/api/v1/test-identities/provenance?resource=webhook_endpoint:"+humanEpID, nil)
+	require.Equal(t, http.StatusOK, humanProvRec.Code, humanProvRec.Body.String())
+	var humanProv TestIdentityProvenance
+	require.NoError(t, json.Unmarshal(humanProvRec.Body.Bytes(), &humanProv))
+	assert.False(t, humanProv.Proven)
+
+	// Purge F.
+	rec := tiPurge(t, e.srv, e.issuerTok, fxID, "", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	r := fpPurgeReport(t, rec)
+	assert.True(t, r.Complete)
+	assert.True(t, r.IdentityDeleted)
+	assert.Equal(t, TestIdentityPurgeCounts{WebhookEndpoints: 1}, r.Deleted)
+	assert.Len(t, r.KeptProjects, 2, "both projects hold unstamped resources (including projOnlyEp holding only an unstamped webhook endpoint)")
+
+	// Stamped endpoint AND its internal secret row are gone.
+	_, err = e.store.GetWebhookEndpoint(ctx, fxEpID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	_, err = e.store.GetSecret(ctx, fxSecretKey, store.ScopeHub, e.srv.hubID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "purging a stamped webhook endpoint must delete its hub-scoped SecretTypeInternal row")
+
+	// Unstamped dependent trigger was paused with status_reason=source_deleted.
+	pausedTrig, err := e.store.GetTrigger(ctx, humanTrigResp.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.TriggerStatusPaused, pausedTrig.Status)
+	assert.Equal(t, store.TriggerStatusReasonSourceDeleted, pausedTrig.StatusReason)
+
+	// Unstamped endpoints AND their internal secret rows survive; projOnlyEp survives.
+	_, err = e.store.GetWebhookEndpoint(ctx, humanEpID)
+	assert.NoError(t, err)
+	_, err = e.store.GetSecret(ctx, humanSecretKey, store.ScopeHub, e.srv.hubID)
+	assert.NoError(t, err)
+	_, err = e.store.GetWebhookEndpoint(ctx, onlyHumanEpID)
+	assert.NoError(t, err)
+	_, err = e.store.GetSecret(ctx, onlyHumanSecretKey, store.ScopeHub, e.srv.hubID)
+	assert.NoError(t, err)
+	assert.True(t, fpProjectExists(t, e.store, projOnlyEp))
+
+	// Provenance after purge proves deletion via the webhook_endpoint_delete audit row.
+	basis := fpRequireBasis(t, e.store, mutationTypeWebhookEndpointDelete, fxEpID, fxID, e.issuerID)
+	afterProvRec := doRequestWithToken(t, e.srv, e.issuerTok, http.MethodGet, "/api/v1/test-identities/provenance?resource=webhook_endpoint:"+fxEpID, nil)
+	require.Equal(t, http.StatusOK, afterProvRec.Code, afterProvRec.Body.String())
+	var afterProv TestIdentityProvenance
+	require.NoError(t, json.Unmarshal(afterProvRec.Body.Bytes(), &afterProv))
+	assert.True(t, afterProv.Proven)
+	assert.True(t, afterProv.Deleted)
+	assert.Equal(t, basis.RunID, afterProv.DeletionRecord)
+
+	// Leftover stamped webhook endpoint + internal secret after user row is gone:
+	// cleanup dry-run discovers it and live cleanup deletes both the row and secret.
+	humanProj := tiCreateProject(t, e.srv, e.humanTok, "fpp-webhooks-human-proj")
+	fx2 := tiIssue(t, e.srv, e.issuerTok, map[string]any{"role": "member", "lifetimeSeconds": 60})
+	fx2ID := fx2.Identity.ID
+	require.Equal(t, http.StatusCreated, fpAddProjectRole(t, e.srv, e.store, e.humanTok, humanProj, store.ProjectRoleAdmin, fx2ID))
+	leftoverEpID := createEndpoint(fx2.AccessToken, humanProj, "fx2-leftover-ep")
+	leftoverSecretKey := store.WebhookEndpointSecretKey(humanProj, leftoverEpID, 1)
+	_, err = e.store.GetSecret(ctx, leftoverSecretKey, store.ScopeHub, e.srv.hubID)
+	require.NoError(t, err)
+	require.NoError(t, e.store.DeleteUser(ctx, fx2ID))
+
+	dryRec := doRequestWithToken(t, e.srv, e.issuerTok, http.MethodPost, "/api/v1/test-identities/cleanup?dryRun=true", nil)
+	require.Equal(t, http.StatusOK, dryRec.Code, dryRec.Body.String())
+	var dryReport TestIdentityCleanupReport
+	require.NoError(t, json.Unmarshal(dryRec.Body.Bytes(), &dryReport))
+	assert.Contains(t, dryReport.Targets, TestIdentityCleanupTarget{
+		Type:          fixtureResourceWebhookEndpoint,
+		ID:            leftoverEpID,
+		FixtureRootID: fx2ID,
+		ProjectID:     humanProj,
+		Status:        "target",
+	})
+	_, err = e.store.GetWebhookEndpoint(ctx, leftoverEpID)
+	require.NoError(t, err, "dry-run must not delete the webhook endpoint")
+
+	cleanRec := doRequestWithToken(t, e.srv, e.issuerTok, http.MethodPost, "/api/v1/test-identities/cleanup", nil)
+	require.Equal(t, http.StatusOK, cleanRec.Code, cleanRec.Body.String())
+	var cleanReport TestIdentityCleanupReport
+	require.NoError(t, json.Unmarshal(cleanRec.Body.Bytes(), &cleanReport))
+	assert.Equal(t, 1, cleanReport.Deleted.WebhookEndpoints)
+	_, err = e.store.GetWebhookEndpoint(ctx, leftoverEpID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	_, err = e.store.GetSecret(ctx, leftoverSecretKey, store.ScopeHub, e.srv.hubID)
+	assert.ErrorIs(t, err, store.ErrNotFound, "cleanup must delete the leftover stamped endpoint's internal secret row")
+	fpRequireBasis(t, e.store, mutationTypeWebhookEndpointDelete, leftoverEpID, fx2ID, e.issuerID)
 }

@@ -123582,6 +123582,8 @@ type WebhookEndpointMutation struct {
 	op                    Op
 	typ                   string
 	id                    *uuid.UUID
+	fixture_root_id       *uuid.UUID
+	fixture_issuer_id     *uuid.UUID
 	project_id            *uuid.UUID
 	name                  *string
 	description           *string
@@ -123708,6 +123710,104 @@ func (m *WebhookEndpointMutation) IDs(ctx context.Context) ([]uuid.UUID, error) 
 	default:
 		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
 	}
+}
+
+// SetFixtureRootID sets the "fixture_root_id" field.
+func (m *WebhookEndpointMutation) SetFixtureRootID(u uuid.UUID) {
+	m.fixture_root_id = &u
+}
+
+// FixtureRootID returns the value of the "fixture_root_id" field in the mutation.
+func (m *WebhookEndpointMutation) FixtureRootID() (r uuid.UUID, exists bool) {
+	v := m.fixture_root_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFixtureRootID returns the old "fixture_root_id" field's value of the WebhookEndpoint entity.
+// If the WebhookEndpoint object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *WebhookEndpointMutation) OldFixtureRootID(ctx context.Context) (v *uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFixtureRootID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFixtureRootID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFixtureRootID: %w", err)
+	}
+	return oldValue.FixtureRootID, nil
+}
+
+// ClearFixtureRootID clears the value of the "fixture_root_id" field.
+func (m *WebhookEndpointMutation) ClearFixtureRootID() {
+	m.fixture_root_id = nil
+	m.clearedFields[webhookendpoint.FieldFixtureRootID] = struct{}{}
+}
+
+// FixtureRootIDCleared returns if the "fixture_root_id" field was cleared in this mutation.
+func (m *WebhookEndpointMutation) FixtureRootIDCleared() bool {
+	_, ok := m.clearedFields[webhookendpoint.FieldFixtureRootID]
+	return ok
+}
+
+// ResetFixtureRootID resets all changes to the "fixture_root_id" field.
+func (m *WebhookEndpointMutation) ResetFixtureRootID() {
+	m.fixture_root_id = nil
+	delete(m.clearedFields, webhookendpoint.FieldFixtureRootID)
+}
+
+// SetFixtureIssuerID sets the "fixture_issuer_id" field.
+func (m *WebhookEndpointMutation) SetFixtureIssuerID(u uuid.UUID) {
+	m.fixture_issuer_id = &u
+}
+
+// FixtureIssuerID returns the value of the "fixture_issuer_id" field in the mutation.
+func (m *WebhookEndpointMutation) FixtureIssuerID() (r uuid.UUID, exists bool) {
+	v := m.fixture_issuer_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFixtureIssuerID returns the old "fixture_issuer_id" field's value of the WebhookEndpoint entity.
+// If the WebhookEndpoint object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *WebhookEndpointMutation) OldFixtureIssuerID(ctx context.Context) (v *uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFixtureIssuerID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFixtureIssuerID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFixtureIssuerID: %w", err)
+	}
+	return oldValue.FixtureIssuerID, nil
+}
+
+// ClearFixtureIssuerID clears the value of the "fixture_issuer_id" field.
+func (m *WebhookEndpointMutation) ClearFixtureIssuerID() {
+	m.fixture_issuer_id = nil
+	m.clearedFields[webhookendpoint.FieldFixtureIssuerID] = struct{}{}
+}
+
+// FixtureIssuerIDCleared returns if the "fixture_issuer_id" field was cleared in this mutation.
+func (m *WebhookEndpointMutation) FixtureIssuerIDCleared() bool {
+	_, ok := m.clearedFields[webhookendpoint.FieldFixtureIssuerID]
+	return ok
+}
+
+// ResetFixtureIssuerID resets all changes to the "fixture_issuer_id" field.
+func (m *WebhookEndpointMutation) ResetFixtureIssuerID() {
+	m.fixture_issuer_id = nil
+	delete(m.clearedFields, webhookendpoint.FieldFixtureIssuerID)
 }
 
 // SetProjectID sets the "project_id" field.
@@ -124383,7 +124483,13 @@ func (m *WebhookEndpointMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *WebhookEndpointMutation) Fields() []string {
-	fields := make([]string, 0, 15)
+	fields := make([]string, 0, 17)
+	if m.fixture_root_id != nil {
+		fields = append(fields, webhookendpoint.FieldFixtureRootID)
+	}
+	if m.fixture_issuer_id != nil {
+		fields = append(fields, webhookendpoint.FieldFixtureIssuerID)
+	}
 	if m.project_id != nil {
 		fields = append(fields, webhookendpoint.FieldProjectID)
 	}
@@ -124437,6 +124543,10 @@ func (m *WebhookEndpointMutation) Fields() []string {
 // schema.
 func (m *WebhookEndpointMutation) Field(name string) (ent.Value, bool) {
 	switch name {
+	case webhookendpoint.FieldFixtureRootID:
+		return m.FixtureRootID()
+	case webhookendpoint.FieldFixtureIssuerID:
+		return m.FixtureIssuerID()
 	case webhookendpoint.FieldProjectID:
 		return m.ProjectID()
 	case webhookendpoint.FieldName:
@@ -124476,6 +124586,10 @@ func (m *WebhookEndpointMutation) Field(name string) (ent.Value, bool) {
 // database failed.
 func (m *WebhookEndpointMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
 	switch name {
+	case webhookendpoint.FieldFixtureRootID:
+		return m.OldFixtureRootID(ctx)
+	case webhookendpoint.FieldFixtureIssuerID:
+		return m.OldFixtureIssuerID(ctx)
 	case webhookendpoint.FieldProjectID:
 		return m.OldProjectID(ctx)
 	case webhookendpoint.FieldName:
@@ -124515,6 +124629,20 @@ func (m *WebhookEndpointMutation) OldField(ctx context.Context, name string) (en
 // type.
 func (m *WebhookEndpointMutation) SetField(name string, value ent.Value) error {
 	switch name {
+	case webhookendpoint.FieldFixtureRootID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFixtureRootID(v)
+		return nil
+	case webhookendpoint.FieldFixtureIssuerID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFixtureIssuerID(v)
+		return nil
 	case webhookendpoint.FieldProjectID:
 		v, ok := value.(uuid.UUID)
 		if !ok {
@@ -124689,6 +124817,12 @@ func (m *WebhookEndpointMutation) AddField(name string, value ent.Value) error {
 // mutation.
 func (m *WebhookEndpointMutation) ClearedFields() []string {
 	var fields []string
+	if m.FieldCleared(webhookendpoint.FieldFixtureRootID) {
+		fields = append(fields, webhookendpoint.FieldFixtureRootID)
+	}
+	if m.FieldCleared(webhookendpoint.FieldFixtureIssuerID) {
+		fields = append(fields, webhookendpoint.FieldFixtureIssuerID)
+	}
 	if m.FieldCleared(webhookendpoint.FieldDescription) {
 		fields = append(fields, webhookendpoint.FieldDescription)
 	}
@@ -124712,6 +124846,12 @@ func (m *WebhookEndpointMutation) FieldCleared(name string) bool {
 // error if the field is not defined in the schema.
 func (m *WebhookEndpointMutation) ClearField(name string) error {
 	switch name {
+	case webhookendpoint.FieldFixtureRootID:
+		m.ClearFixtureRootID()
+		return nil
+	case webhookendpoint.FieldFixtureIssuerID:
+		m.ClearFixtureIssuerID()
+		return nil
 	case webhookendpoint.FieldDescription:
 		m.ClearDescription()
 		return nil
@@ -124729,6 +124869,12 @@ func (m *WebhookEndpointMutation) ClearField(name string) error {
 // It returns an error if the field is not defined in the schema.
 func (m *WebhookEndpointMutation) ResetField(name string) error {
 	switch name {
+	case webhookendpoint.FieldFixtureRootID:
+		m.ResetFixtureRootID()
+		return nil
+	case webhookendpoint.FieldFixtureIssuerID:
+		m.ResetFixtureIssuerID()
+		return nil
 	case webhookendpoint.FieldProjectID:
 		m.ResetProjectID()
 		return nil
