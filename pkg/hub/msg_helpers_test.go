@@ -152,10 +152,12 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	{file: "message_hold_redrive.go", function: "dispatchClaimedHeldMessage", symbol: "dispatchWithBrokerRetry",
 		class: "guarded", reason: "A2-S4: revalidateClaimedHeldMessage runs authorizeAgentMessage before dispatchClaimedHeldMessage"},
 
-	// server.go: dispatchAgentEventHandler — guarded at server.go:3103
-	// (authorizeScheduledAgentCreate).
-	{file: "server.go", function: "dispatchAgentEventHandler", symbol: "DispatchAgentCreate",
-		class: "guarded", reason: "authorizeScheduledAgentCreate at server.go fire-time authorization"},
+	// agent_create_headless.go: createAgentHeadless — guarded by
+	// dispatchAgentAction.Authorize -> authorizeDispatchAgentFire before Fire.
+	{file: "agent_create_headless.go", function: "createAgentHeadless", symbol: "DispatchAgentCreate",
+		class: "guarded", reason: "dispatchAgentAction.Authorize runs authorizeDispatchAgentFire before createAgentHeadless"},
+	{file: "agent_create_headless.go", function: "createAgentHeadless", symbol: "DispatchAgentCreateWithGather",
+		class: "guarded", reason: "dispatchAgentAction.Authorize runs authorizeDispatchAgentFire before createAgentHeadless"},
 
 	// reconcile.go: deliverMessage — dead code. The seam is assigned but
 	// never invoked in production.
@@ -234,6 +236,10 @@ var sharedClassificationSites = []struct {
 	{
 		site:   effectCallSiteKey{"start_claim.go", "startAgentCore", "DispatchAgentStartWithOptions"},
 		sameAs: effectCallSiteKey{"start_claim.go", "startAgentCore", "DispatchAgentStart"},
+	},
+	{
+		site:   effectCallSiteKey{"agent_create_headless.go", "createAgentHeadless", "DispatchAgentCreateWithGather"},
+		sameAs: effectCallSiteKey{"agent_create_headless.go", "createAgentHeadless", "DispatchAgentCreate"},
 	},
 }
 

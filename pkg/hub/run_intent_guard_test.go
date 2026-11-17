@@ -108,8 +108,8 @@ var lifecycleDispatchCallers = map[string]lifecycleDispatchRule{
 	"Server.stopHeldAgent":        {kind: intentRecorded},
 	"Server.handleStopAllAgents":  {kind: intentRecorded},
 	"Server.autoSuspendAgent":     {kind: intentRecorded},
-	// The scheduled create-and-start runs under a start claim.
-	"Server.dispatchAgentEventHandler": {kind: intentRecorded, recordedBy: "Server.withStartClaim",
+	// The headless/scheduled create-and-start runs under a start claim.
+	"Server.createAgentHeadless": {kind: intentRecorded, recordedBy: "Server.withStartClaim",
 		link: linkCallsRecorder, hops: []string{"Server.createUnderClaim"}},
 	"Server.handleExistingAgent":    {kind: intentRecorded},
 	"Server.createAgentInProject":   {kind: intentRecorded},

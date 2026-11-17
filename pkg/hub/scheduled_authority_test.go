@@ -761,9 +761,12 @@ func TestSchedDispatchFailureCompensates(t *testing.T) {
 // none of its functions calls sourceEffectCeiling.
 func TestSchedFireNeverCallsSourceEffectCeiling(t *testing.T) {
 	firePath := map[string][]string{
-		"server.go":              {"dispatchAgentEventHandler", "authorizeScheduledAgentCreate", "scheduledCreatorIdentity", "applyScheduledProjectDefaultGCPIdentity", "executeSchedule"},
-		"scheduled_authority.go": {"resolveScheduledAuthority", "scheduledEffectCeiling", "intersectEffectCeilings"},
-		"firecore_authority.go":  {"resolveRecordedAuthority", "resolveFireUser", "resolveFireAgent", "fireRevisionCeilingConsistent"},
+		"server.go":                       {"applyScheduledProjectDefaultGCPIdentity", "executeSchedule"},
+		"scheduled_authority.go":          {"resolveScheduledAuthority", "intersectEffectCeilings"},
+		"firecore_authority.go":           {"resolveRecordedAuthority", "resolveFireUser", "resolveFireAgent", "fireRevisionCeilingConsistent", "fireEffectCeiling"},
+		"action_dispatch_agent.go":        {"Authorize", "Fire", "authorizeDispatchAgentFire"},
+		"agent_create_headless.go":        {"createAgentHeadless"},
+		"firecore_legacy_helpers_test.go": {"scheduledEffectCeiling", "authorizeScheduledAgentCreate", "scheduledCreatorIdentity", "dispatchAgentEventHandler"},
 	}
 	fset := token.NewFileSet()
 	for file, funcs := range firePath {

@@ -643,6 +643,8 @@ func TestFireCoreContainment(t *testing.T) {
 			"resolveFireUser",
 			"resolveFireAgent",
 			"fireStanding",
+			"fireCreatorName",
+			"fireEffectCeiling",
 		},
 		"firecore_tracker.go": {
 			"newScheduledFireTracker",
@@ -670,6 +672,17 @@ func TestFireCoreContainment(t *testing.T) {
 			"Detaches",
 			"authorizeExecFire",
 			"dispatchExecAction",
+		},
+		"action_dispatch_agent.go": {
+			"Validate",
+			"ValidatePayload",
+			"Authorize",
+			"Fire",
+			"Detaches",
+			"authorizeDispatchAgentFire",
+		},
+		"agent_create_headless.go": {
+			"createAgentHeadless",
 		},
 	}
 	forbiddenStoreTypes := map[string]bool{
@@ -1270,7 +1283,8 @@ func TestFireCoreLegacyActionDetaches(t *testing.T) {
 	legacyMsgAction := newLegacyAction("message", nil)
 	realExecAction := &execAction{}
 	legacyExecAction := newLegacyAction(scheduledEventTypeExec, nil)
-	dispAction := newLegacyAction("dispatch_agent", nil)
+	realDispAction := &dispatchAgentAction{}
+	legacyDispAction := newLegacyAction("dispatch_agent", nil)
 
 	for _, defKind := range []string{
 		hubfire.DefinitionKindScheduledEvent,
@@ -1297,10 +1311,15 @@ func TestFireCoreLegacyActionDetaches(t *testing.T) {
 				Payload:   `{bad-json`,
 			}), "%s malformed payload does not detach (%s)", name, defKind)
 		}
-		assert.False(t, dispAction.Detaches(hubfire.FireRequest{
-			Authority: hubfire.RecordedAuthority{DefinitionKind: defKind},
-			Payload:   `{"agentName":"worker"}`,
-		}), "dispatch_agent never detaches (%s)", defKind)
+		for name, act := range map[string]FireAction{
+			"dispatchAgentAction": realDispAction,
+			"legacyAction":        legacyDispAction,
+		} {
+			assert.False(t, act.Detaches(hubfire.FireRequest{
+				Authority: hubfire.RecordedAuthority{DefinitionKind: defKind},
+				Payload:   `{"agentName":"worker"}`,
+			}), "%s dispatch_agent never detaches (%s)", name, defKind)
+		}
 	}
 
 	for name, act := range map[string]FireAction{

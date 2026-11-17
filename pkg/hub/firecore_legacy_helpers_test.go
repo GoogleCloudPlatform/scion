@@ -81,3 +81,61 @@ func (s *Server) authorizeScheduledExecFire(ctx context.Context, evt store.Sched
 	target, err := s.authorizeExecFire(ctx, evt.ProjectID, auth, identity, p)
 	return auth, identity, target, err
 }
+
+// dispatchAgentEventHandler returns a thin test-compatibility EventHandler over
+// dispatchAgentAction so existing scheduler test suites calling
+// srv.dispatchAgentEventHandler() directly continue exercising the single
+// fireActionWith path unchanged.
+// Removed in PR 2 (ptone/scion#8029).
+func (s *Server) dispatchAgentEventHandler() EventHandler {
+	return func(ctx context.Context, evt store.ScheduledEvent) error {
+		exec, _ := ExecutorContextFromContext(ctx)
+		req := scheduledFireRequest(s, evt, exec, nil)
+		req.ActionType = "dispatch_agent"
+		out, rawErr := s.fireActionWithRawError(withFireHistoryCreator(ctx, evt.CreatedBy), req, &dispatchAgentAction{srv: s})
+		if rawErr != nil && !out.Detached {
+			return rawErr
+		}
+		return scheduledFireError("dispatch_agent", out)
+	}
+}
+
+// scheduledCreator is the test-compatibility wrapper for scheduled
+// dispatch_agent authorization assertions.
+// Removed in PR 2 (ptone/scion#8029).
+type scheduledCreator struct {
+	Authority ScheduledAuthority
+	Identity  Identity
+	Name      string
+}
+
+func (s *Server) scheduledCreatorIdentity(ctx context.Context, evt store.ScheduledEvent) (scheduledCreator, error) {
+	auth, identity, err := s.resolveScheduledAuthority(ctx, evt)
+	if err != nil {
+		return scheduledCreator{}, err
+	}
+	return scheduledCreator{
+		Authority: auth,
+		Identity:  identity,
+		Name:      fireCreatorName(auth),
+	}, nil
+}
+
+func (s *Server) authorizeScheduledAgentCreate(ctx context.Context, evt store.ScheduledEvent) (scheduledCreator, error) {
+	creator, err := s.scheduledCreatorIdentity(ctx, evt)
+	if err != nil {
+		return scheduledCreator{}, err
+	}
+	rec := scheduledRecordedAuthority(evt)
+	if err := s.authorizeDispatchAgentFire(ctx, evt.ProjectID, evt.ID, rec.DefinitionKind, creator.Authority, creator.Identity); err != nil {
+		return scheduledCreator{}, err
+	}
+	return creator, nil
+}
+
+func (s *Server) scheduledEffectCeiling(ctx context.Context, auth ScheduledAuthority, evt store.ScheduledEvent) (store.EffectCeiling, store.AuthorityProvenance, error) {
+	if auth.Recorded.FireID == "" {
+		auth.Recorded = scheduledRecordedAuthority(evt)
+	}
+	return s.fireEffectCeiling(ctx, auth)
+}

@@ -234,7 +234,7 @@ func TestUATIntrinsic_CeilingReadersUseHopCeiling(t *testing.T) {
 		},
 		"childRoleWithinCeiling": {
 			"planAgentDelegatorReissue": true, // an agent parent's ceiling (agentRowEffectCeiling)
-			"dispatchAgentEventHandler": true, // scheduler edge ceiling with role none: not a token hop
+			"createAgentHeadless":       true, // deferred fire edge ceiling (fireEffectCeiling): not a token hop
 		},
 		// No exceptions: every caller passes uatHopEffectCeiling inline, so
 		// missingRoleSelectors (below) always reads a hop ceiling.

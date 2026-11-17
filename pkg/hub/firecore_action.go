@@ -29,9 +29,11 @@ type FireAuthorized any
 
 // FireRefusal represents an authorization or standing refusal of a fire. The
 // generic Reason is persisted on the fire record; detailed causes are logged
-// by Authorize.
+// by Authorize. Cause, when non-nil, carries the wrapped internal error for
+// direct caller inspection without widening FireOutcome.Error.
 type FireRefusal struct {
 	Reason string
+	Cause  error
 }
 
 // FireAction defines one deferred action type handled by the fire core. Name
@@ -130,14 +132,19 @@ func unknownActionTypeError(actionType string) string {
 	return "unknown action type: " + actionType
 }
 
-func fireAuthorityRefusalText(actionType string, err error) string {
+func fireAuthorityRefusalText(req hubfire.FireRequest, err error) string {
 	if errors.Is(err, errScheduledAuthorityUnrecorded) {
 		return errScheduledAuthorityUnrecorded.Error()
 	}
-	if actionType == "message" {
+	if req.ActionType == "message" {
 		return errScheduledMessageRefused.Error()
 	}
-	return actionType + " refused"
+	if req.ActionType == "dispatch_agent" &&
+		(req.Authority.DefinitionKind == hubfire.DefinitionKindSchedule ||
+			req.Authority.DefinitionKind == hubfire.DefinitionKindScheduledEvent) {
+		return err.Error()
+	}
+	return req.ActionType + " refused"
 }
 
 func (s *Server) logFireAuthorityRefusal(req hubfire.FireRequest, permissionID string, err error) {
@@ -244,11 +251,15 @@ func (s *Server) fireActionWithRawError(ctx context.Context, req hubfire.FireReq
 			}, scheduledKnownError(refusalText)
 		}
 		s.logFireAuthorityRefusal(req, permissionID, err)
-		refusalText := fireAuthorityRefusalText(req.ActionType, err)
+		refusalText := fireAuthorityRefusalText(req, err)
+		rawErr := scheduledKnownError(refusalText)
+		if refusalText == err.Error() {
+			rawErr = err
+		}
 		return hubfire.FireOutcome{
 			Status: hubfire.FireStatusRefused,
 			Error:  refusalText,
-		}, scheduledKnownError(refusalText)
+		}, rawErr
 	}
 	authorized, refusal, err := action.Authorize(ctx, req, auth, identity)
 	if err != nil {
@@ -264,10 +275,14 @@ func (s *Server) fireActionWithRawError(ctx context.Context, req hubfire.FireReq
 		}, err
 	}
 	if refusal != nil {
+		rawErr := refusal.Cause
+		if rawErr == nil {
+			rawErr = scheduledKnownError(refusal.Reason)
+		}
 		return hubfire.FireOutcome{
 			Status: hubfire.FireStatusRefused,
 			Error:  refusal.Reason,
-		}, scheduledKnownError(refusal.Reason)
+		}, rawErr
 	}
 	out, err := action.Fire(ctx, req, authorized)
 	if err != nil {

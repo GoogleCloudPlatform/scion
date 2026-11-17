@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -78,27 +79,30 @@ func scheduleBlockedError(existing *store.Agent, placementRefused bool) error {
 		existing.Slug, detail)
 }
 
-// notifyScheduleBlocked creates a SCHEDULE_BLOCKED notification for the
-// owner of evt (scheduleNotificationRecipient) and publishes it on that
-// user's subject only. Only recurring-schedule fires notify; a one-shot
-// event (no ScheduleID) records its error and nothing else (lead ruling on
-// ptone/scion#3701). Every failure is logged and skipped: it never changes
-// the fire's result.
-func (s *Server) notifyScheduleBlocked(ctx context.Context, evt store.ScheduledEvent, existing *store.Agent, placementRefused bool) {
-	if evt.ScheduleID == "" {
+// notifyFireBlocked creates a SCHEDULE_BLOCKED notification for the owner of
+// a recurring schedule fire (scheduleNotificationRecipient) blocked by an
+// existing agent row in phase error (ptone/scion#3701) and publishes it on
+// that user's subject only. Only recurring-schedule fires notify; a one-shot
+// event (no ScheduleID) or Stage 1 trigger records its error and nothing else
+// (lead ruling on ptone/scion#3701). Every failure is logged and skipped: it
+// never changes the fire's result.
+func (s *Server) notifyFireBlocked(ctx context.Context, req hubfire.FireRequest, existing *store.Agent, placementRefused bool) {
+	if req.Authority.DefinitionKind != hubfire.DefinitionKindSchedule || req.Authority.DefinitionID == "" {
 		return
 	}
-	log := slog.With("subsystem", "scheduler", "eventID", evt.ID,
-		"scheduleID", evt.ScheduleID, "projectID", evt.ProjectID, "agentID", existing.ID)
-	recipient := s.scheduleNotificationRecipient(ctx, evt.CreatedBy)
+	scheduleID := req.Authority.DefinitionID
+	createdBy := fireHistoryCreatorFromContext(ctx)
+	log := slog.With("subsystem", "scheduler", "eventID", req.Authority.FireID,
+		"scheduleID", scheduleID, "projectID", req.ProjectID, "agentID", existing.ID)
+	recipient := s.scheduleNotificationRecipient(ctx, createdBy)
 	if recipient == "" {
 		log.Warn("Scheduler: blocked fire has no owning user to notify; skipping notification",
-			"createdBy", evt.CreatedBy)
+			"createdBy", createdBy)
 		return
 	}
 
-	name := evt.ScheduleID
-	if sched, err := s.store.GetSchedule(ctx, evt.ScheduleID); err == nil && sched.Name != "" {
+	name := scheduleID
+	if sched, err := s.store.GetSchedule(ctx, scheduleID); err == nil && sched.Name != "" {
 		name = sched.Name
 	}
 	message := fmt.Sprintf("Schedule %q is blocked: agent %q is in phase error. Delete the agent to resume this schedule.",
@@ -108,7 +112,7 @@ func (s *Server) notifyScheduleBlocked(ctx context.Context, evt store.ScheduledE
 			name, existing.Slug, inconsistentPlacementDocsURL)
 	}
 
-	projectID := evt.ProjectID
+	projectID := req.ProjectID
 	if projectID == "" {
 		projectID = uuid.Nil.String()
 	}
