@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -31,9 +32,10 @@ import (
 )
 
 const (
-	maxTriggerNameLen        = 128
-	maxTriggerDescriptionLen = 1024
-	defaultWebhookMatchType  = "webhook.received"
+	maxTriggerNameLen          = 128
+	maxTriggerDescriptionLen   = 1024
+	maxTriggerRequestBodyBytes = 64 * 1024
+	defaultWebhookMatchType    = "webhook.received"
 )
 
 var (
@@ -250,6 +252,36 @@ func setTriggerETag(w http.ResponseWriter, rev int) {
 	w.Header().Set("ETag", fmt.Sprintf("%q", fmt.Sprintf("%d", rev)))
 }
 
+// readTriggerRequestJSON caps trigger and webhook-endpoint write request bodies
+// at maxTriggerRequestBodyBytes (64 KiB) via http.MaxBytesReader and maps
+// *http.MaxBytesError to 413 payload_too_large.
+func readTriggerRequestJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	if r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, maxTriggerRequestBodyBytes)
+	}
+	if err := readJSON(r, v); err != nil {
+		if isMaxBytesError(err) {
+			writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
+				fmt.Sprintf("request body exceeds %d byte limit", maxTriggerRequestBodyBytes), nil)
+			return false
+		}
+		BadRequest(w, "Invalid JSON body: "+err.Error())
+		return false
+	}
+	if r.Body != nil {
+		if _, err := io.Copy(io.Discard, r.Body); err != nil {
+			if isMaxBytesError(err) {
+				writeError(w, http.StatusRequestEntityTooLarge, "payload_too_large",
+					fmt.Sprintf("request body exceeds %d byte limit", maxTriggerRequestBodyBytes), nil)
+				return false
+			}
+			BadRequest(w, "Invalid JSON body: "+err.Error())
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID string) {
 	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)
@@ -259,8 +291,7 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 	}
 
 	var req CreateTriggerRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid JSON body: "+err.Error())
+	if !readTriggerRequestJSON(w, r, &req) {
 		return
 	}
 
@@ -487,8 +518,7 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 	}
 
 	var req UpdateTriggerRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid JSON body: "+err.Error())
+	if !readTriggerRequestJSON(w, r, &req) {
 		return
 	}
 

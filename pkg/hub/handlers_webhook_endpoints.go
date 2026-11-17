@@ -127,8 +127,7 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 	}
 
 	var req CreateWebhookEndpointRequest
-	if err := readJSON(r, &req); err != nil {
-		BadRequest(w, "Invalid JSON body: "+err.Error())
+	if !readTriggerRequestJSON(w, r, &req) {
 		return
 	}
 

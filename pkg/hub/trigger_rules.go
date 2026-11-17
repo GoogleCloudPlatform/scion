@@ -20,12 +20,15 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/celengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/triggerrule"
 )
+
+var errTriggerRuleEngineNotInitialized = errors.New("trigger rule engine is not initialized")
 
 // Trigger rule registration, authoring validation, and engine seam
 // (Stage 1 §7.0, §7.0a, §7.1, §7.2; ptone/scion#8030).
@@ -100,7 +103,7 @@ func (s *Server) compileTriggerMatchRule(ctx context.Context, dialect, expr stri
 			return err
 		}
 	}
-	return errors.New("trigger rule engine is not initialized")
+	return errTriggerRuleEngineNotInitialized
 }
 
 func (s *Server) compileTriggerSubjectRule(ctx context.Context, dialect, expr string) error {
@@ -119,7 +122,14 @@ func (s *Server) compileTriggerSubjectRule(ctx context.Context, dialect, expr st
 			return err
 		}
 	}
-	return errors.New("trigger rule engine is not initialized")
+	return errTriggerRuleEngineNotInitialized
+}
+
+func validateTriggerRuleExpr(field, expr string) error {
+	if !utf8.ValidString(expr) || strings.ContainsFunc(expr, isDisallowedTriggerDescriptionRune) {
+		return fmt.Errorf("%s must not contain control or format characters", field)
+	}
+	return nil
 }
 
 // writeAndValidateTriggerMatch normalizes and compiles a trigger's match block
@@ -146,6 +156,10 @@ func (s *Server) writeAndValidateTriggerMatch(w http.ResponseWriter, ctx context
 		types = []string{defaultWebhookMatchType}
 	}
 	if err := triggerrule.ValidateMatchTypes(types); err != nil {
+		ValidationError(w, err.Error(), nil)
+		return nil, "", "", false
+	}
+	if err := validateTriggerRuleExpr("match.expr", expr); err != nil {
 		ValidationError(w, err.Error(), nil)
 		return nil, "", "", false
 	}
@@ -187,6 +201,10 @@ func (s *Server) writeAndValidateTriggerSubject(w http.ResponseWriter, ctx conte
 		ValidationError(w, fmt.Sprintf("unsupported subject mode %q", mode), nil)
 		return "", "", "", false
 	}
+	if err := validateTriggerRuleExpr("subject.expr", expr); err != nil {
+		ValidationError(w, err.Error(), nil)
+		return "", "", "", false
+	}
 	if err := s.compileTriggerSubjectRule(ctx, dialect, expr); err != nil {
 		writeTriggerRuleError(w, "subject", err)
 		return "", "", "", false
@@ -200,7 +218,9 @@ func (s *Server) writeAndValidateTriggerSubject(w http.ResponseWriter, ctx conte
 
 // writeTriggerRuleError maps authoring-time rule compilation and dialect-admission
 // errors to HTTP 400 ErrCodeInvalidRule responses carrying structured CompileError
-// or UnsupportedDialectError details, never 500.
+// or UnsupportedDialectError details. Unexpected internal errors (such as an
+// uninitialized rule engine) fall through to writeErrorFromErr, which logs the
+// cause and returns a generic HTTP 500 without echoing internal error text.
 func writeTriggerRuleError(w http.ResponseWriter, slot string, err error) {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		writeErrorFromErr(w, err, "")
@@ -242,7 +262,5 @@ func writeTriggerRuleError(w http.ResponseWriter, slot string, err error) {
 		return
 	}
 
-	writeError(w, http.StatusBadRequest, ErrCodeInvalidRule,
-		fmt.Sprintf("invalid %s rule: %s", slot, err.Error()),
-		map[string]any{"field": slot})
+	writeErrorFromErr(w, err, "")
 }

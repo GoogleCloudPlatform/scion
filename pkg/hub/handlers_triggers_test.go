@@ -39,6 +39,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
+	"github.com/GoogleCloudPlatform/scion/pkg/triggerrule"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -2315,4 +2316,326 @@ func TestTriggersAuthoring_PatchDispatchFieldOverBrokenStoredRuleRejected(t *tes
 			assert.Equal(t, tc.subjectRule, stored.SubjectRule)
 		})
 	}
+}
+
+func TestTriggersAuthoring_RejectControlAndFormatCharactersInRules(t *testing.T) {
+	badExprs := []struct {
+		label string
+		expr  string
+	}{
+		{"nul", "event.type == \"\x00\""},
+		{"bel_osc", "event.type == \"\x1b]0;pwned\x07\x1b[2J\""},
+		{"ansi_comment", "true // \x1b[31mred"},
+		{"vt", "true\x0b"},
+		{"ff", "true\x0c"},
+		{"del", "event.type == \"a\x7fb\""},
+		{"c1_csi", "event.type == \"a\u009b2Jb\""},
+		{"bidi_rlo_cf", "event.type == \"a\u202eb\""},
+		{"bidi_lri_cf", "event.type == \"a\u2066b\""},
+		{"zwsp_cf", "event.type == \"a\u200bb\""},
+		{"bom_cf", "\ufefftrue"},
+		{"line_sep_zl", "true // \u2028next"},
+		{"para_sep_zp", "true // \u2029next"},
+		{"invalid_utf8", "event.type == \"\xff\""},
+	}
+	for _, tc := range badExprs {
+		t.Run("unit_"+tc.label, func(t *testing.T) {
+			assert.Error(t, validateTriggerRuleExpr("match.expr", tc.expr))
+			assert.Error(t, validateTriggerRuleExpr("subject.expr", tc.expr))
+		})
+	}
+	require.NoError(t, validateTriggerRuleExpr("match.expr", "event.type == \"webhook.received\" &&\r\n\ttrue"))
+
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+
+	epRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "ctrl-rule-ep"})
+	require.Equal(t, http.StatusCreated, epRec.Code, epRec.Body.String())
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+	// Multiline rules with \n, \r\n, and \t remain valid at authoring.
+	multilineMatch := "event.type == \"webhook.received\" &&\r\n\thas(event.attributes.subject)"
+	multilineSubj := "has(event.subject) ?\n\tstring(event.subject) : \"default\""
+	validRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:    "multiline-valid-tr",
+		Source:  TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match:   &TriggerMatchSpec{Expr: multilineMatch},
+		Subject: &TriggerSubjectSpec{Expr: multilineSubj},
+		Action:  TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusCreated, validRec.Code, validRec.Body.String())
+	var validTr TriggerResponse
+	require.NoError(t, json.Unmarshal(validRec.Body.Bytes(), &validTr))
+
+	// Create and PATCH reject C0 control and Unicode Cf characters in match.expr and subject.expr (400).
+	for i, bad := range []struct {
+		matchExpr string
+		subjExpr  string
+	}{
+		{matchExpr: "event.type == \"\x1b]0;pwned\x07\x1b[2J\"", subjExpr: "\"\x1b[31msubj\""},
+		{matchExpr: "event.type == \"a\u202eb\"", subjExpr: "\"subj\u202e\""},
+		{matchExpr: "true // \x1b[31mred", subjExpr: "\"subj\" // \u200bzwsp"},
+	} {
+		badMatchCreate := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+			Name:   fmt.Sprintf("bad-match-ctrl-%d", i),
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+			Match:  &TriggerMatchSpec{Expr: bad.matchExpr},
+			Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+		})
+		require.Equal(t, http.StatusBadRequest, badMatchCreate.Code, badMatchCreate.Body.String())
+		matchErr := decodeTriggerRuleError(t, badMatchCreate)
+		assert.Equal(t, ErrCodeValidationError, matchErr.Code)
+		assert.Contains(t, matchErr.Message, "match.expr must not contain control or format characters")
+
+		badSubjCreate := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+			Name:    fmt.Sprintf("bad-subj-ctrl-%d", i),
+			Source:  TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+			Subject: &TriggerSubjectSpec{Expr: bad.subjExpr},
+			Action:  TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+		})
+		require.Equal(t, http.StatusBadRequest, badSubjCreate.Code, badSubjCreate.Body.String())
+		subjErr := decodeTriggerRuleError(t, badSubjCreate)
+		assert.Equal(t, ErrCodeValidationError, subjErr.Code)
+		assert.Contains(t, subjErr.Message, "subject.expr must not contain control or format characters")
+
+		matchCopy := bad.matchExpr
+		patchMatchRec := f.doTrigger(t, f.ownerAuth, validTr.ID, http.MethodPatch, UpdateTriggerRequest{
+			Match: &TriggerMatchPatchSpec{Expr: &matchCopy},
+		})
+		require.Equal(t, http.StatusBadRequest, patchMatchRec.Code, patchMatchRec.Body.String())
+		assert.Contains(t, decodeTriggerRuleError(t, patchMatchRec).Message, "match.expr must not contain control or format characters")
+
+		subjCopy := bad.subjExpr
+		patchSubjRec := f.doTrigger(t, f.ownerAuth, validTr.ID, http.MethodPatch, UpdateTriggerRequest{
+			Subject: &TriggerSubjectPatchSpec{Expr: &subjCopy},
+		})
+		require.Equal(t, http.StatusBadRequest, patchSubjRec.Code, patchSubjRec.Body.String())
+		assert.Contains(t, decodeTriggerRuleError(t, patchSubjRec).Message, "subject.expr must not contain control or format characters")
+	}
+
+	// Stored paused trigger with bidi/control characters in MatchRule or SubjectRule is rejected 400 on resume and dispatch PATCH.
+	now := time.Now().UTC()
+	for _, tc := range []struct {
+		name      string
+		matchRule string
+		subjRule  string
+		wantField string
+	}{
+		{"stored_bidi_match", "event.type == \"a\u202eb\"", "", "match.expr"},
+		{"stored_esc_subject", "true", "\"\x1b[2J\"", "subject.expr"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			trID := api.NewUUID()
+			require.NoError(t, f.store.CreateTrigger(ctx, &store.Trigger{
+				ID:             trID,
+				ProjectID:      f.projectID,
+				Name:           "paused-ctrl-" + trID[:8],
+				Status:         store.TriggerStatusPaused,
+				SourceKind:     store.TriggerSourceKindWebhook,
+				SourceID:       ep.ID,
+				MatchTypes:     []string{"webhook.received"},
+				MatchDialect:   "cel",
+				MatchRule:      tc.matchRule,
+				ActionType:     "message",
+				ActionPayload:  `{"agentId":"` + f.targetAgent.ID + `","message":"hi"}`,
+				SubjectDialect: "cel",
+				SubjectRule:    tc.subjRule,
+				SubjectMode:    store.TriggerSubjectModeNew,
+				CreatedBy:      f.owner.ID,
+				InitiatorAttribution: store.InitiatorAttribution{
+					InitiatorPrincipalKind:  "user",
+					InitiatorPrincipalID:    f.owner.ID,
+					InitiatorCredentialKind: store.InitiatorCredentialKindSession,
+					AttributionVersion:      1,
+					AuthorizationRevision:   1,
+				},
+				CreatedAt: now,
+				UpdatedAt: now,
+			}))
+
+			resumeRec := f.doTrigger(t, f.ownerAuth, trID+"/resume", http.MethodPost, nil)
+			require.Equal(t, http.StatusBadRequest, resumeRec.Code, resumeRec.Body.String())
+			assert.Contains(t, decodeTriggerRuleError(t, resumeRec).Message, tc.wantField+" must not contain control or format characters")
+
+			dispatchPatchRec := f.doTrigger(t, f.ownerAuth, trID, http.MethodPatch, UpdateTriggerRequest{
+				Action: &TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "updated"},
+			})
+			require.Equal(t, http.StatusBadRequest, dispatchPatchRec.Code, dispatchPatchRec.Body.String())
+			assert.Contains(t, decodeTriggerRuleError(t, dispatchPatchRec).Message, tc.wantField+" must not contain control or format characters")
+
+			stored, err := f.store.GetTrigger(ctx, trID)
+			require.NoError(t, err)
+			assert.Equal(t, store.TriggerStatusPaused, stored.Status)
+			assert.Equal(t, 1, stored.AuthorizationRevision)
+		})
+	}
+}
+
+func TestTriggersAuthoring_UninitializedRuleEngineReturnsGeneric500(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+
+	epRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "uninit-engine-ep"})
+	require.Equal(t, http.StatusCreated, epRec.Code, epRec.Body.String())
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+	baseRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "uninit-base-tr",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match:  &TriggerMatchSpec{Expr: "true"},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusCreated, baseRec.Code, baseRec.Body.String())
+	var baseTr TriggerResponse
+	require.NoError(t, json.Unmarshal(baseRec.Body.Bytes(), &baseTr))
+	require.Equal(t, http.StatusOK, f.doTrigger(t, f.ownerAuth, baseTr.ID+"/pause", http.MethodPost, nil).Code)
+
+	origRules, origTriggerRules := f.srv.rules, f.srv.triggerRules
+	t.Cleanup(func() {
+		f.srv.rules = origRules
+		f.srv.triggerRules = origTriggerRules
+	})
+
+	assertGeneric500 := func(t *testing.T, rec *httptest.ResponseRecorder) {
+		t.Helper()
+		require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+		eb := decodeTriggerRuleError(t, rec)
+		assert.Equal(t, ErrCodeInternalError, eb.Code)
+		assert.Equal(t, "Internal server error", eb.Message)
+		assert.Empty(t, eb.Details)
+		assert.NotContains(t, rec.Body.String(), "not initialized")
+		assert.NotContains(t, rec.Body.String(), "unknown CEL environment")
+		assert.NotContains(t, rec.Body.String(), ErrCodeInvalidRule)
+	}
+
+	// 1. Nil rule engine state -> 500 Internal server error (never 400 invalid_rule or internal text).
+	f.srv.rules = nil
+	f.srv.triggerRules = nil
+
+	assertGeneric500(t, f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "uninit-create",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match:  &TriggerMatchSpec{Expr: "true"},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	}))
+
+	newExpr := `event.type == "webhook.received"`
+	assertGeneric500(t, f.doTrigger(t, f.ownerAuth, baseTr.ID, http.MethodPatch, UpdateTriggerRequest{
+		Match: &TriggerMatchPatchSpec{Expr: &newExpr},
+	}))
+
+	assertGeneric500(t, f.doTrigger(t, f.ownerAuth, baseTr.ID+"/resume", http.MethodPost, nil))
+
+	// 2. Half-initialized state (s.rules grants "trigger" but s.triggerRules is nil) -> generic 500.
+	misEng, _, err := newRuleEngine()
+	require.NoError(t, err)
+	require.NoError(t, misEng.AllowConsumerDialects(triggerrule.ConsumerName, ruleengine.Grant(ruleengine.DialectCEL)))
+	f.srv.rules = misEng
+	f.srv.triggerRules = nil
+
+	assertGeneric500(t, f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "misconfig-create",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match:  &TriggerMatchSpec{Expr: "true"},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	}))
+
+	// 3. Direct writeTriggerRuleError check on an arbitrary unexpected internal error -> generic 500, no text leak.
+	rec := httptest.NewRecorder()
+	writeTriggerRuleError(rec, "match", fmt.Errorf("ruleengine: unknown CEL environment %q", "trigger"))
+	assertGeneric500(t, rec)
+}
+
+func TestTriggersAndWebhookEndpoints_OversizeRequestBodyReturns413(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+
+	sendRaw := func(method, path string, raw []byte, handler func(http.ResponseWriter, *http.Request)) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		reqCtx := contextWithIdentity(req.Context(), f.ownerAuth)
+		reqCtx = contextWithCredentialContext(reqCtx, credentialContextForIdentity(f.ownerAuth))
+		rec := httptest.NewRecorder()
+		handler(rec, req.WithContext(reqCtx))
+		return rec
+	}
+
+	assert413 := func(t *testing.T, rec *httptest.ResponseRecorder) {
+		t.Helper()
+		require.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, rec.Body.String())
+		eb := decodeTriggerRuleError(t, rec)
+		assert.Equal(t, "payload_too_large", eb.Code)
+	}
+
+	// 1. POST /webhook-endpoints: exact 64 KiB body succeeds (201), 64 KiB + 1 byte returns 413.
+	epPath := "/api/v1/projects/" + f.projectID + "/webhook-endpoints"
+	epPrefix := `{"name":"cap-ep","description":"ok"}`
+	epExact := []byte(epPrefix + strings.Repeat(" ", maxTriggerRequestBodyBytes-len(epPrefix)))
+	require.Len(t, epExact, maxTriggerRequestBodyBytes)
+
+	epOKRec := sendRaw(http.MethodPost, epPath, epExact, func(w http.ResponseWriter, r *http.Request) {
+		f.srv.handleWebhookEndpoints(w, r, f.projectID, "")
+	})
+	require.Equal(t, http.StatusCreated, epOKRec.Code, epOKRec.Body.String())
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epOKRec.Body.Bytes(), &ep))
+
+	epOverJSON := []byte(`{"name":"over-ep","description":"` + strings.Repeat("a", maxTriggerRequestBodyBytes) + `"}`)
+	assert413(t, sendRaw(http.MethodPost, epPath, epOverJSON, func(w http.ResponseWriter, r *http.Request) {
+		f.srv.handleWebhookEndpoints(w, r, f.projectID, "")
+	}))
+	assert413(t, sendRaw(http.MethodPost, epPath, append(append([]byte{}, epExact...), ' '), func(w http.ResponseWriter, r *http.Request) {
+		f.srv.handleWebhookEndpoints(w, r, f.projectID, "")
+	}))
+
+	// 2. POST /triggers: exact 64 KiB body succeeds (201), 64 KiB + 1 byte and oversize JSON object return 413.
+	trPath := "/api/v1/projects/" + f.projectID + "/triggers"
+	trBase, err := json.Marshal(CreateTriggerRequest{
+		Name:   "cap-tr",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match:  &TriggerMatchSpec{Expr: "true"},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hello"},
+	})
+	require.NoError(t, err)
+	trExact := append(append([]byte{}, trBase...), bytes.Repeat([]byte(" "), maxTriggerRequestBodyBytes-len(trBase))...)
+	require.Len(t, trExact, maxTriggerRequestBodyBytes)
+
+	trOKRec := sendRaw(http.MethodPost, trPath, trExact, func(w http.ResponseWriter, r *http.Request) {
+		f.srv.handleTriggers(w, r, f.projectID, "")
+	})
+	require.Equal(t, http.StatusCreated, trOKRec.Code, trOKRec.Body.String())
+	var createdTr TriggerResponse
+	require.NoError(t, json.Unmarshal(trOKRec.Body.Bytes(), &createdTr))
+
+	trOverJSON := []byte(`{"name":"over-tr","source":{"kind":"webhook","id":"` + ep.ID + `"},"action":{"type":"message","agentId":"` + f.targetAgent.ID + `","message":"` + strings.Repeat("m", maxTriggerRequestBodyBytes) + `"}}`)
+	assert413(t, sendRaw(http.MethodPost, trPath, trOverJSON, func(w http.ResponseWriter, r *http.Request) {
+		f.srv.handleTriggers(w, r, f.projectID, "")
+	}))
+	assert413(t, sendRaw(http.MethodPost, trPath, append(append([]byte{}, trExact...), ' '), func(w http.ResponseWriter, r *http.Request) {
+		f.srv.handleTriggers(w, r, f.projectID, "")
+	}))
+
+	// 3. PATCH /triggers/{id}: exact 64 KiB body succeeds (200), > 64 KiB returns 413 and leaves trigger unchanged.
+	patchPath := trPath + "/" + createdTr.ID
+	patchPrefix := `{"description":"patched-at-cap"}`
+	patchExact := []byte(patchPrefix + strings.Repeat(" ", maxTriggerRequestBodyBytes-len(patchPrefix)))
+	require.Len(t, patchExact, maxTriggerRequestBodyBytes)
+
+	patchOKRec := sendRaw(http.MethodPatch, patchPath, patchExact, func(w http.ResponseWriter, r *http.Request) {
+		f.srv.handleTriggers(w, r, f.projectID, createdTr.ID)
+	})
+	require.Equal(t, http.StatusOK, patchOKRec.Code, patchOKRec.Body.String())
+
+	patchOverJSON := []byte(`{"description":"` + strings.Repeat("d", maxTriggerRequestBodyBytes) + `"}`)
+	assert413(t, sendRaw(http.MethodPatch, patchPath, patchOverJSON, func(w http.ResponseWriter, r *http.Request) {
+		f.srv.handleTriggers(w, r, f.projectID, createdTr.ID)
+	}))
+	assert413(t, sendRaw(http.MethodPatch, patchPath, append(append([]byte{}, patchExact...), ' '), func(w http.ResponseWriter, r *http.Request) {
+		f.srv.handleTriggers(w, r, f.projectID, createdTr.ID)
+	}))
+
+	stored, err := f.store.GetTrigger(ctx, createdTr.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "patched-at-cap", stored.Description)
 }
