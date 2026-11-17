@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -471,7 +472,13 @@ func TestProjectGitHubTriggerSettings_ReadinessAndRepoRoutingWarning(t *testing.
 		Type:  "RSA PRIVATE KEY",
 		Bytes: x509.MarshalPKCS1PrivateKey(rsaKey),
 	}))
+	var repoCheckCalls atomic.Int32
 	mockGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/repos/") {
+			repoCheckCalls.Add(1)
+			http.Error(w, "unexpected association repo check", http.StatusInternalServerError)
+			return
+		}
 		if r.URL.Path != "/app" || r.Method != http.MethodGet {
 			http.NotFound(w, r)
 			return
@@ -499,8 +506,10 @@ func TestProjectGitHubTriggerSettings_ReadinessAndRepoRoutingWarning(t *testing.
 	super := createSystemUserForGitHubTriggerTest(t, s, "ght-route-super", store.SystemRoleSuperAdmin)
 	memberA := createUserForGitHubTriggerTest(t, s, "ght-route-member-a", store.UserRoleMember)
 	memberB := createUserForGitHubTriggerTest(t, s, "ght-route-member-b", store.UserRoleMember)
+	otherCreator := createUserForGitHubTriggerTest(t, s, "ght-route-other-creator", store.UserRoleMember)
 
 	instID := int64(7001)
+	otherInstID := int64(7002)
 	// Intentionally omit "Acme/Widgets" from cached Repositories and mark projB
 	// degraded/repo_not_accessible to verify candidacy follows G5-core's
 	// IsGitHubTriggerCandidate (§4.2 steps 1-3: installation ID + host-pinned remote).
@@ -512,11 +521,20 @@ func TestProjectGitHubTriggerSettings_ReadinessAndRepoRoutingWarning(t *testing.
 		Repositories:   []string{"Acme/OtherRepo"},
 		Status:         store.GitHubInstallationStatusActive,
 	}))
+	require.NoError(t, s.CreateGitHubInstallation(ctx, &store.GitHubInstallation{
+		InstallationID: otherInstID,
+		AccountLogin:   "OtherOrg",
+		AccountType:    "Organization",
+		AppID:          99,
+		Repositories:   []string{"Acme/Widgets", "OtherOrg/Unrelated"},
+		Status:         store.GitHubInstallationStatusActive,
+	}))
 
 	webHost := srv.githubAppWebHost()
 	projA := tid("ght-route-proj-a")
 	projB := tid("ght-route-proj-b")
 	projC := tid("ght-route-proj-c")
+	projOtherInst := tid("ght-route-proj-other-inst")
 	require.NoError(t, s.CreateProject(ctx, &store.Project{
 		ID:                   projA,
 		Name:                 "alpha",
@@ -548,6 +566,31 @@ func TestProjectGitHubTriggerSettings_ReadinessAndRepoRoutingWarning(t *testing.
 		Created:              time.Now(),
 		Updated:              time.Now(),
 	}))
+	// Project bound to a DIFFERENT installation (even with the same repo path and
+	// a creator GITHUB_TOKEN that buildGitHubAssociationReport would probe): must
+	// neither appear in OtherProjects nor be probed on a project-reader GET.
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID:                   projOtherInst,
+		Name:                 "delta-other-inst",
+		Slug:                 "delta-other-inst",
+		CreatedBy:            otherCreator.ID,
+		OwnerID:              otherCreator.ID,
+		GitRemote:            "https://" + webHost + "/Acme/Widgets.git",
+		GitHubInstallationID: &otherInstID,
+		Created:              time.Now(),
+		Updated:              time.Now(),
+	}))
+	require.NoError(t, s.CreateSecret(ctx, &store.Secret{
+		ID:             tid("ght-other-creator-pat"),
+		Key:            "GITHUB_TOKEN",
+		EncryptedValue: "ghp_other_creator_token",
+		SecretType:     store.SecretTypeEnvironment,
+		Scope:          store.ScopeUser,
+		ScopeID:        otherCreator.ID,
+		Version:        1,
+		Created:        time.Now(),
+		Updated:        time.Now(),
+	}))
 	bindProjectRoleForGitHubTriggerTest(t, s, projA, memberA.ID, store.ProjectRoleMember)
 	bindProjectRoleForGitHubTriggerTest(t, s, projB, memberB.ID, store.ProjectRoleMember)
 
@@ -555,8 +598,19 @@ func TestProjectGitHubTriggerSettings_ReadinessAndRepoRoutingWarning(t *testing.
 	pathB := "/api/v1/projects/" + projB + "/trigger-sources/github"
 
 	// 1. Multiple candidate projects with no primary set -> multi_project_repo warning + sorted sibling project names.
+	// Also verify a project-reader GET does NOT invoke buildGitHubAssociationReport.
 	rr := doRequestAsUser(t, srv, memberA, http.MethodGet, pathA, nil)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	srv.githubAssociationReportCache.mu.Lock()
+	assocValid := srv.githubAssociationReportCache.valid
+	assocLastFullBuild := srv.githubAssociationReportCache.lastFullBuild
+	assocEntriesLen := len(srv.githubAssociationReportCache.entries)
+	srv.githubAssociationReportCache.mu.Unlock()
+	assert.False(t, assocValid, "project-reader GET must not build the hub-wide association report")
+	assert.True(t, assocLastFullBuild.IsZero(), "project-reader GET must not set lastFullBuild on association report cache")
+	assert.Zero(t, assocEntriesLen, "project-reader GET must not populate association report entries")
+	assert.Zero(t, repoCheckCalls.Load(), "project-reader GET must not trigger outbound creator repo-access probes")
 
 	// Ensure hub-admin-only webhook configuration booleans are never exposed on the project view (§10.2).
 	var rawMap map[string]any
@@ -583,19 +637,6 @@ func TestProjectGitHubTriggerSettings_ReadinessAndRepoRoutingWarning(t *testing.
 		PrimaryProjectID: projA,
 	})
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-
-	// Force the association-report cache to stay valid + rebuild-limited to confirm
-	// routing changes are reflected immediately even when routing writes do not
-	// invalidate or rebuild the association report cache.
-	_, _, err = srv.githubAssociationReport(ctx, false)
-	if err != nil {
-		// Inside the rebuild limiter after PUT invalidated valid=false; mark valid=true
-		// directly on the already-populated entries map so subsequent GETs hit the warm cache.
-		srv.githubAssociationReportCache.mu.Lock()
-		srv.githubAssociationReportCache.valid = true
-		srv.githubAssociationReportCache.generatedAt = time.Now()
-		srv.githubAssociationReportCache.mu.Unlock()
-	}
 
 	// 3. projA now sees is_primary=true, primary_project={projA, "alpha"}, and no multi_project_repo warning.
 	rr = doRequestAsUser(t, srv, memberA, http.MethodGet, pathA, nil)

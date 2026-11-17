@@ -556,6 +556,9 @@ func (s *ProjectStore) listProjects(ctx context.Context, filter store.ProjectFil
 	} else if filter.GitRemotePrefix != "" {
 		query.Where(project.GitRemoteHasPrefix(filter.GitRemotePrefix))
 	}
+	if filter.GitHubInstallationID != nil {
+		query.Where(project.GithubInstallationIDEQ(*filter.GitHubInstallationID))
+	}
 	if filter.BrokerID != "" {
 		brokerUID, err := parseUUID(filter.BrokerID)
 		if err != nil {

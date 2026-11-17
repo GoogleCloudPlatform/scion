@@ -332,9 +332,11 @@ func (s *Server) buildProjectGitHubTriggerSettingsResponse(
 	}, nil
 }
 
+const githubTriggerRoutingCandidatePageSize = 500
+
 // projectGitHubTriggerRoutingView derives the project-scoped routing card view
-// from G5-core's repo-routing entry builder (§8.4) without reading raw
-// installation routing columns directly.
+// directly for this project's installation and repository (§4.2, §8.4) without
+// triggering a hub-wide GitHub association report build.
 func (s *Server) projectGitHubTriggerRoutingView(
 	ctx context.Context,
 	project *store.Project,
@@ -356,46 +358,62 @@ func (s *Server) projectGitHubTriggerRoutingView(
 		return empty, nil, err
 	}
 
-	assocEntries, err := s.associationEntriesForRouting(ctx)
-	if err != nil {
-		return empty, nil, err
-	}
-	assocEntries = ensureProjectAssociationRoutingEntry(assocEntries, project, inst.InstallationID)
-	entries := s.buildRepoRoutingEntries(ctx, []store.GitHubInstallation{*inst}, assocEntries)
-
-	var matched *GitHubRepoRoutingEntry
-	for i := range entries {
-		if strings.EqualFold(entries[i].Repo, ownerRepo) {
-			matched = &entries[i]
+	instID := inst.InstallationID
+	var candidates []store.Project
+	seenTarget := false
+	cursor := ""
+	for {
+		page, listErr := s.store.ListProjects(ctx, store.ProjectFilter{
+			GitHubInstallationID: &instID,
+		}, store.ListOptions{
+			Limit:          githubTriggerRoutingCandidatePageSize,
+			Cursor:         cursor,
+			SkipTotalCount: true,
+		})
+		if listErr != nil {
+			return empty, nil, listErr
+		}
+		for i := range page.Items {
+			p := page.Items[i]
+			if p.ID == project.ID {
+				p = *project
+				seenTarget = true
+			}
+			if s.IsGitHubTriggerCandidate(instID, &p, ownerRepo) {
+				candidates = append(candidates, p)
+			}
+		}
+		if page.NextCursor == "" {
 			break
 		}
+		cursor = page.NextCursor
 	}
-	if matched == nil {
+	if !seenTarget && s.IsGitHubTriggerCandidate(instID, project, ownerRepo) {
+		candidates = append(candidates, *project)
+	}
+	if len(candidates) == 0 {
 		return empty, nil, nil
 	}
 
-	selfCandidate := false
-	otherProjects := make([]string, 0, len(matched.Projects))
+	selected, _, status := ApplyPrimaryRouting(candidates, inst.TriggerRouting, ownerRepo)
 	var activePrimary *ProjectGitHubTriggerPrimaryRef
-	for _, p := range matched.Projects {
-		if p.ID == project.ID {
-			selfCandidate = true
-		} else {
-			name := p.Name
-			if name == "" {
-				name = p.ID
-			}
-			otherProjects = append(otherProjects, name)
-		}
-		if matched.Status == GitHubTriggerRoutingStatusOK && p.ID == matched.PrimaryProjectID {
-			activePrimary = &ProjectGitHubTriggerPrimaryRef{
-				ID:   p.ID,
-				Name: p.Name,
-			}
+	if status == GitHubTriggerRoutingStatusOK && len(selected) == 1 {
+		activePrimary = &ProjectGitHubTriggerPrimaryRef{
+			ID:   selected[0].ID,
+			Name: selected[0].Name,
 		}
 	}
-	if !selfCandidate {
-		return empty, nil, nil
+
+	otherProjects := make([]string, 0, len(candidates)-1)
+	for i := range candidates {
+		if candidates[i].ID == project.ID {
+			continue
+		}
+		name := candidates[i].Name
+		if name == "" {
+			name = candidates[i].ID
+		}
+		otherProjects = append(otherProjects, name)
 	}
 	sort.Strings(otherProjects)
 
@@ -409,37 +427,4 @@ func (s *Server) projectGitHubTriggerRoutingView(
 		warnings = []string{WarningGitHubTriggersMultiProjectRepo}
 	}
 	return view, warnings, nil
-}
-
-// ensureProjectAssociationRoutingEntry refreshes or appends project's own entry
-// in a cloned slice when needed so a truncated (>maxProjects) or uninvalidated
-// association-report snapshot never omits or uses stale metadata for the target
-// project itself.
-func ensureProjectAssociationRoutingEntry(
-	entries []githubAssociationReportEntry,
-	project *store.Project,
-	installationID int64,
-) []githubAssociationReportEntry {
-	live := githubAssociationReportEntry{
-		ProjectID:      project.ID,
-		ProjectName:    project.Name,
-		GitRemote:      project.GitRemote,
-		InstallationID: installationID,
-	}
-	for i := range entries {
-		if entries[i].ProjectID == project.ID {
-			if entries[i].ProjectName == live.ProjectName &&
-				entries[i].GitRemote == live.GitRemote &&
-				entries[i].InstallationID == live.InstallationID {
-				return entries
-			}
-			cloned := make([]githubAssociationReportEntry, len(entries))
-			copy(cloned, entries)
-			cloned[i] = live
-			return cloned
-		}
-	}
-	cloned := make([]githubAssociationReportEntry, len(entries), len(entries)+1)
-	copy(cloned, entries)
-	return append(cloned, live)
 }

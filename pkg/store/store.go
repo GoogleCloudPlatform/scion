@@ -1732,13 +1732,14 @@ type ProjectStore interface {
 
 // ProjectFilter defines criteria for filtering projects.
 type ProjectFilter struct {
-	OwnerID         string
-	GitRemotePrefix string
-	GitRemote       string // Filter by exact git remote (case-sensitive)
-	BrokerID        string // Filter by contributing broker
-	Name            string // Filter by exact name (case-insensitive)
-	Slug            string // Filter by exact slug (case-insensitive)
-	Search          string // Substring match on name and slug (case-insensitive)
+	OwnerID              string
+	GitRemotePrefix      string
+	GitRemote            string // Filter by exact git remote (case-sensitive)
+	GitHubInstallationID *int64 // Filter by associated GitHub App installation ID
+	BrokerID             string // Filter by contributing broker
+	Name                 string // Filter by exact name (case-insensitive)
+	Slug                 string // Filter by exact slug (case-insensitive)
+	Search               string // Substring match on name and slug (case-insensitive)
 
 	// MemberOrOwnerIDs, when non-empty, restricts results to projects whose ID
 	// is in this set OR whose owner_id matches OwnerID. OwnerID and this
