@@ -376,6 +376,17 @@ func TestGitHubAppRepoRouting(t *testing.T) {
 	assert.Equal(t, 2, total)
 	require.Len(t, audits, 2)
 
+	// Repeating DELETE without ?installation= when no route exists is idempotent (204)
+	// and writes no spurious no-op audit record.
+	rr = doRepoRoutingAsUser(t, srv, admin, http.MethodDelete, "/api/v1/github-app/repo-routing/ACME/WIDGETS", nil)
+	require.Equal(t, http.StatusNoContent, rr.Code, rr.Body.String())
+	audits, total, err = s.ListMutationAudits(ctx, store.MutationAuditFilter{
+		MutationType: githubRepoRoutingAuditMutation,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, total, "no-op DELETE without ?installation= must not write a mutation audit record")
+	require.Len(t, audits, 2)
+
 	// 8. Project deletion cascade: setting projA as primary and deleting projA removes its routing entry.
 	rr = doRepoRoutingAsUser(t, srv, admin, http.MethodPut, "/api/v1/github-app/repo-routing/acme/widgets", GitHubRepoRoutingPutRequest{
 		InstallationID:   instID,

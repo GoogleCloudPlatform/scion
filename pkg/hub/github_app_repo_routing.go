@@ -574,6 +574,7 @@ func (s *Server) handleDeleteGitHubAppRepoRouting(w http.ResponseWriter, r *http
 		}
 	}
 
+	var anyRemoved bool
 	if len(targetInstIDs) > 0 {
 		err = s.store.WithTx(ctx, func(tx store.Store) error {
 			for _, instID := range targetInstIDs {
@@ -588,9 +589,14 @@ func (s *Server) handleDeleteGitHubAppRepoRouting(w http.ResponseWriter, r *http
 				if prev, ok := lookupTriggerRoute(curInst.TriggerRouting, lowerRepo); ok {
 					beforePrimary = prev.PrimaryProjectID
 				}
-				if _, txErr := tx.DeleteGitHubInstallationTriggerRoute(ctx, instID, lowerRepo); txErr != nil {
+				removed, txErr := tx.DeleteGitHubInstallationTriggerRoute(ctx, instID, lowerRepo)
+				if txErr != nil {
 					return txErr
 				}
+				if !removed {
+					continue
+				}
+				anyRemoved = true
 				rec := newRepoRoutingAuditRecord(ctx, instID, lowerRepo, beforePrimary, "")
 				if txErr := tx.CreateMutationAudit(ctx, rec); txErr != nil {
 					return txErr
@@ -608,6 +614,8 @@ func (s *Server) handleDeleteGitHubAppRepoRouting(w http.ResponseWriter, r *http
 		}
 	}
 
-	s.githubAssociationReportCache.invalidateAll()
+	if anyRemoved {
+		s.githubAssociationReportCache.invalidateAll()
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
