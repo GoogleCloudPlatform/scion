@@ -602,44 +602,67 @@ func (s *Server) updateProjectsForInstallation(ctx context.Context, installation
 	}
 }
 
+// resetPermissionDeniedProjectsPageSize is the ListProjects page size used by
+// resetPermissionDeniedProjectsForInstallation (a variable so tests can force
+// multi-page traversal without inserting thousands of rows).
+var resetPermissionDeniedProjectsPageSize = githubAssociationReportPageSize
+
 // resetPermissionDeniedProjectsForInstallation clears degraded or
 // permission_denied GitHubAppStatus back to unchecked for projects associated
 // with installationID (§10.3). Other error states (for example suspended or
 // repo_not_accessible) and active projects are left untouched.
 func (s *Server) resetPermissionDeniedProjectsForInstallation(ctx context.Context, installationID int64) {
-	projects, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 10000})
-	if err != nil {
-		slog.Error("Failed to list projects for permission acceptance reset", "error", err)
-		return
+	pageSize := resetPermissionDeniedProjectsPageSize
+	if pageSize <= 0 {
+		pageSize = githubAssociationReportPageSize
 	}
 
 	now := timeNow()
-	for _, project := range projects.Items {
-		if project.GitHubInstallationID == nil || *project.GitHubInstallationID != installationID {
-			continue
-		}
-		if project.GitHubAppStatus == nil {
-			continue
-		}
-		if project.GitHubAppStatus.State != store.GitHubAppStateDegraded &&
-			project.GitHubAppStatus.ErrorCode != githubapp.ErrCodePermissionDenied {
-			continue
-		}
-
-		lastTokenMint := project.GitHubAppStatus.LastTokenMint
-		project.GitHubAppStatus = &store.GitHubAppProjectStatus{
-			State:         store.GitHubAppStateUnchecked,
-			LastChecked:   now,
-			LastTokenMint: lastTokenMint,
+	cursor := ""
+	for {
+		page, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{
+			Limit:          pageSize,
+			Cursor:         cursor,
+			SkipTotalCount: true,
+		})
+		if err != nil {
+			slog.Error("Failed to list projects for permission acceptance reset", "error", err)
+			return
 		}
 
-		if err := s.store.UpdateProject(ctx, &project); err != nil {
-			slog.Error("Failed to reset project GitHub App status after new_permissions_accepted",
-				"project_id", project.ID, "error", err)
-			continue
+		for i := range page.Items {
+			project := &page.Items[i]
+			if project.GitHubInstallationID == nil || *project.GitHubInstallationID != installationID {
+				continue
+			}
+			if project.GitHubAppStatus == nil {
+				continue
+			}
+			if project.GitHubAppStatus.State != store.GitHubAppStateDegraded &&
+				project.GitHubAppStatus.ErrorCode != githubapp.ErrCodePermissionDenied {
+				continue
+			}
+
+			lastTokenMint := project.GitHubAppStatus.LastTokenMint
+			project.GitHubAppStatus = &store.GitHubAppProjectStatus{
+				State:         store.GitHubAppStateUnchecked,
+				LastChecked:   now,
+				LastTokenMint: lastTokenMint,
+			}
+
+			if err := s.store.UpdateProject(ctx, project); err != nil {
+				slog.Error("Failed to reset project GitHub App status after new_permissions_accepted",
+					"project_id", project.ID, "error", err)
+				continue
+			}
+			s.invalidateGitHubAssociation(project.ID)
+			s.events.PublishProjectUpdated(ctx, project)
 		}
-		s.invalidateGitHubAssociation(project.ID)
-		s.events.PublishProjectUpdated(ctx, &project)
+
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
 	}
 }
 

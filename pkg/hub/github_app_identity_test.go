@@ -1209,3 +1209,219 @@ func TestWebhook_InstallationNewPermissionsAccepted(t *testing.T) {
 		t.Errorf("expected project on other installation untouched, got %+v", pOther.GitHubAppStatus)
 	}
 }
+
+func TestWebhook_InstallationNewPermissionsAccepted_PaginatesAllProjects(t *testing.T) {
+	prevPageSize := resetPermissionDeniedProjectsPageSize
+	resetPermissionDeniedProjectsPageSize = 2
+	t.Cleanup(func() { resetPermissionDeniedProjectsPageSize = prevPageSize })
+
+	mockGH := newMockAppEndpoint(t, http.StatusOK, map[string]any{
+		"id":     42,
+		"slug":   "scion-app",
+		"events": githubTriggersRequiredEvents,
+		"permissions": map[string]string{
+			"contents":      "write",
+			"issues":        "write",
+			"metadata":      "read",
+			"pull_requests": "write",
+		},
+	})
+
+	srv, s := webhookTestServer(t)
+	setGitHubTriggersExperiment(t, srv, true)
+	srv.mu.Lock()
+	srv.config.GitHubAppConfig.PrivateKey = testGitHubAppPrivateKeyPEM(t)
+	srv.config.GitHubAppConfig.APIBaseURL = mockGH.server.URL
+	srv.mu.Unlock()
+
+	ctx := context.Background()
+	instID := int64(22345)
+	otherInstID := int64(88888)
+	for _, id := range []int64{instID, otherInstID} {
+		if err := s.CreateGitHubInstallation(ctx, &store.GitHubInstallation{
+			InstallationID: id,
+			AccountLogin:   "acme",
+			AccountType:    "Organization",
+			AppID:          42,
+			Repositories:   []string{"acme/widgets"},
+			Status:         store.GitHubInstallationStatusActive,
+		}); err != nil {
+			t.Fatalf("CreateGitHubInstallation(%d): %v", id, err)
+		}
+	}
+
+	baseTime := time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)
+	mintTime := baseTime.Add(-time.Hour)
+
+	// ListProjects orders by (Created DESC, ID DESC). Create 6 projects so that
+	// with pageSize=2 they span 3 pages and the target degraded / permission_denied
+	// projects land on page 3 (the last page).
+	fixtures := []*store.Project{
+		{
+			ID:                   tid("proj-np-page3-degraded"),
+			Name:                 "Page 3 Degraded",
+			Slug:                 "page3-degraded",
+			GitRemote:            "https://github.com/acme/widgets.git",
+			GitHubInstallationID: &instID,
+			GitHubAppStatus: &store.GitHubAppProjectStatus{
+				State:         store.GitHubAppStateDegraded,
+				ErrorCode:     githubapp.ErrCodePermissionDenied,
+				ErrorMessage:  "missing issues:write",
+				LastTokenMint: &mintTime,
+				LastChecked:   mintTime,
+			},
+			Created: baseTime,
+			Updated: baseTime,
+		},
+		{
+			ID:                   tid("proj-np-page3-perm-err"),
+			Name:                 "Page 3 Perm Error",
+			Slug:                 "page3-perm-err",
+			GitRemote:            "https://github.com/acme/widgets.git",
+			GitHubInstallationID: &instID,
+			GitHubAppStatus: &store.GitHubAppProjectStatus{
+				State:        store.GitHubAppStateError,
+				ErrorCode:    githubapp.ErrCodePermissionDenied,
+				ErrorMessage: "403 forbidden",
+				LastChecked:  mintTime,
+			},
+			Created: baseTime.Add(1 * time.Minute),
+			Updated: baseTime.Add(1 * time.Minute),
+		},
+		{
+			ID:                   tid("proj-np-page2-suspended"),
+			Name:                 "Page 2 Suspended",
+			Slug:                 "page2-suspended",
+			GitRemote:            "https://github.com/acme/widgets.git",
+			GitHubInstallationID: &instID,
+			GitHubAppStatus: &store.GitHubAppProjectStatus{
+				State:        store.GitHubAppStateError,
+				ErrorCode:    githubapp.ErrCodeInstallationSuspended,
+				ErrorMessage: "suspended",
+				LastChecked:  mintTime,
+			},
+			Created: baseTime.Add(2 * time.Minute),
+			Updated: baseTime.Add(2 * time.Minute),
+		},
+		{
+			ID:                   tid("proj-np-page2-other-inst"),
+			Name:                 "Page 2 Other Inst",
+			Slug:                 "page2-other-inst",
+			GitRemote:            "https://github.com/acme/widgets.git",
+			GitHubInstallationID: &otherInstID,
+			GitHubAppStatus: &store.GitHubAppProjectStatus{
+				State:     store.GitHubAppStateDegraded,
+				ErrorCode: githubapp.ErrCodePermissionDenied,
+			},
+			Created: baseTime.Add(3 * time.Minute),
+			Updated: baseTime.Add(3 * time.Minute),
+		},
+		{
+			ID:                   tid("proj-np-page1-ok-a"),
+			Name:                 "Page 1 OK A",
+			Slug:                 "page1-ok-a",
+			GitRemote:            "https://github.com/acme/widgets.git",
+			GitHubInstallationID: &instID,
+			GitHubAppStatus:      &store.GitHubAppProjectStatus{State: store.GitHubAppStateOK, LastChecked: mintTime},
+			Created:              baseTime.Add(4 * time.Minute),
+			Updated:              baseTime.Add(4 * time.Minute),
+		},
+		{
+			ID:                   tid("proj-np-page1-ok-b"),
+			Name:                 "Page 1 OK B",
+			Slug:                 "page1-ok-b",
+			GitRemote:            "https://github.com/acme/widgets.git",
+			GitHubInstallationID: &instID,
+			GitHubAppStatus:      &store.GitHubAppProjectStatus{State: store.GitHubAppStateOK, LastChecked: mintTime},
+			Created:              baseTime.Add(5 * time.Minute),
+			Updated:              baseTime.Add(5 * time.Minute),
+		},
+	}
+	for _, p := range fixtures {
+		if err := s.CreateProject(ctx, p); err != nil {
+			t.Fatalf("CreateProject(%s): %v", p.ID, err)
+		}
+	}
+
+	firstPage, err := s.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 2, SkipTotalCount: true})
+	if err != nil {
+		t.Fatalf("ListProjects(first page): %v", err)
+	}
+	if firstPage.NextCursor == "" {
+		t.Fatal("expected NextCursor on first page with Limit=2 and 6 projects")
+	}
+	for _, item := range firstPage.Items {
+		if item.ID == tid("proj-np-page3-degraded") || item.ID == tid("proj-np-page3-perm-err") {
+			t.Fatalf("target project %s unexpectedly landed on page 1", item.ID)
+		}
+	}
+
+	payload := mustJSON(t, map[string]any{
+		"action": "new_permissions_accepted",
+		"installation": map[string]any{
+			"id":     instID,
+			"app_id": 42,
+			"account": map[string]any{
+				"login": "acme",
+				"type":  "Organization",
+			},
+		},
+	})
+	sig := signWebhookPayload(payload, "test-webhook-secret")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", bytes.NewReader(payload))
+	req.Header.Set("X-GitHub-Event", "installation")
+	req.Header.Set("X-GitHub-Delivery", "delivery-new-perms-paged")
+	req.Header.Set("X-Hub-Signature-256", sig)
+
+	rec := httptest.NewRecorder()
+	srv.handleGitHubWebhook(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("webhook returned %d: %s", rec.Code, rec.Body.String())
+	}
+
+	pDeg, err := s.GetProject(ctx, tid("proj-np-page3-degraded"))
+	if err != nil {
+		t.Fatalf("GetProject(page3-degraded): %v", err)
+	}
+	if pDeg.GitHubAppStatus == nil || pDeg.GitHubAppStatus.State != store.GitHubAppStateUnchecked {
+		t.Errorf("expected page-3 degraded project reset to unchecked, got %+v", pDeg.GitHubAppStatus)
+	}
+	if pDeg.GitHubAppStatus != nil && (pDeg.GitHubAppStatus.LastTokenMint == nil || !pDeg.GitHubAppStatus.LastTokenMint.Equal(mintTime)) {
+		t.Errorf("expected LastTokenMint preserved on page-3 reset, got %+v", pDeg.GitHubAppStatus.LastTokenMint)
+	}
+
+	pPerm, err := s.GetProject(ctx, tid("proj-np-page3-perm-err"))
+	if err != nil {
+		t.Fatalf("GetProject(page3-perm-err): %v", err)
+	}
+	if pPerm.GitHubAppStatus == nil || pPerm.GitHubAppStatus.State != store.GitHubAppStateUnchecked {
+		t.Errorf("expected page-3 permission_denied project reset to unchecked, got %+v", pPerm.GitHubAppStatus)
+	}
+
+	pSusp, err := s.GetProject(ctx, tid("proj-np-page2-suspended"))
+	if err != nil {
+		t.Fatalf("GetProject(page2-suspended): %v", err)
+	}
+	if pSusp.GitHubAppStatus == nil || pSusp.GitHubAppStatus.State != store.GitHubAppStateError {
+		t.Errorf("expected page-2 suspended project untouched, got %+v", pSusp.GitHubAppStatus)
+	}
+
+	pOther, err := s.GetProject(ctx, tid("proj-np-page2-other-inst"))
+	if err != nil {
+		t.Fatalf("GetProject(page2-other-inst): %v", err)
+	}
+	if pOther.GitHubAppStatus == nil || pOther.GitHubAppStatus.State != store.GitHubAppStateDegraded {
+		t.Errorf("expected page-2 other-installation project untouched, got %+v", pOther.GitHubAppStatus)
+	}
+
+	for _, okID := range []string{"proj-np-page1-ok-a", "proj-np-page1-ok-b"} {
+		pOK, err := s.GetProject(ctx, tid(okID))
+		if err != nil {
+			t.Fatalf("GetProject(%s): %v", okID, err)
+		}
+		if pOK.GitHubAppStatus == nil || pOK.GitHubAppStatus.State != store.GitHubAppStateOK {
+			t.Errorf("expected %s untouched in ok state, got %+v", okID, pOK.GitHubAppStatus)
+		}
+	}
+}
