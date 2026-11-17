@@ -353,12 +353,14 @@ func canonicalGitHubTokenPermKey(perms githubapp.TokenPermissions) string {
 }
 
 // scopeRequestedGitHubTokenPermissions validates an explicit permission set
-// against grant. Any "write" level is lowered to "read" when !grant.WriteAllowed,
-// unknown levels are rejected, and an empty set is refused.
+// against grant. Unknown levels and empty sets are rejected; if any requested
+// field asks for "write" under a read-only grant (!grant.WriteAllowed), it
+// refuses with ErrGitHubWriteNotPermitted rather than silently downgrading.
 func scopeRequestedGitHubTokenPermissions(
 	requested githubapp.TokenPermissions,
 	grant githubAssociationGrant,
 ) (githubapp.TokenPermissions, error) {
+	requiresWrite := false
 	level := func(field, raw string) (string, error) {
 		v := strings.ToLower(strings.TrimSpace(raw))
 		switch v {
@@ -367,10 +369,8 @@ func scopeRequestedGitHubTokenPermissions(
 		case "read":
 			return "read", nil
 		case "write":
-			if grant.WriteAllowed {
-				return "write", nil
-			}
-			return "read", nil
+			requiresWrite = true
+			return "write", nil
 		default:
 			return "", fmt.Errorf("invalid GitHub token permission %q for %s", raw, field)
 		}
@@ -398,6 +398,9 @@ func scopeRequestedGitHubTokenPermissions(
 	}
 	if out == (githubapp.TokenPermissions{}) {
 		return githubapp.TokenPermissions{}, fmt.Errorf("explicit GitHub token permissions are required")
+	}
+	if requiresWrite && !grant.WriteAllowed {
+		return githubapp.TokenPermissions{}, ErrGitHubWriteNotPermitted
 	}
 	return out, nil
 }

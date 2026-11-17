@@ -106,3 +106,46 @@ func TestCanonicalGitHubTokenPermKey(t *testing.T) {
 		t.Errorf("permission keys collided: comment=%q enrich=%q default=%q", commentKey, enrichKey, defaultKey)
 	}
 }
+
+func TestScopeRequestedGitHubTokenPermissions(t *testing.T) {
+	readOnlyGrant := githubAssociationGrant{Owner: "acme", Repo: "widgets", WriteAllowed: false}
+	writeGrant := githubAssociationGrant{Owner: "acme", Repo: "widgets", WriteAllowed: true}
+
+	writeCases := []struct {
+		name  string
+		perms githubapp.TokenPermissions
+	}{
+		{"contents write", githubapp.TokenPermissions{Contents: "write"}},
+		{"pull_requests write", githubapp.TokenPermissions{PullRequests: "write"}},
+		{"issues write", githubapp.TokenPermissions{Issues: "write", Metadata: "read"}},
+		{"metadata write", githubapp.TokenPermissions{Metadata: "write"}},
+		{"checks write", githubapp.TokenPermissions{Checks: "write"}},
+		{"actions write", githubapp.TokenPermissions{Actions: "write"}},
+	}
+	for _, tc := range writeCases {
+		t.Run("read-only grant refuses "+tc.name, func(t *testing.T) {
+			_, err := scopeRequestedGitHubTokenPermissions(tc.perms, readOnlyGrant)
+			if !errors.Is(err, ErrGitHubWriteNotPermitted) {
+				t.Fatalf("scopeRequestedGitHubTokenPermissions(%+v, readOnly) err = %v, want ErrGitHubWriteNotPermitted", tc.perms, err)
+			}
+		})
+		t.Run("write grant allows "+tc.name, func(t *testing.T) {
+			got, err := scopeRequestedGitHubTokenPermissions(tc.perms, writeGrant)
+			if err != nil {
+				t.Fatalf("scopeRequestedGitHubTokenPermissions(%+v, write) err = %v", tc.perms, err)
+			}
+			if got != tc.perms {
+				t.Fatalf("got %+v, want %+v", got, tc.perms)
+			}
+		})
+	}
+
+	readPerms := githubapp.TokenPermissions{PullRequests: "read", Metadata: "read"}
+	gotRead, err := scopeRequestedGitHubTokenPermissions(readPerms, readOnlyGrant)
+	if err != nil {
+		t.Fatalf("read request under read-only grant failed: %v", err)
+	}
+	if gotRead != readPerms {
+		t.Fatalf("got %+v, want %+v", gotRead, readPerms)
+	}
+}

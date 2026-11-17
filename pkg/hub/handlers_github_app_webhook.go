@@ -758,29 +758,27 @@ func (s *Server) getGitHubAppClient() (*githubapp.Client, error) {
 // intentionally uncached so agent tokens retain their full lifetime and
 // status checks always contact GitHub.
 func (s *Server) mintGitHubAppToken(ctx context.Context, project *store.Project) (string, string, error) {
-	return s.mintGitHubAppTokenInternal(ctx, project, nil, false, false)
+	return s.mintGitHubAppTokenInternal(ctx, project, nil, false)
 }
 
 // MintGitHubAppTokenWithPermissions mints (or returns a cached) repository-scoped
 // GitHub App installation token for hub-internal Stage 3 callers (trigger
 // enrichment and github.comment) with an explicit permission set (§7.3).
-// Association authorization runs on every call; when requireWrite is true, a
-// read-only grant (such as a pull-only creator proof) is refused with
-// ErrGitHubWriteNotPermitted.
+// Association authorization runs on every call; if requested contains any
+// "write" permission level under a read-only grant (such as a pull-only creator
+// proof), it refuses with ErrGitHubWriteNotPermitted rather than downgrading.
 func (s *Server) MintGitHubAppTokenWithPermissions(
 	ctx context.Context,
 	project *store.Project,
 	requested githubapp.TokenPermissions,
-	requireWrite bool,
 ) (string, string, error) {
-	return s.mintGitHubAppTokenInternal(ctx, project, &requested, requireWrite, true)
+	return s.mintGitHubAppTokenInternal(ctx, project, &requested, true)
 }
 
 func (s *Server) mintGitHubAppTokenInternal(
 	ctx context.Context,
 	project *store.Project,
 	requested *githubapp.TokenPermissions,
-	requireWrite bool,
 	useCache bool,
 ) (string, string, error) {
 	if project == nil || project.GitHubInstallationID == nil {
@@ -801,9 +799,6 @@ func (s *Server) mintGitHubAppTokenInternal(
 		s.updateProjectGitHubAppStatus(ctx, project, store.GitHubAppStateError,
 			githubAssociationErrorCode(authzErr), authzErr.Error())
 		return "", "", authzErr
-	}
-	if requireWrite && !grant.WriteAllowed {
-		return "", "", ErrGitHubWriteNotPermitted
 	}
 
 	var perms githubapp.TokenPermissions
