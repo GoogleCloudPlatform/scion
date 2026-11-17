@@ -78,6 +78,15 @@ const (
 	// the requested and mapped Kubernetes ServiceAccounts.
 	BrokerErrCodeIdentityKSAMismatch = "identity_ksa_mismatch"
 
+	// BrokerErrCodeIdentityKSAConflict marks a dispatch in GCP identity mode
+	// "assign" on the Kubernetes runtime where opt-in broker KSA creation
+	// found an existing Kubernetes ServiceAccount at the conventional
+	// <gsa-account-id> name whose iam.gke.io/gcp-service-account annotation
+	// does not match the target GCP service account (400). The existing KSA
+	// is never modified; the details name it and the namespace so the Hub can
+	// tell the operator how to resolve the collision (ptone/scion#7966).
+	BrokerErrCodeIdentityKSAConflict = "identity_ksa_conflict"
+
 	// BrokerErrCodePriorStartInProgress marks a create refused because an
 	// earlier start of the same agent name on the broker was still
 	// finishing its failure cleanup when the broker's supersede wait ended
@@ -219,9 +228,9 @@ func IsBrokerRuntimeCause(code string) bool {
 	return false
 }
 
-// Detail keys of a broker identity_not_mapped or identity_ksa_mismatch
-// error. The broker writes them and the hub reads them to build its own
-// message.
+// Detail keys of a broker identity_not_mapped, identity_ksa_mismatch, or
+// identity_ksa_conflict error. The broker writes them and the hub reads them
+// to build its own message.
 const (
 	BrokerErrDetailServiceAccount = "serviceAccount"
 	BrokerErrDetailProfile        = "profile"
@@ -229,11 +238,14 @@ const (
 	BrokerErrDetailBroker         = "broker"
 	BrokerErrDetailRequestedKSA   = "requestedKubernetesServiceAccount"
 	BrokerErrDetailMappedKSA      = "mappedKubernetesServiceAccount"
+	BrokerErrDetailConflictingKSA = "conflictingKubernetesServiceAccount"
 
 	// BrokerErrDetailKSASource says where the Kubernetes ServiceAccount
 	// named by BrokerErrDetailMappedKSA came from: BrokerKSASourceMapped
-	// (kubernetes_service_account_mappings) or BrokerKSASourceDiscovered
-	// (the iam.gke.io/gcp-service-account annotation). Absent means mapped.
+	// (kubernetes_service_account_mappings), BrokerKSASourceDiscovered
+	// (the iam.gke.io/gcp-service-account annotation), or
+	// BrokerKSASourceCreated (created or reused by opt-in broker KSA
+	// creation). Absent means mapped.
 	BrokerErrDetailKSASource = "kubernetesServiceAccountSource"
 
 	// BrokerErrDetailDiscovery is the result of looking for a Kubernetes
@@ -243,12 +255,25 @@ const (
 	// namespace that was searched.
 	BrokerErrDetailDiscovery = "kubernetesServiceAccountDiscovery"
 	BrokerErrDetailNamespace = "namespace"
+
+	// BrokerErrDetailMissingPermission names the Kubernetes RBAC permission
+	// that failed with 403 Forbidden during opt-in KSA creation on an
+	// identity_not_mapped refusal (ptone/scion#7966): one of the
+	// BrokerKSAPermission values.
+	BrokerErrDetailMissingPermission = "missingPermission"
 )
 
 // Values of BrokerErrDetailKSASource.
 const (
 	BrokerKSASourceMapped     = "mapped"
 	BrokerKSASourceDiscovered = "discovered"
+	BrokerKSASourceCreated    = "created"
+)
+
+// Values of BrokerErrDetailMissingPermission.
+const (
+	BrokerKSAPermissionCreate = "create serviceaccounts"
+	BrokerKSAPermissionGet    = "get serviceaccounts"
 )
 
 // BrokerSASourceCloudRunAllowlist is the Source of a service account report

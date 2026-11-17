@@ -45,7 +45,7 @@ func TestRuntimesSectionSchema_KubernetesFieldTypes(t *testing.T) {
 	}
 	entry, _ := sec["additionalProperties"].(map[string]interface{})
 	got, _ := entry["properties"].(map[string]interface{})
-	for _, k := range []string{"node_selector", "tolerations", "runtime_class_name", "kubernetes_block_service_account", "kubernetes_service_account_mappings", "priority_class_name"} {
+	for _, k := range []string{"node_selector", "tolerations", "runtime_class_name", "kubernetes_block_service_account", "kubernetes_service_account_mappings", "priority_class_name", "workload_identity_pool", "create_service_accounts"} {
 		w, ok := want[k]
 		if !ok {
 			t.Fatalf("settings-v1.schema.json runtimeConfig has no %s", k)

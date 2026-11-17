@@ -206,14 +206,96 @@ func TestValidateRuntimeBrokerInstances_WorkloadIdentityPool(t *testing.T) {
 	if len(errs) != 1 || errs[0].Path != "server.broker.instances[0].runtime_target.workload_identity_pool" {
 		t.Errorf("malformed pool: %v", errs)
 	}
-	errs = ValidateRuntimeBrokerInstances(inst(RuntimeTargetTypeDocker, "cluster-project.svc.id.goog"))
-	found := false
-	for _, e := range errs {
-		if strings.Contains(e.Path, "workload_identity_pool") || strings.Contains(e.Message, "workload_identity_pool") {
-			found = true
+	if errs := ValidateRuntimeBrokerInstances(inst(RuntimeTargetTypeDocker, "cluster-project.svc.id.goog")); len(errs) > 0 {
+		found := false
+		for _, e := range errs {
+			if strings.Contains(e.Path, "workload_identity_pool") || strings.Contains(e.Message, "workload_identity_pool") {
+				found = true
+			}
 		}
+		if !found {
+			t.Errorf("docker target with a pool: %v", errs)
+		}
+	} else {
+		t.Error("docker target with a pool: expected an error")
 	}
-	if !found {
-		t.Errorf("docker target with a pool: %v", errs)
+}
+
+func TestCreateServiceAccounts_RuntimeEntryLoads(t *testing.T) {
+	const yaml = `schema_version: "1"
+runtimes:
+    gke:
+        type: kubernetes
+        namespace: agents
+        create_service_accounts: true
+`
+	if errs, err := ValidateSettings([]byte(yaml), "1"); err != nil || len(errs) != 0 {
+		t.Fatalf("schema: %v %v", errs, err)
+	}
+	bad := strings.Replace(yaml, "true", `"yes"`, 1)
+	if errs, err := ValidateSettings([]byte(bad), "1"); err == nil && len(errs) == 0 {
+		t.Fatal("schema accepted a non-boolean create_service_accounts")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeCloudRunTestSettings(t, filepath.Join(home, ".scion"), yaml)
+	vs, _, err := LoadGlobalSettingsWithOverlay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !vs.Runtimes["gke"].CreateServiceAccounts {
+		t.Error("CreateServiceAccounts = false, want true")
+	}
+	if vs.Runtimes["other"].CreateServiceAccounts {
+		t.Error("default CreateServiceAccounts = true, want false")
+	}
+}
+
+func TestCreateServiceAccounts_IsV1Indicator(t *testing.T) {
+	raw := map[string]interface{}{"runtimes": map[string]interface{}{
+		"gke": map[string]interface{}{"create_service_accounts": true},
+	}}
+	if !hasV1RuntimeIndicators(raw) {
+		t.Error("create_service_accounts is not a v1 runtime indicator")
+	}
+}
+
+func TestProjectSettingsHasCreateServiceAccounts(t *testing.T) {
+	const withCreate = `schema_version: "1"
+runtimes:
+    gke:
+        type: kubernetes
+        create_service_accounts: true
+`
+	setup := func(t *testing.T, projectYAML string) string {
+		t.Helper()
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		// The global settings set it too: it must not be mistaken for one
+		// the project set itself.
+		writeCloudRunTestSettings(t, filepath.Join(home, ".scion"), withCreate)
+		projectDir := t.TempDir()
+		writeCloudRunTestSettings(t, filepath.Join(projectDir, ".scion"), projectYAML)
+		return projectDir
+	}
+	if !ProjectSettingsHasCreateServiceAccounts(setup(t, withCreate), "gke") {
+		t.Error("expected true: the project's own settings.yaml sets create_service_accounts: true")
+	}
+	if !ProjectSettingsHasCreateServiceAccounts(setup(t, strings.Replace(withCreate, "true", "false", 1)), "gke") {
+		t.Error("expected true: an explicit false in the project's own settings.yaml also warns")
+	}
+	if ProjectSettingsHasCreateServiceAccounts(setup(t, withCreate), "other") {
+		t.Error("expected false for another runtime entry")
+	}
+	if ProjectSettingsHasCreateServiceAccounts(setup(t, `schema_version: "1"
+runtimes:
+    gke:
+        type: kubernetes
+        namespace: agents
+`), "gke") {
+		t.Error("expected false: the project does not set create_service_accounts (the global one must not count)")
+	}
+	if ProjectSettingsHasCreateServiceAccounts(setup(t, withCreate), "") {
+		t.Error("expected false for an empty runtime entry name")
 	}
 }

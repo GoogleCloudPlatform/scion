@@ -732,6 +732,10 @@ func compileSchemas() {
 					// at mint (ptone/scion#3329 phase 5). Value rule:
 					// config.ValidateWorkloadIdentityPool.
 					"workload_identity_pool": map[string]interface{}{"type": "string", "pattern": config.WorkloadIdentityPoolPattern},
+
+					// Opt-in broker creation of conventional Kubernetes
+					// ServiceAccounts for Hub-minted GSAs (ptone/scion#7966).
+					"create_service_accounts": map[string]interface{}{"type": "boolean"},
 				},
 			},
 		},
