@@ -4383,7 +4383,7 @@ func (s *Server) writeAgentResponse(w http.ResponseWriter, r *http.Request, agen
 		Agent:               *agent,
 		ResolvedHarness:     resolvedHarness,
 		HarnessCapabilities: &harnessCaps,
-		HarnessVendor:       harness.Vendor(agentBadgeHarness(agent, resolvedHarness)),
+		HarnessVendor:       harness.Vendor(resolvedHarness),
 		ModelSize:           agentModelSize(agent),
 		CloudLogging:        s.logQueryService != nil,
 		SSHHostKey:          s.agentSSHHostKey(agent),

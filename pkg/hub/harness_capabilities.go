@@ -135,12 +135,10 @@ func (s *Server) resolveHarnessTypeFromConfigRefMemo(ctx context.Context, projec
 	return inferHarnessFromName(configRef)
 }
 
-// resolveAgentHarnessType resolves the agent's harness type live: inline
-// harness, then its harness-config references. It does not read the
-// harness stamped at create (AppliedConfig.Harness), which every
-// harnessVendor (lists, events and the single-agent view, through
-// agentBadgeHarness) prefers; the two agree unless a harness-config's
-// harness type is changed in the catalog after the agent was created.
+// resolveAgentHarnessType resolves the agent's harness type live from its
+// configuration: inline harness, then its harness-config references. Callers
+// that want the agent's effective harness (stamped harness at create first,
+// then live config resolution) use effectiveAgentHarnessType instead.
 func (s *Server) resolveAgentHarnessType(ctx context.Context, agent *store.Agent) string {
 	return s.resolveAgentHarnessTypeMemo(ctx, agent, nil)
 }
@@ -199,6 +197,9 @@ func storedAgentHarness(agent *store.Agent) string {
 		return ""
 	}
 	if agent.AppliedConfig.Harness != "" {
+		if h := canonicalHarnessName(agent.AppliedConfig.Harness); h != "" {
+			return h
+		}
 		return agent.AppliedConfig.Harness
 	}
 	return inlineHarnessType(agent.AppliedConfig)
@@ -227,15 +228,42 @@ func (s *Server) stampAgentHarness(ctx context.Context, agent *store.Agent, reso
 	}
 }
 
-// agentBadgeHarness returns the harness the single-agent view derives its
-// vendor from: the record's harness (storedAgentHarness) when it names one,
-// as lists and events do, else the live resolved harness. So all three
-// agree for every agent.
-func agentBadgeHarness(agent *store.Agent, resolvedHarness string) string {
+// effectiveAgentHarnessType resolves the agent's underlying harness type:
+// the harness stamped on the agent at create (storedAgentHarness), else the
+// type its harness-config references resolve to (resolveAgentHarnessType).
+// Single-agent capability resolution, list badges and suspend eligibility
+// share this resolver so catalog changes after create cannot split them
+// (ptone/scion#8227).
+func (s *Server) effectiveAgentHarnessType(ctx context.Context, agent *store.Agent) string {
+	return s.effectiveAgentHarnessTypeMemo(ctx, agent, nil)
+}
+
+// effectiveAgentHarnessTypeMemo is effectiveAgentHarnessType with an optional
+// per-request memo of harness-config lookups (nil = no memo).
+func (s *Server) effectiveAgentHarnessTypeMemo(ctx context.Context, agent *store.Agent, memo *harnessTypeMemo) string {
 	if h := storedAgentHarness(agent); h != "" {
 		return h
 	}
-	return resolvedHarness
+	return s.resolveAgentHarnessTypeMemo(ctx, agent, memo)
+}
+
+// agentNamesHarness reports whether agent carries any harness type or
+// harness-config reference on its record (the same fields
+// effectiveAgentHarnessType inspects).
+func agentNamesHarness(agent *store.Agent) bool {
+	if agent == nil {
+		return false
+	}
+	if storedAgentHarness(agent) != "" || strings.TrimSpace(agent.HarnessConfig) != "" {
+		return true
+	}
+	if agent.AppliedConfig == nil {
+		return false
+	}
+	if strings.TrimSpace(agent.AppliedConfig.HarnessConfig) != "" {
+		return true
+	}
+	return agent.AppliedConfig.InlineConfig != nil && strings.TrimSpace(agent.AppliedConfig.InlineConfig.HarnessConfig) != ""
 }
 
 // agentModelSize returns the model size alias recorded on the agent at
@@ -248,29 +276,24 @@ func agentModelSize(agent *store.Agent) string {
 }
 
 // setAgentListBadges sets HarnessVendor and ModelSize on every item of an
-// agent list. The harness comes from the agent record when it names it
-// (storedAgentHarness, no lookup); otherwise from resolveAgentHarnessType
-// with a memo shared by the whole list, so the store is read at most once
-// per distinct project-scope (project, reference) and once per distinct
-// global-scope reference, never once per agent.
+// agent list. The harness comes from effectiveAgentHarnessTypeMemo with a memo
+// shared by the whole list: no store lookup when storedAgentHarness names it,
+// and otherwise at most one lookup per distinct project-scope (project,
+// reference) and one per distinct global-scope reference across the list.
 func (s *Server) setAgentListBadges(ctx context.Context, agents []AgentWithCapabilities) {
 	var memo *harnessTypeMemo
 	for i := range agents {
 		a := &agents[i].Agent
-		var resolved string
-		if storedAgentHarness(a) == "" {
-			if memo == nil {
-				memo = newHarnessTypeMemo()
-			}
-			resolved = s.resolveAgentHarnessTypeMemo(ctx, a, memo)
+		if storedAgentHarness(a) == "" && memo == nil {
+			memo = newHarnessTypeMemo()
 		}
-		agents[i].HarnessVendor = harness.Vendor(agentBadgeHarness(a, resolved))
+		agents[i].HarnessVendor = harness.Vendor(s.effectiveAgentHarnessTypeMemo(ctx, a, memo))
 		agents[i].ModelSize = agentModelSize(a)
 	}
 }
 
 func (s *Server) resolveAgentHarnessCapabilities(ctx context.Context, agent *store.Agent) (string, api.HarnessAdvancedCapabilities) {
-	resolvedHarness := s.resolveAgentHarnessType(ctx, agent)
+	resolvedHarness := s.effectiveAgentHarnessType(ctx, agent)
 	return resolvedHarness, harness.New(resolvedHarness).AdvancedCapabilities()
 }
 

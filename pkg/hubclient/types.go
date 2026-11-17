@@ -97,6 +97,14 @@ type Agent struct {
 	// ListAgentsOptions.IncludeAuthority is set. Nil from Hubs that predate
 	// it.
 	Authority *api.AgentAuthority `json:"authority,omitempty"`
+
+	// ResolvedHarness is the underlying harness type the Hub resolved for
+	// this agent (stamped harness first, then harness-config resolution).
+	ResolvedHarness string `json:"resolvedHarness,omitempty"`
+
+	// HarnessCapabilities describes the feature matrix of ResolvedHarness
+	// (including resume support), populated on single-agent responses.
+	HarnessCapabilities *api.HarnessAdvancedCapabilities `json:"harnessCapabilities,omitempty"`
 }
 
 // AgentLaunch is the Hub's view of an agent's current or most recent launch.

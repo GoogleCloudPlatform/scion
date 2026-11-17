@@ -631,3 +631,36 @@ func TestAgentService_ReissueScopesAll(t *testing.T) {
 		server.Close()
 	}
 }
+
+func TestAgentService_Get_DecodesHarnessCapabilities(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodGet, r.Method)
+		assert.Equal(t, "/api/v1/agents/agent-1", r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{
+			"id": "agent-1",
+			"slug": "agent-1",
+			"name": "Agent 1",
+			"phase": "running",
+			"resolvedHarness": "generic",
+			"harnessCapabilities": {
+				"harness": "generic",
+				"resume": {
+					"support": "no",
+					"reason": "Generic harness does not support session resume"
+				}
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL)
+	require.NoError(t, err)
+	got, err := client.Agents().Get(context.Background(), "agent-1")
+	require.NoError(t, err)
+	assert.Equal(t, "generic", got.ResolvedHarness)
+	require.NotNil(t, got.HarnessCapabilities)
+	assert.Equal(t, "generic", got.HarnessCapabilities.Harness)
+	assert.Equal(t, "no", string(got.HarnessCapabilities.Resume.Support))
+	assert.Equal(t, "Generic harness does not support session resume", got.HarnessCapabilities.Resume.Reason)
+}

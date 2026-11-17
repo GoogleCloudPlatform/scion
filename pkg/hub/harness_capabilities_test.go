@@ -332,3 +332,99 @@ func TestUpdateAgent_AllowsConfigUpdateWhenStoppedAndRejectsWhenRunning(t *testi
 		require.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
 	})
 }
+
+// TestGetAgent_HarnessCapabilitiesMatchSuspendWhenCatalogDrifts is a regression
+// test for ptone/scion#8227: GET /api/v1/agents/{id} must compute
+// resolvedHarness and harnessCapabilities with the same stamped-first resolver
+// that manual and automatic suspend use, so catalog changes after agent
+// creation cannot cause the API capability and suspend decision to disagree.
+func TestGetAgent_HarnessCapabilitiesMatchSuspendWhenCatalogDrifts(t *testing.T) {
+	cases := []struct {
+		name                string
+		stampedHarness      string
+		configSlug          string
+		catalogHarness      string // "" means harness config was deleted from the catalog
+		wantHarness         string
+		wantResumeSupport   api.SupportLevel
+		wantSuspendHTTPCode int
+		wantFinalPhase      state.Phase
+	}{
+		{
+			name:                "stamped claude with catalog changed to generic stays resumable",
+			stampedHarness:      "claude",
+			configSlug:          "team-reviewer",
+			catalogHarness:      "generic",
+			wantHarness:         "claude",
+			wantResumeSupport:   api.SupportYes,
+			wantSuspendHTTPCode: http.StatusOK,
+			wantFinalPhase:      state.PhaseSuspended,
+		},
+		{
+			name:                "stamped claude with deleted catalog config stays resumable",
+			stampedHarness:      "claude",
+			configSlug:          "deleted-reviewer",
+			catalogHarness:      "",
+			wantHarness:         "claude",
+			wantResumeSupport:   api.SupportYes,
+			wantSuspendHTTPCode: http.StatusOK,
+			wantFinalPhase:      state.PhaseSuspended,
+		},
+		{
+			name:                "stamped generic with catalog changed to claude stays non-resumable",
+			stampedHarness:      "generic",
+			configSlug:          "team-shell",
+			catalogHarness:      "claude",
+			wantHarness:         "generic",
+			wantResumeSupport:   api.SupportNo,
+			wantSuspendHTTPCode: http.StatusBadRequest,
+			wantFinalPhase:      state.PhaseRunning,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			srv, s := testServer(t)
+			srv.SetDispatcher(&runIntentDispatcher{})
+
+			if tc.catalogHarness != "" {
+				require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{
+					ID:      tid("hc-8227-" + tc.configSlug),
+					Name:    tc.configSlug,
+					Slug:    tc.configSlug,
+					Harness: tc.catalogHarness,
+					Scope:   store.HarnessConfigScopeGlobal,
+					Status:  store.HarnessConfigStatusActive,
+					Config:  &store.HarnessConfigData{Harness: tc.catalogHarness},
+				}))
+			}
+
+			_, _, agent := setupOnlineBrokerAgent(t, s, "8227-"+tc.configSlug)
+			agent.AppliedConfig = &store.AgentAppliedConfig{
+				Harness:       tc.stampedHarness,
+				HarnessConfig: tc.configSlug,
+			}
+			require.NoError(t, s.UpdateAgent(ctx, agent))
+
+			getRec := doRequest(t, srv, http.MethodGet, "/api/v1/agents/"+agent.ID, nil)
+			require.Equal(t, http.StatusOK, getRec.Code, getRec.Body.String())
+
+			var got AgentWithCapabilities
+			require.NoError(t, json.Unmarshal(getRec.Body.Bytes(), &got))
+			require.NotNil(t, got.HarnessCapabilities)
+			assert.Equal(t, tc.wantHarness, got.ResolvedHarness)
+			assert.Equal(t, tc.wantHarness, got.HarnessCapabilities.Harness)
+			assert.Equal(t, tc.wantResumeSupport, got.HarnessCapabilities.Resume.Support)
+			if tc.wantResumeSupport == api.SupportNo {
+				assert.NotEmpty(t, got.HarnessCapabilities.Resume.Reason)
+			}
+
+			suspRec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/suspend", nil)
+			assert.Equal(t, tc.wantSuspendHTTPCode, suspRec.Code, suspRec.Body.String())
+
+			reloaded, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, string(tc.wantFinalPhase), reloaded.Phase)
+		})
+	}
+}
