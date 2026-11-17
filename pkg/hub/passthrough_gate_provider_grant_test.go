@@ -38,7 +38,6 @@ import (
 
 const (
 	passthroughProviderGrantDenialSubstr = "requires broker ownership, Hub admin, or the broker being provided to this project by its owner"
-	passthroughProviderGrantOffModeMsg   = "Passthrough through a project's provider grant requires GCP IAM permission checking on this Hub (gcpIamCheckMode=enforce); ask the broker owner or a Hub admin"
 	passthroughRedactedActAsDeniedMsg    = "You don't have permission to use passthrough on this broker (iam.serviceAccounts.actAs is required on the broker's host service account)"
 )
 
@@ -894,19 +893,50 @@ func TestPassthroughGate_Surface_ProjectDefault(t *testing.T) {
 		setMode(w.srv, SAAssignCheckOff)
 		t.Cleanup(func() { enforceSAAssign(w.srv, checker) })
 
-		embCR.CreatedBy = w.brokerOwner.ID
-		require.NoError(t, w.s.UpdateRuntimeBroker(ctx, embCR))
-		_ = w.s.RemoveProjectProvider(ctx, w.projectA.ID, embCR.ID)
-		require.NoError(t, w.s.AddProjectProvider(ctx, &store.ProjectProvider{
-			ProjectID: w.projectA.ID, BrokerID: embCR.ID, BrokerName: embCR.Name,
-			Status: store.BrokerStatusOnline, LinkedBy: w.brokerOwner.ID,
-		}))
-
 		logs.reset()
 		code, body = putMode(w.projectMember)
 		assert.Equal(t, http.StatusForbidden, code, body)
 		assert.Contains(t, body, passthroughProviderGrantOffModeMsg)
 		deniedEntry, ok := logs.findLast("passthrough denied", SurfacePassthroughProjectDefault)
+		require.True(t, ok)
+		assert.Equal(t, "provider_grant", deniedEntry.attrs["authPath"])
+
+		logs.reset()
+		code, body = putMode(w.adminUser)
+		require.Equal(t, http.StatusOK, code, body)
+		entry, ok = logs.findLast("passthrough allowed", SurfacePassthroughProjectDefault)
+		require.True(t, ok)
+		assert.Equal(t, "admin", entry.attrs["authPath"])
+
+		// Also verify an owned flat Cloud Run broker across PUT and apply in off mode:
+		// owner -> allow, admin -> allow, provider_grant -> deny.
+		ownedCR := &store.RuntimeBroker{
+			ID:                         tid("q5-pd-owned-cr"),
+			Name:                       "q5-pd-owned-cr",
+			Slug:                       "q5-pd-owned-cr",
+			Status:                     store.BrokerStatusOnline,
+			CreatedBy:                  w.brokerOwner.ID,
+			AutoProvide:                true,
+			GCPHostServiceAccountEmail: crSA,
+			GCPHostProjectID:           "pd-cr-proj",
+			RuntimeTarget:              cloudRunTargetFor("q5-pd-owned-cr"),
+		}
+		require.NoError(t, w.s.CreateRuntimeBroker(ctx, ownedCR))
+		require.NoError(t, w.s.AddProjectProvider(ctx, &store.ProjectProvider{
+			ProjectID: w.projectA.ID, BrokerID: ownedCR.ID, BrokerName: ownedCR.Name,
+			Status: store.BrokerStatusOnline, LinkedBy: w.brokerOwner.ID,
+		}))
+		w.srv.mu.Lock()
+		w.srv.embeddedFlatIDs = nil
+		w.srv.mu.Unlock()
+		w.srv.SetEmbeddedBrokerID(ownedCR.ID)
+		t.Cleanup(func() { w.srv.SetEmbeddedBrokerID("") })
+
+		logs.reset()
+		code, body = putMode(w.projectMember)
+		assert.Equal(t, http.StatusForbidden, code, body)
+		assert.Contains(t, body, passthroughProviderGrantOffModeMsg)
+		deniedEntry, ok = logs.findLast("passthrough denied", SurfacePassthroughProjectDefault)
 		require.True(t, ok)
 		assert.Equal(t, "provider_grant", deniedEntry.attrs["authPath"])
 
@@ -927,11 +957,35 @@ func TestPassthroughGate_Surface_ProjectDefault(t *testing.T) {
 		userCtxFor := func(u *store.User) context.Context {
 			return contextWithIdentity(ctx, NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, "web"))
 		}
-		allowed, _ := w.srv.projectDefaultPassthroughAllowed(userCtxFor(w.projectMember), nil, embCR.ID, w.projectA.ID, "a-pd", "")
-		assert.False(t, allowed, "off-mode provider_grant apply must be denied")
-		allowed, _ = w.srv.projectDefaultPassthroughAllowed(userCtxFor(w.brokerOwner), nil, embCR.ID, w.projectA.ID, "a-pd", "")
+		// Direct SurfacePassthroughProjectDefault gate on ownedCR in off mode:
+		assert.NotNil(t, w.srv.evaluatePassthroughIdentity(userCtxFor(w.projectMember), nil, ownedCR, w.projectA.ID, SurfacePassthroughProjectDefault))
+		assert.Nil(t, w.srv.evaluatePassthroughIdentity(userCtxFor(w.brokerOwner), nil, ownedCR, w.projectA.ID, SurfacePassthroughProjectDefault))
+		assert.Nil(t, w.srv.evaluatePassthroughIdentity(userCtxFor(w.adminUser), nil, ownedCR, w.projectA.ID, SurfacePassthroughProjectDefault))
+
+		// Apply path (projectDefaultPassthroughAllowed) on a confined embedded docker broker in off mode:
+		// non-owner/non-admin -> false, owner -> true, admin -> true.
+		ownedDocker := &store.RuntimeBroker{
+			ID:                         tid("q5-pd-owned-docker"),
+			Name:                       "q5-pd-owned-docker",
+			Slug:                       "q5-pd-owned-docker",
+			Status:                     store.BrokerStatusOnline,
+			CreatedBy:                  w.brokerOwner.ID,
+			AutoProvide:                true,
+			GCPHostServiceAccountEmail: crSA,
+			GCPHostProjectID:           "pd-cr-proj",
+			Profiles:                   []store.BrokerProfile{{Name: "docker", Type: "docker", Available: true}},
+		}
+		require.NoError(t, w.s.CreateRuntimeBroker(ctx, ownedDocker))
+		require.NoError(t, w.s.AddProjectProvider(ctx, &store.ProjectProvider{
+			ProjectID: w.projectA.ID, BrokerID: ownedDocker.ID, BrokerName: ownedDocker.Name,
+			Status: store.BrokerStatusOnline, LinkedBy: w.brokerOwner.ID,
+		}))
+		w.srv.SetEmbeddedBrokerID(ownedDocker.ID)
+		allowed, _ := w.srv.projectDefaultPassthroughAllowed(userCtxFor(w.projectMember), nil, ownedDocker.ID, w.projectA.ID, "a-pd", "")
+		assert.False(t, allowed, "off-mode non-owner/non-admin apply must be denied")
+		allowed, _ = w.srv.projectDefaultPassthroughAllowed(userCtxFor(w.brokerOwner), nil, ownedDocker.ID, w.projectA.ID, "a-pd", "")
 		assert.True(t, allowed, "off-mode owner apply must remain allowed")
-		allowed, _ = w.srv.projectDefaultPassthroughAllowed(userCtxFor(w.adminUser), nil, embCR.ID, w.projectA.ID, "a-pd", "")
+		allowed, _ = w.srv.projectDefaultPassthroughAllowed(userCtxFor(w.adminUser), nil, ownedDocker.ID, w.projectA.ID, "a-pd", "")
 		assert.True(t, allowed, "off-mode admin apply must remain allowed")
 	})
 
