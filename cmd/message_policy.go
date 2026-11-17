@@ -33,6 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messagepolicy"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"gopkg.in/yaml.v3"
 )
 
@@ -90,6 +91,18 @@ message policies.
 In agent mode, only read-only inspection ('list' and 'get') is available;
 policy authoring, deletion, dry-run testing, and decision log queries are
 human-mode operations requiring project owner/admin or Hub admin permissions.`,
+		// Args/Run make this command Runnable so cobra validates subcommand
+		// names, as for "scion artifact" and "scion hub": an unrecognized
+		// subcommand, including one removed in agent mode (create, delete, test,
+		// decisions), returns an error with a non-zero exit instead of falling
+		// through to this group's help with exit status 0.
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 || args[0] == "help" {
+				return pflag.ErrHelp
+			}
+			return cobra.NoArgs(cmd, args)
+		},
+		Run: func(cmd *cobra.Command, args []string) {},
 	}
 	cmd.AddCommand(
 		newMessagePolicyCreateCmd(),
