@@ -78,8 +78,9 @@ func (s *Server) holdOrDispatch(
 		return false, dispatchFn()
 	}
 
-	if s.idleSuspendDeliveryGateActive() {
-		precheckMark := agent.IdleSuspendClaimActive
+	rowClaim := agent.IdleSuspendClaimActive || agent.IdleSuspendClaimUntil != nil
+	if s.idleSuspendDeliveryGateActive() || rowClaim {
+		precheckMark := rowClaim
 		if !precheckMark {
 			finCtx, finCancel := finalizationContext(ctx)
 			hasHold, hErr := s.store.HasAgentDeliveryHold(finCtx, agent.ID)

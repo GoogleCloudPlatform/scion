@@ -1592,18 +1592,25 @@ func (s *AgentStore) agentFilterPredicates(ctx context.Context, filter store.Age
 	}
 	switch {
 	case filter.Phase != "" && filter.OrRunIntent != "":
-		now, err := s.driverStoreNow(ctx)
-		if err != nil {
-			return nil, err
+		if filter.OrActiveIdleClaim {
+			now, err := s.driverStoreNow(ctx)
+			if err != nil {
+				return nil, err
+			}
+			preds = append(preds, agent.Or(
+				agent.PhaseEQ(filter.Phase),
+				agent.RunIntentEQ(filter.OrRunIntent),
+				agent.And(
+					agent.IdleSuspendClaimUntilNotNil(),
+					agent.IdleSuspendClaimUntilGT(claimTime(now)),
+				),
+			))
+		} else {
+			preds = append(preds, agent.Or(
+				agent.PhaseEQ(filter.Phase),
+				agent.RunIntentEQ(filter.OrRunIntent),
+			))
 		}
-		preds = append(preds, agent.Or(
-			agent.PhaseEQ(filter.Phase),
-			agent.RunIntentEQ(filter.OrRunIntent),
-			agent.And(
-				agent.IdleSuspendClaimUntilNotNil(),
-				agent.IdleSuspendClaimUntilGT(claimTime(now)),
-			),
-		))
 	case filter.Phase != "":
 		preds = append(preds, agent.PhaseEQ(filter.Phase))
 	case filter.OrRunIntent != "":
@@ -1764,34 +1771,36 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	}
 	clearSuspendReasonForHold := false
 	if su.IfNoStartClaim || su.IfNoActiveIdleClaim || su.IfIdleSuspendCommit != nil {
-		storeClock, err := entTxStoreNow(ctx, tx, s.dialect() == dialect.Postgres)
-		if err != nil {
-			return err
-		}
-		idleActive := current.IdleSuspendClaimUntil != nil && storeClock.Before(*current.IdleSuspendClaimUntil)
-		if su.IfNoActiveIdleClaim && idleActive {
+		if su.IfNoStartClaim && heldClaimError(current) != nil {
 			return store.ErrClaimPredicate
 		}
-		if su.IfNoStartClaim && (heldClaimError(current) != nil || idleActive) {
-			return store.ErrClaimPredicate
-		}
-		if su.IfIdleSuspendCommit != nil {
-			if !checkIdleSuspendCommit(current, *su.IfIdleSuspendCommit, storeClock) {
-				return store.ErrIdleSuspendPrecondition
+		if current.IdleSuspendClaimUntil != nil || su.IfIdleSuspendCommit != nil {
+			storeClock, err := entTxStoreNow(ctx, tx, s.dialect() == dialect.Postgres)
+			if err != nil {
+				return err
 			}
-			// If a membership-loss hold took effect while the idle claim's
-			// container stop was in flight, finish moving the row out of
-			// running/stopping/stopped/error into suspended, but leave
-			// suspend_reason NULL so the held agent never auto-wakes.
-			held, herr := tx.AgentHold.Query().
-				Where(agenthold.AgentIDEQ(current.ID), agenthold.ClearedAtIsNil()).
-				Exist(ctx)
-			if herr != nil {
-				return mapError(herr)
+			idleActive := current.IdleSuspendClaimUntil != nil && storeClock.Before(*current.IdleSuspendClaimUntil)
+			if (su.IfNoActiveIdleClaim || su.IfNoStartClaim) && idleActive {
+				return store.ErrClaimPredicate
 			}
-			if held {
-				su.SuspendReason = ""
-				clearSuspendReasonForHold = true
+			if su.IfIdleSuspendCommit != nil {
+				if !checkIdleSuspendCommit(current, *su.IfIdleSuspendCommit, storeClock) {
+					return store.ErrIdleSuspendPrecondition
+				}
+				// If a membership-loss hold took effect while the idle claim's
+				// container stop was in flight, finish moving the row out of
+				// running/stopping/stopped/error into suspended, but leave
+				// suspend_reason NULL so the held agent never auto-wakes.
+				held, herr := tx.AgentHold.Query().
+					Where(agenthold.AgentIDEQ(current.ID), agenthold.ClearedAtIsNil()).
+					Exist(ctx)
+				if herr != nil {
+					return mapError(herr)
+				}
+				if held {
+					su.SuspendReason = ""
+					clearSuspendReasonForHold = true
+				}
 			}
 		}
 	}

@@ -1964,14 +1964,13 @@ func TestIdleSuspend_GateOffSkipsMarkAgentDeliveryEntirely(t *testing.T) {
 		settingOn bool
 	}{
 		{name: "experiment_off_setting_on", expOn: false, settingOn: true},
-		{name: "experiment_on_setting_off", expOn: true, settingOn: false},
 		{name: "both_off", expOn: false, settingOn: false},
 	}
 
 	for _, m := range modes {
 		t.Run(m.name, func(t *testing.T) {
 			ctx := context.Background()
-			boom := errors.New("MarkAgentDelivery must not be called when gate is off")
+			boom := errors.New("MarkAgentDelivery must not be called when experiment is off")
 			srv, rawStore, wrapper, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *countingAndFailingMarkDeliveryStore {
 				return &countingAndFailingMarkDeliveryStore{Store: inner, fault: f, err: boom}
 			})
@@ -2020,6 +2019,38 @@ func TestIdleSuspend_GateOffSkipsMarkAgentDeliveryEntirely(t *testing.T) {
 			assert.Len(t, disp.getCalls(), 4)
 		})
 	}
+
+	t.Run("experiment_on_setting_off_marks_deliveries", func(t *testing.T) {
+		ctx := context.Background()
+		srv, rawStore, wrapper, _ := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *countingAndFailingMarkDeliveryStore {
+			return &countingAndFailingMarkDeliveryStore{Store: inner, fault: f, err: errors.New("unused")}
+		})
+		disp := &recordingDispatcher{}
+		srv.SetDispatcher(disp)
+		setIdleSuspendExperiment(t, srv, true)
+		srv.mu.Lock()
+		srv.config.AutoSuspendIdle = false
+		srv.config.IdleSuspendAfter = 15 * time.Minute
+		srv.mu.Unlock()
+
+		now := time.Now().UTC()
+		pastGrace := now.Add(-20 * time.Minute)
+		target := newIdleCandidateBrokerAgent(t, rawStore, "r3-target-exp-on-set-off", string(state.ActivityIdle), &pastGrace, now.Add(-15*time.Second))
+		sender := newIdleCandidateBrokerAgent(t, rawStore, "r3-sender-exp-on-set-off", string(state.ActivityIdle), &pastGrace, now.Add(-15*time.Second))
+		sender.ProjectID = target.ProjectID
+		_, err := rawStore.(*entadapter.CompositeStore).DB().ExecContext(ctx,
+			"UPDATE agents SET project_id = ? WHERE id = ?", target.ProjectID, sender.ID)
+		require.NoError(t, err)
+
+		res, dmErr := srv.ExecuteAgentDM(ctx, awAgentDMInput(sender, target, "agent dm with experiment on setting off"))
+		require.Nil(t, dmErr)
+		require.NotNil(t, res)
+		assert.Equal(t, AgentDMAccepted, res.Outcome)
+		assert.Equal(t, int32(1), wrapper.markCalls.Load(), "MarkAgentDelivery must stamp last_delivery_at whenever experiment is on")
+		fresh, err := rawStore.GetAgent(ctx, target.ID)
+		require.NoError(t, err)
+		assert.NotNil(t, fresh.LastDeliveryAt)
+	})
 }
 
 // TestIdleSuspend_SettleTimeoutErrorWording verifies O3: the default settle
@@ -2079,8 +2110,8 @@ func TestIdleSuspend_SettleTimeoutErrorWording(t *testing.T) {
 	srv.mu.Lock()
 	srv.config.AutoSuspendIdle = false
 	srv.mu.Unlock()
-	assert.Equal(t, "agent is already starting", srv.deferredReason(claimed),
-		"deferredReason must ignore IdleSuspendClaimActive while the idle-suspend gate is off")
+	assert.Equal(t, "agent is suspending", srv.deferredReason(claimed),
+		"deferredReason must always honour an active IdleSuspendClaimActive regardless of auto_suspend_idle")
 	assert.Empty(t, disp.getCalls())
 }
 

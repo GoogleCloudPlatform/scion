@@ -787,12 +787,15 @@ func (s *Server) autoSuspendIdleEnabled() bool {
 	return enabled
 }
 
-// idleSuspendDeliveryGateActive reports whether both the lifecycle.idle_suspend
-// experiment and server.hub.auto_suspend_idle are enabled. When either is off,
-// message delivery skips MarkAgentDelivery and idle-suspend claim checks so
-// behavior and DB work match base (AC 8).
+// idleSuspendDeliveryGateActive reports whether the lifecycle.idle_suspend
+// experiment is enabled. Whenever the experiment is on, message delivery stamps
+// last_delivery_at via MarkAgentDelivery even while server.hub.auto_suspend_idle
+// is false, so enabling the setting (or propagating it across replicas) cannot
+// open an unmarked window. When the experiment is off (and the target row holds
+// no active idle-suspend claim), delivery skips MarkAgentDelivery completely so
+// DB work and behavior match base (AC 8).
 func (s *Server) idleSuspendDeliveryGateActive() bool {
-	return s != nil && s.experimentEnabled(experiments.IdleSuspend) && s.autoSuspendIdleEnabled()
+	return s != nil && s.experimentEnabled(experiments.IdleSuspend)
 }
 
 func (s *Server) deliveryMarker() agentDeliveryMarker {
@@ -6060,6 +6063,7 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 		cutoff := now.Add(-after)
 		heartbeatCutoff := now.Add(-agentHeartbeatRecency)
 		if agent.Phase != string(state.PhaseRunning) ||
+			(agent.RunIntent != "" && agent.RunIntent != store.RunIntentRunning) ||
 			agent.RunID != snapshot.RunID ||
 			agent.Activity != snapshot.Activity ||
 			!state.Activity(agent.Activity).IsSuspendEligible() ||
@@ -6160,6 +6164,20 @@ func (s *Server) autoSuspendAgent(ctx context.Context, dispatcher AgentDispatche
 		claimedIdle bool
 	)
 	if reason == state.SuspendReasonIdle {
+		if !s.experimentEnabled(experiments.IdleSuspend) {
+			s.clearWorkspaceAtStop(ctx, agent)
+			slog.Info("Scheduler: skipping idle auto-suspend; experiment disabled before claim",
+				"agent_id", agent.ID, "agent_name", agent.Name)
+			return false
+		}
+		enabledNow, afterNow := s.idleSuspendSettings()
+		if !enabledNow {
+			s.clearWorkspaceAtStop(ctx, agent)
+			slog.Info("Scheduler: skipping idle auto-suspend; auto_suspend_idle disabled before claim",
+				"agent_id", agent.ID, "agent_name", agent.Name)
+			return false
+		}
+		idleCond.IdleSuspendAfter = afterNow
 		priorIntent, intentAt, claimUntil, err = s.claimIdleSuspend(ctx, agent, idleCond)
 		if errors.Is(err, store.ErrIdleSuspendPrecondition) {
 			s.clearWorkspaceAtStop(ctx, agent)

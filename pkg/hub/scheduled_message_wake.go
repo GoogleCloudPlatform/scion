@@ -177,7 +177,7 @@ func idleSuspendSettleBudget() time.Duration {
 // Nothing is started by the wait; the caller's delivery authorization
 // covers delivering to the run another start brought up.
 func (s *Server) wakeOrAwaitStart(ctx context.Context, agent *store.Agent) (dmErr *AgentDMError, awaitErr error) {
-	if s.idleSuspendDeliveryGateActive() && agent != nil && (agent.IdleSuspendClaimActive || agent.IdleSuspendClaimUntil != nil) {
+	if agent != nil && (agent.IdleSuspendClaimActive || agent.IdleSuspendClaimUntil != nil) {
 		if err := s.waitForIdleSuspendToSettle(ctx, agent); err != nil {
 			return nil, err
 		}

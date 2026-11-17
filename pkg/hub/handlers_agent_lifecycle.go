@@ -572,6 +572,9 @@ func (s *Server) harnessSupportsResume(ctx context.Context, agent *store.Agent) 
 }
 
 func (s *Server) harnessSupportsResumeMemo(ctx context.Context, agent *store.Agent, memo *harnessTypeMemo) (supported bool, harnessType, reason string) {
+	if agent != nil && isManagedAgentRuntime(agent.Runtime) {
+		return false, agent.Runtime, "managed agent runtimes do not support suspend"
+	}
 	harnessType = s.effectiveAgentHarnessTypeMemo(ctx, agent, memo)
 	caps := agentHarnessCapabilities(agent, harnessType)
 	if caps.Resume.Support == api.SupportNo {
@@ -1758,9 +1761,10 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 	// (for example one in phase error), so stop-all leaves no agent
 	// intended to run.
 	filter := store.AgentFilter{
-		ProjectID:   projectID,
-		Phase:       string(state.PhaseRunning),
-		OrRunIntent: string(store.RunIntentRunning),
+		ProjectID:         projectID,
+		Phase:             string(state.PhaseRunning),
+		OrRunIntent:       string(store.RunIntentRunning),
+		OrActiveIdleClaim: s.experimentEnabled(experiments.IdleSuspend),
 	}
 
 	// agent.stop_all is decided against the hub for global stop-all and

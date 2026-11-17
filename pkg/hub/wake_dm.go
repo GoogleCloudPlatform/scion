@@ -23,6 +23,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -93,6 +94,14 @@ func wakeDeleteWonError(agentID string) *AgentDMError {
 // Returns (*WakeResult, nil) on success or (nil, *AgentDMError) on failure.
 // On failure, no message should be dispatched (AC-4).
 func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeResult, *AgentDMError) {
+	if agent != nil && agent.IdleSuspendClaimActive {
+		if err := s.waitForIdleSuspendToSettle(ctx, agent); err != nil {
+			return nil, startInProgressDMError(agent, err)
+		}
+		if state.Phase(agent.Phase) == state.PhaseRunning {
+			return &WakeResult{Outcome: WakeAlreadyRunning}, nil
+		}
+	}
 	// The effective resting phase (ptone/scion#4669): an error row that
 	// remembers the suspended phase a failed asynchronous resume began from
 	// wakes as a suspended agent; a local only, agent.Phase is unchanged.
@@ -515,25 +524,19 @@ func validateGroupMemberDeliverable(agent *store.Agent) *AgentDMError {
 // agent automatically without --wake, so the hint omits "--wake".
 func (s *Server) groupMemberDeliverableError(agent *store.Agent) *AgentDMError {
 	err := s.validateAgentDeliverable(agent)
-	claimSuspending := s != nil && s.idleSuspendDeliveryGateActive() && agent != nil && agent.IdleSuspendClaimActive
+	claimSuspending := agent != nil && agent.IdleSuspendClaimActive
 	if err != nil && (state.Phase(store.EffectiveRestingPhase(agent)) == state.PhaseSuspended || claimSuspending) {
 		err.Message = fmt.Sprintf("agent %q is suspended; group messages do not wake agents — message it directly with --wake", agent.Slug)
 	}
-	if err != nil && (s.shouldAutoWake(agent) || claimSuspending) {
+	if err != nil && (s.shouldAutoWake(agent) || (claimSuspending && s != nil && s.experimentEnabled(experiments.IdleSuspend))) {
 		err.Message = fmt.Sprintf("agent %q is suspended; group messages do not wake agents — message it directly to wake and deliver", agent.Slug)
 	}
 	return err
 }
 
-// validateAgentDeliverable checks target deliverability while ignoring any
-// in-memory IdleSuspendClaimActive flag when the idle-suspend delivery gate is
-// off (AC 8).
+// validateAgentDeliverable checks target deliverability, always honouring an
+// active idle-suspend claim on the target row regardless of current settings.
 func (s *Server) validateAgentDeliverable(agent *store.Agent) *AgentDMError {
-	if agent != nil && agent.IdleSuspendClaimActive && (s == nil || !s.idleSuspendDeliveryGateActive()) {
-		cp := *agent
-		cp.IdleSuspendClaimActive = false
-		agent = &cp
-	}
 	return validateAgentDeliverable(agent)
 }
 
@@ -607,7 +610,7 @@ func (s *Server) deferredReason(agent *store.Agent) string {
 	if reincarnationInFlight(agent) {
 		return "agent is reincarnating"
 	}
-	if agent != nil && agent.IdleSuspendClaimActive && s != nil && s.idleSuspendDeliveryGateActive() {
+	if agent != nil && agent.IdleSuspendClaimActive {
 		return "agent is suspending"
 	}
 	if agent != nil && agent.StartClaimKind == store.StartClaimStop {

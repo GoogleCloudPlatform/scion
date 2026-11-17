@@ -77,7 +77,7 @@ func (s *Server) autoWakeModeOf(agent *store.Agent) autoWakeMode {
 		return autoWakeNone
 	}
 	if agent.IdleSuspendClaimActive {
-		if !s.idleSuspendDeliveryGateActive() {
+		if !s.experimentEnabled(experiments.IdleSuspend) {
 			return autoWakeNone
 		}
 		return autoWakeAwait
@@ -119,7 +119,7 @@ func (s *Server) shouldQueueAutoWake(agent *store.Agent) bool {
 	if s.shouldAutoWake(agent) {
 		return true
 	}
-	return agent != nil && agent.IdleSuspendClaimActive && s.idleSuspendDeliveryGateActive()
+	return agent != nil && agent.IdleSuspendClaimActive && s != nil && s.experimentEnabled(experiments.IdleSuspend)
 }
 
 // syncAutoWakeForDM waits for an in-flight idle auto-suspend to settle and
@@ -272,7 +272,7 @@ func (s *Server) autoWakeAgent(ctx context.Context, agent *store.Agent) (*store.
 	if err != nil || current == nil {
 		return nil, &AgentDMError{Code: ErrCodeAgentNotRunning, Message: "agent could not be read for auto-wake", HTTPStatus: http.StatusConflict}
 	}
-	if s.idleSuspendDeliveryGateActive() && current.IdleSuspendClaimUntil != nil {
+	if current.IdleSuspendClaimActive || current.IdleSuspendClaimUntil != nil {
 		if err := s.waitForIdleSuspendToSettle(ctx, current); err != nil {
 			return nil, startInProgressDMError(current, err)
 		}

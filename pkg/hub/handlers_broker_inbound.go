@@ -250,7 +250,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 
 	// Reject messages to non-running agents (including running rows with an
 	// active idle-suspend claim, treated as suspended).
-	if s.idleSuspendDeliveryGateActive() && agent.IdleSuspendClaimActive {
+	if agent.IdleSuspendClaimActive {
 		writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
 			fmt.Sprintf("Agent %q is suspended.", agent.Slug), nil)
 		return

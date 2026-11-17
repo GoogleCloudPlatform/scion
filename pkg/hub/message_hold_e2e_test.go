@@ -3142,8 +3142,8 @@ func TestHold_IdleSuspend_OffStateParity(t *testing.T) {
 		expEnabled     bool
 		settingEnabled bool
 	}{
-		{name: "experiment_off", expEnabled: false, settingEnabled: true},
-		{name: "setting_off", expEnabled: true, settingEnabled: false},
+		{name: "experiment_off_setting_on", expEnabled: false, settingEnabled: true},
+		{name: "both_off", expEnabled: false, settingEnabled: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -3200,6 +3200,53 @@ func TestHold_IdleSuspend_OffStateParity(t *testing.T) {
 			assert.Less(t, idx1, idx2, "off-parity-1 must be delivered before off-parity-2")
 		})
 	}
+
+	t.Run("experiment_on_setting_off_marks_deliveries", func(t *testing.T) {
+		f := newHoldE2EFixture(t)
+		ctx := context.Background()
+		configureHoldIdleSuspendGate(t, f, true, false)
+
+		intercept, _ := installStoreFault(t, f.srv, func(inner store.Store, _ *storeFaultSwitch) *holdIdleMarkInterceptStore {
+			return &holdIdleMarkInterceptStore{Store: inner}
+		})
+
+		fresh1, err := f.store.GetAgent(ctx, f.launched.ID)
+		require.NoError(t, err)
+		res1, dmErr := f.srv.ExecuteAgentDM(ctx, &AgentDMInput{
+			SenderAgent:    f.agent,
+			SenderIdentity: &storedAgentIdentity{agent: f.agent},
+			TargetAgent:    fresh1,
+			ProjectID:      fresh1.ProjectID,
+			Msg:            "exp-on-set-off-1",
+			Type:           messages.TypeInstruction,
+		})
+		require.Nil(t, dmErr)
+		f.waitMessageState(t, res1.MessageID, store.MessageDispatchAwaitingSession)
+
+		fresh2, err := f.store.GetAgent(ctx, f.launched.ID)
+		require.NoError(t, err)
+		res2, dmErr := f.srv.ExecuteAgentDM(ctx, &AgentDMInput{
+			SenderAgent:    f.agent,
+			SenderIdentity: &storedAgentIdentity{agent: f.agent},
+			TargetAgent:    fresh2,
+			ProjectID:      fresh2.ProjectID,
+			Msg:            "exp-on-set-off-2",
+			Type:           messages.TypeInstruction,
+		})
+		require.Nil(t, dmErr)
+		f.waitMessageState(t, res2.MessageID, store.MessageDispatchAwaitingSession)
+
+		ca := f.connectDeliverSession(t, f.public.URL, true, nil)
+		f.waitMessageState(t, res1.MessageID, store.MessageDispatchDelivered)
+		f.waitMessageState(t, res2.MessageID, store.MessageDispatchDelivered)
+
+		assert.GreaterOrEqual(t, intercept.markCalls.Load(), int32(1), "MarkAgentDelivery must run when experiment is on even with auto_suspend_idle=false")
+		after, err := f.store.GetAgent(ctx, f.launched.ID)
+		require.NoError(t, err)
+		assert.NotNil(t, after.LastDeliveryAt)
+		pasted := strings.Join(ca.tmux.pastedTexts(), "\n")
+		assert.Less(t, strings.Index(pasted, "exp-on-set-off-1"), strings.Index(pasted, "exp-on-set-off-2"))
+	})
 }
 
 // TestHold_IdleSuspend_StaleClaimSnapshotFallsThroughToSessionHold verifies O1:

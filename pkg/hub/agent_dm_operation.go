@@ -454,7 +454,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			mode = s.autoWakeModeOf(input.TargetAgent)
 		}
 		isFanoutMention := input.SkipPhaseGate && input.Type == messages.TypeMention
-		claimActive := s.idleSuspendDeliveryGateActive() && input.TargetAgent.IdleSuspendClaimActive
+		claimActive := input.TargetAgent.IdleSuspendClaimActive
 		autoWake = mode == autoWakeResume || (mode == autoWakeAwait && (!isFanoutMention || claimActive))
 		switch {
 		case holdErr != nil:

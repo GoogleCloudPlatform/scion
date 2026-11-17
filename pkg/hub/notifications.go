@@ -63,8 +63,8 @@ type NotificationDispatcher struct {
 	// Server sets it (autoWakeNotificationSubscriber); nil = no auto-wake.
 	autoWakeFn func(subscriber *store.Agent) bool
 
-	// idleSuspendGateFn reports whether both lifecycle.idle_suspend and
-	// server.hub.auto_suspend_idle are enabled; nil means off (AC 8).
+	// idleSuspendGateFn reports whether lifecycle.idle_suspend is enabled;
+	// nil means off (AC 8).
 	idleSuspendGateFn func() bool
 }
 

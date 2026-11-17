@@ -85,6 +85,9 @@ func checkIdleSuspendRow(row *ent.Agent, cond store.IdleSuspendCondition, now ti
 	if row.Phase != string(state.PhaseRunning) {
 		return false
 	}
+	if row.RunIntent != nil && *row.RunIntent != string(store.RunIntentRunning) {
+		return false
+	}
 	if row.RunID != cond.RunID {
 		return false
 	}

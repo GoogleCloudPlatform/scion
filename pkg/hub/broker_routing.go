@@ -151,10 +151,10 @@ type agentDeliveryMarker interface {
 }
 
 // idleSuspendGateChecker is an optional predicate on agentDeliveryMarker
-// reporting whether both lifecycle.idle_suspend and server.hub.auto_suspend_idle
-// are currently enabled. When false, markAgentForDispatch skips the row-locked
-// write and claim check altogether so off-state behavior is identical to base
-// (AC 8).
+// reporting whether lifecycle.idle_suspend is enabled. When false and the
+// target carries no idle-suspend claim, markAgentForDispatch skips the
+// row-locked write and claim check altogether so off-state behavior is
+// identical to base (AC 8).
 type idleSuspendGateChecker interface {
 	IdleSuspendGateActive() bool
 }
@@ -254,14 +254,14 @@ func isPreDispatchDeliveryError(err error) bool {
 	return errors.As(err, &markErr) || errors.As(err, &idleErr) || errors.As(err, &wakeErr)
 }
 
-// markAgentForDispatch runs MarkAgentDelivery under the row lock when both
-// lifecycle.idle_suspend and server.hub.auto_suspend_idle are enabled, updates
-// *agent with the fresh store snapshot (including store-clock
-// IdleSuspendClaimActive), fails closed on any store error, and rejects
-// dispatch with *errAgentIdleSuspending if an idle-suspend claim is active or
-// a previously running/starting target moved out of running/starting since the
-// caller's read. When either gate is off, it returns nil immediately without
-// touching the store.
+// markAgentForDispatch runs MarkAgentDelivery under the row lock whenever
+// lifecycle.idle_suspend is enabled OR the target snapshot already carries an
+// idle-suspend claim, updates *agent with the fresh store snapshot (including
+// store-clock IdleSuspendClaimActive), fails closed on any store error, and
+// rejects dispatch with *errAgentIdleSuspending if an idle-suspend claim is
+// active or a previously running/starting target moved out of running/starting
+// since the caller's read. When the experiment is off and the row carries no
+// claim, it returns nil immediately without touching the store (AC 8).
 func markAgentForDispatch(ctx context.Context, marker agentDeliveryMarker, agent *store.Agent) error {
 	if marker == nil {
 		return &errDeliveryMarkFailed{err: errors.New("delivery marker store is nil")}
@@ -269,7 +269,8 @@ func markAgentForDispatch(ctx context.Context, marker agentDeliveryMarker, agent
 	if agent == nil || agent.ID == "" {
 		return &errDeliveryMarkFailed{err: errors.New("target agent is nil")}
 	}
-	if gate, ok := marker.(idleSuspendGateChecker); ok && !gate.IdleSuspendGateActive() {
+	hasRowClaim := agent.IdleSuspendClaimActive || agent.IdleSuspendClaimUntil != nil
+	if gate, ok := marker.(idleSuspendGateChecker); ok && !gate.IdleSuspendGateActive() && !hasRowClaim {
 		return nil
 	}
 	wasDeliverable := state.Phase(agent.Phase) == state.PhaseRunning || state.Phase(agent.Phase) == state.PhaseStarting

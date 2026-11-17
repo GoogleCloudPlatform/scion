@@ -1288,6 +1288,12 @@ type AgentFilter struct {
 	// bindings (a hash of the encoded filter) unchanged when it is unset.
 	OrRunIntent string `json:",omitempty"`
 
+	// OrActiveIdleClaim, when true alongside non-empty Phase and OrRunIntent,
+	// also matches agents holding an unexpired idle_suspend_claim_until >
+	// storeNow (used by stop-all when lifecycle.idle_suspend is enabled;
+	// omitted when off so ListAgents incurs zero extra store-clock query).
+	OrActiveIdleClaim bool `json:",omitempty"`
+
 	// MemberOrOwnerProjectIDs, when non-empty, restricts results to agents
 	// whose project_id is in this set OR whose owner_id matches OwnerID.
 	// OwnerID and this field are combined with OR (not AND) when both are set.

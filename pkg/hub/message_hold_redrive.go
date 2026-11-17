@@ -309,7 +309,7 @@ func (s *Server) maybeScheduleHeldMessageRedriveIfConnected(agentID string) {
 		}
 		switch st {
 		case agentDeliverSessionReady:
-			if s.idleSuspendDeliveryGateActive() && agent.IdleSuspendClaimActive {
+			if agent.IdleSuspendClaimActive {
 				return
 			}
 			s.scheduleHeldMessageRedrive(agentID)

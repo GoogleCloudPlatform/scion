@@ -32,7 +32,8 @@
     `autoSuspendQueueLimit` (`1000`) for stalled hand-offs.
   - Added `ClaimIdleSuspend` as the single commit point before `DispatchAgentStop`: under the row
     lock and store clock (`storeNow`), it swaps `run_intent` to `stopped` and sets
-    `idle_suspend_claim_until` only while `phase=running`, `run_id`, `activity`, and
+    `idle_suspend_claim_until` (`idleSuspendClaimLease() = 226s`) only while `phase=running`,
+    `run_intent` is `running` (`NULL` treated as `running`), `run_id`, `activity`, and
     `activity_since` are unchanged and past grace, `last_seen` is within `agentHeartbeatRecency`,
     `!HasRecentLiveWork`, no start/delete/reincarnation/idle-suspend claim is held, and no delivery
     landed at or after `activity_since`. Once `ClaimIdleSuspend` commits and `DispatchAgentStop`
@@ -51,25 +52,34 @@
     `ptone/scion#8204` (do not set `server.hub.auto_suspend_idle` with `lifecycle.idle_suspend` on
     in production until `ptone/scion#8204` lands; noted in `pkg/experiments/registry.go`,
     `docs-site/src/content/docs/reference/experiments.md`, and the `autoSuspendAgent` commit point).
-  - Standardized claim-expiry checks on the store clock (`GetAgent`, `GetAgentBySlug`, and
-    `MarkAgentDelivery` populating `agent.IdleSuspendClaimActive` from the store clock, plus
-    `entTxStoreNow` inside `UpdateAgentStatus`).
+  - Standardized claim-expiry checks on the store clock (`GetAgent`, `GetAgentBySlug`,
+    `ListAgents`, and `MarkAgentDelivery` populating `agent.IdleSuspendClaimActive` from the store
+    clock only when `IdleSuspendClaimUntil != nil`, `AgentFilter.OrActiveIdleClaim` gated on
+    `lifecycle.idle_suspend`, and `entTxStoreNow` inside `UpdateAgentStatus` skipped when
+    `IdleSuspendClaimUntil == nil && IfIdleSuspendCommit == nil`, so off-state queries incur zero
+    extra `SELECT now()` round trips).
 - **Idle sweep, generalized auto-suspend worker, and unified delivery gate (`pkg/hub`):**
   - Registered recurring singleton `agent-idle-suspend` (every 5 ticks, bounded by
     `stalledDetectionTimeout`) next to `agent-stalled-detection`, sharing `agentHeartbeatRecency`
     (`2m`).
   - Generalized `autoSuspendWorker` items to carry a `state.SuspendReason` (`idle` or `stalled`),
     preserving retained pre-suspend activities (`idle`, `completed`, `harness_error`) via
-    `syncAgentAfterStopRecord` and emitting `SUSPENDED`-only notifications. Both `idle` and
-    `stalled` worker items now also skip soft-deleted rows, rows with active deletion or
-    reincarnation, and rows with an in-flight lifecycle operation (`tryBeginLifecycleOp`).
+    `syncAgentAfterStopRecord` and emitting `SUSPENDED`-only notifications, and rejecting
+    `managed:*` runtimes in `harnessSupportsResumeMemo`. Both `idle` and `stalled` worker items now
+    also skip soft-deleted rows, rows with active deletion or reincarnation, and rows with an
+    in-flight lifecycle operation (`tryBeginLifecycleOp`), and the `idle` worker re-reads both
+    `lifecycle.idle_suspend` and `server.hub.auto_suspend_idle` immediately before
+    `ClaimIdleSuspend`.
   - Routed every `AgentDispatcher.DispatchAgentMessage` reference in `pkg/hub` through one
     choke point (`dispatchMarkedAgentMessage`, enforced by AST guard
-    `TestMessageDispatchCallsMarkAgentDelivery` including method-value bypasses). When both
-    `lifecycle.idle_suspend` and `server.hub.auto_suspend_idle` are enabled, `markAgentForDispatch`
-    runs `MarkAgentDelivery` fail-closed before any broker dispatch; when either flag is off, the
-    delivery mark and claim check are skipped completely so DB work and mention behavior match base
-    (AC 8). Auto-waking paths wait up to the full idle-suspend claim lease (`idleSuspendClaimLease`)
+    `TestMessageDispatchCallsMarkAgentDelivery` including method-value bypasses). Whenever
+    `lifecycle.idle_suspend` is enabled (even while `server.hub.auto_suspend_idle` is `false`, so
+    enabling the runtime setting across replicas never opens an unmarked window) OR a target row
+    already carries an idle-suspend claim, `markAgentForDispatch` runs `MarkAgentDelivery`
+    fail-closed before any broker dispatch, and every validator and settle path honours an active
+    row claim regardless of `server.hub.auto_suspend_idle`; when `lifecycle.idle_suspend` is off and
+    no claim is present on the row, the delivery mark and claim check are skipped completely so DB
+    work and behavior match base (AC 8). Auto-waking paths wait up to the full idle-suspend claim lease (`idleSuspendClaimLease`)
     for an active claim to settle via `wakeOrAwaitStart` / `queueAutoWake` and report `"is suspending"`
     on timeout; non-auto-waking paths (`MessageBrokerProxy`, `broadcastDirect`,
     `handleBrokerInbound`, `dispatchRoutedRecipient`, `reconcile.deliverMessage`,

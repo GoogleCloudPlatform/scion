@@ -1611,7 +1611,7 @@ func (s *Server) isAgentUnreachable(agent *store.Agent) (bool, string) {
 	if unreachable, why := isAgentUnreachable(agent); unreachable {
 		return true, why
 	}
-	if s != nil && s.idleSuspendDeliveryGateActive() && agent != nil && agent.IdleSuspendClaimActive {
+	if agent != nil && agent.IdleSuspendClaimActive {
 		return true, string(state.PhaseSuspended)
 	}
 	return false, ""

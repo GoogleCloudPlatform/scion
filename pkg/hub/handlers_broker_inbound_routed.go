@@ -398,7 +398,7 @@ func (s *Server) dispatchRoutedRecipient(
 	}
 
 	// --- Phase check ---
-	if s.idleSuspendDeliveryGateActive() && agent.IdleSuspendClaimActive {
+	if agent.IdleSuspendClaimActive {
 		result.Status = "not_running"
 		result.Error = "agent is suspended"
 		return result

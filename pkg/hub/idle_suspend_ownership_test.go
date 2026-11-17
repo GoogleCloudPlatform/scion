@@ -284,6 +284,7 @@ type isoCallbackDispatcher struct {
 	onRestart             func(ctx context.Context, agent *store.Agent) error
 	onDelete              func(ctx context.Context, agent *store.Agent) error
 	onMsg                 func(ctx context.Context, agent *store.Agent, msg string) error
+	onExec                func(ctx context.Context, agent *store.Agent, command []string, timeout int) (string, int, error)
 	msgs                  []string
 	mu                    sync.Mutex
 }
@@ -366,6 +367,13 @@ func (d *isoCallbackDispatcher) DispatchAgentDelete(ctx context.Context, agent *
 		return d.onDelete(ctx, agent)
 	}
 	return d.runIntentDispatcher.DispatchAgentDelete(ctx, agent, deleteFiles, removeBranch, softDelete, deletedAt)
+}
+
+func (d *isoCallbackDispatcher) DispatchAgentExec(ctx context.Context, agent *store.Agent, command []string, timeout int) (string, int, error) {
+	if d.onExec != nil {
+		return d.onExec(ctx, agent, command, timeout)
+	}
+	return d.runIntentDispatcher.DispatchAgentExec(ctx, agent, command, timeout)
 }
 
 func (d *isoCallbackDispatcher) DispatchAgentMessage(ctx context.Context, agent *store.Agent, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {
@@ -509,6 +517,54 @@ func TestIdleSuspend_OwnershipMatrix_ClaimHolderAndRollback(t *testing.T) {
 		assert.Equal(t, string(state.PhaseStopped), got.Phase)
 		assert.Equal(t, store.RunIntentStopped, got.RunIntent, "RevertRunIntent CAS must preserve newer user stopped intent")
 		assert.Nil(t, got.IdleSuspendClaimUntil)
+	})
+
+	t.Run("failed user stop leaving run_intent=stopped is never turned into suspended(idle)", func(t *testing.T) {
+		ctx := context.Background()
+		srvA, s := testServer(t)
+		isoEnableIdleSweep(t, srvA, 15*time.Minute)
+		_, _, agent := isoSetupIdleAgent(t, s, "failed-user-stop-intent", string(state.ActivityIdle))
+		u := wakeLifecycleUser(t, s, "iso-failed-stop-user", agent.ProjectID, "agent.lifecycle", "agent.read")
+
+		disp := &isoCallbackDispatcher{
+			onStop: func(_ context.Context, _ *store.Agent) error {
+				return errors.New("broker stop failed during user stop")
+			},
+		}
+		srvA.SetDispatcher(disp)
+
+		// 1. User issues stop, whose broker stop fails: phase stays running, run_intent=stopped.
+		rec := requestAsIdentity(t, srvA, authUser(u), http.MethodPost, "/api/v1/agents/"+agent.ID+"/stop", nil)
+		require.NotEqual(t, http.StatusOK, rec.Code)
+		assert.Equal(t, int32(1), disp.stops.Load())
+
+		afterStopFail, err := s.GetAgent(ctx, agent.ID)
+		require.NoError(t, err)
+		require.Equal(t, string(state.PhaseRunning), afterStopFail.Phase)
+		require.Equal(t, store.RunIntentStopped, afterStopFail.RunIntent)
+
+		// 2. Now broker recovers; neither the idle sweep nor direct ClaimIdleSuspend
+		// may claim the stopped-intent row or convert it into auto-wakeable suspended(idle).
+		disp.onStop = nil
+		srvA.agentIdleSuspendHandler()(ctx)
+		srvA.waitAutoSuspendIdle()
+		assert.Equal(t, int32(1), disp.stops.Load(), "idle sweep must skip running row with run_intent=stopped")
+
+		_, _, _, err = s.ClaimIdleSuspend(ctx, afterStopFail.ID, store.IdleSuspendCondition{
+			RunID:            afterStopFail.RunID,
+			Activity:         afterStopFail.Activity,
+			ActivitySince:    *afterStopFail.ActivitySince,
+			IdleSuspendAfter: 15 * time.Minute,
+			HeartbeatRecency: agentHeartbeatRecency,
+			ClaimTTL:         45 * time.Second,
+		})
+		require.ErrorIs(t, err, store.ErrIdleSuspendPrecondition)
+
+		final, err := s.GetAgent(ctx, agent.ID)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseRunning), final.Phase)
+		assert.Empty(t, final.SuspendReason)
+		assert.Equal(t, store.RunIntentStopped, final.RunIntent)
 	})
 }
 
@@ -1703,6 +1759,17 @@ func TestIdleSuspend_OwnershipMatrix_UpdateAgentAndBackfillPreserveClaim(t *test
 	})
 	require.NoError(t, err)
 	assert.True(t, recorded)
+
+	// Managed agent runtimes (managed:*) do not support suspend/resume and are
+	// skipped by harnessSupportsResume / the idle sweep.
+	_, _, managedAgent := isoSetupIdleAgent(t, s, "managed-runtime-skip", string(state.ActivityIdle))
+	_, err = s.(*entadapter.CompositeStore).DB().ExecContext(ctx,
+		"UPDATE agents SET runtime = 'managed:vertex' WHERE id = ?", managedAgent.ID)
+	require.NoError(t, err)
+	loadedManaged, err := s.GetAgent(ctx, managedAgent.ID)
+	require.NoError(t, err)
+	supported, _, _ := srvA.harnessSupportsResume(ctx, loadedManaged)
+	assert.False(t, supported, "managed agent runtimes must not be suspendable")
 }
 
 type isoKeysDispatcher struct {
@@ -1749,4 +1816,263 @@ func TestIdleSuspend_ExecuteAgentKeysOutOfScopePreservesClaim(t *testing.T) {
 	assert.True(t, after.IdleSuspendClaimActive)
 	assert.Equal(t, claimUntil, *after.IdleSuspendClaimUntil)
 	assert.Nil(t, after.LastDeliveryAt, "ExecuteAgentKeys must not stamp last_delivery_at")
+}
+
+// TestIdleSuspend_OwnershipMatrix_StartDispatchRollback pins Writer Audit
+// Row 31: beginStartDispatch (Phase: starting, IfPhase: priorPhase) and
+// (*startDispatch).rollback (Phase: priorPhase, IfPhase: starting, Restore: true)
+// cannot overwrite or clear an active idle-suspend claim on a running row, and a
+// failed resume from suspended(idle) rolls back cleanly to phase=suspended,
+// suspend_reason=idle with retained activity and surviving held messages intact.
+func TestIdleSuspend_OwnershipMatrix_StartDispatchRollback(t *testing.T) {
+	ctx := context.Background()
+	srvA, s := testServer(t)
+	isoEnableIdleSweep(t, srvA, 15*time.Minute)
+
+	// 1. Stale startDispatch rollback against an active running idle claim
+	// rejects on IfPhase: starting without touching idle_suspend_claim_until.
+	_, _, claimedAgent := isoSetupIdleAgent(t, s, "start-dispatch-guard", string(state.ActivityCompleted))
+	_, _, claimUntil := isoClaimIdleDirectly(t, s, claimedAgent, 45*time.Second)
+
+	staleDispatch := &startDispatch{
+		s:                 srvA,
+		agent:             claimedAgent,
+		priorPhase:        string(state.PhaseSuspended),
+		priorActivity:     string(state.ActivityCompleted),
+		priorRestingPhase: string(state.PhaseSuspended),
+		marked:            true,
+	}
+	staleDispatch.rollback(ctx)
+
+	afterStale, err := s.GetAgent(ctx, claimedAgent.ID)
+	require.NoError(t, err)
+	assert.True(t, afterStale.IdleSuspendClaimActive)
+	assert.Equal(t, claimUntil, *afterStale.IdleSuspendClaimUntil)
+	assert.Equal(t, string(state.PhaseRunning), afterStale.Phase)
+
+	// 2. Real failed resume from resting suspended(idle) invokes beginStartDispatch
+	// (Phase: starting) and rollback (Phase: suspended, Restore: true), preserving
+	// suspend_reason=idle, retained activity, and surviving awaiting_session holds.
+	_, _, resumeAgent := isoSetupIdleAgent(t, s, "start-dispatch-resume-fail", string(state.ActivityCompleted))
+	_, err = s.(*entadapter.CompositeStore).DB().ExecContext(ctx,
+		"UPDATE agents SET runtime = 'cloudrun' WHERE id = ?", resumeAgent.ID)
+	require.NoError(t, err)
+	resumeAgent, err = s.GetAgent(ctx, resumeAgent.ID)
+	require.NoError(t, err)
+	heldRow := isoSeedAwaitingSessionMessage(t, s, resumeAgent, "held-across-failed-resume")
+
+	srvA.SetDispatcher(&isoCallbackDispatcher{st: s})
+	srvA.agentIdleSuspendHandler()(ctx)
+	srvA.waitAutoSuspendIdle()
+
+	suspendedRow, err := s.GetAgent(ctx, resumeAgent.ID)
+	require.NoError(t, err)
+	require.Equal(t, string(state.PhaseSuspended), suspendedRow.Phase)
+	require.Equal(t, string(state.SuspendReasonIdle), suspendedRow.SuspendReason)
+	require.Equal(t, string(state.ActivityCompleted), suspendedRow.Activity)
+
+	srvA.SetDispatcher(&isoCallbackDispatcher{
+		st: s,
+		onStart: func(_ context.Context, _ *store.Agent, _ string, _ bool) error {
+			return errors.New("broker start failed")
+		},
+	})
+	u := wakeLifecycleUser(t, s, "iso-start-fail-user", resumeAgent.ProjectID, "agent.lifecycle", "agent.read")
+	rec := requestAsIdentity(t, srvA, authUser(u), http.MethodPost, "/api/v1/agents/"+resumeAgent.ID+"/start", nil)
+	require.NotEqual(t, http.StatusOK, rec.Code)
+
+	rolledBack, err := s.GetAgent(ctx, resumeAgent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseSuspended), rolledBack.Phase)
+	assert.Equal(t, string(state.SuspendReasonIdle), rolledBack.SuspendReason)
+	assert.Equal(t, string(state.ActivityCompleted), rolledBack.Activity)
+
+	gotHeld, err := s.GetMessage(ctx, heldRow.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchAwaitingSession, gotHeld.DispatchState,
+		"failed resume rollback to suspended(idle) must keep awaiting_session held row")
+}
+
+// TestIdleSuspend_SettingsToggleDuringClaimAndStaleReplica verifies Pass-6 R1:
+//   - An active idle claim on the target row is always honoured even if
+//     auto_suspend_idle is toggled off mid-claim (deliveries wait/auto-wake into
+//     the resumed run and never dispatch into the dying container).
+//   - Whenever lifecycle.idle_suspend is on, deliveries stamp last_delivery_at
+//     even on a replica whose auto_suspend_idle snapshot is still false, so a
+//     racing sweep on another replica aborts ClaimIdleSuspend.
+//   - autoSuspendAgent re-reads auto_suspend_idle immediately before
+//     ClaimIdleSuspend (after checkEphemeralWorkspaceBeforeStop) and aborts if
+//     the setting turned off.
+func TestIdleSuspend_SettingsToggleDuringClaimAndStaleReplica(t *testing.T) {
+	t.Run("setting toggled off during active claim still waits and auto-wakes into new run", func(t *testing.T) {
+		ctx := context.Background()
+		srvA, s := testServer(t)
+		isoEnableIdleSweep(t, srvA, 15*time.Minute)
+		_, _, target := isoSetupIdleAgent(t, s, "toggle-off-mid-claim", string(state.ActivityIdle))
+		_, _, sender := isoSetupIdleAgent(t, s, "toggle-off-sender", string(state.ActivityIdle))
+		_, err := s.(*entadapter.CompositeStore).DB().ExecContext(ctx,
+			"UPDATE agents SET project_id = ? WHERE id = ?", target.ProjectID, sender.ID)
+		require.NoError(t, err)
+		sender.ProjectID = target.ProjectID
+		initialRunID := target.RunID
+
+		stopEntered := make(chan struct{})
+		releaseStop := make(chan struct{})
+		var msgRunIDs []string
+		var msgMu sync.Mutex
+
+		disp := &isoCallbackDispatcher{
+			st:               s,
+			autoReadyOnStart: true,
+			onStop: func(_ context.Context, _ *store.Agent) error {
+				close(stopEntered)
+				<-releaseStop
+				return nil
+			},
+			onMsg: func(_ context.Context, a *store.Agent, _ string) error {
+				msgMu.Lock()
+				msgRunIDs = append(msgRunIDs, a.RunID)
+				msgMu.Unlock()
+				return nil
+			},
+		}
+		srvA.SetDispatcher(disp)
+
+		srvA.agentIdleSuspendHandler()(ctx)
+		<-stopEntered
+
+		// Admin toggles auto_suspend_idle OFF while DispatchAgentStop is in flight.
+		srvA.mu.Lock()
+		srvA.config.AutoSuspendIdle = false
+		srvA.mu.Unlock()
+
+		// Non-auto-wake delivery (reconcile.deliverMessage) must honour the active
+		// claim and refuse rather than dispatching into the dying container.
+		err = srvA.deliverMessage(ctx, &store.Message{
+			ID:      uuid.NewString(),
+			AgentID: target.ID,
+			Msg:     "reconcile-during-toggled-off-claim",
+		})
+		require.Error(t, err)
+		assert.Empty(t, disp.deliveredMessages(), "must never dispatch into dying container")
+
+		// Auto-waking DM arrives while AutoSuspendIdle=false and claim is still active:
+		// it must wait for suspended(idle) commit, auto-wake into a new RunID, and
+		// deliver only to the resumed container.
+		dmDone := make(chan error, 1)
+		freshTarget, err := s.GetAgent(ctx, target.ID)
+		require.NoError(t, err)
+		go func() {
+			res, dmErr := srvA.ExecuteAgentDM(ctx, awAgentDMInput(sender, freshTarget, "dm-across-setting-off"))
+			if dmErr != nil {
+				dmDone <- errors.New(dmErr.Message)
+				return
+			}
+			if res == nil || res.Outcome != AgentDMAccepted {
+				dmDone <- fmt.Errorf("unexpected DM result: %+v", res)
+				return
+			}
+			dmDone <- nil
+		}()
+
+		time.Sleep(30 * time.Millisecond)
+		assert.Empty(t, disp.deliveredMessages(), "DM must wait while idle stop is in flight")
+		close(releaseStop)
+
+		require.NoError(t, <-dmDone)
+		srvA.waitAutoSuspendIdle()
+
+		assert.Equal(t, []string{"dm-across-setting-off"}, disp.deliveredMessages())
+		msgMu.Lock()
+		gotRunIDs := append([]string(nil), msgRunIDs...)
+		msgMu.Unlock()
+		require.Len(t, gotRunIDs, 1)
+		assert.NotEqual(t, initialRunID, gotRunIDs[0], "DM must deliver to resumed run, never the dying run")
+	})
+
+	t.Run("setting toggled on while peer replica has stale off snapshot marks delivery and aborts claim", func(t *testing.T) {
+		ctx := context.Background()
+		srvA, s := testServer(t)
+		isoEnableIdleSweep(t, srvA, 15*time.Minute) // Replica A already sees auto_suspend_idle=true
+
+		dispA := &isoCallbackDispatcher{st: s}
+		srvA.SetDispatcher(dispA)
+		dispB := &isoCallbackDispatcher{st: s}
+		srvB := isoSecondReplica(t, s, dispB)
+		// Replica B still has stale auto_suspend_idle=false (propagation lag),
+		// with lifecycle.idle_suspend experiment enabled.
+		srvB.mu.Lock()
+		srvB.config.AutoSuspendIdle = false
+		srvB.mu.Unlock()
+
+		_, _, target := isoSetupIdleAgent(t, s, "stale-replica-mark", string(state.ActivityIdle))
+		_, _, sender := isoSetupIdleAgent(t, s, "stale-replica-sender", string(state.ActivityIdle))
+		_, err := s.(*entadapter.CompositeStore).DB().ExecContext(ctx,
+			"UPDATE agents SET project_id = ? WHERE id = ?", target.ProjectID, sender.ID)
+		require.NoError(t, err)
+		sender.ProjectID = target.ProjectID
+
+		// Replica A has already scanned target as an idle candidate.
+		candidateSnap, err := s.GetAgent(ctx, target.ID)
+		require.NoError(t, err)
+
+		// Before Replica A claims, a DM lands on Replica B (whose AutoSuspendIdle is false).
+		res, dmErr := srvB.ExecuteAgentDM(ctx, awAgentDMInput(sender, target, "dm-on-stale-replica-b"))
+		require.Nil(t, dmErr)
+		require.NotNil(t, res)
+		assert.Equal(t, []string{"dm-on-stale-replica-b"}, dispB.deliveredMessages())
+
+		afterMark, err := s.GetAgent(ctx, target.ID)
+		require.NoError(t, err)
+		require.NotNil(t, afterMark.LastDeliveryAt, "Replica B must stamp last_delivery_at while experiment is on")
+
+		// Replica A's worker runs on its pre-delivery candidate snapshot: ClaimIdleSuspend
+		// sees last_delivery_at >= activity_since and aborts without stopping the container.
+		suspended := srvA.autoSuspendAgent(ctx, *candidateSnap, state.SuspendReasonIdle, dispA)
+		assert.False(t, suspended)
+		assert.Zero(t, dispA.stops.Load())
+
+		final, err := s.GetAgent(ctx, target.ID)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseRunning), final.Phase)
+	})
+
+	t.Run("setting toggled off during workspace check aborts before ClaimIdleSuspend", func(t *testing.T) {
+		ctx := context.Background()
+		srvA, s := testServer(t)
+		isoEnableIdleSweep(t, srvA, 15*time.Minute)
+		_, _, target := isoSetupIdleAgent(t, s, "toggle-off-before-claim", string(state.ActivityIdle))
+		_, err := s.(*entadapter.CompositeStore).DB().ExecContext(ctx,
+			"UPDATE agents SET runtime = 'kubernetes', workspace_placement = ? WHERE id = ?",
+			api.WorkspacePlacementLocal, target.ID)
+		require.NoError(t, err)
+		snap, err := s.GetAgent(ctx, target.ID)
+		require.NoError(t, err)
+
+		var execCalled atomic.Bool
+		disp := &isoCallbackDispatcher{
+			st: s,
+			onExec: func(_ context.Context, _ *store.Agent, _ []string, _ int) (string, int, error) {
+				execCalled.Store(true)
+				// Admin disables auto_suspend_idle while pre-stop workspace check is in flight.
+				srvA.mu.Lock()
+				srvA.config.AutoSuspendIdle = false
+				srvA.mu.Unlock()
+				return "scion-workspace-check commits=1 files=2\n", 0, nil
+			},
+		}
+		srvA.SetDispatcher(disp)
+
+		suspended := srvA.autoSuspendAgent(ctx, *snap, state.SuspendReasonIdle, disp)
+		assert.False(t, suspended)
+		assert.True(t, execCalled.Load(), "pre-stop workspace check must have run")
+		assert.Zero(t, disp.stops.Load(), "worker must re-read setting before ClaimIdleSuspend and skip stop")
+
+		after, err := s.GetAgent(ctx, target.ID)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseRunning), after.Phase)
+		assert.Equal(t, store.RunIntentRunning, after.RunIntent)
+		assert.Nil(t, after.IdleSuspendClaimUntil)
+		assert.Empty(t, after.WorkspaceAtStop, "aborted pre-claim workspace_at_stop record must be cleared")
+	})
 }

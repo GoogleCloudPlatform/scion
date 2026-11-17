@@ -1572,11 +1572,6 @@ func (p *MessageBrokerProxy) deliveryMarker() agentDeliveryMarker {
 }
 
 func (p *MessageBrokerProxy) validateAgentDeliverable(agent *store.Agent) *AgentDMError {
-	if agent != nil && agent.IdleSuspendClaimActive && !p.idleSuspendGateActive() {
-		cp := *agent
-		cp.IdleSuspendClaimActive = false
-		agent = &cp
-	}
 	return validateAgentDeliverable(agent)
 }
 

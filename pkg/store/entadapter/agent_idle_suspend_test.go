@@ -248,6 +248,31 @@ func TestAgentStore_ClaimIdleSuspend_AndDeliveryHandshake(t *testing.T) {
 		assert.ErrorIs(t, err, store.ErrIdleSuspendPrecondition)
 	})
 
+	t.Run("R2: ClaimIdleSuspend rejects run_intent!=running and accepts NULL as running", func(t *testing.T) {
+		// Reviewer reproducer: a user stop recorded run_intent=stopped while
+		// DispatchAgentStop failed (leaving phase=running). ClaimIdleSuspend must
+		// refuse so the agent never becomes auto-wakeable suspended(idle).
+		aStopped, condStopped := makeEligible("intent-already-stopped")
+		_, _, err := s.SwapRunIntent(ctx, aStopped.ID, store.RunIntentStopped)
+		require.NoError(t, err)
+		_, _, _, err = s.ClaimIdleSuspend(ctx, aStopped.ID, condStopped)
+		assert.ErrorIs(t, err, store.ErrIdleSuspendPrecondition)
+
+		afterStopped, err := s.GetAgent(ctx, aStopped.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.RunIntentStopped, afterStopped.RunIntent)
+		assert.Nil(t, afterStopped.IdleSuspendClaimUntil)
+
+		// Legacy NULL run_intent is treated as running, matching BackfillRunIntent.
+		aNull, condNull := makeEligible("intent-null-running")
+		_, err = s.client.Agent.UpdateOneID(uuid.MustParse(aNull.ID)).ClearRunIntent().Save(ctx)
+		require.NoError(t, err)
+		prior, _, cu, err := s.ClaimIdleSuspend(ctx, aNull.ID, condNull)
+		require.NoError(t, err)
+		assert.Equal(t, store.RunIntent(""), prior)
+		assert.False(t, cu.IsZero())
+	})
+
 	t.Run("claim before delivery leaves claim visible and commits across stopping and stopped reports", func(t *testing.T) {
 		a, cond := makeEligible("claim-first")
 		prior, at, claimUntil, err := s.ClaimIdleSuspend(ctx, a.ID, cond)
@@ -778,9 +803,10 @@ func TestAgentStore_ClaimAgentStartWakeYieldsToActiveIdleClaim(t *testing.T) {
 	time.Sleep(15 * time.Millisecond)
 
 	listed, err := s.ListAgents(ctx, store.AgentFilter{
-		ProjectID:   projectID,
-		Phase:       string(state.PhaseRunning),
-		OrRunIntent: string(store.RunIntentRunning),
+		ProjectID:         projectID,
+		Phase:             string(state.PhaseRunning),
+		OrRunIntent:       string(store.RunIntentRunning),
+		OrActiveIdleClaim: true,
 	}, store.ListOptions{})
 	require.NoError(t, err)
 	listedMap := map[string]store.Agent{}
@@ -790,6 +816,20 @@ func TestAgentStore_ClaimAgentStartWakeYieldsToActiveIdleClaim(t *testing.T) {
 	require.Contains(t, listedMap, aActiveFilter.ID, "active idle claim must be matched by stop-all filter")
 	assert.True(t, listedMap[aActiveFilter.ID].IdleSuspendClaimActive, "ListAgents must populate IdleSuspendClaimActive")
 	assert.NotContains(t, listedMap, aExpiredFilter.ID, "expired idle claim must NOT be matched by stop-all filter")
+
+	// With OrActiveIdleClaim=false (lifecycle.idle_suspend off), ListAgents skips
+	// the active-claim OR branch and incurs no extra store-clock query.
+	listedOff, err := s.ListAgents(ctx, store.AgentFilter{
+		ProjectID:         projectID,
+		Phase:             string(state.PhaseRunning),
+		OrRunIntent:       string(store.RunIntentRunning),
+		OrActiveIdleClaim: false,
+	}, store.ListOptions{})
+	require.NoError(t, err)
+	for _, item := range listedOff.Items {
+		assert.NotEqual(t, aActiveFilter.ID, item.ID, "OrActiveIdleClaim=false must omit stopped row with active claim")
+		assert.NotEqual(t, aExpiredFilter.ID, item.ID)
+	}
 
 	// 4. Held awaiting_session messages survive active idle claim and suspended(idle),
 	// rebind cleanly via RebindHeldMessagesLaunch, and still expire on user suspend.
