@@ -2028,7 +2028,7 @@ func TestIdleSuspend_SettingsToggleDuringClaimAndStaleReplica(t *testing.T) {
 
 		// Replica A's worker runs on its pre-delivery candidate snapshot: ClaimIdleSuspend
 		// sees last_delivery_at >= activity_since and aborts without stopping the container.
-		suspended := srvA.autoSuspendAgent(ctx, *candidateSnap, state.SuspendReasonIdle, dispA)
+		suspended := srvA.autoSuspendAgent(ctx, dispA, candidateSnap, state.SuspendReasonIdle)
 		assert.False(t, suspended)
 		assert.Zero(t, dispA.stops.Load())
 
@@ -2063,7 +2063,7 @@ func TestIdleSuspend_SettingsToggleDuringClaimAndStaleReplica(t *testing.T) {
 		}
 		srvA.SetDispatcher(disp)
 
-		suspended := srvA.autoSuspendAgent(ctx, *snap, state.SuspendReasonIdle, disp)
+		suspended := srvA.autoSuspendAgent(ctx, disp, snap, state.SuspendReasonIdle)
 		assert.False(t, suspended)
 		assert.True(t, execCalled.Load(), "pre-stop workspace check must have run")
 		assert.Zero(t, disp.stops.Load(), "worker must re-read setting before ClaimIdleSuspend and skip stop")
@@ -2073,6 +2073,6 @@ func TestIdleSuspend_SettingsToggleDuringClaimAndStaleReplica(t *testing.T) {
 		assert.Equal(t, string(state.PhaseRunning), after.Phase)
 		assert.Equal(t, store.RunIntentRunning, after.RunIntent)
 		assert.Nil(t, after.IdleSuspendClaimUntil)
-		assert.Empty(t, after.WorkspaceAtStop, "aborted pre-claim workspace_at_stop record must be cleared")
+		assert.Nil(t, recordedWorkspaceAtStop(after), "aborted pre-claim workspace-at-stop annotation must be cleared")
 	})
 }
