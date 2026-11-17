@@ -3665,6 +3665,7 @@ func (s *Server) handleConversationInteragent(w http.ResponseWriter, r *http.Req
 	seen := make(map[string]bool, len(result.Items))
 	filtered := make([]store.Message, 0, len(result.Items)+len(senderResult.Items))
 	viewerID := user.ID()
+	allowedByConv := make(map[string]bool)
 	addMsg := func(m store.Message) {
 		if !strings.HasPrefix(m.Sender, "agent:") || !strings.HasPrefix(m.Recipient, "agent:") {
 			return
@@ -3673,18 +3674,8 @@ func (s *Server) handleConversationInteragent(w http.ResponseWriter, r *http.Req
 			return
 		}
 		seen[m.ID] = true
-		switch {
-		case isCrossProjectRow(&m) && m.ConversationID == "":
-			// No conversation to check participation against: fail closed.
+		if !s.interagentBodyVisible(ctx, viewerID, &m, allowedByConv) {
 			m.Msg = ""
-		case ClassifyLegacyViewQuery(&m) == LegacyViewCanonical && m.ConversationID != "":
-			decision := s.AuthorizeCrossProjectContentAccess(
-				ctx, viewerID, m.ConversationID, ContentSurfaceInteragentView,
-			)
-			if !decision.Allowed {
-				// Strip body — participation not verified.
-				m.Msg = ""
-			}
 		}
 		filtered = append(filtered, m)
 	}
@@ -3695,7 +3686,47 @@ func (s *Server) handleConversationInteragent(w http.ResponseWriter, r *http.Req
 		addMsg(m)
 	}
 
+	slices.SortFunc(filtered, func(a, b store.Message) int {
+		if c := b.CreatedAt.Compare(a.CreatedAt); c != 0 {
+			return c
+		}
+		return strings.Compare(b.ID, a.ID)
+	})
+	if len(filtered) > limit {
+		filtered = filtered[:limit]
+	}
+
 	writeJSON(w, http.StatusOK, interagentResponse{Messages: filtered})
+}
+
+// interagentBodyVisible reports whether viewerID may see the body of an
+// inter-agent message row, memoizing per-conversation cross-project decisions
+// in allowedByConv when non-nil.
+func (s *Server) interagentBodyVisible(
+	ctx context.Context,
+	viewerID string,
+	m *store.Message,
+	allowedByConv map[string]bool,
+) bool {
+	switch {
+	case isCrossProjectRow(m) && m.ConversationID == "":
+		// No conversation to check participation against: fail closed.
+		return false
+	case ClassifyLegacyViewQuery(m) == LegacyViewCanonical && m.ConversationID != "":
+		allowed, ok := allowedByConv[m.ConversationID]
+		if !ok {
+			decision := s.AuthorizeCrossProjectContentAccess(
+				ctx, viewerID, m.ConversationID, ContentSurfaceInteragentView,
+			)
+			allowed = decision.Allowed
+			if allowedByConv != nil {
+				allowedByConv[m.ConversationID] = allowed
+			}
+		}
+		return allowed
+	default:
+		return true
+	}
 }
 
 // interagentResponse is the response for the interagent endpoint.
