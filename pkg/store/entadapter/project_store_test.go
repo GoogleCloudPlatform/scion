@@ -300,8 +300,11 @@ func TestProject_ListFilters(t *testing.T) {
 	ctx := context.Background()
 
 	owner := uuid.NewString()
+	instA := int64(77001)
+	instB := int64(77002)
 	pub := newProject(1)
 	pub.OwnerID = owner
+	pub.GitHubInstallationID = &instA
 	require.NoError(t, ps.CreateProject(ctx, pub))
 
 	priv := newProject(2)
@@ -318,6 +321,17 @@ func TestProject_ListFilters(t *testing.T) {
 	byName, err := ps.ListProjects(ctx, store.ProjectFilter{Name: pub.Name}, store.ListOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, 1, byName.TotalCount)
+
+	byInstA, err := ps.ListProjects(ctx, store.ProjectFilter{GitHubInstallationID: &instA}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, 1, byInstA.TotalCount)
+	require.Len(t, byInstA.Items, 1)
+	assert.Equal(t, pub.ID, byInstA.Items[0].ID)
+
+	byInstB, err := ps.ListProjects(ctx, store.ProjectFilter{GitHubInstallationID: &instB}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, 0, byInstB.TotalCount)
+	assert.Empty(t, byInstB.Items)
 
 	limited, err := ps.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 1})
 	require.NoError(t, err)

@@ -1075,6 +1075,7 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 				"agent.delegation.credential.revoke", "agent.delegation.list",
 				"agent.delegation.read", "agent.delegation.revoke",
 				"gcp_service_account.assign",
+				"github_trigger.comment", "github_trigger.configure",
 				"harness_config.create", "harness_config.delete",
 				"harness_config.list", "harness_config.read", "harness_config.update",
 				"project.chat_post", "project.delete", "project.list", "project.manage", "project.manage_visitors",
@@ -1098,6 +1099,7 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 				"agent.delegation.credential.revoke", "agent.delegation.list",
 				"agent.delegation.read", "agent.delegation.revoke",
 				"gcp_service_account.assign",
+				"github_trigger.comment", "github_trigger.configure",
 				"harness_config.create",
 				"harness_config.list", "harness_config.read", "harness_config.update",
 				"project.chat_post", "project.list", "project.manage", "project.manage_visitors",
@@ -1117,6 +1119,7 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 				"artifact.create", "artifact.read",
 				"agent.create", "agent.list", "agent.read",
 				"gcp_service_account.assign",
+				"github_trigger.comment",
 				"harness_config.create", "harness_config.list", "harness_config.read",
 				"project.chat_post", "project.list", "project.read",
 				"scheduled_event.create", "scheduled_event.list", "scheduled_event.read",
@@ -1148,9 +1151,9 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 // TestProjectRoleRevisions verifies the current revision of each project role.
 func TestProjectRoleRevisions(t *testing.T) {
 	wantRevisions := map[string]int{
-		store.ProjectRoleOwner:   11,
-		store.ProjectRoleAdmin:   9,
-		store.ProjectRoleMember:  6,
+		store.ProjectRoleOwner:   12,
+		store.ProjectRoleAdmin:   10,
+		store.ProjectRoleMember:  7,
 		store.ProjectRoleVisitor: 1,
 		store.ProjectRoleViewer:  1,
 	}
@@ -1175,9 +1178,9 @@ func TestProjectRoleReconciliationConverges(t *testing.T) {
 		revision    int
 		permissions func() []string
 	}{
-		{store.ProjectRoleOwner, 11, projectOwnerPermissionIDs},
-		{store.ProjectRoleAdmin, 9, projectAdminPermissionIDs},
-		{store.ProjectRoleMember, 6, projectMemberCuratedPermissionIDs},
+		{store.ProjectRoleOwner, 12, projectOwnerPermissionIDs},
+		{store.ProjectRoleAdmin, 10, projectAdminPermissionIDs},
+		{store.ProjectRoleMember, 7, projectMemberCuratedPermissionIDs},
 		{store.ProjectRoleVisitor, 1, projectVisitorPermissionIDs},
 		{store.ProjectRoleViewer, 1, projectViewerPermissionIDs},
 	}

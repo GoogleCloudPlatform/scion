@@ -193,6 +193,9 @@ var ProjectTargetApplicability = map[string]bool{
 	"scheduled_event.read": true, "scheduled_event.list": true, "scheduled_event.create": true,
 	"scheduled_event.delete": true, "scheduled_event.update": true,
 
+	// github_trigger.* — always scoped to an existing project.
+	"github_trigger.comment": true, "github_trigger.configure": true,
+
 	"project.secret_read": true,
 
 	// Material delivery and runtime-use permissions (ptone/scion#2129): every
@@ -316,6 +319,10 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	"scheduled_event.read": {BoundaryKindProject, BoundaryKindHub}, "scheduled_event.list": {BoundaryKindProject, BoundaryKindHub},
 	"scheduled_event.update": {BoundaryKindProject, BoundaryKindHub}, "scheduled_event.delete": {BoundaryKindProject, BoundaryKindHub},
 	"scheduled_event.create": {BoundaryKindProject, BoundaryKindHub},
+
+	// github_trigger.* act on one project's GitHub App trigger actions and
+	// source settings.
+	"github_trigger.comment": {BoundaryKindProject, BoundaryKindHub}, "github_trigger.configure": {BoundaryKindProject, BoundaryKindHub},
 
 	// hub.* integration and observability permissions act on the hub
 	// itself, so their selectors are hub-only.
@@ -537,6 +544,9 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	"scheduled_event.read": {TargetClassKindProjectScoped}, "scheduled_event.list": {TargetClassKindProjectScoped},
 	"scheduled_event.update": {TargetClassKindProjectScoped}, "scheduled_event.delete": {TargetClassKindProjectScoped},
 	"scheduled_event.create": {TargetClassKindProjectScoped},
+
+	// github_trigger.* target a project's GitHub trigger actions and source settings.
+	"github_trigger.comment": {TargetClassKindProjectScoped}, "github_trigger.configure": {TargetClassKindProjectScoped},
 
 	// hub.* integration and observability permissions target the hub
 	// instance.

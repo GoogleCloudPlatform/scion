@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 401
+**Operations:** 403
 
 ## Table of Contents
 
@@ -117,6 +117,8 @@
 - [project.github.installation.bind](#projectgithubinstallationbind) — Bind a GitHub App installation to a project (admin only: also requires hub.github_app.update)
 - [project.github.write](#projectgithubwrite) — Change a project's GitHub installation, status check, GitHub permissions and git identity
 - [project.members.assignableroles](#projectmembersassignableroles) — List the roles the caller may assign in a project
+- [project.triggersources.github.read](#projecttriggersourcesgithubread) — Read a project's GitHub trigger source settings, readiness, and repository routing status
+- [project.triggersources.github.update](#projecttriggersourcesgithubupdate) — Update a project's GitHub trigger source unmatched-command reply settings
 - [agent.message.send](#agentmessagesend) — Send a message to an agent
 - [inbox.message.read](#inboxmessageread) — List and read the caller's own inbox messages. A project token lists only messages of its boundary project
 - [inbox.message.write](#inboxmessagewrite) — Mark the caller's own inbox messages read. Mark-all by a project token touches only messages of its boundary project
@@ -4792,6 +4794,78 @@
 ### Tests
 
 - `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## project.triggersources.github.read
+
+**Domain:** project
+
+**Description:** Read a project's GitHub trigger source settings, readiness, and repository routing status
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/projects/{id}/trigger-sources/github` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestProjectGitHubTriggerSettings_ScopedTokens`
+
+---
+
+## project.triggersources.github.update
+
+**Domain:** project
+
+**Description:** Update a project's GitHub trigger source unmatched-command reply settings
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/projects/{id}/trigger-sources/github` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `github_trigger.configure`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `update-resource`
+
+### Audit
+
+- **Event Type:** `project.github_trigger_settings.update`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** unmatched_command_reply, unmatched_command_text_bytes
+- **After Fields:** unmatched_command_reply, unmatched_command_text_bytes
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestProjectGitHubTriggerSettings_ScopedTokens`
 
 ---
 

@@ -149,6 +149,10 @@ var expectedSelectorRegistry = map[string][]string{
 	"scheduled_event:update": {"scheduled_event.update"},
 	"scheduled_event:create": {"scheduled_event.create"},
 
+	// github_trigger selectors (App comment action and project source settings).
+	"github_trigger:comment":   {"github_trigger.comment"},
+	"github_trigger:configure": {"github_trigger.configure"},
+
 	// Identity governance reads and hub audit (hub boundary only).
 	"role:read":              {"role.read"},
 	"role_binding:read":      {"role_binding.read"},

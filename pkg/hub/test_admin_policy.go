@@ -285,6 +285,17 @@ var testAdminPermissionPolicy = map[string]testAdminPolicy{
 	"scheduled_event.delete":  testAdminPolicyAllow,
 	"scheduled_event.update":  testAdminPolicyAllow,
 
+	// GitHub App triggers (ptone/scion#8090): github_trigger.comment is held
+	// by the built-in project-member, project-admin, and project-owner roles;
+	// like project.chat_post, keeping it allow preserves test-admin group
+	// delegation of project-member while exercising it still requires the
+	// hub.github_triggers experiment (deny for test admins) plus an authorized
+	// GitHub App association on a test-class hub. Configuring project GitHub
+	// trigger source settings (github_trigger.configure) stays deny for direct
+	// exercise and grantable at project scope (testAdminGrantableAtProjectScope).
+	"github_trigger.comment":   testAdminPolicyAllow,
+	"github_trigger.configure": testAdminPolicyDeny,
+
 	// Material delivery and runtime retrieval of secret values.
 	"secret.deliver":          testAdminPolicyDeny,
 	"env_var.deliver":         testAdminPolicyDeny,
@@ -317,6 +328,7 @@ var testAdminGrantableAtProjectScope = map[string]bool{
 	"agent.delegation.list":              true,
 	"agent.delegation.read":              true,
 	"project.manage_visitors":            true,
+	"github_trigger.configure":           true,
 }
 
 // testAdminGrantRefuses reports whether an admin-kind test identity is

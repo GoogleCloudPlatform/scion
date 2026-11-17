@@ -110,6 +110,7 @@ const (
 	ErrCodeStaleAuthorizationPreview        = apierr.ErrCodeStaleAuthorizationPreview
 	ErrCodeSubjectNotFound                  = apierr.ErrCodeSubjectNotFound
 	ErrCodeTargetRoleProtected              = apierr.ErrCodeTargetRoleProtected
+	ErrCodeProtectedAnnotation              = apierr.ErrCodeProtectedAnnotation
 	ErrCodeTemplateConflict                 = apierr.ErrCodeTemplateConflict
 	ErrCodeThreadProjectRequired            = apierr.ErrCodeThreadProjectRequired
 	ErrCodeUnauthorized                     = apierr.ErrCodeUnauthorized

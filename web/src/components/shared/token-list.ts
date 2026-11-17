@@ -201,6 +201,7 @@ const RESOURCE_TYPE_LABELS: Record<string, string> = {
   artifact: 'Artifact',
   broker: 'Broker',
   gcp_service_account: 'GCP Service Account',
+  github_trigger: 'GitHub Trigger',
   group: 'Group',
   harness_config: 'Harness Config',
   hub: 'Hub',
@@ -416,6 +417,20 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     label: 'gcp_service_account:verify',
     description: 'Verify GCP service accounts',
     resource: 'gcp_service_account',
+    isAlias: false,
+  },
+  {
+    value: 'github_trigger:comment',
+    label: 'github_trigger:comment',
+    description: 'Post comments on GitHub as the GitHub App through project triggers',
+    resource: 'github_trigger',
+    isAlias: false,
+  },
+  {
+    value: 'github_trigger:configure',
+    label: 'github_trigger:configure',
+    description: 'Configure GitHub trigger source settings for a project',
+    resource: 'github_trigger',
     isAlias: false,
   },
   {

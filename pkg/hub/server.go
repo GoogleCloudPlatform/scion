@@ -2732,6 +2732,14 @@ type Server struct {
 	// githubRepoAccessCheck performs that check; nil selects
 	// githubapp.CheckUserRepoAccess. Tests replace it at the GitHub boundary.
 	githubRepoAccessCheck func(ctx context.Context, apiBaseURL, userToken, owner, repo string) (githubapp.RepoAccess, error)
+	// githubTokenCache caches hub-internal Stage 3 installation tokens minted
+	// via MintGitHubAppTokenWithPermissions in memory keyed by
+	// (project_id, permission_set) until expires_at - 5m
+	// (github_trigger_client_support.go).
+	githubTokenCache githubInstallationTokenCache
+	// githubCommentLimiter bounds outbound GitHub App comments per project
+	// at 1/s, burst 5 (github_trigger_client_support.go).
+	githubCommentLimiter githubCommentRateLimiter
 
 	// Shared HTTP client for federation proxy calls (no redirect following).
 	federationClient *http.Client

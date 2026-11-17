@@ -609,10 +609,11 @@ func (c *githubAssociationReportCache) invalidate(projectID string) {
 }
 
 // invalidateGitHubAssociation drops every cached association outcome for
-// projectID: the mint path's access checks and the admin report's entry.
-// Every association change goes through here.
+// projectID: the mint path's access checks, cached installation tokens, and
+// the admin report's entry. Every association change goes through here.
 func (s *Server) invalidateGitHubAssociation(projectID string) {
 	s.githubAccessCache.invalidateProject(projectID)
+	s.githubTokenCache.invalidateProject(projectID)
 	s.githubAssociationReportCache.invalidate(projectID)
 }
 

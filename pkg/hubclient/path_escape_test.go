@@ -299,6 +299,12 @@ func TestPathEscape_Projects(t *testing.T) {
 			func(ctx context.Context, c Client, id string) { _ = p(c).DeleteAgent(ctx, id, id, nil) }},
 		{"Clone", "/api/v1/projects/{id}/clone",
 			func(ctx context.Context, c Client, id string) { _, _ = p(c).Clone(ctx, id, CloneProjectRequest{}) }},
+		{"GetGitHubTriggerSettings", "/api/v1/projects/{id}/trigger-sources/github",
+			func(ctx context.Context, c Client, id string) { _, _ = p(c).GetGitHubTriggerSettings(ctx, id) }},
+		{"UpdateGitHubTriggerSettings", "/api/v1/projects/{id}/trigger-sources/github",
+			func(ctx context.Context, c Client, id string) {
+				_, _ = p(c).UpdateGitHubTriggerSettings(ctx, id, &UpdateProjectGitHubTriggerSettingsRequest{})
+			}},
 	})
 }
 

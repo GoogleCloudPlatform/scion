@@ -20,6 +20,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -71,6 +73,9 @@ const (
 	// HubEndpointForConduitCheck is the hub host the conduit relay refuses
 	// as its internal_advertise address in hosted HA.
 	HubEndpointForConduitCheck HubEndpointUse = "conduit_check"
+	// HubEndpointForAgentLinks is the base URL of user-facing web agent
+	// detail links (for example in trigger acknowledgement comments).
+	HubEndpointForAgentLinks HubEndpointUse = "agent_links"
 )
 
 // hubEndpointKind selects one of the two resolved endpoints.
@@ -99,6 +104,7 @@ var hubEndpointUses = map[HubEndpointUse]hubEndpointKind{
 	HubEndpointForOIDCIssuer:        hubEndpointPublic,
 	HubEndpointForTransportAudience: hubEndpointPublic,
 	HubEndpointForConduitCheck:      hubEndpointPublic,
+	HubEndpointForAgentLinks:        hubEndpointPublic,
 }
 
 // Public endpoint sources reported by HubEndpoints.PublicSource besides the
@@ -221,6 +227,21 @@ func (s *Server) HubEndpoints() HubEndpoints {
 // hubEndpointUses).
 func (s *Server) HubEndpointFor(use HubEndpointUse) string {
 	return s.HubEndpoints().For(use)
+}
+
+// AgentWebURL composes the user-facing web URL for an agent detail page
+// (`<public-base>/agents/<agentID>`, matching web/src/client/main.ts).
+// It returns "" when either the resolved base endpoint or agentID is empty.
+func (s *Server) AgentWebURL(agentID string) string {
+	agentID = strings.TrimSpace(agentID)
+	if agentID == "" {
+		return ""
+	}
+	base := strings.TrimRight(strings.TrimSpace(s.HubEndpointFor(HubEndpointForAgentLinks)), "/")
+	if base == "" {
+		return ""
+	}
+	return base + "/agents/" + url.PathEscape(agentID)
 }
 
 // PluginHubURLs returns the two hub URLs handed to broker plugins
