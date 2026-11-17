@@ -1195,7 +1195,9 @@ func TestHoldA2_5_FailurePathsRevalidationAndTransientFaultRehold(t *testing.T) 
 		got := f.waitMessageState(t, m.ID, store.MessageDispatchFailed)
 		require.NotNil(t, got.DispatchFailureReason)
 		assert.Equal(t, holdFailReasonCannotReceiveConduit, *got.DispatchFailureReason)
-		require.Len(t, f.disp.notices(), 1)
+		require.Eventually(t, func() bool {
+			return len(f.disp.notices()) == 1
+		}, 5*time.Second, 10*time.Millisecond, "sender failure notice must arrive after async expiry commits")
 		assert.Contains(t, f.disp.notices()[0], holdFailReasonCannotReceiveConduit)
 	})
 
@@ -1301,21 +1303,54 @@ func TestHoldA2_5_FailurePathsRevalidationAndTransientFaultRehold(t *testing.T) 
 
 	t.Run("session_drop_during_redrive_reholds_with_original_hold_until", func(t *testing.T) {
 		f := newHoldE2EFixture(t)
+		ctx := context.Background()
 		origHoldUntil := time.Now().UTC().Add(4 * time.Minute).Truncate(time.Millisecond)
 		m := f.seedHeldMessage(t, "agent:"+f.agent.Slug, f.agent.ID, "drop-mid-redrive", origHoldUntil)
 
-		var ca *connectableControlAgent
+		deliverEntered := make(chan struct{})
+		releaseDeliver := make(chan struct{})
+		var releaseOnce sync.Once
+		release := func() { releaseOnce.Do(func() { close(releaseDeliver) }) }
+		t.Cleanup(release)
+
 		var dropOnce sync.Once
 		f.disp.mu.Lock()
 		f.disp.beforeDeliver = func(*agentcontrol.DeliverRequest) {
 			dropOnce.Do(func() {
-				// Drop the Conduit session right before /deliver hits the Hub!
-				ca.stop(t)
+				close(deliverEntered)
+				<-releaseDeliver
 			})
 		}
 		f.disp.mu.Unlock()
 
-		ca = f.connectDeliverSession(t, f.public.URL, true, nil)
+		ca := f.connectDeliverSession(t, f.public.URL, true, nil)
+
+		select {
+		case <-deliverEntered:
+		case <-time.After(10 * time.Second):
+			t.Fatal("re-drive never entered /deliver")
+		}
+
+		// Confirm re-drive claimed the held row to dispatched before /deliver runs,
+		// so waitMessageState below cannot pass on the initial awaiting_session state.
+		claimed, err := f.store.GetMessage(ctx, m.ID)
+		require.NoError(t, err)
+		require.Equal(t, store.MessageDispatchDispatched, claimed.DispatchState)
+
+		// Drop the Conduit session and wait for the Hub relay to observe the close
+		// and evict the session before /deliver hits the Hub; otherwise under
+		// -test.cpu=1 /deliver writes the RPC frame to a half-closed socket and
+		// rightly treats the post-send close as 504 outcome=unknown (partial).
+		ca.stop(t)
+		require.Eventually(t, func() bool {
+			st, err := f.srv.agentConduitDeliverSessionState(ctx, f.launched)
+			if err != nil || st != agentDeliverSessionNone {
+				return false
+			}
+			ps, err := f.sharedRegStore.ListPrincipalSessions(ctx, registry.PrincipalAgent, f.launched.ID)
+			return err == nil && len(ps.Sessions) == 0
+		}, 10*time.Second, 10*time.Millisecond, "hub relay must evict closed conduit session")
+		release()
 
 		// Broker's /deliver gets 503 no_session, reports code=awaiting_session,
 		// and row returns to awaiting_session with the ORIGINAL HoldUntil!
@@ -1323,6 +1358,7 @@ func TestHoldA2_5_FailurePathsRevalidationAndTransientFaultRehold(t *testing.T) 
 		require.NotNil(t, reheld.HoldUntil)
 		assert.WithinDuration(t, origHoldUntil, *reheld.HoldUntil, 50*time.Millisecond,
 			"A2-S3: re-hold after session drop must preserve original hold_until, never reset to now+10m")
+		assert.Empty(t, f.disp.notices())
 	})
 
 	t.Run("transient_lookup_fault_reholds_batch_tail_preserving_order", func(t *testing.T) {
