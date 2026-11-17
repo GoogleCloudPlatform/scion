@@ -167,12 +167,6 @@ func newGitHubTriggerSettingsAuditRecord(
 		AfterSummary:  formatGitHubTriggerSettingsAuditSummary(afterReply, afterTextBytes),
 	}
 	auditActorFromContext(ctx).ApplyActor(rec)
-	if rec.ActorPrincipalKind == "" {
-		rec.ActorPrincipalKind = "system"
-	}
-	if rec.ActorPrincipalID == "" {
-		rec.ActorPrincipalID = "unknown"
-	}
 	return rec
 }
 
@@ -262,8 +256,9 @@ func (s *Server) persistProjectGitHubTriggerSettings(
 	req ProjectGitHubTriggerSettingsUpdateRequest,
 ) {
 	ctx := r.Context()
-	actorID := strings.TrimSpace(auditActorFromContext(ctx).PrincipalID)
-	if actorID == "" {
+	actor := auditActorFromContext(ctx)
+	actorID := strings.TrimSpace(actor.PrincipalID)
+	if strings.TrimSpace(actor.PrincipalKind) == "" || actorID == "" {
 		InternalError(w)
 		return
 	}
