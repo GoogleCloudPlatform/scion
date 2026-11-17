@@ -559,6 +559,9 @@ func (s *Server) setEnvVar(w http.ResponseWriter, r *http.Request, key string) {
 		if s.refuseInternalSecretMutation(w, ctx, key, scope, scopeID) {
 			return
 		}
+		if rejectWebhookEndpointReservedSecretWrite(w, key) {
+			return
+		}
 
 		input := &secret.SetSecretInput{
 			Name:          key,
@@ -597,6 +600,9 @@ func (s *Server) setEnvVar(w http.ResponseWriter, r *http.Request, key string) {
 	}
 
 	// Plain env var write
+	if rejectWebhookEndpointReservedSecretWrite(w, key) {
+		return
+	}
 	injectionMode := req.InjectionMode
 	if injectionMode == "" {
 		injectionMode = store.InjectionModeAsNeeded
@@ -1207,6 +1213,9 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 	if s.refuseInternalSecretMutation(w, ctx, key, scope, scopeID) {
 		return
 	}
+	if rejectWebhookEndpointReservedSecretWrite(w, key) {
+		return
+	}
 
 	// allowProgeny is only valid on user-scoped secrets.
 	// Unlike env vars, secrets do NOT require injectionMode=always when
@@ -1301,6 +1310,9 @@ func (s *Server) patchSecretValidateAndUpdate(w http.ResponseWriter, r *http.Req
 	}
 
 	if s.refuseInternalSecretMutation(w, ctx, key, scope, scopeID) {
+		return
+	}
+	if rejectWebhookEndpointReservedSecretWrite(w, key) {
 		return
 	}
 
@@ -1687,6 +1699,9 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 	}
 
 	if s.refuseInternalSecretMutation(w, ctx, key, scope, scopeID) {
+		return
+	}
+	if rejectWebhookEndpointReservedSecretWrite(w, key) {
 		return
 	}
 
@@ -2111,6 +2126,9 @@ func (s *Server) handleScopedEnvVarByKey(w http.ResponseWriter, r *http.Request,
 			if s.refuseInternalSecretMutation(w, ctx, key, scope, scopeID) {
 				return
 			}
+			if rejectWebhookEndpointReservedSecretWrite(w, key) {
+				return
+			}
 			input := &secret.SetSecretInput{
 				Name:          key,
 				Value:         req.Value,
@@ -2140,6 +2158,9 @@ func (s *Server) handleScopedEnvVarByKey(w http.ResponseWriter, r *http.Request,
 			return
 		}
 
+		if rejectWebhookEndpointReservedSecretWrite(w, key) {
+			return
+		}
 		injectionMode := req.InjectionMode
 		if injectionMode == "" {
 			injectionMode = store.InjectionModeAsNeeded
@@ -2419,6 +2440,9 @@ func (s *Server) handleScopedSecretByKey(w http.ResponseWriter, r *http.Request,
 			}
 		}
 		if s.refuseInternalSecretMutation(w, ctx, key, scope, scopeID) {
+			return
+		}
+		if rejectWebhookEndpointReservedSecretWrite(w, key) {
 			return
 		}
 		input := &secret.SetSecretInput{

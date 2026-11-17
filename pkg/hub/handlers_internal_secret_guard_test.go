@@ -249,3 +249,118 @@ func TestWebhookEndpointSecretHelpers_RoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, plain, unsealed)
 }
+
+func TestWebhookEndpointReservedSecretPrefix_RefusedAcrossGenericWrites(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	srv.SetSecretBackend(secret.NewLocalBackendWithCipher(s, srv.hubID, srv.cipher))
+
+	project := &store.Project{
+		ID:      tid("proj_werp"),
+		Name:    "Webhook Reserved Prefix Project",
+		Slug:    "webhook-reserved-prefix-project",
+		OwnerID: DevUserID,
+		Created: time.Now(),
+		Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	agent := &store.Agent{
+		ID:           tid("agent_werp"),
+		Slug:         "werp-agent",
+		Name:         "WERP Agent",
+		ProjectID:    project.ID,
+		OwnerID:      DevUserID,
+		Phase:        string(state.PhaseRunning),
+		StateVersion: 1,
+		Created:      time.Now(),
+		Updated:      time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+	agentToken, err := srv.agentTokenService.GenerateAgentToken(agent.ID, project.ID, []AgentTokenScope{ScopeProjectSecretRead}, []string{DevUserID})
+	require.NoError(t, err)
+
+	// Unoccupied future rotation key (.v2) and sanitized/case-folded colliding forms.
+	reservedKeys := []string{
+		store.WebhookEndpointSecretKey(project.ID, tid("ep_werp"), 2),
+		"webhook_endpoint.custom.key",
+		"WEBHOOK_ENDPOINT." + project.ID + ".v2",
+		"webhook_endpoint-" + project.ID + "-v2",
+	}
+
+	assertValidationReserved := func(t *testing.T, code int, body []byte) {
+		t.Helper()
+		require.Equal(t, http.StatusBadRequest, code, string(body))
+		var errResp ErrorResponse
+		require.NoError(t, json.Unmarshal(body, &errResp), string(body))
+		assert.Equal(t, ErrCodeValidationError, errResp.Error.Code)
+		assert.Contains(t, errResp.Error.Message, "webhook_endpoint.")
+	}
+
+	for _, key := range reservedKeys {
+		escaped := url.PathEscape(key)
+
+		// Global PUT /api/v1/secrets/{key} (hub, project, user scopes)
+		for _, sc := range []struct {
+			scope   string
+			scopeID string
+		}{
+			{store.ScopeHub, ""},
+			{store.ScopeProject, project.ID},
+			{store.ScopeUser, ""},
+		} {
+			rec := doRequest(t, srv, http.MethodPut, "/api/v1/secrets/"+escaped, map[string]any{
+				"value":    "planted",
+				"encoding": "raw",
+				"type":     "variable",
+				"scope":    sc.scope,
+				"scopeId":  sc.scopeID,
+			})
+			assertValidationReserved(t, rec.Code, rec.Body.Bytes())
+		}
+
+		// Scoped PUT /api/v1/projects/{id}/secrets/{key}
+		rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/secrets/"+escaped, map[string]any{
+			"value":    "planted",
+			"encoding": "raw",
+			"type":     "variable",
+		})
+		assertValidationReserved(t, rec.Code, rec.Body.Bytes())
+
+		// Env promotion and plain env PUT /api/v1/projects/{id}/env/{key}
+		for _, isSecret := range []bool{true, false} {
+			rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/env/"+escaped, map[string]any{
+				"value":  "planted",
+				"secret": isSecret,
+			})
+			assertValidationReserved(t, rec.Code, rec.Body.Bytes())
+		}
+
+		// Agent PUT /api/v1/agents/{id}/secrets/{key} (project scope and pending user scope)
+		for _, agScope := range []string{store.ScopeProject, store.ScopeUser} {
+			rec = doRequestWithAgentToken(t, srv, http.MethodPut, "/api/v1/agents/"+agent.ID+"/secrets/"+escaped, map[string]any{
+				"value":    "planted",
+				"encoding": "raw",
+				"type":     "variable",
+				"scope":    agScope,
+			}, agentToken)
+			assertValidationReserved(t, rec.Code, rec.Body.Bytes())
+		}
+
+		// Confirm nothing was stored in hub, project, or user scope.
+		_, err := s.GetSecret(ctx, key, store.ScopeHub, srv.hubID)
+		assert.ErrorIs(t, err, store.ErrNotFound)
+		_, err = s.GetSecret(ctx, key, store.ScopeProject, project.ID)
+		assert.ErrorIs(t, err, store.ErrNotFound)
+		_, err = s.GetSecret(ctx, key, store.ScopeUser, DevUserID)
+		assert.ErrorIs(t, err, store.ErrNotFound)
+	}
+
+	// Non-reserved prefixes (such as ordinary user env/secret names like WEBHOOK_ENDPOINT_URL) still work normally.
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/secrets/WEBHOOK_ENDPOINT_URL", map[string]any{
+		"value":    "https://example.com/hook",
+		"encoding": "raw",
+		"type":     "variable",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}

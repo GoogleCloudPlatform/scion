@@ -199,6 +199,9 @@ func (s *Server) agentWritePendingUserSecret(w http.ResponseWriter, r *http.Requ
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	if rejectWebhookEndpointReservedSecretWrite(w, key) {
+		return
+	}
 
 	refused := &store.PendingSecret{
 		Key:          key,
@@ -567,6 +570,9 @@ func (s *Server) approvePendingSecret(w http.ResponseWriter, r *http.Request, ow
 		return
 	}
 	if s.refuseInternalSecretMutation(w, ctx, p.Key, store.ScopeUser, ownerID) {
+		return
+	}
+	if rejectWebhookEndpointReservedSecretWrite(w, p.Key) {
 		return
 	}
 
