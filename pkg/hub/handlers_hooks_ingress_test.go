@@ -950,3 +950,94 @@ func TestWebhookIngress_RefusesNonInternalSecretRow(t *testing.T) {
 	recRecovered := sendSignedHookHTTP(f.srv, ep.ID, ep.Secret, time.Now().Unix(), "deliv-recovered", "push", "", "application/json", "", nil, payload)
 	assert.Equal(t, http.StatusAccepted, recRecovered.Code, recRecovered.Body.String())
 }
+
+func TestWebhookIngress_BadSignatureFloodNeverChargesRejectionBucket(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	now := time.Date(2026, 11, 17, 12, 45, 0, 0, time.UTC)
+
+	ep := createTestWebhookEndpointViaAPI(t, f, f.projectID, "badsig-isolation-ep")
+
+	dqs := f.store.(store.DurableQueueStore)
+	f.srv.webhookIngress = trigger.NewIngress(trigger.IngressConfig{
+		Store:      f.store,
+		QueueStore: dqs,
+		Queue:      f.srv.durableQueue,
+		LoadSecret: f.srv.loadWebhookEndpointSecret,
+		Enabled:    func() bool { return f.srv.experimentEnabled(experiments.Triggers) },
+		Limiter: trigger.NewIngressLimiter(trigger.LimiterConfig{
+			PerIPRate:        0.001,
+			PerIPBurst:       100,
+			RejectionRate:    0.001,
+			RejectionBurst:   2, // shared rejection bucket holds only 2 tokens
+			PerEndpointRate:  0.001,
+			PerEndpointBurst: 5,
+			Now:              func() time.Time { return now },
+		}),
+		Now: func() time.Time { return now },
+	})
+
+	payload := []byte(`{"forged":true}`)
+
+	// Flood known active endpoint `ep` with 8 bad-signature requests (5 -> 401, 3 -> 429 per-endpoint).
+	unauthCount, rateLimitedCount := 0, 0
+	for i := range 8 {
+		rec := sendSignedHookHTTP(
+			f.srv,
+			ep.ID,
+			"wrong-hmac-secret",
+			now.Unix(),
+			fmt.Sprintf("forged-%d", i),
+			"push",
+			"",
+			"application/json",
+			fmt.Sprintf("198.51.100.%d:4000", 10+i),
+			nil,
+			payload,
+		)
+		switch rec.Code {
+		case http.StatusUnauthorized:
+			unauthCount++
+		case http.StatusTooManyRequests:
+			rateLimitedCount++
+		default:
+			t.Fatalf("unexpected status %d on bad-signature flood request %d", rec.Code, i)
+		}
+	}
+	assert.Equal(t, 5, unauthCount)
+	assert.Equal(t, 3, rateLimitedCount)
+
+	// Immediately afterwards, two unknown-ID requests still answer 404 (not 429),
+	// proving signature failures on known endpoints never charge the shared rejection bucket.
+	for i := range 2 {
+		recUnknown := sendSignedHookHTTP(
+			f.srv,
+			uuid.NewString(),
+			"junk",
+			now.Unix(),
+			"",
+			"",
+			"",
+			"application/json",
+			fmt.Sprintf("203.0.113.%d:4000", 20+i),
+			nil,
+			payload,
+		)
+		assert.Equal(t, http.StatusNotFound, recUnknown.Code, "unknown-ID request %d must answer 404, not 429", i)
+	}
+
+	// Exhausting those 2 unknown-ID tokens causes the 3rd unknown-ID request to hit 429.
+	recRej429 := sendSignedHookHTTP(
+		f.srv,
+		uuid.NewString(),
+		"junk",
+		now.Unix(),
+		"",
+		"",
+		"",
+		"application/json",
+		"203.0.113.99:4000",
+		nil,
+		payload,
+	)
+	assert.Equal(t, http.StatusTooManyRequests, recRej429.Code)
+}

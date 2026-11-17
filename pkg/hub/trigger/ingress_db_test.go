@@ -449,3 +449,98 @@ func TestIngress_IPv6Slash48SprayDoesNotLockOutLegitimateSender(t *testing.T) {
 	recHealthy2 := sendSignedFrom(epHealthy.ID, "198.51.100.201", "healthy-2")
 	require.Equal(t, http.StatusAccepted, recHealthy2.Code, recHealthy2.Body.String())
 }
+
+func TestIngress_BadSignatureFloodNeverChargesRejectionBucket(t *testing.T) {
+	ctx := context.Background()
+	cs := entadapter.NewCompositeStore(enttest.NewClient(t))
+	now := time.Date(2026, 11, 17, 12, 30, 0, 0, time.UTC)
+
+	q := durablequeue.NewQueue(cs, durablequeue.WithQueueClock(func() time.Time { return now }))
+	projID := uuid.NewString()
+	require.NoError(t, cs.CreateProject(ctx, &store.Project{
+		ID:   projID,
+		Name: "badsig-proj",
+		Slug: "badsig-" + projID[:8],
+	}))
+
+	ep := &store.WebhookEndpoint{
+		ID:                  uuid.NewString(),
+		ProjectID:           projID,
+		Name:                "known-ep",
+		OwnerPrincipalKind:  store.DelegationPrincipalUser,
+		OwnerPrincipalID:    uuid.NewString(),
+		OwnerCredentialKind: "session",
+		SecretVersion:       1,
+		SignatureMode:       store.WebhookSignatureModeScionV1,
+		Status:              store.WebhookEndpointStatusActive,
+		CreatedBy:           "user-1",
+	}
+	require.NoError(t, cs.CreateWebhookEndpoint(ctx, ep))
+
+	const epSecret = "YmFkc2lnLWZsb29kLXdlYmhvb2stc2VjcmV0LTMyYnl0ZXM"
+	lim := trigger.NewIngressLimiter(trigger.LimiterConfig{
+		PerIPRate:        0.001,
+		PerIPBurst:       100,
+		RejectionRate:    0.001,
+		RejectionBurst:   2, // tiny shared rejection budget: even 2 charges would exhaust it
+		PerEndpointRate:  0.001,
+		PerEndpointBurst: 6,
+		Now:              func() time.Time { return now },
+	})
+	ing := trigger.NewIngress(trigger.IngressConfig{
+		Store:      cs,
+		QueueStore: cs,
+		Queue:      q,
+		LoadSecret: func(_ context.Context, _, _ string, _ int) (string, error) {
+			return epSecret, nil
+		},
+		ClientIP: func(r *http.Request) string { return r.RemoteAddr },
+		Limiter:  lim,
+		Enabled:  func() bool { return true },
+		Audit:    &memAuditSink{},
+		Now:      func() time.Time { return now },
+	})
+
+	payload := []byte(`{"attempt":"forged"}`)
+
+	// Flood the known active endpoint with 10 bad-signature requests (>> RejectionBurst=2):
+	// the first 6 reach HMAC verification and answer 401, and the remaining 4 hit ep's
+	// per-endpoint bucket (429). None may touch the shared rejection bucket.
+	unauthCount, epRateLimitedCount := 0, 0
+	for i := range 10 {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+ep.ID, bytes.NewReader(payload))
+		req.RemoteAddr = "198.51.100." + strconv.Itoa(10+i)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(trigger.HeaderSignature, trigger.SignScionV1("wrong-secret-key", now.Unix(), "", "", "", payload))
+		rec := httptest.NewRecorder()
+		ing.ServeHTTP(rec, req)
+		switch rec.Code {
+		case http.StatusUnauthorized:
+			unauthCount++
+		case http.StatusTooManyRequests:
+			epRateLimitedCount++
+		default:
+			t.Fatalf("unexpected status %d on bad-signature request %d", rec.Code, i)
+		}
+	}
+	assert.Equal(t, 6, unauthCount)
+	assert.Equal(t, 4, epRateLimitedCount)
+
+	// Both tokens of the shared rejection bucket (RejectionBurst=2) must still be intact:
+	// two unknown-ID requests answer 404 (not 429), and only the 3rd hits 429.
+	for i := range 2 {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+uuid.NewString(), bytes.NewReader(payload))
+		req.RemoteAddr = "203.0.113." + strconv.Itoa(50+i)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		ing.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusNotFound, rec.Code, "unknown-ID request %d after bad-sig flood must get 404, not 429", i)
+	}
+
+	reqThirdUnknown := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+uuid.NewString(), bytes.NewReader(payload))
+	reqThirdUnknown.RemoteAddr = "203.0.113.99"
+	reqThirdUnknown.Header.Set("Content-Type", "application/json")
+	recThirdUnknown := httptest.NewRecorder()
+	ing.ServeHTTP(recThirdUnknown, reqThirdUnknown)
+	assert.Equal(t, http.StatusTooManyRequests, recThirdUnknown.Code)
+}
