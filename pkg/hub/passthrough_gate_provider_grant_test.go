@@ -477,8 +477,9 @@ func TestPassthroughGate_EvaluateMatrixAndAuthPathPrecedence(t *testing.T) {
 	assert.Equal(t, "provider_grant", deniedEntry.attrs["authPath"])
 	checker.AllowTarget(crAgentSA)
 
-	// 11. Design r15 §B.4.5 item 3a (H1): gcpIamCheckMode=off keeps owner & admin unchanged,
-	//     and denies provider_grant with a non-retryable configuration refusal.
+	// 11. Design r16 §B.4.5 item 3a: with gcpIamCheckMode=off, owner, admin, and
+	//     provider_grant all pass Check 3 with MechanismCheckDisabled (logged on
+	//     "passthrough allowed" alongside authPath), while Check 1 denials still fail closed.
 	setMode(w.srv, SAAssignCheckOff)
 	t.Cleanup(func() { enforceSAAssign(w.srv, checker) })
 
@@ -499,14 +500,61 @@ func TestPassthroughGate_EvaluateMatrixAndAuthPathPrecedence(t *testing.T) {
 	for _, b := range []*store.RuntimeBroker{legacyBroker, embCRRow} {
 		logs.reset()
 		d = w.srv.evaluatePassthroughIdentity(ctxFor(w.projectMember), nil, b, w.projectA.ID, SurfacePassthroughCreate)
-		require.NotNil(t, d, "provider_grant must be refused when gcpIamCheckMode=off (broker=%s)", b.Name)
-		assert.False(t, d.retryable, "off-mode provider_grant refusal must be non-retryable")
-		assert.Equal(t, passthroughProviderGrantOffModeMsg, d.Error())
-		deniedEntry, ok = logs.findLast("passthrough denied", SurfacePassthroughCreate)
+		require.Nil(t, d, "provider_grant must be allowed when gcpIamCheckMode=off (broker=%s)", b.Name)
+		entry, ok = logs.findLast("passthrough allowed", SurfacePassthroughCreate)
 		require.True(t, ok)
-		assert.Equal(t, "provider_grant", deniedEntry.attrs["authPath"])
-		assert.Equal(t, store.MechanismCheckDisabled, deniedEntry.attrs["mechanism"])
+		assert.Equal(t, "provider_grant", entry.attrs["authPath"])
+		assert.Equal(t, store.MechanismCheckDisabled, entry.attrs["mechanism"])
 	}
+
+	// Check 1 denials in off mode: no link -> deny, empty/placeholder LinkedBy -> deny,
+	// flat AutoProvide=false without broker.dispatch -> deny, and Hub-own embedded -> deny.
+	unlinkedOff := &store.RuntimeBroker{
+		ID:                         tid("q5-eval-unlinked-off"),
+		Name:                       "q5-eval-unlinked-off",
+		Slug:                       "q5-eval-unlinked-off",
+		Status:                     store.BrokerStatusOnline,
+		CreatedBy:                  w.brokerOwner.ID,
+		GCPHostServiceAccountEmail: hostSA,
+		GCPHostProjectID:           "q5-proj",
+		Profiles:                   []store.BrokerProfile{{Name: "default", Type: "docker", Available: true}},
+	}
+	require.NoError(t, w.s.CreateRuntimeBroker(ctx, unlinkedOff))
+	d = w.srv.evaluatePassthroughIdentity(ctxFor(w.projectMember), nil, unlinkedOff, w.projectA.ID, SurfacePassthroughCreate)
+	require.NotNil(t, d)
+	assert.Contains(t, d.Error(), passthroughProviderGrantDenialSubstr)
+
+	for _, badLinker := range []string{"", w.otherMember.ID} {
+		_ = w.s.RemoveProjectProvider(ctx, w.projectA.ID, unlinkedOff.ID)
+		require.NoError(t, w.s.AddProjectProvider(ctx, &store.ProjectProvider{
+			ProjectID: w.projectA.ID, BrokerID: unlinkedOff.ID, BrokerName: unlinkedOff.Name,
+			Status: store.BrokerStatusOnline, LinkedBy: badLinker,
+		}))
+		d = w.srv.evaluatePassthroughIdentity(ctxFor(w.projectMember), nil, unlinkedOff, w.projectA.ID, SurfacePassthroughCreate)
+		require.NotNil(t, d)
+		assert.Contains(t, d.Error(), passthroughProviderGrantDenialSubstr)
+	}
+
+	flatNoAutoOff := &store.RuntimeBroker{
+		ID:                         tid("q5-eval-flat-noauto-off"),
+		Name:                       "q5-eval-flat-noauto-off",
+		Slug:                       "q5-eval-flat-noauto-off",
+		Status:                     store.BrokerStatusOnline,
+		CreatedBy:                  w.brokerOwner.ID,
+		AutoProvide:                false,
+		GCPHostServiceAccountEmail: crAgentSA,
+		GCPHostProjectID:           "cr-proj",
+		RuntimeTarget:              cloudRunTargetFor("q5-eval-flat-noauto-off"),
+	}
+	require.NoError(t, w.s.CreateRuntimeBroker(ctx, flatNoAutoOff))
+	require.NoError(t, w.s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: w.projectA.ID, BrokerID: flatNoAutoOff.ID, BrokerName: flatNoAutoOff.Name,
+		Status: store.BrokerStatusOnline, LinkedBy: w.brokerOwner.ID,
+	}))
+	d = w.srv.evaluatePassthroughIdentity(ctxFor(w.projectMember), nil, flatNoAutoOff, w.projectA.ID, SurfacePassthroughCreate)
+	require.NotNil(t, d)
+	assert.Contains(t, d.Error(), passthroughProviderGrantDenialSubstr)
+
 	enforceSAAssign(w.srv, checker)
 }
 
@@ -727,8 +775,10 @@ func TestPassthroughGate_Surfaces_CreateAndPatch(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.True(t, w.disp.startCalled)
 
-	// F) Design r15 §B.4.5 item 3a (H1): gcpIamCheckMode=off on Create and PATCH:
-	//    owner -> allow, admin -> allow, provider_grant -> configuration refusal (zero dispatches).
+	// F) Design r16 §B.4.5 item 3a: gcpIamCheckMode=off on Create and PATCH:
+	//    owner, admin, and provider_grant -> allow (logged with mechanism=check-disabled
+	//    and authPath); Check 1 denials (no link, empty LinkedBy, AutoProvide=false) still deny
+	//    with zero dispatches.
 	setMode(w.srv, SAAssignCheckOff)
 	t.Cleanup(func() { enforceSAAssign(w.srv, checker) })
 
@@ -740,66 +790,75 @@ func TestPassthroughGate_Surfaces_CreateAndPatch(t *testing.T) {
 		require.NoError(t, w.s.UpdateAgent(ctx, a))
 	}
 
-	w.disp.capturedAgent = nil
-	logs.reset()
-	rec = doRequestAsUser(t, w.srv, w.projectMember, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name: "denied-offmode-member-create", ProjectID: w.projectA.ID, RuntimeBrokerID: flatCR.ID, Task: "t",
-		GCPIdentity: &GCPIdentityAssignment{MetadataMode: store.GCPMetadataModePassthrough},
-	})
-	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), passthroughProviderGrantOffModeMsg)
-	assert.Nil(t, w.disp.capturedAgent, "off-mode provider_grant create must not dispatch")
-	deniedOffCreate, ok := logs.findLast("passthrough denied", SurfacePassthroughCreate)
-	require.True(t, ok)
-	assert.Equal(t, "provider_grant", deniedOffCreate.attrs["authPath"])
+	for _, tc := range []struct {
+		user     *store.User
+		name     string
+		wantPath string
+	}{
+		{w.projectMember, "allowed-offmode-member-create", "provider_grant"},
+		{w.brokerOwner, "allowed-offmode-owner-create", "owner"},
+		{w.adminUser, "allowed-offmode-admin-create", "admin"},
+	} {
+		logs.reset()
+		rec = doRequestAsUser(t, w.srv, tc.user, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+			Name: tc.name, ProjectID: w.projectA.ID, RuntimeBrokerID: flatCR.ID, Task: "t",
+			GCPIdentity: &GCPIdentityAssignment{MetadataMode: store.GCPMetadataModePassthrough},
+		})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		entry, ok = logs.findLast("passthrough allowed", SurfacePassthroughCreate)
+		require.True(t, ok)
+		assert.Equal(t, tc.wantPath, entry.attrs["authPath"])
+		assert.Equal(t, store.MechanismCheckDisabled, entry.attrs["mechanism"])
 
+		resetPatchAgent()
+		logs.reset()
+		rec = doRequestAsUser(t, w.srv, tc.user, http.MethodPatch, "/api/v1/agents/"+patchAgent.ID,
+			map[string]interface{}{"gcp_identity": map[string]interface{}{"metadata_mode": store.GCPMetadataModePassthrough}})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		entry, ok = logs.findLast("passthrough allowed", SurfacePassthroughPatch)
+		require.True(t, ok)
+		assert.Equal(t, tc.wantPath, entry.attrs["authPath"])
+		assert.Equal(t, store.MechanismCheckDisabled, entry.attrs["mechanism"])
+	}
+
+	// Off-mode Check 1 denials on Create and PATCH (zero dispatches):
+	// 1) AutoProvide=false without broker.dispatch -> denied on PATCH;
+	flatCR.AutoProvide = false
+	require.NoError(t, w.s.UpdateRuntimeBroker(ctx, flatCR))
 	resetPatchAgent()
-	logs.reset()
+	w.disp.capturedAgent = nil
 	rec = doRequestAsUser(t, w.srv, w.projectMember, http.MethodPatch, "/api/v1/agents/"+patchAgent.ID,
 		map[string]interface{}{"gcp_identity": map[string]interface{}{"metadata_mode": store.GCPMetadataModePassthrough}})
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), passthroughProviderGrantOffModeMsg)
-	deniedOffPatch, ok := logs.findLast("passthrough denied", SurfacePassthroughPatch)
-	require.True(t, ok)
-	assert.Equal(t, "provider_grant", deniedOffPatch.attrs["authPath"])
+	assert.Contains(t, rec.Body.String(), passthroughProviderGrantDenialSubstr)
+	assert.Nil(t, w.disp.capturedAgent)
 
-	logs.reset()
-	rec = doRequestAsUser(t, w.srv, w.brokerOwner, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name: "allowed-offmode-owner-create", ProjectID: w.projectA.ID, RuntimeBrokerID: flatCR.ID, Task: "t",
+	// 2) AutoProvide=true with empty LinkedBy -> denied on Create & PATCH;
+	flatCR.AutoProvide = true
+	require.NoError(t, w.s.UpdateRuntimeBroker(ctx, flatCR))
+	_ = w.s.RemoveProjectProvider(ctx, w.projectA.ID, flatCR.ID)
+	require.NoError(t, w.s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: w.projectA.ID, BrokerID: flatCR.ID, BrokerName: flatCR.Name,
+		Status: store.BrokerStatusOnline, LinkedBy: "",
+	}))
+	w.disp.capturedAgent = nil
+	rec = doRequestAsUser(t, w.srv, w.projectMember, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name: "denied-offmode-emptylink-create", ProjectID: w.projectA.ID, RuntimeBrokerID: flatCR.ID, Task: "t",
 		GCPIdentity: &GCPIdentityAssignment{MetadataMode: store.GCPMetadataModePassthrough},
 	})
-	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-	entry, ok = logs.findLast("passthrough allowed", SurfacePassthroughCreate)
-	require.True(t, ok)
-	assert.Equal(t, "owner", entry.attrs["authPath"])
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), passthroughProviderGrantDenialSubstr)
+	assert.Nil(t, w.disp.capturedAgent)
 
+	// 3) No link -> denied on PATCH (and Create refuses unlinked broker with zero dispatches).
+	_ = w.s.RemoveProjectProvider(ctx, w.projectA.ID, flatCR.ID)
 	resetPatchAgent()
-	logs.reset()
-	rec = doRequestAsUser(t, w.srv, w.brokerOwner, http.MethodPatch, "/api/v1/agents/"+patchAgent.ID,
+	w.disp.capturedAgent = nil
+	rec = doRequestAsUser(t, w.srv, w.projectMember, http.MethodPatch, "/api/v1/agents/"+patchAgent.ID,
 		map[string]interface{}{"gcp_identity": map[string]interface{}{"metadata_mode": store.GCPMetadataModePassthrough}})
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	entry, ok = logs.findLast("passthrough allowed", SurfacePassthroughPatch)
-	require.True(t, ok)
-	assert.Equal(t, "owner", entry.attrs["authPath"])
-
-	logs.reset()
-	rec = doRequestAsUser(t, w.srv, w.adminUser, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name: "allowed-offmode-admin-create", ProjectID: w.projectA.ID, RuntimeBrokerID: flatCR.ID, Task: "t",
-		GCPIdentity: &GCPIdentityAssignment{MetadataMode: store.GCPMetadataModePassthrough},
-	})
-	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-	entry, ok = logs.findLast("passthrough allowed", SurfacePassthroughCreate)
-	require.True(t, ok)
-	assert.Equal(t, "admin", entry.attrs["authPath"])
-
-	resetPatchAgent()
-	logs.reset()
-	rec = doRequestAsUser(t, w.srv, w.adminUser, http.MethodPatch, "/api/v1/agents/"+patchAgent.ID,
-		map[string]interface{}{"gcp_identity": map[string]interface{}{"metadata_mode": store.GCPMetadataModePassthrough}})
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	entry, ok = logs.findLast("passthrough allowed", SurfacePassthroughPatch)
-	require.True(t, ok)
-	assert.Equal(t, "admin", entry.attrs["authPath"])
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), passthroughProviderGrantDenialSubstr)
+	assert.Nil(t, w.disp.capturedAgent)
 }
 
 // TestPassthroughGate_Surface_ProjectDefault exercises Surface 3
@@ -888,18 +947,19 @@ func TestPassthroughGate_Surface_ProjectDefault(t *testing.T) {
 		require.True(t, ok)
 		assert.Equal(t, "admin", entry.attrs["authPath"])
 
-		// 6. Design r15 §B.4.5 item 3a (H1): gcpIamCheckMode=off on ProjectDefault PUT and apply:
-		//    owner -> allow, admin -> allow, provider_grant -> deny (configuration refusal).
+		// 6. Design r16 §B.4.5 item 3a: gcpIamCheckMode=off on ProjectDefault PUT and apply:
+		//    owner, admin, and provider_grant -> allow (logged with mechanism=check-disabled
+		//    and authPath); Check 1 denials (no link, AutoProvide=false, Hub-own embedded) still deny.
 		setMode(w.srv, SAAssignCheckOff)
 		t.Cleanup(func() { enforceSAAssign(w.srv, checker) })
 
 		logs.reset()
 		code, body = putMode(w.projectMember)
-		assert.Equal(t, http.StatusForbidden, code, body)
-		assert.Contains(t, body, passthroughProviderGrantOffModeMsg)
-		deniedEntry, ok := logs.findLast("passthrough denied", SurfacePassthroughProjectDefault)
+		require.Equal(t, http.StatusOK, code, body)
+		entry, ok = logs.findLast("passthrough allowed", SurfacePassthroughProjectDefault)
 		require.True(t, ok)
-		assert.Equal(t, "provider_grant", deniedEntry.attrs["authPath"])
+		assert.Equal(t, "provider_grant", entry.attrs["authPath"])
+		assert.Equal(t, store.MechanismCheckDisabled, entry.attrs["mechanism"])
 
 		logs.reset()
 		code, body = putMode(w.adminUser)
@@ -907,9 +967,10 @@ func TestPassthroughGate_Surface_ProjectDefault(t *testing.T) {
 		entry, ok = logs.findLast("passthrough allowed", SurfacePassthroughProjectDefault)
 		require.True(t, ok)
 		assert.Equal(t, "admin", entry.attrs["authPath"])
+		assert.Equal(t, store.MechanismCheckDisabled, entry.attrs["mechanism"])
 
-		// Also verify an owned flat Cloud Run broker across PUT and apply in off mode:
-		// owner -> allow, admin -> allow, provider_grant -> deny.
+		// Also verify an owned flat Cloud Run broker across PUT and direct gate in off mode:
+		// owner, admin, and provider_grant -> allow; unlinked / AutoProvide=false -> deny.
 		ownedCR := &store.RuntimeBroker{
 			ID:                         tid("q5-pd-owned-cr"),
 			Name:                       "q5-pd-owned-cr",
@@ -932,38 +993,42 @@ func TestPassthroughGate_Surface_ProjectDefault(t *testing.T) {
 		w.srv.SetEmbeddedBrokerID(ownedCR.ID)
 		t.Cleanup(func() { w.srv.SetEmbeddedBrokerID("") })
 
-		logs.reset()
+		for _, tc := range []struct {
+			user     *store.User
+			wantPath string
+		}{
+			{w.projectMember, "provider_grant"},
+			{w.brokerOwner, "owner"},
+			{w.adminUser, "admin"},
+		} {
+			logs.reset()
+			code, body = putMode(tc.user)
+			require.Equal(t, http.StatusOK, code, body)
+			entry, ok = logs.findLast("passthrough allowed", SurfacePassthroughProjectDefault)
+			require.True(t, ok)
+			assert.Equal(t, tc.wantPath, entry.attrs["authPath"])
+			assert.Equal(t, store.MechanismCheckDisabled, entry.attrs["mechanism"])
+		}
+
+		// Off-mode Check 1 denial on ProjectDefault PUT when unlinked:
+		_ = w.s.RemoveProjectProvider(ctx, w.projectA.ID, ownedCR.ID)
 		code, body = putMode(w.projectMember)
 		assert.Equal(t, http.StatusForbidden, code, body)
-		assert.Contains(t, body, passthroughProviderGrantOffModeMsg)
-		deniedEntry, ok = logs.findLast("passthrough denied", SurfacePassthroughProjectDefault)
-		require.True(t, ok)
-		assert.Equal(t, "provider_grant", deniedEntry.attrs["authPath"])
-
-		logs.reset()
-		code, body = putMode(w.brokerOwner)
-		require.Equal(t, http.StatusOK, code, body)
-		entry, ok = logs.findLast("passthrough allowed", SurfacePassthroughProjectDefault)
-		require.True(t, ok)
-		assert.Equal(t, "owner", entry.attrs["authPath"])
-
-		logs.reset()
-		code, body = putMode(w.adminUser)
-		require.Equal(t, http.StatusOK, code, body)
-		entry, ok = logs.findLast("passthrough allowed", SurfacePassthroughProjectDefault)
-		require.True(t, ok)
-		assert.Equal(t, "admin", entry.attrs["authPath"])
+		assert.Contains(t, body, passthroughProviderGrantDenialSubstr)
+		require.NoError(t, w.s.AddProjectProvider(ctx, &store.ProjectProvider{
+			ProjectID: w.projectA.ID, BrokerID: ownedCR.ID, BrokerName: ownedCR.Name,
+			Status: store.BrokerStatusOnline, LinkedBy: w.brokerOwner.ID,
+		}))
 
 		userCtxFor := func(u *store.User) context.Context {
 			return contextWithIdentity(ctx, NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, "web"))
 		}
-		// Direct SurfacePassthroughProjectDefault gate on ownedCR in off mode:
-		assert.NotNil(t, w.srv.evaluatePassthroughIdentity(userCtxFor(w.projectMember), nil, ownedCR, w.projectA.ID, SurfacePassthroughProjectDefault))
+		assert.Nil(t, w.srv.evaluatePassthroughIdentity(userCtxFor(w.projectMember), nil, ownedCR, w.projectA.ID, SurfacePassthroughProjectDefault))
 		assert.Nil(t, w.srv.evaluatePassthroughIdentity(userCtxFor(w.brokerOwner), nil, ownedCR, w.projectA.ID, SurfacePassthroughProjectDefault))
 		assert.Nil(t, w.srv.evaluatePassthroughIdentity(userCtxFor(w.adminUser), nil, ownedCR, w.projectA.ID, SurfacePassthroughProjectDefault))
 
-		// Apply path (projectDefaultPassthroughAllowed) on a confined embedded docker broker in off mode:
-		// non-owner/non-admin -> false, owner -> true, admin -> true.
+		// Apply path (projectDefaultPassthroughAllowed) on a confined Hub-own embedded docker broker
+		// in off mode: non-owner/non-admin -> false (hostIdentityIsHubOwn Check 1), owner -> true, admin -> true.
 		ownedDocker := &store.RuntimeBroker{
 			ID:                         tid("q5-pd-owned-docker"),
 			Name:                       "q5-pd-owned-docker",
@@ -982,7 +1047,7 @@ func TestPassthroughGate_Surface_ProjectDefault(t *testing.T) {
 		}))
 		w.srv.SetEmbeddedBrokerID(ownedDocker.ID)
 		allowed, _ := w.srv.projectDefaultPassthroughAllowed(userCtxFor(w.projectMember), nil, ownedDocker.ID, w.projectA.ID, "a-pd", "")
-		assert.False(t, allowed, "off-mode non-owner/non-admin apply must be denied")
+		assert.False(t, allowed, "off-mode Hub-own non-owner/non-admin apply must be denied")
 		allowed, _ = w.srv.projectDefaultPassthroughAllowed(userCtxFor(w.brokerOwner), nil, ownedDocker.ID, w.projectA.ID, "a-pd", "")
 		assert.True(t, allowed, "off-mode owner apply must remain allowed")
 		allowed, _ = w.srv.projectDefaultPassthroughAllowed(userCtxFor(w.adminUser), nil, ownedDocker.ID, w.projectA.ID, "a-pd", "")
@@ -1179,45 +1244,64 @@ func TestPassthroughGate_Surfaces_TranslationAndReview(t *testing.T) {
 	require.True(t, errors.As(err, &denied))
 	assert.Equal(t, http.StatusForbidden, denied.status)
 
-	// 5. Design r15 §B.4.5 item 3a (H1): gcpIamCheckMode=off on SurfacePassthroughTranslation
-	//    and SurfacePassthroughTranslationReview: owner -> allow, admin -> allow, provider_grant -> deny.
+	// 5. Design r16 §B.4.5 item 3a: gcpIamCheckMode=off on SurfacePassthroughTranslation
+	//    and SurfacePassthroughTranslationReview: owner, admin, and provider_grant all pass
+	//    the passthrough gate (logged with mechanism=check-disabled and authPath); Check 1
+	//    denials (no link / unconsented link) still deny.
 	setMode(f.srv, SAAssignCheckOff)
 	t.Cleanup(func() { enforceSAAssign(f.srv, checker) })
 
 	transCtxFor := func(u *store.User) context.Context {
 		return contextWithIdentity(ctx, NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, "web"))
 	}
-	require.Nil(t, f.srv.evaluatePassthroughIdentity(transCtxFor(f.owner), nil, f.broker, f.project.ID, SurfacePassthroughTranslation))
-	require.Nil(t, f.srv.evaluatePassthroughIdentity(transCtxFor(admin), nil, f.broker, f.project.ID, SurfacePassthroughTranslation))
-	logs.reset()
-	dOffTrans := f.srv.evaluatePassthroughIdentity(transCtxFor(member), nil, f.broker, f.project.ID, SurfacePassthroughTranslation)
-	require.NotNil(t, dOffTrans)
-	assert.Equal(t, passthroughProviderGrantOffModeMsg, dOffTrans.Error())
-	transDenied, ok := logs.findLast("passthrough denied", SurfacePassthroughTranslation)
-	require.True(t, ok)
-	assert.Equal(t, "provider_grant", transDenied.attrs["authPath"])
+	for _, tc := range []struct {
+		user     *store.User
+		wantPath string
+	}{
+		{f.owner, "owner"},
+		{admin, "admin"},
+		{member, "provider_grant"},
+	} {
+		logs.reset()
+		require.Nil(t, f.srv.evaluatePassthroughIdentity(transCtxFor(tc.user), nil, f.broker, f.project.ID, SurfacePassthroughTranslation))
+		transAllowed, ok := logs.findLast("passthrough allowed", SurfacePassthroughTranslation)
+		require.True(t, ok)
+		assert.Equal(t, tc.wantPath, transAllowed.attrs["authPath"])
+		assert.Equal(t, store.MechanismCheckDisabled, transAllowed.attrs["mechanism"])
+	}
 
-	// HTTP create by member on cloudrun-sandbox in off mode is refused with the provider_grant off-mode error before dispatch.
-	rec = doRequestAsUser(t, f.srv, member, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name: "trans-denied-offmode-member", ProjectID: f.project.ID, Task: "t",
-		GCPIdentity: &GCPIdentityAssignment{MetadataMode: store.GCPMetadataModePassthrough},
-	})
-	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), passthroughProviderGrantOffModeMsg)
-	f.agentMissing(t, "trans-denied-offmode-member")
-
-	// Translation review in off mode: owner & admin pass; provider_grant fails (non-retryable) with off-mode refusal.
+	// Translation review in off mode: owner, admin, and provider_grant all pass with
+	// mechanism=check-disabled and authPath recorded on "passthrough allowed".
 	logs.reset()
 	enOwnerOff := reviewOf(ownerAgent.ID)
 	assert.Equal(t, translationReviewPass, enOwnerOff.Outcome, enOwnerOff.Reason)
+	revOwnerAllowed, ok := logs.findLastForCaller("passthrough allowed", SurfacePassthroughTranslationReview, f.owner.ID)
+	require.True(t, ok)
+	assert.Equal(t, "owner", revOwnerAllowed.attrs["authPath"])
+	assert.Equal(t, store.MechanismCheckDisabled, revOwnerAllowed.attrs["mechanism"])
+
 	enAdminOff := reviewOf(adminAgent.ID)
 	assert.Equal(t, translationReviewPass, enAdminOff.Outcome, enAdminOff.Reason)
-	enMemberOff := reviewOf(createdAgent.ID)
-	assert.Equal(t, translationReviewFail, enMemberOff.Outcome, enMemberOff.Reason)
-	assert.Equal(t, passthroughProviderGrantOffModeMsg, enMemberOff.Reason)
-	revOffDenied, ok := logs.findLastForCaller("passthrough denied", SurfacePassthroughTranslationReview, member.ID)
+	revAdminAllowed, ok := logs.findLastForCaller("passthrough allowed", SurfacePassthroughTranslationReview, admin.ID)
 	require.True(t, ok)
-	assert.Equal(t, "provider_grant", revOffDenied.attrs["authPath"])
+	assert.Equal(t, "admin", revAdminAllowed.attrs["authPath"])
+	assert.Equal(t, store.MechanismCheckDisabled, revAdminAllowed.attrs["mechanism"])
+
+	enMemberOff := reviewOf(createdAgent.ID)
+	assert.Equal(t, translationReviewPass, enMemberOff.Outcome, enMemberOff.Reason)
+	revMemberAllowed, ok := logs.findLastForCaller("passthrough allowed", SurfacePassthroughTranslationReview, member.ID)
+	require.True(t, ok)
+	assert.Equal(t, "provider_grant", revMemberAllowed.attrs["authPath"])
+	assert.Equal(t, store.MechanismCheckDisabled, revMemberAllowed.attrs["mechanism"])
+
+	// Off-mode Check 1 denial on Translation & TranslationReview when unlinked:
+	require.NoError(t, f.store.RemoveProjectProvider(ctx, f.project.ID, f.broker.ID))
+	dUnlinkedOff := f.srv.evaluatePassthroughIdentity(transCtxFor(member), nil, f.broker, f.project.ID, SurfacePassthroughTranslation)
+	require.NotNil(t, dUnlinkedOff)
+	assert.Contains(t, dUnlinkedOff.Error(), passthroughProviderGrantDenialSubstr)
+	enUnlinkedOff := reviewOf(createdAgent.ID)
+	assert.Equal(t, translationReviewFail, enUnlinkedOff.Outcome, enUnlinkedOff.Reason)
+	assert.Contains(t, enUnlinkedOff.Reason, passthroughProviderGrantDenialSubstr)
 }
 
 // TestPassthroughGate_Surface_ReincarnateMove exercises Surface 6
@@ -1324,21 +1408,15 @@ func TestPassthroughGate_Surface_ReincarnateMove(t *testing.T) {
 		assert.Equal(t, tc.wantPath, entry.attrs["authPath"])
 	}
 
-	// 5. Design r15 §B.4.5 item 3a (H1): gcpIamCheckMode=off on ReincarnateMove:
-	//    owner -> allow, admin -> allow, provider_grant -> configuration refusal.
+	// 5. Design r16 §B.4.5 item 3a: gcpIamCheckMode=off on ReincarnateMove:
+	//    owner, admin, and provider_grant -> allow (logged with mechanism=check-disabled
+	//    and authPath); unlinked / unconsented Check 1 denials still fail closed.
 	setMode(f.srv, SAAssignCheckOff)
-	logs.reset()
-	code, body = moveDryRunAs(member, f.dst.ID)
-	assert.Equal(t, http.StatusForbidden, code, body)
-	assert.Contains(t, body, passthroughProviderGrantOffModeMsg)
-	moveOffDenied, ok := logs.findLast("passthrough denied", SurfacePassthroughMove)
-	require.True(t, ok)
-	assert.Equal(t, "provider_grant", moveOffDenied.attrs["authPath"])
-
 	for _, tc := range []struct {
 		user     *store.User
 		wantPath string
 	}{
+		{member, "provider_grant"},
 		{brokerOwner, "owner"},
 		{admin, "admin"},
 	} {
@@ -1352,7 +1430,18 @@ func TestPassthroughGate_Surface_ReincarnateMove(t *testing.T) {
 		entry, ok := logs.findLast("passthrough allowed", SurfacePassthroughMove)
 		require.True(t, ok)
 		assert.Equal(t, tc.wantPath, entry.attrs["authPath"])
+		assert.Equal(t, store.MechanismCheckDisabled, entry.attrs["mechanism"])
 	}
+
+	// Off-mode Check 1 denial on ReincarnateMove when unlinked:
+	_ = f.s.RemoveProjectProvider(ctx, f.project.ID, f.dst.ID)
+	code, body = moveDryRunAs(member, f.dst.ID)
+	assert.Equal(t, http.StatusForbidden, code, body)
+	assert.Contains(t, body, passthroughProviderGrantDenialSubstr)
+	require.NoError(t, f.s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: f.project.ID, BrokerID: f.dst.ID, BrokerName: f.dst.Name,
+		Status: store.BrokerStatusOnline, LinkedBy: brokerOwner.ID,
+	}))
 	enforceSAAssign(f.srv, checker)
 
 	// 6. Design r15 §B.4.5 item 3b (L1) on SurfacePassthroughMove: flat Cloud Run

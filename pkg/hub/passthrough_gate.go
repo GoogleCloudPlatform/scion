@@ -77,10 +77,7 @@ func isValidServiceAccountEmail(email string) bool {
 	}
 }
 
-const (
-	passthroughCheck1DeniedMsg         = "GCP identity passthrough requires broker ownership, Hub admin, or the broker being provided to this project by its owner."
-	passthroughProviderGrantOffModeMsg = "Passthrough through a project's provider grant requires GCP IAM permission checking on this Hub (gcpIamCheckMode=enforce); ask the broker owner or a Hub admin"
-)
+const passthroughCheck1DeniedMsg = "GCP identity passthrough requires broker ownership, Hub admin, or the broker being provided to this project by its owner."
 
 // callerCanSeeBrokerGCPHost applies the same capability rule as display
 // redaction (§B.4.5 items 2 & 3b): on flat Cloud Run brokers, only callers who
@@ -311,23 +308,6 @@ func (s *Server) evaluatePassthroughIdentity(
 			return &passthroughDenial{msg: "You don't have permission to use passthrough on this broker (" +
 				store.PermissionActAs + " is required on " + target.Email + ")"}
 		}
-	}
-
-	// Design r15 §B.4.5 item 3a: provider_grant stands in for broker ownership
-	// only when iam.serviceAccounts.actAs is genuinely checked. In
-	// gcpIamCheckMode=off, owner and admin keep today's behavior while
-	// provider_grant fails closed with a non-retryable configuration refusal.
-	if authPath == "provider_grant" && result.Mechanism == store.MechanismCheckDisabled {
-		const reason = "provider_grant requires gcpIamCheckMode=enforce"
-		logAuthzDenial(r, GetIdentityFromContext(ctx),
-			Resource{Type: "broker", ID: broker.ID}, ActionDispatch,
-			reason)
-		slog.Warn("passthrough denied",
-			"surface", surface, "authPath", authPath, "callerKind", principal.Kind.String(),
-			"caller", principal.ID, "targetSA", target.Email,
-			"outcome", result.Outcome.String(), "mechanism", result.Mechanism,
-			"reason", reason)
-		return &passthroughDenial{msg: passthroughProviderGrantOffModeMsg}
 	}
 
 	slog.Info("passthrough allowed",
