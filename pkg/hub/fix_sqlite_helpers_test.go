@@ -775,6 +775,11 @@ func (d *schedFailingDispatcher) DispatchAgentCreate(_ context.Context, agent *s
 	return nil, d.createErr
 }
 
+func (d *schedFailingDispatcher) DispatchAgentCreateWithGather(_ context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
+	d.capturedAgent = agent
+	return nil, d.createErr
+}
+
 // reservationsHeld records whether each create-time reservation is held for
 // an agent ID at some point, so a test can prove the reservations existed
 // before asserting the cleanup released them.

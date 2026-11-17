@@ -222,7 +222,10 @@ func (d *containmentDispatchSpy) DispatchAgentExec(_ context.Context, _ *store.A
 func (d *containmentDispatchSpy) DispatchCheckAgentPrompt(_ context.Context, _ *store.Agent) (bool, error) {
 	return false, nil
 }
-func (d *containmentDispatchSpy) DispatchAgentCreateWithGather(_ context.Context, _ *store.Agent) (*CreateDispatchResult, error) {
+func (d *containmentDispatchSpy) DispatchAgentCreateWithGather(_ context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.calls = append(d.calls, containmentDispatchCall{Method: "DispatchAgentCreateWithGather", Agent: agent})
 	return nil, nil
 }
 func (d *containmentDispatchSpy) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) (*CreateDispatchResult, error) {

@@ -54,6 +54,7 @@ type CreateScheduledEventRequest struct {
 	Template string `json:"template,omitempty"`
 	Task     string `json:"task,omitempty"`
 	Branch   string `json:"branch,omitempty"`
+	NoAuth   bool   `json:"noAuth,omitempty"`
 
 	// Convenience fields for "exec" events (ptone/scion#7883), with
 	// AgentID/AgentName: the argv and its timeout (0: 60 seconds).
@@ -346,6 +347,10 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 		ValidationError(w, "wake applies to message events only", nil)
 		return
 	}
+	if req.NoAuth && req.EventType != "dispatch_agent" {
+		ValidationError(w, "noAuth applies to dispatch_agent events only", nil)
+		return
+	}
 	// The payload "raw" tombstone applies to both supported event types:
 	// the advanced Payload field is accepted verbatim for "dispatch_agent"
 	// too, and neither payload type has a raw field. A "raw" key (any case,
@@ -395,6 +400,7 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 			Template:  req.Template,
 			Task:      req.Task,
 			Branch:    req.Branch,
+			NoAuth:    req.NoAuth,
 		}
 		payloadBytes, err := json.Marshal(p)
 		if err != nil {

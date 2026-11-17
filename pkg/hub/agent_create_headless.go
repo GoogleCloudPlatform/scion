@@ -25,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -71,15 +72,18 @@ type HeadlessCreate struct {
 	EdgeCeiling    store.EffectCeiling
 	EdgeProvenance store.AuthorityProvenance
 
-	// Credential and lineage posture. Stage 1 scheduled dispatch_agent passes
-	// Role=AgentRoleNone, NoAuth=true, OwnerID="", Ancestry=nil to preserve
-	// existing schedule behaviour; credentialed callers set NoAuth=false so
-	// DispatchAgentCreateWithGather evaluates env completeness and resolves
-	// stored env/secrets under OwnerID and Ancestry.
-	Role     AgentRole
-	NoAuth   bool
-	OwnerID  string
-	Ancestry []string
+	// Credential and lineage posture (Stage 1 design rev 8.27,
+	// headless-identity-note.md §2 & §2.3). When AgentRole is empty,
+	// createAgentHeadless resolves the role through the project/hub default
+	// ladder capped by scion.io/max-agent-role, the edge ceiling, and (for agent
+	// principals) the parent agent's role. NoAuth is true when explicitly
+	// requested (e.g. payload.noAuth) or when the resolved role is AgentRoleNone.
+	// When OwnerID and Ancestry are empty, they are derived from Authority
+	// exactly as an interactive create by that principal records them.
+	AgentRole AgentRole
+	NoAuth    bool
+	OwnerID   string
+	Ancestry  []string
 
 	// Trusted authoring-time values (Stage 1 design §5.8).
 	Name     string
@@ -126,20 +130,112 @@ func validateHeadlessEventFile(content []byte) error {
 	return nil
 }
 
+// projectDefaultAgentRole returns the project's default agent role annotation,
+// falling back to the hub default and then AgentRoleFull, matching
+// createAgentInProject (handlers_agents_core.go).
+func (s *Server) projectDefaultAgentRole(project *store.Project) AgentRole {
+	if project != nil && project.Annotations != nil {
+		if defStr, ok := project.Annotations[projectSettingDefaultAgentRole]; ok && defStr != "" {
+			if ValidAgentRole(AgentRole(defStr)) {
+				return AgentRole(defStr)
+			}
+		}
+	}
+	if hubDefault := s.hubAgentDefaults().DefaultAgentRole; hubDefault != "" {
+		if ValidAgentRole(AgentRole(hubDefault)) {
+			return AgentRole(hubDefault)
+		}
+	}
+	return AgentRoleFull
+}
+
+func (s *Server) resolveHeadlessOwnerAndAncestry(ctx context.Context, hc HeadlessCreate) (ownerID string, ancestry []string, err error) {
+	if hc.OwnerID != "" || len(hc.Ancestry) > 0 {
+		return hc.OwnerID, slices.Clone(hc.Ancestry), nil
+	}
+	switch hc.Authority.PrincipalKind {
+	case store.DelegationPrincipalUser:
+		if hc.Authority.PrincipalID == "" {
+			return "", nil, errors.New("headless create: missing user principal ID")
+		}
+		return hc.Authority.PrincipalID, []string{hc.Authority.PrincipalID}, nil
+	case store.DelegationPrincipalAgent:
+		creatorAgent := hc.Authority.agent
+		if creatorAgent == nil {
+			creatorAgent, err = s.store.GetAgent(ctx, hc.Authority.PrincipalID)
+			if err != nil {
+				return "", nil, fmt.Errorf("%w: %s: %w", errAgentCreatorUnreadable, hc.Authority.PrincipalID, err)
+			}
+		}
+		anc := make([]string, 0, len(creatorAgent.Ancestry)+1)
+		anc = append(anc, creatorAgent.Ancestry...)
+		anc = append(anc, creatorAgent.ID)
+		return creatorAgent.ID, anc, nil
+	default:
+		return "", nil, fmt.Errorf("headless create: unsupported principal kind %q", hc.Authority.PrincipalKind)
+	}
+}
+
+func (s *Server) resolveHeadlessPreCapRole(
+	ctx context.Context,
+	project *store.Project,
+	auth FireAuthority,
+	requestedRole AgentRole,
+) (preCapRole AgentRole, roleExplicit bool, parentMessageMode string, err error) {
+	projectMax := projectMaxAgentRole(project)
+	defaultAgentRole := s.projectDefaultAgentRole(project)
+	if requestedRole != "" {
+		if !ValidAgentRole(requestedRole) {
+			return "", false, "", fmt.Errorf("invalid agent role %q", requestedRole)
+		}
+		roleExplicit = true
+	}
+
+	if auth.PrincipalKind == store.DelegationPrincipalAgent {
+		var parentRole AgentRole
+		if auth.agent != nil {
+			parentRole, _ = agentRoleAndScopes(auth.agent)
+			parentMessageMode = auth.agent.MessageMode
+			if !ValidAgentRole(parentRole) {
+				parentRole = AgentRoleBaseline
+			}
+		} else {
+			parentRole, parentMessageMode = s.callerAgentRoleCeiling(ctx, auth.PrincipalID)
+		}
+		if !roleExplicit {
+			requestedRole = parentRole
+		}
+		if roleExplicit && CompareRoles(requestedRole, parentRole) > 0 {
+			return "", false, "", fmt.Errorf("cannot grant sub-agent role %q: parent agent role is %q", requestedRole, parentRole)
+		}
+		return minRole(requestedRole, parentRole, projectMax), roleExplicit, parentMessageMode, nil
+	}
+
+	if !roleExplicit {
+		requestedRole = defaultAgentRole
+	}
+	if roleExplicit && CompareRoles(requestedRole, projectMax) > 0 {
+		return "", false, "", fmt.Errorf("cannot grant agent role %q: project maximum is %q", requestedRole, projectMax)
+	}
+	return minRole(requestedRole, projectMax), roleExplicit, "", nil
+}
+
 // createAgentHeadless creates and starts an agent non-interactively under
-// hc.Authority and hc.Identity. Callers must resolve recorded authority,
-// live create/delegation authorization, and standing before invoking this
-// method.
+// hc.Authority and hc.Identity, mirroring an interactive create by the same
+// principal (headless-identity-note.md §1–§2). Callers must resolve recorded
+// authority, live create/delegation authorization, and standing before invoking
+// this method.
 //
-// When hc.NoAuth is false, dispatch runs through DispatchAgentCreateWithGather
-// (buildCreateRequestFor -> resolveEnvFromStorageWithSource / resolveSecrets
-// plus the as-needed second pass resolveAsNeededForKeys). Any remaining
-// EnvRequirements().Needs after the second pass fails the create: runtime
-// files are deleted, minted credentials are revoked, the agent row and its
-// delegation edge are compensated via cleanupFailedCreate (createStageMissingEnv),
-// key names (never values) are written to the compensation audit and slog, and
-// a content-free HeadlessMissingEnvError ("missing required environment
-// variables (N)") is returned.
+// Dispatch runs through DispatchAgentCreateWithGather (buildCreateRequestFor ->
+// resolveEnvFromStorageWithSource / resolveSecrets plus the as-needed second
+// pass resolveAsNeededForKeys; NoAuth agents set req.NoAuth and skip secrets
+// and broker gather). Any remaining EnvRequirements().Needs after the second
+// pass fails the create: runtime files are deleted, minted credentials are
+// revoked, the agent row and its delegation edge are compensated via
+// cleanupFailedCreate (createStageMissingEnv), key names (never values) are
+// written to the compensation audit and slog, and a content-free
+// HeadlessMissingEnvError ("missing required environment variables (N)") is
+// returned.
 func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*store.Agent, error) {
 	if s == nil || s.store == nil {
 		return nil, errors.New("headless create: server not configured")
@@ -153,6 +249,9 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 	templateName := hc.Template
 	if !templateRefAllowed(templateName) {
 		return nil, fmt.Errorf("dispatch_agent payload: %s", templateRefRefusal)
+	}
+	if hc.AgentRole != "" && !ValidAgentRole(hc.AgentRole) {
+		return nil, fmt.Errorf("invalid agent role %q", hc.AgentRole)
 	}
 	if err := labels.Validate(hc.Labels); err != nil {
 		return nil, fmt.Errorf("invalid labels: %w", err)
@@ -186,6 +285,27 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 		}
 		return nil, fmt.Errorf("failed to resolve project %q: %w", hc.ProjectID, err)
 	}
+	if project.IsTemplate() {
+		return nil, errors.New("cannot create agents in a template project")
+	}
+
+	ownerID, ancestry, err := s.resolveHeadlessOwnerAndAncestry(ctx, hc)
+	if err != nil {
+		return nil, err
+	}
+	preCapRole, roleExplicit, parentMessageMode, err := s.resolveHeadlessPreCapRole(ctx, project, hc.Authority, hc.AgentRole)
+	if err != nil {
+		return nil, fmt.Errorf("scheduled dispatch of agent %q: %w", slug, err)
+	}
+	childRole, cause, fits := childRoleWithinCeiling(
+		uatHopEffectCeiling(edgeProvenance.SourcePrincipalKind, edgeProvenance.SourcePrincipalID, edgeProvenance, edgeCeiling),
+		preCapRole,
+		roleExplicit,
+	)
+	if !fits {
+		return nil, fmt.Errorf("scheduled dispatch of agent %q: %w: %s", slug, errScheduledAuthorityDenied, cause)
+	}
+	effectiveNoAuth := hc.NoAuth || childRole == AgentRoleNone
 
 	creatorIdentity := hc.Identity
 	runtimeBrokerID, err := s.resolveScheduledRuntimeBroker(
@@ -236,11 +356,11 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 		Template:        templateName,
 		ProjectID:       hc.ProjectID,
 		RuntimeBrokerID: runtimeBrokerID,
-		Phase:           "created",
+		Phase:           string(state.PhaseCreated),
 		Detached:        hc.Detached,
 		CreatedBy:       hc.Authority.PrincipalID,
-		OwnerID:         hc.OwnerID,
-		Ancestry:        slices.Clone(hc.Ancestry),
+		OwnerID:         ownerID,
+		Ancestry:        ancestry,
 		Labels:          clonedLabels,
 	}
 	applyPinnedPlacement(agent, placement)
@@ -251,33 +371,15 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 		}
 	}
 
-	agent.AppliedConfig = &store.AgentAppliedConfig{}
-	requestedRole := hc.Role
-	if requestedRole == "" {
-		requestedRole = AgentRoleNone
-	}
-	childRole, cause, fits := childRoleWithinCeiling(edgeCeiling, requestedRole, true)
-	if !fits {
-		return nil, fmt.Errorf("scheduled dispatch of agent %q: %w: %s", slug, errScheduledAuthorityDenied, cause)
-	}
-	agent.AppliedConfig.AgentRole = string(childRole)
-	agent.AppliedConfig.NoAuth = hc.NoAuth
-
 	creatorName := hc.CreatorName
 	if creatorName == "" {
 		creatorName = fireCreatorName(hc.Authority)
 	}
-	agent.AppliedConfig.CreatorName = creatorName
-	if hc.Task != "" {
-		agent.AppliedConfig.Task = hc.Task
-	}
-	if hc.Branch != "" {
-		agent.AppliedConfig.Branch = hc.Branch
-	}
-	agent.AppliedConfig.CreateInputs = &store.AgentCreateInputs{
+	agent.AppliedConfig = s.buildAppliedConfig(CreateAgentRequest{
+		Task:   hc.Task,
 		Branch: hc.Branch,
-		NoAuth: hc.NoAuth,
-	}
+		NoAuth: effectiveNoAuth,
+	}, creatorName, childRole)
 
 	templateFromProjectDefault := false
 	if templateName == "" && project != nil && project.Annotations != nil {
@@ -327,16 +429,23 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 			tmpl = nil
 			tmplErr = store.ErrNotFound
 		}
-		if templateFromHubDefault && tmpl == nil &&
-			(tmplErr == nil || errors.Is(tmplErr, store.ErrNotFound)) {
-			s.warnHubDefaultTemplateUnusable(ctx, templateName, hc.ProjectID, "not found")
-			templateName = ""
-			agent.Template = ""
-		}
-		if templateFromImplicitDefault && tmpl == nil &&
-			(tmplErr == nil || errors.Is(tmplErr, store.ErrNotFound)) {
-			templateName = ""
-			agent.Template = ""
+		if tmpl == nil && (tmplErr == nil || errors.Is(tmplErr, store.ErrNotFound)) {
+			brokerHasLocal := false
+			if runtimeBrokerID != "" {
+				provider, provErr := s.store.GetProjectProvider(ctx, hc.ProjectID, runtimeBrokerID)
+				if provErr == nil && provider.LocalPath != "" {
+					brokerHasLocal = true
+				}
+			}
+			switch {
+			case brokerHasLocal:
+				// Template will be resolved locally by the Runtime Broker.
+			case templateFromHubDefault:
+				s.warnHubDefaultTemplateUnusable(ctx, templateName, hc.ProjectID, "not found")
+				agent.Template = ""
+			case templateFromImplicitDefault:
+				agent.Template = ""
+			}
 		}
 		if tmplErr == nil && tmpl != nil {
 			if tmpl.Slug != "" {
@@ -344,6 +453,36 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 			}
 		}
 	}
+
+	var templateMessageMode string
+	if jc := s.templateJobConfig(ctx, tmpl); jc != nil {
+		templateMessageMode = jc.MessageMode
+	}
+	if templateMessageMode != "" {
+		if !store.IsValidMessageMode(templateMessageMode) {
+			return nil, fmt.Errorf("invalid template message mode: %s", templateMessageMode)
+		}
+		agent.MessageMode = templateMessageMode
+	} else if parentMessageMode != "" {
+		agent.MessageMode = parentMessageMode
+	} else {
+		agent.MessageMode = store.MessageModeProject
+	}
+	if agent.MessageMode == store.MessageModeHub {
+		if decision := s.AuthorizeMessageModeGrant(ctx, creatorIdentity, hc.ProjectID, agent.MessageMode); !decision.Allowed {
+			return nil, fmt.Errorf("cannot grant hub message mode: %s", decision.Reason)
+		}
+	}
+
+	persistence, persistenceSource, refusal := resolveAgentPersistence(persistenceInput{
+		BrokerName:     persistenceBrokerName(scheduledBroker),
+		BrokerSupports: brokerSupportsEphemeral(scheduledBroker),
+		GateOn:         s.experimentEnabled(experiments.CloudRunEphemeralAgents),
+	})
+	if refusal != nil {
+		return nil, errors.New(refusal.Message)
+	}
+	stampAgentPersistence(agent, persistence, persistenceSource)
 
 	saOrigin, err := s.applyScheduledProjectDefaultGCPIdentity(
 		contextWithIdentity(ctx, creatorIdentity), agent, project)
@@ -431,9 +570,6 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 	}
 
 	created, err := s.createUnderClaim(ctx, agent, func(ctx context.Context) (*CreateDispatchResult, error) {
-		if hc.NoAuth {
-			return dispatcher.DispatchAgentCreate(ctx, agent)
-		}
 		return dispatcher.DispatchAgentCreateWithGather(ctx, agent)
 	})
 	var held *store.ClaimHeldError

@@ -50,6 +50,7 @@ type CreateScheduleRequest struct {
 	Template string `json:"template,omitempty"`
 	Task     string `json:"task,omitempty"`
 	Branch   string `json:"branch,omitempty"`
+	NoAuth   bool   `json:"noAuth,omitempty"`
 
 	// Convenience fields for "exec" events (ptone/scion#7884)
 	AgentID        string   `json:"agentId,omitempty"`
@@ -255,6 +256,10 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 		ValidationError(w, "wake applies to message events only", nil)
 		return
 	}
+	if req.NoAuth && req.EventType != "dispatch_agent" {
+		ValidationError(w, "noAuth applies to dispatch_agent events only", nil)
+		return
+	}
 	// Recurring schedules accept (ptone/scion#2200)
 	// the same advanced Payload JSON as one-shot scheduled events and must
 	// be tombstoned the same way (see createScheduledEvent), for both
@@ -307,6 +312,7 @@ func (s *Server) createSchedule(w http.ResponseWriter, r *http.Request, projectI
 			Template:  req.Template,
 			Task:      req.Task,
 			Branch:    req.Branch,
+			NoAuth:    req.NoAuth,
 		}
 		payloadBytes, marshalErr := json.Marshal(p)
 		if marshalErr != nil {

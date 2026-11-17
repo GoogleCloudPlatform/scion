@@ -6481,6 +6481,7 @@ type DispatchAgentEventPayload struct {
 	Template  string `json:"template,omitempty"`
 	Task      string `json:"task,omitempty"`
 	Branch    string `json:"branch,omitempty"`
+	NoAuth    bool   `json:"noAuth,omitempty"`
 }
 
 // applyScheduledProjectDefaultGCPIdentity is the scheduler-path twin of the

@@ -240,9 +240,9 @@ func TestFixturePurge_TransitivePurge(t *testing.T) {
 	}, fxID)))
 	sched, err := e.store.GetAgentBySlug(ctx, e.project, "fpp-sched")
 	require.NoError(t, err)
-	require.Empty(t, sched.OwnerID, "a scheduled-dispatch child has no OwnerID")
-	require.Empty(t, sched.Ancestry, "a scheduled-dispatch child has no ancestry")
-	require.Equal(t, fxID, sched.Fixture.RootID, "it is selected by its stamp alone")
+	require.Equal(t, fxID, sched.OwnerID)
+	require.Equal(t, []string{fxID}, sched.Ancestry)
+	require.Equal(t, fxID, sched.Fixture.RootID)
 	scheduleID := fpCreateSchedule(t, e.srv, e.fx.AccessToken, e.project, fpScheduleBody("fpp-schedule"))
 	groupID := fpCreateGroup(t, e.srv, e.fx.AccessToken, CreateGroupRequest{Name: "fpp-group"})
 

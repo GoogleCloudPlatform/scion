@@ -154,8 +154,6 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 
 	// agent_create_headless.go: createAgentHeadless — guarded by
 	// dispatchAgentAction.Authorize -> authorizeDispatchAgentFire before Fire.
-	{file: "agent_create_headless.go", function: "createAgentHeadless", symbol: "DispatchAgentCreate",
-		class: "guarded", reason: "dispatchAgentAction.Authorize runs authorizeDispatchAgentFire before createAgentHeadless"},
 	{file: "agent_create_headless.go", function: "createAgentHeadless", symbol: "DispatchAgentCreateWithGather",
 		class: "guarded", reason: "dispatchAgentAction.Authorize runs authorizeDispatchAgentFire before createAgentHeadless"},
 
@@ -236,10 +234,6 @@ var sharedClassificationSites = []struct {
 	{
 		site:   effectCallSiteKey{"start_claim.go", "startAgentCore", "DispatchAgentStartWithOptions"},
 		sameAs: effectCallSiteKey{"start_claim.go", "startAgentCore", "DispatchAgentStart"},
-	},
-	{
-		site:   effectCallSiteKey{"agent_create_headless.go", "createAgentHeadless", "DispatchAgentCreateWithGather"},
-		sameAs: effectCallSiteKey{"agent_create_headless.go", "createAgentHeadless", "DispatchAgentCreate"},
 	},
 }
 

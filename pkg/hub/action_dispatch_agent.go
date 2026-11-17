@@ -104,7 +104,11 @@ func (s *Server) authorizeDispatchAgentFire(
 	auth FireAuthority,
 	identity Identity,
 ) error {
-	delegatedRole := AgentRoleFull // a user's scheduled dispatch is checked against the default role
+	var project *store.Project
+	if p, err := s.store.GetProject(ctx, projectID); err == nil {
+		project = p
+	}
+	delegatedRole := s.projectDefaultAgentRole(project)
 	if auth.PrincipalKind == store.DelegationPrincipalAgent {
 		role, _ := agentRoleAndScopes(auth.agent)
 		delegatedRole = role
@@ -112,6 +116,9 @@ func (s *Server) authorizeDispatchAgentFire(
 		if !ok || !agentIdent.HasScope(ScopeAgentCreate) {
 			return fmt.Errorf("scheduled dispatch principal agent %q missing required scope: %s", auth.PrincipalID, ScopeAgentCreate)
 		}
+	}
+	if project != nil {
+		delegatedRole = minRole(delegatedRole, projectMaxAgentRole(project))
 	}
 
 	if decision := s.agentCreateDecision(ctx, identity, projectID); !decision.Allowed {
@@ -228,10 +235,7 @@ func (a *dispatchAgentAction) Fire(ctx context.Context, req hubfire.FireRequest,
 		CreatorName:    da.creatorName,
 		EdgeCeiling:    da.edgeCeiling,
 		EdgeProvenance: da.edgeProvenance,
-		Role:           AgentRoleNone,
-		NoAuth:         true,
-		OwnerID:        "",
-		Ancestry:       nil,
+		NoAuth:         da.payload.NoAuth,
 		Name:           da.payload.AgentName,
 		Template:       da.payload.Template,
 		Task:           da.payload.Task,

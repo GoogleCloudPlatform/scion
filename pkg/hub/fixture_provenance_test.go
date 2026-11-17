@@ -271,7 +271,8 @@ func TestFixtureProvenance_ScheduledDispatchStamped(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, want, byUser.Fixture)
 	assert.Equal(t, fxID, byUser.CreatedBy)
-	assert.Empty(t, byUser.Ancestry, "a scheduled child keeps no ancestry")
+	assert.Equal(t, fxID, byUser.OwnerID)
+	assert.Equal(t, []string{fxID}, byUser.Ancestry)
 	fpAssertEdgeDelegator(t, e.store, byUser.ID, store.DelegationPrincipalUser, fxID)
 
 	parent := fpCreateAgent(t, e.srv, e.fx.AccessToken, e.project, "fp-sched-parent")
@@ -283,7 +284,8 @@ func TestFixtureProvenance_ScheduledDispatchStamped(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, want, byAgent.Fixture)
 	assert.Equal(t, parent, byAgent.CreatedBy)
-	assert.Empty(t, byAgent.Ancestry, "a scheduled child keeps no ancestry")
+	assert.Equal(t, parent, byAgent.OwnerID)
+	assert.Equal(t, []string{fxID, parent}, byAgent.Ancestry)
 	fpAssertEdgeDelegator(t, e.store, byAgent.ID, store.DelegationPrincipalAgent, parent)
 }
 

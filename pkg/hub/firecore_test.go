@@ -30,6 +30,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1378,6 +1379,223 @@ func TestFireCoreMessageActionValidate(t *testing.T) {
 	normalized, err = nilAction.Validate(context.Background(), nil, "", "")
 	require.ErrorContains(t, err, "message action authoring validation is not wired in 1a")
 	assert.Empty(t, normalized)
+}
+
+type dispatchDenyEdgeStore struct {
+	*mockScheduledEventStore
+	edge *store.DelegationEdge
+}
+
+func (s *dispatchDenyEdgeStore) GetDelegationEdgesForDelegate(_ context.Context, _, id string) ([]*store.DelegationEdge, error) {
+	if s.edge != nil && s.edge.DelegateID == id {
+		return []*store.DelegationEdge{s.edge}, nil
+	}
+	return nil, nil
+}
+
+func TestFireCoreDispatchAgentAction(t *testing.T) {
+	t.Parallel()
+
+	const projectID = "project-dispatch-action"
+
+	seedDispatchUser := func(ms *mockScheduledEventStore, perms ...string) string {
+		userID := "dispatch-user-1"
+		ms.projects[projectID] = &store.Project{ID: projectID, Name: projectID, Slug: projectID}
+		ms.users[userID] = &store.User{
+			ID:          userID,
+			Email:       "dispatch-user@example.com",
+			DisplayName: "Dispatch User",
+			Role:        store.UserRoleMember,
+			Status:      store.UserStatusActive,
+		}
+		ms.roleDefinitions["rd-dispatch"] = &store.RoleDefinition{
+			ID:          "rd-dispatch",
+			Name:        store.ProjectRoleMember,
+			ScopeType:   store.RoleScopeProject,
+			Permissions: perms,
+			System:      true,
+		}
+		ms.roleBindings = append(ms.roleBindings, &store.RoleBinding{
+			ID:               "rb-dispatch",
+			RoleDefinitionID: "rd-dispatch",
+			PrincipalType:    store.RoleBindingPrincipalUser,
+			PrincipalID:      userID,
+			ScopeType:        store.RoleScopeProject,
+			ScopeID:          projectID,
+		})
+		return userID
+	}
+
+	t.Run("Validate refuses in Stage 1 and Detaches is false", func(t *testing.T) {
+		ms := newMockStore()
+		srv := newEventHandlerTestServer(ms)
+		act := &dispatchAgentAction{srv: srv}
+
+		assert.Equal(t, "dispatch_agent", act.Type())
+		assert.Equal(t, "agent.create", act.Permission())
+		assert.False(t, act.Detaches(hubfire.FireRequest{
+			Authority: hubfire.RecordedAuthority{DefinitionKind: hubfire.DefinitionKindSchedule},
+		}))
+		assert.False(t, act.Detaches(hubfire.FireRequest{
+			Authority: hubfire.RecordedAuthority{DefinitionKind: hubfire.DefinitionKindTrigger},
+		}))
+
+		normalized, err := act.Validate(context.Background(), nil, projectID, `{"agentName":"worker"}`)
+		require.ErrorContains(t, err, "dispatch_agent action authoring validation is not wired in Stage 1")
+		assert.Empty(t, normalized)
+
+		var nilAction *dispatchAgentAction
+		normalized, err = nilAction.Validate(context.Background(), nil, "", "")
+		require.ErrorContains(t, err, "dispatch_agent action authoring validation is not wired in Stage 1")
+		assert.Empty(t, normalized)
+	})
+
+	t.Run("ValidatePayload rejects invalid JSON missing agentName and non-name template", func(t *testing.T) {
+		act := &dispatchAgentAction{srv: newEventHandlerTestServer(newMockStore())}
+		require.ErrorContains(t, act.ValidatePayload(hubfire.FireRequest{Payload: `{bad`}), "invalid dispatch_agent payload")
+		require.ErrorContains(t, act.ValidatePayload(hubfire.FireRequest{Payload: `{}`}), "agentName is required")
+		require.ErrorContains(t, act.ValidatePayload(hubfire.FireRequest{
+			Payload: `{"agentName":"worker","template":"https://evil.example/t.git"}`,
+		}), templateRefRefusal)
+		require.NoError(t, act.ValidatePayload(hubfire.FireRequest{
+			Payload: `{"agentName":"worker","template":"claude","noAuth":true}`,
+		}))
+	})
+
+	t.Run("CanDelegate refusal differentiates trigger vs schedule refusal text and audit targetType", func(t *testing.T) {
+		// Grant agent.create so resolveRecordedAuthority and agentCreateDecision pass,
+		// but omit project.secret_read so CanDelegate(AgentRoleFull) is denied.
+		for _, tc := range []struct {
+			name           string
+			defKind        string
+			wantTargetType string
+			wantExactErr   string
+			wantErrSub     string
+		}{
+			{
+				name:           "trigger_dispatch",
+				defKind:        hubfire.DefinitionKindTrigger,
+				wantTargetType: "trigger_dispatch",
+				wantExactErr:   "dispatch_agent refused",
+			},
+			{
+				name:           "scheduled_dispatch",
+				defKind:        hubfire.DefinitionKindScheduledEvent,
+				wantTargetType: "scheduled_dispatch",
+				wantErrSub:     "failed CanDelegate at fire time",
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				ms := newMockStore()
+				ms.projects[projectID] = &store.Project{ID: projectID, Name: projectID, Slug: projectID}
+				creatorID := seedFullRoleDispatchCreator(ms, projectID)
+				ms.roleDefinitions["rd-creator-member"].Permissions = []string{"agent.read", "agent.create"}
+				st := &dispatchDenyEdgeStore{
+					mockScheduledEventStore: ms,
+					edge: &store.DelegationEdge{
+						ID:            "edge-creator",
+						DelegatorType: store.DelegationPrincipalUser,
+						DelegatorID:   "creator-owner",
+						DelegateType:  store.DelegationPrincipalAgent,
+						DelegateID:    creatorID,
+						ScopeType:     store.RoleScopeProject,
+						ScopeID:       projectID,
+						Role:          string(AgentRoleFull),
+						Active:        true,
+						AuthorityProvenance: store.AuthorityProvenance{
+							ProvenanceVersion:    store.ProvenanceVersionV1,
+							SourcePrincipalKind:  store.DelegationPrincipalUser,
+							SourcePrincipalID:    "creator-owner",
+							SourceCredentialKind: store.SourceCredentialUAT,
+							SourceCredentialID:   "uat-narrow",
+						},
+						EffectCeiling: store.EffectCeiling{
+							Kind:              store.EffectCeilingBounded,
+							Version:           permissions.CeilingVersionV1,
+							PermissionIDs:     []string{"agent.create"},
+							BoundaryKind:      string(permissions.BoundaryKindProject),
+							BoundaryProjectID: projectID,
+						},
+					},
+				}
+				srv := newEventHandlerTestServer(st)
+				srv.registerFireActions()
+				evt := withMockAgentRevision(store.ScheduledEvent{ID: "fire-deny", ProjectID: projectID, CreatedBy: creatorID}, creatorID)
+
+				out := srv.fireAction(context.Background(), hubfire.FireRequest{
+					ProjectID: projectID,
+					Authority: hubfire.RecordedAuthority{
+						Attribution:    evt.InitiatorAttribution,
+						Ceiling:        evt.AuthorityCeiling,
+						DefinitionKind: tc.defKind,
+						DefinitionID:   "def-1",
+						FireID:         "fire-deny",
+					},
+					ActionType: "dispatch_agent",
+					Payload:    `{"agentName":"worker-denied"}`,
+				})
+				assert.Equal(t, hubfire.FireStatusRefused, out.Status)
+				if tc.wantExactErr != "" {
+					assert.Equal(t, tc.wantExactErr, out.Error)
+				} else {
+					assert.Contains(t, out.Error, tc.wantErrSub)
+				}
+				srv.mutationAuditWork.stop(context.Background(), time.Second, time.Second)
+				ms.mu.Lock()
+				audits := append([]*store.MutationAuditRecord(nil), ms.audits...)
+				ms.mu.Unlock()
+				require.Len(t, audits, 1)
+				assert.Equal(t, tc.wantTargetType, audits[0].TargetType)
+				assert.Equal(t, "fire-deny", audits[0].TargetID)
+				assert.Equal(t, "deny", audits[0].CanDelegateResult)
+			})
+		}
+	})
+
+	t.Run("Fire creates detached owned agent and returns ResultRef", func(t *testing.T) {
+		ms := newMockStore()
+		srv := newEventHandlerTestServer(ms)
+		srv.registerFireActions()
+		userID := seedDispatchUser(ms,
+			"agent.create",
+			"project.read",
+			"project.secret_read",
+			"agent.message",
+			"scheduled_event.create",
+			"scheduled_event.read",
+			"scheduled_event.list",
+		)
+		// Cap project role to baseline so standard member permissions satisfy CanDelegate.
+		ms.projects[projectID].Annotations = map[string]string{
+			projectSettingDefaultAgentRole: string(AgentRoleBaseline),
+		}
+		evt := withSessionRevision(store.ScheduledEvent{ID: "fire-ok", ProjectID: projectID}, userID)
+
+		out := srv.fireAction(context.Background(), hubfire.FireRequest{
+			ProjectID: projectID,
+			Authority: hubfire.RecordedAuthority{
+				Attribution:    evt.InitiatorAttribution,
+				Ceiling:        evt.AuthorityCeiling,
+				DefinitionKind: hubfire.DefinitionKindScheduledEvent,
+				DefinitionID:   "evt-ok",
+				FireID:         "fire-ok",
+			},
+			ActionType: "dispatch_agent",
+			Payload:    `{"agentName":"worker-ok","task":"run checks"}`,
+		})
+		require.Equal(t, hubfire.FireStatusFired, out.Status, "unexpected fire error: %s", out.Error)
+		require.NotEmpty(t, out.ResultRef)
+
+		created, err := ms.GetAgent(context.Background(), out.ResultRef)
+		require.NoError(t, err)
+		assert.Equal(t, "worker-ok", created.Slug)
+		assert.Equal(t, userID, created.OwnerID)
+		assert.Equal(t, []string{userID}, created.Ancestry)
+		assert.True(t, created.Detached)
+		require.NotNil(t, created.AppliedConfig)
+		assert.Equal(t, string(AgentRoleBaseline), created.AppliedConfig.AgentRole)
+		assert.False(t, created.AppliedConfig.NoAuth)
+	})
 }
 
 // TestFireCoreAdapterDetachesMatrix covers all seven cells of design §5.1a

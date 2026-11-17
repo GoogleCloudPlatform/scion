@@ -13,6 +13,14 @@ Scion release notes are published for each preview and stable release. Earlier n
 - [v0.3.0-preview.7](/scion/release-notes/v0-3-0-preview-7/)
 - [v0.3.0-preview.6](/scion/release-notes/v0-3-0-preview-6/)
 
+## Scheduled agent dispatch creates owned agents with credentials and environment gathering
+
+At their next fire, `dispatch_agent` recurring schedules and one-shot scheduled events create agents with the revision's recorded principal as owner and ancestry, an agent role from the project and Hub default role ladder (`scion.io/default-agent-role` → `agent_defaults.default_agent_role` → `full` for user principals; the parent agent's role for agent principals, capped by `scion.io/max-agent-role` and the revision's recorded permission ceiling), the project's default agent settings, and `NoAuth: false`.
+
+- **Secrets, environment variables, and gathering:** Unless the resolved role is `none` or the payload sets `"noAuth": true`, the Hub resolves environment variables and secrets from Hub storage under the revision principal (via the owner path for user principals and the progeny path for agent principals) and dispatches creation to the Runtime Broker with environment gathering, satisfying `as_needed` entries automatically. If required environment variables remain unsatisfied, the Hub rolls back the failed create (removing Runtime Broker files, revoking the minted agent token, and compensating the agent row) and records the fire as failed with `missing required environment variables (N)`.
+- **Opting out (`noAuth: true`):** A schedule or one-shot event that should keep credential-less creation sets `"noAuth": true` on create or replaces the schedule's `payload` via `PATCH` (which bumps `authorizationRevision` and records the caller's authority).
+- **Existing scheduled agents and user deletion:** Agents created by schedules before this release are not migrated and keep `NoAuth: true` and role `none`, including across `scion reincarnate`. Newly dispatched user-owned scheduled agents count as owned agents when deleting a user, just like interactively created agents. See [Scheduling — Security & Authorization](/scion/hosted/user/scheduling/#security--authorization).
+
 ## Agents can report `idle`; idle auto-suspend and auto-wake (experimental)
 
 Agents now end each turn with one of `blocked` (waiting on a specific event, including their own background job), `idle` (nothing to do until new work arrives), `task_completed` or `ask_user`. See [Ending a turn: blocked, idle, task_completed](/scion/concepts/#ending-a-turn-blocked-idle-task_completed).

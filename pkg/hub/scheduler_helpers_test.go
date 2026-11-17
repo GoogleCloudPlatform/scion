@@ -409,6 +409,18 @@ func (m *mockScheduledEventStore) GetProjectProviders(_ context.Context, project
 	}}, nil
 }
 
+func (m *mockScheduledEventStore) GetProjectProvider(_ context.Context, projectID, brokerID string) (*store.ProjectProvider, error) {
+	if brokerID != mockSchedulerBrokerID {
+		return nil, store.ErrNotFound
+	}
+	return &store.ProjectProvider{
+		ProjectID:  projectID,
+		BrokerID:   mockSchedulerBrokerID,
+		BrokerName: mockSchedulerBrokerID,
+		Status:     store.BrokerStatusOnline,
+	}, nil
+}
+
 func (m *mockScheduledEventStore) GetRuntimeBroker(_ context.Context, id string) (*store.RuntimeBroker, error) {
 	if id != mockSchedulerBrokerID {
 		return nil, store.ErrNotFound
