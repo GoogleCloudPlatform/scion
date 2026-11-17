@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -378,8 +379,9 @@ func TestHandleProjectGitHubPermissions(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&perms); err != nil {
 		t.Fatalf("failed to decode: %v", err)
 	}
-	if perms.Contents != "write" {
-		t.Errorf("expected default contents:write, got %s", perms.Contents)
+	wantDefaults := store.GitHubTokenPermissions(githubapp.DefaultTokenPermissions())
+	if perms != wantDefaults {
+		t.Errorf("expected default permissions %+v, got %+v", wantDefaults, perms)
 	}
 
 	// Set custom permissions
@@ -412,6 +414,18 @@ func TestHandleProjectGitHubPermissions(t *testing.T) {
 	}
 	if clearedProject.GitHubPermissions != nil {
 		t.Error("expected nil permissions after reset")
+	}
+
+	rec = doRequest(t, srv, http.MethodGet, fmt.Sprintf("/api/v1/projects/%s/github-permissions", tid("project_gh_perms")), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 after reset, got %d", rec.Code)
+	}
+	perms = store.GitHubTokenPermissions{}
+	if err := json.NewDecoder(rec.Body).Decode(&perms); err != nil {
+		t.Fatalf("failed to decode after reset: %v", err)
+	}
+	if perms != wantDefaults {
+		t.Errorf("expected default permissions after reset %+v, got %+v", wantDefaults, perms)
 	}
 }
 

@@ -775,12 +775,9 @@ func (s *Server) handleProjectGitHubPermissions(w http.ResponseWriter, r *http.R
 	case http.MethodGet:
 		perms := project.GitHubPermissions
 		if perms == nil {
-			// Return defaults
-			perms = &store.GitHubTokenPermissions{
-				Contents:     "write",
-				PullRequests: "write",
-				Metadata:     "read",
-			}
+			// Return the same defaults token minting falls back to.
+			defaults := store.GitHubTokenPermissions(githubapp.DefaultTokenPermissions())
+			perms = &defaults
 		}
 		writeJSON(w, http.StatusOK, perms)
 

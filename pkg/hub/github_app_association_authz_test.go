@@ -866,6 +866,39 @@ func TestGitHubAssociation_PushProofEmptyStoredPermissionsDefaultsOnly(t *testin
 	}, mints[0].Permissions)
 }
 
+// GET /api/v1/projects/{id}/github-permissions on a project with no explicit
+// permission grant reports the exact permission set that token minting requests
+// under a write-proven association, so displayed and minted defaults cannot drift.
+func TestProjectGitHubPermissions_DefaultDisplayedMatchesMinted(t *testing.T) {
+	srv, st := testServer(t)
+	ctx := context.Background()
+	gh := newFakeGitHubForAssoc(t)
+	configureFakeGitHubApp(t, srv, gh)
+
+	createAssocInstallation(t, st, 5903, "acme", "acme/widgets")
+	giveUserGitHubToken(t, srv, st, "pusher", "ghp_pusher")
+	gh.grant("ghp_pusher", "acme/widgets", githubapp.RepoAccess{Push: true, Pull: true})
+
+	p := createAssocProject(t, st, "perm-nil-default-match", gh.remote("acme", "widgets"), "pusher", ptrInt64(5903))
+	require.Nil(t, reloadProject(t, st, p.ID).GitHubPermissions)
+
+	rec := doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+p.ID+"/github-permissions", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	var displayedMap map[string]string
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &displayedMap))
+	var displayedStruct store.GitHubTokenPermissions
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &displayedStruct))
+
+	_, _, err := srv.MintGitHubAppTokenForProject(ctx, reloadProject(t, st, p.ID))
+	require.NoError(t, err)
+	_, mints := gh.counts()
+	require.Len(t, mints, 1)
+
+	assert.Equal(t, store.GitHubTokenPermissions(githubapp.DefaultTokenPermissions()), displayedStruct)
+	assert.Equal(t, mints[0].Permissions, displayedMap, "displayed default permissions must match minted default permissions")
+}
+
 // PUT github-permissions accepts only the known fields with "", "read" or
 // "write"; anything else is refused and nothing is stored. Revert check:
 // before the fix any body was stored.
