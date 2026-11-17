@@ -2260,7 +2260,7 @@ var projectOperations = []OperationSpec{
 		AuditObligation: &AuditObligation{
 			EventType:              "project_message_policy_delete",
 			ContextFields:          []string{"actor_id", "project_id"},
-			BeforeFields:           []string{"policy_id", "policy_name", "revision"},
+			BeforeFields:           []string{"policy_id", "policy_name", "mode", "revision"},
 			Atomic:                 false,
 			NonAtomicJustification: "Policy deletion commits in the store and emits a structured mutation audit record immediately afterward via emitMutationAudit",
 		},

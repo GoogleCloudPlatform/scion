@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/celengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
@@ -343,6 +344,26 @@ func TestMessagePolicyHandlers_CRUDCoverageAndCacheInvalidation(t *testing.T) {
 
 	getAfterDel := mphSessionDo(t, f.srv, f.owner, http.MethodGet, base+"/"+created.ID, nil)
 	assert.Equal(t, http.StatusNotFound, getAfterDel.Code)
+
+	// Verify delete mutation audit BeforeSummary matches AuditObligation.BeforeFields.
+	var delAudits []*store.MutationAuditRecord
+	require.Eventually(t, func() bool {
+		var auditErr error
+		delAudits, _, auditErr = f.s.ListMutationAudits(context.Background(), store.MutationAuditFilter{
+			MutationType: mutationTypeMessagePolicyDelete,
+			TargetID:     f.project,
+			Limit:        10,
+		})
+		return auditErr == nil && len(delAudits) == 1
+	}, 2*time.Second, 10*time.Millisecond, "delete mutation audit should be recorded")
+	var beforeFields map[string]any
+	require.NoError(t, json.Unmarshal([]byte(delAudits[0].BeforeSummary), &beforeFields))
+	assert.Equal(t, map[string]any{
+		"policy_id":   created.ID,
+		"policy_name": created.Name,
+		"mode":        store.MessagePolicyModeEnforce,
+		"revision":    float64(2),
+	}, beforeFields)
 }
 
 // TestMessagePolicyHandlers_AuthoringValidation400s verifies structured 400
@@ -454,12 +475,43 @@ func TestMessagePolicyHandlers_AuthoringValidation400s(t *testing.T) {
 		assert.Equal(t, "on_failed", apiErr.Details["field"])
 	})
 
-	t.Run("reserved names and cross-project sender agent_ids return 400", func(t *testing.T) {
+	t.Run("reserved names, uuid-shaped names, and cross-project sender agent_ids return 400", func(t *testing.T) {
 		for _, reserved := range []string{"test", "decisions"} {
 			body := mphValidCreateBody(reserved)
 			rec := mphSessionDo(t, f.srv, f.owner, http.MethodPost, base, body)
 			require.Equal(t, http.StatusBadRequest, rec.Code, "reserved name %s: %s", reserved, rec.Body.String())
-			assert.Equal(t, ErrCodeValidationError, decodeErr(t, rec).Code)
+			apiErr := decodeErr(t, rec)
+			assert.Equal(t, ErrCodeValidationError, apiErr.Code)
+			assert.Equal(t, "name", apiErr.Details["field"])
+		}
+
+		uuidNames := []string{
+			"550e8400-e29b-41d4-a716-446655440000",
+			"550e8400e29b41d4a716446655440000",
+		}
+		for _, uuidName := range uuidNames {
+			body := mphValidCreateBody(uuidName)
+			rec := mphSessionDo(t, f.srv, f.owner, http.MethodPost, base, body)
+			require.Equal(t, http.StatusBadRequest, rec.Code, "uuid name %s: %s", uuidName, rec.Body.String())
+			apiErr := decodeErr(t, rec)
+			assert.Equal(t, ErrCodeValidationError, apiErr.Code)
+			assert.Equal(t, "name", apiErr.Details["field"])
+		}
+
+		// PATCH cannot rename an existing policy to a reserved or UUID-shaped name.
+		seedRec := mphSessionDo(t, f.srv, f.owner, http.MethodPost, base, mphValidCreateBody("rename-guard-seed"))
+		require.Equal(t, http.StatusCreated, seedRec.Code, seedRec.Body.String())
+		var seeded MessagePolicyResponse
+		require.NoError(t, json.Unmarshal(seedRec.Body.Bytes(), &seeded))
+		for _, badName := range append([]string{"test", "decisions"}, uuidNames...) {
+			nameCopy := badName
+			patchRec := mphSessionDo(t, f.srv, f.owner, http.MethodPatch, base+"/"+seeded.ID, PatchMessagePolicyRequest{
+				Name: &nameCopy,
+			})
+			require.Equal(t, http.StatusBadRequest, patchRec.Code, "PATCH bad name %s: %s", badName, patchRec.Body.String())
+			apiErr := decodeErr(t, patchRec)
+			assert.Equal(t, ErrCodeValidationError, apiErr.Code)
+			assert.Equal(t, "name", apiErr.Details["field"])
 		}
 
 		crossSender := mphValidCreateBody("cross-sender")
@@ -682,6 +734,40 @@ func TestMessagePolicyHandlers_DecisionsContentFreeAndFiltered(t *testing.T) {
 		assert.NotContains(t, m, "msg")
 		assert.NotContains(t, m, "message_body")
 	}
+
+	// Malformed cursors on both list endpoints return 400 invalid_cursor.
+	for _, badCursorPath := range []string{
+		base + "?cursor=not-base64-!!!",
+		base + "/decisions?cursor=not-base64-!!!",
+	} {
+		curRec := mphSessionDo(t, f.srv, f.owner, http.MethodGet, badCursorPath, nil)
+		require.Equal(t, http.StatusBadRequest, curRec.Code, "path %s: %s", badCursorPath, curRec.Body.String())
+		var curErr ErrorResponse
+		require.NoError(t, json.Unmarshal(curRec.Body.Bytes(), &curErr))
+		assert.Equal(t, ErrCodeInvalidCursor, curErr.Error.Code)
+	}
+
+	// Non-UUID unknown ?policy_id= returns 404 not_found (never invalid_cursor).
+	unknownRefRec := mphSessionDo(t, f.srv, f.owner, http.MethodGet, base+"/decisions?policy_id=typo-name", nil)
+	require.Equal(t, http.StatusNotFound, unknownRefRec.Code, unknownRefRec.Body.String())
+	var unknownErr ErrorResponse
+	require.NoError(t, json.Unmarshal(unknownRefRec.Body.Bytes(), &unknownErr))
+	assert.Equal(t, ErrCodeNotFound, unknownErr.Error.Code)
+
+	// Deleting a policy still allows querying historical decisions by its UUID,
+	// while its former slug name returns 404 not_found.
+	delAlphaRec := mphSessionDo(t, f.srv, f.owner, http.MethodDelete, base+"/"+createdA.ID, nil)
+	require.Equal(t, http.StatusNoContent, delAlphaRec.Code, delAlphaRec.Body.String())
+
+	histByUUIDRec := mphSessionDo(t, f.srv, f.owner, http.MethodGet, base+"/decisions?policy_id="+createdA.ID, nil)
+	require.Equal(t, http.StatusOK, histByUUIDRec.Code, histByUUIDRec.Body.String())
+	var histDecisions ListMessagePolicyDecisionsResponse
+	require.NoError(t, json.Unmarshal(histByUUIDRec.Body.Bytes(), &histDecisions))
+	require.Len(t, histDecisions.Decisions, 1)
+	assert.Equal(t, createdA.ID, histDecisions.Decisions[0].PolicyID)
+
+	deletedNameRec := mphSessionDo(t, f.srv, f.owner, http.MethodGet, base+"/decisions?policy_id=policy-alpha", nil)
+	require.Equal(t, http.StatusNotFound, deletedNameRec.Code, deletedNameRec.Body.String())
 }
 
 func mphIdentityDo(t *testing.T, srv *Server, identity Identity, cred CredentialContext, method, path string, body any) *httptest.ResponseRecorder {

@@ -4986,7 +4986,7 @@
 
 - **Event Type:** `project_message_policy_delete`
 - **Context Fields:** actor_id, project_id
-- **Before Fields:** policy_id, policy_name, revision
+- **Before Fields:** policy_id, policy_name, mode, revision
 - **Atomic:** No
 - **Non-Atomic Justification:** Policy deletion commits in the store and emits a structured mutation audit record immediately afterward via emitMutationAudit
 

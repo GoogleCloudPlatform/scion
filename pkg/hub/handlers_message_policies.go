@@ -24,6 +24,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messagepolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -315,11 +317,10 @@ func (s *Server) handleProjectMessagePolicies(w http.ResponseWriter, r *http.Req
 				}
 				s.handlePatchMessagePolicy(w, r, project, policyRef, actorID)
 			case http.MethodDelete:
-				actorID, ok := s.authorizeMessagePolicyManage(w, r, project)
-				if !ok {
+				if _, ok := s.authorizeMessagePolicyManage(w, r, project); !ok {
 					return
 				}
-				s.handleDeleteMessagePolicy(w, r, project, policyRef, actorID)
+				s.handleDeleteMessagePolicy(w, r, project, policyRef)
 			}
 			return
 		}
@@ -593,6 +594,13 @@ func (s *Server) validateMessagePolicyAuthoring(
 		return "", false
 	}
 
+	if _, parseErr := uuid.Parse(spec.Name); parseErr == nil {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+			fmt.Sprintf("policy name %q must not be UUID-shaped", spec.Name),
+			map[string]interface{}{"field": "name"})
+		return "", false
+	}
+
 	if forbidReservedNames && isReservedMessagePolicyName(spec.Name) {
 		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
 			fmt.Sprintf("policy name %q is reserved", spec.Name),
@@ -679,7 +687,7 @@ func (s *Server) handleListMessagePolicies(w http.ResponseWriter, r *http.Reques
 		Cursor: strings.TrimSpace(q.Get("cursor")),
 	})
 	if err != nil {
-		if errors.Is(err, store.ErrInvalidInput) {
+		if errors.Is(err, store.ErrInvalidCursor) {
 			writeInvalidCursor(w)
 			return
 		}
@@ -922,7 +930,7 @@ func (s *Server) handlePatchMessagePolicy(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, toMessagePolicyResponse(*candidate))
 }
 
-func (s *Server) handleDeleteMessagePolicy(w http.ResponseWriter, r *http.Request, project *store.Project, policyRef, actorID string) {
+func (s *Server) handleDeleteMessagePolicy(w http.ResponseWriter, r *http.Request, project *store.Project, policyRef string) {
 	ctx := r.Context()
 	existing, err := s.resolveProjectMessagePolicy(ctx, project.ID, policyRef)
 	if err != nil {
@@ -940,11 +948,10 @@ func (s *Server) handleDeleteMessagePolicy(w http.ResponseWriter, r *http.Reques
 	}
 
 	beforeSummary, _ := json.Marshal(map[string]any{
-		"id":       existing.ID,
-		"name":     existing.Name,
-		"mode":     existing.Mode,
-		"revision": existing.Revision,
-		"actor_id": actorID,
+		"policy_id":   existing.ID,
+		"policy_name": existing.Name,
+		"mode":        existing.Mode,
+		"revision":    existing.Revision,
 	})
 	s.emitMutationAudit(ctx, &store.MutationAuditRecord{
 		MutationType:  mutationTypeMessagePolicyDelete,
@@ -1286,8 +1293,14 @@ func (s *Server) handleListMessagePolicyDecisions(w http.ResponseWriter, r *http
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				// Allow filtering by an already-deleted policy UUID so historical
-				// decision rows remain queryable after policy deletion.
-				filter.PolicyID = qPolicy
+				// decision rows remain queryable after policy deletion; unknown
+				// non-UUID refs return 404 (matching /{policyId}/decisions).
+				if parsedID, parseErr := uuid.Parse(qPolicy); parseErr == nil && parsedID != uuid.Nil && len(qPolicy) == 36 {
+					filter.PolicyID = parsedID.String()
+				} else {
+					writeErrorFromErr(w, err, "Message policy")
+					return
+				}
 			} else {
 				writeErrorFromErr(w, err, "Message policy")
 				return
@@ -1334,7 +1347,7 @@ func (s *Server) handleListMessagePolicyDecisions(w http.ResponseWriter, r *http
 		Cursor: strings.TrimSpace(q.Get("cursor")),
 	})
 	if err != nil {
-		if errors.Is(err, store.ErrInvalidInput) {
+		if errors.Is(err, store.ErrInvalidCursor) {
 			writeInvalidCursor(w)
 			return
 		}
