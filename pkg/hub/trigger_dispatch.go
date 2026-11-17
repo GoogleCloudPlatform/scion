@@ -45,11 +45,16 @@ type triggerRuntime struct {
 }
 
 // TriggerEventQueue returns the hub's shared durablequeue.StoreQueue for
-// trigger.event producers and drainers, creating it lazily when s.store
-// implements store.DurableQueueStore.
+// trigger.event producers and drainers. When s was constructed via New, this
+// returns s.durableQueue (the same queue instance used by POST /api/v1/hooks/{id}
+// ingress so Wake wakes the local drainer immediately); bare test Server
+// structs without s.durableQueue fall back to a lazy StoreQueue on s.triggers.
 func (s *Server) TriggerEventQueue() *durablequeue.StoreQueue {
 	if s == nil {
 		return nil
+	}
+	if s.durableQueue != nil {
+		return s.durableQueue
 	}
 	dqStore, ok := s.store.(store.DurableQueueStore)
 	if !ok || dqStore == nil {
@@ -58,10 +63,17 @@ func (s *Server) TriggerEventQueue() *durablequeue.StoreQueue {
 	rt := &s.triggers
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	if rt.queue == nil {
-		rt.queue = durablequeue.NewQueue(dqStore)
+	return s.triggerQueueLocked(dqStore)
+}
+
+func (s *Server) triggerQueueLocked(dqStore store.DurableQueueStore) *durablequeue.StoreQueue {
+	if s.durableQueue != nil {
+		return s.durableQueue
 	}
-	return rt.queue
+	if s.triggers.queue == nil {
+		s.triggers.queue = durablequeue.NewQueue(dqStore)
+	}
+	return s.triggers.queue
 }
 
 // serverTriggerCore adapts Server's fire core, experiment gate, and wake-fire
@@ -185,10 +197,8 @@ func (s *Server) reconcileTriggerDrainerLocked(ctx context.Context, dqStore stor
 	if ctx.Err() != nil {
 		return
 	}
-	if rt.queue == nil {
-		rt.queue = durablequeue.NewQueue(dqStore)
-	}
-	d, err := s.triggerDrainer(dqStore, rt.queue)
+	q := s.triggerQueueLocked(dqStore)
+	d, err := s.triggerDrainer(dqStore, q)
 	if err != nil {
 		slog.Warn("hub.triggers: drainer not started", "error", err)
 		return

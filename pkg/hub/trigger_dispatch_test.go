@@ -17,9 +17,11 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -751,4 +753,118 @@ func TestTriggerDispatchE2E_WakeFireContextEndsWithQueueItem(t *testing.T) {
 			t.Fatal("Dispatcher.HandleItem did not return after queue item cancellation")
 		}
 	})
+}
+
+func TestTriggerDispatchE2E_HooksIngressWakeAndDuplicateIdempotency(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	enableWriteDenySwitch(t, f.srv)
+	ctx := context.Background()
+
+	require.NotNil(t, f.srv.durableQueue)
+	require.Same(t, f.srv.durableQueue, f.srv.TriggerEventQueue(),
+		"POST /api/v1/hooks/{id} ingress and trigger drainer must share Server.durableQueue so Wake wakes the drainer immediately")
+
+	disp := &recordingDispatcher{}
+	f.srv.SetDispatcher(disp)
+
+	done := f.srv.startTriggerDrainer(ctx)
+	require.NotNil(t, done)
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		f.srv.stopTriggerDrainer(stopCtx)
+	})
+
+	epRec := f.doWebhookEndpoint(t, f.agentAAuth, "", http.MethodPost, CreateWebhookEndpointRequest{
+		Name: "hooks-e2e",
+	})
+	require.Equal(t, http.StatusCreated, epRec.Code, epRec.Body.String())
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+	require.NotEmpty(t, ep.Secret)
+
+	trRec := f.doTrigger(t, f.agentAAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:   "on-deploy-finished",
+		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
+		Match:  &TriggerMatchSpec{Types: []string{"webhook.deploy.finished"}},
+		Action: TriggerActionSpec{Type: "message", AgentID: f.agentA.ID, Message: "Deploy completed"},
+	})
+	require.Equal(t, http.StatusCreated, trRec.Code, trRec.Body.String())
+	var tr TriggerResponse
+	require.NoError(t, json.Unmarshal(trRec.Body.Bytes(), &tr))
+
+	// Let the drainer finish its initial empty-queue check and park on Wake/PollInterval (5 s).
+	time.Sleep(50 * time.Millisecond)
+
+	payload := []byte(`{"env":"prod","ok":true}`)
+	ts := time.Now().Unix()
+	delivery := "deliv-e2e-idem-1"
+	eventHdr := "deploy.finished"
+	subjectHdr := "svc/api"
+	sig := trigger.SignScionV1(ep.Secret, ts, delivery, eventHdr, subjectHdr, payload)
+
+	postHook := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/"+ep.ID, bytes.NewReader(payload))
+		req.RemoteAddr = "198.51.100.42:54321"
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(trigger.HeaderDelivery, delivery)
+		req.Header.Set(trigger.HeaderEvent, eventHdr)
+		req.Header.Set(trigger.HeaderSubject, subjectHdr)
+		req.Header.Set(trigger.HeaderSignature, sig)
+		rec := httptest.NewRecorder()
+		f.srv.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+
+	// 1. First delivery: 202 "queued", wakes drainer immediately (< 1.5 s vs 5 s PollInterval), fires §8.3 envelope.
+	rec1 := postHook()
+	require.Equal(t, http.StatusAccepted, rec1.Code, rec1.Body.String())
+	var resp1 trigger.IngressAcceptedResponse
+	require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &resp1))
+	assert.Equal(t, trigger.IngressStatusQueued, resp1.Status)
+	require.NotEmpty(t, resp1.EventID)
+
+	require.Eventually(t, func() bool {
+		return len(disp.getCalls()) == 1
+	}, 1500*time.Millisecond, 15*time.Millisecond, "shared Server.durableQueue Wake must wake drainer well before 5 s PollInterval")
+
+	env := extractEnvelopeJSONFromDelivery(t, disp.getCalls()[0].StructuredMessage.DeliveryText)
+	assert.Equal(t, "event", env.Type)
+	assert.Equal(t, "system:TRIGGER", env.From)
+	require.NotNil(t, env.Event)
+	assert.Equal(t, messaging.EventTriggerFired, env.Event.Type)
+	assert.Equal(t, "webhook.deploy.finished", env.Event.EventType)
+	assert.Equal(t, resp1.EventID, env.Event.EventID)
+	assert.Equal(t, "webhook:"+ep.ID+"/svc/api", env.Event.Subject)
+	require.NotNil(t, env.Event.External)
+	assert.Equal(t, messaging.ExternalVerifiedScionV1, env.Event.External.Verified)
+	assert.JSONEq(t, `{"env":"prod","ok":true}`, string(env.Event.External.JSON))
+
+	// 2. Duplicate delivery (§16 criterion 6): 202 "duplicate", same eventId, zero extra fires.
+	rec2 := postHook()
+	require.Equal(t, http.StatusAccepted, rec2.Code, rec2.Body.String())
+	var resp2 trigger.IngressAcceptedResponse
+	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp2))
+	assert.Equal(t, trigger.IngressStatusDuplicate, resp2.Status)
+	assert.Equal(t, resp1.EventID, resp2.EventID)
+
+	require.Eventually(t, func() bool {
+		eventsRec := f.doTriggerEvents(t, f.ownerAuth, "", http.MethodGet, nil)
+		if eventsRec.Code != http.StatusOK {
+			return false
+		}
+		var events ListTriggerEventsResponse
+		if err := json.Unmarshal(eventsRec.Body.Bytes(), &events); err != nil {
+			return false
+		}
+		return len(events.Events) == 1 && events.Events[0].Status == store.TriggerEventStatusProcessed
+	}, 2*time.Second, 20*time.Millisecond)
+
+	assert.Len(t, disp.getCalls(), 1, "duplicate X-Scion-Delivery must not double-fire")
+	histRec := f.doTrigger(t, f.agentAAuth, tr.ID+"/history", http.MethodGet, nil)
+	require.Equal(t, http.StatusOK, histRec.Code)
+	var hist ListTriggerFiresResponse
+	require.NoError(t, json.Unmarshal(histRec.Body.Bytes(), &hist))
+	require.Len(t, hist.Fires, 1)
+	assert.Equal(t, store.TriggerFireStatusFired, hist.Fires[0].Status)
 }
