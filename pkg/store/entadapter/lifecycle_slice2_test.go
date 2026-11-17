@@ -256,16 +256,18 @@ func TestLifecycleStore2_LegacyRunlessReport(t *testing.T) {
 	assert.Equal(t, tc.CauseRunUncorrelated, evs[1].Cause, "no E path fired")
 }
 
-// TestLifecycleStore2_SameLaunchResume: two segments of one run, each
-// closed once; stopped -> running with the same run starts it again.
+// TestLifecycleStore2_SameLaunchResume: multiple segments of one run, each
+// closed once; resuming from suspended via a hub start write and restarting
+// from stopped via a heartbeat with the same run each open a new segment.
 func TestLifecycleStore2_SameLaunchResume(t *testing.T) {
 	f, a := newS2Fixture(t)
 	f.mint(a.ID, "R1")
 	f.startWrite(a.ID)
 	f.stopRecord(a.ID, "R1", "suspended")
-	f.heartbeat(a.ID, "running", "R1")
+	f.startWrite(a.ID)
 	f.stopRecord(a.ID, "R1", "stopped")
-	assert.Equal(t, "created@1[/1] started@2[R1/1] stopped@3(suspended)[R1/1] started@4[R1/1] stopped@5(stopped)[R1/1]",
+	f.heartbeat(a.ID, "running", "R1")
+	assert.Equal(t, "created@1[/1] started@2[R1/1] stopped@3(suspended)[R1/1] started@4[R1/1] stopped@5(stopped)[R1/1] started@6[R1/1]",
 		lcFull(f.events(a.ID)))
 }
 

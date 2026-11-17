@@ -1599,8 +1599,8 @@ type AgentStatusUpdate struct {
 	// about the agent's run: the broker heartbeat handler (runtime) or the
 	// agent's own status endpoint (agent). Hub-internal writes leave it
 	// empty. Only the handlers set it, never a request body (json:"-"):
-	// the run check, halted's stickiness and the halt rule read it, and
-	// only a runtime report can halt an agent.
+	// the run check, suspended's and halted's stickiness, and the halt rule
+	// read it, and only a runtime report can halt an agent.
 	ReportSource StatusReportSource `json:"-"`
 	// ReportRunID is the run a status report came from: the run of the
 	// broker heartbeat's agent entry, or the run of the agent token that

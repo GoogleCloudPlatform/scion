@@ -17,10 +17,12 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -30,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1078,4 +1081,238 @@ func TestAutoWake_ChatSecondary(t *testing.T) {
 		}
 		assert.Equal(t, 1, toSecond)
 	})
+}
+
+// suspendShutdownRaceStore orders shutdown status/heartbeat writes right after
+// the hub's suspend write while letting the handlers read the agent row before
+// suspend commits (while phase is still running), reproducing ptone/scion#8256.
+type suspendShutdownRaceStore struct {
+	store.Store
+	fault            *storeFaultSwitch
+	targetID         string
+	wantReports      int
+	mu               sync.Mutex
+	reportsAtStore   int
+	heartbeatAtStore chan struct{}
+	allReportsReady  chan struct{}
+	suspendWritten   chan struct{}
+	heartbeatOnce    sync.Once
+	suspendOnce      sync.Once
+}
+
+func (w *suspendShutdownRaceStore) TryAdvisoryLock(ctx context.Context, key store.AdvisoryLockKey) (bool, func() error, error) {
+	return w.Store.(store.AdvisoryLocker).TryAdvisoryLock(ctx, key)
+}
+
+func (w *suspendShutdownRaceStore) TryAdvisoryLockObject(ctx context.Context, classID store.AdvisoryLockKey, objID int32) (bool, func() error, error) {
+	return w.Store.(store.AdvisoryLocker).TryAdvisoryLockObject(ctx, classID, objID)
+}
+
+func (w *suspendShutdownRaceStore) UpdateAgentStatus(ctx context.Context, id string, su store.AgentStatusUpdate) error {
+	if !w.fault.Active() || id != w.targetID {
+		return w.Store.UpdateAgentStatus(ctx, id, su)
+	}
+	if su.ReportSource != "" {
+		if su.ReportSource == store.StatusReportSourceRuntime {
+			w.heartbeatOnce.Do(func() { close(w.heartbeatAtStore) })
+		}
+		w.mu.Lock()
+		w.reportsAtStore++
+		if w.reportsAtStore == w.wantReports {
+			close(w.allReportsReady)
+		}
+		w.mu.Unlock()
+		<-w.suspendWritten
+		return w.Store.UpdateAgentStatus(ctx, id, su)
+	}
+	err := w.Store.UpdateAgentStatus(ctx, id, su)
+	if su.Phase == string(state.PhaseSuspended) {
+		w.suspendOnce.Do(func() { close(w.suspendWritten) })
+	}
+	return err
+}
+
+type stopCallbackDispatcher struct {
+	*wakeTrackingDispatcher
+	onStop func(ctx context.Context, agent *store.Agent) error
+}
+
+func (d *stopCallbackDispatcher) DispatchAgentStop(ctx context.Context, agent *store.Agent) error {
+	if d.onStop != nil {
+		return d.onStop(ctx, agent)
+	}
+	return nil
+}
+
+// TestSuspend_ShutdownReportsKeepSuspendedAndAutoWakeable is the hub-level
+// end-to-end regression test for ptone/scion#8256: when DispatchAgentStop
+// triggers the dying container's shutdown reports (sciontool stopping +
+// stopped "Session ended", and a broker heartbeat reporting stopped) whose
+// handler reads happen while the row is still running and whose store writes
+// land after phase=suspended commits, the row ends suspended with its
+// suspend_reason and retained activity intact, and a stalled-suspended agent
+// remains auto-wakeable (2b).
+func TestSuspend_ShutdownReportsKeepSuspendedAndAutoWakeable(t *testing.T) {
+	srv, s, raceStore, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *suspendShutdownRaceStore {
+		return &suspendShutdownRaceStore{
+			Store:            inner,
+			fault:            f,
+			wantReports:      3,
+			heartbeatAtStore: make(chan struct{}),
+			allReportsReady:  make(chan struct{}),
+			suspendWritten:   make(chan struct{}),
+		}
+	})
+	setIdleSuspendExperiment(t, srv, true)
+	grantDevUserRuntimeBrokerAccess(t, s)
+	t.Cleanup(srv.waitAutoWakeIdle)
+
+	ctx := context.Background()
+	target := newStalledBrokerAgent(t, s, "susp-race-stalled")
+	const runID = "run-susp-race-1"
+	_, err := s.SetAgentRunID(ctx, target.ID, runID, nil)
+	require.NoError(t, err)
+	// Stalled from completed so suspend retains activity=completed.
+	target, err = s.GetAgent(ctx, target.ID)
+	require.NoError(t, err)
+	target.StalledFromActivity = string(state.ActivityCompleted)
+	target.MessageMode = store.MessageModeProject
+	require.NoError(t, s.UpdateAgent(ctx, target))
+
+	sender := &store.Agent{
+		ID:              tid("sender-susp-race"),
+		Slug:            "sender-susp-race",
+		Name:            "Sender",
+		ProjectID:       target.ProjectID,
+		RuntimeBrokerID: target.RuntimeBrokerID,
+		Phase:           string(state.PhaseRunning),
+		MessageMode:     store.MessageModeProject,
+		OwnerID:         DevUserID,
+		CreatedBy:       DevUserID,
+	}
+	require.NoError(t, s.CreateAgent(ctx, sender))
+	ensureStandingRoot(t, s, target.ProjectID, DevUserID)
+	target, err = s.GetAgent(ctx, target.ID)
+	require.NoError(t, err)
+	target.Ancestry = []string{DevUserID}
+	require.NoError(t, s.UpdateAgent(ctx, target))
+	sender, err = s.GetAgent(ctx, sender.ID)
+	require.NoError(t, err)
+	sender.Ancestry = []string{DevUserID}
+	require.NoError(t, s.UpdateAgent(ctx, sender))
+
+	raceStore.targetID = target.ID
+	baseDisp := &wakeTrackingDispatcher{}
+	var reportWG sync.WaitGroup
+	disp := &stopCallbackDispatcher{
+		wakeTrackingDispatcher: baseDisp,
+		onStop: func(_ context.Context, a *store.Agent) error {
+			// Trigger sciontool's shutdown reports for runID while the DB row
+			// is still running: updateAgentStatus's GetAgent sees phase=running
+			// (bypassing Guard 0) and blocks at UpdateAgentStatus until
+			// recordStopStatus writes phase=suspended.
+			postAgentStatus := func(upd store.AgentStatusUpdate) {
+				reportWG.Add(1)
+				go func() {
+					defer reportWG.Done()
+					body, merr := json.Marshal(upd)
+					require.NoError(t, merr)
+					claims := &AgentTokenClaims{
+						Claims:    jwt.Claims{Subject: a.ID},
+						ProjectID: a.ProjectID,
+						Scopes:    []AgentTokenScope{ScopeAgentStatusUpdate},
+						RunID:     runID,
+					}
+					req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+a.ID+"/status", bytes.NewReader(body))
+					rctx := context.WithValue(req.Context(), agentContextKey{}, claims)
+					rctx = contextWithIdentity(rctx, &agentIdentityWrapper{claims})
+					req = req.WithContext(rctx)
+					rec := httptest.NewRecorder()
+					srv.updateAgentStatus(rec, req, a.ID)
+					assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				}()
+			}
+			postAgentStatus(store.AgentStatusUpdate{
+				Phase:   string(state.PhaseStopping),
+				Message: "Agent shutting down",
+			})
+			postAgentStatus(store.AgentStatusUpdate{
+				Phase:      string(state.PhaseStopped),
+				Message:    "Session ended",
+				ExitReason: string(state.ExitReasonSignaled),
+			})
+
+			select {
+			case <-raceStore.allReportsReady:
+			case <-time.After(5 * time.Second):
+				t.Error("timed out waiting for shutdown reports to reach UpdateAgentStatus")
+			}
+			return nil
+		},
+	}
+	srv.SetDispatcher(disp)
+
+	target, err = s.GetAgent(ctx, target.ID)
+	require.NoError(t, err)
+	fault.Arm()
+
+	// Start a broker heartbeat reporting stopped while no local lifecycleOp is
+	// active (as on another replica or just before the op starts), so its
+	// pre-write read sees phase=running (agentSuspended=false) and carries
+	// Phase=stopped into UpdateAgentStatus after suspend commits.
+	reportWG.Add(1)
+	go func() {
+		defer reportWG.Done()
+		exitZero := 0
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/runtime-brokers/"+target.RuntimeBrokerID+"/heartbeat",
+			brokerHeartbeatRequest{
+				Status: store.BrokerStatusOnline,
+				Projects: []brokerProjectHeartbeat{{
+					ProjectID:  target.ProjectID,
+					AgentCount: 1,
+					Agents: []brokerAgentHeartbeat{{
+						Slug:            target.Slug,
+						RunID:           runID,
+						Phase:           string(state.PhaseStopped),
+						ContainerStatus: "exited (0)",
+						ExitCode:        &exitZero,
+					}},
+				}},
+			})
+		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	}()
+	select {
+	case <-raceStore.heartbeatAtStore:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for heartbeat to reach UpdateAgentStatus")
+	}
+
+	srv.enqueueAutoSuspend([]store.Agent{*target})
+	srv.waitAutoSuspendIdle()
+	reportWG.Wait()
+
+	// Disarm the race wrapper before testing auto-wake.
+	raceStore.targetID = ""
+
+	got, err := s.GetAgent(ctx, target.ID)
+	require.NoError(t, err)
+	require.Equal(t, string(state.PhaseSuspended), got.Phase, "shutdown reports must not move suspended row to stopped")
+	require.Equal(t, string(state.SuspendReasonStalled), got.SuspendReason, "suspend_reason must remain stalled")
+	assert.Equal(t, string(state.ActivityCompleted), got.Activity, "retained suspend activity must be preserved")
+
+	// A stalled-suspended agent remains auto-wakeable (phase 2b) after the reports.
+	awReadyOnStart(t, s, target.ID)
+	res, dmErr := srv.ExecuteAgentDM(ctx, awAgentDMInput(sender, got, "wake after shutdown reports"))
+	require.Nil(t, dmErr)
+	assert.Equal(t, AgentDMAccepted, res.Outcome)
+	require.Len(t, baseDisp.getStartCalls(), 1, "stalled-suspended agent auto-wakes once")
+	assert.True(t, baseDisp.getStartCalls()[0].Continue, "resume continues the session")
+	msgs := baseDisp.getMessageCalls()
+	require.Len(t, msgs, 1)
+	assert.Equal(t, "wake after shutdown reports", msgs[0].Message)
+
+	woken, err := s.GetAgent(ctx, target.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseRunning), woken.Phase)
+	assert.Empty(t, woken.SuspendReason, "resume clears suspend_reason")
 }
