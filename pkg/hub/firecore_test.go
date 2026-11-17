@@ -834,12 +834,11 @@ func TestFireCoreAuthorityMissingRuleDenialText(t *testing.T) {
 	assert.ErrorContains(t, err, "action has no recorded authority rule")
 
 	evt := store.ScheduledEvent{
-		ID:                    "evt-unmapped",
-		ProjectID:             projectID,
-		EventType:             "unmapped_type",
-		InitiatorAttribution:  rec.Attribution,
-		AuthorityCeiling:      rec.Ceiling,
-		AuthorizationRevision: rec.Attribution.AuthorizationRevision,
+		ID:                   "evt-unmapped",
+		ProjectID:            projectID,
+		EventType:            "unmapped_type",
+		InitiatorAttribution: rec.Attribution,
+		AuthorityCeiling:     rec.Ceiling,
 	}
 	_, _, err = srv.resolveScheduledAuthority(context.Background(), evt)
 	require.ErrorIs(t, err, errScheduledAuthorityDenied)
