@@ -161,16 +161,3 @@ func (t *boundedTable[K, V]) tryPutEvictWhere(key K, val V, maxProbes int, canEv
 	t.recordScan(steps)
 	return true
 }
-
-// deleteWhere removes all entries matching pred (used by periodic background
-// maintenance, never on the hot request path).
-func (t *boundedTable[K, V]) deleteWhere(pred func(K, V) bool) {
-	for elem := t.order.Front(); elem != nil; {
-		next := elem.Next()
-		entry := elem.Value.(boundedEntry[K, V])
-		if pred(entry.key, entry.val) {
-			t.removeElement(elem)
-		}
-		elem = next
-	}
-}

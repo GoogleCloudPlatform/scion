@@ -15,7 +15,6 @@
 package trigger
 
 import (
-	"context"
 	"net"
 	"sync"
 	"time"
@@ -34,9 +33,8 @@ const (
 	HubVerifiedRatePerSecond        = 200.0
 	HubVerifiedBurst                = 1000
 
-	LimiterMaxEntries      = 10000
-	LimiterMaxAge          = 30 * time.Minute
-	LimiterCleanupInterval = 5 * time.Minute
+	LimiterMaxEntries = 10000
+	LimiterMaxAge     = 30 * time.Minute
 )
 
 // ClientRateKey returns the per-client-IP bucket key: the IPv4 address as-is,
@@ -185,15 +183,6 @@ func (s *keyedBucketSet) isRefilled(b *tokenBucket, now time.Time) bool {
 	return b.tokens+idle.Seconds()*s.rate >= float64(s.burst)
 }
 
-func (s *keyedBucketSet) cleanup(now time.Time) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	cutoff := now.Add(-s.maxAge)
-	s.buckets.deleteWhere(func(_ string, b *tokenBucket) bool {
-		return b.lastCheck.Before(cutoff) || s.isRefilled(b, now)
-	})
-}
-
 func (s *keyedBucketSet) len() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -215,7 +204,6 @@ type LimiterConfig struct {
 	HubVerifiedBurst        int
 	MaxEntries              int
 	MaxAge                  time.Duration
-	CleanupInterval         time.Duration
 	Now                     func() time.Time
 	OnEvictScan             func(steps int)
 }
@@ -226,13 +214,16 @@ type LimiterConfig struct {
 //  3. Per-endpoint (10/s burst 60) ONLY for known active endpoints (including sig failures, R2)
 //  4. Per-project verified (50/s burst 300) ONLY after HMAC verification succeeds (R3)
 //  5. Hub-wide verified (200/s burst 1000) ONLY after per-project verified passes
+//
+// Keyed tables (perIP, perEndpoint, perProjectVerified) bound memory via
+// boundedTable (maxEntries = 10,000) and evict refilled/stale entries on demand
+// in O(1) bounded probes, with no background sweep goroutine or ticker.
 type IngressLimiter struct {
 	perIP              *keyedBucketSet
 	rejection          *singleTokenBucket
 	perEndpoint        *keyedBucketSet
 	perProjectVerified *keyedBucketSet
 	hubVerified        *singleTokenBucket
-	cleanupInterval    time.Duration
 	now                func() time.Time
 }
 
@@ -256,10 +247,6 @@ func NewIngressLimiter(cfg LimiterConfig) *IngressLimiter {
 	if maxAge <= 0 {
 		maxAge = LimiterMaxAge
 	}
-	cleanupInterval := cfg.CleanupInterval
-	if cleanupInterval <= 0 {
-		cleanupInterval = LimiterCleanupInterval
-	}
 	nowFn := cfg.Now
 	if nowFn == nil {
 		nowFn = time.Now
@@ -271,7 +258,6 @@ func NewIngressLimiter(cfg LimiterConfig) *IngressLimiter {
 		perEndpoint:        newKeyedBucketSet(valFloat(cfg.PerEndpointRate, PerEndpointRatePerSecond), valInt(cfg.PerEndpointBurst, PerEndpointBurst), maxEntries, maxAge, false, cfg.OnEvictScan),
 		perProjectVerified: newKeyedBucketSet(valFloat(cfg.PerProjectVerifiedRate, PerProjectVerifiedRatePerSecond), valInt(cfg.PerProjectVerifiedBurst, PerProjectVerifiedBurst), maxEntries, maxAge, false, cfg.OnEvictScan),
 		hubVerified:        newSingleTokenBucket(valFloat(cfg.HubVerifiedRate, HubVerifiedRatePerSecond), valInt(cfg.HubVerifiedBurst, HubVerifiedBurst)),
-		cleanupInterval:    cleanupInterval,
 		now:                nowFn,
 	}
 }
@@ -308,27 +294,4 @@ func (l *IngressLimiter) AllowHubVerified() bool {
 // PerIPLen returns the current number of tracked per-client-IP buckets.
 func (l *IngressLimiter) PerIPLen() int {
 	return l.perIP.len()
-}
-
-// Cleanup evicts stale keyed buckets as of now.
-func (l *IngressLimiter) Cleanup(now time.Time) {
-	l.perIP.cleanup(now)
-	l.perEndpoint.cleanup(now)
-	l.perProjectVerified.cleanup(now)
-}
-
-// StartCleanup runs periodic bucket eviction until ctx is cancelled.
-func (l *IngressLimiter) StartCleanup(ctx context.Context) {
-	go func() {
-		ticker := time.NewTicker(l.cleanupInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case t := <-ticker.C:
-				l.Cleanup(t)
-			}
-		}
-	}()
 }

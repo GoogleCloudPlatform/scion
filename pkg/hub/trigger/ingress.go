@@ -322,14 +322,12 @@ func (h *Ingress) FlushCounters(ctx context.Context) error {
 	return h.counters.Flush(ctx, h.store)
 }
 
-// StartBackground starts the limiter's stale-bucket cleanup goroutine and the
-// 10-second endpoint counter flush loop until ctx is cancelled.
+// StartBackground starts the 10-second endpoint counter flush loop until ctx is
+// cancelled. Keyed rate-limiter, cache, and audit tables enforce capacity on
+// demand in O(1) without background sweep goroutines.
 func (h *Ingress) StartBackground(ctx context.Context) {
 	if h == nil {
 		return
-	}
-	if h.limiter != nil {
-		h.limiter.StartCleanup(ctx)
 	}
 	if h.counters != nil && h.store != nil {
 		h.counters.StartLoop(ctx, h.store, h.logger)

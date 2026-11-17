@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"log/slog"
@@ -31,8 +32,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -247,11 +250,11 @@ func TestIngressLimiter_SplitBucketsRefillAndCleanup(t *testing.T) {
 	assert.True(t, lim.AllowEndpoint("ep-a"))
 	assert.False(t, lim.AllowEndpoint("ep-a"))
 
-	// Advance past MaxAge and run Cleanup; fresh burst applies again.
+	// Advance past MaxAge; on-demand refill restores full burst without any background Cleanup sweep.
 	now = now.Add(15 * time.Minute)
-	lim.Cleanup(now)
 	assert.True(t, lim.AllowClientIP("2001:db8:1:2::1"))
 	assert.True(t, lim.AllowClientIP("2001:db8:1:2::2"))
+	assert.False(t, lim.AllowClientIP("2001:db8:1:2::3"))
 }
 
 func TestIngressLimiter_IPv6Slash48SprayDoesNotLockOutNewSenders(t *testing.T) {
@@ -887,4 +890,174 @@ func TestIngress_TxWithoutQueuePendingCounterFailsClosed500(t *testing.T) {
 	assert.Zero(t, outer.outerCountCalls, "ingress must never fall back to non-transactional QueueStore")
 	assert.Empty(t, q.enqueued)
 	assert.Empty(t, q.wakes)
+}
+
+type flushNotifyStore struct {
+	store.TriggerStore
+	store.DurableQueueStore
+	flushes chan struct{}
+}
+
+func (s *flushNotifyStore) WithTx(_ context.Context, _ func(tx store.Store) error) error {
+	return nil
+}
+
+func (s *flushNotifyStore) FlushWebhookEndpointCounters(_ context.Context, _ string, _, _ int, _ *time.Time) error {
+	select {
+	case s.flushes <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+func TestIngress_NoBackgroundCleanupGoroutinesOrTickersOnBoundedTables(t *testing.T) {
+	// 1. Reflection guard: IngressLimiter exposes neither Cleanup nor StartCleanup.
+	limType := reflect.TypeFor[*trigger.IngressLimiter]()
+	_, hasCleanup := limType.MethodByName("Cleanup")
+	_, hasStartCleanup := limType.MethodByName("StartCleanup")
+	assert.False(t, hasCleanup, "IngressLimiter must not expose a full-table Cleanup method")
+	assert.False(t, hasStartCleanup, "IngressLimiter must not spawn a StartCleanup ticker goroutine")
+
+	// 2. AST guard over all non-test .go files in pkg/hub/trigger:
+	//    Zero goroutines, tickers, timers, or AfterFunc calls exist anywhere on
+	//    limiter, boundedTable, endpoint/negative/secret caches, or audit sink;
+	//    the sole background ticker in the package is CounterAccumulator.StartLoop.
+	entries, err := os.ReadDir(".")
+	require.NoError(t, err)
+	fset := token.NewFileSet()
+	var goLocations, timerLocations []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		fileAST, parseErr := parser.ParseFile(fset, filepath.Clean(name), nil, 0)
+		require.NoError(t, parseErr)
+		for _, decl := range fileAST.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			fnLabel := name + ":" + fn.Name.Name
+			if fn.Recv != nil && len(fn.Recv.List) > 0 {
+				var recvBuf bytes.Buffer
+				ast.Inspect(fn.Recv.List[0].Type, func(n ast.Node) bool {
+					if id, ok := n.(*ast.Ident); ok {
+						recvBuf.WriteString(id.Name)
+					}
+					return true
+				})
+				fnLabel = name + ":" + recvBuf.String() + "." + fn.Name.Name
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				switch node := n.(type) {
+				case *ast.GoStmt:
+					goLocations = append(goLocations, fnLabel)
+				case *ast.CallExpr:
+					if sel, ok := node.Fun.(*ast.SelectorExpr); ok {
+						if pkgIdent, ok := sel.X.(*ast.Ident); ok && pkgIdent.Name == "time" {
+							switch sel.Sel.Name {
+							case "NewTicker", "Tick", "NewTimer", "After", "AfterFunc":
+								timerLocations = append(timerLocations, fnLabel+"->time."+sel.Sel.Name)
+							}
+						}
+					}
+				}
+				return true
+			})
+		}
+	}
+	assert.Equal(t, []string{"cache.go:CounterAccumulator.StartLoop"}, goLocations,
+		"CounterAccumulator.StartLoop must be the only background goroutine in pkg/hub/trigger")
+	assert.Equal(t, []string{"cache.go:CounterAccumulator.StartLoop->time.NewTicker"}, timerLocations,
+		"CounterAccumulator.StartLoop must be the only ticker/timer/AfterFunc in pkg/hub/trigger")
+
+	// 3. Runtime guard: populate all bounded tables, then start Ingress background
+	//    loop and verify zero boundedTable operations occur from background ticks.
+	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	var scanHooksEnabled atomic.Bool
+	var bgTableTouches atomic.Int64
+	onScan := func(_ int) {
+		if scanHooksEnabled.Load() {
+			bgTableTouches.Add(1)
+		}
+	}
+
+	lim := trigger.NewIngressLimiter(trigger.LimiterConfig{
+		MaxEntries:  64,
+		Now:         func() time.Time { return now },
+		OnEvictScan: onScan,
+	})
+	cache := trigger.NewEndpointCache(trigger.EndpointCacheConfig{
+		MaxPositiveEntries: 64,
+		MaxNegativeEntries: 64,
+		Now:                func() time.Time { return now },
+		OnEvictScan:        onScan,
+	})
+	discardLogger := slog.New(slog.NewTextHandler(bytes.NewBuffer(nil), &slog.HandlerOptions{Level: slog.LevelError}))
+	sink := trigger.NewSlogAuditSink(trigger.SlogAuditConfig{
+		Logger:      discardLogger,
+		MaxEntries:  64,
+		Now:         func() time.Time { return now },
+		OnEvictScan: onScan,
+	})
+	populateCtx := context.Background()
+	cacheBacking := &stubCacheStore{endpoints: make(map[string]*store.WebhookEndpoint, 64)}
+	for i := range 64 {
+		epID := fmt.Sprintf("ep-%03d", i)
+		cacheBacking.endpoints[epID] = &store.WebhookEndpoint{
+			ID:            epID,
+			ProjectID:     "proj-1",
+			SecretVersion: 1,
+			SignatureMode: store.WebhookSignatureModeScionV1,
+			Status:        store.WebhookEndpointStatusActive,
+		}
+		require.True(t, lim.AllowClientIP(fmt.Sprintf("198.51.100.%d", i)))
+		require.True(t, lim.AllowEndpoint(epID))
+		require.True(t, lim.AllowProjectVerified(fmt.Sprintf("proj-%d", i)))
+		_, err := cache.LookupEndpoint(populateCtx, cacheBacking, epID)
+		require.NoError(t, err)
+		_, err = cache.LookupEndpoint(populateCtx, cacheBacking, fmt.Sprintf("missing-%03d", i))
+		require.ErrorIs(t, err, store.ErrNotFound)
+		_, err = cache.LookupSecret(populateCtx, func(_ context.Context, _, _ string, _ int) (string, error) {
+			return "sec", nil
+		}, "proj-1", epID, 1)
+		require.NoError(t, err)
+		sink.RecordSignatureFailure(populateCtx, trigger.SignatureFailureAuditRecord{
+			ProjectID:  "proj-1",
+			EndpointID: epID,
+			RemoteIP:   "198.51.100.1",
+		})
+	}
+
+	counters := trigger.NewCounterAccumulator(5 * time.Millisecond)
+	notifyStore := &flushNotifyStore{flushes: make(chan struct{}, 8)}
+	ing := trigger.NewIngress(trigger.IngressConfig{
+		Store:      notifyStore,
+		QueueStore: notifyStore,
+		Queue:      &fakeEnqueueQueue{},
+		Limiter:    lim,
+		Cache:      cache,
+		Counters:   counters,
+		Audit:      sink,
+		Logger:     discardLogger,
+		Now:        func() time.Time { return now },
+	})
+
+	scanHooksEnabled.Store(true)
+	bgCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ing.StartBackground(bgCtx)
+
+	for range 3 {
+		counters.RecordRejected("ep-001")
+		select {
+		case <-notifyStore.flushes:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for CounterAccumulator background flush")
+		}
+	}
+	cancel()
+
+	assert.Zero(t, bgTableTouches.Load(), "background loop must never scan or touch any bounded table")
 }
