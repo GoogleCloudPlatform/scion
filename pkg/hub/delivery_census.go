@@ -82,13 +82,14 @@ type LaunchDeliveryEdgeFacts struct {
 	CeilingKind          string `json:"ceilingKind,omitempty"`
 	Sentinel             bool   `json:"sentinel"`
 	DelegatorAgentGone   bool   `json:"delegatorAgentGone"`
-	// UATRecorded: the edge was recorded from a user access token
-	// (uatRecordedHop), so the intrinsic set applies to it.
+	// UATRecorded: the edge was recorded from a user access token (directly or
+	// via a consistent UAT-initiated scheduler/trigger hop, uatRecordedHop), so
+	// the intrinsic set applies to it.
 	UATRecorded bool `json:"uatRecorded"`
 	// InitiatorCredentialKind is the edge's initiator credential kind. A
-	// scheduler-recorded edge with initiator "uat" carries a token's list
-	// but is not a uatRecordedHop: scheduler-recorded hops are not token
-	// hops. Counted, and unchanged.
+	// consistent bounded scheduler-recorded edge with initiator "uat" is also
+	// recognized by uatRecordedHop (headless-identity-note.md §2.2) and counted
+	// separately in SchedulerUATInitiated.
 	InitiatorCredentialKind string `json:"initiatorCredentialKind,omitempty"`
 }
 
