@@ -631,3 +631,70 @@ func TestAgentService_ReissueScopesAll(t *testing.T) {
 		server.Close()
 	}
 }
+
+func TestAgentService_Get_DecodesHarnessCapabilities(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodGet, r.Method)
+		assert.Equal(t, "/api/v1/agents/agent-1", r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{
+			"id": "agent-1",
+			"slug": "agent-1",
+			"name": "Agent 1",
+			"phase": "running",
+			"resolvedHarness": "generic",
+			"harnessCapabilities": {
+				"harness": "generic",
+				"resume": {
+					"support": "no",
+					"reason": "Generic harness does not support session resume"
+				}
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL)
+	require.NoError(t, err)
+	got, err := client.Agents().Get(context.Background(), "agent-1")
+	require.NoError(t, err)
+	assert.Equal(t, "generic", got.ResolvedHarness)
+	require.NotNil(t, got.HarnessCapabilities)
+	assert.Equal(t, "generic", got.HarnessCapabilities.Harness)
+	assert.Equal(t, "no", string(got.HarnessCapabilities.Resume.Support))
+	assert.Equal(t, "Generic harness does not support session resume", got.HarnessCapabilities.Resume.Reason)
+}
+
+func TestAgentService_List_IncludeCapabilitiesComposesWithAuthority(t *testing.T) {
+	var gotInclude []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotInclude = append(gotInclude, r.URL.Query().Get("include"))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"agents":[{"id":"a1","slug":"a1","resolvedHarness":"claude","harnessCapabilities":{"harness":"claude","resume":{"support":"yes"}}}]}`))
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL)
+	require.NoError(t, err)
+
+	for _, svc := range []AgentService{client.Agents(), client.ProjectAgents("project-1")} {
+		gotInclude = nil
+		resp, err := svc.List(context.Background(), &ListAgentsOptions{IncludeCapabilities: true})
+		require.NoError(t, err)
+		assert.Equal(t, []string{"capabilities"}, gotInclude)
+		require.Len(t, resp.Agents, 1)
+		assert.Equal(t, "claude", resp.Agents[0].ResolvedHarness)
+		require.NotNil(t, resp.Agents[0].HarnessCapabilities)
+		assert.Equal(t, "yes", string(resp.Agents[0].HarnessCapabilities.Resume.Support))
+
+		gotInclude = nil
+		_, err = svc.List(context.Background(), &ListAgentsOptions{IncludeAuthority: true, IncludeCapabilities: true})
+		require.NoError(t, err)
+		assert.Equal(t, []string{"authority,capabilities"}, gotInclude)
+
+		gotInclude = nil
+		_, err = svc.List(context.Background(), &ListAgentsOptions{})
+		require.NoError(t, err)
+		assert.Equal(t, []string{""}, gotInclude)
+	}
+}

@@ -2815,3 +2815,105 @@ func TestHubStatusToPhaseActivity_SuspendedAndRetainedActivities(t *testing.T) {
 	assert.Equal(t, "suspended", phase)
 	assert.Equal(t, "completed", act)
 }
+
+func TestListAgentsViaHub_JSONIncludesHarnessCapabilities(t *testing.T) {
+	var gotIncludes []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/agents"):
+			gotIncludes = append(gotIncludes, r.URL.Query().Get("include"))
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"agents": []map[string]any{
+					{
+						"id":              "a1",
+						"slug":            "claude-dev",
+						"projectId":       "p1",
+						"phase":           "running",
+						"harnessConfig":   "claude",
+						"resolvedHarness": "claude",
+						"harnessCapabilities": map[string]any{
+							"harness": "claude",
+							"resume":  map[string]any{"support": "yes"},
+						},
+					},
+					{
+						"id":              "a2",
+						"slug":            "shell-runner",
+						"projectId":       "p1",
+						"phase":           "running",
+						"harnessConfig":   "generic",
+						"resolvedHarness": "generic",
+						"harnessCapabilities": map[string]any{
+							"harness": "generic",
+							"resume": map[string]any{
+								"support": "no",
+								"reason":  "Generic harness does not support session resume",
+							},
+						},
+					},
+					{
+						"id":        "a3",
+						"slug":      "older-hub-agent",
+						"projectId": "p1",
+						"phase":     "stopped",
+					},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL}
+
+	oldListAll, oldOutputFormat := listAll, outputFormat
+	listAll, outputFormat = true, "json"
+	defer func() { listAll, outputFormat = oldListAll, oldOutputFormat }()
+
+	stdout, _ := captureStdoutStderr(t, func() {
+		require.NoError(t, listAgentsViaHub(hubCtx))
+	})
+
+	var rawItems []map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(stdout), &rawItems), stdout)
+	require.Len(t, rawItems, 3)
+
+	var got []api.AgentInfo
+	require.NoError(t, json.Unmarshal([]byte(stdout), &got), stdout)
+	byName := map[string]api.AgentInfo{}
+	rawByName := map[string]map[string]json.RawMessage{}
+	for i, a := range got {
+		byName[a.Name] = a
+		rawByName[a.Name] = rawItems[i]
+	}
+
+	res := byName["claude-dev"]
+	assert.Equal(t, "claude", res.ResolvedHarness)
+	require.NotNil(t, res.HarnessCapabilities)
+	assert.Equal(t, api.SupportYes, res.HarnessCapabilities.Resume.Support)
+	assert.Empty(t, res.HarnessCapabilities.Resume.Reason)
+
+	nonRes := byName["shell-runner"]
+	assert.Equal(t, "generic", nonRes.ResolvedHarness)
+	require.NotNil(t, nonRes.HarnessCapabilities)
+	assert.Equal(t, api.SupportNo, nonRes.HarnessCapabilities.Resume.Support)
+	assert.Equal(t, "Generic harness does not support session resume", nonRes.HarnessCapabilities.Resume.Reason)
+
+	olderRaw := rawByName["older-hub-agent"]
+	_, hasResolved := olderRaw["resolvedHarness"]
+	_, hasCaps := olderRaw["harnessCapabilities"]
+	assert.False(t, hasResolved, "omitted when Hub omits resolvedHarness")
+	assert.False(t, hasCaps, "omitted when Hub omits harnessCapabilities")
+	assert.Equal(t, []string{"authority,capabilities"}, gotIncludes, "JSON output requests include=capabilities alongside authority")
+
+	gotIncludes = nil
+	outputFormat = ""
+	_, _ = captureStdoutStderr(t, func() {
+		require.NoError(t, listAgentsViaHub(hubCtx))
+	})
+	assert.Equal(t, []string{"authority"}, gotIncludes, "text table output does not request include=capabilities")
+}

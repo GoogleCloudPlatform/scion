@@ -762,6 +762,15 @@ type AgentInfo struct {
 	// Authority is the agent's authority state as the Hub computed it.
 	// Set only for agents listed through a Hub that was asked for it.
 	Authority *AgentAuthority `json:"authority,omitempty"`
+	// ResolvedHarness is the underlying harness type the Hub resolved for
+	// the agent (for example "claude" or "generic"). Set for agents listed
+	// through a Hub that was asked for capabilities (scion list --format json).
+	ResolvedHarness string `json:"resolvedHarness,omitempty"`
+	// HarnessCapabilities describes the feature matrix of ResolvedHarness
+	// (including Resume.Support and Resume.Reason, which reflect Hub suspend
+	// eligibility and allow agents that name no harness). Set for agents
+	// listed through a Hub that was asked for capabilities.
+	HarnessCapabilities *HarnessAdvancedCapabilities `json:"harnessCapabilities,omitempty"`
 	// WorkspacePlacement is where the start that produced this info placed
 	// the agent's workspace: WorkspacePlacementExport or
 	// WorkspacePlacementLocal. Empty when this info did not come from a

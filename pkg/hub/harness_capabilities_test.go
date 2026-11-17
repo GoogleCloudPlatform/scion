@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -331,4 +332,344 @@ func TestUpdateAgent_AllowsConfigUpdateWhenStoppedAndRejectsWhenRunning(t *testi
 		})
 		require.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
 	})
+}
+
+// TestGetAgent_HarnessCapabilitiesMatchSuspendWhenCatalogDrifts is a regression
+// test for ptone/scion#8227: GET /api/v1/agents/{id} must compute
+// resolvedHarness and harnessCapabilities with the same stamped-first resolver
+// that manual and automatic suspend use, so catalog changes after agent
+// creation cannot cause the API capability and suspend decision to disagree.
+func TestGetAgent_HarnessCapabilitiesMatchSuspendWhenCatalogDrifts(t *testing.T) {
+	cases := []struct {
+		name                string
+		stampedHarness      string
+		configSlug          string
+		catalogHarness      string // "" means harness config was deleted from the catalog
+		wantHarness         string
+		wantResumeSupport   api.SupportLevel
+		wantSuspendHTTPCode int
+		wantFinalPhase      state.Phase
+	}{
+		{
+			name:                "stamped claude with catalog changed to generic stays resumable",
+			stampedHarness:      "claude",
+			configSlug:          "team-reviewer",
+			catalogHarness:      "generic",
+			wantHarness:         "claude",
+			wantResumeSupport:   api.SupportYes,
+			wantSuspendHTTPCode: http.StatusOK,
+			wantFinalPhase:      state.PhaseSuspended,
+		},
+		{
+			name:                "stamped claude with deleted catalog config stays resumable",
+			stampedHarness:      "claude",
+			configSlug:          "deleted-reviewer",
+			catalogHarness:      "",
+			wantHarness:         "claude",
+			wantResumeSupport:   api.SupportYes,
+			wantSuspendHTTPCode: http.StatusOK,
+			wantFinalPhase:      state.PhaseSuspended,
+		},
+		{
+			name:                "stamped generic with catalog changed to claude stays non-resumable",
+			stampedHarness:      "generic",
+			configSlug:          "team-shell",
+			catalogHarness:      "claude",
+			wantHarness:         "generic",
+			wantResumeSupport:   api.SupportNo,
+			wantSuspendHTTPCode: http.StatusBadRequest,
+			wantFinalPhase:      state.PhaseRunning,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			srv, s := testServer(t)
+			srv.SetDispatcher(&runIntentDispatcher{})
+
+			if tc.catalogHarness != "" {
+				require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{
+					ID:      tid("hc-8227-" + tc.configSlug),
+					Name:    tc.configSlug,
+					Slug:    tc.configSlug,
+					Harness: tc.catalogHarness,
+					Scope:   store.HarnessConfigScopeGlobal,
+					Status:  store.HarnessConfigStatusActive,
+					Config:  &store.HarnessConfigData{Harness: tc.catalogHarness},
+				}))
+			}
+
+			_, _, agent := setupOnlineBrokerAgent(t, s, "8227-"+tc.configSlug)
+			agent.AppliedConfig = &store.AgentAppliedConfig{
+				Harness:       tc.stampedHarness,
+				HarnessConfig: tc.configSlug,
+			}
+			require.NoError(t, s.UpdateAgent(ctx, agent))
+
+			getRec := doRequest(t, srv, http.MethodGet, "/api/v1/agents/"+agent.ID, nil)
+			require.Equal(t, http.StatusOK, getRec.Code, getRec.Body.String())
+
+			var got AgentWithCapabilities
+			require.NoError(t, json.Unmarshal(getRec.Body.Bytes(), &got))
+			require.NotNil(t, got.HarnessCapabilities)
+			assert.Equal(t, tc.wantHarness, got.ResolvedHarness)
+			assert.Equal(t, tc.wantHarness, got.HarnessCapabilities.Harness)
+			assert.Equal(t, tc.wantResumeSupport, got.HarnessCapabilities.Resume.Support)
+			if tc.wantResumeSupport == api.SupportNo {
+				assert.NotEmpty(t, got.HarnessCapabilities.Resume.Reason)
+			}
+
+			suspRec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/suspend", nil)
+			assert.Equal(t, tc.wantSuspendHTTPCode, suspRec.Code, suspRec.Body.String())
+
+			reloaded, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, string(tc.wantFinalPhase), reloaded.Phase)
+		})
+	}
+}
+
+// TestListAgents_FullViewExposesHarnessCapabilities verifies that full-view
+// agent list endpoints populate resolvedHarness and harnessCapabilities using
+// the stamped-first resolver (so scion list --format json can report resume
+// TestListAgents_FullViewExposesHarnessCapabilities verifies that Hub agent
+// list endpoints omit resolvedHarness and harnessCapabilities by default (and
+// on unknown/other include tokens), populate both on full-view responses when
+// include=capabilities is passed (composing with include=authority and ignoring
+// unknown tokens), and always omit both on view=compact (ptone/scion#8227).
+func TestListAgents_FullViewExposesHarnessCapabilities(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+
+	// Seed catalog harness configs that disagree with the stamped harnesses to
+	// prove list resolution uses the shared stamped-first resolver too.
+	for _, hc := range []*store.HarnessConfig{
+		{
+			ID: tid("hc-list-8227-1"), Name: "drifted-to-generic", Slug: "drifted-to-generic",
+			Harness: "generic", Scope: store.HarnessConfigScopeGlobal, Status: store.HarnessConfigStatusActive,
+			Config: &store.HarnessConfigData{Harness: "generic"},
+		},
+		{
+			ID: tid("hc-list-8227-2"), Name: "drifted-to-claude", Slug: "drifted-to-claude",
+			Harness: "claude", Scope: store.HarnessConfigScopeGlobal, Status: store.HarnessConfigStatusActive,
+			Config: &store.HarnessConfigData{Harness: "claude"},
+		},
+	} {
+		require.NoError(t, s.CreateHarnessConfig(ctx, hc))
+	}
+
+	proj, _, resumable := setupOnlineBrokerAgent(t, s, "8227-list-resumable")
+	resumable.AppliedConfig = &store.AgentAppliedConfig{
+		Harness:       "claude",
+		HarnessConfig: "drifted-to-generic",
+	}
+	require.NoError(t, s.UpdateAgent(ctx, resumable))
+
+	nonResumable := &store.Agent{
+		ID:        tid("8227-list-nonresumable"),
+		Slug:      "8227-list-nonresumable",
+		Name:      "8227-list-nonresumable",
+		ProjectID: proj.ID,
+		Phase:     string(state.PhaseRunning),
+		AppliedConfig: &store.AgentAppliedConfig{
+			Harness:       "generic",
+			HarnessConfig: "drifted-to-claude",
+		},
+	}
+	require.NoError(t, s.CreateAgent(ctx, nonResumable))
+
+	endpoints := []string{
+		"/api/v1/agents",
+		"/api/v1/projects/" + proj.ID + "/agents",
+	}
+	modes := []string{"", "sort=updated&fit=500"}
+
+	withQuery := func(base, mode, extra string) string {
+		var parts []string
+		if mode != "" {
+			parts = append(parts, mode)
+		}
+		if extra != "" {
+			parts = append(parts, extra)
+		}
+		if len(parts) == 0 {
+			return base
+		}
+		return base + "?" + strings.Join(parts, "&")
+	}
+
+	assertOmitsCapabilities := func(path string) {
+		t.Helper()
+		rec := doRequest(t, srv, http.MethodGet, path, nil)
+		require.Equal(t, http.StatusOK, rec.Code, "%s: %s", path, rec.Body.String())
+		var raw struct {
+			Agents []map[string]json.RawMessage `json:"agents"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+		require.NotEmpty(t, raw.Agents, path)
+		for _, item := range raw.Agents {
+			_, hasResolved := item["resolvedHarness"]
+			_, hasCaps := item["harnessCapabilities"]
+			assert.False(t, hasResolved, "%s: must omit resolvedHarness", path)
+			assert.False(t, hasCaps, "%s: must omit harnessCapabilities", path)
+		}
+	}
+
+	for _, base := range endpoints {
+		for _, mode := range modes {
+			// Default full-view list, include=authority alone, and unknown
+			// include values must all omit capability fields.
+			for _, extra := range []string{"", "include=authority", "include=bogus", "include=capabilitiesx"} {
+				assertOmitsCapabilities(withQuery(base, mode, extra))
+			}
+
+			// Opt-in include=capabilities (alone, composed with authority, or
+			// alongside unknown tokens) populates resolvedHarness and
+			// harnessCapabilities matching suspend.
+			for _, tc := range []struct {
+				query         string
+				wantAuthority bool
+			}{
+				{query: "include=capabilities"},
+				{query: "include=authority,capabilities", wantAuthority: true},
+				{query: "include=bogus,%20capabilities"},
+				{query: "include=authority&include=capabilities", wantAuthority: true},
+			} {
+				fullPath := withQuery(base, mode, tc.query)
+				rec := doRequest(t, srv, http.MethodGet, fullPath, nil)
+				require.Equal(t, http.StatusOK, rec.Code, "%s: %s", fullPath, rec.Body.String())
+
+				var resp ListAgentsResponse
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+				byID := map[string]AgentWithCapabilities{}
+				for _, a := range resp.Agents {
+					byID[a.ID] = a
+				}
+
+				gotRes, ok := byID[resumable.ID]
+				require.True(t, ok, "%s: expected resumable agent", fullPath)
+				assert.Equal(t, "claude", gotRes.ResolvedHarness, fullPath)
+				require.NotNil(t, gotRes.HarnessCapabilities, fullPath)
+				assert.Equal(t, api.SupportYes, gotRes.HarnessCapabilities.Resume.Support, fullPath)
+				assert.Empty(t, gotRes.HarnessCapabilities.Resume.Reason, fullPath)
+				if tc.wantAuthority {
+					assert.NotNil(t, gotRes.Authority, "%s: include=authority must compose with capabilities", fullPath)
+				} else {
+					assert.Nil(t, gotRes.Authority, fullPath)
+				}
+
+				gotNon, ok := byID[nonResumable.ID]
+				require.True(t, ok, "%s: expected non-resumable agent", fullPath)
+				assert.Equal(t, "generic", gotNon.ResolvedHarness, fullPath)
+				require.NotNil(t, gotNon.HarnessCapabilities, fullPath)
+				assert.Equal(t, api.SupportNo, gotNon.HarnessCapabilities.Resume.Support, fullPath)
+				assert.NotEmpty(t, gotNon.HarnessCapabilities.Resume.Reason, fullPath)
+			}
+
+			// Compact view never populates capability fields, even when
+			// include=capabilities is supplied.
+			assertOmitsCapabilities(withQuery(base, mode, "view=compact"))
+			assertOmitsCapabilities(withQuery(base, mode, "view=compact&include=capabilities"))
+		}
+	}
+}
+
+// TestAgentWithoutConfiguredHarness_APICapabilitiesMatchSuspend ensures that an
+// agent whose record names no harness and no harness-config at all reports
+// resume.support = "yes" on single-agent GET and on full-view list endpoints
+// with include=capabilities, matching manual/auto suspend (which allows
+// suspending unnamed agents) without contaminating named "generic" agents in
+// the same list (ptone/scion#8227).
+func TestAgentWithoutConfiguredHarness_APICapabilitiesMatchSuspend(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+	srv.SetDispatcher(&runIntentDispatcher{})
+
+	proj, _, unnamed := setupOnlineBrokerAgent(t, s, "8227-unnamed-harness")
+	require.Nil(t, unnamed.AppliedConfig)
+	require.Empty(t, unnamed.HarnessConfig)
+
+	namedGeneric := &store.Agent{
+		ID:            tid("8227-named-generic"),
+		Slug:          "8227-named-generic",
+		Name:          "8227-named-generic",
+		ProjectID:     proj.ID,
+		Phase:         string(state.PhaseRunning),
+		AppliedConfig: &store.AgentAppliedConfig{Harness: "generic"},
+	}
+	require.NoError(t, s.CreateAgent(ctx, namedGeneric))
+
+	getRec := doRequest(t, srv, http.MethodGet, "/api/v1/agents/"+unnamed.ID, nil)
+	require.Equal(t, http.StatusOK, getRec.Code, getRec.Body.String())
+	var gotGet AgentWithCapabilities
+	require.NoError(t, json.Unmarshal(getRec.Body.Bytes(), &gotGet))
+	require.NotNil(t, gotGet.HarnessCapabilities)
+	assert.Equal(t, api.SupportYes, gotGet.HarnessCapabilities.Resume.Support)
+	assert.Empty(t, gotGet.HarnessCapabilities.Resume.Reason)
+
+	for _, basePath := range []string{"/api/v1/agents", "/api/v1/projects/" + proj.ID + "/agents"} {
+		listPath := basePath + "?include=capabilities"
+		listRec := doRequest(t, srv, http.MethodGet, listPath, nil)
+		require.Equal(t, http.StatusOK, listRec.Code, "%s: %s", listPath, listRec.Body.String())
+		var listResp ListAgentsResponse
+		require.NoError(t, json.Unmarshal(listRec.Body.Bytes(), &listResp))
+		byID := map[string]AgentWithCapabilities{}
+		for _, a := range listResp.Agents {
+			byID[a.ID] = a
+		}
+
+		gotUnnamed, ok := byID[unnamed.ID]
+		require.True(t, ok, listPath)
+		require.NotNil(t, gotUnnamed.HarnessCapabilities, listPath)
+		assert.Equal(t, api.SupportYes, gotUnnamed.HarnessCapabilities.Resume.Support, listPath)
+		assert.Empty(t, gotUnnamed.HarnessCapabilities.Resume.Reason, listPath)
+
+		gotNamed, ok := byID[namedGeneric.ID]
+		require.True(t, ok, listPath)
+		require.NotNil(t, gotNamed.HarnessCapabilities, listPath)
+		assert.Equal(t, api.SupportNo, gotNamed.HarnessCapabilities.Resume.Support, listPath)
+		assert.NotEmpty(t, gotNamed.HarnessCapabilities.Resume.Reason, listPath)
+	}
+
+	suspRec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+unnamed.ID+"/suspend", nil)
+	assert.Equal(t, http.StatusOK, suspRec.Code, suspRec.Body.String())
+	reloaded, err := s.GetAgent(ctx, unnamed.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseSuspended), reloaded.Phase)
+}
+
+func TestStoredAgentHarness_CanonicalizesStampedNames(t *testing.T) {
+	assert.Equal(t, "", storedAgentHarness(nil))
+	assert.Equal(t, "", storedAgentHarness(&store.Agent{}))
+	assert.Equal(t, "claude", storedAgentHarness(&store.Agent{AppliedConfig: &store.AgentAppliedConfig{Harness: "Claude"}}))
+	assert.Equal(t, "gemini-cli", storedAgentHarness(&store.Agent{AppliedConfig: &store.AgentAppliedConfig{Harness: "gemini"}}))
+	assert.Equal(t, "custom-runner", storedAgentHarness(&store.Agent{AppliedConfig: &store.AgentAppliedConfig{Harness: "custom-runner"}}))
+
+	srv := &Server{}
+	resolved, caps := srv.resolveAgentHarnessCapabilities(context.Background(), &store.Agent{
+		AppliedConfig: &store.AgentAppliedConfig{Harness: "gemini"},
+	})
+	assert.Equal(t, "gemini-cli", resolved)
+	assert.Equal(t, api.SupportYes, caps.Resume.Support)
+}
+
+func TestSetAgentListCapabilities_IsolatesPerAgentCopies(t *testing.T) {
+	agents := []AgentWithCapabilities{
+		{
+			Agent:           store.Agent{ID: "a1", AppliedConfig: &store.AgentAppliedConfig{Harness: "claude"}},
+			ResolvedHarness: "claude",
+		},
+		{
+			Agent:           store.Agent{ID: "a2", AppliedConfig: &store.AgentAppliedConfig{Harness: "claude"}},
+			ResolvedHarness: "claude",
+		},
+	}
+	setAgentListCapabilities(agents)
+	require.NotNil(t, agents[0].HarnessCapabilities)
+	require.NotNil(t, agents[1].HarnessCapabilities)
+	assert.NotSame(t, agents[0].HarnessCapabilities, agents[1].HarnessCapabilities)
+
+	agents[0].HarnessCapabilities.Resume.Reason = "mutated"
+	assert.Empty(t, agents[1].HarnessCapabilities.Resume.Reason)
 }

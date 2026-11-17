@@ -410,7 +410,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		s.writeAgentList(ctx, w, p.view, false, sortedShortCircuitResponse(p))
+		s.writeAgentList(ctx, w, p.view, agentListIncludes{}, sortedShortCircuitResponse(p))
 	}
 
 	// RS2: Unauthenticated callers get an empty list immediately.
@@ -527,7 +527,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 
 	agents, scopeCap := s.buildGlobalAgentPage(ctx, identity, result.Items)
 
-	s.writeAgentList(ctx, w, legacyAgentListView(query), agentListIncludesAuthority(query), ListAgentsResponse{
+	s.writeAgentList(ctx, w, legacyAgentListView(query), parseAgentListIncludes(query), ListAgentsResponse{
 		Agents:                agents,
 		NextCursor:            result.NextCursor,
 		TotalCount:            result.TotalCount,
@@ -4394,7 +4394,7 @@ func (s *Server) writeAgentResponse(w http.ResponseWriter, r *http.Request, agen
 		Agent:               *agent,
 		ResolvedHarness:     resolvedHarness,
 		HarnessCapabilities: &harnessCaps,
-		HarnessVendor:       harness.Vendor(agentBadgeHarness(agent, resolvedHarness)),
+		HarnessVendor:       harness.Vendor(resolvedHarness),
 		ModelSize:           agentModelSize(agent),
 		CloudLogging:        s.logQueryService != nil,
 		SSHHostKey:          s.agentSSHHostKey(agent),

@@ -26,7 +26,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -561,23 +560,13 @@ func (e *errHarnessNoResume) Error() string {
 
 // harnessSupportsResume reports whether the agent's harness supports resuming
 // a session, with the harness type it judged and, when unsupported, the
-// harness's reason. The harness type is the underlying one, not the
-// harness-config name: the harness stamped on the agent at create, else the
-// type its harness-config reference resolves to (resolveAgentHarnessType), so
-// a custom-named config of a resumable harness is resumable
-// (ptone/scion#7922). An agent whose applied config names no harness is
-// treated as supported, matching the HTTP suspend handler's prior behavior of
-// only rejecting when a harness was explicitly resolved and declared
-// SupportNo. Auto-suspend and the idle sweep share this check.
+// harness's reason. It delegates directly to resolveAgentHarnessCapabilities
+// (stamped harness at create first, else live config resolution via
+// effectiveAgentHarnessType, with unnamed agents reporting Resume.Support =
+// SupportYes; ptone/scion#7922, ptone/scion#8227) so GET, full-view list,
+// manual suspend, auto-suspend and membership-loss suspend always agree.
 func (s *Server) harnessSupportsResume(ctx context.Context, agent *store.Agent) (supported bool, harnessType, reason string) {
-	harnessType = storedAgentHarness(agent)
-	if harnessType == "" {
-		if agent.AppliedConfig == nil || agent.AppliedConfig.HarnessConfig == "" {
-			return true, "", ""
-		}
-		harnessType = s.resolveAgentHarnessType(ctx, agent)
-	}
-	caps := harness.New(harnessType).AdvancedCapabilities()
+	harnessType, caps := s.resolveAgentHarnessCapabilities(ctx, agent)
 	if caps.Resume.Support == api.SupportNo {
 		return false, harnessType, caps.Resume.Reason
 	}

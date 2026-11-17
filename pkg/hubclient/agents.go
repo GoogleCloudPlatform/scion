@@ -202,6 +202,10 @@ type ListAgentsOptions struct {
 	// per listed agent.
 	IncludeAuthority bool
 
+	// IncludeCapabilities asks the Hub to include each agent's
+	// resolvedHarness and harnessCapabilities (include=capabilities).
+	IncludeCapabilities bool
+
 	Page apiclient.PageOptions
 }
 
@@ -490,8 +494,15 @@ func (s *agentService) List(ctx context.Context, opts *ListAgentsOptions) (*List
 		if opts.LineageRootID != "" {
 			query.Set("lineageRootId", opts.LineageRootID)
 		}
+		var includes []string
 		if opts.IncludeAuthority {
-			query.Set("include", "authority")
+			includes = append(includes, "authority")
+		}
+		if opts.IncludeCapabilities {
+			includes = append(includes, "capabilities")
+		}
+		if len(includes) > 0 {
+			query.Set("include", strings.Join(includes, ","))
 		}
 		opts.Page.ToQuery(query)
 	}
