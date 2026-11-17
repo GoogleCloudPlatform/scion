@@ -823,10 +823,11 @@ func TestFireCoreRefusalLogging(t *testing.T) {
 
 type fireCoreScheduleStore struct {
 	*mockScheduledEventStore
-	advanceCalls  int
-	afterRunCalls int
-	completeCalls int
-	lastRunErr    string
+	advanceCalls        int
+	afterRunCalls       int
+	completeCalls       int
+	unadmittedExecCalls int
+	lastRunErr          string
 }
 
 func (s *fireCoreScheduleStore) AdvanceScheduleNextRun(_ context.Context, id string, nextRunAt time.Time) error {
@@ -871,6 +872,42 @@ func (s *fireCoreScheduleStore) CompleteFiringScheduledEvent(ctx context.Context
 	s.completeCalls++
 	s.mu.Unlock()
 	return s.mockScheduledEventStore.CompleteFiringScheduledEvent(ctx, id, status, firedAt, errMsg, scheduleID, ranAt)
+}
+
+func (s *fireCoreScheduleStore) CompleteUnadmittedExecEvent(_ context.Context, id string, status string, errMsg string, scheduleID string, ranAt time.Time) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.unadmittedExecCalls++
+	evt, ok := s.events[id]
+	if !ok || (evt.Status != store.ScheduledEventFired && evt.Status != store.ScheduledEventExpired) {
+		return false, nil
+	}
+	evt.Status = status
+	evt.Error = errMsg
+	if scheduleID != "" {
+		if sc, ok := s.schedules[scheduleID]; ok {
+			sc.RunCount++
+			if status == store.ScheduledEventFailed {
+				sc.ErrorCount++
+			}
+			if sc.LastRunAt == nil || sc.LastRunAt.Before(ranAt) {
+				cpRan := ranAt
+				sc.LastRunAt = &cpRan
+				switch status {
+				case store.ScheduledEventSkipped:
+					sc.LastRunStatus = store.ScheduleRunSkipped
+					sc.LastRunError = errMsg
+				case store.ScheduledEventFailed:
+					sc.LastRunStatus = store.ScheduleRunError
+					sc.LastRunError = errMsg
+				default:
+					sc.LastRunStatus = store.ScheduleRunSuccess
+					sc.LastRunError = ""
+				}
+			}
+		}
+	}
+	return true, nil
 }
 
 func TestFireCoreSchedulerAdapters(t *testing.T) {
@@ -1150,10 +1187,10 @@ func TestFireCoreLegacyActionDetaches(t *testing.T) {
 		}), "dispatch_agent never detaches (%s)", defKind)
 	}
 
-	assert.False(t, execAction.Detaches(hubfire.FireRequest{
+	assert.True(t, execAction.Detaches(hubfire.FireRequest{
 		Authority: hubfire.RecordedAuthority{DefinitionKind: hubfire.DefinitionKindSchedule},
 		Payload:   `{"agentId":"a1","command":["true"]}`,
-	}), "recurring exec stays non-detaching in 1a until PR 2 / exec-schedules Phase 2")
+	}), "recurring exec detaches when DefinitionKind == schedule (rev 8.12)")
 	assert.False(t, execAction.Detaches(hubfire.FireRequest{
 		Authority: hubfire.RecordedAuthority{DefinitionKind: hubfire.DefinitionKindScheduledEvent},
 		Payload:   `{"agentId":"a1","command":["true"]}`,
@@ -1223,8 +1260,8 @@ func TestFireCoreMessageActionValidate(t *testing.T) {
 // TestFireCoreAdapterDetachesMatrix covers all seven cells of design §5.1a
 // (rev 8.11 / 8.12): recurring x {detaches, !detaches} x {Detached, !Detached}
 // (including the mismatch cell !detaches && Detached), one-shot x
-// {Detached, detaches && !Detached, !detaches && !Detached}, and stored
-// recurring exec's synchronous refusal parity with base in 1a.
+// {Detached, detaches && !Detached, !detaches && !Detached}, and recurring +
+// one-shot exec detachment on legacyAction after exec-schedules Phase 2.
 func TestFireCoreAdapterDetachesMatrix(t *testing.T) {
 	// Not t.Parallel: captures process-default slog logger for mismatch check.
 	const projectID = "project-detaches-matrix"
@@ -1430,22 +1467,36 @@ func TestFireCoreAdapterDetachesMatrix(t *testing.T) {
 		})
 	}
 
-	t.Run("8. stored recurring exec schedule refuses synchronously without detaching in 1a", func(t *testing.T) {
+	t.Run("8a. recurring exec admitted detaches pre-advances next_run_at and leaves write to exec tracker", func(t *testing.T) {
 		ms := newMockStore()
 		ms.schedules = make(map[string]*store.Schedule)
 		fs := &fireCoreScheduleStore{mockScheduledEventStore: ms}
 		srv := newEventHandlerTestServer(fs)
-		srv.registerFireActions()
 		sched := NewScheduler(fs, slog.Default())
 		sched.srv = srv
 		srv.scheduler = sched
 
+		require.NoError(t, ms.CreateAgent(context.Background(), &store.Agent{
+			ID:        "a1",
+			Slug:      "worker",
+			ProjectID: projectID,
+			Phase:     "running",
+		}))
 		rec := newFireCoreTestAuthority(ms, projectID)
+		srv.RegisterAction(newLegacyAction(scheduledEventTypeExec, func(_ context.Context, evt store.ScheduledEvent) error {
+			fs.mu.Lock()
+			adv := fs.advanceCalls
+			fs.mu.Unlock()
+			assert.Equal(t, 1, adv, "AdvanceScheduleNextRun ran before recurring exec handler")
+			assert.Equal(t, store.ScheduledEventFired, evt.Status)
+			return outcomeRecorded(nil)
+		}))
+
 		dueAt := now.Add(-time.Minute)
 		scRow := &store.Schedule{
-			ID:                   "sched-rec-exec",
+			ID:                   "sched-rec-exec-admitted",
 			ProjectID:            projectID,
-			Name:                 "rec-exec",
+			Name:                 "rec-exec-admitted",
 			CronExpr:             "0 * * * *",
 			EventType:            scheduledEventTypeExec,
 			Payload:              `{"agentId":"a1","command":["true"]}`,
@@ -1457,11 +1508,17 @@ func TestFireCoreAdapterDetachesMatrix(t *testing.T) {
 		ms.schedules[scRow.ID] = scRow
 
 		srv.executeSchedule(context.Background(), *scRow, now)
+		srv.scheduledWakeFires.wg.Wait()
+
+		// Simulate shutdown sweep: run.tryRecord(func(){}) already claimed the
+		// wakeFireRun, so recordAbandonedWakeFires must not clobber the event.
+		srv.recordAbandonedWakeFires(context.Background())
 
 		fs.mu.Lock()
-		assert.Equal(t, 0, fs.advanceCalls, "AdvanceScheduleNextRun must not run for exec in 1a")
-		assert.Equal(t, 1, fs.afterRunCalls, "UpdateScheduleAfterRun runs synchronously as on base")
-		assert.Equal(t, 0, fs.completeCalls, "CompleteFiringScheduledEvent must not run")
+		assert.Equal(t, 1, fs.advanceCalls, "AdvanceScheduleNextRun called once before fire")
+		assert.Equal(t, 0, fs.afterRunCalls, "UpdateScheduleAfterRun must not run for detached exec")
+		assert.Equal(t, 0, fs.completeCalls, "CompleteFiringScheduledEvent must not run for exec")
+		assert.Equal(t, 0, fs.unadmittedExecCalls, "CompleteUnadmittedExecEvent must not run for admitted exec")
 		require.Len(t, ms.events, 1)
 		var gotEvt *store.ScheduledEvent
 		for _, ev := range ms.events {
@@ -1470,12 +1527,116 @@ func TestFireCoreAdapterDetachesMatrix(t *testing.T) {
 		gotSched := *ms.schedules[scRow.ID]
 		fs.mu.Unlock()
 
-		assert.Equal(t, store.ScheduledEventFailed, gotEvt.Status)
-		assert.Equal(t, execReasonRecurring, gotEvt.Error)
-		assert.Equal(t, 1, gotSched.RunCount)
-		assert.Equal(t, store.ScheduleRunError, gotSched.LastRunStatus)
-		assert.Equal(t, execReasonRecurring, gotSched.LastRunError)
+		assert.Equal(t, store.ScheduledEventFired, gotEvt.Status)
+		assert.True(t, gotEvt.FireAt.Equal(dueAt), "recurring exec preserves NextRunAt on evt.FireAt")
+		assert.Equal(t, 0, gotSched.RunCount, "admitted exec run owns schedule run accounting")
 		require.NotNil(t, gotSched.NextRunAt)
 		assert.True(t, gotSched.NextRunAt.Equal(wantNextRun))
+	})
+
+	t.Run("8b. recurring exec unadmitted skip and refusal record via CompleteUnadmittedExecEvent without rewinding next_run_at", func(t *testing.T) {
+		ms := newMockStore()
+		ms.schedules = make(map[string]*store.Schedule)
+		fs := &fireCoreScheduleStore{mockScheduledEventStore: ms}
+		srv := newEventHandlerTestServer(fs)
+		srv.registerFireActions()
+		sched := NewScheduler(fs, slog.Default())
+		sched.srv = srv
+		srv.scheduler = sched
+
+		require.NoError(t, ms.CreateAgent(context.Background(), &store.Agent{
+			ID:        "a1",
+			Slug:      "worker",
+			ProjectID: projectID,
+			Phase:     "running",
+		}))
+		rec := newFireCoreTestAuthority(ms, projectID)
+		dueAt := now.Add(-time.Minute)
+		scRow := &store.Schedule{
+			ID:                   "sched-rec-exec-skip",
+			ProjectID:            projectID,
+			Name:                 "rec-exec-skip",
+			CronExpr:             "0 * * * *",
+			EventType:            scheduledEventTypeExec,
+			Payload:              `{"agentId":"a1","command":["true"]}`,
+			Status:               store.ScheduleStatusActive,
+			NextRunAt:            &dueAt,
+			InitiatorAttribution: rec.Attribution,
+			AuthorityCeiling:     rec.Ceiling,
+		}
+		ms.schedules[scRow.ID] = scRow
+
+		// With hub.exec_schedules disabled by default on newEventHandlerTestServer,
+		// fireScheduledExec returns unadmitted skip ("exec schedules disabled").
+		srv.executeSchedule(context.Background(), *scRow, now)
+		srv.scheduledWakeFires.wg.Wait()
+
+		fs.mu.Lock()
+		assert.Equal(t, 1, fs.advanceCalls, "AdvanceScheduleNextRun called once before fire")
+		assert.Equal(t, 0, fs.afterRunCalls, "UpdateScheduleAfterRun must not run for detached exec")
+		assert.Equal(t, 0, fs.completeCalls, "CompleteFiringScheduledEvent must not run for exec")
+		assert.Equal(t, 1, fs.unadmittedExecCalls, "CompleteUnadmittedExecEvent records unadmitted recurring exec")
+		require.Len(t, ms.events, 1)
+		var gotEvt *store.ScheduledEvent
+		for _, ev := range ms.events {
+			gotEvt = ev
+		}
+		gotSched := *ms.schedules[scRow.ID]
+		fs.mu.Unlock()
+
+		assert.Equal(t, store.ScheduledEventSkipped, gotEvt.Status)
+		assert.Equal(t, execReasonDisabled, gotEvt.Error)
+		assert.Equal(t, 1, gotSched.RunCount)
+		assert.Equal(t, 0, gotSched.ErrorCount, "skipped recurring exec must not increment error_count")
+		assert.Equal(t, store.ScheduleRunSkipped, gotSched.LastRunStatus)
+		assert.Equal(t, execReasonDisabled, gotSched.LastRunError)
+		require.NotNil(t, gotSched.NextRunAt)
+		assert.True(t, gotSched.NextRunAt.Equal(wantNextRun))
+	})
+
+	t.Run("8c. one-shot exec stays non-detaching for both admitted and unadmitted outcomes", func(t *testing.T) {
+		ms := newMockStore()
+		fs := &fireCoreScheduleStore{mockScheduledEventStore: ms}
+		srv := newEventHandlerTestServer(fs)
+		sched := NewScheduler(fs, slog.Default())
+		sched.srv = srv
+		srv.scheduler = sched
+
+		rec := newFireCoreTestAuthority(ms, projectID)
+		admitted := true
+		srv.RegisterAction(newLegacyAction(scheduledEventTypeExec, func(_ context.Context, _ store.ScheduledEvent) error {
+			if admitted {
+				return outcomeRecorded(nil)
+			}
+			return skipScheduledFire("not running")
+		}))
+
+		evt1 := store.ScheduledEvent{
+			ID:                   "evt-oneshot-exec-admitted",
+			ProjectID:            projectID,
+			EventType:            scheduledEventTypeExec,
+			FireAt:               now,
+			Payload:              `{"agentId":"a1","command":["true"]}`,
+			Status:               store.ScheduledEventPending,
+			InitiatorAttribution: rec.Attribution,
+			AuthorityCeiling:     rec.Ceiling,
+		}
+		require.NoError(t, ms.CreateScheduledEvent(context.Background(), &evt1))
+		sched.fireEvent(context.Background(), evt1, false)
+		assert.Equal(t, store.ScheduledEventPending, ms.getEvent(evt1.ID).Status, "admitted one-shot exec leaves event row to run tracker")
+
+		admitted = false
+		evt2 := evt1
+		evt2.ID = "evt-oneshot-exec-skip"
+		require.NoError(t, ms.CreateScheduledEvent(context.Background(), &evt2))
+		sched.fireEvent(context.Background(), evt2, false)
+		gotSkip := ms.getEvent(evt2.ID)
+		assert.Equal(t, store.ScheduledEventSkipped, gotSkip.Status)
+		assert.Equal(t, "not running", gotSkip.Error)
+
+		fs.mu.Lock()
+		assert.Equal(t, 0, fs.completeCalls)
+		assert.Equal(t, 0, fs.unadmittedExecCalls)
+		fs.mu.Unlock()
 	})
 }

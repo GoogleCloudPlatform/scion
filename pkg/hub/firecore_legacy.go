@@ -117,11 +117,7 @@ func (a *legacyAction) Detaches(req hubfire.FireRequest) bool {
 	case "message":
 		return scheduledPayloadWakes(req.Payload)
 	case scheduledEventTypeExec:
-		// Enabled with recurring exec in PR 2 / exec-schedules Phase 2
-		// (req.Authority.DefinitionKind == hubfire.DefinitionKindSchedule);
-		// false in 1a so a stored recurring exec row keeps base's synchronous
-		// refusal path (design rev 8.12 §5.1).
-		return false
+		return req.Authority.DefinitionKind == hubfire.DefinitionKindSchedule
 	default:
 		return false
 	}
