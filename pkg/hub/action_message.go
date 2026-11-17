@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
@@ -28,8 +27,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
-
-const maxMessageActionPayloadBytes = 16 * 1024
 
 // messageAction implements FireAction and FirePayloadValidator for deferred
 // "message" fires dispatched to agents through the AgentDispatcher.
@@ -64,75 +61,12 @@ func (a *messageAction) Detaches(req hubfire.FireRequest) bool {
 	return scheduledPayloadWakes(req.Payload)
 }
 
-func (a *messageAction) Validate(ctx context.Context, caller Identity, projectID string, payload string) (string, error) {
-	if a == nil || a.srv == nil || a.srv.store == nil {
-		return "", errors.New("message action: server not configured")
-	}
-	if caller == nil {
-		return "", errors.New("caller identity is required")
-	}
-
-	var rawObj map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(payload), &rawObj); err != nil || rawObj == nil {
-		if err != nil {
-			return "", fmt.Errorf("invalid message payload: %w", err)
-		}
-		return "", errors.New("invalid message payload: expected JSON object")
-	}
-
-	var p MessageEventPayload
-	if err := json.Unmarshal([]byte(payload), &p); err != nil {
-		return "", fmt.Errorf("invalid message payload: %w", err)
-	}
-	if strings.TrimSpace(p.Message) == "" {
-		return "", errors.New("message payload is empty")
-	}
-	if len(p.Message) > maxMessageActionPayloadBytes {
-		return "", fmt.Errorf("message payload exceeds maximum length of %d bytes", maxMessageActionPayloadBytes)
-	}
-
-	agentID := strings.TrimSpace(p.AgentID)
-	agentName := strings.TrimSpace(p.AgentName)
-	var target *store.Agent
-	var err error
-	switch {
-	case agentID != "":
-		target, err = a.srv.store.GetAgent(ctx, agentID)
-	case agentName != "" && projectID != "":
-		target, err = a.srv.store.GetAgentBySlug(ctx, projectID, agentName)
-	default:
-		return "", errors.New("message payload must include agentId or agentName")
-	}
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return "", errors.New("target agent not found")
-		}
-		return "", fmt.Errorf("target agent lookup failed: %w", err)
-	}
-	if target == nil || !target.DeletedAt.IsZero() ||
-		(agentID != "" && agentName != "" && agentName != target.Slug) {
-		return "", errors.New("target agent not found")
-	}
-
-	if target.ProjectID != projectID {
-		ops := a.srv.GetOperationalSettings()
-		if ops == nil || !ops.CrossProjectMessagingEnabled() {
-			return "", errors.New("cross-project messages require cross-project messaging to be enabled")
-		}
-	}
-
-	allowed, reason, _ := a.srv.authorizeAgentMessage(ctx, caller, target, false)
-	if !allowed {
-		return "", fmt.Errorf("not authorized to message agent %q: %s", target.Slug, reason)
-	}
-
-	p.AgentID = target.ID
-	p.AgentName = target.Slug
-	encoded, err := json.Marshal(p)
-	if err != nil {
-		return "", fmt.Errorf("encode normalized message payload: %w", err)
-	}
-	return string(encoded), nil
+// Validate refuses in Phase 1a: schedule authoring handlers continue to
+// authorize through authorizeScheduledMessageAuthoring /
+// authorizeScheduledMessageReauthoring, and trigger authoring wires shared
+// target validation in a later phase.
+func (a *messageAction) Validate(_ context.Context, _ Identity, _ string, _ string) (string, error) {
+	return "", errors.New("message action authoring validation is not wired in 1a")
 }
 
 func (a *messageAction) ValidatePayload(req hubfire.FireRequest) error {
@@ -309,6 +243,8 @@ func (s *Server) deliverMessageAction(ctx context.Context, req hubfire.FireReque
 		scheduleID = req.Authority.DefinitionID
 	}
 
+	// Authorize checks reincarnationInFlight before wake authorization; re-check
+	// here to guard a Fire called with stale Authorized state.
 	if reincarnationInFlight(agent) {
 		return hubfire.FireOutcome{}, fmt.Errorf("target agent is reincarnating")
 	}

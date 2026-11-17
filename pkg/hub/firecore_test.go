@@ -22,7 +22,6 @@ import (
 	"go/parser"
 	"go/token"
 	"log/slog"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1208,53 +1207,15 @@ func TestFireCoreMessageActionValidate(t *testing.T) {
 	require.NoError(t, err)
 	caller := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "session")
 
-	target := &store.Agent{
-		ID:          "agent-target-1",
-		Slug:        "worker-one",
-		Name:        "Worker One",
-		ProjectID:   projectID,
-		OwnerID:     userID,
-		MessageMode: store.MessageModeProject,
-	}
-	require.NoError(t, ms.CreateAgent(context.Background(), target))
-	noneTarget := &store.Agent{
-		ID:          "agent-target-none",
-		Slug:        "worker-none",
-		Name:        "Worker None",
-		ProjectID:   projectID,
-		MessageMode: store.MessageModeNone,
-	}
-	require.NoError(t, ms.CreateAgent(context.Background(), noneTarget))
-	otherProjTarget := &store.Agent{
-		ID:          "agent-target-other",
-		Slug:        "worker-other",
-		Name:        "Worker Other",
-		ProjectID:   "other-project",
-		OwnerID:     userID,
-		MessageMode: store.MessageModeProject,
-	}
-	require.NoError(t, ms.CreateAgent(context.Background(), otherProjTarget))
-
 	act := &messageAction{srv: srv}
-
 	normalized, err := act.Validate(context.Background(), caller, projectID, `{"agentName":"worker-one","message":"hello","wake":true}`)
-	require.NoError(t, err)
-	assert.JSONEq(t, `{"agentId":"agent-target-1","agentName":"worker-one","message":"hello","wake":true}`, normalized)
+	require.ErrorContains(t, err, "message action authoring validation is not wired in 1a")
+	assert.Empty(t, normalized)
 
-	_, err = act.Validate(context.Background(), caller, projectID, `{"agentName":"worker-none","message":"hello"}`)
-	require.ErrorContains(t, err, "not authorized to message agent")
-
-	_, err = act.Validate(context.Background(), caller, projectID, `{"agentName":"worker-one","message":"   "}`)
-	require.ErrorContains(t, err, "message payload is empty")
-
-	_, err = act.Validate(context.Background(), caller, projectID, `{"agentName":"worker-one","message":"`+strings.Repeat("x", maxMessageActionPayloadBytes+1)+`"}`)
-	require.ErrorContains(t, err, "exceeds maximum length")
-
-	_, err = act.Validate(context.Background(), caller, projectID, `{"message":"hello"}`)
-	require.ErrorContains(t, err, "must include agentId or agentName")
-
-	_, err = act.Validate(context.Background(), caller, projectID, `{"agentId":"agent-target-other","message":"hello"}`)
-	require.ErrorContains(t, err, "cross-project messages require cross-project messaging to be enabled")
+	var nilAction *messageAction
+	normalized, err = nilAction.Validate(context.Background(), nil, "", "")
+	require.ErrorContains(t, err, "message action authoring validation is not wired in 1a")
+	assert.Empty(t, normalized)
 }
 
 // TestFireCoreAdapterDetachesMatrix covers all seven cells of design §5.1a
