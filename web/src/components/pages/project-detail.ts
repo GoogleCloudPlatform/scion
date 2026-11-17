@@ -123,8 +123,8 @@ import type { ProjectLeftDetail, ScionProjectLeaveDialog } from '../shared/proje
 import {
   AGENT_BADGES_FLAG,
   FEATURE_FLAGS_CHANGED_EVENT,
+  decisionsEnabled,
   isFeatureEnabled,
-  projectDecisionsEnabled,
 } from '../../utils/feature-flags.js';
 import { fetchProjectDecisionCounts } from '../../client/project-decisions.js';
 import { agentBadges } from '../shared/agent-badges.js';
@@ -488,7 +488,7 @@ export class ScionPageProjectDetail extends LitElement {
   private decisionsCountTimer: ReturnType<typeof setTimeout> | null = null;
 
   private boundOnFeatureFlagsChanged = (): void => {
-    const next = projectDecisionsEnabled();
+    const next = decisionsEnabled();
     if (next === this.decisionsEnabled) return;
     this.decisionsEnabled = next;
     if (!next) {
@@ -1332,7 +1332,7 @@ export class ScionPageProjectDetail extends LitElement {
       view: listViewOf(this.viewMode),
     });
 
-    this.decisionsEnabled = projectDecisionsEnabled();
+    this.decisionsEnabled = decisionsEnabled();
 
     // Set SSE scope to this project (receives all agent events within
     // project) before the first load: a drain belongs to the scope

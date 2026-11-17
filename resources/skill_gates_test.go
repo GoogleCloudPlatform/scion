@@ -177,29 +177,29 @@ func TestPlatformSkillGates_WellFormed(t *testing.T) {
 // TestParseSkillMarkdown_RejectsMalformedGates checks the checker itself.
 func TestParseSkillMarkdown_RejectsMalformedGates(t *testing.T) {
 	for name, raw := range map[string]string{
-		"unclosed":    "a\n<!-- scion:experiment web.chat_choices -->\nb\n",
-		"nested":      "<!-- scion:experiment web.chat_choices -->\n<!-- scion:experiment web.chat_choices -->\n<!-- scion:end-experiment -->\n",
+		"unclosed":    "a\n<!-- scion:experiment web.decisions -->\nb\n",
+		"nested":      "<!-- scion:experiment web.decisions -->\n<!-- scion:experiment web.decisions -->\n<!-- scion:end-experiment -->\n",
 		"stray end":   "a\n<!-- scion:end-experiment -->\n",
-		"inline":      "text <!-- scion:experiment web.chat_choices --> more\n",
-		"frontmatter": "---\nname: x\n<!-- scion:experiment web.chat_choices -->\n---\n",
+		"inline":      "text <!-- scion:experiment web.decisions --> more\n",
+		"frontmatter": "---\nname: x\n<!-- scion:experiment web.decisions -->\n---\n",
 		"empty id":    "---\nexperiment:\n---\nbody\n",
-		"bad yaml":    "---\nexperiment: web.chat_choices\ndescription: a: b\n---\nbody\n",
+		"bad yaml":    "---\nexperiment: web.decisions\ndescription: a: b\n---\nbody\n",
 	} {
 		if got := parseSkillMarkdown(name, raw); len(got.problems) == 0 {
 			t.Errorf("%s: no problem reported for %q", name, raw)
 		}
 	}
-	ok := parseSkillMarkdown("ok", "---\nexperiment: web.chat_choices\n---\na\r\n<!-- scion:experiment hub.artifacts -->\r\nb\r\n<!-- scion:end-experiment -->\r\n")
+	ok := parseSkillMarkdown("ok", "---\nexperiment: web.decisions\n---\na\r\n<!-- scion:experiment hub.artifacts -->\r\nb\r\n<!-- scion:end-experiment -->\r\n")
 	if len(ok.problems) != 0 {
 		t.Errorf("well-formed file reported problems: %v", ok.problems)
 	}
-	if ok.fileGate != experiments.ChatChoices || len(ok.lines) != 3 || ok.lines[1].gate != experiments.Artifacts {
+	if ok.fileGate != experiments.Decisions || len(ok.lines) != 3 || ok.lines[1].gate != experiments.Artifacts {
 		t.Errorf("parsed %+v", ok)
 	}
 }
 
 // TestPlatformSkillGates_ChoicesClaimsAreGated: Choices guidance appears
-// only inside web.chat_choices gates, so an agent on a hub without Choices
+// only inside web.decisions gates, so an agent on a hub without Decisions
 // is never told to use it (design 3.6, as scion-web-serving does for the
 // page view).
 func TestPlatformSkillGates_ChoicesClaimsAreGated(t *testing.T) {
@@ -213,8 +213,8 @@ func TestPlatformSkillGates_ChoicesClaimsAreGated(t *testing.T) {
 					continue
 				}
 				found++
-				if l.gate != experiments.ChatChoices {
-					t.Errorf("%s:%d mentions %q outside a %s gate: %q", sm.name, l.n, c, experiments.ChatChoices, l.text)
+				if l.gate != experiments.Decisions {
+					t.Errorf("%s:%d mentions %q outside a %s gate: %q", sm.name, l.n, c, experiments.Decisions, l.text)
 				}
 			}
 		}
@@ -238,8 +238,8 @@ func TestPlatformSkillsFS_ScionMessagingChoices(t *testing.T) {
 		return string(data)
 	}
 	ref := parseSkillMarkdown("references/choices.md", read("scion-messaging/references/choices.md"))
-	if ref.fileGate != experiments.ChatChoices {
-		t.Errorf("references/choices.md frontmatter gate = %q, want %q", ref.fileGate, experiments.ChatChoices)
+	if ref.fileGate != experiments.Decisions {
+		t.Errorf("references/choices.md frontmatter gate = %q, want %q", ref.fileGate, experiments.Decisions)
 	}
 	skill := parseSkillMarkdown("SKILL.md", read("scion-messaging/SKILL.md"))
 	if skill.fileGate != "" {
@@ -248,13 +248,13 @@ func TestPlatformSkillsFS_ScionMessagingChoices(t *testing.T) {
 	blocks := 0
 	prev := ""
 	for _, l := range skill.lines {
-		if l.gate == experiments.ChatChoices && prev != experiments.ChatChoices {
+		if l.gate == experiments.Decisions && prev != experiments.Decisions {
 			blocks++
 		}
 		prev = l.gate
 	}
 	if blocks != 2 {
-		t.Errorf("scion-messaging/SKILL.md has %d %s blocks, want 2 (decision line, flags bullet)", blocks, experiments.ChatChoices)
+		t.Errorf("scion-messaging/SKILL.md has %d %s blocks, want 2 (decision line, flags bullet)", blocks, experiments.Decisions)
 	}
 
 	var body strings.Builder

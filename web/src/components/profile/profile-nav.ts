@@ -37,7 +37,7 @@ import {
   scheduleSharedProfileDecisionProbeRefresh,
 } from '../../client/profile-decisions.js';
 import { stateManager } from '../../client/state.js';
-import { FEATURE_FLAGS_CHANGED_EVENT, projectDecisionsEnabled } from '../../utils/feature-flags.js';
+import { FEATURE_FLAGS_CHANGED_EVENT, decisionsEnabled } from '../../utils/feature-flags.js';
 
 import type { User, Project } from '../../shared/types.js';
 
@@ -123,7 +123,7 @@ export class ScionProfileNav extends LitElement {
   @state()
   private pendingSecretCount = 0;
 
-  /** Whether both `web.project_decisions` and `web.chat_choices` are enabled. */
+  /** Whether `web.decisions` is enabled. */
   @state()
   private decisionsEnabled = false;
 
@@ -147,7 +147,7 @@ export class ScionProfileNav extends LitElement {
   };
 
   private boundOnFeatureFlagsChanged = (): void => {
-    const next = projectDecisionsEnabled();
+    const next = decisionsEnabled();
     if (next === this.decisionsEnabled) return;
     this.decisionsEnabled = next;
     if (next) {
@@ -633,7 +633,7 @@ export class ScionProfileNav extends LitElement {
     super.connectedCallback();
     void this.checkGitHubApp();
     void this.loadPendingSecretCount();
-    this.decisionsEnabled = projectDecisionsEnabled();
+    this.decisionsEnabled = decisionsEnabled();
     if (this.decisionsEnabled) {
       this.ensureProfileStateScope();
       this.syncOrProbeDecisionsCount();

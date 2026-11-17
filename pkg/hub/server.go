@@ -8583,9 +8583,9 @@ func (s *Server) registerRoutes() {
 		s.mux.HandleFunc("/api/v1/chat/starred-conversations", s.guarded("/api/v1/chat/starred-conversations", s.chatRoute(s.handleChatStarredConversations)))
 		s.mux.HandleFunc("/api/v1/chat/attachments", s.guarded("/api/v1/chat/attachments", s.chatAttachmentRoute(s.handleChatAttachments)))
 		s.mux.HandleFunc("/api/v1/chat/attachments/", s.guarded("/api/v1/chat/attachments/", s.chatAttachmentRoute(s.handleChatAttachmentByID)))
-		// Choice prompt decisions: read and answer (web.chat_choices; 404 while off).
+		// Choice prompt decisions: read and answer (web.decisions; 404 while off).
 		s.mux.HandleFunc("/api/v1/decisions/", s.guarded("/api/v1/decisions/", s.chatRoute(s.handleDecisionRoutes)))
-		// Choice prompt set answers (web.chat_choices; 404 while off).
+		// Choice prompt set answers (web.decisions; 404 while off).
 		s.mux.HandleFunc("/api/v1/choice-prompts/", s.guarded("/api/v1/choice-prompts/", s.chatRoute(s.handleChoicePromptRoutes)))
 	}
 
@@ -8602,7 +8602,7 @@ func (s *Server) registerRoutes() {
 	// Agent self-service secret fetch (agent token auth)
 	s.mux.HandleFunc("POST /api/v1/agent/secrets", s.guarded("POST /api/v1/agent/secrets", s.handleAgentSecretFetch))
 
-	// Agent self-service decision list, show, and interpreted answers (agent token auth; 404 when web.chat_choices is off)
+	// Agent self-service decision list, show, and interpreted answers (agent token auth; 404 when web.decisions is off)
 	s.mux.HandleFunc("/api/v1/agent/decisions", s.guarded("/api/v1/agent/decisions", s.handleAgentDecisionRoutes))
 	s.mux.HandleFunc("/api/v1/agent/decisions/", s.guarded("/api/v1/agent/decisions/", s.handleAgentDecisionRoutes))
 

@@ -252,23 +252,23 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Pin:    "TestChatAttachmentDownloadToken_ProjectFileNeedsProjectRead",
 	},
 	{OperationID: "chat.decision.read", Method: "GET", Pattern: "/api/v1/decisions/{rowId}"}: {
-		Reason: "the route answers 404 while the web.chat_choices experiment is off, as in this fixture, so the session-only probe gets 404 before the credential check. The dedicated test enables the experiment and drives the route with a user access token and a visitor",
+		Reason: "the route answers 404 while the web.decisions experiment is off, as in this fixture, so the session-only probe gets 404 before the credential check. The dedicated test enables the experiment and drives the route with a user access token and a visitor",
 		Pin:    "TestDecisionRoutes_TokenAndVisitorForbidden",
 	},
 	{OperationID: "chat.choiceprompt.answer", Method: "POST", Pattern: "/api/v1/choice-prompts/{messageId}/answers"}: {
-		Reason: "the route answers 404 while the web.chat_choices experiment is off, as in this fixture, so the session-only probe gets 404 before the credential check. The dedicated test enables the experiment and drives the route with a user access token, a federated user and a visitor",
+		Reason: "the route answers 404 while the web.decisions experiment is off, as in this fixture, so the session-only probe gets 404 before the credential check. The dedicated test enables the experiment and drives the route with a user access token, a federated user and a visitor",
 		Pin:    "TestChoiceSetAnswer_Authorization",
 	},
 	{OperationID: "chat.decision.answer", Method: "POST", Pattern: "/api/v1/decisions/{rowId}/answer"}: {
-		Reason: "the route answers 404 while the web.chat_choices experiment is off, as in this fixture, so the session-only probe gets 404 before the credential check. The dedicated test enables the experiment and drives the route with a user access token and a visitor",
+		Reason: "the route answers 404 while the web.decisions experiment is off, as in this fixture, so the session-only probe gets 404 before the credential check. The dedicated test enables the experiment and drives the route with a user access token and a visitor",
 		Pin:    "TestDecisionRoutes_TokenAndVisitorForbidden",
 	},
 	{OperationID: "chat.projectdecisions.list", Method: "GET", Pattern: "/api/v1/projects/{id}/decisions"}: {
-		Reason: "the route answers 404 unless both web.project_decisions and web.chat_choices are on, and both are off in this fixture; the dedicated test enables both experiments and drives the route across session, project and hub UATs (with and without inbox:read and project:read), wrong-project UATs, agent tokens, federated users and visitors",
+		Reason: "the route answers 404 while the web.decisions experiment is off, as in this fixture; the dedicated test enables the experiment and drives the route across session, project and hub UATs (with and without inbox:read and project:read), wrong-project UATs, agent tokens, federated users and visitors",
 		Pin:    "TestProjectDecisions_TokenAndCallerAuthz",
 	},
 	{OperationID: "chat.userdecisions.list", Method: "GET", Pattern: "/api/v1/users/me/decisions"}: {
-		Reason: "the route answers 404 unless both web.project_decisions and web.chat_choices are on, and when on it filters candidate member projects by project:read rather than refusing a UAT without project:read; the dedicated test enables both experiments and drives the route across session, project-bounded and hub-bounded UATs (with and without inbox:read and project:read), agent tokens, federated users and visitors",
+		Reason: "the route answers 404 while the web.decisions experiment is off, and when on it filters candidate member projects by project:read rather than refusing a UAT without project:read; the dedicated test enables the experiment and drives the route across session, project-bounded and hub-bounded UATs (with and without inbox:read and project:read), agent tokens, federated users and visitors",
 		Pin:    "TestUserMeDecisions_TokenAndCallerAuthz",
 	},
 	// Global catalog and project-scope branches whose refusal the generic

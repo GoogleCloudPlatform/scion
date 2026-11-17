@@ -97,7 +97,7 @@ type OutboundMessageRequest struct {
 
 	// Choices makes the message a choice prompt: one or more decisions
 	// for a user or a conversation (design choices v4, 4.3). Gated by the
-	// web.chat_choices experiment; the hub validates and normalizes them,
+	// web.decisions experiment; the hub validates and normalizes them,
 	// stores them with the message, and renders Msg (the optional intro)
 	// followed by a markdown fallback of the decisions.
 	Choices []messages.DecisionInput `json:"choices,omitempty"`

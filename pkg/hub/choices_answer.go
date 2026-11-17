@@ -79,12 +79,12 @@ type DecisionAnswerResponse struct {
 }
 
 // handleDecisionRoutes serves the decision endpoints, 404 while
-// web.chat_choices is off:
+// web.decisions is off:
 //
 //	GET  /api/v1/decisions/{rowId}         the decision's view
 //	POST /api/v1/decisions/{rowId}/answer  answer it (a user, never an agent)
 func (s *Server) handleDecisionRoutes(w http.ResponseWriter, r *http.Request) {
-	s.requireExperiment(experiments.ChatChoices, func(w http.ResponseWriter, r *http.Request) {
+	s.requireExperiment(experiments.Decisions, func(w http.ResponseWriter, r *http.Request) {
 		rest := strings.TrimPrefix(r.URL.Path, decisionsRoutePrefix)
 		rowID, sub, _ := strings.Cut(rest, "/")
 		switch {

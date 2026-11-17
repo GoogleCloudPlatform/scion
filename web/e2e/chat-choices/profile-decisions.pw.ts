@@ -16,8 +16,7 @@
  * Real-hub end-to-end Playwright suite for Profile > Decisions across projects
  * (ptone/scion#7996, parent ptone/scion#7988).
  *
- * Verifies against a real Go `scion` hub with `web.chat_choices` and
- * `web.project_decisions` enabled:
+ * Verifies against a real Go `scion` hub with `web.decisions` enabled:
  *   1. User A is a member of two projects (`projAlpha`, `projBeta`) and NOT a
  *      member of a third project (`projGamma`) owned by User B.
  *   2. Decisions (both pending and answered) exist across all three projects,

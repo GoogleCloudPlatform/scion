@@ -458,11 +458,11 @@ func TestDecisionsRecord_BothFormsAndErrorRendering(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, `decision "MISSING" was not found`, strings.TrimSpace(err.Error()))
 
-	// Experiment off 404 -> friendly message naming web.chat_choices.
+	// Experiment off 404 -> friendly message naming web.decisions.
 	mode = "exp_off"
 	_, err = runDecisionsTestCmd(t, "decisions", "record", "--from", "reply-2", "D234=1")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "decisions need the web.chat_choices experiment")
+	assert.Contains(t, err.Error(), "decisions need the web.decisions experiment")
 }
 
 func TestDecisionsListAgent_SearchValidationPaginationAndErrors(t *testing.T) {

@@ -423,8 +423,7 @@ describe('scion-profile-nav — Decisions entry & badge (ptone/scion#7996)', () 
     delete window.__SCION_FEATURES__;
     flags.resetServerFlagStateForTests();
     if (options.flagsEnabled ?? true) {
-      flags.setFeatureFlag(flags.PROJECT_DECISIONS_FLAG, true);
-      flags.setFeatureFlag(flags.CHAT_CHOICES_FLAG, true);
+      flags.setFeatureFlag(flags.DECISIONS_FLAG, true);
     }
 
     vi.stubGlobal(
@@ -542,8 +541,7 @@ describe('scion-profile-nav — Decisions entry & badge (ptone/scion#7996)', () 
     const flags = await import('../../utils/feature-flags.js');
     delete window.__SCION_FEATURES__;
     flags.resetServerFlagStateForTests();
-    flags.setFeatureFlag(flags.PROJECT_DECISIONS_FLAG, true);
-    flags.setFeatureFlag(flags.CHAT_CHOICES_FLAG, true);
+    flags.setFeatureFlag(flags.DECISIONS_FLAG, true);
 
     vi.stubGlobal(
       'fetch',
@@ -661,8 +659,7 @@ describe('scion-profile-nav — Decisions entry & badge (ptone/scion#7996)', () 
     const flags = await import('../../utils/feature-flags.js');
     delete window.__SCION_FEATURES__;
     flags.resetServerFlagStateForTests();
-    flags.setFeatureFlag(flags.PROJECT_DECISIONS_FLAG, true);
-    flags.setFeatureFlag(flags.CHAT_CHOICES_FLAG, true);
+    flags.setFeatureFlag(flags.DECISIONS_FLAG, true);
 
     vi.stubGlobal(
       'fetch',
@@ -754,8 +751,7 @@ describe('scion-profile-nav — Decisions entry & badge (ptone/scion#7996)', () 
     const flags = await import('../../utils/feature-flags.js');
     delete window.__SCION_FEATURES__;
     flags.resetServerFlagStateForTests();
-    flags.setFeatureFlag(flags.PROJECT_DECISIONS_FLAG, true);
-    flags.setFeatureFlag(flags.CHAT_CHOICES_FLAG, true);
+    flags.setFeatureFlag(flags.DECISIONS_FLAG, true);
 
     let resolveProbe!: (r: Response) => void;
     vi.stubGlobal(
@@ -829,8 +825,7 @@ describe('scion-profile-nav — Decisions entry & badge (ptone/scion#7996)', () 
     const flags = await import('../../utils/feature-flags.js');
     delete window.__SCION_FEATURES__;
     flags.resetServerFlagStateForTests();
-    flags.setFeatureFlag(flags.PROJECT_DECISIONS_FLAG, true);
-    flags.setFeatureFlag(flags.CHAT_CHOICES_FLAG, true);
+    flags.setFeatureFlag(flags.DECISIONS_FLAG, true);
 
     vi.stubGlobal(
       'fetch',

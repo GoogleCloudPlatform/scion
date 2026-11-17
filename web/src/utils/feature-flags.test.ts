@@ -23,24 +23,17 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import * as featureFlags from './feature-flags.js';
 import {
+  DECISIONS_FLAG,
+  decisionsEnabled,
   isFeatureEnabled,
   setFeatureFlag,
   setServerFlags,
   resetServerFlagStateForTests,
 } from './feature-flags.js';
 
-// Verify removed exports at the type level — these should not exist.
-// @ts-expect-error ACCESS_BOUNDARIES_READ_FLAG was removed
-import { ACCESS_BOUNDARIES_READ_FLAG } from './feature-flags.js';
-// @ts-expect-error ACCESS_BOUNDARIES_AUTHORING_FLAG was removed
-import { ACCESS_BOUNDARIES_AUTHORING_FLAG } from './feature-flags.js';
-// @ts-expect-error NATIVE_CHAT_PALETTE_FLAG was removed (the palette is always on)
-import { NATIVE_CHAT_PALETTE_FLAG } from './feature-flags.js';
-// @ts-expect-error NATIVE_CHAT_V2_FLAG was removed (v2 is always on)
-import { NATIVE_CHAT_V2_FLAG } from './feature-flags.js';
-// @ts-expect-error TERMINAL_WORKSPACE_FLAG was removed (the terminal workspace is always on)
-import { TERMINAL_WORKSPACE_FLAG } from './feature-flags.js';
+const featureFlagExports: Record<string, unknown> = featureFlags;
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -90,11 +83,11 @@ describe('feature-flags: web.chat_starred_messages', () => {
 
 describe('feature-flags: access boundary flags removed', () => {
   it('does not export ACCESS_BOUNDARIES_READ_FLAG', () => {
-    expect(ACCESS_BOUNDARIES_READ_FLAG).toBeUndefined();
+    expect(featureFlagExports.ACCESS_BOUNDARIES_READ_FLAG).toBeUndefined();
   });
 
   it('does not export ACCESS_BOUNDARIES_AUTHORING_FLAG', () => {
-    expect(ACCESS_BOUNDARIES_AUTHORING_FLAG).toBeUndefined();
+    expect(featureFlagExports.ACCESS_BOUNDARIES_AUTHORING_FLAG).toBeUndefined();
   });
 
   it('access_boundaries_read defaults to OFF (not in DEFAULT_ON_FLAGS)', () => {
@@ -112,7 +105,7 @@ describe('feature-flags: access boundary flags removed', () => {
 
 describe('feature-flags: palette flag removed', () => {
   it('does not export NATIVE_CHAT_PALETTE_FLAG', () => {
-    expect(NATIVE_CHAT_PALETTE_FLAG).toBeUndefined();
+    expect(featureFlagExports.NATIVE_CHAT_PALETTE_FLAG).toBeUndefined();
   });
 });
 
@@ -122,7 +115,7 @@ describe('feature-flags: palette flag removed', () => {
 
 describe('feature-flags: v2 flag removed', () => {
   it('does not export NATIVE_CHAT_V2_FLAG', () => {
-    expect(NATIVE_CHAT_V2_FLAG).toBeUndefined();
+    expect(featureFlagExports.NATIVE_CHAT_V2_FLAG).toBeUndefined();
   });
 });
 
@@ -142,7 +135,7 @@ describe('feature-flags: native_chat flags retained', () => {
 
 describe('feature-flags: terminal workspace flag removed', () => {
   it('does not export TERMINAL_WORKSPACE_FLAG', () => {
-    expect(TERMINAL_WORKSPACE_FLAG).toBeUndefined();
+    expect(featureFlagExports.TERMINAL_WORKSPACE_FLAG).toBeUndefined();
   });
 
   // The one allowed reference to the retired name outside compiledRetired
@@ -166,6 +159,34 @@ describe('feature-flags: project thread groups flag removed', () => {
   // (see the experiment-removal checklist).
   it('the retired name resolves OFF by default (not in DEFAULT_ON_FLAGS)', () => {
     expect(isFeatureEnabled('hub.chat_thread_groups')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Consolidated Decisions flag (ptone/scion#8223)
+// ---------------------------------------------------------------------------
+
+describe('feature-flags: web.decisions consolidation', () => {
+  it('does not export CHAT_CHOICES_FLAG or PROJECT_DECISIONS_FLAG', () => {
+    expect((featureFlags as Record<string, unknown>).CHAT_CHOICES_FLAG).toBeUndefined();
+    expect((featureFlags as Record<string, unknown>).PROJECT_DECISIONS_FLAG).toBeUndefined();
+    expect((featureFlags as Record<string, unknown>).chatChoicesEnabled).toBeUndefined();
+    expect((featureFlags as Record<string, unknown>).projectDecisionsEnabled).toBeUndefined();
+  });
+
+  // The one allowed reference to each retired name outside compiledRetired
+  // (see the experiment-removal checklist).
+  it('retired names resolve OFF by default and do not turn on web.decisions', () => {
+    expect(isFeatureEnabled('web.chat_choices')).toBe(false);
+    expect(isFeatureEnabled('web.project_decisions')).toBe(false);
+    expect(decisionsEnabled()).toBe(false);
+  });
+
+  it('DECISIONS_FLAG is web.decisions, defaults OFF, and toggles decisionsEnabled()', () => {
+    expect(DECISIONS_FLAG).toBe('web.decisions');
+    expect(decisionsEnabled()).toBe(false);
+    setFeatureFlag(DECISIONS_FLAG, true);
+    expect(decisionsEnabled()).toBe(true);
   });
 });
 

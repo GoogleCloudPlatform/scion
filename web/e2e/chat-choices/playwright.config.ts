@@ -19,7 +19,7 @@ import { chromiumLaunchOptions } from '../../playwright-chromium.js';
 const CI = !!process.env.CI;
 
 // Real-hub E2E suite for interactive chat choices (ptone/scion#7776).
-// Starts the real Go hub binary with `web.chat_choices` enabled and a
+// Starts the real Go hub binary with `web.decisions` enabled and a
 // co-located runtime broker so containerless test agents (`../harness/agent.ts`)
 // can send real choice prompts over SSE without requiring Docker.
 export default defineConfig({

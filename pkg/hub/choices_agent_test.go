@@ -994,16 +994,14 @@ func TestAgentDecisions_SearchValidationTimeoutAndExperimentGate(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rrBadCursor.Code, rrBadCursor.Body.String())
 	assert.Contains(t, rrBadCursor.Body.String(), "invalid cursor")
 
-	// Experiment gating (C3): web.chat_choices gates agent decisions?q= independently of web.project_decisions.
-	setProjectDecisionsExperiments(t, f.srv, true, false)
-	assert.Equal(t, []string{"D234"}, agentListKeys(t, f, f.agent, url.Values{"q": {"feature"}}),
-		"agent search works when web.chat_choices=true and web.project_decisions=false")
-
-	setProjectDecisionsExperiments(t, f.srv, false, true)
+	// Experiment gating: web.decisions gates agent decisions?q=.
+	setChoicesExperiment(t, f.srv, false)
 	rrOff := f.agentDecisionReq(t, f.agent, http.MethodGet, "/api/v1/agent/decisions?q=feature", nil)
-	assert.Equal(t, http.StatusNotFound, rrOff.Code, "web.chat_choices=false returns 404 even when web.project_decisions=true")
+	assert.Equal(t, http.StatusNotFound, rrOff.Code, "web.decisions=false returns 404")
 
-	setProjectDecisionsExperiments(t, f.srv, true, true)
+	setChoicesExperiment(t, f.srv, true)
+	assert.Equal(t, []string{"D234"}, agentListKeys(t, f, f.agent, url.Values{"q": {"feature"}}),
+		"agent search works when web.decisions=true")
 
 	// Timeout mapping: ChatSearchTimeout expiry with q returns 503 SEARCH_TIMEOUT; omitting q stays 200.
 	f.srv.config.ChatSearchTimeout = time.Nanosecond

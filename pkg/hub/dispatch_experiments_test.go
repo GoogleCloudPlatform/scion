@@ -102,25 +102,25 @@ func TestCloudRunNativeIdentityExperiment_Dispatched(t *testing.T) {
 	}
 }
 
-// web.chat_choices is in HubAgentDefaults.Experiments only while it is on,
+// web.decisions is in HubAgentDefaults.Experiments only while it is on,
 // so the broker can apply the scion-messaging skill gates
-// (ptone/scion#7830).
-func TestChatChoicesExperiment_OnWire(t *testing.T) {
-	on := dispatchExperimentsServer(t, `{"overrides":{"web.chat_choices":true}}`)
-	if got := on.dispatchExperiments(); !slices.Equal(got, []string{experiments.ChatChoices}) {
-		t.Errorf("on: dispatch experiments = %v, want [%s]", got, experiments.ChatChoices)
+// (ptone/scion#7830, ptone/scion#8223).
+func TestDecisionsExperiment_OnWire(t *testing.T) {
+	on := dispatchExperimentsServer(t, `{"overrides":{"web.decisions":true}}`)
+	if got := on.dispatchExperiments(); !slices.Equal(got, []string{experiments.Decisions}) {
+		t.Errorf("on: dispatch experiments = %v, want [%s]", got, experiments.Decisions)
 	}
 	d := on.CreateAuthenticatedDispatcher()
 	req, err := d.buildCreateRequest(context.Background(), hubDefaultsDispatchAgent(), "test")
 	if err != nil {
 		t.Fatalf("buildCreateRequest: %v", err)
 	}
-	if req.Config == nil || req.Config.HubAgentDefaults == nil || !slices.Contains(req.Config.HubAgentDefaults.Experiments, experiments.ChatChoices) {
-		t.Errorf("on: create dispatch does not carry %s: %+v", experiments.ChatChoices, req.Config)
+	if req.Config == nil || req.Config.HubAgentDefaults == nil || !slices.Contains(req.Config.HubAgentDefaults.Experiments, experiments.Decisions) {
+		t.Errorf("on: create dispatch does not carry %s: %+v", experiments.Decisions, req.Config)
 	}
 	off := dispatchExperimentsServer(t, `{"overrides":{"hub.k8s_nfs_home":true}}`)
-	if got := off.dispatchExperiments(); slices.Contains(got, experiments.ChatChoices) {
-		t.Errorf("off: dispatch experiments = %v include %s", got, experiments.ChatChoices)
+	if got := off.dispatchExperiments(); slices.Contains(got, experiments.Decisions) {
+		t.Errorf("off: dispatch experiments = %v include %s", got, experiments.Decisions)
 	}
 }
 

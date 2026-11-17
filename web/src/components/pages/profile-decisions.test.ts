@@ -35,8 +35,7 @@ import {
 import { stateManager } from '../../client/state.js';
 import { avatarColor, avatarInitial } from '../shared/decisions-format.js';
 import {
-  CHAT_CHOICES_FLAG,
-  PROJECT_DECISIONS_FLAG,
+  DECISIONS_FLAG,
   resetServerFlagStateForTests,
   setFeatureFlag,
 } from '../../utils/feature-flags.js';
@@ -414,8 +413,7 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
     expect(requestedUrls).toEqual([]);
     el.remove();
 
-    setFeatureFlag(PROJECT_DECISIONS_FLAG, true);
-    setFeatureFlag(CHAT_CHOICES_FLAG, true);
+    setFeatureFlag(DECISIONS_FLAG, true);
     handleDecisionsFetch = (): Promise<Response> =>
       jsonResponse({ error: { code: 'not_found' } }, 404);
 
@@ -424,8 +422,7 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
   });
 
   it('renders Waiting on you grouped By project by default, syncs URL, switches to Most recent, and uses per-tab sort defaults (R-1, R-2, R6)', async () => {
-    setFeatureFlag(PROJECT_DECISIONS_FLAG, true);
-    setFeatureFlag(CHAT_CHOICES_FLAG, true);
+    setFeatureFlag(DECISIONS_FLAG, true);
 
     const el = await mount('/profile/decisions');
     expect(window.location.search).toBe('?tab=pending&sort=project');
@@ -484,8 +481,7 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
   });
 
   it('wires Project combobox, removable Project tag, filtered "n of m" badge, and D5 project labels/hints on Conversation and Agent options', async () => {
-    setFeatureFlag(PROJECT_DECISIONS_FLAG, true);
-    setFeatureFlag(CHAT_CHOICES_FLAG, true);
+    setFeatureFlag(DECISIONS_FLAG, true);
 
     const el = await mount('/profile/decisions?tab=pending&sort=project');
     const panel = el.shadowRoot?.querySelector<ScionDecisionsFilterPanel>(
@@ -553,8 +549,7 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
   });
 
   it('renders Made By project overview groups and drills down via "See all in <project>" to sort=recent&project=<id> (R5, R-3)', async () => {
-    setFeatureFlag(PROJECT_DECISIONS_FLAG, true);
-    setFeatureFlag(CHAT_CHOICES_FLAG, true);
+    setFeatureFlag(DECISIONS_FLAG, true);
 
     const el = await mount('/profile/decisions?tab=made&sort=project');
     expect(window.location.search).toBe('?tab=made&sort=project');
@@ -588,8 +583,7 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
   });
 
   it('shows the R3 banner when truncatedProjects is true and hides it while a project filter is active', async () => {
-    setFeatureFlag(PROJECT_DECISIONS_FLAG, true);
-    setFeatureFlag(CHAT_CHOICES_FLAG, true);
+    setFeatureFlag(DECISIONS_FLAG, true);
     handleDecisionsFetch = (): Promise<Response> =>
       jsonResponse({
         counts: { waitingOnYou: 0, waitingOnOthers: 0 },
@@ -630,8 +624,7 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
   });
 
   it('records surface=decisions_page on inline answer, updates nav badge event, and reloads By project from page 1 when paged (R7, Brief §Task)', async () => {
-    setFeatureFlag(PROJECT_DECISIONS_FLAG, true);
-    setFeatureFlag(CHAT_CHOICES_FLAG, true);
+    setFeatureFlag(DECISIONS_FLAG, true);
 
     let answeredR1 = false;
     handleDecisionsFetch = (url: URL): Promise<Response> => {
@@ -749,8 +742,7 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
   });
 
   it('handles SEARCH_TIMEOUT with warning alert + facet hydration, no-match Clear filters, and "/" shortcut', async () => {
-    setFeatureFlag(PROJECT_DECISIONS_FLAG, true);
-    setFeatureFlag(CHAT_CHOICES_FLAG, true);
+    setFeatureFlag(DECISIONS_FLAG, true);
 
     handleDecisionsFetch = (url: URL): Promise<Response> => {
       const q = url.searchParams.get('q') || '';
@@ -841,8 +833,7 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
 
   it('piggybacks <scion-profile-nav> badge onto <scion-page-profile-decisions> fetch without issuing a ?limit=0 probe', async () => {
     await import('../profile/profile-nav.js');
-    setFeatureFlag(PROJECT_DECISIONS_FLAG, true);
-    setFeatureFlag(CHAT_CHOICES_FLAG, true);
+    setFeatureFlag(DECISIONS_FLAG, true);
 
     window.history.replaceState(null, '', '/profile/decisions');
     const nav = document.createElement('scion-profile-nav') as HTMLElement & {
@@ -868,8 +859,7 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
   });
 
   it('keeps pendingNeedsReset across an off-tab SSE refresh so Waiting on you reloads filtered prompts on tab switch', async () => {
-    setFeatureFlag(PROJECT_DECISIONS_FLAG, true);
-    setFeatureFlag(CHAT_CHOICES_FLAG, true);
+    setFeatureFlag(DECISIONS_FLAG, true);
 
     const orig = handleDecisionsFetch;
     const el = await mount('/profile/decisions?tab=made&sort=recent');
@@ -919,8 +909,7 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
   });
 
   it('never sends a stale cursor across sort, tab, or filter changes', async () => {
-    setFeatureFlag(PROJECT_DECISIONS_FLAG, true);
-    setFeatureFlag(CHAT_CHOICES_FLAG, true);
+    setFeatureFlag(DECISIONS_FLAG, true);
 
     const orig = handleDecisionsFetch;
     handleDecisionsFetch = (url: URL): Promise<Response> => {
@@ -1020,8 +1009,7 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
   });
 
   it('invalidates the opposite tab when setSort or drillDownMadeProject flushes a debounced search within 300ms', async () => {
-    setFeatureFlag(PROJECT_DECISIONS_FLAG, true);
-    setFeatureFlag(CHAT_CHOICES_FLAG, true);
+    setFeatureFlag(DECISIONS_FLAG, true);
 
     const orig = handleDecisionsFetch;
     handleDecisionsFetch = (url: URL): Promise<Response> => {
@@ -1132,8 +1120,7 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
   });
 
   it('subscribes to the profile SSE scope (including user.<id>.chat.>) so DM choice.updated events refresh Waiting on you', async () => {
-    setFeatureFlag(PROJECT_DECISIONS_FLAG, true);
-    setFeatureFlag(CHAT_CHOICES_FLAG, true);
+    setFeatureFlag(DECISIONS_FLAG, true);
 
     const sseSources: FakeEventSource[] = [];
     class RecordingEventSource extends FakeEventSource {
@@ -1180,8 +1167,7 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
     expect(avatarInitial(null)).toBe('?');
     expect(avatarInitial('   ')).toBe('?');
 
-    setFeatureFlag(PROJECT_DECISIONS_FLAG, true);
-    setFeatureFlag(CHAT_CHOICES_FLAG, true);
+    setFeatureFlag(DECISIONS_FLAG, true);
 
     const promptWithoutAsker = makePrompt({
       project: PROJ_SCION,

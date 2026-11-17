@@ -152,22 +152,14 @@ func profileProjectSlugs(refs []ProjectDecisionProjectRef) []string {
 func TestUserMeDecisions_ExperimentMatrixAndMethods(t *testing.T) {
 	f := newChoicesFixture(t)
 
-	// Both off -> GET 404, non-GET 405 before gate, nested suffix 404.
-	setProjectDecisionsExperiments(t, f.srv, false, false)
+	// web.decisions off -> GET 404, non-GET 405 before gate, nested suffix 404.
+	setChoicesExperiment(t, f.srv, false)
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath, nil).Code)
 	assert.Equal(t, http.StatusMethodNotAllowed, doRequestAsUser(t, f.srv, f.bob, http.MethodPost, userMeDecisionsPath, nil).Code)
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath+"/extra", nil).Code)
 
-	// Only web.chat_choices on -> GET 404.
-	setProjectDecisionsExperiments(t, f.srv, true, false)
-	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath, nil).Code)
-
-	// Only web.project_decisions on -> GET 404.
-	setProjectDecisionsExperiments(t, f.srv, false, true)
-	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath, nil).Code)
-
-	// Both on -> GET 200, unsupported methods 405, nested suffix 404.
-	setProjectDecisionsExperiments(t, f.srv, true, true)
+	// web.decisions on -> GET 200, unsupported methods 405, nested suffix 404.
+	setChoicesExperiment(t, f.srv, true)
 	resp := decodeProfilePendingDecisions(t, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, userMeDecisionsPath, nil))
 	assert.Equal(t, ProjectDecisionCounts{}, resp.Counts)
 	assert.NotNil(t, resp.Prompts)
@@ -186,7 +178,7 @@ func TestUserMeDecisions_ExperimentMatrixAndMethods(t *testing.T) {
 // federated users.
 func TestUserMeDecisions_TokenAndCallerAuthz(t *testing.T) {
 	f := newChatFixture(t)
-	setProjectDecisionsExperiments(t, f.srv, true, true)
+	setChoicesExperiment(t, f.srv, true)
 	ctx := context.Background()
 
 	// Make f.member also a member of f.projB so the profile roll-up covers two
@@ -297,7 +289,7 @@ func TestUserMeDecisions_TokenAndCallerAuthz(t *testing.T) {
 //     decision is another user's private DM).
 func TestUserMeDecisions_DMPrivacyAndMembershipScope(t *testing.T) {
 	f := newChoicesFixture(t)
-	setProjectDecisionsExperiments(t, f.srv, true, true)
+	setChoicesExperiment(t, f.srv, true)
 	ctx := context.Background()
 
 	// Create a Hub super-admin who is NOT a member of f.project.
@@ -479,7 +471,7 @@ func TestUserMeDecisions_DMPrivacyAndMembershipScope(t *testing.T) {
 
 func TestUserMeDecisions_PendingSortsPaginationAndProjectFilter(t *testing.T) {
 	f := newChoicesFixture(t)
-	setProjectDecisionsExperiments(t, f.srv, true, true)
+	setChoicesExperiment(t, f.srv, true)
 	ctx := context.Background()
 
 	// Rename f.project to Alpha and create Beta (Bob is a member of both) and
@@ -639,7 +631,7 @@ func TestUserMeDecisions_PendingSortsPaginationAndProjectFilter(t *testing.T) {
 
 func TestUserMeDecisions_MadeSortsOverviewAndSearch(t *testing.T) {
 	f := newChoicesFixture(t)
-	setProjectDecisionsExperiments(t, f.srv, true, true)
+	setChoicesExperiment(t, f.srv, true)
 	ctx := context.Background()
 
 	f.project.Name = "Alpha"
@@ -766,7 +758,7 @@ func TestUserMeDecisions_ProjectSortPagingStability(t *testing.T) {
 
 	t.Run("new prompt in later group does not skip older items", func(t *testing.T) {
 		f := newChoicesFixture(t)
-		setProjectDecisionsExperiments(t, f.srv, true, true)
+		setChoicesExperiment(t, f.srv, true)
 
 		projB := &store.Project{ID: api.NewUUID(), Name: "Beta", Slug: "beta", Created: base, Updated: base}
 		require.NoError(t, f.store.CreateProject(ctx, projB))
@@ -801,7 +793,7 @@ func TestUserMeDecisions_ProjectSortPagingStability(t *testing.T) {
 
 	t.Run("inline answer mid-group finishes active group before later groups", func(t *testing.T) {
 		f := newChoicesFixture(t)
-		setProjectDecisionsExperiments(t, f.srv, true, true)
+		setChoicesExperiment(t, f.srv, true)
 
 		projB := &store.Project{ID: api.NewUUID(), Name: "Beta", Slug: "beta", Created: base, Updated: base}
 		require.NoError(t, f.store.CreateProject(ctx, projB))
@@ -845,7 +837,7 @@ func TestUserMeDecisions_ProjectSortPagingStability(t *testing.T) {
 
 	t.Run("inline answer after crossing group does not repeat finished group", func(t *testing.T) {
 		f := newChoicesFixture(t)
-		setProjectDecisionsExperiments(t, f.srv, true, true)
+		setChoicesExperiment(t, f.srv, true)
 
 		projB := &store.Project{ID: api.NewUUID(), Name: "Beta", Slug: "beta", Created: base, Updated: base}
 		require.NoError(t, f.store.CreateProject(ctx, projB))
@@ -895,7 +887,7 @@ func TestUserMeDecisions_ProjectSortPagingStability(t *testing.T) {
 
 func TestUserMeDecisions_ProjectCap200AndTimeout(t *testing.T) {
 	f := newChoicesFixture(t)
-	setProjectDecisionsExperiments(t, f.srv, true, true)
+	setChoicesExperiment(t, f.srv, true)
 	ctx := context.Background()
 
 	// Realistic worst-case cap fixture: 205 member projects x 5 topics per project,
@@ -1075,7 +1067,7 @@ func TestUserMeDecisions_ProjectCap200AndTimeout(t *testing.T) {
 		return &interruptingDecisionStore{Store: inner}
 	})
 	intFix := newChoicesFixtureOn(t, intSrv, intStore, intAlice, intBob, intProj)
-	setProjectDecisionsExperiments(t, intFix.srv, true, true)
+	setChoicesExperiment(t, intFix.srv, true)
 	intFix.topicPrompt(t, `[{"id":"ship-now","question":"Deploy?","choices":["yes","no"]}]`, false)
 	intFix.srv.config.ChatSearchTimeout = 50 * time.Millisecond
 	for _, tab := range []string{ProjectDecisionsTabPending, ProjectDecisionsTabMade} {

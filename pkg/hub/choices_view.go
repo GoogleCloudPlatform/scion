@@ -489,9 +489,9 @@ func choiceResponseSetViewOf(as []*store.DecisionAnswer, prompts map[string]*sto
 }
 
 // addChoiceHistoryViews fills the choice fields of a history page. They are
-// omitted while web.chat_choices is off, so clients show the markdown body.
+// omitted while web.decisions is off, so clients show the markdown body.
 func (s *Server) addChoiceHistoryViews(ctx context.Context, resp *chatHistoryResponse) {
-	if len(resp.Messages) == 0 || !s.experimentEnabled(experiments.ChatChoices) {
+	if len(resp.Messages) == 0 || !s.experimentEnabled(experiments.Decisions) {
 		return
 	}
 	msgs := make([]*store.Message, len(resp.Messages))

@@ -74,10 +74,10 @@ func (s *Server) prepareChoicePromptSend(w http.ResponseWriter, req *OutboundMes
 	if req.Choices == nil && !req.ChoicesUpdate {
 		return nil, true
 	}
-	if !s.experimentEnabled(experiments.ChatChoices) {
+	if !s.experimentEnabled(experiments.Decisions) {
 		writeError(w, http.StatusBadRequest, ErrCodeExperimentDisabled,
-			"experiment_disabled: "+experiments.ChatChoices+" is off; choices are not available on this hub",
-			map[string]interface{}{"experiment": experiments.ChatChoices})
+			"experiment_disabled: "+experiments.Decisions+" is off; decisions are not available on this hub",
+			map[string]interface{}{"experiment": experiments.Decisions})
 		return nil, false
 	}
 	if req.Choices == nil {

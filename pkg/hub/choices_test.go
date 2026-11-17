@@ -42,7 +42,7 @@ import (
 
 // choicesFixture is the scheduled-send fixture (alice owns the project, bob
 // is a member and owns the running agent, a topic whose default agent it is)
-// with web.chat_choices on, plus an outsider with no project access.
+// with web.decisions on, plus an outsider with no project access.
 type choicesFixture struct {
 	*scheduledSendFixture
 	outsider *store.User
@@ -72,8 +72,8 @@ func newChoicesFixtureOn(t *testing.T, srv *Server, s store.Store, alice, bob *s
 
 func setChoicesExperiment(t *testing.T, srv *Server, enabled bool) {
 	t.Helper()
-	setExperimentOverrides(t, srv, map[string]bool{experiments.ChatScheduledSend: true, experiments.ChatChoices: enabled})
-	require.Equal(t, enabled, srv.experimentEnabled(experiments.ChatChoices))
+	setExperimentOverrides(t, srv, map[string]bool{experiments.ChatScheduledSend: true, experiments.Decisions: enabled})
+	require.Equal(t, enabled, srv.experimentEnabled(experiments.Decisions))
 }
 
 func decisionInputs(t *testing.T, raw string) []messages.DecisionInput {
@@ -167,7 +167,7 @@ func TestChoicesSend_ExperimentOffRefused(t *testing.T) {
 	rr := f.sendAsAgent(t, OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Choices: decisionInputs(t, twoDecisions)})
 	require.Equal(t, http.StatusBadRequest, rr.Code, "body: %s", rr.Body.String())
 	assert.Equal(t, ErrCodeExperimentDisabled, errorCode(t, rr))
-	assert.Contains(t, rr.Body.String(), "web.chat_choices")
+	assert.Contains(t, rr.Body.String(), "web.decisions")
 	rows, err := f.store.ListMessages(context.Background(), store.MessageFilter{SenderID: f.agent.ID}, store.ListOptions{Limit: 10})
 	require.NoError(t, err)
 	assert.Empty(t, rows.Items)
@@ -723,7 +723,7 @@ func TestDecisionAnswer_AskerGoneStoresFailedResponse(t *testing.T) {
 // decision routes; answers come from a web session only. The token's and
 // the federated user's refusal is the session-only one the catalog
 // records (reason INTERACTIVE_STATE, credential session_required); the
-// bearer disposition matrix cannot reach it while web.chat_choices is
+// bearer disposition matrix cannot reach it while web.decisions is
 // off, so this test pins it. The refusal does not depend on the token's
 // selectors, which is why a project:read token covers the matrix rows.
 func TestDecisionRoutes_TokenAndVisitorForbidden(t *testing.T) {

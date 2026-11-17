@@ -119,13 +119,13 @@ type RecordInterpretedResponse struct {
 }
 
 // handleAgentDecisionRoutes serves the agent decision endpoints, 404 while
-// web.chat_choices is off:
+// web.decisions is off:
 //
 //	GET  /api/v1/agent/decisions              list caller agent's decisions
 //	GET  /api/v1/agent/decisions/{key}        show all versions of {key}
 //	POST /api/v1/agent/decisions/interpreted  record interpreted answers
 func (s *Server) handleAgentDecisionRoutes(w http.ResponseWriter, r *http.Request) {
-	s.requireExperiment(experiments.ChatChoices, func(w http.ResponseWriter, r *http.Request) {
+	s.requireExperiment(experiments.Decisions, func(w http.ResponseWriter, r *http.Request) {
 		agentIdent := agentDecisionCaller(w, r)
 		if agentIdent == nil {
 			return

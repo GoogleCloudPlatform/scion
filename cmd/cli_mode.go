@@ -205,7 +205,7 @@ var agentAllowed = map[string]bool{
 	"secret.list": true,
 
 	// Choice decision self-service as the calling agent (ptone/scion#7797,
-	// decision Q1). Hub routes enforce AgentIdentity and web.chat_choices.
+	// decision Q1). Hub routes enforce AgentIdentity and web.decisions.
 	"decisions":        true,
 	"decisions.list":   true,
 	"decisions.show":   true,

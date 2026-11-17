@@ -6242,7 +6242,7 @@ type chatHistoryResponse struct {
 
 	// MessageDecisions and MessageChoiceIntros (choice-prompt rows) and
 	// MessageChoiceResponses (choice-response rows) are keyed by message
-	// ID, set only while web.chat_choices is on (design choices v4, 4.4).
+	// ID, set only while web.decisions is on (design choices v4, 4.4).
 	// The intro is the agent's body without the markdown fallback.
 	MessageDecisions       map[string][]DecisionView     `json:"messageDecisions,omitempty"`
 	MessageChoiceIntros    map[string]string             `json:"messageChoiceIntros,omitempty"`

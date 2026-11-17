@@ -14,7 +14,7 @@
 
 /**
  * Choice cards and response lines (ptone/scion#7673) in the real chat page,
- * with web.chat_choices on: each approved mock state (design §4.3, §4.6;
+ * with web.decisions on: each approved mock state (design §4.3, §4.6;
  * mocks r4) in light and dark on desktop and at 390 px. Each test asserts
  * the state's text and ARIA, then saves a screenshot of the messages it
  * shows as a test artifact (`test-results/chat-mobile/…/choices-*.png`),
@@ -53,7 +53,7 @@ const PROJECTS = new Set(['desktop-1440', 'chromium-390']);
 const isPhone = (page: Page): boolean => (page.viewportSize()?.width ?? 0) <= 768;
 
 /**
- * Open #general showing `thread`, with web.chat_choices on and `theme`
+ * Open #general showing `thread`, with web.decisions on and `theme`
  * applied the way index.html applies a saved choice (so the real theme
  * tokens are in effect).
  */
@@ -72,7 +72,7 @@ async function openChoices(
   await openChatRail(page, async (p) => {
     await p.addInitScript((t) => {
       localStorage.setItem('scion-theme', t);
-      window.__SCION_FEATURES__ = { ...window.__SCION_FEATURES__, 'web.chat_choices': true };
+      window.__SCION_FEATURES__ = { ...window.__SCION_FEATURES__, 'web.decisions': true };
     }, theme);
     await routeChoiceThread(p, thread, asker);
     if (preselect) {

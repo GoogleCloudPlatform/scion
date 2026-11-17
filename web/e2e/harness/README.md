@@ -352,7 +352,7 @@ const hub = await startHub({
   env: {
     SCION_IMAGE_REGISTRY: 'registry.invalid/scion-e2e',
   },
-  experiments: ['web.chat_choices'],
+  experiments: ['web.decisions'],
 });
 ```
 

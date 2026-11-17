@@ -114,7 +114,7 @@ func TestDecisionsBell_FormatMessageAndDeterministicID(t *testing.T) {
 //   - Answering all clears both A's and B's rows (acknowledged=true, resource_id="0") and publishes acknowledged=true on user.<id>.notification.
 func TestDecisionsBell_B2LifecycleAndG6Scenario(t *testing.T) {
 	f := newChoicesFixture(t)
-	setProjectDecisionsExperiments(t, f.srv, true, true)
+	setChoicesExperiment(t, f.srv, true)
 	setFastDecisionBell(t, f.srv, 15*time.Millisecond)
 	ctx := context.Background()
 
@@ -427,7 +427,7 @@ func TestDecisionsBell_DebounceCoalescesBurst(t *testing.T) {
 	})
 	f := newChoicesFixtureOn(t, srv, spy, alice, bob, project)
 	fault.Arm()
-	setProjectDecisionsExperiments(t, f.srv, true, true)
+	setChoicesExperiment(t, f.srv, true)
 	setFastDecisionBell(t, f.srv, 30*time.Millisecond)
 
 	// 1. Single 10-row prompt in Bob's DM -> 1 write.
@@ -539,7 +539,7 @@ func TestDecisionsBell_DeterministicIDConcurrentRace(t *testing.T) {
 	}
 	f := newChoicesFixtureOn(t, srv, raceStore, alice, bob, project)
 	fault.Arm()
-	setProjectDecisionsExperiments(t, f.srv, true, true)
+	setChoicesExperiment(t, f.srv, true)
 
 	// Seed 2 open DM decisions directly in the store (without background worker)
 	// and fire concurrent recomputeDecisionBellUser calls.
@@ -591,7 +591,7 @@ func TestDecisionsBell_B8TopicCapAndB6Reconcile(t *testing.T) {
 	})
 	f := newChoicesFixtureOn(t, srv, spy, alice, bob, project)
 	fault.Arm()
-	setProjectDecisionsExperiments(t, f.srv, true, true)
+	setChoicesExperiment(t, f.srv, true)
 	setFastDecisionBell(t, f.srv, 15*time.Millisecond)
 	ctx := context.Background()
 
@@ -673,7 +673,7 @@ func TestDecisionsBell_B8TopicCapAndB6Reconcile(t *testing.T) {
 // AgentDispatcher, or broadcast/project notification subjects.
 func TestDecisionsBell_NoExternalChannelOrBrokerDispatch(t *testing.T) {
 	f := newChoicesFixture(t)
-	setProjectDecisionsExperiments(t, f.srv, true, true)
+	setChoicesExperiment(t, f.srv, true)
 	setFastDecisionBell(t, f.srv, 15*time.Millisecond)
 
 	bus := &spyBrokerBus{}
@@ -718,9 +718,9 @@ func TestDecisionsBell_NoExternalChannelOrBrokerDispatch(t *testing.T) {
 	assert.Len(t, f.dispatcher.getMessages(), beforeDispatchCalls, "AgentDispatcher must never be called for decisions_waiting")
 }
 
-// TestDecisionsBell_ExperimentMatrixAndFlagOffReconcile verifies C3:
-//   - When either web.project_decisions or web.chat_choices is off, the bell writer is a no-op;
-//   - Rows written while flags were on are acknowledged on the next reconcile when flags are off.
+// TestDecisionsBell_ExperimentMatrixAndFlagOffReconcile verifies:
+//   - When web.decisions is off, the bell writer is a no-op;
+//   - Rows written while web.decisions was on are acknowledged on the next reconcile when it is off.
 func TestDecisionsBell_ExperimentMatrixAndFlagOffReconcile(t *testing.T) {
 	f := newChoicesFixture(t)
 	setFastDecisionBell(t, f.srv, 15*time.Millisecond)
@@ -730,28 +730,16 @@ func TestDecisionsBell_ExperimentMatrixAndFlagOffReconcile(t *testing.T) {
 	_, res := f.topicPrompt(t, oneDecision, false)
 	require.Len(t, res.Decisions, 1)
 
-	for _, tc := range []struct {
-		name      string
-		choices   bool
-		decisions bool
-	}{
-		{"both_off", false, false},
-		{"only_choices", true, false},
-		{"only_project_decisions", false, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			setProjectDecisionsExperiments(t, f.srv, tc.choices, tc.decisions)
-			f.srv.enqueueDecisionBellEvent(f.project.ID, f.topicID, f.bob.ID)
-			require.NoError(t, f.srv.recomputeDecisionBellUser(ctx, f.bob.ID))
-			waitDecisionBellIdle(t, f.srv)
-			notifs, err := f.store.GetNotifications(ctx, store.SubscriberTypeUser, f.bob.ID, false)
-			require.NoError(t, err)
-			assert.Empty(t, notifs, "no bell writes allowed when %s", tc.name)
-		})
-	}
+	setChoicesExperiment(t, f.srv, false)
+	f.srv.enqueueDecisionBellEvent(f.project.ID, f.topicID, f.bob.ID)
+	require.NoError(t, f.srv.recomputeDecisionBellUser(ctx, f.bob.ID))
+	waitDecisionBellIdle(t, f.srv)
+	notifs, err := f.store.GetNotifications(ctx, store.SubscriberTypeUser, f.bob.ID, false)
+	require.NoError(t, err)
+	assert.Empty(t, notifs, "no bell writes allowed when web.decisions is off")
 
-	// Enable both flags -> write unacknowledged rows for Alice and Bob.
-	setProjectDecisionsExperiments(t, f.srv, true, true)
+	// Enable web.decisions -> write unacknowledged rows for Alice and Bob.
+	setChoicesExperiment(t, f.srv, true)
 	require.NoError(t, f.srv.recomputeDecisionBellUser(ctx, f.bob.ID))
 	require.NoError(t, f.srv.recomputeDecisionBellUser(ctx, f.alice.ID))
 
@@ -759,8 +747,8 @@ func TestDecisionsBell_ExperimentMatrixAndFlagOffReconcile(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, bobRow.Acknowledged)
 
-	// Turn off web.project_decisions -> reconcile via /users/me/decisions acknowledges Bob's row.
-	setProjectDecisionsExperiments(t, f.srv, true, false)
+	// Turn off web.decisions -> reconcile via /users/me/decisions acknowledges Bob's row.
+	setChoicesExperiment(t, f.srv, false)
 	rr := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/users/me/decisions?tab=pending&limit=0", nil)
 	assert.Equal(t, http.StatusNotFound, rr.Code)
 	waitDecisionBellIdle(t, f.srv)
@@ -785,7 +773,7 @@ func TestDecisionsBell_ExperimentMatrixAndFlagOffReconcile(t *testing.T) {
 // agent-recorded interpreted answers and --update replacements.
 func TestDecisionsBell_InterpretedAndReplacedLifecycle(t *testing.T) {
 	f := newChoicesFixture(t)
-	setProjectDecisionsExperiments(t, f.srv, true, true)
+	setChoicesExperiment(t, f.srv, true)
 	setFastDecisionBell(t, f.srv, 15*time.Millisecond)
 	ctx := context.Background()
 
@@ -885,7 +873,7 @@ func TestDecisionsBell_ConcurrentMarkReadNotUndoneByDecrease(t *testing.T) {
 		return &interleaveAckOnKeepWriteStore{Store: inner, fault: f}
 	})
 	f := newChoicesFixtureOn(t, srv, hookStore, alice, bob, project)
-	setProjectDecisionsExperiments(t, f.srv, true, true)
+	setChoicesExperiment(t, f.srv, true)
 	setFastDecisionBell(t, f.srv, 15*time.Millisecond)
 	ctx := context.Background()
 
@@ -961,7 +949,7 @@ func TestDecisionsBell_TopicWorkerPanicRecovery(t *testing.T) {
 	})
 	panicStore.projectID = project.ID
 	f := newChoicesFixtureOn(t, srv, panicStore, alice, bob, project)
-	setProjectDecisionsExperiments(t, f.srv, true, true)
+	setChoicesExperiment(t, f.srv, true)
 	setFastDecisionBell(t, f.srv, 15*time.Millisecond)
 
 	f.agent.Ancestry = []string{f.bob.ID}
@@ -1044,7 +1032,7 @@ func TestDecisionsBell_TopicExpansionBatchesUserAccountLookups(t *testing.T) {
 		return &batchUserExpansionSpyStore{Store: inner, fault: f}
 	})
 	f := newChoicesFixtureOn(t, srv, spy, alice, bob, project)
-	setProjectDecisionsExperiments(t, f.srv, true, true)
+	setChoicesExperiment(t, f.srv, true)
 	ctx := context.Background()
 
 	isolatedProj := &store.Project{

@@ -260,25 +260,19 @@ export const CHAT_RETENTION_FLAG = 'hub.chat_retention';
 export const WELCOME_PROJECT_FLAG = 'hub.welcome_project';
 
 /**
- * Interactive chat choices (web.chat_choices, ptone/scion#7514): choice cards
- * in chat conversations and inline decision answering. Presentation only: the
- * hub checks the experiment on decision and choice-prompt routes. Default OFF.
+ * Decisions (web.decisions, ptone/scion#8223): interactive decision cards in
+ * chat conversations, inline answering, the project and profile Decisions
+ * pages, the Decisions header and profile-nav badges, the Profile Settings
+ * Decisions card, and the coalesced decisions_waiting bell notification.
+ * Presentation only: every hub check is server-side. Default OFF.
  */
-export const CHAT_CHOICES_FLAG = 'web.chat_choices';
+export const DECISIONS_FLAG = 'web.decisions';
 
 /**
- * Project decisions page (web.project_decisions, ptone/scion#7753): the
- * Decisions button + badge in the project header and /projects/:id/decisions
- * page. Presentation only: the hub checks both web.project_decisions and
- * web.chat_choices on GET /api/v1/projects/{id}/decisions. Default OFF.
+ * Whether Decisions surfaces (chat cards, project and profile Decisions pages,
+ * header/nav badges, Profile Settings card, and bell notifications) are
+ * enabled in this browser session.
  */
-export const PROJECT_DECISIONS_FLAG = 'web.project_decisions';
-
-/**
- * Whether the project Decisions page and header entry point are enabled in
- * this browser session. Requires both `web.project_decisions` and
- * `web.chat_choices` (Plan B7).
- */
-export function projectDecisionsEnabled(): boolean {
-  return isFeatureEnabled(PROJECT_DECISIONS_FLAG) && isFeatureEnabled(CHAT_CHOICES_FLAG);
+export function decisionsEnabled(): boolean {
+  return isFeatureEnabled(DECISIONS_FLAG);
 }

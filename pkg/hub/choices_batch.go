@@ -68,11 +68,11 @@ type ChoiceSetAnswerResponse struct {
 }
 
 // handleChoicePromptRoutes serves the choice prompt endpoints, 404 while
-// web.chat_choices is off:
+// web.decisions is off:
 //
 //	POST /api/v1/choice-prompts/{messageId}/answers  answer every decision as one set
 func (s *Server) handleChoicePromptRoutes(w http.ResponseWriter, r *http.Request) {
-	s.requireExperiment(experiments.ChatChoices, func(w http.ResponseWriter, r *http.Request) {
+	s.requireExperiment(experiments.Decisions, func(w http.ResponseWriter, r *http.Request) {
 		rest := strings.TrimPrefix(r.URL.Path, choicePromptsRoutePrefix)
 		msgID, sub, _ := strings.Cut(rest, "/")
 		if msgID == "" || sub != "answers" {

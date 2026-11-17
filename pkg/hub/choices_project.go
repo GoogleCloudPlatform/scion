@@ -237,18 +237,16 @@ func (s *Server) decisionViewsFor(ctx context.Context, ds []*store.Decision) []D
 }
 
 // handleProjectDecisions serves GET /api/v1/projects/{id}/decisions.
-// Unsupported methods return 405 before the dual experiment gate, which
-// returns 404 unless both web.project_decisions and web.chat_choices are on.
+// Unsupported methods return 405 before the experiment gate, which returns 404
+// while web.decisions is off.
 func (s *Server) handleProjectDecisions(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
-	s.requireExperiment(experiments.ProjectDecisions,
-		s.requireExperiment(experiments.ChatChoices, func(w http.ResponseWriter, r *http.Request) {
-			s.listProjectDecisions(w, r, projectID)
-		}),
-	)(w, r)
+	s.requireExperiment(experiments.Decisions, func(w http.ResponseWriter, r *http.Request) {
+		s.listProjectDecisions(w, r, projectID)
+	})(w, r)
 }
 
 // projectDecisionsCaller returns the authenticated user identity (web session,

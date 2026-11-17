@@ -17,7 +17,7 @@
  * (ptone/scion#7800, parent ptone/scion#7753, epic ptone/scion#7514).
  *
  * Implements the Plan §8 G3A browser scenario against a real Go `scion` hub
- * with both `web.chat_choices` and `web.project_decisions` enabled:
+ * with `web.decisions` enabled:
  *   1. User B (project owner/admin) and User A (ordinary project member) in one
  *      project with a containerless `release-bot` (`../harness/agent.ts`).
  *   2. Agent posts one choice prompt in `#release` and one in a private DM with User A.
@@ -258,7 +258,7 @@ async function assertNoPageReload(page: Page, expectedBootId: string): Promise<v
   expect(current).toBe(expectedBootId);
 }
 
-test.describe('Project Decisions page on real hub (web.project_decisions + web.chat_choices)', () => {
+test.describe('Project Decisions page on real hub (web.decisions)', () => {
   let hub!: HubState;
   let projectId = '';
   let userA!: AuthSession;

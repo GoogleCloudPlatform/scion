@@ -713,7 +713,7 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 	// decisions.byId reads and answers a choice prompt decision; the
 	// handler authorizes per conversation (read or send rights on the
-	// prompt's thread or DM). 404 while web.chat_choices is off.
+	// prompt's thread or DM). 404 while web.decisions is off.
 	"/api/v1/decisions/": {
 		Pattern: "/api/v1/decisions/", RouteID: "decisions.byId",
 		Classification: RoutePolicy,

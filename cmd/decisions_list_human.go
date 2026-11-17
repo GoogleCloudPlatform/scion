@@ -41,7 +41,6 @@ const (
 	maxDecisionsSearchRunes   = 256
 	maxDecisionsFacetOptions  = 500
 
-	errMsgProjectDecisionsDisabled  = "Decisions are not enabled on this hub (experiment web.project_decisions)"
 	errMsgDecisionSearchUnsupported = "this hub does not support decision search"
 )
 
@@ -238,8 +237,7 @@ func formatProjectDecisionsError(err error) error {
 		if strings.HasPrefix(apiErr.Message, "Project") {
 			return errors.New("project not found on this hub")
 		}
-		//nolint:staticcheck // ST1005: fixed user-facing text from design 5.4, pinned by TestDecisionsListHuman_ExperimentOffAndOldHub.
-		return errors.New(errMsgProjectDecisionsDisabled)
+		return errors.New(errMsgDecisionsExperimentRequired)
 	}
 	return formatDecisionAPIError(err)
 }
