@@ -57,14 +57,9 @@ const (
 	// message_policy_decisions.cel_error_reason.
 	maxDecisionCELReasonBytes = 64
 
-	// reasonPolicyCapExceeded classifies matching enforce policies past the
-	// per-send evaluation cap (store.MaxActiveMatchingMessagePolicies = 10)
-	// as failed rather than silently skipping them (fail-closed via on_failed).
-	reasonPolicyCapExceeded = "policy_cap_exceeded"
-
-	// reasonFactsUnavailable classifies policy evaluations when a store read
-	// needed to populate mention or conversation participant facts fails.
-	reasonFactsUnavailable = "facts_unavailable"
+	// shadowDropReasonQueueFull labels shadow evaluations dropped because the
+	// bounded shadow worker queue was full.
+	shadowDropReasonQueueFull = "queue_full"
 )
 
 // OTelMessagePolicyMetrics exports content-free message policy counters and
@@ -91,7 +86,7 @@ func NewOTelMessagePolicyMetrics(mp metric.MeterProvider) (*OTelMessagePolicyMet
 	if err != nil {
 		return nil, err
 	}
-	drops, err := meter.Int64Counter("scion.message_policy.shadow.drops", metric.WithUnit("{batch}"))
+	drops, err := meter.Int64Counter("scion.message_policy.shadow.drops", metric.WithUnit("{evaluation}"))
 	if err != nil {
 		return nil, err
 	}
@@ -130,9 +125,14 @@ func (s *Server) recordMessagePolicyEvalMetric(class, mode, surface string, elap
 }
 
 func (s *Server) recordMessagePolicyShadowDrop(projectID string, policyCount int) {
-	s.messagePolicyShadowDrops.Add(1)
+	if policyCount <= 0 {
+		return
+	}
+	s.messagePolicyShadowDrops.Add(int64(policyCount))
 	if m := s.messagePolicyMetrics.Load(); m != nil {
-		m.shadowDrops.Add(context.Background(), 1)
+		m.shadowDrops.Add(context.Background(), int64(policyCount), metric.WithAttributes(
+			attribute.String("reason", shadowDropReasonQueueFull),
+		))
 	}
 	slog.Warn("message policy shadow queue full; dropping shadow evaluation batch",
 		"project_id", projectID,
@@ -147,7 +147,7 @@ func (s *Server) recordMessagePolicyShadowCapDrop(projectID string, droppedCount
 	s.messagePolicyShadowDrops.Add(int64(droppedCount))
 	if m := s.messagePolicyMetrics.Load(); m != nil {
 		m.shadowDrops.Add(context.Background(), int64(droppedCount), metric.WithAttributes(
-			attribute.String("reason", reasonPolicyCapExceeded),
+			attribute.String("reason", messagepolicy.ReasonPolicyCapExceeded),
 		))
 	}
 	slog.Warn("message policy shadow per-send cap exceeded; dropping excess shadow policies",
@@ -328,7 +328,7 @@ func (s *Server) processMessagePolicyShadowJob(ctx context.Context, job messageP
 		if factsUnavailable {
 			classification = messagepolicy.Classification{
 				Class:  messagepolicy.ClassFailed,
-				Reason: reasonFactsUnavailable,
+				Reason: messagepolicy.ReasonFactsUnavailable,
 			}
 		} else {
 			start := time.Now()
@@ -502,12 +502,12 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 		case i >= store.MaxActiveMatchingMessagePolicies:
 			classification = messagepolicy.Classification{
 				Class:  messagepolicy.ClassFailed,
-				Reason: reasonPolicyCapExceeded,
+				Reason: messagepolicy.ReasonPolicyCapExceeded,
 			}
 		case factsErr != nil:
 			classification = messagepolicy.Classification{
 				Class:  messagepolicy.ClassFailed,
-				Reason: reasonFactsUnavailable,
+				Reason: messagepolicy.ReasonFactsUnavailable,
 			}
 		default:
 			start := time.Now()
@@ -691,10 +691,14 @@ func deriveH2FactSnapshot(in *h2PolicyInput) h2FactSnapshot {
 	req := in.req
 	agent := in.agent
 
-	isGroup := (res.ConvResult != nil && res.ConvResult.Kind == "group") ||
-		strings.HasPrefix(res.Recipient, "thread:") ||
-		strings.HasPrefix(res.Recipient, "conv:") ||
-		(req.ThreadID != "" && !strings.HasPrefix(req.ThreadID, "dm:") && !strings.HasPrefix(req.ThreadID, "agent:"))
+	var isGroup bool
+	if res.ConvResult != nil {
+		isGroup = res.ConvResult.Kind == "group"
+	} else {
+		isGroup = strings.HasPrefix(res.Recipient, "thread:") ||
+			strings.HasPrefix(res.Recipient, "conv:") ||
+			(req.ThreadID != "" && !strings.HasPrefix(req.ThreadID, "dm:") && !strings.HasPrefix(req.ThreadID, "agent:"))
+	}
 
 	snap := h2FactSnapshot{
 		projectID:       agent.ProjectID,
@@ -736,9 +740,23 @@ func deriveH2FactSnapshot(in *h2PolicyInput) h2FactSnapshot {
 		snap.convKind = "direct"
 		snap.recipientKind = "user"
 		snap.recipientID = res.RecipientID
-		snap.recipientSlug = strings.TrimPrefix(res.Recipient, "user:")
+		if snap.recipientID == "" && res.ConvResult != nil {
+			if kindA, idA, kindB, idB, err := messages.ParseDMKey(res.ConvResult.ExternalRef); err == nil {
+				switch {
+				case kindA == "agent" && idA == agent.ID:
+					snap.recipientID = idB
+				case kindB == "agent" && idB == agent.ID:
+					snap.recipientID = idA
+				}
+			}
+		}
+		if strings.HasPrefix(res.Recipient, "user:") {
+			snap.recipientSlug = strings.TrimPrefix(res.Recipient, "user:")
+		} else if res.ConvResult == nil {
+			snap.recipientSlug = res.Recipient
+		}
 		if snap.recipientSlug == "" {
-			snap.recipientSlug = res.RecipientID
+			snap.recipientSlug = snap.recipientID
 		}
 	}
 	return snap

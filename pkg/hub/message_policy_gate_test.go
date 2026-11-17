@@ -40,6 +40,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messagepolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/ruleengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
@@ -663,11 +664,11 @@ func TestMessagePolicyGate_MultipleEnforceOrderingAndCap10(t *testing.T) {
 		assert.Equal(t, store.MessagePolicyClassViolation, byName["p05"].Class)
 
 		assert.Equal(t, store.MessagePolicyClassFailed, byName["p11"].Class)
-		assert.Equal(t, reasonPolicyCapExceeded, byName["p11"].CELErrorReason)
+		assert.Equal(t, messagepolicy.ReasonPolicyCapExceeded, byName["p11"].CELErrorReason)
 		assert.Equal(t, store.MessagePolicyActionRejected, byName["p11"].Action)
 
 		assert.Equal(t, store.MessagePolicyClassFailed, byName["p12"].Class)
-		assert.Equal(t, reasonPolicyCapExceeded, byName["p12"].CELErrorReason)
+		assert.Equal(t, messagepolicy.ReasonPolicyCapExceeded, byName["p12"].CELErrorReason)
 		assert.Equal(t, store.MessagePolicyActionAdmitted, byName["p12"].Action)
 	})
 
@@ -717,7 +718,7 @@ func TestMessagePolicyGate_MultipleEnforceOrderingAndCap10(t *testing.T) {
 		// Override policy_cap_exceeded -> admit on p11; send now admits and still
 		// records p11 as failed{policy_cap_exceeded}.
 		p11.OnFailedReasons = map[string]string{
-			reasonPolicyCapExceeded: messagepolicy.OutcomeAdmit,
+			messagepolicy.ReasonPolicyCapExceeded: messagepolicy.OutcomeAdmit,
 		}
 		require.NoError(t, f.s.UpdateMessagePolicy(ctx, p11))
 
@@ -734,7 +735,7 @@ func TestMessagePolicyGate_MultipleEnforceOrderingAndCap10(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, p11Decs.Items, 2)
 		assert.Equal(t, store.MessagePolicyClassFailed, p11Decs.Items[0].Class)
-		assert.Equal(t, reasonPolicyCapExceeded, p11Decs.Items[0].CELErrorReason)
+		assert.Equal(t, messagepolicy.ReasonPolicyCapExceeded, p11Decs.Items[0].CELErrorReason)
 		assert.Equal(t, store.MessagePolicyActionAdmitted, p11Decs.Items[0].Action)
 		assert.NotEmpty(t, p11Decs.Items[0].MessageID)
 	})
@@ -1606,7 +1607,7 @@ func TestMessagePolicyGate_FactsUnavailableFailsClosed(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, decs.Items, 1)
 		assert.Equal(t, store.MessagePolicyClassFailed, decs.Items[0].Class)
-		assert.Equal(t, reasonFactsUnavailable, decs.Items[0].CELErrorReason)
+		assert.Equal(t, messagepolicy.ReasonFactsUnavailable, decs.Items[0].CELErrorReason)
 		assert.Equal(t, store.MessagePolicyActionRejected, decs.Items[0].Action)
 		assert.Empty(t, decs.Items[0].MessageID)
 	})
@@ -1656,7 +1657,7 @@ func TestMessagePolicyGate_FactsUnavailableFailsClosed(t *testing.T) {
 
 		// 3. Explicit on_failed_reasons["facts_unavailable"] = "admit" admits and records failed{facts_unavailable}.
 		pol.OnFailedReasons = map[string]string{
-			reasonFactsUnavailable: messagepolicy.OutcomeAdmit,
+			messagepolicy.ReasonFactsUnavailable: messagepolicy.OutcomeAdmit,
 		}
 		require.NoError(t, f.s.UpdateMessagePolicy(ctx, pol))
 
@@ -1678,7 +1679,7 @@ func TestMessagePolicyGate_FactsUnavailableFailsClosed(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, decs.Items, 3)
 		assert.Equal(t, store.MessagePolicyClassFailed, decs.Items[0].Class)
-		assert.Equal(t, reasonFactsUnavailable, decs.Items[0].CELErrorReason)
+		assert.Equal(t, messagepolicy.ReasonFactsUnavailable, decs.Items[0].CELErrorReason)
 		assert.Equal(t, store.MessagePolicyActionAdmitted, decs.Items[0].Action)
 		assert.NotEmpty(t, decs.Items[0].MessageID)
 	})
@@ -1950,6 +1951,405 @@ func TestMessagePolicyGate_UnstoredSendDoesNotRecordDanglingMessageID(t *testing
 	assert.Equal(t, messagepolicy.ClassFailed, c.Class)
 	assert.Equal(t, ruleengine.ReasonConsumerNotRegistered, c.Reason)
 	assert.True(t, c.AdmissionError)
+}
+
+// mpgRecordingSpokeBus captures messages published to an external channel spoke
+// on the MessageBrokerProxy path.
+type mpgRecordingSpokeBus struct {
+	mu   sync.Mutex
+	msgs []*messages.StructuredMessage
+}
+
+func (b *mpgRecordingSpokeBus) Publish(_ context.Context, _ string, msg *messages.StructuredMessage) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.msgs = append(b.msgs, msg)
+	return nil
+}
+
+func (b *mpgRecordingSpokeBus) Subscribe(string, eventbus.EventHandler) (eventbus.Subscription, error) {
+	return nullSub{}, nil
+}
+
+func (b *mpgRecordingSpokeBus) Close() error { return nil }
+
+func (b *mpgRecordingSpokeBus) snapshot() []*messages.StructuredMessage {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]*messages.StructuredMessage, len(b.msgs))
+	copy(out, b.msgs)
+	return out
+}
+
+// TestMessagePolicyGate_DeriveH2FactSnapshot_Classification verifies R1: when
+// routing resolved a conversation (ConvResult != nil), H2 takes the surface and
+// conversation/recipient kind strictly from ConvResult.Kind; fallback heuristics
+// apply only when ConvResult is nil (write-deny-off fallback).
+func TestMessagePolicyGate_DeriveH2FactSnapshot_Classification(t *testing.T) {
+	agent := &store.Agent{
+		ID:        "a1111111-1111-4111-8111-111111111111",
+		Slug:      "sender-agent",
+		ProjectID: "33333333-3333-4333-8333-333333333333",
+	}
+	userID := "22222222-2222-4222-8222-222222222222"
+	dmKey, err := messages.DMConversationKey("agent", agent.ID, "user", userID)
+	require.NoError(t, err)
+
+	t.Run("conv_result_direct_with_non_dm_thread_id_classifies_as_agent_to_user", func(t *testing.T) {
+		snap := deriveH2FactSnapshot(&h2PolicyInput{
+			agent: agent,
+			req: &OutboundMessageRequest{
+				Channel:  "slack",
+				ThreadID: "1700000000.123",
+				Msg:      "hello",
+				Type:     "input-needed",
+			},
+			routing: &routingResult{
+				Recipient:      "user:alice@example.com",
+				RecipientID:    userID,
+				ConversationID: "c1",
+				Channel:        "slack",
+				ThreadID:       "1700000000.123",
+				ConvResult: &messaging.ConversationResult{
+					ConversationID: "c1",
+					Kind:           "direct",
+					ExternalRef:    dmKey,
+				},
+			},
+		})
+		assert.Equal(t, messagepolicy.SurfaceAgentToUser, snap.surface)
+		assert.Equal(t, "user", snap.recipientKind)
+		assert.Equal(t, "direct", snap.convKind)
+		assert.Equal(t, userID, snap.recipientID)
+		assert.Equal(t, "alice@example.com", snap.recipientSlug)
+		assert.Equal(t, "c1", snap.convID)
+
+		// Even a bare ConvResult probe without pre-populated routing.RecipientID
+		// or with a thread:-shaped Recipient must classify strictly from ConvResult.Kind.
+		bareSnap := deriveH2FactSnapshot(&h2PolicyInput{
+			agent: agent,
+			req: &OutboundMessageRequest{
+				Channel:  "slack",
+				ThreadID: "1700000000.123",
+				Msg:      "hello",
+			},
+			routing: &routingResult{
+				Recipient: "thread:spoofed",
+				ConvResult: &messaging.ConversationResult{
+					ConversationID: "c1",
+					Kind:           "direct",
+					ExternalRef:    dmKey,
+				},
+			},
+		})
+		assert.Equal(t, messagepolicy.SurfaceAgentToUser, bareSnap.surface)
+		assert.Equal(t, "user", bareSnap.recipientKind)
+		assert.Equal(t, "direct", bareSnap.convKind)
+		assert.Equal(t, userID, bareSnap.recipientID)
+	})
+
+	t.Run("conv_result_group_classifies_strictly_from_conv_result_kind", func(t *testing.T) {
+		snap := deriveH2FactSnapshot(&h2PolicyInput{
+			agent: agent,
+			req: &OutboundMessageRequest{
+				ThreadID: dmKey,
+				Msg:      "hello group",
+			},
+			routing: &routingResult{
+				Recipient:      "user:alice@example.com",
+				RecipientID:    userID,
+				ConversationID: "g1",
+				ConvResult: &messaging.ConversationResult{
+					ConversationID: "g1",
+					Kind:           "group",
+					DisplayName:    "eng-room",
+				},
+			},
+		})
+		assert.Equal(t, messagepolicy.SurfaceAgentToConversation, snap.surface)
+		assert.Equal(t, "conversation", snap.recipientKind)
+		assert.Equal(t, "group", snap.convKind)
+		assert.Equal(t, "g1", snap.recipientID)
+		assert.Equal(t, "eng-room", snap.recipientSlug)
+	})
+
+	t.Run("conv_result_nil_falls_back_to_addressing_heuristics", func(t *testing.T) {
+		groupByThread := deriveH2FactSnapshot(&h2PolicyInput{
+			agent: agent,
+			req: &OutboundMessageRequest{
+				ThreadID: "1700000000.123",
+				Msg:      "thread fallback",
+			},
+			routing: &routingResult{
+				Recipient:   "user:alice@example.com",
+				RecipientID: "t-conv",
+			},
+		})
+		assert.Equal(t, messagepolicy.SurfaceAgentToConversation, groupByThread.surface)
+		assert.Equal(t, "conversation", groupByThread.recipientKind)
+		assert.Equal(t, "group", groupByThread.convKind)
+
+		directFallback := deriveH2FactSnapshot(&h2PolicyInput{
+			agent: agent,
+			req: &OutboundMessageRequest{
+				ThreadID: dmKey,
+				Msg:      "dm fallback",
+			},
+			routing: &routingResult{
+				Recipient:   "user:alice@example.com",
+				RecipientID: userID,
+			},
+		})
+		assert.Equal(t, messagepolicy.SurfaceAgentToUser, directFallback.surface)
+		assert.Equal(t, "user", directFallback.recipientKind)
+		assert.Equal(t, "direct", directFallback.convKind)
+		assert.Equal(t, userID, directFallback.recipientID)
+		assert.Equal(t, "alice@example.com", directFallback.recipientSlug)
+	})
+}
+
+// TestMessagePolicyGate_DirectConvNonDMThreadID_EnforceRejectsEndToEnd verifies
+// R1 end to end through handleAgentOutboundMessage with a MessageBrokerProxy and
+// external channel spoke: an agent_to_user-only enforce policy cannot be bypassed
+// by addressing a direct user DM with channel="slack" and a non-dm: thread_id.
+func TestMessagePolicyGate_DirectConvNonDMThreadID_EnforceRejectsEndToEnd(t *testing.T) {
+	f := newMpgFixture(t, true)
+	ctx := context.Background()
+
+	slackSpoke := &mpgRecordingSpokeBus{}
+	inprocBus := eventbus.NewInProcessEventBus(slog.Default())
+	t.Cleanup(func() { _ = inprocBus.Close() })
+	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
+		{Name: eventbus.InProcessBusName, Bus: inprocBus},
+		{Name: "web", Bus: nullSpokeEventBus{}},
+		{Name: "slack", Bus: slackSpoke},
+	}, slog.Default())
+	proxy := NewMessageBrokerProxy(fanout, f.srv.store, f.srv.events, f.srv.GetDispatcher, slog.Default())
+	proxy.Start()
+	t.Cleanup(proxy.Stop)
+	f.srv.SetMessageBrokerProxy(proxy)
+	f.srv.mu.RLock()
+	proxy.webChatStore = f.srv.webChatStore
+	f.srv.mu.RUnlock()
+	proxy.subscribeProjectUserMessages(f.project.ID)
+
+	dmKey, err := messages.DMConversationKey("agent", f.sender.ID, "user", f.alice.ID)
+	require.NoError(t, err)
+	dmConv, err := f.s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: dmKey,
+		DriftState:  "active",
+	})
+	require.NoError(t, err)
+
+	pol := &store.MessagePolicy{
+		ProjectID: f.project.ID,
+		Name:      "dm-only-guard",
+		Enabled:   true,
+		Mode:      store.MessagePolicyModeEnforce,
+		Scope: store.MessagePolicyScope{
+			Surfaces:  []string{store.MessagePolicySurfaceAgentToUser},
+			Sender:    store.MessagePolicySenderSelector{AllAgents: true},
+			Recipient: store.MessagePolicyRecipientSelector{Kinds: []string{"user"}},
+		},
+		ViolationRule: `surface == "agent_to_user" && recipient.kind == "user" && conversation.kind == "direct" && message.body.matches("(?i)option a")`,
+		OnFailed:      messagepolicy.OutcomeReject,
+		RejectReason:  "DM blocked by {policy} to {recipient}",
+	}
+	require.NoError(t, f.s.CreateMessagePolicy(ctx, pol))
+
+	// 1. Bypass attempt via conversation_ref + external channel + non-dm: thread_id -> 422.
+	rrRef := f.sendOutbound(t, OutboundMessageRequest{
+		ConversationRef: "conv:" + dmConv.ID,
+		Channel:         "slack",
+		ThreadID:        "1700000000.123",
+		Msg:             "Do you want Option A?",
+	})
+	require.Equal(t, http.StatusUnprocessableEntity, rrRef.Code, "body: %s", rrRef.Body.String())
+
+	var refErr ErrorResponse
+	require.NoError(t, json.Unmarshal(rrRef.Body.Bytes(), &refErr))
+	assert.Equal(t, string(MessageDenialPolicyRejected), refErr.Error.Code)
+	assert.Equal(t, "DM blocked by dm-only-guard to alice@example.com", refErr.Error.Message)
+
+	// 2. Bypass attempt via raw conversation_id + explicit recipient + non-dm: thread_id -> 422.
+	rrID := f.sendOutbound(t, OutboundMessageRequest{
+		ConversationID: dmConv.ID,
+		Recipient:      "user:" + f.alice.Email,
+		Channel:        "slack",
+		ThreadID:       "1700000000.456",
+		Msg:            "Still asking Option A?",
+	})
+	require.Equal(t, http.StatusUnprocessableEntity, rrID.Code, "body: %s", rrID.Body.String())
+
+	assert.Empty(t, slackSpoke.snapshot(), "rejected DM sends must never publish to the external channel spoke")
+	msgs, err := f.s.ListMessages(ctx, store.MessageFilter{SenderID: f.sender.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	assert.Empty(t, msgs.Items, "rejected DM sends must persist zero message rows")
+
+	rejDecs, err := f.s.ListMessagePolicyDecisions(ctx, store.MessagePolicyDecisionFilter{
+		ProjectID: f.project.ID,
+		PolicyID:  pol.ID,
+		Action:    store.MessagePolicyActionRejected,
+	}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, rejDecs.Items, 2)
+	for _, d := range rejDecs.Items {
+		assert.Equal(t, store.MessagePolicySurfaceAgentToUser, d.Surface)
+		assert.Equal(t, "user", d.RecipientKind)
+		assert.Equal(t, f.alice.ID, d.RecipientID)
+		assert.Equal(t, store.MessagePolicyClassViolation, d.Class)
+		assert.Empty(t, d.MessageID)
+	}
+
+	// 3. Compliant send with the exact same conversation_ref + external channel +
+	// non-dm: thread_id succeeds and delivers to the slack spoke, proving the 422s
+	// above came strictly from H2 agent_to_user policy evaluation.
+	rrOK := f.sendOutbound(t, OutboundMessageRequest{
+		ConversationRef: "conv:" + dmConv.ID,
+		Channel:         "slack",
+		ThreadID:        "1700000000.789",
+		Msg:             "Deployment finished cleanly.",
+	})
+	require.Equal(t, http.StatusOK, rrOK.Code, "body: %s", rrOK.Body.String())
+	delivered := slackSpoke.snapshot()
+	require.Len(t, delivered, 1)
+	assert.Equal(t, "1700000000.789", delivered[0].ThreadID)
+	assert.Equal(t, "user:"+f.alice.Email, delivered[0].Recipient)
+
+	admDecs, err := f.s.ListMessagePolicyDecisions(ctx, store.MessagePolicyDecisionFilter{
+		ProjectID: f.project.ID,
+		PolicyID:  pol.ID,
+		Action:    store.MessagePolicyActionAdmitted,
+	}, store.ListOptions{Limit: 5})
+	require.NoError(t, err)
+	require.Len(t, admDecs.Items, 1)
+	assert.Equal(t, store.MessagePolicySurfaceAgentToUser, admDecs.Items[0].Surface)
+	assert.Equal(t, "user", admDecs.Items[0].RecipientKind)
+	assert.Equal(t, f.alice.ID, admDecs.Items[0].RecipientID)
+	assert.Equal(t, store.MessagePolicyClassPass, admDecs.Items[0].Class)
+}
+
+// TestMessagePolicyGate_ShadowDropMetrics_ConsistentUnitAndReasons verifies N2:
+// scion.message_policy.shadow.drops uses unit "{evaluation}" and distinguishes
+// "queue_full" and "policy_cap_exceeded" via the "reason" attribute, counting
+// dropped policy evaluations consistently across both paths.
+func TestMessagePolicyGate_ShadowDropMetrics_ConsistentUnitAndReasons(t *testing.T) {
+	f := newMpgFixture(t, true)
+	ctx := context.Background()
+	f.srv.chatSendLimiter = nil
+
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+	otelMetrics, err := NewOTelMessagePolicyMetrics(mp)
+	require.NoError(t, err)
+	f.srv.SetMessagePolicyMetrics(otelMetrics)
+
+	// 1. Seed 12 shadow policies -> 1 send drops 2 excess policy evaluations with reason=policy_cap_exceeded.
+	var created []*store.MessagePolicy
+	for i := 1; i <= 12; i++ {
+		p := &store.MessagePolicy{
+			ProjectID: f.project.ID,
+			Name:      fmt.Sprintf("s-metric-%02d", i),
+			Enabled:   true,
+			Mode:      store.MessagePolicyModeShadow,
+			Scope: store.MessagePolicyScope{
+				Surfaces: []string{store.MessagePolicySurfaceAgentToUser},
+				Sender:   store.MessagePolicySenderSelector{AllAgents: true},
+			},
+			ViolationRule: "false",
+			OnFailed:      messagepolicy.OutcomeAdmit,
+		}
+		require.NoError(t, f.s.CreateMessagePolicy(ctx, p))
+		created = append(created, p)
+	}
+
+	rrCap := f.sendOutbound(t, OutboundMessageRequest{
+		Recipient: "user:" + f.alice.Email,
+		Msg:       "trigger shadow cap drop",
+	})
+	require.Equal(t, http.StatusOK, rrCap.Code)
+
+	// Wait for that 1 shadow job to drain before blocking workers for queue_full.
+	require.Eventually(t, func() bool {
+		decs, err := f.s.ListMessagePolicyDecisions(ctx, store.MessagePolicyDecisionFilter{
+			ProjectID: f.project.ID,
+		}, store.ListOptions{Limit: 20})
+		return err == nil && len(decs.Items) == store.MaxActiveMatchingMessagePolicies
+	}, 3*time.Second, 15*time.Millisecond)
+
+	// 2. Keep exactly 2 shadow policies enabled and saturate the shadow queue with 5 overflow sends ->
+	// 5 dropped batches * 2 policies = 10 dropped evaluations with reason=queue_full.
+	for i := 2; i < len(created); i++ {
+		created[i].Enabled = false
+		require.NoError(t, f.s.UpdateMessagePolicy(ctx, created[i]))
+	}
+
+	unblock := make(chan struct{})
+	f.srv.messagePolicyGate.testShadowBeforeEval = func() {
+		<-unblock
+	}
+	defer func() {
+		select {
+		case <-unblock:
+		default:
+			close(unblock)
+		}
+	}()
+
+	workersBlocked := messagePolicyShadowWorkers
+	for i := 0; i < workersBlocked; i++ {
+		rr := f.sendOutbound(t, OutboundMessageRequest{
+			Recipient: "user:" + f.alice.Email,
+			Msg:       fmt.Sprintf("block worker %d", i),
+		})
+		require.Equal(t, http.StatusOK, rr.Code)
+	}
+	// Give the 2 workers a brief moment to dequeue and block on unblock.
+	require.Eventually(t, func() bool {
+		f.srv.messagePolicyGate.mu.Lock()
+		defer f.srv.messagePolicyGate.mu.Unlock()
+		return len(f.srv.messagePolicyGate.shadowCh) == 0
+	}, time.Second, 5*time.Millisecond)
+
+	overflowBatches := 5
+	for i := 0; i < messagePolicyShadowQueueCap+overflowBatches; i++ {
+		rr := f.sendOutbound(t, OutboundMessageRequest{
+			Recipient: "user:" + f.alice.Email,
+			Msg:       fmt.Sprintf("fill and overflow %d", i),
+		})
+		require.Equal(t, http.StatusOK, rr.Code)
+	}
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(ctx, &rm))
+
+	var foundMetric bool
+	byReason := make(map[string]int64)
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "scion.message_policy.shadow.drops" {
+				continue
+			}
+			foundMetric = true
+			assert.Equal(t, "{evaluation}", m.Unit)
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			require.True(t, ok)
+			for _, dp := range sum.DataPoints {
+				rVal, hasReason := dp.Attributes.Value("reason")
+				assert.True(t, hasReason, "every shadow.drops data point must carry a reason attribute")
+				byReason[rVal.AsString()] += dp.Value
+			}
+		}
+	}
+	require.True(t, foundMetric, "expected scion.message_policy.shadow.drops metric")
+	assert.Equal(t, int64(2), byReason[messagepolicy.ReasonPolicyCapExceeded])
+	assert.Equal(t, int64(overflowBatches*2), byReason[shadowDropReasonQueueFull])
+	assert.Equal(t, int64(2+overflowBatches*2), f.srv.messagePolicyShadowDrops.Load())
+
+	close(unblock)
 }
 
 func mpgSeedShadowBenchmarkPolicies(tb testing.TB, ctx context.Context, s store.Store, projectID string) []*store.MessagePolicy {
