@@ -568,18 +568,11 @@ func (s *Server) handleDeleteGitHubAppRepoRouting(w http.ResponseWriter, r *http
 			InternalError(w)
 			return
 		}
-		owner := strings.SplitN(lowerRepo, "/", 2)[0]
-		var ownerFallback []int64
 		for i := range installations {
 			inst := &installations[i]
 			if _, ok := lookupTriggerRoute(inst.TriggerRouting, lowerRepo); ok {
 				targetInstIDs = append(targetInstIDs, inst.InstallationID)
-			} else if strings.EqualFold(inst.AccountLogin, owner) || installationListsRepo(*inst, lowerRepo) {
-				ownerFallback = append(ownerFallback, inst.InstallationID)
 			}
-		}
-		if len(targetInstIDs) == 0 {
-			targetInstIDs = ownerFallback
 		}
 	}
 
