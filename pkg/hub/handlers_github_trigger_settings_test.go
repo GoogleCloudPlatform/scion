@@ -223,22 +223,23 @@ func TestProjectGitHubTriggerSettings_GatingAndAuthz(t *testing.T) {
 		UnmatchedCommandText:  "Try /help",
 	}
 
-	// 1. Unsupported methods answer 405 with Allow: GET, PUT even when experiment is off.
-	for _, m := range []string{http.MethodPost, http.MethodDelete, http.MethodPatch} {
+	// 1. Experiment off -> every HTTP method (including POST/DELETE/PATCH) returns 404 without leaking route existence via 405.
+	for _, m := range []string{http.MethodGet, http.MethodPost, http.MethodDelete, http.MethodPatch} {
 		rr := doRequestAsUser(t, srv, owner, m, path, nil)
-		assert.Equal(t, http.StatusMethodNotAllowed, rr.Code, "method %s", m)
+		assert.Equal(t, http.StatusNotFound, rr.Code, "method %s with hub.github_triggers off", m)
+		assert.Empty(t, rr.Header().Get("Allow"), "method %s with hub.github_triggers off must not set Allow", m)
+	}
+	rr := doRequestAsUser(t, srv, owner, http.MethodPut, path, validPut)
+	assert.Equal(t, http.StatusNotFound, rr.Code)
+
+	// 2. Enable experiment -> unsupported methods answer 405 with Allow: GET, PUT, and unknown trigger-sources subpaths return 404.
+	setGitHubTriggersExperimentForRouting(t, srv, true)
+	for _, m := range []string{http.MethodPost, http.MethodDelete, http.MethodPatch} {
+		rr = doRequestAsUser(t, srv, owner, m, path, nil)
+		assert.Equal(t, http.StatusMethodNotAllowed, rr.Code, "method %s with hub.github_triggers on", m)
 		assert.Contains(t, rr.Header().Get("Allow"), http.MethodGet)
 		assert.Contains(t, rr.Header().Get("Allow"), http.MethodPut)
 	}
-
-	// 2. Experiment off -> GET and PUT return 404.
-	rr := doRequestAsUser(t, srv, owner, http.MethodGet, path, nil)
-	assert.Equal(t, http.StatusNotFound, rr.Code)
-	rr = doRequestAsUser(t, srv, owner, http.MethodPut, path, validPut)
-	assert.Equal(t, http.StatusNotFound, rr.Code)
-
-	// 3. Unknown trigger-sources subpaths return 404 ("Trigger source not found").
-	setGitHubTriggersExperimentForRouting(t, srv, true)
 	for _, unknownPath := range []string{
 		"/api/v1/projects/" + projID + "/trigger-sources",
 		"/api/v1/projects/" + projID + "/trigger-sources/gitlab",

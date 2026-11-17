@@ -178,24 +178,26 @@ func newGitHubTriggerSettingsAuditRecord(
 
 // handleProjectTriggerSourcesRoutes dispatches /api/v1/projects/{id}/trigger-sources/...
 func (s *Server) handleProjectTriggerSourcesRoutes(w http.ResponseWriter, r *http.Request, projectID, subPath string) {
-	if subPath != "trigger-sources/github" {
-		NotFound(w, "Trigger source")
-		return
-	}
-	s.handleProjectGitHubTriggerSettings(w, r, projectID)
+	s.requireGitHubTriggers(func(w http.ResponseWriter, r *http.Request) {
+		if subPath != "trigger-sources/github" {
+			NotFound(w, "Trigger source")
+			return
+		}
+		s.handleProjectGitHubTriggerSettings(w, r, projectID)
+	})(w, r)
 }
 
 // handleProjectGitHubTriggerSettings handles GET and PUT
 // /api/v1/projects/{id}/trigger-sources/github.
 func (s *Server) handleProjectGitHubTriggerSettings(w http.ResponseWriter, r *http.Request, projectID string) {
-	switch r.Method {
-	case http.MethodGet, http.MethodPut:
-	default:
-		MethodNotAllowed(w, http.MethodGet, http.MethodPut)
-		return
-	}
-
 	s.requireGitHubTriggers(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet, http.MethodPut:
+		default:
+			MethodNotAllowed(w, http.MethodGet, http.MethodPut)
+			return
+		}
+
 		ctx := r.Context()
 		if GetAgentIdentityFromContext(ctx) != nil {
 			Forbidden(w)
