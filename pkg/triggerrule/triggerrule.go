@@ -44,9 +44,12 @@ const (
 	EnvironmentVersion = 1
 )
 
-// Stage 1 trigger rule limits (§7.2, §4.2, §4.4, §8.1).
+// Stage 1 trigger rule limits (§7.2, §4.2, §4.4, §8.1; mixed-rule-arrays §2.1, §6).
 const (
 	MaxMatchRuleBytes      = 4096
+	MaxMatchRules          = 8
+	MaxMatchRulesJSONBytes = 16 * 1024
+	MaxRuleDialectBytes    = 32
 	MaxSubjectRuleBytes    = 1024
 	MaxDerivedSubjectBytes = 256
 	MaxPayloadBytes        = 64 * 1024
@@ -56,6 +59,25 @@ const (
 	MaxAttributesBytes = 8 * 1024
 	EventRuleBudget    = time.Second
 )
+
+// MatchResult outcome classes (§3.1).
+const (
+	MatchClassMatched   = "matched"
+	MatchClassFalse     = "false"
+	MatchClassUncertain = "uncertain"
+	MatchClassFailed    = "failed"
+	MatchClassBudget    = "budget"
+)
+
+// MatchResult describes the outcome of evaluating an ordered match-rule list
+// with short-circuit AND semantics (§3.1).
+type MatchResult struct {
+	Matched bool
+	Through int    // elements evaluated (1-based index of the deciding element; == len(rules) on a full match)
+	Dialect string // dialect of the deciding element
+	Class   string // "matched" | "false" | "uncertain" | "failed" | "budget"
+	Reason  string // content-free, from the error class
+}
 
 // Generic history reasons recorded on skipped trigger fires (§6.3, §7.0a, §7.2).
 const (
@@ -403,6 +425,220 @@ func (r *Rules) Match(ctx context.Context, scope celengine.CacheScope, rule Rule
 		return false, err
 	}
 	return dec.Bool, nil
+}
+
+// MatchAll evaluates rules in strict author order with short-circuit AND
+// semantics (§3.1). It never reorders or parallelizes elements, stops on the
+// first successful false (Class: "false", nil error) or terminal error
+// (Class: "uncertain", "failed", or "budget"), and shares one BudgetTracker
+// across elements so each element's deadline is bounded by
+// min(dialect.Declares().MaxEvalTime, tracker.Remaining()).
+// An empty rules slice is a full match (Matched: true, Through: 0, Class: "matched").
+func (r *Rules) MatchAll(
+	ctx context.Context,
+	scope celengine.CacheScope,
+	rules []Rule,
+	act Activation,
+	opts ...EvalOption,
+) (MatchResult, error) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			fErr := &ruleengine.FailedError{Reason: celengine.ReasonCanceled, Cause: err}
+			dialect := ""
+			through := 0
+			if len(rules) > 0 {
+				dialect = rules[0].normalizedDialect()
+				through = 1
+			}
+			return MatchResult{
+				Matched: false,
+				Through: through,
+				Dialect: dialect,
+				Class:   MatchClassFailed,
+				Reason:  celengine.ReasonCanceled,
+			}, fErr
+		}
+	}
+	if len(rules) == 0 {
+		return MatchResult{
+			Matched: true,
+			Through: 0,
+			Class:   MatchClassMatched,
+		}, nil
+	}
+
+	cfg := applyEvalOpts(opts)
+	if scope.Consumer == "" {
+		scope.Consumer = ConsumerName
+	}
+	input := ruleengine.Input{Activation: act.toMap()}
+	lastDialect := ""
+
+	for i, elem := range rules {
+		through := i + 1
+		dialect := elem.normalizedDialect()
+
+		if ctx != nil {
+			if err := ctx.Err(); err != nil {
+				fErr := &ruleengine.FailedError{Reason: celengine.ReasonCanceled, Cause: err}
+				return MatchResult{
+					Matched: false,
+					Through: through,
+					Dialect: dialect,
+					Class:   MatchClassFailed,
+					Reason:  celengine.ReasonCanceled,
+				}, fErr
+			}
+		}
+		if cfg.tracker != nil && cfg.tracker.Exhausted() {
+			return MatchResult{
+				Matched: false,
+				Through: through,
+				Dialect: dialect,
+				Class:   MatchClassBudget,
+				Reason:  SkipReasonBudgetExhausted,
+			}, ruleengine.ErrBudgetExhausted
+		}
+
+		d, err := r.engine.DialectFor(ConsumerName, dialect)
+		if err != nil {
+			cls, reason := classifyMatchError(err)
+			return MatchResult{
+				Matched: false,
+				Through: through,
+				Dialect: dialect,
+				Class:   cls,
+				Reason:  reason,
+			}, err
+		}
+		if elem.Expr == "" {
+			lastDialect = dialect
+			continue
+		}
+
+		compileStart := time.Now()
+		compiled, err := r.engine.CachedCompile(ctx, dialect, scope, elem.Expr, ruleengine.KindFilter, matchEnvRef())
+		if cfg.tracker != nil {
+			cfg.tracker.Charge(time.Since(compileStart))
+		}
+		if err != nil {
+			cls, reason := classifyMatchError(err)
+			return MatchResult{
+				Matched: false,
+				Through: through,
+				Dialect: dialect,
+				Class:   cls,
+				Reason:  reason,
+			}, err
+		}
+		if cfg.tracker != nil && cfg.tracker.Exhausted() {
+			return MatchResult{
+				Matched: false,
+				Through: through,
+				Dialect: dialect,
+				Class:   MatchClassBudget,
+				Reason:  SkipReasonBudgetExhausted,
+			}, ruleengine.ErrBudgetExhausted
+		}
+
+		dec, err := r.engine.Evaluate(ctx, compiled, input, ruleengine.Budget{
+			MaxEvalTime: d.Declares().MaxEvalTime,
+			Tracker:     cfg.tracker,
+		})
+		if err != nil {
+			cls, reason := classifyMatchError(err)
+			return MatchResult{
+				Matched: false,
+				Through: through,
+				Dialect: dialect,
+				Class:   cls,
+				Reason:  reason,
+			}, err
+		}
+		if !dec.Bool {
+			return MatchResult{
+				Matched: false,
+				Through: through,
+				Dialect: dialect,
+				Class:   MatchClassFalse,
+			}, nil
+		}
+		lastDialect = dialect
+	}
+
+	return MatchResult{
+		Matched: true,
+		Through: len(rules),
+		Dialect: lastDialect,
+		Class:   MatchClassMatched,
+	}, nil
+}
+
+func classifyMatchError(err error) (class, reason string) {
+	if cls, rsn, matched := classifyMatchErrorTopDown(err); matched {
+		return cls, rsn
+	}
+	if errors.Is(err, context.Canceled) {
+		return MatchClassFailed, celengine.ReasonCanceled
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return MatchClassFailed, celengine.ReasonTimeout
+	}
+	return MatchClassFailed, SkipReasonEvalFailed
+}
+
+func classifyMatchErrorTopDown(err error) (class, reason string, matched bool) {
+	if err == nil {
+		return "", "", false
+	}
+	if err == ruleengine.ErrBudgetExhausted {
+		return MatchClassBudget, SkipReasonBudgetExhausted, true
+	}
+	switch e := err.(type) {
+	case *ruleengine.UncertainError:
+		rsn := e.Reason
+		if rsn == "" {
+			rsn = SkipReasonRuleUncertain
+		}
+		return MatchClassUncertain, rsn, true
+	case *ruleengine.FailedError:
+		rsn := e.Reason
+		if rsn == "" {
+			rsn = SkipReasonEvalFailed
+		}
+		return MatchClassFailed, rsn, true
+	case *celengine.EvalError:
+		rsn := e.Reason
+		if rsn == "" {
+			rsn = SkipReasonEvalFailed
+		}
+		return MatchClassFailed, rsn, true
+	case *celengine.CompileError:
+		rsn := e.Category
+		if rsn == "" {
+			rsn = SkipReasonNoLongerCompiles
+		}
+		return MatchClassFailed, rsn, true
+	case *ruleengine.UnsupportedDialectError:
+		rsn := e.Reason
+		if rsn == "" {
+			rsn = "unsupported_dialect"
+		}
+		return MatchClassFailed, rsn, true
+	}
+
+	if multi, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, sub := range multi.Unwrap() {
+			if c, r, m := classifyMatchErrorTopDown(sub); m {
+				return c, r, true
+			}
+		}
+		return "", "", false
+	}
+	if single, ok := err.(interface{ Unwrap() error }); ok {
+		return classifyMatchErrorTopDown(single.Unwrap())
+	}
+	return "", "", false
 }
 
 // Subject evaluates rule for the trigger subject slot using the engine's
