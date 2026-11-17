@@ -148,6 +148,7 @@ func (s *Server) requireExperiment(name string, next http.HandlerFunc) http.Hand
 // skill names an experiment that is missing here.
 var dispatchExperimentNames = []string{
 	experiments.K8sNFSHome,
+	experiments.K8sWorkloadIdentitySetup,
 	experiments.AgentPlugins,
 	experiments.CloudRunNativeIdentity,
 	experiments.CloudRunEphemeralAgents,

@@ -24,7 +24,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -48,6 +50,7 @@ import (
 // listed.
 const (
 	GCPSAMappingMapped      = SAMappingStateMapped
+	GCPSAMappingCreatable   = SAMappingStateCreatable
 	GCPSAMappingNotMapped   = SAMappingStateNotMapped
 	GCPSAMappingUnknown     = SAMappingStateUnknown
 	GCPSAMappingNotReported = "not_reported"
@@ -255,13 +258,15 @@ func (s *Server) getGCPServiceAccountStatus(w http.ResponseWriter, r *http.Reque
 // needs the caller's identity.
 func (s *Server) buildGCPServiceAccountStatus(ctx context.Context, project *store.Project, sa *store.GCPServiceAccount, brokers []*store.RuntimeBroker) GCPServiceAccountStatus {
 	now := gcpSAWIBindingNow()
+	expOn := s.experimentEnabled(experiments.K8sWorkloadIdentitySetup)
+	allowCreate := expOn && sa.Managed
 	profiles := s.brokerKubernetesProfileMappings(brokers)
-	mappings := gcpSAProfileMappings(sa.Email, profiles, now)
+	mappings := gcpSAProfileMappingsFor(sa.Email, allowCreate, profiles, now)
 	binding := GCPServiceAccountBinding{
 		State:  GCPSABindingUnknown,
 		Reason: GCPSABindingReasonNotChecked,
 	}
-	if s.experimentEnabled(experiments.K8sWorkloadIdentitySetup) {
+	if expOn {
 		binding = s.evaluateWorkloadIdentityStatus(ctx, sa, brokers, mappings, now)
 	}
 	st := GCPServiceAccountStatus{
@@ -303,6 +308,10 @@ func gcpSAVerificationOf(sa *store.GCPServiceAccount) GCPServiceAccountVerificat
 // view, the warnings and the refusal agree. A profile with no report at all
 // is "not_reported"; one whose decision is not_required is left out.
 func gcpSAProfileMappings(email string, profiles []kubernetesProfileMappings, now time.Time) []GCPServiceAccountProfileMapping {
+	return gcpSAProfileMappingsFor(email, false, profiles, now)
+}
+
+func gcpSAProfileMappingsFor(email string, allowCreate bool, profiles []kubernetesProfileMappings, now time.Time) []GCPServiceAccountProfileMapping {
 	out := make([]GCPServiceAccountProfileMapping, 0, len(profiles))
 	key := strings.ToLower(email)
 	for _, p := range profiles {
@@ -310,14 +319,21 @@ func gcpSAProfileMappings(email string, profiles []kubernetesProfileMappings, no
 			BrokerID: p.brokerID, BrokerName: p.brokerName, Profile: p.profile, State: GCPSAMappingNotReported,
 		}
 		if p.reported {
-			d := p.decision(email, now)
+			d := p.decisionFor(email, allowCreate, now)
 			if d.State == SAMappingStateNotRequired {
 				continue
 			}
 			m.State, m.UnknownReason = d.State, d.Reason
-			if m.State == GCPSAMappingMapped {
+			switch m.State {
+			case GCPSAMappingMapped:
 				e := p.entries[key]
 				m.KubernetesServiceAccount, m.Namespace, m.Source = e.KSA, e.Namespace, e.Source
+			case GCPSAMappingCreatable:
+				if ksa, err := k8s.ConventionalKSAName(email); err == nil {
+					m.KubernetesServiceAccount = ksa
+				}
+				m.Namespace = d.Namespace
+				m.Source = api.BrokerKSASourceCreated
 			}
 			m.ReportedAt = p.report.MappingsReportedAt
 			if p.report.MappingsReported && !p.report.MappingsComplete {
@@ -344,15 +360,19 @@ func gcpSAProfileMappings(email string, profiles []kubernetesProfileMappings, no
 // notRequired counts those so the summary can leave them out of the
 // unreported count too.
 func gcpSAMappedCount(email string, profiles []kubernetesProfileMappings, now time.Time) (mapped, reported, notRequired int) {
+	return gcpSAMappedCountFor(email, false, profiles, now)
+}
+
+func gcpSAMappedCountFor(email string, allowCreate bool, profiles []kubernetesProfileMappings, now time.Time) (mapped, reported, notRequired int) {
 	for _, p := range profiles {
 		if !p.reported {
 			continue
 		}
-		switch p.decision(email, now).State {
+		switch p.decisionFor(email, allowCreate, now).State {
 		case SAMappingStateNotRequired:
 			notRequired++
 			continue
-		case SAMappingStateMapped:
+		case SAMappingStateMapped, SAMappingStateCreatable:
 			mapped++
 		}
 		reported++
@@ -422,7 +442,7 @@ func gcpSANextStepForBinding(verified bool, mappings []GCPServiceAccountProfileM
 	for i := range mappings {
 		m := &mappings[i]
 		switch m.State {
-		case GCPSAMappingMapped:
+		case GCPSAMappingMapped, GCPSAMappingCreatable:
 			anyMapped = true
 		case GCPSAMappingNotMapped, GCPSAMappingUnknown:
 			if m.State == GCPSAMappingUnknown && !m.Ambiguous {
@@ -594,9 +614,18 @@ type GCPServiceAccountMappingSummary struct {
 
 // annotateGCPSAMappings sets the mapping summary on every listed account.
 func annotateGCPSAMappings(items []GCPServiceAccountWithCapabilities, profiles []kubernetesProfileMappings) {
+	annotateGCPSAMappingsWithExperiment(items, profiles, false)
+}
+
+func (s *Server) annotateGCPSAMappings(items []GCPServiceAccountWithCapabilities, profiles []kubernetesProfileMappings) {
+	annotateGCPSAMappingsWithExperiment(items, profiles, s.experimentEnabled(experiments.K8sWorkloadIdentitySetup))
+}
+
+func annotateGCPSAMappingsWithExperiment(items []GCPServiceAccountWithCapabilities, profiles []kubernetesProfileMappings, expOn bool) {
 	now := time.Now()
 	for i := range items {
-		mapped, reported, notRequired := gcpSAMappedCount(items[i].Email, profiles, now)
+		allowCreate := expOn && items[i].Managed
+		mapped, reported, notRequired := gcpSAMappedCountFor(items[i].Email, allowCreate, profiles, now)
 		items[i].Mapping = &GCPServiceAccountMappingSummary{
 			MappedProfiles:     mapped,
 			ReportedProfiles:   reported,

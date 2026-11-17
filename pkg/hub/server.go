@@ -1893,6 +1893,10 @@ type RemoteHubAgentDefaults struct {
 	// (withDispatchImageTag). A broker that predates it ignores it and runs
 	// the images it resolves unchanged.
 	ImageTag string `json:"imageTag,omitempty"`
+	// CreateKSA authorizes opt-in broker KSA creation for a Hub-minted GCP
+	// service account while hub.k8s_workload_identity_setup is enabled
+	// (api.HubAgentDefaults.CreateKSA; ptone/scion#7966).
+	CreateKSA bool `json:"createKSA,omitempty"`
 }
 
 // RemoteGCPIdentityConfig holds GCP identity configuration sent from Hub to Broker.

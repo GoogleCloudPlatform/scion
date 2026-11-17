@@ -55,6 +55,7 @@ const INCOMPLETE_REASON_TEXT: Record<string, string> = {
 
 const MAPPING_STATE_TEXT: Record<string, string> = {
   mapped: 'Mapped',
+  creatable: 'KSA created at start',
   not_mapped: 'Not mapped',
   unknown: 'Unknown',
   not_reported: 'Not reported',
@@ -307,7 +308,13 @@ export class ScionGCPServiceAccountStatus extends LitElement {
 
   private renderMappingRow(m: GCPServiceAccountProfileMapping, showBinding: boolean) {
     const variant =
-      m.state === 'mapped' ? 'success' : m.state === 'not_mapped' ? 'warning' : 'neutral';
+      m.state === 'mapped'
+        ? 'success'
+        : m.state === 'creatable'
+          ? 'primary'
+          : m.state === 'not_mapped'
+            ? 'warning'
+            : 'neutral';
     // An unknown state carries its own reason, which covers an incomplete
     // report; the separate incomplete note is for the other states. An
     // ambiguous mapping is said once, by the ambiguous note.

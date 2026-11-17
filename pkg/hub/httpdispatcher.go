@@ -1057,7 +1057,10 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 		// or InlineConfig.Env, both of which outrank template and
 		// harness-config env at the broker) and lands at buildAgentEnv's
 		// lowest tier.
-		req.Config.HubAgentDefaults = withDispatchImageTag(remoteHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), experiments, tel.wireTelemetry()), imageTag)
+		req.Config.HubAgentDefaults = withDispatchCreateKSA(
+			withDispatchImageTag(remoteHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), experiments, tel.wireTelemetry()), imageTag),
+			d.shouldCreateKSA(ctx, agent, experiments),
+		)
 		req.Config.TelemetryPolicy = tel.telemetryPolicy()
 
 		req.ResolvedEnv = agent.AppliedConfig.Env
@@ -4132,12 +4135,15 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 		UserID:               agent.OwnerID,
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentStart"),
 		Workspace:            startEnv.workspace,
-		HubAgentDefaults:     withDispatchImageTag(startHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), startEnv.experiments, tel.wireTelemetry()), imageTag),
-		TelemetryPolicy:      tel.telemetryPolicy(),
-		Image:                d.dispatchImageForBroker(agent, imageTag),
-		TemplateName:         agent.Template,
-		PreviousProjectIDs:   d.previousProjectIDs(ctx, projectInfo),
-		NoAuth:               launchesWithoutCredentials(agent),
+		HubAgentDefaults: withDispatchCreateKSA(
+			withDispatchImageTag(startHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), startEnv.experiments, tel.wireTelemetry()), imageTag),
+			d.shouldCreateKSA(ctx, agent, startEnv.experiments),
+		),
+		TelemetryPolicy:    tel.telemetryPolicy(),
+		Image:              d.dispatchImageForBroker(agent, imageTag),
+		TemplateName:       agent.Template,
+		PreviousProjectIDs: d.previousProjectIDs(ctx, projectInfo),
+		NoAuth:             launchesWithoutCredentials(agent),
 	}
 	extras.TemplateID, extras.TemplateHash = dispatchTemplateIdentity(agent)
 	extras.Profile = dispatchProfile(agent)
@@ -4421,17 +4427,20 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		UserID:               agent.OwnerID,
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentRestart"),
 		Workspace:            startEnv.workspace,
-		HubAgentDefaults:     withDispatchImageTag(startHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), startEnv.experiments, tel.wireTelemetry()), imageTag),
-		TelemetryPolicy:      tel.telemetryPolicy(),
-		Image:                d.dispatchImageForBroker(agent, imageTag),
-		SharedWorkspace:      projectInfo.sharedWorkspace,
-		TemplateName:         agent.Template,
-		ProjectPath:          projectInfo.projectPath,
-		ProjectSlug:          projectInfo.projectSlug,
-		SharedDirs:           projectInfo.sharedDirs,
-		ResolvedSecrets:      startEnv.secrets,
-		PreviousProjectIDs:   d.previousProjectIDs(ctx, projectInfo),
-		NoAuth:               launchesWithoutCredentials(agent),
+		HubAgentDefaults: withDispatchCreateKSA(
+			withDispatchImageTag(startHubAgentDefaults(d.hubAgentDefaults(), d.autoExposePortsDefault(), startEnv.experiments, tel.wireTelemetry()), imageTag),
+			d.shouldCreateKSA(ctx, agent, startEnv.experiments),
+		),
+		TelemetryPolicy:    tel.telemetryPolicy(),
+		Image:              d.dispatchImageForBroker(agent, imageTag),
+		SharedWorkspace:    projectInfo.sharedWorkspace,
+		TemplateName:       agent.Template,
+		ProjectPath:        projectInfo.projectPath,
+		ProjectSlug:        projectInfo.projectSlug,
+		SharedDirs:         projectInfo.sharedDirs,
+		ResolvedSecrets:    startEnv.secrets,
+		PreviousProjectIDs: d.previousProjectIDs(ctx, projectInfo),
+		NoAuth:             launchesWithoutCredentials(agent),
 	}
 	extras.TemplateID, extras.TemplateHash = dispatchTemplateIdentity(agent)
 	extras.Profile = dispatchProfile(agent)

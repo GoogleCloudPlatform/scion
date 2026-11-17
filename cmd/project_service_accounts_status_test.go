@@ -119,6 +119,7 @@ func TestPrintSAStatus_MappingDetails(t *testing.T) {
     {"brokerId":"b1","brokerName":"b","profile":"gke-9","state":"unknown","unknownReason":"report_incomplete"},
     {"brokerId":"b1","brokerName":"b","profile":"gke-4","state":"unknown","unknownReason":"ambiguous_mapping","ambiguous":true},
     {"brokerId":"b1","brokerName":"b","profile":"gke-10","state":"unknown","unknownReason":"runtime_unrecognized"},
+    {"brokerId":"b1","brokerName":"b","profile":"gke-creatable","state":"creatable","kubernetesServiceAccount":"worker","namespace":"agents","source":"created"},
     {"brokerId":"b1","brokerName":"b","profile":"gke-5","state":"mapped"}
   ],
   "workloadIdentityBinding":{"state":"unknown"},
@@ -145,6 +146,7 @@ func TestPrintSAStatus_MappingDetails(t *testing.T) {
 		"b/gke-4                         unknown; ambiguous: more than one Kubernetes service account is annotated with it\n",
 		// A reason code without its own text is shown as-is.
 		"b/gke-10                        unknown; runtime unrecognized\n",
+		"b/gke-creatable                 KSA created at start (KSA worker, namespace agents, created)\n",
 		// An older broker's entry names only the state.
 		"b/gke-5                         mapped\n",
 	} {

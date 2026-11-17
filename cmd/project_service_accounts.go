@@ -373,6 +373,7 @@ func runSAShow(cmd *cobra.Command, args []string) error {
 // saMappingStateText renders a mapping state for humans.
 var saMappingStateText = map[string]string{
 	"mapped":       "mapped",
+	"creatable":    "KSA created at start",
 	"not_mapped":   "not mapped",
 	"unknown":      "unknown",
 	"not_reported": "not reported",

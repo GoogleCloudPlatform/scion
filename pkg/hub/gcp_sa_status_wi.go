@@ -323,6 +323,9 @@ func (s *Server) evaluateWorkloadIdentityStatus(
 	conventionalKSA := gcpAccountID(sa.Email)
 	mappedProfiles := make(map[string]GCPServiceAccountProfileMapping, len(mappings))
 	for i := range mappings {
+		// Only already-mapped profiles override the conventional <account ID>;
+		// a creatable profile (KSA not yet created) checks the conventional
+		// member that the broker will create at start.
 		if mappings[i].State == GCPSAMappingMapped {
 			mappedProfiles[mappings[i].BrokerID+"\x00"+mappings[i].Profile] = mappings[i]
 		}

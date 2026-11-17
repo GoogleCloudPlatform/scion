@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -183,6 +184,7 @@ func (s *Server) resolveAssignStatusBroker(ctx context.Context, projectID, reque
 var assignStatusMessages = map[string]string{
 	SAMappingStateMapped: "Mapped: the broker's latest report for this profile lists a Kubernetes service account for it. " +
 		"The Workload Identity IAM binding is not checked.",
+	SAMappingStateCreatable: "KSA created at start: the broker creates the conventional Kubernetes service account on first start for this hub-minted account.",
 	SAMappingStateNotMapped: "Not mapped: the broker's latest complete report for this profile lists no Kubernetes service account for it. " +
 		"An agent assigned it on this profile is refused at start until a broker operator maps it.",
 	SAMappingStateNotRequired: "No mapping needed: this profile's runtime is not Kubernetes.",
@@ -200,7 +202,11 @@ var assignStatusMessages = map[string]string{
 
 // assignStatusFor builds the status for one account.
 func assignStatusFor(b assignStatusBroker, profile, email string, now time.Time) *GCPServiceAccountAssignStatus {
-	d := profileSAMappingDecision(b.broker, profile, email, now)
+	return assignStatusForWithCreate(b, profile, email, false, now)
+}
+
+func assignStatusForWithCreate(b assignStatusBroker, profile, email string, allowCreate bool, now time.Time) *GCPServiceAccountAssignStatus {
+	d := profileSAMappingDecisionWithCreate(b.broker, profile, email, allowCreate, now)
 	st := &GCPServiceAccountAssignStatus{
 		State:      d.State,
 		Reason:     d.Reason,
@@ -229,8 +235,10 @@ func (s *Server) annotateGCPSAAssignStatus(ctx context.Context, items []GCPServi
 		return
 	}
 	b := s.resolveAssignStatusBroker(ctx, projectID, req.broker)
+	expOn := s.experimentEnabled(experiments.K8sWorkloadIdentitySetup)
 	now := time.Now()
 	for i := range items {
-		items[i].AssignStatus = assignStatusFor(b, req.profile, items[i].Email, now)
+		allowCreate := expOn && items[i].Managed
+		items[i].AssignStatus = assignStatusForWithCreate(b, req.profile, items[i].Email, allowCreate, now)
 	}
 }

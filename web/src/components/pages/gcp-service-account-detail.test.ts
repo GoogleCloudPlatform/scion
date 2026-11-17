@@ -116,6 +116,15 @@ function statusView(overrides: Partial<GCPServiceAccountStatus> = {}): GCPServic
         ambiguous: true,
       },
       { brokerId: 'b1', brokerName: 'b', profile: 'gke-old', state: 'mapped' },
+      {
+        brokerId: 'b1',
+        brokerName: 'b',
+        profile: 'gke-creatable',
+        state: 'creatable',
+        kubernetesServiceAccount: 'worker',
+        namespace: 'agents',
+        source: 'created',
+      },
       { brokerId: 'b1', brokerName: 'b', profile: 'gke-silent', state: 'not_reported' },
     ],
     workloadIdentityBinding: { state: 'unknown', reason: 'not checked' },
@@ -211,6 +220,14 @@ describe('GCP service account detail: status sections', () => {
     expect(mapped).toContain('agents');
     expect(mapped).toContain('discovered');
     expect(mapped).toContain('5 minutes ago');
+
+    const creatable = root
+      .querySelector('tr[data-profile="gke-creatable"]')!
+      .textContent!.replace(/\s+/g, ' ');
+    expect(creatable).toContain('KSA created at start');
+    expect(creatable).toContain('worker');
+    expect(creatable).toContain('agents');
+    expect(creatable).toContain('created');
 
     // "Not mapped" only on an authoritative report; otherwise unknown, with why.
     const incomplete = root.querySelector('tr[data-profile="gke-2"]')!;

@@ -272,9 +272,9 @@ func (s *Server) listGCPServiceAccountsScoped(w http.ResponseWriter, r *http.Req
 		if len(items) > 0 {
 			profiles = s.projectKubernetesProfileMappings(ctx, req.scopeID)
 		}
-		annotateGCPSAMappings(items, profiles)
+		s.annotateGCPSAMappings(items, profiles)
 		s.annotateGCPSAAssignStatus(ctx, items, req.scopeID, assignReq)
-		warnings = projectSAMappingWarningsFrom(req.scopeID,
+		warnings = s.projectSAMappingWarningsFrom(req.scopeID,
 			func() projectSAMappingView { return projectSAMappingViewFrom(profiles) }, saPtrs...)
 	} else {
 		warnings = s.hubSAMappingWarnings(ctx, saPtrs...)
@@ -976,7 +976,7 @@ func (s *Server) mintHubScopedGCPServiceAccount(w http.ResponseWriter, r *http.R
 
 	writeJSON(w, http.StatusCreated, gcpServiceAccountWithWarnings{
 		GCPServiceAccount:        *sa,
-		Warnings:                 hubSAMappingWarningsFrom(warningView, sa),
+		Warnings:                 s.hubSAMappingWarningsFrom(warningView, sa),
 		WorkloadIdentityBindings: wiBindings,
 	})
 }
