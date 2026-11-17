@@ -486,6 +486,7 @@ describe('scion-page-profile-settings — view mode shortcuts', () => {
     element = await createComponent(createFetchHandler({}));
 
     expect(shadowText(element)).toContain('View mode shortcuts');
+    expect(shadowText(element)).toContain('Switch between Console, Chat and Terminal');
     expect(shortcutsSwitch().hasAttribute('checked')).toBe(true);
   });
 

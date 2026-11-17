@@ -992,7 +992,7 @@ describe('view mode shortcuts', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
 
-  it('Ctrl+1, Ctrl+2 and Ctrl+3 switch to Dashboard, Chat and Terminal', async () => {
+  it('Ctrl+1, Ctrl+2 and Ctrl+3 switch to Console, Chat and Terminal', async () => {
     await mountHeader({ currentPath: '/projects/p1' });
 
     press(document.body, { code: 'Digit2', key: '2', ctrlKey: true });
@@ -1315,7 +1315,7 @@ describe('view mode shortcuts', () => {
       const el = await mountHeader({ currentPath: '/projects/p1' });
 
       expect(modeTooltips(el)).toEqual([
-        'Dashboard · Ctrl+1',
+        'Console · Ctrl+1',
         'Chat · Ctrl+2',
         'Terminals (0) · Ctrl+3',
       ]);
@@ -1329,7 +1329,7 @@ describe('view mode shortcuts', () => {
       await el.updateComplete;
       try {
         expect(modeTooltips(el)).toEqual([
-          'Dashboard · Ctrl+1',
+          'Console · Ctrl+1',
           'Chat, 3 unread conversations · Ctrl+2',
           'Terminals (0) · Ctrl+3',
         ]);
@@ -1355,7 +1355,7 @@ describe('view mode shortcuts', () => {
       setPlatform('MacIntel');
       const el = await mountHeader({ currentPath: '/projects/p1' });
 
-      expect(modeTooltips(el)).toEqual(['Dashboard · ⌘1', 'Chat · ⌘2', 'Terminals (0) · ⌘3']);
+      expect(modeTooltips(el)).toEqual(['Console · ⌘1', 'Chat · ⌘2', 'Terminals (0) · ⌘3']);
       expect(modeButtons(el)).toEqual(['Meta+1', 'Meta+2', 'Meta+3']);
       expect(menuHints(el)).toEqual(['⌘1', '⌘2', '⌘3']);
     });
@@ -1364,7 +1364,7 @@ describe('view mode shortcuts', () => {
       setViewModeShortcutsEnabled(false);
       const el = await mountHeader({ currentPath: '/projects/p1' });
 
-      expect(modeTooltips(el)).toEqual(['Dashboard', 'Chat', 'Terminals (0)']);
+      expect(modeTooltips(el)).toEqual(['Console', 'Chat', 'Terminals (0)']);
       expect(modeButtons(el)).toEqual([null, null, null]);
       expect(menuHints(el)).toEqual([]);
 
@@ -1378,7 +1378,7 @@ describe('view mode shortcuts', () => {
       stubTouchPrimary(true);
       const el = await mountHeader({ currentPath: '/projects/p1' });
 
-      expect(modeTooltips(el)).toEqual(['Dashboard', 'Chat', 'Terminals (0)']);
+      expect(modeTooltips(el)).toEqual(['Console', 'Chat', 'Terminals (0)']);
       expect(menuHints(el)).toEqual([]);
 
       // Control: the shortcut itself still works for a hardware keyboard.
@@ -1386,5 +1386,54 @@ describe('view mode shortcuts', () => {
       await settled();
       expect(navTargets).toEqual(['/terminals']);
     });
+  });
+});
+
+describe('mode switcher: Console label and distinct icon', () => {
+  it('labels the segmented mode button Console with grid-1x2 in wide and medium tiers', async () => {
+    const el = await mountHeader({ currentPath: '/projects/p1' });
+    const switches = Array.from(el.shadowRoot?.querySelectorAll('.mode-switch') ?? []);
+    expect(switches).toHaveLength(2);
+
+    for (const sw of switches) {
+      const firstButton = sw.querySelector('button');
+      expect(firstButton?.getAttribute('aria-label')).toBe('Console');
+      expect(firstButton?.querySelector('.mode-label')?.textContent?.trim()).toBe('Console');
+      expect(firstButton?.querySelector('sl-icon')?.getAttribute('name')).toBe('grid-1x2');
+      expect(firstButton?.querySelector('sl-icon')?.getAttribute('name')).not.toBe('house');
+    }
+  });
+
+  it('labels the narrow-tier dropdown trigger and menu item Console with grid-1x2 while keeping value="dashboard"', async () => {
+    const el = await mountHeader({ currentPath: '/' });
+    const dropdown = el.shadowRoot?.querySelector('.compact-mode-dropdown');
+    const triggerIcon = dropdown?.querySelector('.mode-trigger .mode-icon sl-icon');
+    const triggerLabel = dropdown?.querySelector('.mode-trigger .mode-dropdown-label');
+    expect(triggerIcon?.getAttribute('name')).toBe('grid-1x2');
+    expect(triggerLabel?.textContent?.trim()).toBe('Console');
+
+    const item = dropdown?.querySelector('sl-menu-item[value="dashboard"]');
+    expect(item).not.toBeNull();
+    expect(item?.querySelector('sl-icon[slot="prefix"]')?.getAttribute('name')).toBe('grid-1x2');
+    // Text content excluding the suffix <kbd> shortcut hint
+    const directText = Array.from(item?.childNodes ?? [])
+      .filter((n) => n.nodeType === Node.TEXT_NODE)
+      .map((n) => n.textContent ?? '')
+      .join('')
+      .trim();
+    expect(directText).toBe('Console');
+  });
+
+  it('keeps the left-nav Dashboard item named Dashboard with the house icon', async () => {
+    await import('./nav.js');
+    const nav = document.createElement('scion-nav');
+    nav.user = TEST_USER;
+    nav.currentPath = '/';
+    document.body.appendChild(nav);
+    await nav.updateComplete;
+
+    const homeLink = nav.shadowRoot?.querySelector('a.nav-link[href="/"]');
+    expect(homeLink?.querySelector('.nav-link-text')?.textContent?.trim()).toBe('Dashboard');
+    expect(homeLink?.querySelector('sl-icon')?.getAttribute('name')).toBe('house');
   });
 });
