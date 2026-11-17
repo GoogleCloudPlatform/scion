@@ -290,3 +290,17 @@ export const EXEC_SCHEDULES_FLAG = 'hub.exec_schedules';
 export function execSchedulesEnabled(): boolean {
   return isFeatureEnabled(EXEC_SCHEDULES_FLAG);
 }
+
+/**
+ * Workload Identity setup for minted service accounts
+ * (hub.k8s_workload_identity_setup, ptone/scion#3329 phase 5): shows the
+ * per-target Workload Identity binding lines in the service account mint
+ * dialog. Presentation only: the hub checks the experiment before making any
+ * IAM grant. Default OFF.
+ */
+export const K8S_WORKLOAD_IDENTITY_SETUP_FLAG = 'hub.k8s_workload_identity_setup';
+
+/** Whether Workload Identity setup UI surfaces are enabled in this session. */
+export function k8sWorkloadIdentitySetupEnabled(): boolean {
+  return isFeatureEnabled(K8S_WORKLOAD_IDENTITY_SETUP_FLAG);
+}

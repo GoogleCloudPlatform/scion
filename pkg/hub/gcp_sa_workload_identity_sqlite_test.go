@@ -20,9 +20,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -72,6 +74,7 @@ func setWorkloadIdentityTargets(t *testing.T, s store.Store, brokerID string, ca
 
 type wiMintResponse struct {
 	store.GCPServiceAccount
+	Warnings                 []string                      `json:"warnings"`
 	WorkloadIdentityBindings []api.WorkloadIdentityBinding `json:"workloadIdentityBindings"`
 }
 
@@ -86,11 +89,48 @@ func mintForWI(t *testing.T, srv *Server, projectID string) (wiMintResponse, str
 	return resp, rec.Body.String()
 }
 
+func mintHubForWI(t *testing.T, srv *Server, admin *store.User) (wiMintResponse, string) {
+	t.Helper()
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost,
+		"/api/v1/gcp-service-accounts/mint?scope=hub",
+		map[string]string{"account_id": "wi-hub"})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var resp wiMintResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	return resp, rec.Body.String()
+}
+
+func addStandaloneBroker(t *testing.T, s store.Store, name string, profiles ...store.BrokerProfile) *store.RuntimeBroker {
+	t.Helper()
+	b := &store.RuntimeBroker{
+		ID:       tid("wi-hub-" + name + "-" + t.Name()),
+		Name:     name,
+		Slug:     "wi-hub-" + name + "-" + tidSlugSafe(t.Name()),
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+		Profiles: profiles,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(context.Background(), b))
+	return b
+}
+
+func wiAuditEvents(events []*GCPTokenEvent) []*GCPTokenEvent {
+	var out []*GCPTokenEvent
+	for _, e := range events {
+		if e.EventType == GCPTokenEventWIBinding {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // Experiment on: the mint grants the Workload Identity role for every
 // serving Kubernetes target in one write, reports each target, and leaves
 // the required grants unchanged.
 func TestMintGCPServiceAccount_WorkloadIdentityBindings(t *testing.T) {
 	srv, s, mock := testServerWithMinting(t)
+	audit := &mockAuditLogger{}
+	srv.auditLogger = audit
 	setWorkloadIdentitySetupExperiment(t, srv, true)
 	projectID := createTestProjectForSA(t, srv, nil)
 	a := addProviderBroker(t, s, projectID, "a", k8sProfile("gke", false), k8sProfile("gke-dev", false))
@@ -121,6 +161,15 @@ func TestMintGCPServiceAccount_WorkloadIdentityBindings(t *testing.T) {
 	assert.Equal(t, api.WorkloadIdentityReasonNoPool, resp.WorkloadIdentityBindings[1].Reason)
 	assert.Equal(t, []string{"old/k8s"}, resp.WorkloadIdentityBindings[2].Profiles)
 	assert.Contains(t, resp.WorkloadIdentityBindings[2].Detail, "does not report", "a broker without wi_targets_v1")
+
+	wiEvents := wiAuditEvents(audit.gcpEvents)
+	require.Len(t, wiEvents, 3)
+	assert.True(t, wiEvents[0].Success)
+	assert.Equal(t, projectID, wiEvents[0].ProjectID)
+	assert.Equal(t, "serviceAccount:cluster-project.svc.id.goog[agents/scion-wi-test]", wiEvents[0].Member)
+	assert.Empty(t, wiEvents[0].FailReason)
+	assert.False(t, wiEvents[1].Success)
+	assert.Equal(t, "no_workload_identity_pool a/gke-dev", wiEvents[1].FailReason)
 }
 
 // A failed grant never fails the mint: the account is stored verified and
@@ -299,4 +348,233 @@ func wiLoadBroker(t *testing.T, s store.Store, id string) *store.RuntimeBroker {
 	got, err := s.GetRuntimeBroker(context.Background(), id)
 	require.NoError(t, err)
 	return got
+}
+
+// Hub-scoped mint with the experiment on: binds over every Runtime Broker on
+// the hub (whether linked to a project or standalone, legacy or flat),
+// merges duplicate (pool, namespace) pairs into one write, audits the bound
+// member, and uses only brokerSelf-reported, validated targets.
+func TestMintHubScopedGCPServiceAccount_WorkloadIdentityBindings(t *testing.T) {
+	srv, s, mock, admin, _ := setupHubMintTest(t)
+	audit := &mockAuditLogger{}
+	srv.auditLogger = audit
+	setWorkloadIdentitySetupExperiment(t, srv, true)
+	grantDevUserRuntimeBrokerAccess(t, s)
+
+	projectID := createTestProjectForSA(t, srv, nil)
+	a := addProviderBroker(t, s, projectID, "a", k8sProfile("gke", false), k8sProfile("gke-dev", false))
+	setWorkloadIdentityTargets(t, s, a.ID, true, []store.WorkloadIdentityTarget{
+		{Profile: "gke", Pool: "cluster-one.svc.id.goog", Namespace: "agents"},
+	})
+
+	// A broker linked to no project at all still receives bindings at hub
+	// scope, and shares the (cluster-one, agents) entry with a/gke.
+	standalone := addStandaloneBroker(t, s, "standalone", k8sProfile("prod", false), k8sProfile("staging", false))
+	standaloneTargets := []store.WorkloadIdentityTarget{
+		{Profile: "prod", Pool: "cluster-one.svc.id.goog", Namespace: "agents"},
+		{Profile: "staging", Pool: "cluster-two.svc.id.goog", Namespace: "team"},
+		{Profile: "staging", Pool: "$(evil).svc.id.goog", Namespace: "team"},
+	}
+	wiHeartbeatAsBroker(t, srv, standalone.ID, brokerHeartbeatRequest{
+		Status:                  "online",
+		Capabilities:            &store.BrokerCapabilities{WITargetsV1: true},
+		WorkloadIdentityTargets: &standaloneTargets,
+	})
+
+	// A user-authenticated heartbeat cannot plant targets on a broker for a
+	// hub-scoped mint either.
+	untrusted := addStandaloneBroker(t, s, "old", k8sProfile("k8s", false))
+	hostile := []store.WorkloadIdentityTarget{{Profile: "k8s", Pool: "attacker-proj.svc.id.goog", Namespace: "agents"}}
+	postHeartbeat(t, srv, untrusted.ID, brokerHeartbeatRequest{Status: "online", WorkloadIdentityTargets: &hostile})
+
+	// Non-Kubernetes brokers are ignored.
+	addStandaloneBroker(t, s, "docker-only", store.BrokerProfile{Name: "local", Type: "docker"})
+
+	resp, _ := mintHubForWI(t, srv, admin)
+	assert.True(t, resp.Verified)
+	assert.True(t, resp.Managed)
+	assert.Equal(t, store.ScopeHub, resp.Scope)
+	assert.Equal(t, "scion-wi-hub@test-hub-project.iam.gserviceaccount.com", resp.Email)
+
+	require.Len(t, mock.addMembersCalls, 1, "one batched policy write across all brokers")
+	assert.Equal(t, mockAddRoleMembersCall{
+		SAEmail: resp.Email,
+		Role:    "roles/iam.workloadIdentityUser",
+		Members: []string{
+			"serviceAccount:cluster-one.svc.id.goog[agents/scion-wi-hub]",
+			"serviceAccount:cluster-two.svc.id.goog[team/scion-wi-hub]",
+		},
+	}, mock.addMembersCalls[0])
+	require.Len(t, mock.iamPolicies, 2, "the required grants are unchanged")
+
+	require.Len(t, resp.WorkloadIdentityBindings, 4)
+	assert.Equal(t, api.WorkloadIdentityBinding{
+		Pool: "cluster-one.svc.id.goog", Namespace: "agents", KSA: "scion-wi-hub",
+		Member:   "serviceAccount:cluster-one.svc.id.goog[agents/scion-wi-hub]",
+		Profiles: []string{"a/gke", "standalone/prod"}, State: api.WorkloadIdentityBindingBound,
+	}, resp.WorkloadIdentityBindings[0])
+	assert.Equal(t, api.WorkloadIdentityBinding{
+		Pool: "cluster-two.svc.id.goog", Namespace: "team", KSA: "scion-wi-hub",
+		Member:   "serviceAccount:cluster-two.svc.id.goog[team/scion-wi-hub]",
+		Profiles: []string{"standalone/staging"}, State: api.WorkloadIdentityBindingBound,
+	}, resp.WorkloadIdentityBindings[1])
+	assert.Equal(t, []string{"a/gke-dev"}, resp.WorkloadIdentityBindings[2].Profiles)
+	assert.Equal(t, api.WorkloadIdentityReasonNoPool, resp.WorkloadIdentityBindings[2].Reason)
+	assert.Equal(t, []string{"old/k8s"}, resp.WorkloadIdentityBindings[3].Profiles)
+	assert.Equal(t, api.WorkloadIdentityReasonNoPool, resp.WorkloadIdentityBindings[3].Reason)
+	assert.Contains(t, resp.WorkloadIdentityBindings[3].Detail, "does not report")
+
+	wiEvents := wiAuditEvents(audit.gcpEvents)
+	require.Len(t, wiEvents, 4)
+	assert.True(t, wiEvents[0].Success)
+	assert.Empty(t, wiEvents[0].ProjectID, "hub-scoped mint carries empty projectId")
+	assert.Equal(t, "serviceAccount:cluster-one.svc.id.goog[agents/scion-wi-hub]", wiEvents[0].Member)
+	assert.True(t, wiEvents[1].Success)
+	assert.Equal(t, "serviceAccount:cluster-two.svc.id.goog[team/scion-wi-hub]", wiEvents[1].Member)
+	assert.False(t, wiEvents[2].Success)
+	assert.Equal(t, "no_workload_identity_pool a/gke-dev", wiEvents[2].FailReason)
+}
+
+func TestMintHubScopedGCPServiceAccount_WorkloadIdentityGrantFailureKeepsMint(t *testing.T) {
+	srv, s, mock, admin, _ := setupHubMintTest(t)
+	setWorkloadIdentitySetupExperiment(t, srv, true)
+	mock.addMembersErr = func(int, []string) error {
+		return &googleapi.Error{Code: http.StatusForbidden, Message: "denied"}
+	}
+	b := addStandaloneBroker(t, s, "a", k8sProfile("gke", false))
+	setWorkloadIdentityTargets(t, s, b.ID, true, []store.WorkloadIdentityTarget{
+		{Profile: "gke", Pool: "cluster-project.svc.id.goog", Namespace: "agents"},
+	})
+
+	resp, _ := mintHubForWI(t, srv, admin)
+	assert.True(t, resp.Verified)
+	assert.True(t, resp.Managed)
+	assert.Equal(t, store.ScopeHub, resp.Scope)
+	assert.Empty(t, mock.deletedSAs, "the account is not cleaned up")
+	stored, err := s.GetGCPServiceAccount(context.Background(), resp.ID)
+	require.NoError(t, err)
+	assert.True(t, stored.Verified)
+	require.Len(t, resp.WorkloadIdentityBindings, 1)
+	entry := resp.WorkloadIdentityBindings[0]
+	assert.Equal(t, api.WorkloadIdentityBindingSkipped, entry.State)
+	assert.Equal(t, api.WorkloadIdentityReasonPermissionDenied, entry.Reason)
+	assert.Contains(t, entry.ManualStep, "gcloud iam service-accounts add-iam-policy-binding '"+resp.Email+"'")
+}
+
+func TestMintHubScopedGCPServiceAccount_WorkloadIdentityExperimentOff(t *testing.T) {
+	srv, s, mock, admin, _ := setupHubMintTest(t)
+	setWorkloadIdentitySetupExperiment(t, srv, false)
+	b := addStandaloneBroker(t, s, "a", k8sProfile("gke", false))
+	setWorkloadIdentityTargets(t, s, b.ID, true, []store.WorkloadIdentityTarget{
+		{Profile: "gke", Pool: "cluster-project.svc.id.goog", Namespace: "agents"},
+	})
+
+	_, body := mintHubForWI(t, srv, admin)
+	assert.Empty(t, mock.addMembersCalls)
+	assert.NotContains(t, body, "workloadIdentityBindings")
+}
+
+func TestMintHubScopedGCPServiceAccount_WorkloadIdentityNoKubernetesTargets(t *testing.T) {
+	srv, s, mock, admin, _ := setupHubMintTest(t)
+	setWorkloadIdentitySetupExperiment(t, srv, true)
+	addStandaloneBroker(t, s, "a", store.BrokerProfile{Name: "local", Type: "docker"})
+
+	_, body := mintHubForWI(t, srv, admin)
+	assert.Empty(t, mock.addMembersCalls)
+	assert.NotContains(t, body, "workloadIdentityBindings")
+}
+
+type wiBrokerReadCountStore struct {
+	store.Store
+	fault           *storeFaultSwitch
+	failListBrokers atomic.Bool
+	providersReads  atomic.Int32
+	brokerGets      atomic.Int32
+	brokerLists     atomic.Int32
+}
+
+func (c *wiBrokerReadCountStore) GetProjectProviders(ctx context.Context, projectID string) ([]store.ProjectProvider, error) {
+	if c.fault.Active() {
+		c.providersReads.Add(1)
+	}
+	return c.Store.GetProjectProviders(ctx, projectID)
+}
+
+func (c *wiBrokerReadCountStore) GetRuntimeBroker(ctx context.Context, id string) (*store.RuntimeBroker, error) {
+	if c.fault.Active() {
+		c.brokerGets.Add(1)
+	}
+	return c.Store.GetRuntimeBroker(ctx, id)
+}
+
+func (c *wiBrokerReadCountStore) ListRuntimeBrokers(ctx context.Context, filter store.RuntimeBrokerFilter, opts store.ListOptions) (*store.ListResult[store.RuntimeBroker], error) {
+	if c.fault.Active() {
+		c.brokerLists.Add(1)
+		if c.failListBrokers.Load() {
+			return nil, errors.New("broker listing failed")
+		}
+	}
+	return c.Store.ListRuntimeBrokers(ctx, filter, opts)
+}
+
+// Each mint reads its broker set once and reuses it for both the Workload
+// Identity plan and the SA mapping warnings.
+func TestMintGCPServiceAccount_BrokerListReusedForWarnings(t *testing.T) {
+	t.Run("project scope", func(t *testing.T) {
+		srv, s, mock := testServerWithMinting(t)
+		counter, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *wiBrokerReadCountStore {
+			return &wiBrokerReadCountStore{Store: inner, fault: f}
+		})
+		setWorkloadIdentitySetupExperiment(t, srv, true)
+		projectID := createTestProjectForSA(t, srv, nil)
+		b := addProviderBroker(t, s, projectID, "a", authoritativeProfile("gke", mappedGSA))
+		setWorkloadIdentityTargets(t, s, b.ID, true, []store.WorkloadIdentityTarget{
+			{Profile: "gke", Pool: "cluster-project.svc.id.goog", Namespace: "agents"},
+		})
+
+		fault.Arm()
+		resp, _ := mintForWI(t, srv, projectID)
+		assert.Len(t, mock.addMembersCalls, 1)
+		require.Len(t, resp.WorkloadIdentityBindings, 1)
+		assert.Equal(t, api.WorkloadIdentityBindingBound, resp.WorkloadIdentityBindings[0].State)
+		require.Len(t, resp.Warnings, 1, "unmapped warning still produced from the reused broker list")
+		assert.Contains(t, resp.Warnings[0], resp.Email)
+		assert.Equal(t, int32(1), counter.providersReads.Load(), "GetProjectProviders called once")
+		assert.Equal(t, int32(1), counter.brokerGets.Load(), "GetRuntimeBroker called once")
+	})
+
+	t.Run("hub scope", func(t *testing.T) {
+		srv, s, mock, admin, _ := setupHubMintTest(t)
+		counter, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *wiBrokerReadCountStore {
+			return &wiBrokerReadCountStore{Store: inner, fault: f}
+		})
+		setWorkloadIdentitySetupExperiment(t, srv, true)
+		b := addStandaloneBroker(t, s, "a", authoritativeProfile("gke", mappedGSA))
+		setWorkloadIdentityTargets(t, s, b.ID, true, []store.WorkloadIdentityTarget{
+			{Profile: "gke", Pool: "cluster-project.svc.id.goog", Namespace: "agents"},
+		})
+
+		fault.Arm()
+		resp, _ := mintHubForWI(t, srv, admin)
+		assert.Len(t, mock.addMembersCalls, 1)
+		require.Len(t, resp.WorkloadIdentityBindings, 1)
+		assert.Equal(t, api.WorkloadIdentityBindingBound, resp.WorkloadIdentityBindings[0].State)
+		require.Len(t, resp.Warnings, 1, "unmapped hub warning still produced from the reused broker list")
+		assert.Contains(t, resp.Warnings[0], "of this hub")
+		assert.Equal(t, int32(1), counter.brokerLists.Load(), "ListRuntimeBrokers called once")
+	})
+
+	t.Run("hub scope broker list failure still mints", func(t *testing.T) {
+		srv, s, _, admin, _ := setupHubMintTest(t)
+		counter, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *wiBrokerReadCountStore {
+			return &wiBrokerReadCountStore{Store: inner, fault: f}
+		})
+		setWorkloadIdentitySetupExperiment(t, srv, true)
+		addStandaloneBroker(t, s, "a", authoritativeProfile("gke", mappedGSA))
+
+		counter.failListBrokers.Store(true)
+		fault.Arm()
+		resp, _ := mintHubForWI(t, srv, admin)
+		assert.True(t, resp.Verified)
+	})
 }

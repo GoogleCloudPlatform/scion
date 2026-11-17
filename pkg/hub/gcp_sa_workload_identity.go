@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 
 	"google.golang.org/api/googleapi"
@@ -54,10 +55,6 @@ import (
 // roleWorkloadIdentityUser is the role a Workload Identity member needs on
 // a GSA to act as it.
 const roleWorkloadIdentityUser = "roles/iam.workloadIdentityUser"
-
-// GCPTokenEventWIBinding audits one Workload Identity grant made, or
-// skipped, at mint.
-const GCPTokenEventWIBinding GCPTokenEventType = "gcp_sa.wi_binding"
 
 // maxWorkloadIdentityTargets caps the Workload Identity targets stored for
 // one broker. A legacy broker reports one per Kubernetes profile and a flat
@@ -452,12 +449,12 @@ func isIAMPolicyConflict(err error) bool {
 }
 
 // projectWorkloadIdentityBindings runs the Workload Identity binding of a
-// project-scoped mint when the experiment is on: the plan over the
-// project's provider brokers, then the grant. Nil when the experiment is
-// off or the project has no Kubernetes runtime target.
-func (s *Server) projectWorkloadIdentityBindings(ctx context.Context, projectID, saEmail string) []api.WorkloadIdentityBinding {
+// project-scoped mint when the experiment is on (the plan over the project's
+// provider brokers, then the grant) and returns a mapping-warning view that
+// reuses the provider broker list it loaded.
+func (s *Server) projectWorkloadIdentityBindings(ctx context.Context, projectID, saEmail string) ([]api.WorkloadIdentityBinding, func() projectSAMappingView) {
 	if !s.experimentEnabled(experiments.K8sWorkloadIdentitySetup) {
-		return nil
+		return nil, func() projectSAMappingView { return s.projectSAMappings(ctx, projectID) }
 	}
 	brokers, complete := s.projectProviderBrokers(ctx, projectID)
 	if !complete {
@@ -466,19 +463,49 @@ func (s *Server) projectWorkloadIdentityBindings(ctx context.Context, projectID,
 		slog.Warn("GCP SA mint: the project's provider brokers could not all be read; Workload Identity bindings may miss some runtime targets",
 			"project_id", projectID, "sa_email", saEmail, "brokers_read", len(brokers))
 	}
+	warningView := func() projectSAMappingView {
+		return projectSAMappingViewFrom(s.brokerKubernetesProfileMappings(brokers))
+	}
 	plan := workloadIdentityMintPlanFor(brokers)
 	if plan.empty() {
-		return nil
+		return nil, warningView
 	}
-	return s.grantWorkloadIdentityBestEffort(ctx, saEmail, plan)
+	return s.grantWorkloadIdentityBestEffort(ctx, saEmail, plan), warningView
+}
+
+// hubWorkloadIdentityBindings runs the Workload Identity binding of a
+// hub-scoped mint when the experiment is on (the plan over every Runtime
+// Broker on the hub, then the grant; design §3.4) and returns a
+// mapping-warning view that reuses a complete broker walk.
+func (s *Server) hubWorkloadIdentityBindings(ctx context.Context, saEmail string) ([]api.WorkloadIdentityBinding, func() projectSAMappingView) {
+	if !s.experimentEnabled(experiments.K8sWorkloadIdentitySetup) {
+		return nil, func() projectSAMappingView { return s.hubSAMappings(ctx) }
+	}
+	brokers, complete := s.hubRuntimeBrokers(ctx)
+	warningView := func() projectSAMappingView { return s.hubSAMappings(ctx) }
+	if complete {
+		warningView = func() projectSAMappingView {
+			return mappingViewFrom("this hub", s.brokerKubernetesProfileMappings(brokers))
+		}
+	} else {
+		slog.Warn("GCP SA mint (hub scope): the hub's Runtime Brokers could not all be read; Workload Identity bindings may miss some runtime targets",
+			"sa_email", saEmail, "brokers_read", len(brokers))
+	}
+	plan := workloadIdentityMintPlanFor(brokers)
+	if plan.empty() {
+		return nil, warningView
+	}
+	return s.grantWorkloadIdentityBestEffort(ctx, saEmail, plan), warningView
 }
 
 // logWorkloadIdentityBindingsAudit audits each binding entry of a mint: a
-// bound entry as a success, any other as a failure whose reason names the
-// reason code and the member (or the runtime targets with no pool). The
-// structured log lines of grantWorkloadIdentityBestEffort carry the member
-// of a bound entry.
+// bound entry as a success naming the granted IAM member, and any other as
+// a failure whose reason names the reason code and the member (or the
+// runtime targets with no pool).
 func (s *Server) logWorkloadIdentityBindingsAudit(ctx context.Context, projectID string, sa *store.GCPServiceAccount, bindings []api.WorkloadIdentityBinding) {
+	if s.auditLogger == nil {
+		return
+	}
 	for _, b := range bindings {
 		bound := b.State == api.WorkloadIdentityBindingBound
 		reason := ""
@@ -489,7 +516,15 @@ func (s *Server) logWorkloadIdentityBindingsAudit(ctx context.Context, projectID
 			}
 			reason = b.Reason + " " + target
 		}
-		LogGCPTokenGeneration(ctx, s.auditLogger, GCPTokenEventWIBinding,
-			"", projectID, sa.Email, sa.ID, bound, reason)
+		_ = s.auditLogger.LogGCPTokenEvent(ctx, &GCPTokenEvent{
+			EventType:           GCPTokenEventWIBinding,
+			ProjectID:           projectID,
+			ServiceAccountEmail: sa.Email,
+			ServiceAccountID:    sa.ID,
+			Member:              b.Member,
+			Success:             bound,
+			FailReason:          reason,
+			Timestamp:           time.Now(),
+		})
 	}
 }

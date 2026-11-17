@@ -45,8 +45,10 @@ import type {
   GCPVerificationStatus,
   Capabilities,
   GCPMintQuotaInfo,
+  WorkloadIdentityBinding,
 } from '../../shared/types.js';
 import { can } from '../../shared/types.js';
+import { k8sWorkloadIdentitySetupEnabled } from '../../utils/feature-flags.js';
 import type { GCPSAListScope } from '../../shared/gcp-service-account-urls.js';
 import {
   saCreateUrl,
@@ -105,6 +107,7 @@ export class ScionGCPServiceAccountList extends LitElement {
   @state() private mintDialogLoading = false;
   @state() private mintDialogError: string | null = null;
   @state() private mintAllowSelfActAs = true;
+  @state() private mintedResult: GCPServiceAccount | null = null;
 
   // Quota info
   @state() private mintQuota: GCPMintQuotaInfo | null = null;
@@ -176,7 +179,8 @@ export class ScionGCPServiceAccountList extends LitElement {
         flex-wrap: wrap;
       }
 
-      .verify-failed-content .gcloud-command {
+      .verify-failed-content .gcloud-command,
+      .mint-result-content .gcloud-command {
         background: var(--sl-color-neutral-100, #f1f5f9);
         padding: 0.75rem 1rem;
         border-radius: 0.375rem;
@@ -186,6 +190,65 @@ export class ScionGCPServiceAccountList extends LitElement {
         overflow-x: auto;
         white-space: pre-wrap;
         word-break: break-all;
+      }
+
+      .mint-result-content {
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+      }
+
+      .mint-result-content p {
+        margin: 0;
+        line-height: 1.5;
+      }
+
+      .mint-result-content code {
+        background: var(--sl-color-neutral-100, #f1f5f9);
+        padding: 0.125rem 0.375rem;
+        border-radius: 0.25rem;
+        font-size: 0.875em;
+        word-break: break-all;
+      }
+
+      .wi-bindings-heading {
+        font-weight: 600;
+        font-size: 0.875rem;
+        margin-bottom: 0.5rem;
+      }
+
+      .wi-bindings-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+      }
+
+      .wi-binding-item {
+        display: flex;
+        flex-direction: column;
+        gap: 0.375rem;
+      }
+
+      .wi-binding-summary {
+        display: flex;
+        align-items: baseline;
+        flex-wrap: wrap;
+        gap: 0.375rem;
+        line-height: 1.5;
+      }
+
+      .wi-manual-step {
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+      }
+
+      .wi-propagation-note {
+        font-size: 0.8125rem;
+        color: var(--scion-text-muted, #64748b);
       }
     `,
   ];
@@ -304,11 +367,13 @@ export class ScionGCPServiceAccountList extends LitElement {
     this.mintDescription = '';
     this.mintAllowSelfActAs = true;
     this.mintDialogError = null;
+    this.mintedResult = null;
     this.mintDialogOpen = true;
   }
 
   private closeMintDialog(): void {
     this.mintDialogOpen = false;
+    this.mintedResult = null;
   }
 
   private async handleMint(e: Event): Promise<void> {
@@ -346,7 +411,15 @@ export class ScionGCPServiceAccountList extends LitElement {
       // Parse the minted SA from the response before any other consumption.
       const mintedSA = (await response.json().catch(() => null)) as GCPServiceAccount | null;
 
-      this.closeMintDialog();
+      const showWIBindings =
+        k8sWorkloadIdentitySetupEnabled() &&
+        Boolean(mintedSA?.workloadIdentityBindings && mintedSA.workloadIdentityBindings.length > 0);
+
+      if (showWIBindings) {
+        this.mintedResult = mintedSA;
+      } else {
+        this.closeMintDialog();
+      }
       await this.loadAccounts();
 
       if (mintedSA?.id) {
@@ -923,84 +996,160 @@ export class ScionGCPServiceAccountList extends LitElement {
   }
 
   private renderMintDialog() {
+    const result = this.mintedResult;
+    const bindings = result?.workloadIdentityBindings ?? [];
+    const anyBound = bindings.some((b) => b.state === 'bound');
+
     return html`
       <sl-dialog
         label="Mint GCP Service Account"
         ?open=${this.mintDialogOpen}
         @sl-request-close=${this.closeMintDialog}
       >
-        <form class="dialog-form" @submit=${this.handleMint}>
-          <sl-input
-            label="Account ID"
-            placeholder="Optional (e.g. my-pipeline → scion-my-pipeline)"
-            help-text="Leave empty for auto-generated ID. Will be prefixed with scion-."
-            value=${this.mintAccountId}
-            @sl-input=${(e: Event) => {
-              this.mintAccountId = (e.target as HTMLInputElement).value;
-            }}
-          ></sl-input>
+        ${result
+          ? html`
+              <div class="mint-result-content">
+                <p>Minted service account <code>${this.wiOneLine(result.email)}</code>.</p>
+                <div class="wi-bindings-section">
+                  <div class="wi-bindings-heading">Workload Identity bindings</div>
+                  <ul class="wi-bindings-list">
+                    ${bindings.map((b) => this.renderWorkloadIdentityBindingLine(b))}
+                  </ul>
+                </div>
+                ${anyBound
+                  ? html`<p class="wi-propagation-note">
+                      A new Workload Identity binding can take a few minutes to take effect.
+                    </p>`
+                  : nothing}
+              </div>
 
-          <sl-input
-            label="Display Name"
-            placeholder="Optional human-friendly label"
-            value=${this.mintDisplayName}
-            @sl-input=${(e: Event) => {
-              this.mintDisplayName = (e.target as HTMLInputElement).value;
-            }}
-          ></sl-input>
+              <sl-button slot="footer" variant="primary" @click=${this.closeMintDialog}>
+                Done
+              </sl-button>
+            `
+          : html`
+              <form class="dialog-form" @submit=${this.handleMint}>
+                <sl-input
+                  label="Account ID"
+                  placeholder="Optional (e.g. my-pipeline → scion-my-pipeline)"
+                  help-text="Leave empty for auto-generated ID. Will be prefixed with scion-."
+                  value=${this.mintAccountId}
+                  @sl-input=${(e: Event) => {
+                    this.mintAccountId = (e.target as HTMLInputElement).value;
+                  }}
+                ></sl-input>
 
-          <sl-input
-            label="Description"
-            placeholder="Optional description"
-            value=${this.mintDescription}
-            @sl-input=${(e: Event) => {
-              this.mintDescription = (e.target as HTMLInputElement).value;
-            }}
-          ></sl-input>
+                <sl-input
+                  label="Display Name"
+                  placeholder="Optional human-friendly label"
+                  value=${this.mintDisplayName}
+                  @sl-input=${(e: Event) => {
+                    this.mintDisplayName = (e.target as HTMLInputElement).value;
+                  }}
+                ></sl-input>
 
-          <sl-checkbox
-            ?checked=${this.mintAllowSelfActAs}
-            @sl-change=${(e: Event) => {
-              this.mintAllowSelfActAs = (e.target as HTMLInputElement).checked;
-            }}
-          >
-            Allow this service account to act as itself
-            <div slot="help-text">
-              Enables using this SA as a project default, allowing agents to create sub-agents that
-              run as this same identity. Recommended for most use cases.
-            </div>
-          </sl-checkbox>
+                <sl-input
+                  label="Description"
+                  placeholder="Optional description"
+                  value=${this.mintDescription}
+                  @sl-input=${(e: Event) => {
+                    this.mintDescription = (e.target as HTMLInputElement).value;
+                  }}
+                ></sl-input>
 
-          <div class="dialog-hint">
-            <sl-icon name="info-circle"></sl-icon>
-            The Hub will create a new service account in its own GCP project. The SA is
-            automatically verified for impersonation by the Hub.
-          </div>
+                <sl-checkbox
+                  ?checked=${this.mintAllowSelfActAs}
+                  @sl-change=${(e: Event) => {
+                    this.mintAllowSelfActAs = (e.target as HTMLInputElement).checked;
+                  }}
+                >
+                  Allow this service account to act as itself
+                  <div slot="help-text">
+                    Enables using this SA as a project default, allowing agents to create sub-agents
+                    that run as this same identity. Recommended for most use cases.
+                  </div>
+                </sl-checkbox>
 
-          ${this.mintDialogError
-            ? html`<div class="dialog-error">${this.mintDialogError}</div>`
-            : nothing}
-        </form>
+                <div class="dialog-hint">
+                  <sl-icon name="info-circle"></sl-icon>
+                  The Hub will create a new service account in its own GCP project. The SA is
+                  automatically verified for impersonation by the Hub.
+                </div>
 
-        <sl-button
-          slot="footer"
-          variant="default"
-          @click=${this.closeMintDialog}
-          ?disabled=${this.mintDialogLoading}
-        >
-          Cancel
-        </sl-button>
-        <sl-button
-          slot="footer"
-          variant="primary"
-          ?loading=${this.mintDialogLoading}
-          ?disabled=${this.mintDialogLoading}
-          @click=${this.handleMint}
-        >
-          Mint
-        </sl-button>
+                ${this.mintDialogError
+                  ? html`<div class="dialog-error">${this.mintDialogError}</div>`
+                  : nothing}
+              </form>
+
+              <sl-button
+                slot="footer"
+                variant="default"
+                @click=${this.closeMintDialog}
+                ?disabled=${this.mintDialogLoading}
+              >
+                Cancel
+              </sl-button>
+              <sl-button
+                slot="footer"
+                variant="primary"
+                ?loading=${this.mintDialogLoading}
+                ?disabled=${this.mintDialogLoading}
+                @click=${this.handleMint}
+              >
+                Mint
+              </sl-button>
+            `}
       </sl-dialog>
     `;
+  }
+
+  private renderWorkloadIdentityBindingLine(b: WorkloadIdentityBinding) {
+    const state = this.wiOneLine(b.state || 'unknown');
+    const where = this.wiOneLine((b.profiles ?? []).join(', '));
+    const member = this.wiOneLine(b.member ?? '');
+
+    if (state === 'bound') {
+      return html`
+        <li class="wi-binding-item">
+          <div class="wi-binding-summary">
+            <sl-badge variant="success">bound</sl-badge>
+            <code>${member}</code>
+            ${where ? html`<span class="meta-text">(${where})</span>` : nothing}
+          </div>
+        </li>
+      `;
+    }
+
+    const variant = state === 'skipped' ? 'warning' : 'danger';
+    const reason = this.wiOneLine(b.reason ?? '');
+    const detail = this.wiOneLine(b.detail ?? '');
+    const manualStep = this.wiOneLine(b.manualStep ?? '');
+
+    return html`
+      <li class="wi-binding-item">
+        <div class="wi-binding-summary">
+          <sl-badge variant=${variant}>${state}</sl-badge>
+          ${member ? html`<code>${member}</code>` : where ? html`<code>${where}</code>` : nothing}
+          ${member && where ? html`<span class="meta-text">(${where})</span>` : nothing}
+          ${reason ? html`<span>${reason}${detail ? ` — ${detail}` : ''}</span>` : nothing}
+        </div>
+        ${manualStep
+          ? html`
+              <div class="wi-manual-step">
+                <span class="meta-text">To grant it by hand:</span>
+                <div class="gcloud-command">${manualStep}</div>
+              </div>
+            `
+          : nothing}
+      </li>
+    `;
+  }
+
+  private wiOneLine(s: string): string {
+    // Strip ASCII/C1 control characters so no server value can inject a second
+    // visual command line into a rendered manual step or detail.
+    // eslint-disable-next-line no-control-regex
+    return s.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ');
   }
 
   private extractProjectFromEmail(email: string): string {

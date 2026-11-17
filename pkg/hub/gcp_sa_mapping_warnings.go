@@ -362,18 +362,18 @@ func (s *Server) hubSAMappings(ctx context.Context) projectSAMappingView {
 	return view
 }
 
-// loadHubSAMappings walks every broker on the hub. ok is false when a
-// listing page failed; the partial view is still returned for this call.
-func (s *Server) loadHubSAMappings(ctx context.Context) (projectSAMappingView, bool) {
-	var brokers []*store.RuntimeBroker
-	ok := true
+// hubRuntimeBrokers returns every Runtime Broker on the hub, paged by
+// hubSAMappingBrokerPageSize. complete is false when a listing page failed;
+// the brokers read before the failure are still returned.
+func (s *Server) hubRuntimeBrokers(ctx context.Context) (brokers []*store.RuntimeBroker, complete bool) {
+	complete = true
 	cursor := ""
 	for {
 		page, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{},
 			store.ListOptions{Limit: hubSAMappingBrokerPageSize, Cursor: cursor, SkipTotalCount: true})
 		if err != nil {
 			slog.Debug("SA mapping warning: listing hub brokers failed", "error", err)
-			ok = false
+			complete = false
 			break
 		}
 		for i := range page.Items {
@@ -384,6 +384,13 @@ func (s *Server) loadHubSAMappings(ctx context.Context) (projectSAMappingView, b
 		}
 		cursor = page.NextCursor
 	}
+	return brokers, complete
+}
+
+// loadHubSAMappings walks every broker on the hub. ok is false when a
+// listing page failed; the partial view is still returned for this call.
+func (s *Server) loadHubSAMappings(ctx context.Context) (projectSAMappingView, bool) {
+	brokers, ok := s.hubRuntimeBrokers(ctx)
 	return mappingViewFrom("this hub", s.brokerKubernetesProfileMappings(brokers)), ok
 }
 
@@ -479,6 +486,13 @@ func projectSAMappingWarningsFrom(projectID string, view func() projectSAMapping
 // routes, which have no project to narrow the brokers to. Project-scoped
 // accounts are skipped. Nil when there is nothing to warn about.
 func (s *Server) hubSAMappingWarnings(ctx context.Context, sas ...*store.GCPServiceAccount) []string {
+	return hubSAMappingWarningsFrom(func() projectSAMappingView { return s.hubSAMappings(ctx) }, sas...)
+}
+
+// hubSAMappingWarningsFrom is hubSAMappingWarnings with the view supplied by
+// the caller, so a handler that already walked the brokers does not walk them
+// again. view is called only when an account needs checking.
+func hubSAMappingWarningsFrom(view func() projectSAMappingView, sas ...*store.GCPServiceAccount) []string {
 	var candidates []*store.GCPServiceAccount
 	for _, sa := range sas {
 		if sa != nil && sa.Scope == store.ScopeHub {
@@ -488,7 +502,7 @@ func (s *Server) hubSAMappingWarnings(ctx context.Context, sas ...*store.GCPServ
 	if len(candidates) == 0 {
 		return nil
 	}
-	return s.hubSAMappings(ctx).warnings(candidates)
+	return view().warnings(candidates)
 }
 
 // warnings returns the warning for each account in sas whose check warns

@@ -659,7 +659,7 @@ var compiled = []Experiment{
 	{
 		Name:        K8sWorkloadIdentitySetup,
 		Title:       "Workload Identity setup for minted service accounts",
-		Description: "When the hub mints a GCP service account, it also grants roles/iam.workloadIdentityUser on it to the Kubernetes ServiceAccount named after the account ID, in the namespace of every Kubernetes runtime target of the project's Runtime Brokers that sets workload_identity_pool. A failed grant never fails the mint: the response lists each target as bound or skipped, with the gcloud command for a skipped one.",
+		Description: "When the hub mints a GCP service account (project-scoped or hub-scoped), it also grants roles/iam.workloadIdentityUser on it to the Kubernetes ServiceAccount named after the account ID, in the namespace of every serving Kubernetes runtime target that sets workload_identity_pool (the project's Runtime Brokers for a project-scoped mint, every Runtime Broker on the hub for a hub-scoped mint). A failed grant never fails the mint: the response lists each target as bound, skipped or failed, with the gcloud command for any target not bound; the web layer shows these binding lines in the mint dialog.",
 		Default:     false,
 		Layers:      []Layer{LayerServer, LayerWeb},
 		Stage:       StageAlpha,
