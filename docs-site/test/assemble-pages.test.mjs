@@ -66,7 +66,7 @@ async function createSnapshotTarball(dir, tag, files) {
 describe('selectRetainedReleases', () => {
 	const now = new Date('2026-11-15T12:00:00Z');
 
-	it('retains all stable releases, up to 5 active previews, and 14-day nightlies while pruning promoted/superseded lines', () => {
+	it('retains all stable releases, the single most recent active preview, and 14-day nightlies while pruning promoted/superseded lines', () => {
 		const releases = [
 			// Historical stable WITHOUT docs assets still prunes v0.2.0-preview.*!
 			makeRelease('v0.2.0', { hasDocs: false }),
@@ -77,7 +77,7 @@ describe('selectRetainedReleases', () => {
 			makeRelease('v0.4.0', { publishedAt: '2026-11-10T00:00:00Z' }),
 			// Superseded minor line (0.3 < 0.4) -> pruned even if v0.3.0 hadn't existed:
 			makeRelease('v0.1.0-preview.1', { hasDocs: true }),
-			// Active v0.5.0 preview/rc line (7 candidates -> keep newest 5):
+			// Active v0.5.0 preview/rc line (7 candidates -> keep only the single newest):
 			makeRelease('v0.5.0-preview.1'),
 			makeRelease('v0.5.0-preview.2'),
 			makeRelease('v0.5.0-preview.8'),
@@ -101,13 +101,7 @@ describe('selectRetainedReleases', () => {
 		);
 		assert.deepEqual(
 			retained.preview.map((r) => r.tagName),
-			[
-				'v0.5.0-rc.2',
-				'v0.5.0-rc.1',
-				'v0.5.0-preview.10',
-				'v0.5.0-preview.9',
-				'v0.5.0-preview.8',
-			],
+			['v0.5.0-rc.2'],
 		);
 		assert.deepEqual(
 			retained.nightly.map((r) => r.tagName),
@@ -115,16 +109,36 @@ describe('selectRetainedReleases', () => {
 		);
 	});
 
-	it('retains patch previews on an already-released minor line until that patch is promoted', () => {
+	it('retains the single newest patch preview on an already-released minor line until that patch is promoted', () => {
 		const releases = [
 			makeRelease('v0.3.0'),
 			makeRelease('v0.3.1-preview.1'),
-			makeRelease('v0.4.0-preview.2'),
+			makeRelease('v0.3.1-preview.2'),
 		];
 		const retained = selectRetainedReleases(releases, { now });
 		assert.deepEqual(
 			retained.preview.map((r) => r.tagName),
-			['v0.4.0-preview.2', 'v0.3.1-preview.1'],
+			['v0.3.1-preview.2'],
+		);
+
+		const afterPatchPromotion = selectRetainedReleases(
+			[...releases, makeRelease('v0.3.1')],
+			{ now },
+		);
+		assert.deepEqual(afterPatchPromotion.preview, []);
+	});
+
+	it('honors an explicit maxActivePreviews override when provided', () => {
+		const releases = [
+			makeRelease('v0.3.0'),
+			makeRelease('v0.3.1-preview.1'),
+			makeRelease('v0.4.0-preview.1'),
+			makeRelease('v0.4.0-preview.2'),
+		];
+		const retained = selectRetainedReleases(releases, { now, maxActivePreviews: 2 });
+		assert.deepEqual(
+			retained.preview.map((r) => r.tagName),
+			['v0.4.0-preview.2', 'v0.4.0-preview.1'],
 		);
 	});
 });
@@ -308,13 +322,23 @@ describe('verifyTarListingSafe and extractVerifiedSnapshotTarball', () => {
 				outDir,
 				releases: [
 					makeRelease('v0.3.0', { publishedAt: '2026-11-01T00:00:00Z' }),
+					makeRelease('v0.4.0-preview.1', { publishedAt: '2026-11-07T00:00:00Z' }),
 					makeRelease('v0.4.0-preview.2', { publishedAt: '2026-11-14T00:00:00Z' }),
 				],
-				resolveAssets: async (tag) => map[tag],
+				resolveAssets: async (tag) => {
+					if (!map[tag]) {
+						throw new Error(`Unexpected asset fetch for non-retained tag ${tag}`);
+					}
+					return map[tag];
+				},
 				now: new Date('2026-11-15T12:00:00Z'),
 			});
 
 			assert.equal(retainedCount, 2);
+			assert.deepEqual(
+				manifest.channels.find((c) => c.id === 'preview')?.versions.map((v) => v.version),
+				['v0.4.0-preview.2'],
+			);
 			assert.equal(
 				await fs.readFile(path.join(outDir, 'overview/index.html'), 'utf8'),
 				'<html><body>main overview</body></html>',

@@ -93,9 +93,10 @@ export function computeNightlyCutoffDate(now, windowDays = 14) {
  * Filter and sort GitHub Releases that carry verified docs snapshot tarballs according
  * to the approved retention policy:
  * - `stable`: all non-draft `vX.Y.Z` releases with snapshot assets (newest first)
- * - `preview`: up to `maxActivePreviews` (default 5) active `vX.Y.Z-(preview|rc).N` releases
- *   whose target `vX.Y.Z` has not yet been promoted to `stable` and (for `.0` previews) whose
- *   minor line has not been superseded by a higher `.0` stable release
+ * - `preview`: up to `maxActivePreviews` (default 1, the single most recent) active
+ *   `vX.Y.Z-(preview|rc).N` releases whose target `vX.Y.Z` has not yet been promoted to `stable`
+ *   and (for `.0` previews) whose minor line has not been superseded by a higher `.0` stable
+ *   release
  * - `nightly`: `nightly-YYYYMMDD` releases within `nightlyWindowDays` (default 14 days, newest first)
  *
  * Note: `allStableTags` is computed from ALL non-draft GitHub releases (even historical stable
@@ -107,7 +108,7 @@ export function computeNightlyCutoffDate(now, windowDays = 14) {
  */
 export function selectRetainedReleases(releases, options = {}) {
 	const now = options.now ?? new Date();
-	const maxActivePreviews = options.maxActivePreviews ?? 5;
+	const maxActivePreviews = options.maxActivePreviews ?? 1;
 	const nightlyWindowDays = options.nightlyWindowDays ?? 14;
 	const nightlyCutoff = computeNightlyCutoffDate(now, nightlyWindowDays);
 

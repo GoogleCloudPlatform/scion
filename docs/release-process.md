@@ -372,10 +372,10 @@ accepts deployments only from `refs/heads/main`:
 **Retention policy.** `assemble-pages.mjs` retains:
 
 - **Stable:** all non-draft `vX.Y.Z` releases that carry snapshot assets.
-- **Preview:** up to the 5 most recent `vX.Y.Z-preview.N` and `vX.Y.Z-rc.N` releases on unreleased
-  lines. Pre-releases are pruned automatically once their target `vX.Y.Z` is promoted to `stable`
-  (or when a `.0` preview line is superseded by a stable release on the same or higher minor line),
-  even if the older stable release predates docs snapshots.
+- **Preview:** the single most recent active `vX.Y.Z-preview.N` or `vX.Y.Z-rc.N` release overall,
+  across all unreleased lines (`maxActivePreviews = 1`). Pre-releases are pruned automatically once
+  their target `vX.Y.Z` is promoted to `stable` (or when a `.0` preview line is superseded by a stable
+  release on the same or higher minor line), even if the older stable release predates docs snapshots.
 - **Nightly:** `nightly-YYYYMMDD` releases from the last 14 days (matching nightly release cleanup).
 
 **Backfilling or rerunning snapshots.** `assemble-pages.mjs` fails closed if a retained release's

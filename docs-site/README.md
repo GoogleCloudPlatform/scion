@@ -70,7 +70,7 @@ Or build a complete release tarball (`scion-docs-<tag>.tar.gz` + `.sha256`) from
 The documentation site is published to GitHub Pages (`https://googlecloudplatform.github.io/scion/`) as an assembled multi-version site:
 
 - `/scion/<slug>/` serves the latest docs from `main`.
-- `/scion/<tag>/<slug>/` serves immutable tag snapshots (`Stable`, up to 5 active `Preview`/`RC` builds on unreleased lines, and `Nightly` builds from the last 14 days).
+- `/scion/<tag>/<slug>/` serves immutable tag snapshots (`Stable`, the single most recent active `Preview`/`RC` build overall across all unreleased lines, and `Nightly` builds from the last 14 days).
 - `/scion/main/`, `/scion/stable/`, `/scion/preview/`, and `/scion/nightly/` redirect to the latest `/overview/` page in each channel.
 - `/scion/versions.json` lists available channels and versions for the header channel/version selectors and outdated-snapshot banner.
 
