@@ -127,32 +127,39 @@ type WebhookEndpointFilter struct {
 	OwnerPrincipalID   string
 }
 
+// TriggerMatchRule is one ordered element of a trigger's match_rules list (§4.2, mixed-rule-arrays §2.1).
+type TriggerMatchRule struct {
+	Dialect string `json:"dialect"`
+	Expr    string `json:"expr"`
+}
+
 // Trigger represents a project-scoped event trigger definition (§4.2).
 type Trigger struct {
-	ID             string     `json:"id"`
-	ProjectID      string     `json:"projectId"`
-	Name           string     `json:"name"`
-	Description    string     `json:"description,omitempty"`
-	SourceKind     string     `json:"sourceKind"`
-	SourceID       string     `json:"sourceId"`
-	MatchTypes     []string   `json:"matchTypes"`
-	MatchDialect   string     `json:"matchDialect"`
-	MatchRule      string     `json:"matchRule,omitempty"`
-	ActionType     string     `json:"actionType"`
-	ActionPayload  string     `json:"actionPayload"`
-	SubjectDialect string     `json:"subjectDialect"`
-	SubjectRule    string     `json:"subjectRule,omitempty"`
-	SubjectMode    string     `json:"subjectMode"`
-	Status         string     `json:"status"`
-	StatusReason   string     `json:"statusReason,omitempty"`
-	LastFireAt     *time.Time `json:"lastFireAt,omitempty"`
-	LastFireStatus string     `json:"lastFireStatus,omitempty"`
-	LastFireError  string     `json:"lastFireError,omitempty"`
-	FireCount      int        `json:"fireCount"`
-	ErrorCount     int        `json:"errorCount"`
-	CreatedBy      string     `json:"createdBy,omitempty"`
-	CreatedAt      time.Time  `json:"createdAt"`
-	UpdatedAt      time.Time  `json:"updatedAt"`
+	ID             string             `json:"id"`
+	ProjectID      string             `json:"projectId"`
+	Name           string             `json:"name"`
+	Description    string             `json:"description,omitempty"`
+	SourceKind     string             `json:"sourceKind"`
+	SourceID       string             `json:"sourceId"`
+	MatchTypes     []string           `json:"matchTypes"`
+	MatchDialect   string             `json:"matchDialect,omitempty"`
+	MatchRule      string             `json:"matchRule,omitempty"`
+	MatchRules     []TriggerMatchRule `json:"matchRules"`
+	ActionType     string             `json:"actionType"`
+	ActionPayload  string             `json:"actionPayload"`
+	SubjectDialect string             `json:"subjectDialect"`
+	SubjectRule    string             `json:"subjectRule,omitempty"`
+	SubjectMode    string             `json:"subjectMode"`
+	Status         string             `json:"status"`
+	StatusReason   string             `json:"statusReason,omitempty"`
+	LastFireAt     *time.Time         `json:"lastFireAt,omitempty"`
+	LastFireStatus string             `json:"lastFireStatus,omitempty"`
+	LastFireError  string             `json:"lastFireError,omitempty"`
+	FireCount      int                `json:"fireCount"`
+	ErrorCount     int                `json:"errorCount"`
+	CreatedBy      string             `json:"createdBy,omitempty"`
+	CreatedAt      time.Time          `json:"createdAt"`
+	UpdatedAt      time.Time          `json:"updatedAt"`
 
 	InitiatorAttribution `json:"-"`
 	AuthorityCeiling     EffectCeiling     `json:"-"`
@@ -182,6 +189,7 @@ type TriggerFieldMask struct {
 	MatchTypes     bool
 	MatchDialect   bool
 	MatchRule      bool
+	MatchRules     bool
 	ActionType     bool
 	ActionPayload  bool
 	SubjectDialect bool

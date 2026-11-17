@@ -170,6 +170,11 @@ func MatchRule(v string) predicate.Trigger {
 	return predicate.Trigger(sql.FieldEQ(FieldMatchRule, v))
 }
 
+// MatchRules applies equality check predicate on the "match_rules" field. It's identical to MatchRulesEQ.
+func MatchRules(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldEQ(FieldMatchRules, v))
+}
+
 // ActionType applies equality check predicate on the "action_type" field. It's identical to ActionTypeEQ.
 func ActionType(v string) predicate.Trigger {
 	return predicate.Trigger(sql.FieldEQ(FieldActionType, v))
@@ -1683,6 +1688,71 @@ func MatchRuleEqualFold(v string) predicate.Trigger {
 // MatchRuleContainsFold applies the ContainsFold predicate on the "match_rule" field.
 func MatchRuleContainsFold(v string) predicate.Trigger {
 	return predicate.Trigger(sql.FieldContainsFold(FieldMatchRule, v))
+}
+
+// MatchRulesEQ applies the EQ predicate on the "match_rules" field.
+func MatchRulesEQ(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldEQ(FieldMatchRules, v))
+}
+
+// MatchRulesNEQ applies the NEQ predicate on the "match_rules" field.
+func MatchRulesNEQ(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldNEQ(FieldMatchRules, v))
+}
+
+// MatchRulesIn applies the In predicate on the "match_rules" field.
+func MatchRulesIn(vs ...string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldIn(FieldMatchRules, vs...))
+}
+
+// MatchRulesNotIn applies the NotIn predicate on the "match_rules" field.
+func MatchRulesNotIn(vs ...string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldNotIn(FieldMatchRules, vs...))
+}
+
+// MatchRulesGT applies the GT predicate on the "match_rules" field.
+func MatchRulesGT(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldGT(FieldMatchRules, v))
+}
+
+// MatchRulesGTE applies the GTE predicate on the "match_rules" field.
+func MatchRulesGTE(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldGTE(FieldMatchRules, v))
+}
+
+// MatchRulesLT applies the LT predicate on the "match_rules" field.
+func MatchRulesLT(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldLT(FieldMatchRules, v))
+}
+
+// MatchRulesLTE applies the LTE predicate on the "match_rules" field.
+func MatchRulesLTE(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldLTE(FieldMatchRules, v))
+}
+
+// MatchRulesContains applies the Contains predicate on the "match_rules" field.
+func MatchRulesContains(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldContains(FieldMatchRules, v))
+}
+
+// MatchRulesHasPrefix applies the HasPrefix predicate on the "match_rules" field.
+func MatchRulesHasPrefix(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldHasPrefix(FieldMatchRules, v))
+}
+
+// MatchRulesHasSuffix applies the HasSuffix predicate on the "match_rules" field.
+func MatchRulesHasSuffix(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldHasSuffix(FieldMatchRules, v))
+}
+
+// MatchRulesEqualFold applies the EqualFold predicate on the "match_rules" field.
+func MatchRulesEqualFold(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldEqualFold(FieldMatchRules, v))
+}
+
+// MatchRulesContainsFold applies the ContainsFold predicate on the "match_rules" field.
+func MatchRulesContainsFold(v string) predicate.Trigger {
+	return predicate.Trigger(sql.FieldContainsFold(FieldMatchRules, v))
 }
 
 // ActionTypeEQ applies the EQ predicate on the "action_type" field.

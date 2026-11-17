@@ -114085,6 +114085,7 @@ type TriggerMutation struct {
 	match_types                           *string
 	match_dialect                         *string
 	match_rule                            *string
+	match_rules                           *string
 	action_type                           *string
 	action_payload                        *string
 	subject_dialect                       *string
@@ -115258,6 +115259,42 @@ func (m *TriggerMutation) ResetMatchRule() {
 	m.match_rule = nil
 }
 
+// SetMatchRules sets the "match_rules" field.
+func (m *TriggerMutation) SetMatchRules(s string) {
+	m.match_rules = &s
+}
+
+// MatchRules returns the value of the "match_rules" field in the mutation.
+func (m *TriggerMutation) MatchRules() (r string, exists bool) {
+	v := m.match_rules
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldMatchRules returns the old "match_rules" field's value of the Trigger entity.
+// If the Trigger object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *TriggerMutation) OldMatchRules(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldMatchRules is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldMatchRules requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldMatchRules: %w", err)
+	}
+	return oldValue.MatchRules, nil
+}
+
+// ResetMatchRules resets all changes to the "match_rules" field.
+func (m *TriggerMutation) ResetMatchRules() {
+	m.match_rules = nil
+}
+
 // SetActionType sets the "action_type" field.
 func (m *TriggerMutation) SetActionType(s string) {
 	m.action_type = &s
@@ -115937,7 +115974,7 @@ func (m *TriggerMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *TriggerMutation) Fields() []string {
-	fields := make([]string, 0, 38)
+	fields := make([]string, 0, 39)
 	if m.initiator_principal_kind != nil {
 		fields = append(fields, trigger.FieldInitiatorPrincipalKind)
 	}
@@ -116006,6 +116043,9 @@ func (m *TriggerMutation) Fields() []string {
 	}
 	if m.match_rule != nil {
 		fields = append(fields, trigger.FieldMatchRule)
+	}
+	if m.match_rules != nil {
+		fields = append(fields, trigger.FieldMatchRules)
 	}
 	if m.action_type != nil {
 		fields = append(fields, trigger.FieldActionType)
@@ -116106,6 +116146,8 @@ func (m *TriggerMutation) Field(name string) (ent.Value, bool) {
 		return m.MatchDialect()
 	case trigger.FieldMatchRule:
 		return m.MatchRule()
+	case trigger.FieldMatchRules:
+		return m.MatchRules()
 	case trigger.FieldActionType:
 		return m.ActionType()
 	case trigger.FieldActionPayload:
@@ -116191,6 +116233,8 @@ func (m *TriggerMutation) OldField(ctx context.Context, name string) (ent.Value,
 		return m.OldMatchDialect(ctx)
 	case trigger.FieldMatchRule:
 		return m.OldMatchRule(ctx)
+	case trigger.FieldMatchRules:
+		return m.OldMatchRules(ctx)
 	case trigger.FieldActionType:
 		return m.OldActionType(ctx)
 	case trigger.FieldActionPayload:
@@ -116390,6 +116434,13 @@ func (m *TriggerMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetMatchRule(v)
+		return nil
+	case trigger.FieldMatchRules:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetMatchRules(v)
 		return nil
 	case trigger.FieldActionType:
 		v, ok := value.(string)
@@ -116781,6 +116832,9 @@ func (m *TriggerMutation) ResetField(name string) error {
 		return nil
 	case trigger.FieldMatchRule:
 		m.ResetMatchRule()
+		return nil
+	case trigger.FieldMatchRules:
+		m.ResetMatchRules()
 		return nil
 	case trigger.FieldActionType:
 		m.ResetActionType()

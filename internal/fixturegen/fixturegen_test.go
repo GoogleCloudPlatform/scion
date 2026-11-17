@@ -223,6 +223,7 @@ func TestFixtureLoadable(t *testing.T) {
 	require.NoError(t, err, "triggers fixture row must be readable via TriggerStore")
 	assert.Equal(t, "fixture-trigger", tr.Name)
 	assert.Equal(t, []string{"webhook.received"}, tr.MatchTypes)
+	assert.Equal(t, []store.TriggerMatchRule{{Dialect: "cel", Expr: "true"}}, tr.MatchRules)
 
 	trEvt, err := composite.GetTriggerEvent(ctx, triggerEventID)
 	require.NoError(t, err, "trigger_events fixture row must be readable via TriggerStore")

@@ -60,6 +60,8 @@ const (
 	FieldMatchDialect = "match_dialect"
 	// FieldMatchRule holds the string denoting the match_rule field in the database.
 	FieldMatchRule = "match_rule"
+	// FieldMatchRules holds the string denoting the match_rules field in the database.
+	FieldMatchRules = "match_rules"
 	// FieldActionType holds the string denoting the action_type field in the database.
 	FieldActionType = "action_type"
 	// FieldActionPayload holds the string denoting the action_payload field in the database.
@@ -120,6 +122,7 @@ var Columns = []string{
 	FieldMatchTypes,
 	FieldMatchDialect,
 	FieldMatchRule,
+	FieldMatchRules,
 	FieldActionType,
 	FieldActionPayload,
 	FieldSubjectDialect,
@@ -168,6 +171,8 @@ var (
 	DefaultMatchDialect string
 	// DefaultMatchRule holds the default value on creation for the "match_rule" field.
 	DefaultMatchRule string
+	// DefaultMatchRules holds the default value on creation for the "match_rules" field.
+	DefaultMatchRules string
 	// ActionTypeValidator is a validator for the "action_type" field. It is called by the builders before save.
 	ActionTypeValidator func(string) error
 	// DefaultActionPayload holds the default value on creation for the "action_payload" field.
@@ -315,6 +320,11 @@ func ByMatchDialect(opts ...sql.OrderTermOption) OrderOption {
 // ByMatchRule orders the results by the match_rule field.
 func ByMatchRule(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldMatchRule, opts...).ToFunc()
+}
+
+// ByMatchRules orders the results by the match_rules field.
+func ByMatchRules(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldMatchRules, opts...).ToFunc()
 }
 
 // ByActionType orders the results by the action_type field.

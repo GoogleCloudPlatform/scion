@@ -455,6 +455,28 @@ func unmarshalMatchTypes(raw string) []string {
 	return out
 }
 
+func marshalMatchRules(rules []store.TriggerMatchRule) (string, error) {
+	if len(rules) == 0 {
+		return "[]", nil
+	}
+	raw, err := json.Marshal(rules)
+	if err != nil {
+		return "", fmt.Errorf("%w: marshal match_rules: %v", store.ErrInvalidInput, err)
+	}
+	return string(raw), nil
+}
+
+func unmarshalMatchRules(raw string) []store.TriggerMatchRule {
+	if raw == "" || raw == "[]" {
+		return nil
+	}
+	var out []store.TriggerMatchRule
+	if err := json.Unmarshal([]byte(raw), &out); err != nil || len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func entTriggerToStore(e *ent.Trigger) *store.Trigger {
 	tr := &store.Trigger{
 		ID:             e.ID.String(),
@@ -466,6 +488,7 @@ func entTriggerToStore(e *ent.Trigger) *store.Trigger {
 		MatchTypes:     unmarshalMatchTypes(e.MatchTypes),
 		MatchDialect:   e.MatchDialect,
 		MatchRule:      e.MatchRule,
+		MatchRules:     unmarshalMatchRules(e.MatchRules),
 		ActionType:     e.ActionType,
 		ActionPayload:  e.ActionPayload,
 		SubjectDialect: e.SubjectDialect,
@@ -646,6 +669,10 @@ func (s *TriggerStore) CreateTrigger(ctx context.Context, tr *store.Trigger) err
 	if err != nil {
 		return err
 	}
+	matchRulesJSON, err := marshalMatchRules(tr.MatchRules)
+	if err != nil {
+		return err
+	}
 	if err := validateEdgeCeiling(tr.AuthorityCeiling); err != nil {
 		return err
 	}
@@ -654,10 +681,6 @@ func (s *TriggerStore) CreateTrigger(ctx context.Context, tr *store.Trigger) err
 		return err
 	}
 
-	matchDialect := tr.MatchDialect
-	if matchDialect == "" {
-		matchDialect = store.TriggerDialectCEL
-	}
 	subjectDialect := tr.SubjectDialect
 	if subjectDialect == "" {
 		subjectDialect = store.TriggerDialectCEL
@@ -693,8 +716,9 @@ func (s *TriggerStore) CreateTrigger(ctx context.Context, tr *store.Trigger) err
 		SetSourceKind(tr.SourceKind).
 		SetSourceID(tr.SourceID).
 		SetMatchTypes(matchTypesJSON).
-		SetMatchDialect(matchDialect).
+		SetMatchDialect(tr.MatchDialect).
 		SetMatchRule(tr.MatchRule).
+		SetMatchRules(matchRulesJSON).
 		SetActionType(tr.ActionType).
 		SetActionPayload(payload).
 		SetSubjectDialect(subjectDialect).
@@ -891,6 +915,13 @@ func (s *TriggerStore) UpdateTrigger(
 	}
 	if fields.MatchRule {
 		update = update.SetMatchRule(tr.MatchRule)
+	}
+	if fields.MatchRules {
+		matchRulesJSON, mErr := marshalMatchRules(tr.MatchRules)
+		if mErr != nil {
+			return mErr
+		}
+		update = update.SetMatchRules(matchRulesJSON)
 	}
 	if fields.ActionType {
 		update = update.SetActionType(tr.ActionType)
