@@ -197,7 +197,7 @@ func plainSummaryText(s string) string {
 // choiceDecisionLine is one decision in the text output (design 4.2):
 // "D234 v1 (new)", "D1 v2 (new, replaces v1 which was pending)" or
 // "D1 v2 (new, replaces v1 which was decided by Pat: yes)".
-func choiceDecisionLine(d hubclient.ChoiceDecisionResult) string {
+func choiceDecisionLine(d hubclient.DecisionSendResult) string {
 	if d.Replaced == nil {
 		return fmt.Sprintf("%s v%d (new)", d.Key, d.Version)
 	}
@@ -222,13 +222,13 @@ func printChoiceDecisions(result *hubclient.OutboundMessageResult) {
 }
 
 // applyChoicesToOutbound puts the loaded decisions on an outbound request.
-// The hub sets the message type of a choice prompt.
+// The hub sets the message type of a decision prompt.
 func applyChoicesToOutbound(out *hubclient.OutboundMessageRequest) {
 	if msgChoicesPayload == nil {
 		return
 	}
-	out.Choices = msgChoicesPayload
-	out.ChoicesUpdate = msgChoicesUpdate
+	out.Decisions = msgChoicesPayload
+	out.DecisionsUpdate = msgChoicesUpdate
 	out.Type = ""
 }
 

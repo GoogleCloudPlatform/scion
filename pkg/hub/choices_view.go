@@ -28,7 +28,7 @@ import (
 
 // DecisionView is one version of a decision as clients see it (design
 // choices v4, 4.4): the web card, the answer endpoint's responses and the
-// choice.updated event.
+// decision.updated event.
 type DecisionView struct {
 	RowID           string              `json:"rowId"`
 	MessageID       string              `json:"messageId"`
@@ -229,7 +229,7 @@ func (s *Server) choicePromptViews(ctx context.Context, msgs []*store.Message) m
 	var ids []string
 	byID := make(map[string]*store.Message)
 	for _, m := range msgs {
-		if m != nil && m.Type == messages.TypeChoicePrompt {
+		if m != nil && m.Type == messages.TypeDecisionPrompt {
 			ids = append(ids, m.ID)
 			byID[m.ID] = m
 		}
@@ -294,12 +294,12 @@ func (s *Server) choicePromptViewOf(ctx context.Context, m *store.Message) *Choi
 }
 
 // choiceResponseViews returns, keyed by message id, the ChoiceResponseView
-// of every one-click choice-response message among msgs and the
+// of every one-click decision-response message among msgs and the
 // ChoiceResponseSetView of every set response (its answers share a batch).
 func (s *Server) choiceResponseViews(ctx context.Context, msgs []*store.Message) (map[string]ChoiceResponseView, map[string]ChoiceResponseSetView) {
 	var ids []string
 	for _, m := range msgs {
-		if m != nil && m.Type == messages.TypeChoiceResponse {
+		if m != nil && m.Type == messages.TypeDecisionResponse {
 			ids = append(ids, m.ID)
 		}
 	}
@@ -503,23 +503,23 @@ func (s *Server) addChoiceHistoryViews(ctx context.Context, resp *chatHistoryRes
 		for id, v := range prompts {
 			resp.MessageDecisions[id] = v.Decisions
 			if v.Intro != "" {
-				if resp.MessageChoiceIntros == nil {
-					resp.MessageChoiceIntros = map[string]string{}
+				if resp.MessageDecisionIntros == nil {
+					resp.MessageDecisionIntros = map[string]string{}
 				}
-				resp.MessageChoiceIntros[id] = v.Intro
+				resp.MessageDecisionIntros[id] = v.Intro
 			}
-			if resp.MessageChoiceAnswerModes == nil {
-				resp.MessageChoiceAnswerModes = map[string]string{}
+			if resp.MessageDecisionAnswerModes == nil {
+				resp.MessageDecisionAnswerModes = map[string]string{}
 			}
-			resp.MessageChoiceAnswerModes[id] = v.AnswerMode
+			resp.MessageDecisionAnswerModes[id] = v.AnswerMode
 		}
 	}
 	responses, sets := s.choiceResponseViews(ctx, msgs)
 	if len(responses) > 0 {
-		resp.MessageChoiceResponses = responses
+		resp.MessageDecisionResponses = responses
 	}
 	if len(sets) > 0 {
-		resp.MessageChoiceResponseSets = sets
+		resp.MessageDecisionResponseSets = sets
 	}
 }
 

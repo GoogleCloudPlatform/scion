@@ -14,8 +14,8 @@
 
 package messages
 
-// Choices: an agent asks a user to decide between a few options. A choice
-// prompt (TypeChoicePrompt) carries one or more decisions; each decision
+// Choices: an agent asks a user to decide between a few options. A decision
+// prompt (TypeDecisionPrompt) carries one or more decisions; each decision
 // has a per-agent key, a markdown question and 2 to 10 choices. This file
 // holds the agent-facing input schema (DecisionInput), the canonical stored
 // form (Decision), the normalizer and validator (NormalizeDecisions), and

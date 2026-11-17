@@ -609,8 +609,8 @@ describe('scion-profile-nav — Decisions entry & badge (ptone/scion#7996)', () 
     await new Promise((r) => setTimeout(r, 140));
     expect(decisionsProbeCount).toBe(1);
 
-    // SSE choice-updated triggers ONE debounced shared refresh for both nav instances
-    stateManager.dispatchEvent(new CustomEvent('choice-updated', { detail: {} }));
+    // SSE decision-updated triggers ONE debounced shared refresh for both nav instances
+    stateManager.dispatchEvent(new CustomEvent('decision-updated', { detail: {} }));
     await new Promise((r) => setTimeout(r, 140));
     await desktopNav.updateComplete;
     await remountedNav.updateComplete;
@@ -619,7 +619,7 @@ describe('scion-profile-nav — Decisions entry & badge (ptone/scion#7996)', () 
     expect(decisionsBadge(desktopNav)?.textContent?.trim()).toBe('6');
     expect(decisionsBadge(remountedNav)?.textContent?.trim()).toBe('6');
 
-    // Real Hub chat-message-received payload ({ data: { type: 'choice-prompt', decisions } }) triggers refresh;
+    // Real Hub chat-message-received payload ({ data: { type: 'decision-prompt', decisions } }) triggers refresh;
     // plain chat message does not
     liveWaiting = 7;
     stateManager.dispatchEvent(
@@ -633,7 +633,7 @@ describe('scion-profile-nav — Decisions entry & badge (ptone/scion#7996)', () 
     stateManager.dispatchEvent(
       new CustomEvent('chat-message-received', {
         detail: {
-          data: { id: 'm-choice', type: 'choice-prompt', decisions: [{ rowId: 'r-new' }] },
+          data: { id: 'm-choice', type: 'decision-prompt', decisions: [{ rowId: 'r-new' }] },
         },
       })
     );
@@ -646,7 +646,7 @@ describe('scion-profile-nav — Decisions entry & badge (ptone/scion#7996)', () 
     expect(decisionsBadge(remountedNav)?.textContent?.trim()).toBe('7');
   });
 
-  it('re-probes on remount after off-nav choice-updated or TTL expiry while staying probe-free when fresh', async () => {
+  it('re-probes on remount after off-nav decision-updated or TTL expiry while staying probe-free when fresh', async () => {
     let now = 2_000_000;
     const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
     let liveWaiting = 3;
@@ -698,7 +698,7 @@ describe('scion-profile-nav — Decisions entry & badge (ptone/scion#7996)', () 
       nav1.remove();
       element = null;
       liveWaiting = 0;
-      stateManager.dispatchEvent(new CustomEvent('choice-updated', { detail: {} }));
+      stateManager.dispatchEvent(new CustomEvent('decision-updated', { detail: {} }));
       expect(decisionsProbeCount).toBe(1);
 
       // 3. Return to /profile/settings -> remounted nav re-probes once and clears the stale badge
@@ -800,7 +800,7 @@ describe('scion-profile-nav — Decisions entry & badge (ptone/scion#7996)', () 
     expect(decisionsBadge(nav500)).toBeNull();
   });
 
-  it('opens the profile SSE scope with user.<id>.chat.> and refreshes badge on DM choice.updated events', async () => {
+  it('opens the profile SSE scope with user.<id>.chat.> and refreshes badge on DM decision.updated events', async () => {
     class FakeEventSource extends EventTarget {
       static instances: FakeEventSource[] = [];
       readyState = 0;
@@ -858,12 +858,12 @@ describe('scion-profile-nav — Decisions entry & badge (ptone/scion#7996)', () 
     expect(decodeURIComponent(latestUrl)).toContain('sub=user.u-1.chat.>');
     expect(decisionsBadge(nav)?.textContent?.trim()).toBe('2');
 
-    // Feed a DM user.u-1.chat.choice.updated event through stateManager
+    // Feed a DM user.u-1.chat.decision.updated event through stateManager
     liveWaiting = 1;
     (
       stateManager as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }
     ).handleUpdate({
-      subject: 'user.u-1.chat.choice.updated',
+      subject: 'user.u-1.chat.decision.updated',
       data: { messageId: 'm-dm', threadId: 'dm:agent:a:user:u-1', decision: { rowId: 'r-dm' } },
     });
     await new Promise((r) => setTimeout(r, 140));

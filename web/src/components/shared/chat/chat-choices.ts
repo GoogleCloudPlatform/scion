@@ -15,21 +15,21 @@
  */
 
 /**
- * `<scion-chat-choices>`: the card a choice-prompt message renders under
+ * `<scion-chat-choices>`: the card a decision-prompt message renders under
  * web.decisions (ptone/scion#7673, design §4.1–§4.3).
  *
  * Single mode: one click records the answer through
  * `POST /api/v1/decisions/{rowId}/answer`; Enter on the focused card picks
  * the recommended choice. The card applies the 200's view at once and emits
  * `choice-answered` so the thread holds the same view; other tabs get it
- * over `chat.choice.updated`.
+ * over `chat.decision.updated`.
  *
  * Set mode (`answerMode=set`): clicks only select. Recommended choices are
  * outlined and nothing is selected until the viewer clicks, unless their
  * `preselectRecommendedChoices` profile setting is on, which starts each
  * recommended choice selected (ptone/scion#7842). One Submit answers sends
  * every actionable row through
- * `POST /api/v1/choice-prompts/{messageId}/answers`. A 409
+ * `POST /api/v1/decision-prompts/{messageId}/answers`. A 409
  * `answer_set_changed` takes the fresh views and names the changed rows
  * inline; rows answered elsewhere lock as their updates arrive.
  *
@@ -78,7 +78,7 @@ export class ScionChatChoices extends LitElement {
   readonly _zone = new DisplayZoneController(this);
   readonly _choicePrefs = new ChoicePreferencesController(this);
 
-  /** The choice-prompt message id. */
+  /** The decision-prompt message id. */
   @property()
   messageId = '';
 

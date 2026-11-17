@@ -200,7 +200,7 @@ func (c *CompositeStore) createChoicePromptTx(ctx context.Context, in *store.Cho
 			existing = append(existing, ek)
 		}
 		if len(existing) > 0 {
-			return nil, &store.ChoiceKeyExistsError{Existing: existing}
+			return nil, &store.DecisionKeyExistsError{Existing: existing}
 		}
 	}
 
@@ -275,7 +275,7 @@ func (c *CompositeStore) createChoicePromptTx(ctx context.Context, in *store.Cho
 	// 6. The message, with the markdown fallback as its text.
 	msgText, introLen := messages.RenderChoiceFallback(in.Intro, keyed, in.AnswerURL)
 	in.Message.Msg = msgText
-	in.Message.Type = messages.TypeChoicePrompt
+	in.Message.Type = messages.TypeDecisionPrompt
 	if err := c.CreateMessage(ctx, in.Message); err != nil {
 		return nil, err
 	}
@@ -709,7 +709,7 @@ func (c *CompositeStore) recordAnswerTx(ctx context.Context, in *store.RecordAns
 		return nil, false, err
 	}
 
-	in.ResponseMessage.Type = messages.TypeChoiceResponse
+	in.ResponseMessage.Type = messages.TypeDecisionResponse
 	if err := c.CreateMessage(ctx, in.ResponseMessage); err != nil {
 		return nil, false, err
 	}
@@ -967,7 +967,7 @@ func (c *CompositeStore) recordAnswerSetTx(ctx context.Context, in *store.Record
 		return nil, &store.AnswerSetChangedError{Reasons: reasons}
 	}
 
-	in.ResponseMessage.Type = messages.TypeChoiceResponse
+	in.ResponseMessage.Type = messages.TypeDecisionResponse
 	if err := c.CreateMessage(ctx, in.ResponseMessage); err != nil {
 		return nil, err
 	}
@@ -1676,12 +1676,12 @@ func (c *CompositeStore) recordInterpretedAnswersTx(ctx context.Context, in *sto
 		}
 	}
 
-	// 4. Insert the single choice-response message, the DecisionAnswer rows,
+	// 4. Insert the single decision-response message, the DecisionAnswer rows,
 	// and mark each Decision row decided.
 	if in.FormatMessage != nil && in.ResponseMessage.Msg == "" {
 		in.ResponseMessage.Msg = in.FormatMessage(formatted)
 	}
-	in.ResponseMessage.Type = messages.TypeChoiceResponse
+	in.ResponseMessage.Type = messages.TypeDecisionResponse
 	if err := c.CreateMessage(ctx, in.ResponseMessage); err != nil {
 		return nil, err
 	}

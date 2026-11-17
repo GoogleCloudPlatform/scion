@@ -36,10 +36,10 @@ type Json = Record<string, unknown>;
 export interface ChoiceThread {
   messages: Json[];
   messageDecisions?: Record<string, Json[]>;
-  messageChoiceIntros?: Record<string, string>;
-  messageChoiceAnswerModes?: Record<string, 'single' | 'set'>;
-  messageChoiceResponses?: Record<string, Json>;
-  messageChoiceResponseSets?: Record<string, Json>;
+  messageDecisionIntros?: Record<string, string>;
+  messageDecisionAnswerModes?: Record<string, 'single' | 'set'>;
+  messageDecisionResponses?: Record<string, Json>;
+  messageDecisionResponseSets?: Record<string, Json>;
   canPost?: boolean;
 }
 
@@ -209,11 +209,11 @@ export function singleThread(
   const id = d.messageId as string;
   return {
     messages: [
-      row(id, 0, 'choice-prompt', `${intro}\n\n**D234** Ship v0.9 today? (fallback)`, 'asker'),
+      row(id, 0, 'decision-prompt', `${intro}\n\n**D234** Ship v0.9 today? (fallback)`, 'asker'),
     ],
     messageDecisions: { [id]: [d] },
-    messageChoiceIntros: { [id]: intro },
-    messageChoiceAnswerModes: { [id]: 'single' },
+    messageDecisionIntros: { [id]: intro },
+    messageDecisionAnswerModes: { [id]: 'single' },
   };
 }
 
@@ -224,10 +224,10 @@ export function setThread(
   intro = 'Three calls before the release. Answer them together.'
 ): ChoiceThread {
   return {
-    messages: [row(id, 0, 'choice-prompt', `${intro}\n\n(fallback)`, 'asker')],
+    messages: [row(id, 0, 'decision-prompt', `${intro}\n\n(fallback)`, 'asker')],
     messageDecisions: { [id]: decisions },
-    messageChoiceIntros: { [id]: intro },
-    messageChoiceAnswerModes: { [id]: 'set' },
+    messageDecisionIntros: { [id]: intro },
+    messageDecisionAnswerModes: { [id]: 'set' },
   };
 }
 
@@ -257,18 +257,18 @@ export function replacedThread(): ChoiceThread {
   });
   return {
     messages: [
-      row('prompt-v1', 0, 'choice-prompt', 'Which approach? (fallback)', 'asker'),
+      row('prompt-v1', 0, 'decision-prompt', 'Which approach? (fallback)', 'asker'),
       row(
         'prompt-v2',
         2,
-        'choice-prompt',
+        'decision-prompt',
         'Updated: added the hybrid option.\n\n(fallback)',
         'asker'
       ),
     ],
     messageDecisions: { 'prompt-v1': [v1], 'prompt-v2': [v2] },
-    messageChoiceIntros: { 'prompt-v1': '', 'prompt-v2': 'Updated: added the hybrid option.' },
-    messageChoiceAnswerModes: { 'prompt-v1': 'single', 'prompt-v2': 'single' },
+    messageDecisionIntros: { 'prompt-v1': '', 'prompt-v2': 'Updated: added the hybrid option.' },
+    messageDecisionAnswerModes: { 'prompt-v1': 'single', 'prompt-v2': 'single' },
   };
 }
 
@@ -325,24 +325,24 @@ export function responsesThread(): ChoiceThread {
   });
   return {
     messages: [
-      row('prompt-resp', 0, 'choice-prompt', 'One call before I tag it.\n\n(fallback)', 'asker'),
-      row('resp-own', 1, 'choice-response', 'I chose Yes for D234.', 'self'),
-      row('resp-bob', 2, 'choice-response', 'Bob chose New waiting state for 17.', 'bob'),
-      row('resp-set', 3, 'choice-response', 'I answered 3 decisions.', 'self'),
-      row('resp-failed', 29, 'choice-response', 'I chose Yes for D234.', 'self', {
+      row('prompt-resp', 0, 'decision-prompt', 'One call before I tag it.\n\n(fallback)', 'asker'),
+      row('resp-own', 1, 'decision-response', 'I chose Yes for D234.', 'self'),
+      row('resp-bob', 2, 'decision-response', 'Bob chose New waiting state for 17.', 'bob'),
+      row('resp-set', 3, 'decision-response', 'I answered 3 decisions.', 'self'),
+      row('resp-failed', 29, 'decision-response', 'I chose Yes for D234.', 'self', {
         dispatchState: 'failed',
         dispatchFailureReason: 'agent gone',
       }),
     ],
     messageDecisions: { 'prompt-resp': [prompt] },
-    messageChoiceIntros: { 'prompt-resp': 'One call before I tag it.' },
-    messageChoiceAnswerModes: { 'prompt-resp': 'single' },
-    messageChoiceResponses: {
+    messageDecisionIntros: { 'prompt-resp': 'One call before I tag it.' },
+    messageDecisionAnswerModes: { 'prompt-resp': 'single' },
+    messageDecisionResponses: {
       'resp-own': single('own', 'Yes', 'D234', 'Ship v0.9 today?', 'yes', SELF_ID, 'Fixture User'),
       'resp-bob': single('bob', 'New waiting state', '17', 'Which approach?', 'b', BOB_ID, 'Bob'),
       'resp-failed': single('failed', 'Yes', 'D234', '', 'yes', SELF_ID, 'Fixture User'),
     },
-    messageChoiceResponseSets: { 'resp-set': set },
+    messageDecisionResponseSets: { 'resp-set': set },
   };
 }
 
@@ -361,21 +361,21 @@ export function responsesPhase2Thread(): ChoiceThread {
   });
   return {
     messages: [
-      row('prompt-other', 0, 'choice-prompt', 'Schedule check.\n\n(fallback)', 'asker'),
-      row('prompt-p27', 1, 'choice-prompt', 'One call before I tag it.\n\n(fallback)', 'asker'),
+      row('prompt-other', 0, 'decision-prompt', 'Schedule check.\n\n(fallback)', 'asker'),
+      row('prompt-p27', 1, 'decision-prompt', 'One call before I tag it.\n\n(fallback)', 'asker'),
       row('reply-self', 2, 'instruction', 'Yes, ship D234 today.', 'self'),
-      row('resp-interp-own', 3, 'choice-response', 'recorded answer', 'asker'),
-      row('resp-interp-bob-set', 5, 'choice-response', 'recorded Bob answers', 'asker'),
-      row('resp-confirm', 11, 'choice-response', 'confirmed Yes', 'self'),
-      row('resp-override', 12, 'choice-response', 'changed D234 to No', 'self'),
+      row('resp-interp-own', 3, 'decision-response', 'recorded answer', 'asker'),
+      row('resp-interp-bob-set', 5, 'decision-response', 'recorded Bob answers', 'asker'),
+      row('resp-confirm', 11, 'decision-response', 'confirmed Yes', 'self'),
+      row('resp-override', 12, 'decision-response', 'changed D234 to No', 'self'),
     ],
     messageDecisions: { 'prompt-other': [otherPrompt], 'prompt-p27': [prompt] },
-    messageChoiceIntros: {
+    messageDecisionIntros: {
       'prompt-other': 'Schedule check.',
       'prompt-p27': 'One call before I tag it.',
     },
-    messageChoiceAnswerModes: { 'prompt-other': 'single', 'prompt-p27': 'single' },
-    messageChoiceResponses: {
+    messageDecisionAnswerModes: { 'prompt-other': 'single', 'prompt-p27': 'single' },
+    messageDecisionResponses: {
       'resp-interp-own': {
         rowId: 'interp-own-row',
         ref: 'D234',
@@ -422,7 +422,7 @@ export function responsesPhase2Thread(): ChoiceThread {
         previousChoiceLabel: 'Yes',
       },
     },
-    messageChoiceResponseSets: {
+    messageDecisionResponseSets: {
       'resp-interp-bob-set': {
         batchId: 'batch-interp-bob',
         answers: [

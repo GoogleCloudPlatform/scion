@@ -115,12 +115,12 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 		"handlers_agent_messaging.go:processMentions": "Publish inside if persisted block",
 
 		// publishChoiceResponse: called by handleDecisionAnswer only after
-		// RecordAnswer stored the choice-response row in the answer's
+		// RecordAnswer stored the decision-response row in the answer's
 		// transaction; any RecordAnswer error returns before it.
 		"choices_answer.go:publishChoiceResponse": "Called only after RecordAnswer stored the response row; a RecordAnswer error returns before it",
 
 		// publishChoiceResponseSet: called by handleChoiceSetAnswer only
-		// after RecordAnswerSet stored the set's one choice-response row in
+		// after RecordAnswerSet stored the set's one decision-response row in
 		// the submit's transaction; any RecordAnswerSet error returns
 		// before it, and a replay returns before it too.
 		"choices_batch.go:publishChoiceResponseSet": "Called only after RecordAnswerSet stored the response row; a RecordAnswerSet error or a replay returns before it",

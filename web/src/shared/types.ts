@@ -1710,19 +1710,19 @@ export interface Message {
   /** The delegation grant of a message sent with an agent delegated credential. */
   delegationGrantId?: string;
   /**
-   * Choice prompt decisions (messageType "choice-prompt"). Present only while
+   * Decision prompt decisions (messageType "decision-prompt"). Present only while
    * the web.decisions experiment is on: from the history side map
    * messageDecisions or inline on the live chat.message event.
    */
   decisions?: DecisionView[];
   /** The prompt's intro without the hub's markdown fallback. */
-  choiceIntro?: string;
+  decisionIntro?: string;
   /** "single" for one decision, "set" for 2 or more (one submit answers all). */
   answerMode?: ChoiceAnswerMode;
-  /** One-click answer carried by a "choice-response" message. */
-  choiceResponse?: ChoiceResponseView;
-  /** Set submit carried by a "choice-response" message. */
-  choiceResponseSet?: ChoiceResponseSetView;
+  /** One-click answer carried by a "decision-response" message. */
+  decisionResponse?: ChoiceResponseView;
+  /** Set submit carried by a "decision-response" message. */
+  decisionResponseSet?: ChoiceResponseSetView;
 }
 
 // ---------------------------------------------------------------------------
@@ -1790,7 +1790,7 @@ export interface DecisionView {
   decision?: AnswerView;
 }
 
-/** What a choice-response row of a one-click answer carries. */
+/** What a decision-response row of a one-click answer carries. */
 export interface ChoiceResponseView {
   rowId: string;
   ref: string;
@@ -1830,14 +1830,14 @@ export interface ChoiceResponseSetAnswer {
   previousChoiceLabel?: string;
 }
 
-/** What the choice-response row of a set submit carries, in position order. */
+/** What the decision-response row of a set submit carries, in position order. */
 export interface ChoiceResponseSetView {
   promptMessageId?: string;
   batchId: string;
   answers: ChoiceResponseSetAnswer[];
 }
 
-/** Payload of the chat.choice.updated SSE event. */
+/** Payload of the chat.decision.updated SSE event. */
 export interface ChoiceUpdatedEvent {
   decision: DecisionView;
   messageId: string;

@@ -2362,15 +2362,15 @@ func TestHoldA2_Round1_OPT1_ChoiceResponsePreservesAgentLineAndMetadata(t *testi
 	require.NoError(t, err)
 
 	sendChoicePromptFromLaunched := func(rawDecisions string) struct {
-		MessageID string                 `json:"message_id"`
-		Decisions []ChoiceDecisionResult `json:"decisions"`
+		MessageID string               `json:"message_id"`
+		Decisions []DecisionSendResult `json:"decisions"`
 	} {
 		var decs []messages.DecisionInput
 		require.NoError(t, json.Unmarshal([]byte(rawDecisions), &decs))
 		body, err := json.Marshal(OutboundMessageRequest{
 			Recipient: "user:" + owner.Email,
 			Msg:       "Please choose",
-			Choices:   decs,
+			Decisions: decs,
 		})
 		require.NoError(t, err)
 		req, err := http.NewRequest(http.MethodPost, f.public.URL+"/api/v1/agents/"+f.launched.ID+"/outbound-message", bytes.NewReader(body))
@@ -2383,8 +2383,8 @@ func TestHoldA2_Round1_OPT1_ChoiceResponsePreservesAgentLineAndMetadata(t *testi
 		rb, _ := io.ReadAll(resp.Body)
 		require.Equal(t, http.StatusOK, resp.StatusCode, string(rb))
 		var out struct {
-			MessageID string                 `json:"message_id"`
-			Decisions []ChoiceDecisionResult `json:"decisions"`
+			MessageID string               `json:"message_id"`
+			Decisions []DecisionSendResult `json:"decisions"`
 		}
 		require.NoError(t, json.Unmarshal(rb, &out))
 		return out
@@ -2408,7 +2408,7 @@ func TestHoldA2_Round1_OPT1_ChoiceResponsePreservesAgentLineAndMetadata(t *testi
 		ID: uuid.NewString(), ProjectID: f.launched.ProjectID, AgentID: f.launched.ID,
 		Sender: "agent:" + f.launched.Slug, SenderID: f.launched.ID,
 		Recipient: "user:" + owner.Email, RecipientID: owner.ID,
-		Msg: "recorded interpreted no", Type: messages.TypeChoiceResponse,
+		Msg: "recorded interpreted no", Type: messages.TypeDecisionResponse,
 		DispatchState: store.MessageDispatchDelivered, CreatedAt: time.Now().UTC(),
 	}
 	_, _, err = f.store.RecordAnswer(ctx, &store.RecordAnswerInput{
@@ -2439,7 +2439,7 @@ func TestHoldA2_Round1_OPT1_ChoiceResponsePreservesAgentLineAndMetadata(t *testi
 	require.NoError(t, json.Unmarshal(ansBytes, &singleAnsOut))
 	f.waitMessageState(t, singleAnsOut.ResponseMessageID, store.MessageDispatchAwaitingSession)
 
-	// 2. Three-decision set prompt answered via POST /api/v1/choice-prompts/{id}/answers
+	// 2. Three-decision set prompt answered via POST /api/v1/decision-prompts/{id}/answers
 	//    while f.launched is held in awaiting_session.
 	setOut := sendChoicePromptFromLaunched(`[{"id":"D234","question":"Ship the feature now?","choices":["yes","no"],"default":"yes"},{"question":"Which approach?","choices":[{"id":"a","label":"Extend"},{"id":"b","label":"New type"}]},{"id":"ship-now","question":"Deploy today?","choices":["yes","no"],"default":"no"}]`)
 	require.Len(t, setOut.Decisions, 3)
@@ -2450,7 +2450,7 @@ func TestHoldA2_Round1_OPT1_ChoiceResponsePreservesAgentLineAndMetadata(t *testi
 			{"decision_row_id": setOut.Decisions[2].RowID, "choice_id": "1"},
 		},
 	})
-	setReq, err := http.NewRequest(http.MethodPost, f.public.URL+"/api/v1/choice-prompts/"+setOut.MessageID+"/answers", bytes.NewReader(setAnsBody))
+	setReq, err := http.NewRequest(http.MethodPost, f.public.URL+"/api/v1/decision-prompts/"+setOut.MessageID+"/answers", bytes.NewReader(setAnsBody))
 	require.NoError(t, err)
 	setReq.Header.Set("Authorization", "Bearer "+f.userToken)
 	setReq.Header.Set("Content-Type", "application/json")
@@ -2463,7 +2463,7 @@ func TestHoldA2_Round1_OPT1_ChoiceResponsePreservesAgentLineAndMetadata(t *testi
 	require.NoError(t, json.Unmarshal(setBytes, &setAnsOut))
 	f.waitMessageState(t, setAnsOut.ResponseMessageID, store.MessageDispatchAwaitingSession)
 
-	// Connect Conduit session and verify both re-driven choice-response envelopes.
+	// Connect Conduit session and verify both re-driven decision-response envelopes.
 	ca := f.connectDeliverSession(t, f.public.URL, true, nil)
 	f.waitMessageState(t, singleAnsOut.ResponseMessageID, store.MessageDispatchDelivered)
 	f.waitMessageState(t, setAnsOut.ResponseMessageID, store.MessageDispatchDelivered)
@@ -2478,25 +2478,25 @@ func TestHoldA2_Round1_OPT1_ChoiceResponsePreservesAgentLineAndMetadata(t *testi
 
 	assert.Equal(t, singleAnsOut.ResponseMessageID, pastedEnvs[0]["message_id"])
 	singleMsgText, _ := pastedEnvs[0]["msg"].(string)
-	assert.Contains(t, singleMsgText, `[choice-response] D10 v1 ("Ship the feature now?") answer=yes (choice 1) by `+owner.Email+`, overriding interpreted answer no`)
+	assert.Contains(t, singleMsgText, `[decision-response] D10 v1 ("Ship the feature now?") answer=yes (choice 1) by `+owner.Email+`, overriding interpreted answer no`)
 	singleMeta, _ := pastedEnvs[0]["metadata"].(map[string]any)
 	require.NotNil(t, singleMeta)
-	assert.Equal(t, "D10", singleMeta[messages.MetadataChoiceKey])
-	assert.Equal(t, "1", singleMeta[messages.MetadataChoiceVersion])
+	assert.Equal(t, "D10", singleMeta[messages.MetadataDecisionKey])
+	assert.Equal(t, "1", singleMeta[messages.MetadataDecisionVersion])
 	assert.Equal(t, "1", singleMeta[messages.MetadataChoiceID])
-	assert.Equal(t, store.DecisionProvenanceDirect, singleMeta[messages.MetadataChoiceProvenance])
+	assert.Equal(t, store.DecisionProvenanceDirect, singleMeta[messages.MetadataDecisionProvenance])
 
 	assert.Equal(t, setAnsOut.ResponseMessageID, pastedEnvs[1]["message_id"])
 	setMsgText, _ := pastedEnvs[1]["msg"].(string)
-	assert.Contains(t, setMsgText, "[choice-response] 3 decisions answered by "+owner.Email+" (prompt "+setOut.MessageID+")")
+	assert.Contains(t, setMsgText, "[decision-response] 3 decisions answered by "+owner.Email+" (prompt "+setOut.MessageID+")")
 	assert.Contains(t, setMsgText, `D234 v1 ("Ship the feature now?") answer=yes (choice 1, recommended)`)
 	assert.Contains(t, setMsgText, `1 v1 ("Which approach?") answer=Extend (choice a)`)
 	assert.Contains(t, setMsgText, `ship-now v1 ("Deploy today?") answer=yes (choice 1)`)
 	setMeta, _ := pastedEnvs[1]["metadata"].(map[string]any)
 	require.NotNil(t, setMeta)
-	assert.Equal(t, setAnsOut.BatchID, setMeta[messages.MetadataChoiceBatch])
-	assert.Equal(t, "D234@1=1,1@1=a,ship-now@1=1", setMeta[messages.MetadataChoiceAnswers])
-	assert.Empty(t, setMeta[messages.MetadataChoiceKey])
+	assert.Equal(t, setAnsOut.BatchID, setMeta[messages.MetadataDecisionBatch])
+	assert.Equal(t, "D234@1=1,1@1=a,ship-now@1=1", setMeta[messages.MetadataDecisionAnswers])
+	assert.Empty(t, setMeta[messages.MetadataDecisionKey])
 }
 
 func TestHoldA2_Round2_R1_FlagOffRoutedGroupRecordsUserParticipant(t *testing.T) {

@@ -449,10 +449,10 @@ func TestProjectDecisions_PurgedPromptsAndAnswerSurface(t *testing.T) {
 	ctx := context.Background()
 	basePath := "/api/v1/projects/" + f.project.ID + "/decisions"
 
-	// Subscribe to SSE choice.updated on both project and Bob's user subject.
-	projUpdated, unsubProj := f.srv.events.Subscribe("project." + f.project.ID + ".chat.choice.updated")
+	// Subscribe to SSE decision.updated on both project and Bob's user subject.
+	projUpdated, unsubProj := f.srv.events.Subscribe("project." + f.project.ID + ".chat.decision.updated")
 	defer unsubProj()
-	bobUpdated, unsubBob := f.srv.events.Subscribe("user." + f.bob.ID + ".chat.choice.updated")
+	bobUpdated, unsubBob := f.srv.events.Subscribe("user." + f.bob.ID + ".chat.decision.updated")
 	defer unsubBob()
 
 	// 1. Single prompt in Bob's DM + 3-decision set prompt in Bob's DM + single prompt in topic (for --update after purge) + soft-deleted topic prompt.
@@ -511,7 +511,7 @@ func TestProjectDecisions_PurgedPromptsAndAnswerSurface(t *testing.T) {
 		})
 		assert.Equal(t, http.StatusBadRequest, rr1.Code, "single surface=%s", badSurface)
 
-		rr2 := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/choice-prompts/"+dmSet.MessageID+"/answers", map[string]interface{}{
+		rr2 := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decision-prompts/"+dmSet.MessageID+"/answers", map[string]interface{}{
 			"surface": badSurface,
 			"answers": []map[string]interface{}{
 				{"decision_row_id": dmSet.Decisions[0].RowID, "choice_id": "1"},
@@ -538,11 +538,11 @@ func TestProjectDecisions_PurgedPromptsAndAnswerSurface(t *testing.T) {
 	require.NoError(t, json.Unmarshal(singleAnsRR.Body.Bytes(), &singleAns))
 	require.NotNil(t, singleAns.Decision.Decision)
 	assert.Equal(t, store.DecisionSurfaceDecisionsPage, singleAns.Decision.Decision.Surface)
-	assert.NotEmpty(t, collectEvents(bobUpdated), "SSE choice.updated published for purged DM single prompt")
+	assert.NotEmpty(t, collectEvents(bobUpdated), "SSE decision.updated published for purged DM single prompt")
 
 	// Answer purged 3-decision DM set prompt with surface="decisions_page"!
 	_ = collectEvents(bobUpdated)
-	setAnsRR := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/choice-prompts/"+dmSet.MessageID+"/answers", map[string]interface{}{
+	setAnsRR := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decision-prompts/"+dmSet.MessageID+"/answers", map[string]interface{}{
 		"surface": "decisions_page",
 		"answers": []map[string]interface{}{
 			{"decision_row_id": dmSet.Decisions[0].RowID, "choice_id": "1"},
@@ -557,10 +557,10 @@ func TestProjectDecisions_PurgedPromptsAndAnswerSurface(t *testing.T) {
 		require.NotNil(t, dv.Decision)
 		assert.Equal(t, store.DecisionSurfaceDecisionsPage, dv.Decision.Surface)
 	}
-	assert.Len(t, collectEvents(bobUpdated), 3, "SSE choice.updated published per row of purged DM set prompt")
+	assert.Len(t, collectEvents(bobUpdated), 3, "SSE decision.updated published per row of purged DM set prompt")
 
 	// Replace purged topic prompt's decision via --update through handleAgentOutboundMessage
-	// and verify project SSE choice.updated still fires on the old topic's subject!
+	// and verify project SSE decision.updated still fires on the old topic's subject!
 	_ = collectEvents(projUpdated)
 	repRes := f.sendPromptToBob(t, `[{"id":"rep-after-purge","question":"Replace me v2?","choices":["v2a","v2b"]}]`, true)
 	require.NotNil(t, repRes.Decisions[0].Replaced)
@@ -1050,7 +1050,7 @@ func TestProjectDecisions_NullChatKeyFallbackToPromptThread(t *testing.T) {
 	assert.Equal(t, http.StatusOK, f.answer(t, f.bob, topicRes.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"}).Code)
 	assert.Equal(t, http.StatusOK, f.answer(t, f.bob, dmSingle.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"}).Code)
 
-	// 3. POST /api/v1/choice-prompts/{messageId}/answers refuses non-participant Alice (404) and succeeds for Bob (200)!
+	// 3. POST /api/v1/decision-prompts/{messageId}/answers refuses non-participant Alice (404) and succeeds for Bob (200)!
 	setBody := map[string]interface{}{
 		"surface": "decisions_page",
 		"answers": []map[string]interface{}{
@@ -1059,8 +1059,8 @@ func TestProjectDecisions_NullChatKeyFallbackToPromptThread(t *testing.T) {
 			{"decision_row_id": dmSet.Decisions[2].RowID, "choice_id": "2"},
 		},
 	}
-	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.alice, http.MethodPost, "/api/v1/choice-prompts/"+dmSet.MessageID+"/answers", setBody).Code)
-	assert.Equal(t, http.StatusOK, doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/choice-prompts/"+dmSet.MessageID+"/answers", setBody).Code)
+	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.alice, http.MethodPost, "/api/v1/decision-prompts/"+dmSet.MessageID+"/answers", setBody).Code)
+	assert.Equal(t, http.StatusOK, doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decision-prompts/"+dmSet.MessageID+"/answers", setBody).Code)
 }
 
 func TestProjectDecisions_EqualTimestampCursorTieBreak(t *testing.T) {
@@ -1356,7 +1356,7 @@ func TestDecisions_SingleGateMatrixAndRetiredOverrides(t *testing.T) {
 	}
 
 	// 2. Every surface is OFF when web.decisions is OFF.
-	sendOff := f.sendAsAgent(t, OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Choices: decisionInputs(t, oneDecision)})
+	sendOff := f.sendAsAgent(t, OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Decisions: decisionInputs(t, oneDecision)})
 	assert.Equal(t, http.StatusBadRequest, sendOff.Code)
 	assert.Equal(t, ErrCodeExperimentDisabled, errorCode(t, sendOff))
 	assert.Contains(t, sendOff.Body.String(), "web.decisions")
@@ -1378,7 +1378,7 @@ func TestDecisions_SingleGateMatrixAndRetiredOverrides(t *testing.T) {
 
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/decisions/"+rowID, nil).Code)
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decisions/"+rowID+"/answer", map[string]interface{}{"choice_id": "1"}).Code)
-	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/choice-prompts/"+twoMsg.ID+"/answers", setAnswersBody).Code)
+	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decision-prompts/"+twoMsg.ID+"/answers", setAnswersBody).Code)
 
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/projects/"+f.project.ID+"/decisions", nil).Code)
 	assert.Equal(t, http.StatusNotFound, doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/users/me/decisions", nil).Code)
@@ -1418,12 +1418,12 @@ func TestDecisions_SingleGateMatrixAndRetiredOverrides(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, bobBell.Acknowledged)
 
-	sendOn := f.sendAsAgent(t, OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Choices: decisionInputs(t, `[{"id":"D999","question":"Go?","choices":["yes","no"]}]`)})
+	sendOn := f.sendAsAgent(t, OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Decisions: decisionInputs(t, `[{"id":"D999","question":"Go?","choices":["yes","no"]}]`)})
 	assert.Equal(t, http.StatusOK, sendOn.Code, sendOn.Body.String())
 
 	assert.Equal(t, http.StatusOK, doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decisions/"+rowID+"/answer", map[string]interface{}{"choice_id": "1"}).Code)
-	setAnsOn := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/choice-prompts/"+twoMsg.ID+"/answers", setAnswersBody)
-	assert.NotEqual(t, http.StatusNotFound, setAnsOn.Code, "POST /api/v1/choice-prompts/{id}/answers must be reachable when web.decisions is on")
+	setAnsOn := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decision-prompts/"+twoMsg.ID+"/answers", setAnswersBody)
+	assert.NotEqual(t, http.StatusNotFound, setAnsOn.Code, "POST /api/v1/decision-prompts/{id}/answers must be reachable when web.decisions is on")
 	assert.Equal(t, http.StatusOK, setAnsOn.Code, setAnsOn.Body.String())
 	interpOn := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", map[string]interface{}{})
 	assert.NotEqual(t, http.StatusNotFound, interpOn.Code, "POST /api/v1/agent/decisions/interpreted must be reachable when web.decisions is on")

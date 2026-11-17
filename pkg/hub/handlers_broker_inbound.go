@@ -291,7 +291,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, ErrCodeValidationError, err.Error(), nil)
 		return
 	}
-	// choice-prompt and choice-response are minted by the hub only; a
+	// decision-prompt and decision-response are minted by the hub only; a
 	// plugin relays user messages and never sets either.
 	if rejectHubMintedType(w, req.Message.Type) {
 		return

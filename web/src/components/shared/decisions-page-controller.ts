@@ -301,7 +301,7 @@ export class DecisionsPageController implements ReactiveController {
     window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFlagsChanged);
     window.addEventListener(DISPLAY_TIMEZONE_CHANGED_EVENT, this.boundOnTimezoneChanged);
     window.addEventListener('keydown', this.boundOnKeydown);
-    stateManager.addEventListener('choice-updated', this.boundOnChoiceUpdated);
+    stateManager.addEventListener('decision-updated', this.boundOnChoiceUpdated);
     stateManager.addEventListener('chat-message-received', this.boundOnChatMessageReceived);
     void this.bootIfEnabled();
   }
@@ -310,7 +310,7 @@ export class DecisionsPageController implements ReactiveController {
     window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.boundOnFlagsChanged);
     window.removeEventListener(DISPLAY_TIMEZONE_CHANGED_EVENT, this.boundOnTimezoneChanged);
     window.removeEventListener('keydown', this.boundOnKeydown);
-    stateManager.removeEventListener('choice-updated', this.boundOnChoiceUpdated);
+    stateManager.removeEventListener('decision-updated', this.boundOnChoiceUpdated);
     stateManager.removeEventListener('chat-message-received', this.boundOnChatMessageReceived);
     this.teardownActiveLoads();
   }

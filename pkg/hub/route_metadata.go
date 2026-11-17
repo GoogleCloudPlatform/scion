@@ -719,8 +719,8 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RoutePolicy,
 		Permission:     "project.read", Resource: "project", Action: "read",
 	},
-	"/api/v1/choice-prompts/": {
-		Pattern: "/api/v1/choice-prompts/", RouteID: "choiceprompts.byId",
+	"/api/v1/decision-prompts/": {
+		Pattern: "/api/v1/decision-prompts/", RouteID: "decisionprompts.byId",
 		Classification: RoutePolicy,
 		Permission:     "project.read", Resource: "project", Action: "read",
 	},

@@ -150,7 +150,7 @@ describe('<scion-page-project-detail> Decisions button & badge (Mock P3-1)', () 
     expect(decisionsUrls).toEqual([]);
   });
 
-  it('renders Decisions button, fetches limit=0 count, hides badge at 0, and updates live on choice-updated', async () => {
+  it('renders Decisions button, fetches limit=0 count, hides badge at 0, and updates live on decision-updated', async () => {
     setFeatureFlag(DECISIONS_FLAG, true);
     waitingOnYouCount = 3;
 
@@ -164,19 +164,19 @@ describe('<scion-page-project-detail> Decisions button & badge (Mock P3-1)', () 
     const badge = btn?.querySelector('sl-badge.decisions-badge');
     expect(badge?.textContent?.trim()).toBe('3');
 
-    // Choice updated in another project is ignored
+    // Decision updated in another project is ignored
     stateManager.dispatchEvent(
-      new CustomEvent('choice-updated', {
+      new CustomEvent('decision-updated', {
         detail: { data: { projectId: 'other-proj', messageId: 'm-other' } },
       })
     );
     await settle(el, 150);
     expect(decisionsUrls).toHaveLength(1);
 
-    // Choice updated in this project decrements count to 1
+    // Decision updated in this project decrements count to 1
     waitingOnYouCount = 1;
     stateManager.dispatchEvent(
-      new CustomEvent('choice-updated', {
+      new CustomEvent('decision-updated', {
         detail: { data: { projectId: 'p-1', messageId: 'm-1' } },
       })
     );
@@ -184,10 +184,10 @@ describe('<scion-page-project-detail> Decisions button & badge (Mock P3-1)', () 
     expect(decisionsUrls).toHaveLength(2);
     expect(btn?.querySelector('sl-badge.decisions-badge')?.textContent?.trim()).toBe('1');
 
-    // DM choice-updated (no projectId) decrements count to 0 -> badge hidden
+    // DM decision-updated (no projectId) decrements count to 0 -> badge hidden
     waitingOnYouCount = 0;
     stateManager.dispatchEvent(
-      new CustomEvent('choice-updated', {
+      new CustomEvent('decision-updated', {
         detail: { data: { messageId: 'm-dm' } },
       })
     );
@@ -196,7 +196,7 @@ describe('<scion-page-project-detail> Decisions button & badge (Mock P3-1)', () 
     expect(btn?.querySelector('sl-badge.decisions-badge')).toBeNull();
   });
 
-  it('refreshes badge on chat-message-received for choice-prompt only, and ignores plain messages or other projects', async () => {
+  it('refreshes badge on chat-message-received for decision-prompt only, and ignores plain messages or other projects', async () => {
     setFeatureFlag(DECISIONS_FLAG, true);
     waitingOnYouCount = 1;
 
@@ -208,10 +208,16 @@ describe('<scion-page-project-detail> Decisions button & badge (Mock P3-1)', () 
         ?.textContent?.trim()
     ).toBe('1');
 
-    // Other project choice-prompt is ignored
+    // Other project decision-prompt is ignored
     stateManager.dispatchEvent(
       new CustomEvent('chat-message-received', {
-        detail: { data: { projectId: 'other-proj', type: 'choice-prompt' } },
+        detail: { data: { projectId: 'other-proj', type: 'decision-prompt' } },
+      })
+    );
+    // Legacy choice-prompt in this project is ignored (S2 clean break)
+    stateManager.dispatchEvent(
+      new CustomEvent('chat-message-received', {
+        detail: { data: { projectId: 'p-1', type: 'choice-prompt' } },
       })
     );
     // Plain chat message in this project is ignored
@@ -223,11 +229,11 @@ describe('<scion-page-project-detail> Decisions button & badge (Mock P3-1)', () 
     await settle(el, 150);
     expect(decisionsUrls).toHaveLength(1);
 
-    // New choice-prompt in this project triggers debounced count refresh
+    // New decision-prompt in this project triggers debounced count refresh
     waitingOnYouCount = 4;
     stateManager.dispatchEvent(
       new CustomEvent('chat-message-received', {
-        detail: { data: { projectId: 'p-1', type: 'choice-prompt' } },
+        detail: { data: { projectId: 'p-1', type: 'decision-prompt' } },
       })
     );
     await settle(el, 150);

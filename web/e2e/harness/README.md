@@ -395,7 +395,7 @@ const sendRes = await agent.sendChoicePrompt({
 // Also authenticates on RouteAgentToken (/api/v1/agent/*):
 const res = await agent.request('/api/v1/agent/gcp-token');
 
-// Inspect or wait for choice-response delivery behavior (assumes a
+// Inspect or wait for decision-response delivery behavior (assumes a
 // containerless/absent agent; default timeout 20s for ~5–6s broker buffer +
 // retries on hosts without Docker; promptMessageId matches the newest response
 // in ListMessages DESC order):

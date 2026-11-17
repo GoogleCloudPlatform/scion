@@ -77,7 +77,7 @@ function msg(over: Partial<Message> = {}): Message {
     recipient: 'user:u',
     recipientId: 'u',
     msg: 'fallback',
-    type: 'choice-prompt',
+    type: 'decision-prompt',
     agentId: 'a1',
     createdAt: '2026-11-12T09:00:00Z',
     ...over,
@@ -242,13 +242,13 @@ describe('patchDecisions', () => {
 describe('applyChoiceHistoryMaps', () => {
   it('copies the five side maps onto their messages', () => {
     const prompt = msg();
-    const resp = msg({ id: 'm2', type: 'choice-response' });
-    const respSet = msg({ id: 'm3', type: 'choice-response' });
+    const resp = msg({ id: 'm2', type: 'decision-response' });
+    const respSet = msg({ id: 'm3', type: 'decision-response' });
     applyChoiceHistoryMaps([prompt, resp, respSet], {
       messageDecisions: { m1: [view()] },
-      messageChoiceIntros: { m1: 'Intro' },
-      messageChoiceAnswerModes: { m1: 'single' },
-      messageChoiceResponses: {
+      messageDecisionIntros: { m1: 'Intro' },
+      messageDecisionAnswerModes: { m1: 'single' },
+      messageDecisionResponses: {
         m2: {
           rowId: 'r1',
           ref: 'D1',
@@ -261,20 +261,20 @@ describe('applyChoiceHistoryMaps', () => {
           promptMessageId: 'm1',
         },
       },
-      messageChoiceResponseSets: { m3: { promptMessageId: 'm1', batchId: 'b', answers: [] } },
+      messageDecisionResponseSets: { m3: { promptMessageId: 'm1', batchId: 'b', answers: [] } },
     });
     expect(prompt.decisions?.[0]?.rowId).toBe('r1');
-    expect(prompt.choiceIntro).toBe('Intro');
+    expect(prompt.decisionIntro).toBe('Intro');
     expect(prompt.answerMode).toBe('single');
-    expect(resp.choiceResponse?.label).toBe('Yes');
-    expect(respSet.choiceResponseSet?.batchId).toBe('b');
+    expect(resp.decisionResponse?.label).toBe('Yes');
+    expect(respSet.decisionResponseSet?.batchId).toBe('b');
   });
 
   it('leaves messages untouched without maps (experiment off)', () => {
     const m = msg();
     applyChoiceHistoryMaps([m], {});
     expect(m.decisions).toBeUndefined();
-    expect(m.choiceIntro).toBeUndefined();
+    expect(m.decisionIntro).toBeUndefined();
   });
 });
 
@@ -294,11 +294,11 @@ describe('carryChoiceFields', () => {
   });
 
   it('keeps the held choice fields when the incoming copy has none', () => {
-    const existing = msg({ decisions: [view()], choiceIntro: 'Intro', answerMode: 'single' });
+    const existing = msg({ decisions: [view()], decisionIntro: 'Intro', answerMode: 'single' });
     const incoming = msg();
     carryChoiceFields(existing, incoming);
     expect(incoming.decisions).toBe(existing.decisions);
-    expect(incoming.choiceIntro).toBe('Intro');
+    expect(incoming.decisionIntro).toBe('Intro');
     expect(incoming.answerMode).toBe('single');
   });
 });
@@ -408,7 +408,7 @@ describe('answerDecisionSet', () => {
       batchId: 'b1',
     });
     const [path, init] = apiFetch.mock.calls[0]!;
-    expect(path).toBe('/api/v1/choice-prompts/m%201/answers');
+    expect(path).toBe('/api/v1/decision-prompts/m%201/answers');
     expect(init?.method).toBe('POST');
     expect(JSON.parse(init?.body as string)).toEqual({
       idempotency_key: 'key-1',

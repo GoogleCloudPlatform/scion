@@ -128,14 +128,14 @@ func TestMapLegacyType_AllOldTypes(t *testing.T) {
 			wantIntent: ptrIntent(IntentRequest),
 		},
 		{
-			name:       "choice-prompt → text/question",
-			oldType:    messages.TypeChoicePrompt,
+			name:       "decision-prompt → text/question",
+			oldType:    messages.TypeDecisionPrompt,
 			wantKind:   KindText,
 			wantIntent: ptrIntent(IntentQuestion),
 		},
 		{
-			name:       "choice-response → text/inform",
-			oldType:    messages.TypeChoiceResponse,
+			name:       "decision-response → text/inform",
+			oldType:    messages.TypeDecisionResponse,
 			wantKind:   KindText,
 			wantIntent: ptrIntent(IntentInform),
 		},

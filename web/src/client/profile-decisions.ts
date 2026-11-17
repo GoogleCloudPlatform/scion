@@ -51,8 +51,8 @@ export const PROFILE_DECISION_PROBE_TTL_MS = 30_000;
 
 /**
  * Returns true when a `stateManager` `'chat-message-received'` event carries a
- * structured choice prompt (`UserMessageEvent` in `pkg/hub/events.go` emits
- * `type: 'choice-prompt'` and top-level `decisions`).
+ * structured decision prompt (`UserMessageEvent` in `pkg/hub/events.go` emits
+ * `type: 'decision-prompt'` and top-level `decisions`).
  */
 export function isChoicePromptMessageEvent(e: Event): boolean {
   const raw = (e as CustomEvent).detail as {
@@ -64,7 +64,7 @@ export function isChoicePromptMessageEvent(e: Event): boolean {
     decisions?: unknown;
   } | null;
   const data = raw?.data ?? raw;
-  return data?.type === 'choice-prompt' || Array.isArray(data?.decisions);
+  return data?.type === 'decision-prompt' || Array.isArray(data?.decisions);
 }
 
 /** Sort order for `/profile/decisions` (`project` groups by project, `recent` is chronological). */
@@ -364,7 +364,7 @@ let probeInvalidationListenersInstalled = false;
 function ensureProbeInvalidationListeners(): void {
   if (probeInvalidationListenersInstalled) return;
   probeInvalidationListenersInstalled = true;
-  stateManager.addEventListener('choice-updated', () => {
+  stateManager.addEventListener('decision-updated', () => {
     ++probeInvalidationSeq;
     cachedProfileDecisionProbeDirty = true;
   });

@@ -275,7 +275,7 @@ describe('<scion-page-project-decisions>', () => {
         }
         if (
           url.pathname.startsWith('/api/v1/decisions/') ||
-          url.pathname.startsWith('/api/v1/choice-prompts/')
+          url.pathname.startsWith('/api/v1/decision-prompts/')
         ) {
           return answerResponseFn(url, parsedBody);
         }
@@ -691,7 +691,7 @@ describe('<scion-page-project-decisions>', () => {
     );
   });
 
-  it('removes a prompt settled in another tab live on choice-updated and updates counts without reload', async () => {
+  it('removes a prompt settled in another tab live on decision-updated and updates counts without reload', async () => {
     enableDecisionsFlag();
     pendingResponses = [
       {
@@ -723,7 +723,7 @@ describe('<scion-page-project-decisions>', () => {
 
     // Another project's event is ignored
     stateManager.dispatchEvent(
-      new CustomEvent('choice-updated', {
+      new CustomEvent('decision-updated', {
         detail: {
           data: {
             projectId: 'other-project',
@@ -751,9 +751,9 @@ describe('<scion-page-project-decisions>', () => {
     await settle(el, 20);
     expect(root.querySelector('[data-prompt-card="m-dm-live"]')).not.toBeNull();
 
-    // User-scoped DM choice-updated (no projectId) settles r-dm-live immediately and refreshes
+    // User-scoped DM decision-updated (no projectId) settles r-dm-live immediately and refreshes
     stateManager.dispatchEvent(
-      new CustomEvent('choice-updated', {
+      new CustomEvent('decision-updated', {
         detail: {
           data: {
             messageId: 'm-dm-live',
@@ -784,7 +784,7 @@ describe('<scion-page-project-decisions>', () => {
     expect(root.querySelector('[data-empty="pending"]')).not.toBeNull();
   });
 
-  it('preserves Made Load more pages and cursor on live choice-updated, and never aborts an in-flight Load more', async () => {
+  it('preserves Made Load more pages and cursor on live decision-updated, and never aborts an in-flight Load more', async () => {
     enableDecisionsFlag();
     const rowP1 = makeLogEntry({ answerId: 'ans-p1', label: 'Page 1 original' });
     const rowP2 = makeLogEntry({ answerId: 'ans-p2', label: 'Page 2 older' });
@@ -833,9 +833,9 @@ describe('<scion-page-project-decisions>', () => {
     root.querySelector<HTMLElement>('[data-load-more="made"]')!.click();
     await settle(el, 10);
 
-    // Fire choice-updated while Load more is in flight; wait past 60ms debounce
+    // Fire decision-updated while Load more is in flight; wait past 60ms debounce
     stateManager.dispatchEvent(
-      new CustomEvent('choice-updated', {
+      new CustomEvent('decision-updated', {
         detail: { data: { projectId: 'p-1', messageId: 'm-1' } },
       })
     );
@@ -906,9 +906,9 @@ describe('<scion-page-project-decisions>', () => {
     root.querySelector<HTMLElement>('sl-tab[panel="pending"]')!.click();
     await settle(el, 20);
 
-    // Fire choice-updated while Made is hidden
+    // Fire decision-updated while Made is hidden
     stateManager.dispatchEvent(
-      new CustomEvent('choice-updated', {
+      new CustomEvent('decision-updated', {
         detail: { data: { projectId: 'p-1', messageId: 'm-1' } },
       })
     );
@@ -928,7 +928,7 @@ describe('<scion-page-project-decisions>', () => {
     expect(renderedIds).toEqual(['ans-after-sse', 'ans-initial']);
   });
 
-  it('preserves Pending prompts beyond page 1 (>50) across live choice-updated without aborting Load more', async () => {
+  it('preserves Pending prompts beyond page 1 (>50) across live decision-updated without aborting Load more', async () => {
     enableDecisionsFlag();
     const page1Prompts = Array.from({ length: 50 }, (_, i) =>
       makePrompt({
@@ -985,9 +985,9 @@ describe('<scion-page-project-decisions>', () => {
     root.querySelector<HTMLElement>('[data-load-more="pending"]')!.click();
     await settle(el, 10);
 
-    // Fire choice-updated while Pending Load more is in flight
+    // Fire decision-updated while Pending Load more is in flight
     stateManager.dispatchEvent(
-      new CustomEvent('choice-updated', {
+      new CustomEvent('decision-updated', {
         detail: { data: { projectId: 'p-1', messageId: 'm-other' } },
       })
     );
@@ -1156,7 +1156,7 @@ describe('<scion-page-project-decisions>', () => {
 
     // Settle p-1 so it leaves Waiting on you
     stateManager.dispatchEvent(
-      new CustomEvent('choice-updated', {
+      new CustomEvent('decision-updated', {
         detail: {
           data: {
             projectId: 'p-1',
@@ -1191,7 +1191,7 @@ describe('<scion-page-project-decisions>', () => {
     expect(p2ChoicesAfter).toBe(p2ChoicesBefore);
   });
 
-  it('refreshes on chat-message-received for choice-prompt only and dynamically toggles on FEATURE_FLAGS_CHANGED_EVENT', async () => {
+  it('refreshes on chat-message-received for decision-prompt only and dynamically toggles on FEATURE_FLAGS_CHANGED_EVENT', async () => {
     // Start with flags OFF -> 404, zero requests
     const el = await mount();
     const root = el.shadowRoot!;
@@ -1228,10 +1228,10 @@ describe('<scion-page-project-decisions>', () => {
 
     const pendingCountBefore = requests.filter((r) => r.url.includes('tab=pending')).length;
 
-    // Ignore other-project choice-prompt and same-project plain message
+    // Ignore other-project decision-prompt and same-project plain message
     stateManager.dispatchEvent(
       new CustomEvent('chat-message-received', {
-        detail: { data: { projectId: 'other-proj', type: 'choice-prompt' } },
+        detail: { data: { projectId: 'other-proj', type: 'decision-prompt' } },
       })
     );
     stateManager.dispatchEvent(
@@ -1242,10 +1242,10 @@ describe('<scion-page-project-decisions>', () => {
     await settle(el, 90);
     expect(requests.filter((r) => r.url.includes('tab=pending')).length).toBe(pendingCountBefore);
 
-    // Same-project choice-prompt triggers debounced refresh
+    // Same-project decision-prompt triggers debounced refresh
     stateManager.dispatchEvent(
       new CustomEvent('chat-message-received', {
-        detail: { data: { projectId: 'p-1', type: 'choice-prompt' } },
+        detail: { data: { projectId: 'p-1', type: 'decision-prompt' } },
       })
     );
     await settle(el, 90);
@@ -1447,9 +1447,9 @@ describe('<scion-page-project-decisions>', () => {
     );
     await settle(el, 10);
 
-    // Fire choice-updated while filter reset is in flight; wait past 60ms debounce
+    // Fire decision-updated while filter reset is in flight; wait past 60ms debounce
     stateManager.dispatchEvent(
-      new CustomEvent('choice-updated', {
+      new CustomEvent('decision-updated', {
         detail: { data: { projectId: 'p-1', messageId: 'm-1' } },
       })
     );
@@ -1511,9 +1511,9 @@ describe('<scion-page-project-decisions>', () => {
     const el = await mount();
     const root = el.shadowRoot!;
 
-    // Fire choice-updated while initial Pending reset is still in flight
+    // Fire decision-updated while initial Pending reset is still in flight
     stateManager.dispatchEvent(
-      new CustomEvent('choice-updated', {
+      new CustomEvent('decision-updated', {
         detail: { data: { projectId: 'p-1', messageId: 'm-boot' } },
       })
     );
@@ -2530,10 +2530,10 @@ describe('<scion-page-project-decisions>', () => {
     );
     await settle(el, 20);
 
-    // Fire an SSE choice-prompt while on Made -> scheduleLiveRefresh must NOT run a `live` merge on Pending
+    // Fire an SSE decision-prompt while on Made -> scheduleLiveRefresh must NOT run a `live` merge on Pending
     stateManager.dispatchEvent(
       new CustomEvent('chat-message-received', {
-        detail: { data: { projectId: 'p-1', type: 'choice-prompt' } },
+        detail: { data: { projectId: 'p-1', type: 'decision-prompt' } },
       })
     );
     await settle(el, 90);

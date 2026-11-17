@@ -98,7 +98,7 @@ function prompt(id: string, minute: number) {
     recipient: '',
     recipientId: '',
     msg: 'fallback',
-    type: 'choice-prompt',
+    type: 'decision-prompt',
     agentId: 'a1',
     createdAt: `2026-11-12T15:${minute}:00Z`,
     threadId: KEY,
@@ -114,7 +114,7 @@ function response(id: string, senderId: string, minute: number) {
     recipient: 'agent:release-bot',
     recipientId: 'a1',
     msg: 'alice chose "Yes" for D234 "Ship it?"',
-    type: 'choice-response',
+    type: 'decision-response',
     agentId: 'a1',
     createdAt: `2026-11-12T15:${minute}:00Z`,
     threadId: KEY,
@@ -174,8 +174,8 @@ beforeEach(() => {
   history = {
     messages: [prompt('p1', 41), prompt('p2', 42)],
     messageDecisions: { p1: [decision('p1')], p2: [decision('p2')] },
-    messageChoiceIntros: { p1: '', p2: '' },
-    messageChoiceAnswerModes: { p1: 'single', p2: 'single' },
+    messageDecisionIntros: { p1: '', p2: '' },
+    messageDecisionAnswerModes: { p1: 'single', p2: 'single' },
   };
   agentRead = () => json({ id: 'a1', name: 'release-bot', _messageability: { canMessage: true } });
   apiFetch.mockReset();
@@ -379,10 +379,10 @@ describe('a 403 over the asker read', () => {
   });
 });
 
-describe('choice-response lines', () => {
+describe('decision-response lines', () => {
   beforeEach(() => {
     history.messages = [prompt('p1', 41), response('c1', 'u-me', 42), response('c2', 'u-bob', 43)];
-    history.messageChoiceResponses = {
+    history.messageDecisionResponses = {
       c1: {
         rowId: 'row-p1',
         ref: 'D234',
@@ -398,7 +398,7 @@ describe('choice-response lines', () => {
         promptMessageId: 'p1',
       },
     };
-    history.messageChoiceResponseSets = {
+    history.messageDecisionResponseSets = {
       c2: {
         promptMessageId: 'p1',
         batchId: 'b1',

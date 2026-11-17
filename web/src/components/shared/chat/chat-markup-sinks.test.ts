@@ -374,8 +374,8 @@ describe('chat message markup boundary', () => {
     const el = document.createElement('scion-chat-message') as ScionChatMessage;
     el.senderIsAgent = true;
     el.fromAgent = true;
-    el.messageType = 'choice-prompt';
-    el.choiceIntro = 'One call before I tag it.';
+    el.messageType = 'decision-prompt';
+    el.decisionIntro = 'One call before I tag it.';
     el.body = 'One call before I tag it.\n\nFallback text the card hides.';
     el.decisions = [
       {

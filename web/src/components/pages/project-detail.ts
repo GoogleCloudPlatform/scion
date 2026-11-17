@@ -522,7 +522,7 @@ export class ScionPageProjectDetail extends LitElement {
     } | null;
     const data = raw?.data ?? raw;
     if (data?.projectId && data.projectId !== this.projectId) return;
-    if (data?.type !== 'choice-prompt' && !Array.isArray(data?.decisions)) return;
+    if (data?.type !== 'decision-prompt' && !Array.isArray(data?.decisions)) return;
     this.scheduleDecisionsCountRefresh();
   };
 
@@ -1350,7 +1350,7 @@ export class ScionPageProjectDetail extends LitElement {
     stateManager.addEventListener('projects-updated', this.boundOnProjectsUpdated);
     stateManager.addEventListener('agents-changed', this.boundOnAgentsChanged);
     stateManager.addEventListener('agents-resync', this.boundOnAgentsResync);
-    stateManager.addEventListener('choice-updated', this.boundOnChoiceUpdated);
+    stateManager.addEventListener('decision-updated', this.boundOnChoiceUpdated);
     stateManager.addEventListener('chat-message-received', this.boundOnChatMessageReceived);
     this.agentWindow.addEventListener('change', this.boundOnWindowChange);
   }
@@ -1361,7 +1361,7 @@ export class ScionPageProjectDetail extends LitElement {
     stateManager.removeEventListener('projects-updated', this.boundOnProjectsUpdated);
     stateManager.removeEventListener('agents-changed', this.boundOnAgentsChanged);
     stateManager.removeEventListener('agents-resync', this.boundOnAgentsResync);
-    stateManager.removeEventListener('choice-updated', this.boundOnChoiceUpdated);
+    stateManager.removeEventListener('decision-updated', this.boundOnChoiceUpdated);
     stateManager.removeEventListener('chat-message-received', this.boundOnChatMessageReceived);
     this.agentWindow.removeEventListener('change', this.boundOnWindowChange);
     this.cancelAgentsLoad();

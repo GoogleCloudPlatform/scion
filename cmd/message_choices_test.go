@@ -204,13 +204,13 @@ func TestChoicesSummary(t *testing.T) {
 }
 
 func TestChoiceDecisionLine(t *testing.T) {
-	assert.Equal(t, "D234 v1 (new)", choiceDecisionLine(hubclient.ChoiceDecisionResult{Key: "D234", Version: 1}))
-	assert.Equal(t, "D1 v2 (new, replaces v1 which was pending)", choiceDecisionLine(hubclient.ChoiceDecisionResult{
-		Key: "D1", Version: 2, Replaced: &hubclient.ChoiceReplacedDecision{Version: 1, Status: "pending"}}))
-	assert.Equal(t, "D1 v3 (new, replaces v2 which was decided: yes)", choiceDecisionLine(hubclient.ChoiceDecisionResult{
-		Key: "D1", Version: 3, Replaced: &hubclient.ChoiceReplacedDecision{Version: 2, Status: "decided", Answer: "yes"}}))
-	assert.Equal(t, "D1 v3 (new, replaces v2 which was decided by Pat: yes)", choiceDecisionLine(hubclient.ChoiceDecisionResult{
-		Key: "D1", Version: 3, Replaced: &hubclient.ChoiceReplacedDecision{Version: 2, Status: "decided", Answer: "yes", AnsweredBy: "Pat"}}))
+	assert.Equal(t, "D234 v1 (new)", choiceDecisionLine(hubclient.DecisionSendResult{Key: "D234", Version: 1}))
+	assert.Equal(t, "D1 v2 (new, replaces v1 which was pending)", choiceDecisionLine(hubclient.DecisionSendResult{
+		Key: "D1", Version: 2, Replaced: &hubclient.DecisionReplaced{Version: 1, Status: "pending"}}))
+	assert.Equal(t, "D1 v3 (new, replaces v2 which was decided: yes)", choiceDecisionLine(hubclient.DecisionSendResult{
+		Key: "D1", Version: 3, Replaced: &hubclient.DecisionReplaced{Version: 2, Status: "decided", Answer: "yes"}}))
+	assert.Equal(t, "D1 v3 (new, replaces v2 which was decided by Pat: yes)", choiceDecisionLine(hubclient.DecisionSendResult{
+		Key: "D1", Version: 3, Replaced: &hubclient.DecisionReplaced{Version: 2, Status: "decided", Answer: "yes", AnsweredBy: "Pat"}}))
 }
 
 // A choice prompt to a user sends the decisions and --update, prints the
@@ -227,9 +227,9 @@ func TestSendOutboundChoices_UserRecipient(t *testing.T) {
 	out := captureStdout(t, func() { err = sendOutboundMessageViaHub(hubCtx, "user:alice@example.com", "", false) })
 	require.NoError(t, err)
 
-	assert.Equal(t, true, got["choices_update"])
-	assert.NotContains(t, got, "type", "the hub sets a choice prompt's type")
-	raw, _ := json.Marshal(got["choices"])
+	assert.Equal(t, true, got["decisions_update"])
+	assert.NotContains(t, got, "type", "the hub sets a decision prompt's type")
+	raw, _ := json.Marshal(got["decisions"])
 	assert.JSONEq(t, choicesTwoDecisions, string(raw))
 
 	assert.Contains(t, out, "Message sent to user:alice@example.com via Hub (message msg-choices-1).")
@@ -252,7 +252,7 @@ func TestSendOutboundChoices_ConversationJSON(t *testing.T) {
 	out := captureStdout(t, func() { err = sendMessageViaConversation(hubCtx, ref, "Two calls", false, false, nil) })
 	require.NoError(t, err)
 	assert.Equal(t, "Two calls", got["msg"])
-	assert.Contains(t, got, "choices")
+	assert.Contains(t, got, "decisions")
 
 	var res hubclient.OutboundMessageResult
 	require.NoError(t, json.Unmarshal([]byte(out), &res))

@@ -380,7 +380,7 @@ describe('scion-chat-message attribution by answeredByUserId', () => {
     setFeatureFlag(DECISIONS_FLAG, true);
     const msg = document.createElement('scion-chat-message');
     msg.messageId = 'm1';
-    msg.messageType = 'choice-response';
+    msg.messageType = 'decision-response';
     msg.timestamp = '2026-11-12T15:42:00Z';
     Object.assign(msg, props);
     document.body.appendChild(msg);
@@ -398,7 +398,7 @@ describe('scion-chat-message attribution by answeredByUserId', () => {
       fromAgent: true,
       senderName: 'Alice',
       routedTo: 'release-bot',
-      choiceResponse: single({ answeredByUserId: 'u-alice', answeredByName: 'Alice' }),
+      decisionResponse: single({ answeredByUserId: 'u-alice', answeredByName: 'Alice' }),
     });
     expect(ownMsg.shadowRoot!.querySelector('.choice-response-row.own')).not.toBeNull();
     const ownLine = ownMsg.shadowRoot!.querySelector('scion-chat-choice-response')!;
@@ -409,7 +409,7 @@ describe('scion-chat-message attribution by answeredByUserId', () => {
       fromAgent: false,
       senderName: 'Alice',
       routedTo: 'release-bot',
-      choiceResponse: single({ answeredByUserId: 'u-bob', answeredByName: 'Bob' }),
+      decisionResponse: single({ answeredByUserId: 'u-bob', answeredByName: 'Bob' }),
     });
     expect(bobMsg.shadowRoot!.querySelector('.choice-response-row.other')).not.toBeNull();
     const bobLine = bobMsg.shadowRoot!.querySelector('scion-chat-choice-response')!;
@@ -421,7 +421,7 @@ describe('scion-chat-message attribution by answeredByUserId', () => {
       currentUserId: '',
       fromAgent: false,
       senderName: 'Alice',
-      choiceResponse: single({ answeredByUserId: 'u-alice', answeredByName: 'Alice' }),
+      decisionResponse: single({ answeredByUserId: 'u-alice', answeredByName: 'Alice' }),
     });
     expect(msg.shadowRoot!.querySelector('.choice-response-row.other')).not.toBeNull();
     const line = msg.shadowRoot!.querySelector('scion-chat-choice-response')!;
@@ -439,7 +439,7 @@ describe('scion-chat-message attribution by answeredByUserId', () => {
           currentUserId,
           fromAgent: false,
           senderName: 'Alice',
-          choiceResponse: response,
+          decisionResponse: response,
         });
         expect(msg.shadowRoot!.querySelector('.choice-response-row.other')).not.toBeNull();
         expect(msg.shadowRoot!.querySelector('.choice-response-row.own')).toBeNull();
@@ -460,7 +460,7 @@ describe('scion-chat-message attribution by answeredByUserId', () => {
       sender: 'agent:release-bot',
       senderName: 'release-bot',
       routedTo: '',
-      choiceResponse: single({
+      decisionResponse: single({
         provenance: 'agent_interpreted',
         answeredByUserId: 'u-alice',
         answeredByName: 'Alice',
@@ -484,7 +484,7 @@ describe('scion-chat-message attribution by answeredByUserId', () => {
       sender: 'agent:release-bot',
       senderName: '',
       routedTo: '',
-      choiceResponseSet: set({
+      decisionResponseSet: set({
         answers: [
           setAnswer({
             rowId: 'r1',

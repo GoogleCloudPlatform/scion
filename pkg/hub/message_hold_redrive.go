@@ -857,18 +857,18 @@ func (s *Server) processClaimedHeldRow(
 	// of earlier held rows.
 	sm.Urgent = false
 
-	// Choice responses store a chat summary in row.Msg while live delivery
-	// sends the hub-formatted [choice-response] line and hub-set choice
+	// Decision responses store a chat summary in row.Msg while live delivery
+	// sends the hub-formatted [decision-response] line and hub-set decision
 	// metadata from decision_answers / decisions (OPT-1). Reconstruct both
 	// before RenderDeliveryText so legacy and envelope consumers match live send.
-	if row.Type == messages.TypeChoiceResponse {
+	if row.Type == messages.TypeDecisionResponse {
 		choiceFailReason, choiceTransientErr := s.enrichHeldChoiceResponse(ctx, row, sm)
 		if choiceTransientErr != nil || ctx.Err() != nil {
 			errToLog := choiceTransientErr
 			if errToLog == nil {
 				errToLog = ctx.Err()
 			}
-			slog.Warn("message-hold: transient error enriching choice-response; re-holding row",
+			slog.Warn("message-hold: transient error enriching decision-response; re-holding row",
 				"agent_id", agentID, "message_id", row.ID, "error", errToLog)
 			s.reholdOrFailClaimedRow(ctx, agentID, row)
 			return claimedRowReheldTransient
@@ -996,10 +996,10 @@ func (s *Server) enrichHeldChoiceResponse(
 		if sm.Metadata == nil {
 			sm.Metadata = make(map[string]string, 4)
 		}
-		sm.Metadata[messages.MetadataChoiceKey] = a.Key
-		sm.Metadata[messages.MetadataChoiceVersion] = strconv.Itoa(a.Version)
+		sm.Metadata[messages.MetadataDecisionKey] = a.Key
+		sm.Metadata[messages.MetadataDecisionVersion] = strconv.Itoa(a.Version)
 		sm.Metadata[messages.MetadataChoiceID] = a.ChoiceID
-		sm.Metadata[messages.MetadataChoiceProvenance] = a.Provenance
+		sm.Metadata[messages.MetadataDecisionProvenance] = a.Provenance
 		return "", nil
 	}
 
@@ -1066,8 +1066,8 @@ func (s *Server) enrichHeldChoiceResponse(
 	if sm.Metadata == nil {
 		sm.Metadata = make(map[string]string, 2)
 	}
-	sm.Metadata[messages.MetadataChoiceBatch] = batchID
-	sm.Metadata[messages.MetadataChoiceAnswers] = choiceAnswersMetadata(ordered)
+	sm.Metadata[messages.MetadataDecisionBatch] = batchID
+	sm.Metadata[messages.MetadataDecisionAnswers] = choiceAnswersMetadata(ordered)
 	return "", nil
 }
 

@@ -31,10 +31,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// Set answers (design choices v5, 4.2 and 4.3): a choice prompt with two or
+// Set answers (design choices v5, 4.2 and 4.3): a decision prompt with two or
 // more decisions is answered as one set.
 
-const choicePromptsRoutePrefix = "/api/v1/choice-prompts/"
+const decisionPromptsRoutePrefix = "/api/v1/decision-prompts/"
 
 // Error codes of the set answer endpoint and the per-decision guard.
 const (
@@ -44,7 +44,7 @@ const (
 )
 
 // ChoiceSetAnswerRequest is the body of POST
-// /api/v1/choice-prompts/{messageId}/answers. The client sends choice ids
+// /api/v1/decision-prompts/{messageId}/answers. The client sends choice ids
 // only; labels come from the stored rows.
 type ChoiceSetAnswerRequest struct {
 	IdempotencyKey string                `json:"idempotency_key,omitempty"`
@@ -59,7 +59,7 @@ type ChoiceSetAnswerItem struct {
 }
 
 // ChoiceSetAnswerResponse is the 200 body of a set submit: the one
-// choice-response message, the batch and every decision of the prompt.
+// decision-response message, the batch and every decision of the prompt.
 type ChoiceSetAnswerResponse struct {
 	ResponseMessageID string         `json:"responseMessageId"`
 	BatchID           string         `json:"batchId"`
@@ -67,16 +67,16 @@ type ChoiceSetAnswerResponse struct {
 	Replayed          bool           `json:"replayed,omitempty"`
 }
 
-// handleChoicePromptRoutes serves the choice prompt endpoints, 404 while
+// handleChoicePromptRoutes serves the decision prompt endpoints, 404 while
 // web.decisions is off:
 //
-//	POST /api/v1/choice-prompts/{messageId}/answers  answer every decision as one set
+//	POST /api/v1/decision-prompts/{messageId}/answers  answer every decision as one set
 func (s *Server) handleChoicePromptRoutes(w http.ResponseWriter, r *http.Request) {
 	s.requireExperiment(experiments.Decisions, func(w http.ResponseWriter, r *http.Request) {
-		rest := strings.TrimPrefix(r.URL.Path, choicePromptsRoutePrefix)
+		rest := strings.TrimPrefix(r.URL.Path, decisionPromptsRoutePrefix)
 		msgID, sub, _ := strings.Cut(rest, "/")
 		if msgID == "" || sub != "answers" {
-			NotFound(w, "Choice prompt")
+			NotFound(w, "Decision prompt")
 			return
 		}
 		if r.Method != http.MethodPost {
@@ -91,7 +91,7 @@ func (s *Server) handleChoicePromptRoutes(w http.ResponseWriter, r *http.Request
 // still present) and authorizes the caller to send in its conversation (using
 // stored chat_key so multi-decision set prompts remain answerable after chat
 // retention purges the prompt message, falling back to messages.thread_id for
-// pre-backfill rows). A message that is not a choice prompt, a prompt with no
+// pre-backfill rows). A message that is not a decision prompt, a prompt with no
 // decisions, a purged prompt with no chat_key, and a refused caller all answer
 // 404.
 func (s *Server) loadAuthorizedChoicePrompt(w http.ResponseWriter, ctx context.Context, user UserIdentity, msgID string) ([]*store.Decision, string, bool) {
@@ -102,8 +102,8 @@ func (s *Server) loadAuthorizedChoicePrompt(w http.ResponseWriter, ctx context.C
 		writeErrorFromErr(w, err, "")
 		return nil, "", false
 	}
-	if m != nil && m.Type != messages.TypeChoicePrompt {
-		NotFound(w, "Choice prompt")
+	if m != nil && m.Type != messages.TypeDecisionPrompt {
+		NotFound(w, "Decision prompt")
 		return nil, "", false
 	}
 	rows, err := s.store.GetDecisionsByMessageIDs(ctx, []string{msgID})
@@ -113,7 +113,7 @@ func (s *Server) loadAuthorizedChoicePrompt(w http.ResponseWriter, ctx context.C
 	}
 	ds := rows[msgID]
 	if len(ds) == 0 {
-		NotFound(w, "Choice prompt")
+		NotFound(w, "Decision prompt")
 		return nil, "", false
 	}
 	chatKey := ds[0].ChatKey
@@ -121,12 +121,12 @@ func (s *Server) loadAuthorizedChoicePrompt(w http.ResponseWriter, ctx context.C
 		chatKey = m.ThreadID
 	}
 	if chatKey == "" {
-		NotFound(w, "Choice prompt")
+		NotFound(w, "Decision prompt")
 		return nil, "", false
 	}
 	if serr := s.authorizeDecisionChatKey(ctx, user, chatKey, true); serr != nil {
 		if serr.Status == http.StatusNotFound || serr.accessRefused {
-			NotFound(w, "Choice prompt")
+			NotFound(w, "Decision prompt")
 			return nil, "", false
 		}
 		serr.write(w)
@@ -188,7 +188,7 @@ func (s *Server) writeAnswerSetChanged(w http.ResponseWriter, ctx context.Contex
 		map[string]interface{}{"decisions": s.promptDecisionViewsByID(ctx, msgID), "reasons": reasons})
 }
 
-// handleChoiceSetAnswer serves POST /api/v1/choice-prompts/{messageId}/answers
+// handleChoiceSetAnswer serves POST /api/v1/decision-prompts/{messageId}/answers
 // (design choices v5, 4.2).
 func (s *Server) handleChoiceSetAnswer(w http.ResponseWriter, r *http.Request, msgID string) {
 	ctx := r.Context()
@@ -313,7 +313,7 @@ func (s *Server) handleChoiceSetAnswer(w http.ResponseWriter, r *http.Request, m
 	if !ok {
 		return
 	}
-	// The choice-response is a message from the user to the asking agent:
+	// The decision-response is a message from the user to the asking agent:
 	// the chat send's messaging check, unless nothing is delivered (a gone
 	// asker or an all-confirm set).
 	if !askerGone && !allConfirm {
@@ -353,7 +353,7 @@ func (s *Server) handleChoiceSetAnswer(w http.ResponseWriter, r *http.Request, m
 		ValidationError(w, err.Error(), nil)
 		return
 	case errors.Is(err, store.ErrNotFound):
-		NotFound(w, "Choice prompt")
+		NotFound(w, "Decision prompt")
 		return
 	default:
 		writeErrorFromErr(w, err, "")
@@ -370,7 +370,7 @@ func (s *Server) handleChoiceSetAnswer(w http.ResponseWriter, r *http.Request, m
 
 	// Step 8, after commit: the response row's chat events, the delivery
 	// to the asker (not for an all-confirm set: the agent already acted on
-	// those answers), then choice.updated once per answered row, in
+	// those answers), then decision.updated once per answered row, in
 	// position order.
 	setView := choiceResponseSetView(msgID, res.BatchID, ds, res.Answers)
 	s.publishChoiceResponseSet(ctx, responseMsg, setView)
@@ -426,7 +426,7 @@ func sameSetAnswers(prior []*store.DecisionAnswer, userID string, choices map[st
 	return true
 }
 
-// choiceSetResponseStoreMessage builds the one choice-response row of a set
+// choiceSetResponseStoreMessage builds the one decision-response row of a set
 // submit (design v5 5.1): sender the answering user, recipient the asking
 // agent, in the prompt's conversation, its body one line per answer in
 // position order. A gone asker (askerGone; asker is then unused) or one
@@ -450,7 +450,7 @@ func choiceSetResponseStoreMessage(user UserIdentity, ds []*store.Decision, chat
 		SenderID:       user.ID(),
 		RecipientID:    ds[0].AskerAgentID,
 		Msg:            fmt.Sprintf("%s answered %d %s: %s", userDisplay(user), len(parts), noun, strings.Join(parts, " · ")),
-		Type:           messages.TypeChoiceResponse,
+		Type:           messages.TypeDecisionResponse,
 		AgentID:        ds[0].AskerAgentID,
 		Channel:        "web",
 		ThreadID:       chatKey,
@@ -474,7 +474,7 @@ func choiceSetResponseStoreMessage(user UserIdentity, ds []*store.Decision, chat
 	return m
 }
 
-// choiceResponseSetView builds the choiceResponseSet of a set's response
+// choiceResponseSetView builds the decisionResponseSet of a set's response
 // row from its answers, in the position order of the prompt's rows ds.
 func choiceResponseSetView(promptID, batchID string, ds []*store.Decision, answers []*store.DecisionAnswer) *ChoiceResponseSetView {
 	byRow := make(map[string]*store.DecisionAnswer, len(answers))
@@ -519,7 +519,7 @@ func choiceSetAgentLines(promptID string, answers []*store.DecisionAnswer, overr
 	if len(answers) == 1 {
 		noun = "decision"
 	}
-	lines := []string{fmt.Sprintf("[choice-response] %d %s answered by %s (prompt %s)", len(answers), noun, who, promptID)}
+	lines := []string{fmt.Sprintf("[decision-response] %d %s answered by %s (prompt %s)", len(answers), noun, who, promptID)}
 	for _, a := range answers {
 		notes := []string{"choice " + a.ChoiceID}
 		if a.MatchedDefault {
@@ -541,7 +541,7 @@ func choiceSetAgentLines(promptID string, answers []*store.DecisionAnswer, overr
 	return strings.Join(lines, "\n")
 }
 
-// choiceAnswersMetadata is the compact choice_answers value of a set
+// choiceAnswersMetadata is the compact decision_answers value of a set
 // response: key@version=choiceId, comma-separated, in position order (at
 // most 10 entries, one per decision).
 func choiceAnswersMetadata(answers []*store.DecisionAnswer) string {
@@ -553,8 +553,8 @@ func choiceAnswersMetadata(answers []*store.DecisionAnswer) string {
 }
 
 // deliverChoiceSetResponse dispatches a set's response to the asking agent:
-// one message with a line per answer and the hub-set choice_batch and
-// choice_answers metadata. A stopped or deleted asker leaves the row failed;
+// one message with a line per answer and the hub-set decision_batch and
+// decision_answers metadata. A stopped or deleted asker leaves the row failed;
 // the answers stand either way.
 func (s *Server) deliverChoiceSetResponse(ctx context.Context, asker *store.Agent, m *store.Message, promptID string, res *store.AnswerSetResult, overridden map[string]*store.DecisionAnswer) {
 	if asker == nil || m.DispatchState != store.MessageDispatchDispatched {
@@ -573,7 +573,7 @@ func (s *Server) deliverChoiceSetResponse(ctx context.Context, asker *store.Agen
 		Recipient:      m.Recipient,
 		RecipientID:    m.RecipientID,
 		Msg:            text,
-		Type:           messages.TypeChoiceResponse,
+		Type:           messages.TypeDecisionResponse,
 		Channel:        m.Channel,
 		ThreadID:       m.ThreadID,
 		ConversationID: m.ConversationID,
@@ -584,14 +584,14 @@ func (s *Server) deliverChoiceSetResponse(ctx context.Context, asker *store.Agen
 	if sm.Metadata == nil {
 		sm.Metadata = make(map[string]string, 2)
 	}
-	sm.Metadata[messages.MetadataChoiceBatch] = res.BatchID
-	sm.Metadata[messages.MetadataChoiceAnswers] = choiceAnswersMetadata(res.Answers)
+	sm.Metadata[messages.MetadataDecisionBatch] = res.BatchID
+	sm.Metadata[messages.MetadataDecisionAnswers] = choiceAnswersMetadata(res.Answers)
 	dctx, cancel := context.WithTimeout(withDispatchMessageID(context.WithoutCancel(ctx), m.ID), 30*time.Second)
 	defer cancel()
 	if _, err := s.holdOrDispatch(dctx, asker, m.ID, m, func() error {
 		return dispatchWithBrokerRetry(dctx, s.recordLog(), dispatcher, asker, text, false, sm)
 	}); err != nil {
-		s.messageLog.Error("choices: failed to deliver set choice-response", "agent", asker.Slug, "message_id", m.ID, "error", err)
+		s.messageLog.Error("decisions: failed to deliver set decision-response", "agent", asker.Slug, "message_id", m.ID, "error", err)
 		_ = s.markFailed(context.WithoutCancel(ctx), m.ID, err.Error())
 	}
 }
@@ -601,7 +601,7 @@ func (s *Server) deliverChoiceSetResponse(ctx context.Context, asker *store.Agen
 // answer in a set submit.
 func (s *Server) writeBatchRequired(w http.ResponseWriter, ctx context.Context, user UserIdentity, msgID string, ds []*store.Decision) {
 	writeError(w, http.StatusConflict, ErrCodeBatchRequired,
-		fmt.Sprintf("this prompt has %d decisions; answer them together with POST %s%s/answers", len(ds), choicePromptsRoutePrefix, msgID),
+		fmt.Sprintf("this prompt has %d decisions; answer them together with POST %s%s/answers", len(ds), decisionPromptsRoutePrefix, msgID),
 		map[string]interface{}{
 			"promptMessageId": msgID,
 			"actionable":      actionableViews(s.decisionViewsFor(ctx, ds), ds, user.ID()),

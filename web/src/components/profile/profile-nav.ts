@@ -644,7 +644,7 @@ export class ScionProfileNav extends LitElement {
       PROFILE_DECISIONS_COUNT_CHANGED_EVENT,
       this.boundOnProfileDecisionsCountChanged
     );
-    stateManager.addEventListener('choice-updated', this.boundOnChoiceUpdated);
+    stateManager.addEventListener('decision-updated', this.boundOnChoiceUpdated);
     stateManager.addEventListener('chat-message-received', this.boundOnChatMessageReceived);
   }
 
@@ -662,7 +662,7 @@ export class ScionProfileNav extends LitElement {
       PROFILE_DECISIONS_COUNT_CHANGED_EVENT,
       this.boundOnProfileDecisionsCountChanged
     );
-    stateManager.removeEventListener('choice-updated', this.boundOnChoiceUpdated);
+    stateManager.removeEventListener('decision-updated', this.boundOnChoiceUpdated);
     stateManager.removeEventListener('chat-message-received', this.boundOnChatMessageReceived);
   }
 
