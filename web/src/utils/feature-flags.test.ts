@@ -397,3 +397,18 @@ describe('execSchedulesEnabled (hub.exec_schedules)', () => {
     expect(execSchedulesEnabled()).toBe(false);
   });
 });
+
+describe('k8sWorkloadIdentitySetupEnabled (hub.k8s_workload_identity_setup)', () => {
+  it('defaults to false and follows server/explicit flags', async () => {
+    const { K8S_WORKLOAD_IDENTITY_SETUP_FLAG, k8sWorkloadIdentitySetupEnabled } =
+      await import('./feature-flags.js');
+    expect(K8S_WORKLOAD_IDENTITY_SETUP_FLAG).toBe('hub.k8s_workload_identity_setup');
+    expect(k8sWorkloadIdentitySetupEnabled()).toBe(false);
+
+    setServerFlags({ 'hub.k8s_workload_identity_setup': true });
+    expect(k8sWorkloadIdentitySetupEnabled()).toBe(true);
+
+    setFeatureFlag('hub.k8s_workload_identity_setup', false);
+    expect(k8sWorkloadIdentitySetupEnabled()).toBe(false);
+  });
+});

