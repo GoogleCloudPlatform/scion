@@ -643,8 +643,8 @@ func TestHeadlessCreate_LabelsAndDataChannels(t *testing.T) {
 	t.Run("valid_labels_and_allowlisted_event_env_persisted_as_plain_data", func(t *testing.T) {
 		hc := baseHC("channels-valid")
 		hc.Labels = map[string]string{
-			"scion.io/trigger": "pr-opened",
-			"env":              "staging",
+			"scion.dev/trigger": "pr-opened",
+			"env":               "staging",
 		}
 		hc.EventEnv = map[string]string{
 			EventEnvKeyTriggerEventID: "tevt-123",
@@ -703,23 +703,62 @@ func TestHeadlessCreate_LabelsAndDataChannels(t *testing.T) {
 		f.assertNoChild(t, hcNul.Name)
 	})
 
-	t.Run("event_file_cap_and_pre_restack_guard", func(t *testing.T) {
+	t.Run("event_file_cap_capability_gate_and_home_files_delivery", func(t *testing.T) {
 		hcTooLarge := baseHC("file-too-large")
 		hcTooLarge.EventFile = bytes.Repeat([]byte("x"), maxHeadlessEventFileBytes+1)
 		_, err := f.srv.createAgentHeadless(ctx, hcTooLarge)
 		require.ErrorIs(t, err, errHeadlessEventFileTooLarge)
 		f.assertNoChild(t, hcTooLarge.Name)
 
-		hcUnsupported := baseHC("file-pre-restack")
-		hcUnsupported.EventFile = []byte(`{"id":"evt-1"}`)
-		_, err = f.srv.createAgentHeadless(ctx, hcUnsupported)
-		require.ErrorIs(t, err, errHeadlessEventFileUnsupported)
-		f.assertNoChild(t, hcUnsupported.Name)
-
+		// Empty EventFile succeeds even when the Runtime Broker does not advertise HomeFiles.
 		hcEmpty := baseHC("file-empty-ok")
 		hcEmpty.EventFile = []byte{}
 		_, err = f.srv.createAgentHeadless(ctx, hcEmpty)
 		require.NoError(t, err)
+		assert.Empty(t, client.lastCreateReq.HomeFiles)
+
+		// Non-empty EventFile is refused before agent creation when broker lacks Capabilities.HomeFiles.
+		hcNoCap := baseHC("file-no-broker-cap")
+		hcNoCap.EventFile = []byte(`{"id":"evt-1"}`)
+		_, err = f.srv.createAgentHeadless(ctx, hcNoCap)
+		require.ErrorIs(t, err, ErrBrokerLacksHomeFiles)
+		f.assertNoChild(t, hcNoCap.Name)
+
+		// Enable HomeFiles capability on the Runtime Broker and verify transient delivery.
+		broker, err := f.store.GetRuntimeBroker(ctx, f.broker.ID)
+		require.NoError(t, err)
+		broker.Capabilities = &store.BrokerCapabilities{HomeFiles: true}
+		require.NoError(t, f.store.UpdateRuntimeBroker(ctx, broker))
+
+		payload := []byte(`{"id":"evt-1","secret":"USER_PRIVATE_SECRET"}`)
+		hcDelivered := baseHC("file-delivered")
+		hcDelivered.EventFile = payload
+		created, err := f.srv.createAgentHeadless(ctx, hcDelivered)
+		require.NoError(t, err)
+		require.NotNil(t, created)
+		require.Equal(t, []api.HomeFile{{
+			Path:    HeadlessEventFilePath,
+			Mode:    0o600,
+			Content: payload,
+		}}, client.lastCreateReq.HomeFiles)
+
+		// Missing env alongside non-empty EventFile still compensates and returns content-free HeadlessMissingEnvError.
+		client.mu.Lock()
+		client.calls = nil
+		client.firstPassReqs = &RemoteEnvRequirementsResponse{
+			AgentID:  "pending",
+			Required: []string{"MISSING_WITH_FILE"},
+			Needs:    []string{"MISSING_WITH_FILE"},
+		}
+		client.mu.Unlock()
+		hcMissingEnv := baseHC("file-missing-env")
+		hcMissingEnv.EventFile = payload
+		_, err = f.srv.createAgentHeadless(ctx, hcMissingEnv)
+		var missingErr *HeadlessMissingEnvError
+		require.ErrorAs(t, err, &missingErr)
+		assert.Equal(t, 1, missingErr.Count)
+		assert.Equal(t, "missing required environment variables (1)", err.Error())
+		f.assertNoChild(t, hcMissingEnv.Name)
 	})
 }
 

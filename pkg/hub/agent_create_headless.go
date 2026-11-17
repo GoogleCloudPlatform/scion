@@ -36,6 +36,12 @@ const (
 	EventEnvKeyTriggerEventID = "SCION_TRIGGER_EVENT_ID"
 	EventEnvKeyTriggerID      = "SCION_TRIGGER_ID"
 
+	// HeadlessEventFilePath is the relative home-directory path where
+	// HeadlessCreate.EventFile is written via WithCreateHomeFiles (Stage 1
+	// design §5.7).
+	HeadlessEventFilePath = ".scion/trigger-event.json"
+	headlessEventFileMode = 0o600
+
 	// maxHeadlessEventFileBytes bounds HeadlessCreate.EventFile to the 16 KiB
 	// trigger envelope cap (Stage 1 design §5.7).
 	maxHeadlessEventFileBytes = 16 * 1024
@@ -45,7 +51,6 @@ var (
 	errDisallowedHeadlessEventEnvKey = errors.New("disallowed headless event env key")
 	errInvalidHeadlessEventEnvValue  = errors.New("headless event env value contains NUL byte")
 	errHeadlessEventFileTooLarge     = errors.New("headless create event file exceeds 16 KiB limit")
-	errHeadlessEventFileUnsupported  = errors.New("headless create event file is not wired before homeFiles channel restack")
 )
 
 // HeadlessMissingEnvError is the content-free error returned when a headless
@@ -75,8 +80,8 @@ type HeadlessCreate struct {
 	// Credential and lineage posture (Stage 1 design rev 8.27,
 	// headless-identity-note.md §2 & §2.3). When AgentRole is empty,
 	// createAgentHeadless resolves the role through the project/hub default
-	// ladder capped by scion.io/max-agent-role, the edge ceiling, and (for agent
-	// principals) the parent agent's role. NoAuth is true when explicitly
+	// ladder capped by projectSettingMaxAgentRole, the edge ceiling, and (for
+	// agent principals) the parent agent's role. NoAuth is true when explicitly
 	// requested (e.g. payload.noAuth) or when the resolved role is AgentRoleNone.
 	// When OwnerID and Ancestry are empty, they are derived from Authority
 	// exactly as an interactive create by that principal records them.
@@ -123,9 +128,6 @@ func validateHeadlessEventEnv(env map[string]string) error {
 func validateHeadlessEventFile(content []byte) error {
 	if len(content) > maxHeadlessEventFileBytes {
 		return fmt.Errorf("%w: %d bytes exceeds maximum of %d", errHeadlessEventFileTooLarge, len(content), maxHeadlessEventFileBytes)
-	}
-	if len(content) > 0 {
-		return errHeadlessEventFileUnsupported
 	}
 	return nil
 }
@@ -320,6 +322,11 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 			scheduledBroker = b
 		} else if !errors.Is(err, store.ErrNotFound) {
 			return nil, fmt.Errorf("failed to resolve runtime broker %q: %w", runtimeBrokerID, err)
+		}
+	}
+	if len(hc.EventFile) > 0 {
+		if err := checkBrokerHomeFilesCapability(scheduledBroker); err != nil {
+			return nil, fmt.Errorf("scheduled dispatch of agent %q: %w", slug, err)
 		}
 	}
 	placement, err := s.flatCreatePlacement(ctx, scheduledBroker, "", "")
@@ -570,8 +577,21 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 	}
 
 	created, err := s.createUnderClaim(ctx, agent, func(ctx context.Context) (*CreateDispatchResult, error) {
+		if len(hc.EventFile) > 0 {
+			ctx = WithCreateHomeFiles(ctx, []api.HomeFile{{
+				Path:    HeadlessEventFilePath,
+				Mode:    headlessEventFileMode,
+				Content: hc.EventFile,
+			}})
+		}
 		return dispatcher.DispatchAgentCreateWithGather(ctx, agent)
 	})
+	var missingNeeds []string
+	var homeFilesMissing *homeFilesEnvGatherDeferredError
+	if errors.As(err, &homeFilesMissing) && len(homeFilesMissing.needs) > 0 {
+		missingNeeds = homeFilesMissing.needs
+		err = nil
+	}
 	var held *store.ClaimHeldError
 	if errors.As(err, &held) {
 		slog.Info("Scheduler: agent already starting; event skipped",
@@ -603,9 +623,13 @@ func (s *Server) createAgentHeadless(ctx context.Context, hc HeadlessCreate) (*s
 		})
 	}
 
-	envReqs := created.EnvRequirements()
-	if envReqs != nil && len(envReqs.Needs) > 0 {
-		sortedNeeds := slices.Clone(envReqs.Needs)
+	if len(missingNeeds) == 0 && created != nil {
+		if envReqs := created.EnvRequirements(); envReqs != nil {
+			missingNeeds = envReqs.Needs
+		}
+	}
+	if len(missingNeeds) > 0 {
+		sortedNeeds := slices.Clone(missingNeeds)
 		slices.Sort(sortedNeeds)
 		slog.Warn("Scheduler: headless agent create failed: missing required environment variables",
 			"eventID", fireID,
