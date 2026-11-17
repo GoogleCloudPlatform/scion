@@ -855,7 +855,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		if ref.Kind == messaging.RefEmail {
 			probe.Recipient = outMsg.Recipient
 		}
-		// A choice prompt's type and body are the hub's to set (the body
+		// A decision prompt's type and body are the hub's to set (the body
 		// may be empty), so only an ordinary message is probed.
 		if msgChoicesPayload == nil {
 			if err := messaging.ValidateLegacyMessage(probe); err != nil {
@@ -903,7 +903,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		default:
 			fmt.Printf("Message dispatched to %s%s (status: %s).\n", ref.Raw, receiptSuffix(result.MessageID, result.ConversationID), result.Status)
 		}
-		// A choice prompt's decisions, whatever the status.
+		// A decision prompt's decisions, whatever the status.
 		printChoiceDecisions(result)
 		printAttachmentWarnings(result.AttachmentWarnings)
 		return nil

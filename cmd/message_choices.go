@@ -178,7 +178,7 @@ var (
 	mdEmphasisRe = regexp.MustCompile("(^|[\\s(\\[])[*_`~]+|[*_`~]+($|[\\s).,:;!?\\]])")
 )
 
-// choicesSummary is the ask_user message after a choice prompt is sent:
+// choicesSummary is the ask_user message after a decision prompt is sent:
 // "Decision needed: <first question as plain text, 120 chars>" plus
 // " (+N more)" for further decisions.
 func choicesSummary(payload json.RawMessage) string {
@@ -253,7 +253,7 @@ func applyChoicesToOutbound(out *hubclient.OutboundMessageRequest) {
 }
 
 // afterChoicesSent runs the ask_user side effect after the hub accepted a
-// choice prompt, in agent mode only (design 4.9). The status update logs
+// decision prompt, in agent mode only (design 4.9). The status update logs
 // its own failures and never fails the send; a refused send (for example
 // 400 experiment_disabled) never reaches here.
 func afterChoicesSent() {

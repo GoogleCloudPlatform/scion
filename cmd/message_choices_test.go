@@ -221,7 +221,7 @@ func TestChoiceDecisionLine(t *testing.T) {
 		Key: "D1", Version: 3, Replaced: &hubclient.DecisionReplaced{Version: 2, Status: "decided", Answer: "yes", AnsweredBy: "Pat"}}))
 }
 
-// A choice prompt to a user sends the decisions and --update, prints the
+// A decision prompt to a user sends the decisions and --update, prints the
 // message id and one line per decision, and then marks the agent waiting
 // for input with the summary.
 func TestSendOutboundChoices_UserRecipient(t *testing.T) {
