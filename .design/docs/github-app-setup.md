@@ -120,7 +120,7 @@ If your GitHub App was registered for Git authentication only, upgrade its permi
    - Save changes.
 3. **Accept the updated permissions on each installation**:
    - Subscribing to events for already-granted permissions takes effect immediately, but adding or raising a permission causes GitHub to ask each installation's organization or account owner to accept the update. Until accepted, installation token mints requesting `issues: write` fail and GitHub does not deliver the newly added events for that installation.
-   - Have each installation owner approve the prompt in **GitHub Settings > Applications** (or Organization **Settings > Third-party Access > GitHub Apps**). When accepted, GitHub delivers `installation` (`action: "new_permissions_accepted"`), and the Hub refreshes its cached App metadata and resets affected projects' GitHub App status from `degraded` (`permission_denied`) back to `unchecked` so the next token mint re-validates cleanly.
+   - Have each installation owner approve the prompt in **GitHub Settings > Applications** (or Organization **Settings > Third-party Access > GitHub Apps**). When accepted, GitHub delivers `installation` (`action: "new_permissions_accepted"`); while `hub.github_triggers` is enabled, the Hub refreshes its cached App metadata and resets affected projects' GitHub App status from `degraded` (`permission_denied`) back to `unchecked` so the next token mint re-validates cleanly.
 4. **Verify trigger readiness on the Hub**:
    - Refresh cached App metadata immediately if needed:
      ```bash
