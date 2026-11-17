@@ -216,15 +216,17 @@ func (s *Server) handleInstallationWebhook(w http.ResponseWriter, r *http.Reques
 		s.updateProjectsForInstallation(ctx, installationID, store.GitHubAppStateUnchecked, "", "")
 
 	case "new_permissions_accepted":
-		// Refresh cached App identity (events + permissions) and reset
-		// degraded/permission_denied projects on this installation back to
-		// unchecked so the next mint validates the newly accepted permissions
-		// (§10.3).
-		if _, err := s.refreshGitHubAppIdentity(ctx); err != nil {
-			slog.Warn("Failed to refresh GitHub App identity after new_permissions_accepted",
-				"installation_id", installationID, "error", upstreamText(err.Error()))
+		if s.githubTriggersEnabled() {
+			// Refresh cached App identity (events + permissions) and reset
+			// degraded/permission_denied projects on this installation back to
+			// unchecked so the next mint validates the newly accepted permissions
+			// (§10.3, §11 G12).
+			if _, err := s.refreshGitHubAppIdentity(ctx); err != nil {
+				slog.Warn("Failed to refresh GitHub App identity after new_permissions_accepted",
+					"installation_id", installationID, "error", upstreamText(err.Error()))
+			}
+			s.resetPermissionDeniedProjectsForInstallation(ctx, installationID)
 		}
-		s.resetPermissionDeniedProjectsForInstallation(ctx, installationID)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})

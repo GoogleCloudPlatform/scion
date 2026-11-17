@@ -835,6 +835,36 @@ func TestWebhook_InstallationNewPermissionsAccepted(t *testing.T) {
 		},
 	})
 	sig := signWebhookPayload(payload, "test-webhook-secret")
+
+	// 1. While hub.github_triggers is off (§11 G12), new_permissions_accepted is a no-op:
+	// no GET /app refresh and no project status reset.
+	reqOff := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", bytes.NewReader(payload))
+	reqOff.Header.Set("X-GitHub-Event", "installation")
+	reqOff.Header.Set("X-GitHub-Delivery", "delivery-new-perms-off")
+	reqOff.Header.Set("X-Hub-Signature-256", sig)
+
+	recOff := httptest.NewRecorder()
+	srv.handleGitHubWebhook(recOff, reqOff)
+	if recOff.Code != http.StatusOK {
+		t.Fatalf("webhook (flag off) returned %d: %s", recOff.Code, recOff.Body.String())
+	}
+	if got := mockGH.hits.Load(); got != 1 {
+		t.Fatalf("expected 0 webhook GET /app calls while experiment off (total 1), got %d", got)
+	}
+	if id, ok := srv.GitHubAppIdentity(ctx); !ok || id.Permissions["issues"] != "read" {
+		t.Fatalf("expected cached identity untouched while experiment off, got %+v", id)
+	}
+	pDegOff, err := s.GetProject(ctx, tid("proj-np-degraded"))
+	if err != nil {
+		t.Fatalf("GetProject(degraded, off): %v", err)
+	}
+	if pDegOff.GitHubAppStatus == nil || pDegOff.GitHubAppStatus.State != store.GitHubAppStateDegraded {
+		t.Fatalf("expected degraded project untouched while experiment off, got %+v", pDegOff.GitHubAppStatus)
+	}
+
+	// 2. Enable hub.github_triggers and redeliver: refreshes identity and resets degraded/permission_denied.
+	setGitHubTriggersExperiment(t, srv, true)
+
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/github", bytes.NewReader(payload))
 	req.Header.Set("X-GitHub-Event", "installation")
 	req.Header.Set("X-GitHub-Delivery", "delivery-new-perms-1")
