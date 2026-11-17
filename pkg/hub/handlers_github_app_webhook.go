@@ -757,16 +757,40 @@ func (s *Server) getGitHubAppClient() (*githubapp.Client, error) {
 // It handles error classification and updates the project's GitHub App status.
 // Returns the token string and expiry, or an error.
 func (s *Server) mintGitHubAppToken(ctx context.Context, project *store.Project) (string, string, error) {
-	if project.GitHubInstallationID == nil {
+	return s.mintGitHubAppTokenInternal(ctx, project, nil, false)
+}
+
+// MintGitHubAppTokenWithPermissions mints (or returns a cached) repository-scoped
+// GitHub App installation token for project with an explicit permission set.
+// Association authorization runs on every call; when requireWrite is true, a
+// read-only grant (such as a pull-only creator proof) is refused with
+// ErrGitHubWriteNotPermitted.
+func (s *Server) MintGitHubAppTokenWithPermissions(
+	ctx context.Context,
+	project *store.Project,
+	requested githubapp.TokenPermissions,
+	requireWrite bool,
+) (string, string, error) {
+	return s.mintGitHubAppTokenInternal(ctx, project, &requested, requireWrite)
+}
+
+func (s *Server) mintGitHubAppTokenInternal(
+	ctx context.Context,
+	project *store.Project,
+	requested *githubapp.TokenPermissions,
+	requireWrite bool,
+) (string, string, error) {
+	if project == nil || project.GitHubInstallationID == nil {
 		return "", "", fmt.Errorf("project has no GitHub App installation")
 	}
 
 	// Single choke for every token delivery leg (hub-host clone and pull,
 	// agent env at create and refresh, the agent token-refresh endpoint,
-	// resource import, skills, the status check): the association must be
-	// authorized NOW, whatever was recorded before. See
-	// github_app_association_authz.go. A refusal, definitive or
-	// inconclusive, mints nothing and is surfaced on the project status.
+	// resource import, skills, the status check, trigger enrichment and
+	// github.comment): the association must be authorized NOW, whatever was
+	// recorded before. See github_app_association_authz.go. A refusal,
+	// definitive or inconclusive, mints nothing and is surfaced on the
+	// project status.
 	grant, authzErr := s.authorizeGitHubAppAssociation(ctx, project, *project.GitHubInstallationID)
 	if authzErr != nil {
 		slog.Warn("GitHub App token refused: installation association not authorized",
@@ -774,6 +798,34 @@ func (s *Server) mintGitHubAppToken(ctx context.Context, project *store.Project)
 		s.updateProjectGitHubAppStatus(ctx, project, store.GitHubAppStateError,
 			githubAssociationErrorCode(authzErr), authzErr.Error())
 		return "", "", authzErr
+	}
+	if requireWrite && !grant.WriteAllowed {
+		return "", "", ErrGitHubWriteNotPermitted
+	}
+
+	var perms githubapp.TokenPermissions
+	if requested != nil {
+		var permErr error
+		perms, permErr = scopeRequestedGitHubTokenPermissions(*requested, grant)
+		if permErr != nil {
+			return "", "", permErr
+		}
+	} else {
+		// Never request more than the stored permissions and the association's
+		// proof allow (a pull-only proof gets read-only permissions), and never
+		// an empty set, which GitHub would treat as every installation
+		// permission.
+		perms = githubTokenPermissionsForGrant(project.GitHubPermissions, grant)
+	}
+
+	installationID := *project.GitHubInstallationID
+	ownerRepo := grant.Owner + "/" + grant.Repo
+	appID := s.githubAppConfiguredID()
+	apiBase := s.githubAppAPIBase()
+	permKey := canonicalGitHubTokenPermKey(perms)
+
+	if cachedToken, cachedExp, ok := s.githubTokenCache.get(project.ID, permKey, appID, apiBase, installationID, ownerRepo); ok {
+		return cachedToken, cachedExp.UTC().Format("2006-01-02T15:04:05Z"), nil
 	}
 
 	client, err := s.getGitHubAppClient()
@@ -794,14 +846,6 @@ func (s *Server) mintGitHubAppToken(ctx context.Context, project *store.Project)
 			errorCode, githubAppStatusMessage(errorCode))
 		return "", "", err
 	}
-
-	installationID := *project.GitHubInstallationID
-
-	// Never request more than the stored permissions and the association's
-	// proof allow (a pull-only proof gets read-only permissions), and never
-	// an empty set, which GitHub would treat as every installation
-	// permission.
-	perms := githubTokenPermissionsForGrant(project.GitHubPermissions, grant)
 
 	// Always repository-scoped, never installation-wide: the API takes the
 	// bare repo name, and the coverage check above pinned the installation
@@ -834,6 +878,8 @@ func (s *Server) mintGitHubAppToken(ctx context.Context, project *store.Project)
 		s.updateProjectGitHubAppStatus(ctx, project, state, errorCode, errorMessage)
 		return "", "", err
 	}
+
+	s.githubTokenCache.put(project.ID, permKey, appID, apiBase, installationID, ownerRepo, token.Token, token.ExpiresAt)
 
 	// Cache rate limit info
 	if rl := client.GetRateLimit(); rl != nil {

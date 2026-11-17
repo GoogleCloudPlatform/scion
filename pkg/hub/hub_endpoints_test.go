@@ -160,6 +160,7 @@ func TestHubEndpointUses(t *testing.T) {
 		HubEndpointForOIDCIssuer,
 		HubEndpointForTransportAudience,
 		HubEndpointForConduitCheck,
+		HubEndpointForAgentLinks,
 	}
 	if len(uses) != len(hubEndpointUses) {
 		t.Errorf("hubEndpointUses has %d entries, this test lists %d uses", len(hubEndpointUses), len(uses))
@@ -256,4 +257,30 @@ func TestStoredPublicURL(t *testing.T) {
 			t.Errorf("StoredPublicURL = %q, %v; want a malformed row ignored", got, err)
 		}
 	})
+}
+
+func TestAgentWebURL(t *testing.T) {
+	srv := &Server{config: ServerConfig{
+		HubEndpoint:  "https://operator.example.com/",
+		HubEndpoints: &HubEndpoints{Operator: "https://operator.example.com/", Public: "https://public.example.com/"},
+	}}
+	if got, want := srv.AgentWebURL("agent-123"), "https://public.example.com/agents/agent-123"; got != want {
+		t.Errorf("AgentWebURL = %q, want %q", got, want)
+	}
+	if got, want := srv.AgentWebURL("agent/with space"), "https://public.example.com/agents/agent%2Fwith%20space"; got != want {
+		t.Errorf("AgentWebURL escaped = %q, want %q", got, want)
+	}
+	if got := srv.AgentWebURL("   "); got != "" {
+		t.Errorf("AgentWebURL empty agentID = %q, want empty", got)
+	}
+
+	fallbackSrv := &Server{config: ServerConfig{HubEndpoint: "http://127.0.0.1:9810"}}
+	if got, want := fallbackSrv.AgentWebURL("agent-abc"), "http://127.0.0.1:9810/agents/agent-abc"; got != want {
+		t.Errorf("AgentWebURL fallback = %q, want %q", got, want)
+	}
+
+	emptyBaseSrv := &Server{}
+	if got := emptyBaseSrv.AgentWebURL("agent-abc"); got != "" {
+		t.Errorf("AgentWebURL empty base = %q, want empty", got)
+	}
 }
