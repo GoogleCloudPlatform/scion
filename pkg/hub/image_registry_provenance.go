@@ -181,11 +181,18 @@ func dropTopLevelMember(rawBody []byte, key string) []byte {
 }
 
 // brokerForDisplay returns b with the reported node image registry redacted
-// for display (config.RedactImageRegistry). The capabilities are copied, so
-// the stored broker and the value dispatch resolves with are unchanged.
-// The version is bounded (brokerVersionToken), which also covers rows
-// stored before the bound existed.
+// for display (config.RedactImageRegistry) and, for flat Cloud Run rows, the
+// private GCP host pair cleared (fail-closed for viewers without broker.update;
+// callers with capabilities use brokerForDisplayWithCap or
+// brokerForDisplayWithDetail). The capabilities are copied, so the stored
+// broker and the value dispatch resolves with are unchanged. The version is
+// bounded (brokerVersionToken), which also covers rows stored before the bound
+// existed.
 func brokerForDisplay(b store.RuntimeBroker) store.RuntimeBroker {
+	return redactFlatCloudRunGCPHost(brokerForDisplayBase(b), false)
+}
+
+func brokerForDisplayBase(b store.RuntimeBroker) store.RuntimeBroker {
 	b.Version = brokerVersionToken(b.Version)
 	if b.Status != store.BrokerStatusOnline {
 		if b.Status == store.BrokerStatusOffline {

@@ -2592,14 +2592,23 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// The node image registry is shown redacted (ptone/scion#3916), and the
-	// storage values only to a hub admin or the broker itself.
+	// The node image registry is shown redacted (ptone/scion#3916), the
+	// storage values only to a hub admin or the broker itself, and a flat Cloud
+	// Run row's private GCP host pair only to updaters or pure broker self.
 	if broker != nil {
 		self := false
 		if brokerIdent := GetBrokerIdentityFromContext(ctx); brokerIdent != nil && brokerIdent.BrokerID() == broker.ID {
 			self = true
 		}
-		shown := brokerForDisplay(s.brokerStorageForViewer(ctx, *broker, self))
+		pureSelf := self && GetUserIdentityFromContext(ctx) == nil
+		detail := pureSelf
+		if !detail {
+			if ident := GetIdentityFromContext(ctx); ident != nil {
+				caps := s.authzService.ComputeCapabilities(ctx, ident, brokerResource(broker))
+				detail = caps != nil && capabilityAllows(caps, ActionUpdate)
+			}
+		}
+		shown := brokerForDisplayWithDetail(s.brokerStorageForViewer(ctx, *broker, pureSelf), detail)
 		broker = &shown
 	}
 	writeJSON(w, http.StatusOK, RegisterProjectResponse{
