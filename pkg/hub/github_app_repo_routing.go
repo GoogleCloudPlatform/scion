@@ -182,8 +182,13 @@ func (s *Server) associationEntriesForRouting(ctx context.Context) ([]githubAsso
 		return nil, err
 	}
 
+	limit := s.githubAssociationReportCache.maxProjects
+	if limit <= 0 {
+		limit = githubAssociationReportMaxProjects
+	}
 	var entries []githubAssociationReportEntry
-	cursor := ""
+	listed, cursor := 0, ""
+pages:
 	for {
 		page, listErr := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{
 			Limit:          githubAssociationReportPageSize,
@@ -194,6 +199,10 @@ func (s *Server) associationEntriesForRouting(ctx context.Context) ([]githubAsso
 			return nil, listErr
 		}
 		for i := range page.Items {
+			if listed == limit {
+				break pages
+			}
+			listed++
 			p := &page.Items[i]
 			if p.GitHubInstallationID == nil {
 				continue
@@ -205,7 +214,7 @@ func (s *Server) associationEntriesForRouting(ctx context.Context) ([]githubAsso
 				InstallationID: *p.GitHubInstallationID,
 			})
 		}
-		if page.NextCursor == "" {
+		if page.NextCursor == "" || listed == limit {
 			break
 		}
 		cursor = page.NextCursor

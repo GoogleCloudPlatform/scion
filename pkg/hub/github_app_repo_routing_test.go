@@ -20,13 +20,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -334,7 +337,8 @@ func TestGitHubAppRepoRouting(t *testing.T) {
 	require.NoError(t, err)
 	instForStaleRepoCache.Repositories = []string{"Acme/Gadgets"} // Acme/Widgets absent from cached list
 	require.NoError(t, s.UpdateGitHubInstallation(ctx, instForStaleRepoCache))
-	srv.githubAssociationReportCache.invalidateAll()
+	srv.invalidateGitHubAssociation(projA)
+	srv.invalidateGitHubAssociation(projB)
 
 	rr = doRepoRoutingAsUser(t, srv, admin, http.MethodGet, "/api/v1/github-app/repo-routing?installation=5001", nil)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
@@ -653,4 +657,133 @@ func TestGitHubAppInstallations_TriggerRoutingSingleWriter(t *testing.T) {
 	require.Contains(t, stored.TriggerRouting, "acme/widgets")
 	assert.Equal(t, projB, stored.TriggerRouting["acme/widgets"].PrimaryProjectID,
 		"installation webhook status update must preserve trigger_routing")
+}
+
+// TestGitHubAppRepoRouting_ConsecutiveWritesPreserveRebuildLimiter verifies that
+// consecutive repo-routing PUT/DELETE requests mark the association report
+// invalid without resetting lastFullBuild, so back-to-back routing writes do
+// not trigger back-to-back full association-report rebuilds.
+func TestGitHubAppRepoRouting_ConsecutiveWritesPreserveRebuildLimiter(t *testing.T) {
+	srv, s := testServer(t)
+	setGitHubTriggersExperimentForRouting(t, srv, true)
+	ctx := context.Background()
+
+	adminID := tid("routing-lim-admin")
+	creatorID := tid("routing-lim-creator")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: adminID, Email: "routing-lim-admin@example.com", DisplayName: "Admin",
+		Role: store.UserRoleAdmin, Status: store.UserStatusActive, Created: time.Now(),
+	}))
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: creatorID, Email: "routing-lim-creator@example.com", DisplayName: "Creator",
+		Role: store.UserRoleMember, Status: store.UserStatusActive, Created: time.Now(),
+	}))
+	hubAdminRD, err := s.GetRoleDefinitionByName(ctx, "hub-admin", store.RoleScopeSystem)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: hubAdminRD.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      adminID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        adminID,
+	})
+	require.NoError(t, err)
+	admin := NewAuthenticatedUser(adminID, "routing-lim-admin@example.com", "Admin", store.UserRoleAdmin, "api")
+
+	require.NoError(t, s.CreateSecret(ctx, &store.Secret{
+		ID:             tid("routing-lim-gh-token"),
+		Key:            "GITHUB_TOKEN",
+		EncryptedValue: "creator-token",
+		SecretType:     store.SecretTypeEnvironment,
+		Target:         "GITHUB_TOKEN",
+		Scope:          store.ScopeUser,
+		ScopeID:        creatorID,
+	}))
+	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
+
+	var repoAccessChecks atomic.Int64
+	srv.githubRepoAccessCheck = func(_ context.Context, _, _, _, _ string) (githubapp.RepoAccess, error) {
+		repoAccessChecks.Add(1)
+		// Return an inconclusive error so githubAccessCache caches nothing and
+		// every full association-report rebuild increments repoAccessChecks.
+		return githubapp.RepoAccess{}, errors.New("upstream unavailable")
+	}
+
+	instID := int64(7201)
+	require.NoError(t, s.CreateGitHubInstallation(ctx, &store.GitHubInstallation{
+		InstallationID: instID,
+		AccountLogin:   "Acme",
+		AccountType:    "Organization",
+		AppID:          42,
+		Repositories:   []string{"Acme/Widgets"},
+		Status:         store.GitHubInstallationStatusActive,
+	}))
+
+	projA := tid("routing-lim-proj-a")
+	projB := tid("routing-lim-proj-b")
+	for _, tc := range []struct{ id, name string }{
+		{projA, "alpha"},
+		{projB, "bravo"},
+	} {
+		require.NoError(t, s.CreateProject(ctx, &store.Project{
+			ID:                   tc.id,
+			Name:                 tc.name,
+			Slug:                 tc.name,
+			GitRemote:            "https://github.com/Acme/Widgets.git",
+			GitHubInstallationID: &instID,
+			CreatedBy:            creatorID,
+			Created:              time.Now(),
+			Updated:              time.Now(),
+		}))
+	}
+
+	// First PUT: cold report cache -> runs 1 full rebuild (1 access check per associated project = 2).
+	rr := doRepoRoutingAsUser(t, srv, admin, http.MethodPut, "/api/v1/github-app/repo-routing/Acme/Widgets", GitHubRepoRoutingPutRequest{
+		InstallationID:   instID,
+		PrimaryProjectID: projA,
+	})
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var entry GitHubRepoRoutingEntry
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &entry))
+	assert.Equal(t, projA, entry.PrimaryProjectID)
+	assert.Equal(t, GitHubTriggerRoutingStatusOK, entry.Status)
+	require.Len(t, entry.Projects, 2)
+	assert.Equal(t, int64(2), repoAccessChecks.Load(), "cold report build must check each associated project once")
+
+	srv.githubAssociationReportCache.mu.Lock()
+	firstBuildAt := srv.githubAssociationReportCache.lastFullBuild
+	srv.githubAssociationReportCache.mu.Unlock()
+	require.False(t, firstBuildAt.IsZero(), "lastFullBuild must be recorded after initial build")
+
+	// Second PUT immediately after: must NOT reset lastFullBuild or run a second full rebuild;
+	// associationEntriesForRouting serves via its rate-limited direct scan fallback.
+	rr = doRepoRoutingAsUser(t, srv, admin, http.MethodPut, "/api/v1/github-app/repo-routing/Acme/Widgets", GitHubRepoRoutingPutRequest{
+		InstallationID:   instID,
+		PrimaryProjectID: projB,
+	})
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &entry))
+	assert.Equal(t, projB, entry.PrimaryProjectID)
+	assert.Equal(t, GitHubTriggerRoutingStatusOK, entry.Status)
+	require.Len(t, entry.Projects, 2)
+	assert.Equal(t, int64(2), repoAccessChecks.Load(), "second routing PUT inside rebuild interval must not trigger a second full rebuild")
+
+	srv.githubAssociationReportCache.mu.Lock()
+	afterSecondPutBuildAt := srv.githubAssociationReportCache.lastFullBuild
+	srv.githubAssociationReportCache.mu.Unlock()
+	assert.True(t, firstBuildAt.Equal(afterSecondPutBuildAt), "routing PUT must preserve lastFullBuild")
+
+	// DELETE + GET immediately after also preserve lastFullBuild and serve via the fallback.
+	rr = doRepoRoutingAsUser(t, srv, admin, http.MethodDelete, "/api/v1/github-app/repo-routing/Acme/Widgets", nil)
+	require.Equal(t, http.StatusNoContent, rr.Code, rr.Body.String())
+
+	rr = doRepoRoutingAsUser(t, srv, admin, http.MethodGet, "/api/v1/github-app/repo-routing?installation=7201", nil)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var list []GitHubRepoRoutingEntry
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &list))
+	require.Len(t, list, 1)
+	assert.Equal(t, GitHubTriggerRoutingStatusNone, list[0].Status)
+	assert.Empty(t, list[0].PrimaryProjectID)
+	require.Len(t, list[0].Projects, 2)
+	assert.Equal(t, int64(2), repoAccessChecks.Load(), "DELETE + GET inside rebuild interval must not trigger another full rebuild")
 }

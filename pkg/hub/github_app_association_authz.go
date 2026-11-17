@@ -609,13 +609,13 @@ func (c *githubAssociationReportCache) invalidate(projectID string) {
 	c.dirty[projectID] = c.seq
 }
 
-// invalidateAll marks the entire association report cache invalid and clears
-// lastFullBuild so the next read rebuilds without hitting the rate limit.
+// invalidateAll marks the cached association report stale without clearing
+// lastFullBuild, so full rebuilds remain bounded by
+// githubAssociationReportMinRebuildInterval.
 func (c *githubAssociationReportCache) invalidateAll() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.valid = false
-	c.lastFullBuild = time.Time{}
 }
 
 // invalidateGitHubAssociation drops every cached association outcome for
@@ -668,7 +668,8 @@ func (s *Server) githubAssociationReport(ctx context.Context, refresh bool) (git
 
 	now := timeNow()
 	c.mu.Lock()
-	fresh := c.valid && now.Before(c.generatedAt.Add(githubAssociationReportTTL))
+	valid := c.valid
+	fresh := valid && now.Before(c.generatedAt.Add(githubAssociationReportTTL))
 	nextBuild := c.lastFullBuild.Add(githubAssociationReportMinRebuildInterval)
 	limited := !c.lastFullBuild.IsZero() && now.Before(nextBuild)
 	startSeq := c.seq
@@ -680,7 +681,7 @@ func (s *Server) githubAssociationReport(ctx context.Context, refresh bool) (git
 
 	switch {
 	case refresh || !fresh:
-		if limited && (refresh || !c.valid) {
+		if limited && (refresh || !valid) {
 			return githubAssociationReport{}, nextBuild.Sub(now), errGitHubAssociationReportRateLimited
 		}
 		if !limited {
