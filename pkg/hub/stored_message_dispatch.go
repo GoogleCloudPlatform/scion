@@ -46,7 +46,9 @@ var errStoredMessageUnrecoverable = errors.New("stored message cannot be rebuilt
 //     sender envelope to messages originally sent plain). For TypeDecisionResponse,
 //     processClaimedHeldRow enriches the rebuilt StructuredMessage from the
 //     persisted decision_answers / decisions rows so the asking agent still
-//     receives the [decision-response] line and hub-set decision metadata.
+//     receives the [decision-response] line and hub-set decision metadata; for
+//     project-scoped human web messages, processClaimedHeldRow re-derives
+//     outbound @email mentions from row.Msg (ptone/scion#8212).
 func storedMessageDispatch(ctx context.Context, row *store.Message) (context.Context, *messages.StructuredMessage, error) {
 	if row == nil {
 		return nil, nil, fmt.Errorf("%w: nil row", errStoredMessageUnrecoverable)
