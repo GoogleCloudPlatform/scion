@@ -317,8 +317,8 @@ func TestGitHubAppRepoRouting(t *testing.T) {
 	assert.Equal(t, adminID, audits[0].ActorPrincipalID)
 	assert.Contains(t, audits[0].AfterSummary, projB)
 
-	// 6. When primary project loses repository candidacy (e.g. repo_not_accessible / disassociation),
-	// GET reports status "stale_primary".
+	// 5b. Cached Repositories gaps or repo_not_accessible status do NOT exclude a §4.2 candidate:
+	// GET still reports status "ok" and PUT still accepts the candidate.
 	pB, err := s.GetProject(ctx, projB)
 	require.NoError(t, err)
 	now := time.Now()
@@ -327,6 +327,28 @@ func TestGitHubAppRepoRouting(t *testing.T) {
 		ErrorCode:   githubapp.ErrCodeRepoNotAccessible,
 		LastChecked: now,
 	}
+	require.NoError(t, s.UpdateProject(ctx, pB))
+	srv.invalidateGitHubAssociation(projB)
+
+	instForStaleRepoCache, err := s.GetGitHubInstallation(ctx, instID)
+	require.NoError(t, err)
+	instForStaleRepoCache.Repositories = []string{"Acme/Gadgets"} // Acme/Widgets absent from cached list
+	require.NoError(t, s.UpdateGitHubInstallation(ctx, instForStaleRepoCache))
+	srv.githubAssociationReportCache.invalidateAll()
+
+	rr = doRepoRoutingAsUser(t, srv, admin, http.MethodGet, "/api/v1/github-app/repo-routing?installation=5001", nil)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &list))
+	require.Len(t, list, 1)
+	assert.Equal(t, GitHubTriggerRoutingStatusOK, list[0].Status,
+		"repo_not_accessible or stale Repositories cache must not disagree with §4.2 candidacy")
+	require.Len(t, list[0].Projects, 2)
+
+	// 6. When primary project loses §4.2 candidacy (disassociated from installation or remote changed),
+	// GET reports status "stale_primary".
+	pB, err = s.GetProject(ctx, projB)
+	require.NoError(t, err)
+	pB.GitHubInstallationID = nil
 	require.NoError(t, s.UpdateProject(ctx, pB))
 	srv.invalidateGitHubAssociation(projB)
 

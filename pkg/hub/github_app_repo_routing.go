@@ -23,7 +23,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -138,27 +137,30 @@ func lookupTriggerRoute(routing map[string]store.GitHubTriggerRoute, repo string
 	return store.GitHubTriggerRoute{}, false
 }
 
-func (s *Server) isEntryCandidateForRepo(
-	inst *store.GitHubInstallation,
-	gitRemote string,
-	projectInstallationID int64,
-	appStatusErrCode string,
-	lowerRepo string,
-) bool {
-	if inst == nil || projectInstallationID != inst.InstallationID {
+// IsGitHubTriggerCandidate reports whether proj is a candidate project for
+// GitHub trigger fan-out on repo under installationID, implementing design §4.2
+// steps 1-3:
+//  1. proj.GitHubInstallationID != nil && *proj.GitHubInstallationID == installationID
+//  2. s.githubOwnerRepo(proj.GitRemote) (host-pinned) matches repo case-insensitively.
+//
+// Neither GitHubAppStatus (e.g. repo_not_accessible) nor the installation's
+// cached Repositories list excludes a project here: §4.2 checks association
+// authorization at fire time in the drainer, and GitHub may deliver events
+// while the cached repository list is stale.
+//
+// Stage 3 G1's webhook fan-out (§4.2 steps 1-3, before ApplyPrimaryRouting)
+// MUST call IsGitHubTriggerCandidate so ingress fan-out and admin repo-routing
+// status / PUT candidacy validation never diverge.
+func (s *Server) IsGitHubTriggerCandidate(installationID int64, proj *store.Project, repo string) bool {
+	if installationID <= 0 || proj == nil || proj.GitHubInstallationID == nil || *proj.GitHubInstallationID != installationID {
 		return false
 	}
-	if appStatusErrCode == githubapp.ErrCodeRepoNotAccessible {
+	target := strings.TrimSpace(repo)
+	if target == "" {
 		return false
 	}
-	ownerRepo := s.githubOwnerRepo(gitRemote)
-	if ownerRepo == "" || !strings.EqualFold(ownerRepo, lowerRepo) {
-		return false
-	}
-	if len(inst.Repositories) > 0 && !installationListsRepo(*inst, lowerRepo) {
-		return false
-	}
-	return true
+	ownerRepo := s.githubOwnerRepo(proj.GitRemote)
+	return ownerRepo != "" && strings.EqualFold(ownerRepo, target)
 }
 
 // projectHasGitHubTriggers reports whether projectID has any GitHub-sourced
@@ -196,16 +198,11 @@ func (s *Server) associationEntriesForRouting(ctx context.Context) ([]githubAsso
 			if p.GitHubInstallationID == nil {
 				continue
 			}
-			var appErr string
-			if p.GitHubAppStatus != nil {
-				appErr = p.GitHubAppStatus.ErrorCode
-			}
 			entries = append(entries, githubAssociationReportEntry{
-				ProjectID:          p.ID,
-				ProjectName:        p.Name,
-				GitRemote:          p.GitRemote,
-				InstallationID:     *p.GitHubInstallationID,
-				AppStatusErrorCode: appErr,
+				ProjectID:      p.ID,
+				ProjectName:    p.Name,
+				GitRemote:      p.GitRemote,
+				InstallationID: *p.GitHubInstallationID,
 			})
 		}
 		if page.NextCursor == "" {
@@ -244,7 +241,14 @@ func (s *Server) buildRepoRoutingEntries(
 			continue
 		}
 		lowerRepo := strings.ToLower(ownerRepo)
-		if !s.isEntryCandidateForRepo(inst, e.GitRemote, e.InstallationID, e.AppStatusErrorCode, lowerRepo) {
+		projInstID := e.InstallationID
+		candProj := store.Project{
+			ID:                   e.ProjectID,
+			Name:                 e.ProjectName,
+			GitRemote:            e.GitRemote,
+			GitHubInstallationID: &projInstID,
+		}
+		if !s.IsGitHubTriggerCandidate(inst.InstallationID, &candProj, lowerRepo) {
 			continue
 		}
 		key := instRepoKey{instID: inst.InstallationID, repo: lowerRepo}
@@ -454,15 +458,7 @@ func (s *Server) handlePutGitHubAppRepoRouting(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	var projAppErr string
-	if proj.GitHubAppStatus != nil {
-		projAppErr = proj.GitHubAppStatus.ErrorCode
-	}
-	var projInstID int64
-	if proj.GitHubInstallationID != nil {
-		projInstID = *proj.GitHubInstallationID
-	}
-	if !s.isEntryCandidateForRepo(inst, proj.GitRemote, projInstID, projAppErr, lowerRepo) {
+	if !s.IsGitHubTriggerCandidate(inst.InstallationID, proj, lowerRepo) {
 		writeError(w, http.StatusConflict, ErrCodeNotACandidate,
 			"project is not a current candidate for this repository under this installation", nil)
 		return
