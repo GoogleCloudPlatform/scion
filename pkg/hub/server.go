@@ -8464,8 +8464,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/webhooks/github", s.guarded("/api/v1/webhooks/github", s.handleGitHubWebhook))
 	s.mux.HandleFunc("/github-app/setup", s.guarded("/github-app/setup", s.handleGitHubAppSetup))
 
-	// Generic signed webhook ingress (unauthenticated — scion_v1 HMAC signature, experiment-gated)
-	s.mux.HandleFunc("/api/v1/hooks/{id}", s.guarded("/api/v1/hooks/{id}", s.requireExperiment(experiments.Triggers, s.handleWebhookIngress)))
+	// Generic signed webhook ingress (unauthenticated — scion_v1 HMAC signature,
+	// hub.triggers experiment-gated). Checked per request inside handleWebhookIngress
+	// rather than with requireExperiment at registration so servers built over a
+	// synthetic test registry still boot.
+	s.mux.HandleFunc("/api/v1/hooks/{id}", s.guarded("/api/v1/hooks/{id}", s.handleWebhookIngress))
 
 	// Workstation-only system endpoints: declarative guard enforces workstation token.
 	s.mux.HandleFunc("/api/v1/system/identity", s.guarded("/api/v1/system/identity", s.handleSystemIdentity))

@@ -54,9 +54,15 @@ func newWebhookIngress(srv *Server, trustedProxies []string) *trigger.Ingress {
 }
 
 // handleWebhookIngress handles unauthenticated POST /api/v1/hooks/{id}
-// requests (§8.1). A Server built without New (or without a DurableQueueStore)
-// answers 404.
+// requests (§8.1). Gated per request on experiments.Triggers (404 while off)
+// rather than with requireExperiment at route registration so servers built
+// over a synthetic test registry still boot. A Server built without New (or
+// without a DurableQueueStore) also answers 404.
 func (s *Server) handleWebhookIngress(w http.ResponseWriter, r *http.Request) {
+	if !s.experimentEnabled(experiments.Triggers) {
+		NotFound(w, "route")
+		return
+	}
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w, http.MethodPost)
 		return

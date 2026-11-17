@@ -344,7 +344,7 @@ func (h *Ingress) Close(ctx context.Context) {
 
 // ServeHTTP executes the 10-step ingress pipeline of §8.1.
 func (h *Ingress) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Step 0: experiment gate (also enforced by Server.requireExperiment).
+	// Step 0: experiment gate (also enforced by Server.handleWebhookIngress).
 	if h == nil || (h.enabled != nil && !h.enabled()) {
 		http.NotFound(w, r)
 		return

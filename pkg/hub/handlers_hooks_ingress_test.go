@@ -823,3 +823,19 @@ func TestWebhookEndpointIngressURL_EmptyPublicEndpointReturnsRelativePath(t *tes
 	require.Len(t, listed.Endpoints, 1)
 	assert.Equal(t, wantURL, listed.Endpoints[0].URL)
 }
+
+func TestWebhookIngress_SyntheticTestRegistryBootsAndAnswers404(t *testing.T) {
+	st, err := newTestStore(t, ":memory:")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = st.Close() })
+
+	cfg := DefaultServerConfig()
+	cfg.Experiments = testRegistry(t)
+	srv, err := newTestHubServer(t, cfg, st)
+	require.NoError(t, err, "New() with a synthetic test registry lacking hub.triggers must boot without panicking")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/hooks/550e8400-e29b-41d4-a716-446655440000", strings.NewReader(`{}`))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
