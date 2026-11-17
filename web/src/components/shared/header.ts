@@ -994,7 +994,7 @@ export class ScionHeader extends LitElement {
   // =========================================================================
 
   /**
-   * Inline segmented control for switching between Dashboard / Chat /
+   * Inline segmented control for switching between Console / Chat /
    * Terminal modes. Used in the wide center column (with labels) and in
    * the compact tier (icon-only via CSS).
    */
@@ -1010,17 +1010,17 @@ export class ScionHeader extends LitElement {
 
     return html`
       <div class="mode-switch" role="group" aria-label="Switch view">
-        <sl-tooltip content=${withHint('Dashboard', dashboardHint)}>
+        <sl-tooltip content=${withHint('Console', dashboardHint)}>
           <button
             class=${!isChat && !isTerminal ? 'active' : ''}
             @click=${(): void => {
               void this.handleModeSwitch('dashboard');
             }}
-            aria-label="Dashboard"
+            aria-label="Console"
             aria-keyshortcuts=${dashboardHint?.aria ?? nothing}
           >
-            <sl-icon name="house"></sl-icon>
-            <span class="mode-label">Dashboard</span>
+            <sl-icon name="grid-1x2"></sl-icon>
+            <span class="mode-label">Console</span>
           </button>
         </sl-tooltip>
         ${chatEnabled
@@ -1066,7 +1066,7 @@ export class ScionHeader extends LitElement {
   // =========================================================================
 
   /**
-   * Dropdown for switching between Dashboard / Chat / Terminal modes.
+   * Dropdown for switching between Console / Chat / Terminal modes.
    */
   private renderModeDropdown(): TemplateResult {
     const chatEnabled = isFeatureEnabled(NATIVE_CHAT_FLAG);
@@ -1096,8 +1096,8 @@ export class ScionHeader extends LitElement {
             this.handleModeSelect(e)}
         >
           <sl-menu-item value="dashboard" ?checked=${!isChat && !isTerminal}>
-            <sl-icon slot="prefix" name="house"></sl-icon>
-            Dashboard ${this.renderMenuShortcutHint('dashboard')}
+            <sl-icon slot="prefix" name="grid-1x2"></sl-icon>
+            Console ${this.renderMenuShortcutHint('dashboard')}
           </sl-menu-item>
           ${chatEnabled
             ? html`
@@ -1163,7 +1163,7 @@ export class ScionHeader extends LitElement {
   private getCurrentMode(): { icon: string; label: string } {
     if (this.isChatView()) return { icon: 'chat-dots', label: 'Chat' };
     if (this.isTerminalView()) return { icon: 'terminal', label: 'Terminal' };
-    return { icon: 'house', label: 'Dashboard' };
+    return { icon: 'grid-1x2', label: 'Console' };
   }
 
   /** Handle mode selection from the dropdown menu. */

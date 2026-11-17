@@ -154,6 +154,10 @@ One of the roles a server process can run — the Hub API, the Runtime Broker AP
 ### Combo server
 A server process running both the Hub and Runtime Broker components together (the default in workstation mode).
 
+### Console (web UI mode)
+The management view in the web UI's three-way header mode switcher (**Console**, **Chat**, **Terminal**), holding the left-hand navigation and the overview, project, agent, Runtime Broker, and admin pages. Distinct from **Dashboard**, which is the overview landing page (`/`) inside Console's left-hand navigation.
+_Avoid_: Dashboard (when naming the mode-switcher option rather than the `/` overview page)
+
 ### Secret
 A credential made available to an agent at runtime (e.g. API keys, tokens). A harness-config's `secrets` field *declares* which secrets an agent needs; the **Secret Backend** — a pluggable store (local SQLite for development, GCP Secret Manager in production, selected via `SCION_SERVER_SECRETS_BACKEND`) — *stores and resolves* them, scoped by user, project, runtime broker, or hub, and injects them into the container.
 

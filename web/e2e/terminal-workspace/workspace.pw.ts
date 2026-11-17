@@ -446,7 +446,7 @@ test('empty workspace and chat-disabled header keep Terminals available', async 
   await setup(page, true, undefined, false);
   await page.goto('/terminals');
   await expect(page.locator('#terminal-workspace')).toContainText('No terminals are open.');
-  await expect(page.getByRole('button', { name: 'Dashboard' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Console' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Terminals (0)' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Chat' })).toHaveCount(0);
 });
@@ -463,7 +463,7 @@ test('mode switch restores last dashboard and chat routes while retaining termin
     `/terminals/${agent}`
   );
   await expect.poll(() => socket.attaches).toBe(1);
-  await page.getByRole('button', { name: 'Dashboard' }).click();
+  await page.getByRole('button', { name: 'Console' }).click();
   await expect(page).toHaveURL('/projects/project-123/settings');
   await page.getByRole('button', { name: 'Terminals (1)' }).click();
   await expect(page).toHaveURL('/terminals');
@@ -2554,10 +2554,10 @@ test.describe('combined regression journey', () => {
     await expect.poll(() => socket.attaches).toBe(2);
 
     // Agent 3: graph/tree view terminal button click (actual UI producer).
-    // Navigate to agents page via Dashboard button (SPA navigation preserves
+    // Navigate to agents page via Console button (SPA navigation preserves
     // existing sessions), switch to graph view, then click the terminal
     // icon-button for agentC. This exercises the real graph view UI surface.
-    await page.getByRole('button', { name: 'Dashboard' }).click();
+    await page.getByRole('button', { name: 'Console' }).click();
     await expect(page).toHaveURL('/');
     // Set graph view mode before navigating to agents
     await page.evaluate(({ storageKey, mode }) => localStorage.setItem(storageKey, mode), {

@@ -140,6 +140,7 @@ const USED_ICONS = [
   'globe2',
   'graph-up',
   'grid',
+  'grid-1x2',
   'grid-3x3-gap',
   'hammer',
   'google',

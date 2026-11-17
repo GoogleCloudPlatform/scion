@@ -21,7 +21,7 @@ The dashboard features an integrated notification framework with real-time SSE d
 - **Browser Push Notifications**: Opt-in native browser push notifications ensure you receive alerts even when the dashboard is in the background. Default triggers include `stalled` and `error` states, as well as requests for user input.
 
 ### Mode Switcher
-The header features a **mode switcher** that lets you move between the top-level workspaces: **Dashboard**, **Chat**, and **Terminal**. The header adapts to the viewport width in three tiers:
+The header features a **mode switcher** that lets you move between the top-level workspaces: **Console**, **Chat**, and **Terminal** (**Console** holds the left-hand navigation, including the **Dashboard** overview page at `/`). The header adapts to the viewport width in three tiers:
 
 - **Wide (above 1100 px)**: A segmented mode switcher with text labels and icons, with inline buttons for notifications, help, theme, profile, and sign-out.
 - **Medium (768–1100 px)**: The mode switcher shows icons only. Notifications, help, theme, profile, and sign-out move into a single account dropdown. A badge dot on the dropdown shows unread notifications.
@@ -29,7 +29,7 @@ The header features a **mode switcher** that lets you move between the top-level
 
 Notifications stay reachable at every width. The Chat entry shows the unread conversation count, and the Terminal entry shows how many terminal sessions are open.
 
-**Keyboard shortcuts**: Cmd+1, Cmd+2 and Cmd+3 on macOS (Ctrl+1, Ctrl+2 and Ctrl+3 elsewhere) switch to Dashboard, Chat and Terminal. The shortcuts use the physical digit keys, so they are the same on every keyboard layout. They are on by default; turn them off with the **View mode shortcuts** switch on your profile settings page. The setting is stored in the browser.
+**Keyboard shortcuts**: Cmd+1, Cmd+2 and Cmd+3 on macOS (Ctrl+1, Ctrl+2 and Ctrl+3 elsewhere) switch to Console, Chat and Terminal. The shortcuts use the physical digit keys, so they are the same on every keyboard layout. They are on by default; turn them off with the **View mode shortcuts** switch on your profile settings page. The setting is stored in the browser.
 
 The web UI also works on phones, down to 320 px wide and in landscape, including notched screens and the on-screen keyboard. Wide code blocks and tables scroll sideways on their own instead of widening the page, and a sideways swipe does not trigger the browser's Back gesture.
 
@@ -39,10 +39,10 @@ The dashboard shows clock times in 24-hour format. The **Display timezone** card
 ### Native Web Chat
 When enabled via the `web.native_chat` feature flag, the dashboard includes a top-level **Native Web Chat** workspace (a fourth ShellType in the SPA). It offers a rich interface for direct communication and coordination with your running agents and team.
 - **Project-Scoped Spaces & Shared Threads**: Conversations are organized into distinct spaces scoped to specific Projects. Within these spaces, users and agents can collaborate on shared discussion threads.
-- **Project Context Preservation (Mode Switching)**: When you switch between Dashboard, Chat, and Terminal modes using the header mode switcher, the system maintains your active project context so you do not lose your place:
-  - **Dashboard → Chat**: Clicking the **Chat** icon while on a project-scoped dashboard page (e.g., `/projects/:id/...`) takes you straight to that project's chat space (`/chat/space/:id`).
-  - **Chat → Dashboard**: Clicking the **Dashboard** icon while in a project chat space (`/chat/space/:id/...` or `/chat/:slug/...`) takes you directly back to that project's detail page (`/projects/:id`).
-  - **DMs / General Chat**: If there is no active project context (such as when in Direct Messages or bare `/chat`), the view defaults back to the top-level dashboard `/`.
+- **Project Context Preservation (Mode Switching)**: When you switch between Console, Chat, and Terminal modes using the header mode switcher, the system maintains your active project context so you do not lose your place:
+  - **Console → Chat**: Clicking **Chat** while on a project-scoped Console page (e.g., `/projects/:id/...`) takes you straight to that project's chat space (`/chat/space/:id`).
+  - **Chat → Console**: Clicking **Console** while in a project chat space (`/chat/space/:id/...` or `/chat/:slug/...`) takes you directly back to that project's detail page (`/projects/:id`).
+  - **DMs / General Chat**: If there is no active project context (such as when in Direct Messages or bare `/chat`), the view defaults back to the top-level Dashboard page (`/`).
 - **Direct Messages (DMs)**: Start 1-on-1 direct messages covering both human-to-human (H2H) and human-to-agent (H2A) communication, consolidated as a single "global pair" thread per pair.
 - **Members Sidebar, Presence & Typing**: A right-hand sidebar displays active project members, showcasing real-time online presence status and typing indicators.
 - **Composer Default-Agent Disambiguation**: When sending messages in spaces with multiple active agents, the composer helps resolve which agent is targeted if no explicit mention is used.
@@ -62,7 +62,7 @@ When enabled via the `web.native_chat` feature flag, the dashboard includes a to
 - **Coherence Sync**: Real-time sync ensures actions taken on external channels (e.g. Discord or Teams) propagate instantly to the Web UI, with delivery state tooltips indicating whether messages succeeded.
 
 ### Terminal Workspace
-The **Terminal Workspace** provides a dedicated, multi-pane terminal environment as a top-level workspace alongside Dashboard and Chat. It allows you to manage interactive terminal sessions with your agents in a persistent, multi-pane layout.
+The **Terminal Workspace** provides a dedicated, multi-pane terminal environment as a top-level workspace alongside Console and Chat. It allows you to manage interactive terminal sessions with your agents in a persistent, multi-pane layout.
 - **Multi-Pane Layout**: Open multiple agent terminals side by side. The workspace preserves your active pane layout during navigation and places newly opened terminals into available slots. In a multi-pane layout, clicking a terminal in the rail that is not already in a pane puts it in the first empty pane; a terminal already in a pane is focused where it is, and with no empty pane the layout does not change. A multi-pane layout restores its panes in parallel rather than one after another.
 - **Shareable Layout URLs**: Multi-pane layouts (the active preset and which agent occupies each pane) are encoded in the page URL. Reloading the page restores the layout, the browser Back and Forward buttons step through layout changes, and you can bookmark or share the URL to reopen the same multi-pane configuration. Single-pane views keep a clean URL. If the layout parameters are malformed or refer to agents that no longer exist, the workspace falls back safely.
 - **Session Restore**: The Hub saves your list of open terminals and which one was in front, per user, and restores them the next time you open the Terminal Workspace, including from another browser or device. Only the frontmost terminal connects automatically; the others are restored to the rail and connect when you open them. Agents that have been deleted, or that you can no longer attach to, are dropped from the restored list. If the URL names a specific agent or layout, the URL decides what connects.
