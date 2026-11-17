@@ -254,6 +254,7 @@ type EventScheduleRef struct {
 const (
 	ExternalVerifiedScionV1        = "scion-v1"
 	ExternalVerifiedHMACSHA256Body = "hmac-sha256-body"
+	ExternalVerifiedUnverified     = "unverified"
 )
 
 // ExternalPayload carries integrity-verified external data inside an EventBody (§8.3).

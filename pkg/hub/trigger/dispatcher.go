@@ -267,6 +267,9 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 	}
 
 	// Parse payload JSON once per event so rule evaluation shares one value (§6.3, F5).
+	// Phase 3b-2 (ptone/scion#8030) consumes parsedPayload when building the CEL
+	// rule activation; Stage 1b-3 performs Types-only matching and still charges
+	// the once-per-event JSON parse against ruleElapsed.
 	parseStart := d.now()
 	var parsedPayload any
 	if ev.Payload != "" {
@@ -320,14 +323,14 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 			}
 		}
 
-		subject := deriveFireSubject(ev.Subject)
+		fireSubject := deriveFireSubject(ev.Subject)
 		claimNow := d.now().UTC()
 		fire := store.TriggerFire{
 			ID:                   uuid.NewString(),
 			ProjectID:            tr.ProjectID,
 			TriggerID:            tr.ID,
 			EventID:              ev.ID,
-			Subject:              subject,
+			Subject:              fireSubject,
 			ActionType:           tr.ActionType,
 			Status:               store.TriggerFireStatusFiring,
 			ExecutorKind:         ExecutorKindTriggerDrainer,
@@ -373,7 +376,7 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 				SourceKind: ev.SourceKind,
 				SourceID:   ev.SourceID,
 				Type:       ev.Type,
-				Subject:    subject,
+				Subject:    ev.Subject,
 				OccurredAt: ev.OccurredAt,
 				ReceivedAt: ev.ReceivedAt,
 				Attributes: maps.Clone(ev.Attributes),
@@ -403,6 +406,11 @@ func (d *Dispatcher) HandleItem(ctx context.Context, item durablequeue.Item, lea
 			finished  bool
 			finishErr error
 		)
+		// NOTE (PR 2): triggerFireTracker.Record runs at most one write per fire.
+		// Stage 1's message action never calls req.Tracked.Record itself; if a PR 2
+		// action records via req.Tracked.Record directly, this outer tracker.Record
+		// call becomes a no-op and—unless that action also updates trigger_fires—the
+		// firing row would be left to the hourly reaper.
 		tracker.Record(func() {
 			finished, finishErr = d.store.FinishTriggerFire(writeCtx, fire.ID, statusStr, out.ResultRef, out.Error, finishedAt)
 		})

@@ -242,20 +242,20 @@ func (s *Server) runTriggerMaintenance(ctx context.Context) {
 	}
 }
 
+// verifiedLabelForFireEvent maps known signature_mode values to canonical
+// integrity labels and fails closed to ExternalVerifiedUnverified for missing
+// or unrecognized modes (never assuming scion-v1 and never echoing raw input).
 func verifiedLabelForFireEvent(ev *hubfire.FireEvent) string {
 	if ev == nil {
-		return ""
+		return messaging.ExternalVerifiedUnverified
 	}
 	switch ev.Attributes["signature_mode"] {
-	case "body_only", messaging.ExternalVerifiedHMACSHA256Body:
+	case store.WebhookSignatureModeBodyOnly, messaging.ExternalVerifiedHMACSHA256Body:
 		return messaging.ExternalVerifiedHMACSHA256Body
-	case "scion_v1", messaging.ExternalVerifiedScionV1:
+	case store.WebhookSignatureModeScionV1, messaging.ExternalVerifiedScionV1:
 		return messaging.ExternalVerifiedScionV1
 	default:
-		if ev.SourceKind == store.TriggerSourceKindWebhook {
-			return messaging.ExternalVerifiedScionV1
-		}
-		return ev.Attributes["signature_mode"]
+		return messaging.ExternalVerifiedUnverified
 	}
 }
 
@@ -297,8 +297,9 @@ func buildDispatchedEventBody(ev *hubfire.FireEvent) messaging.EventBody {
 	verified := verifiedLabelForFireEvent(ev)
 	if len(ev.Attributes) > 0 {
 		attrs := maps.Clone(ev.Attributes)
-		if verified == messaging.ExternalVerifiedHMACSHA256Body {
-			// §8.1a: body_only mode never routes or forwards unsigned header attributes.
+		if verified != messaging.ExternalVerifiedScionV1 {
+			// §8.1a: only scion_v1 signs routing headers; body_only and any
+			// unverified/unknown mode never forward unsigned header attributes.
 			delete(attrs, "delivery")
 			delete(attrs, "event")
 			delete(attrs, "subject")

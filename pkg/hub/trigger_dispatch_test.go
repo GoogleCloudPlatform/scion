@@ -174,6 +174,57 @@ func TestApplyDispatchedEventEnvelope_WebhookReceivedAndTriggerFired(t *testing.
 		assert.True(t, utf8.ValidString(env.Event.External.Text))
 		assert.LessOrEqual(t, len(env.Event.External.Text), messaging.MaxExternalPayloadInlineBytes)
 	})
+
+	t.Run("missing or unknown signature_mode fails closed to unverified and never echoes raw attribute", func(t *testing.T) {
+		for _, mode := range []string{"", "attacker-custom-sig"} {
+			msg := messages.NewSystemMessage("scheduler", "agent:lead", "Check event", messages.SystemCategoryScheduler)
+			msg.RecipientID = tid("env-agent-lead")
+
+			attrs := map[string]string{
+				"endpoint_name": "unverified-hook",
+				"delivery":      "unsigned-deliv",
+				"event":         "unsigned-event",
+				"subject":       "unsigned-subject",
+			}
+			if mode != "" {
+				attrs["signature_mode"] = mode
+			}
+			req := hubfire.FireRequest{
+				ProjectID:  tid("env-project"),
+				ActionType: "message",
+				Event: &hubfire.FireEvent{
+					ID:         api.NewUUID(),
+					ProjectID:  tid("env-project"),
+					SourceKind: store.TriggerSourceKindWebhook,
+					SourceID:   tid("env-ep-3"),
+					Type:       "webhook.received",
+					Subject:    "webhook:" + tid("env-ep-3") + "/" + strings.Repeat("x", 300),
+					OccurredAt: now,
+					ReceivedAt: now,
+					Attributes: attrs,
+					Payload:    []byte(`{"untrusted":true}`),
+					Trigger: &hubfire.FireTriggerRef{
+						ID:   tid("env-trig-3"),
+						Name: "fail-closed-rule",
+					},
+				},
+			}
+
+			require.NoError(t, ApplyDispatchedEventEnvelope(msg, req))
+			msg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
+				Msg:       msg,
+				CreatedAt: now,
+			})
+			env := extractEnvelopeJSONFromDelivery(t, msg.DeliveryText)
+			require.NotNil(t, env.Event)
+			assert.Equal(t, req.Event.Subject, env.Event.Subject)
+			assert.NotContains(t, env.Event.Attributes, "delivery")
+			assert.NotContains(t, env.Event.Attributes, "event")
+			assert.NotContains(t, env.Event.Attributes, "subject")
+			require.NotNil(t, env.Event.External)
+			assert.Equal(t, messaging.ExternalVerifiedUnverified, env.Event.External.Verified, "mode=%q", mode)
+		}
+	})
 }
 
 func enqueueTestTriggerEvent(t *testing.T, f *triggersTestFixture, ev *store.TriggerEvent) {

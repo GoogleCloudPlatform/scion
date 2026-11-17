@@ -17,6 +17,7 @@ package trigger_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -326,13 +327,15 @@ func TestDispatcher_WakeFireDetachAndPerFireBudget(t *testing.T) {
 		SubjectMode:   store.TriggerSubjectModeNew,
 		Status:        store.TriggerStatusActive,
 	}))
+	longSubject := "webhook:" + epID + "/prod-" + strings.Repeat("s", 300)
+	require.Greater(t, len(longSubject), trigger.MaxFireSubjectBytes)
 	require.NoError(t, ms.CreateTriggerEvent(context.Background(), &store.TriggerEvent{
 		ID:         evID,
 		ProjectID:  projID,
 		SourceKind: store.TriggerSourceKindWebhook,
 		SourceID:   epID,
 		Type:       "webhook.deploy.finished",
-		Subject:    "webhook:" + epID + "/prod",
+		Subject:    longSubject,
 		DedupKey:   "d-1",
 		OccurredAt: t0,
 		ReceivedAt: t0,
@@ -362,6 +365,7 @@ func TestDispatcher_WakeFireDetachAndPerFireBudget(t *testing.T) {
 		assert.Equal(t, trigger.ExecutorKindTriggerDrainer, req.Executor.Kind)
 		assert.Equal(t, trigger.ExecutorIDPrefixTriggerEvent+evID, req.Executor.ID)
 		require.NotNil(t, req.Event)
+		assert.Equal(t, longSubject, req.Event.Subject, "FireEvent carries full trigger_events.subject")
 		require.NotNil(t, req.Event.Trigger)
 		assert.Equal(t, trID, req.Event.Trigger.ID)
 		assert.Equal(t, "wake-tr", req.Event.Trigger.Name)
@@ -397,6 +401,12 @@ func TestDispatcher_WakeFireDetachAndPerFireBudget(t *testing.T) {
 	assert.Equal(t, store.TriggerEventStatusProcessed, ev.Status)
 	assert.Equal(t, 1, ev.MatchCount)
 	assert.Equal(t, 1, ev.FireCount)
+
+	fires, err := ms.ListTriggerFires(context.Background(), store.TriggerFireFilter{}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, fires.Items, 1)
+	assert.Equal(t, trigger.MaxFireSubjectBytes, len(fires.Items[0].Subject), "trigger_fires.subject keeps 256-byte truncation")
+	assert.Equal(t, longSubject[:trigger.MaxFireSubjectBytes], fires.Items[0].Subject)
 }
 
 func TestDispatcher_RuleBudgetExhaustedAndMalformedPayload(t *testing.T) {
