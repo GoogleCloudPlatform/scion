@@ -560,17 +560,12 @@ func (e *errHarnessNoResume) Error() string {
 
 // harnessSupportsResume reports whether the agent's harness supports resuming
 // a session, with the harness type it judged and, when unsupported, the
-// harness's reason. It shares resolveAgentHarnessCapabilities (stamped harness
-// at create first, else live config resolution via effectiveAgentHarnessType;
-// ptone/scion#7922, ptone/scion#8227) so GET /api/v1/agents/{id} and suspend
-// always agree. An agent whose record names no harness or harness-config at all
-// is treated as supported, matching the HTTP suspend handler's prior behavior
-// of only rejecting when a harness was explicitly configured and declared
-// SupportNo. Auto-suspend and the idle sweep share this check.
+// harness's reason. It delegates directly to resolveAgentHarnessCapabilities
+// (stamped harness at create first, else live config resolution via
+// effectiveAgentHarnessType, with unnamed agents reporting Resume.Support =
+// SupportYes; ptone/scion#7922, ptone/scion#8227) so GET, full-view list,
+// manual suspend, auto-suspend and membership-loss suspend always agree.
 func (s *Server) harnessSupportsResume(ctx context.Context, agent *store.Agent) (supported bool, harnessType, reason string) {
-	if !agentNamesHarness(agent) {
-		return true, "", ""
-	}
 	harnessType, caps := s.resolveAgentHarnessCapabilities(ctx, agent)
 	if caps.Resume.Support == api.SupportNo {
 		return false, harnessType, caps.Resume.Reason

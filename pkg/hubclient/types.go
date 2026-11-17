@@ -103,7 +103,8 @@ type Agent struct {
 	ResolvedHarness string `json:"resolvedHarness,omitempty"`
 
 	// HarnessCapabilities describes the feature matrix of ResolvedHarness
-	// (including resume support), populated on single-agent responses.
+	// (including resume support), populated on single-agent and full-view
+	// list responses.
 	HarnessCapabilities *api.HarnessAdvancedCapabilities `json:"harnessCapabilities,omitempty"`
 }
 

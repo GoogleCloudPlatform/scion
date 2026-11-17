@@ -529,3 +529,80 @@ func TestListAgents_FullViewExposesHarnessCapabilities(t *testing.T) {
 		}
 	}
 }
+
+// TestAgentWithoutConfiguredHarness_APICapabilitiesMatchSuspend ensures that an
+// agent whose record names no harness and no harness-config at all reports
+// resume.support = "yes" on both single-agent GET and full-view list endpoints,
+// matching manual/auto suspend (which allows suspending unnamed agents) and
+// without contaminating named "generic" agents in the same list (ptone/scion#8227).
+func TestAgentWithoutConfiguredHarness_APICapabilitiesMatchSuspend(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+	srv.SetDispatcher(&runIntentDispatcher{})
+
+	proj, _, unnamed := setupOnlineBrokerAgent(t, s, "8227-unnamed-harness")
+	require.Nil(t, unnamed.AppliedConfig)
+	require.Empty(t, unnamed.HarnessConfig)
+
+	namedGeneric := &store.Agent{
+		ID:            tid("8227-named-generic"),
+		Slug:          "8227-named-generic",
+		Name:          "8227-named-generic",
+		ProjectID:     proj.ID,
+		Phase:         string(state.PhaseRunning),
+		AppliedConfig: &store.AgentAppliedConfig{Harness: "generic"},
+	}
+	require.NoError(t, s.CreateAgent(ctx, namedGeneric))
+
+	getRec := doRequest(t, srv, http.MethodGet, "/api/v1/agents/"+unnamed.ID, nil)
+	require.Equal(t, http.StatusOK, getRec.Code, getRec.Body.String())
+	var gotGet AgentWithCapabilities
+	require.NoError(t, json.Unmarshal(getRec.Body.Bytes(), &gotGet))
+	require.NotNil(t, gotGet.HarnessCapabilities)
+	assert.Equal(t, api.SupportYes, gotGet.HarnessCapabilities.Resume.Support)
+	assert.Empty(t, gotGet.HarnessCapabilities.Resume.Reason)
+
+	for _, listPath := range []string{"/api/v1/agents", "/api/v1/projects/" + proj.ID + "/agents"} {
+		listRec := doRequest(t, srv, http.MethodGet, listPath, nil)
+		require.Equal(t, http.StatusOK, listRec.Code, "%s: %s", listPath, listRec.Body.String())
+		var listResp ListAgentsResponse
+		require.NoError(t, json.Unmarshal(listRec.Body.Bytes(), &listResp))
+		byID := map[string]AgentWithCapabilities{}
+		for _, a := range listResp.Agents {
+			byID[a.ID] = a
+		}
+
+		gotUnnamed, ok := byID[unnamed.ID]
+		require.True(t, ok, listPath)
+		require.NotNil(t, gotUnnamed.HarnessCapabilities, listPath)
+		assert.Equal(t, api.SupportYes, gotUnnamed.HarnessCapabilities.Resume.Support, listPath)
+		assert.Empty(t, gotUnnamed.HarnessCapabilities.Resume.Reason, listPath)
+
+		gotNamed, ok := byID[namedGeneric.ID]
+		require.True(t, ok, listPath)
+		require.NotNil(t, gotNamed.HarnessCapabilities, listPath)
+		assert.Equal(t, api.SupportNo, gotNamed.HarnessCapabilities.Resume.Support, listPath)
+		assert.NotEmpty(t, gotNamed.HarnessCapabilities.Resume.Reason, listPath)
+	}
+
+	suspRec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+unnamed.ID+"/suspend", nil)
+	assert.Equal(t, http.StatusOK, suspRec.Code, suspRec.Body.String())
+	reloaded, err := s.GetAgent(ctx, unnamed.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseSuspended), reloaded.Phase)
+}
+
+func TestStoredAgentHarness_CanonicalizesStampedNames(t *testing.T) {
+	assert.Equal(t, "", storedAgentHarness(nil))
+	assert.Equal(t, "", storedAgentHarness(&store.Agent{}))
+	assert.Equal(t, "claude", storedAgentHarness(&store.Agent{AppliedConfig: &store.AgentAppliedConfig{Harness: "Claude"}}))
+	assert.Equal(t, "gemini-cli", storedAgentHarness(&store.Agent{AppliedConfig: &store.AgentAppliedConfig{Harness: "gemini"}}))
+	assert.Equal(t, "custom-runner", storedAgentHarness(&store.Agent{AppliedConfig: &store.AgentAppliedConfig{Harness: "custom-runner"}}))
+
+	srv := &Server{}
+	resolved, caps := srv.resolveAgentHarnessCapabilities(context.Background(), &store.Agent{
+		AppliedConfig: &store.AgentAppliedConfig{Harness: "gemini"},
+	})
+	assert.Equal(t, "gemini-cli", resolved)
+	assert.Equal(t, api.SupportYes, caps.Resume.Support)
+}

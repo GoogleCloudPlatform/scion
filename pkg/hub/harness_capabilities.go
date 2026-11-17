@@ -295,24 +295,44 @@ func (s *Server) setAgentListBadges(ctx context.Context, agents []AgentWithCapab
 	}
 }
 
+type listCapsKey struct {
+	harness string
+	named   bool
+}
+
+// agentHarnessCapabilities returns the capability matrix for agent at
+// resolvedHarness. When the agent's record names no harness or harness-config
+// at all (!agentNamesHarness), session resume is reported as supported
+// (SupportYes) so GET and full-view list responses match suspend eligibility,
+// which only rejects suspend when a configured harness explicitly declares
+// SupportNo (ptone/scion#8227).
+func agentHarnessCapabilities(agent *store.Agent, resolvedHarness string) api.HarnessAdvancedCapabilities {
+	caps := harness.New(resolvedHarness).AdvancedCapabilities()
+	if !agentNamesHarness(agent) {
+		caps.Resume = api.CapabilityField{Support: api.SupportYes}
+	}
+	return caps
+}
+
 // setAgentListCapabilities populates HarnessCapabilities on every item of a
 // full-view agent list from its already-resolved ResolvedHarness, memoizing
-// capability parsing per distinct harness type across the list.
+// capability parsing per distinct (harness, named) pair across the list.
 func setAgentListCapabilities(agents []AgentWithCapabilities) {
-	var capsByHarness map[string]*api.HarnessAdvancedCapabilities
+	var capsByKey map[listCapsKey]*api.HarnessAdvancedCapabilities
 	for i := range agents {
 		resolved := agents[i].ResolvedHarness
 		if resolved == "" {
 			continue
 		}
-		if capsByHarness == nil {
-			capsByHarness = make(map[string]*api.HarnessAdvancedCapabilities)
+		if capsByKey == nil {
+			capsByKey = make(map[listCapsKey]*api.HarnessAdvancedCapabilities)
 		}
-		caps, ok := capsByHarness[resolved]
+		key := listCapsKey{harness: resolved, named: agentNamesHarness(&agents[i].Agent)}
+		caps, ok := capsByKey[key]
 		if !ok {
-			c := harness.New(resolved).AdvancedCapabilities()
+			c := agentHarnessCapabilities(&agents[i].Agent, resolved)
 			caps = &c
-			capsByHarness[resolved] = caps
+			capsByKey[key] = caps
 		}
 		agents[i].HarnessCapabilities = caps
 	}
@@ -320,7 +340,7 @@ func setAgentListCapabilities(agents []AgentWithCapabilities) {
 
 func (s *Server) resolveAgentHarnessCapabilities(ctx context.Context, agent *store.Agent) (string, api.HarnessAdvancedCapabilities) {
 	resolvedHarness := s.effectiveAgentHarnessType(ctx, agent)
-	return resolvedHarness, harness.New(resolvedHarness).AdvancedCapabilities()
+	return resolvedHarness, agentHarnessCapabilities(agent, resolvedHarness)
 }
 
 // resolveModelAliasForAgent resolves a model size alias (e.g. "extra-large")
