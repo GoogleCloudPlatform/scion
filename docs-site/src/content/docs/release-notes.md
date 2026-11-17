@@ -6,6 +6,9 @@ Scion release notes are published for each preview and stable release. Earlier n
 
 ## Releases
 
+- [v0.4.0-preview.3](/scion/release-notes/v0-4-0-preview-3/)
+- [v0.4.0-preview.2](/scion/release-notes/v0-4-0-preview-2/)
+- [v0.4.0-preview.1](/scion/release-notes/v0-4-0-preview-1/)
 - [v0.3.0](/scion/release-notes/v0-3-0/)
 - [v0.3.0-preview.7](/scion/release-notes/v0-3-0-preview-7/)
 - [v0.3.0-preview.6](/scion/release-notes/v0-3-0-preview-6/)
