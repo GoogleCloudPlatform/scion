@@ -753,15 +753,17 @@ func (s *Server) getGitHubAppClient() (*githubapp.Client, error) {
 	}, keyData)
 }
 
-// mintGitHubAppToken mints a GitHub App installation token for a project.
-// It handles error classification and updates the project's GitHub App status.
-// Returns the token string and expiry, or an error.
+// mintGitHubAppToken mints a fresh GitHub App installation token for a project
+// (agent delivery/refresh, status check, resource import, skills). It is
+// intentionally uncached so agent tokens retain their full lifetime and
+// status checks always contact GitHub.
 func (s *Server) mintGitHubAppToken(ctx context.Context, project *store.Project) (string, string, error) {
-	return s.mintGitHubAppTokenInternal(ctx, project, nil, false)
+	return s.mintGitHubAppTokenInternal(ctx, project, nil, false, false)
 }
 
 // MintGitHubAppTokenWithPermissions mints (or returns a cached) repository-scoped
-// GitHub App installation token for project with an explicit permission set.
+// GitHub App installation token for hub-internal Stage 3 callers (trigger
+// enrichment and github.comment) with an explicit permission set (§7.3).
 // Association authorization runs on every call; when requireWrite is true, a
 // read-only grant (such as a pull-only creator proof) is refused with
 // ErrGitHubWriteNotPermitted.
@@ -771,7 +773,7 @@ func (s *Server) MintGitHubAppTokenWithPermissions(
 	requested githubapp.TokenPermissions,
 	requireWrite bool,
 ) (string, string, error) {
-	return s.mintGitHubAppTokenInternal(ctx, project, &requested, requireWrite)
+	return s.mintGitHubAppTokenInternal(ctx, project, &requested, requireWrite, true)
 }
 
 func (s *Server) mintGitHubAppTokenInternal(
@@ -779,6 +781,7 @@ func (s *Server) mintGitHubAppTokenInternal(
 	project *store.Project,
 	requested *githubapp.TokenPermissions,
 	requireWrite bool,
+	useCache bool,
 ) (string, string, error) {
 	if project == nil || project.GitHubInstallationID == nil {
 		return "", "", fmt.Errorf("project has no GitHub App installation")
@@ -824,8 +827,10 @@ func (s *Server) mintGitHubAppTokenInternal(
 	apiBase := s.githubAppAPIBase()
 	permKey := canonicalGitHubTokenPermKey(perms)
 
-	if cachedToken, cachedExp, ok := s.githubTokenCache.get(project.ID, permKey, appID, apiBase, installationID, ownerRepo); ok {
-		return cachedToken, cachedExp.UTC().Format("2006-01-02T15:04:05Z"), nil
+	if useCache {
+		if cachedToken, cachedExp, ok := s.githubTokenCache.get(project.ID, permKey, appID, apiBase, installationID, ownerRepo); ok {
+			return cachedToken, cachedExp.UTC().Format("2006-01-02T15:04:05Z"), nil
+		}
 	}
 
 	client, err := s.getGitHubAppClient()
@@ -879,7 +884,9 @@ func (s *Server) mintGitHubAppTokenInternal(
 		return "", "", err
 	}
 
-	s.githubTokenCache.put(project.ID, permKey, appID, apiBase, installationID, ownerRepo, token.Token, token.ExpiresAt)
+	if useCache {
+		s.githubTokenCache.put(project.ID, permKey, appID, apiBase, installationID, ownerRepo, token.Token, token.ExpiresAt)
+	}
 
 	// Cache rate limit info
 	if rl := client.GetRateLimit(); rl != nil {

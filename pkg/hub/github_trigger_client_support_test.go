@@ -34,6 +34,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 func TestGitHubInstallationTokenCache_HitExpiryInvalidationPermissionsAndNoLogs(t *testing.T) {
@@ -90,16 +91,48 @@ func TestGitHubInstallationTokenCache_HitExpiryInvalidationPermissionsAndNoLogs(
 	projB := createAssocProject(t, st, "tokcache-proj-b", remoteB, "nobody", ptrInt64(7101))
 	setAdminBinding(t, st, projB, 7101, normalizedRemoteForTest(remoteB), admin.ID)
 
-	// 1. Default mint populates cache; second mint is a cache hit (no second GitHub call).
-	tok1, _, err := srv.MintGitHubAppTokenForProject(ctx, reloadProject(t, st, projA.ID))
+	// 1. Hub-internal MintGitHubAppTokenWithPermissions caches by (project_id, permission_set),
+	// whereas MintGitHubAppTokenForProject (agent delivery / refresh) and
+	// POST /api/v1/projects/{id}/github-status (status check) always mint fresh.
+	defaultLikePerms := githubapp.TokenPermissions{Contents: "write", PullRequests: "write", Metadata: "read"}
+	tokHubPerm, _, err := srv.MintGitHubAppTokenWithPermissions(ctx, reloadProject(t, st, projA.ID), defaultLikePerms, true)
 	require.NoError(t, err)
-	assert.Equal(t, "ghs_SECRET_CACHE_TOKEN_1", tok1)
+	assert.Equal(t, "ghs_SECRET_CACHE_TOKEN_1", tokHubPerm)
 	assert.Equal(t, int64(1), mintCount.Load())
 
-	tok1Hit, _, err := srv.MintGitHubAppTokenForProject(ctx, reloadProject(t, st, projA.ID))
+	tokHubPermHit, _, err := srv.MintGitHubAppTokenWithPermissions(ctx, reloadProject(t, st, projA.ID), defaultLikePerms, true)
 	require.NoError(t, err)
-	assert.Equal(t, tok1, tok1Hit)
-	assert.Equal(t, int64(1), mintCount.Load(), "cached token must be reused before expires_at - 5m")
+	assert.Equal(t, tokHubPerm, tokHubPermHit)
+	assert.Equal(t, int64(1), mintCount.Load(), "MintGitHubAppTokenWithPermissions must reuse cached token before expires_at - 5m")
+
+	// Agent delivery / refresh leg (MintGitHubAppTokenForProject) must stay uncached
+	// and mint a fresh token on every call even when defaultLikePerms is warm in cache.
+	tokAgent1, _, err := srv.MintGitHubAppTokenForProject(ctx, reloadProject(t, st, projA.ID))
+	require.NoError(t, err)
+	assert.Equal(t, "ghs_SECRET_CACHE_TOKEN_2", tokAgent1)
+	assert.Equal(t, int64(2), mintCount.Load(), "agent delivery leg must mint fresh rather than reading cache")
+
+	tokAgent2, _, err := srv.MintGitHubAppTokenForProject(ctx, reloadProject(t, st, projA.ID))
+	require.NoError(t, err)
+	assert.Equal(t, "ghs_SECRET_CACHE_TOKEN_3", tokAgent2)
+	assert.NotEqual(t, tokAgent1, tokAgent2)
+	assert.Equal(t, int64(3), mintCount.Load(), "second agent delivery call must also mint fresh")
+
+	// Status-check leg (POST /api/v1/projects/{id}/github-status -> handleCheckProjectGitHubStatus)
+	// must actively contact GitHub and clear a stale degraded status rather than hitting cache.
+	degradedProj := reloadProject(t, st, projA.ID)
+	degradedProj.GitHubAppStatus = &store.GitHubAppProjectStatus{
+		State:     store.GitHubAppStateDegraded,
+		ErrorCode: githubapp.ErrCodePermissionDenied,
+	}
+	require.NoError(t, st.UpdateProject(ctx, degradedProj))
+
+	statusRR := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/projects/"+projA.ID+"/github-status", nil)
+	require.Equal(t, http.StatusOK, statusRR.Code, statusRR.Body.String())
+	assert.Equal(t, int64(4), mintCount.Load(), "handleCheckProjectGitHubStatus must contact GitHub even with warm cache")
+	checkedProj := reloadProject(t, st, projA.ID)
+	require.NotNil(t, checkedProj.GitHubAppStatus)
+	assert.Equal(t, store.GitHubAppStateOK, checkedProj.GitHubAppStatus.State)
 
 	// 2. Distinct permission sets on the same project do not collide in cache.
 	commentPerms := githubapp.TokenPermissions{Issues: "write", Metadata: "read"}
@@ -107,13 +140,13 @@ func TestGitHubInstallationTokenCache_HitExpiryInvalidationPermissionsAndNoLogs(
 
 	tokComment, _, err := srv.MintGitHubAppTokenWithPermissions(ctx, reloadProject(t, st, projA.ID), commentPerms, true)
 	require.NoError(t, err)
-	assert.Equal(t, "ghs_SECRET_CACHE_TOKEN_2", tokComment)
-	assert.Equal(t, int64(2), mintCount.Load())
+	assert.Equal(t, "ghs_SECRET_CACHE_TOKEN_5", tokComment)
+	assert.Equal(t, int64(5), mintCount.Load())
 
 	tokEnrich, _, err := srv.MintGitHubAppTokenWithPermissions(ctx, reloadProject(t, st, projA.ID), enrichPerms, false)
 	require.NoError(t, err)
-	assert.Equal(t, "ghs_SECRET_CACHE_TOKEN_3", tokEnrich)
-	assert.Equal(t, int64(3), mintCount.Load())
+	assert.Equal(t, "ghs_SECRET_CACHE_TOKEN_6", tokEnrich)
+	assert.Equal(t, int64(6), mintCount.Load())
 
 	// Re-reading both explicit permission sets hits their respective cache entries.
 	tokCommentHit, _, err := srv.MintGitHubAppTokenWithPermissions(ctx, reloadProject(t, st, projA.ID), commentPerms, true)
@@ -122,34 +155,34 @@ func TestGitHubInstallationTokenCache_HitExpiryInvalidationPermissionsAndNoLogs(
 	tokEnrichHit, _, err := srv.MintGitHubAppTokenWithPermissions(ctx, reloadProject(t, st, projA.ID), enrichPerms, false)
 	require.NoError(t, err)
 	assert.Equal(t, tokEnrich, tokEnrichHit)
-	assert.Equal(t, int64(3), mintCount.Load())
+	assert.Equal(t, int64(6), mintCount.Load())
 
 	// Mint projB as well so we can verify per-project invalidation leaves projB untouched.
 	tokB, _, err := srv.MintGitHubAppTokenWithPermissions(ctx, reloadProject(t, st, projB.ID), commentPerms, true)
 	require.NoError(t, err)
-	assert.Equal(t, "ghs_SECRET_CACHE_TOKEN_4", tokB)
-	assert.Equal(t, int64(4), mintCount.Load())
+	assert.Equal(t, "ghs_SECRET_CACHE_TOKEN_7", tokB)
+	assert.Equal(t, int64(7), mintCount.Load())
 
 	// 3. Expiry at expires_at - 5m boundary: at +54m59s still valid; at +55m00s refreshes.
 	now = now.Add(54*time.Minute + 59*time.Second)
 	tokBeforeMargin, _, err := srv.MintGitHubAppTokenWithPermissions(ctx, reloadProject(t, st, projA.ID), commentPerms, true)
 	require.NoError(t, err)
 	assert.Equal(t, tokComment, tokBeforeMargin)
-	assert.Equal(t, int64(4), mintCount.Load())
+	assert.Equal(t, int64(7), mintCount.Load())
 
 	now = now.Add(time.Second) // exactly expires_at - 5m
 	tokRefreshed, _, err := srv.MintGitHubAppTokenWithPermissions(ctx, reloadProject(t, st, projA.ID), commentPerms, true)
 	require.NoError(t, err)
-	assert.Equal(t, "ghs_SECRET_CACHE_TOKEN_5", tokRefreshed)
-	assert.Equal(t, int64(5), mintCount.Load(), "token at expires_at - 5m must mint fresh")
+	assert.Equal(t, "ghs_SECRET_CACHE_TOKEN_8", tokRefreshed)
+	assert.Equal(t, int64(8), mintCount.Load(), "token at expires_at - 5m must mint fresh")
 
 	// 4. invalidateGitHubAssociation(projA.ID) drops projA's cached tokens while
 	// keeping projB's fresh token (if still before projB's margin).
 	// Mint projB fresh at current `now` first so projB has a full 1h window.
 	tokBFresh, _, err := srv.MintGitHubAppTokenWithPermissions(ctx, reloadProject(t, st, projB.ID), commentPerms, true)
 	require.NoError(t, err)
-	assert.Equal(t, "ghs_SECRET_CACHE_TOKEN_6", tokBFresh)
-	assert.Equal(t, int64(6), mintCount.Load())
+	assert.Equal(t, "ghs_SECRET_CACHE_TOKEN_9", tokBFresh)
+	assert.Equal(t, int64(9), mintCount.Load())
 
 	srv.invalidateGitHubAssociation(projA.ID)
 
@@ -157,12 +190,12 @@ func TestGitHubInstallationTokenCache_HitExpiryInvalidationPermissionsAndNoLogs(
 	tokBHit, _, err := srv.MintGitHubAppTokenWithPermissions(ctx, reloadProject(t, st, projB.ID), commentPerms, true)
 	require.NoError(t, err)
 	assert.Equal(t, tokBFresh, tokBHit)
-	assert.Equal(t, int64(6), mintCount.Load())
+	assert.Equal(t, int64(9), mintCount.Load())
 
 	tokAAfterInvalidate, _, err := srv.MintGitHubAppTokenWithPermissions(ctx, reloadProject(t, st, projA.ID), commentPerms, true)
 	require.NoError(t, err)
-	assert.Equal(t, "ghs_SECRET_CACHE_TOKEN_7", tokAAfterInvalidate)
-	assert.Equal(t, int64(7), mintCount.Load())
+	assert.Equal(t, "ghs_SECRET_CACHE_TOKEN_10", tokAAfterInvalidate)
+	assert.Equal(t, int64(10), mintCount.Load())
 
 	// 5. Pull-only creator proof refuses requireWrite=true with ErrGitHubWriteNotPermitted.
 	fakeAssoc := newFakeGitHubForAssoc(t)
