@@ -1617,30 +1617,35 @@ Manages notifications and notification subscriptions.
 
 ### `scion schedule`
 
-Manage one-shot scheduled events and recurring cron schedules on the Hub for the active project (requires Hub mode; available in both human and agent mode). See [Scheduling](/scion/hosted/user/scheduling/) for event types, time zones, and authority rules.
+Manage one-shot scheduled events and recurring cron schedules on the Hub for the active project (requires Hub mode; available in both human and agent mode). See [Scheduling](/scion/hosted/user/scheduling/) for event types, time zones, exec prerequisites, and authority rules.
 
-- `scion schedule create`: Schedule a one-shot event. Requires either `--in <duration>` (for example `30m`, `2h`, `1d`) or `--at <RFC3339>`.
+- `scion schedule create [-- <argv...>]`: Schedule a one-shot event. Requires timing (`--in <duration>` or `--at <ISO-8601>`) and `--agent <name>`.
     - Flags:
-        - `--in <duration>`, `--at <RFC3339>`: Relative delay or absolute fire timestamp (mutually exclusive; one required).
-        - `--type <message|dispatch_agent>`: Event type (default: `message`).
-        - `--name <name>`: Optional label for the one-shot event.
-        - `--agent <name>`: Target agent (`message` events) or newly dispatched agent name (`dispatch_agent` events).
-        - `--message <text>`: Message body (`message` events).
-        - `--wake`: Start or resume the target agent before delivering a `message` event if it is stopped or suspended.
-        - `--template <name>`, `--task <prompt>`, `--branch <git-branch>`: Agent launch parameters for `dispatch_agent` events (`--task` is required for `dispatch_agent`).
-- `scion schedule create-recurring`: Create a recurring cron schedule.
+        - `--in <duration>`, `--at <ISO-8601>`: Relative delay (for example `30m`, `1h`) or absolute fire timestamp (mutually exclusive; one required).
+        - `--type <message|exec>`: Event type (default: `message`; `exec` requires the `hub.conduit` and `hub.exec_schedules` experiments on the Hub).
+        - `--agent <name>` (required): Target agent name.
+        - `--message <text>`: Message body (`message` events only; required for `message`, rejected with `--type exec`).
+        - `--interrupt`: Interrupt the target agent (`message` events only; rejected with `--type exec`).
+        - `--wake`: Resume the target agent if it is suspended when a `message` event fires (`message` events only; requires permission to start it; stopped agents are not resumed; rejected with `--type exec`).
+        - `--timeout <duration>`: Command timeout as a whole-second duration from `1s` to `60m` / `3600s` (default `60s`; `exec` events only, rejected with `--type message`).
+        - `-- <argv...>`: Command arguments executed directly without a shell (`exec` events only; `1`–`64` non-NUL arguments, non-empty `argv[0]`, at most `4,096` bytes per argument and `16,384` bytes total; rejected with `--type message`).
+- `scion schedule create-recurring [-- <argv...>]`: Create a recurring cron schedule. Requires `--name`, `--cron`, and `--agent`.
     - Flags:
         - `--name <name>` (required): Unique schedule name within the project.
-        - `--cron "<min> <hour> <dom> <mon> <dow>"` (required): Standard 5-field cron expression.
-        - `--time-zone <IANA-zone>`: Time zone in which `--cron` is evaluated (for example `America/Los_Angeles`; defaults to your Hub profile timezone when set, else `UTC`).
-        - `--type <message|dispatch_agent>`, `--agent <name>`, `--message <text>`, `--wake`, `--template <name>`, `--task <prompt>`, `--branch <git-branch>`: Same event parameters as `create`.
-- `scion schedule list`: List recurring schedules and one-shot events in the project (`--show all|events|recurring`, default `all`). When authenticated as an agent, the Hub returns only schedules and events whose recorded authority is that agent, and text mode prints `Note: showing only schedules and events held by this agent` on stderr.
-- `scion schedule get <id-or-name>`: Inspect a recurring schedule or one-shot event by full UUID, unique UUID prefix, or recurring schedule name.
+        - `--cron "<min> <hour> <dom> <mon> <dow>"` (required): Standard 5-field cron expression (zone prefixes `CRON_TZ=` and `TZ=` are rejected).
+        - `--time-zone <IANA-zone>`: IANA time zone in which `--cron` is evaluated (for example `America/Los_Angeles`; defaults to `UTC` when omitted; displayed next-run times follow `--tz` / display zone).
+        - `--type <message|exec>`, `--agent <name>`, `--message <text>`, `--interrupt`, `--wake`, `--timeout <duration>`, `-- <argv...>`: Same event parameters and validation rules as `create`.
+- `scion schedule list`: List recurring schedules and one-shot events in the project. When caller-scoped (`scope: "caller"` or authenticated with an agent token), the Hub returns only schedules and events whose recorded authority is that agent, and text mode prints `Note: showing only schedules and events held by this agent (other project schedules are hidden).` on stdout.
+    - Flags:
+        - `--show <all|events|recurring>`: Filter by resource type (default: `all`).
+        - `--status <status>`: Filter by status (`pending`, `firing`, `fired`, `skipped`, `cancelled`, `expired`, `failed`, `active`, `paused`).
+        - `--type <message|dispatch_agent|exec>`: Filter one-shot scheduled events by event type.
+- `scion schedule get <id>`: Inspect a one-shot event or recurring schedule by full UUID or unique UUID prefix. For `exec` events and schedules, displays `Command` (or `<redacted, N args, sha256:...>` when redacted), `Timeout`, and `execSummary` fields (`Outcome`, `Exit Code`, `Duration`, `Output` on events; `Last Outcome` and `Last Exit Code` from the latest history entry on recurring schedules).
 - `scion schedule cancel <id>`: Cancel a `pending` one-shot event (accepts full UUID or unique UUID prefix).
-- `scion schedule pause <id-or-name>`, `scion schedule resume <id-or-name>`, `scion schedule delete <id-or-name>`: Pause, resume, or delete a recurring schedule by UUID, unique UUID prefix, or name. Resuming a schedule transfers its recorded authority to the caller.
-- `scion schedule history <id-or-name>`: Show recent execution history for a recurring schedule (`--limit <n>`).
+- `scion schedule pause <id>`, `scion schedule resume <id>`, `scion schedule delete <id>`: Pause, resume, or delete a recurring schedule by full UUID or unique UUID prefix. Resuming a schedule records the caller's authority (and for `exec` schedules, requires live `agent.attach` on the stored target).
+- `scion schedule history <id>`: Show recent execution history for a recurring schedule by full UUID or unique UUID prefix (adds `OUTCOME`, `EXIT`, `DURATION`, and `OUTPUT` columns when any entry is an `exec` run).
 
-When an agent caller receives `404` or `409` because a named schedule in the project is held by another principal (so it is hidden from or not mutable by the calling agent's token), the CLI appends a hint suggesting a user session or checking who created or last resumed the schedule.
+When an agent caller looks up an unknown ID prefix or receives `409`, `404`, or `403` from a Hub without a caller-scope hint, the CLI appends a caller-scope hint explaining that schedules and events held by another principal are hidden from agent lists and return `403` by ID (and that `get`, `pause`, `resume`, `delete`, and `history` take an ID or ID prefix rather than a schedule name).
 
 ## Infrastructure
 

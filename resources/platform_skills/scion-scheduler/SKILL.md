@@ -11,8 +11,8 @@ description: >-
 
 Schedule future events that deliver messages to agents — either one-shot (fire
 once at a specific time) or recurring (fire on a cron schedule) — or, when
-enabled, schedule one-shot commands to run directly inside an agent's
-container (`--type exec`).
+enabled, schedule one-shot or recurring commands to run directly inside an
+agent's container (`--type exec`).
 All schedules are **project-scoped** — an agent can only create and manage
 schedules within its own project.
 
@@ -84,51 +84,71 @@ schedule keeps its local time across daylight saving changes. Without
 `--time-zone` the expression is evaluated in UTC. Each recurring schedule
 has a name, can be paused and resumed, and maintains execution history.
 
-## Exec events (`--type exec`, experimental, one-shot only)
+## Exec events and schedules (`--type exec`, experimental)
 
-When a one-shot scheduled task only needs to run a deterministic command or
-script in a running agent's container — with no message and no LLM turn — use
-`scion schedule create --type exec` and pass `argv` after `--`:
+When a one-shot event or recurring schedule only needs to run a deterministic
+command or script in a running agent's container — with no message and no LLM
+turn — pass `--type exec` (optional `--timeout`, `1s`–`60m` in whole seconds,
+default `60s`) and place `argv` after `--`:
 
 ```bash
 # One-shot exec event
 scion schedule create --non-interactive --type exec \
   --agent "$(scion whoami --non-interactive --format json | jq -r .name)" \
   --in 10m --timeout 60s -- /usr/local/bin/check-queue
+
+# Recurring exec schedule
+scion schedule create-recurring --non-interactive \
+  --name "queue-sweep" --cron "*/15 * * * *" --time-zone UTC --type exec \
+  --agent "$(scion whoami --non-interactive --format json | jq -r .name)" \
+  --timeout 60s -- /usr/local/bin/check-queue
 ```
 
-- **One-shot only today:** recurring exec schedules are **not yet available**
-  (Phase 2, ptone/scion#7884). `scion schedule create-recurring --type exec`
-  forwards to the Hub and is refused with `422 unsupported event type`; do not
-  use `create-recurring --type exec` until Hub support lands.
 - **Prerequisites:** `hub.conduit` and `hub.exec_schedules` must be enabled on
   the Hub (check `scion whoami --full`), the target agent must have been
   launched or restarted with `hub.exec_schedules` on (otherwise fires record
   `skipped: agent executor unavailable`), agent clocks must be
-  NTP-synchronised, and the caller must be a user or agent that may attach to
-  the agent (`agent.attach`; for an agent caller, a role that grants
+  NTP-synchronised, and creating or resuming requires a user or agent that may
+  attach to the agent (`agent.attach`; for an agent caller, a role that grants
   `agent.attach` such as `full` in the same delegation chain — `baseline` and
   `readonly` are refused).
 - **Execution environment:** runs directly via `execve` (no implicit shell —
   pass `-- sh -c '...'` if shell syntax is needed) as user `scion`, with cwd
   `/workspace` (else home), the harness shell's launch environment, and
   `stdin` `/dev/null`.
-- **Timeouts and outcomes:** `--timeout` accepts whole-second durations from
-  `1s` to `60m` (`3600s`, default `60s`). Exit `0` records `fired`; non-zero
-  records `failed` (`exit status N`); timeout kills the process group
-  (`SIGTERM`, then `SIGKILL` after 5s). Non-running targets are `skipped`
-  (`--wake` is not supported for `exec`).
-- **No output stored:** stdout and stderr are drained and discarded in the
-  container. `scion schedule get <event-id>` shows `execSummary` (`outcome`,
-  `exitCode`, `durationMs`, `outputBytes`; `scion schedule history` uses the
-  same summary columns once recurring exec lands) and redacts `argv`
-  (`<redacted, N args, sha256:...>`, a SHA-256 of the command (`argv`)) unless
-  the reader holds live `agent.attach`. Write logs to a file or send failure
-  alerts with `scion message` from your script.
+- **Timeouts, overlap, and accounting:** `--timeout` accepts whole-second
+  durations from `1s` to `60m` (`3600s`, default `60s`). Exit `0` records
+  `fired` (`lastRunStatus: success`); non-zero records `failed` (`exit status
+  N`); timeout kills the process group (`SIGTERM`, then `SIGKILL` after 5s).
+  Non-running targets are `skipped` (`--wake` is not supported for `exec`).
+  For recurring schedules, a fire arriving while a previous run is still active
+  is `skipped` (`previous run in progress`) via the Hub's per-schedule DB
+  overlap lease (`timeout + 120s`) and `sciontool`'s live-process guard; every
+  completed fire increments `runCount`, while only failed fires increment
+  `errorCount` (updating `lastRunAt`, `lastRunStatus`, and `lastRunError`).
+- **Target deletion, `resume`, and `PATCH`:** deleting the target agent cancels
+  its pending one-shot exec events and pauses recurring exec schedules with
+  `statusReason: target_deleted`. Resuming (`scion schedule resume <id>`)
+  re-checks live `agent.attach` on the stored target. Schedule `PATCH` edits
+  are user-only (`403` for agents): `eventType` cannot change to or from
+  `exec`, dispatch-changing edits require `agent.attach` on the stored target,
+  and re-targeting a schedule whose target was deleted requires a replacement
+  `command` (or `payload`).
+- **No output stored, `execSummary`, and `commandSha256`:** stdout and stderr
+  are drained and discarded in the container. `scion schedule get` and
+  `scion schedule history` show `execSummary` (`outcome`, `exitCode`,
+  `durationMs`, `outputBytes`, `startedAt`, `finishedAt`). Unless the reader's
+  current credential holds live `agent.attach` on the target, `payload` redacts
+  `command` to `commandRedacted: true`, `argc`, and `commandSha256`
+  (`<redacted, N args, sha256:...>` in `get`), where `commandSha256` is the
+  lowercase hex SHA-256 of the canonical UTF-8 JSON array encoding of `argv`
+  with no HTML escaping and the trailing newline trimmed. Write logs to a file
+  or send failure alerts with `scion message` from your script.
 - **Long-running work (>60m) and `flock`:** run jobs up to 60m directly under
   `--timeout`. For work exceeding 60m, detach with `setsid` and guard mutual
   exclusion with `flock -n /tmp/<job>.lock` because detached descendants
-  escape process-group tracking.
+  escape process-group tracking and release the overlap lease when the wrapper
+  exits.
 
 ## Message-to-orchestrator pattern
 
