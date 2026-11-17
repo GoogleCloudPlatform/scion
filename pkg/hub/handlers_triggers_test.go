@@ -1695,8 +1695,8 @@ func TestTriggersAuthoring_CELValidRulesCreatePatchResume(t *testing.T) {
 	var ep WebhookEndpointCreatedResponse
 	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
 
-	matchExpr := `has(event.payload) && event.payload.status == "ok" && event.attributes["branch"].matches("^release/")`
-	subjExpr := `string(event.payload.service) + ":" + trigger.name`
+	matchExpr := `has(event.attributes.subject) && event.attributes.subject.matches("^release/") && has(event.payload) && has(event.payload.status) && event.payload.status == "ok"`
+	subjExpr := `(has(event.payload) && has(event.payload.service) ? string(event.payload.service) : string(event.subject)) + ":" + string(trigger.name)`
 
 	createRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
 		Name:   "cel-valid-tr",
@@ -2169,9 +2169,9 @@ func TestTriggersAuthoring_AgentParityWithUserAuthoring(t *testing.T) {
 	okRec := f.doTrigger(t, f.agentAAuth, "", http.MethodPost, CreateTriggerRequest{
 		Name:   "agent-cel-ok",
 		Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: ep.ID},
-		Match:  &TriggerMatchSpec{Expr: `has(event.payload) && event.payload.ok == true`},
+		Match:  &TriggerMatchSpec{Expr: `has(event.payload) && has(event.payload.ok) && event.payload.ok == true`},
 		Subject: &TriggerSubjectSpec{
-			Expr: `string(event.payload.pr)`,
+			Expr: `has(event.payload) && has(event.payload.pr) ? string(event.payload.pr) : string(event.subject)`,
 		},
 		Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "pr event"},
 	})
@@ -2182,7 +2182,7 @@ func TestTriggersAuthoring_AgentParityWithUserAuthoring(t *testing.T) {
 
 	// Agent pause + resume re-compiles stored CEL rules and bumps revision to 2
 	// (while PATCH by an agent remains 403 per Stage 1 trigger edit policy).
-	nextExpr := `event.attributes["action"] == "synchronize"`
+	nextExpr := `has(event.attributes.event) && event.attributes.event == "deploy.finished"`
 	patchRec := f.doTrigger(t, f.agentAAuth, tr.ID, http.MethodPatch, UpdateTriggerRequest{
 		Match: &TriggerMatchPatchSpec{Expr: &nextExpr},
 	})
@@ -2231,4 +2231,88 @@ func TestTriggersAuthoring_AgentParityWithUserAuthoring(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, agentBadDialect.Code, agentBadDialect.Body.String())
 	require.Equal(t, http.StatusBadRequest, ownerBadDialect.Code, ownerBadDialect.Body.String())
 	assert.Equal(t, decodeTriggerRuleError(t, ownerBadDialect), decodeTriggerRuleError(t, agentBadDialect))
+}
+
+func TestTriggersAuthoring_PatchDispatchFieldOverBrokenStoredRuleRejected(t *testing.T) {
+	f := setupTriggersTestFixture(t)
+	ctx := context.Background()
+
+	epRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: "stored-broken-rule-ep"})
+	require.Equal(t, http.StatusCreated, epRec.Code, epRec.Body.String())
+	var ep WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(epRec.Body.Bytes(), &ep))
+
+	now := time.Now().UTC()
+	origPayload := `{"agentId":"` + f.targetAgent.ID + `","message":"original message"}`
+
+	for _, tc := range []struct {
+		name        string
+		matchRule   string
+		subjectRule string
+		wantField   string
+	}{
+		{
+			name:        "stored_broken_match_rule",
+			matchRule:   `string(event.subject)`,
+			subjectRule: "",
+			wantField:   "match",
+		},
+		{
+			name:        "stored_broken_subject_rule",
+			matchRule:   `true`,
+			subjectRule: `event.type == "webhook.received"`,
+			wantField:   "subject",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			trID := api.NewUUID()
+			require.NoError(t, f.store.CreateTrigger(ctx, &store.Trigger{
+				ID:             trID,
+				ProjectID:      f.projectID,
+				Name:           "broken-" + tc.wantField + "-" + trID[:8],
+				Status:         store.TriggerStatusActive,
+				SourceKind:     store.TriggerSourceKindWebhook,
+				SourceID:       ep.ID,
+				MatchTypes:     []string{"webhook.received"},
+				MatchDialect:   "cel",
+				MatchRule:      tc.matchRule,
+				ActionType:     "message",
+				ActionPayload:  origPayload,
+				SubjectDialect: "cel",
+				SubjectRule:    tc.subjectRule,
+				SubjectMode:    store.TriggerSubjectModeNew,
+				CreatedBy:      f.owner.ID,
+				InitiatorAttribution: store.InitiatorAttribution{
+					InitiatorPrincipalKind:  "user",
+					InitiatorPrincipalID:    f.owner.ID,
+					InitiatorCredentialKind: store.InitiatorCredentialKindSession,
+					AttributionVersion:      1,
+					AuthorizationRevision:   1,
+				},
+				CreatedAt: now,
+				UpdatedAt: now,
+			}))
+
+			patchRec := f.doTrigger(t, f.adminAuth, trID, http.MethodPatch, UpdateTriggerRequest{
+				Action: &TriggerActionSpec{
+					Type:    "message",
+					AgentID: f.targetAgent.ID,
+					Message: "updated message",
+				},
+			})
+			require.Equal(t, http.StatusBadRequest, patchRec.Code, patchRec.Body.String())
+			eb := decodeTriggerRuleError(t, patchRec)
+			assert.Equal(t, ErrCodeInvalidRule, eb.Code)
+			assert.Equal(t, tc.wantField, eb.Details["field"])
+			assert.Equal(t, "result_type", eb.Details["category"])
+
+			stored, err := f.store.GetTrigger(ctx, trID)
+			require.NoError(t, err)
+			assert.Equal(t, origPayload, stored.ActionPayload, "stored action payload must remain unchanged")
+			assert.Equal(t, 1, stored.AuthorizationRevision, "authorization revision must remain unchanged")
+			assert.Equal(t, f.owner.ID, stored.InitiatorPrincipalID, "initiator attribution must remain unchanged")
+			assert.Equal(t, tc.matchRule, stored.MatchRule)
+			assert.Equal(t, tc.subjectRule, stored.SubjectRule)
+		})
+	}
 }

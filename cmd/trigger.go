@@ -67,16 +67,21 @@ var triggerCreateCmd = &cobra.Command{
 
 CEL Rules & Regex Guidance:
   --where (bool, <= 4096 bytes) and --subject (string, <= 1024 bytes) are CEL
-  expressions compiled at authoring time against event.{id,type,source,subject,
-  time,attributes,payload} and trigger.{id,name}.
+  expressions compiled at authoring time against event.{id,type,source.kind,
+  source.id,subject,occurred_at,received_at,attributes,payload} and
+  trigger.{id,name,project_id}. Guard optional JSON payload fields or optional
+  attributes with has(...) (for example has(event.payload.env) or
+  has(event.attributes.subject)) so absent keys evaluate cleanly instead of
+  skipping the rule as missing_input.
 
   matches() accepts literal RE2 patterns only (dynamic patterns fail compilation
-  at authoring time). Run matches() on event.attributes.<k> or one
-  event.payload.<field>, not on the whole payload: against a full 64 KiB string
-  the regex work bound passes up to ~14 case-insensitive keywords (16+ refuses)
-  and an anchored ^[a-z0-9-]{1,63}$ refuses on 64 KiB input (passes on 16 KiB).
-  Runtime evaluation refusals record skipped ("rule evaluation failed") in
-  trigger history.
+  at authoring time). Run matches() on event.attributes.<k> (webhook keys:
+  endpoint_name, event, delivery, subject, signature_mode, content_type,
+  payload_bytes, remote_ip) or one event.payload.<field>, not on the whole
+  payload: against a full 64 KiB string the regex work bound passes up to ~14
+  case-insensitive keywords (16+ refuses) and an anchored ^[a-z0-9-]{1,63}$
+  refuses on 64 KiB input (passes on 16 KiB). Runtime evaluation refusals record
+  skipped ("rule evaluation failed") in trigger history.
 
 Examples:
   # Deliver a message to agent "lead" whenever webhook endpoint "deploys" receives an event
@@ -85,10 +90,10 @@ Examples:
   # Match specific event types
   scion trigger create --name prod-deploy --webhook deploys --type webhook.deploy.finished --agent lead --message "Production deploy finished"
 
-  # Filter with a CEL predicate and derive a concurrency subject from a single field
+  # Filter with a CEL predicate and derive a concurrency subject from a guarded field
   scion trigger create --name prod-service-deploy --webhook deploys \
-    --where 'has(event.payload) && event.payload.env == "prod" && event.attributes["branch"].matches("^release/")' \
-    --subject 'string(event.payload.service)' \
+    --where 'has(event.attributes.subject) && event.attributes.subject.matches("^release/") && has(event.payload) && has(event.payload.env) && event.payload.env == "prod"' \
+    --subject 'has(event.payload) && has(event.payload.service) ? string(event.payload.service) : string(event.subject)' \
     --agent lead --message "Inspect production release event"`,
 	RunE: runTriggerCreate,
 }

@@ -24,14 +24,19 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/celengine"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/hubfire"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/trigger"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
+	"github.com/GoogleCloudPlatform/scion/pkg/triggerrule"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -906,9 +911,18 @@ func TestTriggerHistoryCLI_NameAndUUIDResolutionFlagsAndFormats(t *testing.T) {
 }
 
 func TestTriggerCreateHelp_RegexAndCELAuthorGuidance(t *testing.T) {
-	help := triggerCreateCmd.Long
+	help := strings.Join(strings.Fields(triggerCreateCmd.Long), " ")
 	assert.Contains(t, help, "--where")
 	assert.Contains(t, help, "--subject")
+	assert.Contains(t, help, "source.kind")
+	assert.Contains(t, help, "source.id")
+	assert.Contains(t, help, "occurred_at")
+	assert.Contains(t, help, "received_at")
+	assert.Contains(t, help, "trigger.{id,name,project_id}")
+	assert.Contains(t, help, "has(")
+	assert.Contains(t, help, "missing_input")
+	assert.NotContains(t, help, "event.time")
+	assert.NotContains(t, help, `"branch"`)
 	assert.Contains(t, help, "literal RE2 patterns only")
 	assert.Contains(t, help, "event.attributes.<k>")
 	assert.Contains(t, help, "event.payload.<field>")
@@ -924,6 +938,88 @@ func TestTriggerCreateHelp_RegexAndCELAuthorGuidance(t *testing.T) {
 	subjectFlag := triggerCreateCmd.Flags().Lookup("subject")
 	require.NotNil(t, subjectFlag)
 	assert.Contains(t, subjectFlag.Usage, "1024B")
+}
+
+func TestTriggerCreateHelp_ExampleCompilesAndEvaluatesOnWebhookEvent(t *testing.T) {
+	help := triggerCreateCmd.Long
+
+	whereMatch := regexp.MustCompile(`--where '([^']+)'`).FindStringSubmatch(help)
+	require.Len(t, whereMatch, 2, "expected --where '<cel>' example in triggerCreateCmd.Long")
+	whereExpr := whereMatch[1]
+
+	subjectMatch := regexp.MustCompile(`--subject '([^']+)'`).FindStringSubmatch(help)
+	require.Len(t, subjectMatch, 2, "expected --subject '<cel>' example in triggerCreateCmd.Long")
+	subjectExpr := subjectMatch[1]
+
+	rules, err := triggerrule.NewDefault()
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	whereRule := triggerrule.Rule{Dialect: "cel", Expr: whereExpr}
+	subjectRule := triggerrule.Rule{Dialect: "cel", Expr: subjectExpr}
+
+	require.NoError(t, rules.CompileMatch(ctx, whereRule))
+	require.NoError(t, rules.CompileSubject(ctx, subjectRule))
+
+	now := time.Date(2026, 11, 17, 0, 30, 0, 0, time.UTC)
+	trRef := hubfire.FireTriggerRef{
+		ID:   "dddddddd-1111-4222-8333-444444444444",
+		Name: "prod-service-deploy",
+	}
+	scope := celengine.CacheScope{
+		Consumer: triggerrule.ConsumerName,
+		ID:       trRef.ID,
+		Revision: 1,
+	}
+
+	// §8.2-shaped webhook event matching the help example (X-Scion-Subject: release/v1.4.0, env=prod, service=billing).
+	matchingPayload := []byte(`{"env":"prod","service":"billing"}`)
+	matchingEvent := hubfire.FireEvent{
+		ID:         "eeeeeeee-1111-4222-8333-444444444444",
+		ProjectID:  "proj-1",
+		SourceKind: "webhook",
+		SourceID:   "bbbbbbbb-1111-4222-8333-444444444444",
+		Type:       "webhook.received",
+		Subject:    "webhook:bbbbbbbb-1111-4222-8333-444444444444/release/v1.4.0",
+		OccurredAt: now,
+		ReceivedAt: now,
+		Attributes: map[string]string{
+			"endpoint_name":  "deploys",
+			"event":          "received",
+			"delivery":       "deliv-101",
+			"subject":        "release/v1.4.0",
+			"signature_mode": "scion_v1",
+			"content_type":   "application/json",
+			"payload_bytes":  strconv.Itoa(len(matchingPayload)),
+			"remote_ip":      "203.0.113.10",
+		},
+		Payload: matchingPayload,
+	}
+	matchingAct, err := triggerrule.NewActivation(matchingEvent, trRef)
+	require.NoError(t, err)
+
+	matched, err := rules.Match(ctx, scope, whereRule, matchingAct)
+	require.NoError(t, err)
+	assert.True(t, matched, "help --where example should match §8.2 prod release event")
+
+	derivedSubj, err := rules.Subject(ctx, scope, subjectRule, matchingAct)
+	require.NoError(t, err)
+	assert.Equal(t, "billing", derivedSubj)
+
+	// §8.2-shaped webhook event with missing optional JSON keys evaluates cleanly to false / fallback (not missing_input).
+	sparseEvent := matchingEvent
+	sparseEvent.ID = "ffffffff-1111-4222-8333-444444444444"
+	sparseEvent.Payload = []byte(`{}`)
+	sparseAct, err := triggerrule.NewActivation(sparseEvent, trRef)
+	require.NoError(t, err)
+
+	sparseMatched, err := rules.Match(ctx, scope, whereRule, sparseAct)
+	require.NoError(t, err, "missing optional payload keys must evaluate cleanly to false, not missing_input")
+	assert.False(t, sparseMatched)
+
+	fallbackSubj, err := rules.Subject(ctx, scope, subjectRule, sparseAct)
+	require.NoError(t, err)
+	assert.Equal(t, matchingEvent.Subject, fallbackSubj)
 }
 
 func TestTriggerCLI_WhereSubjectCreateAndPositionBearingErrors(t *testing.T) {
