@@ -62,6 +62,9 @@ const (
 	GCPTokenEventAccessToken   GCPTokenEventType = "gcp_access_token"
 	GCPTokenEventIdentityToken GCPTokenEventType = "gcp_identity_token"
 	GCPTokenEventMintSA        GCPTokenEventType = "gcp_mint_service_account"
+	// GCPTokenEventWIBinding audits one Workload Identity grant made, or
+	// skipped, at GCP service account mint.
+	GCPTokenEventWIBinding GCPTokenEventType = "gcp_sa.wi_binding"
 )
 
 // GCPTokenEvent represents an auditable GCP token generation event.
@@ -71,9 +74,12 @@ type GCPTokenEvent struct {
 	ProjectID           string            `json:"projectId"`
 	ServiceAccountEmail string            `json:"serviceAccountEmail"`
 	ServiceAccountID    string            `json:"serviceAccountId"`
-	Success             bool              `json:"success"`
-	FailReason          string            `json:"failReason,omitempty"`
-	Timestamp           time.Time         `json:"timestamp"`
+	// Member is the IAM member of a Workload Identity binding event
+	// (GCPTokenEventWIBinding), e.g. serviceAccount:<pool>[<ns>/<ksa>].
+	Member     string    `json:"member,omitempty"`
+	Success    bool      `json:"success"`
+	FailReason string    `json:"failReason,omitempty"`
+	Timestamp  time.Time `json:"timestamp"`
 }
 
 // BrokerAuthEvent represents an auditable event related to broker authentication.
@@ -559,6 +565,10 @@ func (l *LogAuditLogger) LogGCPTokenEvent(ctx context.Context, event *GCPTokenEv
 		// anyone could read. Emitting it only when non-empty would make the key
 		// come and go between records and defeat the point of a stable schema.
 		slog.String("sa_id", event.ServiceAccountID),
+	}
+
+	if event.Member != "" {
+		attrs = append(attrs, slog.String("member", event.Member))
 	}
 
 	if event.FailReason != "" {

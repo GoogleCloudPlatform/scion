@@ -1119,7 +1119,7 @@ func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, p
 	// Workload Identity bindings (hub.k8s_workload_identity_setup): best
 	// effort, after the required grants. A failed grant never fails the
 	// mint; it is reported in the response.
-	wiBindings := s.projectWorkloadIdentityBindings(r.Context(), projectID, saEmail)
+	wiBindings, warningView := s.projectWorkloadIdentityBindings(r.Context(), projectID, saEmail)
 
 	// Store the SA record — only reached when ALL required IAM mutations succeeded.
 	sa := &store.GCPServiceAccount{
@@ -1162,7 +1162,7 @@ func (s *Server) mintGCPServiceAccount(w http.ResponseWriter, r *http.Request, p
 
 	writeJSON(w, http.StatusCreated, gcpServiceAccountWithWarnings{
 		GCPServiceAccount:        *sa,
-		Warnings:                 s.projectSAMappingWarnings(r.Context(), projectID, sa),
+		Warnings:                 projectSAMappingWarningsFrom(projectID, warningView, sa),
 		WorkloadIdentityBindings: wiBindings,
 	})
 }

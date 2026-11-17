@@ -342,3 +342,55 @@ func TestGrantWorkloadIdentityBestEffort_FailedDetailIsSanitized(t *testing.T) {
 	assert.NotContains(t, b.ManualStep, "curl")
 	assert.Equal(t, workloadIdentityManualStep(wiTestGSA, b.Member), b.ManualStep)
 }
+
+// Bound and failed Workload Identity binding audit events emit the IAM
+// member in the JSON log record; a no-pool entry omits member because none
+// was computed.
+func TestWorkloadIdentityAuditEvent_BoundMemberEmitted(t *testing.T) {
+	buf := captureAuditLogs(t)
+	s := &Server{auditLogger: NewLogAuditLogger("[Test]", false)}
+	sa := &store.GCPServiceAccount{ID: "sa-1", Email: wiTestGSA}
+
+	s.logWorkloadIdentityBindingsAudit(context.Background(), "proj-1", sa, []api.WorkloadIdentityBinding{
+		{
+			Member:   "serviceAccount:p1.svc.id.goog[agents/scion-foo]",
+			Profiles: []string{"a/gke"},
+			State:    api.WorkloadIdentityBindingBound,
+		},
+		{
+			Member:   "serviceAccount:nope.svc.id.goog[agents/scion-foo]",
+			Profiles: []string{"b/gke"},
+			State:    api.WorkloadIdentityBindingSkipped,
+			Reason:   api.WorkloadIdentityReasonPoolNotFound,
+		},
+		{
+			Profiles: []string{"old/k8s"},
+			State:    api.WorkloadIdentityBindingSkipped,
+			Reason:   api.WorkloadIdentityReasonNoPool,
+		},
+	})
+
+	var recs []map[string]any
+	for _, r := range auditRecords(t, buf) {
+		if r["msg"] == "GCP token audit event" {
+			recs = append(recs, r)
+		}
+	}
+	require.Len(t, recs, 3)
+
+	assert.Equal(t, string(GCPTokenEventWIBinding), recs[0]["event_type"])
+	assert.Equal(t, true, recs[0]["success"])
+	assert.Equal(t, "proj-1", recs[0]["project_id"])
+	assert.Equal(t, wiTestGSA, recs[0]["sa_email"])
+	assert.Equal(t, "sa-1", recs[0]["sa_id"])
+	assert.Equal(t, "serviceAccount:p1.svc.id.goog[agents/scion-foo]", recs[0]["member"])
+	assert.NotContains(t, recs[0], "fail_reason")
+
+	assert.Equal(t, false, recs[1]["success"])
+	assert.Equal(t, "serviceAccount:nope.svc.id.goog[agents/scion-foo]", recs[1]["member"])
+	assert.Equal(t, "pool_not_found serviceAccount:nope.svc.id.goog[agents/scion-foo]", recs[1]["fail_reason"])
+
+	assert.Equal(t, false, recs[2]["success"])
+	assert.NotContains(t, recs[2], "member")
+	assert.Equal(t, "no_workload_identity_pool old/k8s", recs[2]["fail_reason"])
+}

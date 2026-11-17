@@ -930,6 +930,11 @@ func (s *Server) mintHubScopedGCPServiceAccount(w http.ResponseWriter, r *http.R
 	slog.Info("GCP SA mint (hub scope): SA created and IAM grants succeeded",
 		"sa_email", saEmail, "hub_email", hubEmail, "self_act_as", allowSelfActAs)
 
+	// Workload Identity bindings (hub.k8s_workload_identity_setup): best
+	// effort, after the required grants. A failed grant never fails the
+	// mint; it is reported in the response.
+	wiBindings, warningView := s.hubWorkloadIdentityBindings(r.Context(), saEmail)
+
 	// Store the SA record — only reached when ALL required IAM mutations succeeded.
 	sa := &store.GCPServiceAccount{
 		ID:                 uuid.New().String(),
@@ -962,6 +967,7 @@ func (s *Server) mintHubScopedGCPServiceAccount(w http.ResponseWriter, r *http.R
 	LogGCPTokenGeneration(r.Context(), s.auditLogger, GCPTokenEventMintSA,
 		"", "", saEmail, sa.ID, true, "")
 	s.logGCPServiceAccountRegisterAudit(r.Context(), sa)
+	s.logWorkloadIdentityBindingsAudit(r.Context(), "", sa, wiBindings)
 
 	slog.Info("GCP SA minted (hub scope)",
 		"sa_id", sa.ID, "email", saEmail,
@@ -969,7 +975,8 @@ func (s *Server) mintHubScopedGCPServiceAccount(w http.ResponseWriter, r *http.R
 		"self_act_as", allowSelfActAs)
 
 	writeJSON(w, http.StatusCreated, gcpServiceAccountWithWarnings{
-		GCPServiceAccount: *sa,
-		Warnings:          s.hubSAMappingWarnings(r.Context(), sa),
+		GCPServiceAccount:        *sa,
+		Warnings:                 hubSAMappingWarningsFrom(warningView, sa),
+		WorkloadIdentityBindings: wiBindings,
 	})
 }
