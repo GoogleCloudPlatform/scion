@@ -1319,3 +1319,85 @@ func TestTriggersAndWebhookEndpoints_ListByNameFilter(t *testing.T) {
 	require.NoError(t, json.Unmarshal(agentProbeOwnerTr.Body.Bytes(), &trList))
 	assert.Empty(t, trList.Triggers)
 }
+
+func TestTriggersAndWebhookEndpoints_RejectControlAndFormatCharactersInNames(t *testing.T) {
+	badNames := []struct {
+		label string
+		value string
+	}{
+		{"ansi_esc", "hook-\x1b[31mred"},
+		{"osc_52", "hook-\x1b]52;c;ZHVtYg==\x07"},
+		{"nul", "hook\x00name"},
+		{"del", "hook\x7fname"},
+		{"c1_csi", "hook\u009b2J"},
+		{"bidi_rlo_cf", "hook\u202ehidden"},
+		{"zwsp_cf", "hook\u200bname"},
+		{"bom_cf", "\ufeffhook"},
+		{"line_sep_zl", "hook\u2028name"},
+		{"para_sep_zp", "hook\u2029name"},
+		{"trailing_lf", "hook\n"},
+		{"leading_tab", "\thook"},
+		{"slash", "team/hook"},
+		{"invalid_utf8", "hook\xffname"},
+	}
+
+	for _, tc := range badNames {
+		t.Run("unit_"+tc.label, func(t *testing.T) {
+			_, err := validateWebhookEndpointName(tc.value)
+			assert.Error(t, err, "validateWebhookEndpointName(%q)", tc.value)
+			_, err = validateTriggerName(tc.value)
+			assert.Error(t, err, "validateTriggerName(%q)", tc.value)
+		})
+	}
+
+	gotEp, err := validateWebhookEndpointName("  clean-endpoint-01  ")
+	require.NoError(t, err)
+	assert.Equal(t, "clean-endpoint-01", gotEp)
+	gotTr, err := validateTriggerName("  clean-trigger-01  ")
+	require.NoError(t, err)
+	assert.Equal(t, "clean-trigger-01", gotTr)
+
+	f := setupTriggersTestFixture(t)
+	validEpRec := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{
+		Name:        "valid-ep",
+		Description: "line 1\nline 2",
+	})
+	require.Equal(t, http.StatusCreated, validEpRec.Code, validEpRec.Body.String())
+	var validEp WebhookEndpointCreatedResponse
+	require.NoError(t, json.Unmarshal(validEpRec.Body.Bytes(), &validEp))
+
+	validTrRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+		Name:        "valid-tr",
+		Description: "line 1\nline 2",
+		Source:      TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: validEp.ID},
+		Action:      TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+	})
+	require.Equal(t, http.StatusCreated, validTrRec.Code, validTrRec.Body.String())
+	var validTr TriggerResponse
+	require.NoError(t, json.Unmarshal(validTrRec.Body.Bytes(), &validTr))
+
+	for _, bad := range []string{"agent-\x1b[2Jspoof", "agent-\u202espoof"} {
+		epRec := f.doWebhookEndpoint(t, f.agentAAuth, "", http.MethodPost, CreateWebhookEndpointRequest{Name: bad})
+		assert.Equal(t, http.StatusBadRequest, epRec.Code, "endpoint create with %q must fail validation", bad)
+
+		trRec := f.doTrigger(t, f.ownerAuth, "", http.MethodPost, CreateTriggerRequest{
+			Name:   bad,
+			Source: TriggerSourceSpec{Kind: store.TriggerSourceKindWebhook, ID: validEp.ID},
+			Action: TriggerActionSpec{Type: "message", AgentID: f.targetAgent.ID, Message: "hi"},
+		})
+		assert.Equal(t, http.StatusBadRequest, trRec.Code, "trigger create with %q must fail validation", bad)
+
+		badCopy := bad
+		patchRec := f.doTrigger(t, f.ownerAuth, validTr.ID, http.MethodPatch, UpdateTriggerRequest{Name: &badCopy})
+		assert.Equal(t, http.StatusBadRequest, patchRec.Code, "trigger PATCH with %q must fail validation", bad)
+
+		badDescEp := f.doWebhookEndpoint(t, f.ownerAuth, "", http.MethodPost, CreateWebhookEndpointRequest{
+			Name:        "desc-check-ep",
+			Description: bad,
+		})
+		assert.Equal(t, http.StatusBadRequest, badDescEp.Code, "endpoint description with %q must fail validation", bad)
+
+		badDescPatch := f.doTrigger(t, f.ownerAuth, validTr.ID, http.MethodPatch, UpdateTriggerRequest{Description: &badCopy})
+		assert.Equal(t, http.StatusBadRequest, badDescPatch.Code, "trigger description PATCH with %q must fail validation", bad)
+	}
+}

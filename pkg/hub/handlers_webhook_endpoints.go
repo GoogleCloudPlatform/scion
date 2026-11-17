@@ -115,17 +115,7 @@ func (s *Server) handleWebhookEndpoints(w http.ResponseWriter, r *http.Request, 
 }
 
 func validateWebhookEndpointName(raw string) (string, error) {
-	name := strings.TrimSpace(raw)
-	if name == "" {
-		return "", errors.New("name is required")
-	}
-	if len(name) > maxWebhookEndpointNameLen {
-		return "", fmt.Errorf("name exceeds maximum length of %d characters", maxWebhookEndpointNameLen)
-	}
-	if strings.ContainsAny(name, "/\r\n\t") {
-		return "", errors.New("name must not contain '/' or control characters")
-	}
-	return name, nil
+	return validateTriggerResourceName(raw, maxWebhookEndpointNameLen)
 }
 
 func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, projectID string) {
@@ -147,8 +137,8 @@ func (s *Server) createWebhookEndpoint(w http.ResponseWriter, r *http.Request, p
 		ValidationError(w, err.Error(), nil)
 		return
 	}
-	if len(req.Description) > maxWebhookEndpointDescLen {
-		ValidationError(w, fmt.Sprintf("description exceeds maximum length of %d characters", maxWebhookEndpointDescLen), nil)
+	if err := validateTriggerResourceDescription(req.Description, maxWebhookEndpointDescLen); err != nil {
+		ValidationError(w, err.Error(), nil)
 		return
 	}
 	sigMode := strings.TrimSpace(req.SignatureMode)

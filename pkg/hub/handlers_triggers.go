@@ -21,6 +21,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
@@ -180,18 +182,43 @@ func (s *Server) handleTriggers(w http.ResponseWriter, r *http.Request, projectI
 	})(w, r)
 }
 
-func validateTriggerName(raw string) (string, error) {
+func isDisallowedTriggerNameRune(r rune) bool {
+	return r == '/' || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r)
+}
+
+func isDisallowedTriggerDescriptionRune(r rune) bool {
+	if r == '\n' || r == '\r' || r == '\t' {
+		return false
+	}
+	return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r)
+}
+
+func validateTriggerResourceName(raw string, maxLen int) (string, error) {
+	if !utf8.ValidString(raw) || strings.ContainsFunc(raw, isDisallowedTriggerNameRune) {
+		return "", errors.New("name must not contain '/' or control or format characters")
+	}
 	name := strings.TrimSpace(raw)
 	if name == "" {
 		return "", errors.New("name is required")
 	}
-	if len(name) > maxTriggerNameLen {
-		return "", fmt.Errorf("name exceeds maximum length of %d characters", maxTriggerNameLen)
-	}
-	if strings.ContainsAny(name, "/\r\n\t") {
-		return "", errors.New("name must not contain '/' or control characters")
+	if len(name) > maxLen {
+		return "", fmt.Errorf("name exceeds maximum length of %d characters", maxLen)
 	}
 	return name, nil
+}
+
+func validateTriggerResourceDescription(desc string, maxLen int) error {
+	if len(desc) > maxLen {
+		return fmt.Errorf("description exceeds maximum length of %d characters", maxLen)
+	}
+	if !utf8.ValidString(desc) || strings.ContainsFunc(desc, isDisallowedTriggerDescriptionRune) {
+		return errors.New("description must not contain control or format characters")
+	}
+	return nil
+}
+
+func validateTriggerName(raw string) (string, error) {
+	return validateTriggerResourceName(raw, maxTriggerNameLen)
 }
 
 func validateStage1b1Match(spec *TriggerMatchSpec) ([]string, string, string, error) {
@@ -274,8 +301,8 @@ func (s *Server) createTrigger(w http.ResponseWriter, r *http.Request, projectID
 		ValidationError(w, err.Error(), nil)
 		return
 	}
-	if len(req.Description) > maxTriggerDescriptionLen {
-		ValidationError(w, fmt.Sprintf("description exceeds maximum length of %d characters", maxTriggerDescriptionLen), nil)
+	if err := validateTriggerResourceDescription(req.Description, maxTriggerDescriptionLen); err != nil {
+		ValidationError(w, err.Error(), nil)
 		return
 	}
 
@@ -528,8 +555,8 @@ func (s *Server) updateTrigger(w http.ResponseWriter, r *http.Request, projectID
 		fields.Name = true
 	}
 	if req.Description != nil {
-		if len(*req.Description) > maxTriggerDescriptionLen {
-			ValidationError(w, fmt.Sprintf("description exceeds maximum length of %d characters", maxTriggerDescriptionLen), nil)
+		if err := validateTriggerResourceDescription(*req.Description, maxTriggerDescriptionLen); err != nil {
+			ValidationError(w, err.Error(), nil)
 			return
 		}
 		tr.Description = *req.Description
