@@ -263,16 +263,24 @@ func TestGitHubAppRepoRouting(t *testing.T) {
 	rr = doRepoRoutingAsUser(t, srv, member, http.MethodDelete, "/api/v1/github-app/repo-routing/Acme/Widgets", nil)
 	assert.Equal(t, http.StatusForbidden, rr.Code)
 
-	// 3. Initial GET lists candidate repositories with status "none" and supports ?installation= filter.
+	// 3. Initial GET lists candidate repositories with status "none", emits "primary_project_id": null,
+	// and supports ?installation= filter.
 	rr = doRepoRoutingAsUser(t, srv, admin, http.MethodGet, "/api/v1/github-app/repo-routing?installation=5001", nil)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var rawList []map[string]any
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &rawList))
+	require.Len(t, rawList, 1)
+	primaryVal, hasPrimaryKey := rawList[0]["primary_project_id"]
+	assert.True(t, hasPrimaryKey, "primary_project_id key must always be present on wire (null when unset): %s", rr.Body.String())
+	assert.Nil(t, primaryVal, "primary_project_id must serialize as JSON null when unset")
+
 	var list []GitHubRepoRoutingEntry
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &list))
 	require.Len(t, list, 1)
 	assert.Equal(t, instID, list[0].InstallationID)
 	assert.Equal(t, "acme/widgets", list[0].Repo)
 	assert.Equal(t, GitHubTriggerRoutingStatusNone, list[0].Status)
-	assert.Empty(t, list[0].PrimaryProjectID)
+	assert.Nil(t, list[0].PrimaryProjectID)
 	require.Len(t, list[0].Projects, 2)
 	assert.Equal(t, projA, list[0].Projects[0].ID)
 	assert.Equal(t, projB, list[0].Projects[1].ID)
@@ -301,7 +309,8 @@ func TestGitHubAppRepoRouting(t *testing.T) {
 	var putResp GitHubRepoRoutingEntry
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &putResp))
 	assert.Equal(t, "acme/widgets", putResp.Repo)
-	assert.Equal(t, projB, putResp.PrimaryProjectID)
+	require.NotNil(t, putResp.PrimaryProjectID)
+	assert.Equal(t, projB, *putResp.PrimaryProjectID)
 	assert.Equal(t, GitHubTriggerRoutingStatusOK, putResp.Status)
 
 	storedInst, err := s.GetGitHubInstallation(ctx, instID)
@@ -361,7 +370,8 @@ func TestGitHubAppRepoRouting(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &list))
 	require.Len(t, list, 1)
 	assert.Equal(t, GitHubTriggerRoutingStatusStalePrimary, list[0].Status)
-	assert.Equal(t, projB, list[0].PrimaryProjectID)
+	require.NotNil(t, list[0].PrimaryProjectID)
+	assert.Equal(t, projB, *list[0].PrimaryProjectID)
 	require.Len(t, list[0].Projects, 1)
 	assert.Equal(t, projA, list[0].Projects[0].ID)
 
@@ -745,10 +755,16 @@ func TestGitHubAppRepoRouting_ConsecutiveWritesPreserveRebuildLimiter(t *testing
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	var entry GitHubRepoRoutingEntry
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &entry))
-	assert.Equal(t, projA, entry.PrimaryProjectID)
+	require.NotNil(t, entry.PrimaryProjectID)
+	assert.Equal(t, projA, *entry.PrimaryProjectID)
 	assert.Equal(t, GitHubTriggerRoutingStatusOK, entry.Status)
 	require.Len(t, entry.Projects, 2)
 	assert.Equal(t, int64(2), repoAccessChecks.Load(), "cold report build must check each associated project once")
+
+	// Plain association-report GET right after first PUT serves the warm report (200, never 429).
+	reportRR := doRepoRoutingAsUser(t, srv, admin, http.MethodGet, "/api/v1/github-app/installations/association-report", nil)
+	require.Equal(t, http.StatusOK, reportRR.Code, "plain association-report GET after first routing PUT must return 200: %s", reportRR.Body.String())
+	assert.Equal(t, int64(2), repoAccessChecks.Load())
 
 	srv.githubAssociationReportCache.mu.Lock()
 	firstBuildAt := srv.githubAssociationReportCache.lastFullBuild
@@ -763,12 +779,13 @@ func TestGitHubAppRepoRouting_ConsecutiveWritesPreserveRebuildLimiter(t *testing
 	})
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &entry))
-	assert.Equal(t, projB, entry.PrimaryProjectID)
+	require.NotNil(t, entry.PrimaryProjectID)
+	assert.Equal(t, projB, *entry.PrimaryProjectID)
 	assert.Equal(t, GitHubTriggerRoutingStatusOK, entry.Status)
 	require.Len(t, entry.Projects, 2)
 	assert.Equal(t, int64(2), repoAccessChecks.Load(), "second routing PUT inside rebuild interval must not trigger a second full rebuild")
 
-	reportRR := doRepoRoutingAsUser(t, srv, admin, http.MethodGet, "/api/v1/github-app/installations/association-report", nil)
+	reportRR = doRepoRoutingAsUser(t, srv, admin, http.MethodGet, "/api/v1/github-app/installations/association-report", nil)
 	require.Equal(t, http.StatusOK, reportRR.Code, "plain association-report GET after routing PUT must serve cached report (not 429): %s", reportRR.Body.String())
 	assert.Equal(t, int64(2), repoAccessChecks.Load())
 
@@ -790,7 +807,7 @@ func TestGitHubAppRepoRouting_ConsecutiveWritesPreserveRebuildLimiter(t *testing
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &list))
 	require.Len(t, list, 1)
 	assert.Equal(t, GitHubTriggerRoutingStatusNone, list[0].Status)
-	assert.Empty(t, list[0].PrimaryProjectID)
+	assert.Nil(t, list[0].PrimaryProjectID)
 	require.Len(t, list[0].Projects, 2)
 	assert.Equal(t, int64(2), repoAccessChecks.Load(), "DELETE + GET inside rebuild interval must not trigger another full rebuild")
 }

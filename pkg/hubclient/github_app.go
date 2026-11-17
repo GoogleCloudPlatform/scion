@@ -59,7 +59,7 @@ type GitHubRepoRoutingEntry struct {
 	InstallationID   int64                      `json:"installation_id"`
 	Repo             string                     `json:"repo"`
 	Projects         []GitHubRepoRoutingProject `json:"projects"`
-	PrimaryProjectID string                     `json:"primary_project_id,omitempty"`
+	PrimaryProjectID *string                    `json:"primary_project_id"`
 	Status           string                     `json:"status"`
 }
 

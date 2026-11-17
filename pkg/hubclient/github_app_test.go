@@ -30,6 +30,8 @@ func TestGitHubAppService_RepoRouting(t *testing.T) {
 
 	var gotMethod, gotPath, gotQuery string
 	var gotBody SetGitHubRepoPrimaryRequest
+	var lastGetJSON []byte
+	p1 := "p1"
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
@@ -39,22 +41,33 @@ func TestGitHubAppService_RepoRouting(t *testing.T) {
 
 		switch r.Method {
 		case http.MethodGet:
-			_ = json.NewEncoder(w).Encode([]GitHubRepoRoutingEntry{
+			payload, err := json.Marshal([]GitHubRepoRoutingEntry{
 				{
 					InstallationID:   42,
 					Repo:             "acme/widgets",
 					Projects:         []GitHubRepoRoutingProject{{ID: "p1", Name: "alpha", HasGitHubTriggers: false}},
-					PrimaryProjectID: "p1",
+					PrimaryProjectID: &p1,
 					Status:           "ok",
 				},
+				{
+					InstallationID:   42,
+					Repo:             "acme/gadgets",
+					Projects:         []GitHubRepoRoutingProject{{ID: "p2", Name: "beta", HasGitHubTriggers: false}},
+					PrimaryProjectID: nil,
+					Status:           "none",
+				},
 			})
+			require.NoError(t, err)
+			lastGetJSON = payload
+			_, _ = w.Write(payload)
 		case http.MethodPut:
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&gotBody))
+			primaryID := gotBody.PrimaryProjectID
 			_ = json.NewEncoder(w).Encode(GitHubRepoRoutingEntry{
 				InstallationID:   gotBody.InstallationID,
 				Repo:             "acme/widgets",
 				Projects:         []GitHubRepoRoutingProject{{ID: gotBody.PrimaryProjectID, Name: "alpha"}},
-				PrimaryProjectID: gotBody.PrimaryProjectID,
+				PrimaryProjectID: &primaryID,
 				Status:           "ok",
 			})
 		case http.MethodDelete:
@@ -74,8 +87,19 @@ func TestGitHubAppService_RepoRouting(t *testing.T) {
 	assert.Equal(t, http.MethodGet, gotMethod)
 	assert.Equal(t, "/api/v1/github-app/repo-routing", gotPath)
 	assert.Equal(t, "installation=42", gotQuery)
-	require.Len(t, list, 1)
+	require.Len(t, list, 2)
 	assert.Equal(t, "ok", list[0].Status)
+	require.NotNil(t, list[0].PrimaryProjectID)
+	assert.Equal(t, "p1", *list[0].PrimaryProjectID)
+	assert.Equal(t, "none", list[1].Status)
+	assert.Nil(t, list[1].PrimaryProjectID)
+
+	var rawWire []map[string]any
+	require.NoError(t, json.Unmarshal(lastGetJSON, &rawWire))
+	require.Len(t, rawWire, 2)
+	unsetVal, hasUnsetKey := rawWire[1]["primary_project_id"]
+	assert.True(t, hasUnsetKey, "GitHubRepoRoutingEntry must always serialize primary_project_id (null when unset)")
+	assert.Nil(t, unsetVal)
 
 	entry, err := c.GitHubApp().SetRepoPrimary(ctx, "Acme", "Widgets", &SetGitHubRepoPrimaryRequest{
 		InstallationID:   42,
@@ -85,7 +109,8 @@ func TestGitHubAppService_RepoRouting(t *testing.T) {
 	assert.Equal(t, http.MethodPut, gotMethod)
 	assert.Equal(t, "/api/v1/github-app/repo-routing/Acme/Widgets", gotPath)
 	assert.Equal(t, int64(42), gotBody.InstallationID)
-	assert.Equal(t, "p1", entry.PrimaryProjectID)
+	require.NotNil(t, entry.PrimaryProjectID)
+	assert.Equal(t, "p1", *entry.PrimaryProjectID)
 
 	require.NoError(t, c.GitHubApp().DeleteRepoPrimary(ctx, "Acme", "Widgets", &instID))
 	assert.Equal(t, http.MethodDelete, gotMethod)

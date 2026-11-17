@@ -57,7 +57,7 @@ type GitHubRepoRoutingEntry struct {
 	InstallationID   int64                      `json:"installation_id"`
 	Repo             string                     `json:"repo"`
 	Projects         []GitHubRepoRoutingProject `json:"projects"`
-	PrimaryProjectID string                     `json:"primary_project_id,omitempty"`
+	PrimaryProjectID *string                    `json:"primary_project_id"`
 	Status           string                     `json:"status"`
 }
 
@@ -302,7 +302,10 @@ func (s *Server) buildRepoRoutingEntries(
 		}
 
 		status := GitHubTriggerRoutingStatusNone
+		var primaryPtr *string
 		if primaryID != "" {
+			id := primaryID
+			primaryPtr = &id
 			status = GitHubTriggerRoutingStatusStalePrimary
 			for _, p := range projects {
 				if p.ID == primaryID {
@@ -316,7 +319,7 @@ func (s *Server) buildRepoRoutingEntries(
 			InstallationID:   key.instID,
 			Repo:             key.repo,
 			Projects:         projects,
-			PrimaryProjectID: primaryID,
+			PrimaryProjectID: primaryPtr,
 			Status:           status,
 		})
 	}
@@ -520,11 +523,12 @@ func (s *Server) handlePutGitHubAppRepoRouting(w http.ResponseWriter, r *http.Re
 			return
 		}
 	}
+	primaryID := req.PrimaryProjectID
 	writeJSON(w, http.StatusOK, GitHubRepoRoutingEntry{
 		InstallationID:   req.InstallationID,
 		Repo:             lowerRepo,
 		Projects:         []GitHubRepoRoutingProject{},
-		PrimaryProjectID: req.PrimaryProjectID,
+		PrimaryProjectID: &primaryID,
 		Status:           GitHubTriggerRoutingStatusStalePrimary,
 	})
 }
