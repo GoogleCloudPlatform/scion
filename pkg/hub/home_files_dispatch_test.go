@@ -22,8 +22,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -42,6 +45,39 @@ func (g *homeFilesTokenCounter) AuthorizeAgentToken(context.Context, *store.Agen
 func (g *homeFilesTokenCounter) SignAgentToken(AgentTokenGrant, string) (string, *store.AgentCredential, error) {
 	g.sign++
 	return "", nil, fmt.Errorf("unexpected token signature")
+}
+
+type prefixedMintingTokenGenerator struct {
+	mu     sync.Mutex
+	prefix string
+	jtis   []string
+}
+
+func (g *prefixedMintingTokenGenerator) AuthorizeAgentToken(_ context.Context, agent *store.Agent) (AgentTokenGrant, error) {
+	return AgentTokenGrant{AgentID: agent.ID, ProjectID: agent.ProjectID, Ancestry: agent.Ancestry}, nil
+}
+
+func (g *prefixedMintingTokenGenerator) SignAgentToken(grant AgentTokenGrant, runID string) (string, *store.AgentCredential, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	jti := fmt.Sprintf("test-jti-%s-%s-%d", g.prefix, grant.AgentID, len(g.jtis)+1)
+	g.jtis = append(g.jtis, jti)
+	now := time.Now()
+	cred := &store.AgentCredential{
+		AgentID:      grant.AgentID,
+		ProjectID:    grant.ProjectID,
+		TokenJTIHash: hashJTI(jti),
+		RunID:        runID,
+		IssuedAt:     now,
+		ExpiresAt:    now.Add(10 * time.Hour),
+	}
+	return "fake-agent-jwt-" + jti, cred, nil
+}
+
+func (g *prefixedMintingTokenGenerator) lastJTI() string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.jtis[len(g.jtis)-1]
 }
 
 func homeFilesTestDispatcher(t *testing.T, caps *store.BrokerCapabilities, asNeededVars ...store.EnvVar) (*HTTPAgentDispatcher, *mockRuntimeBrokerClient, *store.Agent, store.Store) {
@@ -96,6 +132,11 @@ type homeFilesCreateOp struct {
 	run  func(ctx context.Context, d *HTTPAgentDispatcher, a *store.Agent) error
 }
 
+// homeFilesCreateOps lists the top-level create entry points that accept
+// WithCreateHomeFiles(ctx, files). Standalone DispatchFinalizeEnv is NOT an
+// entry point: HomeFiles exist only within one dispatch's ctx (never persisted
+// across a separate HTTP POST .../env submission), while same-ctx as_needed
+// finalizeEnv and cross-node deferredFinalizeEnv are tested dedicatedly below.
 func homeFilesCreateOps() []homeFilesCreateOp {
 	return []homeFilesCreateOp{
 		{
@@ -116,13 +157,6 @@ func homeFilesCreateOps() []homeFilesCreateOp {
 			name: "DispatchAgentProvision",
 			run: func(ctx context.Context, d *HTTPAgentDispatcher, a *store.Agent) error {
 				return d.DispatchAgentProvision(ctx, a)
-			},
-		},
-		{
-			name: "DispatchFinalizeEnv",
-			run: func(ctx context.Context, d *HTTPAgentDispatcher, a *store.Agent) error {
-				_, err := d.DispatchFinalizeEnv(ctx, a, map[string]string{"EXTRA": "1"})
-				return err
 			},
 		},
 	}
@@ -279,4 +313,301 @@ func TestHomeFilesDispatch_ReprovisionRefusesHomeFiles(t *testing.T) {
 	require.True(t, m.createCalled)
 	assert.True(t, m.lastCreateReq.Reprovision)
 	assert.Empty(t, m.lastCreateReq.HomeFiles)
+}
+
+func TestHomeFilesDispatch_CreateWithGatherFailsClosedOnUnresolvedEnvNeeds(t *testing.T) {
+	want := []api.HomeFile{
+		{Path: ".scion/trigger-event.json", Mode: 0o600, Content: []byte(`{"id":"evt-unresolved"}`)},
+	}
+
+	t.Run("no as_needed match fails closed and revokes credential", func(t *testing.T) {
+		d, m, a, s := homeFilesTestDispatcher(t, &store.BrokerCapabilities{HomeFiles: true})
+		gen := &fakeMintingTokenGenerator{store: s}
+		d.SetTokenGenerator(gen)
+
+		var seen []*RemoteCreateAgentRequest
+		m.createWithGatherFunc = func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+			cp := *req
+			cp.HomeFiles = api.CloneHomeFiles(req.HomeFiles)
+			seen = append(seen, &cp)
+			return nil, &RemoteEnvRequirementsResponse{Needs: []string{"CLI_ONLY_SECRET"}}, nil
+		}
+
+		ctx := withKeepCredentialOnUnknownOutcome(WithCreateHomeFiles(context.Background(), want))
+		res, err := d.DispatchAgentCreateWithGather(ctx, a)
+		require.Error(t, err)
+		assert.Nil(t, res)
+		assert.ErrorIs(t, err, ErrHomeFilesEnvGatherDeferred)
+		assert.True(t, isConfirmedStartNotActedOnError(err), "must be classified confirmed not-acted-on")
+		assert.False(t, isUnknownDispatchOutcome(err), "must be a definite failure so create rolls back")
+
+		require.Len(t, seen, 1)
+		assert.Equal(t, want, seen[0].HomeFiles, "every broker request sent during the attempt carried HomeFiles")
+
+		require.Len(t, gen.jtis, 1)
+		cred := getTestAgentCredential(t, s, gen.lastJTI())
+		require.NotNil(t, cred.RevokedAt, "credential minted before 202 refusal must be revoked")
+
+		// Even if a caller subsequently invokes DispatchFinalizeEnv on a fresh
+		// context.Background(), no create request with empty HomeFiles is sent.
+		_, finErr := d.DispatchFinalizeEnv(context.Background(), a, map[string]string{"CLI_ONLY_SECRET": "late-val"})
+		require.Error(t, finErr)
+		assert.ErrorIs(t, finErr, ErrHomeFilesEnvGatherDeferred)
+		assert.True(t, isConfirmedStartNotActedOnError(finErr))
+		require.Len(t, seen, 1, "subsequent fresh-ctx DispatchFinalizeEnv must not contact the broker without HomeFiles")
+	})
+
+	t.Run("partial as_needed match (ErrEnvStillMissing) fails closed and revokes all minted credentials", func(t *testing.T) {
+		d, m, a, s := homeFilesTestDispatcher(t, &store.BrokerCapabilities{HomeFiles: true}, store.EnvVar{
+			Key:   "AS_NEEDED_KEY",
+			Value: "present",
+		})
+		gen := &fakeMintingTokenGenerator{store: s}
+		d.SetTokenGenerator(gen)
+
+		var seen [][]api.HomeFile
+		m.createWithGatherFunc = func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+			seen = append(seen, api.CloneHomeFiles(req.HomeFiles))
+			if len(seen) == 1 {
+				return nil, &RemoteEnvRequirementsResponse{Needs: []string{"AS_NEEDED_KEY", "STILL_MISSING_KEY"}}, nil
+			}
+			return nil, &RemoteEnvRequirementsResponse{Needs: []string{"STILL_MISSING_KEY"}}, nil
+		}
+
+		ctx := withKeepCredentialOnUnknownOutcome(WithCreateHomeFiles(context.Background(), want))
+		res, err := d.DispatchAgentCreateWithGather(ctx, a)
+		require.Error(t, err)
+		assert.Nil(t, res)
+		assert.ErrorIs(t, err, ErrHomeFilesEnvGatherDeferred)
+		assert.True(t, isConfirmedStartNotActedOnError(err))
+		assert.False(t, isUnknownDispatchOutcome(err))
+
+		// Pass 1 (initial gather), pass 2 (finalizeEnv first send), and no request ever sent empty HomeFiles.
+		require.NotEmpty(t, seen)
+		for i, hf := range seen {
+			assert.Equal(t, want, hf, "broker request %d must carry HomeFiles", i)
+		}
+		require.NotEmpty(t, gen.jtis)
+		for _, jti := range gen.jtis {
+			assert.NotNil(t, getTestAgentCredential(t, s, jti).RevokedAt, "credential %s must be revoked", jti)
+		}
+	})
+
+	t.Run("DispatchAgentProvision also fails closed when HomeFiles gather leaves unresolved needs", func(t *testing.T) {
+		d, m, a, s := homeFilesTestDispatcher(t, &store.BrokerCapabilities{HomeFiles: true})
+		gen := &fakeMintingTokenGenerator{store: s}
+		d.SetTokenGenerator(gen)
+
+		m.createWithGatherFunc = func(_ context.Context, _, _ string, _ *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+			return nil, &RemoteEnvRequirementsResponse{Needs: []string{"MISSING_ON_PROVISION"}}, nil
+		}
+
+		err := d.DispatchAgentProvision(WithCreateHomeFiles(context.Background(), want), a)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrHomeFilesEnvGatherDeferred)
+		assert.True(t, isConfirmedStartNotActedOnError(err))
+		require.Len(t, gen.jtis, 1)
+		assert.NotNil(t, getTestAgentCredential(t, s, gen.lastJTI()).RevokedAt)
+	})
+}
+
+func runPendingDispatchOnOwner(ctx context.Context, srv *Server, s store.Store, events *ChannelEventPublisher, brokerID string) error {
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		pending, err := s.ListPendingDispatch(ctx, brokerID)
+		if err != nil {
+			return err
+		}
+		if len(pending) == 0 {
+			time.Sleep(5 * time.Millisecond)
+			continue
+		}
+		row := pending[0]
+		if _, err := s.ClaimBrokerDispatch(ctx, row.ID, "owner-node"); err != nil {
+			return err
+		}
+		out, execErr := srv.executeDispatch(ctx, row)
+		if execErr != nil {
+			if ferr := s.FailBrokerDispatch(ctx, row.ID, execErr.Error(), dispatchFailureResult(execErr)); ferr != nil {
+				return ferr
+			}
+			events.PublishDispatchDone(ctx, row.ID)
+			return nil
+		}
+		if err := s.CompleteBrokerDispatch(ctx, row.ID, out); err != nil {
+			return err
+		}
+		events.PublishDispatchDone(ctx, row.ID)
+		return nil
+	}
+	return fmt.Errorf("timed out waiting for pending BrokerDispatch row on broker %s", brokerID)
+}
+
+func TestHomeFilesDispatch_CrossNodeDeferredCarriesHomeFiles(t *testing.T) {
+	want := []api.HomeFile{
+		{Path: ".scion/trigger-event.json", Mode: 0o600, Content: []byte(`{"id":"evt-xnode"}`)},
+		{Path: ".scion/triggers/meta.json", Mode: 0o644, Content: []byte(`{"source":"webhook"}`)},
+	}
+
+	setupCrossNode := func(t *testing.T, ownerClient *mockRuntimeBrokerClient, reqClient *mockRuntimeBrokerClient, asNeeded ...store.EnvVar) (*Server, *HTTPAgentDispatcher, *prefixedMintingTokenGenerator, *prefixedMintingTokenGenerator, *store.Agent, store.Store, *ChannelEventPublisher) {
+		t.Helper()
+		ctx := context.Background()
+		srv, s := testServer(t)
+
+		brokerID := tid("xnode-hf-broker")
+		projectID := tid("xnode-hf-project")
+		agentID := tid("xnode-hf-agent")
+
+		require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+			ID:           brokerID,
+			Name:         "xnode-hf-broker",
+			Slug:         "xnode-hf-broker",
+			Endpoint:     "http://localhost:9800",
+			Status:       store.BrokerStatusOnline,
+			Capabilities: &store.BrokerCapabilities{HomeFiles: true},
+		}))
+		require.NoError(t, s.CreateProject(ctx, &store.Project{
+			ID:   projectID,
+			Name: "xnode-hf-project",
+			Slug: "xnode-hf-project",
+		}))
+		for i := range asNeeded {
+			v := asNeeded[i]
+			v.ID = api.NewUUID()
+			v.Scope = store.ScopeProject
+			v.ScopeID = projectID
+			v.InjectionMode = store.InjectionModeAsNeeded
+			require.NoError(t, s.CreateEnvVar(ctx, &v))
+		}
+		agent := &store.Agent{
+			ID:              agentID,
+			Name:            "xnode-hf-agent",
+			Slug:            "xnode-hf-agent",
+			ProjectID:       projectID,
+			OwnerID:         tid("user-xnode-hf"),
+			RuntimeBrokerID: brokerID,
+			Phase:           string(state.PhaseProvisioning),
+			AppliedConfig:   &store.AgentAppliedConfig{HarnessConfig: "claude"},
+		}
+		require.NoError(t, s.CreateAgent(ctx, agent))
+
+		ownerDisp := NewHTTPAgentDispatcherWithClient(s, ownerClient, false, slog.Default())
+		ownerGen := &prefixedMintingTokenGenerator{prefix: "owner"}
+		ownerDisp.SetTokenGenerator(ownerGen)
+		srv.SetDispatcher(ownerDisp)
+
+		events := NewChannelEventPublisher()
+		t.Cleanup(func() { events.Close() })
+
+		reqDisp := NewHTTPAgentDispatcherWithClient(s, reqClient, false, slog.Default())
+		reqGen := &prefixedMintingTokenGenerator{prefix: "req"}
+		reqDisp.SetTokenGenerator(reqGen)
+		reqDisp.SetCrossNodeDeps(events, NoopCommandBus{})
+
+		return srv, reqDisp, reqGen, ownerGen, agent, s, events
+	}
+
+	t.Run("deferredCreateWithGather -> execDispatchCreate forwards HomeFiles to owner broker", func(t *testing.T) {
+		var ownerReceived *RemoteCreateAgentRequest
+		ownerClient := &mockRuntimeBrokerClient{
+			createWithGatherFunc: func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+				cp := *req
+				cp.HomeFiles = api.CloneHomeFiles(req.HomeFiles)
+				ownerReceived = &cp
+				return &RemoteAgentResponse{Agent: &RemoteAgentInfo{ID: req.ID, Phase: string(state.PhaseRunning)}}, nil, nil
+			},
+		}
+		reqClient := &mockRuntimeBrokerClient{
+			createWithGatherFunc: func(context.Context, string, string, *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+				return nil, nil, ErrLifecycleDeferred
+			},
+		}
+		srv, reqDisp, _, _, agent, s, events := setupCrossNode(t, ownerClient, reqClient)
+
+		ownerDone := make(chan error, 1)
+		go func() {
+			ownerDone <- runPendingDispatchOnOwner(context.Background(), srv, s, events, agent.RuntimeBrokerID)
+		}()
+
+		res, err := reqDisp.DispatchAgentCreateWithGather(WithCreateHomeFiles(context.Background(), want), agent)
+		require.NoError(t, err)
+		assert.Nil(t, res)
+		require.NoError(t, <-ownerDone)
+
+		require.NotNil(t, ownerReceived, "owner broker must receive the re-dispatched create")
+		assert.Equal(t, want, ownerReceived.HomeFiles, "owner execDispatchCreate must attach HomeFiles from BrokerDispatch.Args")
+	})
+
+	t.Run("deferredFinalizeEnv -> execDispatchFinalizeEnv forwards HomeFiles and as_needed env to owner broker", func(t *testing.T) {
+		var ownerReceived *RemoteCreateAgentRequest
+		ownerClient := &mockRuntimeBrokerClient{
+			createWithGatherFunc: func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+				cp := *req
+				cp.HomeFiles = api.CloneHomeFiles(req.HomeFiles)
+				ownerReceived = &cp
+				return &RemoteAgentResponse{Agent: &RemoteAgentInfo{ID: req.ID, Phase: string(state.PhaseRunning)}}, nil, nil
+			},
+		}
+		pass := 0
+		reqClient := &mockRuntimeBrokerClient{
+			createWithGatherFunc: func(context.Context, string, string, *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+				pass++
+				if pass == 1 {
+					return nil, &RemoteEnvRequirementsResponse{Needs: []string{"XNODE_AS_NEEDED"}}, nil
+				}
+				return nil, nil, ErrLifecycleDeferred
+			},
+		}
+		srv, reqDisp, _, _, agent, s, events := setupCrossNode(t, ownerClient, reqClient, store.EnvVar{
+			Key:   "XNODE_AS_NEEDED",
+			Value: "xnode-secret-val",
+		})
+
+		ownerDone := make(chan error, 1)
+		go func() {
+			ownerDone <- runPendingDispatchOnOwner(context.Background(), srv, s, events, agent.RuntimeBrokerID)
+		}()
+
+		res, err := reqDisp.DispatchAgentCreateWithGather(WithCreateHomeFiles(context.Background(), want), agent)
+		require.NoError(t, err)
+		assert.Nil(t, res)
+		require.NoError(t, <-ownerDone)
+
+		require.NotNil(t, ownerReceived, "owner broker must receive the re-dispatched finalize_env create")
+		assert.Equal(t, want, ownerReceived.HomeFiles, "owner execDispatchFinalizeEnv must attach HomeFiles from BrokerDispatch.Args")
+		assert.Equal(t, "xnode-secret-val", ownerReceived.ResolvedEnv["XNODE_AS_NEEDED"])
+	})
+
+	t.Run("cross-node deferredCreateWithGather fails closed on unresolved owner env needs and revokes all credentials", func(t *testing.T) {
+		ownerClient := &mockRuntimeBrokerClient{
+			createWithGatherFunc: func(_ context.Context, _, _ string, _ *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+				return nil, &RemoteEnvRequirementsResponse{Needs: []string{"OWNER_MISSING_VAR"}}, nil
+			},
+		}
+		reqClient := &mockRuntimeBrokerClient{
+			createWithGatherFunc: func(context.Context, string, string, *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+				return nil, nil, ErrLifecycleDeferred
+			},
+		}
+		srv, reqDisp, reqGen, ownerGen, agent, s, events := setupCrossNode(t, ownerClient, reqClient)
+
+		ownerDone := make(chan error, 1)
+		go func() {
+			ownerDone <- runPendingDispatchOnOwner(context.Background(), srv, s, events, agent.RuntimeBrokerID)
+		}()
+
+		ctx := withKeepCredentialOnUnknownOutcome(WithCreateHomeFiles(context.Background(), want))
+		res, err := reqDisp.DispatchAgentCreateWithGather(ctx, agent)
+		require.Error(t, err)
+		assert.Nil(t, res)
+		require.NoError(t, <-ownerDone)
+
+		assert.ErrorIs(t, err, ErrHomeFilesEnvGatherDeferred)
+		assert.True(t, isConfirmedStartNotActedOnError(err))
+		assert.False(t, isUnknownDispatchOutcome(err))
+		require.Len(t, reqGen.jtis, 1)
+		require.Len(t, ownerGen.jtis, 1)
+		assert.NotNil(t, getTestAgentCredential(t, s, reqGen.lastJTI()).RevokedAt)
+		assert.NotNil(t, getTestAgentCredential(t, s, ownerGen.lastJTI()).RevokedAt)
+	})
 }

@@ -2164,6 +2164,11 @@ func (s *Server) createAgentInProject(
 		agent.Template = resolvedTemplate.Slug
 	}
 
+	if req.ManagedAgent && len(createHomeFilesFromContext(ctx)) > 0 {
+		ValidationError(w, "homeFiles are not supported for hub-direct managed agents", nil)
+		return
+	}
+
 	if req.Config != nil && req.Config.ThinkingLevel != nil {
 		if tl := *req.Config.ThinkingLevel; tl < 0 || tl > 100 {
 			BadRequest(w, "thinking_level must be between 0 and 100")
@@ -2747,6 +2752,12 @@ func (s *Server) createAgentInProject(
 		}
 
 		if !hasLocalPath && !s.isEmbeddedBroker(runtimeBrokerID) {
+			if len(createHomeFilesFromContext(ctx)) > 0 {
+				failCreate(createRollback{Stage: createStageStorage, Cause: ErrHomeFilesEnvGatherDeferred}, func() {
+					ValidationError(w, "homeFiles create cannot defer to workspace bootstrap upload", nil)
+				})
+				return
+			}
 			stor := s.GetStorage()
 			// Both failures below come after the row and reservations were
 			// written but before any dispatch: nothing to delete on a broker

@@ -138,3 +138,27 @@ func TestDispatchArgs_HomeFilesRoundTrip(t *testing.T) {
 	assert.Equal(t, map[string]string{"K": "V"}, gotFinalize.Env)
 	assert.Equal(t, files, gotFinalize.HomeFiles)
 }
+
+func TestDispatchFailureResult_HomeFilesSentinelsRoundTrip(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		err      error
+		sentinel error
+	}{
+		{"lacks capability", &brokerLacksHomeFilesError{broker: "b-1"}, ErrBrokerLacksHomeFiles},
+		{"env gather deferred", &homeFilesEnvGatherDeferredError{needs: []string{"SECRET_A"}}, ErrHomeFilesEnvGatherDeferred},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := dispatchFailureResult(tc.err)
+			require.NotEmpty(t, res)
+			rebuilt := dispatchFailureError(&store.BrokerDispatch{
+				Op:     "create",
+				State:  store.DispatchStateFailed,
+				Error:  tc.err.Error(),
+				Result: res,
+			})
+			assert.ErrorIs(t, rebuilt, tc.sentinel)
+			assert.True(t, isConfirmedStartNotActedOnError(rebuilt), "rebuilt cross-node error must remain confirmed not-acted-on")
+		})
+	}
+}
