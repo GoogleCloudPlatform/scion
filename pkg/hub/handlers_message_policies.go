@@ -222,18 +222,18 @@ func (s *Server) handleProjectMessagePolicies(w http.ResponseWriter, r *http.Req
 	sub := strings.Trim(rest, "/")
 
 	// Validate method before project/authz lookup so unsupported methods get 405.
-	switch {
-	case sub == "":
+	switch sub {
+	case "":
 		if r.Method != http.MethodGet && r.Method != http.MethodPost {
 			MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 			return
 		}
-	case sub == "test":
+	case "test":
 		if r.Method != http.MethodPost {
 			MethodNotAllowed(w, http.MethodPost)
 			return
 		}
-	case sub == "decisions":
+	case "decisions":
 		if r.Method != http.MethodGet {
 			MethodNotAllowed(w, http.MethodGet)
 			return
