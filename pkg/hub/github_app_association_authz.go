@@ -608,15 +608,6 @@ func (c *githubAssociationReportCache) invalidate(projectID string) {
 	c.dirty[projectID] = c.seq
 }
 
-// invalidateAll marks the cached association report stale without clearing
-// lastFullBuild, so full rebuilds remain bounded by
-// githubAssociationReportMinRebuildInterval.
-func (c *githubAssociationReportCache) invalidateAll() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.valid = false
-}
-
 // invalidateGitHubAssociation drops every cached association outcome for
 // projectID: the mint path's access checks and the admin report's entry.
 // Every association change goes through here.

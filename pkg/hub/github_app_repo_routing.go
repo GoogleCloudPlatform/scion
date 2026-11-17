@@ -503,8 +503,6 @@ func (s *Server) handlePutGitHubAppRepoRouting(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	s.githubAssociationReportCache.invalidateAll()
-
 	updatedInst, err := s.store.GetGitHubInstallation(ctx, req.InstallationID)
 	if err != nil {
 		InternalError(w)
@@ -576,7 +574,6 @@ func (s *Server) handleDeleteGitHubAppRepoRouting(w http.ResponseWriter, r *http
 		}
 	}
 
-	var anyRemoved bool
 	if len(targetInstIDs) > 0 {
 		err = s.store.WithTx(ctx, func(tx store.Store) error {
 			for _, instID := range targetInstIDs {
@@ -598,7 +595,6 @@ func (s *Server) handleDeleteGitHubAppRepoRouting(w http.ResponseWriter, r *http
 				if !removed {
 					continue
 				}
-				anyRemoved = true
 				rec := newRepoRoutingAuditRecord(ctx, instID, lowerRepo, beforePrimary, "")
 				if txErr := tx.CreateMutationAudit(ctx, rec); txErr != nil {
 					return txErr
@@ -616,8 +612,5 @@ func (s *Server) handleDeleteGitHubAppRepoRouting(w http.ResponseWriter, r *http
 		}
 	}
 
-	if anyRemoved {
-		s.githubAssociationReportCache.invalidateAll()
-	}
 	w.WriteHeader(http.StatusNoContent)
 }

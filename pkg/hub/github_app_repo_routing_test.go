@@ -755,8 +755,8 @@ func TestGitHubAppRepoRouting_ConsecutiveWritesPreserveRebuildLimiter(t *testing
 	srv.githubAssociationReportCache.mu.Unlock()
 	require.False(t, firstBuildAt.IsZero(), "lastFullBuild must be recorded after initial build")
 
-	// Second PUT immediately after: must NOT reset lastFullBuild or run a second full rebuild;
-	// associationEntriesForRouting serves via its rate-limited direct scan fallback.
+	// Second PUT immediately after: must NOT reset lastFullBuild or run a second full rebuild,
+	// and plain GET /api/v1/github-app/installations/association-report must continue serving 200 (never 429).
 	rr = doRepoRoutingAsUser(t, srv, admin, http.MethodPut, "/api/v1/github-app/repo-routing/Acme/Widgets", GitHubRepoRoutingPutRequest{
 		InstallationID:   instID,
 		PrimaryProjectID: projB,
@@ -768,14 +768,21 @@ func TestGitHubAppRepoRouting_ConsecutiveWritesPreserveRebuildLimiter(t *testing
 	require.Len(t, entry.Projects, 2)
 	assert.Equal(t, int64(2), repoAccessChecks.Load(), "second routing PUT inside rebuild interval must not trigger a second full rebuild")
 
+	reportRR := doRepoRoutingAsUser(t, srv, admin, http.MethodGet, "/api/v1/github-app/installations/association-report", nil)
+	require.Equal(t, http.StatusOK, reportRR.Code, "plain association-report GET after routing PUT must serve cached report (not 429): %s", reportRR.Body.String())
+	assert.Equal(t, int64(2), repoAccessChecks.Load())
+
 	srv.githubAssociationReportCache.mu.Lock()
 	afterSecondPutBuildAt := srv.githubAssociationReportCache.lastFullBuild
 	srv.githubAssociationReportCache.mu.Unlock()
 	assert.True(t, firstBuildAt.Equal(afterSecondPutBuildAt), "routing PUT must preserve lastFullBuild")
 
-	// DELETE + GET immediately after also preserve lastFullBuild and serve via the fallback.
+	// DELETE + GET immediately after also keep the cached association report valid (200 on association-report, no rebuild).
 	rr = doRepoRoutingAsUser(t, srv, admin, http.MethodDelete, "/api/v1/github-app/repo-routing/Acme/Widgets", nil)
 	require.Equal(t, http.StatusNoContent, rr.Code, rr.Body.String())
+
+	reportRR = doRepoRoutingAsUser(t, srv, admin, http.MethodGet, "/api/v1/github-app/installations/association-report", nil)
+	require.Equal(t, http.StatusOK, reportRR.Code, "plain association-report GET after routing DELETE must serve cached report (not 429): %s", reportRR.Body.String())
 
 	rr = doRepoRoutingAsUser(t, srv, admin, http.MethodGet, "/api/v1/github-app/repo-routing?installation=7201", nil)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
