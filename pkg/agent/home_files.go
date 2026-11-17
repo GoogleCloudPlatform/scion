@@ -21,13 +21,18 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/homeprep"
+	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
 
 // reservedHomeFilePaths lists every file and directory under .scion/ in an
-// agent home that pkg/agent, pkg/harness, or broker credential rotation owns.
-// Derived from the authoritative package constants so the collision gate has
+// agent home that pkg/agent, pkg/harness, sciontool, or broker/CLI config and
+// credential management owns. Derived from the authoritative package constants
+// where available (avoiding import cycles into cmd/) so the collision gate has
 // one source of truth.
 var reservedHomeFilePaths = []string{
 	path.Join(".scion", agentConfigFileName),
@@ -40,6 +45,12 @@ var reservedHomeFilePaths = []string{
 	path.Join(".scion", transportauth.TransportTokenFileName),
 	path.Join(".scion", transportauth.TransportTokenFileName+".tmp"),
 	path.Join(".scion", telemetryGCPCredentialsFileName),
+	path.Join(".scion", stagedsecrets.VariableSecretsFileName),
+	homeprep.LinksRecordPath,
+	path.Join(".scion", config.SettingsFileName),
+	path.Join(".scion", projectkeys.ProjectIDFile),
+	".scion/ssh",    // cmd/ssh_config_files.go (sshKnownHostsDirRel; cmd imports pkg/agent)
+	".scion/vscode", // cmd/ssh_config_files.go (~/.scion/vscode; cmd imports pkg/agent)
 	harness.GenericSystemPromptRel,
 	harness.StagedBundleRel,
 	harness.PreStartHookDirRel,

@@ -146,6 +146,42 @@ func TestCreateAgent_HomeFilesValidationAndThreading(t *testing.T) {
 					{Path: ".scion/skills/foo/SKILL.md", Mode: 0o600, Content: []byte(canary)},
 				},
 			},
+			{
+				name: "reserved secrets.json refused",
+				files: []api.HomeFile{
+					{Path: ".scion/secrets.json", Mode: 0o600, Content: []byte(canary)},
+				},
+			},
+			{
+				name: "reserved .home-links.json refused",
+				files: []api.HomeFile{
+					{Path: ".scion/.home-links.json", Mode: 0o600, Content: []byte(canary)},
+				},
+			},
+			{
+				name: "reserved settings.yaml refused",
+				files: []api.HomeFile{
+					{Path: ".scion/settings.yaml", Mode: 0o644, Content: []byte(canary)},
+				},
+			},
+			{
+				name: "reserved project-id refused",
+				files: []api.HomeFile{
+					{Path: ".scion/project-id", Mode: 0o644, Content: []byte(canary)},
+				},
+			},
+			{
+				name: "reserved ssh subtree refused",
+				files: []api.HomeFile{
+					{Path: ".scion/ssh/known_hosts-hub", Mode: 0o600, Content: []byte(canary)},
+				},
+			},
+			{
+				name: "reserved vscode subtree refused",
+				files: []api.HomeFile{
+					{Path: ".scion/vscode/state.json", Mode: 0o600, Content: []byte(canary)},
+				},
+			},
 		}
 
 		for _, tc := range cases {
