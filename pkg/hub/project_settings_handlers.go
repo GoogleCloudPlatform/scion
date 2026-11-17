@@ -443,7 +443,11 @@ func (s *Server) authorizeProjectDefaultPassthrough(w http.ResponseWriter, ctx c
 		BadRequest(w, "default GCP identity mode 'passthrough' is only available on a hub with an embedded broker; choose another mode")
 		return false
 	}
-	if d := s.evaluatePassthroughIdentity(ctx, nil, broker, SurfacePassthroughProjectDefault); d != nil {
+	projectID := ""
+	if project != nil {
+		projectID = project.ID
+	}
+	if d := s.evaluatePassthroughIdentity(ctx, nil, broker, projectID, SurfacePassthroughProjectDefault); d != nil {
 		slog.InfoContext(ctx, "project-default GCP passthrough refused at save: caller lacks passthrough authority",
 			"surface", SurfacePassthroughProjectDefault, "project_id", project.ID, "broker", broker.ID)
 		d.write(w)

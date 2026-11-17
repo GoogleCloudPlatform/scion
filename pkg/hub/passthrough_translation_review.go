@@ -268,7 +268,7 @@ func (s *Server) reviewTranslatedAgent(ctx context.Context, a *store.Agent) tran
 	}
 
 	principalCtx := contextWithIdentity(ctx, NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, ""))
-	if d := s.evaluatePassthroughIdentity(principalCtx, nil, broker, SurfacePassthroughTranslationReview); d != nil {
+	if d := s.evaluatePassthroughIdentity(principalCtx, nil, broker, a.ProjectID, SurfacePassthroughTranslationReview); d != nil {
 		en.Reason = d.msg
 		if d.retryable {
 			en.Outcome = translationReviewError

@@ -486,7 +486,7 @@ func (s *Server) projectDefaultPassthroughAllowed(ctx context.Context, r *http.R
 			"broker", runtimeBrokerID, "error", err)
 		return false, ""
 	}
-	if d := s.evaluatePassthroughIdentity(ctx, r, broker, SurfacePassthroughProjectDefault); d != nil {
+	if d := s.evaluatePassthroughIdentity(ctx, r, broker, projectID, SurfacePassthroughProjectDefault); d != nil {
 		slog.InfoContext(ctx, "project-default GCP passthrough denied: caller lacks passthrough authority",
 			"surface", SurfacePassthroughProjectDefault, "project_id", projectID, "agent", agentName,
 			"broker", runtimeBrokerID, "reason", d.msg)

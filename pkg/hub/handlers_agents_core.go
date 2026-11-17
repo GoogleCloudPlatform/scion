@@ -1854,7 +1854,7 @@ func (s *Server) createAgentInProject(
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		if !s.authorizePassthroughIdentity(w, r, broker, SurfacePassthroughCreate) {
+		if !s.authorizePassthroughIdentity(w, r, broker, projectID, SurfacePassthroughCreate) {
 			return
 		}
 	}
@@ -4801,7 +4801,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 				writeErrorFromErr(w, err, "")
 				return
 			}
-			if !s.authorizePassthroughIdentity(w, r, broker, SurfacePassthroughPatch) {
+			if !s.authorizePassthroughIdentity(w, r, broker, agent.ProjectID, SurfacePassthroughPatch) {
 				return
 			}
 			agent.AppliedConfig.GCPIdentity = &store.GCPIdentityConfig{
@@ -6519,7 +6519,11 @@ func (s *Server) translatePassthroughForSandbox(
 			msg: passthroughTranslationModeDeniedMsg}
 	}
 	// 2. The creator must pass the passthrough gate for this broker.
-	if d := s.evaluatePassthroughIdentity(ctx, r, broker, SurfacePassthroughTranslation); d != nil {
+	projectID := agent.ProjectID
+	if projectID == "" && project != nil {
+		projectID = project.ID
+	}
+	if d := s.evaluatePassthroughIdentity(ctx, r, broker, projectID, SurfacePassthroughTranslation); d != nil {
 		return &passthroughTranslationDenied{status: http.StatusForbidden, code: ErrCodeForbidden, msg: d.msg}
 	}
 

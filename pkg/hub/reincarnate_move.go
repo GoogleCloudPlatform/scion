@@ -832,8 +832,12 @@ func (s *Server) moveProbesFor(r *http.Request, project *store.Project, ac *stor
 	}
 	p.HostSARecord = s.hostSARecordMoveProbe(ctx, ac)
 	if ac != nil && ac.GCPIdentity != nil && ac.GCPIdentity.MetadataMode == store.GCPMetadataModePassthrough {
+		projectID := ""
+		if project != nil {
+			projectID = project.ID
+		}
 		p.Passthrough = func(dst *store.RuntimeBroker) string {
-			if d := s.evaluatePassthroughIdentity(r.Context(), r, dst, SurfacePassthroughMove); d != nil {
+			if d := s.evaluatePassthroughIdentity(r.Context(), r, dst, projectID, SurfacePassthroughMove); d != nil {
 				return d.msg
 			}
 			return ""
