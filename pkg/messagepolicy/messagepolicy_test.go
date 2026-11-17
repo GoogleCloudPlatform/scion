@@ -443,6 +443,62 @@ func TestAuthoringValidationAndCoverage(t *testing.T) {
 	require.ErrorAs(t, err, &vErr)
 	assert.Equal(t, messagepolicy.ErrCodeValidation, vErr.Code)
 	assert.Equal(t, "reject_reason", vErr.Field)
+
+	// Every known failure reason in the closed set (including policy_cap_exceeded
+	// and facts_unavailable) is accepted as an on_failed_reasons key.
+	knownReasons := messagepolicy.KnownFailureReasons()
+	assert.Contains(t, knownReasons, messagepolicy.ReasonBudgetExhausted)
+	assert.Contains(t, knownReasons, messagepolicy.ReasonPolicyCapExceeded)
+	assert.Contains(t, knownReasons, messagepolicy.ReasonFactsUnavailable)
+	assert.Contains(t, knownReasons, messagepolicy.ReasonCompileError)
+	assert.Contains(t, knownReasons, messagepolicy.ReasonUninitializedProgram)
+	assert.Contains(t, knownReasons, messagepolicy.ReasonInvalidCompiledProgram)
+	assert.Contains(t, knownReasons, celengine.ReasonMissingInput)
+	assert.Contains(t, knownReasons, celengine.ReasonCostLimit)
+	assert.Contains(t, knownReasons, celengine.ReasonTimeout)
+	assert.Contains(t, knownReasons, celengine.ReasonCanceled)
+	assert.Contains(t, knownReasons, celengine.ReasonRuntime)
+	assert.Contains(t, knownReasons, celengine.ReasonType)
+	assert.Contains(t, knownReasons, ruleengine.ReasonConsumerNotRegistered)
+	assert.Contains(t, knownReasons, ruleengine.ReasonDialectNotAllowed)
+
+	allReasonsSpec := validAuthoringSpec()
+	allReasonsSpec.OnFailedReasons = make(map[string]string, len(knownReasons))
+	for i, r := range knownReasons {
+		assert.True(t, messagepolicy.IsValidFailureReason(r), "reason=%s", r)
+		if i%2 == 0 {
+			allReasonsSpec.OnFailedReasons[r] = messagepolicy.OutcomeAdmit
+		} else {
+			allReasonsSpec.OnFailedReasons[r] = messagepolicy.OutcomeReject
+		}
+	}
+	_, err = ev.ValidateAuthoring(ctx, allReasonsSpec)
+	require.NoError(t, err)
+
+	// Unknown, typo, or blank on_failed_reasons keys are refused with validation_error.
+	for _, badReason := range []string{"", "   ", "cost-limit", "budget_exausted", "unknown_reason"} {
+		assert.False(t, messagepolicy.IsValidFailureReason(badReason), "badReason=%q", badReason)
+		badReasonSpec := validAuthoringSpec()
+		badReasonSpec.OnFailedReasons = map[string]string{
+			badReason: messagepolicy.OutcomeReject,
+		}
+		_, err = ev.ValidateAuthoring(ctx, badReasonSpec)
+		vErr = nil
+		require.ErrorAs(t, err, &vErr, "badReason=%q", badReason)
+		assert.Equal(t, messagepolicy.ErrCodeValidation, vErr.Code)
+		assert.Equal(t, "on_failed_reasons", vErr.Field)
+	}
+
+	// Valid failure reason with invalid outcome is refused with validation_error.
+	badOutcomeSpec := validAuthoringSpec()
+	badOutcomeSpec.OnFailedReasons = map[string]string{
+		celengine.ReasonTimeout: "ignore",
+	}
+	_, err = ev.ValidateAuthoring(ctx, badOutcomeSpec)
+	vErr = nil
+	require.ErrorAs(t, err, &vErr)
+	assert.Equal(t, messagepolicy.ErrCodeValidation, vErr.Code)
+	assert.Equal(t, "on_failed_reasons", vErr.Field)
 }
 
 func TestTemplateRendering_ContentFree(t *testing.T) {

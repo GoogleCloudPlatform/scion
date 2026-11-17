@@ -71,8 +71,16 @@ const (
 	ClassFailed    = "failed"
 )
 
-// ReasonBudgetExhausted identifies per-send aggregate CEL budget exhaustion.
-const ReasonBudgetExhausted = "budget_exhausted"
+// Failure reason codes produced or consumed by message_policy (consumer design §§5.3, 5.5, 5.8).
+const (
+	ReasonBudgetExhausted        = "budget_exhausted"
+	ReasonPolicyCapExceeded      = "policy_cap_exceeded"
+	ReasonFactsUnavailable       = "facts_unavailable"
+	ReasonCompileError           = "compile_error"
+	ReasonUninitializedProgram   = "uninitialized_program"
+	ReasonInvalidCompiledProgram = "invalid_compiled_program"
+	ReasonUnsupportedDialect     = "unsupported_dialect"
+)
 
 // Outbound message hook surfaces (consumer design §§5.2, 5.3).
 // Only SurfaceAgentToUser and SurfaceAgentToConversation are enforced in M1 (H2).

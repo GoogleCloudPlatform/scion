@@ -117,7 +117,7 @@ func ClassifyError(err error) Classification {
 	if errors.As(err, &unsupErr) {
 		reason := unsupErr.Reason
 		if reason == "" {
-			reason = "unsupported_dialect"
+			reason = ReasonUnsupportedDialect
 		}
 		return Classification{
 			Class:          ClassFailed,
@@ -130,7 +130,7 @@ func ClassifyError(err error) Classification {
 	if errors.As(err, &compErr) {
 		return Classification{
 			Class:  ClassFailed,
-			Reason: "compile_error",
+			Reason: ReasonCompileError,
 		}
 	}
 

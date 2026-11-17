@@ -18,6 +18,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/celengine"
@@ -120,6 +122,52 @@ func IsCanonicalSlug(s string) bool {
 		return false
 	}
 	return !prevHyphen
+}
+
+var knownFailureReasons = []string{
+	celengine.ReasonCanceled,
+	celengine.ReasonCostLimit,
+	celengine.ReasonMissingInput,
+	celengine.ReasonRuntime,
+	celengine.ReasonTimeout,
+	celengine.ReasonType,
+	ReasonBudgetExhausted,
+	ReasonCompileError,
+	ReasonFactsUnavailable,
+	ReasonInvalidCompiledProgram,
+	ReasonPolicyCapExceeded,
+	ReasonUninitializedProgram,
+	ReasonUnsupportedDialect,
+	ruleengine.ReasonConsumerNotRegistered,
+	ruleengine.ReasonDialectNotAllowed,
+	ruleengine.ReasonEmptyConsumer,
+	ruleengine.ReasonIONotAllowed,
+	ruleengine.ReasonUnknownDialect,
+}
+
+var knownFailureReasonSet = func() map[string]struct{} {
+	m := make(map[string]struct{}, len(knownFailureReasons))
+	for _, r := range knownFailureReasons {
+		m[r] = struct{}{}
+	}
+	return m
+}()
+
+// KnownFailureReasons returns a sorted copy of the closed failure-reason set
+// accepted by on_failed_reasons in M1 (CEL evaluation, ruleengine program and
+// consumer admission, and message_policy consumer failure reasons; consumer
+// design §5.3).
+func KnownFailureReasons() []string {
+	out := slices.Clone(knownFailureReasons)
+	slices.Sort(out)
+	return out
+}
+
+// IsValidFailureReason reports whether reason belongs to the closed M1 failure
+// reason set accepted as an on_failed_reasons key.
+func IsValidFailureReason(reason string) bool {
+	_, ok := knownFailureReasonSet[reason]
+	return ok
 }
 
 // SenderSelector mirrors policy sender scope for authoring validation.
@@ -243,8 +291,16 @@ func (e *Evaluator) ValidateAuthoring(ctx context.Context, spec AuthoringSpec) (
 			Message: fmt.Sprintf("on_uncertain must be %q or %q when specified", OutcomeAdmit, OutcomeReject),
 		}
 	}
-	for reason, outcome := range spec.OnFailedReasons {
-		if strings.TrimSpace(reason) == "" || (outcome != OutcomeAdmit && outcome != OutcomeReject) {
+	for _, reason := range slices.Sorted(maps.Keys(spec.OnFailedReasons)) {
+		outcome := spec.OnFailedReasons[reason]
+		if !IsValidFailureReason(reason) {
+			return "", &ValidationError{
+				Code:    ErrCodeValidation,
+				Field:   "on_failed_reasons",
+				Message: fmt.Sprintf("unknown on_failed_reasons key %q", reason),
+			}
+		}
+		if outcome != OutcomeAdmit && outcome != OutcomeReject {
 			return "", &ValidationError{
 				Code:    ErrCodeValidation,
 				Field:   "on_failed_reasons",
