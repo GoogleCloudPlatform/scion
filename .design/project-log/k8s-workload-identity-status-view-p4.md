@@ -12,18 +12,25 @@
 - `pkg/hub/gcp_sa_status_wi.go` & `pkg/hub/gcp_sa_status.go`: behind
   `hub.k8s_workload_identity_setup`, `buildGCPServiceAccountStatus` reads
   `roles/iam.workloadIdentityUser` on Hub-minted GSAs (`sa.Managed`), cached for 60 s per
-  email (invalidated on `addWorkloadIdentityMembers` writes; failed reads are not cached,
-  and list views never read IAM policy). Reuses `workloadIdentityMintPlanFor` across
-  legacy and flat provider brokers to report `bound` or `not_bound` per target (with a
-  single-quoted `manualStep` when not bound) and per profile row in `mappings` (checking
-  the profile's mapped/discovered KSA when mapped, else the conventional `<account ID>`).
-  Bring-your-own GSAs stay `unknown` with reason `"not minted by this hub"`. With the
-  experiment off, output and behaviour match `main`.
+  email (invalidated after any `addWorkloadIdentityMembers` write attempt, on mint entry,
+  and on GSA deletion via `invalidateActAsCache`; failed reads are not cached, and list
+  views never read IAM policy). Reuses `workloadIdentityMintPlanFor` across legacy and flat
+  provider brokers to report `bound` or `not_bound` per target (with a single-quoted
+  `manualStep` when not bound, and distinct missing-pool reasons `no_workload_identity_pool`,
+  `broker_too_old`, and `flat_broker_pool_unreported`) and per profile row in `mappings`
+  (checking the profile's mapped/discovered KSA when mapped, else the conventional
+  `<account ID>`). When any target is `not_bound`, `nextStep` returns code `not_bound`
+  pointing at the manual `gcloud` step; when any Kubernetes target reports no pool while
+  reported pool targets are bound, summary `state` stays `unknown`; and IAM read errors or
+  stale stored targets never report `"Nothing missing"` or `"is not checked"` in
+  `nextStep.message`. Bring-your-own GSAs stay `unknown` with reason
+  `"not minted by this hub"`. With the experiment off, output and behaviour match `main`.
 - Stored-target staleness (P1 review 3 FYI-4): targets come from stored broker heartbeat
   reports; when a contributing broker does not advertise `wiTargetsV1` (for example after
   a downgrade) or its `LastHeartbeat` is stale, the target and profile binding set
   `stale: true` with `staleReason` (`broker_no_longer_reports` or
-  `broker_heartbeat_stale`), omitting post-downgrade `LastHeartbeat` timestamps.
+  `broker_heartbeat_stale`), omitting post-downgrade `LastHeartbeat` timestamps and
+  qualifying the summary `reason` and `nextStep.message`.
 - CLI (`cmd/project_service_accounts.go`) and `pkg/hubclient`: decode and print per-target
   binding states, heartbeat age / staleness notes, and `manualStep` (`wiOneLine`-sanitized).
 - Web (`web/src/components/shared/gcp-service-account-status.ts`,

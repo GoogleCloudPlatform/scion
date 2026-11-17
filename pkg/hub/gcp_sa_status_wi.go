@@ -59,6 +59,11 @@ const (
 	// Staleness reasons for stored Workload Identity targets (FYI-4).
 	GCPSABindingTargetStaleBrokerNoLongerReports = "broker_no_longer_reports"
 	GCPSABindingTargetStaleBrokerHeartbeat       = "broker_heartbeat_stale"
+
+	// Missing-pool reasons for Kubernetes targets without a reported pool (O3).
+	GCPSABindingReasonNoPool             = api.WorkloadIdentityReasonNoPool
+	GCPSABindingReasonBrokerTooOld       = "broker_too_old"
+	GCPSABindingReasonFlatPoolUnreported = "flat_broker_pool_unreported"
 )
 
 // gcpSAWIBindingNow is the clock for the Workload Identity binding cache and
@@ -285,6 +290,7 @@ func (s *Server) evaluateWorkloadIdentityStatus(
 	// Sanitize stored targets as defence in depth and index freshness per
 	// (pool, namespace) and per (brokerID, profile).
 	sanitized := make([]*store.RuntimeBroker, 0, len(brokers))
+	brokerByID := make(map[string]*store.RuntimeBroker, len(brokers))
 	targetMeta := map[string]*GCPServiceAccountBindingTarget{}
 	profileTargets := map[string]storedProfileWITarget{}
 
@@ -292,6 +298,7 @@ func (s *Server) evaluateWorkloadIdentityStatus(
 		if b == nil {
 			continue
 		}
+		brokerByID[b.ID] = b
 		hb, stale, staleReason := brokerWITargetFreshness(b, now)
 		cp := *b
 		if len(b.WorkloadIdentityTargets) > 0 {
@@ -341,7 +348,7 @@ func (s *Server) evaluateWorkloadIdentityStatus(
 		for i := range mappings {
 			mappings[i].WorkloadIdentityBinding = &GCPServiceAccountProfileBinding{
 				State:  GCPSABindingUnknown,
-				Reason: api.WorkloadIdentityReasonNoPool,
+				Reason: missingProfileBindingReason(brokerByID[mappings[i].BrokerID]),
 			}
 		}
 		return GCPServiceAccountBinding{
@@ -354,7 +361,7 @@ func (s *Server) evaluateWorkloadIdentityStatus(
 		for i := range mappings {
 			mappings[i].WorkloadIdentityBinding = &GCPServiceAccountProfileBinding{
 				State:  GCPSABindingUnknown,
-				Reason: api.WorkloadIdentityReasonNoPool,
+				Reason: missingProfileBindingReason(brokerByID[mappings[i].BrokerID]),
 			}
 		}
 		targets := make([]GCPServiceAccountBindingTarget, 0, len(plan.missing))
@@ -363,7 +370,7 @@ func (s *Server) evaluateWorkloadIdentityStatus(
 				KSA:      ksa,
 				Profiles: m.profiles,
 				State:    GCPSABindingUnknown,
-				Reason:   api.WorkloadIdentityReasonNoPool,
+				Reason:   wiMissingStatusReason(m.why),
 			})
 		}
 		return GCPServiceAccountBinding{
@@ -375,7 +382,7 @@ func (s *Server) evaluateWorkloadIdentityStatus(
 
 	if s.gcpIAMAdmin == nil {
 		const reason = "IAM policy client not configured"
-		setProfileBindingsUnknown(mappings, profileTargets, reason)
+		setProfileBindingsUnknown(mappings, profileTargets, brokerByID, reason)
 		return GCPServiceAccountBinding{
 			State:  GCPSABindingUnknown,
 			Reason: reason,
@@ -389,7 +396,7 @@ func (s *Server) evaluateWorkloadIdentityStatus(
 		if workloadIdentityErrorReason(err) == api.WorkloadIdentityReasonPermissionDenied {
 			reason = "permission denied reading IAM policy"
 		}
-		setProfileBindingsUnknown(mappings, profileTargets, reason)
+		setProfileBindingsUnknown(mappings, profileTargets, brokerByID, reason)
 		return GCPServiceAccountBinding{
 			State:  GCPSABindingUnknown,
 			Reason: reason,
@@ -398,6 +405,7 @@ func (s *Server) evaluateWorkloadIdentityStatus(
 
 	targets := make([]GCPServiceAccountBindingTarget, 0, len(plan.targets)+len(plan.missing))
 	boundCount := 0
+	staleCount := 0
 	for _, t := range plan.targets {
 		member := workloadIdentityMember(t.pool, t.namespace, ksa)
 		entry := GCPServiceAccountBindingTarget{
@@ -419,6 +427,9 @@ func (s *Server) evaluateWorkloadIdentityStatus(
 			entry.Stale = meta.Stale
 			entry.StaleReason = meta.StaleReason
 		}
+		if entry.Stale {
+			staleCount++
+		}
 		targets = append(targets, entry)
 	}
 	for _, m := range plan.missing {
@@ -426,7 +437,7 @@ func (s *Server) evaluateWorkloadIdentityStatus(
 			KSA:      ksa,
 			Profiles: m.profiles,
 			State:    GCPSABindingUnknown,
-			Reason:   api.WorkloadIdentityReasonNoPool,
+			Reason:   wiMissingStatusReason(m.why),
 		})
 	}
 
@@ -435,7 +446,7 @@ func (s *Server) evaluateWorkloadIdentityStatus(
 		if !ok {
 			mappings[i].WorkloadIdentityBinding = &GCPServiceAccountProfileBinding{
 				State:  GCPSABindingUnknown,
-				Reason: api.WorkloadIdentityReasonNoPool,
+				Reason: missingProfileBindingReason(brokerByID[mappings[i].BrokerID]),
 			}
 			continue
 		}
@@ -466,16 +477,33 @@ func (s *Server) evaluateWorkloadIdentityStatus(
 	missingProfiles := countMissingTargetProfiles(plan.missing)
 	state := GCPSABindingNotBound
 	var reasons []string
-	if boundCount == len(plan.targets) {
+	switch {
+	case boundCount < len(plan.targets):
+		if boundCount > 0 {
+			reasons = append(reasons, fmt.Sprintf("%d of %d targets bound", boundCount, len(plan.targets)))
+		}
+	case missingProfiles > 0:
+		state = GCPSABindingUnknown
+		if boundCount == 1 {
+			reasons = append(reasons, "1 reported target bound")
+		} else {
+			reasons = append(reasons, fmt.Sprintf("%d reported targets bound", boundCount))
+		}
+	default:
 		state = GCPSABindingBound
-	} else if boundCount > 0 {
-		reasons = append(reasons, fmt.Sprintf("%d of %d targets bound", boundCount, len(plan.targets)))
 	}
 	if missingProfiles > 0 {
 		if missingProfiles == 1 {
 			reasons = append(reasons, "1 Kubernetes target reports no pool")
 		} else {
 			reasons = append(reasons, fmt.Sprintf("%d Kubernetes targets report no pool", missingProfiles))
+		}
+	}
+	if staleCount > 0 {
+		if staleCount == 1 {
+			reasons = append(reasons, "1 target from stale broker report")
+		} else {
+			reasons = append(reasons, fmt.Sprintf("%d targets from stale broker reports", staleCount))
 		}
 	}
 
@@ -486,13 +514,34 @@ func (s *Server) evaluateWorkloadIdentityStatus(
 	}
 }
 
-func setProfileBindingsUnknown(mappings []GCPServiceAccountProfileMapping, profileTargets map[string]storedProfileWITarget, reason string) {
+func wiMissingStatusReason(why workloadIdentityMissingReason) string {
+	switch why {
+	case wiMissingTooOld:
+		return GCPSABindingReasonBrokerTooOld
+	case wiMissingFlat:
+		return GCPSABindingReasonFlatPoolUnreported
+	default:
+		return GCPSABindingReasonNoPool
+	}
+}
+
+func missingProfileBindingReason(b *store.RuntimeBroker) string {
+	if b != nil && b.IsFlat() {
+		return GCPSABindingReasonFlatPoolUnreported
+	}
+	if b == nil || b.Capabilities == nil || !b.Capabilities.WITargetsV1 {
+		return GCPSABindingReasonBrokerTooOld
+	}
+	return GCPSABindingReasonNoPool
+}
+
+func setProfileBindingsUnknown(mappings []GCPServiceAccountProfileMapping, profileTargets map[string]storedProfileWITarget, brokerByID map[string]*store.RuntimeBroker, reason string) {
 	for i := range mappings {
 		pt, ok := profileTargets[mappings[i].BrokerID+"\x00"+mappings[i].Profile]
 		if !ok {
 			mappings[i].WorkloadIdentityBinding = &GCPServiceAccountProfileBinding{
 				State:  GCPSABindingUnknown,
-				Reason: api.WorkloadIdentityReasonNoPool,
+				Reason: missingProfileBindingReason(brokerByID[mappings[i].BrokerID]),
 			}
 			continue
 		}

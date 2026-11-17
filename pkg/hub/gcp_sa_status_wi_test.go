@@ -37,6 +37,7 @@ type wiReadStubAdmin struct {
 	readRoles  []string
 	membersFn  func(call int, saEmail, role string) ([]string, error)
 	writeCalls int
+	writeErr   error
 }
 
 func (a *wiReadStubAdmin) CreateServiceAccount(context.Context, string, string, string, string) (string, string, error) {
@@ -53,7 +54,7 @@ func (a *wiReadStubAdmin) SetIAMPolicy(context.Context, string, string, string) 
 
 func (a *wiReadStubAdmin) AddRoleMembers(context.Context, string, string, []string) error {
 	a.writeCalls++
-	return nil
+	return a.writeErr
 }
 
 func (a *wiReadStubAdmin) RoleMembers(_ context.Context, saEmail, role string) ([]string, error) {
@@ -122,6 +123,30 @@ func TestWIRoleMembersCache_TTLKeyAndInvalidation(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, got["serviceAccount:p.svc.id.goog[agents/after-grant]"])
 	assert.Len(t, admin.readCalls, 4)
+
+	// O4: A failed or partially applied AddRoleMembers attempt also invalidates
+	// the cached entry, so a partial write followed by an error cannot serve a
+	// stale member set for 60s.
+	admin.writeErr = &googleapi.Error{Code: http.StatusInternalServerError, Message: "partial failure"}
+	current = []string{"serviceAccount:p.svc.id.goog[agents/after-partial-failure]"}
+	require.Error(t, s.addWorkloadIdentityMembers(ctx, wiTestGSA, []string{"serviceAccount:p.svc.id.goog[agents/after-partial-failure]"}))
+	got, err = s.cachedWorkloadIdentityMembers(ctx, wiTestGSA)
+	require.NoError(t, err)
+	assert.True(t, got["serviceAccount:p.svc.id.goog[agents/after-partial-failure]"])
+	assert.Len(t, admin.readCalls, 5)
+
+	// O4: SA deletion (via invalidateActAsCache) invalidates only that email's
+	// cached Workload Identity role-members entry; scion-other (cached at t+59s,
+	// still within its 60s TTL at t+61s) stays cached.
+	current = []string{"serviceAccount:p.svc.id.goog[agents/reminted]"}
+	s.invalidateActAsCache(wiTestGSA)
+	_, err = s.cachedWorkloadIdentityMembers(ctx, "scion-other@hub-proj.iam.gserviceaccount.com")
+	require.NoError(t, err)
+	assert.Len(t, admin.readCalls, 5, "other SA remains cached")
+	got, err = s.cachedWorkloadIdentityMembers(ctx, wiTestGSA)
+	require.NoError(t, err)
+	assert.True(t, got["serviceAccount:p.svc.id.goog[agents/reminted]"])
+	assert.Len(t, admin.readCalls, 6, "deleted SA's cache entry was invalidated")
 }
 
 func TestWIRoleMembersCache_ErrorNotCachedAndExpiredNotServed(t *testing.T) {
@@ -204,6 +229,8 @@ func TestGCPServiceAccountWIBinding_TargetStaleness(t *testing.T) {
 
 	binding := s.evaluateWorkloadIdentityStatus(context.Background(), sa, brokers, mappings, base)
 	assert.Equal(t, GCPSABindingNotBound, binding.State)
+	assert.Contains(t, binding.Reason, "3 of 4 targets bound")
+	assert.Contains(t, binding.Reason, "3 targets from stale broker reports")
 
 	byPool := map[string]GCPServiceAccountBindingTarget{}
 	for _, tgt := range binding.Targets {
@@ -248,4 +275,94 @@ func TestGCPServiceAccountWIBinding_TargetStaleness(t *testing.T) {
 	require.NotNil(t, byBrokerProfile["downgraded/shared"])
 	assert.True(t, byBrokerProfile["downgraded/shared"].Stale)
 	assert.Equal(t, GCPSABindingTargetStaleBrokerNoLongerReports, byBrokerProfile["downgraded/shared"].StaleReason)
+
+	// O1: When every target is bound but comes from a stale broker report, the
+	// summary carries the stale qualifier in Reason and NextStep does not claim
+	// "Nothing missing".
+	staleOnlyBrokers := []*store.RuntimeBroker{downgraded}
+	staleOnlyMappings := []GCPServiceAccountProfileMapping{{BrokerID: downgraded.ID, BrokerName: downgraded.Name, Profile: "gke-old", State: GCPSAMappingMapped}}
+	staleOnlyBinding := s.evaluateWorkloadIdentityStatus(context.Background(), sa, staleOnlyBrokers, staleOnlyMappings, base)
+	assert.Equal(t, GCPSABindingBound, staleOnlyBinding.State)
+	assert.Equal(t, "2 targets from stale broker reports", staleOnlyBinding.Reason)
+	step := gcpSANextStepForBinding(true, staleOnlyMappings, nil, staleOnlyBinding)
+	assert.Equal(t, GCPSANextStepNone, step.Code)
+	assert.Contains(t, step.Message, "stale broker reports")
+	assert.NotContains(t, step.Message, "Nothing missing")
+}
+
+// O2 & O3: Missing-pool targets preserve P1's distinction (no_workload_identity_pool,
+// broker_too_old, flat_broker_pool_unreported), and when some Kubernetes targets
+// report no pool while reported pool targets are bound, overall State is unknown
+// and NextStep does not claim "Nothing missing".
+func TestGCPServiceAccountWIBinding_MissingReasonsAndPartialUnknown(t *testing.T) {
+	base := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	withWIBindingClock(t, base)
+
+	current := wiLegacyBroker("a", true, []store.WorkloadIdentityTarget{
+		{Profile: "gke", Pool: "pool-one.svc.id.goog", Namespace: "agents"},
+	}, wiK8sProfile("gke"), wiK8sProfile("gke-nopool"))
+	current.LastHeartbeat = base.Add(-time.Minute)
+
+	tooOld := wiLegacyBroker("old", false, nil, wiK8sProfile("k8s"))
+	tooOld.LastHeartbeat = base.Add(-time.Minute)
+
+	flatNoPool := wiFlatBroker("flat-nopool", "kubernetes", nil)
+	flatNoPool.LastHeartbeat = base.Add(-time.Minute)
+
+	admin := &wiReadStubAdmin{
+		membersFn: func(int, string, string) ([]string, error) {
+			return []string{"serviceAccount:pool-one.svc.id.goog[agents/scion-foo]"}, nil
+		},
+	}
+	s := &Server{gcpIAMAdmin: admin}
+	sa := &store.GCPServiceAccount{ID: "sa-1", Email: wiTestGSA, Managed: true}
+
+	brokers := []*store.RuntimeBroker{current, tooOld, flatNoPool}
+	mappings := []GCPServiceAccountProfileMapping{
+		{BrokerID: current.ID, BrokerName: current.Name, Profile: "gke", State: GCPSAMappingMapped},
+		{BrokerID: current.ID, BrokerName: current.Name, Profile: "gke-nopool", State: GCPSAMappingMapped},
+		{BrokerID: tooOld.ID, BrokerName: tooOld.Name, Profile: "k8s", State: GCPSAMappingMapped},
+	}
+	binding := s.evaluateWorkloadIdentityStatus(context.Background(), sa, brokers, mappings, base)
+	assert.Equal(t, GCPSABindingUnknown, binding.State, "O2: cannot be overall bound while Kubernetes targets report no pool")
+	assert.Contains(t, binding.Reason, "1 reported target bound")
+	assert.Contains(t, binding.Reason, "3 Kubernetes targets report no pool")
+	require.Len(t, binding.Targets, 4)
+	assert.Equal(t, GCPSABindingBound, binding.Targets[0].State)
+	assert.Equal(t, "no_workload_identity_pool", binding.Targets[1].Reason)
+	assert.Equal(t, []string{"a/gke-nopool"}, binding.Targets[1].Profiles)
+	assert.Equal(t, "flat_broker_pool_unreported", binding.Targets[2].Reason)
+	assert.Equal(t, []string{"flat-nopool"}, binding.Targets[2].Profiles)
+	assert.Equal(t, "broker_too_old", binding.Targets[3].Reason)
+	assert.Equal(t, []string{"old/k8s"}, binding.Targets[3].Profiles)
+
+	// Per-profile rows also distinguish no_workload_identity_pool from broker_too_old.
+	assert.Equal(t, GCPSABindingBound, mappings[0].WorkloadIdentityBinding.State)
+	assert.Equal(t, "no_workload_identity_pool", mappings[1].WorkloadIdentityBinding.Reason)
+	assert.Equal(t, "broker_too_old", mappings[2].WorkloadIdentityBinding.Reason)
+
+	step := gcpSANextStepForBinding(true, mappings, nil, binding)
+	assert.Equal(t, GCPSANextStepNone, step.Code)
+	assert.Contains(t, step.Message, "could not be checked")
+	assert.NotContains(t, step.Message, "Nothing missing")
+
+	// Also when NO broker reported a pool (len(plan.targets) == 0), the missing
+	// target reasons still distinguish all three causes.
+	noPoolBrokers := []*store.RuntimeBroker{
+		wiLegacyBroker("a", true, nil, wiK8sProfile("gke-nopool")),
+		tooOld,
+		flatNoPool,
+	}
+	noPoolMappings := []GCPServiceAccountProfileMapping{
+		{BrokerID: "a", BrokerName: "a", Profile: "gke-nopool", State: GCPSAMappingMapped},
+		{BrokerID: tooOld.ID, BrokerName: tooOld.Name, Profile: "k8s", State: GCPSAMappingMapped},
+	}
+	noPoolBinding := s.evaluateWorkloadIdentityStatus(context.Background(), sa, noPoolBrokers, noPoolMappings, base)
+	assert.Equal(t, GCPSABindingUnknown, noPoolBinding.State)
+	require.Len(t, noPoolBinding.Targets, 3)
+	assert.Equal(t, "no_workload_identity_pool", noPoolBinding.Targets[0].Reason)
+	assert.Equal(t, "flat_broker_pool_unreported", noPoolBinding.Targets[1].Reason)
+	assert.Equal(t, "broker_too_old", noPoolBinding.Targets[2].Reason)
+	assert.Equal(t, "no_workload_identity_pool", noPoolMappings[0].WorkloadIdentityBinding.Reason)
+	assert.Equal(t, "broker_too_old", noPoolMappings[1].WorkloadIdentityBinding.Reason)
 }

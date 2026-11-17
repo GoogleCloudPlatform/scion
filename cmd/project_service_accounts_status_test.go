@@ -181,16 +181,18 @@ func TestPrintSAStatus_WorkloadIdentityTargetsAndStaleness(t *testing.T) {
   "mappings":[],
   "workloadIdentityBinding":{
     "state":"not_bound",
-    "reason":"1 of 2 targets bound; 1 Kubernetes target reports no pool",
+    "reason":"1 of 2 targets bound; 3 Kubernetes targets report no pool; 1 target from stale broker report",
     "targets":[
       {"pool":"p1.svc.id.goog","namespace":"agents","ksa":"scion-worker","member":"serviceAccount:p1.svc.id.goog[agents/scion-worker]","profiles":["a/gke"],"state":"bound","lastHeartbeat":"2026-10-10T11:58:00Z"},
       {"pool":"p2.svc.id.goog","namespace":"team","ksa":"scion-worker","member":"serviceAccount:p2.svc.id.goog[team/scion-worker]","profiles":["old/gke\nfake"],"state":"not_bound","stale":true,"staleReason":"broker_no_longer_reports","manualStep":"gcloud iam service-accounts add-iam-policy-binding 'scion-worker@p.iam.gserviceaccount.com' --role roles/iam.workloadIdentityUser --member 'serviceAccount:p2.svc.id.goog[team/scion-worker]'"},
-      {"ksa":"scion-worker","profiles":["nopool/k8s"],"state":"unknown","reason":"no_workload_identity_pool"}
+      {"ksa":"scion-worker","profiles":["nopool/k8s"],"state":"unknown","reason":"no_workload_identity_pool"},
+      {"ksa":"scion-worker","profiles":["legacy/k8s"],"state":"unknown","reason":"broker_too_old"},
+      {"ksa":"scion-worker","profiles":["flat-k8s"],"state":"unknown","reason":"flat_broker_pool_unreported"}
     ]
   },
   "defaultFor":[],
   "agents":{"count":0,"names":[]},
-  "nextStep":{"code":"none","message":"Verification and mapping have nothing missing; one or more Workload Identity targets are not bound."}
+  "nextStep":{"code":"not_bound","message":"Workload Identity role roles/iam.workloadIdentityUser is not granted on this account for serviceAccount:p2.svc.id.goog[team/scion-worker] (old/gke fake)."}
 }`
 	var st hubclient.GCPServiceAccountStatus
 	require.NoError(t, json.Unmarshal([]byte(mintedBody), &st))
@@ -199,12 +201,14 @@ func TestPrintSAStatus_WorkloadIdentityTargetsAndStaleness(t *testing.T) {
 	out := buf.String()
 
 	for _, want := range []string{
-		"Workload Identity binding:\n  not bound (1 of 2 targets bound; 1 Kubernetes target reports no pool)\n",
+		"Workload Identity binding:\n  not bound (1 of 2 targets bound; 3 Kubernetes targets report no pool; 1 target from stale broker report)\n",
 		"  stored targets (from broker heartbeats):\n",
 		"    bound      serviceAccount:p1.svc.id.goog[agents/scion-worker] (a/gke); broker heartbeat 2m ago\n",
 		"    not bound  serviceAccount:p2.svc.id.goog[team/scion-worker] (old/gke fake); stored target: the broker no longer reports Workload Identity targets\n",
 		"               to grant it by hand: gcloud iam service-accounts add-iam-policy-binding 'scion-worker@p.iam.gserviceaccount.com' --role roles/iam.workloadIdentityUser --member 'serviceAccount:p2.svc.id.goog[team/scion-worker]'\n",
 		"    unknown    nopool/k8s; no Workload Identity pool reported\n",
+		"    unknown    legacy/k8s; broker too old to report Workload Identity targets\n",
+		"    unknown    flat-k8s; flat broker does not report a Workload Identity pool yet\n",
 	} {
 		assert.Contains(t, out, want)
 	}

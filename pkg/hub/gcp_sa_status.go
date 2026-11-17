@@ -71,10 +71,13 @@ const (
 	GCPSADefaultHub     = "hub"
 )
 
-// Next-step codes: the first missing link.
+// Next-step codes: the first missing link. GCPSANextStepNotBound is returned
+// only when hub.k8s_workload_identity_setup is enabled and at least one
+// Workload Identity target is not bound.
 const (
 	GCPSANextStepNotVerified = "not_verified"
 	GCPSANextStepNotMapped   = "not_mapped"
+	GCPSANextStepNotBound    = "not_bound"
 	GCPSANextStepNone        = "none"
 )
 
@@ -271,7 +274,7 @@ func (s *Server) buildGCPServiceAccountStatus(ctx context.Context, project *stor
 		DefaultFor:              s.gcpSADefaultsFor(project, sa.ID),
 		Agents:                  GCPServiceAccountAgents{Names: []string{}},
 	}
-	st.NextStep = gcpSANextStepForBinding(st.Verification.Verified, st.Mappings, st.DefaultFor, st.WorkloadIdentityBinding.State)
+	st.NextStep = gcpSANextStepForBinding(st.Verification.Verified, st.Mappings, st.DefaultFor, st.WorkloadIdentityBinding)
 	return st
 }
 
@@ -391,12 +394,16 @@ func (s *Server) gcpSADefaultsFor(project *store.Project, saID string) []GCPServ
 // unknown, is not a known missing link, except an ambiguous mapping on a
 // current, complete report (the broker refuses it, and an operator can fix
 // it).
-// The Workload Identity binding is not checked, so it never produces a step.
+// The Workload Identity binding is not checked when gcpSANextStep is called
+// directly (experiment-off behavior), so it never produces a step there.
 func gcpSANextStep(verified bool, mappings []GCPServiceAccountProfileMapping, defaults []GCPServiceAccountDefault) GCPServiceAccountNextStep {
-	return gcpSANextStepForBinding(verified, mappings, defaults, GCPSABindingUnknown)
+	return gcpSANextStepForBinding(verified, mappings, defaults, GCPServiceAccountBinding{
+		State:  GCPSABindingUnknown,
+		Reason: "not checked",
+	})
 }
 
-func gcpSANextStepForBinding(verified bool, mappings []GCPServiceAccountProfileMapping, defaults []GCPServiceAccountDefault, bindingState string) GCPServiceAccountNextStep {
+func gcpSANextStepForBinding(verified bool, mappings []GCPServiceAccountProfileMapping, defaults []GCPServiceAccountDefault, binding GCPServiceAccountBinding) GCPServiceAccountNextStep {
 	if !verified {
 		return GCPServiceAccountNextStep{
 			Code: GCPSANextStepNotVerified,
@@ -432,16 +439,82 @@ func gcpSANextStepForBinding(verified bool, mappings []GCPServiceAccountProfileM
 	if !anyMapped && firstUnmapped != nil {
 		return gcpSANotMappedStep(firstUnmapped)
 	}
-	msg := "Nothing missing that the hub can check. The Workload Identity binding is not checked."
-	switch bindingState {
-	case GCPSABindingBound:
-		msg = "Nothing missing that the hub can check."
+	switch binding.State {
 	case GCPSABindingNotBound:
-		msg = "Verification and mapping have nothing missing; one or more Workload Identity targets are not bound."
+		return gcpSANotBoundStep(binding)
+	case GCPSABindingBound:
+		for _, t := range binding.Targets {
+			if t.Stale {
+				return GCPServiceAccountNextStep{
+					Code: GCPSANextStepNone,
+					Message: "Verification and mapping have nothing missing; stored Workload Identity targets are bound, " +
+						"but one or more targets come from stale broker reports.",
+				}
+			}
+		}
+		return GCPServiceAccountNextStep{
+			Code:    GCPSANextStepNone,
+			Message: "Nothing missing that the hub can check.",
+		}
+	default:
+		return GCPServiceAccountNextStep{
+			Code:    GCPSANextStepNone,
+			Message: gcpSAUnknownBindingNextStepMessage(binding),
+		}
+	}
+}
+
+func gcpSANotBoundStep(binding GCPServiceAccountBinding) GCPServiceAccountNextStep {
+	var first *GCPServiceAccountBindingTarget
+	notBoundCount := 0
+	for i := range binding.Targets {
+		if binding.Targets[i].State == GCPSABindingNotBound {
+			notBoundCount++
+			if first == nil {
+				first = &binding.Targets[i]
+			}
+		}
+	}
+	if first == nil || first.ManualStep == "" {
+		return GCPServiceAccountNextStep{
+			Code: GCPSANextStepNotBound,
+			Message: fmt.Sprintf("Workload Identity role %s is not granted on this account for one or more targets; "+
+				"run each unbound target's manualStep gcloud command.", roleWorkloadIdentityUser),
+		}
+	}
+	where := strings.Join(first.Profiles, ", ")
+	target := first.Member
+	if where != "" && target != "" {
+		target = fmt.Sprintf("%s (%s)", target, where)
+	} else if target == "" {
+		target = where
+	}
+	msg := fmt.Sprintf("Workload Identity role %s is not granted on this account for %s. "+
+		"Run the per-target manualStep gcloud command to grant it: %s",
+		roleWorkloadIdentityUser, target, first.ManualStep)
+	if notBoundCount > 1 {
+		msg = fmt.Sprintf("Workload Identity role %s is not granted on this account for %d targets (first: %s). "+
+			"Run each unbound target's manualStep gcloud command, starting with: %s",
+			roleWorkloadIdentityUser, notBoundCount, target, first.ManualStep)
 	}
 	return GCPServiceAccountNextStep{
-		Code:    GCPSANextStepNone,
+		Code:    GCPSANextStepNotBound,
 		Message: msg,
+	}
+}
+
+func gcpSAUnknownBindingNextStepMessage(binding GCPServiceAccountBinding) string {
+	switch binding.Reason {
+	case "", "not checked":
+		return "Nothing missing that the hub can check. The Workload Identity binding is not checked."
+	case GCPSABindingReasonNotMinted:
+		return "Nothing missing that the hub can check. The Workload Identity binding is not checked (not minted by this hub)."
+	case "no Kubernetes targets in this project":
+		return "Nothing missing that the hub can check."
+	case "IAM policy client not configured", "permission denied reading IAM policy", "IAM policy read failed":
+		return fmt.Sprintf("Verification and mapping have nothing missing; the Workload Identity binding could not be checked (%s).", binding.Reason)
+	default:
+		return fmt.Sprintf("Verification and mapping have nothing missing; the Workload Identity binding could not be checked for every Kubernetes target (%s).", binding.Reason)
 	}
 }
 

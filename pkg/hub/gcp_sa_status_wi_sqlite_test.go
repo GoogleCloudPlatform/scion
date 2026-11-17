@@ -156,6 +156,11 @@ func TestGCPSAStatus_WIBinding_MintedPerTargetAndCache(t *testing.T) {
 	assert.Contains(t, st.WorkloadIdentityBinding.Reason, "1 of 2 targets bound")
 	require.Len(t, st.WorkloadIdentityBinding.Targets, 3)
 
+	// R1: NextStep has code "not_bound" and points at the unbound target's manual gcloud step.
+	assert.Equal(t, "not_bound", st.NextStep.Code)
+	assert.Contains(t, st.NextStep.Message, "a/gke-unbound")
+	assert.Contains(t, st.NextStep.Message, workloadIdentityManualStep(email, "serviceAccount:pool-b.svc.id.goog[team/scion-worker]"))
+
 	assert.Equal(t, GCPSABindingBound, st.WorkloadIdentityBinding.Targets[0].State)
 	assert.Equal(t, "pool-a.svc.id.goog", st.WorkloadIdentityBinding.Targets[0].Pool)
 	assert.Equal(t, "agents", st.WorkloadIdentityBinding.Targets[0].Namespace)
@@ -196,13 +201,19 @@ func TestGCPSAStatus_WIBinding_MintedPerTargetAndCache(t *testing.T) {
 	assert.Equal(t, GCPSABindingNotBound, stCached.WorkloadIdentityBinding.State)
 	assert.Len(t, mock.roleMembersCalls, 1, "60s cache avoids a second getIamPolicy")
 
-	// Past 60s, the policy is re-read and both pool targets report bound.
+	// Past 60s, the policy is re-read and both pool targets report bound;
+	// because a/gke-nopool still reports no pool (O2), overall state is unknown
+	// rather than bound and NextStep does not claim "Nothing missing".
 	*now = now.Add(31 * time.Second)
 	stFresh := getSAStatus(t, srv, projectID, sa.ID)
 	assert.Len(t, mock.roleMembersCalls, 2)
-	assert.Equal(t, GCPSABindingBound, stFresh.WorkloadIdentityBinding.State)
+	assert.Equal(t, GCPSABindingUnknown, stFresh.WorkloadIdentityBinding.State)
+	assert.Contains(t, stFresh.WorkloadIdentityBinding.Reason, "2 reported targets bound")
+	assert.Contains(t, stFresh.WorkloadIdentityBinding.Reason, "1 Kubernetes target reports no pool")
 	assert.Equal(t, GCPSABindingBound, stFresh.WorkloadIdentityBinding.Targets[0].State)
 	assert.Equal(t, GCPSABindingBound, stFresh.WorkloadIdentityBinding.Targets[1].State)
+	assert.Equal(t, GCPSANextStepNone, stFresh.NextStep.Code)
+	assert.NotContains(t, stFresh.NextStep.Message, "Nothing missing")
 }
 
 // End-to-end: minting a GSA with the experiment on records the grant, and the
@@ -328,6 +339,9 @@ func TestGCPSAStatus_WIBinding_IAMReadErrorIsUnknownAndNotCached(t *testing.T) {
 	st := getSAStatus(t, srv, projectID, sa.ID)
 	assert.Equal(t, GCPSABindingUnknown, st.WorkloadIdentityBinding.State)
 	assert.Contains(t, st.WorkloadIdentityBinding.Reason, "permission denied")
+	assert.Equal(t, GCPSANextStepNone, st.NextStep.Code)
+	assert.Contains(t, st.NextStep.Message, "could not be checked")
+	assert.NotContains(t, st.NextStep.Message, "is not checked")
 	require.Len(t, st.Mappings, 1)
 	require.NotNil(t, st.Mappings[0].WorkloadIdentityBinding)
 	assert.Equal(t, GCPSABindingUnknown, st.Mappings[0].WorkloadIdentityBinding.State)
@@ -373,6 +387,10 @@ func TestGCPSAStatus_WIBinding_DowngradedBrokerHeartbeatMarksStale(t *testing.T)
 		Capabilities: &store.BrokerCapabilities{WITargetsV1: false},
 	})
 	st = getSAStatus(t, srv, projectID, sa.ID)
+	assert.Equal(t, GCPSABindingBound, st.WorkloadIdentityBinding.State)
+	assert.Equal(t, "1 target from stale broker report", st.WorkloadIdentityBinding.Reason)
+	assert.NotContains(t, st.NextStep.Message, "Nothing missing")
+	assert.Contains(t, st.NextStep.Message, "stale broker reports")
 	require.Len(t, st.WorkloadIdentityBinding.Targets, 1)
 	assert.Equal(t, GCPSABindingBound, st.WorkloadIdentityBinding.Targets[0].State)
 	assert.True(t, st.WorkloadIdentityBinding.Targets[0].Stale)
@@ -380,4 +398,54 @@ func TestGCPSAStatus_WIBinding_DowngradedBrokerHeartbeatMarksStale(t *testing.T)
 	assert.Nil(t, st.WorkloadIdentityBinding.Targets[0].LastHeartbeat)
 	require.NotNil(t, st.Mappings[0].WorkloadIdentityBinding)
 	assert.True(t, st.Mappings[0].WorkloadIdentityBinding.Stale)
+}
+
+// O4: Deleting a minted GSA registration invalidates its cached Workload
+// Identity role-members entry so re-registering/re-minting the same email
+// within 60s re-reads IAM immediately.
+func TestGCPSAStatus_WIBinding_DeleteSAInvalidatesCache(t *testing.T) {
+	withWIBindingClock(t, time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC))
+	srv, s, mock := testServerWithMinting(t)
+	setWorkloadIdentitySetupExperiment(t, srv, true)
+	projectID := createTestProjectForSA(t, srv, nil)
+	const email = "scion-worker@test-hub-project.iam.gserviceaccount.com"
+	b := addProviderBroker(t, s, projectID, "a", authoritativeProfile("gke", email))
+	require.NoError(t, s.UpdateRuntimeBrokerHeartbeat(context.Background(), b.ID, store.BrokerStatusOnline))
+	setWorkloadIdentityTargets(t, s, b.ID, true, []store.WorkloadIdentityTarget{
+		{Profile: "gke", Pool: "cluster-project.svc.id.goog", Namespace: "agents"},
+	})
+
+	sa := createStatusTestSA(t, s, store.ScopeProject, projectID, email, true)
+	mock.setRoleMembers(email, roleWorkloadIdentityUser, []string{
+		"serviceAccount:cluster-project.svc.id.goog[agents/scion-worker]",
+	})
+	st := getSAStatus(t, srv, projectID, sa.ID)
+	assert.Equal(t, GCPSABindingBound, st.WorkloadIdentityBinding.State)
+	require.Len(t, mock.roleMembersCalls, 1)
+
+	// Delete the GSA registration through the HTTP handler and clear IAM bindings.
+	rec := doRequest(t, srv, http.MethodDelete, fmt.Sprintf("/api/v1/projects/%s/gcp-service-accounts/%s", projectID, sa.ID), nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	mock.setRoleMembers(email, roleWorkloadIdentityUser, nil)
+
+	// Re-create a minted GSA with the same email within the 60s window: status
+	// must NOT serve the deleted account's cached "bound" set.
+	reminted := &store.GCPServiceAccount{
+		ID:                 tid("wi-status-sa-reminted-" + t.Name()),
+		Scope:              store.ScopeProject,
+		ScopeID:            projectID,
+		Email:              email,
+		ProjectID:          "test-hub-project",
+		Verified:           true,
+		VerificationStatus: store.GCPVerificationVerified,
+		VerifiedAt:         time.Now().UTC().Truncate(time.Second),
+		CreatedAt:          time.Now().UTC().Truncate(time.Second),
+		Managed:            true,
+	}
+	require.NoError(t, s.CreateGCPServiceAccount(context.Background(), reminted))
+
+	stAfter := getSAStatus(t, srv, projectID, reminted.ID)
+	assert.Len(t, mock.roleMembersCalls, 2, "delete invalidated the cached entry")
+	assert.Equal(t, GCPSABindingNotBound, stAfter.WorkloadIdentityBinding.State)
+	assert.Equal(t, "not_bound", stAfter.NextStep.Code)
 }

@@ -68,6 +68,8 @@ const BINDING_STATE_TEXT: Record<string, string> = {
 
 const BINDING_REASON_TEXT: Record<string, string> = {
   no_workload_identity_pool: 'no pool reported',
+  broker_too_old: 'broker too old to report a pool',
+  flat_broker_pool_unreported: 'flat broker does not report a pool yet',
 };
 
 const STALE_TARGET_REASON_TEXT: Record<string, string> = {

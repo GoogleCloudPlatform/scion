@@ -515,6 +515,19 @@ func saTargetStaleReasonText(reason string) string {
 	}
 }
 
+func saBindingTargetReasonText(reason string) string {
+	switch reason {
+	case api.WorkloadIdentityReasonNoPool:
+		return "no Workload Identity pool reported"
+	case "broker_too_old":
+		return "broker too old to report Workload Identity targets"
+	case "flat_broker_pool_unreported":
+		return "flat broker does not report a Workload Identity pool yet"
+	default:
+		return wiOneLine(strings.ReplaceAll(reason, "_", " "))
+	}
+}
+
 func printSAStatusBindingTargets(w io.Writer, targets []hubclient.GCPServiceAccountBindingTarget) {
 	if len(targets) == 0 {
 		return
@@ -532,11 +545,7 @@ func printSAStatusBindingTargets(w io.Writer, targets []hubclient.GCPServiceAcco
 		}
 		var notes []string
 		if t.Reason != "" {
-			if t.Reason == api.WorkloadIdentityReasonNoPool {
-				notes = append(notes, "no Workload Identity pool reported")
-			} else {
-				notes = append(notes, wiOneLine(strings.ReplaceAll(t.Reason, "_", " ")))
-			}
+			notes = append(notes, saBindingTargetReasonText(t.Reason))
 		}
 		if t.Stale {
 			staleMsg := "stored target: " + saTargetStaleReasonText(t.StaleReason)

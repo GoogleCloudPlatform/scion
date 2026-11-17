@@ -249,19 +249,35 @@ describe('GCP service account detail: status sections', () => {
     expect(sectionText(root, 'agents')).toContain('a1');
     expect(sectionText(root, 'agents')).toContain('and 1 more');
     expect(sectionText(root, 'next-step')).toContain('Nothing missing that the hub can check.');
+    expect(root.querySelector('[data-section="next-step"] sl-icon')?.getAttribute('name')).toBe(
+      'check-circle'
+    );
 
     // A hub-scoped account keeps its capability-driven actions.
     expect(buttonLabels(el)).toEqual(['Re-verify', 'Delete']);
   });
 
-  it('shows the binding as the hub states it, never upgraded', async () => {
+  it('shows the binding as the hub states it, never upgraded, and uses info-circle when nextStep is not_bound', async () => {
     routes({
       '/api/v1/projects/proj-1/gcp-service-accounts/sa-1/status': () =>
-        json(statusView({ workloadIdentityBinding: { state: 'not_bound' } })),
+        json(
+          statusView({
+            workloadIdentityBinding: { state: 'not_bound' },
+            nextStep: {
+              code: 'not_bound',
+              message:
+                "Workload Identity role roles/iam.workloadIdentityUser is not granted on this account; run the per-target manualStep gcloud command: gcloud iam service-accounts add-iam-policy-binding 'worker@example.com' ...",
+            },
+          })
+        ),
       '/api/v1/gcp-service-accounts/sa-1': () => json(row()),
     });
     const root = await statusRoot(await mount('/settings/service-accounts/sa-1?project=proj-1'));
     expect(sectionText(root, 'binding')).toBe('Workload Identity binding Not bound');
+    const icon = root.querySelector('[data-section="next-step"] sl-icon');
+    expect(icon?.getAttribute('name')).toBe('info-circle');
+    expect(icon?.getAttribute('name')).not.toBe('check-circle');
+    expect(sectionText(root, 'next-step')).toContain('add-iam-policy-binding');
   });
 
   it('keeps the binding column and target list hidden while hub.k8s_workload_identity_setup is off', async () => {
@@ -353,10 +369,21 @@ describe('GCP service account detail: status sections', () => {
                   reason: 'no_workload_identity_pool',
                 },
               },
+              {
+                brokerId: 'b4',
+                brokerName: 'prewi-b',
+                profile: 'gke-too-old',
+                state: 'mapped',
+                workloadIdentityBinding: {
+                  state: 'unknown',
+                  reason: 'broker_too_old',
+                },
+              },
             ],
             workloadIdentityBinding: {
               state: 'not_bound',
-              reason: '1 of 2 targets bound; 1 Kubernetes target reports no pool',
+              reason:
+                '1 of 2 targets bound; 3 Kubernetes targets report no pool; 1 target from stale broker report',
               targets: [
                 {
                   pool: 'p1.svc.id.goog',
@@ -385,7 +412,24 @@ describe('GCP service account detail: status sections', () => {
                   state: 'unknown',
                   reason: 'no_workload_identity_pool',
                 },
+                {
+                  ksa: 'scion-worker',
+                  profiles: ['prewi-b/gke-too-old'],
+                  state: 'unknown',
+                  reason: 'broker_too_old',
+                },
+                {
+                  ksa: 'scion-worker',
+                  profiles: ['flat-b'],
+                  state: 'unknown',
+                  reason: 'flat_broker_pool_unreported',
+                },
               ],
+            },
+            nextStep: {
+              code: 'not_bound',
+              message:
+                "Workload Identity role roles/iam.workloadIdentityUser is not granted on this account for serviceAccount:p2.svc.id.goog[team/scion-worker] (old-b/gke-stale-target). Run the per-target manualStep gcloud command to grant it: gcloud iam service-accounts add-iam-policy-binding 'worker@example.com' --role roles/iam.workloadIdentityUser --member 'serviceAccount:p2.svc.id.goog[team/scion-worker]'",
             },
           })
         ),
@@ -413,9 +457,13 @@ describe('GCP service account detail: status sections', () => {
     expect(noPoolCell.textContent).toContain('Unknown');
     expect(noPoolCell.textContent).toContain('no pool reported');
 
+    const tooOldCell = root.querySelector('tr[data-profile="gke-too-old"] td[data-col="binding"]')!;
+    expect(tooOldCell.textContent).toContain('Unknown');
+    expect(tooOldCell.textContent).toContain('broker too old to report a pool');
+
     const bindingSection = sectionText(root, 'binding');
     expect(bindingSection).toContain(
-      'Not bound (1 of 2 targets bound; 1 Kubernetes target reports no pool)'
+      'Not bound (1 of 2 targets bound; 3 Kubernetes targets report no pool; 1 target from stale broker report)'
     );
     expect(bindingSection).toContain(
       "Targets are taken from each broker's last stored heartbeat report."
@@ -429,6 +477,11 @@ describe('GCP service account detail: status sections', () => {
       "gcloud iam service-accounts add-iam-policy-binding 'worker@example.com'"
     );
     expect(bindingSection).toContain('nopool-b/gke-nopool');
+    expect(bindingSection).toContain('broker too old to report a pool');
+    expect(bindingSection).toContain('flat broker does not report a pool yet');
+    expect(root.querySelector('[data-section="next-step"] sl-icon')?.getAttribute('name')).toBe(
+      'info-circle'
+    );
 
     // Toggling the experiment off hides the presentation column without a reload.
     setFeatureFlag(K8S_WORKLOAD_IDENTITY_SETUP_FLAG, false);

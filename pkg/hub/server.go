@@ -5395,11 +5395,14 @@ func (s *Server) SetHookIdentityChecker(c store.CallerPermissionChecker) {
 	}
 }
 
-// invalidateActAsCache removes cached actAs decisions for a specific SA.
+// invalidateActAsCache removes cached actAs decisions and Workload Identity
+// role-member reads for a specific SA.
 // Called after SA deletion and Hub-initiated IAM mutations (mint path).
-// No-op if the configured checkers do not support invalidation (e.g.
+// No-op for actAs checkers that do not support invalidation (e.g.
 // DisabledCallerPermissionChecker when gcpIamCheckMode=off).
 func (s *Server) invalidateActAsCache(saEmail string) {
+	s.wiRoleMembersCache.invalidate(saEmail)
+
 	s.mu.RLock()
 	assignChecker := s.saAssignChecker
 	hookChecker := s.hookIdentityChecker

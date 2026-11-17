@@ -362,6 +362,39 @@ func TestGCPSANextStep(t *testing.T) {
 			assert.Contains(t, got.Message, tc.wantMessage)
 		})
 	}
+
+	t.Run("not_bound returns not_bound code and manual step (R1)", func(t *testing.T) {
+		manual := workloadIdentityManualStep(mappedGSA, "serviceAccount:pool-a.svc.id.goog[agents/scion-worker]")
+		got := gcpSANextStepForBinding(true, []GCPServiceAccountProfileMapping{m("a", GCPSAMappingMapped)}, nil, GCPServiceAccountBinding{
+			State: GCPSABindingNotBound,
+			Targets: []GCPServiceAccountBindingTarget{
+				{State: GCPSABindingBound, Member: "serviceAccount:pool-ok.svc.id.goog[agents/scion-worker]", Profiles: []string{"b/ok"}},
+				{State: GCPSABindingNotBound, Member: "serviceAccount:pool-a.svc.id.goog[agents/scion-worker]", Profiles: []string{"b/a"}, ManualStep: manual},
+			},
+		})
+		assert.Equal(t, GCPSANextStepNotBound, got.Code)
+		assert.Contains(t, got.Message, "b/a")
+		assert.Contains(t, got.Message, manual)
+	})
+
+	t.Run("experiment-off unknown keeps exact legacy message", func(t *testing.T) {
+		got := gcpSANextStepForBinding(true, []GCPServiceAccountProfileMapping{m("a", GCPSAMappingMapped)}, nil, GCPServiceAccountBinding{
+			State:  GCPSABindingUnknown,
+			Reason: "not checked",
+		})
+		assert.Equal(t, GCPSANextStepNone, got.Code)
+		assert.Equal(t, "Nothing missing that the hub can check. The Workload Identity binding is not checked.", got.Message)
+	})
+
+	t.Run("IAM read failure says could not be checked (O5)", func(t *testing.T) {
+		got := gcpSANextStepForBinding(true, []GCPServiceAccountProfileMapping{m("a", GCPSAMappingMapped)}, nil, GCPServiceAccountBinding{
+			State:  GCPSABindingUnknown,
+			Reason: "IAM policy read failed",
+		})
+		assert.Equal(t, GCPSANextStepNone, got.Code)
+		assert.Contains(t, got.Message, "could not be checked")
+		assert.NotContains(t, got.Message, "is not checked")
+	})
 }
 
 // The list's mapping summary counts with the shared decision, like the status

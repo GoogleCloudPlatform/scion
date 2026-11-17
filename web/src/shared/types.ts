@@ -2232,7 +2232,7 @@ export interface GCPServiceAccountStatus {
   defaultFor: Array<{ kind: string; profile?: string }>;
   /** Already limited to agents the caller may see; names may be truncated. */
   agents: { count: number; names: string[] };
-  /** code is 'not_verified', 'not_mapped' or 'none'. */
+  /** code is 'not_verified', 'not_mapped', 'not_bound' or 'none'. */
   nextStep: { code: string; brokerName?: string; profile?: string; message: string };
 }
 

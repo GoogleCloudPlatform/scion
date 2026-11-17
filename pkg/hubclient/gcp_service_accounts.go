@@ -230,7 +230,9 @@ type GCPServiceAccountStatus struct {
 		Count int      `json:"count"`
 		Names []string `json:"names"`
 	} `json:"agents"`
-	// NextStep.Code is "not_verified", "not_mapped" or "none".
+	// NextStep.Code is "not_verified", "not_mapped", "not_bound" (when
+	// hub.k8s_workload_identity_setup is enabled and a target is unbound) or
+	// "none".
 	NextStep struct {
 		Code       string `json:"code"`
 		BrokerName string `json:"brokerName,omitempty"`
