@@ -100,6 +100,14 @@ Examples:
 				if err := decodeYAMLOrJSONStrict(raw, &req, "test request file"); err != nil {
 					return err
 				}
+				if req.Policy != nil {
+					if changed := changedInlinePolicyFlags(cmd, ruleFile); len(changed) > 0 {
+						return newUsageError("cannot combine inline policy override flags (%s) with --file containing a nested 'policy' block", strings.Join(changed, ", "))
+					}
+					if hasTopLevelTestPolicyFields(&req) {
+						return newUsageError("test request file cannot set both nested 'policy' and top-level policy fields")
+					}
+				}
 			}
 
 			sample := req.Sample
@@ -299,4 +307,42 @@ Examples:
 	cmd.Flags().Bool("json", false, "Output in JSON format")
 
 	return cmd
+}
+
+func changedInlinePolicyFlags(cmd *cobra.Command, ruleFile string) []string {
+	flagNames := []string{
+		"name",
+		"mode",
+		"policy-surface",
+		"rule",
+		"rule-file",
+		"on-uncertain",
+		"on-failed",
+		"on-failed-reason",
+		"reject-reason",
+		"reject-remediation",
+	}
+	var out []string
+	for _, name := range flagNames {
+		if cmd.Flags().Changed(name) || (name == "rule-file" && ruleFile != "") {
+			out = append(out, "--"+name)
+		}
+	}
+	return out
+}
+
+func hasTopLevelTestPolicyFields(req *hubclient.TestMessagePolicyRequest) bool {
+	if req == nil {
+		return false
+	}
+	return req.Name != "" ||
+		req.Mode != "" ||
+		req.Scope != nil ||
+		req.ViolationRule != "" ||
+		req.SystemOneRule != "" ||
+		req.OnUncertain != "" ||
+		req.OnFailed != "" ||
+		len(req.OnFailedReasons) > 0 ||
+		req.RejectReason != "" ||
+		req.RejectRemediation != ""
 }

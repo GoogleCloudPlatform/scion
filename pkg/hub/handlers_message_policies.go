@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -571,16 +572,17 @@ func writeMessagePolicyValidationError(w http.ResponseWriter, err error) {
 }
 
 // validateMessagePolicyAuthoring validates spec via pkg/messagepolicy and
-// verifies that any sender agent_ids belong to project.ID (consumer design
-// §§5.3, 12.5). On failure it writes a structured 400 response and returns
-// ("", false).
+// verifies that any sender agent_ids belong to projectID (consumer design
+// §§5.3, 12.5), returning the normalized mode and canonicalized sender agent
+// IDs (ag.ID). On failure it writes a structured 400 response and returns
+// ("", nil, false).
 func (s *Server) validateMessagePolicyAuthoring(
 	ctx context.Context,
 	w http.ResponseWriter,
 	projectID string,
 	spec messagepolicy.AuthoringSpec,
 	forbidReservedNames bool,
-) (string, bool) {
+) (string, []string, bool) {
 	ev := s.MessagePolicyEvaluator()
 	if ev == nil {
 		writeError(w, http.StatusBadRequest, messagepolicy.ErrCodeUnsupportedDialect,
@@ -590,57 +592,64 @@ func (s *Server) validateMessagePolicyAuthoring(
 				"category": "consumer_not_registered",
 				"reason":   "consumer_not_registered",
 			})
-		return "", false
+		return "", nil, false
 	}
 
 	mode, err := ev.ValidateAuthoring(ctx, spec)
 	if err != nil {
 		writeMessagePolicyValidationError(w, err)
-		return "", false
+		return "", nil, false
 	}
 
 	if _, parseErr := uuid.Parse(spec.Name); parseErr == nil {
 		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
 			fmt.Sprintf("policy name %q must not be UUID-shaped", spec.Name),
 			map[string]interface{}{"field": "name"})
-		return "", false
+		return "", nil, false
 	}
 
 	if forbidReservedNames && isReservedMessagePolicyName(spec.Name) {
 		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
 			fmt.Sprintf("policy name %q is reserved", spec.Name),
 			map[string]interface{}{"field": "name"})
-		return "", false
+		return "", nil, false
 	}
 
-	for _, rawAgentID := range spec.Scope.Sender.AgentIDs {
-		agentID := strings.TrimSpace(rawAgentID)
-		if agentID == "" {
-			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
-				"scope.sender.agent_ids entries must not be empty",
-				map[string]interface{}{"field": "scope.sender.agent_ids"})
-			return "", false
-		}
-		ag, err := s.store.GetAgent(ctx, agentID)
-		if err != nil {
-			if errors.Is(err, store.ErrNotFound) {
+	var canonicalSenderIDs []string
+	if len(spec.Scope.Sender.AgentIDs) > 0 {
+		canonicalSenderIDs = make([]string, 0, len(spec.Scope.Sender.AgentIDs))
+		for _, rawAgentID := range spec.Scope.Sender.AgentIDs {
+			agentID := strings.TrimSpace(rawAgentID)
+			if agentID == "" {
+				writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+					"scope.sender.agent_ids entries must not be empty",
+					map[string]interface{}{"field": "scope.sender.agent_ids"})
+				return "", nil, false
+			}
+			ag, err := s.store.GetAgent(ctx, agentID)
+			if err != nil {
+				if errors.Is(err, store.ErrNotFound) {
+					writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+						fmt.Sprintf("scope.sender.agent_ids: agent %q does not belong to this project", agentID),
+						map[string]interface{}{"field": "scope.sender.agent_ids", "agent_id": agentID})
+					return "", nil, false
+				}
+				writeErrorFromErr(w, err, "Agent")
+				return "", nil, false
+			}
+			if ag.ProjectID != projectID {
 				writeError(w, http.StatusBadRequest, ErrCodeValidationError,
 					fmt.Sprintf("scope.sender.agent_ids: agent %q does not belong to this project", agentID),
 					map[string]interface{}{"field": "scope.sender.agent_ids", "agent_id": agentID})
-				return "", false
+				return "", nil, false
 			}
-			writeErrorFromErr(w, err, "Agent")
-			return "", false
-		}
-		if ag.ProjectID != projectID {
-			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
-				fmt.Sprintf("scope.sender.agent_ids: agent %q does not belong to this project", agentID),
-				map[string]interface{}{"field": "scope.sender.agent_ids", "agent_id": agentID})
-			return "", false
+			if !slices.Contains(canonicalSenderIDs, ag.ID) {
+				canonicalSenderIDs = append(canonicalSenderIDs, ag.ID)
+			}
 		}
 	}
 
-	return mode, true
+	return mode, canonicalSenderIDs, true
 }
 
 func parseBoundedLimit(raw string, defaultLimit, maxLimit int) (int, bool) {
@@ -736,13 +745,13 @@ func (s *Server) handleCreateMessagePolicy(w http.ResponseWriter, r *http.Reques
 		Scope:             authoringScopeFromStore(req.Scope),
 		ViolationRule:     req.ViolationRule,
 		SystemOneRule:     req.SystemOneRule,
-		OnUncertain:       req.OnUncertain,
-		OnFailed:          req.OnFailed,
+		OnUncertain:       strings.TrimSpace(req.OnUncertain),
+		OnFailed:          strings.TrimSpace(req.OnFailed),
 		OnFailedReasons:   req.OnFailedReasons,
 		RejectReason:      req.RejectReason,
 		RejectRemediation: req.RejectRemediation,
 	}
-	mode, ok := s.validateMessagePolicyAuthoring(ctx, w, project.ID, spec, true)
+	mode, canonicalSenderIDs, ok := s.validateMessagePolicyAuthoring(ctx, w, project.ID, spec, true)
 	if !ok {
 		return
 	}
@@ -752,17 +761,20 @@ func (s *Server) handleCreateMessagePolicy(w http.ResponseWriter, r *http.Reques
 		enabled = *req.Enabled
 	}
 
+	scope := req.Scope.Clone()
+	scope.Sender.AgentIDs = canonicalSenderIDs
+
 	policy := &store.MessagePolicy{
 		ProjectID:         project.ID,
 		Name:              spec.Name,
 		Description:       req.Description,
 		Enabled:           enabled,
 		Mode:              mode,
-		Scope:             req.Scope.Clone(),
+		Scope:             scope,
 		ViolationRule:     req.ViolationRule,
 		SystemOneRule:     req.SystemOneRule,
-		OnUncertain:       strings.TrimSpace(req.OnUncertain),
-		OnFailed:          strings.TrimSpace(req.OnFailed),
+		OnUncertain:       spec.OnUncertain,
+		OnFailed:          spec.OnFailed,
 		OnFailedReasons:   req.OnFailedReasons,
 		RejectReason:      req.RejectReason,
 		RejectRemediation: req.RejectRemediation,
@@ -887,11 +899,12 @@ func (s *Server) handlePatchMessagePolicy(w http.ResponseWriter, r *http.Request
 		RejectReason:      candidate.RejectReason,
 		RejectRemediation: candidate.RejectRemediation,
 	}
-	mode, ok := s.validateMessagePolicyAuthoring(ctx, w, project.ID, spec, true)
+	mode, canonicalSenderIDs, ok := s.validateMessagePolicyAuthoring(ctx, w, project.ID, spec, true)
 	if !ok {
 		return
 	}
 	candidate.Mode = mode
+	candidate.Scope.Sender.AgentIDs = canonicalSenderIDs
 
 	if err := s.store.UpdateMessagePolicy(ctx, candidate); err != nil {
 		switch {
@@ -1027,10 +1040,10 @@ func (s *Server) handleTestMessagePolicy(w http.ResponseWriter, r *http.Request,
 			effective.SystemOneRule = inline.SystemOneRule
 		}
 		if inline.OnUncertain != "" {
-			effective.OnUncertain = inline.OnUncertain
+			effective.OnUncertain = strings.TrimSpace(inline.OnUncertain)
 		}
 		if inline.OnFailed != "" {
-			effective.OnFailed = inline.OnFailed
+			effective.OnFailed = strings.TrimSpace(inline.OnFailed)
 		}
 		if inline.OnFailedReasons != nil {
 			effective.OnFailedReasons = inline.OnFailedReasons
@@ -1062,8 +1075,8 @@ func (s *Server) handleTestMessagePolicy(w http.ResponseWriter, r *http.Request,
 			Scope:             scope,
 			ViolationRule:     inline.ViolationRule,
 			SystemOneRule:     inline.SystemOneRule,
-			OnUncertain:       inline.OnUncertain,
-			OnFailed:          inline.OnFailed,
+			OnUncertain:       strings.TrimSpace(inline.OnUncertain),
+			OnFailed:          strings.TrimSpace(inline.OnFailed),
 			OnFailedReasons:   inline.OnFailedReasons,
 			RejectReason:      inline.RejectReason,
 			RejectRemediation: inline.RejectRemediation,
@@ -1082,11 +1095,12 @@ func (s *Server) handleTestMessagePolicy(w http.ResponseWriter, r *http.Request,
 		RejectReason:      effective.RejectReason,
 		RejectRemediation: effective.RejectRemediation,
 	}
-	mode, ok := s.validateMessagePolicyAuthoring(ctx, w, project.ID, spec, false)
+	mode, canonicalSenderIDs, ok := s.validateMessagePolicyAuthoring(ctx, w, project.ID, spec, false)
 	if !ok {
 		return
 	}
 	effective.Mode = mode
+	effective.Scope.Sender.AgentIDs = canonicalSenderIDs
 
 	sample := MessagePolicyTestSample{
 		Surface: req.Surface,
@@ -1125,6 +1139,12 @@ func (s *Server) handleTestMessagePolicy(w http.ResponseWriter, r *http.Request,
 	}
 	if sample.Sender != nil {
 		sender = *sample.Sender
+		sender.ID = strings.TrimSpace(sender.ID)
+		if sender.ID != "" {
+			if parsedID, parseErr := uuid.Parse(sender.ID); parseErr == nil {
+				sender.ID = parsedID.String()
+			}
+		}
 		if sender.Kind == "" {
 			sender.Kind = "agent"
 		}

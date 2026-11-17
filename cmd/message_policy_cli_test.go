@@ -445,3 +445,83 @@ func TestMessagePolicyCLI_ErrorMapping(t *testing.T) {
 		assert.NotContains(t, err.Error(), "hub.message_policies")
 	})
 }
+
+func TestMessagePolicyCLI_Test_RefusesNestedPolicyWithInlineOverrideFlags(t *testing.T) {
+	nestedFile := filepath.Join(t.TempDir(), "nested-test.yaml")
+	require.NoError(t, os.WriteFile(nestedFile, []byte(`
+policy:
+  name: nested-spec
+  mode: shadow
+  scope:
+    surfaces:
+      - agent_to_user
+  violation_rule: "message.body.contains('blocked')"
+  on_failed: admit
+sample:
+  surface: agent_to_user
+  body: "blocked sample"
+`), 0600))
+
+	ruleFile := filepath.Join(t.TempDir(), "override.cel")
+	require.NoError(t, os.WriteFile(ruleFile, []byte(`true`), 0600))
+
+	serverCalls := 0
+	installMockMessagePolicyServer(t, func(w http.ResponseWriter, r *http.Request) {
+		serverCalls++
+		w.Header().Set("Content-Type", "application/json")
+		var req hubclient.TestMessagePolicyRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		_ = json.NewEncoder(w).Encode(hubclient.TestMessagePolicyResponse{
+			PolicyName:   "nested-spec",
+			Mode:         "shadow",
+			Surface:      "agent_to_user",
+			ScopeMatched: true,
+			Class:        "violation",
+			Outcome:      "reject",
+			Action:       "shadow",
+			BodyBytes:    len(req.Sample.Body),
+		})
+	})
+
+	overrideFlagCases := [][]string{
+		{"--mode", "enforce"},
+		{"--rule", "false"},
+		{"--rule-file", ruleFile},
+		{"--name", "other-name"},
+		{"--policy-surface", "agent_to_conversation"},
+		{"--on-uncertain", "reject"},
+		{"--on-failed", "reject"},
+		{"--on-failed-reason", "timeout=reject"},
+		{"--reject-reason", "override reason"},
+		{"--reject-remediation", "override remediation"},
+	}
+	for _, flagArgs := range overrideFlagCases {
+		args := append([]string{"test", "--file", nestedFile}, flagArgs...)
+		_, err := runMessagePolicyCLI(t, args...)
+		require.Error(t, err, "expected error for %v", flagArgs)
+		assert.Contains(t, err.Error(), "nested", "error for %v: %v", flagArgs, err)
+		assert.Contains(t, err.Error(), flagArgs[0], "error for %v: %v", flagArgs, err)
+	}
+	assert.Equal(t, 0, serverCalls, "refused flag combinations must not send HTTP requests")
+
+	// Also refuse a request file setting both nested 'policy' and top-level policy fields.
+	mixedFile := filepath.Join(t.TempDir(), "mixed-test.yaml")
+	require.NoError(t, os.WriteFile(mixedFile, []byte(`
+policy:
+  violation_rule: "true"
+  on_failed: admit
+mode: enforce
+sample:
+  body: "hi"
+`), 0600))
+	_, err := runMessagePolicyCLI(t, "test", "--file", mixedFile)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "nested")
+	assert.Equal(t, 0, serverCalls)
+
+	// Sample-only flags (e.g. --body) remain allowed alongside a nested 'policy' file.
+	out, err := runMessagePolicyCLI(t, "test", "--file", nestedFile, "--body", "overridden body")
+	require.NoError(t, err)
+	assert.Contains(t, out, "Policy:          nested-spec")
+	assert.Equal(t, 1, serverCalls)
+}

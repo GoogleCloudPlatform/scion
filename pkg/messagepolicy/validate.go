@@ -99,6 +99,17 @@ func IsCoveredSurface(surface string) bool {
 	return surface == SurfaceAgentToUser || surface == SurfaceAgentToConversation
 }
 
+func surfaceRecipientKind(surface string) string {
+	switch surface {
+	case SurfaceAgentToUser:
+		return "user"
+	case SurfaceAgentToConversation:
+		return "conversation"
+	default:
+		return ""
+	}
+}
+
 // IsCanonicalSlug reports whether s is a canonical lowercase ASCII slug of
 // length 1..MaxPolicyNameLen (`^[a-z0-9]+(-[a-z0-9]+)*$`).
 func IsCanonicalSlug(s string) bool {
@@ -273,6 +284,24 @@ func (e *Evaluator) ValidateAuthoring(ctx context.Context, spec AuthoringSpec) (
 				Code:    ErrCodeValidation,
 				Field:   "scope.recipient.kinds",
 				Message: fmt.Sprintf("invalid recipient kind %q (must be \"user\" or \"conversation\")", k),
+			}
+		}
+	}
+	if len(spec.Scope.Recipient.Kinds) > 0 {
+		reachable := false
+		for _, s := range spec.Scope.Surfaces {
+			if rk := surfaceRecipientKind(s); rk != "" && slices.Contains(spec.Scope.Recipient.Kinds, rk) {
+				reachable = true
+				break
+			}
+		}
+		if !reachable {
+			return "", &ValidationError{
+				Code:  ErrCodeValidation,
+				Field: "scope.recipient.kinds",
+				Message: fmt.Sprintf("none of scope.recipient.kinds (%s) can match scope.surfaces (%s)",
+					strings.Join(spec.Scope.Recipient.Kinds, ", "),
+					strings.Join(spec.Scope.Surfaces, ", ")),
 			}
 		}
 	}

@@ -426,6 +426,51 @@ func TestAuthoringValidationAndCoverage(t *testing.T) {
 	require.ErrorAs(t, err, &vErr)
 	assert.Equal(t, messagepolicy.ErrCodeSurfaceNotCovered, vErr.Code)
 
+	// Recipient kinds unreachable from the listed surfaces refused with validation_error (O3).
+	unreachableCases := []struct {
+		name     string
+		surfaces []string
+		kinds    []string
+	}{
+		{
+			name:     "agent_to_user with conversation kind",
+			surfaces: []string{messagepolicy.SurfaceAgentToUser},
+			kinds:    []string{"conversation"},
+		},
+		{
+			name:     "agent_to_conversation with user kind",
+			surfaces: []string{messagepolicy.SurfaceAgentToConversation},
+			kinds:    []string{"user"},
+		},
+	}
+	for _, tc := range unreachableCases {
+		unreachSpec := validAuthoringSpec()
+		unreachSpec.Scope.Surfaces = tc.surfaces
+		unreachSpec.Scope.Recipient.Kinds = tc.kinds
+		_, err = ev.ValidateAuthoring(ctx, unreachSpec)
+		vErr = nil
+		require.ErrorAs(t, err, &vErr, tc.name)
+		assert.Equal(t, messagepolicy.ErrCodeValidation, vErr.Code, tc.name)
+		assert.Equal(t, "scope.recipient.kinds", vErr.Field, tc.name)
+	}
+
+	// Reachable surface + recipient.kinds combinations remain accepted.
+	for _, tc := range []struct {
+		surfaces []string
+		kinds    []string
+	}{
+		{[]string{messagepolicy.SurfaceAgentToUser}, []string{"user"}},
+		{[]string{messagepolicy.SurfaceAgentToConversation}, []string{"conversation"}},
+		{[]string{messagepolicy.SurfaceAgentToUser, messagepolicy.SurfaceAgentToConversation}, []string{"user"}},
+		{[]string{messagepolicy.SurfaceAgentToUser, messagepolicy.SurfaceAgentToConversation}, []string{"conversation"}},
+	} {
+		reachSpec := validAuthoringSpec()
+		reachSpec.Scope.Surfaces = tc.surfaces
+		reachSpec.Scope.Recipient.Kinds = tc.kinds
+		_, err = ev.ValidateAuthoring(ctx, reachSpec)
+		require.NoError(t, err, "surfaces=%v kinds=%v", tc.surfaces, tc.kinds)
+	}
+
 	// Missing on_failed refused with validation_error (Target 4).
 	noOnFailed := validAuthoringSpec()
 	noOnFailed.OnFailed = ""

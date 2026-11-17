@@ -1161,3 +1161,185 @@ func TestMessagePolicyAuthz_Target7_CredentialMatrix(t *testing.T) {
 		assert.Contains(t, ownerScopesRec.Body.String(), `"project:read_message_policies"`)
 	})
 }
+
+// TestMessagePolicyHandlers_CanonicalizeSenderAgentIDsAndEnforceMatches verifies R1:
+// non-canonical sender agent_ids (leading/trailing whitespace, uppercase hex,
+// unhyphenated 32-hex, braced/URN UUIDs, and duplicate representations) are
+// persisted in canonical lowercase UUID form across create, patch, and dry-run
+// test, and that an enforce policy authored or patched with non-canonical
+// sender agent_ids matches at send time and rejects with HTTP 422.
+func TestMessagePolicyHandlers_CanonicalizeSenderAgentIDsAndEnforceMatches(t *testing.T) {
+	f := newMpgFixture(t, true)
+	ctx := context.Background()
+	owner := projectOpsUser(t, f.s, "mph-r1-owner", false)
+	projectOpsGrant(t, f.s, owner, f.project.ID, store.ProjectRoleOwner)
+	base := "/api/v1/projects/" + f.project.ID + "/message-policies"
+
+	upperPaddedSender := "  " + strings.ToUpper(f.sender.ID) + "\t"
+	unhyphenatedPeer := strings.ReplaceAll(f.peerAgent.ID, "-", "")
+	bracedDuplicateSender := "{" + strings.ToUpper(f.sender.ID) + "}"
+	require.NotEqual(t, f.sender.ID, upperPaddedSender)
+	require.NotEqual(t, f.peerAgent.ID, unhyphenatedPeer)
+
+	// 1. Create an enforce policy with non-canonical sender agent_ids (plus
+	// whitespace-padded on_failed to verify trim-once consistency).
+	createBody := CreateMessagePolicyRequest{
+		Name: "canonical-sender-enforce",
+		Mode: store.MessagePolicyModeEnforce,
+		Scope: store.MessagePolicyScope{
+			Surfaces: []string{store.MessagePolicySurfaceAgentToUser},
+			Sender: store.MessagePolicySenderSelector{
+				AgentIDs: []string{upperPaddedSender, unhyphenatedPeer, bracedDuplicateSender},
+			},
+		},
+		ViolationRule:     `message.body.contains("BLOCK_NONCANON")`,
+		OnFailed:          "  reject  ",
+		RejectReason:      "Blocked by {policy} for {recipient}",
+		RejectRemediation: "Remove forbidden token",
+	}
+	createRec := mphSessionDo(t, f.srv, owner, http.MethodPost, base, createBody)
+	require.Equal(t, http.StatusCreated, createRec.Code, createRec.Body.String())
+
+	var created MessagePolicyResponse
+	require.NoError(t, json.Unmarshal(createRec.Body.Bytes(), &created))
+	assert.Equal(t, []string{f.sender.ID, f.peerAgent.ID}, created.Scope.Sender.AgentIDs,
+		"create response must return canonical deduplicated sender agent IDs")
+	assert.Equal(t, store.MessagePolicyOutcomeReject, created.OnFailed)
+
+	stored, err := f.s.GetMessagePolicy(ctx, created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{f.sender.ID, f.peerAgent.ID}, stored.Scope.Sender.AgentIDs,
+		"persisted scope.sender.agent_ids must be canonical lowercase UUIDs")
+
+	// 2. Live H2 gate send from f.sender matches the canonicalized enforce policy -> 422.
+	sendRec := f.sendOutbound(t, OutboundMessageRequest{
+		Recipient: "user:" + f.alice.Email,
+		Msg:       "Please review BLOCK_NONCANON payload",
+	})
+	require.Equal(t, http.StatusUnprocessableEntity, sendRec.Code, "enforce policy with non-canonical authored sender ID must match and reject: %s", sendRec.Body.String())
+	var sendErr ErrorResponse
+	require.NoError(t, json.Unmarshal(sendRec.Body.Bytes(), &sendErr))
+	assert.Equal(t, string(MessageDenialPolicyRejected), sendErr.Error.Code)
+	assert.Equal(t, "canonical-sender-enforce", sendErr.Error.Details["policy"])
+	assert.Equal(t, 0, f.recordChannel.count(), "rejected send must not dispatch to channel")
+
+	decs, err := f.s.ListMessagePolicyDecisions(ctx, store.MessagePolicyDecisionFilter{
+		ProjectID: f.project.ID,
+		PolicyID:  created.ID,
+	}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, decs.Items, 1)
+	assert.Equal(t, store.MessagePolicyActionRejected, decs.Items[0].Action)
+	assert.Equal(t, f.sender.ID, decs.Items[0].SenderID)
+
+	// 3. PATCH with unhyphenated uppercase sender ID also persists canonical ID and matches at send time.
+	unhyphenatedUpperSender := " " + strings.ToUpper(strings.ReplaceAll(f.sender.ID, "-", "")) + " "
+	patchScope := store.MessagePolicyScope{
+		Surfaces: []string{store.MessagePolicySurfaceAgentToUser},
+		Sender: store.MessagePolicySenderSelector{
+			AgentIDs: []string{unhyphenatedUpperSender},
+		},
+	}
+	patchRec := mphSessionDo(t, f.srv, owner, http.MethodPatch, base+"/"+created.ID, PatchMessagePolicyRequest{
+		Scope: &patchScope,
+	})
+	require.Equal(t, http.StatusOK, patchRec.Code, patchRec.Body.String())
+
+	var patched MessagePolicyResponse
+	require.NoError(t, json.Unmarshal(patchRec.Body.Bytes(), &patched))
+	assert.Equal(t, []string{f.sender.ID}, patched.Scope.Sender.AgentIDs)
+
+	storedAfterPatch, err := f.s.GetMessagePolicy(ctx, created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{f.sender.ID}, storedAfterPatch.Scope.Sender.AgentIDs)
+
+	sendRec2 := f.sendOutbound(t, OutboundMessageRequest{
+		Recipient: "user:" + f.alice.Email,
+		Msg:       "Second BLOCK_NONCANON attempt after patch",
+	})
+	require.Equal(t, http.StatusUnprocessableEntity, sendRec2.Code, "patched enforce policy must still match and reject: %s", sendRec2.Body.String())
+
+	// 4. Dry-run /test with non-canonical inline scope.sender.agent_ids and
+	// non-canonical sample.sender.id canonicalizes both and matches scope.
+	dryRunRec := mphSessionDo(t, f.srv, owner, http.MethodPost, base+"/test", TestMessagePolicyRequest{
+		Mode: store.MessagePolicyModeEnforce,
+		Scope: &store.MessagePolicyScope{
+			Surfaces: []string{store.MessagePolicySurfaceAgentToUser},
+			Sender: store.MessagePolicySenderSelector{
+				AgentIDs: []string{unhyphenatedUpperSender},
+			},
+		},
+		ViolationRule: `message.body.contains("BLOCK_NONCANON")`,
+		OnFailed:      " reject ",
+		Sample: &MessagePolicyTestSample{
+			Surface: store.MessagePolicySurfaceAgentToUser,
+			Body:    "BLOCK_NONCANON dry run",
+			Sender:  &messagepolicy.SenderFacts{ID: "  " + strings.ToUpper(f.sender.ID) + "  "},
+		},
+	})
+	require.Equal(t, http.StatusOK, dryRunRec.Code, dryRunRec.Body.String())
+	var dryRunResp TestMessagePolicyResponse
+	require.NoError(t, json.Unmarshal(dryRunRec.Body.Bytes(), &dryRunResp))
+	assert.True(t, dryRunResp.ScopeMatched, "dry-run must match after canonicalizing sender IDs")
+	assert.Equal(t, messagepolicy.ClassViolation, dryRunResp.Class)
+	assert.Equal(t, store.MessagePolicyActionRejected, dryRunResp.Action)
+}
+
+// TestMessagePolicyHandlers_UnreachableRecipientKinds400 verifies O3:
+// authoring or patching a policy whose scope.recipient.kinds cannot be reached
+// from any of its scope.surfaces returns HTTP 400 validation_error.
+func TestMessagePolicyHandlers_UnreachableRecipientKinds400(t *testing.T) {
+	f := newMPHFixture(t, true)
+	base := f.basePath()
+
+	for _, tc := range []struct {
+		name       string
+		policyName string
+		surfaces   []string
+		kinds      []string
+	}{
+		{
+			name:       "agent_to_user cannot reach conversation kind",
+			policyName: "unreach-kind-user",
+			surfaces:   []string{store.MessagePolicySurfaceAgentToUser},
+			kinds:      []string{"conversation"},
+		},
+		{
+			name:       "agent_to_conversation cannot reach user kind",
+			policyName: "unreach-kind-conv",
+			surfaces:   []string{store.MessagePolicySurfaceAgentToConversation},
+			kinds:      []string{"user"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := mphValidCreateBody(tc.policyName)
+			body.Scope.Surfaces = tc.surfaces
+			body.Scope.Recipient.Kinds = tc.kinds
+			rec := mphSessionDo(t, f.srv, f.owner, http.MethodPost, base, body)
+			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			var env ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &env))
+			assert.Equal(t, ErrCodeValidationError, env.Error.Code)
+			assert.Equal(t, "scope.recipient.kinds", env.Error.Details["field"])
+		})
+	}
+
+	// PATCH narrowing surfaces so stored recipient.kinds becomes unreachable also returns 400.
+	seedBody := mphValidCreateBody("patch-unreach-seed")
+	seedBody.Scope.Recipient.Kinds = []string{"conversation"}
+	seedRec := mphSessionDo(t, f.srv, f.owner, http.MethodPost, base, seedBody)
+	require.Equal(t, http.StatusCreated, seedRec.Code, seedRec.Body.String())
+
+	patchScope := store.MessagePolicyScope{
+		Surfaces:  []string{store.MessagePolicySurfaceAgentToUser},
+		Recipient: store.MessagePolicyRecipientSelector{Kinds: []string{"conversation"}},
+	}
+	patchRec := mphSessionDo(t, f.srv, f.owner, http.MethodPatch, base+"/patch-unreach-seed", PatchMessagePolicyRequest{
+		Scope: &patchScope,
+	})
+	require.Equal(t, http.StatusBadRequest, patchRec.Code, patchRec.Body.String())
+	var patchErr ErrorResponse
+	require.NoError(t, json.Unmarshal(patchRec.Body.Bytes(), &patchErr))
+	assert.Equal(t, ErrCodeValidationError, patchErr.Error.Code)
+	assert.Equal(t, "scope.recipient.kinds", patchErr.Error.Details["field"])
+}
