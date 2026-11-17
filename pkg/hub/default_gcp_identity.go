@@ -150,17 +150,19 @@ func (t defaultTier) brokerRejectionSuffix(mode string) string {
 }
 
 // isBrokerGCPIdentityError reports whether a Runtime Broker 400 validation
-// error message rejects an agent's GCP identity configuration.
+// error message rejects an agent's GCP identity configuration. Generic
+// "service account" / "serviceaccount" substrings are intentionally omitted so
+// Kubernetes pod-spec ServiceAccount validation 400s are not misattributed to a
+// default GCP identity rung.
 func isBrokerGCPIdentityError(msg string) bool {
 	lower := strings.ToLower(msg)
 	for _, marker := range []string{
 		"gcp identit",
-		"service account",
-		"serviceaccount",
 		"service_account",
 		"passthrough",
 		"assigned identit",
 		"cloud run identity",
+		"cloud run native identity",
 		"not attachable",
 	} {
 		if strings.Contains(lower, marker) {

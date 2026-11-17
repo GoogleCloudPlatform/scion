@@ -962,4 +962,24 @@ func TestCreateAgent_Broker400IdentityRejectionAppendsDefaultRungAttribution(t *
 		msg := decodeFlatAPIError(t, rec).Message
 		assert.Equal(t, "invalid template configuration: unknown harness", msg)
 	})
+
+	t.Run("generic Kubernetes ServiceAccount 400 validation_error does NOT append default-rung attribution", func(t *testing.T) {
+		raw, err := json.Marshal(map[string]string{f.flat.ID: saBroker.ID})
+		require.NoError(t, err)
+		putSettings(map[string]string{projectSettingDefaultGCPIdentitySAIDByBroker: string(raw)})
+
+		for i, brokerMsg := range []string{
+			`pod spec serviceAccount "foo" invalid`,
+			`template validation failed: service account "default" not found in namespace "agents"`,
+		} {
+			f.client.returnErr = makeBrokerJSONStatusErr(t, http.StatusBadRequest, ErrCodeValidationError, brokerMsg, nil)
+			rec := f.create(t, map[string]interface{}{
+				"name":            fmt.Sprintf("k8s-sa-err-agent-%d", i),
+				"runtimeBrokerId": f.flat.ID,
+			})
+			requireAPIError(t, rec, http.StatusBadRequest, ErrCodeValidationError)
+			msg := decodeFlatAPIError(t, rec).Message
+			assert.Equal(t, brokerMsg, msg, "generic Kubernetes ServiceAccount error must not blame GCP default rung")
+		}
+	})
 }

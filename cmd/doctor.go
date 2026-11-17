@@ -694,6 +694,17 @@ func (r *doctorReport) localSettingsChecks() {
 	if d14, ok := checkDoctorLegacyPlacementPreflightHere(); ok {
 		r.add(&r.HubChecks, d14)
 	}
+	// D15: flat Cloud Run instance diagnostics (local check, read-only):
+	// checks each flat cloudrun instance's credentials_file, API
+	// reachability, and iam.serviceAccounts.actAs across all configured
+	// agent service accounts using the instance's credentials.
+	var doctorServerCfg *config.V1ServerConfig
+	if nfsErr == nil && nfsSettings != nil {
+		doctorServerCfg = nfsSettings.Server
+	}
+	for _, c := range checkDoctorFlatCloudRunInstancesHere(doctorServerCfg) {
+		r.add(&r.HubChecks, c)
+	}
 
 	// D6: Telemetry Pipeline (local check)
 	r.add(&r.HubChecks, checkDoctorTelemetry())

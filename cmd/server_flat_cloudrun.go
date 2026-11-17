@@ -485,11 +485,13 @@ func (a *flatInstanceActivation) cloudRunRuntime(ctx context.Context, inst confi
 		}
 	}
 	return newRT(config.CloudRunConfig{
-		ProjectID:      t.ProjectID,
-		Location:       t.Region,
-		ServiceAccount: t.ServiceAccount,
-		Network:        t.Network,
-		Subnetwork:     t.Subnetwork,
+		ProjectID:                 t.ProjectID,
+		Location:                  t.Region,
+		ServiceAccount:            t.ServiceAccount,
+		BlockServiceAccount:       t.BlockServiceAccount,
+		AssignableServiceAccounts: slices.Clone(t.AssignableServiceAccounts),
+		Network:                   t.Network,
+		Subnetwork:                t.Subnetwork,
 	}, creds)
 }
 
