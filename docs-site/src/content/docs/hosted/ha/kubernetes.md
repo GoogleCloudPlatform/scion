@@ -556,7 +556,7 @@ Restricting the pod's outbound access with an egress NetworkPolicy would give a 
 
 This is experimental: it needs the [`hub.k8s_workload_identity_setup`](/scion/reference/experiments/#server-experiments-with-notes) experiment, which is off by default. With the experiment off, minting is unchanged.
 
-When a project owner or admin mints a GSA (`scion project service-accounts mint`, or `POST /api/v1/projects/{id}/gcp-service-accounts/mint`), the Hub also grants `roles/iam.workloadIdentityUser` on the new GSA to the Workload Identity member of the conventional KSA, for every Kubernetes runtime target of the project's Runtime Brokers that reports a Workload Identity pool:
+When a GSA is minted — either for a project (`scion project service-accounts mint` or `POST /api/v1/projects/{id}/gcp-service-accounts/mint`) or at Hub scope (`POST /api/v1/gcp-service-accounts/mint?scope=hub`, or **Mint Service Account** in the web UI) — the Hub also grants `roles/iam.workloadIdentityUser` on the new GSA to the Workload Identity member of the conventional KSA, for every serving Kubernetes runtime target that reports a Workload Identity pool (the project's Runtime Brokers for a project-scoped mint, and every Runtime Broker on the Hub for a Hub-scoped mint, since any project can assign a Hub-scoped GSA):
 
 ```text
 serviceAccount:<pool>[<namespace>/<account ID>]
@@ -581,14 +581,14 @@ runtimes:
 
 **What the mint does.** After the grants the mint needs (token creator for the Hub, and the optional self `serviceAccountUser`), the Hub adds every member to `roles/iam.workloadIdentityUser` on the new GSA in one update of the GSA's IAM policy. Equal pool and namespace pairs are granted once. The Hub only changes the minted GSA's own policy: it never edits a project IAM policy and never calls Kubernetes. Its existing `roles/iam.serviceAccountAdmin` on the Hub project covers the change.
 
-The grant is best effort. **A failed grant never fails the mint**: the GSA is stored as verified either way. The mint response lists each target in `workloadIdentityBindings`, and the CLI prints one line per entry:
+The grant is best effort. **A failed grant never fails the mint**: the GSA is stored as verified either way. The mint response lists each target in `workloadIdentityBindings`, and both the CLI and the web mint dialog show one line per entry:
 
 | `state` | `reason` | Meaning |
 | :--- | :--- | :--- |
 | `bound` | | The member was added. |
 | `skipped` | `permission_denied` | The Hub may not change the GSA's IAM policy. |
 | `skipped` | `pool_not_found` | IAM does not know the pool: Workload Identity is not enabled in that project, or `workload_identity_pool` is misspelt. The other targets are still granted. |
-| `skipped` | `no_workload_identity_pool` | A Kubernetes profile or flat instance of a project broker reports no pool: none is configured, the broker is too old to report one, or it is a flat instance, which does not report one yet (`detail` says which). |
+| `skipped` | `no_workload_identity_pool` | A serving Kubernetes profile or flat instance reports no pool: none is configured, the broker is too old to report one, or it is a flat instance, which does not report one yet (`detail` says which). |
 | `failed` | `iam_error` | Any other IAM error. |
 
 Each entry that is not `bound` carries a `manualStep`, the command that makes the grant by hand, with its arguments in single quotes. For a `no_workload_identity_pool` entry, fill in the cluster project and namespace:
@@ -599,9 +599,9 @@ gcloud iam service-accounts add-iam-policy-binding '<GSA email>' \
   --member 'serviceAccount:<CLUSTER_PROJECT>.svc.id.goog[<NAMESPACE>/<account ID>]'
 ```
 
-A new binding can take a few minutes to take effect, so the first token request of an agent started right after the mint can fail. Brokers added to the project after the mint, and GSAs minted before the experiment was on, get no binding: use the manual command. Hub-scoped mints are not bound yet.
+A new binding can take a few minutes to take effect, so the first token request of an agent started right after the mint can fail. Runtime Brokers added after the mint, and GSAs minted before the experiment was on, get no binding: use the manual command.
 
-**Who can act as the GSA.** Workload Identity authorises by member, not by annotation: anyone who can create a KSA with the conventional name in that namespace, or run a pod as it, can act as the GSA. This is the same as a binding made by hand. Use a namespace dedicated to Scion agents, where only the broker's identity can create ServiceAccounts and pods.
+**Who can act as the GSA.** Workload Identity authorises by member, not by annotation: anyone who can create a KSA with the conventional name in that namespace, or run a pod as it, can act as the GSA. For a Hub-scoped mint, every Runtime Broker on the Hub that reports a Workload Identity pool receives a binding on the minted GSA. This is the same as a binding made by hand. Use a namespace dedicated to Scion agents, where only the broker's identity can create ServiceAccounts and pods.
 
 #### GCP Identity Mode "assign" (Workload Identity mapping)
 
