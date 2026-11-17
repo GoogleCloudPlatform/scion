@@ -69,6 +69,7 @@ type OTelMessagePolicyMetrics struct {
 	durationMs      metric.Float64Histogram
 	shadowDrops     metric.Int64Counter
 	admissionErrors metric.Int64Counter
+	uncovered       metric.Int64Counter
 }
 
 // NewOTelMessagePolicyMetrics constructs OTel instruments for the message
@@ -94,11 +95,16 @@ func NewOTelMessagePolicyMetrics(mp metric.MeterProvider) (*OTelMessagePolicyMet
 	if err != nil {
 		return nil, err
 	}
+	uncov, err := meter.Int64Counter("scion.message_policy.uncovered", metric.WithUnit("{message}"))
+	if err != nil {
+		return nil, err
+	}
 	return &OTelMessagePolicyMetrics{
 		evaluations:     evals,
 		durationMs:      dur,
 		shadowDrops:     drops,
 		admissionErrors: admErrs,
+		uncovered:       uncov,
 	}, nil
 }
 
@@ -171,6 +177,28 @@ func (s *Server) recordMessagePolicyAdmissionError(projectID, policyID, policyNa
 	)
 }
 
+func (s *Server) recordMessagePolicyUncovered(snap h2FactSnapshot) {
+	if snap.uncoveredPath == "" {
+		return
+	}
+	s.messagePolicyUncovered.Add(1)
+	if m := s.messagePolicyMetrics.Load(); m != nil {
+		m.uncovered.Add(context.Background(), 1, metric.WithAttributes(
+			attribute.String("uncovered_path", snap.uncoveredPath),
+		))
+	}
+	log := s.messageLog
+	if log == nil {
+		log = slog.Default()
+	}
+	log.Info("message policy gate: admitting send on uncovered path",
+		"uncovered_path", snap.uncoveredPath,
+		"project_id", snap.projectID,
+		"sender_id", snap.senderID,
+		"conversation_id", snap.convID,
+	)
+}
+
 // messagePolicyGateRuntime holds the shared Evaluator wrapper, bounded shadow
 // worker pool, and deterministic test seams for a Hub Server.
 type messagePolicyGateRuntime struct {
@@ -201,6 +229,7 @@ type messagePolicyShadowJob struct {
 }
 
 type h2FactSnapshot struct {
+	uncoveredPath   string
 	surface         string
 	projectID       string
 	senderID        string
@@ -424,6 +453,13 @@ func (s *Server) evaluateH2MessagePolicies(ctx context.Context, w http.ResponseW
 	}
 
 	snap := deriveH2FactSnapshot(in)
+	if snap.uncoveredPath != "" {
+		s.recordMessagePolicyUncovered(snap)
+		return h2PolicyOutcome{}, true
+	}
+	if snap.surface == "" {
+		return h2PolicyOutcome{}, true
+	}
 
 	enabledTrue := true
 	polList, err := s.store.ListMessagePolicies(ctx, store.MessagePolicyFilter{
@@ -735,21 +771,44 @@ func deriveH2FactSnapshot(in *h2PolicyInput) h2FactSnapshot {
 		default:
 			snap.recipientSlug = snap.recipientID
 		}
-	} else {
-		snap.surface = messagepolicy.SurfaceAgentToUser
-		snap.convKind = "direct"
-		snap.recipientKind = "user"
-		snap.recipientID = res.RecipientID
-		if snap.recipientID == "" && res.ConvResult != nil {
-			if kindA, idA, kindB, idB, err := messages.ParseDMKey(res.ConvResult.ExternalRef); err == nil {
-				switch {
-				case kindA == "agent" && idA == agent.ID:
-					snap.recipientID = idB
-				case kindB == "agent" && idB == agent.ID:
-					snap.recipientID = idA
+		return snap
+	}
+
+	snap.convKind = "direct"
+
+	// A direct ConvResult whose DM key names two agents, with RecipientID empty
+	// or equal to the non-sender agent, is an uncovered agent_dm send in M1.
+	if res.ConvResult != nil && res.ConvResult.Kind == "direct" {
+		if kindA, idA, kindB, idB, err := messages.ParseDMKey(res.ConvResult.ExternalRef); err == nil && kindA == "agent" && kindB == "agent" {
+			var peerAgentID string
+			var senderInKey bool
+			switch {
+			case idA == agent.ID:
+				peerAgentID = idB
+				senderInKey = true
+			case idB == agent.ID:
+				peerAgentID = idA
+				senderInKey = true
+			}
+			if senderInKey && (res.RecipientID == "" || res.RecipientID == peerAgentID) {
+				snap.uncoveredPath = messagepolicy.SurfaceAgentDM
+				snap.recipientKind = "agent"
+				snap.recipientID = peerAgentID
+				if strings.HasPrefix(res.Recipient, "agent:") {
+					snap.recipientSlug = strings.TrimPrefix(res.Recipient, "agent:")
+				} else {
+					snap.recipientSlug = peerAgentID
 				}
+				return snap
 			}
 		}
+	}
+
+	// Never classify a recipient as "user" unless its ID came from user resolution.
+	if res.UserResolved && res.RecipientID != "" {
+		snap.surface = messagepolicy.SurfaceAgentToUser
+		snap.recipientKind = "user"
+		snap.recipientID = res.RecipientID
 		if strings.HasPrefix(res.Recipient, "user:") {
 			snap.recipientSlug = strings.TrimPrefix(res.Recipient, "user:")
 		} else if res.ConvResult == nil {

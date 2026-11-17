@@ -3002,6 +3002,7 @@ type Server struct {
 	messagePolicyMetrics         atomic.Pointer[OTelMessagePolicyMetrics]
 	messagePolicyShadowDrops     atomic.Int64
 	messagePolicyAdmissionErrors atomic.Int64
+	messagePolicyUncovered       atomic.Int64
 }
 
 // groupsLogger returns the groups subsystem logger, falling back to

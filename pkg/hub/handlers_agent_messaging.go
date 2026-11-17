@@ -171,6 +171,8 @@ type routingResult struct {
 	ConvRefResolved bool
 	// Def152DerivedRecipient tracks whether S5 derived the addressee from the conversation.
 	Def152DerivedRecipient bool
+	// UserResolved tracks whether RecipientID came from user resolution (GetUser/GetUserByEmail).
+	UserResolved bool
 }
 
 // outboundThreadState is the result of outboundThreadConversationState.
@@ -302,6 +304,7 @@ func (s *Server) resolveOutboundRouting(
 	// ─────────────────────────────────────────────────────────────────────────
 	recipientID := req.RecipientID
 	recipient := req.Recipient
+	userResolved := false
 
 	if recipientID == "" && recipient != "" {
 		// Explicit recipient string provided without an ID — resolve the user.
@@ -321,6 +324,7 @@ func (s *Server) resolveOutboundRouting(
 			if err == nil {
 				recipientID = u.ID
 				recipient = "user:" + userAddressName(u)
+				userResolved = true
 			} else if errors.Is(err, store.ErrNotFound) {
 				writeError(w, http.StatusBadRequest, ErrCodeAddrUnknown,
 					fmt.Sprintf("user:%s is not a valid addressee. No user exists with that ID.", identifier), nil)
@@ -341,6 +345,7 @@ func (s *Server) resolveOutboundRouting(
 					name = u.ID
 				}
 				recipient = "user:" + name
+				userResolved = true
 			} else if errors.Is(err, store.ErrNotSingular) {
 				writeError(w, http.StatusBadRequest, ErrCodeAddrAmbiguous,
 					fmt.Sprintf("user:%s is not a valid addressee. Multiple users match that email; resolve the duplicate before sending.", identifier), nil)
@@ -395,6 +400,7 @@ func (s *Server) resolveOutboundRouting(
 			if recipient == "" {
 				recipient = "user:" + userAddressName(u)
 			}
+			userResolved = true
 		} else if errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusBadRequest, ErrCodeAddrUnknown,
 				fmt.Sprintf("recipient_id %s is not a valid addressee. No user exists with that ID.", recipientID), nil)
@@ -822,6 +828,7 @@ func (s *Server) resolveOutboundRouting(
 				}
 				recipient = "user:" + name
 				def152DerivedRecipient = true
+				userResolved = true
 			}
 		case "group":
 			// Group conversations have no single recipient. Fall through to S6
@@ -881,6 +888,7 @@ func (s *Server) resolveOutboundRouting(
 					// Overwrite recipient with the thread key.
 					recipient = "thread:" + threadID
 					recipientID = threadID
+					userResolved = false
 					if req.ThreadID == "" {
 						req.ThreadID = threadID
 					}
@@ -901,6 +909,7 @@ func (s *Server) resolveOutboundRouting(
 					// is the address — mirroring "thread:<id>" for legacy groups.
 					recipient = "conv:" + convResult.ConversationID
 					recipientID = convResult.ConversationID
+					userResolved = false
 				} else {
 					// Unexpected ExternalRef format — fail closed rather than
 					// silently misrouting to the native path.
@@ -941,8 +950,18 @@ func (s *Server) resolveOutboundRouting(
 				// DEF-161 (direct half): an explicit recipient must match the DM
 				// key's non-sender participant; do NOT silently overwrite it.
 				explicitRecipient := (req.Recipient != "" || req.RecipientID != "") && !def152DerivedRecipient
-				if err := s.checkDirectRecipientMatchesDMKey(ctx, w, convResult.ConversationID, convResult.ExternalRef, recipient, recipientID, explicitRecipient); err != nil {
+				addrKind, err := s.checkDirectRecipientMatchesDMKey(ctx, w, convResult.ConversationID, convResult.ExternalRef, recipient, recipientID, explicitRecipient)
+				if err != nil {
 					return nil, err
+				}
+				if explicitRecipient && addrKind == "user" && !userResolved {
+					resolvedRecipient, resolvedID, resolveErr := s.resolveAssertedDirectUserRecipient(ctx, w, recipient, recipientID)
+					if resolveErr != nil {
+						return nil, resolveErr
+					}
+					recipient = resolvedRecipient
+					recipientID = resolvedID
+					userResolved = true
 				}
 
 				// DEF-168: The affinity re-run that was here (DEF-158) has been
@@ -988,9 +1007,23 @@ func (s *Server) resolveOutboundRouting(
 		}
 
 		explicitRecipient := req.Recipient != "" || req.RecipientID != ""
-		if err := s.checkDirectRecipientMatchesDMKey(ctx, w, convResult.ConversationID, convResult.ExternalRef, recipient, recipientID, explicitRecipient); err != nil {
+		addrKind, err := s.checkDirectRecipientMatchesDMKey(ctx, w, convResult.ConversationID, convResult.ExternalRef, recipient, recipientID, explicitRecipient)
+		if err != nil {
 			return nil, err
 		}
+		if explicitRecipient && addrKind == "user" && !userResolved {
+			resolvedRecipient, resolvedID, resolveErr := s.resolveAssertedDirectUserRecipient(ctx, w, recipient, recipientID)
+			if resolveErr != nil {
+				return nil, resolveErr
+			}
+			recipient = resolvedRecipient
+			recipientID = resolvedID
+			userResolved = true
+		}
+	}
+
+	if convResult != nil && convResult.Kind == "group" {
+		userResolved = false
 	}
 
 	// Propagate recipients and group_id from metadata for group-set messages.
@@ -1030,6 +1063,7 @@ func (s *Server) resolveOutboundRouting(
 	result.GroupID = groupID
 	result.ConvRefResolved = convRefResolved
 	result.Def152DerivedRecipient = def152DerivedRecipient
+	result.UserResolved = userResolved
 
 	return result, nil
 }
@@ -1063,9 +1097,9 @@ func nonSenderDMSide(ctx context.Context, kindA, idA, kindB, idB string) (addrKi
 // mismatch. This is shared by both ways a caller can assert a direct
 // conversation: a resolved conversation_ref and a raw conversation_id, so the
 // two behave identically.
-func (s *Server) checkDirectRecipientMatchesDMKey(ctx context.Context, w http.ResponseWriter, conversationID, externalRef, recipient, recipientID string, explicitRecipientSupplied bool) error {
+func (s *Server) checkDirectRecipientMatchesDMKey(ctx context.Context, w http.ResponseWriter, conversationID, externalRef, recipient, recipientID string, explicitRecipientSupplied bool) (string, error) {
 	if !explicitRecipientSupplied {
-		return nil
+		return "", nil
 	}
 	kindA, idA, kindB, idB, parseErr := messages.ParseDMKey(externalRef)
 	if parseErr != nil {
@@ -1073,7 +1107,7 @@ func (s *Server) checkDirectRecipientMatchesDMKey(ctx context.Context, w http.Re
 			"external_ref", externalRef, "conversation_id", conversationID, "error", parseErr)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"conversation has an invalid DM key; cannot validate recipient", nil)
-		return parseErr
+		return "", parseErr
 	}
 	addrKind, addrID, ok := nonSenderDMSide(ctx, kindA, idA, kindB, idB)
 	if !ok {
@@ -1081,7 +1115,7 @@ func (s *Server) checkDirectRecipientMatchesDMKey(ctx context.Context, w http.Re
 			"external_ref", externalRef, "conversation_id", conversationID)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"cannot validate recipient: sender not found in conversation", nil)
-		return fmt.Errorf("sender not in DM key")
+		return "", fmt.Errorf("sender not in DM key")
 	}
 	// The supplied recipient must match the non-sender participant by ID,
 	// and by kind when a kind was supplied — not merely appear somewhere in
@@ -1100,9 +1134,32 @@ func (s *Server) checkDirectRecipientMatchesDMKey(ctx context.Context, w http.Re
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
 			"a recipient may not be supplied with a direct conversation — "+
 				"the conversation is the address; remove the recipient and retry", nil)
-		return fmt.Errorf("recipient does not match DM key non-sender participant")
+		return "", fmt.Errorf("recipient does not match DM key non-sender participant")
 	}
-	return nil
+	return addrKind, nil
+}
+
+// resolveAssertedDirectUserRecipient resolves a caller-supplied recipient_id on
+// an asserted direct agent<->user conversation (which skipped S1 user lookup so
+// agent<->agent DMs can pass agent IDs). Ensuring GetUser runs here guarantees
+// every user DM recipient ID came from user resolution.
+func (s *Server) resolveAssertedDirectUserRecipient(ctx context.Context, w http.ResponseWriter, recipient, recipientID string) (string, string, error) {
+	u, err := s.store.GetUser(ctx, recipientID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusBadRequest, ErrCodeAddrUnknown,
+				fmt.Sprintf("recipient_id %s is not a valid addressee. No user exists with that ID.", recipientID), nil)
+			return "", "", err
+		}
+		s.messageLog.Error("user lookup by recipient_id failed", "recipient_id", recipientID, "error", err)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"user lookup failed due to an internal error", nil)
+		return "", "", err
+	}
+	if recipient == "" {
+		recipient = "user:" + userAddressName(u)
+	}
+	return recipient, u.ID, nil
 }
 
 // checkDirectThreadIDMatchesDMKey applies the ptone/scion#2211 direct-conversation

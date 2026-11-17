@@ -2007,6 +2007,7 @@ func TestMessagePolicyGate_DeriveH2FactSnapshot_Classification(t *testing.T) {
 			routing: &routingResult{
 				Recipient:      "user:alice@example.com",
 				RecipientID:    userID,
+				UserResolved:   true,
 				ConversationID: "c1",
 				Channel:        "slack",
 				ThreadID:       "1700000000.123",
@@ -2024,9 +2025,9 @@ func TestMessagePolicyGate_DeriveH2FactSnapshot_Classification(t *testing.T) {
 		assert.Equal(t, "alice@example.com", snap.recipientSlug)
 		assert.Equal(t, "c1", snap.convID)
 
-		// Even a bare ConvResult probe without pre-populated routing.RecipientID
-		// or with a thread:-shaped Recipient must classify strictly from ConvResult.Kind.
-		bareSnap := deriveH2FactSnapshot(&h2PolicyInput{
+		// Even with a thread:-shaped Recipient, a user-resolved RecipientID on a
+		// direct ConvResult classifies strictly from ConvResult.Kind as agent_to_user.
+		spoofedPrefixSnap := deriveH2FactSnapshot(&h2PolicyInput{
 			agent: agent,
 			req: &OutboundMessageRequest{
 				Channel:  "slack",
@@ -2034,7 +2035,9 @@ func TestMessagePolicyGate_DeriveH2FactSnapshot_Classification(t *testing.T) {
 				Msg:      "hello",
 			},
 			routing: &routingResult{
-				Recipient: "thread:spoofed",
+				Recipient:    "thread:spoofed",
+				RecipientID:  userID,
+				UserResolved: true,
 				ConvResult: &messaging.ConversationResult{
 					ConversationID: "c1",
 					Kind:           "direct",
@@ -2042,10 +2045,94 @@ func TestMessagePolicyGate_DeriveH2FactSnapshot_Classification(t *testing.T) {
 				},
 			},
 		})
-		assert.Equal(t, messagepolicy.SurfaceAgentToUser, bareSnap.surface)
-		assert.Equal(t, "user", bareSnap.recipientKind)
-		assert.Equal(t, "direct", bareSnap.convKind)
-		assert.Equal(t, userID, bareSnap.recipientID)
+		assert.Equal(t, messagepolicy.SurfaceAgentToUser, spoofedPrefixSnap.surface)
+		assert.Equal(t, "user", spoofedPrefixSnap.recipientKind)
+		assert.Equal(t, "direct", spoofedPrefixSnap.convKind)
+		assert.Equal(t, userID, spoofedPrefixSnap.recipientID)
+	})
+
+	t.Run("two_agent_direct_conv_result_is_uncovered_agent_dm", func(t *testing.T) {
+		for _, peerID := range []string{
+			"00000000-0000-4000-8000-000000000001", // sorts before agent.ID
+			"f9999999-9999-4999-8999-999999999999", // sorts after agent.ID
+		} {
+			agentDMKey, keyErr := messages.DMConversationKey("agent", agent.ID, "agent", peerID)
+			require.NoError(t, keyErr)
+
+			for _, recipientID := range []string{"", peerID} {
+				snap := deriveH2FactSnapshot(&h2PolicyInput{
+					agent: agent,
+					req:   &OutboundMessageRequest{Msg: "agent dm"},
+					routing: &routingResult{
+						Recipient:      "agent:peer-bot",
+						RecipientID:    recipientID,
+						ConversationID: "adm-1",
+						ConvResult: &messaging.ConversationResult{
+							ConversationID: "adm-1",
+							Kind:           "direct",
+							ExternalRef:    agentDMKey,
+						},
+					},
+				})
+				assert.Equal(t, messagepolicy.SurfaceAgentDM, snap.uncoveredPath)
+				assert.Empty(t, snap.surface)
+				assert.NotEqual(t, "user", snap.recipientKind)
+				assert.Equal(t, "agent", snap.recipientKind)
+				assert.Equal(t, peerID, snap.recipientID)
+				assert.Equal(t, "direct", snap.convKind)
+			}
+		}
+	})
+
+	t.Run("unresolved_recipient_id_never_classifies_as_user", func(t *testing.T) {
+		// Empty RecipientID on a user DM key (no user resolution ran) must not
+		// synthesize a user recipient from ParseDMKey.
+		emptyRecipSnap := deriveH2FactSnapshot(&h2PolicyInput{
+			agent: agent,
+			req:   &OutboundMessageRequest{Msg: "no user resolution"},
+			routing: &routingResult{
+				ConvResult: &messaging.ConversationResult{
+					ConversationID: "c1",
+					Kind:           "direct",
+					ExternalRef:    dmKey,
+				},
+			},
+		})
+		assert.NotEqual(t, "user", emptyRecipSnap.recipientKind)
+		assert.Empty(t, emptyRecipSnap.surface)
+
+		// Unresolved RecipientID (UserResolved == false) on either a two-agent DM
+		// key (mismatched ID) or nil ConvResult must never classify as "user".
+		peerID := "b2222222-2222-4222-8222-222222222222"
+		agentDMKey, keyErr := messages.DMConversationKey("agent", agent.ID, "agent", peerID)
+		require.NoError(t, keyErr)
+
+		mismatchedAgentDMSnap := deriveH2FactSnapshot(&h2PolicyInput{
+			agent: agent,
+			req:   &OutboundMessageRequest{Msg: "mismatched id"},
+			routing: &routingResult{
+				Recipient:   "user:spoofed@example.com",
+				RecipientID: agent.ID,
+				ConvResult: &messaging.ConversationResult{
+					ConversationID: "adm-2",
+					Kind:           "direct",
+					ExternalRef:    agentDMKey,
+				},
+			},
+		})
+		assert.NotEqual(t, "user", mismatchedAgentDMSnap.recipientKind)
+		assert.Empty(t, mismatchedAgentDMSnap.surface)
+
+		nilConvUnresolvedSnap := deriveH2FactSnapshot(&h2PolicyInput{
+			agent: agent,
+			req:   &OutboundMessageRequest{Msg: "unresolved nil conv"},
+			routing: &routingResult{
+				Recipient:   "agent:peer-bot",
+				RecipientID: peerID,
+			},
+		})
+		assert.NotEqual(t, "user", nilConvUnresolvedSnap.recipientKind)
+		assert.Empty(t, nilConvUnresolvedSnap.surface)
 	})
 
 	t.Run("conv_result_group_classifies_strictly_from_conv_result_kind", func(t *testing.T) {
@@ -2096,8 +2183,9 @@ func TestMessagePolicyGate_DeriveH2FactSnapshot_Classification(t *testing.T) {
 				Msg:      "dm fallback",
 			},
 			routing: &routingResult{
-				Recipient:   "user:alice@example.com",
-				RecipientID: userID,
+				Recipient:    "user:alice@example.com",
+				RecipientID:  userID,
+				UserResolved: true,
 			},
 		})
 		assert.Equal(t, messagepolicy.SurfaceAgentToUser, directFallback.surface)
@@ -2352,6 +2440,295 @@ func TestMessagePolicyGate_ShadowDropMetrics_ConsistentUnitAndReasons(t *testing
 	close(unblock)
 }
 
+// TestMessagePolicyGate_TwoAgentDirectConvUncovered_HumanDMStillRejected verifies
+// the agent-to-agent DM over-match fix:
+//  1. An enforce agent_to_user policy (plus a shadow policy) with a constructed
+//     two-agent direct ConvResult at H2 (RecipientID empty or equal to the
+//     non-sender agent) is treated as UNCOVERED: admitted with zero policy
+//     evaluations, zero decision rows, and log + metric uncovered_path=agent_dm.
+//  2. A human DM under the exact same policy is still rejected (422) both at H2
+//     and end-to-end through handleAgentOutboundMessage.
+func TestMessagePolicyGate_TwoAgentDirectConvUncovered_HumanDMStillRejected(t *testing.T) {
+	f := newMpgFixture(t, true)
+	ctx := context.Background()
+
+	var logBuf bytes.Buffer
+	var logMu sync.Mutex
+	f.srv.messageLog = slog.New(slog.NewJSONHandler(&mpgLockedWriter{mu: &logMu, w: &logBuf}, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+	otelMetrics, err := NewOTelMessagePolicyMetrics(mp)
+	require.NoError(t, err)
+	f.srv.SetMessagePolicyMetrics(otelMetrics)
+
+	// Enforce policy omits scope.recipient.kinds so any surface="agent_to_user"
+	// classification would match and reject via recipient.kind != "agent" or body regex.
+	enfPol := &store.MessagePolicy{
+		ProjectID: f.project.ID,
+		Name:      "enforce-agent-to-user",
+		Enabled:   true,
+		Mode:      store.MessagePolicyModeEnforce,
+		Scope: store.MessagePolicyScope{
+			Surfaces: []string{store.MessagePolicySurfaceAgentToUser},
+			Sender:   store.MessagePolicySenderSelector{AllAgents: true},
+		},
+		ViolationRule: `recipient.kind != "agent" && !message.has_choices && message.body.matches("(?i)option a")`,
+		OnFailed:      messagepolicy.OutcomeReject,
+		RejectReason:  "Blocked by {policy} to {recipient}",
+	}
+	require.NoError(t, f.s.CreateMessagePolicy(ctx, enfPol))
+
+	shadowPol := &store.MessagePolicy{
+		ProjectID: f.project.ID,
+		Name:      "shadow-agent-to-user",
+		Enabled:   true,
+		Mode:      store.MessagePolicyModeShadow,
+		Scope: store.MessagePolicyScope{
+			Surfaces: []string{store.MessagePolicySurfaceAgentToUser},
+			Sender:   store.MessagePolicySenderSelector{AllAgents: true},
+		},
+		ViolationRule: `true`,
+		OnFailed:      messagepolicy.OutcomeAdmit,
+	}
+	require.NoError(t, f.s.CreateMessagePolicy(ctx, shadowPol))
+
+	// Exercise both lexical UUID orders in dm:agent:<id1>:agent:<id2> and both
+	// RecipientID == "" and RecipientID == peerID.
+	const secretBody = "CONFIDENTIAL-AGENT-DM: Should we pick Option A?"
+	var expectedUncovered int64
+	for _, peerID := range []string{
+		f.peerAgent.ID,
+		"00000000-0000-4000-8000-000000000001",
+		"f9999999-9999-4999-8999-999999999999",
+	} {
+		agentDMKey, keyErr := messages.DMConversationKey("agent", f.sender.ID, "agent", peerID)
+		require.NoError(t, keyErr)
+
+		for _, tc := range []struct {
+			name        string
+			recipient   string
+			recipientID string
+		}{
+			{name: "empty_recipient_id", recipient: "", recipientID: ""},
+			{name: "peer_agent_recipient_id", recipient: "agent:" + f.peerAgent.Slug, recipientID: peerID},
+			{name: "kindless_peer_agent_recipient_id", recipient: "", recipientID: peerID},
+		} {
+			expectedUncovered++
+			rr := httptest.NewRecorder()
+			out, ok := f.srv.evaluateH2MessagePolicies(ctx, rr, &h2PolicyInput{
+				agent: f.sender,
+				req: &OutboundMessageRequest{
+					Recipient:   tc.recipient,
+					RecipientID: tc.recipientID,
+					Msg:         secretBody,
+					Type:        "instruction",
+				},
+				routing: &routingResult{
+					Recipient:      tc.recipient,
+					RecipientID:    tc.recipientID,
+					ConversationID: "conv-agent-dm",
+					ConvResult: &messaging.ConversationResult{
+						ConversationID: "conv-agent-dm",
+						Kind:           "direct",
+						ExternalRef:    agentDMKey,
+					},
+				},
+			})
+			require.True(t, ok, "case %s (peer=%s) must be admitted as uncovered; body=%s", tc.name, peerID, rr.Body.String())
+			assert.Equal(t, http.StatusOK, rr.Code)
+			assert.Empty(t, rr.Body.String())
+			assert.Empty(t, out.admittedDecisions)
+			assert.Nil(t, out.shadowJob)
+			f.srv.recordAdmittedH2PolicyDecisions(ctx, &out, api.NewUUID())
+		}
+	}
+
+	assert.Zero(t, f.faultWrapper.listCalls.Load(), "uncovered agent_dm at H2 must perform zero policy loads/evaluations")
+	assert.Zero(t, f.faultWrapper.decisionCalls.Load(), "uncovered agent_dm at H2 must persist zero decision rows")
+	allDecs, err := f.s.ListMessagePolicyDecisions(ctx, store.MessagePolicyDecisionFilter{
+		ProjectID: f.project.ID,
+	}, store.ListOptions{Limit: 20})
+	require.NoError(t, err)
+	assert.Empty(t, allDecs.Items, "uncovered agent_dm must produce zero decision rows")
+
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(ctx, &rm))
+	assert.Equal(t, int64(0), mpgSumInt64Metric(t, rm, "scion.message_policy.evaluations"))
+	assert.Equal(t, expectedUncovered, f.srv.messagePolicyUncovered.Load())
+
+	var uncoveredByPath = make(map[string]int64)
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "scion.message_policy.uncovered" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			require.True(t, ok)
+			for _, dp := range sum.DataPoints {
+				v, hasAttr := dp.Attributes.Value("uncovered_path")
+				assert.True(t, hasAttr, "uncovered metric must carry uncovered_path attribute")
+				uncoveredByPath[v.AsString()] += dp.Value
+			}
+		}
+	}
+	assert.Equal(t, expectedUncovered, uncoveredByPath[messagepolicy.SurfaceAgentDM])
+
+	logMu.Lock()
+	logs := logBuf.String()
+	logMu.Unlock()
+	assert.Contains(t, logs, `"uncovered_path":"agent_dm"`)
+	assert.NotContains(t, logs, "CONFIDENTIAL-AGENT-DM", "uncovered log must stay content-free")
+
+	// (2) Human DM under the exact same policy is still rejected (both at H2 and end-to-end).
+	userDMKey, err := messages.DMConversationKey("agent", f.sender.ID, "user", f.alice.ID)
+	require.NoError(t, err)
+	userDMConv, err := f.s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: userDMKey,
+		DriftState:  "active",
+	})
+	require.NoError(t, err)
+
+	rrH2Human := httptest.NewRecorder()
+	_, humanOK := f.srv.evaluateH2MessagePolicies(ctx, rrH2Human, &h2PolicyInput{
+		agent: f.sender,
+		req: &OutboundMessageRequest{
+			Recipient: "user:" + f.alice.Email,
+			Msg:       "Do you want Option A?",
+			Type:      "input-needed",
+		},
+		routing: &routingResult{
+			Recipient:      "user:" + f.alice.Email,
+			RecipientID:    f.alice.ID,
+			UserResolved:   true,
+			ConversationID: userDMConv.ID,
+			ConvResult: &messaging.ConversationResult{
+				ConversationID: userDMConv.ID,
+				Kind:           "direct",
+				ExternalRef:    userDMKey,
+			},
+		},
+	})
+	require.False(t, humanOK, "human DM at H2 must still be rejected")
+	require.Equal(t, http.StatusUnprocessableEntity, rrH2Human.Code)
+
+	// End-to-end human DMs (explicit user email, conversation_ref with no explicit
+	// recipient, and asserted conversation_id + kindless recipient_id) all reject 422.
+	for _, req := range []OutboundMessageRequest{
+		{
+			Recipient: "user:" + f.alice.Email,
+			Msg:       "Do you want Option A?",
+		},
+		{
+			ConversationRef: "conv:" + userDMConv.ID,
+			Msg:             "Do you want Option A via conv ref?",
+		},
+		{
+			ConversationID: userDMConv.ID,
+			RecipientID:    f.alice.ID,
+			Msg:            "Do you want Option A via conv_id + recipient_id?",
+		},
+	} {
+		rrHuman := f.sendOutbound(t, req)
+		require.Equal(t, http.StatusUnprocessableEntity, rrHuman.Code, "body: %s", rrHuman.Body.String())
+		var errResp ErrorResponse
+		require.NoError(t, json.Unmarshal(rrHuman.Body.Bytes(), &errResp))
+		assert.Equal(t, string(MessageDenialPolicyRejected), errResp.Error.Code)
+	}
+
+	assert.Zero(t, f.recordChannel.count(), "rejected human DMs must never deliver to user channels")
+	rejDecs, err := f.s.ListMessagePolicyDecisions(ctx, store.MessagePolicyDecisionFilter{
+		ProjectID: f.project.ID,
+		PolicyID:  enfPol.ID,
+		Action:    store.MessagePolicyActionRejected,
+	}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, rejDecs.Items, 4)
+	for _, d := range rejDecs.Items {
+		assert.Equal(t, store.MessagePolicySurfaceAgentToUser, d.Surface)
+		assert.Equal(t, "user", d.RecipientKind)
+		assert.Equal(t, f.alice.ID, d.RecipientID)
+		assert.Equal(t, store.MessagePolicyClassViolation, d.Class)
+	}
+}
+
+// TestMessagePolicyGate_TwoAgentDirectConvNoExplicitRecipient_RoutesToExecuteAgentDMNeverReachesH2
+// pins outbound routing (test 3): a two-agent direct conversation addressed with
+// no explicit recipient goes to ExecuteAgentDM and never reaches H2.
+func TestMessagePolicyGate_TwoAgentDirectConvNoExplicitRecipient_RoutesToExecuteAgentDMNeverReachesH2(t *testing.T) {
+	f := newMpgFixture(t, true)
+	ctx := context.Background()
+
+	agentDMKey, err := messages.DMConversationKey("agent", f.sender.ID, "agent", f.peerAgent.ID)
+	require.NoError(t, err)
+	agentDMConv, err := f.s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind:        "direct",
+		Surface:     "native",
+		ExternalRef: agentDMKey,
+		DriftState:  "active",
+	})
+	require.NoError(t, err)
+
+	// Seed a catch-all enforce policy AND arm the store fault switch on
+	// ListMessagePolicies / CreateMessagePolicyDecision so reaching H2 (either
+	// covered or uncovered) would be immediately observable.
+	pol := &store.MessagePolicy{
+		ProjectID: f.project.ID,
+		Name:      "reject-everything-at-h2",
+		Enabled:   true,
+		Mode:      store.MessagePolicyModeEnforce,
+		Scope: store.MessagePolicyScope{
+			Surfaces: []string{
+				store.MessagePolicySurfaceAgentToUser,
+				store.MessagePolicySurfaceAgentToConversation,
+			},
+			Sender: store.MessagePolicySenderSelector{AllAgents: true},
+		},
+		ViolationRule: `true`,
+		OnFailed:      messagepolicy.OutcomeReject,
+	}
+	require.NoError(t, f.s.CreateMessagePolicy(ctx, pol))
+	f.faultSwitch.Arm()
+
+	rr := f.sendOutbound(t, OutboundMessageRequest{
+		ConversationRef: "conv:" + agentDMConv.ID,
+		Msg:             "Do you want Option A?",
+		Type:            "instruction",
+	})
+	require.Equal(t, http.StatusOK, rr.Code, "two-agent direct conversation must succeed via ExecuteAgentDM; body: %s", rr.Body.String())
+
+	calls := f.dispatcher.getCalls()
+	require.Len(t, calls, 1, "expected 1 ExecuteAgentDM dispatch call")
+	assert.Equal(t, f.peerAgent.ID, calls[0].Agent.ID)
+	assert.Zero(t, f.recordChannel.count(), "agent DM must not deliver through user channels")
+
+	// H2 was never reached at all (neither policy load nor H2 uncovered counter).
+	assert.Zero(t, f.faultWrapper.listCalls.Load(), "ExecuteAgentDM path must never reach H2 ListMessagePolicies")
+	assert.Zero(t, f.faultWrapper.decisionCalls.Load(), "ExecuteAgentDM path must never persist H2 policy decisions")
+	assert.Zero(t, f.srv.messagePolicyUncovered.Load(), "ExecuteAgentDM path returns before H2 and must not hit H2 uncovered fallback")
+
+	msgs, err := f.s.ListMessages(ctx, store.MessageFilter{SenderID: f.sender.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, msgs.Items, 1)
+	assert.Equal(t, f.peerAgent.ID, msgs.Items[0].RecipientID)
+	assert.Equal(t, "agent:"+f.peerAgent.Slug, msgs.Items[0].Recipient)
+	assert.Equal(t, agentDMConv.ID, msgs.Items[0].ConversationID)
+}
+
+type mpgLockedWriter struct {
+	mu *sync.Mutex
+	w  *bytes.Buffer
+}
+
+func (lw *mpgLockedWriter) Write(p []byte) (int, error) {
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	return lw.w.Write(p)
+}
+
 func mpgSeedShadowBenchmarkPolicies(tb testing.TB, ctx context.Context, s store.Store, projectID string) []*store.MessagePolicy {
 	tb.Helper()
 	specs := []struct {
@@ -2421,8 +2798,9 @@ func TestMessagePolicyGate_ShadowOverheadP99Under5ms(t *testing.T) {
 		Type:      "input-needed",
 	}
 	route := &routingResult{
-		Recipient:   "user:" + f.alice.Email,
-		RecipientID: f.alice.ID,
+		Recipient:    "user:" + f.alice.Email,
+		RecipientID:  f.alice.ID,
+		UserResolved: true,
 	}
 	evalInput := &h2PolicyInput{
 		agent:   f.sender,
@@ -2512,8 +2890,9 @@ func BenchmarkMessagePolicyGate_ShadowOnly(b *testing.B) {
 		Type:      "input-needed",
 	}
 	route := &routingResult{
-		Recipient:   "user:" + alice.Email,
-		RecipientID: alice.ID,
+		Recipient:    "user:" + alice.Email,
+		RecipientID:  alice.ID,
+		UserResolved: true,
 	}
 	evalInput := &h2PolicyInput{
 		agent:   sender,
