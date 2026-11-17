@@ -53,28 +53,6 @@ func New(engine *ruleengine.Engine) (*Evaluator, error) {
 	return &Evaluator{engine: engine}, nil
 }
 
-// NewDefault builds a standalone *Evaluator backed by a fresh *ruleengine.Engine
-// with the message_policy v1 CEL environment registered and ConsumerName granted
-// DialectCEL (no I/O). Intended for unit tests.
-func NewDefault() (*Evaluator, error) {
-	celEng, err := NewCELEngine()
-	if err != nil {
-		return nil, err
-	}
-	celDialect, err := ruleengine.NewCELDialect(celEng)
-	if err != nil {
-		return nil, err
-	}
-	re := ruleengine.NewEngine()
-	if err := re.Register(celDialect); err != nil {
-		return nil, err
-	}
-	if err := re.AllowConsumerDialects(ConsumerName, ruleengine.Grant(ruleengine.DialectCEL)); err != nil {
-		return nil, err
-	}
-	return New(re)
-}
-
 // NewSendBudget creates a 250ms aggregate per-send BudgetTracker (brief §1).
 func NewSendBudget() *ruleengine.BudgetTracker {
 	return ruleengine.NewBudgetTracker(DefaultSendBudget)
