@@ -17,7 +17,7 @@
 /**
  * Choices web cards (ptone/scion#7673): the answer endpoint and the merge
  * rules that keep a card's decision views current across history pages, live
- * chat messages and `chat.choice.updated` events.
+ * chat messages and `chat.decision.updated` events.
  */
 
 import { apiFetch, apiErrorMessageFromBody } from './api.js';
@@ -112,43 +112,43 @@ export function patchDecisions(
   return changed ? next : (decisions as DecisionView[]);
 }
 
-/** The choice side maps of a chat history response. */
+/** The decision side maps of a chat history response. */
 export interface ChoiceHistoryMaps {
   messageDecisions?: Record<string, DecisionView[]>;
-  messageChoiceIntros?: Record<string, string>;
-  messageChoiceAnswerModes?: Record<string, ChoiceAnswerMode>;
-  messageChoiceResponses?: Record<string, ChoiceResponseView>;
-  messageChoiceResponseSets?: Record<string, ChoiceResponseSetView>;
+  messageDecisionIntros?: Record<string, string>;
+  messageDecisionAnswerModes?: Record<string, ChoiceAnswerMode>;
+  messageDecisionResponses?: Record<string, ChoiceResponseView>;
+  messageDecisionResponseSets?: Record<string, ChoiceResponseSetView>;
 }
 
 /**
- * Copies the choice side maps of a history response onto its messages.
+ * Copies the decision side maps of a history response onto its messages.
  * The hub omits the maps while web.decisions is off, which leaves the
  * messages untouched.
  */
 export function applyChoiceHistoryMaps(items: Message[], data: ChoiceHistoryMaps): void {
   const decisions = data.messageDecisions;
-  const intros = data.messageChoiceIntros;
-  const modes = data.messageChoiceAnswerModes;
-  const responses = data.messageChoiceResponses;
-  const responseSets = data.messageChoiceResponseSets;
+  const intros = data.messageDecisionIntros;
+  const modes = data.messageDecisionAnswerModes;
+  const responses = data.messageDecisionResponses;
+  const responseSets = data.messageDecisionResponseSets;
   if (!decisions && !intros && !modes && !responses && !responseSets) return;
   for (const m of items) {
     const d = decisions?.[m.id];
     if (d) m.decisions = d;
     const intro = intros?.[m.id];
-    if (intro !== undefined) m.choiceIntro = intro;
+    if (intro !== undefined) m.decisionIntro = intro;
     const mode = modes?.[m.id];
     if (mode) m.answerMode = mode;
     const r = responses?.[m.id];
-    if (r) m.choiceResponse = r;
+    if (r) m.decisionResponse = r;
     const rs = responseSets?.[m.id];
-    if (rs) m.choiceResponseSet = rs;
+    if (rs) m.decisionResponseSet = rs;
   }
 }
 
 /**
- * Keeps the choice fields of a message already shown when the same message
+ * Keeps the decision fields of a message already shown when the same message
  * arrives again: the newer decision views per row (out-of-order guard), and
  * the held fields when the incoming copy carries none.
  */
@@ -156,8 +156,8 @@ export function carryChoiceFields(existing: Message | undefined, incoming: Messa
   if (!existing?.decisions) return;
   if (!incoming.decisions) {
     incoming.decisions = existing.decisions;
-    if (incoming.choiceIntro === undefined && existing.choiceIntro !== undefined) {
-      incoming.choiceIntro = existing.choiceIntro;
+    if (incoming.decisionIntro === undefined && existing.decisionIntro !== undefined) {
+      incoming.decisionIntro = existing.decisionIntro;
     }
     if (!incoming.answerMode && existing.answerMode) incoming.answerMode = existing.answerMode;
     return;
@@ -290,7 +290,7 @@ export type AnswerDecisionSetResult =
     };
 
 /**
- * POST /api/v1/choice-prompts/{messageId}/answers for a set prompt
+ * POST /api/v1/decision-prompts/{messageId}/answers for a set prompt
  * (design §4.3). A network failure resolves as status 0.
  */
 export async function answerDecisionSet(
@@ -301,7 +301,7 @@ export async function answerDecisionSet(
 ): Promise<AnswerDecisionSetResult> {
   let res: Response;
   try {
-    res = await apiFetch(`/api/v1/choice-prompts/${encodeURIComponent(messageId)}/answers`, {
+    res = await apiFetch(`/api/v1/decision-prompts/${encodeURIComponent(messageId)}/answers`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

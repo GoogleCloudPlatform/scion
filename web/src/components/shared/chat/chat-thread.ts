@@ -1107,7 +1107,7 @@ export class ScionChatThread extends LitElement {
   /** Bound listener for v2 SSE message-deleted events. */
   private _v2DeleteHandler = this.handleV2MessageDeleted.bind(this);
 
-  /** Bound listener for `chat.choice.updated` (the `choice-updated` state event). */
+  /** Bound listener for `chat.decision.updated` (the `decision-updated` state event). */
   private _choiceUpdatedHandler = this.handleChoiceUpdated.bind(this);
 
   private eventSource: EventSource | null = null;
@@ -2056,7 +2056,7 @@ export class ScionChatThread extends LitElement {
     stateManager.removeEventListener('chat-read-state-updated', this._v2ReadStateHandler);
     stateManager.removeEventListener('chat-message-edited', this._v2EditHandler);
     stateManager.removeEventListener('chat-message-deleted', this._v2DeleteHandler);
-    stateManager.removeEventListener('choice-updated', this._choiceUpdatedHandler);
+    stateManager.removeEventListener('decision-updated', this._choiceUpdatedHandler);
 
     // Clear read-receipt state — it belongs to the conversation we just left.
     this.clearSeenState();
@@ -2154,7 +2154,7 @@ export class ScionChatThread extends LitElement {
     stateManager.removeEventListener('chat-read-state-updated', this._v2ReadStateHandler);
     stateManager.removeEventListener('chat-message-edited', this._v2EditHandler);
     stateManager.removeEventListener('chat-message-deleted', this._v2DeleteHandler);
-    stateManager.removeEventListener('choice-updated', this._choiceUpdatedHandler);
+    stateManager.removeEventListener('decision-updated', this._choiceUpdatedHandler);
     this.clearSeenState();
     // Clean up typing timers
     for (const entry of this.typingUsers.values()) {
@@ -2345,7 +2345,7 @@ export class ScionChatThread extends LitElement {
       stateManager.removeEventListener('chat-read-state-updated', this._v2ReadStateHandler);
       stateManager.removeEventListener('chat-message-edited', this._v2EditHandler);
       stateManager.removeEventListener('chat-message-deleted', this._v2DeleteHandler);
-      stateManager.removeEventListener('choice-updated', this._choiceUpdatedHandler);
+      stateManager.removeEventListener('decision-updated', this._choiceUpdatedHandler);
     }
   }
 
@@ -2780,7 +2780,7 @@ export class ScionChatThread extends LitElement {
     stateManager.addEventListener('chat-read-state-updated', this._v2ReadStateHandler);
     stateManager.addEventListener('chat-message-edited', this._v2EditHandler);
     stateManager.addEventListener('chat-message-deleted', this._v2DeleteHandler);
-    stateManager.addEventListener('choice-updated', this._choiceUpdatedHandler);
+    stateManager.addEventListener('decision-updated', this._choiceUpdatedHandler);
     // Seed the typing self-filter. The scope may not exist yet — see selfUserId.
     const scope = stateManager.currentScope;
     if (scope && scope.type === 'chat') {
@@ -2845,12 +2845,12 @@ export class ScionChatThread extends LitElement {
       attachments?: import('./chat-message.js').AttachmentRefInfo[];
       /** metadata.artifacts: the message's artifact refs, ids and versions only. */
       metadata?: { artifacts?: string };
-      // Choice fields (web.decisions; absent while off).
+      // Decision fields (web.decisions; absent while off).
       decisions?: DecisionView[];
-      choiceIntro?: string;
+      decisionIntro?: string;
       answerMode?: ChoiceAnswerMode;
-      choiceResponse?: ChoiceResponseView;
-      choiceResponseSet?: ChoiceResponseSetView;
+      decisionResponse?: ChoiceResponseView;
+      decisionResponseSet?: ChoiceResponseSetView;
     };
     const detail = (e as CustomEvent).detail as
       | ({ data?: ChatEventData } & ChatEventData)
@@ -2925,10 +2925,12 @@ export class ScionChatThread extends LitElement {
         ...(eventData.broadcasted != null ? { broadcasted: eventData.broadcasted } : {}),
         ...(eventData.read != null ? { read: eventData.read } : {}),
         ...(eventData.decisions ? { decisions: eventData.decisions } : {}),
-        ...(eventData.choiceIntro != null ? { choiceIntro: eventData.choiceIntro } : {}),
+        ...(eventData.decisionIntro != null ? { decisionIntro: eventData.decisionIntro } : {}),
         ...(eventData.answerMode ? { answerMode: eventData.answerMode } : {}),
-        ...(eventData.choiceResponse ? { choiceResponse: eventData.choiceResponse } : {}),
-        ...(eventData.choiceResponseSet ? { choiceResponseSet: eventData.choiceResponseSet } : {}),
+        ...(eventData.decisionResponse ? { decisionResponse: eventData.decisionResponse } : {}),
+        ...(eventData.decisionResponseSet
+          ? { decisionResponseSet: eventData.decisionResponseSet }
+          : {}),
       };
       // Update attachment map BEFORE mergeMessages so the triggered re-render
       // already sees the refs. v2AttachmentMap is not @state() — writing it
@@ -4194,7 +4196,7 @@ export class ScionChatThread extends LitElement {
   }
 
   /**
-   * SSE handler for chat.choice.updated: patches the row of a loaded
+   * SSE handler for chat.decision.updated: patches the row of a loaded
    * prompt (design §4.4).
    */
   private handleChoiceUpdated(e: Event): void {
@@ -6402,7 +6404,7 @@ export class ScionChatThread extends LitElement {
     // Walk the composed path up to the message host so controls inside nested
     // shadow roots (<scion-chat-choices>, <sl-button>, <sl-icon>) are
     // recognized instead of stopping at an inner shadow boundary.
-    // `summary` toggles a <details> (a set's choice-response answers).
+    // `summary` toggles a <details> (a set's decision-response answers).
     for (const node of e.composedPath()) {
       if (node === e.currentTarget) break;
       if (
@@ -7788,11 +7790,11 @@ export class ScionChatThread extends LitElement {
             channel=${msg.channel || ''}
             messageType=${msg.type || ''}
             .decisions=${msg.decisions}
-            .choiceIntro=${msg.choiceIntro}
+            .decisionIntro=${msg.decisionIntro}
             .answerMode=${msg.answerMode}
             .answerability=${this.answerabilityFor(msg)}
-            .choiceResponse=${msg.choiceResponse}
-            .choiceResponseSet=${msg.choiceResponseSet}
+            .decisionResponse=${msg.decisionResponse}
+            .decisionResponseSet=${msg.decisionResponseSet}
             @choice-answered=${this.handleChoiceAnswered}
             @choice-jump=${this.handleChoiceJump}
             @choice-answer-denied=${this.handleChoiceAnswerDenied}

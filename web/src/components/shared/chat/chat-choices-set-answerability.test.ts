@@ -287,7 +287,7 @@ describe('403 on the set submit', () => {
     submit(el).click();
     await settle(el);
 
-    expect(apiFetch.mock.calls[0]![0]).toBe('/api/v1/choice-prompts/m1/answers');
+    expect(apiFetch.mock.calls[0]![0]).toBe('/api/v1/decision-prompts/m1/answers');
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
       messageId: 'm1',

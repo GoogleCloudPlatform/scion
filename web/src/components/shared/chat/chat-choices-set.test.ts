@@ -372,7 +372,7 @@ describe('set card, submit', () => {
     await click(el, submit(el));
 
     const [path, init] = apiFetch.mock.calls[0]!;
-    expect(path).toBe('/api/v1/choice-prompts/m1/answers');
+    expect(path).toBe('/api/v1/decision-prompts/m1/answers');
     expect(init?.method).toBe('POST');
     const body = JSON.parse(init!.body as string);
     expect(body.answers).toEqual([

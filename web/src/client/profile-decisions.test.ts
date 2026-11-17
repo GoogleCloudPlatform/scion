@@ -408,11 +408,11 @@ describe('profile-decisions API client (R1, R3, R4, R5, §7)', () => {
     }
   });
 
-  it('matches real Hub choice-prompt chat events and ignores plain messages or dead message.choices shapes', () => {
+  it('matches real Hub decision-prompt chat events and ignores plain messages, legacy choice-prompt, or dead message.choices shapes', () => {
     expect(
       isChoicePromptMessageEvent(
         new CustomEvent('chat-message-received', {
-          detail: { data: { id: 'm1', type: 'choice-prompt' } },
+          detail: { data: { id: 'm1', type: 'decision-prompt' } },
         })
       )
     ).toBe(true);
@@ -423,6 +423,13 @@ describe('profile-decisions API client (R1, R3, R4, R5, §7)', () => {
         })
       )
     ).toBe(true);
+    expect(
+      isChoicePromptMessageEvent(
+        new CustomEvent('chat-message-received', {
+          detail: { data: { id: 'm-legacy', type: 'choice-prompt' } },
+        })
+      )
+    ).toBe(false);
     expect(
       isChoicePromptMessageEvent(
         new CustomEvent('chat-message-received', {
@@ -452,8 +459,8 @@ describe('profile-decisions API client (R1, R3, R4, R5, §7)', () => {
       expect(getCachedProfileDecisionProbe()).toEqual({ available: true, waitingOnYou: 3 });
       expect(getLastKnownProfileDecisionAvailability()).toBe(true);
 
-      // Unmounted choice-updated marks cache dirty without issuing a background fetch
-      stateManager.dispatchEvent(new CustomEvent('choice-updated', { detail: {} }));
+      // Unmounted decision-updated marks cache dirty without issuing a background fetch
+      stateManager.dispatchEvent(new CustomEvent('decision-updated', { detail: {} }));
       expect(apiFetch).toHaveBeenCalledTimes(1);
       expect(getCachedProfileDecisionProbe()).toBeNull();
       expect(getLastKnownProfileDecisionAvailability()).toBe(true);
@@ -467,7 +474,7 @@ describe('profile-decisions API client (R1, R3, R4, R5, §7)', () => {
       expect(apiFetch).toHaveBeenCalledTimes(2);
       expect(getCachedProfileDecisionProbe()).toEqual({ available: true, waitingOnYou: 1 });
 
-      // Choice-prompt chat message also marks cache dirty; plain chat message does not
+      // Decision-prompt chat message also marks cache dirty; plain chat message does not
       stateManager.dispatchEvent(
         new CustomEvent('chat-message-received', {
           detail: { data: { id: 'm-plain', type: 'message' } },
@@ -477,7 +484,9 @@ describe('profile-decisions API client (R1, R3, R4, R5, §7)', () => {
 
       stateManager.dispatchEvent(
         new CustomEvent('chat-message-received', {
-          detail: { data: { id: 'm-choice', type: 'choice-prompt', decisions: [{ rowId: 'r1' }] } },
+          detail: {
+            data: { id: 'm-choice', type: 'decision-prompt', decisions: [{ rowId: 'r1' }] },
+          },
         })
       );
       expect(getCachedProfileDecisionProbe()).toBeNull();

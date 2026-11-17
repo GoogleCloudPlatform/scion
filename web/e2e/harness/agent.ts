@@ -216,13 +216,13 @@ export interface AgentRequestResult<T = unknown> {
 }
 
 /**
- * How the hub handled agent delivery for a stored `choice-response` message
+ * How the hub handled agent delivery for a stored `decision-response` message
  * (assumes a containerless/absent agent; against a live running container,
  * delivered responses also stay `dispatchState: "dispatched"`):
  *   - `'attempted_delivery'`: the hub called `deliverChoiceResponse` /
  *     `deliverChoiceSetResponse` to the containerless runtime broker, which
  *     rejected/failed container delivery because no container is running.
- *   - `'logged_without_delivery'`: the stored `choice-response` row is not (yet)
+ *   - `'logged_without_delivery'`: the stored `decision-response` row is not (yet)
  *     marked `failed` (`dispatchState: "dispatched"`). Once broker flush has
  *     settled for a containerless agent, this indicates the hub skipped broker
  *     delivery (for example `outcome == "confirm"` on a matching interpreted
@@ -253,9 +253,9 @@ export interface ChoiceResponseInspection {
 }
 
 export interface WaitForChoiceResponseSelector {
-  /** Exact `choice-response` message UUID, when known. */
+  /** Exact `decision-response` message UUID, when known. */
   responseMessageId?: string;
-  /** Originating choice-prompt message UUID (`sendRes.message_id`). */
+  /** Originating decision-prompt message UUID (`sendRes.message_id`). */
   promptMessageId?: string;
 }
 
@@ -284,7 +284,7 @@ export interface AgentSender {
   sendChoicePrompt(options: SendChoicePromptOptions): Promise<AgentOutboundSendResponse>;
 
   /**
-   * Lists `choice-response` rows in `conversationKey` (`topicId` or `dm:...`)
+   * Lists `decision-response` rows in `conversationKey` (`topicId` or `dm:...`)
    * from `GET /api/v1/chat/conversations/{conversationKey}/messages` and
    * classifies each row's agent-delivery behavior.
    */
@@ -294,11 +294,11 @@ export interface AgentSender {
   ): Promise<ChoiceResponseInspection[]>;
 
   /**
-   * Polls `inspectChoiceResponses` until the selected `choice-response` row
+   * Polls `inspectChoiceResponses` until the selected `decision-response` row
    * settles into a non-buffered delivery outcome (`'attempted_delivery'` or
    * `'agent_unreachable'`). Pass either a `responseMessageId` string or
    * `{ responseMessageId?, promptMessageId? }`. When matching by
-   * `promptMessageId`, selects the newest matching `choice-response` row
+   * `promptMessageId`, selects the newest matching `decision-response` row
    * (`ListMessages` orders `DESC`).
    *
    * Assumes a containerless/absent agent (`'logged_without_delivery'` means
@@ -341,8 +341,8 @@ interface RawHistoryMessage {
 
 interface RawChatHistoryResponse {
   messages?: RawHistoryMessage[];
-  messageChoiceResponses?: Record<string, ChoiceResponseView>;
-  messageChoiceResponseSets?: Record<string, ChoiceResponseSetView>;
+  messageDecisionResponses?: Record<string, ChoiceResponseView>;
+  messageDecisionResponseSets?: Record<string, ChoiceResponseSetView>;
 }
 
 /**
@@ -471,7 +471,7 @@ export function canonicalAgentUserDMKey(agentId: string, userId: string): string
   return `dm:agent:${agentId}:user:${userId}`;
 }
 
-/** Classifies a stored `choice-response` message's dispatch state and failure reason. */
+/** Classifies a stored `decision-response` message's dispatch state and failure reason. */
 export function classifyChoiceResponseDelivery(
   dispatchState: string | undefined,
   dispatchFailureReason: string | undefined
@@ -636,8 +636,8 @@ export async function createTestAgent(
     const payload: Record<string, unknown> = {
       ...buildOutboundAddressing(choiceOpts),
       msg: choiceOpts.msg ?? '',
-      choices: choiceOpts.choices,
-      ...(choiceOpts.choicesUpdate ? { choices_update: true } : {}),
+      decisions: choiceOpts.choices,
+      ...(choiceOpts.choicesUpdate ? { decisions_update: true } : {}),
     };
     return sendOutbound('agent.sendChoicePrompt', payload);
   };
@@ -661,11 +661,11 @@ export async function createTestAgent(
     }
     const history = parseBody<RawChatHistoryResponse>(text);
     const messages = history.messages ?? [];
-    const singleViews = history.messageChoiceResponses ?? {};
-    const setViews = history.messageChoiceResponseSets ?? {};
+    const singleViews = history.messageDecisionResponses ?? {};
+    const setViews = history.messageDecisionResponseSets ?? {};
 
     return messages
-      .filter((m) => m.type === 'choice-response')
+      .filter((m) => m.type === 'decision-response')
       .map((m) => {
         const dispatchState = m.dispatchState ?? '';
         const dispatchFailureReason = m.dispatchFailureReason ?? '';

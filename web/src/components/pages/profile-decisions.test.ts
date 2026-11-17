@@ -729,9 +729,9 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
       expect(el.shadowRoot?.querySelectorAll('[data-prompt-card]')).toHaveLength(1);
       expect(el.shadowRoot?.querySelector('[data-pending-group="proj-2"]')).not.toBeNull();
 
-      // Also test SSE choice-updated refresh
+      // Also test SSE decision-updated refresh
       stateManager.dispatchEvent(
-        new CustomEvent('choice-updated', {
+        new CustomEvent('decision-updated', {
           detail: { data: { projectId: 'proj-2', messageId: 'm-page2' } },
         })
       );
@@ -884,9 +884,9 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
     );
     await settle(el, 25);
 
-    // Fire an SSE choice-updated while still on Made -> must skip off-tab pending live load
+    // Fire an SSE decision-updated while still on Made -> must skip off-tab pending live load
     const urlsBeforeSse = requestedUrls.length;
-    stateManager.dispatchEvent(new CustomEvent('choice-updated', { detail: {} }));
+    stateManager.dispatchEvent(new CustomEvent('decision-updated', { detail: {} }));
     await settle(el, 120);
     const sseUrls = requestedUrls.slice(urlsBeforeSse);
     expect(sseUrls.some((u) => u.includes('tab=pending'))).toBe(false);
@@ -1119,7 +1119,7 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
     ]);
   });
 
-  it('subscribes to the profile SSE scope (including user.<id>.chat.>) so DM choice.updated events refresh Waiting on you', async () => {
+  it('subscribes to the profile SSE scope (including user.<id>.chat.>) so DM decision.updated events refresh Waiting on you', async () => {
     setFeatureFlag(DECISIONS_FLAG, true);
 
     const sseSources: FakeEventSource[] = [];
@@ -1141,7 +1141,7 @@ describe('<scion-page-profile-decisions> (ptone/scion#7996)', () => {
     (
       stateManager as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }
     ).handleUpdate({
-      subject: 'user.u-me.chat.choice.updated',
+      subject: 'user.u-me.chat.decision.updated',
       data: {
         messageId: 'm-1',
         threadId: 'dm:agent:release-bot:user:u-me',

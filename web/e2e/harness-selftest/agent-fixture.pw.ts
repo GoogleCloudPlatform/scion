@@ -180,19 +180,19 @@ test('createTestAgent provisions with provisionOnly, authenticates, and inspects
             messages: [
               {
                 id: 'resp-confirm',
-                type: 'choice-response',
+                type: 'decision-response',
                 dispatchState: 'dispatched',
                 dispatchFailureReason: '',
               },
               {
                 id: 'resp-override',
-                type: 'choice-response',
+                type: 'decision-response',
                 dispatchState: pollCount >= 2 ? 'failed' : 'dispatched',
                 dispatchFailureReason:
                   pollCount >= 2 ? 'broker delivery failed: missing container' : '',
               },
             ],
-            messageChoiceResponses: {
+            messageDecisionResponses: {
               'resp-confirm': {
                 promptMessageId: 'msg-confirm-prompt',
                 rowId: 'row-c',
@@ -249,7 +249,7 @@ test('createTestAgent provisions with provisionOnly, authenticates, and inspects
     expect(sendRes.message_id).toBe('msg-prompt-1');
     expect(seenCalls[2]?.body).toMatchObject({
       conversation_ref: 'conv:conv-1',
-      choices: [{ question: 'Proceed?', choices: ['Yes', 'No'] }],
+      decisions: [{ question: 'Proceed?', choices: ['Yes', 'No'] }],
     });
 
     // In practice on a containerless agent, polling until the override settles

@@ -15,10 +15,10 @@
  */
 
 /**
- * Choice prompts in the thread (ptone/scion#7673, design §4.1, §4.4): the
+ * Decision prompts in the thread (ptone/scion#7673, design §4.1, §4.4): the
  * double gate (hub fields and the web.decisions browser flag), the
  * history side maps and live chat.message fields, and the version-guarded
- * patch from `choice-updated` (another tab's answer over SSE) and from the
+ * patch from `decision-updated` (another tab's answer over SSE) and from the
  * card's own `choice-answered`.
  */
 
@@ -111,7 +111,7 @@ function prompt(id = 'p1') {
     recipient: '',
     recipientId: '',
     msg: FALLBACK,
-    type: 'choice-prompt',
+    type: 'decision-prompt',
     agentId: 'a1',
     createdAt: '2026-11-12T15:41:00Z',
     threadId: KEY,
@@ -166,7 +166,7 @@ function bodyText(msgEl: HTMLElement): string {
 }
 
 function choiceUpdated(data: Record<string, unknown>): void {
-  stateManager.dispatchEvent(new CustomEvent('choice-updated', { detail: { state: {}, data } }));
+  stateManager.dispatchEvent(new CustomEvent('decision-updated', { detail: { state: {}, data } }));
 }
 
 beforeEach(() => {
@@ -174,8 +174,8 @@ beforeEach(() => {
   history = {
     messages: [prompt()],
     messageDecisions: { p1: [decision()] },
-    messageChoiceIntros: { p1: 'Intro text' },
-    messageChoiceAnswerModes: { p1: 'single' },
+    messageDecisionIntros: { p1: 'Intro text' },
+    messageDecisionAnswerModes: { p1: 'single' },
   };
   apiFetch.mockReset();
   apiFetch.mockImplementation((path) => {
@@ -222,7 +222,22 @@ describe('choice prompt rendering', () => {
     expect(bodyText(el)).toContain('Ship it?');
   });
 
-  it('renders the card for a live chat.message with inline choice fields', async () => {
+  it('renders a legacy choice-prompt row as fallback markdown (S2 clean break)', async () => {
+    history = {
+      messages: [{ ...prompt('p-legacy'), type: 'choice-prompt' }],
+      messageDecisions: { 'p-legacy': [decision({ messageId: 'p-legacy' })] },
+      messageDecisionIntros: { 'p-legacy': 'Intro text' },
+      messageDecisionAnswerModes: { 'p-legacy': 'single' },
+    };
+    const thread = await open();
+    const el = await messageEl(thread, 'p-legacy');
+
+    expect(cardOf(el)).toBeNull();
+    expect(bodyText(el)).toContain('Ship it?');
+    expect(el.shadowRoot!.querySelector('.bubble.choice')).toBeNull();
+  });
+
+  it('renders the card for a live chat.message with inline decision fields', async () => {
     history = { messages: [] };
     const thread = await open();
     stateManager.dispatchEvent(
@@ -233,7 +248,7 @@ describe('choice prompt rendering', () => {
             ...prompt('p2'),
             conversationKey: KEY,
             decisions: [decision({ messageId: 'p2', rowId: 'row-2' })],
-            choiceIntro: 'Live intro',
+            decisionIntro: 'Live intro',
             answerMode: 'single',
           },
         },
@@ -249,7 +264,7 @@ describe('choice prompt rendering', () => {
   });
 });
 
-describe('choice-updated', () => {
+describe('decision-updated', () => {
   it('patches the card when another tab answers (SSE)', async () => {
     const thread = await open();
     const el = await messageEl(thread);
@@ -331,8 +346,8 @@ describe('set prompts and jump links', () => {
     history = {
       messages: [prompt()],
       messageDecisions: { p1: [decision(), noDefault] },
-      messageChoiceIntros: { p1: 'Intro text' },
-      messageChoiceAnswerModes: { p1: 'set' },
+      messageDecisionIntros: { p1: 'Intro text' },
+      messageDecisionAnswerModes: { p1: 'set' },
     };
     const thread = await open();
     const el = await messageEl(thread);
@@ -350,7 +365,7 @@ describe('set prompts and jump links', () => {
     history = {
       messages: [prompt()],
       messageDecisions: { p1: [decision(), decision({ rowId: 'row-2', key: '17' })] },
-      messageChoiceAnswerModes: { p1: 'set' },
+      messageDecisionAnswerModes: { p1: 'set' },
     };
     const thread = await open();
     const el = await messageEl(thread);
@@ -420,8 +435,8 @@ describe('history choice maps on the other load paths', () => {
     history = {
       messages: [prompt('p2')],
       messageDecisions: { p2: [decision({ messageId: 'p2', rowId: 'row-2' })] },
-      messageChoiceIntros: { p2: 'Backfilled intro' },
-      messageChoiceAnswerModes: { p2: 'single' },
+      messageDecisionIntros: { p2: 'Backfilled intro' },
+      messageDecisionAnswerModes: { p2: 'single' },
     };
     stateManager.dispatchEvent(new CustomEvent('chat-message-received', { detail: undefined }));
     await vi.waitFor(async () => {
@@ -442,8 +457,8 @@ describe('history choice maps on the other load paths', () => {
           json({
             messages: [prompt('p9')],
             messageDecisions: { p9: [decision({ messageId: 'p9', rowId: 'row-9', version: 2 })] },
-            messageChoiceIntros: { p9: 'Version two' },
-            messageChoiceAnswerModes: { p9: 'single' },
+            messageDecisionIntros: { p9: 'Version two' },
+            messageDecisionAnswerModes: { p9: 'single' },
           })
         );
       }
@@ -517,8 +532,8 @@ describe('mobile touch on choice cards (ptone/scion#7839)', () => {
           }),
         ],
       },
-      messageChoiceIntros: { 'p-plain': 'Plain', 'p-desc': 'With descriptions' },
-      messageChoiceAnswerModes: { 'p-plain': 'single', 'p-desc': 'single' },
+      messageDecisionIntros: { 'p-plain': 'Plain', 'p-desc': 'With descriptions' },
+      messageDecisionAnswerModes: { 'p-plain': 'single', 'p-desc': 'single' },
     };
 
     const thread = await open();

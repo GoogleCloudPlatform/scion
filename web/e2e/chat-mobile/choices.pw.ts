@@ -346,7 +346,7 @@ for (const theme of ['light', 'dark'] as const) {
         '17': ['a', 'a · Extend input-needed'],
         'ship-now': ['no', 'No'],
       };
-      await page.route('**/api/v1/choice-prompts/*/answers', async (route) => {
+      await page.route('**/api/v1/decision-prompts/*/answers', async (route) => {
         body = route.request().postDataJSON() as typeof body;
         await route.fulfill({
           json: {
@@ -418,7 +418,7 @@ for (const theme of ['light', 'dark'] as const) {
       await c.locator('.row[data-row="prompt-set-d234"] [data-choice="no"]').click();
       await c.locator('.row[data-row="prompt-set-17"] [data-choice="a"]').click();
       await c.locator('.row[data-row="prompt-set-ship-now"] [data-choice="no"]').click();
-      await page.route('**/api/v1/choice-prompts/*/answers', (route) =>
+      await page.route('**/api/v1/decision-prompts/*/answers', (route) =>
         route.fulfill({
           status: 409,
           json: {
@@ -557,22 +557,22 @@ for (const theme of ['light', 'dark'] as const) {
           row(
             'prompt-p21',
             0,
-            'choice-prompt',
+            'decision-prompt',
             'The release branch is green. One call before I tag it.\n\n(fallback)',
             'asker'
           ),
           row('reply-self', 2, 'instruction', 'Yes on both.', 'self'),
-          row('prompt-p26', 3, 'choice-prompt', 'RC branch check.\n\n(fallback)', 'asker'),
+          row('prompt-p26', 3, 'decision-prompt', 'RC branch check.\n\n(fallback)', 'asker'),
         ],
         messageDecisions: {
           'prompt-p21': [ownInterp],
           'prompt-p26': [secondInterp],
         },
-        messageChoiceIntros: {
+        messageDecisionIntros: {
           'prompt-p21': 'The release branch is green. One call before I tag it.',
           'prompt-p26': 'RC branch check.',
         },
-        messageChoiceAnswerModes: {
+        messageDecisionAnswerModes: {
           'prompt-p21': 'single',
           'prompt-p26': 'single',
         },
@@ -843,7 +843,7 @@ for (const theme of ['light', 'dark'] as const) {
 
       let submitted: { answers?: Array<{ decision_row_id: string; choice_id: string }> } | null =
         null;
-      await page.route('**/api/v1/choice-prompts/*/answers', async (route) => {
+      await page.route('**/api/v1/decision-prompts/*/answers', async (route) => {
         submitted = route.request().postDataJSON() as typeof submitted;
         await route.fulfill({
           json: {
@@ -1097,18 +1097,18 @@ for (const theme of ['light', 'dark'] as const) {
       const plainDecision = shipDecision('prompt-plain');
       const thread: ChoiceThread = {
         messages: [
-          row('prompt-desc', 0, 'choice-prompt', 'Strategy check.\n\n(fallback)', 'asker'),
-          row('prompt-plain', 1, 'choice-prompt', 'Release check.\n\n(fallback)', 'asker'),
+          row('prompt-desc', 0, 'decision-prompt', 'Strategy check.\n\n(fallback)', 'asker'),
+          row('prompt-plain', 1, 'decision-prompt', 'Release check.\n\n(fallback)', 'asker'),
         ],
         messageDecisions: {
           'prompt-desc': [descDecision],
           'prompt-plain': [plainDecision],
         },
-        messageChoiceIntros: {
+        messageDecisionIntros: {
           'prompt-desc': 'Strategy check.',
           'prompt-plain': 'Release check.',
         },
-        messageChoiceAnswerModes: {
+        messageDecisionAnswerModes: {
           'prompt-desc': 'single',
           'prompt-plain': 'single',
         },
