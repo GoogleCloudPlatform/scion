@@ -499,7 +499,7 @@ func TestCreateOrReuseAssignKSA_ReusableWithoutDiscovery(t *testing.T) {
 		agentLifecycleLog: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)),
 	}
 	flatSel := dispatchProfileSelection{InstanceKey: "k8s-1", RuntimeTargetID: "rt-1"}
-	client := fake.NewSimpleClientset()
+	client := fake.NewClientset()
 
 	got, sce := srv.createOrReuseAssignKSA(context.Background(), client, "agent-1", "agents-ns", "agent-worker", discoveryTestGSA, flatSel)
 	if sce != nil {

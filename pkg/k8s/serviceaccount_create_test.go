@@ -51,7 +51,7 @@ func TestEnsureConventionalServiceAccount_CreatesWithContractFields(t *testing.T
 		gsa = "scion-worker@hub-proj.iam.gserviceaccount.com"
 		ksa = "scion-worker"
 	)
-	client := fake.NewSimpleClientset()
+	client := fake.NewClientset()
 	outcome, err := EnsureConventionalServiceAccount(context.Background(), client, ns, ksa, gsa)
 	if err != nil {
 		t.Fatalf("EnsureConventionalServiceAccount: %v", err)
@@ -149,7 +149,7 @@ func TestEnsureConventionalServiceAccount_AlreadyExistsNeverModifies(t *testing.
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			client := fake.NewSimpleClientset(tc.existing.DeepCopy())
+			client := fake.NewClientset(tc.existing.DeepCopy())
 			outcome, err := EnsureConventionalServiceAccount(context.Background(), client, ns, ksa, gsa)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
@@ -179,7 +179,7 @@ func TestEnsureConventionalServiceAccount_ForbiddenAndErrors(t *testing.T) {
 	gr := schema.GroupResource{Resource: "serviceaccounts"}
 
 	t.Run("create forbidden", func(t *testing.T) {
-		client := fake.NewSimpleClientset()
+		client := fake.NewClientset()
 		client.PrependReactor("create", "serviceaccounts", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
 			return true, nil, apierrors.NewForbidden(gr, ksa, errors.New("denied"))
 		})
@@ -190,7 +190,7 @@ func TestEnsureConventionalServiceAccount_ForbiddenAndErrors(t *testing.T) {
 	})
 
 	t.Run("already exists then get forbidden", func(t *testing.T) {
-		client := fake.NewSimpleClientset(&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: ksa, Namespace: ns}})
+		client := fake.NewClientset(&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: ksa, Namespace: ns}})
 		client.PrependReactor("get", "serviceaccounts", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
 			return true, nil, apierrors.NewForbidden(gr, ksa, errors.New("get denied"))
 		})
@@ -201,7 +201,7 @@ func TestEnsureConventionalServiceAccount_ForbiddenAndErrors(t *testing.T) {
 	})
 
 	t.Run("other API error", func(t *testing.T) {
-		client := fake.NewSimpleClientset()
+		client := fake.NewClientset()
 		client.PrependReactor("create", "serviceaccounts", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
 			return true, nil, apierrors.NewInternalError(errors.New("boom"))
 		})
