@@ -51,7 +51,7 @@ func (f *choicesFixture) submitSet(t *testing.T, u *store.User, msgID, idem stri
 	if idem != "" {
 		body["idempotency_key"] = idem
 	}
-	return doRequestAsUser(t, f.srv, u, http.MethodPost, "/api/v1/choice-prompts/"+msgID+"/answers", body)
+	return doRequestAsUser(t, f.srv, u, http.MethodPost, "/api/v1/decision-prompts/"+msgID+"/answers", body)
 }
 
 // sendSetToBob sends the three-decision prompt to bob and returns the
@@ -71,7 +71,7 @@ func decodeSetResponse(t *testing.T, rr *httptest.ResponseRecorder) ChoiceSetAns
 }
 
 // Criteria 19, 22 and 23: one submit records every row with one batch id,
-// stores and delivers one choice-response listing every answer in position
+// stores and delivers one decision-response listing every answer in position
 // order with labels from the stored rows, marks the recommended choices,
 // and carries the set metadata (not v4's per-decision keys).
 func TestChoiceSetAnswer_RecordsAndDeliversOneResponse(t *testing.T) {
@@ -99,23 +99,23 @@ func TestChoiceSetAnswer_RecordsAndDeliversOneResponse(t *testing.T) {
 	ctx := context.Background()
 	m, err := f.store.GetMessage(ctx, out.ResponseMessageID)
 	require.NoError(t, err)
-	assert.Equal(t, messages.TypeChoiceResponse, m.Type)
+	assert.Equal(t, messages.TypeDecisionResponse, m.Type)
 	assert.Contains(t, m.Msg, "answered 3 decisions: D234 yes · 1 Extend · ship-now yes")
 
 	sent := f.dispatcher.getMessages()[before:]
 	require.Len(t, sent, 1, "one delivery for the whole set")
 	sm := sent[0].structured
 	require.NotNil(t, sm)
-	assert.Equal(t, messages.TypeChoiceResponse, sm.Type)
+	assert.Equal(t, messages.TypeDecisionResponse, sm.Type)
 	lines := strings.Split(sm.Msg, "\n")
 	require.Len(t, lines, 4, sm.Msg)
-	assert.Equal(t, "[choice-response] 3 decisions answered by "+f.bob.Email+" (prompt "+resp.MessageID+")", lines[0])
+	assert.Equal(t, "[decision-response] 3 decisions answered by "+f.bob.Email+" (prompt "+resp.MessageID+")", lines[0])
 	assert.Equal(t, `D234 v1 ("Ship the feature now?") answer=yes (choice 1, recommended)`, lines[1])
 	assert.Equal(t, `1 v1 ("Which approach?") answer=Extend (choice a)`, lines[2])
 	assert.Equal(t, `ship-now v1 ("Deploy today?") answer=yes (choice 1)`, lines[3])
-	assert.Equal(t, out.BatchID, sm.Metadata[messages.MetadataChoiceBatch])
-	assert.Equal(t, "D234@1=1,1@1=a,ship-now@1=1", sm.Metadata[messages.MetadataChoiceAnswers])
-	assert.Empty(t, sm.Metadata[messages.MetadataChoiceKey], "v4's per-decision keys are not set on a set response")
+	assert.Equal(t, out.BatchID, sm.Metadata[messages.MetadataDecisionBatch])
+	assert.Equal(t, "D234@1=1,1@1=a,ship-now@1=1", sm.Metadata[messages.MetadataDecisionAnswers])
+	assert.Empty(t, sm.Metadata[messages.MetadataDecisionKey], "v4's per-decision keys are not set on a set response")
 }
 
 // Criterion 22: labels come from the stored rows even when the client sends
@@ -129,7 +129,7 @@ func TestChoiceSetAnswer_LabelsFromStoredRows(t *testing.T) {
 		{"decision_row_id": r[1].RowID, "choice_id": "a", "choice_label": "HACKED"},
 		{"decision_row_id": r[2].RowID, "choice_id": "2"},
 	}}
-	rr := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/choice-prompts/"+resp.MessageID+"/answers", body)
+	rr := doRequestAsUser(t, f.srv, f.bob, http.MethodPost, "/api/v1/decision-prompts/"+resp.MessageID+"/answers", body)
 	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
 	out := decodeSetResponse(t, rr)
 	assert.Equal(t, "yes", out.Decisions[0].Decision.Label)
@@ -245,7 +245,7 @@ func TestChoiceSetAnswer_Authorization(t *testing.T) {
 	d, err := f.store.GetDecision(context.Background(), msg.RowID)
 	require.NoError(t, err)
 	promptID := d.MessageID
-	path := "/api/v1/choice-prompts/" + promptID + "/answers"
+	path := "/api/v1/decision-prompts/" + promptID + "/answers"
 	body := map[string]interface{}{"answers": []map[string]interface{}{{"decision_row_id": msg.RowID, "choice_id": "1"}}}
 
 	rr := doRequestAsUser(t, f.srv, f.outsider, http.MethodPost, path, body)
@@ -314,11 +314,11 @@ func TestChoiceSetAnswer_AllConfirmNotDelivered(t *testing.T) {
 	assert.Len(t, f.dispatcher.getMessages(), before, "an all-confirm set is not delivered")
 	m, err := f.store.GetMessage(context.Background(), out.ResponseMessageID)
 	require.NoError(t, err, "it is still logged")
-	assert.Equal(t, messages.TypeChoiceResponse, m.Type)
+	assert.Equal(t, messages.TypeDecisionResponse, m.Type)
 }
 
 // Criterion 18 and design v5 5.2: history marks set and single prompts, and
-// a set's response row carries choiceResponseSet; with the flag off both
+// a set's response row carries decisionResponseSet; with the flag off both
 // are omitted.
 func TestChoicesHistory_AnswerModeAndResponseSet(t *testing.T) {
 	f := newChoicesFixture(t)
@@ -337,9 +337,9 @@ func TestChoicesHistory_AnswerModeAndResponseSet(t *testing.T) {
 		return h
 	}
 	h := history()
-	assert.Equal(t, ChoiceAnswerModeSet, h.MessageChoiceAnswerModes[setMsg.ID])
-	assert.Equal(t, ChoiceAnswerModeSingle, h.MessageChoiceAnswerModes[singleMsg.ID])
-	crs, ok := h.MessageChoiceResponseSets[out.ResponseMessageID]
+	assert.Equal(t, ChoiceAnswerModeSet, h.MessageDecisionAnswerModes[setMsg.ID])
+	assert.Equal(t, ChoiceAnswerModeSingle, h.MessageDecisionAnswerModes[singleMsg.ID])
+	crs, ok := h.MessageDecisionResponseSets[out.ResponseMessageID]
 	require.True(t, ok)
 	assert.Equal(t, setMsg.ID, crs.PromptMessageID)
 	assert.Equal(t, out.BatchID, crs.BatchID)
@@ -347,13 +347,13 @@ func TestChoicesHistory_AnswerModeAndResponseSet(t *testing.T) {
 	assert.Equal(t, "D234", crs.Answers[0].Key, "position order")
 	assert.True(t, crs.Answers[2].MatchedDefault, "ship-now answered no, its recommended choice")
 	assert.Equal(t, store.DecisionOutcomeAnswer, crs.Answers[1].Outcome)
-	_, single := h.MessageChoiceResponses[out.ResponseMessageID]
+	_, single := h.MessageDecisionResponses[out.ResponseMessageID]
 	assert.False(t, single, "a set response is not a one-click response")
 
 	setChoicesExperiment(t, f.srv, false)
 	h = history()
-	assert.Nil(t, h.MessageChoiceAnswerModes)
-	assert.Nil(t, h.MessageChoiceResponseSets)
+	assert.Nil(t, h.MessageDecisionAnswerModes)
+	assert.Nil(t, h.MessageDecisionResponseSets)
 }
 
 // The idempotency key is scoped to the user and the prompt: in a group
@@ -436,14 +436,14 @@ func TestChoiceSetAnswer_ConcurrentOneWinner(t *testing.T) {
 	assert.Len(t, f.dispatcher.getMessages(), before+1, "one delivery")
 }
 
-// Design v5 5.2: choice.updated is published once per answered row, in
+// Design v5 5.2: decision.updated is published once per answered row, in
 // position order, and the response row's chat event carries
-// choiceResponseSet.
+// decisionResponseSet.
 func TestChoiceSetAnswer_PublishesUpdatesAndResponseSet(t *testing.T) {
 	f := newChoicesFixture(t)
 	resp := f.sendSetToBob(t)
 	r := resp.Decisions
-	updates, unsubUpdates := f.srv.events.Subscribe("user." + f.bob.ID + ".chat.choice.updated")
+	updates, unsubUpdates := f.srv.events.Subscribe("user." + f.bob.ID + ".chat.decision.updated")
 	defer unsubUpdates()
 	chat, unsubChat := f.srv.events.Subscribe("user." + f.bob.ID + ".chat.dm")
 	defer unsubChat()
@@ -453,7 +453,7 @@ func TestChoiceSetAnswer_PublishesUpdatesAndResponseSet(t *testing.T) {
 	out := decodeSetResponse(t, rr)
 
 	evts := collectEvents(updates)
-	require.Len(t, evts, 3, "one choice.updated per row")
+	require.Len(t, evts, 3, "one decision.updated per row")
 	for i, e := range evts {
 		var got struct {
 			Decision DecisionView `json:"decision"`
@@ -468,10 +468,10 @@ func TestChoiceSetAnswer_PublishesUpdatesAndResponseSet(t *testing.T) {
 		var evt UserMessageEvent
 		require.NoError(t, json.Unmarshal(e.Data, &evt))
 		if evt.ID == out.ResponseMessageID {
-			set = evt.ChoiceResponseSet
+			set = evt.DecisionResponseSet
 		}
 	}
-	require.NotNil(t, set, "the response row's chat event carries choiceResponseSet")
+	require.NotNil(t, set, "the response row's chat event carries decisionResponseSet")
 	assert.Equal(t, out.BatchID, set.BatchID)
 	assert.Equal(t, resp.MessageID, set.PromptMessageID)
 	require.Len(t, set.Answers, 3)
@@ -619,12 +619,12 @@ func TestChoiceSetAnswer_AskerGoneRecordsWithoutDelivery(t *testing.T) {
 	}
 	m, err := f.store.GetMessage(ctx, out.ResponseMessageID)
 	require.NoError(t, err)
-	assert.Equal(t, messages.TypeChoiceResponse, m.Type)
+	assert.Equal(t, messages.TypeDecisionResponse, m.Type)
 	assert.Equal(t, store.MessageDispatchFailed, m.DispatchState)
 	assert.Len(t, f.dispatcher.getMessages(), before, "nothing is sent to a gone asker")
 	// Positive control for assertNoChoiceResponse: the same thread filter
 	// finds this one response row.
-	rows, err := f.store.ListMessages(ctx, store.MessageFilter{ThreadID: f.topicID, Type: messages.TypeChoiceResponse}, store.ListOptions{Limit: 10})
+	rows, err := f.store.ListMessages(ctx, store.MessageFilter{ThreadID: f.topicID, Type: messages.TypeDecisionResponse}, store.ListOptions{Limit: 10})
 	require.NoError(t, err)
 	assert.Len(t, rows.Items, 1, "control: the thread filter sees the stored response row")
 }
@@ -678,12 +678,12 @@ func TestDecisionAnswer_AskerLookupFaultRecordsNothing(t *testing.T) {
 }
 
 // assertNoChoiceResponse checks that the fixture's topic thread holds no
-// choice-response message.
+// decision-response message.
 func (f *choicesFixture) assertNoChoiceResponse(t *testing.T) {
 	t.Helper()
-	rows, err := f.store.ListMessages(context.Background(), store.MessageFilter{ThreadID: f.topicID, Type: messages.TypeChoiceResponse}, store.ListOptions{Limit: 10})
+	rows, err := f.store.ListMessages(context.Background(), store.MessageFilter{ThreadID: f.topicID, Type: messages.TypeDecisionResponse}, store.ListOptions{Limit: 10})
 	require.NoError(t, err)
-	assert.Empty(t, rows.Items, "no choice-response row is stored")
+	assert.Empty(t, rows.Items, "no decision-response row is stored")
 }
 
 // ptone/scion#7775: ChoiceResponseSetView carries answerer identity,
@@ -711,17 +711,17 @@ func TestChoiceResponseSetView_AttributionAndOutcomes(t *testing.T) {
 		var evt UserMessageEvent
 		require.NoError(t, json.Unmarshal(e.Data, &evt))
 		if evt.ID == out.ResponseMessageID {
-			liveSet = evt.ChoiceResponseSet
+			liveSet = evt.DecisionResponseSet
 		}
 	}
-	require.NotNil(t, liveSet, "live SSE carries choiceResponseSet")
+	require.NotNil(t, liveSet, "live SSE carries decisionResponseSet")
 
 	rec := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/chat/conversations/"+f.topicID+"/messages", nil)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
 	var h chatHistoryResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &h))
-	histSet, ok := h.MessageChoiceResponseSets[out.ResponseMessageID]
-	require.True(t, ok, "history carries choiceResponseSet")
+	histSet, ok := h.MessageDecisionResponseSets[out.ResponseMessageID]
+	require.True(t, ok, "history carries decisionResponseSet")
 
 	for source, set := range map[string]ChoiceResponseSetView{"live": *liveSet, "history": histSet} {
 		assert.Equal(t, msg.ID, set.PromptMessageID, source)

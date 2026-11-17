@@ -368,17 +368,17 @@ type UserMessageEvent struct {
 	// see withChatArtifactRefs.
 	Metadata *UserMessageEventMetadata `json:"metadata,omitempty"`
 
-	// Decisions and ChoiceIntro are set on a choice-prompt row, and
-	// ChoiceResponse on a choice-response row, on the chat subjects only
+	// Decisions and DecisionIntro are set on a decision-prompt row, and
+	// DecisionResponse on a decision-response row, on the chat subjects only
 	// (design choices v4, 4.4); see withChatChoicePayload. Only the
 	// handlers of the web.decisions experiment set them.
-	Decisions      []DecisionView      `json:"decisions,omitempty"`
-	ChoiceIntro    string              `json:"choiceIntro,omitempty"`
-	ChoiceResponse *ChoiceResponseView `json:"choiceResponse,omitempty"`
-	// AnswerMode is set with Decisions, and ChoiceResponseSet on the
+	Decisions        []DecisionView      `json:"decisions,omitempty"`
+	DecisionIntro    string              `json:"decisionIntro,omitempty"`
+	DecisionResponse *ChoiceResponseView `json:"decisionResponse,omitempty"`
+	// AnswerMode is set with Decisions, and DecisionResponseSet on the
 	// response row of a set submit (design choices v5, 5.1 and 5.2).
-	AnswerMode        string                 `json:"answerMode,omitempty"`
-	ChoiceResponseSet *ChoiceResponseSetView `json:"choiceResponseSet,omitempty"`
+	AnswerMode          string                 `json:"answerMode,omitempty"`
+	DecisionResponseSet *ChoiceResponseSetView `json:"decisionResponseSet,omitempty"`
 }
 
 // UserMessageEventMetadata is the message metadata a live chat event
@@ -1023,11 +1023,11 @@ func withChatChoicePayload(evt UserMessageEvent, p *choiceEventPayload) UserMess
 	}
 	if p.Prompt != nil {
 		evt.Decisions = p.Prompt.Decisions
-		evt.ChoiceIntro = p.Prompt.Intro
+		evt.DecisionIntro = p.Prompt.Intro
 		evt.AnswerMode = p.Prompt.AnswerMode
 	}
-	evt.ChoiceResponse = p.Response
-	evt.ChoiceResponseSet = p.ResponseSet
+	evt.DecisionResponse = p.Response
+	evt.DecisionResponseSet = p.ResponseSet
 	return evt
 }
 

@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -26,16 +27,16 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// Error codes of the choice prompt send path (design 4.3, 4.12).
+// Error codes of the decision prompt send path (design 4.3, 4.12).
 const (
-	ErrCodeChoiceKeyExists     = "choice_key_exists"
+	ErrCodeDecisionKeyExists   = "decision_key_exists"
 	ErrCodeHubMintedType       = "hub_minted_type"
 	ErrCodeTooManyPending      = "too_many_pending_decisions"
 	ErrCodeDecisionKeyNotIssue = "decision_key_not_issued"
 )
 
 // rejectHubMintedType answers 400 and reports true when a client named a
-// message type only the hub may set (choice-prompt, choice-response). Every
+// message type only the hub may set (decision-prompt, decision-response). Every
 // client send path that accepts a caller-supplied type calls it before
 // anything is stored or routed (design 4.4, acceptance criterion 9).
 func rejectHubMintedType(w http.ResponseWriter, msgType string) bool {
@@ -48,7 +49,7 @@ func rejectHubMintedType(w http.ResponseWriter, msgType string) bool {
 	return true
 }
 
-// choicePromptSend is a validated choice prompt on its way through the
+// choicePromptSend is a validated decision prompt on its way through the
 // outbound-message handler: its decisions, normalized, and, once stored,
 // the store's result.
 type choicePromptSend struct {
@@ -58,20 +59,44 @@ type choicePromptSend struct {
 	result    *store.ChoicePromptResult
 }
 
-// choiceStoreError is a store failure of a choice prompt the handler answers
+// choiceStoreError is a store failure of a decision prompt the handler answers
 // with its own status and code instead of a 500.
 type choiceStoreError struct{ err error }
 
 func (e *choiceStoreError) Error() string { return e.err.Error() }
 func (e *choiceStoreError) Unwrap() error { return e.err }
 
-// prepareChoicePromptSend checks a send that carries choices, before any
+// prepareChoicePromptSend checks a send that carries decisions, before any
 // routing: the experiment (400 experiment_disabled when off, never a silent
-// drop), --update without choices, a recipient that is an agent or a
+// drop), --update without decisions, a recipient that is an agent or a
 // broadcast, attachments, and the decisions themselves. It returns nil and
 // true for an ordinary send, and false when it wrote the refusal.
-func (s *Server) prepareChoicePromptSend(w http.ResponseWriter, req *OutboundMessageRequest) (*choicePromptSend, bool) {
-	if req.Choices == nil && !req.ChoicesUpdate {
+func (s *Server) prepareChoicePromptSend(w http.ResponseWriter, agentID string, req *OutboundMessageRequest) (*choicePromptSend, bool) {
+	decisionsInput := req.Decisions
+	decisionsUpdate := req.DecisionsUpdate
+
+	// legacy choices fallback: remove in follow-up filed with ptone/scion#8225
+	if req.Choices != nil && req.Decisions != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+			"cannot specify both decisions and legacy choices",
+			map[string]interface{}{"field": "decisions"})
+		return nil, false
+	}
+	if (req.Decisions == nil && req.Choices != nil) || (!req.DecisionsUpdate && req.ChoicesUpdate) {
+		if decisionsInput == nil {
+			decisionsInput = req.Choices
+		}
+		if !decisionsUpdate {
+			decisionsUpdate = req.ChoicesUpdate
+		}
+		if s.messageLog != nil {
+			s.messageLog.Debug("legacy choices request field used", "agent_id", agentID)
+		} else {
+			slog.Debug("legacy choices request field used", "agent_id", agentID)
+		}
+	}
+
+	if decisionsInput == nil && !decisionsUpdate {
 		return nil, true
 	}
 	if !s.experimentEnabled(experiments.Decisions) {
@@ -80,27 +105,27 @@ func (s *Server) prepareChoicePromptSend(w http.ResponseWriter, req *OutboundMes
 			map[string]interface{}{"experiment": experiments.Decisions})
 		return nil, false
 	}
-	if req.Choices == nil {
-		ValidationError(w, "choices_update requires choices", map[string]interface{}{"field": "choices_update"})
+	if decisionsInput == nil {
+		ValidationError(w, "decisions_update requires decisions", map[string]interface{}{"field": "decisions_update"})
 		return nil, false
 	}
 	recipient := strings.TrimSpace(req.Recipient)
 	if strings.HasPrefix(recipient, "agent:") || isBroadcastRecipient(recipient) {
-		ValidationError(w, "choices can be sent only to a user or a conversation, not to an agent or a broadcast",
+		ValidationError(w, "decisions can be sent only to a user or a conversation, not to an agent or a broadcast",
 			map[string]interface{}{"field": "recipient"})
 		return nil, false
 	}
 	if len(req.Attachments) > 0 || len(req.AttachmentIDs) > 0 {
-		ValidationError(w, "a message with choices cannot carry attachments", map[string]interface{}{"field": "attachments"})
+		ValidationError(w, "a message with decisions cannot carry attachments", map[string]interface{}{"field": "attachments"})
 		return nil, false
 	}
-	decisions, err := messages.NormalizeDecisions("choices", req.Choices)
+	decisions, err := messages.NormalizeDecisions("decisions", decisionsInput)
 	if err != nil {
 		writeChoiceErrors(w, err)
 		return nil, false
 	}
 	// The intro is set from the body once its mentions are rewritten.
-	return &choicePromptSend{decisions: decisions, update: req.ChoicesUpdate}, true
+	return &choicePromptSend{decisions: decisions, update: decisionsUpdate}, true
 }
 
 // isBroadcastRecipient reports whether a recipient names a broadcast.
@@ -117,17 +142,17 @@ func isBroadcastRecipient(recipient string) bool {
 func writeChoiceErrors(w http.ResponseWriter, err error) {
 	var errs messages.ChoiceErrors
 	if errors.As(err, &errs) {
-		ValidationError(w, "invalid choices: "+errs.Error(), map[string]interface{}{"errors": errs})
+		ValidationError(w, "invalid decisions: "+errs.Error(), map[string]interface{}{"errors": errs})
 		return
 	}
-	ValidationError(w, "invalid choices: "+err.Error(), nil)
+	ValidationError(w, "invalid decisions: "+err.Error(), nil)
 }
 
 // writeChoiceStoreError answers a CreateChoicePrompt failure. It reports
-// false for an error that is not a choice prompt refusal (the caller answers
+// false for an error that is not a decision prompt refusal (the caller answers
 // 500).
 func writeChoiceStoreError(w http.ResponseWriter, err error) bool {
-	var exists *store.ChoiceKeyExistsError
+	var exists *store.DecisionKeyExistsError
 	var notIssued *store.DecisionKeyNotIssuedError
 	switch {
 	case errors.As(err, &exists):
@@ -139,7 +164,7 @@ func writeChoiceStoreError(w http.ResponseWriter, err error) bool {
 			}
 			keys[i] = entry
 		}
-		writeError(w, http.StatusConflict, ErrCodeChoiceKeyExists, exists.Error(),
+		writeError(w, http.StatusConflict, ErrCodeDecisionKeyExists, exists.Error(),
 			map[string]interface{}{"existing": keys})
 		return true
 	case errors.As(err, &notIssued):
@@ -193,8 +218,8 @@ func (s *Server) storeChoicePrompt(ctx context.Context, cp *choicePromptSend, ag
 	return nil
 }
 
-// publishReplacedDecisions tells the open cards of every version a choice
-// send replaced (--update) that it is now replaced: chat.choice.updated for
+// publishReplacedDecisions tells the open cards of every version a decision
+// send replaced (--update) that it is now replaced: chat.decision.updated for
 // the old row, on its own prompt's subjects (it may be in another thread or
 // DM than the new prompt), with a view that carries replacedBy. Best
 // effort: the send has committed, and history carries the state anyway.
@@ -208,39 +233,39 @@ func (s *Server) publishReplacedDecisions(ctx context.Context, res *store.Choice
 		}
 		old, err := s.store.GetDecision(ctx, d.Replaced.RowID)
 		if err != nil {
-			s.messageLog.Warn("choices: replaced decision not found for choice.updated", "row_id", d.Replaced.RowID, "error", err)
+			s.messageLog.Warn("decisions: replaced decision not found for decision.updated", "row_id", d.Replaced.RowID, "error", err)
 			continue
 		}
 		chatKey := old.ChatKey
 		if chatKey == "" {
 			prompt, err := s.store.GetMessage(ctx, old.MessageID)
 			if err != nil {
-				s.messageLog.Warn("choices: replaced decision's prompt not found for choice.updated", "row_id", old.ID, "message_id", old.MessageID, "error", err)
+				s.messageLog.Warn("decisions: replaced decision's prompt not found for decision.updated", "row_id", old.ID, "message_id", old.MessageID, "error", err)
 				continue
 			}
 			chatKey = prompt.ThreadID
 		}
 		if chatKey == "" {
-			s.messageLog.Warn("choices: replaced decision has no chat_key for choice.updated", "row_id", old.ID, "message_id", old.MessageID)
+			s.messageLog.Warn("decisions: replaced decision has no chat_key for decision.updated", "row_id", old.ID, "message_id", old.MessageID)
 			continue
 		}
 		s.publishChoiceUpdatedAt(ctx, old.ProjectID, old.MessageID, chatKey, s.decisionViewFor(ctx, old))
 	}
 }
 
-// ChoiceDecisionResult is one decision in a choice prompt send response.
-type ChoiceDecisionResult struct {
-	Key      string                  `json:"key"`
-	Version  int                     `json:"version"`
-	Ref      string                  `json:"ref"`
-	RowID    string                  `json:"row_id"`
-	Replaced *ChoiceReplacedDecision `json:"replaced"`
+// DecisionSendResult is one decision in a decision prompt send response.
+type DecisionSendResult struct {
+	Key      string            `json:"key"`
+	Version  int               `json:"version"`
+	Ref      string            `json:"ref"`
+	RowID    string            `json:"row_id"`
+	Replaced *DecisionReplaced `json:"replaced"`
 }
 
-// ChoiceReplacedDecision is the version a send replaced, as it was. For a
+// DecisionReplaced is the version a send replaced, as it was. For a
 // decided version, Answer is the effective answer's label and AnsweredBy
 // who gave it (the name, else the email).
-type ChoiceReplacedDecision struct {
+type DecisionReplaced struct {
 	Version    int    `json:"version"`
 	Status     string `json:"status"`
 	Answer     string `json:"answer,omitempty"`
@@ -248,15 +273,15 @@ type ChoiceReplacedDecision struct {
 }
 
 // choiceDecisionResults is the decisions field of the send response.
-func choiceDecisionResults(agentID string, res *store.ChoicePromptResult) []ChoiceDecisionResult {
+func choiceDecisionResults(agentID string, res *store.ChoicePromptResult) []DecisionSendResult {
 	if res == nil {
 		return nil
 	}
-	out := make([]ChoiceDecisionResult, len(res.Decisions))
+	out := make([]DecisionSendResult, len(res.Decisions))
 	for i, d := range res.Decisions {
-		out[i] = ChoiceDecisionResult{Key: d.Key, Version: d.Version, Ref: d.Ref(agentID), RowID: d.RowID}
+		out[i] = DecisionSendResult{Key: d.Key, Version: d.Version, Ref: d.Ref(agentID), RowID: d.RowID}
 		if d.Replaced != nil {
-			r := &ChoiceReplacedDecision{Version: d.Replaced.Version, Status: d.Replaced.Status}
+			r := &DecisionReplaced{Version: d.Replaced.Version, Status: d.Replaced.Status}
 			if a := d.Replaced.Answer; a != nil {
 				r.Answer = a.ChoiceLabel
 				r.AnsweredBy = a.AnsweredByName

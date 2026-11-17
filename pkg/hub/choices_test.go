@@ -16,14 +16,15 @@
 
 package hub
 
-// Choice prompts (design choices v4): the send path on outbound-message,
+// Decision prompts (design choices v4): the send path on outbound-message,
 // the hub-minted type refusal on every client path, the decision answer and
-// get endpoints, delivery of the choice-response, and the history views.
+// get endpoints, delivery of the decision-response, and the history views.
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -113,15 +114,15 @@ func (f *choicesFixture) sendRawAsAgent(t *testing.T, body []byte) *httptest.Res
 }
 
 type choiceSendResponse struct {
-	MessageID string                 `json:"message_id"`
-	Decisions []ChoiceDecisionResult `json:"decisions"`
+	MessageID string               `json:"message_id"`
+	Decisions []DecisionSendResult `json:"decisions"`
 }
 
-// sendPromptToBob sends a choice prompt from the agent to bob's DM.
+// sendPromptToBob sends a decision prompt from the agent to bob's DM.
 func (f *choicesFixture) sendPromptToBob(t *testing.T, raw string, update bool) choiceSendResponse {
 	t.Helper()
 	rr := f.sendAsAgent(t, OutboundMessageRequest{
-		Recipient: "user:" + f.bob.Email, Msg: "Two calls", Choices: decisionInputs(t, raw), ChoicesUpdate: update,
+		Recipient: "user:" + f.bob.Email, Msg: "Two calls", Decisions: decisionInputs(t, raw), DecisionsUpdate: update,
 	})
 	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
 	var resp choiceSendResponse
@@ -129,10 +130,10 @@ func (f *choicesFixture) sendPromptToBob(t *testing.T, raw string, update bool) 
 	return resp
 }
 
-// topicPrompt stores a choice prompt in the fixture's topic directly.
+// topicPrompt stores a decision prompt in the fixture's topic directly.
 func (f *choicesFixture) topicPrompt(t *testing.T, raw string, update bool) (*store.Message, *store.ChoicePromptResult) {
 	t.Helper()
-	decs, err := messages.NormalizeDecisions("choices", decisionInputs(t, raw))
+	decs, err := messages.NormalizeDecisions("decisions", decisionInputs(t, raw))
 	require.NoError(t, err)
 	conv, err := f.store.GetConversationByExternalRef(context.Background(), "native", "thread:"+f.project.ID+":"+f.topicID)
 	require.NoError(t, err)
@@ -159,12 +160,12 @@ func (f *choicesFixture) answer(t *testing.T, u *store.User, rowID string, body 
 // Send path
 // ---------------------------------------------------------------------------
 
-// Acceptance 1: with the experiment off a send with choices fails naming
+// Acceptance 1: with the experiment off a send with decisions fails naming
 // it, and nothing is stored.
 func TestChoicesSend_ExperimentOffRefused(t *testing.T) {
 	f := newChoicesFixture(t)
 	setChoicesExperiment(t, f.srv, false)
-	rr := f.sendAsAgent(t, OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Choices: decisionInputs(t, twoDecisions)})
+	rr := f.sendAsAgent(t, OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Decisions: decisionInputs(t, twoDecisions)})
 	require.Equal(t, http.StatusBadRequest, rr.Code, "body: %s", rr.Body.String())
 	assert.Equal(t, ErrCodeExperimentDisabled, errorCode(t, rr))
 	assert.Contains(t, rr.Body.String(), "web.decisions")
@@ -193,7 +194,7 @@ func TestChoicesSend_UserDM(t *testing.T) {
 	ctx := context.Background()
 	msg, err := f.store.GetMessage(ctx, resp.MessageID)
 	require.NoError(t, err)
-	assert.Equal(t, messages.TypeChoicePrompt, msg.Type)
+	assert.Equal(t, messages.TypeDecisionPrompt, msg.Type)
 	assert.True(t, strings.HasPrefix(msg.Msg, "Two calls\n\n"))
 	assert.Contains(t, msg.Msg, "**2 decisions needed. Answer all of them together.**")
 	dmKey, err := messages.DMConversationKey("agent", f.agent.ID, "user", f.bob.ID)
@@ -211,7 +212,7 @@ func TestChoicesSend_UserDM(t *testing.T) {
 		if evt.ID == resp.MessageID {
 			found = true
 			require.Len(t, evt.Decisions, 2)
-			assert.Equal(t, "Two calls", evt.ChoiceIntro)
+			assert.Equal(t, "Two calls", evt.DecisionIntro)
 			assert.Equal(t, "pending", evt.Decisions[0].Status)
 		}
 	}
@@ -223,7 +224,7 @@ func TestChoicesSend_UserDM(t *testing.T) {
 }
 
 // Acceptance 3 (send-side fields): agent recipients, --update without
-// choices, attachments and invalid decisions are refused field by field.
+// decisions, attachments and invalid decisions are refused field by field.
 func TestChoicesSend_Refusals(t *testing.T) {
 	f := newChoicesFixture(t)
 	cases := []struct {
@@ -231,12 +232,12 @@ func TestChoicesSend_Refusals(t *testing.T) {
 		req  OutboundMessageRequest
 		code string
 	}{
-		{"agent recipient", OutboundMessageRequest{Recipient: "agent:other", Choices: decisionInputs(t, twoDecisions)}, ErrCodeValidationError},
-		{"broadcast recipient", OutboundMessageRequest{Recipient: "broadcast", Choices: decisionInputs(t, twoDecisions)}, ErrCodeValidationError},
-		{"update without choices", OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Msg: "x", ChoicesUpdate: true}, ErrCodeValidationError},
-		{"attachments", OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Choices: decisionInputs(t, twoDecisions), Attachments: []string{"/workspace/a"}}, ErrCodeValidationError},
-		{"one choice", OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Choices: decisionInputs(t, `[{"question":"q","choices":["only"]}]`)}, ErrCodeValidationError},
-		{"never issued number", OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Choices: decisionInputs(t, `[{"id":"99","question":"q","choices":["a","b"]}]`)}, ErrCodeDecisionKeyNotIssue},
+		{"agent recipient", OutboundMessageRequest{Recipient: "agent:other", Decisions: decisionInputs(t, twoDecisions)}, ErrCodeValidationError},
+		{"broadcast recipient", OutboundMessageRequest{Recipient: "broadcast", Decisions: decisionInputs(t, twoDecisions)}, ErrCodeValidationError},
+		{"update without decisions", OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Msg: "x", DecisionsUpdate: true}, ErrCodeValidationError},
+		{"attachments", OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Decisions: decisionInputs(t, twoDecisions), Attachments: []string{"/workspace/a"}}, ErrCodeValidationError},
+		{"one choice", OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Decisions: decisionInputs(t, `[{"question":"q","choices":["only"]}]`)}, ErrCodeValidationError},
+		{"never issued number", OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Decisions: decisionInputs(t, `[{"id":"99","question":"q","choices":["a","b"]}]`)}, ErrCodeDecisionKeyNotIssue},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -247,9 +248,10 @@ func TestChoicesSend_Refusals(t *testing.T) {
 	}
 	t.Run("reserved field", func(t *testing.T) {
 		// Raw JSON: a typed request drops the reserved field.
-		rr := f.sendRawAsAgent(t, []byte(`{"recipient":"user:`+f.bob.Email+`","choices":[{"question":"q","choices":["a","b"],"multiple":true}]}`))
+		rr := f.sendRawAsAgent(t, []byte(`{"recipient":"user:`+f.bob.Email+`","decisions":[{"question":"q","choices":["a","b"],"multiple":true}]}`))
 		require.Equal(t, http.StatusBadRequest, rr.Code, "body: %s", rr.Body.String())
 		assert.Equal(t, ErrCodeValidationError, errorCode(t, rr))
+		assert.Contains(t, rr.Body.String(), "decisions[0].multiple")
 	})
 	rows, err := f.store.ListMessages(context.Background(), store.MessageFilter{SenderID: f.agent.ID}, store.ListOptions{Limit: 10})
 	require.NoError(t, err)
@@ -262,9 +264,9 @@ func TestChoicesSend_KeyExistsAndUpdate(t *testing.T) {
 	f := newChoicesFixture(t)
 	first := f.sendPromptToBob(t, twoDecisions, false)
 
-	rr := f.sendAsAgent(t, OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Choices: decisionInputs(t, twoDecisions)})
+	rr := f.sendAsAgent(t, OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Decisions: decisionInputs(t, twoDecisions)})
 	require.Equal(t, http.StatusConflict, rr.Code, "body: %s", rr.Body.String())
-	assert.Equal(t, ErrCodeChoiceKeyExists, errorCode(t, rr))
+	assert.Equal(t, ErrCodeDecisionKeyExists, errorCode(t, rr))
 	assert.Contains(t, rr.Body.String(), "D234 already exists (v1, pending)")
 	assert.Contains(t, rr.Body.String(), "--update")
 
@@ -280,12 +282,12 @@ func TestChoicesSend_KeyExistsAndUpdate(t *testing.T) {
 	assert.Equal(t, store.DecisionStatusReplaced, old.Status)
 }
 
-// Choice prompts count against the outbound message rate limit.
+// Decision prompts count against the outbound message rate limit.
 func TestChoicesSend_CountsAgainstRateLimit(t *testing.T) {
 	f := newChoicesFixture(t)
 	f.srv.chatSendLimiter = newChatSendLimiterWithRates(map[chatSenderClass]float64{chatSenderHuman: 100, chatSenderAgent: 1}, nil)
 	f.sendPromptToBob(t, `[{"question":"First?","choices":["y","n"]}]`, false)
-	rr := f.sendAsAgent(t, OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Choices: decisionInputs(t, `[{"question":"Second?","choices":["y","n"]}]`)})
+	rr := f.sendAsAgent(t, OutboundMessageRequest{Recipient: "user:" + f.bob.Email, Decisions: decisionInputs(t, `[{"question":"Second?","choices":["y","n"]}]`)})
 	assert.Equal(t, http.StatusTooManyRequests, rr.Code, "body: %s", rr.Body.String())
 }
 
@@ -294,7 +296,7 @@ func TestChoicesSend_CountsAgainstRateLimit(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHubMintedTypes_RefusedOnClientPaths(t *testing.T) {
-	for _, typ := range []string{messages.TypeChoicePrompt, messages.TypeChoiceResponse} {
+	for _, typ := range []string{messages.TypeDecisionPrompt, messages.TypeDecisionResponse} {
 		t.Run(typ, func(t *testing.T) {
 			f := newChoicesFixture(t)
 
@@ -412,8 +414,8 @@ func TestDecisionAnswer_Authorization(t *testing.T) {
 
 // Acceptance 6 and 10: the answer copies the label from the stored row
 // (a tampered label is ignored), records the snapshots, stores a
-// choice-response from the clicker and delivers the hub line with the
-// choice metadata to the asker.
+// decision-response from the clicker and delivers the hub line with the
+// decision metadata to the asker.
 func TestDecisionAnswer_RecordsAndDelivers(t *testing.T) {
 	f := newChoicesFixture(t)
 	resp := f.sendPromptToBob(t, oneDecision, false)
@@ -443,7 +445,7 @@ func TestDecisionAnswer_RecordsAndDelivers(t *testing.T) {
 
 	m, err := f.store.GetMessage(ctx, a.ResponseMessageID)
 	require.NoError(t, err)
-	assert.Equal(t, messages.TypeChoiceResponse, m.Type)
+	assert.Equal(t, messages.TypeDecisionResponse, m.Type)
 	assert.Equal(t, f.bob.ID, m.SenderID)
 	assert.NotContains(t, m.Msg, "HACKED")
 
@@ -451,12 +453,12 @@ func TestDecisionAnswer_RecordsAndDelivers(t *testing.T) {
 	require.Len(t, sent, 1)
 	sm := sent[0].structured
 	require.NotNil(t, sm)
-	assert.Equal(t, messages.TypeChoiceResponse, sm.Type)
-	assert.True(t, strings.HasPrefix(sm.Msg, `[choice-response] D234 v1 ("Ship the **feature** now?") answer=yes (choice 1) by `+f.bob.Email), sm.Msg)
-	assert.Equal(t, "D234", sm.Metadata[messages.MetadataChoiceKey])
-	assert.Equal(t, "1", sm.Metadata[messages.MetadataChoiceVersion])
+	assert.Equal(t, messages.TypeDecisionResponse, sm.Type)
+	assert.True(t, strings.HasPrefix(sm.Msg, `[decision-response] D234 v1 ("Ship the **feature** now?") answer=yes (choice 1) by `+f.bob.Email), sm.Msg)
+	assert.Equal(t, "D234", sm.Metadata[messages.MetadataDecisionKey])
+	assert.Equal(t, "1", sm.Metadata[messages.MetadataDecisionVersion])
 	assert.Equal(t, "1", sm.Metadata[messages.MetadataChoiceID])
-	assert.Equal(t, store.DecisionProvenanceDirect, sm.Metadata[messages.MetadataChoiceProvenance])
+	assert.Equal(t, store.DecisionProvenanceDirect, sm.Metadata[messages.MetadataDecisionProvenance])
 
 	// Acceptance 8: an answered version is 409 with the effective answer.
 	rr = f.answer(t, f.bob, row, map[string]interface{}{"choice_id": "2"})
@@ -536,10 +538,10 @@ func TestDecisionAnswer_Replaced409(t *testing.T) {
 	assert.Contains(t, rr.Body.String(), v2.Decisions[0].RowID)
 }
 
-// The answer publishes choice.updated on the project subject for a thread.
+// The answer publishes decision.updated on the project subject for a thread.
 func TestDecisionAnswer_PublishesChoiceUpdated(t *testing.T) {
 	f := newChoicesFixture(t)
-	events, unsub := f.srv.events.Subscribe("project." + f.project.ID + ".chat.choice.updated")
+	events, unsub := f.srv.events.Subscribe("project." + f.project.ID + ".chat.decision.updated")
 	defer unsub()
 	_, res := f.topicPrompt(t, oneDecision, false)
 	rr := f.answer(t, f.bob, res.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"})
@@ -557,8 +559,8 @@ func TestDecisionAnswer_PublishesChoiceUpdated(t *testing.T) {
 // History
 // ---------------------------------------------------------------------------
 
-// History rows for choice prompts gain decisions and the intro, and
-// choice-response rows gain choiceResponse; both are omitted while the
+// History rows for decision prompts gain decisions and the intro, and
+// decision-response rows gain decisionResponse; both are omitted while the
 // experiment is off.
 func TestChoicesHistory_ViewsGatedByExperiment(t *testing.T) {
 	f := newChoicesFixture(t)
@@ -579,8 +581,8 @@ func TestChoicesHistory_ViewsGatedByExperiment(t *testing.T) {
 
 	h := history()
 	require.Len(t, h.MessageDecisions[msg.ID], 2)
-	assert.Equal(t, "Please decide", h.MessageChoiceIntros[msg.ID])
-	cr, ok := h.MessageChoiceResponses[ans.ResponseMessageID]
+	assert.Equal(t, "Please decide", h.MessageDecisionIntros[msg.ID])
+	cr, ok := h.MessageDecisionResponses[ans.ResponseMessageID]
 	require.True(t, ok)
 	assert.Equal(t, "yes", cr.Label)
 	assert.Equal(t, single.ID, cr.PromptMessageID)
@@ -588,17 +590,17 @@ func TestChoicesHistory_ViewsGatedByExperiment(t *testing.T) {
 	setChoicesExperiment(t, f.srv, false)
 	h = history()
 	assert.Nil(t, h.MessageDecisions)
-	assert.Nil(t, h.MessageChoiceIntros)
-	assert.Nil(t, h.MessageChoiceResponses)
+	assert.Nil(t, h.MessageDecisionIntros)
+	assert.Nil(t, h.MessageDecisionResponses)
 }
 
 // ---------------------------------------------------------------------------
 // Review round 1
 // ---------------------------------------------------------------------------
 
-// A choice prompt into a group conversation is addressed to humans: it
+// A decision prompt into a group conversation is addressed to humans: it
 // wakes no default agent and fans out no agent mention. The same posts
-// without choices (the controls) do both.
+// without decisions (the controls) do both.
 func TestChoicesSend_GroupPostWakesNoAgent(t *testing.T) {
 	f := newGroupWakeFixture(t)
 	setChoicesExperiment(t, f.srv, true)
@@ -613,37 +615,37 @@ func TestChoicesSend_GroupPostWakesNoAgent(t *testing.T) {
 	for _, msg := range []string{"Please decide", "@" + mentionBystanderSlug + " please decide"} {
 		resp := f.postRequest(t, OutboundMessageRequest{
 			Msg: msg, ConversationRef: "conv:" + f.convID,
-			Choices: decisionInputs(t, `[{"question":"Ship?","choices":["y","n"]}]`),
+			Decisions: decisionInputs(t, `[{"question":"Ship?","choices":["y","n"]}]`),
 		})
 		assert.Nil(t, resp.DefaultAgentResult, msg)
 		assert.Empty(t, resp.MentionResults, msg)
 		assert.Empty(t, resp.WokenAgents, msg)
 	}
-	assert.Len(t, f.dispatcher.getCalls(), before, "a choice prompt dispatches to no agent")
+	assert.Len(t, f.dispatcher.getCalls(), before, "a decision prompt dispatches to no agent")
 }
 
-// A DM answer publishes choice.updated to the DM's user only, never on the
+// A DM answer publishes decision.updated to the DM's user only, never on the
 // project subject (a thread answer does, TestDecisionAnswer_PublishesChoiceUpdated).
 func TestDecisionAnswer_DMChoiceUpdatedOnlyToUser(t *testing.T) {
 	f := newChoicesFixture(t)
-	projEvents, unsubProject := f.srv.events.Subscribe("project." + f.project.ID + ".chat.choice.updated")
+	projEvents, unsubProject := f.srv.events.Subscribe("project." + f.project.ID + ".chat.decision.updated")
 	defer unsubProject()
-	userEvents, unsubUser := f.srv.events.Subscribe("user." + f.bob.ID + ".chat.choice.updated")
+	userEvents, unsubUser := f.srv.events.Subscribe("user." + f.bob.ID + ".chat.decision.updated")
 	defer unsubUser()
 
 	dm := f.sendPromptToBob(t, `[{"id":"dm-upd","question":"DM?","choices":["y","n"]}]`, false)
 	rr := f.answer(t, f.bob, dm.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"})
 	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
 
-	assert.Len(t, collectEvents(userEvents), 1, "the DM's user gets choice.updated")
+	assert.Len(t, collectEvents(userEvents), 1, "the DM's user gets decision.updated")
 	assert.Empty(t, collectEvents(projEvents), "a DM answer is never published on the project subject")
 }
 
-// replacedEvent decodes the one chat.choice.updated event of evts and
+// replacedEvent decodes the one chat.decision.updated event of evts and
 // checks it is the replaced view of row, pointing at its new version.
 func replacedEvent(t *testing.T, evts []Event, row string, newRow string) {
 	t.Helper()
-	require.Len(t, evts, 1, "one chat.choice.updated for the replaced version")
+	require.Len(t, evts, 1, "one chat.decision.updated for the replaced version")
 	var got struct {
 		Decision  DecisionView `json:"decision"`
 		MessageID string       `json:"messageId"`
@@ -657,14 +659,14 @@ func replacedEvent(t *testing.T, evts []Event, row string, newRow string) {
 	assert.Equal(t, got.Decision.MessageID, got.MessageID, "published for the old row's own prompt")
 }
 
-// An --update send publishes chat.choice.updated for the version it
+// An --update send publishes chat.decision.updated for the version it
 // replaced, on the old prompt's own subjects: here the old version is in a
 // project thread and the new one in a DM, so the replaced view goes out on
 // the project subject (ptone/scion#7673 review R1).
 func TestChoicesSend_UpdatePublishesReplacedOnOldThread(t *testing.T) {
 	f := newChoicesFixture(t)
 	_, v1 := f.topicPrompt(t, oneDecision, false)
-	events, unsub := f.srv.events.Subscribe("project." + f.project.ID + ".chat.choice.updated")
+	events, unsub := f.srv.events.Subscribe("project." + f.project.ID + ".chat.decision.updated")
 	defer unsub()
 
 	v2 := f.sendPromptToBob(t, oneDecision, true)
@@ -678,9 +680,9 @@ func TestChoicesSend_UpdatePublishesReplacedDMOnlyToUser(t *testing.T) {
 	f := newChoicesFixture(t)
 	raw := `[{"id":"dm-rep","question":"DM?","choices":["y","n"]}]`
 	v1 := f.sendPromptToBob(t, raw, false)
-	projEvents, unsubProject := f.srv.events.Subscribe("project." + f.project.ID + ".chat.choice.updated")
+	projEvents, unsubProject := f.srv.events.Subscribe("project." + f.project.ID + ".chat.decision.updated")
 	defer unsubProject()
-	userEvents, unsubUser := f.srv.events.Subscribe("user." + f.bob.ID + ".chat.choice.updated")
+	userEvents, unsubUser := f.srv.events.Subscribe("user." + f.bob.ID + ".chat.decision.updated")
 	defer unsubUser()
 
 	v2 := f.sendPromptToBob(t, raw, true)
@@ -688,10 +690,10 @@ func TestChoicesSend_UpdatePublishesReplacedDMOnlyToUser(t *testing.T) {
 	assert.Empty(t, collectEvents(projEvents), "a DM replacement is never published on the project subject")
 }
 
-// A send without --update replaces nothing and publishes no choice.updated.
+// A send without --update replaces nothing and publishes no decision.updated.
 func TestChoicesSend_NewPromptPublishesNoChoiceUpdated(t *testing.T) {
 	f := newChoicesFixture(t)
-	userEvents, unsub := f.srv.events.Subscribe("user." + f.bob.ID + ".chat.choice.updated")
+	userEvents, unsub := f.srv.events.Subscribe("user." + f.bob.ID + ".chat.decision.updated")
 	defer unsub()
 	f.sendPromptToBob(t, `[{"id":"fresh","question":"New?","choices":["y","n"]}]`, false)
 	assert.Empty(t, collectEvents(userEvents))
@@ -714,7 +716,7 @@ func TestDecisionAnswer_AskerGoneStoresFailedResponse(t *testing.T) {
 
 	m, err := f.store.GetMessage(ctx, ans.ResponseMessageID)
 	require.NoError(t, err)
-	assert.Equal(t, messages.TypeChoiceResponse, m.Type)
+	assert.Equal(t, messages.TypeDecisionResponse, m.Type)
 	assert.Equal(t, store.MessageDispatchFailed, m.DispatchState)
 	assert.Len(t, f.dispatcher.getMessages(), before, "nothing is dispatched to a gone asker")
 }
@@ -880,7 +882,7 @@ func TestChoicesSend_IntroGetsMentionRewrite(t *testing.T) {
 	f := newChoicesFixture(t)
 	rr := f.sendAsAgent(t, OutboundMessageRequest{
 		Recipient: "user:" + f.bob.Email, Msg: "Ask @agent:helper-bot first",
-		Choices: decisionInputs(t, `[{"question":"Ship?","choices":["y","n"]}]`),
+		Decisions: decisionInputs(t, `[{"question":"Ship?","choices":["y","n"]}]`),
 	})
 	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
 	var resp choiceSendResponse
@@ -976,13 +978,13 @@ func TestDecisionAnswer_AskerRefusesMessages(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
 }
 
-// A choice prompt may leave out its intro: the send is accepted and the
+// A decision prompt may leave out its intro: the send is accepted and the
 // stored body is the markdown fallback rendered from the decisions.
 func TestChoicesSend_WithoutIntro(t *testing.T) {
 	f := newChoicesFixture(t)
 	rr := f.sendAsAgent(t, OutboundMessageRequest{
 		Recipient: "user:" + f.bob.Email,
-		Choices:   decisionInputs(t, `[{"id":"ship","question":"Ship it now?","choices":["yes","no"]}]`),
+		Decisions: decisionInputs(t, `[{"id":"ship","question":"Ship it now?","choices":["yes","no"]}]`),
 	})
 	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
 	var resp choiceSendResponse
@@ -992,7 +994,7 @@ func TestChoicesSend_WithoutIntro(t *testing.T) {
 
 	m, err := f.store.GetMessage(context.Background(), resp.MessageID)
 	require.NoError(t, err)
-	assert.Equal(t, messages.TypeChoicePrompt, m.Type)
+	assert.Equal(t, messages.TypeDecisionPrompt, m.Type)
 	assert.Contains(t, m.Msg, "Ship it now?", "the stored body is the rendered fallback")
 	decs, err := f.store.GetDecisionsByMessageIDs(context.Background(), []string{resp.MessageID})
 	require.NoError(t, err)
@@ -1080,8 +1082,8 @@ func TestChoiceResponseView_AttributionAndOutcomes(t *testing.T) {
 	for _, e := range collectEvents(chat) {
 		var evt UserMessageEvent
 		require.NoError(t, json.Unmarshal(e.Data, &evt))
-		if evt.ChoiceResponse != nil {
-			liveByID[evt.ID] = *evt.ChoiceResponse
+		if evt.DecisionResponse != nil {
+			liveByID[evt.ID] = *evt.DecisionResponse
 		}
 	}
 
@@ -1090,7 +1092,7 @@ func TestChoiceResponseView_AttributionAndOutcomes(t *testing.T) {
 	var h chatHistoryResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &h))
 
-	for source, views := range map[string]map[string]ChoiceResponseView{"live": liveByID, "history": h.MessageChoiceResponses} {
+	for source, views := range map[string]map[string]ChoiceResponseView{"live": liveByID, "history": h.MessageDecisionResponses} {
 		direct := views[directAns.ResponseMessageID]
 		assert.Equal(t, f.bob.ID, direct.AnsweredByUserID, source)
 		assert.Equal(t, f.bob.DisplayName, direct.AnsweredByName, source)
@@ -1119,8 +1121,8 @@ func TestChoiceResponseView_AttributionAndOutcomes(t *testing.T) {
 		assert.Equal(t, overridePrompt.ID, override.PromptMessageID, source)
 	}
 
-	// History also enriches stored agent_interpreted choice-response rows.
-	interp := h.MessageChoiceResponses[interpRespID]
+	// History also enriches stored agent_interpreted decision-response rows.
+	interp := h.MessageDecisionResponses[interpRespID]
 	assert.Equal(t, f.alice.ID, interp.AnsweredByUserID)
 	assert.Equal(t, f.alice.DisplayName, interp.AnsweredByName)
 	assert.Equal(t, store.DecisionProvenanceAgentInterpreted, interp.Provenance)
@@ -1170,4 +1172,162 @@ func TestChoiceResponseView_AttributionAndOutcomes(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(setItemJSON), `"answeredByUserId"`)
 	assert.Contains(t, string(setItemJSON), `"answeredByName":"Old User"`)
+}
+
+// ptone/scion#8224 (plan §6): POST /api/v1/agents/{id}/outbound-message accepts
+// legacy choices / choices_update when decisions / decisions_update are absent
+// (logging at debug level with agent_id), and rejects requests carrying both
+// choices and decisions with 400 invalid_request.
+func TestDecisionsSend_LegacyChoicesFallbackAndConflict(t *testing.T) {
+	f := newChoicesFixture(t)
+	var logBuf bytes.Buffer
+	var logMu sync.Mutex
+	f.srv.messageLog = slog.New(slog.NewJSONHandler(&syncWriter{mu: &logMu, w: &logBuf}, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	takeLog := func() string {
+		logMu.Lock()
+		defer logMu.Unlock()
+		out := logBuf.String()
+		logBuf.Reset()
+		return out
+	}
+
+	// 1. Primary decisions field succeeds without firing the legacy debug log.
+	rrPrimary := f.sendRawAsAgent(t, []byte(`{"recipient":"user:`+f.bob.Email+`","msg":"Primary","decisions":[{"id":"D-leg","question":"Ship v1?","choices":["yes","no"]}]}`))
+	require.Equal(t, http.StatusOK, rrPrimary.Code, rrPrimary.Body.String())
+	assert.NotContains(t, takeLog(), "legacy choices request field used")
+
+	// 2. Legacy choices + choices_update falls back cleanly, mints decision-prompt,
+	//    and logs at debug level with the agent ID.
+	rrFallback := f.sendRawAsAgent(t, []byte(`{"recipient":"user:`+f.bob.Email+`","msg":"Fallback","choices":[{"id":"D-leg","question":"Ship v2?","choices":["yes","no"]}],"choices_update":true}`))
+	require.Equal(t, http.StatusOK, rrFallback.Code, rrFallback.Body.String())
+	var fbResp choiceSendResponse
+	require.NoError(t, json.Unmarshal(rrFallback.Body.Bytes(), &fbResp))
+	require.Len(t, fbResp.Decisions, 1)
+	assert.Equal(t, 2, fbResp.Decisions[0].Version)
+	fbMsg, err := f.store.GetMessage(context.Background(), fbResp.MessageID)
+	require.NoError(t, err)
+	assert.Equal(t, messages.TypeDecisionPrompt, fbMsg.Type)
+
+	logged := takeLog()
+	assert.Contains(t, logged, "legacy choices request field used")
+	assert.Contains(t, logged, f.agent.ID)
+
+	// 3. Validation errors on fallback still report the primary decisions[i] root.
+	rrBadFallback := f.sendRawAsAgent(t, []byte(`{"recipient":"user:`+f.bob.Email+`","choices":[{"question":"One choice?","choices":["only"]}]}`))
+	require.Equal(t, http.StatusBadRequest, rrBadFallback.Code, rrBadFallback.Body.String())
+	assert.Equal(t, ErrCodeValidationError, errorCode(t, rrBadFallback))
+	assert.Contains(t, rrBadFallback.Body.String(), "decisions[0].choices")
+	_ = takeLog()
+
+	// 4. Sending both choices and decisions (even an empty decisions slice) is 400 invalid_request.
+	for name, payload := range map[string]string{
+		"both populated":               `{"recipient":"user:` + f.bob.Email + `","decisions":[{"question":"A?","choices":["y","n"]}],"choices":[{"question":"B?","choices":["y","n"]}]}`,
+		"empty decisions with choices": `{"recipient":"user:` + f.bob.Email + `","decisions":[],"choices":[{"question":"B?","choices":["y","n"]}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			before, lerr := f.store.ListMessages(context.Background(), store.MessageFilter{SenderID: f.agent.ID}, store.ListOptions{Limit: 20})
+			require.NoError(t, lerr)
+			rr := f.sendRawAsAgent(t, []byte(payload))
+			require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+			assert.Equal(t, ErrCodeInvalidRequest, errorCode(t, rr))
+			after, lerr := f.store.ListMessages(context.Background(), store.MessageFilter{SenderID: f.agent.ID}, store.ListOptions{Limit: 20})
+			require.NoError(t, lerr)
+			assert.Equal(t, before.TotalCount, after.TotalCount, "conflict stores nothing")
+		})
+	}
+}
+
+type syncWriter struct {
+	mu *sync.Mutex
+	w  *bytes.Buffer
+}
+
+func (s *syncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
+}
+
+// ptone/scion#8224 (plan §5.2 & §12 item 3): clean break for legacy message
+// types. Pre-upgrade "choice-prompt" and "choice-response" rows in messages
+// are not hydrated as decision cards or response pills in chat history, and
+// POST /api/v1/decision-prompts/{id}/answers answers 404 on a "choice-prompt"
+// row, while per-decision POST /api/v1/decisions/{rowId}/answer and
+// POST /api/v1/agent/decisions/interpreted continue to work on the underlying
+// decision rows.
+func TestDecisions_CleanBreakLegacyMessageTypes(t *testing.T) {
+	f := newChoicesFixture(t)
+	ctx := context.Background()
+
+	legacySingleMsg, legacySingleRes := f.topicPrompt(t, `[{"id":"LEG-1","question":"Legacy single?","choices":["yes","no"],"default":"yes"}]`, false)
+	legacySetMsg, legacySetRes := f.topicPrompt(t, `[{"id":"LEG-S1","question":"Legacy set 1?","choices":["yes","no"]},{"id":"LEG-S2","question":"Legacy set 2?","choices":["a","b"]}]`, false)
+	alreadyAnsweredMsg, alreadyAnsweredRes := f.topicPrompt(t, `[{"id":"LEG-ANS","question":"Already answered?","choices":["yes","no"]}]`, false)
+	ansRR := f.answer(t, f.bob, alreadyAnsweredRes.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"})
+	require.Equal(t, http.StatusOK, ansRR.Code, ansRR.Body.String())
+	var priorAns DecisionAnswerResponse
+	require.NoError(t, json.Unmarshal(ansRR.Body.Bytes(), &priorAns))
+
+	// Rewrite stored messages.type to pre-S2 wire values to simulate an upgraded DB.
+	provider, ok := f.store.(testRetentionProvider)
+	require.True(t, ok)
+	for _, id := range []string{legacySingleMsg.ID, legacySetMsg.ID, alreadyAnsweredMsg.ID} {
+		_, err := provider.DB().ExecContext(ctx, `UPDATE messages SET type = 'choice-prompt' WHERE id = ?`, id)
+		require.NoError(t, err)
+	}
+	_, err := provider.DB().ExecContext(ctx, `UPDATE messages SET type = 'choice-response' WHERE id = ?`, priorAns.ResponseMessageID)
+	require.NoError(t, err)
+
+	// 1. Chat history returns the raw markdown/text bodies and omits legacy rows from all side maps.
+	rec := doRequestAsUser(t, f.srv, f.bob, http.MethodGet, "/api/v1/chat/conversations/"+f.topicID+"/messages", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var h chatHistoryResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &h))
+
+	byID := map[string]store.Message{}
+	for _, m := range h.Messages {
+		byID[m.ID] = m
+	}
+	assert.Contains(t, byID[legacySingleMsg.ID].Msg, "Legacy single?")
+	assert.Contains(t, byID[legacySetMsg.ID].Msg, "Legacy set 1?")
+	assert.Contains(t, byID[priorAns.ResponseMessageID].Msg, "chose")
+	assert.NotContains(t, h.MessageDecisions, legacySingleMsg.ID)
+	assert.NotContains(t, h.MessageDecisions, legacySetMsg.ID)
+	assert.NotContains(t, h.MessageDecisionIntros, legacySingleMsg.ID)
+	assert.NotContains(t, h.MessageDecisionAnswerModes, legacySetMsg.ID)
+	assert.NotContains(t, h.MessageDecisionResponses, priorAns.ResponseMessageID)
+
+	// 2. Set submit on a "choice-prompt" message returns 404.
+	setRR := f.submitSet(t, f.bob, legacySetMsg.ID, "", legacySetRes.Decisions[0].RowID, "1", legacySetRes.Decisions[1].RowID, "1")
+	assert.Equal(t, http.StatusNotFound, setRR.Code, setRR.Body.String())
+
+	// 3. Per-decision answer on the single-decision row still succeeds and mints a decision-response!
+	before := len(f.dispatcher.getMessages())
+	singleRR := f.answer(t, f.bob, legacySingleRes.Decisions[0].RowID, map[string]interface{}{"choice_id": "1"})
+	require.Equal(t, http.StatusOK, singleRR.Code, singleRR.Body.String())
+	var singleAns DecisionAnswerResponse
+	require.NoError(t, json.Unmarshal(singleRR.Body.Bytes(), &singleAns))
+	newRespMsg, err := f.store.GetMessage(ctx, singleAns.ResponseMessageID)
+	require.NoError(t, err)
+	assert.Equal(t, messages.TypeDecisionResponse, newRespMsg.Type)
+	sent := f.dispatcher.getMessages()[before:]
+	require.Len(t, sent, 1)
+	assert.True(t, strings.HasPrefix(sent[0].structured.Msg, "[decision-response] LEG-1 v1"), sent[0].structured.Msg)
+
+	// 4. Agent interpreted recording still works on the legacy set's rows!
+	userReply := f.storeUserReply(t, f.alice, f.topicID, legacySetMsg.ConversationID, "web", "LEG-S1: yes, LEG-S2: a")
+	interpRR := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", RecordInterpretedRequest{
+		SourceMessageID: userReply.ID,
+		IdempotencyKey:  "ik-legacy-set",
+		Answers: []InterpretedAnswerInput{
+			{Key: "LEG-S1", ChoiceID: "1"},
+			{Key: "LEG-S2", ChoiceID: "1"},
+		},
+	})
+	require.Equal(t, http.StatusOK, interpRR.Code, interpRR.Body.String())
+	var interpOut RecordInterpretedResponse
+	require.NoError(t, json.Unmarshal(interpRR.Body.Bytes(), &interpOut))
+	interpMsg, err := f.store.GetMessage(ctx, interpOut.ResponseMessageID)
+	require.NoError(t, err)
+	assert.Equal(t, messages.TypeDecisionResponse, interpMsg.Type)
 }

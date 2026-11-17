@@ -6240,18 +6240,18 @@ type chatHistoryResponse struct {
 	// the oldest page (no nextCursor); see chatHistoryRetentionMarker.
 	Retention *chatHistoryRetention `json:"retention,omitempty"`
 
-	// MessageDecisions and MessageChoiceIntros (choice-prompt rows) and
-	// MessageChoiceResponses (choice-response rows) are keyed by message
+	// MessageDecisions and MessageDecisionIntros (decision-prompt rows) and
+	// MessageDecisionResponses (decision-response rows) are keyed by message
 	// ID, set only while web.decisions is on (design choices v4, 4.4).
 	// The intro is the agent's body without the markdown fallback.
-	MessageDecisions       map[string][]DecisionView     `json:"messageDecisions,omitempty"`
-	MessageChoiceIntros    map[string]string             `json:"messageChoiceIntros,omitempty"`
-	MessageChoiceResponses map[string]ChoiceResponseView `json:"messageChoiceResponses,omitempty"`
-	// MessageChoiceAnswerModes (choice-prompt rows: "single" or "set") and
-	// MessageChoiceResponseSets (the response rows of set submits) are set
+	MessageDecisions         map[string][]DecisionView     `json:"messageDecisions,omitempty"`
+	MessageDecisionIntros    map[string]string             `json:"messageDecisionIntros,omitempty"`
+	MessageDecisionResponses map[string]ChoiceResponseView `json:"messageDecisionResponses,omitempty"`
+	// MessageDecisionAnswerModes (decision-prompt rows: "single" or "set") and
+	// MessageDecisionResponseSets (the response rows of set submits) are set
 	// under the same rule (design choices v5, 5.1 and 5.2).
-	MessageChoiceAnswerModes  map[string]string                `json:"messageChoiceAnswerModes,omitempty"`
-	MessageChoiceResponseSets map[string]ChoiceResponseSetView `json:"messageChoiceResponseSets,omitempty"`
+	MessageDecisionAnswerModes  map[string]string                `json:"messageDecisionAnswerModes,omitempty"`
+	MessageDecisionResponseSets map[string]ChoiceResponseSetView `json:"messageDecisionResponseSets,omitempty"`
 }
 
 // chatHistoryRetention is the history page's retention marker: messages

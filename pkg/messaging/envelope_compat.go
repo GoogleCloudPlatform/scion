@@ -93,13 +93,13 @@ func MapLegacyType(oldType, systemCategory string, hasAddressee bool) (MessageKi
 		intent := IntentRequest
 		return KindText, &intent, nil
 
-	case messages.TypeChoicePrompt:
+	case messages.TypeDecisionPrompt:
 		// An agent asks a human to decide; the decisions travel as rows, the
 		// body is the markdown fallback.
 		intent := IntentQuestion
 		return KindText, &intent, nil
 
-	case messages.TypeChoiceResponse:
+	case messages.TypeDecisionResponse:
 		// The hub-formatted record of an answer.
 		intent := IntentInform
 		return KindText, &intent, nil

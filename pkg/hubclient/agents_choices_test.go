@@ -19,7 +19,7 @@ import (
 	"testing"
 )
 
-// The choice fields of an outbound send: choices and choices_update go
+// The decision fields of an outbound send: decisions and decisions_update go
 // out only when set, and the result's decisions decode with the replaced
 // version's answer and who gave it.
 func TestOutboundMessageChoicesWire(t *testing.T) {
@@ -31,27 +31,27 @@ func TestOutboundMessageChoicesWire(t *testing.T) {
 	if err := json.Unmarshal(plain, &fields); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"choices", "choices_update"} {
+	for _, k := range []string{"decisions", "decisions_update"} {
 		if _, ok := fields[k]; ok {
 			t.Errorf("an ordinary send carries %q", k)
 		}
 	}
 
-	withChoices, err := json.Marshal(OutboundMessageRequest{
-		Recipient: "user:a@example.com", Choices: json.RawMessage(`[{"question":"q","choices":["a","b"]}]`), ChoicesUpdate: true,
+	withDecisions, err := json.Marshal(OutboundMessageRequest{
+		Recipient: "user:a@example.com", Decisions: json.RawMessage(`[{"question":"q","choices":["a","b"]}]`), DecisionsUpdate: true,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	fields = nil
-	if err := json.Unmarshal(withChoices, &fields); err != nil {
+	if err := json.Unmarshal(withDecisions, &fields); err != nil {
 		t.Fatal(err)
 	}
-	if fields["choices_update"] != true {
-		t.Errorf("choices_update = %v, want true", fields["choices_update"])
+	if fields["decisions_update"] != true {
+		t.Errorf("decisions_update = %v, want true", fields["decisions_update"])
 	}
-	if _, ok := fields["choices"].([]interface{}); !ok {
-		t.Errorf("choices = %v, want the decisions array", fields["choices"])
+	if _, ok := fields["decisions"].([]interface{}); !ok {
+		t.Errorf("decisions = %v, want the decisions array", fields["decisions"])
 	}
 
 	var res OutboundMessageResult

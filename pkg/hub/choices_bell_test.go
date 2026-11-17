@@ -74,8 +74,8 @@ func sendTopicChoicePromptAsAgent(t *testing.T, srv *Server, st store.Store, ag 
 	body, err := json.Marshal(OutboundMessageRequest{
 		Msg:             "Please decide",
 		ConversationRef: "conv:" + conv.ID,
-		Choices:         decisionInputs(t, raw),
-		ChoicesUpdate:   update,
+		Decisions:       decisionInputs(t, raw),
+		DecisionsUpdate: update,
 	})
 	require.NoError(t, err)
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+ag.ID+"/outbound-message", bytes.NewReader(body))
@@ -360,7 +360,7 @@ func TestDecisionsBell_B2LifecycleAndG6Scenario(t *testing.T) {
 	_ = collectEvents(aliceSub)
 	_ = collectEvents(bobSub)
 
-	batchRR := doRequestAsUser(t, f.srv, f.alice, http.MethodPost, "/api/v1/choice-prompts/"+p2.MessageID+"/answers", ChoiceSetAnswerRequest{
+	batchRR := doRequestAsUser(t, f.srv, f.alice, http.MethodPost, "/api/v1/decision-prompts/"+p2.MessageID+"/answers", ChoiceSetAnswerRequest{
 		IdempotencyKey: api.NewUUID(),
 		Answers: []ChoiceSetAnswerItem{
 			{DecisionRowID: p2.Decisions[0].RowID, ChoiceID: "1"},

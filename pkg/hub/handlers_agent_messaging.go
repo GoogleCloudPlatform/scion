@@ -95,15 +95,19 @@ type OutboundMessageRequest struct {
 	// ignored for user and group recipients (zero resumes invoked).
 	Wake bool `json:"wake,omitempty"`
 
-	// Choices makes the message a choice prompt: one or more decisions
+	// Decisions makes the message a decision prompt: one or more decisions
 	// for a user or a conversation (design choices v4, 4.3). Gated by the
 	// web.decisions experiment; the hub validates and normalizes them,
 	// stores them with the message, and renders Msg (the optional intro)
 	// followed by a markdown fallback of the decisions.
-	Choices []messages.DecisionInput `json:"choices,omitempty"`
-	// ChoicesUpdate allows Choices to replace decisions whose keys already
-	// exist (a new version each). Valid only with Choices.
-	ChoicesUpdate bool `json:"choices_update,omitempty"`
+	Decisions []messages.DecisionInput `json:"decisions,omitempty"`
+	// DecisionsUpdate allows Decisions to replace decisions whose keys already
+	// exist (a new version each). Valid only with Decisions.
+	DecisionsUpdate bool `json:"decisions_update,omitempty"`
+
+	// legacy choices fallback: remove in follow-up filed with ptone/scion#8225
+	Choices       []messages.DecisionInput `json:"choices,omitempty"`
+	ChoicesUpdate bool                     `json:"choices_update,omitempty"`
 
 	// This outbound path never accepted a raw field. A "raw" member in the
 	// request body is an unknown field and is ignored by JSON decoding; it
@@ -1152,16 +1156,16 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// choice-prompt and choice-response are minted by the hub only.
+	// decision-prompt and decision-response are minted by the hub only.
 	if rejectHubMintedType(w, req.Type) {
 		return
 	}
-	choiceSend, ok := s.prepareChoicePromptSend(w, &req)
+	choiceSend, ok := s.prepareChoicePromptSend(w, id, &req)
 	if !ok {
 		return
 	}
 	if choiceSend != nil {
-		req.Type = messages.TypeChoicePrompt
+		req.Type = messages.TypeDecisionPrompt
 	}
 
 	if req.Type == "" {
@@ -1247,10 +1251,10 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
-	// A choice prompt is for humans: a recipient that routing resolved to
+	// A decision prompt is for humans: a recipient that routing resolved to
 	// an agent (an agent DM, or a conversation that is one) is refused.
 	if choiceSend != nil && (outboundTargetAgentID != "" || result.DeliveryPath == deliveryAgentDM) {
-		ValidationError(w, "choices can be sent only to a user or a conversation, not to an agent",
+		ValidationError(w, "decisions can be sent only to a user or a conversation, not to an agent",
 			map[string]interface{}{"field": "recipient"})
 		return
 	}
@@ -2122,7 +2126,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			structuredMsg.Sender = "agent:" + senderSlug
 		}
 		defaultInboundStructured(structuredMsg)
-		// choice-prompt and choice-response are minted by the hub only.
+		// decision-prompt and decision-response are minted by the hub only.
 		if rejectHubMintedType(w, structuredMsg.Type) {
 			return
 		}
@@ -4139,7 +4143,7 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 	// ptone/scion#2100: fill what a minimal client payload omits, as
 	// handleAgentMessage does.
 	defaultInboundStructured(req.StructuredMessage)
-	// choice-prompt and choice-response are minted by the hub only.
+	// decision-prompt and decision-response are minted by the hub only.
 	if rejectHubMintedType(w, req.StructuredMessage.Type) {
 		return
 	}

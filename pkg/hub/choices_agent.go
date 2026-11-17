@@ -628,7 +628,7 @@ func (s *Server) handleAgentDecisionInterpreted(w http.ResponseWriter, r *http.R
 		SenderID:       agentID,
 		Recipient:      userSenderAddress(authorIdent),
 		RecipientID:    authorIdent.ID(),
-		Type:           messages.TypeChoiceResponse,
+		Type:           messages.TypeDecisionResponse,
 		AgentID:        agentID,
 		Channel:        "web",
 		ThreadID:       commonThreadID,
@@ -686,8 +686,8 @@ func (s *Server) handleAgentDecisionInterpreted(w http.ResponseWriter, r *http.R
 		views[i] = s.decisionViewFor(ctx, cur)
 	}
 
-	// Publish the single choice-response to web SSE + member fan-out, and
-	// choice.updated per row. Never deliver back to the asking agent.
+	// Publish the single decision-response to web SSE + member fan-out, and
+	// decision.updated per row. Never deliver back to the asking agent.
 	if len(res.Answers) == 1 {
 		s.publishChoiceResponse(ctx, responseMsg, updatedRows[0], res.Answers[0])
 	} else {

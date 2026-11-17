@@ -186,18 +186,27 @@ func TestStripReservedMetadata_StripsSenderTimezone(t *testing.T) {
 	}
 }
 
-// The choice response keys are hub-set only: a client-supplied value is
+// The decision response keys are hub-set only: a client-supplied value is
 // stripped before delivery (design choices v4, 4.4).
 func TestStripReservedMetadata_StripsChoiceKeys(t *testing.T) {
 	md := map[string]string{
-		"foo":                             "bar",
-		messages.MetadataChoiceKey:        "D1",
-		messages.MetadataChoiceVersion:    "1",
-		messages.MetadataChoiceID:         "yes",
-		messages.MetadataChoiceProvenance: "direct",
+		"foo":                               "bar",
+		messages.MetadataDecisionKey:        "D1",
+		messages.MetadataDecisionVersion:    "1",
+		messages.MetadataChoiceID:           "yes",
+		messages.MetadataDecisionProvenance: "direct",
+		messages.MetadataDecisionBatch:      "b1",
+		messages.MetadataDecisionAnswers:    "D1@1=yes",
 	}
 	out := StripReservedMetadata(md)
-	for _, k := range []string{messages.MetadataChoiceKey, messages.MetadataChoiceVersion, messages.MetadataChoiceID, messages.MetadataChoiceProvenance} {
+	for _, k := range []string{
+		messages.MetadataDecisionKey,
+		messages.MetadataDecisionVersion,
+		messages.MetadataChoiceID,
+		messages.MetadataDecisionProvenance,
+		messages.MetadataDecisionBatch,
+		messages.MetadataDecisionAnswers,
+	} {
 		if _, ok := out[k]; ok {
 			t.Errorf("%s survived the strip: %v", k, out)
 		}

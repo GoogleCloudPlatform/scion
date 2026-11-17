@@ -130,10 +130,10 @@ func TestCreateChoicePrompt_StoresMessageAndDecisions(t *testing.T) {
 	assert.Equal(t, "1", res.Decisions[1].Key)
 	assert.Equal(t, store.DecisionKeySourceHub, res.Decisions[1].KeySource)
 
-	// The message is stored as a choice prompt whose text is the fallback.
+	// The message is stored as a decision prompt whose text is the fallback.
 	msg, err := f.cs.GetMessage(ctx, in.Message.ID)
 	require.NoError(t, err)
-	assert.Equal(t, messages.TypeChoicePrompt, msg.Type)
+	assert.Equal(t, messages.TypeDecisionPrompt, msg.Type)
 	assert.Contains(t, msg.Msg, "**D234.** Ship it?")
 	assert.Contains(t, msg.Msg, "**1.** Which approach?")
 	assert.Equal(t, len("Two things 🚀\n\n"), res.IntroLength)
@@ -220,7 +220,7 @@ func TestCreateChoicePrompt_RejectsUnissuedNumbers(t *testing.T) {
 	assert.Equal(t, store.DecisionKeySourceHub, res.Decisions[0].KeySource)
 
 	// Nothing from the refused prompts was stored.
-	n, err := f.cs.client.Message.Query().Where(message.TypeEQ(messages.TypeChoicePrompt)).Count(ctx)
+	n, err := f.cs.client.Message.Query().Where(message.TypeEQ(messages.TypeDecisionPrompt)).Count(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, 2, n)
 }
@@ -234,9 +234,9 @@ func TestCreateChoicePrompt_RejectsExistingKeysWithoutUpdate(t *testing.T) {
 
 	in := f.prompt("", false, yesNo("d234", "again"), yesNo("SHIP-NOW", "again"), yesNo("fresh", "new"))
 	_, err = f.cs.CreateChoicePrompt(ctx, in)
-	var kee *store.ChoiceKeyExistsError
+	var kee *store.DecisionKeyExistsError
 	require.ErrorAs(t, err, &kee)
-	assert.ErrorIs(t, err, store.ErrChoiceKeyExists)
+	assert.ErrorIs(t, err, store.ErrDecisionKeyExists)
 	require.Len(t, kee.Existing, 2)
 	assert.Equal(t, "D234", kee.Existing[0].Key, "keys are displayed as first given")
 	assert.Equal(t, 1, kee.Existing[0].Version)
@@ -459,7 +459,7 @@ func TestRecordAnswer_RecordsSnapshotAndDecides(t *testing.T) {
 
 	resp, err := f.cs.GetMessage(ctx, in.ResponseMessage.ID)
 	require.NoError(t, err)
-	assert.Equal(t, messages.TypeChoiceResponse, resp.Type)
+	assert.Equal(t, messages.TypeDecisionResponse, resp.Type)
 
 	d, err := f.cs.GetDecision(ctx, res.Decisions[0].RowID)
 	require.NoError(t, err)
@@ -996,7 +996,7 @@ func TestRecordAnswerSet_RecordsAllWithOneBatch(t *testing.T) {
 	}
 	m, err := f.cs.GetMessage(ctx, in.ResponseMessage.ID)
 	require.NoError(t, err)
-	assert.Equal(t, messages.TypeChoiceResponse, m.Type)
+	assert.Equal(t, messages.TypeDecisionResponse, m.Type)
 }
 
 // TestRecordAnswerSet_ChangedSetStoresNothing: every difference from the
@@ -1521,7 +1521,7 @@ func TestRecordInterpretedAnswers_SingleAndMultiPromptPartialSet(t *testing.T) {
 
 	msg, err := f.cs.GetMessage(ctx, singleIn.ResponseMessage.ID)
 	require.NoError(t, err)
-	assert.Equal(t, messages.TypeChoiceResponse, msg.Type)
+	assert.Equal(t, messages.TypeDecisionResponse, msg.Type)
 	assert.Equal(t, "interpreted: SOLO=yes", msg.Msg)
 
 	// Multi-prompt + partial set: prompt A has (D234, D999), prompt B has (17).
@@ -1567,7 +1567,7 @@ func TestRecordInterpretedAnswers_AllOrNothingRollback(t *testing.T) {
 	_, _, err := f.cs.RecordAnswer(ctx, f.answer(p.Decisions[1].RowID, "1", "user-1", ""))
 	require.NoError(t, err)
 
-	beforeMsgs, err := f.cs.client.Message.Query().Where(message.TypeEQ(messages.TypeChoiceResponse)).Count(ctx)
+	beforeMsgs, err := f.cs.client.Message.Query().Where(message.TypeEQ(messages.TypeDecisionResponse)).Count(ctx)
 	require.NoError(t, err)
 
 	// K1 is valid, K2 is already_answered, K3 has invalid_choice "99".
@@ -1588,15 +1588,15 @@ func TestRecordInterpretedAnswers_AllOrNothingRollback(t *testing.T) {
 	assert.Equal(t, store.InterpretedReasonInvalidChoice, iaErr.Failures[1].Reason)
 	assert.Equal(t, "99", iaErr.Failures[1].ChoiceID)
 
-	// K1 is still untouched, and 0 new choice-response messages were stored.
+	// K1 is still untouched, and 0 new decision-response messages were stored.
 	k1, err := f.cs.GetDecision(ctx, p.Decisions[0].RowID)
 	require.NoError(t, err)
 	assert.Equal(t, store.DecisionStatusPending, k1.Status)
 	assert.Empty(t, k1.Answers)
 
-	afterMsgs, err := f.cs.client.Message.Query().Where(message.TypeEQ(messages.TypeChoiceResponse)).Count(ctx)
+	afterMsgs, err := f.cs.client.Message.Query().Where(message.TypeEQ(messages.TypeDecisionResponse)).Count(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, beforeMsgs, afterMsgs, "0 choice-response messages committed on rollback")
+	assert.Equal(t, beforeMsgs, afterMsgs, "0 decision-response messages committed on rollback")
 }
 
 func TestRecordInterpretedAnswers_Idempotency(t *testing.T) {

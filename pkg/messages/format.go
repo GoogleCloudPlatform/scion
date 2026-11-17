@@ -52,19 +52,19 @@ const (
 // human user.
 const MetadataSenderTimezone = "sender_timezone"
 
-// Choice response metadata (design choices v4, 4.4): the hub sets these on
-// the choice-response message it delivers to the asking agent and strips
+// Decision response metadata (design choices v4, 4.4): the hub sets these on
+// the decision-response message it delivers to the asking agent and strips
 // any client-supplied value (messaging.StripReservedMetadata).
 const (
-	MetadataChoiceKey        = "choice_key"
-	MetadataChoiceVersion    = "choice_version"
-	MetadataChoiceID         = "choice_id"
-	MetadataChoiceProvenance = "choice_provenance"
-	// MetadataChoiceBatch and MetadataChoiceAnswers are set instead of the
+	MetadataDecisionKey        = "decision_key"
+	MetadataDecisionVersion    = "decision_version"
+	MetadataChoiceID           = "choice_id"
+	MetadataDecisionProvenance = "decision_provenance"
+	// MetadataDecisionBatch and MetadataDecisionAnswers are set instead of the
 	// four keys above on the response of a set submit (design choices v5,
 	// 5.1): the batch id and a compact key@version=choiceId list.
-	MetadataChoiceBatch   = "choice_batch"
-	MetadataChoiceAnswers = "choice_answers"
+	MetadataDecisionBatch   = "decision_batch"
+	MetadataDecisionAnswers = "decision_answers"
 )
 
 // deliveryMetadataAllowlist defines the metadata keys that are forwarded to
@@ -96,13 +96,13 @@ var deliveryMetadataAllowlist = map[string]bool{
 	MetadataSenderDisplay: true,
 	// Hub-set only (see MetadataSenderTimezone).
 	MetadataSenderTimezone: true,
-	// Hub-set only (see MetadataChoiceKey).
-	MetadataChoiceKey:        true,
-	MetadataChoiceVersion:    true,
-	MetadataChoiceID:         true,
-	MetadataChoiceProvenance: true,
-	MetadataChoiceBatch:      true,
-	MetadataChoiceAnswers:    true,
+	// Hub-set only (see MetadataDecisionKey).
+	MetadataDecisionKey:        true,
+	MetadataDecisionVersion:    true,
+	MetadataChoiceID:           true,
+	MetadataDecisionProvenance: true,
+	MetadataDecisionBatch:      true,
+	MetadataDecisionAnswers:    true,
 }
 
 // deliveryMessage is the subset of StructuredMessage fields delivered to the agent.

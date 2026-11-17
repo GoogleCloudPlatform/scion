@@ -77,9 +77,9 @@ const (
 const MaxDecisionIdempotencyKeyLen = 128
 
 var (
-	// ErrChoiceKeyExists: a choice prompt without Update reuses a key that
-	// already exists for the agent. The error is a *ChoiceKeyExistsError.
-	ErrChoiceKeyExists = errors.New("choice_key_exists")
+	// ErrDecisionKeyExists: a decision prompt without Update reuses a key that
+	// already exists for the agent. The error is a *DecisionKeyExistsError.
+	ErrDecisionKeyExists = errors.New("decision_key_exists")
 	// ErrDecisionKeyNotIssued: an all-digit key that the hub never issued
 	// to the agent. The error is a *DecisionKeyNotIssuedError.
 	ErrDecisionKeyNotIssued = errors.New("decision key not issued")
@@ -319,13 +319,13 @@ func (e ExistingDecisionKey) Hint() string {
 	return fmt.Sprintf("%s already exists (v%d, %s)", e.Key, e.Version, state)
 }
 
-// ChoiceKeyExistsError lists every key of a refused prompt that already
-// exists. Nothing was stored. It matches ErrChoiceKeyExists.
-type ChoiceKeyExistsError struct {
+// DecisionKeyExistsError lists every key of a refused prompt that already
+// exists. Nothing was stored. It matches ErrDecisionKeyExists.
+type DecisionKeyExistsError struct {
 	Existing []ExistingDecisionKey
 }
 
-func (e *ChoiceKeyExistsError) Error() string {
+func (e *DecisionKeyExistsError) Error() string {
 	parts := make([]string, len(e.Existing))
 	for i, k := range e.Existing {
 		parts[i] = k.Hint()
@@ -333,7 +333,7 @@ func (e *ChoiceKeyExistsError) Error() string {
 	return strings.Join(parts, "; ") + "; pass --update to replace it, or use a new id"
 }
 
-func (e *ChoiceKeyExistsError) Unwrap() error { return ErrChoiceKeyExists }
+func (e *DecisionKeyExistsError) Unwrap() error { return ErrDecisionKeyExists }
 
 // DecisionKeyNotIssuedError lists the all-digit keys of a refused prompt
 // that the hub never issued to the agent. It matches
@@ -454,11 +454,11 @@ type DecisionAnswer struct {
 	CreatedAt time.Time
 }
 
-// ChoicePromptInput is a choice prompt to store: its message and its
+// ChoicePromptInput is a decision prompt to store: its message and its
 // decisions, normalized by messages.NormalizeDecisions.
 type ChoicePromptInput struct {
-	// Message is the choice-prompt message row. ID and ProjectID are
-	// required; Type is set to messages.TypeChoicePrompt and Msg to the
+	// Message is the decision-prompt message row. ID and ProjectID are
+	// required; Type is set to messages.TypeDecisionPrompt and Msg to the
 	// rendered markdown fallback (Intro followed by the decisions).
 	Message *Message
 	// Intro is the agent's body shown above the decisions; may be empty.
@@ -473,7 +473,7 @@ type ChoicePromptInput struct {
 	Decisions []messages.Decision
 	// Update allows keys that already exist: each gets a new version and
 	// its active version is marked replaced. Without it, a prompt reusing
-	// any existing key is refused as a whole (ChoiceKeyExistsError).
+	// any existing key is refused as a whole (DecisionKeyExistsError).
 	Update bool
 }
 
@@ -524,9 +524,9 @@ type RecordAnswerInput struct {
 	SourceMessageID      string // required iff agent_interpreted
 	Surface              string // DecisionSurface*; required
 
-	// ResponseMessage is the choice-response message, stored in the same
+	// ResponseMessage is the decision-response message, stored in the same
 	// transaction (ID and ProjectID required; Type is set to
-	// messages.TypeChoiceResponse).
+	// messages.TypeDecisionResponse).
 	ResponseMessage *Message
 
 	AuthorizingUserID string
@@ -559,9 +559,9 @@ type RecordAnswerSetInput struct {
 
 	Answers []AnswerSetItem
 
-	// ResponseMessage is the one choice-response message of the set,
+	// ResponseMessage is the one decision-response message of the set,
 	// stored in the same transaction (ID and ProjectID required; Type is
-	// set to messages.TypeChoiceResponse).
+	// set to messages.TypeDecisionResponse).
 	ResponseMessage *Message
 
 	// IdempotencyKey, when set, is scoped to the user and the prompt: a
@@ -591,7 +591,7 @@ type InterpretedAnswerPair struct {
 
 // InterpretedFormattedItem carries the canonical key and choice label of one
 // validated pair so RecordInterpretedInput.FormatMessage can render the
-// single choice-response message text inside the transaction.
+// single decision-response message text inside the transaction.
 type InterpretedFormattedItem struct {
 	Key         string
 	ChoiceID    string
@@ -612,9 +612,9 @@ type RecordInterpretedInput struct {
 
 	Answers []InterpretedAnswerPair
 
-	// ResponseMessage is the one choice-response message stored in the same
+	// ResponseMessage is the one decision-response message stored in the same
 	// transaction (ID and ProjectID required; Type is set to
-	// messages.TypeChoiceResponse). When FormatMessage is non-nil and Msg is
+	// messages.TypeDecisionResponse). When FormatMessage is non-nil and Msg is
 	// empty, Msg is populated from the validated pairs before insertion.
 	ResponseMessage *Message
 	FormatMessage   func(items []InterpretedFormattedItem) string
@@ -626,14 +626,14 @@ type RecordInterpretedInput struct {
 	IdempotencyKey string
 }
 
-// DecisionStore persists choice prompt decisions and their answers.
+// DecisionStore persists decision prompt decisions and their answers.
 type DecisionStore interface {
-	// CreateChoicePrompt stores a choice prompt in one transaction: it
+	// CreateChoicePrompt stores a decision prompt in one transaction: it
 	// assigns the next numbers from the agent's counter to decisions
 	// without a key (never reused), refuses an all-digit key the agent
 	// was never issued (DecisionKeyNotIssuedError), and without Update
 	// refuses a prompt that reuses any existing key, listing each with its
-	// version, status and answer (ChoiceKeyExistsError); with Update it
+	// version, status and answer (DecisionKeyExistsError); with Update it
 	// marks each reused key's active version replaced and inserts the next
 	// version. It then refuses a prompt that would leave the agent more
 	// than MaxPendingDecisionsPerAgent pending decisions

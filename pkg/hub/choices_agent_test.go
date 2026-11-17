@@ -251,11 +251,11 @@ func TestAgentDecisions_InterpretedSingleAndMultiPromptPartialSet(t *testing.T) 
 	f := newChoicesFixture(t)
 	ctx := context.Background()
 
-	// Single pair: batch_id omitted, 1 choice-response message, 0 agent deliveries.
+	// Single pair: batch_id omitted, 1 decision-response message, 0 agent deliveries.
 	pSolo := f.sendPromptToBob(t, `[{"id":"SOLO","question":"Deploy solo?","choices":["yes","no"],"default":"yes"}]`, false)
 	replySolo := f.bobDMReply(t, pSolo.MessageID, "SOLO: yes")
 
-	updates, unsubUpdates := f.srv.events.Subscribe("user." + f.bob.ID + ".chat.choice.updated")
+	updates, unsubUpdates := f.srv.events.Subscribe("user." + f.bob.ID + ".chat.decision.updated")
 	defer unsubUpdates()
 	chat, unsubChat := f.srv.events.Subscribe("user." + f.bob.ID + ".chat.dm")
 	defer unsubChat()
@@ -329,7 +329,7 @@ func TestAgentDecisions_InterpretedSingleAndMultiPromptPartialSet(t *testing.T) 
 		outBatch.Decisions[0].Key, outBatch.Decisions[1].Key, outBatch.Decisions[2].Key,
 	})
 	assert.Equal(t, beforeDeliveries, len(f.dispatcher.getMessages()), "multi-pair interpreted answers are never delivered back to the agent")
-	assert.Len(t, collectEvents(updates), 3, "one choice.updated SSE event per recorded row")
+	assert.Len(t, collectEvents(updates), 3, "one decision.updated SSE event per recorded row")
 
 	// ship-now (3rd row of pSet) remains pending!
 	shipNow, err := f.store.GetDecision(ctx, pSet.Decisions[2].RowID)
@@ -348,7 +348,7 @@ func TestAgentDecisions_InterpretedSingleAndMultiPromptPartialSet(t *testing.T) 
 		var evt UserMessageEvent
 		require.NoError(t, json.Unmarshal(e.Data, &evt))
 		if evt.ID == outBatch.ResponseMessageID {
-			sseSet = evt.ChoiceResponseSet
+			sseSet = evt.DecisionResponseSet
 		}
 	}
 	require.NotNil(t, sseSet)
@@ -370,7 +370,7 @@ func TestAgentDecisions_InterpretedSingleAndMultiPromptPartialSet(t *testing.T) 
 	// Verify chat history hydration also omits envelope PromptMessageID and matches canonical order.
 	histResp := &chatHistoryResponse{Messages: []store.Message{*batchMsg}}
 	f.srv.addChoiceHistoryViews(ctx, histResp)
-	histSet, ok := histResp.MessageChoiceResponseSets[outBatch.ResponseMessageID]
+	histSet, ok := histResp.MessageDecisionResponseSets[outBatch.ResponseMessageID]
 	require.True(t, ok)
 	assert.Empty(t, histSet.PromptMessageID)
 	require.Len(t, histSet.Answers, 3)
@@ -651,7 +651,7 @@ func TestAgentDecisions_SurfaceMappingAndIdempotency(t *testing.T) {
 	gchatReply := f.storeUserReply(t, f.alice, f.topicID, promptMsg.ConversationID, "gchat", "GC1: yes")
 	otherReply := f.storeUserReply(t, f.alice, f.topicID, promptMsg.ConversationID, "slack", "GC2: no")
 
-	projUpdates, unsubProjUpdates := f.srv.events.Subscribe("project." + f.project.ID + ".chat.choice.updated")
+	projUpdates, unsubProjUpdates := f.srv.events.Subscribe("project." + f.project.ID + ".chat.decision.updated")
 	defer unsubProjUpdates()
 
 	rr1 := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", RecordInterpretedRequest{
@@ -664,7 +664,7 @@ func TestAgentDecisions_SurfaceMappingAndIdempotency(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rr1.Body.Bytes(), &out1))
 	assert.False(t, out1.Replayed)
 	assert.Equal(t, store.DecisionSurfaceGoogleChat, out1.Decisions[0].Decision.Surface)
-	assert.Len(t, collectEvents(projUpdates), 1, "topic interpreted record publishes choice.updated on project subject")
+	assert.Len(t, collectEvents(projUpdates), 1, "topic interpreted record publishes decision.updated on project subject")
 
 	// Exact retry -> 200 with replayed=true and same response_message_id.
 	rrReplay := f.agentDecisionReq(t, f.agent, http.MethodPost, "/api/v1/agent/decisions/interpreted", RecordInterpretedRequest{

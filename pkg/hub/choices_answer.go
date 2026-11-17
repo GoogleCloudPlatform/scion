@@ -548,7 +548,7 @@ func choiceResponseStoreMessage(user UserIdentity, d *store.Decision, chatKey st
 		SenderID:       user.ID(),
 		RecipientID:    d.AskerAgentID,
 		Msg:            choiceResponseLine(userDisplay(user), d.Key, choice.Label, d.Question),
-		Type:           messages.TypeChoiceResponse,
+		Type:           messages.TypeDecisionResponse,
 		AgentID:        d.AskerAgentID,
 		Channel:        "web",
 		ThreadID:       chatKey,
@@ -583,7 +583,7 @@ func userDisplay(user UserIdentity) string {
 	return user.ID()
 }
 
-// choiceResponseLine is the stored body of a choice-response (design 4.4):
+// choiceResponseLine is the stored body of a decision-response (design 4.4):
 // `ptone chose "yes" for D234 "Ship the feature now?"`.
 func choiceResponseLine(who, key, label, question string) string {
 	return fmt.Sprintf("%s chose %q for %s %q", who, label, key, truncateRunes(plainLine(question), choiceResponseQuestionMax))
@@ -596,7 +596,7 @@ func choiceResponseAgentLine(a *store.DecisionAnswer, overridden *store.Decision
 	if who == "" {
 		who = a.AnsweredByName
 	}
-	line := fmt.Sprintf("[choice-response] %s v%d (%q) answer=%s (choice %s) by %s",
+	line := fmt.Sprintf("[decision-response] %s v%d (%q) answer=%s (choice %s) by %s",
 		a.Key, a.Version, truncateRunes(plainLine(a.QuestionText), choiceResponseQuestionMax), a.ChoiceLabel, a.ChoiceID, who)
 	if overridden != nil {
 		line += ", overriding interpreted answer " + overridden.ChoiceLabel
@@ -652,35 +652,35 @@ func (s *Server) deliverChoiceResponse(ctx context.Context, asker *store.Agent, 
 		Recipient:      m.Recipient,
 		RecipientID:    m.RecipientID,
 		Msg:            line,
-		Type:           messages.TypeChoiceResponse,
+		Type:           messages.TypeDecisionResponse,
 		Channel:        m.Channel,
 		ThreadID:       m.ThreadID,
 		ConversationID: m.ConversationID,
 	}
 	// Strip the reserved keys first, as every dispatch site does, so no
-	// value from another source reaches the agent; the four choice keys are
+	// value from another source reaches the agent; the four decision keys are
 	// reserved and only the hub sets them, after the strip.
 	sm.Metadata = messaging.StripReservedMetadata(sm.Metadata)
 	if sm.Metadata == nil {
 		sm.Metadata = make(map[string]string, 4)
 	}
-	sm.Metadata[messages.MetadataChoiceKey] = a.Key
-	sm.Metadata[messages.MetadataChoiceVersion] = strconv.Itoa(a.Version)
+	sm.Metadata[messages.MetadataDecisionKey] = a.Key
+	sm.Metadata[messages.MetadataDecisionVersion] = strconv.Itoa(a.Version)
 	sm.Metadata[messages.MetadataChoiceID] = a.ChoiceID
-	sm.Metadata[messages.MetadataChoiceProvenance] = a.Provenance
+	sm.Metadata[messages.MetadataDecisionProvenance] = a.Provenance
 	dctx, cancel := context.WithTimeout(withDispatchMessageID(context.WithoutCancel(ctx), m.ID), 30*time.Second)
 	defer cancel()
 	if _, err := s.holdOrDispatch(dctx, asker, m.ID, m, func() error {
 		return dispatchWithBrokerRetry(dctx, s.recordLog(), dispatcher, asker, line, false, sm)
 	}); err != nil {
-		s.messageLog.Error("choices: failed to deliver choice-response", "agent", asker.Slug, "message_id", m.ID, "error", err)
+		s.messageLog.Error("decisions: failed to deliver decision-response", "agent", asker.Slug, "message_id", m.ID, "error", err)
 		_ = s.markFailed(context.WithoutCancel(ctx), m.ID, err.Error())
 	}
 }
 
 // publishChoiceUpdated tells every open card of the decision about its new
-// state: on project.<id>.chat.choice.updated for a thread, and on
-// user.<id>.chat.choice.updated for each user of a DM, so a DM's decisions reach
+// state: on project.<id>.chat.decision.updated for a thread, and on
+// user.<id>.chat.decision.updated for each user of a DM, so a DM's decisions reach
 // only its participants.
 func (s *Server) publishChoiceUpdated(ctx context.Context, prompt *store.Message, view DecisionView) {
 	if prompt == nil {
@@ -689,7 +689,7 @@ func (s *Server) publishChoiceUpdated(ctx context.Context, prompt *store.Message
 	s.publishChoiceUpdatedAt(ctx, prompt.ProjectID, prompt.ID, prompt.ThreadID, view)
 }
 
-// publishChoiceUpdatedAt publishes chat.choice.updated using the decision's
+// publishChoiceUpdatedAt publishes chat.decision.updated using the decision's
 // stored project_id, message_id, and chat_key so SSE updates continue to work
 // after chat retention purges the prompt message.
 func (s *Server) publishChoiceUpdatedAt(ctx context.Context, projectID, messageID, threadID string, view DecisionView) {
@@ -709,13 +709,13 @@ func (s *Server) publishChoiceUpdatedAt(ctx context.Context, projectID, messageI
 					kind = parts[3]
 				}
 				if kind == "user" && id != "" {
-					s.events.PublishRaw("user."+id+".chat.choice.updated", evt)
+					s.events.PublishRaw("user."+id+".chat.decision.updated", evt)
 				}
 			}
 		}
 		return
 	}
 	if projectID != "" {
-		s.events.PublishRaw("project."+projectID+".chat.choice.updated", evt)
+		s.events.PublishRaw("project."+projectID+".chat.decision.updated", evt)
 	}
 }
