@@ -527,17 +527,12 @@ func (s *Server) computeGitHubTriggersReadiness(ctx context.Context, cfg GitHubA
 func (s *Server) GitHubTriggersProjectReadiness(ctx context.Context) GitHubTriggersProjectReadiness {
 	cfg, _, hasWebhookSecret := s.githubAppCredentialPresence(ctx)
 	full := s.computeGitHubTriggersReadiness(ctx, cfg, hasWebhookSecret)
-	var checkedAtPtr *time.Time
-	if full.CheckedAt != nil {
-		t := *full.CheckedAt
-		checkedAtPtr = &t
-	}
 	return GitHubTriggersProjectReadiness{
 		Ready:              full.Ready,
 		MissingEvents:      full.MissingEvents,
 		MissingPermissions: full.MissingPermissions,
 		AppSlug:            full.AppSlug,
-		CheckedAt:          checkedAtPtr,
+		CheckedAt:          full.CheckedAt,
 		Error:              full.Error,
 	}
 }
