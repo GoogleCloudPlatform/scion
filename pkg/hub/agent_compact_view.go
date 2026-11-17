@@ -163,14 +163,16 @@ func legacyAgentListView(query url.Values) string {
 // view. It is the last step of every agent list response on both
 // endpoints: everything that decides membership, order, cursors, counts,
 // stats and capabilities has already run, identically for both views, and
-// only the per-item shape differs. It first sets every item's harness
-// vendor and model size (setAgentListBadges), the same for both views, so
-// every list path carries them. With includeAuthority, the full view also
-// carries each item's authority state (setAgentListAuthority); the compact
-// view never does, so it makes no authority reads.
+// only the per-item shape differs. It first sets every item's resolved
+// harness, harness vendor and model size (setAgentListBadges), the same for
+// both views, so every list path carries the badges. On the full view it also
+// populates harnessCapabilities (setAgentListCapabilities) and, with
+// includeAuthority, each item's authority state (setAgentListAuthority); the
+// compact view never does, so it makes no authority reads.
 func (s *Server) writeAgentList(ctx context.Context, w http.ResponseWriter, view string, includeAuthority bool, resp ListAgentsResponse) {
 	s.setAgentListBadges(ctx, resp.Agents)
 	if view != agentListViewCompact {
+		setAgentListCapabilities(resp.Agents)
 		if includeAuthority {
 			s.setAgentListAuthority(ctx, resp.Agents)
 		}

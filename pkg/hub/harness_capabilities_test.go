@@ -428,3 +428,104 @@ func TestGetAgent_HarnessCapabilitiesMatchSuspendWhenCatalogDrifts(t *testing.T)
 		})
 	}
 }
+
+// TestListAgents_FullViewExposesHarnessCapabilities verifies that full-view
+// agent list endpoints populate resolvedHarness and harnessCapabilities using
+// the stamped-first resolver (so scion list --format json can report resume
+// support per agent, ptone/scion#8227), while compact list items omit both.
+func TestListAgents_FullViewExposesHarnessCapabilities(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+
+	// Seed catalog harness configs that disagree with the stamped harnesses to
+	// prove list resolution uses the shared stamped-first resolver too.
+	for _, hc := range []*store.HarnessConfig{
+		{
+			ID: tid("hc-list-8227-1"), Name: "drifted-to-generic", Slug: "drifted-to-generic",
+			Harness: "generic", Scope: store.HarnessConfigScopeGlobal, Status: store.HarnessConfigStatusActive,
+			Config: &store.HarnessConfigData{Harness: "generic"},
+		},
+		{
+			ID: tid("hc-list-8227-2"), Name: "drifted-to-claude", Slug: "drifted-to-claude",
+			Harness: "claude", Scope: store.HarnessConfigScopeGlobal, Status: store.HarnessConfigStatusActive,
+			Config: &store.HarnessConfigData{Harness: "claude"},
+		},
+	} {
+		require.NoError(t, s.CreateHarnessConfig(ctx, hc))
+	}
+
+	proj, _, resumable := setupOnlineBrokerAgent(t, s, "8227-list-resumable")
+	resumable.AppliedConfig = &store.AgentAppliedConfig{
+		Harness:       "claude",
+		HarnessConfig: "drifted-to-generic",
+	}
+	require.NoError(t, s.UpdateAgent(ctx, resumable))
+
+	nonResumable := &store.Agent{
+		ID:        tid("8227-list-nonresumable"),
+		Slug:      "8227-list-nonresumable",
+		Name:      "8227-list-nonresumable",
+		ProjectID: proj.ID,
+		Phase:     string(state.PhaseRunning),
+		AppliedConfig: &store.AgentAppliedConfig{
+			Harness:       "generic",
+			HarnessConfig: "drifted-to-claude",
+		},
+	}
+	require.NoError(t, s.CreateAgent(ctx, nonResumable))
+
+	endpoints := []string{
+		"/api/v1/agents",
+		"/api/v1/projects/" + proj.ID + "/agents",
+	}
+	modes := []string{"", "sort=updated&fit=500"}
+
+	for _, base := range endpoints {
+		for _, mode := range modes {
+			fullPath := base
+			if mode != "" {
+				fullPath += "?" + mode
+			}
+			rec := doRequest(t, srv, http.MethodGet, fullPath, nil)
+			require.Equal(t, http.StatusOK, rec.Code, "%s: %s", fullPath, rec.Body.String())
+
+			var resp ListAgentsResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			byID := map[string]AgentWithCapabilities{}
+			for _, a := range resp.Agents {
+				byID[a.ID] = a
+			}
+
+			gotRes, ok := byID[resumable.ID]
+			require.True(t, ok, "%s: expected resumable agent", fullPath)
+			assert.Equal(t, "claude", gotRes.ResolvedHarness, fullPath)
+			require.NotNil(t, gotRes.HarnessCapabilities, fullPath)
+			assert.Equal(t, api.SupportYes, gotRes.HarnessCapabilities.Resume.Support, fullPath)
+			assert.Empty(t, gotRes.HarnessCapabilities.Resume.Reason, fullPath)
+
+			gotNon, ok := byID[nonResumable.ID]
+			require.True(t, ok, "%s: expected non-resumable agent", fullPath)
+			assert.Equal(t, "generic", gotNon.ResolvedHarness, fullPath)
+			require.NotNil(t, gotNon.HarnessCapabilities, fullPath)
+			assert.Equal(t, api.SupportNo, gotNon.HarnessCapabilities.Resume.Support, fullPath)
+			assert.NotEmpty(t, gotNon.HarnessCapabilities.Resume.Reason, fullPath)
+
+			compactPath := base + "?view=compact"
+			if mode != "" {
+				compactPath = base + "?" + mode + "&view=compact"
+			}
+			compRec := doRequest(t, srv, http.MethodGet, compactPath, nil)
+			require.Equal(t, http.StatusOK, compRec.Code, "%s: %s", compactPath, compRec.Body.String())
+			var raw struct {
+				Agents []map[string]json.RawMessage `json:"agents"`
+			}
+			require.NoError(t, json.Unmarshal(compRec.Body.Bytes(), &raw))
+			for _, item := range raw.Agents {
+				_, hasResolved := item["resolvedHarness"]
+				_, hasCaps := item["harnessCapabilities"]
+				assert.False(t, hasResolved, "%s: compact view must omit resolvedHarness", compactPath)
+				assert.False(t, hasCaps, "%s: compact view must omit harnessCapabilities", compactPath)
+			}
+		}
+	}
+}

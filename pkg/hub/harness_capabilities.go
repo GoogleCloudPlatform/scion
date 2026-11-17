@@ -275,11 +275,12 @@ func agentModelSize(agent *store.Agent) string {
 	return agent.AppliedConfig.ModelSize
 }
 
-// setAgentListBadges sets HarnessVendor and ModelSize on every item of an
-// agent list. The harness comes from effectiveAgentHarnessTypeMemo with a memo
-// shared by the whole list: no store lookup when storedAgentHarness names it,
-// and otherwise at most one lookup per distinct project-scope (project,
-// reference) and one per distinct global-scope reference across the list.
+// setAgentListBadges sets ResolvedHarness, HarnessVendor and ModelSize on every
+// item of an agent list. The harness comes from effectiveAgentHarnessTypeMemo
+// with a memo shared by the whole list: no store lookup when storedAgentHarness
+// names it, and otherwise at most one lookup per distinct project-scope
+// (project, reference) and one per distinct global-scope reference across the
+// list.
 func (s *Server) setAgentListBadges(ctx context.Context, agents []AgentWithCapabilities) {
 	var memo *harnessTypeMemo
 	for i := range agents {
@@ -287,8 +288,33 @@ func (s *Server) setAgentListBadges(ctx context.Context, agents []AgentWithCapab
 		if storedAgentHarness(a) == "" && memo == nil {
 			memo = newHarnessTypeMemo()
 		}
-		agents[i].HarnessVendor = harness.Vendor(s.effectiveAgentHarnessTypeMemo(ctx, a, memo))
+		resolved := s.effectiveAgentHarnessTypeMemo(ctx, a, memo)
+		agents[i].ResolvedHarness = resolved
+		agents[i].HarnessVendor = harness.Vendor(resolved)
 		agents[i].ModelSize = agentModelSize(a)
+	}
+}
+
+// setAgentListCapabilities populates HarnessCapabilities on every item of a
+// full-view agent list from its already-resolved ResolvedHarness, memoizing
+// capability parsing per distinct harness type across the list.
+func setAgentListCapabilities(agents []AgentWithCapabilities) {
+	var capsByHarness map[string]*api.HarnessAdvancedCapabilities
+	for i := range agents {
+		resolved := agents[i].ResolvedHarness
+		if resolved == "" {
+			continue
+		}
+		if capsByHarness == nil {
+			capsByHarness = make(map[string]*api.HarnessAdvancedCapabilities)
+		}
+		caps, ok := capsByHarness[resolved]
+		if !ok {
+			c := harness.New(resolved).AdvancedCapabilities()
+			caps = &c
+			capsByHarness[resolved] = caps
+		}
+		agents[i].HarnessCapabilities = caps
 	}
 }
 
